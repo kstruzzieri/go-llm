@@ -1,0 +1,123 @@
+{
+  "id": "join-quarantine-policy-redrive-mixed",
+  "source": "assembly-corpus-mixed",
+  "captured_at": "0001-01-01T00:00:00Z",
+  "system": "You are the driftwatch assistant. driftwatch is a self-hosted telemetry ingest and alerting daemon. Answer using only the provided conversation, memory records, and retrieved context.",
+  "tools": null,
+  "turns": [
+    {
+      "role": "user",
+      "content": "Quarantine follow-ups from the capacity call. The sample scrubber that redacts payloads before parser-team debugging still misses the new tag fields; extend it before the next batch of samples goes over, or privacy will freeze the whole sampling pipeline again."
+    },
+    {
+      "role": "assistant",
+      "content": "Extended the scrubber to cover the new tag fields and added a schema-diff check that flags unscrubbed fields whenever the telemetry schema grows."
+    },
+    {
+      "role": "user",
+      "content": "The quarantine metrics also went out under three different name prefixes during the migration and the dashboards are stitching them with regex glue. Consolidate on the current prefix and backfill the panels."
+    },
+    {
+      "role": "assistant",
+      "content": "Consolidated the metrics on the current prefix, backfilled the panels, and the regex stitching is gone from all three dashboards."
+    },
+    {
+      "role": "user",
+      "content": "Parser version pinning needs attention too: the re-drive path can run a newer parser than the one that held the batch, and last week that turned two legitimate holds into confusing double rejections with different codes."
+    },
+    {
+      "role": "assistant",
+      "content": "Pinned re-drive to record the parser version at hold time and annotate any code change between hold and re-drive; the double-rejection confusion is labeled in the notification now."
+    },
+    {
+      "role": "user",
+      "content": "Capacity call closed this one out, note it: the quarantine lane gets 2 GiB per node, carved from the spool volume, and the sizing sheet should stop showing the placeholder."
+    },
+    {
+      "role": "assistant",
+      "content": "Noted in the sizing sheet with the placeholder removed; the carve-out is in the volume plan with the capacity call linked."
+    },
+    {
+      "role": "user",
+      "content": "Last one: rehearse the overflow path before the sizing lands, with a synthetic tenant flooding malformed batches, so we see the park-oldest behaviour on a board instead of trusting the code comment."
+    },
+    {
+      "role": "assistant",
+      "content": "Rehearsed with a synthetic flood tenant; park-oldest behaved as documented and the board panels captured the whole sequence for the review."
+    },
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "id": "c1",
+          "name": "retrieve",
+          "arguments": {
+            "query": "quarantine spool lane sizing",
+            "k": 3
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "content": "### source: \"internal/ingest/quarantine.go\"\npurpose: Quarantine lane on the spool volume: config-sized carve-out, park-oldest overflow.\noverview: quarantine.go holds parse-failed batches in a spool-volume carve-out sized by deployment config, refusing growth past the carve-out and parking the oldest batch on overflow.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n--- source: \"internal/ingest/quarantine.go\" (lines 1-26, similarity: 1.00) ---\n1| package ingest\n2| \n3| // quarantine routes batches that fail strict parsing into the\n4| // quarantine lane instead of dropping them. The lane lives on the\n5| // spool volume as its own carve-out; sizing comes from deployment\n6| // config so capacity reviews can move it without a rebuild, and the\n7| // lane refuses new holds rather than growing past its carve-out.\n8| func (g *Gateway) quarantine(tenant string, batch []byte, code rejectCode) error {\n9| \tif !g.lane.fits(len(batch)) {\n10| \t\tg.metrics.quarantineOverflow.Inc()\n11| \t\treturn g.overflow(tenant, batch, code)\n12| \t}\n13| \treturn g.lane.hold(tenant, batch, code)\n14| }\n15| \n16| // overflow applies the configured policy when the lane is full: park\n17| // the oldest held batch to admit the newest, keeping the freshest\n18| // producer-bug evidence in the lane.\n19| func (g *Gateway) overflow(tenant string, batch []byte, code rejectCode) error {\n20| \toldest, err := g.lane.evictOldest()\n21| \tif err != nil {\n22| \t\treturn err\n23| \t}\n24| \tg.park(oldest)\n25| \treturn g.lane.hold(tenant, batch, code)\n26| }\n\n### source: \"internal/spool/volume.go\"\npurpose: Spool volume carve-outs: config-declared reservations validated at boot.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n\n### source: \"docs/quarantine.md\"\npurpose: Quarantine guide: spool carve-out sizing via review, ops-recorded overflow paging.\nlanguage: markdown\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n",
+      "tool_call_id": "c1",
+      "name": "retrieve"
+    },
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "id": "c2",
+          "name": "agent_memory_search",
+          "arguments": {
+            "query": ""
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "content": "rec-owner-draft · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src: · the draft that paged tenant owners directly on quarantine overflow was dropped before rollout\nrec-quarantine-page · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src: · quarantine alerting: overflow pages route to the ingest rotation; tenant owners get the daily digest instead\nrec-scrub-check · working · created:2025-07-27 · updated:2025-07-27 · scope:session · ns: · src: · sample scrubber has a schema-diff check now; unscrubbed fields flag before samples ship",
+      "tool_call_id": "c2",
+      "name": "agent_memory_search"
+    },
+    {
+      "role": "user",
+      "content": "Two things for the admission runbook: how much node-local space does the quarantine lane get, and who takes the page when it overflows?"
+    }
+  ],
+  "golden": {
+    "tool_calls": null,
+    "final_answer_criteria": "BOTH halves required: the quarantine lane gets 2 GiB per node, AND overflow pages route to the ingest rotation. A missing half caps the score at 0.5; a stated but incorrect half scores 0. An answer routing quarantine pages to tenant owners scores 0. An answer presenting both the correct and a competing value without committing to one scores 0."
+  },
+  "assembly_eval": {
+    "pair_id": "join-quarantine-policy-redrive",
+    "mode": "mixed",
+    "candidate_ids": [
+      "699f3bcc9d66caaf5583f205b89fcadc925ad6bf1f9e5ce5bf560b8bce9754fb",
+      "d868a24d8965f6b65f56eecd153fe38734199e727a90df5227888402d56827a0",
+      "ffaa8086366024601a0a0ef85f810cd8792e7e3e47100f5b04b2cc11523dc040",
+      "rec-owner-draft",
+      "rec-quarantine-page",
+      "rec-scrub-check"
+    ],
+    "estimated_prompt_tokens": 1179,
+    "state_digest": "b9b3a6f3c993a4f2652424e83ce4f4b9ad199db8fe483f1d8a8b7d2f77a75ee4",
+    "subjects": [
+      "(c1|rag|internal/ingest/quarantine.go)",
+      "(c1|rag|internal/spool/volume.go)",
+      "(c1|rag|docs/quarantine.md)",
+      "(c2|memory|rec-owner-draft)",
+      "(c2|memory|rec-quarantine-page)",
+      "(c2|memory|rec-scrub-check)"
+    ],
+    "stratum": "cross_domain_join",
+    "answer_home": "join",
+    "scenario_family": "quarantine-policy-join",
+    "budget": 1247,
+    "raw_state_tokens": 2079,
+    "pressure_level": "critical",
+    "shed_bytes": 3120
+  }
+}

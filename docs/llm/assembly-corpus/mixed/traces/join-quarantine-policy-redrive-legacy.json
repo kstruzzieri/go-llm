@@ -1,0 +1,65 @@
+{
+  "id": "join-quarantine-policy-redrive-legacy",
+  "source": "assembly-corpus-mixed",
+  "captured_at": "0001-01-01T00:00:00Z",
+  "system": "You are the driftwatch assistant. driftwatch is a self-hosted telemetry ingest and alerting daemon. Answer using only the provided conversation, memory records, and retrieved context.",
+  "tools": null,
+  "turns": [
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "id": "c2",
+          "name": "agent_memory_search",
+          "arguments": {
+            "query": ""
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "content": "rec-owner-draft · semantic · 2025-07-27 · the draft that paged tenant owners directly on quarantine overflow was dropped before rollout\nrec-quarantine-page · semantic · 2025-07-27 · quarantine alerting: overflow pages route to the ingest rotation; tenant owners get the daily digest instead\nrec-scrub-check · working · 2025-07-27 · sample scrubber has a schema-diff check now; unscrubbed fields flag before samples ship",
+      "tool_call_id": "c2",
+      "name": "agent_memory_search"
+    },
+    {
+      "role": "user",
+      "content": "Two things for the admission runbook: how much node-local space does the quarantine lane get, and who takes the page when it overflows?"
+    }
+  ],
+  "golden": {
+    "tool_calls": null,
+    "final_answer_criteria": "BOTH halves required: the quarantine lane gets 2 GiB per node, AND overflow pages route to the ingest rotation. A missing half caps the score at 0.5; a stated but incorrect half scores 0. An answer routing quarantine pages to tenant owners scores 0. An answer presenting both the correct and a competing value without committing to one scores 0."
+  },
+  "assembly_eval": {
+    "pair_id": "join-quarantine-policy-redrive",
+    "mode": "legacy",
+    "candidate_ids": [
+      "699f3bcc9d66caaf5583f205b89fcadc925ad6bf1f9e5ce5bf560b8bce9754fb",
+      "d868a24d8965f6b65f56eecd153fe38734199e727a90df5227888402d56827a0",
+      "ffaa8086366024601a0a0ef85f810cd8792e7e3e47100f5b04b2cc11523dc040",
+      "rec-owner-draft",
+      "rec-quarantine-page",
+      "rec-scrub-check"
+    ],
+    "estimated_prompt_tokens": 187,
+    "state_digest": "b9b3a6f3c993a4f2652424e83ce4f4b9ad199db8fe483f1d8a8b7d2f77a75ee4",
+    "subjects": [
+      "(c1|rag|internal/ingest/quarantine.go)",
+      "(c1|rag|internal/spool/volume.go)",
+      "(c1|rag|docs/quarantine.md)",
+      "(c2|memory|rec-owner-draft)",
+      "(c2|memory|rec-quarantine-page)",
+      "(c2|memory|rec-scrub-check)"
+    ],
+    "stratum": "cross_domain_join",
+    "answer_home": "join",
+    "scenario_family": "quarantine-policy-join",
+    "budget": 1247,
+    "raw_state_tokens": 2079,
+    "pressure_level": "ok",
+    "shed_messages": 12,
+    "shed_bytes": 7073
+  }
+}

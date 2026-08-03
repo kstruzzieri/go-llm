@@ -1865,6 +1865,687 @@
       }
     },
     {
+      "id": "join-ingest-token-audit",
+      "stratum": "cross_domain_join",
+      "answer_home": "join",
+      "scenario_family": "ingest-token-join",
+      "system": "You are the driftwatch assistant. driftwatch is a self-hosted telemetry ingest and alerting daemon. Answer using only the provided conversation, memory records, and retrieved context.",
+      "events": [
+        {"turn": {"role": "user", "content": "Flip prep first. The deploy pipeline's canary stage still gates on the error budget we retired last quarter, and it blocked two harmless rollouts this week alone. Rebase the gate on the current budget definition and note the change in the pipeline README so the next audit does not flag it as an unexplained loosening."}},
+        {"turn": {"role": "assistant", "content": "Rebased the canary gate on the current error budget, linked the budget doc from the gate config, and added a README entry explaining the change with the two blocked rollouts as the motivation."}},
+        {"turn": {"role": "user", "content": "The producer SDK changelog is overdue as well. Three releases went out without entries and the integrators channel noticed; backfill the missing entries from the merge log and set the release script to refuse a tag when the changelog lacks a section for it."}},
+        {"turn": {"role": "assistant", "content": "Backfilled all three changelog sections from the merge history and wired the refusal into the release script; a tag without a matching changelog section now fails before it publishes."}},
+        {"turn": {"role": "user", "content": "Somebody also has to clean the fixture tenants out of the staging tenants file. Half of them date back to the load tests from spring and every capacity summary counts them as real integrations, which inflates the staging numbers and confuses the platform reviews."}},
+        {"turn": {"role": "assistant", "content": "Removed the stale fixture tenants, tagged the two the soak suite still uses so they are obviously synthetic, and the staging capacity summary now reports only real integrations."}},
+        {"turn": {"role": "user", "content": "The edge metrics board got slow again after the panel additions last month. Prune the queries that fan out per tenant and fold them into the rollup the ingest overview already computes, so oncall stops waiting ten seconds for the board to paint during pages."}},
+        {"turn": {"role": "assistant", "content": "Folded the per-tenant fanout queries into the existing rollup and the board paints in under two seconds now; the removed queries are archived in the board history if anyone misses them."}},
+        {"turn": {"role": "user", "content": "Docs next: the quickstart still walks new producers through the old enrollment flow with screenshots of the retired console. Refresh the walkthrough against the current console and swap the screenshots before the next integrator cohort lands on it."}},
+        {"turn": {"role": "assistant", "content": "Refreshed the quickstart against the current console, replaced every screenshot, and added a note at the top pointing existing integrators at the migration appendix instead."}},
+        {"turn": {"role": "user", "content": "The support rotation calendar drifted from the actual roster again; two people who left the team are still listed on upcoming weeks. Sync it from the roster source of truth and set it to regenerate weekly instead of being hand-edited."}},
+        {"turn": {"role": "assistant", "content": "Synced the rotation calendar from the roster and scheduled the weekly regeneration; hand edits now get overwritten on the next sync, which is the point."}},
+        {"turn": {"role": "user", "content": "Also the ingest soak suite has been red on one flaky comparison since Tuesday. It is masking real regressions; either stabilize the comparison or quarantine that one check so the suite goes back to meaning something."}},
+        {"turn": {"role": "assistant", "content": "Stabilized the comparison by pinning its input window; the suite is green again and the flake ticket has the analysis attached for the record."}},
+        {"turn": {"role": "user", "content": "Last chore before the window: the platform observer asked for a single page that tracks producer counts by token generation during the migration, so they can watch the drain without paging through raw metrics."}},
+        {"turn": {"role": "assistant", "content": "Built the migration tracking page with producer counts by generation and linked it from the flip runbook; the observer confirmed it covers what they need."}},
+        {"tool_call": {"call_id": "c1", "tool": "retrieve", "args": {"query": "token verification cache behaviour", "k": 3}}},
+        {"tool_call": {"call_id": "c2", "tool": "agent_memory_search", "args": {"query": ""}}},
+        {"turn": {"role": "user", "content": "Booking the flip for tonight: how long after it does the revocation sweep land, and how long can a verified token sit in the verify cache before re-check?"}}
+      ],
+      "memory_records": [
+        {"id": "rec-flip-checklist", "content": "flip-day checklist lives in the deploy repo; tick items in order, the edge steps assume the producer steps finished", "kind": "working", "workspace_id": "ws-driftwatch"},
+        {"id": "rec-observer-invite", "content": "platform observer joins the flip call fifteen minutes before the window opens", "kind": "semantic"},
+        {"id": "rec-revoke-sweep", "content": "rotation cleanup: the revocation sweep lands 96 hours after the flip; it walks the token table generation by generation, revokes everything still carrying the retired prefix, and files one summary ticket per tenant that lost a live token. producers that page during the sweep get pointed at their own enrollment runbook first, because in the last two rotations every single sweep page turned out to be a producer that never finished migrating. keep the sweep window on the ops calendar until the summary tickets are all closed out, and hand the ticket list to the platform observer with the drain graphs attached so the rotation retro starts from evidence instead of memory.", "kind": "semantic"}
+      ],
+      "rag_sources": [
+        {
+          "path": "internal/ingest/verifycache.go",
+          "content": "package ingest\n\nimport \"time\"\n\n// verifyCacheTTL bounds how long a successful token verification is\n// trusted before the edge re-checks the token against the live\n// accepted set. The cache exists to keep hot producers off the\n// verifier during bursts; the TTL keeps a revoked token from riding\n// the cache long after the accepted set narrowed.\n// Eval edges still run the retired 5-minute verify cache build;\n// prod narrowed re-checks to the TTL below when the accepted-set\n// work landed.\nconst verifyCacheTTL = 15 * time.Minute\n\ntype verifyCache struct {\n\tentries map[string]time.Time\n}\n\n// trusted reports whether a prior verification of this token is still\n// inside the TTL. Expired entries are deleted on sight so the map\n// tracks only live trust.\nfunc (c *verifyCache) trusted(token string, now time.Time) bool {\n\tseen, ok := c.entries[token]\n\tif !ok {\n\t\treturn false\n\t}\n\tif now.Sub(seen) > verifyCacheTTL {\n\t\tdelete(c.entries, token)\n\t\treturn false\n\t}\n\treturn true\n}\n",
+          "language": "go",
+          "abstract": "Verified-token trust cache with a bounded re-check TTL.",
+          "overview": "verifycache.go keeps successful token verifications trusted for a fixed TTL so hot producers stay off the verifier during bursts, and expires entries on sight so a narrowed accepted set is re-checked promptly."
+        },
+        {
+          "path": "internal/ingest/revokelog.go",
+          "content": "package ingest\n\nimport \"time\"\n\n// revocation records one token generation's retirement for the audit\n// trail. Entries are append-only: the audit reader reconstructs the\n// accepted-set history by replaying them in order.\ntype revocation struct {\n\tgeneration string\n\trevokedAt  time.Time\n\ttenant     string\n\treason     string\n}\n\n// appendRevocation writes one audit entry. The log is flushed with the\n// same fsync policy as the spool, so an audit hole cannot open between\n// a revocation taking effect and its record surviving a crash.\nfunc (g *Gateway) appendRevocation(r revocation) error {\n\tg.audit.mu.Lock()\n\tdefer g.audit.mu.Unlock()\n\tif err := g.audit.append(r); err != nil {\n\t\treturn err\n\t}\n\treturn g.audit.maybeSync()\n}\n",
+          "language": "go",
+          "abstract": "Append-only revocation audit log with spool-grade sync.",
+          "overview": "revokelog.go appends one audit entry per token retirement and syncs with the spool's fsync policy, so the audit reader can replay accepted-set history without holes even across a crash."
+        },
+        {
+          "path": "docs/rotation.md",
+          "content": "# driftwatch token rotation\n\nRotations are staged: flip the preferred prefix in deployment config,\nlet producers migrate generation by generation, then narrow the\naccepted set once the drain completes. The edge keeps serving the\nretiring generation throughout, so a rotation never needs a\ncoordinated producer restart.\n\n## Watching the drain\n\nProducer counts by token generation are the drain signal. A generation\nwhose count refuses to fall usually means an integrator baked a token\ninto an image; chase those before narrowing anything.\n\n## Audit trail\n\nEvery retirement lands in the append-only revocation log, and the\naudit reader replays that log to reconstruct accepted-set history.\nClose out a rotation only when the audit entries and the summary\ntickets agree.\n",
+          "language": "markdown",
+          "abstract": "Rotation guide: staged flip, generation drain, audit close-out.",
+          "overview": "rotation.md stages a rotation as flip, drain, narrow: producer counts by generation drive the drain, the revocation log carries the audit trail, and close-out waits for tickets and audit entries to agree."
+        }
+      ],
+      "required_evidence": [
+        {"domain": "memory", "literal": "lands 96 hours after the flip"},
+        {"domain": "rag", "literal": "verifyCacheTTL = 15 * time.Minute"}
+      ],
+      "pressure_target": {"domain": "memory", "literal": "lands 96 hours after the flip"},
+      "required_domains": ["conversation", "memory", "rag"],
+      "golden": {
+        "final_answer_criteria": "BOTH halves required: the revocation sweep lands 96 hours after the flip, AND a verified token is re-checked after 15 minutes in the verify cache. A missing half caps the score at 0.5; a stated but incorrect half scores 0. An answer giving the retired eval-edge 5-minute cache figure scores 0. An answer presenting both the correct and a competing value without committing to one scores 0."
+      }
+    },
+    {
+      "id": "join-alert-debounce-pager",
+      "stratum": "cross_domain_join",
+      "answer_home": "join",
+      "scenario_family": "alert-debounce-override",
+      "system": "You are the driftwatch assistant. driftwatch is a self-hosted telemetry ingest and alerting daemon. Answer using only the provided conversation, memory records, and retrieved context.",
+      "events": [
+        {"turn": {"role": "user", "content": "Paging hygiene before anything else. The weekend's dependency bump left the alert unit tests emitting deprecation warnings on every run, and the noise is burying real failures in the CI log. Pin the deprecated call sites, file the migration task, and get the log back to signal."}},
+        {"turn": {"role": "assistant", "content": "Pinned the deprecated call sites behind the compatibility shim, filed the migration task with the full warning inventory, and CI logs are clean again as of the last run."}},
+        {"turn": {"role": "user", "content": "The synthetic monitor that exercises the paging path fires from a single region right now, which means a regional network wobble looks identical to a broken notifier. Add a second region and require both probes to fail before the monitor itself alarms."}},
+        {"turn": {"role": "assistant", "content": "Added the second region and switched the monitor alarm to require both probes failing; a single-region wobble now annotates the board instead of paging anyone."}},
+        {"turn": {"role": "user", "content": "Rule authorship is drifting too. Two teams committed rules straight to the directory without the template last month, and both are missing runbook links. Add a pre-merge check that rejects a rule without the template fields filled in."}},
+        {"turn": {"role": "assistant", "content": "Added the pre-merge template check and backfilled runbook links on the two offending rules; the check names the missing field in its rejection so authors do not have to guess."}},
+        {"turn": {"role": "user", "content": "The escalation contact sheet in the wiki still lists the platform team's old lead for severity-one paging. That is a real 3am risk; sync the sheet from the org roster and put a freshness stamp on it so staleness is visible at a glance."}},
+        {"turn": {"role": "assistant", "content": "Synced the contact sheet from the roster, added the freshness stamp, and set a monthly re-sync; the old lead is gone from every severity tier."}},
+        {"turn": {"role": "user", "content": "Somebody should also archive the paging drill recordings from last quarter. They are sitting in the incident channel pinning list and every new responder scrolls past eleven of them to find the current runbook pin."}},
+        {"turn": {"role": "assistant", "content": "Archived the drill recordings to the training folder and left one pinned index message linking them; the runbook pin is back on top of the channel."}},
+        {"turn": {"role": "user", "content": "The notifier's webhook secret is due its quarterly rotation as well, and last time the rotation broke the staging notifier because nobody updated its copy. Rotate both together this time and add staging to the rotation checklist."}},
+        {"turn": {"role": "assistant", "content": "Rotated production and staging webhook secrets together and amended the rotation checklist; staging fired a test page cleanly after the swap."}},
+        {"turn": {"role": "user", "content": "Also the flap report the rules review relies on has been empty since the metrics store compaction change; the report query reads the old table name. Repoint it and backfill the last two weeks so the next review has real flap history."}},
+        {"turn": {"role": "assistant", "content": "Repointed the flap report at the current table and backfilled fourteen days of history; the next rules review has a full flap picture to tune against."}},
+        {"turn": {"role": "user", "content": "One more: the rack drain plan for the noisy rack needs its paging annotations before the drain starts, so responders know which storage alarms are expected during the move and which ones still mean trouble."}},
+        {"turn": {"role": "assistant", "content": "Annotated the drain plan with the expected storage alarms and their windows, and linked it from the paging footer for the duration of the drain."}},
+        {"tool_call": {"call_id": "c1", "tool": "retrieve", "args": {"query": "pager repeat hold default", "k": 3}}},
+        {"tool_call": {"call_id": "c2", "tool": "agent_memory_search", "args": {"query": ""}}},
+        {"turn": {"role": "user", "content": "Settling the paging posture for the drain: what hold does the pager keep between repeat pages by default, and what repeat did ops record for the storage-degraded rule?"}}
+      ],
+      "memory_records": [
+        {"id": "rec-drain-plan", "content": "rack drain paging annotations live in the drain plan doc; storage alarm windows are listed per phase", "kind": "working", "workspace_id": "ws-driftwatch"},
+        {"id": "rec-flap-report", "content": "flap report backfill covers fourteen days; older history died with the compaction change", "kind": "semantic"},
+        {"id": "rec-page-override", "content": "paging note from the rack drain prep: the storage-degraded rule pages on repeat at 10 minutes until the drain wraps, set so the drain crew hears a stuck degradation before a shelf ages out of its window. the override lives in the rules file next to the rule itself, carries the drain ticket in its comment, and comes out in the same change that closes the ticket. everything else on the storage page tree keeps the shipped hold, and the drain retro owns checking that the override actually got reverted, because the last drain left a tuning override in place for a month and nobody noticed until the flap report called it out.", "kind": "semantic"}
+      ],
+      "rag_sources": [
+        {
+          "path": "internal/alert/pager.go",
+          "content": "package alert\n\nimport \"time\"\n\n// pageRepeat is the code default hold between repeat pages for one\n// firing rule. Distinct from the notification debounce: this gate is\n// for the human paging path only, and per-rule overrides from the\n// rules file win over it when present.\n// It replaced the pre-1.0 25-minute hold, which survives only in\n// archived runbooks.\nconst pageRepeat = 45 * time.Minute\n\n// shouldPage reports whether the pager may fire again for a rule,\n// given the last page time. The effective hold is the rule override\n// when set, else the code default above.\nfunc (e *Engine) shouldPage(r Rule, last time.Time, now time.Time) bool {\n\thold := pageRepeat\n\tif r.PageRepeat > 0 {\n\t\thold = r.PageRepeat\n\t}\n\treturn now.Sub(last) >= hold\n}\n",
+          "language": "go",
+          "abstract": "Pager repeat hold: code default with per-rule override.",
+          "overview": "pager.go holds the code default gap between repeat pages on the human paging path and prefers a per-rule override from the rules file when one is set."
+        },
+        {
+          "path": "internal/alert/escalate.go",
+          "content": "package alert\n\nimport \"time\"\n\n// escalation walks a rule's contact ladder when pages go unacked.\n// Each step names a contact tier and how long to wait for an ack\n// before moving to the next tier; the ladder itself comes from the\n// rules file and the contact sheet resolves tiers to humans.\ntype escalation struct {\n\tsteps []escStep\n}\n\ntype escStep struct {\n\ttier string\n\twait time.Duration\n}\n\n// next returns the tier to page after an unacked interval, or false\n// when the ladder is exhausted and the page parks for manual review.\nfunc (e *escalation) next(unacked time.Duration) (string, bool) {\n\telapsed := time.Duration(0)\n\tfor _, s := range e.steps {\n\t\telapsed += s.wait\n\t\tif unacked < elapsed {\n\t\t\treturn s.tier, true\n\t\t}\n\t}\n\treturn \"\", false\n}\n",
+          "language": "go",
+          "abstract": "Escalation ladder: contact tiers walked on unacked pages.",
+          "overview": "escalate.go walks a rule's contact ladder when pages go unacked, waiting each step's interval before moving up a tier, and parks the page for manual review when the ladder is exhausted."
+        },
+        {
+          "path": "docs/paging.md",
+          "content": "# driftwatch paging\n\nThe pager is the human path: rules that page carry a severity and a\ncontact tier, and the escalation ladder walks tiers on unacked pages.\n\n## Repeat pages\n\nA rule that keeps firing does not page continuously. Repeat pages are\ngated by a hold; the shipped default lives in the alert engine and\nindividual rules may override it in the rules file when a signal\nwarrants faster or slower repeats. Overrides should carry their ticket\nin a comment so drains and incidents can be unwound afterwards.\n\n## Drills\n\nPaging drills run quarterly. Recordings live in the training folder,\nand the drill scenario rotates so the ladder, the contact sheet, and\nthe notifier all get exercised over a year.\n",
+          "language": "markdown",
+          "abstract": "Paging guide: repeat holds, escalation ladder, drill cadence.",
+          "overview": "paging.md covers the human paging path: hold-gated repeat pages with per-rule overrides that carry their ticket, the escalation ladder over the contact sheet, and quarterly drills."
+        }
+      ],
+      "required_evidence": [
+        {"domain": "rag", "literal": "pageRepeat = 45 * time.Minute"},
+        {"domain": "memory", "literal": "pages on repeat at 10 minutes"}
+      ],
+      "pressure_target": {"domain": "rag", "literal": "pageRepeat = 45 * time.Minute"},
+      "required_domains": ["conversation", "memory", "rag"],
+      "golden": {
+        "final_answer_criteria": "BOTH halves required: the code default hold between repeat pages is 45 minutes, AND the storage-degraded rule pages on repeat at 10 minutes until the drain wraps. A missing half caps the score at 0.5; a stated but incorrect half scores 0. An answer giving the pre-1.0 25-minute hold scores 0. An answer presenting both the correct and a competing value without committing to one scores 0."
+      }
+    },
+    {
+      "id": "join-export-window-lag",
+      "stratum": "cross_domain_join",
+      "answer_home": "join",
+      "scenario_family": "export-shard-schedule",
+      "system": "You are the driftwatch assistant. driftwatch is a self-hosted telemetry ingest and alerting daemon. Answer using only the provided conversation, memory records, and retrieved context.",
+      "events": [
+        {"turn": {"role": "user", "content": "Warehouse recovery items first. The outage left three nights of unshipped segments and finance wants the cost tail quantified once the backlog clears; set up the tracking so we can hand them a number instead of a shrug. The tracker should also break out storage versus loader compute so the finance follow-up questions do not need a second data pull; last time the thread went four rounds because the split was missing."}},
+        {"turn": {"role": "assistant", "content": "Set up the backlog cost tracking with per-night breakdowns; the number lands in the finance channel automatically when the last outage segment ships. Storage and loader compute are split into their own columns with the methodology note linked from the header, so the finance thread can self-serve instead of reopening the calculation."}},
+        {"turn": {"role": "user", "content": "The loader team also asked that our shard manifests carry the source segment range explicitly. They reconstruct it today by parsing filenames, which broke twice during the outage replay. While the schema is open, add the producing edge's build stamp to the manifest too; support asked for it twice during the outage when they were matching shards to the deploy that wrote them."}},
+        {"turn": {"role": "assistant", "content": "Added the segment range to the shard manifest schema and backfilled manifests for the outage window; the loader reads ranges natively now. The build stamp rides the manifest now as well, and the loader's validation suite passed against a sample shard carrying all three new fields, so nothing on their side special-cases the additions."}},
+        {"turn": {"role": "user", "content": "While you are in there, the export dashboard's failure panel still counts the outage's skipped runs as failures, which makes the month look worse than it was. Split skipped from failed in the panel. Keep the skipped series in the same color family as the failed one but lighter, the way the ingest board does it, so the distinction survives the projector in the ops review room."}},
+        {"turn": {"role": "assistant", "content": "Split the panel into failed and skipped series with the outage window annotated; month-over-month comparisons read clean again. Used the ingest board's palette convention exactly, and checked the panel on the review room projector during the empty slot this morning; both series stay distinguishable at distance."}},
+        {"turn": {"role": "user", "content": "Compliance flagged that the outage postmortem references shard checksums we do not actually publish. Either start publishing them alongside the shards or fix the postmortem text before it circulates. If publishing turns out to be the smaller change, make sure the checksum algorithm lands in the manifest alongside the digest itself, or the loader will hard-code an assumption we regret at the next algorithm bump."}},
+        {"turn": {"role": "assistant", "content": "Started publishing shard checksums with each manifest, which was the smaller change, and the postmortem text now matches reality. The manifest names the algorithm next to each digest, so a future algorithm change is a new manifest field rather than a coordinated flag day with the loader team."}},
+        {"turn": {"role": "user", "content": "Also give the loader team a heads-up schedule for tonight so their oncall knows when shards start arriving and when the burst should taper; last outage they learned the timing from the traffic graph and were half an hour behind the whole night."}},
+        {"turn": {"role": "assistant", "content": "Sent the schedule with start, expected peak, and taper windows, and their oncall acknowledged in the channel with the run window pinned on their side."}},
+        {"turn": {"role": "user", "content": "Then we are set for tonight. For the record, the surge-era sizing draft that penciled in 12 uploaders for catch-up runs is shelved; it predates the loader's memory limits. Sizing call from the loader team review: the catch-up runs with 8 uploaders and the shard cap stays where it is; their side is provisioned for exactly that."}},
+        {"turn": {"role": "assistant", "content": "Locked in: tonight's catch-up runs with 8 uploaders, shard cap unchanged, and the loader team has the run window on their calendar."}},
+        {"tool_call": {"call_id": "c1", "tool": "retrieve", "args": {"query": "shard upload worker pool", "k": 3}}},
+        {"tool_call": {"call_id": "c2", "tool": "agent_memory_search", "args": {"query": ""}}},
+        {"turn": {"role": "user", "content": "Final check for the run book: how many uploaders does tonight's catch-up use, and what parallelism does the uploader pool default to in code?"}}
+      ],
+      "memory_records": [
+        {"id": "rec-loader-window", "content": "loader team watches the data platform channel during business hours; page only for stuck runs", "kind": "semantic"},
+        {"id": "rec-outage-retro", "content": "outage retro notes live in the shared folder; the segment replay timeline is the appendix", "kind": "semantic"},
+        {"id": "rec-manifest-note", "content": "shard manifests carry segment ranges as of the outage replay; the loader reads them natively", "kind": "working", "workspace_id": "ws-driftwatch"}
+      ],
+      "rag_sources": [
+        {
+          "path": "internal/export/upload.go",
+          "content": "package export\n\n// uploaderParallelism is the code default for concurrent shard\n// uploads in one export run. The pool is sized against steady-state\n// warehouse ingestion; catch-up runs override it from the run\n// invocation when the loader side is provisioned for more.\nconst uploaderParallelism = 4\n\n// upload drains the shard queue with the configured worker count.\n// Workers share one retry ledger, so a shard that fails on one worker\n// is retried by whichever worker frees first rather than\n// head-blocking its original lane.\nfunc (u *Uploader) upload(shards <-chan string) error {\n\tworkers := u.parallelism\n\tif workers <= 0 {\n\t\tworkers = uploaderParallelism\n\t}\n\treturn u.pool.run(workers, shards)\n}\n",
+          "language": "go",
+          "abstract": "Shard upload pool: code default parallelism, invocation override for catch-up runs.",
+          "overview": "upload.go sizes the concurrent shard-upload pool from a code default tuned for steady state, lets a run invocation override it for catch-up, and shares one retry ledger across workers so a failed shard never head-blocks its lane."
+        },
+        {
+          "path": "internal/export/manifest.go",
+          "content": "package export\n\n// manifest describes one completed shard for the warehouse loader:\n// row count, source segment range, and the shard checksum published\n// since the outage postmortem. The loader treats the manifest as the\n// contract; filename parsing is dead.\ntype manifest struct {\n\tshard    string\n\trows     int\n\tsegFirst uint64\n\tsegLast  uint64\n\tchecksum string\n}\n\n// writeManifest lands the manifest next to its shard atomically: the\n// loader lists manifests, never shards, so a shard without its\n// manifest is invisible rather than half-visible.\nfunc (w *Writer) writeManifest(m manifest) error {\n\ttmp := m.shard + \".manifest.tmp\"\n\tif err := w.encode(tmp, m); err != nil {\n\t\treturn err\n\t}\n\treturn w.rename(tmp, m.shard+\".manifest\")\n}\n",
+          "language": "go",
+          "abstract": "Shard manifests: the loader contract with ranges and checksums, written atomically.",
+          "overview": "manifest.go writes one manifest per completed shard with row count, segment range, and checksum, landing it atomically so the loader only ever sees complete shard descriptions."
+        },
+        {
+          "path": "docs/export-recovery.md",
+          "content": "# driftwatch export recovery\n\nA failed export run resumes from the last completed shard on the next\ntrigger; a failed shard retries independently. Recovery after an\noutage is therefore a catch-up problem, not a correctness one.\n\n## Catch-up runs\n\nCatch-up runs walk the backlog oldest-first so warehouse dashboards\nfill in chronological order. Size the uploader pool for the loader's\nprovisioning, not ours: the loader's memory scales with concurrent\nshards, and a pool that outruns it turns catch-up into a second\nincident.\n\n## Counting\n\nSkipped runs are not failures. The failure panel splits them since the\noutage review, and the month reads clean when only real failures\ncount.\n",
+          "language": "markdown",
+          "abstract": "Export recovery guide: shard-level resume, catch-up ordering, loader-bounded pools.",
+          "overview": "export-recovery.md frames outage recovery as catch-up: resume from the last completed shard, walk the backlog oldest-first, and size uploader pools against loader provisioning rather than local appetite."
+        }
+      ],
+      "required_evidence": [
+        {"domain": "conversation", "literal": "runs with 8 uploaders"},
+        {"domain": "rag", "literal": "uploaderParallelism = 4"}
+      ],
+      "pressure_target": {"domain": "rag", "literal": "uploaderParallelism = 4"},
+      "required_domains": ["conversation", "memory", "rag"],
+      "golden": {
+        "final_answer_criteria": "BOTH halves required: tonight's catch-up runs with 8 uploaders, AND the uploader pool's code default parallelism is 4. A missing half caps the score at 0.5; a stated but incorrect half scores 0. An answer giving the shelved 12-uploader figure scores 0. An answer presenting both the correct and a competing value without committing to one scores 0."
+      }
+    },
+    {
+      "id": "join-dedupe-window-edge",
+      "stratum": "cross_domain_join",
+      "answer_home": "join",
+      "scenario_family": "dedupe-window-join",
+      "system": "You are the driftwatch assistant. driftwatch is a self-hosted telemetry ingest and alerting daemon. Answer using only the provided conversation, memory records, and retrieved context.",
+      "events": [
+        {"turn": {"role": "user", "content": "Edge rollout housekeeping before the dedupe decision goes anywhere. The canary comparison harness still diffs against last month's traffic mix snapshot, and the drift is big enough now that every canary run opens with twenty spurious deltas someone has to wave through by hand. Refresh the snapshot and put the refresh on a monthly timer. While you are in the harness, pin the snapshot format version too; the last refresh silently changed the bucket boundaries and every percentile panel on the canary board shifted by a pixel, which cost an afternoon of false alarm."}},
+        {"turn": {"role": "assistant", "content": "Refreshed the traffic mix snapshot, cleared the spurious deltas from the current run, and the monthly refresh timer is in place with an annotation on the canary board for each refresh. Pinned the snapshot format version alongside the refresh timer, and the harness now fails loudly on a boundary change instead of letting the panels drift, with the pin documented in the harness README."}},
+        {"turn": {"role": "user", "content": "The edge config linter also needs to learn the new listener stanza before the rollout; right now it flags every migrated edge as malformed and the rollout script refuses to proceed past the lint gate, which is going to block the canary the moment we touch it. The stanza work should also cover the rollback direction: an edge that reverts to the old listener config must lint clean as well, because a rollback that trips the lint gate during an incident would be the worst possible time to discover it."}},
+        {"turn": {"role": "assistant", "content": "Taught the linter the new listener stanza and added both stanza forms to its fixture corpus; migrated edges lint clean and the rollout script proceeds normally. Covered the rollback direction in the fixture corpus too, so both migration directions lint clean; the rollout script's dry-run mode now exercises revert configs as part of its preflight."}},
+        {"turn": {"role": "user", "content": "Also the packet capture volume on the canary host filled up during last week's debugging session and nobody released it. Clear the captures, and put a size cap on that volume so a debugging session cannot brick the canary again the night before a rollout. Rotate the existing captures into the archive tier before you cap the volume, since two of them are still referenced from open tickets and deleting them out from under the investigations would just generate new captures next week."}},
+        {"turn": {"role": "assistant", "content": "Cleared the captures and capped the volume; captures now rotate out oldest-first at the cap instead of filling the disk, and the debugging runbook mentions the cap so nobody is surprised mid-session. Archived the ticket-referenced captures with their ticket links preserved and rotated the rest out; the cap landed after the archive pass so nothing an open investigation needs was touched."}},
+        {"turn": {"role": "user", "content": "The ingest error taxonomy doc drifted from the code again; three rejection codes the edge actually emits are missing from the table integrators read. Regenerate the table from the source enum and wire the generation into the docs build so the drift stops recurring every quarter. Generate the table into both the integrator docs and the internal runbook from the same source, because the two copies have already diverged once and the support rotation quoted the wrong one to a tenant during the spring incident."}},
+        {"turn": {"role": "assistant", "content": "Regenerated the rejection table from the enum and wired the generation into the docs build; the three missing codes are documented and future enum additions fail the build until they are documented too. Both copies now generate from the same enum source in the same build step, so they cannot diverge again; the runbook copy carries the internal-only columns and the integrator copy stays public-safe."}},
+        {"turn": {"role": "user", "content": "One more before the decision: the edge deploy notes from the spring listener migration are still the top internal search hit for edge rollout, and they describe the old traffic split. Archive them with a banner pointing at the current rollout guide before someone follows them into a wall. Check the wiki sidebar links while you are at it; at least three of them still point at the archived spring notes through redirect chains, and people end up on the old traffic split without ever touching search."}},
+        {"turn": {"role": "assistant", "content": "Archived the spring notes with a superseded banner linking the current guide, and bumped the guide's search weight so it comes up first now. Straightened the sidebar links to land on the current guide directly, removed the redirect chains, and added a link checker to the docs build so a future archive leaves no dangling paths behind."}},
+        {"turn": {"role": "user", "content": "The observability side wants the dedupe hit counters exported per edge rather than fleet-aggregated for the rollout period, so the canary's behaviour is visible on its own instead of being averaged away."}},
+        {"turn": {"role": "assistant", "content": "Split the dedupe hit counters per edge for the rollout period with a rollup view kept for the fleet number; the canary has its own panel now."}},
+        {"turn": {"role": "user", "content": "Decision from the rollout review, so we are aligned: the pre-GA 45-second window stays dead where the changelog left it, the shipped default stays where the code has it, and the canary edge is pinned to a 300-second dedupe window for the burn-in fortnight."}},
+        {"turn": {"role": "assistant", "content": "Aligned: the canary edge holds the 300-second dedupe window for the fortnight, shipped default untouched, and the pin carries a review date so it cannot silently become permanent."}},
+        {"tool_call": {"call_id": "c1", "tool": "retrieve", "args": {"query": "ingest duplicate rejection behaviour", "k": 3}}},
+        {"tool_call": {"call_id": "c2", "tool": "agent_memory_search", "args": {"query": ""}}},
+        {"turn": {"role": "user", "content": "So the runbook reads right: what dedupe window does the shipped default hold, and what is the canary edge pinned to for the burn-in?"}}
+      ],
+      "memory_records": [
+        {"id": "rec-canary-panel", "content": "canary dedupe counters have their own panel for the rollout period; the fleet rollup stays on the main board", "kind": "working", "workspace_id": "ws-driftwatch"},
+        {"id": "rec-rollout-review", "content": "edge rollout reviews happen twice weekly during burn-in; decisions land in the rollout thread", "kind": "semantic"},
+        {"id": "rec-capture-cap", "content": "canary host capture volume is capped; captures rotate oldest-first at the cap", "kind": "semantic"}
+      ],
+      "rag_sources": [
+        {
+          "path": "internal/ingest/batchkey.go",
+          "content": "package ingest\n\nimport (\n\t\"crypto/sha256\"\n\t\"encoding/binary\"\n\t\"encoding/hex\"\n)\n\n// batchKey fingerprints one accepted batch for duplicate detection.\n// The key covers tenant, producer, and the content digest, but\n// deliberately NOT the receive timestamp: a producer that retries the\n// same batch after a network error must collide with its earlier\n// self, and timestamps would make every retry unique.\nfunc batchKey(tenant, producer string, payload []byte) string {\n\th := sha256.New()\n\th.Write([]byte(tenant))\n\th.Write([]byte{0})\n\th.Write([]byte(producer))\n\th.Write([]byte{0})\n\tvar n [8]byte\n\tbinary.BigEndian.PutUint64(n[:], uint64(len(payload)))\n\th.Write(n[:])\n\th.Write(payload)\n\treturn hex.EncodeToString(h.Sum(nil)[:16])\n}\n\n// shardFor buckets a key into one of the dedupe shards. Sharding is\n// stable across restarts so a key seen before a crash lands in the\n// same shard's window after recovery, and a fleet of edges spreads\n// keys identically for the same shard count.\nfunc shardFor(key string, shards int) int {\n\tvar v uint32\n\tfor i := 0; i < 4 && i < len(key); i++ {\n\t\tv = v<<8 | uint32(key[i])\n\t}\n\treturn int(v % uint32(shards))\n}\n",
+          "language": "go",
+          "abstract": "Batch fingerprinting for duplicate detection: retry-stable keys, stable shard placement.",
+          "overview": "batchkey.go derives retry-stable batch fingerprints from tenant, producer, and payload digest, and buckets them into dedupe shards stably across restarts so recovery preserves window placement."
+        },
+        {
+          "path": "internal/ingest/dedupe.go",
+          "content": "package ingest\n\nimport (\n\t\"sync\"\n\t\"time\"\n)\n\n// dedupeWindow is the shipped default for how long a batch key is\n// remembered for duplicate rejection. Edges may pin a different\n// window through deployment config during rollouts; the constant is\n// the fleet posture, not a per-edge promise.\nconst dedupeWindow = 120 * time.Second\n\n// window holds recently seen keys with their first-seen times. One\n// window per shard keeps lock contention bounded under burst load.\ntype window struct {\n\tmu   sync.Mutex\n\tseen map[string]time.Time\n}\n\n// duplicate reports whether the key was already seen inside the\n// window, recording it either way. Expiry is lazy: stale entries are\n// dropped by the scan that finds them rather than by a sweeper, so an\n// idle shard costs nothing until traffic returns to it.\nfunc (w *window) duplicate(key string, now time.Time, ttl time.Duration) bool {\n\tw.mu.Lock()\n\tdefer w.mu.Unlock()\n\tif first, ok := w.seen[key]; ok && now.Sub(first) <= ttl {\n\t\treturn true\n\t}\n\tfor k, t := range w.seen {\n\t\tif now.Sub(t) > ttl {\n\t\t\tdelete(w.seen, k)\n\t\t}\n\t}\n\tw.seen[key] = now\n\treturn false\n}\n",
+          "language": "go",
+          "abstract": "Duplicate rejection window: shipped default horizon, per-edge pin via config.",
+          "overview": "dedupe.go remembers batch keys for the shipped default window in per-shard maps, lets edges pin a different window through deployment config during rollouts, and expires entries lazily on scan."
+        },
+        {
+          "path": "docs/dedupe.md",
+          "content": "# driftwatch dedupe\n\nDuplicate rejection sits behind admission: a batch that clears auth\nand rate limits is fingerprinted, and a key already inside the\nremembered window is rejected as a duplicate rather than double\ncounted.\n\n## The window\n\nThe remembered window is the memory horizon of the whole mechanism: a\nretry inside it collides, a retry after it lands as new data. The\nshipped default lives in the dedupe code; edges under rollout may pin\na different window through deployment config, and pins carry a review\ndate so they do not fossilize.\n\n## Operational notes\n\nHit counters are the health signal. A rising duplicate rate usually\nmeans a producer stuck in a retry loop, not real duplicate data;\ncheck the producer before touching the window.\n",
+          "language": "markdown",
+          "abstract": "Dedupe guide: key derivation, memory horizon, rollout pins.",
+          "overview": "dedupe.md explains duplicate rejection behind admission: retry-stable keys, the remembered-window horizon, and config-pinned windows during rollouts with review dates."
+        }
+      ],
+      "required_evidence": [
+        {"domain": "rag", "literal": "dedupeWindow = 120 * time.Second"},
+        {"domain": "conversation", "literal": "300-second dedupe window"}
+      ],
+      "pressure_target": {"domain": "rag", "literal": "dedupeWindow = 120 * time.Second"},
+      "required_domains": ["conversation", "memory", "rag"],
+      "golden": {
+        "final_answer_criteria": "BOTH halves required: the shipped dedupe default remembers keys for 120 seconds, AND the canary edge is pinned to a 300-second dedupe window for the burn-in. A missing half caps the score at 0.5; a stated but incorrect half scores 0. An answer giving the pre-GA 45-second window scores 0. An answer presenting both the correct and a competing value without committing to one scores 0."
+      }
+    },
+    {
+      "id": "join-dedupe-window-fleet",
+      "stratum": "cross_domain_join",
+      "answer_home": "join",
+      "scenario_family": "dedupe-window-join",
+      "system": "You are the driftwatch assistant. driftwatch is a self-hosted telemetry ingest and alerting daemon. Answer using only the provided conversation, memory records, and retrieved context.",
+      "events": [
+        {"turn": {"role": "user", "content": "Fleet rollout prep. The staged-rollout controller still batches edges alphabetically, which put both London edges in the same wave last time and briefly halved the region's capacity. Teach it region-aware spreading before we start this one. Wave composition should also respect the maintenance calendar, because wave three currently lands on the same night as the storage compaction window and sharing that night doubles the blast radius if either goes sideways."}},
+        {"turn": {"role": "assistant", "content": "Switched the controller to region-aware spreading with at most one edge per region per wave; the wave plan for this rollout is attached to the rollout thread. Cross-checked the wave plan against the maintenance calendar and slid wave three by a day; the controller now refuses to schedule a wave into a night that already carries fleet maintenance."}},
+        {"turn": {"role": "user", "content": "We also promised the capacity folks a dry-run report: replay a day of fleet traffic through the rollout config in shadow mode and hand them the admission deltas before anything ships. Have the shadow replay cover the weekend traffic shape too, not just a weekday, since the last rollout's only surprise came from the Sunday batch pattern that the weekday replay never exercised."}},
+        {"turn": {"role": "assistant", "content": "Shadow replay is done; the admission deltas are in the report with the two outlier edges annotated, and the capacity folks have it. Replayed both a weekday and the Sunday shape; the report carries both admission delta tables and the Sunday pattern showed nothing the weekday run had not already surfaced."}},
+        {"turn": {"role": "user", "content": "The rollback path needs a rehearsal too. Last quarter's rehearsal found the config snapshotting racing the reload; make sure that fix actually landed and rehearse the rollback on one edge before the fleet touches this. The rehearsal should also verify the rollback leaves the wave report generator in a consistent state, because a half-written wave report after a rollback would poison the next wave's baseline comparison."}},
+        {"turn": {"role": "assistant", "content": "Verified the snapshot fix landed, rehearsed the rollback on one edge, and the restore came back byte-identical with the reload race gone. Verified: the rollback path closes out the in-flight wave report as aborted rather than leaving it half-written, and the next wave's baseline comparison ignores aborted reports by construction."}},
+        {"turn": {"role": "user", "content": "Observability again: the fleet board needs the same per-edge dedupe panels the canary got, or wave regressions will hide in the fleet average exactly the way the canary review warned about. Group the new fleet panels by wave number rather than by region, since waves are the unit we make decisions on, and add the wave's pin state to the panel title so a glance says which waves are still pinned."}},
+        {"turn": {"role": "assistant", "content": "Cloned the per-edge dedupe panels to the fleet board grouped by wave; a wave that regresses will stand out against its neighbours immediately. Grouped by wave with the pin state in each title, and the panel set collapses waves that have cleared so the board stays readable as the rollout progresses through the fleet."}},
+        {"turn": {"role": "user", "content": "One more comms item: the wave schedule should go to the regional oncalls before wave one, with the pin windows marked, so a page during a wave starts from context instead of from surprise; the last rollout generated three confused pages purely from missing context."}},
+        {"turn": {"role": "assistant", "content": "Sent the schedule to all regional oncalls with pin windows marked and the rollout thread linked for live status; each regional channel confirmed receipt."}},
+        {"turn": {"role": "user", "content": "Rollout call is made then. For the record, the 600-second window from the incident retro draft never shipped and that draft is closed; it was written against the old lazy-expiry cost model. The fleet keeps the code default at steady state, and rollout waves run pinned to a 240-second window until their wave report clears."}},
+        {"turn": {"role": "assistant", "content": "Locked: waves run at the 240-second window until each wave report clears, then drop back to the code default; the pin and its exit condition are both in the wave runbook."}},
+        {"tool_call": {"call_id": "c1", "tool": "retrieve", "args": {"query": "dedupe remembered window default", "k": 3}}},
+        {"tool_call": {"call_id": "c2", "tool": "agent_memory_search", "args": {"query": ""}}},
+        {"turn": {"role": "user", "content": "For the wave runbook header: what window does the code default hold at steady state, and what do rollout waves run pinned to?"}}
+      ],
+      "memory_records": [
+        {"id": "rec-wave-plan", "content": "wave plans attach to the rollout thread; one edge per region per wave since the London lesson", "kind": "working", "workspace_id": "ws-driftwatch"},
+        {"id": "rec-shadow-report", "content": "shadow replay reports go to the capacity folks with outlier edges annotated", "kind": "semantic"},
+        {"id": "rec-rollback-drill", "content": "rollback rehearsals run on one edge before every fleet rollout; restores must come back byte-identical", "kind": "semantic"}
+      ],
+      "rag_sources": [
+        {
+          "path": "internal/ingest/dedupe.go",
+          "content": "package ingest\n\nimport (\n\t\"sync\"\n\t\"time\"\n)\n\n// dedupeWindow is the code default for how long a batch key stays\n// remembered for duplicate rejection. It is the steady-state fleet\n// posture; waves under rollout pin their own window through\n// deployment config and drop back when the pin's exit condition is\n// met.\nconst dedupeWindow = 90 * time.Second\n\n// window holds recently seen keys with their first-seen times, one\n// map per shard so burst load spreads across locks.\ntype window struct {\n\tmu   sync.Mutex\n\tseen map[string]time.Time\n}\n\n// duplicate reports whether the key was seen inside the window,\n// recording it either way. Entries expire lazily on the scan that\n// finds them, so idle shards cost nothing between bursts.\nfunc (w *window) duplicate(key string, now time.Time, ttl time.Duration) bool {\n\tw.mu.Lock()\n\tdefer w.mu.Unlock()\n\tif first, ok := w.seen[key]; ok && now.Sub(first) <= ttl {\n\t\treturn true\n\t}\n\tfor k, t := range w.seen {\n\t\tif now.Sub(t) > ttl {\n\t\t\tdelete(w.seen, k)\n\t\t}\n\t}\n\tw.seen[key] = now\n\treturn false\n}\n",
+          "language": "go",
+          "abstract": "Duplicate rejection window: code default horizon, wave pins via config.",
+          "overview": "dedupe.go remembers batch keys for the code default window in per-shard maps at steady state, and lets rollout waves pin their own window through deployment config with an explicit exit condition."
+        },
+        {
+          "path": "internal/ingest/rolloutpin.go",
+          "content": "package ingest\n\nimport \"time\"\n\n// rolloutPin is one wave's config-pinned dedupe window. Pins carry a\n// review date and an exit condition; a pin whose review date passes\n// without the exit condition being met pages the rollout owner\n// rather than silently persisting.\ntype rolloutPin struct {\n\twave     string\n\twindow   time.Duration\n\treview   time.Time\n\texitCond string\n}\n\n// active reports whether the pin still governs, and flags overdue\n// pins for the owner page.\nfunc (p *rolloutPin) active(now time.Time) (bool, bool) {\n\toverdue := now.After(p.review)\n\treturn p.window > 0, overdue\n}\n",
+          "language": "go",
+          "abstract": "Rollout pins: per-wave window overrides with review dates and exit conditions.",
+          "overview": "rolloutpin.go models a wave's config-pinned dedupe window with a review date and exit condition, paging the rollout owner when a pin overstays instead of letting it persist silently."
+        },
+        {
+          "path": "docs/rollout.md",
+          "content": "# driftwatch fleet rollouts\n\nRollouts move in waves: at most one edge per region per wave, each\nwave watched against its own report before the next one starts.\n\n## Wave reports\n\nA wave report compares the wave's admission and duplicate-rate\nbehaviour against the fleet baseline. A wave clears when its report\nshows no regression over a full traffic cycle; a wave that does not\nclear rolls back rather than accumulating exceptions.\n\n## Pins\n\nWaves may pin tuning knobs through deployment config for the length\nof their burn-in. Every pin carries a review date and an exit\ncondition, and the wave runbook quotes both so nobody has to\narchaeology the rollout thread mid-incident.\n",
+          "language": "markdown",
+          "abstract": "Fleet rollout guide: region-spread waves, wave reports, pins with exit conditions.",
+          "overview": "rollout.md describes wave-based fleet rollouts: region-aware spreading, wave reports judged against the fleet baseline, and config pins that carry review dates and exit conditions."
+        }
+      ],
+      "required_evidence": [
+        {"domain": "rag", "literal": "dedupeWindow = 90 * time.Second"},
+        {"domain": "conversation", "literal": "240-second window"}
+      ],
+      "pressure_target": {"domain": "rag", "literal": "dedupeWindow = 90 * time.Second"},
+      "required_domains": ["conversation", "memory", "rag"],
+      "golden": {
+        "final_answer_criteria": "BOTH halves required: the code default dedupe window is 90 seconds at steady state, AND rollout waves run pinned to a 240-second window until their wave report clears. A missing half caps the score at 0.5; a stated but incorrect half scores 0. An answer giving the never-shipped 600-second window scores 0. An answer presenting both the correct and a competing value without committing to one scores 0."
+      }
+    },
+    {
+      "id": "join-checkpoint-cycle-plan",
+      "stratum": "cross_domain_join",
+      "answer_home": "join",
+      "scenario_family": "checkpoint-cycle-join",
+      "system": "You are the driftwatch assistant. driftwatch is a self-hosted telemetry ingest and alerting daemon. Answer using only the provided conversation, memory records, and retrieved context.",
+      "events": [
+        {"turn": {"role": "user", "content": "Collector maintenance items. The collector build is still linking the debug allocator from the leak hunt; swap the release allocator back in before the next rollout so we stop paying the overhead fleet-wide. The allocator swap should land in its own commit so the perf comparison between builds stays clean for the fleet graphs."}},
+        {"turn": {"role": "assistant", "content": "Swapped the release allocator back in and added a build check that fails if the debug allocator ever links into a release artifact again. Landed the swap as its own commit with before-and-after fleet graphs linked from the commit message for the perf record."}},
+        {"turn": {"role": "user", "content": "The collector's crash uploader also needs its symbol server entry refreshed; the last two minidumps came back unsymbolicated and the crash triage rotation burned an hour on hand-mapping. Symbol retention policy should get a line in the crash runbook too, so the next expiry is a planned event rather than a surprise."}},
+        {"turn": {"role": "assistant", "content": "Refreshed the symbol server entry and re-symbolicated both minidumps; the triage notes are updated with the real stacks. Added the retention policy line to the crash runbook with the renewal cadence and the owning rotation named explicitly."}},
+        {"turn": {"role": "user", "content": "Fleet config drift check: two collectors in the east region are running last month's build because their updater lease expired. Renew the leases and alarm on lease expiry so silent drift stops. The lease alarm should page the fleet rotation rather than the collector owners, matching how the other fleet drift alarms route."}},
+        {"turn": {"role": "assistant", "content": "Renewed both leases, the east collectors are on the current build, and lease expiry now alarms before a collector can drift a full cycle. Routed the lease alarm to the fleet rotation in line with the other drift alarms, and noted the routing in the fleet runbook."}},
+        {"turn": {"role": "user", "content": "Sizing decision from this morning's review is final, write it down: crash recovery gets a replay budget of 40 seconds, sized against the p99 segment fill rate, and the runbook should quote that number rather than the old guesswork."}},
+        {"turn": {"role": "assistant", "content": "Recorded it in the recovery runbook with the sizing rationale linked; the old guesswork paragraph is gone."}},
+        {"turn": {"role": "user", "content": "Last item: the collector dashboard's restart annotations stopped rendering after the panel upgrade, which makes crash correlation squint-work. Fix the annotation source before the next crash review."}},
+        {"turn": {"role": "assistant", "content": "Repointed the annotation source at the current events stream; restarts render again and the crash review board shows the last month backfilled."}},
+        {"tool_call": {"call_id": "c1", "tool": "agent_memory_search", "args": {"query": ""}}},
+        {"tool_call": {"call_id": "c2", "tool": "retrieve", "args": {"query": "collector checkpoint cadence", "k": 3}}},
+        {"turn": {"role": "user", "content": "Runbook question before it ships: how often does the collector checkpoint by default, and what did the review land on for crash recovery?"}}
+      ],
+      "memory_records": [
+        {"id": "rec-crash-rotation", "content": "crash triage rotates weekly; minidumps land in the triage bucket with symbolication attached", "kind": "semantic"},
+        {"id": "rec-lease-alarm", "content": "collector updater leases alarm before expiry now; renewals go through the fleet config repo", "kind": "working", "workspace_id": "ws-driftwatch"},
+        {"id": "rec-review-notes", "content": "collector sizing reviews post their decisions to the fleet channel the same day", "kind": "semantic"}
+      ],
+      "rag_sources": [
+        {
+          "path": "internal/collector/checkpoint.go",
+          "content": "package collector\n\nimport (\n\t\"context\"\n\t\"time\"\n)\n\n// checkpointEvery is the code default cadence for flushing the\n// collector's in-memory cursor state to disk. Checkpoints bound crash\n// replay: on restart the collector replays segments from the last\n// checkpoint forward, so the cadence trades steady-state write cost\n// against worst-case recovery work.\n// Early builds checkpointed every 30 seconds; the write-cost work\n// landed the cadence below.\nconst checkpointEvery = 4 * time.Minute\n\n// loop flushes cursor state on the cadence until ctx ends. A flush\n// that fails leaves the previous checkpoint in place; replay is\n// correct from any older checkpoint, merely slower.\nfunc (c *Collector) loop(ctx context.Context) {\n\tt := time.NewTicker(checkpointEvery)\n\tdefer t.Stop()\n\tfor {\n\t\tselect {\n\t\tcase <-ctx.Done():\n\t\t\treturn\n\t\tcase <-t.C:\n\t\t\tif err := c.flush(); err != nil {\n\t\t\t\tc.metrics.flushFailures.Inc()\n\t\t\t}\n\t\t}\n\t}\n}\n",
+          "language": "go",
+          "abstract": "Collector checkpoint cadence: code default flush interval bounding crash replay.",
+          "overview": "checkpoint.go flushes collector cursor state on a fixed code-default cadence so crash replay is bounded from the last checkpoint, and a failed flush safely leaves the older checkpoint in place."
+        },
+        {
+          "path": "internal/collector/replay.go",
+          "content": "package collector\n\n// replay walks segments from the last checkpoint forward on restart,\n// skipping batches the cursor already acknowledged. Replay is\n// idempotent by construction: an acknowledged batch replayed twice is\n// dropped by the dedupe layer downstream, so a torn checkpoint can\n// only cost time, never correctness.\nfunc (c *Collector) replay() error {\n\tcp, err := c.lastCheckpoint()\n\tif err != nil {\n\t\treturn err\n\t}\n\tfor seg := cp.segment; seg <= c.head(); seg++ {\n\t\tif err := c.replaySegment(seg, cp.offset); err != nil {\n\t\t\treturn err\n\t\t}\n\t\tcp.offset = 0\n\t}\n\treturn nil\n}\n",
+          "language": "go",
+          "abstract": "Crash replay: segment walk from the last checkpoint, idempotent by dedupe.",
+          "overview": "replay.go restores collector state by walking segments from the last checkpoint forward, relying on downstream dedupe so a torn checkpoint costs replay time rather than correctness."
+        },
+        {
+          "path": "docs/collector.md",
+          "content": "# driftwatch collector\n\nThe collector tails local telemetry sources, batches them, and ships\nbatches to the ingest edge. Cursor state marks how far each source\nhas been shipped.\n\n## Checkpoints and recovery\n\nCursor state lives in memory and is flushed to disk on a fixed\ncadence. After a crash the collector replays from the last checkpoint\nforward; recovery time is bounded by the cadence times the segment\nfill rate, which is exactly the trade the cadence constant encodes.\n\n## Fleet management\n\nCollectors self-update under a lease. A lease that expires without\nrenewal freezes the collector on its current build, which is safe but\ndrifts; lease expiry alarms exist so drift is loud.\n",
+          "language": "markdown",
+          "abstract": "Collector guide: cursor checkpoints, crash replay, fleet leases.",
+          "overview": "collector.md covers the collector's shipping loop, disk-flushed cursor checkpoints that bound crash replay, and lease-based fleet updates with loud expiry."
+        }
+      ],
+      "required_evidence": [
+        {"domain": "rag", "literal": "checkpointEvery = 4 * time.Minute"},
+        {"domain": "conversation", "literal": "replay budget of 40 seconds"}
+      ],
+      "pressure_target": {"domain": "rag", "literal": "checkpointEvery = 4 * time.Minute"},
+      "required_domains": ["conversation", "memory", "rag"],
+      "golden": {
+        "final_answer_criteria": "BOTH halves required: the collector checkpoints every 4 minutes by default, AND crash recovery's replay budget is 40 seconds. A missing half caps the score at 0.5; a stated but incorrect half scores 0. An answer giving the early-build 30-second cadence scores 0. An answer presenting both the correct and a competing value without committing to one scores 0."
+      }
+    },
+    {
+      "id": "join-checkpoint-cycle-freeze",
+      "stratum": "cross_domain_join",
+      "answer_home": "join",
+      "scenario_family": "checkpoint-cycle-join",
+      "system": "You are the driftwatch assistant. driftwatch is a self-hosted telemetry ingest and alerting daemon. Answer using only the provided conversation, memory records, and retrieved context.",
+      "events": [
+        {"turn": {"role": "user", "content": "Freeze prep sweep. The collector fleet's client certificates include four that expire inside the freeze window; rotate them this week so nobody has to break the freeze for an expiry, and add expiry-versus-freeze overlap to the freeze checklist. Pull the expiry list from the certificate transparency log rather than the deployment inventory this time, because the inventory missed a manually-enrolled collector last quarter and that one nearly expired unnoticed."}},
+        {"turn": {"role": "assistant", "content": "Rotated all four certificates ahead of the window and added the overlap check to the freeze checklist; the next freeze will catch expiries automatically. Pulled the list from the transparency log and cross-checked it against the inventory; the diff caught one manually-enrolled collector again, which is now tracked in the inventory properly."}},
+        {"turn": {"role": "user", "content": "The dependency pins need an audit too: two collector libraries float on minor versions, and a floating dependency during a freeze is how we got last winter's surprise regression. Pin them exact and note the follow-up upgrades for after. The pin audit should include the transitive dependencies too, since the winter regression actually arrived through a transitive bump that the direct pins never constrained in the first place."}},
+        {"turn": {"role": "assistant", "content": "Pinned both libraries exact, filed the post-freeze upgrade tasks, and the build now warns on any floating version in the collector tree. Audited the full transitive graph and pinned the two floating transitive libraries as well; the build's version report now prints the whole resolved graph so drift is visible in review."}},
+        {"turn": {"role": "user", "content": "Freeze comms next: last time two teams learned about the freeze from a rejected deploy. Put the window on the shared engineering calendar with the exception process linked, and have the deploy tooling say the dates in its rejection. Add the freeze dates to the deploy tooling's status output as well, not only the rejection message, so people see the window coming before they have a change staged and get surprised at the last step."}},
+        {"turn": {"role": "assistant", "content": "Calendar entry is up with the exception process linked, and deploy rejections during the window now name the dates and point at the exception doc. The status output now shows the freeze window whenever one is scheduled inside the next two weeks, so the surprise moves from deploy time to planning time where it belongs."}},
+        {"turn": {"role": "user", "content": "Oncall staffing through the freeze needs a look as well; the holiday swap left two nights double-covered and one uncovered. Rebalance the rota and confirm both affected responders acknowledged the change. When you rebalance, keep the two most freeze-experienced responders on the first and last nights, since those are historically when exception requests cluster and judgment calls get made under pressure."}},
+        {"turn": {"role": "assistant", "content": "Rebalanced the rota, the uncovered night is staffed, and both responders acknowledged in the scheduling thread. Placed the two most experienced responders on the first and last nights and documented the reasoning in the rota notes so the next freeze inherits the pattern instead of rediscovering it."}},
+        {"turn": {"role": "user", "content": "Also snapshot the fleet dashboards as the freeze baseline; when something drifts mid-freeze we want a before picture that is not a screenshot someone took on their phone. Snapshot the alerting thresholds alongside the dashboards, because threshold drift during the freeze is exactly the kind of quiet change the baseline exists to catch and nobody thinks of it until afterwards."}},
+        {"turn": {"role": "assistant", "content": "Captured the baseline snapshot into the freeze folder with per-board exports; drift comparisons can diff against it directly. Captured the full alerting threshold set into the freeze folder next to the dashboard exports, so any mid-freeze threshold change will show up in the diff against the baseline."}},
+        {"turn": {"role": "user", "content": "Freeze posture is settled then: checkpoint cadence stays on the code default through the freeze, and checkpoint uploads run at compression level 6 so the archive fits the freeze-window quota."}},
+        {"turn": {"role": "assistant", "content": "Set: uploads at compression level 6 through the freeze, cadence untouched on the code default; the freeze checklist quotes both so nobody relitigates it mid-freeze."}},
+        {"tool_call": {"call_id": "c1", "tool": "retrieve", "args": {"query": "collector checkpoint flush interval", "k": 3}}},
+        {"tool_call": {"call_id": "c2", "tool": "agent_memory_search", "args": {"query": ""}}},
+        {"turn": {"role": "user", "content": "Freeze checklist wants both numbers: what cadence does the collector checkpoint on through the freeze, and what compression do checkpoint uploads run at?"}}
+      ],
+      "memory_records": [
+        {"id": "rec-freeze-window", "content": "freeze window is on the shared engineering calendar; the exception process is linked from the entry", "kind": "semantic"},
+        {"id": "rec-baseline-snap", "content": "freeze baseline dashboard snapshot lives in the freeze folder with per-board exports", "kind": "working", "workspace_id": "ws-driftwatch"},
+        {"id": "rec-cert-sweep", "content": "collector certificates that would expire mid-freeze were rotated ahead of the window", "kind": "semantic"}
+      ],
+      "rag_sources": [
+        {
+          "path": "internal/collector/checkpoint.go",
+          "content": "package collector\n\nimport (\n\t\"context\"\n\t\"time\"\n)\n\n// checkpointEvery is the code default cadence for flushing collector\n// cursor state to disk. The cadence bounds crash replay from the last\n// checkpoint forward; freezes deliberately leave it alone, because a\n// cadence change mid-freeze would invalidate the recovery numbers the\n// freeze baseline was captured under.\nconst checkpointEvery = 10 * time.Minute\n\n// loop flushes on the cadence until ctx ends. A failed flush keeps\n// the previous checkpoint; recovery from an older checkpoint is\n// correct, merely slower.\nfunc (c *Collector) loop(ctx context.Context) {\n\tt := time.NewTicker(checkpointEvery)\n\tdefer t.Stop()\n\tfor {\n\t\tselect {\n\t\tcase <-ctx.Done():\n\t\t\treturn\n\t\tcase <-t.C:\n\t\t\tif err := c.flush(); err != nil {\n\t\t\t\tc.metrics.flushFailures.Inc()\n\t\t\t}\n\t\t}\n\t}\n}\n",
+          "language": "go",
+          "abstract": "Collector checkpoint cadence: code default flush interval, left untouched by freezes.",
+          "overview": "checkpoint.go flushes collector cursor state on the code default cadence that bounds crash replay, and freezes leave the cadence alone so recovery numbers stay comparable to the freeze baseline."
+        },
+        {
+          "path": "internal/collector/archive.go",
+          "content": "package collector\n\n// archive ships completed checkpoint files to the durable archive.\n// Compression is applied at upload time from deployment config, so\n// operational windows can trade cpu for archive quota without a\n// rebuild; the archiver records the level used in the object\n// metadata for the restore path.\nfunc (a *Archiver) archive(path string) error {\n\tlevel := a.cfg.CompressionLevel\n\tobj, err := a.compress(path, level)\n\tif err != nil {\n\t\treturn err\n\t}\n\treturn a.put(obj)\n}\n",
+          "language": "go",
+          "abstract": "Checkpoint archiving: config-driven compression recorded per object.",
+          "overview": "archive.go uploads completed checkpoints with a compression level taken from deployment config and recorded in object metadata, so quota trades need no rebuild and restores know what they are reading."
+        },
+        {
+          "path": "docs/freeze.md",
+          "content": "# driftwatch change freezes\n\nA freeze is a posture, not a lockout: the fleet keeps running, but\nchanges need the exception process and the burden of proof flips.\n\n## What freezes\n\nDeploys, config changes, and dependency updates freeze. Certificate\nrotations done ahead of the window and freeze-baseline snapshots are\nthe standing preparation items.\n\n## What does not\n\nTuning constants stay wherever the code has them; a freeze that\nquietly retunes the fleet is worse than no freeze. Operational knobs\nthat must move for quota reasons ride deployment config through the\nexception process, with the freeze checklist quoting the settled\nvalues.\n",
+          "language": "markdown",
+          "abstract": "Freeze guide: exception process, standing prep items, code defaults left in place.",
+          "overview": "freeze.md frames freezes as a posture: deploys and config changes gate on exceptions, prep items like cert rotations and baseline snapshots happen ahead, and tuning constants stay where the code has them."
+        }
+      ],
+      "required_evidence": [
+        {"domain": "rag", "literal": "checkpointEvery = 10 * time.Minute"},
+        {"domain": "conversation", "literal": "compression level 6"}
+      ],
+      "pressure_target": {"domain": "rag", "literal": "checkpointEvery = 10 * time.Minute"},
+      "required_domains": ["conversation", "memory", "rag"],
+      "golden": {
+        "final_answer_criteria": "BOTH halves required: the collector checkpoints every 10 minutes through the freeze, AND checkpoint uploads run at compression level 6. A missing half caps the score at 0.5; a stated but incorrect half scores 0. An answer presenting both the correct and a competing value without committing to one scores 0."
+      }
+    },
+    {
+      "id": "join-quarantine-policy-cap",
+      "stratum": "cross_domain_join",
+      "answer_home": "join",
+      "scenario_family": "quarantine-policy-join",
+      "system": "You are the driftwatch assistant. driftwatch is a self-hosted telemetry ingest and alerting daemon. Answer using only the provided conversation, memory records, and retrieved context.",
+      "events": [
+        {"turn": {"role": "user", "content": "Admission cleanup while the capacity review settles. The parser fuzz corpus has not been refreshed since the schema change, so the fuzzer is exercising shapes the edge can no longer receive while missing the new list encoding entirely. Refresh the corpus from recent quarantine samples and put the refresh on the weekly schedule so it stops going stale between incidents. Seed the refresh with the schema-change samples specifically, because the fuzzer's value lies in the shapes that actually reached quarantine, and the schema transition produced exactly the malformed family we most need coverage on."}},
+        {"turn": {"role": "assistant", "content": "Refreshed the fuzz corpus from the last month of quarantine samples, added the new list encoding shapes, and the weekly refresh job is scheduled with its output linked from the parser README. Seeded the refresh from the transition window's samples first, and the corpus report now shows coverage per rejection family so gaps in a future schema change are visible immediately."}},
+        {"turn": {"role": "user", "content": "Debugging retention next: malformed-batch samples are kept forever right now, which is a privacy problem and a disk problem at once. Scope sample retention to the debugging window the parser team actually uses and make the cleanup automatic instead of someone remembering. Coordinate the retention window with the privacy review's data map as well, since the map currently lists quarantine samples as indefinite and the mismatch would fail the next audit cycle on paper even after we fix the practice."}},
+        {"turn": {"role": "assistant", "content": "Scoped sample retention to the parser team's debugging window with automatic cleanup, and the retention choice is documented next to the sampling config so the privacy review can point at it. Updated the data map alongside the retention change, so practice and paper agree; the privacy review has the diff and confirmed the audit line item closes with it."}},
+        {"turn": {"role": "user", "content": "The tenant notification templates for quarantined batches also read like a stack trace wearing a tie. Rewrite them so an integrator learns what was held, why, and what to fix, without needing one of us on a call to translate the rejection code. Run the rewritten templates past the developer-experience folks before they ship, because the last wording change confused two integrators into re-sending held batches in a loop and the queue graphs looked like an attack."}},
+        {"turn": {"role": "assistant", "content": "Rewrote the templates around the rejection taxonomy with a fix-it link per code family; the integrator support channel already noticed the difference in the trial tenant. The developer-experience folks reviewed the wording and the templates now explicitly say not to re-send held batches; the trial tenant's behaviour confirms the loop pattern is gone."}},
+        {"turn": {"role": "user", "content": "Quarantine visibility is still thin on the admission board: depth is there but age is not, and an old held batch is the actual signal that something is wedged rather than merely bursty. Add oldest-held-age panels split by tenant next to the depth ones. Backfill the age panels from the retained history where possible too, because a panel that starts empty tonight cannot distinguish a wedge that began last week from one that began at panel creation."}},
+        {"turn": {"role": "assistant", "content": "Added oldest-held-age panels beside the depth panels with the per-tenant split; the board now distinguishes a wedge from a burst at a glance. Backfilled age history from the retained hold records, so the panels open with a week of context and a pre-existing wedge reads as old on day one instead of hiding as new."}},
+        {"turn": {"role": "user", "content": "And drop the admission log back from the incident verbosity; it has been logging every accepted batch for three weeks and the log budget graph is a ski jump. Keep the verbose form for rejections only. Make the verbosity change through the logging config layer rather than the code path, so the next incident can turn accepted-batch logging back on with a reload instead of waiting on a deploy."}},
+        {"turn": {"role": "assistant", "content": "Dropped accepted-batch logging back to the normal level, kept verbose rejection logging, and the log budget graph is already flattening. Moved the verbosity control into the logging config layer with a reload hook; incident responders can flip it live, and the setting documents its own log-budget cost next to the flag."}},
+        {"turn": {"role": "user", "content": "Scope note so the thread stops resurfacing: the 2000-batch quarantine cap from the incident draft is dead; it was sized for the old single-lane spool and quoting it in sizing threads just muddies the review."}},
+        {"turn": {"role": "assistant", "content": "Marked the draft dead with a superseded banner and linked the current sizing sheet; the number should stop leaking into threads now."}},
+        {"turn": {"role": "user", "content": "Then the review's call stands as final: the per-tenant quarantine cap lands at 500 batches, with the overflow policy unchanged until the next capacity pass."}},
+        {"turn": {"role": "assistant", "content": "Recorded: the cap lands at 500 batches per tenant, overflow policy untouched; the sizing sheet and the admission runbook both quote the review link."}},
+        {"tool_call": {"call_id": "c1", "tool": "retrieve", "args": {"query": "quarantine lane admission behaviour", "k": 3}}},
+        {"tool_call": {"call_id": "c2", "tool": "agent_memory_search", "args": {"query": ""}}},
+        {"turn": {"role": "user", "content": "Signing off the runbook: where did the per-tenant quarantine cap land, and how long after intake do held batches re-enter the parser?"}}
+      ],
+      "memory_records": [
+        {"id": "rec-parser-fuzz", "content": "parser fuzz corpus refreshes from quarantine samples weekly; crashes file automatically", "kind": "semantic"},
+        {"id": "rec-quarantine-board", "content": "quarantine depth and age panels sit on the admission board; the per-tenant split is the left column", "kind": "working", "workspace_id": "ws-driftwatch"},
+        {"id": "rec-redrive-policy", "content": "quarantine operations note: held batches go back through the parser 6 hours after intake, oldest first, one tenant at a time so a single bad integration cannot monopolize the re-drive lane. batches that fail the second parse are parked for manual review with the tenant tag and the rejection code attached, and the parked set is walked in the weekly admission review. the re-drive clock starts at intake rather than at lane admission, so a batch that sat in the ingest queue does not collect extra hold time, and the admission review tracks the intake-to-redrive spread to catch queue delays hiding inside the hold.", "kind": "semantic"}
+      ],
+      "rag_sources": [
+        {
+          "path": "internal/ingest/quarantine.go",
+          "content": "package ingest\n\n// quarantine routes batches that fail strict parsing into the\n// quarantine lane instead of dropping them: malformed telemetry is\n// usually a producer bug, and the payload is the evidence. The lane\n// is accounted per tenant, and the per-tenant cap comes from\n// deployment config so capacity reviews can move it without a\n// rebuild.\nfunc (g *Gateway) quarantine(tenant string, batch []byte, code rejectCode) error {\n\tif !g.lanes.admit(tenant) {\n\t\tg.metrics.quarantineOverflow.Inc()\n\t\treturn g.overflow(tenant, batch, code)\n\t}\n\treturn g.lanes.hold(tenant, batch, code)\n}\n\n// overflow applies the configured overflow policy when a tenant's\n// lane is at cap. The shipped policy parks the oldest held batch to\n// make room, on the theory that the newest failure carries the\n// freshest evidence about the producer bug.\nfunc (g *Gateway) overflow(tenant string, batch []byte, code rejectCode) error {\n\toldest, err := g.lanes.evictOldest(tenant)\n\tif err != nil {\n\t\treturn err\n\t}\n\tg.park(oldest)\n\treturn g.lanes.hold(tenant, batch, code)\n}\n",
+          "language": "go",
+          "abstract": "Quarantine lane admission: per-tenant accounting, config-supplied caps, park-oldest overflow.",
+          "overview": "quarantine.go holds parse-failed batches in a per-tenant quarantine lane with the cap supplied by deployment config, and handles overflow by parking the oldest held batch so the freshest evidence stays in the lane."
+        },
+        {
+          "path": "internal/ingest/parser.go",
+          "content": "package ingest\n\n// parse validates one batch against the strict telemetry schema.\n// Rejection codes are stable identifiers from the taxonomy enum;\n// integrator-facing docs are generated from the same enum, so a code\n// in a notification always has a matching docs row.\nfunc parse(batch []byte) (parsed, rejectCode, error) {\n\tp, err := decode(batch)\n\tif err != nil {\n\t\treturn parsed{}, rejectMalformedEnvelope, err\n\t}\n\tif err := p.validateSchema(); err != nil {\n\t\treturn parsed{}, rejectSchemaMismatch, err\n\t}\n\tif err := p.validateBounds(); err != nil {\n\t\treturn parsed{}, rejectBoundsViolation, err\n\t}\n\treturn p, rejectNone, nil\n}\n",
+          "language": "go",
+          "abstract": "Strict batch parsing with stable rejection codes from the taxonomy enum.",
+          "overview": "parser.go validates batches against the strict schema and returns stable rejection codes drawn from the taxonomy enum that also generates the integrator-facing docs table."
+        },
+        {
+          "path": "docs/quarantine.md",
+          "content": "# driftwatch quarantine\n\nBatches that fail strict parsing are held, not dropped: the payload\nis the evidence for the producer bug that created it.\n\n## Caps and overflow\n\nThe quarantine lane is accounted per tenant with the cap supplied by\ndeployment config; capacity reviews own the number. At cap, the\nshipped overflow policy parks the oldest held batch to admit the\nnewest one.\n\n## Re-drive\n\nHeld batches re-enter the parser on a schedule the operations side\nowns; the current policy is recorded in the ops notes rather than\nhere, because it moves with parser releases and incident load. Parked\nbatches from failed re-drives are walked in the weekly admission\nreview.\n",
+          "language": "markdown",
+          "abstract": "Quarantine guide: hold-not-drop, config-owned caps, ops-owned re-drive policy.",
+          "overview": "quarantine.md explains hold-not-drop quarantine: per-tenant caps from deployment config, park-oldest overflow, and a re-drive schedule owned by operations and recorded in the ops notes."
+        }
+      ],
+      "required_evidence": [
+        {"domain": "conversation", "literal": "cap lands at 500 batches"},
+        {"domain": "memory", "literal": "back through the parser 6 hours after intake"}
+      ],
+      "pressure_target": {"domain": "memory", "literal": "back through the parser 6 hours after intake"},
+      "required_domains": ["conversation", "memory", "rag"],
+      "golden": {
+        "final_answer_criteria": "BOTH halves required: the per-tenant quarantine cap lands at 500 batches, AND held batches go back through the parser 6 hours after intake. A missing half caps the score at 0.5; a stated but incorrect half scores 0. An answer giving the dead 2000-batch draft cap scores 0. An answer presenting both the correct and a competing value without committing to one scores 0."
+      }
+    },
+    {
+      "id": "join-quarantine-policy-redrive",
+      "stratum": "cross_domain_join",
+      "answer_home": "join",
+      "scenario_family": "quarantine-policy-join",
+      "system": "You are the driftwatch assistant. driftwatch is a self-hosted telemetry ingest and alerting daemon. Answer using only the provided conversation, memory records, and retrieved context.",
+      "events": [
+        {"turn": {"role": "user", "content": "Quarantine follow-ups from the capacity call. The sample scrubber that redacts payloads before parser-team debugging still misses the new tag fields; extend it before the next batch of samples goes over, or privacy will freeze the whole sampling pipeline again."}},
+        {"turn": {"role": "assistant", "content": "Extended the scrubber to cover the new tag fields and added a schema-diff check that flags unscrubbed fields whenever the telemetry schema grows."}},
+        {"turn": {"role": "user", "content": "The quarantine metrics also went out under three different name prefixes during the migration and the dashboards are stitching them with regex glue. Consolidate on the current prefix and backfill the panels."}},
+        {"turn": {"role": "assistant", "content": "Consolidated the metrics on the current prefix, backfilled the panels, and the regex stitching is gone from all three dashboards."}},
+        {"turn": {"role": "user", "content": "Parser version pinning needs attention too: the re-drive path can run a newer parser than the one that held the batch, and last week that turned two legitimate holds into confusing double rejections with different codes."}},
+        {"turn": {"role": "assistant", "content": "Pinned re-drive to record the parser version at hold time and annotate any code change between hold and re-drive; the double-rejection confusion is labeled in the notification now."}},
+        {"turn": {"role": "user", "content": "Capacity call closed this one out, note it: the quarantine lane gets 2 GiB per node, carved from the spool volume, and the sizing sheet should stop showing the placeholder."}},
+        {"turn": {"role": "assistant", "content": "Noted in the sizing sheet with the placeholder removed; the carve-out is in the volume plan with the capacity call linked."}},
+        {"turn": {"role": "user", "content": "Last one: rehearse the overflow path before the sizing lands, with a synthetic tenant flooding malformed batches, so we see the park-oldest behaviour on a board instead of trusting the code comment."}},
+        {"turn": {"role": "assistant", "content": "Rehearsed with a synthetic flood tenant; park-oldest behaved as documented and the board panels captured the whole sequence for the review."}},
+        {"tool_call": {"call_id": "c1", "tool": "retrieve", "args": {"query": "quarantine spool lane sizing", "k": 3}}},
+        {"tool_call": {"call_id": "c2", "tool": "agent_memory_search", "args": {"query": ""}}},
+        {"turn": {"role": "user", "content": "Two things for the admission runbook: how much node-local space does the quarantine lane get, and who takes the page when it overflows?"}}
+      ],
+      "memory_records": [
+        {"id": "rec-quarantine-page", "content": "quarantine alerting: overflow pages route to the ingest rotation; tenant owners get the daily digest instead", "kind": "semantic"},
+        {"id": "rec-owner-draft", "content": "the draft that paged tenant owners directly on quarantine overflow was dropped before rollout", "kind": "semantic"},
+        {"id": "rec-scrub-check", "content": "sample scrubber has a schema-diff check now; unscrubbed fields flag before samples ship", "kind": "working", "workspace_id": "ws-driftwatch"}
+      ],
+      "rag_sources": [
+        {
+          "path": "internal/ingest/quarantine.go",
+          "content": "package ingest\n\n// quarantine routes batches that fail strict parsing into the\n// quarantine lane instead of dropping them. The lane lives on the\n// spool volume as its own carve-out; sizing comes from deployment\n// config so capacity reviews can move it without a rebuild, and the\n// lane refuses new holds rather than growing past its carve-out.\nfunc (g *Gateway) quarantine(tenant string, batch []byte, code rejectCode) error {\n\tif !g.lane.fits(len(batch)) {\n\t\tg.metrics.quarantineOverflow.Inc()\n\t\treturn g.overflow(tenant, batch, code)\n\t}\n\treturn g.lane.hold(tenant, batch, code)\n}\n\n// overflow applies the configured policy when the lane is full: park\n// the oldest held batch to admit the newest, keeping the freshest\n// producer-bug evidence in the lane.\nfunc (g *Gateway) overflow(tenant string, batch []byte, code rejectCode) error {\n\toldest, err := g.lane.evictOldest()\n\tif err != nil {\n\t\treturn err\n\t}\n\tg.park(oldest)\n\treturn g.lane.hold(tenant, batch, code)\n}\n",
+          "language": "go",
+          "abstract": "Quarantine lane on the spool volume: config-sized carve-out, park-oldest overflow.",
+          "overview": "quarantine.go holds parse-failed batches in a spool-volume carve-out sized by deployment config, refusing growth past the carve-out and parking the oldest batch on overflow."
+        },
+        {
+          "path": "internal/spool/volume.go",
+          "content": "package spool\n\n// carveOut reserves a fixed slice of the spool volume for a named\n// consumer. Carve-outs are declared in deployment config and\n// validated at startup against the volume's actual size, so an\n// over-committed volume fails loudly at boot instead of at 3am.\ntype carveOut struct {\n\tname  string\n\tbytes int64\n}\n\n// validateCarveOuts confirms the volume can hold every declared\n// carve-out plus the spool's own floor. The floor is not\n// configurable: a spool squeezed below it cannot absorb an exporter\n// outage, which is the spool's whole reason to exist.\nfunc validateCarveOuts(volume int64, floor int64, outs []carveOut) error {\n\ttotal := floor\n\tfor _, o := range outs {\n\t\ttotal += o.bytes\n\t}\n\tif total > volume {\n\t\treturn errOverCommitted\n\t}\n\treturn nil\n}\n\n// resizeCarveOut applies a config change to a live carve-out. Growth\n// is applied immediately; shrinking waits until the consumer's usage\n// drops below the new size, because reclaiming pages out from under a\n// consumer trades a config error for data loss. The pending shrink is\n// visible in the volume status output until it completes.\nfunc (v *Volume) resizeCarveOut(name string, newBytes int64) error {\n\tout, ok := v.byName(name)\n\tif !ok {\n\t\treturn errUnknownCarveOut\n\t}\n\tif newBytes >= out.bytes {\n\t\tout.bytes = newBytes\n\t\treturn nil\n\t}\n\tout.pendingShrink = newBytes\n\treturn nil\n}\n",
+          "language": "go",
+          "abstract": "Spool volume carve-outs: config-declared reservations validated at boot.",
+          "overview": "volume.go validates config-declared carve-outs against the actual spool volume at startup, protecting the spool's non-configurable floor so an over-committed volume fails at boot rather than during an outage. Live resizes grow immediately and shrink lazily, with pending shrinks visible in status output."
+        },
+        {
+          "path": "docs/quarantine.md",
+          "content": "# driftwatch quarantine\n\nMalformed batches are held as evidence, not dropped. The lane lives\non the spool volume as a carve-out, and admission refuses growth past\nit.\n\n## Sizing\n\nLane sizing is a capacity decision made in review and carried in\ndeployment config; the volume validator refuses an over-committed\ndisk at boot. Overflow parks the oldest hold.\n\n## Paging\n\nOverflow paging is routed by the alerting config, and the routing\nchoice is an operations decision recorded in the ops notes: the\ntradeoff between paging the platform side and paging tenant owners\nhas gone back and forth historically, and the notes carry the current\nanswer with its rationale.\n\n## Live resizing\n\nCarve-out changes apply without a restart: growth is immediate, and\nshrinking waits for usage to drop below the new size so no held batch\nis reclaimed out from under an investigation. The pending state shows\nin the volume status output, and capacity reviews treat a shrink that\nnever completes as a sizing signal in its own right.\n",
+          "language": "markdown",
+          "abstract": "Quarantine guide: spool carve-out sizing via review, ops-recorded overflow paging.",
+          "overview": "quarantine.md covers the quarantine lane as a spool carve-out sized in capacity review, park-oldest overflow, and overflow paging whose routing is an operations decision recorded in the ops notes."
+        }
+      ],
+      "required_evidence": [
+        {"domain": "conversation", "literal": "quarantine lane gets 2 GiB per node"},
+        {"domain": "memory", "literal": "pages route to the ingest rotation"}
+      ],
+      "pressure_target": {"domain": "memory", "literal": "pages route to the ingest rotation"},
+      "required_domains": ["conversation", "memory", "rag"],
+      "golden": {
+        "final_answer_criteria": "BOTH halves required: the quarantine lane gets 2 GiB per node, AND overflow pages route to the ingest rotation. A missing half caps the score at 0.5; a stated but incorrect half scores 0. An answer routing quarantine pages to tenant owners scores 0. An answer presenting both the correct and a competing value without committing to one scores 0."
+      }
+    },
+    {
+      "id": "join-downsample-tier-raw",
+      "stratum": "cross_domain_join",
+      "answer_home": "join",
+      "scenario_family": "downsample-tier-join",
+      "system": "You are the driftwatch assistant. driftwatch is a self-hosted telemetry ingest and alerting daemon. Answer using only the provided conversation, memory records, and retrieved context.",
+      "events": [
+        {"turn": {"role": "user", "content": "Storage housekeeping while the boards doc is open. The retention audit spreadsheet the compliance side asked for is still assembled by hand each quarter, and last quarter it shipped with two tiers transposed. Generate it from the store's own tier metadata instead, and attach the generation date so an auditor can see it is not a stale copy someone forgot about. Include the tier fold lineage in the generated sheet as well, because the auditors' first question every quarter is which tier feeds which, and answering it from the manifest beats answering it from memory in a meeting."}},
+        {"turn": {"role": "assistant", "content": "Wired the spreadsheet generation to the store's tier metadata with the generation date stamped in the header; the transposition class of error is gone because nobody types tier names anymore. The sheet now includes a lineage column generated from the same manifest, so the fold graph is on paper before the auditors ask, and a manifest change updates it automatically next run."}},
+        {"turn": {"role": "user", "content": "The tier bytes forecast needs its growth model refreshed as well; it still extrapolates from before the two big tenant onboardings, so the disk planning numbers it feeds are fiction and procurement keeps quoting them in threads. Have procurement's copy watermark the model version prominently, since their threads have a habit of outliving the numbers, and a two-quarter-old screenshot with no version stamp is how the fiction spread last time."}},
+        {"turn": {"role": "assistant", "content": "Refreshed the growth model with the post-onboarding baseline and re-ran the forecast; procurement has the corrected numbers with the model change annotated. Watermarked the version and generation date on every exported page of the forecast, so any screenshot that escapes into a thread carries its own expiry information with it."}},
+        {"turn": {"role": "user", "content": "There is also a slow-query hunt owed on the storage board: three panels time out at the month view since the panel refactor, and the storage rotation keeps screenshotting week views as a workaround, which is silly. While hunting, check whether the month view actually needs raw resolution anywhere at all, because if a single panel legitimately does, it should say so in its title rather than surprising the next person who profiles the board."}},
+        {"turn": {"role": "assistant", "content": "Found the three panels fanning out to raw resolution at month scale, repointed them at the appropriate rollups, and the month view paints inside the timeout with margin now. None of the month-view panels needed raw; the one borderline case was the drill-down preview, which now states its resolution in the title so future profiling starts informed."}},
+        {"turn": {"role": "user", "content": "The downsample pass metrics got renamed in the storage migration and half the alerts on them silently went stale; audit every alert that references the old names and repoint them before something real hides behind a stale alert. The alert audit should also produce a standing list mapping old metric names to new ones, because the rename will keep biting ad-hoc queries and dashboards that live outside the rule repo for months yet."}},
+        {"turn": {"role": "assistant", "content": "Audited the alert set, repointed the six rules still reading old metric names, and added a lint that fails a rule referencing a metric the store no longer emits. Published the rename mapping as a standing reference linked from the storage board header, and the lint's error message points at it so every future hit teaches the mapping."}},
+        {"turn": {"role": "user", "content": "Exporter lease visibility is the other gap: the downsample pass skips leased shards by design, but nothing shows which shards are leased right now, so a wedged exporter looks identical to a busy one on the board. Give the lease panel the same per-tenant split as the depth panels while you are in there, since a single tenant's stuck export has different ownership than a fleet-wide exporter problem and the page should say which it is."}},
+        {"turn": {"role": "assistant", "content": "Added a live lease panel with per-shard lease age next to the pass progress panel; a wedged exporter now stands out from a merely busy one at a glance. Split the lease panel per tenant with a fleet rollup row on top, so the page can tell a single stuck tenant from a systemic exporter issue before anyone opens a dashboard."}},
+        {"turn": {"role": "user", "content": "Also for the record, the redesign draft's 1h dashboard default died in review; it was aimed at the old sparse boards and bringing it up now just reopens a settled argument."}},
+        {"turn": {"role": "assistant", "content": "Archived the draft with the review outcome on top; the boards doc links the settled decision instead of the draft."}},
+        {"turn": {"role": "user", "content": "So the decision on record stands: dashboards default to the 5m rollup fleet-wide, with raw drill-down staying one click away on every panel."}},
+        {"turn": {"role": "assistant", "content": "Confirmed and applied: dashboards default to the 5m rollup, and the drill-down link is verified on every panel template."}},
+        {"tool_call": {"call_id": "c1", "tool": "retrieve", "args": {"query": "downsample pass shard behaviour", "k": 3}}},
+        {"tool_call": {"call_id": "c2", "tool": "agent_memory_search", "args": {"query": ""}}},
+        {"turn": {"role": "user", "content": "Locking the boards doc: which rollup do dashboards default to, and how long do raw 1s samples sit before the first downsample pass?"}}
+      ],
+      "memory_records": [
+        {"id": "rec-tier-ladder", "content": "tier ladder panels live on the storage board; per-tier bytes split by region", "kind": "working", "workspace_id": "ws-driftwatch"},
+        {"id": "rec-board-owners", "content": "storage board changes go through the observability rotation; screenshots go in the change thread", "kind": "semantic"},
+        {"id": "rec-raw-hold", "content": "downsample operations note: raw 1s samples are held 48 hours before the first downsample pass; the pass runs per shard, oldest shard first, and skips any shard with an active export lease so a slow warehouse copy never loses raw resolution mid-transfer. shards that skip twice in a row page the storage rotation, because a lease surviving two passes usually means a wedged exporter rather than a slow one. the hold clock starts at segment roll rather than at ingest, which keeps partially filled segments from aging out early, and the storage rotation reviews the skip ledger weekly so lease bugs surface before they cost raw data.", "kind": "semantic"}
+      ],
+      "rag_sources": [
+        {
+          "path": "internal/store/downsample.go",
+          "content": "package store\n\n// pass runs one downsample sweep over the shard set, oldest shard\n// first. A shard holding an active export lease is skipped rather\n// than raced: the exporter is reading raw resolution, and\n// downsampling under it would hand the warehouse a mid-copy\n// resolution change. Skips are recorded in the ledger the storage\n// rotation reviews.\nfunc (s *Store) pass() error {\n\tfor _, shard := range s.shardsOldestFirst() {\n\t\tif s.leases.active(shard) {\n\t\t\ts.ledger.recordSkip(shard)\n\t\t\tcontinue\n\t\t}\n\t\tif err := s.downsampleShard(shard); err != nil {\n\t\t\treturn err\n\t\t}\n\t}\n\treturn nil\n}\n\n// downsampleShard folds one shard's samples into the next tier and\n// releases the raw segments it consumed once the fold is durable.\nfunc (s *Store) downsampleShard(shard shardID) error {\n\tfold, err := s.fold(shard)\n\tif err != nil {\n\t\treturn err\n\t}\n\tif err := s.commit(fold); err != nil {\n\t\treturn err\n\t}\n\treturn s.releaseRaw(shard)\n}\n",
+          "language": "go",
+          "abstract": "Downsample pass: oldest-first shard sweep, lease-aware skips, durable folds.",
+          "overview": "downsample.go sweeps shards oldest-first, skips shards under an active export lease so warehouse copies keep raw resolution, records skips in the rotation's ledger, and releases raw segments only after a durable fold."
+        },
+        {
+          "path": "internal/store/tiers.go",
+          "content": "package store\n\n// tier describes one rung of the rollup ladder: the resolution it\n// stores and the tier it folds into next. The ladder is data-driven\n// from the store manifest, so adding a rung is a manifest change and\n// a migration, never an enum edit scattered across query code.\ntype tier struct {\n\tname       string\n\tresolution string\n\tnext       string\n}\n\n// resolve maps a query window to the coarsest tier that still meets\n// the window's resolution floor, so wide windows ride cheap tiers\n// while narrow windows keep detail.\nfunc (l *ladder) resolve(window queryWindow) tier {\n\tfor _, t := range l.coarsestFirst() {\n\t\tif t.meets(window.floor) {\n\t\t\treturn t\n\t\t}\n\t}\n\treturn l.finest()\n}\n",
+          "language": "go",
+          "abstract": "Rollup tier ladder: manifest-driven rungs, coarsest-tier query resolution.",
+          "overview": "tiers.go models the rollup ladder as manifest-driven tiers and resolves each query window to the coarsest tier meeting its resolution floor, keeping wide windows cheap and narrow windows detailed."
+        },
+        {
+          "path": "docs/downsample.md",
+          "content": "# driftwatch downsampling\n\nRaw samples land at full resolution and fold down the tier ladder as\nthey age. Folding is a storage decision; how long raw is held before\nthe first fold is an operations decision, recorded in the ops notes\nbecause it moves with disk budgets and compliance windows.\n\n## The pass\n\nThe downsample pass sweeps shards on a schedule, oldest first, and\nnever races an active export lease: a warehouse copy in flight keeps\nits raw resolution. Skipped shards are ledgered and reviewed.\n\n## Boards\n\nDashboards choose their default tier in the boards doc; drill-down to\nraw stays available regardless of the default, so the default is a\ncost decision rather than a capability one.\n",
+          "language": "markdown",
+          "abstract": "Downsampling guide: tier folding, lease-aware passes, ops-recorded raw hold.",
+          "overview": "downsample.md separates the concerns: the store owns folding mechanics and lease-aware passes, operations owns the raw hold duration in the ops notes, and the boards doc owns dashboard tier defaults."
+        }
+      ],
+      "required_evidence": [
+        {"domain": "conversation", "literal": "dashboards default to the 5m rollup"},
+        {"domain": "memory", "literal": "held 48 hours before the first downsample"}
+      ],
+      "pressure_target": {"domain": "memory", "literal": "held 48 hours before the first downsample"},
+      "required_domains": ["conversation", "memory", "rag"],
+      "golden": {
+        "final_answer_criteria": "BOTH halves required: dashboards default to the 5m rollup, AND raw 1s samples are held 48 hours before the first downsample pass. A missing half caps the score at 0.5; a stated but incorrect half scores 0. An answer giving the dead 1h draft default scores 0. An answer presenting both the correct and a competing value without committing to one scores 0."
+      }
+    },
+    {
+      "id": "join-downsample-tier-default",
+      "stratum": "cross_domain_join",
+      "answer_home": "join",
+      "scenario_family": "downsample-tier-join",
+      "system": "You are the driftwatch assistant. driftwatch is a self-hosted telemetry ingest and alerting daemon. Answer using only the provided conversation, memory records, and retrieved context.",
+      "events": [
+        {"turn": {"role": "user", "content": "Perf review follow-ups. The tier bytes report the review leaned on only counts sealed segments, so the raw tier looks smaller than it is by whatever is still open; fix the report to include open segments with a footnote. Note in the footnote how open segments are estimated as well, because the perf folks will ask whether the open-segment number is measured or extrapolated the moment the report shows a split they have not seen before."}},
+        {"turn": {"role": "assistant", "content": "Fixed the report to count open segments separately with the footnote explaining the split; the raw tier line now matches what the disk actually holds. The footnote explains the estimation method and its error bound, and the report links the measurement code so the perf folks can audit the estimate rather than asking about it every quarter."}},
+        {"turn": {"role": "user", "content": "The alert latency complaint from the review also needs a proper writeup: evaluation cost spiked whenever rules crossed tier boundaries mid-window, and the perf folks want the mechanism documented before we tune anything else. Attach the reproduction query set to the writeup too, since the next tuning pass will want to replay the exact spike shapes rather than reconstruct them from the flame graphs and guesswork."}},
+        {"turn": {"role": "assistant", "content": "Wrote up the boundary-crossing mechanism with flame graphs from the spike windows attached; the writeup is linked from the review notes. Attached the reproduction queries with their window parameters, and the writeup's appendix explains how to replay them against a staging store so the next pass starts from evidence."}},
+        {"turn": {"role": "user", "content": "Board hygiene: the rule-evaluation panels were cloned from the dashboard template and still carry dashboard-oriented legends, which confuses every new responder who reads them during a page. Keep one legacy-legend panel screenshotted in the change thread for reference, because two responders learned the old legends by muscle memory and the transition note should show both forms side by side."}},
+        {"turn": {"role": "assistant", "content": "Rebuilt the rule-evaluation panels on the alerting template with evaluation-oriented legends; the storage rotation reviewed them and signed off. The change thread carries a side-by-side of old and new legends with the mapping annotated, and both responders confirmed the new form reads correctly during a live page."}},
+        {"turn": {"role": "user", "content": "The compaction overrun alarm needs its threshold revisited too; it fired twice during normal Sunday load and both pages were shrugged, which is how alarm fatigue starts. Document the threshold's tuning window in the alarm comment as well, so the next person who sees a Sunday fire knows which quarter of data the threshold was tuned against before they start second-guessing it."}},
+        {"turn": {"role": "assistant", "content": "Retuned the overrun threshold against the last quarter of Sunday runs and both shrugged pages would not have fired under it; the alarm carries the tuning rationale in its comment now. The alarm comment now names the tuning window and links the analysis, so a future Sunday fire starts from the tuning context instead of from suspicion."}},
+        {"turn": {"role": "user", "content": "And the export lease metric the downsample pass depends on should surface on the alerting board as well, since a wedged lease eventually becomes an alerting problem when raw drill-downs go missing. Set the lease alert's threshold from the pass skip rule's actual constant rather than a copied number, because the two drifting apart would recreate exactly the silent mismatch class we keep finding this month."}},
+        {"turn": {"role": "assistant", "content": "Surfaced the lease age metric on the alerting board with a threshold matching the pass skip rule; wedged leases will page before drill-downs degrade. Wired the alert threshold to read the skip rule's constant directly at rule generation time, so the two values cannot drift apart without the generator failing loudly."}},
+        {"turn": {"role": "user", "content": "Query routing decision is final from the perf review then: alert queries pin to the 1m tier so evaluation cost stays flat, and dashboards keep their own default."}},
+        {"turn": {"role": "assistant", "content": "Applied: alert queries pin to the 1m tier across the rule fleet, and the evaluation cost graphs are annotated with the switch."}},
+        {"tool_call": {"call_id": "c1", "tool": "retrieve", "args": {"query": "rollup tier query routing", "k": 3}}},
+        {"tool_call": {"call_id": "c2", "tool": "agent_memory_search", "args": {"query": ""}}},
+        {"turn": {"role": "user", "content": "Perf review follow-up needs both facts: which tier do alert queries pin to, and when does rollup compaction run?"}}
+      ],
+      "memory_records": [
+        {"id": "rec-compact-slot", "content": "rollup compaction runs Sundays at 03:40, after the export window clears", "kind": "semantic"},
+        {"id": "rec-sheet-slot", "content": "the sizing sheet's Saturday compaction slot was scrapped before rollout", "kind": "semantic"},
+        {"id": "rec-board-panels", "content": "storage board owns the compaction panels; alerts fire on overrun only", "kind": "working", "workspace_id": "ws-driftwatch"}
+      ],
+      "rag_sources": [
+        {
+          "path": "internal/store/query.go",
+          "content": "package store\n\n// route picks the tier a query reads. Callers may pin a tier through\n// their query config; unpinned queries resolve through the ladder to\n// the coarsest tier meeting the window's resolution floor. Pins exist\n// for callers whose cost must stay flat across window sizes, and the\n// pin is honored even when the ladder would choose coarser.\nfunc (s *Store) route(q query) tier {\n\tif q.pinnedTier != \"\" {\n\t\treturn s.ladder.byName(q.pinnedTier)\n\t}\n\treturn s.ladder.resolve(q.window)\n}\n",
+          "language": "go",
+          "abstract": "Query tier routing: caller pins honored, ladder resolution otherwise.",
+          "overview": "query.go routes each query to a tier: a caller-pinned tier is honored for flat-cost callers, and unpinned queries resolve through the ladder to the coarsest tier meeting their resolution floor."
+        },
+        {
+          "path": "internal/store/compact.go",
+          "content": "package store\n\n// compact folds a rollup tier's small files into larger ones so tier\n// reads stay sequential. The schedule comes from operations config,\n// not code: compaction competes with the export window for disk\n// bandwidth, and only the operations side sees both calendars.\nfunc (s *Store) compact(tierName string) error {\n\tfiles, err := s.smallFiles(tierName)\n\tif err != nil {\n\t\treturn err\n\t}\n\tif len(files) == 0 {\n\t\treturn nil\n\t}\n\tmerged, err := s.merge(files)\n\tif err != nil {\n\t\treturn err\n\t}\n\treturn s.swap(files, merged)\n}\n\n// smallFiles lists a tier's files below the merge threshold, oldest\n// first, capped per run so one compaction cannot monopolize the disk\n// bandwidth the export window depends on. The cap is deliberately a\n// run-level bound rather than a rate limit: a bounded run finishes\n// and releases the disk, while a rate-limited run lingers across the\n// window boundary and competes with the export anyway.\nfunc (s *Store) smallFiles(tierName string) ([]file, error) {\n\tfiles, err := s.list(tierName)\n\tif err != nil {\n\t\treturn nil, err\n\t}\n\treturn filterSmall(files, s.mergeThreshold, s.runCap), nil\n}\n",
+          "language": "go",
+          "abstract": "Rollup compaction: small-file merges on an operations-owned schedule.",
+          "overview": "compact.go merges a rollup tier's small files into sequential reads, with the schedule owned by operations config because compaction competes with the export window for disk bandwidth. Runs are bounded per pass rather than rate limited, so compaction releases the disk before the export window needs it."
+        },
+        {
+          "path": "docs/tiers.md",
+          "content": "# driftwatch rollup tiers\n\nTiers trade resolution for cost as samples age down the ladder.\n\n## Query routing\n\nUnpinned queries ride the ladder: the coarsest tier that meets the\nwindow's resolution floor wins. Callers with flat-cost requirements\npin a tier in their query config, and the pin wins over the ladder.\n\n## Maintenance\n\nCompaction keeps tier reads sequential; its schedule is an operations\ndecision recorded in the ops notes, balanced against the export\nwindow. Overrun alarms watch the boundary.\n\n## Bandwidth budget\n\nCompaction and export share the same disks, so their windows are\nscheduled apart and compaction runs are bounded per pass. A pass that\nhits its bound simply resumes at the next slot; the overrun alarm\nwatches the boundary between the two windows rather than the pass\nduration itself.\n",
+          "language": "markdown",
+          "abstract": "Tier guide: ladder routing, flat-cost pins, ops-scheduled compaction.",
+          "overview": "tiers.md explains ladder-based query routing with caller pins for flat-cost paths, and compaction as an operations-scheduled maintenance task balanced against the export window."
+        }
+      ],
+      "required_evidence": [
+        {"domain": "conversation", "literal": "alert queries pin to the 1m tier"},
+        {"domain": "memory", "literal": "runs Sundays at 03:40"}
+      ],
+      "pressure_target": {"domain": "memory", "literal": "runs Sundays at 03:40"},
+      "required_domains": ["conversation", "memory", "rag"],
+      "golden": {
+        "final_answer_criteria": "BOTH halves required: alert queries pin to the 1m tier, AND rollup compaction runs Sundays at 03:40. A missing half caps the score at 0.5; a stated but incorrect half scores 0. An answer giving the scrapped Saturday compaction slot scores 0. An answer presenting both the correct and a competing value without committing to one scores 0."
+      }
+    },
+    {
       "id": "stale-spool-cap",
       "stratum": "stale_vs_fresh",
       "answer_home": "rag",
