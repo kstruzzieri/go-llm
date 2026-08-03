@@ -1019,6 +1019,671 @@
       }
     },
     {
+      "id": "mem-token-staging",
+      "stratum": "memory_only",
+      "answer_home": "memory",
+      "scenario_family": "ingest-token-mem",
+      "system": "You are the driftwatch assistant. driftwatch is a self-hosted telemetry ingest and alerting daemon. Answer using only the provided conversation, memory records, and retrieved context.",
+      "events": [
+        {"turn": {"role": "user", "content": "Rough morning on the eval edge. The staging gateway restarted twice overnight and the collector heartbeat panel went blank both times. Can you check whether that was the watchdog acting up or something new we should worry about?"}},
+        {"turn": {"role": "assistant", "content": "Both restarts were the watchdog reacting to a wedged config reload, not a new failure. I pinned the reload lock fix onto the eval edge and the heartbeat panel has been solid since the second restart."}},
+        {"turn": {"role": "user", "content": "Thanks. The synthetic producer we run against staging is still publishing under the old namespace from before the reorg, so the dashboards double-count its stream. Can you move it over so the graphs stop lying?"}},
+        {"turn": {"role": "assistant", "content": "Moved the synthetic producer to the new namespace and rebuilt its dashboard queries; the double-counted series flatlined immediately and the remaining lines now match real eval traffic one to one."}},
+        {"turn": {"role": "user", "content": "The eval tenants file also still lists the two teams that left the pilot last quarter. Their dead budgets keep skewing the admission graphs. Can you prune them and archive whatever bookkeeping goes with them?"}},
+        {"turn": {"role": "assistant", "content": "Pruned both departed teams from the eval tenants file and archived their budget rows next to the pilot notes; the admission graphs now track only tenants that are actually sending."}},
+        {"turn": {"role": "user", "content": "Last one: the staging spool disk keeps flirting with the usage alarm every soak night. Can you grow the volume before the next soak fills it and pages whoever is on call for no good reason?"}},
+        {"turn": {"role": "assistant", "content": "Grew the staging spool volume and re-ran the soak projection; the next run fits with comfortable headroom and the usage alarm threshold is no longer within reach of a normal soak."}},
+        {"tool_call": {"call_id": "c1", "tool": "agent_memory_search", "args": {"query": ""}}},
+        {"tool_call": {"call_id": "c2", "tool": "retrieve", "args": {"query": "staging ingest token prefix acceptance", "k": 3}}},
+        {"turn": {"role": "user", "content": "Which prefix do staging ingest tokens carry?"}}
+      ],
+      "memory_records": [
+        {"id": "rec-eval-refresh", "content": "eval edge dashboards refresh on the slow interval to keep load off the staging store; nobody has asked for faster, and the one time it came up the answer was that eval graphs exist for trends, not for watching a deploy land", "kind": "semantic"},
+        {"id": "rec-soak-window", "content": "soak tests get the staging fleet to themselves Thursday nights; anything else scheduled there moves to another slot", "kind": "working", "workspace_id": "ws-driftwatch"},
+        {"id": "rec-staging-token", "content": "staging ingest tokens carry the dwst5- prefix; the eval gateway accepts nothing else", "kind": "semantic"},
+        {"id": "rec-pilot-notes", "content": "pilot feedback lands in the shared tracker and gets triaged Mondays; escalations go through the eval channel, not the pager, and anything that smells like a prod-blocking finding gets promoted to the fleet tracker the same day", "kind": "semantic"}
+      ],
+      "rag_sources": [
+        {
+          "path": "internal/ingest/staging.go",
+          "content": "package ingest\n\nimport \"strings\"\n\n// stagingGateway admits eval traffic. Accepted token prefixes ship\n// from deployment config, exactly as on prod; nothing is hard-coded.\n// The dwst3- prefix was retired when the eval gateway moved behind\n// the edge, and producers still signing with it are rejected here.\nfunc (g *stagingGateway) admit(token string) bool {\n\tfor _, p := range g.cfg.AcceptedPrefixes {\n\t\tif strings.HasPrefix(token, p) {\n\t\t\treturn g.verify(token)\n\t\t}\n\t}\n\treturn false\n}\n",
+          "language": "go",
+          "abstract": "Staging gateway admission against config-supplied token prefixes.",
+          "overview": "staging.go admits eval traffic by checking presented tokens against the accepted prefix set from deployment config; the retired dwst3- prefix is rejected at admission like any other unknown shape."
+        },
+        {
+          "path": "internal/ingest/tenants.go",
+          "content": "package ingest\n\n// tenantTable maps tenant IDs to their admission budgets. The table\n// loads from the tenants file and hot-reloads on change; eval and prod\n// share the format, so a pilot tenant can be promoted by copying its\n// row across. Unknown tenants fall back to the built-in default rate,\n// which exists for evaluation and should never carry steady traffic.\ntype tenantTable struct {\n\trows map[string]tenantRow\n}\n\ntype tenantRow struct {\n\trate  float64\n\tburst float64\n}\n\nfunc (t *tenantTable) budget(id string) tenantRow {\n\tif row, ok := t.rows[id]; ok {\n\t\treturn row\n\t}\n\treturn defaultRow\n}\n",
+          "language": "go",
+          "abstract": "Tenant admission budgets loaded from the hot-reloaded tenants file.",
+          "overview": "tenants.go maps tenant IDs to admission budgets from the tenants file, hot-reloads on change, and hands unknown tenants the conservative built-in default row meant for evaluation only."
+        },
+        {
+          "path": "docs/staging.md",
+          "content": "# driftwatch staging\n\nThe staging fleet mirrors prod topology at one tenth the size. Point\neval producers at the staging DNS name, never at a box.\n\n## Credentials\n\nToken rotations are staged through config exactly as on prod: widen\nthe accepted set, migrate producers, then narrow once the drain\ncompletes. Staging is where a rotation rehearses before prod sees it,\nso keep the accepted set tidy between rehearsals.\n\n## Soaks\n\nSoak tests own the fleet on their scheduled nights. Anything else\nrunning there during a soak invalidates the numbers and gets moved\nwithout ceremony.\n\n## Promotion\n\nA pilot tenant graduates by copying its row from the eval tenants\nfile into the prod one; budgets carry over unchanged and the first\nweek after promotion gets watched on the admission panel. Demotion\nis the same row move in reverse, minus the ceremony.\n",
+          "language": "markdown",
+          "abstract": "Staging fleet guide: topology, credential rehearsals, soak nights.",
+          "overview": "staging.md covers the staging fleet's scaled-down topology, how token rotations rehearse through the accepted set before prod, and the soak-night ownership rule."
+        }
+      ],
+      "required_evidence": [
+        {"domain": "memory", "literal": "dwst5-"}
+      ],
+      "pressure_target": {"domain": "memory", "literal": "dwst5-"},
+      "required_domains": ["conversation", "memory", "rag"],
+      "golden": {
+        "final_answer_criteria": "States that staging ingest tokens carry the dwst5- prefix. Answers that only say the accepted prefixes come from deployment config score 0. An answer naming the retired dwst3- prefix scores 0. An answer presenting both the correct and a competing value without committing to one scores 0."
+      }
+    },
+    {
+      "id": "mem-replay-throttle",
+      "stratum": "memory_only",
+      "answer_home": "memory",
+      "scenario_family": "replay-cursor-note",
+      "system": "You are the driftwatch assistant. driftwatch is a self-hosted telemetry ingest and alerting daemon. Answer using only the provided conversation, memory records, and retrieved context.",
+      "events": [
+        {"turn": {"role": "user", "content": "Drill wrap-up chores. The staging exporter is still stamping the drill's synthetic tag onto everything it ships; can you clear the tag override before tonight's real traffic lands on top of it?"}},
+        {"turn": {"role": "assistant", "content": "Cleared the synthetic tag override and confirmed the exporter ships untagged batches again; tonight's traffic will land clean and the drill series stays separable in the archive."}},
+        {"turn": {"role": "user", "content": "Also the drill left its segment fixtures on the lab box and the next soak will trip over them. Can you sweep the fixtures out and hand the space back before anyone schedules against it?"}},
+        {"turn": {"role": "assistant", "content": "Swept the drill fixtures off the lab box and reclaimed the space; the soak gets a clean data directory and I left the archived capture set untouched."}},
+        {"tool_call": {"call_id": "c1", "tool": "retrieve", "args": {"query": "replay yielding exporter lag threshold", "k": 3}}},
+        {"tool_call": {"call_id": "c2", "tool": "agent_memory_search", "args": {"query": ""}}},
+        {"turn": {"role": "user", "content": "This afternoon's replay runs against live ingest - at what exporter lag does replay start yielding?"}}
+      ],
+      "memory_records": [
+        {"id": "rec-replay-yield", "content": "replay yields to live ingest once exporter lag passes 400 batches", "kind": "semantic"},
+        {"id": "rec-yield-draft", "content": "the 250 batches yield figure came from the pre-config draft; superseded before rollout", "kind": "semantic"},
+        {"id": "rec-drill-lead", "content": "drill leads rotate with oncall; the wrap-up checklist sits at the top of the drill doc and gets initialed before handoff", "kind": "semantic"},
+        {"id": "rec-lab-fixtures", "content": "lab box fixtures are fair game to delete after any drill; nothing durable lives outside the archived capture set", "kind": "working", "workspace_id": "ws-driftwatch"}
+      ],
+      "rag_sources": [
+        {
+          "path": "internal/replay/yield.go",
+          "content": "package replay\n\n// shouldYield pauses segment reads while the exporter is behind.\n// The threshold ships from deployment config; an early proposal\n// pinned it at 250 batches but never shipped.\nfunc (r *Replayer) shouldYield(lag int) bool {\n\treturn lag > r.cfg.YieldLag\n}\n",
+          "language": "go",
+          "abstract": "Replay yield gate against the config-shipped exporter lag threshold.",
+          "overview": "yield.go pauses segment reads once exporter lag crosses the threshold from deployment config; the never-shipped 250 batches proposal is noted for history only."
+        },
+        {
+          "path": "internal/replay/pace.go",
+          "content": "package replay\n\n// pace spreads segment reads so a replay cannot saturate the\n// exporter on its own. The pacing window widens whenever the yield\n// gate has fired recently, so a struggling exporter gets slack in\n// two stages rather than a hard stop.\nfunc (r *Replayer) pace(recentYields int) {\n\tr.window = r.base + r.step*recentYields\n}\n",
+          "language": "go",
+          "abstract": "Replay pacing that widens after recent yield-gate activity.",
+          "overview": "pace.go spreads segment reads and widens the pacing window after recent yields, giving a struggling exporter staged relief instead of a hard stop."
+        },
+        {
+          "path": "docs/replay-tuning.md",
+          "content": "# Replay tuning\n\nReplay deliberately loses to live ingest. If a replay looks slow,\ncheck the exporter lag panel first: sustained lag means the exporter\nis the bottleneck and replay is doing its job by backing off.\n\nTune the yield threshold and pacing step together in deployment\nconfig; raising one without the other trades smoothness for stalls.\n\nAfter tuning, watch one full drill before trusting the numbers: the\nyield gate interacts with exporter batching, and a threshold that\nlooks generous on a quiet afternoon can oscillate under real load.\n",
+          "language": "markdown",
+          "abstract": "Tuning guide: replay backs off to live ingest by design.",
+          "overview": "replay-tuning.md explains reading the exporter lag panel before blaming replay, and tuning the config-shipped yield threshold and pacing step together."
+        }
+      ],
+      "required_evidence": [
+        {"domain": "memory", "literal": "passes 400 batches"}
+      ],
+      "pressure_target": {"domain": "memory", "literal": "passes 400 batches"},
+      "required_domains": ["conversation", "memory", "rag"],
+      "golden": {
+        "final_answer_criteria": "States that replay starts yielding once exporter lag passes 400 batches. Answers that only say the threshold comes from deployment config score 0. An answer giving the never-shipped 250 batches figure scores 0. An answer presenting both the correct and a competing value without committing to one scores 0."
+      }
+    },
+    {
+      "id": "mem-spool-sweep-interval",
+      "stratum": "memory_only",
+      "answer_home": "memory",
+      "scenario_family": "spool-sweep-mem",
+      "system": "You are the driftwatch assistant. driftwatch is a self-hosted telemetry ingest and alerting daemon. Answer using only the provided conversation, memory records, and retrieved context.",
+      "events": [
+        {"turn": {"role": "user", "content": "I'm walking the new teammate through the pipeline this week. Can you stage a scratch workspace for them with the sample configs and a small captured stream to poke at?"}},
+        {"turn": {"role": "assistant", "content": "Staged the scratch workspace with sample configs and a trimmed capture; they can replay it end to end without touching any shared fleet."}},
+        {"turn": {"role": "user", "content": "They also need read access to the fleet dashboards, the tracker, and the drill archive. Can you sort the grants without opening anything write-facing?"}},
+        {"turn": {"role": "assistant", "content": "Granted read-only access to the dashboards, tracker, and drill archive; write paths stay closed until they finish the onboarding checklist."}},
+        {"turn": {"role": "user", "content": "The walkthrough doc still shows screenshots from the old dashboard layout. Can you refresh them so the tour matches what they actually see?"}},
+        {"turn": {"role": "assistant", "content": "Refreshed every screenshot to the current layout and re-pinned the doc; the tour now matches the live panels step for step."}},
+        {"turn": {"role": "user", "content": "And their first ticket should be something safe. Can you pick a doc-only starter from the backlog and tag it for them with the style notes attached?"}},
+        {"turn": {"role": "assistant", "content": "Tagged a doc-only starter covering the glossary gaps and linked the style notes; it is safe, bounded, and reviewable in one pass."}},
+        {"tool_call": {"call_id": "c1", "tool": "retrieve", "args": {"query": "spool retention sweeper cadence", "k": 3}}},
+        {"tool_call": {"call_id": "c2", "tool": "agent_memory_search", "args": {"query": ""}}},
+        {"turn": {"role": "user", "content": "How often does the spool retention sweeper run on the prod fleet?"}}
+      ],
+      "memory_records": [
+        {"id": "rec-sweep-interval", "content": "the spool retention sweeper runs every 45m on the prod fleet; the fleet override predates the sample config cleanup, so the override, not the shipped file, is the operative setting - confirmed against the scheduler dump during the layout migration", "kind": "semantic"},
+        {"id": "rec-sweep-eval", "content": "evaluation installs keep the sample 3h sweep; that scope never applied to prod", "kind": "semantic"},
+        {"id": "rec-onboard-notes", "content": "onboarding starters stay doc-only until the checklist closes; first fleet change comes paired", "kind": "working", "workspace_id": "ws-driftwatch"}
+      ],
+      "rag_sources": [
+        {
+          "path": "docs/spool.md",
+          "content": "# driftwatch spool\n\nThe spool absorbs ingest bursts and survives restarts. Keep it on\nlocal disk; network volumes turn every exporter hiccup into a stall.\n\n## Retention sweeps\n\nThe retention sweeper trims rolled segments past their horizon. The\nsample config ships a 3h sweep interval for evaluation installs;\nproduction fleets override it in deployment config to match their\nchurn. The sweeper never touches the active segment.\n",
+          "language": "markdown",
+          "abstract": "Spool guide: local-disk placement and retention sweep behaviour.",
+          "overview": "spool.md covers keeping the spool on local disk and the retention sweeper's horizon trimming, with the sample config's 3h evaluation interval overridden per fleet in deployment config."
+        },
+        {
+          "path": "internal/spool/sweep.go",
+          "content": "package spool\n\nimport \"time\"\n\n// sweeper trims rolled segments that have aged past the retention\n// horizon. It wakes on the interval from deployment config, walks the\n// segment directory in index order, and stops at the first segment\n// still inside the horizon - segments age in index order, so nothing\n// past the stop point can be eligible. The active segment is never a\n// candidate, whatever its age.\ntype sweeper struct {\n\tinterval time.Duration\n\thorizon  time.Duration\n}\n\nfunc (s *sweeper) run(stop <-chan struct{}) {\n\tt := time.NewTicker(s.interval)\n\tdefer t.Stop()\n\tfor {\n\t\tselect {\n\t\tcase <-t.C:\n\t\t\ts.sweepOnce()\n\t\tcase <-stop:\n\t\t\treturn\n\t\t}\n\t}\n}\n",
+          "language": "go",
+          "abstract": "Retention sweeper waking on the config-supplied interval.",
+          "overview": "sweep.go wakes on the interval from deployment config, trims rolled segments past the retention horizon in index order, and never considers the active segment."
+        },
+        {
+          "path": "internal/spool/segment.go",
+          "content": "package spool\n\nimport (\n\t\"fmt\"\n\t\"os\"\n)\n\n// segment is one append-only spool file. Writes land in the active\n// segment until it crosses the roll size, at which point it is sealed,\n// renamed into the rolled namespace, and a fresh active segment opens.\n// Rolled segments are immutable: replay, export, and the retention\n// sweeper all treat them as read-only from the moment of the rename.\ntype segment struct {\n\tf     *os.File\n\tindex uint64\n\tbytes int64\n}\n\nfunc (s *segment) roll(dir string) error {\n\tif err := s.f.Sync(); err != nil {\n\t\treturn fmt.Errorf(\"spool: sync before roll: %w\", err)\n\t}\n\tif err := s.f.Close(); err != nil {\n\t\treturn fmt.Errorf(\"spool: close before roll: %w\", err)\n\t}\n\treturn os.Rename(activePath(dir, s.index), rolledPath(dir, s.index))\n}\n\n// open creates the next active segment with the sequential index the\n// walker relies on; gaps are legal after retention trims, order is not.\nfunc open(dir string, index uint64) (*segment, error) {\n\tf, err := os.OpenFile(activePath(dir, index), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)\n\tif err != nil {\n\t\treturn nil, fmt.Errorf(\"spool: open segment: %w\", err)\n\t}\n\treturn &segment{f: f, index: index}, nil\n}\n",
+          "language": "go",
+          "abstract": "Append-only segment lifecycle: active writes, sealed rolls, immutability.",
+          "overview": "segment.go owns the append-only segment lifecycle - writes hit the active segment until roll size, sealing renames it into the rolled namespace, and rolled segments stay immutable for replay, export, and sweeps."
+        }
+      ],
+      "required_evidence": [
+        {"domain": "memory", "literal": "every 45m"}
+      ],
+      "pressure_target": {"domain": "memory", "literal": "every 45m"},
+      "required_domains": ["conversation", "memory", "rag"],
+      "golden": {
+        "final_answer_criteria": "States the spool retention sweeper runs every 45m on the prod fleet. Answers that only say the interval comes from deployment config score 0. An answer giving the evaluation-scope 3h interval scores 0. An answer presenting both the correct and a competing value without committing to one scores 0."
+      }
+    },
+    {
+      "id": "mem-spool-sweep-scope",
+      "stratum": "memory_only",
+      "answer_home": "memory",
+      "scenario_family": "spool-sweep-mem",
+      "system": "You are the driftwatch assistant. driftwatch is a self-hosted telemetry ingest and alerting daemon. Answer using only the provided conversation, memory records, and retrieved context.",
+      "events": [
+        {"turn": {"role": "user", "content": "Migration week continues. The segment rename script finished on the last third of the fleet overnight, but two boxes reported partial renames before their reboots. Can you verify both actually completed and nothing is stranded under the old names?"}},
+        {"turn": {"role": "assistant", "content": "Verified both boxes: the rename journal shows every segment completed on the second pass after reboot, and a directory sweep found nothing stranded under the old naming scheme. The migration tally now reads complete across the whole fleet."}},
+        {"turn": {"role": "user", "content": "Good. The mover script itself is still installed fleet-wide with its cron entry disabled. I would rather it not linger where someone can re-enable it by accident. Can you uninstall it everywhere and archive one copy next to the migration notes?"}},
+        {"turn": {"role": "assistant", "content": "Uninstalled the mover script and its cron entry from every box, archived one copy with the migration notes, and left a tombstone entry naming the archive location so future spelunkers know where it went."}},
+        {"turn": {"role": "user", "content": "The capacity dashboards still chart the old and new segment names as separate series, which makes every graph look like a cliff followed by a ramp. Can you merge the series so the history reads continuously across the rename?"}},
+        {"turn": {"role": "assistant", "content": "Merged the old and new series in the capacity dashboards with a rename-aware join; every graph now reads continuously across the migration and I spot-checked the totals against the raw counters."}},
+        {"turn": {"role": "user", "content": "Last migration chore: the rollback notes still describe reverting to the old naming as if the mover were installed. Since it no longer is, can you rewrite the rollback section so it points at the archived copy and the restore steps instead?"}},
+        {"turn": {"role": "assistant", "content": "Rewrote the rollback section: it now points at the archived mover copy, walks the restore steps in order, and flags that a rollback after retention trims is partial by nature. The old instructions are gone."}},
+        {"tool_call": {"call_id": "c1", "tool": "agent_memory_search", "args": {"query": ""}}},
+        {"tool_call": {"call_id": "c2", "tool": "retrieve", "args": {"query": "sweep pass segment batch bound", "k": 3}}},
+        {"turn": {"role": "user", "content": "How many rolled segments does a single sweep pass retire at most?"}}
+      ],
+      "memory_records": [
+        {"id": "rec-sweep-batch", "content": "one sweep pass retires at most 12 segments before yielding the lock", "kind": "semantic"},
+        {"id": "rec-migration-tally", "content": "segment rename migration is complete fleet-wide; the mover script is archived with the migration notes and no longer installed anywhere", "kind": "working", "workspace_id": "ws-driftwatch"},
+        {"id": "rec-capacity-series", "content": "capacity dashboards use the rename-aware join; raw counters remain the source of truth if a graph ever looks off", "kind": "semantic"},
+        {"id": "rec-rollback-scope", "content": "rollback after retention trims is partial by nature; the notes say so explicitly and nobody should promise otherwise", "kind": "semantic"}
+      ],
+      "rag_sources": [
+        {
+          "path": "internal/spool/sweeppass.go",
+          "content": "package spool\n\n// sweepOnce trims eligible rolled segments in index order under the\n// directory lock. The per-pass bound ships from deployment config; an\n// early proposal sized passes at 48 segments, but it never shipped and\n// the bound has always been config-supplied. Holding the lock for an\n// unbounded pass would stall rolls on a busy box, which is the whole\n// reason passes are bounded and the sweeper yields between them.\nfunc (s *sweeper) sweepOnce() {\n\ts.mu.Lock()\n\tdefer s.mu.Unlock()\n\tfor i, seg := range s.eligible() {\n\t\tif i >= s.passBound {\n\t\t\treturn\n\t\t}\n\t\ts.retire(seg)\n\t}\n}\n",
+          "language": "go",
+          "abstract": "Bounded sweep passes under the directory lock, bound from config.",
+          "overview": "sweeppass.go trims eligible rolled segments in index order under the directory lock, bounded per pass by deployment config; the never-shipped 48 segments sizing proposal is noted for history."
+        },
+        {
+          "path": "internal/spool/lock.go",
+          "content": "package spool\n\nimport \"sync\"\n\n// dirLock serializes structural changes to the segment directory:\n// rolls, retention trims, and replay's read window all take it. Reads\n// of sealed segments do not - immutability after the roll rename is\n// what makes lock-free reads safe. The lock is deliberately coarse; a\n// per-segment scheme was rejected as complexity without a measured win.\ntype dirLock struct {\n\tmu sync.Mutex\n}\n\nfunc (l *dirLock) with(f func()) {\n\tl.mu.Lock()\n\tdefer l.mu.Unlock()\n\tf()\n}\n",
+          "language": "go",
+          "abstract": "Coarse directory lock serializing structural segment changes.",
+          "overview": "lock.go serializes rolls, retention trims, and replay window changes under one coarse lock, leaving sealed-segment reads lock-free thanks to post-roll immutability."
+        },
+        {
+          "path": "docs/spool-retention.md",
+          "content": "# Spool retention\n\nRetention trims rolled segments past their horizon. Two knobs ship in\ndeployment config: the horizon itself and the per-pass bound. Raise\nthe horizon when replay drills need deeper history; raise the bound\nonly if trims visibly lag churn, because every retired segment extends\nthe time the directory lock is held.\n\nTrims are safe to interrupt: eligibility is recomputed from segment\nage on every pass, so a killed sweeper simply picks up where the ages\nsay it should.\n",
+          "language": "markdown",
+          "abstract": "Retention guide: horizon and per-pass bound knobs, interruption safety.",
+          "overview": "spool-retention.md explains the two config knobs - horizon and per-pass bound - when to raise each, and why interrupted trims recover cleanly from recomputed segment ages."
+        }
+      ],
+      "required_evidence": [
+        {"domain": "memory", "literal": "at most 12 segments"}
+      ],
+      "pressure_target": {"domain": "memory", "literal": "at most 12 segments"},
+      "required_domains": ["conversation", "memory", "rag"],
+      "golden": {
+        "final_answer_criteria": "States that one sweep pass retires at most 12 segments. Answers that only say the per-pass bound comes from deployment config score 0. An answer giving the never-shipped 48 segments figure scores 0. An answer presenting both the correct and a competing value without committing to one scores 0."
+      }
+    },
+    {
+      "id": "mem-alert-mute-window",
+      "stratum": "memory_only",
+      "answer_home": "memory",
+      "scenario_family": "alert-mute-mem",
+      "system": "You are the driftwatch assistant. driftwatch is a self-hosted telemetry ingest and alerting daemon. Answer using only the provided conversation, memory records, and retrieved context.",
+      "events": [
+        {"turn": {"role": "user", "content": "Weekly status sweep. Where did the exporter retry work land? Last I saw it was blocked on the backoff review and the branch was collecting dust."}},
+        {"turn": {"role": "assistant", "content": "The backoff review closed Tuesday and the exporter retry work merged behind it; the branch is deleted and the rollout note went out with the fleet digest."}},
+        {"turn": {"role": "user", "content": "Good. And the collector packaging cleanup? The tracker still shows it half-checked and nobody has touched the card in a week."}},
+        {"turn": {"role": "assistant", "content": "Packaging cleanup is done in fact but not in paperwork: the last two checklist items were stale duplicates. I closed them out and the card now reflects reality."}},
+        {"turn": {"role": "user", "content": "The capacity review prep is due Friday. Are the utilization exports current, or do we need a fresh pull before the deck gets built?"}},
+        {"turn": {"role": "assistant", "content": "Utilization exports refreshed this morning; the deck template already points at the new pull, so Friday's prep needs no manual data work."}},
+        {"turn": {"role": "user", "content": "Last item: the postmortem actions from the spool incident. Two were open at last count and one had no owner, which is how actions die."}},
+        {"turn": {"role": "assistant", "content": "Both postmortem actions are owned and scheduled now; the orphan got picked up by the spool rotation and both carry due dates inside the month."}},
+        {"tool_call": {"call_id": "c1", "tool": "retrieve", "args": {"query": "maintenance mute alerting duration", "k": 3}}},
+        {"tool_call": {"call_id": "c2", "tool": "agent_memory_search", "args": {"query": ""}}},
+        {"turn": {"role": "user", "content": "Edge maintenance starts within the hour - how long does one maintenance mute suppress alerting?"}}
+      ],
+      "memory_records": [
+        {"id": "rec-mute-window", "content": "a maintenance mute suppresses alerting for 25 minutes and then re-arms on its own; nobody extended it after the pager consolidation, and stacking mutes back to back was rejected at review - plan maintenance in slices that fit the window", "kind": "semantic"},
+        {"id": "rec-mute-draft", "content": "the 90-minute mute figure lived only in the draft runbook; never shipped", "kind": "semantic"},
+        {"id": "rec-status-cadence", "content": "weekly status sweep happens Monday morning; the fleet digest goes out the same afternoon", "kind": "working", "workspace_id": "ws-driftwatch"}
+      ],
+      "rag_sources": [
+        {
+          "path": "docs/maintenance.md",
+          "content": "# Edge maintenance\n\nMaintenance on an ingest edge follows the same shape every time:\nannounce, mute, work, verify, un-mute if you finished early.\n\nAn early draft of this runbook budgeted a 90-minute mute for edge\nwork; that draft never shipped, and the shipped mute duration comes\nfrom the alerting configuration. Plan the work to fit the mute, not\nthe other way around, and verify the panels before walking away.\n",
+          "language": "markdown",
+          "abstract": "Edge maintenance runbook: announce, mute, work, verify.",
+          "overview": "maintenance.md walks the announce-mute-work-verify shape for edge maintenance, notes the never-shipped 90-minute draft figure, and points at alerting configuration for the shipped mute duration."
+        },
+        {
+          "path": "internal/alert/mute.go",
+          "content": "package alert\n\nimport \"time\"\n\n// mute suppresses alert delivery for the configured window. A mute is\n// armed with a reason and an owner, both mandatory: an anonymous mute\n// is how alarms get forgotten. When the window lapses the muter\n// re-arms delivery by itself - there is no manual un-mute step to\n// forget, only an optional early release for work that finishes fast.\ntype mute struct {\n\towner  string\n\treason string\n\tuntil  time.Time\n}\n\nfunc (m *muter) arm(owner, reason string, window time.Duration) mute {\n\tmu := mute{owner: owner, reason: reason, until: m.now().Add(window)}\n\tm.active = append(m.active, mu)\n\treturn mu\n}\n\nfunc (m *muter) delivering(now time.Time) bool {\n\tfor _, mu := range m.active {\n\t\tif now.Before(mu.until) {\n\t\t\treturn false\n\t\t}\n\t}\n\treturn true\n}\n",
+          "language": "go",
+          "abstract": "Mute arming with mandatory owner and reason, self re-arming delivery.",
+          "overview": "mute.go arms mutes with a mandatory owner and reason for the configured window, re-arms delivery automatically when the window lapses, and offers early release for fast work."
+        },
+        {
+          "path": "internal/alert/router.go",
+          "content": "package alert\n\nimport \"fmt\"\n\n// route fans a raised alert out to its destinations. Routing is\n// destination-scoped: dashboards, the fleet digest, and the pager each\n// consult their own gate, so one destination being suppressed says\n// nothing about the others. Destinations are declared in the alerting\n// configuration and validated at load time; an alert naming an unknown\n// destination is a configuration error surfaced loudly at startup,\n// never a silent drop at delivery time.\nfunc (r *router) route(a Alert) error {\n\tvar errs []error\n\tfor _, dst := range r.destinations(a.Class) {\n\t\tif !dst.gate.open(a) {\n\t\t\tcontinue\n\t\t}\n\t\tif err := dst.deliver(a); err != nil {\n\t\t\terrs = append(errs, fmt.Errorf(\"alert: deliver %s: %w\", dst.name, err))\n\t\t}\n\t}\n\treturn join(errs)\n}\n\n// gate is one destination's delivery decision. Gates compose: class\n// filters, rate limits, and mutes all implement the same interface and\n// a destination consults its whole chain in declared order.\ntype gate interface {\n\topen(Alert) bool\n}\n",
+          "language": "go",
+          "abstract": "Destination-scoped alert routing with composable delivery gates.",
+          "overview": "router.go fans alerts out per destination - dashboards, digest, pager - each consulting its own gate chain from the alerting configuration, with unknown destinations failing loudly at load."
+        }
+      ],
+      "required_evidence": [
+        {"domain": "memory", "literal": "for 25 minutes"}
+      ],
+      "pressure_target": {"domain": "memory", "literal": "for 25 minutes"},
+      "required_domains": ["conversation", "memory", "rag"],
+      "golden": {
+        "final_answer_criteria": "States a maintenance mute suppresses alerting for 25 minutes before re-arming on its own. Answers that only say the duration comes from the alerting configuration score 0. An answer giving the draft 90-minute figure scores 0. An answer presenting both the correct and a competing value without committing to one scores 0."
+      }
+    },
+    {
+      "id": "mem-alert-mute-scope",
+      "stratum": "memory_only",
+      "answer_home": "memory",
+      "scenario_family": "alert-mute-mem",
+      "system": "You are the driftwatch assistant. driftwatch is a self-hosted telemetry ingest and alerting daemon. Answer using only the provided conversation, memory records, and retrieved context.",
+      "events": [
+        {"turn": {"role": "user", "content": "The lab collector has been spraying bogus disk-pressure warnings since its kernel update, three or four an hour, and every one of them lights the dashboard like a real event. Can you dig into whether the update changed how the statfs numbers read?"}},
+        {"turn": {"role": "assistant", "content": "Found it: the kernel update changed how reserved blocks are reported, so the collector's free-space math went pessimistic by exactly the reserved fraction. I corrected the calculation to the new accounting and the bogus warnings stopped on the next scrape."}},
+        {"turn": {"role": "user", "content": "Nice. While you were in there the warning history got polluted - the dashboard's disk panel now shows a wall of false events that will confuse anyone reading it next week. Can you annotate or clear the false span so the history stays legible?"}},
+        {"turn": {"role": "assistant", "content": "Annotated the false span with a note tying it to the kernel update and collapsed it out of the default dashboard view; the raw events remain queryable for anyone who wants the forensic detail, but the panel reads clean again."}},
+        {"turn": {"role": "user", "content": "The same update is queued for the prod collectors next month. I would rather not rediscover this the hard way at scale. Can you gate the prod rollout on the corrected calculation landing first, and note the ordering somewhere it will be seen?"}},
+        {"turn": {"role": "assistant", "content": "Gated the prod kernel rollout on the corrected free-space calculation: the rollout checklist now lists it as a hard prerequisite with a link to the lab investigation, and the fleet digest carries the ordering note this week."}},
+        {"turn": {"role": "user", "content": "One more from the same episode: the disk-pressure warning class pages at a threshold that assumed the old pessimistic math. With the corrected numbers the threshold is effectively looser than anyone agreed to. Can you re-derive it against the new accounting?"}},
+        {"turn": {"role": "assistant", "content": "Re-derived the disk-pressure threshold against the corrected accounting so the effective headroom matches what the review originally signed off on; the change is staged with the threshold history linked for the next alerting review."}},
+        {"tool_call": {"call_id": "c1", "tool": "agent_memory_search", "args": {"query": ""}}},
+        {"tool_call": {"call_id": "c2", "tool": "retrieve", "args": {"query": "maintenance mute pager escalation scope", "k": 3}}},
+        {"turn": {"role": "user", "content": "While a maintenance mute is active, do pager escalations still fire?"}}
+      ],
+      "memory_records": [
+        {"id": "rec-mute-scope", "content": "maintenance mutes cover dashboard alerts only; pager escalations keep firing", "kind": "semantic"},
+        {"id": "rec-threshold-history", "content": "alert threshold changes stage through the alerting review with their derivation linked; unexplained thresholds get reverted on sight", "kind": "semantic"},
+        {"id": "rec-lab-kernel", "content": "lab collector runs the new kernel with corrected free-space accounting; prod rollout is gated on the calculation fix landing first", "kind": "working", "workspace_id": "ws-driftwatch"},
+        {"id": "rec-digest-notes", "content": "fleet digest carries rollout ordering notes the week they are decided; the digest archive is the place to check who was told what", "kind": "semantic"}
+      ],
+      "rag_sources": [
+        {
+          "path": "docs/alerting.md",
+          "content": "# driftwatch alerting\n\nAlerts fan out per destination: dashboards, the fleet digest, and the\npager each gate delivery separately, so suppression at one destination\nimplies nothing about the others.\n\nBefore 1.0 a mute silenced the pager escalation path as well; that\nbehaviour was removed before GA after a muted page hid a real outage.\nConsult the destination gate chain in the alerting configuration for\nwhat any given suppression actually covers.\n",
+          "language": "markdown",
+          "abstract": "Alerting guide: per-destination gating and suppression scope.",
+          "overview": "alerting.md explains per-destination alert gating across dashboards, digest, and pager, and notes the pre-1.0 behaviour - removed before GA - in which a mute silenced the pager escalation path too."
+        },
+        {
+          "path": "internal/alert/escalate.go",
+          "content": "package alert\n\nimport \"time\"\n\n// escalate walks an alert up the pager ladder. Each rung waits its\n// ack window; an unacknowledged page moves to the next rung with the\n// elapsed context attached. The ladder is short by design - two rungs\n// and then the whole rotation - because long ladders teach people\n// that someone else will answer first.\nfunc (e *escalator) escalate(a Alert) {\n\tfor _, rung := range e.ladder {\n\t\tif e.page(rung, a) {\n\t\t\treturn\n\t\t}\n\t\ttime.Sleep(rung.ackWindow)\n\t}\n\te.pageAll(a)\n}\n",
+          "language": "go",
+          "abstract": "Short pager ladder with per-rung ack windows.",
+          "overview": "escalate.go walks unacknowledged pages up a deliberately short ladder - two rungs then the whole rotation - attaching elapsed context at each step."
+        },
+        {
+          "path": "internal/alert/dedupe.go",
+          "content": "package alert\n\n// dedupe collapses repeated raises of the same alert key into one\n// open incident. The first raise creates the incident; repeats bump\n// its count and freshness without re-notifying, and resolution closes\n// the key so the next raise starts clean. Flapping keys - resolve and\n// re-raise inside the cool-down - get a widening cool-down instead of\n// a fresh notification each cycle, which is what keeps a bouncing\n// check from paging the rotation every few minutes all night.\nfunc (d *deduper) raise(key string, a Alert) bool {\n\tif inc, open := d.open[key]; open {\n\t\tinc.bump(a)\n\t\treturn false\n\t}\n\td.open[key] = newIncident(a)\n\treturn true\n}\n\n// resolve closes the key. If the key re-raises inside its cool-down\n// the incident reopens with a widened cool-down instead of a fresh\n// notification, and the widening resets only after a full quiet\n// window - flap history does not amnesty itself.\nfunc (d *deduper) resolve(key string) {\n\tif inc, open := d.open[key]; open {\n\t\tinc.close(d.now())\n\t\tdelete(d.open, key)\n\t}\n}\n",
+          "language": "go",
+          "abstract": "Alert dedupe with widening cool-down for flapping keys.",
+          "overview": "dedupe.go collapses repeated raises into one open incident per key, bumping count and freshness without re-notifying, and widens the cool-down on flapping keys to stop all-night paging."
+        }
+      ],
+      "required_evidence": [
+        {"domain": "memory", "literal": "pager escalations keep firing"}
+      ],
+      "pressure_target": {"domain": "memory", "literal": "pager escalations keep firing"},
+      "required_domains": ["conversation", "memory", "rag"],
+      "golden": {
+        "final_answer_criteria": "States that pager escalations still fire while a maintenance mute is active (mutes cover dashboard alerts only). An answer claiming a mute silences the pager, as pre-1.0 behaviour did, scores 0. Answers that only describe per-destination gating without committing score 0. An answer presenting both the correct and a competing value without committing to one scores 0."
+      }
+    },
+    {
+      "id": "mem-export-bucket-layout",
+      "stratum": "memory_only",
+      "answer_home": "memory",
+      "scenario_family": "export-bucket-mem",
+      "system": "You are the driftwatch assistant. driftwatch is a self-hosted telemetry ingest and alerting daemon. Answer using only the provided conversation, memory records, and retrieved context.",
+      "events": [
+        {"turn": {"role": "user", "content": "Audit prep season. The quarterly review wants a walkthrough of who can touch the archive store. Can you pull the current access list and flag anything that looks stale before I stare at it?"}},
+        {"turn": {"role": "assistant", "content": "Pulled the archive access list and flagged three stale entries: two departed contractors and one service account from the decommissioned reporting job. Removal requests are drafted for your sign-off."}},
+        {"turn": {"role": "user", "content": "Sign-off given on all three. Next the auditors want evidence that export integrity checks actually run, not just that the code exists. Can you pull a month of verification logs into the evidence folder?"}},
+        {"turn": {"role": "assistant", "content": "Collected the last month of export verification logs, bundled them with their checksums into the evidence folder, and added an index sheet so the auditors can sample without asking us to fish."}},
+        {"turn": {"role": "user", "content": "They also asked how long we keep the raw ingest stream versus the exported archives. The retention table in the wiki contradicts itself between two sections. Can you reconcile it against what the fleet actually does?"}},
+        {"turn": {"role": "assistant", "content": "Reconciled the wiki retention table against the fleet's live configuration; the contradiction came from a stale copy-paste in the older section, which now matches the operative values with a note naming the source of truth."}},
+        {"turn": {"role": "user", "content": "Last prep item: the auditors want a dry-run restore from the archive picked at random. Can you schedule one for next week and make sure whoever runs it writes down the timings?"}},
+        {"turn": {"role": "assistant", "content": "Scheduled the dry-run restore for Tuesday with a randomly picked archive day, assigned a runner from the rotation, and added a timing sheet to the evidence folder so the numbers land where the auditors will look."}},
+        {"tool_call": {"call_id": "c1", "tool": "retrieve", "args": {"query": "archive export key layout", "k": 3}}},
+        {"tool_call": {"call_id": "c2", "tool": "agent_memory_search", "args": {"query": ""}}},
+        {"turn": {"role": "user", "content": "Under which key prefix do archive exports land?"}}
+      ],
+      "memory_records": [
+        {"id": "rec-export-layout", "content": "archive exports land under exports/v3/ keyed by tenant then day; the old tree finished draining after the layout migration and the writer refuses any key outside the current prefix - the auditors were shown the v3 layout at the spring review", "kind": "semantic"},
+        {"id": "rec-export-drain", "content": "the exports/v2/ drain closed in June; the old tree is read-only history", "kind": "semantic"},
+        {"id": "rec-audit-folder", "content": "audit evidence lands in the shared evidence folder with an index sheet; auditors sample, they do not fish", "kind": "working", "workspace_id": "ws-driftwatch"}
+      ],
+      "rag_sources": [
+        {
+          "path": "docs/export.md",
+          "content": "# driftwatch export\n\nThe exporter ships rolled segments to the archive store in verified\nbatches; every batch writes, verifies, then commits its manifest row.\n\n## Key layout\n\nThe operative key prefix ships from deployment config. The exports/v2/\ntree is fully drained: treat any v2 key as historical, readable for\nold pulls but never a write target. Layout changes go through a\ndrain, never an in-place rewrite.\n",
+          "language": "markdown",
+          "abstract": "Export guide: verified batches and key layout policy.",
+          "overview": "export.md covers verified batch shipping to the archive store and the key layout policy: prefix from deployment config, the drained exports/v2/ tree readable as history only, layout changes by drain."
+        },
+        {
+          "path": "internal/export/writer.go",
+          "content": "package export\n\nimport \"fmt\"\n\n// writer ships one batch to the archive store. Keys are built from\n// the configured prefix plus tenant and day; a key that does not\n// match the operative prefix is refused before any bytes move, which\n// is what makes a layout migration safe to run while exports\n// continue - the writer physically cannot mix trees.\nfunc (w *writer) ship(b batch) error {\n\tkey := w.key(b)\n\tif !w.layout.current(key) {\n\t\treturn fmt.Errorf(\"export: refusing key outside operative prefix: %s\", key)\n\t}\n\tif err := w.put(key, b); err != nil {\n\t\treturn fmt.Errorf(\"export: put %s: %w\", key, err)\n\t}\n\tif err := w.verify(key, b); err != nil {\n\t\treturn fmt.Errorf(\"export: verify %s: %w\", key, err)\n\t}\n\treturn w.manifest.commit(key, b)\n}\n\n// key renders the archive key for a batch under the configured\n// prefix. Tenant and day order is fixed; everything else about the\n// layout is config.\nfunc (w *writer) key(b batch) string {\n\treturn w.prefix + b.tenant + \"/\" + b.day\n}\n",
+          "language": "go",
+          "abstract": "Batch writer refusing keys outside the operative configured prefix.",
+          "overview": "writer.go ships batches under keys built from the configured prefix plus tenant and day, refuses anything outside the operative prefix before bytes move, and commits manifest rows only after verification."
+        },
+        {
+          "path": "internal/export/manifest.go",
+          "content": "package export\n\nimport (\n\t\"fmt\"\n\t\"time\"\n)\n\n// manifest records every shipped batch: key, checksum, byte count,\n// and commit time. The manifest is the restore path's source of\n// truth - a dry-run restore samples manifest rows, fetches their\n// keys, and re-verifies the checksums end to end. Rows are append\n// only; a re-shipped batch gets a new row rather than an update, so\n// the history of any key is complete by construction.\ntype manifestRow struct {\n\tKey       string\n\tChecksum  string\n\tBytes     int64\n\tCommitted time.Time\n}\n\nfunc (m *manifest) commit(key string, b batch) error {\n\trow := manifestRow{Key: key, Checksum: b.sum, Bytes: b.size, Committed: m.now()}\n\tif err := m.append(row); err != nil {\n\t\treturn fmt.Errorf(\"export: manifest append %s: %w\", key, err)\n\t}\n\treturn nil\n}\n\n// sample returns n manifest rows drawn evenly across the retention\n// window, the shape the quarterly dry-run restore wants: old, middle,\n// and recent keys rather than n recent ones.\nfunc (m *manifest) sample(n int) []manifestRow {\n\trows := m.rows()\n\tif len(rows) <= n {\n\t\treturn rows\n\t}\n\tstep := len(rows) / n\n\tout := make([]manifestRow, 0, n)\n\tfor i := 0; i < len(rows) && len(out) < n; i += step {\n\t\tout = append(out, rows[i])\n\t}\n\treturn out\n}\n",
+          "language": "go",
+          "abstract": "Append-only export manifest backing verified restores.",
+          "overview": "manifest.go records every shipped batch as an append-only row of key, checksum, bytes, and commit time, and samples rows evenly across the retention window for dry-run restores."
+        }
+      ],
+      "required_evidence": [
+        {"domain": "memory", "literal": "exports/v3/"}
+      ],
+      "pressure_target": {"domain": "memory", "literal": "exports/v3/"},
+      "required_domains": ["conversation", "memory", "rag"],
+      "golden": {
+        "final_answer_criteria": "States that archive exports land under the exports/v3/ prefix (keyed by tenant then day). Answers that only say the prefix comes from deployment config score 0. An answer naming the drained exports/v2/ tree scores 0. An answer presenting both the correct and a competing value without committing to one scores 0."
+      }
+    },
+    {
+      "id": "mem-export-bucket-region",
+      "stratum": "memory_only",
+      "answer_home": "memory",
+      "scenario_family": "export-bucket-mem",
+      "system": "You are the driftwatch assistant. driftwatch is a self-hosted telemetry ingest and alerting daemon. Answer using only the provided conversation, memory records, and retrieved context.",
+      "events": [
+        {"turn": {"role": "user", "content": "Capacity review follow-ups. The archive store's growth curve crossed the projection line last month; can you break the overage down by tenant so we know whether it is one loud tenant or a general drift?"}},
+        {"turn": {"role": "assistant", "content": "Broke the overage down: two tenants account for most of the excess after enabling verbose payloads, and the rest of the fleet tracks projection. Tenant-level charts are attached to the review page."}},
+        {"turn": {"role": "user", "content": "That matches my guess. Can you also refresh the storage cost model with the current archive pricing? The one in the deck still uses last year's tiers and finance will notice."}},
+        {"turn": {"role": "assistant", "content": "Refreshed the cost model with current archive pricing tiers and re-ran the projections; the deck now carries this year's numbers with the tier change footnoted for finance."}},
+        {"tool_call": {"call_id": "c1", "tool": "retrieve", "args": {"query": "archive export bucket write target", "k": 3}}},
+        {"tool_call": {"call_id": "c2", "tool": "agent_memory_search", "args": {"query": ""}}},
+        {"turn": {"role": "user", "content": "We are re-running the June archive export - which bucket should the writes land in?"}}
+      ],
+      "memory_records": [
+        {"id": "rec-export-bucket", "content": "archive exports write to the dw-archive-eu bucket; nothing else is approved", "kind": "semantic"},
+        {"id": "rec-legacy-bucket", "content": "dw-archive-us holds legacy objects for old pulls only; it was never re-approved for writes after the residency review", "kind": "semantic"},
+        {"id": "rec-cost-model", "content": "the storage cost model lives with the capacity review deck and gets re-based every pricing change; finance reads the footnotes first", "kind": "semantic"},
+        {"id": "rec-verbose-tenants", "content": "two tenants run verbose payloads since the spring enablement; their growth is expected and budgeted, not drift", "kind": "working", "workspace_id": "ws-driftwatch"}
+      ],
+      "rag_sources": [
+        {
+          "path": "internal/export/target.go",
+          "content": "package export\n\n// target resolves the archive bucket for a batch. The write target\n// ships from deployment config; dw-archive-us predates the residency\n// review and holds legacy objects only, with no new writes.\nfunc (w *writer) target() string {\n\treturn w.cfg.ArchiveBucket\n}\n",
+          "language": "go",
+          "abstract": "Archive bucket resolution from deployment config.",
+          "overview": "target.go resolves the batch write target from deployment config and notes that dw-archive-us predates the residency review, holding legacy objects with no new writes."
+        },
+        {
+          "path": "internal/export/retry.go",
+          "content": "package export\n\nimport \"time\"\n\n// retry re-ships a failed batch with capped exponential backoff.\n// Verification failures do not retry: a batch that wrote but failed\n// its checksum needs eyes, not persistence.\nfunc (w *writer) retry(b batch) error {\n\tfor wait := w.base; wait <= w.cap; wait *= 2 {\n\t\tif err := w.ship(b); err == nil {\n\t\t\treturn nil\n\t\t}\n\t\ttime.Sleep(wait)\n\t}\n\treturn errGaveUp\n}\n",
+          "language": "go",
+          "abstract": "Capped exponential retry for failed batch shipments.",
+          "overview": "retry.go re-ships failed batches with capped exponential backoff and deliberately refuses to retry verification failures, which need investigation rather than persistence."
+        },
+        {
+          "path": "docs/export-runbook.md",
+          "content": "# Export runbook\n\nRe-running an export is safe: the writer refuses keys outside the\noperative layout and the manifest appends a fresh row per shipped\nbatch, so a re-run can duplicate work but never corrupt history.\nPick the day range, confirm the bucket target from deployment\nconfig, and watch the verification counter rather than the byte\ngraph - bytes lie during compression, verification does not.\n",
+          "language": "markdown",
+          "abstract": "Runbook for safe export re-runs and what to watch.",
+          "overview": "export-runbook.md explains why re-runs are safe - operative-layout refusal plus append-only manifest - and says to confirm the bucket target from config and watch verification counts over byte graphs."
+        }
+      ],
+      "required_evidence": [
+        {"domain": "memory", "literal": "dw-archive-eu"}
+      ],
+      "pressure_target": {"domain": "memory", "literal": "dw-archive-eu"},
+      "required_domains": ["conversation", "memory", "rag"],
+      "golden": {
+        "final_answer_criteria": "States that the June re-run's writes land in the dw-archive-eu bucket. Answers that only say the target comes from deployment config score 0. An answer naming the legacy dw-archive-us bucket scores 0. An answer presenting both the correct and a competing value without committing to one scores 0."
+      }
+    },
+    {
+      "id": "mem-collector-cert-rotate",
+      "stratum": "memory_only",
+      "answer_home": "memory",
+      "scenario_family": "collector-cert-mem",
+      "system": "You are the driftwatch assistant. driftwatch is a self-hosted telemetry ingest and alerting daemon. Answer using only the provided conversation, memory records, and retrieved context.",
+      "events": [
+        {"turn": {"role": "user", "content": "Collector 2.4 rollout day. The canary ring took the build overnight - can you walk its metrics against the 2.3 baseline before we let the wave scheduler start on the general fleet this afternoon?"}},
+        {"turn": {"role": "assistant", "content": "Walked the canary ring against the 2.3 baseline: scrape latency and memory are flat, and the one divergence is the known startup log volume change from the new config parser. Nothing blocks the wave scheduler."}},
+        {"turn": {"role": "user", "content": "Good. Two boxes in the canary ring are still pinned to 2.2 from the incident freeze in the spring, and the pin file outlived the freeze. Can you lift the stale pins so the waves do not skip them forever?"}},
+        {"turn": {"role": "assistant", "content": "Lifted both stale 2.2 pins and left a note in the freeze log pointing at today's lift; the wave scheduler picked both boxes up for the first general wave and neither shows any residue from the old freeze."}},
+        {"turn": {"role": "user", "content": "The rollout dashboard also needs its version breakdown panel fixed - it still groups 2.4 release candidates with the final build, which made the canary numbers unreadable last time. Can you split them properly?"}},
+        {"turn": {"role": "assistant", "content": "Split the version breakdown panel so release candidates chart separately from the final 2.4 build; the canary week is now legible in hindsight and future rollouts inherit the corrected grouping."}},
+        {"turn": {"role": "user", "content": "Last rollout chore: the wave scheduler's pause thresholds have not been revisited since the fleet grew by a third. Can you re-derive them so one bad rack does not pause a wave that is actually healthy?"}},
+        {"turn": {"role": "assistant", "content": "Re-derived the wave pause thresholds against the current fleet size with rack-level failure isolation; a single bad rack now flags for review without pausing an otherwise healthy wave, and the derivation is linked from the scheduler config."}},
+        {"tool_call": {"call_id": "c1", "tool": "agent_memory_search", "args": {"query": ""}}},
+        {"tool_call": {"call_id": "c2", "tool": "retrieve", "args": {"query": "collector client certificate rotation cadence", "k": 3}}},
+        {"turn": {"role": "user", "content": "On what cadence do collector client certificates rotate?"}}
+      ],
+      "memory_records": [
+        {"id": "rec-cert-cadence", "content": "collector client certs rotate every 20 days through cert-loader", "kind": "semantic"},
+        {"id": "rec-wave-thresholds", "content": "wave pause thresholds are derived from fleet size with rack isolation; the derivation is linked from the scheduler config and re-runs on growth", "kind": "semantic"},
+        {"id": "rec-canary-ring", "content": "the canary ring takes every build overnight before general waves; its baseline comparisons archive with the rollout notes", "kind": "working", "workspace_id": "ws-driftwatch"},
+        {"id": "rec-freeze-log", "content": "incident freezes pin versions through the pin file; lifting a pin gets logged in the freeze log with the lift date", "kind": "semantic"}
+      ],
+      "rag_sources": [
+        {
+          "path": "docs/tls.md",
+          "content": "# driftwatch TLS\n\nEverything between collectors and the ingest edge speaks mutual TLS.\nPublic guidance suggests rotating client certificates every 90 days;\ndriftwatch fleets run a tighter cadence set in deployment config,\nbecause a collector that misses one rotation window should still be\ninside its trust lifetime at the next one. Rotation is handled by\ncert-loader, which swaps certificates without restarting the\ncollector process.\n",
+          "language": "markdown",
+          "abstract": "TLS guide: mutual TLS everywhere, rotation via cert-loader.",
+          "overview": "tls.md covers mutual TLS between collectors and the edge, the public every-90-days guidance versus the tighter config-set fleet cadence, and cert-loader's restart-free certificate swaps."
+        },
+        {
+          "path": "internal/collector/certloader.go",
+          "content": "package collector\n\nimport \"crypto/tls\"\n\n// certLoader hot-swaps the client certificate without a process\n// restart. The collector asks for the current certificate on every\n// handshake, so a swapped file takes effect on the next dial; no\n// connection is torn down early, and a failed load keeps the previous\n// certificate live rather than dropping to nothing.\ntype certLoader struct {\n\tcurrent *tls.Certificate\n}\n\nfunc (l *certLoader) get() (*tls.Certificate, error) {\n\tif c := l.reload(); c != nil {\n\t\tl.current = c\n\t}\n\treturn l.current, nil\n}\n",
+          "language": "go",
+          "abstract": "Restart-free client certificate hot-swapping.",
+          "overview": "certloader.go serves the current client certificate per handshake so swapped files take effect on the next dial, and keeps the previous certificate live if a reload fails."
+        },
+        {
+          "path": "internal/collector/dial.go",
+          "content": "package collector\n\nimport (\n\t\"context\"\n\t\"time\"\n)\n\n// dial connects the collector to its ingest edge with bounded\n// backoff. Redials reuse the resolver cache for one cycle so a DNS\n// blip does not amplify into a thundering herd, and every attempt\n// re-reads the client certificate through the loader, which is what\n// makes certificate rotation invisible to the dial path.\nfunc (c *Collector) dial(ctx context.Context) error {\n\tfor wait := time.Second; ; wait = bounded(wait * 2) {\n\t\tif conn, err := c.connect(ctx); err == nil {\n\t\t\tc.conn = conn\n\t\t\treturn nil\n\t\t}\n\t\tselect {\n\t\tcase <-time.After(wait):\n\t\tcase <-ctx.Done():\n\t\t\treturn ctx.Err()\n\t\t}\n\t}\n}\n",
+          "language": "go",
+          "abstract": "Bounded-backoff dialing that re-reads certificates per attempt.",
+          "overview": "dial.go connects collectors to the edge with bounded backoff, reuses the resolver cache for one cycle to avoid thundering herds, and re-reads the client certificate each attempt."
+        }
+      ],
+      "required_evidence": [
+        {"domain": "memory", "literal": "every 20 days"}
+      ],
+      "pressure_target": {"domain": "memory", "literal": "every 20 days"},
+      "required_domains": ["conversation", "memory", "rag"],
+      "golden": {
+        "final_answer_criteria": "States that collector client certificates rotate every 20 days (through cert-loader). Answers that only say the cadence is set in deployment config score 0. An answer giving the public every-90-days guidance as the fleet cadence scores 0. An answer presenting both the correct and a competing value without committing to one scores 0."
+      }
+    },
+    {
+      "id": "mem-collector-cert-bundle",
+      "stratum": "memory_only",
+      "answer_home": "memory",
+      "scenario_family": "collector-cert-mem",
+      "system": "You are the driftwatch assistant. driftwatch is a self-hosted telemetry ingest and alerting daemon. Answer using only the provided conversation, memory records, and retrieved context.",
+      "events": [
+        {"turn": {"role": "user", "content": "Fleet expansion prep. The two new racks arrive Thursday and their collectors need bootstrap profiles cut ahead of time. Can you generate profiles for both racks with the current fleet defaults baked in?"}},
+        {"turn": {"role": "assistant", "content": "Cut bootstrap profiles for both incoming racks with current fleet defaults baked in; the profiles are staged in the provisioning share, keyed by rack serial so the installers cannot cross them."}},
+        {"turn": {"role": "user", "content": "The provisioning checklist also still tells installers to hand-edit the edge address into each collector. We moved that to DNS ages ago. Can you strip the stale step before Thursday's crew reads it?"}},
+        {"turn": {"role": "assistant", "content": "Stripped the hand-edit step from the provisioning checklist and replaced it with the DNS pointer note; Thursday's crew gets a checklist that matches how the fleet has actually bootstrapped since the move."}},
+        {"tool_call": {"call_id": "c1", "tool": "retrieve", "args": {"query": "collector CA bundle trust pin", "k": 3}}},
+        {"tool_call": {"call_id": "c2", "tool": "agent_memory_search", "args": {"query": ""}}},
+        {"turn": {"role": "user", "content": "Which CA bundle do the new collectors pin?"}}
+      ],
+      "memory_records": [
+        {"id": "rec-cert-bundle", "content": "collectors pin the dw-root-2027 bundle after the trust rotation", "kind": "semantic"},
+        {"id": "rec-bundle-drain", "content": "dw-root-2025 finished its drain in spring; kept only to verify old archive signatures", "kind": "semantic"},
+        {"id": "rec-provisioning", "content": "bootstrap profiles stage in the provisioning share keyed by rack serial; installers never edit a profile by hand", "kind": "working", "workspace_id": "ws-driftwatch"},
+        {"id": "rec-rack-intake", "content": "new racks join the canary ring for their first week before entering general waves; intake notes archive with the rollout log", "kind": "semantic"}
+      ],
+      "rag_sources": [
+        {
+          "path": "internal/collector/trust.go",
+          "content": "package collector\n\n// trust loads the pinned CA bundle named by deployment config.\n// dw-root-2025 finished its trust drain; nothing on the fleet should\n// still present it, and the loader logs any peer that does.\nfunc (c *Collector) trust() (*bundle, error) {\n\treturn loadBundle(c.cfg.PinnedBundle)\n}\n",
+          "language": "go",
+          "abstract": "Pinned CA bundle loading from deployment config.",
+          "overview": "trust.go loads the pinned CA bundle named by deployment config and logs any peer still presenting the drained dw-root-2025 roots."
+        },
+        {
+          "path": "internal/collector/register.go",
+          "content": "package collector\n\nimport \"fmt\"\n\n// register announces a new collector to the edge with its rack\n// serial and bootstrap profile hash. The edge refuses a serial it\n// has already seen with a different hash - cloned profiles are the\n// classic provisioning mistake and this is where they surface.\nfunc (c *Collector) register() error {\n\tok, err := c.edge.announce(c.serial, c.profileHash)\n\tif err != nil {\n\t\treturn fmt.Errorf(\"collector: register: %w\", err)\n\t}\n\tif !ok {\n\t\treturn errSerialConflict\n\t}\n\treturn nil\n}\n",
+          "language": "go",
+          "abstract": "Collector registration surfacing cloned-profile conflicts.",
+          "overview": "register.go announces new collectors by rack serial and profile hash, letting the edge refuse serial conflicts so cloned bootstrap profiles surface at registration."
+        },
+        {
+          "path": "docs/collector-fleet.md",
+          "content": "# Collector fleet\n\nNew hardware joins through bootstrap profiles cut from fleet\ndefaults, never by hand-editing a box. Provisioning resolves the\nedge by DNS, pins trust to the bundle named in deployment config,\nand parks each new rack in the canary ring for its first week so\nsurprises surface where the blast radius is one rack, not the fleet.\n",
+          "language": "markdown",
+          "abstract": "Fleet intake: profile-based bootstrap, DNS, canary-first racks.",
+          "overview": "collector-fleet.md covers profile-based bootstrap from fleet defaults, DNS-resolved edges, config-named trust pinning, and the canary-first week for new racks."
+        }
+      ],
+      "required_evidence": [
+        {"domain": "memory", "literal": "dw-root-2027"}
+      ],
+      "pressure_target": {"domain": "memory", "literal": "dw-root-2027"},
+      "required_domains": ["conversation", "memory", "rag"],
+      "golden": {
+        "final_answer_criteria": "States that collectors pin the dw-root-2027 bundle. Answers that only say the bundle is named in deployment config score 0. An answer naming the drained dw-root-2025 bundle scores 0. An answer presenting both the correct and a competing value without committing to one scores 0."
+      }
+    },
+    {
+      "id": "mem-retention-floor-days",
+      "stratum": "memory_only",
+      "answer_home": "memory",
+      "scenario_family": "retention-floor-mem",
+      "system": "You are the driftwatch assistant. driftwatch is a self-hosted telemetry ingest and alerting daemon. Answer using only the provided conversation, memory records, and retrieved context.",
+      "events": [
+        {"turn": {"role": "user", "content": "Customer request triage. The bakery chain wants their dashboards to open on the outage view by default because that is all their ops person ever looks at. Reasonable? And if so can you just set it for them?"}},
+        {"turn": {"role": "assistant", "content": "Reasonable and done: their org default now opens on the outage view, individual users can still override it, and I noted the change in their account log so support sees it before anyone asks."}},
+        {"turn": {"role": "user", "content": "Next one is stranger: the logistics tenant asks why their ingest graphs dip every day at the same hour and whether we are throttling them. I suspect it is their own batch window but can you confirm from our side before I answer?"}},
+        {"turn": {"role": "assistant", "content": "Confirmed from admission logs: the dip is their own nightly batch pause, not throttling on our side - their producers simply go quiet for the hour. I attached the admission graph overlay to the ticket so you can show rather than tell."}},
+        {"turn": {"role": "user", "content": "Third: a prospect on the eval plan wants to know whether alert routing can page two rotations at once for the same alert class. I thought the router handled fan-out but I do not want to promise from memory. Can you check?"}},
+        {"turn": {"role": "assistant", "content": "Checked the router: destination fan-out per alert class is supported and two pager destinations can gate independently, so paging two rotations at once works today; I added a config example to the prospect thread."}},
+        {"turn": {"role": "user", "content": "Last one: the workshop tenant asks for their old April data back. Their plan file says their window ended long ago, so I assume the answer is no, but can you confirm what actually remains before I write the refusal?"}},
+        {"turn": {"role": "assistant", "content": "Confirmed: April is fully outside their retained window and the segments were retired by retention sweeps at the time, so nothing remains to restore; I drafted the refusal with the retirement dates cited so the answer is factual rather than policy-flavored."}},
+        {"tool_call": {"call_id": "c1", "tool": "agent_memory_search", "args": {"query": ""}}},
+        {"tool_call": {"call_id": "c2", "tool": "retrieve", "args": {"query": "tenant retention minimum clamp", "k": 3}}},
+        {"turn": {"role": "user", "content": "What is the lowest retention a tenant can actually configure?"}}
+      ],
+      "memory_records": [
+        {"id": "rec-retention-clamp", "content": "tenant retention clamps to a 14-day floor whatever the plan file says", "kind": "semantic"},
+        {"id": "rec-account-log", "content": "tenant-facing setting changes get noted in the account log the same day; support reads it before answering any billing-adjacent question", "kind": "semantic"},
+        {"id": "rec-refusal-style", "content": "data-restoration refusals cite the actual retirement dates; factual beats policy-flavored in every escalation we have seen", "kind": "semantic"},
+        {"id": "rec-triage-rotation", "content": "customer triage rotates weekly; the handoff note lists open threads with their next expected action and owner", "kind": "working", "workspace_id": "ws-driftwatch"}
+      ],
+      "rag_sources": [
+        {
+          "path": "docs/retention.md",
+          "content": "# Tenant retention\n\nEach tenant's retained window comes from their plan file entry, and\nthe daemon clamps configured values to the shipped floor. Pre-GA\nbuilds enforced a 7-day floor; GA changed the clamp and the old\nfigure survives only in archived release notes. Values below the\noperative floor are raised silently at load rather than rejected,\nso a too-low plan entry works, it just works at the floor.\n",
+          "language": "markdown",
+          "abstract": "Retention guide: plan-file windows clamped to the shipped floor.",
+          "overview": "retention.md explains plan-file retention windows and the load-time clamp to the shipped floor, noting the pre-GA 7-day floor survives only in archived release notes and low values are raised silently."
+        },
+        {
+          "path": "internal/retention/clamp.go",
+          "content": "package retention\n\nimport \"time\"\n\n// clamp raises a configured retention below the operative floor up\n// to the floor at load time. Raising silently is deliberate: a plan\n// file written against an older floor keeps working after an\n// upgrade, and the effective value is always visible in the loaded\n// config dump rather than hidden in a rejection path.\nfunc clamp(configured, floor time.Duration) time.Duration {\n\tif configured < floor {\n\t\treturn floor\n\t}\n\treturn configured\n}\n",
+          "language": "go",
+          "abstract": "Load-time clamp raising sub-floor retention values.",
+          "overview": "clamp.go raises configured retention below the operative floor at load time, keeping older plan files working across upgrades with the effective value visible in the config dump."
+        },
+        {
+          "path": "internal/retention/plan.go",
+          "content": "package retention\n\nimport (\n\t\"fmt\"\n\t\"time\"\n)\n\n// planEntry is one tenant's row in the plan file: the retained\n// window, the export allowance, and the burst multiplier their\n// admission budget tolerates. The file hot-reloads; a parse error\n// keeps the previous table live and raises a config alert instead of\n// dropping tenants to defaults mid-flight.\ntype planEntry struct {\n\tRetained time.Duration\n\tExports  int\n\tBurst    float64\n}\n\nfunc (t *table) load(raw []byte) error {\n\tnext, err := parse(raw)\n\tif err != nil {\n\t\tt.alert(fmt.Errorf(\"retention: plan parse: %w\", err))\n\t\treturn err\n\t}\n\tt.swap(next)\n\treturn nil\n}\n",
+          "language": "go",
+          "abstract": "Hot-reloaded tenant plan table with parse-safe swaps.",
+          "overview": "plan.go holds each tenant's retained window, export allowance, and burst multiplier, hot-reloads the plan file, and keeps the previous table live on parse errors instead of dropping tenants to defaults."
+        }
+      ],
+      "required_evidence": [
+        {"domain": "memory", "literal": "14-day floor"}
+      ],
+      "pressure_target": {"domain": "memory", "literal": "14-day floor"},
+      "required_domains": ["conversation", "memory", "rag"],
+      "golden": {
+        "final_answer_criteria": "States that tenant retention clamps to a 14-day floor regardless of the plan file. Answers that only say values are clamped to a shipped floor without naming 14 days score 0. An answer giving the pre-GA 7-day floor scores 0. An answer presenting both the correct and a competing value without committing to one scores 0."
+      }
+    },
+    {
+      "id": "mem-retention-floor-audit",
+      "stratum": "memory_only",
+      "answer_home": "memory",
+      "scenario_family": "retention-floor-mem",
+      "system": "You are the driftwatch assistant. driftwatch is a self-hosted telemetry ingest and alerting daemon. Answer using only the provided conversation, memory records, and retrieved context.",
+      "events": [
+        {"turn": {"role": "user", "content": "Compliance checklist week. The control matrix wants evidence that admin actions are attributable end to end. Can you pull a sample of last month's admin actions with their audit entries lined up side by side?"}},
+        {"turn": {"role": "assistant", "content": "Pulled thirty admin actions from last month and lined each up with its audit entry: actor, action, and timestamp all match end to end, and the sample sheet is in the compliance folder ready for the reviewer."}},
+        {"turn": {"role": "user", "content": "The matrix also asks whether audit entries can be altered after the fact. I know the store is append-only but the reviewer wants that stated with evidence, not asserted. Can you put together the write-path proof?"}},
+        {"turn": {"role": "assistant", "content": "Assembled the write-path proof: the audit store exposes append and read only, with no update or delete path in the schema or the code, and I captured the schema dump plus the handler list as evidence in the compliance folder."}},
+        {"tool_call": {"call_id": "c1", "tool": "retrieve", "args": {"query": "audit log retention period", "k": 3}}},
+        {"tool_call": {"call_id": "c2", "tool": "agent_memory_search", "args": {"query": ""}}},
+        {"turn": {"role": "user", "content": "How long are audit log entries kept?"}}
+      ],
+      "memory_records": [
+        {"id": "rec-audit-retention", "content": "audit log entries keep for 365 days, pinned outside tenant retention", "kind": "semantic"},
+        {"id": "rec-audit-draft", "content": "the 180 days audit figure came from the draft compliance matrix; superseded before rollout", "kind": "semantic"},
+        {"id": "rec-compliance-folder", "content": "compliance evidence lands in the shared folder with the control number in the filename; reviewers navigate by control, not by date", "kind": "working", "workspace_id": "ws-driftwatch"},
+        {"id": "rec-sample-style", "content": "evidence samples pair each action with its audit entry side by side; reviewers accept lined-up samples without re-pulling", "kind": "semantic"}
+      ],
+      "rag_sources": [
+        {
+          "path": "docs/audit.md",
+          "content": "# Audit log\n\nEvery admin action writes an audit entry: actor, action, target,\nand timestamp. The store is append-only and its retention is pinned\nin deployment config, separate from tenant data retention. An early\ncompliance draft set audit retention at 180 days; the shipped pin\ncomes from deployment config and the draft figure never rolled out.\n",
+          "language": "markdown",
+          "abstract": "Audit log guide: append-only store with pinned retention.",
+          "overview": "audit.md covers append-only audit entries for admin actions and their config-pinned retention, separate from tenant data; the draft 180 days figure never rolled out."
+        },
+        {
+          "path": "internal/audit/log.go",
+          "content": "package audit\n\nimport \"time\"\n\n// entry is one attributable admin action. Entries are append-only:\n// the store exposes no update or delete path, and retention is\n// enforced by age at the storage layer rather than by any handler.\ntype entry struct {\n\tActor  string\n\tAction string\n\tTarget string\n\tAt     time.Time\n}\n\nfunc (l *log) append(e entry) error {\n\treturn l.store.append(e)\n}\n",
+          "language": "go",
+          "abstract": "Append-only audit entries with storage-layer retention.",
+          "overview": "log.go defines attributable audit entries with no update or delete path, leaving retention to age-based enforcement at the storage layer."
+        },
+        {
+          "path": "internal/audit/rotate.go",
+          "content": "package audit\n\n// rotate seals the active audit file daily and opens a fresh one;\n// sealed files are checksummed and the checksum chain is what the\n// compliance reviewers verify. Age-based retirement walks sealed\n// files only - the active file is never a candidate - and every\n// retirement is itself an audited action, so the trail records its\n// own trimming.\nfunc (l *log) rotate() error {\n\tif err := l.seal(); err != nil {\n\t\treturn err\n\t}\n\treturn l.open()\n}\n",
+          "language": "go",
+          "abstract": "Daily audit file rotation with checksummed seals.",
+          "overview": "rotate.go seals the active audit file daily into a checksummed chain, retires sealed files by age only, and records each retirement as an audited action."
+        }
+      ],
+      "required_evidence": [
+        {"domain": "memory", "literal": "for 365 days"}
+      ],
+      "pressure_target": {"domain": "memory", "literal": "for 365 days"},
+      "required_domains": ["conversation", "memory", "rag"],
+      "golden": {
+        "final_answer_criteria": "States that audit log entries are kept for 365 days, pinned separately from tenant retention. Answers that only say audit retention is pinned in deployment config score 0. An answer giving the draft 180 days figure scores 0. An answer presenting both the correct and a competing value without committing to one scores 0."
+      }
+    },
+    {
       "id": "join-ingest-token",
       "stratum": "cross_domain_join",
       "answer_home": "join",

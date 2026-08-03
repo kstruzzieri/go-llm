@@ -1,0 +1,101 @@
+{
+  "id": "mem-collector-cert-bundle-mixed",
+  "source": "assembly-corpus-mixed",
+  "captured_at": "0001-01-01T00:00:00Z",
+  "system": "You are the driftwatch assistant. driftwatch is a self-hosted telemetry ingest and alerting daemon. Answer using only the provided conversation, memory records, and retrieved context.",
+  "tools": null,
+  "turns": [
+    {
+      "role": "user",
+      "content": "Fleet expansion prep. The two new racks arrive Thursday and their collectors need bootstrap profiles cut ahead of time. Can you generate profiles for both racks with the current fleet defaults baked in?"
+    },
+    {
+      "role": "assistant",
+      "content": "Cut bootstrap profiles for both incoming racks with current fleet defaults baked in; the profiles are staged in the provisioning share, keyed by rack serial so the installers cannot cross them."
+    },
+    {
+      "role": "user",
+      "content": "The provisioning checklist also still tells installers to hand-edit the edge address into each collector. We moved that to DNS ages ago. Can you strip the stale step before Thursday's crew reads it?"
+    },
+    {
+      "role": "assistant",
+      "content": "Stripped the hand-edit step from the provisioning checklist and replaced it with the DNS pointer note; Thursday's crew gets a checklist that matches how the fleet has actually bootstrapped since the move."
+    },
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "id": "c1",
+          "name": "retrieve",
+          "arguments": {
+            "query": "collector CA bundle trust pin",
+            "k": 3
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "content": "### source: \"internal/collector/trust.go\"\npurpose: Pinned CA bundle loading from deployment config.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n--- source: \"internal/collector/trust.go\" (lines 1-8, similarity: 1.00) ---\n1| package collector\n2| \n3| // trust loads the pinned CA bundle named by deployment config.\n4| // dw-root-2025 finished its trust drain; nothing on the fleet should\n5| // still present it, and the loader logs any peer that does.\n6| func (c *Collector) trust() (*bundle, error) {\n7| \treturn loadBundle(c.cfg.PinnedBundle)\n8| }\n\n### source: \"internal/collector/register.go\"\npurpose: Collector registration surfacing cloned-profile conflicts.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n\n### source: \"docs/collector-fleet.md\"\npurpose: Fleet intake: profile-based bootstrap, DNS, canary-first racks.\nlanguage: markdown\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n",
+      "tool_call_id": "c1",
+      "name": "retrieve"
+    },
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "id": "c2",
+          "name": "agent_memory_search",
+          "arguments": {
+            "query": ""
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "content": "rec-bundle-drain · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:\nrec-cert-bundle · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src: · collectors pin the dw-root-2027 bundle after the trust rotation\nrec-provisioning · working · created:2025-07-27 · updated:2025-07-27 · scope:session · ns: · src:\nrec-rack-intake · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:",
+      "tool_call_id": "c2",
+      "name": "agent_memory_search"
+    },
+    {
+      "role": "user",
+      "content": "Which CA bundle do the new collectors pin?"
+    }
+  ],
+  "golden": {
+    "tool_calls": null,
+    "final_answer_criteria": "States that collectors pin the dw-root-2027 bundle. Answers that only say the bundle is named in deployment config score 0. An answer naming the drained dw-root-2025 bundle scores 0. An answer presenting both the correct and a competing value without committing to one scores 0."
+  },
+  "assembly_eval": {
+    "pair_id": "mem-collector-cert-bundle",
+    "mode": "mixed",
+    "candidate_ids": [
+      "15683c7e58834c14c5e1d5c5c3b9ab45359a8be84ad351f94c6b062b5ea89e13",
+      "5cee590bb77db1dfb57bef45dcf5401e85494c27bb6e868dfe40d66710aed1eb",
+      "60006817e8d0dd4847274341ac07c9755963c925991f189504f142b1440a7fd1",
+      "rec-bundle-drain",
+      "rec-cert-bundle",
+      "rec-provisioning",
+      "rec-rack-intake"
+    ],
+    "estimated_prompt_tokens": 631,
+    "state_digest": "c1efc21a9b284b2fa2a943491ad16533c3f7797cfcfb2a130e783a4f18235fd7",
+    "subjects": [
+      "(c1|rag|internal/collector/trust.go)",
+      "(c1|rag|internal/collector/register.go)",
+      "(c1|rag|docs/collector-fleet.md)",
+      "(c2|memory|rec-bundle-drain)",
+      "(c2|memory|rec-cert-bundle)",
+      "(c2|memory|rec-provisioning)",
+      "(c2|memory|rec-rack-intake)"
+    ],
+    "stratum": "memory_only",
+    "answer_home": "memory",
+    "scenario_family": "collector-cert-mem",
+    "budget": 672,
+    "raw_state_tokens": 1120,
+    "pressure_level": "critical",
+    "shed_bytes": 1668
+  }
+}

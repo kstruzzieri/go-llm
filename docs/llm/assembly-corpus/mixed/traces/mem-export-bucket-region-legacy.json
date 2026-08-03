@@ -1,0 +1,67 @@
+{
+  "id": "mem-export-bucket-region-legacy",
+  "source": "assembly-corpus-mixed",
+  "captured_at": "0001-01-01T00:00:00Z",
+  "system": "You are the driftwatch assistant. driftwatch is a self-hosted telemetry ingest and alerting daemon. Answer using only the provided conversation, memory records, and retrieved context.",
+  "tools": null,
+  "turns": [
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "id": "c2",
+          "name": "agent_memory_search",
+          "arguments": {
+            "query": ""
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "content": "rec-cost-model · semantic · 2025-07-27 · the storage cost model lives with the capacity review deck and gets re-based every pricing change; finance reads the footnotes first\nrec-export-bucket · semantic · 2025-07-27 · archive exports write to the dw-archive-eu bucket; nothing else is approved\nrec-legacy-bucket · semantic · 2025-07-27 · dw-archive-us holds legacy objects for old pulls only; it was never re-approved for writes after the residency review\nrec-verbose-tenants · working · 2025-07-27 · two tenants run verbose payloads since the spring enablement; their growth is expected and budgeted, not drift",
+      "tool_call_id": "c2",
+      "name": "agent_memory_search"
+    },
+    {
+      "role": "user",
+      "content": "We are re-running the June archive export - which bucket should the writes land in?"
+    }
+  ],
+  "golden": {
+    "tool_calls": null,
+    "final_answer_criteria": "States that the June re-run's writes land in the dw-archive-eu bucket. Answers that only say the target comes from deployment config score 0. An answer naming the legacy dw-archive-us bucket scores 0. An answer presenting both the correct and a competing value without committing to one scores 0."
+  },
+  "assembly_eval": {
+    "pair_id": "mem-export-bucket-region",
+    "mode": "legacy",
+    "candidate_ids": [
+      "19d42122af3b11c650e7ef5011773917c6bd192540e5eac63686473ad76eb07e",
+      "56766166d90bb9fc85ab53b4b37c803672c8e20112a3b808aa7369c3e5efc49a",
+      "7914b72605d28836ac839ff6639d9c0a9747ed89cefc1d200eac4b9687a15cfe",
+      "rec-cost-model",
+      "rec-export-bucket",
+      "rec-legacy-bucket",
+      "rec-verbose-tenants"
+    ],
+    "estimated_prompt_tokens": 223,
+    "state_digest": "d55dcf2d7b2f709916cf43a7bac547cf87082b9096feeeb5d48d9a40a1a8825b",
+    "subjects": [
+      "(c1|rag|internal/export/target.go)",
+      "(c1|rag|internal/export/retry.go)",
+      "(c1|rag|docs/export-runbook.md)",
+      "(c2|memory|rec-cost-model)",
+      "(c2|memory|rec-export-bucket)",
+      "(c2|memory|rec-legacy-bucket)",
+      "(c2|memory|rec-verbose-tenants)"
+    ],
+    "stratum": "memory_only",
+    "answer_home": "memory",
+    "scenario_family": "export-bucket-mem",
+    "budget": 673,
+    "raw_state_tokens": 1121,
+    "pressure_level": "ok",
+    "shed_messages": 6,
+    "shed_bytes": 3296
+  }
+}

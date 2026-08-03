@@ -1,0 +1,68 @@
+{
+  "id": "mem-retention-floor-days-legacy",
+  "source": "assembly-corpus-mixed",
+  "captured_at": "0001-01-01T00:00:00Z",
+  "system": "You are the driftwatch assistant. driftwatch is a self-hosted telemetry ingest and alerting daemon. Answer using only the provided conversation, memory records, and retrieved context.",
+  "tools": null,
+  "turns": [
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "id": "c2",
+          "name": "retrieve",
+          "arguments": {
+            "query": "tenant retention minimum clamp",
+            "k": 3
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "content": "### source: \"docs/retention.md\"\npurpose: Retention guide: plan-file windows clamped to the shipped floor.\noverview: retention.md explains plan-file retention windows and the load-time clamp to the shipped floor, noting the pre-GA 7-day floor survives only in archived release notes and low values are raised silently.\nlanguage: markdown\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n--- source: \"docs/retention.md\" (lines 1-8, similarity: 1.00) ---\n1| # Tenant retention\n2| \n3| Each tenant's retained window comes from their plan file entry, and\n4| the daemon clamps configured values to the shipped floor. Pre-GA\n5| builds enforced a 7-day floor; GA changed the clamp and the old\n6| figure survives only in archived release notes. Values below the\n7| operative floor are raised silently at load rather than rejected,\n8| so a too-low plan entry works, it just works at the floor.\n\n### source: \"internal/retention/clamp.go\"\npurpose: Load-time clamp raising sub-floor retention values.\noverview: clamp.go raises configured retention below the operative floor at load time, keeping older plan files working across upgrades with the effective value visible in the config dump.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n--- source: \"internal/retention/clamp.go\" (lines 1-15, similarity: 1.00) ---\n1| package retention\n2| \n3| import \"time\"\n4| \n5| // clamp raises a configured retention below the operative floor up\n6| // to the floor at load time. Raising silently is deliberate: a plan\n7| // file written against an older floor keeps working after an\n8| // upgrade, and the effective value is always visible in the loaded\n9| // config dump rather than hidden in a rejection path.\n10| func clamp(configured, floor time.Duration) time.Duration {\n11| \tif configured \u003c floor {\n12| \t\treturn floor\n13| \t}\n14| \treturn configured\n15| }\n\n### source: \"internal/retention/plan.go\"\npurpose: Hot-reloaded tenant plan table with parse-safe swaps.\noverview: plan.go holds each tenant's retained window, export allowance, and burst multiplier, hot-reloads the plan file, and keeps the previous table live on parse errors instead of dropping tenants to defaults.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n--- source: \"internal/retention/plan.go\" (lines 1-27, similarity: 1.00) ---\n1| package retention\n2| \n3| import (\n4| \t\"fmt\"\n5| \t\"time\"\n6| )\n7| \n8| // planEntry is one tenant's row in the plan file: the retained\n9| // window, the export allowance, and the burst multiplier their\n10| // admission budget tolerates. The file hot-reloads; a parse error\n11| // keeps the previous table live and raises a config alert instead of\n12| // dropping tenants to defaults mid-flight.\n13| type planEntry struct {\n14| \tRetained time.Duration\n15| \tExports  int\n16| \tBurst    float64\n17| }\n18| \n19| func (t *table) load(raw []byte) error {\n20| \tnext, err := parse(raw)\n21| \tif err != nil {\n22| \t\tt.alert(fmt.Errorf(\"retention: plan parse: %w\", err))\n23| \t\treturn err\n24| \t}\n25| \tt.swap(next)\n26| \treturn nil\n27| }\n",
+      "tool_call_id": "c2",
+      "name": "retrieve"
+    },
+    {
+      "role": "user",
+      "content": "What is the lowest retention a tenant can actually configure?"
+    }
+  ],
+  "golden": {
+    "tool_calls": null,
+    "final_answer_criteria": "States that tenant retention clamps to a 14-day floor regardless of the plan file. Answers that only say values are clamped to a shipped floor without naming 14 days score 0. An answer giving the pre-GA 7-day floor scores 0. An answer presenting both the correct and a competing value without committing to one scores 0."
+  },
+  "assembly_eval": {
+    "pair_id": "mem-retention-floor-days",
+    "mode": "legacy",
+    "candidate_ids": [
+      "ac1f3c45c480668c5eefd02a9f8577e10346e744ca4f7164209b03d12a173fec",
+      "d3171264cc09b8f6c0630158deffe59d79066a32998a1678b83683459e2d6322",
+      "ee1eed4cc288e96040ed415925e61d2881036d6035df3dd46e22c228abf3148b",
+      "rec-account-log",
+      "rec-refusal-style",
+      "rec-retention-clamp",
+      "rec-triage-rotation"
+    ],
+    "estimated_prompt_tokens": 840,
+    "state_digest": "98dfd2971846670a7a585c9baf7d28baf6ea07d45df15d301bc3604ae56e22a8",
+    "subjects": [
+      "(c1|memory|rec-account-log)",
+      "(c1|memory|rec-refusal-style)",
+      "(c1|memory|rec-retention-clamp)",
+      "(c1|memory|rec-triage-rotation)",
+      "(c2|rag|docs/retention.md)",
+      "(c2|rag|internal/retention/clamp.go)",
+      "(c2|rag|internal/retention/plan.go)"
+    ],
+    "stratum": "memory_only",
+    "answer_home": "memory",
+    "scenario_family": "retention-floor-mem",
+    "budget": 928,
+    "raw_state_tokens": 1546,
+    "pressure_level": "critical",
+    "shed_messages": 10,
+    "shed_bytes": 2393
+  }
+}

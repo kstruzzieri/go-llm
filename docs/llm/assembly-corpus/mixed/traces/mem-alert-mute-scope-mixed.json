@@ -1,0 +1,117 @@
+{
+  "id": "mem-alert-mute-scope-mixed",
+  "source": "assembly-corpus-mixed",
+  "captured_at": "0001-01-01T00:00:00Z",
+  "system": "You are the driftwatch assistant. driftwatch is a self-hosted telemetry ingest and alerting daemon. Answer using only the provided conversation, memory records, and retrieved context.",
+  "tools": null,
+  "turns": [
+    {
+      "role": "user",
+      "content": "The lab collector has been spraying bogus disk-pressure warnings since its kernel update, three or four an hour, and every one of them lights the dashboard like a real event. Can you dig into whether the update changed how the statfs numbers read?"
+    },
+    {
+      "role": "assistant",
+      "content": "Found it: the kernel update changed how reserved blocks are reported, so the collector's free-space math went pessimistic by exactly the reserved fraction. I corrected the calculation to the new accounting and the bogus warnings stopped on the next scrape."
+    },
+    {
+      "role": "user",
+      "content": "Nice. While you were in there the warning history got polluted - the dashboard's disk panel now shows a wall of false events that will confuse anyone reading it next week. Can you annotate or clear the false span so the history stays legible?"
+    },
+    {
+      "role": "assistant",
+      "content": "Annotated the false span with a note tying it to the kernel update and collapsed it out of the default dashboard view; the raw events remain queryable for anyone who wants the forensic detail, but the panel reads clean again."
+    },
+    {
+      "role": "user",
+      "content": "The same update is queued for the prod collectors next month. I would rather not rediscover this the hard way at scale. Can you gate the prod rollout on the corrected calculation landing first, and note the ordering somewhere it will be seen?"
+    },
+    {
+      "role": "assistant",
+      "content": "Gated the prod kernel rollout on the corrected free-space calculation: the rollout checklist now lists it as a hard prerequisite with a link to the lab investigation, and the fleet digest carries the ordering note this week."
+    },
+    {
+      "role": "user",
+      "content": "One more from the same episode: the disk-pressure warning class pages at a threshold that assumed the old pessimistic math. With the corrected numbers the threshold is effectively looser than anyone agreed to. Can you re-derive it against the new accounting?"
+    },
+    {
+      "role": "assistant",
+      "content": "Re-derived the disk-pressure threshold against the corrected accounting so the effective headroom matches what the review originally signed off on; the change is staged with the threshold history linked for the next alerting review."
+    },
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "id": "c1",
+          "name": "agent_memory_search",
+          "arguments": {
+            "query": ""
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "content": "rec-digest-notes · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:\nrec-lab-kernel · working · created:2025-07-27 · updated:2025-07-27 · scope:session · ns: · src:\nrec-mute-scope · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src: · maintenance mutes cover dashboard alerts only; pager escalations keep firing\nrec-threshold-history · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:",
+      "tool_call_id": "c1",
+      "name": "agent_memory_search"
+    },
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "id": "c2",
+          "name": "retrieve",
+          "arguments": {
+            "query": "maintenance mute pager escalation scope",
+            "k": 3
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "content": "### source: \"docs/alerting.md\"\npurpose: Alerting guide: per-destination gating and suppression scope.\nlanguage: markdown\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n--- source: \"docs/alerting.md\" (lines 1-10, similarity: 1.00) ---\n1| # driftwatch alerting\n2| \n3| Alerts fan out per destination: dashboards, the fleet digest, and the\n4| pager each gate delivery separately, so suppression at one destination\n5| implies nothing about the others.\n6| \n7| Before 1.0 a mute silenced the pager escalation path as well; that\n8| behaviour was removed before GA after a muted page hid a real outage.\n9| Consult the destination gate chain in the alerting configuration for\n10| what any given suppression actually covers.\n\n### source: \"internal/alert/escalate.go\"\npurpose: Short pager ladder with per-rung ack windows.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n\n### source: \"internal/alert/dedupe.go\"\npurpose: Alert dedupe with widening cool-down for flapping keys.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n",
+      "tool_call_id": "c2",
+      "name": "retrieve"
+    },
+    {
+      "role": "user",
+      "content": "While a maintenance mute is active, do pager escalations still fire?"
+    }
+  ],
+  "golden": {
+    "tool_calls": null,
+    "final_answer_criteria": "States that pager escalations still fire while a maintenance mute is active (mutes cover dashboard alerts only). An answer claiming a mute silences the pager, as pre-1.0 behaviour did, scores 0. Answers that only describe per-destination gating without committing score 0. An answer presenting both the correct and a competing value without committing to one scores 0."
+  },
+  "assembly_eval": {
+    "pair_id": "mem-alert-mute-scope",
+    "mode": "mixed",
+    "candidate_ids": [
+      "036b7f48b8e008d2195917596694f22ddeace9225d8f8cb0cf2f4389f1b11696",
+      "31b341b97b5a4cdde6058595a7d88016cceb712df9654ae5589be78832606bf4",
+      "f327f686a06fb9a0b6eda3b9b4731546b6a8f6ff61a71f3ff2ad896461319a0c",
+      "rec-digest-notes",
+      "rec-lab-kernel",
+      "rec-mute-scope",
+      "rec-threshold-history"
+    ],
+    "estimated_prompt_tokens": 954,
+    "state_digest": "340bed349ab8a9b0f9259a7aa7a9c6cce9d6a55c8a2474c1b9deffaed1007bba",
+    "subjects": [
+      "(c1|memory|rec-digest-notes)",
+      "(c1|memory|rec-lab-kernel)",
+      "(c1|memory|rec-mute-scope)",
+      "(c1|memory|rec-threshold-history)",
+      "(c2|rag|docs/alerting.md)",
+      "(c2|rag|internal/alert/escalate.go)",
+      "(c2|rag|internal/alert/dedupe.go)"
+    ],
+    "stratum": "memory_only",
+    "answer_home": "memory",
+    "scenario_family": "alert-mute-mem",
+    "budget": 1022,
+    "raw_state_tokens": 1703,
+    "pressure_level": "critical",
+    "shed_bytes": 2578
+  }
+}

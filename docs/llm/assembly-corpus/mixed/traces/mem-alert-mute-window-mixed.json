@@ -1,0 +1,115 @@
+{
+  "id": "mem-alert-mute-window-mixed",
+  "source": "assembly-corpus-mixed",
+  "captured_at": "0001-01-01T00:00:00Z",
+  "system": "You are the driftwatch assistant. driftwatch is a self-hosted telemetry ingest and alerting daemon. Answer using only the provided conversation, memory records, and retrieved context.",
+  "tools": null,
+  "turns": [
+    {
+      "role": "user",
+      "content": "Weekly status sweep. Where did the exporter retry work land? Last I saw it was blocked on the backoff review and the branch was collecting dust."
+    },
+    {
+      "role": "assistant",
+      "content": "The backoff review closed Tuesday and the exporter retry work merged behind it; the branch is deleted and the rollout note went out with the fleet digest."
+    },
+    {
+      "role": "user",
+      "content": "Good. And the collector packaging cleanup? The tracker still shows it half-checked and nobody has touched the card in a week."
+    },
+    {
+      "role": "assistant",
+      "content": "Packaging cleanup is done in fact but not in paperwork: the last two checklist items were stale duplicates. I closed them out and the card now reflects reality."
+    },
+    {
+      "role": "user",
+      "content": "The capacity review prep is due Friday. Are the utilization exports current, or do we need a fresh pull before the deck gets built?"
+    },
+    {
+      "role": "assistant",
+      "content": "Utilization exports refreshed this morning; the deck template already points at the new pull, so Friday's prep needs no manual data work."
+    },
+    {
+      "role": "user",
+      "content": "Last item: the postmortem actions from the spool incident. Two were open at last count and one had no owner, which is how actions die."
+    },
+    {
+      "role": "assistant",
+      "content": "Both postmortem actions are owned and scheduled now; the orphan got picked up by the spool rotation and both carry due dates inside the month."
+    },
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "id": "c1",
+          "name": "retrieve",
+          "arguments": {
+            "query": "maintenance mute alerting duration",
+            "k": 3
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "content": "### source: \"docs/maintenance.md\"\npurpose: Edge maintenance runbook: announce, mute, work, verify.\nlanguage: markdown\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n--- source: \"docs/maintenance.md\" (lines 1-9, similarity: 1.00) ---\n1| # Edge maintenance\n2| \n3| Maintenance on an ingest edge follows the same shape every time:\n4| announce, mute, work, verify, un-mute if you finished early.\n5| \n6| An early draft of this runbook budgeted a 90-minute mute for edge\n7| work; that draft never shipped, and the shipped mute duration comes\n8| from the alerting configuration. Plan the work to fit the mute, not\n9| the other way around, and verify the panels before walking away.\n\n### source: \"internal/alert/mute.go\"\npurpose: Mute arming with mandatory owner and reason, self re-arming delivery.\noverview: mute.go arms mutes with a mandatory owner and reason for the configured window, re-arms delivery automatically when the window lapses, and offers early release for fast work.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n\n### source: \"internal/alert/router.go\"\npurpose: Destination-scoped alert routing with composable delivery gates.\noverview: router.go fans alerts out per destination - dashboards, digest, pager - each consulting its own gate chain from the alerting configuration, with unknown destinations failing loudly at load.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n",
+      "tool_call_id": "c1",
+      "name": "retrieve"
+    },
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "id": "c2",
+          "name": "agent_memory_search",
+          "arguments": {
+            "query": ""
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "content": "rec-mute-draft · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src: · the 90-minute mute figure lived only in the draft runbook; never shipped\nrec-mute-window · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:\nrec-status-cadence · working · created:2025-07-27 · updated:2025-07-27 · scope:session · ns: · src: · weekly status sweep happens Monday morning; the fleet digest goes out the same afternoon",
+      "tool_call_id": "c2",
+      "name": "agent_memory_search"
+    },
+    {
+      "role": "user",
+      "content": "Edge maintenance starts within the hour - how long does one maintenance mute suppress alerting?"
+    }
+  ],
+  "golden": {
+    "tool_calls": null,
+    "final_answer_criteria": "States a maintenance mute suppresses alerting for 25 minutes before re-arming on its own. Answers that only say the duration comes from the alerting configuration score 0. An answer giving the draft 90-minute figure scores 0. An answer presenting both the correct and a competing value without committing to one scores 0."
+  },
+  "assembly_eval": {
+    "pair_id": "mem-alert-mute-window",
+    "mode": "mixed",
+    "candidate_ids": [
+      "1677df20ac8b4b59b1b9a2435a0eeabaf62c2e22cb3ab79e6548595c6e1081b4",
+      "a06856ff4a8e04ed50716fbd750ecf1bc549244e91b69864b7fd25b4314e6b04",
+      "d0cd93e0e26eb2b44dcb73fe743a4cf25cb858efcfa46013cd38360ef44ff7cb",
+      "rec-mute-draft",
+      "rec-mute-window",
+      "rec-status-cadence"
+    ],
+    "estimated_prompt_tokens": 852,
+    "state_digest": "01c08174ad989cac5ff4a9b31eb2147e5560c0cb230c35bbfbbd810bdc4ae84e",
+    "subjects": [
+      "(c1|rag|docs/maintenance.md)",
+      "(c1|rag|internal/alert/mute.go)",
+      "(c1|rag|internal/alert/router.go)",
+      "(c2|memory|rec-mute-draft)",
+      "(c2|memory|rec-mute-window)",
+      "(c2|memory|rec-status-cadence)"
+    ],
+    "stratum": "memory_only",
+    "answer_home": "memory",
+    "scenario_family": "alert-mute-mem",
+    "budget": 937,
+    "raw_state_tokens": 1562,
+    "pressure_level": "critical",
+    "shed_bytes": 2425
+  }
+}

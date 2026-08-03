@@ -1,0 +1,68 @@
+{
+  "id": "mem-alert-mute-scope-legacy",
+  "source": "assembly-corpus-mixed",
+  "captured_at": "0001-01-01T00:00:00Z",
+  "system": "You are the driftwatch assistant. driftwatch is a self-hosted telemetry ingest and alerting daemon. Answer using only the provided conversation, memory records, and retrieved context.",
+  "tools": null,
+  "turns": [
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "id": "c2",
+          "name": "retrieve",
+          "arguments": {
+            "query": "maintenance mute pager escalation scope",
+            "k": 3
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "content": "### source: \"docs/alerting.md\"\npurpose: Alerting guide: per-destination gating and suppression scope.\noverview: alerting.md explains per-destination alert gating across dashboards, digest, and pager, and notes the pre-1.0 behaviour - removed before GA - in which a mute silenced the pager escalation path too.\nlanguage: markdown\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n--- source: \"docs/alerting.md\" (lines 1-10, similarity: 1.00) ---\n1| # driftwatch alerting\n2| \n3| Alerts fan out per destination: dashboards, the fleet digest, and the\n4| pager each gate delivery separately, so suppression at one destination\n5| implies nothing about the others.\n6| \n7| Before 1.0 a mute silenced the pager escalation path as well; that\n8| behaviour was removed before GA after a muted page hid a real outage.\n9| Consult the destination gate chain in the alerting configuration for\n10| what any given suppression actually covers.\n\n### source: \"internal/alert/escalate.go\"\npurpose: Short pager ladder with per-rung ack windows.\noverview: escalate.go walks unacknowledged pages up a deliberately short ladder - two rungs then the whole rotation - attaching elapsed context at each step.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n--- source: \"internal/alert/escalate.go\" (lines 1-18, similarity: 1.00) ---\n1| package alert\n2| \n3| import \"time\"\n4| \n5| // escalate walks an alert up the pager ladder. Each rung waits its\n6| // ack window; an unacknowledged page moves to the next rung with the\n7| // elapsed context attached. The ladder is short by design - two rungs\n8| // and then the whole rotation - because long ladders teach people\n9| // that someone else will answer first.\n10| func (e *escalator) escalate(a Alert) {\n11| \tfor _, rung := range e.ladder {\n12| \t\tif e.page(rung, a) {\n13| \t\t\treturn\n14| \t\t}\n15| \t\ttime.Sleep(rung.ackWindow)\n16| \t}\n17| \te.pageAll(a)\n18| }\n\n### source: \"internal/alert/dedupe.go\"\npurpose: Alert dedupe with widening cool-down for flapping keys.\noverview: dedupe.go collapses repeated raises into one open incident per key, bumping count and freshness without re-notifying, and widens the cool-down on flapping keys to stop all-night paging.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n--- source: \"internal/alert/dedupe.go\" (lines 1-28, similarity: 1.00) ---\n1| package alert\n2| \n3| // dedupe collapses repeated raises of the same alert key into one\n4| // open incident. The first raise creates the incident; repeats bump\n5| // its count and freshness without re-notifying, and resolution closes\n6| // the key so the next raise starts clean. Flapping keys - resolve and\n7| // re-raise inside the cool-down - get a widening cool-down instead of\n8| // a fresh notification each cycle, which is what keeps a bouncing\n9| // check from paging the rotation every few minutes all night.\n10| func (d *deduper) raise(key string, a Alert) bool {\n11| \tif inc, open := d.open[key]; open {\n12| \t\tinc.bump(a)\n13| \t\treturn false\n14| \t}\n15| \td.open[key] = newIncident(a)\n16| \treturn true\n17| }\n18| \n19| // resolve closes the key. If the key re-raises inside its cool-down\n20| // the incident reopens with a widened cool-down instead of a fresh\n21| // notification, and the widening resets only after a full quiet\n22| // window - flap history does not amnesty itself.\n23| func (d *deduper) resolve(key string) {\n24| \tif inc, open := d.open[key]; open {\n25| \t\tinc.close(d.now())\n26| \t\tdelete(d.open, key)\n27| \t}\n28| }\n",
+      "tool_call_id": "c2",
+      "name": "retrieve"
+    },
+    {
+      "role": "user",
+      "content": "While a maintenance mute is active, do pager escalations still fire?"
+    }
+  ],
+  "golden": {
+    "tool_calls": null,
+    "final_answer_criteria": "States that pager escalations still fire while a maintenance mute is active (mutes cover dashboard alerts only). An answer claiming a mute silences the pager, as pre-1.0 behaviour did, scores 0. Answers that only describe per-destination gating without committing score 0. An answer presenting both the correct and a competing value without committing to one scores 0."
+  },
+  "assembly_eval": {
+    "pair_id": "mem-alert-mute-scope",
+    "mode": "legacy",
+    "candidate_ids": [
+      "036b7f48b8e008d2195917596694f22ddeace9225d8f8cb0cf2f4389f1b11696",
+      "31b341b97b5a4cdde6058595a7d88016cceb712df9654ae5589be78832606bf4",
+      "f327f686a06fb9a0b6eda3b9b4731546b6a8f6ff61a71f3ff2ad896461319a0c",
+      "rec-digest-notes",
+      "rec-lab-kernel",
+      "rec-mute-scope",
+      "rec-threshold-history"
+    ],
+    "estimated_prompt_tokens": 951,
+    "state_digest": "340bed349ab8a9b0f9259a7aa7a9c6cce9d6a55c8a2474c1b9deffaed1007bba",
+    "subjects": [
+      "(c1|memory|rec-digest-notes)",
+      "(c1|memory|rec-lab-kernel)",
+      "(c1|memory|rec-mute-scope)",
+      "(c1|memory|rec-threshold-history)",
+      "(c2|rag|docs/alerting.md)",
+      "(c2|rag|internal/alert/escalate.go)",
+      "(c2|rag|internal/alert/dedupe.go)"
+    ],
+    "stratum": "memory_only",
+    "answer_home": "memory",
+    "scenario_family": "alert-mute-mem",
+    "budget": 1022,
+    "raw_state_tokens": 1703,
+    "pressure_level": "critical",
+    "shed_messages": 10,
+    "shed_bytes": 2580
+  }
+}

@@ -1,0 +1,115 @@
+{
+  "id": "mem-spool-sweep-interval-mixed",
+  "source": "assembly-corpus-mixed",
+  "captured_at": "0001-01-01T00:00:00Z",
+  "system": "You are the driftwatch assistant. driftwatch is a self-hosted telemetry ingest and alerting daemon. Answer using only the provided conversation, memory records, and retrieved context.",
+  "tools": null,
+  "turns": [
+    {
+      "role": "user",
+      "content": "I'm walking the new teammate through the pipeline this week. Can you stage a scratch workspace for them with the sample configs and a small captured stream to poke at?"
+    },
+    {
+      "role": "assistant",
+      "content": "Staged the scratch workspace with sample configs and a trimmed capture; they can replay it end to end without touching any shared fleet."
+    },
+    {
+      "role": "user",
+      "content": "They also need read access to the fleet dashboards, the tracker, and the drill archive. Can you sort the grants without opening anything write-facing?"
+    },
+    {
+      "role": "assistant",
+      "content": "Granted read-only access to the dashboards, tracker, and drill archive; write paths stay closed until they finish the onboarding checklist."
+    },
+    {
+      "role": "user",
+      "content": "The walkthrough doc still shows screenshots from the old dashboard layout. Can you refresh them so the tour matches what they actually see?"
+    },
+    {
+      "role": "assistant",
+      "content": "Refreshed every screenshot to the current layout and re-pinned the doc; the tour now matches the live panels step for step."
+    },
+    {
+      "role": "user",
+      "content": "And their first ticket should be something safe. Can you pick a doc-only starter from the backlog and tag it for them with the style notes attached?"
+    },
+    {
+      "role": "assistant",
+      "content": "Tagged a doc-only starter covering the glossary gaps and linked the style notes; it is safe, bounded, and reviewable in one pass."
+    },
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "id": "c1",
+          "name": "retrieve",
+          "arguments": {
+            "query": "spool retention sweeper cadence",
+            "k": 3
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "content": "### source: \"docs/spool.md\"\npurpose: Spool guide: local-disk placement and retention sweep behaviour.\nlanguage: markdown\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n--- source: \"docs/spool.md\" (lines 1-11, similarity: 1.00) ---\n1| # driftwatch spool\n2| \n3| The spool absorbs ingest bursts and survives restarts. Keep it on\n4| local disk; network volumes turn every exporter hiccup into a stall.\n5| \n6| ## Retention sweeps\n7| \n8| The retention sweeper trims rolled segments past their horizon. The\n9| sample config ships a 3h sweep interval for evaluation installs;\n10| production fleets override it in deployment config to match their\n11| churn. The sweeper never touches the active segment.\n\n### source: \"internal/spool/sweep.go\"\npurpose: Retention sweeper waking on the config-supplied interval.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n--- source: \"internal/spool/sweep.go\" (lines 1-27, similarity: 1.00) ---\n1| package spool\n2| \n3| import \"time\"\n4| \n5| // sweeper trims rolled segments that have aged past the retention\n6| // horizon. It wakes on the interval from deployment config, walks the\n7| // segment directory in index order, and stops at the first segment\n8| // still inside the horizon - segments age in index order, so nothing\n9| // past the stop point can be eligible. The active segment is never a\n10| // candidate, whatever its age.\n11| type sweeper struct {\n12| \tinterval time.Duration\n13| \thorizon  time.Duration\n14| }\n15| \n16| func (s *sweeper) run(stop \u003c-chan struct{}) {\n17| \tt := time.NewTicker(s.interval)\n18| \tdefer t.Stop()\n19| \tfor {\n20| \t\tselect {\n21| \t\tcase \u003c-t.C:\n22| \t\t\ts.sweepOnce()\n23| \t\tcase \u003c-stop:\n24| \t\t\treturn\n25| \t\t}\n26| \t}\n27| }\n\n### source: \"internal/spool/segment.go\"\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nnote: metadata overview (summary omitted: budget)\n",
+      "tool_call_id": "c1",
+      "name": "retrieve"
+    },
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "id": "c2",
+          "name": "agent_memory_search",
+          "arguments": {
+            "query": ""
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "content": "rec-onboard-notes · working · created:2025-07-27 · updated:2025-07-27 · scope:session · ns: · src:\nrec-sweep-eval · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:\nrec-sweep-interval · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:",
+      "tool_call_id": "c2",
+      "name": "agent_memory_search"
+    },
+    {
+      "role": "user",
+      "content": "How often does the spool retention sweeper run on the prod fleet?"
+    }
+  ],
+  "golden": {
+    "tool_calls": null,
+    "final_answer_criteria": "States the spool retention sweeper runs every 45m on the prod fleet. Answers that only say the interval comes from deployment config score 0. An answer giving the evaluation-scope 3h interval scores 0. An answer presenting both the correct and a competing value without committing to one scores 0."
+  },
+  "assembly_eval": {
+    "pair_id": "mem-spool-sweep-interval",
+    "mode": "mixed",
+    "candidate_ids": [
+      "c2009264daeb1e565e474f8a703552f5afad0b7b18235a464ac57ff9b1b1c21d",
+      "e77f4b1212e8eeff0bd31c638d825b16a06d4a285cc31b57b7685ec71c4fe60d",
+      "f222c993523171205dff85eeb52c8972fb6adce754d71f59fa5e905b23801bd2",
+      "rec-onboard-notes",
+      "rec-sweep-eval",
+      "rec-sweep-interval"
+    ],
+    "estimated_prompt_tokens": 899,
+    "state_digest": "9744c252eaef71b1b7831dd1640cc96eefc1fe19b3ae2050a2adc89e04a31f9c",
+    "subjects": [
+      "(c1|rag|docs/spool.md)",
+      "(c1|rag|internal/spool/sweep.go)",
+      "(c1|rag|internal/spool/segment.go)",
+      "(c2|memory|rec-onboard-notes)",
+      "(c2|memory|rec-sweep-eval)",
+      "(c2|memory|rec-sweep-interval)"
+    ],
+    "stratum": "memory_only",
+    "answer_home": "memory",
+    "scenario_family": "spool-sweep-mem",
+    "budget": 948,
+    "raw_state_tokens": 1580,
+    "pressure_level": "critical",
+    "shed_bytes": 2306
+  }
+}

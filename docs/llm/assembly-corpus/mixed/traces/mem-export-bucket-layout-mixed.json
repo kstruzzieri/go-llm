@@ -1,0 +1,115 @@
+{
+  "id": "mem-export-bucket-layout-mixed",
+  "source": "assembly-corpus-mixed",
+  "captured_at": "0001-01-01T00:00:00Z",
+  "system": "You are the driftwatch assistant. driftwatch is a self-hosted telemetry ingest and alerting daemon. Answer using only the provided conversation, memory records, and retrieved context.",
+  "tools": null,
+  "turns": [
+    {
+      "role": "user",
+      "content": "Audit prep season. The quarterly review wants a walkthrough of who can touch the archive store. Can you pull the current access list and flag anything that looks stale before I stare at it?"
+    },
+    {
+      "role": "assistant",
+      "content": "Pulled the archive access list and flagged three stale entries: two departed contractors and one service account from the decommissioned reporting job. Removal requests are drafted for your sign-off."
+    },
+    {
+      "role": "user",
+      "content": "Sign-off given on all three. Next the auditors want evidence that export integrity checks actually run, not just that the code exists. Can you pull a month of verification logs into the evidence folder?"
+    },
+    {
+      "role": "assistant",
+      "content": "Collected the last month of export verification logs, bundled them with their checksums into the evidence folder, and added an index sheet so the auditors can sample without asking us to fish."
+    },
+    {
+      "role": "user",
+      "content": "They also asked how long we keep the raw ingest stream versus the exported archives. The retention table in the wiki contradicts itself between two sections. Can you reconcile it against what the fleet actually does?"
+    },
+    {
+      "role": "assistant",
+      "content": "Reconciled the wiki retention table against the fleet's live configuration; the contradiction came from a stale copy-paste in the older section, which now matches the operative values with a note naming the source of truth."
+    },
+    {
+      "role": "user",
+      "content": "Last prep item: the auditors want a dry-run restore from the archive picked at random. Can you schedule one for next week and make sure whoever runs it writes down the timings?"
+    },
+    {
+      "role": "assistant",
+      "content": "Scheduled the dry-run restore for Tuesday with a randomly picked archive day, assigned a runner from the rotation, and added a timing sheet to the evidence folder so the numbers land where the auditors will look."
+    },
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "id": "c1",
+          "name": "retrieve",
+          "arguments": {
+            "query": "archive export key layout",
+            "k": 3
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "content": "### source: \"docs/export.md\"\npurpose: Export guide: verified batches and key layout policy.\noverview: export.md covers verified batch shipping to the archive store and the key layout policy: prefix from deployment config, the drained exports/v2/ tree readable as history only, layout changes by drain.\nlanguage: markdown\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n--- source: \"docs/export.md\" (lines 1-11, similarity: 1.00) ---\n1| # driftwatch export\n2| \n3| The exporter ships rolled segments to the archive store in verified\n4| batches; every batch writes, verifies, then commits its manifest row.\n5| \n6| ## Key layout\n7| \n8| The operative key prefix ships from deployment config. The exports/v2/\n9| tree is fully drained: treat any v2 key as historical, readable for\n10| old pulls but never a write target. Layout changes go through a\n11| drain, never an in-place rewrite.\n\n### source: \"internal/export/writer.go\"\npurpose: Batch writer refusing keys outside the operative configured prefix.\noverview: writer.go ships batches under keys built from the configured prefix plus tenant and day, refuses anything outside the operative prefix before bytes move, and commits manifest rows only after verification.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n\n### source: \"internal/export/manifest.go\"\npurpose: Append-only export manifest backing verified restores.\noverview: manifest.go records every shipped batch as an append-only row of key, checksum, bytes, and commit time, and samples rows evenly across the retention window for dry-run restores.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n",
+      "tool_call_id": "c1",
+      "name": "retrieve"
+    },
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "id": "c2",
+          "name": "agent_memory_search",
+          "arguments": {
+            "query": ""
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "content": "rec-audit-folder · working · created:2025-07-27 · updated:2025-07-27 · scope:session · ns: · src: · audit evidence lands in the shared evidence folder with an index sheet; auditors sample, they do not fish\nrec-export-drain · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src: · the exports/v2/ drain closed in June; the old tree is read-only history\nrec-export-layout · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:",
+      "tool_call_id": "c2",
+      "name": "agent_memory_search"
+    },
+    {
+      "role": "user",
+      "content": "Under which key prefix do archive exports land?"
+    }
+  ],
+  "golden": {
+    "tool_calls": null,
+    "final_answer_criteria": "States that archive exports land under the exports/v3/ prefix (keyed by tenant then day). Answers that only say the prefix comes from deployment config score 0. An answer naming the drained exports/v2/ tree scores 0. An answer presenting both the correct and a competing value without committing to one scores 0."
+  },
+  "assembly_eval": {
+    "pair_id": "mem-export-bucket-layout",
+    "mode": "mixed",
+    "candidate_ids": [
+      "2564e458c4247053df869fa728a80e1d12347493da9da212799b838cede7a471",
+      "465a59349cc75fc719cf379a2b6792d89e80ce6bcf3e8ccc38c930b05c09d083",
+      "a01220b7c7c99190d2d6168ceb0a549cdd59699da2d20dab7b114ea43bd807aa",
+      "rec-audit-folder",
+      "rec-export-drain",
+      "rec-export-layout"
+    ],
+    "estimated_prompt_tokens": 1017,
+    "state_digest": "6027da317905fb45850b9d13a3ca7de1aa9a3268b07917b8c1a48a5419e62641",
+    "subjects": [
+      "(c1|rag|docs/export.md)",
+      "(c1|rag|internal/export/writer.go)",
+      "(c1|rag|internal/export/manifest.go)",
+      "(c2|memory|rec-audit-folder)",
+      "(c2|memory|rec-export-drain)",
+      "(c2|memory|rec-export-layout)"
+    ],
+    "stratum": "memory_only",
+    "answer_home": "memory",
+    "scenario_family": "export-bucket-mem",
+    "budget": 1079,
+    "raw_state_tokens": 1799,
+    "pressure_level": "critical",
+    "shed_bytes": 2709
+  }
+}
