@@ -81,7 +81,7 @@
   ],
   "golden": {
     "tool_calls": null,
-    "final_answer_criteria": "States that archive exports land under the exports/v3/ prefix (keyed by tenant then day). Answers that only say the prefix comes from deployment config score 0. An answer naming the drained exports/v2/ tree scores 0. An answer presenting both the correct and a competing value without committing to one scores 0."
+    "final_answer_criteria": "States that archive exports land under the exports/v4/ prefix (keyed by tenant then day). Answers that only say the prefix comes from deployment config score 0. An answer naming the drained exports/v2/ tree scores 0. Any other prefix scores 0. An answer presenting both the correct and a competing value without committing to one scores 0."
   },
   "assembly_eval": {
     "pair_id": "mem-export-bucket-layout",
@@ -95,7 +95,7 @@
       "rec-export-layout"
     ],
     "estimated_prompt_tokens": 1017,
-    "state_digest": "6027da317905fb45850b9d13a3ca7de1aa9a3268b07917b8c1a48a5419e62641",
+    "state_digest": "52726d447156e5b810ef6bfb3c6a79b6c686e30daa6fac241f17ab28b7423e7c",
     "subjects": [
       "(c1|rag|docs/export.md)",
       "(c1|rag|internal/export/writer.go)",
@@ -107,9 +107,9 @@
     "stratum": "memory_only",
     "answer_home": "memory",
     "scenario_family": "export-bucket-mem",
-    "budget": 1079,
-    "raw_state_tokens": 1799,
+    "budget": 1081,
+    "raw_state_tokens": 1801,
     "pressure_level": "critical",
-    "shed_bytes": 2709
+    "shed_bytes": 2718
   }
 }

@@ -1374,7 +1374,7 @@
         {"turn": {"role": "user", "content": "Under which key prefix do archive exports land?"}}
       ],
       "memory_records": [
-        {"id": "rec-export-layout", "content": "archive exports land under exports/v3/ keyed by tenant then day; the old tree finished draining after the layout migration and the writer refuses any key outside the current prefix - the auditors were shown the v3 layout at the spring review", "kind": "semantic"},
+        {"id": "rec-export-layout", "content": "archive exports land under exports/v4/ keyed by tenant then day; the old tree finished draining after the layout migration and the writer refuses any key outside the current prefix - build restore paths from the manifest rather than hand-writing keys", "kind": "semantic"},
         {"id": "rec-export-drain", "content": "the exports/v2/ drain closed in June; the old tree is read-only history", "kind": "semantic"},
         {"id": "rec-audit-folder", "content": "audit evidence lands in the shared evidence folder with an index sheet; auditors sample, they do not fish", "kind": "working", "workspace_id": "ws-driftwatch"}
       ],
@@ -1402,12 +1402,12 @@
         }
       ],
       "required_evidence": [
-        {"domain": "memory", "literal": "exports/v3/"}
+        {"domain": "memory", "literal": "exports/v4/"}
       ],
-      "pressure_target": {"domain": "memory", "literal": "exports/v3/"},
+      "pressure_target": {"domain": "memory", "literal": "exports/v4/"},
       "required_domains": ["conversation", "memory", "rag"],
       "golden": {
-        "final_answer_criteria": "States that archive exports land under the exports/v3/ prefix (keyed by tenant then day). Answers that only say the prefix comes from deployment config score 0. An answer naming the drained exports/v2/ tree scores 0. An answer presenting both the correct and a competing value without committing to one scores 0."
+        "final_answer_criteria": "States that archive exports land under the exports/v4/ prefix (keyed by tenant then day). Answers that only say the prefix comes from deployment config score 0. An answer naming the drained exports/v2/ tree scores 0. Any other prefix scores 0. An answer presenting both the correct and a competing value without committing to one scores 0."
       }
     },
     {
