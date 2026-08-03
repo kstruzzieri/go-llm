@@ -2841,7 +2841,7 @@
       ],
       "memory_records": [
         {"id": "rec-probe-timeout", "content": "edge collector probe timeout at 9 seconds, raised during the flaky-uplink burn-in; the prober holds its socket open across the retry window, field sites on microwave hops stay inside the window even under rain fade, and the burn-in doc records the sweep that settled the value", "kind": "semantic"},
-        {"id": "rec-probe-clamp", "content": "probe attempts on edge collectors are cut off at 2 seconds", "kind": "semantic"},
+        {"id": "rec-probe-clamp", "content": "edge collector probes give up at 2 seconds", "kind": "semantic"},
         {"id": "rec-burnin-doc", "content": "flaky-uplink burn-in doc collects the vendor findings and the capture links", "kind": "semantic"},
         {"id": "rec-retry-bump", "content": "edge exporter retry budget bump from the burn-in is still active in the exporter profile", "kind": "working", "workspace_id": "ws-driftwatch"}
       ],
@@ -2850,7 +2850,7 @@
           "path": "internal/edge/prober.go",
           "content": "package edge\n\n// probe sends one liveness check to a site collector and records the\n// round trip. The attempt deadline comes from the prober config; the\n// retry window wraps attempts so a lossy hop distinguishes a slow\n// site from a dead one.\nfunc (p *Prober) probe(target string) result {\n\tctx, cancel := p.attemptContext()\n\tdefer cancel()\n\tstart := p.clock.Now()\n\terr := p.dial(ctx, target)\n\treturn result{\n\t\ttarget:  target,\n\t\trtt:     p.clock.Now().Sub(start),\n\t\thealthy: err == nil,\n\t}\n}\n",
           "language": "go",
-          "abstract": "Edge probing: each probe attempt is cut off at 2 seconds, with retries wrapping the attempts.",
+          "abstract": "Edge probing: probes are cut off at 2 seconds.",
           "overview": "prober.go sends per-target liveness checks under the config-supplied attempt deadline and wraps attempts in the retry window; no deadline value is hard-coded here."
         },
         {
