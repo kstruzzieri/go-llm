@@ -1,0 +1,26 @@
+{
+  "id": "stale-wal-segment-index-topline",
+  "source": "assembly-corpus-mixed",
+  "captured_at": "0001-01-01T00:00:00Z",
+  "system": "You are the driftwatch assistant. driftwatch is a self-hosted telemetry ingest and alerting daemon. Answer using only the provided conversation, memory records, and retrieved context.",
+  "tools": null,
+  "turns": [
+    {
+      "role": "user",
+      "content": "Facts:\nThe stored memory note records that index WAL segments roll at 128 MiB, raised during the index compaction rework; the index WAL source summary still claiming 24 MiB segments predates the rework and is stale.\n\nQuestion: How big does an index WAL segment get before it rolls?"
+    }
+  ],
+  "golden": {
+    "tool_calls": null,
+    "final_answer_criteria": "States index WAL segments roll at 128 MiB. 128 MiB and 134217728 bytes are equivalent correct forms. An answer of 24 MiB scores 0. An answer presenting both the correct and a competing value without committing to one scores 0."
+  },
+  "assembly_eval": {
+    "pair_id": "stale-wal-segment-index",
+    "mode": "topline",
+    "candidate_ids": null,
+    "estimated_prompt_tokens": 117,
+    "stratum": "stale_vs_fresh",
+    "answer_home": "memory",
+    "scenario_family": "wal-segment-staleness"
+  }
+}

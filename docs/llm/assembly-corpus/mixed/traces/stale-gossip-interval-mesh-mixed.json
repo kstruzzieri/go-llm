@@ -1,0 +1,101 @@
+{
+  "id": "stale-gossip-interval-mesh-mixed",
+  "source": "assembly-corpus-mixed",
+  "captured_at": "0001-01-01T00:00:00Z",
+  "system": "You are the driftwatch assistant. driftwatch is a self-hosted telemetry ingest and alerting daemon. Answer using only the provided conversation, memory records, and retrieved context.",
+  "tools": null,
+  "turns": [
+    {
+      "role": "user",
+      "content": "Also the mesh review needs the node count history since the expansion started; the review doc has opinions but no numbers."
+    },
+    {
+      "role": "assistant",
+      "content": "Added the node count history to the review doc from the fleet records, with the expansion milestones marked on the curve."
+    },
+    {
+      "role": "user",
+      "content": "And confirm the relay uplink saturation alarms from the soak got follow-ups filed; two fired in week one and I have not seen tickets."
+    },
+    {
+      "role": "assistant",
+      "content": "Both alarms have tickets now: one traced to a misconfigured relay uplink and one to genuine saturation during the soak's peak week."
+    },
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "id": "c1",
+          "name": "retrieve",
+          "arguments": {
+            "query": "mesh gossip round behaviour",
+            "k": 3
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "content": "### source: \"internal/mesh/gossip.go\"\npurpose: Mesh gossip rounds: digest exchange with churn-tracking cost.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n--- source: \"internal/mesh/gossip.go\" (lines 1-38, similarity: 1.00) ---\n1| package mesh\n2| \n3| import \"time\"\n4| \n5| // gossipEvery is the round interval for the relay mesh. It was\n6| // stretched after the mesh soak: five-second rounds saturated relay\n7| // uplinks once the mesh crossed two hundred nodes, and the soak\n8| // confirmed membership convergence holds at the longer round.\n9| const gossipEvery = 20 * time.Second\n10| \n11| // gossipLoop runs the mesh rounds. Each round exchanges digests with\n12| // a fanout-sized sample of peers; full state flows only for entries\n13| // the digests disagree on, so round cost tracks churn rather than\n14| // mesh size.\n15| func (m *Mesh) gossipLoop() {\n16| \tt := time.NewTicker(gossipEvery)\n17| \tdefer t.Stop()\n18| \tfor range t.C {\n19| \t\tpeers := m.sample()\n20| \t\tfor _, p := range peers {\n21| \t\t\tm.exchange(p)\n22| \t\t}\n23| \t}\n24| }\n25| \n26| // exchange runs one digest swap with a peer and reconciles the\n27| // entries the digests disagree on. Reconciliation prefers the entry\n28| // with the newer version vector; ties keep the local entry, because\n29| // symmetric ties resolve themselves on a later round anyway.\n30| func (m *Mesh) exchange(p Peer) {\n31| \tlocal := m.digest()\n32| \tremote, err := p.swapDigest(local)\n33| \tif err != nil {\n34| \t\tm.metricsExchangeFailed.Inc()\n35| \t\treturn\n36| \t}\n37| \tm.reconcile(remote)\n38| }\n\n### source: \"internal/mesh/member.go\"\npurpose: Mesh membership: timer-driven suspicion with self-refutation.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n\n### source: \"docs/mesh.md\"\nlanguage: markdown\nindexed: 2025-07-27T00:00:00Z\nnote: metadata overview (summary omitted: budget)\n",
+      "tool_call_id": "c1",
+      "name": "retrieve"
+    },
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "id": "c2",
+          "name": "agent_memory_search",
+          "arguments": {
+            "query": ""
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "content": "rec-gossip-note · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src: · mesh gossip fires every 5 seconds; hands off until the soak ends\nrec-mesh-review · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:\nrec-uplink-tickets · working · created:2025-07-27 · updated:2025-07-27 · scope:session · ns: · src:",
+      "tool_call_id": "c2",
+      "name": "agent_memory_search"
+    },
+    {
+      "role": "user",
+      "content": "How often does mesh gossip fire?"
+    }
+  ],
+  "golden": {
+    "tool_calls": null,
+    "final_answer_criteria": "States mesh gossip fires every 20 seconds. gossipEvery = 20 * time.Second and a 20 second interval are equivalent correct forms. An answer of every 5 seconds scores 0. An answer presenting both the correct and a competing value without committing to one scores 0."
+  },
+  "assembly_eval": {
+    "pair_id": "stale-gossip-interval-mesh",
+    "mode": "mixed",
+    "candidate_ids": [
+      "03faaaacb89a24b147c3aa814c71c6ff421ef8921cbbf3c168170d1d33a15e53",
+      "7f1512ea554672ab829d3c9b91144e24e5ec17db57b86f947d17097534f945ce",
+      "81d297d45892a520a8dcb0f9545dcfa6ad7529ef186f5ad2f10a87ebb2a07ccb",
+      "rec-gossip-note",
+      "rec-mesh-review",
+      "rec-uplink-tickets"
+    ],
+    "estimated_prompt_tokens": 755,
+    "state_digest": "403e6253bf7a4626cc7fd532b7abbddb250f0350b8786bfa2572c1363dece601",
+    "subjects": [
+      "(c1|rag|internal/mesh/gossip.go)",
+      "(c1|rag|internal/mesh/member.go)",
+      "(c1|rag|docs/mesh.md)",
+      "(c2|memory|rec-gossip-note)",
+      "(c2|memory|rec-mesh-review)",
+      "(c2|memory|rec-uplink-tickets)"
+    ],
+    "stratum": "stale_vs_fresh",
+    "answer_home": "rag",
+    "scenario_family": "gossip-interval-staleness",
+    "budget": 807,
+    "raw_state_tokens": 1345,
+    "pressure_level": "critical",
+    "shed_messages": 2,
+    "shed_bytes": 2006,
+    "omitted_subjects": 1
+  }
+}

@@ -2609,7 +2609,6 @@
       ],
       "pressure_target": {"domain": "rag", "literal": "capped at 128 MiB"},
       "required_domains": ["conversation", "memory", "rag"],
-      "topline_facts": "internal/spool/spool.go now sets spoolMaxBytes = 512 << 20 (512 MiB per node), raised during the ingest surge work; the stored source summary still claims a 128 MiB cap and is stale.",
       "golden": {
         "final_answer_criteria": "States the per-node spool ceiling is 512 MiB. 512 MiB, 512 << 20, and 536870912 bytes are equivalent correct forms. An answer of 128 MiB scores 0. An answer presenting both the correct and a competing value without committing to one scores 0."
       }
@@ -2674,9 +2673,787 @@
       ],
       "pressure_target": {"domain": "rag", "literal": "fanoutWorkers = 12"},
       "required_domains": ["conversation", "memory", "rag"],
-      "topline_facts": "internal/alert/fanout.go sets fanoutWorkers = 12, widened after the pager consolidation load tests; the memory note claiming the fanout still runs 4 workers predates the widening and is stale.",
       "golden": {
         "final_answer_criteria": "States the alert fanout runs 12 delivery workers. An answer of 4 workers scores 0. An answer presenting both the correct and a competing value without committing to one scores 0."
+      }
+    },
+    {
+      "id": "stale-spool-edge-cap",
+      "stratum": "stale_vs_fresh",
+      "answer_home": "rag",
+      "scenario_family": "spool-cap-staleness",
+      "system": "You are the driftwatch assistant. driftwatch is a self-hosted telemetry ingest and alerting daemon. Answer using only the provided conversation, memory records, and retrieved context.",
+      "events": [
+        {"turn": {"role": "user", "content": "Edge relay rollout follow-ups. The rollout tracker still lists three relays as pending even though the fleet dashboard shows them serving; can you reconcile the tracker against the dashboard before the weekly sync?"}},
+        {"turn": {"role": "assistant", "content": "Reconciled the tracker: the three relays finished their serving checks last night, so I marked them done and linked the dashboard snapshots as evidence."}},
+        {"turn": {"role": "user", "content": "The relay install script also grew a manual step during the rollout; someone has to paste the bootstrap token by hand. Fold that into the script so the next batch installs clean."}},
+        {"turn": {"role": "assistant", "content": "Folded the bootstrap token fetch into the install script; the next relay install runs end to end without a manual paste."}},
+        {"turn": {"role": "user", "content": "Can you sweep the relay host inventory for boxes still tagged with the staging role? A few kept the tag after promotion and it skews the capacity reports."}},
+        {"turn": {"role": "assistant", "content": "Swept the inventory and retagged four hosts from staging to serving; the capacity report totals now match the fleet dashboard."}},
+        {"turn": {"role": "user", "content": "The edge oncall runbook needs a section for relay restarts too; the old collector restart steps do not cover the relay drain behaviour."}},
+        {"turn": {"role": "assistant", "content": "Added a relay restart section to the runbook covering the drain wait and the safe restart order, with a link from the old collector steps."}},
+        {"turn": {"role": "user", "content": "Also the rollout burned through the change-freeze exception we filed; if any relays remain to ship, file a fresh exception before the freeze window closes."}},
+        {"turn": {"role": "assistant", "content": "Filed a fresh exception covering the remaining relay batch and attached the rollout schedule so approvals do not stall at the freeze board."}},
+        {"turn": {"role": "user", "content": "The relay metrics landed under a temporary namespace during the rollout as well; migrate them into the main edge namespace so the dashboards stop double-counting."}},
+        {"turn": {"role": "assistant", "content": "Migrated the relay metrics into the main edge namespace and updated the two dashboards that queried the temporary one; counts are single-sourced now."}},
+        {"turn": {"role": "user", "content": "Someone reported the relay TLS certs were cut with a short validity as a rollout shortcut. Check the expiry dates and queue renewals for anything that expires this quarter."}},
+        {"turn": {"role": "assistant", "content": "Checked the fleet: six relay certs expire this quarter, and renewals are queued through the usual pipeline with the edge team on the approval."}},
+        {"turn": {"role": "user", "content": "The rollout retro is scheduled but has no pre-read. Can you draft one from the tracker history so the discussion starts from what actually happened?"}},
+        {"turn": {"role": "assistant", "content": "Drafted the pre-read from the tracker timeline, including the two rollback events and what unblocked them, and shared it on the retro invite."}},
+        {"turn": {"role": "user", "content": "And the loaner switch the network team lent us for relay bring-up should go back; confirm nothing in the edge rack still uplinks through it."}},
+        {"turn": {"role": "assistant", "content": "Confirmed the rack uplinks moved to the permanent switch, powered down the loaner, and told the network team it is ready for pickup."}},
+        {"turn": {"role": "user", "content": "Last thing: the relay spend line finance flagged needs a note explaining the rollout spike before the monthly close."}},
+        {"turn": {"role": "assistant", "content": "Added a note to the spend line breaking the spike into hardware and egress, with the rollout dates attached so the close review has context."}},
+        {"tool_call": {"call_id": "c1", "tool": "retrieve", "args": {"query": "edge relay spool ceiling", "k": 3}}},
+        {"tool_call": {"call_id": "c2", "tool": "agent_memory_search", "args": {"query": ""}}},
+        {"turn": {"role": "user", "content": "How large may an edge relay's on-disk spool grow?"}}
+      ],
+      "memory_records": [
+        {"id": "rec-relay-tracker", "content": "edge relay rollout tracker is reconciled against the fleet dashboard before each weekly sync", "kind": "semantic"},
+        {"id": "rec-edge-cap", "content": "edge relay spool stays capped at 96 MiB", "kind": "semantic"},
+        {"id": "rec-freeze-window", "content": "change-freeze exceptions for relay batches go through the freeze board with the rollout schedule attached", "kind": "working", "workspace_id": "ws-driftwatch"},
+        {"id": "rec-edge-runbook", "content": "edge oncall runbook covers relay restarts including the drain wait", "kind": "semantic"}
+      ],
+      "rag_sources": [
+        {
+          "path": "internal/edge/relaydrain.go",
+          "content": "package edge\n\n// drain moves landed batches from the relay spool to the uplink in\n// arrival order. The loop backs off while the uplink reports\n// congestion and resumes from the oldest undrained segment, so a slow\n// uplink delays shipping without reordering batches.\nfunc (r *Relay) drain() {\n\tfor seg := r.spool.oldest(); seg != nil; seg = r.spool.oldest() {\n\t\tif !r.uplink.ready() {\n\t\t\tr.backoff()\n\t\t\tcontinue\n\t\t}\n\t\tr.ship(seg)\n\t}\n}\n",
+          "language": "go",
+          "abstract": "Relay drain loop: arrival-order shipping with uplink backoff.",
+          "overview": "relaydrain.go walks undrained spool segments oldest-first and ships them over the uplink, backing off on congestion without reordering batches."
+        },
+        {
+          "path": "internal/edge/spoolcap.go",
+          "content": "package edge\n\n// edgeSpoolMaxBytes is the per-relay ceiling on total spool size. It\n// was raised during the edge relay rollout: relays buffer for whole\n// sites, and a weekend uplink outage at the old ceiling forced early\n// drops before the uplink came back.\nconst edgeSpoolMaxBytes = 384 << 20\n\n// hasRoom reports whether one more batch fits under the ceiling.\nfunc (s *EdgeSpool) hasRoom(batch int64) bool {\n\treturn s.size+batch <= edgeSpoolMaxBytes\n}\n\n// reserve claims space for an incoming batch or reports backpressure.\n// Callers must hold the spool lock; reservations are released by the\n// drain loop once the batch lands in a segment.\nfunc (s *EdgeSpool) reserve(batch int64) bool {\n\tif !s.hasRoom(batch) {\n\t\ts.metricsBackpressure.Inc()\n\t\treturn false\n\t}\n\ts.size += batch\n\treturn true\n}\n\n// release returns reserved space after a segment write completes. The\n// drain loop calls it exactly once per landed batch, so size never\n// drifts from the sum of live reservations.\nfunc (s *EdgeSpool) release(batch int64) {\n\ts.size -= batch\n\tif s.size < 0 {\n\t\ts.size = 0\n\t}\n}\n",
+          "language": "go",
+          "abstract": "Edge spool sizing: a relay's on-disk spool is capped at 96 MiB, with backpressure at the ceiling.",
+          "overview": "spoolcap.go owns the edge relay spool ceiling and the reservation accounting around it; segment layout and the drain loop live in the sibling files."
+        },
+        {
+          "path": "docs/edge-relay.md",
+          "content": "# driftwatch edge relays\n\nEdge relays sit between site collectors and the core ingest tier.\nA relay accepts batches from its site, lands them in the local\nspool, and ships them upstream in arrival order.\n\n## Operations\n\nRelays run unattended. Watch the backpressure counter after uplink\noutages: sustained growth means the site produces faster than the\nuplink drains and the site needs either a wider uplink or fewer\nproducers.\n",
+          "language": "markdown",
+          "abstract": "Edge relay guide: site buffering role, drain order, backpressure monitoring.",
+          "overview": "edge-relay.md covers the relay's position between site collectors and core ingest, arrival-order shipping, and what sustained backpressure growth means for a site."
+        }
+      ],
+      "required_evidence": [
+        {"domain": "rag", "literal": "edgeSpoolMaxBytes = 384 << 20"}
+      ],
+      "pressure_target": {"domain": "rag", "literal": "capped at 96 MiB"},
+      "required_domains": ["conversation", "memory", "rag"],
+      "golden": {
+        "final_answer_criteria": "States an edge relay's on-disk spool may grow to 384 MiB. 384 MiB, 384 << 20, and 402653184 bytes are equivalent correct forms. An answer of 96 MiB scores 0. An answer presenting both the correct and a competing value without committing to one scores 0."
+      }
+    },
+    {
+      "id": "stale-fanout-webhook",
+      "stratum": "stale_vs_fresh",
+      "answer_home": "conversation",
+      "scenario_family": "fanout-worker-staleness",
+      "system": "You are the driftwatch assistant. driftwatch is a self-hosted telemetry ingest and alerting daemon. Answer using only the provided conversation, memory records, and retrieved context.",
+      "events": [
+        {"turn": {"role": "user", "content": "Receiver consolidation wrap-up items. The old chat receiver still has an API key active in the secrets store; revoke it and note the revocation in the consolidation log. While you are in the secrets store, list any other credentials that still name the old receiver in their description so we can queue them for the same treatment, and note who owns each one."}},
+        {"turn": {"role": "assistant", "content": "Revoked the old chat receiver key, confirmed nothing authenticated with it this week, and logged the revocation with a pointer to the replacement. Two more credentials name the old receiver in their descriptions; both are queued with owners noted, one with the platform team and one with the integrations group."}},
+        {"turn": {"role": "user", "content": "The consolidation also left two receiver health checks probing endpoints that no longer exist. Retire those probes before they wake anyone up with a false page."}},
+        {"turn": {"role": "assistant", "content": "Retired both stale probes and added a check against the consolidated receiver's health endpoint so coverage did not shrink."}},
+        {"turn": {"role": "user", "content": "With the receiver consolidation soak closed out, I widened the webhook fanout to 18 webhook delivery workers this morning; update the capacity sheet so the on-paper number matches the fleet."}},
+        {"turn": {"role": "assistant", "content": "Updated the capacity sheet and linked the soak report beside the entry so the next reviewer sees why the pool widened."}},
+        {"turn": {"role": "user", "content": "Can you also fold the receiver migration notes into the alerting handbook? They live in a personal doc right now and the handbook is where people will look."}},
+        {"turn": {"role": "assistant", "content": "Folded the migration notes into the handbook's receiver chapter and left a redirect note in the personal doc."}},
+        {"turn": {"role": "user", "content": "The consolidated receiver's rate limit was set conservatively during the soak. Check with the provider what the contracted ceiling is and note it in the config comments."}},
+        {"turn": {"role": "assistant", "content": "Confirmed the contracted ceiling with the provider and recorded it in the config comment above the limit so nobody treats the soak value as a hard cap."}},
+        {"turn": {"role": "user", "content": "Someone mentioned the delivery latency panel still graphs the old receiver's endpoint. Point it at the consolidated one so the graph stops flatlining."}},
+        {"turn": {"role": "assistant", "content": "Repointed the latency panel at the consolidated receiver and kept a dotted series for the old endpoint's final week for comparison."}},
+        {"turn": {"role": "user", "content": "The synthetic alert that exercises the delivery path should run against the consolidated receiver too; make sure its schedule survived the migration."}},
+        {"turn": {"role": "assistant", "content": "Verified the synthetic still fires on schedule against the consolidated receiver and labeled it clearly in the alert body as synthetic."}},
+        {"turn": {"role": "user", "content": "One more: the delivery runbook's fanout section still describes the pre-consolidation pool; rewrite it around the 18 webhook delivery workers we run today so oncall stops second-guessing the number."}},
+        {"turn": {"role": "assistant", "content": "Rewrote the fanout section around the current pool and added where the sizing decision is recorded, so the runbook and the capacity sheet agree."}},
+        {"tool_call": {"call_id": "c1", "tool": "retrieve", "args": {"query": "webhook delivery fanout path", "k": 3}}},
+        {"tool_call": {"call_id": "c2", "tool": "agent_memory_search", "args": {"query": ""}}},
+        {"turn": {"role": "user", "content": "How many delivery workers does the webhook fanout run?"}}
+      ],
+      "memory_records": [
+        {"id": "rec-webhook-pool", "content": "webhook fanout still runs 6 delivery workers", "kind": "semantic"},
+        {"id": "rec-consol-log", "content": "receiver consolidation log links the soak report; capacity sheet entries point at it", "kind": "semantic"},
+        {"id": "rec-synthetic-label", "content": "the delivery-path synthetic stays labeled synthetic in the alert body so responders cannot mistake it", "kind": "working", "workspace_id": "ws-driftwatch"}
+      ],
+      "rag_sources": [
+        {
+          "path": "internal/notify/webhookpool.go",
+          "content": "package notify\n\nimport \"sync\"\n\n// pool drains queued webhook deliveries through a fixed set of\n// workers. The pool size is wired in from the delivery profile at\n// startup; Run panics on a non-positive size because a zero pool\n// silently strands every queued delivery.\ntype pool struct {\n\tsize int\n\tq    chan Delivery\n\twg   sync.WaitGroup\n}\n\nfunc (p *pool) Run() {\n\tif p.size <= 0 {\n\t\tpanic(\"notify: webhook pool size must be positive\")\n\t}\n\tfor i := 0; i < p.size; i++ {\n\t\tp.wg.Add(1)\n\t\tgo p.worker()\n\t}\n}\n",
+          "language": "go",
+          "abstract": "Webhook fanout pool startup and worker lifecycle; size wired from the delivery profile.",
+          "overview": "webhookpool.go starts the fixed webhook worker set from the profile-supplied size and owns shutdown draining; no sizing constant lives in this file."
+        },
+        {
+          "path": "internal/notify/webhooksign.go",
+          "content": "package notify\n\nimport (\n\t\"crypto/hmac\"\n\t\"crypto/sha256\"\n\t\"encoding/hex\"\n)\n\n// sign computes the delivery signature receivers verify. The signing\n// secret comes from the receiver entry; deliveries to receivers\n// without a secret go out unsigned and are counted, because a silent\n// unsigned delivery would defeat the receiver-side check.\nfunc sign(secret, body []byte) string {\n\tmac := hmac.New(sha256.New, secret)\n\tmac.Write(body)\n\treturn hex.EncodeToString(mac.Sum(nil))\n}\n",
+          "language": "go",
+          "abstract": "Webhook delivery signing with per-receiver secrets.",
+          "overview": "webhooksign.go computes the HMAC signature receivers verify, reads the secret from the receiver entry, and counts unsigned deliveries instead of hiding them."
+        },
+        {
+          "path": "docs/webhooks.md",
+          "content": "# driftwatch webhooks\n\nFired alerts can fan out to webhook receivers alongside the pager\npath. Receivers are declared in the delivery profile with an\nendpoint, an optional signing secret, and a retry policy.\n\n## Delivery\n\nQueued deliveries drain through the webhook worker pool. Failures\nretry with backoff under the receiver's policy; exhausted retries\nland in the dead-letter log for operator replay.\n",
+          "language": "markdown",
+          "abstract": "Webhook delivery guide: receiver declarations, worker pool drain, retry and dead-letter flow.",
+          "overview": "webhooks.md covers declaring webhook receivers in the delivery profile, how queued deliveries drain through the pool, and where exhausted retries land."
+        }
+      ],
+      "required_evidence": [
+        {"domain": "conversation", "literal": "18 webhook delivery workers"}
+      ],
+      "pressure_target": {"domain": "conversation", "literal": "18 webhook delivery workers"},
+      "required_domains": ["conversation", "memory", "rag"],
+      "golden": {
+        "final_answer_criteria": "States the webhook fanout runs 18 delivery workers. An answer of 6 workers scores 0. An answer presenting both the correct and a competing value without committing to one scores 0."
+      }
+    },
+    {
+      "id": "stale-probe-timeout-edge",
+      "stratum": "stale_vs_fresh",
+      "answer_home": "memory",
+      "scenario_family": "probe-timeout-staleness",
+      "system": "You are the driftwatch assistant. driftwatch is a self-hosted telemetry ingest and alerting daemon. Answer using only the provided conversation, memory records, and retrieved context.",
+      "events": [
+        {"turn": {"role": "user", "content": "Burn-in follow-ups from the flaky-uplink weeks. The packet-loss captures from the worst two sites are still on the collector hosts; pull them into the shared analysis bucket before the hosts recycle."}},
+        {"turn": {"role": "assistant", "content": "Pulled both capture sets into the analysis bucket with site and date prefixes, and noted the recycle schedule in the burn-in doc."}},
+        {"turn": {"role": "user", "content": "The burn-in dashboards can be trimmed as well; keep the loss and retry panels, drop the experimental ones nobody read during the burn-in."}},
+        {"turn": {"role": "assistant", "content": "Kept loss and retry, dropped the four experimental panels, and archived their queries in the dashboard folder in case anyone asks."}},
+        {"turn": {"role": "user", "content": "Can you write up the uplink vendor's findings for the burn-in doc? Their engineer summarized it on the call but nothing landed in writing on our side."}},
+        {"turn": {"role": "assistant", "content": "Wrote the vendor findings into the burn-in doc: the microwave hop degraded under rain fade, and the reroute they applied held for the final two weeks."}},
+        {"turn": {"role": "user", "content": "The site survey photos from the two worst sites should be linked from the doc too; field ops has them in their drive somewhere."}},
+        {"turn": {"role": "assistant", "content": "Linked the survey photo albums from the burn-in doc after field ops shared the folder; both sites' antenna runs are visible in the sets."}},
+        {"turn": {"role": "user", "content": "Also the burn-in left a temporary retry budget bump on the edge exporters. Confirm whether it is still in place and note where it is set."}},
+        {"turn": {"role": "assistant", "content": "The bump is still in place, set in the edge exporter profile; I noted the location and flagged it for review at the next config pass."}},
+        {"turn": {"role": "user", "content": "The weekly edge sync ran long every week of the burn-in. Now that it is over, propose trimming the standing agenda back to the pre-burn-in shape."}},
+        {"turn": {"role": "assistant", "content": "Proposed the trimmed agenda to the edge leads and both agreed; the invite now carries the shorter agenda starting next week."}},
+        {"turn": {"role": "user", "content": "Field ops asked for a one-page summary of what the burn-in changed for their install checklist; can you draft that from the doc?"}},
+        {"turn": {"role": "assistant", "content": "Drafted the one-pager: antenna alignment tolerances tightened and the reroute contact added; field ops confirmed it covers their checklist."}},
+        {"turn": {"role": "user", "content": "And the burn-in spend needs splitting between the network and edge budgets before the month closes; finance flagged the combined line."}},
+        {"turn": {"role": "assistant", "content": "Split the spend with the vendor invoices as the dividing line and sent finance the breakdown; both budget owners signed off."}},
+        {"turn": {"role": "user", "content": "Last: the two loaner spectrum analyzers from the vendor go back this week; make sure the shipping labels and the customs forms are sorted."}},
+        {"turn": {"role": "assistant", "content": "Both analyzers are boxed with labels and customs forms attached, and the vendor's return authorization is taped inside the lids."}},
+        {"tool_call": {"call_id": "c1", "tool": "retrieve", "args": {"query": "edge collector probe path", "k": 3}}},
+        {"tool_call": {"call_id": "c2", "tool": "agent_memory_search", "args": {"query": ""}}},
+        {"turn": {"role": "user", "content": "What timeout do edge collector probes use?"}}
+      ],
+      "memory_records": [
+        {"id": "rec-probe-timeout", "content": "edge collector probe timeout at 9 seconds, raised during the flaky-uplink burn-in; the prober holds its socket open across the retry window, field sites on microwave hops stay inside the window even under rain fade, and the burn-in doc records the sweep that settled the value", "kind": "semantic"},
+        {"id": "rec-probe-clamp", "content": "probe attempts on edge collectors are cut off at 2 seconds", "kind": "semantic"},
+        {"id": "rec-burnin-doc", "content": "flaky-uplink burn-in doc collects the vendor findings and the capture links", "kind": "semantic"},
+        {"id": "rec-retry-bump", "content": "edge exporter retry budget bump from the burn-in is still active in the exporter profile", "kind": "working", "workspace_id": "ws-driftwatch"}
+      ],
+      "rag_sources": [
+        {
+          "path": "internal/edge/prober.go",
+          "content": "package edge\n\n// probe sends one liveness check to a site collector and records the\n// round trip. The attempt deadline comes from the prober config; the\n// retry window wraps attempts so a lossy hop distinguishes a slow\n// site from a dead one.\nfunc (p *Prober) probe(target string) result {\n\tctx, cancel := p.attemptContext()\n\tdefer cancel()\n\tstart := p.clock.Now()\n\terr := p.dial(ctx, target)\n\treturn result{\n\t\ttarget:  target,\n\t\trtt:     p.clock.Now().Sub(start),\n\t\thealthy: err == nil,\n\t}\n}\n",
+          "language": "go",
+          "abstract": "Edge probing: each probe attempt is cut off at 2 seconds, with retries wrapping the attempts.",
+          "overview": "prober.go sends per-target liveness checks under the config-supplied attempt deadline and wraps attempts in the retry window; no deadline value is hard-coded here."
+        },
+        {
+          "path": "internal/edge/uplink.go",
+          "content": "package edge\n\nimport (\n\t\"sync\"\n\t\"time\"\n)\n\n// uplink tracks the health of a site's path to the core tier. State\n// transitions are hysteretic: a link marks degraded after consecutive\n// failed windows and recovers only after consecutive clean ones, so a\n// single lossy window cannot flap the shipping path.\ntype uplink struct {\n\tmu        sync.Mutex\n\tdegraded  bool\n\tfailRuns  int\n\tcleanRuns int\n\tlast      time.Time\n}\n\n// observe folds one probe window into the health state. Callers pass\n// windows in order; out-of-order windows are dropped with a counter\n// rather than rewinding state, because replaying old windows would\n// mask a live degradation.\nfunc (u *uplink) observe(w window) {\n\tu.mu.Lock()\n\tdefer u.mu.Unlock()\n\tif w.start.Before(u.last) {\n\t\tu.metricsOutOfOrder.Inc()\n\t\treturn\n\t}\n\tu.last = w.start\n\tif w.clean() {\n\t\tu.cleanRuns++\n\t\tu.failRuns = 0\n\t} else {\n\t\tu.failRuns++\n\t\tu.cleanRuns = 0\n\t}\n\tu.transition()\n}\n",
+          "language": "go",
+          "abstract": "Uplink health tracking with hysteretic degraded-state transitions.",
+          "overview": "uplink.go folds probe windows into a per-site health state with hysteresis in both directions and drops out-of-order windows loudly instead of rewinding."
+        },
+        {
+          "path": "docs/edge-probes.md",
+          "content": "# driftwatch edge probing\n\nCore probers check every site collector on a fixed cadence. Probe\nresults feed the uplink health state, which decides whether a site's\nshipping path counts as degraded.\n\n## Reading probe results\n\nA slow site and a dead site look identical inside one attempt; the\nretry window is what separates them. Judge a site by its window\nverdicts, not by single attempts.\n",
+          "language": "markdown",
+          "abstract": "Edge probe guide: cadence, health feed, window-level verdicts.",
+          "overview": "edge-probes.md explains the probe cadence, how results feed uplink health, and why sites are judged by retry-window verdicts rather than single attempts."
+        }
+      ],
+      "required_evidence": [
+        {"domain": "memory", "literal": "probe timeout at 9 seconds"}
+      ],
+      "pressure_target": {"domain": "memory", "literal": "probe timeout at 9 seconds"},
+      "required_domains": ["conversation", "memory", "rag"],
+      "golden": {
+        "final_answer_criteria": "States edge collector probes use a 9 second timeout. An answer of 2 seconds scores 0. An answer presenting both the correct and a competing value without committing to one scores 0."
+      }
+    },
+    {
+      "id": "stale-probe-timeout-core",
+      "stratum": "stale_vs_fresh",
+      "answer_home": "conversation",
+      "scenario_family": "probe-timeout-staleness",
+      "system": "You are the driftwatch assistant. driftwatch is a self-hosted telemetry ingest and alerting daemon. Answer using only the provided conversation, memory records, and retrieved context.",
+      "events": [
+        {"turn": {"role": "user", "content": "Morning sweep. First: I raised the core probe timeout to 15 seconds once the collector burn-in wrapped up; fold that into the deployment profile notes so the next provisioning run records why."}},
+        {"turn": {"role": "assistant", "content": "Folded it into the profile notes with a pointer to the burn-in summary, so provisioning history explains the setting."}},
+        {"turn": {"role": "user", "content": "The burn-in also left debug sampling enabled on two core collectors; turn it off and confirm the sample volume drops back to the baseline."}},
+        {"turn": {"role": "assistant", "content": "Disabled debug sampling on both collectors and watched the sample volume settle back to baseline within the hour."}},
+        {"turn": {"role": "user", "content": "Core cert rotation is due as well; stage the renewals so the fleet rotates in two waves instead of all at once."}},
+        {"turn": {"role": "assistant", "content": "Staged the renewals into two waves a week apart, with the wave assignments recorded in the rotation sheet."}},
+        {"turn": {"role": "user", "content": "Can you reconcile the core host inventory against the asset registry? Finance found two hosts billed that the inventory does not list."}},
+        {"turn": {"role": "assistant", "content": "Reconciled both lists: the two hosts were decommissioned but never removed from billing; I filed the correction with finance."}},
+        {"turn": {"role": "user", "content": "The core dashboards grew a duplicated latency row during the burn-in. Merge the duplicates and keep the alert annotations from both."}},
+        {"turn": {"role": "assistant", "content": "Merged the duplicated rows and carried both sets of annotations across, so the incident markers survived the merge."}},
+        {"turn": {"role": "user", "content": "Also draft the burn-in summary for the platform review; the raw notes are in the burn-in channel and nobody will read them as-is."}},
+        {"turn": {"role": "assistant", "content": "Drafted the summary from the channel notes with the three headline findings and linked the raw thread for anyone who wants depth."}},
+        {"turn": {"role": "user", "content": "The spare core chassis in the rack cage should go back to procurement's pool now that the burn-in is over; check nothing is cabled to it."}},
+        {"turn": {"role": "assistant", "content": "Checked the cage: the spare is uncabled, and procurement has it scheduled for pickup with the asset tag already transferred."}},
+        {"turn": {"role": "user", "content": "Someone flagged that the core alert routing still names the old team alias from before the reorg; update the routes and the escalation doc."}},
+        {"turn": {"role": "assistant", "content": "Updated the routes to the current alias and fixed the escalation doc; the old alias now forwards with a deprecation note."}},
+        {"turn": {"role": "user", "content": "And the burn-in spend line needs an owner note before the close; finance wants the overage explained against the estimate."}},
+        {"turn": {"role": "assistant", "content": "Wrote the owner note breaking the overage into extended lab time and the extra chassis rental, and attached it to the spend line."}},
+        {"turn": {"role": "user", "content": "Last: schedule the post-burn-in review with the collector leads and attach the summary draft so the meeting starts from the findings."}},
+        {"turn": {"role": "assistant", "content": "Scheduled the review for early next week with the summary attached and both collector leads confirmed attendance."}},
+        {"tool_call": {"call_id": "c1", "tool": "retrieve", "args": {"query": "core collector probe loop", "k": 3}}},
+        {"tool_call": {"call_id": "c2", "tool": "agent_memory_search", "args": {"query": ""}}},
+        {"turn": {"role": "user", "content": "What is the probe timeout for core collectors?"}}
+      ],
+      "memory_records": [
+        {"id": "rec-core-probe", "content": "core probe timeout is 4 seconds; hold it there through the collector burn-in", "kind": "semantic"},
+        {"id": "rec-core-rotation", "content": "core cert renewals rotate in two waves recorded in the rotation sheet", "kind": "semantic"},
+        {"id": "rec-burnin-channel", "content": "collector burn-in raw notes live in the burn-in channel; summaries go to the platform review", "kind": "working", "workspace_id": "ws-driftwatch"}
+      ],
+      "rag_sources": [
+        {
+          "path": "internal/core/prober.go",
+          "content": "package core\n\n// probeLoop walks the collector set on the fixed cadence and issues\n// one liveness probe per collector per round. Deadlines and the\n// cadence come from the deployment profile; the loop only owns\n// ordering and skip accounting for collectors in maintenance.\nfunc (p *Prober) probeLoop() {\n\tfor range p.ticker.C {\n\t\tfor _, c := range p.collectors() {\n\t\t\tif c.inMaintenance() {\n\t\t\t\tp.metricsSkipped.Inc()\n\t\t\t\tcontinue\n\t\t\t}\n\t\t\tp.probe(c)\n\t\t}\n\t}\n}\n",
+          "language": "go",
+          "abstract": "Core probe loop: per-round collector walk with maintenance skips.",
+          "overview": "prober.go iterates the collector set each round and issues liveness probes under profile-supplied deadlines, counting maintenance skips instead of hiding them."
+        },
+        {
+          "path": "internal/core/registry.go",
+          "content": "package core\n\nimport (\n\t\"sort\"\n\t\"sync\"\n)\n\n// registry is the authoritative set of core collectors. Membership\n// changes arrive from the provisioning pipeline and take effect on\n// the next probe round; the registry never mutates mid-round, so a\n// round sees one consistent snapshot.\ntype registry struct {\n\tmu      sync.RWMutex\n\tentries map[string]collectorEntry\n\tepoch   uint64\n}\n\n// snapshot returns the current membership in stable name order. The\n// sort is deliberate: probe rounds, reports, and the fleet dashboard\n// all walk the same order, which keeps their row alignment stable\n// across refreshes.\nfunc (r *registry) snapshot() []collectorEntry {\n\tr.mu.RLock()\n\tdefer r.mu.RUnlock()\n\tout := make([]collectorEntry, 0, len(r.entries))\n\tfor _, e := range r.entries {\n\t\tout = append(out, e)\n\t}\n\tsort.Slice(out, func(i, j int) bool { return out[i].name < out[j].name })\n\treturn out\n}\n\n// apply installs a provisioning update and bumps the epoch. Updates\n// are whole-set replacements: partial merges once produced ghosts\n// when a rename raced a removal, and the epoch lets probe rounds\n// detect that membership moved under them.\nfunc (r *registry) apply(update []collectorEntry) {\n\tr.mu.Lock()\n\tdefer r.mu.Unlock()\n\tnext := make(map[string]collectorEntry, len(update))\n\tfor _, e := range update {\n\t\tnext[e.name] = e\n\t}\n\tr.entries = next\n\tr.epoch++\n}\n",
+          "language": "go",
+          "abstract": "Core collector registry: consistent snapshots, whole-set provisioning updates.",
+          "overview": "registry.go holds the authoritative collector membership, hands out name-ordered snapshots for stable row alignment, and applies provisioning updates as epoch-bumped whole-set replacements."
+        },
+        {
+          "path": "docs/core-collectors.md",
+          "content": "# driftwatch core collectors\n\nCore collectors aggregate site traffic before it reaches ingest.\nMembership comes from the provisioning pipeline; probing walks the\nregistry snapshot every round.\n\n## Maintenance\n\nMark a collector in maintenance before touching it: probes skip it,\nthe dashboard grays the row, and alerts hold. Forgetting the flag\npages oncall for every planned restart, which is how the flag ended\nup mandatory in the restart runbook.\n",
+          "language": "markdown",
+          "abstract": "Core collector guide: aggregation role, registry membership, maintenance flags.",
+          "overview": "core-collectors.md covers the aggregation tier's role, registry-driven membership, and why the maintenance flag is mandatory before planned restarts."
+        }
+      ],
+      "required_evidence": [
+        {"domain": "conversation", "literal": "core probe timeout to 15 seconds"}
+      ],
+      "pressure_target": {"domain": "conversation", "literal": "core probe timeout to 15 seconds"},
+      "required_domains": ["conversation", "memory", "rag"],
+      "topline_facts": "The conversation records that the core probe timeout to 15 seconds change landed once the collector burn-in wrapped up; the stored memory note still holding core probes at 4 seconds predates the burn-in close and is stale.",
+      "golden": {
+        "final_answer_criteria": "States the core collector probe timeout is 15 seconds. An answer of 4 seconds scores 0. An answer presenting both the correct and a competing value without committing to one scores 0."
+      }
+    },
+    {
+      "id": "stale-notifier-timeout-page",
+      "stratum": "stale_vs_fresh",
+      "answer_home": "memory",
+      "scenario_family": "notifier-timeout-staleness",
+      "system": "You are the driftwatch assistant. driftwatch is a self-hosted telemetry ingest and alerting daemon. Answer using only the provided conversation, memory records, and retrieved context.",
+      "events": [
+        {"turn": {"role": "user", "content": "Paging migration punch list. The old provider's webhook endpoints are still registered in our delivery profile; remove them and note the removal in the migration log so the cutover trail stays complete."}},
+        {"turn": {"role": "assistant", "content": "Removed the old endpoints from the profile, verified nothing delivered to them this week, and logged the removal with the cutover date."}},
+        {"turn": {"role": "user", "content": "The migration also left both providers receiving test pages from the drill schedule. Point the drill at the new provider only, and archive the old drill results where the runbook links them."}},
+        {"turn": {"role": "assistant", "content": "Repointed the drill at the new provider and archived the old results under the runbook's drill section, links intact."}},
+        {"turn": {"role": "user", "content": "Can you reconcile the escalation policies against the new provider's schedule model? Two policies still reference rotation names that only existed on the old side."}},
+        {"turn": {"role": "assistant", "content": "Reconciled the policies: both stale rotation names now map to the new schedules, and I left a comment on each policy naming the old rotation for the audit."}},
+        {"turn": {"role": "user", "content": "The provider migration doc needs the acknowledgement flow written up as well; the new provider acks asynchronously and people keep assuming the old synchronous behaviour."}},
+        {"turn": {"role": "assistant", "content": "Wrote the acknowledgement flow into the migration doc, including the poll step, and linked it from the paging runbook's delivery section."}},
+        {"turn": {"role": "user", "content": "Also check the paging spend against the old provider's final invoice; we should not be billed past the cutover."}},
+        {"turn": {"role": "assistant", "content": "Checked the invoice: two days past cutover were billed, and I filed the credit request with the cutover log attached as evidence."}},
+        {"turn": {"role": "user", "content": "The oncall handbook still screenshots the old provider's app for the ack walkthrough. Refresh those against the new app before the next cohort onboards."}},
+        {"turn": {"role": "assistant", "content": "Refreshed the walkthrough with new-app screenshots and had this week's oncall verify the steps match what they actually see."}},
+        {"turn": {"role": "user", "content": "Someone reported the low-urgency route double-notified during the migration window. Confirm the dedupe settings survived the cutover on that route."}},
+        {"turn": {"role": "assistant", "content": "Confirmed the route's dedupe settings carried over; the double notification traced to the overlap window itself, and I noted that in the migration log."}},
+        {"turn": {"role": "user", "content": "The migration retro needs scheduling too, with the provider's implementation engineer invited; their side saw failure modes ours did not."}},
+        {"turn": {"role": "assistant", "content": "Scheduled the retro with the implementation engineer attending and seeded the agenda with the delivery items from the migration log."}},
+        {"turn": {"role": "user", "content": "Last: file the DPA addendum from the new provider with legal and link it from the vendor register so audit can find it."}},
+        {"turn": {"role": "assistant", "content": "Filed the addendum with legal and linked it from the vendor register entry alongside the signed order form."}},
+        {"tool_call": {"call_id": "c1", "tool": "retrieve", "args": {"query": "pager notifier delivery path", "k": 3}}},
+        {"tool_call": {"call_id": "c2", "tool": "agent_memory_search", "args": {"query": ""}}},
+        {"turn": {"role": "user", "content": "How long does the pager notifier wait on a delivery before giving up?"}}
+      ],
+      "memory_records": [
+        {"id": "rec-pager-timeout", "content": "pager notifier timeout at 45 seconds, raised during the paging-provider migration; the new provider acknowledges asynchronously, a delivery only counts failed after the acknowledgement poll drains, and short timeouts double-page during provider brownouts, which the migration doc calls out beside the sweep that settled the value", "kind": "semantic"},
+        {"id": "rec-pager-window", "content": "pager notifier gives up a delivery at 10 seconds", "kind": "semantic"},
+        {"id": "rec-migration-log", "content": "paging migration log records the cutover trail; the retro agenda seeds from its delivery items", "kind": "working", "workspace_id": "ws-driftwatch"}
+      ],
+      "rag_sources": [
+        {
+          "path": "internal/notify/pager.go",
+          "content": "package notify\n\n// deliverPage sends one page to the provider and waits for the\n// delivery verdict. The wait ceiling comes from the delivery profile;\n// the poll loop below owns the asynchronous acknowledgement flow the\n// provider introduced.\nfunc (n *Notifier) deliverPage(p Page) error {\n\treceipt, err := n.provider.Send(p)\n\tif err != nil {\n\t\treturn err\n\t}\n\treturn n.awaitAck(receipt)\n}\n",
+          "language": "go",
+          "abstract": "Pager delivery: provider send plus acknowledgement wait under the profile ceiling.",
+          "overview": "pager.go sends pages and waits on the asynchronous acknowledgement flow under the profile-supplied ceiling; no wait value is hard-coded here."
+        },
+        {
+          "path": "internal/notify/ackpoll.go",
+          "content": "package notify\n\nimport \"time\"\n\n// awaitAck polls the provider's receipt endpoint until the delivery\n// reaches a terminal state. Polling backs off geometrically from the\n// initial interval; a receipt that vanishes from the provider's side\n// is treated as failed, never as delivered, because a lost receipt\n// after a real delivery re-pages harmlessly while the reverse drops\n// a page.\nfunc (n *Notifier) awaitAck(r Receipt) error {\n\tinterval := n.pollInitial\n\tdeadline := n.clock.Now().Add(n.waitCeiling)\n\tfor n.clock.Now().Before(deadline) {\n\t\tstate, err := n.provider.Receipt(r)\n\t\tif err == nil && state.Terminal() {\n\t\t\tif state.Delivered() {\n\t\t\t\treturn nil\n\t\t\t}\n\t\t\treturn errDeliveryFailed\n\t\t}\n\t\tn.clock.Sleep(interval)\n\t\tinterval = n.nextInterval(interval)\n\t}\n\treturn errAckTimeout\n}\n",
+          "language": "go",
+          "abstract": "Acknowledgement polling with geometric backoff and fail-safe receipt handling.",
+          "overview": "ackpoll.go polls delivery receipts to a terminal state under the wait ceiling, backs off geometrically, and treats vanished receipts as failures so a lost receipt can never silently drop a page."
+        },
+        {
+          "path": "docs/paging-delivery.md",
+          "content": "# driftwatch pager delivery\n\nPages route through the paging provider; delivery is confirmed by\nacknowledgement, not by the send call returning.\n\n## Acknowledgement\n\nThe provider acknowledges asynchronously. A delivery counts as\nfailed only after the acknowledgement poll drains without reaching a\nterminal delivered state; the failure path then escalates through\nthe policy ladder rather than retrying the same responder.\n",
+          "language": "markdown",
+          "abstract": "Pager delivery guide: acknowledgement-confirmed delivery and the escalation handoff.",
+          "overview": "paging-delivery.md explains acknowledgement-based delivery confirmation, when a delivery counts as failed, and where the failure path escalates."
+        }
+      ],
+      "required_evidence": [
+        {"domain": "memory", "literal": "pager notifier timeout at 45 seconds"}
+      ],
+      "pressure_target": {"domain": "memory", "literal": "pager notifier timeout at 45 seconds"},
+      "required_domains": ["conversation", "memory", "rag"],
+      "golden": {
+        "final_answer_criteria": "States the pager notifier waits 45 seconds before giving up a delivery. An answer of 10 seconds scores 0. An answer presenting both the correct and a competing value without committing to one scores 0."
+      }
+    },
+    {
+      "id": "stale-notifier-timeout-hook",
+      "stratum": "stale_vs_fresh",
+      "answer_home": "conversation",
+      "scenario_family": "notifier-timeout-staleness",
+      "system": "You are the driftwatch assistant. driftwatch is a self-hosted telemetry ingest and alerting daemon. Answer using only the provided conversation, memory records, and retrieved context.",
+      "events": [
+        {"turn": {"role": "user", "content": "Receiver rework follow-through. The rework branch is merged but the deploy notes never made it to the change log; write them up while the details are fresh."}},
+        {"turn": {"role": "assistant", "content": "Wrote the deploy notes into the change log with the rollout order and the two config flips, linked from the rework ticket."}},
+        {"turn": {"role": "user", "content": "The rework testbed receivers are still running in the sandbox project. Tear them down and reclaim the addresses before something starts depending on them."}},
+        {"turn": {"role": "assistant", "content": "Tore down the sandbox receivers and released the addresses; the sandbox project is back to its pre-rework footprint."}},
+        {"turn": {"role": "user", "content": "Can you sweep the delivery profile for receiver entries with no traffic since before the rework? A few lab entries look abandoned."}},
+        {"turn": {"role": "assistant", "content": "Swept the profile and flagged three abandoned lab entries; two owners confirmed deletion and the third is queued pending a reply."}},
+        {"turn": {"role": "user", "content": "Where did the webhook notifier settings land after the rework? I want the change log to show the final state, not the branch history."}},
+        {"turn": {"role": "assistant", "content": "Settled state: after the receiver rework I raised the webhook notifier timeout to 30 seconds, and the retry backoff kept its shape; the change log now records both with the rework rationale."}},
+        {"turn": {"role": "user", "content": "The rework also touched the dead-letter replay path; run one replay drill so we know the operator steps still match the runbook."}},
+        {"turn": {"role": "assistant", "content": "Ran the drill on a synthetic dead-letter entry; the steps matched except one renamed flag, and I fixed the runbook line that named it."}},
+        {"turn": {"role": "user", "content": "Receiver-side signing needs a doc pass too; the rework changed where secrets live and the receiver onboarding doc still shows the old location."}},
+        {"turn": {"role": "assistant", "content": "Updated the onboarding doc with the new secret location and added a migration note for receivers still reading the old path."}},
+        {"turn": {"role": "user", "content": "Also confirm the rework did not change delivery ordering for receivers that requested strict order; their integration tests are strict about it."}},
+        {"turn": {"role": "assistant", "content": "Confirmed strict-order receivers still drain through the ordered lane; I attached the lane assignment listing to the rework ticket as evidence."}},
+        {"turn": {"role": "user", "content": "The capacity review wants a before-and-after on delivery latency across the rework; pull the two-week windows either side of the merge."}},
+        {"turn": {"role": "assistant", "content": "Pulled both windows into the review sheet: median delivery latency held flat and the long tail shortened after the rework."}},
+        {"turn": {"role": "user", "content": "Last: thank the receiver-side teams that ran early integrations; their bug reports shaped the rework and the retro should say so."}},
+        {"turn": {"role": "assistant", "content": "Added an acknowledgements section to the retro doc naming the three teams and the issues their reports surfaced."}},
+        {"tool_call": {"call_id": "c1", "tool": "retrieve", "args": {"query": "webhook notifier delivery path", "k": 3}}},
+        {"tool_call": {"call_id": "c2", "tool": "agent_memory_search", "args": {"query": ""}}},
+        {"turn": {"role": "user", "content": "How long may a webhook notifier delivery run before timing out?"}}
+      ],
+      "memory_records": [
+        {"id": "rec-hook-window", "content": "webhook notifier timeout stands at 8 seconds", "kind": "semantic"},
+        {"id": "rec-strict-order", "content": "strict-order receivers drain through the ordered delivery lane; the lane listing lives on the rework ticket", "kind": "semantic"},
+        {"id": "rec-secret-loc", "content": "receiver signing secrets moved during the rework; the onboarding doc shows the new location", "kind": "working", "workspace_id": "ws-driftwatch"}
+      ],
+      "rag_sources": [
+        {
+          "path": "internal/notify/hookdeliver.go",
+          "content": "package notify\n\n// deliverHook posts one webhook delivery and classifies the outcome.\n// The attempt runs under the delivery deadline from the profile;\n// classification stays coarse on purpose: retryable or terminal,\n// nothing in between, so the retry loop cannot misread a status.\nfunc (n *Notifier) deliverHook(d Delivery) outcome {\n\tctx, cancel := n.deadlineContext()\n\tdefer cancel()\n\tresp, err := n.post(ctx, d)\n\tif err != nil {\n\t\treturn retryable(err)\n\t}\n\treturn classify(resp)\n}\n",
+          "language": "go",
+          "abstract": "Webhook delivery attempt: profile deadline, coarse outcome classification.",
+          "overview": "hookdeliver.go posts webhook deliveries under the profile-supplied deadline and classifies outcomes as retryable or terminal only; the deadline value itself lives in the profile."
+        },
+        {
+          "path": "internal/notify/retryplan.go",
+          "content": "package notify\n\nimport \"time\"\n\n// retryPlan owns the per-receiver retry schedule. Plans are built\n// from the receiver's declared policy at profile load and never\n// consult the clock themselves: the drain loop asks for the next\n// attempt time and the plan answers from its precomputed ladder,\n// which keeps retry behaviour reproducible in replay tests.\ntype retryPlan struct {\n\tladder  []time.Duration\n\tattempt int\n\tceiling time.Duration\n}\n\n// next returns the delay before the following attempt, or false once\n// the ladder is exhausted. Exhaustion is terminal by design: a\n// receiver that wants more attempts declares a longer ladder in its\n// policy instead of the notifier inventing retries it was never\n// asked to make.\nfunc (r *retryPlan) next() (time.Duration, bool) {\n\tif r.attempt >= len(r.ladder) {\n\t\treturn 0, false\n\t}\n\td := r.ladder[r.attempt]\n\tif d > r.ceiling {\n\t\td = r.ceiling\n\t}\n\tr.attempt++\n\treturn d, true\n}\n",
+          "language": "go",
+          "abstract": "Per-receiver retry ladders: precomputed schedules, declared exhaustion.",
+          "overview": "retryplan.go precomputes each receiver's retry ladder from its declared policy, answers next-attempt delays without consulting the clock, and treats ladder exhaustion as terminal."
+        },
+        {
+          "path": "docs/notifier-delivery.md",
+          "content": "# driftwatch notifier delivery\n\nWebhook and pager deliveries share the notifier's drain loop but\nrun under separate profiles: deadlines, retry ladders, and\ndead-letter policies are declared per path.\n\n## Operator notes\n\nWatch the dead-letter log after profile changes; a mistyped ladder\nusually shows up there first. Replay drills are cheap and the\nrunbook's replay section stays current on purpose.\n",
+          "language": "markdown",
+          "abstract": "Notifier delivery guide: per-path profiles and dead-letter monitoring.",
+          "overview": "notifier-delivery.md covers the shared drain loop with per-path profiles and what to watch after profile changes, including dead-letter replays."
+        }
+      ],
+      "required_evidence": [
+        {"domain": "conversation", "literal": "webhook notifier timeout to 30 seconds"}
+      ],
+      "pressure_target": {"domain": "conversation", "literal": "webhook notifier timeout to 30 seconds"},
+      "required_domains": ["conversation", "memory", "rag"],
+      "golden": {
+        "final_answer_criteria": "States the webhook notifier delivery timeout is 30 seconds. An answer of 8 seconds scores 0. An answer presenting both the correct and a competing value without committing to one scores 0."
+      }
+    },
+    {
+      "id": "stale-backfill-chunk-replay",
+      "stratum": "stale_vs_fresh",
+      "answer_home": "memory",
+      "scenario_family": "backfill-chunk-staleness",
+      "system": "You are the driftwatch assistant. driftwatch is a self-hosted telemetry ingest and alerting daemon. Answer using only the provided conversation, memory records, and retrieved context.",
+      "events": [
+        {"turn": {"role": "user", "content": "Columnar rewrite cleanup. The rewrite feature branch is merged but the old row-assembly benchmarks still run nightly; retire them and keep only the columnar suite so the perf dashboard stops mixing eras."}},
+        {"turn": {"role": "assistant", "content": "Retired the row-assembly benchmarks and archived their history; the perf dashboard now graphs the columnar suite alone with an era marker at the merge."}},
+        {"turn": {"role": "user", "content": "The rewrite doc should get the operator-facing summary section we promised; the design detail is all there but oncall needs the two-paragraph version."}},
+        {"turn": {"role": "assistant", "content": "Added the operator summary up top: what changed on the replay path, what to watch during backfills, and where the deep detail lives."}},
+        {"turn": {"role": "user", "content": "Can you sweep the feature flags left from the rewrite rollout? At least two are permanently on now and should become defaults."}},
+        {"turn": {"role": "assistant", "content": "Swept the flags: promoted the two permanent ones to defaults and deleted their flag checks; one experimental flag remains with an owner and an expiry."}},
+        {"turn": {"role": "user", "content": "The staging cluster still runs mixed binaries from the rollout waves. Roll it forward to the merged build so staging results stop depending on which node you land on."}},
+        {"turn": {"role": "assistant", "content": "Rolled staging forward to the merged build across all nodes and verified the version banner matches everywhere."}},
+        {"turn": {"role": "user", "content": "Also the rewrite changed the segment flush cadence assumptions; make sure the capacity model spreadsheet picked up the new write pattern."}},
+        {"turn": {"role": "assistant", "content": "Updated the capacity model with the post-rewrite write pattern and left the old columns hidden but intact for comparison."}},
+        {"turn": {"role": "user", "content": "The data team asked for a heads-up channel before large backfills run; set up the notification hook so their materialized views stop getting surprised."}},
+        {"turn": {"role": "assistant", "content": "Wired a backfill-start notification into the data team's channel with size and expected duration, and documented the hook in the rewrite doc."}},
+        {"turn": {"role": "user", "content": "Someone hit a confusing error when a backfill raced a retention sweep last week. Confirm the guard ordering and file whatever the fix is."}},
+        {"turn": {"role": "assistant", "content": "Confirmed the sweep now yields to staging backfills with the guard ordering fixed and filed; the confusing error message got rewritten too."}},
+        {"turn": {"role": "user", "content": "The rewrite retro wants concrete numbers; pull the before-and-after replay throughput from the burn windows into the retro doc."}},
+        {"turn": {"role": "assistant", "content": "Pulled both windows into the retro doc: replay throughput roughly tripled after the rewrite, with the caveat notes on measurement windows attached."}},
+        {"turn": {"role": "user", "content": "Last: the old row-assembly design doc should be marked superseded with a pointer forward, so searches stop landing people on the dead design."}},
+        {"turn": {"role": "assistant", "content": "Marked the old design doc superseded with a banner linking the rewrite doc, and fixed the three wiki pages that still linked the old one."}},
+        {"tool_call": {"call_id": "c1", "tool": "retrieve", "args": {"query": "replay backfill staging path", "k": 3}}},
+        {"tool_call": {"call_id": "c2", "tool": "agent_memory_search", "args": {"query": ""}}},
+        {"turn": {"role": "user", "content": "How many rows does a replay backfill chunk carry?"}}
+      ],
+      "memory_records": [
+        {"id": "rec-backfill-chunk", "content": "replay backfill chunk at 50000 rows, raised during the columnar rewrite; the writer stages one chunk per segment flush, row assembly moved off the replay path so larger chunks stopped starving live ingest, and the rewrite notes record the sweep that settled the size", "kind": "semantic"},
+        {"id": "rec-backfill-walk", "content": "replay backfill walks 5000-row chunks", "kind": "semantic"},
+        {"id": "rec-backfill-notify", "content": "large backfills announce start, size, and expected duration in the data team's channel", "kind": "working", "workspace_id": "ws-driftwatch"}
+      ],
+      "rag_sources": [
+        {
+          "path": "internal/replay/stage.go",
+          "content": "package replay\n\n// stageChunk writes one backfill chunk into the staging segment and\n// hands it to the flush path. Chunk sizing is owned by the backfill\n// planner; staging only enforces that a chunk arrives whole, because\n// a partial chunk after a crash would replay rows twice.\nfunc (b *Backfill) stageChunk(c Chunk) error {\n\tif err := c.complete(); err != nil {\n\t\treturn err\n\t}\n\tseg := b.staging.current()\n\tif err := seg.append(c); err != nil {\n\t\treturn err\n\t}\n\treturn b.flusher.enqueue(seg)\n}\n",
+          "language": "go",
+          "abstract": "Backfill chunk staging: whole-chunk writes into flush-bound segments.",
+          "overview": "stage.go lands planner-sized backfill chunks whole into staging segments and enqueues them for flush; chunk sizing itself lives with the backfill planner."
+        },
+        {
+          "path": "internal/replay/columnar.go",
+          "content": "package replay\n\n// assembleColumns turns a staged chunk into the columnar layout the\n// exporter consumes. Column vectors are built per field with nulls\n// tracked in a validity bitmap; the assembly is allocation-heavy on\n// purpose at this layer so the flush path below it stays copy-free.\nfunc assembleColumns(c Chunk) (ColumnSet, error) {\n\tfields := c.schema.Fields()\n\tout := make(ColumnSet, len(fields))\n\tfor i, f := range fields {\n\t\tvec, err := buildVector(c, f)\n\t\tif err != nil {\n\t\t\treturn nil, err\n\t\t}\n\t\tout[i] = vec\n\t}\n\treturn out, nil\n}\n\n// buildVector walks one field across the chunk's rows. Validity is a\n// bitmap rather than a sentinel value because sentinel collisions\n// with real data were the root cause of the rewrite's ugliest\n// pre-merge bug, and the bitmap makes absence unrepresentable as a\n// value.\nfunc buildVector(c Chunk, f Field) (Vector, error) {\n\tv := newVector(f.Type, c.rows())\n\tfor i := 0; i < c.rows(); i++ {\n\t\tcell, ok := c.cell(i, f)\n\t\tif !ok {\n\t\t\tv.setNull(i)\n\t\t\tcontinue\n\t\t}\n\t\tif err := v.set(i, cell); err != nil {\n\t\t\treturn Vector{}, err\n\t\t}\n\t}\n\treturn v, nil\n}\n",
+          "language": "go",
+          "abstract": "Columnar assembly for staged chunks: per-field vectors with validity bitmaps.",
+          "overview": "columnar.go assembles staged chunks into per-field column vectors with bitmap-tracked validity, keeping allocation at this layer so the flush path stays copy-free."
+        },
+        {
+          "path": "docs/replay-backfill.md",
+          "content": "# driftwatch replay backfill\n\nBackfills replay historical segments through the columnar path into\nthe export tier. The planner sizes work; staging lands it whole;\nflush hands it to the exporter.\n\n## Running one\n\nAnnounce large backfills before starting them. Live ingest always\nhas priority: if the ingest dashboards show pressure during a\nbackfill, pause the backfill rather than tuning around it.\n",
+          "language": "markdown",
+          "abstract": "Replay backfill guide: planner-staged-flush pipeline and operating etiquette.",
+          "overview": "replay-backfill.md walks the planner, staging, and flush stages of a backfill and sets the operating rule that live ingest keeps priority."
+        }
+      ],
+      "required_evidence": [
+        {"domain": "memory", "literal": "backfill chunk at 50000 rows"}
+      ],
+      "pressure_target": {"domain": "memory", "literal": "backfill chunk at 50000 rows"},
+      "required_domains": ["conversation", "memory", "rag"],
+      "golden": {
+        "final_answer_criteria": "States a replay backfill chunk carries 50000 rows. 50000 and 50,000 are equivalent correct forms. An answer of 5000 rows scores 0. An answer presenting both the correct and a competing value without committing to one scores 0."
+      }
+    },
+    {
+      "id": "stale-backfill-chunk-index",
+      "stratum": "stale_vs_fresh",
+      "answer_home": "memory",
+      "scenario_family": "backfill-chunk-staleness",
+      "system": "You are the driftwatch assistant. driftwatch is a self-hosted telemetry ingest and alerting daemon. Answer using only the provided conversation, memory records, and retrieved context.",
+      "events": [
+        {"turn": {"role": "user", "content": "Quick ones before standup. The segment merge rework doc still lists its rollout checklist as draft; the rollout finished, so mark the checklist final and file the doc under the index maintenance section."}},
+        {"turn": {"role": "assistant", "content": "Marked the checklist final and filed the doc under index maintenance with a completed-rollout banner up top."}},
+        {"turn": {"role": "user", "content": "Also the merge planner's state dump helper got renamed during the rework; update the troubleshooting page so the command people paste actually runs."}},
+        {"turn": {"role": "assistant", "content": "Updated the troubleshooting page with the renamed helper and added a one-line output sample so people can confirm they ran the right thing."}},
+        {"turn": {"role": "user", "content": "And check that the index maintenance calendar shows the post-rework quiet window; the old entry still blocks the whole weekend instead of the low-ingest window."}},
+        {"turn": {"role": "assistant", "content": "Fixed the calendar: the quiet window now matches the post-rework low-ingest window and the weekend-wide block is gone."}},
+        {"tool_call": {"call_id": "c1", "tool": "agent_memory_search", "args": {"query": ""}}},
+        {"tool_call": {"call_id": "c2", "tool": "retrieve", "args": {"query": "index backfill chunk staging", "k": 3}}},
+        {"turn": {"role": "user", "content": "How many rows does an index backfill chunk carry?"}}
+      ],
+      "memory_records": [
+        {"id": "rec-index-chunk", "content": "index backfill chunk at 20000 rows, raised when the segment merge rework landed", "kind": "semantic"},
+        {"id": "rec-merge-planner", "content": "segment merge rework notes: the merge planner batches candidate segments by tier, cold tiers merge inside the low-ingest window, the planner refuses to schedule a merge while an index backfill is staging, and the operator checks for a stuck merge are the planner state dump and the staging directory listing", "kind": "semantic"},
+        {"id": "rec-merge-drills", "content": "index maintenance drills run quarterly: restore one segment from the archive tier, verify the checksum chain against the manifest, replay it through the index path, and file the timing against the recovery objective in the maintenance calendar", "kind": "semantic"},
+        {"id": "rec-merge-alerts", "content": "merge alerting stays coarse on purpose: one alert for a merge exceeding its window and one for a planner refusing work, both routed to the index maintenance channel with the troubleshooting page linked in the alert body", "kind": "working", "workspace_id": "ws-driftwatch"}
+      ],
+      "rag_sources": [
+        {
+          "path": "internal/index/backfill.go",
+          "content": "package index\n\n// stageBackfill feeds historical rows into the index build path in\n// planner-sized chunks. Chunk sizing comes from the merge planner's\n// backfill profile; staging enforces only that chunks land whole and\n// in order, so a crashed backfill resumes at a chunk boundary.\nfunc (ix *Index) stageBackfill(src RowSource) error {\n\tfor {\n\t\tchunk, ok := src.Next()\n\t\tif !ok {\n\t\t\treturn nil\n\t\t}\n\t\tif err := ix.stage(chunk); err != nil {\n\t\t\treturn err\n\t\t}\n\t}\n}\n",
+          "language": "go",
+          "abstract": "Index backfill staging: the build path ingests history in 2000-row chunks.",
+          "overview": "backfill.go stages planner-sized chunks into the index build path, enforcing whole in-order chunk landings so crashed backfills resume at chunk boundaries."
+        },
+        {
+          "path": "internal/index/merge.go",
+          "content": "package index\n\n// scheduleMerge picks the next segment merge from the planner queue.\n// Merges yield to live staging: the planner refuses to schedule\n// while a backfill holds the staging lock, because a merge racing a\n// backfill doubles write amplification on the same tier.\nfunc (ix *Index) scheduleMerge() (Merge, bool) {\n\tif ix.staging.locked() {\n\t\tix.metricsDeferred.Inc()\n\t\treturn Merge{}, false\n\t}\n\treturn ix.planner.next()\n}\n",
+          "language": "go",
+          "abstract": "Merge scheduling: planner queue with backfill yield.",
+          "overview": "merge.go schedules segment merges from the planner queue and defers while a backfill holds staging, counting deferrals."
+        },
+        {
+          "path": "docs/index-maintenance.md",
+          "content": "# driftwatch index maintenance\n\nThe index tier stays healthy through scheduled merges and the\noccasional backfill. Both run inside the low-ingest window; the\nmaintenance calendar is authoritative for when that window falls.\n\n## Stuck work\n\nA merge or backfill that outlives its window pages the maintenance\nchannel. Start with the planner state dump; most stuck work is a\nheld staging lock, not a wedged planner.\n",
+          "language": "markdown",
+          "abstract": "Index maintenance guide: merge and backfill windows, stuck-work triage.",
+          "overview": "index-maintenance.md covers the low-ingest maintenance window, the authoritative calendar, and first steps when merges or backfills outlive their window."
+        }
+      ],
+      "required_evidence": [
+        {"domain": "memory", "literal": "backfill chunk at 20000 rows"}
+      ],
+      "pressure_target": {"domain": "memory", "literal": "backfill chunk at 20000 rows"},
+      "required_domains": ["conversation", "memory", "rag"],
+      "golden": {
+        "final_answer_criteria": "States an index backfill chunk carries 20000 rows. 20000 and 20,000 are equivalent correct forms. An answer of 2000 rows scores 0. An answer presenting both the correct and a competing value without committing to one scores 0."
+      }
+    },
+    {
+      "id": "stale-wal-segment-ingest",
+      "stratum": "stale_vs_fresh",
+      "answer_home": "rag",
+      "scenario_family": "wal-segment-staleness",
+      "system": "You are the driftwatch assistant. driftwatch is a self-hosted telemetry ingest and alerting daemon. Answer using only the provided conversation, memory records, and retrieved context.",
+      "events": [
+        {"turn": {"role": "user", "content": "Compaction rework follow-ups. The rework merged with two TODOs still open against the checkpoint path; file them as proper tickets with owners so they stop living in code comments."}},
+        {"turn": {"role": "assistant", "content": "Filed both TODOs as tickets with the checkpoint owner assigned and linked them from the code comments so the trail runs both ways."}},
+        {"turn": {"role": "user", "content": "The rework load tests left a pile of scratch WAL directories on the perf hosts; clean them up and reclaim the disk before the next scheduled run fails on space."}},
+        {"turn": {"role": "assistant", "content": "Cleaned the scratch directories across all four perf hosts and reclaimed the disk; the next scheduled run has full headroom."}},
+        {"turn": {"role": "user", "content": "Can you update the disaster-recovery drill doc for the post-rework layout? The restore steps still describe the old directory structure."}},
+        {"turn": {"role": "assistant", "content": "Updated the drill doc with the post-rework layout and walked one restore in staging to confirm the revised steps hold."}},
+        {"turn": {"role": "user", "content": "The rework also changed what the disk-usage forecast should assume; hand the capacity planner the new write amplification numbers from the load tests."}},
+        {"turn": {"role": "assistant", "content": "Handed over the new write amplification numbers with the load test links, and the planner refreshed the disk forecast through year end."}},
+        {"turn": {"role": "user", "content": "Someone should tell the backup tooling team their WAL shipping script parses paths; if the layout changed, their nightly job breaks quietly."}},
+        {"turn": {"role": "assistant", "content": "Told the backup team and reviewed their script together; it needed one glob updated, and their nightly job passed against the new layout."}},
+        {"turn": {"role": "user", "content": "The perf dashboard's WAL panel mixes pre- and post-rework runs in one series; split them so the rework's effect is actually visible."}},
+        {"turn": {"role": "assistant", "content": "Split the series at the rework merge with an annotation, and the panel now shows the before-and-after cleanly."}},
+        {"turn": {"role": "user", "content": "Also the rework retro should capture the checkpoint cadence discussion; it nearly derailed the merge and the reasoning deserves a written home."}},
+        {"turn": {"role": "assistant", "content": "Added the checkpoint cadence discussion to the retro doc with the option we rejected and why, linked to the load test that decided it."}},
+        {"turn": {"role": "user", "content": "The oncall alert for WAL disk pressure needs its threshold reviewed against the new layout; the old threshold assumed the old rollover behaviour."}},
+        {"turn": {"role": "assistant", "content": "Reviewed the threshold with oncall: it moved to track the new rollover behaviour and the alert description now names the rework as the reason."}},
+        {"turn": {"role": "user", "content": "And the rework's feature flag should come out now that the fleet is fully rolled; check no config still sets it before deleting."}},
+        {"turn": {"role": "assistant", "content": "Checked the fleet configs, removed the two stale settings, and deleted the flag; the rework path is now the only path."}},
+        {"turn": {"role": "user", "content": "Last: finance flagged the perf host rental overage from the load tests; add the explanation note before the month closes."}},
+        {"turn": {"role": "assistant", "content": "Added the note tying the overage to the two extra load test weeks, with the rework schedule attached for context."}},
+        {"tool_call": {"call_id": "c1", "tool": "retrieve", "args": {"query": "ingest wal segment rollover", "k": 3}}},
+        {"tool_call": {"call_id": "c2", "tool": "agent_memory_search", "args": {"query": ""}}},
+        {"turn": {"role": "user", "content": "At what size does an ingest WAL segment roll?"}}
+      ],
+      "memory_records": [
+        {"id": "rec-walship-glob", "content": "backup team's WAL shipping script parses segment paths; layout changes need their glob reviewed", "kind": "semantic"},
+        {"id": "rec-wal-roll", "content": "ingest WAL segments roll at 32 MiB; the backup glob assumes it", "kind": "semantic"},
+        {"id": "rec-perf-hosts", "content": "perf host rentals for load tests get an overage note before month close", "kind": "semantic"},
+        {"id": "rec-drill-doc", "content": "disaster-recovery drill doc reflects the post-rework layout; one staging restore verified the steps", "kind": "working", "workspace_id": "ws-driftwatch"}
+      ],
+      "rag_sources": [
+        {
+          "path": "internal/wal/checkpoint.go",
+          "content": "package wal\n\n// checkpoint records the durable replay position after a segment\n// ships. Checkpoints are ordered writes: the position file is\n// replaced atomically, so a crash between segment ship and\n// checkpoint replays one segment rather than losing one.\nfunc (w *WAL) checkpoint(seg segmentID) error {\n\tpos := w.positionAfter(seg)\n\tif err := w.writePositionTmp(pos); err != nil {\n\t\treturn err\n\t}\n\treturn w.renamePosition()\n}\n",
+          "language": "go",
+          "abstract": "WAL checkpointing: atomic position replacement after segment ship.",
+          "overview": "checkpoint.go persists the durable replay position with an atomic replace so a crash replays at most one shipped segment."
+        },
+        {
+          "path": "internal/wal/segment.go",
+          "content": "package wal\n\n// walSegmentBytes is the rollover size for ingest WAL segments. It\n// was raised during the ingest compaction rework: small segments\n// rolled so often under the compacted write pattern that rollover\n// fsyncs dominated the checkpoint cadence, and the load tests showed\n// the larger segment restores the intended write batching.\nconst walSegmentBytes = 256 << 20\n\n// shouldRoll reports whether the active segment has reached the\n// rollover size. Size is tracked at append time so the check never\n// stats the file on the hot path.\nfunc (w *WAL) shouldRoll() bool {\n\treturn w.active.written >= walSegmentBytes\n}\n\n// roll seals the active segment and opens the next one. Sealing\n// fsyncs the segment and its directory entry before the WAL accepts\n// another append, so a sealed segment is durable by definition and\n// the shipper can trust the segment list without re-checking disks.\nfunc (w *WAL) roll() error {\n\tif err := w.active.seal(); err != nil {\n\t\treturn err\n\t}\n\tnext, err := w.openSegment(w.active.index + 1)\n\tif err != nil {\n\t\treturn err\n\t}\n\tw.active = next\n\treturn nil\n}\n",
+          "language": "go",
+          "abstract": "Ingest WAL sizing: segments roll at 32 MiB, sealed with directory fsyncs.",
+          "overview": "segment.go owns the ingest WAL rollover size and the seal-then-open roll sequence; sealed segments are durable before the WAL accepts further appends."
+        },
+        {
+          "path": "docs/wal.md",
+          "content": "# driftwatch ingest WAL\n\nEvery accepted batch appends to the write-ahead log before the\ningest response returns. Segments seal at the rollover size and ship\nto the export tier; sealed segments are immutable.\n\n## Disk planning\n\nProvision WAL disks for at least a full day of segments at peak\ningest. Rollover and shipping compete for the same spindles, so\nundersized WAL disks show up as ingest latency, not as a clean\nerror.\n",
+          "language": "markdown",
+          "abstract": "Ingest WAL guide: append durability, sealed segments, disk planning.",
+          "overview": "wal.md covers append-before-ack durability, segment sealing and shipping, and why undersized WAL disks surface as ingest latency."
+        }
+      ],
+      "required_evidence": [
+        {"domain": "rag", "literal": "walSegmentBytes = 256 << 20"}
+      ],
+      "pressure_target": {"domain": "rag", "literal": "segments roll at 32 MiB"},
+      "required_domains": ["conversation", "memory", "rag"],
+      "golden": {
+        "final_answer_criteria": "States ingest WAL segments roll at 256 MiB. 256 MiB, 256 << 20, and 268435456 bytes are equivalent correct forms. An answer of 32 MiB scores 0. An answer presenting both the correct and a competing value without committing to one scores 0."
+      }
+    },
+    {
+      "id": "stale-wal-segment-index",
+      "stratum": "stale_vs_fresh",
+      "answer_home": "memory",
+      "scenario_family": "wal-segment-staleness",
+      "system": "You are the driftwatch assistant. driftwatch is a self-hosted telemetry ingest and alerting daemon. Answer using only the provided conversation, memory records, and retrieved context.",
+      "events": [
+        {"turn": {"role": "user", "content": "Index compaction rework items. The rework doubled the compaction throughput on the benchmark tier; get the result written into the quarterly infra summary before the numbers go stale."}},
+        {"turn": {"role": "assistant", "content": "Wrote the result into the infra summary with the benchmark methodology footnote and the tier configuration attached."}},
+        {"turn": {"role": "user", "content": "The rework's canary tier ran with extra tracing enabled and it is still on; turn it off and confirm the trace volume returns to the baseline."}},
+        {"turn": {"role": "assistant", "content": "Turned off the canary tracing; trace volume is back at baseline and the change is logged."}},
+        {"turn": {"role": "user", "content": "Can you refresh the index tier's restore runbook? The rework changed the segment naming and the runbook examples show the old names."}},
+        {"turn": {"role": "assistant", "content": "Refreshed the runbook examples with the new segment names and ran the listing commands in staging to confirm they return what the text claims."}},
+        {"turn": {"role": "user", "content": "The compaction dashboards need an annotation at the rework rollout too, or the throughput step will look like a regression hunt in six months."}},
+        {"turn": {"role": "assistant", "content": "Annotated the rollout on both compaction dashboards with a link to the rework summary, so the step change explains itself."}},
+        {"turn": {"role": "user", "content": "Also reconcile the index tier's disk forecast with the post-rework segment sizes; capacity planning still projects from the old layout."}},
+        {"turn": {"role": "assistant", "content": "Reconciled the forecast with the post-rework sizes; the next hardware ask moves out a quarter."}},
+        {"turn": {"role": "user", "content": "Someone asked whether the archive tier needs the rework too; write a short assessment so the question stops resurfacing every planning cycle."}},
+        {"turn": {"role": "assistant", "content": "Wrote the assessment: the archive tier never hits the compaction path, so the rework does not apply."}},
+        {"turn": {"role": "user", "content": "The index oncall rotation should get a walkthrough of the new compaction behaviour before the next handoff; set that up with the rework lead."}},
+        {"turn": {"role": "assistant", "content": "Scheduled the walkthrough ahead of the handoff with the rework lead presenting, and the session notes will land in the oncall folder."}},
+        {"turn": {"role": "user", "content": "And the rework's load test data set is parked on the shared scratch volume; archive what the retro needs and free the rest."}},
+        {"turn": {"role": "assistant", "content": "Archived the retro-relevant runs and freed the scratch volume; the retro doc links the set."}},
+        {"turn": {"role": "user", "content": "Last: the infra summary needs sign-off from the storage lead before it circulates; route it and chase the approval."}},
+        {"turn": {"role": "assistant", "content": "Routed the summary to the storage lead with a sign-off deadline before circulation, and the approval is already acknowledged."}},
+        {"tool_call": {"call_id": "c1", "tool": "retrieve", "args": {"query": "index wal rollover behaviour", "k": 3}}},
+        {"tool_call": {"call_id": "c2", "tool": "agent_memory_search", "args": {"query": ""}}},
+        {"turn": {"role": "user", "content": "How big does an index WAL segment get before it rolls?"}}
+      ],
+      "memory_records": [
+        {"id": "rec-index-wal", "content": "index WAL segments roll at 128 MiB, raised during the index compaction rework", "kind": "semantic"},
+        {"id": "rec-restore-scratch", "content": "index WAL segments roll at 24 MiB; the restore scratch volume is sized against that roll size", "kind": "semantic"},
+        {"id": "rec-canary-trace", "content": "index canary tracing is off again after the rework; trace volume back at baseline", "kind": "semantic"},
+        {"id": "rec-archive-scope", "content": "archive tier skips the compaction rework; the assessment records the reasoning", "kind": "working", "workspace_id": "ws-driftwatch"}
+      ],
+      "rag_sources": [
+        {
+          "path": "internal/index/wal.go",
+          "content": "package index\n\n// appendWAL lands one index mutation batch in the tier's write-ahead\n// log before the mutation applies. Rollover sizing is owned by the\n// tier profile; this path enforces only append ordering and the\n// seal-before-apply rule that makes crashed mutations replayable.\nfunc (ix *Index) appendWAL(batch MutationBatch) error {\n\tif err := ix.wal.append(batch); err != nil {\n\t\treturn err\n\t}\n\treturn ix.apply(batch)\n}\n",
+          "language": "go",
+          "abstract": "Index WAL sizing: segments roll at 24 MiB, sealed before mutations apply.",
+          "overview": "wal.go appends mutation batches to the index WAL ahead of apply, with rollover sizing owned by the tier profile and sealing ordered before application."
+        },
+        {
+          "path": "internal/index/compact.go",
+          "content": "package index\n\n// compact folds a tier's eligible segments into the next generation.\n// Eligibility is age- and overlap-driven: segments compact when\n// their key ranges overlap enough that reads pay for the overlap on\n// every lookup, or when age pushes them past the tier's horizon.\n// The rework moved scoring off the read path entirely; scores are\n// maintained incrementally at write time and the compactor consumes\n// a ready queue instead of scanning the tier.\nfunc (ix *Index) compact(tier Tier) error {\n\tfor {\n\t\tcand, ok := tier.readyQueue.pop()\n\t\tif !ok {\n\t\t\treturn nil\n\t\t}\n\t\tgen, err := ix.fold(cand)\n\t\tif err != nil {\n\t\t\treturn err\n\t\t}\n\t\tif err := ix.install(gen); err != nil {\n\t\t\treturn err\n\t\t}\n\t\ttier.retire(cand)\n\t}\n}\n\n// install publishes a folded generation atomically: readers switch\n// to the new generation at a single pointer swap, and the retired\n// segments stay readable until the last in-flight lookup drains.\nfunc (ix *Index) install(g Generation) error {\n\tif err := g.seal(); err != nil {\n\t\treturn err\n\t}\n\tix.generations.swap(g)\n\treturn nil\n}\n",
+          "language": "go",
+          "abstract": "Tier compaction: incremental scoring, ready-queue consumption, atomic installs.",
+          "overview": "compact.go folds eligible segments into new generations from a write-time-scored ready queue and publishes results with a single atomic swap while retired segments drain."
+        },
+        {
+          "path": "docs/index-tier.md",
+          "content": "# driftwatch index tier\n\nThe index tier turns sealed export segments into the lookup\nstructures the query path reads. Mutations land through the tier's\nWAL; compaction folds segments into generations in the background.\n\n## Health\n\nWatch generation counts per tier: a climbing count means compaction\nis not keeping up with writes, and the ready-queue depth names the\ntier that needs attention first.\n",
+          "language": "markdown",
+          "abstract": "Index tier guide: WAL-fronted mutations, generational compaction, health signals.",
+          "overview": "index-tier.md covers the mutation path through the tier WAL, background compaction into generations, and the generation-count health signal."
+        }
+      ],
+      "required_evidence": [
+        {"domain": "memory", "literal": "index WAL segments roll at 128 MiB"}
+      ],
+      "pressure_target": {"domain": "memory", "literal": "index WAL segments roll at 128 MiB"},
+      "required_domains": ["conversation", "memory", "rag"],
+      "topline_facts": "The stored memory note records that index WAL segments roll at 128 MiB, raised during the index compaction rework; the index WAL source summary still claiming 24 MiB segments predates the rework and is stale.",
+      "golden": {
+        "final_answer_criteria": "States index WAL segments roll at 128 MiB. 128 MiB and 134217728 bytes are equivalent correct forms. An answer of 24 MiB scores 0. An answer presenting both the correct and a competing value without committing to one scores 0."
+      }
+    },
+    {
+      "id": "stale-gossip-interval-mesh",
+      "stratum": "stale_vs_fresh",
+      "answer_home": "rag",
+      "scenario_family": "gossip-interval-staleness",
+      "system": "You are the driftwatch assistant. driftwatch is a self-hosted telemetry ingest and alerting daemon. Answer using only the provided conversation, memory records, and retrieved context.",
+      "events": [
+        {"turn": {"role": "user", "content": "Before the mesh review: the soak dashboards for the relay mesh should be snapshotted into the review doc, since the live boards will roll past the soak window by Thursday. Keep the capture list in the doc appendix too, so the review can tell which panels came from which capture day without opening the archive."}},
+        {"turn": {"role": "assistant", "content": "Snapshotted the soak boards into the review doc with the capture dates in the captions so the window stays interpretable later. The appendix lists each snapshot with its capture day and panel set."}},
+        {"turn": {"role": "user", "content": "Also the mesh review needs the node count history since the expansion started; the review doc has opinions but no numbers."}},
+        {"turn": {"role": "assistant", "content": "Added the node count history to the review doc from the fleet records, with the expansion milestones marked on the curve."}},
+        {"turn": {"role": "user", "content": "And confirm the relay uplink saturation alarms from the soak got follow-ups filed; two fired in week one and I have not seen tickets."}},
+        {"turn": {"role": "assistant", "content": "Both alarms have tickets now: one traced to a misconfigured relay uplink and one to genuine saturation during the soak's peak week."}},
+        {"tool_call": {"call_id": "c1", "tool": "retrieve", "args": {"query": "mesh gossip round behaviour", "k": 3}}},
+        {"tool_call": {"call_id": "c2", "tool": "agent_memory_search", "args": {"query": ""}}},
+        {"turn": {"role": "user", "content": "How often does mesh gossip fire?"}}
+      ],
+      "memory_records": [
+        {"id": "rec-gossip-note", "content": "mesh gossip fires every 5 seconds; hands off until the soak ends", "kind": "semantic"},
+        {"id": "rec-mesh-review", "content": "mesh review doc collects the soak snapshots and the node count history", "kind": "semantic"},
+        {"id": "rec-uplink-tickets", "content": "both relay uplink saturation alarms from the soak have follow-up tickets filed", "kind": "working", "workspace_id": "ws-driftwatch"}
+      ],
+      "rag_sources": [
+        {
+          "path": "internal/mesh/gossip.go",
+          "content": "package mesh\n\nimport \"time\"\n\n// gossipEvery is the round interval for the relay mesh. It was\n// stretched after the mesh soak: five-second rounds saturated relay\n// uplinks once the mesh crossed two hundred nodes, and the soak\n// confirmed membership convergence holds at the longer round.\nconst gossipEvery = 20 * time.Second\n\n// gossipLoop runs the mesh rounds. Each round exchanges digests with\n// a fanout-sized sample of peers; full state flows only for entries\n// the digests disagree on, so round cost tracks churn rather than\n// mesh size.\nfunc (m *Mesh) gossipLoop() {\n\tt := time.NewTicker(gossipEvery)\n\tdefer t.Stop()\n\tfor range t.C {\n\t\tpeers := m.sample()\n\t\tfor _, p := range peers {\n\t\t\tm.exchange(p)\n\t\t}\n\t}\n}\n\n// exchange runs one digest swap with a peer and reconciles the\n// entries the digests disagree on. Reconciliation prefers the entry\n// with the newer version vector; ties keep the local entry, because\n// symmetric ties resolve themselves on a later round anyway.\nfunc (m *Mesh) exchange(p Peer) {\n\tlocal := m.digest()\n\tremote, err := p.swapDigest(local)\n\tif err != nil {\n\t\tm.metricsExchangeFailed.Inc()\n\t\treturn\n\t}\n\tm.reconcile(remote)\n}\n",
+          "language": "go",
+          "abstract": "Mesh gossip rounds: digest exchange with churn-tracking cost.",
+          "overview": "gossip.go owns the mesh round interval and the digest-swap exchange, reconciling only disagreeing entries so round cost follows churn rather than mesh size."
+        },
+        {
+          "path": "internal/mesh/member.go",
+          "content": "package mesh\n\n// membership tracks the relays this node believes are alive.\n// Suspicion is timer-driven: an entry silent past the suspicion\n// horizon is marked suspect and gossiped as such, and only a\n// refutation from the entry itself clears the mark.\nfunc (m *Membership) tick(now int64) {\n\tfor id, e := range m.entries {\n\t\tif e.silentSince(now) > m.suspicionHorizon {\n\t\t\tm.markSuspect(id)\n\t\t}\n\t}\n}\n",
+          "language": "go",
+          "abstract": "Mesh membership: timer-driven suspicion with self-refutation.",
+          "overview": "member.go marks silent entries suspect past the suspicion horizon and clears marks only on refutation from the entry itself."
+        },
+        {
+          "path": "docs/mesh.md",
+          "content": "# driftwatch relay mesh\n\nRelays form a gossip mesh for membership and route hints. The mesh\nis advisory: shipping paths come from configuration, and the mesh\nonly accelerates failure detection between config pushes.\n\n## Soaks\n\nMesh changes get a soak on the full fleet before they are called\ndone; convergence behaviour at small scale has repeatedly failed to\npredict behaviour past a hundred nodes.\n",
+          "language": "markdown",
+          "abstract": "Relay mesh guide: advisory gossip role and full-fleet soak policy.",
+          "overview": "mesh.md explains the mesh's advisory membership role and why mesh changes soak on the full fleet before being called done."
+        }
+      ],
+      "required_evidence": [
+        {"domain": "rag", "literal": "gossipEvery = 20 * time.Second"}
+      ],
+      "pressure_target": {"domain": "rag", "literal": "gossipEvery = 20 * time.Second"},
+      "required_domains": ["conversation", "memory", "rag"],
+      "golden": {
+        "final_answer_criteria": "States mesh gossip fires every 20 seconds. gossipEvery = 20 * time.Second and a 20 second interval are equivalent correct forms. An answer of every 5 seconds scores 0. An answer presenting both the correct and a competing value without committing to one scores 0."
+      }
+    },
+    {
+      "id": "stale-gossip-interval-edge",
+      "stratum": "stale_vs_fresh",
+      "answer_home": "conversation",
+      "scenario_family": "gossip-interval-staleness",
+      "system": "You are the driftwatch assistant. driftwatch is a self-hosted telemetry ingest and alerting daemon. Answer using only the provided conversation, memory records, and retrieved context.",
+      "events": [
+        {"turn": {"role": "user", "content": "Mesh follow-ups now the relay soak is signed off. I moved the fleet off the soak cadence and set edge gossip at 45 seconds; note it in the mesh profile history so provisioning stops reverting it."}},
+        {"turn": {"role": "assistant", "content": "Noted it in the profile history with the sign-off linked, and provisioning now carries the setting forward instead of reverting it."}},
+        {"turn": {"role": "user", "content": "The soak's temporary mesh visualization can come down too; it was reading the debug endpoint and that endpoint should go back behind the flag. The flag notes should say why the endpoint is gated, or the next soak will just flip it back on without the context."}},
+        {"turn": {"role": "assistant", "content": "Took the visualization down and put the debug endpoint back behind its flag; the standing dashboards cover the mesh now."}},
+        {"turn": {"role": "user", "content": "Can you archive the soak's raw gossip traces? Keep the two convergence incidents and drop the routine days, the full set is enormous. Label the archive with the soak window dates so nobody has to guess which weeks the traces cover."}},
+        {"turn": {"role": "assistant", "content": "Archived the two incident windows with context hours around each and dropped the routine days; the archive index describes what was kept."}},
+        {"turn": {"role": "user", "content": "The mesh alerting thresholds were widened for the soak as well; bring them back to the standing values and note the change window. The alert history entry should name the soak as the reason the thresholds moved, for the next audit pass."}},
+        {"turn": {"role": "assistant", "content": "Restored the standing thresholds and noted the widened window in the alert history so the soak period reads correctly later."}},
+        {"turn": {"role": "user", "content": "Also the relay install image should bake the post-soak mesh settings; new relays currently join with defaults and converge late. Check the image build logs afterwards so we know the bake actually landed in the current image generation."}},
+        {"turn": {"role": "assistant", "content": "Baked the post-soak settings into the install image and verified a fresh relay joins converged instead of trailing the mesh."}},
+        {"turn": {"role": "user", "content": "The soak report needs its reviewers assigned; the mesh leads plus one skeptic who did not run the soak, ideally. Give the reviewers a deadline ahead of the mesh review so the report does not slip past the quarter."}},
+        {"turn": {"role": "assistant", "content": "Assigned the two mesh leads and drafted in a reviewer from the ingest side who had no soak involvement, as the outside eye."}},
+        {"turn": {"role": "user", "content": "Someone flagged that the mesh glossary still defines terms the soak renamed; sync the glossary before the report circulates. The glossary sync should also catch the two entries the soak retired outright, not just the renames."}},
+        {"turn": {"role": "assistant", "content": "Synced the glossary with the renamed terms and left redirect entries for the old names so existing links keep resolving."}},
+        {"turn": {"role": "user", "content": "And thank the relay site owners who hosted soak hardware; the report should name them in the acknowledgements. Their site contacts are in the fleet records if the report needs formal names rather than handles."}},
+        {"turn": {"role": "assistant", "content": "Added an acknowledgements section naming the four site owners and the weeks their sites hosted the soak hardware."}},
+        {"turn": {"role": "user", "content": "The provisioning template's mesh example is my last worry: it still shows the soak cadence in its comments, so refresh the example around edge gossip at 45 seconds before someone copies the old line."}},
+        {"turn": {"role": "assistant", "content": "Refreshed the template example and its comments to the current cadence and added a pointer to the profile history entry for the reasoning."}},
+        {"tool_call": {"call_id": "c1", "tool": "retrieve", "args": {"query": "edge mesh gossip cadence", "k": 3}}},
+        {"tool_call": {"call_id": "c2", "tool": "agent_memory_search", "args": {"query": ""}}},
+        {"turn": {"role": "user", "content": "How often do edge relays gossip?"}}
+      ],
+      "memory_records": [
+        {"id": "rec-edge-cadence", "content": "edge gossip holds at 10 seconds; the relay soak needs the short round", "kind": "semantic"},
+        {"id": "rec-soak-archive", "content": "soak gossip trace archive keeps the two convergence incidents with context hours", "kind": "semantic"},
+        {"id": "rec-install-image", "content": "relay install image bakes the post-soak mesh settings; fresh relays join converged", "kind": "working", "workspace_id": "ws-driftwatch"}
+      ],
+      "rag_sources": [
+        {
+          "path": "internal/mesh/profile.go",
+          "content": "package mesh\n\n// applyProfile installs mesh settings from the provisioning profile.\n// The mesh never invents values: every knob resolves from the\n// profile or the install image, and a knob absent from both fails\n// the apply loudly instead of falling back to a compiled default.\nfunc (m *Mesh) applyProfile(p Profile) error {\n\tfor _, k := range meshKnobs {\n\t\tv, ok := p.lookup(k)\n\t\tif !ok {\n\t\t\treturn errKnobUnset(k)\n\t\t}\n\t\tif err := m.set(k, v); err != nil {\n\t\t\treturn err\n\t\t}\n\t}\n\treturn nil\n}\n",
+          "language": "go",
+          "abstract": "Mesh profile application: explicit knob resolution, no compiled defaults.",
+          "overview": "profile.go installs every mesh knob from the provisioning profile or install image and fails loudly on absent knobs rather than falling back to compiled defaults."
+        },
+        {
+          "path": "internal/mesh/converge.go",
+          "content": "package mesh\n\nimport \"time\"\n\n// convergence tracks how long the mesh takes to agree after a\n// membership change. The tracker watches version vectors rather\n// than clocks: a change is converged when every sampled peer\n// reports the change's vector entry, and the elapsed rounds are\n// what the dashboards graph.\ntype convergence struct {\n\tpending map[changeID]pendingChange\n\tsamples int\n}\n\ntype pendingChange struct {\n\tintroduced time.Time\n\trounds     int\n\tconfirmed  int\n}\n\n// observeRound folds one gossip round's peer reports into the\n// pending set. Confirmation counts are monotone: a peer that\n// reported the change once counts confirmed even if a later sample\n// misses it, because samples are sparse and absence in one sample\n// is not regression.\nfunc (c *convergence) observeRound(reports []peerReport) {\n\tfor _, r := range reports {\n\t\tfor id := range r.seen {\n\t\t\tp, ok := c.pending[id]\n\t\t\tif !ok {\n\t\t\t\tcontinue\n\t\t\t}\n\t\t\tp.confirmed++\n\t\t\tp.rounds++\n\t\t\tc.pending[id] = p\n\t\t}\n\t}\n}\n",
+          "language": "go",
+          "abstract": "Convergence tracking: version-vector confirmation over sampled rounds.",
+          "overview": "converge.go measures membership convergence in gossip rounds using version vectors and monotone confirmation counts over sparse peer samples."
+        },
+        {
+          "path": "docs/mesh-operations.md",
+          "content": "# driftwatch mesh operations\n\nMesh settings flow from the provisioning profile; the install image\ncarries the same values so fresh relays join with fleet settings\nrather than defaults.\n\n## Changing cadence\n\nCadence changes ride the profile, get a soak, and land in the\nprofile history with the sign-off linked. Provisioning reapplies the\nprofile on every run, so an unrecorded manual change does not\nsurvive the next provisioning pass.\n",
+          "language": "markdown",
+          "abstract": "Mesh operations guide: profile-driven settings and cadence change flow.",
+          "overview": "mesh-operations.md covers profile-driven mesh settings, install-image parity for fresh relays, and why cadence changes must land in the profile history to survive provisioning."
+        }
+      ],
+      "required_evidence": [
+        {"domain": "conversation", "literal": "edge gossip at 45 seconds"}
+      ],
+      "pressure_target": {"domain": "conversation", "literal": "edge gossip at 45 seconds"},
+      "required_domains": ["conversation", "memory", "rag"],
+      "golden": {
+        "final_answer_criteria": "States edge relays gossip every 45 seconds. An answer of every 10 seconds scores 0. An answer presenting both the correct and a competing value without committing to one scores 0."
       }
     },
     {

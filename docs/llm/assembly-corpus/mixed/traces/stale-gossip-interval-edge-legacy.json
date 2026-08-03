@@ -1,0 +1,92 @@
+{
+  "id": "stale-gossip-interval-edge-legacy",
+  "source": "assembly-corpus-mixed",
+  "captured_at": "0001-01-01T00:00:00Z",
+  "system": "You are the driftwatch assistant. driftwatch is a self-hosted telemetry ingest and alerting daemon. Answer using only the provided conversation, memory records, and retrieved context.",
+  "tools": null,
+  "turns": [
+    {
+      "role": "user",
+      "content": "The provisioning template's mesh example is my last worry: it still shows the soak cadence in its comments, so refresh the example around edge gossip at 45 seconds before someone copies the old line."
+    },
+    {
+      "role": "assistant",
+      "content": "Refreshed the template example and its comments to the current cadence and added a pointer to the profile history entry for the reasoning."
+    },
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "id": "c1",
+          "name": "retrieve",
+          "arguments": {
+            "query": "edge mesh gossip cadence",
+            "k": 3
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "content": "### source: \"internal/mesh/profile.go\"\npurpose: Mesh profile application: explicit knob resolution, no compiled defaults.\noverview: profile.go installs every mesh knob from the provisioning profile or install image and fails loudly on absent knobs rather than falling back to compiled defaults.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n--- source: \"internal/mesh/profile.go\" (lines 1-18, similarity: 1.00) ---\n1| package mesh\n2| \n3| // applyProfile installs mesh settings from the provisioning profile.\n4| // The mesh never invents values: every knob resolves from the\n5| // profile or the install image, and a knob absent from both fails\n6| // the apply loudly instead of falling back to a compiled default.\n7| func (m *Mesh) applyProfile(p Profile) error {\n8| \tfor _, k := range meshKnobs {\n9| \t\tv, ok := p.lookup(k)\n10| \t\tif !ok {\n11| \t\t\treturn errKnobUnset(k)\n12| \t\t}\n13| \t\tif err := m.set(k, v); err != nil {\n14| \t\t\treturn err\n15| \t\t}\n16| \t}\n17| \treturn nil\n18| }\n\n### source: \"internal/mesh/converge.go\"\npurpose: Convergence tracking: version-vector confirmation over sampled rounds.\noverview: converge.go measures membership convergence in gossip rounds using version vectors and monotone confirmation counts over sparse peer samples.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n--- source: \"internal/mesh/converge.go\" (lines 1-38, similarity: 1.00) ---\n1| package mesh\n2| \n3| import \"time\"\n4| \n5| // convergence tracks how long the mesh takes to agree after a\n6| // membership change. The tracker watches version vectors rather\n7| // than clocks: a change is converged when every sampled peer\n8| // reports the change's vector entry, and the elapsed rounds are\n9| // what the dashboards graph.\n10| type convergence struct {\n11| \tpending map[changeID]pendingChange\n12| \tsamples int\n13| }\n14| \n15| type pendingChange struct {\n16| \tintroduced time.Time\n17| \trounds     int\n18| \tconfirmed  int\n19| }\n20| \n21| // observeRound folds one gossip round's peer reports into the\n22| // pending set. Confirmation counts are monotone: a peer that\n23| // reported the change once counts confirmed even if a later sample\n24| // misses it, because samples are sparse and absence in one sample\n25| // is not regression.\n26| func (c *convergence) observeRound(reports []peerReport) {\n27| \tfor _, r := range reports {\n28| \t\tfor id := range r.seen {\n29| \t\t\tp, ok := c.pending[id]\n30| \t\t\tif !ok {\n31| \t\t\t\tcontinue\n32| \t\t\t}\n33| \t\t\tp.confirmed++\n34| \t\t\tp.rounds++\n35| \t\t\tc.pending[id] = p\n36| \t\t}\n37| \t}\n38| }\n\n### source: \"docs/mesh-operations.md\"\npurpose: Mesh operations guide: profile-driven settings and cadence change flow.\noverview: mesh-operations.md covers profile-driven mesh settings, install-image parity for fresh relays, and why cadence changes must land in the profile history to survive provisioning.\nlanguage: markdown\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n--- source: \"docs/mesh-operations.md\" (lines 1-12, similarity: 1.00) ---\n1| # driftwatch mesh operations\n2| \n3| Mesh settings flow from the provisioning profile; the install image\n4| carries the same values so fresh relays join with fleet settings\n5| rather than defaults.\n6| \n7| ## Changing cadence\n8| \n9| Cadence changes ride the profile, get a soak, and land in the\n10| profile history with the sign-off linked. Provisioning reapplies the\n11| profile on every run, so an unrecorded manual change does not\n12| survive the next provisioning pass.\n",
+      "tool_call_id": "c1",
+      "name": "retrieve"
+    },
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "id": "c2",
+          "name": "agent_memory_search",
+          "arguments": {
+            "query": ""
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "content": "rec-edge-cadence · semantic · 2025-07-27 · edge gossip holds at 10 seconds; the relay soak needs the short round\nrec-install-image · working · 2025-07-27 · relay install image bakes the post-soak mesh settings; fresh relays join converged\nrec-soak-archive · semantic · 2025-07-27 · soak gossip trace archive keeps the two convergence incidents with context hours",
+      "tool_call_id": "c2",
+      "name": "agent_memory_search"
+    },
+    {
+      "role": "user",
+      "content": "How often do edge relays gossip?"
+    }
+  ],
+  "golden": {
+    "tool_calls": null,
+    "final_answer_criteria": "States edge relays gossip every 45 seconds. An answer of every 10 seconds scores 0. An answer presenting both the correct and a competing value without committing to one scores 0."
+  },
+  "assembly_eval": {
+    "pair_id": "stale-gossip-interval-edge",
+    "mode": "legacy",
+    "candidate_ids": [
+      "356ed424272fe8001ea93522bf352910b5478375b6a1edd30ca74b6b9c41aa7f",
+      "50f6abc71871f4ccd017b523808b8daf4105a71aea6ae06c0767fab18762d0cd",
+      "c5d594e3c36f40565f844f2f2c12131ba874925be2bb32912e3db0d12f27f33c",
+      "rec-edge-cadence",
+      "rec-install-image",
+      "rec-soak-archive"
+    ],
+    "estimated_prompt_tokens": 1119,
+    "state_digest": "701d4681778081be7c9c0bfa1582eccbd58340cadc72660546c5f79ff7c02295",
+    "subjects": [
+      "(c1|rag|internal/mesh/profile.go)",
+      "(c1|rag|internal/mesh/converge.go)",
+      "(c1|rag|docs/mesh-operations.md)",
+      "(c2|memory|rec-edge-cadence)",
+      "(c2|memory|rec-install-image)",
+      "(c2|memory|rec-soak-archive)"
+    ],
+    "stratum": "stale_vs_fresh",
+    "answer_home": "conversation",
+    "scenario_family": "gossip-interval-staleness",
+    "budget": 1204,
+    "raw_state_tokens": 2007,
+    "pressure_level": "critical",
+    "shed_messages": 16,
+    "shed_bytes": 2795
+  }
+}

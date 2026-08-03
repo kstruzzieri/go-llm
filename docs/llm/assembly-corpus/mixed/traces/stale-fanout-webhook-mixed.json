@@ -1,0 +1,141 @@
+{
+  "id": "stale-fanout-webhook-mixed",
+  "source": "assembly-corpus-mixed",
+  "captured_at": "0001-01-01T00:00:00Z",
+  "system": "You are the driftwatch assistant. driftwatch is a self-hosted telemetry ingest and alerting daemon. Answer using only the provided conversation, memory records, and retrieved context.",
+  "tools": null,
+  "turns": [
+    {
+      "role": "user",
+      "content": "The consolidation also left two receiver health checks probing endpoints that no longer exist. Retire those probes before they wake anyone up with a false page."
+    },
+    {
+      "role": "assistant",
+      "content": "Retired both stale probes and added a check against the consolidated receiver's health endpoint so coverage did not shrink."
+    },
+    {
+      "role": "user",
+      "content": "With the receiver consolidation soak closed out, I widened the webhook fanout to 18 webhook delivery workers this morning; update the capacity sheet so the on-paper number matches the fleet."
+    },
+    {
+      "role": "assistant",
+      "content": "Updated the capacity sheet and linked the soak report beside the entry so the next reviewer sees why the pool widened."
+    },
+    {
+      "role": "user",
+      "content": "Can you also fold the receiver migration notes into the alerting handbook? They live in a personal doc right now and the handbook is where people will look."
+    },
+    {
+      "role": "assistant",
+      "content": "Folded the migration notes into the handbook's receiver chapter and left a redirect note in the personal doc."
+    },
+    {
+      "role": "user",
+      "content": "The consolidated receiver's rate limit was set conservatively during the soak. Check with the provider what the contracted ceiling is and note it in the config comments."
+    },
+    {
+      "role": "assistant",
+      "content": "Confirmed the contracted ceiling with the provider and recorded it in the config comment above the limit so nobody treats the soak value as a hard cap."
+    },
+    {
+      "role": "user",
+      "content": "Someone mentioned the delivery latency panel still graphs the old receiver's endpoint. Point it at the consolidated one so the graph stops flatlining."
+    },
+    {
+      "role": "assistant",
+      "content": "Repointed the latency panel at the consolidated receiver and kept a dotted series for the old endpoint's final week for comparison."
+    },
+    {
+      "role": "user",
+      "content": "The synthetic alert that exercises the delivery path should run against the consolidated receiver too; make sure its schedule survived the migration."
+    },
+    {
+      "role": "assistant",
+      "content": "Verified the synthetic still fires on schedule against the consolidated receiver and labeled it clearly in the alert body as synthetic."
+    },
+    {
+      "role": "user",
+      "content": "One more: the delivery runbook's fanout section still describes the pre-consolidation pool; rewrite it around the 18 webhook delivery workers we run today so oncall stops second-guessing the number."
+    },
+    {
+      "role": "assistant",
+      "content": "Rewrote the fanout section around the current pool and added where the sizing decision is recorded, so the runbook and the capacity sheet agree."
+    },
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "id": "c1",
+          "name": "retrieve",
+          "arguments": {
+            "query": "webhook delivery fanout path",
+            "k": 3
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "content": "### source: \"internal/notify/webhookpool.go\"\npurpose: Webhook fanout pool startup and worker lifecycle; size wired from the delivery profile.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n--- source: \"internal/notify/webhookpool.go\" (lines 1-23, similarity: 1.00) ---\n1| package notify\n2| \n3| import \"sync\"\n4| \n5| // pool drains queued webhook deliveries through a fixed set of\n6| // workers. The pool size is wired in from the delivery profile at\n7| // startup; Run panics on a non-positive size because a zero pool\n8| // silently strands every queued delivery.\n9| type pool struct {\n10| \tsize int\n11| \tq    chan Delivery\n12| \twg   sync.WaitGroup\n13| }\n14| \n15| func (p *pool) Run() {\n16| \tif p.size \u003c= 0 {\n17| \t\tpanic(\"notify: webhook pool size must be positive\")\n18| \t}\n19| \tfor i := 0; i \u003c p.size; i++ {\n20| \t\tp.wg.Add(1)\n21| \t\tgo p.worker()\n22| \t}\n23| }\n\n### source: \"internal/notify/webhooksign.go\"\npurpose: Webhook delivery signing with per-receiver secrets.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n\n### source: \"docs/webhooks.md\"\nlanguage: markdown\nindexed: 2025-07-27T00:00:00Z\nnote: metadata overview (summary omitted: budget)\n",
+      "tool_call_id": "c1",
+      "name": "retrieve"
+    },
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "id": "c2",
+          "name": "agent_memory_search",
+          "arguments": {
+            "query": ""
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "content": "rec-consol-log · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src: · receiver consolidation log links the soak report; capacity sheet entries point at it\nrec-synthetic-label · working · created:2025-07-27 · updated:2025-07-27 · scope:session · ns: · src:\nrec-webhook-pool · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src: · webhook fanout still runs 6 delivery workers",
+      "tool_call_id": "c2",
+      "name": "agent_memory_search"
+    },
+    {
+      "role": "user",
+      "content": "How many delivery workers does the webhook fanout run?"
+    }
+  ],
+  "golden": {
+    "tool_calls": null,
+    "final_answer_criteria": "States the webhook fanout runs 18 delivery workers. An answer of 6 workers scores 0. An answer presenting both the correct and a competing value without committing to one scores 0."
+  },
+  "assembly_eval": {
+    "pair_id": "stale-fanout-webhook",
+    "mode": "mixed",
+    "candidate_ids": [
+      "0e5eaa13ef2a8625fb404294f92d87a85c19907cfa2472c3b8bc7be266c4e122",
+      "5f783cb54c1dc972c42d13aa049d962702172982f7d52ec91ac1cabf5e5df7a3",
+      "e694b7e618292d25178d32fed39a62b93cf06e4069f7c33681cc2e53e972bcbd",
+      "rec-consol-log",
+      "rec-synthetic-label",
+      "rec-webhook-pool"
+    ],
+    "estimated_prompt_tokens": 1007,
+    "state_digest": "82e90cf5119182aef9cb0d8ebc9dc1782cc5cbae0cb681a8bc93153b1231137a",
+    "subjects": [
+      "(c1|rag|internal/notify/webhookpool.go)",
+      "(c1|rag|internal/notify/webhooksign.go)",
+      "(c1|rag|docs/webhooks.md)",
+      "(c2|memory|rec-consol-log)",
+      "(c2|memory|rec-synthetic-label)",
+      "(c2|memory|rec-webhook-pool)"
+    ],
+    "stratum": "stale_vs_fresh",
+    "answer_home": "conversation",
+    "scenario_family": "fanout-worker-staleness",
+    "budget": 1051,
+    "raw_state_tokens": 1752,
+    "pressure_level": "critical",
+    "shed_messages": 2,
+    "shed_bytes": 2302,
+    "omitted_subjects": 1
+  }
+}

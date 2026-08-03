@@ -1,0 +1,165 @@
+{
+  "id": "stale-spool-edge-cap-mixed",
+  "source": "assembly-corpus-mixed",
+  "captured_at": "0001-01-01T00:00:00Z",
+  "system": "You are the driftwatch assistant. driftwatch is a self-hosted telemetry ingest and alerting daemon. Answer using only the provided conversation, memory records, and retrieved context.",
+  "tools": null,
+  "turns": [
+    {
+      "role": "user",
+      "content": "Edge relay rollout follow-ups. The rollout tracker still lists three relays as pending even though the fleet dashboard shows them serving; can you reconcile the tracker against the dashboard before the weekly sync?"
+    },
+    {
+      "role": "assistant",
+      "content": "Reconciled the tracker: the three relays finished their serving checks last night, so I marked them done and linked the dashboard snapshots as evidence."
+    },
+    {
+      "role": "user",
+      "content": "The relay install script also grew a manual step during the rollout; someone has to paste the bootstrap token by hand. Fold that into the script so the next batch installs clean."
+    },
+    {
+      "role": "assistant",
+      "content": "Folded the bootstrap token fetch into the install script; the next relay install runs end to end without a manual paste."
+    },
+    {
+      "role": "user",
+      "content": "Can you sweep the relay host inventory for boxes still tagged with the staging role? A few kept the tag after promotion and it skews the capacity reports."
+    },
+    {
+      "role": "assistant",
+      "content": "Swept the inventory and retagged four hosts from staging to serving; the capacity report totals now match the fleet dashboard."
+    },
+    {
+      "role": "user",
+      "content": "The edge oncall runbook needs a section for relay restarts too; the old collector restart steps do not cover the relay drain behaviour."
+    },
+    {
+      "role": "assistant",
+      "content": "Added a relay restart section to the runbook covering the drain wait and the safe restart order, with a link from the old collector steps."
+    },
+    {
+      "role": "user",
+      "content": "Also the rollout burned through the change-freeze exception we filed; if any relays remain to ship, file a fresh exception before the freeze window closes."
+    },
+    {
+      "role": "assistant",
+      "content": "Filed a fresh exception covering the remaining relay batch and attached the rollout schedule so approvals do not stall at the freeze board."
+    },
+    {
+      "role": "user",
+      "content": "The relay metrics landed under a temporary namespace during the rollout as well; migrate them into the main edge namespace so the dashboards stop double-counting."
+    },
+    {
+      "role": "assistant",
+      "content": "Migrated the relay metrics into the main edge namespace and updated the two dashboards that queried the temporary one; counts are single-sourced now."
+    },
+    {
+      "role": "user",
+      "content": "Someone reported the relay TLS certs were cut with a short validity as a rollout shortcut. Check the expiry dates and queue renewals for anything that expires this quarter."
+    },
+    {
+      "role": "assistant",
+      "content": "Checked the fleet: six relay certs expire this quarter, and renewals are queued through the usual pipeline with the edge team on the approval."
+    },
+    {
+      "role": "user",
+      "content": "The rollout retro is scheduled but has no pre-read. Can you draft one from the tracker history so the discussion starts from what actually happened?"
+    },
+    {
+      "role": "assistant",
+      "content": "Drafted the pre-read from the tracker timeline, including the two rollback events and what unblocked them, and shared it on the retro invite."
+    },
+    {
+      "role": "user",
+      "content": "And the loaner switch the network team lent us for relay bring-up should go back; confirm nothing in the edge rack still uplinks through it."
+    },
+    {
+      "role": "assistant",
+      "content": "Confirmed the rack uplinks moved to the permanent switch, powered down the loaner, and told the network team it is ready for pickup."
+    },
+    {
+      "role": "user",
+      "content": "Last thing: the relay spend line finance flagged needs a note explaining the rollout spike before the monthly close."
+    },
+    {
+      "role": "assistant",
+      "content": "Added a note to the spend line breaking the spike into hardware and egress, with the rollout dates attached so the close review has context."
+    },
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "id": "c1",
+          "name": "retrieve",
+          "arguments": {
+            "query": "edge relay spool ceiling",
+            "k": 3
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "content": "### source: \"internal/edge/relaydrain.go\"\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nnote: metadata overview (summary omitted: budget)\n--- source: \"internal/edge/relaydrain.go\" (lines 1-15, similarity: 1.00) ---\n1| package edge\n2| \n3| // drain moves landed batches from the relay spool to the uplink in\n4| // arrival order. The loop backs off while the uplink reports\n5| // congestion and resumes from the oldest undrained segment, so a slow\n6| // uplink delays shipping without reordering batches.\n7| func (r *Relay) drain() {\n8| \tfor seg := r.spool.oldest(); seg != nil; seg = r.spool.oldest() {\n9| \t\tif !r.uplink.ready() {\n10| \t\t\tr.backoff()\n11| \t\t\tcontinue\n12| \t\t}\n13| \t\tr.ship(seg)\n14| \t}\n15| }\n\n### source: \"internal/edge/spoolcap.go\"\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nnote: metadata overview (summary omitted: budget)\n\n### source: \"docs/edge-relay.md\"\nlanguage: markdown\nindexed: 2025-07-27T00:00:00Z\nnote: metadata overview (summary omitted: budget)\n",
+      "tool_call_id": "c1",
+      "name": "retrieve"
+    },
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "id": "c2",
+          "name": "agent_memory_search",
+          "arguments": {
+            "query": ""
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "content": "rec-edge-cap · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src: · edge relay spool stays capped at 96 MiB\nrec-edge-runbook · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:\nrec-freeze-window · working · created:2025-07-27 · updated:2025-07-27 · scope:session · ns: · src:\nrec-relay-tracker · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:",
+      "tool_call_id": "c2",
+      "name": "agent_memory_search"
+    },
+    {
+      "role": "user",
+      "content": "How large may an edge relay's on-disk spool grow?"
+    }
+  ],
+  "golden": {
+    "tool_calls": null,
+    "final_answer_criteria": "States an edge relay's on-disk spool may grow to 384 MiB. 384 MiB, 384 \u003c\u003c 20, and 402653184 bytes are equivalent correct forms. An answer of 96 MiB scores 0. An answer presenting both the correct and a competing value without committing to one scores 0."
+  },
+  "assembly_eval": {
+    "pair_id": "stale-spool-edge-cap",
+    "mode": "mixed",
+    "candidate_ids": [
+      "159968d1675b348aefa96a0388f1b6dd18ea8bfca6e4fae2abeb7e928a43c198",
+      "17dce98bf2ca57f456446c127877da082efeba9ad0670da2a391cfa955686d70",
+      "4c01ec07f55d4f83ff261f2abf1c3e45e98f2bd89614e944e2875ab3cb787148",
+      "rec-edge-cap",
+      "rec-edge-runbook",
+      "rec-freeze-window",
+      "rec-relay-tracker"
+    ],
+    "estimated_prompt_tokens": 1159,
+    "state_digest": "9ac72817696e059c45384733aea97ed20d5ae4c070c902d2d6f01b12e89fdbbc",
+    "subjects": [
+      "(c1|rag|internal/edge/relaydrain.go)",
+      "(c1|rag|internal/edge/spoolcap.go)",
+      "(c1|rag|docs/edge-relay.md)",
+      "(c2|memory|rec-edge-cap)",
+      "(c2|memory|rec-edge-runbook)",
+      "(c2|memory|rec-freeze-window)",
+      "(c2|memory|rec-relay-tracker)"
+    ],
+    "stratum": "stale_vs_fresh",
+    "answer_home": "rag",
+    "scenario_family": "spool-cap-staleness",
+    "budget": 1205,
+    "raw_state_tokens": 2008,
+    "pressure_level": "critical",
+    "shed_bytes": 2594
+  }
+}

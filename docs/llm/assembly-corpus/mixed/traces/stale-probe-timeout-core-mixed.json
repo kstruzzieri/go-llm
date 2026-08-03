@@ -1,0 +1,163 @@
+{
+  "id": "stale-probe-timeout-core-mixed",
+  "source": "assembly-corpus-mixed",
+  "captured_at": "0001-01-01T00:00:00Z",
+  "system": "You are the driftwatch assistant. driftwatch is a self-hosted telemetry ingest and alerting daemon. Answer using only the provided conversation, memory records, and retrieved context.",
+  "tools": null,
+  "turns": [
+    {
+      "role": "user",
+      "content": "Morning sweep. First: I raised the core probe timeout to 15 seconds once the collector burn-in wrapped up; fold that into the deployment profile notes so the next provisioning run records why."
+    },
+    {
+      "role": "assistant",
+      "content": "Folded it into the profile notes with a pointer to the burn-in summary, so provisioning history explains the setting."
+    },
+    {
+      "role": "user",
+      "content": "The burn-in also left debug sampling enabled on two core collectors; turn it off and confirm the sample volume drops back to the baseline."
+    },
+    {
+      "role": "assistant",
+      "content": "Disabled debug sampling on both collectors and watched the sample volume settle back to baseline within the hour."
+    },
+    {
+      "role": "user",
+      "content": "Core cert rotation is due as well; stage the renewals so the fleet rotates in two waves instead of all at once."
+    },
+    {
+      "role": "assistant",
+      "content": "Staged the renewals into two waves a week apart, with the wave assignments recorded in the rotation sheet."
+    },
+    {
+      "role": "user",
+      "content": "Can you reconcile the core host inventory against the asset registry? Finance found two hosts billed that the inventory does not list."
+    },
+    {
+      "role": "assistant",
+      "content": "Reconciled both lists: the two hosts were decommissioned but never removed from billing; I filed the correction with finance."
+    },
+    {
+      "role": "user",
+      "content": "The core dashboards grew a duplicated latency row during the burn-in. Merge the duplicates and keep the alert annotations from both."
+    },
+    {
+      "role": "assistant",
+      "content": "Merged the duplicated rows and carried both sets of annotations across, so the incident markers survived the merge."
+    },
+    {
+      "role": "user",
+      "content": "Also draft the burn-in summary for the platform review; the raw notes are in the burn-in channel and nobody will read them as-is."
+    },
+    {
+      "role": "assistant",
+      "content": "Drafted the summary from the channel notes with the three headline findings and linked the raw thread for anyone who wants depth."
+    },
+    {
+      "role": "user",
+      "content": "The spare core chassis in the rack cage should go back to procurement's pool now that the burn-in is over; check nothing is cabled to it."
+    },
+    {
+      "role": "assistant",
+      "content": "Checked the cage: the spare is uncabled, and procurement has it scheduled for pickup with the asset tag already transferred."
+    },
+    {
+      "role": "user",
+      "content": "Someone flagged that the core alert routing still names the old team alias from before the reorg; update the routes and the escalation doc."
+    },
+    {
+      "role": "assistant",
+      "content": "Updated the routes to the current alias and fixed the escalation doc; the old alias now forwards with a deprecation note."
+    },
+    {
+      "role": "user",
+      "content": "And the burn-in spend line needs an owner note before the close; finance wants the overage explained against the estimate."
+    },
+    {
+      "role": "assistant",
+      "content": "Wrote the owner note breaking the overage into extended lab time and the extra chassis rental, and attached it to the spend line."
+    },
+    {
+      "role": "user",
+      "content": "Last: schedule the post-burn-in review with the collector leads and attach the summary draft so the meeting starts from the findings."
+    },
+    {
+      "role": "assistant",
+      "content": "Scheduled the review for early next week with the summary attached and both collector leads confirmed attendance."
+    },
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "id": "c1",
+          "name": "retrieve",
+          "arguments": {
+            "query": "core collector probe loop",
+            "k": 3
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "content": "### source: \"internal/core/prober.go\"\npurpose: Core probe loop: per-round collector walk with maintenance skips.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n--- source: \"internal/core/prober.go\" (lines 1-17, similarity: 1.00) ---\n1| package core\n2| \n3| // probeLoop walks the collector set on the fixed cadence and issues\n4| // one liveness probe per collector per round. Deadlines and the\n5| // cadence come from the deployment profile; the loop only owns\n6| // ordering and skip accounting for collectors in maintenance.\n7| func (p *Prober) probeLoop() {\n8| \tfor range p.ticker.C {\n9| \t\tfor _, c := range p.collectors() {\n10| \t\t\tif c.inMaintenance() {\n11| \t\t\t\tp.metricsSkipped.Inc()\n12| \t\t\t\tcontinue\n13| \t\t\t}\n14| \t\t\tp.probe(c)\n15| \t\t}\n16| \t}\n17| }\n\n### source: \"internal/core/registry.go\"\npurpose: Core collector registry: consistent snapshots, whole-set provisioning updates.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n\n### source: \"docs/core-collectors.md\"\npurpose: Core collector guide: aggregation role, registry membership, maintenance flags.\nlanguage: markdown\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n",
+      "tool_call_id": "c1",
+      "name": "retrieve"
+    },
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "id": "c2",
+          "name": "agent_memory_search",
+          "arguments": {
+            "query": ""
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "content": "rec-burnin-channel · working · created:2025-07-27 · updated:2025-07-27 · scope:session · ns: · src:\nrec-core-probe · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src: · core probe timeout is 4 seconds; hold it there through the collector burn-in\nrec-core-rotation · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src: · core cert renewals rotate in two waves recorded in the rotation sheet",
+      "tool_call_id": "c2",
+      "name": "agent_memory_search"
+    },
+    {
+      "role": "user",
+      "content": "What is the probe timeout for core collectors?"
+    }
+  ],
+  "golden": {
+    "tool_calls": null,
+    "final_answer_criteria": "States the core collector probe timeout is 15 seconds. An answer of 4 seconds scores 0. An answer presenting both the correct and a competing value without committing to one scores 0."
+  },
+  "assembly_eval": {
+    "pair_id": "stale-probe-timeout-core",
+    "mode": "mixed",
+    "candidate_ids": [
+      "b153fe148b1c6307ec6df7e06cf10f201844fda62980da2dd3564aa17eb2ca64",
+      "b2af8c1927d4459f2264064172752c43458fca6bbd0db6015801118f8c262d2d",
+      "ddfc87f263cd37df2468329df83fa22ec3b7a1eea8176f6f09e529f2ee769041",
+      "rec-burnin-channel",
+      "rec-core-probe",
+      "rec-core-rotation"
+    ],
+    "estimated_prompt_tokens": 1137,
+    "state_digest": "1eb23089de517c3dca91af98fd1b9f55ca84962c5d351728784089e16ada6370",
+    "subjects": [
+      "(c1|rag|internal/core/prober.go)",
+      "(c1|rag|internal/core/registry.go)",
+      "(c1|rag|docs/core-collectors.md)",
+      "(c2|memory|rec-burnin-channel)",
+      "(c2|memory|rec-core-probe)",
+      "(c2|memory|rec-core-rotation)"
+    ],
+    "stratum": "stale_vs_fresh",
+    "answer_home": "conversation",
+    "scenario_family": "probe-timeout-staleness",
+    "budget": 1194,
+    "raw_state_tokens": 1990,
+    "pressure_level": "critical",
+    "shed_bytes": 2613
+  }
+}

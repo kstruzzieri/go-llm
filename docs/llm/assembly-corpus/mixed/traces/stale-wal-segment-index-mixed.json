@@ -1,0 +1,157 @@
+{
+  "id": "stale-wal-segment-index-mixed",
+  "source": "assembly-corpus-mixed",
+  "captured_at": "0001-01-01T00:00:00Z",
+  "system": "You are the driftwatch assistant. driftwatch is a self-hosted telemetry ingest and alerting daemon. Answer using only the provided conversation, memory records, and retrieved context.",
+  "tools": null,
+  "turns": [
+    {
+      "role": "user",
+      "content": "Index compaction rework items. The rework doubled the compaction throughput on the benchmark tier; get the result written into the quarterly infra summary before the numbers go stale."
+    },
+    {
+      "role": "assistant",
+      "content": "Wrote the result into the infra summary with the benchmark methodology footnote and the tier configuration attached."
+    },
+    {
+      "role": "user",
+      "content": "The rework's canary tier ran with extra tracing enabled and it is still on; turn it off and confirm the trace volume returns to the baseline."
+    },
+    {
+      "role": "assistant",
+      "content": "Turned off the canary tracing; trace volume is back at baseline and the change is logged."
+    },
+    {
+      "role": "user",
+      "content": "Can you refresh the index tier's restore runbook? The rework changed the segment naming and the runbook examples show the old names."
+    },
+    {
+      "role": "assistant",
+      "content": "Refreshed the runbook examples with the new segment names and ran the listing commands in staging to confirm they return what the text claims."
+    },
+    {
+      "role": "user",
+      "content": "The compaction dashboards need an annotation at the rework rollout too, or the throughput step will look like a regression hunt in six months."
+    },
+    {
+      "role": "assistant",
+      "content": "Annotated the rollout on both compaction dashboards with a link to the rework summary, so the step change explains itself."
+    },
+    {
+      "role": "user",
+      "content": "Also reconcile the index tier's disk forecast with the post-rework segment sizes; capacity planning still projects from the old layout."
+    },
+    {
+      "role": "assistant",
+      "content": "Reconciled the forecast with the post-rework sizes; the next hardware ask moves out a quarter."
+    },
+    {
+      "role": "user",
+      "content": "Someone asked whether the archive tier needs the rework too; write a short assessment so the question stops resurfacing every planning cycle."
+    },
+    {
+      "role": "assistant",
+      "content": "Wrote the assessment: the archive tier never hits the compaction path, so the rework does not apply."
+    },
+    {
+      "role": "user",
+      "content": "The index oncall rotation should get a walkthrough of the new compaction behaviour before the next handoff; set that up with the rework lead."
+    },
+    {
+      "role": "assistant",
+      "content": "Scheduled the walkthrough ahead of the handoff with the rework lead presenting, and the session notes will land in the oncall folder."
+    },
+    {
+      "role": "user",
+      "content": "And the rework's load test data set is parked on the shared scratch volume; archive what the retro needs and free the rest."
+    },
+    {
+      "role": "assistant",
+      "content": "Archived the retro-relevant runs and freed the scratch volume; the retro doc links the set."
+    },
+    {
+      "role": "user",
+      "content": "Last: the infra summary needs sign-off from the storage lead before it circulates; route it and chase the approval."
+    },
+    {
+      "role": "assistant",
+      "content": "Routed the summary to the storage lead with a sign-off deadline before circulation, and the approval is already acknowledged."
+    },
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "id": "c1",
+          "name": "retrieve",
+          "arguments": {
+            "query": "index wal rollover behaviour",
+            "k": 3
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "content": "### source: \"internal/index/wal.go\"\npurpose: Index WAL sizing: segments roll at 24 MiB, sealed before mutations apply.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n--- source: \"internal/index/wal.go\" (lines 1-12, similarity: 1.00) ---\n1| package index\n2| \n3| // appendWAL lands one index mutation batch in the tier's write-ahead\n4| // log before the mutation applies. Rollover sizing is owned by the\n5| // tier profile; this path enforces only append ordering and the\n6| // seal-before-apply rule that makes crashed mutations replayable.\n7| func (ix *Index) appendWAL(batch MutationBatch) error {\n8| \tif err := ix.wal.append(batch); err != nil {\n9| \t\treturn err\n10| \t}\n11| \treturn ix.apply(batch)\n12| }\n\n### source: \"internal/index/compact.go\"\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nnote: metadata overview (summary omitted: budget)\n\n### source: \"docs/index-tier.md\"\nlanguage: markdown\nindexed: 2025-07-27T00:00:00Z\nnote: metadata overview (summary omitted: budget)\n",
+      "tool_call_id": "c1",
+      "name": "retrieve"
+    },
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "id": "c2",
+          "name": "agent_memory_search",
+          "arguments": {
+            "query": ""
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "content": "rec-archive-scope · working · created:2025-07-27 · updated:2025-07-27 · scope:session · ns: · src: · archive tier skips the compaction rework; the assessment records the reasoning\nrec-canary-trace · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:\nrec-index-wal · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src: · index WAL segments roll at 128 MiB, raised during the index compaction rework\nrec-restore-scratch · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:",
+      "tool_call_id": "c2",
+      "name": "agent_memory_search"
+    },
+    {
+      "role": "user",
+      "content": "How big does an index WAL segment get before it rolls?"
+    }
+  ],
+  "golden": {
+    "tool_calls": null,
+    "final_answer_criteria": "States index WAL segments roll at 128 MiB. 128 MiB and 134217728 bytes are equivalent correct forms. An answer of 24 MiB scores 0. An answer presenting both the correct and a competing value without committing to one scores 0."
+  },
+  "assembly_eval": {
+    "pair_id": "stale-wal-segment-index",
+    "mode": "mixed",
+    "candidate_ids": [
+      "1b66a1bfcdc6d00d1ed3a97fd18ffe761ab0bfeccca690ed1ea38291118f36d2",
+      "a7baa396b31fb84b63143a97bb84e8eaa811375ccdc3393bf8e50d9129f1c88c",
+      "e462fdc04f67e67309c7940b9fb78d62ff21f05effd03a01916a88390bc09663",
+      "rec-archive-scope",
+      "rec-canary-trace",
+      "rec-index-wal",
+      "rec-restore-scratch"
+    ],
+    "estimated_prompt_tokens": 1034,
+    "state_digest": "51d488d6798fd272e8d15b80d5be919e7c5c6443985636fbd5651e8dfa1fe7e9",
+    "subjects": [
+      "(c1|rag|internal/index/wal.go)",
+      "(c1|rag|internal/index/compact.go)",
+      "(c1|rag|docs/index-tier.md)",
+      "(c2|memory|rec-archive-scope)",
+      "(c2|memory|rec-canary-trace)",
+      "(c2|memory|rec-index-wal)",
+      "(c2|memory|rec-restore-scratch)"
+    ],
+    "stratum": "stale_vs_fresh",
+    "answer_home": "memory",
+    "scenario_family": "wal-segment-staleness",
+    "budget": 1089,
+    "raw_state_tokens": 1815,
+    "pressure_level": "critical",
+    "shed_bytes": 2391
+  }
+}

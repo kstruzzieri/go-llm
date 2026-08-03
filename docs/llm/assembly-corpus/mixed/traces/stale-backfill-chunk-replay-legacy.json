@@ -1,0 +1,84 @@
+{
+  "id": "stale-backfill-chunk-replay-legacy",
+  "source": "assembly-corpus-mixed",
+  "captured_at": "0001-01-01T00:00:00Z",
+  "system": "You are the driftwatch assistant. driftwatch is a self-hosted telemetry ingest and alerting daemon. Answer using only the provided conversation, memory records, and retrieved context.",
+  "tools": null,
+  "turns": [
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "id": "c1",
+          "name": "retrieve",
+          "arguments": {
+            "query": "replay backfill staging path",
+            "k": 3
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "content": "### source: \"internal/replay/stage.go\"\npurpose: Backfill chunk staging: whole-chunk writes into flush-bound segments.\noverview: stage.go lands planner-sized backfill chunks whole into staging segments and enqueues them for flush; chunk sizing itself lives with the backfill planner.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n--- source: \"internal/replay/stage.go\" (lines 1-16, similarity: 1.00) ---\n1| package replay\n2| \n3| // stageChunk writes one backfill chunk into the staging segment and\n4| // hands it to the flush path. Chunk sizing is owned by the backfill\n5| // planner; staging only enforces that a chunk arrives whole, because\n6| // a partial chunk after a crash would replay rows twice.\n7| func (b *Backfill) stageChunk(c Chunk) error {\n8| \tif err := c.complete(); err != nil {\n9| \t\treturn err\n10| \t}\n11| \tseg := b.staging.current()\n12| \tif err := seg.append(c); err != nil {\n13| \t\treturn err\n14| \t}\n15| \treturn b.flusher.enqueue(seg)\n16| }\n\n### source: \"internal/replay/columnar.go\"\npurpose: Columnar assembly for staged chunks: per-field vectors with validity bitmaps.\noverview: columnar.go assembles staged chunks into per-field column vectors with bitmap-tracked validity, keeping allocation at this layer so the flush path stays copy-free.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n--- source: \"internal/replay/columnar.go\" (lines 1-38, similarity: 1.00) ---\n1| package replay\n2| \n3| // assembleColumns turns a staged chunk into the columnar layout the\n4| // exporter consumes. Column vectors are built per field with nulls\n5| // tracked in a validity bitmap; the assembly is allocation-heavy on\n6| // purpose at this layer so the flush path below it stays copy-free.\n7| func assembleColumns(c Chunk) (ColumnSet, error) {\n8| \tfields := c.schema.Fields()\n9| \tout := make(ColumnSet, len(fields))\n10| \tfor i, f := range fields {\n11| \t\tvec, err := buildVector(c, f)\n12| \t\tif err != nil {\n13| \t\t\treturn nil, err\n14| \t\t}\n15| \t\tout[i] = vec\n16| \t}\n17| \treturn out, nil\n18| }\n19| \n20| // buildVector walks one field across the chunk's rows. Validity is a\n21| // bitmap rather than a sentinel value because sentinel collisions\n22| // with real data were the root cause of the rewrite's ugliest\n23| // pre-merge bug, and the bitmap makes absence unrepresentable as a\n24| // value.\n25| func buildVector(c Chunk, f Field) (Vector, error) {\n26| \tv := newVector(f.Type, c.rows())\n27| \tfor i := 0; i \u003c c.rows(); i++ {\n28| \t\tcell, ok := c.cell(i, f)\n29| \t\tif !ok {\n30| \t\t\tv.setNull(i)\n31| \t\t\tcontinue\n32| \t\t}\n33| \t\tif err := v.set(i, cell); err != nil {\n34| \t\t\treturn Vector{}, err\n35| \t\t}\n36| \t}\n37| \treturn v, nil\n38| }\n\n### source: \"docs/replay-backfill.md\"\npurpose: Replay backfill guide: planner-staged-flush pipeline and operating etiquette.\noverview: replay-backfill.md walks the planner, staging, and flush stages of a backfill and sets the operating rule that live ingest keeps priority.\nlanguage: markdown\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n--- source: \"docs/replay-backfill.md\" (lines 1-11, similarity: 1.00) ---\n1| # driftwatch replay backfill\n2| \n3| Backfills replay historical segments through the columnar path into\n4| the export tier. The planner sizes work; staging lands it whole;\n5| flush hands it to the exporter.\n6| \n7| ## Running one\n8| \n9| Announce large backfills before starting them. Live ingest always\n10| has priority: if the ingest dashboards show pressure during a\n11| backfill, pause the backfill rather than tuning around it.\n",
+      "tool_call_id": "c1",
+      "name": "retrieve"
+    },
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "id": "c2",
+          "name": "agent_memory_search",
+          "arguments": {
+            "query": ""
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "content": "rec-backfill-chunk · semantic · 2025-07-27 · replay backfill chunk at 50000 rows, raised during the columnar rewrite; the writer stages one chunk per segment flush, row assembly moved off the replay path so larger chunks stopped starving live ingest, and the rewrite notes record the sweep that settled the size\nrec-backfill-notify · working · 2025-07-27 · large backfills announce start, size, and expected duration in the data team's channel\nrec-backfill-walk · semantic · 2025-07-27 · replay backfill walks 5000-row chunks",
+      "tool_call_id": "c2",
+      "name": "agent_memory_search"
+    },
+    {
+      "role": "user",
+      "content": "How many rows does a replay backfill chunk carry?"
+    }
+  ],
+  "golden": {
+    "tool_calls": null,
+    "final_answer_criteria": "States a replay backfill chunk carries 50000 rows. 50000 and 50,000 are equivalent correct forms. An answer of 5000 rows scores 0. An answer presenting both the correct and a competing value without committing to one scores 0."
+  },
+  "assembly_eval": {
+    "pair_id": "stale-backfill-chunk-replay",
+    "mode": "legacy",
+    "candidate_ids": [
+      "55fb9ba03307a6c3763f7185efa8ff66f7d92e33899fe40405e290f5a3ea9b21",
+      "72c9efa779e2115035332a1f27dcaf635ab75c53de864317e09aebabdb09871e",
+      "a0793fc31e7f3f7e109c646038d4e40e71194a2aaa1de353bd8bd1c45f5634fa",
+      "rec-backfill-chunk",
+      "rec-backfill-notify",
+      "rec-backfill-walk"
+    ],
+    "estimated_prompt_tokens": 1094,
+    "state_digest": "70182bff136ba1a27c094d21b0bf45c1e968de8a8be42a208a852eb868134ea2",
+    "subjects": [
+      "(c1|rag|internal/replay/stage.go)",
+      "(c1|rag|internal/replay/columnar.go)",
+      "(c1|rag|docs/replay-backfill.md)",
+      "(c2|memory|rec-backfill-chunk)",
+      "(c2|memory|rec-backfill-notify)",
+      "(c2|memory|rec-backfill-walk)"
+    ],
+    "stratum": "stale_vs_fresh",
+    "answer_home": "memory",
+    "scenario_family": "backfill-chunk-staleness",
+    "budget": 1157,
+    "raw_state_tokens": 1928,
+    "pressure_level": "critical",
+    "shed_messages": 18,
+    "shed_bytes": 2567
+  }
+}

@@ -1,0 +1,149 @@
+{
+  "id": "stale-gossip-interval-edge-mixed",
+  "source": "assembly-corpus-mixed",
+  "captured_at": "0001-01-01T00:00:00Z",
+  "system": "You are the driftwatch assistant. driftwatch is a self-hosted telemetry ingest and alerting daemon. Answer using only the provided conversation, memory records, and retrieved context.",
+  "tools": null,
+  "turns": [
+    {
+      "role": "user",
+      "content": "The soak's temporary mesh visualization can come down too; it was reading the debug endpoint and that endpoint should go back behind the flag. The flag notes should say why the endpoint is gated, or the next soak will just flip it back on without the context."
+    },
+    {
+      "role": "assistant",
+      "content": "Took the visualization down and put the debug endpoint back behind its flag; the standing dashboards cover the mesh now."
+    },
+    {
+      "role": "user",
+      "content": "Can you archive the soak's raw gossip traces? Keep the two convergence incidents and drop the routine days, the full set is enormous. Label the archive with the soak window dates so nobody has to guess which weeks the traces cover."
+    },
+    {
+      "role": "assistant",
+      "content": "Archived the two incident windows with context hours around each and dropped the routine days; the archive index describes what was kept."
+    },
+    {
+      "role": "user",
+      "content": "The mesh alerting thresholds were widened for the soak as well; bring them back to the standing values and note the change window. The alert history entry should name the soak as the reason the thresholds moved, for the next audit pass."
+    },
+    {
+      "role": "assistant",
+      "content": "Restored the standing thresholds and noted the widened window in the alert history so the soak period reads correctly later."
+    },
+    {
+      "role": "user",
+      "content": "Also the relay install image should bake the post-soak mesh settings; new relays currently join with defaults and converge late. Check the image build logs afterwards so we know the bake actually landed in the current image generation."
+    },
+    {
+      "role": "assistant",
+      "content": "Baked the post-soak settings into the install image and verified a fresh relay joins converged instead of trailing the mesh."
+    },
+    {
+      "role": "user",
+      "content": "The soak report needs its reviewers assigned; the mesh leads plus one skeptic who did not run the soak, ideally. Give the reviewers a deadline ahead of the mesh review so the report does not slip past the quarter."
+    },
+    {
+      "role": "assistant",
+      "content": "Assigned the two mesh leads and drafted in a reviewer from the ingest side who had no soak involvement, as the outside eye."
+    },
+    {
+      "role": "user",
+      "content": "Someone flagged that the mesh glossary still defines terms the soak renamed; sync the glossary before the report circulates. The glossary sync should also catch the two entries the soak retired outright, not just the renames."
+    },
+    {
+      "role": "assistant",
+      "content": "Synced the glossary with the renamed terms and left redirect entries for the old names so existing links keep resolving."
+    },
+    {
+      "role": "user",
+      "content": "And thank the relay site owners who hosted soak hardware; the report should name them in the acknowledgements. Their site contacts are in the fleet records if the report needs formal names rather than handles."
+    },
+    {
+      "role": "assistant",
+      "content": "Added an acknowledgements section naming the four site owners and the weeks their sites hosted the soak hardware."
+    },
+    {
+      "role": "user",
+      "content": "The provisioning template's mesh example is my last worry: it still shows the soak cadence in its comments, so refresh the example around edge gossip at 45 seconds before someone copies the old line."
+    },
+    {
+      "role": "assistant",
+      "content": "Refreshed the template example and its comments to the current cadence and added a pointer to the profile history entry for the reasoning."
+    },
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "id": "c1",
+          "name": "retrieve",
+          "arguments": {
+            "query": "edge mesh gossip cadence",
+            "k": 3
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "content": "### source: \"internal/mesh/profile.go\"\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nnote: metadata overview (summary omitted: budget)\n--- source: \"internal/mesh/profile.go\" (lines 1-18, similarity: 1.00) ---\n1| package mesh\n2| \n3| // applyProfile installs mesh settings from the provisioning profile.\n4| // The mesh never invents values: every knob resolves from the\n5| // profile or the install image, and a knob absent from both fails\n6| // the apply loudly instead of falling back to a compiled default.\n7| func (m *Mesh) applyProfile(p Profile) error {\n8| \tfor _, k := range meshKnobs {\n9| \t\tv, ok := p.lookup(k)\n10| \t\tif !ok {\n11| \t\t\treturn errKnobUnset(k)\n12| \t\t}\n13| \t\tif err := m.set(k, v); err != nil {\n14| \t\t\treturn err\n15| \t\t}\n16| \t}\n17| \treturn nil\n18| }\n\n### source: \"internal/mesh/converge.go\"\npurpose: Convergence tracking: version-vector confirmation over sampled rounds.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n\n### source: \"docs/mesh-operations.md\"\npurpose: Mesh operations guide: profile-driven settings and cadence change flow.\nlanguage: markdown\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n",
+      "tool_call_id": "c1",
+      "name": "retrieve"
+    },
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "id": "c2",
+          "name": "agent_memory_search",
+          "arguments": {
+            "query": ""
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "content": "rec-edge-cadence · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src: · edge gossip holds at 10 seconds; the relay soak needs the short round\nrec-install-image · working · created:2025-07-27 · updated:2025-07-27 · scope:session · ns: · src:\nrec-soak-archive · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:",
+      "tool_call_id": "c2",
+      "name": "agent_memory_search"
+    },
+    {
+      "role": "user",
+      "content": "How often do edge relays gossip?"
+    }
+  ],
+  "golden": {
+    "tool_calls": null,
+    "final_answer_criteria": "States edge relays gossip every 45 seconds. An answer of every 10 seconds scores 0. An answer presenting both the correct and a competing value without committing to one scores 0."
+  },
+  "assembly_eval": {
+    "pair_id": "stale-gossip-interval-edge",
+    "mode": "mixed",
+    "candidate_ids": [
+      "356ed424272fe8001ea93522bf352910b5478375b6a1edd30ca74b6b9c41aa7f",
+      "50f6abc71871f4ccd017b523808b8daf4105a71aea6ae06c0767fab18762d0cd",
+      "c5d594e3c36f40565f844f2f2c12131ba874925be2bb32912e3db0d12f27f33c",
+      "rec-edge-cadence",
+      "rec-install-image",
+      "rec-soak-archive"
+    ],
+    "estimated_prompt_tokens": 1157,
+    "state_digest": "701d4681778081be7c9c0bfa1582eccbd58340cadc72660546c5f79ff7c02295",
+    "subjects": [
+      "(c1|rag|internal/mesh/profile.go)",
+      "(c1|rag|internal/mesh/converge.go)",
+      "(c1|rag|docs/mesh-operations.md)",
+      "(c2|memory|rec-edge-cadence)",
+      "(c2|memory|rec-install-image)",
+      "(c2|memory|rec-soak-archive)"
+    ],
+    "stratum": "stale_vs_fresh",
+    "answer_home": "conversation",
+    "scenario_family": "gossip-interval-staleness",
+    "budget": 1204,
+    "raw_state_tokens": 2007,
+    "pressure_level": "critical",
+    "shed_messages": 2,
+    "shed_bytes": 2663,
+    "omitted_subjects": 1
+  }
+}

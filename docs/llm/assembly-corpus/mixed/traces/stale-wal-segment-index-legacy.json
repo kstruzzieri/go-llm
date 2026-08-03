@@ -1,0 +1,67 @@
+{
+  "id": "stale-wal-segment-index-legacy",
+  "source": "assembly-corpus-mixed",
+  "captured_at": "0001-01-01T00:00:00Z",
+  "system": "You are the driftwatch assistant. driftwatch is a self-hosted telemetry ingest and alerting daemon. Answer using only the provided conversation, memory records, and retrieved context.",
+  "tools": null,
+  "turns": [
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "id": "c2",
+          "name": "agent_memory_search",
+          "arguments": {
+            "query": ""
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "content": "rec-archive-scope · working · 2025-07-27 · archive tier skips the compaction rework; the assessment records the reasoning\nrec-canary-trace · semantic · 2025-07-27 · index canary tracing is off again after the rework; trace volume back at baseline\nrec-index-wal · semantic · 2025-07-27 · index WAL segments roll at 128 MiB, raised during the index compaction rework\nrec-restore-scratch · semantic · 2025-07-27 · index WAL segments roll at 24 MiB; the restore scratch volume is sized against that roll size",
+      "tool_call_id": "c2",
+      "name": "agent_memory_search"
+    },
+    {
+      "role": "user",
+      "content": "How big does an index WAL segment get before it rolls?"
+    }
+  ],
+  "golden": {
+    "tool_calls": null,
+    "final_answer_criteria": "States index WAL segments roll at 128 MiB. 128 MiB and 134217728 bytes are equivalent correct forms. An answer of 24 MiB scores 0. An answer presenting both the correct and a competing value without committing to one scores 0."
+  },
+  "assembly_eval": {
+    "pair_id": "stale-wal-segment-index",
+    "mode": "legacy",
+    "candidate_ids": [
+      "1b66a1bfcdc6d00d1ed3a97fd18ffe761ab0bfeccca690ed1ea38291118f36d2",
+      "a7baa396b31fb84b63143a97bb84e8eaa811375ccdc3393bf8e50d9129f1c88c",
+      "e462fdc04f67e67309c7940b9fb78d62ff21f05effd03a01916a88390bc09663",
+      "rec-archive-scope",
+      "rec-canary-trace",
+      "rec-index-wal",
+      "rec-restore-scratch"
+    ],
+    "estimated_prompt_tokens": 189,
+    "state_digest": "51d488d6798fd272e8d15b80d5be919e7c5c6443985636fbd5651e8dfa1fe7e9",
+    "subjects": [
+      "(c1|rag|internal/index/wal.go)",
+      "(c1|rag|internal/index/compact.go)",
+      "(c1|rag|docs/index-tier.md)",
+      "(c2|memory|rec-archive-scope)",
+      "(c2|memory|rec-canary-trace)",
+      "(c2|memory|rec-index-wal)",
+      "(c2|memory|rec-restore-scratch)"
+    ],
+    "stratum": "stale_vs_fresh",
+    "answer_home": "memory",
+    "scenario_family": "wal-segment-staleness",
+    "budget": 1089,
+    "raw_state_tokens": 1815,
+    "pressure_level": "ok",
+    "shed_messages": 20,
+    "shed_bytes": 5736
+  }
+}

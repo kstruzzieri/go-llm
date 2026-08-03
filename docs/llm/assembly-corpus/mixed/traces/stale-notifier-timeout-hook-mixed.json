@@ -1,0 +1,155 @@
+{
+  "id": "stale-notifier-timeout-hook-mixed",
+  "source": "assembly-corpus-mixed",
+  "captured_at": "0001-01-01T00:00:00Z",
+  "system": "You are the driftwatch assistant. driftwatch is a self-hosted telemetry ingest and alerting daemon. Answer using only the provided conversation, memory records, and retrieved context.",
+  "tools": null,
+  "turns": [
+    {
+      "role": "user",
+      "content": "Receiver rework follow-through. The rework branch is merged but the deploy notes never made it to the change log; write them up while the details are fresh."
+    },
+    {
+      "role": "assistant",
+      "content": "Wrote the deploy notes into the change log with the rollout order and the two config flips, linked from the rework ticket."
+    },
+    {
+      "role": "user",
+      "content": "The rework testbed receivers are still running in the sandbox project. Tear them down and reclaim the addresses before something starts depending on them."
+    },
+    {
+      "role": "assistant",
+      "content": "Tore down the sandbox receivers and released the addresses; the sandbox project is back to its pre-rework footprint."
+    },
+    {
+      "role": "user",
+      "content": "Can you sweep the delivery profile for receiver entries with no traffic since before the rework? A few lab entries look abandoned."
+    },
+    {
+      "role": "assistant",
+      "content": "Swept the profile and flagged three abandoned lab entries; two owners confirmed deletion and the third is queued pending a reply."
+    },
+    {
+      "role": "user",
+      "content": "Where did the webhook notifier settings land after the rework? I want the change log to show the final state, not the branch history."
+    },
+    {
+      "role": "assistant",
+      "content": "Settled state: after the receiver rework I raised the webhook notifier timeout to 30 seconds, and the retry backoff kept its shape; the change log now records both with the rework rationale."
+    },
+    {
+      "role": "user",
+      "content": "The rework also touched the dead-letter replay path; run one replay drill so we know the operator steps still match the runbook."
+    },
+    {
+      "role": "assistant",
+      "content": "Ran the drill on a synthetic dead-letter entry; the steps matched except one renamed flag, and I fixed the runbook line that named it."
+    },
+    {
+      "role": "user",
+      "content": "Receiver-side signing needs a doc pass too; the rework changed where secrets live and the receiver onboarding doc still shows the old location."
+    },
+    {
+      "role": "assistant",
+      "content": "Updated the onboarding doc with the new secret location and added a migration note for receivers still reading the old path."
+    },
+    {
+      "role": "user",
+      "content": "Also confirm the rework did not change delivery ordering for receivers that requested strict order; their integration tests are strict about it."
+    },
+    {
+      "role": "assistant",
+      "content": "Confirmed strict-order receivers still drain through the ordered lane; I attached the lane assignment listing to the rework ticket as evidence."
+    },
+    {
+      "role": "user",
+      "content": "The capacity review wants a before-and-after on delivery latency across the rework; pull the two-week windows either side of the merge."
+    },
+    {
+      "role": "assistant",
+      "content": "Pulled both windows into the review sheet: median delivery latency held flat and the long tail shortened after the rework."
+    },
+    {
+      "role": "user",
+      "content": "Last: thank the receiver-side teams that ran early integrations; their bug reports shaped the rework and the retro should say so."
+    },
+    {
+      "role": "assistant",
+      "content": "Added an acknowledgements section to the retro doc naming the three teams and the issues their reports surfaced."
+    },
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "id": "c1",
+          "name": "retrieve",
+          "arguments": {
+            "query": "webhook notifier delivery path",
+            "k": 3
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "content": "### source: \"internal/notify/hookdeliver.go\"\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nnote: metadata overview (summary omitted: budget)\n--- source: \"internal/notify/hookdeliver.go\" (lines 1-15, similarity: 1.00) ---\n1| package notify\n2| \n3| // deliverHook posts one webhook delivery and classifies the outcome.\n4| // The attempt runs under the delivery deadline from the profile;\n5| // classification stays coarse on purpose: retryable or terminal,\n6| // nothing in between, so the retry loop cannot misread a status.\n7| func (n *Notifier) deliverHook(d Delivery) outcome {\n8| \tctx, cancel := n.deadlineContext()\n9| \tdefer cancel()\n10| \tresp, err := n.post(ctx, d)\n11| \tif err != nil {\n12| \t\treturn retryable(err)\n13| \t}\n14| \treturn classify(resp)\n15| }\n\n### source: \"internal/notify/retryplan.go\"\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nnote: metadata overview (summary omitted: budget)\n\n### source: \"docs/notifier-delivery.md\"\npurpose: Notifier delivery guide: per-path profiles and dead-letter monitoring.\nlanguage: markdown\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n",
+      "tool_call_id": "c1",
+      "name": "retrieve"
+    },
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "id": "c2",
+          "name": "agent_memory_search",
+          "arguments": {
+            "query": ""
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "content": "rec-hook-window · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src: · webhook notifier timeout stands at 8 seconds\nrec-secret-loc · working · created:2025-07-27 · updated:2025-07-27 · scope:session · ns: · src:\nrec-strict-order · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:",
+      "tool_call_id": "c2",
+      "name": "agent_memory_search"
+    },
+    {
+      "role": "user",
+      "content": "How long may a webhook notifier delivery run before timing out?"
+    }
+  ],
+  "golden": {
+    "tool_calls": null,
+    "final_answer_criteria": "States the webhook notifier delivery timeout is 30 seconds. An answer of 8 seconds scores 0. An answer presenting both the correct and a competing value without committing to one scores 0."
+  },
+  "assembly_eval": {
+    "pair_id": "stale-notifier-timeout-hook",
+    "mode": "mixed",
+    "candidate_ids": [
+      "807f50925c7d667e59adf0cfd1950fb52cfa46f27008f22829e4fdf05eb2d0c3",
+      "a255ba2b7aaeb5932b9f1eea6e6eebd58693e85700883951775575166b5c2061",
+      "c2972ef9039342c0f0e53f9e3555d56039bd0ddcbf8ca9321627a2f67c1233a9",
+      "rec-hook-window",
+      "rec-secret-loc",
+      "rec-strict-order"
+    ],
+    "estimated_prompt_tokens": 1046,
+    "state_digest": "6d280ee90f84e49e55b9bb1fcc3efc648b03ebbe48e3b894f00c0f4c11a4fb3e",
+    "subjects": [
+      "(c1|rag|internal/notify/hookdeliver.go)",
+      "(c1|rag|internal/notify/retryplan.go)",
+      "(c1|rag|docs/notifier-delivery.md)",
+      "(c2|memory|rec-hook-window)",
+      "(c2|memory|rec-secret-loc)",
+      "(c2|memory|rec-strict-order)"
+    ],
+    "stratum": "stale_vs_fresh",
+    "answer_home": "conversation",
+    "scenario_family": "notifier-timeout-staleness",
+    "budget": 1091,
+    "raw_state_tokens": 1819,
+    "pressure_level": "critical",
+    "shed_bytes": 2353
+  }
+}

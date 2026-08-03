@@ -1,0 +1,157 @@
+{
+  "id": "stale-probe-timeout-edge-mixed",
+  "source": "assembly-corpus-mixed",
+  "captured_at": "0001-01-01T00:00:00Z",
+  "system": "You are the driftwatch assistant. driftwatch is a self-hosted telemetry ingest and alerting daemon. Answer using only the provided conversation, memory records, and retrieved context.",
+  "tools": null,
+  "turns": [
+    {
+      "role": "user",
+      "content": "Burn-in follow-ups from the flaky-uplink weeks. The packet-loss captures from the worst two sites are still on the collector hosts; pull them into the shared analysis bucket before the hosts recycle."
+    },
+    {
+      "role": "assistant",
+      "content": "Pulled both capture sets into the analysis bucket with site and date prefixes, and noted the recycle schedule in the burn-in doc."
+    },
+    {
+      "role": "user",
+      "content": "The burn-in dashboards can be trimmed as well; keep the loss and retry panels, drop the experimental ones nobody read during the burn-in."
+    },
+    {
+      "role": "assistant",
+      "content": "Kept loss and retry, dropped the four experimental panels, and archived their queries in the dashboard folder in case anyone asks."
+    },
+    {
+      "role": "user",
+      "content": "Can you write up the uplink vendor's findings for the burn-in doc? Their engineer summarized it on the call but nothing landed in writing on our side."
+    },
+    {
+      "role": "assistant",
+      "content": "Wrote the vendor findings into the burn-in doc: the microwave hop degraded under rain fade, and the reroute they applied held for the final two weeks."
+    },
+    {
+      "role": "user",
+      "content": "The site survey photos from the two worst sites should be linked from the doc too; field ops has them in their drive somewhere."
+    },
+    {
+      "role": "assistant",
+      "content": "Linked the survey photo albums from the burn-in doc after field ops shared the folder; both sites' antenna runs are visible in the sets."
+    },
+    {
+      "role": "user",
+      "content": "Also the burn-in left a temporary retry budget bump on the edge exporters. Confirm whether it is still in place and note where it is set."
+    },
+    {
+      "role": "assistant",
+      "content": "The bump is still in place, set in the edge exporter profile; I noted the location and flagged it for review at the next config pass."
+    },
+    {
+      "role": "user",
+      "content": "The weekly edge sync ran long every week of the burn-in. Now that it is over, propose trimming the standing agenda back to the pre-burn-in shape."
+    },
+    {
+      "role": "assistant",
+      "content": "Proposed the trimmed agenda to the edge leads and both agreed; the invite now carries the shorter agenda starting next week."
+    },
+    {
+      "role": "user",
+      "content": "Field ops asked for a one-page summary of what the burn-in changed for their install checklist; can you draft that from the doc?"
+    },
+    {
+      "role": "assistant",
+      "content": "Drafted the one-pager: antenna alignment tolerances tightened and the reroute contact added; field ops confirmed it covers their checklist."
+    },
+    {
+      "role": "user",
+      "content": "And the burn-in spend needs splitting between the network and edge budgets before the month closes; finance flagged the combined line."
+    },
+    {
+      "role": "assistant",
+      "content": "Split the spend with the vendor invoices as the dividing line and sent finance the breakdown; both budget owners signed off."
+    },
+    {
+      "role": "user",
+      "content": "Last: the two loaner spectrum analyzers from the vendor go back this week; make sure the shipping labels and the customs forms are sorted."
+    },
+    {
+      "role": "assistant",
+      "content": "Both analyzers are boxed with labels and customs forms attached, and the vendor's return authorization is taped inside the lids."
+    },
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "id": "c1",
+          "name": "retrieve",
+          "arguments": {
+            "query": "edge collector probe path",
+            "k": 3
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "content": "### source: \"internal/edge/prober.go\"\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nnote: metadata overview (summary omitted: budget)\n--- source: \"internal/edge/prober.go\" (lines 1-17, similarity: 1.00) ---\n1| package edge\n2| \n3| // probe sends one liveness check to a site collector and records the\n4| // round trip. The attempt deadline comes from the prober config; the\n5| // retry window wraps attempts so a lossy hop distinguishes a slow\n6| // site from a dead one.\n7| func (p *Prober) probe(target string) result {\n8| \tctx, cancel := p.attemptContext()\n9| \tdefer cancel()\n10| \tstart := p.clock.Now()\n11| \terr := p.dial(ctx, target)\n12| \treturn result{\n13| \t\ttarget:  target,\n14| \t\trtt:     p.clock.Now().Sub(start),\n15| \t\thealthy: err == nil,\n16| \t}\n17| }\n\n### source: \"internal/edge/uplink.go\"\npurpose: Uplink health tracking with hysteretic degraded-state transitions.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n\n### source: \"docs/edge-probes.md\"\npurpose: Edge probe guide: cadence, health feed, window-level verdicts.\nlanguage: markdown\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n",
+      "tool_call_id": "c1",
+      "name": "retrieve"
+    },
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "id": "c2",
+          "name": "agent_memory_search",
+          "arguments": {
+            "query": ""
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "content": "rec-burnin-doc · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:\nrec-probe-clamp · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src: · probe attempts on edge collectors are cut off at 2 seconds\nrec-probe-timeout · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:\nrec-retry-bump · working · created:2025-07-27 · updated:2025-07-27 · scope:session · ns: · src:",
+      "tool_call_id": "c2",
+      "name": "agent_memory_search"
+    },
+    {
+      "role": "user",
+      "content": "What timeout do edge collector probes use?"
+    }
+  ],
+  "golden": {
+    "tool_calls": null,
+    "final_answer_criteria": "States edge collector probes use a 9 second timeout. An answer of 2 seconds scores 0. An answer presenting both the correct and a competing value without committing to one scores 0."
+  },
+  "assembly_eval": {
+    "pair_id": "stale-probe-timeout-edge",
+    "mode": "mixed",
+    "candidate_ids": [
+      "3d020a865929348f86bf75dbf3ada73d94a54a98dccf1c553a8dad3445295095",
+      "8d638fb568ff2038a1fb06cde8268e44dc8655ed4fde12334735e7d50b7842aa",
+      "a1827d7c190af4657b1250d33c87cb085a00da7403fb7c928344b9a0b0717585",
+      "rec-burnin-doc",
+      "rec-probe-clamp",
+      "rec-probe-timeout",
+      "rec-retry-bump"
+    ],
+    "estimated_prompt_tokens": 1098,
+    "state_digest": "a666ff460df83749659dde69bf44c06eac1ffea2b7145e4536746888b3da4f4b",
+    "subjects": [
+      "(c1|rag|internal/edge/prober.go)",
+      "(c1|rag|internal/edge/uplink.go)",
+      "(c1|rag|docs/edge-probes.md)",
+      "(c2|memory|rec-burnin-doc)",
+      "(c2|memory|rec-probe-clamp)",
+      "(c2|memory|rec-probe-timeout)",
+      "(c2|memory|rec-retry-bump)"
+    ],
+    "stratum": "stale_vs_fresh",
+    "answer_home": "memory",
+    "scenario_family": "probe-timeout-staleness",
+    "budget": 1137,
+    "raw_state_tokens": 1895,
+    "pressure_level": "critical",
+    "shed_bytes": 2452
+  }
+}

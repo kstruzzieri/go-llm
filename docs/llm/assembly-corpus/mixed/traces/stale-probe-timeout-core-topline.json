@@ -1,0 +1,26 @@
+{
+  "id": "stale-probe-timeout-core-topline",
+  "source": "assembly-corpus-mixed",
+  "captured_at": "0001-01-01T00:00:00Z",
+  "system": "You are the driftwatch assistant. driftwatch is a self-hosted telemetry ingest and alerting daemon. Answer using only the provided conversation, memory records, and retrieved context.",
+  "tools": null,
+  "turns": [
+    {
+      "role": "user",
+      "content": "Facts:\nThe conversation records that the core probe timeout to 15 seconds change landed once the collector burn-in wrapped up; the stored memory note still holding core probes at 4 seconds predates the burn-in close and is stale.\n\nQuestion: What is the probe timeout for core collectors?"
+    }
+  ],
+  "golden": {
+    "tool_calls": null,
+    "final_answer_criteria": "States the core collector probe timeout is 15 seconds. An answer of 4 seconds scores 0. An answer presenting both the correct and a competing value without committing to one scores 0."
+  },
+  "assembly_eval": {
+    "pair_id": "stale-probe-timeout-core",
+    "mode": "topline",
+    "candidate_ids": null,
+    "estimated_prompt_tokens": 118,
+    "stratum": "stale_vs_fresh",
+    "answer_home": "conversation",
+    "scenario_family": "probe-timeout-staleness"
+  }
+}
