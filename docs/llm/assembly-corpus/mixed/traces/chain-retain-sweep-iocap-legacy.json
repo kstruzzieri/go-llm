@@ -1,0 +1,69 @@
+{
+  "id": "chain-retain-sweep-iocap-legacy",
+  "source": "assembly-corpus-mixed",
+  "captured_at": "0001-01-01T00:00:00Z",
+  "system": "You are the driftwatch assistant. driftwatch is a self-hosted telemetry ingest and alerting daemon. Answer using only the provided conversation, memory records, and retrieved context.",
+  "tools": null,
+  "turns": [
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "id": "c2",
+          "name": "fixture_echo",
+          "arguments": {
+            "content": "cold volume io sample during the overnight sweep window, pasted from the lab box:\n2025-07-26T01:40:00Z vol=cold rMB/s=45.9 wMB/s=62.4 util=72% queue=2.0\n2025-07-26T01:41:00Z vol=cold rMB/s=46.2 wMB/s=60.7 util=70% queue=1.8\nprobe note: the 40 MB/s comparison line this sampler still draws is the retired first-rollout cap; it gates nothing on any live volume.\nsummary: utilization stayed under the watermark for the whole pass; no ingest contention observed."
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "content": "cold volume io sample during the overnight sweep window, pasted from the lab box:\n2025-07-26T01:40:00Z vol=cold rMB/s=45.9 wMB/s=62.4 util=72% queue=2.0\n2025-07-26T01:41:00Z vol=cold rMB/s=46.2 wMB/s=60.7 util=70% queue=1.8\nprobe note: the 40 MB/s comparison line this sampler still draws is the retired first-rollout cap; it gates nothing on any live volume.\nsummary: utilization stayed under the watermark for the whole pass; no ingest contention observed.",
+      "tool_call_id": "c2",
+      "name": "fixture_echo"
+    },
+    {
+      "role": "user",
+      "content": "What io cap does the cold-tier sweep run at now?"
+    }
+  ],
+  "golden": {
+    "tool_calls": null,
+    "final_answer_criteria": "States the cold-tier sweep io cap is 120 MB/s. The pasted io sample cannot yield the cap, and the retired 40 MB/s first-rollout figure it mentions scores 0. Unit-equivalent phrasings of 120 MB/s (for example 120 megabytes per second) are acceptable. An answer presenting both the correct and a competing value without committing to one scores 0."
+  },
+  "assembly_eval": {
+    "pair_id": "chain-retain-sweep-iocap",
+    "mode": "legacy",
+    "candidate_ids": [
+      "rec-array-refresh",
+      "rec-capacity-note",
+      "rec-deferral-split",
+      "rec-iocap-cold",
+      "rec-lab-window",
+      "rec-pager-storage",
+      "rec-retro-appendix",
+      "rec-review-scope"
+    ],
+    "estimated_prompt_tokens": 173,
+    "state_digest": "564676ddfc880b4b0b4fce80b2c0c9a01d0d78facd2cd7853e4d453e90422f5f",
+    "subjects": [
+      "(c1|memory|rec-array-refresh)",
+      "(c1|memory|rec-capacity-note)",
+      "(c1|memory|rec-deferral-split)",
+      "(c1|memory|rec-iocap-cold)",
+      "(c1|memory|rec-lab-window)",
+      "(c1|memory|rec-pager-storage)",
+      "(c1|memory|rec-retro-appendix)",
+      "(c1|memory|rec-review-scope)"
+    ],
+    "stratum": "chain_retention",
+    "answer_home": "memory",
+    "scenario_family": "retention-sweep-chain",
+    "budget": 550,
+    "raw_state_tokens": 917,
+    "pressure_level": "ok",
+    "shed_messages": 4,
+    "shed_bytes": 2745
+  }
+}

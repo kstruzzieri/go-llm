@@ -1,0 +1,71 @@
+{
+  "id": "chain-uplink-part-size-legacy",
+  "source": "assembly-corpus-mixed",
+  "captured_at": "0001-01-01T00:00:00Z",
+  "system": "You are the driftwatch assistant. driftwatch is a self-hosted telemetry ingest and alerting daemon. Answer using only the provided conversation, memory records, and retrieved context.",
+  "tools": null,
+  "turns": [
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "id": "c2",
+          "name": "agent_memory_search",
+          "arguments": {
+            "query": ""
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "content": "rec-budget-sheet · semantic · 2025-07-27 · the transfer-budget sheet ships with the capacity note; warehouse loaders read its throughput row before planning their own parallelism for the quarter, and a late sheet has twice pushed their planning meeting, so the sheet deadline is treated as hard\nrec-part-history · semantic · 2025-07-27 · the 16 MB part sizing came from the pre-GA uploader; superseded at GA\nrec-resume-drill · semantic · 2025-07-27 · the resume-after-cut drill passed last month; keep the drill notes linked from the runbook so the next audit finds the evidence without asking around, because the last audit spent two days reconstructing exactly this and filed a finding about it\nrec-sheet-review · semantic · 2025-07-27 · the warehouse team reviews the transfer sheet before it circulates; leave them a full business day or the review lands after the note ships, which happened once and produced a correction cycle nobody enjoyed and the platform lead still brings up\nrec-uplink-owner · semantic · 2025-07-27 · uplink capacity questions go to the storage team; the archive store contract renews in the fall and the renewal thread tracks open capacity asks, so new asks should land there rather than in direct messages that the renewal owner never sees\nrec-upload-window · semantic · 2025-07-27 · archive pushes run in the overnight window so daytime exports keep the uplink to themselves; the window boundaries follow the export schedule rather than the clock, and the scheduler shifts them automatically when the export calendar changes",
+      "tool_call_id": "c2",
+      "name": "agent_memory_search"
+    },
+    {
+      "role": "user",
+      "content": "What part size does the archive uploader send now?"
+    }
+  ],
+  "golden": {
+    "tool_calls": null,
+    "final_answer_criteria": "States the archive uploader sends 48 MB parts. The superseded pre-GA 16 MB sizing noted in memory scores 0. An answer presenting both the correct and a competing value without committing to one scores 0."
+  },
+  "assembly_eval": {
+    "pair_id": "chain-uplink-part-size",
+    "mode": "legacy",
+    "candidate_ids": [
+      "68e7b56322087eb269f16287fd86db9a1294545f86ece648770c7982fcc12e9d",
+      "6f7394c8c3e248f8a7c9f6f0691e8b36cf8d7e552d23e5ea6d8d67f74a72b8a9",
+      "9005246504aa1c039f15bf50a45f798aa71da93fa12012586515fe21ba34c9a8",
+      "rec-budget-sheet",
+      "rec-part-history",
+      "rec-resume-drill",
+      "rec-sheet-review",
+      "rec-uplink-owner",
+      "rec-upload-window"
+    ],
+    "estimated_prompt_tokens": 453,
+    "state_digest": "34c02075157112a6d0205d26f8c7ca0de84f23ea1026a03456e2a1c5e88a0982",
+    "subjects": [
+      "(c1|rag|internal/archive/uploader.go)",
+      "(c1|rag|internal/archive/resume.go)",
+      "(c1|rag|docs/archive-upload.md)",
+      "(c2|memory|rec-budget-sheet)",
+      "(c2|memory|rec-part-history)",
+      "(c2|memory|rec-resume-drill)",
+      "(c2|memory|rec-sheet-review)",
+      "(c2|memory|rec-uplink-owner)",
+      "(c2|memory|rec-upload-window)"
+    ],
+    "stratum": "chain_retention",
+    "answer_home": "rag",
+    "scenario_family": "uplink-part-chain",
+    "budget": 1018,
+    "raw_state_tokens": 1697,
+    "pressure_level": "ok",
+    "shed_messages": 4,
+    "shed_bytes": 4747
+  }
+}

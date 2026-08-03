@@ -3563,9 +3563,678 @@
       ],
       "pressure_target": {"domain": "memory", "literal": "lifted to 40 rps"},
       "required_domains": ["conversation", "memory", "rag"],
-      "topline_facts": "The stored memory note records the atlas tenant quota lifted to 40 rps after their batching fix; the limiter code itself only resolves rates from the tenants file.",
       "golden": {
         "final_answer_criteria": "States the atlas tenant ingest quota is now 40 rps. Answers that only describe the tenants-file mechanism without the 40 rps figure score 0. An answer presenting both the correct and a competing value without committing to one scores 0."
+      }
+    },
+    {
+      "id": "chain-retain-sweep-iocap",
+      "stratum": "chain_retention",
+      "answer_home": "memory",
+      "scenario_family": "retention-sweep-chain",
+      "system": "You are the driftwatch assistant. driftwatch is a self-hosted telemetry ingest and alerting daemon. Answer using only the provided conversation, memory records, and retrieved context.",
+      "events": [
+        {"turn": {"role": "user", "content": "The storage half of the capacity note is next; before I paste the overnight io sample, check your stored notes so the cold-tier rows quote settled figures rather than hallway memory."}},
+        {"turn": {"role": "assistant", "content": "Checking the stored notes now; once you paste the overnight sample we can line the cold-tier rows up against them."}},
+        {"tool_call": {"call_id": "c1", "tool": "agent_memory_search", "args": {"query": ""}}},
+        {"tool_call": {"call_id": "c2", "tool": "fixture_echo", "args": {"content": "cold volume io sample during the overnight sweep window, pasted from the lab box:\n2025-07-26T01:40:00Z vol=cold rMB/s=45.9 wMB/s=62.4 util=72% queue=2.0\n2025-07-26T01:41:00Z vol=cold rMB/s=46.2 wMB/s=60.7 util=70% queue=1.8\nprobe note: the 40 MB/s comparison line this sampler still draws is the retired first-rollout cap; it gates nothing on any live volume.\nsummary: utilization stayed under the watermark for the whole pass; no ingest contention observed."}}},
+        {"turn": {"role": "user", "content": "What io cap does the cold-tier sweep run at now?"}}
+      ],
+      "memory_records": [
+        {"id": "rec-array-refresh", "content": "the flash array refresh closed out last month; the cold volume now sits on the new shelves with plenty of headroom, the old shelves are queued for decommission once the audit signs off, and the decommission window is already blocked out on the storage calendar with the platform observer invited", "kind": "semantic"},
+        {"id": "rec-capacity-note", "content": "capacity notes for the tier review go out before the platform sync and should quote overnight sweep numbers next to the quarter's trend line so reviewers see direction rather than snapshots; the trend series lives in the review folder and refreshes with each overnight capture that lands", "kind": "semantic"},
+        {"id": "rec-iocap-cold", "content": "cold-tier sweep io cap raised to 120 MB/s after the array refresh", "kind": "semantic"},
+        {"id": "rec-lab-window", "content": "overnight lab captures rotate out weekly; pull anything worth keeping before the Friday cleanup and file it under the review folder with the capture date in the file name, because the cleanup job is unforgiving and the platform team has declined twice to add a retention exception for the lab box", "kind": "semantic"},
+        {"id": "rec-pager-storage", "content": "the storage pager holder for the review week also owns the sweep dashboard link and its refresh, and hands both off together with the pager at rotation; the handoff checklist lives next to the rotation calendar and the dashboard link entry is the one people forget most often", "kind": "semantic"},
+        {"id": "rec-retro-appendix", "content": "the array refresh retro keeps an appendix of behavior changes observed on the new shelves; sweep entries land there with a pass log link attached to each one, and the retro owner asks for a one-line summary per entry so the appendix stays readable for people outside the storage team", "kind": "semantic"},
+        {"id": "rec-review-scope", "content": "the tier review only tunes warm and cold keep durations; those ship from deployment config, not code, and every change lands with its rationale in the stanza history so a quota question two quarters later can be answered from the commit trail instead of from whoever happens to remember", "kind": "semantic"},
+        {"id": "rec-sync-invite", "content": "platform sync invites go out a day early during review weeks so the observers can prepare questions; the calendar bot handles the early send on its own, and the one manual step left is attaching the capacity note draft to the invite before the bot fires, which the note owner does", "kind": "semantic"},
+        {"id": "rec-watermark-note", "content": "the watermark-hold counter resets at deploy by design; graphs spanning a deploy need the reset annotated or reviewers read the drop as an incident, and the annotation macro lives in the dashboard tools menu under annotations with the deploy marker preset selected as the default", "kind": "semantic"},
+        {"id": "rec-deferral-split", "content": "the quarter's deferral history splits by tier only from the raw pass logs; the dashboard export is combined-only and the export team has parked the split request until next quarter, so review prep includes a manual split step that the runbook describes next to the export instructions", "kind": "semantic"}
+      ],
+      "rag_sources": [
+        {
+          "path": "internal/retain/iocap.go",
+          "content": "package retain\n\n// ioCapWriter wraps the cold-volume writer and paces deletions so a\n// sweep pass never contends with live ingest. The pacing ceiling is\n// read from deployment config at pass start; this file only enforces\n// whatever ceiling the config hands it.\nfunc (s *Sweeper) pacedWriter(tier string) writer {\n\tif tier != \"cold\" {\n\t\treturn s.raw\n\t}\n\treturn newPacedWriter(s.raw, s.cfg.SweepIOCeiling)\n}\n",
+          "language": "go",
+          "abstract": "Cold-volume sweep io pacing behind a config-supplied ceiling.",
+          "overview": "iocap.go wraps the cold-volume writer with a pacing layer whose ceiling comes from deployment config at pass start, so sweep deletions never contend with live ingest."
+        },
+        {
+          "path": "internal/retain/passlog.go",
+          "content": "package retain\n\n// passLog records one sweep pass: per-tier scanned, removed, and\n// kept counts, wall duration, whether pacing engaged, and the\n// deferral and watermark-hold counters the review dashboards chart.\n// Fields are append-only: dashboards parse historical lines, so a\n// renamed field is a breaking change and goes through review.\ntype passLog struct {\n\ttier     string\n\tscanned  int\n\tremoved  int\n\tkept     int\n\tpaced    bool\n\tdeferred int\n}\n",
+          "language": "go",
+          "abstract": "Sweep pass log fields the review dashboards parse.",
+          "overview": "passlog.go defines the append-only per-pass log record: per-tier scan and removal counts, duration, pacing engagement, and the deferral counters dashboards chart."
+        },
+        {
+          "path": "docs/sweep-io.md",
+          "content": "# sweep io pacing\n\nSweeps on the slow cold volume are paced so deletion io never\ncompetes with live ingest. The pacing ceiling ships from deployment\nconfig; raising it is a config deploy reviewed with the storage team,\nnot a code change.\n\nIf a pass overruns its window, prefer raising the ceiling over\nwidening the sweep spacing: spacing changes shift every tier, while\nthe ceiling touches only the cold volume.\n",
+          "language": "markdown",
+          "abstract": "Why cold-volume sweeps are paced and how the ceiling changes.",
+          "overview": "sweep-io.md explains the cold-volume pacing rule, that the ceiling ships from deployment config reviewed with the storage team, and why ceiling raises beat spacing changes."
+        }
+      ],
+      "required_evidence": [
+        {"domain": "memory", "literal": "raised to 120 MB/s"}
+      ],
+      "pressure_target": {"domain": "memory", "literal": "raised to 120 MB/s"},
+      "required_domains": ["conversation", "memory", "rag"],
+      "golden": {
+        "final_answer_criteria": "States the cold-tier sweep io cap is 120 MB/s. The pasted io sample cannot yield the cap, and the retired 40 MB/s first-rollout figure it mentions scores 0. Unit-equivalent phrasings of 120 MB/s (for example 120 megabytes per second) are acceptable. An answer presenting both the correct and a competing value without committing to one scores 0."
+      }
+    },
+    {
+      "id": "chain-retain-quota-refill",
+      "stratum": "chain_retention",
+      "answer_home": "rag",
+      "scenario_family": "tenant-quota-chain",
+      "system": "You are the driftwatch assistant. driftwatch is a self-hosted telemetry ingest and alerting daemon. Answer using only the provided conversation, memory records, and retrieved context.",
+      "events": [
+        {"turn": {"role": "user", "content": "Tenant capacity summary again tomorrow; this time the reviewers want limiter mechanics quoted from source, so pull the refill code before we draft the throughput rows or paste any counters."}},
+        {"turn": {"role": "assistant", "content": "Pulling the limiter's refill source now; once it is up we can draft the throughput rows against the actual mechanics instead of folklore."}},
+        {"tool_call": {"call_id": "c1", "tool": "retrieve", "args": {"query": "tenant limiter refill cadence", "k": 3}}},
+        {"tool_call": {"call_id": "c2", "tool": "fixture_echo", "args": {"content": "limiter counter scrape from the staging edge, pasted verbatim:\ningest_limiter_refill_passes_total 118204\ningest_limiter_refill_tenants_walked_total 9456320\ningest_limiter_quota_rejects_total{tenant=\"atlas\"} 112\ningest_limiter_quota_rejects_total{tenant=\"borealis\"} 3049\ningest_limiter_bucket_underflow_clamps_total 0\nscrape note: the tick=900ms series a few old dashboards still chart came from the perf-spike shadow profile; that profile never shipped and its series reads zero on every live edge.\ningest_limiter_refill_walk_duration_seconds_sum 3801.4\n"}}},
+        {"turn": {"role": "user", "content": "How often does the tenant limiter refill its token buckets?"}}
+      ],
+      "memory_records": [
+        {"id": "rec-review-cycle", "content": "capacity summaries alternate between the platform and warehouse reviewers; this cycle is the platform team's turn", "kind": "semantic"},
+        {"id": "rec-row-style", "content": "throughput rows in the capacity summary cite a source file or a config stanza next to every number", "kind": "semantic"},
+        {"id": "rec-scrape-window", "content": "staging edge counter scrapes reset at deploy; quote windows that avoid the deploy boundary", "kind": "semantic"}
+      ],
+      "rag_sources": [
+        {
+          "path": "internal/ingest/refill.go",
+          "content": "package ingest\n\nimport \"time\"\n\n// refillTick is the cadence the tenant limiter adds tokens back to\n// every bucket. Refills are batched: one pass walks all tenants per\n// tick rather than arming a timer per bucket, so tenant count never\n// multiplies timers.\nconst refillTick = 350 * time.Millisecond\n\n// refillLoop runs the batched refill until ctx ends.\nfunc (l *tenantLimiter) refillLoop() {\n\tt := time.NewTicker(refillTick)\n\tdefer t.Stop()\n\tfor range t.C {\n\t\tl.refillAll()\n\t}\n}\n",
+          "language": "go",
+          "abstract": "Tenant limiter refill cadence and the batched refill loop.",
+          "overview": "refill.go owns the batched per-tick refill pass that walks every tenant bucket on a fixed cadence instead of arming per-bucket timers."
+        },
+        {
+          "path": "internal/ingest/bucket.go",
+          "content": "package ingest\n\n// bucket tracks one tenant's spendable tokens. take spends against\n// the current balance and reports whether the batch was admitted;\n// deposit adds the refill share and clamps at the burst ceiling so\n// an idle tenant cannot bank unbounded credit across quiet hours.\n//\n// Balances are plain float64s guarded by the limiter's mutex rather\n// than atomics: every touch already happens under the limiter lock\n// because admission reads the tenants file generation alongside the\n// balance, and splitting those reads produced a measured torn-read\n// bug during the hot-reload work. The comment stays as a warning to\n// the next person who wants to shave the lock.\ntype bucket struct {\n\tbalance float64\n\tceiling float64\n}\n\nfunc (b *bucket) take(cost float64) bool {\n\tif b.balance < cost {\n\t\treturn false\n\t}\n\tb.balance -= cost\n\treturn true\n}\n\nfunc (b *bucket) deposit(share float64) {\n\tb.balance += share\n\tif b.balance > b.ceiling {\n\t\tb.balance = b.ceiling\n\t}\n}\n\n// snapshot copies the balances for the metrics scrape without\n// holding the lock across the exporter's serialization; the scrape\n// sees a consistent point-in-time view and the limiter never blocks\n// on a slow scrape consumer.\nfunc (l *tenantLimiter) snapshot() map[string]float64 {\n\tl.mu.Lock()\n\tdefer l.mu.Unlock()\n\tout := make(map[string]float64, len(l.buckets))\n\tfor t, b := range l.buckets {\n\t\tout[t] = b.balance\n\t}\n\treturn out\n}\n",
+          "language": "go",
+          "abstract": "Per-tenant token bucket: spend, deposit, burst clamp, scrape snapshot.",
+          "overview": "bucket.go implements the per-tenant balance under the limiter lock with take, ceiling-clamped deposit, the torn-read warning from the hot-reload work, and a lock-bounded snapshot for the metrics scrape."
+        },
+        {
+          "path": "docs/limiter.md",
+          "content": "# driftwatch tenant limiter\n\nEvery accepted batch spends tokens from its tenant's bucket. Rates\nand burst ceilings ship from the tenants file and hot-reload without\na restart; the refill machinery and its pacing are code.\n\nThe limiter tops buckets up on a fixed tick shared by all tenants.\nA single batched pass keeps refill cost flat as the tenant count\ngrows, which is why per-tenant timers were rejected when the fleet\ncrossed a thousand tenants and timer pressure showed up in the\nscheduler profiles.\n\n## Reading the counters\n\nThe refill pass and walk counters chart on the limiter dashboard;\nreject counters are per-tenant labelled so a noisy tenant is visible\nwithout log diving. Underflow clamps should read zero in steady\nstate - a nonzero clamp count means a config deploy shrank a ceiling\nbelow an in-flight balance, which is harmless but worth noting in\nthe capacity summary's appendix.\n",
+          "language": "markdown",
+          "abstract": "Limiter guide: config-supplied rates, code-owned refill pacing, counter reading.",
+          "overview": "limiter.md separates config-supplied per-tenant rates and bursts from the code-owned batched refill pass, records why per-tenant timers were rejected at fleet scale, and explains the dashboard counters including the harmless underflow clamp case."
+        }
+      ],
+      "required_evidence": [
+        {"domain": "rag", "literal": "refillTick = 350 * time.Millisecond"}
+      ],
+      "pressure_target": {"domain": "rag", "literal": "refillTick = 350 * time.Millisecond"},
+      "required_domains": ["conversation", "memory", "rag"],
+      "golden": {
+        "final_answer_criteria": "States the tenant limiter refills on a 350 millisecond tick. Equivalent phrasings (350ms, 0.35 seconds, roughly three times a second) are acceptable when the 350ms figure is stated. The 900ms shadow-profile tick named in the pasted scrape scores 0. An answer presenting both the correct and a competing value without committing to one scores 0."
+      }
+    },
+    {
+      "id": "chain-merge-fanin-flash",
+      "stratum": "chain_retention",
+      "answer_home": "join",
+      "scenario_family": "merge-fanin-chain",
+      "system": "You are the driftwatch assistant. driftwatch is a self-hosted telemetry ingest and alerting daemon. Answer using only the provided conversation, memory records, and retrieved context.",
+      "events": [
+        {"turn": {"role": "user", "content": "The compaction section of the storage review is mine; check your stored notes first, then pull the merge source so the section quotes mechanics rather than memory, and leave the planner dump for last."}},
+        {"turn": {"role": "assistant", "content": "Notes first, then the merge source; I will flag anywhere the two disagree before the section goes out."}},
+        {"turn": {"role": "user", "content": "The review template also wants the compaction section to open with last quarter's incident count for the subsystem; pull that from the retro index before you write the intro."}},
+        {"turn": {"role": "assistant", "content": "Intro drafted with the quarter's compaction incident count from the retro index, and each incident is linked so reviewers can expand any of them in place."}},
+        {"tool_call": {"call_id": "c1", "tool": "agent_memory_search", "args": {"query": ""}}},
+        {"tool_call": {"call_id": "c2", "tool": "retrieve", "args": {"query": "compactor merge pass width", "k": 3}}},
+        {"tool_call": {"call_id": "c3", "tool": "fixture_echo", "args": {"content": "planner debug dump from the staging compactor, pasted verbatim:\nplanner: tier=warm candidates=54 cohorts=9 est_out=9\nplanner: cohort 01 segs=[s0412 s0415 s0419 s0421 s0424 s0430] est_bytes=812MiB\nplanner: cohort 02 segs=[s0433 s0437 s0440 s0444 s0447 s0451] est_bytes=790MiB\nplanner: skipped 3 segments under the exporter watermark\nplanner note: the fanin=12 lab experiment was reverted the same week it ran; no shipped config ever carried it and the planner ignores the flag if present.\n"}}},
+        {"turn": {"role": "user", "content": "How many segments does one merge pass cohort combine, and which tier are merge passes currently restricted to?"}}
+      ],
+      "memory_records": [
+        {"id": "rec-merge-tier", "content": "merge passes restricted to the flash tier during the io review", "kind": "semantic"},
+        {"id": "rec-cohort-naming", "content": "merged output segments keep the m-prefix naming so dashboards can tell merged from rolled segments at a glance; the naming predates the planner and two exporters still depend on it, so renaming proposals get closed as wontfix with a pointer to the exporter tickets", "kind": "semantic"},
+        {"id": "rec-review-owner", "content": "the storage review's compaction section rotates between the ingest and storage teams each quarter; whoever holds it also owns the section's open questions list and hands the list over at rotation so questions do not reset to zero every quarter", "kind": "semantic"},
+        {"id": "rec-planner-dumps", "content": "planner debug dumps from staging rotate daily; capture the interesting ones before the evening rollover and file them with the pass date, because the rollover job compresses aggressively and recovering a specific dump after the fact takes a storage ticket", "kind": "semantic"},
+        {"id": "rec-watermark-rule", "content": "compaction never touches segments the exporter watermark has not passed; that rule predates the planner and survived every rewrite since, and the review section restates it each quarter because someone new asks about it without fail", "kind": "semantic"},
+        {"id": "rec-dash-cohorts", "content": "the compaction dashboard charts cohorts per pass and bytes per cohort; reviewers read it weekly and the panel snapshot in the review has to be regenerated the same day the section is written or the numbers drift from the text", "kind": "semantic"}
+      ],
+      "rag_sources": [
+        {
+          "path": "internal/compact/merge.go",
+          "content": "package compact\n\n// mergeFanIn is how many segments one merge cohort combines into a\n// single output segment. Wider cohorts were measured to thrash the\n// page cache on the slower shelves, so the width is a code constant\n// rather than a tuning knob.\nconst mergeFanIn = 6\n\n// cohorts slices the candidate list into fan-in sized groups, oldest\n// segments first, deferring a trailing partial group to the next\n// pass so every output segment has the same provenance shape.\nfunc cohorts(cands []segRef) [][]segRef {\n\tvar out [][]segRef\n\tfor len(cands) >= mergeFanIn {\n\t\tout = append(out, cands[:mergeFanIn])\n\t\tcands = cands[mergeFanIn:]\n\t}\n\treturn out\n}\n",
+          "language": "go",
+          "abstract": "Merge cohort width constant and the cohort slicer.",
+          "overview": "merge.go pins the merge cohort width as a code constant after cache-thrash measurements and slices candidates into full cohorts oldest-first, deferring partial groups."
+        },
+        {
+          "path": "internal/compact/picker.go",
+          "content": "package compact\n\n// pick returns the merge candidates for one pass: rolled segments\n// the exporter watermark has passed, oldest first, bounded by the\n// per-pass byte budget from deployment config. The byte budget, not\n// a segment count, is the pass sizing knob so shelf generations with\n// different segment sizes behave the same under one config.\n//\n// Candidates are re-listed every pass rather than cached between\n// passes: the exporter advances its watermark concurrently, and a\n// cached list from the previous pass could admit a segment the\n// watermark had not covered when the list was built. Re-listing was\n// measured cheap next to the merges themselves, and it removed an\n// entire class of watermark races the old cache carried workarounds\n// for. The workarounds are gone; do not reintroduce the cache.\nfunc (p *Picker) pick(now int64, watermark uint64) []segRef {\n\trefs := p.list()\n\tout := refs[:0]\n\tvar budget int64 = p.cfg.PassByteBudget\n\tfor _, r := range refs {\n\t\tif r.index > watermark || r.bytes > budget {\n\t\t\tcontinue\n\t\t}\n\t\tbudget -= r.bytes\n\t\tout = append(out, r)\n\t}\n\treturn out\n}\n\n// list walks the tier directories and returns rolled segments in\n// age order. Age comes from the roll timestamp in the segment\n// header, never from file mtimes, because restore tooling rewrites\n// mtimes and a restored shelf must not jump the merge queue.\nfunc (p *Picker) list() []segRef {\n\treturn p.scanner.rolledByAge()\n}\n",
+          "language": "go",
+          "abstract": "Merge candidate picker: watermark safety, byte-budget sizing, re-list rule.",
+          "overview": "picker.go selects watermark-cleared rolled segments oldest-first under the config byte budget, re-lists candidates every pass to close watermark races instead of caching, and orders age by segment-header roll timestamps so restores cannot jump the queue."
+        },
+        {
+          "path": "docs/compaction-plan.md",
+          "content": "# compaction planning\n\nThe planner turns eligible segments into merge cohorts and hands the\ncohorts to the merge workers. Pass sizing is a byte budget from\ndeployment config; cohort width is code. The planner never schedules\na cohort across tiers, and it skips anything the exporter watermark\nhas not passed.\n\nPlanner dumps are the debugging tool of record: every admitted pass\nlogs its cohorts, the skipped segments with reasons, and the budget\nleft when admission stopped. Reviewers read the dumps before\nquestioning the planner, and the review's compaction section links\nthe dump for any pass it discusses so the numbers stay checkable.\n\n## When a pass looks wrong\n\nStart from the dump, not the dashboard: the dashboard aggregates and\nthe dump itemizes. A cohort that looks undersized is usually the\ntrailing partial group deferred to the next pass, and a pass that\nlooks empty usually ran during an exporter stall when nothing had\ncleared the watermark.\n",
+          "language": "markdown",
+          "abstract": "Planner guide: cohorts, byte-budget sizing, watermark safety, dump-first debugging.",
+          "overview": "compaction-plan.md explains cohort planning under the config byte budget with code-owned width, the single-tier and watermark rules, planner dumps as the itemized debugging record, and the usual benign explanations for undersized or empty passes."
+        }
+      ],
+      "required_evidence": [
+        {"domain": "rag", "literal": "mergeFanIn = 6"},
+        {"domain": "memory", "literal": "restricted to the flash tier"}
+      ],
+      "pressure_target": {"domain": "rag", "literal": "mergeFanIn = 6"},
+      "required_domains": ["conversation", "memory", "rag"],
+      "golden": {
+        "final_answer_criteria": "BOTH halves required: one merge cohort combines 6 segments, AND merge passes are currently restricted to the flash tier. A missing half caps the score at 0.5; a stated but incorrect half scores 0. The reverted fanin=12 lab experiment named in the pasted planner dump scores 0 for the width half. An answer presenting both the correct and a competing value without committing to one scores 0."
+      }
+    },
+    {
+      "id": "chain-merge-fanin-lock",
+      "stratum": "chain_retention",
+      "answer_home": "join",
+      "scenario_family": "merge-fanin-chain",
+      "system": "You are the driftwatch assistant. driftwatch is a self-hosted telemetry ingest and alerting daemon. Answer using only the provided conversation, memory records, and retrieved context.",
+      "events": [
+        {"turn": {"role": "user", "content": "Storage sync ran long; before the merge notes, two cleanups. The compaction dashboard's cohort panel still charts the retired staging shelf; drop that series before the review screenshots go out."}},
+        {"turn": {"role": "assistant", "content": "Dropped the retired shelf's series from the cohort panel and regenerated the panel snapshot the notes embed; only the live shelves chart now."}},
+        {"turn": {"role": "user", "content": "Also fold in a line on why the lock ceiling exists at all; reviewers keep asking and the wiki paragraph everyone links is marked stale."}},
+        {"turn": {"role": "assistant", "content": "Will do; the lock section will state the ceiling, the reason it exists, and where raises get reviewed, all sourced rather than folklore."}},
+        {"turn": {"role": "user", "content": "And the merge notes template lost its decisions-up-top layout in the last edit; restore it before this round or the reviewers will complain about it again."}},
+        {"turn": {"role": "assistant", "content": "Restored the decisions-up-top layout and locked the template section so casual edits cannot reflow it again; the template changelog records the lock."}},
+        {"turn": {"role": "user", "content": "One decision did land at the sync: merge lock trips page the storage rotation, not the ingest rotation. Put that in the merge notes verbatim, then pull the lock source so the ceiling row quotes code."}},
+        {"turn": {"role": "assistant", "content": "Noted the paging split in the merge notes; pulling the compactor lock source next so the ceiling row cites the constant rather than the wiki."}},
+        {"tool_call": {"call_id": "c1", "tool": "retrieve", "args": {"query": "compactor merge pass lock ceiling", "k": 3}}},
+        {"tool_call": {"call_id": "c2", "tool": "fixture_echo", "args": {"content": "one merge pass from the staging shelf, pasted verbatim:\n2025-07-26T03:10:11Z merge pass begin tier=warm cohorts=3\n2025-07-26T03:10:14Z merged s0412+s0415+s0419+s0421+s0424+s0430 out=m1120 held_lock=2.9s\n2025-07-26T03:10:18Z merged s0433+s0437+s0440+s0444+s0447+s0451 out=m1121 held_lock=3.4s\n2025-07-26T03:10:22Z merged s0455+s0458+s0462+s0463+s0468+s0471 out=m1122 held_lock=3.1s\n2025-07-26T03:10:22Z merge pass end merged=18 requeued=0 yields=0\nlog note: the 8-second ceiling a few runbooks still quote is the pre-refresh wiki figure; it was retired and the wiki page carries a stale banner now.\n"}}},
+        {"turn": {"role": "user", "content": "What is the merge pass lock ceiling, and which rotation gets paged when it trips?"}}
+      ],
+      "memory_records": [
+        {"id": "rec-lock-dashboards", "content": "lock hold times chart on the compaction dashboard; reviewers watch the p99 line during shelf migrations", "kind": "semantic"},
+        {"id": "rec-notes-format", "content": "merge notes ship as one page per review with decisions up top and mechanics below the fold", "kind": "semantic"},
+        {"id": "rec-wiki-cleanup", "content": "stale wiki pages get a banner first and a redirect a quarter later; deletions need the doc owner", "kind": "semantic"},
+        {"id": "rec-shelf-migration", "content": "the shelf migration wraps this quarter; compaction settings get rechecked once the last shelf drains", "kind": "semantic"}
+      ],
+      "rag_sources": [
+        {
+          "path": "internal/compact/mergelock.go",
+          "content": "package compact\n\nimport \"time\"\n\n// mergeLockMax bounds how long one merge cohort may hold a tier\n// lock. A cohort that would exceed it yields and re-queues its\n// remaining segments, so readers never starve behind a long merge.\n// The bound is a code constant: it protects reader latency, which\n// is not a per-deploy preference.\nconst mergeLockMax = 25 * time.Second\n\nfunc (m *Merger) withLock(tier string, fn func() error) error {\n\tlease := m.locks.acquire(tier, mergeLockMax)\n\tdefer lease.release()\n\treturn fn()\n}\n",
+          "language": "go",
+          "abstract": "Merge tier-lock ceiling constant and the yielding lock wrapper.",
+          "overview": "mergelock.go pins the tier-lock hold ceiling as a code constant protecting reader latency, with cohorts yielding and re-queuing instead of overrunning the lease."
+        },
+        {
+          "path": "internal/compact/requeue.go",
+          "content": "package compact\n\n// requeue returns a yielded cohort's remaining segments to the\n// candidate list without losing their age ordering. Yields are\n// normal operation, not failures: the pass log counts them and the\n// dashboard charts the rate, but nothing alerts on a yield alone.\n//\n// A cohort that yields repeatedly ages to the front of the next\n// pass, so starvation resolves itself without operator action. The\n// aging is deliberate and cheap: re-queued segments keep their\n// original roll timestamps, and the picker orders by those, so a\n// yielded segment naturally outranks everything rolled after it.\n// The alternative - a priority boost field - was tried during the\n// shelf migration and reverted: the boost leaked into dashboards as\n// phantom age and two review cycles argued about ghost segments\n// before the field was removed. Age from roll timestamps is the\n// only ordering signal, and the pass log records enough per yield\n// to reconstruct any starvation question a review might raise.\nfunc (m *Merger) requeue(rem []segRef) {\n\tm.mu.Lock()\n\tdefer m.mu.Unlock()\n\tm.pending = mergeByAge(m.pending, rem)\n}\n",
+          "language": "go",
+          "abstract": "Age-preserving requeue for yielded cohorts; boost-field history.",
+          "overview": "requeue.go returns yielded segments to the candidate list ordered by original roll timestamps, treats yields as charted normal operation, and records why the priority-boost alternative was reverted in favor of pure age ordering."
+        },
+        {
+          "path": "docs/merge-ops.md",
+          "content": "# merge operations\n\nMerges take a per-tier lock so readers see a consistent segment\nlist. Holds are bounded; a cohort that would overrun yields and\nre-queues. Lock alerts route through the alerting config like every\nother storage alarm, and raises to the hold bound get reviewed with\nthe storage team before anything changes.\n\nWhen lock alarms fire during a shelf migration, check the migration\ndashboard before touching compaction settings: migrations move\nsegments between shelves in bulk, and the resulting merge backlog\nlooks exactly like a lock problem until the migration completes and\nthe backlog drains on its own.\n\n## Reading hold-time charts\n\nThe p99 hold line is the one reviewers watch. Single-pass spikes are\nnormal during shelf migrations; a sustained p99 climb outside a\nmigration window is the signal worth a ticket, and the pass logs\nname which cohorts held the lock longest.\n",
+          "language": "markdown",
+          "abstract": "Merge lock operations: bounded holds, alert routing, chart reading.",
+          "overview": "merge-ops.md covers the per-tier merge lock with bounded yielding holds, alerting-config routing, the migration-backlog false alarm, and how to read p99 hold-time charts before filing tickets."
+        }
+      ],
+      "required_evidence": [
+        {"domain": "rag", "literal": "mergeLockMax = 25 * time.Second"},
+        {"domain": "conversation", "literal": "page the storage rotation"}
+      ],
+      "pressure_target": {"domain": "rag", "literal": "mergeLockMax = 25 * time.Second"},
+      "required_domains": ["conversation", "memory", "rag"],
+      "golden": {
+        "final_answer_criteria": "BOTH halves required: the merge pass lock ceiling is 25 seconds, AND a lock trip pages the storage rotation. A missing half caps the score at 0.5; a stated but incorrect half scores 0. The retired 8-second wiki figure scores 0 for the ceiling half. An answer presenting both the correct and a competing value without committing to one scores 0."
+      }
+    },
+    {
+      "id": "chain-uplink-part-size",
+      "stratum": "chain_retention",
+      "answer_home": "rag",
+      "scenario_family": "uplink-part-chain",
+      "system": "You are the driftwatch assistant. driftwatch is a self-hosted telemetry ingest and alerting daemon. Answer using only the provided conversation, memory records, and retrieved context.",
+      "events": [
+        {"turn": {"role": "user", "content": "The transfer-budget sheet needs the uploader's part size for the throughput math; pull the uploader source first, then check the stored ops notes for anything the sheet should flag alongside the number."}},
+        {"turn": {"role": "assistant", "content": "Pulling the uploader source now, stored notes right after; the sheet will get the number and the flags together."}},
+        {"tool_call": {"call_id": "c1", "tool": "retrieve", "args": {"query": "archive uploader part size", "k": 3}}},
+        {"tool_call": {"call_id": "c2", "tool": "agent_memory_search", "args": {"query": ""}}},
+        {"turn": {"role": "user", "content": "What part size does the archive uploader send now?"}}
+      ],
+      "memory_records": [
+        {"id": "rec-part-history", "content": "the 16 MB part sizing came from the pre-GA uploader; superseded at GA", "kind": "semantic"},
+        {"id": "rec-budget-sheet", "content": "the transfer-budget sheet ships with the capacity note; warehouse loaders read its throughput row before planning their own parallelism for the quarter, and a late sheet has twice pushed their planning meeting, so the sheet deadline is treated as hard", "kind": "semantic"},
+        {"id": "rec-upload-window", "content": "archive pushes run in the overnight window so daytime exports keep the uplink to themselves; the window boundaries follow the export schedule rather than the clock, and the scheduler shifts them automatically when the export calendar changes", "kind": "semantic"},
+        {"id": "rec-resume-drill", "content": "the resume-after-cut drill passed last month; keep the drill notes linked from the runbook so the next audit finds the evidence without asking around, because the last audit spent two days reconstructing exactly this and filed a finding about it", "kind": "semantic"},
+        {"id": "rec-uplink-owner", "content": "uplink capacity questions go to the storage team; the archive store contract renews in the fall and the renewal thread tracks open capacity asks, so new asks should land there rather than in direct messages that the renewal owner never sees", "kind": "semantic"},
+        {"id": "rec-sheet-review", "content": "the warehouse team reviews the transfer sheet before it circulates; leave them a full business day or the review lands after the note ships, which happened once and produced a correction cycle nobody enjoyed and the platform lead still brings up", "kind": "semantic"}
+      ],
+      "rag_sources": [
+        {
+          "path": "internal/archive/uploader.go",
+          "content": "package archive\n\n// uploadPartMB is the fixed multipart size for archive pushes. It\n// is a code constant: the archive store rejects mixed part sizes\n// within one object, so a per-deploy knob would break resumability\n// the first time two deploys disagreed mid-object.\nconst uploadPartMB = 48\n\nfunc (u *Uploader) push(obj object) error {\n\tfor _, part := range obj.split(uploadPartMB << 20) {\n\t\tif err := u.send(part); err != nil {\n\t\t\treturn u.checkpoint(obj, part, err)\n\t\t}\n\t}\n\treturn u.finalize(obj)\n}\n",
+          "language": "go",
+          "abstract": "Fixed multipart size constant and the checkpointing push loop.",
+          "overview": "uploader.go pins the multipart size as a code constant because the archive store rejects mixed part sizes within an object, and checkpoints failed parts for resume."
+        },
+        {
+          "path": "internal/archive/resume.go",
+          "content": "package archive\n\n// resume restarts an interrupted push from its checkpoint. The\n// checkpoint names the object, the last acknowledged part index,\n// and the sizing the push began with; resume refuses to continue an\n// object whose recorded sizing disagrees with the current build,\n// surfacing the mismatch instead of corrupting the object.\n//\n// Checkpoints are written after every acknowledged part rather than\n// batched: the write is one small record on the local disk, and the\n// batched variant saved microseconds while widening the replay\n// window after a crash to everything since the last batch flush.\n// The drill that exercises resume-after-cut measures the replay\n// window explicitly, and the single-part checkpoint keeps that\n// window to exactly one part regardless of when the cut lands.\nfunc (u *Uploader) resume(cp checkpoint) error {\n\tif cp.partBytes != u.partBytes() {\n\t\treturn errSizingMismatch\n\t}\n\tobj, err := u.reopen(cp.object)\n\tif err != nil {\n\t\treturn err\n\t}\n\treturn u.pushFrom(obj, cp.lastAcked+1)\n}\n\n// reopen validates the local object against the checkpoint digest\n// before any part is resent, so a file rewritten between the crash\n// and the resume fails loudly rather than uploading a hybrid.\nfunc (u *Uploader) reopen(name string) (object, error) {\n\treturn u.store.OpenVerified(name)\n}\n",
+          "language": "go",
+          "abstract": "Checkpoint-based resume: sizing refusal, per-part checkpoints, verified reopen.",
+          "overview": "resume.go restarts interrupted pushes from per-part checkpoints that record the original sizing, refuses on sizing mismatch, keeps the crash replay window to one part by design, and verifies the local object digest before resending anything."
+        },
+        {
+          "path": "docs/archive-upload.md",
+          "content": "# archive uploads\n\nRolled segments push to the archive store in fixed-size parts with\na checkpoint after every acknowledged part. Interrupted pushes\nresume from the checkpoint rather than restarting the object, which\nis why the sizing is uniform per object and owned by code.\n\nThroughput planning multiplies the part size by the acknowledged\nparts-per-minute rate from the uplink dashboard; both factors sit in\nthe transfer-budget sheet, and the sheet cites this page next to the\nthroughput row so reviewers can check the arithmetic against the\nmechanics instead of taking the row on faith.\n\n## Overnight window\n\nPushes run in the overnight window the export schedule defines.\nDaytime pushes are possible in an emergency but contend with the\nexports for uplink, so the runbook requires a storage sign-off\nbefore anyone starts one.\n",
+          "language": "markdown",
+          "abstract": "Upload guide: fixed parts, checkpoints, throughput planning, overnight window.",
+          "overview": "archive-upload.md covers fixed-size checkpointed pushes, resume-from-checkpoint behavior, the transfer sheet's part-size-times-rate arithmetic, and the export-defined overnight window with its emergency sign-off rule."
+        }
+      ],
+      "required_evidence": [
+        {"domain": "rag", "literal": "uploadPartMB = 48"}
+      ],
+      "pressure_target": {"domain": "rag", "literal": "uploadPartMB = 48"},
+      "required_domains": ["conversation", "memory", "rag"],
+      "golden": {
+        "final_answer_criteria": "States the archive uploader sends 48 MB parts. The superseded pre-GA 16 MB sizing noted in memory scores 0. An answer presenting both the correct and a competing value without committing to one scores 0."
+      }
+    },
+    {
+      "id": "chain-uplink-verify",
+      "stratum": "chain_retention",
+      "answer_home": "memory",
+      "scenario_family": "uplink-part-chain",
+      "system": "You are the driftwatch assistant. driftwatch is a self-hosted telemetry ingest and alerting daemon. Answer using only the provided conversation, memory records, and retrieved context.",
+      "events": [
+        {"turn": {"role": "user", "content": "Transfer budget review is tomorrow and the verification row is still blank. Check the stored notes first so the row quotes the settled sampling, then pull the uploader docs for the mechanics column."}},
+        {"turn": {"role": "assistant", "content": "Stored notes first, then the uploader source; the verification row will cite both sides."}},
+        {"tool_call": {"call_id": "c1", "tool": "agent_memory_search", "args": {"query": ""}}},
+        {"turn": {"role": "user", "content": "Also the retry column from last quarter still says draft on it; replace it with whatever the shipped behavior is while you are in there."}},
+        {"turn": {"role": "assistant", "content": "Will refresh the retry column from the shipped source as well; both columns will cite where their numbers came from."}},
+        {"turn": {"role": "user", "content": "And flag anything in the uploader docs that contradicts the runbook; the audit team reads both and files a ticket per mismatch."}},
+        {"turn": {"role": "assistant", "content": "I will note contradictions inline and link the runbook section next to each one so the audit team sees a single consolidated view."}},
+        {"turn": {"role": "user", "content": "Last thing: the verify row needs a footnote on what happens at a mismatch; the audit team asked twice last cycle and the answer lived only in chat."}},
+        {"turn": {"role": "assistant", "content": "Footnote added: a mismatch quarantines the object and pages storage immediately, and the footnote cites the runbook section instead of chat history."}},
+        {"tool_call": {"call_id": "c2", "tool": "retrieve", "args": {"query": "archive upload verification mechanics", "k": 3}}},
+        {"turn": {"role": "user", "content": "What fraction of uploaded parts does the verifier sample now?"}}
+      ],
+      "memory_records": [
+        {"id": "rec-verify-sampling", "content": "archive upload verify sampling set to 1 in 20 parts after the integrity review", "kind": "semantic"},
+        {"id": "rec-audit-window", "content": "the storage audit team samples the transfer sheet quarterly; keep citations current or they file a ticket per stale row, the tickets block the note until closed, and the audit lead has made clear that repeat offenders get their whole section re-reviewed line by line", "kind": "semantic"},
+        {"id": "rec-runbook-owner", "content": "the uploader runbook belongs to the storage rotation; doc fixes ride the weekly maintenance window and land with a changelog line each, and fixes that skip the window have twice raced a rotation handoff and been lost, so the window rule is enforced now", "kind": "semantic"},
+        {"id": "rec-retry-shipped", "content": "upload retries backed off to the shipped schedule at GA; the draft schedule never left staging and its doc page is archived behind a banner, with the archive note pointing readers at the shipped schedule so nobody quotes the draft numbers by accident", "kind": "semantic"},
+        {"id": "rec-sheet-cadence", "content": "the transfer-budget sheet refreshes before each capacity note and the review reads the delta column first, so stale deltas get noticed immediately and the sheet owner keeps a one-line justification ready for any delta above the usual band", "kind": "semantic"},
+        {"id": "rec-integrity-scope", "content": "the integrity review covered push, resume, and verify; its actions all closed except the dashboard one, which carries into next quarter with its owner unchanged, and the review's closing summary is the citation the audit team accepts for verification questions", "kind": "semantic"},
+        {"id": "rec-dashboard-action", "content": "the open integrity action adds verify outcomes to the uplink dashboard; storage owns the panel work, the ticket sits in their current sprint, and the panel design doc already went through review so the remaining work is wiring rather than decisions", "kind": "semantic"},
+        {"id": "rec-mechanics-column", "content": "mechanics columns in the sheet quote source files, never dashboards, so reviewers can diff behavior by commit instead of guessing from graphs; the rule dates to the quarter a dashboard rename silently broke three citations and nobody caught it until the audit", "kind": "semantic"}
+      ],
+      "rag_sources": [
+        {
+          "path": "internal/archive/verify.go",
+          "content": "package archive\n\n// verifySample decides whether one acknowledged part gets a\n// read-back check. The pre-GA build verified 1 in 5 parts; that\n// sampling never shipped past the pilot, and the shipped fraction\n// comes from deployment config so fleets can tighten it during\n// audits without a rebuild.\nfunc (v *Verifier) verifySample(idx int) bool {\n\treturn idx%v.cfg.SampleEvery == 0\n}\n",
+          "language": "go",
+          "abstract": "Read-back sampling gate driven by the config fraction.",
+          "overview": "verify.go gates read-back checks on the config-supplied sampling fraction, noting the pre-GA pilot sampling that never shipped, so audits can tighten fleets without rebuilds."
+        },
+        {
+          "path": "internal/archive/readback.go",
+          "content": "package archive\n\n// readBack fetches a sampled part from the archive store and\n// compares its digest against the local checkpoint record. A\n// mismatch quarantines the object and pages storage: verification\n// exists to catch silent store corruption, so a mismatch is never\n// retried quietly.\n//\n// The fetch uses the store's cold path on purpose, exercising the\n// same path a real restore would take. The warm path was measured\n// faster and rejected anyway: a warm-path verify can pass while the\n// cold replicas rot, and the whole point of sampling is to catch\n// exactly that before a restore discovers it under pressure. Cold\n// fetch cost is bounded by the sampling fraction, which is the\n// other reason the fraction ships from config - audits buy more\n// coverage with a config deploy and pay the fetch cost knowingly.\nfunc (v *Verifier) readBack(p part) error {\n\tgot, err := v.store.FetchCold(p.ref)\n\tif err != nil {\n\t\treturn err\n\t}\n\tif digest(got) != p.digest {\n\t\treturn v.quarantine(p)\n\t}\n\treturn nil\n}\n\n// quarantine marks the object read-only in the index, records the\n// mismatched part, and emits the pager event with both digests so\n// the responder starts with evidence rather than a mystery.\nfunc (v *Verifier) quarantine(p part) error {\n\treturn v.index.Quarantine(p.object, p.ref)\n}\n",
+          "language": "go",
+          "abstract": "Cold-path read-back compare, quarantine-and-page on mismatch.",
+          "overview": "readback.go fetches sampled parts over the store's cold path by design, compares digests against the checkpoint record, quarantines with a storage page on mismatch, and documents why the faster warm path was rejected for verification."
+        },
+        {
+          "path": "docs/archive-verify.md",
+          "content": "# upload verification\n\nA sampled fraction of acknowledged parts gets a cold-path read-back\nand digest compare. Sampling is deployment config: audits tighten\nit temporarily, and the setting reverts with the audit's close.\nMismatches quarantine the object and page storage immediately.\n\nVerification cost scales with the sampled fraction times the part\nrate, so the transfer sheet carries a verify row next to the push\nrow whenever the fraction changes, and the sheet's footnote points\nat the quarantine behavior so reviewers know what a failure does\nbefore they ask.\n",
+          "language": "markdown",
+          "abstract": "Verification guide: sampled read-backs, audit tightening, cost row.",
+          "overview": "archive-verify.md explains sampled cold-path read-backs, audit-driven temporary tightening of the config fraction, quarantine-and-page mismatches, and the verify cost row the transfer sheet carries."
+        }
+      ],
+      "required_evidence": [
+        {"domain": "memory", "literal": "set to 1 in 20 parts"}
+      ],
+      "pressure_target": {"domain": "memory", "literal": "set to 1 in 20 parts"},
+      "required_domains": ["conversation", "memory", "rag"],
+      "golden": {
+        "final_answer_criteria": "States the verifier samples 1 in 20 uploaded parts. Equivalent phrasings (5% of parts, one part in twenty, every 20th part) are acceptable. The pre-GA 1 in 5 pilot sampling named in the verifier source scores 0. An answer presenting both the correct and a competing value without committing to one scores 0."
+      }
+    },
+    {
+      "id": "chain-listen-queue-depth",
+      "stratum": "chain_retention",
+      "answer_home": "rag",
+      "scenario_family": "listen-queue-chain",
+      "system": "You are the driftwatch assistant. driftwatch is a self-hosted telemetry ingest and alerting daemon. Answer using only the provided conversation, memory records, and retrieved context.",
+      "events": [
+        {"turn": {"role": "user", "content": "Listener section of the ops review needs the ingress queue sizing quoted from source; pull the queue code before I paste the startup log so the sizing row cites the constant, not a dashboard."}},
+        {"turn": {"role": "assistant", "content": "Pulling the listener queue source now; paste the startup log whenever and we will reconcile the two before the row goes in."}},
+        {"tool_call": {"call_id": "c1", "tool": "retrieve", "args": {"query": "syslog listener ingress queue sizing", "k": 3}}},
+        {"tool_call": {"call_id": "c2", "tool": "fixture_echo", "args": {"content": "listener startup log from the staging edge, pasted verbatim:\n2025-07-26T05:00:01Z listener starting proto=syslog-udp workers=asynchronous\n2025-07-26T05:00:01Z ingress ring allocated slots=configured drain=distinct-pool\n2025-07-26T05:00:01Z drain pool attached watermarks=armed backpressure=counter-only\n2025-07-26T05:00:02Z replay guard loaded window=persisted cursor=intact\n2025-07-26T05:00:02Z listener ready accept=open probes=passing\nstartup note: the queue=512 debug profile some lab captures mention was a bench experiment only; it never shipped in any build and the flag is ignored on live edges.\n2025-07-26T05:00:05Z first burst absorbed peak_fill_pct=22 drops=0\n2025-07-26T05:00:31Z steady state fill_pct=4 drops=0\n"}}},
+        {"turn": {"role": "user", "content": "How deep is the syslog listener ingress queue now?"}}
+      ],
+      "memory_records": [
+        {"id": "rec-review-listener", "content": "the ops review's listener section quotes code for sizing and dashboards only for observed rates", "kind": "semantic"},
+        {"id": "rec-startup-logs", "content": "staging edge startup logs rotate at deploy; capture the interesting ones the same day", "kind": "semantic"},
+        {"id": "rec-burst-drill", "content": "the burst replay drill runs monthly against staging; results file under the listener drill folder", "kind": "semantic"}
+      ],
+      "rag_sources": [
+        {
+          "path": "internal/listener/queue.go",
+          "content": "package listener\n\n// listenQueue is the ingress ring's slot count. It is sized against\n// the burst replay drill, not steady state: the ring must absorb a\n// full replay burst while the drain pool catches up, and resizing\n// is a code change reviewed with that drill's numbers in hand.\nconst listenQueue = 3072\n\nfunc newIngressRing() *ring {\n\treturn &ring{\n\t\tslots: make([]slot, listenQueue),\n\t\thead:  0,\n\t\ttail:  0,\n\t}\n}\n",
+          "language": "go",
+          "abstract": "Ingress ring slot count sized against the burst replay drill.",
+          "overview": "queue.go pins the ingress ring slot count as a code constant sized by the burst replay drill, with resizes reviewed against drill numbers rather than steady-state fill."
+        },
+        {
+          "path": "internal/listener/drain.go",
+          "content": "package listener\n\n// drain moves datagrams from the ingress ring to the parser pool.\n// The drain pool is sized separately from the ring: ring depth\n// buys absorption during bursts, drain width buys steady-state\n// throughput, and conflating the two is the classic tuning mistake\n// the runbook warns about. Watermark counters fire well before the\n// ring fills so operators see pressure while there is still room.\n//\n// The drain claims batches rather than single datagrams: a batch\n// amortizes the ring's head/tail synchronization across its whole\n// length, and the batch bound ships from deployment config because\n// it trades drain latency against synchronization cost, which is a\n// fleet preference rather than a correctness property. A batch\n// claimed is a batch parsed - the drain never returns datagrams to\n// the ring, so ring occupancy only ever moves forward and the fill\n// percentage the watermarks read is monotone within a burst.\nfunc (l *Listener) drainLoop() {\n\tfor {\n\t\tbatch := l.ring.takeUpTo(l.cfg.DrainBatch)\n\t\tif len(batch) == 0 {\n\t\t\tl.parkUntilSignal()\n\t\t\tcontinue\n\t\t}\n\t\tl.pool.parse(batch)\n\t}\n}\n\n// parkUntilSignal sleeps the drain until the ring signals new\n// datagrams, avoiding a busy poll during quiet hours; the wake\n// signal is edge-triggered and the loop re-checks the ring before\n// parking again, so a datagram landing between the check and the\n// park is never stranded.\nfunc (l *Listener) parkUntilSignal() {\n\tl.ring.waitNonEmpty()\n}\n",
+          "language": "go",
+          "abstract": "Ring-to-parser drain: batched claims, config batch bound, park/wake.",
+          "overview": "drain.go drains the ingress ring into the parser pool in config-bounded batches that amortize ring synchronization, keeps ring occupancy monotone within bursts for the watermarks, and parks edge-triggered during quiet hours without stranding datagrams."
+        },
+        {
+          "path": "docs/listener.md",
+          "content": "# syslog listener\n\nThe listener accepts syslog datagrams into a fixed ingress ring and\ndrains them to the parser pool. Ring depth is code, sized by the\nburst replay drill; drain batch width is deployment config. Fill\nwatermarks chart on the listener dashboard and alarm thresholds\nship from the alerting config.\n\nWhen drops appear, read the fill watermark history before touching\nany sizing: most drop incidents are drain stalls, not ring depth,\nand a stall shows as a fill plateau with the drain counters flat\nwhile a genuine depth problem shows as a clean spike through the\nwatermarks during a burst.\n\n## The burst replay drill\n\nThe drill replays the worst recorded burst against staging monthly.\nIts numbers are the review evidence for the ring sizing, and any\nproposal to resize starts by re-running the drill against the\nproposed depth rather than arguing from steady-state graphs, which\nthe runbook calls out as the classic mistake.\n",
+          "language": "markdown",
+          "abstract": "Listener guide: ring depth vs drain width, drop triage, the drill.",
+          "overview": "listener.md separates code-owned ring depth from config-owned drain width, explains how to tell drain stalls from genuine depth problems in the watermark history, and makes the monthly burst replay drill the evidence basis for any resize proposal."
+        }
+      ],
+      "required_evidence": [
+        {"domain": "rag", "literal": "listenQueue = 3072"}
+      ],
+      "pressure_target": {"domain": "rag", "literal": "listenQueue = 3072"},
+      "required_domains": ["conversation", "memory", "rag"],
+      "topline_facts": "internal/listener/queue.go sizes the syslog listener ingress ring with listenQueue = 3072; the depth is a code constant sized against the burst replay drill, not deployment config.",
+      "golden": {
+        "final_answer_criteria": "States the syslog listener ingress queue is 3072 slots deep. The never-shipped queue=512 debug profile named in the pasted startup log scores 0. An answer presenting both the correct and a competing value without committing to one scores 0."
+      }
+    },
+    {
+      "id": "chain-listen-queue-drops",
+      "stratum": "chain_retention",
+      "answer_home": "memory",
+      "scenario_family": "listen-queue-chain",
+      "system": "You are the driftwatch assistant. driftwatch is a self-hosted telemetry ingest and alerting daemon. Answer using only the provided conversation, memory records, and retrieved context.",
+      "events": [
+        {"turn": {"role": "user", "content": "Listener health section of the ops review is on me this quarter; check your stored listener notes before I paste the overnight stats, because the alarm rows have to quote settled figures rather than dashboard folklore, and last cycle two rows shipped with dashboard-derived numbers that the audit flagged within a day and the section owner spent the next standup walking back."}},
+        {"turn": {"role": "assistant", "content": "Checking the stored listener notes now; paste the overnight stats whenever they are ready and we will reconcile every alarm row against the stored decisions first, mark anything that disagrees, and only then let the dashboard numbers illustrate the observed side so the audit has nothing to flag this cycle."}},
+        {"tool_call": {"call_id": "c1", "tool": "agent_memory_search", "args": {"query": ""}}},
+        {"tool_call": {"call_id": "c2", "tool": "fixture_echo", "args": {"content": "overnight listener stats from the staging edge, pasted verbatim:\nsyslog_listener_accepted_total 48211903\nsyslog_listener_dropped_total 1204\nsyslog_listener_drop_rate_per_min_p95 3.8\nsyslog_listener_drop_rate_per_min_max 11.2\nsyslog_listener_queue_high_watermark_pct 64\nstats note: the 75 drops/min threshold the v1 dashboard json still prints was the old runbook alarm; it was retired with the v2 listener rollout and fires nothing anywhere now.\nsyslog_listener_synthetic_feed_missed_total 0\n"}}},
+        {"turn": {"role": "user", "content": "What drop rate trips the listener alarm now?"}}
+      ],
+      "memory_records": [
+        {"id": "rec-drop-alarm", "content": "listener drop alarm moved to 200 drops/min after the tuning session", "kind": "semantic"},
+        {"id": "rec-alarm-review", "content": "alarm threshold changes get a week of shadow alerting before the old threshold is switched off; the shadow week logs both thresholds side by side and the tuning session's notes link the shadow log as the evidence that the new threshold held clean for the whole week", "kind": "semantic"},
+        {"id": "rec-canary-feed", "content": "the synthetic canary feed beats once a minute; missed beats chart on the listener dashboard and two consecutive misses open a ticket automatically, with the ticket template pre-filled from the feed's last known state so responders start with context instead of a bare alert", "kind": "semantic"},
+        {"id": "rec-incident-retro", "content": "the spring listener incident retro produced two capacity items; both carry tracking tickets, the review's risk box links them each quarter, and the retro owner pings the ticket owners the week before the review so the status lines in the box are current rather than copied forward", "kind": "semantic"},
+        {"id": "rec-parse-errors", "content": "parse errors are charted but unalarmed; the noisy vendor firmware upstream makes them expected, the vendor ticket about it has been open since spring, and the review section carries a standing one-liner about it so new reviewers stop rediscovering the same non-problem", "kind": "semantic"},
+        {"id": "rec-review-template", "content": "the ops review template added a capacity-risks box this quarter; section owners seed it before the meeting or the box ships empty and gets flagged, and the template changelog notes that the box was added precisely because empty risk sections kept passing review unchallenged", "kind": "semantic"},
+        {"id": "rec-runbook-v2", "content": "the v2 listener runbook is authoritative; v1 pages are archived and banner-linked forward so stale search results still land somewhere current, and the archive sweep that catches un-bannered v1 pages runs monthly with its findings posted to the ops channel where the doc owners triage them within the week", "kind": "semantic"},
+        {"id": "rec-stats-source", "content": "alarm rows in the review quote stored decisions; dashboards only illustrate observed behavior and never define what a threshold is, a distinction the review intro restates every quarter because the two get conflated whenever a new dashboard panel looks authoritative enough to be mistaken for policy by someone new", "kind": "semantic"},
+        {"id": "rec-cert-renewal", "content": "the synthetic feed's client certificate renews on a calendar reminder two weeks ahead of expiry; the renewal is manual by choice because the feed exercises the same enrollment path real collectors use and automating it would stop exercising that path, a tradeoff the ops review re-affirmed this spring", "kind": "semantic"},
+        {"id": "rec-drill-linkage", "content": "listener drill results and alarm threshold history live in different folders on purpose; drills measure capacity while thresholds record decisions, and the review links both so capacity questions and policy questions stop landing in the same thread and stalling each other for days", "kind": "semantic"}
+      ],
+      "rag_sources": [
+        {
+          "path": "internal/listener/alarm.go",
+          "content": "package listener\n\n// dropAlarm evaluates the drop-rate alarm each scrape tick. The\n// firing threshold ships from the alerting config; this file only\n// compares the observed per-minute rate against whatever threshold\n// the config supplies and emits the alarm event with its context\n// attached: current rate, watermark percentage, and drain state.\nfunc (l *Listener) dropAlarm(rate float64) {\n\tif rate < l.alertCfg.DropRateThreshold {\n\t\treturn\n\t}\n\tl.alerts.Fire(\"listener_drop_rate\", l.snapshot(rate))\n}\n",
+          "language": "go",
+          "abstract": "Drop-rate alarm gate against the config-supplied threshold.",
+          "overview": "alarm.go compares observed per-minute drop rates against the alerting-config threshold and fires the alarm event with rate, watermark, and drain context attached."
+        },
+        {
+          "path": "internal/listener/snapshot.go",
+          "content": "package listener\n\n// snapshot captures the listener state an alarm event carries:\n// observed rates, ring fill, drain batch state, and the synthetic\n// feed's last beat. Alarm consumers page from the event alone, so\n// the snapshot must stand on its own without a dashboard query;\n// responders on the v2 runbook read it top to bottom before any\n// mitigation step.\nfunc (l *Listener) snapshot(rate float64) map[string]any {\n\treturn map[string]any{\n\t\t\"rate\":      rate,\n\t\t\"fill_pct\":  l.ring.fillPct(),\n\t\t\"drain\":     l.drainState(),\n\t\t\"last_beat\": l.synthetic.lastBeat(),\n\t}\n}\n",
+          "language": "go",
+          "abstract": "Self-contained alarm snapshot for pager consumers.",
+          "overview": "snapshot.go bundles rates, ring fill, drain state, and the synthetic feed beat into the alarm event so responders can act from the page without dashboard queries."
+        },
+        {
+          "path": "docs/listener-alerts.md",
+          "content": "# listener alerting\n\nListener alarms ship their thresholds from the alerting config and\nfire with a self-contained snapshot. Threshold changes follow the\nshadow-alerting week: the new threshold alerts to the test channel\nwhile the old one still pages, then they swap.\n\nThe drop-rate alarm is the only pager-severity listener alarm;\neverything else lands on the dashboard review queue.\n",
+          "language": "markdown",
+          "abstract": "Listener alerting guide: config thresholds, shadow week, severity.",
+          "overview": "listener-alerts.md covers config-shipped thresholds, the shadow-alerting week for threshold changes, and the drop-rate alarm's status as the only pager-severity alarm."
+        }
+      ],
+      "required_evidence": [
+        {"domain": "memory", "literal": "moved to 200 drops/min"}
+      ],
+      "pressure_target": {"domain": "memory", "literal": "moved to 200 drops/min"},
+      "required_domains": ["conversation", "memory", "rag"],
+      "golden": {
+        "final_answer_criteria": "States the listener drop alarm trips at 200 drops per minute. The retired 75 drops/min v1 alarm named in the pasted stats scores 0. An answer presenting both the correct and a competing value without committing to one scores 0."
+      }
+    },
+    {
+      "id": "chain-drift-window-pair",
+      "stratum": "chain_retention",
+      "answer_home": "join",
+      "scenario_family": "drift-window-chain",
+      "system": "You are the driftwatch assistant. driftwatch is a self-hosted telemetry ingest and alerting daemon. Answer using only the provided conversation, memory records, and retrieved context.",
+      "events": [
+        {"turn": {"role": "user", "content": "Drift detector section of the review is next; check your stored notes first, then pull the detector source so the section quotes the shipped mechanics, and keep the eval log paste for the end."}},
+        {"turn": {"role": "assistant", "content": "Stored notes first, then the detector source; I will flag anywhere the notes and the code disagree before the section goes out."}},
+        {"turn": {"role": "user", "content": "The review template also wants suppression counts for the quarter in the drift section; pull the count from the suppression log summary before writing the intro."}},
+        {"turn": {"role": "assistant", "content": "Quarter's suppression count pulled from the log summary and cited in the intro, with the weekly breakdown linked for anyone who wants the shape of it."}},
+        {"tool_call": {"call_id": "c1", "tool": "agent_memory_search", "args": {"query": ""}}},
+        {"tool_call": {"call_id": "c2", "tool": "retrieve", "args": {"query": "drift detector averaging", "k": 3}}},
+        {"tool_call": {"call_id": "c3", "tool": "fixture_echo", "args": {"content": "detector eval log from the staging replay, pasted verbatim:\n2025-07-26T04:12:00Z eval begin series=418 replayed_hours=6\n2025-07-26T04:12:09Z scored series=418 flagged=11 suppressed=2\n2025-07-26T04:12:09Z top offsets: srs-2214 z=4.1 srs-1808 z=3.7 srs-0917 z=3.2\n2025-07-26T04:12:10Z eval end verdict=clean drift_alerts_emitted=9\neval note: the 10-minute prototype window was abandoned after the false-positive storm in the pilot; nothing shipped with it and the replay harness no longer accepts it.\n"}}},
+        {"turn": {"role": "user", "content": "What window does the drift detector average over, and which tier's alerts does the drift gate cover right now?"}}
+      ],
+      "memory_records": [
+        {"id": "rec-drift-gate", "content": "the drift gate covers warm-tier alerts only until the pilot review closes", "kind": "semantic"},
+        {"id": "rec-eval-replays", "content": "staging replay evals run nightly against six replayed hours; verdicts file under the drift folder and a non-clean verdict pages nobody by design, landing instead on the morning triage queue with the offending series pre-listed for whoever picks it up", "kind": "semantic"},
+        {"id": "rec-pilot-review", "content": "the drift pilot review closes next month; its checklist gates any scope change for the gate, and the checklist's last two items are the suppression-log audit and a sign-off from the alerting owners, both scheduled into the closing week already", "kind": "semantic"},
+        {"id": "rec-suppression-log", "content": "gate suppressions log with the series id and reason; the review reads the suppression log weekly and the log summary job posts the weekly count to the drift channel so the trend is visible without anyone opening the raw log", "kind": "semantic"},
+        {"id": "rec-series-owners", "content": "flagged series route to their owning team's queue; unowned series page the platform rotation, and the ownership backfill that would empty that fallback path is tracked as a standing item the review re-prioritizes every quarter without ever quite finishing it", "kind": "semantic"},
+        {"id": "rec-review-section", "content": "the drift section of the review leads with the eval verdict and quotes mechanics from source, a structure the section owner adopted after a quarter where dashboard screenshots aged badly between drafting and the meeting and two numbers contradicted each other live", "kind": "semantic"}
+      ],
+      "rag_sources": [
+        {
+          "path": "internal/drift/detector.go",
+          "content": "package drift\n\nimport \"time\"\n\n// driftWindow is the averaging window the detector scores against.\n// Shorter windows were measured to chase noise; the window is a\n// code constant and the alert thresholds are config, so tuning\n// sensitivity never silently changes what a score means.\nconst driftWindow = 35 * time.Minute\n\nfunc (d *Detector) score(s series) float64 {\n\tbase := s.mean(driftWindow)\n\treturn (s.latest() - base) / s.stddev(driftWindow)\n}\n",
+          "language": "go",
+          "abstract": "Averaging-window constant and the z-style drift score.",
+          "overview": "detector.go pins the averaging window as a code constant after noise-chasing measurements and scores each series as deviation from its windowed mean."
+        },
+        {
+          "path": "internal/drift/route.go",
+          "content": "package drift\n\n// route hands a flagged series to the alert pipeline. Routing is\n// tier-aware: the gate consults its configured tier scope before\n// emitting, and suppressed flags are logged with a reason rather\n// than dropped, because the pilot review reads the suppression log\n// to decide when the gate's scope can widen safely.\n//\n// The scope check happens at routing time rather than scoring time\n// on purpose: every series gets scored regardless of scope, so the\n// suppression log records what WOULD have alerted outside the\n// current scope. That counterfactual record is the whole basis for\n// widening decisions - a gate that skipped scoring out-of-scope\n// series would have no evidence to widen on, and the pilot would\n// end with an argument instead of a log. The cost of scoring\n// everything was measured during the pilot's first week and stays\n// well under the collector budget the platform team allocated.\nfunc (g *Gate) route(f flag) {\n\tif !g.scopeAllows(f.tier) {\n\t\tg.suppress(f, \"tier outside gate scope\")\n\t\treturn\n\t}\n\tg.alerts.Emit(f)\n}\n\n// suppress records the flag with its reason and the would-have\n// routing so the log entry is decision-grade on its own.\nfunc (g *Gate) suppress(f flag, reason string) {\n\tg.log.Record(f, reason)\n}\n",
+          "language": "go",
+          "abstract": "Tier-scoped routing with counterfactual suppression logging.",
+          "overview": "route.go emits flagged series only inside the gate's configured tier scope, scores everything regardless of scope so suppressions record the counterfactual evidence widening decisions need, and keeps decision-grade reasons on every suppressed flag."
+        },
+        {
+          "path": "docs/drift-alerts.md",
+          "content": "# drift alerting\n\nThe detector scores series against their windowed baseline and the\ngate routes flags by tier scope. Scores mean the same thing on\nevery fleet because the window is code; sensitivity tuning happens\nin the threshold config alone.\n\nSuppression is observable by design: every suppressed flag carries\na reason and the would-have routing, and scope changes cite the\nsuppression log rather than anyone's recollection of how noisy\nthings felt.\n\n## Triage order\n\nStart from the eval verdict, then the flagged list, then the\nsuppression summary. The dashboards come last: they aggregate, and\nevery incident postmortem that started from a dashboard ended up\nre-deriving what the logs already itemized.\n",
+          "language": "markdown",
+          "abstract": "Drift alerting guide: fixed-window scores, scoped routing, triage order.",
+          "overview": "drift-alerts.md explains fixed-window scoring for cross-fleet comparability, tier-scoped routing with reasoned counterfactual suppressions, and the logs-before-dashboards triage order postmortems keep vindicating."
+        }
+      ],
+      "required_evidence": [
+        {"domain": "rag", "literal": "driftWindow = 35 * time.Minute"},
+        {"domain": "memory", "literal": "covers warm-tier alerts only"}
+      ],
+      "pressure_target": {"domain": "rag", "literal": "driftWindow = 35 * time.Minute"},
+      "required_domains": ["conversation", "memory", "rag"],
+      "golden": {
+        "final_answer_criteria": "BOTH halves required: the drift detector averages over a 35 minute window, AND the drift gate currently covers warm-tier alerts only. A missing half caps the score at 0.5; a stated but incorrect half scores 0. The abandoned 10-minute prototype window named in the pasted eval log scores 0 for the window half. An answer presenting both the correct and a competing value without committing to one scores 0."
+      }
+    },
+    {
+      "id": "chain-drift-window-baseline",
+      "stratum": "chain_retention",
+      "answer_home": "join",
+      "scenario_family": "drift-window-chain",
+      "system": "You are the driftwatch assistant. driftwatch is a self-hosted telemetry ingest and alerting daemon. Answer using only the provided conversation, memory records, and retrieved context.",
+      "events": [
+        {"turn": {"role": "user", "content": "Drift review prep continues; the detector section is drafted, so today is baselines. Check the stored notes before we write the storage rows of the baseline table."}},
+        {"turn": {"role": "assistant", "content": "Pulling the stored baseline notes now; the storage rows wait until we have them in front of us."}},
+        {"tool_call": {"call_id": "c1", "tool": "agent_memory_search", "args": {"query": ""}}},
+        {"turn": {"role": "user", "content": "Platform sync closed the cadence question this morning, by the way - the drift baseline recomputes every 4 days now, off the shared scheduler rather than a local timer, so the cadence row is settled."}},
+        {"turn": {"role": "assistant", "content": "Good, that settles the cadence row; I will also pull the baseline docs next so the location and retention rows come from source instead of memory."}},
+        {"turn": {"role": "user", "content": "While you are in there, the review wants one line on why rollups and baselines are stored apart; reviewers trip over that split every quarter, so keep the line short and quotable."}},
+        {"turn": {"role": "assistant", "content": "Added the line: rollups are derived and rebuildable while baselines are reference points, so they live in different stores with different retention; it reads well in the table intro."}},
+        {"turn": {"role": "user", "content": "Also mark the incident-window freeze rule in the retention row; last review someone assumed baselines rolled during the incident and wrote a wrong action item off that assumption."}},
+        {"turn": {"role": "assistant", "content": "Marked the retention row with the freeze rule and linked the ops-channel declaration format, so the next incident review does not repeat the wrong assumption."}},
+        {"tool_call": {"call_id": "c2", "tool": "retrieve", "args": {"query": "drift baseline storage and rollup layout", "k": 3}}},
+        {"turn": {"role": "user", "content": "How often does the drift baseline recompute, and where do the baseline snapshots land?"}}
+      ],
+      "memory_records": [
+        {"id": "rec-baseline-path", "content": "drift baseline snapshots land under dw-baselines/gold/ on each pass", "kind": "semantic"},
+        {"id": "rec-baseline-freeze", "content": "baselines freeze during incident windows so post-incident scoring compares against a pre-incident reference instead of chasing the incident itself; the freeze is automatic on window declaration and the thaw is part of the commander's clearing checklist", "kind": "semantic"},
+        {"id": "rec-gold-retention", "content": "gold baseline snapshots keep four generations; older generations age to the archive store and restores from archive need a storage ticket, a friction the review accepted deliberately so casual restores stop overwriting the working set", "kind": "semantic"},
+        {"id": "rec-review-rows", "content": "the baseline table in the review carries cadence, location, and retention rows, each with a source citation the reviewers spot-check quarterly; a row that cites chat or a dashboard instead of a decision or a file gets bounced back to its owner", "kind": "semantic"},
+        {"id": "rec-rollup-rebuild", "content": "rollups rebuild from raw series on demand; nobody restores rollups from backups on purpose and the runbook says so in its first paragraph, because the one time someone did the restored aggregates disagreed with a rebuild and the discrepancy burned a day", "kind": "semantic"},
+        {"id": "rec-scheduler-move", "content": "shared-scheduler jobs carry owner tags; the platform team audits unowned jobs monthly and pauses anything nobody claims within the week, so any job moved onto the shared scheduler needs its owner tag set the same day it lands or it risks the pause sweep", "kind": "semantic"},
+        {"id": "rec-storage-rows", "content": "storage rows in review tables cite either a source file or a stored decision, never a dashboard, so behavior diffs trace to commits or decisions; the rule survived three attempts to relax it and the review intro links the incident that settled the argument", "kind": "semantic"},
+        {"id": "rec-incident-window", "content": "incident windows are declared in the ops channel and cleared by the incident commander only; nobody else may clear one even if it looks resolved, and the clearing checklist includes the baseline thaw precisely so the freeze never outlives the incident by accident", "kind": "semantic"}
+      ],
+      "rag_sources": [
+        {
+          "path": "internal/drift/baseline.go",
+          "content": "package drift\n\n// writeBaseline persists one baseline snapshot pass. The pilot's\n// nightly recompute was dropped before GA; the cadence now ships\n// from the shared scheduler's job config, not from this file, and\n// the writer only runs when the scheduler fires it. Snapshots are\n// written whole and swapped atomically so scorers never read a\n// half-written baseline.\nfunc (b *Baseliner) writeBaseline(pass int64) error {\n\tsnap, err := b.compute(pass)\n\tif err != nil {\n\t\treturn err\n\t}\n\treturn b.store.SwapAtomic(snap)\n}\n",
+          "language": "go",
+          "abstract": "Scheduler-fired baseline writer with atomic snapshot swaps.",
+          "overview": "baseline.go notes the dropped nightly pilot cadence, takes its firing from the shared scheduler's job config, and swaps whole snapshots atomically for scorers."
+        },
+        {
+          "path": "internal/drift/rollup.go",
+          "content": "package drift\n\n// rollup folds raw series into the derived aggregates the scorers\n// and dashboards read. Rollups are rebuildable by construction:\n// every rollup names the raw range it derives from, and a rebuild\n// walks that range again. Baselines never derive from rollups -\n// they read raw series directly, so a rollup bug cannot silently\n// poison the reference points scoring compares against.\n//\n// The independence is enforced structurally, not by convention:\n// the baseline package imports the raw store alone, and the one\n// attempt to share the fold code between rollups and baselines was\n// reverted when it hauled the rollup store into the baseline\n// dependency graph. The duplication it reintroduced is small,\n// measured, and considered the price of the isolation guarantee;\n// the revert commit says so in exactly those words and the review\n// cites it whenever the question resurfaces.\nfunc (r *Rolluper) rebuild(rng rawRange) error {\n\tagg, err := r.fold(rng)\n\tif err != nil {\n\t\treturn err\n\t}\n\treturn r.store.Replace(rng.Key(), agg)\n}\n\n// fold walks the named raw range once and produces the aggregate;\n// it is deterministic for a fixed range, which is what makes the\n// rebuild-versus-restore comparison meaningful during audits.\nfunc (r *Rolluper) fold(rng rawRange) (aggregate, error) {\n\treturn foldRange(r.raw, rng)\n}\n",
+          "language": "go",
+          "abstract": "Rebuildable rollups structurally isolated from baseline reads.",
+          "overview": "rollup.go derives rebuildable aggregates that name their raw ranges, keeps baselines reading raw series through an enforced import boundary, and records why the shared-fold refactor was reverted to preserve the isolation guarantee."
+        },
+        {
+          "path": "docs/drift-baselines.md",
+          "content": "# drift baselines\n\nBaselines are the reference points scoring compares against;\nrollups are derived aggregates for dashboards. They live in\ndifferent stores with different retention because one is a\nreference and the other is rebuildable.\n\nThe baseline location and generation count are stored decisions;\nthe recompute cadence belongs to the shared scheduler's job config.\nDuring incident windows baselines freeze until the commander\nclears the window, and the thaw rides the clearing checklist so a\nfreeze cannot outlive its incident unnoticed.\n\n## Review sourcing\n\nBaseline rows in review tables cite stored decisions or source\nfiles. The cadence row cites the scheduler job config's change\nhistory, the location and retention rows cite the stored decisions,\nand none of them cite dashboards.\n",
+          "language": "markdown",
+          "abstract": "Baselines vs rollups: stores, cadence ownership, review sourcing.",
+          "overview": "drift-baselines.md separates reference baselines from rebuildable rollups, assigns the recompute cadence to the shared scheduler's job config, notes incident-window freezes with checklist-driven thaws, and pins review rows to decisions and files."
+        }
+      ],
+      "required_evidence": [
+        {"domain": "conversation", "literal": "recomputes every 4 days"},
+        {"domain": "memory", "literal": "under dw-baselines/gold/"}
+      ],
+      "pressure_target": {"domain": "memory", "literal": "under dw-baselines/gold/"},
+      "required_domains": ["conversation", "memory", "rag"],
+      "golden": {
+        "final_answer_criteria": "BOTH halves required: the drift baseline recomputes every 4 days, AND baseline snapshots land under dw-baselines/gold/. A missing half caps the score at 0.5; a stated but incorrect half scores 0. The dropped nightly pilot cadence mentioned in the baseline source scores 0 for the cadence half. An answer presenting both the correct and a competing value without committing to one scores 0."
+      }
+    },
+    {
+      "id": "chain-spill-quota-cap",
+      "stratum": "chain_retention",
+      "answer_home": "rag",
+      "scenario_family": "spill-quota-chain",
+      "system": "You are the driftwatch assistant. driftwatch is a self-hosted telemetry ingest and alerting daemon. Answer using only the provided conversation, memory records, and retrieved context.",
+      "events": [
+        {"turn": {"role": "user", "content": "Spool section of the capacity note needs the spill area's ceiling quoted from source; pull the spill code before I paste the weekend usage sample so the ceiling row cites the constant."}},
+        {"turn": {"role": "assistant", "content": "Pulling the spill source now; paste the weekend sample whenever and we will reconcile the ceiling row against it before the note goes out."}},
+        {"tool_call": {"call_id": "c1", "tool": "retrieve", "args": {"query": "spool spill area ceiling", "k": 3}}},
+        {"tool_call": {"call_id": "c2", "tool": "fixture_echo", "args": {"content": "weekend spill usage sample from the staging box, pasted verbatim:\n2025-07-25T22:00:00Z spill_used_gb=3.1 spill_files=44 oldest_age_h=2.2\n2025-07-26T04:00:00Z spill_used_gb=7.8 spill_files=101 oldest_age_h=6.9\n2025-07-26T10:00:00Z spill_used_gb=11.4 spill_files=139 oldest_age_h=11.0\n2025-07-26T16:00:00Z spill_used_gb=6.2 spill_files=77 oldest_age_h=3.4\nsample note: the 96 GB sizing that still appears in the old capacity draft was rejected in review; it never reached config or code and the draft is archived.\nsample summary: usage peaked mid-window and drained back below baseline before the sample closed.\n"}}},
+        {"turn": {"role": "user", "content": "How much disk may the spool spill area use now?"}}
+      ],
+      "memory_records": [
+        {"id": "rec-note-owner", "content": "the spool section of the capacity note belongs to the ingest team; storage reviews the spill rows", "kind": "semantic"},
+        {"id": "rec-sample-cadence", "content": "weekend usage samples run six-hourly on staging; weekday samples are hourly and noisier", "kind": "semantic"},
+        {"id": "rec-draft-archive", "content": "rejected capacity drafts archive with their review thread linked so old numbers stay traceable", "kind": "semantic"}
+      ],
+      "rag_sources": [
+        {
+          "path": "internal/spool/spill.go",
+          "content": "package spool\n\n// spillQuotaGB caps the spill area on the shared volume. It is a\n// code constant: the spill area shares a volume with the WAL, so\n// the ceiling protects a neighbor and is not a per-deploy\n// preference. Writes past the cap surface backpressure to the\n// admission gate instead of growing the area.\nconst spillQuotaGB = 24\n\nfunc (s *Spill) admit(sz int64) error {\n\tif s.usedBytes()+sz > spillQuotaGB<<30 {\n\t\treturn errSpillFull\n\t}\n\treturn nil\n}\n",
+          "language": "go",
+          "abstract": "Spill area ceiling constant protecting the shared volume.",
+          "overview": "spill.go pins the spill area ceiling as a code constant because the area shares a volume with the WAL, surfacing backpressure instead of growing past the cap."
+        },
+        {
+          "path": "internal/spool/spillage.go",
+          "content": "package spool\n\n// age drains spill files oldest-first once the primary spool has\n// room again. Draining is opportunistic and yields to live ingest:\n// a drain pass claims a bounded batch, re-checks primary headroom\n// between batches, and parks when ingest pressure rises. The batch\n// bound ships from deployment config because it trades drain speed\n// against ingest latency, which is a fleet preference.\n//\n// Oldest-first is a durability decision, not a tidiness one: the\n// spill area inherits the primary spool's export obligations, and\n// the exporter's watermark advances through spilled batches in\n// arrival order. Draining newest-first was prototyped for cache\n// friendliness and dropped when it stalled the watermark behind\n// the oldest spilled batch for as long as pressure persisted; the\n// prototype's branch is archived with the measurement attached,\n// and the runbook links it under lessons rather than options.\nfunc (s *Spill) drainPass() {\n\tfor s.primary.hasHeadroom() {\n\t\tbatch := s.oldest(s.cfg.DrainBatch)\n\t\tif len(batch) == 0 {\n\t\t\treturn\n\t\t}\n\t\ts.replay(batch)\n\t}\n}\n\n// replay pushes one drained batch back through admission so every\n// spilled batch rejoins the normal pipeline with its metrics and\n// limits applied; nothing bypasses admission on the way back in.\nfunc (s *Spill) replay(batch []spillFile) {\n\ts.admitter.Replay(batch)\n}\n",
+          "language": "go",
+          "abstract": "Oldest-first opportunistic draining; watermark rationale; admission replay.",
+          "overview": "spillage.go drains spill files oldest-first in config-bounded batches yielding to ingest pressure, keeps the exporter watermark advancing by arrival order after the newest-first prototype stalled it, and replays every drained batch through normal admission."
+        },
+        {
+          "path": "docs/spool-spill.md",
+          "content": "# spool spill area\n\nWhen the primary spool fills, accepted batches spill to the shared\nvolume until headroom returns. The spill ceiling is code because\nthe volume is shared with the WAL; the drain batch bound is config\nbecause it trades drain speed against ingest latency.\n\nSpill usage charts on the spool dashboard, and the capacity note\nquotes the ceiling next to the observed peak so reviewers see the\nmargin, not just the cap.\n\n## Reading a usage sample\n\nSix-hourly samples smooth the weekday noise; read the peak against\nthe ceiling and the oldest-age column against the export deadline.\nA rising oldest-age with falling usage means the drain is working\nthrough backlog in arrival order, which is the designed behavior\nand not a stall.\n",
+          "language": "markdown",
+          "abstract": "Spill area guide: code ceiling, config drain bound, sample reading.",
+          "overview": "spool-spill.md explains the code-owned spill ceiling protecting the shared WAL volume, the config drain bound, the cap-versus-peak margin row, and how to read usage samples without mistaking arrival-order draining for a stall."
+        }
+      ],
+      "required_evidence": [
+        {"domain": "rag", "literal": "spillQuotaGB = 24"}
+      ],
+      "pressure_target": {"domain": "rag", "literal": "spillQuotaGB = 24"},
+      "required_domains": ["conversation", "memory", "rag"],
+      "golden": {
+        "final_answer_criteria": "States the spool spill area may use 24 GB. The rejected 96 GB capacity-draft sizing named in the pasted sample scores 0. An answer presenting both the correct and a competing value without committing to one scores 0."
+      }
+    },
+    {
+      "id": "chain-spill-drain-rate",
+      "stratum": "chain_retention",
+      "answer_home": "memory",
+      "scenario_family": "spill-quota-chain",
+      "system": "You are the driftwatch assistant. driftwatch is a self-hosted telemetry ingest and alerting daemon. Answer using only the provided conversation, memory records, and retrieved context.",
+      "events": [
+        {"turn": {"role": "user", "content": "Spool section wrap-up today, last section of the capacity note; check your stored spill notes before I paste the weekend drain log, because the drain rows have to quote settled numbers rather than whatever the dashboard showed last, and the storage reviewers bounced a section for exactly that mistake two cycles ago, still mention it in every kickoff, and have promised a line-by-line re-review for the next section that ships with an uncited pacing number in it."}},
+        {"turn": {"role": "assistant", "content": "Reading the stored spill notes now; paste the weekend drain log when it is ready and we will reconcile the drain rows against the stored decisions first, flag anything that disagrees for the note appendix, and keep the dashboard numbers strictly illustrative so the storage reviewers have nothing to bounce this time, with each row citing the decision it came from right in the cell."}},
+        {"tool_call": {"call_id": "c1", "tool": "agent_memory_search", "args": {"query": ""}}},
+        {"tool_call": {"call_id": "c2", "tool": "fixture_echo", "args": {"content": "weekend drain log from the staging box, pasted verbatim:\n2025-07-26T02:00:00Z drain pass begin files=101 used_gb=7.8\n2025-07-26T02:09:40Z drained files=79 replayed_ok=79 parked=1 reason=ingest-pressure\n2025-07-26T02:13:05Z drain pass end files_left=0 used_gb=0.4\nlog note: the 300 MB/s full-throttle profile in the tuning doc stayed a lab experiment; no fleet ever ran it and the doc says so in bold now.\n"}}},
+        {"turn": {"role": "user", "content": "What rate does the spill drain run at off-peak?"}}
+      ],
+      "memory_records": [
+        {"id": "rec-drain-pace", "content": "the spill drain runs at 80 MB/s off-peak since the io review", "kind": "semantic"},
+        {"id": "rec-axis-units", "content": "dashboard axis units follow the current exporter; relabel graphs before embedding them anywhere or someone misreads the units in a review again, which is exactly what happened with the MB/h axis the old exporter left behind on the drain panel last quarter and took a full meeting to untangle", "kind": "semantic"},
+        {"id": "rec-drain-window", "content": "off-peak drain windows follow the ingest lull; the scheduler shifts them when traffic patterns move and the shifts log to the ops channel, so a drain that seems mistimed should be checked against the shift log before anyone assumes the scheduler broke, which has happened twice and been wrong both times", "kind": "semantic"},
+        {"id": "rec-park-policy", "content": "drain passes park under ingest pressure and resume without operator action; parks chart weekly and a park streak longer than a day gets a look, with the triage starting from the pressure counters rather than the drain code because the pressure is almost always real and the code has yet to be the culprit", "kind": "semantic"},
+        {"id": "rec-routing-test", "content": "alert routing changes need a CI-checked routing test since the reorg silently dropped two routes and nobody noticed for a week; the test asserts the full route table against the declared owners file so the next reorg breaks CI loudly instead of dropping alerts quietly", "kind": "semantic"},
+        {"id": "rec-runbook-hosts", "content": "runbooks reference hosts through the inventory aliases so machine renames stay one-line fixes instead of doc-wide sweeps; the rollback section of the drain runbook was the last holdout and it moved to aliases after the retired staging box burned a responder mid-incident", "kind": "semantic"},
+        {"id": "rec-screenshot-rule", "content": "review notes embed regenerated screenshots only; stale screenshots got a note bounced last quarter and the rule stuck after that, with the regeneration step now listed in the note checklist so it happens before circulation rather than after someone complains", "kind": "semantic"},
+        {"id": "rec-io-review", "content": "the io review settled contention rules between drain traffic and live ingest on shared volumes; its decisions are the citation for pacing rows in capacity notes, and pacing questions that reopen settled ground get pointed at the review doc before any new thread starts", "kind": "semantic"},
+        {"id": "rec-lull-data", "content": "the window scheduler's lull boundaries come from observed traffic, not the clock; the observation window trails by a week so sudden pattern changes take effect gradually, and the review notes this lag whenever a pacing row looks briefly out of step with traffic during a seasonal shift in the producers", "kind": "semantic"},
+        {"id": "rec-replay-admission", "content": "drained spill batches replay through normal admission with metrics and limits applied; nothing bypasses admission on the way back in, which is why a drain pass shows up in the tenant counters and why capacity notes footnote the drain window on the ingest rows", "kind": "semantic"}
+      ],
+      "rag_sources": [
+        {
+          "path": "internal/spool/drainrate.go",
+          "content": "package spool\n\n// paceDrain shapes drain replay io. The pace ships from deployment\n// config with distinct peak and off-peak entries; this file only\n// enforces whichever entry the window scheduler hands it, and it\n// re-reads the entry between batches so a config deploy mid-pass\n// takes effect without restarting the drain.\nfunc (s *Spill) paceDrain(w window) {\n\ts.pacer.SetRate(s.cfg.DrainRateFor(w))\n}\n",
+          "language": "go",
+          "abstract": "Window-aware drain pacing from config peak and off-peak entries.",
+          "overview": "drainrate.go enforces the config-supplied drain pace for the current window, re-reading entries between batches so mid-pass config deploys apply without restarts."
+        },
+        {
+          "path": "internal/spool/window.go",
+          "content": "package spool\n\n// window classifies the current time against the ingest lull\n// schedule the window scheduler maintains. Classification is data\n// from the scheduler, not local clock math: lull boundaries move\n// with observed traffic, and drains must agree with the scheduler\n// about which window they are in or pacing flaps at boundaries.\nfunc (s *Spill) currentWindow() window {\n\treturn s.sched.Classify(s.clock.Now())\n}\n",
+          "language": "go",
+          "abstract": "Scheduler-owned window classification for drain pacing.",
+          "overview": "window.go delegates peak versus off-peak classification to the window scheduler so drain pacing agrees with observed lull boundaries instead of local clock math."
+        },
+        {
+          "path": "docs/spool-drain.md",
+          "content": "# spill draining\n\nDrain passes replay spilled batches back through admission when\nheadroom returns. Replay io is paced per window: the pace entries\nship from deployment config, and the window boundaries come from\nthe scheduler's observed lull data.\n\nDrain behavior questions in reviews should quote the stored io\nreview decisions for the pace and the runbook for procedures; the\ndashboard only shows what a particular pass did.\n",
+          "language": "markdown",
+          "abstract": "Drain guide: windowed pacing, config entries, review sourcing.",
+          "overview": "spool-drain.md covers windowed replay pacing from config entries, scheduler-owned lull boundaries, and points review rows at stored decisions over dashboards."
+        }
+      ],
+      "required_evidence": [
+        {"domain": "memory", "literal": "runs at 80 MB/s off-peak"}
+      ],
+      "pressure_target": {"domain": "memory", "literal": "runs at 80 MB/s off-peak"},
+      "required_domains": ["conversation", "memory", "rag"],
+      "golden": {
+        "final_answer_criteria": "States the spill drain runs at 80 MB/s off-peak. Unit-equivalent phrasings of 80 MB/s (for example 80 megabytes per second) are acceptable. The lab-only 300 MB/s full-throttle profile named in the pasted log scores 0. An answer presenting both the correct and a competing value without committing to one scores 0."
       }
     },
     {

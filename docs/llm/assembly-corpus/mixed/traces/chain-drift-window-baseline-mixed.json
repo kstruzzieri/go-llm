@@ -1,0 +1,125 @@
+{
+  "id": "chain-drift-window-baseline-mixed",
+  "source": "assembly-corpus-mixed",
+  "captured_at": "0001-01-01T00:00:00Z",
+  "system": "You are the driftwatch assistant. driftwatch is a self-hosted telemetry ingest and alerting daemon. Answer using only the provided conversation, memory records, and retrieved context.",
+  "tools": null,
+  "turns": [
+    {
+      "role": "user",
+      "content": "Drift review prep continues; the detector section is drafted, so today is baselines. Check the stored notes before we write the storage rows of the baseline table."
+    },
+    {
+      "role": "assistant",
+      "content": "Pulling the stored baseline notes now; the storage rows wait until we have them in front of us."
+    },
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "id": "c1",
+          "name": "agent_memory_search",
+          "arguments": {
+            "query": ""
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "content": "rec-baseline-freeze · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:\nrec-baseline-path · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src: · drift baseline snapshots land under dw-baselines/gold/ on each pass\nrec-gold-retention · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:\nrec-incident-window · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:\nrec-review-rows · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:\nrec-rollup-rebuild · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:\nrec-scheduler-move · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:\nrec-storage-rows · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:",
+      "tool_call_id": "c1",
+      "name": "agent_memory_search"
+    },
+    {
+      "role": "user",
+      "content": "Platform sync closed the cadence question this morning, by the way - the drift baseline recomputes every 4 days now, off the shared scheduler rather than a local timer, so the cadence row is settled."
+    },
+    {
+      "role": "assistant",
+      "content": "Good, that settles the cadence row; I will also pull the baseline docs next so the location and retention rows come from source instead of memory."
+    },
+    {
+      "role": "user",
+      "content": "While you are in there, the review wants one line on why rollups and baselines are stored apart; reviewers trip over that split every quarter, so keep the line short and quotable."
+    },
+    {
+      "role": "assistant",
+      "content": "Added the line: rollups are derived and rebuildable while baselines are reference points, so they live in different stores with different retention; it reads well in the table intro."
+    },
+    {
+      "role": "user",
+      "content": "Also mark the incident-window freeze rule in the retention row; last review someone assumed baselines rolled during the incident and wrote a wrong action item off that assumption."
+    },
+    {
+      "role": "assistant",
+      "content": "Marked the retention row with the freeze rule and linked the ops-channel declaration format, so the next incident review does not repeat the wrong assumption."
+    },
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "id": "c2",
+          "name": "retrieve",
+          "arguments": {
+            "query": "drift baseline storage and rollup layout",
+            "k": 3
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "content": "### source: \"internal/drift/baseline.go\"\npurpose: Scheduler-fired baseline writer with atomic snapshot swaps.\noverview: baseline.go notes the dropped nightly pilot cadence, takes its firing from the shared scheduler's job config, and swaps whole snapshots atomically for scorers.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n--- source: \"internal/drift/baseline.go\" (lines 1-15, similarity: 1.00) ---\n1| package drift\n2| \n3| // writeBaseline persists one baseline snapshot pass. The pilot's\n4| // nightly recompute was dropped before GA; the cadence now ships\n5| // from the shared scheduler's job config, not from this file, and\n6| // the writer only runs when the scheduler fires it. Snapshots are\n7| // written whole and swapped atomically so scorers never read a\n8| // half-written baseline.\n9| func (b *Baseliner) writeBaseline(pass int64) error {\n10| \tsnap, err := b.compute(pass)\n11| \tif err != nil {\n12| \t\treturn err\n13| \t}\n14| \treturn b.store.SwapAtomic(snap)\n15| }\n\n### source: \"internal/drift/rollup.go\"\npurpose: Rebuildable rollups structurally isolated from baseline reads.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n\n### source: \"docs/drift-baselines.md\"\npurpose: Baselines vs rollups: stores, cadence ownership, review sourcing.\nlanguage: markdown\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n--- source: \"docs/drift-baselines.md\" (lines 1-19, similarity: 1.00) ---\n1| # drift baselines\n2| \n3| Baselines are the reference points scoring compares against;\n4| rollups are derived aggregates for dashboards. They live in\n5| different stores with different retention because one is a\n6| reference and the other is rebuildable.\n7| \n8| The baseline location and generation count are stored decisions;\n9| the recompute cadence belongs to the shared scheduler's job config.\n10| During incident windows baselines freeze until the commander\n11| clears the window, and the thaw rides the clearing checklist so a\n12| freeze cannot outlive its incident unnoticed.\n13| \n14| ## Review sourcing\n15| \n16| Baseline rows in review tables cite stored decisions or source\n17| files. The cadence row cites the scheduler job config's change\n18| history, the location and retention rows cite the stored decisions,\n19| and none of them cite dashboards.\n",
+      "tool_call_id": "c2",
+      "name": "retrieve"
+    },
+    {
+      "role": "user",
+      "content": "How often does the drift baseline recompute, and where do the baseline snapshots land?"
+    }
+  ],
+  "golden": {
+    "tool_calls": null,
+    "final_answer_criteria": "BOTH halves required: the drift baseline recomputes every 4 days, AND baseline snapshots land under dw-baselines/gold/. A missing half caps the score at 0.5; a stated but incorrect half scores 0. The dropped nightly pilot cadence mentioned in the baseline source scores 0 for the cadence half. An answer presenting both the correct and a competing value without committing to one scores 0."
+  },
+  "assembly_eval": {
+    "pair_id": "chain-drift-window-baseline",
+    "mode": "mixed",
+    "candidate_ids": [
+      "a532d003fbc921c6b29acd687e3a3f301d2907f67669c25985444b35fcc31aed",
+      "b0e9624ec8ffe12ca753872aa8322c484a9e7448ea11195ba09c05676273d6c3",
+      "ce02210c7e98cb78f6d1e5e409eb971aa36ea20e3e137b27955b89a3e3e2706f",
+      "rec-baseline-freeze",
+      "rec-baseline-path",
+      "rec-gold-retention",
+      "rec-incident-window",
+      "rec-review-rows",
+      "rec-rollup-rebuild",
+      "rec-scheduler-move",
+      "rec-storage-rows"
+    ],
+    "estimated_prompt_tokens": 1219,
+    "state_digest": "b1b135c04a9e7413a6b0c2ee6d1942b3f347bfb5e1f7dcd0a00b068daabce636",
+    "subjects": [
+      "(c1|memory|rec-baseline-freeze)",
+      "(c1|memory|rec-baseline-path)",
+      "(c1|memory|rec-gold-retention)",
+      "(c1|memory|rec-incident-window)",
+      "(c1|memory|rec-review-rows)",
+      "(c1|memory|rec-rollup-rebuild)",
+      "(c1|memory|rec-scheduler-move)",
+      "(c1|memory|rec-storage-rows)",
+      "(c2|rag|internal/drift/baseline.go)",
+      "(c2|rag|internal/drift/rollup.go)",
+      "(c2|rag|docs/drift-baselines.md)"
+    ],
+    "stratum": "chain_retention",
+    "answer_home": "join",
+    "scenario_family": "drift-window-chain",
+    "budget": 1292,
+    "raw_state_tokens": 2154,
+    "pressure_level": "critical",
+    "shed_bytes": 3326
+  }
+}

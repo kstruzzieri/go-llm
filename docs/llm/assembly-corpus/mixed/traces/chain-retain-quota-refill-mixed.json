@@ -1,0 +1,85 @@
+{
+  "id": "chain-retain-quota-refill-mixed",
+  "source": "assembly-corpus-mixed",
+  "captured_at": "0001-01-01T00:00:00Z",
+  "system": "You are the driftwatch assistant. driftwatch is a self-hosted telemetry ingest and alerting daemon. Answer using only the provided conversation, memory records, and retrieved context.",
+  "tools": null,
+  "turns": [
+    {
+      "role": "user",
+      "content": "Tenant capacity summary again tomorrow; this time the reviewers want limiter mechanics quoted from source, so pull the refill code before we draft the throughput rows or paste any counters."
+    },
+    {
+      "role": "assistant",
+      "content": "Pulling the limiter's refill source now; once it is up we can draft the throughput rows against the actual mechanics instead of folklore."
+    },
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "id": "c1",
+          "name": "retrieve",
+          "arguments": {
+            "query": "tenant limiter refill cadence",
+            "k": 3
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "content": "### source: \"internal/ingest/refill.go\"\npurpose: Tenant limiter refill cadence and the batched refill loop.\noverview: refill.go owns the batched per-tick refill pass that walks every tenant bucket on a fixed cadence instead of arming per-bucket timers.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n--- source: \"internal/ingest/refill.go\" (lines 1-18, similarity: 1.00) ---\n1| package ingest\n2| \n3| import \"time\"\n4| \n5| // refillTick is the cadence the tenant limiter adds tokens back to\n6| // every bucket. Refills are batched: one pass walks all tenants per\n7| // tick rather than arming a timer per bucket, so tenant count never\n8| // multiplies timers.\n9| const refillTick = 350 * time.Millisecond\n10| \n11| // refillLoop runs the batched refill until ctx ends.\n12| func (l *tenantLimiter) refillLoop() {\n13| \tt := time.NewTicker(refillTick)\n14| \tdefer t.Stop()\n15| \tfor range t.C {\n16| \t\tl.refillAll()\n17| \t}\n18| }\n\n### source: \"internal/ingest/bucket.go\"\npurpose: Per-tenant token bucket: spend, deposit, burst clamp, scrape snapshot.\noverview: bucket.go implements the per-tenant balance under the limiter lock with take, ceiling-clamped deposit, the torn-read warning from the hot-reload work, and a lock-bounded snapshot for the metrics scrape.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n\n### source: \"docs/limiter.md\"\npurpose: Limiter guide: config-supplied rates, code-owned refill pacing, counter reading.\nlanguage: markdown\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n",
+      "tool_call_id": "c1",
+      "name": "retrieve"
+    },
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "id": "c2",
+          "name": "fixture_echo",
+          "arguments": {
+            "content": "limiter counter scrape from the staging edge, pasted verbatim:\ningest_limiter_refill_passes_total 118204\ningest_limiter_refill_tenants_walked_total 9456320\ningest_limiter_quota_rejects_total{tenant=\"atlas\"} 112\ningest_limiter_quota_rejects_total{tenant=\"borealis\"} 3049\ningest_limiter_bucket_underflow_clamps_total 0\nscrape note: the tick=900ms series a few old dashboards still chart came from the perf-spike shadow profile; that profile never shipped and its series reads zero on every live edge.\ningest_limiter_refill_walk_duration_seconds_sum 3801.4\n"
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "content": "limiter counter scrape from the staging edge, pasted verbatim:\ningest_limiter_refill_passes_total 118204\ningest_limiter_refill_tenants_walked_total 9456320\ningest_limiter_quota_rejects_total{tenant=\"atlas\"} 112\ningest_limiter_quota_rejects_total{tenant=\"borealis\"} 3049\ningest_limiter_bucket_underflow_clamps_total 0\nscrape note: the tick=900ms series a few old dashboards still chart came from the perf-spike shadow profile; that profile never shipped and its series reads zero on every live edge.\ningest_limiter_refill_walk_duration_seconds_sum 3801.4\n",
+      "tool_call_id": "c2",
+      "name": "fixture_echo"
+    },
+    {
+      "role": "user",
+      "content": "How often does the tenant limiter refill its token buckets?"
+    }
+  ],
+  "golden": {
+    "tool_calls": null,
+    "final_answer_criteria": "States the tenant limiter refills on a 350 millisecond tick. Equivalent phrasings (350ms, 0.35 seconds, roughly three times a second) are acceptable when the 350ms figure is stated. The 900ms shadow-profile tick named in the pasted scrape scores 0. An answer presenting both the correct and a competing value without committing to one scores 0."
+  },
+  "assembly_eval": {
+    "pair_id": "chain-retain-quota-refill",
+    "mode": "mixed",
+    "candidate_ids": [
+      "5f75d9a08fb7ff4b24217fc729300e795801ece84aada739b24ee17ad6cbaaee",
+      "7b2da155b08b89592a22754ed8f3aa4305ede43120ec65af6bdefa096d1be531",
+      "b58fc8fb6630915ac56448b0438a7b3a2eef3b3ca8fadb93afe8e6c4e4fdcfab"
+    ],
+    "estimated_prompt_tokens": 686,
+    "state_digest": "56132b8b77738a8f163ef2235302f1a8407fbf9762ec0cd667378c61f434efc3",
+    "subjects": [
+      "(c1|rag|internal/ingest/refill.go)",
+      "(c1|rag|internal/ingest/bucket.go)",
+      "(c1|rag|docs/limiter.md)"
+    ],
+    "stratum": "chain_retention",
+    "answer_home": "rag",
+    "scenario_family": "tenant-quota-chain",
+    "budget": 889,
+    "raw_state_tokens": 1481,
+    "pressure_level": "critical",
+    "shed_bytes": 2956
+  }
+}

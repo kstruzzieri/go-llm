@@ -1,0 +1,97 @@
+{
+  "id": "chain-uplink-part-size-mixed",
+  "source": "assembly-corpus-mixed",
+  "captured_at": "0001-01-01T00:00:00Z",
+  "system": "You are the driftwatch assistant. driftwatch is a self-hosted telemetry ingest and alerting daemon. Answer using only the provided conversation, memory records, and retrieved context.",
+  "tools": null,
+  "turns": [
+    {
+      "role": "user",
+      "content": "The transfer-budget sheet needs the uploader's part size for the throughput math; pull the uploader source first, then check the stored ops notes for anything the sheet should flag alongside the number."
+    },
+    {
+      "role": "assistant",
+      "content": "Pulling the uploader source now, stored notes right after; the sheet will get the number and the flags together."
+    },
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "id": "c1",
+          "name": "retrieve",
+          "arguments": {
+            "query": "archive uploader part size",
+            "k": 3
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "content": "### source: \"internal/archive/uploader.go\"\npurpose: Fixed multipart size constant and the checkpointing push loop.\noverview: uploader.go pins the multipart size as a code constant because the archive store rejects mixed part sizes within an object, and checkpoints failed parts for resume.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n--- source: \"internal/archive/uploader.go\" (lines 1-16, similarity: 1.00) ---\n1| package archive\n2| \n3| // uploadPartMB is the fixed multipart size for archive pushes. It\n4| // is a code constant: the archive store rejects mixed part sizes\n5| // within one object, so a per-deploy knob would break resumability\n6| // the first time two deploys disagreed mid-object.\n7| const uploadPartMB = 48\n8| \n9| func (u *Uploader) push(obj object) error {\n10| \tfor _, part := range obj.split(uploadPartMB \u003c\u003c 20) {\n11| \t\tif err := u.send(part); err != nil {\n12| \t\t\treturn u.checkpoint(obj, part, err)\n13| \t\t}\n14| \t}\n15| \treturn u.finalize(obj)\n16| }\n\n### source: \"internal/archive/resume.go\"\npurpose: Checkpoint-based resume: sizing refusal, per-part checkpoints, verified reopen.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n\n### source: \"docs/archive-upload.md\"\npurpose: Upload guide: fixed parts, checkpoints, throughput planning, overnight window.\noverview: archive-upload.md covers fixed-size checkpointed pushes, resume-from-checkpoint behavior, the transfer sheet's part-size-times-rate arithmetic, and the export-defined overnight window with its emergency sign-off rule.\nlanguage: markdown\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n--- source: \"docs/archive-upload.md\" (lines 1-19, similarity: 1.00) ---\n1| # archive uploads\n2| \n3| Rolled segments push to the archive store in fixed-size parts with\n4| a checkpoint after every acknowledged part. Interrupted pushes\n5| resume from the checkpoint rather than restarting the object, which\n6| is why the sizing is uniform per object and owned by code.\n7| \n8| Throughput planning multiplies the part size by the acknowledged\n9| parts-per-minute rate from the uplink dashboard; both factors sit in\n10| the transfer-budget sheet, and the sheet cites this page next to the\n11| throughput row so reviewers can check the arithmetic against the\n12| mechanics instead of taking the row on faith.\n13| \n14| ## Overnight window\n15| \n16| Pushes run in the overnight window the export schedule defines.\n17| Daytime pushes are possible in an emergency but contend with the\n18| exports for uplink, so the runbook requires a storage sign-off\n19| before anyone starts one.\n",
+      "tool_call_id": "c1",
+      "name": "retrieve"
+    },
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "id": "c2",
+          "name": "agent_memory_search",
+          "arguments": {
+            "query": ""
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "content": "rec-budget-sheet · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:\nrec-part-history · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src: · the 16 MB part sizing came from the pre-GA uploader; superseded at GA\nrec-resume-drill · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:\nrec-sheet-review · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:\nrec-uplink-owner · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:\nrec-upload-window · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:",
+      "tool_call_id": "c2",
+      "name": "agent_memory_search"
+    },
+    {
+      "role": "user",
+      "content": "What part size does the archive uploader send now?"
+    }
+  ],
+  "golden": {
+    "tool_calls": null,
+    "final_answer_criteria": "States the archive uploader sends 48 MB parts. The superseded pre-GA 16 MB sizing noted in memory scores 0. An answer presenting both the correct and a competing value without committing to one scores 0."
+  },
+  "assembly_eval": {
+    "pair_id": "chain-uplink-part-size",
+    "mode": "mixed",
+    "candidate_ids": [
+      "68e7b56322087eb269f16287fd86db9a1294545f86ece648770c7982fcc12e9d",
+      "6f7394c8c3e248f8a7c9f6f0691e8b36cf8d7e552d23e5ea6d8d67f74a72b8a9",
+      "9005246504aa1c039f15bf50a45f798aa71da93fa12012586515fe21ba34c9a8",
+      "rec-budget-sheet",
+      "rec-part-history",
+      "rec-resume-drill",
+      "rec-sheet-review",
+      "rec-uplink-owner",
+      "rec-upload-window"
+    ],
+    "estimated_prompt_tokens": 979,
+    "state_digest": "34c02075157112a6d0205d26f8c7ca0de84f23ea1026a03456e2a1c5e88a0982",
+    "subjects": [
+      "(c1|rag|internal/archive/uploader.go)",
+      "(c1|rag|internal/archive/resume.go)",
+      "(c1|rag|docs/archive-upload.md)",
+      "(c2|memory|rec-budget-sheet)",
+      "(c2|memory|rec-part-history)",
+      "(c2|memory|rec-resume-drill)",
+      "(c2|memory|rec-sheet-review)",
+      "(c2|memory|rec-uplink-owner)",
+      "(c2|memory|rec-upload-window)"
+    ],
+    "stratum": "chain_retention",
+    "answer_home": "rag",
+    "scenario_family": "uplink-part-chain",
+    "budget": 1018,
+    "raw_state_tokens": 1697,
+    "pressure_level": "critical",
+    "shed_bytes": 2645
+  }
+}

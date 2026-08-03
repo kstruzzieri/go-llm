@@ -1,0 +1,123 @@
+{
+  "id": "chain-merge-fanin-flash-mixed",
+  "source": "assembly-corpus-mixed",
+  "captured_at": "0001-01-01T00:00:00Z",
+  "system": "You are the driftwatch assistant. driftwatch is a self-hosted telemetry ingest and alerting daemon. Answer using only the provided conversation, memory records, and retrieved context.",
+  "tools": null,
+  "turns": [
+    {
+      "role": "user",
+      "content": "The compaction section of the storage review is mine; check your stored notes first, then pull the merge source so the section quotes mechanics rather than memory, and leave the planner dump for last."
+    },
+    {
+      "role": "assistant",
+      "content": "Notes first, then the merge source; I will flag anywhere the two disagree before the section goes out."
+    },
+    {
+      "role": "user",
+      "content": "The review template also wants the compaction section to open with last quarter's incident count for the subsystem; pull that from the retro index before you write the intro."
+    },
+    {
+      "role": "assistant",
+      "content": "Intro drafted with the quarter's compaction incident count from the retro index, and each incident is linked so reviewers can expand any of them in place."
+    },
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "id": "c1",
+          "name": "agent_memory_search",
+          "arguments": {
+            "query": ""
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "content": "rec-cohort-naming · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:\nrec-dash-cohorts · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src: · the compaction dashboard charts cohorts per pass and bytes per cohort; reviewers read it weekly and the panel snapshot in the review has to be regenerated the same day the section is written or the numbers drift from the text\nrec-merge-tier · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src: · merge passes restricted to the flash tier during the io review\nrec-planner-dumps · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:\nrec-review-owner · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:\nrec-watermark-rule · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src: · compaction never touches segments the exporter watermark has not passed; that rule predates the planner and survived every rewrite since, and the review section restates it each quarter because someone new asks about it without fail",
+      "tool_call_id": "c1",
+      "name": "agent_memory_search"
+    },
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "id": "c2",
+          "name": "retrieve",
+          "arguments": {
+            "query": "compactor merge pass width",
+            "k": 3
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "content": "### source: \"internal/compact/merge.go\"\npurpose: Merge cohort width constant and the cohort slicer.\noverview: merge.go pins the merge cohort width as a code constant after cache-thrash measurements and slices candidates into full cohorts oldest-first, deferring partial groups.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n--- source: \"internal/compact/merge.go\" (lines 1-19, similarity: 1.00) ---\n1| package compact\n2| \n3| // mergeFanIn is how many segments one merge cohort combines into a\n4| // single output segment. Wider cohorts were measured to thrash the\n5| // page cache on the slower shelves, so the width is a code constant\n6| // rather than a tuning knob.\n7| const mergeFanIn = 6\n8| \n9| // cohorts slices the candidate list into fan-in sized groups, oldest\n10| // segments first, deferring a trailing partial group to the next\n11| // pass so every output segment has the same provenance shape.\n12| func cohorts(cands []segRef) [][]segRef {\n13| \tvar out [][]segRef\n14| \tfor len(cands) \u003e= mergeFanIn {\n15| \t\tout = append(out, cands[:mergeFanIn])\n16| \t\tcands = cands[mergeFanIn:]\n17| \t}\n18| \treturn out\n19| }\n\n### source: \"internal/compact/picker.go\"\npurpose: Merge candidate picker: watermark safety, byte-budget sizing, re-list rule.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n\n### source: \"docs/compaction-plan.md\"\npurpose: Planner guide: cohorts, byte-budget sizing, watermark safety, dump-first debugging.\nlanguage: markdown\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n",
+      "tool_call_id": "c2",
+      "name": "retrieve"
+    },
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "id": "c3",
+          "name": "fixture_echo",
+          "arguments": {
+            "content": "planner debug dump from the staging compactor, pasted verbatim:\nplanner: tier=warm candidates=54 cohorts=9 est_out=9\nplanner: cohort 01 segs=[s0412 s0415 s0419 s0421 s0424 s0430] est_bytes=812MiB\nplanner: cohort 02 segs=[s0433 s0437 s0440 s0444 s0447 s0451] est_bytes=790MiB\nplanner: skipped 3 segments under the exporter watermark\nplanner note: the fanin=12 lab experiment was reverted the same week it ran; no shipped config ever carried it and the planner ignores the flag if present.\n"
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "content": "planner debug dump from the staging compactor, pasted verbatim:\nplanner: tier=warm candidates=54 cohorts=9 est_out=9\nplanner: cohort 01 segs=[s0412 s0415 s0419 s0421 s0424 s0430] est_bytes=812MiB\nplanner: cohort 02 segs=[s0433 s0437 s0440 s0444 s0447 s0451] est_bytes=790MiB\nplanner: skipped 3 segments under the exporter watermark\nplanner note: the fanin=12 lab experiment was reverted the same week it ran; no shipped config ever carried it and the planner ignores the flag if present.\n",
+      "tool_call_id": "c3",
+      "name": "fixture_echo"
+    },
+    {
+      "role": "user",
+      "content": "How many segments does one merge pass cohort combine, and which tier are merge passes currently restricted to?"
+    }
+  ],
+  "golden": {
+    "tool_calls": null,
+    "final_answer_criteria": "BOTH halves required: one merge cohort combines 6 segments, AND merge passes are currently restricted to the flash tier. A missing half caps the score at 0.5; a stated but incorrect half scores 0. The reverted fanin=12 lab experiment named in the pasted planner dump scores 0 for the width half. An answer presenting both the correct and a competing value without committing to one scores 0."
+  },
+  "assembly_eval": {
+    "pair_id": "chain-merge-fanin-flash",
+    "mode": "mixed",
+    "candidate_ids": [
+      "3cb66d6e58acdf04028902e8a7d80e0a23a38caaeb1fff235fc6b8ae9929732a",
+      "5fa92b54591b6d109d9616cb692cea9331566c431b0edb3bc1b51e953034a409",
+      "677cb9c10bc297c34f7e3cb2f582875811c20ce4837e41ca546cfd433f48835a",
+      "rec-cohort-naming",
+      "rec-dash-cohorts",
+      "rec-merge-tier",
+      "rec-planner-dumps",
+      "rec-review-owner",
+      "rec-watermark-rule"
+    ],
+    "estimated_prompt_tokens": 1048,
+    "state_digest": "74f270f81f3b9a2caffdfa7283579cae5b44627371d7b98f4ee96f9944f64a86",
+    "subjects": [
+      "(c1|memory|rec-cohort-naming)",
+      "(c1|memory|rec-dash-cohorts)",
+      "(c1|memory|rec-merge-tier)",
+      "(c1|memory|rec-planner-dumps)",
+      "(c1|memory|rec-review-owner)",
+      "(c1|memory|rec-watermark-rule)",
+      "(c2|rag|internal/compact/merge.go)",
+      "(c2|rag|internal/compact/picker.go)",
+      "(c2|rag|docs/compaction-plan.md)"
+    ],
+    "stratum": "chain_retention",
+    "answer_home": "join",
+    "scenario_family": "merge-fanin-chain",
+    "budget": 1234,
+    "raw_state_tokens": 2057,
+    "pressure_level": "critical",
+    "shed_bytes": 3683
+  }
+}
