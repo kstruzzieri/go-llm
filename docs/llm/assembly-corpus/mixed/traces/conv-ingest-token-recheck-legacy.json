@@ -57,7 +57,7 @@
   ],
   "golden": {
     "tool_calls": null,
-    "final_answer_criteria": "States that the emergency revocation batch is reserved the dwk3- prefix. Answering dwk2- (the completed rotation's prefix from memory) or only describing config-supplied prefixes scores 0. An answer presenting both the correct and a competing value without committing to one scores 0."
+    "final_answer_criteria": "States that the emergency revocation batch is reserved for the dwk3- prefix. Answering dwk2- (the completed rotation's prefix from memory) or only describing config-supplied prefixes scores 0. An answer presenting both the correct and a competing value without committing to one scores 0."
   },
   "assembly_eval": {
     "pair_id": "conv-ingest-token-recheck",

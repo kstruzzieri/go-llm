@@ -25,7 +25,7 @@
     },
     {
       "role": "user",
-      "content": "What built-in default rate do unnamed tenants get now?"
+      "content": "What built-in default rate for unnamed tenants did the capacity call land on?"
     }
   ],
   "golden": {
@@ -43,8 +43,8 @@
       "rec-eval-default",
       "rec-tenant-tags"
     ],
-    "estimated_prompt_tokens": 172,
-    "state_digest": "eac23311d571c5d9caedc945b36851a97e66aa16b7167f2d63aef918fee94afd",
+    "estimated_prompt_tokens": 178,
+    "state_digest": "f2fea8f3968c68ec3dadb3f22c9c4d810b8a3773aadef7d480e81bc49bd16e59",
     "subjects": [
       "(c1|rag|internal/ingest/limits.go)",
       "(c1|rag|internal/ingest/tenants.go)",
@@ -56,8 +56,8 @@
     "stratum": "conversation_only",
     "answer_home": "conversation",
     "scenario_family": "tenant-default-rate-conv",
-    "budget": 1204,
-    "raw_state_tokens": 2006,
+    "budget": 1207,
+    "raw_state_tokens": 2012,
     "pressure_level": "ok",
     "shed_messages": 14,
     "shed_bytes": 6778

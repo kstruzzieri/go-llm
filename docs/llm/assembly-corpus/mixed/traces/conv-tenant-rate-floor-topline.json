@@ -7,7 +7,7 @@
   "turns": [
     {
       "role": "user",
-      "content": "Facts:\nThe capacity call moved the built-in unnamed-tenant ingest default to 250 batches/min, with production tenants still expected to carry explicit tenants-file stanzas; per-tenant rates hot-reload from the tenants file.\n\nQuestion: What built-in default rate do unnamed tenants get now?"
+      "content": "Facts:\nThe capacity call moved the built-in unnamed-tenant ingest default to 250 batches/min, with production tenants still expected to carry explicit tenants-file stanzas; per-tenant rates hot-reload from the tenants file.\n\nQuestion: What built-in default rate for unnamed tenants did the capacity call land on?"
     }
   ],
   "golden": {
@@ -18,7 +18,7 @@
     "pair_id": "conv-tenant-rate-floor",
     "mode": "topline",
     "candidate_ids": null,
-    "estimated_prompt_tokens": 119,
+    "estimated_prompt_tokens": 124,
     "stratum": "conversation_only",
     "answer_home": "conversation",
     "scenario_family": "tenant-default-rate-conv"
