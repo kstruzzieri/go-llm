@@ -1926,7 +1926,7 @@
       "pressure_target": {"domain": "memory", "literal": "lands 96 hours after the flip"},
       "required_domains": ["conversation", "memory", "rag"],
       "golden": {
-        "final_answer_criteria": "BOTH halves required: the revocation sweep lands 96 hours after the flip, AND a verified token is re-checked after 15 minutes in the verify cache. A missing half caps the score at 0.5; a stated but incorrect half scores 0. An answer giving the retired eval-edge 5-minute cache figure scores 0. An answer presenting both the correct and a competing value without committing to one scores 0."
+        "final_answer_criteria": "BOTH halves required: the revocation sweep lands 96 hours after the flip, AND a verified token is re-checked after 15 minutes in the verify cache. A missing half caps the score at 0.5; a stated but incorrect half scores 0. An answer giving 5 minutes as the production re-check bound scores 0; a committed 15-minute answer that notes the eval-edge 5-minute caveat is still correct. An answer presenting both the correct and a competing value without committing to one scores 0."
       }
     },
     {
