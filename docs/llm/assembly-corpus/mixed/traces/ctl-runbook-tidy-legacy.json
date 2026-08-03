@@ -1,0 +1,56 @@
+{
+  "id": "ctl-runbook-tidy-legacy",
+  "source": "assembly-corpus-mixed",
+  "captured_at": "0001-01-01T00:00:00Z",
+  "system": "You are the driftwatch assistant. driftwatch is a self-hosted telemetry ingest and alerting daemon. Answer using only the provided conversation, memory records, and retrieved context.",
+  "tools": null,
+  "turns": [
+    {
+      "role": "user",
+      "content": "Two quick edits landed on the pager runbook this morning: the escalation ladder moved to the top of the page, and every step now names an owning role instead of a person."
+    },
+    {
+      "role": "assistant",
+      "content": "Saw both. I also finished the third item from the backlog: the stale screenshot gallery is gone, replaced by links to the live dashboards."
+    },
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "id": "c1",
+          "name": "fixture_echo",
+          "arguments": {
+            "content": "runbook scan: ladder heading first, role names resolve, zero image embeds remain."
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "content": "runbook scan: ladder heading first, role names resolve, zero image embeds remain.",
+      "tool_call_id": "c1",
+      "name": "fixture_echo"
+    },
+    {
+      "role": "user",
+      "content": "What changed in the pager runbook today?"
+    }
+  ],
+  "golden": {
+    "tool_calls": null,
+    "final_answer_criteria": "Control pair: the two arms are identical by construction; scores here measure decode and labeling noise, not assembly. Three named changes determine the score: the escalation ladder moved to the top of the runbook; every step now names an owning role instead of a person; the stale screenshot gallery was replaced with links to the live dashboards. All three correctly recapped scores 1; exactly two scores 0.5; fewer than two scores 0. Extra details supported by the conversation neither earn nor lose credit; a claimed change not grounded in the conversation scores 0."
+  },
+  "assembly_eval": {
+    "pair_id": "ctl-runbook-tidy",
+    "mode": "legacy",
+    "candidate_ids": [],
+    "estimated_prompt_tokens": 155,
+    "state_digest": "0f33592ff35f8ab33ff7c7498300f0eea43464305959a8808f317f5adec99f25",
+    "stratum": "memory_only",
+    "answer_home": "memory",
+    "control": true,
+    "budget": 259,
+    "raw_state_tokens": 195,
+    "pressure_level": "watch"
+  }
+}

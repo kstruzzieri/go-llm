@@ -4270,6 +4270,162 @@
       "golden": {
         "final_answer_criteria": "Control pair: the two arms are identical by construction; scores here measure decode and labeling noise, not assembly. Three named changes determine the score: the template was trimmed to blockers, decisions, and follow-ups; decisions became one line per decision with a link; the template was posted and pinned in the team room. All three correctly recapped scores 1; exactly two scores 0.5; fewer than two scores 0. Extra details supported by the conversation neither earn nor lose credit; a claimed change not grounded in the conversation scores 0."
       }
+    },
+    {
+      "id": "ctl-triage-handoff",
+      "stratum": "conversation_only",
+      "answer_home": "conversation",
+      "control": true,
+      "system": "You are the driftwatch assistant. driftwatch is a self-hosted telemetry ingest and alerting daemon. Answer using only the provided conversation, memory records, and retrieved context.",
+      "events": [
+        {"turn": {"role": "user", "content": "Housekeeping ping. We moved the triage rotation handoff off Mondays because it kept colliding with the release freeze review; the handoff now happens on Wednesday."}},
+        {"turn": {"role": "assistant", "content": "Updated the rotation calendar, and the reminder bot now pings the incoming person that morning."}},
+        {"turn": {"role": "user", "content": "Thanks. Leave the escalation contacts exactly as they are for now."}},
+        {"tool_call": {"call_id": "c1", "tool": "fixture_echo", "args": {"content": "rotation calendar check: single handoff marker per week, reminder hook active."}}},
+        {"turn": {"role": "user", "content": "Which day does the triage rotation hand off?"}}
+      ],
+      "memory_records": [
+        {"id": "rec-oncall-scope", "content": "triage duty covers the shared inbox and dashboard alerts; pages route through the on-call rotation, not triage", "kind": "semantic"}
+      ],
+      "rag_sources": [
+        {
+          "path": "docs/triage.md",
+          "content": "# triage rotation\n\nThe triage rotation watches the shared inbox and the alert dashboard.\nHandoff notes live in the rotation log, newest entry first.\n",
+          "language": "markdown",
+          "abstract": "",
+          "overview": ""
+        }
+      ],
+      "required_domains": ["conversation", "memory", "rag"],
+      "answer_turn_index": 0,
+      "golden": {
+        "final_answer_criteria": "Control pair: the two arms are identical by construction; scores here measure decode and labeling noise, not assembly. One value stated in the conversation determines the score: the triage rotation handoff happens on Wednesday. An answer stating Wednesday scores 1; any other day, or no day at all, scores 0."
+      }
+    },
+    {
+      "id": "ctl-runbook-tidy",
+      "stratum": "memory_only",
+      "answer_home": "memory",
+      "control": true,
+      "system": "You are the driftwatch assistant. driftwatch is a self-hosted telemetry ingest and alerting daemon. Answer using only the provided conversation, memory records, and retrieved context.",
+      "events": [
+        {"turn": {"role": "user", "content": "Two quick edits landed on the pager runbook this morning: the escalation ladder moved to the top of the page, and every step now names an owning role instead of a person."}},
+        {"turn": {"role": "assistant", "content": "Saw both. I also finished the third item from the backlog: the stale screenshot gallery is gone, replaced by links to the live dashboards."}},
+        {"tool_call": {"call_id": "c1", "tool": "fixture_echo", "args": {"content": "runbook scan: ladder heading first, role names resolve, zero image embeds remain."}}},
+        {"turn": {"role": "user", "content": "What changed in the pager runbook today?"}}
+      ],
+      "memory_records": [
+        {"id": "rec-runbook-owner", "content": "the pager runbook is owned by the operations rotation; edits go through review like code", "kind": "semantic"}
+      ],
+      "rag_sources": [
+        {
+          "path": "docs/pager-runbook.md",
+          "content": "# pager runbook\n\nStart at the escalation ladder and work down. Every step should be\nactionable by whoever holds the pager, without tribal knowledge.\n",
+          "language": "markdown",
+          "abstract": "",
+          "overview": ""
+        }
+      ],
+      "required_domains": ["conversation", "memory", "rag"],
+      "golden": {
+        "final_answer_criteria": "Control pair: the two arms are identical by construction; scores here measure decode and labeling noise, not assembly. Three named changes determine the score: the escalation ladder moved to the top of the runbook; every step now names an owning role instead of a person; the stale screenshot gallery was replaced with links to the live dashboards. All three correctly recapped scores 1; exactly two scores 0.5; fewer than two scores 0. Extra details supported by the conversation neither earn nor lose credit; a claimed change not grounded in the conversation scores 0."
+      }
+    },
+    {
+      "id": "ctl-review-slot",
+      "stratum": "stale_vs_fresh",
+      "answer_home": "conversation",
+      "control": true,
+      "system": "You are the driftwatch assistant. driftwatch is a self-hosted telemetry ingest and alerting daemon. Answer using only the provided conversation, memory records, and retrieved context.",
+      "events": [
+        {"turn": {"role": "user", "content": "Dashboard review this week is Thursday at 14:00 in the usual room."}},
+        {"turn": {"role": "assistant", "content": "Noted, I put it on the shared calendar and linked the agenda."}},
+        {"turn": {"role": "user", "content": "Change of plan: the room is double-booked at that hour, so the review moves to 15:30 on the same Thursday. The 14:00 slot is off the calendar entirely."}},
+        {"tool_call": {"call_id": "c1", "tool": "fixture_echo", "args": {"content": "calendar check: one review entry present, Thursday, single time marker."}}},
+        {"turn": {"role": "user", "content": "What time does this week's dashboard review start?"}}
+      ],
+      "memory_records": [
+        {"id": "rec-review-cadence", "content": "the dashboard review runs weekly; skipped weeks are noted in the review log", "kind": "semantic"}
+      ],
+      "rag_sources": [
+        {
+          "path": "docs/review.md",
+          "content": "# dashboard review\n\nWeekly walkthrough of the ingest and alerting dashboards. Agenda and\npast notes are linked from the review log.\n",
+          "language": "markdown",
+          "abstract": "",
+          "overview": ""
+        }
+      ],
+      "required_domains": ["conversation", "memory", "rag"],
+      "golden": {
+        "final_answer_criteria": "Control pair: the two arms are identical by construction; scores here measure decode and labeling noise, not assembly. The conversation first places the review at 14:00 and then moves it: the room was double-booked, the review now starts at 15:30 on Thursday, and the 14:00 slot came off the calendar. An answer stating 15:30 scores 1; an answer stating 14:00 scores 0. An answer presenting both the correct and a competing value without committing to one scores 0."
+      }
+    },
+    {
+      "id": "ctl-incident-archive",
+      "stratum": "chain_retention",
+      "answer_home": "rag",
+      "control": true,
+      "system": "You are the driftwatch assistant. driftwatch is a self-hosted telemetry ingest and alerting daemon. Answer using only the provided conversation, memory records, and retrieved context.",
+      "events": [
+        {"turn": {"role": "user", "content": "Cleanup pass on the incident tracker today. The closed-thread list has grown enough that search results are mostly noise."}},
+        {"turn": {"role": "assistant", "content": "Agreed, most of those threads are resolved pages nobody revisits. Archiving them keeps search useful without deleting anything."}},
+        {"turn": {"role": "user", "content": "Let's settle the holding period then: closed incident threads stay searchable for ninety days after close, and after that they move to the archive."}},
+        {"turn": {"role": "assistant", "content": "Done. I tagged everything past the mark and the archive job picked those threads up on its next pass."}},
+        {"turn": {"role": "user", "content": "Also make sure the archive keeps the original timestamps; the quarterly review leans on those."}},
+        {"turn": {"role": "assistant", "content": "It does. Archived threads keep their full history; only the search index entry is dropped."}},
+        {"tool_call": {"call_id": "c1", "tool": "fixture_echo", "args": {"content": "tracker sweep: archive job ran clean, timestamps preserved on sampled threads."}}},
+        {"turn": {"role": "user", "content": "How long do closed incident threads stay searchable before they move to the archive?"}}
+      ],
+      "memory_records": [
+        {"id": "rec-tracker-search", "content": "tracker search indexes open and closed threads; archived threads are reachable from the archive browser", "kind": "semantic"}
+      ],
+      "rag_sources": [
+        {
+          "path": "docs/incident-tracker.md",
+          "content": "# incident tracker\n\nEvery page opens a thread. Threads close when the follow-ups land,\nand closed threads are kept for the record, never deleted.\n",
+          "language": "markdown",
+          "abstract": "",
+          "overview": ""
+        }
+      ],
+      "required_domains": ["conversation", "memory", "rag"],
+      "golden": {
+        "final_answer_criteria": "Control pair: the two arms are identical by construction; scores here measure decode and labeling noise, not assembly. One value stated in the conversation determines the score: closed incident threads stay searchable for ninety days after close before moving to the archive. An answer stating ninety days (or 90 days) scores 1; any other period, or no period at all, scores 0."
+      }
+    },
+    {
+      "id": "ctl-weekly-report-home",
+      "stratum": "cross_domain_join",
+      "answer_home": "join",
+      "control": true,
+      "system": "You are the driftwatch assistant. driftwatch is a self-hosted telemetry ingest and alerting daemon. Answer using only the provided conversation, memory records, and retrieved context.",
+      "events": [
+        {"turn": {"role": "user", "content": "The weekly ingest health report needs a stable home. Right now it lands wherever whoever wrote it happened to be typing."}},
+        {"turn": {"role": "assistant", "content": "This week's draft went to the alerts channel, which buried an actual page within the hour."}},
+        {"turn": {"role": "user", "content": "Let's still try the alerts channel for one cycle; at least everyone already watches it."}},
+        {"turn": {"role": "assistant", "content": "The noise complaints arrived immediately. Two people muted the channel, which defeats its purpose."}},
+        {"turn": {"role": "user", "content": "Fair, that settles it. The alerts-channel experiment is over: from this week on the report is posted in the ops-weekly thread, and the alerts channel carries pages only."}},
+        {"turn": {"role": "assistant", "content": "Posted this week's report in the ops-weekly thread and added a pointer in the channel topic so nobody goes looking in alerts."}},
+        {"tool_call": {"call_id": "c1", "tool": "fixture_echo", "args": {"content": "channel audit: one report entry in ops-weekly, alerts channel shows pages only."}}},
+        {"turn": {"role": "user", "content": "Where does the weekly ingest health report get posted?"}}
+      ],
+      "memory_records": [
+        {"id": "rec-report-author", "content": "the weekly ingest health report is written by whoever closed the most recent on-call shift", "kind": "semantic"}
+      ],
+      "rag_sources": [
+        {
+          "path": "docs/weekly-report.md",
+          "content": "# weekly ingest health report\n\nOne page: ingest volume, drop counts, alert noise, and anything the\nnext on-call should watch. Written weekly, kept short.\n",
+          "language": "markdown",
+          "abstract": "",
+          "overview": ""
+        }
+      ],
+      "required_domains": ["conversation", "memory", "rag"],
+      "golden": {
+        "final_answer_criteria": "Control pair: the two arms are identical by construction; scores here measure decode and labeling noise, not assembly. The conversation first tries the alerts channel and then settles the question: the alerts-channel experiment ended, the report is posted in the ops-weekly thread, and the alerts channel carries pages only. An answer stating the ops-weekly thread scores 1; an answer stating the alerts channel scores 0. An answer presenting both the correct and a competing value without committing to one scores 0."
+      }
     }
   ]
 }
