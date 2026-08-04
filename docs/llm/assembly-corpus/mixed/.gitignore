@@ -1,1 +1,6 @@
-worksheet-*.txt
+# Raw pass-1/pass-2 labeling worksheets stay untracked by the registered
+# commit policy (labels/preferences JSONL are the committed products).
+# Deliberately NARROW: an adjudication worksheet, when any block is
+# flagged, MUST be committed - do not widen these patterns to cover it.
+worksheet-pass1-*.txt
+worksheet-pass2-*.txt

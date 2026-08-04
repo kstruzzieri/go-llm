@@ -13,9 +13,10 @@ audit, the sealed forced-choice sidemap (digest committed before labeling)
 with `pair-preferences.jsonl`, and `report.json` are all committed — the
 "Committed artifacts" and "Commit policy" lists below now describe the
 current tree. No adjudication artifact exists because zero blocks were
-flagged (see the verdict section). The regeneration gate
-(`TestMixedCorpusRegeneration`) and the balance gate
-(`TestMixedCorpusBalance`) rebuild and re-check the corpus in CI.
+flagged (see the verdict section). In CI, the regeneration gate
+(`TestMixedCorpusRegeneration`) rebuilds the corpus from the fixture and
+byte-compares every trace, and the balance gate (`TestMixedCorpusBalance`)
+re-checks the registered corpus shape.
 
 Every case is one frozen `agent.State` assembled twice — a `legacy` arm
 (`ContextManager.Assemble`, default compactor) and a `mixed` arm
