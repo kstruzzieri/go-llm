@@ -537,8 +537,13 @@ type assemblyMixedPair struct {
 // captureVerification is the report-side view of a capture run manifest
 // (-capture-manifest, #331 W3): which artifact hashes the manifest lists
 // with usage_present true. Nil means no manifest was supplied.
+// expectedPairs (v2 manifests only; nil for v1) lists every legacy-mixed
+// pair key the capture ledger expected, so a pair whose arms ALL failed at
+// capture — invisible to artifact-driven pair discovery — is synthesized
+// into the registered missing-arm exclusions instead of vanishing.
 type captureVerification struct {
-	usagePresent map[string]bool // artifact_hash -> usage_present
+	usagePresent  map[string]bool // artifact_hash -> usage_present
+	expectedPairs []assemblyPairKey
 }
 
 // capturePairTemperaturesEqual reports whether both arms carry capture

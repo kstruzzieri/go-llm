@@ -825,6 +825,19 @@ func computeAssemblyReport(arts []Artifact, labels []Label, seed int64, bootstra
 				k.pair, k.model, mode)
 		}
 	}
+	// v2 capture-ledger cross-check (external PR review P1): a legacy-mixed
+	// pair the capture EXPECTED but produced no artifacts for is invisible to
+	// the artifact-driven discovery above — synthesize it (empty arm set) so
+	// it lands in the registered missing-arm exclusions instead of silently
+	// vanishing. v1 manifests carry no ledger (expectedPairs nil): no change.
+	if extras.capture != nil {
+		for _, k := range extras.capture.expectedPairs {
+			if _, ok := pairs[k]; !ok {
+				pairs[k] = &assemblyArmSet{}
+				keys = append(keys, k)
+			}
+		}
+	}
 	sort.Slice(keys, func(i, j int) bool {
 		if keys[i].model != keys[j].model {
 			return keys[i].model < keys[j].model

@@ -219,8 +219,9 @@ func parseMixedFixture(raw []byte) (mixedFixture, error) {
 	if err := dec.Decode(&f); err != nil {
 		return mixedFixture{}, err
 	}
-	if dec.More() {
-		return mixedFixture{}, fmt.Errorf("trailing data after the fixture object")
+	// More() is blind to a bare ']' or '}' after the object; require io.EOF.
+	if err := requireJSONDecoderEOF(dec, "mixed fixture"); err != nil {
+		return mixedFixture{}, err
 	}
 	return f, nil
 }

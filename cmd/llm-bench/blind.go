@@ -25,6 +25,14 @@ const blindFillMarker = "--- fill below (score: 0 | 0.5 | 1) ---"
 // this literal, so it lives in one place.
 const blindEndMarker = "=== END ==="
 
+// worksheetEscapePrefix is the visible escape the renderers prefix onto any
+// untrusted-text line (candidate output, question, rubric, prompt body) that
+// collides with a worksheet sentinel — a fill marker, the end marker, a block
+// header prefix, or a recognized field line. Without it a candidate answer
+// containing a well-formed fill-marker/score/end-marker frame would score its
+// own block and orphan the human's real fill region.
+const worksheetEscapePrefix = "| "
+
 // Blind worksheet header prefixes. Non-promptless blocks stay hash-addressed
 // ("=== ARTIFACT <hash> ==="), byte-identical to the pre-3c grammar. W5:
 // promptless (legacy/mixed/topline) blocks are addressed by an OPAQUE id
@@ -133,6 +141,56 @@ func (g worksheetGrammar) matchHeader(line string) (string, bool) {
 	return "", false
 }
 
+// matchWorksheetField reports which recognized field a line starts with
+// ("" when none). Shared by the fill-region parser and the pre-marker
+// forged-field check.
+func matchWorksheetField(fields []string, line string) string {
+	for _, f := range fields {
+		if strings.HasPrefix(line, f+":") {
+			return f
+		}
+	}
+	return ""
+}
+
+// worksheetSentinelCollision reports whether a line of UNTRUSTED text
+// (candidate output, question, rubric, prompt body) collides with any
+// worksheet sentinel across all three grammars: a fill marker, the shared end
+// marker, a block-header prefix, or a recognized field line. The union is
+// deliberate — one rule for every renderer beats three grammar-local ones,
+// and over-escaping is harmless (the escape is rendering-only).
+func worksheetSentinelCollision(line string) bool {
+	for _, p := range []string{
+		blindFillMarker, fcFillMarker, blindEndMarker,
+		blindArtifactHeaderPrefix, blindBlockHeaderPrefix, fcPairHeaderPrefix,
+	} {
+		if strings.HasPrefix(line, p) {
+			return true
+		}
+	}
+	return matchWorksheetField([]string{"score", "notes", "flag", "prefer", "arm_guess", "reason"}, line) != ""
+}
+
+// escapeWorksheetText prefixes worksheetEscapePrefix onto every line of
+// untrusted text that collides with a worksheet sentinel, so embedded
+// sentinel-shaped text renders visibly but can never open, close, or score a
+// block. Collision-free text is returned byte-identical (the pre-3c golden
+// worksheets are pinned on that).
+func escapeWorksheetText(s string) string {
+	lines := strings.Split(s, "\n")
+	changed := false
+	for i, line := range lines {
+		if worksheetSentinelCollision(line) {
+			lines[i] = worksheetEscapePrefix + line
+			changed = true
+		}
+	}
+	if !changed {
+		return s
+	}
+	return strings.Join(lines, "\n")
+}
+
 // scanWorksheetBlocks is the single block scanner behind all three worksheet
 // parsers (blind, forced-choice, adjudication). Line rules: outside a block,
 // only a header-prefix line opens one — so a forged header inside candidate
@@ -144,9 +202,29 @@ func (g worksheetGrammar) matchHeader(line string) (string, bool) {
 // blindEndMarker line flushes the block, and a block still open at end of
 // input is flushed once. open receives the matched prefix alongside the
 // header body so a two-prefix grammar can tell its block kinds apart.
+//
+// Forged-frame hardening (external PR review P1): renderers escape untrusted
+// text (escapeWorksheetText), so an UNESCAPED sentinel is always evidence of
+// a forged or corrupted worksheet and errors loudly naming the block instead
+// of silently mis-framing: a duplicate fill marker inside one block, an end
+// marker before the fill marker, a recognized field line before the fill
+// marker, and a fill or end marker outside any block (the reproduced attack
+// closes the block early with a well-formed forged frame, orphaning the
+// human's REAL fill region outside the block — the stray real marker is the
+// loud evidence). Stray FIELD lines outside a block stay ignored: they
+// cannot score anything, and the pre-hardening grammar pinned that.
 func scanWorksheetBlocks(text string, g worksheetGrammar, open func(prefix, body string) error, setField func(field, value string), flush func() error) error {
 	inBlock, afterMarker := false, false
 	blockID := ""
+	location := func() string {
+		if blockID == "" && !inBlock {
+			return "before any block"
+		}
+		if !inBlock {
+			return fmt.Sprintf("after block %q", blockID)
+		}
+		return fmt.Sprintf("in block %q", blockID)
+	}
 	for _, line := range strings.Split(text, "\n") {
 		prefix, isHeader := "", false
 		if !inBlock {
@@ -160,9 +238,21 @@ func scanWorksheetBlocks(text string, g worksheetGrammar, open func(prefix, body
 			}
 			blockID = body
 			afterMarker, inBlock = false, true
-		case inBlock && strings.HasPrefix(line, g.fillMarker):
+		case strings.HasPrefix(line, g.fillMarker):
+			if !inBlock {
+				return fmt.Errorf("stray fill marker outside any block (%s): unescaped sentinel text or a forged frame closed the block early", location())
+			}
+			if afterMarker {
+				return fmt.Errorf("block %q: fill marker appears more than once (unescaped sentinel text or a forged frame)", blockID)
+			}
 			afterMarker = true
-		case inBlock && strings.HasPrefix(line, blindEndMarker):
+		case strings.HasPrefix(line, blindEndMarker):
+			if !inBlock {
+				return fmt.Errorf("stray end marker outside any block (%s): unescaped sentinel text or a forged frame", location())
+			}
+			if !afterMarker {
+				return fmt.Errorf("block %q: end marker before the fill marker (unescaped sentinel text or a forged frame)", blockID)
+			}
 			// The fill region ends at the block terminator: a stray field line
 			// between "=== END ===" and the next block must not attach to the
 			// previous block.
@@ -170,14 +260,10 @@ func scanWorksheetBlocks(text string, g worksheetGrammar, open func(prefix, body
 				return err
 			}
 			inBlock, afterMarker = false, false
+		case inBlock && !afterMarker && matchWorksheetField(g.fields, line) != "":
+			return fmt.Errorf("block %q: field line %q appears before the fill marker (unescaped sentinel text or a forged frame)", blockID, line)
 		case inBlock && afterMarker && strings.TrimSpace(line) != "":
-			matched := ""
-			for _, f := range g.fields {
-				if strings.HasPrefix(line, f+":") {
-					matched = f
-					break
-				}
-			}
+			matched := matchWorksheetField(g.fields, line)
 			if matched == "" {
 				return fmt.Errorf("block %q: unrecognized fill-region line %q (recognized fields: %s)", blockID, line, strings.Join(g.fields, ", "))
 			}
@@ -570,7 +656,7 @@ func writeBlindBlock(b *strings.Builder, a Artifact, dup bool, bm *blindBlockmap
 	}
 	if promptless {
 		fmt.Fprintln(b, "[question]")
-		fmt.Fprintln(b, strings.TrimSpace(blindQuestion(a.Trace)))
+		fmt.Fprintln(b, escapeWorksheetText(strings.TrimSpace(blindQuestion(a.Trace))))
 	} else {
 		if a.Trace.AssemblyEval == nil {
 			fmt.Fprintf(b, "trace: %s\n\n", a.TraceID)
@@ -579,10 +665,10 @@ func writeBlindBlock(b *strings.Builder, a Artifact, dup bool, bm *blindBlockmap
 	}
 	fmt.Fprintln(b)
 	fmt.Fprintln(b, "[rubric]")
-	fmt.Fprintln(b, strings.TrimSpace(a.Trace.Golden.FinalAnswerCriteria))
+	fmt.Fprintln(b, escapeWorksheetText(strings.TrimSpace(a.Trace.Golden.FinalAnswerCriteria)))
 	fmt.Fprintln(b)
 	fmt.Fprintln(b, "[candidate output]")
-	fmt.Fprintln(b, strings.TrimSpace(a.ActualFinalAnswer))
+	fmt.Fprintln(b, escapeWorksheetText(strings.TrimSpace(a.ActualFinalAnswer)))
 	fmt.Fprintln(b)
 	fmt.Fprintln(b, blindFillMarker)
 	fmt.Fprintln(b, "score: ")
@@ -599,15 +685,16 @@ func writeBlindBlock(b *strings.Builder, a Artifact, dup bool, bm *blindBlockmap
 // writeBlindPromptBody renders the full-prompt section ([prompt], trimmed
 // system, each non-empty turn). Shared by the non-promptless worksheet block
 // and the adjudication worksheet so the two spellings can never drift.
+// System and turn content are untrusted text and sentinel-escaped.
 func writeBlindPromptBody(b *strings.Builder, t Trace) {
 	fmt.Fprintln(b, "[prompt]")
-	fmt.Fprintln(b, strings.TrimSpace(t.System))
+	fmt.Fprintln(b, escapeWorksheetText(strings.TrimSpace(t.System)))
 	for _, turn := range t.Turns {
 		content := strings.TrimSpace(turn.Content)
 		if content == "" {
 			continue
 		}
-		fmt.Fprintf(b, "\n<%s>\n%s\n", turn.Role, content)
+		fmt.Fprintf(b, "\n<%s>\n%s\n", turn.Role, escapeWorksheetText(content))
 	}
 }
 

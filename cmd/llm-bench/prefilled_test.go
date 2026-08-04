@@ -1031,8 +1031,18 @@ func TestCaptureManifestWritten(t *testing.T) {
 	if err := json.Unmarshal(raw, &m); err != nil {
 		t.Fatalf("decode manifest: %v", err)
 	}
-	if m.SchemaVersion != "mixed-capture-manifest/v1" {
-		t.Errorf("schema_version = %q; want mixed-capture-manifest/v1", m.SchemaVersion)
+	if m.SchemaVersion != "mixed-capture-manifest/v2" {
+		t.Errorf("schema_version = %q; want mixed-capture-manifest/v2 (new captures write the run ledger)", m.SchemaVersion)
+	}
+	// v2 run ledger: an all-success capture records one captured row per
+	// (trace x model); the failure shapes live in TestCaptureManifestV2ExpectedLedger.
+	if m.ExpectedCount != 3 || len(m.Expected) != 3 {
+		t.Errorf("expected_count/len(expected) = %d/%d; want 3/3", m.ExpectedCount, len(m.Expected))
+	}
+	for _, row := range m.Expected {
+		if row.Status != "captured" || row.Attempts != 1 {
+			t.Errorf("ledger row %+v; want status captured, attempts 1", row)
+		}
 	}
 	if !m.CreatedAt.Equal(clock()) {
 		t.Errorf("created_at = %v; want the injected clock %v", m.CreatedAt, clock())

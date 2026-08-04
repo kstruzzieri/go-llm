@@ -202,7 +202,15 @@ type calibrateCaptureOptions struct {
 // <artifacts-out>.manifest.json pinning the run conditions; the registered
 // -assembly-report run verifies pairs against it (-capture-manifest).
 const (
+	// captureManifestSchemaVersion is the LEGACY v1 schema: per_artifact rows
+	// for successful captures only, no run ledger. The committed slice-3c
+	// manifests are v1 and sealed; the report keeps v1 semantics for v1 files.
 	captureManifestSchemaVersion = "mixed-capture-manifest/v1"
+	// captureManifestSchemaVersionV2 adds the `expected` run ledger — one row
+	// per (trace x model) attempt, failures included — so a failed run leaves
+	// auditable evidence instead of vanishing (external PR review P1). New
+	// captures write v2.
+	captureManifestSchemaVersionV2 = "mixed-capture-manifest/v2"
 	// captureProbeMaxBytes bounds the recorded /props probe body.
 	captureProbeMaxBytes = 16 * 1024
 )
@@ -222,8 +230,38 @@ type captureManifest struct {
 	ServerProbe          captureServerProbe      `json:"server_probe"`
 	Decoding             captureDecoding         `json:"decoding"`
 	CounterbalanceScheme string                  `json:"counterbalance_scheme"`
-	ArtifactCount        int                     `json:"artifact_count"`
-	PerArtifact          []captureManifestRow    `json:"per_artifact"`
+	// ArtifactCount counts SUCCESSFUL captures only (one per PerArtifact
+	// row) — unchanged from v1.
+	ArtifactCount int                  `json:"artifact_count"`
+	PerArtifact   []captureManifestRow `json:"per_artifact"`
+	// ExpectedCount / Expected are the v2 run ledger: one row per
+	// (trace x model) the capture attempted, failures included. Absent on v1
+	// manifests; required on v2.
+	ExpectedCount int                  `json:"expected_count,omitempty"`
+	Expected      []captureExpectedRow `json:"expected,omitempty"`
+}
+
+// captureExpectedRow is one v2-ledger entry: a (trace x model) run the
+// capture attempted. Status "captured" rows carry the written artifact's
+// hash; "failed" rows carry the (path-redacted) error and no hash — they
+// produced no artifact and cannot be labeled, but they no longer vanish:
+// the report synthesizes their pairs into missing-arm exclusions.
+//
+// Attempts is structurally 1 today: the runner makes exactly one attempt per
+// (trace x model), and the registered one-retry policy operates at the
+// re-invocation level (a second -calibrate-capture over the gap). The ledger
+// is what makes a partial first invocation visible to that policy.
+type captureExpectedRow struct {
+	TraceID string `json:"trace_id"`
+	Model   string `json:"model"`
+	// PairID/Arm locate assembly traces: Arm is legacy/mixed/topline (empty
+	// for non-assembly traces); PairID is set on legacy/mixed arms only.
+	PairID       string `json:"pair_id,omitempty"`
+	Arm          string `json:"arm,omitempty"`
+	Status       string `json:"status"` // captured | failed
+	Attempts     int    `json:"attempts"`
+	Error        string `json:"error,omitempty"`
+	ArtifactHash string `json:"artifact_hash,omitempty"`
 }
 
 type captureManifestTarget struct {
@@ -313,8 +351,12 @@ func probeCaptureServer(baseURL string) (json.RawMessage, string) {
 
 // loadCaptureManifestForReport reads a capture run manifest for
 // -assembly-report verification, returning the embedded reference (the
-// FILE's sha256 digest + artifact count) and the usage-present hash set the
-// pair verification consults.
+// FILE's sha256 digest + artifact count) and the verification set the pair
+// verification consults. v1 manifests (the sealed slice-3c run) keep exactly
+// the pre-ledger semantics: a usage-present hash set and nothing else. v2
+// manifests additionally validate the expected run ledger against the
+// per_artifact rows (hash match, both directions) and surface the expected
+// legacy-mixed pair keys for missing-pair synthesis.
 func loadCaptureManifestForReport(path string) (AssemblyCaptureManifest, *captureVerification, error) {
 	raw, err := os.ReadFile(path)
 	if err != nil {
@@ -324,22 +366,106 @@ func loadCaptureManifestForReport(path string) (AssemblyCaptureManifest, *captur
 	if err := json.Unmarshal(raw, &m); err != nil {
 		return AssemblyCaptureManifest{}, nil, fmt.Errorf("capture-manifest: decode %q: %w", path, err)
 	}
-	if m.SchemaVersion != captureManifestSchemaVersion {
-		return AssemblyCaptureManifest{}, nil, fmt.Errorf("capture-manifest: %q schema_version %q (want %q)", path, m.SchemaVersion, captureManifestSchemaVersion)
-	}
 	if m.ArtifactCount != len(m.PerArtifact) {
 		return AssemblyCaptureManifest{}, nil, fmt.Errorf("capture-manifest: %q artifact_count %d does not match its %d per_artifact row(s) (corrupt or hand-edited manifest)", path, m.ArtifactCount, len(m.PerArtifact))
 	}
-	usage := make(map[string]bool, len(m.PerArtifact))
+	verify := &captureVerification{usagePresent: make(map[string]bool, len(m.PerArtifact))}
 	for _, row := range m.PerArtifact {
-		usage[row.ArtifactHash] = row.UsagePresent
+		verify.usagePresent[row.ArtifactHash] = row.UsagePresent
+	}
+	switch m.SchemaVersion {
+	case captureManifestSchemaVersion:
+		// v1: no ledger may ride along — a hand-added one would silently
+		// change pair discovery on a schema that never carried it.
+		if m.ExpectedCount != 0 || len(m.Expected) > 0 {
+			return AssemblyCaptureManifest{}, nil, fmt.Errorf("capture-manifest: v1 manifest %q carries a v2 expected ledger (%d row(s)); re-run the capture or fix the schema_version", path, len(m.Expected))
+		}
+	case captureManifestSchemaVersionV2:
+		pairs, err := validateCaptureLedger(m)
+		if err != nil {
+			return AssemblyCaptureManifest{}, nil, fmt.Errorf("capture-manifest: %q: %w", path, err)
+		}
+		verify.expectedPairs = pairs
+	default:
+		return AssemblyCaptureManifest{}, nil, fmt.Errorf("capture-manifest: %q schema_version %q (want %q or %q)", path, m.SchemaVersion, captureManifestSchemaVersion, captureManifestSchemaVersionV2)
 	}
 	sum := sha256.Sum256(raw)
 	ref := AssemblyCaptureManifest{
 		Digest:        "sha256:" + hex.EncodeToString(sum[:]),
 		ArtifactCount: m.ArtifactCount,
 	}
-	return ref, &captureVerification{usagePresent: usage}, nil
+	return ref, verify, nil
+}
+
+// validateCaptureLedger checks a v2 manifest's expected run ledger against
+// its per_artifact rows and returns the deduplicated expected legacy-mixed
+// pair keys (file order). Every violation is loud: the ledger is the audit
+// trail for failed runs, so a corrupt or hand-edited one must never verify.
+func validateCaptureLedger(m captureManifest) ([]assemblyPairKey, error) {
+	if m.ExpectedCount != len(m.Expected) {
+		return nil, fmt.Errorf("expected_count %d does not match its %d expected row(s)", m.ExpectedCount, len(m.Expected))
+	}
+	if len(m.Expected) == 0 {
+		return nil, fmt.Errorf("v2 manifest has no expected ledger rows")
+	}
+	perArtifact := make(map[string]struct{}, len(m.PerArtifact))
+	for _, row := range m.PerArtifact {
+		perArtifact[row.ArtifactHash] = struct{}{}
+	}
+	seen := make(map[string]struct{}, len(m.Expected))
+	capturedHashes := make(map[string]struct{}, len(m.Expected))
+	var pairs []assemblyPairKey
+	seenPair := map[assemblyPairKey]struct{}{}
+	for i, row := range m.Expected {
+		key := row.TraceID + "\x00" + row.Model
+		if _, dup := seen[key]; dup {
+			return nil, fmt.Errorf("expected row %d: duplicate (trace_id, model) (%s, %s)", i, row.TraceID, row.Model)
+		}
+		seen[key] = struct{}{}
+		switch row.Arm {
+		case "", string(AssemblyTopline):
+			if row.PairID != "" {
+				return nil, fmt.Errorf("expected row %d (%s/%s): pair_id %q on a non-paired arm %q", i, row.TraceID, row.Model, row.PairID, row.Arm)
+			}
+		case string(AssemblyLegacy), string(AssemblyMixed):
+			if row.PairID == "" {
+				return nil, fmt.Errorf("expected row %d (%s/%s): %s arm requires a pair_id", i, row.TraceID, row.Model, row.Arm)
+			}
+		default:
+			return nil, fmt.Errorf("expected row %d (%s/%s): invalid arm %q", i, row.TraceID, row.Model, row.Arm)
+		}
+		switch row.Status {
+		case "captured":
+			if row.ArtifactHash == "" {
+				return nil, fmt.Errorf("expected row %d (%s/%s): captured row without an artifact_hash", i, row.TraceID, row.Model)
+			}
+			if _, ok := perArtifact[row.ArtifactHash]; !ok {
+				return nil, fmt.Errorf("expected row %d (%s/%s): captured hash %q is not in per_artifact", i, row.TraceID, row.Model, row.ArtifactHash)
+			}
+			capturedHashes[row.ArtifactHash] = struct{}{}
+		case "failed":
+			if row.ArtifactHash != "" {
+				return nil, fmt.Errorf("expected row %d (%s/%s): failed row carries artifact_hash %q (failed runs produce no artifact)", i, row.TraceID, row.Model, row.ArtifactHash)
+			}
+		default:
+			return nil, fmt.Errorf("expected row %d (%s/%s): invalid status %q (want captured or failed)", i, row.TraceID, row.Model, row.Status)
+		}
+		if row.Arm == string(AssemblyLegacy) || row.Arm == string(AssemblyMixed) {
+			k := assemblyPairKey{assemblyKindLegacyMixed, row.PairID, modelKey(row.Model)}
+			if _, dup := seenPair[k]; !dup {
+				seenPair[k] = struct{}{}
+				pairs = append(pairs, k)
+			}
+		}
+	}
+	// Both directions: every per_artifact row must be vouched for by a
+	// captured ledger row too, or the ledger under-reports the run.
+	for _, row := range m.PerArtifact {
+		if _, ok := capturedHashes[row.ArtifactHash]; !ok {
+			return nil, fmt.Errorf("per_artifact hash %q has no captured row in the expected ledger", row.ArtifactHash)
+		}
+	}
+	return pairs, nil
 }
 
 // writeCaptureManifest marshals and writes the manifest, then emits the
@@ -402,14 +528,32 @@ func runCalibrateCapture(ctx context.Context, opts calibrateCaptureOptions) (ret
 	}
 	var artifacts []Artifact
 	var manifestRows []captureManifestRow
+	var expected []captureExpectedRow
 	failed := 0
 	for _, r := range results {
+		// The v2 run ledger records EVERY attempted (trace x model), failures
+		// included — a failed run must leave auditable evidence, not vanish
+		// (external PR review P1). Attempts is structurally 1: the runner
+		// makes one attempt per pair; the registered one-retry policy is a
+		// re-invocation over the gap, which this ledger makes visible.
+		row := captureExpectedRow{TraceID: r.TraceID, Model: r.Model, Status: "captured", Attempts: 1}
+		if trace, ok := traceByID[r.TraceID]; ok && prefilledAssemblyMode(trace) {
+			row.Arm = string(trace.AssemblyEval.Mode)
+			switch trace.AssemblyEval.Mode {
+			case AssemblyLegacy, AssemblyMixed:
+				row.PairID = trace.AssemblyEval.PairID
+			}
+		}
 		if r.Err != nil {
 			// Skip failed runs — they cannot be labeled coherently.
 			// Surface the per-pair reason: a silently dropped result makes a
 			// partial corpus look complete and hides timeout-vs-refusal.
 			fmt.Fprintf(os.Stderr, "calibrate-capture: skipped %s/%s: %v\n", r.TraceID, r.Model, r.Err)
 			failed++
+			row.Status = "failed"
+			// Path-redacted: the manifest is committed evidence.
+			row.Error = redactPaths(r.Err.Error())
+			expected = append(expected, row)
 			continue
 		}
 		trace, ok := traceByID[r.TraceID]
@@ -428,6 +572,8 @@ func runCalibrateCapture(ctx context.Context, opts calibrateCaptureOptions) (ret
 		}
 		artifact.ArtifactHash = artifactHash(artifact)
 		artifacts = append(artifacts, artifact)
+		row.ArtifactHash = artifact.ArtifactHash
+		expected = append(expected, row)
 		manifestRows = append(manifestRows, captureManifestRow{
 			TraceID:      r.TraceID,
 			ArtifactHash: artifact.ArtifactHash,
@@ -482,7 +628,7 @@ func runCalibrateCapture(ctx context.Context, opts calibrateCaptureOptions) (ret
 			})
 		}
 		manifest := captureManifest{
-			SchemaVersion:        captureManifestSchemaVersion,
+			SchemaVersion:        captureManifestSchemaVersionV2,
 			CreatedAt:            now(),
 			Endpoint:             endpoint,
 			Transport:            transport,
@@ -492,6 +638,8 @@ func runCalibrateCapture(ctx context.Context, opts calibrateCaptureOptions) (ret
 			CounterbalanceScheme: captureCounterbalanceScheme,
 			ArtifactCount:        len(manifestRows),
 			PerArtifact:          manifestRows,
+			ExpectedCount:        len(expected),
+			Expected:             expected,
 		}
 		if err := writeCaptureManifest(captureManifestPath(opts.OutputPath), manifest, opts.Stdout); err != nil {
 			return err
@@ -700,6 +848,24 @@ func matchLabels(labels []Label, arts []Artifact) ([]matchedLabel, []Label, erro
 	return matched, stale, nil
 }
 
+// requireJSONDecoderEOF asserts a json.Decoder has consumed its entire input:
+// exactly one more Decode must return io.EOF. Decoder.More() cannot do this —
+// it reports false at a closing ']' or '}', so a JSONL file (or single-value
+// document) with a stray bracket or brace after the final value would pass a
+// More()-based end check silently (external PR review P3). Whitespace-only
+// tails still pass (Decode returns io.EOF).
+func requireJSONDecoderEOF(dec *json.Decoder, kind string) error {
+	var trailing json.RawMessage
+	switch err := dec.Decode(&trailing); {
+	case err == nil:
+		return fmt.Errorf("%s: trailing data after the final value", kind)
+	case errors.Is(err, io.EOF):
+		return nil
+	default:
+		return fmt.Errorf("%s: trailing data after the final value: %w", kind, err)
+	}
+}
+
 func loadArtifacts(path string) ([]Artifact, error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -723,6 +889,9 @@ func loadArtifacts(path string) ([]Artifact, error) {
 		}
 		seen[a.ArtifactHash] = struct{}{}
 		out = append(out, a)
+	}
+	if err := requireJSONDecoderEOF(dec, "artifacts"); err != nil {
+		return nil, err
 	}
 	return out, nil
 }
@@ -751,6 +920,9 @@ func loadLabels(path string) ([]Label, error) {
 				l.TraceID, l.CandidateModel, l.ExpectedAnswerQuality)
 		}
 		out = append(out, l)
+	}
+	if err := requireJSONDecoderEOF(dec, "labels"); err != nil {
+		return nil, err
 	}
 	return out, nil
 }

@@ -1,0 +1,104 @@
+package main
+
+// Output/input alias audit (#331 slice 3c, external PR review P1): every
+// output flag in every mode must route through refuseOutputAlias against all
+// of that mode's inputs and its sibling outputs — the review reproduced
+// -assembly-report -report clobbering the artifacts JSONL. Guards fire
+// BEFORE any input is loaded, so each case here only needs paths, not valid
+// file contents.
+
+import (
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"testing"
+)
+
+func TestMainOutputAliasGuardsAllModes(t *testing.T) {
+	dir := t.TempDir()
+	mkFile := func(name string) string {
+		path := filepath.Join(dir, name)
+		if err := os.WriteFile(path, []byte("x\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+	arts := mkFile("artifacts.jsonl")
+	labels := mkFile("labels.jsonl")
+	corpus := mkFile("corpus-manifest.jsonl")
+	captureMan := mkFile("artifacts.jsonl.manifest.json")
+	trace := mkFile("trace.json")
+	fimCase := mkFile("fim-case.json")
+	xlamSrc := mkFile("xlam.json")
+	sidemap := filepath.Join(dir, "sidemap.json") // need not exist: guards fire before loads
+	discOut := filepath.Join(dir, "discriminators.jsonl")
+
+	cases := []struct {
+		name, wantErr string
+		args          []string
+	}{
+		{"assembly-report report aliasing artifacts", "-report must differ from -artifacts",
+			[]string{"-assembly-report", "-labels", labels, "-artifacts", arts, "-report", arts}},
+		{"assembly-report report aliasing capture manifest", "-report must differ from -capture-manifest",
+			[]string{"-assembly-report", "-labels", labels, "-artifacts", arts, "-capture-manifest", captureMan, "-report", captureMan}},
+		{"manual-report report aliasing labels", "-report must differ from -labels",
+			[]string{"-manual-report", "-labels", labels, "-artifacts", arts, "-report", labels}},
+		{"paired-report report aliasing artifacts", "-report must differ from -artifacts",
+			[]string{"-paired-report", "-labels", labels, "-artifacts", arts, "-report", arts}},
+		{"paired-report report aliasing corpus manifest", "-report must differ from -corpus-manifest",
+			[]string{"-paired-report", "-labels", labels, "-artifacts", arts, "-corpus-manifest", corpus, "-report", corpus}},
+		{"discrimination manifest-out aliasing corpus manifest", "-discriminator-manifest-out must differ from -corpus-manifest",
+			[]string{"-discrimination-report", "-labels", labels, "-artifacts", arts, "-corpus-manifest", corpus, "-discriminator-manifest-out", corpus}},
+		{"discrimination report aliasing manifest-out", "-report must differ from -discriminator-manifest-out",
+			[]string{"-discrimination-report", "-labels", labels, "-artifacts", arts, "-corpus-manifest", corpus, "-discriminator-manifest-out", discOut, "-report", discOut}},
+		{"blind-render report aliasing artifacts", "-report must differ from -artifacts",
+			[]string{"-blind-render", "-artifacts", arts, "-report", arts}},
+		{"fc-render report aliasing sidemap", "-report must differ from -fc-sidemap",
+			[]string{"-fc-render", "-artifacts", arts, "-fc-sidemap", sidemap, "-report", sidemap}},
+		{"fc-render report aliasing artifacts", "-report must differ from -artifacts",
+			[]string{"-fc-render", "-artifacts", arts, "-fc-sidemap", sidemap, "-report", arts}},
+		{"adjudicate-render report aliasing labels", "-report must differ from -labels",
+			[]string{"-adjudicate-render", "-artifacts", arts, "-labels", labels, "-report", labels}},
+		{"calibrate-capture labels-out aliasing a trace", "-labels-out must differ from -traces",
+			[]string{"-calibrate-capture", "-traces", trace, "-models", "m", "-labels-out", trace}},
+		{"run report aliasing a trace", "-report must differ from -traces",
+			[]string{"-traces", trace, "-models", "m", "-report", trace}},
+		{"run report aliasing manual labels", "-report must differ from -labels",
+			[]string{"-traces", trace, "-models", "m", "-scorer", "manual", "-labels", labels, "-report", labels}},
+		{"fim-latency report aliasing a case", "-report must differ from -fim-cases",
+			[]string{"-fim-latency", "-fim-cases", fimCase, "-models", "m", "-report", fimCase}},
+		{"import-xlam manifest aliasing the source", "-import-xlam-manifest must differ from -import-xlam",
+			[]string{"-import-xlam", xlamSrc, "-import-xlam-manifest", xlamSrc, "-import-xlam-out", filepath.Join(dir, "xlam-out")}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cmd := exec.Command(os.Args[0], tc.args...)
+			cmd.Env = append(os.Environ(), "LLM_BENCH_TEST_MAIN=1")
+			out, err := cmd.CombinedOutput()
+			if err == nil {
+				t.Fatalf("output aliasing an input was accepted:\n%s", out)
+			}
+			if !strings.Contains(string(out), tc.wantErr) {
+				t.Fatalf("output missing %q:\n%s", tc.wantErr, out)
+			}
+		})
+	}
+
+	t.Run("hardlinked report caught by os.SameFile", func(t *testing.T) {
+		hard := filepath.Join(dir, "report-hardlink.json")
+		if err := os.Link(arts, hard); err != nil {
+			t.Skipf("hardlink unsupported here: %v", err)
+		}
+		cmd := exec.Command(os.Args[0],
+			"-assembly-report", "-labels", labels, "-artifacts", arts, "-report", hard)
+		cmd.Env = append(os.Environ(), "LLM_BENCH_TEST_MAIN=1")
+		out, err := cmd.CombinedOutput()
+		if err == nil {
+			t.Fatalf("hardlinked report path accepted:\n%s", out)
+		}
+		if !strings.Contains(string(out), "resolves to the same file as -artifacts") {
+			t.Fatalf("output missing the SameFile refusal:\n%s", out)
+		}
+	})
+}

@@ -108,6 +108,9 @@ func loadManifest(path string) (Manifest, error) {
 		seen[e.TraceID] = struct{}{}
 		m.Entries = append(m.Entries, e)
 	}
+	if err := requireJSONDecoderEOF(dec, "manifest"); err != nil {
+		return Manifest{}, err
+	}
 	if len(m.Entries) == 0 {
 		return Manifest{}, fmt.Errorf("manifest: %q is empty", path)
 	}

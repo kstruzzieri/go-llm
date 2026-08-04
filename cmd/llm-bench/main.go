@@ -227,6 +227,8 @@ func main() {
 	}
 
 	if *importXlam != "" {
+		refuseOutputAlias("import-xlam", "-import-xlam-manifest", *importXlamManifest,
+			[][2]string{{"-import-xlam", *importXlam}})
 		res, err := importXlamIrrelevance(xlamImportOptions{
 			SrcPath:      *importXlam,
 			OutDir:       *importXlamOut,
@@ -250,6 +252,10 @@ func main() {
 		if err != nil {
 			log.Fatalf("llm-bench: glob: %v", err)
 		}
+		// The artifacts output (and its manifest sibling) must never clobber
+		// a trace input.
+		refuseOutputAlias("calibrate-capture", "-labels-out", *labelsOut, pathListInputs("-traces", tracePaths))
+		refuseOutputAlias("calibrate-capture", "-labels-out capture manifest", captureManifestPath(*labelsOut), pathListInputs("-traces", tracePaths))
 		traces, err := loadTraces(tracePaths)
 		if err != nil {
 			log.Fatalf("llm-bench: load traces: %v", err)
@@ -350,6 +356,8 @@ func main() {
 	}
 
 	if *manualReport {
+		refuseReportAlias("manual-report", *reportPath, [][2]string{
+			{"-labels", *labelsPath}, {"-artifacts", *artifactsPath}, {"-corpus-manifest", *corpusManifestPath}})
 		filter, err := offlineCorpusFilter(*corpusManifestPath, *corpusPartitions, *corpusCategories, *corpusSources, *corpusOnlyEvidence)
 		if err != nil {
 			log.Fatalf("llm-bench: manual-report: %v", err)
@@ -370,6 +378,8 @@ func main() {
 	}
 
 	if *pairedReport {
+		refuseReportAlias("paired-report", *reportPath, [][2]string{
+			{"-labels", *labelsPath}, {"-artifacts", *artifactsPath}, {"-corpus-manifest", *corpusManifestPath}})
 		filter, err := offlineCorpusFilter(*corpusManifestPath, *corpusPartitions, *corpusCategories, *corpusSources, *corpusOnlyEvidence)
 		if err != nil {
 			log.Fatalf("llm-bench: paired-report: %v", err)
@@ -390,6 +400,11 @@ func main() {
 	}
 
 	if *assemblyReport {
+		// The review reproduced -report clobbering the artifacts JSONL here.
+		refuseReportAlias("assembly-report", *reportPath, [][2]string{
+			{"-labels", *labelsPath}, {"-artifacts", *artifactsPath},
+			{"-fc-preferences", *fcPreferences}, {"-fc-sidemap", *fcSidemapPath},
+			{"-capture-manifest", *captureManifestFlag}})
 		report, err := runAssemblyReport(assemblyReportOptions{
 			LabelsPath:          *labelsPath,
 			ArtifactsPath:       *artifactsPath,
@@ -419,6 +434,14 @@ func main() {
 		if strings.TrimSpace(*corpusSources) != "" {
 			log.Printf("llm-bench: ignoring -corpus-sources in -discrimination-report mode (all strata are classified so the funnel shows every source)")
 		}
+		discriminationInputs := [][2]string{
+			{"-labels", *labelsPath}, {"-artifacts", *artifactsPath}, {"-corpus-manifest", *corpusManifestPath}}
+		if strings.TrimSpace(*discriminatorManifestOut) != "" {
+			refuseOutputAlias("discrimination-report", "-discriminator-manifest-out", *discriminatorManifestOut, discriminationInputs)
+		}
+		// Output/output collision: both files are written by this invocation.
+		refuseReportAlias("discrimination-report", *reportPath,
+			append(discriminationInputs, [2]string{"-discriminator-manifest-out", *discriminatorManifestOut}))
 		report, err := runDiscriminationReport(discriminationOptions{
 			LabelsPath:               *labelsPath,
 			ArtifactsPath:            *artifactsPath,
@@ -443,6 +466,7 @@ func main() {
 	}
 
 	if *blindRender {
+		refuseReportAlias("blind-render", *reportPath, [][2]string{{"-artifacts", *artifactsPath}})
 		arts, err := loadArtifacts(*artifactsPath)
 		if err != nil {
 			log.Fatalf("llm-bench: blind-render: load artifacts: %v", err)
@@ -519,6 +543,8 @@ func main() {
 		if strings.TrimSpace(*fcSidemapPath) == "" {
 			log.Fatalf("llm-bench: -fc-render requires -fc-sidemap (generate one with -fc-sidemap-generate)")
 		}
+		refuseReportAlias("fc-render", *reportPath, [][2]string{
+			{"-artifacts", *artifactsPath}, {"-fc-sidemap", *fcSidemapPath}})
 		sidemap := mustLoadVerifiedFCSidemap("fc-render", *fcSidemapPath, *fcSidemapDigest)
 		arts, err := loadArtifacts(*artifactsPath)
 		if err != nil {
@@ -579,6 +605,8 @@ func main() {
 	}
 
 	if *adjudicateRender {
+		refuseReportAlias("adjudicate-render", *reportPath, [][2]string{
+			{"-artifacts", *artifactsPath}, {"-labels", *labelsPath}})
 		arts, err := loadArtifacts(*artifactsPath)
 		if err != nil {
 			log.Fatalf("llm-bench: adjudicate-render: load artifacts: %v", err)
@@ -743,6 +771,7 @@ func main() {
 		if len(casePaths) == 0 {
 			log.Fatalf("llm-bench: no FIM cases matched %q", *fimCases)
 		}
+		refuseReportAlias("fim-latency", *reportPath, pathListInputs("-fim-cases", casePaths))
 		cases, err := loadFIMCases(casePaths)
 		if err != nil {
 			log.Fatalf("llm-bench: load FIM cases: %v", err)
@@ -793,6 +822,13 @@ func main() {
 	if len(tracePaths) == 0 {
 		log.Fatalf("llm-bench: no traces matched %q", *tracesGlob)
 	}
+
+	runInputs := append(pathListInputs("-traces", tracePaths),
+		[2]string{"-corpus-manifest", *corpusManifestPath})
+	if *scorerName == "manual" {
+		runInputs = append(runInputs, [2]string{"-labels", *labelsPath})
+	}
+	refuseReportAlias("run", *reportPath, runInputs)
 
 	targets, err := parseModelTargets(*modelsArg)
 	if err != nil {
@@ -946,14 +982,20 @@ func mustLoadVerifiedFCSidemap(mode, path, committedDigest string) fcSidemapFile
 	return sidemap
 }
 
-// refuseOutputAlias fatals when an output path aliases an input file, via
-// cleaned-path equality or the os.SameFile backstop (case-insensitive
-// filesystems, symlinks, hardlinks). Mirrors the hardened -blind-ingest
-// -labels-out guard for the other worksheet-mode output flags; inputs are
-// ordered (flag, path) pairs so the failure is deterministic.
+// refuseOutputAlias fatals when an output path aliases an input file (or a
+// sibling output of the same invocation), via cleaned-path equality or the
+// os.SameFile backstop (case-insensitive filesystems, symlinks, hardlinks).
+// Mirrors the hardened -blind-ingest -labels-out guard across EVERY output
+// flag (external PR review P1: -report could clobber the artifacts JSONL);
+// inputs are ordered (flag, path) pairs so the failure is deterministic.
+// Blank input paths (unset optional flags) are skipped so call sites can
+// list every mode input unconditionally.
 func refuseOutputAlias(mode, outFlag, outPath string, inputs [][2]string) {
 	for _, in := range inputs {
 		inFlag, inPath := in[0], in[1]
+		if strings.TrimSpace(inPath) == "" {
+			continue
+		}
 		if filepath.Clean(outPath) == filepath.Clean(inPath) {
 			log.Fatalf("llm-bench: %s: %s must differ from %s (it would overwrite the input)", mode, outFlag, inFlag)
 		}
@@ -963,6 +1005,25 @@ func refuseOutputAlias(mode, outFlag, outPath string, inputs [][2]string) {
 			}
 		}
 	}
+}
+
+// refuseReportAlias applies refuseOutputAlias to the -report flag when it is
+// set (an empty -report writes to stdout and can alias nothing).
+func refuseReportAlias(mode, reportPath string, inputs [][2]string) {
+	if strings.TrimSpace(reportPath) == "" {
+		return
+	}
+	refuseOutputAlias(mode, "-report", reportPath, inputs)
+}
+
+// pathListInputs expands a list of concrete paths (globbed traces or FIM
+// cases) into refuseOutputAlias (flag, path) pairs under one flag name.
+func pathListInputs(flagName string, paths []string) [][2]string {
+	out := make([][2]string, 0, len(paths))
+	for _, p := range paths {
+		out = append(out, [2]string{flagName, p})
+	}
+	return out
 }
 
 func defaultJudgeModelName() string {

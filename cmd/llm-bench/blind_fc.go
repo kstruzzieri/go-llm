@@ -29,6 +29,10 @@ import (
 // prefer: and arm_guess: lines after it are read by the ingest parser.
 const fcFillMarker = "--- fill below (prefer: A | B | tie) ---"
 
+// fcPairHeaderPrefix opens a forced-choice block. Renderer, ingest grammar,
+// and the sentinel-escape rule must agree on this literal.
+const fcPairHeaderPrefix = "=== PAIR "
+
 // FCPreference is one forced-choice sidecar row (JSONL via -fc-out).
 // Preference is "a", "b", or "tie" — a SIDE, not an arm: which assembly arm
 // rendered as A is recoverable only through the sealed sidemap (or, for
@@ -240,6 +244,9 @@ func loadFCPreferences(path string) ([]FCPreference, error) {
 		}
 		out = append(out, r)
 	}
+	if err := requireJSONDecoderEOF(dec, "fc-preferences"); err != nil {
+		return nil, err
+	}
 	return out, nil
 }
 
@@ -367,18 +374,18 @@ func renderForcedChoiceWorksheet(arts []Artifact, sidemap fcSidemapFile) (string
 				return "", fmt.Errorf("forced-choice: pair %q model %q: header field %q is empty or contains whitespace (the PAIR header is space-delimited)", p.pairID, p.model, part)
 			}
 		}
-		fmt.Fprintf(&b, "=== PAIR %s %s ===\n", p.pairID, p.model)
+		fmt.Fprintf(&b, "%s%s %s ===\n", fcPairHeaderPrefix, p.pairID, p.model)
 		fmt.Fprintln(&b, "[question]")
-		fmt.Fprintln(&b, question)
+		fmt.Fprintln(&b, escapeWorksheetText(question))
 		fmt.Fprintln(&b)
 		fmt.Fprintln(&b, "[rubric]")
-		fmt.Fprintln(&b, strings.TrimSpace(p.legacy.Trace.Golden.FinalAnswerCriteria))
+		fmt.Fprintln(&b, escapeWorksheetText(strings.TrimSpace(p.legacy.Trace.Golden.FinalAnswerCriteria)))
 		fmt.Fprintln(&b)
 		fmt.Fprintln(&b, "[answer A]")
-		fmt.Fprintln(&b, strings.TrimSpace(sideA.ActualFinalAnswer))
+		fmt.Fprintln(&b, escapeWorksheetText(strings.TrimSpace(sideA.ActualFinalAnswer)))
 		fmt.Fprintln(&b)
 		fmt.Fprintln(&b, "[answer B]")
-		fmt.Fprintln(&b, strings.TrimSpace(sideB.ActualFinalAnswer))
+		fmt.Fprintln(&b, escapeWorksheetText(strings.TrimSpace(sideB.ActualFinalAnswer)))
 		fmt.Fprintln(&b)
 		fmt.Fprintln(&b, fcFillMarker)
 		fmt.Fprintln(&b, "prefer: ")
@@ -482,7 +489,7 @@ func ingestForcedChoiceWorksheet(worksheet string, arts []Artifact, labeler stri
 		return nil
 	}
 
-	grammar := worksheetGrammar{headerPrefixes: []string{"=== PAIR "}, fillMarker: fcFillMarker, fields: []string{"prefer", "arm_guess"}}
+	grammar := worksheetGrammar{headerPrefixes: []string{fcPairHeaderPrefix}, fillMarker: fcFillMarker, fields: []string{"prefer", "arm_guess"}}
 	err = scanWorksheetBlocks(worksheet, grammar,
 		func(_, body string) error {
 			fields := strings.Fields(body)
