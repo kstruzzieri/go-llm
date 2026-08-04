@@ -12,6 +12,7 @@ import (
 	"reflect"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -194,6 +195,106 @@ func (c *captureCaller) Chat(_ context.Context, req provider.ChatRequest, onToke
 	}
 	return agent.ModelResult{Response: provider.ChatResponse{Content: c.answer, Done: true}}, nil
 }
+
+type mapSessionStore struct {
+	mu            sync.Mutex
+	conversations map[string]conversation.Conversation
+	loadErr       error
+	saveErr       error
+	compressedErr error
+	loads         int
+	saves         int
+}
+
+var _ golem.SessionStore = (*mapSessionStore)(nil)
+
+func (s *mapSessionStore) Load(ctx context.Context, id string) (*conversation.Conversation, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.loads++
+	if s.loadErr != nil {
+		return nil, s.loadErr
+	}
+	conv, ok := s.conversations[id]
+	if !ok {
+		return nil, fmt.Errorf("map session store: load %q: %w", id, conversation.ErrNotFound)
+	}
+	cloned := cloneConversation(conv)
+	return &cloned, nil
+}
+
+func (s *mapSessionStore) Save(ctx context.Context, conv conversation.Conversation) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.saves++
+	if s.saveErr != nil {
+		return s.saveErr
+	}
+	if conv.DurableSummary != nil && s.compressedErr != nil {
+		return s.compressedErr
+	}
+	if s.conversations == nil {
+		s.conversations = make(map[string]conversation.Conversation)
+	}
+	s.conversations[conv.ID] = cloneConversation(conv)
+	return nil
+}
+
+func cloneConversation(conv conversation.Conversation) conversation.Conversation {
+	cloned := conv
+	cloned.Messages = append([]conversation.Message(nil), conv.Messages...)
+	for i := range cloned.Messages {
+		cloned.Messages[i].ToolCalls = append(json.RawMessage(nil), conv.Messages[i].ToolCalls...)
+	}
+	if conv.DurableSummary != nil {
+		summary := *conv.DurableSummary
+		cloned.DurableSummary = &summary
+	}
+	return cloned
+}
+
+type closeTrackingSessionStore struct {
+	mapSessionStore
+	closeCalls int
+}
+
+func (s *closeTrackingSessionStore) Close() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.closeCalls++
+	return nil
+}
+
+type blockingCompressionStore struct {
+	mapSessionStore
+	started chan struct{}
+	once    sync.Once
+}
+
+func (s *blockingCompressionStore) Save(ctx context.Context, conv conversation.Conversation) error {
+	if conv.DurableSummary == nil {
+		return s.mapSessionStore.Save(ctx, conv)
+	}
+	s.once.Do(func() { close(s.started) })
+	<-ctx.Done()
+	return ctx.Err()
+}
+
+type malformedSessionStore struct {
+	conversation *conversation.Conversation
+}
+
+func (s malformedSessionStore) Load(context.Context, string) (*conversation.Conversation, error) {
+	return s.conversation, nil
+}
+
+func (malformedSessionStore) Save(context.Context, conversation.Conversation) error { return nil }
 
 type thinkingCaller struct{}
 
@@ -884,9 +985,12 @@ func TestCancelFindsActiveRunAndStopsIt(t *testing.T) {
 
 func TestRunRejectsConcurrentTurnForSameThread(t *testing.T) {
 	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	store := &mapSessionStore{}
+	entered := make(chan string, 1)
 	runtime, err := golem.New(context.Background(), golem.Options{
 		Root:         t.TempDir(),
-		Orchestrator: agent.New(contextCaller{}, agent.ContextManager{}),
+		SessionStore: store,
+		Orchestrator: agent.New(barrierCaller{entered: entered}, agent.ContextManager{}),
 	})
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -897,22 +1001,16 @@ func TestRunRejectsConcurrentTurnForSameThread(t *testing.T) {
 		}
 	})
 
-	started := make(chan struct{})
 	firstDone := make(chan error, 1)
 	go func() {
 		_, runErr := runtime.Run(context.Background(), golem.Turn{
 			ThreadID: "thread-1",
 			RunID:    "run-1",
 			Message:  "wait",
-		}, func(event golem.Event) error {
-			if event.Type == "run.started" {
-				close(started)
-			}
-			return nil
-		})
+		}, func(golem.Event) error { return nil })
 		firstDone <- runErr
 	}()
-	<-started
+	<-entered
 
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
@@ -944,6 +1042,12 @@ func TestRunRejectsConcurrentTurnForSameThread(t *testing.T) {
 	runtime.Cancel("run-1")
 	if err := <-firstDone; !errors.Is(err, context.Canceled) {
 		t.Fatalf("first Run error = %v, want context canceled", err)
+	}
+	store.mu.Lock()
+	loads := store.loads
+	store.mu.Unlock()
+	if loads != 1 {
+		t.Fatalf("store loads = %d, want only the reserved run to load", loads)
 	}
 }
 
@@ -999,8 +1103,10 @@ func TestRunRejectsDuplicateActiveRunIDWithoutEvents(t *testing.T) {
 func TestRunAllowsDifferentThreadsConcurrently(t *testing.T) {
 	t.Setenv("XDG_DATA_HOME", t.TempDir())
 	entered := make(chan string, 2)
+	store := &mapSessionStore{}
 	runtime, err := golem.New(context.Background(), golem.Options{
 		Root:         t.TempDir(),
+		SessionStore: store,
 		Orchestrator: agent.New(barrierCaller{entered: entered}, agent.ContextManager{}),
 	})
 	if err != nil {
@@ -1273,6 +1379,317 @@ func TestStatelessRunDoesNotCreateSessionDatabase(t *testing.T) {
 	}
 }
 
+func TestInjectedSessionStorePreservesNativeHistoryAndThreadIsolationAcrossRuntimes(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("XDG_DATA_HOME", root)
+	store := &mapSessionStore{}
+
+	first, err := golem.New(context.Background(), golem.Options{
+		Root:         root,
+		SessionStore: store,
+		Orchestrator: agent.New(&captureCaller{answer: "first answer"}, agent.ContextManager{}),
+	})
+	if err != nil {
+		t.Fatalf("first New: %v", err)
+	}
+	if _, err := first.Run(context.Background(), golem.Turn{
+		ThreadID: "thread-injected",
+		RunID:    "run-injected-first",
+		Message:  "first question",
+	}, func(golem.Event) error { return nil }); err != nil {
+		t.Fatalf("first Run: %v", err)
+	}
+	if err := first.Close(); err != nil {
+		t.Fatalf("first Close: %v", err)
+	}
+
+	secondCaller := &captureCaller{answer: "second answer"}
+	second, err := golem.New(context.Background(), golem.Options{
+		Root:         root,
+		SessionStore: store,
+		Orchestrator: agent.New(secondCaller, agent.ContextManager{}),
+	})
+	if err != nil {
+		t.Fatalf("second New: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := second.Close(); err != nil {
+			t.Fatalf("second Close: %v", err)
+		}
+	})
+	if _, err := second.Run(context.Background(), golem.Turn{
+		ThreadID: "thread-other",
+		RunID:    "run-injected-other",
+		Message:  "unrelated question",
+	}, func(golem.Event) error { return nil }); err != nil {
+		t.Fatalf("other thread Run: %v", err)
+	}
+	isolated := []provider.ChatMessage{
+		{Role: "system", Content: golem.SystemPrompt(false, false)},
+		{Role: "user", Content: "unrelated question"},
+	}
+	if got := secondCaller.requests[0].Messages; !reflect.DeepEqual(got, isolated) {
+		t.Fatalf("other thread messages = %#v, want %#v", got, isolated)
+	}
+
+	if _, err := second.Run(context.Background(), golem.Turn{
+		ThreadID: "thread-injected",
+		RunID:    "run-injected-second",
+		Message:  "second question",
+	}, func(golem.Event) error { return nil }); err != nil {
+		t.Fatalf("second Run: %v", err)
+	}
+
+	want := []provider.ChatMessage{
+		{Role: "system", Content: golem.SystemPrompt(false, false)},
+		{Role: "user", Content: "first question"},
+		{Role: "assistant", Content: "first answer"},
+		{Role: "user", Content: "second question"},
+	}
+	if got := secondCaller.requests[1].Messages; !reflect.DeepEqual(got, want) {
+		t.Fatalf("second request messages = %#v, want %#v", got, want)
+	}
+}
+
+func TestInjectedSessionStoreDoesNotOpenDefaultSessionDatabase(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("XDG_DATA_HOME", root)
+	runtime, err := golem.New(context.Background(), golem.Options{
+		Root:         root,
+		SessionStore: &mapSessionStore{},
+		Orchestrator: agent.New(&captureCaller{answer: "answer"}, agent.ContextManager{}),
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if _, err := runtime.Run(context.Background(), golem.Turn{
+		ThreadID: "thread-no-default-db",
+		RunID:    "run-no-default-db",
+		Message:  "hello",
+	}, func(golem.Event) error { return nil }); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if err := runtime.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	path := filepath.Join(root, "golem", "sessions.db")
+	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("session database stat error = %v, want not exist", err)
+	}
+}
+
+func TestRuntimeCloseDoesNotCloseInjectedSessionStore(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("XDG_DATA_HOME", root)
+	store := &closeTrackingSessionStore{}
+	runtime, err := golem.New(context.Background(), golem.Options{
+		Root:         root,
+		SessionStore: store,
+		Orchestrator: agent.New(&captureCaller{answer: "answer"}, agent.ContextManager{}),
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if _, err := runtime.Run(context.Background(), golem.Turn{
+		ThreadID: "thread-owned-by-caller",
+		RunID:    "run-owned-by-caller",
+		Message:  "hello",
+	}, func(golem.Event) error { return nil }); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if err := runtime.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	store.mu.Lock()
+	closeCalls := store.closeCalls
+	store.mu.Unlock()
+	if closeCalls != 0 {
+		t.Fatalf("store close calls = %d, want 0", closeCalls)
+	}
+	if _, err := store.Load(context.Background(), "thread-owned-by-caller"); err != nil {
+		t.Fatalf("caller store unusable after Runtime.Close: %v", err)
+	}
+}
+
+func TestInjectedSessionStoreLoadFailurePreservesRunFailure(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("XDG_DATA_HOME", root)
+	loadErr := errors.New("load failed")
+	caller := &countingCaller{}
+	store := &mapSessionStore{loadErr: loadErr}
+	runtime, err := golem.New(context.Background(), golem.Options{
+		Root:         root,
+		SessionStore: store,
+		Orchestrator: agent.New(caller, agent.ContextManager{}),
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	t.Cleanup(func() { _ = runtime.Close() })
+
+	var events []golem.Event
+	_, err = runtime.Run(context.Background(), golem.Turn{
+		ThreadID: "thread-load-failure",
+		RunID:    "run-load-failure",
+		Message:  "hello",
+	}, func(event golem.Event) error {
+		events = append(events, event)
+		return nil
+	})
+	if !errors.Is(err, loadErr) || errors.Is(err, golem.ErrSessionPersistence) {
+		t.Fatalf("Run error = %v, want load error without ErrSessionPersistence", err)
+	}
+	if caller.calls != 0 || store.saves != 0 {
+		t.Fatalf("model calls = %d, store saves = %d, want 0, 0", caller.calls, store.saves)
+	}
+	if got, want := eventTypes(events), []string{"run.started", "run.failed"}; !slices.Equal(got, want) {
+		t.Fatalf("event types = %v, want %v", got, want)
+	}
+	var failed struct {
+		Code string `json:"code"`
+	}
+	if err := json.Unmarshal(events[1].Payload, &failed); err != nil {
+		t.Fatalf("decode run.failed: %v", err)
+	}
+	if failed.Code != "internal" {
+		t.Fatalf("run.failed code = %q, want internal", failed.Code)
+	}
+}
+
+func TestInjectedSessionStoreRejectsMalformedLoadResult(t *testing.T) {
+	tests := []struct {
+		name         string
+		conversation *conversation.Conversation
+	}{
+		{name: "nil conversation"},
+		{name: "wrong conversation ID", conversation: &conversation.Conversation{ID: "thread-other"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			caller := &countingCaller{}
+			runtime, err := golem.New(context.Background(), golem.Options{
+				Root:         t.TempDir(),
+				SessionStore: malformedSessionStore{conversation: tt.conversation},
+				Orchestrator: agent.New(caller, agent.ContextManager{}),
+			})
+			if err != nil {
+				t.Fatalf("New: %v", err)
+			}
+			t.Cleanup(func() { _ = runtime.Close() })
+
+			var events []golem.Event
+			var panicked any
+			func() {
+				defer func() { panicked = recover() }()
+				_, err = runtime.Run(context.Background(), golem.Turn{
+					ThreadID: "thread-requested",
+					RunID:    "run-malformed-load",
+					Message:  "hello",
+				}, func(event golem.Event) error {
+					events = append(events, event)
+					return nil
+				})
+			}()
+			if panicked != nil {
+				t.Fatalf("Run panicked: %v", panicked)
+			}
+			if err == nil {
+				t.Fatal("Run succeeded with malformed loaded conversation")
+			}
+			if caller.calls != 0 {
+				t.Fatalf("model calls = %d, want 0", caller.calls)
+			}
+			if got, want := eventTypes(events), []string{"run.started", "run.failed"}; !slices.Equal(got, want) {
+				t.Fatalf("event types = %v, want %v", got, want)
+			}
+		})
+	}
+}
+
+func TestInjectedSessionStoreSaveFailurePreservesRunFailure(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("XDG_DATA_HOME", root)
+	saveErr := errors.New("save failed")
+	store := &mapSessionStore{saveErr: saveErr}
+	runtime, err := golem.New(context.Background(), golem.Options{
+		Root:         root,
+		SessionStore: store,
+		Orchestrator: agent.New(&captureCaller{answer: "answer"}, agent.ContextManager{}),
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	t.Cleanup(func() { _ = runtime.Close() })
+
+	var events []golem.Event
+	result, err := runtime.Run(context.Background(), golem.Turn{
+		ThreadID: "thread-save-failure",
+		RunID:    "run-save-failure",
+		Message:  "hello",
+	}, func(event golem.Event) error {
+		events = append(events, event)
+		return nil
+	})
+	if result.Answer != "answer" {
+		t.Fatalf("Run answer = %q, want answer", result.Answer)
+	}
+	if !errors.Is(err, saveErr) || !errors.Is(err, golem.ErrSessionPersistence) {
+		t.Fatalf("Run error = %v, want save error and ErrSessionPersistence", err)
+	}
+	if got, want := eventTypes(events), []string{"run.started", "message.delta", "run.failed"}; !slices.Equal(got, want) {
+		t.Fatalf("event types = %v, want %v", got, want)
+	}
+	var failed struct {
+		Code string `json:"code"`
+	}
+	if err := json.Unmarshal(events[2].Payload, &failed); err != nil {
+		t.Fatalf("decode run.failed: %v", err)
+	}
+	if failed.Code != "internal" {
+		t.Fatalf("run.failed code = %q, want internal", failed.Code)
+	}
+}
+
+func TestInjectedSessionStoreLoadCancellationPreservesCanceledTerminal(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("XDG_DATA_HOME", root)
+	caller := &countingCaller{}
+	store := &mapSessionStore{loadErr: context.Canceled}
+	runtime, err := golem.New(context.Background(), golem.Options{
+		Root:         root,
+		SessionStore: store,
+		Orchestrator: agent.New(caller, agent.ContextManager{}),
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	t.Cleanup(func() { _ = runtime.Close() })
+
+	var events []golem.Event
+	_, err = runtime.Run(context.Background(), golem.Turn{
+		ThreadID: "thread-load-canceled",
+		RunID:    "run-load-canceled",
+		Message:  "hello",
+	}, func(event golem.Event) error {
+		events = append(events, event)
+		return nil
+	})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run error = %v, want context canceled", err)
+	}
+	if caller.calls != 0 || store.saves != 0 {
+		t.Fatalf("model calls = %d, store saves = %d, want 0, 0", caller.calls, store.saves)
+	}
+	if got, want := eventTypes(events), []string{"run.started", "run.canceled"}; !slices.Equal(got, want) {
+		t.Fatalf("event types = %v, want %v", got, want)
+	}
+	if string(events[1].Payload) != "{}" {
+		t.Fatalf("run.canceled payload = %s, want {}", events[1].Payload)
+	}
+}
+
 func TestStatefulThreadPersistsAcrossRuntimeInstances(t *testing.T) {
 	t.Setenv("XDG_DATA_HOME", t.TempDir())
 	root := t.TempDir()
@@ -1337,11 +1754,13 @@ func TestStatefulThreadPersistsAcrossRuntimeInstances(t *testing.T) {
 }
 
 func TestCanceledRunDoesNotPersistPartialTurn(t *testing.T) {
-	t.Setenv("XDG_DATA_HOME", t.TempDir())
 	root := t.TempDir()
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	store := &mapSessionStore{}
 	entered := make(chan string, 1)
 	first, err := golem.New(context.Background(), golem.Options{
 		Root:         root,
+		SessionStore: store,
 		Orchestrator: agent.New(barrierCaller{entered: entered}, agent.ContextManager{}),
 	})
 	if err != nil {
@@ -1364,10 +1783,17 @@ func TestCanceledRunDoesNotPersistPartialTurn(t *testing.T) {
 	if err := first.Close(); err != nil {
 		t.Fatalf("first Close: %v", err)
 	}
+	store.mu.Lock()
+	loads, saves := store.loads, store.saves
+	store.mu.Unlock()
+	if loads != 1 || saves != 0 {
+		t.Fatalf("store loads, saves = %d, %d, want 1, 0", loads, saves)
+	}
 
 	caller := &captureCaller{answer: "done"}
 	second, err := golem.New(context.Background(), golem.Options{
 		Root:         root,
+		SessionStore: store,
 		Orchestrator: agent.New(caller, agent.ContextManager{}),
 	})
 	if err != nil {
@@ -1394,12 +1820,14 @@ func TestCanceledRunDoesNotPersistPartialTurn(t *testing.T) {
 }
 
 func TestUnansweredRunDoesNotPersistPartialTurn(t *testing.T) {
-	dataDir := t.TempDir()
-	t.Setenv("XDG_DATA_HOME", dataDir)
+	root := t.TempDir()
+	t.Setenv("XDG_DATA_HOME", root)
+	store := &mapSessionStore{}
 	runtime, err := golem.New(context.Background(), golem.Options{
-		Root:         t.TempDir(),
+		Root:         root,
 		MaxSteps:     1,
 		Tools:        []agent.Tool{previewTool{}},
+		SessionStore: store,
 		Orchestrator: agent.New(&toolCaller{}, agent.ContextManager{}),
 	})
 	if err != nil {
@@ -1419,23 +1847,18 @@ func TestUnansweredRunDoesNotPersistPartialTurn(t *testing.T) {
 	if err := runtime.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
-
-	db, err := memory.OpenHardenedDB(context.Background(), filepath.Join(dataDir, "golem", "sessions.db"))
-	if err != nil {
-		t.Fatalf("open saved sessions: %v", err)
-	}
-	t.Cleanup(func() { _ = db.Close() })
-	store, err := conversation.NewStore(context.Background(), db)
-	if err != nil {
-		t.Fatalf("open conversation store: %v", err)
-	}
 	if _, err := store.Load(context.Background(), "thread-unanswered"); !errors.Is(err, conversation.ErrNotFound) {
 		t.Fatalf("load unanswered thread error = %v, want ErrNotFound", err)
+	}
+	if store.saves != 0 {
+		t.Fatalf("store saves = %d, want 0", store.saves)
 	}
 }
 
 func TestStatefulThreadCompressesHistoryIntoDurableSummary(t *testing.T) {
-	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	root := t.TempDir()
+	t.Setenv("XDG_DATA_HOME", root)
+	store := &mapSessionStore{}
 	caller := &captureCaller{answer: strings.Repeat("a", 20*1024)}
 	summaryCalls := 0
 	summarize := func(_ context.Context, _ string, _ []conversation.Message) (string, error) {
@@ -1443,9 +1866,10 @@ func TestStatefulThreadCompressesHistoryIntoDurableSummary(t *testing.T) {
 		return "compressed summary", nil
 	}
 	runtime, err := golem.New(context.Background(), golem.Options{
-		Root:         t.TempDir(),
+		Root:         root,
 		Budget:       agent.Budget{InputCeiling: 32 * 1024},
 		Summarizer:   summarize,
+		SessionStore: store,
 		Orchestrator: agent.New(caller, agent.ContextManager{}),
 	})
 	if err != nil {
@@ -1492,21 +1916,30 @@ func TestStatefulThreadCompressesHistoryIntoDurableSummary(t *testing.T) {
 	if !found {
 		t.Fatalf("next model request did not contain durable summary %q", wantSummary)
 	}
+	saved, err := store.Load(context.Background(), "thread-compress")
+	if err != nil {
+		t.Fatalf("load injected compressed thread: %v", err)
+	}
+	if saved.DurableSummary == nil || saved.DurableSummary.Content != "compressed summary" {
+		t.Fatalf("stored durable summary = %#v, want compressed summary", saved.DurableSummary)
+	}
 }
 
-func TestCompressionFailureKeepsSuccessfulTurn(t *testing.T) {
-	dataDir := t.TempDir()
-	t.Setenv("XDG_DATA_HOME", dataDir)
+func TestInjectedSessionStoreCompressionSaveFailureKeepsSuccessfulTurn(t *testing.T) {
 	root := t.TempDir()
+	t.Setenv("XDG_DATA_HOME", root)
+	compressionSaveErr := errors.New("compressed save failed")
+	store := &mapSessionStore{compressedErr: compressionSaveErr}
 	answer := strings.Repeat("a", 20*1024)
 	var warnings []error
 	runtime, err := golem.New(context.Background(), golem.Options{
 		Root:   root,
 		Budget: agent.Budget{InputCeiling: 32 * 1024},
 		Summarizer: func(context.Context, string, []conversation.Message) (string, error) {
-			return "", errors.New("summarizer unavailable")
+			return "compressed summary", nil
 		},
 		OnWarning:    func(err error) { warnings = append(warnings, err) },
+		SessionStore: store,
 		Orchestrator: agent.New(&captureCaller{answer: answer}, agent.ContextManager{}),
 	})
 	if err != nil {
@@ -1534,20 +1967,8 @@ func TestCompressionFailureKeepsSuccessfulTurn(t *testing.T) {
 	if err := runtime.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
-	if len(warnings) == 0 || !strings.Contains(warnings[len(warnings)-1].Error(), "summarizer unavailable") {
-		t.Fatalf("compression warnings = %v, want summarizer error", warnings)
-	}
-
-	db, err := memory.OpenHardenedDB(context.Background(), filepath.Join(dataDir, "golem", "sessions.db"))
-	if err != nil {
-		t.Fatalf("open saved sessions: %v", err)
-	}
-	t.Cleanup(func() {
-		_ = db.Close()
-	})
-	store, err := conversation.NewStore(context.Background(), db)
-	if err != nil {
-		t.Fatalf("open conversation store: %v", err)
+	if len(warnings) == 0 || !errors.Is(warnings[len(warnings)-1], compressionSaveErr) {
+		t.Fatalf("compression warnings = %v, want compressed save error", warnings)
 	}
 	saved, err := store.Load(context.Background(), "thread-compression-error")
 	if err != nil {
@@ -1558,7 +1979,10 @@ func TestCompressionFailureKeepsSuccessfulTurn(t *testing.T) {
 	}) || !slices.ContainsFunc(saved.Messages, func(message conversation.Message) bool {
 		return message.Role == "assistant" && message.Content == answer
 	}) {
-		t.Fatalf("saved turn missing after compression failure")
+		t.Fatalf("raw turn missing after compressed save failure")
+	}
+	if saved.DurableSummary != nil {
+		t.Fatalf("failed compressed snapshot was persisted: %#v", saved.DurableSummary)
 	}
 }
 
@@ -1726,6 +2150,66 @@ func TestCloseAbortsPostCommitCompression(t *testing.T) {
 		}
 	case <-time.After(10 * time.Second):
 		t.Fatal("Close blocked on post-commit compression")
+	}
+	if err := <-runDone; err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+}
+
+func TestCloseAbortsInjectedCompressionSave(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("XDG_DATA_HOME", root)
+	store := &blockingCompressionStore{started: make(chan struct{})}
+	answer := strings.Repeat("a", 20*1024)
+	runtime, err := golem.New(context.Background(), golem.Options{
+		Root:         root,
+		Budget:       agent.Budget{InputCeiling: 32 * 1024},
+		Summarizer:   func(context.Context, string, []conversation.Message) (string, error) { return "summary", nil },
+		SessionStore: store,
+		Orchestrator: agent.New(&captureCaller{answer: answer}, agent.ContextManager{}),
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	runDone := make(chan error, 1)
+	go func() {
+		for i := 0; i < 8; i++ {
+			_, runErr := runtime.Run(context.Background(), golem.Turn{
+				ThreadID: "thread-close-injected-compression",
+				RunID:    fmt.Sprintf("run-close-injected-compression-%d", i),
+				Message:  fmt.Sprintf("%d-%s", i, strings.Repeat("q", 20*1024)),
+			}, func(golem.Event) error { return nil })
+			if runErr != nil {
+				runDone <- runErr
+				return
+			}
+			select {
+			case <-store.started:
+				runDone <- nil
+				return
+			default:
+			}
+		}
+		runDone <- errors.New("compression save did not start")
+	}()
+
+	select {
+	case <-store.started:
+	case err := <-runDone:
+		t.Fatalf("Run ended before compressed save: %v", err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("compressed save did not start")
+	}
+	closeDone := make(chan error, 1)
+	go func() { closeDone <- runtime.Close() }()
+	select {
+	case err := <-closeDone:
+		if err != nil {
+			t.Fatalf("Close: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Close blocked on best-effort compressed save")
 	}
 	if err := <-runDone; err != nil {
 		t.Fatalf("Run: %v", err)

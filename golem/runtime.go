@@ -41,6 +41,23 @@ const (
 	maxCorrelationIDBytes      = 256
 )
 
+// SessionStore loads and saves complete stateful-thread snapshots. Load must
+// return an error matching conversation.ErrNotFound for a missing ID, and a
+// successful Load must return a non-nil Conversation with that ID. Save must
+// replace or upsert the complete snapshot.
+//
+// Calls for different thread IDs may overlap, so implementations must be safe
+// for concurrent use. Same-thread serialization applies only within one
+// Runtime; callers sharing a store across runtimes must not run the same thread
+// concurrently. Compression may save a completed turn twice: first the raw
+// snapshot, then a best-effort compressed snapshot. The caller owns the store
+// and must keep it alive until Runtime.Close returns; Runtime never closes,
+// migrates, or hardens it.
+type SessionStore interface {
+	Load(ctx context.Context, id string) (*conversation.Conversation, error)
+	Save(ctx context.Context, conv conversation.Conversation) error
+}
+
 // Options configures a Runtime.
 type Options struct {
 	Root       string
@@ -58,6 +75,10 @@ type Options struct {
 	// uncompressed and grow without bound.
 	Summarizer         conversation.Summarizer
 	DisableCompression bool
+	// SessionStore overrides the lazy durable SQLite store for non-empty
+	// ThreadIDs, including compression, without opening the default database.
+	// Nil preserves the default SQLite behavior; empty ThreadIDs stay stateless.
+	SessionStore SessionStore
 	// RetainReasoning preserves model reasoning in returned Results. Leave
 	// false for untrusted embedders; reasoning never reaches events or the
 	// session database either way.
@@ -193,6 +214,10 @@ func New(ctx context.Context, opts Options) (*Runtime, error) {
 	if maxMessage <= 0 {
 		maxMessage = defaultMaxMessageBytes
 	}
+	var sessions *threadStore
+	if opts.SessionStore != nil {
+		sessions = &threadStore{store: opts.SessionStore}
+	}
 	return &Runtime{
 		orchestrator:    orchestrator,
 		root:            root,
@@ -209,6 +234,7 @@ func New(ctx context.Context, opts Options) (*Runtime, error) {
 		active:          make(map[string]*activeRun),
 		activeThreads:   make(map[string]*activeRun),
 		closeDone:       make(chan struct{}),
+		sessions:        sessions,
 		bundle:          bundle,
 	}, nil
 }

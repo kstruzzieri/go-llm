@@ -28,7 +28,7 @@ const (
 type threadStore struct {
 	db    *sql.DB
 	path  string
-	store *conversation.SQLiteStore
+	store SessionStore
 }
 
 type threadState struct {
@@ -68,6 +68,9 @@ func (r *Runtime) loadThread(ctx context.Context, id string) (*threadState, erro
 			return &threadState{conversation: conversation.Conversation{ID: id}}, nil
 		}
 		return nil, fmt.Errorf("golem: load thread %q: %w", id, err)
+	}
+	if conv == nil || conv.ID != id {
+		return nil, fmt.Errorf("golem: load thread %q: session store returned invalid conversation", id)
 	}
 	return &threadState{conversation: *conv}, nil
 }
@@ -127,7 +130,7 @@ func (r *Runtime) saveThread(ctx context.Context, active *activeRun, state *thre
 	if !changed {
 		return nil
 	}
-	if err := store.store.Save(persistCtx, compacted); err != nil {
+	if err := store.store.Save(ctx, compacted); err != nil {
 		r.reportCompressionWarning(candidate.ID, fmt.Errorf("save compressed conversation: %w", err))
 		return nil
 	}
@@ -137,6 +140,9 @@ func (r *Runtime) saveThread(ctx context.Context, active *activeRun, state *thre
 }
 
 func (r *Runtime) secureThreadStore(store *threadStore) {
+	if store.db == nil {
+		return
+	}
 	if err := memory.SecureDBFiles(store.path); err != nil {
 		r.reportWarning(fmt.Errorf("golem: secure session database: %w", err))
 	}
@@ -299,6 +305,9 @@ func (r *Runtime) closeThreadStore() error {
 	r.sessions = nil
 	r.sessionMu.Unlock()
 	if store == nil {
+		return nil
+	}
+	if store.db == nil {
 		return nil
 	}
 	return store.db.Close()
