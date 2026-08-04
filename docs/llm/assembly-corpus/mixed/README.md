@@ -38,6 +38,25 @@ Committed artifacts of the registered run (see "Commit policy" below):
 - `pair-preferences.jsonl` — the forced-choice sidecar labels
 - `report.json` — the committed `-assembly-report` verdict
 
+## Registered verdict (labeled 2026-08-04)
+
+**quality-improved** for candidate `qwen3-coder-next:latest`: pooled mean
+paired delta (mixed − legacy) **+0.279** on the 0/0.5/1 AnswerQuality scale,
+95% stratified-cluster-bootstrap CI **[+0.179, +0.379]**, over **70/70
+complete labeled non-control pairs with zero exclusions**. The verdict is
+scoped to this balanced synthetic stress corpus at the registered pressure
+fraction f=0.6, under greedy decoding, for the named candidate model.
+Instruments: all 6 identical-arm control pairs scored |delta| = 0; 7/7
+intra-rater duplicate blocks agreed (mean |delta| 0.000); the 12-trace
+topline ceiling scored mean 1.0 (the model answers when handed the facts —
+assembly was the bottleneck); the registered forced-choice secondary agrees
+(34 mixed / 14 legacy / 22 ties, cluster sign-flip permutation p = 0.0049);
+leave-one-family-out CI lower bounds stay in [+0.154, +0.206]. Zero blocks
+were flagged for adjudication, so no adjudication log exists for this run.
+Per-stratum means are descriptive only: chain_retention +1.00,
+conversation_only +0.50, stale_vs_fresh +0.07, memory_only −0.07,
+cross_domain_join −0.11.
+
 ## Pre-registered decision rule (v2) — frozen before any labeling
 
 The report header carries this rule verbatim, rendered from the registered
