@@ -46,7 +46,8 @@ Committed artifacts of the registered run (see "Commit policy" below):
 
 ## Registered verdict (labeled 2026-08-04)
 
-**quality-improved** for candidate `qwen3-coder-next:latest`: pooled mean
+**quality-improved** for the candidate served by the configured endpoint
+under selector `qwen3-coder-next:latest`: pooled mean
 paired delta (mixed − legacy) **+0.279** on the 0/0.5/1 AnswerQuality scale,
 95% stratified-cluster-bootstrap CI **[+0.179, +0.379]**, over **70/70
 complete labeled non-control pairs with zero exclusions**. The verdict is
@@ -59,6 +60,9 @@ assembly was the bottleneck); the registered forced-choice secondary agrees
 (34 mixed / 14 legacy / 22 ties, cluster sign-flip permutation p = 0.0049);
 leave-one-family-out CI lower bounds stay in [+0.154, +0.206]. Zero blocks
 were flagged for adjudication, so no adjudication log exists for this run.
+No arm guesses were recorded in the forced-choice pass (arm_guess is
+optional and the report shows n_guessed = 0), so only STRUCTURAL blinding
+is evidenced for this run; the practical-blinding audit is vacuous here.
 Per-stratum means are descriptive only: chain_retention +1.00,
 conversation_only +0.50, stale_vs_fresh +0.07, memory_only −0.07,
 cross_domain_join −0.11.
@@ -70,8 +74,8 @@ structural weakness to bite. Summed per-stratum delta contributions (out of
 the pooled +19.5 total over 70 pairs): chain_retention +14.0,
 conversation_only +7.0, stale_vs_fresh +1.0, memory_only −1.0,
 cross_domain_join −1.5 — the 42 cases outside the two positive strata sum
-to −1.5. Leave-one-stratum-out over the same stratified-cluster-bootstrap
-scheme (descriptive, not registered): dropping chain_retention gives mean
+to −1.5. Stratum-exclusion sensitivity over the same stratified-cluster-bootstrap
+scheme (descriptive, not registered; one- and two-stratum removals): dropping chain_retention gives mean
 +0.098 with CI approximately [−0.03, +0.22]; dropping chain_retention AND
 conversation_only gives −0.036 with CI approximately [−0.20, +0.13].
 Reading: chain_retention and conversation_only are precisely the strata
@@ -80,11 +84,14 @@ discards (whole answer-bearing chains; older history spans), while
 cross_domain_join and memory_only were authored with registered
 legacy-favoring polarities and landed negative — the corpus contains
 designed legacy wins, and the pooled verdict holds over the registered
-mixture. The bootstrap holds that authored stratum mixture fixed; it
-quantifies label/cluster noise, not uncertainty about the mixture itself.
-The registered decision applies to the pooled corpus as registered; on
-transcript populations without chain-eviction or deep-history retention
-pressure, these tables say the expected gain is near zero.
+mixture. The bootstrap holds that authored stratum mixture fixed and the labels
+are fixed inputs; it quantifies resampling variability among the observed
+authored families, not label noise and not uncertainty about the mixture
+itself. The registered decision applies to the pooled corpus as
+registered; within this corpus, the cases outside the two designed
+pressure shapes show no measured gain (the tables above), and any claim
+about other transcript distributions is outside this instrument's
+evidence.
 
 ### Candidate identity (narrowed claim + post-hoc addendum)
 
@@ -94,8 +101,9 @@ The committed identity evidence for this run is: the selector
 every artifact row. The manifest's `/props` probe returned `status 404`
 (llama-swap does not proxy it) and the selector digest is empty, so the
 identity claim is NARROWED to "the model the configured endpoint served
-under this selector." Post-hoc addendum, disclosed as such: the GGUF file
-resident at the serving path, unchanged since the capture, hashes to
+under this selector." Post-hoc addendum, an operator-reported observation (a post-hoc hash
+cannot establish that the file is the one served): the GGUF file resident
+at the serving path hashes to
 sha256:4bb93f0a0221ef4ff963ca9094df629c8dfdfabc3b4fdd85c1a2e4c0624fce36
 (unsloth Qwen3-Coder-Next UD-Q4_K_XL), served by llama.cpp build
 b10210-000547513 per live probes during the same session; neither fact
