@@ -328,6 +328,66 @@ func TestImportXlamIrrelevanceClearsStaleTraces(t *testing.T) {
 	}
 }
 
+// TestImportXlamIrrelevanceRefusesToDeleteItsSource pins the stale-cleanup
+// self-delete hazard (external PR review round 2 P1): a -import-xlam source
+// that matches the managed xlam-irrel-*.json pattern inside -import-xlam-out
+// would be removed by the cleanup after being read, and the import would
+// "succeed" from memory with its input gone. The import must refuse before
+// any cleanup — by cleaned path, and by os.SameFile for a symlinked source.
+func TestImportXlamIrrelevanceRefusesToDeleteItsSource(t *testing.T) {
+	recs := []xlamRecord{{Query: "a", Tools: sampleXlamTools, Answers: "[]"}}
+	blob, _ := json.Marshal(recs)
+
+	t.Run("source inside the output dir", func(t *testing.T) {
+		dir := t.TempDir()
+		out := filepath.Join(dir, "o")
+		if err := os.MkdirAll(out, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		src := filepath.Join(out, "xlam-irrel-0001.json")
+		if err := os.WriteFile(src, blob, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		_, err := importXlamIrrelevance(xlamImportOptions{
+			SrcPath: src, OutDir: out, ManifestPath: filepath.Join(dir, "m.jsonl"),
+			N: 0, Seed: 1, MinTools: 1,
+		})
+		if err == nil || !strings.Contains(err.Error(), "refusing") {
+			t.Fatalf("err = %v; want a loud refusal to delete the source", err)
+		}
+		got, readErr := os.ReadFile(src)
+		if readErr != nil || string(got) != string(blob) {
+			t.Fatalf("source no longer intact (err=%v, %d bytes)", readErr, len(got))
+		}
+	})
+
+	t.Run("symlinked source caught by os.SameFile", func(t *testing.T) {
+		dir := t.TempDir()
+		out := filepath.Join(dir, "o")
+		if err := os.MkdirAll(out, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		real := filepath.Join(dir, "xlam.json")
+		if err := os.WriteFile(real, blob, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		link := filepath.Join(out, "xlam-irrel-0002.json")
+		if err := os.Symlink(real, link); err != nil {
+			t.Skipf("symlink unsupported here: %v", err)
+		}
+		_, err := importXlamIrrelevance(xlamImportOptions{
+			SrcPath: real, OutDir: out, ManifestPath: filepath.Join(dir, "m.jsonl"),
+			N: 0, Seed: 1, MinTools: 1,
+		})
+		if err == nil || !strings.Contains(err.Error(), "refusing") {
+			t.Fatalf("err = %v; want a loud refusal (symlink resolves to the source)", err)
+		}
+		if _, statErr := os.Stat(real); statErr != nil {
+			t.Fatalf("source no longer intact: %v", statErr)
+		}
+	})
+}
+
 func TestImportXlamIrrelevanceRejectsNullFieldsEvenAtMinToolsZero(t *testing.T) {
 	// With min-tools=0 a "null" tools/answers row must still be filtered, not
 	// imported as a zero-tool / false golden-empty trace.

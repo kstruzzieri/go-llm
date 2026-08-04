@@ -16,13 +16,19 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
+	"sort"
 	"strings"
 	"testing"
 )
 
 // failingRunner returns one Result per (target, trace) like the real runner,
-// failing the trace IDs in fail with a canned error.
-type failingRunner struct{ fail map[string]bool }
+// failing the trace IDs in fail with a canned error (failErr overrides the
+// default when set).
+type failingRunner struct {
+	fail    map[string]bool
+	failErr error
+}
 
 func (f *failingRunner) RunAll(_ context.Context, targets []ModelTarget, traces []Trace) ([]Result, error) {
 	var results []Result
@@ -31,6 +37,9 @@ func (f *failingRunner) RunAll(_ context.Context, targets []ModelTarget, traces 
 			r := Result{Model: target.Display, TraceID: tr.ID, CandidateProvider: target.Provider}
 			if f.fail[tr.ID] {
 				r.Err = fmt.Errorf("replay timeout for %s", tr.ID)
+				if f.failErr != nil {
+					r.Err = f.failErr
+				}
 			} else {
 				r.Transcript = []Turn{{Role: "assistant", Content: "ans " + tr.ID}}
 				r.Score = Score{PromptEvalTokens: 10, GenTokens: 2}
@@ -104,8 +113,15 @@ func TestCaptureManifestV2ExpectedLedger(t *testing.T) {
 			t.Errorf("no ledger row for %s", id)
 			continue
 		}
-		if row.Model != "m" || row.Status != w.status || row.PairID != w.pairID || row.Arm != w.arm || row.Attempts != 1 {
-			t.Errorf("row %s = %+v; want model m, status %s, pair %q, arm %q, attempts 1", id, row, w.status, w.pairID, w.arm)
+		// A cell that fails its first attempt is retried once in-run (round-2
+		// review P2): captured-first-try rows record attempts 1, rows that
+		// stayed failed record the retry as attempts 2.
+		wantAttempts := 1
+		if w.status == "failed" {
+			wantAttempts = 2
+		}
+		if row.Model != "m" || row.Status != w.status || row.PairID != w.pairID || row.Arm != w.arm || row.Attempts != wantAttempts {
+			t.Errorf("row %s = %+v; want model m, status %s, pair %q, arm %q, attempts %d", id, row, w.status, w.pairID, w.arm, wantAttempts)
 		}
 		if w.status == "failed" {
 			if row.Error == "" || row.ArtifactHash != "" {
@@ -128,6 +144,234 @@ func TestCaptureManifestV2ExpectedLedger(t *testing.T) {
 	}
 	if len(verify.expectedPairs) != 2 {
 		t.Fatalf("expectedPairs = %+v; want the two legacy-mixed pairs", verify.expectedPairs)
+	}
+}
+
+// flakyRunner is a stateful calibrationRunner: failFirst trace IDs fail on
+// the first invocation only, failAlways ones fail every time, and drop ones
+// never produce a Result at all. calls records each invocation's trace IDs
+// so tests can assert the in-run retry re-runs ONLY the failed cells.
+type flakyRunner struct {
+	failFirst  map[string]bool
+	failAlways map[string]bool
+	drop       map[string]bool
+	calls      [][]string
+}
+
+func (f *flakyRunner) RunAll(_ context.Context, targets []ModelTarget, traces []Trace) ([]Result, error) {
+	var ids []string
+	for _, tr := range traces {
+		ids = append(ids, tr.ID)
+	}
+	f.calls = append(f.calls, ids)
+	firstAttempt := len(f.calls) == 1
+	var results []Result
+	for _, target := range targets {
+		for _, tr := range traces {
+			if f.drop[tr.ID] {
+				continue
+			}
+			r := Result{Model: target.Display, TraceID: tr.ID, CandidateProvider: target.Provider}
+			if f.failAlways[tr.ID] || (f.failFirst[tr.ID] && firstAttempt) {
+				r.Err = fmt.Errorf("replay timeout for %s", tr.ID)
+			} else {
+				r.Transcript = []Turn{{Role: "assistant", Content: "ans " + tr.ID}}
+				r.Score = Score{PromptEvalTokens: 10, GenTokens: 2}
+			}
+			results = append(results, r)
+		}
+	}
+	return results, nil
+}
+
+// TestCaptureRetriesFailedCellsOnce pins the round-2 review P2 in-run retry:
+// a failed (trace x model) cell is retried exactly once within the same
+// invocation — the retry pass carries ONLY the failed cells — and the ledger
+// records attempts 1 (first-try capture) or 2 (retried). A cell the runner
+// never returned a Result for still gets a universe ledger row.
+func TestCaptureRetriesFailedCellsOnce(t *testing.T) {
+	traces := []Trace{
+		pairedCaptureTrace("r-legacy", "pair-r", AssemblyLegacy),
+		pairedCaptureTrace("r-mixed", "pair-r", AssemblyMixed),
+		pairedCaptureTrace("d-legacy", "pair-d", AssemblyLegacy),
+		pairedCaptureTrace("d-mixed", "pair-d", AssemblyMixed),
+		{ID: "plain-t", System: "sys", Turns: []Turn{{Role: "user", Content: "q"}}, Golden: Golden{FinalAnswerCriteria: "c"}},
+	}
+	runner := &flakyRunner{
+		failFirst: map[string]bool{"r-mixed": true},
+		drop:      map[string]bool{"d-mixed": true},
+	}
+	out := filepath.Join(t.TempDir(), "artifacts.jsonl")
+	if err := runCalibrateCapture(context.Background(), calibrateCaptureOptions{
+		Runner:     runner,
+		Targets:    []ModelTarget{{Display: "m", Provider: "ollama", Model: "m"}},
+		Traces:     traces,
+		OutputPath: out,
+		Stdout:     io.Discard,
+	}); err != nil {
+		t.Fatalf("runCalibrateCapture: %v", err)
+	}
+	if len(runner.calls) != 2 {
+		t.Fatalf("RunAll invocations = %d; want 2 (initial + one retry)", len(runner.calls))
+	}
+	retried := append([]string(nil), runner.calls[1]...)
+	sort.Strings(retried)
+	if want := []string{"d-mixed", "r-mixed"}; !reflect.DeepEqual(retried, want) {
+		t.Fatalf("retry pass ran %v; want only the failed cells %v", runner.calls[1], want)
+	}
+	arts := readArtifactsFile(t, out)
+	hashByID := map[string]string{}
+	for _, a := range arts {
+		hashByID[a.TraceID] = a.ArtifactHash
+	}
+	if len(arts) != 4 || hashByID["r-mixed"] == "" {
+		t.Fatalf("artifacts = %d (%v); want 4 including the retried r-mixed", len(arts), hashByID)
+	}
+	raw, err := os.ReadFile(out + ".manifest.json")
+	if err != nil {
+		t.Fatalf("manifest missing: %v", err)
+	}
+	var m captureManifest
+	if err := json.Unmarshal(raw, &m); err != nil {
+		t.Fatal(err)
+	}
+	if m.ExpectedCount != 5 || m.ArtifactCount != 4 {
+		t.Fatalf("expected/artifact counts = %d/%d; want 5/4", m.ExpectedCount, m.ArtifactCount)
+	}
+	rows := map[string]captureExpectedRow{}
+	for _, row := range m.Expected {
+		rows[row.TraceID] = row
+	}
+	type want struct {
+		status string
+		att    int
+	}
+	wants := map[string]want{
+		"r-legacy": {"captured", 1},
+		"r-mixed":  {"captured", 2}, // retry succeeded on the second attempt
+		"d-legacy": {"captured", 1},
+		"d-mixed":  {"failed", 2}, // dropped by the runner both times: universe row persists
+		"plain-t":  {"captured", 1},
+	}
+	for id, w := range wants {
+		row, ok := rows[id]
+		if !ok {
+			t.Errorf("no ledger row for %s", id)
+			continue
+		}
+		if row.Status != w.status || row.Attempts != w.att {
+			t.Errorf("row %s = %+v; want status %s attempts %d", id, row, w.status, w.att)
+		}
+		if w.status == "captured" && row.ArtifactHash != hashByID[id] {
+			t.Errorf("row %s hash = %q; want the written artifact hash %q", id, row.ArtifactHash, hashByID[id])
+		}
+	}
+	if rows["d-mixed"].Error == "" || !strings.HasPrefix(rows["d-mixed"].Error, "<error: ") {
+		t.Errorf("d-mixed error = %q; want a categorized no-result stub", rows["d-mixed"].Error)
+	}
+	// The manifest with a retried row loads for report verification
+	// (attempts 2 is within the 1..2 policy range).
+	if _, _, err := loadCaptureManifestForReport(out + ".manifest.json"); err != nil {
+		t.Fatalf("loadCaptureManifestForReport: %v", err)
+	}
+}
+
+// TestCaptureAllFailedStillWritesManifest pins the round-2 review P2
+// evidence requirement: a capture whose every attempt failed must still
+// write the manifest with the full expected ledger — the run's evidence
+// persists even though no artifact (and no artifacts file) exists.
+func TestCaptureAllFailedStillWritesManifest(t *testing.T) {
+	traces := []Trace{
+		pairedCaptureTrace("g-legacy", "pair-g", AssemblyLegacy),
+		pairedCaptureTrace("g-mixed", "pair-g", AssemblyMixed),
+	}
+	out := filepath.Join(t.TempDir(), "artifacts.jsonl")
+	err := runCalibrateCapture(context.Background(), calibrateCaptureOptions{
+		Runner:     &flakyRunner{failAlways: map[string]bool{"g-legacy": true, "g-mixed": true}},
+		Targets:    []ModelTarget{{Display: "m", Provider: "ollama", Model: "m"}},
+		Traces:     traces,
+		OutputPath: out,
+		Stdout:     io.Discard,
+	})
+	if err == nil || !strings.Contains(err.Error(), "no artifacts written") {
+		t.Fatalf("err = %v; want the loud no-artifacts failure", err)
+	}
+	if _, statErr := os.Stat(out); !os.IsNotExist(statErr) {
+		t.Fatalf("artifacts file stat err = %v; want no artifacts file", statErr)
+	}
+	raw, readErr := os.ReadFile(out + ".manifest.json")
+	if readErr != nil {
+		t.Fatalf("manifest must persist for an all-failed assembly run: %v", readErr)
+	}
+	var m captureManifest
+	if err := json.Unmarshal(raw, &m); err != nil {
+		t.Fatal(err)
+	}
+	if m.SchemaVersion != captureManifestSchemaVersionV2 || m.ExpectedCount != 2 || len(m.Expected) != 2 || m.ArtifactCount != 0 || len(m.PerArtifact) != 0 {
+		t.Fatalf("manifest = version %q expected %d/%d artifacts %d/%d; want v2 with the full 2-row ledger and zero artifacts",
+			m.SchemaVersion, m.ExpectedCount, len(m.Expected), m.ArtifactCount, len(m.PerArtifact))
+	}
+	for _, row := range m.Expected {
+		if row.Status != "failed" || row.Attempts != 2 || row.Error == "" {
+			t.Errorf("row %+v; want failed with attempts 2 and a recorded error", row)
+		}
+	}
+	// The all-failed manifest loads and surfaces the vanished pair for
+	// missing-arm synthesis.
+	_, verify, loadErr := loadCaptureManifestForReport(out + ".manifest.json")
+	if loadErr != nil {
+		t.Fatalf("loadCaptureManifestForReport: %v", loadErr)
+	}
+	if len(verify.expectedPairs) != 1 || verify.expectedPairs[0].pair != "pair-g" {
+		t.Fatalf("expectedPairs = %+v; want the one vanished pair-g", verify.expectedPairs)
+	}
+}
+
+// TestCaptureLedgerErrorsAreClassifiedStubs pins the committed-evidence
+// redaction chokepoint (external PR review round 2 P1): an openai-compat
+// backend error can embed kilobytes of arbitrary server response — API keys
+// included — and path redaction alone would write it into the committed
+// manifest. Ledger errors must route through redactErrorMessage, so only a
+// categorized stub survives.
+func TestCaptureLedgerErrorsAreClassifiedStubs(t *testing.T) {
+	const secret = "sk-FAKE-SECRET-MARKER-0000"
+	traces := []Trace{
+		pairedCaptureTrace("leak-legacy", "pair-leak", AssemblyLegacy),
+		pairedCaptureTrace("leak-mixed", "pair-leak", AssemblyMixed),
+	}
+	runner := &failingRunner{fail: map[string]bool{"leak-mixed": true}}
+	runner.failErr = fmt.Errorf("backend 500: {\"error\":\"invalid key %s\"} at /Users/keith/models", secret)
+	out := filepath.Join(t.TempDir(), "artifacts.jsonl")
+	if err := runCalibrateCapture(context.Background(), calibrateCaptureOptions{
+		Runner:     runner,
+		Targets:    []ModelTarget{{Display: "m", Provider: "ollama", Model: "m"}},
+		Traces:     traces,
+		OutputPath: out,
+		Stdout:     io.Discard,
+	}); err != nil {
+		t.Fatalf("runCalibrateCapture: %v", err)
+	}
+	raw, err := os.ReadFile(out + ".manifest.json")
+	if err != nil {
+		t.Fatalf("manifest missing: %v", err)
+	}
+	if strings.Contains(string(raw), secret) {
+		t.Fatalf("manifest carries the raw backend error (secret marker survived):\n%s", raw)
+	}
+	if strings.Contains(string(raw), "/Users/") {
+		t.Fatalf("manifest carries a local path:\n%s", raw)
+	}
+	var m captureManifest
+	if err := json.Unmarshal(raw, &m); err != nil {
+		t.Fatal(err)
+	}
+	for _, row := range m.Expected {
+		if row.Status != "failed" {
+			continue
+		}
+		if !strings.HasPrefix(row.Error, "<error: ") {
+			t.Errorf("failed row %s error = %q; want a redactErrorMessage stub", row.TraceID, row.Error)
+		}
 	}
 }
 
@@ -250,6 +494,9 @@ func TestLoadCaptureManifestLedgerValidation(t *testing.T) {
 		})},
 		{"expected_count mismatch", "expected_count", mutate(func(m *captureManifest) { m.ExpectedCount = 3 })},
 		{"unknown status", "status", mutate(func(m *captureManifest) { m.Expected[1].Status = "maybe" })},
+		{"attempts zero", "attempts", mutate(func(m *captureManifest) { m.Expected[0].Attempts = 0 })},
+		{"attempts beyond the one-retry policy", "attempts", mutate(func(m *captureManifest) { m.Expected[1].Attempts = 3 })},
+		{"attempts two accepted (retried cell)", "", mutate(func(m *captureManifest) { m.Expected[1].Attempts = 2 })},
 		{"duplicate trace x model row", "duplicate", mutate(func(m *captureManifest) {
 			m.Expected[1] = m.Expected[0]
 		})},

@@ -375,8 +375,8 @@ func attachAssemblyForcedChoice(models []AssemblyMixedModelReport, prefs []FCPre
 	for i := range models {
 		fc := models[i].ForcedChoice
 		fc.NNonTie = fc.MixedWins + fc.LegacyWins
-		fc.PTwoSided = signTestTwoSidedP(fc.MixedWins, fc.NNonTie)
-		fc.PClusterPermutation = fcClusterPermutationP(signs[models[i].CandidateModel], seed, bootstrapN)
+		fc.PTwoSided = canonicalStat(signTestTwoSidedP(fc.MixedWins, fc.NNonTie))
+		fc.PClusterPermutation = canonicalStat(fcClusterPermutationP(signs[models[i].CandidateModel], seed, bootstrapN))
 	}
 	return nil
 }
@@ -670,14 +670,16 @@ func computeAssemblyMixedSection(keys []assemblyPairKey, pairs map[assemblyPairK
 		}
 		if leg.Control {
 			a.report.ControlPairs++
-			a.report.ControlAbsDeltas = append(a.report.ControlAbsDeltas, math.Abs(qM-qL))
+			a.report.ControlAbsDeltas = append(a.report.ControlAbsDeltas, canonicalStat(math.Abs(qM-qL)))
 			continue
 		}
 		// Arms verified identical above (stratum/family invariants), so
 		// reading them from the legacy arm is exact.
 		a.complete = append(a.complete, assemblyMixedPair{
 			pairID: k.pair,
-			delta:  qM - qL, stratum: leg.Stratum, family: leg.ScenarioFamily,
+			// Canonical at the source: every downstream statistic (pooled and
+			// per-stratum means, bootstrap CI, LOGO band) derives from delta.
+			delta: canonicalStat(qM - qL), stratum: leg.Stratum, family: leg.ScenarioFamily,
 			twin:   leg.TwinGroup,
 			legacy: leg, mixed: mix,
 		})
@@ -753,7 +755,7 @@ func computeAssemblyMixedSection(keys []assemblyPairKey, pairs map[assemblyPairK
 				r.Deltas = append(r.Deltas, p.delta)
 				sum += p.delta
 			}
-			r.MeanDelta = sum / float64(r.Pairs)
+			r.MeanDelta = canonicalStat(sum / float64(r.Pairs))
 			r.Strata, clusters = assemblyMixedStrata(a.complete)
 			r.DeltaCILow, r.DeltaCIHigh = assemblyStratifiedClusterCI(clusters, seed, bootstrapN)
 			r.ArmPressure = assemblyMixedArmPressure(a.complete)
@@ -909,7 +911,7 @@ func assemblyMixedStrata(complete []assemblyMixedPair) ([]AssemblyStratumReport,
 			}
 			cs[idx] = append(cs[idx], p.delta)
 		}
-		sr.MeanDelta = sum / float64(len(ps))
+		sr.MeanDelta = canonicalStat(sum / float64(len(ps)))
 		strata = append(strata, sr)
 		clusters = append(clusters, cs)
 	}
@@ -967,7 +969,11 @@ func assemblyStratifiedClusterCI(strata [][][]float64, seed int64, n int) (lo, h
 		means[i] = rep
 	}
 	ps := percentiles(means, 0.025, 0.975)
-	return ps[0], ps[1]
+	// Canonical at the return so the pooled CI, the LOGO band, and the
+	// decision rule all consume the same architecture-stable values: the
+	// weights[si]*(sum/count) accumulator above is exactly the multiply-add
+	// arm64 contracts into an FMA, which shifted the last ULP vs amd64.
+	return canonicalStat(ps[0]), canonicalStat(ps[1])
 }
 
 // assemblyMixedArmPressure computes per-arm aggregate pressure descriptives
@@ -989,9 +995,9 @@ func assemblyMixedArmPressure(complete []assemblyMixedPair) []AssemblyArmPressur
 		}
 		return AssemblyArmPressure{
 			Mode:                  string(mode),
-			MedianShedMessages:    medianOf(msgs),
-			MedianShedBytes:       medianOf(bytes),
-			MedianOmittedSubjects: medianOf(omitted),
+			MedianShedMessages:    canonicalStat(medianOf(msgs)),
+			MedianShedBytes:       canonicalStat(medianOf(bytes)),
+			MedianOmittedSubjects: canonicalStat(medianOf(omitted)),
 			PressureLevels:        levels,
 		}
 	}
@@ -1044,7 +1050,7 @@ func computeAssemblyTopline(arts []*Artifact, quality map[string]float64) []Asse
 		if s.labeled == 0 {
 			return 0
 		}
-		return s.sum / float64(s.labeled)
+		return canonicalStat(s.sum / float64(s.labeled))
 	}
 	var out []AssemblyToplineReport
 	for _, model := range order {

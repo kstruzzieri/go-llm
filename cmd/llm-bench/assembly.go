@@ -708,6 +708,23 @@ func assemblyDecision(ciLo, ciHi, medianReduction float64) string {
 	}
 }
 
+// canonicalStat rounds a derived report statistic to 12 decimal places so
+// the emitted float is identical across architectures: arm64 FMA contraction
+// shifts the bootstrap accumulator's last ULP relative to amd64, which broke
+// the committed-report byte-identity gate (external PR review round 2 P1).
+// 1e-12 is far below label precision (a 0/0.5/1 rubric) and every reporting
+// threshold. Applied to EVERY derived float the report emits, and applied
+// BEFORE the decision rules consume CI bounds, so decision and display can
+// never disagree across architectures. Collapses -0 to 0 so rounding a tiny
+// negative never emits "-0".
+func canonicalStat(x float64) float64 {
+	c := math.Round(x*1e12) / 1e12
+	if c == 0 {
+		return 0
+	}
+	return c
+}
+
 // AssemblyReport is the -assembly-report output.
 type AssemblyReport struct {
 	SchemaVersion        string                `json:"schema_version"` // "llm-bench-assembly/v1"
@@ -896,7 +913,7 @@ func computeAssemblyReport(arts []Artifact, labels []Label, seed int64, bootstra
 		}
 		acc.report.Pairs++
 		totalPairs++
-		acc.report.Deltas = append(acc.report.Deltas, qp-qf)
+		acc.report.Deltas = append(acc.report.Deltas, canonicalStat(qp-qf))
 		// validateTrace enforced tokens > 0 for every paired artifact.
 		ft := float64(s.base.Trace.AssemblyEval.EstimatedPromptTokens)
 		pt := float64(s.treat.Trace.AssemblyEval.EstimatedPromptTokens)
@@ -915,16 +932,16 @@ func computeAssemblyReport(arts []Artifact, labels []Label, seed int64, bootstra
 			for _, delta := range acc.report.Deltas {
 				sum += delta
 			}
-			acc.report.MeanDelta = sum / float64(acc.report.Pairs)
-			acc.report.DeltaCILow, acc.report.DeltaCIHigh =
-				bootstrapDeltaCI(acc.report.Deltas, seed, bootstrapN)
+			acc.report.MeanDelta = canonicalStat(sum / float64(acc.report.Pairs))
+			lo, hi := bootstrapDeltaCI(acc.report.Deltas, seed, bootstrapN)
+			acc.report.DeltaCILow, acc.report.DeltaCIHigh = canonicalStat(lo), canonicalStat(hi)
 			sort.Float64s(acc.reductions)
 			// len(reductions) == Pairs > 0 inside this branch.
 			if n := len(acc.reductions); n%2 == 1 {
-				acc.report.MedianTokenReduction = acc.reductions[n/2]
+				acc.report.MedianTokenReduction = canonicalStat(acc.reductions[n/2])
 			} else {
 				acc.report.MedianTokenReduction =
-					(acc.reductions[n/2-1] + acc.reductions[n/2]) / 2
+					canonicalStat((acc.reductions[n/2-1] + acc.reductions[n/2]) / 2)
 			}
 		}
 		if acc.report.Pairs < assemblyMinimumPairsPerModel {

@@ -11,9 +11,9 @@
       "candidate_model": "qwen3-coder-next:latest",
       "pairs": 70,
       "control_pairs": 6,
-      "mean_delta": 0.2785714285714286,
-      "delta_ci_low": 0.17857142857142863,
-      "delta_ci_high": 0.3785714285714286,
+      "mean_delta": 0.278571428571,
+      "delta_ci_low": 0.178571428571,
+      "delta_ci_high": 0.378571428571,
       "decision": "quality-improved",
       "deltas": [
         1,
@@ -107,7 +107,7 @@
         {
           "stratum": "cross_domain_join",
           "pairs": 14,
-          "mean_delta": -0.10714285714285714,
+          "mean_delta": -0.107142857143,
           "wins": 5,
           "losses": 5,
           "ties": 4
@@ -115,7 +115,7 @@
         {
           "stratum": "memory_only",
           "pairs": 14,
-          "mean_delta": -0.07142857142857142,
+          "mean_delta": -0.071428571429,
           "wins": 4,
           "losses": 5,
           "ties": 5
@@ -123,7 +123,7 @@
         {
           "stratum": "stale_vs_fresh",
           "pairs": 14,
-          "mean_delta": 0.07142857142857142,
+          "mean_delta": 0.071428571429,
           "wins": 4,
           "losses": 3,
           "ties": 7
@@ -170,8 +170,8 @@
         "max_cluster_size": 2,
         "independence_groups": 33,
         "leave_one_out": {
-          "min_low": 0.1544117647058824,
-          "max_low": 0.2058823529411765
+          "min_low": 0.154411764706,
+          "max_low": 0.205882352941
         }
       },
       "forced_choice": {
@@ -179,8 +179,8 @@
         "legacy_wins": 14,
         "ties": 22,
         "n_nontie": 48,
-        "p_two_sided": 0.005515201485501109,
-        "p_cluster_permutation": 0.004899510048995101,
+        "p_two_sided": 0.005515201486,
+        "p_cluster_permutation": 0.004899510049,
         "skipped_excluded": 6,
         "arm_guess_accuracy": {
           "n_guessed": 0,

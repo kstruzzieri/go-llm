@@ -256,6 +256,12 @@ func main() {
 		// a trace input.
 		refuseOutputAlias("calibrate-capture", "-labels-out", *labelsOut, pathListInputs("-traces", tracePaths))
 		refuseOutputAlias("calibrate-capture", "-labels-out capture manifest", captureManifestPath(*labelsOut), pathListInputs("-traces", tracePaths))
+		// ... and the two outputs must differ from EACH OTHER (round-2 review
+		// P1): a pre-existing hardlink/symlink between <labels-out> and its
+		// .manifest.json sibling would leave the artifacts path holding the
+		// manifest bytes after the second write.
+		refuseOutputAlias("calibrate-capture", "-labels-out capture manifest", captureManifestPath(*labelsOut),
+			[][2]string{{"-labels-out", *labelsOut}})
 		traces, err := loadTraces(tracePaths)
 		if err != nil {
 			log.Fatalf("llm-bench: load traces: %v", err)
@@ -467,6 +473,15 @@ func main() {
 
 	if *blindRender {
 		refuseReportAlias("blind-render", *reportPath, [][2]string{{"-artifacts", *artifactsPath}})
+		if strings.TrimSpace(*blindBlockmapOut) != "" {
+			// Two-output collision (round-2 review P2): the map is written
+			// first and the worksheet second, so an aliased pair loses the
+			// only opaque-id join. Cleaned-path equality alone missed
+			// hardlinks; refuseOutputAlias adds the os.SameFile backstop and
+			// fires before any input loads.
+			refuseOutputAlias("blind-render", "-blind-blockmap-out", *blindBlockmapOut,
+				[][2]string{{"-artifacts", *artifactsPath}, {"-report", *reportPath}})
+		}
 		arts, err := loadArtifacts(*artifactsPath)
 		if err != nil {
 			log.Fatalf("llm-bench: blind-render: load artifacts: %v", err)
@@ -492,13 +507,7 @@ func main() {
 			log.Fatalf("llm-bench: blind-render: no promptless blocks rendered; drop -blind-blockmap-out")
 		}
 		if blockmap != nil {
-			refuseOutputAlias("blind-render", "-blind-blockmap-out", *blindBlockmapOut,
-				[][2]string{{"-artifacts", *artifactsPath}})
-			// Two-output collision: the map is written first and the worksheet
-			// second, so an aliased -report would silently clobber the map.
-			if strings.TrimSpace(*reportPath) != "" && filepath.Clean(*blindBlockmapOut) == filepath.Clean(*reportPath) {
-				log.Fatalf("llm-bench: blind-render: -blind-blockmap-out must differ from -report (the worksheet would overwrite the block map)")
-			}
+			// Aliasing was refused up front, before any input loaded.
 			if err := writeBlindBlockmap(*blindBlockmapOut, *blockmap); err != nil {
 				log.Fatalf("llm-bench: blind-render: %v", err)
 			}
@@ -824,7 +833,10 @@ func main() {
 	}
 
 	runInputs := append(pathListInputs("-traces", tracePaths),
-		[2]string{"-corpus-manifest", *corpusManifestPath})
+		[2]string{"-corpus-manifest", *corpusManifestPath},
+		// Round-2 review P2: the report write could truncate the judge cache
+		// SQLite file while it is OPEN — the cache belongs in the guard set.
+		[2]string{"-judge-cache", *judgeCachePath})
 	if *scorerName == "manual" {
 		runInputs = append(runInputs, [2]string{"-labels", *labelsPath})
 	}

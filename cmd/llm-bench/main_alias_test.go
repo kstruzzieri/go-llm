@@ -70,6 +70,17 @@ func TestMainOutputAliasGuardsAllModes(t *testing.T) {
 			[]string{"-fim-latency", "-fim-cases", fimCase, "-models", "m", "-report", fimCase}},
 		{"import-xlam manifest aliasing the source", "-import-xlam-manifest must differ from -import-xlam",
 			[]string{"-import-xlam", xlamSrc, "-import-xlam-manifest", xlamSrc, "-import-xlam-out", filepath.Join(dir, "xlam-out")}},
+		// Round-2 review P2 (a): the -blind-render two-output collision was
+		// caught by cleaned-path equality only; it now routes through
+		// refuseOutputAlias and fires before any input loads.
+		{"blind-render blockmap-out aliasing report", "-blind-blockmap-out must differ from -report",
+			[]string{"-blind-render", "-artifacts", arts, "-blind-blockmap-out", filepath.Join(dir, "map.json"), "-report", filepath.Join(dir, "map.json")}},
+		{"blind-render blockmap-out aliasing artifacts", "-blind-blockmap-out must differ from -artifacts",
+			[]string{"-blind-render", "-artifacts", arts, "-blind-blockmap-out", arts, "-report", filepath.Join(dir, "ws.txt")}},
+		// Round-2 review P2 (b): a normal run's -report could truncate the
+		// OPEN -judge-cache SQLite file; the cache belongs in the guard set.
+		{"run report aliasing the judge cache", "-report must differ from -judge-cache",
+			[]string{"-traces", trace, "-models", "m", "-judge-cache", labels, "-report", labels}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -98,6 +109,54 @@ func TestMainOutputAliasGuardsAllModes(t *testing.T) {
 			t.Fatalf("hardlinked report path accepted:\n%s", out)
 		}
 		if !strings.Contains(string(out), "resolves to the same file as -artifacts") {
+			t.Fatalf("output missing the SameFile refusal:\n%s", out)
+		}
+	})
+
+	// Round-2 review P1: the calibrate-capture artifacts output and its
+	// manifest sibling were each guarded against the trace inputs but not
+	// against EACH OTHER — a pre-existing hardlink between <labels-out> and
+	// <labels-out>.manifest.json ended with the artifacts path holding the
+	// manifest bytes.
+	t.Run("calibrate-capture hardlinked manifest sibling caught by os.SameFile", func(t *testing.T) {
+		lout := filepath.Join(dir, "cap-artifacts.jsonl")
+		if err := os.WriteFile(lout, []byte("x\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Link(lout, lout+".manifest.json"); err != nil {
+			t.Skipf("hardlink unsupported here: %v", err)
+		}
+		cmd := exec.Command(os.Args[0],
+			"-calibrate-capture", "-traces", trace, "-models", "m", "-labels-out", lout)
+		cmd.Env = append(os.Environ(), "LLM_BENCH_TEST_MAIN=1")
+		out, err := cmd.CombinedOutput()
+		if err == nil {
+			t.Fatalf("hardlinked labels-out/manifest pair accepted:\n%s", out)
+		}
+		if !strings.Contains(string(out), "resolves to the same file as -labels-out") {
+			t.Fatalf("output missing the sibling SameFile refusal:\n%s", out)
+		}
+	})
+
+	// Round-2 review P2 (a): a hardlink between -blind-blockmap-out and
+	// -report lost the only block map when the worksheet write landed second.
+	t.Run("blind-render hardlinked blockmap/report pair caught by os.SameFile", func(t *testing.T) {
+		mapOut := filepath.Join(dir, "blockmap.json")
+		if err := os.WriteFile(mapOut, []byte("x\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		report := filepath.Join(dir, "worksheet-hardlink.txt")
+		if err := os.Link(mapOut, report); err != nil {
+			t.Skipf("hardlink unsupported here: %v", err)
+		}
+		cmd := exec.Command(os.Args[0],
+			"-blind-render", "-artifacts", arts, "-blind-blockmap-out", mapOut, "-report", report)
+		cmd.Env = append(os.Environ(), "LLM_BENCH_TEST_MAIN=1")
+		out, err := cmd.CombinedOutput()
+		if err == nil {
+			t.Fatalf("hardlinked blockmap/report pair accepted:\n%s", out)
+		}
+		if !strings.Contains(string(out), "resolves to the same file as -report") {
 			t.Fatalf("output missing the SameFile refusal:\n%s", out)
 		}
 	})

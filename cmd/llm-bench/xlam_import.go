@@ -151,6 +151,24 @@ func importXlamIrrelevance(opts xlamImportOptions) (xlamImportResult, error) {
 	if err != nil {
 		return xlamImportResult{}, fmt.Errorf("xlam import: scan stale traces: %w", err)
 	}
+	// The source must never be in the deletion set (external PR review round 2
+	// P1): a -import-xlam file matching the managed pattern inside
+	// -import-xlam-out would be removed below AFTER being read, and the import
+	// would "succeed" from memory with its input gone. Refuse before any
+	// cleanup — cleaned-path equality plus the os.SameFile backstop
+	// (symlinks, hardlinks, case-insensitive filesystems).
+	srcInfo, srcStatErr := os.Stat(opts.SrcPath)
+	for _, p := range stale {
+		same := filepath.Clean(p) == filepath.Clean(opts.SrcPath)
+		if !same && srcStatErr == nil {
+			if info, err := os.Stat(p); err == nil && os.SameFile(srcInfo, info) {
+				same = true
+			}
+		}
+		if same {
+			return xlamImportResult{}, fmt.Errorf("xlam import: source %s resolves to managed trace file %s inside -import-xlam-out; refusing to delete the input (move the source outside the output directory)", opts.SrcPath, p)
+		}
+	}
 	for _, p := range stale {
 		if err := os.Remove(p); err != nil {
 			return xlamImportResult{}, fmt.Errorf("xlam import: remove stale %s: %w", p, err)

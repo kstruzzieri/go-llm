@@ -394,8 +394,8 @@ func TestAssemblyReportStratifiedBootstrap(t *testing.T) {
 	if s.Stratum != "conversation_only" || s.Pairs != 14 || s.Wins != 12 || s.Losses != 2 || s.Ties != 0 {
 		t.Fatalf("stratum entry = %+v, want conversation_only/14/12/2/0", s)
 	}
-	if s.MeanDelta != 4.0/14 { // (12*0.5 - 2*1.0) / 14
-		t.Fatalf("stratum mean delta = %v, want %v", s.MeanDelta, 4.0/14)
+	if want := canonicalStat(4.0 / 14); s.MeanDelta != want { // (12*0.5 - 2*1.0) / 14, canonicalized
+		t.Fatalf("stratum mean delta = %v, want %v", s.MeanDelta, want)
 	}
 	raw, err := json.Marshal(s)
 	if err != nil {
@@ -1106,8 +1106,9 @@ func TestAssemblyForcedChoiceSection(t *testing.T) {
 		// 2/8 = 0.25 and p ~= (0.25*B+1)/(B+1). The permutation test shares
 		// the report's seed/B (this harness passes 1/200; production passes
 		// pairedBootstrapSeed/pairedBootstrapN), so the pinned literal is the
-		// deterministic seed-1 draw at B = 200: count = 48, p = 49/201.
-		if want := 49.0 / 201; fc.PClusterPermutation != want {
+		// deterministic seed-1 draw at B = 200: count = 48, p = 49/201
+		// (canonicalized to 12 decimal places like every emitted stat).
+		if want := canonicalStat(49.0 / 201); fc.PClusterPermutation != want {
 			t.Fatalf("p_cluster_permutation = %v, want %v (seed-1 draw, expectation 0.25)", fc.PClusterPermutation, want)
 		}
 		// Deterministic across runs.
@@ -1127,7 +1128,7 @@ func TestAssemblyForcedChoiceSection(t *testing.T) {
 		// only when the two flips agree: exact expectation 2/4 = 0.5 — twice
 		// the unmerged three-group fraction, so merging observably weakens
 		// the evidence. Pinned literal: the deterministic seed-1 draw at the
-		// harness's B = 200 is count = 91, p = 92/201.
+		// harness's B = 200 is count = 91, p = 92/201 (canonicalized).
 		var twinArts []Artifact
 		var twinLabels []Label
 		for _, pair := range []string{"tw-a", "tw-b", "tw-c"} {
@@ -1153,7 +1154,7 @@ func TestAssemblyForcedChoiceSection(t *testing.T) {
 		if fc == nil || fc.MixedWins != 3 {
 			t.Fatalf("fc = %+v; want three mixed wins", fc)
 		}
-		if want := 92.0 / 201; fc.PClusterPermutation != want {
+		if want := canonicalStat(92.0 / 201); fc.PClusterPermutation != want {
 			t.Fatalf("p_cluster_permutation = %v, want %v (twin-merged, expectation 0.5)", fc.PClusterPermutation, want)
 		}
 	})

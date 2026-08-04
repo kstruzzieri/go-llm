@@ -247,10 +247,10 @@ type captureManifest struct {
 // produced no artifact and cannot be labeled, but they no longer vanish:
 // the report synthesizes their pairs into missing-arm exclusions.
 //
-// Attempts is structurally 1 today: the runner makes exactly one attempt per
-// (trace x model), and the registered one-retry policy operates at the
-// re-invocation level (a second -calibrate-capture over the gap). The ledger
-// is what makes a partial first invocation visible to that policy.
+// Attempts is 1 or 2: the registered one-retry policy runs IN-RUN — a cell
+// that fails (or gets no result) on the first attempt is retried exactly
+// once within the same invocation, and the ledger records whether the retry
+// happened. Loading rejects any value outside 1..2.
 type captureExpectedRow struct {
 	TraceID string `json:"trace_id"`
 	Model   string `json:"model"`
@@ -422,6 +422,9 @@ func validateCaptureLedger(m captureManifest) ([]assemblyPairKey, error) {
 			return nil, fmt.Errorf("expected row %d: duplicate (trace_id, model) (%s, %s)", i, row.TraceID, row.Model)
 		}
 		seen[key] = struct{}{}
+		if row.Attempts < 1 || row.Attempts > 2 {
+			return nil, fmt.Errorf("expected row %d (%s/%s): attempts %d outside the registered 1..2 range (one initial attempt plus at most one in-run retry)", i, row.TraceID, row.Model, row.Attempts)
+		}
 		switch row.Arm {
 		case "", string(AssemblyTopline):
 			if row.PairID != "" {
@@ -489,10 +492,14 @@ func writeCaptureManifest(path string, m captureManifest, stdout io.Writer) erro
 	return nil
 }
 
-// runCalibrateCapture replays each (trace, candidate) and writes one
-// Artifact per non-failed Result to OutputPath as JSONL. Artifacts have
-// no ExpectedAnswerQuality — labels are a separate file the operator
-// hand-edits.
+// runCalibrateCapture replays each (trace, candidate) cell — retrying every
+// failed cell exactly once in-run (the registered one-retry policy) — and
+// writes one Artifact per captured cell to OutputPath as JSONL. Artifacts
+// have no ExpectedAnswerQuality — labels are a separate file the operator
+// hand-edits. The v2 manifest ledger derives from the requested
+// (target x trace) universe, so a cell the runner never answered for still
+// appears as failed, and an all-failed assembly run still writes its
+// manifest before erroring: evidence must persist.
 func runCalibrateCapture(ctx context.Context, opts calibrateCaptureOptions) (retErr error) {
 	if opts.Runner == nil {
 		return fmt.Errorf("calibrate-capture: nil runner")
@@ -506,6 +513,13 @@ func runCalibrateCapture(ctx context.Context, opts calibrateCaptureOptions) (ret
 	if len(opts.Targets) == 0 {
 		return errors.New("calibrate-capture: no targets")
 	}
+	for i, target := range opts.Targets {
+		for _, other := range opts.Targets[:i] {
+			if other.Display == target.Display {
+				return fmt.Errorf("calibrate-capture: duplicate model target %q", target.Display)
+			}
+		}
+	}
 	traceByID := make(map[string]Trace, len(opts.Traces))
 	for _, trace := range opts.Traces {
 		if _, ok := traceByID[trace.ID]; ok {
@@ -518,9 +532,75 @@ func runCalibrateCapture(ctx context.Context, opts calibrateCaptureOptions) (ret
 	for i, trace := range ordered {
 		orderIndex[trace.ID] = i
 	}
+	// The run ledger derives from the REQUESTED (target x trace) universe,
+	// never from whatever results came back (external PR review round 2 P2):
+	// a cell the runner silently dropped still appears — as failed — in the
+	// manifest.
+	type captureCell struct {
+		trace    Trace
+		res      *Result
+		attempts int
+	}
+	type cellKey struct{ model, trace string }
+	cells := make(map[cellKey]*captureCell, len(opts.Targets)*len(ordered))
+	cellOrder := make([]cellKey, 0, len(opts.Targets)*len(ordered))
+	for _, target := range opts.Targets {
+		for _, trace := range ordered {
+			k := cellKey{target.Display, trace.ID}
+			cells[k] = &captureCell{trace: trace}
+			cellOrder = append(cellOrder, k)
+		}
+	}
 	results, err := opts.Runner.RunAll(ctx, opts.Targets, ordered)
 	if err != nil {
 		return fmt.Errorf("calibrate-capture: run: %w", err)
+	}
+	for i := range results {
+		r := &results[i]
+		c, ok := cells[cellKey{r.Model, r.TraceID}]
+		if !ok {
+			return fmt.Errorf("calibrate-capture: result %s/%s has no matching trace context", r.TraceID, r.Model)
+		}
+		if c.res != nil {
+			return fmt.Errorf("calibrate-capture: duplicate result for %s/%s", r.TraceID, r.Model)
+		}
+		c.res = r
+		c.attempts = 1
+	}
+	// One in-run retry per failed cell (the registered one-retry policy,
+	// external PR review round 2 P2): each target's failed or unanswered
+	// traces are re-run once, in their original counterbalanced order.
+	// Attempts records 1 (captured first try) or 2 (retried, either outcome).
+	for _, target := range opts.Targets {
+		var retryTraces []Trace
+		for _, trace := range ordered {
+			if c := cells[cellKey{target.Display, trace.ID}]; c.res == nil || c.res.Err != nil {
+				retryTraces = append(retryTraces, trace)
+			}
+		}
+		if len(retryTraces) == 0 {
+			continue
+		}
+		retryResults, err := opts.Runner.RunAll(ctx, []ModelTarget{target}, retryTraces)
+		if err != nil {
+			return fmt.Errorf("calibrate-capture: retry run: %w", err)
+		}
+		pending := make(map[cellKey]bool, len(retryTraces))
+		for _, trace := range retryTraces {
+			k := cellKey{target.Display, trace.ID}
+			pending[k] = true
+			cells[k].attempts = 2 // the retry was attempted, result or not
+		}
+		for i := range retryResults {
+			r := &retryResults[i]
+			k := cellKey{r.Model, r.TraceID}
+			// Only the retried cells may be updated (canned test runners can
+			// replay unrelated results), and only once each.
+			if pending[k] {
+				cells[k].res = r
+				pending[k] = false
+			}
+		}
 	}
 	now := func() time.Time { return time.Now().UTC() }
 	if opts.Clock != nil {
@@ -528,93 +608,73 @@ func runCalibrateCapture(ctx context.Context, opts calibrateCaptureOptions) (ret
 	}
 	var artifacts []Artifact
 	var manifestRows []captureManifestRow
-	var expected []captureExpectedRow
+	expected := make([]captureExpectedRow, 0, len(cellOrder))
 	failed := 0
-	for _, r := range results {
-		// The v2 run ledger records EVERY attempted (trace x model), failures
-		// included — a failed run must leave auditable evidence, not vanish
-		// (external PR review P1). Attempts is structurally 1: the runner
-		// makes one attempt per pair; the registered one-retry policy is a
-		// re-invocation over the gap, which this ledger makes visible.
-		row := captureExpectedRow{TraceID: r.TraceID, Model: r.Model, Status: "captured", Attempts: 1}
-		if trace, ok := traceByID[r.TraceID]; ok && prefilledAssemblyMode(trace) {
-			row.Arm = string(trace.AssemblyEval.Mode)
-			switch trace.AssemblyEval.Mode {
+	for _, k := range cellOrder {
+		c := cells[k]
+		row := captureExpectedRow{TraceID: k.trace, Model: k.model, Status: "captured", Attempts: c.attempts}
+		if prefilledAssemblyMode(c.trace) {
+			row.Arm = string(c.trace.AssemblyEval.Mode)
+			switch c.trace.AssemblyEval.Mode {
 			case AssemblyLegacy, AssemblyMixed:
-				row.PairID = trace.AssemblyEval.PairID
+				row.PairID = c.trace.AssemblyEval.PairID
 			}
 		}
-		if r.Err != nil {
+		switch {
+		case c.res == nil:
+			// The runner returned no Result for this cell on either attempt.
+			fmt.Fprintf(os.Stderr, "calibrate-capture: skipped %s/%s: runner returned no result\n", k.trace, k.model)
+			failed++
+			row.Status = "failed"
+			row.Error = "<error: no-result>"
+		case c.res.Err != nil:
 			// Skip failed runs — they cannot be labeled coherently.
 			// Surface the per-pair reason: a silently dropped result makes a
 			// partial corpus look complete and hides timeout-vs-refusal.
-			fmt.Fprintf(os.Stderr, "calibrate-capture: skipped %s/%s: %v\n", r.TraceID, r.Model, r.Err)
+			fmt.Fprintf(os.Stderr, "calibrate-capture: skipped %s/%s: %v\n", k.trace, k.model, c.res.Err)
 			failed++
 			row.Status = "failed"
-			// Path-redacted: the manifest is committed evidence.
-			row.Error = redactPaths(r.Err.Error())
-			expected = append(expected, row)
-			continue
+			// The manifest is committed evidence and an openai-compat error can
+			// embed arbitrary server response text (up to 64 KiB, API keys
+			// included) — record only the redactErrorMessage category stub,
+			// never the raw text. The raw error already went to stderr above.
+			row.Error = redactErrorMessage(c.res.Err.Error())
+		default:
+			r := *c.res
+			artifact := Artifact{
+				TraceID:           r.TraceID,
+				CandidateModel:    r.Model,
+				Trace:             c.trace,
+				ActualFinalAnswer: lastAssistantContent(r.Transcript),
+				ActualToolCalls:   extractToolNames(r.Transcript),
+				ActualTranscript:  r.Transcript,
+				CapturedAt:        now(),
+				Capture:           captureProvenance(c.trace, r, orderIndex, capturedOrders, opts.ModelDigests),
+			}
+			artifact.ArtifactHash = artifactHash(artifact)
+			artifacts = append(artifacts, artifact)
+			row.ArtifactHash = artifact.ArtifactHash
+			manifestRows = append(manifestRows, captureManifestRow{
+				TraceID:      r.TraceID,
+				ArtifactHash: artifact.ArtifactHash,
+				OrderIndex:   orderIndex[r.TraceID],
+				// Zero counts mean "usage not reported" (see the KNOWN GAP on
+				// CaptureProvenance), so presence requires both counts non-zero.
+				UsagePresent: r.Score.PromptEvalTokens > 0 && r.Score.GenTokens > 0,
+			})
 		}
-		trace, ok := traceByID[r.TraceID]
-		if !ok {
-			return fmt.Errorf("calibrate-capture: result %s/%s has no matching trace context", r.TraceID, r.Model)
-		}
-		artifact := Artifact{
-			TraceID:           r.TraceID,
-			CandidateModel:    r.Model,
-			Trace:             trace,
-			ActualFinalAnswer: lastAssistantContent(r.Transcript),
-			ActualToolCalls:   extractToolNames(r.Transcript),
-			ActualTranscript:  r.Transcript,
-			CapturedAt:        now(),
-			Capture:           captureProvenance(trace, r, orderIndex, capturedOrders, opts.ModelDigests),
-		}
-		artifact.ArtifactHash = artifactHash(artifact)
-		artifacts = append(artifacts, artifact)
-		row.ArtifactHash = artifact.ArtifactHash
 		expected = append(expected, row)
-		manifestRows = append(manifestRows, captureManifestRow{
-			TraceID:      r.TraceID,
-			ArtifactHash: artifact.ArtifactHash,
-			OrderIndex:   orderIndex[r.TraceID],
-			// Zero counts mean "usage not reported" (see the KNOWN GAP on
-			// CaptureProvenance), so presence requires both counts non-zero.
-			UsagePresent: r.Score.PromptEvalTokens > 0 && r.Score.GenTokens > 0,
-		})
 	}
-	if len(artifacts) == 0 {
-		return fmt.Errorf("calibrate-capture: no artifacts written; %d results returned, %d failed", len(results), failed)
-	}
-	if failed > 0 {
-		// Partial capture is a valid best-effort outcome (the caller can gap-fill
-		// the missing pairs), so this is a warning, not an error — but it must be
-		// loud: a partial corpus that prints only the success line reads as complete.
-		fmt.Fprintf(os.Stderr, "calibrate-capture: WARNING partial capture — wrote %d artifact(s), %d of %d runs failed\n", len(artifacts), failed, len(results))
-	}
-
 	if err := os.MkdirAll(filepath.Dir(opts.OutputPath), 0o755); err != nil {
 		return fmt.Errorf("calibrate-capture: mkdir: %w", err)
-	}
-	f, err := os.OpenFile(opts.OutputPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
-	if err != nil {
-		return fmt.Errorf("calibrate-capture: open output: %w", err)
-	}
-	defer func() {
-		if closeErr := f.Close(); retErr == nil && closeErr != nil {
-			retErr = fmt.Errorf("calibrate-capture: close output: %w", closeErr)
-		}
-	}()
-	enc := json.NewEncoder(f)
-	for _, artifact := range artifacts {
-		if err := enc.Encode(artifact); err != nil {
-			return fmt.Errorf("calibrate-capture: encode artifact %s/%s: %w", artifact.TraceID, artifact.CandidateModel, err)
-		}
 	}
 	// Assembly captures REQUIRE the run manifest (#331 W3): the registered
 	// report verifies pairs against it, so a capture that cannot write it
 	// fails loudly. Non-assembly captures stay manifest-free.
-	if anyPrefilledAssemblyTrace(opts.Traces) {
+	writeAssemblyManifest := func() error {
+		if !anyPrefilledAssemblyTrace(opts.Traces) {
+			return nil
+		}
 		endpoint, transport := captureEndpointTransport(opts.Targets, opts.OllamaURL, opts.OpenAICompatBaseURL)
 		probe := captureServerProbe{OllamaDigests: opts.ModelDigests}
 		if strings.Contains(transport, openAICompatTransport) || transport == "mixed" {
@@ -641,11 +701,40 @@ func runCalibrateCapture(ctx context.Context, opts calibrateCaptureOptions) (ret
 			ExpectedCount:        len(expected),
 			Expected:             expected,
 		}
-		if err := writeCaptureManifest(captureManifestPath(opts.OutputPath), manifest, opts.Stdout); err != nil {
+		return writeCaptureManifest(captureManifestPath(opts.OutputPath), manifest, opts.Stdout)
+	}
+	if len(artifacts) == 0 {
+		// Evidence must persist (external PR review round 2 P2): an all-failed
+		// assembly run still writes its manifest — the full expected ledger
+		// with zero artifacts — before failing loudly. No artifacts file is
+		// created.
+		if err := writeAssemblyManifest(); err != nil {
 			return err
 		}
+		return fmt.Errorf("calibrate-capture: no artifacts written; %d run(s) attempted, %d failed", len(cellOrder), failed)
 	}
-	return nil
+	if failed > 0 {
+		// Partial capture is a valid best-effort outcome (the caller can gap-fill
+		// the missing pairs), so this is a warning, not an error — but it must be
+		// loud: a partial corpus that prints only the success line reads as complete.
+		fmt.Fprintf(os.Stderr, "calibrate-capture: WARNING partial capture — wrote %d artifact(s), %d of %d runs failed\n", len(artifacts), failed, len(cellOrder))
+	}
+	f, err := os.OpenFile(opts.OutputPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	if err != nil {
+		return fmt.Errorf("calibrate-capture: open output: %w", err)
+	}
+	defer func() {
+		if closeErr := f.Close(); retErr == nil && closeErr != nil {
+			retErr = fmt.Errorf("calibrate-capture: close output: %w", closeErr)
+		}
+	}()
+	enc := json.NewEncoder(f)
+	for _, artifact := range artifacts {
+		if err := enc.Encode(artifact); err != nil {
+			return fmt.Errorf("calibrate-capture: encode artifact %s/%s: %w", artifact.TraceID, artifact.CandidateModel, err)
+		}
+	}
+	return writeAssemblyManifest()
 }
 
 // counterbalanceCaptureTraces returns the deterministic capture order for a
