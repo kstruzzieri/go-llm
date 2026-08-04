@@ -63,6 +63,45 @@ Per-stratum means are descriptive only: chain_retention +1.00,
 conversation_only +0.50, stale_vs_fresh +0.07, memory_only −0.07,
 cross_domain_join −0.11.
 
+### Sensitivity and attribution (descriptive; added at external review)
+
+The pooled effect is concentrated where the corpus designed legacy's
+structural weakness to bite. Summed per-stratum delta contributions (out of
+the pooled +19.5 total over 70 pairs): chain_retention +14.0,
+conversation_only +7.0, stale_vs_fresh +1.0, memory_only −1.0,
+cross_domain_join −1.5 — the 42 cases outside the two positive strata sum
+to −1.5. Leave-one-stratum-out over the same stratified-cluster-bootstrap
+scheme (descriptive, not registered): dropping chain_retention gives mean
++0.098 with CI approximately [−0.03, +0.22]; dropping chain_retention AND
+conversation_only gives −0.036 with CI approximately [−0.20, +0.13].
+Reading: chain_retention and conversation_only are precisely the strata
+whose definitions target what the legacy recency compactor structurally
+discards (whole answer-bearing chains; older history spans), while
+cross_domain_join and memory_only were authored with registered
+legacy-favoring polarities and landed negative — the corpus contains
+designed legacy wins, and the pooled verdict holds over the registered
+mixture. The bootstrap holds that authored stratum mixture fixed; it
+quantifies label/cluster noise, not uncertainty about the mixture itself.
+The registered decision applies to the pooled corpus as registered; on
+transcript populations without chain-eviction or deep-history retention
+pressure, these tables say the expected gain is near zero.
+
+### Candidate identity (narrowed claim + post-hoc addendum)
+
+The committed identity evidence for this run is: the selector
+(`openai-compat/qwen3-coder-next:latest`), the endpoint
+(`http://127.0.0.1:8090`, llama-swap), and the per-request transport tag in
+every artifact row. The manifest's `/props` probe returned `status 404`
+(llama-swap does not proxy it) and the selector digest is empty, so the
+identity claim is NARROWED to "the model the configured endpoint served
+under this selector." Post-hoc addendum, disclosed as such: the GGUF file
+resident at the serving path, unchanged since the capture, hashes to
+sha256:4bb93f0a0221ef4ff963ca9094df629c8dfdfabc3b4fdd85c1a2e4c0624fce36
+(unsloth Qwen3-Coder-Next UD-Q4_K_XL), served by llama.cpp build
+b10210-000547513 per live probes during the same session; neither fact
+rides the sealed manifest. Future registered runs must commit a pre-run
+server identity (per-upstream /props body or equivalent).
+
 ## Pre-registered decision rule (v2) — frozen before any labeling
 
 The report header carries this rule verbatim, rendered from the registered
@@ -527,8 +566,10 @@ note.)
 
 - **Model identity**: the openai-compat transport exposes no model content
   digest endpoint, so the registered identity record is the capture
-  manifest — the `/props` probe body (llama.cpp build, model, n_ctx) plus
-  the committed manifest digest. Ollama ShowModel digests are recorded when
+  manifest — the `/props` probe body when the endpoint serves it, or the
+  recorded probe error — plus the committed manifest digest. In THIS run
+  the probe returned 404 through llama-swap, so the identity claim is
+  narrowed; see "Candidate identity" in the verdict section. Ollama ShowModel digests are recorded when
   an ollama target is captured, but registered runs use openai-compat /
   llama.cpp.
 - **Ollama tool-arg bytes are semantic-only**: the frozen ollama wire type
