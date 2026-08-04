@@ -5,13 +5,17 @@ mixed structured context assembly (`agent.ContextManager{Mixed: true}`)
 preserve answer quality better than the legacy assembly path at the same
 token budget, on transcripts that mix conversation, agent memory, and RAG?
 
-**Status**: the Task 10 seed fixture (`mixed-cases.json`, 12 primary cases
-plus 1 control) and its built traces are COMMITTED, and the regeneration
-gate (`TestMixedCorpusRegeneration`) is ACTIVE — it rebuilds the corpus
-from the fixture and byte-compares every trace and the manifest. Capture
-artifacts and labels still land in Tasks 12–13. The "Committed artifacts"
-and "Commit policy" lists below describe the registered END state of the
-run, not the current tree.
+**Status**: the registered run is COMPLETE. The full fixture
+(`mixed-cases.json`, 70 primary cases plus 6 controls), all 164 built
+traces, both models' capture artifacts and run manifests (with committed
+digests), the absolute labels, the blind block map, the duplicate-block
+audit, the sealed forced-choice sidemap (digest committed before labeling)
+with `pair-preferences.jsonl`, and `report.json` are all committed — the
+"Committed artifacts" and "Commit policy" lists below now describe the
+current tree. No adjudication artifact exists because zero blocks were
+flagged (see the verdict section). The regeneration gate
+(`TestMixedCorpusRegeneration`) and the balance gate
+(`TestMixedCorpusBalance`) rebuild and re-check the corpus in CI.
 
 Every case is one frozen `agent.State` assembled twice — a `legacy` arm
 (`ContextManager.Assemble`, default compactor) and a `mixed` arm
@@ -33,8 +37,9 @@ Committed artifacts of the registered run (see "Commit policy" below):
 - the sealed forced-choice sidemap JSON + its committed sha256 digest
 - the blind worksheet block map (`-blind-blockmap-out`) — the only join
   from opaque worksheet BLOCK ids back to artifact hashes
-- absolute labels JSONL, the duplicate-block audit (`-dups-out`), the
-  adjudication worksheet and its logged corrections
+- absolute labels JSONL, the duplicate-block audit (`-dups-out`), and —
+  when any block is flagged — the adjudication worksheet and its logged
+  corrections (this run flagged none, so none exists)
 - `pair-preferences.jsonl` — the forced-choice sidecar labels
 - `report.json` — the committed `-assembly-report` verdict
 
@@ -419,7 +424,8 @@ llm-bench -assembly-build docs/llm/assembly-corpus/mixed/mixed-cases.json \
 ```
 
 Capture (basis of the registered run; only qwen3-coder-next is labeled
-first — the gemma4:31b artifacts wait for a follow-up session):
+first — the gemma4:31b artifacts are captured and committed, and their
+LABELING waits for a follow-up session):
 
 ```
 llm-bench -calibrate-capture -traces 'docs/llm/assembly-corpus/mixed/traces/*.json' ...
@@ -508,12 +514,13 @@ temperature; the report embeds the manifest's digest and artifact count.
 
 The registered run commits ALL of: the capture artifacts and their
 manifest (digest included), the absolute labels, the blind worksheet block
-map (`-blind-blockmap-out`), the duplicate-block audit (`-dups-out`), the
-adjudication worksheet and its logged corrections,
+map (`-blind-blockmap-out`), the duplicate-block audit (`-dups-out`), any
+adjudication worksheet and its logged corrections (only when blocks were
+flagged; this run flagged none),
 `pair-preferences.jsonl`, the sealed sidemap and its committed digest, and
 `report.json`. An uncommitted input is an unverifiable input. (This list is
-the registered END state; see the Status note — none of it exists before
-Tasks 10–13 run.)
+the registered END state, and the tree now matches it; see the Status
+note.)
 
 ## Provenance and limitations (stated before labels exist)
 
