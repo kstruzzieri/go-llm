@@ -52,7 +52,9 @@ const (
 	assemblyMixedNonInferiorityMargin = -0.10
 	assemblyMixedMinimumPairs         = 60
 	assemblyMixedMinimumStratumPairs  = 12
-	assemblyMixedPressureFraction     = 0.6
+	// Aliases the governing constant (assembly_mixed_fixture.go) so the
+	// rendered rule header cannot drift from the budget the builder applies.
+	assemblyMixedPressureFraction = mixedBudgetFraction
 )
 
 // REGISTERED cluster-independence constants (#331 slice 3c): every registered

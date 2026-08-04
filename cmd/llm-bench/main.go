@@ -927,11 +927,6 @@ func main() {
 	fmt.Fprintf(os.Stderr, "llm-bench: report written to %s\n", *reportPath)
 }
 
-// refuseOutputAlias fatals when an output path aliases an input file, via
-// cleaned-path equality or the os.SameFile backstop (case-insensitive
-// filesystems, symlinks, hardlinks). Mirrors the hardened -blind-ingest
-// -labels-out guard for the other worksheet-mode output flags; inputs are
-// ordered (flag, path) pairs so the failure is deterministic.
 // mustLoadVerifiedFCSidemap loads the sealed side map for a worksheet mode
 // and, when the operator supplied -fc-sidemap-digest, verifies the file
 // against the committed digest — the same gate -assembly-report applies, so
@@ -951,6 +946,11 @@ func mustLoadVerifiedFCSidemap(mode, path, committedDigest string) fcSidemapFile
 	return sidemap
 }
 
+// refuseOutputAlias fatals when an output path aliases an input file, via
+// cleaned-path equality or the os.SameFile backstop (case-insensitive
+// filesystems, symlinks, hardlinks). Mirrors the hardened -blind-ingest
+// -labels-out guard for the other worksheet-mode output flags; inputs are
+// ordered (flag, path) pairs so the failure is deterministic.
 func refuseOutputAlias(mode, outFlag, outPath string, inputs [][2]string) {
 	for _, in := range inputs {
 		inFlag, inPath := in[0], in[1]

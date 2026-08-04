@@ -365,7 +365,10 @@ func replayPrefilled(ctx context.Context, client candidateChatClient, model stri
 	// Registered greedy decoding is defaulted HERE, at the same place the
 	// prefilled dispatch commits to a single generation call, so capture
 	// provenance stamping Temperature 0 can never describe a request that
-	// was sent without it. Callers may still pin an explicit value.
+	// was sent without it. No caller pins its own value: provenance stamps
+	// the registered constant, so a caller-pinned temperature would make the
+	// stamp lie — thread the effective value into captureProvenance before
+	// ever adding such a caller.
 	if opts.Temperature == nil {
 		temp := assemblyCaptureTemperature
 		opts.Temperature = &temp
