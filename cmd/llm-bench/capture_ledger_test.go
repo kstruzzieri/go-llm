@@ -564,9 +564,9 @@ func TestAssemblyReportLedgerSynthesizesVanishedPairs(t *testing.T) {
 
 	ledger := []captureExpectedRow{
 		{TraceID: half.TraceID, Model: "m", PairID: "pair-half", Arm: "legacy", Status: "captured", Attempts: 1, ArtifactHash: half.ArtifactHash},
-		{TraceID: "pair-half-mixed", Model: "m", PairID: "pair-half", Arm: "mixed", Status: "failed", Attempts: 1, Error: "replay timeout"},
-		{TraceID: "pair-gone-legacy", Model: "m", PairID: "pair-gone", Arm: "legacy", Status: "failed", Attempts: 1, Error: "replay timeout"},
-		{TraceID: "pair-gone-mixed", Model: "m", PairID: "pair-gone", Arm: "mixed", Status: "failed", Attempts: 1, Error: "replay timeout"},
+		{TraceID: "pair-half-mixed", Model: "m", PairID: "pair-half", Arm: "mixed", Status: "failed", Attempts: 2, Error: "<error: timeout>"},
+		{TraceID: "pair-gone-legacy", Model: "m", PairID: "pair-gone", Arm: "legacy", Status: "failed", Attempts: 2, Error: "<error: timeout>"},
+		{TraceID: "pair-gone-mixed", Model: "m", PairID: "pair-gone", Arm: "mixed", Status: "failed", Attempts: 2, Error: "<error: timeout>"},
 	}
 	v2 := writeLedgerManifest(t, dir, "v2.manifest.json", captureManifest{
 		SchemaVersion: captureManifestSchemaVersionV2,
@@ -589,15 +589,15 @@ func TestAssemblyReportLedgerSynthesizesVanishedPairs(t *testing.T) {
 		if len(rep.LegacyMixedModels) != 1 {
 			t.Fatalf("legacy_mixed_models = %d; want 1", len(rep.LegacyMixedModels))
 		}
-		reasons := map[string]string{}
+		reasons := map[string][]string{}
 		for _, ex := range rep.LegacyMixedModels[0].Exclusions {
-			reasons[ex.PairID] = ex.Reason
+			reasons[ex.PairID] = append(reasons[ex.PairID], ex.Reason)
 		}
-		if reasons["pair-half"] != "missing-mixed-arm" {
+		if !reflect.DeepEqual(reasons["pair-half"], []string{"missing-mixed-arm"}) {
 			t.Errorf("pair-half reason = %q; want missing-mixed-arm", reasons["pair-half"])
 		}
-		if reasons["pair-gone"] != "missing-legacy-arm" {
-			t.Errorf("pair-gone reason = %q; want missing-legacy-arm (the pair must be synthesized from the ledger, never vanish)", reasons["pair-gone"])
+		if !reflect.DeepEqual(reasons["pair-gone"], []string{"missing-legacy-arm", "missing-mixed-arm"}) {
+			t.Errorf("pair-gone reasons = %q; want both missing-arm exclusions (the pair must be synthesized from the ledger, never vanish)", reasons["pair-gone"])
 		}
 	})
 
@@ -632,7 +632,7 @@ func TestAssemblyReportLedgerSynthesizesVanishedPairs(t *testing.T) {
 func TestLoadCaptureManifestLedgerValidation(t *testing.T) {
 	dir := t.TempDir()
 	captured := captureExpectedRow{TraceID: "t1", Model: "m", PairID: "p1", Arm: "legacy", Status: "captured", Attempts: 1, ArtifactHash: "sha256:aa"}
-	failed := captureExpectedRow{TraceID: "t2", Model: "m", PairID: "p1", Arm: "mixed", Status: "failed", Attempts: 1, Error: "boom"}
+	failed := captureExpectedRow{TraceID: "t2", Model: "m", PairID: "p1", Arm: "mixed", Status: "failed", Attempts: 2, Error: "<error: timeout>"}
 	perArtifact := []captureManifestRow{{TraceID: "t1", ArtifactHash: "sha256:aa", UsagePresent: true}}
 	valid := captureManifest{
 		SchemaVersion: captureManifestSchemaVersionV2,
@@ -657,19 +657,38 @@ func TestLoadCaptureManifestLedgerValidation(t *testing.T) {
 		})},
 		{"expected_count mismatch", "expected_count", mutate(func(m *captureManifest) { m.ExpectedCount = 3 })},
 		{"unknown status", "status", mutate(func(m *captureManifest) { m.Expected[1].Status = "maybe" })},
+		{"blank trace_id", "trace_id", mutate(func(m *captureManifest) { m.Expected[0].TraceID = "" })},
+		{"blank model", "model", mutate(func(m *captureManifest) { m.Expected[0].Model = "" })},
 		{"attempts zero", "attempts", mutate(func(m *captureManifest) { m.Expected[0].Attempts = 0 })},
 		{"attempts beyond the one-retry policy", "attempts", mutate(func(m *captureManifest) { m.Expected[1].Attempts = 3 })},
 		{"attempts two accepted (retried cell)", "", mutate(func(m *captureManifest) { m.Expected[1].Attempts = 2 })},
+		{"failed row with one attempt", "attempts", mutate(func(m *captureManifest) { m.Expected[1].Attempts = 1 })},
+		{"failed row with blank error", "error", mutate(func(m *captureManifest) { m.Expected[1].Error = "" })},
+		{"failed row with raw error", "error", mutate(func(m *captureManifest) { m.Expected[1].Error = "timeout while calling backend" })},
 		{"duplicate trace x model row", "duplicate", mutate(func(m *captureManifest) {
 			m.Expected[1] = m.Expected[0]
 		})},
 		{"captured row without a hash", "artifact_hash", mutate(func(m *captureManifest) { m.Expected[0].ArtifactHash = "" })},
+		{"captured row carrying an error", "captured", mutate(func(m *captureManifest) { m.Expected[0].Error = "<error: timeout>" })},
 		{"captured row hash absent from per_artifact", "per_artifact", mutate(func(m *captureManifest) {
 			m.Expected[0].ArtifactHash = "sha256:other"
+		})},
+		{"duplicate captured hash", "duplicate", mutate(func(m *captureManifest) {
+			m.Expected[1] = captured
+			m.Expected[1].TraceID = "t2"
 		})},
 		{"failed row carrying a hash", "failed", mutate(func(m *captureManifest) { m.Expected[1].ArtifactHash = "sha256:aa" })},
 		{"legacy arm without pair_id", "pair_id", mutate(func(m *captureManifest) { m.Expected[0].PairID = "" })},
 		{"invalid arm", "arm", mutate(func(m *captureManifest) { m.Expected[0].Arm = "sideways" })},
+		{"per_artifact blank trace_id", "per_artifact", mutate(func(m *captureManifest) { m.PerArtifact[0].TraceID = "" })},
+		{"per_artifact blank hash", "per_artifact", mutate(func(m *captureManifest) { m.PerArtifact[0].ArtifactHash = "" })},
+		{"duplicate per_artifact hash", "duplicate", mutate(func(m *captureManifest) {
+			m.PerArtifact = append(m.PerArtifact, captureManifestRow{TraceID: "t3", ArtifactHash: "sha256:aa"})
+			m.ArtifactCount = 2
+		})},
+		{"captured trace/hash mismatch", "trace_id", mutate(func(m *captureManifest) {
+			m.PerArtifact[0].TraceID = "other"
+		})},
 		{"per_artifact hash missing from the ledger", "ledger", mutate(func(m *captureManifest) {
 			m.PerArtifact = append(m.PerArtifact, captureManifestRow{TraceID: "t9", ArtifactHash: "sha256:bb"})
 			m.ArtifactCount = 2

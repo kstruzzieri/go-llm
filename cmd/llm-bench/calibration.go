@@ -373,16 +373,25 @@ func validateCaptureLedger(m captureManifest) ([]assemblyPairKey, error) {
 	if len(m.Expected) == 0 {
 		return nil, fmt.Errorf("v2 manifest has no expected ledger rows")
 	}
-	perArtifact := make(map[string]struct{}, len(m.PerArtifact))
-	for _, row := range m.PerArtifact {
-		perArtifact[row.ArtifactHash] = struct{}{}
+	perArtifact := make(map[string]string, len(m.PerArtifact))
+	for i, row := range m.PerArtifact {
+		if strings.TrimSpace(row.TraceID) == "" || strings.TrimSpace(row.ArtifactHash) == "" {
+			return nil, fmt.Errorf("per_artifact row %d: trace_id and artifact_hash must be nonblank", i)
+		}
+		if _, dup := perArtifact[row.ArtifactHash]; dup {
+			return nil, fmt.Errorf("per_artifact row %d: duplicate artifact_hash %q", i, row.ArtifactHash)
+		}
+		perArtifact[row.ArtifactHash] = row.TraceID
 	}
-	seen := make(map[string]struct{}, len(m.Expected))
+	seen := make(map[[2]string]struct{}, len(m.Expected))
 	capturedHashes := make(map[string]struct{}, len(m.Expected))
 	var pairs []assemblyPairKey
 	seenPair := map[assemblyPairKey]struct{}{}
 	for i, row := range m.Expected {
-		key := row.TraceID + "\x00" + row.Model
+		if strings.TrimSpace(row.TraceID) == "" || strings.TrimSpace(row.Model) == "" {
+			return nil, fmt.Errorf("expected row %d: trace_id and model must be nonblank", i)
+		}
+		key := [2]string{row.TraceID, row.Model}
 		if _, dup := seen[key]; dup {
 			return nil, fmt.Errorf("expected row %d: duplicate (trace_id, model) (%s, %s)", i, row.TraceID, row.Model)
 		}
@@ -407,13 +416,31 @@ func validateCaptureLedger(m captureManifest) ([]assemblyPairKey, error) {
 			if row.ArtifactHash == "" {
 				return nil, fmt.Errorf("expected row %d (%s/%s): captured row without an artifact_hash", i, row.TraceID, row.Model)
 			}
-			if _, ok := perArtifact[row.ArtifactHash]; !ok {
+			if row.Error != "" {
+				return nil, fmt.Errorf("expected row %d (%s/%s): captured row carries error %q", i, row.TraceID, row.Model, row.Error)
+			}
+			if _, dup := capturedHashes[row.ArtifactHash]; dup {
+				return nil, fmt.Errorf("expected row %d (%s/%s): duplicate captured artifact_hash %q", i, row.TraceID, row.Model, row.ArtifactHash)
+			}
+			traceID, ok := perArtifact[row.ArtifactHash]
+			if !ok {
 				return nil, fmt.Errorf("expected row %d (%s/%s): captured hash %q is not in per_artifact", i, row.TraceID, row.Model, row.ArtifactHash)
+			}
+			if traceID != row.TraceID {
+				return nil, fmt.Errorf("expected row %d (%s/%s): captured artifact_hash %q maps to per_artifact trace_id %q", i, row.TraceID, row.Model, row.ArtifactHash, traceID)
 			}
 			capturedHashes[row.ArtifactHash] = struct{}{}
 		case "failed":
+			if row.Attempts != 2 {
+				return nil, fmt.Errorf("expected row %d (%s/%s): failed row attempts %d (want 2 after the in-run retry)", i, row.TraceID, row.Model, row.Attempts)
+			}
 			if row.ArtifactHash != "" {
 				return nil, fmt.Errorf("expected row %d (%s/%s): failed row carries artifact_hash %q (failed runs produce no artifact)", i, row.TraceID, row.Model, row.ArtifactHash)
+			}
+			switch row.Error {
+			case "<error: no-result>", "<error: timeout>", "<error: network>", "<error: parse>", "<error: other>":
+			default:
+				return nil, fmt.Errorf("expected row %d (%s/%s): failed row error %q is not a categorized error stub", i, row.TraceID, row.Model, row.Error)
 			}
 		default:
 			return nil, fmt.Errorf("expected row %d (%s/%s): invalid status %q (want captured or failed)", i, row.TraceID, row.Model, row.Status)

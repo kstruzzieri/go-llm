@@ -604,6 +604,9 @@ func computeAssemblyMixedSection(keys []assemblyPairKey, pairs map[assemblyPairK
 		s := pairs[k]
 		if s.base == nil {
 			exclude("missing-legacy-arm")
+			if s.treat == nil {
+				exclude("missing-mixed-arm")
+			}
 			continue
 		}
 		if s.treat == nil {
