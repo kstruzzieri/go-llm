@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -260,6 +261,94 @@ func TestCaptureRejectsMissingActiveEndpointBeforePublication(t *testing.T) {
 		raw, readErr := os.ReadFile(path)
 		if readErr != nil || string(raw) != want {
 			t.Fatalf("%s changed before publication: bytes=%q err=%v", path, raw, readErr)
+		}
+	}
+}
+
+func TestCaptureRejectsInvalidRequestedTraceUniverseBeforeRun(t *testing.T) {
+	for _, tc := range []struct {
+		name, wantErr string
+		traces        []Trace
+	}{
+		{
+			name: "duplicate pair arm", wantErr: "duplicate pair_id/arm",
+			traces: []Trace{
+				pairedCaptureTrace("legacy-a", "pair-a", AssemblyLegacy),
+				pairedCaptureTrace("legacy-b", "pair-a", AssemblyLegacy),
+			},
+		},
+		{
+			name: "whitespace-only trace ID", wantErr: "trace_id must be nonblank",
+			traces: []Trace{pairedCaptureTrace("   ", "pair-a", AssemblyLegacy)},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			const (
+				oldArtifacts = "preexisting artifacts\n"
+				oldManifest  = "preexisting manifest\n"
+			)
+			runner := &orderRecordingRunner{}
+			dir := t.TempDir()
+			out := filepath.Join(dir, "artifacts.jsonl")
+			if err := os.WriteFile(out, []byte(oldArtifacts), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(captureManifestPath(out), []byte(oldManifest), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			err := runCalibrateCapture(context.Background(), calibrateCaptureOptions{
+				Runner:  runner,
+				Targets: []ModelTarget{{Display: "ollama/m", Provider: defaultBenchProvider, Model: "m"}},
+				Traces:  tc.traces, OutputPath: out, OllamaURL: testCaptureOllamaURL, Stdout: io.Discard,
+			})
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("err = %q; want pre-run rejection containing %q", errString(err), tc.wantErr)
+			}
+			if len(runner.gotTraceIDs) != 0 {
+				t.Fatalf("runner called before requested universe validation: %v", runner.gotTraceIDs)
+			}
+			for path, want := range map[string]string{out: oldArtifacts, captureManifestPath(out): oldManifest} {
+				raw, readErr := os.ReadFile(path)
+				if readErr != nil || string(raw) != want {
+					t.Fatalf("%s changed before publication: bytes=%q err=%v", path, raw, readErr)
+				}
+			}
+			entries, readErr := os.ReadDir(dir)
+			if readErr != nil {
+				t.Fatal(readErr)
+			}
+			got := make([]string, len(entries))
+			for i := range entries {
+				got[i] = entries[i].Name()
+			}
+			if !reflect.DeepEqual(got, []string{"artifacts.jsonl", "artifacts.jsonl.manifest.json"}) {
+				t.Fatalf("publication debris in %s: %v", dir, got)
+			}
+		})
+	}
+}
+
+func TestCaptureValidRequestedTraceUniverseStillRuns(t *testing.T) {
+	runner := &orderRecordingRunner{}
+	out := filepath.Join(t.TempDir(), "artifacts.jsonl")
+	err := runCalibrateCapture(context.Background(), calibrateCaptureOptions{
+		Runner:  runner,
+		Targets: []ModelTarget{{Display: "ollama/m", Provider: defaultBenchProvider, Model: "m"}},
+		Traces: []Trace{
+			pairedCaptureTrace("legacy", "pair-a", AssemblyLegacy),
+			pairedCaptureTrace("mixed", "pair-a", AssemblyMixed),
+		},
+		OutputPath: out, OllamaURL: testCaptureOllamaURL, Stdout: io.Discard,
+	})
+	if err != nil {
+		t.Fatalf("valid requested trace universe rejected: %v", err)
+	}
+	if len(runner.gotTraceIDs) != 1 {
+		t.Fatalf("runner calls = %d; want 1", len(runner.gotTraceIDs))
+	}
+	for _, path := range []string{out, captureManifestPath(out)} {
+		if _, err := os.Stat(path); err != nil {
+			t.Fatalf("valid capture did not publish %s: %v", path, err)
 		}
 	}
 }

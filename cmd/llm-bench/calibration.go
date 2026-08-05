@@ -702,6 +702,41 @@ func validateV2CaptureProvenance(arts []Artifact, m captureManifest, expectedArt
 	return nil
 }
 
+func validateRequestedTraceUniverse(rows []captureRequestedTrace) error {
+	if len(rows) == 0 {
+		return fmt.Errorf("v2 manifest has no requested_traces rows")
+	}
+	requestedIDs := make(map[string]struct{}, len(rows))
+	requestedPairArms := make(map[[2]string]string, len(rows))
+	for i, row := range rows {
+		if strings.TrimSpace(row.TraceID) == "" {
+			return fmt.Errorf("requested_traces row %d: trace_id must be nonblank", i)
+		}
+		if _, dup := requestedIDs[row.TraceID]; dup {
+			return fmt.Errorf("requested_traces row %d: duplicate trace_id %q", i, row.TraceID)
+		}
+		requestedIDs[row.TraceID] = struct{}{}
+		switch row.Arm {
+		case "", string(AssemblyTopline):
+			if row.PairID != "" {
+				return fmt.Errorf("requested_traces row %d (%s): pair_id %q on a non-paired arm %q", i, row.TraceID, row.PairID, row.Arm)
+			}
+		case string(AssemblyLegacy), string(AssemblyMixed):
+			if row.PairID == "" {
+				return fmt.Errorf("requested_traces row %d (%s): %s arm requires a pair_id", i, row.TraceID, row.Arm)
+			}
+			key := [2]string{row.PairID, row.Arm}
+			if prior := requestedPairArms[key]; prior != "" {
+				return fmt.Errorf("requested_traces row %d (%s): duplicate pair_id/arm %s/%s (already %s)", i, row.TraceID, row.PairID, row.Arm, prior)
+			}
+			requestedPairArms[key] = row.TraceID
+		default:
+			return fmt.Errorf("requested_traces row %d (%s): invalid arm %q", i, row.TraceID, row.Arm)
+		}
+	}
+	return nil
+}
+
 // validateCaptureLedger checks a v2 manifest's expected run ledger against
 // its per_artifact rows and returns the deduplicated expected legacy-mixed
 // pair keys (file order). Every violation is loud: the ledger is the audit
@@ -713,36 +748,8 @@ func validateCaptureLedger(m captureManifest) ([]assemblyPairKey, error) {
 	if len(m.Expected) == 0 {
 		return nil, fmt.Errorf("v2 manifest has no expected ledger rows")
 	}
-	if len(m.RequestedTraces) == 0 {
-		return nil, fmt.Errorf("v2 manifest has no requested_traces rows")
-	}
-	requestedIDs := make(map[string]struct{}, len(m.RequestedTraces))
-	requestedPairArms := make(map[[2]string]string, len(m.RequestedTraces))
-	for i, row := range m.RequestedTraces {
-		if strings.TrimSpace(row.TraceID) == "" {
-			return nil, fmt.Errorf("requested_traces row %d: trace_id must be nonblank", i)
-		}
-		if _, dup := requestedIDs[row.TraceID]; dup {
-			return nil, fmt.Errorf("requested_traces row %d: duplicate trace_id %q", i, row.TraceID)
-		}
-		requestedIDs[row.TraceID] = struct{}{}
-		switch row.Arm {
-		case "", string(AssemblyTopline):
-			if row.PairID != "" {
-				return nil, fmt.Errorf("requested_traces row %d (%s): pair_id %q on a non-paired arm %q", i, row.TraceID, row.PairID, row.Arm)
-			}
-		case string(AssemblyLegacy), string(AssemblyMixed):
-			if row.PairID == "" {
-				return nil, fmt.Errorf("requested_traces row %d (%s): %s arm requires a pair_id", i, row.TraceID, row.Arm)
-			}
-			key := [2]string{row.PairID, row.Arm}
-			if prior := requestedPairArms[key]; prior != "" {
-				return nil, fmt.Errorf("requested_traces row %d (%s): duplicate pair_id/arm %s/%s (already %s)", i, row.TraceID, row.PairID, row.Arm, prior)
-			}
-			requestedPairArms[key] = row.TraceID
-		default:
-			return nil, fmt.Errorf("requested_traces row %d (%s): invalid arm %q", i, row.TraceID, row.Arm)
-		}
+	if err := validateRequestedTraceUniverse(m.RequestedTraces); err != nil {
+		return nil, err
 	}
 	wantExpected := len(m.ModelTargets) * len(m.RequestedTraces)
 	if m.ExpectedCount != wantExpected {
@@ -964,6 +971,9 @@ func runCalibrateCapture(ctx context.Context, opts calibrateCaptureOptions) erro
 			}
 		}
 		requestedTraces = append(requestedTraces, row)
+	}
+	if err := validateRequestedTraceUniverse(requestedTraces); err != nil {
+		return fmt.Errorf("calibrate-capture: invalid requested trace universe: %w", err)
 	}
 	orderIndex := make(map[string]int, len(ordered))
 	for i, trace := range ordered {
