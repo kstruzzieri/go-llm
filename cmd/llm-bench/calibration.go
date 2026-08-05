@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"hash/fnv"
 	"io"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -99,6 +100,11 @@ type artifactHashInput struct {
 	ActualTranscript  []Turn   `json:"actual_transcript"`
 }
 
+type captureProvenanceHashInput struct {
+	CapturedAt time.Time          `json:"captured_at"`
+	Capture    *CaptureProvenance `json:"capture"`
+}
+
 // artifactHash returns the canonical sha256 hash for an Artifact. Stable
 // under JSON struct-tag ordering; sensitive to every input including
 // tool-call sequence order.
@@ -113,6 +119,15 @@ func artifactHash(a Artifact) string {
 	})
 	sum := sha256.Sum256(raw)
 	return fmt.Sprintf("sha256:%s", hex.EncodeToString(sum[:]))
+}
+
+// captureProvenanceHash seals the output-only fields deliberately excluded
+// from artifactHash. New v2 manifests bind this digest to each artifact;
+// v1 files retain their historical unbound semantics.
+func captureProvenanceHash(a Artifact) string {
+	raw, _ := json.Marshal(captureProvenanceHashInput{CapturedAt: a.CapturedAt, Capture: a.Capture})
+	sum := sha256.Sum256(raw)
+	return "sha256:" + hex.EncodeToString(sum[:])
 }
 
 // candidateDigestResolver is the minimal ShowModel surface needed to
@@ -306,16 +321,17 @@ type captureDecoding struct {
 // lack it (a provider that omits usage decodes to 0, so zero is treated as
 // "not verified").
 type captureManifestRow struct {
-	TraceID      string `json:"trace_id"`
-	ArtifactHash string `json:"artifact_hash"`
-	OrderIndex   int    `json:"order_index"`
-	UsagePresent bool   `json:"usage_present"`
+	TraceID        string `json:"trace_id"`
+	ArtifactHash   string `json:"artifact_hash"`
+	ProvenanceHash string `json:"provenance_hash,omitempty"`
+	OrderIndex     int    `json:"order_index"`
+	UsagePresent   bool   `json:"usage_present"`
 }
 
 // captureEndpointTransport derives the manifest endpoint/transport pair from
 // the target set. Registered runs are single-transport; a mixed target set
 // records transport "mixed" with both URLs space-joined, ollama first.
-func captureEndpointTransport(targets []ModelTarget, ollamaURL, compatURL string) (endpoint, transport string) {
+func captureEndpointTransport(targets []ModelTarget, ollamaURL, compatURL string) (endpoint, transport string, err error) {
 	hasOllama, hasCompat := false, false
 	for _, t := range targets {
 		if normalizeModelSelector(t.Provider) == openAICompatTransport {
@@ -324,14 +340,44 @@ func captureEndpointTransport(targets []ModelTarget, ollamaURL, compatURL string
 			hasOllama = true
 		}
 	}
+	var ollamaEndpoint, compatEndpoint string
+	if hasOllama {
+		ollamaEndpoint, err = sanitizeCaptureEndpoint(ollamaURL)
+		if err != nil {
+			return "", "", err
+		}
+	}
+	if hasCompat {
+		compatEndpoint, err = sanitizeCaptureEndpoint(compatURL)
+		if err != nil {
+			return "", "", err
+		}
+	}
 	switch {
 	case hasCompat && hasOllama:
-		return strings.TrimSpace(ollamaURL) + " " + strings.TrimSpace(compatURL), "mixed"
+		return ollamaEndpoint + " " + compatEndpoint, "mixed", nil
 	case hasCompat:
-		return strings.TrimSpace(compatURL), openAICompatTransport
+		return compatEndpoint, openAICompatTransport, nil
 	default:
-		return strings.TrimSpace(ollamaURL), defaultBenchProvider
+		return ollamaEndpoint, defaultBenchProvider, nil
 	}
+}
+
+func sanitizeCaptureEndpoint(raw string) (string, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return "", nil
+	}
+	u, err := url.Parse(raw)
+	if err != nil || !u.IsAbs() || u.Host == "" || u.Opaque != "" {
+		return "", errors.New("calibrate-capture: invalid capture endpoint")
+	}
+	u.User = nil
+	u.RawQuery = ""
+	u.ForceQuery = false
+	u.Fragment = ""
+	u.RawFragment = ""
+	return u.String(), nil
 }
 
 // loadCaptureManifestForReport reads a capture run manifest for
@@ -372,6 +418,7 @@ func loadCaptureManifestForReport(path string) (AssemblyCaptureManifest, *captur
 			return AssemblyCaptureManifest{}, nil, fmt.Errorf("capture-manifest: %q: %w", path, err)
 		}
 		verify.expectedPairs = pairs
+		verify.v2Manifest = &m
 		verify.expectedArtifacts = make(map[string]captureExpectedArtifact, m.ArtifactCount)
 		for _, row := range m.Expected {
 			if row.Status == "captured" {
@@ -445,6 +492,195 @@ func validateCaptureArtifacts(arts []Artifact, verify *captureVerification) erro
 			return fmt.Errorf("capture-manifest v2 artifact binding: artifact hash %q arm mismatch", hash)
 		}
 	}
+	return validateV2CaptureProvenance(arts, *verify.v2Manifest, verify.expectedArtifacts)
+}
+
+type captureTargetControl struct {
+	provider, digest string
+}
+
+func validateV2CaptureProvenance(arts []Artifact, m captureManifest, expectedArtifacts map[string]captureExpectedArtifact) error {
+	if m.CounterbalanceScheme != captureCounterbalanceScheme {
+		return fmt.Errorf("capture-manifest v2 counterbalance_scheme mismatch")
+	}
+	if m.Decoding.Temperature != assemblyCaptureTemperature {
+		return fmt.Errorf("capture-manifest v2 temperature %v does not match the registered %v", m.Decoding.Temperature, assemblyCaptureTemperature)
+	}
+	if m.Decoding.SeedSupported {
+		return fmt.Errorf("capture-manifest v2 seed support is not registered")
+	}
+	if len(m.ModelTargets) == 0 {
+		return fmt.Errorf("capture-manifest v2 model_targets is empty")
+	}
+	targets := make(map[string]captureTargetControl, len(m.ModelTargets))
+	probeKeys := make(map[string]captureTargetControl, len(m.ModelTargets))
+	hasOllama, hasCompat := false, false
+	for i, row := range m.ModelTargets {
+		target, err := parseModelTarget(row.Selector)
+		if err != nil {
+			return fmt.Errorf("capture-manifest v2 model_targets row %d is invalid", i)
+		}
+		key := modelKey(row.Selector)
+		if _, dup := targets[key]; dup {
+			return fmt.Errorf("capture-manifest v2 model_targets row %d duplicates model %q", i, key)
+		}
+		if row.ResolvedDigest != "" && canonicalSHA256Digest(row.ResolvedDigest) != row.ResolvedDigest {
+			return fmt.Errorf("capture-manifest v2 model_targets row %d resolved_digest is not canonical", i)
+		}
+		control := captureTargetControl{provider: target.Provider, digest: row.ResolvedDigest}
+		targets[key] = control
+		switch target.Provider {
+		case defaultBenchProvider:
+			hasOllama = true
+			probeKeys[normalizeModelSelector(row.Selector)] = control
+		case openAICompatTransport:
+			hasCompat = true
+			if row.ResolvedDigest != "" {
+				return fmt.Errorf("capture-manifest v2 model_targets row %d openai-compat resolved_digest must be empty", i)
+			}
+		}
+	}
+	wantTransport := defaultBenchProvider
+	if hasCompat {
+		wantTransport = openAICompatTransport
+	}
+	if hasCompat && hasOllama {
+		wantTransport = "mixed"
+	}
+	if m.Transport != wantTransport {
+		return fmt.Errorf("capture-manifest v2 transport %q does not match model_targets transport %q", m.Transport, wantTransport)
+	}
+	compatProvider := ""
+	if hasCompat {
+		compatEndpoint := m.Endpoint
+		if hasOllama {
+			parts := strings.Fields(m.Endpoint)
+			if len(parts) != 2 || m.Endpoint != parts[0]+" "+parts[1] {
+				return fmt.Errorf("capture-manifest v2 mixed endpoint must contain exactly two sanitized URLs")
+			}
+			compatEndpoint = parts[1]
+		}
+		sanitized, err := sanitizeCaptureEndpoint(compatEndpoint)
+		if err != nil || sanitized == "" || sanitized != compatEndpoint {
+			return fmt.Errorf("capture-manifest v2 openai-compat endpoint is not sanitized")
+		}
+		compatProvider = openAICompatCandidateProviderName(sanitized)
+	}
+	for key, digest := range m.ServerProbe.OllamaDigests {
+		control, ok := probeKeys[key]
+		if !ok {
+			return fmt.Errorf("capture-manifest v2 server_probe contains unknown Ollama target")
+		}
+		if canonicalSHA256Digest(digest) != digest || digest != control.digest {
+			return fmt.Errorf("capture-manifest v2 server_probe model_digest mismatch")
+		}
+	}
+	for key, control := range probeKeys {
+		if m.ServerProbe.OllamaDigests[key] != control.digest {
+			return fmt.Errorf("capture-manifest v2 model_targets/server_probe model_digest mismatch")
+		}
+	}
+
+	perArtifact := make(map[string]captureManifestRow, len(m.PerArtifact))
+	for _, row := range m.PerArtifact {
+		perArtifact[row.ArtifactHash] = row
+	}
+	targetSeen := make(map[string]bool, len(targets))
+	modelPosition := make(map[string]int, len(targets))
+	expectedOrder := make(map[string]int, len(expectedArtifacts))
+	pairArms := make(map[string]map[string]string)
+	for i, row := range m.Expected {
+		key := modelKey(row.Model)
+		if _, ok := targets[key]; !ok {
+			return fmt.Errorf("capture-manifest v2 expected row %d model is absent from model_targets", i)
+		}
+		targetSeen[key] = true
+		position := modelPosition[key]
+		modelPosition[key] = position + 1
+		if row.Status == "captured" {
+			expectedOrder[row.ArtifactHash] = position
+		}
+		if row.Arm == string(AssemblyLegacy) || row.Arm == string(AssemblyMixed) {
+			if pairArms[row.PairID] == nil {
+				pairArms[row.PairID] = make(map[string]string, 2)
+			}
+			if traceID := pairArms[row.PairID][row.Arm]; traceID != "" && traceID != row.TraceID {
+				return fmt.Errorf("capture-manifest v2 pair %q arm %q maps to multiple trace_ids", row.PairID, row.Arm)
+			}
+			pairArms[row.PairID][row.Arm] = row.TraceID
+		}
+	}
+	for key := range targets {
+		if !targetSeen[key] {
+			return fmt.Errorf("capture-manifest v2 model_targets model %q has no expected rows", key)
+		}
+	}
+	completePairIDs := make([]string, 0, len(pairArms))
+	for pairID, arms := range pairArms {
+		if arms[string(AssemblyLegacy)] != "" && arms[string(AssemblyMixed)] != "" {
+			completePairIDs = append(completePairIDs, pairID)
+		}
+	}
+	_, capturedOrders := counterbalancePairOrder(completePairIDs)
+
+	actual := make(map[string]*Artifact, len(arts))
+	for i := range arts {
+		actual[arts[i].ArtifactHash] = &arts[i]
+	}
+	for hash, expected := range expectedArtifacts {
+		artifact := actual[hash]
+		row := perArtifact[hash]
+		if captureProvenanceHash(*artifact) != row.ProvenanceHash {
+			return fmt.Errorf("capture-manifest v2 artifact binding: artifact hash %q provenance_hash mismatch", hash)
+		}
+		if row.OrderIndex != expectedOrder[hash] {
+			return fmt.Errorf("capture-manifest v2 artifact binding: artifact hash %q order_index mismatch", hash)
+		}
+		if !prefilledAssemblyMode(artifact.Trace) {
+			if artifact.Capture != nil {
+				return fmt.Errorf("capture-manifest v2 artifact binding: artifact hash %q non-assembly artifact carries capture provenance", hash)
+			}
+			continue
+		}
+		capture := artifact.Capture
+		if capture == nil {
+			return fmt.Errorf("capture-manifest v2 artifact binding: artifact hash %q capture provenance is missing", hash)
+		}
+		if capture.OrderIndex != row.OrderIndex {
+			return fmt.Errorf("capture-manifest v2 artifact binding: artifact hash %q order_index mismatch", hash)
+		}
+		usagePresent := capture.PromptTokens > 0 && capture.GenTokens > 0
+		if usagePresent != row.UsagePresent {
+			return fmt.Errorf("capture-manifest v2 artifact binding: artifact hash %q usage_present mismatch", hash)
+		}
+		if modelKey(capture.Model) != expected.model {
+			return fmt.Errorf("capture-manifest v2 artifact binding: artifact hash %q capture model mismatch", hash)
+		}
+		control := targets[expected.model]
+		wantCaptureTransport := control.provider
+		if control.provider == openAICompatTransport {
+			wantCaptureTransport = compatProvider
+		}
+		if capture.Transport != wantCaptureTransport {
+			return fmt.Errorf("capture-manifest v2 artifact binding: artifact hash %q transport mismatch", hash)
+		}
+		if capture.ModelDigest != control.digest {
+			return fmt.Errorf("capture-manifest v2 artifact binding: artifact hash %q model_digest mismatch", hash)
+		}
+		if capture.Temperature == nil || *capture.Temperature != m.Decoding.Temperature {
+			return fmt.Errorf("capture-manifest v2 artifact binding: artifact hash %q temperature mismatch", hash)
+		}
+		if capture.Seed != nil {
+			return fmt.Errorf("capture-manifest v2 artifact binding: artifact hash %q seed is not supported", hash)
+		}
+		wantOrder := ""
+		if expected.arm == string(AssemblyLegacy) || expected.arm == string(AssemblyMixed) {
+			wantOrder = capturedOrders[expected.pairID]
+		}
+		if capture.CapturedOrder != wantOrder {
+			return fmt.Errorf("capture-manifest v2 artifact binding: artifact hash %q captured_order mismatch", hash)
+		}
+	}
 	return nil
 }
 
@@ -463,6 +699,9 @@ func validateCaptureLedger(m captureManifest) ([]assemblyPairKey, error) {
 	for i, row := range m.PerArtifact {
 		if strings.TrimSpace(row.TraceID) == "" || strings.TrimSpace(row.ArtifactHash) == "" {
 			return nil, fmt.Errorf("per_artifact row %d: trace_id and artifact_hash must be nonblank", i)
+		}
+		if row.ProvenanceHash == "" || canonicalSHA256Digest(row.ProvenanceHash) != row.ProvenanceHash {
+			return nil, fmt.Errorf("per_artifact row %d: provenance_hash must be a canonical sha256 digest", i)
 		}
 		if _, dup := perArtifact[row.ArtifactHash]; dup {
 			return nil, fmt.Errorf("per_artifact row %d: duplicate artifact_hash %q", i, row.ArtifactHash)
@@ -609,6 +848,15 @@ func runCalibrateCapture(ctx context.Context, opts calibrateCaptureOptions) erro
 			return fmt.Errorf("calibrate-capture: duplicate model target %q", target.Display)
 		}
 		seenTargets[key] = struct{}{}
+	}
+	assemblyCapture := anyPrefilledAssemblyTrace(opts.Traces)
+	var endpoint, transport string
+	if assemblyCapture {
+		var err error
+		endpoint, transport, err = captureEndpointTransport(opts.Targets, opts.OllamaURL, opts.OpenAICompatBaseURL)
+		if err != nil {
+			return err
+		}
 	}
 	modelDigests := make(map[string]string, len(opts.ModelDigests))
 	for _, target := range opts.Targets {
@@ -762,9 +1010,10 @@ func runCalibrateCapture(ctx context.Context, opts calibrateCaptureOptions) erro
 			artifacts = append(artifacts, artifact)
 			row.ArtifactHash = artifact.ArtifactHash
 			manifestRows = append(manifestRows, captureManifestRow{
-				TraceID:      r.TraceID,
-				ArtifactHash: artifact.ArtifactHash,
-				OrderIndex:   orderIndex[r.TraceID],
+				TraceID:        r.TraceID,
+				ArtifactHash:   artifact.ArtifactHash,
+				ProvenanceHash: captureProvenanceHash(artifact),
+				OrderIndex:     orderIndex[r.TraceID],
 				// Zero counts mean "usage not reported" (see the KNOWN GAP on
 				// CaptureProvenance), so presence requires both counts non-zero.
 				UsagePresent: r.Score.PromptEvalTokens > 0 && r.Score.GenTokens > 0,
@@ -784,8 +1033,7 @@ func runCalibrateCapture(ctx context.Context, opts calibrateCaptureOptions) erro
 	// fails loudly. Non-assembly captures stay manifest-free.
 	var manifestPath string
 	var manifestRaw []byte
-	if anyPrefilledAssemblyTrace(opts.Traces) {
-		endpoint, transport := captureEndpointTransport(opts.Targets, opts.OllamaURL, opts.OpenAICompatBaseURL)
+	if assemblyCapture {
 		targets := make([]captureManifestTarget, 0, len(opts.Targets))
 		for _, target := range opts.Targets {
 			targets = append(targets, captureManifestTarget{

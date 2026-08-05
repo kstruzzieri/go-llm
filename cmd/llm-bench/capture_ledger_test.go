@@ -23,6 +23,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
 // failingRunner returns one Result per (target, trace) like the real runner,
@@ -719,7 +720,10 @@ func TestAssemblyReportLedgerSynthesizesVanishedPairs(t *testing.T) {
 	v2 := writeLedgerManifest(t, dir, "v2.manifest.json", captureManifest{
 		SchemaVersion: captureManifestSchemaVersionV2,
 		ArtifactCount: 1,
-		PerArtifact:   []captureManifestRow{{TraceID: half.TraceID, ArtifactHash: half.ArtifactHash, UsagePresent: true}},
+		PerArtifact: []captureManifestRow{{
+			TraceID: half.TraceID, ArtifactHash: half.ArtifactHash,
+			ProvenanceHash: captureProvenanceHash(half), UsagePresent: true,
+		}},
 		ExpectedCount: len(ledger),
 		Expected:      ledger,
 	})
@@ -780,14 +784,24 @@ func TestAssemblyReportLedgerSynthesizesVanishedPairs(t *testing.T) {
 func TestAssemblyReportV2ArtifactBinding(t *testing.T) {
 	legacy := withCaptureTemp(mixedArtifact("pair-a", AssemblyLegacy, "ollama/m", nil), 0)
 	mixed := withCaptureTemp(mixedArtifact("pair-a", AssemblyMixed, "ollama/m", nil), 0)
+	legacy.CapturedAt = time.Date(2026, 8, 5, 12, 0, 0, 0, time.UTC)
+	mixed.CapturedAt = legacy.CapturedAt.Add(time.Second)
+	legacy.Capture.OrderIndex, mixed.Capture.OrderIndex = 0, 1
+	legacy.Capture.PromptTokens, legacy.Capture.GenTokens = 10, 2
+	mixed.Capture.PromptTokens, mixed.Capture.GenTokens = 10, 2
+	legacy.Capture.CapturedOrder, mixed.Capture.CapturedOrder = "legacy-first", "legacy-first"
 	arts := []Artifact{legacy, mixed}
 	labels := []Label{labelFor(legacy, 0), labelFor(mixed, 1)}
 	base := captureManifest{
-		SchemaVersion: captureManifestSchemaVersionV2,
-		ArtifactCount: 2,
+		SchemaVersion:        captureManifestSchemaVersionV2,
+		Transport:            defaultBenchProvider,
+		ModelTargets:         []captureManifestTarget{{Selector: "ollama/m"}},
+		Decoding:             captureDecoding{Temperature: assemblyCaptureTemperature},
+		CounterbalanceScheme: captureCounterbalanceScheme,
+		ArtifactCount:        2,
 		PerArtifact: []captureManifestRow{
-			{TraceID: legacy.TraceID, ArtifactHash: legacy.ArtifactHash, UsagePresent: true},
-			{TraceID: mixed.TraceID, ArtifactHash: mixed.ArtifactHash, UsagePresent: true},
+			{TraceID: legacy.TraceID, ArtifactHash: legacy.ArtifactHash, ProvenanceHash: captureProvenanceHash(legacy), UsagePresent: true},
+			{TraceID: mixed.TraceID, ArtifactHash: mixed.ArtifactHash, ProvenanceHash: captureProvenanceHash(mixed), OrderIndex: 1, UsagePresent: true},
 		},
 		ExpectedCount: 2,
 		Expected: []captureExpectedRow{
@@ -890,6 +904,7 @@ func TestAssemblyReportV2ArtifactBinding(t *testing.T) {
 }
 
 func TestAssemblyReportV2KeepsSameNativeModelDistinctByProvider(t *testing.T) {
+	const compatEndpoint = "https://compat.test/v1"
 	var arts []Artifact
 	var labels []Label
 	var perArtifact []captureManifestRow
@@ -898,9 +913,19 @@ func TestAssemblyReportV2KeepsSameNativeModelDistinctByProvider(t *testing.T) {
 		ledgerModel := []string{"ollama / m", "openai-compat / m"}[i]
 		for _, mode := range []AssemblyMode{AssemblyLegacy, AssemblyMixed} {
 			a := withCaptureTemp(mixedArtifact("pair-a", mode, model, nil), 0)
+			a.CapturedAt = time.Date(2026, 8, 5, 12, 0, 0, 0, time.UTC)
+			a.Capture.OrderIndex = len(perArtifact) % 2
+			a.Capture.PromptTokens, a.Capture.GenTokens = 10, 2
+			a.Capture.CapturedOrder = "legacy-first"
+			if strings.HasPrefix(model, openAICompatTransport+"/") {
+				a.Capture.Transport = openAICompatCandidateProviderName(compatEndpoint)
+			}
 			arts = append(arts, a)
 			labels = append(labels, labelFor(a, 1))
-			perArtifact = append(perArtifact, captureManifestRow{TraceID: a.TraceID, ArtifactHash: a.ArtifactHash, UsagePresent: true})
+			perArtifact = append(perArtifact, captureManifestRow{
+				TraceID: a.TraceID, ArtifactHash: a.ArtifactHash,
+				ProvenanceHash: captureProvenanceHash(a), OrderIndex: a.Capture.OrderIndex, UsagePresent: true,
+			})
 			expected = append(expected, captureExpectedRow{TraceID: a.TraceID, Model: ledgerModel, PairID: "pair-a", Arm: string(mode), Status: "captured", Attempts: 1, ArtifactHash: a.ArtifactHash})
 		}
 	}
@@ -915,6 +940,9 @@ func TestAssemblyReportV2KeepsSameNativeModelDistinctByProvider(t *testing.T) {
 	}
 	manifestPath := writeLedgerManifest(t, dir, "manifest.json", captureManifest{
 		SchemaVersion: captureManifestSchemaVersionV2,
+		Endpoint:      "https://ollama.test " + compatEndpoint, Transport: "mixed",
+		ModelTargets: []captureManifestTarget{{Selector: "ollama/m"}, {Selector: "openai-compat/m"}},
+		Decoding:     captureDecoding{Temperature: assemblyCaptureTemperature}, CounterbalanceScheme: captureCounterbalanceScheme,
 		ArtifactCount: len(arts), PerArtifact: perArtifact,
 		ExpectedCount: len(expected), Expected: expected,
 	})
@@ -948,7 +976,9 @@ func TestAssemblyReportV2AllFailedEmptyArtifactsSucceeds(t *testing.T) {
 		{TraceID: "failed-mixed", Model: "ollama/m", PairID: "pair-failed", Arm: "mixed", Status: "failed", Attempts: 2, Error: "<error: timeout>"},
 	}
 	manifestPath := writeLedgerManifest(t, dir, "manifest.json", captureManifest{
-		SchemaVersion: captureManifestSchemaVersionV2,
+		SchemaVersion: captureManifestSchemaVersionV2, Transport: defaultBenchProvider,
+		ModelTargets: []captureManifestTarget{{Selector: "ollama/m"}},
+		Decoding:     captureDecoding{Temperature: assemblyCaptureTemperature}, CounterbalanceScheme: captureCounterbalanceScheme,
 		ExpectedCount: len(expected), Expected: expected,
 	})
 	raw, err := runAssemblyReport(assemblyReportOptions{
@@ -1013,7 +1043,10 @@ func TestLoadCaptureManifestLedgerValidation(t *testing.T) {
 	dir := t.TempDir()
 	captured := captureExpectedRow{TraceID: "t1", Model: "m", PairID: "p1", Arm: "legacy", Status: "captured", Attempts: 1, ArtifactHash: "sha256:aa"}
 	failed := captureExpectedRow{TraceID: "t2", Model: "m", PairID: "p1", Arm: "mixed", Status: "failed", Attempts: 2, Error: "<error: timeout>"}
-	perArtifact := []captureManifestRow{{TraceID: "t1", ArtifactHash: "sha256:aa", UsagePresent: true}}
+	perArtifact := []captureManifestRow{{
+		TraceID: "t1", ArtifactHash: "sha256:aa",
+		ProvenanceHash: "sha256:" + strings.Repeat("a", 64), UsagePresent: true,
+	}}
 	valid := captureManifest{
 		SchemaVersion: captureManifestSchemaVersionV2,
 		ArtifactCount: 1, PerArtifact: perArtifact,
@@ -1067,14 +1100,20 @@ func TestLoadCaptureManifestLedgerValidation(t *testing.T) {
 		{"per_artifact blank trace_id", "per_artifact", mutate(func(m *captureManifest) { m.PerArtifact[0].TraceID = "" })},
 		{"per_artifact blank hash", "per_artifact", mutate(func(m *captureManifest) { m.PerArtifact[0].ArtifactHash = "" })},
 		{"duplicate per_artifact hash", "duplicate", mutate(func(m *captureManifest) {
-			m.PerArtifact = append(m.PerArtifact, captureManifestRow{TraceID: "t3", ArtifactHash: "sha256:aa"})
+			m.PerArtifact = append(m.PerArtifact, captureManifestRow{
+				TraceID: "t3", ArtifactHash: "sha256:aa",
+				ProvenanceHash: "sha256:" + strings.Repeat("b", 64),
+			})
 			m.ArtifactCount = 2
 		})},
 		{"captured trace/hash mismatch", "trace_id", mutate(func(m *captureManifest) {
 			m.PerArtifact[0].TraceID = "other"
 		})},
 		{"per_artifact hash missing from the ledger", "ledger", mutate(func(m *captureManifest) {
-			m.PerArtifact = append(m.PerArtifact, captureManifestRow{TraceID: "t9", ArtifactHash: "sha256:bb"})
+			m.PerArtifact = append(m.PerArtifact, captureManifestRow{
+				TraceID: "t9", ArtifactHash: "sha256:bb",
+				ProvenanceHash: "sha256:" + strings.Repeat("b", 64),
+			})
 			m.ArtifactCount = 2
 		})},
 	}

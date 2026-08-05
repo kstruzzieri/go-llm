@@ -545,6 +545,7 @@ type captureVerification struct {
 	usagePresent          map[string]bool // artifact_hash -> usage_present
 	expectedPairs         []assemblyPairKey
 	expectedArtifacts     map[string]captureExpectedArtifact // nil=v1; nonnil=v2, including all-failed
+	v2Manifest            *captureManifest
 	legacyV1ModelIdentity bool
 }
 

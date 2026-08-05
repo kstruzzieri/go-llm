@@ -247,6 +247,7 @@ func canonicalOpenAICompatBaseURL(raw string) string {
 	u.Host = strings.ToLower(u.Host)
 	u.User = nil
 	u.RawQuery = ""
+	u.ForceQuery = false
 	u.Fragment = ""
 	u.RawPath = ""
 	u.Path = strings.TrimRight(u.Path, "/")
