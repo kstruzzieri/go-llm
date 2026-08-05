@@ -106,7 +106,7 @@ func main() {
 	fcSidemapDigest := flag.String("fc-sidemap-digest", "", "With -fc-render, -fc-ingest, or -assembly-report alongside -fc-sidemap: REQUIRED committed sha256 of the sidemap file; a mismatch is a hard error")
 	fcRequireComplete := flag.Bool("fc-require-complete", false, "With -fc-ingest: any rendered pair block left blank is a loud error listing the pairs (the registered workflow)")
 	captureManifestFlag := flag.String("capture-manifest", "", "With -assembly-report: the -calibrate-capture run manifest; embeds its digest and excludes legacy/mixed pairs it cannot verify (unverified-capture / temperature-mismatch)")
-	modelFilter := flag.String("model", "", "With -blind-render, -fc-render, or -adjudicate-render: only render artifacts whose candidate model matches this selector (the registered workflow labels one model at a time); empty renders all")
+	modelFilter := flag.String("model", "", "With -blind-render, -fc-render, -fc-ingest, or -adjudicate-render: only use artifacts whose candidate model matches this selector (the registered workflow labels one model at a time); empty uses all")
 	adjudicateRender := flag.Bool("adjudicate-render", false, "Render the grounding adjudication worksheet (full prompt shown) for labels flagged grounding-check, from -artifacts and -labels to -report (#331 slice 3c)")
 	adjudicateIngest := flag.Bool("adjudicate-ingest", false, "Parse a filled adjudication worksheet (-worksheet) and emit the full updated label set (-labels-out) from -artifacts and -labels; every flagged label must be adjudicated with a reason")
 	worksheetPath := flag.String("worksheet", "", "Path to a filled worksheet (required with -blind-ingest, -fc-ingest, -adjudicate-ingest)")
@@ -598,6 +598,10 @@ func main() {
 		arts, err := loadArtifacts(*artifactsPath)
 		if err != nil {
 			log.Fatalf("llm-bench: fc-ingest: load artifacts: %v", err)
+		}
+		arts, err = filterArtifactsByModel(arts, *modelFilter)
+		if err != nil {
+			log.Fatalf("llm-bench: fc-ingest: %v", err)
 		}
 		rows, skipped, err := ingestForcedChoiceWorksheet(string(worksheet), arts, strings.TrimSpace(*labelerName), sidemap, *fcRequireComplete)
 		if err != nil {

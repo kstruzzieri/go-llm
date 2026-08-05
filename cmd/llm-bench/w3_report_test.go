@@ -840,6 +840,112 @@ func TestMainFCSidemapDigestGate(t *testing.T) {
 	}
 }
 
+func TestMainFCIngestHonorsModelFilter(t *testing.T) {
+	base := fcPairArtifacts()[:2]
+	other := append([]Artifact(nil), base...)
+	for i := range other {
+		other[i].TraceID += "-d"
+		other[i].Trace.ID += "-d"
+		other[i].CandidateModel = "ollama/d"
+	}
+	arts := append(base, other...)
+	for i := range arts {
+		arts[i].ArtifactHash = artifactHash(arts[i])
+	}
+
+	dir := t.TempDir()
+	artsPath := filepath.Join(dir, "artifacts.jsonl")
+	writeArtifactsJSONL(t, artsPath, arts)
+	sidemap, err := generateFCSidemap(arts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sidemapPath := filepath.Join(dir, "sidemap.json")
+	digest, err := writeFCSidemap(sidemapPath, sidemap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	run := func(args ...string) ([]byte, error) {
+		cmd := exec.Command(os.Args[0], args...)
+		cmd.Env = append(os.Environ(), "LLM_BENCH_TEST_MAIN=1")
+		return cmd.CombinedOutput()
+	}
+
+	worksheetPath := filepath.Join(dir, "worksheet-c.txt")
+	if out, err := run("-fc-render", "-artifacts", artsPath, "-model", "c", "-fc-sidemap", sidemapPath, "-fc-sidemap-digest", digest, "-report", worksheetPath); err != nil {
+		t.Fatalf("render model c: %v\n%s", err, out)
+	}
+	worksheet, err := os.ReadFile(worksheetPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	filled := fillWorksheetField(t, string(worksheet), "=== PAIR pair-alpha c ===", "prefer", "A")
+	if err := os.WriteFile(worksheetPath, []byte(filled), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	outPath := filepath.Join(dir, "preferences-c.jsonl")
+	if out, err := run("-fc-ingest", "-worksheet", worksheetPath, "-artifacts", artsPath, "-model", "c", "-fc-sidemap", sidemapPath, "-fc-sidemap-digest", digest, "-fc-require-complete", "-fc-out", outPath); err != nil {
+		t.Fatalf("ingest model c worksheet with model c: %v\n%s", err, out)
+	}
+	rows, err := loadFCPreferences(outPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 || rows[0].CandidateModel != "c" {
+		t.Fatalf("filtered preferences = %+v; want one model-c row", rows)
+	}
+
+	failures := []struct {
+		name, model, want string
+	}{
+		{name: "model flag omitted", want: "pair-alpha/d"},
+		{name: "wrong present model", model: "d", want: "not in -artifacts"},
+		{name: "absent model", model: "absent", want: "matches no artifacts"},
+	}
+	for _, tc := range failures {
+		t.Run(tc.name, func(t *testing.T) {
+			failedOut := filepath.Join(dir, strings.ReplaceAll(tc.name, " ", "-")+".jsonl")
+			args := []string{"-fc-ingest", "-worksheet", worksheetPath, "-artifacts", artsPath, "-fc-sidemap", sidemapPath, "-fc-sidemap-digest", digest, "-fc-require-complete", "-fc-out", failedOut}
+			if tc.model != "" {
+				args = append(args, "-model", tc.model)
+			}
+			out, err := run(args...)
+			if err == nil || !strings.Contains(string(out), tc.want) {
+				t.Fatalf("ingest model %q: err=%v, want output containing %q\n%s", tc.model, err, tc.want, out)
+			}
+			if _, err := os.Stat(failedOut); !os.IsNotExist(err) {
+				t.Fatalf("failed ingest wrote %s: %v", failedOut, err)
+			}
+		})
+	}
+
+	allWorksheetPath := filepath.Join(dir, "worksheet-all.txt")
+	if out, err := run("-fc-render", "-artifacts", artsPath, "-fc-sidemap", sidemapPath, "-fc-sidemap-digest", digest, "-report", allWorksheetPath); err != nil {
+		t.Fatalf("render all models: %v\n%s", err, out)
+	}
+	allWorksheet, err := os.ReadFile(allWorksheetPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	allFilled := fillWorksheetField(t, string(allWorksheet), "=== PAIR pair-alpha c ===", "prefer", "A")
+	allFilled = fillWorksheetField(t, allFilled, "=== PAIR pair-alpha d ===", "prefer", "B")
+	if err := os.WriteFile(allWorksheetPath, []byte(allFilled), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	allOut := filepath.Join(dir, "preferences-all.jsonl")
+	if out, err := run("-fc-ingest", "-worksheet", allWorksheetPath, "-artifacts", artsPath, "-fc-sidemap", sidemapPath, "-fc-sidemap-digest", digest, "-fc-require-complete", "-fc-out", allOut); err != nil {
+		t.Fatalf("ingest all-model worksheet without -model: %v\n%s", err, out)
+	}
+	allRows, err := loadFCPreferences(allOut)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(allRows) != 2 {
+		t.Fatalf("all-model preferences = %+v; want two rows", allRows)
+	}
+}
+
 func TestFilterArtifactsByModel(t *testing.T) {
 	arts := []Artifact{
 		{CandidateModel: "ollama/qwen3:8b"},
