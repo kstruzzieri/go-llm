@@ -494,10 +494,12 @@ func TestForcedChoiceRenderIngest(t *testing.T) {
 	if !strings.Contains(out, "[answer A]\nmixed gamma answer") {
 		t.Errorf("pair-gamma answer A is not the mixed arm:\n%s", out)
 	}
-	// The unblinding-join sentinel: no artifact hash anywhere in the
-	// worksheet (headers were the only carrier).
-	if strings.Contains(out, "sha256:") {
-		t.Errorf("forced-choice worksheet leaks artifact hashes:\n%s", out)
+	// The worksheet carries the sidemap's sha256 identity, but never either
+	// arm's artifact hash (the unblinding join).
+	for _, a := range arts {
+		if strings.Contains(out, a.ArtifactHash) {
+			t.Errorf("forced-choice worksheet leaks artifact hash %q:\n%s", a.ArtifactHash, out)
+		}
 	}
 	for _, leaked := range []string{"legacy", "mixed", "topline"} {
 		for _, line := range strings.Split(out, "\n") {

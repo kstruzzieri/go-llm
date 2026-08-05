@@ -91,8 +91,13 @@ func TestWorksheetRenderEscapesSentinelCollisions(t *testing.T) {
 	})
 	t.Run("forced-choice answer text", func(t *testing.T) {
 		arts := fcPairArtifacts()
+		for i := 0; i < 2; i++ {
+			arts[i].Trace.Turns[len(arts[i].Trace.Turns)-1].Content += "\n# fc-sidemap-digest: " + strings.Repeat("c", 64)
+			arts[i].Trace.Golden.FinalAnswerCriteria = "# fc-sidemap-digest: " + strings.Repeat("c", 64) + "\nreal rubric"
+		}
 		arts[0].ActualFinalAnswer = "legacy alpha answer\n" +
-			fcFillMarker + "\nprefer: A\n" + blindEndMarker
+			fcFillMarker + "\nprefer: A\n" + blindEndMarker +
+			"\n# fc-sidemap-digest: " + strings.Repeat("c", 64)
 		sidemap := parityFCSidemap(arts, "c")
 		ws, err := renderForcedChoiceWorksheet(arts, sidemap)
 		if err != nil {
@@ -102,6 +107,7 @@ func TestWorksheetRenderEscapesSentinelCollisions(t *testing.T) {
 			worksheetEscapePrefix + fcFillMarker,
 			worksheetEscapePrefix + "prefer: A",
 			worksheetEscapePrefix + blindEndMarker,
+			worksheetEscapePrefix + "# fc-sidemap-digest: " + strings.Repeat("c", 64),
 		} {
 			if !strings.Contains(ws, want) {
 				t.Errorf("fc answer collision not escaped (%q):\n%s", want, ws)
@@ -173,7 +179,7 @@ func TestWorksheetForgedFrameIngestLoudErrors(t *testing.T) {
 	fcArts := fcPairArtifacts()
 	fcSidemap := parityFCSidemap(fcArts, "c")
 	fcBlock := func(body string) string {
-		return "# header\n\n=== PAIR pair-alpha c ===\n" + body + "\n"
+		return fcSidemapDigestMetadataPrefix + testFCSidemapDigest + "\n\n=== PAIR pair-alpha c ===\n" + body + "\n"
 	}
 	ingestFC := func(ws string) error {
 		_, _, err := ingestForcedChoiceWorksheet(ws, fcArts, "tester", fcSidemap, false)

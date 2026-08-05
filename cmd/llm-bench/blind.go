@@ -163,6 +163,7 @@ func worksheetSentinelCollision(line string) bool {
 	for _, p := range []string{
 		blindFillMarker, fcFillMarker, blindEndMarker,
 		blindArtifactHeaderPrefix, blindBlockHeaderPrefix, fcPairHeaderPrefix,
+		fcSidemapDigestMetadataPrefix,
 	} {
 		if strings.HasPrefix(line, p) {
 			return true

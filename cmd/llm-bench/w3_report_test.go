@@ -15,6 +15,13 @@ import (
 	"testing"
 )
 
+var testFCSidemapDigest = "sha256:" + strings.Repeat("a", 64)
+
+func testFCSidemapWithDigest(m fcSidemapFile, digest string) fcSidemapFile {
+	m.verifiedDigest = digest
+	return m
+}
+
 // parityFCSidemap builds a sidemap whose assignments EQUAL the legacy parity
 // rule for the given (pair, model) keys, so fixtures built around
 // fcSideIsLegacyA (fcRowFor, fcPairArtifacts) stay bindable while the code
@@ -42,7 +49,7 @@ func parityFCSidemap(arts []Artifact, model string, pairIDs ...string) fcSidemap
 		}
 		m.Pairs[fcSidemapKey(p.pairID, p.model)] = fcSidemapEntry{LegacyIsA: legacyIsA, HashA: hashA, HashB: hashB}
 	}
-	return m
+	return testFCSidemapWithDigest(m, testFCSidemapDigest)
 }
 
 func TestFCSidemapGenerateAndLoad(t *testing.T) {
@@ -142,14 +149,19 @@ func TestFCSidemapGenerateAndLoad(t *testing.T) {
 }
 
 func TestFCSidemapDigestVerification(t *testing.T) {
-	if err := verifyFCSidemapDigest("abc123", "abc123"); err != nil {
+	digest := strings.Repeat("a", 64)
+	if err := verifyFCSidemapDigest(digest, digest); err != nil {
 		t.Errorf("matching digest rejected: %v", err)
 	}
-	if err := verifyFCSidemapDigest("abc123", "sha256:ABC123"); err != nil {
+	if err := verifyFCSidemapDigest(digest, "sha256:"+strings.ToUpper(digest)); err != nil {
 		t.Errorf("case/prefix-tolerant match rejected: %v", err)
 	}
-	if err := verifyFCSidemapDigest("abc123", "def456"); err == nil || !strings.Contains(err.Error(), "mismatch") {
+	if err := verifyFCSidemapDigest(digest, strings.Repeat("b", 64)); err == nil || !strings.Contains(err.Error(), "mismatch") {
 		t.Errorf("mismatched digest = %v; want a hard mismatch error", err)
+	}
+	secret := "sk-FAKE-SIDEMAP-SECRET-0000"
+	if err := verifyFCSidemapDigest(digest, secret); err == nil || strings.Contains(err.Error(), secret) {
+		t.Errorf("invalid committed digest error = %v; want a non-echoing error", err)
 	}
 }
 
@@ -179,6 +191,10 @@ func TestFCSidemapDigestVerificationEndToEnd(t *testing.T) {
 	if _, err := runAssemblyReport(opts); err != nil {
 		t.Fatalf("matching committed digest rejected: %v", err)
 	}
+	opts.FCSidemapDigest = ""
+	if _, err := runAssemblyReport(opts); err == nil || !strings.Contains(err.Error(), "requires -fc-sidemap-digest") {
+		t.Fatalf("sidemap without committed digest = %v; want a loud requirement error", err)
+	}
 	opts.FCSidemapDigest = strings.Repeat("0", 64)
 	if _, err := runAssemblyReport(opts); err == nil || !strings.Contains(err.Error(), "mismatch") {
 		t.Fatalf("wrong committed digest = %v; want a hard error", err)
@@ -191,6 +207,103 @@ func TestFCSidemapDigestVerificationEndToEnd(t *testing.T) {
 	if _, err := runAssemblyReport(opts); err == nil || !strings.Contains(err.Error(), "without -fc-sidemap") {
 		t.Fatalf("digest without sidemap = %v; want a loud error", err)
 	}
+
+	// Historical reports that provide no sidemap retain the registered parity
+	// resolver. A sidecar produced in parity order must still report cleanly.
+	prefsPath := filepath.Join(dir, "preferences.jsonl")
+	if err := writeJSONLRows(prefsPath, "fc-preferences", []FCPreference{fcRowFor(arts, "pair-alpha", "a")}); err != nil {
+		t.Fatal(err)
+	}
+	opts = assemblyReportOptions{LabelsPath: labelsPath, ArtifactsPath: artsPath, FCPrefsPath: prefsPath}
+	if _, err := runAssemblyReport(opts); err != nil {
+		t.Fatalf("historical no-sidemap parity report: %v", err)
+	}
+
+	// The same row cannot be reinterpreted under a different, independently
+	// valid map: its existing A/B artifact hashes bind it to the original map.
+	flipped := parityFCSidemap(arts, "c")
+	e := flipped.Pairs["pair-alpha|c"]
+	e.LegacyIsA = !e.LegacyIsA
+	e.HashA, e.HashB = e.HashB, e.HashA
+	flipped.Pairs["pair-alpha|c"] = e
+	flippedPath := filepath.Join(dir, "flipped-sidemap.json")
+	flippedDigest, err := writeFCSidemap(flippedPath, flipped)
+	if err != nil {
+		t.Fatal(err)
+	}
+	opts.FCSidemapPath, opts.FCSidemapDigest = flippedPath, flippedDigest
+	if _, err := runAssemblyReport(opts); err == nil || !strings.Contains(err.Error(), "registered side assignment") {
+		t.Fatalf("preference row accepted under a different sidemap = %v; want hash-order rejection", err)
+	}
+}
+
+func TestForcedChoiceRequiresVerifiedDigestAndWorksheetBinding(t *testing.T) {
+	arts := fcPairArtifacts()
+	verified := parityFCSidemap(arts, "c")
+	unverified := fcSidemapFile{
+		SchemaVersion: verified.SchemaVersion,
+		Pairs:         verified.Pairs,
+		SealedDigest:  verified.SealedDigest,
+	}
+
+	t.Run("render function rejects an unverified map", func(t *testing.T) {
+		if _, err := renderForcedChoiceWorksheet(arts, unverified); err == nil || !strings.Contains(err.Error(), "fc-sidemap-digest") {
+			t.Fatalf("render with no committed digest = %v; want a loud requirement error", err)
+		}
+	})
+
+	worksheet, err := renderForcedChoiceWorksheet(arts, verified)
+	if err != nil {
+		t.Fatalf("render verified worksheet: %v", err)
+	}
+	metadata := "# fc-sidemap-digest: " + testFCSidemapDigest
+	if got := strings.Count(worksheet, metadata+"\n"); got != 1 {
+		t.Fatalf("worksheet digest metadata count = %d; want exactly one\n%s", got, worksheet)
+	}
+	filled := fillWorksheetField(t, worksheet, "=== PAIR pair-alpha c ===", "prefer", "A")
+
+	t.Run("ingest function rejects an unverified map", func(t *testing.T) {
+		if _, _, err := ingestForcedChoiceWorksheet(filled, arts, "t", unverified, false); err == nil || !strings.Contains(err.Error(), "fc-sidemap-digest") {
+			t.Fatalf("ingest with no committed digest = %v; want a loud requirement error", err)
+		}
+	})
+
+	t.Run("worksheet metadata is mandatory and singular", func(t *testing.T) {
+		missing := strings.Replace(worksheet, metadata+"\n", "", 1)
+		if _, _, err := ingestForcedChoiceWorksheet(missing, arts, "t", verified, false); err == nil || !strings.Contains(err.Error(), "missing") {
+			t.Fatalf("worksheet without digest metadata = %v; want a loud missing-metadata error", err)
+		}
+		duplicate := metadata + "\n" + worksheet
+		if _, _, err := ingestForcedChoiceWorksheet(duplicate, arts, "t", verified, false); err == nil || !strings.Contains(err.Error(), "exactly one") {
+			t.Fatalf("worksheet with duplicate digest metadata = %v; want a loud duplicate error", err)
+		}
+		forged := strings.Replace(worksheet, metadata, "# fc-sidemap-digest: sha256:"+strings.Repeat("c", 64), 1)
+		if _, _, err := ingestForcedChoiceWorksheet(forged, arts, "t", verified, false); err == nil || !strings.Contains(err.Error(), "digest mismatch") {
+			t.Fatalf("worksheet with forged digest metadata = %v; want a loud mismatch", err)
+		}
+		secret := "sk-FAKE-WORKSHEET-SECRET-0000"
+		invalid := strings.Replace(worksheet, metadata, "# fc-sidemap-digest: "+secret, 1)
+		if _, _, err := ingestForcedChoiceWorksheet(invalid, arts, "t", verified, false); err == nil || strings.Contains(err.Error(), secret) {
+			t.Fatalf("invalid worksheet digest error = %v; want a non-echoing error", err)
+		}
+		forgedBody := strings.Replace(worksheet, metadata+"\n", "", 1)
+		forgedBody = strings.Replace(forgedBody, "[answer A]\n", "[answer A]\n"+metadata+"\n", 1)
+		if _, _, err := ingestForcedChoiceWorksheet(forgedBody, arts, "t", verified, false); err == nil || !strings.Contains(err.Error(), "before the first PAIR") {
+			t.Fatalf("answer-body digest sentinel accepted as worksheet metadata = %v", err)
+		}
+	})
+
+	t.Run("worksheet rendered under map A is rejected under map B", func(t *testing.T) {
+		other := parityFCSidemap(arts, "c")
+		other = testFCSidemapWithDigest(other, "sha256:"+strings.Repeat("b", 64))
+		e := other.Pairs["pair-alpha|c"]
+		e.LegacyIsA = !e.LegacyIsA
+		e.HashA, e.HashB = e.HashB, e.HashA
+		other.Pairs["pair-alpha|c"] = e
+		if _, _, err := ingestForcedChoiceWorksheet(filled, arts, "t", other, false); err == nil || !strings.Contains(err.Error(), "digest mismatch") {
+			t.Fatalf("map-A worksheet ingested under map B = %v; want digest mismatch", err)
+		}
+	})
 }
 
 func TestFCRenderIngestRequireSidemapResolver(t *testing.T) {
@@ -627,6 +740,10 @@ func TestMainFCSidemapDigestGate(t *testing.T) {
 		name, wantErr string
 		args          []string
 	}{
+		{"fc-render missing digest", "requires -fc-sidemap-digest",
+			[]string{"-fc-render", "-artifacts", missingArts, "-fc-sidemap", sidemapPath}},
+		{"fc-ingest missing digest", "requires -fc-sidemap-digest",
+			[]string{"-fc-ingest", "-worksheet", wsPath, "-artifacts", missingArts, "-fc-out", filepath.Join(dir, "out-missing.jsonl"), "-fc-sidemap", sidemapPath}},
 		{"fc-render wrong digest", "mismatch",
 			[]string{"-fc-render", "-artifacts", missingArts, "-fc-sidemap", sidemapPath, "-fc-sidemap-digest", wrong}},
 		{"fc-ingest wrong digest", "mismatch",

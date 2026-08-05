@@ -999,10 +999,10 @@ type assemblyReportOptions struct {
 }
 
 // runAssemblyReport loads the (labels, artifacts) pair — plus, when set, the
-// -fc-ingest preference sidecar, the sealed forced-choice sidemap (verified
-// against -fc-sidemap-digest when supplied; mismatch is a hard error), and
-// the capture run manifest — and renders the assembly report as indented
-// JSON.
+// -fc-ingest preference sidecar, the sealed forced-choice sidemap (which
+// requires and is verified against -fc-sidemap-digest), and the capture run
+// manifest — and renders the assembly report as indented JSON. Omitting both
+// sidemap flags preserves the historical parity resolver.
 func runAssemblyReport(opts assemblyReportOptions) (string, error) {
 	arts, err := loadArtifacts(opts.ArtifactsPath)
 	if err != nil {
@@ -1027,14 +1027,9 @@ func runAssemblyReport(opts assemblyReportOptions) (string, error) {
 		return "", fmt.Errorf("assembly report: -fc-sidemap-digest without -fc-sidemap (there is no file to verify the committed digest against)")
 	}
 	if strings.TrimSpace(opts.FCSidemapPath) != "" {
-		_, resolver, digest, err := loadFCSidemap(opts.FCSidemapPath)
+		_, resolver, err := loadVerifiedFCSidemap(opts.FCSidemapPath, opts.FCSidemapDigest)
 		if err != nil {
 			return "", err
-		}
-		if strings.TrimSpace(opts.FCSidemapDigest) != "" {
-			if err := verifyFCSidemapDigest(digest, opts.FCSidemapDigest); err != nil {
-				return "", err
-			}
 		}
 		extras.sideResolver = resolver
 		extras.armGuess = true

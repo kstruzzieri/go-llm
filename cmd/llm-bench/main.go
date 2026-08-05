@@ -103,7 +103,7 @@ func main() {
 	fcSidemapGenerate := flag.Bool("fc-sidemap-generate", false, "Generate the sealed random forced-choice side map over the complete legacy/mixed pairs in -artifacts, write it to -fc-sidemap-out, and print its sha256 (commit the digest BEFORE labeling)")
 	fcSidemapOut := flag.String("fc-sidemap-out", "", "Output path for -fc-sidemap-generate (required with it)")
 	fcSidemapPath := flag.String("fc-sidemap", "", "Sealed side-map JSON path: REQUIRED with -fc-render and -fc-ingest; optional with -assembly-report, where it replaces the pre-sidemap parity side resolution and enables the descriptive arm-guess audit")
-	fcSidemapDigest := flag.String("fc-sidemap-digest", "", "With -fc-render, -fc-ingest, or -assembly-report (alongside -fc-sidemap): the committed sha256 of the sidemap file; a mismatch is a hard error")
+	fcSidemapDigest := flag.String("fc-sidemap-digest", "", "With -fc-render, -fc-ingest, or -assembly-report alongside -fc-sidemap: REQUIRED committed sha256 of the sidemap file; a mismatch is a hard error")
 	fcRequireComplete := flag.Bool("fc-require-complete", false, "With -fc-ingest: any rendered pair block left blank is a loud error listing the pairs (the registered workflow)")
 	captureManifestFlag := flag.String("capture-manifest", "", "With -assembly-report: the -calibrate-capture run manifest; embeds its digest and excludes legacy/mixed pairs it cannot verify (unverified-capture / temperature-mismatch)")
 	modelFilter := flag.String("model", "", "With -blind-render, -fc-render, or -adjudicate-render: only render artifacts whose candidate model matches this selector (the registered workflow labels one model at a time); empty renders all")
@@ -976,20 +976,14 @@ func main() {
 }
 
 // mustLoadVerifiedFCSidemap loads the sealed side map for a worksheet mode
-// and, when the operator supplied -fc-sidemap-digest, verifies the file
-// against the committed digest — the same gate -assembly-report applies, so
-// a swapped sidemap cannot slip into render or ingest either. Fatal on any
-// failure. Returns the whole map: render and ingest resolve assignments AND
-// arm hashes through it (W5 — worksheet headers are hash-free).
+// and requires it to match the operator's committed digest — the same gate
+// -assembly-report applies. Fatal on any failure. Returns the whole map:
+// render and ingest resolve assignments AND arm hashes through it (W5 —
+// worksheet headers are hash-free).
 func mustLoadVerifiedFCSidemap(mode, path, committedDigest string) fcSidemapFile {
-	sidemap, _, digest, err := loadFCSidemap(path)
+	sidemap, _, err := loadVerifiedFCSidemap(path, committedDigest)
 	if err != nil {
 		log.Fatalf("llm-bench: %s: %v", mode, err)
-	}
-	if strings.TrimSpace(committedDigest) != "" {
-		if err := verifyFCSidemapDigest(digest, committedDigest); err != nil {
-			log.Fatalf("llm-bench: %s: %v", mode, err)
-		}
 	}
 	return sidemap
 }

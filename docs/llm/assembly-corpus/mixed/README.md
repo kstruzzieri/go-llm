@@ -499,12 +499,13 @@ llm-bench -fc-sidemap-generate -artifacts <artifacts.jsonl> -fc-sidemap-out <sid
 
 One crypto/rand boolean per complete pair, plus the pair's two arm artifact
 hashes in the drawn A/B order — the sidemap is the forced-choice flow's
-ONLY hash carrier (worksheet PAIR headers carry pairID and modelKey alone,
+ONLY artifact-hash carrier (worksheet PAIR headers carry pairID and modelKey alone,
 because a header hash would join the committed artifacts JSONL, whose
 `assembly_eval.mode` names the arm). The printed sha256 digest is COMMITTED
 before any labeling starts and verified at every later step via
 `-fc-sidemap-digest` (mismatch is a hard error). `-fc-render` and
-`-fc-ingest` refuse to run without `-fc-sidemap`.
+`-fc-ingest` refuse to run without both `-fc-sidemap` and its committed
+digest; `-assembly-report` requires the digest whenever a sidemap is used.
 
 Labeling, three passes (use `-model` to restrict any worksheet to one
 candidate model — per-model worksheets keep sessions bounded):
@@ -530,8 +531,10 @@ candidate model — per-model worksheets keep sessions bounded):
    `arm_guess_accuracy` section tallies how often the labeler correctly
    guessed the mixed arm's side under the sealed assignment — it feeds no
    decision or test. Neither the sidecar rows nor the worksheet record
-   which side was which arm — the worksheet carries no hashes at all, and
-   the sealed sidemap is the only artifact that resolves sides to arms.
+   which side was which arm — the worksheet carries no artifact hashes, and
+   the sealed sidemap is the only artifact that resolves sides to arms. One
+   canonical sidemap-digest metadata line binds the rendered worksheet to
+   the same committed map at ingest.
 3. **Adjudication** — `-adjudicate-render` / `-adjudicate-ingest`: only
    flagged blocks, now WITH the prompt, prefilled score, required reason;
    every correction is logged in the label notes
@@ -541,7 +544,8 @@ candidate model — per-model worksheets keep sessions bounded):
 
 Blinding honesty: this scheme is STRUCTURAL protection against casual
 inference — no worksheet byte joins the committed artifacts or names an
-arm. It is not cryptographic protection against the operator, who owns the
+arm; its digest metadata joins only the committed sidemap. It is not
+cryptographic protection against the operator, who owns the
 disk and can open the sidemap or block map at will; the `arm_guess` audit
 is the registered check that the blinding held in practice.
 

@@ -6,9 +6,9 @@ package main
 // NOT written into the rows so the sidecar stays blind-stable on disk: side
 // assignment comes from the sealed random side map (-fc-sidemap, W3 —
 // REQUIRED on render and ingest), whose committed digest seals it before
-// labeling. W5: the sidemap is also the ONLY hash carrier — worksheet PAIR
-// headers carry pairID and modelKey alone, because a header hash joins the
-// committed artifacts JSONL (whose AssemblyEval.Mode names the arm) and
+// labeling. W5: the sidemap is also the ONLY artifact-hash carrier —
+// worksheet PAIR headers carry pairID and modelKey alone, because a header
+// hash joins the committed artifacts JSONL (whose AssemblyEval.Mode names the arm) and
 // unblinds without the map. fcSideIsLegacyA remains ONLY as the report's
 // default resolver for pre-sidemap worksheets.
 
@@ -32,6 +32,11 @@ const fcFillMarker = "--- fill below (prefer: A | B | tie) ---"
 // fcPairHeaderPrefix opens a forced-choice block. Renderer, ingest grammar,
 // and the sentinel-escape rule must agree on this literal.
 const fcPairHeaderPrefix = "=== PAIR "
+
+// fcSidemapDigestMetadataPrefix binds a rendered worksheet to the committed
+// sidemap used to produce it. It is a reserved worksheet sentinel because
+// question, rubric, and answer text are untrusted.
+const fcSidemapDigestMetadataPrefix = "# fc-sidemap-digest: "
 
 // FCPreference is one forced-choice sidecar row (JSONL via -fc-out).
 // Preference is "a", "b", or "tie" — a SIDE, not an arm: which assembly arm
@@ -75,9 +80,9 @@ func fcParityResolver(pairID, modelKey string) (bool, error) {
 }
 
 // fcSidemapSchemaVersion pins the sealed side-map file schema. v2 (#331 W5)
-// adds hash_a/hash_b per pair: the sidemap became the sidecar's ONLY hash
-// carrier when worksheet headers went hash-free, so a v1 map can no longer
-// drive render or ingest and is rejected at load.
+// adds hash_a/hash_b per pair: the sidemap became the sidecar's ONLY
+// artifact-hash carrier when worksheet headers went hash-free, so a v1 map
+// can no longer drive render or ingest and is rejected at load.
 const fcSidemapSchemaVersion = "fc-sidemap/v2"
 
 // fcSidemapFile is the sealed random side map: one crypto/rand boolean per
@@ -87,9 +92,10 @@ const fcSidemapSchemaVersion = "fc-sidemap/v2"
 // time for the operator to commit BEFORE labeling and to verify at report
 // time via -fc-sidemap-digest.
 type fcSidemapFile struct {
-	SchemaVersion string                    `json:"schema_version"`
-	Pairs         map[string]fcSidemapEntry `json:"pairs"`
-	SealedDigest  string                    `json:"sealed_digest"`
+	SchemaVersion  string                    `json:"schema_version"`
+	Pairs          map[string]fcSidemapEntry `json:"pairs"`
+	SealedDigest   string                    `json:"sealed_digest"`
+	verifiedDigest string
 }
 
 // fcSidemapEntry is one pair's sealed assignment: which arm renders as
@@ -175,7 +181,7 @@ func loadFCSidemap(path string) (fcSidemapFile, fcSideResolver, string, error) {
 	if len(m.Pairs) == 0 {
 		return fcSidemapFile{}, nil, "", fmt.Errorf("fc-sidemap: %q has no pairs", path)
 	}
-	// v2 entries carry the pair's arm hashes (the only hash carrier for the
+	// v2 entries carry the pair's arm hashes (the only artifact-hash carrier for the
 	// forced-choice flow); a blank or duplicated hash cannot join anything.
 	for key, e := range m.Pairs {
 		if strings.TrimSpace(e.HashA) == "" || strings.TrimSpace(e.HashB) == "" {
@@ -187,6 +193,22 @@ func loadFCSidemap(path string) (fcSidemapFile, fcSideResolver, string, error) {
 	}
 	sum := sha256.Sum256(raw)
 	return m, m.resolver(), hex.EncodeToString(sum[:]), nil
+}
+
+// loadVerifiedFCSidemap is the only production path from sidemap bytes to a
+// render, ingest, or report resolver. The unexported digest marker is kept
+// out of the sealed file schema and records that the file matched the
+// operator's committed digest.
+func loadVerifiedFCSidemap(path, committedDigest string) (fcSidemapFile, fcSideResolver, error) {
+	m, resolver, fileDigest, err := loadFCSidemap(path)
+	if err != nil {
+		return fcSidemapFile{}, nil, err
+	}
+	if err := verifyFCSidemapDigest(fileDigest, committedDigest); err != nil {
+		return fcSidemapFile{}, nil, err
+	}
+	m.verifiedDigest = canonicalSHA256Digest(committedDigest)
+	return m, resolver, nil
 }
 
 // resolver returns the sidemap-backed fcSideResolver: a pair absent from the
@@ -203,12 +225,64 @@ func (m fcSidemapFile) resolver() fcSideResolver {
 }
 
 // verifyFCSidemapDigest compares the loaded sidemap file digest against the
-// operator-committed one (-fc-sidemap-digest). Case-insensitive hex compare;
-// an optional "sha256:" prefix on the committed value is accepted.
+// required operator-committed one (-fc-sidemap-digest). The shared digest
+// parser accepts bare/prefixed and upper/lower hex, then comparison uses the
+// canonical sha256:<lowerhex> form.
 func verifyFCSidemapDigest(gotHex, committed string) error {
-	want := strings.TrimPrefix(strings.TrimSpace(committed), "sha256:")
-	if !strings.EqualFold(gotHex, want) {
-		return fmt.Errorf("fc-sidemap digest mismatch: file is sha256:%s, committed digest is sha256:%s", gotHex, want)
+	got := canonicalSHA256Digest(gotHex)
+	want := canonicalSHA256Digest(committed)
+	if want == "" {
+		if committed == "" {
+			return fmt.Errorf("-fc-sidemap requires -fc-sidemap-digest (the committed sidemap sha256)")
+		}
+		return fmt.Errorf("-fc-sidemap-digest is not a sha256 digest")
+	}
+	if got == "" {
+		return fmt.Errorf("fc-sidemap file digest %q is not a sha256 digest", gotHex)
+	}
+	if got != want {
+		return fmt.Errorf("fc-sidemap digest mismatch: file is %s, committed digest is %s", got, want)
+	}
+	return nil
+}
+
+func requireVerifiedFCSidemap(m fcSidemapFile) (string, error) {
+	if len(m.Pairs) == 0 {
+		return "", fmt.Errorf("requires the sealed side map (-fc-sidemap) and its committed -fc-sidemap-digest")
+	}
+	if m.verifiedDigest == "" || canonicalSHA256Digest(m.verifiedDigest) != m.verifiedDigest {
+		return "", fmt.Errorf("-fc-sidemap requires a verified canonical -fc-sidemap-digest")
+	}
+	return m.verifiedDigest, nil
+}
+
+func verifyFCSidemapWorksheetDigest(worksheet, want string) error {
+	var got string
+	count := 0
+	sawPair := false
+	for _, line := range strings.Split(worksheet, "\n") {
+		if strings.HasPrefix(line, fcPairHeaderPrefix) {
+			sawPair = true
+		}
+		if strings.HasPrefix(line, fcSidemapDigestMetadataPrefix) {
+			if sawPair {
+				return fmt.Errorf("forced-choice worksheet: sidemap digest metadata must appear before the first PAIR block")
+			}
+			count++
+			got = strings.TrimPrefix(line, fcSidemapDigestMetadataPrefix)
+		}
+	}
+	if count == 0 {
+		return fmt.Errorf("forced-choice worksheet: missing %q metadata", strings.TrimSpace(fcSidemapDigestMetadataPrefix))
+	}
+	if count != 1 {
+		return fmt.Errorf("forced-choice worksheet: expected exactly one %q metadata line, got %d", strings.TrimSpace(fcSidemapDigestMetadataPrefix), count)
+	}
+	if canonicalSHA256Digest(got) != got {
+		return fmt.Errorf("forced-choice worksheet: sidemap digest metadata is not canonical")
+	}
+	if got != want {
+		return fmt.Errorf("forced-choice worksheet: sidemap digest mismatch: worksheet has %s, verified map is %s", got, want)
 	}
 	return nil
 }
@@ -318,15 +392,16 @@ func collectFCPairs(arts []Artifact) ([]fcPair, error) {
 // pair. The header line carries pairID and modelKey ONLY (W5): a header hash
 // would join the committed artifacts JSONL, whose AssemblyEval.Mode names
 // the arm, and unblind the block without the sealed map — so the sidemap is
-// the sole hash carrier and the ingest join runs through it. The question is
-// the final turn content, identical across arms by construction; a mismatch
-// is fixture corruption and a loud error. No mode names or hashes appear
-// anywhere. sidemap is REQUIRED; a pair it cannot place, or an entry whose
+// the sole artifact-hash carrier and the ingest join runs through it. The
+// question is the final turn content, identical across arms by construction;
+// a mismatch is fixture corruption and a loud error. No mode names or
+// artifact hashes appear anywhere. sidemap is REQUIRED; a pair it cannot place, or an entry whose
 // hashes disagree with the pair's arms under its own assignment, is a loud
 // error.
 func renderForcedChoiceWorksheet(arts []Artifact, sidemap fcSidemapFile) (string, error) {
-	if len(sidemap.Pairs) == 0 {
-		return "", fmt.Errorf("forced-choice: render requires the sealed side map (-fc-sidemap)")
+	digest, err := requireVerifiedFCSidemap(sidemap)
+	if err != nil {
+		return "", fmt.Errorf("forced-choice: render %w", err)
 	}
 	pairs, err := collectFCPairs(arts)
 	if err != nil {
@@ -337,6 +412,7 @@ func renderForcedChoiceWorksheet(arts []Artifact, sidemap fcSidemapFile) (string
 	}
 	var b strings.Builder
 	fmt.Fprintln(&b, "# llm-bench — forced-choice worksheet")
+	fmt.Fprintln(&b, fcSidemapDigestMetadataPrefix+digest)
 	fmt.Fprintln(&b, "#")
 	fmt.Fprintln(&b, "# Each block shows the same question answered twice by one candidate model")
 	fmt.Fprintln(&b, "# under two hidden context-assembly arms. Fill prefer: with A, B, or tie; leave")
@@ -345,7 +421,7 @@ func renderForcedChoiceWorksheet(arts []Artifact, sidemap fcSidemapFile) (string
 	fmt.Fprintln(&b, "# arm_guess: is an optional blinding audit — if you believe you can tell which")
 	fmt.Fprintln(&b, "# answer came from the reduced-context arm, write a or b; otherwise leave blank.")
 	fmt.Fprintln(&b, "# It never affects any result; it only measures whether the blinding held.")
-	fmt.Fprintln(&b, "# Then run: llm-bench -fc-ingest -worksheet <this file> -artifacts <artifacts.jsonl> -fc-sidemap <sidemap.json> -fc-out <preferences.jsonl>")
+	fmt.Fprintln(&b, "# Then run: llm-bench -fc-ingest -worksheet <this file> -artifacts <artifacts.jsonl> -fc-sidemap <sidemap.json> -fc-sidemap-digest <committed sha256> -fc-out <preferences.jsonl>")
 	fmt.Fprintln(&b)
 	for _, p := range pairs {
 		question := strings.TrimSpace(blindQuestion(p.legacy.Trace))
@@ -398,8 +474,8 @@ func renderForcedChoiceWorksheet(arts []Artifact, sidemap fcSidemapFile) (string
 
 // ingestForcedChoiceWorksheet parses a filled forced-choice worksheet into
 // sidecar rows, resolving each block's A/B artifact hashes from the sealed
-// sidemap (W5: the worksheet carries none) and validating every block
-// against arts: a pair absent from the sidemap, sidemap hashes absent from
+// sidemap (W5: the worksheet carries no artifact hashes) and validating
+// every block against arts: a pair absent from the sidemap, sidemap hashes absent from
 // the artifacts or not belonging to the header's (pair, model), sidemap
 // hashes disagreeing with its own side assignment, an invalid prefer: or
 // arm_guess: value, or a duplicate pair block are loud errors. A blank
@@ -409,8 +485,12 @@ func renderForcedChoiceWorksheet(arts []Artifact, sidemap fcSidemapFile) (string
 // and -fc-sidemap-digest verification is the guard that render and ingest
 // used the SAME sealed map. labeler and labeled_at are stamped on every row.
 func ingestForcedChoiceWorksheet(worksheet string, arts []Artifact, labeler string, sidemap fcSidemapFile, requireComplete bool) (rows []FCPreference, skipped int, err error) {
-	if len(sidemap.Pairs) == 0 {
-		return nil, 0, fmt.Errorf("forced-choice worksheet: ingest requires the sealed side map (-fc-sidemap)")
+	digest, err := requireVerifiedFCSidemap(sidemap)
+	if err != nil {
+		return nil, 0, fmt.Errorf("forced-choice worksheet: ingest %w", err)
+	}
+	if err := verifyFCSidemapWorksheetDigest(worksheet, digest); err != nil {
+		return nil, 0, err
 	}
 	artByHash := make(map[string]Artifact, len(arts))
 	for _, a := range arts {
