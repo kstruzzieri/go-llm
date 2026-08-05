@@ -994,19 +994,6 @@ func TestArtifactHashIgnoresCaptureProvenance(t *testing.T) {
 }
 
 func TestCaptureManifestWritten(t *testing.T) {
-	// Fake openai-compat server: the /props probe answers with llama.cpp-ish
-	// build info. The replay itself is faked by orderRecordingRunner, so the
-	// server exists ONLY for the probe.
-	props := `{"build_info":"b9999","model_path":"/models/m.gguf","n_ctx":8192}`
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/props" {
-			t.Errorf("probe path = %q; want /props", r.URL.Path)
-		}
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(props))
-	}))
-	t.Cleanup(srv.Close)
-
 	traces := []Trace{
 		pairedCaptureTrace("pa-legacy", "p-a", AssemblyLegacy),
 		pairedCaptureTrace("pa-mixed", "p-a", AssemblyMixed),
@@ -1018,7 +1005,7 @@ func TestCaptureManifestWritten(t *testing.T) {
 	var stdout bytes.Buffer
 	if err := runCalibrateCapture(context.Background(), calibrateCaptureOptions{
 		Runner: &orderRecordingRunner{}, Targets: targets, Traces: traces, OutputPath: out,
-		Clock: clock, OpenAICompatBaseURL: srv.URL, Stdout: &stdout,
+		Clock: clock, OpenAICompatBaseURL: "http://openai-compat.test", Stdout: &stdout,
 	}); err != nil {
 		t.Fatalf("runCalibrateCapture: %v", err)
 	}
@@ -1047,23 +1034,14 @@ func TestCaptureManifestWritten(t *testing.T) {
 	if !m.CreatedAt.Equal(clock()) {
 		t.Errorf("created_at = %v; want the injected clock %v", m.CreatedAt, clock())
 	}
-	if m.Endpoint != srv.URL || m.Transport != "openai-compat" {
-		t.Errorf("endpoint/transport = %q/%q; want %q/openai-compat", m.Endpoint, m.Transport, srv.URL)
+	if m.Endpoint != "http://openai-compat.test" || m.Transport != "openai-compat" {
+		t.Errorf("endpoint/transport = %q/%q; want http://openai-compat.test/openai-compat", m.Endpoint, m.Transport)
 	}
 	if len(m.ModelTargets) != 1 || m.ModelTargets[0].Selector != "openai-compat/m" || m.ModelTargets[0].ResolvedDigest != "" {
 		t.Errorf("model_targets = %+v; want the one openai-compat selector with empty digest", m.ModelTargets)
 	}
-	// MarshalIndent re-indents the embedded RawMessage, so compare the probe
-	// record token-for-token (decoded), not byte-for-byte.
-	var gotProps, wantProps map[string]any
-	if err := json.Unmarshal(m.ServerProbe.Props, &gotProps); err != nil {
-		t.Fatalf("decode recorded props: %v", err)
-	}
-	if err := json.Unmarshal([]byte(props), &wantProps); err != nil {
-		t.Fatal(err)
-	}
-	if !reflect.DeepEqual(gotProps, wantProps) || m.ServerProbe.Error != "" {
-		t.Errorf("server_probe = %+v; want the /props JSON content and no error", m.ServerProbe)
+	if len(m.ServerProbe.OllamaDigests) != 0 {
+		t.Errorf("server_probe = %+v; want no digests for openai-compat", m.ServerProbe)
 	}
 	if m.Decoding.Temperature != 0 || m.Decoding.SeedSupported {
 		t.Errorf("decoding = %+v; want temperature 0, seed_supported false", m.Decoding)
@@ -1129,34 +1107,6 @@ func TestCaptureManifestUsageAbsentRecordedFalse(t *testing.T) {
 	}
 	if len(m.PerArtifact) != 1 || m.PerArtifact[0].UsagePresent {
 		t.Fatalf("per_artifact = %+v; zero token counts must record usage_present false", m.PerArtifact)
-	}
-}
-
-func TestCaptureManifestProbeFailureRecordedNotFatal(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		http.Error(w, "no props here", http.StatusNotFound)
-	}))
-	t.Cleanup(srv.Close)
-	out := filepath.Join(t.TempDir(), "artifacts.jsonl")
-	err := runCalibrateCapture(context.Background(), calibrateCaptureOptions{
-		Runner:     &orderRecordingRunner{},
-		Targets:    []ModelTarget{{Display: "openai-compat/m", Provider: "openai-compat", Model: "m"}},
-		Traces:     []Trace{pairedCaptureTrace("pa-legacy", "p-a", AssemblyLegacy)},
-		OutputPath: out, OpenAICompatBaseURL: srv.URL, Stdout: io.Discard,
-	})
-	if err != nil {
-		t.Fatalf("runCalibrateCapture = %v; probe failure must not fail the capture", err)
-	}
-	raw, err := os.ReadFile(out + ".manifest.json")
-	if err != nil {
-		t.Fatalf("manifest missing: %v", err)
-	}
-	var m captureManifest
-	if err := json.Unmarshal(raw, &m); err != nil {
-		t.Fatalf("decode manifest: %v", err)
-	}
-	if m.ServerProbe.Props != nil || !strings.Contains(m.ServerProbe.Error, "404") {
-		t.Errorf("server_probe = %+v; want no props and a recorded status-404 error", m.ServerProbe)
 	}
 }
 

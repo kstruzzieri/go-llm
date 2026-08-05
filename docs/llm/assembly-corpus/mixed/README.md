@@ -98,17 +98,17 @@ evidence.
 The committed identity evidence for this run is: the selector
 (`openai-compat/qwen3-coder-next:latest`), the endpoint
 (`http://127.0.0.1:8090`, llama-swap), and the per-request transport tag in
-every artifact row. The manifest's `/props` probe returned `status 404`
-(llama-swap does not proxy it) and the selector digest is empty, so the
-identity claim is NARROWED to "the model the configured endpoint served
-under this selector." Post-hoc addendum, an operator-reported observation (a post-hoc hash
+every artifact row. The sealed manifest's historical `/props` probe returned
+`status 404` (llama-swap does not proxy it) and the selector digest is empty,
+so the identity claim is NARROWED to "the model the configured endpoint served
+under this selector." New captures do not request or persist `/props`. Post-hoc addendum, an operator-reported observation (a post-hoc hash
 cannot establish that the file is the one served): the GGUF file resident
 at the serving path hashes to
 sha256:4bb93f0a0221ef4ff963ca9094df629c8dfdfabc3b4fdd85c1a2e4c0624fce36
 (unsloth Qwen3-Coder-Next UD-Q4_K_XL), served by llama.cpp build
 b10210-000547513 per live probes during the same session; neither fact
 rides the sealed manifest. Future registered runs must commit a pre-run
-server identity (per-upstream /props body or equivalent).
+server identity through a safe, explicit source.
 
 ## Pre-registered decision rule (v2) — frozen before any labeling
 
@@ -484,9 +484,9 @@ llm-bench -calibrate-capture -traces 'docs/llm/assembly-corpus/mixed/traces/*.js
   `captured_order` provenance is derived from the actual order.
 - The capture writes a sibling run manifest
   (`<artifacts-out>.manifest.json`) — REQUIRED for the registered run —
-  recording endpoint, transport, the llama.cpp `/props` server probe (or
-  the probe error), decoding, the counterbalance scheme, and per-artifact
-  rows with an explicit usage-present bit. Its `manifest_digest` line
+  recording endpoint, transport, safe Ollama model digests, decoding, the
+  counterbalance scheme, and per-artifact rows with an explicit usage-present
+  bit. Its `manifest_digest` line
   (sha256 of the file) is committed alongside the artifacts.
 - One retry per failed arm, then the pair exits via a missing-arm
   exclusion (Completeness above).
@@ -573,13 +573,12 @@ note.)
 ## Provenance and limitations (stated before labels exist)
 
 - **Model identity**: the openai-compat transport exposes no model content
-  digest endpoint, so the registered identity record is the capture
-  manifest — the `/props` probe body when the endpoint serves it, or the
-  recorded probe error — plus the committed manifest digest. In THIS run
-  the probe returned 404 through llama-swap, so the identity claim is
-  narrowed; see "Candidate identity" in the verdict section. Ollama ShowModel digests are recorded when
-  an ollama target is captured, but registered runs use openai-compat /
-  llama.cpp.
+  digest endpoint, so new capture manifests record only its configured
+  endpoint and selector, plus the committed manifest digest. The sealed
+  registered manifest retains its historical probe error, so its identity
+  claim remains narrowed; see "Candidate identity" in the verdict section.
+  Ollama ShowModel digests are recorded when an ollama target is captured,
+  but registered runs use openai-compat / llama.cpp.
 - **Ollama tool-arg bytes are semantic-only**: the frozen ollama wire type
   re-encodes tool arguments (sorted keys, canonical whitespace), so
   byte-exact fixture args are achievable only on openai-compat — one more

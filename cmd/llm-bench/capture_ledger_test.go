@@ -14,11 +14,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"reflect"
 	"sort"
 	"strings"
+	"sync/atomic"
 	"testing"
 )
 
@@ -276,54 +279,86 @@ func TestCaptureRetriesFailedCellsOnce(t *testing.T) {
 	}
 }
 
-// TestCaptureAllFailedStillWritesManifest pins the round-2 review P2
-// evidence requirement: a capture whose every attempt failed must still
-// write the manifest with the full expected ledger — the run's evidence
-// persists even though no artifact (and no artifacts file) exists.
-func TestCaptureAllFailedStillWritesManifest(t *testing.T) {
+func TestCaptureAllFailedReplacesStaleArtifactsWithLoadableEmptyFile(t *testing.T) {
 	traces := []Trace{
 		pairedCaptureTrace("g-legacy", "pair-g", AssemblyLegacy),
 		pairedCaptureTrace("g-mixed", "pair-g", AssemblyMixed),
 	}
-	out := filepath.Join(t.TempDir(), "artifacts.jsonl")
-	err := runCalibrateCapture(context.Background(), calibrateCaptureOptions{
-		Runner:     &flakyRunner{failAlways: map[string]bool{"g-legacy": true, "g-mixed": true}},
-		Targets:    []ModelTarget{{Display: "m", Provider: "ollama", Model: "m"}},
-		Traces:     traces,
-		OutputPath: out,
-		Stdout:     io.Discard,
-	})
-	if err == nil || !strings.Contains(err.Error(), "no artifacts written") {
-		t.Fatalf("err = %v; want the loud no-artifacts failure", err)
-	}
-	if _, statErr := os.Stat(out); !os.IsNotExist(statErr) {
-		t.Fatalf("artifacts file stat err = %v; want no artifacts file", statErr)
-	}
-	raw, readErr := os.ReadFile(out + ".manifest.json")
-	if readErr != nil {
-		t.Fatalf("manifest must persist for an all-failed assembly run: %v", readErr)
-	}
-	var m captureManifest
-	if err := json.Unmarshal(raw, &m); err != nil {
-		t.Fatal(err)
-	}
-	if m.SchemaVersion != captureManifestSchemaVersionV2 || m.ExpectedCount != 2 || len(m.Expected) != 2 || m.ArtifactCount != 0 || len(m.PerArtifact) != 0 {
-		t.Fatalf("manifest = version %q expected %d/%d artifacts %d/%d; want v2 with the full 2-row ledger and zero artifacts",
-			m.SchemaVersion, m.ExpectedCount, len(m.Expected), m.ArtifactCount, len(m.PerArtifact))
-	}
-	for _, row := range m.Expected {
-		if row.Status != "failed" || row.Attempts != 2 || row.Error == "" {
-			t.Errorf("row %+v; want failed with attempts 2 and a recorded error", row)
-		}
-	}
-	// The all-failed manifest loads and surfaces the vanished pair for
-	// missing-arm synthesis.
-	_, verify, loadErr := loadCaptureManifestForReport(out + ".manifest.json")
-	if loadErr != nil {
-		t.Fatalf("loadCaptureManifestForReport: %v", loadErr)
-	}
-	if len(verify.expectedPairs) != 1 || verify.expectedPairs[0].pair != "pair-g" {
-		t.Fatalf("expectedPairs = %+v; want the one vanished pair-g", verify.expectedPairs)
+	for _, tc := range []struct {
+		name  string
+		stale bool
+	}{
+		{name: "fresh output is created"},
+		{name: "stale output is replaced", stale: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			out := filepath.Join(dir, "artifacts.jsonl")
+			if tc.stale {
+				if err := os.WriteFile(out, []byte("stale artifacts\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := os.WriteFile(filepath.Join(dir, "labels.jsonl"), nil, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			err := runCalibrateCapture(context.Background(), calibrateCaptureOptions{
+				Runner:     &flakyRunner{failAlways: map[string]bool{"g-legacy": true, "g-mixed": true}},
+				Targets:    []ModelTarget{{Display: "m", Provider: "ollama", Model: "m"}},
+				Traces:     traces,
+				OutputPath: out,
+				Stdout:     io.Discard,
+			})
+			if err == nil || !strings.Contains(err.Error(), "no artifacts written") {
+				t.Fatalf("err = %v; want the loud no-artifacts failure", err)
+			}
+			rawArtifacts, err := os.ReadFile(out)
+			if err != nil {
+				t.Fatalf("read empty artifacts: %v", err)
+			}
+			if len(rawArtifacts) != 0 {
+				t.Fatalf("artifacts = %q; want an empty JSONL file", rawArtifacts)
+			}
+			artifacts, err := loadArtifacts(out)
+			if err != nil {
+				t.Fatalf("loadArtifacts: %v", err)
+			}
+			if len(artifacts) != 0 {
+				t.Fatalf("loadArtifacts returned %d artifacts; want 0", len(artifacts))
+			}
+
+			raw, err := os.ReadFile(out + ".manifest.json")
+			if err != nil {
+				t.Fatalf("manifest must persist for an all-failed assembly run: %v", err)
+			}
+			var m captureManifest
+			if err := json.Unmarshal(raw, &m); err != nil {
+				t.Fatal(err)
+			}
+			if m.SchemaVersion != captureManifestSchemaVersionV2 || m.ExpectedCount != 2 || len(m.Expected) != 2 || m.ArtifactCount != 0 || len(m.PerArtifact) != 0 {
+				t.Fatalf("manifest = version %q expected %d/%d artifacts %d/%d; want v2 with the full 2-row ledger and zero artifacts",
+					m.SchemaVersion, m.ExpectedCount, len(m.Expected), m.ArtifactCount, len(m.PerArtifact))
+			}
+			for _, row := range m.Expected {
+				if row.Status != "failed" || row.Attempts != 2 || row.Error == "" {
+					t.Errorf("row %+v; want failed with attempts 2 and a recorded error", row)
+				}
+			}
+			if _, _, err := loadCaptureManifestForReport(out + ".manifest.json"); err != nil {
+				t.Fatalf("loadCaptureManifestForReport: %v", err)
+			}
+			report, err := runAssemblyReport(assemblyReportOptions{
+				LabelsPath:          filepath.Join(dir, "labels.jsonl"),
+				ArtifactsPath:       out,
+				CaptureManifestPath: out + ".manifest.json",
+			})
+			if err != nil {
+				t.Fatalf("runAssemblyReport: %v", err)
+			}
+			if !strings.Contains(report, "missing-legacy-arm") {
+				t.Fatalf("assembly report did not synthesize the failed pair exclusion: %s", report)
+			}
+		})
 	}
 }
 
@@ -333,7 +368,7 @@ func TestCaptureAllFailedStillWritesManifest(t *testing.T) {
 // included — and path redaction alone would write it into the committed
 // manifest. Ledger errors must route through redactErrorMessage, so only a
 // categorized stub survives.
-func TestCaptureLedgerErrorsAreClassifiedStubs(t *testing.T) {
+func TestCaptureLedgerErrorsAreRedactedOnStderr(t *testing.T) {
 	const secret = "sk-FAKE-SECRET-MARKER-0000"
 	traces := []Trace{
 		pairedCaptureTrace("leak-legacy", "pair-leak", AssemblyLegacy),
@@ -342,6 +377,17 @@ func TestCaptureLedgerErrorsAreClassifiedStubs(t *testing.T) {
 	runner := &failingRunner{fail: map[string]bool{"leak-mixed": true}}
 	runner.failErr = fmt.Errorf("backend 500: {\"error\":\"invalid key %s\"} at /Users/keith/models", secret)
 	out := filepath.Join(t.TempDir(), "artifacts.jsonl")
+	stderrPath := filepath.Join(t.TempDir(), "stderr.txt")
+	stderrFile, err := os.Create(stderrPath)
+	if err != nil {
+		t.Fatalf("create stderr capture: %v", err)
+	}
+	oldStderr := os.Stderr
+	os.Stderr = stderrFile
+	t.Cleanup(func() {
+		os.Stderr = oldStderr
+		_ = stderrFile.Close()
+	})
 	if err := runCalibrateCapture(context.Background(), calibrateCaptureOptions{
 		Runner:     runner,
 		Targets:    []ModelTarget{{Display: "m", Provider: "ollama", Model: "m"}},
@@ -350,6 +396,17 @@ func TestCaptureLedgerErrorsAreClassifiedStubs(t *testing.T) {
 		Stdout:     io.Discard,
 	}); err != nil {
 		t.Fatalf("runCalibrateCapture: %v", err)
+	}
+	os.Stderr = oldStderr
+	if err := stderrFile.Close(); err != nil {
+		t.Fatalf("close stderr capture: %v", err)
+	}
+	stderr, err := os.ReadFile(stderrPath)
+	if err != nil {
+		t.Fatalf("read stderr capture: %v", err)
+	}
+	if strings.Contains(string(stderr), secret) || strings.Contains(string(stderr), "/Users/") {
+		t.Fatalf("stderr carries the raw backend error: %s", stderr)
 	}
 	raw, err := os.ReadFile(out + ".manifest.json")
 	if err != nil {
@@ -372,6 +429,31 @@ func TestCaptureLedgerErrorsAreClassifiedStubs(t *testing.T) {
 		if !strings.HasPrefix(row.Error, "<error: ") {
 			t.Errorf("failed row %s error = %q; want a redactErrorMessage stub", row.TraceID, row.Error)
 		}
+	}
+}
+
+func TestCaptureDoesNotProbeProps(t *testing.T) {
+	var requests atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		requests.Add(1)
+	}))
+	t.Cleanup(srv.Close)
+	out := filepath.Join(t.TempDir(), "artifacts.jsonl")
+	if err := runCalibrateCapture(context.Background(), calibrateCaptureOptions{
+		Runner:              &orderRecordingRunner{},
+		Targets:             []ModelTarget{{Display: "openai-compat/m", Provider: "openai-compat", Model: "m"}},
+		Traces:              []Trace{pairedCaptureTrace("pa-legacy", "p-a", AssemblyLegacy)},
+		OutputPath:          out,
+		OpenAICompatBaseURL: srv.URL,
+		Stdout:              io.Discard,
+	}); err != nil {
+		t.Fatalf("runCalibrateCapture: %v", err)
+	}
+	if got := requests.Load(); got != 0 {
+		t.Fatalf("server received %d request(s); capture must not probe /props", got)
+	}
+	if _, err := os.Stat(out + ".manifest.json"); err != nil {
+		t.Fatalf("manifest missing: %v", err)
 	}
 }
 

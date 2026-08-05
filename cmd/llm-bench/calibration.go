@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"hash/fnv"
 	"io"
-	"net/http"
 	"os"
 	"path/filepath"
 	"sort"
@@ -131,7 +130,7 @@ const digestResolutionTimeout = 10 * time.Second
 func resolveCaptureModelDigests(ctx context.Context, ollamaURL string, targets []ModelTarget) map[string]string {
 	client, err := newOllamaClient(ollamaURL, ollama.WithTimeout(digestResolutionTimeout))
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "calibrate-capture: digest resolution skipped: %v\n", err)
+		fmt.Fprintf(os.Stderr, "calibrate-capture: digest resolution skipped: %s\n", redactErrorMessage(err.Error()))
 		return nil
 	}
 	return resolveCandidateDigests(ctx, client, targets)
@@ -151,7 +150,7 @@ func resolveCandidateDigests(ctx context.Context, resolver candidateDigestResolv
 		}
 		info, err := resolver.ShowModel(ctx, target.Model)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "calibrate-capture: digest resolution skipped for %q: %v\n", target.Display, err)
+			fmt.Fprintf(os.Stderr, "calibrate-capture: digest resolution skipped for %q: %s\n", target.Display, redactErrorMessage(err.Error()))
 			continue
 		}
 		if info == nil || info.Digest == "" {
@@ -189,7 +188,7 @@ type calibrateCaptureOptions struct {
 	ModelDigests map[string]string
 	// OllamaURL and OpenAICompatBaseURL are the capture endpoints, recorded
 	// on the run manifest (#331 W3) when the trace set contains assembly
-	// modes. OpenAICompatBaseURL additionally drives the /props server probe.
+	// modes.
 	OllamaURL           string
 	OpenAICompatBaseURL string
 	// Stdout receives the manifest_digest line (the pack's committed report
@@ -211,8 +210,6 @@ const (
 	// auditable evidence instead of vanishing (external PR review P1). New
 	// captures write v2.
 	captureManifestSchemaVersionV2 = "mixed-capture-manifest/v2"
-	// captureProbeMaxBytes bounds the recorded /props probe body.
-	captureProbeMaxBytes = 16 * 1024
 )
 
 // captureManifestPath is the manifest's sibling path for one artifacts
@@ -271,13 +268,8 @@ type captureManifestTarget struct {
 	ResolvedDigest string `json:"resolved_digest"`
 }
 
-// captureServerProbe records what the capture could learn about the serving
-// stack: the raw (bounded) llama.cpp /props JSON for openai-compat targets —
-// or the probe error; probe failure never fails the capture but IS recorded —
-// plus the already-resolved ollama ShowModel digests for ollama targets.
+// captureServerProbe records safe Ollama model digests resolved before capture.
 type captureServerProbe struct {
-	Props         json.RawMessage   `json:"props,omitempty"`
-	Error         string            `json:"error,omitempty"`
 	OllamaDigests map[string]string `json:"ollama_digests,omitempty"`
 }
 
@@ -320,33 +312,6 @@ func captureEndpointTransport(targets []ModelTarget, ollamaURL, compatURL string
 	default:
 		return strings.TrimSpace(ollamaURL), defaultBenchProvider
 	}
-}
-
-// probeCaptureServer GETs <base>/props (llama.cpp exposes build/model/n_ctx
-// there) and returns the raw JSON body, or the error string to record.
-// Bounded at captureProbeMaxBytes; an over-cap, non-200, non-JSON, or
-// transport failure is recorded as the error — never a capture failure.
-func probeCaptureServer(baseURL string) (json.RawMessage, string) {
-	client := &http.Client{Timeout: digestResolutionTimeout}
-	resp, err := client.Get(strings.TrimRight(strings.TrimSpace(baseURL), "/") + "/props")
-	if err != nil {
-		return nil, err.Error()
-	}
-	defer func() { _ = resp.Body.Close() }()
-	body, err := io.ReadAll(io.LimitReader(resp.Body, captureProbeMaxBytes+1))
-	if err != nil {
-		return nil, err.Error()
-	}
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Sprintf("GET /props: status %d", resp.StatusCode)
-	}
-	if len(body) > captureProbeMaxBytes {
-		return nil, fmt.Sprintf("GET /props: response exceeds the %d-byte cap", captureProbeMaxBytes)
-	}
-	if !json.Valid(body) {
-		return nil, "GET /props: response is not valid JSON"
-	}
-	return json.RawMessage(body), ""
 }
 
 // loadCaptureManifestForReport reads a capture run manifest for
@@ -553,7 +518,7 @@ func runCalibrateCapture(ctx context.Context, opts calibrateCaptureOptions) (ret
 	}
 	results, err := opts.Runner.RunAll(ctx, opts.Targets, ordered)
 	if err != nil {
-		return fmt.Errorf("calibrate-capture: run: %w", err)
+		return fmt.Errorf("calibrate-capture: run: %s", redactErrorMessage(err.Error()))
 	}
 	for i := range results {
 		r := &results[i]
@@ -583,7 +548,7 @@ func runCalibrateCapture(ctx context.Context, opts calibrateCaptureOptions) (ret
 		}
 		retryResults, err := opts.Runner.RunAll(ctx, []ModelTarget{target}, retryTraces)
 		if err != nil {
-			return fmt.Errorf("calibrate-capture: retry run: %w", err)
+			return fmt.Errorf("calibrate-capture: retry run: %s", redactErrorMessage(err.Error()))
 		}
 		pending := make(map[cellKey]bool, len(retryTraces))
 		for _, trace := range retryTraces {
@@ -631,13 +596,13 @@ func runCalibrateCapture(ctx context.Context, opts calibrateCaptureOptions) (ret
 			// Skip failed runs — they cannot be labeled coherently.
 			// Surface the per-pair reason: a silently dropped result makes a
 			// partial corpus look complete and hides timeout-vs-refusal.
-			fmt.Fprintf(os.Stderr, "calibrate-capture: skipped %s/%s: %v\n", k.trace, k.model, c.res.Err)
+			fmt.Fprintf(os.Stderr, "calibrate-capture: skipped %s/%s: %s\n", k.trace, k.model, redactErrorMessage(c.res.Err.Error()))
 			failed++
 			row.Status = "failed"
 			// The manifest is committed evidence and an openai-compat error can
 			// embed arbitrary server response text (up to 64 KiB, API keys
 			// included) — record only the redactErrorMessage category stub,
-			// never the raw text. The raw error already went to stderr above.
+			// never the raw text.
 			row.Error = redactErrorMessage(c.res.Err.Error())
 		default:
 			r := *c.res
@@ -676,10 +641,6 @@ func runCalibrateCapture(ctx context.Context, opts calibrateCaptureOptions) (ret
 			return nil
 		}
 		endpoint, transport := captureEndpointTransport(opts.Targets, opts.OllamaURL, opts.OpenAICompatBaseURL)
-		probe := captureServerProbe{OllamaDigests: opts.ModelDigests}
-		if strings.Contains(transport, openAICompatTransport) || transport == "mixed" {
-			probe.Props, probe.Error = probeCaptureServer(opts.OpenAICompatBaseURL)
-		}
 		targets := make([]captureManifestTarget, 0, len(opts.Targets))
 		for _, target := range opts.Targets {
 			targets = append(targets, captureManifestTarget{
@@ -693,7 +654,7 @@ func runCalibrateCapture(ctx context.Context, opts calibrateCaptureOptions) (ret
 			Endpoint:             endpoint,
 			Transport:            transport,
 			ModelTargets:         targets,
-			ServerProbe:          probe,
+			ServerProbe:          captureServerProbe{OllamaDigests: opts.ModelDigests},
 			Decoding:             captureDecoding{Temperature: assemblyCaptureTemperature, SeedSupported: false},
 			CounterbalanceScheme: captureCounterbalanceScheme,
 			ArtifactCount:        len(manifestRows),
@@ -703,17 +664,7 @@ func runCalibrateCapture(ctx context.Context, opts calibrateCaptureOptions) (ret
 		}
 		return writeCaptureManifest(captureManifestPath(opts.OutputPath), manifest, opts.Stdout)
 	}
-	if len(artifacts) == 0 {
-		// Evidence must persist (external PR review round 2 P2): an all-failed
-		// assembly run still writes its manifest — the full expected ledger
-		// with zero artifacts — before failing loudly. No artifacts file is
-		// created.
-		if err := writeAssemblyManifest(); err != nil {
-			return err
-		}
-		return fmt.Errorf("calibrate-capture: no artifacts written; %d run(s) attempted, %d failed", len(cellOrder), failed)
-	}
-	if failed > 0 {
+	if failed > 0 && len(artifacts) > 0 {
 		// Partial capture is a valid best-effort outcome (the caller can gap-fill
 		// the missing pairs), so this is a warning, not an error — but it must be
 		// loud: a partial corpus that prints only the success line reads as complete.
@@ -734,7 +685,13 @@ func runCalibrateCapture(ctx context.Context, opts calibrateCaptureOptions) (ret
 			return fmt.Errorf("calibrate-capture: encode artifact %s/%s: %w", artifact.TraceID, artifact.CandidateModel, err)
 		}
 	}
-	return writeAssemblyManifest()
+	if err := writeAssemblyManifest(); err != nil {
+		return err
+	}
+	if len(artifacts) == 0 {
+		return fmt.Errorf("calibrate-capture: no artifacts written; %d run(s) attempted, %d failed", len(cellOrder), failed)
+	}
+	return nil
 }
 
 // counterbalanceCaptureTraces returns the deterministic capture order for a
