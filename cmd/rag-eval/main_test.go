@@ -213,6 +213,50 @@ func TestRunProgressiveExperiment(t *testing.T) {
 	}
 }
 
+func TestMixedExperimentRequiresOut(t *testing.T) {
+	err := run([]string{"-experiment", "mixed"})
+	if err == nil || !strings.Contains(err.Error(), "requires an explicit -out") {
+		t.Fatalf("error = %v, want explicit output requirement", err)
+	}
+}
+
+// TestRunMixedExperiment mirrors TestRunDefaultsToBaseline for the mixed
+// experiment: the runner's output must equal the committed baseline exactly,
+// so `-experiment mixed -out <baseline path>` IS the regeneration command.
+func TestRunMixedExperiment(t *testing.T) {
+	out := filepath.Join(t.TempDir(), "mixed.json")
+	if err := run([]string{"-experiment", "mixed", "-out", out}); err != nil {
+		t.Fatal(err)
+	}
+	got := mustReadRAGEvalFile(t, out)
+	var report rageval.MixedReport
+	if err := json.Unmarshal(got, &report); err != nil {
+		t.Fatal(err)
+	}
+	if report.SchemaVersion != rageval.MixedSchemaVersion {
+		t.Fatalf("schema_version = %q", report.SchemaVersion)
+	}
+	if len(report.Cases) != 5 || !report.Summary.AllDeterministic {
+		t.Fatalf("report summary = %+v with %d cases", report.Summary, len(report.Cases))
+	}
+	want, err := os.ReadFile("../../internal/rageval/testdata/mixed-baseline.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != string(want) {
+		t.Fatal("mixed runner output differs from committed mixed-baseline.json")
+	}
+}
+
+// TestRunUnknownExperimentListsMixed pins that the unknown-experiment error
+// advertises the mixed experiment alongside the pre-existing ones.
+func TestRunUnknownExperimentListsMixed(t *testing.T) {
+	err := run([]string{"-experiment", "nope", "-out", filepath.Join(t.TempDir(), "x.json")})
+	if err == nil || !strings.Contains(err.Error(), "mixed") {
+		t.Fatalf("error = %v, want mention of mixed", err)
+	}
+}
+
 func mustReadRAGEvalFile(t *testing.T, path string) []byte {
 	t.Helper()
 	data, err := os.ReadFile(path)

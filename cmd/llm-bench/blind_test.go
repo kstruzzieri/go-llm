@@ -9,7 +9,7 @@ func TestRenderBlindWorksheet_HidesModelAndShowsHash(t *testing.T) {
 	a1 := testCalibrationArtifact("r2c-fabrication-01", "the candidate answer text")
 	a1.CandidateModel = "ollama/gemma4:31b"
 	a1.ArtifactHash = artifactHash(a1)
-	out := renderBlindWorksheet([]Artifact{a1})
+	out := mustRenderBlind(t, []Artifact{a1}, 0)
 	for _, want := range []string{
 		"=== ARTIFACT " + a1.ArtifactHash + " ===",
 		"trace: r2c-fabrication-01",
@@ -37,7 +37,7 @@ func TestRenderBlindWorksheet_OrdersByTraceThenHash(t *testing.T) {
 	a.ArtifactHash = "sha256:zzzz"
 	c := testCalibrationArtifact("t1", "c")
 	c.ArtifactHash = "sha256:aaaa"
-	out := renderBlindWorksheet([]Artifact{b, a, c})
+	out := mustRenderBlind(t, []Artifact{b, a, c}, 0)
 	// Expect t1 block(s) before t2; within t1, hash aaaa before zzzz.
 	iA := strings.Index(out, "sha256:aaaa")
 	iZ := strings.Index(out, "sha256:zzzz")
@@ -59,7 +59,7 @@ func TestRenderBlindWorksheet_HidesAssemblyTraceIDAndOrdersByHash(t *testing.T) 
 	}
 	progressive.ArtifactHash = "sha256:aaaa"
 
-	out := renderBlindWorksheet([]Artifact{flat, progressive})
+	out := mustRenderBlind(t, []Artifact{flat, progressive}, 0)
 	for _, leaked := range []string{"trace: pair-flat", "trace: pair-progressive"} {
 		if strings.Contains(out, leaked) {
 			t.Fatalf("worksheet leaked assembly arm via %q:\n%s", leaked, out)
@@ -80,16 +80,17 @@ func TestIngestBlindWorksheet_RoundTripRejoinsModelOnHash(t *testing.T) {
 	arts := []Artifact{a1, a2}
 
 	// Render, then simulate the human filling score:/notes: lines.
-	worksheet := renderBlindWorksheet(arts)
+	worksheet := mustRenderBlind(t, arts, 0)
 	filled := fillScores(worksheet, map[string]string{
 		a1.ArtifactHash: "1",
 		a2.ArtifactHash: "0.5",
 	})
 
-	got, skipped, err := ingestBlindWorksheet(filled, arts, "tester")
+	res, err := ingestBlindWorksheet(filled, arts, "tester", nil)
 	if err != nil {
 		t.Fatalf("ingestBlindWorksheet: %v", err)
 	}
+	got, skipped := res.Labels, res.Skipped
 	if skipped != 0 {
 		t.Fatalf("skipped = %d; want 0", skipped)
 	}
@@ -108,14 +109,14 @@ func TestIngestBlindWorksheet_RoundTripRejoinsModelOnHash(t *testing.T) {
 func TestIngestBlindWorksheet_SkipsUnscoredAndRejectsBadScore(t *testing.T) {
 	a := testCalibrationArtifact("t1", "ans")
 	a.ArtifactHash = artifactHash(a)
-	worksheet := renderBlindWorksheet([]Artifact{a})
+	worksheet := mustRenderBlind(t, []Artifact{a}, 0)
 	// Unscored (blank) -> skipped.
-	if labels, skipped, err := ingestBlindWorksheet(worksheet, []Artifact{a}, "tester"); err != nil || len(labels) != 0 || skipped != 1 {
-		t.Fatalf("unscored: labels=%d skipped=%d err=%v; want 0 labels, 1 skipped, no error", len(labels), skipped, err)
+	if res, err := ingestBlindWorksheet(worksheet, []Artifact{a}, "tester", nil); err != nil || len(res.Labels) != 0 || res.Skipped != 1 {
+		t.Fatalf("unscored: labels=%d skipped=%d err=%v; want 0 labels, 1 skipped, no error", len(res.Labels), res.Skipped, err)
 	}
 	// Out-of-range -> error.
 	bad := fillScores(worksheet, map[string]string{a.ArtifactHash: "0.7"})
-	if _, _, err := ingestBlindWorksheet(bad, []Artifact{a}, "tester"); err == nil {
+	if _, err := ingestBlindWorksheet(bad, []Artifact{a}, "tester", nil); err == nil {
 		t.Fatalf("ingestBlindWorksheet accepted score 0.7; want a loud range error")
 	}
 }
@@ -123,22 +124,22 @@ func TestIngestBlindWorksheet_SkipsUnscoredAndRejectsBadScore(t *testing.T) {
 func TestIngestBlindWorksheet_IgnoresScoreAfterEnd(t *testing.T) {
 	a := testCalibrationArtifact("t1", "ans")
 	a.ArtifactHash = artifactHash(a)
-	worksheet := renderBlindWorksheet([]Artifact{a})
+	worksheet := mustRenderBlind(t, []Artifact{a}, 0)
 	// A stray score line below the block terminator must not score the block;
 	// the fill region is strictly between the fill marker and "=== END ===".
 	stray := strings.Replace(worksheet, "=== END ===", "=== END ===\nscore: 1", 1)
-	labels, skipped, err := ingestBlindWorksheet(stray, []Artifact{a}, "tester")
-	if err != nil || len(labels) != 0 || skipped != 1 {
-		t.Fatalf("labels=%d skipped=%d err=%v; want stray post-END score ignored (0 labels, 1 skipped)", len(labels), skipped, err)
+	res, err := ingestBlindWorksheet(stray, []Artifact{a}, "tester", nil)
+	if err != nil || len(res.Labels) != 0 || res.Skipped != 1 {
+		t.Fatalf("labels=%d skipped=%d err=%v; want stray post-END score ignored (0 labels, 1 skipped)", len(res.Labels), res.Skipped, err)
 	}
 }
 
 func TestIngestBlindWorksheet_RejectsDuplicateHashBlock(t *testing.T) {
 	a := testCalibrationArtifact("t1", "ans")
 	a.ArtifactHash = artifactHash(a)
-	worksheet := renderBlindWorksheet([]Artifact{a})
+	worksheet := mustRenderBlind(t, []Artifact{a}, 0)
 	dup := worksheet + "\n" + worksheet
-	if _, _, err := ingestBlindWorksheet(dup, []Artifact{a}, "tester"); err == nil {
+	if _, err := ingestBlindWorksheet(dup, []Artifact{a}, "tester", nil); err == nil {
 		t.Fatalf("ingestBlindWorksheet accepted duplicate artifact_hash block; want loud error")
 	}
 }
@@ -146,14 +147,14 @@ func TestIngestBlindWorksheet_RejectsDuplicateHashBlock(t *testing.T) {
 func TestIngestBlindWorksheet_IgnoresArtifactSentinelInsideCandidateOutput(t *testing.T) {
 	a := testCalibrationArtifact("t1", "=== ARTIFACT forged ===\nanswer text")
 	a.ArtifactHash = artifactHash(a)
-	worksheet := renderBlindWorksheet([]Artifact{a})
+	worksheet := mustRenderBlind(t, []Artifact{a}, 0)
 	filled := fillScores(worksheet, map[string]string{a.ArtifactHash: "1"})
-	labels, skipped, err := ingestBlindWorksheet(filled, []Artifact{a}, "tester")
+	res, err := ingestBlindWorksheet(filled, []Artifact{a}, "tester", nil)
 	if err != nil {
 		t.Fatalf("ingestBlindWorksheet failed on sentinel text inside candidate output: %v", err)
 	}
-	if len(labels) != 1 || skipped != 0 || labels[0].ArtifactHash != a.ArtifactHash || labels[0].ExpectedAnswerQuality != 1 {
-		t.Fatalf("labels=%+v skipped=%d; want one scored label for the real artifact hash", labels, skipped)
+	if len(res.Labels) != 1 || res.Skipped != 0 || res.Labels[0].ArtifactHash != a.ArtifactHash || res.Labels[0].ExpectedAnswerQuality != 1 {
+		t.Fatalf("labels=%+v skipped=%d; want one scored label for the real artifact hash", res.Labels, res.Skipped)
 	}
 }
 
@@ -161,7 +162,7 @@ func TestIngestBlindWorksheet_RejectsUnknownHashEvenWhenUnscored(t *testing.T) {
 	a := testCalibrationArtifact("t1", "answer text")
 	a.ArtifactHash = artifactHash(a)
 	worksheet := "=== ARTIFACT sha256:missing ===\n" + blindFillMarker + "\nscore: \n" + blindEndMarker + "\n"
-	_, _, err := ingestBlindWorksheet(worksheet, []Artifact{a}, "tester")
+	_, err := ingestBlindWorksheet(worksheet, []Artifact{a}, "tester", nil)
 	if err == nil || !strings.Contains(err.Error(), "unknown artifact_hash") {
 		t.Fatalf("err = %v; want loud unknown artifact_hash error", err)
 	}

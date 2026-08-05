@@ -1,0 +1,92 @@
+{
+  "id": "join-export-window-lag-legacy",
+  "source": "assembly-corpus-mixed",
+  "captured_at": "0001-01-01T00:00:00Z",
+  "system": "You are the driftwatch assistant. driftwatch is a self-hosted telemetry ingest and alerting daemon. Answer using only the provided conversation, memory records, and retrieved context.",
+  "tools": null,
+  "turns": [
+    {
+      "role": "user",
+      "content": "Then we are set for tonight. For the record, the surge-era sizing draft that penciled in 12 uploaders for catch-up runs is shelved; it predates the loader's memory limits. Sizing call from the loader team review: the catch-up runs with 8 uploaders and the shard cap stays where it is; their side is provisioned for exactly that."
+    },
+    {
+      "role": "assistant",
+      "content": "Locked in: tonight's catch-up runs with 8 uploaders, shard cap unchanged, and the loader team has the run window on their calendar."
+    },
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "id": "c1",
+          "name": "retrieve",
+          "arguments": {
+            "query": "shard upload worker pool",
+            "k": 3
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "content": "### source: \"internal/export/upload.go\"\npurpose: Shard upload pool: code default parallelism, invocation override for catch-up runs.\noverview: upload.go sizes the concurrent shard-upload pool from a code default tuned for steady state, lets a run invocation override it for catch-up, and shares one retry ledger across workers so a failed shard never head-blocks its lane.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n--- source: \"internal/export/upload.go\" (lines 1-19, similarity: 1.00) ---\n1| package export\n2| \n3| // uploaderParallelism is the code default for concurrent shard\n4| // uploads in one export run. The pool is sized against steady-state\n5| // warehouse ingestion; catch-up runs override it from the run\n6| // invocation when the loader side is provisioned for more.\n7| const uploaderParallelism = 4\n8| \n9| // upload drains the shard queue with the configured worker count.\n10| // Workers share one retry ledger, so a shard that fails on one worker\n11| // is retried by whichever worker frees first rather than\n12| // head-blocking its original lane.\n13| func (u *Uploader) upload(shards \u003c-chan string) error {\n14| \tworkers := u.parallelism\n15| \tif workers \u003c= 0 {\n16| \t\tworkers = uploaderParallelism\n17| \t}\n18| \treturn u.pool.run(workers, shards)\n19| }\n\n### source: \"internal/export/manifest.go\"\npurpose: Shard manifests: the loader contract with ranges and checksums, written atomically.\noverview: manifest.go writes one manifest per completed shard with row count, segment range, and checksum, landing it atomically so the loader only ever sees complete shard descriptions.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n--- source: \"internal/export/manifest.go\" (lines 1-24, similarity: 1.00) ---\n1| package export\n2| \n3| // manifest describes one completed shard for the warehouse loader:\n4| // row count, source segment range, and the shard checksum published\n5| // since the outage postmortem. The loader treats the manifest as the\n6| // contract; filename parsing is dead.\n7| type manifest struct {\n8| \tshard    string\n9| \trows     int\n10| \tsegFirst uint64\n11| \tsegLast  uint64\n12| \tchecksum string\n13| }\n14| \n15| // writeManifest lands the manifest next to its shard atomically: the\n16| // loader lists manifests, never shards, so a shard without its\n17| // manifest is invisible rather than half-visible.\n18| func (w *Writer) writeManifest(m manifest) error {\n19| \ttmp := m.shard + \".manifest.tmp\"\n20| \tif err := w.encode(tmp, m); err != nil {\n21| \t\treturn err\n22| \t}\n23| \treturn w.rename(tmp, m.shard+\".manifest\")\n24| }\n\n### source: \"docs/export-recovery.md\"\npurpose: Export recovery guide: shard-level resume, catch-up ordering, loader-bounded pools.\noverview: export-recovery.md frames outage recovery as catch-up: resume from the last completed shard, walk the backlog oldest-first, and size uploader pools against loader provisioning rather than local appetite.\nlanguage: markdown\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n--- source: \"docs/export-recovery.md\" (lines 1-19, similarity: 1.00) ---\n1| # driftwatch export recovery\n2| \n3| A failed export run resumes from the last completed shard on the next\n4| trigger; a failed shard retries independently. Recovery after an\n5| outage is therefore a catch-up problem, not a correctness one.\n6| \n7| ## Catch-up runs\n8| \n9| Catch-up runs walk the backlog oldest-first so warehouse dashboards\n10| fill in chronological order. Size the uploader pool for the loader's\n11| provisioning, not ours: the loader's memory scales with concurrent\n12| shards, and a pool that outruns it turns catch-up into a second\n13| incident.\n14| \n15| ## Counting\n16| \n17| Skipped runs are not failures. The failure panel splits them since the\n18| outage review, and the month reads clean when only real failures\n19| count.\n",
+      "tool_call_id": "c1",
+      "name": "retrieve"
+    },
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "id": "c2",
+          "name": "agent_memory_search",
+          "arguments": {
+            "query": ""
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "content": "rec-loader-window · semantic · 2025-07-27 · loader team watches the data platform channel during business hours; page only for stuck runs\nrec-manifest-note · working · 2025-07-27 · shard manifests carry segment ranges as of the outage replay; the loader reads them natively\nrec-outage-retro · semantic · 2025-07-27 · outage retro notes live in the shared folder; the segment replay timeline is the appendix",
+      "tool_call_id": "c2",
+      "name": "agent_memory_search"
+    },
+    {
+      "role": "user",
+      "content": "Final check for the run book: how many uploaders does tonight's catch-up use, and what parallelism does the uploader pool default to in code?"
+    }
+  ],
+  "golden": {
+    "tool_calls": null,
+    "final_answer_criteria": "BOTH halves required: tonight's catch-up runs with 8 uploaders, AND the uploader pool's code default parallelism is 4. A missing half caps the score at 0.5; a stated but incorrect half scores 0. An answer giving the shelved 12-uploader figure scores 0. An answer presenting both the correct and a competing value without committing to one scores 0."
+  },
+  "assembly_eval": {
+    "pair_id": "join-export-window-lag",
+    "mode": "legacy",
+    "candidate_ids": [
+      "62fb272f50ca6df2d5a36521d3b7a8f735341c8704f19bfc622bd786376bb325",
+      "90db85e9f432cd5b6be85e46b01a351681f7a52731d4afb213829be6bc677813",
+      "aa15e52e4721e4cf702b64f09eddb9924776d8201c2234489008a2712cf91bd1",
+      "rec-loader-window",
+      "rec-manifest-note",
+      "rec-outage-retro"
+    ],
+    "estimated_prompt_tokens": 1277,
+    "state_digest": "42d42e6d3d6da46862acc97533d663c674d44123095bf221acdb03442941bd52",
+    "subjects": [
+      "(c1|rag|internal/export/upload.go)",
+      "(c1|rag|internal/export/manifest.go)",
+      "(c1|rag|docs/export-recovery.md)",
+      "(c2|memory|rec-loader-window)",
+      "(c2|memory|rec-manifest-note)",
+      "(c2|memory|rec-outage-retro)"
+    ],
+    "stratum": "cross_domain_join",
+    "answer_home": "join",
+    "scenario_family": "export-shard-schedule",
+    "budget": 1339,
+    "raw_state_tokens": 2231,
+    "pressure_level": "critical",
+    "shed_messages": 10,
+    "shed_bytes": 3256
+  }
+}

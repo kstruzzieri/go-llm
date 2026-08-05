@@ -1,0 +1,69 @@
+{
+  "id": "chain-listen-queue-drops-legacy",
+  "source": "assembly-corpus-mixed",
+  "captured_at": "0001-01-01T00:00:00Z",
+  "system": "You are the driftwatch assistant. driftwatch is a self-hosted telemetry ingest and alerting daemon. Answer using only the provided conversation, memory records, and retrieved context.",
+  "tools": null,
+  "turns": [
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "id": "c2",
+          "name": "fixture_echo",
+          "arguments": {
+            "content": "overnight listener stats from the staging edge, pasted verbatim:\nsyslog_listener_accepted_total 48211903\nsyslog_listener_dropped_total 1204\nsyslog_listener_drop_rate_per_min_p95 3.8\nsyslog_listener_drop_rate_per_min_max 11.2\nsyslog_listener_queue_high_watermark_pct 64\nstats note: the 75 drops/min threshold the v1 dashboard json still prints was the old runbook alarm; it was retired with the v2 listener rollout and fires nothing anywhere now.\nsyslog_listener_synthetic_feed_missed_total 0\n"
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "content": "overnight listener stats from the staging edge, pasted verbatim:\nsyslog_listener_accepted_total 48211903\nsyslog_listener_dropped_total 1204\nsyslog_listener_drop_rate_per_min_p95 3.8\nsyslog_listener_drop_rate_per_min_max 11.2\nsyslog_listener_queue_high_watermark_pct 64\nstats note: the 75 drops/min threshold the v1 dashboard json still prints was the old runbook alarm; it was retired with the v2 listener rollout and fires nothing anywhere now.\nsyslog_listener_synthetic_feed_missed_total 0\n",
+      "tool_call_id": "c2",
+      "name": "fixture_echo"
+    },
+    {
+      "role": "user",
+      "content": "What drop rate trips the listener alarm now?"
+    }
+  ],
+  "golden": {
+    "tool_calls": null,
+    "final_answer_criteria": "States the listener drop alarm trips at 200 drops per minute. The retired 75 drops/min v1 alarm named in the pasted stats scores 0. An answer presenting both the correct and a competing value without committing to one scores 0."
+  },
+  "assembly_eval": {
+    "pair_id": "chain-listen-queue-drops",
+    "mode": "legacy",
+    "candidate_ids": [
+      "rec-alarm-review",
+      "rec-canary-feed",
+      "rec-cert-renewal",
+      "rec-drill-linkage",
+      "rec-drop-alarm",
+      "rec-incident-retro",
+      "rec-parse-errors",
+      "rec-review-template"
+    ],
+    "estimated_prompt_tokens": 180,
+    "state_digest": "d38f972396d8d95ca4c7ec5b36c90fc29186e7e616e56134533d94418c2bbd02",
+    "subjects": [
+      "(c1|memory|rec-alarm-review)",
+      "(c1|memory|rec-canary-feed)",
+      "(c1|memory|rec-cert-renewal)",
+      "(c1|memory|rec-drill-linkage)",
+      "(c1|memory|rec-drop-alarm)",
+      "(c1|memory|rec-incident-retro)",
+      "(c1|memory|rec-parse-errors)",
+      "(c1|memory|rec-review-template)"
+    ],
+    "stratum": "chain_retention",
+    "answer_home": "memory",
+    "scenario_family": "listen-queue-chain",
+    "budget": 602,
+    "raw_state_tokens": 1004,
+    "pressure_level": "ok",
+    "shed_messages": 4,
+    "shed_bytes": 3070
+  }
+}

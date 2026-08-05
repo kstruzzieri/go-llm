@@ -1,0 +1,117 @@
+{
+  "id": "mem-retention-floor-days-mixed",
+  "source": "assembly-corpus-mixed",
+  "captured_at": "0001-01-01T00:00:00Z",
+  "system": "You are the driftwatch assistant. driftwatch is a self-hosted telemetry ingest and alerting daemon. Answer using only the provided conversation, memory records, and retrieved context.",
+  "tools": null,
+  "turns": [
+    {
+      "role": "user",
+      "content": "Customer request triage. The bakery chain wants their dashboards to open on the outage view by default because that is all their ops person ever looks at. Reasonable? And if so can you just set it for them?"
+    },
+    {
+      "role": "assistant",
+      "content": "Reasonable and done: their org default now opens on the outage view, individual users can still override it, and I noted the change in their account log so support sees it before anyone asks."
+    },
+    {
+      "role": "user",
+      "content": "Next one is stranger: the logistics tenant asks why their ingest graphs dip every day at the same hour and whether we are throttling them. I suspect it is their own batch window but can you confirm from our side before I answer?"
+    },
+    {
+      "role": "assistant",
+      "content": "Confirmed from admission logs: the dip is their own nightly batch pause, not throttling on our side - their producers simply go quiet for the hour. I attached the admission graph overlay to the ticket so you can show rather than tell."
+    },
+    {
+      "role": "user",
+      "content": "Third: a prospect on the eval plan wants to know whether alert routing can page two rotations at once for the same alert class. I thought the router handled fan-out but I do not want to promise from memory. Can you check?"
+    },
+    {
+      "role": "assistant",
+      "content": "Checked the router: destination fan-out per alert class is supported and two pager destinations can gate independently, so paging two rotations at once works today; I added a config example to the prospect thread."
+    },
+    {
+      "role": "user",
+      "content": "Last one: the workshop tenant asks for their old April data back. Their plan file says their window ended long ago, so I assume the answer is no, but can you confirm what actually remains before I write the refusal?"
+    },
+    {
+      "role": "assistant",
+      "content": "Confirmed: April is fully outside their retained window and the segments were retired by retention sweeps at the time, so nothing remains to restore; I drafted the refusal with the retirement dates cited so the answer is factual rather than policy-flavored."
+    },
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "id": "c1",
+          "name": "agent_memory_search",
+          "arguments": {
+            "query": ""
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "content": "rec-account-log · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:\nrec-refusal-style · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:\nrec-retention-clamp · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src: · tenant retention clamps to a 14-day floor whatever the plan file says\nrec-triage-rotation · working · created:2025-07-27 · updated:2025-07-27 · scope:session · ns: · src:",
+      "tool_call_id": "c1",
+      "name": "agent_memory_search"
+    },
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "id": "c2",
+          "name": "retrieve",
+          "arguments": {
+            "query": "tenant retention minimum clamp",
+            "k": 3
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "content": "### source: \"docs/retention.md\"\nlanguage: markdown\nindexed: 2025-07-27T00:00:00Z\nnote: metadata overview (summary omitted: budget)\n--- source: \"docs/retention.md\" (lines 1-8, similarity: 1.00) ---\n1| # Tenant retention\n2| \n3| Each tenant's retained window comes from their plan file entry, and\n4| the daemon clamps configured values to the shipped floor. Pre-GA\n5| builds enforced a 7-day floor; GA changed the clamp and the old\n6| figure survives only in archived release notes. Values below the\n7| operative floor are raised silently at load rather than rejected,\n8| so a too-low plan entry works, it just works at the floor.\n\n### source: \"internal/retention/clamp.go\"\npurpose: Load-time clamp raising sub-floor retention values.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n\n### source: \"internal/retention/plan.go\"\npurpose: Hot-reloaded tenant plan table with parse-safe swaps.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n",
+      "tool_call_id": "c2",
+      "name": "retrieve"
+    },
+    {
+      "role": "user",
+      "content": "What is the lowest retention a tenant can actually configure?"
+    }
+  ],
+  "golden": {
+    "tool_calls": null,
+    "final_answer_criteria": "States that tenant retention clamps to a 14-day floor regardless of the plan file. Answers that only say values are clamped to a shipped floor without naming 14 days score 0. An answer giving the pre-GA 7-day floor scores 0. An answer presenting both the correct and a competing value without committing to one scores 0."
+  },
+  "assembly_eval": {
+    "pair_id": "mem-retention-floor-days",
+    "mode": "mixed",
+    "candidate_ids": [
+      "ac1f3c45c480668c5eefd02a9f8577e10346e744ca4f7164209b03d12a173fec",
+      "d3171264cc09b8f6c0630158deffe59d79066a32998a1678b83683459e2d6322",
+      "ee1eed4cc288e96040ed415925e61d2881036d6035df3dd46e22c228abf3148b",
+      "rec-account-log",
+      "rec-refusal-style",
+      "rec-retention-clamp",
+      "rec-triage-rotation"
+    ],
+    "estimated_prompt_tokens": 887,
+    "state_digest": "98dfd2971846670a7a585c9baf7d28baf6ea07d45df15d301bc3604ae56e22a8",
+    "subjects": [
+      "(c1|memory|rec-account-log)",
+      "(c1|memory|rec-refusal-style)",
+      "(c1|memory|rec-retention-clamp)",
+      "(c1|memory|rec-triage-rotation)",
+      "(c2|rag|docs/retention.md)",
+      "(c2|rag|internal/retention/clamp.go)",
+      "(c2|rag|internal/retention/plan.go)"
+    ],
+    "stratum": "memory_only",
+    "answer_home": "memory",
+    "scenario_family": "retention-floor-mem",
+    "budget": 928,
+    "raw_state_tokens": 1546,
+    "pressure_level": "critical",
+    "shed_bytes": 2225
+  }
+}

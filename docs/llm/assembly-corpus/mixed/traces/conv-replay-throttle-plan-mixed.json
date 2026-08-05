@@ -1,0 +1,131 @@
+{
+  "id": "conv-replay-throttle-plan-mixed",
+  "source": "assembly-corpus-mixed",
+  "captured_at": "0001-01-01T00:00:00Z",
+  "system": "You are the driftwatch assistant. driftwatch is a self-hosted telemetry ingest and alerting daemon. Answer using only the provided conversation, memory records, and retrieved context.",
+  "tools": null,
+  "turns": [
+    {
+      "role": "user",
+      "content": "Post-outage cleanup first: the export backlog drained overnight but the drill calendar still shows last month's replay drill as pending. Close it out and put the retro link on the entry so the calendar reflects reality."
+    },
+    {
+      "role": "assistant",
+      "content": "Closed the drill entry and attached the retro link; the calendar now shows the next drill in five weeks with the lead already assigned."
+    },
+    {
+      "role": "user",
+      "content": "The replay section of the runbook still tells operators to eyeball disk contention from the node graphs. That advice predates the pacer work entirely and reads as folklore now. Tighten it up around the pacer flow?"
+    },
+    {
+      "role": "assistant",
+      "content": "Rewrote the runbook section around the pacer flow and dropped the folklore paragraph about eyeballing node graphs during a drain."
+    },
+    {
+      "role": "user",
+      "content": "The lab box scratch volume filled again during the backlog drain capture. Cap the capture size before the next drill runs or the morning benchmarks will lose the volume again."
+    },
+    {
+      "role": "assistant",
+      "content": "Capped drill captures with a size quota and freed the scratch volume; the morning benchmarks have headroom again."
+    },
+    {
+      "role": "user",
+      "content": "Now the actual policy: after watching the drain contend with live ingest, we agreed with platform to cap business-hours catch-up replay at 6 MB/s per node, uncapped only inside declared maintenance windows. Put that in the pacer profile and note it in the runbook."
+    },
+    {
+      "role": "assistant",
+      "content": "Set the pacer profile to the agreed business-hours cap with maintenance windows left uncapped, and added the runbook note beside the pacer flow section."
+    },
+    {
+      "role": "user",
+      "content": "Dashboards: the replay lag panel still counts segments, not bytes, which made the outage call harder than it needed to be. Add a bytes-remaining series next to the segment count."
+    },
+    {
+      "role": "assistant",
+      "content": "Added a bytes-remaining series to the replay lag panel and kept the segment count beside it for continuity."
+    },
+    {
+      "role": "user",
+      "content": "Last: the retro doc collected three follow-ups without owners - the pacer alert, the cursor backup note, and the drill checklist refresh. Assign them before the doc goes stale."
+    },
+    {
+      "role": "assistant",
+      "content": "Assigned all three follow-ups with dates: the pacer alert to ops, the cursor backup note to me, and the drill checklist refresh to the drill lead."
+    },
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "id": "c1",
+          "name": "retrieve",
+          "arguments": {
+            "query": "segment replay pacing",
+            "k": 3
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "content": "### source: \"internal/replay/replay.go\"\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nnote: metadata overview (summary omitted: budget)\n--- source: \"internal/replay/replay.go\" (lines 1-44, similarity: 1.00) ---\n1| package replay\n2| \n3| import (\n4| \t\"context\"\n5| \t\"time\"\n6| )\n7| \n8| // Replayer walks rolled segments from the checkpoint cursor and feeds\n9| // batches back through the export pipeline. The walk rate is supplied\n10| // by deployment config; the March drill's wide-open 24 MB/s run\n11| // predates the pacer and lives nowhere in this file.\n12| type Replayer struct {\n13| \tdir    string\n14| \tcursor *Cursor\n15| \tpace   Pace\n16| }\n17| \n18| // Run replays segments until caught up or cancelled. Batches are\n19| // released through the pacer so catch-up traffic and live ingest share\n20| // the disk on the operator's terms rather than racing for it.\n21| func (r *Replayer) Run(ctx context.Context) error {\n22| \tfor {\n23| \t\tseg, err := r.next()\n24| \t\tif err == errCaughtUp {\n25| \t\t\treturn nil\n26| \t\t}\n27| \t\tif err != nil {\n28| \t\t\treturn err\n29| \t\t}\n30| \t\tif err := r.replaySegment(ctx, seg); err != nil {\n31| \t\t\treturn err\n32| \t\t}\n33| \t\tr.cursor.advance(seg)\n34| \t}\n35| }\n36| \n37| // replaySegment streams one segment through the pacer. The pacer's\n38| // release schedule is the only throttle; the segment reader itself\n39| // runs as fast as the pacer lets it.\n40| func (r *Replayer) replaySegment(ctx context.Context, seg segmentRef) error {\n41| \treturn r.pace.Release(ctx, func(batch []byte) error {\n42| \t\treturn r.export(batch)\n43| \t})\n44| }\n\n### source: \"internal/replay/cursor.go\"\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nnote: metadata overview (summary omitted: budget)\n\n### source: \"docs/replay.md\"\nlanguage: markdown\nindexed: 2025-07-27T00:00:00Z\nnote: metadata overview (summary omitted: budget)\n",
+      "tool_call_id": "c1",
+      "name": "retrieve"
+    },
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "id": "c2",
+          "name": "agent_memory_search",
+          "arguments": {
+            "query": ""
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "content": "rec-cursor-note · working · created:2025-07-27 · updated:2025-07-27 · scope:session · ns: · src:\nrec-drill-cadence · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:\nrec-drill-wideopen · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:",
+      "tool_call_id": "c2",
+      "name": "agent_memory_search"
+    },
+    {
+      "role": "user",
+      "content": "What per-node rate is business-hours catch-up replay capped at?"
+    }
+  ],
+  "golden": {
+    "tool_calls": null,
+    "final_answer_criteria": "States business-hours catch-up replay is capped at 6 MB/s per node. Answering 24 MB/s (the uncapped March drill rate from memory) scores 0. An answer presenting both the correct and a competing value without committing to one scores 0."
+  },
+  "assembly_eval": {
+    "pair_id": "conv-replay-throttle-plan",
+    "mode": "mixed",
+    "candidate_ids": [
+      "71e36aaa00e63717a8de7f9604bee55b827a4ef0e6b2a5f98c9391d47dd2a0a8",
+      "84d971fe9d9ef121d73e01456c43e1bac7359485116652a1d1c7b1279e590267",
+      "af44a2f7e6270d5ddeeb9b455451073b303d1e1731f7e69cd372bcc3ebe15e0f",
+      "rec-cursor-note",
+      "rec-drill-cadence",
+      "rec-drill-wideopen"
+    ],
+    "estimated_prompt_tokens": 1102,
+    "state_digest": "e6859b0616a19c254d3d0581929089d228ba6ae22e32211162de2c82eaa71a1b",
+    "subjects": [
+      "(c1|rag|internal/replay/replay.go)",
+      "(c1|rag|internal/replay/cursor.go)",
+      "(c1|rag|docs/replay.md)",
+      "(c2|memory|rec-cursor-note)",
+      "(c2|memory|rec-drill-cadence)",
+      "(c2|memory|rec-drill-wideopen)"
+    ],
+    "stratum": "conversation_only",
+    "answer_home": "conversation",
+    "scenario_family": "replay-throttle-conv",
+    "budget": 1153,
+    "raw_state_tokens": 1922,
+    "pressure_level": "critical",
+    "shed_bytes": 2739
+  }
+}

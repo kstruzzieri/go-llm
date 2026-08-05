@@ -1,0 +1,236 @@
+{
+  "schema_version": "llm-bench-assembly/v1",
+  "minimum_pairs_per_model": 60,
+  "decision_rule": "minimum 60 complete pairs per model; quality-improved: CI low \u003e 0 and median token reduction \u003e= 20%; efficient-noninferior: CI low \u003e -0.10 and reduction \u003e= 20%; regressed: CI high \u003c -0.10; else inconclusive",
+  "models": null,
+  "bootstrap_seed": 1,
+  "bootstrap_n": 10000,
+  "legacy_mixed_decision_rule": "legacy-mixed rule v2 (registered): minimum 60 complete labeled non-control pairs pooled and minimum 12 per stratum present; minimum 6 scenario-family clusters per stratum and maximum cluster size 3; quality-improved: stratified-bootstrap CI low \u003e 0; noninferior: CI low strictly \u003e -0.10; materially-regressed: CI high \u003c -0.10; else inconclusive; token and pressure numbers are descriptive only, never consulted; registered pressure fraction f=0.6",
+  "legacy_mixed_models": [
+    {
+      "candidate_model": "qwen3-coder-next:latest",
+      "pairs": 70,
+      "control_pairs": 6,
+      "mean_delta": 0.278571428571,
+      "delta_ci_low": 0.178571428571,
+      "delta_ci_high": 0.378571428571,
+      "decision": "quality-improved",
+      "deltas": [
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        0,
+        0,
+        1,
+        1,
+        0,
+        1,
+        0,
+        0,
+        1,
+        1,
+        0,
+        1,
+        0,
+        1,
+        -0.5,
+        0,
+        0.5,
+        -1,
+        0,
+        0,
+        -1,
+        0.5,
+        0,
+        0.5,
+        -1,
+        -1,
+        0.5,
+        1,
+        -1,
+        0,
+        1,
+        -1,
+        0,
+        -1,
+        -1,
+        0,
+        0,
+        1,
+        -1,
+        0,
+        1,
+        0,
+        -1,
+        0,
+        1,
+        0,
+        1,
+        1,
+        0,
+        0,
+        0,
+        0,
+        -1,
+        1,
+        -1
+      ],
+      "strata": [
+        {
+          "stratum": "chain_retention",
+          "pairs": 14,
+          "mean_delta": 1,
+          "wins": 14,
+          "losses": 0,
+          "ties": 0
+        },
+        {
+          "stratum": "conversation_only",
+          "pairs": 14,
+          "mean_delta": 0.5,
+          "wins": 7,
+          "losses": 0,
+          "ties": 7
+        },
+        {
+          "stratum": "cross_domain_join",
+          "pairs": 14,
+          "mean_delta": -0.107142857143,
+          "wins": 5,
+          "losses": 5,
+          "ties": 4
+        },
+        {
+          "stratum": "memory_only",
+          "pairs": 14,
+          "mean_delta": -0.071428571429,
+          "wins": 4,
+          "losses": 5,
+          "ties": 5
+        },
+        {
+          "stratum": "stale_vs_fresh",
+          "pairs": 14,
+          "mean_delta": 0.071428571429,
+          "wins": 4,
+          "losses": 3,
+          "ties": 7
+        }
+      ],
+      "control_abs_deltas": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "arm_pressure": [
+        {
+          "mode": "legacy",
+          "median_shed_messages": 10,
+          "median_shed_bytes": 3554.5,
+          "median_omitted_subjects": 0,
+          "pressure_levels": {
+            "critical": 34,
+            "ok": 35,
+            "warn": 1
+          }
+        },
+        {
+          "mode": "mixed",
+          "median_shed_messages": 0,
+          "median_shed_bytes": 2689,
+          "median_omitted_subjects": 0,
+          "pressure_levels": {
+            "critical": 70
+          }
+        }
+      ],
+      "cluster_diagnostics": {
+        "clusters_per_stratum": {
+          "chain_retention": 7,
+          "conversation_only": 7,
+          "cross_domain_join": 7,
+          "memory_only": 7,
+          "stale_vs_fresh": 7
+        },
+        "max_cluster_size": 2,
+        "independence_groups": 33,
+        "leave_one_out": {
+          "min_low": 0.154411764706,
+          "max_low": 0.205882352941
+        }
+      },
+      "forced_choice": {
+        "mixed_wins": 34,
+        "legacy_wins": 14,
+        "ties": 22,
+        "n_nontie": 48,
+        "p_two_sided": 0.005515201486,
+        "p_cluster_permutation": 0.004899510049,
+        "skipped_excluded": 6,
+        "arm_guess_accuracy": {
+          "n_guessed": 0,
+          "n_correct": 0
+        }
+      }
+    }
+  ],
+  "topline": [
+    {
+      "candidate_model": "qwen3-coder-next:latest",
+      "count": 12,
+      "labeled": 12,
+      "mean_quality": 1,
+      "by_stratum": [
+        {
+          "stratum": "chain_retention",
+          "count": 2,
+          "labeled": 2,
+          "mean_quality": 1
+        },
+        {
+          "stratum": "conversation_only",
+          "count": 3,
+          "labeled": 3,
+          "mean_quality": 1
+        },
+        {
+          "stratum": "cross_domain_join",
+          "count": 3,
+          "labeled": 3,
+          "mean_quality": 1
+        },
+        {
+          "stratum": "memory_only",
+          "count": 2,
+          "labeled": 2,
+          "mean_quality": 1
+        },
+        {
+          "stratum": "stale_vs_fresh",
+          "count": 2,
+          "labeled": 2,
+          "mean_quality": 1
+        }
+      ]
+    }
+  ],
+  "capture_manifest": {
+    "digest": "sha256:b94f0ac0dc6106dde1d843b4cb96138c4b60f94928f9321bc8d00d60336db8ae",
+    "artifact_count": 164
+  }
+}

@@ -244,38 +244,25 @@ func TestAssemblyBuildProducesValidPairs(t *testing.T) {
 // deterministic as the traces it digests, and including it is what makes a
 // builder change visible even when a trace edit is self-consistent.
 //
+// The comparison runs through corpusDirDiff (corpus_regen_test.go) — shared
+// with the mixed-corpus gate and itself proven by TestRegenGateDetectsDrift.
+//
 // Regenerate after intentional changes with:
 //
 //	go run ./cmd/llm-bench -assembly-build docs/llm/assembly-corpus/cases.json \
 //	  -assembly-out docs/llm/assembly-corpus/traces
 func TestAssemblyCommittedCorpusUpToDate(t *testing.T) {
-	corpusDir := filepath.Join("..", "..", "docs", "llm", "assembly-corpus")
-	wantDir := filepath.Join(corpusDir, "traces")
+	corpusDir := filepath.Join(corpusRepoRoot(t), "docs", "llm", "assembly-corpus")
 	gotDir := t.TempDir()
 	if err := assemblyBuild(context.Background(), filepath.Join(corpusDir, "cases.json"), gotDir); err != nil {
 		t.Fatal(err)
 	}
-
-	wantEntries, err := os.ReadDir(wantDir)
+	diff, err := corpusDirDiff(gotDir, filepath.Join(corpusDir, "traces"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	gotEntries, err := os.ReadDir(gotDir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(gotEntries) != len(wantEntries) {
-		t.Fatalf("generated %d traces, committed corpus has %d", len(gotEntries), len(wantEntries))
-	}
-	for i, wantEntry := range wantEntries {
-		if gotEntries[i].Name() != wantEntry.Name() {
-			t.Fatalf("trace %d = %q, want %q", i, gotEntries[i].Name(), wantEntry.Name())
-		}
-		got := mustReadAssemblyFile(t, filepath.Join(gotDir, gotEntries[i].Name()))
-		want := mustReadAssemblyFile(t, filepath.Join(wantDir, wantEntry.Name()))
-		if !bytes.Equal(got, want) {
-			t.Fatalf("committed trace %s is stale; rebuild the assembly corpus", wantEntry.Name())
-		}
+	if diff != "" {
+		t.Fatalf("committed corpus is stale; rebuild the assembly corpus: %s", diff)
 	}
 }
 
@@ -673,7 +660,7 @@ func TestAssemblyReportPairingAndDecision(t *testing.T) {
 		arts = append(arts, f, p)
 		labels = append(labels, labelFor(f, 0.5), labelFor(p, 1.0))
 	}
-	rep, err := computeAssemblyReport(arts, labels, 1, 10000)
+	rep, err := computeAssemblyReport(arts, labels, 1, 10000, nil, assemblyReportExtras{})
 	if err != nil {
 		t.Fatalf("computeAssemblyReport: %v", err)
 	}
@@ -692,6 +679,17 @@ func TestAssemblyReportPairingAndDecision(t *testing.T) {
 		t.Fatalf("decision = %q, want quality-improved (uniform +0.5 deltas)", model.Decision)
 	}
 
+	// Pure-3a input: the marshaled report must carry NO 3c keys. The 3c
+	// sections are omitempty, so a flat-progressive-only report stays
+	// byte-identical to the 3a schema — asserted, not just commented.
+	rawRep, err := json.Marshal(rep)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(rawRep), "legacy_mixed") || strings.Contains(string(rawRep), `"topline"`) {
+		t.Fatalf("pure-3a report leaked 3c keys:\n%s", rawRep)
+	}
+
 	// Candidate mismatch invalidates the case, never skews it. The extra
 	// pair uses a FRESH pair ID ("case-mismatch", not one of case-0..59):
 	// reusing an existing pair ID would trip the duplicate-arm error, which
@@ -701,7 +699,7 @@ func TestAssemblyReportPairingAndDecision(t *testing.T) {
 	bad := assemblyArtifact("case-mismatch", AssemblyProgressive, "m", 500, ids2)
 	arts2 := append(append([]Artifact{}, arts...), badFlat, bad)
 	labels2 := append(append([]Label{}, labels...), labelFor(badFlat, 0.5), labelFor(bad, 0.5))
-	rep2, err := computeAssemblyReport(arts2, labels2, 1, 10000)
+	rep2, err := computeAssemblyReport(arts2, labels2, 1, 10000, nil, assemblyReportExtras{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -713,7 +711,7 @@ func TestAssemblyReportPairingAndDecision(t *testing.T) {
 	// A pair missing one arm is a pairing gap, excluded and counted.
 	// Fresh pair ID for the same reason as above.
 	orphan := assemblyArtifact("case-orphan", AssemblyFlat, "m", 1000, ids)
-	rep3, err := computeAssemblyReport(append(arts, orphan), append(labels, labelFor(orphan, 0.5)), 1, 10000)
+	rep3, err := computeAssemblyReport(append(arts, orphan), append(labels, labelFor(orphan, 0.5)), 1, 10000, nil, assemblyReportExtras{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -724,7 +722,7 @@ func TestAssemblyReportPairingAndDecision(t *testing.T) {
 
 	// A statistically favorable result remains explicitly ineligible below
 	// the corpus target; the report never prints "improved" on a seed corpus.
-	small, err := computeAssemblyReport(arts[:10], labels[:10], 1, 10000)
+	small, err := computeAssemblyReport(arts[:10], labels[:10], 1, 10000, nil, assemblyReportExtras{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -751,7 +749,7 @@ func TestAssemblyReportPerModelSeparation(t *testing.T) {
 			labelFor(mf, 0.5), labelFor(mp, 1.0), // m: progressive better
 			labelFor(nf, 1.0), labelFor(np, 0.5)) // n: progressive worse
 	}
-	rep, err := computeAssemblyReport(arts, labels, 1, 10000)
+	rep, err := computeAssemblyReport(arts, labels, 1, 10000, nil, assemblyReportExtras{})
 	if err != nil {
 		t.Fatalf("computeAssemblyReport: %v", err)
 	}
@@ -795,7 +793,7 @@ func TestAssemblyReportErrors(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := computeAssemblyReport(tc.arts, tc.labels, 1, 10000)
+			_, err := computeAssemblyReport(tc.arts, tc.labels, 1, 10000, nil, assemblyReportExtras{})
 			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
 				t.Fatalf("err = %v, want containing %q", err, tc.wantErr)
 			}

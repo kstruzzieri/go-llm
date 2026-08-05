@@ -21,7 +21,7 @@ func main() {
 
 func run(args []string) error {
 	flags := flag.NewFlagSet("rag-eval", flag.ContinueOnError)
-	experiment := flags.String("experiment", "baseline", "Experiment to run: baseline, outline, or progressive")
+	experiment := flags.String("experiment", "baseline", "Experiment to run: baseline, outline, progressive, or mixed")
 	fixturePath := flags.String("fixtures", "internal/rageval/testdata/fixtures.json", "Path to baseline fixture JSON")
 	outPath := flags.String("out", "", "Path to write report JSON (required)")
 	warmRuns := flags.Int("warm-runs", 3, "Baseline warm retrieval runs per query")
@@ -97,7 +97,13 @@ func run(args []string) error {
 			return err
 		}
 		return rageval.WriteProgressiveReport(*outPath, report)
+	case "mixed":
+		report, err := rageval.RunMixedExperiment(context.Background(), rageval.MixedOptions{})
+		if err != nil {
+			return err
+		}
+		return rageval.WriteMixedReport(*outPath, report)
 	default:
-		return fmt.Errorf("unknown experiment %q (want baseline, outline, or progressive)", *experiment)
+		return fmt.Errorf("unknown experiment %q (want baseline, outline, progressive, or mixed)", *experiment)
 	}
 }

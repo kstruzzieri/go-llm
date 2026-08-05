@@ -1,0 +1,132 @@
+{
+  "id": "conv-ingest-token-late-mixed",
+  "source": "assembly-corpus-mixed",
+  "captured_at": "0001-01-01T00:00:00Z",
+  "system": "You are the driftwatch assistant. driftwatch is a self-hosted telemetry ingest and alerting daemon. Answer using only the provided conversation, memory records, and retrieved context.",
+  "tools": null,
+  "turns": [
+    {
+      "role": "user",
+      "content": "Kicking off the rotation planning thread. Before the token work itself: the staging environment still has last month's fixture tenants loaded and they are polluting the ingest graphs. Can we clear them out first so the before and after comparison is clean?"
+    },
+    {
+      "role": "assistant",
+      "content": "Cleared the fixture tenants from staging and reset the ingest graphs so the comparison window starts from a clean baseline."
+    },
+    {
+      "role": "user",
+      "content": "Good. Also the collector image build has been slow since we added the second architecture. Can we split the matrix so the common case ships fast and the other arch builds on a nightly schedule instead?"
+    },
+    {
+      "role": "assistant",
+      "content": "Split the build matrix: the primary architecture publishes on every merge and the secondary one moved to the nightly pipeline with its own freshness badge."
+    },
+    {
+      "role": "user",
+      "content": "On the producers side, the SDK release notes need a section about the upcoming credential change so integrators are not surprised. Nothing specific yet, just a heads-up entry with a link to the tracking issue."
+    },
+    {
+      "role": "assistant",
+      "content": "Added a heads-up entry to the SDK release notes pointing at the tracking issue, worded so it does not commit to a date we have not agreed."
+    },
+    {
+      "role": "user",
+      "content": "Also can someone look at the lab box disk again? The soak capture from last night filled the scratch volume and the morning benchmarks refused to start until I deleted things by hand."
+    },
+    {
+      "role": "assistant",
+      "content": "Freed the scratch volume and capped soak captures with a size quota so a long night cannot starve the morning benchmark runs again."
+    },
+    {
+      "role": "user",
+      "content": "Okay, the actual decision. We talked it over with the platform folks and the new ingest tokens will carry the dwk2- prefix, so the edge can tell rotated credentials from legacy ones at a glance during the drain. Producers migrate first, then the edge flips to prefer the new prefix."
+    },
+    {
+      "role": "assistant",
+      "content": "Recorded. Producers migrate first, then the edge prefers the new prefix; I will fold that ordering into the rotation checklist."
+    },
+    {
+      "role": "user",
+      "content": "Last item: the oncall doc still lists the old paging escalation ordering from before the reorg. Can you bring it in line with the current rota before the weekend handoff?"
+    },
+    {
+      "role": "assistant",
+      "content": "Updated the oncall doc to the current rota and asked the two leads to sanity-check the escalation ordering before Friday."
+    },
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "id": "c1",
+          "name": "retrieve",
+          "arguments": {
+            "query": "ingest token validation prefix",
+            "k": 3
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "content": "### source: \"internal/ingest/auth.go\"\npurpose: Ingest token authentication; accepted prefixes come from config.\noverview: auth.go checks presented ingest tokens against the accepted prefixes supplied by deployment config, so rotations are staged through config rather than rebuilds.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n--- source: \"internal/ingest/auth.go\" (lines 1-15, similarity: 1.00) ---\n1| package ingest\n2| \n3| import \"strings\"\n4| \n5| // authenticate checks the presented ingest token. Accepted prefixes\n6| // are supplied by deployment config so a rotation can be staged\n7| // without a rebuild; this file does not hard-code any prefix.\n8| func (g *Gateway) authenticate(token string) bool {\n9| \tfor _, p := range g.cfg.AcceptedPrefixes {\n10| \t\tif strings.HasPrefix(token, p) {\n11| \t\t\treturn g.verify(token)\n12| \t\t}\n13| \t}\n14| \treturn false\n15| }\n\n### source: \"internal/ingest/limits.go\"\npurpose: Per-tenant token-bucket rate limiting with hot-reloaded rates.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n\n### source: \"docs/operations.md\"\npurpose: Operations guide: process supervision, restart drain, staged credential rotation.\nlanguage: markdown\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n",
+      "tool_call_id": "c1",
+      "name": "retrieve"
+    },
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "id": "c2",
+          "name": "agent_memory_search",
+          "arguments": {
+            "query": ""
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "content": "rec-dash-refresh · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src: · ingest overview dashboard auto-refreshes on the short interval; leave it be, the load is negligible\nrec-oncall-handoff · working · created:2025-07-27 · updated:2025-07-27 · scope:session · ns: · src: · oncall handoff happens Friday afternoon; the summary template lives in the shared doc\nrec-token-rotation · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src: · token rotation window opens Monday; producers migrate before the edge flips preference",
+      "tool_call_id": "c2",
+      "name": "agent_memory_search"
+    },
+    {
+      "role": "user",
+      "content": "Which prefix do freshly rotated ingest tokens carry?"
+    }
+  ],
+  "golden": {
+    "tool_calls": null,
+    "final_answer_criteria": "States that rotated ingest tokens carry the dwk2- prefix. Answers that only describe config-supplied prefixes without naming dwk2- score 0. An answer presenting both the correct and a competing value without committing to one scores 0."
+  },
+  "assembly_eval": {
+    "pair_id": "conv-ingest-token-late",
+    "mode": "mixed",
+    "candidate_ids": [
+      "524f76002d4e73828a49c8dd027719b83c1117ea3e662a667c10fac1feebd215",
+      "9af13e034fe7ae78123e88d5b23af012ab45e65100e4ca481bb10fdb3927c002",
+      "b0e0aeb52f72729936efafa42a6d6cae742557e98ef7472652ad5a94d395e206",
+      "rec-dash-refresh",
+      "rec-oncall-handoff",
+      "rec-token-rotation"
+    ],
+    "estimated_prompt_tokens": 1073,
+    "state_digest": "24c51573441b6a12b9c990ab2dc8af51adb4d5c54f1940b0d842636593ec8b12",
+    "subjects": [
+      "(c1|rag|internal/ingest/auth.go)",
+      "(c1|rag|internal/ingest/limits.go)",
+      "(c1|rag|docs/operations.md)",
+      "(c2|memory|rec-dash-refresh)",
+      "(c2|memory|rec-oncall-handoff)",
+      "(c2|memory|rec-token-rotation)"
+    ],
+    "stratum": "conversation_only",
+    "answer_home": "conversation",
+    "scenario_family": "ingest-token-conv",
+    "twin_group": "tw-ingest-token",
+    "budget": 1130,
+    "raw_state_tokens": 1883,
+    "pressure_level": "critical",
+    "shed_bytes": 2697
+  }
+}

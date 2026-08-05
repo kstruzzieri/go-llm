@@ -1,0 +1,65 @@
+{
+  "id": "mem-export-bucket-layout-legacy",
+  "source": "assembly-corpus-mixed",
+  "captured_at": "0001-01-01T00:00:00Z",
+  "system": "You are the driftwatch assistant. driftwatch is a self-hosted telemetry ingest and alerting daemon. Answer using only the provided conversation, memory records, and retrieved context.",
+  "tools": null,
+  "turns": [
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "id": "c2",
+          "name": "agent_memory_search",
+          "arguments": {
+            "query": ""
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "content": "rec-audit-folder · working · 2025-07-27 · audit evidence lands in the shared evidence folder with an index sheet; auditors sample, they do not fish\nrec-export-drain · semantic · 2025-07-27 · the exports/v2/ drain closed in June; the old tree is read-only history\nrec-export-layout · semantic · 2025-07-27 · archive exports land under exports/v4/ keyed by tenant then day; the old tree finished draining after the layout migration and the writer refuses any key outside the current prefix - build restore paths from the manifest rather than hand-writing keys",
+      "tool_call_id": "c2",
+      "name": "agent_memory_search"
+    },
+    {
+      "role": "user",
+      "content": "Under which key prefix do archive exports land?"
+    }
+  ],
+  "golden": {
+    "tool_calls": null,
+    "final_answer_criteria": "States that archive exports land under the exports/v4/ prefix (keyed by tenant then day). Answers that only say the prefix comes from deployment config score 0. An answer naming the drained exports/v2/ tree scores 0. Any other prefix scores 0. An answer presenting both the correct and a competing value without committing to one scores 0."
+  },
+  "assembly_eval": {
+    "pair_id": "mem-export-bucket-layout",
+    "mode": "legacy",
+    "candidate_ids": [
+      "2564e458c4247053df869fa728a80e1d12347493da9da212799b838cede7a471",
+      "465a59349cc75fc719cf379a2b6792d89e80ce6bcf3e8ccc38c930b05c09d083",
+      "a01220b7c7c99190d2d6168ceb0a549cdd59699da2d20dab7b114ea43bd807aa",
+      "rec-audit-folder",
+      "rec-export-drain",
+      "rec-export-layout"
+    ],
+    "estimated_prompt_tokens": 200,
+    "state_digest": "52726d447156e5b810ef6bfb3c6a79b6c686e30daa6fac241f17ab28b7423e7c",
+    "subjects": [
+      "(c1|rag|docs/export.md)",
+      "(c1|rag|internal/export/writer.go)",
+      "(c1|rag|internal/export/manifest.go)",
+      "(c2|memory|rec-audit-folder)",
+      "(c2|memory|rec-export-drain)",
+      "(c2|memory|rec-export-layout)"
+    ],
+    "stratum": "memory_only",
+    "answer_home": "memory",
+    "scenario_family": "export-bucket-mem",
+    "budget": 1081,
+    "raw_state_tokens": 1801,
+    "pressure_level": "ok",
+    "shed_messages": 10,
+    "shed_bytes": 5980
+  }
+}

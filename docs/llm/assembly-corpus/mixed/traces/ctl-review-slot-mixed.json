@@ -1,0 +1,60 @@
+{
+  "id": "ctl-review-slot-mixed",
+  "source": "assembly-corpus-mixed",
+  "captured_at": "0001-01-01T00:00:00Z",
+  "system": "You are the driftwatch assistant. driftwatch is a self-hosted telemetry ingest and alerting daemon. Answer using only the provided conversation, memory records, and retrieved context.",
+  "tools": null,
+  "turns": [
+    {
+      "role": "user",
+      "content": "Dashboard review this week is Thursday at 14:00 in the usual room."
+    },
+    {
+      "role": "assistant",
+      "content": "Noted, I put it on the shared calendar and linked the agenda."
+    },
+    {
+      "role": "user",
+      "content": "Change of plan: the room is double-booked at that hour, so the review moves to 15:30 on the same Thursday. The 14:00 slot is off the calendar entirely."
+    },
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "id": "c1",
+          "name": "fixture_echo",
+          "arguments": {
+            "content": "calendar check: one review entry present, Thursday, single time marker."
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "content": "calendar check: one review entry present, Thursday, single time marker.",
+      "tool_call_id": "c1",
+      "name": "fixture_echo"
+    },
+    {
+      "role": "user",
+      "content": "What time does this week's dashboard review start?"
+    }
+  ],
+  "golden": {
+    "tool_calls": null,
+    "final_answer_criteria": "Control pair: the two arms are identical by construction; scores here measure decode and labeling noise, not assembly. The conversation first places the review at 14:00 and then moves it: the room was double-booked, the review now starts at 15:30 on Thursday, and the 14:00 slot came off the calendar. An answer stating 15:30 scores 1; an answer stating 14:00 scores 0. An answer presenting both the correct and a competing value without committing to one scores 0."
+  },
+  "assembly_eval": {
+    "pair_id": "ctl-review-slot",
+    "mode": "mixed",
+    "candidate_ids": [],
+    "estimated_prompt_tokens": 148,
+    "state_digest": "aa4ccddfc9d81c7bead6fd26dafb35b51cfad721a4732b632fbc035c73e63367",
+    "stratum": "stale_vs_fresh",
+    "answer_home": "conversation",
+    "control": true,
+    "budget": 260,
+    "raw_state_tokens": 196,
+    "pressure_level": "watch"
+  }
+}

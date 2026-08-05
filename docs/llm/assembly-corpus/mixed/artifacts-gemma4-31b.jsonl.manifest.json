@@ -1,0 +1,1007 @@
+{
+  "schema_version": "mixed-capture-manifest/v1",
+  "created_at": "2026-08-04T15:19:25.517881Z",
+  "endpoint": "http://127.0.0.1:8090",
+  "transport": "openai-compat",
+  "model_targets": [
+    {
+      "selector": "openai-compat/gemma4:31b",
+      "resolved_digest": ""
+    }
+  ],
+  "server_probe": {
+    "error": "GET /props: status 404"
+  },
+  "decoding": {
+    "temperature": 0,
+    "seed_supported": false
+  },
+  "counterbalance_scheme": "pairs sorted by fnv1a64(pair_id) ascending; first arm alternates by position (even=legacy-first, odd=mixed-first)",
+  "artifact_count": 164,
+  "per_artifact": [
+    {
+      "trace_id": "ctl-notes-recap-legacy",
+      "artifact_hash": "sha256:626f1b2e15459fc274e667693fba71a7f491dc852c958114a90fb9cbaed8cd29",
+      "order_index": 0,
+      "usage_present": true
+    },
+    {
+      "trace_id": "ctl-notes-recap-mixed",
+      "artifact_hash": "sha256:4d42b802db44935ac04a5f5ae20f05e7ef7cb13f8be0a4872f159b00d257f33b",
+      "order_index": 1,
+      "usage_present": true
+    },
+    {
+      "trace_id": "conv-pager-channel-mid-mixed",
+      "artifact_hash": "sha256:4bc881eafba7b157a95ff3f336f11c6b1f928d2caf319f6dee877105198de73e",
+      "order_index": 2,
+      "usage_present": true
+    },
+    {
+      "trace_id": "conv-pager-channel-mid-legacy",
+      "artifact_hash": "sha256:952973c13a220dd050bdee6491617ff8ae77b0fd19544a4e8a7eb7c30c38f4d5",
+      "order_index": 3,
+      "usage_present": true
+    },
+    {
+      "trace_id": "ctl-triage-handoff-legacy",
+      "artifact_hash": "sha256:3acd52f130b0f0349e845baa786e82be7fd7f64cec200982c23d2c3283aa323d",
+      "order_index": 4,
+      "usage_present": true
+    },
+    {
+      "trace_id": "ctl-triage-handoff-mixed",
+      "artifact_hash": "sha256:98cf6c0509fee7b010cf7763f60b84d942e5fb9c1ca2d55304a5ee47dbc37938",
+      "order_index": 5,
+      "usage_present": true
+    },
+    {
+      "trace_id": "stale-fanout-workers-mixed",
+      "artifact_hash": "sha256:a7b3196dd855126010b5e07ca82513dad3963a0e2dfa049649cd95968395a24e",
+      "order_index": 6,
+      "usage_present": true
+    },
+    {
+      "trace_id": "stale-fanout-workers-legacy",
+      "artifact_hash": "sha256:8acff13d88920844affec833d3e1e6c7a4ddf65a412e2ebb9d3fb2892eed7233",
+      "order_index": 7,
+      "usage_present": true
+    },
+    {
+      "trace_id": "stale-wal-segment-index-legacy",
+      "artifact_hash": "sha256:56c50c6e7a84693d560a7d9b946425421cd896f01bcd1168026238ac7db09d97",
+      "order_index": 8,
+      "usage_present": true
+    },
+    {
+      "trace_id": "stale-wal-segment-index-mixed",
+      "artifact_hash": "sha256:07032ef573c01a30afd743f9a7756eb29c46aa70b7b725165c3be58dd9c8ea5c",
+      "order_index": 9,
+      "usage_present": true
+    },
+    {
+      "trace_id": "mem-collector-cert-bundle-mixed",
+      "artifact_hash": "sha256:1ca2862fa4a67219d386f43c678492775aad51a4911fe7de818825a356aaa9e5",
+      "order_index": 10,
+      "usage_present": true
+    },
+    {
+      "trace_id": "mem-collector-cert-bundle-legacy",
+      "artifact_hash": "sha256:8fdf6f4634af73dd215613461e1a62bf6f34865639bcf28fedcafcd3fce369f9",
+      "order_index": 11,
+      "usage_present": true
+    },
+    {
+      "trace_id": "chain-drift-window-pair-legacy",
+      "artifact_hash": "sha256:8780ff8a80c6df8de98351bc8320d8775d3cc1bddbc43184053f84b785608f1b",
+      "order_index": 12,
+      "usage_present": true
+    },
+    {
+      "trace_id": "chain-drift-window-pair-mixed",
+      "artifact_hash": "sha256:db1f6121465933ef7dd6367d98db7ee353db846491c8c5a894dc97f49e6cb95d",
+      "order_index": 13,
+      "usage_present": true
+    },
+    {
+      "trace_id": "conv-collector-heartbeat-settle-mixed",
+      "artifact_hash": "sha256:0a933a5cb179ebfd168a8599e76c454f8083d2a1ee7c7ef07ad3860bb5d26139",
+      "order_index": 14,
+      "usage_present": true
+    },
+    {
+      "trace_id": "conv-collector-heartbeat-settle-legacy",
+      "artifact_hash": "sha256:6a23f50c89465b9e5d25d38f7b37c65ae28462590ea5c4027712bcf5f725057c",
+      "order_index": 15,
+      "usage_present": true
+    },
+    {
+      "trace_id": "mem-token-staging-legacy",
+      "artifact_hash": "sha256:0b302377961768f29909178dc13a5dabaf1d99a52852f0a8a946fd9eda454108",
+      "order_index": 16,
+      "usage_present": true
+    },
+    {
+      "trace_id": "mem-token-staging-mixed",
+      "artifact_hash": "sha256:e6a3cc1af404f50b4042c212c67f4a63b0019e8fb38f79a95f72af27aaf5d621",
+      "order_index": 17,
+      "usage_present": true
+    },
+    {
+      "trace_id": "ctl-weekly-report-home-mixed",
+      "artifact_hash": "sha256:5f4ae5dfa156e67370a37ddeef1e6ca9adc903f7d4702dcf01016e2200b22406",
+      "order_index": 18,
+      "usage_present": true
+    },
+    {
+      "trace_id": "ctl-weekly-report-home-legacy",
+      "artifact_hash": "sha256:b2b6e760490877dc1d3f7aac161eb065870f7a88312bad077122f2ea7d3d1930",
+      "order_index": 19,
+      "usage_present": true
+    },
+    {
+      "trace_id": "ctl-runbook-tidy-legacy",
+      "artifact_hash": "sha256:4cbf10a7db57bd5a28586bb99f6e7e804f448bc4f34e243054069b0bdcc388c9",
+      "order_index": 20,
+      "usage_present": true
+    },
+    {
+      "trace_id": "ctl-runbook-tidy-mixed",
+      "artifact_hash": "sha256:b57bc296433aae5bdf31f79e3908cb2ea30fc80a2a7bf3c0cf351b5d1f1cf248",
+      "order_index": 21,
+      "usage_present": true
+    },
+    {
+      "trace_id": "join-ingest-token-audit-mixed",
+      "artifact_hash": "sha256:44ed1d2fe03b9dc4deccff5ea66ba0133af30c0a2d5d8b2ff9c61629abd76565",
+      "order_index": 22,
+      "usage_present": true
+    },
+    {
+      "trace_id": "join-ingest-token-audit-legacy",
+      "artifact_hash": "sha256:6fd761fb0e4e15eb07f6618f05a69224643d91b203f3b2e21882423be0847e0f",
+      "order_index": 23,
+      "usage_present": true
+    },
+    {
+      "trace_id": "stale-notifier-timeout-hook-legacy",
+      "artifact_hash": "sha256:741463a5c69fc8fd584e6c401ef4b40f9c50caae0c9c793b77304ee6bfd4cd1c",
+      "order_index": 24,
+      "usage_present": true
+    },
+    {
+      "trace_id": "stale-notifier-timeout-hook-mixed",
+      "artifact_hash": "sha256:d95bf0eaba3c71d02395e674cec712494cfad017b710e2226712ac57833b6069",
+      "order_index": 25,
+      "usage_present": true
+    },
+    {
+      "trace_id": "mem-export-bucket-region-mixed",
+      "artifact_hash": "sha256:d4f58f09a3cad9514304ea4c46c05002d4edc014fc3dfd43380760950d8a7cee",
+      "order_index": 26,
+      "usage_present": true
+    },
+    {
+      "trace_id": "mem-export-bucket-region-legacy",
+      "artifact_hash": "sha256:c34259ca4e4f335499c6afb6b5f8b31a1533aa47427133783153a885827630e7",
+      "order_index": 27,
+      "usage_present": true
+    },
+    {
+      "trace_id": "conv-ingest-token-late-legacy",
+      "artifact_hash": "sha256:b8f4d5765320181e43944a2c12ed3955974f1e94876832cded9ec5e72f6d49f4",
+      "order_index": 28,
+      "usage_present": true
+    },
+    {
+      "trace_id": "conv-ingest-token-late-mixed",
+      "artifact_hash": "sha256:0c0cab2689f41700927b27140ee597595d725e29177461d32cd631af77fd6534",
+      "order_index": 29,
+      "usage_present": true
+    },
+    {
+      "trace_id": "conv-pager-channel-recheck-mixed",
+      "artifact_hash": "sha256:aca608467f1d560cc2b661846a0795fafc873e14f7011d978bb78aea0ccc4d10",
+      "order_index": 30,
+      "usage_present": true
+    },
+    {
+      "trace_id": "conv-pager-channel-recheck-legacy",
+      "artifact_hash": "sha256:463a4509d8d8a237716879c8efa47a19f737e5a255c965916e5d3fae2868aeae",
+      "order_index": 31,
+      "usage_present": true
+    },
+    {
+      "trace_id": "mem-retention-floor-days-legacy",
+      "artifact_hash": "sha256:5ba08cd605d52605ae8b482eaa67ae314df344bbba95ba701d77321f396c88b3",
+      "order_index": 32,
+      "usage_present": true
+    },
+    {
+      "trace_id": "mem-retention-floor-days-mixed",
+      "artifact_hash": "sha256:381af2c43d3474089d81c24d69268592e3e3f415bdd8aebc0a35cb6d827e66cd",
+      "order_index": 33,
+      "usage_present": true
+    },
+    {
+      "trace_id": "chain-retain-sweep-iocap-mixed",
+      "artifact_hash": "sha256:4fbf79901911e879df2fe746a75f35c7c62ca6d888f0db23127046b71e342675",
+      "order_index": 34,
+      "usage_present": true
+    },
+    {
+      "trace_id": "chain-retain-sweep-iocap-legacy",
+      "artifact_hash": "sha256:480690336c375e9cb0551e57cb298763490377c16f76cafeaa6f339a9b8d2d98",
+      "order_index": 35,
+      "usage_present": true
+    },
+    {
+      "trace_id": "chain-listen-queue-drops-legacy",
+      "artifact_hash": "sha256:18a4a162dfa5e26a6eaaab6724d80a8d30aaf18b546a547cb5d046b3ea4420b2",
+      "order_index": 36,
+      "usage_present": true
+    },
+    {
+      "trace_id": "chain-listen-queue-drops-mixed",
+      "artifact_hash": "sha256:9b3e21a4bddbf6c1654526d4ae247cb5f6603c7b72d3aa5fe32f44a3d98ba201",
+      "order_index": 37,
+      "usage_present": true
+    },
+    {
+      "trace_id": "join-quarantine-policy-cap-mixed",
+      "artifact_hash": "sha256:a5dc2e066514e5a7d20427bab582c14fd26dd54fd500e14b4ffbaaed6bb13101",
+      "order_index": 38,
+      "usage_present": true
+    },
+    {
+      "trace_id": "join-quarantine-policy-cap-legacy",
+      "artifact_hash": "sha256:e355b99d3c362fb18f8486067b607153f89db0298b33f5b124aca7178f4d695b",
+      "order_index": 39,
+      "usage_present": true
+    },
+    {
+      "trace_id": "mem-collector-cert-rotate-legacy",
+      "artifact_hash": "sha256:b9c136e3ea7a4a2484c219fe2c4d7288037615faec49d4312ae97552318ae3f1",
+      "order_index": 40,
+      "usage_present": true
+    },
+    {
+      "trace_id": "mem-collector-cert-rotate-mixed",
+      "artifact_hash": "sha256:a2f59316336b6f36d69ddd98fc70c135a6a70fd231017dad06bce93c844ffd20",
+      "order_index": 41,
+      "usage_present": true
+    },
+    {
+      "trace_id": "chain-uplink-part-size-mixed",
+      "artifact_hash": "sha256:ea7ddf0b27418420478870e43c5ac2ad96c36fc39f3f21e5e06ea4a7cfff62a0",
+      "order_index": 42,
+      "usage_present": true
+    },
+    {
+      "trace_id": "chain-uplink-part-size-legacy",
+      "artifact_hash": "sha256:79268d4fe663441d789edbf075cf9d06a20a7e23b569df66ed4b4d69f10036c3",
+      "order_index": 43,
+      "usage_present": true
+    },
+    {
+      "trace_id": "chain-merge-fanin-lock-legacy",
+      "artifact_hash": "sha256:e7392df1dec8f5a4155b62b48b5278fa24684129051feea783607f5edc4cc044",
+      "order_index": 44,
+      "usage_present": true
+    },
+    {
+      "trace_id": "chain-merge-fanin-lock-mixed",
+      "artifact_hash": "sha256:b3b1634d5c1b5fcb4a67065fb0ed896b6bc9d45b25f8a8ca3b5c58e53f341c1f",
+      "order_index": 45,
+      "usage_present": true
+    },
+    {
+      "trace_id": "mem-alert-mute-window-mixed",
+      "artifact_hash": "sha256:3d18e1a3bd65c636a73148ff0476b5b4f6be9b3dfd0f280963f6786006284ece",
+      "order_index": 46,
+      "usage_present": true
+    },
+    {
+      "trace_id": "mem-alert-mute-window-legacy",
+      "artifact_hash": "sha256:fd64a6856482d999e4507eca70337727625951c3aa48954dcfd972d4cca724b0",
+      "order_index": 47,
+      "usage_present": true
+    },
+    {
+      "trace_id": "stale-wal-segment-ingest-legacy",
+      "artifact_hash": "sha256:19ed4a65393c8691c39f1d80e3663409d28565b74efeff0795de2255e65f87e5",
+      "order_index": 48,
+      "usage_present": true
+    },
+    {
+      "trace_id": "stale-wal-segment-ingest-mixed",
+      "artifact_hash": "sha256:fa21ca203d9bba878fe820bcb8fe6222c00ae4ce064a1636fefd495bad0e4172",
+      "order_index": 49,
+      "usage_present": true
+    },
+    {
+      "trace_id": "mem-replay-cursor-mixed",
+      "artifact_hash": "sha256:0b80a6cb867ec9f71e3e0c87a4e2100ce6cf5454e31a9c71f27e3745f9dc4656",
+      "order_index": 50,
+      "usage_present": true
+    },
+    {
+      "trace_id": "mem-replay-cursor-legacy",
+      "artifact_hash": "sha256:0b0250ddb0b05628491e7d2a65588b8053c5698cbd64140e65061341359738b0",
+      "order_index": 51,
+      "usage_present": true
+    },
+    {
+      "trace_id": "join-alert-debounce-legacy",
+      "artifact_hash": "sha256:59f640c1d850fffa2e7398de2088dd761b154df51506aa1f3a27b06aed0bbd53",
+      "order_index": 52,
+      "usage_present": true
+    },
+    {
+      "trace_id": "join-alert-debounce-mixed",
+      "artifact_hash": "sha256:ae70fa3d1703598b99449ff76a1fa39cb85a315ff6efec33ee7912e6f2246b48",
+      "order_index": 53,
+      "usage_present": true
+    },
+    {
+      "trace_id": "stale-probe-timeout-core-mixed",
+      "artifact_hash": "sha256:a774571409957af9f2112d0cfb26a2647a912e238d838c322a5fb3a359c25b7c",
+      "order_index": 54,
+      "usage_present": true
+    },
+    {
+      "trace_id": "stale-probe-timeout-core-legacy",
+      "artifact_hash": "sha256:a889e4a9413d494bfc00f124196b737dfd8387905cb81be7a1dae46595ebf38f",
+      "order_index": 55,
+      "usage_present": true
+    },
+    {
+      "trace_id": "join-ingest-token-legacy",
+      "artifact_hash": "sha256:59744ecb036b0916a9584a8e82a9a7669a985f565d28f85e472fd652f59b531a",
+      "order_index": 56,
+      "usage_present": true
+    },
+    {
+      "trace_id": "join-ingest-token-mixed",
+      "artifact_hash": "sha256:6d48e6f5e044651eeb29c80700c9d2eef10dbb055ad38507c7bb7f40407c8a10",
+      "order_index": 57,
+      "usage_present": true
+    },
+    {
+      "trace_id": "conv-collector-heartbeat-gap-mixed",
+      "artifact_hash": "sha256:d899b67efaa33893689100636d0662883e23923c6a72153f10624ab798adb167",
+      "order_index": 58,
+      "usage_present": true
+    },
+    {
+      "trace_id": "conv-collector-heartbeat-gap-legacy",
+      "artifact_hash": "sha256:4a3be00863abddcf1bb155539807e77c94642b9bbedde36dbdc5a58f8d21ed68",
+      "order_index": 59,
+      "usage_present": true
+    },
+    {
+      "trace_id": "conv-spool-flush-fleet-legacy",
+      "artifact_hash": "sha256:a3b1abb12c7e37ca926db7d12da0fabe0e46604ba3406ad1e7d87efc5f191431",
+      "order_index": 60,
+      "usage_present": true
+    },
+    {
+      "trace_id": "conv-spool-flush-fleet-mixed",
+      "artifact_hash": "sha256:d5bfcc55fb2fc4c82eab4395a053a2d6d73c5c2850b7ae8e1351f7664fb2dc8f",
+      "order_index": 61,
+      "usage_present": true
+    },
+    {
+      "trace_id": "stale-backfill-chunk-replay-mixed",
+      "artifact_hash": "sha256:77cddc2a132678b8da7c162a3f3d352a9cd8a4ddaee4689429ace7ee845522ca",
+      "order_index": 62,
+      "usage_present": true
+    },
+    {
+      "trace_id": "stale-backfill-chunk-replay-legacy",
+      "artifact_hash": "sha256:49541dd02a5cae7989b8fdc41616dfe5c36f4e4d0b42d48d2eef16ee252b5424",
+      "order_index": 63,
+      "usage_present": true
+    },
+    {
+      "trace_id": "conv-replay-throttle-plan-legacy",
+      "artifact_hash": "sha256:6bc2033ace71c7663bb8416d306cbe9c9a45db0eeefff240e4474bba1b6c18df",
+      "order_index": 64,
+      "usage_present": true
+    },
+    {
+      "trace_id": "conv-replay-throttle-plan-mixed",
+      "artifact_hash": "sha256:1dfe18ed7f139f94f669087d94d5a08932101bf311d769e9d51b13915e27f77e",
+      "order_index": 65,
+      "usage_present": true
+    },
+    {
+      "trace_id": "stale-gossip-interval-mesh-mixed",
+      "artifact_hash": "sha256:c28cf6bd5ea52d66b78bbe1b3683e58b74c6d442b1521b476e1831eb132731f4",
+      "order_index": 66,
+      "usage_present": true
+    },
+    {
+      "trace_id": "stale-gossip-interval-mesh-legacy",
+      "artifact_hash": "sha256:9df5368ee612815dd209b6f59481e872fe62a6c346a4475b7e24938b9b80fef2",
+      "order_index": 67,
+      "usage_present": true
+    },
+    {
+      "trace_id": "mem-export-bucket-layout-legacy",
+      "artifact_hash": "sha256:8671941e3ddc354137d7d2d17395d76a444d5f7affbcc0846d14c92894c76475",
+      "order_index": 68,
+      "usage_present": true
+    },
+    {
+      "trace_id": "mem-export-bucket-layout-mixed",
+      "artifact_hash": "sha256:74d14bf03d556b372ab6d3dccbc323a50eac7260a77daf06219d64a1ae3f5910",
+      "order_index": 69,
+      "usage_present": true
+    },
+    {
+      "trace_id": "chain-uplink-verify-mixed",
+      "artifact_hash": "sha256:6a2646e8a68e517b3a4e02782d74159acae81d34b693b0f614ee500450ee1233",
+      "order_index": 70,
+      "usage_present": true
+    },
+    {
+      "trace_id": "chain-uplink-verify-legacy",
+      "artifact_hash": "sha256:ec8ab64c10f469e5a752d1deba9fc5e59bb74e51071cb37c4d082adbb6b41025",
+      "order_index": 71,
+      "usage_present": true
+    },
+    {
+      "trace_id": "conv-spool-flush-early-legacy",
+      "artifact_hash": "sha256:c925c2c165684bd1dd91701a665d8c36101745147552d1ddb6aea501b054d6f5",
+      "order_index": 72,
+      "usage_present": true
+    },
+    {
+      "trace_id": "conv-spool-flush-early-mixed",
+      "artifact_hash": "sha256:839d17a70d0a9cfcb33715875e97487cb774095dbfb25d3b73bf7010f65e75fe",
+      "order_index": 73,
+      "usage_present": true
+    },
+    {
+      "trace_id": "stale-spool-cap-mixed",
+      "artifact_hash": "sha256:9e9b2c551ff7398f0ae87feaa817f0f15534cc6ce5e6f667c9de5dd47567b2b4",
+      "order_index": 74,
+      "usage_present": true
+    },
+    {
+      "trace_id": "stale-spool-cap-legacy",
+      "artifact_hash": "sha256:93420e09f7eb66cf382641b2a191787210c5362c49e7349e30a141e5fe4f0e73",
+      "order_index": 75,
+      "usage_present": true
+    },
+    {
+      "trace_id": "stale-spool-edge-cap-legacy",
+      "artifact_hash": "sha256:3df1c07eb5435b81e9a447c23d0c53164ff3d71d1830413be47f96f820c073c0",
+      "order_index": 76,
+      "usage_present": true
+    },
+    {
+      "trace_id": "stale-spool-edge-cap-mixed",
+      "artifact_hash": "sha256:050f690ce7d2de7e551c2c7aa429f11996aa4b7fb70930a9f33b48a9425f0f5d",
+      "order_index": 77,
+      "usage_present": true
+    },
+    {
+      "trace_id": "mem-replay-throttle-mixed",
+      "artifact_hash": "sha256:2c03018c22e9d7efaa446bc347433c43d0f85c0da5cee4917a6051199c96cd30",
+      "order_index": 78,
+      "usage_present": true
+    },
+    {
+      "trace_id": "mem-replay-throttle-legacy",
+      "artifact_hash": "sha256:dddeade86ae87e39f5736f5309e268853d7d5a67022c9876493efd14721c1fd2",
+      "order_index": 79,
+      "usage_present": true
+    },
+    {
+      "trace_id": "stale-notifier-timeout-page-legacy",
+      "artifact_hash": "sha256:79c540fdb43a640cf8c43eb5e4d852d758a9f42c4aad23b8557005a339e8e497",
+      "order_index": 80,
+      "usage_present": true
+    },
+    {
+      "trace_id": "stale-notifier-timeout-page-mixed",
+      "artifact_hash": "sha256:559be63e8f6ac53357e86cd58bc727d54bda7ee4e4d2e278ca22ba265c8ddf3b",
+      "order_index": 81,
+      "usage_present": true
+    },
+    {
+      "trace_id": "mem-spool-sweep-interval-mixed",
+      "artifact_hash": "sha256:ac964f93d37a60d1b6eab16cbd4382f367fbce6f19b3726fba72b1b1b3006547",
+      "order_index": 82,
+      "usage_present": true
+    },
+    {
+      "trace_id": "mem-spool-sweep-interval-legacy",
+      "artifact_hash": "sha256:5368a4b3f967172aa89e14a40d157435031489722987406f63a33439b2405a50",
+      "order_index": 83,
+      "usage_present": true
+    },
+    {
+      "trace_id": "join-checkpoint-cycle-freeze-legacy",
+      "artifact_hash": "sha256:d145622c24e10488ecf0e18260405bc91cf37a3659401cc50fd6bb877eacf816",
+      "order_index": 84,
+      "usage_present": true
+    },
+    {
+      "trace_id": "join-checkpoint-cycle-freeze-mixed",
+      "artifact_hash": "sha256:d232ada03d390428010e75ef7bed4bbf2592b3b00fec6bce13c1f2e92a4e3fda",
+      "order_index": 85,
+      "usage_present": true
+    },
+    {
+      "trace_id": "join-alert-debounce-pager-mixed",
+      "artifact_hash": "sha256:9846361927816c430043c53e61222b627c4654b2f3206b6c94639df4c0b8bcff",
+      "order_index": 86,
+      "usage_present": true
+    },
+    {
+      "trace_id": "join-alert-debounce-pager-legacy",
+      "artifact_hash": "sha256:d71923ecd97fa5df442945ad3e4c89c5a57c20291dcdc5fcf79df179fbc7d9cf",
+      "order_index": 87,
+      "usage_present": true
+    },
+    {
+      "trace_id": "stale-gossip-interval-edge-legacy",
+      "artifact_hash": "sha256:c9d764d4e5861aee72bdff755cd790b4cf6b40a0aff5c6f4abc6cf4f86708320",
+      "order_index": 88,
+      "usage_present": true
+    },
+    {
+      "trace_id": "stale-gossip-interval-edge-mixed",
+      "artifact_hash": "sha256:d445d6b0a986a822a793e875ee949b643c4b317a7f10590c3778f1c547c44d26",
+      "order_index": 89,
+      "usage_present": true
+    },
+    {
+      "trace_id": "stale-backfill-chunk-index-mixed",
+      "artifact_hash": "sha256:be10f4cac8fe8d5c98a6235fe198883deb0043531d8695609125c4428ac24db8",
+      "order_index": 90,
+      "usage_present": true
+    },
+    {
+      "trace_id": "stale-backfill-chunk-index-legacy",
+      "artifact_hash": "sha256:b5a68fcbb7af02981692e4a91e2d6ea8417cb4792bf5cc79fa66d07774a3d246",
+      "order_index": 91,
+      "usage_present": true
+    },
+    {
+      "trace_id": "chain-spill-drain-rate-legacy",
+      "artifact_hash": "sha256:1a1df112345da0430dbee8823705757079061c5fbfbe6325f6439e973dc7a57b",
+      "order_index": 92,
+      "usage_present": true
+    },
+    {
+      "trace_id": "chain-spill-drain-rate-mixed",
+      "artifact_hash": "sha256:36e6886fdcfa58d4cbb1ff52b23cbf6036777c22062b66ad0f867f21a78b2832",
+      "order_index": 93,
+      "usage_present": true
+    },
+    {
+      "trace_id": "conv-replay-throttle-confirm-mixed",
+      "artifact_hash": "sha256:79456cdbc54fa88168cecd9e326919b20c945c479456969c228abd23939e6200",
+      "order_index": 94,
+      "usage_present": true
+    },
+    {
+      "trace_id": "conv-replay-throttle-confirm-legacy",
+      "artifact_hash": "sha256:a0bc6775eeda1341ae988bdfa7aff365c68bcad87dbf6234f3e858abb67b993e",
+      "order_index": 95,
+      "usage_present": true
+    },
+    {
+      "trace_id": "join-dedupe-window-fleet-legacy",
+      "artifact_hash": "sha256:a80f257478b6dc877c92859a873ff0f1f8c4e6f11ce737baad1e7ef43a131968",
+      "order_index": 96,
+      "usage_present": true
+    },
+    {
+      "trace_id": "join-dedupe-window-fleet-mixed",
+      "artifact_hash": "sha256:c938b79eebe2360145aa751c52f621f04dc253c47454802c83a6dc2f4a1da5a8",
+      "order_index": 97,
+      "usage_present": true
+    },
+    {
+      "trace_id": "conv-ingest-token-recheck-mixed",
+      "artifact_hash": "sha256:0fb4ca0a746709146afe32fe0462e7450ecd3040bc6eb01c0f6810a8ed446e76",
+      "order_index": 98,
+      "usage_present": true
+    },
+    {
+      "trace_id": "conv-ingest-token-recheck-legacy",
+      "artifact_hash": "sha256:f156ec366768754df5548c8103b16aea6dc280f7b5d761889a8435e8ea12e7e3",
+      "order_index": 99,
+      "usage_present": true
+    },
+    {
+      "trace_id": "conv-tenant-rate-floor-legacy",
+      "artifact_hash": "sha256:2dfaf4884371a7723dbf34bb1ee5cb9abd42745be224530e6daed2c8a1dbc52d",
+      "order_index": 100,
+      "usage_present": true
+    },
+    {
+      "trace_id": "conv-tenant-rate-floor-mixed",
+      "artifact_hash": "sha256:fde1df704ac8cf381ca76e553c575eb74e3d6b504a985da1f98f6ec5c036b584",
+      "order_index": 101,
+      "usage_present": true
+    },
+    {
+      "trace_id": "mem-alert-mute-scope-mixed",
+      "artifact_hash": "sha256:3d8fe9957ab719bc5e1a17869f32c39188230c7501e513696328a67e888d9c4e",
+      "order_index": 102,
+      "usage_present": true
+    },
+    {
+      "trace_id": "mem-alert-mute-scope-legacy",
+      "artifact_hash": "sha256:1916b892194846ca558de528ebb88ba059963b08a6278f3d8a83a0c4ad119684",
+      "order_index": 103,
+      "usage_present": true
+    },
+    {
+      "trace_id": "join-quarantine-policy-redrive-legacy",
+      "artifact_hash": "sha256:8600070b88ded95e21558a4ec087624898a5246f8e4340ca76121b103bf47f53",
+      "order_index": 104,
+      "usage_present": true
+    },
+    {
+      "trace_id": "join-quarantine-policy-redrive-mixed",
+      "artifact_hash": "sha256:b414a725ca1f77f89832ad1ba80623517eb471c5b8c24e52d53a1fb465079c2c",
+      "order_index": 105,
+      "usage_present": true
+    },
+    {
+      "trace_id": "stale-fanout-webhook-mixed",
+      "artifact_hash": "sha256:0ad377a9acf3ea78ef07b1f63814f1167d1f058be9c5af6d7376c5ed0b3d91d1",
+      "order_index": 106,
+      "usage_present": true
+    },
+    {
+      "trace_id": "stale-fanout-webhook-legacy",
+      "artifact_hash": "sha256:08f36f1d5c4f38c3eed2fb85f9600f10258c0ed1e12dd2c4c840b71c250b403a",
+      "order_index": 107,
+      "usage_present": true
+    },
+    {
+      "trace_id": "stale-probe-timeout-edge-legacy",
+      "artifact_hash": "sha256:7dfc254105404abce36ffce457cf1a5045c0198dc841b8b3f27461c29561eb34",
+      "order_index": 108,
+      "usage_present": true
+    },
+    {
+      "trace_id": "stale-probe-timeout-edge-mixed",
+      "artifact_hash": "sha256:be1933b19b2dbdcedf32f085ed5f0a00fe9f4af41e1ce162a16f7b9ed2df2387",
+      "order_index": 109,
+      "usage_present": true
+    },
+    {
+      "trace_id": "conv-tenant-rate-settle-mixed",
+      "artifact_hash": "sha256:073763da0e380dcd8a4a1fdb0007ffeb5b8463f93c53a93e6a5b37cef75030f8",
+      "order_index": 110,
+      "usage_present": true
+    },
+    {
+      "trace_id": "conv-tenant-rate-settle-legacy",
+      "artifact_hash": "sha256:57daecc7f6fb2081f9a0cbc4e8fc1cacf0e3f150ff1f5d6280956996d4c87498",
+      "order_index": 111,
+      "usage_present": true
+    },
+    {
+      "trace_id": "ctl-review-slot-legacy",
+      "artifact_hash": "sha256:7c3a4a824948fef961e5c22da2daaeee4ff3b38d0adda3c87080d4f1e8b8b85f",
+      "order_index": 112,
+      "usage_present": true
+    },
+    {
+      "trace_id": "ctl-review-slot-mixed",
+      "artifact_hash": "sha256:c1851badcc3f20765077ba0d6c291af8f29447b8372df76be5a028e289c103e8",
+      "order_index": 113,
+      "usage_present": true
+    },
+    {
+      "trace_id": "chain-merge-fanin-flash-mixed",
+      "artifact_hash": "sha256:2ba1b30b6b91685e536c2d2aab2ad0fd171c60e502b1df840f092eb1b65b52aa",
+      "order_index": 114,
+      "usage_present": true
+    },
+    {
+      "trace_id": "chain-merge-fanin-flash-legacy",
+      "artifact_hash": "sha256:2ae09308ace71a4c5b11d93086bcb8166c7217414da207c15099bb1ac426b37e",
+      "order_index": 115,
+      "usage_present": true
+    },
+    {
+      "trace_id": "chain-retain-sweep-legacy",
+      "artifact_hash": "sha256:90ea2efe43ef61493ad408981bacd610631d6c554805b1cdc4303f02f033041a",
+      "order_index": 116,
+      "usage_present": true
+    },
+    {
+      "trace_id": "chain-retain-sweep-mixed",
+      "artifact_hash": "sha256:0622aeb414794e46bf6f002b2c23fcea2d26dc946fddcfa31085d6cca78b5559",
+      "order_index": 117,
+      "usage_present": true
+    },
+    {
+      "trace_id": "join-export-window-mixed",
+      "artifact_hash": "sha256:cba8f3a900b8ea471adf4d0770936b530d9e8bbeb9a35f6b33ef2eaafdb2cb1a",
+      "order_index": 118,
+      "usage_present": true
+    },
+    {
+      "trace_id": "join-export-window-legacy",
+      "artifact_hash": "sha256:a16b708e26f79438131d8c3ad0a0c98027ebeecd2ab1905bdd00d5b76d8fcb57",
+      "order_index": 119,
+      "usage_present": true
+    },
+    {
+      "trace_id": "mem-ingest-token-legacy",
+      "artifact_hash": "sha256:64eb35945ab1b2d3f94847681dc342b5b23cd48867b46abed07a96259ffecddf",
+      "order_index": 120,
+      "usage_present": true
+    },
+    {
+      "trace_id": "mem-ingest-token-mixed",
+      "artifact_hash": "sha256:7a0b2dde4d7279ee6d63d59bae29b69563552625077f1206f0817822550ec125",
+      "order_index": 121,
+      "usage_present": true
+    },
+    {
+      "trace_id": "join-export-window-lag-mixed",
+      "artifact_hash": "sha256:4cc83ef7f1294a35a9fcd35b798a6b910a6f02fbfa5aa227f4ca7d75694788db",
+      "order_index": 122,
+      "usage_present": true
+    },
+    {
+      "trace_id": "join-export-window-lag-legacy",
+      "artifact_hash": "sha256:4bea516cc3a9274b9a0b18d48e1f03b1ee90693ffdeaaaa32d92ab1f4b0a1cc1",
+      "order_index": 123,
+      "usage_present": true
+    },
+    {
+      "trace_id": "chain-drift-window-baseline-legacy",
+      "artifact_hash": "sha256:d8261e71f30741aa56e0fac1b71194955288b1b0fe6b3a22a6a9fa50a97b00fb",
+      "order_index": 124,
+      "usage_present": true
+    },
+    {
+      "trace_id": "chain-drift-window-baseline-mixed",
+      "artifact_hash": "sha256:1c9bcc4790dc37d871ab09667b77e6a08153e7134c86233f40c5b4ef15831c44",
+      "order_index": 125,
+      "usage_present": true
+    },
+    {
+      "trace_id": "chain-retain-quota-mixed",
+      "artifact_hash": "sha256:15d4dec53092246a3891537b2cc897a4ef6f6f9b99d381dd75198f765dde73b3",
+      "order_index": 126,
+      "usage_present": true
+    },
+    {
+      "trace_id": "chain-retain-quota-legacy",
+      "artifact_hash": "sha256:9e88dba6eea39f6916e16f4498682d2a03d2e175d486c39265a46b9f1d7c313f",
+      "order_index": 127,
+      "usage_present": true
+    },
+    {
+      "trace_id": "conv-export-cutover-freeze-legacy",
+      "artifact_hash": "sha256:ae174f43cf3cc6394ea444c342f0843024c3c17331666e1bf4ff0c1ce72f8d3a",
+      "order_index": 128,
+      "usage_present": true
+    },
+    {
+      "trace_id": "conv-export-cutover-freeze-mixed",
+      "artifact_hash": "sha256:c5c5889af083385a2cdab6f960054186265d257d59a5e528e12d41967295b88f",
+      "order_index": 129,
+      "usage_present": true
+    },
+    {
+      "trace_id": "mem-spool-sweep-scope-mixed",
+      "artifact_hash": "sha256:04df98de4c11371f43393e78b96c99ba599a84c357e18907b92b0b08f88d234a",
+      "order_index": 130,
+      "usage_present": true
+    },
+    {
+      "trace_id": "mem-spool-sweep-scope-legacy",
+      "artifact_hash": "sha256:717c57be0ab7072db009d0953979645b948624d791b3618019d397c26455825c",
+      "order_index": 131,
+      "usage_present": true
+    },
+    {
+      "trace_id": "mem-retention-floor-audit-legacy",
+      "artifact_hash": "sha256:d160967673fc68f6f039b9779b8124d65eec4ed516dee28af676cd8f19cc321f",
+      "order_index": 132,
+      "usage_present": true
+    },
+    {
+      "trace_id": "mem-retention-floor-audit-mixed",
+      "artifact_hash": "sha256:453c48461082534ab636628caac0226b0dc900ec9c935a35eaea622ca6c2356c",
+      "order_index": 133,
+      "usage_present": true
+    },
+    {
+      "trace_id": "join-dedupe-window-edge-mixed",
+      "artifact_hash": "sha256:3fed2f6f6b3d0bf808202da85c6252c7a471674bcc7627afe3d9576cb4f8c582",
+      "order_index": 134,
+      "usage_present": true
+    },
+    {
+      "trace_id": "join-dedupe-window-edge-legacy",
+      "artifact_hash": "sha256:555aec1befdd10741286b4fbe196826b6d604fa4c5854a16eb93fbe98d44d47a",
+      "order_index": 135,
+      "usage_present": true
+    },
+    {
+      "trace_id": "chain-retain-quota-refill-legacy",
+      "artifact_hash": "sha256:0dee654798ed180b75346f4a17c837b7c103b88231614f34f3530476edaf0c58",
+      "order_index": 136,
+      "usage_present": true
+    },
+    {
+      "trace_id": "chain-retain-quota-refill-mixed",
+      "artifact_hash": "sha256:9ce8aebb866d6a19ea0d9a660246198cd97e8da7e4f8f3867c68fa38eaf801a0",
+      "order_index": 137,
+      "usage_present": true
+    },
+    {
+      "trace_id": "join-downsample-tier-default-mixed",
+      "artifact_hash": "sha256:741c2da03d06a648bf8d6f457e56c8a3b1ce587511faffa3a3dbb984decdc042",
+      "order_index": 138,
+      "usage_present": true
+    },
+    {
+      "trace_id": "join-downsample-tier-default-legacy",
+      "artifact_hash": "sha256:46261a3514f59c63f2af16012cfd470fbf6434af57fa2ee18c3f2cdef955c190",
+      "order_index": 139,
+      "usage_present": true
+    },
+    {
+      "trace_id": "conv-export-cutover-plan-legacy",
+      "artifact_hash": "sha256:773ba9f6962c476fcfd9bc8ef04edfb304e2cf6aa9303571e16955e7ad34df34",
+      "order_index": 140,
+      "usage_present": true
+    },
+    {
+      "trace_id": "conv-export-cutover-plan-mixed",
+      "artifact_hash": "sha256:84e8db052290e2ac0ca01e2b5eb7e8aa3d7854852dd9b3ae6ae4e960cd1e6d2c",
+      "order_index": 141,
+      "usage_present": true
+    },
+    {
+      "trace_id": "chain-spill-quota-cap-mixed",
+      "artifact_hash": "sha256:3636a9e040e6c627df0a26963278284dd9da98eec9a4ed36bb56d957c38490dd",
+      "order_index": 142,
+      "usage_present": true
+    },
+    {
+      "trace_id": "chain-spill-quota-cap-legacy",
+      "artifact_hash": "sha256:44ce5caf5988ba833dd3b07a3749c662f198eb7140d4f38691eeaa6dacc5deba",
+      "order_index": 143,
+      "usage_present": true
+    },
+    {
+      "trace_id": "chain-listen-queue-depth-legacy",
+      "artifact_hash": "sha256:ff74d814fb0782f2d9a58e251c237ac75c40d218657e2b0fd4e21c37529613aa",
+      "order_index": 144,
+      "usage_present": true
+    },
+    {
+      "trace_id": "chain-listen-queue-depth-mixed",
+      "artifact_hash": "sha256:0eb13df91c6ef0aa6bb9d13f68dc330b3009c1d99ab23eb25eb3ecbc5d3ef21d",
+      "order_index": 145,
+      "usage_present": true
+    },
+    {
+      "trace_id": "ctl-incident-archive-mixed",
+      "artifact_hash": "sha256:0ba0e38e1a6b60cde22d85616ed7d1826f34b539d27e0e2b271f4285785a60e9",
+      "order_index": 146,
+      "usage_present": true
+    },
+    {
+      "trace_id": "ctl-incident-archive-legacy",
+      "artifact_hash": "sha256:8b7fbf2d2f655750d3d3168cdde28ef25eca8f3f1c565bdcfd57641bdecdab04",
+      "order_index": 147,
+      "usage_present": true
+    },
+    {
+      "trace_id": "join-downsample-tier-raw-legacy",
+      "artifact_hash": "sha256:bf6b17d391fddfa514dd02524f54823dadf88059cdb932818a0be6068641f158",
+      "order_index": 148,
+      "usage_present": true
+    },
+    {
+      "trace_id": "join-downsample-tier-raw-mixed",
+      "artifact_hash": "sha256:b730dc422585ef807a91a2299087b427cd565a4e941a1c74234f831cb3773a87",
+      "order_index": 149,
+      "usage_present": true
+    },
+    {
+      "trace_id": "join-checkpoint-cycle-plan-mixed",
+      "artifact_hash": "sha256:41ccda2c6227a1849ad671599f31e36589720e1383714b56ca8888a6f9eee6c2",
+      "order_index": 150,
+      "usage_present": true
+    },
+    {
+      "trace_id": "join-checkpoint-cycle-plan-legacy",
+      "artifact_hash": "sha256:1ec976e2d7cbfca08b8a0731ab1acfe7a48efb71d984ac26570b9107d9d4eb2b",
+      "order_index": 151,
+      "usage_present": true
+    },
+    {
+      "trace_id": "chain-listen-queue-depth-topline",
+      "artifact_hash": "sha256:7d0902295f51fd13621961e65ec87507965f9b965545dad1dda24dd19889c6bb",
+      "order_index": 152,
+      "usage_present": true
+    },
+    {
+      "trace_id": "chain-retain-sweep-topline",
+      "artifact_hash": "sha256:f26fa4a45535119c371900e315bd0935102466ed86b1d1cf9af4b7d0baec41bb",
+      "order_index": 153,
+      "usage_present": true
+    },
+    {
+      "trace_id": "conv-pager-channel-mid-topline",
+      "artifact_hash": "sha256:cbdfa9e5bb5bbf2ad9711f052b594eebf60a2bbebec65f00156922a38e73dab2",
+      "order_index": 154,
+      "usage_present": true
+    },
+    {
+      "trace_id": "conv-spool-flush-early-topline",
+      "artifact_hash": "sha256:ce7e806aaf98b8c4238f0fa29534d3dfbfbe9de1a6c6340ab40796a08914f5aa",
+      "order_index": 155,
+      "usage_present": true
+    },
+    {
+      "trace_id": "conv-tenant-rate-floor-topline",
+      "artifact_hash": "sha256:f3a7dbc4408f809835bd0eba60bdc0b19ffe1e16c9b495445b10263e368eb4b4",
+      "order_index": 156,
+      "usage_present": true
+    },
+    {
+      "trace_id": "join-alert-debounce-topline",
+      "artifact_hash": "sha256:040689b217839d1b094c003ba860ed9b6af51392cefcbeab1119b72eae6433f4",
+      "order_index": 157,
+      "usage_present": true
+    },
+    {
+      "trace_id": "join-export-window-topline",
+      "artifact_hash": "sha256:b843b50c3e2a1ce39df21bbcbb95c8ec4221cc27ce25be51a9d33d80c66df696",
+      "order_index": 158,
+      "usage_present": true
+    },
+    {
+      "trace_id": "join-ingest-token-topline",
+      "artifact_hash": "sha256:1225ca13e67805b4bc4fa0128419966b7ff674dece916c5209ce483537cc35b7",
+      "order_index": 159,
+      "usage_present": true
+    },
+    {
+      "trace_id": "mem-ingest-token-topline",
+      "artifact_hash": "sha256:7491a91d5c8ee96d708b97b0b7e3843501038dafdf79ce4dfcf6fba78a12b73b",
+      "order_index": 160,
+      "usage_present": true
+    },
+    {
+      "trace_id": "mem-replay-cursor-topline",
+      "artifact_hash": "sha256:62048d9c87c4ea565837030071b84322a5ea7a98535fa3c554171b4d19b30120",
+      "order_index": 161,
+      "usage_present": true
+    },
+    {
+      "trace_id": "stale-probe-timeout-core-topline",
+      "artifact_hash": "sha256:5b82f4f76c6b42febcaa6f9eff51ca34948a92121052ebe2cb3e9840a1a88269",
+      "order_index": 162,
+      "usage_present": true
+    },
+    {
+      "trace_id": "stale-wal-segment-index-topline",
+      "artifact_hash": "sha256:107af078d210504a6eee2fe25eeaef15d4489df6bdb1f118b6611dbf8c159c1c",
+      "order_index": 163,
+      "usage_present": true
+    }
+  ]
+}

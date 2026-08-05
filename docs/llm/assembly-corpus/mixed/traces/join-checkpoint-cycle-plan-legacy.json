@@ -1,0 +1,66 @@
+{
+  "id": "join-checkpoint-cycle-plan-legacy",
+  "source": "assembly-corpus-mixed",
+  "captured_at": "0001-01-01T00:00:00Z",
+  "system": "You are the driftwatch assistant. driftwatch is a self-hosted telemetry ingest and alerting daemon. Answer using only the provided conversation, memory records, and retrieved context.",
+  "tools": null,
+  "turns": [
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "id": "c2",
+          "name": "retrieve",
+          "arguments": {
+            "query": "collector checkpoint cadence",
+            "k": 3
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "content": "### source: \"internal/collector/checkpoint.go\"\npurpose: Collector checkpoint cadence: code default flush interval bounding crash replay.\noverview: checkpoint.go flushes collector cursor state on a fixed code-default cadence so crash replay is bounded from the last checkpoint, and a failed flush safely leaves the older checkpoint in place.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n--- source: \"internal/collector/checkpoint.go\" (lines 1-33, similarity: 1.00) ---\n1| package collector\n2| \n3| import (\n4| \t\"context\"\n5| \t\"time\"\n6| )\n7| \n8| // checkpointEvery is the code default cadence for flushing the\n9| // collector's in-memory cursor state to disk. Checkpoints bound crash\n10| // replay: on restart the collector replays segments from the last\n11| // checkpoint forward, so the cadence trades steady-state write cost\n12| // against worst-case recovery work.\n13| // Early builds checkpointed every 30 seconds; the write-cost work\n14| // landed the cadence below.\n15| const checkpointEvery = 4 * time.Minute\n16| \n17| // loop flushes cursor state on the cadence until ctx ends. A flush\n18| // that fails leaves the previous checkpoint in place; replay is\n19| // correct from any older checkpoint, merely slower.\n20| func (c *Collector) loop(ctx context.Context) {\n21| \tt := time.NewTicker(checkpointEvery)\n22| \tdefer t.Stop()\n23| \tfor {\n24| \t\tselect {\n25| \t\tcase \u003c-ctx.Done():\n26| \t\t\treturn\n27| \t\tcase \u003c-t.C:\n28| \t\t\tif err := c.flush(); err != nil {\n29| \t\t\t\tc.metrics.flushFailures.Inc()\n30| \t\t\t}\n31| \t\t}\n32| \t}\n33| }\n\n### source: \"internal/collector/replay.go\"\npurpose: Crash replay: segment walk from the last checkpoint, idempotent by dedupe.\noverview: replay.go restores collector state by walking segments from the last checkpoint forward, relying on downstream dedupe so a torn checkpoint costs replay time rather than correctness.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n--- source: \"internal/collector/replay.go\" (lines 1-20, similarity: 1.00) ---\n1| package collector\n2| \n3| // replay walks segments from the last checkpoint forward on restart,\n4| // skipping batches the cursor already acknowledged. Replay is\n5| // idempotent by construction: an acknowledged batch replayed twice is\n6| // dropped by the dedupe layer downstream, so a torn checkpoint can\n7| // only cost time, never correctness.\n8| func (c *Collector) replay() error {\n9| \tcp, err := c.lastCheckpoint()\n10| \tif err != nil {\n11| \t\treturn err\n12| \t}\n13| \tfor seg := cp.segment; seg \u003c= c.head(); seg++ {\n14| \t\tif err := c.replaySegment(seg, cp.offset); err != nil {\n15| \t\t\treturn err\n16| \t\t}\n17| \t\tcp.offset = 0\n18| \t}\n19| \treturn nil\n20| }\n\n### source: \"docs/collector.md\"\npurpose: Collector guide: cursor checkpoints, crash replay, fleet leases.\noverview: collector.md covers the collector's shipping loop, disk-flushed cursor checkpoints that bound crash replay, and lease-based fleet updates with loud expiry.\nlanguage: markdown\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n--- source: \"docs/collector.md\" (lines 1-18, similarity: 1.00) ---\n1| # driftwatch collector\n2| \n3| The collector tails local telemetry sources, batches them, and ships\n4| batches to the ingest edge. Cursor state marks how far each source\n5| has been shipped.\n6| \n7| ## Checkpoints and recovery\n8| \n9| Cursor state lives in memory and is flushed to disk on a fixed\n10| cadence. After a crash the collector replays from the last checkpoint\n11| forward; recovery time is bounded by the cadence times the segment\n12| fill rate, which is exactly the trade the cadence constant encodes.\n13| \n14| ## Fleet management\n15| \n16| Collectors self-update under a lease. A lease that expires without\n17| renewal freezes the collector on its current build, which is safe but\n18| drifts; lease expiry alarms exist so drift is loud.\n",
+      "tool_call_id": "c2",
+      "name": "retrieve"
+    },
+    {
+      "role": "user",
+      "content": "Runbook question before it ships: how often does the collector checkpoint by default, and what did the review land on for crash recovery?"
+    }
+  ],
+  "golden": {
+    "tool_calls": null,
+    "final_answer_criteria": "BOTH halves required: the collector checkpoints every 4 minutes by default, AND crash recovery's replay budget is 40 seconds. A missing half caps the score at 0.5; a stated but incorrect half scores 0. An answer giving the early-build 30-second cadence scores 0. An answer presenting both the correct and a competing value without committing to one scores 0."
+  },
+  "assembly_eval": {
+    "pair_id": "join-checkpoint-cycle-plan",
+    "mode": "legacy",
+    "candidate_ids": [
+      "4364a8c8546d1d919df1517271d79ca67f22bf463cf6b4ba2956371f2a521a8b",
+      "5b644ffdf1346010e4c9bb0530a2dfcea5bd3d27f00134c7c9a84efa7793e13c",
+      "79379af660e3369224bf172d1df2cafc9271bb474e34f5eaabda78b3c726341a",
+      "rec-crash-rotation",
+      "rec-lease-alarm",
+      "rec-review-notes"
+    ],
+    "estimated_prompt_tokens": 1058,
+    "state_digest": "7dfb5dd40ed2207e6fa277ad8d19ca25f63a985fba26407ead2d006cca4ab0b6",
+    "subjects": [
+      "(c1|memory|rec-crash-rotation)",
+      "(c1|memory|rec-lease-alarm)",
+      "(c1|memory|rec-review-notes)",
+      "(c2|rag|internal/collector/checkpoint.go)",
+      "(c2|rag|internal/collector/replay.go)",
+      "(c2|rag|docs/collector.md)"
+    ],
+    "stratum": "cross_domain_join",
+    "answer_home": "join",
+    "scenario_family": "checkpoint-cycle-join",
+    "budget": 1130,
+    "raw_state_tokens": 1883,
+    "pressure_level": "critical",
+    "shed_messages": 12,
+    "shed_bytes": 2808
+  }
+}

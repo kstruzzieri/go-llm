@@ -1,0 +1,76 @@
+{
+  "id": "chain-drift-window-baseline-legacy",
+  "source": "assembly-corpus-mixed",
+  "captured_at": "0001-01-01T00:00:00Z",
+  "system": "You are the driftwatch assistant. driftwatch is a self-hosted telemetry ingest and alerting daemon. Answer using only the provided conversation, memory records, and retrieved context.",
+  "tools": null,
+  "turns": [
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "id": "c2",
+          "name": "retrieve",
+          "arguments": {
+            "query": "drift baseline storage and rollup layout",
+            "k": 3
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "content": "### source: \"internal/drift/baseline.go\"\npurpose: Scheduler-fired baseline writer with atomic snapshot swaps.\noverview: baseline.go notes the dropped nightly pilot cadence, takes its firing from the shared scheduler's job config, and swaps whole snapshots atomically for scorers.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n--- source: \"internal/drift/baseline.go\" (lines 1-15, similarity: 1.00) ---\n1| package drift\n2| \n3| // writeBaseline persists one baseline snapshot pass. The pilot's\n4| // nightly recompute was dropped before GA; the cadence now ships\n5| // from the shared scheduler's job config, not from this file, and\n6| // the writer only runs when the scheduler fires it. Snapshots are\n7| // written whole and swapped atomically so scorers never read a\n8| // half-written baseline.\n9| func (b *Baseliner) writeBaseline(pass int64) error {\n10| \tsnap, err := b.compute(pass)\n11| \tif err != nil {\n12| \t\treturn err\n13| \t}\n14| \treturn b.store.SwapAtomic(snap)\n15| }\n\n### source: \"internal/drift/rollup.go\"\npurpose: Rebuildable rollups structurally isolated from baseline reads.\noverview: rollup.go derives rebuildable aggregates that name their raw ranges, keeps baselines reading raw series through an enforced import boundary, and records why the shared-fold refactor was reverted to preserve the isolation guarantee.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n--- source: \"internal/drift/rollup.go\" (lines 1-31, similarity: 1.00) ---\n1| package drift\n2| \n3| // rollup folds raw series into the derived aggregates the scorers\n4| // and dashboards read. Rollups are rebuildable by construction:\n5| // every rollup names the raw range it derives from, and a rebuild\n6| // walks that range again. Baselines never derive from rollups -\n7| // they read raw series directly, so a rollup bug cannot silently\n8| // poison the reference points scoring compares against.\n9| //\n10| // The independence is enforced structurally, not by convention:\n11| // the baseline package imports the raw store alone, and the one\n12| // attempt to share the fold code between rollups and baselines was\n13| // reverted when it hauled the rollup store into the baseline\n14| // dependency graph. The duplication it reintroduced is small,\n15| // measured, and considered the price of the isolation guarantee;\n16| // the revert commit says so in exactly those words and the review\n17| // cites it whenever the question resurfaces.\n18| func (r *Rolluper) rebuild(rng rawRange) error {\n19| \tagg, err := r.fold(rng)\n20| \tif err != nil {\n21| \t\treturn err\n22| \t}\n23| \treturn r.store.Replace(rng.Key(), agg)\n24| }\n25| \n26| // fold walks the named raw range once and produces the aggregate;\n27| // it is deterministic for a fixed range, which is what makes the\n28| // rebuild-versus-restore comparison meaningful during audits.\n29| func (r *Rolluper) fold(rng rawRange) (aggregate, error) {\n30| \treturn foldRange(r.raw, rng)\n31| }\n\n### source: \"docs/drift-baselines.md\"\npurpose: Baselines vs rollups: stores, cadence ownership, review sourcing.\noverview: drift-baselines.md separates reference baselines from rebuildable rollups, assigns the recompute cadence to the shared scheduler's job config, notes incident-window freezes with checklist-driven thaws, and pins review rows to decisions and files.\nlanguage: markdown\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n--- source: \"docs/drift-baselines.md\" (lines 1-19, similarity: 1.00) ---\n1| # drift baselines\n2| \n3| Baselines are the reference points scoring compares against;\n4| rollups are derived aggregates for dashboards. They live in\n5| different stores with different retention because one is a\n6| reference and the other is rebuildable.\n7| \n8| The baseline location and generation count are stored decisions;\n9| the recompute cadence belongs to the shared scheduler's job config.\n10| During incident windows baselines freeze until the commander\n11| clears the window, and the thaw rides the clearing checklist so a\n12| freeze cannot outlive its incident unnoticed.\n13| \n14| ## Review sourcing\n15| \n16| Baseline rows in review tables cite stored decisions or source\n17| files. The cadence row cites the scheduler job config's change\n18| history, the location and retention rows cite the stored decisions,\n19| and none of them cite dashboards.\n",
+      "tool_call_id": "c2",
+      "name": "retrieve"
+    },
+    {
+      "role": "user",
+      "content": "How often does the drift baseline recompute, and where do the baseline snapshots land?"
+    }
+  ],
+  "golden": {
+    "tool_calls": null,
+    "final_answer_criteria": "BOTH halves required: the drift baseline recomputes every 4 days, AND baseline snapshots land under dw-baselines/gold/. A missing half caps the score at 0.5; a stated but incorrect half scores 0. The dropped nightly pilot cadence mentioned in the baseline source scores 0 for the cadence half. An answer presenting both the correct and a competing value without committing to one scores 0."
+  },
+  "assembly_eval": {
+    "pair_id": "chain-drift-window-baseline",
+    "mode": "legacy",
+    "candidate_ids": [
+      "a532d003fbc921c6b29acd687e3a3f301d2907f67669c25985444b35fcc31aed",
+      "b0e9624ec8ffe12ca753872aa8322c484a9e7448ea11195ba09c05676273d6c3",
+      "ce02210c7e98cb78f6d1e5e409eb971aa36ea20e3e137b27955b89a3e3e2706f",
+      "rec-baseline-freeze",
+      "rec-baseline-path",
+      "rec-gold-retention",
+      "rec-incident-window",
+      "rec-review-rows",
+      "rec-rollup-rebuild",
+      "rec-scheduler-move",
+      "rec-storage-rows"
+    ],
+    "estimated_prompt_tokens": 1170,
+    "state_digest": "b1b135c04a9e7413a6b0c2ee6d1942b3f347bfb5e1f7dcd0a00b068daabce636",
+    "subjects": [
+      "(c1|memory|rec-baseline-freeze)",
+      "(c1|memory|rec-baseline-path)",
+      "(c1|memory|rec-gold-retention)",
+      "(c1|memory|rec-incident-window)",
+      "(c1|memory|rec-review-rows)",
+      "(c1|memory|rec-rollup-rebuild)",
+      "(c1|memory|rec-scheduler-move)",
+      "(c1|memory|rec-storage-rows)",
+      "(c2|rag|internal/drift/baseline.go)",
+      "(c2|rag|internal/drift/rollup.go)",
+      "(c2|rag|docs/drift-baselines.md)"
+    ],
+    "stratum": "chain_retention",
+    "answer_home": "join",
+    "scenario_family": "drift-window-chain",
+    "budget": 1292,
+    "raw_state_tokens": 2154,
+    "pressure_level": "critical",
+    "shed_messages": 10,
+    "shed_bytes": 3509
+  }
+}

@@ -247,6 +247,7 @@ func canonicalOpenAICompatBaseURL(raw string) string {
 	u.Host = strings.ToLower(u.Host)
 	u.User = nil
 	u.RawQuery = ""
+	u.ForceQuery = false
 	u.Fragment = ""
 	u.RawPath = ""
 	u.Path = strings.TrimRight(u.Path, "/")
@@ -944,6 +945,27 @@ func modelSelectorWithoutBenchProvider(s string) string {
 		}
 	}
 	return s
+}
+
+func canonicalCandidateModelKey(s string) string {
+	selector := strings.TrimSpace(s)
+	provider, model, found := strings.Cut(selector, "/")
+	if !found {
+		return normalizeModelSelector(selector)
+	}
+	provider = normalizeModelSelector(provider)
+	model = normalizeModelSelector(model)
+	switch provider {
+	case defaultBenchProvider:
+		if nestedProvider, _, ok := strings.Cut(model, "/"); ok && supportedCandidateProvider(nestedProvider) {
+			return provider + "/" + model
+		}
+		return model
+	case openAICompatTransport:
+		return provider + "/" + model
+	default:
+		return normalizeModelSelector(selector)
+	}
 }
 
 func joinScoreNotes(parts ...string) string {

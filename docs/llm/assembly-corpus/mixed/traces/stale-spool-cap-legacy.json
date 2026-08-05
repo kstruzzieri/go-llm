@@ -1,0 +1,84 @@
+{
+  "id": "stale-spool-cap-legacy",
+  "source": "assembly-corpus-mixed",
+  "captured_at": "0001-01-01T00:00:00Z",
+  "system": "You are the driftwatch assistant. driftwatch is a self-hosted telemetry ingest and alerting daemon. Answer using only the provided conversation, memory records, and retrieved context.",
+  "tools": null,
+  "turns": [
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "id": "c1",
+          "name": "retrieve",
+          "arguments": {
+            "query": "spool size cap per node",
+            "k": 3
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "content": "### source: \"internal/spool/spool.go\"\npurpose: Spool sizing: the on-disk spool is capped at 128 MiB per node, with backpressure at the ceiling.\noverview: spool.go enforces the per-node spool ceiling and applies ingest backpressure when the spool reaches it. Segment rollover and the flush path live in the sibling files; this file owns the cap constant itself.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n--- source: \"internal/spool/spool.go\" (lines 1-13, similarity: 1.00) ---\n1| package spool\n2| \n3| // spoolMaxBytes is the per-node ceiling on total spool size. When the\n4| // ceiling is reached, ingest applies backpressure rather than letting\n5| // the spool eat the volume; the ceiling was raised during the ingest\n6| // surge work so weekend exporter outages no longer force early\n7| // retention sweeps.\n8| const spoolMaxBytes = 512 \u003c\u003c 20\n9| \n10| // hasRoom reports whether one more batch fits under the ceiling.\n11| func (s *Spool) hasRoom(batch int64) bool {\n12| \treturn s.size+batch \u003c= spoolMaxBytes\n13| }\n\n### source: \"internal/spool/segment.go\"\npurpose: Append-only spool segments: sequential naming, locked writes, fsync on rollover.\noverview: segment.go implements the append-only segment files the spool drains into, with sequential naming for manifest-free replay and the sync-on-rollover fsync policy.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n--- source: \"internal/spool/segment.go\" (lines 1-41, similarity: 1.00) ---\n1| package spool\n2| \n3| import (\n4| \t\"fmt\"\n5| \t\"os\"\n6| \t\"path/filepath\"\n7| )\n8| \n9| // segment is one append-only spool file. A segment rolls when it fills;\n10| // rolled segments are immutable and are what the retention sweeper and\n11| // the replay path both consume.\n12| type segment struct {\n13| \tdir     string\n14| \tindex   uint64\n15| \tf       *os.File\n16| \twritten int64\n17| }\n18| \n19| // openSegment creates the next segment file in dir. Naming is strictly\n20| // sequential so replay can walk segments without a manifest.\n21| func openSegment(dir string, index uint64) (*segment, error) {\n22| \tname := filepath.Join(dir, fmt.Sprintf(\"seg-%08d.dwspool\", index))\n23| \tf, err := os.OpenFile(name, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)\n24| \tif err != nil {\n25| \t\treturn nil, fmt.Errorf(\"spool: open segment: %w\", err)\n26| \t}\n27| \treturn \u0026segment{dir: dir, index: index, f: f}, nil\n28| }\n29| \n30| // write appends one drained batch. The caller holds the spool lock, so\n31| // segments never see interleaved batches. Fsync policy is deliberate:\n32| // we sync on rollover, not on every batch, trading a bounded window of\n33| // loss for steady ingest throughput on spinning disks.\n34| func (g *segment) write(batch []byte) error {\n35| \tn, err := g.f.Write(batch)\n36| \tg.written += int64(n)\n37| \tif err != nil {\n38| \t\treturn fmt.Errorf(\"spool: segment write: %w\", err)\n39| \t}\n40| \treturn nil\n41| }\n\n### source: \"docs/spool.md\"\npurpose: Spool guide: durable buffer role, segment layout, ceiling and backpressure.\noverview: spool.md explains the spool's durable-buffer role, the numbered segment layout, and the per-node ceiling with ingest backpressure, plus disk headroom guidance.\nlanguage: markdown\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n--- source: \"docs/spool.md\" (lines 1-18, similarity: 1.00) ---\n1| # driftwatch spool\n2| \n3| The spool is the durable buffer between ingest and the exporter. Every\n4| accepted batch lands in the spool before the ingest response is sent,\n5| so an accepted write survives a crash or an exporter outage.\n6| \n7| ## Layout\n8| \n9| Spool data lives under the data directory as numbered segment files.\n10| Segments are append-only; a segment that has rolled is immutable and\n11| is eligible for retention sweeps once exported.\n12| \n13| ## Sizing and backpressure\n14| \n15| The spool has a per-node size ceiling; at the ceiling, ingest applies\n16| backpressure instead of eating the volume. Size the underlying disk\n17| with headroom above the ceiling so segment rollover and replay\n18| working space never compete with live ingest for the last bytes.\n",
+      "tool_call_id": "c1",
+      "name": "retrieve"
+    },
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "id": "c2",
+          "name": "agent_memory_search",
+          "arguments": {
+            "query": ""
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "content": "rec-capture-quota · working · 2025-07-27 · lab box capture quota was lowered after the surge filled the volume; captures now refuse before the disk fills\nrec-retro-scribe · semantic · 2025-07-27 · surge retro scribe is from the platform side; notes go in the shared retro folder\nrec-surge-review · semantic · 2025-07-27 · post-surge capacity review is with the platform team; bring the ingest peak numbers and the spool growth graph",
+      "tool_call_id": "c2",
+      "name": "agent_memory_search"
+    },
+    {
+      "role": "user",
+      "content": "How large may the on-disk spool grow per node?"
+    }
+  ],
+  "golden": {
+    "tool_calls": null,
+    "final_answer_criteria": "States the per-node spool ceiling is 512 MiB. 512 MiB, 512 \u003c\u003c 20, and 536870912 bytes are equivalent correct forms. An answer of 128 MiB scores 0. An answer presenting both the correct and a competing value without committing to one scores 0."
+  },
+  "assembly_eval": {
+    "pair_id": "stale-spool-cap",
+    "mode": "legacy",
+    "candidate_ids": [
+      "100fe7c10b0915fa04828aa9028606e95861812333dc2f187b3d84bc0b6adad1",
+      "b214aa0c5e20eaa7b9cbad3f4b23e454cc976ab466c201c41cd8e4ea29a446fc",
+      "b6ff716f2ee8f31bff1cbe738c2ee1c04294b21b4876d57a58b00459325384d5",
+      "rec-capture-quota",
+      "rec-retro-scribe",
+      "rec-surge-review"
+    ],
+    "estimated_prompt_tokens": 1209,
+    "state_digest": "5169ba38e5646a4b854ce3c21ac9c50c18431813a9bbcb6184347082170fcfd5",
+    "subjects": [
+      "(c1|rag|internal/spool/spool.go)",
+      "(c1|rag|internal/spool/segment.go)",
+      "(c1|rag|docs/spool.md)",
+      "(c2|memory|rec-capture-quota)",
+      "(c2|memory|rec-retro-scribe)",
+      "(c2|memory|rec-surge-review)"
+    ],
+    "stratum": "stale_vs_fresh",
+    "answer_home": "rag",
+    "scenario_family": "spool-cap-staleness",
+    "budget": 1318,
+    "raw_state_tokens": 2197,
+    "pressure_level": "critical",
+    "shed_messages": 20,
+    "shed_bytes": 3126
+  }
+}

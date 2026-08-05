@@ -1,0 +1,101 @@
+{
+  "id": "mem-replay-throttle-mixed",
+  "source": "assembly-corpus-mixed",
+  "captured_at": "0001-01-01T00:00:00Z",
+  "system": "You are the driftwatch assistant. driftwatch is a self-hosted telemetry ingest and alerting daemon. Answer using only the provided conversation, memory records, and retrieved context.",
+  "tools": null,
+  "turns": [
+    {
+      "role": "user",
+      "content": "Drill wrap-up chores. The staging exporter is still stamping the drill's synthetic tag onto everything it ships; can you clear the tag override before tonight's real traffic lands on top of it?"
+    },
+    {
+      "role": "assistant",
+      "content": "Cleared the synthetic tag override and confirmed the exporter ships untagged batches again; tonight's traffic will land clean and the drill series stays separable in the archive."
+    },
+    {
+      "role": "user",
+      "content": "Also the drill left its segment fixtures on the lab box and the next soak will trip over them. Can you sweep the fixtures out and hand the space back before anyone schedules against it?"
+    },
+    {
+      "role": "assistant",
+      "content": "Swept the drill fixtures off the lab box and reclaimed the space; the soak gets a clean data directory and I left the archived capture set untouched."
+    },
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "id": "c1",
+          "name": "retrieve",
+          "arguments": {
+            "query": "replay yielding exporter lag threshold",
+            "k": 3
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "content": "### source: \"internal/replay/yield.go\"\npurpose: Replay yield gate against the config-shipped exporter lag threshold.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n--- source: \"internal/replay/yield.go\" (lines 1-8, similarity: 1.00) ---\n1| package replay\n2| \n3| // shouldYield pauses segment reads while the exporter is behind.\n4| // The threshold ships from deployment config; an early proposal\n5| // pinned it at 250 batches but never shipped.\n6| func (r *Replayer) shouldYield(lag int) bool {\n7| \treturn lag \u003e r.cfg.YieldLag\n8| }\n\n### source: \"internal/replay/pace.go\"\npurpose: Replay pacing that widens after recent yield-gate activity.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n\n### source: \"docs/replay-tuning.md\"\npurpose: Tuning guide: replay backs off to live ingest by design.\nlanguage: markdown\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n",
+      "tool_call_id": "c1",
+      "name": "retrieve"
+    },
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "id": "c2",
+          "name": "agent_memory_search",
+          "arguments": {
+            "query": ""
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "content": "rec-drill-lead · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:\nrec-lab-fixtures · working · created:2025-07-27 · updated:2025-07-27 · scope:session · ns: · src:\nrec-replay-yield · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src: · replay yields to live ingest once exporter lag passes 400 batches\nrec-yield-draft · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:",
+      "tool_call_id": "c2",
+      "name": "agent_memory_search"
+    },
+    {
+      "role": "user",
+      "content": "This afternoon's replay runs against live ingest - at what exporter lag does replay start yielding?"
+    }
+  ],
+  "golden": {
+    "tool_calls": null,
+    "final_answer_criteria": "States that replay starts yielding once exporter lag passes 400 batches. Answers that only say the threshold comes from deployment config score 0. An answer giving the never-shipped 250 batches figure scores 0. An answer presenting both the correct and a competing value without committing to one scores 0."
+  },
+  "assembly_eval": {
+    "pair_id": "mem-replay-throttle",
+    "mode": "mixed",
+    "candidate_ids": [
+      "21bf1861142ff7381e4af7efd1c025797f4fc27ddfbc2a6ba428c7d766dc8930",
+      "773d0d2c91f1f62a36cad2c94ae13ae0f010b4a039925690149e92f72c4902aa",
+      "82fd3d20c42b8790e5d2656506ee42d4381fecf81a1e79be5ed0140e321e36b0",
+      "rec-drill-lead",
+      "rec-lab-fixtures",
+      "rec-replay-yield",
+      "rec-yield-draft"
+    ],
+    "estimated_prompt_tokens": 616,
+    "state_digest": "4e88e7968acb1211250c9469aef11ff4962df44537f5a6a621575a29ddf15ca4",
+    "subjects": [
+      "(c1|rag|internal/replay/yield.go)",
+      "(c1|rag|internal/replay/pace.go)",
+      "(c1|rag|docs/replay-tuning.md)",
+      "(c2|memory|rec-drill-lead)",
+      "(c2|memory|rec-lab-fixtures)",
+      "(c2|memory|rec-replay-yield)",
+      "(c2|memory|rec-yield-draft)"
+    ],
+    "stratum": "memory_only",
+    "answer_home": "memory",
+    "scenario_family": "replay-cursor-note",
+    "budget": 664,
+    "raw_state_tokens": 1106,
+    "pressure_level": "critical",
+    "shed_bytes": 1671
+  }
+}

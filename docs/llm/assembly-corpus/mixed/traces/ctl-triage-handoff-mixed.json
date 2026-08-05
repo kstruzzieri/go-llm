@@ -1,0 +1,60 @@
+{
+  "id": "ctl-triage-handoff-mixed",
+  "source": "assembly-corpus-mixed",
+  "captured_at": "0001-01-01T00:00:00Z",
+  "system": "You are the driftwatch assistant. driftwatch is a self-hosted telemetry ingest and alerting daemon. Answer using only the provided conversation, memory records, and retrieved context.",
+  "tools": null,
+  "turns": [
+    {
+      "role": "user",
+      "content": "Housekeeping ping. We moved the triage rotation handoff off Mondays because it kept colliding with the release freeze review; the handoff now happens on Wednesday."
+    },
+    {
+      "role": "assistant",
+      "content": "Updated the rotation calendar, and the reminder bot now pings the incoming person that morning."
+    },
+    {
+      "role": "user",
+      "content": "Thanks. Leave the escalation contacts exactly as they are for now."
+    },
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "id": "c1",
+          "name": "fixture_echo",
+          "arguments": {
+            "content": "rotation calendar check: single handoff marker per week, reminder hook active."
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "content": "rotation calendar check: single handoff marker per week, reminder hook active.",
+      "tool_call_id": "c1",
+      "name": "fixture_echo"
+    },
+    {
+      "role": "user",
+      "content": "Which day does the triage rotation hand off?"
+    }
+  ],
+  "golden": {
+    "tool_calls": null,
+    "final_answer_criteria": "Control pair: the two arms are identical by construction; scores here measure decode and labeling noise, not assembly. One value stated in the conversation determines the score: the triage rotation handoff happens on Wednesday. An answer stating Wednesday scores 1; any other day, or no day at all, scores 0."
+  },
+  "assembly_eval": {
+    "pair_id": "ctl-triage-handoff",
+    "mode": "mixed",
+    "candidate_ids": [],
+    "estimated_prompt_tokens": 159,
+    "state_digest": "11841d217a36e8f8260a3e71adb1086acf38398eaaeceaef73d3645597c06b09",
+    "stratum": "conversation_only",
+    "answer_home": "conversation",
+    "control": true,
+    "budget": 271,
+    "raw_state_tokens": 207,
+    "pressure_level": "watch"
+  }
+}

@@ -1,0 +1,92 @@
+{
+  "id": "conv-spool-flush-fleet-legacy",
+  "source": "assembly-corpus-mixed",
+  "captured_at": "0001-01-01T00:00:00Z",
+  "system": "You are the driftwatch assistant. driftwatch is a self-hosted telemetry ingest and alerting daemon. Answer using only the provided conversation, memory records, and retrieved context.",
+  "tools": null,
+  "turns": [
+    {
+      "role": "user",
+      "content": "Rack check came back clean, so calling the rollout: hold the fleet spool flush at 40 seconds everywhere, canary override retired with it. Put the cadence change in the rollout checklist and note the disk-pressure watch item for the first week of the rollout."
+    },
+    {
+      "role": "assistant",
+      "content": "Rollout checklist updated with the cadence decision and the first-week disk-pressure watch item; the canary override is marked for retirement in the same change."
+    },
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "id": "c1",
+          "name": "retrieve",
+          "arguments": {
+            "query": "spool flush pacing default",
+            "k": 3
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "content": "### source: \"internal/spool/spool.go\"\npurpose: Shipped spool flush pacing and the buffered batch drain path.\noverview: spool.go owns the flush ticker default and the drain into the active segment. Profile overrides for the cadence come from deployment config, not from this file.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n--- source: \"internal/spool/spool.go\" (lines 1-14, similarity: 1.00) ---\n1| package spool\n2| \n3| import \"time\"\n4| \n5| // flushEvery is the shipped flush cadence. Deployments override it per\n6| // profile; profile overrides are applied by the config layer, not here.\n7| const flushEvery = 30 * time.Second\n8| \n9| // Flush drains buffered batches into the active segment.\n10| func (s *Spool) Flush() error {\n11| \ts.mu.Lock()\n12| \tdefer s.mu.Unlock()\n13| \treturn s.seg.write(s.buf.drain())\n14| }\n\n### source: \"internal/spool/segment.go\"\npurpose: Append-only spool segments: sequential naming, rollover, fsync policy.\noverview: segment.go implements the append-only segment files the spool drains into. It owns sequential naming for manifest-free replay, the write path under the spool lock, and the sync-on-rollover fsync policy.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n--- source: \"internal/spool/segment.go\" (lines 1-57, similarity: 1.00) ---\n1| package spool\n2| \n3| import (\n4| \t\"fmt\"\n5| \t\"os\"\n6| \t\"path/filepath\"\n7| )\n8| \n9| // segment is one append-only spool file. A segment rolls when it fills;\n10| // rolled segments are immutable and are what the retention sweeper and\n11| // the replay path both consume.\n12| type segment struct {\n13| \tdir    string\n14| \tindex  uint64\n15| \tf      *os.File\n16| \twritten int64\n17| }\n18| \n19| // openSegment creates the next segment file in dir. Naming is strictly\n20| // sequential so replay can walk segments without a manifest.\n21| func openSegment(dir string, index uint64) (*segment, error) {\n22| \tname := filepath.Join(dir, fmt.Sprintf(\"seg-%08d.dwspool\", index))\n23| \tf, err := os.OpenFile(name, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)\n24| \tif err != nil {\n25| \t\treturn nil, fmt.Errorf(\"spool: open segment: %w\", err)\n26| \t}\n27| \treturn \u0026segment{dir: dir, index: index, f: f}, nil\n28| }\n29| \n30| // write appends one drained batch. The caller holds the spool lock, so\n31| // segments never see interleaved batches. Fsync policy is deliberate:\n32| // we sync on rollover, not on every batch, trading a bounded window of\n33| // loss for steady ingest throughput on spinning disks.\n34| func (g *segment) write(batch []byte) error {\n35| \tn, err := g.f.Write(batch)\n36| \tg.written += int64(n)\n37| \tif err != nil {\n38| \t\treturn fmt.Errorf(\"spool: segment write: %w\", err)\n39| \t}\n40| \treturn nil\n41| }\n42| \n43| // roll fsyncs and closes the current file, then opens the successor.\n44| func (g *segment) roll() error {\n45| \tif err := g.f.Sync(); err != nil {\n46| \t\treturn err\n47| \t}\n48| \tif err := g.f.Close(); err != nil {\n49| \t\treturn err\n50| \t}\n51| \tnext, err := openSegment(g.dir, g.index+1)\n52| \tif err != nil {\n53| \t\treturn err\n54| \t}\n55| \t*g = *next\n56| \treturn nil\n57| }\n\n### source: \"docs/spool.md\"\npurpose: Operator guide to the spool: layout, drain pacing, sizing guidance.\noverview: spool.md explains the durable buffer between ingest and export: segment layout, the fixed drain cadence with per-profile tuning, and sizing guidance for exporter outages.\nlanguage: markdown\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n--- source: \"docs/spool.md\" (lines 1-24, similarity: 1.00) ---\n1| # driftwatch spool\n2| \n3| The spool is the durable buffer between ingest and the exporter. Every\n4| accepted batch lands in the spool before the ingest response is sent,\n5| so an accepted write survives a crash or an exporter outage.\n6| \n7| ## Layout\n8| \n9| Spool data lives under the data directory as numbered segment files.\n10| Segments are append-only; a segment that has rolled is immutable and\n11| is eligible for retention sweeps once exported.\n12| \n13| ## Pacing\n14| \n15| Buffered batches drain to the active segment on a fixed cadence. The\n16| shipped default flushes twice a minute; deployments tune this per\n17| profile through the config layer. Lowering the cadence smooths disk\n18| pressure at the cost of a slightly larger replay window after a crash.\n19| \n20| ## Sizing\n21| \n22| Keep the spool on local disk, not network storage. Size it for at\n23| least a day of peak ingest so an exporter outage over a weekend does\n24| not force retention sweeps to run early.\n",
+      "tool_call_id": "c1",
+      "name": "retrieve"
+    },
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "id": "c2",
+          "name": "agent_memory_search",
+          "arguments": {
+            "query": ""
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "content": "rec-rack-watch · working · 2025-07-27 · the two slow racks carry the oldest disks in the fleet; watch their pressure panels during any cadence change\nrec-rollout-thread · semantic · 2025-07-27 · rollout decisions get posted to the deploy thread with a checklist link; ops mirrors them to the runbook\nrec-soak-archive · semantic · 2025-07-27 · weekend soak captures are archived to the fixture bucket Monday; prune after the retro signs off",
+      "tool_call_id": "c2",
+      "name": "agent_memory_search"
+    },
+    {
+      "role": "user",
+      "content": "What flush cadence did we land on for the fleet spool rollout?"
+    }
+  ],
+  "golden": {
+    "tool_calls": null,
+    "final_answer_criteria": "States the fleet spool flush cadence is 40 seconds. Answering 30 seconds (or twice a minute, the shipped default) scores 0. An answer presenting both the correct and a competing value without committing to one scores 0."
+  },
+  "assembly_eval": {
+    "pair_id": "conv-spool-flush-fleet",
+    "mode": "legacy",
+    "candidate_ids": [
+      "369893efe3b24575095f9179f5ba6d12e3e12c6d1c2d8a65b463c2ddb0fcfcd2",
+      "4b956ef05666cf559f7477475a9aab42c11d35fd2e9cdb6999b22f678649f3e5",
+      "ca19c59c18a98aade574f6cb2a8d586a50597de85a395bc8800589ead76bd25b",
+      "rec-rack-watch",
+      "rec-rollout-thread",
+      "rec-soak-archive"
+    ],
+    "estimated_prompt_tokens": 1423,
+    "state_digest": "bd35b50d045c44bad80f97d22769c2a3973c4d13e355351611c9ac9bdc507868",
+    "subjects": [
+      "(c1|rag|internal/spool/spool.go)",
+      "(c1|rag|internal/spool/segment.go)",
+      "(c1|rag|docs/spool.md)",
+      "(c2|memory|rec-rack-watch)",
+      "(c2|memory|rec-rollout-thread)",
+      "(c2|memory|rec-soak-archive)"
+    ],
+    "stratum": "conversation_only",
+    "answer_home": "conversation",
+    "scenario_family": "spool-flush-window",
+    "budget": 1498,
+    "raw_state_tokens": 2497,
+    "pressure_level": "critical",
+    "shed_messages": 14,
+    "shed_bytes": 3600
+  }
+}

@@ -1,0 +1,67 @@
+{
+  "id": "mem-retention-floor-audit-legacy",
+  "source": "assembly-corpus-mixed",
+  "captured_at": "0001-01-01T00:00:00Z",
+  "system": "You are the driftwatch assistant. driftwatch is a self-hosted telemetry ingest and alerting daemon. Answer using only the provided conversation, memory records, and retrieved context.",
+  "tools": null,
+  "turns": [
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "id": "c2",
+          "name": "agent_memory_search",
+          "arguments": {
+            "query": ""
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "content": "rec-audit-draft · semantic · 2025-07-27 · the 180 days audit figure came from the draft compliance matrix; superseded before rollout\nrec-audit-retention · semantic · 2025-07-27 · audit log entries keep for 365 days, pinned outside tenant retention\nrec-compliance-folder · working · 2025-07-27 · compliance evidence lands in the shared folder with the control number in the filename; reviewers navigate by control, not by date\nrec-sample-style · semantic · 2025-07-27 · evidence samples pair each action with its audit entry side by side; reviewers accept lined-up samples without re-pulling",
+      "tool_call_id": "c2",
+      "name": "agent_memory_search"
+    },
+    {
+      "role": "user",
+      "content": "How long are audit log entries kept?"
+    }
+  ],
+  "golden": {
+    "tool_calls": null,
+    "final_answer_criteria": "States that audit log entries are kept for 365 days, pinned separately from tenant retention. Answers that only say audit retention is pinned in deployment config score 0. An answer giving the draft 180 days figure scores 0. An answer presenting both the correct and a competing value without committing to one scores 0."
+  },
+  "assembly_eval": {
+    "pair_id": "mem-retention-floor-audit",
+    "mode": "legacy",
+    "candidate_ids": [
+      "1fd1029cd6be340edd90c9a1efdb327d041c5a8a1555a621e88011d9117bef09",
+      "4e0abe4481bea3679f1bd84411d17f5a8660d42964931373a0dfcc072051933f",
+      "da4806fa8132617eec0a525148a462d7cf8d44d90fdcf521b678fe41e0141c95",
+      "rec-audit-draft",
+      "rec-audit-retention",
+      "rec-compliance-folder",
+      "rec-sample-style"
+    ],
+    "estimated_prompt_tokens": 206,
+    "state_digest": "49d32bd33fec4387d074fc82f6666374f7a6c6b49087cc6137fde99bd2ee5a3c",
+    "subjects": [
+      "(c1|rag|docs/audit.md)",
+      "(c1|rag|internal/audit/log.go)",
+      "(c1|rag|internal/audit/rotate.go)",
+      "(c2|memory|rec-audit-draft)",
+      "(c2|memory|rec-audit-retention)",
+      "(c2|memory|rec-compliance-folder)",
+      "(c2|memory|rec-sample-style)"
+    ],
+    "stratum": "memory_only",
+    "answer_home": "memory",
+    "scenario_family": "retention-floor-mem",
+    "budget": 685,
+    "raw_state_tokens": 1141,
+    "pressure_level": "ok",
+    "shed_messages": 6,
+    "shed_bytes": 3447
+  }
+}

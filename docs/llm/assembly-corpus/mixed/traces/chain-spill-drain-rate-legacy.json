@@ -1,0 +1,69 @@
+{
+  "id": "chain-spill-drain-rate-legacy",
+  "source": "assembly-corpus-mixed",
+  "captured_at": "0001-01-01T00:00:00Z",
+  "system": "You are the driftwatch assistant. driftwatch is a self-hosted telemetry ingest and alerting daemon. Answer using only the provided conversation, memory records, and retrieved context.",
+  "tools": null,
+  "turns": [
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "id": "c2",
+          "name": "fixture_echo",
+          "arguments": {
+            "content": "weekend drain log from the staging box, pasted verbatim:\n2025-07-26T02:00:00Z drain pass begin files=101 used_gb=7.8\n2025-07-26T02:09:40Z drained files=79 replayed_ok=79 parked=1 reason=ingest-pressure\n2025-07-26T02:13:05Z drain pass end files_left=0 used_gb=0.4\nlog note: the 300 MB/s full-throttle profile in the tuning doc stayed a lab experiment; no fleet ever ran it and the doc says so in bold now.\n"
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "content": "weekend drain log from the staging box, pasted verbatim:\n2025-07-26T02:00:00Z drain pass begin files=101 used_gb=7.8\n2025-07-26T02:09:40Z drained files=79 replayed_ok=79 parked=1 reason=ingest-pressure\n2025-07-26T02:13:05Z drain pass end files_left=0 used_gb=0.4\nlog note: the 300 MB/s full-throttle profile in the tuning doc stayed a lab experiment; no fleet ever ran it and the doc says so in bold now.\n",
+      "tool_call_id": "c2",
+      "name": "fixture_echo"
+    },
+    {
+      "role": "user",
+      "content": "What rate does the spill drain run at off-peak?"
+    }
+  ],
+  "golden": {
+    "tool_calls": null,
+    "final_answer_criteria": "States the spill drain runs at 80 MB/s off-peak. Unit-equivalent phrasings of 80 MB/s (for example 80 megabytes per second) are acceptable. The lab-only 300 MB/s full-throttle profile named in the pasted log scores 0. An answer presenting both the correct and a competing value without committing to one scores 0."
+  },
+  "assembly_eval": {
+    "pair_id": "chain-spill-drain-rate",
+    "mode": "legacy",
+    "candidate_ids": [
+      "rec-axis-units",
+      "rec-drain-pace",
+      "rec-drain-window",
+      "rec-io-review",
+      "rec-lull-data",
+      "rec-park-policy",
+      "rec-replay-admission",
+      "rec-routing-test"
+    ],
+    "estimated_prompt_tokens": 160,
+    "state_digest": "51ae2ada87b71fdddf5d067166f99500ad63d2c13e0f147247e830ccea02a112",
+    "subjects": [
+      "(c1|memory|rec-axis-units)",
+      "(c1|memory|rec-drain-pace)",
+      "(c1|memory|rec-drain-window)",
+      "(c1|memory|rec-io-review)",
+      "(c1|memory|rec-lull-data)",
+      "(c1|memory|rec-park-policy)",
+      "(c1|memory|rec-replay-admission)",
+      "(c1|memory|rec-routing-test)"
+    ],
+    "stratum": "chain_retention",
+    "answer_home": "memory",
+    "scenario_family": "spill-quota-chain",
+    "budget": 620,
+    "raw_state_tokens": 1034,
+    "pressure_level": "ok",
+    "shed_messages": 4,
+    "shed_bytes": 3270
+  }
+}

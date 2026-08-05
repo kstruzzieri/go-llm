@@ -1,0 +1,92 @@
+{
+  "id": "join-downsample-tier-default-legacy",
+  "source": "assembly-corpus-mixed",
+  "captured_at": "0001-01-01T00:00:00Z",
+  "system": "You are the driftwatch assistant. driftwatch is a self-hosted telemetry ingest and alerting daemon. Answer using only the provided conversation, memory records, and retrieved context.",
+  "tools": null,
+  "turns": [
+    {
+      "role": "user",
+      "content": "Query routing decision is final from the perf review then: alert queries pin to the 1m tier so evaluation cost stays flat, and dashboards keep their own default."
+    },
+    {
+      "role": "assistant",
+      "content": "Applied: alert queries pin to the 1m tier across the rule fleet, and the evaluation cost graphs are annotated with the switch."
+    },
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "id": "c1",
+          "name": "retrieve",
+          "arguments": {
+            "query": "rollup tier query routing",
+            "k": 3
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "content": "### source: \"internal/store/query.go\"\npurpose: Query tier routing: caller pins honored, ladder resolution otherwise.\noverview: query.go routes each query to a tier: a caller-pinned tier is honored for flat-cost callers, and unpinned queries resolve through the ladder to the coarsest tier meeting their resolution floor.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n--- source: \"internal/store/query.go\" (lines 1-13, similarity: 1.00) ---\n1| package store\n2| \n3| // route picks the tier a query reads. Callers may pin a tier through\n4| // their query config; unpinned queries resolve through the ladder to\n5| // the coarsest tier meeting the window's resolution floor. Pins exist\n6| // for callers whose cost must stay flat across window sizes, and the\n7| // pin is honored even when the ladder would choose coarser.\n8| func (s *Store) route(q query) tier {\n9| \tif q.pinnedTier != \"\" {\n10| \t\treturn s.ladder.byName(q.pinnedTier)\n11| \t}\n12| \treturn s.ladder.resolve(q.window)\n13| }\n\n### source: \"internal/store/compact.go\"\npurpose: Rollup compaction: small-file merges on an operations-owned schedule.\noverview: compact.go merges a rollup tier's small files into sequential reads, with the schedule owned by operations config because compaction competes with the export window for disk bandwidth. Runs are bounded per pass rather than rate limited, so compaction releases the disk before the export window needs it.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n--- source: \"internal/store/compact.go\" (lines 1-34, similarity: 1.00) ---\n1| package store\n2| \n3| // compact folds a rollup tier's small files into larger ones so tier\n4| // reads stay sequential. The schedule comes from operations config,\n5| // not code: compaction competes with the export window for disk\n6| // bandwidth, and only the operations side sees both calendars.\n7| func (s *Store) compact(tierName string) error {\n8| \tfiles, err := s.smallFiles(tierName)\n9| \tif err != nil {\n10| \t\treturn err\n11| \t}\n12| \tif len(files) == 0 {\n13| \t\treturn nil\n14| \t}\n15| \tmerged, err := s.merge(files)\n16| \tif err != nil {\n17| \t\treturn err\n18| \t}\n19| \treturn s.swap(files, merged)\n20| }\n21| \n22| // smallFiles lists a tier's files below the merge threshold, oldest\n23| // first, capped per run so one compaction cannot monopolize the disk\n24| // bandwidth the export window depends on. The cap is deliberately a\n25| // run-level bound rather than a rate limit: a bounded run finishes\n26| // and releases the disk, while a rate-limited run lingers across the\n27| // window boundary and competes with the export anyway.\n28| func (s *Store) smallFiles(tierName string) ([]file, error) {\n29| \tfiles, err := s.list(tierName)\n30| \tif err != nil {\n31| \t\treturn nil, err\n32| \t}\n33| \treturn filterSmall(files, s.mergeThreshold, s.runCap), nil\n34| }\n\n### source: \"docs/tiers.md\"\npurpose: Tier guide: ladder routing, flat-cost pins, ops-scheduled compaction.\noverview: tiers.md explains ladder-based query routing with caller pins for flat-cost paths, and compaction as an operations-scheduled maintenance task balanced against the export window.\nlanguage: markdown\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n--- source: \"docs/tiers.md\" (lines 1-23, similarity: 1.00) ---\n1| # driftwatch rollup tiers\n2| \n3| Tiers trade resolution for cost as samples age down the ladder.\n4| \n5| ## Query routing\n6| \n7| Unpinned queries ride the ladder: the coarsest tier that meets the\n8| window's resolution floor wins. Callers with flat-cost requirements\n9| pin a tier in their query config, and the pin wins over the ladder.\n10| \n11| ## Maintenance\n12| \n13| Compaction keeps tier reads sequential; its schedule is an operations\n14| decision recorded in the ops notes, balanced against the export\n15| window. Overrun alarms watch the boundary.\n16| \n17| ## Bandwidth budget\n18| \n19| Compaction and export share the same disks, so their windows are\n20| scheduled apart and compaction runs are bounded per pass. A pass that\n21| hits its bound simply resumes at the next slot; the overrun alarm\n22| watches the boundary between the two windows rather than the pass\n23| duration itself.\n",
+      "tool_call_id": "c1",
+      "name": "retrieve"
+    },
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "id": "c2",
+          "name": "agent_memory_search",
+          "arguments": {
+            "query": ""
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "content": "rec-board-panels · working · 2025-07-27 · storage board owns the compaction panels; alerts fire on overrun only\nrec-compact-slot · semantic · 2025-07-27 · rollup compaction runs Sundays at 03:40, after the export window clears\nrec-sheet-slot · semantic · 2025-07-27 · the sizing sheet's Saturday compaction slot was scrapped before rollout",
+      "tool_call_id": "c2",
+      "name": "agent_memory_search"
+    },
+    {
+      "role": "user",
+      "content": "Perf review follow-up needs both facts: which tier do alert queries pin to, and when does rollup compaction run?"
+    }
+  ],
+  "golden": {
+    "tool_calls": null,
+    "final_answer_criteria": "BOTH halves required: alert queries pin to the 1m tier, AND rollup compaction runs Sundays at 03:40. A missing half caps the score at 0.5; a stated but incorrect half scores 0. An answer giving the scrapped Saturday compaction slot scores 0. An answer presenting both the correct and a competing value without committing to one scores 0."
+  },
+  "assembly_eval": {
+    "pair_id": "join-downsample-tier-default",
+    "mode": "legacy",
+    "candidate_ids": [
+      "8128bf713400610bf79a1fb96fb5c74c4b1e696b7744866645659b4519d3484b",
+      "acdfd196baab9db96b87cc48307bbffc8eada65cd38d6e6b3550c2b2b51920d0",
+      "f5b89b4d48245e2aecab564e7fc954f17dceb63f76d17fbb3d51f5205e782597",
+      "rec-board-panels",
+      "rec-compact-slot",
+      "rec-sheet-slot"
+    ],
+    "estimated_prompt_tokens": 1295,
+    "state_digest": "00190f6ed5910b52b2cc4b244d7e8e1b28d3c9d2660e7e7a7d265ded2c12ce1e",
+    "subjects": [
+      "(c1|rag|internal/store/query.go)",
+      "(c1|rag|internal/store/compact.go)",
+      "(c1|rag|docs/tiers.md)",
+      "(c2|memory|rec-board-panels)",
+      "(c2|memory|rec-compact-slot)",
+      "(c2|memory|rec-sheet-slot)"
+    ],
+    "stratum": "cross_domain_join",
+    "answer_home": "join",
+    "scenario_family": "downsample-tier-join",
+    "budget": 1410,
+    "raw_state_tokens": 2350,
+    "pressure_level": "critical",
+    "shed_messages": 10,
+    "shed_bytes": 3658
+  }
+}

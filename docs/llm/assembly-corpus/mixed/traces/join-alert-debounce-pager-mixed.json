@@ -1,0 +1,147 @@
+{
+  "id": "join-alert-debounce-pager-mixed",
+  "source": "assembly-corpus-mixed",
+  "captured_at": "0001-01-01T00:00:00Z",
+  "system": "You are the driftwatch assistant. driftwatch is a self-hosted telemetry ingest and alerting daemon. Answer using only the provided conversation, memory records, and retrieved context.",
+  "tools": null,
+  "turns": [
+    {
+      "role": "user",
+      "content": "Paging hygiene before anything else. The weekend's dependency bump left the alert unit tests emitting deprecation warnings on every run, and the noise is burying real failures in the CI log. Pin the deprecated call sites, file the migration task, and get the log back to signal."
+    },
+    {
+      "role": "assistant",
+      "content": "Pinned the deprecated call sites behind the compatibility shim, filed the migration task with the full warning inventory, and CI logs are clean again as of the last run."
+    },
+    {
+      "role": "user",
+      "content": "The synthetic monitor that exercises the paging path fires from a single region right now, which means a regional network wobble looks identical to a broken notifier. Add a second region and require both probes to fail before the monitor itself alarms."
+    },
+    {
+      "role": "assistant",
+      "content": "Added the second region and switched the monitor alarm to require both probes failing; a single-region wobble now annotates the board instead of paging anyone."
+    },
+    {
+      "role": "user",
+      "content": "Rule authorship is drifting too. Two teams committed rules straight to the directory without the template last month, and both are missing runbook links. Add a pre-merge check that rejects a rule without the template fields filled in."
+    },
+    {
+      "role": "assistant",
+      "content": "Added the pre-merge template check and backfilled runbook links on the two offending rules; the check names the missing field in its rejection so authors do not have to guess."
+    },
+    {
+      "role": "user",
+      "content": "The escalation contact sheet in the wiki still lists the platform team's old lead for severity-one paging. That is a real 3am risk; sync the sheet from the org roster and put a freshness stamp on it so staleness is visible at a glance."
+    },
+    {
+      "role": "assistant",
+      "content": "Synced the contact sheet from the roster, added the freshness stamp, and set a monthly re-sync; the old lead is gone from every severity tier."
+    },
+    {
+      "role": "user",
+      "content": "Somebody should also archive the paging drill recordings from last quarter. They are sitting in the incident channel pinning list and every new responder scrolls past eleven of them to find the current runbook pin."
+    },
+    {
+      "role": "assistant",
+      "content": "Archived the drill recordings to the training folder and left one pinned index message linking them; the runbook pin is back on top of the channel."
+    },
+    {
+      "role": "user",
+      "content": "The notifier's webhook secret is due its quarterly rotation as well, and last time the rotation broke the staging notifier because nobody updated its copy. Rotate both together this time and add staging to the rotation checklist."
+    },
+    {
+      "role": "assistant",
+      "content": "Rotated production and staging webhook secrets together and amended the rotation checklist; staging fired a test page cleanly after the swap."
+    },
+    {
+      "role": "user",
+      "content": "Also the flap report the rules review relies on has been empty since the metrics store compaction change; the report query reads the old table name. Repoint it and backfill the last two weeks so the next review has real flap history."
+    },
+    {
+      "role": "assistant",
+      "content": "Repointed the flap report at the current table and backfilled fourteen days of history; the next rules review has a full flap picture to tune against."
+    },
+    {
+      "role": "user",
+      "content": "One more: the rack drain plan for the noisy rack needs its paging annotations before the drain starts, so responders know which storage alarms are expected during the move and which ones still mean trouble."
+    },
+    {
+      "role": "assistant",
+      "content": "Annotated the drain plan with the expected storage alarms and their windows, and linked it from the paging footer for the duration of the drain."
+    },
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "id": "c1",
+          "name": "retrieve",
+          "arguments": {
+            "query": "pager repeat hold default",
+            "k": 3
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "content": "### source: \"internal/alert/pager.go\"\npurpose: Pager repeat hold: code default with per-rule override.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n--- source: \"internal/alert/pager.go\" (lines 1-22, similarity: 1.00) ---\n1| package alert\n2| \n3| import \"time\"\n4| \n5| // pageRepeat is the code default hold between repeat pages for one\n6| // firing rule. Distinct from the notification debounce: this gate is\n7| // for the human paging path only, and per-rule overrides from the\n8| // rules file win over it when present.\n9| // It replaced the pre-1.0 25-minute hold, which survives only in\n10| // archived runbooks.\n11| const pageRepeat = 45 * time.Minute\n12| \n13| // shouldPage reports whether the pager may fire again for a rule,\n14| // given the last page time. The effective hold is the rule override\n15| // when set, else the code default above.\n16| func (e *Engine) shouldPage(r Rule, last time.Time, now time.Time) bool {\n17| \thold := pageRepeat\n18| \tif r.PageRepeat \u003e 0 {\n19| \t\thold = r.PageRepeat\n20| \t}\n21| \treturn now.Sub(last) \u003e= hold\n22| }\n\n### source: \"internal/alert/escalate.go\"\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nnote: metadata overview (summary omitted: budget)\n\n### source: \"docs/paging.md\"\nlanguage: markdown\nindexed: 2025-07-27T00:00:00Z\nnote: metadata overview (summary omitted: budget)\n",
+      "tool_call_id": "c1",
+      "name": "retrieve"
+    },
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "id": "c2",
+          "name": "agent_memory_search",
+          "arguments": {
+            "query": ""
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "content": "rec-drain-plan · working · created:2025-07-27 · updated:2025-07-27 · scope:session · ns: · src:\nrec-flap-report · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:\nrec-page-override · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:",
+      "tool_call_id": "c2",
+      "name": "agent_memory_search"
+    },
+    {
+      "role": "user",
+      "content": "Settling the paging posture for the drain: what hold does the pager keep between repeat pages by default, and what repeat did ops record for the storage-degraded rule?"
+    }
+  ],
+  "golden": {
+    "tool_calls": null,
+    "final_answer_criteria": "BOTH halves required: the code default hold between repeat pages is 45 minutes, AND the storage-degraded rule pages on repeat at 10 minutes until the drain wraps. A missing half caps the score at 0.5; a stated but incorrect half scores 0. An answer giving the pre-1.0 25-minute hold scores 0. An answer presenting both the correct and a competing value without committing to one scores 0."
+  },
+  "assembly_eval": {
+    "pair_id": "join-alert-debounce-pager",
+    "mode": "mixed",
+    "candidate_ids": [
+      "66080881d35105cfe84188cbdb5f4b67383790e7850c97bb6ad3ff5d480a633b",
+      "68de8fae23b9a48fbbe9a01239201cc78131dec128ab7172d2785bda1975890e",
+      "d3c9310a166dcb082c32dd6f0809e4f864834c03cd904cda4fd4780286cafd02",
+      "rec-drain-plan",
+      "rec-flap-report",
+      "rec-page-override"
+    ],
+    "estimated_prompt_tokens": 1291,
+    "state_digest": "4aff642a9bdf543237cc7bfb85fe5ea6e42130669192be2146336c435853916d",
+    "subjects": [
+      "(c1|rag|internal/alert/pager.go)",
+      "(c1|rag|internal/alert/escalate.go)",
+      "(c1|rag|docs/paging.md)",
+      "(c2|memory|rec-drain-plan)",
+      "(c2|memory|rec-flap-report)",
+      "(c2|memory|rec-page-override)"
+    ],
+    "stratum": "cross_domain_join",
+    "answer_home": "join",
+    "scenario_family": "alert-debounce-override",
+    "budget": 1340,
+    "raw_state_tokens": 2233,
+    "pressure_level": "critical",
+    "shed_bytes": 3098
+  }
+}

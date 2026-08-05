@@ -1,0 +1,101 @@
+{
+  "id": "mem-retention-floor-audit-mixed",
+  "source": "assembly-corpus-mixed",
+  "captured_at": "0001-01-01T00:00:00Z",
+  "system": "You are the driftwatch assistant. driftwatch is a self-hosted telemetry ingest and alerting daemon. Answer using only the provided conversation, memory records, and retrieved context.",
+  "tools": null,
+  "turns": [
+    {
+      "role": "user",
+      "content": "Compliance checklist week. The control matrix wants evidence that admin actions are attributable end to end. Can you pull a sample of last month's admin actions with their audit entries lined up side by side?"
+    },
+    {
+      "role": "assistant",
+      "content": "Pulled thirty admin actions from last month and lined each up with its audit entry: actor, action, and timestamp all match end to end, and the sample sheet is in the compliance folder ready for the reviewer."
+    },
+    {
+      "role": "user",
+      "content": "The matrix also asks whether audit entries can be altered after the fact. I know the store is append-only but the reviewer wants that stated with evidence, not asserted. Can you put together the write-path proof?"
+    },
+    {
+      "role": "assistant",
+      "content": "Assembled the write-path proof: the audit store exposes append and read only, with no update or delete path in the schema or the code, and I captured the schema dump plus the handler list as evidence in the compliance folder."
+    },
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "id": "c1",
+          "name": "retrieve",
+          "arguments": {
+            "query": "audit log retention period",
+            "k": 3
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "content": "### source: \"docs/audit.md\"\npurpose: Audit log guide: append-only store with pinned retention.\nlanguage: markdown\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n--- source: \"docs/audit.md\" (lines 1-7, similarity: 1.00) ---\n1| # Audit log\n2| \n3| Every admin action writes an audit entry: actor, action, target,\n4| and timestamp. The store is append-only and its retention is pinned\n5| in deployment config, separate from tenant data retention. An early\n6| compliance draft set audit retention at 180 days; the shipped pin\n7| comes from deployment config and the draft figure never rolled out.\n\n### source: \"internal/audit/log.go\"\npurpose: Append-only audit entries with storage-layer retention.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n\n### source: \"internal/audit/rotate.go\"\npurpose: Daily audit file rotation with checksummed seals.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n",
+      "tool_call_id": "c1",
+      "name": "retrieve"
+    },
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "id": "c2",
+          "name": "agent_memory_search",
+          "arguments": {
+            "query": ""
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "content": "rec-audit-draft · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:\nrec-audit-retention · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src: · audit log entries keep for 365 days, pinned outside tenant retention\nrec-compliance-folder · working · created:2025-07-27 · updated:2025-07-27 · scope:session · ns: · src:\nrec-sample-style · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:",
+      "tool_call_id": "c2",
+      "name": "agent_memory_search"
+    },
+    {
+      "role": "user",
+      "content": "How long are audit log entries kept?"
+    }
+  ],
+  "golden": {
+    "tool_calls": null,
+    "final_answer_criteria": "States that audit log entries are kept for 365 days, pinned separately from tenant retention. Answers that only say audit retention is pinned in deployment config score 0. An answer giving the draft 180 days figure scores 0. An answer presenting both the correct and a competing value without committing to one scores 0."
+  },
+  "assembly_eval": {
+    "pair_id": "mem-retention-floor-audit",
+    "mode": "mixed",
+    "candidate_ids": [
+      "1fd1029cd6be340edd90c9a1efdb327d041c5a8a1555a621e88011d9117bef09",
+      "4e0abe4481bea3679f1bd84411d17f5a8660d42964931373a0dfcc072051933f",
+      "da4806fa8132617eec0a525148a462d7cf8d44d90fdcf521b678fe41e0141c95",
+      "rec-audit-draft",
+      "rec-audit-retention",
+      "rec-compliance-folder",
+      "rec-sample-style"
+    ],
+    "estimated_prompt_tokens": 646,
+    "state_digest": "49d32bd33fec4387d074fc82f6666374f7a6c6b49087cc6137fde99bd2ee5a3c",
+    "subjects": [
+      "(c1|rag|docs/audit.md)",
+      "(c1|rag|internal/audit/log.go)",
+      "(c1|rag|internal/audit/rotate.go)",
+      "(c2|memory|rec-audit-draft)",
+      "(c2|memory|rec-audit-retention)",
+      "(c2|memory|rec-compliance-folder)",
+      "(c2|memory|rec-sample-style)"
+    ],
+    "stratum": "memory_only",
+    "answer_home": "memory",
+    "scenario_family": "retention-floor-mem",
+    "budget": 685,
+    "raw_state_tokens": 1141,
+    "pressure_level": "critical",
+    "shed_bytes": 1694
+  }
+}

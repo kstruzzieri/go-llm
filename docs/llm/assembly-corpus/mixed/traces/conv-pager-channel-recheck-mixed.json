@@ -1,0 +1,149 @@
+{
+  "id": "conv-pager-channel-recheck-mixed",
+  "source": "assembly-corpus-mixed",
+  "captured_at": "0001-01-01T00:00:00Z",
+  "system": "You are the driftwatch assistant. driftwatch is a self-hosted telemetry ingest and alerting daemon. Answer using only the provided conversation, memory records, and retrieved context.",
+  "tools": null,
+  "turns": [
+    {
+      "role": "user",
+      "content": "Action two: the runbook still describes the old evaluation loop layout from before the rules refactor; two responders followed it into a dead end during the last incident. Bring the triage section in line with how the engine actually evaluates rules now, and date the section. Keep the old text in an appendix for one release in case somebody needs to compare mid-incident."
+    },
+    {
+      "role": "assistant",
+      "content": "Rewrote the triage section around the current evaluation flow, dated it, and added a note about per-rule isolation so a broken expression is not misread as a stalled evaluation loop."
+    },
+    {
+      "role": "user",
+      "content": "Action three: the flap-storm postmortem left two open items - the noisy rack drain plan and the debounce write-up. Neither needs to land today, but both need named owners and dates before the review closes out, so chase those down and get them recorded in the tracker. If either owner pushes back on the dates, book them into the follow-up review instead of letting the items float."
+    },
+    {
+      "role": "assistant",
+      "content": "Assigned the rack drain plan and the debounce write-up, both with dates inside the review window, and recorded them in the postmortem tracker with their owners tagged."
+    },
+    {
+      "role": "user",
+      "content": "Action four: the oncall dashboard row order buries the paging-volume panel below the fold, which is exactly the panel the review kept asking about. Move it to the top row and pin the board so the next review starts from the right view instead of someone's scroll position. And check the mobile layout too, because half of oncall opens that board from a phone at night."
+    },
+    {
+      "role": "assistant",
+      "content": "Moved the paging-volume panel to the top row, pinned the board, and saved the previous layout under a dated name in case anyone wants the old view back for comparison."
+    },
+    {
+      "role": "user",
+      "content": "Good, that clears the list, so let's call the routing decision: page escalations route to #dw-osprey-bridge from today, the general ops room goes back to chatter only, and the oncall doc gets updated to match before the evening handoff."
+    },
+    {
+      "role": "assistant",
+      "content": "Routing decision recorded and the oncall doc updated to match; the general room wiring stays in place for chatter only and I posted the change note in the handoff thread."
+    },
+    {
+      "role": "user",
+      "content": "The benchmark rig has been noisy since the lab kernel update. Rerun last week's baseline with pinned inputs so we are not comparing against a moving target."
+    },
+    {
+      "role": "assistant",
+      "content": "Baseline rerun queued with the same pinned inputs; the fresh numbers will attach to the perf tracking issue when it finishes."
+    },
+    {
+      "role": "user",
+      "content": "The docs mirror sync keeps skipping weekends because of the maintenance window overlap. Shift it an hour so it stops colliding, and make skipped runs visible."
+    },
+    {
+      "role": "assistant",
+      "content": "Shifted the mirror sync out of the maintenance window and added a failure notification so a skipped run is visible instead of silent."
+    },
+    {
+      "role": "user",
+      "content": "Quarterly access review is due: two contractors still have write access to the rules directory from the migration. Trim that back to read before the audit lands."
+    },
+    {
+      "role": "assistant",
+      "content": "Trimmed both contractor grants to read-only and noted the change in the access review sheet."
+    },
+    {
+      "role": "user",
+      "content": "Last one: the team room pins are a mess again, half of them point at retired boards. Sweep them and archive anything stale to the notes folder."
+    },
+    {
+      "role": "assistant",
+      "content": "Swept the pins, archived the stale ones to the notes folder, and left the active boards pinned in review order."
+    },
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "id": "c1",
+          "name": "retrieve",
+          "arguments": {
+            "query": "alert escalation routing channel",
+            "k": 3
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "content": "### source: \"internal/alert/notify.go\"\npurpose: Chat webhook notifier; destination channel supplied by config.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n--- source: \"internal/alert/notify.go\" (lines 1-15, similarity: 1.00) ---\n1| package alert\n2| \n3| import \"context\"\n4| \n5| // Notifier posts fired alerts to the configured chat webhook. The\n6| // destination channel comes from deployment config; the old hard-coded\n7| // #dw-crow-watch wiring is gone.\n8| type Notifier struct {\n9| \twebhook string\n10| \tchannel string\n11| }\n12| \n13| func (n *Notifier) Post(ctx context.Context, a Alert) error {\n14| \treturn n.post(ctx, n.channel, renderAlert(a))\n15| }\n\n### source: \"internal/alert/silence.go\"\npurpose: Calendar-declared alert silences; no ad-hoc muting.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n\n### source: \"docs/alerting.md\"\npurpose: Alerting guide: rule reload, webhook routing, calendar silences.\nlanguage: markdown\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n",
+      "tool_call_id": "c1",
+      "name": "retrieve"
+    },
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "id": "c2",
+          "name": "agent_memory_search",
+          "arguments": {
+            "query": ""
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "content": "rec-page-history · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:\nrec-silence-cal · working · created:2025-07-27 · updated:2025-07-27 · scope:session · ns: · src: · maintenance silences are pre-declared in the ops calendar so planned work stays quiet\nrec-webhook-rotate · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src: · notifier webhook token rotates quarterly with the platform team; we only consume it from the secret store",
+      "tool_call_id": "c2",
+      "name": "agent_memory_search"
+    },
+    {
+      "role": "user",
+      "content": "Which channel do page escalations route to now?"
+    }
+  ],
+  "golden": {
+    "tool_calls": null,
+    "final_answer_criteria": "Names #dw-osprey-bridge as the destination for page escalations. Answers naming #dw-crow-watch (the pre-reshuffle channel from memory) or the general ops room score 0. An answer presenting both the correct and a competing value without committing to one scores 0."
+  },
+  "assembly_eval": {
+    "pair_id": "conv-pager-channel-recheck",
+    "mode": "mixed",
+    "candidate_ids": [
+      "27a9b3d14a59ee3b5ed4880c39f6a526340d788dbc7a52d8bd00258f5be6b628",
+      "8f3435a04994c3109bc26f3c1cfec9fbd7d5e45b4def84a8325020eebf86183e",
+      "d719a963594845e05ced182c4bf1be640f85ca1a6e2d81395ff4cc0989841609",
+      "rec-page-history",
+      "rec-silence-cal",
+      "rec-webhook-rotate"
+    ],
+    "estimated_prompt_tokens": 1249,
+    "state_digest": "b743bf6599f2a84b4926653bf1f7b34879940eab34df6b58f531e210b21daeff",
+    "subjects": [
+      "(c1|rag|internal/alert/notify.go)",
+      "(c1|rag|internal/alert/silence.go)",
+      "(c1|rag|docs/alerting.md)",
+      "(c2|memory|rec-page-history)",
+      "(c2|memory|rec-silence-cal)",
+      "(c2|memory|rec-webhook-rotate)"
+    ],
+    "stratum": "conversation_only",
+    "answer_home": "conversation",
+    "scenario_family": "pager-escalation-channel",
+    "budget": 1290,
+    "raw_state_tokens": 2150,
+    "pressure_level": "critical",
+    "shed_messages": 4,
+    "shed_bytes": 2800,
+    "omitted_subjects": 2
+  }
+}

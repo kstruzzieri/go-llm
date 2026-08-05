@@ -1,0 +1,147 @@
+{
+  "id": "conv-ingest-token-recheck-mixed",
+  "source": "assembly-corpus-mixed",
+  "captured_at": "0001-01-01T00:00:00Z",
+  "system": "You are the driftwatch assistant. driftwatch is a self-hosted telemetry ingest and alerting daemon. Answer using only the provided conversation, memory records, and retrieved context.",
+  "tools": null,
+  "turns": [
+    {
+      "role": "user",
+      "content": "Rotation retro plus forward planning today. Before the list: I keep coming back to the revocation gap - if a credential leaks mid-drain we have no reserved lane for an emergency cut, and my note from the retro says reserve the dwk3- prefix for exactly that. Park it until the end; the small items go first. The retro doc has the full argument written out, but the short version is that break-glass credentials sharing a lane with routine rotation are break-glass in name only."
+    },
+    {
+      "role": "assistant",
+      "content": "Parked the emergency-lane question with your retro note attached; taking the smaller items in order and keeping the rotation checklist open for the eventual decision."
+    },
+    {
+      "role": "user",
+      "content": "Staging still carries the drained legacy fixtures from the last rotation and the acceptance graphs double-count them, which means every retro chart needs a footnote explaining the bump. Clear the fixtures out so the numbers stand on their own before we circulate anything. While you are in staging, note which fixtures came from the load-test suite so the cleanup does not delete anything the suite still references."
+    },
+    {
+      "role": "assistant",
+      "content": "Cleared the drained fixtures from staging; the acceptance graphs now match the retro numbers without the footnote, and I regenerated the two charts that had already been circulated."
+    },
+    {
+      "role": "user",
+      "content": "The SDK release notes never got the follow-up entry saying the rotation completed. Integrators are still asking in the support channel whether the migration window is open, which is noise nobody needs. Add the closure note with the actual dates and link it from the channel topic."
+    },
+    {
+      "role": "assistant",
+      "content": "Added the closure entry with the actual migration dates and linked it from the support channel topic; the recurring question has a one-click answer now."
+    },
+    {
+      "role": "user",
+      "content": "The collector image build cache misses on every arm build since the base image bump; that is twenty extra minutes per merge and it lands right in the release crunch. Can someone repin the cache layers against the new base before the next crunch week starts? If repinning does not stick, split the arm build into its own cache scope; the base image bump should not keep taxing every merge."
+    },
+    {
+      "role": "assistant",
+      "content": "Repinned the cache layers against the new base image and verified an arm build lands back inside its old wall time on the second run."
+    },
+    {
+      "role": "user",
+      "content": "Pager rota drift again: the standby column in the oncall doc still shows the pre-rotation ordering, and the weekend handoff is going to route a page to somebody who is on leave. Sync it with the current rota before Friday, please."
+    },
+    {
+      "role": "assistant",
+      "content": "Synced the standby column with the current rota and asked the two leads to confirm the ordering before Friday's handoff."
+    },
+    {
+      "role": "user",
+      "content": "The lab box scratch volume filled overnight from the soak captures once more. Whatever quota we set clearly did not survive the reimage; put it back and this time verify it holds through a provisioning pass instead of assuming. Add the quota check to the provisioning smoke test as well so the next reimage fails loudly instead of silently dropping it."
+    },
+    {
+      "role": "assistant",
+      "content": "Reapplied the capture quota, verified it survives a reimage via the provisioning script, and freed the scratch volume for the morning benchmark runs."
+    },
+    {
+      "role": "user",
+      "content": "The ingest overview dashboard grew a duplicate row during the panel refactor and people keep screenshotting the wrong one into reports. Fold the duplicate back into the canonical row before the capacity review starts pulling numbers from it."
+    },
+    {
+      "role": "assistant",
+      "content": "Folded the duplicate row into the canonical one and pinned the board so report screenshots land on the right panels."
+    },
+    {
+      "role": "user",
+      "content": "Now the parked one, and let's decide it: the emergency revocation batch ships with the dwk3- prefix, reserved now and documented as break-glass only - the edge accepts it alongside the current set so an emergency cut does not wait on a config train. Checklist and runbook both get the entry."
+    },
+    {
+      "role": "assistant",
+      "content": "Recorded the emergency-lane decision in the rotation checklist and the runbook, marked break-glass only, with the edge acceptance note alongside the current set."
+    },
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "id": "c1",
+          "name": "retrieve",
+          "arguments": {
+            "query": "ingest token prefix accepted set",
+            "k": 3
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "content": "### source: \"internal/ingest/auth.go\"\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nnote: metadata overview (summary omitted: budget)\n--- source: \"internal/ingest/auth.go\" (lines 1-16, similarity: 1.00) ---\n1| package ingest\n2| \n3| import \"strings\"\n4| \n5| // authenticate checks the presented ingest token. Accepted prefixes\n6| // are supplied by deployment config so a rotation can be staged\n7| // without a rebuild; this file does not hard-code any prefix. Even\n8| // the dwk2- rollout shipped entirely through config for that reason.\n9| func (g *Gateway) authenticate(token string) bool {\n10| \tfor _, p := range g.cfg.AcceptedPrefixes {\n11| \t\tif strings.HasPrefix(token, p) {\n12| \t\t\treturn g.verify(token)\n13| \t\t}\n14| \t}\n15| \treturn false\n16| }\n\n### source: \"internal/ingest/limits.go\"\npurpose: Per-tenant token-bucket rate limiting with hot-reloaded rates.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n\n### source: \"docs/operations.md\"\nlanguage: markdown\nindexed: 2025-07-27T00:00:00Z\nnote: metadata overview (summary omitted: budget)\n",
+      "tool_call_id": "c1",
+      "name": "retrieve"
+    },
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "id": "c2",
+          "name": "agent_memory_search",
+          "arguments": {
+            "query": ""
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "content": "rec-checklist-home · working · created:2025-07-27 · updated:2025-07-27 · scope:session · ns: · src:\nrec-rotation-history · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:\nrec-support-rota · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:",
+      "tool_call_id": "c2",
+      "name": "agent_memory_search"
+    },
+    {
+      "role": "user",
+      "content": "Which prefix is reserved for the emergency revocation batch?"
+    }
+  ],
+  "golden": {
+    "tool_calls": null,
+    "final_answer_criteria": "States that the emergency revocation batch is reserved for the dwk3- prefix. Answering dwk2- (the completed rotation's prefix from memory) or only describing config-supplied prefixes scores 0. An answer presenting both the correct and a competing value without committing to one scores 0."
+  },
+  "assembly_eval": {
+    "pair_id": "conv-ingest-token-recheck",
+    "mode": "mixed",
+    "candidate_ids": [
+      "524f76002d4e73828a49c8dd027719b83c1117ea3e662a667c10fac1feebd215",
+      "98a3bc1b2eea75c949207c1824c69dbf82761bb2d84616751ffa96f227394c8f",
+      "b0e0aeb52f72729936efafa42a6d6cae742557e98ef7472652ad5a94d395e206",
+      "rec-checklist-home",
+      "rec-rotation-history",
+      "rec-support-rota"
+    ],
+    "estimated_prompt_tokens": 1380,
+    "state_digest": "fc791d0ce277f0519dce7a047623dd727cc296b915ce370eba76e0cb42a37a07",
+    "subjects": [
+      "(c1|rag|internal/ingest/auth.go)",
+      "(c1|rag|internal/ingest/limits.go)",
+      "(c1|rag|docs/operations.md)",
+      "(c2|memory|rec-checklist-home)",
+      "(c2|memory|rec-rotation-history)",
+      "(c2|memory|rec-support-rota)"
+    ],
+    "stratum": "conversation_only",
+    "answer_home": "conversation",
+    "scenario_family": "ingest-token-conv",
+    "budget": 1433,
+    "raw_state_tokens": 2388,
+    "pressure_level": "critical",
+    "shed_bytes": 3359
+  }
+}

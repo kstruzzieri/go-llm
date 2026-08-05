@@ -1,0 +1,140 @@
+{
+  "id": "conv-export-cutover-freeze-legacy",
+  "source": "assembly-corpus-mixed",
+  "captured_at": "0001-01-01T00:00:00Z",
+  "system": "You are the driftwatch assistant. driftwatch is a self-hosted telemetry ingest and alerting daemon. Answer using only the provided conversation, memory records, and retrieved context.",
+  "tools": null,
+  "turns": [
+    {
+      "role": "user",
+      "content": "Then the window stands as proposed: exporter config is frozen from tonight until 06:00 UTC Saturday, the oncall lead owns emergency overrides with a log entry each, and the freeze notice goes to the deploy channel now. After it lifts we do the migration retro Monday."
+    },
+    {
+      "role": "assistant",
+      "content": "Freeze notice posted to the deploy channel with the window, the override path, and the Monday retro."
+    },
+    {
+      "role": "user",
+      "content": "Add the freeze window to the ops calendar too so the automation stops proposing config rollouts inside it."
+    },
+    {
+      "role": "assistant",
+      "content": "Added; the rollout automation now sees the window and defers proposals until it lifts."
+    },
+    {
+      "role": "user",
+      "content": "The backlog panel should be pinned in the migration channel for the week. Easier than everyone bookmarking it separately."
+    },
+    {
+      "role": "assistant",
+      "content": "Pinned the backlog panel in the migration channel for the week."
+    },
+    {
+      "role": "user",
+      "content": "Brief the weekend oncall pair specifically; the freeze spans their whole shift and neither of them was in the sync."
+    },
+    {
+      "role": "assistant",
+      "content": "Briefed both weekend responders with the window, the override path, and the sign-off state."
+    },
+    {
+      "role": "user",
+      "content": "The migration log needs a section header per day or Thursday will be a wall of entries. Small thing, just do it."
+    },
+    {
+      "role": "assistant",
+      "content": "Added per-day section headers to the migration log through Sunday."
+    },
+    {
+      "role": "user",
+      "content": "The staging exporter can keep taking config changes, right? Confirm the freeze scoping excludes staging."
+    },
+    {
+      "role": "assistant",
+      "content": "Confirmed: the freeze covers production exporter config only; staging is explicitly out of scope."
+    },
+    {
+      "role": "user",
+      "content": "Last: archive the pre-flight thread into the migration folder so the retro has the decisions in one place."
+    },
+    {
+      "role": "assistant",
+      "content": "Archived the pre-flight thread with both closed items linked from the retro outline."
+    },
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "id": "c1",
+          "name": "retrieve",
+          "arguments": {
+            "query": "exporter config freeze cutover",
+            "k": 3
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "content": "### source: \"internal/export/exporter.go\"\npurpose: Warehouse exporter; endpoint and batch shape from deployment config.\noverview: exporter.go ships segments to the configured warehouse endpoint; cutovers are config changes and never automatic failovers.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n--- source: \"internal/export/exporter.go\" (lines 1-17, similarity: 1.00) ---\n1| package export\n2| \n3| import \"context\"\n4| \n5| // Exporter ships rolled segments to the warehouse endpoint. Endpoint,\n6| // credentials, and batch shape come from deployment config; a cutover\n7| // is a config change, not a rebuild, and the exporter never fails\n8| // over between endpoints on its own. Pre-rework freezes lifted at\n9| // 04:00 UTC; that convention never lived in this code.\n10| type Exporter struct {\n11| \tendpoint string\n12| \tbatch    BatchShape\n13| }\n14| \n15| func (e *Exporter) Run(ctx context.Context) error {\n16| \treturn e.shipLoop(ctx)\n17| }\n\n### source: \"internal/export/backlog.go\"\npurpose: Export backlog accounting in bytes with live drain estimates.\noverview: backlog.go tracks unshipped bytes and derives drain estimates from live throughput.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n--- source: \"internal/export/backlog.go\" (lines 1-16, similarity: 1.00) ---\n1| package export\n2| \n3| // backlog tracks what has rolled but not yet shipped. Bytes remaining\n4| // is the series drain estimates derive from; segment counts alone\n5| // mislead when segment sizes vary.\n6| type backlog struct {\n7| \tsegments int\n8| \tbytes    int64\n9| }\n10| \n11| func (b *backlog) drainEstimate(throughput float64) float64 {\n12| \tif throughput \u003c= 0 {\n13| \t\treturn -1\n14| \t}\n15| \treturn float64(b.bytes) / throughput\n16| }\n\n### source: \"docs/export.md\"\npurpose: Export guide: staged cutover with operator-chosen timing.\noverview: export.md covers the staged parallel-run cutover and operator-chosen flip timing for the warehouse exporter.\nlanguage: markdown\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n--- source: \"docs/export.md\" (lines 1-6, similarity: 1.00) ---\n1| # driftwatch export\n2| \n3| The exporter ships rolled segments to the warehouse; endpoint and\n4| batch shape are deployment config. Cutovers are staged: both endpoints\n5| run in parallel, the new side is verified, then the flip is signed\n6| off. Flip timing is an operator decision made with the warehouse team.\n",
+      "tool_call_id": "c1",
+      "name": "retrieve"
+    },
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "id": "c2",
+          "name": "agent_memory_search",
+          "arguments": {
+            "query": ""
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "content": "rec-freeze-history · semantic · 2025-07-27 · exporter maintenance freezes used to lift at 04:00 UTC before the warehouse rework; the old runbook still says so\nrec-override-log · semantic · 2025-07-27 · emergency config overrides during freezes are logged in the deploy channel with the oncall lead tagged\nrec-retro-slot · working · 2025-07-27 · the migration retro slot is Monday morning; the outline lives in the migration folder",
+      "tool_call_id": "c2",
+      "name": "agent_memory_search"
+    },
+    {
+      "role": "user",
+      "content": "Until when is the production exporter config frozen?"
+    }
+  ],
+  "golden": {
+    "tool_calls": null,
+    "final_answer_criteria": "States the production exporter config freeze holds until 06:00 UTC Saturday. Answering 04:00 UTC (the old freeze-lift time from memory) scores 0. An answer presenting both the correct and a competing value without committing to one scores 0."
+  },
+  "assembly_eval": {
+    "pair_id": "conv-export-cutover-freeze",
+    "mode": "legacy",
+    "candidate_ids": [
+      "0381df857b0e2b5c550c943b7461a7ea4938f1c20f7dac4c85d3525a94fefc75",
+      "24b95a56a54b653c07adb93149794116c8ccbba977b5b9b6d8d1e7778b2ed3ed",
+      "93828caf2a1220c0e91251b47a0d8d1874a8760dff669e4ddb6fab32ab55a6b3",
+      "rec-freeze-history",
+      "rec-override-log",
+      "rec-retro-slot"
+    ],
+    "estimated_prompt_tokens": 1177,
+    "state_digest": "73b79cb1500c4ad06f6dab731f7a12ea175353c0597533b88da7f0c8f4fecdda",
+    "subjects": [
+      "(c1|rag|internal/export/exporter.go)",
+      "(c1|rag|internal/export/backlog.go)",
+      "(c1|rag|docs/export.md)",
+      "(c2|memory|rec-freeze-history)",
+      "(c2|memory|rec-override-log)",
+      "(c2|memory|rec-retro-slot)"
+    ],
+    "stratum": "conversation_only",
+    "answer_home": "conversation",
+    "scenario_family": "export-cutover-conv",
+    "budget": 1240,
+    "raw_state_tokens": 2066,
+    "pressure_level": "critical",
+    "shed_messages": 6,
+    "shed_bytes": 2748
+  }
+}

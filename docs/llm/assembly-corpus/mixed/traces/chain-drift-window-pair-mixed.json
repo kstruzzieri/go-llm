@@ -1,0 +1,123 @@
+{
+  "id": "chain-drift-window-pair-mixed",
+  "source": "assembly-corpus-mixed",
+  "captured_at": "0001-01-01T00:00:00Z",
+  "system": "You are the driftwatch assistant. driftwatch is a self-hosted telemetry ingest and alerting daemon. Answer using only the provided conversation, memory records, and retrieved context.",
+  "tools": null,
+  "turns": [
+    {
+      "role": "user",
+      "content": "Drift detector section of the review is next; check your stored notes first, then pull the detector source so the section quotes the shipped mechanics, and keep the eval log paste for the end."
+    },
+    {
+      "role": "assistant",
+      "content": "Stored notes first, then the detector source; I will flag anywhere the notes and the code disagree before the section goes out."
+    },
+    {
+      "role": "user",
+      "content": "The review template also wants suppression counts for the quarter in the drift section; pull the count from the suppression log summary before writing the intro."
+    },
+    {
+      "role": "assistant",
+      "content": "Quarter's suppression count pulled from the log summary and cited in the intro, with the weekly breakdown linked for anyone who wants the shape of it."
+    },
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "id": "c1",
+          "name": "agent_memory_search",
+          "arguments": {
+            "query": ""
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "content": "rec-drift-gate · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src: · the drift gate covers warm-tier alerts only until the pilot review closes\nrec-eval-replays · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:\nrec-pilot-review · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:\nrec-review-section · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:\nrec-series-owners · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:\nrec-suppression-log · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:",
+      "tool_call_id": "c1",
+      "name": "agent_memory_search"
+    },
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "id": "c2",
+          "name": "retrieve",
+          "arguments": {
+            "query": "drift detector averaging",
+            "k": 3
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "content": "### source: \"internal/drift/detector.go\"\npurpose: Averaging-window constant and the z-style drift score.\noverview: detector.go pins the averaging window as a code constant after noise-chasing measurements and scores each series as deviation from its windowed mean.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n--- source: \"internal/drift/detector.go\" (lines 1-14, similarity: 1.00) ---\n1| package drift\n2| \n3| import \"time\"\n4| \n5| // driftWindow is the averaging window the detector scores against.\n6| // Shorter windows were measured to chase noise; the window is a\n7| // code constant and the alert thresholds are config, so tuning\n8| // sensitivity never silently changes what a score means.\n9| const driftWindow = 35 * time.Minute\n10| \n11| func (d *Detector) score(s series) float64 {\n12| \tbase := s.mean(driftWindow)\n13| \treturn (s.latest() - base) / s.stddev(driftWindow)\n14| }\n\n### source: \"internal/drift/route.go\"\npurpose: Tier-scoped routing with counterfactual suppression logging.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n\n### source: \"docs/drift-alerts.md\"\npurpose: Drift alerting guide: fixed-window scores, scoped routing, triage order.\noverview: drift-alerts.md explains fixed-window scoring for cross-fleet comparability, tier-scoped routing with reasoned counterfactual suppressions, and the logs-before-dashboards triage order postmortems keep vindicating.\nlanguage: markdown\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n",
+      "tool_call_id": "c2",
+      "name": "retrieve"
+    },
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "id": "c3",
+          "name": "fixture_echo",
+          "arguments": {
+            "content": "detector eval log from the staging replay, pasted verbatim:\n2025-07-26T04:12:00Z eval begin series=418 replayed_hours=6\n2025-07-26T04:12:09Z scored series=418 flagged=11 suppressed=2\n2025-07-26T04:12:09Z top offsets: srs-2214 z=4.1 srs-1808 z=3.7 srs-0917 z=3.2\n2025-07-26T04:12:10Z eval end verdict=clean drift_alerts_emitted=9\neval note: the 10-minute prototype window was abandoned after the false-positive storm in the pilot; nothing shipped with it and the replay harness no longer accepts it.\n"
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "content": "detector eval log from the staging replay, pasted verbatim:\n2025-07-26T04:12:00Z eval begin series=418 replayed_hours=6\n2025-07-26T04:12:09Z scored series=418 flagged=11 suppressed=2\n2025-07-26T04:12:09Z top offsets: srs-2214 z=4.1 srs-1808 z=3.7 srs-0917 z=3.2\n2025-07-26T04:12:10Z eval end verdict=clean drift_alerts_emitted=9\neval note: the 10-minute prototype window was abandoned after the false-positive storm in the pilot; nothing shipped with it and the replay harness no longer accepts it.\n",
+      "tool_call_id": "c3",
+      "name": "fixture_echo"
+    },
+    {
+      "role": "user",
+      "content": "What window does the drift detector average over, and which tier's alerts does the drift gate cover right now?"
+    }
+  ],
+  "golden": {
+    "tool_calls": null,
+    "final_answer_criteria": "BOTH halves required: the drift detector averages over a 35 minute window, AND the drift gate currently covers warm-tier alerts only. A missing half caps the score at 0.5; a stated but incorrect half scores 0. The abandoned 10-minute prototype window named in the pasted eval log scores 0 for the window half. An answer presenting both the correct and a competing value without committing to one scores 0."
+  },
+  "assembly_eval": {
+    "pair_id": "chain-drift-window-pair",
+    "mode": "mixed",
+    "candidate_ids": [
+      "1a36eda838822a60678d5140c450145650dc1a53ed10e6286b7e3013405c4547",
+      "aeace8320573fad839aee3e159a80485e3f60da9134cfc6fd6bb9545d2cd33a8",
+      "b499e2b237cd8058a1726a6c8b50dad3ac662bb1d33609f9a45dceb6db897dba",
+      "rec-drift-gate",
+      "rec-eval-replays",
+      "rec-pilot-review",
+      "rec-review-section",
+      "rec-series-owners",
+      "rec-suppression-log"
+    ],
+    "estimated_prompt_tokens": 927,
+    "state_digest": "24dc3db36b677a4e900eed0a379eefaf318d1cbfe5ad78d3212b009300824cc8",
+    "subjects": [
+      "(c1|memory|rec-drift-gate)",
+      "(c1|memory|rec-eval-replays)",
+      "(c1|memory|rec-pilot-review)",
+      "(c1|memory|rec-review-section)",
+      "(c1|memory|rec-series-owners)",
+      "(c1|memory|rec-suppression-log)",
+      "(c2|rag|internal/drift/detector.go)",
+      "(c2|rag|internal/drift/route.go)",
+      "(c2|rag|docs/drift-alerts.md)"
+    ],
+    "stratum": "chain_retention",
+    "answer_home": "join",
+    "scenario_family": "drift-window-chain",
+    "budget": 1125,
+    "raw_state_tokens": 1875,
+    "pressure_level": "critical",
+    "shed_bytes": 3439
+  }
+}

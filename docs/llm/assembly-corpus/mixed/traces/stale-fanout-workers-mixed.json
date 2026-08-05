@@ -1,0 +1,147 @@
+{
+  "id": "stale-fanout-workers-mixed",
+  "source": "assembly-corpus-mixed",
+  "captured_at": "0001-01-01T00:00:00Z",
+  "system": "You are the driftwatch assistant. driftwatch is a self-hosted telemetry ingest and alerting daemon. Answer using only the provided conversation, memory records, and retrieved context.",
+  "tools": null,
+  "turns": [
+    {
+      "role": "user",
+      "content": "Post-consolidation cleanup list. The pager consolidation left duplicate escalation policies in the paging service; can you merge them down to the one canonical policy before someone edits the wrong copy?"
+    },
+    {
+      "role": "assistant",
+      "content": "Merged the duplicates into the canonical policy and locked the retired copies read-only with a pointer to the survivor."
+    },
+    {
+      "role": "user",
+      "content": "The consolidation dashboard can be retired too, but archive the burn-down panel somewhere first; it is a nice record of the migration actually finishing."
+    },
+    {
+      "role": "assistant",
+      "content": "Archived the burn-down panel into the migrations folder and retired the rest of the consolidation dashboard."
+    },
+    {
+      "role": "user",
+      "content": "Can you also sweep the alert annotations for links to the old paging service? Anything that still deep-links there will break when it is decommissioned next month."
+    },
+    {
+      "role": "assistant",
+      "content": "Swept the annotations and rewrote the deep links to the new paging service; the decommission checklist now shows zero inbound references from alerting."
+    },
+    {
+      "role": "user",
+      "content": "The oncall shadow program needs its schedule refreshed as well; two of the listed shadows rotated teams during the consolidation."
+    },
+    {
+      "role": "assistant",
+      "content": "Refreshed the shadow schedule with two replacements and confirmed both have paging access in the new service."
+    },
+    {
+      "role": "user",
+      "content": "Finally, make sure the consolidation retro captures the fanout sizing discussion; people keep relitigating it from memory and the numbers deserve a written home."
+    },
+    {
+      "role": "assistant",
+      "content": "Added a fanout sizing section to the retro doc summarizing the discussion and linking the load test results that settled it."
+    },
+    {
+      "role": "user",
+      "content": "A few stragglers too. The paging test rotation that ran during the consolidation is still sending its weekly synthetic page to the old service; retarget it before someone treats a synthetic as real."
+    },
+    {
+      "role": "assistant",
+      "content": "Retargeted the synthetic page at the new service and labelled it clearly as synthetic in the alert body so a half-awake responder cannot mistake it."
+    },
+    {
+      "role": "user",
+      "content": "The escalation training doc for new oncallers predates the consolidation as well; it walks through screenshots of the old service and will just confuse the next cohort."
+    },
+    {
+      "role": "assistant",
+      "content": "Rewrote the training doc against the new service with fresh screenshots, and the next cohort's session is already booked to use it."
+    },
+    {
+      "role": "user",
+      "content": "And confirm the old paging service's data export completed before the decommission date; the compliance folks want the acknowledgement trail preserved."
+    },
+    {
+      "role": "assistant",
+      "content": "The export completed and the acknowledgement trail is archived in the compliance bucket with a retention hold; I sent the confirmation to the compliance folks."
+    },
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "id": "c1",
+          "name": "retrieve",
+          "arguments": {
+            "query": "alert fanout worker pool",
+            "k": 3
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "content": "### source: \"internal/alert/fanout.go\"\npurpose: Alert delivery fanout pool sizing and worker lifecycle.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n--- source: \"internal/alert/fanout.go\" (lines 1-22, similarity: 1.00) ---\n1| package alert\n2| \n3| import \"sync\"\n4| \n5| // fanoutWorkers is the delivery pool size. Widened after the pager\n6| // consolidation load tests: the old four-worker pool saturated when\n7| // every team's paging moved onto this daemon, and the soak confirmed\n8| // the wider pool holds the consolidated load.\n9| const fanoutWorkers = 12\n10| \n11| // Fanout drains fired alerts to the notifier through the worker pool.\n12| type Fanout struct {\n13| \tq  chan Alert\n14| \twg sync.WaitGroup\n15| }\n16| \n17| func (f *Fanout) Run() {\n18| \tfor i := 0; i \u003c fanoutWorkers; i++ {\n19| \t\tf.wg.Add(1)\n20| \t\tgo f.worker()\n21| \t}\n22| }\n\n### source: \"internal/alert/queue.go\"\npurpose: Bounded retry queue for failed alert deliveries with backoff ordering.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n\n### source: \"docs/alerting.md\"\npurpose: Alerting delivery guide: fanout pool, notifier path, bounded retries.\nlanguage: markdown\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n",
+      "tool_call_id": "c1",
+      "name": "retrieve"
+    },
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "id": "c2",
+          "name": "agent_memory_search",
+          "arguments": {
+            "query": ""
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "content": "rec-fanout-note · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src: · alert fanout still runs 4 delivery workers; hold at four until the pager consolidation soak finishes\nrec-pager-consol · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src: · pager consolidation is wrapping up; the retro doc collects the sizing discussions\nrec-shadow-rota · working · created:2025-07-27 · updated:2025-07-27 · scope:session · ns: · src:",
+      "tool_call_id": "c2",
+      "name": "agent_memory_search"
+    },
+    {
+      "role": "user",
+      "content": "How many delivery workers does the alert fanout run right now?"
+    }
+  ],
+  "golden": {
+    "tool_calls": null,
+    "final_answer_criteria": "States the alert fanout runs 12 delivery workers. An answer of 4 workers scores 0. An answer presenting both the correct and a competing value without committing to one scores 0."
+  },
+  "assembly_eval": {
+    "pair_id": "stale-fanout-workers",
+    "mode": "mixed",
+    "candidate_ids": [
+      "04304c6374aee32a9dac849eef3a78aa6e3d3687ada5d1002658a67e6e4192a4",
+      "68252ffd389b03f21337d4c7c623d9dc46b177c92d4c59380422d8533a7c2ecf",
+      "b58c09b45457070b8ca7cdd239e8b0b8d5fabbb6e28977dd49ef4a1e6b7ada61",
+      "rec-fanout-note",
+      "rec-pager-consol",
+      "rec-shadow-rota"
+    ],
+    "estimated_prompt_tokens": 1113,
+    "state_digest": "ee942cc3c8ad14e28530e6fc681d58d1ac23df06b4b1d6315be773245fc71663",
+    "subjects": [
+      "(c1|rag|internal/alert/fanout.go)",
+      "(c1|rag|internal/alert/queue.go)",
+      "(c1|rag|docs/alerting.md)",
+      "(c2|memory|rec-fanout-note)",
+      "(c2|memory|rec-pager-consol)",
+      "(c2|memory|rec-shadow-rota)"
+    ],
+    "stratum": "stale_vs_fresh",
+    "answer_home": "rag",
+    "scenario_family": "fanout-worker-staleness",
+    "budget": 1172,
+    "raw_state_tokens": 1954,
+    "pressure_level": "critical",
+    "shed_bytes": 2694
+  }
+}

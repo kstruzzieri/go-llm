@@ -1,0 +1,100 @@
+{
+  "id": "join-dedupe-window-edge-legacy",
+  "source": "assembly-corpus-mixed",
+  "captured_at": "0001-01-01T00:00:00Z",
+  "system": "You are the driftwatch assistant. driftwatch is a self-hosted telemetry ingest and alerting daemon. Answer using only the provided conversation, memory records, and retrieved context.",
+  "tools": null,
+  "turns": [
+    {
+      "role": "user",
+      "content": "The observability side wants the dedupe hit counters exported per edge rather than fleet-aggregated for the rollout period, so the canary's behaviour is visible on its own instead of being averaged away."
+    },
+    {
+      "role": "assistant",
+      "content": "Split the dedupe hit counters per edge for the rollout period with a rollup view kept for the fleet number; the canary has its own panel now."
+    },
+    {
+      "role": "user",
+      "content": "Decision from the rollout review, so we are aligned: the pre-GA 45-second window stays dead where the changelog left it, the shipped default stays where the code has it, and the canary edge is pinned to a 300-second dedupe window for the burn-in fortnight."
+    },
+    {
+      "role": "assistant",
+      "content": "Aligned: the canary edge holds the 300-second dedupe window for the fortnight, shipped default untouched, and the pin carries a review date so it cannot silently become permanent."
+    },
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "id": "c1",
+          "name": "retrieve",
+          "arguments": {
+            "query": "ingest duplicate rejection behaviour",
+            "k": 3
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "content": "### source: \"internal/ingest/batchkey.go\"\npurpose: Batch fingerprinting for duplicate detection: retry-stable keys, stable shard placement.\noverview: batchkey.go derives retry-stable batch fingerprints from tenant, producer, and payload digest, and buckets them into dedupe shards stably across restarts so recovery preserves window placement.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n--- source: \"internal/ingest/batchkey.go\" (lines 1-37, similarity: 1.00) ---\n1| package ingest\n2| \n3| import (\n4| \t\"crypto/sha256\"\n5| \t\"encoding/binary\"\n6| \t\"encoding/hex\"\n7| )\n8| \n9| // batchKey fingerprints one accepted batch for duplicate detection.\n10| // The key covers tenant, producer, and the content digest, but\n11| // deliberately NOT the receive timestamp: a producer that retries the\n12| // same batch after a network error must collide with its earlier\n13| // self, and timestamps would make every retry unique.\n14| func batchKey(tenant, producer string, payload []byte) string {\n15| \th := sha256.New()\n16| \th.Write([]byte(tenant))\n17| \th.Write([]byte{0})\n18| \th.Write([]byte(producer))\n19| \th.Write([]byte{0})\n20| \tvar n [8]byte\n21| \tbinary.BigEndian.PutUint64(n[:], uint64(len(payload)))\n22| \th.Write(n[:])\n23| \th.Write(payload)\n24| \treturn hex.EncodeToString(h.Sum(nil)[:16])\n25| }\n26| \n27| // shardFor buckets a key into one of the dedupe shards. Sharding is\n28| // stable across restarts so a key seen before a crash lands in the\n29| // same shard's window after recovery, and a fleet of edges spreads\n30| // keys identically for the same shard count.\n31| func shardFor(key string, shards int) int {\n32| \tvar v uint32\n33| \tfor i := 0; i \u003c 4 \u0026\u0026 i \u003c len(key); i++ {\n34| \t\tv = v\u003c\u003c8 | uint32(key[i])\n35| \t}\n36| \treturn int(v % uint32(shards))\n37| }\n\n### source: \"internal/ingest/dedupe.go\"\npurpose: Duplicate rejection window: shipped default horizon, per-edge pin via config.\noverview: dedupe.go remembers batch keys for the shipped default window in per-shard maps, lets edges pin a different window through deployment config during rollouts, and expires entries lazily on scan.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n--- source: \"internal/ingest/dedupe.go\" (lines 1-38, similarity: 1.00) ---\n1| package ingest\n2| \n3| import (\n4| \t\"sync\"\n5| \t\"time\"\n6| )\n7| \n8| // dedupeWindow is the shipped default for how long a batch key is\n9| // remembered for duplicate rejection. Edges may pin a different\n10| // window through deployment config during rollouts; the constant is\n11| // the fleet posture, not a per-edge promise.\n12| const dedupeWindow = 120 * time.Second\n13| \n14| // window holds recently seen keys with their first-seen times. One\n15| // window per shard keeps lock contention bounded under burst load.\n16| type window struct {\n17| \tmu   sync.Mutex\n18| \tseen map[string]time.Time\n19| }\n20| \n21| // duplicate reports whether the key was already seen inside the\n22| // window, recording it either way. Expiry is lazy: stale entries are\n23| // dropped by the scan that finds them rather than by a sweeper, so an\n24| // idle shard costs nothing until traffic returns to it.\n25| func (w *window) duplicate(key string, now time.Time, ttl time.Duration) bool {\n26| \tw.mu.Lock()\n27| \tdefer w.mu.Unlock()\n28| \tif first, ok := w.seen[key]; ok \u0026\u0026 now.Sub(first) \u003c= ttl {\n29| \t\treturn true\n30| \t}\n31| \tfor k, t := range w.seen {\n32| \t\tif now.Sub(t) \u003e ttl {\n33| \t\t\tdelete(w.seen, k)\n34| \t\t}\n35| \t}\n36| \tw.seen[key] = now\n37| \treturn false\n38| }\n\n### source: \"docs/dedupe.md\"\npurpose: Dedupe guide: key derivation, memory horizon, rollout pins.\noverview: dedupe.md explains duplicate rejection behind admission: retry-stable keys, the remembered-window horizon, and config-pinned windows during rollouts with review dates.\nlanguage: markdown\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n--- source: \"docs/dedupe.md\" (lines 1-20, similarity: 1.00) ---\n1| # driftwatch dedupe\n2| \n3| Duplicate rejection sits behind admission: a batch that clears auth\n4| and rate limits is fingerprinted, and a key already inside the\n5| remembered window is rejected as a duplicate rather than double\n6| counted.\n7| \n8| ## The window\n9| \n10| The remembered window is the memory horizon of the whole mechanism: a\n11| retry inside it collides, a retry after it lands as new data. The\n12| shipped default lives in the dedupe code; edges under rollout may pin\n13| a different window through deployment config, and pins carry a review\n14| date so they do not fossilize.\n15| \n16| ## Operational notes\n17| \n18| Hit counters are the health signal. A rising duplicate rate usually\n19| means a producer stuck in a retry loop, not real duplicate data;\n20| check the producer before touching the window.\n",
+      "tool_call_id": "c1",
+      "name": "retrieve"
+    },
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "id": "c2",
+          "name": "agent_memory_search",
+          "arguments": {
+            "query": ""
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "content": "rec-canary-panel · working · 2025-07-27 · canary dedupe counters have their own panel for the rollout period; the fleet rollup stays on the main board\nrec-capture-cap · semantic · 2025-07-27 · canary host capture volume is capped; captures rotate oldest-first at the cap\nrec-rollout-review · semantic · 2025-07-27 · edge rollout reviews happen twice weekly during burn-in; decisions land in the rollout thread",
+      "tool_call_id": "c2",
+      "name": "agent_memory_search"
+    },
+    {
+      "role": "user",
+      "content": "So the runbook reads right: what dedupe window does the shipped default hold, and what is the canary edge pinned to for the burn-in?"
+    }
+  ],
+  "golden": {
+    "tool_calls": null,
+    "final_answer_criteria": "BOTH halves required: the shipped dedupe default remembers keys for 120 seconds, AND the canary edge is pinned to a 300-second dedupe window for the burn-in. A missing half caps the score at 0.5; a stated but incorrect half scores 0. An answer giving the pre-GA 45-second window scores 0. An answer presenting both the correct and a competing value without committing to one scores 0."
+  },
+  "assembly_eval": {
+    "pair_id": "join-dedupe-window-edge",
+    "mode": "legacy",
+    "candidate_ids": [
+      "375576cc57768d37e7c8a72e968660682d3c2cce94b30ef3c2e2138e4899cfa5",
+      "6ff52eebd441e9efe244cda1c89374832044cab83315626cbe8eecd8a482d58e",
+      "afed7ef1fe33b22e3946e3b6fd941c3efb4c7f3b21a07e6eba5aa1a3f86a795e",
+      "rec-canary-panel",
+      "rec-capture-cap",
+      "rec-rollout-review"
+    ],
+    "estimated_prompt_tokens": 1582,
+    "state_digest": "7fc94ee4aa946cbaf38463f6cce971bcf1c6db19b658a2eecedd35133d076398",
+    "subjects": [
+      "(c1|rag|internal/ingest/batchkey.go)",
+      "(c1|rag|internal/ingest/dedupe.go)",
+      "(c1|rag|docs/dedupe.md)",
+      "(c2|memory|rec-canary-panel)",
+      "(c2|memory|rec-capture-cap)",
+      "(c2|memory|rec-rollout-review)"
+    ],
+    "stratum": "cross_domain_join",
+    "answer_home": "join",
+    "scenario_family": "dedupe-window-join",
+    "budget": 1707,
+    "raw_state_tokens": 2845,
+    "pressure_level": "critical",
+    "shed_messages": 10,
+    "shed_bytes": 4427
+  }
+}

@@ -1,0 +1,131 @@
+{
+  "id": "conv-tenant-rate-floor-mixed",
+  "source": "assembly-corpus-mixed",
+  "captured_at": "0001-01-01T00:00:00Z",
+  "system": "You are the driftwatch assistant. driftwatch is a self-hosted telemetry ingest and alerting daemon. Answer using only the provided conversation, memory records, and retrieved context.",
+  "tools": null,
+  "turns": [
+    {
+      "role": "user",
+      "content": "Capacity call just wrapped and it ran long, but we settled the unnamed-tenant question at last: the built-in ingest default moves to 250 batches/min so a new integration can onboard and prove itself without waiting on a tenants-file PR, with the explicit-stanza expectation unchanged for production. Get the change queued; the rest of my list is small stuff."
+    },
+    {
+      "role": "assistant",
+      "content": "Queued the default change with the capacity call linked as the decision record, and the explicit-stanza expectation left as-is in the guide. Ready for the small stuff."
+    },
+    {
+      "role": "user",
+      "content": "The tenants file lint still only runs in the main repo; the infra repo bypasses it and that is where half the stanza edits actually happen. Finish the rollout so both repos gate on it before the next batch of edits lands."
+    },
+    {
+      "role": "assistant",
+      "content": "Enabled the lint gate in the infra repo; both repos now block malformed stanzas at review time."
+    },
+    {
+      "role": "user",
+      "content": "Two tenants still have no team tag after the reorg and the capacity summary lists them as orphans every month. Chase their owners down and get the stanzas tagged before the next summary goes out."
+    },
+    {
+      "role": "assistant",
+      "content": "Both orphan stanzas are tagged now; the next capacity summary will group them under the right teams."
+    },
+    {
+      "role": "user",
+      "content": "The standby ingest node is two releases behind instead of the deliberate one. Promote it through one release so the failover story stays inside policy."
+    },
+    {
+      "role": "assistant",
+      "content": "Promoted the standby through one release after its soak; it is now the policy-correct single release behind."
+    },
+    {
+      "role": "user",
+      "content": "Ingest overview dashboard: the admissions panel still plots the old bucket refill series that stopped updating in the refactor. Swap in the live series and drop the dead one before someone reads a flatline as an outage."
+    },
+    {
+      "role": "assistant",
+      "content": "Swapped the admissions panel to the live refill series and removed the dead one from the board."
+    },
+    {
+      "role": "user",
+      "content": "Last item: the failover drill notes from March never made it into the drills folder. Move them over and link the slow-reload fix verification while you are in there."
+    },
+    {
+      "role": "assistant",
+      "content": "Moved the March drill notes into the drills folder with the slow-reload fix verification linked."
+    },
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "id": "c1",
+          "name": "retrieve",
+          "arguments": {
+            "query": "tenant ingest default rate limits",
+            "k": 3
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "content": "### source: \"internal/ingest/limits.go\"\npurpose: Per-tenant token-bucket rate limiting with hot-reloaded rates.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n--- source: \"internal/ingest/limits.go\" (lines 1-52, similarity: 1.00) ---\n1| package ingest\n2| \n3| import (\n4| \t\"sync\"\n5| \t\"time\"\n6| )\n7| \n8| // tenantLimiter is a per-tenant token bucket. Buckets are created\n9| // lazily on first sight of a tenant and refilled on a fixed tick; the\n10| // per-tenant rates come from the tenants file and hot-reload with it.\n11| type tenantLimiter struct {\n12| \tmu      sync.Mutex\n13| \tbuckets map[string]*bucket\n14| \ttick    time.Duration\n15| }\n16| \n17| type bucket struct {\n18| \ttokens float64\n19| \trate   float64\n20| \tburst  float64\n21| \tlast   time.Time\n22| }\n23| \n24| // allow reports whether one accepted batch fits the tenant's current\n25| // budget. Unknown tenants get the default rate until the tenants file\n26| // names them explicitly; the default is deliberately conservative so a\n27| // new integration cannot crowd out established ones. The evaluation\n28| // default of 40 batches/min long predates the capacity work.\n29| func (l *tenantLimiter) allow(tenant string, now time.Time) bool {\n30| \tl.mu.Lock()\n31| \tdefer l.mu.Unlock()\n32| \tb, ok := l.buckets[tenant]\n33| \tif !ok {\n34| \t\tb = l.newBucket(tenant)\n35| \t\tl.buckets[tenant] = b\n36| \t}\n37| \tb.refill(now)\n38| \tif b.tokens \u003c 1 {\n39| \t\treturn false\n40| \t}\n41| \tb.tokens--\n42| \treturn true\n43| }\n44| \n45| func (b *bucket) refill(now time.Time) {\n46| \telapsed := now.Sub(b.last).Seconds()\n47| \tb.tokens += elapsed * b.rate\n48| \tif b.tokens \u003e b.burst {\n49| \t\tb.tokens = b.burst\n50| \t}\n51| \tb.last = now\n52| }\n\n### source: \"internal/ingest/tenants.go\"\npurpose: Tenants-file stanzas: rates, tags, hot reload with loud parse errors.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n\n### source: \"docs/tenants.md\"\nlanguage: markdown\nindexed: 2025-07-27T00:00:00Z\nnote: metadata overview (summary omitted: budget)\n",
+      "tool_call_id": "c1",
+      "name": "retrieve"
+    },
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "id": "c2",
+          "name": "agent_memory_search",
+          "arguments": {
+            "query": ""
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "content": "rec-capacity-cycle · working · created:2025-07-27 · updated:2025-07-27 · scope:session · ns: · src:\nrec-eval-default · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:\nrec-tenant-tags · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:",
+      "tool_call_id": "c2",
+      "name": "agent_memory_search"
+    },
+    {
+      "role": "user",
+      "content": "What built-in default rate for unnamed tenants did the capacity call land on?"
+    }
+  ],
+  "golden": {
+    "tool_calls": null,
+    "final_answer_criteria": "States the built-in default is 250 batches/min for tenants the tenants file does not name. Answering 40 batches/min (the stale evaluation default from memory) scores 0. An answer presenting both the correct and a competing value without committing to one scores 0."
+  },
+  "assembly_eval": {
+    "pair_id": "conv-tenant-rate-floor",
+    "mode": "mixed",
+    "candidate_ids": [
+      "283296b9d91d8d7751b7fe1449d88193e3b3a4076a79275297b16330ac1cae1a",
+      "434725cad95e007a01bb293c0d2ecf3b89c10f8c0f3df27d173c03a0b174fce2",
+      "6b814915305aef55314a325bc4eedfd5781b80d418a095935b37409ac5c71e48",
+      "rec-capacity-cycle",
+      "rec-eval-default",
+      "rec-tenant-tags"
+    ],
+    "estimated_prompt_tokens": 1154,
+    "state_digest": "f2fea8f3968c68ec3dadb3f22c9c4d810b8a3773aadef7d480e81bc49bd16e59",
+    "subjects": [
+      "(c1|rag|internal/ingest/limits.go)",
+      "(c1|rag|internal/ingest/tenants.go)",
+      "(c1|rag|docs/tenants.md)",
+      "(c2|memory|rec-capacity-cycle)",
+      "(c2|memory|rec-eval-default)",
+      "(c2|memory|rec-tenant-tags)"
+    ],
+    "stratum": "conversation_only",
+    "answer_home": "conversation",
+    "scenario_family": "tenant-default-rate-conv",
+    "budget": 1207,
+    "raw_state_tokens": 2012,
+    "pressure_level": "critical",
+    "shed_bytes": 2888
+  }
+}

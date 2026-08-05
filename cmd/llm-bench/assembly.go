@@ -29,16 +29,40 @@ type AssemblyMode string
 const (
 	AssemblyFlat        AssemblyMode = "flat"        // frozen BuildContext
 	AssemblyProgressive AssemblyMode = "progressive" // RenderProgressive, same budget
+
+	// Slice 3c (#331) agent-State arms: legacy vs mixed assembly of the SAME
+	// frozen State under one input budget; topline is the unpaired
+	// full-State ceiling arm (descriptive only, never enters pairing).
+	AssemblyLegacy  AssemblyMode = "legacy"
+	AssemblyMixed   AssemblyMode = "mixed"
+	AssemblyTopline AssemblyMode = "topline"
 )
 
 // AssemblyEval is the per-trace assembly-eval metadata. Both arms of a pair
 // share PairID and must carry identical CandidateIDs (asserted at report
-// time; a mismatch invalidates the case rather than skewing it).
+// time; a mismatch invalidates the case rather than skewing it). The
+// legacy-mixed kind additionally pair-checks StateDigest and Budget.
 type AssemblyEval struct {
 	PairID                string       `json:"pair_id"`
 	Mode                  AssemblyMode `json:"mode"`
 	CandidateIDs          []string     `json:"candidate_ids"`
 	EstimatedPromptTokens int          `json:"estimated_prompt_tokens"`
+
+	// Slice 3c (legacy/mixed/topline) metadata, filled by the 3c builder.
+	// All omitempty so existing 3a trace JSON stays byte-identical.
+	StateDigest     string   `json:"state_digest,omitempty"`     // sha256 of the canonical pre-assembly State
+	Subjects        []string `json:"subjects,omitempty"`         // ORDERED, non-deduplicated "(callID|domain|subjectID)" entries
+	Stratum         string   `json:"stratum,omitempty"`          // corpus stratum (drives the stratified bootstrap)
+	AnswerHome      string   `json:"answer_home,omitempty"`      // where the answer-bearing evidence lives
+	ScenarioFamily  string   `json:"scenario_family,omitempty"`  // bootstrap cluster ID; empty = own cluster
+	TwinGroup       string   `json:"twin_group,omitempty"`       // descriptive lane-bias label; may span strata, never a clustering unit
+	Control         bool     `json:"control,omitempty"`          // negative-control pair, excluded from the verdict
+	Budget          int      `json:"budget,omitempty"`           // TokenBudget.Input, identical across both arms
+	RawStateTokens  int      `json:"raw_state_tokens,omitempty"` // pre-assembly State size
+	PressureLevel   string   `json:"pressure_level,omitempty"`   // per-arm pressure tier
+	ShedMessages    int      `json:"shed_messages,omitempty"`    // full-state msg count minus assembled
+	ShedBytes       int      `json:"shed_bytes,omitempty"`       // full-state byte count minus assembled
+	OmittedSubjects int      `json:"omitted_subjects,omitempty"` // mixed arm only
 }
 
 // assemblyCase is one QA case in the corpus fixture. Chunks are whole-file
@@ -146,29 +170,56 @@ func assemblyBuild(ctx context.Context, fixturePath, outDir string) error {
 	return nil
 }
 
-func buildAssemblyCase(ctx context.Context, c assemblyCase, outDir string) error {
-	chunkIDs := make([]string, len(c.Sources))
-	seenChunkIDs := make(map[string]string, len(c.Sources))
-	for i, source := range c.Sources {
+// assemblyRig is the seeded 3a fixture store plus the retriever built over
+// it. Shared by the 3a case builder and the 3c mixed-state builder so both
+// corpora retrieve from an identically seeded store; chunkIDs maps each source
+// path to its seeded chunk ID (one chunk per source by construction), which
+// the mixed builder uses to restate rag group subjects (source paths) in the
+// 3a chunk-ID candidate vocabulary.
+type assemblyRig struct {
+	store    *rag.SQLiteStore
+	retr     *rag.Retriever
+	chunkIDs map[string]string // source path -> seeded chunk ID
+}
+
+// Close releases the underlying in-memory store.
+func (r *assemblyRig) Close() error { return r.store.Close() }
+
+// seedAssemblyRig seeds an in-memory rag store from fixture sources exactly as
+// the 3a builder always has (provenance-complete sources, rank embeddings,
+// pinned indexed_at epoch, atomic abstract/overview summaries) and returns the
+// retriever over it. Extracted from buildAssemblyCase unchanged; 3a behavior
+// stays byte-identical.
+func seedAssemblyRig(ctx context.Context, sources []assemblySource) (*assemblyRig, error) {
+	chunkIDs := make([]string, len(sources))
+	byPath := make(map[string]string, len(sources))
+	seenChunkIDs := make(map[string]string, len(sources))
+	for i, source := range sources {
 		chunkIDs[i] = assemblyChunkID(source.Path, source.Content)
 		if previous, ok := seenChunkIDs[chunkIDs[i]]; ok {
-			return fmt.Errorf("source %q: chunk ID collides with source %q", source.Path, previous)
+			return nil, fmt.Errorf("source %q: chunk ID collides with source %q", source.Path, previous)
 		}
 		seenChunkIDs[chunkIDs[i]] = source.Path
+		byPath[source.Path] = chunkIDs[i]
 	}
 
 	store, err := rag.NewSQLiteStore(":memory:")
 	if err != nil {
-		return err
+		return nil, err
 	}
-	defer func() { _ = store.Close() }()
+	ok := false
+	defer func() {
+		if !ok {
+			_ = store.Close()
+		}
+	}()
 
 	// Seed provenance-complete sources: one chunk per source. The fixture's
 	// source order is the intended retrieval order; deterministic unit vectors
 	// make that order explicit instead of deriving accidental relevance from
 	// content hashes.
 	const vectorSpaceID = "assembly-fixture-space"
-	for i, s := range c.Sources {
+	for i, s := range sources {
 		chunk := rag.Chunk{
 			ID:        chunkIDs[i],
 			Content:   s.Content,
@@ -181,7 +232,7 @@ func buildAssemblyCase(ctx context.Context, c assemblyCase, outDir string) error
 		if err := store.ReplaceSourceWithHashAndVectorSpaceID(
 			ctx, s.Path, []rag.Chunk{chunk}, [][]float64{emb},
 			assemblySourceSignature(s.Content), vectorSpaceID); err != nil {
-			return fmt.Errorf("seed source %q: %w", s.Path, err)
+			return nil, fmt.Errorf("seed source %q: %w", s.Path, err)
 		}
 	}
 	// The store stamps indexed_at with time.Now(); the progressive renderer
@@ -190,18 +241,18 @@ func buildAssemblyCase(ctx context.Context, c assemblyCase, outDir string) error
 	// depends on the wall clock.
 	if _, err := store.DB().ExecContext(ctx,
 		"UPDATE chunks SET indexed_at = ?", assemblyFixedEpoch); err != nil {
-		return fmt.Errorf("pin indexed_at: %w", err)
+		return nil, fmt.Errorf("pin indexed_at: %w", err)
 	}
-	prov, err := store.SourceProvenanceBatch(ctx, sourcePaths(c.Sources))
+	prov, err := store.SourceProvenanceBatch(ctx, sourcePaths(sources))
 	if err != nil {
-		return err
+		return nil, err
 	}
-	for _, s := range c.Sources {
+	for _, s := range sources {
 		if s.Abstract == "" {
 			continue
 		}
 		if s.Overview == "" {
-			return fmt.Errorf("source %q: abstract without overview (atomic pair)", s.Path)
+			return nil, fmt.Errorf("source %q: abstract without overview (atomic pair)", s.Path)
 		}
 		p := prov[s.Path]
 		if err := store.UpsertSourceSummary(ctx, rag.SourceSummary{
@@ -210,15 +261,26 @@ func buildAssemblyCase(ctx context.Context, c assemblyCase, outDir string) error
 			SummaryModel: "assembly-fixture", FormatVersion: rag.SourceSummaryFormatVersion,
 			SummarizedAt: assemblyFixedEpoch,
 		}); err != nil {
-			return err
+			return nil, err
 		}
 	}
 
 	retr, err := rag.NewRetrieverWithEmbedder(assemblyQueryEmbedder(), store,
 		rag.WithRetrieverModel("assembly-fixture"), rag.WithVectorOnly())
 	if err != nil {
+		return nil, err
+	}
+	ok = true
+	return &assemblyRig{store: store, retr: retr, chunkIDs: byPath}, nil
+}
+
+func buildAssemblyCase(ctx context.Context, c assemblyCase, outDir string) error {
+	rig, err := seedAssemblyRig(ctx, c.Sources)
+	if err != nil {
 		return err
 	}
+	defer func() { _ = rig.Close() }()
+	retr := rig.retr
 	// Selection runs ONCE; both arms render this exact slice.
 	results, err := retr.Retrieve(ctx, c.Question, len(c.Sources))
 	if err != nil {
@@ -318,8 +380,15 @@ func validateAssemblyCase(c assemblyCase) error {
 	if c.AnswerLiteral != "" && strings.TrimSpace(c.AnswerLiteral) == "" {
 		return fmt.Errorf("answer_literal is whitespace-only; omit it or anchor it")
 	}
-	seen := make(map[string]struct{}, len(c.Sources))
-	for i, s := range c.Sources {
+	return validateAssemblySources(c.Sources)
+}
+
+// validateAssemblySources is the per-source validation shared by the 3a case
+// fixture (Sources) and the 3c mixed fixture (RagSources): non-blank path and
+// content, unique paths, and the atomic abstract/overview pair.
+func validateAssemblySources(sources []assemblySource) error {
+	seen := make(map[string]struct{}, len(sources))
+	for i, s := range sources {
 		if strings.TrimSpace(s.Path) == "" || strings.TrimSpace(s.Content) == "" {
 			return fmt.Errorf("source %d: path and content are required", i)
 		}
@@ -398,7 +467,13 @@ func readAssemblyManifest(outDir string) (assemblyManifest, error) {
 }
 
 func validAssemblyTraceFilename(name string) bool {
-	for _, suffix := range []string{"-flat.json", "-progressive.json"} {
+	// 3a flat/progressive plus the 3c mixed-corpus arms; the two corpora live
+	// in separate directories with separate manifests, but share this shape
+	// check (case ID + known arm suffix).
+	for _, suffix := range []string{
+		"-flat.json", "-progressive.json",
+		"-legacy.json", "-mixed.json", "-topline.json",
+	} {
 		if strings.HasSuffix(name, suffix) {
 			return validAssemblyCaseID(strings.TrimSuffix(name, suffix))
 		}
@@ -568,11 +643,19 @@ func sourcePaths(srcs []assemblySource) []string {
 }
 
 func writeTraceJSON(path string, tr Trace) error {
-	raw, err := json.MarshalIndent(tr, "", "  ")
+	raw, err := marshalTraceJSON(tr)
 	if err != nil {
 		return err
 	}
-	return writeFileAtomic(path, append(raw, '\n'))
+	return writeFileAtomic(path, raw)
+}
+
+func marshalTraceJSON(tr Trace) ([]byte, error) {
+	raw, err := json.MarshalIndent(tr, "", "  ")
+	if err != nil {
+		return nil, err
+	}
+	return append(raw, '\n'), nil
 }
 
 func writeFileAtomic(path string, data []byte) error {
@@ -633,6 +716,23 @@ func assemblyDecision(ciLo, ciHi, medianReduction float64) string {
 	}
 }
 
+// canonicalStat rounds a derived report statistic to 12 decimal places so
+// the emitted float is identical across architectures: arm64 FMA contraction
+// shifts the bootstrap accumulator's last ULP relative to amd64, which broke
+// the committed-report byte-identity gate (external PR review round 2 P1).
+// 1e-12 is far below label precision (a 0/0.5/1 rubric) and every reporting
+// threshold. Applied to EVERY derived float the report emits. Decision rules
+// deliberately consume their raw statistics; rounding a displayed value must
+// never alter a registered threshold comparison. Collapses -0 to 0 so
+// rounding a tiny negative never emits "-0".
+func canonicalStat(x float64) float64 {
+	c := math.Round(x*1e12) / 1e12
+	if c == 0 {
+		return 0
+	}
+	return c
+}
+
 // AssemblyReport is the -assembly-report output.
 type AssemblyReport struct {
 	SchemaVersion        string                `json:"schema_version"` // "llm-bench-assembly/v1"
@@ -641,6 +741,23 @@ type AssemblyReport struct {
 	Models               []AssemblyModelReport `json:"models"`
 	BootstrapSeed        int64                 `json:"bootstrap_seed"`
 	BootstrapN           int                   `json:"bootstrap_n"`
+
+	// Slice 3c sections (legacy-mixed kind + topline ceiling). All omitempty
+	// so a flat-progressive-only report stays byte-identical to the 3a schema.
+	LegacyMixedDecisionRule string                     `json:"legacy_mixed_decision_rule,omitempty"`
+	LegacyMixedModels       []AssemblyMixedModelReport `json:"legacy_mixed_models,omitempty"`
+	Topline                 []AssemblyToplineReport    `json:"topline,omitempty"`
+	// CaptureManifest embeds the verified capture run manifest's identity
+	// (#331 W3, -capture-manifest). Omitted when the report ran without one —
+	// the W4 README requires it for the registered run.
+	CaptureManifest *AssemblyCaptureManifest `json:"capture_manifest,omitempty"`
+}
+
+// AssemblyCaptureManifest is the report's embedded capture-manifest
+// reference: the manifest FILE's sha256 digest and its artifact count.
+type AssemblyCaptureManifest struct {
+	Digest        string `json:"digest"`
+	ArtifactCount int    `json:"artifact_count"`
 }
 
 // AssemblyModelReport keeps assembly effects separate by candidate model.
@@ -659,11 +776,30 @@ type AssemblyModelReport struct {
 	Deltas               []float64 `json:"deltas"` // lexicographic pair-ID order ("case-10" < "case-2")
 }
 
-// computeAssemblyReport pairs artifacts on (PairID, CandidateModel), joins
-// human labels by ArtifactHash, and applies the decision rule. Cases with
-// unequal candidate sets are invalid; cases missing an arm or a label are
-// pairing gaps. Both are excluded from the deltas and counted.
-func computeAssemblyReport(arts []Artifact, labels []Label, seed int64, bootstrapN int) (*AssemblyReport, error) {
+// assemblyReportExtras carries the optional W3 report inputs. The zero value
+// reproduces the pre-W3 report exactly.
+type assemblyReportExtras struct {
+	// capture is the -capture-manifest verification set (nil = no manifest);
+	// captureRef is the embedded {digest, artifact_count} reference.
+	capture    *captureVerification
+	captureRef *AssemblyCaptureManifest
+	// sideResolver resolves forced-choice A/B sides; nil defaults to the
+	// pre-sidemap parity rule (fcParityResolver). armGuess is set iff a
+	// sealed sidemap backed the resolver — it enables the descriptive
+	// arm-guess blinding audit and nothing else.
+	sideResolver fcSideResolver
+	armGuess     bool
+}
+
+// computeAssemblyReport pairs artifacts on (kind, PairID, CandidateModel) —
+// kind derives from each artifact's mode (flat/progressive => the 3a
+// flat-progressive kind, legacy/mixed => the 3c legacy-mixed kind) so one
+// PairID may appear under both kinds without collision — joins human labels
+// by ArtifactHash, and applies each kind's decision rule. Topline artifacts
+// never pair; they feed the descriptive ceiling section. Flat-progressive
+// cases with unequal candidate sets are invalid; cases missing an arm or a
+// label are pairing gaps. Both are excluded from the deltas and counted.
+func computeAssemblyReport(arts []Artifact, labels []Label, seed int64, bootstrapN int, fcPrefs []FCPreference, extras assemblyReportExtras) (*AssemblyReport, error) {
 	matched, _, err := matchLabels(labels, arts)
 	if err != nil {
 		return nil, fmt.Errorf("assembly report: match labels: %w", err)
@@ -672,10 +808,9 @@ func computeAssemblyReport(arts []Artifact, labels []Label, seed int64, bootstra
 	for _, m := range matched {
 		quality[m.Artifact.ArtifactHash] = m.Label.ExpectedAnswerQuality
 	}
-	type pairKey struct{ pair, model string }
-	type armSet struct{ flat, prog *Artifact }
-	pairs := map[pairKey]*armSet{}
-	var keys []pairKey
+	pairs := map[assemblyPairKey]*assemblyArmSet{}
+	var keys []assemblyPairKey
+	var topline []*Artifact
 	for i := range arts {
 		a := &arts[i]
 		if a.Trace.AssemblyEval == nil {
@@ -684,35 +819,56 @@ func computeAssemblyReport(arts []Artifact, labels []Label, seed int64, bootstra
 		if err := validateTrace(a.Trace); err != nil {
 			return nil, fmt.Errorf("assembly report: artifact %q: %w", a.TraceID, err)
 		}
-		k := pairKey{a.Trace.AssemblyEval.PairID, modelKey(a.CandidateModel)}
-		if k.model == "" {
+		if modelKey(a.CandidateModel) == "" {
 			return nil, fmt.Errorf("assembly report: artifact %q has blank candidate model", a.TraceID)
 		}
+		mode := a.Trace.AssemblyEval.Mode
+		if mode == AssemblyTopline {
+			topline = append(topline, a)
+			continue
+		}
+		k := assemblyPairKey{assemblyModeKind(mode), a.Trace.AssemblyEval.PairID, modelKey(a.CandidateModel)}
 		s, ok := pairs[k]
 		if !ok {
-			s = &armSet{}
+			s = &assemblyArmSet{}
 			pairs[k] = s
 			keys = append(keys, k)
 		}
-		switch a.Trace.AssemblyEval.Mode {
-		case AssemblyFlat:
-			if s.flat != nil {
-				return nil, fmt.Errorf("assembly report: duplicate flat arm for pair %q model %q", k.pair, k.model)
+		switch mode {
+		case AssemblyFlat, AssemblyLegacy:
+			if s.base != nil {
+				return nil, fmt.Errorf("assembly report: duplicate %s arm for pair %q model %q", mode, k.pair, k.model)
 			}
-			s.flat = a
-		case AssemblyProgressive:
-			if s.prog != nil {
-				return nil, fmt.Errorf("assembly report: duplicate progressive arm for pair %q model %q", k.pair, k.model)
+			s.base = a
+		case AssemblyProgressive, AssemblyMixed:
+			if s.treat != nil {
+				return nil, fmt.Errorf("assembly report: duplicate %s arm for pair %q model %q", mode, k.pair, k.model)
 			}
-			s.prog = a
+			s.treat = a
 		default:
 			return nil, fmt.Errorf("assembly report: pair %q model %q has invalid mode %q",
-				k.pair, k.model, a.Trace.AssemblyEval.Mode)
+				k.pair, k.model, mode)
+		}
+	}
+	// v2 capture-ledger cross-check (external PR review P1): a legacy-mixed
+	// pair the capture EXPECTED but produced no artifacts for is invisible to
+	// the artifact-driven discovery above — synthesize it (empty arm set) so
+	// it lands in the registered missing-arm exclusions instead of silently
+	// vanishing. v1 manifests carry no ledger (expectedPairs nil): no change.
+	if extras.capture != nil {
+		for _, k := range extras.capture.expectedPairs {
+			if _, ok := pairs[k]; !ok {
+				pairs[k] = &assemblyArmSet{}
+				keys = append(keys, k)
+			}
 		}
 	}
 	sort.Slice(keys, func(i, j int) bool {
 		if keys[i].model != keys[j].model {
 			return keys[i].model < keys[j].model
+		}
+		if keys[i].kind != keys[j].kind {
+			return keys[i].kind < keys[j].kind
 		}
 		return keys[i].pair < keys[j].pair
 	})
@@ -731,12 +887,18 @@ func computeAssemblyReport(arts []Artifact, labels []Label, seed int64, bootstra
 	}
 	type modelAccumulator struct {
 		report     AssemblyModelReport
+		deltas     []float64
 		reductions []float64
 	}
 	models := map[string]*modelAccumulator{}
 	var modelOrder []string
 	totalPairs := 0
+	hasMixedEvidence := len(topline) > 0
 	for _, k := range keys {
+		if k.kind != assemblyKindFlatProgressive {
+			hasMixedEvidence = true
+			continue
+		}
 		acc, ok := models[k.model]
 		if !ok {
 			acc = &modelAccumulator{report: AssemblyModelReport{CandidateModel: k.model}}
@@ -744,74 +906,158 @@ func computeAssemblyReport(arts []Artifact, labels []Label, seed int64, bootstra
 			modelOrder = append(modelOrder, k.model)
 		}
 		s := pairs[k]
-		if s.flat == nil || s.prog == nil {
+		if s.base == nil || s.treat == nil {
 			acc.report.PairingGaps++
 			continue
 		}
-		qf, okF := quality[s.flat.ArtifactHash]
-		qp, okP := quality[s.prog.ArtifactHash]
+		qf, okF := quality[s.base.ArtifactHash]
+		qp, okP := quality[s.treat.ArtifactHash]
 		if !okF || !okP {
 			acc.report.PairingGaps++
 			continue
 		}
-		if !reflect.DeepEqual(s.flat.Trace.AssemblyEval.CandidateIDs, s.prog.Trace.AssemblyEval.CandidateIDs) {
+		if !reflect.DeepEqual(s.base.Trace.AssemblyEval.CandidateIDs, s.treat.Trace.AssemblyEval.CandidateIDs) {
 			acc.report.InvalidPairs++
 			continue
 		}
 		acc.report.Pairs++
 		totalPairs++
-		acc.report.Deltas = append(acc.report.Deltas, qp-qf)
+		delta := qp - qf
+		acc.deltas = append(acc.deltas, delta)
+		acc.report.Deltas = append(acc.report.Deltas, canonicalStat(delta))
 		// validateTrace enforced tokens > 0 for every paired artifact.
-		ft := float64(s.flat.Trace.AssemblyEval.EstimatedPromptTokens)
-		pt := float64(s.prog.Trace.AssemblyEval.EstimatedPromptTokens)
+		ft := float64(s.base.Trace.AssemblyEval.EstimatedPromptTokens)
+		pt := float64(s.treat.Trace.AssemblyEval.EstimatedPromptTokens)
 		acc.reductions = append(acc.reductions, 1-pt/ft)
 	}
-	if totalPairs == 0 {
+	// A pure-3a input with nothing labeled still hard-errors exactly as
+	// before; any 3c evidence (legacy/mixed/topline artifacts) makes the
+	// report worth emitting even when the flat-progressive side is empty.
+	if totalPairs == 0 && !hasMixedEvidence {
 		return nil, fmt.Errorf("assembly report: no complete labeled pairs")
 	}
 	for _, model := range modelOrder {
 		acc := models[model]
 		if acc.report.Pairs > 0 {
 			var sum float64
-			for _, delta := range acc.report.Deltas {
+			for _, delta := range acc.deltas {
 				sum += delta
 			}
-			acc.report.MeanDelta = sum / float64(acc.report.Pairs)
-			acc.report.DeltaCILow, acc.report.DeltaCIHigh =
-				bootstrapDeltaCI(acc.report.Deltas, seed, bootstrapN)
+			acc.report.MeanDelta = canonicalStat(sum / float64(acc.report.Pairs))
+			lo, hi := bootstrapDeltaCI(acc.deltas, seed, bootstrapN)
+			acc.report.DeltaCILow, acc.report.DeltaCIHigh = canonicalStat(lo), canonicalStat(hi)
 			sort.Float64s(acc.reductions)
+			var medianReduction float64
 			// len(reductions) == Pairs > 0 inside this branch.
 			if n := len(acc.reductions); n%2 == 1 {
-				acc.report.MedianTokenReduction = acc.reductions[n/2]
+				medianReduction = acc.reductions[n/2]
 			} else {
-				acc.report.MedianTokenReduction =
-					(acc.reductions[n/2-1] + acc.reductions[n/2]) / 2
+				medianReduction = (acc.reductions[n/2-1] + acc.reductions[n/2]) / 2
+			}
+			acc.report.MedianTokenReduction = canonicalStat(medianReduction)
+			if acc.report.Pairs >= assemblyMinimumPairsPerModel {
+				acc.report.Decision = assemblyDecision(lo, hi, medianReduction)
 			}
 		}
 		if acc.report.Pairs < assemblyMinimumPairsPerModel {
 			acc.report.Decision = "insufficient-corpus"
-		} else {
-			acc.report.Decision = assemblyDecision(
-				acc.report.DeltaCILow, acc.report.DeltaCIHigh,
-				acc.report.MedianTokenReduction)
 		}
 		rep.Models = append(rep.Models, acc.report)
+	}
+	rep.LegacyMixedModels = computeAssemblyMixedSection(keys, pairs, quality, seed, bootstrapN, extras.capture)
+	if len(rep.LegacyMixedModels) > 0 {
+		rep.LegacyMixedDecisionRule = assemblyMixedDecisionRuleText()
+	}
+	rep.Topline = computeAssemblyTopline(topline, quality)
+	rep.CaptureManifest = extras.captureRef
+	// Forced-choice is attached AFTER every Decision above is final: the
+	// registered sign test is a secondary analysis and must never feed the
+	// primary decision. fcPrefs == nil means -fc-preferences was not set (an
+	// empty file still attaches zero-count sections).
+	if fcPrefs != nil {
+		artHashes := make(map[string]struct{}, len(arts))
+		for i := range arts {
+			artHashes[arts[i].ArtifactHash] = struct{}{}
+		}
+		if err := attachAssemblyForcedChoice(rep.LegacyMixedModels, fcPrefs, pairs, artHashes, seed, bootstrapN, extras.sideResolver, extras.armGuess); err != nil {
+			return nil, fmt.Errorf("assembly report: %w", err)
+		}
 	}
 	return rep, nil
 }
 
-// runAssemblyReport loads the (labels, artifacts) pair and renders the
-// assembly report as indented JSON.
-func runAssemblyReport(labelsPath, artifactsPath string) (string, error) {
-	arts, err := loadArtifacts(artifactsPath)
+// assemblyReportOptions names the -assembly-report inputs. FCSidemapPath,
+// FCSidemapDigest, and CaptureManifestPath are the optional W3 verification
+// inputs; empty strings reproduce the pre-W3 report.
+type assemblyReportOptions struct {
+	LabelsPath          string
+	ArtifactsPath       string
+	FCPrefsPath         string
+	FCSidemapPath       string
+	FCSidemapDigest     string
+	CaptureManifestPath string
+}
+
+// runAssemblyReport loads the (labels, artifacts) pair — plus, when set, the
+// -fc-ingest preference sidecar, the sealed forced-choice sidemap (which
+// requires and is verified against -fc-sidemap-digest), and the capture run
+// manifest — and renders the assembly report as indented JSON. Omitting both
+// sidemap flags preserves the historical parity resolver.
+func runAssemblyReport(opts assemblyReportOptions) (string, error) {
+	arts, err := loadArtifacts(opts.ArtifactsPath)
 	if err != nil {
 		return "", err
 	}
-	labels, err := loadLabels(labelsPath)
+	labels, err := loadLabels(opts.LabelsPath)
 	if err != nil {
 		return "", err
 	}
-	report, err := computeAssemblyReport(arts, labels, pairedBootstrapSeed, pairedBootstrapN)
+	var fcPrefs []FCPreference
+	if strings.TrimSpace(opts.FCPrefsPath) != "" {
+		fcPrefs, err = loadFCPreferences(opts.FCPrefsPath)
+		if err != nil {
+			return "", err
+		}
+		if fcPrefs == nil {
+			fcPrefs = []FCPreference{} // empty sidecar still means "flag set"
+		}
+	}
+	var extras assemblyReportExtras
+	if strings.TrimSpace(opts.FCSidemapDigest) != "" && strings.TrimSpace(opts.FCSidemapPath) == "" {
+		return "", fmt.Errorf("assembly report: -fc-sidemap-digest without -fc-sidemap (there is no file to verify the committed digest against)")
+	}
+	if strings.TrimSpace(opts.FCSidemapPath) != "" {
+		_, resolver, err := loadVerifiedFCSidemap(opts.FCSidemapPath, opts.FCSidemapDigest)
+		if err != nil {
+			return "", err
+		}
+		extras.sideResolver = resolver
+		extras.armGuess = true
+	}
+	if strings.TrimSpace(opts.CaptureManifestPath) != "" {
+		ref, verify, err := loadCaptureManifestForReport(opts.CaptureManifestPath)
+		if err != nil {
+			return "", err
+		}
+		extras.captureRef = &ref
+		extras.capture = verify
+		if verify.legacyV1ModelIdentity {
+			// v1 sealed reports predate provider-aware candidate keys: their
+			// openai-compat artifacts were intentionally joined to bare FC and
+			// report model IDs. Preserve that historical in-memory view only for
+			// v1; v2 and every new report retain the explicit provider prefix.
+			for i := range arts {
+				arts[i].CandidateModel = modelSelectorWithoutBenchProvider(arts[i].CandidateModel)
+			}
+			for i := range labels {
+				labels[i].CandidateModel = modelSelectorWithoutBenchProvider(labels[i].CandidateModel)
+			}
+		}
+	}
+	if err := validateCaptureArtifacts(arts, extras.capture); err != nil {
+		return "", err
+	}
+	report, err := computeAssemblyReport(arts, labels, pairedBootstrapSeed, pairedBootstrapN, fcPrefs, extras)
 	if err != nil {
 		return "", err
 	}

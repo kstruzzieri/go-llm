@@ -1,0 +1,85 @@
+{
+  "id": "chain-listen-queue-depth-mixed",
+  "source": "assembly-corpus-mixed",
+  "captured_at": "0001-01-01T00:00:00Z",
+  "system": "You are the driftwatch assistant. driftwatch is a self-hosted telemetry ingest and alerting daemon. Answer using only the provided conversation, memory records, and retrieved context.",
+  "tools": null,
+  "turns": [
+    {
+      "role": "user",
+      "content": "Listener section of the ops review needs the ingress queue sizing quoted from source; pull the queue code before I paste the startup log so the sizing row cites the constant, not a dashboard."
+    },
+    {
+      "role": "assistant",
+      "content": "Pulling the listener queue source now; paste the startup log whenever and we will reconcile the two before the row goes in."
+    },
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "id": "c1",
+          "name": "retrieve",
+          "arguments": {
+            "query": "syslog listener ingress queue sizing",
+            "k": 3
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "content": "### source: \"internal/listener/queue.go\"\npurpose: Ingress ring slot count sized against the burst replay drill.\noverview: queue.go pins the ingress ring slot count as a code constant sized by the burst replay drill, with resizes reviewed against drill numbers rather than steady-state fill.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n--- source: \"internal/listener/queue.go\" (lines 1-15, similarity: 1.00) ---\n1| package listener\n2| \n3| // listenQueue is the ingress ring's slot count. It is sized against\n4| // the burst replay drill, not steady state: the ring must absorb a\n5| // full replay burst while the drain pool catches up, and resizing\n6| // is a code change reviewed with that drill's numbers in hand.\n7| const listenQueue = 3072\n8| \n9| func newIngressRing() *ring {\n10| \treturn \u0026ring{\n11| \t\tslots: make([]slot, listenQueue),\n12| \t\thead:  0,\n13| \t\ttail:  0,\n14| \t}\n15| }\n\n### source: \"internal/listener/drain.go\"\npurpose: Ring-to-parser drain: batched claims, config batch bound, park/wake.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n\n### source: \"docs/listener.md\"\npurpose: Listener guide: ring depth vs drain width, drop triage, the drill.\nlanguage: markdown\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n",
+      "tool_call_id": "c1",
+      "name": "retrieve"
+    },
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "id": "c2",
+          "name": "fixture_echo",
+          "arguments": {
+            "content": "listener startup log from the staging edge, pasted verbatim:\n2025-07-26T05:00:01Z listener starting proto=syslog-udp workers=asynchronous\n2025-07-26T05:00:01Z ingress ring allocated slots=configured drain=distinct-pool\n2025-07-26T05:00:01Z drain pool attached watermarks=armed backpressure=counter-only\n2025-07-26T05:00:02Z replay guard loaded window=persisted cursor=intact\n2025-07-26T05:00:02Z listener ready accept=open probes=passing\nstartup note: the queue=512 debug profile some lab captures mention was a bench experiment only; it never shipped in any build and the flag is ignored on live edges.\n2025-07-26T05:00:05Z first burst absorbed peak_fill_pct=22 drops=0\n2025-07-26T05:00:31Z steady state fill_pct=4 drops=0\n"
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "content": "listener startup log from the staging edge, pasted verbatim:\n2025-07-26T05:00:01Z listener starting proto=syslog-udp workers=asynchronous\n2025-07-26T05:00:01Z ingress ring allocated slots=configured drain=distinct-pool\n2025-07-26T05:00:01Z drain pool attached watermarks=armed backpressure=counter-only\n2025-07-26T05:00:02Z replay guard loaded window=persisted cursor=intact\n2025-07-26T05:00:02Z listener ready accept=open probes=passing\nstartup note: the queue=512 debug profile some lab captures mention was a bench experiment only; it never shipped in any build and the flag is ignored on live edges.\n2025-07-26T05:00:05Z first burst absorbed peak_fill_pct=22 drops=0\n2025-07-26T05:00:31Z steady state fill_pct=4 drops=0\n",
+      "tool_call_id": "c2",
+      "name": "fixture_echo"
+    },
+    {
+      "role": "user",
+      "content": "How deep is the syslog listener ingress queue now?"
+    }
+  ],
+  "golden": {
+    "tool_calls": null,
+    "final_answer_criteria": "States the syslog listener ingress queue is 3072 slots deep. The never-shipped queue=512 debug profile named in the pasted startup log scores 0. An answer presenting both the correct and a competing value without committing to one scores 0."
+  },
+  "assembly_eval": {
+    "pair_id": "chain-listen-queue-depth",
+    "mode": "mixed",
+    "candidate_ids": [
+      "2695febdd48d374a47316f1ef4a3501d5355065d19f2b83d1384bb963f5c0fad",
+      "409ececd9c5135f7e08eb17b013af2bd7f22f1aa1e241c7ab9425353e22d4fe7",
+      "b885246524cc57010c01c8076638cfe86edf878d73122ae500b82dc50aaf66e8"
+    ],
+    "estimated_prompt_tokens": 657,
+    "state_digest": "c9557b6bdf3ff59794f43a454fec34a8407ec396d617b5bf8ad98f401f8ca0f7",
+    "subjects": [
+      "(c1|rag|internal/listener/queue.go)",
+      "(c1|rag|internal/listener/drain.go)",
+      "(c1|rag|docs/listener.md)"
+    ],
+    "stratum": "chain_retention",
+    "answer_home": "rag",
+    "scenario_family": "listen-queue-chain",
+    "budget": 921,
+    "raw_state_tokens": 1535,
+    "pressure_level": "critical",
+    "shed_bytes": 3288
+  }
+}

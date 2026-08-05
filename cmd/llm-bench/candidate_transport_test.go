@@ -53,10 +53,10 @@ func TestOllamaCandidateClient_HonorsTimeout(t *testing.T) {
 	}
 
 	start := time.Now()
-	_, err = tr.chat.Chat(context.Background(), ollama.ChatRequest{
+	_, err = tr.chat.Chat(context.Background(), candidateChatRequest{ChatRequest: ollama.ChatRequest{
 		Model:    "served",
 		Messages: []ollama.ChatMessage{{Role: "user", Content: "q"}},
-	})
+	}})
 	elapsed := time.Since(start)
 	if err == nil {
 		t.Fatalf("Chat returned nil error after %v; want a timeout error (opts.timeout was ignored)", elapsed)
@@ -128,7 +128,7 @@ func TestOpenAICompatCandidateClient_ChatTranslatesReplayRequestAndResponse(t *t
 		t.Fatalf("newCandidateTransport: %v", err)
 	}
 
-	resp, err := tr.chat.Chat(context.Background(), ollama.ChatRequest{
+	resp, err := tr.chat.Chat(context.Background(), candidateChatRequest{ChatRequest: ollama.ChatRequest{
 		Model: "fake",
 		Messages: []ollama.ChatMessage{
 			{Role: "system", Content: "sys"},
@@ -143,7 +143,7 @@ func TestOpenAICompatCandidateClient_ChatTranslatesReplayRequestAndResponse(t *t
 				Parameters:  json.RawMessage(`{"type":"object"}`),
 			},
 		}},
-	})
+	}})
 	if err != nil {
 		t.Fatalf("Chat: %v", err)
 	}
@@ -208,10 +208,10 @@ func TestOpenAICompatCandidateClient_ChatSurfacesReasoningTokens(t *testing.T) {
 		t.Fatalf("newCandidateTransport: %v", err)
 	}
 
-	resp, err := tr.chat.Chat(context.Background(), ollama.ChatRequest{
+	resp, err := tr.chat.Chat(context.Background(), candidateChatRequest{ChatRequest: ollama.ChatRequest{
 		Model:    "fake",
 		Messages: []ollama.ChatMessage{{Role: "user", Content: "q"}},
-	})
+	}})
 	if err != nil {
 		t.Fatalf("Chat: %v", err)
 	}
@@ -255,10 +255,10 @@ func TestOpenAICompatCandidateClient_ChatZeroReasoningTokensAreComputed(t *testi
 		t.Fatalf("newCandidateTransport: %v", err)
 	}
 
-	resp, err := tr.chat.Chat(context.Background(), ollama.ChatRequest{
+	resp, err := tr.chat.Chat(context.Background(), candidateChatRequest{ChatRequest: ollama.ChatRequest{
 		Model:    "fake",
 		Messages: []ollama.ChatMessage{{Role: "user", Content: "q"}},
-	})
+	}})
 	if err != nil {
 		t.Fatalf("Chat: %v", err)
 	}
@@ -298,10 +298,10 @@ func TestOpenAICompatCandidateClient_CapturesReasoningContent(t *testing.T) {
 		t.Fatalf("newCandidateTransport: %v", err)
 	}
 
-	resp, err := tr.chat.Chat(context.Background(), ollama.ChatRequest{
+	resp, err := tr.chat.Chat(context.Background(), candidateChatRequest{ChatRequest: ollama.ChatRequest{
 		Model:    "fake",
 		Messages: []ollama.ChatMessage{{Role: "user", Content: "q"}},
-	})
+	}})
 	if err != nil {
 		t.Fatalf("Chat: %v", err)
 	}
@@ -339,10 +339,10 @@ func TestOllamaCandidateClient_CapturesNativeThinking(t *testing.T) {
 		t.Fatalf("newCandidateTransport: %v", err)
 	}
 
-	resp, err := tr.chat.Chat(context.Background(), ollama.ChatRequest{
+	resp, err := tr.chat.Chat(context.Background(), candidateChatRequest{ChatRequest: ollama.ChatRequest{
 		Model:    "served",
 		Messages: []ollama.ChatMessage{{Role: "user", Content: "q"}},
-	})
+	}})
 	if err != nil {
 		t.Fatalf("Chat: %v", err)
 	}
@@ -383,10 +383,10 @@ func TestOpenAICompatCandidateClient_StripsInlineThinkTags(t *testing.T) {
 		t.Fatalf("newCandidateTransport: %v", err)
 	}
 
-	resp, err := tr.chat.Chat(context.Background(), ollama.ChatRequest{
+	resp, err := tr.chat.Chat(context.Background(), candidateChatRequest{ChatRequest: ollama.ChatRequest{
 		Model:    "fake",
 		Messages: []ollama.ChatMessage{{Role: "user", Content: "q"}},
-	})
+	}})
 	if err != nil {
 		t.Fatalf("Chat: %v", err)
 	}

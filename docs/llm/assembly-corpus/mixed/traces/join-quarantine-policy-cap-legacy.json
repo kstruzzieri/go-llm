@@ -1,0 +1,100 @@
+{
+  "id": "join-quarantine-policy-cap-legacy",
+  "source": "assembly-corpus-mixed",
+  "captured_at": "0001-01-01T00:00:00Z",
+  "system": "You are the driftwatch assistant. driftwatch is a self-hosted telemetry ingest and alerting daemon. Answer using only the provided conversation, memory records, and retrieved context.",
+  "tools": null,
+  "turns": [
+    {
+      "role": "user",
+      "content": "Scope note so the thread stops resurfacing: the 2000-batch quarantine cap from the incident draft is dead; it was sized for the old single-lane spool and quoting it in sizing threads just muddies the review."
+    },
+    {
+      "role": "assistant",
+      "content": "Marked the draft dead with a superseded banner and linked the current sizing sheet; the number should stop leaking into threads now."
+    },
+    {
+      "role": "user",
+      "content": "Then the review's call stands as final: the per-tenant quarantine cap lands at 500 batches, with the overflow policy unchanged until the next capacity pass."
+    },
+    {
+      "role": "assistant",
+      "content": "Recorded: the cap lands at 500 batches per tenant, overflow policy untouched; the sizing sheet and the admission runbook both quote the review link."
+    },
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "id": "c1",
+          "name": "retrieve",
+          "arguments": {
+            "query": "quarantine lane admission behaviour",
+            "k": 3
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "content": "### source: \"internal/ingest/quarantine.go\"\npurpose: Quarantine lane admission: per-tenant accounting, config-supplied caps, park-oldest overflow.\noverview: quarantine.go holds parse-failed batches in a per-tenant quarantine lane with the cap supplied by deployment config, and handles overflow by parking the oldest held batch so the freshest evidence stays in the lane.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n--- source: \"internal/ingest/quarantine.go\" (lines 1-28, similarity: 1.00) ---\n1| package ingest\n2| \n3| // quarantine routes batches that fail strict parsing into the\n4| // quarantine lane instead of dropping them: malformed telemetry is\n5| // usually a producer bug, and the payload is the evidence. The lane\n6| // is accounted per tenant, and the per-tenant cap comes from\n7| // deployment config so capacity reviews can move it without a\n8| // rebuild.\n9| func (g *Gateway) quarantine(tenant string, batch []byte, code rejectCode) error {\n10| \tif !g.lanes.admit(tenant) {\n11| \t\tg.metrics.quarantineOverflow.Inc()\n12| \t\treturn g.overflow(tenant, batch, code)\n13| \t}\n14| \treturn g.lanes.hold(tenant, batch, code)\n15| }\n16| \n17| // overflow applies the configured overflow policy when a tenant's\n18| // lane is at cap. The shipped policy parks the oldest held batch to\n19| // make room, on the theory that the newest failure carries the\n20| // freshest evidence about the producer bug.\n21| func (g *Gateway) overflow(tenant string, batch []byte, code rejectCode) error {\n22| \toldest, err := g.lanes.evictOldest(tenant)\n23| \tif err != nil {\n24| \t\treturn err\n25| \t}\n26| \tg.park(oldest)\n27| \treturn g.lanes.hold(tenant, batch, code)\n28| }\n\n### source: \"internal/ingest/parser.go\"\npurpose: Strict batch parsing with stable rejection codes from the taxonomy enum.\noverview: parser.go validates batches against the strict schema and returns stable rejection codes drawn from the taxonomy enum that also generates the integrator-facing docs table.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n--- source: \"internal/ingest/parser.go\" (lines 1-19, similarity: 1.00) ---\n1| package ingest\n2| \n3| // parse validates one batch against the strict telemetry schema.\n4| // Rejection codes are stable identifiers from the taxonomy enum;\n5| // integrator-facing docs are generated from the same enum, so a code\n6| // in a notification always has a matching docs row.\n7| func parse(batch []byte) (parsed, rejectCode, error) {\n8| \tp, err := decode(batch)\n9| \tif err != nil {\n10| \t\treturn parsed{}, rejectMalformedEnvelope, err\n11| \t}\n12| \tif err := p.validateSchema(); err != nil {\n13| \t\treturn parsed{}, rejectSchemaMismatch, err\n14| \t}\n15| \tif err := p.validateBounds(); err != nil {\n16| \t\treturn parsed{}, rejectBoundsViolation, err\n17| \t}\n18| \treturn p, rejectNone, nil\n19| }\n\n### source: \"docs/quarantine.md\"\npurpose: Quarantine guide: hold-not-drop, config-owned caps, ops-owned re-drive policy.\noverview: quarantine.md explains hold-not-drop quarantine: per-tenant caps from deployment config, park-oldest overflow, and a re-drive schedule owned by operations and recorded in the ops notes.\nlanguage: markdown\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n--- source: \"docs/quarantine.md\" (lines 1-19, similarity: 1.00) ---\n1| # driftwatch quarantine\n2| \n3| Batches that fail strict parsing are held, not dropped: the payload\n4| is the evidence for the producer bug that created it.\n5| \n6| ## Caps and overflow\n7| \n8| The quarantine lane is accounted per tenant with the cap supplied by\n9| deployment config; capacity reviews own the number. At cap, the\n10| shipped overflow policy parks the oldest held batch to admit the\n11| newest one.\n12| \n13| ## Re-drive\n14| \n15| Held batches re-enter the parser on a schedule the operations side\n16| owns; the current policy is recorded in the ops notes rather than\n17| here, because it moves with parser releases and incident load. Parked\n18| batches from failed re-drives are walked in the weekly admission\n19| review.\n",
+      "tool_call_id": "c1",
+      "name": "retrieve"
+    },
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "id": "c2",
+          "name": "agent_memory_search",
+          "arguments": {
+            "query": ""
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "content": "rec-parser-fuzz · semantic · 2025-07-27 · parser fuzz corpus refreshes from quarantine samples weekly; crashes file automatically\nrec-quarantine-board · working · 2025-07-27 · quarantine depth and age panels sit on the admission board; the per-tenant split is the left column\nrec-redrive-policy · semantic · 2025-07-27 · quarantine operations note: held batches go back through the parser 6 hours after intake, oldest first, one tenant at a time so a single bad integration cannot monopolize the re-drive lane. batches that fail the second parse are parked for manual review with the tenant tag and the rejection code attached, and the parked set is walked in the weekly admission review. the re-drive clock starts at intake rather than at lane admission, so a batch that sat in the ingest queue does not collect extra hold time, and the admission review tracks the intake-to-redrive spread to catch queue delays hiding inside the hold.",
+      "tool_call_id": "c2",
+      "name": "agent_memory_search"
+    },
+    {
+      "role": "user",
+      "content": "Signing off the runbook: where did the per-tenant quarantine cap land, and how long after intake do held batches re-enter the parser?"
+    }
+  ],
+  "golden": {
+    "tool_calls": null,
+    "final_answer_criteria": "BOTH halves required: the per-tenant quarantine cap lands at 500 batches, AND held batches go back through the parser 6 hours after intake. A missing half caps the score at 0.5; a stated but incorrect half scores 0. An answer giving the dead 2000-batch draft cap scores 0. An answer presenting both the correct and a competing value without committing to one scores 0."
+  },
+  "assembly_eval": {
+    "pair_id": "join-quarantine-policy-cap",
+    "mode": "legacy",
+    "candidate_ids": [
+      "d4f0ff52b67faf6d3fdb3fbee33c77e1b6fddbf1e362231fa4c276bca03969ad",
+      "e05b9c6ae83e9ad096442b809322d748463f2d99ce306c4d07fb839abde29352",
+      "e5ada8b8e1608badfae98e1a4dbade9f3e34cdf76b0e069c4799bdfff962fb9d",
+      "rec-parser-fuzz",
+      "rec-quarantine-board",
+      "rec-redrive-policy"
+    ],
+    "estimated_prompt_tokens": 1502,
+    "state_digest": "d42de86c6fe7c19b890c0a3f9453ebc409de102971ce587a5a00b2841e791fec",
+    "subjects": [
+      "(c1|rag|internal/ingest/quarantine.go)",
+      "(c1|rag|internal/ingest/parser.go)",
+      "(c1|rag|docs/quarantine.md)",
+      "(c2|memory|rec-parser-fuzz)",
+      "(c2|memory|rec-quarantine-board)",
+      "(c2|memory|rec-redrive-policy)"
+    ],
+    "stratum": "cross_domain_join",
+    "answer_home": "join",
+    "scenario_family": "quarantine-policy-join",
+    "budget": 1614,
+    "raw_state_tokens": 2690,
+    "pressure_level": "critical",
+    "shed_messages": 10,
+    "shed_bytes": 4129
+  }
+}

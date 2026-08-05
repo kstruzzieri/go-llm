@@ -1,0 +1,100 @@
+{
+  "id": "join-downsample-tier-raw-legacy",
+  "source": "assembly-corpus-mixed",
+  "captured_at": "0001-01-01T00:00:00Z",
+  "system": "You are the driftwatch assistant. driftwatch is a self-hosted telemetry ingest and alerting daemon. Answer using only the provided conversation, memory records, and retrieved context.",
+  "tools": null,
+  "turns": [
+    {
+      "role": "user",
+      "content": "Also for the record, the redesign draft's 1h dashboard default died in review; it was aimed at the old sparse boards and bringing it up now just reopens a settled argument."
+    },
+    {
+      "role": "assistant",
+      "content": "Archived the draft with the review outcome on top; the boards doc links the settled decision instead of the draft."
+    },
+    {
+      "role": "user",
+      "content": "So the decision on record stands: dashboards default to the 5m rollup fleet-wide, with raw drill-down staying one click away on every panel."
+    },
+    {
+      "role": "assistant",
+      "content": "Confirmed and applied: dashboards default to the 5m rollup, and the drill-down link is verified on every panel template."
+    },
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "id": "c1",
+          "name": "retrieve",
+          "arguments": {
+            "query": "downsample pass shard behaviour",
+            "k": 3
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "content": "### source: \"internal/store/downsample.go\"\npurpose: Downsample pass: oldest-first shard sweep, lease-aware skips, durable folds.\noverview: downsample.go sweeps shards oldest-first, skips shards under an active export lease so warehouse copies keep raw resolution, records skips in the rotation's ledger, and releases raw segments only after a durable fold.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n--- source: \"internal/store/downsample.go\" (lines 1-33, similarity: 1.00) ---\n1| package store\n2| \n3| // pass runs one downsample sweep over the shard set, oldest shard\n4| // first. A shard holding an active export lease is skipped rather\n5| // than raced: the exporter is reading raw resolution, and\n6| // downsampling under it would hand the warehouse a mid-copy\n7| // resolution change. Skips are recorded in the ledger the storage\n8| // rotation reviews.\n9| func (s *Store) pass() error {\n10| \tfor _, shard := range s.shardsOldestFirst() {\n11| \t\tif s.leases.active(shard) {\n12| \t\t\ts.ledger.recordSkip(shard)\n13| \t\t\tcontinue\n14| \t\t}\n15| \t\tif err := s.downsampleShard(shard); err != nil {\n16| \t\t\treturn err\n17| \t\t}\n18| \t}\n19| \treturn nil\n20| }\n21| \n22| // downsampleShard folds one shard's samples into the next tier and\n23| // releases the raw segments it consumed once the fold is durable.\n24| func (s *Store) downsampleShard(shard shardID) error {\n25| \tfold, err := s.fold(shard)\n26| \tif err != nil {\n27| \t\treturn err\n28| \t}\n29| \tif err := s.commit(fold); err != nil {\n30| \t\treturn err\n31| \t}\n32| \treturn s.releaseRaw(shard)\n33| }\n\n### source: \"internal/store/tiers.go\"\npurpose: Rollup tier ladder: manifest-driven rungs, coarsest-tier query resolution.\noverview: tiers.go models the rollup ladder as manifest-driven tiers and resolves each query window to the coarsest tier meeting its resolution floor, keeping wide windows cheap and narrow windows detailed.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n--- source: \"internal/store/tiers.go\" (lines 1-23, similarity: 1.00) ---\n1| package store\n2| \n3| // tier describes one rung of the rollup ladder: the resolution it\n4| // stores and the tier it folds into next. The ladder is data-driven\n5| // from the store manifest, so adding a rung is a manifest change and\n6| // a migration, never an enum edit scattered across query code.\n7| type tier struct {\n8| \tname       string\n9| \tresolution string\n10| \tnext       string\n11| }\n12| \n13| // resolve maps a query window to the coarsest tier that still meets\n14| // the window's resolution floor, so wide windows ride cheap tiers\n15| // while narrow windows keep detail.\n16| func (l *ladder) resolve(window queryWindow) tier {\n17| \tfor _, t := range l.coarsestFirst() {\n18| \t\tif t.meets(window.floor) {\n19| \t\t\treturn t\n20| \t\t}\n21| \t}\n22| \treturn l.finest()\n23| }\n\n### source: \"docs/downsample.md\"\npurpose: Downsampling guide: tier folding, lease-aware passes, ops-recorded raw hold.\noverview: downsample.md separates the concerns: the store owns folding mechanics and lease-aware passes, operations owns the raw hold duration in the ops notes, and the boards doc owns dashboard tier defaults.\nlanguage: markdown\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n--- source: \"docs/downsample.md\" (lines 1-18, similarity: 1.00) ---\n1| # driftwatch downsampling\n2| \n3| Raw samples land at full resolution and fold down the tier ladder as\n4| they age. Folding is a storage decision; how long raw is held before\n5| the first fold is an operations decision, recorded in the ops notes\n6| because it moves with disk budgets and compliance windows.\n7| \n8| ## The pass\n9| \n10| The downsample pass sweeps shards on a schedule, oldest first, and\n11| never races an active export lease: a warehouse copy in flight keeps\n12| its raw resolution. Skipped shards are ledgered and reviewed.\n13| \n14| ## Boards\n15| \n16| Dashboards choose their default tier in the boards doc; drill-down to\n17| raw stays available regardless of the default, so the default is a\n18| cost decision rather than a capability one.\n",
+      "tool_call_id": "c1",
+      "name": "retrieve"
+    },
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "id": "c2",
+          "name": "agent_memory_search",
+          "arguments": {
+            "query": ""
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "content": "rec-board-owners · semantic · 2025-07-27 · storage board changes go through the observability rotation; screenshots go in the change thread\nrec-raw-hold · semantic · 2025-07-27 · downsample operations note: raw 1s samples are held 48 hours before the first downsample pass; the pass runs per shard, oldest shard first, and skips any shard with an active export lease so a slow warehouse copy never loses raw resolution mid-transfer. shards that skip twice in a row page the storage rotation, because a lease surviving two passes usually means a wedged exporter rather than a slow one. the hold clock starts at segment roll rather than at ingest, which keeps partially filled segments from aging out early, and the storage rotation reviews the skip ledger weekly so lease bugs surface before they cost raw data.\nrec-tier-ladder · working · 2025-07-27 · tier ladder panels live on the storage board; per-tier bytes split by region",
+      "tool_call_id": "c2",
+      "name": "agent_memory_search"
+    },
+    {
+      "role": "user",
+      "content": "Locking the boards doc: which rollup do dashboards default to, and how long do raw 1s samples sit before the first downsample pass?"
+    }
+  ],
+  "golden": {
+    "tool_calls": null,
+    "final_answer_criteria": "BOTH halves required: dashboards default to the 5m rollup, AND raw 1s samples are held 48 hours before the first downsample pass. A missing half caps the score at 0.5; a stated but incorrect half scores 0. An answer giving the dead 1h draft default scores 0. An answer presenting both the correct and a competing value without committing to one scores 0."
+  },
+  "assembly_eval": {
+    "pair_id": "join-downsample-tier-raw",
+    "mode": "legacy",
+    "candidate_ids": [
+      "37f3cb6472e8d5de4b37b29cf914a32d519aed92a7a3147b179b267ad63eae4d",
+      "7b48c2362ef3e928857810a564ce10f15dd9feb8d5508098856699a966ccee8b",
+      "f5c3c0fbb0fec0da1d1f7dd39afa82bfa43e6e268adb779b42b55b018645f414",
+      "rec-board-owners",
+      "rec-raw-hold",
+      "rec-tier-ladder"
+    ],
+    "estimated_prompt_tokens": 1480,
+    "state_digest": "811aed8102e7b36588b948b4606e82ccc8eaf8171b9543e7fbf7aff8113a151e",
+    "subjects": [
+      "(c1|rag|internal/store/downsample.go)",
+      "(c1|rag|internal/store/tiers.go)",
+      "(c1|rag|docs/downsample.md)",
+      "(c2|memory|rec-board-owners)",
+      "(c2|memory|rec-raw-hold)",
+      "(c2|memory|rec-tier-ladder)"
+    ],
+    "stratum": "cross_domain_join",
+    "answer_home": "join",
+    "scenario_family": "downsample-tier-join",
+    "budget": 1589,
+    "raw_state_tokens": 2648,
+    "pressure_level": "critical",
+    "shed_messages": 10,
+    "shed_bytes": 4050
+  }
+}

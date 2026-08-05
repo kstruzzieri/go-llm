@@ -1,0 +1,125 @@
+{
+  "id": "chain-uplink-verify-mixed",
+  "source": "assembly-corpus-mixed",
+  "captured_at": "0001-01-01T00:00:00Z",
+  "system": "You are the driftwatch assistant. driftwatch is a self-hosted telemetry ingest and alerting daemon. Answer using only the provided conversation, memory records, and retrieved context.",
+  "tools": null,
+  "turns": [
+    {
+      "role": "user",
+      "content": "Transfer budget review is tomorrow and the verification row is still blank. Check the stored notes first so the row quotes the settled sampling, then pull the uploader docs for the mechanics column."
+    },
+    {
+      "role": "assistant",
+      "content": "Stored notes first, then the uploader source; the verification row will cite both sides."
+    },
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "id": "c1",
+          "name": "agent_memory_search",
+          "arguments": {
+            "query": ""
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "content": "rec-audit-window · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:\nrec-dashboard-action · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:\nrec-integrity-scope · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:\nrec-mechanics-column · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:\nrec-retry-shipped · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:\nrec-runbook-owner · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:\nrec-sheet-cadence · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:\nrec-verify-sampling · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src: · archive upload verify sampling set to 1 in 20 parts after the integrity review",
+      "tool_call_id": "c1",
+      "name": "agent_memory_search"
+    },
+    {
+      "role": "user",
+      "content": "Also the retry column from last quarter still says draft on it; replace it with whatever the shipped behavior is while you are in there."
+    },
+    {
+      "role": "assistant",
+      "content": "Will refresh the retry column from the shipped source as well; both columns will cite where their numbers came from."
+    },
+    {
+      "role": "user",
+      "content": "And flag anything in the uploader docs that contradicts the runbook; the audit team reads both and files a ticket per mismatch."
+    },
+    {
+      "role": "assistant",
+      "content": "I will note contradictions inline and link the runbook section next to each one so the audit team sees a single consolidated view."
+    },
+    {
+      "role": "user",
+      "content": "Last thing: the verify row needs a footnote on what happens at a mismatch; the audit team asked twice last cycle and the answer lived only in chat."
+    },
+    {
+      "role": "assistant",
+      "content": "Footnote added: a mismatch quarantines the object and pages storage immediately, and the footnote cites the runbook section instead of chat history."
+    },
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "id": "c2",
+          "name": "retrieve",
+          "arguments": {
+            "query": "archive upload verification mechanics",
+            "k": 3
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "content": "### source: \"internal/archive/verify.go\"\npurpose: Read-back sampling gate driven by the config fraction.\noverview: verify.go gates read-back checks on the config-supplied sampling fraction, noting the pre-GA pilot sampling that never shipped, so audits can tighten fleets without rebuilds.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n--- source: \"internal/archive/verify.go\" (lines 1-10, similarity: 1.00) ---\n1| package archive\n2| \n3| // verifySample decides whether one acknowledged part gets a\n4| // read-back check. The pre-GA build verified 1 in 5 parts; that\n5| // sampling never shipped past the pilot, and the shipped fraction\n6| // comes from deployment config so fleets can tighten it during\n7| // audits without a rebuild.\n8| func (v *Verifier) verifySample(idx int) bool {\n9| \treturn idx%v.cfg.SampleEvery == 0\n10| }\n\n### source: \"internal/archive/readback.go\"\npurpose: Cold-path read-back compare, quarantine-and-page on mismatch.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n\n### source: \"docs/archive-verify.md\"\npurpose: Verification guide: sampled read-backs, audit tightening, cost row.\noverview: archive-verify.md explains sampled cold-path read-backs, audit-driven temporary tightening of the config fraction, quarantine-and-page mismatches, and the verify cost row the transfer sheet carries.\nlanguage: markdown\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n--- source: \"docs/archive-verify.md\" (lines 1-12, similarity: 1.00) ---\n1| # upload verification\n2| \n3| A sampled fraction of acknowledged parts gets a cold-path read-back\n4| and digest compare. Sampling is deployment config: audits tighten\n5| it temporarily, and the setting reverts with the audit's close.\n6| Mismatches quarantine the object and page storage immediately.\n7| \n8| Verification cost scales with the sampled fraction times the part\n9| rate, so the transfer sheet carries a verify row next to the push\n10| row whenever the fraction changes, and the sheet's footnote points\n11| at the quarantine behavior so reviewers know what a failure does\n12| before they ask.\n",
+      "tool_call_id": "c2",
+      "name": "retrieve"
+    },
+    {
+      "role": "user",
+      "content": "What fraction of uploaded parts does the verifier sample now?"
+    }
+  ],
+  "golden": {
+    "tool_calls": null,
+    "final_answer_criteria": "States the verifier samples 1 in 20 uploaded parts. Equivalent phrasings (5% of parts, one part in twenty, every 20th part) are acceptable. The pre-GA 1 in 5 pilot sampling named in the verifier source scores 0. An answer presenting both the correct and a competing value without committing to one scores 0."
+  },
+  "assembly_eval": {
+    "pair_id": "chain-uplink-verify",
+    "mode": "mixed",
+    "candidate_ids": [
+      "0c10bd75f5aebd23cdb128813a016ccec844f69c34c04fbb1013804598bac033",
+      "1f47fa192bccf61db903b9f99c279bbb5a1596fc8f53be19c35274f50d863207",
+      "2632da7d7798a37d00b40e8d3716b646a6fae3b31724fbd8cbd7e6c25de4270f",
+      "rec-audit-window",
+      "rec-dashboard-action",
+      "rec-integrity-scope",
+      "rec-mechanics-column",
+      "rec-retry-shipped",
+      "rec-runbook-owner",
+      "rec-sheet-cadence",
+      "rec-verify-sampling"
+    ],
+    "estimated_prompt_tokens": 1115,
+    "state_digest": "191ff0d5abcfde298fe955fdd21fb7fe035e3e0c0858652479f19e9867fa5166",
+    "subjects": [
+      "(c1|memory|rec-audit-window)",
+      "(c1|memory|rec-dashboard-action)",
+      "(c1|memory|rec-integrity-scope)",
+      "(c1|memory|rec-mechanics-column)",
+      "(c1|memory|rec-retry-shipped)",
+      "(c1|memory|rec-runbook-owner)",
+      "(c1|memory|rec-sheet-cadence)",
+      "(c1|memory|rec-verify-sampling)",
+      "(c2|rag|internal/archive/verify.go)",
+      "(c2|rag|internal/archive/readback.go)",
+      "(c2|rag|docs/archive-verify.md)"
+    ],
+    "stratum": "chain_retention",
+    "answer_home": "memory",
+    "scenario_family": "uplink-part-chain",
+    "budget": 1191,
+    "raw_state_tokens": 1985,
+    "pressure_level": "critical",
+    "shed_bytes": 3064
+  }
+}

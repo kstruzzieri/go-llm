@@ -1,0 +1,92 @@
+{
+  "id": "stale-fanout-webhook-legacy",
+  "source": "assembly-corpus-mixed",
+  "captured_at": "0001-01-01T00:00:00Z",
+  "system": "You are the driftwatch assistant. driftwatch is a self-hosted telemetry ingest and alerting daemon. Answer using only the provided conversation, memory records, and retrieved context.",
+  "tools": null,
+  "turns": [
+    {
+      "role": "user",
+      "content": "One more: the delivery runbook's fanout section still describes the pre-consolidation pool; rewrite it around the 18 webhook delivery workers we run today so oncall stops second-guessing the number."
+    },
+    {
+      "role": "assistant",
+      "content": "Rewrote the fanout section around the current pool and added where the sizing decision is recorded, so the runbook and the capacity sheet agree."
+    },
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "id": "c1",
+          "name": "retrieve",
+          "arguments": {
+            "query": "webhook delivery fanout path",
+            "k": 3
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "content": "### source: \"internal/notify/webhookpool.go\"\npurpose: Webhook fanout pool startup and worker lifecycle; size wired from the delivery profile.\noverview: webhookpool.go starts the fixed webhook worker set from the profile-supplied size and owns shutdown draining; no sizing constant lives in this file.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n--- source: \"internal/notify/webhookpool.go\" (lines 1-23, similarity: 1.00) ---\n1| package notify\n2| \n3| import \"sync\"\n4| \n5| // pool drains queued webhook deliveries through a fixed set of\n6| // workers. The pool size is wired in from the delivery profile at\n7| // startup; Run panics on a non-positive size because a zero pool\n8| // silently strands every queued delivery.\n9| type pool struct {\n10| \tsize int\n11| \tq    chan Delivery\n12| \twg   sync.WaitGroup\n13| }\n14| \n15| func (p *pool) Run() {\n16| \tif p.size \u003c= 0 {\n17| \t\tpanic(\"notify: webhook pool size must be positive\")\n18| \t}\n19| \tfor i := 0; i \u003c p.size; i++ {\n20| \t\tp.wg.Add(1)\n21| \t\tgo p.worker()\n22| \t}\n23| }\n\n### source: \"internal/notify/webhooksign.go\"\npurpose: Webhook delivery signing with per-receiver secrets.\noverview: webhooksign.go computes the HMAC signature receivers verify, reads the secret from the receiver entry, and counts unsigned deliveries instead of hiding them.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n--- source: \"internal/notify/webhooksign.go\" (lines 1-17, similarity: 1.00) ---\n1| package notify\n2| \n3| import (\n4| \t\"crypto/hmac\"\n5| \t\"crypto/sha256\"\n6| \t\"encoding/hex\"\n7| )\n8| \n9| // sign computes the delivery signature receivers verify. The signing\n10| // secret comes from the receiver entry; deliveries to receivers\n11| // without a secret go out unsigned and are counted, because a silent\n12| // unsigned delivery would defeat the receiver-side check.\n13| func sign(secret, body []byte) string {\n14| \tmac := hmac.New(sha256.New, secret)\n15| \tmac.Write(body)\n16| \treturn hex.EncodeToString(mac.Sum(nil))\n17| }\n\n### source: \"docs/webhooks.md\"\npurpose: Webhook delivery guide: receiver declarations, worker pool drain, retry and dead-letter flow.\noverview: webhooks.md covers declaring webhook receivers in the delivery profile, how queued deliveries drain through the pool, and where exhausted retries land.\nlanguage: markdown\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n--- source: \"docs/webhooks.md\" (lines 1-11, similarity: 1.00) ---\n1| # driftwatch webhooks\n2| \n3| Fired alerts can fan out to webhook receivers alongside the pager\n4| path. Receivers are declared in the delivery profile with an\n5| endpoint, an optional signing secret, and a retry policy.\n6| \n7| ## Delivery\n8| \n9| Queued deliveries drain through the webhook worker pool. Failures\n10| retry with backoff under the receiver's policy; exhausted retries\n11| land in the dead-letter log for operator replay.\n",
+      "tool_call_id": "c1",
+      "name": "retrieve"
+    },
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "id": "c2",
+          "name": "agent_memory_search",
+          "arguments": {
+            "query": ""
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "content": "rec-consol-log · semantic · 2025-07-27 · receiver consolidation log links the soak report; capacity sheet entries point at it\nrec-synthetic-label · working · 2025-07-27 · the delivery-path synthetic stays labeled synthetic in the alert body so responders cannot mistake it\nrec-webhook-pool · semantic · 2025-07-27 · webhook fanout still runs 6 delivery workers",
+      "tool_call_id": "c2",
+      "name": "agent_memory_search"
+    },
+    {
+      "role": "user",
+      "content": "How many delivery workers does the webhook fanout run?"
+    }
+  ],
+  "golden": {
+    "tool_calls": null,
+    "final_answer_criteria": "States the webhook fanout runs 18 delivery workers. An answer of 6 workers scores 0. An answer presenting both the correct and a competing value without committing to one scores 0."
+  },
+  "assembly_eval": {
+    "pair_id": "stale-fanout-webhook",
+    "mode": "legacy",
+    "candidate_ids": [
+      "0e5eaa13ef2a8625fb404294f92d87a85c19907cfa2472c3b8bc7be266c4e122",
+      "5f783cb54c1dc972c42d13aa049d962702172982f7d52ec91ac1cabf5e5df7a3",
+      "e694b7e618292d25178d32fed39a62b93cf06e4069f7c33681cc2e53e972bcbd",
+      "rec-consol-log",
+      "rec-synthetic-label",
+      "rec-webhook-pool"
+    ],
+    "estimated_prompt_tokens": 976,
+    "state_digest": "82e90cf5119182aef9cb0d8ebc9dc1782cc5cbae0cb681a8bc93153b1231137a",
+    "subjects": [
+      "(c1|rag|internal/notify/webhookpool.go)",
+      "(c1|rag|internal/notify/webhooksign.go)",
+      "(c1|rag|docs/webhooks.md)",
+      "(c2|memory|rec-consol-log)",
+      "(c2|memory|rec-synthetic-label)",
+      "(c2|memory|rec-webhook-pool)"
+    ],
+    "stratum": "stale_vs_fresh",
+    "answer_home": "conversation",
+    "scenario_family": "fanout-worker-staleness",
+    "budget": 1051,
+    "raw_state_tokens": 1752,
+    "pressure_level": "critical",
+    "shed_messages": 14,
+    "shed_bytes": 2411
+  }
+}

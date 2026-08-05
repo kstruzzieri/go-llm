@@ -1,0 +1,68 @@
+{
+  "id": "mem-token-staging-legacy",
+  "source": "assembly-corpus-mixed",
+  "captured_at": "0001-01-01T00:00:00Z",
+  "system": "You are the driftwatch assistant. driftwatch is a self-hosted telemetry ingest and alerting daemon. Answer using only the provided conversation, memory records, and retrieved context.",
+  "tools": null,
+  "turns": [
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "id": "c2",
+          "name": "retrieve",
+          "arguments": {
+            "query": "staging ingest token prefix acceptance",
+            "k": 3
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "content": "### source: \"internal/ingest/staging.go\"\npurpose: Staging gateway admission against config-supplied token prefixes.\noverview: staging.go admits eval traffic by checking presented tokens against the accepted prefix set from deployment config; the retired dwst3- prefix is rejected at admission like any other unknown shape.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n--- source: \"internal/ingest/staging.go\" (lines 1-16, similarity: 1.00) ---\n1| package ingest\n2| \n3| import \"strings\"\n4| \n5| // stagingGateway admits eval traffic. Accepted token prefixes ship\n6| // from deployment config, exactly as on prod; nothing is hard-coded.\n7| // The dwst3- prefix was retired when the eval gateway moved behind\n8| // the edge, and producers still signing with it are rejected here.\n9| func (g *stagingGateway) admit(token string) bool {\n10| \tfor _, p := range g.cfg.AcceptedPrefixes {\n11| \t\tif strings.HasPrefix(token, p) {\n12| \t\t\treturn g.verify(token)\n13| \t\t}\n14| \t}\n15| \treturn false\n16| }\n\n### source: \"internal/ingest/tenants.go\"\npurpose: Tenant admission budgets loaded from the hot-reloaded tenants file.\noverview: tenants.go maps tenant IDs to admission budgets from the tenants file, hot-reloads on change, and hands unknown tenants the conservative built-in default row meant for evaluation only.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n--- source: \"internal/ingest/tenants.go\" (lines 1-22, similarity: 1.00) ---\n1| package ingest\n2| \n3| // tenantTable maps tenant IDs to their admission budgets. The table\n4| // loads from the tenants file and hot-reloads on change; eval and prod\n5| // share the format, so a pilot tenant can be promoted by copying its\n6| // row across. Unknown tenants fall back to the built-in default rate,\n7| // which exists for evaluation and should never carry steady traffic.\n8| type tenantTable struct {\n9| \trows map[string]tenantRow\n10| }\n11| \n12| type tenantRow struct {\n13| \trate  float64\n14| \tburst float64\n15| }\n16| \n17| func (t *tenantTable) budget(id string) tenantRow {\n18| \tif row, ok := t.rows[id]; ok {\n19| \t\treturn row\n20| \t}\n21| \treturn defaultRow\n22| }\n\n### source: \"docs/staging.md\"\npurpose: Staging fleet guide: topology, credential rehearsals, soak nights.\noverview: staging.md covers the staging fleet's scaled-down topology, how token rotations rehearse through the accepted set before prod, and the soak-night ownership rule.\nlanguage: markdown\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n--- source: \"docs/staging.md\" (lines 1-24, similarity: 1.00) ---\n1| # driftwatch staging\n2| \n3| The staging fleet mirrors prod topology at one tenth the size. Point\n4| eval producers at the staging DNS name, never at a box.\n5| \n6| ## Credentials\n7| \n8| Token rotations are staged through config exactly as on prod: widen\n9| the accepted set, migrate producers, then narrow once the drain\n10| completes. Staging is where a rotation rehearses before prod sees it,\n11| so keep the accepted set tidy between rehearsals.\n12| \n13| ## Soaks\n14| \n15| Soak tests own the fleet on their scheduled nights. Anything else\n16| running there during a soak invalidates the numbers and gets moved\n17| without ceremony.\n18| \n19| ## Promotion\n20| \n21| A pilot tenant graduates by copying its row from the eval tenants\n22| file into the prod one; budgets carry over unchanged and the first\n23| week after promotion gets watched on the admission panel. Demotion\n24| is the same row move in reverse, minus the ceremony.\n",
+      "tool_call_id": "c2",
+      "name": "retrieve"
+    },
+    {
+      "role": "user",
+      "content": "Which prefix do staging ingest tokens carry?"
+    }
+  ],
+  "golden": {
+    "tool_calls": null,
+    "final_answer_criteria": "States that staging ingest tokens carry the dwst5- prefix. Answers that only say the accepted prefixes come from deployment config score 0. An answer naming the retired dwst3- prefix scores 0. An answer presenting both the correct and a competing value without committing to one scores 0."
+  },
+  "assembly_eval": {
+    "pair_id": "mem-token-staging",
+    "mode": "legacy",
+    "candidate_ids": [
+      "1e869080261c82691204215843383ec211e16aef36605dc39134a9c902424581",
+      "d4f25cf19632d4d969af2c8162abd996b4886d539b5170b9d83bf94fdb6cd4d1",
+      "efeff9727fd66cdb05cbef0caed50cf5f73f74f020855fcde25e3cfe5d8925fb",
+      "rec-eval-refresh",
+      "rec-pilot-notes",
+      "rec-soak-window",
+      "rec-staging-token"
+    ],
+    "estimated_prompt_tokens": 950,
+    "state_digest": "793fd925b2f6fe6b0e0e9ed997430db1ba716cedcda6cd19414f34c2311c0672",
+    "subjects": [
+      "(c1|memory|rec-eval-refresh)",
+      "(c1|memory|rec-pilot-notes)",
+      "(c1|memory|rec-soak-window)",
+      "(c1|memory|rec-staging-token)",
+      "(c2|rag|internal/ingest/staging.go)",
+      "(c2|rag|internal/ingest/tenants.go)",
+      "(c2|rag|docs/staging.md)"
+    ],
+    "stratum": "memory_only",
+    "answer_home": "memory",
+    "scenario_family": "ingest-token-mem",
+    "budget": 997,
+    "raw_state_tokens": 1662,
+    "pressure_level": "critical",
+    "shed_messages": 10,
+    "shed_bytes": 2422
+  }
+}

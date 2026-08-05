@@ -45,8 +45,9 @@ func main() {
 	importXlamManifest := flag.String("import-xlam-manifest", filepath.Join("docs", "llm", "calibration", "xlam-irrelevance-manifest.jsonl"), "Output manifest path for -import-xlam")
 	importXlamN := flag.Int("import-xlam-n", 300, "Number of eligible records to sample for -import-xlam (<=0 = all eligible)")
 	importXlamSeed := flag.Int64("import-xlam-seed", 42, "Deterministic sampling seed for -import-xlam")
-	assemblyBuildPath := flag.String("assembly-build", "", "Build paired flat/progressive assembly traces from this case-fixture JSON (#331)")
-	assemblyOut := flag.String("assembly-out", filepath.Join("docs", "llm", "assembly-corpus", "traces"), "Output directory for -assembly-build")
+	assemblyBuildPath := flag.String("assembly-build", "", "Build assembly traces from this case-fixture JSON (#331): a JSON array is the 3a flat/progressive corpus; a JSON object is the 3c mixed-assembly fixture (paired legacy/mixed arms + optional topline)")
+	assemblyOut := flag.String("assembly-out", filepath.Join("docs", "llm", "assembly-corpus", "traces"), "Output directory for -assembly-build with a 3a JSON-array fixture")
+	assemblyOutMixed := flag.String("assembly-out-mixed", filepath.Join("docs", "llm", "assembly-corpus", "mixed", "traces"), "Output directory for -assembly-build with a 3c mixed-assembly object fixture (the mixed corpus keeps its own manifest, separate from -assembly-out)")
 
 	importXlamMinTools := flag.Int("import-xlam-min-tools", 1, "Drop -import-xlam records offering fewer than this many tools")
 
@@ -89,10 +90,27 @@ func main() {
 	corpusCategories := flag.String("corpus-categories", "", "Comma-separated categories to include from the corpus manifest (empty = all)")
 	corpusSources := flag.String("corpus-sources", "", "Comma-separated provenance sources to include from the corpus manifest (e.g. round3-challenge, round2-challenge, first-accepted-run; empty = all)")
 	corpusOnlyEvidence := flag.Bool("corpus-only-evidence", false, "Restrict the corpus run to entries flagged allowed_as_model_evidence")
-	blindRender := flag.Bool("blind-render", false, "Render a blind labeling worksheet from -artifacts (model identity hidden) to -report")
-	blindIngest := flag.Bool("blind-ingest", false, "Parse a filled blind worksheet (-worksheet) into labels.jsonl (-labels-out), rejoining model on artifact_hash from -artifacts")
-	worksheetPath := flag.String("worksheet", "", "Path to a filled blind worksheet (required with -blind-ingest)")
-	labelerName := flag.String("labeler", "manual", "Labeler name stamped on -blind-ingest output labels")
+	blindRender := flag.Bool("blind-render", false, "Render a blind labeling worksheet from -artifacts (model identity hidden) to -report; legacy/mixed/topline assembly blocks are promptless (#331 slice 3c)")
+	blindIngest := flag.Bool("blind-ingest", false, "Parse a filled blind worksheet (-worksheet) into labels.jsonl (-labels-out), rejoining model on artifact_hash from -artifacts; grounding-check flags and DUP intra-rater scores are summarized on stderr")
+	blindDups := flag.Int("blind-dups", 0, "With -blind-render: append this many duplicate promptless blocks (deterministic selection over legacy/mixed artifacts) as intra-rater controls")
+	dupsOut := flag.String("dups-out", "", "With -blind-ingest: optional JSONL output path for intra-rater dup pairs {artifact_hash, primary_score, dup_score}")
+	blindBlockmapOut := flag.String("blind-blockmap-out", "", "With -blind-render: output path for the opaque block map {schema_version, salt, blocks} — REQUIRED when any promptless (legacy/mixed/topline) block renders; the map is the only join from worksheet BLOCK ids to artifact hashes")
+	blindBlockmapPath := flag.String("blind-blockmap", "", "With -blind-ingest: the -blind-blockmap-out map the worksheet was rendered with; required when the worksheet holds opaque BLOCK blocks")
+	fcRender := flag.Bool("fc-render", false, "Render a forced-choice worksheet (complete legacy/mixed pairs, arm identity hidden behind the sealed -fc-sidemap A/B sides) from -artifacts to -report (#331 slice 3c)")
+	fcIngest := flag.Bool("fc-ingest", false, "Parse a filled forced-choice worksheet (-worksheet) into a preference sidecar JSONL (-fc-out), validating pairs against -artifacts and the sealed -fc-sidemap")
+	fcOut := flag.String("fc-out", "", "Output JSONL path for -fc-ingest preference rows (required with -fc-ingest)")
+	fcPreferences := flag.String("fc-preferences", "", "With -assembly-report: optional -fc-ingest sidecar JSONL; adds the registered forced-choice sign-test secondary analysis to each legacy-mixed model section (never feeds the primary decision)")
+	fcSidemapGenerate := flag.Bool("fc-sidemap-generate", false, "Generate the sealed random forced-choice side map over the complete legacy/mixed pairs in -artifacts, write it to -fc-sidemap-out, and print its sha256 (commit the digest BEFORE labeling)")
+	fcSidemapOut := flag.String("fc-sidemap-out", "", "Output path for -fc-sidemap-generate (required with it)")
+	fcSidemapPath := flag.String("fc-sidemap", "", "Sealed side-map JSON path: REQUIRED with -fc-render and -fc-ingest; optional with -assembly-report, where it replaces the pre-sidemap parity side resolution and enables the descriptive arm-guess audit")
+	fcSidemapDigest := flag.String("fc-sidemap-digest", "", "With -fc-render, -fc-ingest, or -assembly-report alongside -fc-sidemap: REQUIRED committed sha256 of the sidemap file; a mismatch is a hard error")
+	fcRequireComplete := flag.Bool("fc-require-complete", false, "With -fc-ingest: every renderer-eligible pair block must be present and filled; missing or blank pairs are loud errors (the registered workflow)")
+	captureManifestFlag := flag.String("capture-manifest", "", "With -assembly-report: the -calibrate-capture run manifest; embeds its digest and excludes legacy/mixed pairs it cannot verify (unverified-capture / temperature-mismatch)")
+	modelFilter := flag.String("model", "", "With -blind-render, -fc-render, -fc-ingest, or -adjudicate-render: only use artifacts whose candidate model matches this selector (the registered workflow labels one model at a time); empty uses all")
+	adjudicateRender := flag.Bool("adjudicate-render", false, "Render the grounding adjudication worksheet (full prompt shown) for labels flagged grounding-check, from -artifacts and -labels to -report (#331 slice 3c)")
+	adjudicateIngest := flag.Bool("adjudicate-ingest", false, "Parse a filled adjudication worksheet (-worksheet) and emit the full updated label set (-labels-out) from -artifacts and -labels; every flagged label must be adjudicated with a reason")
+	worksheetPath := flag.String("worksheet", "", "Path to a filled worksheet (required with -blind-ingest, -fc-ingest, -adjudicate-ingest)")
+	labelerName := flag.String("labeler", "manual", "Labeler name stamped on -blind-ingest and -fc-ingest output rows")
 	reportPath := flag.String("report", "", "Output report path (default: stdout)")
 	ollamaURL := flag.String("ollama-url", "http://localhost:11434", "Ollama base URL")
 	timeout := flag.Duration("timeout", 5*time.Minute, "Per-replay timeout for candidate model calls")
@@ -132,6 +150,21 @@ func main() {
 	if *blindIngest {
 		modes++
 	}
+	if *fcRender {
+		modes++
+	}
+	if *fcIngest {
+		modes++
+	}
+	if *fcSidemapGenerate {
+		modes++
+	}
+	if *adjudicateRender {
+		modes++
+	}
+	if *adjudicateIngest {
+		modes++
+	}
 	if *discriminationReport {
 		modes++
 	}
@@ -142,14 +175,14 @@ func main() {
 		modes++
 	}
 	if modes > 1 {
-		log.Fatalf("llm-bench: -capture, -calibrate-capture, -calibrate, -manual-report, -paired-report, -assembly-report, -fim-latency, -blind-render, -blind-ingest, -discrimination-report, -import-xlam, -assembly-build are mutually exclusive")
+		log.Fatalf("llm-bench: -capture, -calibrate-capture, -calibrate, -manual-report, -paired-report, -assembly-report, -fim-latency, -blind-render, -blind-ingest, -fc-render, -fc-ingest, -fc-sidemap-generate, -adjudicate-render, -adjudicate-ingest, -discrimination-report, -import-xlam, -assembly-build are mutually exclusive")
 	}
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
 	if *assemblyBuildPath != "" {
-		if err := assemblyBuild(ctx, *assemblyBuildPath, *assemblyOut); err != nil {
+		if err := assemblyBuildDispatch(ctx, *assemblyBuildPath, *assemblyOut, *assemblyOutMixed); err != nil {
 			log.Fatalf("llm-bench: assembly-build: %v", err)
 		}
 		return
@@ -194,6 +227,8 @@ func main() {
 	}
 
 	if *importXlam != "" {
+		refuseOutputAlias("import-xlam", "-import-xlam-manifest", *importXlamManifest,
+			[][2]string{{"-import-xlam", *importXlam}})
 		res, err := importXlamIrrelevance(xlamImportOptions{
 			SrcPath:      *importXlam,
 			OutDir:       *importXlamOut,
@@ -217,6 +252,16 @@ func main() {
 		if err != nil {
 			log.Fatalf("llm-bench: glob: %v", err)
 		}
+		// The artifacts output (and its manifest sibling) must never clobber
+		// a trace input.
+		refuseOutputAlias("calibrate-capture", "-labels-out", *labelsOut, pathListInputs("-traces", tracePaths))
+		refuseOutputAlias("calibrate-capture", "-labels-out capture manifest", captureManifestPath(*labelsOut), pathListInputs("-traces", tracePaths))
+		// ... and the two outputs must differ from EACH OTHER (round-2 review
+		// P1): a pre-existing hardlink/symlink between <labels-out> and its
+		// .manifest.json sibling would leave the artifacts path holding the
+		// manifest bytes after the second write.
+		refuseOutputAlias("calibrate-capture", "-labels-out capture manifest", captureManifestPath(*labelsOut),
+			[][2]string{{"-labels-out", *labelsOut}})
 		traces, err := loadTraces(tracePaths)
 		if err != nil {
 			log.Fatalf("llm-bench: load traces: %v", err)
@@ -232,11 +277,21 @@ func main() {
 			Timeout:             *timeout,
 			Scorer:              &CaptureScorer{},
 		}
+		// Model digests feed assembly-artifact capture provenance only, so
+		// resolution (an /api/show round-trip per ollama target) is skipped
+		// entirely when the trace set has no prefilled assembly arms.
+		var modelDigests map[string]string
+		if anyPrefilledAssemblyTrace(traces) {
+			modelDigests = resolveCaptureModelDigests(ctx, *ollamaURL, targets)
+		}
 		if err := runCalibrateCapture(ctx, calibrateCaptureOptions{
-			Runner:     runner,
-			Targets:    targets,
-			Traces:     traces,
-			OutputPath: *labelsOut,
+			Runner:              runner,
+			Targets:             targets,
+			Traces:              traces,
+			OutputPath:          *labelsOut,
+			ModelDigests:        modelDigests,
+			OllamaURL:           *ollamaURL,
+			OpenAICompatBaseURL: ct.baseURL,
 		}); err != nil {
 			log.Fatalf("llm-bench: calibrate-capture: %v", err)
 		}
@@ -307,6 +362,8 @@ func main() {
 	}
 
 	if *manualReport {
+		refuseReportAlias("manual-report", *reportPath, [][2]string{
+			{"-labels", *labelsPath}, {"-artifacts", *artifactsPath}, {"-corpus-manifest", *corpusManifestPath}})
 		filter, err := offlineCorpusFilter(*corpusManifestPath, *corpusPartitions, *corpusCategories, *corpusSources, *corpusOnlyEvidence)
 		if err != nil {
 			log.Fatalf("llm-bench: manual-report: %v", err)
@@ -327,6 +384,8 @@ func main() {
 	}
 
 	if *pairedReport {
+		refuseReportAlias("paired-report", *reportPath, [][2]string{
+			{"-labels", *labelsPath}, {"-artifacts", *artifactsPath}, {"-corpus-manifest", *corpusManifestPath}})
 		filter, err := offlineCorpusFilter(*corpusManifestPath, *corpusPartitions, *corpusCategories, *corpusSources, *corpusOnlyEvidence)
 		if err != nil {
 			log.Fatalf("llm-bench: paired-report: %v", err)
@@ -347,7 +406,19 @@ func main() {
 	}
 
 	if *assemblyReport {
-		report, err := runAssemblyReport(*labelsPath, *artifactsPath)
+		// The review reproduced -report clobbering the artifacts JSONL here.
+		refuseReportAlias("assembly-report", *reportPath, [][2]string{
+			{"-labels", *labelsPath}, {"-artifacts", *artifactsPath},
+			{"-fc-preferences", *fcPreferences}, {"-fc-sidemap", *fcSidemapPath},
+			{"-capture-manifest", *captureManifestFlag}})
+		report, err := runAssemblyReport(assemblyReportOptions{
+			LabelsPath:          *labelsPath,
+			ArtifactsPath:       *artifactsPath,
+			FCPrefsPath:         *fcPreferences,
+			FCSidemapPath:       *fcSidemapPath,
+			FCSidemapDigest:     *fcSidemapDigest,
+			CaptureManifestPath: *captureManifestFlag,
+		})
 		if err != nil {
 			log.Fatalf("llm-bench: assembly-report: %v", err)
 		}
@@ -369,6 +440,14 @@ func main() {
 		if strings.TrimSpace(*corpusSources) != "" {
 			log.Printf("llm-bench: ignoring -corpus-sources in -discrimination-report mode (all strata are classified so the funnel shows every source)")
 		}
+		discriminationInputs := [][2]string{
+			{"-labels", *labelsPath}, {"-artifacts", *artifactsPath}, {"-corpus-manifest", *corpusManifestPath}}
+		if strings.TrimSpace(*discriminatorManifestOut) != "" {
+			refuseOutputAlias("discrimination-report", "-discriminator-manifest-out", *discriminatorManifestOut, discriminationInputs)
+		}
+		// Output/output collision: both files are written by this invocation.
+		refuseReportAlias("discrimination-report", *reportPath,
+			append(discriminationInputs, [2]string{"-discriminator-manifest-out", *discriminatorManifestOut}))
 		report, err := runDiscriminationReport(discriminationOptions{
 			LabelsPath:               *labelsPath,
 			ArtifactsPath:            *artifactsPath,
@@ -393,6 +472,16 @@ func main() {
 	}
 
 	if *blindRender {
+		refuseReportAlias("blind-render", *reportPath, [][2]string{{"-artifacts", *artifactsPath}})
+		if strings.TrimSpace(*blindBlockmapOut) != "" {
+			// Two-output collision (round-2 review P2): the map is written
+			// first and the worksheet second, so an aliased pair loses the
+			// only opaque-id join. Cleaned-path equality alone missed
+			// hardlinks; refuseOutputAlias adds the os.SameFile backstop and
+			// fires before any input loads.
+			refuseOutputAlias("blind-render", "-blind-blockmap-out", *blindBlockmapOut,
+				[][2]string{{"-artifacts", *artifactsPath}, {"-report", *reportPath}})
+		}
 		arts, err := loadArtifacts(*artifactsPath)
 		if err != nil {
 			log.Fatalf("llm-bench: blind-render: load artifacts: %v", err)
@@ -400,7 +489,30 @@ func main() {
 		if len(arts) == 0 {
 			log.Fatalf("llm-bench: blind-render: no artifacts in %q", *artifactsPath)
 		}
-		worksheet := renderBlindWorksheet(arts)
+		arts, err = filterArtifactsByModel(arts, *modelFilter)
+		if err != nil {
+			log.Fatalf("llm-bench: blind-render: %v", err)
+		}
+		worksheet, blockmap, err := renderBlindWorksheet(arts, *blindDups, "")
+		if err != nil {
+			log.Fatalf("llm-bench: blind-render: %v", err)
+		}
+		// The block map is the only opaque-id join; a promptless render that
+		// discards it produces an un-ingestable worksheet, and the flag on a
+		// promptless-free render is operator confusion — both loud.
+		switch {
+		case blockmap != nil && strings.TrimSpace(*blindBlockmapOut) == "":
+			log.Fatalf("llm-bench: blind-render: promptless blocks rendered; -blind-blockmap-out is required (the block map is the only join from opaque BLOCK ids to artifact hashes)")
+		case blockmap == nil && strings.TrimSpace(*blindBlockmapOut) != "":
+			log.Fatalf("llm-bench: blind-render: no promptless blocks rendered; drop -blind-blockmap-out")
+		}
+		if blockmap != nil {
+			// Aliasing was refused up front, before any input loaded.
+			if err := writeBlindBlockmap(*blindBlockmapOut, *blockmap); err != nil {
+				log.Fatalf("llm-bench: blind-render: %v", err)
+			}
+			fmt.Fprintf(os.Stderr, "llm-bench: blind block map (%d block(s)) written to %s\n", len(blockmap.Blocks), *blindBlockmapOut)
+		}
 		if *reportPath == "" {
 			fmt.Print(worksheet)
 			return
@@ -409,6 +521,165 @@ func main() {
 			log.Fatalf("llm-bench: write worksheet: %v", err)
 		}
 		fmt.Fprintf(os.Stderr, "llm-bench: blind worksheet written to %s\n", *reportPath)
+		return
+	}
+
+	if *fcSidemapGenerate {
+		if strings.TrimSpace(*fcSidemapOut) == "" {
+			log.Fatalf("llm-bench: -fc-sidemap-generate requires -fc-sidemap-out")
+		}
+		refuseOutputAlias("fc-sidemap-generate", "-fc-sidemap-out", *fcSidemapOut,
+			[][2]string{{"-artifacts", *artifactsPath}})
+		arts, err := loadArtifacts(*artifactsPath)
+		if err != nil {
+			log.Fatalf("llm-bench: fc-sidemap-generate: load artifacts: %v", err)
+		}
+		sidemap, err := generateFCSidemap(arts)
+		if err != nil {
+			log.Fatalf("llm-bench: fc-sidemap-generate: %v", err)
+		}
+		digest, err := writeFCSidemap(*fcSidemapOut, sidemap)
+		if err != nil {
+			log.Fatalf("llm-bench: fc-sidemap-generate: %v", err)
+		}
+		fmt.Printf("fc-sidemap sha256:%s\n", digest)
+		fmt.Fprintf(os.Stderr, "llm-bench: fc-sidemap-generate wrote %d pair assignment(s) to %s\n", len(sidemap.Pairs), *fcSidemapOut)
+		fmt.Fprintln(os.Stderr, "llm-bench: commit this digest before labeling; reveal the map after preferences are ingested")
+		return
+	}
+
+	if *fcRender {
+		if strings.TrimSpace(*fcSidemapPath) == "" {
+			log.Fatalf("llm-bench: -fc-render requires -fc-sidemap (generate one with -fc-sidemap-generate)")
+		}
+		refuseReportAlias("fc-render", *reportPath, [][2]string{
+			{"-artifacts", *artifactsPath}, {"-fc-sidemap", *fcSidemapPath}})
+		sidemap := mustLoadVerifiedFCSidemap("fc-render", *fcSidemapPath, *fcSidemapDigest)
+		arts, err := loadArtifacts(*artifactsPath)
+		if err != nil {
+			log.Fatalf("llm-bench: fc-render: load artifacts: %v", err)
+		}
+		arts, err = filterArtifactsByModel(arts, *modelFilter)
+		if err != nil {
+			log.Fatalf("llm-bench: fc-render: %v", err)
+		}
+		worksheet, err := renderForcedChoiceWorksheet(arts, sidemap)
+		if err != nil {
+			log.Fatalf("llm-bench: fc-render: %v", err)
+		}
+		if *reportPath == "" {
+			fmt.Print(worksheet)
+			return
+		}
+		if err := os.WriteFile(*reportPath, []byte(worksheet), 0o600); err != nil {
+			log.Fatalf("llm-bench: write worksheet: %v", err)
+		}
+		fmt.Fprintf(os.Stderr, "llm-bench: forced-choice worksheet written to %s\n", *reportPath)
+		return
+	}
+
+	if *fcIngest {
+		if strings.TrimSpace(*worksheetPath) == "" {
+			log.Fatalf("llm-bench: -fc-ingest requires -worksheet")
+		}
+		if strings.TrimSpace(*fcOut) == "" {
+			log.Fatalf("llm-bench: -fc-ingest requires -fc-out")
+		}
+		if strings.TrimSpace(*fcSidemapPath) == "" {
+			log.Fatalf("llm-bench: -fc-ingest requires -fc-sidemap (the sealed map the worksheet was rendered under)")
+		}
+		refuseOutputAlias("fc-ingest", "-fc-out", *fcOut,
+			[][2]string{{"-artifacts", *artifactsPath}, {"-worksheet", *worksheetPath}, {"-fc-sidemap", *fcSidemapPath}})
+		sidemap := mustLoadVerifiedFCSidemap("fc-ingest", *fcSidemapPath, *fcSidemapDigest)
+		worksheet, err := os.ReadFile(*worksheetPath)
+		if err != nil {
+			log.Fatalf("llm-bench: fc-ingest: read worksheet: %v", err)
+		}
+		arts, err := loadArtifacts(*artifactsPath)
+		if err != nil {
+			log.Fatalf("llm-bench: fc-ingest: load artifacts: %v", err)
+		}
+		arts, err = filterArtifactsByModel(arts, *modelFilter)
+		if err != nil {
+			log.Fatalf("llm-bench: fc-ingest: %v", err)
+		}
+		rows, skipped, err := ingestForcedChoiceWorksheet(string(worksheet), arts, strings.TrimSpace(*labelerName), sidemap, *fcRequireComplete)
+		if err != nil {
+			log.Fatalf("llm-bench: fc-ingest: %v", err)
+		}
+		if len(rows) == 0 {
+			log.Fatalf("llm-bench: fc-ingest: worksheet has no filled prefer: lines (%d skipped); fill them before ingesting", skipped)
+		}
+		if err := writeJSONLRows(*fcOut, "fc-preferences", rows); err != nil {
+			log.Fatalf("llm-bench: fc-ingest: %v", err)
+		}
+		fmt.Fprintf(os.Stderr, "llm-bench: fc-ingest wrote %d preference row(s) to %s (%d block(s) skipped)\n", len(rows), *fcOut, skipped)
+		return
+	}
+
+	if *adjudicateRender {
+		refuseReportAlias("adjudicate-render", *reportPath, [][2]string{
+			{"-artifacts", *artifactsPath}, {"-labels", *labelsPath}})
+		arts, err := loadArtifacts(*artifactsPath)
+		if err != nil {
+			log.Fatalf("llm-bench: adjudicate-render: load artifacts: %v", err)
+		}
+		arts, err = filterArtifactsByModel(arts, *modelFilter)
+		if err != nil {
+			log.Fatalf("llm-bench: adjudicate-render: %v", err)
+		}
+		labels, err := loadLabels(*labelsPath)
+		if err != nil {
+			log.Fatalf("llm-bench: adjudicate-render: load labels: %v", err)
+		}
+		worksheet, err := renderAdjudicationWorksheet(arts, labels)
+		if err != nil {
+			// The labels path names WHICH file lacked grounding-check flags.
+			log.Fatalf("llm-bench: adjudicate-render: %v (labels: %s)", err, *labelsPath)
+		}
+		if *reportPath == "" {
+			fmt.Print(worksheet)
+			return
+		}
+		if err := os.WriteFile(*reportPath, []byte(worksheet), 0o600); err != nil {
+			log.Fatalf("llm-bench: write worksheet: %v", err)
+		}
+		fmt.Fprintf(os.Stderr, "llm-bench: adjudication worksheet written to %s\n", *reportPath)
+		return
+	}
+
+	if *adjudicateIngest {
+		if strings.TrimSpace(*worksheetPath) == "" {
+			log.Fatalf("llm-bench: -adjudicate-ingest requires -worksheet")
+		}
+		// Same footgun as -blind-ingest, plus the primary label file: the
+		// adjudicated set must not clobber -artifacts or the pre-adjudication
+		// -labels (the primary pass is audit evidence for the 3c protocol).
+		if !providedFlags["labels-out"] || strings.TrimSpace(*labelsOut) == "" {
+			log.Fatalf("llm-bench: -adjudicate-ingest requires an explicit -labels-out that differs from -artifacts and -labels")
+		}
+		refuseOutputAlias("adjudicate-ingest", "-labels-out", *labelsOut,
+			[][2]string{{"-artifacts", *artifactsPath}, {"-labels", *labelsPath}, {"-worksheet", *worksheetPath}})
+		worksheet, err := os.ReadFile(*worksheetPath)
+		if err != nil {
+			log.Fatalf("llm-bench: adjudicate-ingest: read worksheet: %v", err)
+		}
+		arts, err := loadArtifacts(*artifactsPath)
+		if err != nil {
+			log.Fatalf("llm-bench: adjudicate-ingest: load artifacts: %v", err)
+		}
+		labels, err := loadLabels(*labelsPath)
+		if err != nil {
+			log.Fatalf("llm-bench: adjudicate-ingest: load labels: %v", err)
+		}
+		updated, err := ingestAdjudicationWorksheet(string(worksheet), arts, labels)
+		if err != nil {
+			log.Fatalf("llm-bench: adjudicate-ingest: %v", err)
+		}
+		if err := writeLabelsJSONL(*labelsOut, updated); err != nil {
+			log.Fatalf("llm-bench: adjudicate-ingest: write labels: %v", err)
+		}
+		fmt.Fprintf(os.Stderr, "llm-bench: adjudicate-ingest wrote %d label(s) to %s\n", len(updated), *labelsOut)
 		return
 	}
 
@@ -432,6 +703,20 @@ func main() {
 				log.Fatalf("llm-bench: -blind-ingest: -labels-out resolves to the same file as -artifacts; choose a different output path")
 			}
 		}
+		// The hand-rolled -labels-out vs -artifacts checks above keep their
+		// pinned error strings; refuseOutputAlias covers the remaining pairs.
+		// The loaded block map is an input like the worksheet: either output
+		// aliasing it would truncate the only opaque-id join for this run.
+		labelsOutInputs := [][2]string{{"-worksheet", *worksheetPath}}
+		dupsOutInputs := [][2]string{{"-artifacts", *artifactsPath}, {"-labels-out", *labelsOut}, {"-worksheet", *worksheetPath}}
+		if strings.TrimSpace(*blindBlockmapPath) != "" {
+			labelsOutInputs = append(labelsOutInputs, [2]string{"-blind-blockmap", *blindBlockmapPath})
+			dupsOutInputs = append(dupsOutInputs, [2]string{"-blind-blockmap", *blindBlockmapPath})
+		}
+		refuseOutputAlias("blind-ingest", "-labels-out", *labelsOut, labelsOutInputs)
+		if strings.TrimSpace(*dupsOut) != "" {
+			refuseOutputAlias("blind-ingest", "-dups-out", *dupsOut, dupsOutInputs)
+		}
 		worksheet, err := os.ReadFile(*worksheetPath)
 		if err != nil {
 			log.Fatalf("llm-bench: blind-ingest: read worksheet: %v", err)
@@ -443,20 +728,48 @@ func main() {
 		if len(arts) == 0 {
 			log.Fatalf("llm-bench: blind-ingest: no artifacts in %q", *artifactsPath)
 		}
-		labels, skipped, err := ingestBlindWorksheet(string(worksheet), arts, strings.TrimSpace(*labelerName))
+		var blockmap *blindBlockmapFile
+		if strings.TrimSpace(*blindBlockmapPath) != "" {
+			bm, err := loadBlindBlockmap(*blindBlockmapPath)
+			if err != nil {
+				log.Fatalf("llm-bench: blind-ingest: %v", err)
+			}
+			blockmap = &bm
+		}
+		res, err := ingestBlindWorksheet(string(worksheet), arts, strings.TrimSpace(*labelerName), blockmap)
 		if err != nil {
 			log.Fatalf("llm-bench: blind-ingest: %v", err)
 		}
 		// An entirely unscored worksheet is a labeler error (nothing filled in);
 		// erroring also keeps an existing -labels-out from being truncated to an
 		// empty file.
-		if len(labels) == 0 {
-			log.Fatalf("llm-bench: blind-ingest: worksheet has no scored blocks (%d unscored); fill the score: lines before ingesting", skipped)
+		if len(res.Labels) == 0 {
+			log.Fatalf("llm-bench: blind-ingest: worksheet has no scored blocks (%d unscored); fill the score: lines before ingesting", res.Skipped)
 		}
-		if err := writeLabelsJSONL(*labelsOut, labels); err != nil {
+		if err := writeLabelsJSONL(*labelsOut, res.Labels); err != nil {
 			log.Fatalf("llm-bench: blind-ingest: write labels: %v", err)
 		}
-		fmt.Fprintf(os.Stderr, "llm-bench: blind-ingest wrote %d label(s) to %s (%d block(s) unscored/skipped)\n", len(labels), *labelsOut, skipped)
+		fmt.Fprintf(os.Stderr, "llm-bench: blind-ingest wrote %d label(s) to %s (%d block(s) unscored/skipped)\n", len(res.Labels), *labelsOut, res.Skipped)
+		if len(res.FlaggedHashes) > 0 {
+			fmt.Fprintf(os.Stderr, "llm-bench: blind-ingest: %d block(s) flagged grounding-check (pending adjudication):\n", len(res.FlaggedHashes))
+			for _, hash := range res.FlaggedHashes {
+				fmt.Fprintf(os.Stderr, "llm-bench: blind-ingest:   %s\n", hash)
+			}
+		}
+		if len(res.DupPairs) > 0 || len(res.DupUnpaired) > 0 {
+			agree, disagree, meanAbs := blindDupSummary(res.DupPairs)
+			fmt.Fprintf(os.Stderr, "llm-bench: blind-ingest intra-rater: %d dup pair(s), agree=%d disagree=%d mean|delta|=%.3f, unpaired=%d\n",
+				len(res.DupPairs), agree, disagree, meanAbs, len(res.DupUnpaired))
+			for _, hash := range res.DupUnpaired {
+				fmt.Fprintf(os.Stderr, "llm-bench: blind-ingest:   unpaired dup %s\n", hash)
+			}
+		}
+		if strings.TrimSpace(*dupsOut) != "" {
+			if err := writeJSONLRows(*dupsOut, "dups", res.DupPairs); err != nil {
+				log.Fatalf("llm-bench: blind-ingest: %v", err)
+			}
+			fmt.Fprintf(os.Stderr, "llm-bench: blind-ingest wrote %d dup pair(s) to %s\n", len(res.DupPairs), *dupsOut)
+		}
 		return
 	}
 
@@ -471,6 +784,7 @@ func main() {
 		if len(casePaths) == 0 {
 			log.Fatalf("llm-bench: no FIM cases matched %q", *fimCases)
 		}
+		refuseReportAlias("fim-latency", *reportPath, pathListInputs("-fim-cases", casePaths))
 		cases, err := loadFIMCases(casePaths)
 		if err != nil {
 			log.Fatalf("llm-bench: load FIM cases: %v", err)
@@ -521,6 +835,16 @@ func main() {
 	if len(tracePaths) == 0 {
 		log.Fatalf("llm-bench: no traces matched %q", *tracesGlob)
 	}
+
+	runInputs := append(pathListInputs("-traces", tracePaths),
+		[2]string{"-corpus-manifest", *corpusManifestPath},
+		// Round-2 review P2: the report write could truncate the judge cache
+		// SQLite file while it is OPEN — the cache belongs in the guard set.
+		[2]string{"-judge-cache", *judgeCachePath})
+	if *scorerName == "manual" {
+		runInputs = append(runInputs, [2]string{"-labels", *labelsPath})
+	}
+	refuseReportAlias("run", *reportPath, runInputs)
 
 	targets, err := parseModelTargets(*modelsArg)
 	if err != nil {
@@ -653,6 +977,141 @@ func main() {
 		log.Fatalf("llm-bench: write report: %v", err)
 	}
 	fmt.Fprintf(os.Stderr, "llm-bench: report written to %s\n", *reportPath)
+}
+
+// mustLoadVerifiedFCSidemap loads the sealed side map for a worksheet mode
+// and requires it to match the operator's committed digest — the same gate
+// -assembly-report applies. Fatal on any failure. Returns the whole map:
+// render and ingest resolve assignments AND arm hashes through it (W5 —
+// worksheet headers are hash-free).
+func mustLoadVerifiedFCSidemap(mode, path, committedDigest string) fcSidemapFile {
+	sidemap, _, err := loadVerifiedFCSidemap(path, committedDigest)
+	if err != nil {
+		log.Fatalf("llm-bench: %s: %v", mode, err)
+	}
+	return sidemap
+}
+
+// pathsAlias reports whether two paths name the same existing or future file.
+// Future paths are resolved through their nearest existing ancestor so a
+// symlinked parent cannot bypass an output/input collision check.
+func pathsAlias(a, b string) (bool, error) {
+	ac, ai, err := canonicalFuturePath(a)
+	if err != nil {
+		return false, err
+	}
+	bc, bi, err := canonicalFuturePath(b)
+	if err != nil {
+		return false, err
+	}
+	if ac == bc {
+		return true, nil
+	}
+	if ai != nil && bi != nil {
+		return os.SameFile(ai, bi), nil
+	}
+	if ai != nil || bi != nil {
+		return false, nil
+	}
+	return strings.EqualFold(ac, bc), nil
+}
+
+func canonicalFuturePath(path string) (string, os.FileInfo, error) {
+	if path == "" {
+		path = "."
+	}
+	path = trimTrailingPathSeparators(path)
+	if _, err := os.Lstat(path); err == nil {
+		resolved, err := filepath.EvalSymlinks(path)
+		if err != nil {
+			return "", nil, fmt.Errorf("unresolved symlink %q: %w", path, err)
+		}
+		abs, err := filepath.Abs(resolved)
+		if err != nil {
+			return "", nil, err
+		}
+		info, err := os.Stat(path)
+		if err != nil {
+			return "", nil, err
+		}
+		return abs, info, nil
+	} else if !os.IsNotExist(err) {
+		return "", nil, err
+	}
+
+	parent, leaf := filepath.Split(path)
+	parent = trimTrailingPathSeparators(parent)
+	if leaf == ".." {
+		return "", nil, fmt.Errorf("cannot resolve %q through a missing path component", path)
+	}
+	if parent == "" {
+		parent = "."
+	}
+	if parent == path {
+		return "", nil, fmt.Errorf("no existing ancestor for %q", path)
+	}
+	canonicalParent, _, err := canonicalFuturePath(parent)
+	if err != nil {
+		return "", nil, err
+	}
+	return filepath.Join(canonicalParent, leaf), nil, nil
+}
+
+func trimTrailingPathSeparators(path string) string {
+	rootEnd := len(filepath.VolumeName(path))
+	if rootEnd < len(path) && os.IsPathSeparator(path[rootEnd]) {
+		rootEnd++
+	}
+	for len(path) > rootEnd && os.IsPathSeparator(path[len(path)-1]) {
+		path = path[:len(path)-1]
+	}
+	return path
+}
+
+// refuseOutputAlias fatals when an output path aliases an input file (or a
+// sibling output of the same invocation), including future paths beneath
+// symlinked parents and existing hardlinks.
+// Mirrors the hardened -blind-ingest -labels-out guard across EVERY output
+// flag (external PR review P1: -report could clobber the artifacts JSONL);
+// inputs are ordered (flag, path) pairs so the failure is deterministic.
+// Blank input paths (unset optional flags) are skipped so call sites can
+// list every mode input unconditionally.
+func refuseOutputAlias(mode, outFlag, outPath string, inputs [][2]string) {
+	for _, in := range inputs {
+		inFlag, inPath := in[0], in[1]
+		if strings.TrimSpace(inPath) == "" {
+			continue
+		}
+		same, err := pathsAlias(outPath, inPath)
+		if err != nil {
+			log.Fatalf("llm-bench: %s: cannot resolve %s or %s: %v", mode, outFlag, inFlag, err)
+		}
+		if same {
+			if filepath.Clean(outPath) == filepath.Clean(inPath) {
+				log.Fatalf("llm-bench: %s: %s must differ from %s (it would overwrite the input)", mode, outFlag, inFlag)
+			}
+			log.Fatalf("llm-bench: %s: %s resolves to the same file as %s; choose a different output path", mode, outFlag, inFlag)
+		}
+	}
+}
+
+// refuseReportAlias applies refuseOutputAlias to the -report flag when it is
+// set (an empty -report writes to stdout and can alias nothing).
+func refuseReportAlias(mode, reportPath string, inputs [][2]string) {
+	if strings.TrimSpace(reportPath) == "" {
+		return
+	}
+	refuseOutputAlias(mode, "-report", reportPath, inputs)
+}
+
+// pathListInputs expands a list of concrete paths (globbed traces or FIM
+// cases) into refuseOutputAlias (flag, path) pairs under one flag name.
+func pathListInputs(flagName string, paths []string) [][2]string {
+	out := make([][2]string, 0, len(paths))
+	for _, p := range paths {
+		out = append(out, [2]string{flagName, p})
+	}
+	return out
 }
 
 func defaultJudgeModelName() string {

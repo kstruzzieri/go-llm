@@ -1,0 +1,68 @@
+{
+  "id": "stale-backfill-chunk-index-legacy",
+  "source": "assembly-corpus-mixed",
+  "captured_at": "0001-01-01T00:00:00Z",
+  "system": "You are the driftwatch assistant. driftwatch is a self-hosted telemetry ingest and alerting daemon. Answer using only the provided conversation, memory records, and retrieved context.",
+  "tools": null,
+  "turns": [
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "id": "c2",
+          "name": "retrieve",
+          "arguments": {
+            "query": "index backfill chunk staging",
+            "k": 3
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "content": "### source: \"internal/index/backfill.go\"\npurpose: Index backfill staging: the build path ingests history in 2000-row chunks.\noverview: backfill.go stages planner-sized chunks into the index build path, enforcing whole in-order chunk landings so crashed backfills resume at chunk boundaries.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n--- source: \"internal/index/backfill.go\" (lines 1-17, similarity: 1.00) ---\n1| package index\n2| \n3| // stageBackfill feeds historical rows into the index build path in\n4| // planner-sized chunks. Chunk sizing comes from the merge planner's\n5| // backfill profile; staging enforces only that chunks land whole and\n6| // in order, so a crashed backfill resumes at a chunk boundary.\n7| func (ix *Index) stageBackfill(src RowSource) error {\n8| \tfor {\n9| \t\tchunk, ok := src.Next()\n10| \t\tif !ok {\n11| \t\t\treturn nil\n12| \t\t}\n13| \t\tif err := ix.stage(chunk); err != nil {\n14| \t\t\treturn err\n15| \t\t}\n16| \t}\n17| }\n\n### source: \"internal/index/merge.go\"\npurpose: Merge scheduling: planner queue with backfill yield.\noverview: merge.go schedules segment merges from the planner queue and defers while a backfill holds staging, counting deferrals.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n--- source: \"internal/index/merge.go\" (lines 1-13, similarity: 1.00) ---\n1| package index\n2| \n3| // scheduleMerge picks the next segment merge from the planner queue.\n4| // Merges yield to live staging: the planner refuses to schedule\n5| // while a backfill holds the staging lock, because a merge racing a\n6| // backfill doubles write amplification on the same tier.\n7| func (ix *Index) scheduleMerge() (Merge, bool) {\n8| \tif ix.staging.locked() {\n9| \t\tix.metricsDeferred.Inc()\n10| \t\treturn Merge{}, false\n11| \t}\n12| \treturn ix.planner.next()\n13| }\n\n### source: \"docs/index-maintenance.md\"\npurpose: Index maintenance guide: merge and backfill windows, stuck-work triage.\noverview: index-maintenance.md covers the low-ingest maintenance window, the authoritative calendar, and first steps when merges or backfills outlive their window.\nlanguage: markdown\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n--- source: \"docs/index-maintenance.md\" (lines 1-11, similarity: 1.00) ---\n1| # driftwatch index maintenance\n2| \n3| The index tier stays healthy through scheduled merges and the\n4| occasional backfill. Both run inside the low-ingest window; the\n5| maintenance calendar is authoritative for when that window falls.\n6| \n7| ## Stuck work\n8| \n9| A merge or backfill that outlives its window pages the maintenance\n10| channel. Start with the planner state dump; most stuck work is a\n11| held staging lock, not a wedged planner.\n",
+      "tool_call_id": "c2",
+      "name": "retrieve"
+    },
+    {
+      "role": "user",
+      "content": "How many rows does an index backfill chunk carry?"
+    }
+  ],
+  "golden": {
+    "tool_calls": null,
+    "final_answer_criteria": "States an index backfill chunk carries 20000 rows. 20000 and 20,000 are equivalent correct forms. An answer of 2000 rows scores 0. An answer presenting both the correct and a competing value without committing to one scores 0."
+  },
+  "assembly_eval": {
+    "pair_id": "stale-backfill-chunk-index",
+    "mode": "legacy",
+    "candidate_ids": [
+      "23e75efc37e6fff12c8ce4adbafbb9875e3d737f25d6286e2296cd2147c0eba0",
+      "ca89495b1e5a10107700b85c2eb7184a36764cb88e74e4c78f195536b4d4939e",
+      "ebfbac7ed23893c8a59b8509de9da3cbe229406d281849dea634d224c7079af0",
+      "rec-index-chunk",
+      "rec-merge-alerts",
+      "rec-merge-drills",
+      "rec-merge-planner"
+    ],
+    "estimated_prompt_tokens": 751,
+    "state_digest": "6fd3e5d59b8b3d7d8650ffe77c634066d0e3cf5c63ece8549786290648330fe6",
+    "subjects": [
+      "(c1|memory|rec-index-chunk)",
+      "(c1|memory|rec-merge-alerts)",
+      "(c1|memory|rec-merge-drills)",
+      "(c1|memory|rec-merge-planner)",
+      "(c2|rag|internal/index/backfill.go)",
+      "(c2|rag|internal/index/merge.go)",
+      "(c2|rag|docs/index-maintenance.md)"
+    ],
+    "stratum": "stale_vs_fresh",
+    "answer_home": "memory",
+    "scenario_family": "backfill-chunk-staleness",
+    "budget": 791,
+    "raw_state_tokens": 1318,
+    "pressure_level": "critical",
+    "shed_messages": 8,
+    "shed_bytes": 1910
+  }
+}

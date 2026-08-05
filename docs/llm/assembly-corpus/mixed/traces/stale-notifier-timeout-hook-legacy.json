@@ -1,0 +1,84 @@
+{
+  "id": "stale-notifier-timeout-hook-legacy",
+  "source": "assembly-corpus-mixed",
+  "captured_at": "0001-01-01T00:00:00Z",
+  "system": "You are the driftwatch assistant. driftwatch is a self-hosted telemetry ingest and alerting daemon. Answer using only the provided conversation, memory records, and retrieved context.",
+  "tools": null,
+  "turns": [
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "id": "c1",
+          "name": "retrieve",
+          "arguments": {
+            "query": "webhook notifier delivery path",
+            "k": 3
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "content": "### source: \"internal/notify/hookdeliver.go\"\npurpose: Webhook delivery attempt: profile deadline, coarse outcome classification.\noverview: hookdeliver.go posts webhook deliveries under the profile-supplied deadline and classifies outcomes as retryable or terminal only; the deadline value itself lives in the profile.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n--- source: \"internal/notify/hookdeliver.go\" (lines 1-15, similarity: 1.00) ---\n1| package notify\n2| \n3| // deliverHook posts one webhook delivery and classifies the outcome.\n4| // The attempt runs under the delivery deadline from the profile;\n5| // classification stays coarse on purpose: retryable or terminal,\n6| // nothing in between, so the retry loop cannot misread a status.\n7| func (n *Notifier) deliverHook(d Delivery) outcome {\n8| \tctx, cancel := n.deadlineContext()\n9| \tdefer cancel()\n10| \tresp, err := n.post(ctx, d)\n11| \tif err != nil {\n12| \t\treturn retryable(err)\n13| \t}\n14| \treturn classify(resp)\n15| }\n\n### source: \"internal/notify/retryplan.go\"\npurpose: Per-receiver retry ladders: precomputed schedules, declared exhaustion.\noverview: retryplan.go precomputes each receiver's retry ladder from its declared policy, answers next-attempt delays without consulting the clock, and treats ladder exhaustion as terminal.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n--- source: \"internal/notify/retryplan.go\" (lines 1-31, similarity: 1.00) ---\n1| package notify\n2| \n3| import \"time\"\n4| \n5| // retryPlan owns the per-receiver retry schedule. Plans are built\n6| // from the receiver's declared policy at profile load and never\n7| // consult the clock themselves: the drain loop asks for the next\n8| // attempt time and the plan answers from its precomputed ladder,\n9| // which keeps retry behaviour reproducible in replay tests.\n10| type retryPlan struct {\n11| \tladder  []time.Duration\n12| \tattempt int\n13| \tceiling time.Duration\n14| }\n15| \n16| // next returns the delay before the following attempt, or false once\n17| // the ladder is exhausted. Exhaustion is terminal by design: a\n18| // receiver that wants more attempts declares a longer ladder in its\n19| // policy instead of the notifier inventing retries it was never\n20| // asked to make.\n21| func (r *retryPlan) next() (time.Duration, bool) {\n22| \tif r.attempt \u003e= len(r.ladder) {\n23| \t\treturn 0, false\n24| \t}\n25| \td := r.ladder[r.attempt]\n26| \tif d \u003e r.ceiling {\n27| \t\td = r.ceiling\n28| \t}\n29| \tr.attempt++\n30| \treturn d, true\n31| }\n\n### source: \"docs/notifier-delivery.md\"\npurpose: Notifier delivery guide: per-path profiles and dead-letter monitoring.\noverview: notifier-delivery.md covers the shared drain loop with per-path profiles and what to watch after profile changes, including dead-letter replays.\nlanguage: markdown\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n--- source: \"docs/notifier-delivery.md\" (lines 1-11, similarity: 1.00) ---\n1| # driftwatch notifier delivery\n2| \n3| Webhook and pager deliveries share the notifier's drain loop but\n4| run under separate profiles: deadlines, retry ladders, and\n5| dead-letter policies are declared per path.\n6| \n7| ## Operator notes\n8| \n9| Watch the dead-letter log after profile changes; a mistyped ladder\n10| usually shows up there first. Replay drills are cheap and the\n11| runbook's replay section stays current on purpose.\n",
+      "tool_call_id": "c1",
+      "name": "retrieve"
+    },
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "id": "c2",
+          "name": "agent_memory_search",
+          "arguments": {
+            "query": ""
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "content": "rec-hook-window · semantic · 2025-07-27 · webhook notifier timeout stands at 8 seconds\nrec-secret-loc · working · 2025-07-27 · receiver signing secrets moved during the rework; the onboarding doc shows the new location\nrec-strict-order · semantic · 2025-07-27 · strict-order receivers drain through the ordered delivery lane; the lane listing lives on the rework ticket",
+      "tool_call_id": "c2",
+      "name": "agent_memory_search"
+    },
+    {
+      "role": "user",
+      "content": "How long may a webhook notifier delivery run before timing out?"
+    }
+  ],
+  "golden": {
+    "tool_calls": null,
+    "final_answer_criteria": "States the webhook notifier delivery timeout is 30 seconds. An answer of 8 seconds scores 0. An answer presenting both the correct and a competing value without committing to one scores 0."
+  },
+  "assembly_eval": {
+    "pair_id": "stale-notifier-timeout-hook",
+    "mode": "legacy",
+    "candidate_ids": [
+      "807f50925c7d667e59adf0cfd1950fb52cfa46f27008f22829e4fdf05eb2d0c3",
+      "a255ba2b7aaeb5932b9f1eea6e6eebd58693e85700883951775575166b5c2061",
+      "c2972ef9039342c0f0e53f9e3555d56039bd0ddcbf8ca9321627a2f67c1233a9",
+      "rec-hook-window",
+      "rec-secret-loc",
+      "rec-strict-order"
+    ],
+    "estimated_prompt_tokens": 1018,
+    "state_digest": "6d280ee90f84e49e55b9bb1fcc3efc648b03ebbe48e3b894f00c0f4c11a4fb3e",
+    "subjects": [
+      "(c1|rag|internal/notify/hookdeliver.go)",
+      "(c1|rag|internal/notify/retryplan.go)",
+      "(c1|rag|docs/notifier-delivery.md)",
+      "(c2|memory|rec-hook-window)",
+      "(c2|memory|rec-secret-loc)",
+      "(c2|memory|rec-strict-order)"
+    ],
+    "stratum": "stale_vs_fresh",
+    "answer_home": "conversation",
+    "scenario_family": "notifier-timeout-staleness",
+    "budget": 1091,
+    "raw_state_tokens": 1819,
+    "pressure_level": "critical",
+    "shed_messages": 18,
+    "shed_bytes": 2444
+  }
+}

@@ -1,0 +1,65 @@
+{
+  "id": "conv-tenant-rate-floor-legacy",
+  "source": "assembly-corpus-mixed",
+  "captured_at": "0001-01-01T00:00:00Z",
+  "system": "You are the driftwatch assistant. driftwatch is a self-hosted telemetry ingest and alerting daemon. Answer using only the provided conversation, memory records, and retrieved context.",
+  "tools": null,
+  "turns": [
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "id": "c2",
+          "name": "agent_memory_search",
+          "arguments": {
+            "query": ""
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "content": "rec-capacity-cycle · working · 2025-07-27 · the capacity summary goes out monthly to whoever holds the ingest pager next\nrec-eval-default · semantic · 2025-07-27 · evaluation builds have shipped a 40 batches/min built-in default since the first release; production tenants are expected to get explicit stanzas\nrec-tenant-tags · semantic · 2025-07-27 · tenant stanzas carry team and cost-center tags; the capacity summary groups by team tag",
+      "tool_call_id": "c2",
+      "name": "agent_memory_search"
+    },
+    {
+      "role": "user",
+      "content": "What built-in default rate for unnamed tenants did the capacity call land on?"
+    }
+  ],
+  "golden": {
+    "tool_calls": null,
+    "final_answer_criteria": "States the built-in default is 250 batches/min for tenants the tenants file does not name. Answering 40 batches/min (the stale evaluation default from memory) scores 0. An answer presenting both the correct and a competing value without committing to one scores 0."
+  },
+  "assembly_eval": {
+    "pair_id": "conv-tenant-rate-floor",
+    "mode": "legacy",
+    "candidate_ids": [
+      "283296b9d91d8d7751b7fe1449d88193e3b3a4076a79275297b16330ac1cae1a",
+      "434725cad95e007a01bb293c0d2ecf3b89c10f8c0f3df27d173c03a0b174fce2",
+      "6b814915305aef55314a325bc4eedfd5781b80d418a095935b37409ac5c71e48",
+      "rec-capacity-cycle",
+      "rec-eval-default",
+      "rec-tenant-tags"
+    ],
+    "estimated_prompt_tokens": 178,
+    "state_digest": "f2fea8f3968c68ec3dadb3f22c9c4d810b8a3773aadef7d480e81bc49bd16e59",
+    "subjects": [
+      "(c1|rag|internal/ingest/limits.go)",
+      "(c1|rag|internal/ingest/tenants.go)",
+      "(c1|rag|docs/tenants.md)",
+      "(c2|memory|rec-capacity-cycle)",
+      "(c2|memory|rec-eval-default)",
+      "(c2|memory|rec-tenant-tags)"
+    ],
+    "stratum": "conversation_only",
+    "answer_home": "conversation",
+    "scenario_family": "tenant-default-rate-conv",
+    "budget": 1207,
+    "raw_state_tokens": 2012,
+    "pressure_level": "ok",
+    "shed_messages": 14,
+    "shed_bytes": 6778
+  }
+}

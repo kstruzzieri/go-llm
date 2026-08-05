@@ -1,0 +1,71 @@
+{
+  "id": "chain-merge-fanin-flash-legacy",
+  "source": "assembly-corpus-mixed",
+  "captured_at": "0001-01-01T00:00:00Z",
+  "system": "You are the driftwatch assistant. driftwatch is a self-hosted telemetry ingest and alerting daemon. Answer using only the provided conversation, memory records, and retrieved context.",
+  "tools": null,
+  "turns": [
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "id": "c3",
+          "name": "fixture_echo",
+          "arguments": {
+            "content": "planner debug dump from the staging compactor, pasted verbatim:\nplanner: pass admitted, cohort manifest recorded in the pass ledger\nplanner: est_out_bytes total=7.1GiB largest_cohort=812MiB smallest_cohort=774MiB\nplanner: skipped 3 segments under the exporter watermark\nplanner: byte budget left at admission stop 91MiB\nplanner note: the fanin=12 lab experiment was reverted the same week it ran; no shipped config ever carried it and the planner ignores the flag if present.\nplanner: handing the admitted cohorts to the merge workers\n"
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "content": "planner debug dump from the staging compactor, pasted verbatim:\nplanner: pass admitted, cohort manifest recorded in the pass ledger\nplanner: est_out_bytes total=7.1GiB largest_cohort=812MiB smallest_cohort=774MiB\nplanner: skipped 3 segments under the exporter watermark\nplanner: byte budget left at admission stop 91MiB\nplanner note: the fanin=12 lab experiment was reverted the same week it ran; no shipped config ever carried it and the planner ignores the flag if present.\nplanner: handing the admitted cohorts to the merge workers\n",
+      "tool_call_id": "c3",
+      "name": "fixture_echo"
+    },
+    {
+      "role": "user",
+      "content": "How many segments does one merge pass cohort combine, and which tier are merge passes currently restricted to?"
+    }
+  ],
+  "golden": {
+    "tool_calls": null,
+    "final_answer_criteria": "BOTH halves required: one merge cohort combines 6 segments, AND merge passes are currently restricted to the flash tier. A missing half caps the score at 0.5; a stated but incorrect half scores 0. The reverted fanin=12 lab experiment named in the pasted planner dump scores 0 for the width half. An answer presenting both the correct and a competing value without committing to one scores 0."
+  },
+  "assembly_eval": {
+    "pair_id": "chain-merge-fanin-flash",
+    "mode": "legacy",
+    "candidate_ids": [
+      "3cb66d6e58acdf04028902e8a7d80e0a23a38caaeb1fff235fc6b8ae9929732a",
+      "5fa92b54591b6d109d9616cb692cea9331566c431b0edb3bc1b51e953034a409",
+      "677cb9c10bc297c34f7e3cb2f582875811c20ce4837e41ca546cfd433f48835a",
+      "rec-cohort-naming",
+      "rec-dash-cohorts",
+      "rec-merge-tier",
+      "rec-planner-dumps",
+      "rec-review-owner",
+      "rec-watermark-rule"
+    ],
+    "estimated_prompt_tokens": 208,
+    "state_digest": "1332a4798ad953c7076f4cfbd413bd1d816cae0c425ea4a9aced2097bd984058",
+    "subjects": [
+      "(c1|memory|rec-cohort-naming)",
+      "(c1|memory|rec-dash-cohorts)",
+      "(c1|memory|rec-merge-tier)",
+      "(c1|memory|rec-planner-dumps)",
+      "(c1|memory|rec-review-owner)",
+      "(c1|memory|rec-watermark-rule)",
+      "(c2|rag|internal/compact/merge.go)",
+      "(c2|rag|internal/compact/picker.go)",
+      "(c2|rag|docs/compaction-plan.md)"
+    ],
+    "stratum": "chain_retention",
+    "answer_home": "join",
+    "scenario_family": "merge-fanin-chain",
+    "budget": 1241,
+    "raw_state_tokens": 2069,
+    "pressure_level": "ok",
+    "shed_messages": 8,
+    "shed_bytes": 7083
+  }
+}

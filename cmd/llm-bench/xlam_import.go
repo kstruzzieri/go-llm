@@ -16,6 +16,8 @@ import (
 // golden-empty label, with no human authoring or sign-off needed.
 const (
 	xlamSource         = "xlam-irrelevance"
+	xlamTracePrefix    = "xlam-irrel-"
+	xlamTraceSuffix    = ".json"
 	xlamDifficulty     = "tempting"
 	xlamFailureMode    = "irrelevant-tools-offered"
 	xlamSystemPrompt   = "You are a helpful assistant with access to the tools listed for this task. Call a tool only when it is required to answer the user's request; if none of the available tools is relevant, answer directly without calling any tool."
@@ -98,11 +100,20 @@ type xlamImportResult struct {
 	Filtered int
 }
 
+type xlamPlannedTrace struct {
+	trace Trace
+	path  string
+}
+
 // importXlamIrrelevance reads the xLAM-irrelevance JSON array, keeps records with
 // at least MinTools offered tools and an empty answer set, seeded-samples N of
 // them, converts each to a golden-empty Trace, and writes the trace files plus a
 // corpus manifest. Sampling is deterministic for a given (Seed, input).
 func importXlamIrrelevance(opts xlamImportOptions) (xlamImportResult, error) {
+	return importXlamIrrelevanceWithPublish(opts, publishFileSet)
+}
+
+func importXlamIrrelevanceWithPublish(opts xlamImportOptions, publish func([]filePublication, []string) (filePublicationOutcome, error)) (xlamImportResult, error) {
 	if opts.MinTools < 0 {
 		// A negative minimum would make `len(tools) < MinTools` always false,
 		// silently admitting 0-tool rows. Reject it rather than guess intent.
@@ -141,22 +152,11 @@ func importXlamIrrelevance(opts xlamImportOptions) (xlamImportResult, error) {
 	if opts.N > 0 && opts.N < len(eligible) {
 		eligible = eligible[:opts.N]
 	}
+	if len(eligible) == 0 {
+		return res, fmt.Errorf("xlam import: no eligible records written (have %d records, min-tools=%d)", len(recs), opts.MinTools)
+	}
 
-	if err := os.MkdirAll(opts.OutDir, 0o755); err != nil {
-		return xlamImportResult{}, fmt.Errorf("xlam import: mkdir out: %w", err)
-	}
-	// Clear prior xlam traces so the output dir always matches the new manifest
-	// (a smaller re-run must not leave orphans that a *.json replay would pick up).
-	stale, err := filepath.Glob(filepath.Join(opts.OutDir, "xlam-irrel-*.json"))
-	if err != nil {
-		return xlamImportResult{}, fmt.Errorf("xlam import: scan stale traces: %w", err)
-	}
-	for _, p := range stale {
-		if err := os.Remove(p); err != nil {
-			return xlamImportResult{}, fmt.Errorf("xlam import: remove stale %s: %w", p, err)
-		}
-	}
-	var manifest Manifest
+	planned := make([]xlamPlannedTrace, 0, len(eligible))
 	for i, r := range eligible {
 		tr, err := xlamRecordToTrace(r, i)
 		if err != nil {
@@ -164,16 +164,36 @@ func importXlamIrrelevance(opts xlamImportOptions) (xlamImportResult, error) {
 			// failure here is a logic bug, not bad data — fail loud, don't undercount.
 			return xlamImportResult{}, fmt.Errorf("xlam import: convert eligible record %d: %w", i, err)
 		}
-		path := filepath.Join(opts.OutDir, safeTraceFilename(tr.ID)+".json")
-		blob, err := json.MarshalIndent(tr, "", "  ")
+		planned = append(planned, xlamPlannedTrace{
+			trace: tr,
+			path:  filepath.Join(opts.OutDir, safeTraceFilename(tr.ID)+".json"),
+		})
+	}
+
+	entries, err := os.ReadDir(opts.OutDir)
+	if err != nil && !os.IsNotExist(err) {
+		return xlamImportResult{}, fmt.Errorf("xlam import: scan stale traces: %w", err)
+	}
+	stale := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		if xlamManagedTraceBasename(entry.Name()) {
+			stale = append(stale, filepath.Join(opts.OutDir, entry.Name()))
+		}
+	}
+	if err := xlamPreflightPaths(opts.SrcPath, opts.OutDir, opts.ManifestPath, planned, stale); err != nil {
+		return xlamImportResult{}, err
+	}
+
+	var manifest Manifest
+	replacements := make([]filePublication, 0, len(planned)+1)
+	for _, p := range planned {
+		raw, err := marshalTraceJSON(p.trace)
 		if err != nil {
-			return xlamImportResult{}, fmt.Errorf("xlam import: marshal %s: %w", tr.ID, err)
+			return xlamImportResult{}, fmt.Errorf("xlam import: marshal %s: %w", p.path, err)
 		}
-		if err := os.WriteFile(path, blob, 0o600); err != nil {
-			return xlamImportResult{}, fmt.Errorf("xlam import: write %s: %w", path, err)
-		}
+		replacements = append(replacements, filePublication{target: p.path, data: raw, mode: 0o644})
 		manifest.Entries = append(manifest.Entries, ManifestEntry{
-			TraceID:                tr.ID,
+			TraceID:                p.trace.ID,
 			Partition:              PartitionChallenge,
 			Category:               "irrelevance",
 			Source:                 xlamSource,
@@ -181,13 +201,126 @@ func importXlamIrrelevance(opts xlamImportOptions) (xlamImportResult, error) {
 		})
 		res.Written++
 	}
-	if res.Written == 0 {
-		return res, fmt.Errorf("xlam import: no eligible records written (have %d records, min-tools=%d)", len(recs), opts.MinTools)
-	}
-	if err := writeManifest(opts.ManifestPath, manifest); err != nil {
+	manifestRaw, err := marshalManifestJSONL(manifest)
+	if err != nil {
 		return xlamImportResult{}, fmt.Errorf("xlam import: %w", err)
 	}
+	replacements = append(replacements, filePublication{target: opts.ManifestPath, data: manifestRaw, mode: 0o600})
+	staleOnly, err := xlamStaleOnly(planned, stale, inspectFilePublicationTarget)
+	if err != nil {
+		return xlamImportResult{}, err
+	}
+	if err := os.MkdirAll(opts.OutDir, 0o755); err != nil {
+		return xlamImportResult{}, fmt.Errorf("xlam import: mkdir out: %w", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(opts.ManifestPath), 0o755); err != nil {
+		return xlamImportResult{}, fmt.Errorf("xlam import: mkdir manifest: %w", err)
+	}
+	publication, err := publish(replacements, staleOnly)
+	if err != nil {
+		return xlamImportResult{}, fmt.Errorf("xlam import: publish evidence: %w", err)
+	}
+	writeFilePublicationWarnings(os.Stderr, "xlam import", publication)
 	return res, nil
+}
+
+func xlamStaleOnly(planned []xlamPlannedTrace, stale []string, inspect func(string) (publicationTarget, error)) ([]string, error) {
+	plannedCanonicalPaths := make(map[string]struct{}, len(planned))
+	plannedFoldedTargets := make(map[string]publicationTarget, len(planned))
+	for _, p := range planned {
+		target, err := inspect(p.path)
+		if err != nil {
+			return nil, fmt.Errorf("xlam import: canonicalize planned trace %s: %w", p.path, err)
+		}
+		plannedCanonicalPaths[target.canonical] = struct{}{}
+		plannedFoldedTargets[strings.ToLower(target.canonical)] = target
+	}
+	staleTargets := make([]publicationTarget, len(stale))
+	staleCanonicalPaths := make(map[string]struct{}, len(stale))
+	for i, stalePath := range stale {
+		target, err := inspect(stalePath)
+		if err != nil {
+			return nil, fmt.Errorf("xlam import: canonicalize stale trace %s: %w", stalePath, err)
+		}
+		staleTargets[i] = target
+		staleCanonicalPaths[target.canonical] = struct{}{}
+	}
+	staleOnly := make([]string, 0, len(stale))
+	for i, stalePath := range stale {
+		target := staleTargets[i]
+		if _, plannedReplacement := plannedCanonicalPaths[target.canonical]; plannedReplacement {
+			continue
+		}
+		caseVariant, caseVariantReplacement := plannedFoldedTargets[strings.ToLower(target.canonical)]
+		if caseVariantReplacement && publicationTargetsAlias(target, caseVariant) {
+			if _, exactSpellingExists := staleCanonicalPaths[caseVariant.canonical]; !exactSpellingExists {
+				continue
+			}
+		}
+		staleOnly = append(staleOnly, stalePath)
+	}
+	return staleOnly, nil
+}
+
+func xlamPreflightPaths(srcPath, outDir, manifestPath string, planned []xlamPlannedTrace, stale []string) error {
+	check := func(leftName, leftPath, rightName, rightPath string) error {
+		same, err := pathsAlias(leftPath, rightPath)
+		if err != nil {
+			return fmt.Errorf("xlam import: resolve %s and %s: %w", leftName, rightName, err)
+		}
+		if same {
+			return fmt.Errorf("xlam import: %s %s aliases %s %s", leftName, leftPath, rightName, rightPath)
+		}
+		return nil
+	}
+	if err := check("manifest", manifestPath, "source", srcPath); err != nil {
+		return err
+	}
+	inManagedNamespace, err := xlamManifestInManagedTraceNamespace(outDir, manifestPath)
+	if err != nil {
+		return fmt.Errorf("xlam import: resolve manifest parent and output directory: %w", err)
+	}
+	if inManagedNamespace {
+		return fmt.Errorf("xlam import: manifest %s is in the managed trace namespace for %s", manifestPath, outDir)
+	}
+	for i, p := range planned {
+		if err := check(fmt.Sprintf("trace %d", i), p.path, "source", srcPath); err != nil {
+			return err
+		}
+		if err := check(fmt.Sprintf("trace %d", i), p.path, "manifest", manifestPath); err != nil {
+			return err
+		}
+	}
+	for _, stalePath := range stale {
+		if err := check("source", srcPath, "managed trace", stalePath); err != nil {
+			return fmt.Errorf("%w; refusing to delete the input (move the source outside the output directory)", err)
+		}
+		if err := check("manifest", manifestPath, "managed trace", stalePath); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// xlamManagedTracePath returns the canonical managed spelling for a manifest
+// direct child in the xLAM trace namespace. Identity is decided by pathsAlias,
+// rather than a lexical directory-prefix check, so symlinked parents and
+// case-sensitive filesystems retain their real filesystem semantics.
+func xlamManagedTraceBasename(path string) bool {
+	name := filepath.Base(path)
+	if len(name) < len(xlamTracePrefix)+len(xlamTraceSuffix) ||
+		!strings.EqualFold(name[:len(xlamTracePrefix)], xlamTracePrefix) ||
+		!strings.EqualFold(name[len(name)-len(xlamTraceSuffix):], xlamTraceSuffix) {
+		return false
+	}
+	return true
+}
+
+func xlamManifestInManagedTraceNamespace(outDir, manifestPath string) (bool, error) {
+	if !xlamManagedTraceBasename(manifestPath) {
+		return false, nil
+	}
+	return pathsAlias(filepath.Dir(manifestPath), outDir)
 }
 
 // xlamRecordEligible reports whether a record is a usable irrelevance case:

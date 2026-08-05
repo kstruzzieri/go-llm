@@ -1,0 +1,155 @@
+{
+  "id": "stale-notifier-timeout-page-mixed",
+  "source": "assembly-corpus-mixed",
+  "captured_at": "0001-01-01T00:00:00Z",
+  "system": "You are the driftwatch assistant. driftwatch is a self-hosted telemetry ingest and alerting daemon. Answer using only the provided conversation, memory records, and retrieved context.",
+  "tools": null,
+  "turns": [
+    {
+      "role": "user",
+      "content": "Paging migration punch list. The old provider's webhook endpoints are still registered in our delivery profile; remove them and note the removal in the migration log so the cutover trail stays complete."
+    },
+    {
+      "role": "assistant",
+      "content": "Removed the old endpoints from the profile, verified nothing delivered to them this week, and logged the removal with the cutover date."
+    },
+    {
+      "role": "user",
+      "content": "The migration also left both providers receiving test pages from the drill schedule. Point the drill at the new provider only, and archive the old drill results where the runbook links them."
+    },
+    {
+      "role": "assistant",
+      "content": "Repointed the drill at the new provider and archived the old results under the runbook's drill section, links intact."
+    },
+    {
+      "role": "user",
+      "content": "Can you reconcile the escalation policies against the new provider's schedule model? Two policies still reference rotation names that only existed on the old side."
+    },
+    {
+      "role": "assistant",
+      "content": "Reconciled the policies: both stale rotation names now map to the new schedules, and I left a comment on each policy naming the old rotation for the audit."
+    },
+    {
+      "role": "user",
+      "content": "The provider migration doc needs the acknowledgement flow written up as well; the new provider acks asynchronously and people keep assuming the old synchronous behaviour."
+    },
+    {
+      "role": "assistant",
+      "content": "Wrote the acknowledgement flow into the migration doc, including the poll step, and linked it from the paging runbook's delivery section."
+    },
+    {
+      "role": "user",
+      "content": "Also check the paging spend against the old provider's final invoice; we should not be billed past the cutover."
+    },
+    {
+      "role": "assistant",
+      "content": "Checked the invoice: two days past cutover were billed, and I filed the credit request with the cutover log attached as evidence."
+    },
+    {
+      "role": "user",
+      "content": "The oncall handbook still screenshots the old provider's app for the ack walkthrough. Refresh those against the new app before the next cohort onboards."
+    },
+    {
+      "role": "assistant",
+      "content": "Refreshed the walkthrough with new-app screenshots and had this week's oncall verify the steps match what they actually see."
+    },
+    {
+      "role": "user",
+      "content": "Someone reported the low-urgency route double-notified during the migration window. Confirm the dedupe settings survived the cutover on that route."
+    },
+    {
+      "role": "assistant",
+      "content": "Confirmed the route's dedupe settings carried over; the double notification traced to the overlap window itself, and I noted that in the migration log."
+    },
+    {
+      "role": "user",
+      "content": "The migration retro needs scheduling too, with the provider's implementation engineer invited; their side saw failure modes ours did not."
+    },
+    {
+      "role": "assistant",
+      "content": "Scheduled the retro with the implementation engineer attending and seeded the agenda with the delivery items from the migration log."
+    },
+    {
+      "role": "user",
+      "content": "Last: file the DPA addendum from the new provider with legal and link it from the vendor register so audit can find it."
+    },
+    {
+      "role": "assistant",
+      "content": "Filed the addendum with legal and linked it from the vendor register entry alongside the signed order form."
+    },
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "id": "c1",
+          "name": "retrieve",
+          "arguments": {
+            "query": "pager notifier delivery path",
+            "k": 3
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "content": "### source: \"internal/notify/pager.go\"\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nnote: metadata overview (summary omitted: budget)\n--- source: \"internal/notify/pager.go\" (lines 1-13, similarity: 1.00) ---\n1| package notify\n2| \n3| // deliverPage sends one page to the provider and waits for the\n4| // delivery verdict. The wait ceiling comes from the delivery profile;\n5| // the poll loop below owns the asynchronous acknowledgement flow the\n6| // provider introduced.\n7| func (n *Notifier) deliverPage(p Page) error {\n8| \treceipt, err := n.provider.Send(p)\n9| \tif err != nil {\n10| \t\treturn err\n11| \t}\n12| \treturn n.awaitAck(receipt)\n13| }\n\n### source: \"internal/notify/ackpoll.go\"\npurpose: Acknowledgement polling with geometric backoff and fail-safe receipt handling.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n\n### source: \"docs/paging-delivery.md\"\nlanguage: markdown\nindexed: 2025-07-27T00:00:00Z\nnote: metadata overview (summary omitted: budget)\n",
+      "tool_call_id": "c1",
+      "name": "retrieve"
+    },
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "id": "c2",
+          "name": "agent_memory_search",
+          "arguments": {
+            "query": ""
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "content": "rec-migration-log · working · created:2025-07-27 · updated:2025-07-27 · scope:session · ns: · src:\nrec-pager-timeout · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:\nrec-pager-window · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src: · pager notifier gives up a delivery at 10 seconds",
+      "tool_call_id": "c2",
+      "name": "agent_memory_search"
+    },
+    {
+      "role": "user",
+      "content": "How long does the pager notifier wait on a delivery before giving up?"
+    }
+  ],
+  "golden": {
+    "tool_calls": null,
+    "final_answer_criteria": "States the pager notifier waits 45 seconds before giving up a delivery. An answer of 10 seconds scores 0. An answer presenting both the correct and a competing value without committing to one scores 0."
+  },
+  "assembly_eval": {
+    "pair_id": "stale-notifier-timeout-page",
+    "mode": "mixed",
+    "candidate_ids": [
+      "2b15f587044c16df7d3dad0ea4167f51c06c462036b688faa343090c9f21346d",
+      "6001883ce8cc87faec478677cfdb2ed0c8ede5bfd3fe143adc053c4e8182801c",
+      "e8775fb66744a8927b6c360c35024281f766bbc5e101ff2f2c3b11b06730cf13",
+      "rec-migration-log",
+      "rec-pager-timeout",
+      "rec-pager-window"
+    ],
+    "estimated_prompt_tokens": 1057,
+    "state_digest": "87bc1cd3928f625b3aae929db6888b2381b037e79f099a4a8a2ed8cd0f973b64",
+    "subjects": [
+      "(c1|rag|internal/notify/pager.go)",
+      "(c1|rag|internal/notify/ackpoll.go)",
+      "(c1|rag|docs/paging-delivery.md)",
+      "(c2|memory|rec-migration-log)",
+      "(c2|memory|rec-pager-timeout)",
+      "(c2|memory|rec-pager-window)"
+    ],
+    "stratum": "stale_vs_fresh",
+    "answer_home": "memory",
+    "scenario_family": "notifier-timeout-staleness",
+    "budget": 1109,
+    "raw_state_tokens": 1849,
+    "pressure_level": "critical",
+    "shed_bytes": 2435
+  }
+}
