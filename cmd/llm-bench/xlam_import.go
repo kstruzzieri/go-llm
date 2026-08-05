@@ -16,6 +16,8 @@ import (
 // golden-empty label, with no human authoring or sign-off needed.
 const (
 	xlamSource         = "xlam-irrelevance"
+	xlamTracePrefix    = "xlam-irrel-"
+	xlamTraceSuffix    = ".json"
 	xlamDifficulty     = "tempting"
 	xlamFailureMode    = "irrelevant-tools-offered"
 	xlamSystemPrompt   = "You are a helpful assistant with access to the tools listed for this task. Call a tool only when it is required to answer the user's request; if none of the available tools is relevant, answer directly without calling any tool."
@@ -164,11 +166,11 @@ func importXlamIrrelevance(opts xlamImportOptions) (xlamImportResult, error) {
 		})
 	}
 
-	stale, err := filepath.Glob(filepath.Join(opts.OutDir, "xlam-irrel-*.json"))
+	stale, err := filepath.Glob(filepath.Join(opts.OutDir, xlamTracePrefix+"*"+xlamTraceSuffix))
 	if err != nil {
 		return xlamImportResult{}, fmt.Errorf("xlam import: scan stale traces: %w", err)
 	}
-	if err := xlamPreflightPaths(opts.SrcPath, opts.ManifestPath, planned, stale); err != nil {
+	if err := xlamPreflightPaths(opts.SrcPath, opts.OutDir, opts.ManifestPath, planned, stale); err != nil {
 		return xlamImportResult{}, err
 	}
 
@@ -202,7 +204,7 @@ func importXlamIrrelevance(opts xlamImportOptions) (xlamImportResult, error) {
 	return res, nil
 }
 
-func xlamPreflightPaths(srcPath, manifestPath string, planned []xlamPlannedTrace, stale []string) error {
+func xlamPreflightPaths(srcPath, outDir, manifestPath string, planned []xlamPlannedTrace, stale []string) error {
 	check := func(leftName, leftPath, rightName, rightPath string) error {
 		same, err := pathsAlias(leftPath, rightPath)
 		if err != nil {
@@ -216,6 +218,11 @@ func xlamPreflightPaths(srcPath, manifestPath string, planned []xlamPlannedTrace
 	if err := check("manifest", manifestPath, "source", srcPath); err != nil {
 		return err
 	}
+	if managedPath, ok := xlamManagedTracePath(outDir, manifestPath); ok {
+		if err := check("manifest", manifestPath, "managed trace namespace", managedPath); err != nil {
+			return err
+		}
+	}
 	for i, p := range planned {
 		if err := check(fmt.Sprintf("trace %d", i), p.path, "source", srcPath); err != nil {
 			return err
@@ -228,8 +235,26 @@ func xlamPreflightPaths(srcPath, manifestPath string, planned []xlamPlannedTrace
 		if err := check("source", srcPath, "managed trace", stalePath); err != nil {
 			return fmt.Errorf("%w; refusing to delete the input (move the source outside the output directory)", err)
 		}
+		if err := check("manifest", manifestPath, "managed trace", stalePath); err != nil {
+			return err
+		}
 	}
 	return nil
+}
+
+// xlamManagedTracePath returns the canonical managed spelling for a manifest
+// direct child in the xLAM trace namespace. Identity is decided by pathsAlias,
+// rather than a lexical directory-prefix check, so symlinked parents and
+// case-sensitive filesystems retain their real filesystem semantics.
+func xlamManagedTracePath(outDir, path string) (string, bool) {
+	name := filepath.Base(path)
+	if len(name) < len(xlamTracePrefix)+len(xlamTraceSuffix) ||
+		!strings.EqualFold(name[:len(xlamTracePrefix)], xlamTracePrefix) ||
+		!strings.EqualFold(name[len(name)-len(xlamTraceSuffix):], xlamTraceSuffix) {
+		return "", false
+	}
+	middle := name[len(xlamTracePrefix) : len(name)-len(xlamTraceSuffix)]
+	return filepath.Join(outDir, xlamTracePrefix+middle+xlamTraceSuffix), true
 }
 
 // xlamRecordEligible reports whether a record is a usable irrelevance case:

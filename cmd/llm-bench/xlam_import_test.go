@@ -348,6 +348,105 @@ func TestImportXlamRejectsManifestTraceAliasBeforeWriting(t *testing.T) {
 	}
 }
 
+func TestImportXlamReservesEntireManagedTraceNamespaceBeforeWriting(t *testing.T) {
+	writeSource := func(t *testing.T, dir string) string {
+		t.Helper()
+		src := filepath.Join(dir, "x.json")
+		blob, err := json.Marshal([]xlamRecord{{Query: "a", Tools: sampleXlamTools, Answers: "[]"}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(src, blob, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return src
+	}
+	importOpts := func(src, out, manifest string) xlamImportOptions {
+		return xlamImportOptions{SrcPath: src, OutDir: out, ManifestPath: manifest, N: 1, Seed: 1, MinTools: 1}
+	}
+
+	t.Run("future unplanned trace leaves absent output directory absent", func(t *testing.T) {
+		dir := t.TempDir()
+		out := filepath.Join(dir, "out")
+		_, err := importXlamIrrelevance(importOpts(writeSource(t, dir), out, filepath.Join(out, "xlam-irrel-9999.json")))
+		if err == nil {
+			t.Fatal("future unplanned managed manifest path was accepted")
+		}
+		if _, statErr := os.Stat(out); !os.IsNotExist(statErr) {
+			t.Fatalf("rejection created output directory: %v", statErr)
+		}
+	})
+
+	t.Run("existing unplanned trace preserves prior bytes", func(t *testing.T) {
+		dir := t.TempDir()
+		out := filepath.Join(dir, "out")
+		if err := os.Mkdir(out, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		manifest := filepath.Join(out, "xlam-irrel-9999.json")
+		prior := []byte("prior managed trace\n")
+		if err := os.WriteFile(manifest, prior, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := importXlamIrrelevance(importOpts(writeSource(t, dir), out, manifest)); err == nil {
+			t.Fatal("existing unplanned managed manifest path was accepted")
+		}
+		got, err := os.ReadFile(manifest)
+		if err != nil || string(got) != string(prior) {
+			t.Fatalf("managed path mutated: err=%v got=%q want=%q", err, got, prior)
+		}
+	})
+
+	t.Run("symlinked output parent resolves namespace identity", func(t *testing.T) {
+		dir := t.TempDir()
+		realOut := filepath.Join(dir, "real-out")
+		if err := os.Mkdir(realOut, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		out := filepath.Join(dir, "out")
+		if err := os.Symlink(realOut, out); err != nil {
+			t.Skipf("symlink unsupported here: %v", err)
+		}
+		keep := filepath.Join(realOut, "keep")
+		if err := os.WriteFile(keep, []byte("keep\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		_, err := importXlamIrrelevance(importOpts(writeSource(t, dir), out, filepath.Join(out, "XLAM-IRREL-9999.JSON")))
+		if err == nil {
+			t.Fatal("case-variant future namespace path below symlinked parent was accepted")
+		}
+		if got, readErr := os.ReadFile(keep); readErr != nil || string(got) != "keep\n" {
+			t.Fatalf("rejection mutated output: err=%v got=%q", readErr, got)
+		}
+	})
+
+	t.Run("outside hardlink to stale managed trace preserves both paths", func(t *testing.T) {
+		dir := t.TempDir()
+		out := filepath.Join(dir, "out")
+		if err := os.Mkdir(out, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		stale := filepath.Join(out, "xlam-irrel-9999.json")
+		prior := []byte("prior managed trace\n")
+		if err := os.WriteFile(stale, prior, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		manifest := filepath.Join(dir, "outside-manifest.jsonl")
+		if err := os.Link(stale, manifest); err != nil {
+			t.Skipf("hardlinks unsupported here: %v", err)
+		}
+		if _, err := importXlamIrrelevance(importOpts(writeSource(t, dir), out, manifest)); err == nil {
+			t.Fatal("outside manifest hardlink to stale managed trace was accepted")
+		}
+		for _, path := range []string{stale, manifest} {
+			got, err := os.ReadFile(path)
+			if err != nil || string(got) != string(prior) {
+				t.Fatalf("%s mutated: err=%v got=%q want=%q", path, err, got, prior)
+			}
+		}
+	})
+}
+
 func TestImportXlamAllIneligiblePreservesPriorCorpus(t *testing.T) {
 	dir := t.TempDir()
 	out := filepath.Join(dir, "out")

@@ -1006,10 +1006,16 @@ func pathsAlias(a, b string) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	if ac == bc || strings.EqualFold(ac, bc) {
+	if ac == bc {
 		return true, nil
 	}
-	return ai != nil && bi != nil && os.SameFile(ai, bi), nil
+	if ai != nil && bi != nil {
+		return os.SameFile(ai, bi), nil
+	}
+	if ai != nil || bi != nil {
+		return false, nil
+	}
+	return strings.EqualFold(ac, bc), nil
 }
 
 func canonicalFuturePath(path string) (string, os.FileInfo, error) {
