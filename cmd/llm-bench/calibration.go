@@ -722,7 +722,7 @@ func validateRequestedTraceUniverse(rows []captureRequestedTrace) error {
 				return fmt.Errorf("requested_traces row %d (%s): pair_id %q on a non-paired arm %q", i, row.TraceID, row.PairID, row.Arm)
 			}
 		case string(AssemblyLegacy), string(AssemblyMixed):
-			if row.PairID == "" {
+			if strings.TrimSpace(row.PairID) == "" {
 				return fmt.Errorf("requested_traces row %d (%s): %s arm requires a pair_id", i, row.TraceID, row.Arm)
 			}
 			key := [2]string{row.PairID, row.Arm}

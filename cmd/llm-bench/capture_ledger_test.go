@@ -1126,6 +1126,10 @@ func TestLoadCaptureManifestLedgerValidation(t *testing.T) {
 		{"requested trace arm mismatch", "arm", mutate(func(m *captureManifest) {
 			m.RequestedTraces[0].Arm = "mixed"
 		})},
+		{"whitespace-only requested pair_id", "requires a pair_id", mutate(func(m *captureManifest) {
+			m.RequestedTraces[0].PairID = " \t "
+			m.Expected[0].PairID = " \t "
+		})},
 		{"failed row deleted with decremented count", "expected_count", mutate(func(m *captureManifest) {
 			m.Expected = m.Expected[:1]
 			m.ExpectedCount = 1

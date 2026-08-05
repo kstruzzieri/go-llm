@@ -363,6 +363,55 @@ func TestFCRenderIngestRequireSidemapResolver(t *testing.T) {
 	}
 }
 
+func TestForcedChoiceWorksheetInstructions(t *testing.T) {
+	arts := fcPairArtifacts()
+	single, err := renderForcedChoiceWorksheet(arts, parityFCSidemap(arts, "c"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantSingle := "# Then run: llm-bench -fc-ingest -worksheet <this file> -artifacts <artifacts.jsonl> -model c -fc-sidemap <sidemap.json> -fc-sidemap-digest <committed sha256> -fc-require-complete -fc-out <preferences.jsonl>"
+	if !strings.Contains(single, wantSingle) {
+		t.Fatalf("single-model worksheet missing exact scoped ingest instruction:\nwant: %s\n%s", wantSingle, single)
+	}
+	wantPartial := "# To intentionally ingest a partial worksheet, omit -fc-require-complete; blank blocks"
+	if !strings.Contains(single, wantPartial) || strings.Contains(single, "leave\n# it blank to skip") {
+		t.Fatalf("worksheet does not distinguish complete from intentional partial ingest:\n%s", single)
+	}
+
+	other := append([]Artifact(nil), arts[:2]...)
+	for i := range other {
+		other[i].CandidateModel = "ollama/d"
+		other[i].ArtifactHash += "-d"
+	}
+	multiArts := append(arts[:2], other...)
+	multiMap, err := generateFCSidemap(multiArts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	multiMap = testFCSidemapWithDigest(multiMap, testFCSidemapDigest)
+	multi, err := renderForcedChoiceWorksheet(multiArts, multiMap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantMulti := "# Then run: llm-bench -fc-ingest -worksheet <this file> -artifacts <artifacts.jsonl> -fc-sidemap <sidemap.json> -fc-sidemap-digest <committed sha256> -fc-require-complete -fc-out <preferences.jsonl>"
+	if !strings.Contains(multi, wantMulti) || strings.Contains(multi, " -model ") {
+		t.Fatalf("multi-model worksheet instruction must require all models without -model:\nwant: %s\n%s", wantMulti, multi)
+	}
+}
+
+func TestMainFCRequireCompleteHelp(t *testing.T) {
+	cmd := exec.Command(os.Args[0], "-h")
+	cmd.Env = append(os.Environ(), "LLM_BENCH_TEST_MAIN=1")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("llm-bench -h: %v\n%s", err, out)
+	}
+	want := "every renderer-eligible pair block must be present and filled; missing or blank pairs are loud errors"
+	if !strings.Contains(string(out), want) {
+		t.Fatalf("-fc-require-complete help missing %q:\n%s", want, out)
+	}
+}
+
 func TestFCIngestRequireCompleteAndArmGuess(t *testing.T) {
 	arts := fcPairArtifacts()
 	sidemap := parityFCSidemap(arts, "c", "pair-alpha", "pair-gamma")

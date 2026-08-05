@@ -281,6 +281,10 @@ func TestCaptureRejectsInvalidRequestedTraceUniverseBeforeRun(t *testing.T) {
 			name: "whitespace-only trace ID", wantErr: "trace_id must be nonblank",
 			traces: []Trace{pairedCaptureTrace("   ", "pair-a", AssemblyLegacy)},
 		},
+		{
+			name: "whitespace-only pair ID", wantErr: "requires a pair_id",
+			traces: []Trace{pairedCaptureTrace("legacy", " \t ", AssemblyLegacy)},
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			const (

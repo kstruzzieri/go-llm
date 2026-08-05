@@ -104,7 +104,7 @@ func main() {
 	fcSidemapOut := flag.String("fc-sidemap-out", "", "Output path for -fc-sidemap-generate (required with it)")
 	fcSidemapPath := flag.String("fc-sidemap", "", "Sealed side-map JSON path: REQUIRED with -fc-render and -fc-ingest; optional with -assembly-report, where it replaces the pre-sidemap parity side resolution and enables the descriptive arm-guess audit")
 	fcSidemapDigest := flag.String("fc-sidemap-digest", "", "With -fc-render, -fc-ingest, or -assembly-report alongside -fc-sidemap: REQUIRED committed sha256 of the sidemap file; a mismatch is a hard error")
-	fcRequireComplete := flag.Bool("fc-require-complete", false, "With -fc-ingest: any rendered pair block left blank is a loud error listing the pairs (the registered workflow)")
+	fcRequireComplete := flag.Bool("fc-require-complete", false, "With -fc-ingest: every renderer-eligible pair block must be present and filled; missing or blank pairs are loud errors (the registered workflow)")
 	captureManifestFlag := flag.String("capture-manifest", "", "With -assembly-report: the -calibrate-capture run manifest; embeds its digest and excludes legacy/mixed pairs it cannot verify (unverified-capture / temperature-mismatch)")
 	modelFilter := flag.String("model", "", "With -blind-render, -fc-render, -fc-ingest, or -adjudicate-render: only use artifacts whose candidate model matches this selector (the registered workflow labels one model at a time); empty uses all")
 	adjudicateRender := flag.Bool("adjudicate-render", false, "Render the grounding adjudication worksheet (full prompt shown) for labels flagged grounding-check, from -artifacts and -labels to -report (#331 slice 3c)")

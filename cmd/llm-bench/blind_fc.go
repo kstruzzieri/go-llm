@@ -410,18 +410,37 @@ func renderForcedChoiceWorksheet(arts []Artifact, sidemap fcSidemapFile) (string
 	if len(pairs) == 0 {
 		return "", fmt.Errorf("forced-choice: no complete legacy/mixed pairs with non-empty answers in -artifacts")
 	}
+	worksheetModel := pairs[0].model
+	for _, p := range pairs {
+		// The PAIR header and single-model ingest command are space-delimited:
+		// validate every interpolated field before constructing worksheet text.
+		for _, part := range []string{p.pairID, p.model} {
+			if part == "" || strings.ContainsAny(part, " \t\r\n") {
+				return "", fmt.Errorf("forced-choice: pair %q model %q: header field %q is empty or contains whitespace (the PAIR header is space-delimited)", p.pairID, p.model, part)
+			}
+		}
+		if p.model != worksheetModel {
+			worksheetModel = ""
+		}
+	}
 	var b strings.Builder
 	fmt.Fprintln(&b, "# llm-bench — forced-choice worksheet")
 	fmt.Fprintln(&b, fcSidemapDigestMetadataPrefix+digest)
 	fmt.Fprintln(&b, "#")
 	fmt.Fprintln(&b, "# Each block shows the same question answered twice by one candidate model")
-	fmt.Fprintln(&b, "# under two hidden context-assembly arms. Fill prefer: with A, B, or tie; leave")
-	fmt.Fprintln(&b, "# it blank to skip the block. Side assignment is a sealed random map committed")
+	fmt.Fprintln(&b, "# under two hidden context-assembly arms. Fill prefer: with A, B, or tie in every block.")
+	fmt.Fprintln(&b, "# The registered workflow uses -fc-require-complete, so missing or blank blocks fail.")
+	fmt.Fprintln(&b, "# To intentionally ingest a partial worksheet, omit -fc-require-complete; blank blocks")
+	fmt.Fprintln(&b, "# are then skipped. Side assignment is a sealed random map committed")
 	fmt.Fprintln(&b, "# before labeling; nothing in a block reveals which arm produced which side.")
 	fmt.Fprintln(&b, "# arm_guess: is an optional blinding audit — if you believe you can tell which")
 	fmt.Fprintln(&b, "# answer came from the reduced-context arm, write a or b; otherwise leave blank.")
 	fmt.Fprintln(&b, "# It never affects any result; it only measures whether the blinding held.")
-	fmt.Fprintln(&b, "# Then run: llm-bench -fc-ingest -worksheet <this file> -artifacts <artifacts.jsonl> -fc-sidemap <sidemap.json> -fc-sidemap-digest <committed sha256> -fc-out <preferences.jsonl>")
+	fmt.Fprint(&b, "# Then run: llm-bench -fc-ingest -worksheet <this file> -artifacts <artifacts.jsonl>")
+	if worksheetModel != "" {
+		fmt.Fprintf(&b, " -model %s", worksheetModel)
+	}
+	fmt.Fprintln(&b, " -fc-sidemap <sidemap.json> -fc-sidemap-digest <committed sha256> -fc-require-complete -fc-out <preferences.jsonl>")
 	fmt.Fprintln(&b)
 	for _, p := range pairs {
 		question := strings.TrimSpace(blindQuestion(p.legacy.Trace))
@@ -442,13 +461,6 @@ func renderForcedChoiceWorksheet(arts []Artifact, sidemap fcSidemapFile) (string
 		if e.HashA != sideA.ArtifactHash || e.HashB != sideB.ArtifactHash {
 			return "", fmt.Errorf("forced-choice: pair %q model %q: sidemap hashes %q/%q disagree with the pair's arms under its registered side assignment (want %q/%q); regenerate the sidemap over the current artifacts",
 				p.pairID, p.model, e.HashA, e.HashB, sideA.ArtifactHash, sideB.ArtifactHash)
-		}
-		// The PAIR header is space-delimited: any whitespace inside a field
-		// would shift the ingest join columns, so refuse it at render time.
-		for _, part := range []string{p.pairID, p.model} {
-			if part == "" || strings.ContainsAny(part, " \t\r\n") {
-				return "", fmt.Errorf("forced-choice: pair %q model %q: header field %q is empty or contains whitespace (the PAIR header is space-delimited)", p.pairID, p.model, part)
-			}
 		}
 		fmt.Fprintf(&b, "%s%s %s ===\n", fcPairHeaderPrefix, p.pairID, p.model)
 		fmt.Fprintln(&b, "[question]")
