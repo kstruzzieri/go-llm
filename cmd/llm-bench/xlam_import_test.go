@@ -328,6 +328,64 @@ func TestImportXlamIrrelevanceClearsStaleTraces(t *testing.T) {
 	}
 }
 
+func TestImportXlamRejectsManifestTraceAliasBeforeWriting(t *testing.T) {
+	dir := t.TempDir()
+	src := filepath.Join(dir, "x.json")
+	blob, _ := json.Marshal([]xlamRecord{{Query: "a", Tools: sampleXlamTools, Answers: "[]"}})
+	if err := os.WriteFile(src, blob, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	out := filepath.Join(dir, "out")
+	_, err := importXlamIrrelevance(xlamImportOptions{
+		SrcPath: src, OutDir: out, ManifestPath: filepath.Join(out, "xlam-irrel-0000.json"),
+		N: 1, Seed: 1, MinTools: 1,
+	})
+	if err == nil {
+		t.Fatal("manifest path aliasing a planned trace was accepted")
+	}
+	if _, statErr := os.Stat(out); !os.IsNotExist(statErr) {
+		t.Fatalf("preflight mutated output directory: stat err = %v", statErr)
+	}
+}
+
+func TestImportXlamAllIneligiblePreservesPriorCorpus(t *testing.T) {
+	dir := t.TempDir()
+	out := filepath.Join(dir, "out")
+	if err := os.Mkdir(out, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	tracePath := filepath.Join(out, "xlam-irrel-0000.json")
+	manifestPath := filepath.Join(dir, "manifest.jsonl")
+	priorTrace := []byte("prior trace\n")
+	priorManifest := []byte("prior manifest\n")
+	if err := os.WriteFile(tracePath, priorTrace, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(manifestPath, priorManifest, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	src := filepath.Join(dir, "x.json")
+	blob, _ := json.Marshal([]xlamRecord{{Query: "a", Tools: "[]", Answers: "[]"}})
+	if err := os.WriteFile(src, blob, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := importXlamIrrelevance(xlamImportOptions{
+		SrcPath: src, OutDir: out, ManifestPath: manifestPath, N: 1, Seed: 1, MinTools: 1,
+	})
+	if err == nil {
+		t.Fatal("all-ineligible import succeeded")
+	}
+	gotTrace, err := os.ReadFile(tracePath)
+	if err != nil || string(gotTrace) != string(priorTrace) {
+		t.Fatalf("trace changed: err=%v got=%q want=%q", err, gotTrace, priorTrace)
+	}
+	gotManifest, err := os.ReadFile(manifestPath)
+	if err != nil || string(gotManifest) != string(priorManifest) {
+		t.Fatalf("manifest changed: err=%v got=%q want=%q", err, gotManifest, priorManifest)
+	}
+}
+
 // TestImportXlamIrrelevanceRefusesToDeleteItsSource pins the stale-cleanup
 // self-delete hazard (external PR review round 2 P1): a -import-xlam source
 // that matches the managed xlam-irrel-*.json pattern inside -import-xlam-out

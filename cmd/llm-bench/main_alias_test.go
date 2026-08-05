@@ -15,6 +15,53 @@ import (
 	"testing"
 )
 
+func TestPathsAliasResolvesNonexistentLeavesThroughSymlinkedParents(t *testing.T) {
+	dir := t.TempDir()
+	realParent := filepath.Join(dir, "real")
+	if err := os.Mkdir(realParent, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	linkParent := filepath.Join(dir, "link")
+	if err := os.Symlink(realParent, linkParent); err != nil {
+		t.Skipf("symlink unsupported here: %v", err)
+	}
+
+	got, err := pathsAlias(filepath.Join(realParent, "future.json"), filepath.Join(linkParent, "future.json"))
+	if err != nil {
+		t.Fatalf("pathsAlias: %v", err)
+	}
+	if !got {
+		t.Fatal("pathsAlias = false, want true for future leaves below the same symlinked parent")
+	}
+}
+
+func TestPathsAliasRejectsDanglingOutputSymlink(t *testing.T) {
+	dir := t.TempDir()
+	src := filepath.Join(dir, "source.json")
+	if err := os.WriteFile(src, []byte("source\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	dangling := filepath.Join(dir, "output.json")
+	if err := os.Symlink(filepath.Join(dir, "missing.json"), dangling); err != nil {
+		t.Skipf("symlink unsupported here: %v", err)
+	}
+
+	if _, err := pathsAlias(src, dangling); err == nil {
+		t.Fatal("pathsAlias accepted dangling output symlink")
+	}
+}
+
+func TestPathsAliasTreatsCaseOnlyFutureNamesAsAliases(t *testing.T) {
+	dir := t.TempDir()
+	got, err := pathsAlias(filepath.Join(dir, "Future.json"), filepath.Join(dir, "future.json"))
+	if err != nil {
+		t.Fatalf("pathsAlias: %v", err)
+	}
+	if !got {
+		t.Fatal("pathsAlias = false, want true for case-only future names")
+	}
+}
+
 func TestMainOutputAliasGuardsAllModes(t *testing.T) {
 	dir := t.TempDir()
 	mkFile := func(name string) string {

@@ -994,9 +994,72 @@ func mustLoadVerifiedFCSidemap(mode, path, committedDigest string) fcSidemapFile
 	return sidemap
 }
 
+// pathsAlias reports whether two paths name the same existing or future file.
+// Future paths are resolved through their nearest existing ancestor so a
+// symlinked parent cannot bypass an output/input collision check.
+func pathsAlias(a, b string) (bool, error) {
+	ac, ai, err := canonicalFuturePath(a)
+	if err != nil {
+		return false, err
+	}
+	bc, bi, err := canonicalFuturePath(b)
+	if err != nil {
+		return false, err
+	}
+	if ac == bc || strings.EqualFold(ac, bc) {
+		return true, nil
+	}
+	return ai != nil && bi != nil && os.SameFile(ai, bi), nil
+}
+
+func canonicalFuturePath(path string) (string, os.FileInfo, error) {
+	abs, err := filepath.Abs(filepath.Clean(path))
+	if err != nil {
+		return "", nil, err
+	}
+	if info, err := os.Lstat(abs); err == nil && info.Mode()&os.ModeSymlink != 0 {
+		resolved, err := filepath.EvalSymlinks(abs)
+		if err != nil {
+			return "", nil, fmt.Errorf("unresolved symlink %q: %w", path, err)
+		}
+		abs = resolved
+	}
+
+	leafInfo, err := os.Stat(abs)
+	if err != nil && !os.IsNotExist(err) {
+		return "", nil, err
+	}
+	if err != nil {
+		leafInfo = nil
+	}
+
+	ancestor := abs
+	var suffix []string
+	for {
+		if _, err := os.Lstat(ancestor); err == nil {
+			resolved, err := filepath.EvalSymlinks(ancestor)
+			if err != nil {
+				return "", nil, fmt.Errorf("unresolved symlink %q: %w", path, err)
+			}
+			for i := len(suffix) - 1; i >= 0; i-- {
+				resolved = filepath.Join(resolved, suffix[i])
+			}
+			return resolved, leafInfo, nil
+		} else if !os.IsNotExist(err) {
+			return "", nil, err
+		}
+		parent := filepath.Dir(ancestor)
+		if parent == ancestor {
+			return "", nil, fmt.Errorf("no existing ancestor for %q", path)
+		}
+		suffix = append(suffix, filepath.Base(ancestor))
+		ancestor = parent
+	}
+}
+
 // refuseOutputAlias fatals when an output path aliases an input file (or a
-// sibling output of the same invocation), via cleaned-path equality or the
-// os.SameFile backstop (case-insensitive filesystems, symlinks, hardlinks).
+// sibling output of the same invocation), including future paths beneath
+// symlinked parents and existing hardlinks.
 // Mirrors the hardened -blind-ingest -labels-out guard across EVERY output
 // flag (external PR review P1: -report could clobber the artifacts JSONL);
 // inputs are ordered (flag, path) pairs so the failure is deterministic.
@@ -1008,13 +1071,15 @@ func refuseOutputAlias(mode, outFlag, outPath string, inputs [][2]string) {
 		if strings.TrimSpace(inPath) == "" {
 			continue
 		}
-		if filepath.Clean(outPath) == filepath.Clean(inPath) {
-			log.Fatalf("llm-bench: %s: %s must differ from %s (it would overwrite the input)", mode, outFlag, inFlag)
+		same, err := pathsAlias(outPath, inPath)
+		if err != nil {
+			log.Fatalf("llm-bench: %s: cannot resolve %s or %s: %v", mode, outFlag, inFlag, err)
 		}
-		if outInfo, err := os.Stat(outPath); err == nil {
-			if inInfo, err := os.Stat(inPath); err == nil && os.SameFile(outInfo, inInfo) {
-				log.Fatalf("llm-bench: %s: %s resolves to the same file as %s; choose a different output path", mode, outFlag, inFlag)
+		if same {
+			if filepath.Clean(outPath) == filepath.Clean(inPath) {
+				log.Fatalf("llm-bench: %s: %s must differ from %s (it would overwrite the input)", mode, outFlag, inFlag)
 			}
+			log.Fatalf("llm-bench: %s: %s resolves to the same file as %s; choose a different output path", mode, outFlag, inFlag)
 		}
 	}
 }
