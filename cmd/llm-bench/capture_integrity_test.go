@@ -231,6 +231,62 @@ func TestCaptureRejectsMalformedEndpointWithoutEchoOrPublication(t *testing.T) {
 	}
 }
 
+func TestCaptureRejectsMissingActiveEndpointBeforePublication(t *testing.T) {
+	const (
+		oldArtifacts = "preexisting artifacts\n"
+		oldManifest  = "preexisting manifest\n"
+	)
+	runner := &orderRecordingRunner{}
+	out := filepath.Join(t.TempDir(), "artifacts.jsonl")
+	if err := os.WriteFile(out, []byte(oldArtifacts), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(captureManifestPath(out), []byte(oldManifest), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	err := runCalibrateCapture(context.Background(), calibrateCaptureOptions{
+		Runner:     runner,
+		Targets:    []ModelTarget{{Display: "openai-compat/m", Provider: openAICompatTransport, Model: "m"}},
+		Traces:     []Trace{pairedCaptureTrace("arm-legacy", "pair-a", AssemblyLegacy)},
+		OutputPath: out, Stdout: io.Discard,
+	})
+	if err == nil || err.Error() != "calibrate-capture: empty openai-compat endpoint" {
+		t.Fatalf("err = %q; want fixed missing compat endpoint error", errString(err))
+	}
+	if len(runner.gotTraceIDs) != 0 {
+		t.Fatalf("runner called before endpoint validation: %v", runner.gotTraceIDs)
+	}
+	for path, want := range map[string]string{out: oldArtifacts, captureManifestPath(out): oldManifest} {
+		raw, readErr := os.ReadFile(path)
+		if readErr != nil || string(raw) != want {
+			t.Fatalf("%s changed before publication: bytes=%q err=%v", path, raw, readErr)
+		}
+	}
+}
+
+func TestCaptureEndpointTransportRequiresOnlyActiveEndpoints(t *testing.T) {
+	ollama := ModelTarget{Display: "ollama/m", Provider: defaultBenchProvider, Model: "m"}
+	compat := ModelTarget{Display: "openai-compat/m", Provider: openAICompatTransport, Model: "m"}
+	for _, tc := range []struct {
+		name                 string
+		targets              []ModelTarget
+		ollamaURL, compatURL string
+		wantErr              string
+	}{
+		{"mixed missing compat", []ModelTarget{ollama, compat}, "http://ollama.test", "", "calibrate-capture: empty openai-compat endpoint"},
+		{"active Ollama missing", []ModelTarget{ollama}, "", "", "calibrate-capture: empty ollama endpoint"},
+		{"inactive compat ignored", []ModelTarget{ollama}, "http://ollama.test", "", ""},
+		{"inactive Ollama ignored", []ModelTarget{compat}, "", "http://compat.test", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, _, err := captureEndpointTransport(tc.targets, tc.ollamaURL, tc.compatURL)
+			if errString(err) != tc.wantErr {
+				t.Fatalf("err = %q; want %q", errString(err), tc.wantErr)
+			}
+		})
+	}
+}
+
 func TestCaptureReportTransportIdentitySurvivesForceQuerySanitization(t *testing.T) {
 	const rawEndpoint = "https://compat.test/v1?"
 	out := filepath.Join(t.TempDir(), "artifacts.jsonl")
@@ -299,7 +355,11 @@ func v2BindingFixture(t *testing.T) ([]Artifact, []Label, captureManifest) {
 	arts := []Artifact{legacy, mixed}
 	manifest := captureManifest{
 		SchemaVersion: captureManifestSchemaVersionV2,
-		CreatedAt:     capturedAt, Endpoint: endpoint, Transport: openAICompatTransport,
+		RequestedTraces: requestedTracesForLedger([]captureExpectedRow{
+			{TraceID: arts[0].TraceID, PairID: "pair-a", Arm: "legacy"},
+			{TraceID: arts[1].TraceID, PairID: "pair-a", Arm: "mixed"},
+		}),
+		CreatedAt: capturedAt, Endpoint: endpoint, Transport: openAICompatTransport,
 		ModelTargets:         []captureManifestTarget{{Selector: "openai-compat/m"}},
 		Decoding:             captureDecoding{Temperature: 0, SeedSupported: false},
 		CounterbalanceScheme: captureCounterbalanceScheme,
@@ -342,6 +402,7 @@ func cloneCaptureManifest(m captureManifest) captureManifest {
 	}
 	clone.PerArtifact = append([]captureManifestRow(nil), m.PerArtifact...)
 	clone.Expected = append([]captureExpectedRow(nil), m.Expected...)
+	clone.RequestedTraces = append([]captureRequestedTrace(nil), m.RequestedTraces...)
 	return clone
 }
 

@@ -755,6 +755,7 @@ func TestAssemblyCaptureCounterbalance(t *testing.T) {
 		runner := &orderRecordingRunner{}
 		if err := runCalibrateCapture(context.Background(), calibrateCaptureOptions{
 			Runner: runner, Targets: targets, Traces: traces, OutputPath: out,
+			OllamaURL: testCaptureOllamaURL,
 		}); err != nil {
 			t.Fatalf("runCalibrateCapture: %v", err)
 		}
@@ -840,7 +841,7 @@ func TestCounterbalanceIncompletePairUnlabeled(t *testing.T) {
 	if err := runCalibrateCapture(context.Background(), calibrateCaptureOptions{
 		Runner:  &orderRecordingRunner{},
 		Targets: []ModelTarget{{Display: "m", Provider: "ollama", Model: "m"}},
-		Traces:  traces, OutputPath: out, Stdout: io.Discard,
+		Traces:  traces, OutputPath: out, OllamaURL: testCaptureOllamaURL, Stdout: io.Discard,
 	}); err != nil {
 		t.Fatalf("runCalibrateCapture: %v", err)
 	}
@@ -906,6 +907,7 @@ func TestAssemblyCaptureProvenanceAndUsage(t *testing.T) {
 	out := filepath.Join(t.TempDir(), "artifacts.jsonl")
 	if err := runCalibrateCapture(context.Background(), calibrateCaptureOptions{
 		Runner: &orderRecordingRunner{}, Targets: targets, Traces: traces, OutputPath: out,
+		OllamaURL:    testCaptureOllamaURL,
 		ModelDigests: map[string]string{"m": modelDigest},
 	}); err != nil {
 		t.Fatalf("runCalibrateCapture: %v", err)
@@ -1103,7 +1105,7 @@ func TestCaptureManifestUsageAbsentRecordedFalse(t *testing.T) {
 		Runner:     &zeroUsageRunner{},
 		Targets:    []ModelTarget{{Display: "m", Provider: "ollama", Model: "m"}},
 		Traces:     []Trace{pairedCaptureTrace("pa-legacy", "p-a", AssemblyLegacy)},
-		OutputPath: out, Stdout: io.Discard,
+		OutputPath: out, OllamaURL: testCaptureOllamaURL, Stdout: io.Discard,
 	}); err != nil {
 		t.Fatalf("runCalibrateCapture: %v", err)
 	}
@@ -1145,7 +1147,7 @@ func TestCaptureManifestWriteFailureFailsCapture(t *testing.T) {
 			pairedCaptureTrace("pa-legacy", "p-a", AssemblyLegacy),
 			pairedCaptureTrace("pa-mixed", "p-a", AssemblyMixed),
 		},
-		OutputPath: out, Stdout: &stdout,
+		OutputPath: out, OllamaURL: testCaptureOllamaURL, Stdout: &stdout,
 	})
 	os.Stderr = oldStderr
 	if closeErr := stderrFile.Close(); closeErr != nil {

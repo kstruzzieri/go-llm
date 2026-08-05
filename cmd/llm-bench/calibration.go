@@ -271,6 +271,15 @@ type captureManifest struct {
 	// manifests; required on v2.
 	ExpectedCount int                  `json:"expected_count,omitempty"`
 	Expected      []captureExpectedRow `json:"expected,omitempty"`
+	// RequestedTraces is the result-independent v2 trace universe, in the
+	// exact order used to build Expected. It makes failed-row deletion loud.
+	RequestedTraces []captureRequestedTrace `json:"requested_traces,omitempty"`
+}
+
+type captureRequestedTrace struct {
+	TraceID string `json:"trace_id"`
+	PairID  string `json:"pair_id,omitempty"`
+	Arm     string `json:"arm,omitempty"`
 }
 
 // captureExpectedRow is one v2-ledger entry: a (trace x model) run the
@@ -346,11 +355,17 @@ func captureEndpointTransport(targets []ModelTarget, ollamaURL, compatURL string
 		if err != nil {
 			return "", "", err
 		}
+		if ollamaEndpoint == "" {
+			return "", "", errors.New("calibrate-capture: empty ollama endpoint")
+		}
 	}
 	if hasCompat {
 		compatEndpoint, err = sanitizeCaptureEndpoint(compatURL)
 		if err != nil {
 			return "", "", err
+		}
+		if compatEndpoint == "" {
+			return "", "", errors.New("calibrate-capture: empty openai-compat endpoint")
 		}
 	}
 	switch {
@@ -410,6 +425,9 @@ func loadCaptureManifestForReport(path string) (AssemblyCaptureManifest, *captur
 		// change pair discovery on a schema that never carried it.
 		if m.ExpectedCount != 0 || len(m.Expected) > 0 {
 			return AssemblyCaptureManifest{}, nil, fmt.Errorf("capture-manifest: v1 manifest %q carries a v2 expected ledger (%d row(s)); re-run the capture or fix the schema_version", path, len(m.Expected))
+		}
+		if len(m.RequestedTraces) > 0 {
+			return AssemblyCaptureManifest{}, nil, fmt.Errorf("capture-manifest: v1 manifest %q carries v2 requested_traces; re-run the capture or fix the schema_version", path)
 		}
 		verify.legacyV1ModelIdentity = true
 	case captureManifestSchemaVersionV2:
@@ -695,6 +713,41 @@ func validateCaptureLedger(m captureManifest) ([]assemblyPairKey, error) {
 	if len(m.Expected) == 0 {
 		return nil, fmt.Errorf("v2 manifest has no expected ledger rows")
 	}
+	if len(m.RequestedTraces) == 0 {
+		return nil, fmt.Errorf("v2 manifest has no requested_traces rows")
+	}
+	requestedIDs := make(map[string]struct{}, len(m.RequestedTraces))
+	requestedPairArms := make(map[[2]string]string, len(m.RequestedTraces))
+	for i, row := range m.RequestedTraces {
+		if strings.TrimSpace(row.TraceID) == "" {
+			return nil, fmt.Errorf("requested_traces row %d: trace_id must be nonblank", i)
+		}
+		if _, dup := requestedIDs[row.TraceID]; dup {
+			return nil, fmt.Errorf("requested_traces row %d: duplicate trace_id %q", i, row.TraceID)
+		}
+		requestedIDs[row.TraceID] = struct{}{}
+		switch row.Arm {
+		case "", string(AssemblyTopline):
+			if row.PairID != "" {
+				return nil, fmt.Errorf("requested_traces row %d (%s): pair_id %q on a non-paired arm %q", i, row.TraceID, row.PairID, row.Arm)
+			}
+		case string(AssemblyLegacy), string(AssemblyMixed):
+			if row.PairID == "" {
+				return nil, fmt.Errorf("requested_traces row %d (%s): %s arm requires a pair_id", i, row.TraceID, row.Arm)
+			}
+			key := [2]string{row.PairID, row.Arm}
+			if prior := requestedPairArms[key]; prior != "" {
+				return nil, fmt.Errorf("requested_traces row %d (%s): duplicate pair_id/arm %s/%s (already %s)", i, row.TraceID, row.PairID, row.Arm, prior)
+			}
+			requestedPairArms[key] = row.TraceID
+		default:
+			return nil, fmt.Errorf("requested_traces row %d (%s): invalid arm %q", i, row.TraceID, row.Arm)
+		}
+	}
+	wantExpected := len(m.ModelTargets) * len(m.RequestedTraces)
+	if m.ExpectedCount != wantExpected {
+		return nil, fmt.Errorf("expected_count %d does not equal model_targets %d x requested_traces %d", m.ExpectedCount, len(m.ModelTargets), len(m.RequestedTraces))
+	}
 	perArtifact := make(map[string]string, len(m.PerArtifact))
 	for i, row := range m.PerArtifact {
 		if strings.TrimSpace(row.TraceID) == "" || strings.TrimSpace(row.ArtifactHash) == "" {
@@ -775,6 +828,24 @@ func validateCaptureLedger(m captureManifest) ([]assemblyPairKey, error) {
 			if _, dup := seenPair[k]; !dup {
 				seenPair[k] = struct{}{}
 				pairs = append(pairs, k)
+			}
+		}
+	}
+	for modelIndex, target := range m.ModelTargets {
+		for traceIndex, requested := range m.RequestedTraces {
+			i := modelIndex*len(m.RequestedTraces) + traceIndex
+			row := m.Expected[i]
+			if modelKey(row.Model) != modelKey(target.Selector) {
+				return nil, fmt.Errorf("expected row %d model %q does not match model_targets row %d %q", i, row.Model, modelIndex, target.Selector)
+			}
+			if row.TraceID != requested.TraceID {
+				return nil, fmt.Errorf("expected row %d trace_id %q does not match requested_traces row %d %q", i, row.TraceID, traceIndex, requested.TraceID)
+			}
+			if row.PairID != requested.PairID {
+				return nil, fmt.Errorf("expected row %d pair_id %q does not match requested_traces row %d %q", i, row.PairID, traceIndex, requested.PairID)
+			}
+			if row.Arm != requested.Arm {
+				return nil, fmt.Errorf("expected row %d arm %q does not match requested_traces row %d %q", i, row.Arm, traceIndex, requested.Arm)
 			}
 		}
 	}
@@ -883,6 +954,17 @@ func runCalibrateCapture(ctx context.Context, opts calibrateCaptureOptions) erro
 		traceByID[trace.ID] = trace
 	}
 	ordered, capturedOrders := counterbalanceCaptureTraces(opts.Traces)
+	requestedTraces := make([]captureRequestedTrace, 0, len(ordered))
+	for _, trace := range ordered {
+		row := captureRequestedTrace{TraceID: trace.ID}
+		if prefilledAssemblyMode(trace) {
+			row.Arm = string(trace.AssemblyEval.Mode)
+			if trace.AssemblyEval.Mode == AssemblyLegacy || trace.AssemblyEval.Mode == AssemblyMixed {
+				row.PairID = trace.AssemblyEval.PairID
+			}
+		}
+		requestedTraces = append(requestedTraces, row)
+	}
 	orderIndex := make(map[string]int, len(ordered))
 	for i, trace := range ordered {
 		orderIndex[trace.ID] = i
@@ -1054,6 +1136,7 @@ func runCalibrateCapture(ctx context.Context, opts calibrateCaptureOptions) erro
 			PerArtifact:          manifestRows,
 			ExpectedCount:        len(expected),
 			Expected:             expected,
+			RequestedTraces:      requestedTraces,
 		}
 		manifestPath = captureManifestPath(opts.OutputPath)
 		var err error

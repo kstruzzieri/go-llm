@@ -26,6 +26,8 @@ import (
 	"time"
 )
 
+const testCaptureOllamaURL = "http://ollama.test"
+
 // failingRunner returns one Result per (target, trace) like the real runner,
 // failing the trace IDs in fail with a canned error (failErr overrides the
 // default when set).
@@ -89,6 +91,7 @@ func TestCaptureManifestV2ExpectedLedger(t *testing.T) {
 		Targets:    []ModelTarget{{Display: "m", Provider: "ollama", Model: "m"}},
 		Traces:     traces,
 		OutputPath: out,
+		OllamaURL:  testCaptureOllamaURL,
 		Stdout:     io.Discard,
 	}); err != nil {
 		t.Fatalf("runCalibrateCapture: %v", err)
@@ -106,6 +109,9 @@ func TestCaptureManifestV2ExpectedLedger(t *testing.T) {
 	}
 	if m.ExpectedCount != 6 || len(m.Expected) != 6 {
 		t.Fatalf("expected_count/len(expected) = %d/%d; want 6/6 (one ledger row per trace x model, failures included)", m.ExpectedCount, len(m.Expected))
+	}
+	if got, want := m.RequestedTraces, requestedTracesForLedger(m.Expected); !reflect.DeepEqual(got, want) {
+		t.Fatalf("requested_traces = %+v; want the ordered result-independent trace universe %+v", got, want)
 	}
 	// artifact_count semantics unchanged: successful captures only.
 	if m.ArtifactCount != 3 || len(m.PerArtifact) != 3 {
@@ -246,6 +252,7 @@ func TestCaptureRetriesFailedCellsOnce(t *testing.T) {
 		Targets:    []ModelTarget{{Display: "m", Provider: "ollama", Model: "m"}},
 		Traces:     traces,
 		OutputPath: out,
+		OllamaURL:  testCaptureOllamaURL,
 		Stdout:     io.Discard,
 	}); err != nil {
 		t.Fatalf("runCalibrateCapture: %v", err)
@@ -343,6 +350,7 @@ func TestCaptureAllFailedReplacesStaleArtifactsWithLoadableEmptyFile(t *testing.
 				Targets:    []ModelTarget{{Display: "m", Provider: "ollama", Model: "m"}},
 				Traces:     traces,
 				OutputPath: out,
+				OllamaURL:  testCaptureOllamaURL,
 				Stdout:     io.Discard,
 			})
 			if err == nil || !strings.Contains(err.Error(), "no artifacts written") {
@@ -429,6 +437,7 @@ func TestCaptureLedgerErrorsAreRedactedOnStderr(t *testing.T) {
 		Targets:    []ModelTarget{{Display: "m", Provider: "ollama", Model: "m"}},
 		Traces:     traces,
 		OutputPath: out,
+		OllamaURL:  testCaptureOllamaURL,
 		Stdout:     io.Discard,
 	}); err != nil {
 		t.Fatalf("runCalibrateCapture: %v", err)
@@ -545,7 +554,7 @@ func TestCaptureInvalidModelDigestIsNotPersisted(t *testing.T) {
 	if err := runCalibrateCapture(context.Background(), calibrateCaptureOptions{
 		Runner: &orderRecordingRunner{}, Targets: []ModelTarget{target},
 		Traces:     []Trace{pairedCaptureTrace("arm-legacy", "pair-a", AssemblyLegacy)},
-		OutputPath: out, ModelDigests: digests, Stdout: io.Discard,
+		OutputPath: out, OllamaURL: testCaptureOllamaURL, ModelDigests: digests, Stdout: io.Discard,
 	}); err != nil {
 		t.Fatalf("runCalibrateCapture: %v", err)
 	}
@@ -596,7 +605,7 @@ func TestCaptureCanonicalModelDigestMatchesAllSinks(t *testing.T) {
 	if err := runCalibrateCapture(context.Background(), calibrateCaptureOptions{
 		Runner: &orderRecordingRunner{}, Targets: []ModelTarget{target},
 		Traces:     []Trace{pairedCaptureTrace("arm-legacy", "pair-a", AssemblyLegacy)},
-		OutputPath: out, ModelDigests: digests, Stdout: io.Discard,
+		OutputPath: out, OllamaURL: testCaptureOllamaURL, ModelDigests: digests, Stdout: io.Discard,
 	}); err != nil {
 		t.Fatalf("runCalibrateCapture: %v", err)
 	}
@@ -631,7 +640,7 @@ func TestCaptureOpenAICompatIgnoresInjectedModelDigest(t *testing.T) {
 	if err := runCalibrateCapture(context.Background(), calibrateCaptureOptions{
 		Runner: &orderRecordingRunner{}, Targets: []ModelTarget{target},
 		Traces:     []Trace{pairedCaptureTrace("arm-legacy", "pair-a", AssemblyLegacy)},
-		OutputPath: out, ModelDigests: map[string]string{"openai-compat/m": digest}, Stdout: io.Discard,
+		OutputPath: out, OpenAICompatBaseURL: "http://compat.test", ModelDigests: map[string]string{"openai-compat/m": digest}, Stdout: io.Discard,
 	}); err != nil {
 		t.Fatalf("runCalibrateCapture: %v", err)
 	}
@@ -702,6 +711,19 @@ func writeLedgerManifest(t *testing.T, dir, name string, m captureManifest) stri
 	return path
 }
 
+func requestedTracesForLedger(rows []captureExpectedRow) []captureRequestedTrace {
+	seen := make(map[string]bool, len(rows))
+	var requested []captureRequestedTrace
+	for _, row := range rows {
+		if seen[row.TraceID] {
+			continue
+		}
+		seen[row.TraceID] = true
+		requested = append(requested, captureRequestedTrace{TraceID: row.TraceID, PairID: row.PairID, Arm: row.Arm})
+	}
+	return requested
+}
+
 func TestAssemblyReportLedgerSynthesizesVanishedPairs(t *testing.T) {
 	// One captured artifact: the legacy arm of pair-half. pair-half's mixed
 	// arm failed at capture; pair-gone lost BOTH arms — before the ledger it
@@ -718,8 +740,10 @@ func TestAssemblyReportLedgerSynthesizesVanishedPairs(t *testing.T) {
 		{TraceID: "pair-gone-mixed", Model: "m", PairID: "pair-gone", Arm: "mixed", Status: "failed", Attempts: 2, Error: "<error: timeout>"},
 	}
 	v2 := writeLedgerManifest(t, dir, "v2.manifest.json", captureManifest{
-		SchemaVersion: captureManifestSchemaVersionV2,
-		ArtifactCount: 1,
+		SchemaVersion:   captureManifestSchemaVersionV2,
+		RequestedTraces: requestedTracesForLedger(ledger),
+		ModelTargets:    []captureManifestTarget{{Selector: "m"}},
+		ArtifactCount:   1,
 		PerArtifact: []captureManifestRow{{
 			TraceID: half.TraceID, ArtifactHash: half.ArtifactHash,
 			ProvenanceHash: captureProvenanceHash(half), UsagePresent: true,
@@ -793,7 +817,11 @@ func TestAssemblyReportV2ArtifactBinding(t *testing.T) {
 	arts := []Artifact{legacy, mixed}
 	labels := []Label{labelFor(legacy, 0), labelFor(mixed, 1)}
 	base := captureManifest{
-		SchemaVersion:        captureManifestSchemaVersionV2,
+		SchemaVersion: captureManifestSchemaVersionV2,
+		RequestedTraces: requestedTracesForLedger([]captureExpectedRow{
+			{TraceID: legacy.TraceID, PairID: "pair-a", Arm: "legacy"},
+			{TraceID: mixed.TraceID, PairID: "pair-a", Arm: "mixed"},
+		}),
 		Transport:            defaultBenchProvider,
 		ModelTargets:         []captureManifestTarget{{Selector: "ollama/m"}},
 		Decoding:             captureDecoding{Temperature: assemblyCaptureTemperature},
@@ -830,6 +858,7 @@ func TestAssemblyReportV2ArtifactBinding(t *testing.T) {
 		m := base
 		m.PerArtifact = append([]captureManifestRow(nil), base.PerArtifact...)
 		m.Expected = append([]captureExpectedRow(nil), base.Expected...)
+		m.RequestedTraces = append([]captureRequestedTrace(nil), base.RequestedTraces...)
 		mut(&m)
 		return m
 	}
@@ -853,7 +882,7 @@ func TestAssemblyReportV2ArtifactBinding(t *testing.T) {
 		manifest   captureManifest
 		artifacts  []Artifact
 	}{
-		{"missing expected hash", "artifact hash", clone(func(m *captureManifest) {
+		{"missing expected row", "expected_count", clone(func(m *captureManifest) {
 			m.PerArtifact = m.PerArtifact[1:]
 			m.Expected = m.Expected[1:]
 			m.ArtifactCount, m.ExpectedCount = 1, 1
@@ -869,7 +898,7 @@ func TestAssemblyReportV2ArtifactBinding(t *testing.T) {
 		}), arts},
 		{"artifact outer trace", "trace_id", outerTraceManifest, outerTraceArtifacts},
 		{"artifact inner trace", "trace.id", innerTraceManifest, innerTraceArtifacts},
-		{"model", "candidate_model", clone(func(m *captureManifest) {
+		{"model", "model_targets", clone(func(m *captureManifest) {
 			m.Expected[0].Model = "openai-compat/m"
 		}), arts},
 		{"pair", "pair_id", clone(func(m *captureManifest) {
@@ -879,9 +908,11 @@ func TestAssemblyReportV2ArtifactBinding(t *testing.T) {
 			m.Expected[0].Arm = "mixed"
 		}), arts},
 		{"extra artifact against all-failed v2", "artifact hash", captureManifest{
-			SchemaVersion: captureManifestSchemaVersionV2,
-			ExpectedCount: 1,
-			Expected:      []captureExpectedRow{{TraceID: "failed-legacy", Model: "ollama/m", PairID: "pair-failed", Arm: "legacy", Status: "failed", Attempts: 2, Error: "<error: timeout>"}},
+			SchemaVersion:   captureManifestSchemaVersionV2,
+			RequestedTraces: []captureRequestedTrace{{TraceID: "failed-legacy", PairID: "pair-failed", Arm: "legacy"}},
+			ModelTargets:    []captureManifestTarget{{Selector: "ollama/m"}},
+			ExpectedCount:   1,
+			Expected:        []captureExpectedRow{{TraceID: "failed-legacy", Model: "ollama/m", PairID: "pair-failed", Arm: "legacy", Status: "failed", Attempts: 2, Error: "<error: timeout>"}},
 		}, []Artifact{legacy}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -939,8 +970,9 @@ func TestAssemblyReportV2KeepsSameNativeModelDistinctByProvider(t *testing.T) {
 		t.Fatal(err)
 	}
 	manifestPath := writeLedgerManifest(t, dir, "manifest.json", captureManifest{
-		SchemaVersion: captureManifestSchemaVersionV2,
-		Endpoint:      "https://ollama.test " + compatEndpoint, Transport: "mixed",
+		SchemaVersion:   captureManifestSchemaVersionV2,
+		RequestedTraces: requestedTracesForLedger(expected),
+		Endpoint:        "https://ollama.test " + compatEndpoint, Transport: "mixed",
 		ModelTargets: []captureManifestTarget{{Selector: "ollama/m"}, {Selector: "openai-compat/m"}},
 		Decoding:     captureDecoding{Temperature: assemblyCaptureTemperature}, CounterbalanceScheme: captureCounterbalanceScheme,
 		ArtifactCount: len(arts), PerArtifact: perArtifact,
@@ -977,8 +1009,9 @@ func TestAssemblyReportV2AllFailedEmptyArtifactsSucceeds(t *testing.T) {
 	}
 	manifestPath := writeLedgerManifest(t, dir, "manifest.json", captureManifest{
 		SchemaVersion: captureManifestSchemaVersionV2, Transport: defaultBenchProvider,
-		ModelTargets: []captureManifestTarget{{Selector: "ollama/m"}},
-		Decoding:     captureDecoding{Temperature: assemblyCaptureTemperature}, CounterbalanceScheme: captureCounterbalanceScheme,
+		RequestedTraces: requestedTracesForLedger(expected),
+		ModelTargets:    []captureManifestTarget{{Selector: "ollama/m"}},
+		Decoding:        captureDecoding{Temperature: assemblyCaptureTemperature}, CounterbalanceScheme: captureCounterbalanceScheme,
 		ExpectedCount: len(expected), Expected: expected,
 	})
 	raw, err := runAssemblyReport(assemblyReportOptions{
@@ -1049,6 +1082,11 @@ func TestLoadCaptureManifestLedgerValidation(t *testing.T) {
 	}}
 	valid := captureManifest{
 		SchemaVersion: captureManifestSchemaVersionV2,
+		RequestedTraces: []captureRequestedTrace{
+			{TraceID: "t1", PairID: "p1", Arm: "legacy"},
+			{TraceID: "t2", PairID: "p1", Arm: "mixed"},
+		},
+		ModelTargets:  []captureManifestTarget{{Selector: "m"}},
 		ArtifactCount: 1, PerArtifact: perArtifact,
 		ExpectedCount: 2, Expected: []captureExpectedRow{captured, failed},
 	}
@@ -1057,6 +1095,7 @@ func TestLoadCaptureManifestLedgerValidation(t *testing.T) {
 		m := valid
 		m.PerArtifact = append([]captureManifestRow(nil), valid.PerArtifact...)
 		m.Expected = append([]captureExpectedRow(nil), valid.Expected...)
+		m.RequestedTraces = append([]captureRequestedTrace(nil), valid.RequestedTraces...)
 		mut(&m)
 		return m
 	}
@@ -1067,6 +1106,35 @@ func TestLoadCaptureManifestLedgerValidation(t *testing.T) {
 		{"valid v2 accepted", "", valid},
 		{"v1 with a ledger rejected", "carries a v2 expected ledger", mutate(func(m *captureManifest) {
 			m.SchemaVersion = captureManifestSchemaVersion
+		})},
+		{"v1 with requested traces rejected", "carries v2 requested_traces", mutate(func(m *captureManifest) {
+			m.SchemaVersion = captureManifestSchemaVersion
+			m.ExpectedCount, m.Expected = 0, nil
+		})},
+		{"missing requested trace", "requested_traces", mutate(func(m *captureManifest) {
+			m.RequestedTraces = m.RequestedTraces[:1]
+		})},
+		{"duplicate requested trace", "duplicate", mutate(func(m *captureManifest) {
+			m.RequestedTraces[1] = m.RequestedTraces[0]
+		})},
+		{"blank requested trace", "requested_traces", mutate(func(m *captureManifest) {
+			m.RequestedTraces[0].TraceID = ""
+		})},
+		{"requested trace pair mismatch", "pair_id", mutate(func(m *captureManifest) {
+			m.RequestedTraces[0].PairID = "other"
+		})},
+		{"requested trace arm mismatch", "arm", mutate(func(m *captureManifest) {
+			m.RequestedTraces[0].Arm = "mixed"
+		})},
+		{"failed row deleted with decremented count", "expected_count", mutate(func(m *captureManifest) {
+			m.Expected = m.Expected[:1]
+			m.ExpectedCount = 1
+		})},
+		{"extra expected model", "model_targets", mutate(func(m *captureManifest) {
+			m.Expected[1].Model = "other"
+		})},
+		{"extra expected trace", "requested_traces", mutate(func(m *captureManifest) {
+			m.Expected[1].TraceID = "other"
 		})},
 		{"expected_count mismatch", "expected_count", mutate(func(m *captureManifest) { m.ExpectedCount = 3 })},
 		{"unknown status", "status", mutate(func(m *captureManifest) { m.Expected[1].Status = "maybe" })},
