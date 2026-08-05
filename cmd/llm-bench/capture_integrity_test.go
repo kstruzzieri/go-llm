@@ -112,6 +112,9 @@ func TestAssemblyReportV2RejectsCaptureProvenanceTampering(t *testing.T) {
 		}},
 		{"bare transport identity", "transport", func(arts []Artifact, _ *captureManifest) { arts[0].Capture.Transport = "openai-compat" }},
 		{"different endpoint transport identity", "transport", func(arts []Artifact, _ *captureManifest) { arts[0].Capture.Transport = "openai-compat:ffffffffffff" }},
+		{"compat endpoint count", "exactly one", func(_ []Artifact, m *captureManifest) {
+			m.Endpoint = "https://compat.test/v1 https://other.test/v1"
+		}},
 		{"target", "model_targets", func(_ []Artifact, m *captureManifest) { m.ModelTargets[0].Selector = "ollama/m" }},
 		{"registered decoding", "temperature", func(arts []Artifact, m *captureManifest) {
 			m.Decoding.Temperature = 0.5

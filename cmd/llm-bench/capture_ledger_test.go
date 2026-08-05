@@ -822,6 +822,7 @@ func TestAssemblyReportV2ArtifactBinding(t *testing.T) {
 			{TraceID: legacy.TraceID, PairID: "pair-a", Arm: "legacy"},
 			{TraceID: mixed.TraceID, PairID: "pair-a", Arm: "mixed"},
 		}),
+		Endpoint:             "https://ollama.test",
 		Transport:            defaultBenchProvider,
 		ModelTargets:         []captureManifestTarget{{Selector: "ollama/m"}},
 		Decoding:             captureDecoding{Temperature: assemblyCaptureTemperature},
@@ -907,6 +908,21 @@ func TestAssemblyReportV2ArtifactBinding(t *testing.T) {
 		{"arm", "arm", clone(func(m *captureManifest) {
 			m.Expected[0].Arm = "mixed"
 		}), arts},
+		{"empty Ollama endpoint", "ollama endpoint", clone(func(m *captureManifest) {
+			m.Endpoint = ""
+		}), arts},
+		{"malformed Ollama endpoint", "ollama endpoint", clone(func(m *captureManifest) {
+			m.Endpoint = "not-a-url"
+		}), arts},
+		{"Ollama endpoint userinfo", "ollama endpoint", clone(func(m *captureManifest) {
+			m.Endpoint = "https://user:ENDPOINT_SECRET@ollama.test"
+		}), arts},
+		{"Ollama endpoint query", "ollama endpoint", clone(func(m *captureManifest) {
+			m.Endpoint = "https://ollama.test?token=ENDPOINT_SECRET"
+		}), arts},
+		{"Ollama endpoint fragment", "ollama endpoint", clone(func(m *captureManifest) {
+			m.Endpoint = "https://ollama.test#ENDPOINT_SECRET"
+		}), arts},
 		{"extra artifact against all-failed v2", "artifact hash", captureManifest{
 			SchemaVersion:   captureManifestSchemaVersionV2,
 			RequestedTraces: []captureRequestedTrace{{TraceID: "failed-legacy", PairID: "pair-failed", Arm: "legacy"}},
@@ -919,6 +935,9 @@ func TestAssemblyReportV2ArtifactBinding(t *testing.T) {
 			err := run(t, tc.manifest, tc.artifacts)
 			if err == nil || !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("err = %v; want v2 binding error containing %q", err, tc.want)
+			}
+			if strings.Contains(err.Error(), "ENDPOINT_SECRET") {
+				t.Fatalf("endpoint validation echoed manifest credentials: %v", err)
 			}
 		})
 	}
@@ -969,7 +988,7 @@ func TestAssemblyReportV2KeepsSameNativeModelDistinctByProvider(t *testing.T) {
 	if err := writeLabelsJSONL(labelsPath, labels); err != nil {
 		t.Fatal(err)
 	}
-	manifestPath := writeLedgerManifest(t, dir, "manifest.json", captureManifest{
+	manifest := captureManifest{
 		SchemaVersion:   captureManifestSchemaVersionV2,
 		RequestedTraces: requestedTracesForLedger(expected),
 		Endpoint:        "https://ollama.test " + compatEndpoint, Transport: "mixed",
@@ -977,10 +996,14 @@ func TestAssemblyReportV2KeepsSameNativeModelDistinctByProvider(t *testing.T) {
 		Decoding:     captureDecoding{Temperature: assemblyCaptureTemperature}, CounterbalanceScheme: captureCounterbalanceScheme,
 		ArtifactCount: len(arts), PerArtifact: perArtifact,
 		ExpectedCount: len(expected), Expected: expected,
-	})
-	raw, err := runAssemblyReport(assemblyReportOptions{
-		LabelsPath: labelsPath, ArtifactsPath: artifactsPath, CaptureManifestPath: manifestPath,
-	})
+	}
+	run := func(manifest captureManifest) (string, error) {
+		manifestPath := writeLedgerManifest(t, dir, "manifest.json", manifest)
+		return runAssemblyReport(assemblyReportOptions{
+			LabelsPath: labelsPath, ArtifactsPath: artifactsPath, CaptureManifestPath: manifestPath,
+		})
+	}
+	raw, err := run(manifest)
 	if err != nil {
 		t.Fatalf("runAssemblyReport: %v", err)
 	}
@@ -990,6 +1013,24 @@ func TestAssemblyReportV2KeepsSameNativeModelDistinctByProvider(t *testing.T) {
 	}
 	if len(report.LegacyMixedModels) != 2 || report.LegacyMixedModels[0].CandidateModel != "m" || report.LegacyMixedModels[1].CandidateModel != "openai-compat/m" {
 		t.Fatalf("legacy_mixed_models = %+v; want distinct Ollama and openai-compat sections", report.LegacyMixedModels)
+	}
+	for _, tc := range []struct{ endpoint, want string }{
+		{" " + compatEndpoint, "ollama endpoint"},
+		{"not-a-url " + compatEndpoint, "ollama endpoint"},
+		{"https://user:ENDPOINT_SECRET@ollama.test " + compatEndpoint, "ollama endpoint"},
+		{"https://ollama.test?token=ENDPOINT_SECRET " + compatEndpoint, "ollama endpoint"},
+		{"https://ollama.test#ENDPOINT_SECRET " + compatEndpoint, "ollama endpoint"},
+		{"https://ollama.test  " + compatEndpoint, "mixed endpoint"},
+	} {
+		bad := manifest
+		bad.Endpoint = tc.endpoint
+		_, err := run(bad)
+		if err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Fatalf("mixed endpoint %q err = %v; want fixed rejection containing %q", tc.endpoint, err, tc.want)
+		}
+		if strings.Contains(err.Error(), "ENDPOINT_SECRET") {
+			t.Fatalf("mixed endpoint validation echoed manifest credentials: %v", err)
+		}
 	}
 }
 
@@ -1008,7 +1049,7 @@ func TestAssemblyReportV2AllFailedEmptyArtifactsSucceeds(t *testing.T) {
 		{TraceID: "failed-mixed", Model: "ollama/m", PairID: "pair-failed", Arm: "mixed", Status: "failed", Attempts: 2, Error: "<error: timeout>"},
 	}
 	manifestPath := writeLedgerManifest(t, dir, "manifest.json", captureManifest{
-		SchemaVersion: captureManifestSchemaVersionV2, Transport: defaultBenchProvider,
+		SchemaVersion: captureManifestSchemaVersionV2, Endpoint: "https://ollama.test", Transport: defaultBenchProvider,
 		RequestedTraces: requestedTracesForLedger(expected),
 		ModelTargets:    []captureManifestTarget{{Selector: "ollama/m"}},
 		Decoding:        captureDecoding{Temperature: assemblyCaptureTemperature}, CounterbalanceScheme: captureCounterbalanceScheme,

@@ -568,21 +568,26 @@ func validateV2CaptureProvenance(arts []Artifact, m captureManifest, expectedArt
 	if m.Transport != wantTransport {
 		return fmt.Errorf("capture-manifest v2 transport %q does not match model_targets transport %q", m.Transport, wantTransport)
 	}
+	endpointTransports := []string{wantTransport}
+	if wantTransport == "mixed" {
+		endpointTransports = []string{defaultBenchProvider, openAICompatTransport}
+	}
+	endpoints := strings.Split(m.Endpoint, " ")
+	if len(endpoints) != len(endpointTransports) {
+		if wantTransport == "mixed" {
+			return fmt.Errorf("capture-manifest v2 mixed endpoint must contain exactly two sanitized URLs")
+		}
+		return fmt.Errorf("capture-manifest v2 %s endpoint must contain exactly one sanitized URL", wantTransport)
+	}
 	compatProvider := ""
-	if hasCompat {
-		compatEndpoint := m.Endpoint
-		if hasOllama {
-			parts := strings.Fields(m.Endpoint)
-			if len(parts) != 2 || m.Endpoint != parts[0]+" "+parts[1] {
-				return fmt.Errorf("capture-manifest v2 mixed endpoint must contain exactly two sanitized URLs")
-			}
-			compatEndpoint = parts[1]
+	for i, endpoint := range endpoints {
+		sanitized, err := sanitizeCaptureEndpoint(endpoint)
+		if err != nil || sanitized == "" || sanitized != endpoint {
+			return fmt.Errorf("capture-manifest v2 %s endpoint is not sanitized", endpointTransports[i])
 		}
-		sanitized, err := sanitizeCaptureEndpoint(compatEndpoint)
-		if err != nil || sanitized == "" || sanitized != compatEndpoint {
-			return fmt.Errorf("capture-manifest v2 openai-compat endpoint is not sanitized")
+		if endpointTransports[i] == openAICompatTransport {
+			compatProvider = openAICompatCandidateProviderName(sanitized)
 		}
-		compatProvider = openAICompatCandidateProviderName(sanitized)
 	}
 	for key, digest := range m.ServerProbe.OllamaDigests {
 		control, ok := probeKeys[key]
