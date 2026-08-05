@@ -480,8 +480,9 @@ func renderForcedChoiceWorksheet(arts []Artifact, sidemap fcSidemapFile) (string
 // hashes disagreeing with its own side assignment, an invalid prefer: or
 // arm_guess: value, or a duplicate pair block are loud errors. A blank
 // prefer: skips the block (partial labeling allowed) and is counted — unless
-// requireComplete is set (the registered workflow), which turns ANY blank
-// prefer: into a loud error listing the unfilled pairs. sidemap is REQUIRED
+// requireComplete is set (the registered workflow), which requires every
+// renderer-eligible pair block and turns ANY blank prefer: into a loud error
+// listing the unfilled pairs. sidemap is REQUIRED
 // and -fc-sidemap-digest verification is the guard that render and ingest
 // used the SAME sealed map. labeler and labeled_at are stamped on every row.
 func ingestForcedChoiceWorksheet(worksheet string, arts []Artifact, labeler string, sidemap fcSidemapFile, requireComplete bool) (rows []FCPreference, skipped int, err error) {
@@ -491,6 +492,26 @@ func ingestForcedChoiceWorksheet(worksheet string, arts []Artifact, labeler stri
 	}
 	if err := verifyFCSidemapWorksheetDigest(worksheet, digest); err != nil {
 		return nil, 0, err
+	}
+	var expectedPairs []fcPair
+	if requireComplete {
+		expectedPairs, err = collectFCPairs(arts)
+		if err != nil {
+			return nil, 0, err
+		}
+		for _, pair := range expectedPairs {
+			e, err := sidemap.entry(pair.pairID, pair.model)
+			if err != nil {
+				return nil, 0, fmt.Errorf("forced-choice worksheet: %w", err)
+			}
+			sideA, sideB := pair.legacy, pair.mixed
+			if !e.LegacyIsA {
+				sideA, sideB = pair.mixed, pair.legacy
+			}
+			if e.HashA != sideA.ArtifactHash || e.HashB != sideB.ArtifactHash {
+				return nil, 0, fmt.Errorf("forced-choice worksheet: pair %q model %q: sidemap hashes disagree with the pair's arms under its registered side assignment", pair.pairID, pair.model)
+			}
+		}
 	}
 	artByHash := make(map[string]Artifact, len(arts))
 	for _, a := range arts {
@@ -593,6 +614,18 @@ func ingestForcedChoiceWorksheet(worksheet string, arts []Artifact, labeler stri
 	if requireComplete && len(blankPairs) > 0 {
 		return nil, 0, fmt.Errorf("forced-choice worksheet: -fc-require-complete: %d block(s) left blank: %s",
 			len(blankPairs), strings.Join(blankPairs, ", "))
+	}
+	if requireComplete {
+		var missingPairs []string
+		for _, pair := range expectedPairs {
+			if _, ok := seen[pair.pairID+"\x00"+pair.model]; !ok {
+				missingPairs = append(missingPairs, fmt.Sprintf("%s/%s", pair.pairID, pair.model))
+			}
+		}
+		if len(missingPairs) > 0 {
+			return nil, 0, fmt.Errorf("forced-choice worksheet: -fc-require-complete: %d block(s) missing: %s",
+				len(missingPairs), strings.Join(missingPairs, ", "))
+		}
 	}
 	return rows, skipped, nil
 }

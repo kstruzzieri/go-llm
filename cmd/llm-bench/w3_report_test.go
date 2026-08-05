@@ -372,6 +372,19 @@ func TestFCIngestRequireCompleteAndArmGuess(t *testing.T) {
 	}
 	alphaHeader := "=== PAIR pair-alpha c ==="
 	gammaHeader := "=== PAIR pair-gamma c ==="
+	removeBlock := func(t *testing.T, worksheet, header string) string {
+		t.Helper()
+		start := strings.Index(worksheet, header+"\n")
+		if start < 0 {
+			t.Fatalf("worksheet missing block %q", header)
+		}
+		end := strings.Index(worksheet[start:], blindEndMarker+"\n")
+		if end < 0 {
+			t.Fatalf("worksheet block %q missing end marker", header)
+		}
+		end += start + len(blindEndMarker) + 1
+		return worksheet[:start] + worksheet[end:]
+	}
 
 	t.Run("require-complete lists blank pairs", func(t *testing.T) {
 		ws := fillWorksheetField(t, out, alphaHeader, "prefer", "A")
@@ -383,6 +396,64 @@ func TestFCIngestRequireCompleteAndArmGuess(t *testing.T) {
 		rows, skipped, err := ingestForcedChoiceWorksheet(ws, arts, "t", sidemap, false)
 		if err != nil || len(rows) != 1 || skipped != 1 {
 			t.Errorf("rows=%d skipped=%d err=%v; want 1/1/nil without the flag", len(rows), skipped, err)
+		}
+	})
+
+	t.Run("require-complete rejects deleted blocks", func(t *testing.T) {
+		ws := removeBlock(t, out, gammaHeader)
+		ws = fillWorksheetField(t, ws, alphaHeader, "prefer", "A")
+		_, _, err := ingestForcedChoiceWorksheet(ws, arts, "t", sidemap, true)
+		if err == nil || !strings.Contains(err.Error(), "pair-gamma/c") || !strings.Contains(err.Error(), "missing") {
+			t.Fatalf("require-complete with pair-gamma block deleted = %v; want a missing-block error naming pair-gamma/c", err)
+		}
+
+		rows, skipped, err := ingestForcedChoiceWorksheet(ws, arts, "t", sidemap, false)
+		if err != nil || len(rows) != 1 || skipped != 0 {
+			t.Fatalf("partial ingest with pair-gamma block deleted: rows=%d skipped=%d err=%v; want 1/0/nil", len(rows), skipped, err)
+		}
+	})
+
+	t.Run("require-complete rejects all blocks deleted in renderer order", func(t *testing.T) {
+		ws := removeBlock(t, removeBlock(t, out, alphaHeader), gammaHeader)
+		_, _, err := ingestForcedChoiceWorksheet(ws, arts, "t", sidemap, true)
+		if err == nil || !strings.Contains(err.Error(), "pair-alpha/c") || !strings.Contains(err.Error(), "pair-gamma/c") {
+			t.Fatalf("require-complete with all blocks deleted = %v; want both missing pairs", err)
+		}
+		if strings.Index(err.Error(), "pair-alpha/c") > strings.Index(err.Error(), "pair-gamma/c") {
+			t.Fatalf("missing pairs not reported in renderer order: %v", err)
+		}
+	})
+
+	t.Run("stale extra sidemap entry is not an expected block", func(t *testing.T) {
+		stale := parityFCSidemap(arts, "c")
+		stale.Pairs["pair-stale|c"] = fcSidemapEntry{LegacyIsA: true, HashA: "sha256:stale-a", HashB: "sha256:stale-b"}
+		ws := fillWorksheetField(t, out, alphaHeader, "prefer", "A")
+		ws = fillWorksheetField(t, ws, gammaHeader, "prefer", "B")
+		if _, _, err := ingestForcedChoiceWorksheet(ws, arts, "t", stale, true); err != nil {
+			t.Fatalf("complete worksheet rejected for stale extra sidemap entry: %v", err)
+		}
+	})
+
+	t.Run("missing sidemap entry for deleted eligible block is loud", func(t *testing.T) {
+		partial := parityFCSidemap(arts, "c", "pair-alpha")
+		ws := removeBlock(t, out, gammaHeader)
+		ws = fillWorksheetField(t, ws, alphaHeader, "prefer", "A")
+		_, _, err := ingestForcedChoiceWorksheet(ws, arts, "t", partial, true)
+		if err == nil || !strings.Contains(err.Error(), "fc-sidemap") || !strings.Contains(err.Error(), "pair-gamma") {
+			t.Fatalf("missing sidemap entry hidden by deleted block = %v; want a loud pair-gamma sidemap error", err)
+		}
+	})
+
+	t.Run("stale sidemap hashes for deleted eligible block are loud", func(t *testing.T) {
+		stale := parityFCSidemap(arts, "c")
+		entry := stale.Pairs["pair-gamma|c"]
+		entry.HashA = "sha256:stale"
+		stale.Pairs["pair-gamma|c"] = entry
+		ws := removeBlock(t, out, gammaHeader)
+		ws = fillWorksheetField(t, ws, alphaHeader, "prefer", "A")
+		_, _, err := ingestForcedChoiceWorksheet(ws, arts, "t", stale, true)
+		if err == nil || !strings.Contains(err.Error(), "pair-gamma") || !strings.Contains(err.Error(), "sidemap hashes") {
+			t.Fatalf("stale sidemap hashes hidden by deleted block = %v; want a loud pair-gamma hash-binding error", err)
 		}
 	})
 
