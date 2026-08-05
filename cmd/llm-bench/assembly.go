@@ -643,11 +643,19 @@ func sourcePaths(srcs []assemblySource) []string {
 }
 
 func writeTraceJSON(path string, tr Trace) error {
-	raw, err := json.MarshalIndent(tr, "", "  ")
+	raw, err := marshalTraceJSON(tr)
 	if err != nil {
 		return err
 	}
-	return writeFileAtomic(path, append(raw, '\n'))
+	return writeFileAtomic(path, raw)
+}
+
+func marshalTraceJSON(tr Trace) ([]byte, error) {
+	raw, err := json.MarshalIndent(tr, "", "  ")
+	if err != nil {
+		return nil, err
+	}
+	return append(raw, '\n'), nil
 }
 
 func writeFileAtomic(path string, data []byte) error {

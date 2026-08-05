@@ -1,7 +1,9 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -51,9 +53,174 @@ type Manifest struct {
 	Entries []ManifestEntry
 }
 
+type filePublication struct {
+	target string
+	data   []byte
+	mode   os.FileMode
+}
+
+func publishFileSet(replacements []filePublication, removals []string) error {
+	return publishFileSetWithRename(replacements, removals, os.Rename)
+}
+
+func publishFileSetWithRename(replacements []filePublication, removals []string, rename func(string, string) error) error {
+	if rename == nil {
+		return errors.New("publish file set: nil rename function")
+	}
+	targets := make([]string, 0, len(replacements)+len(removals))
+	for _, replacement := range replacements {
+		targets = append(targets, replacement.target)
+	}
+	targets = append(targets, removals...)
+	for i, target := range targets {
+		if strings.TrimSpace(target) == "" {
+			return fmt.Errorf("publish file set: empty target %d", i)
+		}
+		info, err := os.Lstat(target)
+		if err == nil {
+			if info.Mode()&os.ModeSymlink != 0 {
+				return fmt.Errorf("publish file set: refuse symlink target %q", target)
+			}
+			if !info.Mode().IsRegular() {
+				return fmt.Errorf("publish file set: refuse non-regular target %q", target)
+			}
+		} else if !os.IsNotExist(err) {
+			return fmt.Errorf("publish file set: inspect %q: %w", target, err)
+		}
+		for j, prior := range targets[:i] {
+			aliases, err := pathsAlias(target, prior)
+			if err != nil {
+				return fmt.Errorf("publish file set: resolve target %d %q and target %d %q: %w", i, target, j, prior, err)
+			}
+			if aliases {
+				return fmt.Errorf("publish file set: target %q aliases target %q", target, prior)
+			}
+		}
+	}
+
+	type stagedFile struct {
+		target string
+		path   string
+	}
+	staged := make([]stagedFile, 0, len(replacements))
+	cleanStages := func() error {
+		var errs []error
+		for _, stage := range staged {
+			if stage.path == "" {
+				continue
+			}
+			if err := os.Remove(stage.path); err != nil && !os.IsNotExist(err) {
+				errs = append(errs, fmt.Errorf("remove unused stage %q: %w", stage.path, err))
+			}
+		}
+		return errors.Join(errs...)
+	}
+	for _, replacement := range replacements {
+		stage, err := os.CreateTemp(filepath.Dir(replacement.target), "."+filepath.Base(replacement.target)+".publish-*")
+		if err != nil {
+			return errors.Join(fmt.Errorf("publish file set: stage %q: %w", replacement.target, err), cleanStages())
+		}
+		stagePath := stage.Name()
+		staged = append(staged, stagedFile{target: replacement.target, path: stagePath})
+		if err := stage.Chmod(replacement.mode.Perm()); err != nil {
+			_ = stage.Close()
+			return errors.Join(fmt.Errorf("publish file set: chmod stage for %q: %w", replacement.target, err), cleanStages())
+		}
+		if _, err := stage.Write(replacement.data); err != nil {
+			_ = stage.Close()
+			return errors.Join(fmt.Errorf("publish file set: write stage for %q: %w", replacement.target, err), cleanStages())
+		}
+		if err := stage.Close(); err != nil {
+			return errors.Join(fmt.Errorf("publish file set: close stage for %q: %w", replacement.target, err), cleanStages())
+		}
+	}
+
+	type backupFile struct {
+		target string
+		path   string
+	}
+	backups := make([]backupFile, 0, len(targets))
+	published := make([]string, 0, len(replacements))
+	rollback := func(original error) error {
+		errs := []error{original}
+		for i := len(published) - 1; i >= 0; i-- {
+			if err := os.Remove(published[i]); err != nil && !os.IsNotExist(err) {
+				errs = append(errs, fmt.Errorf("remove newly published target %q: %w", published[i], err))
+			}
+		}
+		for i := len(backups) - 1; i >= 0; i-- {
+			backup := backups[i]
+			if err := rename(backup.path, backup.target); err != nil {
+				errs = append(errs, fmt.Errorf("restore %q from recovery backup %q: %w", backup.target, backup.path, err))
+			}
+		}
+		if err := cleanStages(); err != nil {
+			errs = append(errs, err)
+		}
+		return errors.Join(errs...)
+	}
+	for _, target := range targets {
+		info, err := os.Lstat(target)
+		if os.IsNotExist(err) {
+			continue
+		}
+		if err != nil {
+			return rollback(fmt.Errorf("publish file set: inspect before backup %q: %w", target, err))
+		}
+		if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+			return rollback(fmt.Errorf("publish file set: target changed to non-regular file before backup %q", target))
+		}
+		placeholder, err := os.CreateTemp(filepath.Dir(target), "."+filepath.Base(target)+".backup-*")
+		if err != nil {
+			return rollback(fmt.Errorf("publish file set: reserve backup for %q: %w", target, err))
+		}
+		backupPath := placeholder.Name()
+		if err := placeholder.Close(); err != nil {
+			_ = os.Remove(backupPath)
+			return rollback(fmt.Errorf("publish file set: close backup placeholder for %q: %w", target, err))
+		}
+		if err := os.Remove(backupPath); err != nil {
+			return rollback(fmt.Errorf("publish file set: prepare backup for %q: %w", target, err))
+		}
+		if err := rename(target, backupPath); err != nil {
+			return rollback(fmt.Errorf("publish file set: back up %q: %w", target, err))
+		}
+		backups = append(backups, backupFile{target: target, path: backupPath})
+	}
+	for i := range staged {
+		if err := rename(staged[i].path, staged[i].target); err != nil {
+			return rollback(fmt.Errorf("publish file set: publish %q: %w", staged[i].target, err))
+		}
+		published = append(published, staged[i].target)
+		staged[i].path = ""
+	}
+	var cleanupErrs []error
+	for _, backup := range backups {
+		if err := os.Remove(backup.path); err != nil && !os.IsNotExist(err) {
+			cleanupErrs = append(cleanupErrs, fmt.Errorf("publish file set: remove backup %q: %w", backup.path, err))
+		}
+	}
+	return errors.Join(cleanupErrs...)
+}
+
+func marshalManifestJSONL(m Manifest) ([]byte, error) {
+	var raw bytes.Buffer
+	enc := json.NewEncoder(&raw)
+	for _, entry := range m.Entries {
+		if err := enc.Encode(entry); err != nil {
+			return nil, fmt.Errorf("manifest: encode entry %q: %w", entry.TraceID, err)
+		}
+	}
+	return raw.Bytes(), nil
+}
+
 // writeManifest writes the manifest as JSONL (one entry per line), mirroring
 // the artifacts/labels conventions.
 func writeManifest(path string, m Manifest) (retErr error) {
+	raw, err := marshalManifestJSONL(m)
+	if err != nil {
+		return err
+	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return fmt.Errorf("manifest: mkdir: %w", err)
 	}
@@ -66,11 +233,8 @@ func writeManifest(path string, m Manifest) (retErr error) {
 			retErr = fmt.Errorf("manifest: close output: %w", closeErr)
 		}
 	}()
-	enc := json.NewEncoder(f)
-	for _, e := range m.Entries {
-		if err := enc.Encode(e); err != nil {
-			return fmt.Errorf("manifest: encode entry %q: %w", e.TraceID, err)
-		}
+	if _, err := f.Write(raw); err != nil {
+		return fmt.Errorf("manifest: write output: %w", err)
 	}
 	return nil
 }

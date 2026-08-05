@@ -1018,6 +1018,15 @@ func TestCaptureManifestWritten(t *testing.T) {
 	if err := json.Unmarshal(raw, &m); err != nil {
 		t.Fatalf("decode manifest: %v", err)
 	}
+	for _, path := range []string{out, out + ".manifest.json"} {
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if info.Mode().Perm() != 0o600 {
+			t.Fatalf("%s mode = %v; want 0600", path, info.Mode().Perm())
+		}
+	}
 	if m.SchemaVersion != "mixed-capture-manifest/v2" {
 		t.Errorf("schema_version = %q; want mixed-capture-manifest/v2 (new captures write the run ledger)", m.SchemaVersion)
 	}
@@ -1113,19 +1122,46 @@ func TestCaptureManifestUsageAbsentRecordedFalse(t *testing.T) {
 func TestCaptureManifestWriteFailureFailsCapture(t *testing.T) {
 	dir := t.TempDir()
 	out := filepath.Join(dir, "artifacts.jsonl")
+	if err := os.WriteFile(out, []byte("prior artifacts\n"), 0o640); err != nil {
+		t.Fatal(err)
+	}
 	// Occupy the manifest's sibling path with a DIRECTORY so the write fails.
 	if err := os.Mkdir(out+".manifest.json", 0o755); err != nil {
 		t.Fatal(err)
 	}
-	err := runCalibrateCapture(context.Background(), calibrateCaptureOptions{
-		Runner:     &orderRecordingRunner{},
-		Targets:    []ModelTarget{{Display: "m", Provider: "ollama", Model: "m"}},
-		Traces:     []Trace{pairedCaptureTrace("pa-legacy", "p-a", AssemblyLegacy)},
-		OutputPath: out, Stdout: io.Discard,
+	stderrFile, err := os.Create(filepath.Join(dir, "stderr.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldStderr := os.Stderr
+	os.Stderr = stderrFile
+	defer func() { os.Stderr = oldStderr }()
+	var stdout bytes.Buffer
+	err = runCalibrateCapture(context.Background(), calibrateCaptureOptions{
+		Runner:  &flakyRunner{failAlways: map[string]bool{"pa-mixed": true}},
+		Targets: []ModelTarget{{Display: "m", Provider: "ollama", Model: "m"}},
+		Traces: []Trace{
+			pairedCaptureTrace("pa-legacy", "p-a", AssemblyLegacy),
+			pairedCaptureTrace("pa-mixed", "p-a", AssemblyMixed),
+		},
+		OutputPath: out, Stdout: &stdout,
 	})
+	os.Stderr = oldStderr
+	if closeErr := stderrFile.Close(); closeErr != nil {
+		t.Fatal(closeErr)
+	}
 	if err == nil || !strings.Contains(err.Error(), "manifest") {
 		t.Fatalf("runCalibrateCapture = %v; want a loud manifest-write failure", err)
 	}
+	stderr, readErr := os.ReadFile(filepath.Join(dir, "stderr.txt"))
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if stdout.Len() != 0 || strings.Contains(string(stderr), "WARNING partial capture") {
+		t.Fatalf("failed publication emitted success output: stdout=%q stderr=%q", stdout.String(), stderr)
+	}
+	assertFileState(t, out, "prior artifacts\n", 0o640)
+	assertNoPublicationDebris(t, dir)
 }
 
 func TestCaptureManifestSkippedForNonAssemblyCaptures(t *testing.T) {

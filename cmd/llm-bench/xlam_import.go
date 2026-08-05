@@ -174,21 +174,14 @@ func importXlamIrrelevance(opts xlamImportOptions) (xlamImportResult, error) {
 		return xlamImportResult{}, err
 	}
 
-	if err := os.MkdirAll(opts.OutDir, 0o755); err != nil {
-		return xlamImportResult{}, fmt.Errorf("xlam import: mkdir out: %w", err)
-	}
-	// Clear prior xlam traces so the output dir always matches the new manifest
-	// (a smaller re-run must not leave orphans that a *.json replay would pick up).
-	for _, p := range stale {
-		if err := os.Remove(p); err != nil {
-			return xlamImportResult{}, fmt.Errorf("xlam import: remove stale %s: %w", p, err)
-		}
-	}
 	var manifest Manifest
+	replacements := make([]filePublication, 0, len(planned)+1)
 	for _, p := range planned {
-		if err := writeTraceJSON(p.path, p.trace); err != nil {
-			return xlamImportResult{}, fmt.Errorf("xlam import: write %s: %w", p.path, err)
+		raw, err := marshalTraceJSON(p.trace)
+		if err != nil {
+			return xlamImportResult{}, fmt.Errorf("xlam import: marshal %s: %w", p.path, err)
 		}
+		replacements = append(replacements, filePublication{target: p.path, data: raw, mode: 0o644})
 		manifest.Entries = append(manifest.Entries, ManifestEntry{
 			TraceID:                p.trace.ID,
 			Partition:              PartitionChallenge,
@@ -198,8 +191,36 @@ func importXlamIrrelevance(opts xlamImportOptions) (xlamImportResult, error) {
 		})
 		res.Written++
 	}
-	if err := writeManifest(opts.ManifestPath, manifest); err != nil {
+	manifestRaw, err := marshalManifestJSONL(manifest)
+	if err != nil {
 		return xlamImportResult{}, fmt.Errorf("xlam import: %w", err)
+	}
+	replacements = append(replacements, filePublication{target: opts.ManifestPath, data: manifestRaw, mode: 0o600})
+	staleOnly := make([]string, 0, len(stale))
+	for _, stalePath := range stale {
+		plannedReplacement := false
+		for _, p := range planned {
+			aliases, err := pathsAlias(stalePath, p.path)
+			if err != nil {
+				return xlamImportResult{}, fmt.Errorf("xlam import: resolve stale trace %s: %w", stalePath, err)
+			}
+			if aliases {
+				plannedReplacement = true
+				break
+			}
+		}
+		if !plannedReplacement {
+			staleOnly = append(staleOnly, stalePath)
+		}
+	}
+	if err := os.MkdirAll(opts.OutDir, 0o755); err != nil {
+		return xlamImportResult{}, fmt.Errorf("xlam import: mkdir out: %w", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(opts.ManifestPath), 0o755); err != nil {
+		return xlamImportResult{}, fmt.Errorf("xlam import: mkdir manifest: %w", err)
+	}
+	if err := publishFileSet(replacements, staleOnly); err != nil {
+		return xlamImportResult{}, fmt.Errorf("xlam import: publish evidence: %w", err)
 	}
 	return res, nil
 }

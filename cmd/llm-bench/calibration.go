@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -468,20 +469,31 @@ func validateCaptureLedger(m captureManifest) ([]assemblyPairKey, error) {
 // here fails the capture loudly — an assembly capture without its manifest
 // cannot be verified by the registered report.
 func writeCaptureManifest(path string, m captureManifest, stdout io.Writer) error {
-	raw, err := json.MarshalIndent(m, "", "  ")
+	raw, err := marshalCaptureManifest(m)
 	if err != nil {
-		return fmt.Errorf("calibrate-capture: marshal manifest: %w", err)
+		return err
 	}
-	raw = append(raw, '\n')
 	if err := os.WriteFile(path, raw, 0o600); err != nil {
 		return fmt.Errorf("calibrate-capture: write manifest: %w", err)
 	}
+	emitCaptureManifestDigest(raw, stdout)
+	return nil
+}
+
+func marshalCaptureManifest(m captureManifest) ([]byte, error) {
+	raw, err := json.MarshalIndent(m, "", "  ")
+	if err != nil {
+		return nil, fmt.Errorf("calibrate-capture: marshal manifest: %w", err)
+	}
+	return append(raw, '\n'), nil
+}
+
+func emitCaptureManifestDigest(raw []byte, stdout io.Writer) {
 	sum := sha256.Sum256(raw)
 	if stdout == nil {
 		stdout = os.Stdout
 	}
 	_, _ = fmt.Fprintf(stdout, "manifest_digest sha256:%s\n", hex.EncodeToString(sum[:]))
-	return nil
 }
 
 // runCalibrateCapture replays each (trace, candidate) cell — retrying every
@@ -492,7 +504,7 @@ func writeCaptureManifest(path string, m captureManifest, stdout io.Writer) erro
 // (target x trace) universe, so a cell the runner never answered for still
 // appears as failed, and an all-failed assembly run still writes its
 // manifest before erroring: evidence must persist.
-func runCalibrateCapture(ctx context.Context, opts calibrateCaptureOptions) (retErr error) {
+func runCalibrateCapture(ctx context.Context, opts calibrateCaptureOptions) error {
 	if opts.Runner == nil {
 		return fmt.Errorf("calibrate-capture: nil runner")
 	}
@@ -657,16 +669,19 @@ func runCalibrateCapture(ctx context.Context, opts calibrateCaptureOptions) (ret
 		}
 		expected = append(expected, row)
 	}
-	if err := os.MkdirAll(filepath.Dir(opts.OutputPath), 0o755); err != nil {
-		return fmt.Errorf("calibrate-capture: mkdir: %w", err)
+	var artifactRaw bytes.Buffer
+	artifactEncoder := json.NewEncoder(&artifactRaw)
+	for _, artifact := range artifacts {
+		if err := artifactEncoder.Encode(artifact); err != nil {
+			return fmt.Errorf("calibrate-capture: encode artifact %s/%s: %w", artifact.TraceID, artifact.CandidateModel, err)
+		}
 	}
 	// Assembly captures REQUIRE the run manifest (#331 W3): the registered
 	// report verifies pairs against it, so a capture that cannot write it
 	// fails loudly. Non-assembly captures stay manifest-free.
-	writeAssemblyManifest := func() error {
-		if !anyPrefilledAssemblyTrace(opts.Traces) {
-			return nil
-		}
+	var manifestPath string
+	var manifestRaw []byte
+	if anyPrefilledAssemblyTrace(opts.Traces) {
 		endpoint, transport := captureEndpointTransport(opts.Targets, opts.OllamaURL, opts.OpenAICompatBaseURL)
 		targets := make([]captureManifestTarget, 0, len(opts.Targets))
 		for _, target := range opts.Targets {
@@ -689,31 +704,31 @@ func runCalibrateCapture(ctx context.Context, opts calibrateCaptureOptions) (ret
 			ExpectedCount:        len(expected),
 			Expected:             expected,
 		}
-		return writeCaptureManifest(captureManifestPath(opts.OutputPath), manifest, opts.Stdout)
+		manifestPath = captureManifestPath(opts.OutputPath)
+		var err error
+		manifestRaw, err = marshalCaptureManifest(manifest)
+		if err != nil {
+			return err
+		}
+	}
+	if err := os.MkdirAll(filepath.Dir(opts.OutputPath), 0o755); err != nil {
+		return fmt.Errorf("calibrate-capture: mkdir: %w", err)
+	}
+	replacements := []filePublication{{target: opts.OutputPath, data: artifactRaw.Bytes(), mode: 0o600}}
+	if manifestPath != "" {
+		replacements = append(replacements, filePublication{target: manifestPath, data: manifestRaw, mode: 0o600})
+	}
+	if err := publishFileSet(replacements, nil); err != nil {
+		return fmt.Errorf("calibrate-capture: publish evidence: %w", err)
+	}
+	if manifestPath != "" {
+		emitCaptureManifestDigest(manifestRaw, opts.Stdout)
 	}
 	if failed > 0 && len(artifacts) > 0 {
 		// Partial capture is a valid best-effort outcome (the caller can gap-fill
 		// the missing pairs), so this is a warning, not an error — but it must be
 		// loud: a partial corpus that prints only the success line reads as complete.
 		fmt.Fprintf(os.Stderr, "calibrate-capture: WARNING partial capture — wrote %d artifact(s), %d of %d runs failed\n", len(artifacts), failed, len(cellOrder))
-	}
-	f, err := os.OpenFile(opts.OutputPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
-	if err != nil {
-		return fmt.Errorf("calibrate-capture: open output: %w", err)
-	}
-	defer func() {
-		if closeErr := f.Close(); retErr == nil && closeErr != nil {
-			retErr = fmt.Errorf("calibrate-capture: close output: %w", closeErr)
-		}
-	}()
-	enc := json.NewEncoder(f)
-	for _, artifact := range artifacts {
-		if err := enc.Encode(artifact); err != nil {
-			return fmt.Errorf("calibrate-capture: encode artifact %s/%s: %w", artifact.TraceID, artifact.CandidateModel, err)
-		}
-	}
-	if err := writeAssemblyManifest(); err != nil {
-		return err
 	}
 	if len(artifacts) == 0 {
 		return fmt.Errorf("calibrate-capture: no artifacts written; %d run(s) attempted, %d failed", len(cellOrder), failed)

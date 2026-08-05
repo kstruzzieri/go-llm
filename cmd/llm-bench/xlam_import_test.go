@@ -213,6 +213,13 @@ func TestImportXlamIrrelevanceFilterSampleDeterministic(t *testing.T) {
 		if err != nil {
 			t.Fatalf("import: %v", err)
 		}
+		manifestInfo, err := os.Stat(mf)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if manifestInfo.Mode().Perm() != 0o600 {
+			t.Fatalf("manifest mode = %v; want 0600", manifestInfo.Mode().Perm())
+		}
 		m, err := loadManifest(mf)
 		if err != nil {
 			t.Fatalf("loadManifest: %v", err)
@@ -238,6 +245,12 @@ func TestImportXlamIrrelevanceFilterSampleDeterministic(t *testing.T) {
 		}
 		if len(traces[0].Golden.ToolCalls) != 0 {
 			t.Errorf("%s not golden-empty", e.TraceID)
+		}
+		traceInfo, err := os.Stat(filepath.Join(dir, "a", e.TraceID+".json"))
+		if err != nil {
+			t.Error(err)
+		} else if traceInfo.Mode().Perm() != 0o644 {
+			t.Errorf("%s mode = %v; want 0644", e.TraceID, traceInfo.Mode().Perm())
 		}
 	}
 	// Same seed -> same sampled trace IDs (determinism).
@@ -326,6 +339,40 @@ func TestImportXlamIrrelevanceClearsStaleTraces(t *testing.T) {
 	if _, err := os.Stat(stale); !os.IsNotExist(err) {
 		t.Errorf("stale trace %s not removed (err=%v)", stale, err)
 	}
+}
+
+func TestImportXlamManifestWriteFailurePreservesPlannedAndStaleTraces(t *testing.T) {
+	dir := t.TempDir()
+	out := filepath.Join(dir, "out")
+	if err := os.Mkdir(out, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	planned := filepath.Join(out, "xlam-irrel-0000.json")
+	stale := filepath.Join(out, "xlam-irrel-9999.json")
+	if err := os.WriteFile(planned, []byte("prior planned\n"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(stale, []byte("prior stale\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	src := filepath.Join(dir, "x.json")
+	blob, _ := json.Marshal([]xlamRecord{{Query: "a", Tools: sampleXlamTools, Answers: "[]"}})
+	if err := os.WriteFile(src, blob, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	manifest := filepath.Join(dir, "manifest.jsonl")
+	if err := os.Mkdir(manifest, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := importXlamIrrelevance(xlamImportOptions{
+		SrcPath: src, OutDir: out, ManifestPath: manifest, N: 1, Seed: 1, MinTools: 1,
+	}); err == nil || !strings.Contains(err.Error(), "manifest") {
+		t.Fatalf("import error = %v; want manifest failure", err)
+	}
+	assertFileState(t, planned, "prior planned\n", 0o640)
+	assertFileState(t, stale, "prior stale\n", 0o600)
+	assertNoPublicationDebris(t, dir)
 }
 
 func TestImportXlamRejectsManifestTraceAliasBeforeWriting(t *testing.T) {
