@@ -66,10 +66,12 @@ func TestComputePairedAnalysis_DedupesBareAndProviderPrefixedArtifacts(t *testin
 
 func TestModelKeyProviderAware(t *testing.T) {
 	for input, want := range map[string]string{
-		"m":               "m",
-		"ollama/M":        "m",
-		"openai-compat/M": "openai-compat/m",
-		"OPENAI-COMPAT/M": "openai-compat/m",
+		"m":                 "m",
+		"ollama/M":          "m",
+		"OLLAMA / M":        "m",
+		"openai-compat/M":   "openai-compat/m",
+		"OPENAI-COMPAT/M":   "openai-compat/m",
+		"openai-compat / M": "openai-compat/m",
 	} {
 		if got := modelKey(input); got != want {
 			t.Errorf("modelKey(%q) = %q; want %q", input, got, want)

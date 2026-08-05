@@ -265,7 +265,7 @@ func newCellKey(trace, model string) cellKey {
 // default Ollama prefix then lowercase/trim, leaving explicit other providers
 // distinct. Mirrors manualScorerKey.
 func modelKey(model string) string {
-	return normalizeModelSelector(modelSelectorWithoutDefaultBenchProvider(model))
+	return canonicalCandidateModelKey(model)
 }
 
 // computePairedAnalysis turns matched labels (+ stale labels + the full

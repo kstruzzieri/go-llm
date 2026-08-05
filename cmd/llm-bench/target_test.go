@@ -56,8 +56,10 @@ func TestParseModelTargetRejectsInvalidSelectors(t *testing.T) {
 func TestParseModelTargetsCanonicalUniqueness(t *testing.T) {
 	for _, csv := range []string{
 		"m,ollama/m",
+		"m,ollama / m",
 		"M,ollama/m",
 		"openai-compat/M,OPENAI-COMPAT/m",
+		"openai-compat/M,openai-compat / m",
 	} {
 		if _, err := parseModelTargets(csv); err == nil || !strings.Contains(err.Error(), "duplicate") {
 			t.Errorf("parseModelTargets(%q) err = %v; want canonical duplicate rejection", csv, err)

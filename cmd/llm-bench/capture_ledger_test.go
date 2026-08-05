@@ -615,6 +615,52 @@ func TestCaptureCanonicalModelDigestMatchesAllSinks(t *testing.T) {
 	}
 }
 
+func TestCaptureOpenAICompatIgnoresInjectedModelDigest(t *testing.T) {
+	const digest = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	target := ModelTarget{Display: "openai-compat/m", Provider: "openai-compat", Model: "m"}
+	stderrPath := filepath.Join(t.TempDir(), "stderr.txt")
+	stderrFile, err := os.Create(stderrPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldStderr := os.Stderr
+	os.Stderr = stderrFile
+	t.Cleanup(func() { os.Stderr = oldStderr })
+	out := filepath.Join(t.TempDir(), "artifacts.jsonl")
+	if err := runCalibrateCapture(context.Background(), calibrateCaptureOptions{
+		Runner: &orderRecordingRunner{}, Targets: []ModelTarget{target},
+		Traces:     []Trace{pairedCaptureTrace("arm-legacy", "pair-a", AssemblyLegacy)},
+		OutputPath: out, ModelDigests: map[string]string{"openai-compat/m": digest}, Stdout: io.Discard,
+	}); err != nil {
+		t.Fatalf("runCalibrateCapture: %v", err)
+	}
+	os.Stderr = oldStderr
+	if err := stderrFile.Close(); err != nil {
+		t.Fatal(err)
+	}
+	stderr, err := os.ReadFile(stderrPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(stderr), "digest resolution skipped") || strings.Contains(string(stderr), "invalid digest") {
+		t.Fatalf("openai-compat digest omission emitted a misleading warning: %q", stderr)
+	}
+	if got := readArtifactsFile(t, out)[0].Capture.ModelDigest; got != "" {
+		t.Fatalf("artifact model_digest = %q; want empty for openai-compat", got)
+	}
+	raw, err := os.ReadFile(captureManifestPath(out))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var m captureManifest
+	if err := json.Unmarshal(raw, &m); err != nil {
+		t.Fatal(err)
+	}
+	if m.ModelTargets[0].ResolvedDigest != "" || len(m.ServerProbe.OllamaDigests) != 0 {
+		t.Fatalf("openai-compat digest persisted: targets=%+v probe=%+v", m.ModelTargets, m.ServerProbe)
+	}
+}
+
 func TestCaptureDoesNotProbeProps(t *testing.T) {
 	var requests atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
@@ -848,13 +894,14 @@ func TestAssemblyReportV2KeepsSameNativeModelDistinctByProvider(t *testing.T) {
 	var labels []Label
 	var perArtifact []captureManifestRow
 	var expected []captureExpectedRow
-	for _, model := range []string{"ollama/m", "openai-compat/m"} {
+	for i, model := range []string{"ollama/m", "openai-compat/m"} {
+		ledgerModel := []string{"ollama / m", "openai-compat / m"}[i]
 		for _, mode := range []AssemblyMode{AssemblyLegacy, AssemblyMixed} {
 			a := withCaptureTemp(mixedArtifact("pair-a", mode, model, nil), 0)
 			arts = append(arts, a)
 			labels = append(labels, labelFor(a, 1))
 			perArtifact = append(perArtifact, captureManifestRow{TraceID: a.TraceID, ArtifactHash: a.ArtifactHash, UsagePresent: true})
-			expected = append(expected, captureExpectedRow{TraceID: a.TraceID, Model: model, PairID: "pair-a", Arm: string(mode), Status: "captured", Attempts: 1, ArtifactHash: a.ArtifactHash})
+			expected = append(expected, captureExpectedRow{TraceID: a.TraceID, Model: ledgerModel, PairID: "pair-a", Arm: string(mode), Status: "captured", Attempts: 1, ArtifactHash: a.ArtifactHash})
 		}
 	}
 	dir := t.TempDir()
@@ -883,6 +930,46 @@ func TestAssemblyReportV2KeepsSameNativeModelDistinctByProvider(t *testing.T) {
 	}
 	if len(report.LegacyMixedModels) != 2 || report.LegacyMixedModels[0].CandidateModel != "m" || report.LegacyMixedModels[1].CandidateModel != "openai-compat/m" {
 		t.Fatalf("legacy_mixed_models = %+v; want distinct Ollama and openai-compat sections", report.LegacyMixedModels)
+	}
+}
+
+func TestAssemblyReportV2AllFailedEmptyArtifactsSucceeds(t *testing.T) {
+	dir := t.TempDir()
+	artifactsPath := filepath.Join(dir, "artifacts.jsonl")
+	labelsPath := filepath.Join(dir, "labels.jsonl")
+	if err := writeJSONLRows(artifactsPath, "artifacts", []Artifact{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeLabelsJSONL(labelsPath, nil); err != nil {
+		t.Fatal(err)
+	}
+	expected := []captureExpectedRow{
+		{TraceID: "failed-legacy", Model: "ollama / m", PairID: "pair-failed", Arm: "legacy", Status: "failed", Attempts: 2, Error: "<error: timeout>"},
+		{TraceID: "failed-mixed", Model: "ollama/m", PairID: "pair-failed", Arm: "mixed", Status: "failed", Attempts: 2, Error: "<error: timeout>"},
+	}
+	manifestPath := writeLedgerManifest(t, dir, "manifest.json", captureManifest{
+		SchemaVersion: captureManifestSchemaVersionV2,
+		ExpectedCount: len(expected), Expected: expected,
+	})
+	raw, err := runAssemblyReport(assemblyReportOptions{
+		LabelsPath: labelsPath, ArtifactsPath: artifactsPath, CaptureManifestPath: manifestPath,
+	})
+	if err != nil {
+		t.Fatalf("runAssemblyReport: %v", err)
+	}
+	var report AssemblyReport
+	if err := json.Unmarshal([]byte(raw), &report); err != nil {
+		t.Fatal(err)
+	}
+	if len(report.LegacyMixedModels) != 1 {
+		t.Fatalf("legacy_mixed_models = %+v; want one synthesized model section", report.LegacyMixedModels)
+	}
+	reasons := map[string]bool{}
+	for _, exclusion := range report.LegacyMixedModels[0].Exclusions {
+		reasons[exclusion.Reason] = true
+	}
+	if !reasons["missing-legacy-arm"] || !reasons["missing-mixed-arm"] {
+		t.Fatalf("exclusions = %+v; want both registered missing-arm reasons", report.LegacyMixedModels[0].Exclusions)
 	}
 }
 

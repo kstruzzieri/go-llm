@@ -276,8 +276,8 @@ func TestManualScorer_MatchesProviderPrefixedAndCasedModel(t *testing.T) {
 
 func TestManualScorer_KeepsExplicitProviderDistinct(t *testing.T) {
 	s, err := newManualScorer([]Label{
-		{TraceID: "t1", CandidateModel: "ollama/m", ExpectedAnswerQuality: 1.0},
-		{TraceID: "t1", CandidateModel: "openai-compat/m", ExpectedAnswerQuality: 0.5},
+		{TraceID: "t1", CandidateModel: "ollama / m", ExpectedAnswerQuality: 1.0},
+		{TraceID: "t1", CandidateModel: "openai-compat / m", ExpectedAnswerQuality: 0.5},
 	})
 	if err != nil {
 		t.Fatalf("newManualScorer: %v", err)

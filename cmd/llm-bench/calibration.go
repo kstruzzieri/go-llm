@@ -612,6 +612,9 @@ func runCalibrateCapture(ctx context.Context, opts calibrateCaptureOptions) erro
 	}
 	modelDigests := make(map[string]string, len(opts.ModelDigests))
 	for _, target := range opts.Targets {
+		if canonicalModelTargetKey(target)[0] != defaultBenchProvider {
+			continue
+		}
 		selector := normalizeModelSelector(target.Display)
 		raw := opts.ModelDigests[selector]
 		if raw == "" {

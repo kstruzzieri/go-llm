@@ -946,13 +946,22 @@ func modelSelectorWithoutBenchProvider(s string) string {
 	return s
 }
 
-func modelSelectorWithoutDefaultBenchProvider(s string) string {
-	s = strings.TrimSpace(s)
-	prefix := defaultBenchProvider + "/"
-	if strings.HasPrefix(strings.ToLower(s), prefix) {
-		return strings.TrimSpace(s[len(prefix):])
+func canonicalCandidateModelKey(s string) string {
+	selector := strings.TrimSpace(s)
+	provider, model, found := strings.Cut(selector, "/")
+	if !found {
+		return normalizeModelSelector(selector)
 	}
-	return s
+	provider = normalizeModelSelector(provider)
+	model = normalizeModelSelector(model)
+	switch provider {
+	case defaultBenchProvider:
+		return model
+	case openAICompatTransport:
+		return provider + "/" + model
+	default:
+		return normalizeModelSelector(selector)
+	}
 }
 
 func joinScoreNotes(parts ...string) string {
