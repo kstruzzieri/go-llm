@@ -776,7 +776,7 @@ func computeAssemblyMixedSection(keys []assemblyPairKey, pairs map[assemblyPairK
 		case assemblyMixedClusterDiversityBelowFloor(clusters):
 			r.Decision = "insufficient-cluster-diversity"
 		default:
-		r.Decision = assemblyMixedDecision(ciLo, ciHi)
+			r.Decision = assemblyMixedDecision(ciLo, ciHi)
 		}
 		out = append(out, r)
 	}
