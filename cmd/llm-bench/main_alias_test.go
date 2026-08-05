@@ -35,6 +35,69 @@ func TestPathsAliasResolvesNonexistentLeavesThroughSymlinkedParents(t *testing.T
 	}
 }
 
+func TestPathsAliasResolvesDotDotAfterSymlink(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		filename string
+		existing bool
+	}{
+		{name: "existing leaf", filename: "input.json", existing: true},
+		{name: "future leaf", filename: "future.json"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, target, disguised := makeSymlinkDotDotPath(t, tc.filename)
+			if tc.existing {
+				if err := os.WriteFile(target, []byte("input\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			got, err := pathsAlias(target, disguised)
+			if err != nil {
+				t.Fatalf("pathsAlias: %v", err)
+			}
+			if !got {
+				t.Fatal("pathsAlias = false, want true after resolving the symlink before dot-dot")
+			}
+		})
+	}
+}
+
+func makeSymlinkDotDotPath(t *testing.T, filename string) (dir, target, disguised string) {
+	t.Helper()
+	dir = t.TempDir()
+	realParent := filepath.Join(dir, "real")
+	nested := filepath.Join(realParent, "nested")
+	if err := os.MkdirAll(nested, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(dir, "link")
+	if err := os.Symlink(nested, link); err != nil {
+		t.Skipf("symlink unsupported here: %v", err)
+	}
+	target = filepath.Join(realParent, filename)
+	disguised = link + string(os.PathSeparator) + ".." + string(os.PathSeparator) + filename
+	return dir, target, disguised
+}
+
+func TestPathsAliasAllowsOrdinaryDotDotForFutureLeaf(t *testing.T) {
+	dir := t.TempDir()
+	child := filepath.Join(dir, "child")
+	if err := os.Mkdir(child, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(dir, "future.json")
+	viaParent := child + string(os.PathSeparator) + ".." + string(os.PathSeparator) + filepath.Base(target)
+
+	got, err := pathsAlias(target, viaParent)
+	if err != nil {
+		t.Fatalf("pathsAlias: %v", err)
+	}
+	if !got {
+		t.Fatal("pathsAlias = false, want true for ordinary parent traversal")
+	}
+}
+
 func TestPathsAliasRejectsDanglingOutputSymlink(t *testing.T) {
 	dir := t.TempDir()
 	src := filepath.Join(dir, "source.json")

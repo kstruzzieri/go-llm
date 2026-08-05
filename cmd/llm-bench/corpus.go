@@ -84,22 +84,24 @@ func inspectFilePublicationTarget(path string) (publicationTarget, error) {
 	if strings.TrimSpace(path) == "" {
 		return publicationTarget{}, errors.New("empty path")
 	}
-	abs, err := filepath.Abs(filepath.Clean(path))
+	trimmed := trimTrailingPathSeparators(path)
+	parent, leaf := filepath.Split(trimmed)
+	parent = trimTrailingPathSeparators(parent)
+	if parent == "" {
+		parent = "."
+	}
+	canonicalParent, _, err := canonicalFuturePath(parent)
 	if err != nil {
 		return publicationTarget{}, err
 	}
-	info, err := os.Lstat(abs)
+	info, err := os.Lstat(trimmed)
 	if err != nil && !os.IsNotExist(err) {
 		return publicationTarget{}, err
 	}
 	if os.IsNotExist(err) {
 		info = nil
 	}
-	parent, _, err := canonicalFuturePath(filepath.Dir(abs))
-	if err != nil {
-		return publicationTarget{}, err
-	}
-	return publicationTarget{path: path, canonical: filepath.Join(parent, filepath.Base(abs)), info: info}, nil
+	return publicationTarget{path: path, canonical: filepath.Join(canonicalParent, leaf), info: info}, nil
 }
 
 func publicationTargetsAlias(left, right publicationTarget) bool {
@@ -168,8 +170,9 @@ func publishFileSetWithOps(replacements []filePublication, removals []string, op
 		}
 		return errors.Join(errs...)
 	}
-	for _, replacement := range replacements {
-		stage, err := os.CreateTemp(filepath.Dir(replacement.target), "."+filepath.Base(replacement.target)+".publish-*")
+	for i, replacement := range replacements {
+		operationTarget := targets[i].canonical
+		stage, err := os.CreateTemp(filepath.Dir(operationTarget), "."+filepath.Base(operationTarget)+".publish-*")
 		if err != nil {
 			return filePublicationOutcome{}, errors.Join(fmt.Errorf("publish file set: stage %q: %w", replacement.target, err), cleanStages())
 		}
@@ -216,7 +219,8 @@ func publishFileSetWithOps(replacements []filePublication, removals []string, op
 		if target.info == nil {
 			continue
 		}
-		placeholder, err := os.CreateTemp(filepath.Dir(target.path), "."+filepath.Base(target.path)+".backup-*")
+		operationTarget := target.canonical
+		placeholder, err := os.CreateTemp(filepath.Dir(operationTarget), "."+filepath.Base(operationTarget)+".backup-*")
 		if err != nil {
 			return filePublicationOutcome{}, rollback(fmt.Errorf("publish file set: reserve backup for %q: %w", target.path, err))
 		}

@@ -286,6 +286,70 @@ func TestPublishFileSetPublishesInOrderWithRequestedModes(t *testing.T) {
 	assertNoPublicationDebris(t, dir)
 }
 
+func TestPublishFileSetPreflightResolvesDotDotAfterSymlinkWithoutMutation(t *testing.T) {
+	dir, target, disguised := makeSymlinkDotDotPath(t, "evidence.json")
+	if err := os.WriteFile(target, []byte("original\n"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	prior, err := os.Stat(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = publishFileSet([]filePublication{
+		{target: target, data: []byte("first\n"), mode: 0o600},
+		{target: disguised, data: []byte("second\n"), mode: 0o600},
+	}, nil)
+	if err == nil || !strings.Contains(err.Error(), "aliases target") {
+		t.Fatalf("publishFileSet error = %v; want preflight alias refusal", err)
+	}
+	assertFileState(t, target, "original\n", 0o640)
+	after, err := os.Stat(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !os.SameFile(prior, after) {
+		t.Fatal("preflight alias refusal replaced the original inode")
+	}
+	assertNoPublicationDebris(t, dir)
+}
+
+func TestPublishFileSetRollbackRestoresTargetReachedThroughSymlinkDotDot(t *testing.T) {
+	dir, target, disguised := makeSymlinkDotDotPath(t, "evidence.json")
+	if err := os.WriteFile(target, []byte("original\n"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	prior, err := os.Stat(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	later := filepath.Join(dir, "later.json")
+
+	_, err = publishFileSetWithRename([]filePublication{
+		{target: disguised, data: []byte("replacement\n"), mode: 0o600},
+		{target: later, data: []byte("later\n"), mode: 0o600},
+	}, nil, func(oldPath, newPath string) error {
+		if newPath == later && strings.Contains(filepath.Base(oldPath), ".publish-") {
+			return errors.New("injected later publish failure")
+		}
+		return os.Rename(oldPath, newPath)
+	})
+	if err == nil || !strings.Contains(err.Error(), "injected later publish failure") {
+		t.Fatalf("publishFileSetWithRename error = %v; want injected failure", err)
+	}
+	assertFileState(t, target, "original\n", 0o640)
+	after, err := os.Stat(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !os.SameFile(prior, after) {
+		t.Fatal("rollback did not restore the original inode")
+	}
+	if _, err := os.Stat(later); !os.IsNotExist(err) {
+		t.Fatalf("later target survived failed publication: %v", err)
+	}
+	assertNoPublicationDebris(t, dir)
+}
+
 func TestPublishFileSetPreflightRejectsUnsafeOrAliasedTargetsWithoutMutation(t *testing.T) {
 	for _, tc := range []struct {
 		name  string

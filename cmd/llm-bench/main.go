@@ -1019,48 +1019,55 @@ func pathsAlias(a, b string) (bool, error) {
 }
 
 func canonicalFuturePath(path string) (string, os.FileInfo, error) {
-	abs, err := filepath.Abs(filepath.Clean(path))
-	if err != nil {
-		return "", nil, err
+	if path == "" {
+		path = "."
 	}
-	if info, err := os.Lstat(abs); err == nil && info.Mode()&os.ModeSymlink != 0 {
-		resolved, err := filepath.EvalSymlinks(abs)
+	path = trimTrailingPathSeparators(path)
+	if _, err := os.Lstat(path); err == nil {
+		resolved, err := filepath.EvalSymlinks(path)
 		if err != nil {
 			return "", nil, fmt.Errorf("unresolved symlink %q: %w", path, err)
 		}
-		abs = resolved
-	}
-
-	leafInfo, err := os.Stat(abs)
-	if err != nil && !os.IsNotExist(err) {
-		return "", nil, err
-	}
-	if err != nil {
-		leafInfo = nil
-	}
-
-	ancestor := abs
-	var suffix []string
-	for {
-		if _, err := os.Lstat(ancestor); err == nil {
-			resolved, err := filepath.EvalSymlinks(ancestor)
-			if err != nil {
-				return "", nil, fmt.Errorf("unresolved symlink %q: %w", path, err)
-			}
-			for i := len(suffix) - 1; i >= 0; i-- {
-				resolved = filepath.Join(resolved, suffix[i])
-			}
-			return resolved, leafInfo, nil
-		} else if !os.IsNotExist(err) {
+		abs, err := filepath.Abs(resolved)
+		if err != nil {
 			return "", nil, err
 		}
-		parent := filepath.Dir(ancestor)
-		if parent == ancestor {
-			return "", nil, fmt.Errorf("no existing ancestor for %q", path)
+		info, err := os.Stat(path)
+		if err != nil {
+			return "", nil, err
 		}
-		suffix = append(suffix, filepath.Base(ancestor))
-		ancestor = parent
+		return abs, info, nil
+	} else if !os.IsNotExist(err) {
+		return "", nil, err
 	}
+
+	parent, leaf := filepath.Split(path)
+	parent = trimTrailingPathSeparators(parent)
+	if leaf == ".." {
+		return "", nil, fmt.Errorf("cannot resolve %q through a missing path component", path)
+	}
+	if parent == "" {
+		parent = "."
+	}
+	if parent == path {
+		return "", nil, fmt.Errorf("no existing ancestor for %q", path)
+	}
+	canonicalParent, _, err := canonicalFuturePath(parent)
+	if err != nil {
+		return "", nil, err
+	}
+	return filepath.Join(canonicalParent, leaf), nil, nil
+}
+
+func trimTrailingPathSeparators(path string) string {
+	rootEnd := len(filepath.VolumeName(path))
+	if rootEnd < len(path) && os.IsPathSeparator(path[rootEnd]) {
+		rootEnd++
+	}
+	for len(path) > rootEnd && os.IsPathSeparator(path[len(path)-1]) {
+		path = path[:len(path)-1]
+	}
+	return path
 }
 
 // refuseOutputAlias fatals when an output path aliases an input file (or a
