@@ -51,6 +51,49 @@ func TestCanonicalStat(t *testing.T) {
 	}
 }
 
+// TestAssemblyReportDecisionUsesUnroundedTokenReduction proves display
+// rounding cannot promote a sub-threshold raw median into a verdict.
+func TestAssemblyReportDecisionUsesUnroundedTokenReduction(t *testing.T) {
+	const flatTokens = 10_000_000_000_000
+	const progressiveTokens = 8_000_000_000_001
+
+	var arts []Artifact
+	var labels []Label
+	for i := 0; i < assemblyMinimumPairsPerModel; i++ {
+		pair := fmt.Sprintf("rounding-%03d", i)
+		flat := assemblyArtifact(pair, AssemblyFlat, "m", flatTokens, []string{"c"})
+		progressive := assemblyArtifact(pair, AssemblyProgressive, "m", progressiveTokens, []string{"c"})
+		arts = append(arts, flat, progressive)
+		labels = append(labels, labelFor(flat, 0.5), labelFor(progressive, 0.5))
+	}
+
+	rep, err := computeAssemblyReport(arts, labels, 1, 100, nil, assemblyReportExtras{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	model := rep.Models[0]
+	if model.MedianTokenReduction != 0.2 {
+		t.Fatalf("displayed median token reduction = %v, want 0.2", model.MedianTokenReduction)
+	}
+	if model.Decision != "inconclusive" {
+		t.Fatalf("decision = %q, want inconclusive for raw reduction below 0.2", model.Decision)
+	}
+}
+
+// TestAssemblyMixedDecisionUsesUnroundedCI proves the mixed report likewise
+// keeps raw CI bounds for its decision while serializing canonical values.
+func TestAssemblyMixedDecisionUsesUnroundedCI(t *testing.T) {
+	arts, labels := appendMixedPairs(nil, nil, "m", 0, assemblyMixedMinimumPairs, 0.5, 0.5000000000004, nil)
+	rep := mustMixedReport(t, arts, labels)
+	model := rep.LegacyMixedModels[0]
+	if model.DeltaCILow != 0 {
+		t.Fatalf("displayed mixed CI low = %v, want 0", model.DeltaCILow)
+	}
+	if model.Decision != "quality-improved" {
+		t.Fatalf("mixed decision = %q, want quality-improved for raw positive CI", model.Decision)
+	}
+}
+
 // TestAssemblyReportEmitsCanonicalFloats builds a report whose raw derived
 // statistics are non-terminating decimals (means of 3, one-third token
 // reduction) and asserts every emitted float is its own canonical form —

@@ -713,10 +713,10 @@ func assemblyDecision(ciLo, ciHi, medianReduction float64) string {
 // shifts the bootstrap accumulator's last ULP relative to amd64, which broke
 // the committed-report byte-identity gate (external PR review round 2 P1).
 // 1e-12 is far below label precision (a 0/0.5/1 rubric) and every reporting
-// threshold. Applied to EVERY derived float the report emits, and applied
-// BEFORE the decision rules consume CI bounds, so decision and display can
-// never disagree across architectures. Collapses -0 to 0 so rounding a tiny
-// negative never emits "-0".
+// threshold. Applied to EVERY derived float the report emits. Decision rules
+// deliberately consume their raw statistics; rounding a displayed value must
+// never alter a registered threshold comparison. Collapses -0 to 0 so
+// rounding a tiny negative never emits "-0".
 func canonicalStat(x float64) float64 {
 	c := math.Round(x*1e12) / 1e12
 	if c == 0 {
@@ -879,6 +879,7 @@ func computeAssemblyReport(arts []Artifact, labels []Label, seed int64, bootstra
 	}
 	type modelAccumulator struct {
 		report     AssemblyModelReport
+		deltas     []float64
 		reductions []float64
 	}
 	models := map[string]*modelAccumulator{}
@@ -913,7 +914,9 @@ func computeAssemblyReport(arts []Artifact, labels []Label, seed int64, bootstra
 		}
 		acc.report.Pairs++
 		totalPairs++
-		acc.report.Deltas = append(acc.report.Deltas, canonicalStat(qp-qf))
+		delta := qp - qf
+		acc.deltas = append(acc.deltas, delta)
+		acc.report.Deltas = append(acc.report.Deltas, canonicalStat(delta))
 		// validateTrace enforced tokens > 0 for every paired artifact.
 		ft := float64(s.base.Trace.AssemblyEval.EstimatedPromptTokens)
 		pt := float64(s.treat.Trace.AssemblyEval.EstimatedPromptTokens)
@@ -929,27 +932,27 @@ func computeAssemblyReport(arts []Artifact, labels []Label, seed int64, bootstra
 		acc := models[model]
 		if acc.report.Pairs > 0 {
 			var sum float64
-			for _, delta := range acc.report.Deltas {
+			for _, delta := range acc.deltas {
 				sum += delta
 			}
 			acc.report.MeanDelta = canonicalStat(sum / float64(acc.report.Pairs))
-			lo, hi := bootstrapDeltaCI(acc.report.Deltas, seed, bootstrapN)
+			lo, hi := bootstrapDeltaCI(acc.deltas, seed, bootstrapN)
 			acc.report.DeltaCILow, acc.report.DeltaCIHigh = canonicalStat(lo), canonicalStat(hi)
 			sort.Float64s(acc.reductions)
+			var medianReduction float64
 			// len(reductions) == Pairs > 0 inside this branch.
 			if n := len(acc.reductions); n%2 == 1 {
-				acc.report.MedianTokenReduction = canonicalStat(acc.reductions[n/2])
+				medianReduction = acc.reductions[n/2]
 			} else {
-				acc.report.MedianTokenReduction =
-					canonicalStat((acc.reductions[n/2-1] + acc.reductions[n/2]) / 2)
+				medianReduction = (acc.reductions[n/2-1] + acc.reductions[n/2]) / 2
+			}
+			acc.report.MedianTokenReduction = canonicalStat(medianReduction)
+			if acc.report.Pairs >= assemblyMinimumPairsPerModel {
+				acc.report.Decision = assemblyDecision(lo, hi, medianReduction)
 			}
 		}
 		if acc.report.Pairs < assemblyMinimumPairsPerModel {
 			acc.report.Decision = "insufficient-corpus"
-		} else {
-			acc.report.Decision = assemblyDecision(
-				acc.report.DeltaCILow, acc.report.DeltaCIHigh,
-				acc.report.MedianTokenReduction)
 		}
 		rep.Models = append(rep.Models, acc.report)
 	}

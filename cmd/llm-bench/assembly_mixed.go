@@ -677,12 +677,11 @@ func computeAssemblyMixedSection(keys []assemblyPairKey, pairs map[assemblyPairK
 			continue
 		}
 		// Arms verified identical above (stratum/family invariants), so
-		// reading them from the legacy arm is exact.
+		// reading them from the legacy arm is exact. Keep this raw: the
+		// decision must not use a rounded presentation value.
 		a.complete = append(a.complete, assemblyMixedPair{
 			pairID: k.pair,
-			// Canonical at the source: every downstream statistic (pooled and
-			// per-stratum means, bootstrap CI, LOGO band) derives from delta.
-			delta: canonicalStat(qM - qL), stratum: leg.Stratum, family: leg.ScenarioFamily,
+			delta:  qM - qL, stratum: leg.Stratum, family: leg.ScenarioFamily,
 			twin:   leg.TwinGroup,
 			legacy: leg, mixed: mix,
 		})
@@ -752,18 +751,20 @@ func computeAssemblyMixedSection(keys []assemblyPairKey, pairs map[assemblyPairK
 		r := a.report
 		r.Pairs = len(a.complete)
 		var clusters [][][]float64
+		var ciLo, ciHi float64
 		if r.Pairs > 0 {
 			var sum float64
 			for _, p := range a.complete {
-				r.Deltas = append(r.Deltas, p.delta)
+				r.Deltas = append(r.Deltas, canonicalStat(p.delta))
 				sum += p.delta
 			}
 			r.MeanDelta = canonicalStat(sum / float64(r.Pairs))
 			r.Strata, clusters = assemblyMixedStrata(a.complete)
-			r.DeltaCILow, r.DeltaCIHigh = assemblyStratifiedClusterCI(clusters, seed, bootstrapN)
+			ciLo, ciHi = assemblyStratifiedClusterCI(clusters, seed, bootstrapN)
+			r.DeltaCILow, r.DeltaCIHigh = canonicalStat(ciLo), canonicalStat(ciHi)
 			r.ArmPressure = assemblyMixedArmPressure(a.complete)
 			r.ClusterDiagnostics = assemblyMixedClusterDiagnostics(
-				a.complete, r.Strata, clusters, r.DeltaCILow, seed, bootstrapN)
+				a.complete, r.Strata, clusters, ciLo, seed, bootstrapN)
 		}
 		switch {
 		case a.unlabeled > 0:
@@ -775,7 +776,7 @@ func computeAssemblyMixedSection(keys []assemblyPairKey, pairs map[assemblyPairK
 		case assemblyMixedClusterDiversityBelowFloor(clusters):
 			r.Decision = "insufficient-cluster-diversity"
 		default:
-			r.Decision = assemblyMixedDecision(r.DeltaCILow, r.DeltaCIHigh)
+		r.Decision = assemblyMixedDecision(ciLo, ciHi)
 		}
 		out = append(out, r)
 	}
@@ -858,7 +859,7 @@ func assemblyMixedClusterDiagnostics(complete []assemblyMixedPair, strata []Asse
 		lows = append(lows, lo)
 	}
 	if len(lows) == 0 {
-		diag.LeaveOneOut = AssemblyLeaveOneGroupOut{MinLow: pooledLow, MaxLow: pooledLow}
+		diag.LeaveOneOut = AssemblyLeaveOneGroupOut{MinLow: canonicalStat(pooledLow), MaxLow: canonicalStat(pooledLow)}
 		return diag
 	}
 	band := AssemblyLeaveOneGroupOut{MinLow: lows[0], MaxLow: lows[0]}
@@ -866,7 +867,10 @@ func assemblyMixedClusterDiagnostics(complete []assemblyMixedPair, strata []Asse
 		band.MinLow = math.Min(band.MinLow, lo)
 		band.MaxLow = math.Max(band.MaxLow, lo)
 	}
-	diag.LeaveOneOut = band
+	diag.LeaveOneOut = AssemblyLeaveOneGroupOut{
+		MinLow: canonicalStat(band.MinLow),
+		MaxLow: canonicalStat(band.MaxLow),
+	}
 	return diag
 }
 
@@ -967,16 +971,12 @@ func assemblyStratifiedClusterCI(strata [][][]float64, seed int64, n int) (lo, h
 					count++
 				}
 			}
-			rep += weights[si] * (sum / float64(count))
+			rep += float64(weights[si] * (sum / float64(count)))
 		}
 		means[i] = rep
 	}
 	ps := percentiles(means, 0.025, 0.975)
-	// Canonical at the return so the pooled CI, the LOGO band, and the
-	// decision rule all consume the same architecture-stable values: the
-	// weights[si]*(sum/count) accumulator above is exactly the multiply-add
-	// arm64 contracts into an FMA, which shifted the last ULP vs amd64.
-	return canonicalStat(ps[0]), canonicalStat(ps[1])
+	return ps[0], ps[1]
 }
 
 // assemblyMixedArmPressure computes per-arm aggregate pressure descriptives

@@ -58,7 +58,8 @@ intra-rater duplicate blocks agreed (mean |delta| 0.000); the 12-trace
 topline ceiling scored mean 1.0 (the model answers when handed the facts —
 assembly was the bottleneck); the registered forced-choice secondary agrees
 (34 mixed / 14 legacy / 22 ties, cluster sign-flip permutation p = 0.0049);
-leave-one-family-out CI lower bounds stay in [+0.154, +0.206]. Zero blocks
+leave-one-independence-group-out CI lower bounds stay in [+0.154, +0.206]
+(scenario families merged by `twin_group`). Zero blocks
 were flagged for adjudication, so no adjudication log exists for this run.
 No arm guesses were recorded in the forced-choice pass (arm_guess is
 optional and the report shows n_guessed = 0), so only STRUCTURAL blinding
@@ -98,10 +99,9 @@ evidence.
 The committed identity evidence for this run is: the selector
 (`openai-compat/qwen3-coder-next:latest`), the endpoint
 (`http://127.0.0.1:8090`, llama-swap), and the per-request transport tag in
-every artifact row. The sealed manifest's historical `/props` probe returned
-`status 404` (llama-swap does not proxy it) and the selector digest is empty,
-so the identity claim is NARROWED to "the model the configured endpoint served
-under this selector." New captures do not request or persist `/props`. Post-hoc addendum, an operator-reported observation (a post-hoc hash
+every artifact row. The selector digest is empty, so the identity claim is
+NARROWED to "the model the configured endpoint served under this selector."
+Post-hoc addendum, an operator-reported observation (a post-hoc hash
 cannot establish that the file is the one served): the GGUF file resident
 at the serving path hashes to
 sha256:4bb93f0a0221ef4ff963ca9094df629c8dfdfabc3b4fdd85c1a2e4c0624fce36
@@ -210,7 +210,7 @@ loud and itemized, never silent:
   therefore slightly narrower than the truth at the registered floors: a
   lower bound that clears a threshold by less than ~10% of the CI
   half-width is a borderline call and should be read as such. The report's
-  descriptive leave-one-group-out band
+  descriptive leave-one-independence-group-out band
   (`cluster_diagnostics.leave_one_out`) is the sensitivity companion; it
   never feeds the decision.
 
