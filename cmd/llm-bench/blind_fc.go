@@ -111,6 +111,10 @@ func fcSidemapKey(pairID, modelKey string) string {
 	return pairID + "|" + modelKey
 }
 
+func quotePOSIXShellArg(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", "'\"'\"'") + "'"
+}
+
 // entry resolves one pair's sealed assignment; a pair absent from the map is
 // a loud error, never a fallback.
 func (m fcSidemapFile) entry(pairID, modelKey string) (fcSidemapEntry, error) {
@@ -412,8 +416,8 @@ func renderForcedChoiceWorksheet(arts []Artifact, sidemap fcSidemapFile) (string
 	}
 	worksheetModel := pairs[0].model
 	for _, p := range pairs {
-		// The PAIR header and single-model ingest command are space-delimited:
-		// validate every interpolated field before constructing worksheet text.
+		// The PAIR header is space-delimited, so validate its fields before
+		// constructing worksheet text. The copied shell command is quoted below.
 		for _, part := range []string{p.pairID, p.model} {
 			if part == "" || strings.ContainsAny(part, " \t\r\n") {
 				return "", fmt.Errorf("forced-choice: pair %q model %q: header field %q is empty or contains whitespace (the PAIR header is space-delimited)", p.pairID, p.model, part)
@@ -438,7 +442,7 @@ func renderForcedChoiceWorksheet(arts []Artifact, sidemap fcSidemapFile) (string
 	fmt.Fprintln(&b, "# It never affects any result; it only measures whether the blinding held.")
 	fmt.Fprint(&b, "# Then run: llm-bench -fc-ingest -worksheet <this file> -artifacts <artifacts.jsonl>")
 	if worksheetModel != "" {
-		fmt.Fprintf(&b, " -model %s", worksheetModel)
+		fmt.Fprintf(&b, " -model %s", quotePOSIXShellArg(worksheetModel))
 	}
 	fmt.Fprintln(&b, " -fc-sidemap <sidemap.json> -fc-sidemap-digest <committed sha256> -fc-require-complete -fc-out <preferences.jsonl>")
 	fmt.Fprintln(&b)
@@ -464,16 +468,16 @@ func renderForcedChoiceWorksheet(arts []Artifact, sidemap fcSidemapFile) (string
 		}
 		fmt.Fprintf(&b, "%s%s %s ===\n", fcPairHeaderPrefix, p.pairID, p.model)
 		fmt.Fprintln(&b, "[question]")
-		fmt.Fprintln(&b, escapeWorksheetText(question))
+		fmt.Fprintln(&b, escapeWorksheetText(redactPaths(question)))
 		fmt.Fprintln(&b)
 		fmt.Fprintln(&b, "[rubric]")
-		fmt.Fprintln(&b, escapeWorksheetText(strings.TrimSpace(p.legacy.Trace.Golden.FinalAnswerCriteria)))
+		fmt.Fprintln(&b, escapeWorksheetText(redactPaths(strings.TrimSpace(p.legacy.Trace.Golden.FinalAnswerCriteria))))
 		fmt.Fprintln(&b)
 		fmt.Fprintln(&b, "[answer A]")
-		fmt.Fprintln(&b, escapeWorksheetText(strings.TrimSpace(sideA.ActualFinalAnswer)))
+		fmt.Fprintln(&b, escapeWorksheetText(redactPaths(strings.TrimSpace(sideA.ActualFinalAnswer))))
 		fmt.Fprintln(&b)
 		fmt.Fprintln(&b, "[answer B]")
-		fmt.Fprintln(&b, escapeWorksheetText(strings.TrimSpace(sideB.ActualFinalAnswer)))
+		fmt.Fprintln(&b, escapeWorksheetText(redactPaths(strings.TrimSpace(sideB.ActualFinalAnswer))))
 		fmt.Fprintln(&b)
 		fmt.Fprintln(&b, fcFillMarker)
 		fmt.Fprintln(&b, "prefer: ")
@@ -481,7 +485,7 @@ func renderForcedChoiceWorksheet(arts []Artifact, sidemap fcSidemapFile) (string
 		fmt.Fprintln(&b, blindEndMarker)
 		fmt.Fprintln(&b)
 	}
-	return redactPaths(b.String()), nil
+	return b.String(), nil
 }
 
 // ingestForcedChoiceWorksheet parses a filled forced-choice worksheet into

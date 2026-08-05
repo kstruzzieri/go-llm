@@ -369,7 +369,7 @@ func TestForcedChoiceWorksheetInstructions(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	wantSingle := "# Then run: llm-bench -fc-ingest -worksheet <this file> -artifacts <artifacts.jsonl> -model c -fc-sidemap <sidemap.json> -fc-sidemap-digest <committed sha256> -fc-require-complete -fc-out <preferences.jsonl>"
+	wantSingle := "# Then run: llm-bench -fc-ingest -worksheet <this file> -artifacts <artifacts.jsonl> -model 'c' -fc-sidemap <sidemap.json> -fc-sidemap-digest <committed sha256> -fc-require-complete -fc-out <preferences.jsonl>"
 	if !strings.Contains(single, wantSingle) {
 		t.Fatalf("single-model worksheet missing exact scoped ingest instruction:\nwant: %s\n%s", wantSingle, single)
 	}
@@ -396,6 +396,64 @@ func TestForcedChoiceWorksheetInstructions(t *testing.T) {
 	wantMulti := "# Then run: llm-bench -fc-ingest -worksheet <this file> -artifacts <artifacts.jsonl> -fc-sidemap <sidemap.json> -fc-sidemap-digest <committed sha256> -fc-require-complete -fc-out <preferences.jsonl>"
 	if !strings.Contains(multi, wantMulti) || strings.Contains(multi, " -model ") {
 		t.Fatalf("multi-model worksheet instruction must require all models without -model:\nwant: %s\n%s", wantMulti, multi)
+	}
+}
+
+func TestForcedChoiceWorksheetQuotesModelForPOSIXShell(t *testing.T) {
+	cases := []struct {
+		name, model, marker, wantWord string
+	}{
+		{"semicolon and IFS", "c;touch${IFS}pwned-semicolon", "pwned-semicolon", "'c;touch${ifs}pwned-semicolon'"},
+		{"command substitution", "c$(touch${IFS}pwned-subst)", "pwned-subst", "'c$(touch${ifs}pwned-subst)'"},
+		{"backticks", "c`touch${IFS}pwned-backtick`", "pwned-backtick", "'c`touch${ifs}pwned-backtick`'"},
+		{"embedded single quote", "c'quoted", "", "'c'\"'\"'quoted'"},
+		{"path-like selector", "/tmp/model", "", "'/tmp/model'"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			arts := fcPairArtifacts()[:2]
+			for i := range arts {
+				arts[i].CandidateModel = "ollama/" + tc.model
+			}
+			worksheet, err := renderForcedChoiceWorksheet(arts, parityFCSidemap(arts, modelKey(arts[0].CandidateModel)))
+			if err != nil {
+				t.Fatal(err)
+			}
+			wantModel := modelKey(arts[0].CandidateModel)
+			if wantHeader := "=== PAIR pair-alpha " + wantModel + " ==="; !strings.Contains(worksheet, wantHeader) {
+				t.Errorf("worksheet missing exact model header %q:\n%s", wantHeader, worksheet)
+			}
+			const prefix = " -model "
+			start := strings.Index(worksheet, prefix)
+			if start < 0 {
+				t.Fatalf("worksheet missing -model instruction:\n%s", worksheet)
+			}
+			modelWord := worksheet[start+len(prefix):]
+			if end := strings.Index(modelWord, " -fc-sidemap"); end >= 0 {
+				modelWord = modelWord[:end]
+			} else {
+				t.Fatalf("worksheet model instruction missing -fc-sidemap suffix:\n%s", worksheet)
+			}
+			if modelWord != tc.wantWord {
+				t.Errorf("rendered model shell word = %q; want %q", modelWord, tc.wantWord)
+			}
+
+			dir := t.TempDir()
+			cmd := exec.Command("/bin/sh", "-c", "set -- "+modelWord+`; printf '%s' "$1"`)
+			cmd.Dir = dir
+			cmd.Env = append(os.Environ(), "ifs= ")
+			out, err := cmd.CombinedOutput()
+			if err != nil {
+				t.Errorf("shell parse failed: %v\n%s", err, out)
+			} else if string(out) != wantModel {
+				t.Errorf("shell captured model = %q; want exact %q", out, wantModel)
+			}
+			if tc.marker != "" {
+				if _, err := os.Stat(filepath.Join(dir, tc.marker)); !os.IsNotExist(err) {
+					t.Errorf("rendered model executed marker %q: %v", tc.marker, err)
+				}
+			}
+		})
 	}
 }
 
