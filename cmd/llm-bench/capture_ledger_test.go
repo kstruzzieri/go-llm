@@ -53,6 +53,26 @@ func (f *failingRunner) RunAll(_ context.Context, targets []ModelTarget, traces 
 	return results, nil
 }
 
+type captureReturnErrorRunner struct {
+	err        error
+	retryError bool
+	calls      int
+}
+
+func (r *captureReturnErrorRunner) RunAll(_ context.Context, targets []ModelTarget, traces []Trace) ([]Result, error) {
+	r.calls++
+	if r.retryError && r.calls == 1 {
+		results := make([]Result, 0, len(targets)*len(traces))
+		for _, target := range targets {
+			for _, trace := range traces {
+				results = append(results, Result{Model: target.Display, TraceID: trace.ID, Err: fmt.Errorf("context deadline exceeded")})
+			}
+		}
+		return results, nil
+	}
+	return nil, r.err
+}
+
 func TestCaptureManifestV2ExpectedLedger(t *testing.T) {
 	traces := []Trace{
 		pairedCaptureTrace("half-legacy", "pair-half", AssemblyLegacy),
@@ -429,6 +449,67 @@ func TestCaptureLedgerErrorsAreRedactedOnStderr(t *testing.T) {
 		if !strings.HasPrefix(row.Error, "<error: ") {
 			t.Errorf("failed row %s error = %q; want a redactErrorMessage stub", row.TraceID, row.Error)
 		}
+	}
+}
+
+func TestCaptureRunnerReturnErrorsAreRedacted(t *testing.T) {
+	const secret = "sk-FAKE-RUNNER-SECRET-0000"
+	for _, tc := range []struct {
+		name       string
+		retryError bool
+	}{
+		{name: "initial run"},
+		{name: "retry run", retryError: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := runCalibrateCapture(context.Background(), calibrateCaptureOptions{
+				Runner: &captureReturnErrorRunner{
+					err:        fmt.Errorf("backend response %s at /Users/keith/models", secret),
+					retryError: tc.retryError,
+				},
+				Targets:    []ModelTarget{{Display: "m", Provider: "ollama", Model: "m"}},
+				Traces:     []Trace{{ID: "t", System: "sys", Turns: []Turn{{Role: "user", Content: "q"}}, Golden: Golden{FinalAnswerCriteria: "c"}}},
+				OutputPath: filepath.Join(t.TempDir(), "artifacts.jsonl"),
+			})
+			if err == nil {
+				t.Fatal("runCalibrateCapture returned nil; want a sanitized runner error")
+			}
+			if got := err.Error(); strings.Contains(got, secret) || strings.Contains(got, "/Users/") || !strings.Contains(got, "<error: other>") {
+				t.Fatalf("runner error = %q; want only a categorized stub", got)
+			}
+		})
+	}
+}
+
+func TestCaptureDigestResolutionErrorsAreRedactedOnStderr(t *testing.T) {
+	const secret = "sk-FAKE-DIGEST-SECRET-0000"
+	stderrPath := filepath.Join(t.TempDir(), "stderr.txt")
+	stderrFile, err := os.Create(stderrPath)
+	if err != nil {
+		t.Fatalf("create stderr capture: %v", err)
+	}
+	oldStderr := os.Stderr
+	os.Stderr = stderrFile
+	t.Cleanup(func() {
+		os.Stderr = oldStderr
+		_ = stderrFile.Close()
+	})
+	digests := resolveCandidateDigests(context.Background(), &fakeShowModeler{
+		err: fmt.Errorf("backend response %s at /Users/keith/models", secret),
+	}, []ModelTarget{{Display: "m", Provider: "ollama", Model: "m"}})
+	os.Stderr = oldStderr
+	if err := stderrFile.Close(); err != nil {
+		t.Fatalf("close stderr capture: %v", err)
+	}
+	if len(digests) != 0 {
+		t.Fatalf("digests = %v; want no digest after resolver failure", digests)
+	}
+	stderr, err := os.ReadFile(stderrPath)
+	if err != nil {
+		t.Fatalf("read stderr capture: %v", err)
+	}
+	if got := string(stderr); strings.Contains(got, secret) || strings.Contains(got, "/Users/") || !strings.Contains(got, "<error: other>") {
+		t.Fatalf("stderr = %q; want only a categorized stub", got)
 	}
 }
 
