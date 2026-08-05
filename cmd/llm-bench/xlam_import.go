@@ -110,6 +110,10 @@ type xlamPlannedTrace struct {
 // them, converts each to a golden-empty Trace, and writes the trace files plus a
 // corpus manifest. Sampling is deterministic for a given (Seed, input).
 func importXlamIrrelevance(opts xlamImportOptions) (xlamImportResult, error) {
+	return importXlamIrrelevanceWithPublish(opts, publishFileSet)
+}
+
+func importXlamIrrelevanceWithPublish(opts xlamImportOptions, publish func([]filePublication, []string) (filePublicationOutcome, error)) (xlamImportResult, error) {
 	if opts.MinTools < 0 {
 		// A negative minimum would make `len(tools) < MinTools` always false,
 		// silently admitting 0-tool rows. Reject it rather than guess intent.
@@ -166,9 +170,15 @@ func importXlamIrrelevance(opts xlamImportOptions) (xlamImportResult, error) {
 		})
 	}
 
-	stale, err := filepath.Glob(filepath.Join(opts.OutDir, xlamTracePrefix+"*"+xlamTraceSuffix))
-	if err != nil {
+	entries, err := os.ReadDir(opts.OutDir)
+	if err != nil && !os.IsNotExist(err) {
 		return xlamImportResult{}, fmt.Errorf("xlam import: scan stale traces: %w", err)
+	}
+	stale := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		if xlamManagedTraceBasename(entry.Name()) {
+			stale = append(stale, filepath.Join(opts.OutDir, entry.Name()))
+		}
 	}
 	if err := xlamPreflightPaths(opts.SrcPath, opts.OutDir, opts.ManifestPath, planned, stale); err != nil {
 		return xlamImportResult{}, err
@@ -206,7 +216,7 @@ func importXlamIrrelevance(opts xlamImportOptions) (xlamImportResult, error) {
 	if err := os.MkdirAll(filepath.Dir(opts.ManifestPath), 0o755); err != nil {
 		return xlamImportResult{}, fmt.Errorf("xlam import: mkdir manifest: %w", err)
 	}
-	publication, err := publishFileSet(replacements, staleOnly)
+	publication, err := publish(replacements, staleOnly)
 	if err != nil {
 		return xlamImportResult{}, fmt.Errorf("xlam import: publish evidence: %w", err)
 	}
@@ -216,22 +226,38 @@ func importXlamIrrelevance(opts xlamImportOptions) (xlamImportResult, error) {
 
 func xlamStaleOnly(planned []xlamPlannedTrace, stale []string, inspect func(string) (publicationTarget, error)) ([]string, error) {
 	plannedCanonicalPaths := make(map[string]struct{}, len(planned))
+	plannedFoldedTargets := make(map[string]publicationTarget, len(planned))
 	for _, p := range planned {
 		target, err := inspect(p.path)
 		if err != nil {
 			return nil, fmt.Errorf("xlam import: canonicalize planned trace %s: %w", p.path, err)
 		}
 		plannedCanonicalPaths[target.canonical] = struct{}{}
+		plannedFoldedTargets[strings.ToLower(target.canonical)] = target
 	}
-	staleOnly := make([]string, 0, len(stale))
-	for _, stalePath := range stale {
+	staleTargets := make([]publicationTarget, len(stale))
+	staleCanonicalPaths := make(map[string]struct{}, len(stale))
+	for i, stalePath := range stale {
 		target, err := inspect(stalePath)
 		if err != nil {
 			return nil, fmt.Errorf("xlam import: canonicalize stale trace %s: %w", stalePath, err)
 		}
-		if _, plannedReplacement := plannedCanonicalPaths[target.canonical]; !plannedReplacement {
-			staleOnly = append(staleOnly, stalePath)
+		staleTargets[i] = target
+		staleCanonicalPaths[target.canonical] = struct{}{}
+	}
+	staleOnly := make([]string, 0, len(stale))
+	for i, stalePath := range stale {
+		target := staleTargets[i]
+		if _, plannedReplacement := plannedCanonicalPaths[target.canonical]; plannedReplacement {
+			continue
 		}
+		caseVariant, caseVariantReplacement := plannedFoldedTargets[strings.ToLower(target.canonical)]
+		if caseVariantReplacement && publicationTargetsAlias(target, caseVariant) {
+			if _, exactSpellingExists := staleCanonicalPaths[caseVariant.canonical]; !exactSpellingExists {
+				continue
+			}
+		}
+		staleOnly = append(staleOnly, stalePath)
 	}
 	return staleOnly, nil
 }

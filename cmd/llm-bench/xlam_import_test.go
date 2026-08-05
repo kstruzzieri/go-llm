@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -315,7 +316,7 @@ func TestImportXlamIrrelevanceDeepFilterSkipsUnconvertible(t *testing.T) {
 	}
 }
 
-func TestImportXlamIrrelevanceClearsStaleTraces(t *testing.T) {
+func TestImportXlamIrrelevanceClearsOnlyDirectManagedStaleTraces(t *testing.T) {
 	recs := []xlamRecord{{Query: "a", Tools: sampleXlamTools, Answers: "[]"}}
 	dir := t.TempDir()
 	src := filepath.Join(dir, "x.json")
@@ -327,9 +328,20 @@ func TestImportXlamIrrelevanceClearsStaleTraces(t *testing.T) {
 	if err := os.MkdirAll(out, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	stale := filepath.Join(out, "xlam-irrel-9999.json")
-	if err := os.WriteFile(stale, []byte("{}"), 0o600); err != nil {
-		t.Fatal(err)
+	stale := filepath.Join(out, "XLAM-IRREL-9999.JSON")
+	unrelated := filepath.Join(out, "keep.json")
+	nested := filepath.Join(out, "nested", "xlam-irrel-9998.json")
+	for path, contents := range map[string]string{
+		stale:     "stale\n",
+		unrelated: "unrelated\n",
+		nested:    "nested\n",
+	} {
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+			t.Fatal(err)
+		}
 	}
 	if _, err := importXlamIrrelevance(xlamImportOptions{
 		SrcPath: src, OutDir: out, ManifestPath: filepath.Join(dir, "m.jsonl"),
@@ -340,6 +352,8 @@ func TestImportXlamIrrelevanceClearsStaleTraces(t *testing.T) {
 	if _, err := os.Stat(stale); !os.IsNotExist(err) {
 		t.Errorf("stale trace %s not removed (err=%v)", stale, err)
 	}
+	assertFileState(t, unrelated, "unrelated\n", 0o600)
+	assertFileState(t, nested, "nested\n", 0o600)
 }
 
 func TestImportXlamManifestWriteFailurePreservesPlannedAndStaleTraces(t *testing.T) {
@@ -373,6 +387,60 @@ func TestImportXlamManifestWriteFailurePreservesPlannedAndStaleTraces(t *testing
 	}
 	assertFileState(t, planned, "prior planned\n", 0o640)
 	assertFileState(t, stale, "prior stale\n", 0o600)
+	assertNoPublicationDebris(t, dir)
+}
+
+func TestImportXlamPublicationFailureRestoresCaseVariantStaleTrace(t *testing.T) {
+	dir := t.TempDir()
+	out := filepath.Join(dir, "out")
+	if err := os.Mkdir(out, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	stale := filepath.Join(out, "XLAM-IRREL-9999.JSON")
+	if err := os.WriteFile(stale, []byte("prior stale\n"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	prior, err := os.Stat(stale)
+	if err != nil {
+		t.Fatal(err)
+	}
+	src := filepath.Join(dir, "x.json")
+	blob, _ := json.Marshal([]xlamRecord{{Query: "a", Tools: sampleXlamTools, Answers: "[]"}})
+	if err := os.WriteFile(src, blob, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	manifest := filepath.Join(dir, "manifest.jsonl")
+	planned := filepath.Join(out, "xlam-irrel-0000.json")
+
+	_, err = importXlamIrrelevanceWithPublish(xlamImportOptions{
+		SrcPath: src, OutDir: out, ManifestPath: manifest, N: 1, Seed: 1, MinTools: 1,
+	}, func(replacements []filePublication, removals []string) (filePublicationOutcome, error) {
+		if len(removals) != 1 || removals[0] != stale {
+			t.Fatalf("stale removals = %v; want [%s]", removals, stale)
+		}
+		return publishFileSetWithRename(replacements, removals, func(oldPath, newPath string) error {
+			if newPath == manifest && strings.Contains(filepath.Base(oldPath), ".publish-") {
+				return errors.New("injected later publication failure")
+			}
+			return os.Rename(oldPath, newPath)
+		})
+	})
+	if err == nil || !strings.Contains(err.Error(), "injected later publication failure") {
+		t.Fatalf("import error = %v; want injected later publication failure", err)
+	}
+	assertFileState(t, stale, "prior stale\n", 0o640)
+	after, err := os.Stat(stale)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !os.SameFile(prior, after) {
+		t.Fatal("rollback did not restore the stale trace inode")
+	}
+	for _, path := range []string{planned, manifest} {
+		if _, statErr := os.Stat(path); !os.IsNotExist(statErr) {
+			t.Fatalf("failed publication left %s: %v", path, statErr)
+		}
+	}
 	assertNoPublicationDebris(t, dir)
 }
 
@@ -444,6 +512,49 @@ func TestXlamStaleOnlyInspectsEachPathOnce(t *testing.T) {
 	}
 	if inspectCalls != pathCount*2 {
 		t.Fatalf("path inspections = %d; want exactly %d", inspectCalls, pathCount*2)
+	}
+}
+
+func TestXlamStaleOnlyFiltersOnlyCaseVariantSamePathIdentity(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "trace.json")
+	if err := os.WriteFile(path, []byte("trace\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	planned := filepath.Join(dir, "xlam-irrel-0000.json")
+	caseVariant := filepath.Join(dir, "XLAM-IRREL-0000.JSON")
+	differentNameAlias := filepath.Join(dir, "XLAM-IRREL-9999.JSON")
+
+	got, err := xlamStaleOnly(
+		[]xlamPlannedTrace{{path: planned}},
+		[]string{caseVariant, differentNameAlias},
+		func(path string) (publicationTarget, error) {
+			return publicationTarget{path: path, canonical: path, info: info}, nil
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0] != differentNameAlias {
+		t.Fatalf("stale-only paths = %v; want only differently named alias %s", got, differentNameAlias)
+	}
+
+	got, err = xlamStaleOnly(
+		[]xlamPlannedTrace{{path: planned}},
+		[]string{planned, caseVariant},
+		func(path string) (publicationTarget, error) {
+			return publicationTarget{path: path, canonical: path, info: info}, nil
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0] != caseVariant {
+		t.Fatalf("two-spelling hardlink stale-only paths = %v; want case-variant alias %s", got, caseVariant)
 	}
 }
 
