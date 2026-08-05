@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -373,6 +374,77 @@ func TestImportXlamManifestWriteFailurePreservesPlannedAndStaleTraces(t *testing
 	assertFileState(t, planned, "prior planned\n", 0o640)
 	assertFileState(t, stale, "prior stale\n", 0o600)
 	assertNoPublicationDebris(t, dir)
+}
+
+func TestImportXlamRejectsDifferentlyNamedStaleAliasToPlannedTrace(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		makeAlias func(oldPath, newPath string) error
+	}{
+		{name: "symlink", makeAlias: os.Symlink},
+		{name: "hardlink", makeAlias: os.Link},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			out := filepath.Join(dir, "out")
+			if err := os.Mkdir(out, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			planned := filepath.Join(out, "xlam-irrel-0000.json")
+			stale := filepath.Join(out, "xlam-irrel-9999.json")
+			if err := os.WriteFile(planned, []byte("prior planned\n"), 0o640); err != nil {
+				t.Fatal(err)
+			}
+			if err := tc.makeAlias(planned, stale); err != nil {
+				t.Skipf("%s unsupported: %v", tc.name, err)
+			}
+			manifest := filepath.Join(dir, "manifest.jsonl")
+			if err := os.WriteFile(manifest, []byte("prior manifest\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			src := filepath.Join(dir, "x.json")
+			blob, _ := json.Marshal([]xlamRecord{{Query: "a", Tools: sampleXlamTools, Answers: "[]"}})
+			if err := os.WriteFile(src, blob, 0o600); err != nil {
+				t.Fatal(err)
+			}
+
+			if _, err := importXlamIrrelevance(xlamImportOptions{
+				SrcPath: src, OutDir: out, ManifestPath: manifest, N: 1, Seed: 1, MinTools: 1,
+			}); err == nil {
+				t.Fatal("import silently omitted a differently named stale alias")
+			}
+			assertFileState(t, planned, "prior planned\n", 0o640)
+			assertFileState(t, stale, "prior planned\n", 0o640)
+			assertFileState(t, manifest, "prior manifest\n", 0o600)
+			assertNoPublicationDebris(t, dir)
+		})
+	}
+}
+
+func TestXlamStaleOnlyInspectsEachPathOnce(t *testing.T) {
+	dir := t.TempDir()
+	const pathCount = 128
+	planned := make([]xlamPlannedTrace, 0, pathCount)
+	stale := make([]string, 0, pathCount)
+	for i := 0; i < pathCount; i++ {
+		path := filepath.Join(dir, fmt.Sprintf("xlam-irrel-%04d.json", i))
+		planned = append(planned, xlamPlannedTrace{path: path})
+		stale = append(stale, path)
+	}
+	inspectCalls := 0
+	got, err := xlamStaleOnly(planned, stale, func(path string) (publicationTarget, error) {
+		inspectCalls++
+		return inspectFilePublicationTarget(path)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("stale-only paths = %v; want none", got)
+	}
+	if inspectCalls != pathCount*2 {
+		t.Fatalf("path inspections = %d; want exactly %d", inspectCalls, pathCount*2)
+	}
 }
 
 func TestImportXlamRejectsManifestTraceAliasBeforeWriting(t *testing.T) {

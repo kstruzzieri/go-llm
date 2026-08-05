@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -59,43 +60,95 @@ type filePublication struct {
 	mode   os.FileMode
 }
 
-func publishFileSet(replacements []filePublication, removals []string) error {
-	return publishFileSetWithRename(replacements, removals, os.Rename)
+type filePublicationOutcome struct {
+	cleanupWarnings []error
 }
 
-func publishFileSetWithRename(replacements []filePublication, removals []string, rename func(string, string) error) error {
-	if rename == nil {
-		return errors.New("publish file set: nil rename function")
+type publicationTarget struct {
+	path      string
+	canonical string
+	info      os.FileInfo
+}
+
+type filePublicationOps struct {
+	rename  func(string, string) error
+	remove  func(string) error
+	inspect func(string) (publicationTarget, error)
+}
+
+func defaultFilePublicationOps() filePublicationOps {
+	return filePublicationOps{rename: os.Rename, remove: os.Remove, inspect: inspectFilePublicationTarget}
+}
+
+func inspectFilePublicationTarget(path string) (publicationTarget, error) {
+	if strings.TrimSpace(path) == "" {
+		return publicationTarget{}, errors.New("empty path")
 	}
-	targets := make([]string, 0, len(replacements)+len(removals))
+	abs, err := filepath.Abs(filepath.Clean(path))
+	if err != nil {
+		return publicationTarget{}, err
+	}
+	info, err := os.Lstat(abs)
+	if err != nil && !os.IsNotExist(err) {
+		return publicationTarget{}, err
+	}
+	if os.IsNotExist(err) {
+		info = nil
+	}
+	parent, _, err := canonicalFuturePath(filepath.Dir(abs))
+	if err != nil {
+		return publicationTarget{}, err
+	}
+	return publicationTarget{path: path, canonical: filepath.Join(parent, filepath.Base(abs)), info: info}, nil
+}
+
+func publicationTargetsAlias(left, right publicationTarget) bool {
+	if left.canonical == right.canonical {
+		return true
+	}
+	if left.info != nil && right.info != nil {
+		return os.SameFile(left.info, right.info)
+	}
+	return left.info == nil && right.info == nil && strings.EqualFold(left.canonical, right.canonical)
+}
+
+func publishFileSet(replacements []filePublication, removals []string) (filePublicationOutcome, error) {
+	return publishFileSetWithOps(replacements, removals, defaultFilePublicationOps())
+}
+
+func publishFileSetWithRename(replacements []filePublication, removals []string, rename func(string, string) error) (filePublicationOutcome, error) {
+	ops := defaultFilePublicationOps()
+	ops.rename = rename
+	return publishFileSetWithOps(replacements, removals, ops)
+}
+
+func publishFileSetWithOps(replacements []filePublication, removals []string, ops filePublicationOps) (filePublicationOutcome, error) {
+	if ops.rename == nil || ops.remove == nil || ops.inspect == nil {
+		return filePublicationOutcome{}, errors.New("publish file set: incomplete file operations")
+	}
+	targetPaths := make([]string, 0, len(replacements)+len(removals))
 	for _, replacement := range replacements {
-		targets = append(targets, replacement.target)
+		targetPaths = append(targetPaths, replacement.target)
 	}
-	targets = append(targets, removals...)
-	for i, target := range targets {
-		if strings.TrimSpace(target) == "" {
-			return fmt.Errorf("publish file set: empty target %d", i)
+	targetPaths = append(targetPaths, removals...)
+	targets := make([]publicationTarget, 0, len(targetPaths))
+	for i, path := range targetPaths {
+		target, err := ops.inspect(path)
+		if err != nil {
+			return filePublicationOutcome{}, fmt.Errorf("publish file set: inspect target %d %q: %w", i, path, err)
 		}
-		info, err := os.Lstat(target)
-		if err == nil {
-			if info.Mode()&os.ModeSymlink != 0 {
-				return fmt.Errorf("publish file set: refuse symlink target %q", target)
-			}
-			if !info.Mode().IsRegular() {
-				return fmt.Errorf("publish file set: refuse non-regular target %q", target)
-			}
-		} else if !os.IsNotExist(err) {
-			return fmt.Errorf("publish file set: inspect %q: %w", target, err)
+		if target.info != nil && target.info.Mode()&os.ModeSymlink != 0 {
+			return filePublicationOutcome{}, fmt.Errorf("publish file set: refuse symlink target %q", path)
+		}
+		if target.info != nil && !target.info.Mode().IsRegular() {
+			return filePublicationOutcome{}, fmt.Errorf("publish file set: refuse non-regular target %q", path)
 		}
 		for j, prior := range targets[:i] {
-			aliases, err := pathsAlias(target, prior)
-			if err != nil {
-				return fmt.Errorf("publish file set: resolve target %d %q and target %d %q: %w", i, target, j, prior, err)
-			}
-			if aliases {
-				return fmt.Errorf("publish file set: target %q aliases target %q", target, prior)
+			if publicationTargetsAlias(target, prior) {
+				return filePublicationOutcome{}, fmt.Errorf("publish file set: target %q aliases target %d %q", path, j, prior.path)
 			}
 		}
+		targets = append(targets, target)
 	}
 
 	type stagedFile struct {
@@ -109,7 +162,7 @@ func publishFileSetWithRename(replacements []filePublication, removals []string,
 			if stage.path == "" {
 				continue
 			}
-			if err := os.Remove(stage.path); err != nil && !os.IsNotExist(err) {
+			if err := ops.remove(stage.path); err != nil && !os.IsNotExist(err) {
 				errs = append(errs, fmt.Errorf("remove unused stage %q: %w", stage.path, err))
 			}
 		}
@@ -118,20 +171,20 @@ func publishFileSetWithRename(replacements []filePublication, removals []string,
 	for _, replacement := range replacements {
 		stage, err := os.CreateTemp(filepath.Dir(replacement.target), "."+filepath.Base(replacement.target)+".publish-*")
 		if err != nil {
-			return errors.Join(fmt.Errorf("publish file set: stage %q: %w", replacement.target, err), cleanStages())
+			return filePublicationOutcome{}, errors.Join(fmt.Errorf("publish file set: stage %q: %w", replacement.target, err), cleanStages())
 		}
 		stagePath := stage.Name()
 		staged = append(staged, stagedFile{target: replacement.target, path: stagePath})
 		if err := stage.Chmod(replacement.mode.Perm()); err != nil {
 			_ = stage.Close()
-			return errors.Join(fmt.Errorf("publish file set: chmod stage for %q: %w", replacement.target, err), cleanStages())
+			return filePublicationOutcome{}, errors.Join(fmt.Errorf("publish file set: chmod stage for %q: %w", replacement.target, err), cleanStages())
 		}
 		if _, err := stage.Write(replacement.data); err != nil {
 			_ = stage.Close()
-			return errors.Join(fmt.Errorf("publish file set: write stage for %q: %w", replacement.target, err), cleanStages())
+			return filePublicationOutcome{}, errors.Join(fmt.Errorf("publish file set: write stage for %q: %w", replacement.target, err), cleanStages())
 		}
 		if err := stage.Close(); err != nil {
-			return errors.Join(fmt.Errorf("publish file set: close stage for %q: %w", replacement.target, err), cleanStages())
+			return filePublicationOutcome{}, errors.Join(fmt.Errorf("publish file set: close stage for %q: %w", replacement.target, err), cleanStages())
 		}
 	}
 
@@ -144,13 +197,13 @@ func publishFileSetWithRename(replacements []filePublication, removals []string,
 	rollback := func(original error) error {
 		errs := []error{original}
 		for i := len(published) - 1; i >= 0; i-- {
-			if err := os.Remove(published[i]); err != nil && !os.IsNotExist(err) {
+			if err := ops.remove(published[i]); err != nil && !os.IsNotExist(err) {
 				errs = append(errs, fmt.Errorf("remove newly published target %q: %w", published[i], err))
 			}
 		}
 		for i := len(backups) - 1; i >= 0; i-- {
 			backup := backups[i]
-			if err := rename(backup.path, backup.target); err != nil {
+			if err := ops.rename(backup.path, backup.target); err != nil {
 				errs = append(errs, fmt.Errorf("restore %q from recovery backup %q: %w", backup.target, backup.path, err))
 			}
 		}
@@ -160,47 +213,46 @@ func publishFileSetWithRename(replacements []filePublication, removals []string,
 		return errors.Join(errs...)
 	}
 	for _, target := range targets {
-		info, err := os.Lstat(target)
-		if os.IsNotExist(err) {
+		if target.info == nil {
 			continue
 		}
+		placeholder, err := os.CreateTemp(filepath.Dir(target.path), "."+filepath.Base(target.path)+".backup-*")
 		if err != nil {
-			return rollback(fmt.Errorf("publish file set: inspect before backup %q: %w", target, err))
-		}
-		if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
-			return rollback(fmt.Errorf("publish file set: target changed to non-regular file before backup %q", target))
-		}
-		placeholder, err := os.CreateTemp(filepath.Dir(target), "."+filepath.Base(target)+".backup-*")
-		if err != nil {
-			return rollback(fmt.Errorf("publish file set: reserve backup for %q: %w", target, err))
+			return filePublicationOutcome{}, rollback(fmt.Errorf("publish file set: reserve backup for %q: %w", target.path, err))
 		}
 		backupPath := placeholder.Name()
 		if err := placeholder.Close(); err != nil {
-			_ = os.Remove(backupPath)
-			return rollback(fmt.Errorf("publish file set: close backup placeholder for %q: %w", target, err))
+			_ = ops.remove(backupPath)
+			return filePublicationOutcome{}, rollback(fmt.Errorf("publish file set: close backup placeholder for %q: %w", target.path, err))
 		}
-		if err := os.Remove(backupPath); err != nil {
-			return rollback(fmt.Errorf("publish file set: prepare backup for %q: %w", target, err))
+		if err := ops.remove(backupPath); err != nil {
+			return filePublicationOutcome{}, rollback(fmt.Errorf("publish file set: prepare backup for %q: %w", target.path, err))
 		}
-		if err := rename(target, backupPath); err != nil {
-			return rollback(fmt.Errorf("publish file set: back up %q: %w", target, err))
+		if err := ops.rename(target.path, backupPath); err != nil {
+			return filePublicationOutcome{}, rollback(fmt.Errorf("publish file set: back up %q: %w", target.path, err))
 		}
-		backups = append(backups, backupFile{target: target, path: backupPath})
+		backups = append(backups, backupFile{target: target.path, path: backupPath})
 	}
 	for i := range staged {
-		if err := rename(staged[i].path, staged[i].target); err != nil {
-			return rollback(fmt.Errorf("publish file set: publish %q: %w", staged[i].target, err))
+		if err := ops.rename(staged[i].path, staged[i].target); err != nil {
+			return filePublicationOutcome{}, rollback(fmt.Errorf("publish file set: publish %q: %w", staged[i].target, err))
 		}
 		published = append(published, staged[i].target)
 		staged[i].path = ""
 	}
-	var cleanupErrs []error
+	var outcome filePublicationOutcome
 	for _, backup := range backups {
-		if err := os.Remove(backup.path); err != nil && !os.IsNotExist(err) {
-			cleanupErrs = append(cleanupErrs, fmt.Errorf("publish file set: remove backup %q: %w", backup.path, err))
+		if err := ops.remove(backup.path); err != nil && !os.IsNotExist(err) {
+			outcome.cleanupWarnings = append(outcome.cleanupWarnings, fmt.Errorf("remove backup %q: %w", backup.path, err))
 		}
 	}
-	return errors.Join(cleanupErrs...)
+	return outcome, nil
+}
+
+func writeFilePublicationWarnings(w io.Writer, scope string, outcome filePublicationOutcome) {
+	for _, warning := range outcome.cleanupWarnings {
+		_, _ = fmt.Fprintf(w, "%s: WARNING evidence set published but backup cleanup failed: %v\n", scope, warning)
+	}
 }
 
 func marshalManifestJSONL(m Manifest) ([]byte, error) {

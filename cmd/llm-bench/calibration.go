@@ -718,9 +718,11 @@ func runCalibrateCapture(ctx context.Context, opts calibrateCaptureOptions) erro
 	if manifestPath != "" {
 		replacements = append(replacements, filePublication{target: manifestPath, data: manifestRaw, mode: 0o600})
 	}
-	if err := publishFileSet(replacements, nil); err != nil {
+	publication, err := publishFileSet(replacements, nil)
+	if err != nil {
 		return fmt.Errorf("calibrate-capture: publish evidence: %w", err)
 	}
+	writeFilePublicationWarnings(os.Stderr, "calibrate-capture", publication)
 	if manifestPath != "" {
 		emitCaptureManifestDigest(manifestRaw, opts.Stdout)
 	}

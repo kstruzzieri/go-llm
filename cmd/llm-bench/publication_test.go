@@ -1,7 +1,9 @@
 package main
 
 import (
+	"bytes"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -11,20 +13,16 @@ import (
 func TestPublishFileSetStageFailurePreservesExistingFiles(t *testing.T) {
 	dir := t.TempDir()
 	oldPath := filepath.Join(dir, "old.json")
-	blockedParent := filepath.Join(dir, "not-a-directory")
 	if err := os.WriteFile(oldPath, []byte("old\n"), 0o640); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(blockedParent, []byte("block\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
 
-	err := publishFileSet([]filePublication{
+	_, err := publishFileSet([]filePublication{
 		{target: oldPath, data: []byte("new\n"), mode: 0o600},
-		{target: filepath.Join(blockedParent, "new.json"), data: []byte("new\n"), mode: 0o600},
+		{target: filepath.Join(dir, "missing-parent", "new.json"), data: []byte("new\n"), mode: 0o600},
 	}, nil)
-	if err == nil {
-		t.Fatal("publishFileSet succeeded despite an unusable staging directory")
+	if err == nil || !strings.Contains(err.Error(), "stage") {
+		t.Fatalf("publishFileSet error = %v; want actual staging failure", err)
 	}
 	assertFileState(t, oldPath, "old\n", 0o640)
 	assertNoPublicationDebris(t, dir)
@@ -53,7 +51,7 @@ func TestPublishFileSetFirstPublishFailureRollsBackReplacementsAndRemoval(t *tes
 		oldInfo[path] = info
 	}
 
-	err := publishFileSetWithRename([]filePublication{
+	_, err := publishFileSetWithRename([]filePublication{
 		{target: dataPath, data: []byte("new data\n"), mode: 0o600},
 		{target: manifestPath, data: []byte("new manifest\n"), mode: 0o600},
 	}, []string{stalePath}, func(oldPath, newPath string) error {
@@ -93,7 +91,7 @@ func TestPublishFileSetManifestLastFailureRemovesNewFilesAndRollsBack(t *testing
 		t.Fatal(err)
 	}
 	var published []string
-	err := publishFileSetWithRename([]filePublication{
+	_, err := publishFileSetWithRename([]filePublication{
 		{target: dataPath, data: []byte("new data\n"), mode: 0o644},
 		{target: manifestPath, data: []byte("new manifest\n"), mode: 0o600},
 	}, []string{stalePath}, func(oldPath, newPath string) error {
@@ -127,7 +125,7 @@ func TestPublishFileSetRestoreFailureNamesRecoveryBackup(t *testing.T) {
 		t.Fatal(err)
 	}
 	var recoveryBackup string
-	err := publishFileSetWithRename([]filePublication{
+	_, err := publishFileSetWithRename([]filePublication{
 		{target: dataPath, data: []byte("new data\n"), mode: 0o644},
 		{target: manifestPath, data: []byte("new manifest\n"), mode: 0o600},
 	}, nil, func(oldPath, newPath string) error {
@@ -146,6 +144,113 @@ func TestPublishFileSetRestoreFailureNamesRecoveryBackup(t *testing.T) {
 	assertFileState(t, recoveryBackup, "old manifest\n", 0o640)
 }
 
+func TestPublishFileSetPartialBackupFailureRestoresPriorBackup(t *testing.T) {
+	dir := t.TempDir()
+	first := filepath.Join(dir, "first.json")
+	second := filepath.Join(dir, "second.json")
+	for _, path := range []string{first, second} {
+		if err := os.WriteFile(path, []byte("old "+filepath.Base(path)+"\n"), 0o640); err != nil {
+			t.Fatal(err)
+		}
+	}
+	firstInfo, err := os.Stat(first)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = publishFileSetWithOps([]filePublication{
+		{target: first, data: []byte("new first\n"), mode: 0o600},
+		{target: second, data: []byte("new second\n"), mode: 0o600},
+	}, nil, filePublicationOps{
+		rename: func(oldPath, newPath string) error {
+			if oldPath == second && strings.Contains(filepath.Base(newPath), ".backup-") {
+				return errors.New("injected second backup failure")
+			}
+			return os.Rename(oldPath, newPath)
+		},
+		remove:  os.Remove,
+		inspect: inspectFilePublicationTarget,
+	})
+	if err == nil || !strings.Contains(err.Error(), "injected second backup failure") {
+		t.Fatalf("publish error = %v", err)
+	}
+	assertFileState(t, first, "old first.json\n", 0o640)
+	assertFileState(t, second, "old second.json\n", 0o640)
+	restoredInfo, err := os.Stat(first)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !os.SameFile(firstInfo, restoredInfo) {
+		t.Fatal("first backup was not restored as its original inode")
+	}
+	assertNoPublicationDebris(t, dir)
+}
+
+func TestPublishFileSetCleanupFailureReturnsCommittedWarning(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "data.json")
+	if err := os.WriteFile(target, []byte("old\n"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	var backupPath string
+	outcome, err := publishFileSetWithOps([]filePublication{
+		{target: target, data: []byte("new\n"), mode: 0o600},
+	}, nil, filePublicationOps{
+		rename: func(oldPath, newPath string) error {
+			if oldPath == target && strings.Contains(filepath.Base(newPath), ".backup-") {
+				backupPath = newPath
+			}
+			return os.Rename(oldPath, newPath)
+		},
+		remove: func(path string) error {
+			if path == backupPath {
+				return errors.New("injected cleanup failure")
+			}
+			return os.Remove(path)
+		},
+		inspect: inspectFilePublicationTarget,
+	})
+	if err != nil {
+		t.Fatalf("committed publication returned fatal error: %v", err)
+	}
+	if len(outcome.cleanupWarnings) != 1 || !strings.Contains(outcome.cleanupWarnings[0].Error(), "injected cleanup failure") {
+		t.Fatalf("cleanup warnings = %v", outcome.cleanupWarnings)
+	}
+	assertFileState(t, target, "new\n", 0o600)
+	assertFileState(t, backupPath, "old\n", 0o640)
+	var warning bytes.Buffer
+	writeFilePublicationWarnings(&warning, "test-scope", outcome)
+	if !strings.Contains(warning.String(), "test-scope: WARNING evidence set published but backup cleanup failed:") {
+		t.Fatalf("warning = %q", warning.String())
+	}
+}
+
+func TestPublishFileSetInspectsEachTargetOnce(t *testing.T) {
+	dir := t.TempDir()
+	const targetCount = 128
+	replacements := make([]filePublication, 0, targetCount)
+	for i := 0; i < targetCount; i++ {
+		replacements = append(replacements, filePublication{
+			target: filepath.Join(dir, fmt.Sprintf("file-%03d.json", i)),
+			data:   []byte("data\n"),
+			mode:   0o600,
+		})
+	}
+	inspectCalls := 0
+	ops := defaultFilePublicationOps()
+	ops.inspect = func(path string) (publicationTarget, error) {
+		inspectCalls++
+		return inspectFilePublicationTarget(path)
+	}
+	if _, err := publishFileSetWithOps(replacements, nil, ops); err != nil {
+		t.Fatal(err)
+	}
+	if inspectCalls != targetCount {
+		t.Fatalf("target inspections = %d; want exactly %d", inspectCalls, targetCount)
+	}
+	assertNoPublicationDebris(t, dir)
+}
+
 func TestPublishFileSetPublishesInOrderWithRequestedModes(t *testing.T) {
 	dir := t.TempDir()
 	dataPath := filepath.Join(dir, "data.json")
@@ -158,7 +263,7 @@ func TestPublishFileSetPublishesInOrderWithRequestedModes(t *testing.T) {
 		t.Fatal(err)
 	}
 	var published []string
-	err := publishFileSetWithRename([]filePublication{
+	_, err := publishFileSetWithRename([]filePublication{
 		{target: dataPath, data: []byte("new data\n"), mode: 0o644},
 		{target: manifestPath, data: []byte("new manifest\n"), mode: 0o600},
 	}, []string{stalePath}, func(oldPath, newPath string) error {
@@ -222,7 +327,7 @@ func TestPublishFileSetPreflightRejectsUnsafeOrAliasedTargetsWithoutMutation(t *
 				t.Fatal(err)
 			}
 			replacements, removals := tc.setup(t, dir, prior)
-			if err := publishFileSet(replacements, removals); err == nil {
+			if _, err := publishFileSet(replacements, removals); err == nil {
 				t.Fatal("publishFileSet accepted an unsafe target set")
 			}
 			assertFileState(t, prior, "prior\n", 0o640)
