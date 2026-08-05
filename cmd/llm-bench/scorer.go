@@ -957,6 +957,9 @@ func canonicalCandidateModelKey(s string) string {
 	model = normalizeModelSelector(model)
 	switch provider {
 	case defaultBenchProvider:
+		if nestedProvider, _, ok := strings.Cut(model, "/"); ok && supportedCandidateProvider(nestedProvider) {
+			return provider + "/" + model
+		}
 		return model
 	case openAICompatTransport:
 		return provider + "/" + model
