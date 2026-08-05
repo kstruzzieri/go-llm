@@ -102,15 +102,11 @@ func TestPathsAliasTreatsExistingHardlinksAndSymlinksAsAliases(t *testing.T) {
 	if err := os.WriteFile(target, []byte("target\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	hardlink := filepath.Join(dir, "hardlink.json")
-	if err := os.Link(target, hardlink); err != nil {
-		t.Skipf("hardlinks unsupported here: %v", err)
-	}
-	symlink := filepath.Join(dir, "symlink.json")
-	if err := os.Symlink(target, symlink); err != nil {
-		t.Skipf("symlinks unsupported here: %v", err)
-	}
-	for _, path := range []string{hardlink, symlink} {
+	t.Run("hardlink", func(t *testing.T) {
+		path := filepath.Join(dir, "hardlink.json")
+		if err := os.Link(target, path); err != nil {
+			t.Skipf("hardlinks unsupported here: %v", err)
+		}
 		got, err := pathsAlias(target, path)
 		if err != nil {
 			t.Fatalf("pathsAlias(%q): %v", path, err)
@@ -118,7 +114,20 @@ func TestPathsAliasTreatsExistingHardlinksAndSymlinksAsAliases(t *testing.T) {
 		if !got {
 			t.Errorf("pathsAlias(%q) = false, want true", path)
 		}
-	}
+	})
+	t.Run("symlink", func(t *testing.T) {
+		path := filepath.Join(dir, "symlink.json")
+		if err := os.Symlink(target, path); err != nil {
+			t.Skipf("symlinks unsupported here: %v", err)
+		}
+		got, err := pathsAlias(target, path)
+		if err != nil {
+			t.Fatalf("pathsAlias(%q): %v", path, err)
+		}
+		if !got {
+			t.Errorf("pathsAlias(%q) = false, want true", path)
+		}
+	})
 }
 
 func TestMainOutputAliasGuardsAllModes(t *testing.T) {

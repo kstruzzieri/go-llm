@@ -397,6 +397,32 @@ func TestImportXlamReservesEntireManagedTraceNamespaceBeforeWriting(t *testing.T
 		}
 	})
 
+	t.Run("existing case-variant trace preserves prior bytes", func(t *testing.T) {
+		dir := t.TempDir()
+		out := filepath.Join(dir, "out")
+		if err := os.Mkdir(out, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		manifest := filepath.Join(out, "XLAM-IRREL-9999.JSON")
+		prior := []byte("prior case-variant trace\n")
+		if err := os.WriteFile(manifest, prior, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		canonical := filepath.Join(out, "xlam-irrel-9999.json")
+		if _, err := os.Stat(canonical); err == nil {
+			t.Skip("filesystem does not support distinct existing case-only trace names")
+		} else if !os.IsNotExist(err) {
+			t.Fatal(err)
+		}
+		if _, err := importXlamIrrelevance(importOpts(writeSource(t, dir), out, manifest)); err == nil {
+			t.Fatal("existing case-variant managed manifest path was accepted")
+		}
+		got, err := os.ReadFile(manifest)
+		if err != nil || string(got) != string(prior) {
+			t.Fatalf("case-variant managed path mutated: err=%v got=%q want=%q", err, got, prior)
+		}
+	})
+
 	t.Run("symlinked output parent resolves namespace identity", func(t *testing.T) {
 		dir := t.TempDir()
 		realOut := filepath.Join(dir, "real-out")

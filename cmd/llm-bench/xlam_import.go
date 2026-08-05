@@ -218,10 +218,12 @@ func xlamPreflightPaths(srcPath, outDir, manifestPath string, planned []xlamPlan
 	if err := check("manifest", manifestPath, "source", srcPath); err != nil {
 		return err
 	}
-	if managedPath, ok := xlamManagedTracePath(outDir, manifestPath); ok {
-		if err := check("manifest", manifestPath, "managed trace namespace", managedPath); err != nil {
-			return err
-		}
+	inManagedNamespace, err := xlamManifestInManagedTraceNamespace(outDir, manifestPath)
+	if err != nil {
+		return fmt.Errorf("xlam import: resolve manifest parent and output directory: %w", err)
+	}
+	if inManagedNamespace {
+		return fmt.Errorf("xlam import: manifest %s is in the managed trace namespace for %s", manifestPath, outDir)
 	}
 	for i, p := range planned {
 		if err := check(fmt.Sprintf("trace %d", i), p.path, "source", srcPath); err != nil {
@@ -246,15 +248,21 @@ func xlamPreflightPaths(srcPath, outDir, manifestPath string, planned []xlamPlan
 // direct child in the xLAM trace namespace. Identity is decided by pathsAlias,
 // rather than a lexical directory-prefix check, so symlinked parents and
 // case-sensitive filesystems retain their real filesystem semantics.
-func xlamManagedTracePath(outDir, path string) (string, bool) {
+func xlamManagedTraceBasename(path string) bool {
 	name := filepath.Base(path)
 	if len(name) < len(xlamTracePrefix)+len(xlamTraceSuffix) ||
 		!strings.EqualFold(name[:len(xlamTracePrefix)], xlamTracePrefix) ||
 		!strings.EqualFold(name[len(name)-len(xlamTraceSuffix):], xlamTraceSuffix) {
-		return "", false
+		return false
 	}
-	middle := name[len(xlamTracePrefix) : len(name)-len(xlamTraceSuffix)]
-	return filepath.Join(outDir, xlamTracePrefix+middle+xlamTraceSuffix), true
+	return true
+}
+
+func xlamManifestInManagedTraceNamespace(outDir, manifestPath string) (bool, error) {
+	if !xlamManagedTraceBasename(manifestPath) {
+		return false, nil
+	}
+	return pathsAlias(filepath.Dir(manifestPath), outDir)
 }
 
 // xlamRecordEligible reports whether a record is a usable irrelevance case:
