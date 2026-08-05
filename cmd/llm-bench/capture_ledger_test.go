@@ -170,6 +170,21 @@ func TestCaptureManifestV2ExpectedLedger(t *testing.T) {
 	}
 }
 
+func TestCaptureRejectsCanonicalDuplicateTargets(t *testing.T) {
+	err := runCalibrateCapture(context.Background(), calibrateCaptureOptions{
+		Runner: &orderRecordingRunner{},
+		Targets: []ModelTarget{
+			{Display: "m", Provider: "ollama", Model: "m"},
+			{Display: "ollama/M", Provider: "ollama", Model: "M"},
+		},
+		Traces:     []Trace{pairedCaptureTrace("arm-legacy", "pair-a", AssemblyLegacy)},
+		OutputPath: filepath.Join(t.TempDir(), "artifacts.jsonl"),
+	})
+	if err == nil || !strings.Contains(err.Error(), "duplicate model target") {
+		t.Fatalf("err = %v; want canonical duplicate target rejection", err)
+	}
+}
+
 // flakyRunner is a stateful calibrationRunner: failFirst trace IDs fail on
 // the first invocation only, failAlways ones fail every time, and drop ones
 // never produce a Result at all. calls records each invocation's trace IDs
@@ -513,6 +528,93 @@ func TestCaptureDigestResolutionErrorsAreRedactedOnStderr(t *testing.T) {
 	}
 }
 
+func TestCaptureInvalidModelDigestIsNotPersisted(t *testing.T) {
+	const secret = "sk-FAKE-PROVIDER-DIGEST-SECRET-0000"
+	target := ModelTarget{Display: "ollama/m", Provider: "ollama", Model: "m"}
+	stderrPath := filepath.Join(t.TempDir(), "stderr.txt")
+	stderrFile, err := os.Create(stderrPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldStderr := os.Stderr
+	os.Stderr = stderrFile
+	t.Cleanup(func() { os.Stderr = oldStderr })
+	digests := map[string]string{"ollama/m": secret}
+	out := filepath.Join(t.TempDir(), "artifacts.jsonl")
+	if err := runCalibrateCapture(context.Background(), calibrateCaptureOptions{
+		Runner: &orderRecordingRunner{}, Targets: []ModelTarget{target},
+		Traces:     []Trace{pairedCaptureTrace("arm-legacy", "pair-a", AssemblyLegacy)},
+		OutputPath: out, ModelDigests: digests, Stdout: io.Discard,
+	}); err != nil {
+		t.Fatalf("runCalibrateCapture: %v", err)
+	}
+	os.Stderr = oldStderr
+	if err := stderrFile.Close(); err != nil {
+		t.Fatal(err)
+	}
+	stderr, err := os.ReadFile(stderrPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	artifacts, err := os.ReadFile(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest, err := os.ReadFile(captureManifestPath(out))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, raw := range map[string][]byte{"stderr": stderr, "artifacts": artifacts, "manifest": manifest} {
+		if strings.Contains(string(raw), secret) {
+			t.Fatalf("%s leaked the invalid provider digest", name)
+		}
+	}
+	if got := string(stderr); !strings.Contains(got, `digest resolution skipped for "ollama/m": invalid digest`) {
+		t.Fatalf("stderr = %q; want the fixed warning naming only the target selector", got)
+	}
+	if got := readArtifactsFile(t, out)[0].Capture.ModelDigest; got != "" {
+		t.Fatalf("artifact model_digest = %q; want empty", got)
+	}
+	var m captureManifest
+	if err := json.Unmarshal(manifest, &m); err != nil {
+		t.Fatal(err)
+	}
+	if m.ModelTargets[0].ResolvedDigest != "" || len(m.ServerProbe.OllamaDigests) != 0 {
+		t.Fatalf("manifest persisted invalid digest: targets=%+v probe=%+v", m.ModelTargets, m.ServerProbe)
+	}
+}
+
+func TestCaptureCanonicalModelDigestMatchesAllSinks(t *testing.T) {
+	const rawDigest = "SHA256:ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789"
+	const wantDigest = "sha256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+	target := ModelTarget{Display: "ollama/m", Provider: "ollama", Model: "m"}
+	digests := resolveCandidateDigests(context.Background(), &fakeShowModeler{
+		digests: map[string]string{"m": rawDigest},
+	}, []ModelTarget{target})
+	out := filepath.Join(t.TempDir(), "artifacts.jsonl")
+	if err := runCalibrateCapture(context.Background(), calibrateCaptureOptions{
+		Runner: &orderRecordingRunner{}, Targets: []ModelTarget{target},
+		Traces:     []Trace{pairedCaptureTrace("arm-legacy", "pair-a", AssemblyLegacy)},
+		OutputPath: out, ModelDigests: digests, Stdout: io.Discard,
+	}); err != nil {
+		t.Fatalf("runCalibrateCapture: %v", err)
+	}
+	if got := readArtifactsFile(t, out)[0].Capture.ModelDigest; got != wantDigest {
+		t.Fatalf("artifact model_digest = %q; want %q", got, wantDigest)
+	}
+	raw, err := os.ReadFile(captureManifestPath(out))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var m captureManifest
+	if err := json.Unmarshal(raw, &m); err != nil {
+		t.Fatal(err)
+	}
+	if m.ModelTargets[0].ResolvedDigest != wantDigest || m.ServerProbe.OllamaDigests["ollama/m"] != wantDigest {
+		t.Fatalf("manifest digest sinks disagree: targets=%+v probe=%+v", m.ModelTargets, m.ServerProbe)
+	}
+}
+
 func TestCaptureDoesNotProbeProps(t *testing.T) {
 	var requests atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
@@ -629,6 +731,197 @@ func TestAssemblyReportLedgerSynthesizesVanishedPairs(t *testing.T) {
 	})
 }
 
+func TestAssemblyReportV2ArtifactBinding(t *testing.T) {
+	legacy := withCaptureTemp(mixedArtifact("pair-a", AssemblyLegacy, "ollama/m", nil), 0)
+	mixed := withCaptureTemp(mixedArtifact("pair-a", AssemblyMixed, "ollama/m", nil), 0)
+	arts := []Artifact{legacy, mixed}
+	labels := []Label{labelFor(legacy, 0), labelFor(mixed, 1)}
+	base := captureManifest{
+		SchemaVersion: captureManifestSchemaVersionV2,
+		ArtifactCount: 2,
+		PerArtifact: []captureManifestRow{
+			{TraceID: legacy.TraceID, ArtifactHash: legacy.ArtifactHash, UsagePresent: true},
+			{TraceID: mixed.TraceID, ArtifactHash: mixed.ArtifactHash, UsagePresent: true},
+		},
+		ExpectedCount: 2,
+		Expected: []captureExpectedRow{
+			{TraceID: legacy.TraceID, Model: "ollama/m", PairID: "pair-a", Arm: "legacy", Status: "captured", Attempts: 1, ArtifactHash: legacy.ArtifactHash},
+			{TraceID: mixed.TraceID, Model: "ollama/m", PairID: "pair-a", Arm: "mixed", Status: "captured", Attempts: 1, ArtifactHash: mixed.ArtifactHash},
+		},
+	}
+	run := func(t *testing.T, manifest captureManifest, artifacts []Artifact) error {
+		t.Helper()
+		dir := t.TempDir()
+		artifactsPath := filepath.Join(dir, "artifacts.jsonl")
+		labelsPath := filepath.Join(dir, "labels.jsonl")
+		if err := writeJSONLRows(artifactsPath, "artifacts", artifacts); err != nil {
+			t.Fatal(err)
+		}
+		if err := writeLabelsJSONL(labelsPath, labels); err != nil {
+			t.Fatal(err)
+		}
+		manifestPath := writeLedgerManifest(t, dir, "manifest.json", manifest)
+		_, err := runAssemblyReport(assemblyReportOptions{
+			LabelsPath: labelsPath, ArtifactsPath: artifactsPath, CaptureManifestPath: manifestPath,
+		})
+		return err
+	}
+	clone := func(mut func(*captureManifest)) captureManifest {
+		m := base
+		m.PerArtifact = append([]captureManifestRow(nil), base.PerArtifact...)
+		m.Expected = append([]captureExpectedRow(nil), base.Expected...)
+		mut(&m)
+		return m
+	}
+	withRehashedFirstArtifact := func(mut func(*Artifact)) (captureManifest, []Artifact) {
+		changed := append([]Artifact(nil), arts...)
+		mut(&changed[0])
+		changed[0].ArtifactHash = artifactHash(changed[0])
+		manifest := clone(func(m *captureManifest) {
+			m.PerArtifact[0].ArtifactHash = changed[0].ArtifactHash
+			m.Expected[0].ArtifactHash = changed[0].ArtifactHash
+		})
+		return manifest, changed
+	}
+	outerTraceManifest, outerTraceArtifacts := withRehashedFirstArtifact(func(a *Artifact) { a.TraceID = "other-trace" })
+	innerTraceManifest, innerTraceArtifacts := withRehashedFirstArtifact(func(a *Artifact) { a.Trace.ID = "other-trace" })
+	if err := run(t, base, arts); err != nil {
+		t.Fatalf("valid v2 report: %v", err)
+	}
+	for _, tc := range []struct {
+		name, want string
+		manifest   captureManifest
+		artifacts  []Artifact
+	}{
+		{"missing expected hash", "artifact hash", clone(func(m *captureManifest) {
+			m.PerArtifact = m.PerArtifact[1:]
+			m.Expected = m.Expected[1:]
+			m.ArtifactCount, m.ExpectedCount = 1, 1
+		}), arts},
+		{"swapped hash set", "artifact hash", clone(func(m *captureManifest) {
+			hash := "sha256:" + strings.Repeat("f", 64)
+			m.PerArtifact[0].ArtifactHash = hash
+			m.Expected[0].ArtifactHash = hash
+		}), arts},
+		{"trace", "trace_id", clone(func(m *captureManifest) {
+			m.PerArtifact[0].TraceID = "other-trace"
+			m.Expected[0].TraceID = "other-trace"
+		}), arts},
+		{"artifact outer trace", "trace_id", outerTraceManifest, outerTraceArtifacts},
+		{"artifact inner trace", "trace.id", innerTraceManifest, innerTraceArtifacts},
+		{"model", "candidate_model", clone(func(m *captureManifest) {
+			m.Expected[0].Model = "openai-compat/m"
+		}), arts},
+		{"pair", "pair_id", clone(func(m *captureManifest) {
+			m.Expected[0].PairID = "pair-other"
+		}), arts},
+		{"arm", "arm", clone(func(m *captureManifest) {
+			m.Expected[0].Arm = "mixed"
+		}), arts},
+		{"extra artifact against all-failed v2", "artifact hash", captureManifest{
+			SchemaVersion: captureManifestSchemaVersionV2,
+			ExpectedCount: 1,
+			Expected:      []captureExpectedRow{{TraceID: "failed-legacy", Model: "ollama/m", PairID: "pair-failed", Arm: "legacy", Status: "failed", Attempts: 2, Error: "<error: timeout>"}},
+		}, []Artifact{legacy}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := run(t, tc.manifest, tc.artifacts)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("err = %v; want v2 binding error containing %q", err, tc.want)
+			}
+		})
+	}
+
+	v1 := captureManifest{
+		SchemaVersion: captureManifestSchemaVersion,
+		ArtifactCount: 2,
+		PerArtifact:   append([]captureManifestRow(nil), base.PerArtifact...),
+	}
+	v1.PerArtifact[0].TraceID = "legacy-v1-does-not-bind-cross-file"
+	if err := run(t, v1, arts); err != nil {
+		t.Fatalf("v1 compatibility bypass: %v", err)
+	}
+}
+
+func TestAssemblyReportV2KeepsSameNativeModelDistinctByProvider(t *testing.T) {
+	var arts []Artifact
+	var labels []Label
+	var perArtifact []captureManifestRow
+	var expected []captureExpectedRow
+	for _, model := range []string{"ollama/m", "openai-compat/m"} {
+		for _, mode := range []AssemblyMode{AssemblyLegacy, AssemblyMixed} {
+			a := withCaptureTemp(mixedArtifact("pair-a", mode, model, nil), 0)
+			arts = append(arts, a)
+			labels = append(labels, labelFor(a, 1))
+			perArtifact = append(perArtifact, captureManifestRow{TraceID: a.TraceID, ArtifactHash: a.ArtifactHash, UsagePresent: true})
+			expected = append(expected, captureExpectedRow{TraceID: a.TraceID, Model: model, PairID: "pair-a", Arm: string(mode), Status: "captured", Attempts: 1, ArtifactHash: a.ArtifactHash})
+		}
+	}
+	dir := t.TempDir()
+	artifactsPath := filepath.Join(dir, "artifacts.jsonl")
+	labelsPath := filepath.Join(dir, "labels.jsonl")
+	if err := writeJSONLRows(artifactsPath, "artifacts", arts); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeLabelsJSONL(labelsPath, labels); err != nil {
+		t.Fatal(err)
+	}
+	manifestPath := writeLedgerManifest(t, dir, "manifest.json", captureManifest{
+		SchemaVersion: captureManifestSchemaVersionV2,
+		ArtifactCount: len(arts), PerArtifact: perArtifact,
+		ExpectedCount: len(expected), Expected: expected,
+	})
+	raw, err := runAssemblyReport(assemblyReportOptions{
+		LabelsPath: labelsPath, ArtifactsPath: artifactsPath, CaptureManifestPath: manifestPath,
+	})
+	if err != nil {
+		t.Fatalf("runAssemblyReport: %v", err)
+	}
+	var report AssemblyReport
+	if err := json.Unmarshal([]byte(raw), &report); err != nil {
+		t.Fatal(err)
+	}
+	if len(report.LegacyMixedModels) != 2 || report.LegacyMixedModels[0].CandidateModel != "m" || report.LegacyMixedModels[1].CandidateModel != "openai-compat/m" {
+		t.Fatalf("legacy_mixed_models = %+v; want distinct Ollama and openai-compat sections", report.LegacyMixedModels)
+	}
+}
+
+func TestAssemblyReportV1KeepsHistoricalOpenAICompatAlias(t *testing.T) {
+	legacy := withCaptureTemp(mixedArtifact("pair-a", AssemblyLegacy, "openai-compat/m", nil), 0)
+	mixed := withCaptureTemp(mixedArtifact("pair-a", AssemblyMixed, "openai-compat/m", nil), 0)
+	arts := []Artifact{legacy, mixed}
+	dir := t.TempDir()
+	artifactsPath := filepath.Join(dir, "artifacts.jsonl")
+	labelsPath := filepath.Join(dir, "labels.jsonl")
+	if err := writeJSONLRows(artifactsPath, "artifacts", arts); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeLabelsJSONL(labelsPath, []Label{labelFor(legacy, 0), labelFor(mixed, 1)}); err != nil {
+		t.Fatal(err)
+	}
+	manifestPath := writeLedgerManifest(t, dir, "manifest.json", captureManifest{
+		SchemaVersion: captureManifestSchemaVersion,
+		ArtifactCount: 2,
+		PerArtifact: []captureManifestRow{
+			{TraceID: legacy.TraceID, ArtifactHash: legacy.ArtifactHash, UsagePresent: true},
+			{TraceID: mixed.TraceID, ArtifactHash: mixed.ArtifactHash, UsagePresent: true},
+		},
+	})
+	raw, err := runAssemblyReport(assemblyReportOptions{
+		LabelsPath: labelsPath, ArtifactsPath: artifactsPath, CaptureManifestPath: manifestPath,
+	})
+	if err != nil {
+		t.Fatalf("runAssemblyReport: %v", err)
+	}
+	var report AssemblyReport
+	if err := json.Unmarshal([]byte(raw), &report); err != nil {
+		t.Fatal(err)
+	}
+	if len(report.LegacyMixedModels) != 1 || report.LegacyMixedModels[0].CandidateModel != "m" {
+		t.Fatalf("legacy_mixed_models = %+v; want historical v1 bare model alias", report.LegacyMixedModels)
+	}
+}
+
 func TestLoadCaptureManifestLedgerValidation(t *testing.T) {
 	dir := t.TempDir()
 	captured := captureExpectedRow{TraceID: "t1", Model: "m", PairID: "p1", Arm: "legacy", Status: "captured", Attempts: 1, ArtifactHash: "sha256:aa"}
@@ -667,6 +960,10 @@ func TestLoadCaptureManifestLedgerValidation(t *testing.T) {
 		{"failed row with raw error", "error", mutate(func(m *captureManifest) { m.Expected[1].Error = "timeout while calling backend" })},
 		{"duplicate trace x model row", "duplicate", mutate(func(m *captureManifest) {
 			m.Expected[1] = m.Expected[0]
+		})},
+		{"default-provider alias duplicate", "duplicate", mutate(func(m *captureManifest) {
+			m.Expected[1] = m.Expected[0]
+			m.Expected[1].Model = "ollama/M"
 		})},
 		{"captured row without a hash", "artifact_hash", mutate(func(m *captureManifest) { m.Expected[0].ArtifactHash = "" })},
 		{"captured row carrying an error", "captured", mutate(func(m *captureManifest) { m.Expected[0].Error = "<error: timeout>" })},

@@ -160,9 +160,28 @@ func resolveCandidateDigests(ctx context.Context, resolver candidateDigestResolv
 			fmt.Fprintf(os.Stderr, "calibrate-capture: digest resolution skipped for %q: ShowModel returned no digest\n", target.Display)
 			continue
 		}
-		digests[normalizeModelSelector(target.Display)] = info.Digest
+		digest := canonicalSHA256Digest(info.Digest)
+		if digest == "" {
+			fmt.Fprintf(os.Stderr, "calibrate-capture: digest resolution skipped for %q: invalid digest\n", target.Display)
+			continue
+		}
+		digests[normalizeModelSelector(target.Display)] = digest
 	}
 	return digests
+}
+
+func canonicalSHA256Digest(raw string) string {
+	hexDigest := raw
+	if len(raw) == len("sha256:")+sha256.Size*2 && strings.EqualFold(raw[:len("sha256:")], "sha256:") {
+		hexDigest = raw[len("sha256:"):]
+	}
+	if len(hexDigest) != sha256.Size*2 {
+		return ""
+	}
+	if _, err := hex.DecodeString(hexDigest); err != nil {
+		return ""
+	}
+	return "sha256:" + strings.ToLower(hexDigest)
 }
 
 // calibrationRunner abstracts Runner.RunAll so calibration tests can
@@ -346,12 +365,21 @@ func loadCaptureManifestForReport(path string) (AssemblyCaptureManifest, *captur
 		if m.ExpectedCount != 0 || len(m.Expected) > 0 {
 			return AssemblyCaptureManifest{}, nil, fmt.Errorf("capture-manifest: v1 manifest %q carries a v2 expected ledger (%d row(s)); re-run the capture or fix the schema_version", path, len(m.Expected))
 		}
+		verify.legacyV1ModelIdentity = true
 	case captureManifestSchemaVersionV2:
 		pairs, err := validateCaptureLedger(m)
 		if err != nil {
 			return AssemblyCaptureManifest{}, nil, fmt.Errorf("capture-manifest: %q: %w", path, err)
 		}
 		verify.expectedPairs = pairs
+		verify.expectedArtifacts = make(map[string]captureExpectedArtifact, m.ArtifactCount)
+		for _, row := range m.Expected {
+			if row.Status == "captured" {
+				verify.expectedArtifacts[row.ArtifactHash] = captureExpectedArtifact{
+					traceID: row.TraceID, model: modelKey(row.Model), pairID: row.PairID, arm: row.Arm,
+				}
+			}
+		}
 	default:
 		return AssemblyCaptureManifest{}, nil, fmt.Errorf("capture-manifest: %q schema_version %q (want %q or %q)", path, m.SchemaVersion, captureManifestSchemaVersion, captureManifestSchemaVersionV2)
 	}
@@ -361,6 +389,63 @@ func loadCaptureManifestForReport(path string) (AssemblyCaptureManifest, *captur
 		ArtifactCount: m.ArtifactCount,
 	}
 	return ref, verify, nil
+}
+
+func validateCaptureArtifacts(arts []Artifact, verify *captureVerification) error {
+	if verify == nil || verify.expectedArtifacts == nil {
+		return nil
+	}
+	actual := make(map[string]*Artifact, len(arts))
+	for i := range arts {
+		actual[arts[i].ArtifactHash] = &arts[i]
+	}
+	expectedHashes := make([]string, 0, len(verify.expectedArtifacts))
+	for hash := range verify.expectedArtifacts {
+		expectedHashes = append(expectedHashes, hash)
+	}
+	sort.Strings(expectedHashes)
+	for _, hash := range expectedHashes {
+		if actual[hash] == nil {
+			return fmt.Errorf("capture-manifest v2 artifact binding: expected artifact hash %q is missing from artifacts", hash)
+		}
+	}
+	actualHashes := make([]string, 0, len(actual))
+	for hash := range actual {
+		actualHashes = append(actualHashes, hash)
+	}
+	sort.Strings(actualHashes)
+	for _, hash := range actualHashes {
+		if _, ok := verify.expectedArtifacts[hash]; !ok {
+			return fmt.Errorf("capture-manifest v2 artifact binding: artifact hash %q is absent from the captured ledger", hash)
+		}
+	}
+	for _, hash := range expectedHashes {
+		expected := verify.expectedArtifacts[hash]
+		artifact := actual[hash]
+		if artifact.TraceID != expected.traceID {
+			return fmt.Errorf("capture-manifest v2 artifact binding: artifact hash %q trace_id mismatch", hash)
+		}
+		if artifact.Trace.ID != expected.traceID {
+			return fmt.Errorf("capture-manifest v2 artifact binding: artifact hash %q trace.id mismatch", hash)
+		}
+		if modelKey(artifact.CandidateModel) != expected.model {
+			return fmt.Errorf("capture-manifest v2 artifact binding: artifact hash %q candidate_model mismatch", hash)
+		}
+		pairID, arm := "", ""
+		if prefilledAssemblyMode(artifact.Trace) {
+			arm = string(artifact.Trace.AssemblyEval.Mode)
+			if artifact.Trace.AssemblyEval.Mode == AssemblyLegacy || artifact.Trace.AssemblyEval.Mode == AssemblyMixed {
+				pairID = artifact.Trace.AssemblyEval.PairID
+			}
+		}
+		if pairID != expected.pairID {
+			return fmt.Errorf("capture-manifest v2 artifact binding: artifact hash %q pair_id mismatch", hash)
+		}
+		if arm != expected.arm {
+			return fmt.Errorf("capture-manifest v2 artifact binding: artifact hash %q arm mismatch", hash)
+		}
+	}
+	return nil
 }
 
 // validateCaptureLedger checks a v2 manifest's expected run ledger against
@@ -392,7 +477,7 @@ func validateCaptureLedger(m captureManifest) ([]assemblyPairKey, error) {
 		if strings.TrimSpace(row.TraceID) == "" || strings.TrimSpace(row.Model) == "" {
 			return nil, fmt.Errorf("expected row %d: trace_id and model must be nonblank", i)
 		}
-		key := [2]string{row.TraceID, row.Model}
+		key := [2]string{row.TraceID, modelKey(row.Model)}
 		if _, dup := seen[key]; dup {
 			return nil, fmt.Errorf("expected row %d: duplicate (trace_id, model) (%s, %s)", i, row.TraceID, row.Model)
 		}
@@ -517,12 +602,27 @@ func runCalibrateCapture(ctx context.Context, opts calibrateCaptureOptions) erro
 	if len(opts.Targets) == 0 {
 		return errors.New("calibrate-capture: no targets")
 	}
-	for i, target := range opts.Targets {
-		for _, other := range opts.Targets[:i] {
-			if other.Display == target.Display {
-				return fmt.Errorf("calibrate-capture: duplicate model target %q", target.Display)
-			}
+	seenTargets := make(map[[2]string]struct{}, len(opts.Targets))
+	for _, target := range opts.Targets {
+		key := canonicalModelTargetKey(target)
+		if _, ok := seenTargets[key]; ok {
+			return fmt.Errorf("calibrate-capture: duplicate model target %q", target.Display)
 		}
+		seenTargets[key] = struct{}{}
+	}
+	modelDigests := make(map[string]string, len(opts.ModelDigests))
+	for _, target := range opts.Targets {
+		selector := normalizeModelSelector(target.Display)
+		raw := opts.ModelDigests[selector]
+		if raw == "" {
+			continue
+		}
+		digest := canonicalSHA256Digest(raw)
+		if digest == "" {
+			fmt.Fprintf(os.Stderr, "calibrate-capture: digest resolution skipped for %q: invalid digest\n", target.Display)
+			continue
+		}
+		modelDigests[selector] = digest
 	}
 	traceByID := make(map[string]Trace, len(opts.Traces))
 	for _, trace := range opts.Traces {
@@ -653,7 +753,7 @@ func runCalibrateCapture(ctx context.Context, opts calibrateCaptureOptions) erro
 				ActualToolCalls:   extractToolNames(r.Transcript),
 				ActualTranscript:  r.Transcript,
 				CapturedAt:        now(),
-				Capture:           captureProvenance(c.trace, r, orderIndex, capturedOrders, opts.ModelDigests),
+				Capture:           captureProvenance(c.trace, r, orderIndex, capturedOrders, modelDigests),
 			}
 			artifact.ArtifactHash = artifactHash(artifact)
 			artifacts = append(artifacts, artifact)
@@ -687,7 +787,7 @@ func runCalibrateCapture(ctx context.Context, opts calibrateCaptureOptions) erro
 		for _, target := range opts.Targets {
 			targets = append(targets, captureManifestTarget{
 				Selector:       target.Display,
-				ResolvedDigest: opts.ModelDigests[normalizeModelSelector(target.Display)],
+				ResolvedDigest: modelDigests[normalizeModelSelector(target.Display)],
 			})
 		}
 		manifest := captureManifest{
@@ -696,7 +796,7 @@ func runCalibrateCapture(ctx context.Context, opts calibrateCaptureOptions) erro
 			Endpoint:             endpoint,
 			Transport:            transport,
 			ModelTargets:         targets,
-			ServerProbe:          captureServerProbe{OllamaDigests: opts.ModelDigests},
+			ServerProbe:          captureServerProbe{OllamaDigests: modelDigests},
 			Decoding:             captureDecoding{Temperature: assemblyCaptureTemperature, SeedSupported: false},
 			CounterbalanceScheme: captureCounterbalanceScheme,
 			ArtifactCount:        len(manifestRows),

@@ -64,6 +64,19 @@ func TestComputePairedAnalysis_DedupesBareAndProviderPrefixedArtifacts(t *testin
 	}
 }
 
+func TestModelKeyProviderAware(t *testing.T) {
+	for input, want := range map[string]string{
+		"m":               "m",
+		"ollama/M":        "m",
+		"openai-compat/M": "openai-compat/m",
+		"OPENAI-COMPAT/M": "openai-compat/m",
+	} {
+		if got := modelKey(input); got != want {
+			t.Errorf("modelKey(%q) = %q; want %q", input, got, want)
+		}
+	}
+}
+
 // A model that appears only in artifacts with no fresh labels must still be in
 // the lineup — otherwise matched-label inference would hide it completely.
 func TestLineupFromArtifacts_IncludesModelWithoutLabels(t *testing.T) {

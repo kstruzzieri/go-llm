@@ -18,11 +18,17 @@ type ModelTarget struct {
 func parseModelTargets(csv string) ([]ModelTarget, error) {
 	parts := strings.Split(csv, ",")
 	targets := make([]ModelTarget, 0, len(parts))
+	seen := make(map[[2]string]struct{}, len(parts))
 	for _, part := range parts {
 		target, err := parseModelTarget(part)
 		if err != nil {
 			return nil, err
 		}
+		key := canonicalModelTargetKey(target)
+		if _, ok := seen[key]; ok {
+			return nil, fmt.Errorf("duplicate model target %q", target.Display)
+		}
+		seen[key] = struct{}{}
 		targets = append(targets, target)
 	}
 	return targets, nil
@@ -42,7 +48,7 @@ func parseModelTarget(raw string) (ModelTarget, error) {
 
 	if strings.Contains(selector, "/") {
 		parts := strings.SplitN(selector, "/", 2)
-		target.Provider = strings.TrimSpace(parts[0])
+		target.Provider = strings.ToLower(strings.TrimSpace(parts[0]))
 		target.Model = strings.TrimSpace(parts[1])
 		if target.Provider == "" || target.Model == "" {
 			return ModelTarget{}, fmt.Errorf("invalid model selector %q", selector)
@@ -54,6 +60,10 @@ func parseModelTarget(raw string) (ModelTarget, error) {
 	}
 
 	return target, nil
+}
+
+func canonicalModelTargetKey(target ModelTarget) [2]string {
+	return [2]string{normalizeModelSelector(target.Provider), normalizeModelSelector(target.Model)}
 }
 
 func supportedCandidateProvider(provider string) bool {

@@ -52,3 +52,22 @@ func TestParseModelTargetRejectsInvalidSelectors(t *testing.T) {
 		})
 	}
 }
+
+func TestParseModelTargetsCanonicalUniqueness(t *testing.T) {
+	for _, csv := range []string{
+		"m,ollama/m",
+		"M,ollama/m",
+		"openai-compat/M,OPENAI-COMPAT/m",
+	} {
+		if _, err := parseModelTargets(csv); err == nil || !strings.Contains(err.Error(), "duplicate") {
+			t.Errorf("parseModelTargets(%q) err = %v; want canonical duplicate rejection", csv, err)
+		}
+	}
+	got, err := parseModelTargets("ollama/m,openai-compat/m")
+	if err != nil {
+		t.Fatalf("distinct providers rejected: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("targets = %+v; want two provider-distinct targets", got)
+	}
+}

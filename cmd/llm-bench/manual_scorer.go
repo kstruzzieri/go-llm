@@ -36,7 +36,7 @@ type manualLabel struct {
 func manualScorerKey(traceID, model string) manualLabelKey {
 	return manualLabelKey{
 		traceID: normalizeModelSelector(traceID),
-		model:   normalizeModelSelector(modelSelectorWithoutBenchProvider(model)),
+		model:   normalizeModelSelector(modelSelectorWithoutDefaultBenchProvider(model)),
 	}
 }
 

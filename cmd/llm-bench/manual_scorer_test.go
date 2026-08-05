@@ -274,6 +274,25 @@ func TestManualScorer_MatchesProviderPrefixedAndCasedModel(t *testing.T) {
 	}
 }
 
+func TestManualScorer_KeepsExplicitProviderDistinct(t *testing.T) {
+	s, err := newManualScorer([]Label{
+		{TraceID: "t1", CandidateModel: "ollama/m", ExpectedAnswerQuality: 1.0},
+		{TraceID: "t1", CandidateModel: "openai-compat/m", ExpectedAnswerQuality: 0.5},
+	})
+	if err != nil {
+		t.Fatalf("newManualScorer: %v", err)
+	}
+	for model, want := range map[string]float64{"m": 1, "openai-compat/M": 0.5} {
+		score, err := s.Score(context.Background(), Trace{ID: "t1"}, Result{Model: model})
+		if err != nil {
+			t.Fatalf("Score(%q): %v", model, err)
+		}
+		if score.AnswerQuality != want {
+			t.Errorf("Score(%q) = %v; want %v", model, score.AnswerQuality, want)
+		}
+	}
+}
+
 func TestManualScorer_MissingLabelFailsLoud(t *testing.T) {
 	s, err := newManualScorer([]Label{
 		{TraceID: "t1", CandidateModel: "qwen3:8b", ExpectedAnswerQuality: 1.0},

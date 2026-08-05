@@ -1046,6 +1046,21 @@ func runAssemblyReport(opts assemblyReportOptions) (string, error) {
 		}
 		extras.captureRef = &ref
 		extras.capture = verify
+		if verify.legacyV1ModelIdentity {
+			// v1 sealed reports predate provider-aware candidate keys: their
+			// openai-compat artifacts were intentionally joined to bare FC and
+			// report model IDs. Preserve that historical in-memory view only for
+			// v1; v2 and every new report retain the explicit provider prefix.
+			for i := range arts {
+				arts[i].CandidateModel = modelSelectorWithoutBenchProvider(arts[i].CandidateModel)
+			}
+			for i := range labels {
+				labels[i].CandidateModel = modelSelectorWithoutBenchProvider(labels[i].CandidateModel)
+			}
+		}
+	}
+	if err := validateCaptureArtifacts(arts, extras.capture); err != nil {
+		return "", err
 	}
 	report, err := computeAssemblyReport(arts, labels, pairedBootstrapSeed, pairedBootstrapN, fcPrefs, extras)
 	if err != nil {

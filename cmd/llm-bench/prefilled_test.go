@@ -897,6 +897,7 @@ func TestCounterbalanceAlternationBalance(t *testing.T) {
 }
 
 func TestAssemblyCaptureProvenanceAndUsage(t *testing.T) {
+	const modelDigest = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 	traces := []Trace{
 		pairedCaptureTrace("arm-legacy", "p-b", AssemblyLegacy),
 		{ID: "plain-t", System: "sys", Turns: []Turn{{Role: "user", Content: "q"}}, Golden: Golden{FinalAnswerCriteria: "c"}},
@@ -905,7 +906,7 @@ func TestAssemblyCaptureProvenanceAndUsage(t *testing.T) {
 	out := filepath.Join(t.TempDir(), "artifacts.jsonl")
 	if err := runCalibrateCapture(context.Background(), calibrateCaptureOptions{
 		Runner: &orderRecordingRunner{}, Targets: targets, Traces: traces, OutputPath: out,
-		ModelDigests: map[string]string{"m": "sha256:model-digest"},
+		ModelDigests: map[string]string{"m": modelDigest},
 	}); err != nil {
 		t.Fatalf("runCalibrateCapture: %v", err)
 	}
@@ -950,8 +951,8 @@ func TestAssemblyCaptureProvenanceAndUsage(t *testing.T) {
 	if prov.Model != "m" {
 		t.Fatalf("capture model = %q; want m", prov.Model)
 	}
-	if prov.ModelDigest != "sha256:model-digest" {
-		t.Fatalf("capture model_digest = %q; want sha256:model-digest", prov.ModelDigest)
+	if prov.ModelDigest != modelDigest {
+		t.Fatalf("capture model_digest = %q; want %s", prov.ModelDigest, modelDigest)
 	}
 	if prov.PromptTokens != 10 || prov.GenTokens != 2 {
 		t.Fatalf("capture usage = %d/%d; want 10/2 from replay usage", prov.PromptTokens, prov.GenTokens)
@@ -1198,14 +1199,15 @@ func (f *fakeShowModeler) ShowModel(_ context.Context, name string) (*ollama.Mod
 }
 
 func TestResolveCandidateDigests(t *testing.T) {
+	const digest = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 	targets := []ModelTarget{
 		{Display: "m1", Provider: "ollama", Model: "m1"},
 		{Display: "openai-compat/m2", Provider: "openai-compat", Model: "m2"},
 		{Display: "missing", Provider: "ollama", Model: "missing"},
 	}
-	got := resolveCandidateDigests(context.Background(), &fakeShowModeler{digests: map[string]string{"m1": "sha256:abc"}}, targets)
-	if got["m1"] != "sha256:abc" {
-		t.Fatalf("digest for m1 = %q; want sha256:abc", got["m1"])
+	got := resolveCandidateDigests(context.Background(), &fakeShowModeler{digests: map[string]string{"m1": digest}}, targets)
+	if got["m1"] != digest {
+		t.Fatalf("digest for m1 = %q; want %s", got["m1"], digest)
 	}
 	if _, ok := got["openai-compat/m2"]; ok {
 		t.Fatal("openai-compat target must not get a digest (no digest endpoint)")
@@ -1218,5 +1220,31 @@ func TestResolveCandidateDigests(t *testing.T) {
 	down := resolveCandidateDigests(context.Background(), &fakeShowModeler{err: fmt.Errorf("ollama down")}, targets)
 	if len(down) != 0 {
 		t.Fatalf("digests from failing resolver = %v; want empty", down)
+	}
+}
+
+func TestCanonicalSHA256Digest(t *testing.T) {
+	hexLower := "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	hexUpper := strings.ToUpper(hexLower)
+	for _, tc := range []struct {
+		name, raw, want string
+	}{
+		{"bare", hexLower, "sha256:" + hexLower},
+		{"prefixed", "sha256:" + hexLower, "sha256:" + hexLower},
+		{"uppercase", "SHA256:" + hexUpper, "sha256:" + hexLower},
+		{"short", "sha256:abc", ""},
+		{"long", "sha256:" + hexLower + "0", ""},
+		{"nonhex", "sha256:" + strings.Repeat("g", 64), ""},
+		{"leading whitespace", " " + hexLower, ""},
+		{"trailing whitespace", hexLower + "\n", ""},
+		{"control", hexLower[:32] + "\x00" + hexLower[33:], ""},
+		{"oversized", strings.Repeat("a", 4096), ""},
+		{"secret marker", "sk-FAKE-DIGEST-SECRET-0000", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := canonicalSHA256Digest(tc.raw); got != tc.want {
+				t.Fatalf("canonicalSHA256Digest() = %q; want %q", got, tc.want)
+			}
+		})
 	}
 }

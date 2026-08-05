@@ -946,6 +946,15 @@ func modelSelectorWithoutBenchProvider(s string) string {
 	return s
 }
 
+func modelSelectorWithoutDefaultBenchProvider(s string) string {
+	s = strings.TrimSpace(s)
+	prefix := defaultBenchProvider + "/"
+	if strings.HasPrefix(strings.ToLower(s), prefix) {
+		return strings.TrimSpace(s[len(prefix):])
+	}
+	return s
+}
+
 func joinScoreNotes(parts ...string) string {
 	var cleaned []string
 	for _, part := range parts {

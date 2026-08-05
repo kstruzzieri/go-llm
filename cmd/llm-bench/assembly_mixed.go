@@ -542,8 +542,14 @@ type assemblyMixedPair struct {
 // capture — invisible to artifact-driven pair discovery — is synthesized
 // into the registered missing-arm exclusions instead of vanishing.
 type captureVerification struct {
-	usagePresent  map[string]bool // artifact_hash -> usage_present
-	expectedPairs []assemblyPairKey
+	usagePresent          map[string]bool // artifact_hash -> usage_present
+	expectedPairs         []assemblyPairKey
+	expectedArtifacts     map[string]captureExpectedArtifact // nil=v1; nonnil=v2, including all-failed
+	legacyV1ModelIdentity bool
+}
+
+type captureExpectedArtifact struct {
+	traceID, model, pairID, arm string
 }
 
 // capturePairTemperaturesEqual reports whether both arms carry capture
