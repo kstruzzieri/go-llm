@@ -38,6 +38,7 @@ type flags struct {
 	inputCeiling        int
 	outputReserve       int
 	noColor             bool
+	noEditor            bool
 	noSession           bool
 	fresh               bool
 	sessionID           string
@@ -100,6 +101,7 @@ func parseFlags(args []string) (flags, error) {
 	fs.IntVar(&f.inputCeiling, "input-ceiling", 0, "token input ceiling (0 => default)")
 	fs.IntVar(&f.outputReserve, "output-reserve", 0, "token output reserve")
 	fs.BoolVar(&f.noColor, "no-color", false, "disable dim ANSI footers")
+	fs.BoolVar(&f.noEditor, "no-editor", false, "disable TTY line editing and history; read plain lines from stdin")
 	fs.BoolVar(&f.noSession, "no-session", false, "disable persistent session memory")
 	fs.BoolVar(&f.fresh, "fresh", false, "start a new persistent session instead of resuming this workspace")
 	fs.BoolVar(&f.allowWrite, "allow-write", false, "enable approval-gated write_file/edit_file tools")
@@ -1004,7 +1006,14 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File) error {
 			stopAutoIndex := startAutoIndex()
 			defer stopAutoIndex()
 		}
-		return withLineSource(newScannerSource(stdin, stdout), func(src lineSource) error {
+		return withLineSource(newInput(inputConfig{
+			Stdin:    stdin,
+			Stdout:   stdout,
+			Stderr:   stderr,
+			NoEditor: f.noEditor,
+			Getenv:   os.Getenv,
+			Root:     root,
+		}), func(src lineSource) error {
 			return runAgentflowAuthor(ctx, src, stdout, stderr, interrupts, sess, f, root)
 		})
 	case sourceNone:
@@ -1021,7 +1030,15 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File) error {
 		return runOneShot(ctx, stdout, stderr, interrupts, sess, f.prompt)
 	}
 
-	return withLineSource(newScannerSource(stdin, stdout), func(src lineSource) error {
+	return withLineSource(newInput(inputConfig{
+		Stdin:      stdin,
+		Stdout:     stdout,
+		Stderr:     stderr,
+		NoEditor:   f.noEditor,
+		UseHistory: true, // only the default REPL reads goals worth recalling
+		Getenv:     os.Getenv,
+		Root:       root,
+	}), func(src lineSource) error {
 		// Bound before the auto-index goroutine can emit a notice, so no
 		// asynchronous message is ever rendered through the default display
 		// while a source exists.

@@ -3,6 +3,11 @@ package main
 import (
 	"context"
 	"errors"
+	"io"
+	"os"
+	"runtime"
+
+	"golang.org/x/term"
 )
 
 // lineSource is the one seam every interactive read goes through. Before it,
@@ -73,6 +78,115 @@ func lineSourceModeFor(f flags) lineSourceMode {
 	default:
 		return sourceREPL
 	}
+}
+
+// termOps is the seam the editor's terminal work goes through. x/term exposes
+// IsTerminal, MakeRaw, Restore and GetSize as package functions over integer
+// descriptors, so a fake io.ReadWriter cannot observe any of them: without this
+// interface no test can tell whether MakeRaw received stdin or whether GetSize
+// received stdout.
+type termOps interface {
+	IsTerminal(fd int) bool
+	MakeRaw(fd int) (*term.State, error)
+	Restore(fd int, st *term.State) error
+	GetSize(fd int) (width, height int, err error)
+}
+
+// realTermOps is the production implementation: thin delegation, no logic, so
+// the fake and the real path cannot drift.
+type realTermOps struct{}
+
+func (realTermOps) IsTerminal(fd int) bool               { return term.IsTerminal(fd) }
+func (realTermOps) MakeRaw(fd int) (*term.State, error)  { return term.MakeRaw(fd) }
+func (realTermOps) Restore(fd int, st *term.State) error { return term.Restore(fd, st) }
+func (realTermOps) GetSize(fd int) (int, int, error)     { return term.GetSize(fd) }
+
+// Compile-time assertion: the production ops must satisfy the seam.
+var _ termOps = realTermOps{}
+
+// inputConfig is everything the input layer needs to decide between the editor
+// and the scanner and then to build whichever it chose.
+//
+// Stdin and Stdout are the real descriptors: only their fd numbers are used, by
+// termOps. In and Out carry the byte streams, so tests can script input and
+// capture output without a pty.
+type inputConfig struct {
+	Stdin  *os.File
+	Stdout *os.File
+	Stderr io.Writer
+	In     io.Reader // defaults to Stdin
+	Out    io.Writer // defaults to Stdout
+
+	NoEditor   bool
+	UseHistory bool // true only for the default REPL; -goal reads answers only
+
+	Getenv func(string) string // defaults to os.Getenv
+	Root   string              // workspace root, for the per-workspace history
+
+	Ops termOps // defaults to realTermOps{}
+}
+
+func (cfg inputConfig) withDefaults() inputConfig {
+	if cfg.Ops == nil {
+		cfg.Ops = realTermOps{}
+	}
+	if cfg.In == nil && cfg.Stdin != nil {
+		cfg.In = cfg.Stdin
+	}
+	if cfg.Out == nil && cfg.Stdout != nil {
+		cfg.Out = cfg.Stdout
+	}
+	// Stderr carries the two warnings this layer can emit -- a degraded history
+	// and a failed MakeRaw. Both fire exactly when something has already gone
+	// wrong, so a nil writer would turn a recoverable problem into a panic.
+	if cfg.Stderr == nil {
+		cfg.Stderr = os.Stderr
+	}
+	if cfg.Getenv == nil {
+		cfg.Getenv = os.Getenv
+	}
+	return cfg
+}
+
+// newInput builds the line source for an interactive mode.
+//
+// The scanner is returned immediately for every declined case, so a non-TTY,
+// dumb, or -no-editor run behaves exactly as it did before this feature. For a
+// selected editor the scanner factory is passed in unbuilt: constructing one
+// eagerly beside a live editor would start a second goroutine reading the same
+// stdin, and the two would steal each other's bytes.
+func newInput(cfg inputConfig) lineSource {
+	cfg = cfg.withDefaults()
+	if !selectsEditor(runtime.GOOS, cfg) {
+		return newScannerSource(cfg.In, cfg.Out)
+	}
+	resize, stopResize := watchResize()
+	return newEditorSource(cfg, resize, stopResize, func() lineSource {
+		return newScannerSource(cfg.In, cfg.Out)
+	})
+}
+
+// selectsEditor is the pure selection decision, with goos passed in so the
+// Windows row is provable on any host.
+//
+// Windows declines regardless of TTY state, before any descriptor is probed.
+// x/term's Windows makeRaw sets ENABLE_VIRTUAL_TERMINAL_INPUT on the input
+// handle only and never enables ENABLE_VIRTUAL_TERMINAL_PROCESSING on stdout,
+// so a working editor there needs console-output setup this ticket can verify
+// only by compile-smoke. Windows keeps today's scanner, which is not a
+// regression, and a follow-up can add the editor with real verification.
+//
+// An empty TERM selects the editor: only the explicit "dumb" terminal type
+// declines, matching what "dumb" means.
+func selectsEditor(goos string, cfg inputConfig) bool {
+	switch {
+	case cfg.NoEditor, goos == "windows", cfg.Getenv("TERM") == "dumb":
+		return false
+	}
+	// Both descriptors must be terminals: the editor reads from one and repaints
+	// on the other, and a redirected half would either lose the repaint or read
+	// a file as keystrokes.
+	return cfg.Ops.IsTerminal(int(cfg.Stdin.Fd())) && cfg.Ops.IsTerminal(int(cfg.Stdout.Fd()))
 }
 
 // withLineSource owns Close for the interactive modes, so no caller has to
