@@ -9,6 +9,14 @@ import (
 	"time"
 )
 
+// newTestControl builds a control with no line source bound, so every test
+// below exercises the source-free default display.
+//
+// Read that literally: since the lineSource seam landed, production notices in
+// the REPL render through scannerSource.IdleDisplay, not through this default.
+// These cases still guard the fallback and the atPrompt/armed policy, but they
+// no longer cover the REPL's real rendering path -- TestScannerSourceIdleDisplay
+// and TestScannerSourceNoticeBetweenEnterPromptAndReadPrintsOnePrompt do.
 func newTestControl() (c *replControl, out, errOut *bytes.Buffer, interrupts chan struct{}, quit *bool) {
 	out, errOut = &bytes.Buffer{}, &bytes.Buffer{}
 	interrupts = make(chan struct{}, 1)
@@ -22,8 +30,8 @@ func newTestControl() (c *replControl, out, errOut *bytes.Buffer, interrupts cha
 // (the bug that made the REPL look hung).
 func TestReplControlNoticeReprintsPromptWhenIdle(t *testing.T) {
 	c, out, _, _, _ := newTestControl()
-	c.prompt()
-	out.Reset() // drop the initial prompt; focus on the notice's effect
+	c.enterPrompt()
+	out.Reset() // enterPrompt prints nothing; focus on the notice's effect
 	c.notice("warning: something happened")
 	got := out.String()
 	if !strings.Contains(got, "warning: something happened") {
@@ -38,7 +46,7 @@ func TestReplControlNoticeReprintsPromptWhenIdle(t *testing.T) {
 // screen mid-turn).
 func TestReplControlNoticeNoPromptDuringTurn(t *testing.T) {
 	c, out, errOut, _, _ := newTestControl()
-	c.prompt()
+	c.enterPrompt()
 	c.enterTurn()
 	out.Reset()
 	c.notice("mid-turn note")
@@ -53,7 +61,7 @@ func TestReplControlNoticeNoPromptDuringTurn(t *testing.T) {
 // Ctrl-C during a turn cancels the turn (sends on interrupts) and does not quit.
 func TestReplControlInterruptMidTurnCancels(t *testing.T) {
 	c, _, _, interrupts, quit := newTestControl()
-	c.prompt()
+	c.enterPrompt()
 	c.enterTurn()
 	c.interrupt()
 	select {
@@ -69,7 +77,7 @@ func TestReplControlInterruptMidTurnCancels(t *testing.T) {
 // First idle Ctrl-C arms + hints; the second quits.
 func TestReplControlDoubleInterruptIdleQuits(t *testing.T) {
 	c, out, _, interrupts, quit := newTestControl()
-	c.prompt()
+	c.enterPrompt()
 	out.Reset()
 
 	c.interrupt() // first: arm + hint
@@ -95,10 +103,10 @@ func TestReplControlDoubleInterruptIdleQuits(t *testing.T) {
 // again instead of quitting.
 func TestReplControlPromptDisarms(t *testing.T) {
 	c, _, _, _, quit := newTestControl()
-	c.prompt()
-	c.interrupt() // arm
-	c.prompt()    // intervening activity disarms
-	c.interrupt() // should hint again, not quit
+	c.enterPrompt()
+	c.interrupt()   // arm
+	c.enterPrompt() // intervening activity disarms
+	c.interrupt()   // should hint again, not quit
 	if *quit {
 		t.Error("Ctrl-C after a fresh prompt must re-arm (hint), not quit")
 	}
@@ -115,7 +123,7 @@ func TestReplControlWiredIntoRunREPL(t *testing.T) {
 	sess.control = newReplControl(&out, &errOut, interrupts, func() {})
 
 	in := strings.NewReader("/exit\n")
-	if err := runREPL(context.Background(), in, &out, interrupts, sess); err != nil {
+	if err := runREPL(context.Background(), newScannerSource(in, &out), &out, interrupts, sess); err != nil {
 		t.Fatalf("runREPL: %v", err)
 	}
 	if !strings.Contains(out.String(), promptText) {
@@ -139,7 +147,7 @@ func TestRunREPLExitsWhenControlQuits(t *testing.T) {
 	defer func() { _ = pw.Close() }() // unblock the lineReader goroutine at test end
 
 	done := make(chan error, 1)
-	go func() { done <- runREPL(ctx, pr, &out, interrupts, sess) }()
+	go func() { done <- runREPL(ctx, newScannerSource(pr, &out), &out, interrupts, sess) }()
 
 	cancel() // stand in for quit(): a second idle Ctrl-C
 	select {

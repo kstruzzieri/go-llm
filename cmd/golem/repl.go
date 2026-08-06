@@ -61,15 +61,14 @@ type replSession struct {
 // runREPL reads lines from in, dispatching slash commands and running every
 // other line as an agent goal. A value on interrupts cancels the in-flight Run
 // without ending the loop. EOF (Ctrl-D) returns nil.
-func runREPL(ctx context.Context, in io.Reader, out io.Writer, interrupts <-chan struct{}, sess *replSession) error {
-	lr := newLineReader(in)
+func runREPL(ctx context.Context, src lineSource, out io.Writer, interrupts <-chan struct{}, sess *replSession) error {
 	for {
 		if sess.control != nil {
-			sess.control.prompt()
-		} else {
-			_, _ = fmt.Fprint(out, promptText)
+			sess.control.enterPrompt()
 		}
-		line, ok, err := lr.ReadLine(ctx)
+		// The source prints the prompt. runREPL must not: the editor arriving
+		// in task 5 prints and repaints its own, and two printers double it.
+		line, ok, err := src.ReadGoal(ctx, promptText)
 		if err != nil {
 			if ctx.Err() != nil {
 				return nil // ctx canceled at the prompt: exit quietly (idle Ctrl-C quit / shutdown)
@@ -93,7 +92,10 @@ func runREPL(ctx context.Context, in io.Reader, out io.Writer, interrupts <-chan
 			}
 			continue
 		}
-		_, _ = runOnce(ctx, out, interrupts, sess, line, lr)
+		// Recorded only here: after trimming and after the empty and slash
+		// checks, so a blank line or a command can never reach history.
+		src.RecordGoal(line)
+		_, _ = runOnce(ctx, out, interrupts, sess, line, src)
 	}
 }
 
@@ -104,7 +106,7 @@ var errOneShotFailed = errors.New("one-shot run failed")
 // runOneShot executes exactly one agent turn for -p. Only the final answer is
 // written to stdout (with a single trailing newline); every other line the
 // turn produces — tool progress, warnings, errors — goes to stderr via
-// runOnce. A nil lineReader means no interactive approver exists, so the
+// runOnce. A nil line source means no interactive approver exists, so the
 // runtime fail-safe denies any approval-gated tool call.
 func runOneShot(ctx context.Context, stdout, stderr io.Writer, interrupts <-chan struct{}, sess *replSession, prompt string) error {
 	res, runErr := runOnce(ctx, stderr, interrupts, sess, prompt, nil)
@@ -121,7 +123,7 @@ func runOneShot(ctx context.Context, stdout, stderr io.Writer, interrupts <-chan
 // runOnce runs a single agent turn, rendering all progress and errors to out.
 // It returns the run result so runOneShot can extract the final answer; the
 // REPL ignores it.
-func runOnce(ctx context.Context, out io.Writer, interrupts <-chan struct{}, sess *replSession, line string, lr *lineReader) (agent.Result, error) {
+func runOnce(ctx context.Context, out io.Writer, interrupts <-chan struct{}, sess *replSession, line string, src lineSource) (agent.Result, error) {
 	runCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
@@ -147,9 +149,13 @@ func runOnce(ctx context.Context, out io.Writer, interrupts <-chan struct{}, ses
 		}()
 	}
 
+	// A nil source means no interactive approver is available -- one-shot mode
+	// in production, read-only sessions in tests. It is capability absence, not
+	// a mode assertion: the runtime's nil-approver fail-safe then denies every
+	// gated call.
 	var approver agent.Approver
-	if lr != nil && needsApprover(sess.allowWrite, sess.allowExec, sess.mcpAttached) {
-		approver = newReplApprover(lr, out, sess.color)
+	if src != nil && needsApprover(sess.allowWrite, sess.allowExec, sess.mcpAttached) {
+		approver = newReplApprover(src, out, sess.color)
 	}
 
 	rend := newRenderer(out, sess.color, sess.maxSteps, sess.clock, sess.mixed)

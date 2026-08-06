@@ -161,7 +161,7 @@ func TestREPL_EndToEndReadOnly(t *testing.T) {
 	in := strings.NewReader("read hello.txt\n")
 	sess := newTestSession(t, caller, root)
 
-	if err := runREPL(context.Background(), in, &out, nil, sess); err != nil {
+	if err := runREPL(context.Background(), newScannerSource(in, &out), &out, nil, sess); err != nil {
 		t.Fatalf("runREPL: %v", err)
 	}
 	got := out.String()
@@ -186,7 +186,7 @@ func TestREPL_SlashCommands(t *testing.T) {
 	in := strings.NewReader("/help\n/tools\n/model\n/clear\n/new\n/undo\n/bogus\n/exit\n")
 	sess := newTestSession(t, caller, root)
 
-	if err := runREPL(context.Background(), in, &out, nil, sess); err != nil {
+	if err := runREPL(context.Background(), newScannerSource(in, &out), &out, nil, sess); err != nil {
 		t.Fatalf("runREPL: %v", err)
 	}
 	got := out.String()
@@ -213,7 +213,7 @@ func TestREPL_CtrlCCancelsRunKeepsREPL(t *testing.T) {
 		interrupts <- struct{}{}
 	}()
 
-	if err := runREPL(context.Background(), in, &out, interrupts, sess); err != nil {
+	if err := runREPL(context.Background(), newScannerSource(in, &out), &out, interrupts, sess); err != nil {
 		t.Fatalf("runREPL should not error on cancel: %v", err)
 	}
 	if !strings.Contains(out.String(), "canceled") {
@@ -287,7 +287,7 @@ func TestREPL_HistoryReachesModelAsRealRoles(t *testing.T) {
 
 	var out strings.Builder
 	in := strings.NewReader("new question\n")
-	if err := runREPL(context.Background(), in, &out, nil, sess); err != nil {
+	if err := runREPL(context.Background(), newScannerSource(in, &out), &out, nil, sess); err != nil {
 		t.Fatalf("runREPL: %v", err)
 	}
 
@@ -333,7 +333,7 @@ func TestREPL_PersistsToolTranscriptButResumesPlainHistory(t *testing.T) {
 	sess := newSessionedTestSession(t, caller, root, "workspace:toolhist")
 
 	var out strings.Builder
-	if err := runREPL(context.Background(), strings.NewReader("read it\n"), &out, nil, sess); err != nil {
+	if err := runREPL(context.Background(), newScannerSource(strings.NewReader("read it\n"), &out), &out, nil, sess); err != nil {
 		t.Fatalf("runREPL: %v", err)
 	}
 	if len(sess.session.msgs) != 4 {
@@ -350,7 +350,7 @@ func TestREPL_PersistsToolTranscriptButResumesPlainHistory(t *testing.T) {
 	resume := &captureCaller{answer: "second"}
 	sess.orch = agent.New(resume, agent.ContextManager{})
 	sess.runtime = newTestRuntime(t, root, sess.baseSystem, sess.orch, nil)
-	if err := runREPL(context.Background(), strings.NewReader("again\n"), &out, nil, sess); err != nil {
+	if err := runREPL(context.Background(), newScannerSource(strings.NewReader("again\n"), &out), &out, nil, sess); err != nil {
 		t.Fatalf("second runREPL: %v", err)
 	}
 	roles := make([]string, len(resume.messages))
@@ -428,7 +428,7 @@ func TestREPL_DoesNotPersistCanceledRun(t *testing.T) {
 		time.Sleep(20 * time.Millisecond)
 		interrupts <- struct{}{}
 	}()
-	if err := runREPL(context.Background(), in, &out, interrupts, sess); err != nil {
+	if err := runREPL(context.Background(), newScannerSource(in, &out), &out, interrupts, sess); err != nil {
 		t.Fatalf("runREPL: %v", err)
 	}
 	if len(sess.session.msgs) != 0 {
@@ -453,7 +453,7 @@ func TestREPL_ReadOnlyDeniesWriteAttempt(t *testing.T) {
 	sess := newTestSession(t, caller, root) // read-only: no write tools, nil approver
 	var out strings.Builder
 	in := strings.NewReader("please write out.txt\n")
-	if err := runREPL(context.Background(), in, &out, nil, sess); err != nil {
+	if err := runREPL(context.Background(), newScannerSource(in, &out), &out, nil, sess); err != nil {
 		t.Fatalf("runREPL: %v", err)
 	}
 	if strings.Contains(out.String(), "Apply this change?") {
@@ -481,7 +481,7 @@ func TestREPL_AllowWriteApprovedWriteApplies(t *testing.T) {
 
 	var out strings.Builder
 	in := strings.NewReader("write out.txt\ny\n") // goal, then approve the write
-	if err := runREPL(context.Background(), in, &out, nil, sess); err != nil {
+	if err := runREPL(context.Background(), newScannerSource(in, &out), &out, nil, sess); err != nil {
 		t.Fatalf("runREPL: %v", err)
 	}
 	got, err := os.ReadFile(filepath.Join(root, "out.txt"))
@@ -510,7 +510,7 @@ func TestREPL_AllowWriteDeniedWriteSkips(t *testing.T) {
 
 	var out strings.Builder
 	in := strings.NewReader("write out.txt\nn\n") // goal, then deny the write
-	if err := runREPL(context.Background(), in, &out, nil, sess); err != nil {
+	if err := runREPL(context.Background(), newScannerSource(in, &out), &out, nil, sess); err != nil {
 		t.Fatalf("runREPL: %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(root, "out.txt")); !os.IsNotExist(err) {
@@ -586,7 +586,7 @@ func TestRunOnceExecOnlyWiresApprover(t *testing.T) {
 
 	var out strings.Builder
 	in := strings.NewReader("run something\nn\n") // goal, then deny the exec
-	if err := runREPL(context.Background(), in, &out, nil, sess); err != nil {
+	if err := runREPL(context.Background(), newScannerSource(in, &out), &out, nil, sess); err != nil {
 		t.Fatalf("runREPL: %v", err)
 	}
 	if !strings.Contains(out.String(), "Run this command?") {
@@ -605,7 +605,7 @@ func TestREPL_ClearAndNew(t *testing.T) {
 
 	var out strings.Builder
 	in := strings.NewReader("/clear\n/new\n/exit\n")
-	if err := runREPL(context.Background(), in, &out, nil, sess); err != nil {
+	if err := runREPL(context.Background(), newScannerSource(in, &out), &out, nil, sess); err != nil {
 		t.Fatalf("runREPL: %v", err)
 	}
 	got := out.String()
@@ -637,7 +637,7 @@ func TestREPL_SessionsListsStoredSessions(t *testing.T) {
 
 	var out strings.Builder
 	in := strings.NewReader("/sessions\n/exit\n")
-	if err := runREPL(context.Background(), in, &out, nil, sess); err != nil {
+	if err := runREPL(context.Background(), newScannerSource(in, &out), &out, nil, sess); err != nil {
 		t.Fatalf("runREPL: %v", err)
 	}
 	got := out.String()
@@ -668,7 +668,7 @@ func TestREPL_ResumeSwitchesActiveSession(t *testing.T) {
 
 	var out strings.Builder
 	in := strings.NewReader("/resume user:other\nfollow up\n")
-	if err := runREPL(context.Background(), in, &out, nil, sess); err != nil {
+	if err := runREPL(context.Background(), newScannerSource(in, &out), &out, nil, sess); err != nil {
 		t.Fatalf("runREPL: %v", err)
 	}
 	if sess.session.id != "user:other" {
@@ -707,7 +707,7 @@ func TestREPL_SearchSessions(t *testing.T) {
 
 	var out strings.Builder
 	in := strings.NewReader("/search-sessions approval\n/exit\n")
-	if err := runREPL(context.Background(), in, &out, nil, sess); err != nil {
+	if err := runREPL(context.Background(), newScannerSource(in, &out), &out, nil, sess); err != nil {
 		t.Fatalf("runREPL: %v", err)
 	}
 	got := out.String()
