@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"io"
 	"strings"
 	"testing"
@@ -125,5 +126,41 @@ func TestReplApproverColorRendersAnsi(t *testing.T) {
 	}
 	if !strings.Contains(s, "\x1b[31m-removed") {
 		t.Fatalf("removed line not red:\n%q", s)
+	}
+}
+
+// stubAnswerSource scripts ReadAnswer; every other lineSource method is inert.
+type stubAnswerSource struct {
+	line string
+	ok   bool
+	err  error
+}
+
+func (s *stubAnswerSource) ReadGoal(context.Context, string) (string, bool, error) {
+	return "", false, nil
+}
+func (s *stubAnswerSource) ReadAnswer(context.Context, string) (string, bool, error) {
+	return s.line, s.ok, s.err
+}
+func (s *stubAnswerSource) RecordGoal(string)  {}
+func (s *stubAnswerSource) IdleDisplay(string) {}
+func (s *stubAnswerSource) Close() error       { return nil }
+
+func TestReplApproverMapsInterruptToCanceled(t *testing.T) {
+	// The editor's Ctrl-C sentinel is normalized at the approval boundary so
+	// every caller classifies one shared error. Leaking errInterrupted would
+	// make runOnce render "error: interrupted" and the Agentflow author skip
+	// its errPlannerInterrupted mapping.
+	var out strings.Builder
+	ap := newReplApprover(&stubAnswerSource{err: errInterrupted}, &out, false)
+	ok, err := ap.Approve(context.Background(), newCall(), "preview")
+	if ok {
+		t.Fatal("interrupted approval must deny")
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want context.Canceled", err)
+	}
+	if errors.Is(err, errInterrupted) {
+		t.Fatalf("err = %v: the editor sentinel must not leak past the approver", err)
 	}
 }

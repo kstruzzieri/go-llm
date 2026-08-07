@@ -120,6 +120,13 @@ type inputConfig struct {
 	NoEditor   bool
 	UseHistory bool // true only for the default REPL; -goal reads answers only
 
+	// OnInterrupt delivers an in-band Ctrl-C to the interrupt policy owner
+	// (replControl.interrupt in production). Raw mode disables ISIG, so the
+	// editor is the only component that ever sees the 0x03 byte; the scanner
+	// path keeps cooked-mode SIGINT delivery and never calls this. Defaults to
+	// a no-op.
+	OnInterrupt func()
+
 	Getenv func(string) string // defaults to os.Getenv
 	Root   string              // workspace root, for the per-workspace history
 
@@ -144,6 +151,9 @@ func (cfg inputConfig) withDefaults() inputConfig {
 	}
 	if cfg.Getenv == nil {
 		cfg.Getenv = os.Getenv
+	}
+	if cfg.OnInterrupt == nil {
+		cfg.OnInterrupt = func() {}
 	}
 	return cfg
 }

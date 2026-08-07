@@ -150,12 +150,14 @@ func (c countingCloseSource) Close() error {
 }
 
 type editorOpts struct {
-	in         io.Reader
-	useHistory bool
-	getenv     func(string) string
-	root       string
-	ops        *fakeTermOps
-	resize     chan struct{}
+	in          io.Reader
+	out         io.Writer // wraps the fixture's lockedBuffer when set; assertions still read f.out
+	useHistory  bool
+	getenv      func(string) string
+	root        string
+	ops         *fakeTermOps
+	resize      chan struct{}
+	onInterrupt func()
 }
 
 // tempDescriptors returns two distinct real descriptors. Only their fd numbers
@@ -226,16 +228,21 @@ func newEditorFixture(t *testing.T, opts editorOpts) *editorFixture {
 		f.resize = make(chan struct{}, 1)
 	}
 
+	var cfgOut io.Writer = out
+	if opts.out != nil {
+		cfgOut = opts.out
+	}
 	cfg := inputConfig{
-		Stdin:      stdin,
-		Stdout:     stdout,
-		Stderr:     errOut,
-		In:         in,
-		Out:        out,
-		UseHistory: opts.useHistory,
-		Getenv:     getenv,
-		Root:       opts.root,
-		Ops:        ops,
+		Stdin:       stdin,
+		Stdout:      stdout,
+		Stderr:      errOut,
+		In:          in,
+		Out:         cfgOut,
+		UseHistory:  opts.useHistory,
+		Getenv:      getenv,
+		Root:        opts.root,
+		Ops:         ops,
+		OnInterrupt: opts.onInterrupt,
 	}
 	var resize <-chan struct{}
 	if f.resize != nil {
@@ -1347,5 +1354,286 @@ func TestEditorSourceAggregateCeilingIsExact(t *testing.T) {
 				t.Fatalf("output does not contain %q", goalLimitWarning)
 			}
 		})
+	}
+}
+
+func TestEditorSourceCtrlCDiscardsRetainedBytesAndContinues(t *testing.T) {
+	// Ctrl-C at the prompt: filter-retained bytes past 0x03 are discarded
+	// (cooked-mode SIGINT flushes the input queue, so this is fidelity), the
+	// kernel queue -- bytes still in the reader -- survives, the Terminal is
+	// recreated, and the next line typed becomes the next goal with no
+	// sacrificial Enter. All inside ONE raw window.
+	r := &chunkReader{chunks: [][]byte{[]byte("junk\x03XYZ"), []byte("ok\r")}}
+	var calls int
+	f := newEditorFixture(t, editorOpts{in: r, onInterrupt: func() { calls++ }})
+	line, ok, err := f.readGoal(t)
+	if err != nil || !ok || line != "ok" {
+		t.Fatalf("ReadGoal = %q ok=%v err=%v, want \"ok\" true nil", line, ok, err)
+	}
+	if calls != 1 {
+		t.Fatalf("OnInterrupt called %d times, want 1", calls)
+	}
+	if got := strings.Count(f.out.String(), pasteEnableSeq); got != 2 {
+		t.Fatalf("paste enabled %d times, want 2: the Terminal must be recreated after Ctrl-C", got)
+	}
+	makeRaw, restore, getSize := f.ops.counts()
+	if makeRaw != 1 || restore != 1 {
+		t.Fatalf("MakeRaw=%d Restore=%d, want 1/1: the cycle stays inside one raw window", makeRaw, restore)
+	}
+	if getSize != 2 {
+		t.Fatalf("GetSize called %d times, want 2: the replacement Terminal must be sized before use", getSize)
+	}
+}
+
+func TestEditorSourceCtrlCHintBeginsOnAFreshLine(t *testing.T) {
+	// The replacement Terminal has cursorX/cursorY == 0 and cannot know where
+	// the discarded line left the physical cursor, so the editor writes an
+	// explicit CRLF before the interrupt owner prints its hint.
+	r := &chunkReader{chunks: [][]byte{[]byte("\x03"), []byte("ok\r")}}
+	var f *editorFixture
+	f = newEditorFixture(t, editorOpts{in: r, onInterrupt: func() { f.src.IdleDisplay(ctrlCHint) }})
+	if line, _, err := f.readGoal(t); err != nil || line != "ok" {
+		t.Fatalf("ReadGoal = %q err=%v", line, err)
+	}
+	if !strings.Contains(f.out.String(), "\r\n"+ctrlCHint) {
+		t.Fatalf("hint not preceded by an explicit CRLF in %q", f.out.String())
+	}
+}
+
+func TestEditorSourceSecondCtrlCQuitsWithoutReenteringPrompt(t *testing.T) {
+	// The arm/hint cycle never leaves ReadGoal: the first idle Ctrl-C arms and
+	// hints, the second quits via replControl. Because both presses live in a
+	// single ReadGoal call, runREPL cannot call enterPrompt in between, which
+	// is exactly what keeps the arm from being cleared.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	interrupts := make(chan struct{}, 1)
+	ctrl := newReplControl(io.Discard, io.Discard, interrupts, cancel)
+	r := &chunkReader{chunks: [][]byte{[]byte("partial\x03"), []byte("\x03")}}
+	f := newEditorFixture(t, editorOpts{in: r, onInterrupt: ctrl.interrupt})
+	ctrl.setIdleDisplay(f.src.IdleDisplay)
+	ctrl.enterPrompt()
+
+	line, ok, err := f.src.ReadGoal(ctx, promptText)
+	if !errors.Is(err, context.Canceled) || ok || line != "" {
+		t.Fatalf("ReadGoal = %q ok=%v err=%v, want the canceled context", line, ok, err)
+	}
+	if got := strings.Count(f.out.String(), ctrlCHint); got != 1 {
+		t.Fatalf("hint printed %d times, want exactly 1 (first press arms, second quits)", got)
+	}
+}
+
+func TestEditorSourceCtrlCDiscardsComposition(t *testing.T) {
+	// An interrupted partial goal -- a backslash continuation plus a partial
+	// paste -- must not leak into the next goal or be recorded.
+	in := `foo\` + "\r" + pasteOn + "a\nb" + pasteOff + "\x03"
+	r := &chunkReader{chunks: [][]byte{[]byte(in), []byte("next\r")}}
+	f := newEditorFixture(t, editorOpts{in: r})
+	line, ok, err := f.readGoal(t)
+	if err != nil || !ok || line != "next" {
+		t.Fatalf("ReadGoal = %q ok=%v err=%v, want \"next\" true nil", line, ok, err)
+	}
+}
+
+func TestEditorSourceCtrlCInsidePasteIsData(t *testing.T) {
+	var calls int
+	f := newEditorFixture(t, editorOpts{
+		in:          strings.NewReader(pasteOn + "a\x03b" + pasteOff + "\r"),
+		onInterrupt: func() { calls++ },
+	})
+	line, ok, err := f.readGoal(t)
+	if err != nil || !ok || line != "a\x03b" {
+		t.Fatalf("ReadGoal = %q ok=%v err=%v, want \"a\\x03b\" true nil", line, ok, err)
+	}
+	if calls != 0 {
+		t.Fatalf("OnInterrupt called %d times for an in-paste 0x03, want 0", calls)
+	}
+}
+
+func TestEditorSourceCtrlCRecreationKeepsConfiguration(t *testing.T) {
+	// The replacement Terminal must be rebound with the same configuration as
+	// the original: goal history and the 4096-refusal watcher are the two with
+	// observable behavior.
+	t.Run("history recall", func(t *testing.T) {
+		root := t.TempDir()
+		xdg := t.TempDir()
+		getenv := func(k string) string {
+			if k == "XDG_DATA_HOME" {
+				return xdg
+			}
+			return ""
+		}
+		r := &chunkReader{chunks: [][]byte{[]byte("\x03"), []byte("\x1b[A\r")}}
+		f := newEditorFixture(t, editorOpts{in: r, useHistory: true, getenv: getenv, root: root})
+		f.src.RecordGoal("remember me")
+		line, ok, err := f.readGoal(t)
+		if err != nil || !ok || line != "remember me" {
+			t.Fatalf("post-Ctrl-C recall = %q ok=%v err=%v, want \"remember me\"", line, ok, err)
+		}
+	})
+	t.Run("4096 watcher", func(t *testing.T) {
+		r := &chunkReader{chunks: [][]byte{[]byte("\x03"), []byte(strings.Repeat("a", maxEditorRunes+1) + "\r")}}
+		f := newEditorFixture(t, editorOpts{in: r})
+		line, ok, err := f.readGoal(t)
+		if err != nil || !ok || len(line) != maxEditorRunes {
+			t.Fatalf("post-Ctrl-C read ok=%v err=%v len=%d, want a full 4096-rune line", ok, err, len(line))
+		}
+		if !strings.Contains(f.out.String(), lineLimitWarning) {
+			t.Fatalf("the refusal watcher did not survive recreation; output %q", f.out.String())
+		}
+	})
+}
+
+func TestEditorSourceAnswerCtrlCReturnsInterrupted(t *testing.T) {
+	// ReadAnswer never continues the approval prompt: one interrupt delivery,
+	// then errInterrupted after the raw window closes. The approver maps the
+	// sentinel; the editor only reports the event.
+	var calls int
+	f := newEditorFixture(t, editorOpts{in: strings.NewReader("y\x03"), onInterrupt: func() { calls++ }})
+	line, ok, err := f.src.ReadAnswer(context.Background(), "approve? ")
+	if !errors.Is(err, errInterrupted) || ok || line != "" {
+		t.Fatalf("ReadAnswer = %q ok=%v err=%v, want errInterrupted", line, ok, err)
+	}
+	if calls != 1 {
+		t.Fatalf("OnInterrupt called %d times, want 1", calls)
+	}
+	makeRaw, restore, _ := f.ops.counts()
+	if makeRaw != 1 || restore != 1 {
+		t.Fatalf("MakeRaw=%d Restore=%d, want 1/1: the window must close before returning", makeRaw, restore)
+	}
+	if got := strings.Count(f.out.String(), pasteDisableSeq); got != 1 {
+		t.Fatalf("paste disabled %d times, want 1", got)
+	}
+}
+
+func TestEditorSourceAnswerDrainsAPastedAnswer(t *testing.T) {
+	// A multiline paste at an approval prompt: the answer is invalid (deny),
+	// the remaining segments are drained inside the same raw window, and the
+	// next goal reads clean -- without this, lines 2..n become later goals.
+	r := &chunkReader{chunks: [][]byte{
+		[]byte(pasteOn + "y\nrm -rf /" + pasteOff + "\r"),
+		[]byte("next\r"),
+	}}
+	f := newEditorFixture(t, editorOpts{in: r})
+	line, ok, err := f.src.ReadAnswer(context.Background(), "approve? ")
+	if err != nil || !ok || line != "" {
+		t.Fatalf("pasted answer = %q ok=%v err=%v, want the invalid-answer denial (\"\" true nil)", line, ok, err)
+	}
+	makeRaw, restore, _ := f.ops.counts()
+	if makeRaw != 1 || restore != 1 {
+		t.Fatalf("MakeRaw=%d Restore=%d after the answer, want 1/1: the drain stays inside the same raw window", makeRaw, restore)
+	}
+	goal, ok, err := f.readGoal(t)
+	if err != nil || !ok || goal != "next" {
+		t.Fatalf("next ReadGoal = %q ok=%v err=%v, want \"next\": drained paste lines must not leak", goal, ok, err)
+	}
+}
+
+func TestEditorSourceAnswerOversizedPasteDenies(t *testing.T) {
+	// errPasteTooLarge at an approval prompt recreates the Terminal and denies
+	// with no approval error; it must not re-prompt for the same approval, and
+	// the next goal reads clean.
+	big := strings.Repeat("a", maxGoalBytes+2)
+	r := &chunkReader{chunks: [][]byte{
+		[]byte(pasteOn + big + pasteOff),
+		[]byte("next\r"),
+	}}
+	f := newEditorFixture(t, editorOpts{in: r})
+	line, ok, err := f.src.ReadAnswer(context.Background(), "approve? ")
+	if err != nil || !ok || line != "" {
+		t.Fatalf("oversized pasted answer = %q ok=%v err=%v, want denial with no error", line, ok, err)
+	}
+	if !strings.Contains(f.out.String(), goalLimitWarning) {
+		t.Fatalf("output does not contain %q", goalLimitWarning)
+	}
+	goal, ok, err := f.readGoal(t)
+	if err != nil || !ok || goal != "next" {
+		t.Fatalf("next ReadGoal = %q ok=%v err=%v, want \"next\"", goal, ok, err)
+	}
+}
+
+// gatedWriter blocks the first write containing its marker until released,
+// signalling entry. Everything else passes straight through to inner.
+type gatedWriter struct {
+	inner   io.Writer
+	marker  string
+	entered chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (w *gatedWriter) Write(p []byte) (int, error) {
+	if strings.Contains(string(p), w.marker) {
+		w.once.Do(func() {
+			close(w.entered)
+			<-w.release
+		})
+	}
+	return w.inner.Write(p)
+}
+
+// signalGateReader signals the first read request, then blocks every read on
+// gate before delegating.
+type signalGateReader struct {
+	requested chan struct{}
+	gate      chan struct{}
+	r         io.Reader
+	once      sync.Once
+}
+
+func (s *signalGateReader) Read(p []byte) (int, error) {
+	s.once.Do(func() { close(s.requested) })
+	<-s.gate
+	return s.r.Read(p)
+}
+
+func TestEditorSourceCtrlCRecreationSerializesWithNotices(t *testing.T) {
+	// Barrier-forced ordering, not repetition: an in-flight notice holds the
+	// binding mutex through its Terminal write, so recreation (replace, CRLF,
+	// hint) cannot start until it completes. The notice is parked in Write
+	// while the Ctrl-C byte is released, proving the recreation path queues
+	// behind the binding rather than racing it.
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	gate := make(chan struct{})
+	requested := make(chan struct{})
+
+	var f *editorFixture
+	inner := &chunkReader{chunks: [][]byte{[]byte("\x03"), []byte("ok\r")}}
+	in := &signalGateReader{requested: requested, gate: gate, r: inner}
+	opts := editorOpts{in: in, onInterrupt: func() { f.src.IdleDisplay(ctrlCHint) }}
+	f = newEditorFixture(t, opts)
+	f.src.rw.w = &gatedWriter{inner: f.src.rw.w, marker: "NOTICE", entered: entered, release: release}
+
+	type result struct {
+		line string
+		err  error
+	}
+	done := make(chan result, 1)
+	go func() {
+		line, _, err := f.readGoal(t)
+		done <- result{line, err}
+	}()
+
+	<-requested // the reader is at the input gate with a Terminal bound
+	go f.src.IdleDisplay("NOTICE")
+	<-entered   // the notice holds the binding mutex, parked mid-write
+	close(gate) // release the Ctrl-C byte; recreation must queue behind the notice
+	time.Sleep(20 * time.Millisecond)
+	close(release)
+
+	select {
+	case res := <-done:
+		if res.err != nil || res.line != "ok" {
+			t.Fatalf("ReadGoal = %q err=%v", res.line, res.err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("read did not complete; recreation deadlocked against the notice")
+	}
+	out := f.out.String()
+	notice := strings.Index(out, "NOTICE")
+	hint := strings.Index(out, "\r\n"+ctrlCHint)
+	if notice == -1 || hint == -1 || notice > hint {
+		t.Fatalf("notice at %d, CRLF+hint at %d: the parked notice must land before recreation's output in %q", notice, hint, out)
 	}
 }

@@ -3,9 +3,11 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -714,5 +716,107 @@ func TestREPL_SearchSessions(t *testing.T) {
 	if !strings.Contains(got, "session search:") || !strings.Contains(got, "workspace:search") ||
 		!strings.Contains(got, "approval prompts") || strings.Contains(got, "user:other") {
 		t.Fatalf("search output wrong:\n%s", got)
+	}
+}
+
+// barrierCaller signals entry, then blocks until its context is canceled.
+type barrierCaller struct {
+	started chan struct{}
+	once    sync.Once
+}
+
+func (b *barrierCaller) Chat(ctx context.Context, _ provider.ChatRequest, _ func(provider.ChatResponse) error) (agent.ModelResult, error) {
+	b.once.Do(func() { close(b.started) })
+	<-ctx.Done()
+	return agent.ModelResult{}, ctx.Err()
+}
+
+// newTracingSession builds a session whose observ records traces under a temp
+// XDG root, returning the session and the trace directory.
+func newTracingSession(t *testing.T, caller agent.ModelCaller) (*replSession, string) {
+	t.Helper()
+	root := t.TempDir()
+	base := t.TempDir()
+	getenv := func(k string) string {
+		if k == "XDG_DATA_HOME" {
+			return base
+		}
+		return ""
+	}
+	o, err := newObserv(getenv, root, true, false, func() time.Time { return time.Unix(1719600000, 0) })
+	if err != nil {
+		t.Fatalf("newObserv: %v", err)
+	}
+	sess := newTestSession(t, caller, root)
+	sess.obs = o
+	return sess, o.traceDir
+}
+
+// recordedTraceStatus reads the single trace file in dir and returns its
+// recorded status field.
+func recordedTraceStatus(t *testing.T, dir string) string {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("ReadDir: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("trace files = %d, want 1", len(entries))
+	}
+	b, err := os.ReadFile(filepath.Join(dir, entries[0].Name()))
+	if err != nil {
+		t.Fatalf("read trace: %v", err)
+	}
+	var trace struct {
+		Status string `json:"status"`
+	}
+	if err := json.Unmarshal(b, &trace); err != nil {
+		t.Fatalf("parse trace: %v", err)
+	}
+	return trace.Status
+}
+
+func TestRunOnceApproverFirstCancelIsCanceled(t *testing.T) {
+	// Approver-first ordering, barrier-forced by construction: Run returns
+	// context.Canceled synchronously (an interrupted approval mapped by the
+	// approver) and there is NO watcher (interrupts is nil), so only the
+	// synchronous normalization in runOnce can make runCtx canceled. Pins both
+	// the rendered line and the status recorded to the trace, which is what
+	// telemetry consumers see.
+	sess, traceDir := newTracingSession(t, errCaller{err: context.Canceled})
+	var out strings.Builder
+	_, runErr := runOnce(context.Background(), &out, nil, sess, "goal", nil)
+	if !errors.Is(runErr, context.Canceled) {
+		t.Fatalf("runErr = %v, want context.Canceled", runErr)
+	}
+	if !strings.Contains(out.String(), "canceled") || strings.Contains(out.String(), "error:") {
+		t.Fatalf("approver-first cancel rendered:\n%s\nwant canceled, never error:", out.String())
+	}
+	if status := recordedTraceStatus(t, traceDir); status != "canceled" {
+		t.Fatalf("recorded trace status = %q, want canceled", status)
+	}
+}
+
+func TestRunOnceWatcherFirstCancelIsCanceled(t *testing.T) {
+	// Watcher-first ordering, barrier-forced: the model blocks until the
+	// interrupt watcher cancels runCtx, so runCtx.Err() is already non-nil
+	// when Run returns. Must classify identically to approver-first.
+	caller := &barrierCaller{started: make(chan struct{})}
+	sess, traceDir := newTracingSession(t, caller)
+	interrupts := make(chan struct{}, 1)
+	go func() {
+		<-caller.started
+		interrupts <- struct{}{}
+	}()
+	var out strings.Builder
+	_, runErr := runOnce(context.Background(), &out, interrupts, sess, "goal", nil)
+	if !errors.Is(runErr, context.Canceled) {
+		t.Fatalf("runErr = %v, want context.Canceled", runErr)
+	}
+	if !strings.Contains(out.String(), "canceled") || strings.Contains(out.String(), "error:") {
+		t.Fatalf("watcher-first cancel rendered:\n%s\nwant canceled, never error:", out.String())
+	}
+	if status := recordedTraceStatus(t, traceDir); status != "canceled" {
+		t.Fatalf("recorded trace status = %q, want canceled", status)
 	}
 }

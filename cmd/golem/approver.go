@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"strings"
@@ -56,6 +57,13 @@ func (a *replApprover) Approve(ctx context.Context, call provider.ToolCall, prev
 		question = "Apply this change? [y/N] "
 	}
 	line, ok, err := a.src.ReadAnswer(ctx, question)
+	if errors.Is(err, errInterrupted) {
+		// Normalized here, at the approval boundary, so runOnce and the
+		// Agentflow author classify one shared error: an interrupted approval
+		// IS a cancellation, and the editor-local sentinel must not leak into
+		// either caller's error taxonomy.
+		return false, context.Canceled
+	}
 	if err != nil {
 		return false, err // ctx canceled: abort the run
 	}

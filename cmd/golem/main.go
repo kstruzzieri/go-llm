@@ -1007,12 +1007,13 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File) error {
 			defer stopAutoIndex()
 		}
 		return withLineSource(newInput(inputConfig{
-			Stdin:    stdin,
-			Stdout:   stdout,
-			Stderr:   stderr,
-			NoEditor: f.noEditor,
-			Getenv:   os.Getenv,
-			Root:     root,
+			Stdin:       stdin,
+			Stdout:      stdout,
+			Stderr:      stderr,
+			NoEditor:    f.noEditor,
+			Getenv:      os.Getenv,
+			Root:        root,
+			OnInterrupt: onInterrupt,
 		}), func(src lineSource) error {
 			return runAgentflowAuthor(ctx, src, stdout, stderr, interrupts, sess, f, root)
 		})
@@ -1038,6 +1039,10 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File) error {
 		UseHistory: true, // only the default REPL reads goals worth recalling
 		Getenv:     os.Getenv,
 		Root:       root,
+		// Raw mode disables ISIG, so the editor sees Ctrl-C as an in-band
+		// byte; it delivers the event to the same policy owner the SIGINT
+		// handler uses, keeping one interrupt taxonomy for both modes.
+		OnInterrupt: onInterrupt,
 	}), func(src lineSource) error {
 		// Bound before the auto-index goroutine can emit a notice, so no
 		// asynchronous message is ever rendered through the default display

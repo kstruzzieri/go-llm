@@ -203,6 +203,14 @@ func runOnce(ctx context.Context, out io.Writer, interrupts <-chan struct{}, ses
 		Approver: approver, // nil when read-only => runtime fail-safe denies Write/Exec
 		Observer: observer,
 	}, func(golemruntime.Event) error { return nil })
+	// An interrupted approval surfaces as context.Canceled from inside the run
+	// and races the interrupt watcher's cancel(). Synchronize the derived
+	// context here so status and rendering never depend on scheduler order: an
+	// interrupted approval IS a cancellation. This deliberately flips the
+	// recorded trace/telemetry status for that case from error to canceled.
+	if errors.Is(runErr, context.Canceled) {
+		cancel()
+	}
 	var sessionSaveErr error
 	if res.Answer != "" &&
 		errors.Is(runErr, golemruntime.ErrSessionPersistence) &&

@@ -6,6 +6,17 @@ All notable changes to `go-llm` are documented here. Downstream consumers
 
 ## [Unreleased]
 
+### Changed — golem: interrupted approvals record `canceled`, not `error`
+
+A Ctrl-C during an interactive approval prompt now always records the run's
+trace and telemetry status as `canceled` and renders `canceled`. Previously
+the recorded status raced the interrupt watcher's context cancellation and
+could land as `error` with an `error: interrupted` line. `runOnce` now
+synchronizes the run context whenever the run returns `context.Canceled`, so
+the classification no longer depends on scheduler order. Telemetry consumers
+that keyed on `status == "error"` for interrupted approvals will see those
+runs as `canceled` from this version on.
+
 ### Added — mixed-domain context assembly, slice 3b of #331
 
 The agent runtime can now assemble model context from RAG results,

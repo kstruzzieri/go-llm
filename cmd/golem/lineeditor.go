@@ -32,6 +32,12 @@ var _ term.History = discardHistory{}
 // run has opened an explicit continuation (spec 8.2).
 const continuationPrompt = "...> "
 
+// errInterrupted is the editor-local Ctrl-C event for an approval read. It
+// never crosses the approver boundary: replApprover maps it to
+// context.Canceled so the REPL and the Agentflow author classify one shared
+// error instead of an editor-specific sentinel.
+var errInterrupted = errors.New("interrupted")
+
 // errSegmentFlagMissing reports that the Terminal returned a line the key
 // filter never framed. It is an internal protocol failure, not a user-input
 // problem: the provenance of this line -- and so of every later one -- is
@@ -105,6 +111,18 @@ func (b *terminalBinding) fallBack(src lineSource) {
 	defer b.mu.Unlock()
 	b.fallen = src
 	b.tm = nil
+}
+
+// write sends bytes through the bound Terminal under the binding mutex, so it
+// serializes with notices and resize. On a freshly recreated Terminal
+// (cursorX/cursorY zero) Terminal.Write passes the bytes straight through,
+// which is what lets the interrupt cycle emit a literal CRLF.
+func (b *terminalBinding) write(s string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.tm != nil {
+		_, _ = b.tm.Write([]byte(s))
+	}
 }
 
 // setPrompt switches the prompt shown by the bound Terminal. It must go
@@ -186,6 +204,13 @@ type editorSource struct {
 	fallback     func() lineSource
 	fallbackOnce sync.Once
 
+	// onInterrupt delivers an out-of-paste Ctrl-C to the policy owner
+	// (replControl.interrupt in production). Called by the sole reader with no
+	// editor lock held -- the interrupt owner renders its hint back through
+	// IdleDisplay, and holding the binding mutex here would deadlock that
+	// cycle. Never nil (withDefaults installs a no-op).
+	onInterrupt func()
+
 	// rawState is the termios saved by the current or last raw window. It is
 	// cleared only once Restore succeeds, so a failed restore leaves exactly one
 	// retry for Close. Owned by the sole reader and by Close, which the mode
@@ -209,15 +234,16 @@ func newEditorSource(cfg inputConfig, resize <-chan struct{}, stopResize func(),
 		stopResize = func() {}
 	}
 	e := &editorSource{
-		stdinFD:    int(cfg.Stdin.Fd()),
-		stdoutFD:   int(cfg.Stdout.Fd()),
-		stderr:     cfg.Stderr,
-		ops:        cfg.Ops,
-		filter:     newKeyFilter(cfg.In, maxGoalBytes),
-		recall:     discardHistory{},
-		stopResize: stopResize,
-		resizeDone: make(chan struct{}),
-		fallback:   fallback,
+		stdinFD:     int(cfg.Stdin.Fd()),
+		stdoutFD:    int(cfg.Stdout.Fd()),
+		stderr:      cfg.Stderr,
+		ops:         cfg.Ops,
+		filter:      newKeyFilter(cfg.In, maxGoalBytes),
+		recall:      discardHistory{},
+		stopResize:  stopResize,
+		resizeDone:  make(chan struct{}),
+		fallback:    fallback,
+		onInterrupt: cfg.OnInterrupt,
 	}
 	e.rw = termIO{r: e.filter, w: cfg.Out}
 	e.binding.out = cfg.Out
@@ -376,6 +402,31 @@ func (e *editorSource) read(ctx context.Context, prompt string, hist term.Histor
 				return "", false, errSegmentFlagMissing
 			}
 			if !compose {
+				if inPaste {
+					// Spec 8.3: an approval answer whose terminator arrived
+					// inside a paste is invalid. Drain the remaining paste
+					// inside this same raw window -- otherwise lines 2..n
+					// become later REPL goals -- and deny.
+					derr := e.drainPasteSegments(current)
+					switch {
+					case derr == nil:
+						return "", true, nil
+					case derr == errPasteTooLarge:
+						// The tail of the pasted answer overran the paste
+						// budget mid-drain; the filter already consumed it.
+						e.binding.idleDisplay(goalLimitWarning)
+						e.bindTerminal(prompt, hist, &refused)
+						return "", true, nil
+					case errors.Is(derr, io.EOF):
+						if e.filter.TakeTerminator() == termCtrlC {
+							e.interruptCycle(prompt, hist, &refused, false)
+							return "", false, errInterrupted
+						}
+						return "", false, nil
+					default:
+						return "", false, derr
+					}
+				}
 				return seg, true, nil
 			}
 			if inPaste {
@@ -393,6 +444,13 @@ func (e *editorSource) read(ctx context.Context, prompt string, hist term.Histor
 						// the fresh Terminal reads on.
 						continue
 					case errors.Is(derr, io.EOF):
+						if e.filter.TakeTerminator() == termCtrlC {
+							e.interruptCycle(prompt, hist, &refused, true)
+							if cerr := ctx.Err(); cerr != nil {
+								return "", false, cerr
+							}
+							continue
+						}
 						return "", false, nil
 					default:
 						return "", false, derr
@@ -434,7 +492,11 @@ func (e *editorSource) read(ctx context.Context, prompt string, hist term.Histor
 			e.bindTerminal(prompt, hist, &refused)
 			if readErr == errPasteTooLarge {
 				// The bare sentinel: the drain completed and typeahead after
-				// the paste is intact, so keep reading.
+				// the paste is intact. An answer read denies with no approval
+				// error rather than re-prompting; a goal read keeps reading.
+				if !compose {
+					return "", true, nil
+				}
 				continue
 			}
 			// Joined with a stream error: EOF is a clean exit, anything else
@@ -444,6 +506,28 @@ func (e *editorSource) read(ctx context.Context, prompt string, hist term.Histor
 			}
 			return "", false, readErr
 		case errors.Is(readErr, io.EOF):
+			if e.filter.TakeTerminator() == termCtrlC {
+				// Out-of-paste Ctrl-C (spec 7.2-7.5). x/term collapsed it to
+				// io.EOF; the filter's tag recovers it. The cycle discards
+				// composition and filter-retained bytes -- cooked-mode SIGINT
+				// would have flushed the input queue, so that is fidelity --
+				// and recreates the Terminal, whose line and cursor state are
+				// unreachable and now stale.
+				parts, joined = nil, 0
+				if !compose {
+					// An approval read never continues its prompt: deliver
+					// the event once and report the interruption.
+					e.interruptCycle(prompt, hist, &refused, false)
+					return "", false, errInterrupted
+				}
+				e.interruptCycle(prompt, hist, &refused, true)
+				if cerr := ctx.Err(); cerr != nil {
+					// The second press: the policy owner canceled the REPL
+					// context inside onInterrupt.
+					return "", false, cerr
+				}
+				continue
+			}
 			// x/term collapses a closed stdin and Ctrl-D on an empty line to
 			// io.EOF; both are a clean exit.
 			return "", false, nil
@@ -475,6 +559,23 @@ func (e *editorSource) bindTerminal(prompt string, hist term.History, refused *b
 		e.binding.setSize(width, height)
 	}
 	e.binding.setPaste(true)
+}
+
+// interruptCycle is the shared out-of-paste Ctrl-C teardown: discard every
+// filter-retained byte and flag (the kernel queue is untouchable and stays),
+// recreate and rebind the Terminal, then deliver the event to the policy
+// owner. crlf additionally emits a literal CRLF through the binding first --
+// the replacement Terminal has cursor zero and cannot know where the discarded
+// line left the physical cursor, so without it the owner's hint renders
+// mid-line. onInterrupt runs with no editor lock held; the owner's hint comes
+// back through IdleDisplay and would deadlock otherwise.
+func (e *editorSource) interruptCycle(prompt string, hist term.History, refused *bool, crlf bool) {
+	e.filter.Discard()
+	e.bindTerminal(prompt, hist, refused)
+	if crlf {
+		e.binding.write("\r\n")
+	}
+	e.onInterrupt()
 }
 
 // drainPasteSegments reads and discards segments until one arrives outside the
