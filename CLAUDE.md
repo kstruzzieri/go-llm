@@ -30,6 +30,7 @@ go-llm/
 ├── prefetch/        # Predictive cache-warming engine for RAG retrieval
 ├── compat/          # OpenAI-compatible endpoint shim (chat, completions, model aliases, concurrency limiter)
 ├── cmd/
+│   ├── golem/       # Golem CLI: agent REPL. Interactive input goes through one lineSource seam — a golang.org/x/term line editor on a TTY (arrow editing, per-workspace goal history, bracketed-paste composition, `/edit`, Ctrl-C arm/quit) or the bufio.Scanner for pipes, -no-editor, dumb terminals, and Windows
 │   ├── go-llm-mcp/  # Standalone MCP server binary (stdio + HTTP/2)
 │   ├── fim-smoke/   # FIM smoke-test harness
 │   └── llm-bench/   # Model evaluation harness (AnswerQuality, tool-use, tool-restraint, latency, tokens; paired Δ + bootstrap CIs; llama.cpp via openai-compat)

@@ -955,3 +955,83 @@ func TestREPL_EditErrorAndEmptyYieldNoGoal(t *testing.T) {
 		})
 	}
 }
+
+// TestREPLIntegrationPartialInputDoubleCtrlCExits is spec 13.1 case 2 driven
+// through the production seam rather than the editor in isolation: newInput
+// selects the editor, replControl owns the arm/hint policy, withLineSource
+// owns Close, and runREPL is the loop.
+//
+// The invariant it guards is spec 7.4. replControl.enterPrompt clears the arm,
+// and runREPL calls it once per loop iteration. If the interrupt cycle ever
+// returned from ReadGoal, runREPL would loop, re-enter the prompt, clear the
+// arm, and a second Ctrl-C could never quit -- so this cannot be replaced by
+// asserting on the editor alone.
+func TestREPLIntegrationPartialInputDoubleCtrlCExits(t *testing.T) {
+	root := t.TempDir()
+	caller := &scriptCaller{}
+	sess := newTestSession(t, caller, root)
+
+	stdin, stdout := tempDescriptors(t)
+	out := &lockedBuffer{}
+	errOut := &lockedBuffer{}
+	ops := &fakeTermOps{
+		ttys:  map[int]bool{int(stdin.Fd()): true, int(stdout.Fd()): true},
+		sizes: [][2]int{{80, 24}},
+	}
+
+	replCtx, cancelREPL := context.WithCancel(context.Background())
+	defer cancelREPL()
+	interrupts := make(chan struct{}, 1)
+	ctrl := newReplControl(out, errOut, interrupts, cancelREPL)
+	sess.control = ctrl
+
+	// Two presses with typed text before the first and nothing between them.
+	// Separate chunks so the second 0x03 cannot be consumed by the same read
+	// as the first, which is what makes this two distinct presses.
+	in := &chunkReader{chunks: [][]byte{[]byte("partial input\x03"), []byte("\x03")}}
+	src := newInput(inputConfig{
+		Stdin: stdin, Stdout: stdout, Stderr: errOut,
+		In: in, Out: out,
+		UseHistory:  false,
+		Getenv:      func(string) string { return "" },
+		Root:        root,
+		Ops:         ops,
+		OnInterrupt: ctrl.interrupt,
+	})
+	if _, isEditor := src.(*editorSource); !isEditor {
+		t.Fatalf("newInput selected %T, want the editor: this test must exercise the editor path", src)
+	}
+	ctrl.setIdleDisplay(src.IdleDisplay)
+
+	done := make(chan error, 1)
+	go func() {
+		done <- withLineSource(src, func(s lineSource) error {
+			return runREPL(replCtx, s, out, interrupts, sess)
+		})
+	}()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("runREPL after a double Ctrl-C = %v, want a clean exit", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("runREPL did not exit after two idle Ctrl-C presses")
+	}
+
+	if got := strings.Count(out.String(), ctrlCHint); got != 1 {
+		t.Fatalf("hint printed %d times, want exactly 1: the first press arms, the second quits", got)
+	}
+	if caller.i != 0 {
+		t.Fatalf("model called %d times, want 0: a discarded partial line is never a goal", caller.i)
+	}
+	if strings.Contains(out.String(), "partial input\r\npartial") {
+		t.Fatalf("the discarded line was resubmitted:\n%q", out.String())
+	}
+	// Production Close ownership ran: every raw window this REPL opened was
+	// closed, so the shell is not left in raw mode.
+	makeRaw, restore, _ := ops.counts()
+	if makeRaw == 0 || makeRaw != restore {
+		t.Fatalf("MakeRaw=%d Restore=%d, want equal and non-zero", makeRaw, restore)
+	}
+}

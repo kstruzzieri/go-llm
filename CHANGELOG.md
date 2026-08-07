@@ -6,6 +6,61 @@ All notable changes to `go-llm` are documented here. Downstream consumers
 
 ## [Unreleased]
 
+### Added — golem: REPL line editing, goal history, and multiline input (#340)
+
+The interactive `golem` prompt is now a real line editor
+(`golang.org/x/term`) instead of a `bufio.Scanner` read. On a terminal you
+get arrow-key cursor movement and in-line editing, up/down recall of previous
+goals, and multiline goals.
+
+- **Per-workspace goal history.** Accepted goals persist under
+  `$XDG_DATA_HOME/golem/history/<workspace>` (directory `0700`, file `0600`),
+  keyed by workspace so one project's goals never surface in another. Only
+  accepted goals are recorded: blank lines, slash commands, and approval
+  answers never reach the store. Entries that cannot be safely re-edited in a
+  single-line editor (multiline text, or text containing ESC, CR, LF, BEL, or
+  DEL) are stored in full but excluded from arrow-key recall.
+- **A pasted block is one goal.** Bracketed paste is detected below the
+  editor, so pasting several lines composes a single goal and runs one turn
+  rather than submitting each line separately.
+- **Explicit continuation.** A line ending in an odd number of backslashes
+  continues the goal on a `...> ` prompt. A trailing run of `n` backslashes
+  emits `n/2` literal backslashes.
+- **`/edit [seed]`** composes a goal in `$VISUAL`, else `$EDITOR`, else `vi`
+  (`notepad.exe` on Windows). The editor value may carry arguments
+  (`code -w`); it is split on whitespace into argv with **no shell
+  interpretation**, so quoting and shell syntax are unsupported. The result
+  runs as a goal even if it begins with `/`. `/edit` is refused when stdin or
+  stdout is not a terminal, so a piped script cannot spawn an editor.
+- **Ctrl-C at an idle prompt** discards the partially typed line and hints;
+  a second press with no input between them exits. Ctrl-D on an empty line
+  still exits, and Ctrl-C during a turn or an approval still cancels it.
+- **`-no-editor`** forces the previous scanner behavior on a terminal. It
+  disables inline editing only: `/edit` remains available.
+- **Input ceilings.** A single line is limited to 4096 runes (x/term's
+  bound; golem warns instead of dropping the keystroke silently), and a
+  composed goal, a single paste, or an `/edit` result is limited to 1 MiB —
+  the same ceiling the scanner path always had.
+
+**Non-interactive behavior is unchanged.** Piped stdin, `-p`, `-plan`, and
+`-goal` keep the scanner and produce byte-identical output.
+
+**Limitation — terminals without bracketed paste.** Paste-as-one-goal
+requires the terminal to bracket pasted text (`ESC[200~` / `ESC[201~`), which
+golem enables for the duration of each read. On a terminal that does not
+support it, a multiline paste arrives as ordinary Enter presses and is
+indistinguishable from typing: each line submits as its own goal and starts
+its own turn. The workarounds are `/edit` for anything long and a trailing
+`\` for explicit continuation. Shift+Enter is not a solution: terminals do
+not portably distinguish it from Enter, so golem cannot bind it.
+
+**Windows keeps the scanner in this release.** Selection declines the editor
+on Windows before any descriptor is probed, because `x/term`'s Windows
+`MakeRaw` enables virtual-terminal processing on the input handle only, and a
+correct editor there additionally needs console-output setup plus a real
+Windows test runner. Windows is compile-verified in CI; enabling the editor
+there is a follow-up. `/edit` works on Windows.
+
 ### Changed — golem: interrupted approvals record `canceled`, not `error`
 
 A Ctrl-C during an interactive approval prompt now always records the run's
