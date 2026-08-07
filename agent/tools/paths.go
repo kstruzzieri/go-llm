@@ -59,7 +59,10 @@ var (
 // ScopeGuard optionally vetoes an access by workspace-relative slash path. write
 // is true for mutations (write/remove), false for reads/listing. A non-nil error
 // denies the access. Enforced below any approver — an approved call still fails
-// if the guard denies it.
+// if the guard denies it. Point lookups pass only the final cleaned relative
+// path — never its ancestors — so a guard must deny descendants itself (deny
+// "secrets" AND "secrets/..."). Directory walks consult it per entry and skip
+// denied directories.
 type ScopeGuard func(rel string, write bool) error
 
 // Workspace is the single audited chokepoint for all filesystem access within the

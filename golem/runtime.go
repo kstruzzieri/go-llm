@@ -65,7 +65,12 @@ type Options struct {
 	Tools  []agent.Tool
 	// ScopeGuard is installed on the runtime-owned Workspace backing every
 	// built-in file tool. It executes inside each tool, below approval
-	// handling. Nil preserves current behavior exactly.
+	// handling. Nil preserves current behavior exactly. Concurrent runs may
+	// call it concurrently; it must not panic and must not call Runtime.Close
+	// synchronously. Point lookups pass only the final cleaned
+	// workspace-relative path — never its ancestors — so a guard must deny
+	// descendants itself (e.g. deny "secrets" AND "secrets/..."); directory
+	// walks consult it per directory and deny by skipping the subtree.
 	ScopeGuard agenttools.ScopeGuard
 	// FailureMessage presents the public message placed in run.failed. When
 	// nil, Runtime preserves the existing truncated err.Error() behavior. The
@@ -469,6 +474,9 @@ type failurePayload struct {
 // returns.
 func (r *Runtime) runFailedPayload(err error) failurePayload {
 	code := failureCode(err)
+	// Previously reservation-only; ErrRunConflict is only produced by reserve
+	// today, so applying the override at every run.failed site is a deliberate,
+	// benign unification.
 	if errors.Is(err, ErrRunConflict) {
 		code = "run_conflict"
 	}

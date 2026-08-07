@@ -75,6 +75,12 @@ func TestScopeGuardCoversEveryBuiltinFileTool(t *testing.T) {
 	if err != nil || list.IsError || strings.Contains(list.Content, "secret.txt") || strings.Contains(list.Content, "private") {
 		t.Fatalf("list = %#v, %v", list, err)
 	}
+	// Direct point lookup of the guarded directory: denial text is the stable
+	// scope message, exactly as for read_file.
+	denied, err := tools["list"].Invoke(context.Background(), json.RawMessage(`{"path":"private"}`))
+	if err != nil || !denied.IsError || denied.Content != "path denied by workspace policy" {
+		t.Fatalf("list(private) = %#v, %v", denied, err)
+	}
 }
 
 func TestNilScopeGuardPreservesBuiltinReads(t *testing.T) {

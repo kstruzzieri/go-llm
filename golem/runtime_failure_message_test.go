@@ -355,6 +355,49 @@ func TestFailureMessagePayloadHelper(t *testing.T) {
 	}
 }
 
+func TestFailureMessageNotInvokedForCancellation(t *testing.T) {
+	presenter := &recordingPresenter{}
+	entered := make(chan struct{})
+	rt, err := New(context.Background(), Options{
+		Root:           t.TempDir(),
+		Orchestrator:   agent.New(blockingChatCaller{entered: entered}, agent.ContextManager{}),
+		FailureMessage: presenter.present,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = rt.Close() })
+
+	var events []Event
+	done := make(chan error, 1)
+	go func() {
+		_, runErr := rt.Run(context.Background(), Turn{RunID: "run-cancel", Message: "go"},
+			func(event Event) error {
+				events = append(events, event)
+				return nil
+			})
+		done <- runErr
+	}()
+	<-entered
+	if !rt.Cancel("run-cancel") {
+		t.Fatal("Cancel did not find the active run")
+	}
+	runErr := <-done
+
+	if !errors.Is(runErr, context.Canceled) {
+		t.Fatalf("Run error = %v, want context.Canceled", runErr)
+	}
+	if len(events) == 0 || events[len(events)-1].Type != "run.canceled" {
+		t.Fatalf("terminal event = %v, want run.canceled", eventTypeNames(events))
+	}
+	presenter.mu.Lock()
+	codes := append([]string(nil), presenter.codes...)
+	presenter.mu.Unlock()
+	if len(codes) != 0 {
+		t.Fatalf("presenter invoked for a cancellation: codes = %v", codes)
+	}
+}
+
 func eventTypeNames(events []Event) []string {
 	names := make([]string, 0, len(events))
 	for _, event := range events {
