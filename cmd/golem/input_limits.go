@@ -1,5 +1,7 @@
 package main
 
+import "errors"
+
 // Shared input ceilings for the REPL line editor and goal history.
 //
 // These live in one file because three layers must agree on them: the key
@@ -21,3 +23,18 @@ const (
 	// the editor path admits exactly what the scanner path always has.
 	maxGoalBytes = 1024 * 1024
 )
+
+// User-visible ceiling messages. lineLimitWarning reports x/term's refused
+// 4097th insertion, which would otherwise drop the keystroke silently;
+// goalLimitWarning reports a composed goal or paste the editor discarded.
+const (
+	lineLimitWarning = "warning: input line is limited to 4096 runes; use /edit for longer input"
+	goalLimitWarning = "warning: goal exceeds 1 MiB and was discarded"
+)
+
+// errPasteTooLarge is the key filter's rejection of a single bracketed paste
+// whose non-marker content exceeds its budget. It surfaces only after the
+// paste has been drained through its end marker (or the stream ended, in which
+// case the stream error is joined), so the editor can recreate the Terminal
+// and keep reading.
+var errPasteTooLarge = errors.New("bracketed paste exceeds 1 MiB")

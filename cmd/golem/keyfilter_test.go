@@ -850,3 +850,132 @@ func TestKeyFilterRejectionDrainTerminatesAtStreamEnd(t *testing.T) {
 		t.Fatalf("second err = %v, want io.EOF", err)
 	}
 }
+
+func TestKeyFilterPasteBudgetStopsForwardingAtTheBound(t *testing.T) {
+	// Cap 8: "abcdefgh" is exactly the budget and is forwarded; "i" is the
+	// first byte beyond it. Forwarding stops there, the paste is drained
+	// through its end marker without forwarding it, and the rejection surfaces
+	// only after the already-staged bytes have been consumed. Input after the
+	// drained paste is ordinary typeahead and must survive for the next read.
+	in := pasteOn + "abcdefghijkl" + pasteOff + "tail\r"
+	f := newKeyFilter(strings.NewReader(in), 8)
+
+	out, err := drain(t, f)
+	if !errors.Is(err, errPasteTooLarge) {
+		t.Fatalf("err = %v, want errPasteTooLarge", err)
+	}
+	if string(out) != pasteOn+"abcdefgh" {
+		t.Fatalf("forwarded %q, want the start marker plus exactly 8 content bytes", out)
+	}
+
+	rest, err := drain(t, f)
+	if !errors.Is(err, io.EOF) {
+		t.Fatalf("post-drain err = %v, want io.EOF", err)
+	}
+	if string(rest) != "tail\r" {
+		t.Fatalf("post-drain typeahead = %q, want %q", rest, "tail\r")
+	}
+	if flags := popFlags(f); len(flags) != 1 || flags[0] {
+		t.Fatalf("flags = %v, want exactly one non-paste line flag for the typed tail", flags)
+	}
+}
+
+func TestKeyFilterPasteBudgetRepeatedStartCannotReset(t *testing.T) {
+	// A redundant start marker inside one paste is consumed, not forwarded,
+	// and must not reset the byte counter: that would let a crafted paste
+	// bypass the budget indefinitely.
+	in := pasteOn + "abcdefgh" + pasteOn + "i" + pasteOff
+	f := newKeyFilter(strings.NewReader(in), 8)
+	if _, err := drain(t, f); !errors.Is(err, errPasteTooLarge) {
+		t.Fatalf("err = %v, want errPasteTooLarge after the redundant start marker", err)
+	}
+}
+
+func TestKeyFilterPasteBudgetResetsOnANewPaste(t *testing.T) {
+	// Two pastes, each exactly at the budget: a completed end marker followed
+	// by a new start marker resets the counter, so both go through untouched.
+	in := pasteOn + "abcdefgh" + pasteOff + pasteOn + "abcdefgh" + pasteOff + "\r"
+	f := newKeyFilter(strings.NewReader(in), 8)
+	out, err := drain(t, f)
+	if !errors.Is(err, io.EOF) {
+		t.Fatalf("err = %v, want clean io.EOF", err)
+	}
+	if string(out) != in {
+		t.Fatalf("forwarded %q, want the whole input untouched", out)
+	}
+}
+
+func TestKeyFilterPasteBudgetTruncatedByEOF(t *testing.T) {
+	// The stream ends before the paste-end marker. The drain terminates
+	// deterministically and the rejection is joined with the stream error in
+	// one answer, so the editor can warn and classify the end in one step.
+	f := newKeyFilter(strings.NewReader(pasteOn+"abcdefghi"), 8)
+	out, err := drain(t, f)
+	if !errors.Is(err, errPasteTooLarge) || !errors.Is(err, io.EOF) {
+		t.Fatalf("err = %v, want errPasteTooLarge joined with io.EOF", err)
+	}
+	if string(out) != pasteOn+"abcdefgh" {
+		t.Fatalf("forwarded %q, want the start marker plus exactly 8 content bytes", out)
+	}
+}
+
+func TestKeyFilterPasteBudgetTruncatedByReaderError(t *testing.T) {
+	boom := errors.New("boom")
+	r := &chunkReader{chunks: [][]byte{[]byte(pasteOn + "abcdefghi")}, err: boom}
+	f := newKeyFilter(r, 8)
+	if _, err := drain(t, f); !errors.Is(err, errPasteTooLarge) || !errors.Is(err, boom) {
+		t.Fatalf("err = %v, want errPasteTooLarge joined with the reader error", err)
+	}
+}
+
+func TestKeyFilterPasteBudgetCountsMultiByteRunes(t *testing.T) {
+	// Budget accounting is in bytes, not runes: two 3-byte runes fill a 6-byte
+	// budget, and a third overflows even though the rune count is small.
+	in := pasteOn + "日本語" + pasteOff
+	f := newKeyFilter(strings.NewReader(in), 6)
+	out, err := drain(t, f)
+	if !errors.Is(err, errPasteTooLarge) {
+		t.Fatalf("err = %v, want errPasteTooLarge on the third rune", err)
+	}
+	if string(out) != pasteOn+"日本" {
+		t.Fatalf("forwarded %q, want the start marker plus two runes", out)
+	}
+}
+
+func TestKeyFilterPasteBudgetChargesDroppedEscBytes(t *testing.T) {
+	// Bare ESC bytes inside a paste are dropped rather than forwarded, but
+	// they are still paste content: a paste padded with them must not slip
+	// under the budget. Cap 8: 4 content bytes + 4 dropped ESC fill it, and
+	// the next content byte overflows.
+	in := pasteOn + "abcd\x1b\x1b\x1b\x1bi" + pasteOff
+	f := newKeyFilter(strings.NewReader(in), 8)
+	out, err := drain(t, f)
+	if !errors.Is(err, errPasteTooLarge) {
+		t.Fatalf("err = %v, want errPasteTooLarge: dropped ESC bytes must count", err)
+	}
+	if string(out) != pasteOn+"abcd" {
+		t.Fatalf("forwarded %q, want the start marker plus %q", out, "abcd")
+	}
+}
+
+func TestKeyFilterPasteBudgetDrainSurvivesASplitEndMarker(t *testing.T) {
+	// The overflow drain reuses the split-marker state machine: an end marker
+	// broken at every byte boundary must still terminate the drain, and the
+	// typeahead after it must survive for the next read.
+	tail := pasteOff + "ok\r"
+	for split := 1; split < len(pasteOff); split++ {
+		r := &chunkReader{chunks: [][]byte{
+			[]byte(pasteOn + "abcdefghi" + tail[:split]),
+			[]byte(tail[split:]),
+		}}
+		f := newKeyFilter(r, 8)
+		if _, err := drain(t, f); !errors.Is(err, errPasteTooLarge) {
+			t.Fatalf("split %d: err = %v, want errPasteTooLarge", split, err)
+		}
+		rest, err := drain(t, f)
+		if !errors.Is(err, io.EOF) || string(rest) != "ok\r" {
+			t.Fatalf("split %d: post-drain = %q err=%v, want %q and io.EOF", split, rest, err, "ok\r")
+		}
+		popFlags(f)
+	}
+}

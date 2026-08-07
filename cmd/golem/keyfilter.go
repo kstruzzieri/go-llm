@@ -116,7 +116,7 @@ type keyFilter struct {
 	flagPaste bool
 
 	pendingErr error // wrapped error, surfaced once and then cleared
-	failErr    error // validation rejection, surfaced only once the drain completes
+	failErr    error // rejection (validation or paste budget), surfaced only once the drain completes
 
 	// draining spans reads. A rejection's boundary -- a typed CR/LF or a
 	// complete paste-end marker -- can arrive in any later chunk, so the drain
@@ -135,7 +135,18 @@ type keyFilter struct {
 	term terminator
 
 	maxPasteBytes int
-	pasteDropped  int // ESC bytes dropped inside paste; charged to the budget in task 6
+
+	// pasteBytes counts every non-marker byte consumed inside the current
+	// bracketed paste, including ESC bytes that are dropped rather than
+	// forwarded. It resets only when a start marker transitions inPaste from
+	// false to true, so a redundant start marker cannot re-arm the budget.
+	pasteBytes int
+
+	// discardingPaste marks a drain armed by a paste-budget overflow. It
+	// changes what a stream end mid-drain means: the rejection and the stream
+	// error surface as one joined answer instead of sequentially, so the
+	// editor can warn and classify the end in a single step.
+	discardingPaste bool
 }
 
 // newKeyFilter wraps r. maxPasteBytes bounds a single bracketed paste; zero or
@@ -176,13 +187,24 @@ func (f *keyFilter) Read(p []byte) (int, error) {
 		if f.draining {
 			switch {
 			case f.drainStep():
-				f.draining, f.drainPendingLF = false, false
+				f.draining, f.drainPendingLF, f.discardingPaste = false, false, false
 			case f.pendingErr != nil:
 				// The stream ended before the boundary arrived. Terminate the
 				// drain deterministically rather than waiting forever; the
 				// rejection still surfaces, and the stream error follows it.
 				f.draining, f.drainPendingLF = false, false
 				f.work = f.work[:0]
+				if f.discardingPaste {
+					// A paste-budget overflow whose end marker never came.
+					// Join the rejection with the stream error so the editor
+					// can warn and classify the end in one answer; surfacing
+					// them sequentially would make it warn, recreate, and
+					// only then learn the stream was already dead.
+					f.discardingPaste = false
+					err := errors.Join(f.failErr, f.pendingErr)
+					f.failErr, f.pendingErr = nil, nil
+					return 0, err
+				}
 			default:
 				f.fill()
 				continue
@@ -310,7 +332,8 @@ func (f *keyFilter) Discard() {
 	f.inPaste = false
 	f.escUnresolved = false
 	f.escSpan = 0
-	f.pasteDropped = 0
+	f.pasteBytes = 0
+	f.discardingPaste = false
 	f.term = termNone
 }
 
@@ -409,13 +432,16 @@ func (f *keyFilter) consume() {
 				if f.inPaste {
 					// A redundant start marker fails x/term's !pasteActive
 					// guard, falls into the unknown-sequence scan, and injects
-					// a surrogate keyUnknown rune into the pasted line.
+					// a surrogate keyUnknown rune into the pasted line. It is
+					// consumed without touching pasteBytes: only a false->true
+					// transition may reset the budget.
 					i += n
 					continue
 				}
 				f.breakEscape()
 				f.out = append(f.out, f.work[i:i+n]...)
 				f.inPaste = true
+				f.pasteBytes = 0
 				f.prevCR = false
 				i += n
 				continue
@@ -430,8 +456,12 @@ func (f *keyFilter) consume() {
 			if f.inPaste {
 				// A bare ESC in paste content would make x/term consume
 				// forward to the next [A-Za-z~], eating pasted newlines and
-				// characters, so the byte is unusable anyway.
-				f.pasteDropped++
+				// characters, so the byte is unusable anyway. It still counts
+				// against the budget: dropped or not, it is paste content.
+				if !f.chargePaste(1) {
+					f.overflowPaste(i)
+					return
+				}
 				i++
 				continue
 			}
@@ -445,6 +475,15 @@ func (f *keyFilter) consume() {
 		}
 
 		if c >= utf8.RuneSelf {
+			if f.inPaste && utf8.FullRune(f.work[i:]) {
+				// Charged whole: forwarding part of a rune and rejecting the
+				// rest would hand x/term a torn encoding.
+				_, size := utf8.DecodeRune(f.work[i:])
+				if !f.chargePaste(size) {
+					f.overflowPaste(i)
+					return
+				}
+			}
 			size, ok := f.acceptRune(f.work[i:])
 			if !ok {
 				if size == 0 {
@@ -462,11 +501,20 @@ func (f *keyFilter) consume() {
 			continue
 		}
 
+		if f.inPaste && !f.chargePaste(1) {
+			f.overflowPaste(i)
+			return
+		}
 		ev := f.transform(c)
 		i++
 		if ev == eventLine && c == byteCR && i < len(f.work) && f.work[i] == byteLF {
 			// CRLF is one event; consume the LF now so it cannot start the
-			// next delivery as a stray terminator.
+			// next delivery as a stray terminator. The suppressed LF is still
+			// paste content, so it is charged -- without an overflow check,
+			// since it is never forwarded; the next content byte overflows.
+			if f.inPaste {
+				f.pasteBytes++
+			}
 			i++
 			f.prevCR = false
 		}
@@ -478,6 +526,29 @@ func (f *keyFilter) consume() {
 		}
 	}
 	f.work = f.work[:0]
+}
+
+// chargePaste counts n non-marker paste bytes against the budget, reporting
+// false -- without charging -- when they would push the paste past its bound.
+func (f *keyFilter) chargePaste(n int) bool {
+	if f.pasteBytes+n > f.maxPasteBytes {
+		return false
+	}
+	f.pasteBytes += n
+	return true
+}
+
+// overflowPaste arms the oversized-paste drain at work[i]: nothing more is
+// forwarded, drainStep consumes through the paste-end marker, and
+// errPasteTooLarge surfaces once every byte already staged has been delivered.
+// Unlike reject, staged output is kept: the bytes up to the bound were within
+// budget, and "stops forwarding at the bound" means exactly them.
+func (f *keyFilter) overflowPaste(i int) {
+	f.work = f.work[:copy(f.work, f.work[i:])]
+	f.discardingPaste = true
+	f.draining = true
+	f.failErr = errPasteTooLarge
+	f.prevCR = false
 }
 
 // rejectReason distinguishes malformed input from a literal U+FFFD so the

@@ -5,7 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strings"
 	"sync"
+	"unicode/utf8"
 
 	"golang.org/x/term"
 )
@@ -25,6 +27,10 @@ func (discardHistory) At(int) string { panic("golem: discard history has no entr
 
 // Compile-time assertion: the discard binding must satisfy x/term's contract.
 var _ term.History = discardHistory{}
+
+// continuationPrompt replaces the goal prompt once an odd trailing-backslash
+// run has opened an explicit continuation (spec 8.2).
+const continuationPrompt = "...> "
 
 // errSegmentFlagMissing reports that the Terminal returned a line the key
 // filter never framed. It is an internal protocol failure, not a user-input
@@ -99,6 +105,17 @@ func (b *terminalBinding) fallBack(src lineSource) {
 	defer b.mu.Unlock()
 	b.fallen = src
 	b.tm = nil
+}
+
+// setPrompt switches the prompt shown by the bound Terminal. It must go
+// through the binding: an asynchronous notice repaints the prompt from
+// Terminal.Write, so an unsynchronized SetPrompt would race that read.
+func (b *terminalBinding) setPrompt(prompt string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.tm != nil {
+		b.tm.SetPrompt(prompt)
+	}
 }
 
 func (b *terminalBinding) setPaste(on bool) {
@@ -251,15 +268,16 @@ func (e *editorSource) stopResizeDelivery() {
 }
 
 func (e *editorSource) ReadGoal(ctx context.Context, prompt string) (string, bool, error) {
-	return e.read(ctx, prompt, e.recall, func(s lineSource) (string, bool, error) {
+	return e.read(ctx, prompt, e.recall, true, func(s lineSource) (string, bool, error) {
 		return s.ReadGoal(ctx, prompt)
 	})
 }
 
 func (e *editorSource) ReadAnswer(ctx context.Context, prompt string) (string, bool, error) {
 	// The discard binding covers the whole answer read, so no arrow key can
-	// surface a goal at an approval prompt.
-	return e.read(ctx, prompt, discardHistory{}, func(s lineSource) (string, bool, error) {
+	// surface a goal at an approval prompt. Answers never compose: an approval
+	// read takes exactly one segment (spec 8.3).
+	return e.read(ctx, prompt, discardHistory{}, false, func(s lineSource) (string, bool, error) {
 		return s.ReadAnswer(ctx, prompt)
 	})
 }
@@ -281,7 +299,7 @@ func (e *editorSource) ReadAnswer(ctx context.Context, prompt string) (string, b
 // been told the session is over. delegate carries the caller's ctx for the
 // scanner fallback, which can honor it throughout.
 func (e *editorSource) read(ctx context.Context, prompt string, hist term.History,
-	delegate func(lineSource) (string, bool, error)) (line string, ok bool, err error) {
+	compose bool, delegate func(lineSource) (string, bool, error)) (line string, ok bool, err error) {
 
 	if s := e.binding.fallenSource(); s != nil {
 		return delegate(s)
@@ -319,46 +337,197 @@ func (e *editorSource) read(ctx context.Context, prompt string, hist term.Histor
 		e.rawState = nil
 	}()
 
-	// A fresh Terminal per logical call. x/term keeps cursor and line state that
-	// is unreachable from outside the package, and a reused instance would
-	// resume with a stale cursor model.
+	refused := false
+	e.bindTerminal(prompt, hist, &refused)
+
+	// Composition state (spec 8.2), used only when compose is true. joined
+	// tracks the byte length of strings.Join(parts, "\n") so every append can
+	// be bounds-checked without re-summing.
+	var parts []string
+	joined := 0
+	for {
+		// The sole-reader exception: snapshot under the binding mutex, release
+		// it, then block.
+		current := e.binding.snapshot()
+		seg, readErr := current.ReadLine()
+		if refused {
+			// x/term silently dropped the keystroke that would have pushed the
+			// line past 4096 runes; surfacing that after the read is the whole
+			// point of the watcher.
+			refused = false
+			e.binding.idleDisplay(lineLimitWarning)
+		}
+		switch {
+		case readErr == nil, errors.Is(readErr, term.ErrPasteIndicator):
+			// ErrPasteIndicator only reports that the line happened to arrive
+			// entirely inside a paste. It says nothing about whether more of
+			// that paste is pending, so it is advisory here and the line is
+			// real.
+			//
+			// Claiming the flag is mandatory, not bookkeeping: the filter
+			// delivers at most one line terminator at a time and answers the
+			// next Read with errTerminatorSwallowed while a flag is unclaimed,
+			// so a reader that skipped this would fail on its second call.
+			inPaste, flagOK := e.filter.PopSegmentFlag()
+			if !flagOK {
+				// Unlike an input rejection, buffered bytes here are of
+				// unknown provenance and must not be reused.
+				e.filter.Discard()
+				return "", false, errSegmentFlagMissing
+			}
+			if !compose {
+				return seg, true, nil
+			}
+			if inPaste {
+				if joinedLen(joined, len(parts), seg) > maxGoalBytes {
+					// Rejecting mid-paste: the rest of this paste must be
+					// drained and discarded, or its lines become later goals.
+					derr := e.drainPasteSegments(current)
+					e.binding.idleDisplay(goalLimitWarning)
+					parts, joined = nil, 0
+					e.bindTerminal(prompt, hist, &refused)
+					switch {
+					case derr == nil, derr == errPasteTooLarge:
+						// A bare errPasteTooLarge means the filter finished
+						// the drain itself; either way the paste is gone and
+						// the fresh Terminal reads on.
+						continue
+					case errors.Is(derr, io.EOF):
+						return "", false, nil
+					default:
+						return "", false, derr
+					}
+				}
+				joined = joinedLen(joined, len(parts), seg)
+				parts = append(parts, seg)
+				continue
+			}
+			trimmed, cont := splitBackslashTail(seg)
+			if joinedLen(joined, len(parts), trimmed) > maxGoalBytes {
+				e.binding.idleDisplay(goalLimitWarning)
+				parts, joined = nil, 0
+				e.bindTerminal(prompt, hist, &refused)
+				continue
+			}
+			if cont {
+				joined = joinedLen(joined, len(parts), trimmed)
+				parts = append(parts, trimmed)
+				e.binding.setPrompt(continuationPrompt)
+				continue
+			}
+			if trimmed == "" && len(parts) > 0 {
+				// A paste ending in a newline leaves an empty final segment
+				// when the user presses Enter; the goal must not grow a
+				// trailing blank line from it. Uniform for typed
+				// continuations too: Enter alone at the continuation prompt
+				// ends the goal without adding an empty line.
+				return strings.Join(parts, "\n"), true, nil
+			}
+			parts = append(parts, trimmed)
+			return strings.Join(parts, "\n"), true, nil
+		case errors.Is(readErr, errPasteTooLarge):
+			// The filter stopped an oversized paste and drained it (or the
+			// stream ended trying). x/term may hold a partial line and stale
+			// paste state, so the Terminal is retired, not reused.
+			e.binding.idleDisplay(goalLimitWarning)
+			parts, joined = nil, 0
+			e.bindTerminal(prompt, hist, &refused)
+			if readErr == errPasteTooLarge {
+				// The bare sentinel: the drain completed and typeahead after
+				// the paste is intact, so keep reading.
+				continue
+			}
+			// Joined with a stream error: EOF is a clean exit, anything else
+			// propagates.
+			if errors.Is(readErr, io.EOF) {
+				return "", false, nil
+			}
+			return "", false, readErr
+		case errors.Is(readErr, io.EOF):
+			// x/term collapses a closed stdin and Ctrl-D on an empty line to
+			// io.EOF; both are a clean exit.
+			return "", false, nil
+		default:
+			return "", false, readErr
+		}
+	}
+}
+
+// bindTerminal builds a fresh Terminal and installs it for the current logical
+// read. x/term keeps cursor and line state that is unreachable from outside
+// the package, so both a new read and a post-rejection recreation need a new
+// instance rather than a reused one.
+func (e *editorSource) bindTerminal(prompt string, hist term.History, refused *bool) {
 	tm := term.NewTerminal(e.rw, prompt)
 	tm.History = hist
+	// The watcher for x/term's silent 4096-rune refusal. AutoCompleteCallback
+	// runs before the length check, so it is the only place the refused
+	// insertion is observable; ok=false declines the completion and lets the
+	// upstream limit drop the key as it always has.
+	tm.AutoCompleteCallback = func(line string, pos int, key rune) (string, int, bool) {
+		if utf8.RuneCountInString(line) == maxEditorRunes && isPrintableKey(key) {
+			*refused = true
+		}
+		return line, pos, false
+	}
 	e.binding.replace(tm)
 	if width, height, sizeErr := e.ops.GetSize(e.stdoutFD); sizeErr == nil {
 		e.binding.setSize(width, height)
 	}
 	e.binding.setPaste(true)
+}
 
-	// The sole-reader exception: snapshot under the binding mutex, release it,
-	// then block.
-	current := e.binding.snapshot()
-	line, readErr := current.ReadLine()
-	switch {
-	case readErr == nil, errors.Is(readErr, term.ErrPasteIndicator):
-		// ErrPasteIndicator only reports that the line happened to arrive
-		// entirely inside a paste. It says nothing about whether more of that
-		// paste is pending, so it is advisory here and the line is real.
-		//
-		// Claiming the flag is mandatory, not bookkeeping: the filter delivers
-		// at most one line terminator at a time and answers the next Read with
-		// errTerminatorSwallowed while a flag is unclaimed, so a reader that
-		// skipped this would fail on its second call. Composition consumes the
-		// paste bit in a later slice; here only its presence is checked.
-		if _, flagOK := e.filter.PopSegmentFlag(); !flagOK {
-			// Unlike an input rejection, buffered bytes here are of unknown
-			// provenance and must not be reused.
-			e.filter.Discard()
-			return "", false, errSegmentFlagMissing
+// drainPasteSegments reads and discards segments until one arrives outside the
+// paste, so a mid-paste rejection cannot leak the paste's remaining lines as
+// later goals. Allocation stays bounded: each discarded segment is dropped
+// before the next is read.
+func (e *editorSource) drainPasteSegments(tm *term.Terminal) error {
+	for {
+		_, err := tm.ReadLine()
+		if err != nil && !errors.Is(err, term.ErrPasteIndicator) {
+			return err
 		}
-		return line, true, nil
-	case errors.Is(readErr, io.EOF):
-		// x/term collapses a closed stdin and Ctrl-D on an empty line to io.EOF;
-		// both are a clean exit.
-		return "", false, nil
-	default:
-		return "", false, readErr
+		inPaste, ok := e.filter.PopSegmentFlag()
+		if !ok {
+			e.filter.Discard()
+			return errSegmentFlagMissing
+		}
+		if !inPaste {
+			return nil
+		}
 	}
+}
+
+// isPrintableKey accepts exactly the set x/term's unexported isPrintable does:
+// key >= 32 excluding the surrogate band x/term uses for its synthetic key
+// runes (keyUnknown and friends). unicode.IsPrint accepts a different set and
+// must not be substituted.
+func isPrintableKey(key rune) bool {
+	const surrogateMin, surrogateMax rune = 0xd800, 0xdbff
+	return key >= 32 && (key < surrogateMin || key > surrogateMax)
+}
+
+// splitBackslashTail applies spec 8.2 backslash parity: a trailing run of n
+// backslashes emits n/2 literal backslashes, and odd n additionally continues
+// the goal. Interior backslashes are untouched.
+func splitBackslashTail(seg string) (string, bool) {
+	n := 0
+	for n < len(seg) && seg[len(seg)-1-n] == '\\' {
+		n++
+	}
+	if n == 0 {
+		return seg, false
+	}
+	return seg[:len(seg)-n] + strings.Repeat(`\`, n/2), n%2 == 1
+}
+
+// joinedLen is the byte length of the goal after appending seg to parts many
+// buffered segments whose join currently measures joined bytes.
+func joinedLen(joined, parts int, seg string) int {
+	if parts == 0 {
+		return len(seg)
+	}
+	return joined + 1 + len(seg)
 }
 
 // fallBack permanently swaps this source for the scanner after MakeRaw failed,

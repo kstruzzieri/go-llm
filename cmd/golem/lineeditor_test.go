@@ -1103,3 +1103,249 @@ func TestEditorSourceWithoutHistoryRecordsNothing(t *testing.T) {
 		t.Fatalf("history directory exists without UseHistory (stat err = %v)", err)
 	}
 }
+
+func TestEditorSourceComposesAPastedGoal(t *testing.T) {
+	// Three pasted lines then a typed Enter are ONE goal. Relying on
+	// term.ErrPasteIndicator here would submit "a" alone; provenance comes
+	// from the filter's segment flags instead.
+	f := newEditorFixture(t, editorOpts{in: strings.NewReader(pasteOn + "a\nb\nc" + pasteOff + "\r")})
+	line, ok, err := f.readGoal(t)
+	if err != nil || !ok || line != "a\nb\nc" {
+		t.Fatalf("ReadGoal = %q ok=%v err=%v, want \"a\\nb\\nc\" true nil", line, ok, err)
+	}
+}
+
+func TestEditorSourceDropsATrailingEmptyPasteSegment(t *testing.T) {
+	// A paste ending in a newline yields a final empty segment when the user
+	// presses Enter; the goal must not grow a trailing blank line from it.
+	f := newEditorFixture(t, editorOpts{in: strings.NewReader(pasteOn + "a\nb\nc\n" + pasteOff + "\r")})
+	line, ok, err := f.readGoal(t)
+	if err != nil || !ok || line != "a\nb\nc" {
+		t.Fatalf("ReadGoal = %q ok=%v err=%v, want \"a\\nb\\nc\" true nil", line, ok, err)
+	}
+}
+
+func TestEditorSourceTypedPrefixThenPasteIsOneGoal(t *testing.T) {
+	// The classic ErrPasteIndicator trap: a typed prefix followed by a
+	// multiline paste returns its first segment with a nil error. Submitting
+	// early would turn the rest of the paste into separate goals.
+	f := newEditorFixture(t, editorOpts{in: strings.NewReader("fix " + pasteOn + "a\nb" + pasteOff + "\r")})
+	line, ok, err := f.readGoal(t)
+	if err != nil || !ok || line != "fix a\nb" {
+		t.Fatalf("ReadGoal = %q ok=%v err=%v, want \"fix a\\nb\" true nil", line, ok, err)
+	}
+	if line, ok, err := f.readGoal(t); ok || err != nil {
+		t.Fatalf("second ReadGoal = %q ok=%v err=%v, want a clean EOF: nothing may submit early", line, ok, err)
+	}
+}
+
+func TestEditorSourceBackslashParity(t *testing.T) {
+	// Spec 8.2: a trailing run of n backslashes emits n/2 literals; odd n
+	// additionally continues the goal. Interior backslashes are untouched.
+	for _, tc := range []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"n=1 continues", `foo\` + "\r" + "bar\r", "foo\nbar"},
+		{"n=2 literal", `foo\\` + "\r", `foo\`},
+		{"n=3 literal plus continue", `foo\\\` + "\r" + "bar\r", "foo\\\nbar"},
+		{"n=4 two literals", `foo\\\\` + "\r", `foo\\`},
+		{"interior untouched", `a\b` + "\r", `a\b`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newEditorFixture(t, editorOpts{in: strings.NewReader(tc.in)})
+			line, ok, err := f.readGoal(t)
+			if err != nil || !ok || line != tc.want {
+				t.Fatalf("ReadGoal = %q ok=%v err=%v, want %q true nil", line, ok, err, tc.want)
+			}
+		})
+	}
+}
+
+func TestEditorSourceContinuationPrompt(t *testing.T) {
+	f := newEditorFixture(t, editorOpts{in: strings.NewReader(`foo\` + "\r" + "bar\r")})
+	if _, _, err := f.readGoal(t); err != nil {
+		t.Fatalf("ReadGoal: %v", err)
+	}
+	if !strings.Contains(f.out.String(), continuationPrompt) {
+		t.Fatalf("output %q does not show the continuation prompt %q", f.out.String(), continuationPrompt)
+	}
+}
+
+func TestEditorSourceWarnsOnlyOnARefusedInsertion(t *testing.T) {
+	// x/term drops the keystroke that would exceed 4096 runes. A line of
+	// exactly 4096 runes is complete and untruncated, so warning on returned
+	// length is a false positive; only the refused 4097th insertion warns.
+	for _, tc := range []struct {
+		runes int
+		warn  bool
+	}{
+		{4095, false},
+		{4096, false},
+		{4097, true},
+	} {
+		f := newEditorFixture(t, editorOpts{in: strings.NewReader(strings.Repeat("a", tc.runes) + "\r")})
+		wantLine := strings.Repeat("a", min(tc.runes, maxEditorRunes))
+		line, ok, err := f.readGoal(t)
+		if err != nil || !ok || line != wantLine {
+			t.Fatalf("%d runes: ReadGoal ok=%v err=%v len=%d, want len=%d true nil", tc.runes, ok, err, len(line), len(wantLine))
+		}
+		if got := strings.Contains(f.out.String(), lineLimitWarning); got != tc.warn {
+			t.Fatalf("%d runes: warning present=%v, want %v; exact text %q", tc.runes, got, tc.warn, lineLimitWarning)
+		}
+	}
+}
+
+func TestEditorSourceNoWarningForANonPrintingKeyAtTheLimit(t *testing.T) {
+	// The predicate must match x/term's unexported isPrintable exactly:
+	// key >= 32 && !(0xd800 <= key && key <= 0xdbff). BEL is below 32; an
+	// unknown escape becomes keyUnknown (0xd800), inside the surrogate hole.
+	for _, tc := range []struct {
+		name string
+		key  string
+	}{
+		{"control byte", "\x07"},
+		{"unknown escape becomes a surrogate key", "\x1b[z"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			in := strings.Repeat("a", maxEditorRunes) + tc.key + "\r"
+			f := newEditorFixture(t, editorOpts{in: strings.NewReader(in)})
+			line, ok, err := f.readGoal(t)
+			if err != nil || !ok || len(line) != maxEditorRunes {
+				t.Fatalf("ReadGoal ok=%v err=%v len=%d, want a full 4096-rune line", ok, err, len(line))
+			}
+			if strings.Contains(f.out.String(), "warning: input line") {
+				t.Fatalf("a non-printing key at the limit warned; output %q", f.out.String())
+			}
+		})
+	}
+}
+
+func TestEditorSourceOversizedPasteWarnsRecreatesAndSubmitsNothing(t *testing.T) {
+	// A single-line bracketed paste beyond 1 MiB: forwarding stops at the
+	// bound, the paste drains through its end marker, the Terminal is
+	// recreated, the warning prints, and nothing is submitted.
+	big := strings.Repeat("a", maxGoalBytes+2)
+	f := newEditorFixture(t, editorOpts{in: strings.NewReader(pasteOn + big + pasteOff)})
+	line, ok, err := f.readGoal(t)
+	if err != nil || ok || line != "" {
+		t.Fatalf("ReadGoal = len %d ok=%v err=%v, want \"\" false nil", len(line), ok, err)
+	}
+	out := f.out.String()
+	if !strings.Contains(out, goalLimitWarning) {
+		t.Fatalf("output does not contain %q", goalLimitWarning)
+	}
+	if got := strings.Count(out, pasteEnableSeq); got != 2 {
+		t.Fatalf("bracketed paste enabled %d times, want 2: the Terminal must be recreated after the rejection", got)
+	}
+}
+
+func TestEditorSourceOversizedPasteTruncatedByEOF(t *testing.T) {
+	// The stream ends before the paste-end marker: still warn and recreate,
+	// then report the EOF as a clean exit rather than an error.
+	big := strings.Repeat("a", maxGoalBytes+2)
+	f := newEditorFixture(t, editorOpts{in: strings.NewReader(pasteOn + big)})
+	line, ok, err := f.readGoal(t)
+	if err != nil || ok || line != "" {
+		t.Fatalf("ReadGoal = len %d ok=%v err=%v, want \"\" false nil", len(line), ok, err)
+	}
+	if !strings.Contains(f.out.String(), goalLimitWarning) {
+		t.Fatalf("output does not contain %q", goalLimitWarning)
+	}
+}
+
+func TestEditorSourceOversizedPasteTruncatedByReaderErrorPropagates(t *testing.T) {
+	boom := errors.New("boom")
+	big := strings.Repeat("a", maxGoalBytes+2)
+	r := &chunkReader{chunks: [][]byte{[]byte(pasteOn + big)}, err: boom}
+	f := newEditorFixture(t, editorOpts{in: r})
+	_, ok, err := f.readGoal(t)
+	if ok || !errors.Is(err, boom) || !errors.Is(err, errPasteTooLarge) {
+		t.Fatalf("ReadGoal ok=%v err=%v, want the reader error joined with errPasteTooLarge", ok, err)
+	}
+	if !strings.Contains(f.out.String(), goalLimitWarning) {
+		t.Fatalf("output does not contain %q", goalLimitWarning)
+	}
+}
+
+func TestEditorSourceAggregateCeilingRejectsTheJoinedGoal(t *testing.T) {
+	// Each paste is under the per-paste budget, but the composed goal joined
+	// with a continuation exceeds 1 MiB: warn and submit nothing.
+	half := strings.Repeat("a", 600*1024)
+	in := pasteOn + half + pasteOff + `\` + "\r" + pasteOn + half + pasteOff + "\r"
+	f := newEditorFixture(t, editorOpts{in: strings.NewReader(in)})
+	line, ok, err := f.readGoal(t)
+	if err != nil || ok || line != "" {
+		t.Fatalf("ReadGoal = len %d ok=%v err=%v, want \"\" false nil", len(line), ok, err)
+	}
+	if !strings.Contains(f.out.String(), goalLimitWarning) {
+		t.Fatalf("output does not contain %q", goalLimitWarning)
+	}
+}
+
+func TestEditorSourceAggregateCeilingMidPasteDrainsTheRemainder(t *testing.T) {
+	// The rejecting segment arrives inside a paste. The rest of that paste
+	// must be drained and discarded, or its lines become later goals.
+	half := strings.Repeat("a", 600*1024)
+	in := pasteOn + half + pasteOff + `\` + "\r" +
+		pasteOn + half + "\nDO NOT RUN" + pasteOff + "\r"
+	f := newEditorFixture(t, editorOpts{in: strings.NewReader(in)})
+	line, ok, err := f.readGoal(t)
+	if err != nil || ok || line != "" {
+		t.Fatalf("ReadGoal = %.40q ok=%v err=%v, want \"\" false nil", line, ok, err)
+	}
+	if !strings.Contains(f.out.String(), goalLimitWarning) {
+		t.Fatalf("output does not contain %q", goalLimitWarning)
+	}
+}
+
+func TestEditorSourcePropagatesReaderErrors(t *testing.T) {
+	// Only term.ErrPasteIndicator is ignored; every other ReadLine error
+	// reaches the caller.
+	boom := errors.New("boom")
+	r := &chunkReader{chunks: [][]byte{[]byte("par")}, err: boom}
+	f := newEditorFixture(t, editorOpts{in: r})
+	_, ok, err := f.readGoal(t)
+	if ok || !errors.Is(err, boom) {
+		t.Fatalf("ReadGoal ok=%v err=%v, want the reader error", ok, err)
+	}
+}
+
+func TestEditorSourceAggregateCeilingIsExact(t *testing.T) {
+	// The ceiling counts the joining newline: a composed goal of exactly
+	// maxGoalBytes is accepted -- matching what the scanner path always
+	// admitted -- and one byte more is rejected. Off-by-one arithmetic in
+	// either direction fails one of the two.
+	first := strings.Repeat("a", 600*1024)
+	for _, tc := range []struct {
+		name   string
+		second int
+		accept bool
+	}{
+		{"exactly at the ceiling", maxGoalBytes - len(first) - 1, true},
+		{"one byte over", maxGoalBytes - len(first), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			second := strings.Repeat("b", tc.second)
+			in := pasteOn + first + pasteOff + `\` + "\r" + pasteOn + second + pasteOff + "\r"
+			f := newEditorFixture(t, editorOpts{in: strings.NewReader(in)})
+			line, ok, err := f.readGoal(t)
+			if err != nil {
+				t.Fatalf("ReadGoal err = %v", err)
+			}
+			if tc.accept {
+				if !ok || line != first+"\n"+second {
+					t.Fatalf("ReadGoal ok=%v len=%d, want the %d-byte goal accepted", ok, len(line), maxGoalBytes)
+				}
+				return
+			}
+			if ok || line != "" {
+				t.Fatalf("ReadGoal ok=%v len=%d, want rejection one byte past the ceiling", ok, len(line))
+			}
+			if !strings.Contains(f.out.String(), goalLimitWarning) {
+				t.Fatalf("output does not contain %q", goalLimitWarning)
+			}
+		})
+	}
+}
