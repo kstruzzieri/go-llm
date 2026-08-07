@@ -93,7 +93,7 @@ func (t *Search) Invoke(ctx context.Context, raw json.RawMessage) (agent.ToolRes
 		return nil
 	})
 	if walkErr != nil && walkErr != fs.SkipAll {
-		return errResult("search failed: " + walkErr.Error()), nil
+		return errResult(toolErrMessage(walkErr)), nil
 	}
 
 	content := strings.TrimRight(out.String(), "\n")

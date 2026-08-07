@@ -50,6 +50,10 @@ var (
 	errNotDir        = errors.New("not a directory")
 	errFileChanged   = errors.New("file identity changed between stat and open")
 	errParentMissing = errors.New("parent directory does not exist")
+	// errScopeDenied replaces a ScopeGuard's own error so host policy text
+	// never reaches model-visible output. Its text doubles as the stable
+	// denial message.
+	errScopeDenied = errors.New("path denied by workspace policy")
 )
 
 // ScopeGuard optionally vetoes an access by workspace-relative slash path. write
@@ -87,7 +91,9 @@ func NewWorkspace(root string) (*Workspace, error) {
 // SetScopeGuard installs (or clears with nil) the proof-mode scope guard.
 func (w *Workspace) SetScopeGuard(g ScopeGuard) { w.guard = g }
 
-// checkScope consults the guard for a cleaned absolute path.
+// checkScope consults the guard for a cleaned absolute path. A guard veto is
+// collapsed to errScopeDenied so the host's own policy text never propagates
+// into tool results.
 func (w *Workspace) checkScope(abs string, write bool) error {
 	if w.guard == nil {
 		return nil
@@ -96,7 +102,10 @@ func (w *Workspace) checkScope(abs string, write bool) error {
 	if err != nil {
 		return err
 	}
-	return w.guard(filepath.ToSlash(rel), write)
+	if w.guard(filepath.ToSlash(rel), write) != nil {
+		return errScopeDenied
+	}
+	return nil
 }
 
 // underRoot reports whether a cleaned absolute candidate is the root or strictly
