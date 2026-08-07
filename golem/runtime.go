@@ -60,12 +60,27 @@ type SessionStore interface {
 
 // Options configures a Runtime.
 type Options struct {
-	Root       string
-	System     string
-	Tools      []agent.Tool
-	ConfigPath string
-	MaxSteps   int
-	Budget     agent.Budget
+	Root   string
+	System string
+	Tools  []agent.Tool
+	// ScopeGuard is installed on the runtime-owned Workspace backing every
+	// built-in file tool. It executes inside each tool, below approval
+	// handling. Nil preserves current behavior exactly. Concurrent runs may
+	// call it concurrently; it must not panic and must not call Runtime.Close
+	// synchronously. Point lookups pass only the final cleaned
+	// workspace-relative path — never its ancestors — so a guard must deny
+	// descendants itself (e.g. deny "secrets" AND "secrets/..."); directory
+	// walks consult it per directory and deny by skipping the subtree.
+	ScopeGuard agenttools.ScopeGuard
+	// FailureMessage presents the public message placed in run.failed. When
+	// nil, Runtime preserves the existing truncated err.Error() behavior. The
+	// error Run returns is never replaced by the presentation. Concurrent
+	// runs may call it concurrently; it must not call Runtime.Close
+	// synchronously.
+	FailureMessage func(code string, err error) string
+	ConfigPath     string
+	MaxSteps       int
+	Budget         agent.Budget
 	// MaxMessageBytes bounds Turn.Message; zero or negative selects the
 	// 64 KiB default. Trusted hosts (like the CLI) may raise it.
 	MaxMessageBytes int
@@ -160,6 +175,7 @@ type Runtime struct {
 	compress        bool
 	retainReasoning bool
 	onWarning       func(error)
+	failureMessage  func(code string, err error) string
 	mu              sync.Mutex
 	active          map[string]*activeRun
 	activeThreads   map[string]*activeRun
@@ -185,10 +201,12 @@ func New(ctx context.Context, opts Options) (*Runtime, error) {
 	if opts.System == "" {
 		opts.System = SystemPrompt(false, false)
 	}
-	fileTools, err := agenttools.NewFileTools(root)
+	ws, err := agenttools.NewWorkspace(root)
 	if err != nil {
 		return nil, fmt.Errorf("golem: build workspace tools: %w", err)
 	}
+	ws.SetScopeGuard(opts.ScopeGuard)
+	fileTools := agenttools.NewFileToolsForWorkspace(ws)
 	tools := append(fileTools, opts.Tools...)
 	if err := validateTools(tools); err != nil {
 		return nil, err
@@ -231,6 +249,7 @@ func New(ctx context.Context, opts Options) (*Runtime, error) {
 		compress:        !opts.DisableCompression && summarizer != nil,
 		retainReasoning: opts.RetainReasoning,
 		onWarning:       opts.OnWarning,
+		failureMessage:  opts.FailureMessage,
 		active:          make(map[string]*activeRun),
 		activeThreads:   make(map[string]*activeRun),
 		closeDone:       make(chan struct{}),
@@ -308,20 +327,10 @@ func (r *Runtime) Run(ctx context.Context, turn Turn, sink EventSink) (agent.Res
 		if errors.Is(err, errDuplicateRunID) {
 			return agent.Result{}, err
 		}
-		code := failureCode(err)
-		if errors.Is(err, ErrRunConflict) {
-			code = "run_conflict"
-		}
 		if emitErr := emit("run.started", struct{}{}); emitErr != nil {
 			return agent.Result{}, emitErr
 		}
-		if emitErr := emit("run.failed", struct {
-			Code    string `json:"code"`
-			Message string `json:"message"`
-		}{
-			Code:    code,
-			Message: truncateErrorMessage(err.Error()),
-		}); emitErr != nil {
+		if emitErr := emit("run.failed", r.runFailedPayload(err)); emitErr != nil {
 			return agent.Result{}, emitErr
 		}
 		return agent.Result{}, err
@@ -359,15 +368,7 @@ func (r *Runtime) Run(ctx context.Context, turn Turn, sink EventSink) (agent.Res
 		var err error
 		thread, err = r.loadThread(runCtx, turn.ThreadID)
 		if err != nil {
-			eventType := "run.failed"
-			payload := any(struct {
-				Code    string `json:"code"`
-				Message string `json:"message"`
-			}{Code: failureCode(err), Message: truncateErrorMessage(err.Error())})
-			if isCancellation(err) {
-				eventType = "run.canceled"
-				payload = struct{}{}
-			}
+			eventType, payload := r.terminalFailure(err)
 			return agent.Result{}, finish(eventType, payload, err)
 		}
 	}
@@ -402,13 +403,7 @@ func (r *Runtime) Run(ctx context.Context, turn Turn, sink EventSink) (agent.Res
 	observer := &eventObserver{runID: turn.RunID, emit: emit, emitDelta: emitDelta, host: turn.Observer}
 	goal, err := turnGoal(turn)
 	if err != nil {
-		return agent.Result{}, finish("run.failed", struct {
-			Code    string `json:"code"`
-			Message string `json:"message"`
-		}{
-			Code:    failureCode(err),
-			Message: truncateErrorMessage(err.Error()),
-		}, err)
+		return agent.Result{}, finish("run.failed", r.runFailedPayload(err), err)
 	}
 	request := agent.Request{
 		Goal:     goal,
@@ -434,32 +429,13 @@ func (r *Runtime) Run(ctx context.Context, turn Turn, sink EventSink) (agent.Res
 		err = runCtx.Err()
 	}
 	if err != nil {
-		eventType := "run.failed"
-		payload := any(struct {
-			Code    string `json:"code"`
-			Message string `json:"message"`
-		}{
-			Code:    failureCode(err),
-			Message: truncateErrorMessage(err.Error()),
-		})
-		if isCancellation(err) {
-			eventType = "run.canceled"
-			payload = struct{}{}
-		}
+		eventType, payload := r.terminalFailure(err)
 		return result, finish(eventType, payload, err)
 	}
 	if thread != nil && result.Answer != "" {
 		if err := r.saveThread(runCtx, active, thread, turn.Message, result); err != nil {
 			err = fmt.Errorf("%w: %w", ErrSessionPersistence, err)
-			eventType := "run.failed"
-			payload := any(struct {
-				Code    string `json:"code"`
-				Message string `json:"message"`
-			}{Code: failureCode(err), Message: truncateErrorMessage(err.Error())})
-			if isCancellation(err) {
-				eventType = "run.canceled"
-				payload = struct{}{}
-			}
+			eventType, payload := r.terminalFailure(err)
 			return result, finish(eventType, payload, err)
 		}
 	} else if err := runCtx.Err(); err != nil {
@@ -483,6 +459,44 @@ func (r *Runtime) Run(ctx context.Context, turn Turn, sink EventSink) (agent.Res
 
 func isCancellation(err error) bool {
 	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
+}
+
+// failurePayload is the run.failed event body.
+type failurePayload struct {
+	Code    string `json:"code"`
+	Message string `json:"message"`
+}
+
+// runFailedPayload centralizes every run.failed construction: classify the
+// code (including the run_conflict override), apply the host presenter when
+// installed, then cap the message exactly as the raw err.Error() was capped
+// before. Presentation affects only the event payload — never the error Run
+// returns.
+func (r *Runtime) runFailedPayload(err error) failurePayload {
+	code := failureCode(err)
+	// Previously reservation-only; ErrRunConflict is only produced by reserve
+	// today, so applying the override at every run.failed site is a deliberate,
+	// benign unification.
+	if errors.Is(err, ErrRunConflict) {
+		code = "run_conflict"
+	}
+	message := err.Error()
+	if r.failureMessage != nil {
+		message = r.failureMessage(code, err)
+	}
+	return failurePayload{Code: code, Message: truncateErrorMessage(message)}
+}
+
+// terminalFailure picks the terminal event for err. The payload is built only
+// on the run.failed branch, so a host presenter is not invoked for errors
+// already classified as cancellations. A Cancel landing between payload
+// construction and commitTerminal can still flip the event to run.canceled,
+// in which case the presenter ran but its output is discarded — benign.
+func (r *Runtime) terminalFailure(err error) (eventType string, payload any) {
+	if isCancellation(err) {
+		return "run.canceled", struct{}{}
+	}
+	return "run.failed", r.runFailedPayload(err)
 }
 
 func failureCode(err error) string {

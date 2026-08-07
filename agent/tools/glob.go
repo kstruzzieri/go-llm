@@ -82,7 +82,7 @@ func (t *Glob) Invoke(ctx context.Context, raw json.RawMessage) (agent.ToolResul
 		return nil
 	})
 	if walkErr != nil && walkErr != fs.SkipAll {
-		return errResult("glob failed: " + walkErr.Error()), nil
+		return errResult(toolErrMessage(walkErr)), nil
 	}
 	return renderEntries(entries, truncated), nil
 }
@@ -158,18 +158,18 @@ func (t *List) Invoke(ctx context.Context, raw json.RawMessage) (agent.ToolResul
 	}
 	f, err := t.ws.openDir(p)
 	if err != nil {
-		return errResult(err.Error()), nil
+		return errResult(toolErrMessage(err)), nil
 	}
 	defer func() { _ = f.Close() }()
 
 	dirents, err := f.ReadDir(-1)
 	if err != nil {
-		return errResult(err.Error()), nil
+		return errResult(toolErrMessage(err)), nil
 	}
 
 	relBase, err := filepath.Rel(t.ws.root, f.Name())
 	if err != nil {
-		return errResult(err.Error()), nil
+		return errResult(toolErrMessage(err)), nil
 	}
 	base := filepath.ToSlash(relBase)
 	if base == "." {

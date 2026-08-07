@@ -1022,8 +1022,10 @@ func TestRunAgentflowAuthor_InstallsProofStateReadGuard(t *testing.T) {
 	if err := runAgentflowAuthorWithClient(context.Background(), &out, &errb, nil, sess, flags{goal: "x", goalSet: true}, root, &stubLocker{}, fixedApprover(true)); err != nil {
 		t.Fatal(err)
 	}
-	// The .agent read must have been denied (guard wired), not served.
-	if !strings.Contains(errb.String(), "proof state") {
+	// The .agent read must have been denied (guard wired), not served. The
+	// workspace collapses guard vetoes to the stable scope-denial message so
+	// host policy text never reaches model-visible output.
+	if !strings.Contains(errb.String(), "path denied by workspace policy") {
 		t.Errorf("planner did not deny the .agent read; guard not wired?\nstderr:\n%s", errb.String())
 	}
 	// The flow still locks after the denied read + valid submission.
