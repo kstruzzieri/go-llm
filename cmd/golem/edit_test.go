@@ -210,3 +210,32 @@ func TestTTYGoalEditorComposePassesContext(t *testing.T) {
 		t.Fatal("the caller's context must reach the runner")
 	}
 }
+
+func TestEditCapabilityIsIndependentOfNoEditor(t *testing.T) {
+	// -no-editor turns off INLINE line editing; it must not turn off /edit,
+	// which is a different question (external composition). The two decisions
+	// are made by different code with different inputs, and this pins that:
+	// for one config on real terminals, selection declines the editor while
+	// the /edit capability still reports available.
+	//
+	// Scope note: this covers the seam, not main.go's wiring line. A refactor
+	// that moved the ttyGoalEditor construction inside an `if !f.noEditor`
+	// branch would still remove /edit for -no-editor users without failing
+	// here; ttyGoalEditor has no access to the flag, so that is the only
+	// remaining way to break it.
+	stdin, stdout := tempDescriptors(t)
+	ops := &fakeTermOps{ttys: map[int]bool{int(stdin.Fd()): true, int(stdout.Fd()): true}}
+	cfg := inputConfig{
+		Stdin: stdin, Stdout: stdout,
+		NoEditor: true,
+		Getenv:   func(string) string { return "" },
+		Ops:      ops,
+	}
+	if selectsEditor("linux", cfg) {
+		t.Fatal("-no-editor must decline the inline editor")
+	}
+	e := &ttyGoalEditor{stdin: stdin, stdout: stdout, ops: ops}
+	if !e.Available() {
+		t.Fatal("/edit must stay available under -no-editor on real terminals")
+	}
+}

@@ -380,8 +380,18 @@ func (e *editorSource) read(ctx context.Context, prompt string, hist term.Histor
 			// x/term silently dropped the keystroke that would have pushed the
 			// line past 4096 runes; surfacing that after the read is the whole
 			// point of the watcher.
+			//
+			// Only on a read that produced a line. Accepting a line resets
+			// x/term's cursor model, so the warning goes out through
+			// Terminal.Write's cursor-zero fast path. After Ctrl-C the cursor
+			// is still mid-line and Write would repaint the prompt plus the
+			// entire cancelled input (terminal.go:751-753) before the
+			// interrupt cycle can retire that Terminal -- and the warning is
+			// moot there anyway, since the line it describes was discarded.
 			refused = false
-			e.binding.idleDisplay(lineLimitWarning)
+			if readErr == nil || errors.Is(readErr, term.ErrPasteIndicator) {
+				e.binding.idleDisplay(lineLimitWarning)
+			}
 		}
 		switch {
 		case readErr == nil, errors.Is(readErr, term.ErrPasteIndicator):
@@ -434,9 +444,8 @@ func (e *editorSource) read(ctx context.Context, prompt string, hist term.Histor
 					// Rejecting mid-paste: the rest of this paste must be
 					// drained and discarded, or its lines become later goals.
 					derr := e.drainPasteSegments(current)
-					e.binding.idleDisplay(goalLimitWarning)
 					parts, joined = nil, 0
-					e.bindTerminal(prompt, hist, &refused)
+					e.retireAndWarn(prompt, hist, &refused, goalLimitWarning)
 					switch {
 					case derr == nil, derr == errPasteTooLarge:
 						// A bare errPasteTooLarge means the filter finished
@@ -461,10 +470,14 @@ func (e *editorSource) read(ctx context.Context, prompt string, hist term.Histor
 				continue
 			}
 			trimmed, cont := splitBackslashTail(seg)
-			if joinedLen(joined, len(parts), trimmed) > maxGoalBytes {
-				e.binding.idleDisplay(goalLimitWarning)
+			// An empty final segment is dropped below, so it contributes
+			// nothing -- not even a separator -- and must not be charged one.
+			// Charging it rejects a goal of exactly maxGoalBytes whose paste
+			// ended in a newline.
+			dropped := trimmed == "" && len(parts) > 0
+			if !dropped && joinedLen(joined, len(parts), trimmed) > maxGoalBytes {
 				parts, joined = nil, 0
-				e.bindTerminal(prompt, hist, &refused)
+				e.retireAndWarn(prompt, hist, &refused, goalLimitWarning)
 				continue
 			}
 			if cont {
@@ -473,7 +486,7 @@ func (e *editorSource) read(ctx context.Context, prompt string, hist term.Histor
 				e.binding.setPrompt(continuationPrompt)
 				continue
 			}
-			if trimmed == "" && len(parts) > 0 {
+			if dropped {
 				// A paste ending in a newline leaves an empty final segment
 				// when the user presses Enter; the goal must not grow a
 				// trailing blank line from it. Uniform for typed
@@ -487,9 +500,8 @@ func (e *editorSource) read(ctx context.Context, prompt string, hist term.Histor
 			// The filter stopped an oversized paste and drained it (or the
 			// stream ended trying). x/term may hold a partial line and stale
 			// paste state, so the Terminal is retired, not reused.
-			e.binding.idleDisplay(goalLimitWarning)
 			parts, joined = nil, 0
-			e.bindTerminal(prompt, hist, &refused)
+			e.retireAndWarn(prompt, hist, &refused, goalLimitWarning)
 			if readErr == errPasteTooLarge {
 				// The bare sentinel: the drain completed and typeahead after
 				// the paste is intact. An answer read denies with no approval
@@ -576,6 +588,24 @@ func (e *editorSource) interruptCycle(prompt string, hist term.History, refused 
 		e.binding.write("\r\n")
 	}
 	e.onInterrupt()
+}
+
+// retireAndWarn replaces the Terminal that is being discarded and only then
+// prints msg, on a fresh physical line.
+//
+// The order is the whole point. A rejected read leaves x/term mid-line: its
+// cursor model is non-zero and t.line still holds every rune it accepted, so
+// Terminal.Write clears back to the prompt and repaints prompt plus line
+// (terminal.go:733-753). Warning through that Terminal therefore re-prints the
+// input being rejected -- for an oversized paste, a megabyte of it -- before
+// the replacement exists. The replacement starts at cursor zero, where Write
+// passes bytes straight through, and the explicit CRLF keeps the warning off
+// whatever the retired Terminal left on screen. Same sequence interruptCycle
+// uses for the Ctrl-C hint.
+func (e *editorSource) retireAndWarn(prompt string, hist term.History, refused *bool, msg string) {
+	e.bindTerminal(prompt, hist, refused)
+	e.binding.write("\r\n")
+	e.binding.idleDisplay(msg)
 }
 
 // drainPasteSegments reads and discards segments until one arrives outside the

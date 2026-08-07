@@ -1637,3 +1637,51 @@ func TestEditorSourceCtrlCRecreationSerializesWithNotices(t *testing.T) {
 		t.Fatalf("notice at %d, CRLF+hint at %d: the parked notice must land before recreation's output in %q", notice, hint, out)
 	}
 }
+
+func TestEditorSourceCeilingIgnoresTheDroppedFinalSegment(t *testing.T) {
+	// A paste ending in a newline leaves an empty final segment that
+	// composition drops, so it contributes no bytes and no separator. Charging
+	// it one rejects a goal of exactly maxGoalBytes -- the same size
+	// TestEditorSourceAggregateCeilingIsExact pins as acceptable when the last
+	// segment is non-empty.
+	first := strings.Repeat("a", 500000)
+	second := strings.Repeat("b", maxGoalBytes-len(first)-1)
+	in := pasteOn + first + "\n" + pasteOff + pasteOn + second + "\n" + pasteOff + "\r"
+
+	f := newEditorFixture(t, editorOpts{in: strings.NewReader(in)})
+	line, ok, err := f.readGoal(t)
+	if err != nil || !ok {
+		t.Fatalf("ReadGoal ok=%v err=%v, want the exactly-maxGoalBytes goal accepted", ok, err)
+	}
+	if len(line) != maxGoalBytes {
+		t.Fatalf("goal len = %d, want exactly %d", len(line), maxGoalBytes)
+	}
+	if strings.Contains(f.out.String(), goalLimitWarning) {
+		t.Fatalf("a legal goal was rejected; output contained %q", goalLimitWarning)
+	}
+}
+
+func TestEditorSourceOversizedPasteDoesNotRepaintTheRejectedInput(t *testing.T) {
+	// The rejected paste is still in x/term's line buffer when the ceiling
+	// trips. Warning through that Terminal makes Terminal.Write clear back to
+	// the prompt and repaint prompt+line, dumping the whole rejected paste to
+	// the screen. The replacement Terminal must be bound first.
+	big := strings.Repeat("z", maxGoalBytes+2)
+	f := newEditorFixture(t, editorOpts{in: strings.NewReader(pasteOn + big + pasteOff)})
+	if _, ok, err := f.readGoal(t); err != nil || ok {
+		t.Fatalf("ReadGoal ok=%v err=%v, want the paste rejected", ok, err)
+	}
+	out := f.out.String()
+	if !strings.Contains(out, goalLimitWarning) {
+		t.Fatalf("output does not contain %q", goalLimitWarning)
+	}
+	// x/term echoes the paste as it arrives, so one copy of the forwarded
+	// bytes is expected. A second copy means Terminal.Write repainted t.line
+	// while rejecting it. Counting bytes rather than runs matters: writeLine
+	// wraps at the terminal width, so the echo is never one contiguous run.
+	//
+	// Measured: 1048576 with the rebind first, 2097152 with the warning first.
+	if n := strings.Count(out, "z"); n > maxGoalBytes {
+		t.Fatalf("rejected paste occupies %d bytes of output, want at most one %d-byte echo; the discarded line was repainted", n, maxGoalBytes)
+	}
+}

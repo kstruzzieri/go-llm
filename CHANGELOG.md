@@ -18,8 +18,10 @@ goals, and multiline goals.
   keyed by workspace so one project's goals never surface in another. Only
   accepted goals are recorded: blank lines, slash commands, and approval
   answers never reach the store. Entries that cannot be safely re-edited in a
-  single-line editor (multiline text, or text containing ESC, CR, LF, BEL, or
-  DEL) are stored in full but excluded from arrow-key recall.
+  single-line editor are stored in full but excluded from arrow-key recall —
+  that is any entry longer than 4096 runes, or containing DEL or **any**
+  control character below `0x20`, which covers multiline text (LF), CR, ESC,
+  BEL, and tab.
 - **A pasted block is one goal.** Bracketed paste is detected below the
   editor, so pasting several lines composes a single goal and runs one turn
   rather than submitting each line separately.
