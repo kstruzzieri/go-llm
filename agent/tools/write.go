@@ -69,14 +69,14 @@ func (t *WriteFile) Plan(_ context.Context, raw json.RawMessage) (agent.ToolPlan
 	}
 	_, priorExists, err := t.ws.resolveWriteTarget(args.Path)
 	if err != nil {
-		return agent.ToolPlan{Effect: eff}, err
+		return agent.ToolPlan{Effect: eff}, toolVisibleError(err)
 	}
 	var prior []byte
 	beforeHash := absentHash
 	if priorExists {
 		prior, err = t.ws.readAll(args.Path)
 		if err != nil {
-			return agent.ToolPlan{Effect: eff}, err
+			return agent.ToolPlan{Effect: eff}, toolVisibleError(err)
 		}
 		if len(prior) > mutateMaxBytes {
 			return agent.ToolPlan{Effect: eff}, fmt.Errorf("file exceeds size limit")
@@ -112,13 +112,13 @@ func (t *WriteFile) Invoke(_ context.Context, raw json.RawMessage) (agent.ToolRe
 	}
 	_, nowExists, err := t.ws.resolveWriteTarget(pp.path)
 	if err != nil {
-		return errResult(err.Error()), nil
+		return errResult(toolVisibleError(err).Error()), nil
 	}
 	curHash := absentHash
 	if nowExists {
 		cur, rerr := t.ws.readAll(pp.path)
 		if rerr != nil {
-			return errResult(rerr.Error()), nil
+			return errResult(toolVisibleError(rerr).Error()), nil
 		}
 		curHash = ContentHash(cur)
 	}
@@ -130,7 +130,7 @@ func (t *WriteFile) Invoke(_ context.Context, raw json.RawMessage) (agent.ToolRe
 	// (symlink/dir) before renaming but not content; without OS file locks this is an
 	// accepted limitation for a local single-user coding agent.
 	if err := t.ws.WriteFileAtomic(pp.path, pp.afterContent); err != nil {
-		return errResult(err.Error()), nil
+		return errResult(toolVisibleError(err).Error()), nil
 	}
 	record(t.j, MutationRecord{
 		Path: pp.path, PriorContent: pp.priorContent, Existed: pp.priorExists,

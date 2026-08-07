@@ -21,6 +21,13 @@ import (
 	"github.com/kstruzzieri/go-llm/provider"
 )
 
+func closeTestRuntime(t *testing.T, rt *Runtime) {
+	t.Helper()
+	if err := rt.Close(); err != nil {
+		t.Errorf("Runtime.Close: %v", err)
+	}
+}
+
 type stubSessionStore struct {
 	loadErr error
 	saveErr error
@@ -195,7 +202,7 @@ func TestFailureMessagePresenterSanitizesReachableBranches(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			t.Cleanup(func() { _ = rt.Close() })
+			t.Cleanup(func() { closeTestRuntime(t, rt) })
 
 			var events []Event
 			_, runErr := rt.Run(context.Background(), tc.turn, func(event Event) error {
@@ -242,16 +249,16 @@ func TestFailureMessageReceivesRunConflictOverride(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = rt.Close() })
+	t.Cleanup(func() { closeTestRuntime(t, rt) })
 
 	threadID := "thread-" + rootMarker
 	firstCtx, cancelFirst := context.WithCancel(context.Background())
 	defer cancelFirst()
-	firstDone := make(chan struct{})
+	firstDone := make(chan error, 1)
 	go func() {
-		defer close(firstDone)
-		_, _ = rt.Run(firstCtx, Turn{ThreadID: threadID, RunID: "run-first", Message: "go"},
+		_, runErr := rt.Run(firstCtx, Turn{ThreadID: threadID, RunID: "run-first", Message: "go"},
 			func(Event) error { return nil })
+		firstDone <- runErr
 	}()
 	<-entered
 
@@ -262,7 +269,9 @@ func TestFailureMessageReceivesRunConflictOverride(t *testing.T) {
 			return nil
 		})
 	cancelFirst()
-	<-firstDone
+	if firstErr := <-firstDone; !errors.Is(firstErr, context.Canceled) {
+		t.Fatalf("first Run error = %v, want context.Canceled", firstErr)
+	}
 
 	if !errors.Is(runErr, ErrRunConflict) {
 		t.Fatalf("Run error = %v, want ErrRunConflict", runErr)
@@ -300,7 +309,7 @@ func TestFailureMessageNilPreservesCurrentFailureText(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = rt.Close() })
+	t.Cleanup(func() { closeTestRuntime(t, rt) })
 
 	var events []Event
 	_, runErr := rt.Run(context.Background(), Turn{ThreadID: "thread-nil", RunID: "run-nil", Message: "go"},
@@ -366,7 +375,7 @@ func TestFailureMessageNotInvokedForCancellation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = rt.Close() })
+	t.Cleanup(func() { closeTestRuntime(t, rt) })
 
 	var events []Event
 	done := make(chan error, 1)

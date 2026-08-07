@@ -15,10 +15,10 @@ import (
 // requested path would only add another disclosure surface.
 func toolErrMessage(err error) string {
 	switch {
-	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
-		return "filesystem operation canceled"
 	case errors.Is(err, errScopeDenied):
 		return errScopeDenied.Error() // single source for the denial text
+	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
+		return "filesystem operation canceled"
 	case errors.Is(err, fs.ErrNotExist), errors.Is(err, errParentMissing):
 		return "path not found"
 	case errors.Is(err, fs.ErrPermission):
@@ -34,4 +34,13 @@ func toolErrMessage(err error) string {
 	default:
 		return "filesystem operation failed"
 	}
+}
+
+// toolVisibleError removes host-only ScopeGuard details before a mutating tool
+// exposes an error through Plan or ToolResult. Other diagnostics are unchanged.
+func toolVisibleError(err error) error {
+	if errors.Is(err, errScopeDenied) {
+		return errScopeDenied
+	}
+	return err
 }

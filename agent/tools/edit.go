@@ -64,7 +64,7 @@ func (t *EditFile) computeEdit(args editFileArgs) (before, after []byte, err err
 	}
 	before, err = t.ws.readAll(args.Path)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, toolVisibleError(err)
 	}
 	if len(before) > mutateMaxBytes {
 		return nil, nil, fmt.Errorf("file exceeds size limit")
@@ -142,7 +142,7 @@ func (t *EditFile) Invoke(_ context.Context, raw json.RawMessage) (agent.ToolRes
 		return errResult("file changed since preview; retry"), nil
 	}
 	if err := t.ws.WriteFileAtomic(pp.path, pp.afterContent); err != nil {
-		return errResult(err.Error()), nil
+		return errResult(toolVisibleError(err).Error()), nil
 	}
 	record(t.j, MutationRecord{
 		Path: pp.path, PriorContent: pp.priorContent, Existed: true,

@@ -50,11 +50,16 @@ var (
 	errNotDir        = errors.New("not a directory")
 	errFileChanged   = errors.New("file identity changed between stat and open")
 	errParentMissing = errors.New("parent directory does not exist")
-	// errScopeDenied replaces a ScopeGuard's own error so host policy text
-	// never reaches model-visible output. Its text doubles as the stable
-	// denial message.
+	// errScopeDenied marks guard vetoes for sanitized tool output. Its text is
+	// the stable model-visible denial message.
 	errScopeDenied = errors.New("path denied by workspace policy")
 )
+
+type scopeDeniedError struct{ cause error }
+
+func (e scopeDeniedError) Error() string        { return e.cause.Error() }
+func (e scopeDeniedError) Unwrap() error        { return e.cause }
+func (e scopeDeniedError) Is(target error) bool { return target == errScopeDenied }
 
 // ScopeGuard optionally vetoes an access by workspace-relative slash path. write
 // is true for mutations (write/remove), false for reads/listing. A non-nil error
@@ -94,9 +99,8 @@ func NewWorkspace(root string) (*Workspace, error) {
 // SetScopeGuard installs (or clears with nil) the proof-mode scope guard.
 func (w *Workspace) SetScopeGuard(g ScopeGuard) { w.guard = g }
 
-// checkScope consults the guard for a cleaned absolute path. A guard veto is
-// collapsed to errScopeDenied so the host's own policy text never propagates
-// into tool results.
+// checkScope consults the guard for a cleaned absolute path. A veto preserves
+// the host error while marking it for sanitized model-visible tool output.
 func (w *Workspace) checkScope(abs string, write bool) error {
 	if w.guard == nil {
 		return nil
@@ -105,8 +109,8 @@ func (w *Workspace) checkScope(abs string, write bool) error {
 	if err != nil {
 		return err
 	}
-	if w.guard(filepath.ToSlash(rel), write) != nil {
-		return errScopeDenied
+	if err := w.guard(filepath.ToSlash(rel), write); err != nil {
+		return scopeDeniedError{cause: err}
 	}
 	return nil
 }

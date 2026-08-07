@@ -43,7 +43,7 @@ func TestScopeGuardCoversEveryBuiltinFileTool(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = rt.Close() })
+	t.Cleanup(func() { closeTestRuntime(t, rt) })
 
 	tools := make(map[string]agent.Tool, len(rt.tools))
 	for _, tool := range rt.tools {
@@ -95,7 +95,7 @@ func TestNilScopeGuardPreservesBuiltinReads(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = rt.Close() })
+	t.Cleanup(func() { closeTestRuntime(t, rt) })
 
 	var read agent.Tool
 	for _, tool := range rt.tools {
@@ -173,7 +173,7 @@ func TestScopeGuardSanitizedToolFailuresThroughRealRun(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			t.Cleanup(func() { _ = rt.Close() })
+			t.Cleanup(func() { closeTestRuntime(t, rt) })
 			if tc.removeRoot {
 				if err := os.RemoveAll(root); err != nil {
 					t.Fatal(err)

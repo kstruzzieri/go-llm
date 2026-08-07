@@ -531,6 +531,74 @@ func TestWorkspace_ScopeGuard_DeniesReadAndWrite(t *testing.T) {
 	}
 }
 
+func TestScopeGuardPreservesHostErrorAndSanitizesFileTools(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "a.txt"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ws, err := NewWorkspace(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	guardErr := &fs.PathError{Op: "scope", Path: "/host/policy/detail", Err: context.Canceled}
+	denied := true
+	writeOnly := false
+	ws.SetScopeGuard(func(_ string, write bool) error {
+		if denied && (!writeOnly || write) {
+			return guardErr
+		}
+		return nil
+	})
+
+	err = ws.WriteFileAtomic("a.txt", []byte("changed"))
+	if !errors.Is(err, guardErr) {
+		t.Fatalf("WriteFileAtomic error = %v, want original guard error", err)
+	}
+	var pathErr *fs.PathError
+	if !errors.As(err, &pathErr) || pathErr != guardErr {
+		t.Fatalf("WriteFileAtomic error = %v, want original *fs.PathError", err)
+	}
+	if err.Error() != guardErr.Error() {
+		t.Fatalf("WriteFileAtomic error = %q, want %q", err, guardErr)
+	}
+
+	res, invokeErr := NewReadFile(ws).Invoke(context.Background(), json.RawMessage(`{"path":"a.txt"}`))
+	if invokeErr != nil {
+		t.Fatalf("read_file Invoke: %v", invokeErr)
+	}
+	if !res.IsError || res.Content != "path denied by workspace policy" {
+		t.Fatalf("read_file = %#v, want sanitized scope denial", res)
+	}
+
+	for _, tc := range []struct {
+		name string
+		tool agent.Tool
+		args json.RawMessage
+	}{
+		{"write_file", NewWriteFile(ws, nil), json.RawMessage(`{"path":"a.txt","content":"changed"}`)},
+		{"edit_file", NewEditFile(ws, nil), json.RawMessage(`{"path":"a.txt","old_string":"x","new_string":"changed"}`)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			denied = true
+			writeOnly = false
+			planner := tc.tool.(agent.PlanningTool)
+			if _, err := planner.Plan(context.Background(), tc.args); err == nil || err.Error() != errScopeDenied.Error() {
+				t.Fatalf("Plan error = %v, want sanitized scope denial", err)
+			}
+			denied = false
+			if _, err := planner.Plan(context.Background(), tc.args); err != nil {
+				t.Fatalf("allowed Plan: %v", err)
+			}
+			denied = true
+			writeOnly = tc.name == "edit_file"
+			res, err := tc.tool.Invoke(context.Background(), tc.args)
+			if err != nil || !res.IsError || res.Content != errScopeDenied.Error() {
+				t.Fatalf("Invoke = %#v, %v, want sanitized scope denial", res, err)
+			}
+		})
+	}
+}
+
 func TestWorkspace_NilGuard_BackwardCompatible(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "a.txt"), []byte("x"), 0o600); err != nil {
