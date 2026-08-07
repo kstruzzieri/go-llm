@@ -820,3 +820,138 @@ func TestRunOnceWatcherFirstCancelIsCanceled(t *testing.T) {
 		t.Fatalf("recorded trace status = %q, want canceled", status)
 	}
 }
+
+// fakeGoalEditor scripts Compose; it records the seeds it was given.
+type fakeGoalEditor struct {
+	available bool
+	text      string
+	err       error
+	seeds     []string
+	composes  int
+}
+
+func (f *fakeGoalEditor) Available() bool { return f.available }
+func (f *fakeGoalEditor) Compose(_ context.Context, seed string) (string, error) {
+	f.composes++
+	f.seeds = append(f.seeds, seed)
+	return f.text, f.err
+}
+
+func TestREPL_EditComposesAForcedGoal(t *testing.T) {
+	// /edit seeds the editor and the edited text becomes the goal: recorded,
+	// then run against the model. /edit itself is never recorded.
+	root := t.TempDir()
+	caller := &scriptCaller{responses: []agent.ModelResult{{
+		Response: provider.ChatResponse{Content: "done"},
+	}}}
+	sess := newTestSession(t, caller, root)
+	ed := &fakeGoalEditor{available: true, text: "edited goal\n"}
+	sess.goalEditor = ed
+
+	var out strings.Builder
+	src := &recordingSource{scannerSource: newScannerSource(strings.NewReader("/edit fix the bug\n"), &out)}
+	if err := runREPL(context.Background(), src, &out, nil, sess); err != nil {
+		t.Fatalf("runREPL: %v", err)
+	}
+	if len(ed.seeds) != 1 || ed.seeds[0] != "fix the bug" {
+		t.Fatalf("seeds = %q, want [\"fix the bug\"]", ed.seeds)
+	}
+	if len(src.recorded) != 1 || src.recorded[0] != "edited goal" {
+		t.Fatalf("recorded goals = %q, want the trimmed edited goal only", src.recorded)
+	}
+	if caller.i != 1 {
+		t.Fatalf("model called %d times, want 1", caller.i)
+	}
+}
+
+func TestREPL_EditResultStartingWithSlashRunsAsGoal(t *testing.T) {
+	// The forced flag bypasses slash dispatch exactly once: an edited goal of
+	// "/exit" is a model goal, not a command.
+	root := t.TempDir()
+	caller := &scriptCaller{responses: []agent.ModelResult{{
+		Response: provider.ChatResponse{Content: "done"},
+	}}}
+	sess := newTestSession(t, caller, root)
+	sess.goalEditor = &fakeGoalEditor{available: true, text: "/exit"}
+
+	var out strings.Builder
+	src := &recordingSource{scannerSource: newScannerSource(strings.NewReader("/edit\n"), &out)}
+	if err := runREPL(context.Background(), src, &out, nil, sess); err != nil {
+		t.Fatalf("runREPL: %v", err)
+	}
+	if caller.i != 1 {
+		t.Fatalf("model called %d times, want 1: \"/exit\" must run as a goal", caller.i)
+	}
+	if len(src.recorded) != 1 || src.recorded[0] != "/exit" {
+		t.Fatalf("recorded goals = %q, want [\"/exit\"]", src.recorded)
+	}
+}
+
+func TestREPL_EditUnavailable(t *testing.T) {
+	// nil and Available()==false both refuse before any runner involvement, so
+	// a piped script can never spawn an interactive editor.
+	for _, tc := range []struct {
+		name   string
+		editor goalEditor
+	}{
+		{"nil editor", nil},
+		{"unavailable editor", &fakeGoalEditor{available: false, text: "never"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			caller := &scriptCaller{}
+			sess := newTestSession(t, caller, root)
+			sess.goalEditor = tc.editor
+
+			var out strings.Builder
+			src := &recordingSource{scannerSource: newScannerSource(strings.NewReader("/edit\n"), &out)}
+			if err := runREPL(context.Background(), src, &out, nil, sess); err != nil {
+				t.Fatalf("runREPL: %v", err)
+			}
+			if !strings.Contains(out.String(), "/edit requires an interactive terminal") {
+				t.Fatalf("missing unavailable message in:\n%s", out.String())
+			}
+			if fe, ok := tc.editor.(*fakeGoalEditor); ok && fe.composes != 0 {
+				t.Fatalf("Compose invoked %d times on an unavailable editor, want 0", fe.composes)
+			}
+			if caller.i != 0 || len(src.recorded) != 0 {
+				t.Fatalf("model calls=%d goals=%q, want none", caller.i, src.recorded)
+			}
+		})
+	}
+}
+
+func TestREPL_EditErrorAndEmptyYieldNoGoal(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		editor   *fakeGoalEditor
+		wantOut  string
+		wantSkip string
+	}{
+		{"runner error", &fakeGoalEditor{available: true, err: errors.New("exit status 3")}, "edit failed:", ""},
+		{"oversized", &fakeGoalEditor{available: true, err: errEditTooLarge}, goalLimitWarning, "edit failed:"},
+		{"empty content", &fakeGoalEditor{available: true, text: "  \n "}, "", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			caller := &scriptCaller{}
+			sess := newTestSession(t, caller, root)
+			sess.goalEditor = tc.editor
+
+			var out strings.Builder
+			src := &recordingSource{scannerSource: newScannerSource(strings.NewReader("/edit\n"), &out)}
+			if err := runREPL(context.Background(), src, &out, nil, sess); err != nil {
+				t.Fatalf("runREPL: %v", err)
+			}
+			if tc.wantOut != "" && !strings.Contains(out.String(), tc.wantOut) {
+				t.Fatalf("output missing %q:\n%s", tc.wantOut, out.String())
+			}
+			if tc.wantSkip != "" && strings.Contains(out.String(), tc.wantSkip) {
+				t.Fatalf("output must not contain %q:\n%s", tc.wantSkip, out.String())
+			}
+			if caller.i != 0 || len(src.recorded) != 0 {
+				t.Fatalf("model calls=%d goals=%q, want none", caller.i, src.recorded)
+			}
+		})
+	}
+}

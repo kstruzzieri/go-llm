@@ -56,6 +56,10 @@ type replSession struct {
 	// and non-interactive callers, where runREPL falls back to a plain prompt
 	// and the caller's interrupt wiring.
 	control *replControl
+
+	// goalEditor backs /edit. nil outside the default REPL and in narrow
+	// tests that never dispatch it; nil renders the unavailable message.
+	goalEditor goalEditor
 }
 
 // runREPL reads lines from in, dispatching slash commands and running every
@@ -87,10 +91,17 @@ func runREPL(ctx context.Context, src lineSource, out io.Writer, interrupts <-ch
 			continue
 		}
 		if strings.HasPrefix(line, "/") {
-			if exit := dispatchSlash(ctx, out, sess, line); exit {
+			forced, exit := dispatchSlash(ctx, out, sess, line)
+			if exit {
 				return nil
 			}
-			continue
+			if forced == "" {
+				continue
+			}
+			// /edit's result is a forced model goal: it falls through to the
+			// recording and run below, bypassing slash dispatch exactly once
+			// even when it begins with "/".
+			line = forced
 		}
 		// Recorded only here: after trimming and after the empty and slash
 		// checks, so a blank line or a command can never reach history.
@@ -282,12 +293,15 @@ func lastRoutedModel(res agent.Result) string {
 }
 
 // dispatchSlash handles a slash command; returns true to exit the REPL.
-func dispatchSlash(ctx context.Context, out io.Writer, sess *replSession, line string) bool {
+// dispatchSlash handles one slash command. A non-empty forced return is a
+// goal the caller must run as a model goal -- /edit's result, which bypasses
+// slash dispatch exactly once even when it begins with "/".
+func dispatchSlash(ctx context.Context, out io.Writer, sess *replSession, line string) (forced string, exit bool) {
 	fields := strings.Fields(line)
 	cmd := fields[0]
 	switch cmd {
 	case "/exit", "/quit":
-		return true
+		return "", true
 	case "/help":
 		_, _ = fmt.Fprint(out, golemHelp)
 	case "/clear":
@@ -363,10 +377,29 @@ func dispatchSlash(ctx context.Context, out io.Writer, sess *replSession, line s
 		if sess.retrieveOmitted {
 			_, _ = fmt.Fprintln(out, "retrieve omitted: no RAG index configured")
 		}
+	case "/edit":
+		// Capability is independent of the line editor: -no-editor selects
+		// the scanner for input but leaves /edit available on a real TTY. A
+		// piped script must never spawn an interactive editor.
+		if sess.goalEditor == nil || !sess.goalEditor.Available() {
+			_, _ = fmt.Fprintln(out, "/edit requires an interactive terminal")
+			return "", false
+		}
+		seed := strings.TrimSpace(strings.TrimPrefix(line, cmd))
+		text, err := sess.goalEditor.Compose(ctx, seed)
+		switch {
+		case errors.Is(err, errEditTooLarge):
+			_, _ = fmt.Fprintln(out, goalLimitWarning)
+		case err != nil:
+			_, _ = fmt.Fprintf(out, "edit failed: %v\n", err)
+		default:
+			// Non-empty text is the forced goal; empty aborts to the prompt.
+			return strings.TrimSpace(text), false
+		}
 	default:
 		_, _ = fmt.Fprintf(out, "unknown command: %s (try /help)\n", cmd)
 	}
-	return false
+	return "", false
 }
 
 const golemHelp = `commands:
@@ -379,6 +412,7 @@ const golemHelp = `commands:
   /search-sessions <query>
                  search saved sessions
   /resume <id>   switch to a saved session
+  /edit [seed]   compose a goal in $VISUAL/$EDITOR (quoting unsupported)
   /undo          revert the last applied write (when -allow-write)
   /remember [--global] <text>
                  save a memory (workspace scope unless --global)

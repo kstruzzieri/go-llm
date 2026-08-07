@@ -1031,6 +1031,19 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File) error {
 		return runOneShot(ctx, stdout, stderr, interrupts, sess, f.prompt)
 	}
 
+	// /edit is wired regardless of -no-editor: the flag disables the inline
+	// line editor, not external composition. Availability is still gated on
+	// real terminals at dispatch time. A data-dir resolution failure (no HOME)
+	// leaves goalEditor nil, which renders the unavailable message.
+	if base, derr := dataDirBase(os.Getenv); derr == nil {
+		sess.goalEditor = &ttyGoalEditor{
+			stdin: stdin, stdout: stdout, stderr: stderr,
+			getenv:  os.Getenv,
+			ops:     realTermOps{},
+			run:     runEditorProcess,
+			dataDir: filepath.Join(base, "golem"),
+		}
+	}
 	return withLineSource(newInput(inputConfig{
 		Stdin:      stdin,
 		Stdout:     stdout,
