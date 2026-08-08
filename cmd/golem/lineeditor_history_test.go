@@ -594,6 +594,31 @@ func TestGoalHistoryScanErrorKeepsWhatDecoded(t *testing.T) {
 	}
 }
 
+func TestGoalHistoryDoesNotRecallMalformedEntries(t *testing.T) {
+	// Entries written before the UTF-8 boundary existed are still on disk. Arrow
+	// recall pushes them straight into x/term through setLine, which walks runes
+	// and would submit different bytes than were stored. Storage keeps them at
+	// full fidelity; recall must not offer them.
+	root := t.TempDir()
+	getenv, _ := historyEnv(t, root)
+	var warns []string
+	h := newGoalHistory(getenv, root, collectWarnings(&warns))
+	t.Cleanup(func() { _ = h.Close() })
+
+	h.Record("bad\xb2entry")
+	h.Record("clean entry")
+
+	if got := h.stored(); !equalStrings(got, []string{"bad\xb2entry", "clean entry"}) {
+		t.Fatalf("stored = %q, want both entries kept", got)
+	}
+	if h.Len() != 1 {
+		t.Fatalf("Len = %d, want 1: the malformed entry must not be recallable", h.Len())
+	}
+	if got := h.At(0); got != "clean entry" {
+		t.Fatalf("At(0) = %q, want the clean entry", got)
+	}
+}
+
 func TestGoalHistoryTightensExistingLooseDir(t *testing.T) {
 	// MkdirAll leaves an existing directory's mode alone, so a history
 	// directory restored from a backup or left by an older build could sit at

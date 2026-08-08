@@ -7,6 +7,7 @@ import (
 	"io"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/kstruzzieri/go-llm/agent"
 	"github.com/kstruzzieri/go-llm/conversation"
@@ -103,8 +104,20 @@ func runREPL(ctx context.Context, src lineSource, out io.Writer, interrupts <-ch
 			// even when it begins with "/".
 			line = forced
 		}
-		// Recorded only here: after trimming and after the empty and slash
-		// checks, so a blank line or a command can never reach history.
+		// One UTF-8 boundary for every source. The editor rejects malformed
+		// bytes at the terminal, but the scanner and /edit never pass through
+		// it, and the provider transport is JSON: it would substitute U+FFFD
+		// silently, so the model would answer a question the user did not type
+		// and history would store bytes arrow recall cannot reproduce. A
+		// correctly encoded U+FFFD is fine here -- only x/term cannot represent
+		// it -- so validity, not content, is the test.
+		if !utf8.ValidString(line) {
+			_, _ = fmt.Fprintln(out, invalidUTF8Warning)
+			continue
+		}
+		// Recorded only here: after trimming, after the empty and slash checks,
+		// and after validation, so a blank line, a command, or malformed bytes
+		// can never reach history.
 		src.RecordGoal(line)
 		_, _ = runOnce(ctx, out, interrupts, sess, line, src)
 	}

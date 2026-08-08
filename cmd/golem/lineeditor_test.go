@@ -1226,6 +1226,58 @@ func TestEditorSourceUnbindsTheTerminalWithItsRawWindow(t *testing.T) {
 	}
 }
 
+func TestRunREPLRefusesMalformedGoalsFromEverySource(t *testing.T) {
+	// The editor rejects malformed bytes at the terminal boundary, but the
+	// scanner and /edit never pass through it. Without a guard here the goal
+	// reaches the provider transport, where JSON silently substitutes U+FFFD --
+	// so the model is asked a question the user did not type, and history stores
+	// bytes that cannot be recalled.
+	t.Run("scanner input", func(t *testing.T) {
+		caller := &countingCaller{response: "done"}
+		sess := newTestSession(t, caller, t.TempDir())
+		var out strings.Builder
+		src := &recordingSource{scannerSource: newScannerSource(
+			strings.NewReader("bad\xb2\ngood goal\n"), &out)}
+
+		if err := runREPL(context.Background(), src, &out, nil, sess); err != nil {
+			t.Fatalf("runREPL: %v", err)
+		}
+		if seen := caller.seen(); len(seen) != 1 || !strings.Contains(seen[0], "good goal") {
+			t.Fatalf("model saw %q, want only the well-formed goal", seen)
+		}
+		if !equalStrings(src.recorded, []string{"good goal"}) {
+			t.Fatalf("recorded %q, want only the well-formed goal", src.recorded)
+		}
+		if !strings.Contains(out.String(), invalidUTF8Warning) {
+			t.Fatalf("no rejection reported to the user in %q", out.String())
+		}
+	})
+
+	t.Run("forced /edit result", func(t *testing.T) {
+		// /edit's result bypasses slash dispatch, so it must not also bypass
+		// this boundary.
+		caller := &countingCaller{response: "done"}
+		sess := newTestSession(t, caller, t.TempDir())
+		sess.goalEditor = &fakeGoalEditor{available: true, text: "from editor \xb2"}
+		var out strings.Builder
+		src := &recordingSource{scannerSource: newScannerSource(
+			strings.NewReader("/edit\n"), &out)}
+
+		if err := runREPL(context.Background(), src, &out, nil, sess); err != nil {
+			t.Fatalf("runREPL: %v", err)
+		}
+		if seen := caller.seen(); len(seen) != 0 {
+			t.Fatalf("model saw %q, want no turn at all", seen)
+		}
+		if len(src.recorded) != 0 {
+			t.Fatalf("recorded %q, want nothing", src.recorded)
+		}
+		if !strings.Contains(out.String(), invalidUTF8Warning) {
+			t.Fatalf("no rejection reported to the user in %q", out.String())
+		}
+	})
+}
+
 func TestEditorSourceCleanEOF(t *testing.T) {
 	// Ctrl-D on an empty line and a closed stdin are the same io.EOF above the
 	// Terminal, and both are a clean exit rather than an error.

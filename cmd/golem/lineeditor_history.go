@@ -289,6 +289,13 @@ func (h *goalHistory) rebuildRecallable() {
 
 // recallableEntry reports whether an entry is safe to hand to x/term's recall.
 func recallableEntry(s string) bool {
+	// Malformed bytes predate the UTF-8 boundary but are still on disk. Recall
+	// hands the entry to x/term's setLine, which walks runes: every bad byte
+	// becomes U+FFFD, so pressing Enter would submit different bytes than were
+	// stored. Kept in storage, never offered to the arrow keys.
+	if !utf8.ValidString(s) {
+		return false
+	}
 	if utf8.RuneCountInString(s) > maxEditorRunes {
 		return false
 	}
