@@ -41,6 +41,11 @@ type replControl struct {
 	// dereference one future caller away.
 	idleDisplay func(string)
 
+	// suspended holds notices back while another process owns the terminal;
+	// queued collects them in arrival order for the flush on resume.
+	suspended bool
+	queued    []string
+
 	// defaultDisplay is the source-free rendering, kept so a source can be
 	// unbound when it closes. runREPL returns with atPrompt still true, and
 	// signal.Stop runs later than the source's Close, so a Ctrl-C arriving in
@@ -91,9 +96,44 @@ func (c *replControl) enterTurn() {
 
 // notice prints an asynchronous message. When idle at the prompt it reprints
 // the prompt underneath so the prompt is never buried by the message.
+// suspendNotices holds asynchronous messages back while something else owns the
+// terminal -- today, the external editor /edit spawns. A notice painted over a
+// full-screen editor corrupts its display with nothing to repaint it, since the
+// editor, not golem, owns the screen.
+func (c *replControl) suspendNotices() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.suspended = true
+}
+
+// resumeNotices releases the terminal and flushes whatever arrived meanwhile,
+// in order. Messages are delivered rather than dropped: they are warnings the
+// user still needs, just not during the edit.
+func (c *replControl) resumeNotices() {
+	c.mu.Lock()
+	queued := c.queued
+	c.queued, c.suspended = nil, false
+	c.mu.Unlock()
+
+	for _, line := range queued {
+		c.notice(line)
+	}
+}
+
 func (c *replControl) notice(line string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if c.suspended {
+		// Bounded: a stuck editor must not let a chatty producer grow this
+		// without limit. The oldest are dropped, since the newest describe the
+		// state the user is returning to.
+		const maxQueuedNotices = 64
+		c.queued = append(c.queued, line)
+		if len(c.queued) > maxQueuedNotices {
+			c.queued = c.queued[len(c.queued)-maxQueuedNotices:]
+		}
+		return
+	}
 	if c.atPrompt {
 		// The mutex is held across the call so the atPrompt decision and the
 		// display action stay one policy operation. The source must therefore

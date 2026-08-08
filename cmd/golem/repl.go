@@ -399,6 +399,13 @@ func dispatchSlash(ctx context.Context, out io.Writer, sess *replSession, line s
 			return "", false
 		}
 		seed := strings.TrimSpace(strings.TrimPrefix(line, cmd))
+		// The editor owns the screen for its lifetime, and golem cannot repaint
+		// what it does not draw. Notices are held and flushed afterwards rather
+		// than painted over it.
+		if sess.control != nil {
+			sess.control.suspendNotices()
+			defer sess.control.resumeNotices()
+		}
 		text, err := sess.goalEditor.Compose(ctx, seed)
 		switch {
 		case errors.Is(err, errEditTooLarge):

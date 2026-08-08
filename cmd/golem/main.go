@@ -1033,15 +1033,21 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File) error {
 
 	// /edit is wired regardless of -no-editor: the flag disables the inline
 	// line editor, not external composition. Availability is still gated on
-	// real terminals at dispatch time. A data-dir resolution failure (no HOME)
-	// leaves goalEditor nil, which renders the unavailable message.
-	if base, derr := dataDirBase(os.Getenv); derr == nil {
+	// real terminals at dispatch time.
+	base, derr := dataDirBase(os.Getenv)
+	if derr != nil {
+		// Reported, not discarded. Leaving goalEditor nil rendered "/edit
+		// requires an interactive terminal", which sends a user with a HOME-less
+		// environment hunting a terminal problem that does not exist.
+		_, _ = fmt.Fprintf(stderr, "golem: /edit unavailable: %v\n", derr)
+	} else {
 		sess.goalEditor = &ttyGoalEditor{
 			stdin: stdin, stdout: stdout, stderr: stderr,
 			getenv:  os.Getenv,
 			ops:     realTermOps{},
 			run:     runEditorProcess,
 			dataDir: filepath.Join(base, "golem"),
+			root:    root,
 		}
 	}
 	return withLineSource(newInput(inputConfig{

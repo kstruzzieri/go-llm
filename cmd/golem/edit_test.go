@@ -27,8 +27,16 @@ type editRunCall struct {
 // runErr is returned from the runner after any write.
 func newEditFixture(t *testing.T, getenv func(string) string, write *string, runErr error) (*ttyGoalEditor, *[]editRunCall) {
 	t.Helper()
+	return newEditFixtureIn(t, filepath.Join(t.TempDir(), "golem"), t.TempDir(), getenv, write, runErr)
+}
+
+// newEditFixtureIn is newEditFixture with the data dir and workspace root named
+// explicitly, for the tests that care where the draft lands.
+func newEditFixtureIn(t *testing.T, dataDir, root string, getenv func(string) string,
+	write *string, runErr error) (*ttyGoalEditor, *[]editRunCall) {
+
+	t.Helper()
 	stdin, stdout := tempDescriptors(t)
-	dataDir := filepath.Join(t.TempDir(), "golem")
 	if getenv == nil {
 		getenv = func(string) string { return "" }
 	}
@@ -63,8 +71,119 @@ func newEditFixture(t *testing.T, getenv func(string) string, write *string, run
 			return runErr
 		},
 		dataDir: dataDir,
+		root:    root,
 	}
 	return e, calls
+}
+
+func TestTTYGoalEditorRemovesEveryArtifact(t *testing.T) {
+	// Editors write more than the file they are handed: emacs leaves goal.txt~,
+	// vim a .swp. Removing only the primary file left those behind under the
+	// data dir holding whatever the user typed.
+	dataDir := filepath.Join(t.TempDir(), "golem")
+	edited := "the composed goal"
+	e, calls := newEditFixtureIn(t, dataDir, t.TempDir(), nil, &edited, nil)
+
+	// The runner also drops a backup beside the draft, as a real editor would.
+	base := *calls
+	_ = base
+	e.run = func(ctx context.Context, name string, args []string, in, out, errw *os.File) error {
+		path := args[len(args)-1]
+		if err := os.WriteFile(path+"~", []byte("backup of a goal"), 0o600); err != nil {
+			t.Fatalf("backup: %v", err)
+		}
+		return os.WriteFile(path, []byte(edited), 0o600)
+	}
+
+	if got, err := e.Compose(context.Background(), "seed"); err != nil || got != edited {
+		t.Fatalf("Compose = %q err=%v", got, err)
+	}
+
+	entries, err := os.ReadDir(dataDir)
+	if err != nil {
+		t.Fatalf("read data dir: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("data dir still holds %d entries after the edit; artifacts carrying goal text were left behind", len(entries))
+	}
+}
+
+func TestTTYGoalEditorRefusesADraftInsideTheWorkspace(t *testing.T) {
+	// Every other data-dir writer applies this check. With XDG_DATA_HOME
+	// pointed inside the repo the draft lands in the workspace as a stray
+	// artifact carrying whatever the user typed.
+	root := t.TempDir()
+	inside := filepath.Join(root, "data", "golem")
+	e, calls := newEditFixtureIn(t, inside, root, nil, nil, nil)
+
+	if _, err := e.Compose(context.Background(), "seed"); err == nil {
+		t.Fatal("Compose accepted a draft location inside the workspace")
+	}
+	if len(*calls) != 0 {
+		t.Fatal("the editor was launched before the location was validated")
+	}
+}
+
+func TestTTYGoalEditorReadsBackThroughAConfinedRoot(t *testing.T) {
+	// An arbitrary process runs between the write and the read, so the name is
+	// no longer trusted: a symlink planted at it must not be followed out of the
+	// per-edit directory.
+	secret := filepath.Join(t.TempDir(), "secret.txt")
+	if err := os.WriteFile(secret, []byte("not the user's goal"), 0o600); err != nil {
+		t.Fatalf("secret: %v", err)
+	}
+	e, _ := newEditFixture(t, nil, nil, nil)
+	e.run = func(ctx context.Context, name string, args []string, in, out, errw *os.File) error {
+		path := args[len(args)-1]
+		if err := os.Remove(path); err != nil {
+			return err
+		}
+		return os.Symlink(secret, path)
+	}
+
+	got, err := e.Compose(context.Background(), "seed")
+	if err == nil {
+		t.Fatalf("Compose followed the planted symlink and returned %q", got)
+	}
+	if strings.Contains(got, "not the user's goal") {
+		t.Fatalf("content escaped the per-edit directory: %q", got)
+	}
+}
+
+func TestTTYGoalEditorAcceptsAnAtomicSave(t *testing.T) {
+	// vim, emacs and friends write a new file and rename it over the target, so
+	// the inode legitimately changes. An os.SameFile check would reject exactly
+	// the editors people use.
+	edited := "saved atomically"
+	e, _ := newEditFixture(t, nil, nil, nil)
+	e.run = func(ctx context.Context, name string, args []string, in, out, errw *os.File) error {
+		path := args[len(args)-1]
+		tmp := path + ".new"
+		if err := os.WriteFile(tmp, []byte(edited), 0o600); err != nil {
+			return err
+		}
+		return os.Rename(tmp, path)
+	}
+
+	got, err := e.Compose(context.Background(), "seed")
+	if err != nil || got != edited {
+		t.Fatalf("Compose = %q err=%v, want the atomically saved content", got, err)
+	}
+}
+
+func TestTTYGoalEditorRejectsANonRegularDraft(t *testing.T) {
+	e, _ := newEditFixture(t, nil, nil, nil)
+	e.run = func(ctx context.Context, name string, args []string, in, out, errw *os.File) error {
+		path := args[len(args)-1]
+		if err := os.Remove(path); err != nil {
+			return err
+		}
+		return os.Mkdir(path, 0o700)
+	}
+
+	if _, err := e.Compose(context.Background(), "seed"); !errors.Is(err, errEditNotRegular) {
+		t.Fatalf("Compose err = %v, want %v", err, errEditNotRegular)
+	}
 }
 
 func TestTTYGoalEditorAvailability(t *testing.T) {

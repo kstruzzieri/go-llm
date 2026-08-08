@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 )
 
@@ -39,8 +40,13 @@ type ttyGoalEditor struct {
 	// run is injected so tests never spawn a process.
 	run func(ctx context.Context, name string, args []string,
 		in, out, errw *os.File) error
-	dataDir string // parent for the temp file, created 0700
+	dataDir string // parent for the per-edit directory, created 0700
+	root    string // workspace root the draft must stay outside of
 }
+
+// errEditNotRegular rejects a draft that is no longer a regular file when it is
+// read back. The editor ran in between, so the name is not trusted afterwards.
+var errEditNotRegular = errors.New("golem: edited goal is not a regular file")
 
 // Available requires both descriptors to be terminals: the editor draws on
 // stdout and reads keys from stdin, and a redirected half would hang or draw
@@ -57,21 +63,29 @@ func (e *ttyGoalEditor) Compose(ctx context.Context, seed string) (string, error
 	if err := os.MkdirAll(e.dataDir, 0o700); err != nil {
 		return "", fmt.Errorf("golem: edit dir: %w", err)
 	}
-	f, err := os.CreateTemp(e.dataDir, "edit-*.txt")
+	// One directory per invocation, removed whole. Editors write more than the
+	// file they were given -- emacs leaves goal.txt~, vim a .swp -- and removing
+	// only the primary file left those behind holding goal text indefinitely.
+	// It also gives the reopen below something to confine to.
+	dir, err := os.MkdirTemp(e.dataDir, "edit-")
 	if err != nil {
-		return "", fmt.Errorf("golem: edit file: %w", err)
+		return "", fmt.Errorf("golem: edit dir: %w", err)
 	}
-	path := f.Name()
-	defer func() { _ = os.Remove(path) }()
+	defer func() { _ = os.RemoveAll(dir) }()
 
-	if _, err := f.WriteString(seed); err != nil {
-		_ = f.Close()
-		return "", fmt.Errorf("golem: seed edit file: %w", err)
+	// Every other data-dir writer applies this; /edit skipped it. With
+	// XDG_DATA_HOME pointed inside the repo the draft would land in the
+	// workspace, where it is a stray artifact carrying whatever the user typed.
+	if err := validatePathOutsideWorkspace(dir, e.root); err != nil {
+		return "", fmt.Errorf("golem: edit dir: %w", err)
 	}
-	// Closed before the editor spawns: Windows cannot open a file this
-	// process still holds, and every editor rewrite must land on disk, not in
-	// a stale descriptor.
-	if err := f.Close(); err != nil {
+
+	const draftName = "goal.txt"
+	path := filepath.Join(dir, draftName)
+	// Written and closed before the editor spawns: Windows cannot open a file
+	// this process still holds, and every editor rewrite must land on disk
+	// rather than in a stale descriptor.
+	if err := os.WriteFile(path, []byte(seed), 0o600); err != nil {
 		return "", fmt.Errorf("golem: seed edit file: %w", err)
 	}
 
@@ -80,11 +94,26 @@ func (e *ttyGoalEditor) Compose(ctx context.Context, seed string) (string, error
 		return "", err
 	}
 
-	edited, err := os.Open(path)
+	// Reopened through a confined root, not by bare name. An arbitrary process
+	// has run since the write, so a symlink planted at the path would otherwise
+	// be followed wherever it points. Deliberately NOT an os.SameFile check:
+	// atomic-save editors legitimately replace the inode, and rejecting that
+	// would break saving in vim, emacs and every editor that writes-and-renames.
+	confined, err := os.OpenRoot(dir)
+	if err != nil {
+		return "", fmt.Errorf("golem: read edited goal: %w", err)
+	}
+	defer func() { _ = confined.Close() }()
+	edited, err := confined.Open(draftName)
 	if err != nil {
 		return "", fmt.Errorf("golem: read edited goal: %w", err)
 	}
 	defer func() { _ = edited.Close() }()
+	if fi, serr := edited.Stat(); serr != nil {
+		return "", fmt.Errorf("golem: read edited goal: %w", serr)
+	} else if !fi.Mode().IsRegular() {
+		return "", errEditNotRegular
+	}
 	// Bounded: one byte past the ceiling proves oversize without ever
 	// allocating the whole file.
 	content, err := io.ReadAll(io.LimitReader(edited, maxGoalBytes+1))
@@ -100,6 +129,13 @@ func (e *ttyGoalEditor) Compose(ctx context.Context, seed string) (string, error
 // resolveEditor picks the editor command: non-empty $VISUAL, else non-empty
 // $EDITOR, else the build's default. Values are split on whitespace into argv
 // with no shell interpretation; quoting and shell syntax are unsupported.
+//
+// The command MUST block until the edit is finished. An editor that forks and
+// returns immediately -- `code` or `subl` without a wait flag -- hands back the
+// unmodified seed, which then runs as a goal before the window has painted.
+// Configure `code --wait` or `subl -w`. golem cannot detect this for you:
+// "returned quickly with the content unchanged" is also what a legitimate
+// no-op edit looks like, so rejecting it would reject deliberate ones.
 func resolveEditor(getenv func(string) string) (string, []string) {
 	for _, key := range []string{"VISUAL", "EDITOR"} {
 		if fields := strings.Fields(getenv(key)); len(fields) > 0 {

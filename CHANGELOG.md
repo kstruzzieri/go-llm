@@ -34,6 +34,14 @@ goals, and multiline goals.
   interpretation**, so quoting and shell syntax are unsupported. The result
   runs as a goal even if it begins with `/`. `/edit` is refused when stdin or
   stdout is not a terminal, so a piped script cannot spawn an editor.
+  The editor **must block until the edit is finished**: configure `code --wait`
+  or `subl -w`, since an editor that forks and returns immediately hands back
+  the unmodified seed, which then runs as a goal. Each edit gets its own
+  directory outside the workspace, removed whole afterwards so editor backup
+  and swap files cannot outlive it, and the draft is read back through a
+  confined root that will not follow a symlink planted while the editor ran.
+  Asynchronous notices are held while the editor owns the screen and flushed
+  when it exits.
 - **Ctrl-C at an idle prompt** discards the partially typed line and hints;
   a second press with no input between them exits. Ctrl-D on an empty line
   still exits, and Ctrl-C during a turn or an approval still cancels it.

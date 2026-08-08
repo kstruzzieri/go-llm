@@ -59,6 +59,39 @@ func TestReplControlNoticeNoPromptDuringTurn(t *testing.T) {
 }
 
 // Ctrl-C during a turn cancels the turn (sends on interrupts) and does not quit.
+func TestReplControlQueuesNoticesWhileSuspended(t *testing.T) {
+	// /edit hands the screen to an external process. A notice painted over a
+	// full-screen editor corrupts a display golem cannot repaint, because the
+	// editor owns it. They are still warnings the user needs, so they are held
+	// and flushed rather than dropped.
+	var out, errOut bytes.Buffer
+	c := newReplControl(&out, &errOut, make(chan struct{}, 1), func() {})
+	c.enterPrompt()
+
+	c.suspendNotices()
+	c.notice("first while editing")
+	c.notice("second while editing")
+	if out.Len() != 0 || errOut.Len() != 0 {
+		t.Fatalf("a notice reached the terminal during an edit: out=%q err=%q", out.String(), errOut.String())
+	}
+
+	c.resumeNotices()
+	got := out.String()
+	first, second := strings.Index(got, "first while editing"), strings.Index(got, "second while editing")
+	if first < 0 || second < 0 {
+		t.Fatalf("queued notices were dropped instead of flushed: %q", got)
+	}
+	if first > second {
+		t.Fatalf("queued notices flushed out of order: %q", got)
+	}
+
+	out.Reset()
+	c.notice("after the edit")
+	if !strings.Contains(out.String(), "after the edit") {
+		t.Fatalf("notices did not resume: %q", out.String())
+	}
+}
+
 func TestReplControlInterruptMidTurnCancels(t *testing.T) {
 	c, _, _, interrupts, quit := newTestControl()
 	c.enterPrompt()
