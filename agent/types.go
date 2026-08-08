@@ -61,13 +61,21 @@ type Budget struct {
 	// also subtracted from the per-turn input ceiling during assembly.
 	OutputReserve int
 	TotalTokens   int // 0 = unbounded whole-run cap
-	// ToolInvocations optionally caps actual Invoke calls by tool name for one
-	// Run. Limits must be positive and name a registered tool. Synthetic
-	// failures (bad arguments, denied approval, exhausted limit) do not count.
-	ToolInvocations map[string]int
+	// ToolLimit optionally caps actual Invoke calls for one named tool in one
+	// Run. Synthetic failures (bad arguments, denied approval, exhausted limit)
+	// do not count.
+	ToolLimit ToolInvocationLimit
 	// Pressure tunes the warn/watch/critical bands classified during assembly.
 	// The zero value normalizes to conservative defaults. #63.
 	Pressure PressureThresholds
+}
+
+// ToolInvocationLimit is a comparable, zero-value-disabled per-Run tool cap.
+// ponytail: one named limit covers dispatch; use a collection only when another
+// tool needs an independent per-Run cap.
+type ToolInvocationLimit struct {
+	Tool string
+	Max  int
 }
 
 // Request is the unit of work handed to Run.

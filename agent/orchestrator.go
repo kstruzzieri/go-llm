@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"hash/fnv"
-	"sort"
 	"strings"
 	"time"
 
@@ -97,7 +96,7 @@ func (o *Orchestrator) Run(ctx context.Context, req Request, obs Observer) (Resu
 	toolSchemaTokens := o.ctxMgr.estimate(toolSchemaString(specs))
 	budget := turnBudget(req.Budget)
 
-	gov, err := newRestraintGovernor(req.Budget.ToolInvocations, reg)
+	gov, err := newRestraintGovernor(req.Budget.ToolLimit, reg)
 	if err != nil {
 		return Result{}, err
 	}
@@ -251,55 +250,41 @@ type restraintGovernor struct {
 	lastSig           uint64
 	hasSig            bool
 	repeatCount       int
-	invocationLimits  map[string]int
-	invocations       map[string]int
+	invocationLimit   ToolInvocationLimit
+	invocations       int
 }
 
-func newRestraintGovernor(limits map[string]int, reg *toolRegistry) (*restraintGovernor, error) {
-	g := &restraintGovernor{}
-	if len(limits) == 0 {
+func newRestraintGovernor(limit ToolInvocationLimit, reg *toolRegistry) (*restraintGovernor, error) {
+	g := &restraintGovernor{invocationLimit: limit}
+	if limit == (ToolInvocationLimit{}) {
 		return g, nil
 	}
-	names := make([]string, 0, len(limits))
-	for name := range limits {
-		names = append(names, name)
+	if limit.Tool == "" {
+		return nil, fmt.Errorf("agent: tool invocation budget has an empty tool name")
 	}
-	sort.Strings(names)
-	g.invocationLimits = make(map[string]int, len(limits))
-	for _, name := range names {
-		limit := limits[name]
-		if name == "" {
-			return nil, fmt.Errorf("agent: tool invocation budget has an empty tool name")
-		}
-		if limit <= 0 {
-			return nil, fmt.Errorf("agent: tool invocation budget %q must be positive, got %d", name, limit)
-		}
-		if _, ok := reg.lookup(name); !ok {
-			return nil, fmt.Errorf("agent: tool invocation budget names unregistered tool %q", name)
-		}
-		g.invocationLimits[name] = limit
+	if limit.Max <= 0 {
+		return nil, fmt.Errorf("agent: tool invocation budget %q must be positive, got %d", limit.Tool, limit.Max)
+	}
+	if _, ok := reg.lookup(limit.Tool); !ok {
+		return nil, fmt.Errorf("agent: tool invocation budget names unregistered tool %q", limit.Tool)
 	}
 	return g, nil
 }
 
 func (g *restraintGovernor) reserveInvocation(name string) (int, bool) {
-	limit, capped := g.invocationLimits[name]
-	if !capped {
+	if name != g.invocationLimit.Tool {
 		return 0, true
 	}
-	if g.invocations[name] >= limit {
-		return limit, false
+	if g.invocations >= g.invocationLimit.Max {
+		return g.invocationLimit.Max, false
 	}
-	if g.invocations == nil {
-		g.invocations = make(map[string]int, len(g.invocationLimits))
-	}
-	g.invocations[name]++
-	return limit, true
+	g.invocations++
+	return g.invocationLimit.Max, true
 }
 
 func (g *restraintGovernor) parallelUncapped(calls []provider.ToolCall) bool {
 	for _, call := range calls {
-		if _, capped := g.invocationLimits[call.Function.Name]; capped {
+		if call.Function.Name == g.invocationLimit.Tool {
 			return false
 		}
 	}

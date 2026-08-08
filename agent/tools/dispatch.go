@@ -16,7 +16,7 @@ import (
 const (
 	// DispatchToolName is the model-facing name of the read-only child dispatcher.
 	DispatchToolName = "dispatch"
-	// DefaultDispatchCallsPerRun bounds aggregate fan-out when installed in a parent Budget.
+	// DefaultDispatchCallsPerRun bounds aggregate fan-out when installed as the parent Budget.ToolLimit.
 	DefaultDispatchCallsPerRun = 4
 
 	maxDispatchTasks             = 4

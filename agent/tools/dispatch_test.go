@@ -247,8 +247,8 @@ func TestParentRunCapsRepeatedDispatchFanout(t *testing.T) {
 	result, err := parent.Run(context.Background(), agent.Request{
 		Goal:  "investigate",
 		Tools: []agent.Tool{dispatch},
-		Budget: agent.Budget{ToolInvocations: map[string]int{
-			DispatchToolName: DefaultDispatchCallsPerRun,
+		Budget: agent.Budget{ToolLimit: agent.ToolInvocationLimit{
+			Tool: DispatchToolName, Max: DefaultDispatchCallsPerRun,
 		}},
 		MaxSteps: DefaultDispatchCallsPerRun + 2,
 	}, nil)
