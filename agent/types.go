@@ -61,6 +61,10 @@ type Budget struct {
 	// also subtracted from the per-turn input ceiling during assembly.
 	OutputReserve int
 	TotalTokens   int // 0 = unbounded whole-run cap
+	// ToolInvocations optionally caps actual Invoke calls by tool name for one
+	// Run. Limits must be positive and name a registered tool. Synthetic
+	// failures (bad arguments, denied approval, exhausted limit) do not count.
+	ToolInvocations map[string]int
 	// Pressure tunes the warn/watch/critical bands classified during assembly.
 	// The zero value normalizes to conservative defaults. #63.
 	Pressure PressureThresholds

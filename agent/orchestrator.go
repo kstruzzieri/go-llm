@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"hash/fnv"
+	"sort"
 	"strings"
 	"time"
 
@@ -96,9 +97,12 @@ func (o *Orchestrator) Run(ctx context.Context, req Request, obs Observer) (Resu
 	toolSchemaTokens := o.ctxMgr.estimate(toolSchemaString(specs))
 	budget := turnBudget(req.Budget)
 
+	gov, err := newRestraintGovernor(req.Budget.ToolInvocations, reg)
+	if err != nil {
+		return Result{}, err
+	}
 	state := initState(req)
 	historyLen := len(req.History)
-	gov := &restraintGovernor{} // per-Run loop state; never shared across Run calls
 	var res Result
 
 	for step := 0; step < maxSteps; step++ {
@@ -247,6 +251,59 @@ type restraintGovernor struct {
 	lastSig           uint64
 	hasSig            bool
 	repeatCount       int
+	invocationLimits  map[string]int
+	invocations       map[string]int
+}
+
+func newRestraintGovernor(limits map[string]int, reg *toolRegistry) (*restraintGovernor, error) {
+	g := &restraintGovernor{}
+	if len(limits) == 0 {
+		return g, nil
+	}
+	names := make([]string, 0, len(limits))
+	for name := range limits {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	g.invocationLimits = make(map[string]int, len(limits))
+	for _, name := range names {
+		limit := limits[name]
+		if name == "" {
+			return nil, fmt.Errorf("agent: tool invocation budget has an empty tool name")
+		}
+		if limit <= 0 {
+			return nil, fmt.Errorf("agent: tool invocation budget %q must be positive, got %d", name, limit)
+		}
+		if _, ok := reg.lookup(name); !ok {
+			return nil, fmt.Errorf("agent: tool invocation budget names unregistered tool %q", name)
+		}
+		g.invocationLimits[name] = limit
+	}
+	return g, nil
+}
+
+func (g *restraintGovernor) reserveInvocation(name string) (int, bool) {
+	limit, capped := g.invocationLimits[name]
+	if !capped {
+		return 0, true
+	}
+	if g.invocations[name] >= limit {
+		return limit, false
+	}
+	if g.invocations == nil {
+		g.invocations = make(map[string]int, len(g.invocationLimits))
+	}
+	g.invocations[name]++
+	return limit, true
+}
+
+func (g *restraintGovernor) parallelUncapped(calls []provider.ToolCall) bool {
+	for _, call := range calls {
+		if _, capped := g.invocationLimits[call.Function.Name]; capped {
+			return false
+		}
+	}
+	return true
 }
 
 // toolCallSignature hashes the call identity together with its result so that a

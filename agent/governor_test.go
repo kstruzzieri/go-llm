@@ -113,6 +113,89 @@ func TestBudgetCapStopOnFinalAnswer(t *testing.T) {
 	}
 }
 
+func TestToolInvocationBudgetCapsDistinctCallsAndResetsPerRun(t *testing.T) {
+	responses := make([]ModelResult, 0, 8)
+	for _, offset := range []int{0, 10} {
+		for i := range 3 {
+			responses = append(responses, ModelResult{Response: provider.ChatResponse{ToolCalls: []provider.ToolCall{{
+				ID: fmt.Sprintf("%d", offset+i), Type: "function",
+				Function: provider.ToolCallFunction{
+					Name: "count", Arguments: json.RawMessage(fmt.Sprintf(`{"i":%d}`, offset+i)),
+				},
+			}}}})
+		}
+		responses = append(responses, ModelResult{Response: provider.ChatResponse{Content: "done", Done: true}})
+	}
+
+	tool := &countingTool{}
+	o := newTestOrchestrator(&scriptedCaller{responses: responses})
+	req := Request{
+		Goal: "q", Tools: []Tool{tool},
+		Budget: Budget{ToolInvocations: map[string]int{"count": 2}},
+	}
+	for run := range 2 {
+		res, err := o.Run(context.Background(), req, nil)
+		if err != nil {
+			t.Fatalf("run %d: %v", run, err)
+		}
+		if res.StopReason != Completed {
+			t.Fatalf("run %d stop = %v, want Completed", run, res.StopReason)
+		}
+		if len(res.ToolCalls) != 3 {
+			t.Fatalf("run %d tool calls = %d, want 3", run, len(res.ToolCalls))
+		}
+		if !res.ToolCalls[0].Invoked || !res.ToolCalls[1].Invoked || res.ToolCalls[2].Invoked || !res.ToolCalls[2].IsError {
+			t.Fatalf("run %d invocation records = %+v, want two invokes then one synthetic error", run, res.ToolCalls)
+		}
+		if tool.n != (run+1)*2 {
+			t.Fatalf("after run %d invokes = %d, want %d", run, tool.n, (run+1)*2)
+		}
+	}
+}
+
+func TestToolInvocationBudgetHandlesOtherwiseParallelBatch(t *testing.T) {
+	batch := func(step int) ModelResult {
+		return ModelResult{Response: provider.ChatResponse{ToolCalls: []provider.ToolCall{
+			{ID: fmt.Sprintf("a-%d", step), Function: provider.ToolCallFunction{Name: "a", Arguments: json.RawMessage(fmt.Sprintf(`{"step":%d}`, step))}},
+			{ID: fmt.Sprintf("b-%d", step), Function: provider.ToolCallFunction{Name: "b", Arguments: json.RawMessage(fmt.Sprintf(`{"step":%d}`, step))}},
+		}}}
+	}
+	o := newTestOrchestrator(&scriptedCaller{responses: []ModelResult{
+		batch(0), batch(1), {Response: provider.ChatResponse{Content: "done", Done: true}},
+	}})
+	res, err := o.Run(context.Background(), Request{
+		Goal: "q", Tools: []Tool{echoTool{name: "a"}, echoTool{name: "b"}},
+		Budget: Budget{ToolInvocations: map[string]int{"a": 1}},
+	}, nil)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(res.ToolCalls) != 4 {
+		t.Fatalf("tool calls = %d, want 4", len(res.ToolCalls))
+	}
+	if !res.ToolCalls[0].Invoked || !res.ToolCalls[1].Invoked || res.ToolCalls[2].Invoked || !res.ToolCalls[2].IsError || !res.ToolCalls[3].Invoked {
+		t.Fatalf("invocation records = %+v", res.ToolCalls)
+	}
+}
+
+func TestToolInvocationBudgetRejectsInvalidConfiguration(t *testing.T) {
+	for name, limits := range map[string]map[string]int{
+		"empty name":   {"": 1},
+		"zero limit":   {"count": 0},
+		"unknown tool": {"missing": 1},
+	} {
+		t.Run(name, func(t *testing.T) {
+			o := newTestOrchestrator(&scriptedCaller{})
+			_, err := o.Run(context.Background(), Request{
+				Goal: "q", Tools: []Tool{&countingTool{}}, Budget: Budget{ToolInvocations: limits},
+			}, nil)
+			if err == nil {
+				t.Fatal("Run succeeded with invalid tool invocation budget")
+			}
+		})
+	}
+}
+
 func TestObserverStepErrorAborts(t *testing.T) {
 	mc := &scriptedCaller{responses: []ModelResult{
 		{Response: provider.ChatResponse{Content: "x", Done: true}},

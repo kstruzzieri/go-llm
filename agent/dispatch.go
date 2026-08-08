@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"unicode/utf8"
 
 	"github.com/kstruzzieri/go-llm/provider"
@@ -15,7 +16,7 @@ func (o *Orchestrator) runToolCalls(ctx context.Context, res *Result, state *Sta
 	reg *toolRegistry, calls []provider.ToolCall, approver Approver, obs Observer, step int,
 	gov *restraintGovernor) error {
 
-	if len(calls) >= 2 && canRunParallel(reg, calls) {
+	if len(calls) >= 2 && canRunParallel(reg, calls) && gov.parallelUncapped(calls) {
 		return o.runToolCallsParallel(ctx, res, state, reg, calls, approver, obs, step, gov)
 	}
 	return o.runToolCallsSerial(ctx, res, state, reg, calls, approver, obs, step, gov)
@@ -27,7 +28,7 @@ func (o *Orchestrator) runToolCallsSerial(ctx context.Context, res *Result, stat
 
 	for _, call := range calls {
 		res.Events = append(res.Events, EventRecord{Step: step, Kind: "tool_call"})
-		out, effect, rec, err := o.dispatch(ctx, reg, call, approver, obs, step)
+		out, effect, rec, err := o.dispatch(ctx, reg, call, approver, obs, step, gov)
 		if err != nil {
 			return err // hard abort (ctx cancel / approver error): no ToolResult, no OnToolResult
 		}
@@ -92,7 +93,8 @@ func (o *Orchestrator) recordResult(ctx context.Context, res *Result, state *Sta
 // preparedCall is the outcome of the serial, observer/approval phase of one tool
 // call. When prepareCall returns a nil error, exactly one of two states holds:
 //   - result != nil: a synthetic outcome (unknown tool / bad JSON / plan failure /
-//     approval denied). The caller must NOT Invoke; use result directly.
+//     approval denied / invocation budget exhausted). The caller must NOT Invoke;
+//     use result directly.
 //   - result == nil: tool and effect are populated; the caller runs invokeCall.
 type preparedCall struct {
 	call   provider.ToolCall
@@ -108,7 +110,7 @@ type preparedCall struct {
 // A non-nil error is a hard abort (ctx cancel / approver failure / observer error);
 // p.rec is still returned so the caller can record it.
 func (o *Orchestrator) prepareCall(ctx context.Context, reg *toolRegistry, call provider.ToolCall,
-	approver Approver, obs Observer, step int) (preparedCall, error) {
+	approver Approver, obs Observer, step int, gov *restraintGovernor) (preparedCall, error) {
 
 	name := call.Function.Name
 	p := preparedCall{call: call, rec: ToolCallRecord{Step: step, Name: name}}
@@ -150,6 +152,11 @@ func (o *Orchestrator) prepareCall(ctx context.Context, reg *toolRegistry, call 
 			return p, nil
 		}
 	}
+	if limit, ok := gov.reserveInvocation(name); !ok {
+		p.rec.IsError = true
+		p.result = &ToolResult{IsError: true, Content: fmt.Sprintf("tool invocation budget reached for %s (%d per run)", name, limit)}
+		return p, nil
+	}
 
 	if err := obs.OnToolCall(ctx, ToolCallEvent{Step: step, Call: call, Effect: effect, Preview: preview}); err != nil {
 		return p, err
@@ -177,9 +184,9 @@ func (o *Orchestrator) invokeCall(ctx context.Context, tool Tool, effect Effect,
 // A cancelled PARENT context after invoke is a hard abort (distinct from a tool's
 // own per-call timeout, which stays a model-visible IsError observation).
 func (o *Orchestrator) dispatch(ctx context.Context, reg *toolRegistry, call provider.ToolCall,
-	approver Approver, obs Observer, step int) (ToolResult, Effect, ToolCallRecord, error) {
+	approver Approver, obs Observer, step int, gov *restraintGovernor) (ToolResult, Effect, ToolCallRecord, error) {
 
-	p, err := o.prepareCall(ctx, reg, call, approver, obs, step)
+	p, err := o.prepareCall(ctx, reg, call, approver, obs, step, gov)
 	if err != nil {
 		return ToolResult{}, p.effect, p.rec, err
 	}
