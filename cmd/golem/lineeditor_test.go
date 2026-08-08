@@ -12,6 +12,9 @@ import (
 	"time"
 
 	"golang.org/x/term"
+
+	"github.com/kstruzzieri/go-llm/agent"
+	"github.com/kstruzzieri/go-llm/provider"
 )
 
 // fakeTermOps stands in for golang.org/x/term's package functions. They take
@@ -1042,6 +1045,184 @@ func TestEditorSourceRefusesToOpenAWindowOnADeadContext(t *testing.T) {
 	}
 	if got := f.out.String(); got != "" {
 		t.Fatalf("a cancelled read still printed %q", got)
+	}
+}
+
+// countingCaller records every request that reached the model, so a test can
+// assert that rejected input started no turn at all.
+type countingCaller struct {
+	mu       sync.Mutex
+	prompts  []string
+	response string
+}
+
+func (c *countingCaller) Chat(_ context.Context, req provider.ChatRequest,
+	_ func(provider.ChatResponse) error) (agent.ModelResult, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if n := len(req.Messages); n > 0 {
+		c.prompts = append(c.prompts, req.Messages[n-1].Content)
+	}
+	return agent.ModelResult{Response: provider.ChatResponse{Content: c.response}}, nil
+}
+
+func (c *countingCaller) seen() []string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]string(nil), c.prompts...)
+}
+
+func TestEditorSourceRejectedGoalWarnsAndKeepsReading(t *testing.T) {
+	// Spec 13b: malformed input is a user-input problem, not a failure. The
+	// prompt says so and reads on, and the typeahead typed after the offending
+	// line survives -- the filter's drain preserved it, so Discard must not run.
+	root, xdg := t.TempDir(), t.TempDir()
+	getenv := func(k string) string {
+		if k == "XDG_DATA_HOME" {
+			return xdg
+		}
+		return ""
+	}
+	f := newEditorFixture(t, editorOpts{
+		in:         strings.NewReader("bad\xb2\rclean goal\r"),
+		useHistory: true,
+		getenv:     getenv,
+		root:       root,
+	})
+
+	line, ok, err := f.readGoal(t)
+	if err != nil || !ok || line != "clean goal" {
+		t.Fatalf("ReadGoal = %q ok=%v err=%v, want the typeahead after the rejection", line, ok, err)
+	}
+	if !strings.Contains(f.out.String(), invalidUTF8Warning) {
+		t.Fatalf("no rejection warning in %q", f.out.String())
+	}
+	// The rejected line never became a goal, so it can never have been recorded.
+	if entries := f.src.hist.stored(); len(entries) != 0 {
+		t.Fatalf("history holds %q after a rejected read; a rejection must write nothing", entries)
+	}
+}
+
+func TestEditorSourceRejectedAnswerDenies(t *testing.T) {
+	// An invalid answer denies exactly as an unrecognized one does. Returning an
+	// approval error instead would abort the turn with a message about encoding.
+	f := newEditorFixture(t, editorOpts{in: strings.NewReader("bad\xb2\r")})
+	line, ok, err := f.src.ReadAnswer(context.Background(), "approve? ")
+	if err != nil {
+		t.Fatalf("ReadAnswer err = %v, want nil: a rejection is not an approval error", err)
+	}
+	if !ok || line != "" {
+		t.Fatalf("ReadAnswer = %q ok=%v, want an empty answer that denies", line, ok)
+	}
+}
+
+func TestEditorSourceFramingDefectFailsClosed(t *testing.T) {
+	// errTerminatorSwallowed is golem's defect, not the user's: x/term consumed
+	// a terminator without producing a line, so provenance is unknown from here
+	// on. Reading past it could hand an approval a flag belonging to another
+	// segment.
+	t.Run("goal read aborts", func(t *testing.T) {
+		f := newEditorFixture(t, editorOpts{in: strings.NewReader("x\rmore\r")})
+		// Deliver a terminator to the filter without claiming its flag, which is
+		// exactly the state a swallow leaves behind.
+		if _, err := f.src.filter.Read(make([]byte, 64)); err != nil {
+			t.Fatalf("priming read: %v", err)
+		}
+		line, ok, err := f.readGoal(t)
+		if !errors.Is(err, errTerminatorSwallowed) {
+			t.Fatalf("ReadGoal err = %v, want %v", err, errTerminatorSwallowed)
+		}
+		if ok || line != "" {
+			t.Fatalf("ReadGoal = %q ok=%v, want no goal", line, ok)
+		}
+		if !strings.Contains(f.out.String(), framingDefectWarning) {
+			t.Fatalf("defect not reported as internal in %q", f.out.String())
+		}
+	})
+
+	t.Run("answer read denies", func(t *testing.T) {
+		f := newEditorFixture(t, editorOpts{in: strings.NewReader("x\rmore\r")})
+		if _, err := f.src.filter.Read(make([]byte, 64)); err != nil {
+			t.Fatalf("priming read: %v", err)
+		}
+		line, ok, err := f.src.ReadAnswer(context.Background(), "approve? ")
+		if err != nil || !ok || line != "" {
+			t.Fatalf("ReadAnswer = %q ok=%v err=%v, want an empty answer that denies", line, ok, err)
+		}
+	})
+}
+
+func TestRunREPLNeverRunsOrRecordsRejectedInput(t *testing.T) {
+	// The end-to-end guarantee spec 13b asks for, asserted on the two consumers
+	// that matter: the model saw only the clean goal, and history stored only
+	// the clean goal.
+	root, xdg := t.TempDir(), t.TempDir()
+	getenv := func(k string) string {
+		if k == "XDG_DATA_HOME" {
+			return xdg
+		}
+		return ""
+	}
+	f := newEditorFixture(t, editorOpts{
+		in:         strings.NewReader("bad\xb2\rclean goal\r\x04"),
+		useHistory: true,
+		getenv:     getenv,
+		root:       root,
+	})
+
+	caller := &countingCaller{response: "done"}
+	sess := newTestSession(t, caller, t.TempDir())
+	var out strings.Builder
+	if err := runREPL(context.Background(), f.src, &out, nil, sess); err != nil {
+		t.Fatalf("runREPL: %v", err)
+	}
+
+	seen := caller.seen()
+	if len(seen) != 1 || !strings.Contains(seen[0], "clean goal") {
+		t.Fatalf("model saw %q, want exactly one turn for the clean goal", seen)
+	}
+	if entries := f.src.hist.stored(); !equalStrings(entries, []string{"clean goal"}) {
+		t.Fatalf("history = %q, want only the clean goal", entries)
+	}
+}
+
+func TestDrainPasteSegmentsClearsTheRefusal(t *testing.T) {
+	// The 4096-refusal watcher fires per keystroke, so a refusal armed while
+	// draining a discarded paste describes input that no longer exists. Carried
+	// forward, it prints the line-length warning for the next line -- one that
+	// was never truncated -- or, if that line ends the read, for nothing at all.
+	f := newEditorFixture(t, editorOpts{
+		in: strings.NewReader(pasteOn + "one\ntwo\n" + pasteOff + "typed\r"),
+	})
+	refused := true // as AutoCompleteCallback would have left it
+	f.src.bindTerminal(promptText, discardHistory{}, &refused)
+
+	if err := f.src.drainPasteSegments(f.src.binding.snapshot(), &refused); err != nil {
+		t.Fatalf("drainPasteSegments: %v", err)
+	}
+	if refused {
+		t.Fatal("the refusal survived a drain whose segments were all discarded")
+	}
+}
+
+func TestEditorSourceUnbindsTheTerminalWithItsRawWindow(t *testing.T) {
+	// A Terminal that outlives its raw window is a repaint waiting to happen:
+	// the SIGWINCH watcher would size it, and Terminal.Write would redraw a
+	// prompt onto a cooked terminal in the middle of a turn.
+	f := newEditorFixture(t, editorOpts{in: strings.NewReader("hello\r")})
+	if _, _, err := f.readGoal(t); err != nil {
+		t.Fatalf("ReadGoal: %v", err)
+	}
+	if tm := f.src.binding.snapshot(); tm != nil {
+		t.Fatal("a Terminal is still bound after the raw window closed")
+	}
+
+	// With nothing bound, an idle notice must still reach the user -- as a plain
+	// line, which is the correct rendering while the terminal is cooked.
+	f.out.Reset()
+	f.src.IdleDisplay("mid-turn note")
+	if got, want := f.out.String(), "mid-turn note\n"; got != want {
+		t.Fatalf("IdleDisplay after the window closed wrote %q, want %q", got, want)
 	}
 }
 

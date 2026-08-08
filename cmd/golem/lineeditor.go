@@ -97,6 +97,15 @@ func (b *terminalBinding) snapshot() *term.Terminal {
 	return b.tm
 }
 
+// unbind drops the current Terminal when its raw window closes. Anything that
+// would have written through it -- an idle notice, a resize -- must fall back
+// to the plain writer rather than repaint a cooked terminal.
+func (b *terminalBinding) unbind() {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.tm = nil
+}
+
 func (b *terminalBinding) fallenSource() lineSource {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -352,6 +361,12 @@ func (e *editorSource) read(ctx context.Context, prompt string, hist term.Histor
 		// not emit ESC[?2004l, so disabling paste after it would leak markers
 		// into the cooked-mode input queue and into the user's shell after exit.
 		e.binding.setPaste(false)
+		// Unbound last, and on every exit path including the error ones. A
+		// Terminal outlives its raw window otherwise, and the SIGWINCH watcher
+		// would then repaint a prompt onto a cooked terminal mid-turn. With
+		// nothing bound, an idle notice falls back to a plain line, which is the
+		// correct rendering while the terminal is cooked anyway.
+		defer e.binding.unbind()
 		if rerr := e.ops.Restore(e.stdinFD, restoreState); rerr != nil {
 			// Refuse to let a turn render on a terminal still in raw mode, where
 			// every unsynchronized renderer newline staircases. rawState is kept
@@ -417,7 +432,7 @@ func (e *editorSource) read(ctx context.Context, prompt string, hist term.Histor
 					// inside a paste is invalid. Drain the remaining paste
 					// inside this same raw window -- otherwise lines 2..n
 					// become later REPL goals -- and deny.
-					derr := e.drainPasteSegments(current)
+					derr := e.drainPasteSegments(current, &refused)
 					switch {
 					case derr == nil:
 						return "", true, nil
@@ -443,7 +458,7 @@ func (e *editorSource) read(ctx context.Context, prompt string, hist term.Histor
 				if joinedLen(joined, len(parts), seg) > maxGoalBytes {
 					// Rejecting mid-paste: the rest of this paste must be
 					// drained and discarded, or its lines become later goals.
-					derr := e.drainPasteSegments(current)
+					derr := e.drainPasteSegments(current, &refused)
 					parts, joined = nil, 0
 					e.retireAndWarn(prompt, hist, &refused, goalLimitWarning)
 					switch {
@@ -543,6 +558,42 @@ func (e *editorSource) read(ctx context.Context, prompt string, hist term.Histor
 			// x/term collapses a closed stdin and Ctrl-D on an empty line to
 			// io.EOF; both are a clean exit.
 			return "", false, nil
+		case errors.Is(readErr, errInvalidUTF8), errors.Is(readErr, errLiteralReplacement):
+			// Spec 13b, input rejection. The filter has already dropped the
+			// offending line and drained it, deliberately preserving the
+			// typeahead that arrived after it, so Discard must NOT be called
+			// here: that is the Ctrl-C path and would throw that typeahead away.
+			// A rejection needs only a fresh Terminal.
+			//
+			// This is user input golem cannot represent, not a failure: the goal
+			// prompt says so and reads on. No goal is returned, so runREPL never
+			// reaches RecordGoal and no turn starts.
+			parts, joined = nil, 0
+			e.retireAndWarn(prompt, hist, &refused, rejectionWarning(readErr))
+			if !compose {
+				// An unrecognized approval answer denies. This is one, so the
+				// turn takes its ordinary denial path rather than aborting with
+				// a message about encoding.
+				return "", true, nil
+			}
+			continue
+		case errors.Is(readErr, errTerminatorSwallowed):
+			// Spec 13b, internal protocol failure -- deliberately NOT reported
+			// as an input problem. x/term consumed a line terminator without
+			// producing a line, so segment provenance is already unknown and
+			// some later line would silently inherit another segment's paste
+			// state. Clearing the event and reading on is specifically wrong:
+			// the lost flag may be the one an approval depends on.
+			//
+			// Fail closed. Unlike a rejection, buffered input here is of unknown
+			// provenance too, so it is discarded rather than preserved. Both
+			// paths below return, so composition state dies with the call.
+			e.filter.Discard()
+			e.retireAndWarn(prompt, hist, &refused, framingDefectWarning)
+			if !compose {
+				return "", true, nil // deny, as every uncertain outcome does
+			}
+			return "", false, readErr
 		default:
 			return "", false, readErr
 		}
@@ -612,7 +663,12 @@ func (e *editorSource) retireAndWarn(prompt string, hist term.History, refused *
 // paste, so a mid-paste rejection cannot leak the paste's remaining lines as
 // later goals. Allocation stays bounded: each discarded segment is dropped
 // before the next is read.
-func (e *editorSource) drainPasteSegments(tm *term.Terminal) error {
+func (e *editorSource) drainPasteSegments(tm *term.Terminal, refused *bool) error {
+	// Every segment read here is discarded, so a 4096-refusal observed inside
+	// the drain describes input that no longer exists. Leaving the flag set
+	// would attribute the warning to whatever line is read next, or -- if that
+	// line ends the read -- print it for a line that was never truncated.
+	defer func() { *refused = false }()
 	for {
 		_, err := tm.ReadLine()
 		if err != nil && !errors.Is(err, term.ErrPasteIndicator) {

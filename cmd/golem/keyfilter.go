@@ -276,9 +276,23 @@ func (f *keyFilter) flushStalledAtEnd() {
 		f.reject(errInvalidUTF8)
 		return
 	}
+	// The retained prefix is an unfinished escape, so forwarding it leaves
+	// x/term mid-scan: it is still hunting the sequence's final byte and will
+	// swallow whatever terminator arrives next. The breaker is therefore still
+	// owed, and the span restarts from these bytes.
+	f.breakEscape()
+	n := len(f.work)
 	f.out = append(f.out, f.work...)
 	f.work = f.work[:0]
 	f.stalled = false
+	if n > 0 && f.out[len(f.out)-n] == byteEsc {
+		f.escUnresolved = true
+		f.escSpan = n
+	}
+	// Non-CR bytes now sit between any CR already delivered and whatever comes
+	// next, so that CR can no longer claim a following LF as its pair. Leaving
+	// the flag set eats the next LF entirely.
+	f.prevCR = false
 }
 
 // TakeTerminator returns and clears the reason the last read ended. Callers
@@ -360,10 +374,16 @@ func (f *keyFilter) reject(err error) {
 // the next chunk rather than guessed at.
 func (f *keyFilter) drainStep() bool {
 	if f.drainPendingLF {
-		// A CR ended the previous chunk. Suppress its paired LF if that is
-		// what opens this one, then the boundary is complete either way.
+		// A CR ended the previous chunk and its paired LF is still undecided.
+		if len(f.work) == 0 {
+			// An empty read is legal and says nothing: the LF may still open a
+			// later chunk. Closing the boundary here would let it through as a
+			// typed newline -- an empty goal at the prompt, or an answer the
+			// user never gave at an approval.
+			return false
+		}
 		f.drainPendingLF = false
-		if len(f.work) > 0 && f.work[0] == byteLF {
+		if f.work[0] == byteLF {
 			f.work = f.work[:copy(f.work, f.work[1:])]
 		}
 		return true
@@ -374,6 +394,10 @@ func (f *keyFilter) drainStep() bool {
 			if f.work[i] == byteEsc {
 				n, st := matchPasteMarker(f.work[i:])
 				switch st {
+				case markerStart:
+					// Redundant starts do not nest, matching x/term.
+					i += n
+					continue
 				case markerEnd:
 					f.inPaste = false
 					i += n
@@ -388,6 +412,29 @@ func (f *keyFilter) drainStep() bool {
 			}
 			i++
 			continue
+		}
+		if f.work[i] == byteEsc {
+			// Paste markers are boundaries the drain must honor even outside a
+			// paste. Walking them byte by byte instead lets a newline in pasted
+			// CONTENT end the drain, after which the rest of the paste is
+			// forwarded as ordinary typed input -- its lines become separate
+			// goals, each mis-flagged as typed.
+			n, st := matchPasteMarker(f.work[i:])
+			switch st {
+			case markerStart:
+				f.inPaste = true
+				i += n
+				continue
+			case markerEnd:
+				// A stray end marker with no open paste still closes whatever
+				// paste context the caller was in.
+				i += n
+				f.work = f.work[:copy(f.work, f.work[i:])]
+				return true
+			case markerIncomplete:
+				f.work = f.work[:copy(f.work, f.work[i:])]
+				return false
+			}
 		}
 		c := f.work[i]
 		i++

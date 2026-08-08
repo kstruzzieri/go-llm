@@ -47,6 +47,130 @@ func (r *chunkReader) Read(p []byte) (int, error) {
 	return n, nil
 }
 
+// scriptedReader plays exact (bytes, error) steps, so a test can put a
+// recoverable failure or an empty read at a precise point in the stream.
+type scriptedReader struct {
+	steps []scriptStep
+	i     int
+}
+
+type scriptStep struct {
+	data []byte
+	err  error
+}
+
+func (r *scriptedReader) Read(p []byte) (int, error) {
+	if r.i >= len(r.steps) {
+		return 0, io.EOF
+	}
+	s := r.steps[r.i]
+	r.i++
+	return copy(p, s.data), s.err
+}
+
+func TestKeyFilterDrainRunsThroughAPasteToItsEndMarker(t *testing.T) {
+	// A rejection's drain must not treat a newline INSIDE a bracketed paste as
+	// its boundary. If it does, the rest of the paste is forwarded as ordinary
+	// typed input: lines the user pasted become separate goals, each mis-flagged
+	// as typed, and composition cannot tell the difference.
+	in := "bad\xb2" + pasteOn + "one\ntwo\n" + pasteOff + "clean\n"
+	f := newKeyFilter(strings.NewReader(in), maxGoalBytes)
+
+	staged, err := drain(t, f)
+	if !errors.Is(err, errInvalidUTF8) {
+		t.Fatalf("first drain err = %v, want %v", err, errInvalidUTF8)
+	}
+	if len(staged) != 0 {
+		// reject discards the offending line whole, including the bytes of it
+		// already staged; only typeahead after it survives.
+		t.Fatalf("bytes before the rejection = %q, want none", staged)
+	}
+	_ = popFlags(f)
+
+	rest, err := drain(t, f)
+	if !errors.Is(err, io.EOF) {
+		t.Fatalf("second drain err = %v, want io.EOF", err)
+	}
+	if string(rest) != "clean\n" {
+		t.Fatalf("after the drain the filter forwarded %q, want only the typeahead %q", rest, "clean\n")
+	}
+	if flags := popFlags(f); !equalBools(flags, []bool{false}) {
+		t.Fatalf("segment flags = %v, want exactly one typed line", flags)
+	}
+}
+
+func TestKeyFilterDrainHoldsAPendingLFAcrossAnEmptyRead(t *testing.T) {
+	// A CR ending one chunk leaves its paired LF undecided. An empty read is
+	// not evidence that no LF is coming, and closing the boundary there lets the
+	// LF through as a typed newline -- a spurious empty segment, which at a goal
+	// prompt is an empty goal and at an approval prompt is a denial the user
+	// never typed.
+	f := newKeyFilter(&scriptedReader{steps: []scriptStep{
+		{data: []byte("bad\xb2more\r")},
+		{data: nil}, // (0, nil): legal, and says nothing about the paired LF
+		{data: []byte("\nclean\n")},
+	}}, maxGoalBytes)
+
+	staged, err := drain(t, f)
+	if !errors.Is(err, errInvalidUTF8) {
+		t.Fatalf("first drain err = %v, want %v", err, errInvalidUTF8)
+	}
+	if len(staged) != 0 {
+		// reject discards the offending line whole, including the bytes of it
+		// already staged; only typeahead after it survives.
+		t.Fatalf("bytes before the rejection = %q, want none", staged)
+	}
+	_ = popFlags(f)
+
+	rest, err := drain(t, f)
+	if !errors.Is(err, io.EOF) {
+		t.Fatalf("second drain err = %v, want io.EOF", err)
+	}
+	if string(rest) != "clean\n" {
+		t.Fatalf("forwarded %q, want %q: the paired LF must be consumed by the drain", rest, "clean\n")
+	}
+	if flags := popFlags(f); !equalBools(flags, []bool{false}) {
+		t.Fatalf("segment flags = %v, want exactly one typed line", flags)
+	}
+}
+
+func TestKeyFilterFlushAtStreamEndKeepsEscapeAndCRState(t *testing.T) {
+	// A partial escape flushed when the stream stalls is still a partial escape
+	// to x/term: it keeps scanning for the sequence's final byte and will
+	// swallow the next terminator, so the breaker is still owed. The flush also
+	// forwards non-CR bytes, so a CR delivered earlier is no longer adjacent and
+	// its pairing must be dropped -- otherwise the next LF is silently eaten as
+	// that CR's partner.
+	boom := errors.New("transient read failure")
+	f := newKeyFilter(&scriptedReader{steps: []scriptStep{
+		{data: []byte("a\r\x1b[20")},
+		{err: boom},
+		{data: []byte("\nnext\n")},
+	}}, maxGoalBytes)
+
+	first, err := drain(t, f)
+	if !errors.Is(err, boom) {
+		t.Fatalf("first drain err = %v, want %v", err, boom)
+	}
+	if string(first) != "a\r\x1b[20" {
+		t.Fatalf("bytes before the stall = %q, want %q", first, "a\r\x1b[20")
+	}
+	if flags := popFlags(f); !equalBools(flags, []bool{false}) {
+		t.Fatalf("flags before the stall = %v, want one typed line for the CR", flags)
+	}
+
+	rest, err := drain(t, f)
+	if !errors.Is(err, io.EOF) {
+		t.Fatalf("second drain err = %v, want io.EOF", err)
+	}
+	if string(rest) != "z\nnext\n" {
+		t.Fatalf("forwarded %q, want %q: breaker owed for the flushed escape, and the LF is its own terminator", rest, "z\nnext\n")
+	}
+	if flags := popFlags(f); !equalBools(flags, []bool{false, false}) {
+		t.Fatalf("flags after the stall = %v, want two typed lines: the recovered empty line and \"next\"", flags)
+	}
+}
+
 // zeroThenReader returns (0, nil) a fixed number of times before delivering
 // data. io.Reader permits it; keyFilter must retry rather than pass it through.
 type zeroThenReader struct {
