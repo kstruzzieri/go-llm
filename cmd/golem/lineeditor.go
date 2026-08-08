@@ -78,16 +78,6 @@ type terminalBinding struct {
 	out io.Writer
 }
 
-// replace installs a Terminal. Called by the sole reader between reads.
-func (b *terminalBinding) replace(tm *term.Terminal) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	if b.fallen != nil {
-		return
-	}
-	b.tm = tm
-}
-
 // snapshot hands the reader the current Terminal so it can block on ReadLine
 // without holding the mutex, which would deadlock every asynchronous notice for
 // as long as the user is thinking.
@@ -153,12 +143,39 @@ func (b *terminalBinding) setPaste(on bool) {
 	}
 }
 
-func (b *terminalBinding) setSize(width, height int) {
+// resize applies the terminal's current size to whatever is bound. The query
+// runs INSIDE the lock, and installTerminal queries the same way, so the two
+// cannot interleave into a stale result: whichever holds the lock last also
+// asked last. Querying outside would let a SIGWINCH that arrives mid-install be
+// overwritten by the size read before it, leaving the wrong width for the whole
+// read. The query is an ioctl, and the lock is never held across ReadLine.
+func (b *terminalBinding) resize(size func() (int, int, bool)) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	if b.tm != nil {
+	if b.tm == nil {
+		return
+	}
+	if width, height, ok := size(); ok {
 		_ = b.tm.SetSize(width, height)
 	}
+}
+
+// installTerminal binds a Terminal and brings it fully up -- size, then
+// bracketed paste -- as one operation. A half-installed Terminal must never be
+// observable: a notice or resize landing between the bind and the size would
+// paint at the wrong width, and between the size and the paste enable would
+// leave markers off for part of the read.
+func (b *terminalBinding) installTerminal(tm *term.Terminal, size func() (int, int, bool)) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.fallen != nil {
+		return
+	}
+	b.tm = tm
+	if width, height, ok := size(); ok {
+		_ = tm.SetSize(width, height)
+	}
+	tm.SetBracketedPasteMode(true)
 }
 
 // idleDisplay writes an asynchronous message. Terminal.Write repaints the
@@ -174,12 +191,17 @@ func (b *terminalBinding) idleDisplay(msg string) {
 		s.IdleDisplay(msg)
 		return
 	}
+	// Deferred from here on: the write below is upstream code over a writer this
+	// package does not own, and a panic in it would otherwise leave the binding
+	// locked forever -- wedging Close and every later notice.
+	defer b.mu.Unlock()
 	if b.tm != nil {
 		_, _ = b.tm.Write([]byte(msg + "\n"))
-	} else if b.out != nil {
+		return
+	}
+	if b.out != nil {
 		_, _ = fmt.Fprintf(b.out, "%s\n", msg)
 	}
-	b.mu.Unlock()
 }
 
 // editorSource is the TTY line source: an x/term.Terminal over the key filter,
@@ -281,13 +303,11 @@ func (e *editorSource) watchSize(resize <-chan struct{}) {
 		case <-e.resizeDone:
 			return
 		case <-resize:
-			width, height, err := e.ops.GetSize(e.stdoutFD)
-			if err != nil {
-				// A transient size query failure is not worth interrupting the
-				// prompt for; the terminal keeps its previous dimensions.
-				continue
-			}
-			e.binding.setSize(width, height)
+			// The query happens under the binding lock, so it cannot be
+			// overtaken by an install that measured the terminal earlier. A
+			// transient failure is not worth interrupting the prompt for; the
+			// terminal keeps its previous dimensions.
+			e.binding.resize(e.currentSize)
 		}
 	}
 }
@@ -617,11 +637,17 @@ func (e *editorSource) bindTerminal(prompt string, hist term.History, refused *b
 		}
 		return line, pos, false
 	}
-	e.binding.replace(tm)
-	if width, height, sizeErr := e.ops.GetSize(e.stdoutFD); sizeErr == nil {
-		e.binding.setSize(width, height)
-	}
-	e.binding.setPaste(true)
+	e.binding.installTerminal(tm, e.currentSize)
+}
+
+// currentSize reports the terminal's dimensions from STDOUT's descriptor.
+// x/term's Windows GetSize calls GetConsoleScreenBufferInfo, an output-handle
+// API, while Unix TIOCGWINSZ answers on either, so a mix-up is invisible here
+// and wrong there. ok=false means the query failed and the caller should leave
+// the size alone.
+func (e *editorSource) currentSize() (width, height int, ok bool) {
+	width, height, err := e.ops.GetSize(e.stdoutFD)
+	return width, height, err == nil
 }
 
 // interruptCycle is the shared out-of-paste Ctrl-C teardown: discard every

@@ -309,9 +309,22 @@ func TestPTYRawModeIsActuallyEntered(t *testing.T) {
 		Getenv: func(string) string { return "" },
 		Root:   root,
 	})
-	t.Cleanup(func() { _ = src.Close() })
-
 	read := make(chan struct{})
+	// Close is owned by the mode boundary and must not overlap a live read; on
+	// a t.Fatal path below the reader is still parked inside ReadLine, so this
+	// cleanup unblocks it and joins before closing. Registering a bare
+	// src.Close() here is a genuine -race flake, not a theoretical one.
+	t.Cleanup(func() {
+		p.close() // idempotent, and unblocks a parked ReadLine
+		select {
+		case <-read:
+		case <-time.After(5 * time.Second):
+			t.Error("the read goroutine never returned; closing the source would race it")
+			return
+		}
+		_ = src.Close()
+	})
+
 	go func() {
 		defer close(read)
 		_, _, _ = src.ReadGoal(context.Background(), promptText)

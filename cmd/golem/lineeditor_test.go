@@ -867,6 +867,10 @@ type erroringReader struct{ err error }
 
 func (e *erroringReader) Read([]byte) (int, error) { return 0, e.err }
 
+// noSize declines to report a size, so a binding test installs a Terminal
+// without an ioctl the fake ops would have to answer.
+func noSize() (int, int, bool) { return 0, 0, false }
+
 // blockingWriter parks the first Write until the test releases it, so a barrier
 // can prove what the binding mutex excludes.
 type blockingWriter struct {
@@ -874,6 +878,7 @@ type blockingWriter struct {
 	release chan struct{}
 	once    sync.Once
 	mu      sync.Mutex
+	armed   bool
 	buf     strings.Builder
 }
 
@@ -881,11 +886,25 @@ func newBlockingWriter() *blockingWriter {
 	return &blockingWriter{entered: make(chan struct{}), release: make(chan struct{})}
 }
 
+// arm makes the next Write park. Installing a Terminal writes to it (the
+// bracketed-paste escape), so the barrier must be set after setup rather than
+// on the first write of any kind.
+func (w *blockingWriter) arm() {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.armed = true
+}
+
 func (w *blockingWriter) Write(p []byte) (int, error) {
-	w.once.Do(func() {
-		close(w.entered)
-		<-w.release
-	})
+	w.mu.Lock()
+	armed := w.armed
+	w.mu.Unlock()
+	if armed {
+		w.once.Do(func() {
+			close(w.entered)
+			<-w.release
+		})
+	}
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	return w.buf.Write(p)
@@ -903,7 +922,8 @@ func TestTerminalBindingSerializesReplacement(t *testing.T) {
 	first := newBlockingWriter()
 	var second strings.Builder
 	b := &terminalBinding{}
-	b.replace(term.NewTerminal(termIO{r: strings.NewReader(""), w: first}, "> "))
+	b.installTerminal(term.NewTerminal(termIO{r: strings.NewReader(""), w: first}, "> "), noSize)
+	first.arm()
 
 	displayed := make(chan struct{})
 	go func() {
@@ -915,7 +935,7 @@ func TestTerminalBindingSerializesReplacement(t *testing.T) {
 	replaced := make(chan struct{})
 	go func() {
 		defer close(replaced)
-		b.replace(term.NewTerminal(termIO{r: strings.NewReader(""), w: &second}, "> "))
+		b.installTerminal(term.NewTerminal(termIO{r: strings.NewReader(""), w: &second}, "> "), noSize)
 	}()
 	select {
 	case <-replaced:
