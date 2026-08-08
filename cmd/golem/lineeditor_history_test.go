@@ -2,6 +2,7 @@ package main
 
 import (
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -591,6 +592,120 @@ func TestGoalHistoryScanErrorKeepsWhatDecoded(t *testing.T) {
 	}
 	if len(warns) != 1 {
 		t.Fatalf("warnings = %v, want exactly one for the scan failure", warns)
+	}
+}
+
+func TestGoalHistorySkipsAnOverLongRecordAndKeepsGoing(t *testing.T) {
+	// One over-long record used to end the load, degrade the store, and repeat
+	// on every later launch: history dead for good, silently. It is now skipped
+	// like any other undecodable record, the records after it still load, and
+	// the store stays writable.
+	root := t.TempDir()
+	getenv, path := historyEnv(t, root)
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	oversized := strconv.Quote(strings.Repeat("x", maxRecordBytes)) + "\n"
+	content := strconv.Quote("before") + "\n" + oversized + strconv.Quote("after") + "\n"
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	var warns []string
+	h := newGoalHistory(getenv, root, collectWarnings(&warns))
+	t.Cleanup(func() { _ = h.Close() })
+
+	if got := h.stored(); !equalStrings(got, []string{"before", "after"}) {
+		t.Fatalf("stored = %q, want the records on both sides of the unreadable one", got)
+	}
+	if h.degraded {
+		t.Fatal("an unreadable record degraded the store; later goals would stop persisting")
+	}
+	if len(warns) != 1 || !strings.Contains(warns[0], "skipped") {
+		t.Fatalf("warnings = %q, want exactly one about skipped records", warns)
+	}
+
+	// Still writable, and the next session sees the new goal.
+	h.Record("new goal")
+	if err := h.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	h2 := newGoalHistory(getenv, root, collectWarnings(&warns))
+	t.Cleanup(func() { _ = h2.Close() })
+	if got := h2.stored(); len(got) == 0 || got[len(got)-1] != "new goal" {
+		t.Fatalf("reloaded = %q, want the goal recorded after the skip", got)
+	}
+}
+
+func TestGoalHistoryRecallDoesNotRetainDroppedEntries(t *testing.T) {
+	// Reslicing to [:0] leaves the previous rebuild's string headers live in the
+	// backing array, pinning goal text that is no longer reachable and
+	// defeating the clear appendEntry does on eviction. Asserted on the array
+	// past len, which is where a retained header actually sits.
+	root := t.TempDir()
+	getenv, _ := historyEnv(t, root)
+	var warns []string
+	h := newGoalHistory(getenv, root, collectWarnings(&warns))
+	t.Cleanup(func() { _ = h.Close() })
+
+	for i := range maxHistoryEntries {
+		h.Record(fmt.Sprintf("recallable goal %d", i))
+	}
+	if h.Len() != maxHistoryEntries {
+		t.Fatalf("Len = %d, want %d", h.Len(), maxHistoryEntries)
+	}
+	// A stored-but-not-recallable goal evicts the oldest entry, so the
+	// projection shrinks by one and the last slot must be released.
+	h.Record("not recallable\nbecause of the newline")
+	if h.Len() != maxHistoryEntries-1 {
+		t.Fatalf("Len = %d, want the projection to shrink by one", h.Len())
+	}
+
+	tail := h.recallable[h.Len():cap(h.recallable)]
+	for i, s := range tail {
+		if s != "" {
+			t.Fatalf("recallable retains %q at %d past len; the dropped entry is still pinned", s, h.Len()+i)
+		}
+	}
+}
+
+func TestGoalHistoryTornTailFailsSafe(t *testing.T) {
+	// tornTail cannot read the last byte if the descriptor is unusable. Guessing
+	// "intact" omits the separator and fuses the next record onto whatever
+	// fragment is there; guessing "torn" costs a blank line the loader skips.
+	root := t.TempDir()
+	getenv, _ := historyEnv(t, root)
+	var warns []string
+	h := newGoalHistory(getenv, root, collectWarnings(&warns))
+	t.Cleanup(func() { _ = h.Close() })
+
+	// A closed descriptor makes ReadAt fail exactly as a broken one would.
+	if err := h.file.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	if !h.tornTail(10) {
+		t.Fatal("tornTail reported intact when it could not read; the next record would fuse")
+	}
+}
+
+func TestGoalHistorySeedsTheDuplicateGuardFromDisk(t *testing.T) {
+	// The guard drops a goal identical to the previous one. Unseeded, the first
+	// goal of every session looks new, so re-running the last goal after a
+	// restart appends a duplicate.
+	root := t.TempDir()
+	getenv, _ := historyEnv(t, root)
+	var warns []string
+	h := newGoalHistory(getenv, root, collectWarnings(&warns))
+	h.Record("same goal")
+	if err := h.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	h2 := newGoalHistory(getenv, root, collectWarnings(&warns))
+	t.Cleanup(func() { _ = h2.Close() })
+	h2.Record("same goal")
+	if got := h2.stored(); !equalStrings(got, []string{"same goal"}) {
+		t.Fatalf("stored = %q, want the restart not to duplicate the last entry", got)
 	}
 }
 

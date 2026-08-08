@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -148,30 +149,85 @@ func (h *goalHistory) load() {
 
 	// O_APPEND affects writes only, so a SectionReader over the same
 	// descriptor reads the file without disturbing the write offset.
-	sc := bufio.NewScanner(io.NewSectionReader(h.file, 0, size))
-	// A control byte quotes to four characters, so a maxGoalBytes goal of NULs
-	// needs four times its size plus the quotes and newline. A flat 4 MiB
-	// limit would reject exactly the largest goal the editor accepts.
-	sc.Buffer(make([]byte, 0, 64*1024), 4*maxGoalBytes+16)
+	r := bufio.NewReaderSize(io.NewSectionReader(h.file, 0, size), 64*1024)
 
-	for sc.Scan() {
-		entry, err := strconv.Unquote(sc.Text())
-		if err != nil {
-			continue
+	var readErr error
+	skipped := 0
+	for {
+		record, tooLong, err := readHistoryRecord(r, maxRecordBytes)
+		switch {
+		case tooLong:
+			// Skipped, not fatal. bufio.Scanner cannot continue past
+			// ErrTooLong, so one over-long record used to end the load, degrade
+			// the store, and do it again on every later launch -- history dead
+			// for good, and silently.
+			skipped++
+		case len(record) > 0:
+			if entry, uerr := strconv.Unquote(record); uerr == nil {
+				h.appendEntry(entry)
+			} else {
+				skipped++
+			}
 		}
-		h.appendEntry(entry)
+		if err != nil {
+			if !errors.Is(err, io.EOF) {
+				readErr = err
+			}
+			break
+		}
 	}
-	scanErr := sc.Err()
 
 	// Ordering matters: the projection is built from whatever decoded, before
-	// any scan failure is reported. Returning early here used to leave recall
-	// empty while entries held data, so one over-long record silently disabled
-	// arrow recall for the whole session.
+	// any read failure is reported. Returning early here used to leave recall
+	// empty while entries held data.
 	h.needsSeparator = h.tornTail(size)
 	h.rebuildRecallable()
+	// Seed the consecutive-duplicate guard from what was loaded. Without it the
+	// first goal of a session always looks new, so re-running the last goal
+	// after a restart appends a duplicate the guard exists to prevent.
+	if n := len(h.entries); n > 0 {
+		h.last, h.haveLast = h.entries[n-1], true
+	}
 
-	if scanErr != nil {
-		h.degrade(scanErr)
+	if skipped > 0 && h.warn != nil {
+		// Data loss the user should hear about once, without disabling writes:
+		// the records that did decode are still usable and new ones still
+		// append.
+		h.warn(fmt.Sprintf("golem: skipped %d unreadable history record(s)", skipped))
+	}
+	if readErr != nil {
+		h.degrade(readErr)
+	}
+}
+
+// maxRecordBytes bounds one encoded record. A control byte quotes to four
+// characters, so a maxGoalBytes goal of NULs needs four times its size plus the
+// quotes and the newline. A flat 4 MiB limit would reject exactly the largest
+// goal the editor accepts.
+const maxRecordBytes = 4*maxGoalBytes + 16
+
+// readHistoryRecord reads one newline-terminated record, without its newline.
+// An over-long record is consumed to its terminator and reported rather than
+// returned, so the loader can skip it and keep reading the records after it.
+func readHistoryRecord(r *bufio.Reader, max int) (record string, tooLong bool, err error) {
+	var buf []byte
+	for {
+		chunk, rerr := r.ReadSlice('\n')
+		if !tooLong {
+			if len(buf)+len(chunk) > max {
+				// Stop accumulating but keep consuming: a corrupt file must not
+				// be able to make this allocate without bound.
+				tooLong, buf = true, nil
+			} else {
+				// ReadSlice aliases the reader's buffer, which the next read
+				// invalidates; append copies.
+				buf = append(buf, chunk...)
+			}
+		}
+		if errors.Is(rerr, bufio.ErrBufferFull) {
+			continue
+		}
+		return strings.TrimSuffix(string(buf), "\n"), tooLong, rerr
 	}
 }
 
@@ -191,7 +247,12 @@ func (h *goalHistory) tornTail(size int64) bool {
 	}
 	buf := make([]byte, 1)
 	if _, err := h.file.ReadAt(buf, size-1); err != nil {
-		return false
+		// Fail safe to "torn". Guessing intact on a failed read omits the
+		// separator, which fuses the next record onto whatever fragment is
+		// there: one line that cannot decode, and -- being twice the size --
+		// potentially one the loader has to skip. A spurious separator costs a
+		// blank line the loader already ignores.
+		return true
 	}
 	return buf[0] != '\n'
 }
@@ -279,6 +340,10 @@ func (h *goalHistory) appendEntry(entry string) {
 // at maxHistoryEntries, so recomputing beats maintaining a parallel structure
 // that could drift from entries.
 func (h *goalHistory) rebuildRecallable() {
+	// Cleared, not just resliced. Reslicing leaves the evicted entries' string
+	// headers live in the backing array, pinning their bytes and defeating the
+	// clear appendEntry does deliberately on eviction.
+	clear(h.recallable)
 	h.recallable = h.recallable[:0]
 	for i := len(h.entries) - 1; i >= 0; i-- {
 		if recallableEntry(h.entries[i]) {
