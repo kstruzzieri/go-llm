@@ -8,47 +8,92 @@ import (
 	"sync"
 )
 
-// lineReader serializes line reads from a single underlying reader across the REPL
-// prompt loop and the approval prompt. One goroutine scans lines into an unbuffered
-// channel; ReadLine selects on the channel or ctx, so a read can be canceled
-// (Ctrl-C during an approval) without a second reader stealing buffered input.
+// lineReader serializes line reads from a single underlying reader across the
+// REPL prompt loop and the approval prompt.
+//
+// Scanning is demand-driven: a scan goroutine exists only while a ReadLine is
+// outstanding or a previous one was abandoned by ctx cancellation. It is never
+// running merely because the reader exists.
+//
+// That property is load-bearing, not tidiness. A scan parked in read(2) on the
+// terminal is a second consumer of stdin, and `/edit` hands that same terminal
+// to an external editor: every keystroke the scan wins is a line golem then
+// runs as an agent goal, with whatever -allow-write/-allow-exec grants are
+// active. Draining stdin between prompts is a privilege-escalation shape, not
+// just lost input. The scanner path is reachable with -no-editor, TERM=dumb, on
+// Windows, and after a mid-session MakeRaw fallback, so this cannot be left to
+// the editor path alone.
+//
+// Not safe for concurrent use. Reads are serialized by construction -- the goal
+// prompt reads only when idle, the approval prompt only mid-turn -- the same
+// sole-reader contract editorSource relies on. Violating it is a data race the
+// detector will report rather than a silent corruption.
 type lineReader struct {
-	lines chan string
-	err   error // final scanner error, set before lines is closed
+	sc *bufio.Scanner
+
+	// inFlight is the delivery channel of the at-most-one live scan. Non-nil
+	// means a scan is running: either the caller is waiting on it now, or a
+	// previous caller lost the race to ctx cancellation and left it running.
+	// Buffered by one so an abandoned scan can park its result and exit instead
+	// of leaking, and so the next ReadLine picks that result up rather than
+	// discarding what the user actually typed.
+	inFlight chan scanResult
+
+	done bool  // the stream ended; err is its final word
+	err  error // nil on clean EOF, non-nil on scanner failure
 }
 
-// newLineReader starts the single scanning goroutine over r. The caller must
-// ensure r eventually reaches EOF or is closed so the goroutine can exit; until
-// then it lives for the process. For the REPL this is os.Stdin (process lifetime).
+// scanResult is one Scan outcome, carried whole so the receiving side needs no
+// access to the Scanner.
+type scanResult struct {
+	line string
+	ok   bool
+	err  error
+}
+
+// newLineReader wraps r. It starts nothing: the first scan begins when a caller
+// actually asks for a line.
 func newLineReader(r io.Reader) *lineReader {
-	lr := &lineReader{lines: make(chan string)}
-	go func() {
-		sc := bufio.NewScanner(r)
-		sc.Buffer(make([]byte, 0, 64*1024), maxGoalBytes)
-		for sc.Scan() {
-			lr.lines <- sc.Text()
-		}
-		// Set err BEFORE closing: this write is sequenced before close(lr.lines),
-		// which happens-before any receive that observes the closed channel, so
-		// ReadLine reads lr.err race-free (write → close → receive → read).
-		lr.err = sc.Err()
-		close(lr.lines)
-	}()
-	return lr
+	sc := bufio.NewScanner(r)
+	sc.Buffer(make([]byte, 0, 64*1024), maxGoalBytes)
+	return &lineReader{sc: sc}
 }
 
-// ReadLine returns the next line. ok=false means no line: with a nil error it is a
-// clean EOF; with a non-nil error it is either a scanner failure (channel closed
-// after an error) or ctx cancellation.
+// ReadLine returns the next line. ok=false means no line: with a nil error it is
+// a clean EOF; with a non-nil error it is either a scanner failure or ctx
+// cancellation.
+//
+// Cancellation abandons the wait, never the line. read(2) on a terminal cannot
+// be interrupted, so the scan continues and its result waits in inFlight for
+// the next caller.
 func (lr *lineReader) ReadLine(ctx context.Context) (string, bool, error) {
+	if lr.done {
+		return "", false, lr.err
+	}
+	if lr.inFlight == nil {
+		ch := make(chan scanResult, 1)
+		lr.inFlight = ch
+		// Only the goroutine touches lr.sc, and only one exists at a time: a
+		// successor is created solely after its predecessor's result has been
+		// received, which happens after that goroutine's last Scanner call.
+		go func() {
+			if lr.sc.Scan() {
+				ch <- scanResult{line: lr.sc.Text(), ok: true}
+				return
+			}
+			ch <- scanResult{err: lr.sc.Err()}
+		}()
+	}
 	select {
 	case <-ctx.Done():
 		return "", false, ctx.Err()
-	case line, ok := <-lr.lines:
-		if !ok {
-			return "", false, lr.err // nil on clean EOF, non-nil on scanner error
+	case res := <-lr.inFlight:
+		lr.inFlight = nil
+		if !res.ok {
+			lr.done = true
+			lr.err = res.err
 		}
-		return line, true, nil
+		return res.line, res.ok, res.err
 	}
 }
 
