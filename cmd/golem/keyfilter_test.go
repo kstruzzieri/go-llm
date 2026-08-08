@@ -564,37 +564,65 @@ func TestKeyFilterSplitsChunkAfterTerminator(t *testing.T) {
 }
 
 func TestKeyFilterDiscardDropsRetainedBytesAndFlags(t *testing.T) {
-	f := newTestFilter(strings.NewReader("ab\x03cde\n"))
+	t.Run("retained bytes after Ctrl-C", func(t *testing.T) {
+		f := newTestFilter(strings.NewReader("ab\x03cde\n"))
+		buf := make([]byte, 64)
+		if _, err := f.Read(buf); err != nil {
+			t.Fatalf("Read err = %v", err)
+		}
+		f.Discard()
+		if got := f.TakeTerminator(); got != termNone {
+			t.Fatalf("TakeTerminator after Discard = %v, want termNone", got)
+		}
+		out, err := drain(t, f)
+		if !errors.Is(err, io.EOF) {
+			t.Fatalf("err = %v", err)
+		}
+		if len(out) != 0 {
+			t.Fatalf("out = %q, want empty; retained post-Ctrl-C bytes must be dropped", out)
+		}
+	})
+
+	t.Run("an armed line flag", func(t *testing.T) {
+		// A Ctrl-C delivery publishes no flag -- only line events do -- so the
+		// old single-case version could never observe one being cleared. This
+		// arms one first.
+		f := newTestFilter(strings.NewReader("ab\ncde\n"))
+		buf := make([]byte, 64)
+		if _, err := f.Read(buf); err != nil {
+			t.Fatalf("Read err = %v", err)
+		}
+		f.Discard()
+		if _, ok := f.PopSegmentFlag(); ok {
+			t.Fatal("PopSegmentFlag after Discard returned ok=true")
+		}
+		// The guard is the proof the flag is genuinely gone rather than merely
+		// unclaimed: an outstanding one makes the next Read answer
+		// errTerminatorSwallowed.
+		if _, err := f.Read(buf); errors.Is(err, errTerminatorSwallowed) {
+			t.Fatal("Discard left the line flag armed")
+		}
+	})
+}
+
+func TestKeyFilterFlagIsClaimedExactlyOnce(t *testing.T) {
+	// "No flag outstanding" must never look like "a typed newline"; composition
+	// relies on the distinction, and a flag reported twice would give the next
+	// segment the previous one's provenance.
+	//
+	// Driven by hand rather than through drain, which claims every flag itself
+	// and so can only ever observe the empty state -- the shape this test used
+	// to have, where no flag was ever armed and the assertion could not fail.
+	f := newTestFilter(strings.NewReader("abc\n"))
 	buf := make([]byte, 64)
 	if _, err := f.Read(buf); err != nil {
 		t.Fatalf("Read err = %v", err)
 	}
-	f.Discard()
-	if got := f.TakeTerminator(); got != termNone {
-		t.Fatalf("TakeTerminator after Discard = %v, want termNone", got)
+	if _, ok := f.PopSegmentFlag(); !ok {
+		t.Fatal("no flag was armed by a delivered line terminator")
 	}
-	if _, ok := f.PopSegmentFlag(); ok {
-		t.Fatalf("PopSegmentFlag after Discard returned ok=true")
-	}
-	out, err := drain(t, f)
-	if !errors.Is(err, io.EOF) {
-		t.Fatalf("err = %v", err)
-	}
-	if len(out) != 0 {
-		t.Fatalf("out = %q, want empty; retained post-Ctrl-C bytes must be dropped", out)
-	}
-}
-
-func TestKeyFilterEmptyFlagQueueReportsNotOK(t *testing.T) {
-	// An empty FIFO must never look like "a typed newline"; composition relies
-	// on the distinction.
-	f := newTestFilter(strings.NewReader("abc"))
-	if _, err := drain(t, f); !errors.Is(err, io.EOF) {
-		t.Fatalf("err = %v", err)
-	}
-	inPaste, ok := f.PopSegmentFlag()
-	if ok {
-		t.Fatalf("PopSegmentFlag = (%v, true), want ok=false", inPaste)
+	if inPaste, ok := f.PopSegmentFlag(); ok {
+		t.Fatalf("PopSegmentFlag = (%v, true) on the second claim, want ok=false", inPaste)
 	}
 }
 
@@ -661,12 +689,34 @@ func TestKeyFilterBreaksLongUnresolvedEscapeAtByte256(t *testing.T) {
 	// x/term's inBuf is 256 bytes; an escape still unresolved at byte 256
 	// leaves a zero-length read and no progress. Measured against v0.42.0: a
 	// 254-byte span is safe, 255 and above livelock without the breaker.
-	for _, span := range []int{253, 254, 255, 256, 300} {
-		f := newTestFilter(strings.NewReader("\x1b" + strings.Repeat("1", span) + "a\n"))
+	//
+	// Bounded on BOTH sides. "never exceeds 256" alone is satisfied by a
+	// breaker that fires far too early -- maxEscSpan = 20 passes it -- and an
+	// early breaker truncates legitimate long escape sequences, turning a real
+	// key into garbage. So each span also pins whether a breaker was injected
+	// at all.
+	for _, tc := range []struct {
+		span        int
+		wantBreaker bool
+	}{
+		{253, false}, // ESC + 253 + the final byte stays inside the budget
+		{254, true},  // the first span that reaches it
+		{255, true},
+		{256, true},
+		{300, true},
+	} {
+		f := newTestFilter(strings.NewReader("\x1b" + strings.Repeat("1", tc.span) + "a\n"))
 		out, _ := drain(t, f)
-		longest := longestUnresolvedEscapeRun(out)
-		if longest > 256 {
-			t.Fatalf("span %d: longest unresolved escape run = %d bytes, must not exceed 256", span, longest)
+		// maxEscSpan forwarded bytes plus the breaker that closes them, which is
+		// the last byte of the sequence and so still inside x/term's 256-byte
+		// inBuf -- the property that matters.
+		if longest, limit := longestUnresolvedEscapeRun(out), maxEscSpan+1; longest > limit {
+			t.Fatalf("span %d: longest unresolved escape run = %d bytes, must not exceed %d",
+				tc.span, longest, limit)
+		}
+		if got := bytes.ContainsRune(out, escBreaker); got != tc.wantBreaker {
+			t.Fatalf("span %d: breaker injected = %v, want %v; an early breaker truncates a real escape sequence",
+				tc.span, got, tc.wantBreaker)
 		}
 	}
 }
@@ -724,17 +774,13 @@ func longestUnresolvedEscapeRun(b []byte) int {
 }
 
 func FuzzKeyFilterPassesBytesThrough(f *testing.F) {
+	// Seeds are ESC-free on purpose: every ESC-bearing input is skipped below,
+	// so seeding them only grew the corpus with cases this target never
+	// evaluates. Five of the original eight were exactly that.
 	f.Add("a\r\nb")
-	f.Add(pasteOn + "x\ny" + pasteOff)
-	f.Add("\x1b[20")
 	f.Add("\x03\x04\r\n")
-	f.Add("\x1b\x1b[200~\r\n" + pasteOff)
-	// A marker between CR and LF: they are no longer adjacent, so the LF is
-	// its own terminator. Unreachable from a real terminal, but it pins the
-	// rule to "immediately follows" rather than "follows eventually".
-	f.Add("\r" + pasteOff + "\n")
-	f.Add("\r" + pasteOn + "\n")
 	f.Add("\r\r\n\n")
+	f.Add("ab\rcd\nef")
 	f.Fuzz(func(t *testing.T, in string) {
 		if !utf8.ValidString(in) || strings.ContainsRune(in, utf8.RuneError) {
 			// Rejected input delivers nothing, so the pass-through rule does
@@ -744,10 +790,13 @@ func FuzzKeyFilterPassesBytesThrough(f *testing.F) {
 		}
 		if strings.ContainsRune(in, 0x1b) {
 			// With an ESC present the byte contract also covers breaker
-			// injection and paste-content stripping, which cannot be stated
-			// as a one-line rule without restating the implementation.
-			// FuzzTerminalFIFOSync covers those inputs against the real
-			// Terminal instead, which is the property that actually matters.
+			// injection and paste-content stripping, which cannot be stated as
+			// a one-line rule without restating the implementation. Those
+			// inputs are covered deterministically instead, against the real
+			// Terminal where it matters: TestKeyFilterBreaksLongUnresolvedEscape
+			// AtByte256, TestKeyFilterDropsBareEscapeInsidePaste,
+			// TestKeyFilterMarkerLikeSequencesArePassedThrough, and the
+			// provenance and fuzz targets in keyfilter_term_test.go.
 			t.Skip()
 		}
 		kf := newKeyFilter(strings.NewReader(in), maxGoalBytes)

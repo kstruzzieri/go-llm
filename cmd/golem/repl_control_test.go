@@ -150,17 +150,39 @@ func TestReplControlPromptDisarms(t *testing.T) {
 func TestReplControlWiredIntoRunREPL(t *testing.T) {
 	root := t.TempDir()
 	caller := &scriptCaller{}
-	var out, errOut strings.Builder
+	// Locked, not a strings.Builder: runREPL writes from its own goroutine
+	// while the test reads.
+	out, errOut := &lockedBuffer{}, &lockedBuffer{}
 	interrupts := make(chan struct{}, 1)
 	sess := newTestSession(t, caller, root)
-	sess.control = newReplControl(&out, &errOut, interrupts, func() {})
+	sess.control = newReplControl(out, errOut, interrupts, func() {})
 
-	in := strings.NewReader("/exit\n")
-	if err := runREPL(context.Background(), newScannerSource(in, &out), &out, interrupts, sess); err != nil {
-		t.Fatalf("runREPL: %v", err)
+	// The prompt itself proves nothing here: the SOURCE prints it, so a version
+	// of runREPL with enterPrompt deleted would still show one. What the
+	// control owns is whether the REPL is idle, and the observable consequence
+	// is which stream an asynchronous notice takes -- stdout with the prompt
+	// restored when idle, stderr when a turn is running.
+	pr, pw := newBlockedPipe(t)
+	src := newScannerSource(pr, out)
+	sess.control.setIdleDisplay(src.IdleDisplay)
+
+	done := make(chan error, 1)
+	go func() {
+		done <- runREPL(context.Background(), src, out, interrupts, sess)
+	}()
+	waitFor(t, func() bool { return strings.Contains(out.String(), promptText) })
+
+	sess.control.notice("async while idle")
+	waitFor(t, func() bool { return strings.Contains(out.String(), "async while idle") })
+	if strings.Contains(errOut.String(), "async while idle") {
+		t.Errorf("notice took the mid-turn stderr path; runREPL never marked the prompt idle:\n%s", errOut.String())
 	}
-	if !strings.Contains(out.String(), promptText) {
-		t.Errorf("control-driven prompt not printed:\n%s", out.String())
+
+	if _, err := pw.Write([]byte("/exit\n")); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if err := <-done; err != nil {
+		t.Fatalf("runREPL: %v", err)
 	}
 }
 

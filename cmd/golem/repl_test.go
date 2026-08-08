@@ -1025,9 +1025,13 @@ func TestREPLIntegrationPartialInputDoubleCtrlCExits(t *testing.T) {
 	if caller.i != 0 {
 		t.Fatalf("model called %d times, want 0: a discarded partial line is never a goal", caller.i)
 	}
-	if strings.Contains(out.String(), "partial input\r\npartial") {
-		t.Fatalf("the discarded line was resubmitted:\n%q", out.String())
-	}
+	// The "was the discarded line resubmitted" check that used to live here was
+	// removed rather than kept: x/term never flushes the echo on the Ctrl-C
+	// path, so the substring it looked for could not appear whatever the
+	// implementation did, and it would not have noticed the Terminal never
+	// being recreated. TestEditorSourceCtrlCDiscardsRetainedBytesAndContinues
+	// asserts that property where it is observable -- on the goal the next line
+	// produces.
 	// Production Close ownership ran: every raw window this REPL opened was
 	// closed, so the shell is not left in raw mode.
 	makeRaw, restore, _ := ops.counts()
