@@ -13,9 +13,10 @@ import (
 
 // Orchestrator runs the plan->act->observe loop.
 type Orchestrator struct {
-	model  ModelCaller
-	ctxMgr ContextManager
-	now    func() time.Time // wall clock for latency; time.Now unless overridden
+	model     ModelCaller
+	ctxMgr    ContextManager
+	now       func() time.Time // wall clock for latency; time.Now unless overridden
+	toolLimit ToolInvocationLimit
 }
 
 // Option configures an Orchestrator at construction. New stays source-compatible
@@ -31,6 +32,12 @@ func WithClock(now func() time.Time) Option {
 			o.now = now
 		}
 	}
+}
+
+// WithToolInvocationLimit caps actual Invoke calls for one named tool in each
+// Run. Synthetic failures do not count, and the zero value disables the cap.
+func WithToolInvocationLimit(limit ToolInvocationLimit) Option {
+	return func(o *Orchestrator) { o.toolLimit = limit }
 }
 
 // New constructs an Orchestrator from a ModelCaller and ContextManager.
@@ -96,7 +103,7 @@ func (o *Orchestrator) Run(ctx context.Context, req Request, obs Observer) (Resu
 	toolSchemaTokens := o.ctxMgr.estimate(toolSchemaString(specs))
 	budget := turnBudget(req.Budget)
 
-	gov, err := newRestraintGovernor(req.Budget.ToolLimit, reg)
+	gov, err := newRestraintGovernor(o.toolLimit, reg)
 	if err != nil {
 		return Result{}, err
 	}
@@ -154,6 +161,7 @@ func (o *Orchestrator) Run(ctx context.Context, req Request, obs Observer) (Resu
 		})
 		modelLatency := o.now().Sub(modelStart)
 		if err != nil {
+			res.Messages = resultMessages(state, historyLen)
 			return res, err
 		}
 		resp := modelResult.Response

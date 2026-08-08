@@ -1,9 +1,11 @@
 package tools
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"slices"
 	"strconv"
 	"strings"
@@ -212,6 +214,65 @@ func TestNewDispatchAppliesConservativeDefaults(t *testing.T) {
 	}
 }
 
+func TestNewDispatchRejectsUnusableResultCap(t *testing.T) {
+	read := agent.Effect{Class: agent.Read, Approval: agent.ApprovalNever}
+	available := []agent.Tool{
+		dispatchNamedTool{name: "read_file", effect: read},
+		dispatchNamedTool{name: "search", effect: read},
+		dispatchNamedTool{name: "glob", effect: read},
+		dispatchNamedTool{name: "list", effect: read},
+	}
+	for _, limit := range []int{1, 110} {
+		_, err := NewDispatch(&dispatchCaller{}, agent.ContextManager{}, available, DispatchLimits{MaxTasks: 1, MaxResultBytes: limit})
+		if err == nil || !strings.Contains(err.Error(), fmt.Sprintf("max result bytes %d cannot hold required metadata", limit)) {
+			t.Fatalf("NewDispatch(%d) error = %v", limit, err)
+		}
+	}
+}
+
+func TestNewDispatchRejectsUnusableSummaryCap(t *testing.T) {
+	read := agent.Effect{Class: agent.Read, Approval: agent.ApprovalNever}
+	available := []agent.Tool{
+		dispatchNamedTool{name: "read_file", effect: read},
+		dispatchNamedTool{name: "search", effect: read},
+		dispatchNamedTool{name: "glob", effect: read},
+		dispatchNamedTool{name: "list", effect: read},
+	}
+	_, err := NewDispatch(&dispatchCaller{}, agent.ContextManager{}, available, DispatchLimits{MaxSummaryBytes: 1})
+	if err == nil || !strings.Contains(err.Error(), "max summary bytes 1 cannot hold truncation marker") {
+		t.Fatalf("NewDispatch error = %v", err)
+	}
+}
+
+func TestNewDispatchReportsNegativeLimitFieldAndValue(t *testing.T) {
+	read := agent.Effect{Class: agent.Read, Approval: agent.ApprovalNever}
+	available := []agent.Tool{
+		dispatchNamedTool{name: "read_file", effect: read},
+		dispatchNamedTool{name: "search", effect: read},
+		dispatchNamedTool{name: "glob", effect: read},
+		dispatchNamedTool{name: "list", effect: read},
+	}
+	tests := map[string]DispatchLimits{
+		"max steps":         {MaxSteps: -1},
+		"input ceiling":     {Budget: agent.Budget{InputCeiling: -1}},
+		"output reserve":    {Budget: agent.Budget{OutputReserve: -1}},
+		"total tokens":      {Budget: agent.Budget{TotalTokens: -1}},
+		"max tasks":         {MaxTasks: -1},
+		"max concurrent":    {MaxConcurrent: -1},
+		"max summary bytes": {MaxSummaryBytes: -1},
+		"max result bytes":  {MaxResultBytes: -1},
+		"timeout":           {Timeout: -1},
+	}
+	for field, limits := range tests {
+		t.Run(field, func(t *testing.T) {
+			_, err := NewDispatch(&dispatchCaller{}, agent.ContextManager{}, available, limits)
+			if err == nil || !strings.Contains(err.Error(), field) || !strings.Contains(err.Error(), "-1") {
+				t.Fatalf("normalizeDispatchLimits error = %v", err)
+			}
+		})
+	}
+}
+
 type repeatingParentDispatchCaller struct {
 	calls atomic.Int32
 }
@@ -243,13 +304,12 @@ func TestParentRunCapsRepeatedDispatchFanout(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewDispatch: %v", err)
 	}
-	parent := agent.New(&repeatingParentDispatchCaller{}, agent.ContextManager{})
+	parent := agent.New(&repeatingParentDispatchCaller{}, agent.ContextManager{}, agent.WithToolInvocationLimit(agent.ToolInvocationLimit{
+		Tool: DispatchToolName, Max: DefaultDispatchCallsPerRun,
+	}))
 	result, err := parent.Run(context.Background(), agent.Request{
-		Goal:  "investigate",
-		Tools: []agent.Tool{dispatch},
-		Budget: agent.Budget{ToolLimit: agent.ToolInvocationLimit{
-			Tool: DispatchToolName, Max: DefaultDispatchCallsPerRun,
-		}},
+		Goal:     "investigate",
+		Tools:    []agent.Tool{dispatch},
 		MaxSteps: DefaultDispatchCallsPerRun + 2,
 	}, nil)
 	if err != nil {
@@ -309,6 +369,55 @@ func TestDispatchRejectsOversizedTaskBeforeModelCall(t *testing.T) {
 	}
 }
 
+func TestDispatchRejectsOversizedArgumentsBeforeModelCall(t *testing.T) {
+	read := agent.Effect{Class: agent.Read, Approval: agent.ApprovalNever}
+	available := []agent.Tool{
+		dispatchNamedTool{name: "read_file", effect: read},
+		dispatchNamedTool{name: "search", effect: read},
+		dispatchNamedTool{name: "glob", effect: read},
+		dispatchNamedTool{name: "list", effect: read},
+	}
+	caller := &dispatchCaller{}
+	tool, err := NewDispatch(caller, agent.ContextManager{}, available, DispatchLimits{})
+	if err != nil {
+		t.Fatalf("NewDispatch: %v", err)
+	}
+	raw := json.RawMessage(`{"padding":"` + strings.Repeat("x", maxDispatchArgsBytes) + `","tasks":["one"]}`)
+	out, err := tool.Invoke(context.Background(), raw)
+	if err != nil {
+		t.Fatalf("Invoke: %v", err)
+	}
+	if !out.IsError || !strings.Contains(out.Content, "arguments must be at most") {
+		t.Fatalf("result = %+v", out)
+	}
+	if len(caller.requests()) != 0 {
+		t.Fatal("oversized arguments reached child model")
+	}
+}
+
+func TestDispatchAllowsWorstCaseEscapedTaskWithinDecodedLimit(t *testing.T) {
+	read := agent.Effect{Class: agent.Read, Approval: agent.ApprovalNever}
+	available := []agent.Tool{
+		dispatchNamedTool{name: "read_file", effect: read},
+		dispatchNamedTool{name: "search", effect: read},
+		dispatchNamedTool{name: "glob", effect: read},
+		dispatchNamedTool{name: "list", effect: read},
+	}
+	caller := &dispatchCaller{}
+	tool, err := NewDispatch(caller, agent.ContextManager{}, available, DispatchLimits{})
+	if err != nil {
+		t.Fatalf("NewDispatch: %v", err)
+	}
+	raw := json.RawMessage(`{"tasks":["` + strings.Repeat(`\u0000`, maxDispatchTaskBytes) + `"]}`)
+	out, err := tool.Invoke(context.Background(), raw)
+	if err != nil || out.IsError {
+		t.Fatalf("Invoke = %+v, %v", out, err)
+	}
+	if len(caller.requests()) != 1 {
+		t.Fatalf("child model calls = %d, want 1", len(caller.requests()))
+	}
+}
+
 type staticDispatchCaller struct {
 	content string
 }
@@ -320,6 +429,79 @@ func (c staticDispatchCaller) Chat(context.Context, provider.ChatRequest, func(p
 			ActualModel: provider.ModelKey{Provider: "local", Model: "fast"},
 		},
 	}, nil
+}
+
+type malformedModelDispatchCaller struct{}
+
+func (malformedModelDispatchCaller) Chat(context.Context, provider.ChatRequest, func(provider.ChatResponse) error) (agent.ModelResult, error) {
+	return agent.ModelResult{
+		Response: provider.ChatResponse{Content: "summary", Done: true},
+		RouteOutcome: &provider.RouteOutcome{
+			ActualModel: provider.ModelKey{Provider: "local", Model: string([]byte{'m', 0xff})},
+		},
+	}, nil
+}
+
+func TestDispatchMarksInvalidModelUTF8AsTruncated(t *testing.T) {
+	read := agent.Effect{Class: agent.Read, Approval: agent.ApprovalNever}
+	available := []agent.Tool{
+		dispatchNamedTool{name: "read_file", effect: read},
+		dispatchNamedTool{name: "search", effect: read},
+		dispatchNamedTool{name: "glob", effect: read},
+		dispatchNamedTool{name: "list", effect: read},
+	}
+	tool, err := NewDispatch(malformedModelDispatchCaller{}, agent.ContextManager{}, available, DispatchLimits{})
+	if err != nil {
+		t.Fatalf("NewDispatch: %v", err)
+	}
+	out, err := tool.Invoke(context.Background(), json.RawMessage(`{"tasks":["one"]}`))
+	if err != nil {
+		t.Fatalf("Invoke: %v", err)
+	}
+	var envelope dispatchEnvelope
+	if err := json.Unmarshal([]byte(out.Content), &envelope); err != nil {
+		t.Fatalf("decode result: %v", err)
+	}
+	if !out.Truncated || !envelope.Results[0].Truncated || !utf8.ValidString(envelope.Results[0].Model) {
+		t.Fatalf("result = %+v; tool truncated = %v", envelope.Results[0], out.Truncated)
+	}
+}
+
+type emptyDispatchCaller struct{}
+
+func (emptyDispatchCaller) Chat(context.Context, provider.ChatRequest, func(provider.ChatResponse) error) (agent.ModelResult, error) {
+	return agent.ModelResult{
+		Response: provider.ChatResponse{Content: " \t", Done: true},
+		RouteOutcome: &provider.RouteOutcome{
+			ActualModel: provider.ModelKey{Provider: "local", Model: "fast"},
+		},
+	}, nil
+}
+
+func TestDispatchTreatsMissingChildSummaryAsError(t *testing.T) {
+	read := agent.Effect{Class: agent.Read, Approval: agent.ApprovalNever}
+	available := []agent.Tool{
+		dispatchNamedTool{name: "read_file", effect: read},
+		dispatchNamedTool{name: "search", effect: read},
+		dispatchNamedTool{name: "glob", effect: read},
+		dispatchNamedTool{name: "list", effect: read},
+	}
+	tool, err := NewDispatch(emptyDispatchCaller{}, agent.ContextManager{}, available, DispatchLimits{})
+	if err != nil {
+		t.Fatalf("NewDispatch: %v", err)
+	}
+	out, err := tool.Invoke(context.Background(), json.RawMessage(`{"tasks":["one"]}`))
+	if err != nil {
+		t.Fatalf("Invoke: %v", err)
+	}
+	var envelope dispatchEnvelope
+	if err := json.Unmarshal([]byte(out.Content), &envelope); err != nil {
+		t.Fatalf("decode result: %v", err)
+	}
+	got := envelope.Results[0]
+	if !out.IsError || got.Summary != "" || got.Error != "child produced no summary before completed" {
+		t.Fatalf("result = %+v; tool error = %v", got, out.IsError)
+	}
 }
 
 type loopingDispatchCaller struct {
@@ -337,6 +519,102 @@ func (firstCallErrorDispatchCaller) Chat(context.Context, provider.ChatRequest, 
 	return agent.ModelResult{
 		RouteOutcome: &provider.RouteOutcome{ActualModel: provider.ModelKey{Provider: "local", Model: "fast"}},
 	}, errors.New("child stream failed")
+}
+
+type blankErrorDispatchCaller struct{}
+
+func (blankErrorDispatchCaller) Chat(context.Context, provider.ChatRequest, func(provider.ChatResponse) error) (agent.ModelResult, error) {
+	return agent.ModelResult{
+		RouteOutcome: &provider.RouteOutcome{ActualModel: provider.ModelKey{Provider: "local", Model: "fast"}},
+	}, errors.New("")
+}
+
+func TestDispatchSurfacesBlankChildError(t *testing.T) {
+	read := agent.Effect{Class: agent.Read, Approval: agent.ApprovalNever}
+	available := []agent.Tool{
+		dispatchNamedTool{name: "read_file", effect: read},
+		dispatchNamedTool{name: "search", effect: read},
+		dispatchNamedTool{name: "glob", effect: read},
+		dispatchNamedTool{name: "list", effect: read},
+	}
+	tool, err := NewDispatch(blankErrorDispatchCaller{}, agent.ContextManager{}, available, DispatchLimits{})
+	if err != nil {
+		t.Fatalf("NewDispatch: %v", err)
+	}
+	out, err := tool.Invoke(context.Background(), json.RawMessage(`{"tasks":["one"]}`))
+	if err != nil {
+		t.Fatalf("Invoke: %v", err)
+	}
+	var envelope dispatchEnvelope
+	if err := json.Unmarshal([]byte(out.Content), &envelope); err != nil {
+		t.Fatalf("decode result: %v", err)
+	}
+	if got := envelope.Results[0]; !out.IsError || got.Error != "child failed without an error message" {
+		t.Fatalf("result = %+v; tool error = %v", got, out.IsError)
+	}
+}
+
+type largeErrorDispatchCaller struct{}
+
+func (largeErrorDispatchCaller) Chat(context.Context, provider.ChatRequest, func(provider.ChatResponse) error) (agent.ModelResult, error) {
+	return agent.ModelResult{
+		RouteOutcome: &provider.RouteOutcome{ActualModel: provider.ModelKey{Provider: "local", Model: "fast"}},
+	}, errors.New(string(bytes.Repeat([]byte{0xff}, 10_000)))
+}
+
+func TestDispatchBoundsErrorWithoutErasingModel(t *testing.T) {
+	read := agent.Effect{Class: agent.Read, Approval: agent.ApprovalNever}
+	available := []agent.Tool{
+		dispatchNamedTool{name: "read_file", effect: read},
+		dispatchNamedTool{name: "search", effect: read},
+		dispatchNamedTool{name: "glob", effect: read},
+		dispatchNamedTool{name: "list", effect: read},
+	}
+	tool, err := NewDispatch(largeErrorDispatchCaller{}, agent.ContextManager{}, available, DispatchLimits{MaxTasks: 1, MaxResultBytes: 256})
+	if err != nil {
+		t.Fatalf("NewDispatch: %v", err)
+	}
+	out, err := tool.Invoke(context.Background(), json.RawMessage(`{"tasks":["one"]}`))
+	if err != nil {
+		t.Fatalf("Invoke: %v", err)
+	}
+	var envelope dispatchEnvelope
+	if err := json.Unmarshal([]byte(out.Content), &envelope); err != nil {
+		t.Fatalf("decode result: %v", err)
+	}
+	got := envelope.Results[0]
+	if len(out.Content) > 256 || got.Model != "local/fast" || got.Error == "" || !strings.HasSuffix(got.Error, "… [error details truncated]") || !utf8.ValidString(got.Error) || !got.Truncated || !out.Truncated {
+		t.Fatalf("result = %+v; tool truncated = %v", got, out.Truncated)
+	}
+}
+
+type longModelDispatchCaller struct{}
+
+func (longModelDispatchCaller) Chat(context.Context, provider.ChatRequest, func(provider.ChatResponse) error) (agent.ModelResult, error) {
+	return agent.ModelResult{
+		Response: provider.ChatResponse{Content: "summary", Done: true},
+		RouteOutcome: &provider.RouteOutcome{
+			ActualModel: provider.ModelKey{Provider: "local", Model: strings.Repeat("m", 300)},
+		},
+	}, nil
+}
+
+func TestDispatchRejectsResultCapThatWouldTruncateModel(t *testing.T) {
+	read := agent.Effect{Class: agent.Read, Approval: agent.ApprovalNever}
+	available := []agent.Tool{
+		dispatchNamedTool{name: "read_file", effect: read},
+		dispatchNamedTool{name: "search", effect: read},
+		dispatchNamedTool{name: "glob", effect: read},
+		dispatchNamedTool{name: "list", effect: read},
+	}
+	tool, err := NewDispatch(longModelDispatchCaller{}, agent.ContextManager{}, available, DispatchLimits{MaxTasks: 1, MaxResultBytes: 256})
+	if err != nil {
+		t.Fatalf("NewDispatch: %v", err)
+	}
+	_, err = tool.Invoke(context.Background(), json.RawMessage(`{"tasks":["one"]}`))
+	if err == nil || !strings.Contains(err.Error(), "child 1: model identity exceeds 256-byte cap") {
+		t.Fatalf("Invoke error = %v", err)
+	}
 }
 
 func TestDispatchPreservesModelIdentityOnFirstCallError(t *testing.T) {
@@ -401,7 +679,7 @@ func TestDispatchPreservesKnownModelIdentityOnChildError(t *testing.T) {
 		t.Fatalf("decode result: %v", err)
 	}
 	got := envelope.Results[0]
-	if got.Model != "local/fast" || got.StopReason != "error" || !strings.Contains(got.Error, "child model failed") {
+	if got.Model != "local/fast" || got.StopReason != "error" || got.Summary != "Partial result before error: unused" || !strings.Contains(got.Error, "child model failed") {
 		t.Fatalf("result = %+v", got)
 	}
 }
@@ -447,7 +725,7 @@ func TestDispatchReportsPerChildBudgetStopAndModel(t *testing.T) {
 		t.Fatalf("decode result: %v", err)
 	}
 	for i, result := range envelope.Results {
-		if result.StopReason != agent.BudgetReached.String() || result.Model != "local/fast" {
+		if result.StopReason != agent.BudgetReached.String() || result.Model != "local/fast" || result.Summary != "Partial result before budget_reached: unused" || result.Error != "" {
 			t.Fatalf("result %d = %+v", i, result)
 		}
 	}
@@ -480,7 +758,7 @@ func TestDispatchReportsChildStepCap(t *testing.T) {
 	if err := json.Unmarshal([]byte(out.Content), &envelope); err != nil {
 		t.Fatalf("decode result: %v", err)
 	}
-	if got := envelope.Results[0]; got.StopReason != agent.StepCapReached.String() || got.Model != "local/fast" {
+	if got := envelope.Results[0]; got.StopReason != agent.StepCapReached.String() || got.Model != "local/fast" || got.Summary != "Partial result before step_cap_reached: unused" || got.Error != "" {
 		t.Fatalf("result = %+v", got)
 	}
 	if caller.calls.Load() != 2 {
@@ -498,7 +776,7 @@ func TestDispatchReturnsValidJSONWithinConfiguredByteCaps(t *testing.T) {
 	}
 	tool, err := NewDispatch(staticDispatchCaller{content: strings.Repeat("界", 200)}, agent.ContextManager{}, available, DispatchLimits{
 		MaxSteps: 2, Budget: agent.Budget{InputCeiling: 4096, OutputReserve: 123, TotalTokens: 10_000},
-		MaxTasks: 2, MaxConcurrent: 2, MaxSummaryBytes: 100, MaxResultBytes: 220, Timeout: time.Minute,
+		MaxTasks: 2, MaxConcurrent: 2, MaxSummaryBytes: 100, MaxResultBytes: 360, Timeout: time.Minute,
 	})
 	if err != nil {
 		t.Fatalf("NewDispatch: %v", err)
@@ -507,8 +785,8 @@ func TestDispatchReturnsValidJSONWithinConfiguredByteCaps(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Invoke: %v", err)
 	}
-	if len(out.Content) > 220 {
-		t.Fatalf("result bytes = %d, want <= 220", len(out.Content))
+	if len(out.Content) > 360 {
+		t.Fatalf("result bytes = %d, want <= 360", len(out.Content))
 	}
 	if !out.Truncated {
 		t.Fatal("ToolResult.Truncated = false, want true")
@@ -518,7 +796,7 @@ func TestDispatchReturnsValidJSONWithinConfiguredByteCaps(t *testing.T) {
 		t.Fatalf("result is not valid JSON: %v\n%s", err, out.Content)
 	}
 	for i, result := range envelope.Results {
-		if len(result.Summary) > 100 || !utf8.ValidString(result.Summary) || !result.Truncated || result.Model != "local/fast" || result.StopReason != agent.Completed.String() {
+		if result.Summary == "" || len(result.Summary) > 100 || !utf8.ValidString(result.Summary) || !result.Truncated || result.Model != "local/fast" || result.StopReason != agent.Completed.String() {
 			t.Fatalf("result %d = %+v", i, result)
 		}
 	}
@@ -529,6 +807,67 @@ type gatedDispatchCaller struct {
 	gates   map[string]chan struct{}
 	active  atomic.Int32
 	max     atomic.Int32
+}
+
+func TestDispatchSharesConcurrencyLimitAcrossInvocations(t *testing.T) {
+	caller := &gatedDispatchCaller{
+		started: make(chan string, 2),
+		gates: map[string]chan struct{}{
+			"one": make(chan struct{}),
+			"two": make(chan struct{}),
+		},
+	}
+	read := agent.Effect{Class: agent.Read, Approval: agent.ApprovalNever}
+	available := []agent.Tool{
+		dispatchNamedTool{name: "read_file", effect: read},
+		dispatchNamedTool{name: "search", effect: read},
+		dispatchNamedTool{name: "glob", effect: read},
+		dispatchNamedTool{name: "list", effect: read},
+	}
+	tool, err := NewDispatch(caller, agent.ContextManager{}, available, DispatchLimits{MaxTasks: 1, MaxConcurrent: 1})
+	if err != nil {
+		t.Fatalf("NewDispatch: %v", err)
+	}
+	firstDone := make(chan error, 1)
+	go func() {
+		_, err := tool.Invoke(context.Background(), json.RawMessage(`{"tasks":["one"]}`))
+		firstDone <- err
+	}()
+	select {
+	case task := <-caller.started:
+		if task != "one" {
+			t.Fatalf("first task = %q", task)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("first child did not start")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	secondDone := make(chan error, 1)
+	go func() {
+		_, err := tool.Invoke(ctx, json.RawMessage(`{"tasks":["two"]}`))
+		secondDone <- err
+	}()
+	select {
+	case task := <-caller.started:
+		close(caller.gates["one"])
+		<-firstDone
+		t.Fatalf("child %q bypassed shared concurrency limit", task)
+	case err := <-secondDone:
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("second Invoke error = %v, want deadline exceeded", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("second Invoke did not honor cancellation while queued")
+	}
+	close(caller.gates["one"])
+	if err := <-firstDone; err != nil {
+		t.Fatalf("first Invoke: %v", err)
+	}
+	if caller.max.Load() != 1 {
+		t.Fatalf("max active children = %d, want 1", caller.max.Load())
+	}
 }
 
 func (c *gatedDispatchCaller) Chat(ctx context.Context, req provider.ChatRequest, _ func(provider.ChatResponse) error) (agent.ModelResult, error) {

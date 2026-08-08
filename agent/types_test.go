@@ -31,3 +31,10 @@ func TestDefaultConsts(t *testing.T) {
 		t.Fatal("defaults must be positive")
 	}
 }
+
+func TestBudgetRetainsPositionalLiteralShape(t *testing.T) {
+	got := Budget{1, 2, 3, PressureThresholds{}}
+	if got.InputCeiling != 1 || got.OutputReserve != 2 || got.TotalTokens != 3 {
+		t.Fatalf("Budget = %+v", got)
+	}
+}

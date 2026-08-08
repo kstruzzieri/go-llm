@@ -128,10 +128,9 @@ func TestToolInvocationBudgetCapsDistinctCallsAndResetsPerRun(t *testing.T) {
 	}
 
 	tool := &countingTool{}
-	o := newTestOrchestrator(&scriptedCaller{responses: responses})
+	o := newTestOrchestrator(&scriptedCaller{responses: responses}, WithToolInvocationLimit(ToolInvocationLimit{Tool: "count", Max: 2}))
 	req := Request{
 		Goal: "q", Tools: []Tool{tool},
-		Budget: Budget{ToolLimit: ToolInvocationLimit{Tool: "count", Max: 2}},
 	}
 	for run := range 2 {
 		res, err := o.Run(context.Background(), req, nil)
@@ -162,10 +161,9 @@ func TestToolInvocationBudgetHandlesOtherwiseParallelBatch(t *testing.T) {
 	}
 	o := newTestOrchestrator(&scriptedCaller{responses: []ModelResult{
 		batch(0), batch(1), {Response: provider.ChatResponse{Content: "done", Done: true}},
-	}})
+	}}, WithToolInvocationLimit(ToolInvocationLimit{Tool: "a", Max: 1}))
 	res, err := o.Run(context.Background(), Request{
 		Goal: "q", Tools: []Tool{echoTool{name: "a"}, echoTool{name: "b"}},
-		Budget: Budget{ToolLimit: ToolInvocationLimit{Tool: "a", Max: 1}},
 	}, nil)
 	if err != nil {
 		t.Fatalf("Run: %v", err)
@@ -185,9 +183,9 @@ func TestToolInvocationBudgetRejectsInvalidConfiguration(t *testing.T) {
 		"unknown tool": {Tool: "missing", Max: 1},
 	} {
 		t.Run(name, func(t *testing.T) {
-			o := newTestOrchestrator(&scriptedCaller{})
+			o := newTestOrchestrator(&scriptedCaller{}, WithToolInvocationLimit(limit))
 			_, err := o.Run(context.Background(), Request{
-				Goal: "q", Tools: []Tool{&countingTool{}}, Budget: Budget{ToolLimit: limit},
+				Goal: "q", Tools: []Tool{&countingTool{}},
 			}, nil)
 			if err == nil {
 				t.Fatal("Run succeeded with invalid tool invocation budget")

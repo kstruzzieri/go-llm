@@ -28,11 +28,11 @@ func (s *scriptedCaller) Chat(_ context.Context, _ provider.ChatRequest,
 	return r, nil
 }
 
-func newTestOrchestrator(mc ModelCaller) *Orchestrator {
+func newTestOrchestrator(mc ModelCaller, opts ...Option) *Orchestrator {
 	return New(mc, ContextManager{
 		Compactor: RecencyCompactor{Estimate: runeEstimator},
 		Estimate:  runeEstimator,
-	})
+	}, opts...)
 }
 
 func TestRunSingleStepFinalAnswer(t *testing.T) {

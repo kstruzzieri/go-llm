@@ -16,17 +16,20 @@ import (
 const (
 	// DispatchToolName is the model-facing name of the read-only child dispatcher.
 	DispatchToolName = "dispatch"
-	// DefaultDispatchCallsPerRun bounds aggregate fan-out when installed as the parent Budget.ToolLimit.
+	// DefaultDispatchCallsPerRun bounds aggregate fan-out when installed with agent.WithToolInvocationLimit.
 	DefaultDispatchCallsPerRun = 4
 
 	maxDispatchTasks             = 4
 	maxDispatchTaskBytes         = 8 * 1024
+	maxDispatchArgsBytes         = maxDispatchTasks*maxDispatchTaskBytes*6 + 1024
 	defaultDispatchMaxSteps      = 6
 	defaultDispatchTotalTokens   = 32 * 1024
 	defaultDispatchOutputReserve = 1024
 	defaultDispatchSummary       = 8 * 1024
 	defaultDispatchResult        = 64 * 1024
 	defaultDispatchTimeout       = 5 * time.Minute
+	dispatchSummaryTruncated     = "… [summary truncated]"
+	dispatchErrorTruncated       = "… [error details truncated]"
 )
 
 const dispatchSystemPrompt = "You are a read-only exploration subagent. Investigate only the assigned task using the available read and retrieval tools. Do not write or edit files, run commands, call external tools, submit plans, or dispatch children. Return a concise evidence-backed summary and do not claim actions you did not perform."
@@ -34,9 +37,11 @@ const dispatchSystemPrompt = "You are a read-only exploration subagent. Investig
 // DispatchLimits bounds every child and one dispatch invocation. Zero fields
 // select conservative defaults; negative fields are rejected.
 type DispatchLimits struct {
-	MaxSteps        int
-	Budget          agent.Budget
-	MaxTasks        int
+	MaxSteps int
+	Budget   agent.Budget
+	MaxTasks int
+	// MaxConcurrent values above one require a ModelCaller and child tools that
+	// support concurrent use.
 	MaxConcurrent   int
 	MaxSummaryBytes int
 	MaxResultBytes  int
@@ -49,6 +54,7 @@ type Dispatch struct {
 	ctxMgr agent.ContextManager
 	tools  []agent.Tool
 	limits DispatchLimits
+	slots  chan struct{}
 }
 
 type dispatchArgs struct {
@@ -117,9 +123,10 @@ func NewDispatch(caller agent.ModelCaller, ctxMgr agent.ContextManager, availabl
 		}
 		tools = append(tools, tool)
 	}
-	return &Dispatch{caller: caller, ctxMgr: ctxMgr, tools: tools, limits: limits}, nil
+	return &Dispatch{caller: caller, ctxMgr: ctxMgr, tools: tools, limits: limits, slots: make(chan struct{}, limits.MaxConcurrent)}, nil
 }
 
+// Spec returns the model-facing dispatch contract.
 func (d *Dispatch) Spec() agent.ToolSpec {
 	return agent.ToolSpec{
 		Name:        DispatchToolName,
@@ -134,6 +141,7 @@ func (d *Dispatch) Spec() agent.ToolSpec {
 	}
 }
 
+// Effect declares bounded read/network access without approval.
 func (d *Dispatch) Effect() agent.Effect {
 	return agent.Effect{
 		Class: agent.Read | agent.Network, Approval: agent.ApprovalNever,
@@ -141,9 +149,13 @@ func (d *Dispatch) Effect() agent.Effect {
 	}
 }
 
+// Invoke runs the requested child tasks and returns an ordered JSON envelope.
 func (d *Dispatch) Invoke(ctx context.Context, raw json.RawMessage) (agent.ToolResult, error) {
 	if err := ctx.Err(); err != nil {
 		return agent.ToolResult{}, err
+	}
+	if len(raw) > maxDispatchArgsBytes {
+		return agent.ToolResult{IsError: true, Content: fmt.Sprintf("dispatch arguments must be at most %d bytes", maxDispatchArgsBytes)}, nil
 	}
 	var args dispatchArgs
 	if err := json.Unmarshal(raw, &args); err != nil {
@@ -165,20 +177,20 @@ func (d *Dispatch) Invoke(ctx context.Context, raw json.RawMessage) (agent.ToolR
 	}
 
 	envelope := dispatchEnvelope{Results: make([]dispatchResult, len(args.Tasks))}
-	sem := make(chan struct{}, d.limits.MaxConcurrent)
+	childErrors := make([]error, len(args.Tasks))
 	var wg sync.WaitGroup
 	for i, task := range args.Tasks {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			select {
-			case sem <- struct{}{}:
+			case d.slots <- struct{}{}:
 			case <-ctx.Done():
 				return
 			}
-			defer func() { <-sem }()
+			defer func() { <-d.slots }()
 			if ctx.Err() == nil {
-				envelope.Results[i] = d.runChild(ctx, task)
+				envelope.Results[i], childErrors[i] = d.runChild(ctx, task)
 			}
 		}()
 	}
@@ -186,16 +198,16 @@ func (d *Dispatch) Invoke(ctx context.Context, raw json.RawMessage) (agent.ToolR
 	if err := ctx.Err(); err != nil {
 		return agent.ToolResult{}, err
 	}
+	for i, err := range childErrors {
+		if err != nil {
+			return agent.ToolResult{}, fmt.Errorf("tools: dispatch: child %d: %w", i+1, err)
+		}
+	}
 	failed := false
 	truncated := false
 	for i := range envelope.Results {
 		result := &envelope.Results[i]
-		var cut bool
-		result.Summary, cut = truncateUTF8(result.Summary, d.limits.MaxSummaryBytes)
-		if cut {
-			result.Truncated = true
-			truncated = true
-		}
+		truncated = truncated || result.Truncated
 		if result.Error != "" {
 			failed = true
 		}
@@ -207,25 +219,72 @@ func (d *Dispatch) Invoke(ctx context.Context, raw json.RawMessage) (agent.ToolR
 	return agent.ToolResult{Content: string(content), IsError: failed, Truncated: truncated || cut}, nil
 }
 
-func (d *Dispatch) runChild(ctx context.Context, task string) dispatchResult {
+func (d *Dispatch) runChild(ctx context.Context, task string) (dispatchResult, error) {
 	caller := &modelRecordingCaller{next: d.caller}
 	result, err := agent.New(caller, d.ctxMgr).Run(ctx, agent.Request{
 		Goal: task, System: dispatchSystemPrompt, Tools: d.tools,
 		MaxSteps: d.limits.MaxSteps, Budget: d.limits.Budget,
 	}, nil)
-	out := dispatchResult{Summary: result.Answer, StopReason: result.StopReason.String(), Model: caller.model()}
+	model, modelErr := caller.model(d.limits.MaxResultBytes)
+	if modelErr != nil {
+		return dispatchResult{}, modelErr
+	}
+	out := dispatchResult{Summary: result.Answer, StopReason: result.StopReason.String(), Model: model}
 	if err != nil {
 		out.StopReason = "error"
-		out.Error = err.Error()
-		if out.Model == "" {
-			out.Error += "; child model identity unavailable"
+	}
+	if strings.TrimSpace(out.Summary) == "" {
+		out.Summary = ""
+		// ponytail: the last evidence avoids an extra model call; add bounded
+		// finalization only if partial summaries prove insufficient.
+		for i := len(result.Messages) - 1; i >= 0; i-- {
+			message := result.Messages[i]
+			if message.Role == "user" || strings.TrimSpace(message.Content) == "" {
+				continue
+			}
+			label := fmt.Sprintf("Partial result before %s: ", out.StopReason)
+			if len(label)+len(dispatchSummaryTruncated) > d.limits.MaxSummaryBytes {
+				out.Summary = dispatchSummaryTruncated
+				out.Truncated = true
+			} else {
+				var cut bool
+				evidence, cut := truncateUTF8WithMarker(strings.TrimSpace(message.Content), d.limits.MaxSummaryBytes-len(label), dispatchSummaryTruncated)
+				out.Summary = label + evidence
+				out.Truncated = out.Truncated || cut
+			}
+			break
 		}
-		return out
+		if out.Summary == "" && err == nil {
+			out.Error = fmt.Sprintf("child produced no summary before %s", out.StopReason)
+		}
 	}
-	if out.Model == "" {
-		out.Error = "child model identity unavailable"
+	if err != nil {
+		out.Error = err.Error()
+		if strings.TrimSpace(out.Error) == "" {
+			out.Error = "child failed without an error message"
+		}
+		if out.Model == "" {
+			const suffix = "; child model identity unavailable"
+			var cut bool
+			out.Error, cut = truncateUTF8WithMarker(out.Error, d.limits.MaxResultBytes-len(suffix), dispatchErrorTruncated)
+			out.Error += suffix
+			out.Truncated = out.Truncated || cut
+		}
+	} else if out.Model == "" {
+		if out.Error != "" {
+			out.Error += "; child model identity unavailable"
+		} else {
+			out.Error = "child model identity unavailable"
+		}
 	}
-	return out
+	var cut bool
+	out.Summary, cut = truncateUTF8WithMarker(out.Summary, d.limits.MaxSummaryBytes, dispatchSummaryTruncated)
+	out.Truncated = out.Truncated || cut
+	out.Error, cut = truncateUTF8WithMarker(out.Error, d.limits.MaxResultBytes, dispatchErrorTruncated)
+	out.Truncated = out.Truncated || cut
+	out.Model, cut = truncateUTF8(out.Model, d.limits.MaxResultBytes)
+	out.Truncated = out.Truncated || cut
+	return out, nil
 }
 
 type modelRecordingCaller struct {
@@ -241,11 +300,14 @@ func (c *modelRecordingCaller) Chat(ctx context.Context, req provider.ChatReques
 	return result, err
 }
 
-func (c *modelRecordingCaller) model() string {
+func (c *modelRecordingCaller) model(limit int) (string, error) {
 	if c.actual == (provider.ModelKey{}) {
-		return ""
+		return "", nil
 	}
-	return c.actual.String()
+	if len(c.actual.Provider) >= limit || len(c.actual.Model) > limit-len(c.actual.Provider)-1 {
+		return "", fmt.Errorf("model identity exceeds %d-byte cap", limit)
+	}
+	return c.actual.String(), nil
 }
 
 func marshalDispatchEnvelope(envelope *dispatchEnvelope, limit int) ([]byte, bool, error) {
@@ -263,14 +325,21 @@ func marshalDispatchEnvelope(envelope *dispatchEnvelope, limit int) ([]byte, boo
 		var owner *dispatchResult
 		for i := range envelope.Results {
 			result := &envelope.Results[i]
-			for _, field := range []*string{&result.Summary, &result.Error, &result.Model} {
-				if longest == nil || len(*field) > len(*longest) {
-					longest, owner = field, result
-				}
+			if len(result.Summary) > len(dispatchSummaryTruncated) && (longest == nil || len(result.Summary) > len(*longest)) {
+				longest, owner = &result.Summary, result
 			}
 		}
-		if longest == nil || *longest == "" {
-			return nil, truncated, fmt.Errorf("tools: dispatch: result metadata exceeds %d-byte cap", limit)
+		isError := false
+		if longest == nil {
+			for i := range envelope.Results {
+				result := &envelope.Results[i]
+				if len(result.Error) > len(dispatchErrorTruncated) && (longest == nil || len(result.Error) > len(*longest)) {
+					longest, owner, isError = &result.Error, result, true
+				}
+			}
+			if longest == nil {
+				return nil, truncated, fmt.Errorf("tools: dispatch: result metadata exceeds %d-byte cap", limit)
+			}
 		}
 		keep := len(*longest) - (len(content) - limit)
 		if keep >= len(*longest) {
@@ -279,28 +348,65 @@ func marshalDispatchEnvelope(envelope *dispatchEnvelope, limit int) ([]byte, boo
 		if keep < 0 {
 			keep = 0
 		}
-		*longest, _ = truncateUTF8(*longest, keep)
+		if isError {
+			*longest, _ = truncateUTF8WithMarker(*longest, keep, dispatchErrorTruncated)
+		} else {
+			*longest, _ = truncateUTF8WithMarker(*longest, keep, dispatchSummaryTruncated)
+		}
 		owner.Truncated = true
 		truncated = true
 	}
 }
 
 func truncateUTF8(value string, limit int) (string, bool) {
+	truncated := len(value) > limit
+	if truncated {
+		value = value[:limit]
+	}
 	valid := strings.ToValidUTF8(value, "�")
-	if len(valid) <= limit {
-		return valid, valid != value
+	changed := truncated || valid != value
+	if len(valid) > limit {
+		end := limit
+		for end > 0 && !utf8.RuneStart(valid[end]) {
+			end--
+		}
+		valid = valid[:end]
+		changed = true
 	}
-	end := limit
-	for end > 0 && !utf8.RuneStart(valid[end]) {
-		end--
+	return strings.Clone(valid), changed
+}
+
+func truncateUTF8WithMarker(value string, limit int, marker string) (string, bool) {
+	bounded, changed := truncateUTF8(value, limit)
+	if !changed {
+		return bounded, false
 	}
-	return valid[:end], true
+	prefixLimit := limit - len(marker)
+	if prefixLimit <= 0 {
+		return strings.Clone(marker), true
+	}
+	prefix, _ := truncateUTF8(value, prefixLimit)
+	return prefix + marker, true
 }
 
 func normalizeDispatchLimits(limits DispatchLimits) (DispatchLimits, error) {
-	if limits.MaxSteps < 0 || limits.MaxTasks < 0 || limits.MaxConcurrent < 0 || limits.MaxSummaryBytes < 0 || limits.MaxResultBytes < 0 || limits.Timeout < 0 ||
-		limits.Budget.InputCeiling < 0 || limits.Budget.OutputReserve < 0 || limits.Budget.TotalTokens < 0 {
-		return DispatchLimits{}, fmt.Errorf("tools: dispatch: limits must not be negative")
+	for _, field := range []struct {
+		name  string
+		value int64
+	}{
+		{"max steps", int64(limits.MaxSteps)},
+		{"input ceiling", int64(limits.Budget.InputCeiling)},
+		{"output reserve", int64(limits.Budget.OutputReserve)},
+		{"total tokens", int64(limits.Budget.TotalTokens)},
+		{"max tasks", int64(limits.MaxTasks)},
+		{"max concurrent", int64(limits.MaxConcurrent)},
+		{"max summary bytes", int64(limits.MaxSummaryBytes)},
+		{"max result bytes", int64(limits.MaxResultBytes)},
+		{"timeout", int64(limits.Timeout)},
+	} {
+		if field.value < 0 {
+			return DispatchLimits{}, fmt.Errorf("tools: dispatch: %s must not be negative, got %d", field.name, field.value)
+		}
 	}
 	if limits.MaxSteps == 0 {
 		limits.MaxSteps = defaultDispatchMaxSteps
@@ -337,6 +443,23 @@ func normalizeDispatchLimits(limits DispatchLimits) (DispatchLimits, error) {
 	}
 	if limits.Budget.OutputReserve >= limits.Budget.InputCeiling {
 		return DispatchLimits{}, fmt.Errorf("tools: dispatch: output reserve %d must be smaller than input ceiling %d", limits.Budget.OutputReserve, limits.Budget.InputCeiling)
+	}
+	if limits.MaxSummaryBytes < len(dispatchSummaryTruncated) {
+		return DispatchLimits{}, fmt.Errorf("tools: dispatch: max summary bytes %d cannot hold truncation marker (%d bytes)", limits.MaxSummaryBytes, len(dispatchSummaryTruncated))
+	}
+	minimum := dispatchEnvelope{Results: make([]dispatchResult, limits.MaxTasks)}
+	for i := range minimum.Results {
+		minimum.Results[i] = dispatchResult{
+			Summary: dispatchSummaryTruncated, StopReason: agent.ToolErrorCapReached.String(),
+			Model: "?", Error: dispatchErrorTruncated, Truncated: true,
+		}
+	}
+	encoded, err := json.Marshal(minimum)
+	if err != nil {
+		return DispatchLimits{}, fmt.Errorf("tools: dispatch: encode minimum result: %w", err)
+	}
+	if limits.MaxResultBytes < len(encoded) {
+		return DispatchLimits{}, fmt.Errorf("tools: dispatch: max result bytes %d cannot hold required metadata (%d bytes)", limits.MaxResultBytes, len(encoded))
 	}
 	return limits, nil
 }
