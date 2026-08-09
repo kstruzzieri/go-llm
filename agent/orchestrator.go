@@ -13,9 +13,10 @@ import (
 
 // Orchestrator runs the plan->act->observe loop.
 type Orchestrator struct {
-	model  ModelCaller
-	ctxMgr ContextManager
-	now    func() time.Time // wall clock for latency; time.Now unless overridden
+	model     ModelCaller
+	ctxMgr    ContextManager
+	now       func() time.Time // wall clock for latency; time.Now unless overridden
+	toolLimit ToolInvocationLimit
 }
 
 // Option configures an Orchestrator at construction. New stays source-compatible
@@ -31,6 +32,14 @@ func WithClock(now func() time.Time) Option {
 			o.now = now
 		}
 	}
+}
+
+// WithToolInvocationLimit caps actual Invoke calls for one named tool in each
+// Run. Synthetic failures do not count, and the zero value disables the cap.
+// A non-zero limit must name a tool registered in every Run's Request.Tools;
+// a Run whose tool set omits it fails fast instead of silently ignoring the cap.
+func WithToolInvocationLimit(limit ToolInvocationLimit) Option {
+	return func(o *Orchestrator) { o.toolLimit = limit }
 }
 
 // New constructs an Orchestrator from a ModelCaller and ContextManager.
@@ -96,9 +105,12 @@ func (o *Orchestrator) Run(ctx context.Context, req Request, obs Observer) (Resu
 	toolSchemaTokens := o.ctxMgr.estimate(toolSchemaString(specs))
 	budget := turnBudget(req.Budget)
 
+	gov, err := newRestraintGovernor(o.toolLimit, reg)
+	if err != nil {
+		return Result{}, err
+	}
 	state := initState(req)
 	historyLen := len(req.History)
-	gov := &restraintGovernor{} // per-Run loop state; never shared across Run calls
 	var res Result
 
 	for step := 0; step < maxSteps; step++ {
@@ -151,6 +163,15 @@ func (o *Orchestrator) Run(ctx context.Context, req Request, obs Observer) (Resu
 		})
 		modelLatency := o.now().Sub(modelStart)
 		if err != nil {
+			// A failed stream may still return collected text. Preserve only that
+			// text; any tool-call fragments may be incomplete.
+			if strings.TrimSpace(modelResult.Response.Content) != "" {
+				state.Messages = append(state.Messages, Message{
+					ChatMessage: provider.ChatMessage{Role: "assistant", Content: modelResult.Response.Content},
+					Segment:     Elastic,
+				})
+			}
+			res.Messages = resultMessages(state, historyLen)
 			return res, err
 		}
 		resp := modelResult.Response
@@ -247,6 +268,45 @@ type restraintGovernor struct {
 	lastSig           uint64
 	hasSig            bool
 	repeatCount       int
+	invocationLimit   ToolInvocationLimit
+	invocations       int
+}
+
+func newRestraintGovernor(limit ToolInvocationLimit, reg *toolRegistry) (*restraintGovernor, error) {
+	g := &restraintGovernor{invocationLimit: limit}
+	if limit == (ToolInvocationLimit{}) {
+		return g, nil
+	}
+	if limit.Tool == "" {
+		return nil, fmt.Errorf("agent: tool invocation budget has an empty tool name")
+	}
+	if limit.Max <= 0 {
+		return nil, fmt.Errorf("agent: tool invocation budget %q must be positive, got %d", limit.Tool, limit.Max)
+	}
+	if _, ok := reg.lookup(limit.Tool); !ok {
+		return nil, fmt.Errorf("agent: tool invocation budget names unregistered tool %q", limit.Tool)
+	}
+	return g, nil
+}
+
+func (g *restraintGovernor) reserveInvocation(name string) (int, bool) {
+	if name != g.invocationLimit.Tool {
+		return 0, true
+	}
+	if g.invocations >= g.invocationLimit.Max {
+		return g.invocationLimit.Max, false
+	}
+	g.invocations++
+	return g.invocationLimit.Max, true
+}
+
+func (g *restraintGovernor) parallelUncapped(calls []provider.ToolCall) bool {
+	for _, call := range calls {
+		if call.Function.Name == g.invocationLimit.Tool {
+			return false
+		}
+	}
+	return true
 }
 
 // toolCallSignature hashes the call identity together with its result so that a

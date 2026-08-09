@@ -66,6 +66,14 @@ type Budget struct {
 	Pressure PressureThresholds
 }
 
+// ToolInvocationLimit is a zero-value-disabled per-Run tool cap.
+// ponytail: one named limit covers dispatch; use a collection only when another
+// tool needs an independent per-Run cap.
+type ToolInvocationLimit struct {
+	Tool string
+	Max  int
+}
+
 // Request is the unit of work handed to Run.
 type Request struct {
 	Goal           string

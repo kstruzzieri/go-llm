@@ -68,7 +68,7 @@ func (o *Orchestrator) runToolCallsParallel(ctx context.Context, res *Result, st
 	prepared := make([]preparedCall, len(calls))
 	for i, call := range calls {
 		res.Events = append(res.Events, EventRecord{Step: step, Kind: "tool_call"})
-		p, err := o.prepareCall(ctx, reg, call, approver, obs, step)
+		p, err := o.prepareCall(ctx, reg, call, approver, obs, step, gov)
 		if err != nil {
 			return err // hard abort: no invokes launched, nothing to cancel
 		}
