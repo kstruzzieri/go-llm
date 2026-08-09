@@ -70,6 +70,15 @@ func (lr *lineReader) ReadLine(ctx context.Context) (string, bool, error) {
 	if lr.done {
 		return "", false, lr.err
 	}
+	// Checked before a scan is started, not only in the select below. With both
+	// cases ready the select picks at random, so an already-cancelled caller
+	// could still open a read on the terminal and consume a line -- and worse,
+	// leave that scan parked in read(2) with nobody waiting on it, which is the
+	// state demand-driven scanning exists to prevent. An in-flight scan from an
+	// earlier cancelled read keeps its buffered result for the next caller.
+	if err := ctx.Err(); err != nil {
+		return "", false, err
+	}
 	if lr.inFlight == nil {
 		ch := make(chan scanResult, 1)
 		lr.inFlight = ch

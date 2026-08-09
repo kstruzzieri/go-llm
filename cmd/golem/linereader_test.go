@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"io"
 	"strings"
 	"sync"
@@ -106,6 +107,26 @@ func TestLineReaderDoesNotScanBetweenReads(t *testing.T) {
 	if peak := g.concurrentPeak(); peak != 1 {
 		t.Fatalf("peak concurrent Read entries = %d, want 1", peak)
 	}
+}
+
+func TestLineReaderStartsNoScanOnADeadContext(t *testing.T) {
+	// A session already shutting down must not open a read on the terminal. The
+	// select alone does not guarantee it: with both cases ready Go picks at
+	// random, so a cancelled caller could still consume a line and, worse,
+	// leave the scan parked in read(2) with nobody waiting -- the exact state
+	// demand-driven scanning exists to prevent.
+	g := newGatedReader()
+	lr := newLineReader(g)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	for range 5 { // repeated: a one-shot pass could be the lucky select branch
+		line, ok, err := lr.ReadLine(ctx)
+		if !errors.Is(err, context.Canceled) || ok || line != "" {
+			t.Fatalf("ReadLine = %q ok=%v err=%v, want the context error", line, ok, err)
+		}
+	}
+	requireNoScanInFlight(t, g)
 }
 
 func TestLineReaderKeepsACancelledLinePending(t *testing.T) {
