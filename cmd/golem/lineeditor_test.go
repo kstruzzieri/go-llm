@@ -36,6 +36,7 @@ type fakeTermOps struct {
 	// snapshotOut is read at Restore so a test can prove ordering against the
 	// bytes already written to the terminal.
 	snapshotOut func() string
+	onRestore   func()
 
 	isTerminalFDs []int
 	makeRawFDs    []int
@@ -75,6 +76,9 @@ func (f *fakeTermOps) Restore(fd int, st *term.State) error {
 	defer f.mu.Unlock()
 	f.restoreFDs = append(f.restoreFDs, fd)
 	f.restoredWith = append(f.restoredWith, st)
+	if f.onRestore != nil {
+		f.onRestore()
+	}
 	if f.snapshotOut != nil {
 		f.restoreSnaps = append(f.restoreSnaps, f.snapshotOut())
 	}
@@ -960,6 +964,34 @@ func TestTerminalBindingSerializesReplacement(t *testing.T) {
 	}
 }
 
+func TestTerminalBindingSizeQueriesHoldBinding(t *testing.T) {
+	var out strings.Builder
+	b := &terminalBinding{}
+	var got []string
+
+	size := func(name string, width int) func() (int, int, bool) {
+		return func() (int, int, bool) {
+			state := name + ":locked"
+			if b.mu.TryLock() {
+				b.mu.Unlock()
+				state = name + ":unlocked"
+			}
+			got = append(got, state)
+			return width, 24, true
+		}
+	}
+
+	b.installTerminal(
+		term.NewTerminal(termIO{r: strings.NewReader(""), w: &out}, "> "),
+		size("install", 80),
+	)
+	b.resize(size("resize", 100))
+
+	if got := strings.Join(got, ","); got != "install:locked,resize:locked" {
+		t.Fatalf("size query lock states = %q, want both locked", got)
+	}
+}
+
 func TestEditorSourceIdleDisplayDuringInFlightRead(t *testing.T) {
 	// The sole reader snapshots the Terminal under the binding mutex and then
 	// releases it before blocking in ReadLine. Holding it across the read would
@@ -1243,6 +1275,26 @@ func TestEditorSourceUnbindsTheTerminalWithItsRawWindow(t *testing.T) {
 	f.src.IdleDisplay("mid-turn note")
 	if got, want := f.out.String(), "mid-turn note\n"; got != want {
 		t.Fatalf("IdleDisplay after the window closed wrote %q, want %q", got, want)
+	}
+}
+
+func TestEditorSourceSerializesTerminalRetirementWithRestore(t *testing.T) {
+	ops := &fakeTermOps{}
+	f := newEditorFixture(t, editorOpts{in: strings.NewReader("hello\r"), ops: ops})
+
+	var restoreRanOutsideBinding bool
+	ops.onRestore = func() {
+		if f.src.binding.mu.TryLock() {
+			restoreRanOutsideBinding = true
+			f.src.binding.mu.Unlock()
+		}
+	}
+
+	if _, _, err := f.readGoal(t); err != nil {
+		t.Fatalf("ReadGoal: %v", err)
+	}
+	if restoreRanOutsideBinding {
+		t.Fatal("Restore ran without the binding lock; a notice or resize could reach the retired Terminal")
 	}
 }
 

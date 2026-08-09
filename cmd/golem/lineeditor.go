@@ -87,13 +87,17 @@ func (b *terminalBinding) snapshot() *term.Terminal {
 	return b.tm
 }
 
-// unbind drops the current Terminal when its raw window closes. Anything that
-// would have written through it -- an idle notice, a resize -- must fall back
-// to the plain writer rather than repaint a cooked terminal.
-func (b *terminalBinding) unbind() {
+// retire closes one raw window atomically with respect to notices and resize.
+// Nothing can reach the old Terminal after Restore makes the descriptor
+// cooked, and anything waiting on the lock observes tm=nil afterward.
+func (b *terminalBinding) retire(restore func() error) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	b.tm = nil
+	defer func() { b.tm = nil }()
+	if b.tm != nil {
+		b.tm.SetBracketedPasteMode(false)
+	}
+	return restore()
 }
 
 func (b *terminalBinding) fallenSource() lineSource {
@@ -132,14 +136,6 @@ func (b *terminalBinding) setPrompt(prompt string) {
 	defer b.mu.Unlock()
 	if b.tm != nil {
 		b.tm.SetPrompt(prompt)
-	}
-}
-
-func (b *terminalBinding) setPaste(on bool) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	if b.tm != nil {
-		b.tm.SetBracketedPasteMode(on)
 	}
 }
 
@@ -377,17 +373,13 @@ func (e *editorSource) read(ctx context.Context, prompt string, hist term.Histor
 	}
 	restoreState := e.rawState
 	defer func() {
-		// One defer, exact reverse order. term.Restore resets termios but does
-		// not emit ESC[?2004l, so disabling paste after it would leak markers
-		// into the cooked-mode input queue and into the user's shell after exit.
-		e.binding.setPaste(false)
-		// Unbound last, and on every exit path including the error ones. A
-		// Terminal outlives its raw window otherwise, and the SIGWINCH watcher
-		// would then repaint a prompt onto a cooked terminal mid-turn. With
-		// nothing bound, an idle notice falls back to a plain line, which is the
-		// correct rendering while the terminal is cooked anyway.
-		defer e.binding.unbind()
-		if rerr := e.ops.Restore(e.stdinFD, restoreState); rerr != nil {
+		// term.Restore does not emit ESC[?2004l, so retire disables paste first,
+		// restores termios, and unbinds before releasing the display lock. A
+		// notice or resize can therefore reach neither a half-retired Terminal
+		// nor a cooked descriptor through Terminal.Write.
+		if rerr := e.binding.retire(func() error {
+			return e.ops.Restore(e.stdinFD, restoreState)
+		}); rerr != nil {
 			// Refuse to let a turn render on a terminal still in raw mode, where
 			// every unsynchronized renderer newline staircases. rawState is kept
 			// so Close can retry the restore exactly once.

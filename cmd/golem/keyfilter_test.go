@@ -959,6 +959,7 @@ func TestKeyFilterRejectionDrainSpansReads(t *testing.T) {
 		{"boundary two chunks later", []string{"bad\xb2", "more", "tail\nclean\n"}, "clean\n"},
 		{"crlf split across chunks", []string{"bad\xb2tail\r", "\nclean\n"}, "clean\n"},
 		{"lone cr boundary", []string{"bad\xb2tail\r", "clean\n"}, "clean\n"},
+		{"stray paste end stays inside typed line", []string{"bad\xb2" + pasteOff + "tail\nclean\n"}, "clean\n"},
 		{"paste end in a later chunk", []string{pasteOn + "bad\xb2", "tail" + pasteOff, "clean\n"}, "clean\n"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

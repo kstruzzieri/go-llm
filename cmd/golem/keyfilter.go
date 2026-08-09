@@ -414,11 +414,9 @@ func (f *keyFilter) drainStep() bool {
 			continue
 		}
 		if f.work[i] == byteEsc {
-			// Paste markers are boundaries the drain must honor even outside a
-			// paste. Walking them byte by byte instead lets a newline in pasted
-			// CONTENT end the drain, after which the rest of the paste is
-			// forwarded as ordinary typed input -- its lines become separate
-			// goals, each mis-flagged as typed.
+			// A paste start changes which boundary ends the drain. A stray end
+			// marker does not: x/term treats it as an unknown escape outside a
+			// paste, so the rejected typed line still runs through its newline.
 			n, st := matchPasteMarker(f.work[i:])
 			switch st {
 			case markerStart:
@@ -426,11 +424,8 @@ func (f *keyFilter) drainStep() bool {
 				i += n
 				continue
 			case markerEnd:
-				// A stray end marker with no open paste still closes whatever
-				// paste context the caller was in.
 				i += n
-				f.work = f.work[:copy(f.work, f.work[i:])]
-				return true
+				continue
 			case markerIncomplete:
 				f.work = f.work[:copy(f.work, f.work[i:])]
 				return false
