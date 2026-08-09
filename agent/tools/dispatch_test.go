@@ -809,6 +809,147 @@ type gatedDispatchCaller struct {
 	max     atomic.Int32
 }
 
+func TestDispatchDeadlineSalvagesCompletedChildEvidence(t *testing.T) {
+	caller := &gatedDispatchCaller{
+		started: make(chan string, 2),
+		gates: map[string]chan struct{}{
+			"one": make(chan struct{}),
+			"two": make(chan struct{}),
+		},
+	}
+	read := agent.Effect{Class: agent.Read, Approval: agent.ApprovalNever}
+	available := []agent.Tool{
+		dispatchNamedTool{name: "read_file", effect: read},
+		dispatchNamedTool{name: "search", effect: read},
+		dispatchNamedTool{name: "glob", effect: read},
+		dispatchNamedTool{name: "list", effect: read},
+	}
+	tool, err := NewDispatch(caller, agent.ContextManager{}, available, DispatchLimits{MaxTasks: 2, MaxConcurrent: 2})
+	if err != nil {
+		t.Fatalf("NewDispatch: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	type invokeResult struct {
+		out agent.ToolResult
+		err error
+	}
+	done := make(chan invokeResult, 1)
+	go func() {
+		out, err := tool.Invoke(ctx, json.RawMessage(`{"tasks":["one","two"]}`))
+		done <- invokeResult{out: out, err: err}
+	}()
+	for range 2 {
+		select {
+		case <-caller.started:
+		case <-time.After(2 * time.Second):
+			t.Fatal("children did not start")
+		}
+	}
+	close(caller.gates["one"]) // "one" completes; "two" blocks until the deadline
+
+	var got invokeResult
+	select {
+	case got = <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("dispatch did not return after its deadline")
+	}
+	if got.err != nil {
+		t.Fatalf("Invoke error = %v, want salvaged envelope", got.err)
+	}
+	if !got.out.IsError {
+		t.Fatalf("ToolResult.IsError = false: %s", got.out.Content)
+	}
+	var envelope dispatchEnvelope
+	if err := json.Unmarshal([]byte(got.out.Content), &envelope); err != nil {
+		t.Fatalf("decode result: %v", err)
+	}
+	first := envelope.Results[0]
+	if first.Summary != "summary: one" || first.StopReason != agent.Completed.String() || first.Model != "local/fast" || first.Error != "" {
+		t.Fatalf("completed child result = %+v", first)
+	}
+	second := envelope.Results[1]
+	if second.StopReason != "error" || !strings.Contains(second.Error, "context deadline exceeded") || !strings.Contains(second.Error, "child model identity unavailable") {
+		t.Fatalf("timed-out child result = %+v", second)
+	}
+}
+
+func TestDispatchDeadlineReportsQueuedChildNotStarted(t *testing.T) {
+	caller := &gatedDispatchCaller{
+		started: make(chan string, 2),
+		gates: map[string]chan struct{}{
+			"one": make(chan struct{}),
+			"two": make(chan struct{}),
+		},
+	}
+	read := agent.Effect{Class: agent.Read, Approval: agent.ApprovalNever}
+	available := []agent.Tool{
+		dispatchNamedTool{name: "read_file", effect: read},
+		dispatchNamedTool{name: "search", effect: read},
+		dispatchNamedTool{name: "glob", effect: read},
+		dispatchNamedTool{name: "list", effect: read},
+	}
+	tool, err := NewDispatch(caller, agent.ContextManager{}, available, DispatchLimits{MaxTasks: 2, MaxConcurrent: 1})
+	if err != nil {
+		t.Fatalf("NewDispatch: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+	out, err := tool.Invoke(ctx, json.RawMessage(`{"tasks":["one","two"]}`))
+	if err != nil {
+		t.Fatalf("Invoke error = %v, want salvaged envelope", err)
+	}
+	if !out.IsError {
+		t.Fatalf("ToolResult.IsError = false: %s", out.Content)
+	}
+	var envelope dispatchEnvelope
+	if err := json.Unmarshal([]byte(out.Content), &envelope); err != nil {
+		t.Fatalf("decode result: %v", err)
+	}
+	// MaxConcurrent 1: either child may win the single slot, so assert set-wise.
+	var timedOut, notStarted int
+	for _, result := range envelope.Results {
+		switch {
+		case strings.Contains(result.Error, "child not started before dispatch timeout"):
+			notStarted++
+		case strings.Contains(result.Error, "context deadline exceeded"):
+			timedOut++
+		default:
+			t.Fatalf("unexpected result = %+v", result)
+		}
+		if result.StopReason != "error" {
+			t.Fatalf("stop reason = %q, want error", result.StopReason)
+		}
+	}
+	if timedOut != 1 || notStarted != 1 {
+		t.Fatalf("timedOut = %d, notStarted = %d, want 1 and 1\n%s", timedOut, notStarted, out.Content)
+	}
+}
+
+func TestMarshalDispatchEnvelopeShrinksLongestFieldAcrossSummariesAndErrors(t *testing.T) {
+	envelope := &dispatchEnvelope{Results: []dispatchResult{
+		{Summary: "short but useful summary", StopReason: "completed", Model: "local/fast"},
+		{StopReason: "error", Model: "local/fast", Error: strings.Repeat("e", 2000)},
+	}}
+	content, truncated, err := marshalDispatchEnvelope(envelope, 512)
+	if err != nil {
+		t.Fatalf("marshalDispatchEnvelope: %v", err)
+	}
+	if !truncated || len(content) > 512 {
+		t.Fatalf("truncated = %v, bytes = %d, want truncated within 512", truncated, len(content))
+	}
+	var got dispatchEnvelope
+	if err := json.Unmarshal(content, &got); err != nil {
+		t.Fatalf("decode result: %v", err)
+	}
+	if got.Results[0].Summary != "short but useful summary" || got.Results[0].Truncated {
+		t.Fatalf("healthy summary was sacrificed to a bloated error: %+v", got.Results[0])
+	}
+	if !strings.HasSuffix(got.Results[1].Error, dispatchErrorTruncated) || !got.Results[1].Truncated {
+		t.Fatalf("bloated error was not truncated: %+v", got.Results[1])
+	}
+}
+
 func TestDispatchSharesConcurrencyLimitAcrossInvocations(t *testing.T) {
 	caller := &gatedDispatchCaller{
 		started: make(chan string, 2),
@@ -844,22 +985,26 @@ func TestDispatchSharesConcurrencyLimitAcrossInvocations(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
-	secondDone := make(chan error, 1)
+	type invokeResult struct {
+		out agent.ToolResult
+		err error
+	}
+	secondDone := make(chan invokeResult, 1)
 	go func() {
-		_, err := tool.Invoke(ctx, json.RawMessage(`{"tasks":["two"]}`))
-		secondDone <- err
+		out, err := tool.Invoke(ctx, json.RawMessage(`{"tasks":["two"]}`))
+		secondDone <- invokeResult{out: out, err: err}
 	}()
 	select {
 	case task := <-caller.started:
 		close(caller.gates["one"])
 		<-firstDone
 		t.Fatalf("child %q bypassed shared concurrency limit", task)
-	case err := <-secondDone:
-		if !errors.Is(err, context.DeadlineExceeded) {
-			t.Fatalf("second Invoke error = %v, want deadline exceeded", err)
+	case got := <-secondDone:
+		if got.err != nil || !got.out.IsError || !strings.Contains(got.out.Content, "child not started before dispatch timeout") {
+			t.Fatalf("second Invoke = %+v, %v, want salvaged not-started envelope", got.out, got.err)
 		}
 	case <-time.After(2 * time.Second):
-		t.Fatal("second Invoke did not honor cancellation while queued")
+		t.Fatal("second Invoke did not honor its deadline while queued")
 	}
 	close(caller.gates["one"])
 	if err := <-firstDone; err != nil {

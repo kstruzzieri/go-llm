@@ -36,6 +36,8 @@ func WithClock(now func() time.Time) Option {
 
 // WithToolInvocationLimit caps actual Invoke calls for one named tool in each
 // Run. Synthetic failures do not count, and the zero value disables the cap.
+// A non-zero limit must name a tool registered in every Run's Request.Tools;
+// a Run whose tool set omits it fails fast instead of silently ignoring the cap.
 func WithToolInvocationLimit(limit ToolInvocationLimit) Option {
 	return func(o *Orchestrator) { o.toolLimit = limit }
 }

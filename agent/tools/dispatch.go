@@ -3,6 +3,7 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -40,8 +41,9 @@ type DispatchLimits struct {
 	MaxSteps int
 	Budget   agent.Budget
 	MaxTasks int
-	// MaxConcurrent values above one require a ModelCaller and child tools that
-	// support concurrent use.
+	// MaxConcurrent values above one require a ModelCaller, child tools, and a
+	// ContextManager (including any custom Compactor or Estimate) that support
+	// concurrent use.
 	MaxConcurrent   int
 	MaxSummaryBytes int
 	MaxResultBytes  int
@@ -113,10 +115,10 @@ func NewDispatch(caller agent.ModelCaller, ctxMgr agent.ContextManager, availabl
 		found[name] = tool
 	}
 	tools := make([]agent.Tool, 0, len(order))
-	for i, name := range order {
+	for _, name := range order {
 		tool, ok := found[name]
 		if !ok {
-			if i < 4 {
+			if name != "retrieve" { // retrieve is the only optional child tool
 				return nil, fmt.Errorf("tools: dispatch: required child tool %q is missing", name)
 			}
 			continue
@@ -178,6 +180,7 @@ func (d *Dispatch) Invoke(ctx context.Context, raw json.RawMessage) (agent.ToolR
 
 	envelope := dispatchEnvelope{Results: make([]dispatchResult, len(args.Tasks))}
 	childErrors := make([]error, len(args.Tasks))
+	started := make([]bool, len(args.Tasks))
 	var wg sync.WaitGroup
 	for i, task := range args.Tasks {
 		wg.Add(1)
@@ -190,17 +193,31 @@ func (d *Dispatch) Invoke(ctx context.Context, raw json.RawMessage) (agent.ToolR
 			}
 			defer func() { <-d.slots }()
 			if ctx.Err() == nil {
+				started[i] = true
 				envelope.Results[i], childErrors[i] = d.runChild(ctx, task)
 			}
 		}()
 	}
 	wg.Wait()
-	if err := ctx.Err(); err != nil {
+	// Cancellation is a hard abort: the parent is gone and nothing consumes the
+	// envelope. A deadline is this tool's own per-invocation timeout, so already
+	// computed child evidence is returned instead of being discarded; a deadline
+	// on the PARENT context still hard-aborts one frame up, at the orchestrator's
+	// parent-ctx check after Invoke.
+	if err := ctx.Err(); err != nil && !errors.Is(err, context.DeadlineExceeded) {
 		return agent.ToolResult{}, err
 	}
 	for i, err := range childErrors {
 		if err != nil {
 			return agent.ToolResult{}, fmt.Errorf("tools: dispatch: child %d: %w", i+1, err)
+		}
+	}
+	for i := range envelope.Results {
+		if !started[i] {
+			envelope.Results[i] = dispatchResult{
+				StopReason: "error",
+				Error:      "child not started before dispatch timeout; child model identity unavailable",
+			}
 		}
 	}
 	failed := false
@@ -247,7 +264,6 @@ func (d *Dispatch) runChild(ctx context.Context, task string) (dispatchResult, e
 				out.Summary = dispatchSummaryTruncated
 				out.Truncated = true
 			} else {
-				var cut bool
 				evidence, cut := truncateUTF8WithMarker(strings.TrimSpace(message.Content), d.limits.MaxSummaryBytes-len(label), dispatchSummaryTruncated)
 				out.Summary = label + evidence
 				out.Truncated = out.Truncated || cut
@@ -321,25 +337,22 @@ func marshalDispatchEnvelope(envelope *dispatchEnvelope, limit int) ([]byte, boo
 			return content, truncated, nil
 		}
 
+		// Shrink the globally longest shrinkable field, summary or error alike,
+		// so one bloated error cannot starve every healthy summary of space.
 		var longest *string
 		var owner *dispatchResult
+		isError := false
 		for i := range envelope.Results {
 			result := &envelope.Results[i]
 			if len(result.Summary) > len(dispatchSummaryTruncated) && (longest == nil || len(result.Summary) > len(*longest)) {
-				longest, owner = &result.Summary, result
+				longest, owner, isError = &result.Summary, result, false
+			}
+			if len(result.Error) > len(dispatchErrorTruncated) && (longest == nil || len(result.Error) > len(*longest)) {
+				longest, owner, isError = &result.Error, result, true
 			}
 		}
-		isError := false
 		if longest == nil {
-			for i := range envelope.Results {
-				result := &envelope.Results[i]
-				if len(result.Error) > len(dispatchErrorTruncated) && (longest == nil || len(result.Error) > len(*longest)) {
-					longest, owner, isError = &result.Error, result, true
-				}
-			}
-			if longest == nil {
-				return nil, truncated, fmt.Errorf("tools: dispatch: result metadata exceeds %d-byte cap", limit)
-			}
+			return nil, truncated, fmt.Errorf("tools: dispatch: result metadata exceeds %d-byte cap", limit)
 		}
 		keep := len(*longest) - (len(content) - limit)
 		if keep >= len(*longest) {
