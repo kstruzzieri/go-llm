@@ -14,13 +14,12 @@ import (
 // prints one-line tool-call and tool-result notices, a dim per-step footer, and
 // (via finalFooter) a dim summary after Run.
 type renderer struct {
-	out          io.Writer
+	markdown     *markdownWriter
 	color        bool
 	maxSteps     int
 	now          func() time.Time
 	lastMark     time.Time
 	runStart     time.Time
-	lastNL       bool
 	warnPressure bool // print a one-line context-pressure warning
 	warned       bool // ensures at most one pressure line per run
 	thinkOpen    bool // "[thinking]" header printed for the current step
@@ -37,23 +36,17 @@ func newRenderer(out io.Writer, color bool, maxSteps int, now func() time.Time, 
 		now = time.Now
 	}
 	start := now()
-	return &renderer{out: out, color: color, maxSteps: maxSteps, now: now, lastMark: start, runStart: start, lastNL: true, mixed: mixed}
+	return &renderer{markdown: newMarkdownWriter(out, color), color: color, maxSteps: maxSteps, now: now, lastMark: start, runStart: start, mixed: mixed}
 }
 
 func (r *renderer) OnToken(_ context.Context, e agent.TokenEvent) error {
 	if r.thinkOpen {
 		r.thinkOpen = false
-		if !r.lastNL {
-			if _, err := io.WriteString(r.out, "\n"); err != nil {
-				return err
-			}
-			r.lastNL = true
+		if err := r.markdown.BreakLine(); err != nil {
+			return err
 		}
 	}
-	_, err := io.WriteString(r.out, e.Content)
-	if err == nil && e.Content != "" {
-		r.lastNL = strings.HasSuffix(e.Content, "\n")
-	}
+	_, err := io.WriteString(r.markdown, e.Content)
 	return err
 }
 
@@ -61,17 +54,9 @@ func (r *renderer) OnToolCall(_ context.Context, e agent.ToolCallEvent) error {
 	// Some tools take no arguments; omit the trailing space when args are empty
 	// so the line reads "> name" rather than "> name ".
 	if args := string(e.Call.Function.Arguments); args != "" {
-		_, err := fmt.Fprintf(r.out, "\n> %s %s\n", e.Call.Function.Name, args)
-		if err == nil {
-			r.lastNL = true
-		}
-		return err
+		return r.writeRaw(fmt.Sprintf("\n> %s %s\n", e.Call.Function.Name, args))
 	}
-	_, err := fmt.Fprintf(r.out, "\n> %s\n", e.Call.Function.Name)
-	if err == nil {
-		r.lastNL = true
-	}
-	return err
+	return r.writeRaw(fmt.Sprintf("\n> %s\n", e.Call.Function.Name))
 }
 
 // OnThinking streams reasoning deltas dim, under a one-per-step "[thinking]"
@@ -79,22 +64,15 @@ func (r *renderer) OnToolCall(_ context.Context, e agent.ToolCallEvent) error {
 // text so non-TTY logs stay parseable.
 func (r *renderer) OnThinking(_ context.Context, e agent.ThinkingEvent) error {
 	if !r.thinkOpen {
-		if !r.lastNL {
-			if _, err := io.WriteString(r.out, "\n"); err != nil {
-				return err
-			}
+		if err := r.markdown.BreakLine(); err != nil {
+			return err
 		}
-		if _, err := io.WriteString(r.out, r.dim("[thinking]")+"\n"); err != nil {
+		if err := r.writeRaw(r.dim("[thinking]") + "\n"); err != nil {
 			return err
 		}
 		r.thinkOpen = true
-		r.lastNL = true
 	}
-	_, err := io.WriteString(r.out, r.dim(e.Content))
-	if err == nil && e.Content != "" {
-		r.lastNL = strings.HasSuffix(e.Content, "\n")
-	}
-	return err
+	return r.writeDimContent(e.Content)
 }
 
 func (r *renderer) OnStep(_ context.Context, e agent.StepEvent) error {
@@ -112,6 +90,7 @@ func (r *renderer) OnStep(_ context.Context, e agent.StepEvent) error {
 }
 
 func (r *renderer) finalFooter(res agent.Result) {
+	_ = r.markdown.Finish()
 	total := r.now().Sub(r.runStart).Seconds()
 	line := fmt.Sprintf("done · %s · %.1fs · %d tok",
 		plural(len(res.Steps), "step", "steps"), total, res.Usage.TotalTokens)
@@ -124,16 +103,32 @@ func (r *renderer) finalFooter(res agent.Result) {
 }
 
 func (r *renderer) writeDim(line string) error {
-	if !r.lastNL {
-		if _, err := io.WriteString(r.out, "\n"); err != nil {
-			return err
-		}
+	if err := r.markdown.BreakLine(); err != nil {
+		return err
 	}
-	_, err := io.WriteString(r.out, r.dim(line)+"\n")
-	if err == nil {
-		r.lastNL = true
-	}
+	return r.writeRaw(r.dim(line) + "\n")
+}
+
+func (r *renderer) writeRaw(s string) error {
+	_, err := r.markdown.WriteRaw([]byte(s))
 	return err
+}
+
+func (r *renderer) writeDimContent(s string) error {
+	if !r.color {
+		return r.writeRaw(s)
+	}
+	_, err := r.markdown.WriteStyled("\x1b[2m", []byte(s))
+	return err
+}
+
+func (r *renderer) breakLine() error { return r.markdown.BreakLine() }
+
+func (r *renderer) rawWriter() io.Writer { return markdownRawWriter{markdown: r.markdown} }
+
+func (r *renderer) finish() error {
+	r.thinkOpen = false
+	return r.markdown.Finish()
 }
 
 // dim wraps s in the SGR faint sequence when color is on; otherwise s as-is.
@@ -149,16 +144,10 @@ func (r *renderer) dim(s string) string {
 // tool, malformed args, plan failure, denied) may appear result-only with no preceding call.
 // The summary is never persisted and never fed back to the model.
 func (r *renderer) OnToolResult(_ context.Context, e agent.ToolResultEvent) error {
-	if !r.lastNL {
-		if _, err := io.WriteString(r.out, "\n"); err != nil {
-			return err
-		}
+	if err := r.markdown.BreakLine(); err != nil {
+		return err
 	}
-	_, err := io.WriteString(r.out, "< "+r.resultSummary(e)+"\n")
-	if err == nil {
-		r.lastNL = true
-	}
-	return err
+	return r.writeRaw("< " + r.resultSummary(e) + "\n")
 }
 
 // OnPressure prints a single dim context-pressure warning per run when warnings

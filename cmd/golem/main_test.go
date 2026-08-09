@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"syscall"
 	"testing"
@@ -24,6 +25,82 @@ func TestParseFlagsAllowWrite(t *testing.T) {
 	if f2.allowWrite {
 		t.Fatal("allowWrite must default to false")
 	}
+}
+
+func TestColorEnabledHonorsTerminalAndEnvironment(t *testing.T) {
+	t.Setenv("NO_COLOR", "")
+	t.Setenv("TERM", "xterm-256color")
+	null, err := os.Open(os.DevNull)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = null.Close() }()
+	if colorEnabled(null, false) {
+		t.Fatal("character device without a terminal must disable ANSI")
+	}
+
+	if runtime.GOOS != "windows" {
+		t.Run("pty", func(t *testing.T) {
+			terminal := openTestTerminal(t)
+
+			if !colorEnabled(terminal, false) {
+				t.Fatal("PTY should enable ANSI by default")
+			}
+			if colorEnabled(terminal, true) {
+				t.Fatal("-no-color must disable ANSI")
+			}
+			t.Setenv("NO_COLOR", "1")
+			if colorEnabled(terminal, false) {
+				t.Fatal("NO_COLOR must disable ANSI")
+			}
+			t.Setenv("NO_COLOR", "")
+			t.Setenv("TERM", "dumb")
+			if colorEnabled(terminal, false) {
+				t.Fatal("TERM=dumb must disable ANSI")
+			}
+		})
+	}
+
+	regular, err := os.CreateTemp(t.TempDir(), "stdout")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = regular.Close() }()
+	t.Setenv("TERM", "xterm-256color")
+	if colorEnabled(regular, false) {
+		t.Fatal("non-terminal output must disable ANSI")
+	}
+}
+
+func openTestTerminal(t *testing.T) *os.File {
+	t.Helper()
+	if runtime.GOOS == "darwin" {
+		for _, group := range "pqrstuvw" {
+			for _, digit := range "0123456789abcdef" {
+				suffix := fmt.Sprintf("%c%c", group, digit)
+				master, err := os.OpenFile("/dev/pty"+suffix, os.O_RDWR, 0)
+				if err != nil {
+					continue
+				}
+				slave, err := os.OpenFile("/dev/tty"+suffix, os.O_RDWR, 0)
+				if err != nil {
+					_ = master.Close()
+					continue
+				}
+				t.Cleanup(func() {
+					_ = slave.Close()
+					_ = master.Close()
+				})
+				return slave
+			}
+		}
+	}
+	terminal, err := os.OpenFile("/dev/tty", os.O_RDWR, 0)
+	if err != nil {
+		t.Skipf("open terminal: %v", err)
+	}
+	t.Cleanup(func() { _ = terminal.Close() })
+	return terminal
 }
 
 func TestStartupNotices(t *testing.T) {

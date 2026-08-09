@@ -17,6 +17,39 @@ import (
 	"github.com/kstruzzieri/go-llm/provider"
 )
 
+type tokenThenErrorCaller struct{}
+
+func (tokenThenErrorCaller) Chat(_ context.Context, _ provider.ChatRequest, onToken func(provider.ChatResponse) error) (agent.ModelResult, error) {
+	if err := onToken(provider.ChatResponse{Content: "```go\npart"}); err != nil {
+		return agent.ModelResult{}, err
+	}
+	return agent.ModelResult{}, errors.New("provider boom")
+}
+
+type interleavedCancelCaller struct {
+	calls    int
+	streamed chan struct{}
+	toolCall provider.ToolCall
+}
+
+func (c *interleavedCancelCaller) Chat(ctx context.Context, _ provider.ChatRequest, onToken func(provider.ChatResponse) error) (agent.ModelResult, error) {
+	c.calls++
+	if c.calls == 1 {
+		resp := provider.ChatResponse{Content: "```go\npart", ToolCalls: []provider.ToolCall{c.toolCall}}
+		if err := onToken(resp); err != nil {
+			return agent.ModelResult{}, err
+		}
+		return agent.ModelResult{Response: resp}, nil
+	}
+	resp := provider.ChatResponse{Content: "continued"}
+	if err := onToken(resp); err != nil {
+		return agent.ModelResult{}, err
+	}
+	close(c.streamed)
+	<-ctx.Done()
+	return agent.ModelResult{}, ctx.Err()
+}
+
 // scriptCaller returns queued responses in order; each Chat call pops one.
 type scriptCaller struct {
 	responses []agent.ModelResult
@@ -96,6 +129,25 @@ func TestRunOnceDelegatesThroughConsumerRuntime(t *testing.T) {
 	}
 	if result.Answer != "runtime answer" {
 		t.Fatalf("answer = %q, want runtime answer", result.Answer)
+	}
+}
+
+func TestRunOnceFlushesMarkdownBeforeProviderError(t *testing.T) {
+	root := t.TempDir()
+	sess := newTestSession(t, tokenThenErrorCaller{}, root)
+	sess.color = true
+	var out strings.Builder
+
+	if _, err := runOnce(context.Background(), &out, nil, sess, "answer this", nil); err == nil {
+		t.Fatal("runOnce must return the provider error")
+	}
+
+	got := out.String()
+	if !strings.Contains(got, "\x1b[36mpart\x1b[0m\nerror: provider boom\n") {
+		t.Fatalf("provider error inherited Markdown style or preceded pending bytes: %q", got)
+	}
+	if plain := ansiSGR.ReplaceAllString(got, ""); !strings.Contains(plain, "```go\npart\nerror: provider boom\n") {
+		t.Fatalf("plain output order changed: %q", plain)
 	}
 }
 
@@ -492,6 +544,58 @@ func TestREPL_AllowWriteApprovedWriteApplies(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "Apply this change?") {
 		t.Fatalf("approval prompt missing:\n%s", out.String())
+	}
+}
+
+func TestRunOncePreservesMarkdownAcrossApprovalToolAndCancel(t *testing.T) {
+	root := t.TempDir()
+	caller := &interleavedCancelCaller{
+		streamed: make(chan struct{}),
+		toolCall: provider.ToolCall{
+			ID: "w1", Type: "function",
+			Function: provider.ToolCallFunction{
+				Name:      "write_file",
+				Arguments: json.RawMessage(`{"path":"out.txt","content":"hello\n"}`),
+			},
+		},
+	}
+	sess := newWriteEnabledTestSession(t, caller, root)
+	sess.color = true
+	interrupts := make(chan struct{}, 1)
+	go func() {
+		<-caller.streamed
+		interrupts <- struct{}{}
+	}()
+
+	var out strings.Builder
+	_, err := runOnce(context.Background(), &out, interrupts, sess, "write out.txt", newScannerSource(strings.NewReader("y\n"), &out))
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("runOnce error = %v, want context canceled", err)
+	}
+
+	plain := ansiSGR.ReplaceAllString(out.String(), "")
+	position := 0
+	for _, want := range []string{
+		"```go\npart\n",
+		"step 1/16\n",
+		"new file: out.txt\n+hello\n",
+		"Apply this change? [y/N] ",
+		`> write_file {"path":"out.txt","content":"hello\n"}`,
+		"< write out.txt\n",
+		"continued\n",
+		"canceled\n",
+	} {
+		i := strings.Index(plain[position:], want)
+		if i < 0 {
+			t.Fatalf("output missing %q after byte %d:\n%s", want, position, plain)
+		}
+		position += i + len(want)
+	}
+	if strings.Count(plain, "```") != 1 {
+		t.Fatalf("renderer changed model Markdown fence bytes:\n%s", plain)
+	}
+	if sgrActive(out.String()) {
+		t.Fatalf("terminal style remained active after cancellation: %q", out.String())
 	}
 }
 

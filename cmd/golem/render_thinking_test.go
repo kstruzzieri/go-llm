@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/kstruzzieri/go-llm/agent"
 	"github.com/kstruzzieri/go-llm/internal/agenttrace"
@@ -56,6 +57,45 @@ func TestRendererThinkingNoColor(t *testing.T) {
 	}
 	if strings.Contains(out, "\x1b") {
 		t.Fatalf("color=false output contains ANSI escapes: %q", out)
+	}
+}
+
+func TestRendererThinkingResetsBeforeEmbeddedNewline(t *testing.T) {
+	var buf bytes.Buffer
+	r := newRenderer(&buf, true, 4, nil, false)
+	if err := r.OnThinking(context.Background(), agent.ThinkingEvent{Content: "first\n# still thinking"}); err != nil {
+		t.Fatalf("OnThinking: %v", err)
+	}
+
+	want := "\x1b[2m[thinking]\x1b[0m\n" +
+		"\x1b[2mfirst\x1b[0m\n" +
+		"\x1b[2m# still thinking\x1b[0m"
+	if got := buf.String(); got != want {
+		t.Fatalf("thinking output crossed a newline or used Markdown styling:\n got: %q\nwant: %q", got, want)
+	}
+}
+
+func TestRendererThinkingPreservesUTF8AcrossDeltas(t *testing.T) {
+	var buf bytes.Buffer
+	r := newRenderer(&buf, true, 4, nil, false)
+	for _, delta := range []string{
+		string([]byte{0xf0, 0x9f}),
+		string([]byte{0x99, 0x82}),
+	} {
+		if err := r.OnThinking(context.Background(), agent.ThinkingEvent{Content: delta}); err != nil {
+			t.Fatalf("OnThinking: %v", err)
+		}
+	}
+	if err := r.OnToken(context.Background(), agent.TokenEvent{Content: "answer"}); err != nil {
+		t.Fatalf("OnToken: %v", err)
+	}
+
+	got := buf.String()
+	if !utf8.ValidString(got) {
+		t.Fatalf("ANSI split a UTF-8 rune across thinking deltas: %q", got)
+	}
+	if !strings.Contains(got, "\x1b[2m🙂\x1b[0m\nanswer") {
+		t.Fatalf("thinking rune was not emitted as one styled span: %q", got)
 	}
 }
 

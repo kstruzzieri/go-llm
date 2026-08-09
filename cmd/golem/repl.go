@@ -173,17 +173,23 @@ func runOnce(ctx context.Context, out io.Writer, interrupts <-chan struct{}, ses
 		}()
 	}
 
+	rend := newRenderer(out, sess.color, sess.maxSteps, sess.clock, sess.mixed)
+	rend.warnPressure = sess.pressureWarn
+	renderOut := rend.rawWriter()
+	writeRunLine := func(format string, args ...any) {
+		_ = rend.breakLine()
+		_, _ = fmt.Fprintf(renderOut, format+"\n", args...)
+	}
 	// A nil source means no interactive approver is available -- one-shot mode
 	// in production, read-only sessions in tests. It is capability absence, not
 	// a mode assertion: the runtime's nil-approver fail-safe then denies every
 	// gated call.
 	var approver agent.Approver
 	if src != nil && needsApprover(sess.allowWrite, sess.allowExec, sess.mcpAttached) {
-		approver = newReplApprover(src, out, sess.color)
+		ap := newReplApprover(src, renderOut, sess.color)
+		ap.beforeWrite = rend.breakLine
+		approver = ap
 	}
-
-	rend := newRenderer(out, sess.color, sess.maxSteps, sess.clock, sess.mixed)
-	rend.warnPressure = sess.pressureWarn
 
 	var (
 		runID     = conversation.NewID()
@@ -196,7 +202,7 @@ func runOnce(ctx context.Context, out io.Writer, interrupts <-chan struct{}, ses
 		startedAt = sess.obs.clock()
 		var serr error
 		if sink, serr = sess.obs.startSink(runID, startedAt); serr != nil {
-			_, _ = fmt.Fprintf(out, "warning: telemetry disabled: %v\n", serr)
+			writeRunLine("warning: telemetry disabled: %v", serr)
 		}
 		observer = composeObserver(rend, sink)
 		if sink != nil {
@@ -243,6 +249,9 @@ func runOnce(ctx context.Context, out io.Writer, interrupts <-chan struct{}, ses
 		sessionSaveErr = runErr
 		runErr = nil
 	}
+	if ferr := rend.finish(); ferr != nil && runErr == nil {
+		runErr = ferr
+	}
 
 	// Post-run observability on EVERY exit path. Uses the parent ctx (not runCtx)
 	// so a canceled turn still flushes its partial trace.
@@ -250,7 +259,7 @@ func runOnce(ctx context.Context, out io.Writer, interrupts <-chan struct{}, ses
 		status, partial := runStatus(runErr, runCtx.Err() != nil)
 		if sink != nil {
 			if ferr := sink.Finish(res, status); ferr != nil {
-				_, _ = fmt.Fprintf(out, "warning: telemetry write incomplete: %v\n", ferr)
+				writeRunLine("warning: telemetry write incomplete: %v", ferr)
 			}
 		}
 		if sess.obs.trace {
@@ -267,27 +276,27 @@ func runOnce(ctx context.Context, out io.Writer, interrupts <-chan struct{}, ses
 			startedStr := startedAt.UTC().Format(time.RFC3339Nano)
 			endedStr := sess.obs.clock().UTC().Format(time.RFC3339Nano)
 			if terr := sess.obs.writeTrace(runID, startedStr, endedStr, meta, res, status, partial, runErr); terr != nil {
-				_, _ = fmt.Fprintf(out, "warning: trace not written: %v\n", terr)
+				writeRunLine("warning: trace not written: %v", terr)
 			}
 		}
 	}
 
 	if runErr != nil {
 		if runCtx.Err() != nil {
-			_, _ = fmt.Fprintln(out, "\ncanceled")
+			writeRunLine("canceled")
 			return res, runErr
 		}
-		_, _ = fmt.Fprintf(out, "\nerror: %v\n", runErr)
+		writeRunLine("error: %v", runErr)
 		return res, runErr
 	}
 	if m := lastRoutedModel(res); m != "" {
 		sess.lastModel = m
 	}
 	if sessionSaveErr != nil {
-		_, _ = fmt.Fprintf(out, "warning: session not saved: %v\n", sessionSaveErr)
+		writeRunLine("warning: session not saved: %v", sessionSaveErr)
 	} else if sess.session != nil && res.Answer != "" {
 		if _, err := sess.session.switchTo(ctx, sess.session.id); err != nil {
-			_, _ = fmt.Fprintf(out, "warning: session state not refreshed: %v\n", err)
+			writeRunLine("warning: session state not refreshed: %v", err)
 		}
 	}
 	rend.finalFooter(res)

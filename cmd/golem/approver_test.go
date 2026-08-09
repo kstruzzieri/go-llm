@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/kstruzzieri/go-llm/agent"
 	"github.com/kstruzzieri/go-llm/provider"
 )
 
@@ -162,5 +163,46 @@ func TestReplApproverMapsInterruptToCanceled(t *testing.T) {
 	}
 	if errors.Is(err, errInterrupted) {
 		t.Fatalf("err = %v: the editor sentinel must not leak past the approver", err)
+	}
+}
+
+func TestReplApproverFlushesPendingMarkdownBeforePreview(t *testing.T) {
+	var out strings.Builder
+	r := newRenderer(&out, true, 4, nil, false)
+	if err := r.OnToken(context.Background(), agent.TokenEvent{Content: "```go\npart"}); err != nil {
+		t.Fatalf("OnToken: %v", err)
+	}
+
+	ap := newReplApprover(newScannerSource(strings.NewReader("n\n"), &out), &out, true)
+	ap.beforeWrite = r.breakLine
+	if _, err := ap.Approve(context.Background(), newCall(), "+added\n"); err != nil {
+		t.Fatalf("Approve: %v", err)
+	}
+
+	got := out.String()
+	wantOrder := "\x1b[36mpart\x1b[0m\n\x1b[32m+added\x1b[0m\n"
+	if !strings.Contains(got, wantOrder) {
+		t.Fatalf("pending Markdown did not flush before neutral diff output: %q", got)
+	}
+}
+
+func TestReplApproverWritesThroughRendererCursor(t *testing.T) {
+	var out strings.Builder
+	r := newRenderer(&out, false, 4, nil, false)
+	src := newScannerSource(strings.NewReader("n\n"), &out)
+	ap := newReplApprover(src, r.rawWriter(), false)
+	ap.beforeWrite = r.breakLine
+	if ok, err := ap.Approve(context.Background(), newCall(), "preview"); err != nil || ok {
+		t.Fatalf("Approve: ok=%v err=%v", ok, err)
+	}
+	if err := r.OnToolResult(context.Background(), agent.ToolResultEvent{
+		Call:   newCall(),
+		Result: agent.ToolResult{IsError: true, Content: "tool call denied by approver"},
+	}); err != nil {
+		t.Fatalf("OnToolResult: %v", err)
+	}
+
+	if got := out.String(); !strings.Contains(got, "Apply this change? [y/N] \n< error: tool call denied by approver\n") {
+		t.Fatalf("tool result did not observe the approver cursor: %q", got)
 	}
 }

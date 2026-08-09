@@ -100,7 +100,7 @@ func parseFlags(args []string) (flags, error) {
 	fs.IntVar(&f.maxSteps, "max-steps", 0, "max agent steps per prompt (0 => default 16)")
 	fs.IntVar(&f.inputCeiling, "input-ceiling", 0, "token input ceiling (0 => default)")
 	fs.IntVar(&f.outputReserve, "output-reserve", 0, "token output reserve")
-	fs.BoolVar(&f.noColor, "no-color", false, "disable dim ANSI footers")
+	fs.BoolVar(&f.noColor, "no-color", false, "disable ANSI styling (automatic for non-terminal output, NO_COLOR, or TERM=dumb)")
 	fs.BoolVar(&f.noEditor, "no-editor", false, "disable TTY line editing and history; read plain lines from stdin")
 	fs.BoolVar(&f.noSession, "no-session", false, "disable persistent session memory")
 	fs.BoolVar(&f.fresh, "fresh", false, "start a new persistent session instead of resuming this workspace")
@@ -509,6 +509,13 @@ func main() {
 	}
 }
 
+func colorEnabled(out *os.File, noColor bool) bool {
+	if noColor || os.Getenv("NO_COLOR") != "" || os.Getenv("TERM") == "dumb" {
+		return false
+	}
+	return realTermOps{}.IsTerminal(int(out.Fd()))
+}
+
 func run(args []string, stdin *os.File, stdout, stderr *os.File) error {
 	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
 		switch args[0] {
@@ -888,6 +895,10 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File) error {
 	}
 	defer func() { _ = runtime.Close() }()
 
+	renderOut := stdout
+	if f.promptSet {
+		renderOut = stderr
+	}
 	sess := &replSession{
 		orch:                orch,
 		runtime:             runtime,
@@ -897,7 +908,7 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File) error {
 		projectContextBlock: projectContextBlock,
 		maxSteps:            f.maxSteps,
 		budget:              budget,
-		color:               !f.noColor,
+		color:               colorEnabled(renderOut, f.noColor),
 		retrieveOmitted:     retrieveOmitted,
 		session:             sessn,
 		journal:             journal,

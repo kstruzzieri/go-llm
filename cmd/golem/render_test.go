@@ -129,6 +129,101 @@ func TestRenderer_Color_WrapsFooter(t *testing.T) {
 	}
 }
 
+func TestRendererMarkdownStreamsAndResetsBeforeStepFooter(t *testing.T) {
+	var buf bytes.Buffer
+	r := newRenderer(&buf, true, 16, func() time.Time { return time.Unix(0, 0) }, false)
+	ctx := context.Background()
+	for _, chunk := range []string{"#", " Heading"} {
+		if err := r.OnToken(ctx, agent.TokenEvent{Content: chunk}); err != nil {
+			t.Fatalf("OnToken(%q): %v", chunk, err)
+		}
+	}
+	if err := r.OnStep(ctx, agent.StepEvent{Index: 0, Pressure: agent.Pressure{}}); err != nil {
+		t.Fatalf("OnStep: %v", err)
+	}
+
+	want := "\x1b[1m# Heading\x1b[0m\n\x1b[2m? · 0.0s · ctx 0% · step 1/16\x1b[0m\n"
+	if got := buf.String(); got != want {
+		t.Fatalf("renderer output mismatch:\n got: %q\nwant: %q", got, want)
+	}
+}
+
+func TestRendererMarkdownFenceContinuesAcrossStepChrome(t *testing.T) {
+	var buf bytes.Buffer
+	r := newRenderer(&buf, true, 16, func() time.Time { return time.Unix(0, 0) }, false)
+	ctx := context.Background()
+	if err := r.OnToken(ctx, agent.TokenEvent{Content: "```go\npart"}); err != nil {
+		t.Fatalf("OnToken opener: %v", err)
+	}
+	if err := r.OnStep(ctx, agent.StepEvent{Index: 0}); err != nil {
+		t.Fatalf("OnStep: %v", err)
+	}
+	if err := r.OnToken(ctx, agent.TokenEvent{Content: "rest\n```\n"}); err != nil {
+		t.Fatalf("OnToken closer: %v", err)
+	}
+	if err := r.finish(); err != nil {
+		t.Fatalf("finish: %v", err)
+	}
+
+	want := markdownAccent + "rest" + markdownReset + "\n" + markdownFence + "```" + markdownReset + "\n"
+	if got := buf.String(); !strings.Contains(got, want) {
+		t.Fatalf("step chrome discarded the open fence:\n got: %q\nwant substring: %q", got, want)
+	}
+}
+
+func TestRendererMarkdownFenceClosesAtStepBoundary(t *testing.T) {
+	var buf bytes.Buffer
+	r := newRenderer(&buf, true, 16, func() time.Time { return time.Unix(0, 0) }, false)
+	ctx := context.Background()
+	if err := r.OnToken(ctx, agent.TokenEvent{Content: "```go\ncode\n```"}); err != nil {
+		t.Fatalf("OnToken fence: %v", err)
+	}
+	if err := r.OnStep(ctx, agent.StepEvent{Index: 0}); err != nil {
+		t.Fatalf("OnStep: %v", err)
+	}
+	if err := r.OnToken(ctx, agent.TokenEvent{Content: "plain\n"}); err != nil {
+		t.Fatalf("OnToken prose: %v", err)
+	}
+	if err := r.finish(); err != nil {
+		t.Fatalf("finish: %v", err)
+	}
+
+	want := markdownFence + "```" + markdownReset + "\n" +
+		"\x1b[2m? · 0.0s · ctx 0% · step 1/16\x1b[0m\nplain\n"
+	if got := buf.String(); !strings.Contains(got, want) {
+		t.Fatalf("step boundary did not close the fence:\n got: %q\nwant substring: %q", got, want)
+	}
+}
+
+func TestRendererMarkdownFenceOpensAtStepBoundary(t *testing.T) {
+	for _, opener := range []string{"```", "```go"} {
+		t.Run(opener, func(t *testing.T) {
+			var buf bytes.Buffer
+			r := newRenderer(&buf, true, 16, func() time.Time { return time.Unix(0, 0) }, false)
+			ctx := context.Background()
+			if err := r.OnToken(ctx, agent.TokenEvent{Content: opener}); err != nil {
+				t.Fatalf("OnToken opener: %v", err)
+			}
+			if err := r.OnStep(ctx, agent.StepEvent{Index: 0}); err != nil {
+				t.Fatalf("OnStep: %v", err)
+			}
+			if err := r.OnToken(ctx, agent.TokenEvent{Content: "code\n```\n"}); err != nil {
+				t.Fatalf("OnToken body: %v", err)
+			}
+			if err := r.finish(); err != nil {
+				t.Fatalf("finish: %v", err)
+			}
+
+			want := markdownFence + opener + markdownReset + "\n" +
+				"\x1b[2m? · 0.0s · ctx 0% · step 1/16\x1b[0m\n" +
+				markdownAccent + "code" + markdownReset + "\n" + markdownFence + "```" + markdownReset + "\n"
+			if got := buf.String(); !strings.Contains(got, want) {
+				t.Fatalf("step boundary did not open the fence:\n got: %q\nwant substring: %q", got, want)
+			}
+		})
+	}
+}
+
 func renderResult(t *testing.T, name string, res agent.ToolResult) string {
 	t.Helper()
 	var buf bytes.Buffer
