@@ -621,7 +621,7 @@ func TestGoalHistorySkipsAnOverLongRecordAndKeepsGoing(t *testing.T) {
 	if h.degraded {
 		t.Fatal("an unreadable record degraded the store; later goals would stop persisting")
 	}
-	if len(warns) != 1 || !strings.Contains(warns[0], "skipped") {
+	if len(warns) != 1 || !strings.Contains(warns[0], "oversized") {
 		t.Fatalf("warnings = %q, want exactly one about skipped records", warns)
 	}
 
@@ -666,6 +666,36 @@ func TestGoalHistoryRecallDoesNotRetainDroppedEntries(t *testing.T) {
 		if s != "" {
 			t.Fatalf("recallable retains %q at %d past len; the dropped entry is still pinned", s, h.Len()+i)
 		}
+	}
+}
+
+func TestGoalHistoryTornTailWarnsNothing(t *testing.T) {
+	// A tail torn by a crash mid-write is expected, is already handled by the
+	// separator, and stays in the append-only file forever. Reporting it as a
+	// skipped record would print the same unactionable line on every launch
+	// from that crash onward.
+	root := t.TempDir()
+	getenv, path := historyEnv(t, root)
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	torn := strconv.Quote("complete goal") + "\n" + strconv.Quote("torn goal")[:8]
+	if err := os.WriteFile(path, []byte(torn), 0o600); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	var warns []string
+	h := newGoalHistory(getenv, root, collectWarnings(&warns))
+	t.Cleanup(func() { _ = h.Close() })
+
+	if got := h.stored(); !equalStrings(got, []string{"complete goal"}) {
+		t.Fatalf("stored = %q, want the intact record", got)
+	}
+	if len(warns) != 0 {
+		t.Fatalf("warnings = %q, want none for an ordinary torn tail", warns)
+	}
+	if !h.needsSeparator {
+		t.Fatal("torn tail not detected; the next record would fuse onto the fragment")
 	}
 }
 

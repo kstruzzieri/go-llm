@@ -19,9 +19,20 @@ goals, and multiline goals.
   accepted goals are recorded: blank lines, slash commands, and approval
   answers never reach the store. Entries that cannot be safely re-edited in a
   single-line editor are stored in full but excluded from arrow-key recall —
-  that is any entry longer than 4096 runes, or containing DEL or **any**
-  control character below `0x20`, which covers multiline text (LF), CR, ESC,
-  BEL, and tab.
+  that is any entry longer than 4096 runes, any entry containing DEL or **any**
+  control character below `0x20` (which covers multiline text (LF), CR, ESC,
+  BEL, and tab), and any entry that is not valid UTF-8. The last case exists
+  for entries written before the encoding boundary below: recall replays them
+  through the editor rune by rune, so pressing Enter would submit different
+  bytes than were stored.
+- **Goals must be valid UTF-8.** A goal containing malformed bytes is refused
+  with a warning and neither recorded nor sent to the model, from every input
+  source: the line editor rejects it at the terminal, and the scanner and
+  `/edit` are checked immediately before the goal is recorded and run. This is
+  a behavior change — such input previously reached the provider, where the
+  JSON transport substituted U+FFFD silently, so the model answered a question
+  the user had not typed. A correctly encoded U+FFFD is still accepted outside
+  the line editor, which is the only place it cannot be represented.
 - **A pasted block is one goal.** Bracketed paste is detected below the
   editor, so pasting several lines composes a single goal and runs one turn
   rather than submitting each line separately.

@@ -163,10 +163,13 @@ func (h *goalHistory) load() {
 			// for good, and silently.
 			skipped++
 		case len(record) > 0:
+			// An undecodable record is skipped silently, as it always has been.
+			// The common cause is a tail torn by a crash mid-write, which is
+			// expected, is already handled by needsSeparator, and stays in the
+			// append-only file forever -- warning about it would print the same
+			// unactionable line on every launch from then on.
 			if entry, uerr := strconv.Unquote(record); uerr == nil {
 				h.appendEntry(entry)
-			} else {
-				skipped++
 			}
 		}
 		if err != nil {
@@ -190,10 +193,11 @@ func (h *goalHistory) load() {
 	}
 
 	if skipped > 0 && h.warn != nil {
-		// Data loss the user should hear about once, without disabling writes:
-		// the records that did decode are still usable and new ones still
-		// append.
-		h.warn(fmt.Sprintf("golem: skipped %d unreadable history record(s)", skipped))
+		// Only over-long records are reported. They are data loss the user
+		// should hear about once, they cannot arise from an ordinary crash, and
+		// unlike an undecodable record they mean an entire goal was dropped
+		// rather than a fragment. Writes stay enabled either way.
+		h.warn(fmt.Sprintf("golem: skipped %d oversized history record(s)", skipped))
 	}
 	if readErr != nil {
 		h.degrade(readErr)
