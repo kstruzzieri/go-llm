@@ -163,6 +163,14 @@ func (o *Orchestrator) Run(ctx context.Context, req Request, obs Observer) (Resu
 		})
 		modelLatency := o.now().Sub(modelStart)
 		if err != nil {
+			// A failed stream may still return collected text. Preserve only that
+			// text; any tool-call fragments may be incomplete.
+			if strings.TrimSpace(modelResult.Response.Content) != "" {
+				state.Messages = append(state.Messages, Message{
+					ChatMessage: provider.ChatMessage{Role: "assistant", Content: modelResult.Response.Content},
+					Segment:     Elastic,
+				})
+			}
 			res.Messages = resultMessages(state, historyLen)
 			return res, err
 		}

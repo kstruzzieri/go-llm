@@ -521,6 +521,41 @@ func (firstCallErrorDispatchCaller) Chat(context.Context, provider.ChatRequest, 
 	}, errors.New("child stream failed")
 }
 
+type partialStreamErrorDispatchCaller struct{}
+
+func (partialStreamErrorDispatchCaller) Chat(context.Context, provider.ChatRequest, func(provider.ChatResponse) error) (agent.ModelResult, error) {
+	return agent.ModelResult{
+		Response:     provider.ChatResponse{Content: "partial synthesis"},
+		RouteOutcome: &provider.RouteOutcome{ActualModel: provider.ModelKey{Provider: "local", Model: "fast"}},
+	}, errors.New("child stream failed")
+}
+
+func TestDispatchPreservesPartialStreamSummaryOnError(t *testing.T) {
+	read := agent.Effect{Class: agent.Read, Approval: agent.ApprovalNever}
+	available := []agent.Tool{
+		dispatchNamedTool{name: "read_file", effect: read},
+		dispatchNamedTool{name: "search", effect: read},
+		dispatchNamedTool{name: "glob", effect: read},
+		dispatchNamedTool{name: "list", effect: read},
+	}
+	tool, err := NewDispatch(partialStreamErrorDispatchCaller{}, agent.ContextManager{}, available, DispatchLimits{})
+	if err != nil {
+		t.Fatalf("NewDispatch: %v", err)
+	}
+	out, err := tool.Invoke(context.Background(), json.RawMessage(`{"tasks":["one"]}`))
+	if err != nil {
+		t.Fatalf("Invoke: %v", err)
+	}
+	var envelope dispatchEnvelope
+	if err := json.Unmarshal([]byte(out.Content), &envelope); err != nil {
+		t.Fatalf("decode result: %v", err)
+	}
+	got := envelope.Results[0]
+	if !out.IsError || got.Summary != "Partial result before error: partial synthesis" || got.StopReason != "error" || got.Model != "local/fast" || !strings.Contains(got.Error, "child stream failed") {
+		t.Fatalf("result = %+v; tool error = %v", got, out.IsError)
+	}
+}
+
 type blankErrorDispatchCaller struct{}
 
 func (blankErrorDispatchCaller) Chat(context.Context, provider.ChatRequest, func(provider.ChatResponse) error) (agent.ModelResult, error) {
