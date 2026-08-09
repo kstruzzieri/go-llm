@@ -552,10 +552,12 @@ func (f *keyFilter) consume() {
 		if ev == eventLine && c == byteCR && i < len(f.work) && f.work[i] == byteLF {
 			// CRLF is one event; consume the LF now so it cannot start the
 			// next delivery as a stray terminator. The suppressed LF is still
-			// paste content, so it is charged -- without an overflow check,
-			// since it is never forwarded; the next content byte overflows.
-			if f.inPaste {
-				f.pasteBytes++
+			// paste content and must pass through the same byte ceiling.
+			if f.inPaste && !f.chargePaste(1) {
+				f.outEvent = ev
+				f.outPaste = f.inPaste
+				f.overflowPaste(i)
+				return
 			}
 			i++
 			f.prevCR = false

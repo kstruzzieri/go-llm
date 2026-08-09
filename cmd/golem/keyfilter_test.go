@@ -1054,6 +1054,25 @@ func TestKeyFilterPasteBudgetStopsForwardingAtTheBound(t *testing.T) {
 	}
 }
 
+func TestKeyFilterPasteBudgetChargesSuppressedLF(t *testing.T) {
+	// Cap 8: seven letters plus CR fill the budget. LF is part of the pasted
+	// CRLF even though the filter suppresses it before x/term, so it must make
+	// the paste overflow rather than slip past the byte ceiling.
+	in := pasteOn + "abcdefg\r\n" + pasteOff
+	f := newKeyFilter(strings.NewReader(in), 8)
+
+	out, err := drain(t, f)
+	if !errors.Is(err, errPasteTooLarge) {
+		t.Fatalf("err = %v, want errPasteTooLarge", err)
+	}
+	if string(out) != pasteOn+"abcdefg\r" {
+		t.Fatalf("forwarded %q, want the start marker plus exactly 8 content bytes", out)
+	}
+	if flags := popFlags(f); !equalBools(flags, []bool{true}) {
+		t.Fatalf("flags = %v, want the delivered CR attributed to the paste", flags)
+	}
+}
+
 func TestKeyFilterPasteBudgetRepeatedStartCannotReset(t *testing.T) {
 	// A redundant start marker inside one paste is consumed, not forwarded,
 	// and must not reset the byte counter: that would let a crafted paste
