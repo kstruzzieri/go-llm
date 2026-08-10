@@ -52,19 +52,20 @@ type markdownWriter struct {
 	out io.Writer
 	on  bool
 
-	line        markdownLine
-	prefix      []byte
-	inFence     bool
-	fenceSize   int
-	openingSize int
-	closing     bool
-	closeSpace  bool
-	emphasis    []byte
-	styled      []byte
-	styledStyle string
-	runStyle    string
-	run         []byte
-	lastNL      bool
+	line         markdownLine
+	prefix       []byte
+	inFence      bool
+	fenceSize    int
+	openingSize  int
+	closing      bool
+	closeSpace   bool
+	infoBacktick bool
+	emphasis     []byte
+	styled       []byte
+	styledStyle  string
+	runStyle     string
+	run          []byte
+	lastNL       bool
 }
 
 type markdownRawWriter struct{ markdown *markdownWriter }
@@ -78,6 +79,11 @@ func newMarkdownWriter(out io.Writer, enabled bool) *markdownWriter {
 func (w *markdownWriter) Write(p []byte) (int, error) {
 	if !w.on {
 		return w.directWrite(p)
+	}
+	// A styled fragment held by WriteStyled precedes these bytes in the stream;
+	// emit it now so a model-content newline cannot silently discard it.
+	if err := w.flushStyled(); err != nil {
+		return 0, err
 	}
 	for i, b := range p {
 		if err := w.writeByte(b); err != nil {
@@ -95,6 +101,11 @@ func (w *markdownWriter) Write(p []byte) (int, error) {
 // WriteStyled writes raw terminal content with one SGR style while retaining
 // only an incomplete trailing UTF-8 rune across calls.
 func (w *markdownWriter) WriteStyled(style string, p []byte) (int, error) {
+	// Undecided prefix or emphasis bytes arrived first; commit them verbatim so
+	// styled output cannot overtake bytes Write already accepted.
+	if err := w.drainLine(); err != nil {
+		return 0, err
+	}
 	data := append(w.styled, p...)
 	w.styled = nil
 	w.styledStyle = style
@@ -103,13 +114,14 @@ func (w *markdownWriter) WriteStyled(style string, p []byte) (int, error) {
 		_, size := utf8.DecodeRune(data[complete:])
 		complete += size
 	}
+	// Retain the incomplete tail before emitting so an emit error cannot drop it.
+	if complete < len(data) {
+		w.styled = append([]byte(nil), data[complete:]...)
+	}
 	if complete > 0 {
 		if err := w.emit(style, data[:complete]); err != nil {
 			return len(p), err
 		}
-	}
-	if complete < len(data) {
-		w.styled = append(w.styled, data[complete:]...)
 	}
 	if err := w.flushRun(); err != nil {
 		return len(p), err
@@ -125,9 +137,15 @@ func (w *markdownWriter) writeByte(b byte) error {
 	decision := w.decidePrefix()
 	if decision.kind == markdownWait && len(w.prefix) > markdownPrefixLimit {
 		if w.inFence {
-			w.closing = true
-			last := w.prefix[len(w.prefix)-1]
-			w.closeSpace = last == ' ' || last == '\t' || last == '\r'
+			// Wait in a fence means a well-formed closer so far, but the cap can
+			// cut an all-backtick run before it reaches fenceSize; treating that
+			// as a closer would invert fence state for the rest of the stream.
+			indent := leadingMarkdownIndent(w.prefix)
+			if indent >= 0 && countPrefix(w.prefix[indent:], '`') >= w.fenceSize {
+				w.closing = true
+				last := w.prefix[len(w.prefix)-1]
+				w.closeSpace = last == ' ' || last == '\t' || last == '\r'
+			}
 			decision.kind = markdownUseCode
 		} else {
 			decision.kind = markdownUsePlain
@@ -356,6 +374,11 @@ func (w *markdownWriter) writeKnown(b byte) error {
 			w.closing = false
 		}
 	}
+	// A backtick in a backtick fence's info string means the line is inline
+	// code, not a fence opener (CommonMark); endLine must not enter the fence.
+	if w.line == markdownFenceLine && !w.closing && b == '`' {
+		w.infoBacktick = true
+	}
 	if err := w.emit(w.styleForLine(), []byte{b}); err != nil {
 		return err
 	}
@@ -385,13 +408,22 @@ func (w *markdownWriter) writePlain(b byte) error {
 		return w.emit("", []byte{b})
 	}
 	w.emphasis = append(w.emphasis, b)
+	// CommonMark flanking: "* " cannot open emphasis, so "3 * 4 * 5" stays
+	// plain instead of italicizing "* 4 *".
+	if len(w.emphasis) == 2 && (b == ' ' || b == '\t' || b == '\r') {
+		return w.flushEmphasis()
+	}
 	if b == '*' {
 		if len(w.emphasis) == 2 {
 			return w.flushEmphasis()
 		}
-		pending := w.emphasis
-		w.emphasis = nil
-		return w.emit(markdownEmphasis, pending)
+		// A star after whitespace cannot close emphasis; keep scanning so
+		// "*a * b*" styles as one span ending at the flanking-valid closer.
+		if prev := w.emphasis[len(w.emphasis)-2]; prev != ' ' && prev != '\t' && prev != '\r' {
+			pending := w.emphasis
+			w.emphasis = nil
+			return w.emit(markdownEmphasis, pending)
+		}
 	}
 	if len(w.emphasis) > markdownEmphasisLimit {
 		return w.flushEmphasis()
@@ -408,6 +440,24 @@ func (w *markdownWriter) flushEmphasis() error {
 	return w.emit("", pending)
 }
 
+// drainLine commits pending undecided-prefix and emphasis bytes verbatim,
+// degrading the line to prose/code exactly as a mid-line interruption does.
+func (w *markdownWriter) drainLine() error {
+	if len(w.prefix) > 0 {
+		pending := w.prefix
+		w.prefix = nil
+		if w.inFence {
+			w.line = markdownCodeLine
+		} else {
+			w.line = markdownPlain
+		}
+		if err := w.emit(w.styleForLine(), pending); err != nil {
+			return err
+		}
+	}
+	return w.flushEmphasis()
+}
+
 func (w *markdownWriter) flushStyled() error {
 	if len(w.styled) == 0 {
 		return nil
@@ -421,7 +471,7 @@ func (w *markdownWriter) endLine() {
 	if w.closing {
 		w.inFence = false
 		w.fenceSize = 0
-	} else if w.line == markdownFenceLine {
+	} else if w.line == markdownFenceLine && !w.infoBacktick {
 		w.inFence = true
 		w.fenceSize = w.openingSize
 	}
@@ -545,11 +595,10 @@ func (w *markdownWriter) startLine() {
 	w.line = markdownPrefix
 	w.prefix = nil
 	w.emphasis = nil
-	w.styled = nil
-	w.styledStyle = ""
 	w.openingSize = 0
 	w.closing = false
 	w.closeSpace = false
+	w.infoBacktick = false
 }
 
 // flush emits ambiguous input verbatim and closes any active SGR. A forced
@@ -570,20 +619,8 @@ func (w *markdownWriter) flush(atLineEnd bool) error {
 				}
 			}
 		}
-		if len(w.prefix) > 0 {
-			pending := w.prefix
-			w.prefix = nil
-			if w.inFence {
-				w.line = markdownCodeLine
-			} else {
-				w.line = markdownPlain
-			}
-			if err := w.emit(w.styleForLine(), pending); err != nil {
-				return err
-			}
-		}
 	}
-	if err := w.flushEmphasis(); err != nil {
+	if err := w.drainLine(); err != nil {
 		return err
 	}
 	if err := w.flushStyled(); err != nil {

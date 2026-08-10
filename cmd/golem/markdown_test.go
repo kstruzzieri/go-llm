@@ -76,7 +76,7 @@ func renderMarkdown(t *testing.T, input string, splits ...int) string {
 }
 
 func TestMarkdownWriterOutputDoesNotDependOnTokenSplits(t *testing.T) {
-	input := "## Heading\n1. item with *emphasis*\n````go\n```\nfmt.Println(\"λ🙂\")\n`````\nafter\n"
+	input := "## Heading\n1. item with *emphasis*\nmath 2 * 3 * 4\n````go\n```\nfmt.Println(\"λ🙂\")\n`````\nafter\n"
 	want := renderMarkdown(t, input)
 	for split := 0; split <= len(input); split++ {
 		if got := renderMarkdown(t, input, split); got != want {
@@ -94,15 +94,21 @@ func TestMarkdownWriterOutputDoesNotDependOnTokenSplits(t *testing.T) {
 }
 
 func TestMarkdownWriterBoundsAmbiguousPrefixAndResetsBeforeNewline(t *testing.T) {
-	input := strings.Repeat("1", markdownPrefixLimit+32) + "\n````go\nunterminated"
+	digits := strings.Repeat("1", markdownPrefixLimit+32)
+	input := digits + "\n````go\nunterminated"
 	var out bytes.Buffer
 	w := newMarkdownWriter(&out, true)
-	if _, err := io.WriteString(w, input); err != nil {
+	// Measured before any newline: an uncapped writer would still be holding
+	// every digit here, so this bound fails if the prefix cap is removed.
+	if _, err := io.WriteString(w, digits); err != nil {
 		t.Fatalf("WriteString: %v", err)
 	}
 	emitted := len(ansiSGR.ReplaceAllString(out.String(), ""))
-	if emitted < len(input)-markdownPrefixLimit {
-		t.Fatalf("writer buffered too much: emitted %d of %d source bytes before Finish", emitted, len(input))
+	if emitted < len(digits)-(markdownPrefixLimit+1) {
+		t.Fatalf("writer buffered too much: emitted %d of %d source bytes before any newline", emitted, len(digits))
+	}
+	if _, err := io.WriteString(w, input[len(digits):]); err != nil {
+		t.Fatalf("WriteString: %v", err)
 	}
 	if err := w.Finish(); err != nil {
 		t.Fatalf("Finish: %v", err)
@@ -264,6 +270,95 @@ func TestMarkdownWriterOverCapCloserStillClosesFence(t *testing.T) {
 	}
 	if !strings.HasSuffix(got, "after\n") {
 		t.Fatalf("over-cap closer left following prose in code style: %q", got)
+	}
+}
+
+func TestMarkdownWriterEmphasisRespectsFlanking(t *testing.T) {
+	for _, tc := range []struct{ name, input, want string }{
+		{"space-flanked stars stay plain", "2 * 3 = 6 and 4 * 5 = 20\n", "2 * 3 = 6 and 4 * 5 = 20\n"},
+		{"double star stays plain", "**bold** stays plain\n", "**bold** stays plain\n"},
+		{"inner spaced star is content", "*a * b* c\n", "\x1b[3m*a * b*\x1b[0m c\n"},
+		{"tight pair still styles", "see *this* now\n", "see \x1b[3m*this*\x1b[0m now\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := renderMarkdown(t, tc.input); got != tc.want {
+				t.Fatalf("flanking render mismatch:\n got: %q\nwant: %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestMarkdownWriterUndersizedOverCapCloserStaysInFence(t *testing.T) {
+	fence := strings.Repeat("`", markdownPrefixLimit)
+	input := fence + "go\ncode\n" + "   " + strings.Repeat("`", markdownPrefixLimit-2) + "\nstill code\n" + fence + "\nprose\n"
+	got := renderMarkdown(t, input)
+	if plain := ansiSGR.ReplaceAllString(got, ""); plain != input {
+		t.Fatalf("undersized over-cap closer changed source: got %q, want %q", plain, input)
+	}
+	if !strings.Contains(got, markdownAccent+"still code"+markdownReset+"\n") {
+		t.Fatalf("undersized over-cap closer escaped the fence: %q", got)
+	}
+	if !strings.HasSuffix(got, "prose\n") {
+		t.Fatalf("real closer after undersized closer left fence state inverted: %q", got)
+	}
+}
+
+func TestMarkdownWriterInfoStringBacktickDoesNotOpenFence(t *testing.T) {
+	input := "```foo``` is inline code\nplain prose\n"
+	got := renderMarkdown(t, input)
+	if plain := ansiSGR.ReplaceAllString(got, ""); plain != input {
+		t.Fatalf("info-string backtick changed source: got %q, want %q", plain, input)
+	}
+	if !strings.Contains(got, "\nplain prose\n") {
+		t.Fatalf("info-string backtick line opened a fence and styled following prose: %q", got)
+	}
+}
+
+func TestMarkdownWriterInterleavedStyledWritesKeepByteOrder(t *testing.T) {
+	var out bytes.Buffer
+	w := newMarkdownWriter(&out, true)
+	if _, err := w.Write([]byte("##")); err != nil {
+		t.Fatalf("Write prefix: %v", err)
+	}
+	if _, err := w.WriteStyled("\x1b[2m", []byte("T")); err != nil {
+		t.Fatalf("WriteStyled: %v", err)
+	}
+	if _, err := w.WriteStyled("\x1b[2m", []byte{0xf0, 0x9f}); err != nil {
+		t.Fatalf("WriteStyled fragment: %v", err)
+	}
+	if _, err := w.Write([]byte("x\n")); err != nil {
+		t.Fatalf("Write model bytes: %v", err)
+	}
+	if err := w.Finish(); err != nil {
+		t.Fatalf("Finish: %v", err)
+	}
+	want := "##T\xf0\x9fx\n"
+	if plain := ansiSGR.ReplaceAllString(out.String(), ""); plain != want {
+		t.Fatalf("interleaved styled writes reordered or dropped bytes: got %q, want %q", plain, want)
+	}
+}
+
+func TestMarkdownWriterRawChromeMidLineKeepsFenceBody(t *testing.T) {
+	var out bytes.Buffer
+	w := newMarkdownWriter(&out, true)
+	if _, err := io.WriteString(w, "```go\n"); err != nil {
+		t.Fatalf("WriteString fence: %v", err)
+	}
+	if _, err := w.WriteRaw([]byte("chrome")); err != nil {
+		t.Fatalf("WriteRaw: %v", err)
+	}
+	if _, err := io.WriteString(w, "tail\n```\nafter\n"); err != nil {
+		t.Fatalf("WriteString body: %v", err)
+	}
+	if err := w.Finish(); err != nil {
+		t.Fatalf("Finish: %v", err)
+	}
+	got := out.String()
+	if !strings.Contains(got, "chrome"+markdownAccent+"tail"+markdownReset+"\n") {
+		t.Fatalf("code bytes after mid-line chrome lost fence styling: %q", got)
+	}
+	if !strings.HasSuffix(got, "after\n") {
+		t.Fatalf("fence did not close after mid-line chrome: %q", got)
 	}
 }
 

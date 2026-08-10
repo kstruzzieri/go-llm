@@ -27,6 +27,29 @@ func TestParseFlagsAllowWrite(t *testing.T) {
 	}
 }
 
+func TestColorPermittedTruthTable(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		noColor bool
+		env     map[string]string
+		want    bool
+	}{
+		{name: "default", env: map[string]string{"NO_COLOR": "", "TERM": "xterm-256color"}, want: true},
+		{name: "no-color flag", noColor: true, env: map[string]string{"NO_COLOR": "", "TERM": "xterm-256color"}, want: false},
+		{name: "NO_COLOR env", env: map[string]string{"NO_COLOR": "1", "TERM": "xterm-256color"}, want: false},
+		{name: "TERM dumb", env: map[string]string{"NO_COLOR": "", "TERM": "dumb"}, want: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			for k, v := range tc.env {
+				t.Setenv(k, v)
+			}
+			if got := colorPermitted(tc.noColor); got != tc.want {
+				t.Fatalf("colorPermitted(%v) = %v, want %v", tc.noColor, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestColorEnabledHonorsTerminalAndEnvironment(t *testing.T) {
 	t.Setenv("NO_COLOR", "")
 	t.Setenv("TERM", "xterm-256color")
@@ -72,29 +95,12 @@ func TestColorEnabledHonorsTerminalAndEnvironment(t *testing.T) {
 	}
 }
 
+// openTestTerminal opens the controlling terminal, skipping in non-interactive
+// runs. Legacy /dev/pty?? nodes are dead on modern Darwin (open returns
+// EAGAIN), so only interactive runs exercise the TTY-true branch; the flag and
+// environment gates are pinned terminal-free by TestColorPermittedTruthTable.
 func openTestTerminal(t *testing.T) *os.File {
 	t.Helper()
-	if runtime.GOOS == "darwin" {
-		for _, group := range "pqrstuvw" {
-			for _, digit := range "0123456789abcdef" {
-				suffix := fmt.Sprintf("%c%c", group, digit)
-				master, err := os.OpenFile("/dev/pty"+suffix, os.O_RDWR, 0)
-				if err != nil {
-					continue
-				}
-				slave, err := os.OpenFile("/dev/tty"+suffix, os.O_RDWR, 0)
-				if err != nil {
-					_ = master.Close()
-					continue
-				}
-				t.Cleanup(func() {
-					_ = slave.Close()
-					_ = master.Close()
-				})
-				return slave
-			}
-		}
-	}
 	terminal, err := os.OpenFile("/dev/tty", os.O_RDWR, 0)
 	if err != nil {
 		t.Skipf("open terminal: %v", err)

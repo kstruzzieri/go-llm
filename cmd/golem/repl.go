@@ -249,8 +249,11 @@ func runOnce(ctx context.Context, out io.Writer, interrupts <-chan struct{}, ses
 		sessionSaveErr = runErr
 		runErr = nil
 	}
+	// A failed tail flush loses only buffered display bytes on the progress
+	// stream; the run itself completed. Demoting it to a warning keeps a good
+	// one-shot answer printable and records telemetry as the success it was.
 	if ferr := rend.finish(); ferr != nil && runErr == nil {
-		runErr = ferr
+		writeRunLine("warning: render flush incomplete: %v", ferr)
 	}
 
 	// Post-run observability on EVERY exit path. Uses the parent ctx (not runCtx)

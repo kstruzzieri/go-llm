@@ -510,10 +510,13 @@ func main() {
 }
 
 func colorEnabled(out *os.File, noColor bool) bool {
-	if noColor || os.Getenv("NO_COLOR") != "" || os.Getenv("TERM") == "dumb" {
-		return false
-	}
-	return realTermOps{}.IsTerminal(int(out.Fd()))
+	return colorPermitted(noColor) && realTermOps{}.IsTerminal(int(out.Fd()))
+}
+
+// colorPermitted holds the flag/environment gates separately from the TTY
+// probe so their truth table is testable without a terminal.
+func colorPermitted(noColor bool) bool {
+	return !noColor && os.Getenv("NO_COLOR") == "" && os.Getenv("TERM") != "dumb"
 }
 
 func run(args []string, stdin *os.File, stdout, stderr *os.File) error {
