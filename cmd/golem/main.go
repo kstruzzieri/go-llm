@@ -38,6 +38,7 @@ type flags struct {
 	inputCeiling        int
 	outputReserve       int
 	noColor             bool
+	noEditor            bool
 	noSession           bool
 	fresh               bool
 	sessionID           string
@@ -100,6 +101,7 @@ func parseFlags(args []string) (flags, error) {
 	fs.IntVar(&f.inputCeiling, "input-ceiling", 0, "token input ceiling (0 => default)")
 	fs.IntVar(&f.outputReserve, "output-reserve", 0, "token output reserve")
 	fs.BoolVar(&f.noColor, "no-color", false, "disable dim ANSI footers")
+	fs.BoolVar(&f.noEditor, "no-editor", false, "disable TTY line editing and history; read plain lines from stdin")
 	fs.BoolVar(&f.noSession, "no-session", false, "disable persistent session memory")
 	fs.BoolVar(&f.fresh, "fresh", false, "start a new persistent session instead of resuming this workspace")
 	fs.BoolVar(&f.allowWrite, "allow-write", false, "enable approval-gated write_file/edit_file tools")
@@ -870,7 +872,7 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File) error {
 		Budget:   budget,
 		// The REPL line reader accepts lines up to 1 MiB; keep the runtime's
 		// message bound in lockstep so a pasted log or diff is not rejected.
-		MaxMessageBytes: 1024 * 1024,
+		MaxMessageBytes: maxGoalBytes,
 		ModelOptions:    thinkOpts,
 		Summarizer:      summarizer,
 		// The CLI is the trusted host: -trace records include model reasoning.
@@ -948,49 +950,137 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File) error {
 		}
 	}()
 
+	// startAutoIndex is nil unless auto-indexing is enabled. It is a closure so
+	// the REPL branch can start it after binding the idle display and stop it
+	// before the source closes; every other mode never starts it at all.
+	var startAutoIndex func() func()
 	if ready != nil {
-		// Launched after startup construction succeeds so async notices never
-		// interleave the synchronous startup block, and setup errors do not race
-		// the background job against deferred provider cleanup.
-		autoCtx, cancelAuto := context.WithCancel(ctx)
-		autoDone := make(chan struct{})
-		go func() {
-			defer close(autoDone)
-			runAutoIndex(autoCtx, autoIndexJob{
-				root:        root,
-				dbPath:      autoDBPath,
-				workspaceID: autoWorkspaceID,
-				cfg:         bundle.Config,
-				router:      bundle.Router,
-				embedder: newChainEmbedder(func(rc context.Context, rreq provider.RoutingRequest) (embedExecutor, error) {
-					return bundle.Router.Route(rc, rreq)
-				}, embChain),
-				embChain:    embChain,
-				feedbackDB:  feedbackDB,
-				progressive: f.progressive,
-				summarize:   sourceSummarizer,
-				ready:       ready,
-				notice:      notice,
-			})
-		}()
-		// Registered after the reader/provider defers, so shutdown first
-		// cancels and joins the writer while all of its dependencies are live.
-		defer func() {
-			cancelAuto()
-			<-autoDone
-		}()
+		startAutoIndex = func() func() {
+			// Launched after startup construction succeeds so async notices never
+			// interleave the synchronous startup block, and setup errors do not race
+			// the background job against deferred provider cleanup.
+			autoCtx, cancelAuto := context.WithCancel(ctx)
+			autoDone := make(chan struct{})
+			go func() {
+				defer close(autoDone)
+				runAutoIndex(autoCtx, autoIndexJob{
+					root:        root,
+					dbPath:      autoDBPath,
+					workspaceID: autoWorkspaceID,
+					cfg:         bundle.Config,
+					router:      bundle.Router,
+					embedder: newChainEmbedder(func(rc context.Context, rreq provider.RoutingRequest) (embedExecutor, error) {
+						return bundle.Router.Route(rc, rreq)
+					}, embChain),
+					embChain:    embChain,
+					feedbackDB:  feedbackDB,
+					progressive: f.progressive,
+					summarize:   sourceSummarizer,
+					ready:       ready,
+					notice:      notice,
+				})
+			}()
+			return func() {
+				cancelAuto()
+				<-autoDone
+			}
+		}
 	}
 
-	if f.goalSet {
-		return runAgentflowAuthor(ctx, stdin, stdout, stderr, interrupts, sess, f, root)
-	}
-	if f.planPath != "" {
-		return runAgentflowTask(ctx, stdout, stderr, interrupts, sess, f, root)
-	}
-	if f.promptSet {
+	// Final dispatch. A line source is created only where an interactive read
+	// can actually happen, so the modes that never read stdin open no reader.
+	//
+	// Auto-indexing is orthogonal to input and every branch must start it when
+	// enabled: shouldStartAutoIndex excludes only -p and -goal, so -plan wants
+	// the background refresh without wanting a reader. Only the REPL has to
+	// bind the idle display first, which is why it starts the job itself rather
+	// than here. Keeping the guarded call in all three branches makes that
+	// invariant structural -- a branch that forgets it leaves the retrieve
+	// wrapper on its warming message for the whole run while the startup banner
+	// has already announced a refresh that never starts.
+	switch lineSourceModeFor(f) {
+	case sourceAnswerOnly:
+		// Interactive -goal reads only the plan-lock approval: a source, but
+		// no idle display and no history.
+		if startAutoIndex != nil {
+			stopAutoIndex := startAutoIndex()
+			defer stopAutoIndex()
+		}
+		return withLineSource(newInput(inputConfig{
+			Stdin:       stdin,
+			Stdout:      stdout,
+			Stderr:      stderr,
+			NoEditor:    f.noEditor,
+			Getenv:      os.Getenv,
+			Root:        root,
+			OnInterrupt: onInterrupt,
+		}), func(src lineSource) error {
+			return runAgentflowAuthor(ctx, src, stdout, stderr, interrupts, sess, f, root)
+		})
+	case sourceNone:
+		if startAutoIndex != nil {
+			stopAutoIndex := startAutoIndex()
+			defer stopAutoIndex()
+		}
+		if f.goalSet {
+			return runAgentflowAuthor(ctx, nil, stdout, stderr, interrupts, sess, f, root)
+		}
+		if f.planPath != "" {
+			return runAgentflowTask(ctx, stdout, stderr, interrupts, sess, f, root)
+		}
 		return runOneShot(ctx, stdout, stderr, interrupts, sess, f.prompt)
 	}
-	return runREPL(replCtx, stdin, stdout, interrupts, sess)
+
+	// /edit is wired regardless of -no-editor: the flag disables the inline
+	// line editor, not external composition. Availability is still gated on
+	// real terminals at dispatch time.
+	base, derr := dataDirBase(os.Getenv)
+	if derr != nil {
+		// Reported, not discarded. Leaving goalEditor nil rendered "/edit
+		// requires an interactive terminal", which sends a user with a HOME-less
+		// environment hunting a terminal problem that does not exist.
+		_, _ = fmt.Fprintf(stderr, "golem: /edit unavailable: %v\n", derr)
+	} else {
+		sess.goalEditor = &ttyGoalEditor{
+			stdin: stdin, stdout: stdout, stderr: stderr,
+			getenv:  os.Getenv,
+			ops:     realTermOps{},
+			run:     runEditorProcess,
+			dataDir: filepath.Join(base, "golem"),
+			root:    root,
+		}
+	}
+	return withLineSource(newInput(inputConfig{
+		Stdin:      stdin,
+		Stdout:     stdout,
+		Stderr:     stderr,
+		NoEditor:   f.noEditor,
+		UseHistory: true, // only the default REPL reads goals worth recalling
+		Getenv:     os.Getenv,
+		Root:       root,
+		// Raw mode disables ISIG, so the editor sees Ctrl-C as an in-band
+		// byte; it delivers the event to the same policy owner the SIGINT
+		// handler uses, keeping one interrupt taxonomy for both modes.
+		OnInterrupt: onInterrupt,
+	}), func(src lineSource) error {
+		// Bound before the auto-index goroutine can emit a notice, so no
+		// asynchronous message is ever rendered through the default display
+		// while a source exists.
+		if sess.control != nil {
+			sess.control.setIdleDisplay(src.IdleDisplay)
+			// Unbound after the notice producer is joined and before the
+			// source closes, so the Ctrl-C window between runREPL returning
+			// and signal.Stop cannot render through a closed source.
+			defer sess.control.setIdleDisplay(nil)
+		}
+		if startAutoIndex != nil {
+			stopAutoIndex := startAutoIndex()
+			// Cancels and joins the writer before withLineSource closes the
+			// source, so no notice can reach a closed source.
+			defer stopAutoIndex()
+		}
+		return runREPL(replCtx, src, stdout, interrupts, sess)
+	})
 }
 
 func interruptSignals() []os.Signal {

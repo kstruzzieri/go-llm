@@ -68,7 +68,7 @@ func TestGoalAuthor_RealCLI(t *testing.T) {
 	// agentflowRunnerOrSkip built runner, so both reach the same CLI. stdin
 	// answers the interactive "Lock this plan? [y/N]" approval prompt.
 	f := flags{goal: "ensure the answer token", goalSet: true, agentflowSrc: src}
-	if err := runAgentflowAuthor(context.Background(), strings.NewReader("y\n"), &out, &errb, nil, sess, f, dir); err != nil {
+	if err := runAgentflowAuthor(context.Background(), newScannerSource(strings.NewReader("y\n"), &out), &out, &errb, nil, sess, f, dir); err != nil {
 		t.Fatalf("author flow: %v\n%s", err, errb.String())
 	}
 	if !strings.Contains(out.String(), "Lock this plan?") {

@@ -3,9 +3,11 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -161,7 +163,7 @@ func TestREPL_EndToEndReadOnly(t *testing.T) {
 	in := strings.NewReader("read hello.txt\n")
 	sess := newTestSession(t, caller, root)
 
-	if err := runREPL(context.Background(), in, &out, nil, sess); err != nil {
+	if err := runREPL(context.Background(), newScannerSource(in, &out), &out, nil, sess); err != nil {
 		t.Fatalf("runREPL: %v", err)
 	}
 	got := out.String()
@@ -186,7 +188,7 @@ func TestREPL_SlashCommands(t *testing.T) {
 	in := strings.NewReader("/help\n/tools\n/model\n/clear\n/new\n/undo\n/bogus\n/exit\n")
 	sess := newTestSession(t, caller, root)
 
-	if err := runREPL(context.Background(), in, &out, nil, sess); err != nil {
+	if err := runREPL(context.Background(), newScannerSource(in, &out), &out, nil, sess); err != nil {
 		t.Fatalf("runREPL: %v", err)
 	}
 	got := out.String()
@@ -213,7 +215,7 @@ func TestREPL_CtrlCCancelsRunKeepsREPL(t *testing.T) {
 		interrupts <- struct{}{}
 	}()
 
-	if err := runREPL(context.Background(), in, &out, interrupts, sess); err != nil {
+	if err := runREPL(context.Background(), newScannerSource(in, &out), &out, interrupts, sess); err != nil {
 		t.Fatalf("runREPL should not error on cancel: %v", err)
 	}
 	if !strings.Contains(out.String(), "canceled") {
@@ -287,7 +289,7 @@ func TestREPL_HistoryReachesModelAsRealRoles(t *testing.T) {
 
 	var out strings.Builder
 	in := strings.NewReader("new question\n")
-	if err := runREPL(context.Background(), in, &out, nil, sess); err != nil {
+	if err := runREPL(context.Background(), newScannerSource(in, &out), &out, nil, sess); err != nil {
 		t.Fatalf("runREPL: %v", err)
 	}
 
@@ -333,7 +335,7 @@ func TestREPL_PersistsToolTranscriptButResumesPlainHistory(t *testing.T) {
 	sess := newSessionedTestSession(t, caller, root, "workspace:toolhist")
 
 	var out strings.Builder
-	if err := runREPL(context.Background(), strings.NewReader("read it\n"), &out, nil, sess); err != nil {
+	if err := runREPL(context.Background(), newScannerSource(strings.NewReader("read it\n"), &out), &out, nil, sess); err != nil {
 		t.Fatalf("runREPL: %v", err)
 	}
 	if len(sess.session.msgs) != 4 {
@@ -350,7 +352,7 @@ func TestREPL_PersistsToolTranscriptButResumesPlainHistory(t *testing.T) {
 	resume := &captureCaller{answer: "second"}
 	sess.orch = agent.New(resume, agent.ContextManager{})
 	sess.runtime = newTestRuntime(t, root, sess.baseSystem, sess.orch, nil)
-	if err := runREPL(context.Background(), strings.NewReader("again\n"), &out, nil, sess); err != nil {
+	if err := runREPL(context.Background(), newScannerSource(strings.NewReader("again\n"), &out), &out, nil, sess); err != nil {
 		t.Fatalf("second runREPL: %v", err)
 	}
 	roles := make([]string, len(resume.messages))
@@ -428,7 +430,7 @@ func TestREPL_DoesNotPersistCanceledRun(t *testing.T) {
 		time.Sleep(20 * time.Millisecond)
 		interrupts <- struct{}{}
 	}()
-	if err := runREPL(context.Background(), in, &out, interrupts, sess); err != nil {
+	if err := runREPL(context.Background(), newScannerSource(in, &out), &out, interrupts, sess); err != nil {
 		t.Fatalf("runREPL: %v", err)
 	}
 	if len(sess.session.msgs) != 0 {
@@ -453,7 +455,7 @@ func TestREPL_ReadOnlyDeniesWriteAttempt(t *testing.T) {
 	sess := newTestSession(t, caller, root) // read-only: no write tools, nil approver
 	var out strings.Builder
 	in := strings.NewReader("please write out.txt\n")
-	if err := runREPL(context.Background(), in, &out, nil, sess); err != nil {
+	if err := runREPL(context.Background(), newScannerSource(in, &out), &out, nil, sess); err != nil {
 		t.Fatalf("runREPL: %v", err)
 	}
 	if strings.Contains(out.String(), "Apply this change?") {
@@ -481,7 +483,7 @@ func TestREPL_AllowWriteApprovedWriteApplies(t *testing.T) {
 
 	var out strings.Builder
 	in := strings.NewReader("write out.txt\ny\n") // goal, then approve the write
-	if err := runREPL(context.Background(), in, &out, nil, sess); err != nil {
+	if err := runREPL(context.Background(), newScannerSource(in, &out), &out, nil, sess); err != nil {
 		t.Fatalf("runREPL: %v", err)
 	}
 	got, err := os.ReadFile(filepath.Join(root, "out.txt"))
@@ -510,7 +512,7 @@ func TestREPL_AllowWriteDeniedWriteSkips(t *testing.T) {
 
 	var out strings.Builder
 	in := strings.NewReader("write out.txt\nn\n") // goal, then deny the write
-	if err := runREPL(context.Background(), in, &out, nil, sess); err != nil {
+	if err := runREPL(context.Background(), newScannerSource(in, &out), &out, nil, sess); err != nil {
 		t.Fatalf("runREPL: %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(root, "out.txt")); !os.IsNotExist(err) {
@@ -586,7 +588,7 @@ func TestRunOnceExecOnlyWiresApprover(t *testing.T) {
 
 	var out strings.Builder
 	in := strings.NewReader("run something\nn\n") // goal, then deny the exec
-	if err := runREPL(context.Background(), in, &out, nil, sess); err != nil {
+	if err := runREPL(context.Background(), newScannerSource(in, &out), &out, nil, sess); err != nil {
 		t.Fatalf("runREPL: %v", err)
 	}
 	if !strings.Contains(out.String(), "Run this command?") {
@@ -605,7 +607,7 @@ func TestREPL_ClearAndNew(t *testing.T) {
 
 	var out strings.Builder
 	in := strings.NewReader("/clear\n/new\n/exit\n")
-	if err := runREPL(context.Background(), in, &out, nil, sess); err != nil {
+	if err := runREPL(context.Background(), newScannerSource(in, &out), &out, nil, sess); err != nil {
 		t.Fatalf("runREPL: %v", err)
 	}
 	got := out.String()
@@ -637,7 +639,7 @@ func TestREPL_SessionsListsStoredSessions(t *testing.T) {
 
 	var out strings.Builder
 	in := strings.NewReader("/sessions\n/exit\n")
-	if err := runREPL(context.Background(), in, &out, nil, sess); err != nil {
+	if err := runREPL(context.Background(), newScannerSource(in, &out), &out, nil, sess); err != nil {
 		t.Fatalf("runREPL: %v", err)
 	}
 	got := out.String()
@@ -668,7 +670,7 @@ func TestREPL_ResumeSwitchesActiveSession(t *testing.T) {
 
 	var out strings.Builder
 	in := strings.NewReader("/resume user:other\nfollow up\n")
-	if err := runREPL(context.Background(), in, &out, nil, sess); err != nil {
+	if err := runREPL(context.Background(), newScannerSource(in, &out), &out, nil, sess); err != nil {
 		t.Fatalf("runREPL: %v", err)
 	}
 	if sess.session.id != "user:other" {
@@ -707,12 +709,333 @@ func TestREPL_SearchSessions(t *testing.T) {
 
 	var out strings.Builder
 	in := strings.NewReader("/search-sessions approval\n/exit\n")
-	if err := runREPL(context.Background(), in, &out, nil, sess); err != nil {
+	if err := runREPL(context.Background(), newScannerSource(in, &out), &out, nil, sess); err != nil {
 		t.Fatalf("runREPL: %v", err)
 	}
 	got := out.String()
 	if !strings.Contains(got, "session search:") || !strings.Contains(got, "workspace:search") ||
 		!strings.Contains(got, "approval prompts") || strings.Contains(got, "user:other") {
 		t.Fatalf("search output wrong:\n%s", got)
+	}
+}
+
+// barrierCaller signals entry, then blocks until its context is canceled.
+type barrierCaller struct {
+	started chan struct{}
+	once    sync.Once
+}
+
+func (b *barrierCaller) Chat(ctx context.Context, _ provider.ChatRequest, _ func(provider.ChatResponse) error) (agent.ModelResult, error) {
+	b.once.Do(func() { close(b.started) })
+	<-ctx.Done()
+	return agent.ModelResult{}, ctx.Err()
+}
+
+// newTracingSession builds a session whose observ records traces under a temp
+// XDG root, returning the session and the trace directory.
+func newTracingSession(t *testing.T, caller agent.ModelCaller) (*replSession, string) {
+	t.Helper()
+	root := t.TempDir()
+	base := t.TempDir()
+	getenv := func(k string) string {
+		if k == "XDG_DATA_HOME" {
+			return base
+		}
+		return ""
+	}
+	o, err := newObserv(getenv, root, true, false, func() time.Time { return time.Unix(1719600000, 0) })
+	if err != nil {
+		t.Fatalf("newObserv: %v", err)
+	}
+	sess := newTestSession(t, caller, root)
+	sess.obs = o
+	return sess, o.traceDir
+}
+
+// recordedTraceStatus reads the single trace file in dir and returns its
+// recorded status field.
+func recordedTraceStatus(t *testing.T, dir string) string {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("ReadDir: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("trace files = %d, want 1", len(entries))
+	}
+	b, err := os.ReadFile(filepath.Join(dir, entries[0].Name()))
+	if err != nil {
+		t.Fatalf("read trace: %v", err)
+	}
+	var trace struct {
+		Status string `json:"status"`
+	}
+	if err := json.Unmarshal(b, &trace); err != nil {
+		t.Fatalf("parse trace: %v", err)
+	}
+	return trace.Status
+}
+
+func TestRunOnceApproverFirstCancelIsCanceled(t *testing.T) {
+	// Approver-first ordering, barrier-forced by construction: Run returns
+	// context.Canceled synchronously (an interrupted approval mapped by the
+	// approver) and there is NO watcher (interrupts is nil), so only the
+	// synchronous normalization in runOnce can make runCtx canceled. Pins both
+	// the rendered line and the status recorded to the trace, which is what
+	// telemetry consumers see.
+	sess, traceDir := newTracingSession(t, errCaller{err: context.Canceled})
+	var out strings.Builder
+	_, runErr := runOnce(context.Background(), &out, nil, sess, "goal", nil)
+	if !errors.Is(runErr, context.Canceled) {
+		t.Fatalf("runErr = %v, want context.Canceled", runErr)
+	}
+	if !strings.Contains(out.String(), "canceled") || strings.Contains(out.String(), "error:") {
+		t.Fatalf("approver-first cancel rendered:\n%s\nwant canceled, never error:", out.String())
+	}
+	if status := recordedTraceStatus(t, traceDir); status != "canceled" {
+		t.Fatalf("recorded trace status = %q, want canceled", status)
+	}
+}
+
+func TestRunOnceWatcherFirstCancelIsCanceled(t *testing.T) {
+	// Watcher-first ordering, barrier-forced: the model blocks until the
+	// interrupt watcher cancels runCtx, so runCtx.Err() is already non-nil
+	// when Run returns. Must classify identically to approver-first.
+	caller := &barrierCaller{started: make(chan struct{})}
+	sess, traceDir := newTracingSession(t, caller)
+	interrupts := make(chan struct{}, 1)
+	go func() {
+		<-caller.started
+		interrupts <- struct{}{}
+	}()
+	var out strings.Builder
+	_, runErr := runOnce(context.Background(), &out, interrupts, sess, "goal", nil)
+	if !errors.Is(runErr, context.Canceled) {
+		t.Fatalf("runErr = %v, want context.Canceled", runErr)
+	}
+	if !strings.Contains(out.String(), "canceled") || strings.Contains(out.String(), "error:") {
+		t.Fatalf("watcher-first cancel rendered:\n%s\nwant canceled, never error:", out.String())
+	}
+	if status := recordedTraceStatus(t, traceDir); status != "canceled" {
+		t.Fatalf("recorded trace status = %q, want canceled", status)
+	}
+}
+
+// fakeGoalEditor scripts Compose; it records the seeds it was given.
+type fakeGoalEditor struct {
+	available bool
+	text      string
+	err       error
+	seeds     []string
+	composes  int
+}
+
+func (f *fakeGoalEditor) Available() bool { return f.available }
+func (f *fakeGoalEditor) Compose(_ context.Context, seed string) (string, error) {
+	f.composes++
+	f.seeds = append(f.seeds, seed)
+	return f.text, f.err
+}
+
+func TestREPL_EditComposesAForcedGoal(t *testing.T) {
+	// /edit seeds the editor and the edited text becomes the goal: recorded,
+	// then run against the model. /edit itself is never recorded.
+	root := t.TempDir()
+	caller := &scriptCaller{responses: []agent.ModelResult{{
+		Response: provider.ChatResponse{Content: "done"},
+	}}}
+	sess := newTestSession(t, caller, root)
+	ed := &fakeGoalEditor{available: true, text: "edited goal\n"}
+	sess.goalEditor = ed
+
+	var out strings.Builder
+	src := &recordingSource{scannerSource: newScannerSource(strings.NewReader("/edit fix the bug\n"), &out)}
+	if err := runREPL(context.Background(), src, &out, nil, sess); err != nil {
+		t.Fatalf("runREPL: %v", err)
+	}
+	if len(ed.seeds) != 1 || ed.seeds[0] != "fix the bug" {
+		t.Fatalf("seeds = %q, want [\"fix the bug\"]", ed.seeds)
+	}
+	if len(src.recorded) != 1 || src.recorded[0] != "edited goal" {
+		t.Fatalf("recorded goals = %q, want the trimmed edited goal only", src.recorded)
+	}
+	if caller.i != 1 {
+		t.Fatalf("model called %d times, want 1", caller.i)
+	}
+}
+
+func TestREPL_EditResultStartingWithSlashRunsAsGoal(t *testing.T) {
+	// The forced flag bypasses slash dispatch exactly once: an edited goal of
+	// "/exit" is a model goal, not a command.
+	root := t.TempDir()
+	caller := &scriptCaller{responses: []agent.ModelResult{{
+		Response: provider.ChatResponse{Content: "done"},
+	}}}
+	sess := newTestSession(t, caller, root)
+	sess.goalEditor = &fakeGoalEditor{available: true, text: "/exit"}
+
+	var out strings.Builder
+	src := &recordingSource{scannerSource: newScannerSource(strings.NewReader("/edit\n"), &out)}
+	if err := runREPL(context.Background(), src, &out, nil, sess); err != nil {
+		t.Fatalf("runREPL: %v", err)
+	}
+	if caller.i != 1 {
+		t.Fatalf("model called %d times, want 1: \"/exit\" must run as a goal", caller.i)
+	}
+	if len(src.recorded) != 1 || src.recorded[0] != "/exit" {
+		t.Fatalf("recorded goals = %q, want [\"/exit\"]", src.recorded)
+	}
+}
+
+func TestREPL_EditUnavailable(t *testing.T) {
+	// nil and Available()==false both refuse before any runner involvement, so
+	// a piped script can never spawn an interactive editor.
+	for _, tc := range []struct {
+		name   string
+		editor goalEditor
+	}{
+		{"nil editor", nil},
+		{"unavailable editor", &fakeGoalEditor{available: false, text: "never"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			caller := &scriptCaller{}
+			sess := newTestSession(t, caller, root)
+			sess.goalEditor = tc.editor
+
+			var out strings.Builder
+			src := &recordingSource{scannerSource: newScannerSource(strings.NewReader("/edit\n"), &out)}
+			if err := runREPL(context.Background(), src, &out, nil, sess); err != nil {
+				t.Fatalf("runREPL: %v", err)
+			}
+			if !strings.Contains(out.String(), "/edit requires an interactive terminal") {
+				t.Fatalf("missing unavailable message in:\n%s", out.String())
+			}
+			if fe, ok := tc.editor.(*fakeGoalEditor); ok && fe.composes != 0 {
+				t.Fatalf("Compose invoked %d times on an unavailable editor, want 0", fe.composes)
+			}
+			if caller.i != 0 || len(src.recorded) != 0 {
+				t.Fatalf("model calls=%d goals=%q, want none", caller.i, src.recorded)
+			}
+		})
+	}
+}
+
+func TestREPL_EditErrorAndEmptyYieldNoGoal(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		editor   *fakeGoalEditor
+		wantOut  string
+		wantSkip string
+	}{
+		{"runner error", &fakeGoalEditor{available: true, err: errors.New("exit status 3")}, "edit failed:", ""},
+		{"oversized", &fakeGoalEditor{available: true, err: errEditTooLarge}, goalLimitWarning, "edit failed:"},
+		{"empty content", &fakeGoalEditor{available: true, text: "  \n "}, "", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			caller := &scriptCaller{}
+			sess := newTestSession(t, caller, root)
+			sess.goalEditor = tc.editor
+
+			var out strings.Builder
+			src := &recordingSource{scannerSource: newScannerSource(strings.NewReader("/edit\n"), &out)}
+			if err := runREPL(context.Background(), src, &out, nil, sess); err != nil {
+				t.Fatalf("runREPL: %v", err)
+			}
+			if tc.wantOut != "" && !strings.Contains(out.String(), tc.wantOut) {
+				t.Fatalf("output missing %q:\n%s", tc.wantOut, out.String())
+			}
+			if tc.wantSkip != "" && strings.Contains(out.String(), tc.wantSkip) {
+				t.Fatalf("output must not contain %q:\n%s", tc.wantSkip, out.String())
+			}
+			if caller.i != 0 || len(src.recorded) != 0 {
+				t.Fatalf("model calls=%d goals=%q, want none", caller.i, src.recorded)
+			}
+		})
+	}
+}
+
+// TestREPLIntegrationPartialInputDoubleCtrlCExits is spec 13.1 case 2 driven
+// through the production seam rather than the editor in isolation: newInput
+// selects the editor, replControl owns the arm/hint policy, withLineSource
+// owns Close, and runREPL is the loop.
+//
+// The invariant it guards is spec 7.4. replControl.enterPrompt clears the arm,
+// and runREPL calls it once per loop iteration. If the interrupt cycle ever
+// returned from ReadGoal, runREPL would loop, re-enter the prompt, clear the
+// arm, and a second Ctrl-C could never quit -- so this cannot be replaced by
+// asserting on the editor alone.
+func TestREPLIntegrationPartialInputDoubleCtrlCExits(t *testing.T) {
+	root := t.TempDir()
+	caller := &scriptCaller{}
+	sess := newTestSession(t, caller, root)
+
+	stdin, stdout := tempDescriptors(t)
+	out := &lockedBuffer{}
+	errOut := &lockedBuffer{}
+	ops := &fakeTermOps{
+		ttys:  map[int]bool{int(stdin.Fd()): true, int(stdout.Fd()): true},
+		sizes: [][2]int{{80, 24}},
+	}
+
+	replCtx, cancelREPL := context.WithCancel(context.Background())
+	defer cancelREPL()
+	interrupts := make(chan struct{}, 1)
+	ctrl := newReplControl(out, errOut, interrupts, cancelREPL)
+	sess.control = ctrl
+
+	// Two presses with typed text before the first and nothing between them.
+	// Separate chunks so the second 0x03 cannot be consumed by the same read
+	// as the first, which is what makes this two distinct presses.
+	in := &chunkReader{chunks: [][]byte{[]byte("partial input\x03"), []byte("\x03")}}
+	src := newInput(inputConfig{
+		Stdin: stdin, Stdout: stdout, Stderr: errOut,
+		In: in, Out: out,
+		UseHistory:  false,
+		Getenv:      func(string) string { return "" },
+		Root:        root,
+		Ops:         ops,
+		OnInterrupt: ctrl.interrupt,
+	})
+	if _, isEditor := src.(*editorSource); !isEditor {
+		t.Fatalf("newInput selected %T, want the editor: this test must exercise the editor path", src)
+	}
+	ctrl.setIdleDisplay(src.IdleDisplay)
+
+	done := make(chan error, 1)
+	go func() {
+		done <- withLineSource(src, func(s lineSource) error {
+			return runREPL(replCtx, s, out, interrupts, sess)
+		})
+	}()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("runREPL after a double Ctrl-C = %v, want a clean exit", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("runREPL did not exit after two idle Ctrl-C presses")
+	}
+
+	if got := strings.Count(out.String(), ctrlCHint); got != 1 {
+		t.Fatalf("hint printed %d times, want exactly 1: the first press arms, the second quits", got)
+	}
+	if caller.i != 0 {
+		t.Fatalf("model called %d times, want 0: a discarded partial line is never a goal", caller.i)
+	}
+	// The "was the discarded line resubmitted" check that used to live here was
+	// removed rather than kept: x/term never flushes the echo on the Ctrl-C
+	// path, so the substring it looked for could not appear whatever the
+	// implementation did, and it would not have noticed the Terminal never
+	// being recreated. TestEditorSourceCtrlCDiscardsRetainedBytesAndContinues
+	// asserts that property where it is observable -- on the goal the next line
+	// produces.
+	// Production Close ownership ran: every raw window this REPL opened was
+	// closed, so the shell is not left in raw mode.
+	makeRaw, restore, _ := ops.counts()
+	if makeRaw == 0 || makeRaw != restore {
+		t.Fatalf("MakeRaw=%d Restore=%d, want equal and non-zero", makeRaw, restore)
 	}
 }

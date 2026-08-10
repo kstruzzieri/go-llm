@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"strings"
@@ -11,11 +12,11 @@ import (
 )
 
 // replApprover renders a mutation's diff preview and prompts the user for a single
-// [y/N] decision over the shared lineReader. It is wired into agent.Request.Approver
+// [y/N] decision over the shared lineSource. It is wired into agent.Request.Approver
 // only when a configured tool needs approval; otherwise the runtime's nil-approver
 // fail-safe denies every mutating call.
 type replApprover struct {
-	lr    *lineReader
+	src   lineSource
 	out   io.Writer
 	color bool
 }
@@ -23,8 +24,8 @@ type replApprover struct {
 // Compile-time assertion: replApprover must satisfy agent.Approver.
 var _ agent.Approver = (*replApprover)(nil)
 
-func newReplApprover(lr *lineReader, out io.Writer, color bool) *replApprover {
-	return &replApprover{lr: lr, out: out, color: color}
+func newReplApprover(src lineSource, out io.Writer, color bool) *replApprover {
+	return &replApprover{src: src, out: out, color: color}
 }
 
 // Approve shows the preview and reads one line. "y"/"yes" (case-insensitive) approves.
@@ -37,20 +38,32 @@ func (a *replApprover) Approve(ctx context.Context, call provider.ToolCall, prev
 	isExec := call.Function.Name == "run_command"
 	isMCP := strings.HasPrefix(call.Function.Name, "mcp__")
 	isPlan := call.Function.Name == submitPlanToolName
-	if isPlan {
+	// The preview still renders here; only the question moves, because the
+	// source owns prompt printing and the editor repaints its prompt on every
+	// asynchronous write.
+	var question string
+	switch {
+	case isPlan:
 		a.renderPlain(preview)
-		_, _ = fmt.Fprint(a.out, "Lock this plan? [y/N] ")
-	} else if isExec {
+		question = "Lock this plan? [y/N] "
+	case isExec:
 		a.renderPlain(preview)
-		_, _ = fmt.Fprint(a.out, "Run this command? [y/N] ")
-	} else if isMCP {
+		question = "Run this command? [y/N] "
+	case isMCP:
 		a.renderPlain(preview)
-		_, _ = fmt.Fprint(a.out, "Run this MCP tool? [y/N] ")
-	} else {
+		question = "Run this MCP tool? [y/N] "
+	default:
 		a.renderDiff(preview)
-		_, _ = fmt.Fprint(a.out, "Apply this change? [y/N] ")
+		question = "Apply this change? [y/N] "
 	}
-	line, ok, err := a.lr.ReadLine(ctx)
+	line, ok, err := a.src.ReadAnswer(ctx, question)
+	if errors.Is(err, errInterrupted) {
+		// Normalized here, at the approval boundary, so runOnce and the
+		// Agentflow author classify one shared error: an interrupted approval
+		// IS a cancellation, and the editor-local sentinel must not leak into
+		// either caller's error taxonomy.
+		return false, context.Canceled
+	}
 	if err != nil {
 		return false, err // ctx canceled: abort the run
 	}

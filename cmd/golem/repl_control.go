@@ -32,21 +32,57 @@ type replControl struct {
 	quit       func()          // cancels the REPL context so runREPL returns (clean exit)
 	atPrompt   bool            // true while idle at the prompt, waiting for input
 	armed      bool            // a prior idle Ctrl-C armed the next one to quit
+
+	// idleDisplay renders an idle-time message. The line source owns it,
+	// because only the source knows whether a prompt is on screen and how to
+	// restore it. Never nil: modes that build a control but no source (-plan,
+	// Agentflow task) never call setIdleDisplay, and today that is safe only
+	// because enterPrompt is unreachable there. Defaulting removes a nil
+	// dereference one future caller away.
+	idleDisplay func(string)
+
+	// suspended holds notices back while another process owns the terminal;
+	// queued collects them in arrival order for the flush on resume.
+	suspended bool
+	queued    []string
+
+	// defaultDisplay is the source-free rendering, kept so a source can be
+	// unbound when it closes. runREPL returns with atPrompt still true, and
+	// signal.Stop runs later than the source's Close, so a Ctrl-C arriving in
+	// that window would otherwise render through a closed source.
+	defaultDisplay func(string)
 }
 
 func newReplControl(out, errOut io.Writer, interrupts chan<- struct{}, quit func()) *replControl {
-	return &replControl{out: out, errOut: errOut, interrupts: interrupts, quit: quit}
+	c := &replControl{out: out, errOut: errOut, interrupts: interrupts, quit: quit}
+	c.defaultDisplay = func(msg string) {
+		_, _ = fmt.Fprintf(out, "\n%s\n%s", msg, promptText)
+	}
+	c.idleDisplay = c.defaultDisplay
+	return c
 }
 
-// prompt prints the prompt and marks the REPL idle. Called at the top of each
-// loop iteration, before the blocking read. Resets the quit-arm: reaching a
-// fresh prompt (e.g. after a completed turn) is intervening activity.
-func (c *replControl) prompt() {
+// setIdleDisplay hands idle rendering to the line source, before any goroutine
+// that can emit a notice starts. A nil fn restores the source-free default and
+// is how a closing source unbinds itself.
+func (c *replControl) setIdleDisplay(fn func(string)) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if fn == nil {
+		fn = c.defaultDisplay
+	}
+	c.idleDisplay = fn
+}
+
+// enterPrompt marks the REPL idle. It prints nothing: the line source owns the
+// prompt, because the editor arriving in task 5 prints and repaints its own and
+// a second printer would double every one. Resets the quit-arm, since reaching
+// a fresh prompt is intervening activity.
+func (c *replControl) enterPrompt() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.atPrompt = true
 	c.armed = false
-	_, _ = fmt.Fprint(c.out, promptText)
 }
 
 // enterTurn marks the REPL busy: a line was read and is being dispatched or
@@ -60,11 +96,49 @@ func (c *replControl) enterTurn() {
 
 // notice prints an asynchronous message. When idle at the prompt it reprints
 // the prompt underneath so the prompt is never buried by the message.
+// suspendNotices holds asynchronous messages back while something else owns the
+// terminal -- today, the external editor /edit spawns. A notice painted over a
+// full-screen editor corrupts its display with nothing to repaint it, since the
+// editor, not golem, owns the screen.
+func (c *replControl) suspendNotices() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.suspended = true
+}
+
+// resumeNotices releases the terminal and flushes whatever arrived meanwhile,
+// in order. Messages are delivered rather than dropped: they are warnings the
+// user still needs, just not during the edit.
+func (c *replControl) resumeNotices() {
+	c.mu.Lock()
+	queued := c.queued
+	c.queued, c.suspended = nil, false
+	c.mu.Unlock()
+
+	for _, line := range queued {
+		c.notice(line)
+	}
+}
+
 func (c *replControl) notice(line string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if c.suspended {
+		// Bounded: a stuck editor must not let a chatty producer grow this
+		// without limit. The oldest are dropped, since the newest describe the
+		// state the user is returning to.
+		const maxQueuedNotices = 64
+		c.queued = append(c.queued, line)
+		if len(c.queued) > maxQueuedNotices {
+			c.queued = c.queued[len(c.queued)-maxQueuedNotices:]
+		}
+		return
+	}
 	if c.atPrompt {
-		_, _ = fmt.Fprintf(c.out, "\n%s\n%s", line, promptText)
+		// The mutex is held across the call so the atPrompt decision and the
+		// display action stay one policy operation. The source must therefore
+		// not call back into replControl from IdleDisplay.
+		c.idleDisplay(line)
 		return
 	}
 	// Mid-turn: write to stderr so the notice never splices into the renderer's
@@ -90,5 +164,5 @@ func (c *replControl) interrupt() {
 		return
 	}
 	c.armed = true
-	_, _ = fmt.Fprintf(c.out, "\n%s\n%s", ctrlCHint, promptText)
+	c.idleDisplay(ctrlCHint)
 }

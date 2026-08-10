@@ -7,6 +7,7 @@ import (
 	"io"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/kstruzzieri/go-llm/agent"
 	"github.com/kstruzzieri/go-llm/conversation"
@@ -56,20 +57,23 @@ type replSession struct {
 	// and non-interactive callers, where runREPL falls back to a plain prompt
 	// and the caller's interrupt wiring.
 	control *replControl
+
+	// goalEditor backs /edit. nil outside the default REPL and in narrow
+	// tests that never dispatch it; nil renders the unavailable message.
+	goalEditor goalEditor
 }
 
 // runREPL reads lines from in, dispatching slash commands and running every
 // other line as an agent goal. A value on interrupts cancels the in-flight Run
 // without ending the loop. EOF (Ctrl-D) returns nil.
-func runREPL(ctx context.Context, in io.Reader, out io.Writer, interrupts <-chan struct{}, sess *replSession) error {
-	lr := newLineReader(in)
+func runREPL(ctx context.Context, src lineSource, out io.Writer, interrupts <-chan struct{}, sess *replSession) error {
 	for {
 		if sess.control != nil {
-			sess.control.prompt()
-		} else {
-			_, _ = fmt.Fprint(out, promptText)
+			sess.control.enterPrompt()
 		}
-		line, ok, err := lr.ReadLine(ctx)
+		// The source prints the prompt. runREPL must not: the editor arriving
+		// in task 5 prints and repaints its own, and two printers double it.
+		line, ok, err := src.ReadGoal(ctx, promptText)
 		if err != nil {
 			if ctx.Err() != nil {
 				return nil // ctx canceled at the prompt: exit quietly (idle Ctrl-C quit / shutdown)
@@ -88,12 +92,34 @@ func runREPL(ctx context.Context, in io.Reader, out io.Writer, interrupts <-chan
 			continue
 		}
 		if strings.HasPrefix(line, "/") {
-			if exit := dispatchSlash(ctx, out, sess, line); exit {
+			forced, exit := dispatchSlash(ctx, out, sess, line)
+			if exit {
 				return nil
 			}
+			if forced == "" {
+				continue
+			}
+			// /edit's result is a forced model goal: it falls through to the
+			// recording and run below, bypassing slash dispatch exactly once
+			// even when it begins with "/".
+			line = forced
+		}
+		// One UTF-8 boundary for every source. The editor rejects malformed
+		// bytes at the terminal, but the scanner and /edit never pass through
+		// it, and the provider transport is JSON: it would substitute U+FFFD
+		// silently, so the model would answer a question the user did not type
+		// and history would store bytes arrow recall cannot reproduce. A
+		// correctly encoded U+FFFD is fine here -- only x/term cannot represent
+		// it -- so validity, not content, is the test.
+		if !utf8.ValidString(line) {
+			_, _ = fmt.Fprintln(out, invalidUTF8Warning)
 			continue
 		}
-		_, _ = runOnce(ctx, out, interrupts, sess, line, lr)
+		// Recorded only here: after trimming, after the empty and slash checks,
+		// and after validation, so a blank line, a command, or malformed bytes
+		// can never reach history.
+		src.RecordGoal(line)
+		_, _ = runOnce(ctx, out, interrupts, sess, line, src)
 	}
 }
 
@@ -104,7 +130,7 @@ var errOneShotFailed = errors.New("one-shot run failed")
 // runOneShot executes exactly one agent turn for -p. Only the final answer is
 // written to stdout (with a single trailing newline); every other line the
 // turn produces — tool progress, warnings, errors — goes to stderr via
-// runOnce. A nil lineReader means no interactive approver exists, so the
+// runOnce. A nil line source means no interactive approver exists, so the
 // runtime fail-safe denies any approval-gated tool call.
 func runOneShot(ctx context.Context, stdout, stderr io.Writer, interrupts <-chan struct{}, sess *replSession, prompt string) error {
 	res, runErr := runOnce(ctx, stderr, interrupts, sess, prompt, nil)
@@ -121,7 +147,7 @@ func runOneShot(ctx context.Context, stdout, stderr io.Writer, interrupts <-chan
 // runOnce runs a single agent turn, rendering all progress and errors to out.
 // It returns the run result so runOneShot can extract the final answer; the
 // REPL ignores it.
-func runOnce(ctx context.Context, out io.Writer, interrupts <-chan struct{}, sess *replSession, line string, lr *lineReader) (agent.Result, error) {
+func runOnce(ctx context.Context, out io.Writer, interrupts <-chan struct{}, sess *replSession, line string, src lineSource) (agent.Result, error) {
 	runCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
@@ -147,9 +173,13 @@ func runOnce(ctx context.Context, out io.Writer, interrupts <-chan struct{}, ses
 		}()
 	}
 
+	// A nil source means no interactive approver is available -- one-shot mode
+	// in production, read-only sessions in tests. It is capability absence, not
+	// a mode assertion: the runtime's nil-approver fail-safe then denies every
+	// gated call.
 	var approver agent.Approver
-	if lr != nil && needsApprover(sess.allowWrite, sess.allowExec, sess.mcpAttached) {
-		approver = newReplApprover(lr, out, sess.color)
+	if src != nil && needsApprover(sess.allowWrite, sess.allowExec, sess.mcpAttached) {
+		approver = newReplApprover(src, out, sess.color)
 	}
 
 	rend := newRenderer(out, sess.color, sess.maxSteps, sess.clock, sess.mixed)
@@ -197,6 +227,14 @@ func runOnce(ctx context.Context, out io.Writer, interrupts <-chan struct{}, ses
 		Approver: approver, // nil when read-only => runtime fail-safe denies Write/Exec
 		Observer: observer,
 	}, func(golemruntime.Event) error { return nil })
+	// An interrupted approval surfaces as context.Canceled from inside the run
+	// and races the interrupt watcher's cancel(). Synchronize the derived
+	// context here so status and rendering never depend on scheduler order: an
+	// interrupted approval IS a cancellation. This deliberately flips the
+	// recorded trace/telemetry status for that case from error to canceled.
+	if errors.Is(runErr, context.Canceled) {
+		cancel()
+	}
 	var sessionSaveErr error
 	if res.Answer != "" &&
 		errors.Is(runErr, golemruntime.ErrSessionPersistence) &&
@@ -268,12 +306,15 @@ func lastRoutedModel(res agent.Result) string {
 }
 
 // dispatchSlash handles a slash command; returns true to exit the REPL.
-func dispatchSlash(ctx context.Context, out io.Writer, sess *replSession, line string) bool {
+// dispatchSlash handles one slash command. A non-empty forced return is a
+// goal the caller must run as a model goal -- /edit's result, which bypasses
+// slash dispatch exactly once even when it begins with "/".
+func dispatchSlash(ctx context.Context, out io.Writer, sess *replSession, line string) (forced string, exit bool) {
 	fields := strings.Fields(line)
 	cmd := fields[0]
 	switch cmd {
 	case "/exit", "/quit":
-		return true
+		return "", true
 	case "/help":
 		_, _ = fmt.Fprint(out, golemHelp)
 	case "/clear":
@@ -349,10 +390,36 @@ func dispatchSlash(ctx context.Context, out io.Writer, sess *replSession, line s
 		if sess.retrieveOmitted {
 			_, _ = fmt.Fprintln(out, "retrieve omitted: no RAG index configured")
 		}
+	case "/edit":
+		// Capability is independent of the line editor: -no-editor selects
+		// the scanner for input but leaves /edit available on a real TTY. A
+		// piped script must never spawn an interactive editor.
+		if sess.goalEditor == nil || !sess.goalEditor.Available() {
+			_, _ = fmt.Fprintln(out, "/edit requires an interactive terminal")
+			return "", false
+		}
+		seed := strings.TrimSpace(strings.TrimPrefix(line, cmd))
+		// The editor owns the screen for its lifetime, and golem cannot repaint
+		// what it does not draw. Notices are held and flushed afterwards rather
+		// than painted over it.
+		if sess.control != nil {
+			sess.control.suspendNotices()
+			defer sess.control.resumeNotices()
+		}
+		text, err := sess.goalEditor.Compose(ctx, seed)
+		switch {
+		case errors.Is(err, errEditTooLarge):
+			_, _ = fmt.Fprintln(out, goalLimitWarning)
+		case err != nil:
+			_, _ = fmt.Fprintf(out, "edit failed: %v\n", err)
+		default:
+			// Non-empty text is the forced goal; empty aborts to the prompt.
+			return strings.TrimSpace(text), false
+		}
 	default:
 		_, _ = fmt.Fprintf(out, "unknown command: %s (try /help)\n", cmd)
 	}
-	return false
+	return "", false
 }
 
 const golemHelp = `commands:
@@ -365,6 +432,7 @@ const golemHelp = `commands:
   /search-sessions <query>
                  search saved sessions
   /resume <id>   switch to a saved session
+  /edit [seed]   compose a goal in $VISUAL/$EDITOR (quoting unsupported)
   /undo          revert the last applied write (when -allow-write)
   /remember [--global] <text>
                  save a memory (workspace scope unless --global)

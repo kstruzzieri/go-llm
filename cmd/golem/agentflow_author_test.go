@@ -1256,3 +1256,22 @@ func TestRunAgentflowAuthor_TerminalLockErrorReturned(t *testing.T) {
 		t.Fatalf("want terminal invalid_arguments CommandError, got %v", err)
 	}
 }
+
+func TestRunAgentflowAuthor_FastApproverInterruptIsInterrupted(t *testing.T) {
+	// A Ctrl-C during the plan-lock approval itself: the editor returns
+	// errInterrupted, replApprover maps it to context.Canceled, and the author
+	// must classify that as errPlannerInterrupted -- not approval-denied (the
+	// deny path requires a nil error) and never the raw editor sentinel.
+	root := t.TempDir()
+	caller := &scriptCaller{responses: []agent.ModelResult{submitPlanCall(validIRJSON(t))}}
+	sess := newTestSession(t, caller, root)
+	approver := newReplApprover(&stubAnswerSource{err: errInterrupted}, io.Discard, false)
+
+	err := runAgentflowAuthorWithClient(context.Background(), io.Discard, io.Discard, nil, sess, flags{goal: "x", goalSet: true}, root, &stubLocker{}, approver)
+	if !errors.Is(err, errPlannerInterrupted) {
+		t.Fatalf("fast approval interrupt = %v, want errPlannerInterrupted", err)
+	}
+	if errors.Is(err, errPlannerApprovalDenied) || errors.Is(err, errInterrupted) {
+		t.Fatalf("fast approval interrupt misclassified: %v", err)
+	}
+}

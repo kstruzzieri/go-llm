@@ -1357,16 +1357,24 @@ func guardExistingPlan(root string) error {
 
 // runAgentflowAuthor is the -goal flow: guard, probe, run a read-only authoring
 // loop, then initialize and lock only after submit_plan's preview is approved.
-func runAgentflowAuthor(ctx context.Context, stdin io.Reader, stdout, stderr io.Writer, interrupts <-chan struct{}, sess *replSession, f flags, root string) error {
+func runAgentflowAuthor(ctx context.Context, src lineSource, stdout, stderr io.Writer, interrupts <-chan struct{}, sess *replSession, f flags, root string) error {
 	var runner agentflow.Runner
 	if f.agentflowSrc != "" {
 		runner = agentflow.NewSrcExecRunner(root, f.agentflowSrc)
 	} else {
 		runner = agentflow.NewExecRunner(root)
 	}
-	var approver agent.Approver = newReplApprover(newLineReader(stdin), stdout, sess.color)
+	// Only -approve-plan-lock may arrive without a source: its approver never
+	// reads stdin. Any other nil is an internal wiring error, and opening a
+	// second reader here would defeat the single-source invariant.
+	var approver agent.Approver
 	if f.approvePlanLock {
 		approver = &autoPlanApprover{out: stdout}
+	} else {
+		if src == nil {
+			return errors.New("golem: interactive plan approval requires a line source")
+		}
+		approver = newReplApprover(src, stdout, sess.color)
 	}
 	return runAgentflowAuthorWithClient(ctx, stdout, stderr, interrupts, sess, f, root, agentflow.NewClient(runner, root), approver)
 }
