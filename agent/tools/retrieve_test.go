@@ -56,6 +56,92 @@ func TestRetrieveReturnsContextAndAttribution(t *testing.T) {
 	}
 }
 
+type fakeLegacyRenderedRetriever struct {
+	results []rag.SearchResult
+	content string
+	count   int
+}
+
+func (f fakeLegacyRenderedRetriever) Retrieve(context.Context, string, int) ([]rag.SearchResult, error) {
+	return f.results, nil
+}
+func (f fakeLegacyRenderedRetriever) BuildContext([]rag.SearchResult, int) string { return "fallback" }
+func (f fakeLegacyRenderedRetriever) BuildContextWithRenderedCount([]rag.SearchResult, int) (string, int) {
+	return f.content, f.count
+}
+
+func TestRetrieveLegacyRenderedCapabilityAttributesRenderedPrefix(t *testing.T) {
+	fake := fakeLegacyRenderedRetriever{
+		results: []rag.SearchResult{
+			{Chunk: rag.Chunk{Source: "first.go", Content: "first"}, Score: 0.9},
+			{Chunk: rag.Chunk{StableKey: "second", Source: "second.go", Content: "second"}, Score: 0.8},
+		},
+		content: "first",
+		count:   1,
+	}
+
+	res, err := (Retrieve{R: fake}).Invoke(context.Background(), json.RawMessage(`{"query":"q"}`))
+	if err != nil {
+		t.Fatalf("invoke: %v", err)
+	}
+	if res.Content != "first" {
+		t.Fatalf("content = %q, want rendered content", res.Content)
+	}
+	if res.Attrib == nil || len(res.Attrib.Sources) != 1 {
+		t.Fatalf("attribution = %+v, want only the rendered prefix", res.Attrib)
+	}
+	if got := res.Attrib.Sources[0]; got.StableKey != "" || got.Source != "first.go" {
+		t.Fatalf("blank stable key must remain represented for later filtering, got %+v", got)
+	}
+}
+
+type fakeLegacyPrefixRetriever struct{ results []rag.SearchResult }
+
+func (f fakeLegacyPrefixRetriever) Retrieve(context.Context, string, int) ([]rag.SearchResult, error) {
+	return f.results, nil
+}
+func (fakeLegacyPrefixRetriever) BuildContext([]rag.SearchResult, int) string { return "first" }
+
+func TestRetrieveLegacyFallbackOverCreditsWithoutRenderedCapability(t *testing.T) {
+	fake := fakeLegacyPrefixRetriever{results: []rag.SearchResult{
+		{Chunk: rag.Chunk{StableKey: "first", Source: "first.go", Content: "first"}, Score: 0.9},
+		{Chunk: rag.Chunk{StableKey: "second", Source: "second.go", Content: "second"}, Score: 0.8},
+	}}
+
+	res, err := (Retrieve{R: fake}).Invoke(context.Background(), json.RawMessage(`{"query":"q"}`))
+	if err != nil {
+		t.Fatalf("invoke: %v", err)
+	}
+	if res.Content != "first" {
+		t.Fatalf("content = %q, want only the legacy rendered prefix", res.Content)
+	}
+	if res.Attrib == nil || len(res.Attrib.Sources) != 2 {
+		t.Fatalf("legacy fallback must retain all-results attribution, got %+v", res.Attrib)
+	}
+}
+
+func TestRetrieveLegacyRenderedCapabilityRejectsInvalidCount(t *testing.T) {
+	results := []rag.SearchResult{
+		{Chunk: rag.Chunk{StableKey: "first", Source: "first.go", Content: "first"}, Score: 0.9},
+		{Chunk: rag.Chunk{StableKey: "second", Source: "second.go", Content: "second"}, Score: 0.8},
+	}
+	for _, count := range []int{-1, len(results) + 1} {
+		t.Run(fmt.Sprintf("count %d", count), func(t *testing.T) {
+			fake := fakeLegacyRenderedRetriever{results: results, content: "rendered", count: count}
+			res, err := (Retrieve{R: fake}).Invoke(context.Background(), json.RawMessage(`{"query":"q"}`))
+			if err != nil {
+				t.Fatalf("invoke: %v", err)
+			}
+			if !res.IsError {
+				t.Fatalf("invalid rendered count %d must be a tool error: %+v", count, res)
+			}
+			if res.Attrib != nil {
+				t.Fatalf("invalid rendered count %d must attribute nothing: %+v", count, res.Attrib)
+			}
+		})
+	}
+}
+
 func TestRetrieveMalformedArgsIsError(t *testing.T) {
 	tool := Retrieve{R: fakeRetriever{}, K: 4}
 	out, err := tool.Invoke(context.Background(), json.RawMessage(`{"query":}`))

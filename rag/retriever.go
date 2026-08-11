@@ -932,14 +932,22 @@ func validateQueryVectorSpace(queryVectorSpaceID string, probe VectorSpaceProbe)
 // inspect the supporting evidence. The header retains source, line range, and
 // similarity attribution, and the existing max-token truncation is preserved.
 func (r *Retriever) BuildContext(results []SearchResult, maxTokens int) string {
+	context, _ := r.BuildContextWithRenderedCount(results, maxTokens)
+	return context
+}
+
+// BuildContextWithRenderedCount constructs a context string and reports how
+// many leading results it rendered before the token budget was exhausted.
+func (r *Retriever) BuildContextWithRenderedCount(results []SearchResult, maxTokens int) (string, int) {
 	if len(results) == 0 {
-		return ""
+		return "", 0
 	}
 
 	maxChars := maxTokens * 4 // rough approximation
 	var b strings.Builder
 	b.WriteString("Relevant code context:\n\n")
 
+	count := 0
 	for _, res := range results {
 		// The source sits inside a line-start block delimiter and is untrusted:
 		// newlines are legal in POSIX filenames, nothing in the write path rejects
@@ -955,9 +963,10 @@ func (r *Retriever) BuildContext(results []SearchResult, maxTokens int) string {
 			break
 		}
 		b.WriteString(entry)
+		count++
 	}
 
-	return b.String()
+	return b.String(), count
 }
 
 var contentLineBreakReplacer = strings.NewReplacer(

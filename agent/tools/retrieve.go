@@ -44,6 +44,12 @@ type retriever interface {
 	BuildContext(results []rag.SearchResult, maxTokens int) string
 }
 
+// legacyRenderedRetriever optionally reports how many leading results its
+// legacy context rendering included.
+type legacyRenderedRetriever interface {
+	BuildContextWithRenderedCount(results []rag.SearchResult, maxTokens int) (string, int)
+}
+
 // progressiveRetriever is the optional capability the progressive path needs.
 // *rag.Retriever satisfies it. The groups variant is the only one used: it
 // returns the same output and trace as RenderProgressive plus the capability
@@ -61,6 +67,7 @@ type progressiveRetriever interface {
 // cmd/golem. Same convention as rag/progressive.go's progressiveStoreReader
 // assertion (DEV-11) and DEV-20's atomicSourceReplacerWithVectorSpaceID.
 var _ progressiveRetriever = (*rag.Retriever)(nil)
+var _ legacyRenderedRetriever = (*rag.Retriever)(nil)
 
 // Retrieve is the reference read-only retrieval built-in. #95 swaps SearchMulti
 // behind the same retriever seam without changing the agent.Tool contract.
@@ -254,14 +261,21 @@ func (t Retrieve) Invoke(ctx context.Context, raw json.RawMessage) (agent.ToolRe
 		return agent.ToolResult{Content: content, Attrib: attrib, Context: bridgeGroups(groups, t.MinFullResults)}, nil
 	}
 
-	content := t.R.BuildContext(results, maxTokens)
+	var content string
+	if rendered, ok := t.R.(legacyRenderedRetriever); ok {
+		var count int
+		content, count = rendered.BuildContextWithRenderedCount(results, maxTokens)
+		// An impossible count invalidates the renderer's content/attribution pair;
+		// failing the tool is safer than trusting either output or over-crediting.
+		if count < 0 || count > len(results) {
+			return agent.ToolResult{IsError: true, Content: fmt.Sprintf(
+				"retrieval render failed: invalid rendered result count %d for %d results", count, len(results))}, nil
+		}
+		results = results[:count]
+	} else {
+		content = t.R.BuildContext(results, maxTokens)
+	}
 
-	// KNOWN OVER-CREDITING, DELIBERATELY RETAINED: BuildContext stops at the
-	// first entry that would exceed its char budget (rag/retriever.go:948) yet
-	// every retrieved result is attributed here, so the model can be credited
-	// with evidence it never saw (#189 spec section 11). BuildContext is frozen
-	// per spec section 4 and byte-identity with the pre-#189 path is the goal;
-	// set Progressive to get attribution equal to what was actually rendered.
 	attrib := &agent.RetrievalAttribution{Sources: make([]agent.RetrievedSource, 0, len(results))}
 	for _, r := range results {
 		attrib.Sources = append(attrib.Sources, agent.RetrievedSource{

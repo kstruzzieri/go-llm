@@ -938,6 +938,29 @@ func TestRetrieverBuildContext(t *testing.T) {
 	}
 }
 
+func TestRetrieverBuildContextWithRenderedCount(t *testing.T) {
+	retriever := &Retriever{}
+	results := []SearchResult{
+		{
+			Chunk: Chunk{Source: "first.go", StartLine: 3, EndLine: 3, Content: "first"},
+			Score: 0.90,
+		},
+		{
+			Chunk: Chunk{Source: "second.go", StartLine: 7, EndLine: 7, Content: strings.Repeat("x", 200)},
+			Score: 0.80,
+		},
+	}
+
+	got, count := retriever.BuildContextWithRenderedCount(results, 30)
+	const want = "Relevant code context:\n\n--- first.go (lines 3-3, similarity: 0.90) ---\n3| first\n\n"
+	if got != want {
+		t.Fatalf("context = %q, want %q", got, want)
+	}
+	if count != 1 {
+		t.Fatalf("rendered count = %d, want 1", count)
+	}
+}
+
 // countBlockLeads counts "--- " block headers a model would read as the start of
 // a context block: at the start of the text or after a line break. It walks the
 // text structurally rather than reusing the production pattern, so a mistake in
