@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"slices"
 	"time"
 
 	"github.com/kstruzzieri/go-llm/provider"
@@ -112,6 +113,34 @@ type ContextAssemblyEvent struct {
 // observer callbacks.
 type ContextAssemblyObserver interface {
 	OnContextAssembly(ctx context.Context, e ContextAssemblyEvent) error
+}
+
+// RetrievalPresentationEvent reports retrieval attribution in a tool message
+// that survived final context assembly and was presented to the model. It
+// carries no message content; Attribution.Sources is owned by the event.
+type RetrievalPresentationEvent struct {
+	Step        int
+	ToolCallID  string
+	Attribution RetrievalAttribution
+}
+
+// RetrievalPresentationObserver is an OPTIONAL extension of Observer. When an
+// Observer also implements it, the Orchestrator calls OnRetrievalPresentation
+// once for each attributed tool message in the final assembled prompt, after
+// OnPressure and OnContextAssembly and before the step's model call. A returned
+// error aborts Run before the model call, like the other observer callbacks.
+type RetrievalPresentationObserver interface {
+	OnRetrievalPresentation(ctx context.Context, e RetrievalPresentationEvent) error
+}
+
+func retrievalPresentationEvent(step int, msg Message) RetrievalPresentationEvent {
+	return RetrievalPresentationEvent{
+		Step:       step,
+		ToolCallID: msg.ToolCallID,
+		Attribution: RetrievalAttribution{
+			Sources: slices.Clone(msg.Attrib.Sources),
+		},
+	}
 }
 
 type nopObserver struct{}
