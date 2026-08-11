@@ -49,10 +49,20 @@ type SignalStore interface {
 	PruneRetrievals(ctx context.Context) (int, error)
 }
 
+// AtomicSignalStore persists complete retrieval and signal operations in a
+// single transaction.
+type AtomicSignalStore interface {
+	SignalStore
+	InsertRetrievalWithCounts(ctx context.Context, id, query string, chunkKeys []string, createdAt time.Time) error
+	InsertSignals(ctx context.Context, retrievalID string, chunkKeys []string, kind SignalKind, strength float64, createdAt time.Time) error
+}
+
 // SQLiteSignalStore implements SignalStore using a SQLite database.
 type SQLiteSignalStore struct {
 	db *sql.DB
 }
+
+var _ AtomicSignalStore = (*SQLiteSignalStore)(nil)
 
 // NewSignalStore creates a SQLiteSignalStore, running migrations on the
 // provided database if needed.
@@ -72,6 +82,40 @@ func (s *SQLiteSignalStore) InsertRetrieval(ctx context.Context, id, query strin
 	)
 	if err != nil {
 		return fmt.Errorf("feedback: insert retrieval %q: %w", id, err)
+	}
+	return nil
+}
+
+// InsertRetrievalWithCounts records a retrieval event and increments all of
+// its chunk retrieval counts atomically.
+func (s *SQLiteSignalStore) InsertRetrievalWithCounts(ctx context.Context, id, query string, chunkKeys []string, createdAt time.Time) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("feedback: insert retrieval with counts begin: %w", err)
+	}
+
+	if _, err := tx.ExecContext(ctx,
+		`INSERT INTO feedback_retrievals (retrieval_id, query, chunk_keys, created_at) VALUES (?, ?, ?, ?)`,
+		id, query, strings.Join(chunkKeys, "\n"), createdAt.UnixMilli(),
+	); err != nil {
+		_ = tx.Rollback()
+		return fmt.Errorf("feedback: insert retrieval %q: %w", id, err)
+	}
+	for _, key := range chunkKeys {
+		if _, err := tx.ExecContext(ctx,
+			`INSERT INTO feedback_aggregates (chunk_key, retrieval_count)
+			 VALUES (?, 1)
+			 ON CONFLICT(chunk_key) DO UPDATE SET
+				retrieval_count = feedback_aggregates.retrieval_count + 1`,
+			key,
+		); err != nil {
+			_ = tx.Rollback()
+			return fmt.Errorf("feedback: increment retrieval count %q: %w", key, err)
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("feedback: insert retrieval with counts commit: %w", err)
 	}
 	return nil
 }
@@ -111,6 +155,49 @@ func (s *SQLiteSignalStore) InsertSignal(ctx context.Context, retrievalID, chunk
 
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("feedback: insert signal commit: %w", err)
+	}
+	return nil
+}
+
+// InsertSignals persists one signal for each chunk key and updates all
+// aggregate timestamps atomically.
+func (s *SQLiteSignalStore) InsertSignals(ctx context.Context, retrievalID string, chunkKeys []string, kind SignalKind, strength float64, createdAt time.Time) error {
+	if len(chunkKeys) == 0 {
+		return nil
+	}
+	if createdAt.IsZero() {
+		createdAt = time.Now()
+	}
+	now := createdAt.UnixMilli()
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("feedback: insert signals begin: %w", err)
+	}
+
+	for _, key := range chunkKeys {
+		if _, err := tx.ExecContext(ctx,
+			`INSERT INTO feedback_signals (retrieval_id, chunk_key, signal_kind, strength, created_at)
+			 VALUES (?, ?, ?, ?, ?)`,
+			retrievalID, key, string(kind), strength, now,
+		); err != nil {
+			_ = tx.Rollback()
+			return fmt.Errorf("feedback: insert signal: %w", err)
+		}
+
+		if _, err := tx.ExecContext(ctx,
+			`INSERT INTO feedback_aggregates (chunk_key, last_signal_at)
+			 VALUES (?, ?)
+			 ON CONFLICT(chunk_key) DO UPDATE SET last_signal_at = excluded.last_signal_at`,
+			key, now,
+		); err != nil {
+			_ = tx.Rollback()
+			return fmt.Errorf("feedback: upsert aggregate last_signal_at: %w", err)
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("feedback: insert signals commit: %w", err)
 	}
 	return nil
 }
