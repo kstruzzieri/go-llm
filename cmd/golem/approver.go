@@ -16,9 +16,10 @@ import (
 // only when a configured tool needs approval; otherwise the runtime's nil-approver
 // fail-safe denies every mutating call.
 type replApprover struct {
-	src   lineSource
-	out   io.Writer
-	color bool
+	src         lineSource
+	out         io.Writer
+	color       bool
+	beforeWrite func() error
 }
 
 // Compile-time assertion: replApprover must satisfy agent.Approver.
@@ -35,6 +36,11 @@ func newReplApprover(src lineSource, out io.Writer, color bool) *replApprover {
 // plain preview and run prompt; all other calls get the diff rendering and "Apply
 // this change?" prompt.
 func (a *replApprover) Approve(ctx context.Context, call provider.ToolCall, preview string) (bool, error) {
+	if a.beforeWrite != nil {
+		if err := a.beforeWrite(); err != nil {
+			return false, err
+		}
+	}
 	isExec := call.Function.Name == "run_command"
 	isMCP := strings.HasPrefix(call.Function.Name, "mcp__")
 	isPlan := call.Function.Name == submitPlanToolName
@@ -58,6 +64,7 @@ func (a *replApprover) Approve(ctx context.Context, call provider.ToolCall, prev
 	}
 	line, ok, err := a.src.ReadAnswer(ctx, question)
 	if errors.Is(err, errInterrupted) {
+		_, _ = fmt.Fprintln(a.out)
 		// Normalized here, at the approval boundary, so runOnce and the
 		// Agentflow author classify one shared error: an interrupted approval
 		// IS a cancellation, and the editor-local sentinel must not leak into
@@ -65,6 +72,7 @@ func (a *replApprover) Approve(ctx context.Context, call provider.ToolCall, prev
 		return false, context.Canceled
 	}
 	if err != nil {
+		_, _ = fmt.Fprintln(a.out)
 		return false, err // ctx canceled: abort the run
 	}
 	if !ok {
@@ -75,6 +83,7 @@ func (a *replApprover) Approve(ctx context.Context, call provider.ToolCall, prev
 	case "y", "yes":
 		return true, nil
 	default:
+		_, _ = fmt.Fprintln(a.out)
 		return false, nil
 	}
 }

@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"syscall"
 	"testing"
@@ -24,6 +25,88 @@ func TestParseFlagsAllowWrite(t *testing.T) {
 	if f2.allowWrite {
 		t.Fatal("allowWrite must default to false")
 	}
+}
+
+func TestColorPermittedTruthTable(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		noColor bool
+		env     map[string]string
+		want    bool
+	}{
+		{name: "default", env: map[string]string{"NO_COLOR": "", "TERM": "xterm-256color"}, want: true},
+		{name: "no-color flag", noColor: true, env: map[string]string{"NO_COLOR": "", "TERM": "xterm-256color"}, want: false},
+		{name: "NO_COLOR env", env: map[string]string{"NO_COLOR": "1", "TERM": "xterm-256color"}, want: false},
+		{name: "TERM dumb", env: map[string]string{"NO_COLOR": "", "TERM": "dumb"}, want: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			for k, v := range tc.env {
+				t.Setenv(k, v)
+			}
+			if got := colorPermitted(tc.noColor); got != tc.want {
+				t.Fatalf("colorPermitted(%v) = %v, want %v", tc.noColor, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestColorEnabledHonorsTerminalAndEnvironment(t *testing.T) {
+	t.Setenv("NO_COLOR", "")
+	t.Setenv("TERM", "xterm-256color")
+	null, err := os.Open(os.DevNull)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = null.Close() }()
+	if colorEnabled(null, false) {
+		t.Fatal("character device without a terminal must disable ANSI")
+	}
+
+	if runtime.GOOS != "windows" {
+		t.Run("pty", func(t *testing.T) {
+			terminal := openTestTerminal(t)
+
+			if !colorEnabled(terminal, false) {
+				t.Fatal("PTY should enable ANSI by default")
+			}
+			if colorEnabled(terminal, true) {
+				t.Fatal("-no-color must disable ANSI")
+			}
+			t.Setenv("NO_COLOR", "1")
+			if colorEnabled(terminal, false) {
+				t.Fatal("NO_COLOR must disable ANSI")
+			}
+			t.Setenv("NO_COLOR", "")
+			t.Setenv("TERM", "dumb")
+			if colorEnabled(terminal, false) {
+				t.Fatal("TERM=dumb must disable ANSI")
+			}
+		})
+	}
+
+	regular, err := os.CreateTemp(t.TempDir(), "stdout")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = regular.Close() }()
+	t.Setenv("TERM", "xterm-256color")
+	if colorEnabled(regular, false) {
+		t.Fatal("non-terminal output must disable ANSI")
+	}
+}
+
+// openTestTerminal opens the controlling terminal, skipping in non-interactive
+// runs. Legacy /dev/pty?? nodes are dead on modern Darwin (open returns
+// EAGAIN), so only interactive runs exercise the TTY-true branch; the flag and
+// environment gates are pinned terminal-free by TestColorPermittedTruthTable.
+func openTestTerminal(t *testing.T) *os.File {
+	t.Helper()
+	terminal, err := os.OpenFile("/dev/tty", os.O_RDWR, 0)
+	if err != nil {
+		t.Skipf("open terminal: %v", err)
+	}
+	t.Cleanup(func() { _ = terminal.Close() })
+	return terminal
 }
 
 func TestStartupNotices(t *testing.T) {
