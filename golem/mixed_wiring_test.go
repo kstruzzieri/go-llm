@@ -54,6 +54,9 @@ func wiringContextSet() *agent.ContextSet {
 				{Depth: contextdepth.DepthL2, Kind: contextdepth.RepresentationVerbatim},
 			}},
 			Content: wiringEvidenceContent,
+			Attrib: &agent.RetrievalAttribution{Sources: []agent.RetrievedSource{{
+				StableKey: "wiring-source", Source: "one.go", StartLine: 1, EndLine: 2, Score: 0.9,
+			}}},
 		}},
 	}}}
 }
@@ -334,5 +337,57 @@ func TestPlainConsumerObserverUnaffectedByAssemblySeam(t *testing.T) {
 	}
 	if host.steps != 2 {
 		t.Fatalf("host OnStep calls = %d, want 2", host.steps)
+	}
+}
+
+func TestRetrievalPresentationTrustedHostReceivesEvent(t *testing.T) {
+	host := &retrievalPresentationHost{}
+	calls, events, err := runWiringTurn(t, true, host)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if calls != 2 {
+		t.Fatalf("model calls = %d, want 2", calls)
+	}
+	if len(host.events) != 1 {
+		t.Fatalf("retrieval presentations = %d, want 1: %+v", len(host.events), host.events)
+	}
+	got := host.events[0]
+	if got.Step != 1 || got.ToolCallID != "c0" || len(got.Attribution.Sources) != 1 || got.Attribution.Sources[0].StableKey != "wiring-source" {
+		t.Fatalf("retrieval presentation = %+v, want step 1 c0 wiring-source", got)
+	}
+	if want := []string{"run.started", "tool.started", "tool.finished", "message.delta", "run.finished"}; !slices.Equal(eventTypes(events), want) {
+		t.Fatalf("protocol events = %v, want %v", eventTypes(events), want)
+	}
+}
+
+func TestRetrievalPresentationPlainHostIsUnaffected(t *testing.T) {
+	host := &plainHost{}
+	if _, ok := agent.Observer(host).(agent.RetrievalPresentationObserver); ok {
+		t.Fatal("plainHost must not satisfy RetrievalPresentationObserver")
+	}
+	calls, _, err := runWiringTurn(t, true, host)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if calls != 2 || host.steps != 2 {
+		t.Fatalf("model calls/steps = %d/%d, want 2/2", calls, host.steps)
+	}
+}
+
+func TestRetrievalPresentationHostErrorUsesStableCode(t *testing.T) {
+	sentinel := errors.New("host retrieval presentation refused")
+	host := &retrievalPresentationHost{err: sentinel}
+	calls, events, runErr := runWiringTurn(t, true, host)
+	if !errors.Is(runErr, sentinel) {
+		t.Fatalf("Run error = %v, want host error", runErr)
+	}
+	if len(host.events) != 1 || calls != 1 {
+		t.Fatalf("retrieval presentations/model calls = %d/%d, want 1/1", len(host.events), calls)
+	}
+	last := events[len(events)-1]
+	var failed struct{ Code string }
+	if last.Type != "run.failed" || json.Unmarshal(last.Payload, &failed) != nil || failed.Code != "observer_failed" {
+		t.Fatalf("last event = %+v, want observer_failed", last)
 	}
 }

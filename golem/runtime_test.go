@@ -333,6 +333,19 @@ func (*failingHostObserver) OnToolCall(context.Context, agent.ToolCallEvent) err
 
 func (o *failingHostObserver) OnToken(context.Context, agent.TokenEvent) error { return o.err }
 
+type retrievalPresentationHost struct {
+	events []agent.RetrievalPresentationEvent
+	err    error
+}
+
+func (*retrievalPresentationHost) OnStep(context.Context, agent.StepEvent) error         { return nil }
+func (*retrievalPresentationHost) OnToolCall(context.Context, agent.ToolCallEvent) error { return nil }
+func (*retrievalPresentationHost) OnToken(context.Context, agent.TokenEvent) error       { return nil }
+func (h *retrievalPresentationHost) OnRetrievalPresentation(_ context.Context, e agent.RetrievalPresentationEvent) error {
+	h.events = append(h.events, e)
+	return h.err
+}
+
 func (o *hostObserver) OnThinking(_ context.Context, event agent.ThinkingEvent) error {
 	o.thinking += event.Content
 	return nil
