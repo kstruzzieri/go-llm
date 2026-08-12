@@ -23,6 +23,7 @@ const (
 
 	dropOverflowNewest     = "overflow-newest"
 	dropQueuedAfterDisable = "queued-after-disable"
+	dropQueuedAfterTimeout = "queued-after-timeout"
 	dropDisabledAdmission  = "disabled-admission"
 	dropOperationFailed    = "operation-failed"
 )
@@ -119,11 +120,19 @@ type feedbackService struct {
 	cancel context.CancelFunc
 	now    func() time.Time
 	warn   *feedbackNotifier
+	ticks  <-chan time.Time
+
+	workerGate    func(string)
+	admissionGate func()
+	closeTimeout  time.Duration
+	closeReader   func() error
+	closeWriter   func() error
 
 	admissionMu sync.Mutex
 	stopped     bool
 	disabled    bool
 	disabledNow atomic.Bool
+	timedOut    atomic.Bool
 	report      feedbackReport
 	closeAt     time.Time
 
@@ -225,6 +234,8 @@ func openFeedbackService(ctx context.Context, root, dbPath string, warn func(str
 		cancel: cancel, now: time.Now, warn: newFeedbackNotifier(warn),
 		report: feedbackReport{reasons: make(map[string]int)},
 	}
+	s.closeReader = reader.Close
+	s.closeWriter = writer.Close
 	closeWriter = false
 	go s.work(workerCtx)
 	return s, nil
@@ -304,6 +315,9 @@ func (o *feedbackObserver) OnRetrievalPresentation(_ context.Context, e agent.Re
 func (s *feedbackService) admit(e feedbackEvent, counted bool) {
 	s.admissionMu.Lock()
 	defer s.admissionMu.Unlock()
+	if s.admissionGate != nil {
+		s.admissionGate()
+	}
 	if s.stopped {
 		return
 	}
@@ -349,6 +363,9 @@ func (s *feedbackService) disable(class string, err error) {
 	s.disabledNow.Store(true)
 	s.admissionMu.Unlock()
 	if first && err != nil {
+		if s.workerGate != nil {
+			s.workerGate("before-warning")
+		}
 		s.warn.notify("warning: behavioral feedback recording disabled (" + class + "): " + err.Error())
 	}
 }
@@ -361,6 +378,15 @@ func (s *feedbackService) work(ctx context.Context) {
 	defer close(s.done)
 	ticker := time.NewTicker(feedback.SweepInterval)
 	defer ticker.Stop()
+	ticks := ticker.C
+	if s.ticks != nil {
+		ticks = s.ticks
+	}
+	gate := func(point string) {
+		if s.workerGate != nil {
+			s.workerGate(point)
+		}
+	}
 	pending := make(map[feedbackJoinKey]feedbackPending)
 	presented := make(map[feedbackJoinKey]bool)
 	paths := make(map[string][]feedbackPathJoin)
@@ -393,12 +419,12 @@ func (s *feedbackService) work(ctx context.Context) {
 		paths = make(map[string][]feedbackPathJoin)
 		s.collector.DiscardOpen()
 	}
-	abandon := func() {
+	abandon := func(reason string) {
 		for {
 			select {
 			case e := <-s.events:
 				if e.counted {
-					s.drop(dropQueuedAfterDisable)
+					s.drop(reason)
 				}
 			default:
 				discard()
@@ -527,8 +553,12 @@ func (s *feedbackService) work(ctx context.Context) {
 	}
 
 	for {
+		if s.timedOut.Load() {
+			abandon(dropQueuedAfterTimeout)
+			return
+		}
 		if s.disabledNow.Load() {
-			abandon()
+			abandon(dropQueuedAfterDisable)
 			select {
 			case <-s.stop:
 				return
@@ -536,16 +566,30 @@ func (s *feedbackService) work(ctx context.Context) {
 				return
 			}
 		}
+		gate("before-select")
 		select {
 		case <-ctx.Done():
-			discard()
+			abandon(dropQueuedAfterTimeout)
 			return
-		case <-ticker.C:
-			if err := sweep(s.now()); err != nil {
+		case <-ticks:
+			gate("after-tick")
+			s.admissionMu.Lock()
+			stopped := s.stopped
+			sweepAt := s.now()
+			s.admissionMu.Unlock()
+			if stopped {
+				continue
+			}
+			gate("before-tick-sweep")
+			if err := sweep(sweepAt); err != nil {
 				s.disable("maintenance", err)
 			}
 		case <-s.stop:
 			for {
+				if s.timedOut.Load() {
+					abandon(dropQueuedAfterTimeout)
+					return
+				}
 				select {
 				case e := <-s.events:
 					if s.disabledNow.Load() {
@@ -570,13 +614,22 @@ func (s *feedbackService) work(ctx context.Context) {
 				}
 			}
 		case e := <-s.events:
+			gate("after-dequeue")
+			if s.timedOut.Load() {
+				if e.counted {
+					s.drop(dropQueuedAfterTimeout)
+				}
+				abandon(dropQueuedAfterTimeout)
+				return
+			}
 			if s.disabledNow.Load() {
 				if e.counted {
 					s.drop(dropQueuedAfterDisable)
 				}
-				abandon()
+				abandon(dropQueuedAfterDisable)
 				continue
 			}
+			gate("before-handle")
 			handle(e)
 		}
 	}
@@ -592,24 +645,29 @@ func (s *feedbackService) close() (feedbackReport, error) {
 		s.closeAt = s.now()
 		s.admissionMu.Unlock()
 		close(s.stop)
-		timer := time.NewTimer(feedbackCloseTimeout)
+		timeout := s.closeTimeout
+		if timeout <= 0 {
+			timeout = feedbackCloseTimeout
+		}
+		timer := time.NewTimer(timeout)
 		select {
 		case <-s.done:
 			if !timer.Stop() {
 				<-timer.C
 			}
 		case <-timer.C:
+			s.timedOut.Store(true)
 			s.cancel()
 			<-s.done
 		}
 		s.cancel()
-		if s.reader != nil {
-			if err := s.reader.Close(); s.closeErr == nil {
+		if s.closeReader != nil {
+			if err := s.closeReader(); s.closeErr == nil {
 				s.closeErr = err
 			}
 		}
-		if s.writer != nil {
-			if err := s.writer.Close(); s.closeErr == nil {
+		if s.closeWriter != nil {
+			if err := s.closeWriter(); s.closeErr == nil {
 				s.closeErr = err
 			}
 		}

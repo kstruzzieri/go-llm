@@ -34,6 +34,26 @@ type feedbackBlockingStore struct {
 	fail         error
 	recomputeErr error
 	signals      atomic.Int64
+	kindsMu      sync.Mutex
+	kinds        map[feedbackpkg.SignalKind]int
+}
+
+type feedbackGateStore struct {
+	feedbackBlockingStore
+	retrievalStarted chan struct{}
+	retrievalRelease chan struct{}
+	retrievalOnce    sync.Once
+	retrievalErr     error
+}
+
+func (s *feedbackGateStore) InsertRetrievalWithCounts(ctx context.Context, _ string, _ string, _ []string, _ time.Time) error {
+	s.retrievalOnce.Do(func() { close(s.retrievalStarted) })
+	select {
+	case <-s.retrievalRelease:
+		return s.retrievalErr
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 func (s *feedbackBlockingStore) InsertRetrievalWithCounts(ctx context.Context, _ string, _ string, _ []string, _ time.Time) error {
@@ -42,7 +62,7 @@ func (s *feedbackBlockingStore) InsertRetrievalWithCounts(ctx context.Context, _
 func (*feedbackBlockingStore) InsertRetrieval(context.Context, string, string, []string) error {
 	return nil
 }
-func (s *feedbackBlockingStore) InsertSignals(ctx context.Context, _ string, keys []string, _ feedbackpkg.SignalKind, _ float64, _ time.Time) error {
+func (s *feedbackBlockingStore) InsertSignals(ctx context.Context, _ string, keys []string, kind feedbackpkg.SignalKind, _ float64, _ time.Time) error {
 	s.once.Do(func() { close(s.started) })
 	select {
 	case <-s.release:
@@ -53,6 +73,12 @@ func (s *feedbackBlockingStore) InsertSignals(ctx context.Context, _ string, key
 		return s.fail
 	}
 	s.signals.Add(int64(len(keys)))
+	s.kindsMu.Lock()
+	if s.kinds == nil {
+		s.kinds = make(map[feedbackpkg.SignalKind]int)
+	}
+	s.kinds[kind] += len(keys)
+	s.kindsMu.Unlock()
 	return nil
 }
 func (*feedbackBlockingStore) InsertSignal(context.Context, string, string, feedbackpkg.SignalKind, float64, time.Time) error {
@@ -75,14 +101,44 @@ func (*feedbackBlockingStore) PruneSignals(context.Context, time.Time) (int, err
 func (*feedbackBlockingStore) PruneRetrievals(context.Context) (int, error)            { return 0, nil }
 
 func feedbackServiceForStore(root string, store feedbackpkg.AtomicSignalStore, warn func(string)) *feedbackService {
+	return feedbackServiceForStoreConfigured(root, store, warn, nil)
+}
+
+func feedbackServiceForStoreConfigured(root string, store feedbackpkg.AtomicSignalStore, warn func(string), configure func(*feedbackService)) *feedbackService {
 	ctx, cancel := context.WithCancel(context.Background())
 	s := &feedbackService{
 		root: root, collector: feedbackpkg.NewManualCollector(store, feedbackpkg.DefaultConfig()),
 		events: make(chan feedbackEvent, feedbackQueueSize), stop: make(chan struct{}), done: make(chan struct{}),
 		cancel: cancel, now: time.Now, warn: newFeedbackNotifier(warn), report: feedbackReport{reasons: make(map[string]int)},
 	}
+	if configure != nil {
+		configure(s)
+	}
 	go s.work(ctx)
 	return s
+}
+
+func feedbackKindCount(store *feedbackBlockingStore, kind feedbackpkg.SignalKind) int {
+	store.kindsMu.Lock()
+	defer store.kindsMu.Unlock()
+	return store.kinds[kind]
+}
+
+func waitFeedbackCompleted(t *testing.T, svc *feedbackService, want int) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for {
+		svc.admissionMu.Lock()
+		got := svc.report.completed
+		svc.admissionMu.Unlock()
+		if got == want {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("completed = %d, want %d", got, want)
+		}
+		time.Sleep(time.Millisecond)
+	}
 }
 
 func TestFeedbackPathNormalization(t *testing.T) {
@@ -337,53 +393,64 @@ func TestFeedbackObserverCreditsEachRetrievalOncePerKey(t *testing.T) {
 }
 
 func TestFeedbackServiceUsesCallbackEventTime(t *testing.T) {
-	root := t.TempDir()
-	firstPath := filepath.Join(t.TempDir(), "feedback.db")
-	svc, err := openFeedbackService(context.Background(), root, firstPath, feedbackTestWarn(t))
-	if err != nil {
-		t.Fatal(err)
+	for _, tt := range []struct {
+		name        string
+		readAfter   time.Duration
+		wantOpened  int
+		wantExpired int
+	}{
+		{name: "less than boundary", readAfter: 299 * time.Second, wantOpened: 1},
+		{name: "exact boundary", readAfter: 300 * time.Second, wantExpired: 1},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			root := t.TempDir()
+			releaseStore := make(chan struct{})
+			close(releaseStore)
+			store := &feedbackBlockingStore{started: make(chan struct{}), release: releaseStore}
+			base := time.Unix(10_000, 0)
+			var mu sync.Mutex
+			now := base
+			blocked := make(chan struct{})
+			release := make(chan struct{})
+			svc := feedbackServiceForStoreConfigured(root, store, feedbackTestWarn(t), func(s *feedbackService) {
+				s.now = func() time.Time { mu.Lock(); defer mu.Unlock(); return now }
+				s.workerGate = func(point string) {
+					if point == "before-handle" {
+						select {
+						case <-blocked:
+						default:
+							close(blocked)
+							<-release
+						}
+					}
+				}
+			})
+			o := svc.observer("run")
+			results := o.(agent.ToolResultObserver)
+			presentations := o.(agent.RetrievalPresentationObserver)
+			_ = results.OnToolResult(context.Background(), agent.ToolResultEvent{Step: 1, Call: feedbackCall("r", "retrieve", `{"query":"q"}`), Invoked: true})
+			<-blocked
+			_ = presentations.OnRetrievalPresentation(context.Background(), agent.RetrievalPresentationEvent{Step: 2, ToolCallID: "r", Attribution: agent.RetrievalAttribution{Sources: []agent.RetrievedSource{{StableKey: "k", Source: "a.go"}}}})
+			mu.Lock()
+			now = base.Add(tt.readAfter)
+			mu.Unlock()
+			_ = results.OnToolResult(context.Background(), agent.ToolResultEvent{Step: 3, Call: feedbackCall("f", "read_file", `{"path":"a.go"}`), Invoked: true})
+			mu.Lock()
+			now = base.Add(time.Hour)
+			mu.Unlock()
+			close(release)
+			report, err := svc.close()
+			if err != nil || report.dropped != 0 {
+				t.Fatalf("close = %+v, %v", report, err)
+			}
+			if got := feedbackKindCount(store, feedbackpkg.SignalFileOpened); got != tt.wantOpened {
+				t.Fatalf("file opened = %d, want %d", got, tt.wantOpened)
+			}
+			if got := feedbackKindCount(store, feedbackpkg.SignalWindowExpired); got != tt.wantExpired {
+				t.Fatalf("expired = %d, want %d", got, tt.wantExpired)
+			}
+		})
 	}
-	base := time.Unix(10_000, 0)
-	var mu sync.Mutex
-	now := base
-	svc.now = func() time.Time { mu.Lock(); defer mu.Unlock(); return now }
-	obs := svc.observer("run")
-	tro := obs.(agent.ToolResultObserver)
-	rpo := obs.(agent.RetrievalPresentationObserver)
-	_ = tro.OnToolResult(context.Background(), agent.ToolResultEvent{Step: 1, Call: feedbackCall("r", "retrieve", `{"query":"q"}`), Invoked: true})
-	_ = rpo.OnRetrievalPresentation(context.Background(), agent.RetrievalPresentationEvent{Step: 2, ToolCallID: "r", Attribution: agent.RetrievalAttribution{Sources: []agent.RetrievedSource{{StableKey: "k", Source: "a.go"}}}})
-	mu.Lock()
-	now = base.Add(299 * time.Second)
-	mu.Unlock()
-	_ = tro.OnToolResult(context.Background(), agent.ToolResultEvent{Step: 3, Call: feedbackCall("f", "read_file", `{"path":"a.go"}`), Invoked: true})
-	mu.Lock()
-	now = base.Add(time.Hour)
-	mu.Unlock() // worker/close time is irrelevant to the positive.
-	report, err := svc.close()
-	if err != nil || report.dropped != 0 {
-		t.Fatalf("close = %+v, %v", report, err)
-	}
-	assertFeedbackSignalCount(t, firstPath, "file_opened", 1)
-
-	secondPath := filepath.Join(t.TempDir(), "feedback.db")
-	second, err := openFeedbackService(context.Background(), root, secondPath, feedbackTestWarn(t))
-	if err != nil {
-		t.Fatal(err)
-	}
-	now = base
-	second.now = func() time.Time { mu.Lock(); defer mu.Unlock(); return now }
-	o := second.observer("run")
-	tro2 := o.(agent.ToolResultObserver)
-	p := o.(agent.RetrievalPresentationObserver)
-	_ = tro2.OnToolResult(context.Background(), agent.ToolResultEvent{Step: 1, Call: feedbackCall("r", "retrieve", `{"query":"q"}`), Invoked: true})
-	_ = p.OnRetrievalPresentation(context.Background(), agent.RetrievalPresentationEvent{Step: 2, ToolCallID: "r", Attribution: agent.RetrievalAttribution{Sources: []agent.RetrievedSource{{StableKey: "k", Source: "a.go"}}}})
-	mu.Lock()
-	now = base.Add(300 * time.Second)
-	mu.Unlock()
-	_ = tro2.OnToolResult(context.Background(), agent.ToolResultEvent{Step: 3, Call: feedbackCall("f", "read_file", `{"path":"a.go"}`), Invoked: true})
-	_, _ = second.close()
-	assertFeedbackSignalCount(t, secondPath, "file_opened", 0)
-	assertFeedbackSignalCount(t, secondPath, "window_expired", 1)
 }
 
 func assertFeedbackSignalCount(t *testing.T, dbPath, kind string, want int) {
@@ -466,6 +533,44 @@ func TestFeedbackServiceOverflowDisablesAndAccountsQueuedEvents(t *testing.T) {
 	}
 }
 
+func TestFeedbackServiceOverflowBetweenReceiveAndHandleAbandonsDequeuedEvent(t *testing.T) {
+	release := make(chan struct{})
+	close(release)
+	store := &feedbackBlockingStore{started: make(chan struct{}), release: release}
+	dequeued := make(chan struct{})
+	continueDequeue := make(chan struct{})
+	svc := feedbackServiceForStoreConfigured(t.TempDir(), store, feedbackTestWarn(t), func(s *feedbackService) {
+		s.workerGate = func(point string) {
+			if point == "after-dequeue" {
+				select {
+				case <-dequeued:
+				default:
+					close(dequeued)
+					<-continueDequeue
+				}
+			}
+		}
+	})
+	obs := svc.observer("run").(agent.ToolResultObserver)
+	emit := func(id string) {
+		_ = obs.OnToolResult(context.Background(), agent.ToolResultEvent{Step: 1, Call: feedbackCall(id, "retrieve", `{"query":"q"}`), Invoked: true})
+	}
+	emit("dequeued")
+	<-dequeued
+	for i := 0; i < feedbackQueueSize; i++ {
+		emit(fmt.Sprintf("queued-%d", i))
+	}
+	emit("overflow")
+	close(continueDequeue)
+	report, err := svc.close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.attempted != 130 || report.completed != 0 || report.dropped != 130 || report.reasons[dropOverflowNewest] != 1 || report.reasons[dropQueuedAfterDisable] != 129 {
+		t.Fatalf("report=%+v", report)
+	}
+}
+
 func TestFeedbackServiceWriteFailureDisablesAndWarnsOnce(t *testing.T) {
 	store := &feedbackBlockingStore{started: make(chan struct{}), release: make(chan struct{}), fail: errors.New("write failed")}
 	var warnings atomic.Int64
@@ -543,6 +648,167 @@ func TestFeedbackServiceOperationDeadline(t *testing.T) {
 	}
 	if report.attempted != 1 || report.completed != 0 || report.dropped != 1 {
 		t.Fatalf("report=%+v", report)
+	}
+}
+
+func TestFeedbackServiceCloseTimeoutDropsEveryQueuedEvent(t *testing.T) {
+	store := &feedbackGateStore{
+		feedbackBlockingStore: feedbackBlockingStore{started: make(chan struct{}), release: make(chan struct{})},
+		retrievalStarted:      make(chan struct{}), retrievalRelease: make(chan struct{}), retrievalErr: context.Canceled,
+	}
+	cancelSeen := make(chan struct{})
+	var cancelOnce sync.Once
+	var readerCloses, writerCloses atomic.Int64
+	svc := feedbackServiceForStoreConfigured(t.TempDir(), store, feedbackTestWarn(t), func(s *feedbackService) {
+		s.closeTimeout = 20 * time.Millisecond
+		originalCancel := s.cancel
+		s.cancel = func() {
+			cancelOnce.Do(func() { close(cancelSeen); close(store.retrievalRelease) })
+			originalCancel()
+		}
+		s.closeReader = func() error {
+			select {
+			case <-cancelSeen:
+			default:
+				t.Error("reader closed before cancellation")
+			}
+			readerCloses.Add(1)
+			return nil
+		}
+		s.closeWriter = func() error {
+			select {
+			case <-cancelSeen:
+			default:
+				t.Error("writer closed before cancellation")
+			}
+			writerCloses.Add(1)
+			return nil
+		}
+	})
+	o := svc.observer("run")
+	obs := o.(agent.ToolResultObserver)
+	present := o.(agent.RetrievalPresentationObserver)
+	_ = obs.OnToolResult(context.Background(), agent.ToolResultEvent{Step: 1, Call: feedbackCall("blocked", "retrieve", `{"query":"q"}`), Invoked: true})
+	_ = present.OnRetrievalPresentation(context.Background(), agent.RetrievalPresentationEvent{Step: 2, ToolCallID: "blocked", Attribution: agent.RetrievalAttribution{Sources: []agent.RetrievedSource{{StableKey: "k", Source: "a.go"}}}})
+	<-store.retrievalStarted
+	for i := 0; i < 3; i++ {
+		_ = obs.OnToolResult(context.Background(), agent.ToolResultEvent{Step: 1, Call: feedbackCall(fmt.Sprintf("queued-%d", i), "retrieve", `{"query":"q"}`), Invoked: true})
+	}
+	report, err := svc.close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.attempted != 5 || report.completed != 1 || report.dropped != 4 || report.reasons[dropOperationFailed] != 1 || report.reasons[dropQueuedAfterTimeout] != 3 {
+		t.Fatalf("report=%+v", report)
+	}
+	_, _ = svc.close()
+	if readerCloses.Load() != 1 || writerCloses.Load() != 1 {
+		t.Fatalf("reader closes=%d writer closes=%d", readerCloses.Load(), writerCloses.Load())
+	}
+}
+
+func TestFeedbackServiceCloseSkipsTickerAfterStopBoundary(t *testing.T) {
+	root := t.TempDir()
+	releaseStore := make(chan struct{})
+	close(releaseStore)
+	store := &feedbackBlockingStore{started: make(chan struct{}), release: releaseStore}
+	base := time.Unix(30_000, 0)
+	ticks := make(chan time.Time, 1)
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	var nowMu sync.Mutex
+	now := base
+	svc := feedbackServiceForStoreConfigured(root, store, feedbackTestWarn(t), func(s *feedbackService) {
+		s.ticks = ticks
+		s.now = func() time.Time { nowMu.Lock(); defer nowMu.Unlock(); return now }
+		s.workerGate = func(point string) {
+			if point == "after-tick" {
+				close(entered)
+				<-release
+			}
+		}
+	})
+	o := svc.observer("run")
+	_ = o.(agent.ToolResultObserver).OnToolResult(context.Background(), agent.ToolResultEvent{Step: 1, Call: feedbackCall("r", "retrieve", `{"query":"q"}`), Invoked: true})
+	_ = o.(agent.RetrievalPresentationObserver).OnRetrievalPresentation(context.Background(), agent.RetrievalPresentationEvent{Step: 2, ToolCallID: "r", Attribution: agent.RetrievalAttribution{Sources: []agent.RetrievedSource{{StableKey: "k", Source: "a.go"}}}})
+	waitFeedbackCompleted(t, svc, 2)
+	ticks <- base.Add(time.Hour)
+	<-entered
+	nowMu.Lock()
+	now = base.Add(299 * time.Second)
+	nowMu.Unlock()
+	closed := make(chan feedbackReport, 1)
+	go func() { report, _ := svc.close(); closed <- report }()
+	for {
+		svc.admissionMu.Lock()
+		stopped := svc.stopped
+		svc.admissionMu.Unlock()
+		if stopped {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	nowMu.Lock()
+	now = base.Add(time.Hour)
+	nowMu.Unlock()
+	close(release)
+	<-closed
+	if got := feedbackKindCount(store, feedbackpkg.SignalWindowExpired); got != 0 {
+		t.Fatalf("expired = %d, want 0", got)
+	}
+}
+
+func TestFeedbackServiceTickerCapturesSweepTimeBeforeClose(t *testing.T) {
+	releaseStore := make(chan struct{})
+	close(releaseStore)
+	store := &feedbackBlockingStore{started: make(chan struct{}), release: releaseStore}
+	base := time.Unix(40_000, 0)
+	ticks := make(chan time.Time, 1)
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	var nowMu sync.Mutex
+	now := base
+	svc := feedbackServiceForStoreConfigured(t.TempDir(), store, feedbackTestWarn(t), func(s *feedbackService) {
+		s.ticks = ticks
+		s.now = func() time.Time { nowMu.Lock(); defer nowMu.Unlock(); return now }
+		s.workerGate = func(point string) {
+			if point == "before-tick-sweep" {
+				close(entered)
+				<-release
+			}
+		}
+	})
+	o := svc.observer("run")
+	_ = o.(agent.ToolResultObserver).OnToolResult(context.Background(), agent.ToolResultEvent{Step: 1, Call: feedbackCall("r", "retrieve", `{"query":"q"}`), Invoked: true})
+	_ = o.(agent.RetrievalPresentationObserver).OnRetrievalPresentation(context.Background(), agent.RetrievalPresentationEvent{Step: 2, ToolCallID: "r", Attribution: agent.RetrievalAttribution{Sources: []agent.RetrievedSource{{StableKey: "k", Source: "a.go"}}}})
+	waitFeedbackCompleted(t, svc, 2)
+	nowMu.Lock()
+	now = base.Add(299 * time.Second)
+	nowMu.Unlock()
+	ticks <- base.Add(299 * time.Second)
+	select {
+	case <-entered:
+	case <-time.After(time.Second):
+		t.Fatal("worker did not capture ticker time")
+	}
+	closed := make(chan feedbackReport, 1)
+	go func() { report, _ := svc.close(); closed <- report }()
+	for {
+		svc.admissionMu.Lock()
+		stopped := svc.stopped
+		svc.admissionMu.Unlock()
+		if stopped {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	nowMu.Lock()
+	now = base.Add(time.Hour)
+	nowMu.Unlock()
+	close(release)
+	<-closed
+	if got := feedbackKindCount(store, feedbackpkg.SignalWindowExpired); got != 0 {
+		t.Fatalf("expired = %d, want 0", got)
 	}
 }
 
@@ -672,6 +938,70 @@ func TestFeedbackServiceConcurrentAdmissionAndClose(t *testing.T) {
 	}
 }
 
+func TestFeedbackServiceAdmissionStopBoundary(t *testing.T) {
+	svc, err := openFeedbackService(context.Background(), t.TempDir(), filepath.Join(t.TempDir(), "feedback.db"), feedbackTestWarn(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cancelSeen := make(chan struct{})
+	var cancelOnce sync.Once
+	originalCancel := svc.cancel
+	svc.cancel = func() {
+		cancelOnce.Do(func() { close(cancelSeen) })
+		originalCancel()
+	}
+	var readerCloses, writerCloses atomic.Int64
+	readerClosing := make(chan struct{})
+	releaseReader := make(chan struct{})
+	originalCloseReader, originalCloseWriter := svc.closeReader, svc.closeWriter
+	svc.closeReader = func() error {
+		select {
+		case <-cancelSeen:
+		default:
+			t.Error("reader closed before cancellation")
+		}
+		readerCloses.Add(1)
+		close(readerClosing)
+		<-releaseReader
+		return originalCloseReader()
+	}
+	svc.closeWriter = func() error {
+		select {
+		case <-cancelSeen:
+		default:
+			t.Error("writer closed before cancellation")
+		}
+		writerCloses.Add(1)
+		return originalCloseWriter()
+	}
+	obs := svc.observer("run").(agent.ToolResultObserver)
+	inside := make(chan struct{})
+	release := make(chan struct{})
+	var once sync.Once
+	svc.admissionGate = func() { once.Do(func() { close(inside); <-release }) }
+	firstDone := make(chan struct{})
+	go func() {
+		_ = obs.OnToolResult(context.Background(), agent.ToolResultEvent{Step: 1, Call: feedbackCall("before", "retrieve", `{"query":"q"}`), Invoked: true})
+		close(firstDone)
+	}()
+	<-inside
+	closeDone := make(chan feedbackReport, 1)
+	go func() { report, _ := svc.close(); closeDone <- report }()
+	close(release)
+	<-firstDone
+	<-readerClosing
+	_ = obs.OnToolResult(context.Background(), agent.ToolResultEvent{Step: 1, Call: feedbackCall("after", "retrieve", `{"query":"q"}`), Invoked: true})
+	close(releaseReader)
+	report := <-closeDone
+	frozen, _ := svc.close()
+	if report.attempted != 1 || report.completed != 1 || report.dropped != 0 || frozen.attempted != 1 || frozen.completed != 1 || frozen.dropped != 0 || len(svc.events) != 0 {
+		t.Fatalf("report=%+v frozen=%+v queued=%d", report, frozen, len(svc.events))
+	}
+	if readerCloses.Load() != 1 || writerCloses.Load() != 1 {
+		t.Fatalf("reader closes=%d writer closes=%d", readerCloses.Load(), writerCloses.Load())
+	}
+}
+
 func TestFeedbackServiceCloseDiscardsUnexpiredWindow(t *testing.T) {
 	root := t.TempDir()
 	dbPath := filepath.Join(t.TempDir(), "feedback.db")
@@ -690,29 +1020,42 @@ func TestFeedbackServiceCloseDiscardsUnexpiredWindow(t *testing.T) {
 }
 
 func TestFeedbackNotifierSwitchIsSynchronized(t *testing.T) {
-	var first, second atomic.Int64
-	entered := make(chan struct{})
-	release := make(chan struct{})
-	n := newFeedbackNotifier(func(string) {
-		first.Add(1)
-		close(entered)
-		<-release
+	store := &feedbackGateStore{
+		feedbackBlockingStore: feedbackBlockingStore{started: make(chan struct{}), release: make(chan struct{}), fail: errors.New("write failed")},
+		retrievalStarted:      make(chan struct{}), retrievalRelease: make(chan struct{}),
+	}
+	close(store.retrievalRelease)
+	var fallback atomic.Int64
+	warningReady := make(chan struct{})
+	releaseWarning := make(chan struct{})
+	svc := feedbackServiceForStoreConfigured(t.TempDir(), store, func(string) { fallback.Add(1) }, func(s *feedbackService) {
+		s.workerGate = func(point string) {
+			if point == "before-warning" {
+				close(warningReady)
+				<-releaseWarning
+			}
+		}
 	})
-	start := make(chan struct{})
-	done := make(chan struct{})
-	go func() {
-		close(start)
-		n.notify("warning")
-		n.notify("warning")
-		close(done)
-	}()
-	<-start
-	<-entered
-	n.set(func(string) { second.Add(1) })
-	close(release)
-	<-done
-	if first.Load() != 1 || second.Load() != 1 {
-		t.Fatalf("fallback=%d active=%d", first.Load(), second.Load())
+	var promptOut, promptErr strings.Builder
+	ctrl := newReplControl(&promptOut, &promptErr, make(chan struct{}, 1), func() {})
+	ctrl.enterTurn()
+	obs := svc.observer("run").(agent.ToolResultObserver)
+	present := svc.observer("run").(agent.RetrievalPresentationObserver)
+	_ = obs.OnToolResult(context.Background(), agent.ToolResultEvent{Step: 1, Call: feedbackCall("r", "retrieve", `{"query":"q"}`), Invoked: true})
+	_ = present.OnRetrievalPresentation(context.Background(), agent.RetrievalPresentationEvent{Step: 2, ToolCallID: "r", Attribution: agent.RetrievalAttribution{Sources: []agent.RetrievedSource{{StableKey: "k", Source: "a.go"}}}})
+	waitFeedbackCompleted(t, svc, 2)
+	_ = obs.OnToolResult(context.Background(), agent.ToolResultEvent{Step: 3, Call: feedbackCall("read", "read_file", `{"path":"a.go"}`), Invoked: true})
+	<-store.started
+	close(store.release)
+	<-warningReady
+	svc.warn.set(ctrl.notice)
+	close(releaseWarning)
+	for !svc.disabledNow.Load() {
+		time.Sleep(time.Millisecond)
+	}
+	_, _ = svc.close()
+	if fallback.Load() != 0 || strings.Count(promptErr.String(), "behavioral feedback recording disabled") != 1 {
+		t.Fatalf("fallback=%d prompt stderr=%q", fallback.Load(), promptErr.String())
 	}
 }
 
