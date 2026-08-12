@@ -99,8 +99,11 @@ func (c *Collector) RegisterRetrieval(ctx context.Context, query string, chunkKe
 	return c.RegisterRetrievalAt(ctx, query, chunkKeys, time.Now())
 }
 
-// RegisterRetrievalAt opens an attribution window at presentedAt.
-// It rejects a zero presentedAt.
+// RegisterRetrievalAt opens an attribution window at presentedAt. It rejects a
+// zero presentedAt. With an atomic store, the retrieval and count updates
+// commit together. Its legacy two-call fallback can leave the retrieval row
+// committed when count updates fail. Neither path installs an in-memory window
+// on error.
 func (c *Collector) RegisterRetrievalAt(ctx context.Context, query string, chunkKeys []string, presentedAt time.Time) (string, error) {
 	if presentedAt.IsZero() {
 		return "", fmt.Errorf("feedback: register retrieval: presented time is required")
@@ -141,10 +144,13 @@ func (c *Collector) Record(ctx context.Context, signal Signal) error {
 // observedAt to decide whether the window is still open. It rejects a zero
 // observedAt.
 //
-// Its full completion contract is: `(true, nil)` means the signal batch committed;
-// `(true, err)` means it committed but synchronous maintenance recomputation
-// failed; `(false, nil)` is a semantic no-op; `(false, err)` means no signal
-// committed.
+// With an atomic store (always true for `NewManualCollector` and every current
+// production `SignalStore`), its completion contract is: `(true, nil)` means the
+// signal batch committed; `(true, err)` means it committed but synchronous
+// maintenance recomputation failed; `(false, nil)` is a semantic no-op;
+// `(false, err)` means no signal committed. With a legacy non-atomic store,
+// persistence is best-effort per key: `(false, err)` may leave earlier keys in
+// the batch committed, but interaction state is never marked on any error.
 func (c *Collector) RecordAt(ctx context.Context, signal Signal, observedAt time.Time) (bool, error) {
 	if observedAt.IsZero() {
 		return false, fmt.Errorf("feedback: record: observed time is required")
@@ -245,9 +251,21 @@ func (c *Collector) sweepLoop() {
 	}
 }
 
-// SweepExpired expires windows at least maxWindowAge old and returns each ID
-// durably committed and removed before any error. It rejects a zero now.
+// SweepExpired manually expires windows at least maxWindowAge old. It rejects
+// collectors that own a background sweeper and rejects a zero now. With an
+// atomic store, returned IDs are exactly the windows durably committed and
+// removed before any error; the failed window remains open with no weak
+// negatives committed. With a legacy non-atomic store, persistence is
+// best-effort per key: an error may leave earlier weak negatives committed,
+// while the failed window remains open and absent from the returned IDs.
 func (c *Collector) SweepExpired(ctx context.Context, now time.Time) ([]string, error) {
+	if c.done != nil {
+		return nil, fmt.Errorf("feedback: sweep expired: sweep owned by background loop")
+	}
+	return c.sweepExpiredAt(ctx, now)
+}
+
+func (c *Collector) sweepExpiredAt(ctx context.Context, now time.Time) ([]string, error) {
 	if now.IsZero() {
 		return nil, fmt.Errorf("feedback: sweep expired: current time is required")
 	}
@@ -294,8 +312,8 @@ func (c *Collector) SweepExpired(ctx context.Context, now time.Time) ([]string, 
 	return removed, nil
 }
 
-// DiscardOpen removes every open attribution window without writing weak
-// negatives.
+// DiscardOpen is for manual collectors only. It removes every open attribution
+// window without writing weak negatives.
 func (c *Collector) DiscardOpen() {
 	c.mu.Lock()
 	c.windows = make(map[string]*attributionWindow)
@@ -304,7 +322,7 @@ func (c *Collector) DiscardOpen() {
 
 // sweepExpired preserves the legacy background sweep entry point.
 func (c *Collector) sweepExpired() {
-	_, _ = c.SweepExpired(context.Background(), time.Now())
+	_, _ = c.sweepExpiredAt(context.Background(), time.Now())
 }
 
 func (c *Collector) insertRetrieval(ctx context.Context, id, query string, chunkKeys []string, createdAt time.Time) error {

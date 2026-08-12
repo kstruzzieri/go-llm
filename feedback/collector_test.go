@@ -3,6 +3,7 @@ package feedback
 import (
 	"context"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -44,6 +45,19 @@ func (s *recomputeStore) RecomputeAggregates(ctx context.Context, lambda float64
 
 type legacySignalStore struct {
 	SignalStore
+}
+
+type failSecondLegacySignalStore struct {
+	SignalStore
+	insertCalls int
+}
+
+func (s *failSecondLegacySignalStore) InsertSignal(ctx context.Context, retrievalID, chunkKey string, kind SignalKind, strength float64, createdAt time.Time) error {
+	s.insertCalls++
+	if s.insertCalls == 2 {
+		return fmt.Errorf("reject second signal")
+	}
+	return s.SignalStore.InsertSignal(ctx, retrievalID, chunkKey, kind, strength, createdAt)
 }
 
 // newTestCollector creates a Collector backed by an in-memory SQLite store
@@ -448,6 +462,44 @@ func TestRecordAtPersistenceIsAtomicAndStateAdvancesAfterCommit(t *testing.T) {
 	}
 }
 
+func TestRecordAtPersistenceLegacyPartialWriteDoesNotMarkInteractions(t *testing.T) {
+	ctx := context.Background()
+	base := newTestStore(t)
+	store := &failSecondLegacySignalStore{SignalStore: base}
+	c := NewCollector(store, CollectorConfig{})
+	t.Cleanup(c.Close)
+	presentedAt := time.Now()
+	id, err := c.RegisterRetrievalAt(ctx, "q", []string{"chunk-1", "chunk-2"}, presentedAt)
+	if err != nil {
+		t.Fatalf("RegisterRetrievalAt: %v", err)
+	}
+
+	committed, err := c.RecordAt(ctx, Signal{Kind: SignalCodeKept, RetrievalID: id}, presentedAt.Add(time.Second))
+	if err == nil || committed {
+		t.Fatalf("RecordAt = (%v, %v), want (false, second-key error)", committed, err)
+	}
+	var firstRows, secondRows int
+	if err := base.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM feedback_signals WHERE retrieval_id = ? AND chunk_key = 'chunk-1'`, id,
+	).Scan(&firstRows); err != nil {
+		t.Fatalf("query first key: %v", err)
+	}
+	if err := base.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM feedback_signals WHERE retrieval_id = ? AND chunk_key = 'chunk-2'`, id,
+	).Scan(&secondRows); err != nil {
+		t.Fatalf("query second key: %v", err)
+	}
+	if firstRows != 1 || secondRows != 0 {
+		t.Fatalf("raw signal rows = (%d first, %d second), want (1, 0)", firstRows, secondRows)
+	}
+	c.mu.Lock()
+	interactions := len(c.windows[id].interacted)
+	c.mu.Unlock()
+	if interactions != 0 {
+		t.Errorf("interaction marks after partial write = %d, want 0", interactions)
+	}
+}
+
 func TestRecordAtThresholdCrossingRecomputesSynchronously(t *testing.T) {
 	ctx := context.Background()
 	store := &recomputeStore{SQLiteSignalStore: newTestStore(t)}
@@ -610,6 +662,45 @@ func TestSweepExpiredReturnsPartialSuccessAndLeavesFailedWindowOpen(t *testing.T
 	}
 	if len(expiredIDs) != 1 || expiredIDs[0] != secondID {
 		t.Fatalf("SweepExpired retry IDs = %v, want failed ID [%s]", expiredIDs, secondID)
+	}
+}
+
+func TestSweepExpiredRejectsBackgroundCollectorAndTrackedLoopStillSweeps(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	c := NewCollector(store, CollectorConfig{})
+	defer c.Close()
+	presentedAt := time.Now().Add(-maxWindowAge)
+	id, err := c.RegisterRetrievalAt(ctx, "q", []string{"chunk-1"}, presentedAt)
+	if err != nil {
+		t.Fatalf("RegisterRetrievalAt: %v", err)
+	}
+
+	expiredIDs, err := c.SweepExpired(ctx, time.Now())
+	if err == nil || !strings.Contains(err.Error(), "sweep owned by background loop") {
+		t.Fatalf("SweepExpired = (%v, %v), want no IDs and ownership error", expiredIDs, err)
+	}
+	if len(expiredIDs) != 0 {
+		t.Errorf("SweepExpired IDs = %v, want none", expiredIDs)
+	}
+	var expired int
+	if err := store.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM feedback_signals WHERE retrieval_id = ? AND signal_kind = ?`, id, SignalWindowExpired,
+	).Scan(&expired); err != nil {
+		t.Fatalf("query public-sweep rows: %v", err)
+	}
+	if expired != 0 {
+		t.Fatalf("expiry rows after rejected public sweep = %d, want 0", expired)
+	}
+
+	c.Close()
+	if err := store.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM feedback_signals WHERE retrieval_id = ? AND signal_kind = ?`, id, SignalWindowExpired,
+	).Scan(&expired); err != nil {
+		t.Fatalf("query tracked-loop rows: %v", err)
+	}
+	if expired != 1 {
+		t.Errorf("expiry rows after tracked-loop final sweep = %d, want 1", expired)
 	}
 }
 
