@@ -1,9 +1,14 @@
 package feedback
 
 import (
+	"bytes"
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
+	"net/url"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -151,5 +156,192 @@ func TestWeightReaderParityWithCollector(t *testing.T) {
 		if rw[k] != cw[k] {
 			t.Errorf("parity mismatch for %q: reader=%v collector=%v", k, rw[k], cw[k])
 		}
+	}
+}
+
+func TestSQLiteWeightReaderSeesLiveWALWithoutWriting(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "feedback.db")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("open writer: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	db.SetMaxOpenConns(1)
+	store, err := NewSignalStore(ctx, db)
+	if err != nil {
+		t.Fatalf("NewSignalStore: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, `PRAGMA journal_mode=WAL`); err != nil {
+		t.Fatalf("enable WAL: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, `PRAGMA wal_checkpoint(TRUNCATE)`); err != nil {
+		t.Fatalf("checkpoint schema: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, `PRAGMA wal_autocheckpoint=0`); err != nil {
+		t.Fatalf("disable auto-checkpoint: %v", err)
+	}
+	if err := store.InsertRetrievalWithCounts(ctx, "r-live", "query", []string{"chunk-live"}, time.Now()); err != nil {
+		t.Fatalf("insert retrieval: %v", err)
+	}
+	if err := store.InsertSignal(ctx, "r-live", "chunk-live", SignalCompletionAccepted, 0.8, time.Now()); err != nil {
+		t.Fatalf("insert signal: %v", err)
+	}
+	if err := store.RecomputeAggregates(ctx, 0); err != nil {
+		t.Fatalf("recompute aggregates: %v", err)
+	}
+
+	reader, err := NewSQLiteWeightReader(ctx, path, CollectorConfig{})
+	if err != nil {
+		t.Fatalf("NewSQLiteWeightReader: %v", err)
+	}
+	t.Cleanup(func() { _ = reader.Close() })
+	weights, err := reader.WeightsBatch(ctx, []string{"chunk-live"})
+	if err != nil {
+		t.Fatalf("WeightsBatch: %v", err)
+	}
+	if got := weights["chunk-live"]; got != 0.8 {
+		t.Fatalf("live WAL weight = %v, want 0.8", got)
+	}
+	if _, err := reader.db.ExecContext(ctx, `INSERT INTO feedback_aggregates (chunk_key) VALUES ('forbidden')`); err == nil {
+		t.Fatal("write through reader succeeded")
+	}
+
+	u := url.URL{Scheme: "file", Path: path}
+	q := u.Query()
+	q.Set("mode", "ro")
+	q.Set("immutable", "1")
+	u.RawQuery = q.Encode()
+	immutableDB, err := sql.Open("sqlite", u.String())
+	if err != nil {
+		t.Fatalf("open immutable reader: %v", err)
+	}
+	defer func() { _ = immutableDB.Close() }()
+	immutable := NewWeightReader(&SQLiteSignalStore{db: immutableDB}, CollectorConfig{})
+	weights, err = immutable.WeightsBatch(ctx, []string{"chunk-live"})
+	if err != nil {
+		t.Fatalf("immutable WeightsBatch: %v", err)
+	}
+	if got := weights["chunk-live"]; got != 0 {
+		t.Fatalf("immutable WAL weight = %v, want 0", got)
+	}
+}
+
+func TestSQLiteWeightReaderRejectsMissingAndUnmigratedDatabasesWithoutMutation(t *testing.T) {
+	ctx := context.Background()
+	t.Run("missing", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "missing.db")
+		if _, err := NewSQLiteWeightReader(ctx, path, CollectorConfig{}); err == nil {
+			t.Fatal("NewSQLiteWeightReader succeeded for missing database")
+		}
+		if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("missing database Stat error = %v, want os.ErrNotExist", err)
+		}
+	})
+
+	t.Run("unmigrated", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "unmigrated.db")
+		db, err := sql.Open("sqlite", path)
+		if err != nil {
+			t.Fatalf("open fixture: %v", err)
+		}
+		if _, err := db.Exec(`CREATE TABLE existing (value TEXT)`); err != nil {
+			t.Fatalf("create fixture schema: %v", err)
+		}
+		if err := db.Close(); err != nil {
+			t.Fatalf("close fixture: %v", err)
+		}
+		before, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read fixture before: %v", err)
+		}
+
+		if _, err := NewSQLiteWeightReader(ctx, path, CollectorConfig{}); err == nil {
+			t.Fatal("NewSQLiteWeightReader succeeded for unmigrated database")
+		}
+		after, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read fixture after: %v", err)
+		}
+		if !bytes.Equal(after, before) {
+			t.Fatal("unmigrated database changed during construction")
+		}
+		check, err := sql.Open("sqlite", path)
+		if err != nil {
+			t.Fatalf("open fixture check: %v", err)
+		}
+		defer func() { _ = check.Close() }()
+		var tables int
+		if err := check.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type = 'table'`).Scan(&tables); err != nil {
+			t.Fatalf("query fixture schema: %v", err)
+		}
+		if tables != 1 {
+			t.Fatalf("table count = %d, want 1", tables)
+		}
+	})
+}
+
+func TestSQLiteWeightReaderOpensMigratedReadOnlyFile(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "feedback.db")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("open writer: %v", err)
+	}
+	if _, err := NewSignalStore(ctx, db); err != nil {
+		t.Fatalf("NewSignalStore: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, `PRAGMA wal_checkpoint(TRUNCATE)`); err != nil {
+		t.Fatalf("checkpoint schema: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close writer: %v", err)
+	}
+	if err := os.Chmod(path, 0o444); err != nil {
+		t.Fatalf("chmod read-only: %v", err)
+	}
+
+	reader, err := NewSQLiteWeightReader(ctx, path, CollectorConfig{})
+	if err != nil {
+		t.Fatalf("NewSQLiteWeightReader: %v", err)
+	}
+	if err := reader.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+}
+
+func TestSQLiteWeightReaderZeroAndClosed(t *testing.T) {
+	ctx := context.Background()
+	var zero SQLiteWeightReader
+	if _, err := zero.WeightsBatch(ctx, []string{"chunk"}); err == nil {
+		t.Fatal("zero reader WeightsBatch succeeded")
+	}
+	if err := zero.Close(); err != nil {
+		t.Fatalf("zero Close: %v", err)
+	}
+
+	path := filepath.Join(t.TempDir(), "feedback.db")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("open writer: %v", err)
+	}
+	if _, err := NewSignalStore(ctx, db); err != nil {
+		t.Fatalf("NewSignalStore: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close writer: %v", err)
+	}
+	reader, err := NewSQLiteWeightReader(ctx, path, CollectorConfig{})
+	if err != nil {
+		t.Fatalf("NewSQLiteWeightReader: %v", err)
+	}
+	if err := reader.Close(); err != nil {
+		t.Fatalf("first Close: %v", err)
+	}
+	if err := reader.Close(); err != nil {
+		t.Fatalf("second Close: %v", err)
+	}
+	if _, err := reader.WeightsBatch(ctx, []string{"chunk"}); err == nil {
+		t.Fatal("closed reader WeightsBatch succeeded")
 	}
 }
