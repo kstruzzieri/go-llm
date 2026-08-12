@@ -240,31 +240,65 @@ func TestSQLiteWeightReaderRejectsMissingAndUnmigratedDatabasesWithoutMutation(t
 	})
 
 	t.Run("unmigrated", func(t *testing.T) {
-		path := filepath.Join(t.TempDir(), "unmigrated.db")
-		db, err := sql.Open("sqlite", path)
+		sourcePath := filepath.Join(t.TempDir(), "source.db")
+		db, err := sql.Open("sqlite", sourcePath)
 		if err != nil {
 			t.Fatalf("open fixture: %v", err)
+		}
+		t.Cleanup(func() { _ = db.Close() })
+		if _, err := db.Exec(`PRAGMA journal_mode=WAL`); err != nil {
+			t.Fatalf("enable fixture WAL: %v", err)
 		}
 		if _, err := db.Exec(`CREATE TABLE existing (value TEXT)`); err != nil {
 			t.Fatalf("create fixture schema: %v", err)
 		}
-		if err := db.Close(); err != nil {
-			t.Fatalf("close fixture: %v", err)
+		if _, err := db.Exec(`PRAGMA wal_checkpoint(TRUNCATE)`); err != nil {
+			t.Fatalf("checkpoint fixture schema: %v", err)
 		}
-		before, err := os.ReadFile(path)
+		if _, err := db.Exec(`PRAGMA wal_autocheckpoint=0`); err != nil {
+			t.Fatalf("disable fixture auto-checkpoint: %v", err)
+		}
+		if _, err := db.Exec(`INSERT INTO existing (value) VALUES ('wal-only')`); err != nil {
+			t.Fatalf("commit fixture WAL row: %v", err)
+		}
+
+		dir := t.TempDir()
+		path := filepath.Join(dir, "unmigrated.db")
+		mainBefore, err := os.ReadFile(sourcePath)
 		if err != nil {
-			t.Fatalf("read fixture before: %v", err)
+			t.Fatalf("read fixture main: %v", err)
+		}
+		walBefore, err := os.ReadFile(sourcePath + "-wal")
+		if err != nil {
+			t.Fatalf("read fixture WAL: %v", err)
+		}
+		if err := os.WriteFile(path, mainBefore, 0o600); err != nil {
+			t.Fatalf("copy fixture main: %v", err)
+		}
+		if err := os.WriteFile(path+"-wal", walBefore, 0o600); err != nil {
+			t.Fatalf("copy fixture WAL: %v", err)
 		}
 
 		if _, err := NewSQLiteWeightReader(ctx, path, CollectorConfig{}); err == nil {
 			t.Fatal("NewSQLiteWeightReader succeeded for unmigrated database")
 		}
-		after, err := os.ReadFile(path)
+		entries, err := os.ReadDir(dir)
 		if err != nil {
-			t.Fatalf("read fixture after: %v", err)
+			t.Fatalf("read fixture directory: %v", err)
 		}
-		if !bytes.Equal(after, before) {
-			t.Fatal("unmigrated database changed during construction")
+		if len(entries) != 2 || entries[0].Name() != "unmigrated.db" || entries[1].Name() != "unmigrated.db-wal" {
+			t.Fatalf("fixture directory after construction = %v, want only main and WAL", entries)
+		}
+		mainAfter, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read fixture main after: %v", err)
+		}
+		walAfter, err := os.ReadFile(path + "-wal")
+		if err != nil {
+			t.Fatalf("read fixture WAL after: %v", err)
+		}
+		if !bytes.Equal(mainAfter, mainBefore) || !bytes.Equal(walAfter, walBefore) {
+			t.Fatal("unmigrated main database or WAL changed during construction")
 		}
 		check, err := sql.Open("sqlite", path)
 		if err != nil {

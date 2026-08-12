@@ -87,6 +87,32 @@ func NewSQLiteWeightReader(ctx context.Context, dbPath string, config CollectorC
 	q.Set("mode", "ro")
 	u.RawQuery = q.Encode()
 
+	preflightURL := u
+	preflightQuery := preflightURL.Query()
+	preflightQuery.Set("immutable", "1")
+	preflightURL.RawQuery = preflightQuery.Encode()
+	preflight, err := sql.Open("sqlite", preflightURL.String())
+	if err != nil {
+		return nil, fmt.Errorf("feedback: open SQLite weight reader preflight: %w", err)
+	}
+	preflight.SetMaxOpenConns(1)
+	if err := preflight.PingContext(ctx); err != nil {
+		_ = preflight.Close()
+		return nil, fmt.Errorf("feedback: open SQLite weight reader preflight %q: %w", dbPath, err)
+	}
+	version, err := currentSchemaVersion(preflight)
+	if err != nil {
+		_ = preflight.Close()
+		return nil, fmt.Errorf("feedback: validate SQLite weight reader schema: %w", err)
+	}
+	if want := migrations[len(migrations)-1].version; version != want {
+		_ = preflight.Close()
+		return nil, fmt.Errorf("feedback: validate SQLite weight reader schema: version %d, want %d", version, want)
+	}
+	if err := preflight.Close(); err != nil {
+		return nil, fmt.Errorf("feedback: close SQLite weight reader preflight: %w", err)
+	}
+
 	db, err := sql.Open("sqlite", u.String())
 	if err != nil {
 		return nil, fmt.Errorf("feedback: open SQLite weight reader: %w", err)
@@ -95,15 +121,6 @@ func NewSQLiteWeightReader(ctx context.Context, dbPath string, config CollectorC
 	if err := db.PingContext(ctx); err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("feedback: open SQLite weight reader %q: %w", dbPath, err)
-	}
-	version, err := currentSchemaVersion(db)
-	if err != nil {
-		_ = db.Close()
-		return nil, fmt.Errorf("feedback: validate SQLite weight reader schema: %w", err)
-	}
-	if want := migrations[len(migrations)-1].version; version != want {
-		_ = db.Close()
-		return nil, fmt.Errorf("feedback: validate SQLite weight reader schema: version %d, want %d", version, want)
 	}
 
 	store := &SQLiteSignalStore{db: db}
