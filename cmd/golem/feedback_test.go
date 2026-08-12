@@ -227,12 +227,20 @@ func TestFeedbackObserverRecordsFirstPresentationAndLaterRead(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer db.Close()
+	defer func() {
+		if err := db.Close(); err != nil {
+			t.Error(err)
+		}
+	}()
 	rows, err := db.Query(`SELECT chunk_key, signal_kind FROM feedback_signals ORDER BY chunk_key`)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer rows.Close()
+	defer func() {
+		if err := rows.Close(); err != nil {
+			t.Error(err)
+		}
+	}()
 	var got []string
 	for rows.Next() {
 		var key, kind string
@@ -344,6 +352,30 @@ func TestFeedbackObserverFiltersAndIsolatesRuns(t *testing.T) {
 	assertFeedbackSignalCount(t, dbPath, "file_opened", 0)
 }
 
+func TestFeedbackServiceFinishRunClearsPendingRetrieval(t *testing.T) {
+	release := make(chan struct{})
+	close(release)
+	store := &feedbackBlockingStore{started: make(chan struct{}), release: release}
+	svc := feedbackServiceForStore(t.TempDir(), store, feedbackTestWarn(t))
+	o := svc.observer("run")
+	results := o.(agent.ToolResultObserver)
+	presentations := o.(agent.RetrievalPresentationObserver)
+	_ = results.OnToolResult(context.Background(), agent.ToolResultEvent{Step: 1, Call: feedbackCall("pending", "retrieve", `{"query":"q"}`), Invoked: true})
+	svc.finishRun("run")
+	_ = presentations.OnRetrievalPresentation(context.Background(), agent.RetrievalPresentationEvent{Step: 2, ToolCallID: "pending", Attribution: agent.RetrievalAttribution{Sources: []agent.RetrievedSource{{StableKey: "k", Source: "a.go"}}}})
+	_ = results.OnToolResult(context.Background(), agent.ToolResultEvent{Step: 3, Call: feedbackCall("read", "read_file", `{"path":"a.go"}`), Invoked: true})
+	report, err := svc.close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.attempted != 3 || report.completed != 3 || report.dropped != 0 || report.presentationJoinMisses != 1 {
+		t.Fatalf("report=%+v", report)
+	}
+	if got := feedbackKindCount(store, feedbackpkg.SignalFileOpened); got != 0 {
+		t.Fatalf("file opened=%d, want 0", got)
+	}
+}
+
 func TestFeedbackObserverCreditsEachRetrievalOncePerKey(t *testing.T) {
 	root := t.TempDir()
 	dbPath := filepath.Join(t.TempDir(), "feedback.db")
@@ -372,12 +404,20 @@ func TestFeedbackObserverCreditsEachRetrievalOncePerKey(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer db.Close()
+	defer func() {
+		if err := db.Close(); err != nil {
+			t.Error(err)
+		}
+	}()
 	rows, err := db.Query(`SELECT chunk_key, COUNT(*) FROM feedback_signals WHERE signal_kind='file_opened' GROUP BY chunk_key ORDER BY chunk_key`)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer rows.Close()
+	defer func() {
+		if err := rows.Close(); err != nil {
+			t.Error(err)
+		}
+	}()
 	var got []string
 	for rows.Next() {
 		var key string
@@ -396,11 +436,13 @@ func TestFeedbackServiceUsesCallbackEventTime(t *testing.T) {
 	for _, tt := range []struct {
 		name        string
 		readAfter   time.Duration
+		laterEvent  bool
+		completed   int
 		wantOpened  int
 		wantExpired int
 	}{
-		{name: "less than boundary", readAfter: 299 * time.Second, wantOpened: 1},
-		{name: "exact boundary", readAfter: 300 * time.Second, wantExpired: 1},
+		{name: "less than boundary", readAfter: 299 * time.Second, completed: 3, wantOpened: 1},
+		{name: "exact boundary", readAfter: 300 * time.Second, laterEvent: true, completed: 6, wantOpened: 1, wantExpired: 1},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			root := t.TempDir()
@@ -435,12 +477,20 @@ func TestFeedbackServiceUsesCallbackEventTime(t *testing.T) {
 			now = base.Add(tt.readAfter)
 			mu.Unlock()
 			_ = results.OnToolResult(context.Background(), agent.ToolResultEvent{Step: 3, Call: feedbackCall("f", "read_file", `{"path":"a.go"}`), Invoked: true})
+			if tt.laterEvent {
+				_ = results.OnToolResult(context.Background(), agent.ToolResultEvent{Step: 4, Call: feedbackCall("later", "retrieve", `{"query":"later"}`), Invoked: true})
+				_ = presentations.OnRetrievalPresentation(context.Background(), agent.RetrievalPresentationEvent{Step: 5, ToolCallID: "later", Attribution: agent.RetrievalAttribution{Sources: []agent.RetrievedSource{{StableKey: "later-key", Source: "later.go"}}}})
+				mu.Lock()
+				now = base.Add(301 * time.Second)
+				mu.Unlock()
+				_ = results.OnToolResult(context.Background(), agent.ToolResultEvent{Step: 6, Call: feedbackCall("later-read", "read_file", `{"path":"later.go"}`), Invoked: true})
+			}
 			mu.Lock()
 			now = base.Add(time.Hour)
 			mu.Unlock()
 			close(release)
 			report, err := svc.close()
-			if err != nil || report.dropped != 0 {
+			if err != nil || report.attempted != tt.completed || report.completed != tt.completed || report.dropped != 0 {
 				t.Fatalf("close = %+v, %v", report, err)
 			}
 			if got := feedbackKindCount(store, feedbackpkg.SignalFileOpened); got != tt.wantOpened {
@@ -459,7 +509,11 @@ func assertFeedbackSignalCount(t *testing.T, dbPath, kind string, want int) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer db.Close()
+	defer func() {
+		if err := db.Close(); err != nil {
+			t.Error(err)
+		}
+	}()
 	var got int
 	if err := db.QueryRow(`SELECT COUNT(*) FROM feedback_signals WHERE signal_kind = ?`, kind).Scan(&got); err != nil {
 		t.Fatal(err)
@@ -530,6 +584,123 @@ func TestFeedbackServiceOverflowDisablesAndAccountsQueuedEvents(t *testing.T) {
 	}
 	if report.reasons[dropOverflowNewest] != 1 || report.reasons[dropQueuedAfterDisable] != 128 {
 		t.Fatalf("reasons = %v", report.reasons)
+	}
+}
+
+func TestFeedbackServiceCountedOverflowWarnsOnceWithoutBlockingCallback(t *testing.T) {
+	releaseStore := make(chan struct{})
+	close(releaseStore)
+	store := &feedbackBlockingStore{started: make(chan struct{}), release: releaseStore}
+	workerBlocked := make(chan struct{})
+	releaseWorker := make(chan struct{})
+	warnings := make(chan string, 2)
+	var gateOnce sync.Once
+	svc := feedbackServiceForStoreConfigured(t.TempDir(), store, func(line string) { warnings <- line }, func(s *feedbackService) {
+		s.ticks = make(chan time.Time)
+		s.workerGate = func(point string) {
+			if point == "before-select" {
+				gateOnce.Do(func() { close(workerBlocked); <-releaseWorker })
+			}
+		}
+	})
+	defer func() { _, _ = svc.close() }()
+	<-workerBlocked
+	obs := svc.observer("run").(agent.ToolResultObserver)
+	emit := func(id string) {
+		_ = obs.OnToolResult(context.Background(), agent.ToolResultEvent{Step: 1, Call: feedbackCall(id, "retrieve", `{"query":"q"}`), Invoked: true})
+	}
+	for i := 0; i < feedbackQueueSize; i++ {
+		emit(fmt.Sprintf("queued-%d", i))
+	}
+	returned := make(chan struct{})
+	go func() { emit("overflow"); close(returned) }()
+	select {
+	case <-returned:
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("overflow callback blocked")
+	}
+	select {
+	case warning := <-warnings:
+		t.Fatalf("warning ran on callback path: %q", warning)
+	default:
+	}
+	close(releaseWorker)
+	select {
+	case warning := <-warnings:
+		if !strings.Contains(warning, "overflow") {
+			t.Fatalf("warning=%q", warning)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("worker did not deliver overflow warning")
+	}
+	report, err := svc.close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.attempted != 129 || report.completed != 0 || report.dropped != 129 || report.reasons[dropOverflowNewest] != 1 || report.reasons[dropQueuedAfterDisable] != 128 {
+		t.Fatalf("report=%+v", report)
+	}
+	select {
+	case warning := <-warnings:
+		t.Fatalf("extra warning=%q", warning)
+	default:
+	}
+}
+
+func TestFeedbackServiceCleanupOverflowWarnsOnceWithoutBlockingFinishRun(t *testing.T) {
+	releaseStore := make(chan struct{})
+	close(releaseStore)
+	store := &feedbackBlockingStore{started: make(chan struct{}), release: releaseStore}
+	workerBlocked := make(chan struct{})
+	releaseWorker := make(chan struct{})
+	warnings := make(chan string, 2)
+	var gateOnce sync.Once
+	svc := feedbackServiceForStoreConfigured(t.TempDir(), store, func(line string) { warnings <- line }, func(s *feedbackService) {
+		s.ticks = make(chan time.Time)
+		s.workerGate = func(point string) {
+			if point == "before-select" {
+				gateOnce.Do(func() { close(workerBlocked); <-releaseWorker })
+			}
+		}
+	})
+	defer func() { _, _ = svc.close() }()
+	<-workerBlocked
+	obs := svc.observer("run").(agent.ToolResultObserver)
+	for i := 0; i < feedbackQueueSize; i++ {
+		_ = obs.OnToolResult(context.Background(), agent.ToolResultEvent{Step: 1, Call: feedbackCall(fmt.Sprintf("queued-%d", i), "retrieve", `{"query":"q"}`), Invoked: true})
+	}
+	returned := make(chan struct{})
+	go func() { svc.finishRun("run"); close(returned) }()
+	select {
+	case <-returned:
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("finishRun blocked on cleanup overflow")
+	}
+	select {
+	case warning := <-warnings:
+		t.Fatalf("warning ran on finishRun path: %q", warning)
+	default:
+	}
+	close(releaseWorker)
+	select {
+	case warning := <-warnings:
+		if !strings.Contains(warning, "overflow") {
+			t.Fatalf("warning=%q", warning)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("worker did not deliver cleanup overflow warning")
+	}
+	report, err := svc.close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.attempted != 128 || report.completed != 0 || report.dropped != 128 || report.reasons[dropOverflowNewest] != 0 || report.reasons[dropQueuedAfterDisable] != 128 {
+		t.Fatalf("report=%+v", report)
+	}
+	select {
+	case warning := <-warnings:
+		t.Fatalf("extra warning=%q", warning)
+	default:
 	}
 }
 

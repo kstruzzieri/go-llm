@@ -128,13 +128,14 @@ type feedbackService struct {
 	closeReader   func() error
 	closeWriter   func() error
 
-	admissionMu sync.Mutex
-	stopped     bool
-	disabled    bool
-	disabledNow atomic.Bool
-	timedOut    atomic.Bool
-	report      feedbackReport
-	closeAt     time.Time
+	admissionMu  sync.Mutex
+	stopped      bool
+	disabled     bool
+	disabledNow  atomic.Bool
+	overflowWarn atomic.Bool
+	timedOut     atomic.Bool
+	report       feedbackReport
+	closeAt      time.Time
 
 	closeOnce   sync.Once
 	closeReport feedbackReport
@@ -338,6 +339,7 @@ func (s *feedbackService) admit(e feedbackEvent, counted bool) {
 			s.report.dropped++
 			s.report.reasons[dropOverflowNewest]++
 		}
+		s.overflowWarn.CompareAndSwap(false, true)
 		s.disabled = true
 		s.disabledNow.Store(true)
 	}
@@ -385,6 +387,18 @@ func (s *feedbackService) work(ctx context.Context) {
 	gate := func(point string) {
 		if s.workerGate != nil {
 			s.workerGate(point)
+		}
+	}
+	warnOverflow := func() {
+		if !s.overflowWarn.Load() {
+			return
+		}
+		s.admissionMu.Lock()
+		requested := s.overflowWarn.Swap(false)
+		s.admissionMu.Unlock()
+		if requested {
+			gate("before-warning")
+			s.warn.notify("warning: behavioral feedback recording disabled (overflow): event queue full")
 		}
 	}
 	pending := make(map[feedbackJoinKey]feedbackPending)
@@ -440,8 +454,7 @@ func (s *feedbackService) work(ctx context.Context) {
 		return err
 	}
 
-	var handle func(feedbackEvent)
-	handle = func(e feedbackEvent) {
+	handle := func(e feedbackEvent) {
 		switch e.kind {
 		case feedbackRetrieve:
 			pending[feedbackJoinKey{e.runID, e.callID}] = feedbackPending{query: e.query, step: e.step}
@@ -553,6 +566,7 @@ func (s *feedbackService) work(ctx context.Context) {
 	}
 
 	for {
+		warnOverflow()
 		if s.timedOut.Load() {
 			abandon(dropQueuedAfterTimeout)
 			return
@@ -569,6 +583,7 @@ func (s *feedbackService) work(ctx context.Context) {
 		gate("before-select")
 		select {
 		case <-ctx.Done():
+			warnOverflow()
 			abandon(dropQueuedAfterTimeout)
 			return
 		case <-ticks:
@@ -585,6 +600,7 @@ func (s *feedbackService) work(ctx context.Context) {
 				s.disable("maintenance", err)
 			}
 		case <-s.stop:
+			warnOverflow()
 			for {
 				if s.timedOut.Load() {
 					abandon(dropQueuedAfterTimeout)
@@ -636,6 +652,7 @@ func (s *feedbackService) work(ctx context.Context) {
 				return
 			}
 			if s.disabledNow.Load() {
+				warnOverflow()
 				if e.counted {
 					s.drop(dropQueuedAfterDisable)
 				}
