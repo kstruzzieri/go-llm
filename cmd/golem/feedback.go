@@ -590,8 +590,16 @@ func (s *feedbackService) work(ctx context.Context) {
 					abandon(dropQueuedAfterTimeout)
 					return
 				}
+				gate("after-stop-precheck")
 				select {
 				case e := <-s.events:
+					if s.timedOut.Load() {
+						if e.counted {
+							s.drop(dropQueuedAfterTimeout)
+						}
+						abandon(dropQueuedAfterTimeout)
+						return
+					}
 					if s.disabledNow.Load() {
 						if e.counted {
 							s.drop(dropQueuedAfterDisable)
@@ -601,6 +609,11 @@ func (s *feedbackService) work(ctx context.Context) {
 					handle(e)
 				default:
 					if s.disabledNow.Load() {
+						discard()
+						return
+					}
+					gate("before-final-sweep")
+					if s.timedOut.Load() {
 						discard()
 						return
 					}

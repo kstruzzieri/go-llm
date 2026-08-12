@@ -707,6 +707,124 @@ func TestFeedbackServiceCloseTimeoutDropsEveryQueuedEvent(t *testing.T) {
 	}
 }
 
+func TestFeedbackServiceCloseTimeoutAfterStopPrecheckDropsDequeuedEvent(t *testing.T) {
+	releaseStore := make(chan struct{})
+	close(releaseStore)
+	store := &feedbackBlockingStore{started: make(chan struct{}), release: releaseStore}
+	beforeSelect := make(chan struct{})
+	releaseSelect := make(chan struct{})
+	afterPrecheck := make(chan struct{})
+	releasePrecheck := make(chan struct{})
+	cancelSeen := make(chan struct{})
+	var selectOnce, precheckOnce, cancelOnce sync.Once
+	svc := feedbackServiceForStoreConfigured(t.TempDir(), store, feedbackTestWarn(t), func(s *feedbackService) {
+		s.ticks = make(chan time.Time)
+		s.closeTimeout = 20 * time.Millisecond
+		originalCancel := s.cancel
+		s.cancel = func() {
+			cancelOnce.Do(func() { close(cancelSeen) })
+			originalCancel()
+		}
+		s.workerGate = func(point string) {
+			switch point {
+			case "before-select":
+				selectOnce.Do(func() { close(beforeSelect); <-releaseSelect })
+			case "after-stop-precheck":
+				precheckOnce.Do(func() { close(afterPrecheck); <-releasePrecheck })
+			}
+		}
+	})
+	<-beforeSelect
+	obs := svc.observer("run").(agent.ToolResultObserver)
+	_ = obs.OnToolResult(context.Background(), agent.ToolResultEvent{Step: 1, Call: feedbackCall("queued", "retrieve", `{"query":"q"}`), Invoked: true})
+	queued := <-svc.events
+	type closeResult struct {
+		report feedbackReport
+		err    error
+	}
+	closed := make(chan closeResult, 1)
+	go func() {
+		report, err := svc.close()
+		closed <- closeResult{report: report, err: err}
+	}()
+	for {
+		svc.admissionMu.Lock()
+		stopped := svc.stopped
+		svc.admissionMu.Unlock()
+		if stopped {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	close(releaseSelect)
+	<-afterPrecheck
+	svc.events <- queued
+	<-cancelSeen
+	close(releasePrecheck)
+	result := <-closed
+	if result.err != nil {
+		t.Fatal(result.err)
+	}
+	if result.report.attempted != 1 || result.report.completed != 0 || result.report.dropped != 1 || result.report.reasons[dropQueuedAfterTimeout] != 1 {
+		t.Fatalf("report=%+v", result.report)
+	}
+}
+
+func TestFeedbackServiceCloseTimeoutAfterStopPrecheckSkipsFinalSweep(t *testing.T) {
+	store := &feedbackBlockingStore{started: make(chan struct{}), release: make(chan struct{})}
+	base := time.Unix(50_000, 0)
+	var nowUnix atomic.Int64
+	nowUnix.Store(base.Unix())
+	beforeSweep := make(chan struct{})
+	releaseSweep := make(chan struct{})
+	cancelSeen := make(chan struct{})
+	var sweepOnce, cancelOnce sync.Once
+	svc := feedbackServiceForStoreConfigured(t.TempDir(), store, feedbackTestWarn(t), func(s *feedbackService) {
+		s.ticks = make(chan time.Time)
+		s.now = func() time.Time { return time.Unix(nowUnix.Load(), 0) }
+		s.closeTimeout = 20 * time.Millisecond
+		originalCancel := s.cancel
+		s.cancel = func() {
+			cancelOnce.Do(func() { close(cancelSeen) })
+			originalCancel()
+		}
+		s.workerGate = func(point string) {
+			if point == "before-final-sweep" {
+				sweepOnce.Do(func() { close(beforeSweep); <-releaseSweep })
+			}
+		}
+	})
+	o := svc.observer("run")
+	_ = o.(agent.ToolResultObserver).OnToolResult(context.Background(), agent.ToolResultEvent{Step: 1, Call: feedbackCall("r", "retrieve", `{"query":"q"}`), Invoked: true})
+	_ = o.(agent.RetrievalPresentationObserver).OnRetrievalPresentation(context.Background(), agent.RetrievalPresentationEvent{Step: 2, ToolCallID: "r", Attribution: agent.RetrievalAttribution{Sources: []agent.RetrievedSource{{StableKey: "k", Source: "a.go"}}}})
+	waitFeedbackCompleted(t, svc, 2)
+	nowUnix.Store(base.Add(300 * time.Second).Unix())
+	type closeResult struct {
+		report feedbackReport
+		err    error
+	}
+	closed := make(chan closeResult, 1)
+	go func() {
+		report, err := svc.close()
+		closed <- closeResult{report: report, err: err}
+	}()
+	<-beforeSweep
+	<-cancelSeen
+	close(releaseSweep)
+	result := <-closed
+	select {
+	case <-store.started:
+		t.Fatalf("final sweep started persistence after close timeout: %v", result.err)
+	default:
+	}
+	if result.err != nil {
+		t.Fatal(result.err)
+	}
+	if result.report.attempted != 2 || result.report.completed != 2 || result.report.dropped != 0 {
+		t.Fatalf("report=%+v", result.report)
+	}
+}
+
 func TestFeedbackServiceCloseSkipsTickerAfterStopBoundary(t *testing.T) {
 	root := t.TempDir()
 	releaseStore := make(chan struct{})
