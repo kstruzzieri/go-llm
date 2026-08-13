@@ -569,6 +569,7 @@ func (s *feedbackService) work(ctx context.Context) {
 		warnOverflow()
 		gate("after-overflow-warning-probe")
 		if s.timedOut.Load() {
+			warnOverflow()
 			abandon(dropQueuedAfterTimeout)
 			return
 		}
