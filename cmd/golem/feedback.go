@@ -567,11 +567,13 @@ func (s *feedbackService) work(ctx context.Context) {
 
 	for {
 		warnOverflow()
+		gate("after-overflow-warning-probe")
 		if s.timedOut.Load() {
 			abandon(dropQueuedAfterTimeout)
 			return
 		}
 		if s.disabledNow.Load() {
+			warnOverflow()
 			abandon(dropQueuedAfterDisable)
 			select {
 			case <-s.stop:

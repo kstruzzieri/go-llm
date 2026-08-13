@@ -647,6 +647,72 @@ func TestFeedbackServiceCountedOverflowWarnsOnceWithoutBlockingCallback(t *testi
 	}
 }
 
+// Catches removing the disabled-branch overflow warning recheck after the
+// worker's initial warning probe.
+func TestFeedbackServiceOverflowAfterWarningProbeWarnsOnce(t *testing.T) {
+	releaseStore := make(chan struct{})
+	close(releaseStore)
+	store := &feedbackBlockingStore{started: make(chan struct{}), release: releaseStore}
+	afterProbe := make(chan struct{})
+	releaseWorker := make(chan struct{})
+	warnings := make(chan string, 2)
+	var gateOnce sync.Once
+	svc := feedbackServiceForStoreConfigured(t.TempDir(), store, func(line string) { warnings <- line }, func(s *feedbackService) {
+		s.ticks = make(chan time.Time)
+		s.workerGate = func(point string) {
+			if point == "after-overflow-warning-probe" {
+				gateOnce.Do(func() { close(afterProbe); <-releaseWorker })
+			}
+		}
+	})
+	defer func() { _, _ = svc.close() }()
+	select {
+	case <-afterProbe:
+	case <-time.After(time.Second):
+		t.Fatal("worker did not reach overflow warning/disable boundary")
+	}
+	obs := svc.observer("run").(agent.ToolResultObserver)
+	emit := func(id string) {
+		_ = obs.OnToolResult(context.Background(), agent.ToolResultEvent{Step: 1, Call: feedbackCall(id, "retrieve", `{"query":"q"}`), Invoked: true})
+	}
+	for i := 0; i < feedbackQueueSize; i++ {
+		emit(fmt.Sprintf("queued-%d", i))
+	}
+	returned := make(chan struct{})
+	go func() { emit("overflow"); close(returned) }()
+	select {
+	case <-returned:
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("overflow callback blocked")
+	}
+	select {
+	case warning := <-warnings:
+		t.Fatalf("warning ran on callback path: %q", warning)
+	default:
+	}
+	close(releaseWorker)
+	select {
+	case warning := <-warnings:
+		if !strings.Contains(warning, "overflow") {
+			t.Fatalf("warning=%q", warning)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("worker did not deliver overflow warning")
+	}
+	report, err := svc.close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.attempted != 129 || report.completed != 0 || report.dropped != 129 || report.reasons[dropOverflowNewest] != 1 || report.reasons[dropQueuedAfterDisable] != 128 {
+		t.Fatalf("report=%+v", report)
+	}
+	select {
+	case warning := <-warnings:
+		t.Fatalf("extra warning=%q", warning)
+	default:
+	}
+}
+
 func TestFeedbackServiceCleanupOverflowWarnsOnceWithoutBlockingFinishRun(t *testing.T) {
 	releaseStore := make(chan struct{})
 	close(releaseStore)
