@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -529,6 +530,25 @@ type runHooks struct {
 	closed              func(string)
 }
 
+func formatFeedbackReport(report feedbackReport) string {
+	reasons := make([]string, 0, len(report.reasons))
+	for reason, count := range report.reasons {
+		if count != 0 {
+			reasons = append(reasons, fmt.Sprintf("%s:%d", reason, count))
+		}
+	}
+	if report.attempted == 0 && report.completed == 0 && report.dropped == 0 && len(reasons) == 0 && report.presentationDuplicates == 0 && report.presentationJoinMisses == 0 {
+		return ""
+	}
+	sort.Strings(reasons)
+	dropReasons := "none"
+	if len(reasons) > 0 {
+		dropReasons = strings.Join(reasons, ",")
+	}
+	return fmt.Sprintf("behavioral feedback: attempted=%d completed=%d dropped=%d drop_reasons=%s duplicates=%d join_misses=%d",
+		report.attempted, report.completed, report.dropped, dropReasons, report.presentationDuplicates, report.presentationJoinMisses)
+}
+
 func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...runHooks) error {
 	var hooks runHooks
 	if len(testHooks) > 0 {
@@ -653,7 +673,11 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 		warns = append(warns, feedbackWarning)
 	}
 	defer func() {
-		if _, closeErr := feedbackSvc.close(); closeErr != nil {
+		report, closeErr := feedbackSvc.close()
+		if line := formatFeedbackReport(report); line != "" {
+			_, _ = fmt.Fprintln(stderr, line)
+		}
+		if closeErr != nil {
 			_, _ = fmt.Fprintln(stderr, "behavioral feedback close failed: "+closeErr.Error())
 		}
 		if hooks.closed != nil {

@@ -159,7 +159,7 @@ func normalizeFeedbackPath(root, name string) (string, bool) {
 	if name == "" || strings.IndexByte(name, 0) >= 0 {
 		return "", false
 	}
-	name = filepath.FromSlash(strings.ReplaceAll(name, `\`, "/"))
+	name = filepath.FromSlash(name)
 	root = filepath.Clean(root)
 	full := filepath.Clean(name)
 	if !filepath.IsAbs(full) {

@@ -206,17 +206,26 @@ func TestRunFeedbackConstructionGate(t *testing.T) {
 		args         []string
 		wantOpens    int
 		wantWarnings int
+		openSucceeds bool
 	}{
 		{name: "flag off", wantOpens: 0},
 		{name: "no rag", args: []string{"-feedback", "-no-rag"}, wantOpens: 0},
 		{name: "open failure", args: []string{"-feedback"}, wantOpens: 1, wantWarnings: 1},
+		{name: "empty report", args: []string{"-feedback"}, wantOpens: 1, openSucceeds: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			stdin, stdout, stderr := runTestFiles(t)
 			opens := 0
+			var svc *feedbackService
+			if tc.openSucceeds {
+				svc = feedbackServiceForStore(root, &feedbackBlockingStore{}, feedbackTestWarn(t))
+			}
 			err := run(append(append([]string{}, baseArgs...), tc.args...), stdin, stdout, stderr, runHooks{
 				openFeedback: func(context.Context, string, string, func(string)) (*feedbackService, error) {
 					opens++
+					if svc != nil {
+						return svc, nil
+					}
 					return nil, errors.New("open failed")
 				},
 				startAutoIndex: func() func() { return func() {} },
@@ -233,6 +242,9 @@ func TestRunFeedbackConstructionGate(t *testing.T) {
 			warningText := readRunTestFile(t, stderr)
 			if got := strings.Count(warningText, "behavioral feedback disabled"); got != tc.wantWarnings {
 				t.Fatalf("feedback warnings = %d, want %d; stderr:\n%s", got, tc.wantWarnings, warningText)
+			}
+			if strings.Contains(warningText, "behavioral feedback: attempted=") {
+				t.Fatalf("empty or disabled feedback printed a shutdown report:\n%s", warningText)
 			}
 		})
 	}
@@ -277,6 +289,44 @@ func TestRunStopsAutoIndexInEveryDispatchBranch(t *testing.T) {
 				t.Fatalf("auto-index stop count = %d, events = %v", got, events)
 			}
 		})
+	}
+}
+
+func TestRunRendersCumulativeFeedbackShutdownReport(t *testing.T) {
+	configPath, root := writeRunLifecycleConfig(t)
+	stdin, stdout, stderr := runTestFiles(t)
+	svc := feedbackServiceForStore(root, &feedbackBlockingStore{}, feedbackTestWarn(t))
+	svc.report = feedbackReport{
+		attempted:              9,
+		completed:              4,
+		dropped:                5,
+		reasons:                map[string]int{dropOverflowNewest: 3, dropOperationFailed: 2},
+		presentationDuplicates: 6,
+		presentationJoinMisses: 7,
+	}
+	closeErr := errors.New("close failed")
+	svc.closeWriter = func() error { return closeErr }
+	errStop := errors.New("stop after startup")
+
+	err := run([]string{"-config", configPath, "-root", root, "-feedback", "-no-probe", "-no-cap-probe", "-no-session", "-no-memory", "-no-project-context", "-no-auto-index"}, stdin, stdout, stderr, runHooks{
+		openFeedback: func(context.Context, string, string, func(string)) (*feedbackService, error) {
+			return svc, nil
+		},
+		startAutoIndex: func() func() { return func() {} },
+		afterAutoIndexStart: func(lineSourceMode, agent.Tool, *feedbackService) error {
+			return errStop
+		},
+	})
+	if !errors.Is(err, errStop) {
+		t.Fatalf("run error = %v, want test stop", err)
+	}
+	got := readRunTestFile(t, stderr)
+	want := "behavioral feedback: attempted=9 completed=4 dropped=5 drop_reasons=operation-failed:2,overflow-newest:3 duplicates=6 join_misses=7\n"
+	if !strings.Contains(got, want) {
+		t.Fatalf("stderr missing cumulative report %q:\n%s", want, got)
+	}
+	if count := strings.Count(got, "behavioral feedback close failed: close failed"); count != 1 {
+		t.Fatalf("close error count = %d, want 1; stderr:\n%s", count, got)
 	}
 }
 

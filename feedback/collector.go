@@ -46,10 +46,13 @@ type Collector struct {
 	mu      sync.Mutex
 	windows map[string]*attributionWindow
 
-	signalCount atomic.Int64
-	closeOnce   sync.Once
-	done        chan struct{}
-	wg          sync.WaitGroup
+	signalCount   atomic.Int64
+	closeOnce     sync.Once
+	done          chan struct{}
+	wg            sync.WaitGroup
+	lifecycleMu   sync.Mutex
+	maintenanceMu sync.Mutex
+	closed        bool
 }
 
 // NewCollector creates a Collector backed by the given store and config.
@@ -88,7 +91,10 @@ func (c *Collector) Close() {
 		return
 	}
 	c.closeOnce.Do(func() {
+		c.lifecycleMu.Lock()
+		c.closed = true
 		close(c.done)
+		c.lifecycleMu.Unlock()
 	})
 	c.wg.Wait()
 }
@@ -134,10 +140,31 @@ func (c *Collector) RegisterRetrievalAt(ctx context.Context, query string, chunk
 	return id, nil
 }
 
-// Record persists a signal against an open attribution window.
+// Record persists a signal against an open attribution window. Background
+// collectors schedule maintenance asynchronously and ignore its error; manual
+// collectors preserve RecordAt's synchronous, error-reporting behavior.
 func (c *Collector) Record(ctx context.Context, signal Signal) error {
-	_, err := c.RecordAt(ctx, signal, time.Now())
-	return err
+	if c.done == nil {
+		_, err := c.RecordAt(ctx, signal, time.Now())
+		return err
+	}
+	c.lifecycleMu.Lock()
+	if c.closed {
+		c.lifecycleMu.Unlock()
+		return fmt.Errorf("feedback: record: collector is closed")
+	}
+	c.wg.Add(1)
+	c.lifecycleMu.Unlock()
+	_, recompute, err := c.recordAt(ctx, signal, time.Now())
+	if err != nil || !recompute {
+		c.wg.Done()
+		return err
+	}
+	go func() {
+		defer c.wg.Done()
+		_ = c.recompute(context.Background())
+	}()
+	return nil
 }
 
 // RecordAt persists a signal against an open attribution window, using
@@ -152,11 +179,19 @@ func (c *Collector) Record(ctx context.Context, signal Signal) error {
 // persistence is best-effort per key: `(false, err)` may leave earlier keys in
 // the batch committed, but interaction state is never marked on any error.
 func (c *Collector) RecordAt(ctx context.Context, signal Signal, observedAt time.Time) (bool, error) {
+	committed, recompute, err := c.recordAt(ctx, signal, observedAt)
+	if err != nil || !recompute {
+		return committed, err
+	}
+	return true, c.recompute(ctx)
+}
+
+func (c *Collector) recordAt(ctx context.Context, signal Signal, observedAt time.Time) (bool, bool, error) {
 	if observedAt.IsZero() {
-		return false, fmt.Errorf("feedback: record: observed time is required")
+		return false, false, fmt.Errorf("feedback: record: observed time is required")
 	}
 	if signal.RetrievalID == "" {
-		return false, fmt.Errorf("feedback: record: retrieval id is required")
+		return false, false, fmt.Errorf("feedback: record: retrieval id is required")
 	}
 
 	// ponytail: serialize persistence per collector; split per-window locks only
@@ -165,11 +200,11 @@ func (c *Collector) RecordAt(ctx context.Context, signal Signal, observedAt time
 	w, ok := c.windows[signal.RetrievalID]
 	if !ok {
 		c.mu.Unlock()
-		return false, fmt.Errorf("feedback: record: unknown retrieval id %q", signal.RetrievalID)
+		return false, false, fmt.Errorf("feedback: record: unknown retrieval id %q", signal.RetrievalID)
 	}
 	if observedAt.Sub(w.createdAt) >= maxWindowAge {
 		c.mu.Unlock()
-		return false, nil
+		return false, false, nil
 	}
 
 	strength := signal.effectiveStrength()
@@ -182,7 +217,7 @@ func (c *Collector) RecordAt(ctx context.Context, signal Signal, observedAt time
 	}
 	if err := c.insertSignals(ctx, signal.RetrievalID, keys, signal.Kind, strength, signal.Timestamp); err != nil {
 		c.mu.Unlock()
-		return false, err
+		return false, false, err
 	}
 
 	for _, key := range keys {
@@ -193,13 +228,13 @@ func (c *Collector) RecordAt(ctx context.Context, signal Signal, observedAt time
 	recompute := newCount/recomputeInterval > oldCount/recomputeInterval
 	c.mu.Unlock()
 
-	if recompute {
-		if err := c.store.RecomputeAggregates(ctx, c.config.DecayLambda); err != nil {
-			return true, err
-		}
-	}
+	return true, recompute, nil
+}
 
-	return true, nil
+func (c *Collector) recompute(ctx context.Context) error {
+	c.maintenanceMu.Lock()
+	defer c.maintenanceMu.Unlock()
+	return c.store.RecomputeAggregates(ctx, c.config.DecayLambda)
 }
 
 // Weights returns the behavioral weight for a single chunk key.
@@ -304,7 +339,7 @@ func (c *Collector) sweepExpiredAt(ctx context.Context, now time.Time) ([]string
 			continue
 		}
 		c.signalCount.Add(int64(len(keys)))
-		if err := c.store.RecomputeAggregates(ctx, c.config.DecayLambda); err != nil {
+		if err := c.recompute(ctx); err != nil {
 			return removed, err
 		}
 	}

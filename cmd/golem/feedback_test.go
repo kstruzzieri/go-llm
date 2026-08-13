@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -144,6 +145,10 @@ func waitFeedbackCompleted(t *testing.T, svc *feedbackService, want int) {
 func TestFeedbackPathNormalization(t *testing.T) {
 	root := t.TempDir()
 	abs := filepath.Join(root, "Pkg", "file.go")
+	nativeSeparatorInput, nativeSeparatorWant := `Pkg\file.go`, `Pkg\file.go`
+	if runtime.GOOS == "windows" {
+		nativeSeparatorWant = "Pkg/file.go"
+	}
 	for _, tt := range []struct {
 		name, input, want string
 		ok                bool
@@ -151,7 +156,7 @@ func TestFeedbackPathNormalization(t *testing.T) {
 		{"relative", "Pkg/file.go", "Pkg/file.go", true},
 		{"absolute equivalent", abs, "Pkg/file.go", true},
 		{"clean", "Pkg/./sub/../file.go", "Pkg/file.go", true},
-		{"slash conversion", `Pkg\\file.go`, "Pkg/file.go", true},
+		{"native separator conversion", nativeSeparatorInput, nativeSeparatorWant, true},
 		{"case preserved", "pkg/File.go", "pkg/File.go", true},
 		{"empty", "", "", false},
 		{"nul", "Pkg/\x00file.go", "", false},
@@ -174,6 +179,48 @@ func TestFeedbackPathNormalization(t *testing.T) {
 	if got, ok := normalizeFeedbackPath(root, "alias/file.go"); !ok || got != "alias/file.go" {
 		t.Fatalf("textual symlink alias = %q, %v", got, ok)
 	}
+}
+
+func TestFeedbackObserverDoesNotCreditDistinctPOSIXBackslashPath(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("backslash is a native separator on Windows")
+	}
+	root := t.TempDir()
+	if err := os.Mkdir(filepath.Join(root, "pkg"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{`pkg\file.go`, "pkg/file.go"} {
+		if err := os.WriteFile(filepath.Join(root, name), []byte(name), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	backslashInfo, err := os.Stat(filepath.Join(root, `pkg\file.go`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	slashInfo, err := os.Stat(filepath.Join(root, "pkg/file.go"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if os.SameFile(backslashInfo, slashInfo) {
+		t.Fatal("POSIX test files unexpectedly identify the same file")
+	}
+
+	dbPath := filepath.Join(t.TempDir(), "feedback.db")
+	svc, err := openFeedbackService(context.Background(), root, dbPath, feedbackTestWarn(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	observer := svc.observer("run")
+	results := observer.(agent.ToolResultObserver)
+	presentations := observer.(agent.RetrievalPresentationObserver)
+	_ = results.OnToolResult(context.Background(), agent.ToolResultEvent{Step: 1, Call: feedbackCall("retrieve", "retrieve", `{"query":"q"}`), Invoked: true})
+	_ = presentations.OnRetrievalPresentation(context.Background(), agent.RetrievalPresentationEvent{Step: 2, ToolCallID: "retrieve", Attribution: agent.RetrievalAttribution{Sources: []agent.RetrievedSource{{StableKey: "backslash-key", Source: `pkg\file.go`}}}})
+	_ = results.OnToolResult(context.Background(), agent.ToolResultEvent{Step: 3, Call: feedbackCall("read", "read_file", `{"path":"pkg/file.go"}`), Invoked: true})
+	if _, err := svc.close(); err != nil {
+		t.Fatal(err)
+	}
+	assertFeedbackSignalCount(t, dbPath, string(feedbackpkg.SignalFileOpened), 0)
 }
 
 func TestFeedbackObserverRecordsFirstPresentationAndLaterRead(t *testing.T) {

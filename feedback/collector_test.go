@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -41,6 +42,95 @@ func (s *recomputeStore) RecomputeAggregates(ctx context.Context, lambda float64
 		return s.recomputeErr
 	}
 	return s.SQLiteSignalStore.RecomputeAggregates(ctx, lambda)
+}
+
+type blockingRecomputeStore struct {
+	*SQLiteSignalStore
+	started chan struct{}
+	release chan struct{}
+	err     error
+}
+
+func (s *blockingRecomputeStore) RecomputeAggregates(ctx context.Context, _ float64) error {
+	close(s.started)
+	select {
+	case <-s.release:
+		return s.err
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+type closeBoundaryStore struct {
+	*SQLiteSignalStore
+	committed        chan struct{}
+	releaseInsert    chan struct{}
+	recomputeStarted chan struct{}
+	releaseRecompute chan struct{}
+}
+
+func (s *closeBoundaryStore) InsertSignals(ctx context.Context, retrievalID string, chunkKeys []string, kind SignalKind, strength float64, createdAt time.Time) error {
+	if err := s.SQLiteSignalStore.InsertSignals(ctx, retrievalID, chunkKeys, kind, strength, createdAt); err != nil {
+		return err
+	}
+	close(s.committed)
+	select {
+	case <-s.releaseInsert:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (s *closeBoundaryStore) RecomputeAggregates(ctx context.Context, _ float64) error {
+	close(s.recomputeStarted)
+	select {
+	case <-s.releaseRecompute:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+type concurrentRecomputeStore struct {
+	*SQLiteSignalStore
+	mu            sync.Mutex
+	calls         int
+	active        int
+	maxActive     int
+	firstStarted  chan struct{}
+	secondStarted chan struct{}
+	releaseFirst  chan struct{}
+}
+
+func (s *concurrentRecomputeStore) RecomputeAggregates(context.Context, float64) error {
+	s.mu.Lock()
+	s.calls++
+	call := s.calls
+	s.active++
+	if s.active > s.maxActive {
+		s.maxActive = s.active
+	}
+	switch call {
+	case 1:
+		close(s.firstStarted)
+	case 2:
+		close(s.secondStarted)
+	}
+	s.mu.Unlock()
+	if call == 1 {
+		<-s.releaseFirst
+	}
+	s.mu.Lock()
+	s.active--
+	s.mu.Unlock()
+	return nil
+}
+
+func (s *concurrentRecomputeStore) state() (calls, maxActive int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.calls, s.maxActive
 }
 
 type legacySignalStore struct {
@@ -743,6 +833,230 @@ func TestLegacyCollectorConstructorAndMethodsRemainCompatible(t *testing.T) {
 	}
 	if defaultedAt <= before.UnixMilli() {
 		t.Errorf("defaulted signal timestamp = %d, want after %d", defaultedAt, before.UnixMilli())
+	}
+}
+
+func TestLegacyRecordReturnsAfterCommitAndCloseTracksRecompute(t *testing.T) {
+	ctx := context.Background()
+	store := &blockingRecomputeStore{
+		SQLiteSignalStore: newTestStore(t),
+		started:           make(chan struct{}),
+		release:           make(chan struct{}),
+		err:               fmt.Errorf("recompute failed"),
+	}
+	c := NewCollector(store, CollectorConfig{})
+	keys := make([]string, recomputeInterval)
+	for i := range keys {
+		keys[i] = fmt.Sprintf("chunk-%03d", i)
+	}
+	id, err := c.RegisterRetrieval(ctx, "q", keys)
+	if err != nil {
+		t.Fatalf("RegisterRetrieval: %v", err)
+	}
+	recordDone := make(chan error, 1)
+	go func() {
+		recordDone <- c.Record(ctx, Signal{Kind: SignalCodeKept, RetrievalID: id})
+	}()
+	select {
+	case <-store.started:
+	case <-time.After(time.Second):
+		c.Close()
+		t.Fatal("maintenance recompute did not start")
+	}
+	count, err := store.SignalCount(ctx)
+	if err != nil || count != recomputeInterval {
+		close(store.release)
+		<-recordDone
+		c.Close()
+		t.Fatalf("committed signals = %d, %v; want %d, nil", count, err, recomputeInterval)
+	}
+	select {
+	case err := <-recordDone:
+		if err != nil {
+			close(store.release)
+			c.Close()
+			t.Fatalf("Record returned maintenance error: %v", err)
+		}
+	case <-time.After(100 * time.Millisecond):
+		close(store.release)
+		<-recordDone
+		c.Close()
+		t.Fatal("Record waited for maintenance recompute")
+	}
+
+	closeDone := make(chan struct{})
+	go func() {
+		c.Close()
+		close(closeDone)
+	}()
+	deadline := time.Now().Add(time.Second)
+	for {
+		c.lifecycleMu.Lock()
+		closing := c.closed
+		c.lifecycleMu.Unlock()
+		if closing {
+			break
+		}
+		if time.Now().After(deadline) {
+			close(store.release)
+			t.Fatal("Close did not start")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	select {
+	case <-closeDone:
+		close(store.release)
+		t.Fatal("Close returned before tracked recompute completed")
+	case <-time.After(20 * time.Millisecond):
+	}
+	close(store.release)
+	select {
+	case <-closeDone:
+	case <-time.After(time.Second):
+		t.Fatal("Close did not return after recompute completed")
+	}
+}
+
+func TestLegacyRecordCommittedBeforeCloseStillRunsTrackedRecompute(t *testing.T) {
+	ctx := context.Background()
+	store := &closeBoundaryStore{
+		SQLiteSignalStore: newTestStore(t),
+		committed:         make(chan struct{}),
+		releaseInsert:     make(chan struct{}),
+		recomputeStarted:  make(chan struct{}),
+		releaseRecompute:  make(chan struct{}),
+	}
+	c := NewCollector(store, CollectorConfig{})
+	keys := make([]string, recomputeInterval)
+	for i := range keys {
+		keys[i] = fmt.Sprintf("chunk-%03d", i)
+	}
+	id, err := c.RegisterRetrieval(ctx, "q", keys)
+	if err != nil {
+		t.Fatalf("RegisterRetrieval: %v", err)
+	}
+	recordDone := make(chan error, 1)
+	go func() { recordDone <- c.Record(ctx, Signal{Kind: SignalCodeKept, RetrievalID: id}) }()
+	select {
+	case <-store.committed:
+	case <-time.After(time.Second):
+		close(store.releaseInsert)
+		c.Close()
+		t.Fatal("signal batch did not commit")
+	}
+	closeDone := make(chan struct{})
+	go func() {
+		c.Close()
+		close(closeDone)
+	}()
+	deadline := time.Now().Add(time.Second)
+	for {
+		c.lifecycleMu.Lock()
+		closing := c.closed
+		c.lifecycleMu.Unlock()
+		if closing {
+			break
+		}
+		if time.Now().After(deadline) {
+			close(store.releaseInsert)
+			t.Fatal("Close did not start")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	close(store.releaseInsert)
+	if err := <-recordDone; err != nil {
+		close(store.releaseRecompute)
+		t.Fatalf("Record: %v", err)
+	}
+	select {
+	case <-store.recomputeStarted:
+	case <-closeDone:
+		close(store.releaseRecompute)
+		t.Fatal("Close returned without recomputing the committed threshold batch")
+	case <-time.After(time.Second):
+		close(store.releaseRecompute)
+		t.Fatal("committed threshold batch did not start recomputation")
+	}
+	select {
+	case <-closeDone:
+		close(store.releaseRecompute)
+		t.Fatal("Close returned before recomputation completed")
+	case <-time.After(20 * time.Millisecond):
+	}
+	close(store.releaseRecompute)
+	select {
+	case <-closeDone:
+	case <-time.After(time.Second):
+		t.Fatal("Close did not return after recomputation completed")
+	}
+}
+
+func TestLegacyRecordSerializesTrackedRecomputes(t *testing.T) {
+	ctx := context.Background()
+	store := &concurrentRecomputeStore{
+		SQLiteSignalStore: newTestStore(t),
+		firstStarted:      make(chan struct{}),
+		secondStarted:     make(chan struct{}),
+		releaseFirst:      make(chan struct{}),
+	}
+	c := NewCollector(store, CollectorConfig{})
+	for window := 0; window < 2; window++ {
+		keys := make([]string, recomputeInterval)
+		for i := range keys {
+			keys[i] = fmt.Sprintf("chunk-%d-%03d", window, i)
+		}
+		id, err := c.RegisterRetrieval(ctx, fmt.Sprintf("q%d", window), keys)
+		if err != nil {
+			t.Fatalf("RegisterRetrieval %d: %v", window, err)
+		}
+		if err := c.Record(ctx, Signal{Kind: SignalCodeKept, RetrievalID: id}); err != nil {
+			t.Fatalf("Record %d: %v", window, err)
+		}
+		if window == 0 {
+			select {
+			case <-store.firstStarted:
+			case <-time.After(time.Second):
+				close(store.releaseFirst)
+				c.Close()
+				t.Fatal("first recompute did not start")
+			}
+		}
+	}
+	select {
+	case <-store.secondStarted:
+		calls, maxActive := store.state()
+		close(store.releaseFirst)
+		c.Close()
+		t.Fatalf("recomputes overlapped before release: calls=%d max_active=%d", calls, maxActive)
+	case <-time.After(20 * time.Millisecond):
+	}
+	close(store.releaseFirst)
+	select {
+	case <-store.secondStarted:
+	case <-time.After(time.Second):
+		c.Close()
+		t.Fatal("second recompute did not run")
+	}
+	c.Close()
+	if calls, maxActive := store.state(); calls != 2 || maxActive != 1 {
+		t.Fatalf("recompute state = calls %d, max_active %d; want 2, 1", calls, maxActive)
+	}
+}
+
+func TestLegacyRecordRejectsAfterClose(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	c := NewCollector(store, CollectorConfig{})
+	id, err := c.RegisterRetrieval(ctx, "q", []string{"chunk"})
+	if err != nil {
+		t.Fatalf("RegisterRetrieval: %v", err)
+	}
+	c.Close()
+	if err := c.Record(ctx, Signal{Kind: SignalCodeKept, RetrievalID: id}); err == nil || !strings.Contains(err.Error(), "collector is closed") {
+		t.Fatalf("Record after Close = %v, want closed collector error", err)
+	}
+	if count, err := store.SignalCount(ctx); err != nil || count != 0 {
+		t.Fatalf("signals after rejected Record = %d, %v; want 0, nil", count, err)
 	}
 }
 
