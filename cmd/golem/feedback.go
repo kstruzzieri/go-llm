@@ -516,6 +516,9 @@ func (s *feedbackService) work(ctx context.Context) {
 			s.complete()
 		case feedbackRead:
 			joins := paths[e.path]
+			signals := make([]feedback.Signal, 0, len(joins))
+			positions := make(map[string]int)
+			active := make(map[string]*feedbackActive)
 			for _, join := range joins {
 				if join.retrieval.runID != e.runID || e.step <= join.retrieval.step {
 					continue
@@ -529,24 +532,40 @@ func (s *feedbackService) work(ctx context.Context) {
 				if len(keys) == 0 {
 					continue
 				}
-				opctx, cancel := s.operationContext(ctx)
-				committed, err := s.collector.RecordAt(opctx, feedback.Signal{Kind: feedback.SignalFileOpened, RetrievalID: join.retrieval.retrievalID, ChunkKeys: keys, Timestamp: e.at}, e.at)
-				cancel()
-				if committed {
+				id := join.retrieval.retrievalID
+				if pos, ok := positions[id]; ok {
 					for _, key := range keys {
-						join.retrieval.credited[key] = true
+						if !containsString(signals[pos].ChunkKeys, key) {
+							signals[pos].ChunkKeys = append(signals[pos].ChunkKeys, key)
+						}
 					}
+					continue
 				}
-				if err != nil {
-					if committed {
-						s.complete()
-						s.disable("maintenance", err)
-					} else {
-						s.drop(dropOperationFailed)
-						s.disable("write", err)
-					}
-					return
+				positions[id] = len(signals)
+				active[id] = join.retrieval
+				signals = append(signals, feedback.Signal{Kind: feedback.SignalFileOpened, RetrievalID: id, ChunkKeys: keys, Timestamp: e.at})
+			}
+			if len(signals) == 0 {
+				s.complete()
+				return
+			}
+			opctx, cancel := s.operationContext(ctx)
+			committed, err := s.collector.RecordBatchAt(opctx, signals, e.at)
+			cancel()
+			for _, signal := range committed {
+				for _, key := range signal.ChunkKeys {
+					active[signal.RetrievalID].credited[key] = true
 				}
+			}
+			if err != nil {
+				if len(committed) > 0 {
+					s.complete()
+					s.disable("maintenance", err)
+				} else {
+					s.drop(dropOperationFailed)
+					s.disable("write", err)
+				}
+				return
 			}
 			s.complete()
 		case feedbackFinishRun:

@@ -16,6 +16,12 @@ type boundarySignalStore struct {
 	rejectSignals bool
 }
 
+type countFailStore struct{ *SQLiteSignalStore }
+
+func (*countFailStore) SignalCount(context.Context) (int, error) {
+	return 0, fmt.Errorf("count unavailable")
+}
+
 func (s *boundarySignalStore) InsertSignal(ctx context.Context, retrievalID, chunkKey string, kind SignalKind, strength float64, createdAt time.Time) error {
 	if s.rejectSignals {
 		return fmt.Errorf("reject signal")
@@ -333,6 +339,21 @@ func TestManualCollectorRejectsPositiveAtWindowBoundaryThenSweeps(t *testing.T) 
 	}
 	if kind != string(SignalWindowExpired) || strength != -0.1 {
 		t.Errorf("expiry signal = (%q, %v), want (%q, -0.1)", kind, strength, SignalWindowExpired)
+	}
+}
+
+func TestManualCollectorExpiredRecordDoesNotReadSignalCount(t *testing.T) {
+	ctx := context.Background()
+	store := &countFailStore{newTestStore(t)}
+	c := NewManualCollector(store, CollectorConfig{})
+	presentedAt := time.Unix(1_700_000_000, 0)
+	id, err := c.RegisterRetrievalAt(ctx, "q", []string{"chunk-1"}, presentedAt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	committed, err := c.RecordAt(ctx, Signal{Kind: SignalCompletionAccepted, RetrievalID: id}, presentedAt.Add(maxWindowAge))
+	if err != nil || committed {
+		t.Fatalf("RecordAt expired window = (%v, %v), want (false, nil)", committed, err)
 	}
 }
 
@@ -833,6 +854,28 @@ func TestLegacyCollectorConstructorAndMethodsRemainCompatible(t *testing.T) {
 	}
 	if defaultedAt <= before.UnixMilli() {
 		t.Errorf("defaulted signal timestamp = %d, want after %d", defaultedAt, before.UnixMilli())
+	}
+}
+
+func TestLegacyCollectorRecordBatchAtRejectsBeforeWriting(t *testing.T) {
+	ctx := context.Background()
+	base := newTestStore(t)
+	c := NewCollector(legacySignalStore{SignalStore: base}, CollectorConfig{})
+	t.Cleanup(c.Close)
+	id, err := c.RegisterRetrieval(ctx, "q", []string{"chunk-1", "chunk-2"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	committed, err := c.RecordBatchAt(ctx, []Signal{{Kind: SignalCodeKept, RetrievalID: id}}, time.Now())
+	if err == nil || len(committed) != 0 {
+		t.Fatalf("RecordBatchAt legacy store = (%v, %v), want no commit and atomic-store error", committed, err)
+	}
+	count, err := base.SignalCount(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 {
+		t.Fatalf("legacy batch signal count = %d, want 0", count)
 	}
 }
 

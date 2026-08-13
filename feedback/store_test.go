@@ -2,6 +2,9 @@ package feedback
 
 import (
 	"context"
+	"database/sql"
+	"fmt"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -401,6 +404,72 @@ func TestRecomputeAggregates(t *testing.T) {
 	// Score should be approximately 0.8 + 0.6 = 1.4.
 	if agg.WeightedScore < 1.3 || agg.WeightedScore > 1.5 {
 		t.Errorf("weighted_score = %f, expected ~1.4", agg.WeightedScore)
+	}
+}
+
+func TestRecomputeAggregatesReservesWriterBeforeScanning(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "feedback.db")
+	open := func(busyTimeout int) *SQLiteSignalStore {
+		t.Helper()
+		db, err := sql.Open("sqlite", path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = db.Close() })
+		db.SetMaxOpenConns(1)
+		if _, err := db.Exec(`PRAGMA journal_mode=WAL`); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.Exec(fmt.Sprintf(`PRAGMA busy_timeout=%d`, busyTimeout)); err != nil {
+			t.Fatal(err)
+		}
+		store, err := NewSignalStore(ctx, db)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return store
+	}
+	first := open(1000)
+	second := open(50)
+	if err := first.InsertRetrievalWithCounts(ctx, "r", "q", []string{"key"}, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if err := first.InsertSignal(ctx, "r", "key", SignalCompletionAccepted, 0.8, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+
+	scanned := make(chan struct{})
+	release := make(chan struct{})
+	released := false
+	defer func() {
+		if !released {
+			close(release)
+		}
+	}()
+	first.recomputeAfterScan = func() {
+		close(scanned)
+		<-release
+	}
+	recomputeErr := make(chan error, 1)
+	go func() { recomputeErr <- first.RecomputeAggregates(ctx, 0) }()
+	<-scanned
+
+	writeErr := second.InsertSignal(ctx, "r", "key", SignalCompletionAccepted, 0.6, time.Now())
+	if writeErr == nil {
+		t.Error("concurrent signal write committed during recomputation scan")
+	}
+	var count int
+	if err := second.db.QueryRow(`SELECT COUNT(*) FROM feedback_signals`).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Errorf("signal count while recompute is gated = %d, want 1", count)
+	}
+	close(release)
+	released = true
+	if err := <-recomputeErr; err != nil {
+		t.Fatal(err)
 	}
 }
 

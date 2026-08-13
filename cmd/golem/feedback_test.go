@@ -82,6 +82,14 @@ func (s *feedbackBlockingStore) InsertSignals(ctx context.Context, _ string, key
 	s.kindsMu.Unlock()
 	return nil
 }
+func (s *feedbackBlockingStore) InsertSignalBatch(ctx context.Context, signals []feedbackpkg.Signal) error {
+	for _, signal := range signals {
+		if err := s.InsertSignals(ctx, signal.RetrievalID, signal.ChunkKeys, signal.Kind, signal.Strength, signal.Timestamp); err != nil {
+			return err
+		}
+	}
+	return nil
+}
 func (*feedbackBlockingStore) InsertSignal(context.Context, string, string, feedbackpkg.SignalKind, float64, time.Time) error {
 	return nil
 }
@@ -308,48 +316,119 @@ func TestFeedbackObserverRecordsFirstPresentationAndLaterRead(t *testing.T) {
 func TestFeedbackServiceCrossesProductionWeightGates(t *testing.T) {
 	root := t.TempDir()
 	dbPath := filepath.Join(t.TempDir(), "feedback.db")
+	record := func(svc *feedbackService, count int) {
+		t.Helper()
+		o := svc.observer("run")
+		to := o.(agent.ToolResultObserver)
+		po := o.(agent.RetrievalPresentationObserver)
+		for i := 0; i < count; i++ {
+			callID := fmt.Sprintf("retrieve-%d", i)
+			sources := make([]agent.RetrievedSource, 20)
+			sources[0] = agent.RetrievedSource{StableKey: "key", Source: "a.go"}
+			for j := 1; j < len(sources); j++ {
+				sources[j] = agent.RetrievedSource{StableKey: fmt.Sprintf("other-%d-%d", i, j), Source: "a.go"}
+			}
+			step := i*3 + 1
+			_ = to.OnToolResult(context.Background(), agent.ToolResultEvent{Step: step, Call: feedbackCall(callID, "retrieve", `{"query":"q"}`), Invoked: true})
+			_ = po.OnRetrievalPresentation(context.Background(), agent.RetrievalPresentationEvent{Step: step + 1, ToolCallID: callID, Attribution: agent.RetrievalAttribution{Sources: sources}})
+			_ = to.OnToolResult(context.Background(), agent.ToolResultEvent{Step: step + 2, Call: feedbackCall(fmt.Sprintf("read-%d", i), "read_file", `{"path":"a.go"}`), Invoked: true})
+		}
+		waitFeedbackCompleted(t, svc, count*3)
+	}
+
+	first, err := openFeedbackService(context.Background(), root, dbPath, feedbackTestWarn(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	record(first, 2)
+	if _, err := first.close(); err != nil {
+		t.Fatal(err)
+	}
+	second, err := openFeedbackService(context.Background(), root, dbPath, feedbackTestWarn(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var count int
+	var score float64
+	if err := second.writer.QueryRow(`SELECT COUNT(*) FROM feedback_signals`).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if err := second.writer.QueryRow(`SELECT weighted_score FROM feedback_aggregates WHERE chunk_key = 'key'`).Scan(&score); err != nil {
+		t.Fatal(err)
+	}
+	if count != 40 || score != 0 {
+		t.Fatalf("after first lifetime: signals=%d score=%v, want 40 and 0", count, score)
+	}
+	record(second, 3)
+	if err := second.writer.QueryRow(`SELECT COUNT(*) FROM feedback_signals`).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != feedbackpkg.DefaultConfig().WarmupSignals {
+		t.Fatalf("after second lifetime: signals=%d, want %d", count, feedbackpkg.DefaultConfig().WarmupSignals)
+	}
+	weights, err := second.behavioralWeighter().WeightsBatch(context.Background(), []string{"key"})
+	if err != nil || weights["key"] == 0 {
+		t.Fatalf("post-crossing weights=%v err=%v", weights, err)
+	}
+	if _, err := second.close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestFeedbackServiceReadIsAtomicAcrossRetrievalWindows(t *testing.T) {
+	root := t.TempDir()
+	dbPath := filepath.Join(t.TempDir(), "feedback.db")
 	svc, err := openFeedbackService(context.Background(), root, dbPath, feedbackTestWarn(t))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := svc.writer.Exec(`INSERT INTO feedback_retrievals(retrieval_id,query,chunk_keys,created_at) VALUES('seed','q','key',1)`); err != nil {
-		t.Fatal(err)
-	}
-	for i := 0; i < feedbackpkg.DefaultConfig().WarmupSignals-1; i++ {
-		if _, err := svc.writer.Exec(`INSERT INTO feedback_signals(retrieval_id,chunk_key,signal_kind,strength,created_at) VALUES('seed','seed-key','file_opened',0.3,1)`); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if _, err := svc.writer.Exec(`INSERT INTO feedback_aggregates(chunk_key,retrieval_count,weighted_score) VALUES('key',?,0.7)`, feedbackpkg.DefaultConfig().MinRetrievals-1); err != nil {
-		t.Fatal(err)
-	}
-	weights, err := svc.behavioralWeighter().WeightsBatch(context.Background(), []string{"key"})
-	if err != nil || weights["key"] != 0 {
-		t.Fatalf("pre-crossing weights=%v err=%v", weights, err)
-	}
 	o := svc.observer("run")
-	_ = o.(agent.ToolResultObserver).OnToolResult(context.Background(), agent.ToolResultEvent{Step: 1, Call: feedbackCall("r", "retrieve", `{"query":"q"}`), Invoked: true})
-	_ = o.(agent.RetrievalPresentationObserver).OnRetrievalPresentation(context.Background(), agent.RetrievalPresentationEvent{Step: 2, ToolCallID: "r", Attribution: agent.RetrievalAttribution{Sources: []agent.RetrievedSource{{StableKey: "key", Source: "a.go"}}}})
-	_ = o.(agent.ToolResultObserver).OnToolResult(context.Background(), agent.ToolResultEvent{Step: 3, Call: feedbackCall("f", "read_file", `{"path":"a.go"}`), Invoked: true})
-	deadline := time.Now().Add(time.Second)
-	for {
-		var count int
-		if err := svc.writer.QueryRow(`SELECT COUNT(*) FROM feedback_signals`).Scan(&count); err != nil {
-			t.Fatal(err)
-		}
-		if count == feedbackpkg.DefaultConfig().WarmupSignals {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("signal count = %d", count)
-		}
-		time.Sleep(time.Millisecond)
+	to := o.(agent.ToolResultObserver)
+	po := o.(agent.RetrievalPresentationObserver)
+	for i, key := range []string{"key-a", "key-b"} {
+		step := i*2 + 1
+		callID := fmt.Sprintf("retrieve-%d", i)
+		_ = to.OnToolResult(context.Background(), agent.ToolResultEvent{Step: step, Call: feedbackCall(callID, "retrieve", `{"query":"q"}`), Invoked: true})
+		_ = po.OnRetrievalPresentation(context.Background(), agent.RetrievalPresentationEvent{Step: step + 1, ToolCallID: callID, Attribution: agent.RetrievalAttribution{Sources: []agent.RetrievedSource{{StableKey: key, Source: "a.go"}}}})
 	}
-	weights, err = svc.behavioralWeighter().WeightsBatch(context.Background(), []string{"key"})
-	if err != nil || weights["key"] == 0 {
-		t.Fatalf("post-crossing weights=%v err=%v", weights, err)
+	waitFeedbackCompleted(t, svc, 4)
+	if _, err := svc.writer.Exec(`
+		CREATE TRIGGER abort_second_window_file_open
+		BEFORE INSERT ON feedback_signals
+		WHEN NEW.signal_kind = 'file_opened' AND NEW.chunk_key = 'key-b'
+		BEGIN
+			SELECT RAISE(ABORT, 'second window');
+		END`); err != nil {
+		t.Fatal(err)
 	}
-	_, _ = svc.close()
+	_ = to.OnToolResult(context.Background(), agent.ToolResultEvent{Step: 5, Call: feedbackCall("read", "read_file", `{"path":"a.go"}`), Invoked: true})
+
+	report, closeErr := svc.close()
+	if closeErr != nil {
+		t.Fatal(closeErr)
+	}
+	if report.attempted != 5 || report.completed != 4 || report.dropped != 1 || report.reasons[dropOperationFailed] != 1 {
+		t.Fatalf("report = %+v", report)
+	}
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	var signals int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM feedback_signals WHERE signal_kind = 'file_opened'`).Scan(&signals); err != nil {
+		t.Fatal(err)
+	}
+	if signals != 0 {
+		t.Fatalf("durable file-opened signals = %d, want 0", signals)
+	}
+	var touched int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM feedback_aggregates WHERE chunk_key IN ('key-a','key-b') AND last_signal_at != 0`).Scan(&touched); err != nil {
+		t.Fatal(err)
+	}
+	if touched != 0 {
+		t.Fatalf("touched aggregates = %d, want 0", touched)
+	}
 }
 
 func TestFeedbackObserverFiltersAndIsolatesRuns(t *testing.T) {

@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"sort"
 	"sync"
-	"sync/atomic"
 	"time"
 )
 
@@ -46,7 +45,8 @@ type Collector struct {
 	mu      sync.Mutex
 	windows map[string]*attributionWindow
 
-	signalCount   atomic.Int64
+	signalCount   int64
+	signalCountOK bool
 	closeOnce     sync.Once
 	done          chan struct{}
 	wg            sync.WaitGroup
@@ -155,9 +155,12 @@ func (c *Collector) Record(ctx context.Context, signal Signal) error {
 	}
 	c.wg.Add(1)
 	c.lifecycleMu.Unlock()
-	_, recompute, err := c.recordAt(ctx, signal, time.Now())
+	committed, recompute, err := c.recordBatchAt(ctx, []Signal{signal}, time.Now())
 	if err != nil || !recompute {
 		c.wg.Done()
+		if len(committed) > 0 {
+			return nil
+		}
 		return err
 	}
 	go func() {
@@ -179,56 +182,101 @@ func (c *Collector) Record(ctx context.Context, signal Signal) error {
 // persistence is best-effort per key: `(false, err)` may leave earlier keys in
 // the batch committed, but interaction state is never marked on any error.
 func (c *Collector) RecordAt(ctx context.Context, signal Signal, observedAt time.Time) (bool, error) {
-	committed, recompute, err := c.recordAt(ctx, signal, observedAt)
+	committed, recompute, err := c.recordBatchAt(ctx, []Signal{signal}, observedAt)
 	if err != nil || !recompute {
-		return committed, err
+		return len(committed) > 0, err
 	}
 	return true, c.recompute(ctx)
 }
 
-func (c *Collector) recordAt(ctx context.Context, signal Signal, observedAt time.Time) (bool, bool, error) {
-	if observedAt.IsZero() {
-		return false, false, fmt.Errorf("feedback: record: observed time is required")
+// RecordBatchAt atomically records one observer event against all matching
+// attribution windows. Returned signals are exactly those durably committed.
+// It rejects collectors constructed without an AtomicSignalStore.
+func (c *Collector) RecordBatchAt(ctx context.Context, signals []Signal, observedAt time.Time) ([]Signal, error) {
+	if c.atomicStore == nil {
+		return nil, fmt.Errorf("feedback: record batch: atomic store is required")
 	}
-	if signal.RetrievalID == "" {
-		return false, false, fmt.Errorf("feedback: record: retrieval id is required")
+	committed, recompute, err := c.recordBatchAt(ctx, signals, observedAt)
+	if err != nil || !recompute {
+		return committed, err
+	}
+	return committed, c.recompute(ctx)
+}
+
+func (c *Collector) recordBatchAt(ctx context.Context, signals []Signal, observedAt time.Time) ([]Signal, bool, error) {
+	if observedAt.IsZero() {
+		return nil, false, fmt.Errorf("feedback: record: observed time is required")
 	}
 
 	// ponytail: serialize persistence per collector; split per-window locks only
 	// if recording throughput becomes a measured bottleneck.
 	c.mu.Lock()
-	w, ok := c.windows[signal.RetrievalID]
-	if !ok {
-		c.mu.Unlock()
-		return false, false, fmt.Errorf("feedback: record: unknown retrieval id %q", signal.RetrievalID)
+	defer c.mu.Unlock()
+
+	committed := make([]Signal, 0, len(signals))
+	windows := make([]*attributionWindow, 0, len(signals))
+	for _, signal := range signals {
+		if signal.RetrievalID == "" {
+			return nil, false, fmt.Errorf("feedback: record: retrieval id is required")
+		}
+		w, ok := c.windows[signal.RetrievalID]
+		if !ok {
+			return nil, false, fmt.Errorf("feedback: record: unknown retrieval id %q", signal.RetrievalID)
+		}
+		if observedAt.Sub(w.createdAt) >= maxWindowAge {
+			continue
+		}
+		keys := signal.ChunkKeys
+		if len(keys) == 0 {
+			keys = w.chunkKeys
+		}
+		signal.ChunkKeys = append([]string(nil), keys...)
+		if signal.Timestamp.IsZero() {
+			signal.Timestamp = observedAt
+		}
+		signal.Strength = signal.effectiveStrength()
+		committed = append(committed, signal)
+		windows = append(windows, w)
 	}
-	if observedAt.Sub(w.createdAt) >= maxWindowAge {
-		c.mu.Unlock()
-		return false, false, nil
+	if len(committed) == 0 {
+		return nil, false, nil
+	}
+	if !c.signalCountOK {
+		count, err := c.store.SignalCount(ctx)
+		if err != nil {
+			return nil, false, err
+		}
+		c.signalCount = int64(count)
+		c.signalCountOK = true
+	}
+	var err error
+	if len(committed) == 1 {
+		signal := committed[0]
+		err = c.insertSignals(ctx, signal.RetrievalID, signal.ChunkKeys, signal.Kind, signal.Strength, signal.Timestamp)
+	} else if c.atomicStore == nil {
+		err = fmt.Errorf("feedback: record batch: atomic store is required")
+	} else {
+		err = c.atomicStore.InsertSignalBatch(ctx, committed)
+	}
+	if err != nil {
+		return nil, false, err
 	}
 
-	strength := signal.effectiveStrength()
-	keys := signal.ChunkKeys
-	if len(keys) == 0 {
-		keys = w.chunkKeys
+	for i, signal := range committed {
+		for _, key := range signal.ChunkKeys {
+			windows[i].interacted[key] = true
+		}
 	}
-	if signal.Timestamp.IsZero() {
-		signal.Timestamp = observedAt
+	oldCount := c.signalCount
+	count, err := c.store.SignalCount(ctx)
+	if err != nil {
+		return committed, false, err
 	}
-	if err := c.insertSignals(ctx, signal.RetrievalID, keys, signal.Kind, strength, signal.Timestamp); err != nil {
-		c.mu.Unlock()
-		return false, false, err
-	}
-
-	for _, key := range keys {
-		w.interacted[key] = true
-	}
-	oldCount := c.signalCount.Load()
-	newCount := c.signalCount.Add(int64(len(keys)))
+	newCount := int64(count)
+	c.signalCount = newCount
 	recompute := newCount/recomputeInterval > oldCount/recomputeInterval
-	c.mu.Unlock()
 
-	return true, recompute, nil
+	return committed, recompute, nil
 }
 
 func (c *Collector) recompute(ctx context.Context) error {
@@ -338,7 +386,7 @@ func (c *Collector) sweepExpiredAt(ctx context.Context, now time.Time) ([]string
 		if len(keys) == 0 {
 			continue
 		}
-		c.signalCount.Add(int64(len(keys)))
+		c.signalCount += int64(len(keys))
 		if err := c.recompute(ctx); err != nil {
 			return removed, err
 		}
