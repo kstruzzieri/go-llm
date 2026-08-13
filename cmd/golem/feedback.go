@@ -143,8 +143,10 @@ type feedbackService struct {
 }
 
 type feedbackObserver struct {
-	service *feedbackService
-	runID   string
+	service     *feedbackService
+	runID       string
+	mu          sync.Mutex
+	retrievalID map[string]bool
 }
 
 var (
@@ -250,7 +252,7 @@ func (s *feedbackService) behavioralWeighter() rag.BehavioralWeighter {
 }
 
 func (s *feedbackService) observer(runID string) agent.Observer {
-	return &feedbackObserver{service: s, runID: runID}
+	return &feedbackObserver{service: s, runID: runID, retrievalID: make(map[string]bool)}
 }
 
 func (s *feedbackService) finishRun(runID string) {
@@ -276,6 +278,9 @@ func (o *feedbackObserver) OnToolResult(_ context.Context, e agent.ToolResultEve
 		if e.Call.ID == "" || json.Unmarshal(e.Call.Function.Arguments, &args) != nil || strings.TrimSpace(args.Query) == "" {
 			return nil
 		}
+		o.mu.Lock()
+		o.retrievalID[e.Call.ID] = true
+		o.mu.Unlock()
 		o.service.admit(feedbackEvent{kind: feedbackRetrieve, counted: true, at: o.service.now(), runID: o.runID, step: e.Step, callID: e.Call.ID, query: args.Query}, true)
 	case "read_file":
 		var args struct {
@@ -294,7 +299,13 @@ func (o *feedbackObserver) OnToolResult(_ context.Context, e agent.ToolResultEve
 }
 
 func (o *feedbackObserver) OnRetrievalPresentation(_ context.Context, e agent.RetrievalPresentationEvent) error {
-	if o == nil || o.service == nil || o.runID == "" || e.ToolCallID == "" || len(e.Attribution.Sources) == 0 {
+	if o == nil || o.service == nil || o.runID == "" || len(e.Attribution.Sources) == 0 {
+		return nil
+	}
+	o.mu.Lock()
+	isRetrieval := o.retrievalID[e.ToolCallID]
+	o.mu.Unlock()
+	if !isRetrieval {
 		return nil
 	}
 	sources := make([]agent.RetrievedSource, 0, len(e.Attribution.Sources))
@@ -715,11 +726,6 @@ func (s *feedbackService) close() (feedbackReport, error) {
 	return s.closeReport, s.closeErr
 }
 
-type behavioralWeighterHandle struct {
-	weighter rag.BehavioralWeighter
-	db       *sql.DB
-}
-
 // feedbackDBPathForWorkspace resolves the per-workspace writable behavioral
 // feedback DB path (<base>/golem/retrieval-feedback/<key>.db), mirroring
 // indexDBPathForWorkspace. It is validated to live outside the workspace so it
@@ -735,40 +741,4 @@ func feedbackDBPathForWorkspace(getenv func(string) string, root string) (string
 		return "", err
 	}
 	return dbPath, nil
-}
-
-// openBehavioralWeighter best-effort opens the feedback DB and returns a
-// consume-only weighter handle. It NEVER returns an error: on any failure it
-// returns a nil handle and a human-readable warning, so retrieval proceeds with
-// neutral ranking. It may run feedback schema migrations, but it never records
-// retrievals or outcomes. Callers own the returned DB handle and must close it
-// during normal shutdown.
-func openBehavioralWeighter(ctx context.Context, dbPath string) (*behavioralWeighterHandle, string) {
-	if err := prepareDBFile(dbPath); err != nil {
-		return nil, "behavioral feedback disabled: " + err.Error()
-	}
-	db, err := sql.Open("sqlite", dbPath)
-	if err != nil {
-		return nil, fmt.Sprintf("behavioral feedback disabled: open %q: %v", dbPath, err)
-	}
-	db.SetMaxOpenConns(1)
-	for _, pragma := range []string{"PRAGMA journal_mode=WAL", "PRAGMA busy_timeout=5000"} {
-		if _, err := db.ExecContext(ctx, pragma); err != nil {
-			_ = db.Close()
-			return nil, fmt.Sprintf("behavioral feedback disabled: %s: %v", pragma, err)
-		}
-	}
-	store, err := feedback.NewSignalStore(ctx, db)
-	if err != nil {
-		_ = db.Close()
-		return nil, fmt.Sprintf("behavioral feedback disabled: init %q: %v", dbPath, err)
-	}
-	if err := chmodDBFiles(dbPath); err != nil {
-		_ = db.Close()
-		return nil, "behavioral feedback disabled: " + err.Error()
-	}
-	return &behavioralWeighterHandle{
-		weighter: feedback.NewWeightReader(store, feedback.DefaultConfig()),
-		db:       db,
-	}, ""
 }

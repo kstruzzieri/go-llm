@@ -45,7 +45,8 @@ type replSession struct {
 	allowExec    bool
 	mcpAttached  bool    // true when external MCP tools are attached (force approver)
 	obs          *observ // nil unless -trace/-telemetry enabled
-	pressureWarn bool    // enable the one-per-run context-pressure warning line
+	feedback     *feedbackService
+	pressureWarn bool // enable the one-per-run context-pressure warning line
 	// mixed mirrors what newOrchestratorFactory puts in ContextManager.Mixed, so
 	// the renderer can tell whether a tool result's flat Content is what the
 	// model actually read. Same -progressive flag, one source.
@@ -196,7 +197,6 @@ func runOnce(ctx context.Context, out io.Writer, interrupts <-chan struct{}, ses
 		startedAt time.Time
 		sink      *agenttrace.TelemetrySink
 	)
-	observer := agent.Observer(rend)
 	if sess.obs != nil {
 		runID = sess.obs.nextRunID()
 		startedAt = sess.obs.clock()
@@ -204,11 +204,15 @@ func runOnce(ctx context.Context, out io.Writer, interrupts <-chan struct{}, ses
 		if sink, serr = sess.obs.startSink(runID, startedAt); serr != nil {
 			writeRunLine("warning: telemetry disabled: %v", serr)
 		}
-		observer = composeObserver(rend, sink)
 		if sink != nil {
 			defer func() { _ = sink.Close() }()
 		}
 	}
+	var feedbackObserver agent.Observer
+	if sess.feedback != nil {
+		feedbackObserver = sess.feedback.observer(runID)
+	}
+	observer := composeObserver(rend, sink, feedbackObserver)
 
 	// Trace metadata only: the runtime builds the real agent.Request. Tools,
 	// Approver, and Options are deliberately absent — the runtime supplies its
@@ -233,6 +237,7 @@ func runOnce(ctx context.Context, out io.Writer, interrupts <-chan struct{}, ses
 		Approver: approver, // nil when read-only => runtime fail-safe denies Write/Exec
 		Observer: observer,
 	}, func(golemruntime.Event) error { return nil })
+	sess.feedback.finishRun(runID)
 	// An interrupted approval surfaces as context.Canceled from inside the run
 	// and races the interrupt watcher's cancel(). Synchronize the derived
 	// context here so status and rendering never depend on scheduler order: an

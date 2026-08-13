@@ -19,8 +19,8 @@ type retrieveOpts struct {
 	ragDB       string // explicit -rag-db path
 	autoDBPath  string // per-workspace index DB path
 	workspaceID string // workspace:<sha16> for sidecar validation
-	feedbackDB  string // resolved feedback DB path; "" => behavioral ranking off
-	progressive bool   // opt into the #189 progressive renderer
+	weighter    rag.BehavioralWeighter
+	progressive bool // opt into the #189 progressive renderer
 }
 
 // retrieveResult is the startup outcome. line is the positive disclosure to show
@@ -45,19 +45,15 @@ func enableRetrieve(ctx context.Context, cfg *config.Config, router *provider.Ro
 	}
 
 	if opts.ragDB != "" {
-		reader, feedbackWarn, dec, _, err := buildGatedRetriever(ctx, cfg, router, opts.ragDB, expected, opts.feedbackDB, opts.progressive)
+		reader, dec, _, err := buildGatedRetriever(ctx, cfg, router, opts.ragDB, expected, opts.weighter, opts.progressive)
 		if err != nil {
 			return retrieveResult{warns: []string{"retrieve disabled: " + err.Error()}, suppressNotice: true}
 		}
 		if reader == nil {
 			return retrieveResult{warns: []string{explicitMismatchWarning(opts.ragDB, dec, expected)}, suppressNotice: true}
 		}
-		warns := legacyWarnIfAny(dec)
-		if feedbackWarn != "" {
-			warns = append(warns, feedbackWarn)
-		}
 		return retrieveResult{tool: reader.tool, reader: reader, line: "retrieve: rag-db " + opts.ragDB, suppressNotice: true,
-			warns: warns}
+			warns: legacyWarnIfAny(dec)}
 	}
 
 	// Auto-discovery resolves the atomic pointer first and falls back to the
@@ -69,7 +65,7 @@ func enableRetrieve(ctx context.Context, cfg *config.Config, router *provider.Ro
 		}
 		return retrieveResult{warns: []string{"retrieve disabled: " + err.Error()}, suppressNotice: true}
 	}
-	reader, feedbackWarn, dec, stats, err := buildGatedRetriever(ctx, cfg, router, gen.dbPath, expected, opts.feedbackDB, opts.progressive)
+	reader, dec, stats, err := buildGatedRetriever(ctx, cfg, router, gen.dbPath, expected, opts.weighter, opts.progressive)
 	if err != nil {
 		// An index exists but could not be opened/probed: a specific warning
 		// already explains why, so suppress the contradictory generic "no index"
@@ -81,11 +77,7 @@ func enableRetrieve(ctx context.Context, cfg *config.Config, router *provider.Ro
 		// stands alone; suppress the generic "no index" notice.
 		return retrieveResult{warns: []string{autoMismatchWarning(dec, expected)}, suppressNotice: true}
 	}
-	warns := legacyWarnIfAny(dec)
-	if feedbackWarn != "" {
-		warns = append(warns, feedbackWarn)
-	}
-	return retrieveResult{tool: reader.tool, reader: reader, line: autoGenerationLine(gen.metadata, stats), warns: warns}
+	return retrieveResult{tool: reader.tool, reader: reader, line: autoGenerationLine(gen.metadata, stats), warns: legacyWarnIfAny(dec)}
 }
 
 // expectedVectorSpaces returns the provider-qualified vsid set the current

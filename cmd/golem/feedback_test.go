@@ -346,7 +346,7 @@ func TestFeedbackObserverFiltersAndIsolatesRuns(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if report.attempted != 6 || report.completed != 6 || report.dropped != 0 || report.presentationJoinMisses != 1 {
+	if report.attempted != 5 || report.completed != 5 || report.dropped != 0 || report.presentationJoinMisses != 0 {
 		t.Fatalf("filtered callbacks or run isolation report = %+v", report)
 	}
 	assertFeedbackSignalCount(t, dbPath, "file_opened", 0)
@@ -526,8 +526,9 @@ func assertFeedbackSignalCount(t *testing.T, dbPath, kind string, want int) {
 func TestFeedbackServiceOverflowDisablesAndAccountsQueuedEvents(t *testing.T) {
 	store := &feedbackBlockingStore{started: make(chan struct{}), release: make(chan struct{})}
 	svc := feedbackServiceForStore(t.TempDir(), store, feedbackTestWarn(t))
-	obs := svc.observer("run").(agent.ToolResultObserver)
-	present := svc.observer("run").(agent.RetrievalPresentationObserver)
+	observer := svc.observer("run")
+	obs := observer.(agent.ToolResultObserver)
+	present := observer.(agent.RetrievalPresentationObserver)
 	emitRetrieve := func(id string) {
 		if err := obs.OnToolResult(context.Background(), agent.ToolResultEvent{Step: 1, Call: feedbackCall(id, "retrieve", `{"query":"q"}`), Invoked: true}); err != nil {
 			t.Fatal(err)
@@ -898,8 +899,9 @@ func TestFeedbackServiceWriteFailureDisablesAndWarnsOnce(t *testing.T) {
 	store := &feedbackBlockingStore{started: make(chan struct{}), release: make(chan struct{}), fail: errors.New("write failed")}
 	var warnings atomic.Int64
 	svc := feedbackServiceForStore(t.TempDir(), store, func(string) { warnings.Add(1) })
-	obs := svc.observer("run").(agent.ToolResultObserver)
-	present := svc.observer("run").(agent.RetrievalPresentationObserver)
+	observer := svc.observer("run")
+	obs := observer.(agent.ToolResultObserver)
+	present := observer.(agent.RetrievalPresentationObserver)
 	_ = obs.OnToolResult(context.Background(), agent.ToolResultEvent{Step: 1, Call: feedbackCall("setup", "retrieve", `{"query":"q"}`), Invoked: true})
 	_ = present.OnRetrievalPresentation(context.Background(), agent.RetrievalPresentationEvent{Step: 2, ToolCallID: "setup", Attribution: agent.RetrievalAttribution{Sources: []agent.RetrievedSource{{StableKey: "k", Source: "a.go"}}}})
 	deadline := time.Now().Add(time.Second)
@@ -1480,8 +1482,9 @@ func TestFeedbackNotifierSwitchIsSynchronized(t *testing.T) {
 	var promptOut, promptErr strings.Builder
 	ctrl := newReplControl(&promptOut, &promptErr, make(chan struct{}, 1), func() {})
 	ctrl.enterTurn()
-	obs := svc.observer("run").(agent.ToolResultObserver)
-	present := svc.observer("run").(agent.RetrievalPresentationObserver)
+	observer := svc.observer("run")
+	obs := observer.(agent.ToolResultObserver)
+	present := observer.(agent.RetrievalPresentationObserver)
 	_ = obs.OnToolResult(context.Background(), agent.ToolResultEvent{Step: 1, Call: feedbackCall("r", "retrieve", `{"query":"q"}`), Invoked: true})
 	_ = present.OnRetrievalPresentation(context.Background(), agent.RetrievalPresentationEvent{Step: 2, ToolCallID: "r", Attribution: agent.RetrievalAttribution{Sources: []agent.RetrievedSource{{StableKey: "k", Source: "a.go"}}}})
 	waitFeedbackCompleted(t, svc, 2)
@@ -1551,88 +1554,5 @@ func TestFeedbackDBPathForWorkspaceRejectsInsideWorkspace(t *testing.T) {
 	}
 	if _, err := feedbackDBPathForWorkspace(getenv, root); err == nil {
 		t.Fatalf("expected path inside workspace to be rejected")
-	}
-}
-
-func TestOpenBehavioralWeighterValid(t *testing.T) {
-	dbPath := filepath.Join(t.TempDir(), "sub", "fb.db") // parent dir does not exist yet
-	h, warn := openBehavioralWeighter(context.Background(), dbPath)
-	if h == nil || h.weighter == nil || h.db == nil {
-		t.Fatalf("want non-nil handle, warn=%q", warn)
-	}
-	defer func() { _ = h.db.Close() }()
-	if warn != "" {
-		t.Errorf("unexpected warn: %q", warn)
-	}
-	info, err := os.Stat(dbPath)
-	if err != nil {
-		t.Errorf("feedback DB not created: %v", err)
-	} else if info.Mode().Perm() != 0o600 {
-		t.Errorf("feedback DB mode = %o, want 0600", info.Mode().Perm())
-	}
-	dirInfo, err := os.Stat(filepath.Dir(dbPath))
-	if err != nil {
-		t.Errorf("feedback DB dir not created: %v", err)
-	} else if dirInfo.Mode().Perm() != 0o700 {
-		t.Errorf("feedback DB dir mode = %o, want 0700", dirInfo.Mode().Perm())
-	}
-}
-
-func TestOpenBehavioralWeighterFailsOpen(t *testing.T) {
-	dir := t.TempDir() // a directory path is not a valid SQLite file target
-	h, warn := openBehavioralWeighter(context.Background(), dir)
-	if h != nil {
-		t.Errorf("want nil handle for bad path, got non-nil")
-	}
-	if warn == "" {
-		t.Errorf("want a warning for bad path")
-	}
-}
-
-func TestEnableRetrieveFeedbackValid(t *testing.T) {
-	dataDir := t.TempDir()
-	dbPath := filepath.Join(dataDir, "indexes", "k.db")
-	seedIndex(t, dbPath, "workspace:k", "ollama/nomic")
-	removeSQLiteSidecars(t, dbPath)
-
-	feedbackDB := filepath.Join(dataDir, "feedback", "fb.db")
-	got := enableRetrieve(context.Background(), embedCfg(), &provider.Router{}, retrieveOpts{
-		autoDBPath:  dbPath,
-		workspaceID: "workspace:k",
-		feedbackDB:  feedbackDB,
-	})
-	if got.tool == nil {
-		t.Fatalf("retrieve should register; warns=%v", got.warns)
-	}
-	if got.reader == nil || got.reader.feedback == nil || got.reader.feedback.db == nil || got.reader.feedback.weighter == nil {
-		t.Fatalf("feedback handle not retained by reader: %#v", got.reader)
-	}
-	defer func() {
-		if err := got.reader.closeAfterDrain(); err != nil {
-			t.Error(err)
-		}
-	}()
-}
-
-func TestEnableRetrieveFeedbackFailsOpen(t *testing.T) {
-	dataDir := t.TempDir()
-	dbPath := filepath.Join(dataDir, "indexes", "k.db")
-	seedIndex(t, dbPath, "workspace:k", "ollama/nomic")
-	removeSQLiteSidecars(t, dbPath)
-
-	got := enableRetrieve(context.Background(), embedCfg(), &provider.Router{}, retrieveOpts{
-		autoDBPath:  dbPath,
-		workspaceID: "workspace:k",
-		feedbackDB:  t.TempDir(), // directory path: invalid SQLite file target
-	})
-	if got.tool == nil {
-		t.Fatalf("retrieve should remain registered when feedback fails open; warns=%v", got.warns)
-	}
-	if got.reader != nil && got.reader.feedback != nil {
-		t.Fatalf("bad feedback DB should not return a handle")
-	}
-	joined := strings.Join(got.warns, "\n")
-	if !strings.Contains(joined, "behavioral feedback disabled") {
-		t.Fatalf("missing feedback warning in %v", got.warns)
 	}
 }

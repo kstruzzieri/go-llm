@@ -55,7 +55,7 @@ type autoIndexJob struct {
 	router      *provider.Router
 	embedder    rag.Embedder
 	embChain    []string
-	feedbackDB  string
+	weighter    rag.BehavioralWeighter
 	progressive bool
 	summarize   rag.SourceSummaryGenerator
 	ready       *readyRetrieve
@@ -64,7 +64,7 @@ type autoIndexJob struct {
 	// openRetriever is a test seam: nil selects the real buildGatedRetriever
 	// over cfg/router; tests inject a fake because buildGatedRetriever needs
 	// a live provider router to construct the query-time chain embedder.
-	openRetriever func(context.Context, string) (*retrievalReader, string, vsDecision, rag.StoreStats, error)
+	openRetriever func(context.Context, string) (*retrievalReader, vsDecision, rag.StoreStats, error)
 }
 
 // runAutoIndex acquires the workspace writer lease, probes the actual vector
@@ -153,7 +153,7 @@ func runAutoIndex(ctx context.Context, job autoIndexJob) {
 	}
 	final := built.generation
 	pointer := activeGenerationPointer{SchemaVersion: activePointerSchemaVersion, WorkspaceID: job.workspaceID, Generation: final.id}
-	reader, feedbackWarn, dec, openedStats, err := job.open(ctx, final.dbPath)
+	reader, dec, openedStats, err := job.open(ctx, final.dbPath)
 	if err != nil {
 		cleanupErr := removeGenerationPath(context.WithoutCancel(ctx), filepath.Dir(final.dbPath))
 		fail(errors.Join(err, cleanupErr).Error())
@@ -189,9 +189,6 @@ func runAutoIndex(ctx context.Context, job autoIndexJob) {
 	if built.summaryErr != nil {
 		job.notice("warning: retrieve auto-index progressive summaries incomplete: " + firstLine(built.summaryErr.Error()))
 	}
-	if feedbackWarn != "" {
-		job.notice("warning: " + feedbackWarn)
-	}
 }
 
 // indexLeaseRetryInterval paces the first-run writer-lease wait; contention is
@@ -218,11 +215,11 @@ func awaitIndexWriterLease(ctx context.Context, dbPath string) (*flockLease, err
 
 // open builds the query-time retrieval reader over dbPath, via the injected
 // test seam when one is set.
-func (job autoIndexJob) open(ctx context.Context, dbPath string) (*retrievalReader, string, vsDecision, rag.StoreStats, error) {
+func (job autoIndexJob) open(ctx context.Context, dbPath string) (*retrievalReader, vsDecision, rag.StoreStats, error) {
 	if job.openRetriever != nil {
 		return job.openRetriever(ctx, dbPath)
 	}
-	return buildGatedRetriever(ctx, job.cfg, job.router, dbPath, job.embChain, job.feedbackDB, job.progressive)
+	return buildGatedRetriever(ctx, job.cfg, job.router, dbPath, job.embChain, job.weighter, job.progressive)
 }
 
 // adoptActiveGeneration installs the generation a competing writer published
@@ -234,7 +231,7 @@ func adoptActiveGeneration(ctx context.Context, job autoIndexJob) bool {
 	if err != nil {
 		return false
 	}
-	reader, feedbackWarn, _, stats, err := job.open(ctx, gen.dbPath)
+	reader, _, stats, err := job.open(ctx, gen.dbPath)
 	if err != nil || reader == nil {
 		return false
 	}
@@ -243,9 +240,6 @@ func adoptActiveGeneration(ctx context.Context, job autoIndexJob) bool {
 		return true
 	}
 	job.notice(line)
-	if feedbackWarn != "" {
-		job.notice("warning: " + feedbackWarn)
-	}
 	return true
 }
 

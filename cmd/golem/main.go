@@ -123,7 +123,7 @@ func parseFlags(args []string) (flags, error) {
 	fs.BoolVar(&f.trace, "trace", false, "persist a content-full run trace per turn (outside the workspace; may contain workspace/user/memory content)")
 	fs.BoolVar(&f.telemetry, "telemetry", false, "append content-light run telemetry (timings, route, usage; no prompt/output)")
 	fs.IntVar(&f.pressureWarn, "pressure-warn", 75, "context-pressure warn threshold percent 1-100 (0 disables the warning line)")
-	fs.BoolVar(&f.feedback, "feedback", false, "enable optional behavioral feedback ranking (consume-only; reads a per-workspace feedback DB)")
+	fs.BoolVar(&f.feedback, "feedback", false, "enable local behavioral feedback collection and retrieval ranking")
 	fs.StringVar(&f.feedbackDB, "feedback-db", "", "override the behavioral feedback DB path (default: per-workspace under the data dir)")
 	fs.StringVar(&f.think, "think", "", "reasoning control for the agent model: off, on, low, medium, high (default: model decides); no-op with a notice when the model does not support thinking")
 	fs.StringVar(&f.planPath, "plan", "", "AgentFlow task mode: path to a plan document (JSON) to lock and execute; requires both -approve-plan-edits and -approve-plan-gates; mutually exclusive with -p, -allow-write/-allow-exec, -rag-db, -delegate, and -mcp-*")
@@ -629,20 +629,17 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File) error {
 	if autoErr != nil && !f.noRag && f.ragDB == "" {
 		warns = append(warns, "retrieve auto-index disabled: "+autoErr.Error())
 	}
-	feedbackDB := ""
-	if f.feedback && !f.noRag {
-		if f.feedbackDB != "" {
-			if err := validatePathOutsideWorkspace(f.feedbackDB, root); err != nil {
-				warns = append(warns, "behavioral feedback disabled: "+err.Error())
-			} else {
-				feedbackDB = f.feedbackDB
-			}
-		} else if p, ferr := feedbackDBPathForWorkspace(os.Getenv, root); ferr != nil {
-			warns = append(warns, "behavioral feedback disabled: "+ferr.Error())
-		} else {
-			feedbackDB = p
-		}
+	feedbackSvc, feedbackWarning := openConfiguredFeedback(ctx, f.feedback && !f.noRag, root, f.feedbackDB, os.Getenv,
+		func(line string) { _, _ = fmt.Fprintln(stderr, line) }, openFeedbackService)
+	if feedbackWarning != "" {
+		warns = append(warns, feedbackWarning)
 	}
+	defer func() {
+		if _, closeErr := feedbackSvc.close(); closeErr != nil {
+			_, _ = fmt.Fprintln(stderr, "behavioral feedback close failed: "+closeErr.Error())
+		}
+	}()
+	feedbackWeighter := feedbackSvc.behavioralWeighter()
 	embChain, embChainErr := embeddingChain(bundle.Config)
 	var retrieve agent.Tool
 	retrieveLine := ""
@@ -660,7 +657,7 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File) error {
 		retrieve = ready
 		rr := enableRetrieve(ctx, bundle.Config, bundle.Router, retrieveOpts{
 			autoDBPath:  autoDBPath,
-			workspaceID: autoWorkspaceID, feedbackDB: feedbackDB, progressive: f.progressive,
+			workspaceID: autoWorkspaceID, weighter: feedbackWeighter, progressive: f.progressive,
 		})
 		warns = append(warns, rr.warns...)
 		if rr.reader != nil {
@@ -678,7 +675,7 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File) error {
 			ragDB:       f.ragDB,
 			autoDBPath:  autoDBPath,
 			workspaceID: autoWorkspaceID,
-			feedbackDB:  feedbackDB,
+			weighter:    feedbackWeighter,
 			progressive: f.progressive,
 		})
 		if rr.reader != nil {
@@ -923,6 +920,7 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File) error {
 		records:             mrt.records,
 		workspaceID:         workspaceID(root),
 		obs:                 obsv,
+		feedback:            feedbackSvc,
 		pressureWarn:        f.pressureWarn > 0,
 		mixed:               f.progressive,
 		modelOptions:        thinkOpts,
@@ -955,6 +953,9 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File) error {
 		defer cancelREPL()
 		ctrl := newReplControl(stdout, stderr, interrupts, cancelREPL)
 		sess.control = ctrl
+		if feedbackSvc != nil {
+			feedbackSvc.warn.set(ctrl.notice)
+		}
 		notice = ctrl.notice
 		onInterrupt = ctrl.interrupt
 	}
@@ -987,7 +988,7 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File) error {
 						return bundle.Router.Route(rc, rreq)
 					}, embChain),
 					embChain:    embChain,
-					feedbackDB:  feedbackDB,
+					weighter:    feedbackWeighter,
 					progressive: f.progressive,
 					summarize:   sourceSummarizer,
 					ready:       ready,

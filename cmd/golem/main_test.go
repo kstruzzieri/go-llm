@@ -2,8 +2,11 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"errors"
+	"flag"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -163,6 +166,48 @@ func TestParseFlags_Defaults(t *testing.T) {
 	}
 	if f.root != "." {
 		t.Errorf("root = %q, want \".\"", f.root)
+	}
+}
+
+func TestMainFeedbackConstructionGate(t *testing.T) {
+	root := t.TempDir()
+	paths, opens := 0, 0
+	getenv := func(string) string { paths++; return t.TempDir() }
+	opener := func(context.Context, string, string, func(string)) (*feedbackService, error) {
+		opens++
+		return nil, errors.New("open failed")
+	}
+
+	service, warning := openConfiguredFeedback(context.Background(), false, root, "", getenv, func(string) {}, opener)
+	if service != nil || warning != "" || paths != 0 || opens != 0 {
+		t.Fatalf("flag-off gate: service=%v warning=%q paths=%d opens=%d", service, warning, paths, opens)
+	}
+	service, warning = openConfiguredFeedback(context.Background(), true, root, filepath.Join(t.TempDir(), "feedback.db"), getenv, func(string) {}, opener)
+	if service != nil || opens != 1 || strings.Count(warning, "behavioral feedback disabled") != 1 {
+		t.Fatalf("open failure: service=%v warning=%q opens=%d", service, warning, opens)
+	}
+}
+
+func TestParseFlags_FeedbackHelpDescribesCollectionAndRanking(t *testing.T) {
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	original := os.Stderr
+	t.Cleanup(func() { os.Stderr = original })
+	os.Stderr = w
+	_, parseErr := parseFlags([]string{"-help"})
+	os.Stderr = original
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = r.Close() }()
+	help, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !errors.Is(parseErr, flag.ErrHelp) || !strings.Contains(string(help), "enable local behavioral feedback collection and retrieval ranking") {
+		t.Fatalf("parse error=%v help=%q", parseErr, help)
 	}
 }
 
