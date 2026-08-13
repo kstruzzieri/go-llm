@@ -519,7 +519,21 @@ func colorPermitted(noColor bool) bool {
 	return !noColor && os.Getenv("NO_COLOR") == "" && os.Getenv("TERM") != "dumb"
 }
 
-func run(args []string, stdin *os.File, stdout, stderr *os.File) error {
+// runHooks exposes only the process lifecycle boundaries that package tests
+// must control or observe deterministically. A zero value is the production
+// path; it neither replaces composition nor coordinates shutdown.
+type runHooks struct {
+	openFeedback        func(context.Context, string, string, func(string)) (*feedbackService, error)
+	startAutoIndex      func() func()
+	afterAutoIndexStart func(lineSourceMode, agent.Tool, *feedbackService) error
+	closed              func(string)
+}
+
+func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...runHooks) error {
+	var hooks runHooks
+	if len(testHooks) > 0 {
+		hooks = testHooks[0]
+	}
 	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
 		switch args[0] {
 		case "index":
@@ -629,14 +643,21 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File) error {
 	if autoErr != nil && !f.noRag && f.ragDB == "" {
 		warns = append(warns, "retrieve auto-index disabled: "+autoErr.Error())
 	}
+	feedbackOpener := hooks.openFeedback
+	if feedbackOpener == nil {
+		feedbackOpener = openFeedbackService
+	}
 	feedbackSvc, feedbackWarning := openConfiguredFeedback(ctx, f.feedback && !f.noRag, root, f.feedbackDB, os.Getenv,
-		func(line string) { _, _ = fmt.Fprintln(stderr, line) }, openFeedbackService)
+		func(line string) { _, _ = fmt.Fprintln(stderr, line) }, feedbackOpener)
 	if feedbackWarning != "" {
 		warns = append(warns, feedbackWarning)
 	}
 	defer func() {
 		if _, closeErr := feedbackSvc.close(); closeErr != nil {
 			_, _ = fmt.Fprintln(stderr, "behavioral feedback close failed: "+closeErr.Error())
+		}
+		if hooks.closed != nil {
+			hooks.closed("feedback")
 		}
 	}()
 	feedbackWeighter := feedbackSvc.behavioralWeighter()
@@ -652,6 +673,9 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File) error {
 		defer func() {
 			if closeErr := ready.close(); closeErr != nil {
 				_, _ = fmt.Fprintln(stderr, closeErr)
+			}
+			if hooks.closed != nil {
+				hooks.closed("retrieval")
 			}
 		}()
 		retrieve = ready
@@ -682,6 +706,9 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File) error {
 			defer func() {
 				if closeErr := rr.reader.closeAfterDrain(); closeErr != nil {
 					_, _ = fmt.Fprintln(stderr, closeErr)
+				}
+				if hooks.closed != nil {
+					hooks.closed("retrieval")
 				}
 			}()
 		}
@@ -893,7 +920,12 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File) error {
 	if err != nil {
 		return err
 	}
-	defer func() { _ = runtime.Close() }()
+	defer func() {
+		_ = runtime.Close()
+		if hooks.closed != nil {
+			hooks.closed("runtime")
+		}
+	}()
 
 	renderOut := stdout
 	if f.promptSet {
@@ -1001,6 +1033,9 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File) error {
 			}
 		}
 	}
+	if hooks.startAutoIndex != nil {
+		startAutoIndex = hooks.startAutoIndex
+	}
 
 	// Final dispatch. A line source is created only where an interactive read
 	// can actually happen, so the modes that never read stdin open no reader.
@@ -1020,6 +1055,11 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File) error {
 		if startAutoIndex != nil {
 			stopAutoIndex := startAutoIndex()
 			defer stopAutoIndex()
+			if hooks.afterAutoIndexStart != nil {
+				if err := hooks.afterAutoIndexStart(sourceAnswerOnly, retrieve, feedbackSvc); err != nil {
+					return err
+				}
+			}
 		}
 		return withLineSource(newInput(inputConfig{
 			Stdin:       stdin,
@@ -1036,6 +1076,11 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File) error {
 		if startAutoIndex != nil {
 			stopAutoIndex := startAutoIndex()
 			defer stopAutoIndex()
+			if hooks.afterAutoIndexStart != nil {
+				if err := hooks.afterAutoIndexStart(sourceNone, retrieve, feedbackSvc); err != nil {
+					return err
+				}
+			}
 		}
 		if f.goalSet {
 			return runAgentflowAuthor(ctx, nil, stdout, stderr, interrupts, sess, f, root)
@@ -1093,6 +1138,11 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File) error {
 			// Cancels and joins the writer before withLineSource closes the
 			// source, so no notice can reach a closed source.
 			defer stopAutoIndex()
+			if hooks.afterAutoIndexStart != nil {
+				if err := hooks.afterAutoIndexStart(sourceREPL, retrieve, feedbackSvc); err != nil {
+					return err
+				}
+			}
 		}
 		return runREPL(replCtx, src, stdout, interrupts, sess)
 	})

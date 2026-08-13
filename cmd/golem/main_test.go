@@ -3,17 +3,25 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
+	"time"
+
+	"github.com/kstruzzieri/go-llm/agent"
+	"github.com/kstruzzieri/go-llm/rag"
 )
 
 func TestParseFlagsAllowWrite(t *testing.T) {
@@ -186,6 +194,292 @@ func TestMainFeedbackConstructionGate(t *testing.T) {
 	if service != nil || opens != 1 || strings.Count(warning, "behavioral feedback disabled") != 1 {
 		t.Fatalf("open failure: service=%v warning=%q opens=%d", service, warning, opens)
 	}
+}
+
+func TestRunFeedbackConstructionGate(t *testing.T) {
+	configPath, root := writeRunLifecycleConfig(t)
+	baseArgs := []string{"-config", configPath, "-root", root, "-p", "done", "-no-probe", "-no-cap-probe", "-no-session", "-no-memory", "-no-project-context"}
+	errStop := errors.New("stop after startup")
+
+	for _, tc := range []struct {
+		name         string
+		args         []string
+		wantOpens    int
+		wantWarnings int
+	}{
+		{name: "flag off", wantOpens: 0},
+		{name: "no rag", args: []string{"-feedback", "-no-rag"}, wantOpens: 0},
+		{name: "open failure", args: []string{"-feedback"}, wantOpens: 1, wantWarnings: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stdin, stdout, stderr := runTestFiles(t)
+			opens := 0
+			err := run(append(append([]string{}, baseArgs...), tc.args...), stdin, stdout, stderr, runHooks{
+				openFeedback: func(context.Context, string, string, func(string)) (*feedbackService, error) {
+					opens++
+					return nil, errors.New("open failed")
+				},
+				startAutoIndex: func() func() { return func() {} },
+				afterAutoIndexStart: func(lineSourceMode, agent.Tool, *feedbackService) error {
+					return errStop
+				},
+			})
+			if !errors.Is(err, errStop) {
+				t.Fatalf("run error = %v, want test stop", err)
+			}
+			if opens != tc.wantOpens {
+				t.Fatalf("feedback opens = %d, want %d", opens, tc.wantOpens)
+			}
+			warningText := readRunTestFile(t, stderr)
+			if got := strings.Count(warningText, "behavioral feedback disabled"); got != tc.wantWarnings {
+				t.Fatalf("feedback warnings = %d, want %d; stderr:\n%s", got, tc.wantWarnings, warningText)
+			}
+		})
+	}
+}
+
+func TestRunStopsAutoIndexInEveryDispatchBranch(t *testing.T) {
+	configPath, root := writeRunLifecycleConfig(t)
+	baseArgs := []string{"-config", configPath, "-root", root, "-no-probe", "-no-cap-probe", "-no-session", "-no-memory", "-no-project-context", "-no-auto-index"}
+	errStop := errors.New("stop after auto-index start")
+
+	for _, tc := range []struct {
+		name string
+		args []string
+		mode lineSourceMode
+	}{
+		{name: "answer only", args: []string{"-goal", "plan it"}, mode: sourceAnswerOnly},
+		{name: "noninteractive", args: []string{"-p", "done"}, mode: sourceNone},
+		{name: "repl", mode: sourceREPL},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stdin, stdout, stderr := runTestFiles(t)
+			var events []string
+			err := run(append(append([]string{}, baseArgs...), tc.args...), stdin, stdout, stderr, runHooks{
+				startAutoIndex: func() func() {
+					return func() { events = append(events, "auto-index") }
+				},
+				afterAutoIndexStart: func(got lineSourceMode, _ agent.Tool, _ *feedbackService) error {
+					if got != tc.mode {
+						t.Fatalf("dispatch mode = %v, want %v", got, tc.mode)
+					}
+					return errStop
+				},
+				closed: func(name string) { events = append(events, name) },
+			})
+			if !errors.Is(err, errStop) {
+				t.Fatalf("run error = %v, want test stop", err)
+			}
+			if len(events) == 0 || events[0] != "auto-index" {
+				t.Fatalf("shutdown events = %v, want branch-local auto-index stop first", events)
+			}
+			if got := strings.Count(strings.Join(events, ","), "auto-index"); got != 1 {
+				t.Fatalf("auto-index stop count = %d, events = %v", got, events)
+			}
+		})
+	}
+}
+
+func TestRunShutdownDrainsBorrowedWeighterBeforeFeedbackClose(t *testing.T) {
+	for _, current := range []bool{false, true} {
+		name := "ready generation"
+		if current {
+			name = "current explicit generation"
+		}
+		t.Run(name, func(t *testing.T) {
+			configPath, root := writeRunLifecycleConfig(t)
+			stdin, stdout, stderr := runTestFiles(t)
+			errStop := errors.New("stop with retrieval active")
+			weighter := &runBlockingWeighter{entered: make(chan struct{}), release: make(chan struct{})}
+			svc := feedbackServiceForStore(root, &feedbackBlockingStore{}, feedbackTestWarn(t))
+			svc.weighter = weighter
+			args := []string{"-config", configPath, "-root", root, "-feedback", "-no-probe", "-no-cap-probe", "-no-session", "-no-memory", "-no-project-context"}
+			if current {
+				dbPath := filepath.Join(t.TempDir(), "explicit.db")
+				seedIndex(t, dbPath, workspaceID(root), "test/qwen3-embedding:8b")
+				args = append(args, "-rag-db", dbPath)
+			}
+
+			var mu sync.Mutex
+			var events []string
+			runtimeClosed := make(chan struct{})
+			feedbackClosed := make(chan struct{})
+			var runtimeOnce, feedbackOnce sync.Once
+			closed := func(name string) {
+				mu.Lock()
+				events = append(events, name)
+				mu.Unlock()
+				switch name {
+				case "runtime":
+					runtimeOnce.Do(func() { close(runtimeClosed) })
+				case "feedback":
+					feedbackOnce.Do(func() { close(feedbackClosed) })
+				}
+			}
+
+			releaseResult := make(chan error, 1)
+			err := run(args, stdin, stdout, stderr, runHooks{
+				openFeedback: func(context.Context, string, string, func(string)) (*feedbackService, error) {
+					return svc, nil
+				},
+				startAutoIndex: func() func() {
+					return func() {
+						mu.Lock()
+						events = append(events, "auto-index")
+						mu.Unlock()
+					}
+				},
+				afterAutoIndexStart: func(mode lineSourceMode, retrieve agent.Tool, gotSvc *feedbackService) error {
+					if mode != sourceREPL || gotSvc != svc {
+						t.Fatalf("startup hook mode/service = %v/%p, want REPL/%p", mode, gotSvc, svc)
+					}
+					active := retrieve
+					if !current {
+						ready, ok := retrieve.(*readyRetrieve)
+						if !ok {
+							t.Fatalf("retrieve tool = %T, want *readyRetrieve", retrieve)
+						}
+						ready.install(newRetrievalReader(runBorrowingTool{weighter: gotSvc.behavioralWeighter()}, func() error { return nil }), "ready")
+						active = ready
+					}
+					type invokeOutcome struct {
+						result agent.ToolResult
+						err    error
+					}
+					invokeResult := make(chan invokeOutcome, 1)
+					go func() {
+						result, invokeErr := active.Invoke(context.Background(), json.RawMessage(`{"query":"active"}`))
+						invokeResult <- invokeOutcome{result: result, err: invokeErr}
+					}()
+					select {
+					case <-weighter.entered:
+					case outcome := <-invokeResult:
+						t.Fatalf("retrieval returned before borrowing the feedback weighter: result=%+v err=%v", outcome.result, outcome.err)
+					case <-time.After(time.Second):
+						t.Fatal("retrieval did not borrow the feedback weighter")
+					}
+					go func() {
+						select {
+						case <-runtimeClosed:
+						case <-time.After(time.Second):
+							close(weighter.release)
+							releaseResult <- errors.New("retrieval drain ran before runtime close")
+							return
+						}
+						select {
+						case <-feedbackClosed:
+							close(weighter.release)
+							releaseResult <- errors.New("feedback closed while retrieval still borrowed its weighter")
+						default:
+							close(weighter.release)
+							releaseResult <- nil
+						}
+					}()
+					return errStop
+				},
+				closed: closed,
+			})
+			if !errors.Is(err, errStop) {
+				t.Fatalf("run error = %v, want test stop", err)
+			}
+			if releaseErr := <-releaseResult; releaseErr != nil {
+				t.Fatal(releaseErr)
+			}
+			mu.Lock()
+			gotEvents := append([]string(nil), events...)
+			mu.Unlock()
+			wantEvents := []string{"auto-index", "runtime", "retrieval", "feedback"}
+			if fmt.Sprint(gotEvents) != fmt.Sprint(wantEvents) {
+				t.Fatalf("shutdown events = %v, want %v", gotEvents, wantEvents)
+			}
+		})
+	}
+}
+
+type runBlockingWeighter struct {
+	entered chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (w *runBlockingWeighter) WeightsBatch(context.Context, []string) (map[string]float64, error) {
+	w.once.Do(func() { close(w.entered) })
+	<-w.release
+	return map[string]float64{}, nil
+}
+
+type runBorrowingTool struct{ weighter rag.BehavioralWeighter }
+
+func (runBorrowingTool) Spec() agent.ToolSpec {
+	return agent.ToolSpec{Name: "retrieve", Parameters: json.RawMessage(`{"type":"object"}`)}
+}
+func (runBorrowingTool) Effect() agent.Effect { return agent.Effect{Class: agent.Read} }
+func (t runBorrowingTool) Invoke(ctx context.Context, _ json.RawMessage) (agent.ToolResult, error) {
+	_, err := t.weighter.WeightsBatch(ctx, []string{"chunk"})
+	return agent.ToolResult{Content: "done"}, err
+}
+
+func writeRunLifecycleConfig(t *testing.T) (string, string) {
+	t.Helper()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/v1/models":
+			_, _ = io.WriteString(w, `{"data":[{"id":"agent-model"},{"id":"qwen3-embedding:8b"}]}`)
+		case "/v1/embeddings":
+			embedding := make([]float64, 768)
+			embedding[0] = 1
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"data":  []any{map[string]any{"embedding": embedding, "index": 0}},
+				"model": "qwen3-embedding:8b",
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(server.Close)
+	root := t.TempDir()
+	configPath := filepath.Join(t.TempDir(), "models.json")
+	configJSON := fmt.Sprintf(`{
+  "providers": {"test": {"base_url": %q, "api_format": "openai-compat", "timeout": "2s"}},
+  "models": {
+    "agent": {"name": "agent-model", "provider": "test", "type": "dense", "context_window": 32768,
+      "capabilities": ["chat", "stream", "tool_call"]},
+	"embedding": {"name": "qwen3-embedding:8b", "provider": "test", "type": "embedding", "dimensions": 768,
+      "capabilities": ["embed"]}
+  },
+  "defaults": {"agent": "agent", "embedding": "embedding"}
+}`, server.URL)
+	if err := os.WriteFile(configPath, []byte(configJSON), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return configPath, root
+}
+
+func runTestFiles(t *testing.T) (*os.File, *os.File, *os.File) {
+	t.Helper()
+	files := make([]*os.File, 3)
+	for i := range files {
+		file, err := os.CreateTemp(t.TempDir(), "run-file")
+		if err != nil {
+			t.Fatal(err)
+		}
+		files[i] = file
+		t.Cleanup(func() { _ = file.Close() })
+	}
+	return files[0], files[1], files[2]
+}
+
+func readRunTestFile(t *testing.T, file *os.File) string {
+	t.Helper()
+	if _, err := file.Seek(0, io.SeekStart); err != nil {
+		t.Fatal(err)
+	}
+	contents, err := io.ReadAll(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(contents)
 }
 
 func TestParseFlags_FeedbackHelpDescribesCollectionAndRanking(t *testing.T) {
