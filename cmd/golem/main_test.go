@@ -250,6 +250,25 @@ func TestRunFeedbackConstructionGate(t *testing.T) {
 	}
 }
 
+func TestRunReportsDerivedInputCeilingFromConfig(t *testing.T) {
+	configPath, root := writeRunLifecycleConfig(t)
+	stdin, stdout, stderr := runTestFiles(t)
+	errStop := errors.New("stop after startup")
+	err := run([]string{"-config", configPath, "-root", root, "-no-probe", "-no-cap-probe", "-no-session", "-no-memory", "-no-project-context", "-no-auto-index"}, stdin, stdout, stderr, runHooks{
+		startAutoIndex: func() func() { return func() {} },
+		afterAutoIndexStart: func(lineSourceMode, agent.Tool, *feedbackService) error {
+			return errStop
+		},
+	})
+	if !errors.Is(err, errStop) {
+		t.Fatalf("run error = %v, want test stop", err)
+	}
+	got := readRunTestFile(t, stderr)
+	if !strings.Contains(got, "input ceiling: 32768 tokens (chain minimum)") {
+		t.Fatalf("stderr missing derived input ceiling:\n%s", got)
+	}
+}
+
 func TestRunStopsAutoIndexInEveryDispatchBranch(t *testing.T) {
 	configPath, root := writeRunLifecycleConfig(t)
 	baseArgs := []string{"-config", configPath, "-root", root, "-no-probe", "-no-cap-probe", "-no-session", "-no-memory", "-no-project-context", "-no-auto-index"}

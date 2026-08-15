@@ -52,7 +52,8 @@ type ModelRegistry struct {
 	capOverride     CapabilityOverride
 	capFloor        CapabilityFloor
 	thinkOverride   ThinkOverride
-	overrideVersion uint64 // bumped by SetCapabilityOverride, SetCapabilityFloor, SetThinkOverride, and invalidateProfile; guards stale cache writes in buildProfile
+	contextOverride ContextWindowOverride
+	overrideVersion uint64 // bumped by policy setters and invalidateProfile; guards stale cache writes in buildProfile
 	rejectionHook   OverrideRejectionHook
 
 	// Capability-probe resolution (ResolveToolCall). Both fields are set
@@ -238,6 +239,10 @@ func (r *ModelRegistry) SetCapabilityFloor(fn CapabilityFloor) {
 // the capability override: config is the final word, per field).
 type ThinkOverride func(key ModelKey) (mode *ThinkMode, tags *ThinkTags)
 
+// ContextWindowOverride returns the configured context window for a model.
+// A value <= 0 leaves the merged catalog, fingerprint, and runtime value intact.
+type ContextWindowOverride func(key ModelKey) int
+
 // SetThinkOverride installs (or clears) the think override hook.
 // Pass nil to disable. Safe for concurrent use.
 //
@@ -249,6 +254,16 @@ func (r *ModelRegistry) SetThinkOverride(fn ThinkOverride) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.thinkOverride = fn
+	r.overrideVersion++
+	clear(r.profiles)
+}
+
+// SetContextWindowOverride installs (or clears) configured context windows.
+// Config is authoritative, so the override applies after all discovery layers.
+func (r *ModelRegistry) SetContextWindowOverride(fn ContextWindowOverride) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.contextOverride = fn
 	r.overrideVersion++
 	clear(r.profiles)
 }
@@ -674,17 +689,17 @@ func (r *ModelRegistry) FIMConfigFor(ctx context.Context, key ModelKey) (*FIMCon
 	return profile.FIM, nil
 }
 
-// buildProfile performs the three-layer merge for a model key and caches
+// buildProfile performs the model metadata merge for a model key and caches
 // the result. The merge layers in order of ascending precedence are:
 //  1. Static catalog: FIM policy, think_mode, quality/speed tiers, RAM estimates
-//  2. Fingerprint: capability probing data, benchmarked resource observations
+//  2. Fingerprint: capability probing data, context, benchmarked observations
 //  3. Runtime: context_window, parameter_size, quant_level, digest (freshest)
+//  4. Config: explicit per-model overrides
 func (r *ModelRegistry) buildProfile(ctx context.Context, key ModelKey) (*ModelProfile, error) {
-	// Snapshot (override, floor, thinkOverride, version, rejectionHook)
+	// Snapshot policy hooks and their shared version before any provider IO.
 	// FIRST so the policy a single buildProfile applies is fixed at start,
 	// and the cache write at the end can detect any concurrent
-	// SetCapabilityOverride, SetCapabilityFloor, or SetThinkOverride (all
-	// bump the shared version counter). Reading
+	// any policy setter (all bump the shared version counter). Reading
 	// later (after slow IO like queryRuntime) would shrink the visible
 	// TOCTOU window but also leave the same race against the cache write
 	// itself; reading first keeps the contract simple: one buildProfile ->
@@ -693,6 +708,7 @@ func (r *ModelRegistry) buildProfile(ctx context.Context, key ModelKey) (*ModelP
 	override := r.capOverride
 	floor := r.capFloor
 	thinkOverride := r.thinkOverride
+	contextOverride := r.contextOverride
 	overrideVer := r.overrideVersion
 	rejectionHook := r.rejectionHook
 	r.mu.RUnlock()
@@ -718,7 +734,7 @@ func (r *ModelRegistry) buildProfile(ctx context.Context, key ModelKey) (*ModelP
 
 	// Merge layers using the (override, floor, rejectionHook) snapshot
 	// taken at function entry.
-	profile := r.merge(key, runtimeInfo, staticProfile, fpProfile, parsed, override, floor, thinkOverride, rejectionHook, capProbeCaps)
+	profile := r.merge(key, runtimeInfo, staticProfile, fpProfile, parsed, override, floor, thinkOverride, contextOverride, rejectionHook, capProbeCaps)
 
 	// Cache the result iff the override snapshot is still current.
 	r.mu.Lock()
@@ -962,11 +978,12 @@ func (r *ModelRegistry) queryRuntime(ctx context.Context, key ModelKey) (*ModelI
 	return nil, fmt.Errorf("model %q not found on %q", key.Model, key.Provider)
 }
 
-// merge combines runtime, static, and fingerprint data into a single
+// merge combines runtime, static, fingerprint, and config data into a single
 // ModelProfile. Precedence (lowest to highest):
 //   - Static catalog: FIM policy, think_mode, quality/speed tiers, RAM estimates
 //   - Fingerprint: capability probing data, benchmarked resource observations
 //   - Runtime: context_window, dimensions, parameter_size, quant_level (freshest)
+//   - Config: explicit per-model overrides
 func (r *ModelRegistry) merge(
 	key ModelKey,
 	runtime *ModelInfo,
@@ -976,6 +993,7 @@ func (r *ModelRegistry) merge(
 	override CapabilityOverride,
 	floor CapabilityFloor,
 	thinkOverride ThinkOverride,
+	contextOverride ContextWindowOverride,
 	rejectionHook OverrideRejectionHook,
 	capProbeCaps Capability,
 ) *ModelProfile {
@@ -1037,6 +1055,9 @@ func (r *ModelRegistry) merge(
 				profile.Resources.RAMRequired = observedGB
 			}
 		}
+		if fp.EffectiveContext > 0 {
+			profile.ContextWindow = fp.EffectiveContext
+		}
 	}
 
 	// Cap-probe verdict (read-only layer, computed by buildProfile). OR-only
@@ -1075,6 +1096,12 @@ func (r *ModelRegistry) merge(
 			} else {
 				profile.Caps &^= CapInsert
 			}
+		}
+	}
+
+	if contextOverride != nil {
+		if configured := contextOverride(key); configured > 0 {
+			profile.ContextWindow = configured
 		}
 	}
 

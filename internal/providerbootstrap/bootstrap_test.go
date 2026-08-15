@@ -57,6 +57,39 @@ func TestNew_NilConfigBuildsRouter(t *testing.T) {
 	}
 }
 
+func TestNew_ConfigContextWindowPopulatesMergedProfile(t *testing.T) {
+	ctx := context.Background()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/models" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":[{"id":"byo-model"}]}`))
+	}))
+	defer srv.Close()
+
+	cfg := &config.Config{
+		Providers: map[string]config.ProviderConfig{"lc": {APIFormat: "openai-compat", BaseURL: srv.URL}},
+		Models: map[string]config.ModelConfig{
+			"agent": {Provider: "lc", Name: "byo-model", Type: "dense", ContextWindow: 32_768},
+		},
+	}
+	bundle, err := New(ctx, Options{Config: cfg})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer func() { _ = bundle.Close() }()
+
+	profile, err := bundle.Models.Lookup(ctx, provider.ModelKey{Provider: "lc", Model: "byo-model"})
+	if err != nil {
+		t.Fatalf("Lookup: %v", err)
+	}
+	if profile.ContextWindow != 32_768 {
+		t.Fatalf("ContextWindow = %d, want configured 32768", profile.ContextWindow)
+	}
+}
+
 func TestNew_ProberFactoryInstalledWithFingerprintStore(t *testing.T) {
 	// With a fingerprint store, New must wire the prober factory (parity with mcp).
 	// Assert indirectly: New succeeds and a registry was built. A deeper assertion

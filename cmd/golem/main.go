@@ -99,7 +99,7 @@ func parseFlags(args []string) (flags, error) {
 	fs.StringVar(&f.prompt, "p", "", "one-shot mode: run a single agent turn with this prompt and exit; only the final answer goes to stdout (implies -no-session -no-compress -no-memory; approval-gated tools are unavailable, so -allow-write/-allow-exec are ignored)")
 	fs.StringVar(&f.ragDB, "rag-db", "", "path to a prebuilt RAG SQLite DB to enable the retrieve tool")
 	fs.IntVar(&f.maxSteps, "max-steps", 0, "max agent steps per prompt (0 => default 16)")
-	fs.IntVar(&f.inputCeiling, "input-ceiling", 0, "token input ceiling (0 => default)")
+	fs.IntVar(&f.inputCeiling, "input-ceiling", 0, "token input ceiling (0 => derive from model context)")
 	fs.IntVar(&f.outputReserve, "output-reserve", 0, "token output reserve")
 	fs.BoolVar(&f.noColor, "no-color", false, "disable ANSI styling (automatic for non-terminal output, NO_COLOR, or TERM=dumb)")
 	fs.BoolVar(&f.noEditor, "no-editor", false, "disable TTY line editing and history; read plain lines from stdin")
@@ -412,6 +412,7 @@ type startupInfo struct {
 	retrieveOmitted    bool
 	retrieveRequested  bool // -rag-db, -no-rag, or auto suppress the generic no-index notice
 	thinkLine          string
+	inputCeilingLine   string
 	sessionLine        string
 	projectContextLine string
 	memoryLine         string
@@ -456,6 +457,9 @@ func startupNotices(info startupInfo) []string {
 	}
 	if info.thinkLine != "" {
 		out = append(out, info.thinkLine)
+	}
+	if info.inputCeilingLine != "" {
+		out = append(out, info.inputCeilingLine)
 	}
 	for _, w := range info.bootstrapWarns {
 		out = append(out, "warning: "+w.Error())
@@ -658,6 +662,7 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 	}
 
 	thinkOpts, thinkLine := resolveThinkOptions(ctx, bundle.Models, plan.chain, f.think)
+	inputCeiling := resolveInputCeiling(ctx, bundle.Models, plan.chain, f.inputCeiling)
 
 	autoDBPath, autoWorkspaceID, autoErr := indexDBPathForWorkspace(os.Getenv, root)
 	if autoErr != nil && !f.noRag && f.ragDB == "" {
@@ -885,6 +890,7 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 		retrieveOmitted:    retrieveOmitted,
 		retrieveRequested:  retrieveRequested,
 		thinkLine:          thinkLine,
+		inputCeilingLine:   inputCeiling.line(),
 		sessionLine:        sessionLine,
 		projectContextLine: projectContextLine,
 		memoryLine:         memoryLine,
@@ -915,7 +921,7 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 		return fmt.Errorf("golem: observability setup: %w", err)
 	}
 
-	budget := agent.Budget{InputCeiling: f.inputCeiling, OutputReserve: f.outputReserve}
+	budget := agent.Budget{InputCeiling: inputCeiling.ceiling, OutputReserve: f.outputReserve}
 	if f.pressureWarn > 0 {
 		// The agent package owns the band layout (single source of truth for the
 		// monotonic clamp + defaults); golem only supplies the warn fraction.

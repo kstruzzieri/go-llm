@@ -107,6 +107,9 @@ func New(ctx context.Context, opts Options) (*Bundle, error) {
 	if err != nil {
 		return nil, fmt.Errorf("providerbootstrap: model registry: %w", err)
 	}
+	if err := installContextWindowOverrides(mr, effCfg); err != nil {
+		return nil, err
+	}
 	if err := installCapabilityOverrides(mr, effCfg); err != nil {
 		return nil, err
 	}

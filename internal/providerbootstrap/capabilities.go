@@ -13,6 +13,57 @@ type modelDefaultsEntry struct {
 	opts provider.SamplingDefaults
 }
 
+type contextWindowEntry struct {
+	role   string
+	window int
+}
+
+func buildContextWindowOverrides(cfg *config.Config) (map[provider.ModelKey]int, error) {
+	out := make(map[provider.ModelKey]int)
+	if cfg == nil {
+		return out, nil
+	}
+	roles := make([]string, 0, len(cfg.Models))
+	for role := range cfg.Models {
+		roles = append(roles, role)
+	}
+	sort.Strings(roles)
+	seen := make(map[provider.ModelKey]contextWindowEntry)
+	for _, role := range roles {
+		model := cfg.Models[role]
+		if model.Provider == "" || model.Name == "" || model.ContextWindow == 0 {
+			continue
+		}
+		if model.ContextWindow < 0 {
+			return nil, fmt.Errorf("providerbootstrap: model %q context_window must be positive", role)
+		}
+		key := provider.ModelKey{Provider: model.Provider, Model: model.Name}
+		if existing, ok := seen[key]; ok && existing.window != model.ContextWindow {
+			return nil, fmt.Errorf(
+				"providerbootstrap: conflicting context_window for %s: models %q and %q",
+				key, existing.role, role,
+			)
+		}
+		seen[key] = contextWindowEntry{role: role, window: model.ContextWindow}
+		out[key] = model.ContextWindow
+	}
+	return out, nil
+}
+
+func installContextWindowOverrides(mr *provider.ModelRegistry, cfg *config.Config) error {
+	if mr == nil || cfg == nil {
+		return nil
+	}
+	overrides, err := buildContextWindowOverrides(cfg)
+	if err != nil {
+		return err
+	}
+	if len(overrides) > 0 {
+		mr.SetContextWindowOverride(func(key provider.ModelKey) int { return overrides[key] })
+	}
+	return nil
+}
+
 func buildModelDefaults(cfg *config.Config) (map[provider.ModelKey]provider.SamplingDefaults, error) {
 	out := make(map[provider.ModelKey]provider.SamplingDefaults)
 	if cfg == nil {

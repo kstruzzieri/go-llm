@@ -260,6 +260,50 @@ func TestModelRegistry_Lookup_CatalogMatch(t *testing.T) {
 	}
 }
 
+func TestModelRegistry_ContextWindowOverrideWins(t *testing.T) {
+	ctx := context.Background()
+	prov := &mrMockProvider{name: "test", models: []ModelInfo{{Name: "model", ContextWindow: 65_536}}}
+	mr, err := NewModelRegistry(&mrMockProviderRegistry{providers: map[string]Provider{"test": prov}}, nil)
+	if err != nil {
+		t.Fatalf("NewModelRegistry: %v", err)
+	}
+	key := ModelKey{Provider: "test", Model: "model"}
+	mr.SetContextWindowOverride(func(got ModelKey) int {
+		if got == key {
+			return 32_768
+		}
+		return 0
+	})
+	profile, err := mr.Lookup(ctx, key)
+	if err != nil {
+		t.Fatalf("Lookup: %v", err)
+	}
+	if profile.ContextWindow != 32_768 {
+		t.Fatalf("ContextWindow = %d, want configured override 32768", profile.ContextWindow)
+	}
+}
+
+func TestModelRegistry_FingerprintContextWindowFallback(t *testing.T) {
+	ctx := context.Background()
+	key := ModelKey{Provider: "test", Model: "unknown-model"}
+	prov := &mrMockProvider{name: "test", models: []ModelInfo{{Name: key.Model}}}
+	store := newMrMockFingerprintStore()
+	store.profiles["test\x00unknown-model"] = &fingerprint.Profile{
+		BackendID: key.Provider, ModelName: key.Model, EffectiveContext: 24_576,
+	}
+	mr, err := NewModelRegistry(&mrMockProviderRegistry{providers: map[string]Provider{"test": prov}}, store)
+	if err != nil {
+		t.Fatalf("NewModelRegistry: %v", err)
+	}
+	profile, err := mr.Lookup(ctx, key)
+	if err != nil {
+		t.Fatalf("Lookup: %v", err)
+	}
+	if profile.ContextWindow != 24_576 {
+		t.Fatalf("ContextWindow = %d, want fingerprint fallback 24576", profile.ContextWindow)
+	}
+}
+
 func TestModelRegistry_Lookup_RunsFingerprintProberFactory(t *testing.T) {
 	ctx := context.Background()
 
