@@ -109,6 +109,7 @@ type feedbackPathJoin struct {
 
 type feedbackService struct {
 	root      string
+	dbPath    string
 	collector *feedback.Collector
 	weighter  rag.BehavioralWeighter
 	writer    *sql.DB
@@ -232,7 +233,7 @@ func openFeedbackService(ctx context.Context, root, dbPath string, warn func(str
 	}
 	workerCtx, cancel := context.WithCancel(context.Background())
 	s := &feedbackService{
-		root: root, collector: collector, weighter: reader, writer: writer, reader: reader,
+		root: root, dbPath: dbPath, collector: collector, weighter: reader, writer: writer, reader: reader,
 		events: make(chan feedbackEvent, feedbackQueueSize), stop: make(chan struct{}), done: make(chan struct{}),
 		cancel: cancel, now: time.Now, warn: newFeedbackNotifier(warn),
 		report: feedbackReport{reasons: make(map[string]int)},
@@ -461,6 +462,7 @@ func (s *feedbackService) work(ctx context.Context) {
 		opctx, cancel := s.operationContext(ctx)
 		ids, err := s.collector.SweepExpired(opctx, now)
 		cancel()
+		_ = chmodDBFiles(s.dbPath)
 		removeRetrievals(ids)
 		return err
 	}
@@ -502,6 +504,7 @@ func (s *feedbackService) work(ctx context.Context) {
 			opctx, cancel := s.operationContext(ctx)
 			id, err := s.collector.RegisterRetrievalAt(opctx, meta.query, keys, e.at)
 			cancel()
+			_ = chmodDBFiles(s.dbPath)
 			if err != nil {
 				s.drop(dropOperationFailed)
 				s.disable("write", err)
@@ -552,6 +555,7 @@ func (s *feedbackService) work(ctx context.Context) {
 			opctx, cancel := s.operationContext(ctx)
 			committed, err := s.collector.RecordBatchAt(opctx, signals, e.at)
 			cancel()
+			_ = chmodDBFiles(s.dbPath)
 			for _, signal := range committed {
 				for _, key := range signal.ChunkKeys {
 					active[signal.RetrievalID].credited[key] = true
@@ -734,6 +738,7 @@ func (s *feedbackService) close() (feedbackReport, error) {
 				s.closeErr = err
 			}
 		}
+		_ = chmodDBFiles(s.dbPath)
 		s.admissionMu.Lock()
 		s.closeReport = s.report
 		s.closeReport.reasons = make(map[string]int, len(s.report.reasons))

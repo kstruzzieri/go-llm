@@ -313,6 +313,87 @@ func TestFeedbackObserverRecordsFirstPresentationAndLaterRead(t *testing.T) {
 	}
 }
 
+func TestFeedbackServiceReSecuresSQLiteFilesAfterWorkerWritesAndClose(t *testing.T) {
+	root := t.TempDir()
+	dbPath := filepath.Join(t.TempDir(), "feedback.db")
+	svc, err := openFeedbackService(context.Background(), root, dbPath, feedbackTestWarn(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _, _ = svc.close() })
+
+	loosen := func(when string) {
+		t.Helper()
+		for _, path := range []string{dbPath, dbPath + "-wal", dbPath + "-shm"} {
+			if _, err := os.Stat(path); err != nil {
+				if os.IsNotExist(err) {
+					continue
+				}
+				t.Fatalf("%s: stat %s: %v", when, path, err)
+			}
+			if err := os.Chmod(path, 0o644); err != nil {
+				t.Fatalf("%s: chmod %s: %v", when, path, err)
+			}
+			info, err := os.Stat(path)
+			if err != nil {
+				t.Fatalf("%s: re-stat %s: %v", when, path, err)
+			}
+			if got := info.Mode().Perm(); got != 0o644 {
+				t.Fatalf("%s: %s mode = %o, want 0644 before write", when, filepath.Base(path), got)
+			}
+		}
+	}
+	requireSecured := func(when string) {
+		t.Helper()
+		for _, path := range []string{dbPath, dbPath + "-wal", dbPath + "-shm"} {
+			info, err := os.Stat(path)
+			if err != nil {
+				if os.IsNotExist(err) {
+					continue
+				}
+				t.Fatalf("%s: stat %s: %v", when, path, err)
+			}
+			if got := info.Mode().Perm(); got != 0o600 {
+				t.Fatalf("%s: %s mode = %o, want 0600", when, filepath.Base(path), got)
+			}
+		}
+	}
+
+	obs := svc.observer("run")
+	observer := obs.(agent.ToolResultObserver)
+	presentation := obs.(agent.RetrievalPresentationObserver)
+	if err := observer.OnToolResult(context.Background(), agent.ToolResultEvent{
+		Step: 1, Call: feedbackCall("retrieve", "retrieve", `{"query":"q"}`), Invoked: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	waitFeedbackCompleted(t, svc, 1)
+
+	loosen("before retrieval persistence")
+	if err := presentation.OnRetrievalPresentation(context.Background(), agent.RetrievalPresentationEvent{
+		Step: 2, ToolCallID: "retrieve", Attribution: agent.RetrievalAttribution{Sources: []agent.RetrievedSource{{StableKey: "key", Source: "file.go"}}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	waitFeedbackCompleted(t, svc, 2)
+	requireSecured("after retrieval persistence")
+
+	loosen("before signal persistence")
+	if err := observer.OnToolResult(context.Background(), agent.ToolResultEvent{
+		Step: 3, Call: feedbackCall("read", "read_file", `{"path":"file.go"}`), Invoked: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	waitFeedbackCompleted(t, svc, 3)
+	requireSecured("after signal persistence")
+
+	loosen("before close")
+	if _, err := svc.close(); err != nil {
+		t.Fatal(err)
+	}
+	requireSecured("after close")
+}
+
 func TestFeedbackServiceCrossesProductionWeightGates(t *testing.T) {
 	root := t.TempDir()
 	dbPath := filepath.Join(t.TempDir(), "feedback.db")
