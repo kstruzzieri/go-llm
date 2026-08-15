@@ -2,8 +2,10 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -13,6 +15,7 @@ import (
 
 	"github.com/kstruzzieri/go-llm/agent"
 	"github.com/kstruzzieri/go-llm/conversation"
+	feedbackpkg "github.com/kstruzzieri/go-llm/feedback"
 	golemruntime "github.com/kstruzzieri/go-llm/golem"
 	"github.com/kstruzzieri/go-llm/provider"
 )
@@ -55,6 +58,42 @@ type scriptCaller struct {
 	responses []agent.ModelResult
 	i         int
 	block     chan struct{} // when non-nil, Chat waits on ctx or this before responding
+}
+
+type attributedRetrieve struct{}
+
+func (attributedRetrieve) Spec() agent.ToolSpec { return agent.ToolSpec{Name: "retrieve"} }
+func (attributedRetrieve) Effect() agent.Effect { return agent.Effect{Class: agent.Read} }
+func (attributedRetrieve) Invoke(context.Context, json.RawMessage) (agent.ToolResult, error) {
+	return agent.ToolResult{Content: "chunk", Attrib: &agent.RetrievalAttribution{Sources: []agent.RetrievedSource{{StableKey: "key-a", Source: "a.go"}}}}, nil
+}
+
+type nestedDispatch struct{ child agent.Tool }
+
+func (nestedDispatch) Spec() agent.ToolSpec { return agent.ToolSpec{Name: "dispatch"} }
+func (nestedDispatch) Effect() agent.Effect { return agent.Effect{Class: agent.Read} }
+func (d nestedDispatch) Invoke(ctx context.Context, args json.RawMessage) (agent.ToolResult, error) {
+	return d.child.Invoke(ctx, args)
+}
+
+type retrieveThenStopCaller struct {
+	calls   int
+	err     error
+	entered chan struct{}
+}
+
+func (c *retrieveThenStopCaller) Chat(ctx context.Context, _ provider.ChatRequest, onToken func(provider.ChatResponse) error) (agent.ModelResult, error) {
+	c.calls++
+	if c.calls == 1 {
+		resp := provider.ChatResponse{ToolCalls: []provider.ToolCall{{ID: "retrieve-1", Type: "function", Function: provider.ToolCallFunction{Name: "retrieve", Arguments: json.RawMessage(`{"query":"a"}`)}}}}
+		return agent.ModelResult{Response: resp}, onToken(resp)
+	}
+	if c.entered != nil {
+		close(c.entered)
+		<-ctx.Done()
+		return agent.ModelResult{}, ctx.Err()
+	}
+	return agent.ModelResult{}, c.err
 }
 
 func (s *scriptCaller) Chat(ctx context.Context, req provider.ChatRequest, onToken func(provider.ChatResponse) error) (agent.ModelResult, error) {
@@ -129,6 +168,269 @@ func TestRunOnceDelegatesThroughConsumerRuntime(t *testing.T) {
 	}
 	if result.Answer != "runtime answer" {
 		t.Fatalf("answer = %q, want runtime answer", result.Answer)
+	}
+}
+
+func TestRunOnce_ComposesFeedbackWithoutTelemetryAndFinishesRun(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "a.go"), []byte("package a\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	caller := &scriptCaller{responses: []agent.ModelResult{
+		{Response: provider.ChatResponse{ToolCalls: []provider.ToolCall{{ID: "retrieve-1", Type: "function", Function: provider.ToolCallFunction{Name: "retrieve", Arguments: json.RawMessage(`{"query":"a"}`)}}}}},
+		{Response: provider.ChatResponse{ToolCalls: []provider.ToolCall{{ID: "read-1", Type: "function", Function: provider.ToolCallFunction{Name: "read_file", Arguments: json.RawMessage(`{"path":"a.go"}`)}}}}},
+		{Response: provider.ChatResponse{Content: "done"}},
+	}}
+	release := make(chan struct{})
+	close(release)
+	store := &feedbackBlockingStore{started: make(chan struct{}), release: release}
+	svc := feedbackServiceForStore(root, store, feedbackTestWarn(t))
+	system := buildSystemPrompt(false, false)
+	orch := agent.New(caller, agent.ContextManager{})
+	sess := &replSession{
+		runtime: newTestRuntime(t, root, system, orch, []agent.Tool{attributedRetrieve{}}),
+		tools:   []agent.Tool{attributedRetrieve{}}, baseSystem: system, maxSteps: 16,
+		clock: func() time.Time { return time.Unix(0, 0) }, feedback: svc,
+	}
+	var out strings.Builder
+	if _, err := runOnce(context.Background(), &out, nil, sess, "find a", nil); err != nil {
+		t.Fatalf("runOnce: %v", err)
+	}
+	report, err := svc.close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := feedbackKindCount(store, feedbackpkg.SignalFileOpened); got != 1 {
+		t.Fatalf("file-opened signals = %d, want 1; report=%+v", got, report)
+	}
+	if report.attempted != report.completed || report.dropped != 0 {
+		t.Fatalf("feedback report = %+v", report)
+	}
+}
+
+func TestRunOnce_ComposesFeedbackWithTelemetry(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "a.go"), []byte("package a\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	dataDir := t.TempDir()
+	obs, err := newObserv(func(k string) string {
+		if k == "XDG_DATA_HOME" {
+			return dataDir
+		}
+		return ""
+	}, root, false, true, time.Now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	caller := &scriptCaller{responses: []agent.ModelResult{
+		{Response: provider.ChatResponse{ToolCalls: []provider.ToolCall{{ID: "retrieve-1", Type: "function", Function: provider.ToolCallFunction{Name: "retrieve", Arguments: json.RawMessage(`{"query":"a"}`)}}}}},
+		{Response: provider.ChatResponse{ToolCalls: []provider.ToolCall{{ID: "read-1", Type: "function", Function: provider.ToolCallFunction{Name: "read_file", Arguments: json.RawMessage(`{"path":"a.go"}`)}}}}},
+		{Response: provider.ChatResponse{Content: "done"}},
+	}}
+	release := make(chan struct{})
+	close(release)
+	store := &feedbackBlockingStore{started: make(chan struct{}), release: release}
+	svc := feedbackServiceForStore(root, store, feedbackTestWarn(t))
+	system := buildSystemPrompt(false, false)
+	sess := &replSession{
+		runtime: newTestRuntime(t, root, system, agent.New(caller, agent.ContextManager{}), []agent.Tool{attributedRetrieve{}}),
+		tools:   []agent.Tool{attributedRetrieve{}}, baseSystem: system, maxSteps: 16,
+		clock: func() time.Time { return time.Unix(0, 0) }, obs: obs, feedback: svc,
+	}
+	var out strings.Builder
+	if _, err := runOnce(context.Background(), &out, nil, sess, "find a", nil); err != nil {
+		t.Fatalf("runOnce: %v", err)
+	}
+	report, err := svc.close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	telemetry, err := os.ReadFile(obs.telemetryPath)
+	if err != nil || len(telemetry) == 0 {
+		t.Fatalf("telemetry = %q, %v", telemetry, err)
+	}
+	if got := feedbackKindCount(store, feedbackpkg.SignalFileOpened); got != 1 || report.dropped != 0 {
+		t.Fatalf("file-opened signals=%d report=%+v", got, report)
+	}
+}
+
+func TestRunOnce_NestedDispatchRetrievalIsInvisibleToFeedback(t *testing.T) {
+	root := t.TempDir()
+	caller := &scriptCaller{responses: []agent.ModelResult{
+		{Response: provider.ChatResponse{ToolCalls: []provider.ToolCall{{ID: "dispatch-1", Type: "function", Function: provider.ToolCallFunction{Name: "dispatch", Arguments: json.RawMessage(`{"query":"a"}`)}}}}},
+		{Response: provider.ChatResponse{Content: "done"}},
+	}}
+	release := make(chan struct{})
+	close(release)
+	store := &feedbackBlockingStore{started: make(chan struct{}), release: release}
+	svc := feedbackServiceForStore(root, store, feedbackTestWarn(t))
+	tool := nestedDispatch{child: attributedRetrieve{}}
+	system := buildSystemPrompt(false, false)
+	sess := &replSession{
+		runtime: newTestRuntime(t, root, system, agent.New(caller, agent.ContextManager{}), []agent.Tool{tool}),
+		tools:   []agent.Tool{tool}, baseSystem: system, maxSteps: 16,
+		clock: func() time.Time { return time.Unix(0, 0) }, feedback: svc,
+	}
+	var out strings.Builder
+	if _, err := runOnce(context.Background(), &out, nil, sess, "dispatch", nil); err != nil {
+		t.Fatalf("runOnce: %v", err)
+	}
+	report, err := svc.close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.attempted != 0 || report.completed != 0 || store.signals.Load() != 0 {
+		t.Fatalf("nested dispatch leaked into feedback: report=%+v signals=%d", report, store.signals.Load())
+	}
+}
+
+func TestRunOnce_FinishesFeedbackRunOnErrorAndCancel(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		caller *retrieveThenStopCaller
+		cancel bool
+	}{
+		{name: "error", caller: &retrieveThenStopCaller{err: errors.New("provider stopped")}},
+		{name: "cancel", caller: &retrieveThenStopCaller{entered: make(chan struct{})}, cancel: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			dbPath := filepath.Join(t.TempDir(), "feedback.db")
+			svc, err := openFeedbackService(context.Background(), root, dbPath, feedbackTestWarn(t))
+			if err != nil {
+				t.Fatal(err)
+			}
+			fixed := time.Unix(1719600000, 0)
+			obs := &observ{clock: func() time.Time { return fixed }}
+			system := buildSystemPrompt(false, false)
+			retrieve := &countingTool{content: "chunk"}
+			sess := &replSession{
+				runtime: newTestRuntime(t, root, system, agent.New(tc.caller, agent.ContextManager{}), []agent.Tool{retrieve}),
+				tools:   []agent.Tool{retrieve}, baseSystem: system, maxSteps: 16,
+				clock: func() time.Time { return time.Unix(0, 0) }, obs: obs, feedback: svc,
+			}
+			var interrupts chan struct{}
+			if tc.cancel {
+				interrupts = make(chan struct{}, 1)
+				go func() { <-tc.caller.entered; interrupts <- struct{}{} }()
+			}
+			var out strings.Builder
+			if _, err := runOnce(context.Background(), &out, interrupts, sess, "find a", nil); err == nil {
+				t.Fatal("runOnce returned nil error")
+			}
+			runID := fmt.Sprintf("%d-%d-1", fixed.UnixMilli(), os.Getpid())
+			svc.admit(feedbackEvent{kind: feedbackPresentation, counted: true, at: time.Now(), runID: runID, step: 2, callID: "retrieve-1", sources: []agent.RetrievedSource{{StableKey: "key-a", Source: "a.go"}}}, true)
+			if _, err := svc.close(); err != nil {
+				t.Fatal(err)
+			}
+			db, err := sql.Open("sqlite", dbPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = db.Close() }()
+			var retrievals int
+			if err := db.QueryRow(`SELECT COUNT(*) FROM feedback_retrievals`).Scan(&retrievals); err != nil || retrievals != 0 {
+				t.Fatalf("retrievals=%d err=%v; finishRun did not clear %s run", retrievals, err, tc.name)
+			}
+		})
+	}
+}
+
+func TestRunOneShot_ComposesFeedbackAndCloseDrainsSignal(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "a.go"), []byte("package a\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	caller := &scriptCaller{responses: []agent.ModelResult{
+		{Response: provider.ChatResponse{ToolCalls: []provider.ToolCall{{ID: "retrieve-1", Type: "function", Function: provider.ToolCallFunction{Name: "retrieve", Arguments: json.RawMessage(`{"query":"a"}`)}}}}},
+		{Response: provider.ChatResponse{ToolCalls: []provider.ToolCall{{ID: "read-1", Type: "function", Function: provider.ToolCallFunction{Name: "read_file", Arguments: json.RawMessage(`{"path":"a.go"}`)}}}}},
+		{Response: provider.ChatResponse{Content: "done"}},
+	}}
+	release := make(chan struct{})
+	close(release)
+	store := &feedbackBlockingStore{started: make(chan struct{}), release: release}
+	svc := feedbackServiceForStore(root, store, feedbackTestWarn(t))
+	system := buildSystemPrompt(false, false)
+	sess := &replSession{
+		runtime: newTestRuntime(t, root, system, agent.New(caller, agent.ContextManager{}), []agent.Tool{attributedRetrieve{}}),
+		tools:   []agent.Tool{attributedRetrieve{}}, baseSystem: system, maxSteps: 16,
+		clock: func() time.Time { return time.Unix(0, 0) }, feedback: svc,
+	}
+	var stdout, stderr strings.Builder
+	if err := runOneShot(context.Background(), &stdout, &stderr, nil, sess, "find a"); err != nil {
+		t.Fatalf("runOneShot: %v; stderr=%q", err, stderr.String())
+	}
+	report, err := svc.close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stdout.String() != "done\n" || feedbackKindCount(store, feedbackpkg.SignalFileOpened) != 1 {
+		t.Fatalf("stdout=%q report=%+v signals=%d", stdout.String(), report, store.signals.Load())
+	}
+}
+
+func TestRunOnce_FeedbackObserverChainWeightsOnlySuccessfulRead(t *testing.T) {
+	for _, tc := range []struct {
+		name, readPath string
+		wantWeight     bool
+	}{
+		{name: "successful read", readPath: "a.go", wantWeight: true},
+		{name: "failed read", readPath: "missing.go"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			if err := os.WriteFile(filepath.Join(root, "a.go"), []byte("package a\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			dbPath := filepath.Join(t.TempDir(), "feedback.db")
+			svc, err := openFeedbackService(context.Background(), root, dbPath, feedbackTestWarn(t))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := svc.writer.Exec(`INSERT INTO feedback_retrievals(retrieval_id,query,chunk_keys,created_at) VALUES('seed','q','key-a',1)`); err != nil {
+				t.Fatal(err)
+			}
+			for i := 0; i < feedbackpkg.DefaultConfig().WarmupSignals-1; i++ {
+				if _, err := svc.writer.Exec(`INSERT INTO feedback_signals(retrieval_id,chunk_key,signal_kind,strength,created_at) VALUES('seed','seed-key','file_opened',0.3,1)`); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if _, err := svc.writer.Exec(`INSERT INTO feedback_aggregates(chunk_key,retrieval_count,weighted_score) VALUES('key-a',?,0.7)`, feedbackpkg.DefaultConfig().MinRetrievals-1); err != nil {
+				t.Fatal(err)
+			}
+
+			caller := &scriptCaller{responses: []agent.ModelResult{
+				{Response: provider.ChatResponse{ToolCalls: []provider.ToolCall{{ID: "retrieve-1", Type: "function", Function: provider.ToolCallFunction{Name: "retrieve", Arguments: json.RawMessage(`{"query":"a"}`)}}}}},
+				{Response: provider.ChatResponse{ToolCalls: []provider.ToolCall{{ID: "read-1", Type: "function", Function: provider.ToolCallFunction{Name: "read_file", Arguments: json.RawMessage(`{"path":"` + tc.readPath + `"}`)}}}}},
+				{Response: provider.ChatResponse{Content: "done"}},
+			}}
+			system := buildSystemPrompt(false, false)
+			sess := &replSession{
+				runtime: newTestRuntime(t, root, system, agent.New(caller, agent.ContextManager{}), []agent.Tool{attributedRetrieve{}}),
+				tools:   []agent.Tool{attributedRetrieve{}}, baseSystem: system, maxSteps: 16,
+				clock: func() time.Time { return time.Unix(0, 0) }, feedback: svc,
+			}
+			var out strings.Builder
+			if _, err := runOnce(context.Background(), &out, nil, sess, "find a", nil); err != nil {
+				t.Fatalf("runOnce: %v", err)
+			}
+			if _, err := svc.close(); err != nil {
+				t.Fatal(err)
+			}
+			reader, err := feedbackpkg.NewSQLiteWeightReader(context.Background(), dbPath, feedbackpkg.DefaultConfig())
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = reader.Close() }()
+			weights, err := reader.WeightsBatch(context.Background(), []string{"key-a"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if (weights["key-a"] != 0) != tc.wantWeight {
+				t.Fatalf("weights=%v, want non-neutral=%v; output=%q", weights, tc.wantWeight, out.String())
+			}
+		})
 	}
 }
 

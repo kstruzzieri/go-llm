@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -123,7 +124,7 @@ func parseFlags(args []string) (flags, error) {
 	fs.BoolVar(&f.trace, "trace", false, "persist a content-full run trace per turn (outside the workspace; may contain workspace/user/memory content)")
 	fs.BoolVar(&f.telemetry, "telemetry", false, "append content-light run telemetry (timings, route, usage; no prompt/output)")
 	fs.IntVar(&f.pressureWarn, "pressure-warn", 75, "context-pressure warn threshold percent 1-100 (0 disables the warning line)")
-	fs.BoolVar(&f.feedback, "feedback", false, "enable optional behavioral feedback ranking (consume-only; reads a per-workspace feedback DB)")
+	fs.BoolVar(&f.feedback, "feedback", false, "enable local behavioral feedback collection and retrieval ranking")
 	fs.StringVar(&f.feedbackDB, "feedback-db", "", "override the behavioral feedback DB path (default: per-workspace under the data dir)")
 	fs.StringVar(&f.think, "think", "", "reasoning control for the agent model: off, on, low, medium, high (default: model decides); no-op with a notice when the model does not support thinking")
 	fs.StringVar(&f.planPath, "plan", "", "AgentFlow task mode: path to a plan document (JSON) to lock and execute; requires both -approve-plan-edits and -approve-plan-gates; mutually exclusive with -p, -allow-write/-allow-exec, -rag-db, -delegate, and -mcp-*")
@@ -519,7 +520,40 @@ func colorPermitted(noColor bool) bool {
 	return !noColor && os.Getenv("NO_COLOR") == "" && os.Getenv("TERM") != "dumb"
 }
 
-func run(args []string, stdin *os.File, stdout, stderr *os.File) error {
+// runHooks exposes only the process lifecycle boundaries that package tests
+// must control or observe deterministically. A zero value is the production
+// path; it neither replaces composition nor coordinates shutdown.
+type runHooks struct {
+	openFeedback        func(context.Context, string, string, func(string)) (*feedbackService, error)
+	startAutoIndex      func() func()
+	afterAutoIndexStart func(lineSourceMode, agent.Tool, *feedbackService) error
+	closed              func(string)
+}
+
+func formatFeedbackReport(report feedbackReport) string {
+	reasons := make([]string, 0, len(report.reasons))
+	for reason, count := range report.reasons {
+		if count != 0 {
+			reasons = append(reasons, fmt.Sprintf("%s:%d", reason, count))
+		}
+	}
+	if report.attempted == 0 && report.completed == 0 && report.dropped == 0 && len(reasons) == 0 && report.presentationDuplicates == 0 && report.presentationJoinMisses == 0 {
+		return ""
+	}
+	sort.Strings(reasons)
+	dropReasons := "none"
+	if len(reasons) > 0 {
+		dropReasons = strings.Join(reasons, ",")
+	}
+	return fmt.Sprintf("behavioral feedback: attempted=%d completed=%d dropped=%d drop_reasons=%s duplicates=%d join_misses=%d",
+		report.attempted, report.completed, report.dropped, dropReasons, report.presentationDuplicates, report.presentationJoinMisses)
+}
+
+func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...runHooks) error {
+	var hooks runHooks
+	if len(testHooks) > 0 {
+		hooks = testHooks[0]
+	}
 	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
 		switch args[0] {
 		case "index":
@@ -629,20 +663,28 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File) error {
 	if autoErr != nil && !f.noRag && f.ragDB == "" {
 		warns = append(warns, "retrieve auto-index disabled: "+autoErr.Error())
 	}
-	feedbackDB := ""
-	if f.feedback && !f.noRag {
-		if f.feedbackDB != "" {
-			if err := validatePathOutsideWorkspace(f.feedbackDB, root); err != nil {
-				warns = append(warns, "behavioral feedback disabled: "+err.Error())
-			} else {
-				feedbackDB = f.feedbackDB
-			}
-		} else if p, ferr := feedbackDBPathForWorkspace(os.Getenv, root); ferr != nil {
-			warns = append(warns, "behavioral feedback disabled: "+ferr.Error())
-		} else {
-			feedbackDB = p
-		}
+	feedbackOpener := hooks.openFeedback
+	if feedbackOpener == nil {
+		feedbackOpener = openFeedbackService
 	}
+	feedbackSvc, feedbackWarning := openConfiguredFeedback(ctx, f.feedback && !f.noRag, root, f.feedbackDB, os.Getenv,
+		func(line string) { _, _ = fmt.Fprintln(stderr, line) }, feedbackOpener)
+	if feedbackWarning != "" {
+		warns = append(warns, feedbackWarning)
+	}
+	defer func() {
+		report, closeErr := feedbackSvc.close()
+		if line := formatFeedbackReport(report); line != "" {
+			_, _ = fmt.Fprintln(stderr, line)
+		}
+		if closeErr != nil {
+			_, _ = fmt.Fprintln(stderr, "behavioral feedback close failed: "+closeErr.Error())
+		}
+		if hooks.closed != nil {
+			hooks.closed("feedback")
+		}
+	}()
+	feedbackWeighter := feedbackSvc.behavioralWeighter()
 	embChain, embChainErr := embeddingChain(bundle.Config)
 	var retrieve agent.Tool
 	retrieveLine := ""
@@ -656,11 +698,14 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File) error {
 			if closeErr := ready.close(); closeErr != nil {
 				_, _ = fmt.Fprintln(stderr, closeErr)
 			}
+			if hooks.closed != nil {
+				hooks.closed("retrieval")
+			}
 		}()
 		retrieve = ready
 		rr := enableRetrieve(ctx, bundle.Config, bundle.Router, retrieveOpts{
 			autoDBPath:  autoDBPath,
-			workspaceID: autoWorkspaceID, feedbackDB: feedbackDB, progressive: f.progressive,
+			workspaceID: autoWorkspaceID, weighter: feedbackWeighter, progressive: f.progressive,
 		})
 		warns = append(warns, rr.warns...)
 		if rr.reader != nil {
@@ -678,13 +723,16 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File) error {
 			ragDB:       f.ragDB,
 			autoDBPath:  autoDBPath,
 			workspaceID: autoWorkspaceID,
-			feedbackDB:  feedbackDB,
+			weighter:    feedbackWeighter,
 			progressive: f.progressive,
 		})
 		if rr.reader != nil {
 			defer func() {
 				if closeErr := rr.reader.closeAfterDrain(); closeErr != nil {
 					_, _ = fmt.Fprintln(stderr, closeErr)
+				}
+				if hooks.closed != nil {
+					hooks.closed("retrieval")
 				}
 			}()
 		}
@@ -896,7 +944,12 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File) error {
 	if err != nil {
 		return err
 	}
-	defer func() { _ = runtime.Close() }()
+	defer func() {
+		_ = runtime.Close()
+		if hooks.closed != nil {
+			hooks.closed("runtime")
+		}
+	}()
 
 	renderOut := stdout
 	if f.promptSet {
@@ -923,6 +976,7 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File) error {
 		records:             mrt.records,
 		workspaceID:         workspaceID(root),
 		obs:                 obsv,
+		feedback:            feedbackSvc,
 		pressureWarn:        f.pressureWarn > 0,
 		mixed:               f.progressive,
 		modelOptions:        thinkOpts,
@@ -955,6 +1009,9 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File) error {
 		defer cancelREPL()
 		ctrl := newReplControl(stdout, stderr, interrupts, cancelREPL)
 		sess.control = ctrl
+		if feedbackSvc != nil {
+			feedbackSvc.warn.set(ctrl.notice)
+		}
 		notice = ctrl.notice
 		onInterrupt = ctrl.interrupt
 	}
@@ -987,7 +1044,7 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File) error {
 						return bundle.Router.Route(rc, rreq)
 					}, embChain),
 					embChain:    embChain,
-					feedbackDB:  feedbackDB,
+					weighter:    feedbackWeighter,
 					progressive: f.progressive,
 					summarize:   sourceSummarizer,
 					ready:       ready,
@@ -999,6 +1056,9 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File) error {
 				<-autoDone
 			}
 		}
+	}
+	if hooks.startAutoIndex != nil {
+		startAutoIndex = hooks.startAutoIndex
 	}
 
 	// Final dispatch. A line source is created only where an interactive read
@@ -1019,6 +1079,11 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File) error {
 		if startAutoIndex != nil {
 			stopAutoIndex := startAutoIndex()
 			defer stopAutoIndex()
+			if hooks.afterAutoIndexStart != nil {
+				if err := hooks.afterAutoIndexStart(sourceAnswerOnly, retrieve, feedbackSvc); err != nil {
+					return err
+				}
+			}
 		}
 		return withLineSource(newInput(inputConfig{
 			Stdin:       stdin,
@@ -1035,6 +1100,11 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File) error {
 		if startAutoIndex != nil {
 			stopAutoIndex := startAutoIndex()
 			defer stopAutoIndex()
+			if hooks.afterAutoIndexStart != nil {
+				if err := hooks.afterAutoIndexStart(sourceNone, retrieve, feedbackSvc); err != nil {
+					return err
+				}
+			}
 		}
 		if f.goalSet {
 			return runAgentflowAuthor(ctx, nil, stdout, stderr, interrupts, sess, f, root)
@@ -1092,6 +1162,11 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File) error {
 			// Cancels and joins the writer before withLineSource closes the
 			// source, so no notice can reach a closed source.
 			defer stopAutoIndex()
+			if hooks.afterAutoIndexStart != nil {
+				if err := hooks.afterAutoIndexStart(sourceREPL, retrieve, feedbackSvc); err != nil {
+					return err
+				}
+			}
 		}
 		return runREPL(replCtx, src, stdout, interrupts, sess)
 	})

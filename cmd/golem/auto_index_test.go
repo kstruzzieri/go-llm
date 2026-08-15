@@ -133,17 +133,17 @@ func autoIndexTestEmbedder(vsid, failSubstr string) rag.Embedder {
 // against a stale pre-checkpoint snapshot even while a writer is live, so the
 // ordering invariant is pinned by the source counts the callers assert on
 // (a stale snapshot reads 0 sources), not by this open failing.
-func realReadOnlyOpen(_ string) func(context.Context, string) (*retrievalReader, string, vsDecision, rag.StoreStats, error) {
-	return func(ctx context.Context, dbPath string) (*retrievalReader, string, vsDecision, rag.StoreStats, error) {
+func realReadOnlyOpen(_ string) func(context.Context, string) (*retrievalReader, vsDecision, rag.StoreStats, error) {
+	return func(ctx context.Context, dbPath string) (*retrievalReader, vsDecision, rag.StoreStats, error) {
 		store, err := rag.OpenSQLiteStoreReadOnly(dbPath)
 		if err != nil {
-			return nil, "", vsDecision{}, rag.StoreStats{}, err
+			return nil, vsDecision{}, rag.StoreStats{}, err
 		}
 		stats, err := store.Stats(ctx)
 		if err != nil {
-			return nil, "", vsDecision{}, rag.StoreStats{}, errors.Join(err, store.Close())
+			return nil, vsDecision{}, rag.StoreStats{}, errors.Join(err, store.Close())
 		}
-		return newOwnedRetrievalReader(&agenttools.Retrieve{}, store, nil), "", vsDecision{}, stats, nil
+		return newOwnedRetrievalReader(&agenttools.Retrieve{}, store), vsDecision{}, stats, nil
 	}
 }
 
@@ -176,7 +176,7 @@ func installActiveTestReader(t *testing.T, ready *readyRetrieve, dbPath string) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	reader, _, _, _, err := realReadOnlyOpen(dbPath)(context.Background(), gen.dbPath)
+	reader, _, _, err := realReadOnlyOpen(dbPath)(context.Background(), gen.dbPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -210,6 +210,33 @@ func TestRunAutoIndex_FirstRunBuildsAndMarksReady(t *testing.T) {
 		t.Fatalf("generation metadata = %+v", gen.metadata)
 	}
 	assertIndexDBModes(t, gen.dbPath)
+}
+
+func TestRunAutoIndex_RebuiltStoreUsesBorrowedFeedbackWeighter(t *testing.T) {
+	root := t.TempDir()
+	writeWorkspaceFile(t, root, "a.go", "package a\n\nfunc A() {}\n")
+	dbPath := filepath.Join(t.TempDir(), "indexes", "k.db")
+	cfg, router, _ := testRoutingEmbedder(t)
+	weighter := &countingBehavioralWeighter{}
+	var notices []string
+	job := autoIndexJob{
+		root: root, dbPath: dbPath, workspaceID: "workspace:k",
+		cfg: cfg, router: router, embedder: autoIndexTestEmbedder("embed-test/a", ""),
+		embChain: []string{"embed-test/a"}, weighter: weighter,
+		ready: newReadyRetrieve(warmingRetrieveMessage), notice: func(s string) { notices = append(notices, s) },
+	}
+
+	runAutoIndex(context.Background(), job)
+	result, err := job.ready.Invoke(context.Background(), json.RawMessage(`{"query":"find A"}`))
+	if err != nil || result.IsError {
+		t.Fatalf("Invoke = %+v, %v; notices=%v", result, err, notices)
+	}
+	if got := weighter.callCount(); got != 1 {
+		t.Fatalf("behavioral weight calls = %d, want 1", got)
+	}
+	if err := job.ready.close(); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func TestRunAutoIndex_ProgressiveSummaryGenerationIsOptIn(t *testing.T) {
@@ -648,8 +675,8 @@ func TestRunAutoIndex_RetrieverOpenFailureDoesNotPublish(t *testing.T) {
 	var notices []string
 	job := newAutoIndexTestJob(root, dbPath, autoIndexTestEmbedder("ollama/nomic", ""), &notices)
 	job.ready = ready
-	job.openRetriever = func(context.Context, string) (*retrievalReader, string, vsDecision, rag.StoreStats, error) {
-		return nil, "", vsDecision{}, rag.StoreStats{}, errors.New("reader open failed")
+	job.openRetriever = func(context.Context, string) (*retrievalReader, vsDecision, rag.StoreStats, error) {
+		return nil, vsDecision{}, rag.StoreStats{}, errors.New("reader open failed")
 	}
 	runAutoIndex(context.Background(), job)
 
@@ -726,16 +753,16 @@ func TestRunAutoIndex_ServesActiveWhileBlockedThenPublishesAndSwaps(t *testing.T
 	var notices []string
 	job := newAutoIndexTestJob(root, dbPath, emb, &notices)
 	job.ready = ready
-	job.openRetriever = func(ctx context.Context, path string) (*retrievalReader, string, vsDecision, rag.StoreStats, error) {
+	job.openRetriever = func(ctx context.Context, path string) (*retrievalReader, vsDecision, rag.StoreStats, error) {
 		store, err := rag.OpenSQLiteStoreReadOnly(path)
 		if err != nil {
-			return nil, "", vsDecision{}, rag.StoreStats{}, err
+			return nil, vsDecision{}, rag.StoreStats{}, err
 		}
 		stats, err := store.Stats(ctx)
 		if err != nil {
-			return nil, "", vsDecision{}, rag.StoreStats{}, errors.Join(err, store.Close())
+			return nil, vsDecision{}, rag.StoreStats{}, errors.Join(err, store.Close())
 		}
-		return newOwnedRetrievalReader(&countingTool{content: "new"}, store, nil), "", vsDecision{}, stats, nil
+		return newOwnedRetrievalReader(&countingTool{content: "new"}, store), vsDecision{}, stats, nil
 	}
 	done := make(chan struct{})
 	go func() { runAutoIndex(context.Background(), job); close(done) }()
@@ -872,6 +899,49 @@ func TestRunAutoIndex_WaitsOutLeaseAndAdoptsPublishedGeneration(t *testing.T) {
 	}
 	if err := job.ready.close(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestRunAutoIndex_AdoptedStoreUsesBorrowedFeedbackWeighter(t *testing.T) {
+	root := t.TempDir()
+	writeWorkspaceFile(t, root, "a.go", "package a\n\nfunc A() {}\n")
+	dbPath := filepath.Join(t.TempDir(), "indexes", "k.db")
+	lease, err := acquireIndexWriterLease(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg, router, _ := testRoutingEmbedder(t)
+	weighter := &countingBehavioralWeighter{}
+	var notices []string
+	job := autoIndexJob{
+		root: root, dbPath: dbPath, workspaceID: "workspace:k",
+		cfg: cfg, router: router, embedder: autoIndexTestEmbedder("embed-test/a", ""),
+		embChain: []string{"embed-test/a"}, weighter: weighter,
+		ready: newReadyRetrieve(warmingRetrieveMessage), notice: func(s string) { notices = append(notices, s) },
+	}
+	done := make(chan struct{})
+	go func() { runAutoIndex(context.Background(), job); close(done) }()
+	publishTestGeneration(t, dbPath, "workspace:k", strings.Repeat("e", 32))
+	if err := lease.Close(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("adoption did not finish")
+	}
+	result, err := job.ready.Invoke(context.Background(), json.RawMessage(`{"query":"find A"}`))
+	if err != nil || result.IsError {
+		t.Fatalf("Invoke = %+v, %v; notices=%v", result, err, notices)
+	}
+	if got := weighter.callCount(); got != 1 {
+		t.Fatalf("behavioral weight calls = %d, want 1", got)
+	}
+	if err := job.ready.close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := weighter.WeightsBatch(context.Background(), nil); err != nil {
+		t.Fatalf("reader retirement closed borrowed weighter: %v", err)
 	}
 }
 

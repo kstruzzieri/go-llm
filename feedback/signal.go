@@ -37,6 +37,9 @@ const (
 
 	// SignalInsightDismissed indicates the user dismissed an analysis insight.
 	SignalInsightDismissed SignalKind = "insight_dismissed"
+
+	// SignalWindowExpired indicates an attribution window expired.
+	SignalWindowExpired SignalKind = "window_expired"
 )
 
 // defaultStrength maps each signal kind to its default weight contribution.

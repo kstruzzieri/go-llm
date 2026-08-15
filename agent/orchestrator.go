@@ -138,6 +138,16 @@ func (o *Orchestrator) Run(ctx context.Context, req Request, obs Observer) (Resu
 				return res, aerr
 			}
 		}
+		if rpo, ok := obs.(RetrievalPresentationObserver); ok {
+			for _, msg := range assembled.Messages {
+				if msg.ToolCallID == "" || msg.Attrib == nil || len(msg.Attrib.Sources) == 0 {
+					continue
+				}
+				if rerr := rpo.OnRetrievalPresentation(ctx, retrievalPresentationEvent(step, msg)); rerr != nil {
+					return res, rerr
+				}
+			}
+		}
 		if pressure.Compactions > 0 {
 			res.Events = append(res.Events, EventRecord{Step: step, Kind: "compaction"})
 		}

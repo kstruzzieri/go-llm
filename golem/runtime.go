@@ -695,6 +695,8 @@ type eventObserver struct {
 	host      agent.Observer
 }
 
+var _ agent.RetrievalPresentationObserver = (*eventObserver)(nil)
+
 type hostObserverError struct {
 	err error
 }
@@ -787,6 +789,15 @@ func (o *eventObserver) OnThinking(ctx context.Context, event agent.ThinkingEven
 func (o *eventObserver) OnContextAssembly(ctx context.Context, event agent.ContextAssemblyEvent) error {
 	if host, ok := o.host.(agent.ContextAssemblyObserver); ok {
 		return wrapHostObserverError(host.OnContextAssembly(ctx, event))
+	}
+	return nil
+}
+
+// OnRetrievalPresentation forwards retrieval attribution only to opted-in host
+// observers; it deliberately has no protocol event equivalent.
+func (o *eventObserver) OnRetrievalPresentation(ctx context.Context, event agent.RetrievalPresentationEvent) error {
+	if host, ok := o.host.(agent.RetrievalPresentationObserver); ok {
+		return wrapHostObserverError(host.OnRetrievalPresentation(ctx, event))
 	}
 	return nil
 }

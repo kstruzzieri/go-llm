@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -207,6 +208,70 @@ func TestMultiObserverOnPressureFanout(t *testing.T) {
 	}
 	if len(child.got) != 1 || child.got[0].Step != 3 {
 		t.Fatalf("PressureObserver child not reached: %+v", child.got)
+	}
+}
+
+type retrievalPresentationRecorder struct {
+	name   string
+	log    *[]string
+	events []agent.RetrievalPresentationEvent
+	err    error
+}
+
+func (*retrievalPresentationRecorder) OnStep(context.Context, agent.StepEvent) error { return nil }
+func (*retrievalPresentationRecorder) OnToolCall(context.Context, agent.ToolCallEvent) error {
+	return nil
+}
+func (*retrievalPresentationRecorder) OnToken(context.Context, agent.TokenEvent) error { return nil }
+func (r *retrievalPresentationRecorder) OnRetrievalPresentation(_ context.Context, e agent.RetrievalPresentationEvent) error {
+	r.events = append(r.events, e)
+	if r.log != nil {
+		*r.log = append(*r.log, r.name)
+	}
+	return r.err
+}
+
+func TestComposeObserverRetrievalPresentationFanout(t *testing.T) {
+	var log []string
+	renderer := &retrievalPresentationRecorder{name: "renderer", log: &log}
+	feedback := &retrievalPresentationRecorder{name: "feedback", log: &log}
+	plain := nonPressureObs{}
+	if _, ok := agent.Observer(plain).(agent.RetrievalPresentationObserver); ok {
+		t.Fatal("plain child must not satisfy RetrievalPresentationObserver")
+	}
+
+	absent, ok := composeObserver(renderer, nil, plain, nil, feedback).(*multiObserver)
+	if !ok {
+		t.Fatal("extra child without telemetry should create a multiObserver")
+	}
+	if err := absent.OnRetrievalPresentation(context.Background(), agent.RetrievalPresentationEvent{Step: 1}); err != nil {
+		t.Fatalf("OnRetrievalPresentation: %v", err)
+	}
+	if got, want := strings.Join(log, ","), "renderer,feedback"; got != want {
+		t.Fatalf("delivery order = %q, want %q", got, want)
+	}
+
+	sink, err := agenttrace.NewTelemetrySink(filepath.Join(t.TempDir(), "telemetry.jsonl"), "run", time.Now(), time.Now)
+	if err != nil {
+		t.Fatalf("NewTelemetrySink: %v", err)
+	}
+	t.Cleanup(func() { _ = sink.Close() })
+	present, ok := composeObserver(renderer, sink, nil, feedback).(*multiObserver)
+	if !ok || len(present.children) != 3 || present.children[0] != renderer || present.children[1] != sink || present.children[2] != feedback {
+		t.Fatalf("telemetry composition = %#v, want renderer, telemetry, feedback", present)
+	}
+}
+
+func TestMultiObserverRetrievalPresentationReturnsFirstError(t *testing.T) {
+	sentinel := errors.New("feedback refused")
+	failing := &retrievalPresentationRecorder{err: sentinel}
+	later := &retrievalPresentationRecorder{}
+	m := &multiObserver{children: []agent.Observer{failing, later}}
+	if err := m.OnRetrievalPresentation(context.Background(), agent.RetrievalPresentationEvent{}); err != sentinel {
+		t.Fatalf("error = %v, want sentinel", err)
+	}
+	if len(later.events) != 0 {
+		t.Fatalf("fan-out continued after first error: %+v", later.events)
 	}
 }
 

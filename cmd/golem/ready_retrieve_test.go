@@ -2,9 +2,7 @@ package main
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
-	"path/filepath"
 	"reflect"
 	"strings"
 	"sync"
@@ -97,7 +95,7 @@ func TestReadyRetrieve_FailedResponse(t *testing.T) {
 func TestReadyRetrieve_ReadyDelegatesExactlyOnce(t *testing.T) {
 	r := newReadyRetrieve(warmingRetrieveMessage)
 	inner := &countingTool{content: "chunks"}
-	r.markReady(inner, "ready", nil)
+	r.install(newRetrievalReader(inner, nil), "ready")
 	res, err := r.Invoke(context.Background(), json.RawMessage(`{"query":"q"}`))
 	if err != nil {
 		t.Fatal(err)
@@ -113,62 +111,18 @@ func TestReadyRetrieve_ReadyDelegatesExactlyOnce(t *testing.T) {
 func TestReadyRetrieve_FirstTerminalTransitionWins(t *testing.T) {
 	r := newReadyRetrieve(warmingRetrieveMessage)
 	r.markFailed("first failure; use read_file, search, glob, and list instead")
-	r.markReady(&countingTool{content: "chunks"}, "ready", nil)
+	r.install(newRetrievalReader(&countingTool{content: "chunks"}, nil), "ready")
 	res, _ := r.Invoke(context.Background(), json.RawMessage(`{"query":"q"}`))
 	if res.Content == "chunks" {
-		t.Fatal("markReady after markFailed must be ignored (first terminal transition wins)")
+		t.Fatal("install after markFailed must be ignored (first terminal transition wins)")
 	}
 
 	r2 := newReadyRetrieve(warmingRetrieveMessage)
-	r2.markReady(&countingTool{content: "chunks"}, "ready", nil)
+	r2.install(newRetrievalReader(&countingTool{content: "chunks"}, nil), "ready")
 	r2.markFailed("late failure")
 	res2, _ := r2.Invoke(context.Background(), json.RawMessage(`{"query":"q"}`))
 	if res2.Content != "chunks" {
-		t.Fatal("markFailed after markReady must be ignored (first terminal transition wins)")
-	}
-}
-
-func TestReadyRetrieve_CloseReleasesFeedbackHandle(t *testing.T) {
-	dbPath := filepath.Join(t.TempDir(), "feedback.db")
-	db, err := sql.Open("sqlite", dbPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := db.Ping(); err != nil {
-		t.Fatal(err)
-	}
-	r := newReadyRetrieve(warmingRetrieveMessage)
-	r.markReady(&countingTool{content: "chunks"}, "ready", &behavioralWeighterHandle{db: db})
-	if err := r.close(); err != nil {
-		t.Fatal(err)
-	}
-	if err := db.Ping(); err == nil {
-		t.Fatal("close() must close the retained feedback DB handle")
-	}
-	if err := r.close(); err != nil { // idempotent, nil-safe second close
-		t.Fatal(err)
-	}
-}
-
-// Shutdown can race the background job: close() may run while the wrapper is
-// still warming, and markReady lands afterwards. The handle installed then can
-// never be released by close() again, so markReady must release it itself.
-func TestReadyRetrieve_MarkReadyAfterCloseReleasesHandle(t *testing.T) {
-	dbPath := filepath.Join(t.TempDir(), "feedback.db")
-	db, err := sql.Open("sqlite", dbPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := db.Ping(); err != nil {
-		t.Fatal(err)
-	}
-	r := newReadyRetrieve(warmingRetrieveMessage)
-	if err := r.close(); err != nil {
-		t.Fatal(err)
-	}
-	r.markReady(&countingTool{content: "chunks"}, "ready", &behavioralWeighterHandle{db: db})
-	if err := db.Ping(); err == nil {
-		t.Fatal("markReady after close() must release the incoming feedback handle")
+		t.Fatal("markFailed after install must be ignored (first terminal transition wins)")
 	}
 }
 
@@ -176,56 +130,6 @@ func TestReadyRetrieve_CloseNilSafe(t *testing.T) {
 	r := newReadyRetrieve(warmingRetrieveMessage)
 	if err := r.close(); err != nil { // no feedback handle retained; must not panic
 		t.Fatal(err)
-	}
-}
-
-// A markReady that loses the terminal-transition race to markFailed must not
-// strand its feedback handle either — same ownership rule as the close race.
-func TestReadyRetrieve_MarkReadyAfterFailedReleasesHandle(t *testing.T) {
-	dbPath := filepath.Join(t.TempDir(), "feedback.db")
-	db, err := sql.Open("sqlite", dbPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := db.Ping(); err != nil {
-		t.Fatal(err)
-	}
-	r := newReadyRetrieve(warmingRetrieveMessage)
-	r.markFailed("boom; use read_file, search, glob, and list instead")
-	r.markReady(&countingTool{content: "chunks"}, "ready", &behavioralWeighterHandle{db: db})
-	if err := db.Ping(); err == nil {
-		t.Fatal("markReady losing the transition race must release its feedback handle")
-	}
-}
-
-// Concurrent close/markReady: exactly one side must end up releasing the
-// handle, with no race reported and no strand.
-func TestReadyRetrieve_ConcurrentCloseAndMarkReady(t *testing.T) {
-	for i := 0; i < 50; i++ {
-		dbPath := filepath.Join(t.TempDir(), "feedback.db")
-		db, err := sql.Open("sqlite", dbPath)
-		if err != nil {
-			t.Fatal(err)
-		}
-		r := newReadyRetrieve(warmingRetrieveMessage)
-		var wg sync.WaitGroup
-		wg.Add(2)
-		go func() {
-			defer wg.Done()
-			r.markReady(&countingTool{content: "chunks"}, "ready", &behavioralWeighterHandle{db: db})
-		}()
-		go func() {
-			defer wg.Done()
-			if err := r.close(); err != nil {
-				t.Error(err)
-			}
-		}()
-		wg.Wait()
-		// Whichever side lost the race must have released the handle already;
-		// no sweep needed.
-		if err := db.Ping(); err == nil {
-			t.Fatal("handle stranded after concurrent close/markReady")
-		}
 	}
 }
 
@@ -247,7 +151,7 @@ func TestReadyRetrieve_ConcurrentMarkReadyAndInvoke(t *testing.T) {
 			}
 		}()
 	}
-	r.markReady(inner, "ready", nil)
+	r.install(newRetrievalReader(inner, nil), "ready")
 	wg.Wait()
 	res, err := r.Invoke(context.Background(), json.RawMessage(`{"query":"q"}`))
 	if err != nil {

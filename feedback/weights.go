@@ -1,6 +1,14 @@
 package feedback
 
-import "context"
+import (
+	"context"
+	"database/sql"
+	"fmt"
+	"net/url"
+	"sync"
+
+	_ "modernc.org/sqlite"
+)
 
 const weightLookupBatchSize = 900
 
@@ -59,4 +67,92 @@ func NewWeightReader(store SignalStore, config CollectorConfig) *WeightReader {
 // below-threshold keys return 0. During warmup all keys return 0.
 func (r *WeightReader) WeightsBatch(ctx context.Context, chunkKeys []string) (map[string]float64, error) {
 	return weightsBatch(ctx, r.store, r.config, chunkKeys)
+}
+
+// SQLiteWeightReader owns a read-only connection to an existing feedback
+// database and serves behavioral weights without running migrations.
+type SQLiteWeightReader struct {
+	mu     sync.Mutex
+	db     *sql.DB
+	reader *WeightReader
+}
+
+// NewSQLiteWeightReader opens an existing migrated feedback database read-only.
+func NewSQLiteWeightReader(ctx context.Context, dbPath string, config CollectorConfig) (*SQLiteWeightReader, error) {
+	if dbPath == "" {
+		return nil, fmt.Errorf("feedback: open SQLite weight reader: empty path")
+	}
+	u := url.URL{Scheme: "file", Path: dbPath}
+	q := u.Query()
+	q.Set("mode", "ro")
+	u.RawQuery = q.Encode()
+
+	preflightURL := u
+	preflightQuery := preflightURL.Query()
+	preflightQuery.Set("immutable", "1")
+	preflightURL.RawQuery = preflightQuery.Encode()
+	preflight, err := sql.Open("sqlite", preflightURL.String())
+	if err != nil {
+		return nil, fmt.Errorf("feedback: open SQLite weight reader preflight: %w", err)
+	}
+	preflight.SetMaxOpenConns(1)
+	if err := preflight.PingContext(ctx); err != nil {
+		_ = preflight.Close()
+		return nil, fmt.Errorf("feedback: open SQLite weight reader preflight %q: %w", dbPath, err)
+	}
+	version, err := currentSchemaVersion(preflight)
+	if err != nil {
+		_ = preflight.Close()
+		return nil, fmt.Errorf("feedback: validate SQLite weight reader schema: %w", err)
+	}
+	if want := migrations[len(migrations)-1].version; version != want {
+		_ = preflight.Close()
+		return nil, fmt.Errorf("feedback: validate SQLite weight reader schema: version %d, want %d", version, want)
+	}
+	if err := preflight.Close(); err != nil {
+		return nil, fmt.Errorf("feedback: close SQLite weight reader preflight: %w", err)
+	}
+
+	db, err := sql.Open("sqlite", u.String())
+	if err != nil {
+		return nil, fmt.Errorf("feedback: open SQLite weight reader: %w", err)
+	}
+	db.SetMaxOpenConns(1)
+	if err := db.PingContext(ctx); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("feedback: open SQLite weight reader %q: %w", dbPath, err)
+	}
+
+	store := &SQLiteSignalStore{db: db}
+	return &SQLiteWeightReader{db: db, reader: NewWeightReader(store, config)}, nil
+}
+
+// WeightsBatch returns gated behavioral weights from the live database.
+func (r *SQLiteWeightReader) WeightsBatch(ctx context.Context, chunkKeys []string) (map[string]float64, error) {
+	if r == nil {
+		return nil, fmt.Errorf("feedback: SQLite weight reader is closed")
+	}
+	r.mu.Lock()
+	if r.db == nil {
+		r.mu.Unlock()
+		return nil, fmt.Errorf("feedback: SQLite weight reader is closed")
+	}
+	reader := r.reader
+	r.mu.Unlock()
+	return reader.WeightsBatch(ctx, chunkKeys)
+}
+
+// Close closes the owned database connection. Repeated calls are safe.
+func (r *SQLiteWeightReader) Close() error {
+	if r == nil {
+		return nil
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.db == nil {
+		return nil
+	}
+	db := r.db
+	r.db = nil
+	return db.Close()
 }

@@ -200,38 +200,32 @@ func embeddingChain(cfg *config.Config) ([]string, error) {
 
 // buildGatedRetriever stats dbPath, opens it, probes its stored vector space,
 // reads store stats for startup display, and applies the §6.1 gate against
-// expected. It returns (tool, feedback, feedbackWarn, decision, stats, err):
+// expected. It returns (tool, decision, stats, err):
 //   - tool/decision/stats set, err nil when the corpus is registerable
 //     (decision.kind may be vsLegacy, surfaced as a soft warning by the caller);
 //   - nil tool, err nil when the gate disables retrieve (vsMismatch/vsInconsistent);
 //   - nil tool, zero stats, err set when the DB cannot be opened/probed or the
 //     embedder is unavailable.
 //
-// When feedbackDB != "" it best-effort opens a consume-only behavioral weighter
-// and injects it into the store. feedback is non-nil only on success (the caller
-// owns it and must close feedback.db); it stays nil when feedback is disabled or
-// fails to open. feedbackWarn is non-empty when feedback failed to open, in which
-// case retrieval still registers and ranks neutrally.
-//
 // The returned retrievalReader owns and closes the opened store.
-func buildGatedRetriever(ctx context.Context, cfg *config.Config, router *provider.Router, dbPath string, expected []string, feedbackDB string, progressive bool) (*retrievalReader, string, vsDecision, rag.StoreStats, error) {
+func buildGatedRetriever(ctx context.Context, cfg *config.Config, router *provider.Router, dbPath string, expected []string, weighter rag.BehavioralWeighter, progressive bool) (*retrievalReader, vsDecision, rag.StoreStats, error) {
 	if cfg == nil || router == nil {
-		return nil, "", vsDecision{}, rag.StoreStats{}, fmt.Errorf("golem: no provider configured for embeddings")
+		return nil, vsDecision{}, rag.StoreStats{}, fmt.Errorf("golem: no provider configured for embeddings")
 	}
 	embChain, err := embeddingChain(cfg)
 	if err != nil {
-		return nil, "", vsDecision{}, rag.StoreStats{}, err
+		return nil, vsDecision{}, rag.StoreStats{}, err
 	}
 	info, err := os.Stat(dbPath)
 	if err != nil {
-		return nil, "", vsDecision{}, rag.StoreStats{}, fmt.Errorf("golem: rag-db %q: %w", dbPath, err)
+		return nil, vsDecision{}, rag.StoreStats{}, fmt.Errorf("golem: rag-db %q: %w", dbPath, err)
 	}
 	if info.IsDir() {
-		return nil, "", vsDecision{}, rag.StoreStats{}, fmt.Errorf("golem: rag-db %q is a directory, not a SQLite file", dbPath)
+		return nil, vsDecision{}, rag.StoreStats{}, fmt.Errorf("golem: rag-db %q is a directory, not a SQLite file", dbPath)
 	}
 	store, err := rag.OpenSQLiteStoreReadOnly(dbPath)
 	if err != nil {
-		return nil, "", vsDecision{}, rag.StoreStats{}, fmt.Errorf("golem: open index db %q: %w", dbPath, err)
+		return nil, vsDecision{}, rag.StoreStats{}, fmt.Errorf("golem: open index db %q: %w", dbPath, err)
 	}
 	closeStore := func(cause error) error {
 		if closeErr := store.Close(); closeErr != nil {
@@ -241,20 +235,20 @@ func buildGatedRetriever(ctx context.Context, cfg *config.Config, router *provid
 	}
 	stats, err := store.Stats(ctx)
 	if err != nil {
-		return nil, "", vsDecision{}, rag.StoreStats{}, closeStore(fmt.Errorf("golem: read index stats %q: %w", dbPath, err))
+		return nil, vsDecision{}, rag.StoreStats{}, closeStore(fmt.Errorf("golem: read index stats %q: %w", dbPath, err))
 	}
 	if stats.EmbeddingFormat != rag.EmbeddingFormatEmpty && stats.EmbeddingFormat != rag.EmbeddingFormatPackedFloat32 {
-		return nil, "", vsDecision{}, stats, closeStore(fmt.Errorf(
+		return nil, vsDecision{}, stats, closeStore(fmt.Errorf(
 			"golem: rag-db %q uses embedding format %s; explicit indexes are read-only and will not be migrated; rebuild it deliberately or remove -rag-db to use the packed auto index",
 			dbPath, stats.EmbeddingFormat))
 	}
 	probe, err := store.ProbeVectorSpaces(ctx)
 	if err != nil {
-		return nil, "", vsDecision{}, rag.StoreStats{}, closeStore(fmt.Errorf("golem: probe index db %q: %w", dbPath, err))
+		return nil, vsDecision{}, rag.StoreStats{}, closeStore(fmt.Errorf("golem: probe index db %q: %w", dbPath, err))
 	}
 	dec := vsGateDecision(probe.KnownIDs, probe.HasUnknown, expected)
 	if !dec.register {
-		return nil, "", dec, stats, closeStore(nil)
+		return nil, dec, stats, closeStore(nil)
 	}
 	queryChain := embChain
 	queryModel := embChain[0]
@@ -269,20 +263,11 @@ func buildGatedRetriever(ctx context.Context, cfg *config.Config, router *provid
 	}, queryChain)
 	retr, err := rag.NewRetrieverWithEmbedder(embedder, store, rag.WithRetrieverModel(queryModel))
 	if err != nil {
-		return nil, "", vsDecision{}, rag.StoreStats{}, closeStore(fmt.Errorf("golem: build retriever for %q: %w", dbPath, err))
+		return nil, vsDecision{}, rag.StoreStats{}, closeStore(fmt.Errorf("golem: build retriever for %q: %w", dbPath, err))
 	}
-	var feedbackHandle *behavioralWeighterHandle
-	feedbackWarn := ""
-	if feedbackDB != "" {
-		if h, warn := openBehavioralWeighter(ctx, feedbackDB); h != nil {
-			store.SetBehavioralWeighter(h.weighter)
-			feedbackHandle = h
-		} else if warn != "" {
-			feedbackWarn = warn
-		}
-	}
+	store.SetBehavioralWeighter(weighter)
 	tool := &agenttools.Retrieve{R: retr, K: 5, MaxTokens: 2048, Progressive: progressive}
-	return newOwnedRetrievalReader(tool, store, feedbackHandle), feedbackWarn, dec, stats, nil
+	return newOwnedRetrievalReader(tool, store), dec, stats, nil
 }
 
 // effectClassName renders an agent.EffectClass bitset for /tools. The agent

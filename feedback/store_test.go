@@ -2,6 +2,10 @@ package feedback
 
 import (
 	"context"
+	"database/sql"
+	"fmt"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -36,6 +40,228 @@ func TestInsertRetrievalAndSignal(t *testing.T) {
 	}
 	if count != 1 {
 		t.Errorf("SignalCount = %d, want 1", count)
+	}
+}
+
+func TestSQLiteSignalStoreInsertRetrievalWithCountsAtomic(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	store.db.SetMaxOpenConns(1)
+
+	if _, err := store.db.ExecContext(ctx, `
+		CREATE TRIGGER abort_second_aggregate
+		BEFORE INSERT ON feedback_aggregates
+		WHEN NEW.chunk_key = 'chunk-2'
+		BEGIN
+			SELECT RAISE(ABORT, 'second aggregate');
+		END`); err != nil {
+		t.Fatalf("create abort trigger: %v", err)
+	}
+
+	err := store.InsertRetrievalWithCounts(ctx, "r-atomic", "query", []string{"chunk-1", "chunk-2"}, time.UnixMilli(1234))
+	if err == nil {
+		t.Fatal("InsertRetrievalWithCounts succeeded, want trigger error")
+	}
+
+	var retrievalRows int
+	if err := store.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM feedback_retrievals WHERE retrieval_id = 'r-atomic'`,
+	).Scan(&retrievalRows); err != nil {
+		t.Fatalf("query raw retrieval rows: %v", err)
+	}
+	if retrievalRows != 0 {
+		t.Errorf("raw retrieval rows = %d, want 0", retrievalRows)
+	}
+
+	var aggregateRows int
+	if err := store.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM feedback_aggregates WHERE chunk_key IN ('chunk-1', 'chunk-2')`,
+	).Scan(&aggregateRows); err != nil {
+		t.Fatalf("query raw aggregate rows: %v", err)
+	}
+	if aggregateRows != 0 {
+		t.Errorf("raw aggregate rows = %d, want 0", aggregateRows)
+	}
+}
+
+func TestSQLiteSignalStoreInsertRetrievalWithCountsPersistsCreatedAtAndEmptyKeys(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	createdAt := time.UnixMilli(1700000000123)
+
+	if err := store.InsertRetrievalWithCounts(ctx, "r-counted", "query", []string{"chunk-1", "chunk-2"}, createdAt); err != nil {
+		t.Fatalf("InsertRetrievalWithCounts: %v", err)
+	}
+
+	var query, keys string
+	var createdAtMillis int64
+	if err := store.db.QueryRowContext(ctx,
+		`SELECT query, chunk_keys, created_at FROM feedback_retrievals WHERE retrieval_id = 'r-counted'`,
+	).Scan(&query, &keys, &createdAtMillis); err != nil {
+		t.Fatalf("query raw retrieval row: %v", err)
+	}
+	if query != "query" || keys != "chunk-1\nchunk-2" || createdAtMillis != 1700000000123 {
+		t.Errorf("raw retrieval = (%q, %q, %d), want (%q, %q, %d)", query, keys, createdAtMillis, "query", "chunk-1\nchunk-2", int64(1700000000123))
+	}
+
+	for _, key := range []string{"chunk-1", "chunk-2"} {
+		var count int
+		if err := store.db.QueryRowContext(ctx,
+			`SELECT retrieval_count FROM feedback_aggregates WHERE chunk_key = ?`, key,
+		).Scan(&count); err != nil {
+			t.Fatalf("query raw aggregate %q: %v", key, err)
+		}
+		if count != 1 {
+			t.Errorf("raw aggregate %q retrieval_count = %d, want 1", key, count)
+		}
+	}
+
+	if err := store.InsertRetrievalWithCounts(ctx, "r-empty", "empty", nil, createdAt); err != nil {
+		t.Fatalf("InsertRetrievalWithCounts empty: %v", err)
+	}
+	var emptyKeys string
+	if err := store.db.QueryRowContext(ctx,
+		`SELECT chunk_keys FROM feedback_retrievals WHERE retrieval_id = 'r-empty'`,
+	).Scan(&emptyKeys); err != nil {
+		t.Fatalf("query empty-key retrieval: %v", err)
+	}
+	if emptyKeys != "" {
+		t.Errorf("empty-key retrieval chunk_keys = %q, want empty", emptyKeys)
+	}
+	var emptyAggregateRows int
+	if err := store.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM feedback_aggregates WHERE chunk_key = ''`,
+	).Scan(&emptyAggregateRows); err != nil {
+		t.Fatalf("query empty-key aggregate rows: %v", err)
+	}
+	if emptyAggregateRows != 0 {
+		t.Errorf("empty-key aggregate rows = %d, want 0", emptyAggregateRows)
+	}
+}
+
+func TestSQLiteSignalStoreInsertSignalsAtomic(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	store.db.SetMaxOpenConns(1)
+
+	if err := store.InsertRetrieval(ctx, "r-signals", "query", []string{"chunk-1", "chunk-2"}); err != nil {
+		t.Fatalf("InsertRetrieval: %v", err)
+	}
+	if _, err := store.db.ExecContext(ctx, `
+		INSERT INTO feedback_aggregates (chunk_key, last_signal_at)
+		VALUES ('chunk-1', 111), ('chunk-2', 111)`); err != nil {
+		t.Fatalf("seed aggregate timestamps: %v", err)
+	}
+	if _, err := store.db.ExecContext(ctx, `
+		CREATE TRIGGER abort_second_signal
+		BEFORE INSERT ON feedback_signals
+		WHEN NEW.chunk_key = 'chunk-2'
+		BEGIN
+			SELECT RAISE(ABORT, 'second signal');
+		END`); err != nil {
+		t.Fatalf("create abort trigger: %v", err)
+	}
+
+	err := store.InsertSignals(ctx, "r-signals", []string{"chunk-1", "chunk-2"}, SignalCodeKept, 0.6, time.UnixMilli(222))
+	if err == nil {
+		t.Fatal("InsertSignals succeeded, want trigger error")
+	}
+
+	var signalRows int
+	if err := store.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM feedback_signals WHERE retrieval_id = 'r-signals'`,
+	).Scan(&signalRows); err != nil {
+		t.Fatalf("query raw signal rows: %v", err)
+	}
+	if signalRows != 0 {
+		t.Errorf("raw signal rows = %d, want 0", signalRows)
+	}
+
+	rows, err := store.db.QueryContext(ctx,
+		`SELECT chunk_key, last_signal_at FROM feedback_aggregates WHERE chunk_key IN ('chunk-1', 'chunk-2') ORDER BY chunk_key`)
+	if err != nil {
+		t.Fatalf("query raw aggregate timestamps: %v", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var aggregateRows int
+	for rows.Next() {
+		var key string
+		var lastSignalAt int64
+		if err := rows.Scan(&key, &lastSignalAt); err != nil {
+			t.Fatalf("scan raw aggregate timestamp: %v", err)
+		}
+		if lastSignalAt != 111 {
+			t.Errorf("raw aggregate %q last_signal_at = %d, want 111", key, lastSignalAt)
+		}
+		aggregateRows++
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate raw aggregate timestamps: %v", err)
+	}
+	if aggregateRows != 2 {
+		t.Errorf("raw aggregate timestamp rows = %d, want 2", aggregateRows)
+	}
+}
+
+func TestSQLiteSignalStoreInsertSignalsPersistsCreatedAtAndEmptyKeys(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	createdAt := time.UnixMilli(1700000000456)
+
+	if err := store.InsertRetrieval(ctx, "r-signals", "query", []string{"chunk-1", "chunk-2"}); err != nil {
+		t.Fatalf("InsertRetrieval: %v", err)
+	}
+	if err := store.InsertSignals(ctx, "r-signals", []string{"chunk-1", "chunk-2"}, SignalCodeKept, 0.6, createdAt); err != nil {
+		t.Fatalf("InsertSignals: %v", err)
+	}
+
+	rows, err := store.db.QueryContext(ctx,
+		`SELECT chunk_key, signal_kind, strength, created_at FROM feedback_signals WHERE retrieval_id = 'r-signals' ORDER BY chunk_key`)
+	if err != nil {
+		t.Fatalf("query raw signal rows: %v", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var gotKeys []string
+	for rows.Next() {
+		var key, kind string
+		var strength float64
+		var createdAtMillis int64
+		if err := rows.Scan(&key, &kind, &strength, &createdAtMillis); err != nil {
+			t.Fatalf("scan raw signal row: %v", err)
+		}
+		gotKeys = append(gotKeys, key)
+		if kind != "code_kept" || strength != 0.6 || createdAtMillis != 1700000000456 {
+			t.Errorf("raw signal %q = (%q, %v, %d), want (%q, %v, %d)", key, kind, strength, createdAtMillis, "code_kept", 0.6, int64(1700000000456))
+		}
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate raw signal rows: %v", err)
+	}
+	if strings.Join(gotKeys, ",") != "chunk-1,chunk-2" {
+		t.Errorf("raw signal keys = %q, want %q", strings.Join(gotKeys, ","), "chunk-1,chunk-2")
+	}
+
+	for _, key := range []string{"chunk-1", "chunk-2"} {
+		var lastSignalAt int64
+		if err := store.db.QueryRowContext(ctx,
+			`SELECT last_signal_at FROM feedback_aggregates WHERE chunk_key = ?`, key,
+		).Scan(&lastSignalAt); err != nil {
+			t.Fatalf("query raw aggregate %q: %v", key, err)
+		}
+		if lastSignalAt != 1700000000456 {
+			t.Errorf("raw aggregate %q last_signal_at = %d, want %d", key, lastSignalAt, int64(1700000000456))
+		}
+	}
+
+	if err := store.InsertSignals(ctx, "missing", nil, SignalCodeUndone, -0.7, createdAt); err != nil {
+		t.Fatalf("InsertSignals empty: %v", err)
+	}
+	var signalRows int
+	if err := store.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM feedback_signals`).Scan(&signalRows); err != nil {
+		t.Fatalf("count raw signals: %v", err)
+	}
+	if signalRows != 2 {
+		t.Errorf("raw signal rows after empty insert = %d, want 2", signalRows)
 	}
 }
 
@@ -178,6 +404,72 @@ func TestRecomputeAggregates(t *testing.T) {
 	// Score should be approximately 0.8 + 0.6 = 1.4.
 	if agg.WeightedScore < 1.3 || agg.WeightedScore > 1.5 {
 		t.Errorf("weighted_score = %f, expected ~1.4", agg.WeightedScore)
+	}
+}
+
+func TestRecomputeAggregatesReservesWriterBeforeScanning(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "feedback.db")
+	open := func(busyTimeout int) *SQLiteSignalStore {
+		t.Helper()
+		db, err := sql.Open("sqlite", path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = db.Close() })
+		db.SetMaxOpenConns(1)
+		if _, err := db.Exec(`PRAGMA journal_mode=WAL`); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.Exec(fmt.Sprintf(`PRAGMA busy_timeout=%d`, busyTimeout)); err != nil {
+			t.Fatal(err)
+		}
+		store, err := NewSignalStore(ctx, db)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return store
+	}
+	first := open(1000)
+	second := open(50)
+	if err := first.InsertRetrievalWithCounts(ctx, "r", "q", []string{"key"}, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if err := first.InsertSignal(ctx, "r", "key", SignalCompletionAccepted, 0.8, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+
+	scanned := make(chan struct{})
+	release := make(chan struct{})
+	released := false
+	defer func() {
+		if !released {
+			close(release)
+		}
+	}()
+	first.recomputeAfterScan = func() {
+		close(scanned)
+		<-release
+	}
+	recomputeErr := make(chan error, 1)
+	go func() { recomputeErr <- first.RecomputeAggregates(ctx, 0) }()
+	<-scanned
+
+	writeErr := second.InsertSignal(ctx, "r", "key", SignalCompletionAccepted, 0.6, time.Now())
+	if writeErr == nil {
+		t.Error("concurrent signal write committed during recomputation scan")
+	}
+	var count int
+	if err := second.db.QueryRow(`SELECT COUNT(*) FROM feedback_signals`).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Errorf("signal count while recompute is gated = %d, want 1", count)
+	}
+	close(release)
+	released = true
+	if err := <-recomputeErr; err != nil {
+		t.Fatal(err)
 	}
 }
 
