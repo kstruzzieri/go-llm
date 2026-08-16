@@ -64,13 +64,14 @@ func TestResolveInputCeiling(t *testing.T) {
 	}
 
 	tests := []struct {
-		name        string
-		reg         capChecker
-		chain       []string
-		explicit    int
-		resolveTool bool
-		want        int
-		wantSource  inputCeilingSource
+		name          string
+		reg           capChecker
+		chain         []string
+		explicit      int
+		outputReserve int
+		resolveTool   bool
+		want          int
+		wantSource    inputCeilingSource
 	}{
 		{
 			name:       "explicit override wins without metadata",
@@ -79,10 +80,42 @@ func TestResolveInputCeiling(t *testing.T) {
 			wantSource: inputCeilingExplicit,
 		},
 		{
-			name:       "known chain uses smallest full context window",
+			// 32_768 minus the router's implicit 2_048 "agent" output reserve:
+			// with -output-reserve 0 the router still budgets that reserve, so
+			// the derived ceiling must leave room for it.
+			name:       "known chain uses smallest window minus implicit output reserve",
 			reg:        inputCeilingTestRegistry{profiles: map[provider.ModelKey]*provider.ModelProfile{key("large"): profile("large", 65_536), key("small"): profile("small", 32_768)}},
 			chain:      []string{"test/large", "test/small"},
-			want:       32_768,
+			want:       30_720,
+			wantSource: inputCeilingChainMinimum,
+		},
+		{
+			name:          "nonzero output reserve keeps full window",
+			reg:           inputCeilingTestRegistry{profiles: map[provider.ModelKey]*provider.ModelProfile{key("small"): profile("small", 32_768)}},
+			chain:         []string{"test/small"},
+			outputReserve: 512,
+			want:          32_768,
+			wantSource:    inputCeilingChainMinimum,
+		},
+		{
+			// "agent" is not a quality-sensitive use case, so the router
+			// validates against the full ContextWindow, not QualityCtxCeiling;
+			// the derivation must match or the two budgets diverge again.
+			name: "quality ceiling does not shrink agent window",
+			reg: inputCeilingTestRegistry{profiles: map[provider.ModelKey]*provider.ModelProfile{
+				key("yarn"): {Key: key("yarn"), ContextWindow: 32_768, QualityCtxCeiling: 16_384, Caps: toolRouteCaps},
+			}},
+			chain:      []string{"test/yarn"},
+			want:       30_720,
+			wantSource: inputCeilingChainMinimum,
+		},
+		{
+			// Degenerate window at or below the implicit reserve: keep the raw
+			// window rather than deriving a zero/negative ceiling.
+			name:       "window at implicit reserve stays raw",
+			reg:        inputCeilingTestRegistry{profiles: map[provider.ModelKey]*provider.ModelProfile{key("micro"): profile("micro", 2_048)}},
+			chain:      []string{"test/micro"},
+			want:       2_048,
 			wantSource: inputCeilingChainMinimum,
 		},
 		{
@@ -106,7 +139,7 @@ func TestResolveInputCeiling(t *testing.T) {
 			name:       "known model may be smaller than safe default",
 			reg:        inputCeilingTestRegistry{profiles: map[provider.ModelKey]*provider.ModelProfile{key("tiny"): profile("tiny", 4_096)}},
 			chain:      []string{"test/tiny"},
-			want:       4_096,
+			want:       2_048,
 			wantSource: inputCeilingChainMinimum,
 		},
 		{
@@ -114,7 +147,7 @@ func TestResolveInputCeiling(t *testing.T) {
 			reg: inputCeilingTestRegistry{recommended: []*provider.ModelProfile{
 				profile("large", 65_536), profile("small", 16_384),
 			}},
-			want:       16_384,
+			want:       14_336,
 			wantSource: inputCeilingChainMinimum,
 		},
 		{
@@ -124,7 +157,7 @@ func TestResolveInputCeiling(t *testing.T) {
 				{Key: key("probeable"), ContextWindow: 16_384, Caps: provider.CapChat | provider.CapStream},
 			}},
 			resolveTool: true,
-			want:        16_384,
+			want:        14_336,
 			wantSource:  inputCeilingChainMinimum,
 		},
 		{
@@ -133,7 +166,7 @@ func TestResolveInputCeiling(t *testing.T) {
 				profile("large", 65_536),
 				{Key: key("unknown-tool"), ContextWindow: 16_384, Caps: provider.CapChat | provider.CapStream},
 			}},
-			want:       65_536,
+			want:       63_488,
 			wantSource: inputCeilingChainMinimum,
 		},
 		{
@@ -149,7 +182,7 @@ func TestResolveInputCeiling(t *testing.T) {
 			},
 			chain:       []string{"test/large", "test/non-tool"},
 			resolveTool: true,
-			want:        32_768,
+			want:        30_720,
 			wantSource:  inputCeilingChainMinimum,
 		},
 		{
@@ -159,7 +192,7 @@ func TestResolveInputCeiling(t *testing.T) {
 				key("unknown-tool"): {Key: key("unknown-tool"), ContextWindow: 4_096, Caps: provider.CapChat | provider.CapStream},
 			}},
 			chain:      []string{"test/large", "test/unknown-tool"},
-			want:       32_768,
+			want:       30_720,
 			wantSource: inputCeilingChainMinimum,
 		},
 		{
@@ -175,7 +208,7 @@ func TestResolveInputCeiling(t *testing.T) {
 			},
 			chain:       []string{"test/large", "test/probe-no"},
 			resolveTool: true,
-			want:        32_768,
+			want:        30_720,
 			wantSource:  inputCeilingChainMinimum,
 		},
 		{
@@ -188,7 +221,7 @@ func TestResolveInputCeiling(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := resolveInputCeiling(context.Background(), tt.reg, tt.chain, tt.explicit, tt.resolveTool)
+			got := resolveInputCeiling(context.Background(), tt.reg, tt.chain, tt.explicit, tt.outputReserve, tt.resolveTool)
 			if got.ceiling != tt.want || got.source != tt.wantSource {
 				t.Fatalf("resolveInputCeiling() = %+v, want ceiling=%d source=%q", got, tt.want, tt.wantSource)
 			}
@@ -201,10 +234,10 @@ func TestResolveInputCeilingRecomputesForChangedChain(t *testing.T) {
 		{Provider: "test", Model: "first"}:  {ContextWindow: 32_768, Caps: toolRouteCaps},
 		{Provider: "test", Model: "second"}: {ContextWindow: 131_072, Caps: toolRouteCaps},
 	}}
-	first := resolveInputCeiling(context.Background(), reg, []string{"test/first"}, 0, false)
-	second := resolveInputCeiling(context.Background(), reg, []string{"test/second"}, 0, false)
-	if first.ceiling != 32_768 || second.ceiling != 131_072 {
-		t.Fatalf("changed chain ceilings = %d then %d, want 32768 then 131072", first.ceiling, second.ceiling)
+	first := resolveInputCeiling(context.Background(), reg, []string{"test/first"}, 0, 0, false)
+	second := resolveInputCeiling(context.Background(), reg, []string{"test/second"}, 0, 0, false)
+	if first.ceiling != 30_720 || second.ceiling != 129_024 {
+		t.Fatalf("changed chain ceilings = %d then %d, want 30720 then 129024", first.ceiling, second.ceiling)
 	}
 }
 

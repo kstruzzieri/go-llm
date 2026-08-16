@@ -265,7 +265,7 @@ func TestRunReportsDerivedInputCeilingFromConfig(t *testing.T) {
 		t.Fatalf("run error = %v, want test stop", err)
 	}
 	got := readRunTestFile(t, stderr)
-	if !strings.Contains(got, "input ceiling: 32768 tokens (chain minimum)") {
+	if !strings.Contains(got, "input ceiling: 30720 tokens (chain minimum)") {
 		t.Fatalf("stderr missing derived input ceiling:\n%s", got)
 	}
 }
@@ -315,7 +315,7 @@ func TestRunReportsDerivedInputCeilingFromFingerprint(t *testing.T) {
 		t.Fatalf("run error = %v, want test stop", err)
 	}
 	got := readRunTestFile(t, stderr)
-	if !strings.Contains(got, "input ceiling: 24576 tokens (chain minimum)") {
+	if !strings.Contains(got, "input ceiling: 22528 tokens (chain minimum)") {
 		t.Fatalf("stderr missing fingerprint-derived input ceiling:\n%s", got)
 	}
 }

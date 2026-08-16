@@ -34,7 +34,7 @@ func (r inputCeilingResolution) line() string {
 	return fmt.Sprintf("input ceiling: %d tokens (%s)", r.ceiling, source)
 }
 
-func resolveInputCeiling(ctx context.Context, reg capChecker, chain []string, explicit int, canResolveToolCall bool) inputCeilingResolution {
+func resolveInputCeiling(ctx context.Context, reg capChecker, chain []string, explicit, outputReserve int, canResolveToolCall bool) inputCeilingResolution {
 	if explicit > 0 {
 		return inputCeilingResolution{ceiling: explicit, source: inputCeilingExplicit}
 	}
@@ -44,7 +44,21 @@ func resolveInputCeiling(ctx context.Context, reg capChecker, chain []string, ex
 	add := func(profile *provider.ModelProfile) {
 		window := agent.DefaultInputCeiling
 		if profile != nil && profile.ContextWindow > 0 {
-			window = profile.ContextWindow
+			// Mirror the router's admission budget: it validates input against
+			// EffectiveContextWindow("agent") minus the request's expected
+			// output, and a zero -output-reserve leaves ExpectedOutput unset,
+			// so the router reserves DefaultExpectedOutput("agent") implicitly.
+			// Without that reserve here, a long session assembles past the
+			// router budget and routing fails with ErrBudgetAdaptationRequired
+			// instead of compacting. A nonzero -output-reserve is already
+			// subtracted on both sides (turnBudget and ExpectedOutput), so the
+			// full window is correct then.
+			window = profile.EffectiveContextWindow("agent")
+			if outputReserve <= 0 {
+				if reserved := window - provider.DefaultExpectedOutput("agent"); reserved > 0 {
+					window = reserved
+				}
+			}
 		} else {
 			usedFallback = true
 		}

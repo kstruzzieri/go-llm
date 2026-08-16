@@ -667,7 +667,7 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 	}
 
 	thinkOpts, thinkLine := resolveThinkOptions(ctx, bundle.Models, plan.chain, f.think)
-	inputCeiling := resolveInputCeiling(ctx, bundle.Models, plan.chain, f.inputCeiling, resolver != nil)
+	inputCeiling := resolveInputCeiling(ctx, bundle.Models, plan.chain, f.inputCeiling, f.outputReserve, resolver != nil)
 
 	autoDBPath, autoWorkspaceID, autoErr := indexDBPathForWorkspace(os.Getenv, root)
 	if autoErr != nil && !f.noRag && f.ragDB == "" {
