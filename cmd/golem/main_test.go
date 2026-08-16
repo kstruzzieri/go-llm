@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/kstruzzieri/go-llm/agent"
+	"github.com/kstruzzieri/go-llm/fingerprint"
 	"github.com/kstruzzieri/go-llm/rag"
 )
 
@@ -266,6 +267,79 @@ func TestRunReportsDerivedInputCeilingFromConfig(t *testing.T) {
 	got := readRunTestFile(t, stderr)
 	if !strings.Contains(got, "input ceiling: 32768 tokens (chain minimum)") {
 		t.Fatalf("stderr missing derived input ceiling:\n%s", got)
+	}
+}
+
+func TestRunReportsDerivedInputCeilingFromFingerprint(t *testing.T) {
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	configPath, root := writeRunLifecycleConfig(t)
+	raw, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	withoutContext := strings.Replace(string(raw), `, "context_window": 32768`, "", 1)
+	if withoutContext == string(raw) {
+		t.Fatal("test config did not contain context_window")
+	}
+	if err := os.WriteFile(configPath, []byte(withoutContext), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	handle, warning := openCapProbeStore(context.Background(), os.Getenv, root)
+	if handle == nil || warning != "" {
+		t.Fatalf("open fingerprint store = %v, warning %q", handle, warning)
+	}
+	if err := handle.profiles.Save(context.Background(), fingerprint.Profile{
+		BackendID:        "test",
+		ModelName:        "agent-model",
+		ModelDigest:      "config-caps:chat,stream,tool_call",
+		ProfileVersion:   fingerprint.CurrentProfileVersion,
+		EffectiveContext: 24_576,
+		TestedAt:         time.Now(),
+	}); err != nil {
+		t.Fatalf("save fingerprint profile: %v", err)
+	}
+	if err := handle.db.Close(); err != nil {
+		t.Fatalf("close fingerprint store: %v", err)
+	}
+
+	stdin, stdout, stderr := runTestFiles(t)
+	errStop := errors.New("stop after startup")
+	err = run([]string{"-config", configPath, "-root", root, "-no-probe", "-no-cap-probe", "-no-session", "-no-memory", "-no-project-context", "-no-auto-index"}, stdin, stdout, stderr, runHooks{
+		startAutoIndex: func() func() { return func() {} },
+		afterAutoIndexStart: func(lineSourceMode, agent.Tool, *feedbackService) error {
+			return errStop
+		},
+	})
+	if !errors.Is(err, errStop) {
+		t.Fatalf("run error = %v, want test stop", err)
+	}
+	got := readRunTestFile(t, stderr)
+	if !strings.Contains(got, "input ceiling: 24576 tokens (chain minimum)") {
+		t.Fatalf("stderr missing fingerprint-derived input ceiling:\n%s", got)
+	}
+}
+
+func TestRunWarnsWhenFingerprintCacheDegradesWithCapProbeDisabled(t *testing.T) {
+	blocker := filepath.Join(t.TempDir(), "blocker")
+	if err := os.WriteFile(blocker, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("XDG_DATA_HOME", blocker)
+	configPath, root := writeRunLifecycleConfig(t)
+	stdin, stdout, stderr := runTestFiles(t)
+	errStop := errors.New("stop after startup")
+	err := run([]string{"-config", configPath, "-root", root, "-no-probe", "-no-cap-probe", "-no-session", "-no-memory", "-no-project-context", "-no-auto-index"}, stdin, stdout, stderr, runHooks{
+		startAutoIndex: func() func() { return func() {} },
+		afterAutoIndexStart: func(lineSourceMode, agent.Tool, *feedbackService) error {
+			return errStop
+		},
+	})
+	if !errors.Is(err, errStop) {
+		t.Fatalf("run error = %v, want test stop", err)
+	}
+	if got := readRunTestFile(t, stderr); !strings.Contains(got, "fingerprint cache degraded to in-memory") {
+		t.Fatalf("stderr missing fingerprint degradation warning:\n%s", got)
 	}
 }
 

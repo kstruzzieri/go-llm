@@ -5,6 +5,7 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/kstruzzieri/go-llm/fingerprint"
 	"github.com/kstruzzieri/go-llm/provider"
 )
 
@@ -13,6 +14,7 @@ type inputCeilingTestRegistry struct {
 	lookupErrs   map[provider.ModelKey]error
 	recommended  []*provider.ModelProfile
 	recommendErr error
+	explanations map[provider.ModelKey]provider.ToolCallExplanation
 }
 
 func (r inputCeilingTestRegistry) Lookup(_ context.Context, key provider.ModelKey) (*provider.ModelProfile, error) {
@@ -38,23 +40,37 @@ func (r inputCeilingTestRegistry) LookupAny(_ context.Context, model string) ([]
 	return profiles, nil
 }
 
-func (r inputCeilingTestRegistry) Recommend(context.Context, provider.RecommendOpts) ([]*provider.ModelProfile, error) {
-	return r.recommended, r.recommendErr
+func (r inputCeilingTestRegistry) Recommend(_ context.Context, opts provider.RecommendOpts) ([]*provider.ModelProfile, error) {
+	if r.recommendErr != nil {
+		return nil, r.recommendErr
+	}
+	var profiles []*provider.ModelProfile
+	for _, profile := range r.recommended {
+		if profile != nil && profile.Caps.Has(opts.RequiredCaps) {
+			profiles = append(profiles, profile)
+		}
+	}
+	return profiles, nil
+}
+
+func (r inputCeilingTestRegistry) ExplainToolCall(_ context.Context, key provider.ModelKey) (provider.ToolCallExplanation, error) {
+	return r.explanations[key], nil
 }
 
 func TestResolveInputCeiling(t *testing.T) {
 	key := func(model string) provider.ModelKey { return provider.ModelKey{Provider: "test", Model: model} }
 	profile := func(model string, window int) *provider.ModelProfile {
-		return &provider.ModelProfile{Key: key(model), ContextWindow: window}
+		return &provider.ModelProfile{Key: key(model), ContextWindow: window, Caps: toolRouteCaps}
 	}
 
 	tests := []struct {
-		name       string
-		reg        capChecker
-		chain      []string
-		explicit   int
-		want       int
-		wantSource inputCeilingSource
+		name        string
+		reg         capChecker
+		chain       []string
+		explicit    int
+		resolveTool bool
+		want        int
+		wantSource  inputCeilingSource
 	}{
 		{
 			name:       "explicit override wins without metadata",
@@ -102,6 +118,67 @@ func TestResolveInputCeiling(t *testing.T) {
 			wantSource: inputCeilingChainMinimum,
 		},
 		{
+			name: "recommend mode includes probeable candidate",
+			reg: inputCeilingTestRegistry{recommended: []*provider.ModelProfile{
+				profile("large", 65_536),
+				{Key: key("probeable"), ContextWindow: 16_384, Caps: provider.CapChat | provider.CapStream},
+			}},
+			resolveTool: true,
+			want:        16_384,
+			wantSource:  inputCeilingChainMinimum,
+		},
+		{
+			name: "recommend mode without resolution excludes unknown tool capability",
+			reg: inputCeilingTestRegistry{recommended: []*provider.ModelProfile{
+				profile("large", 65_536),
+				{Key: key("unknown-tool"), ContextWindow: 16_384, Caps: provider.CapChat | provider.CapStream},
+			}},
+			want:       65_536,
+			wantSource: inputCeilingChainMinimum,
+		},
+		{
+			name: "explicit non-tool fallback is ineligible",
+			reg: inputCeilingTestRegistry{
+				profiles: map[provider.ModelKey]*provider.ModelProfile{
+					key("large"):    profile("large", 32_768),
+					key("non-tool"): {Key: key("non-tool"), ContextWindow: 4_096, Caps: provider.CapChat | provider.CapStream},
+				},
+				explanations: map[provider.ModelKey]provider.ToolCallExplanation{
+					key("non-tool"): {Source: "explicit", Has: false},
+				},
+			},
+			chain:       []string{"test/large", "test/non-tool"},
+			resolveTool: true,
+			want:        32_768,
+			wantSource:  inputCeilingChainMinimum,
+		},
+		{
+			name: "chain without resolution excludes unknown tool capability",
+			reg: inputCeilingTestRegistry{profiles: map[provider.ModelKey]*provider.ModelProfile{
+				key("large"):        profile("large", 32_768),
+				key("unknown-tool"): {Key: key("unknown-tool"), ContextWindow: 4_096, Caps: provider.CapChat | provider.CapStream},
+			}},
+			chain:      []string{"test/large", "test/unknown-tool"},
+			want:       32_768,
+			wantSource: inputCeilingChainMinimum,
+		},
+		{
+			name: "valid cached negative fallback is ineligible",
+			reg: inputCeilingTestRegistry{
+				profiles: map[provider.ModelKey]*provider.ModelProfile{
+					key("large"):    profile("large", 32_768),
+					key("probe-no"): {Key: key("probe-no"), ContextWindow: 4_096, Caps: provider.CapChat | provider.CapStream},
+				},
+				explanations: map[provider.ModelKey]provider.ToolCallExplanation{
+					key("probe-no"): {Source: "probe", State: fingerprint.CapProbeNo, Valid: true},
+				},
+			},
+			chain:       []string{"test/large", "test/probe-no"},
+			resolveTool: true,
+			want:        32_768,
+			wantSource:  inputCeilingChainMinimum,
+		},
+		{
 			name:       "empty recommendation uses safe default",
 			reg:        inputCeilingTestRegistry{},
 			want:       8_192,
@@ -111,7 +188,7 @@ func TestResolveInputCeiling(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := resolveInputCeiling(context.Background(), tt.reg, tt.chain, tt.explicit)
+			got := resolveInputCeiling(context.Background(), tt.reg, tt.chain, tt.explicit, tt.resolveTool)
 			if got.ceiling != tt.want || got.source != tt.wantSource {
 				t.Fatalf("resolveInputCeiling() = %+v, want ceiling=%d source=%q", got, tt.want, tt.wantSource)
 			}
@@ -121,11 +198,11 @@ func TestResolveInputCeiling(t *testing.T) {
 
 func TestResolveInputCeilingRecomputesForChangedChain(t *testing.T) {
 	reg := inputCeilingTestRegistry{profiles: map[provider.ModelKey]*provider.ModelProfile{
-		{Provider: "test", Model: "first"}:  {ContextWindow: 32_768},
-		{Provider: "test", Model: "second"}: {ContextWindow: 131_072},
+		{Provider: "test", Model: "first"}:  {ContextWindow: 32_768, Caps: toolRouteCaps},
+		{Provider: "test", Model: "second"}: {ContextWindow: 131_072, Caps: toolRouteCaps},
 	}}
-	first := resolveInputCeiling(context.Background(), reg, []string{"test/first"}, 0)
-	second := resolveInputCeiling(context.Background(), reg, []string{"test/second"}, 0)
+	first := resolveInputCeiling(context.Background(), reg, []string{"test/first"}, 0, false)
+	second := resolveInputCeiling(context.Background(), reg, []string{"test/second"}, 0, false)
 	if first.ceiling != 32_768 || second.ceiling != 131_072 {
 		t.Fatalf("changed chain ceilings = %d then %d, want 32768 then 131072", first.ceiling, second.ceiling)
 	}

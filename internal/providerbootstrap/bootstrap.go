@@ -16,10 +16,13 @@ import (
 // Options configures New. Config is optional; nil synthesizes a single default
 // Ollama provider so callers can start with no discovered configuration.
 type Options struct {
-	Config            *config.Config
-	FingerprintStore  fingerprint.Store
-	OllamaURLOverride string
-	RouterOptions     []provider.RouterOption
+	Config           *config.Config
+	FingerprintStore fingerprint.Store
+	// FingerprintProfileStore supplies persisted profile enrichment without
+	// enabling full profiling. FingerprintStore takes precedence when both are set.
+	FingerprintProfileStore fingerprint.Store
+	OllamaURLOverride       string
+	RouterOptions           []provider.RouterOption
 
 	// OpenAICompatURLOverrideProvider names the openai-compat provider whose
 	// BaseURL is replaced by OpenAICompatURLOverride (provider keys are
@@ -86,6 +89,13 @@ func New(ctx context.Context, opts Options) (*Bundle, error) {
 	factory := proberFactory(effCfg, ollamaClients)
 	if opts.FingerprintStore != nil {
 		mrOpts = append(mrOpts, provider.WithFingerprintProberFactory(factory))
+	} else if opts.FingerprintProfileStore != nil {
+		mrOpts = append(mrOpts, provider.WithReadOnlyFingerprintProfiles(factory))
+	}
+	fpStore := opts.FingerprintStore
+	if fpStore == nil {
+		// Read persisted profiles without installing the full profiling factory.
+		fpStore = opts.FingerprintProfileStore
 	}
 	// Capability-only resolution (ResolveToolCall): explicit store wins;
 	// otherwise a FingerprintStore that also satisfies CapProbeStore (the
@@ -103,7 +113,7 @@ func New(ctx context.Context, opts Options) (*Bundle, error) {
 			provider.WithCapabilityProber(factory),
 		)
 	}
-	mr, err := provider.NewModelRegistry(pReg, opts.FingerprintStore, mrOpts...)
+	mr, err := provider.NewModelRegistry(pReg, fpStore, mrOpts...)
 	if err != nil {
 		return nil, fmt.Errorf("providerbootstrap: model registry: %w", err)
 	}

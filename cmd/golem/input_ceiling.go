@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"github.com/kstruzzieri/go-llm/agent"
+	"github.com/kstruzzieri/go-llm/fingerprint"
 	"github.com/kstruzzieri/go-llm/provider"
 )
 
@@ -21,6 +22,10 @@ type inputCeilingResolution struct {
 	source  inputCeilingSource
 }
 
+type toolCallExplainer interface {
+	ExplainToolCall(context.Context, provider.ModelKey) (provider.ToolCallExplanation, error)
+}
+
 func (r inputCeilingResolution) line() string {
 	source := string(r.source)
 	if r.source == inputCeilingSafeFallback {
@@ -29,7 +34,7 @@ func (r inputCeilingResolution) line() string {
 	return fmt.Sprintf("input ceiling: %d tokens (%s)", r.ceiling, source)
 }
 
-func resolveInputCeiling(ctx context.Context, reg capChecker, chain []string, explicit int) inputCeilingResolution {
+func resolveInputCeiling(ctx context.Context, reg capChecker, chain []string, explicit int, canResolveToolCall bool) inputCeilingResolution {
 	if explicit > 0 {
 		return inputCeilingResolution{ceiling: explicit, source: inputCeilingExplicit}
 	}
@@ -47,16 +52,51 @@ func resolveInputCeiling(ctx context.Context, reg capChecker, chain []string, ex
 			ceiling = window
 		}
 	}
+	eligible := func(profile *provider.ModelProfile) bool {
+		if profile == nil {
+			return true
+		}
+		if !profile.Caps.Has(toolRouteCaps &^ provider.CapToolCall) {
+			return false
+		}
+		if profileToolCapable(profile) {
+			return true
+		}
+		if !canResolveToolCall {
+			return false
+		}
+		explainer, ok := reg.(toolCallExplainer)
+		if !ok {
+			return true
+		}
+		explanation, err := explainer.ExplainToolCall(ctx, profile.Key)
+		if err != nil {
+			return true
+		}
+		if explanation.Source == "explicit" {
+			return explanation.Has
+		}
+		if explanation.Source == "probe" && explanation.Valid {
+			return explanation.State == fingerprint.CapProbeYes
+		}
+		return true
+	}
 
 	if reg == nil {
 		add(nil)
 	} else if len(chain) == 0 {
-		profiles, err := reg.Recommend(ctx, provider.RecommendOpts{RequiredCaps: toolRouteCaps})
+		requiredCaps := toolRouteCaps
+		if canResolveToolCall {
+			requiredCaps &^= provider.CapToolCall
+		}
+		profiles, err := reg.Recommend(ctx, provider.RecommendOpts{RequiredCaps: requiredCaps})
 		if err != nil || len(profiles) == 0 {
 			add(nil)
 		} else {
 			for _, profile := range profiles {
-				add(profile)
+				if eligible(profile) {
+					add(profile)
+				}
 			}
 		}
 	} else {
@@ -65,7 +105,7 @@ func resolveInputCeiling(ctx context.Context, reg capChecker, chain []string, ex
 				profile, err := reg.Lookup(ctx, key)
 				if err != nil {
 					add(nil)
-				} else {
+				} else if eligible(profile) {
 					add(profile)
 				}
 				continue
@@ -76,9 +116,14 @@ func resolveInputCeiling(ctx context.Context, reg capChecker, chain []string, ex
 				continue
 			}
 			for _, profile := range profiles {
-				add(profile)
+				if eligible(profile) {
+					add(profile)
+				}
 			}
 		}
+	}
+	if ceiling == 0 {
+		add(nil)
 	}
 
 	source := inputCeilingChainMinimum

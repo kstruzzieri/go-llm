@@ -616,14 +616,18 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 	}
 
 	var capStore fingerprint.CapProbeStore
+	var profileStore fingerprint.Store
 	capStoreWarn := ""
-	if !f.noCapProbe {
-		var capHandle *capProbeHandle
-		capHandle, capStoreWarn = openCapProbeStore(ctx, os.Getenv, root)
+	if !f.noCapProbe || f.inputCeiling <= 0 {
+		capHandle, warning := openCapProbeStore(ctx, os.Getenv, root)
 		if capHandle != nil {
-			capStore = capHandle.store
+			profileStore = capHandle.profiles
+			if !f.noCapProbe {
+				capStore = capHandle.store
+			}
 			defer func() { _ = capHandle.db.Close() }()
 		}
+		capStoreWarn = warning
 	}
 
 	bundle, err := providerbootstrap.New(ctx, providerbootstrap.Options{
@@ -631,6 +635,7 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 		OllamaURLOverride:               f.ollamaURL,
 		OpenAICompatURLOverrideProvider: backendRes.providerKey,
 		OpenAICompatURLOverride:         backendRes.baseURL,
+		FingerprintProfileStore:         profileStore,
 		CapabilityProbeStore:            capStore, // nil when -no-cap-probe or open fully failed
 	})
 	if err != nil {
@@ -662,7 +667,7 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 	}
 
 	thinkOpts, thinkLine := resolveThinkOptions(ctx, bundle.Models, plan.chain, f.think)
-	inputCeiling := resolveInputCeiling(ctx, bundle.Models, plan.chain, f.inputCeiling)
+	inputCeiling := resolveInputCeiling(ctx, bundle.Models, plan.chain, f.inputCeiling, resolver != nil)
 
 	autoDBPath, autoWorkspaceID, autoErr := indexDBPathForWorkspace(os.Getenv, root)
 	if autoErr != nil && !f.noRag && f.ragDB == "" {

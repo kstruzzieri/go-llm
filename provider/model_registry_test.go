@@ -289,9 +289,17 @@ func TestModelRegistry_FingerprintContextWindowFallback(t *testing.T) {
 	prov := &mrMockProvider{name: "test", models: []ModelInfo{{Name: key.Model}}}
 	store := newMrMockFingerprintStore()
 	store.profiles["test\x00unknown-model"] = &fingerprint.Profile{
-		BackendID: key.Provider, ModelName: key.Model, EffectiveContext: 24_576,
+		BackendID: key.Provider, ModelName: key.Model, ModelDigest: key.String(),
+		ProfileVersion: fingerprint.CurrentProfileVersion, EffectiveContext: 24_576,
 	}
-	mr, err := NewModelRegistry(&mrMockProviderRegistry{providers: map[string]Provider{"test": prov}}, store)
+	prober := &mrRecordingFingerprintProber{}
+	mr, err := NewModelRegistry(
+		&mrMockProviderRegistry{providers: map[string]Provider{"test": prov}},
+		store,
+		WithReadOnlyFingerprintProfiles(func(context.Context, ModelKey, *ModelInfo, Provider) (*FingerprintProberSpec, error) {
+			return &FingerprintProberSpec{Prober: prober, ModelDigest: key.String()}, nil
+		}),
+	)
 	if err != nil {
 		t.Fatalf("NewModelRegistry: %v", err)
 	}
@@ -301,6 +309,48 @@ func TestModelRegistry_FingerprintContextWindowFallback(t *testing.T) {
 	}
 	if profile.ContextWindow != 24_576 {
 		t.Fatalf("ContextWindow = %d, want fingerprint fallback 24576", profile.ContextWindow)
+	}
+	if prober.detectCalls != 0 || prober.chatCalls != 0 {
+		t.Fatalf("read-only fingerprint path probed: detect=%d chat=%d", prober.detectCalls, prober.chatCalls)
+	}
+}
+
+func TestModelRegistry_ReadOnlyFingerprintRejectsStaleProfile(t *testing.T) {
+	ctx := context.Background()
+	key := ModelKey{Provider: "test", Model: "unknown-model"}
+	for _, tt := range []struct {
+		name    string
+		digest  string
+		version int
+	}{
+		{name: "digest mismatch", digest: "old-digest", version: fingerprint.CurrentProfileVersion},
+		{name: "obsolete profile version", digest: key.String(), version: fingerprint.CurrentProfileVersion - 1},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			prov := &mrMockProvider{name: "test", models: []ModelInfo{{Name: key.Model}}}
+			store := newMrMockFingerprintStore()
+			store.profiles["test\x00unknown-model"] = &fingerprint.Profile{
+				BackendID: key.Provider, ModelName: key.Model, ModelDigest: tt.digest,
+				ProfileVersion: tt.version, EffectiveContext: 65_536,
+			}
+			mr, err := NewModelRegistry(
+				&mrMockProviderRegistry{providers: map[string]Provider{"test": prov}},
+				store,
+				WithReadOnlyFingerprintProfiles(func(context.Context, ModelKey, *ModelInfo, Provider) (*FingerprintProberSpec, error) {
+					return &FingerprintProberSpec{Prober: &mrRecordingFingerprintProber{}, ModelDigest: key.String()}, nil
+				}),
+			)
+			if err != nil {
+				t.Fatalf("NewModelRegistry: %v", err)
+			}
+			profile, err := mr.Lookup(ctx, key)
+			if err != nil {
+				t.Fatalf("Lookup: %v", err)
+			}
+			if profile.ContextWindow != 0 {
+				t.Fatalf("ContextWindow = %d, want stale fingerprint ignored", profile.ContextWindow)
+			}
+		})
 	}
 }
 

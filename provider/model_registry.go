@@ -48,6 +48,7 @@ type ModelRegistry struct {
 	catalog         *staticCatalog
 	fpStore         fingerprint.Store
 	fpProberFactory FingerprintProberFactory
+	fpReadOnly      bool
 	providers       ProviderResolver
 	capOverride     CapabilityOverride
 	capFloor        CapabilityFloor
@@ -84,6 +85,15 @@ type ModelRegistryOption func(*ModelRegistry)
 func WithFingerprintProberFactory(fn FingerprintProberFactory) ModelRegistryOption {
 	return func(r *ModelRegistry) {
 		r.fpProberFactory = fn
+	}
+}
+
+// WithReadOnlyFingerprintProfiles installs provider-aware fingerprint identity
+// validation without allowing Lookup to run profiling probes.
+func WithReadOnlyFingerprintProfiles(fn FingerprintProberFactory) ModelRegistryOption {
+	return func(r *ModelRegistry) {
+		r.fpProberFactory = fn
+		r.fpReadOnly = true
 	}
 }
 
@@ -768,15 +778,16 @@ func (r *ModelRegistry) catalogProfileFor(parsed ParsedModel, runtimeInfo *Model
 	return staticProfile
 }
 
-// ToolCallExplanation is diagnostic provenance for one model's tool_call
-// capability, consumed by `golem models`. Deliberately narrow -- not a general
-// provenance API.
+// ToolCallExplanation is read-only provenance for one model's tool_call
+// capability, consumed by Golem diagnostics and eligibility checks.
+// Deliberately narrow -- not a general provenance API.
 type ToolCallExplanation struct {
 	Caps     Capability
 	Has      bool
 	Source   string                    // "explicit" | "catalog" | "runtime" | "probe" | "unknown"
 	State    fingerprint.CapProbeState // cached probe state, "" if none
 	TestedAt time.Time                 // zero when no probe row
+	Valid    bool                      // cached probe matches current identity/version and is unexpired
 }
 
 // ExplainToolCall reports where a model's tool_call bit comes from (or why it
@@ -790,8 +801,8 @@ type ToolCallExplanation struct {
 //  3. profile lacks tool_call but a probe row (any state) exists => "probe".
 //  4. otherwise => "unknown".
 //
-// State + TestedAt are populated from the cap-probe row whenever one exists,
-// regardless of the chosen Source, so operators see the last verdict and when.
+// For non-explicit sources, State, TestedAt, and Valid are populated whenever a
+// cap-probe row exists so callers can distinguish stale verdicts.
 func (r *ModelRegistry) ExplainToolCall(ctx context.Context, key ModelKey) (ToolCallExplanation, error) {
 	// 1. Explicit override is authoritative in both directions.
 	r.mu.RLock()
@@ -819,9 +830,12 @@ func (r *ModelRegistry) ExplainToolCall(ctx context.Context, key ModelKey) (Tool
 	row := r.capProbeRow(ctx, key)
 
 	exp := ToolCallExplanation{Caps: profile.Caps, Has: profile.Caps.Has(CapToolCall)}
+	var runtimeInfo *ModelInfo
 	if row != nil {
 		exp.State = row.State
 		exp.TestedAt = row.TestedAt
+		runtimeInfo, _ = r.queryRuntime(ctx, key)
+		exp.Valid = row.Valid(capProbeDigest(key, runtimeInfo), time.Now())
 	}
 
 	if profile.Caps.Has(CapToolCall) {
@@ -832,7 +846,9 @@ func (r *ModelRegistry) ExplainToolCall(ctx context.Context, key ModelKey) (Tool
 		// queryRuntime but does not expose the digest, and the probe-row Valid
 		// check below needs it (via capProbeDigest). It is a metadata read, not
 		// a tool-call probe -- the READ-ONLY contract holds.
-		runtimeInfo, _ := r.queryRuntime(ctx, key)
+		if runtimeInfo == nil {
+			runtimeInfo, _ = r.queryRuntime(ctx, key)
+		}
 		parsed := ParseModelName(key.Model)
 		if static := r.catalogProfileFor(parsed, runtimeInfo); static != nil && static.Caps.Has(CapToolCall) {
 			exp.Source = "catalog"
@@ -843,7 +859,7 @@ func (r *ModelRegistry) ExplainToolCall(ctx context.Context, key ModelKey) (Tool
 		// yes row cannot be the source of a live bit -- that came from floor /
 		// fingerprint / runtime -- so gate on Valid() exactly like capProbeCaps,
 		// using the identical digest fallback (runtimeInfo.Digest -> key.String()).
-		if row != nil && row.State == fingerprint.CapProbeYes && row.Valid(capProbeDigest(key, runtimeInfo), time.Now()) {
+		if row != nil && row.State == fingerprint.CapProbeYes && exp.Valid {
 			exp.Source = "probe"
 			return exp, nil
 		}
@@ -895,28 +911,38 @@ func (r *ModelRegistry) fingerprintProfile(ctx context.Context, key ModelKey, ru
 		return nil
 	}
 
+	modelDigest := ""
 	if r.fpProberFactory != nil {
 		if p, err := r.providers.Resolve(key); err == nil {
 			spec, err := r.fpProberFactory(ctx, key, runtimeInfo, p)
-			if err == nil && spec != nil && spec.Prober != nil {
-				modelDigest := spec.ModelDigest
+			if err == nil && spec != nil {
+				modelDigest = spec.ModelDigest
 				if modelDigest == "" && runtimeInfo != nil {
 					modelDigest = runtimeInfo.Digest
 				}
 				if modelDigest == "" {
 					modelDigest = key.String()
 				}
-				profile, err := fingerprint.NewProfiler(r.fpStore, spec.Prober).EnsureProfile(ctx, key.Provider, key.Model, modelDigest)
-				if err == nil {
-					return profile
+				if !r.fpReadOnly && spec.Prober != nil {
+					profile, err := fingerprint.NewProfiler(r.fpStore, spec.Prober).EnsureProfile(ctx, key.Provider, key.Model, modelDigest)
+					if err == nil {
+						return profile
+					}
 				}
 			}
 		}
 	}
 
 	fpProfile, _ := r.fpStore.Get(ctx, key.Provider, key.Model)
+	if (r.fpReadOnly || modelDigest != "") && !currentFingerprintProfile(fpProfile, modelDigest) {
+		return nil
+	}
 	// Ignore errors -- fingerprint is optional enrichment.
 	return fpProfile
+}
+
+func currentFingerprintProfile(profile *fingerprint.Profile, modelDigest string) bool {
+	return profile != nil && modelDigest != "" && profile.ModelDigest == modelDigest && profile.ProfileVersion >= fingerprint.CurrentProfileVersion
 }
 
 // capProbeCaps reads the persisted tool-call probe verdict for a key and

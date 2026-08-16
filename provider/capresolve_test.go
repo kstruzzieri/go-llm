@@ -828,6 +828,9 @@ func TestExplainToolCall_Provenance(t *testing.T) {
 		if exp.State != fingerprint.CapProbeYes {
 			t.Fatalf("State = %q, want yes", exp.State)
 		}
+		if !exp.Valid {
+			t.Fatal("Valid = false, want true")
+		}
 		if exp.TestedAt.IsZero() {
 			t.Fatalf("TestedAt is zero, want the probe row timestamp")
 		}
@@ -867,6 +870,9 @@ func TestExplainToolCall_Provenance(t *testing.T) {
 		}
 		if exp.State != fingerprint.CapProbeNo {
 			t.Fatalf("State = %q, want no", exp.State)
+		}
+		if !exp.Valid {
+			t.Fatal("Valid = false, want true")
 		}
 	})
 
@@ -911,6 +917,9 @@ func TestExplainToolCall_Provenance(t *testing.T) {
 		}
 		if exp.State != fingerprint.CapProbeYes || exp.TestedAt.IsZero() {
 			t.Fatalf("State/TestedAt = %q/%v, want the stale row still surfaced", exp.State, exp.TestedAt)
+		}
+		if exp.Valid {
+			t.Fatal("Valid = true, want false for stale row")
 		}
 	})
 
