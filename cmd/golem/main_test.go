@@ -1525,6 +1525,19 @@ func TestApplyGoalMode_WarnsOnIgnoredFlags(t *testing.T) {
 	}
 }
 
+func TestStartupNotices_DispatchLine(t *testing.T) {
+	lines := startupNotices(startupInfo{workspace: "/w", dispatchLine: "dispatch: enabled -> local/speedy"})
+	found := false
+	for _, l := range lines {
+		if l == "dispatch: enabled -> local/speedy" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("dispatch notice not surfaced: %v", lines)
+	}
+}
+
 func TestParseFlags_Dispatch(t *testing.T) {
 	f, err := parseFlags(nil)
 	if err != nil {

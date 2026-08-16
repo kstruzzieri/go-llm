@@ -257,6 +257,23 @@ func TestBuildDispatchTool_ExplicitUnknownRole(t *testing.T) {
 	}
 }
 
+func TestDispatchSystemFragment(t *testing.T) {
+	if dispatchSystemFragment(false) != "" {
+		t.Fatal("fragment must be empty when dispatch disabled")
+	}
+	on := dispatchSystemFragment(true)
+	for _, want := range []string{"dispatch", "sequential", "read"} {
+		if !strings.Contains(on, want) {
+			t.Fatalf("fragment should mention %q: %q", want, on)
+		}
+	}
+	for _, banned := range []string{"write_file", "edit_file", "run_command"} {
+		if strings.Contains(on, banned) {
+			t.Fatalf("read-only fragment must not mention %s: %q", banned, on)
+		}
+	}
+}
+
 func TestBuildDispatchTool_MissingFileToolsError(t *testing.T) {
 	// Valid config + valid role: the ONLY invalid input is the empty available set.
 	cfg := &config.Config{

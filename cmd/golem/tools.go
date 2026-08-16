@@ -71,6 +71,15 @@ func delegateSystemFragment(enabled, allowWrite bool) string {
 	return " For a well-scoped, self-contained code-generation sub-task you may call delegate_code with a precise prompt; it returns generated code from a specialist model for you to review and present to the user. Use delegate_code for bulk generation, never for planning or decisions."
 }
 
+// dispatchSystemFragment is appended to the system prompt only when dispatch is
+// enabled. Empty otherwise so default runs are byte-for-byte unchanged.
+func dispatchSystemFragment(enabled bool) string {
+	if !enabled {
+		return ""
+	}
+	return " For broad read-only investigation you may call dispatch with up to a few independent exploration tasks; they run sequentially, each in a bounded child agent with only file-reading and retrieval tools, and each returns a summary, its stop reason, and the model that produced it. Use dispatch to keep bulk exploration out of your own context; children cannot modify anything or dispatch further children, and their summaries are evidence to verify, not conclusions to repeat blindly."
+}
+
 // dispatchUseCase is the routing use-case for dispatch child agents. It names
 // the TASK (agentic tool-use exploration), not the model — the child chain
 // picks the model. Not asserted on the wire by any test; keep in sync with the

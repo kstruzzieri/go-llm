@@ -429,6 +429,7 @@ type startupInfo struct {
 	agentMemoryLine    string
 	mcpLine            string
 	delegateLine       string
+	dispatchLine       string
 }
 
 // startupNotices renders the human-facing startup lines (written to stderr).
@@ -455,6 +456,9 @@ func startupNotices(info startupInfo) []string {
 	}
 	if info.delegateLine != "" {
 		out = append(out, info.delegateLine)
+	}
+	if info.dispatchLine != "" {
+		out = append(out, info.dispatchLine)
 	}
 	if info.projectContextLine != "" {
 		out = append(out, info.projectContextLine)
