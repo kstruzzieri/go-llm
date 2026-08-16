@@ -28,6 +28,10 @@ type Server struct {
 	kind     transportKind
 	command  []string // stdio
 	endpoint string   // http
+	// tr, when non-nil, overrides the built transport. Test-only: lets the
+	// concurrency tests drive Connect with gated in-memory transports, the same
+	// way the connectVia split lets them drive a single dial.
+	tr gomcp.Transport
 }
 
 // StdioServer attaches an MCP server run as a subprocess over stdin/stdout.
@@ -44,6 +48,9 @@ func HTTPServer(alias, endpoint string) Server {
 // exec.Command (NOT CommandContext): its lifetime is bound to the session and
 // ended by Manager.Close, not by the short-lived Connect context.
 func (s Server) transport() (gomcp.Transport, error) {
+	if s.tr != nil {
+		return s.tr, nil
+	}
 	switch s.kind {
 	case transportStdio:
 		if len(s.command) == 0 {
