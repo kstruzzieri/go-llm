@@ -405,10 +405,17 @@ func TestNewDispatchTool_ChildrenRunSequentially(t *testing.T) {
 	if err != nil {
 		t.Fatalf("newDispatchTool: %v", err)
 	}
-	done := make(chan struct{})
+	// Fatalf is only legal on the test goroutine, so the Invoke goroutine
+	// reports back over a channel instead of using invokeDispatch.
+	done := make(chan error, 1)
 	go func() {
-		defer close(done)
-		invokeDispatch(t, tool, tasks)
+		raw, err := json.Marshal(map[string][]string{"tasks": tasks})
+		if err != nil {
+			done <- err
+			return
+		}
+		_, err = tool.Invoke(context.Background(), raw)
+		done <- err
 	}()
 	var first string
 	select {
@@ -430,7 +437,10 @@ func TestNewDispatchTool_ChildrenRunSequentially(t *testing.T) {
 	}
 	close(caller.gates[second])
 	select {
-	case <-done:
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("dispatch Invoke: %v", err)
+		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("dispatch did not finish")
 	}
