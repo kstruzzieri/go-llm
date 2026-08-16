@@ -4,6 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -25,6 +30,111 @@ type dispatchTestEnvelope struct {
 		Model      string `json:"model"`
 		Error      string `json:"error,omitempty"`
 	} `json:"results"`
+}
+
+// dispatchOneShotHarness spins up a fake openai-compat backend that captures
+// every /v1/chat/completions request body and answers a one-chunk stream, plus
+// a models.json pointing golem at it. Modeled on writeRunLifecycleConfig.
+func dispatchOneShotHarness(t *testing.T) (configPath, root string, chatBodies func() []string) {
+	t.Helper()
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	var mu sync.Mutex
+	var bodies []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/models":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"data":[{"id":"agent-model"}]}`)
+		case "/v1/chat/completions":
+			body, err := io.ReadAll(r.Body)
+			if err != nil {
+				t.Errorf("read chat body: %v", err)
+			}
+			mu.Lock()
+			bodies = append(bodies, string(body))
+			mu.Unlock()
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.WriteHeader(http.StatusOK)
+			_, _ = io.WriteString(w, `data: {"model":"agent-model","choices":[{"delta":{"content":"final answer"}}]}`+"\n\n")
+			_, _ = io.WriteString(w, `data: {"model":"agent-model","choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`+"\n\n")
+			_, _ = io.WriteString(w, "data: [DONE]\n\n")
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(server.Close)
+	root = t.TempDir()
+	configPath = filepath.Join(t.TempDir(), "models.json")
+	configJSON := fmt.Sprintf(`{
+  "providers": {"test": {"base_url": %q, "api_format": "openai-compat", "timeout": "5s"}},
+  "models": {
+    "agent": {"name": "agent-model", "provider": "test", "type": "dense", "context_window": 32768,
+      "capabilities": ["chat", "generate", "stream", "tool_call"]}
+  },
+  "defaults": {"agent": "agent"}
+}`, server.URL)
+	if err := os.WriteFile(configPath, []byte(configJSON), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return configPath, root, func() []string {
+		mu.Lock()
+		defer mu.Unlock()
+		return append([]string(nil), bodies...)
+	}
+}
+
+// TestRunOneShot_DispatchRegistration proves the actual main.go wiring: with
+// -dispatch the model-facing request carries the dispatch tool schema and the
+// system fragment, the startup notice names the parent-chain head, and the run
+// completes (so the invocation-limit option did not fail fast); without the
+// flag none of that appears.
+func TestRunOneShot_DispatchRegistration(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		dispatch bool
+	}{
+		{"enabled", true},
+		{"disabled control", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			configPath, root, chatBodies := dispatchOneShotHarness(t)
+			args := []string{"-config", configPath, "-root", root, "-p", "say done",
+				"-no-probe", "-no-cap-probe", "-no-rag", "-no-project-context"}
+			if tc.dispatch {
+				args = append(args, "-dispatch")
+			}
+			stdin, stdout, stderr := runTestFiles(t)
+			if err := run(args, stdin, stdout, stderr); err != nil {
+				t.Fatalf("run: %v\nstderr:\n%s", err, readRunTestFile(t, stderr))
+			}
+			bodies := chatBodies()
+			if len(bodies) != 1 {
+				t.Fatalf("chat requests = %d, want exactly 1 (the parent turn)", len(bodies))
+			}
+			wireHasTool := strings.Contains(bodies[0], `"name":"dispatch"`)
+			wireHasFragment := strings.Contains(bodies[0], "you may call dispatch")
+			notice := strings.Contains(readRunTestFile(t, stderr), "dispatch: enabled -> test/agent-model")
+			if tc.dispatch {
+				if !wireHasTool {
+					t.Fatalf("dispatch tool schema missing from the model request:\n%s", bodies[0])
+				}
+				if !wireHasFragment {
+					t.Fatalf("dispatch system fragment missing from the model request:\n%s", bodies[0])
+				}
+				if !notice {
+					t.Fatalf("startup notice missing:\n%s", readRunTestFile(t, stderr))
+				}
+			} else {
+				if wireHasTool || wireHasFragment || notice {
+					t.Fatalf("dispatch artifacts leaked into a default run: tool=%v fragment=%v notice=%v",
+						wireHasTool, wireHasFragment, notice)
+				}
+			}
+			if !strings.Contains(readRunTestFile(t, stdout), "final answer") {
+				t.Fatalf("one-shot answer missing from stdout")
+			}
+		})
+	}
 }
 
 // countingDispatchStub stands in for the real dispatch tool: same name and

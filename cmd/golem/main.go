@@ -791,6 +791,22 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 	}
 	retrieveOmitted := retrieve == nil
 
+	// Dispatch is built here, before memory/write/exec/delegate/MCP are
+	// appended, so the child-visible set is exactly the read-only tools above.
+	dispatchLine := ""
+	if f.dispatch {
+		dpt, dchain, derr := buildDispatchTool(bundle.Config, bundle.Router, f.dispatchRole, plan.chain, f.progressive, tools)
+		if derr != nil {
+			return derr
+		}
+		tools = append(tools, dpt)
+		head := "model recommendation"
+		if len(dchain) > 0 {
+			head = dchain[0]
+		}
+		dispatchLine = fmt.Sprintf("dispatch: enabled -> %s", head)
+	}
+
 	wantAgentMemory, agentMemoryWarn := agentMemoryRequest(f.agentMemory, f.noSession)
 	if agentMemoryWarn != "" {
 		warns = append(warns, agentMemoryWarn)
@@ -866,6 +882,7 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 
 	baseSystem := buildSystemPrompt(f.allowWrite, f.allowExec)
 	baseSystem += delegateSystemFragment(f.delegate, f.allowWrite)
+	baseSystem += dispatchSystemFragment(f.dispatch)
 	baseSystem += memorySystemFragment(memoryEnabled)
 	projectContextLine := ""
 	projectContextBlock := ""
@@ -932,6 +949,7 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 		agentMemoryLine:    agentMemoryLine,
 		mcpLine:            mcpLine,
 		delegateLine:       delegateLine,
+		dispatchLine:       dispatchLine,
 	}) {
 		_, _ = fmt.Fprintln(stderr, line)
 	}
