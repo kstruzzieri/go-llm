@@ -1558,8 +1558,8 @@ func TestParseFlags_Dispatch(t *testing.T) {
 func TestValidateFlags_DispatchModes(t *testing.T) {
 	cases := []struct {
 		name       string
-		with       flags // dispatch=true variant
-		without    flags // dispatch=false control: must validate clean
+		with       flags  // dispatch=true variant
+		without    flags  // dispatch=false control: must validate clean
 		wantSubstr string // "" => the dispatch variant must ALSO validate clean (allowed mode)
 	}{
 		{
