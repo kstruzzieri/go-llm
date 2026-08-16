@@ -498,9 +498,25 @@ func startupNotices(info startupInfo) []string {
 //
 // It takes flags rather than a bool so the production call site cannot pass a
 // value other than the one -progressive parsed into.
+//
+// With -dispatch it also installs the per-run dispatch invocation cap.
 func newOrchestratorFactory(caller agent.ModelCaller, f flags) func() *agent.Orchestrator {
+	var opts []agent.Option
+	if f.dispatch {
+		// #282 coordination: cap dispatch INVOCATIONS per run so the parent
+		// cannot bypass child-local limits by re-dispatching fresh children;
+		// with the library's per-call task cap this bounds total children per
+		// run. The option fails fast on a Run whose tool set omits the named
+		// tool — sound here because -dispatch is rejected in -plan/-goal and
+		// agentflow modes, so every Run through this factory carries the
+		// dispatch tool.
+		opts = append(opts, agent.WithToolInvocationLimit(agent.ToolInvocationLimit{
+			Tool: agenttools.DispatchToolName,
+			Max:  agenttools.DefaultDispatchCallsPerRun,
+		}))
+	}
 	return func() *agent.Orchestrator {
-		return agent.New(caller, agent.ContextManager{Mixed: f.progressive})
+		return agent.New(caller, agent.ContextManager{Mixed: f.progressive}, opts...)
 	}
 }
 

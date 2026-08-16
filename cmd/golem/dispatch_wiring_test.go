@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -10,6 +11,7 @@ import (
 	"time"
 
 	"github.com/kstruzzieri/go-llm/agent"
+	agenttools "github.com/kstruzzieri/go-llm/agent/tools"
 	"github.com/kstruzzieri/go-llm/provider"
 )
 
@@ -23,6 +25,94 @@ type dispatchTestEnvelope struct {
 		Model      string `json:"model"`
 		Error      string `json:"error,omitempty"`
 	} `json:"results"`
+}
+
+// countingDispatchStub stands in for the real dispatch tool: same name and
+// read-only effect, counts actual Invokes so the test observes the per-run cap
+// rather than re-deriving it from the option we installed.
+type countingDispatchStub struct{ invokes int }
+
+func (s *countingDispatchStub) Spec() agent.ToolSpec {
+	return agent.ToolSpec{Name: agenttools.DispatchToolName, Parameters: json.RawMessage(`{"type":"object"}`)}
+}
+
+func (s *countingDispatchStub) Effect() agent.Effect {
+	return agent.Effect{Class: agent.Read, Approval: agent.ApprovalNever}
+}
+
+func (s *countingDispatchStub) Invoke(context.Context, json.RawMessage) (agent.ToolResult, error) {
+	s.invokes++
+	return agent.ToolResult{Content: "ok"}, nil
+}
+
+// TestOrchestratorFactory_DispatchPerRunInvocationCap drives a factory-built
+// orchestrator through DefaultDispatchCallsPerRun+1 dispatch tool calls. With
+// -dispatch the cap must synthetically fail the last call before Invoke;
+// without it the control run proves the counter can actually see all calls
+// (the assertion is not blind to the behavior it tests).
+func TestOrchestratorFactory_DispatchPerRunInvocationCap(t *testing.T) {
+	calls := agenttools.DefaultDispatchCallsPerRun + 1
+	for _, tc := range []struct {
+		name        string
+		dispatch    bool
+		wantInvokes int
+	}{
+		{"cap installed with -dispatch", true, agenttools.DefaultDispatchCallsPerRun},
+		{"control: no cap without -dispatch", false, calls},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			responses := make([]agent.ModelResult, 0, calls+1)
+			for i := range calls {
+				// Distinct arguments per call so the repeat-call governor does
+				// not collapse them before the invocation limit is exercised.
+				responses = append(responses, agent.ModelResult{Response: provider.ChatResponse{
+					ToolCalls: []provider.ToolCall{{
+						ID: fmt.Sprintf("c%d", i), Type: "function",
+						Function: provider.ToolCallFunction{
+							Name:      agenttools.DispatchToolName,
+							Arguments: json.RawMessage(fmt.Sprintf(`{"i":%d}`, i)),
+						},
+					}},
+				}})
+			}
+			responses = append(responses, agent.ModelResult{Response: provider.ChatResponse{Content: "done", Done: true}})
+			stub := &countingDispatchStub{}
+			caller := &scriptCaller{responses: responses}
+			orch := newOrchestratorFactory(caller, flags{dispatch: tc.dispatch})()
+			res, err := orch.Run(context.Background(), agent.Request{
+				Goal:  "explore",
+				Tools: []agent.Tool{stub},
+			}, nil)
+			if err != nil {
+				t.Fatalf("Run: %v", err)
+			}
+			if stub.invokes != tc.wantInvokes {
+				t.Fatalf("dispatch invokes = %d, want %d", stub.invokes, tc.wantInvokes)
+			}
+			// All scripted responses consumed: every tool step really happened,
+			// so the count above measures the cap, not an early stop.
+			if caller.i != calls+1 {
+				t.Fatalf("model calls = %d, want %d", caller.i, calls+1)
+			}
+			var dispatchRecords []agent.ToolCallRecord
+			for _, rec := range res.ToolCalls {
+				if rec.Name == agenttools.DispatchToolName {
+					dispatchRecords = append(dispatchRecords, rec)
+				}
+			}
+			if len(dispatchRecords) != calls {
+				t.Fatalf("dispatch call records = %d, want %d", len(dispatchRecords), calls)
+			}
+			last := dispatchRecords[len(dispatchRecords)-1]
+			if tc.dispatch {
+				if last.Invoked || !last.IsError {
+					t.Fatalf("capped call must be a synthetic pre-invoke failure: %+v", last)
+				}
+			} else if !last.Invoked {
+				t.Fatalf("uncapped final call must actually invoke: %+v", last)
+			}
+		})
+	}
 }
 
 // specRecordingCaller records the tool specs of every child chat request and
