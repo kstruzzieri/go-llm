@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/kstruzzieri/go-llm/agent"
+	agenttools "github.com/kstruzzieri/go-llm/agent/tools"
 	"github.com/kstruzzieri/go-llm/config"
 )
 
@@ -175,6 +176,100 @@ func TestDelegateSystemFragment(t *testing.T) {
 	}
 	if strings.Contains(noWrite, "write_file") || strings.Contains(noWrite, "edit_file") {
 		t.Fatalf("write-disabled fragment must not instruct writing to disk: %q", noWrite)
+	}
+}
+
+// validDispatchAvailable returns a real read-only file tool set rooted in a
+// temp dir — valid surrounding input for the builder tests, so each negative
+// case can only fail for the reason it names.
+func validDispatchAvailable(t *testing.T) []agent.Tool {
+	t.Helper()
+	fileTools, err := agenttools.NewFileTools(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return fileTools
+}
+
+func TestBuildDispatchTool_ExplicitRoleResolvesChain(t *testing.T) {
+	cfg := &config.Config{
+		Models: map[string]config.ModelConfig{
+			"lightweight": {Name: "speedy", Provider: "local"},
+		},
+	}
+	tool, chain, err := buildDispatchTool(cfg, nil, "lightweight", []string{"local/parent"}, false, validDispatchAvailable(t))
+	if err != nil {
+		t.Fatalf("buildDispatchTool: %v", err)
+	}
+	if tool == nil || tool.Spec().Name != agenttools.DispatchToolName {
+		t.Fatalf("expected %s tool, got %+v", agenttools.DispatchToolName, tool)
+	}
+	if len(chain) != 1 || chain[0] != "local/speedy" {
+		t.Fatalf("explicit role must resolve its own chain, not the parent's: %v", chain)
+	}
+}
+
+func TestBuildDispatchTool_DefaultFollowsParentChain(t *testing.T) {
+	// No role: the child chain IS the parent chain (no-swap by construction).
+	// Config deliberately lacks any role so a regression to role resolution errors.
+	cfg := &config.Config{Models: map[string]config.ModelConfig{}}
+	tool, chain, err := buildDispatchTool(cfg, nil, "", []string{"local/parent-a", "local/parent-b"}, false, validDispatchAvailable(t))
+	if err != nil {
+		t.Fatalf("buildDispatchTool: %v", err)
+	}
+	if tool == nil || tool.Spec().Name != agenttools.DispatchToolName {
+		t.Fatalf("expected %s tool, got %+v", agenttools.DispatchToolName, tool)
+	}
+	if len(chain) != 2 || chain[0] != "local/parent-a" || chain[1] != "local/parent-b" {
+		t.Fatalf("default must follow parent chain verbatim: %v", chain)
+	}
+}
+
+func TestBuildDispatchTool_DefaultWithEmptyParentChainIsRecommendMode(t *testing.T) {
+	// Recommend-mode parents have no chain; dispatch mirrors that instead of erroring.
+	tool, chain, err := buildDispatchTool(&config.Config{}, nil, "", nil, false, validDispatchAvailable(t))
+	if err != nil {
+		t.Fatalf("buildDispatchTool: %v", err)
+	}
+	if tool == nil || len(chain) != 0 {
+		t.Fatalf("empty parent chain must build in recommend mode: tool=%v chain=%v", tool, chain)
+	}
+}
+
+func TestBuildDispatchTool_ExplicitRoleNilConfig(t *testing.T) {
+	_, _, err := buildDispatchTool(nil, nil, "lightweight", nil, false, validDispatchAvailable(t))
+	if err == nil {
+		t.Fatal("explicit role with nil config should fail loudly, not no-op")
+	}
+	if !strings.Contains(err.Error(), "-dispatch-role requires a models.json") {
+		t.Fatalf("wrong failure category: %v", err)
+	}
+}
+
+func TestBuildDispatchTool_ExplicitUnknownRole(t *testing.T) {
+	cfg := &config.Config{Models: map[string]config.ModelConfig{}}
+	_, _, err := buildDispatchTool(cfg, nil, "lightweight", nil, false, validDispatchAvailable(t))
+	if err == nil {
+		t.Fatal("unknown role should error")
+	}
+	if !strings.Contains(err.Error(), `-dispatch-role "lightweight"`) {
+		t.Fatalf("error must name the failing role flag: %v", err)
+	}
+}
+
+func TestBuildDispatchTool_MissingFileToolsError(t *testing.T) {
+	// Valid config + valid role: the ONLY invalid input is the empty available set.
+	cfg := &config.Config{
+		Models: map[string]config.ModelConfig{
+			"lightweight": {Name: "speedy", Provider: "local"},
+		},
+	}
+	_, _, err := buildDispatchTool(cfg, nil, "lightweight", nil, false, nil)
+	if err == nil {
+		t.Fatal("empty available set must error: children need the file readers")
+	}
+	if !strings.Contains(err.Error(), "required child tool") {
+		t.Fatalf("wrong failure category (want the library's missing-child-tool error): %v", err)
 	}
 }
 
