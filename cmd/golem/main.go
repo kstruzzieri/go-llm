@@ -47,6 +47,8 @@ type flags struct {
 	allowExec           bool
 	delegate            bool
 	delegateRole        string
+	dispatch            bool
+	dispatchRole        string
 	mcpStdio            stringSliceFlag
 	mcpHTTP             stringSliceFlag
 	noRag               bool
@@ -109,6 +111,8 @@ func parseFlags(args []string) (flags, error) {
 	fs.BoolVar(&f.allowExec, "allow-exec", false, "enable the approval-gated run_command exec tool")
 	fs.BoolVar(&f.delegate, "delegate", false, "enable the delegate_code tool (route a scoped codegen sub-task to a specialist model)")
 	fs.StringVar(&f.delegateRole, "delegate-role", "coding", "model role the delegate_code tool routes to")
+	fs.BoolVar(&f.dispatch, "dispatch", false, "enable the dispatch tool (bounded read-only exploration tasks run sequentially in child agents)")
+	fs.StringVar(&f.dispatchRole, "dispatch-role", "", "model role dispatch child agents route to (default: the primary agent chain, so children never force a model swap)")
 	fs.Var(&f.mcpStdio, "mcp-stdio", "attach an MCP server over stdio: \"[alias=]command args...\" (repeatable; use `env KEY=val cmd` for env vars)")
 	fs.Var(&f.mcpHTTP, "mcp-http", "attach an MCP server over streamable HTTP: \"[alias=]https://endpoint\" (repeatable)")
 	fs.BoolVar(&f.noRag, "no-rag", false, "disable the retrieve tool entirely (ignore any auto index)")
@@ -127,7 +131,7 @@ func parseFlags(args []string) (flags, error) {
 	fs.BoolVar(&f.feedback, "feedback", false, "enable local behavioral feedback collection and retrieval ranking")
 	fs.StringVar(&f.feedbackDB, "feedback-db", "", "override the behavioral feedback DB path (default: per-workspace under the data dir)")
 	fs.StringVar(&f.think, "think", "", "reasoning control for the agent model: off, on, low, medium, high (default: model decides); no-op with a notice when the model does not support thinking")
-	fs.StringVar(&f.planPath, "plan", "", "AgentFlow task mode: path to a plan document (JSON) to lock and execute; requires both -approve-plan-edits and -approve-plan-gates; mutually exclusive with -p, -allow-write/-allow-exec, -rag-db, -delegate, and -mcp-*")
+	fs.StringVar(&f.planPath, "plan", "", "AgentFlow task mode: path to a plan document (JSON) to lock and execute; requires both -approve-plan-edits and -approve-plan-gates; mutually exclusive with -p, -allow-write/-allow-exec, -rag-db, -delegate, -dispatch, and -mcp-*")
 	fs.IntVar(&f.planWorkers, "plan-workers", 1, "AgentFlow task mode: maximum workers for the initial parallel plan cohort (positive; requires -plan)")
 	fs.BoolVar(&f.approveEdits, "approve-plan-edits", false, "required in task mode: auto-approve step-scoped write/edit (still bounded by the step-scope and .agent guards)")
 	fs.BoolVar(&f.approveGates, "approve-plan-gates", false, "required in task mode: auto-run plan-declared validation gates")
@@ -216,7 +220,7 @@ func validateFlags(f flags) error {
 		}
 		if f.promptSet || f.goalSet || f.reviewManifest != "" || f.evidencePath != "" ||
 			f.wfProfileSet || f.wfReasonSet || f.workflowProfile != "" || f.workflowReason != "" ||
-			f.ragDB != "" || f.delegate || len(f.mcpStdio) > 0 || len(f.mcpHTTP) > 0 ||
+			f.ragDB != "" || f.delegate || f.dispatch || len(f.mcpStdio) > 0 || len(f.mcpHTTP) > 0 ||
 			f.allowWrite || f.allowExec || f.approvePlanLock {
 			return fmt.Errorf("golem: %s cannot be combined with planning, setup, review, or ambient tool flags", mode)
 		}
@@ -284,6 +288,9 @@ func validateFlags(f flags) error {
 	if f.planPath != "" && f.delegate {
 		return fmt.Errorf("golem: -plan (task mode) does not attach delegate_code; proof-mode tools are built from the locked plan")
 	}
+	if f.planPath != "" && f.dispatch {
+		return fmt.Errorf("golem: -plan (task mode) does not attach dispatch; proof-mode tools are built from the locked plan")
+	}
 	if f.planPath != "" && (len(f.mcpStdio) > 0 || len(f.mcpHTTP) > 0) {
 		return fmt.Errorf("golem: -plan (task mode) does not attach MCP tools; proof-mode tools are built from the locked plan")
 	}
@@ -307,6 +314,9 @@ func validateFlags(f flags) error {
 	}
 	if f.goalSet && f.delegate {
 		return fmt.Errorf("golem: -goal (planning mode) does not attach delegate_code")
+	}
+	if f.goalSet && f.dispatch {
+		return fmt.Errorf("golem: -goal (planning mode) does not attach dispatch")
 	}
 	if f.goalSet && (len(f.mcpStdio) > 0 || len(f.mcpHTTP) > 0) {
 		return fmt.Errorf("golem: -goal (planning mode) does not attach MCP tools")
