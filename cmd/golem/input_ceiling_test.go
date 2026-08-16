@@ -15,6 +15,7 @@ type inputCeilingTestRegistry struct {
 	recommended  []*provider.ModelProfile
 	recommendErr error
 	explanations map[provider.ModelKey]provider.ToolCallExplanation
+	explainErrs  map[provider.ModelKey]error
 }
 
 func (r inputCeilingTestRegistry) Lookup(_ context.Context, key provider.ModelKey) (*provider.ModelProfile, error) {
@@ -54,6 +55,9 @@ func (r inputCeilingTestRegistry) Recommend(_ context.Context, opts provider.Rec
 }
 
 func (r inputCeilingTestRegistry) ExplainToolCall(_ context.Context, key provider.ModelKey) (provider.ToolCallExplanation, error) {
+	if err := r.explainErrs[key]; err != nil {
+		return provider.ToolCallExplanation{}, err
+	}
 	return r.explanations[key], nil
 }
 
@@ -110,12 +114,75 @@ func TestResolveInputCeiling(t *testing.T) {
 			wantSource: inputCeilingChainMinimum,
 		},
 		{
-			// Degenerate window at or below the implicit reserve: keep the raw
-			// window rather than deriving a zero/negative ceiling.
-			name:       "window at implicit reserve stays raw",
+			// A window at or below the implicit reserve gives the router a
+			// zero budget: the model can never be admitted, so it must not
+			// set the chain minimum. Alone in the chain, derivation falls
+			// back to the safe default.
+			name:       "router-inadmissible window alone falls back",
 			reg:        inputCeilingTestRegistry{profiles: map[provider.ModelKey]*provider.ModelProfile{key("micro"): profile("micro", 2_048)}},
 			chain:      []string{"test/micro"},
-			want:       2_048,
+			want:       8_192,
+			wantSource: inputCeilingSafeFallback,
+		},
+		{
+			name:       "router-inadmissible window does not pin chain minimum",
+			reg:        inputCeilingTestRegistry{profiles: map[provider.ModelKey]*provider.ModelProfile{key("micro"): profile("micro", 2_048), key("small"): profile("small", 32_768)}},
+			chain:      []string{"test/micro", "test/small"},
+			want:       30_720,
+			wantSource: inputCeilingChainMinimum,
+		},
+		{
+			// Inadmissibility is judged against the explicit reserve when one
+			// is set: window <= reserve means a zero router budget.
+			name:          "window consumed by explicit reserve falls back",
+			reg:           inputCeilingTestRegistry{profiles: map[provider.ModelKey]*provider.ModelProfile{key("tiny"): profile("tiny", 4_096)}},
+			chain:         []string{"test/tiny"},
+			outputReserve: 4_096,
+			want:          8_192,
+			wantSource:    inputCeilingSafeFallback,
+		},
+		{
+			// A stale probe verdict (Valid=false) must not exclude the model:
+			// eligibility fails open and the smaller window still counts.
+			name: "stale negative probe keeps model eligible",
+			reg: inputCeilingTestRegistry{
+				profiles: map[provider.ModelKey]*provider.ModelProfile{
+					key("large"):    profile("large", 32_768),
+					key("probe-no"): {Key: key("probe-no"), ContextWindow: 16_384, Caps: provider.CapChat | provider.CapStream},
+				},
+				explanations: map[provider.ModelKey]provider.ToolCallExplanation{
+					key("probe-no"): {Source: "probe", State: fingerprint.CapProbeNo, Valid: false},
+				},
+			},
+			chain:       []string{"test/large", "test/probe-no"},
+			resolveTool: true,
+			want:        14_336,
+			wantSource:  inputCeilingChainMinimum,
+		},
+		{
+			// A failing explainer must not exclude the model either.
+			name: "explain error keeps model eligible",
+			reg: inputCeilingTestRegistry{
+				profiles: map[provider.ModelKey]*provider.ModelProfile{
+					key("large"): profile("large", 32_768),
+					key("flaky"): {Key: key("flaky"), ContextWindow: 16_384, Caps: provider.CapChat | provider.CapStream},
+				},
+				explainErrs: map[provider.ModelKey]error{key("flaky"): errors.New("explain down")},
+			},
+			chain:       []string{"test/large", "test/flaky"},
+			resolveTool: true,
+			want:        14_336,
+			wantSource:  inputCeilingChainMinimum,
+		},
+		{
+			// Missing chat/stream prerequisites exclude a model outright.
+			name: "missing stream capability excludes model",
+			reg: inputCeilingTestRegistry{profiles: map[provider.ModelKey]*provider.ModelProfile{
+				key("large"):     profile("large", 32_768),
+				key("no-stream"): {Key: key("no-stream"), ContextWindow: 4_096, Caps: provider.CapChat | provider.CapToolCall},
+			}},
+			chain:      []string{"test/large", "test/no-stream"},
+			want:       30_720,
 			wantSource: inputCeilingChainMinimum,
 		},
 		{

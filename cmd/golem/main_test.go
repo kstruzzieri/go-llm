@@ -271,8 +271,7 @@ func TestRunReportsDerivedInputCeilingFromConfig(t *testing.T) {
 }
 
 func TestRunReportsDerivedInputCeilingFromFingerprint(t *testing.T) {
-	t.Setenv("XDG_DATA_HOME", t.TempDir())
-	configPath, root := writeRunLifecycleConfig(t)
+	configPath, root := writeRunLifecycleConfig(t) // isolates XDG_DATA_HOME
 	raw, err := os.ReadFile(configPath)
 	if err != nil {
 		t.Fatal(err)
@@ -325,8 +324,10 @@ func TestRunWarnsWhenFingerprintCacheDegradesWithCapProbeDisabled(t *testing.T) 
 	if err := os.WriteFile(blocker, []byte("x"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("XDG_DATA_HOME", blocker)
 	configPath, root := writeRunLifecycleConfig(t)
+	// Override the helper's isolated XDG_DATA_HOME with a non-directory so the
+	// store open fails and degrades.
+	t.Setenv("XDG_DATA_HOME", blocker)
 	stdin, stdout, stderr := runTestFiles(t)
 	errStop := errors.New("stop after startup")
 	err := run([]string{"-config", configPath, "-root", root, "-no-probe", "-no-cap-probe", "-no-session", "-no-memory", "-no-project-context", "-no-auto-index"}, stdin, stdout, stderr, runHooks{
@@ -564,6 +565,11 @@ func (t runBorrowingTool) Invoke(ctx context.Context, _ json.RawMessage) (agent.
 
 func writeRunLifecycleConfig(t *testing.T) (string, string) {
 	t.Helper()
+	// run() opens the shared fingerprint DB whenever the ceiling is derived,
+	// even under -no-cap-probe; isolate every lifecycle test from the
+	// developer's real $XDG_DATA_HOME/golem/fingerprints.db. Tests that need
+	// a custom location override after calling this helper.
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch r.URL.Path {

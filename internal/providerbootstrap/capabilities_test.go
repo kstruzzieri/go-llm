@@ -44,6 +44,16 @@ func TestBuildModelDefaults_ConflictErrors(t *testing.T) {
 	}
 }
 
+func TestBuildContextWindowOverridesRejectsNegativeWindow(t *testing.T) {
+	cfg := &config.Config{Models: map[string]config.ModelConfig{
+		"agent": {Provider: "lc", Name: "qwen", ContextWindow: -1},
+	}}
+	_, err := buildContextWindowOverrides(cfg)
+	if err == nil || !strings.Contains(err.Error(), `model "agent" context_window must be positive`) {
+		t.Fatalf("error = %v, want negative context_window rejection", err)
+	}
+}
+
 func TestBuildContextWindowOverrides(t *testing.T) {
 	key := provider.ModelKey{Provider: "lc", Model: "qwen"}
 	cfg := &config.Config{Models: map[string]config.ModelConfig{

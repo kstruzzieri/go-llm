@@ -26,6 +26,12 @@ type toolCallExplainer interface {
 	ExplainToolCall(context.Context, provider.ModelKey) (provider.ToolCallExplanation, error)
 }
 
+// The eligibility filter reaches ExplainToolCall through a runtime type
+// assertion that silently reports "not implemented" on signature drift; pin
+// the production registry to it at compile time so drift breaks the build
+// instead of quietly disabling every exclusion.
+var _ toolCallExplainer = (*provider.ModelRegistry)(nil)
+
 func (r inputCeilingResolution) line() string {
 	source := string(r.source)
 	if r.source == inputCeilingSafeFallback {
@@ -54,10 +60,19 @@ func resolveInputCeiling(ctx context.Context, reg capChecker, chain []string, ex
 			// subtracted on both sides (turnBudget and ExpectedOutput), so the
 			// full window is correct then.
 			window = profile.EffectiveContextWindow("agent")
+			reserve := outputReserve
+			if reserve <= 0 {
+				reserve = provider.DefaultExpectedOutput("agent")
+			}
+			if window <= reserve {
+				// The router's budget for this model is zero: it can never be
+				// admitted, so routing always serves from other chain entries.
+				// Letting it set the chain minimum would crush the ceiling for
+				// the models that actually carry the session.
+				return
+			}
 			if outputReserve <= 0 {
-				if reserved := window - provider.DefaultExpectedOutput("agent"); reserved > 0 {
-					window = reserved
-				}
+				window -= reserve
 			}
 		} else {
 			usedFallback = true

@@ -1144,6 +1144,41 @@ func TestRunAgentflowAuthor_UsesPlannerPromptAndProjectContext(t *testing.T) {
 	}
 }
 
+func TestPlannerBudgetAlignsTurnBudgetWithRouterAdmission(t *testing.T) {
+	tests := []struct {
+		name        string
+		budget      agent.Budget
+		options     provider.ModelOptions
+		wantReserve int
+		wantCeiling int
+	}{
+		// Zero reserve: the ceiling must drop by NumPredict minus the
+		// implicit 2048 the derivation already reserved, or long planner
+		// sessions land in an ErrBudgetAdaptationRequired band.
+		{name: "zero reserve lowers derived ceiling by planner delta",
+			budget: agent.Budget{InputCeiling: 30_720}, wantCeiling: 29_268},
+		{name: "zero reserve lowers default ceiling by planner delta",
+			wantCeiling: 6_740},
+		{name: "zero reserve with larger caller NumPredict",
+			budget: agent.Budget{InputCeiling: 30_720}, options: provider.ModelOptions{NumPredict: 8_192}, wantCeiling: 24_576},
+		{name: "degenerate delta keeps ceiling positive",
+			budget: agent.Budget{InputCeiling: 1_024}, options: provider.ModelOptions{NumPredict: 8_192}, wantCeiling: 1},
+		{name: "small reserve floored, ceiling untouched",
+			budget: agent.Budget{InputCeiling: 32_768, OutputReserve: 1_024}, wantReserve: minPlannerOutput, wantCeiling: 32_768},
+		{name: "large reserve kept, ceiling untouched",
+			budget: agent.Budget{InputCeiling: 32_768, OutputReserve: 8_192}, wantReserve: 8_192, wantCeiling: 32_768},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := plannerBudget(tt.budget, plannerModelOptions(tt.options))
+			if got.OutputReserve != tt.wantReserve || got.InputCeiling != tt.wantCeiling {
+				t.Fatalf("plannerBudget = {ceiling %d, reserve %d}, want {ceiling %d, reserve %d}",
+					got.InputCeiling, got.OutputReserve, tt.wantCeiling, tt.wantReserve)
+			}
+		})
+	}
+}
+
 type optionsCaptureCaller struct{ options provider.ModelOptions }
 
 func (c *optionsCaptureCaller) Chat(_ context.Context, req provider.ChatRequest, _ func(provider.ChatResponse) error) (agent.ModelResult, error) {

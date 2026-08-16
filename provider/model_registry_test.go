@@ -315,6 +315,39 @@ func TestModelRegistry_FingerprintContextWindowFallback(t *testing.T) {
 	}
 }
 
+// TestModelRegistry_ReadOnlyFingerprintFailsClosedOnFactoryError pins the
+// conservative direction of the staleness gate: when the read-only factory
+// cannot establish the model's identity (error -> empty digest), even a
+// stored profile that would validate against the current digest is dropped
+// rather than trusted unvalidated.
+func TestModelRegistry_ReadOnlyFingerprintFailsClosedOnFactoryError(t *testing.T) {
+	ctx := context.Background()
+	key := ModelKey{Provider: "test", Model: "unknown-model"}
+	prov := &mrMockProvider{name: "test", models: []ModelInfo{{Name: key.Model}}}
+	store := newMrMockFingerprintStore()
+	store.profiles["test\x00unknown-model"] = &fingerprint.Profile{
+		BackendID: key.Provider, ModelName: key.Model, ModelDigest: key.String(),
+		ProfileVersion: fingerprint.CurrentProfileVersion, EffectiveContext: 24_576,
+	}
+	mr, err := NewModelRegistry(
+		&mrMockProviderRegistry{providers: map[string]Provider{"test": prov}},
+		store,
+		WithReadOnlyFingerprintProfiles(func(context.Context, ModelKey, *ModelInfo, Provider) (*FingerprintProberSpec, error) {
+			return nil, errors.New("identity unavailable")
+		}),
+	)
+	if err != nil {
+		t.Fatalf("NewModelRegistry: %v", err)
+	}
+	profile, err := mr.Lookup(ctx, key)
+	if err != nil {
+		t.Fatalf("Lookup: %v", err)
+	}
+	if profile.ContextWindow != 0 {
+		t.Fatalf("ContextWindow = %d, want 0 (unvalidated profile must be dropped)", profile.ContextWindow)
+	}
+}
+
 func TestModelRegistry_ReadOnlyFingerprintRejectsStaleProfile(t *testing.T) {
 	ctx := context.Background()
 	key := ModelKey{Provider: "test", Model: "unknown-model"}
