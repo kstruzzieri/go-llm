@@ -11,11 +11,12 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-// capProbeHandle owns the capability-probe store and its DB handle so run()
-// can close it at shutdown (mirrors behavioralWeighterHandle).
+// capProbeHandle owns the shared fingerprint/capability store and its DB handle
+// so run() can close it at shutdown (mirrors behavioralWeighterHandle).
 type capProbeHandle struct {
-	store fingerprint.CapProbeStore
-	db    *sql.DB
+	store    fingerprint.CapProbeStore
+	profiles fingerprint.Store
+	db       *sql.DB
 }
 
 // sidecarSecuringCapStore re-chmods the DB file and its -wal/-shm sidecars
@@ -45,7 +46,7 @@ func (s sidecarSecuringCapStore) DeleteCapProbes(ctx context.Context, backendID,
 	return err
 }
 
-// capProbeStorePath resolves the shared capability-probe DB path:
+// capProbeStorePath resolves the shared fingerprint/capability DB path:
 // $XDG_DATA_HOME/golem/fingerprints.db (else ~/.local/share/golem/...).
 // Mirrors memoryDBPath's use of dataDirBase.
 func capProbeStorePath(getenv func(string) string) (string, error) {
@@ -56,7 +57,7 @@ func capProbeStorePath(getenv func(string) string) (string, error) {
 	return filepath.Join(base, "golem", "fingerprints.db"), nil
 }
 
-// openCapProbeStore opens (creating if needed) the capability-probe store
+// openCapProbeStore opens (creating if needed) the fingerprint/capability store
 // with the same hardening as golem's sibling DBs: outside-workspace path
 // validation, 0700 dir / 0600 file, WAL single-conn open, and post-migration
 // sidecar re-chmod (shared memory.OpenHardenedDB primitives). On any failure
@@ -74,11 +75,11 @@ func openCapProbeStore(ctx context.Context, getenv func(string) string, root str
 		db.SetMaxOpenConns(1)
 		var s *fingerprint.SQLiteStore
 		if s, merr = fingerprint.NewStore(ctx, db); merr == nil {
-			return &capProbeHandle{store: s, db: db}, fmt.Sprintf("capability probe cache degraded to in-memory: %v", err)
+			return &capProbeHandle{store: s, profiles: s, db: db}, fmt.Sprintf("fingerprint cache degraded to in-memory: %v", err)
 		}
 		_ = db.Close()
 	}
-	return nil, fmt.Sprintf("capability probe cache disabled: %v (memory fallback failed: %v)", err, merr)
+	return nil, fmt.Sprintf("fingerprint cache disabled: %v (memory fallback failed: %v)", err, merr)
 }
 
 // openCapProbeStoreFile is the file-backed happy path behind openCapProbeStore.
@@ -106,5 +107,5 @@ func openCapProbeStoreFile(ctx context.Context, getenv func(string) string, root
 	}
 	// Wrap so every mid-session SaveCapProbe/DeleteCapProbes re-secures sidecars.
 	// The in-memory fallback stays unwrapped: it has no file path to chmod.
-	return &capProbeHandle{store: sidecarSecuringCapStore{inner: store, path: path}, db: db}, nil
+	return &capProbeHandle{store: sidecarSecuringCapStore{inner: store, path: path}, profiles: store, db: db}, nil
 }

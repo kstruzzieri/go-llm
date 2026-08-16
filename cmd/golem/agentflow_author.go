@@ -102,13 +102,30 @@ func plannerModelOptions(options provider.ModelOptions) provider.ModelOptions {
 	return options
 }
 
-// plannerBudget floors a nonzero OutputReserve at minPlannerOutput: the agent
-// layer forwards Budget.OutputReserve over Options.NumPredict, so an
-// -output-reserve below the floor would silently undo plannerModelOptions.
-// Zero stays zero — no override fires and the NumPredict floor holds.
-func plannerBudget(budget agent.Budget) agent.Budget {
+// plannerBudget aligns the planner's turn budget with the router's admission
+// budget. A nonzero -output-reserve is floored at minPlannerOutput: the agent
+// layer forwards Budget.OutputReserve over Options.NumPredict, so a smaller
+// reserve would silently undo plannerModelOptions (and both sides then agree
+// on the same reserve). A zero reserve leaves NumPredict untouched, but the
+// router's ExpectedOutput then comes from the planner's NumPredict
+// (>= minPlannerOutput) while the derived input ceiling reserved only the
+// implicit DefaultExpectedOutput("agent"); lower the ceiling by the
+// difference, or long planner sessions assemble input in a band every
+// candidate must refuse (ErrBudgetAdaptationRequired) instead of compacting.
+// options is the planner's already-floored ModelOptions.
+func plannerBudget(budget agent.Budget, options provider.ModelOptions) agent.Budget {
 	if budget.OutputReserve > 0 {
 		budget.OutputReserve = max(budget.OutputReserve, minPlannerOutput)
+		return budget
+	}
+	ceiling := budget.InputCeiling
+	if ceiling <= 0 {
+		ceiling = agent.DefaultInputCeiling
+	}
+	if delta := options.NumPredict - provider.DefaultExpectedOutput("agent"); delta > 0 {
+		// Keep the result positive: a zero InputCeiling means "unset" to
+		// turnBudget and would silently restore the full default ceiling.
+		budget.InputCeiling = max(ceiling-delta, 1)
 	}
 	return budget
 }
@@ -1444,13 +1461,14 @@ func runAgentflowAuthorWithClient(ctx context.Context, stdout, stderr io.Writer,
 		system = system + "\n\n" + sess.projectContextBlock
 	}
 
+	plannerOpts := plannerModelOptions(sess.modelOptions)
 	req := agent.Request{
 		Goal:     f.goal,
 		System:   system,
 		Tools:    planTools,
 		MaxSteps: sess.maxSteps,
-		Budget:   plannerBudget(sess.budget),
-		Options:  plannerModelOptions(sess.modelOptions),
+		Budget:   plannerBudget(sess.budget, plannerOpts),
+		Options:  plannerOpts,
 		Approver: &authorPlanApprover{delegate: approver, sess: as},
 	}
 	_, runErr := sess.orch.Run(loopCtx, req, agent.Observer(newRenderer(stderr, false, sess.maxSteps, sess.clock, sess.mixed)))
