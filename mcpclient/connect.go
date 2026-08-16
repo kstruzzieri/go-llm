@@ -102,7 +102,9 @@ func (m *Manager) Close() error {
 	return errors.Join(errs...)
 }
 
-// Connect dials each server, lists its tools (paginated), and adapts them.
+// Connect dials each server (concurrently, bounded by maxConcurrentConnects),
+// lists its tools (paginated), and adapts them. Sessions, tools, and warnings
+// are aggregated in config order regardless of dial completion order.
 // Fatal error: invalid or duplicate alias (config error). Everything else -- a
 // server that fails to connect/list, a tool skipped for an invalid name/schema,
 // a per-server cap truncation -- is a non-fatal warning, so one bad server never
