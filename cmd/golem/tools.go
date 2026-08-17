@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/kstruzzieri/go-llm/agent"
 	agenttools "github.com/kstruzzieri/go-llm/agent/tools"
@@ -69,6 +70,71 @@ func delegateSystemFragment(enabled, allowWrite bool) string {
 		return " For a well-scoped, self-contained code-generation sub-task you may call delegate_code with a precise prompt; it returns generated code from a specialist model. The result is a proposal: review it, then write it with write_file or edit_file. Use delegate_code for bulk generation, never for planning or decisions, and stay responsible for what you apply."
 	}
 	return " For a well-scoped, self-contained code-generation sub-task you may call delegate_code with a precise prompt; it returns generated code from a specialist model for you to review and present to the user. Use delegate_code for bulk generation, never for planning or decisions."
+}
+
+// dispatchSystemFragment is appended to the system prompt only when dispatch is
+// enabled. Empty otherwise so default runs are byte-for-byte unchanged.
+func dispatchSystemFragment(enabled bool) string {
+	if !enabled {
+		return ""
+	}
+	return " For broad read-only investigation you may call dispatch with up to a few independent exploration tasks; they run sequentially, each in a bounded child agent with only file-reading and retrieval tools, and each returns a summary, its stop reason, and the model that produced it. Use dispatch to keep bulk exploration out of your own context; children cannot modify anything or dispatch further children, and their summaries are evidence to verify, not conclusions to repeat blindly."
+}
+
+// dispatchUseCase is the routing use-case for dispatch child agents. It names
+// the TASK (agentic tool-use exploration), not the model — the child chain
+// picks the model. Not asserted on the wire by any test; keep in sync with the
+// parent's "agent" use case by review.
+const dispatchUseCase = "agent"
+
+// resolveDispatchChain returns the chain dispatch children route down. An
+// empty role follows parentChain verbatim (which may itself be empty:
+// recommend mode) so children route to the already-resident primary model and
+// never force a model swap. An explicit role resolves its own chain and fails
+// loudly when it cannot — an explicit -dispatch-role must not silently no-op.
+// The caller owns preflighting an explicit chain: the run-level agent
+// preflight only covers the parent chain.
+func resolveDispatchChain(cfg *config.Config, role string, parentChain []string) ([]string, error) {
+	if role == "" {
+		return parentChain, nil
+	}
+	if cfg == nil {
+		return nil, fmt.Errorf("golem: -dispatch-role requires a models.json with a %q role; none found", role)
+	}
+	resolved, err := cfg.RoleChain(role)
+	if err != nil {
+		return nil, fmt.Errorf("golem: -dispatch-role %q: %w", role, err)
+	}
+	if len(resolved) == 0 {
+		return nil, fmt.Errorf("golem: -dispatch-role %q resolved to an empty chain", role)
+	}
+	return resolved, nil
+}
+
+// newDispatchTool is the caller-injectable seam of the dispatch wiring: tests
+// drive child behavior (toolset pass-through, retrieve reuse, serial
+// execution, budget threading) through it with a scripted caller, which a
+// *provider.Router cannot fake. mixed mirrors -progressive so child context
+// assembly matches the shared retrieve renderer, the same pairing
+// newOrchestratorFactory enforces for the parent. budget carries the resolved
+// input ceiling and output reserve for the chain children route, so a child
+// never assembles a request larger than its backend accepts; zero fields fall
+// back to library defaults. Remaining limits keep every library default —
+// MaxConcurrent=1 (sequential children; fan-out is #403), 4 tasks, 6 steps,
+// 32k tokens per child — except Timeout: the library's 5m bounds the WHOLE
+// invocation, and a live two-task run on gemma4:31b measured task 2 starving
+// behind task 1 (single model calls ran 76-347s), so golem budgets that
+// per-task ceiling times the 4-task maximum. Revisit with governed fan-out
+// (#403).
+func newDispatchTool(caller agent.ModelCaller, mixed bool, budget agent.Budget, available []agent.Tool) (agent.Tool, error) {
+	dt, err := agenttools.NewDispatch(caller, agent.ContextManager{Mixed: mixed}, available, agenttools.DispatchLimits{
+		Budget:  budget,
+		Timeout: 20 * time.Minute, // 5m per task x 4 max tasks
+	})
+	if err != nil {
+		return nil, fmt.Errorf("golem: build dispatch tool: %w", err)
+	}
+	return dt, nil
 }
 
 // buildExecTools constructs the approval-gated exec tool set bound to one Workspace

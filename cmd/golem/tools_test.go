@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/kstruzzieri/go-llm/agent"
+	agenttools "github.com/kstruzzieri/go-llm/agent/tools"
 	"github.com/kstruzzieri/go-llm/config"
 )
 
@@ -175,6 +176,106 @@ func TestDelegateSystemFragment(t *testing.T) {
 	}
 	if strings.Contains(noWrite, "write_file") || strings.Contains(noWrite, "edit_file") {
 		t.Fatalf("write-disabled fragment must not instruct writing to disk: %q", noWrite)
+	}
+}
+
+// validDispatchAvailable returns a real read-only file tool set rooted in a
+// temp dir — valid surrounding input for the builder tests, so each negative
+// case can only fail for the reason it names.
+func validDispatchAvailable(t *testing.T) []agent.Tool {
+	t.Helper()
+	fileTools, err := agenttools.NewFileTools(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return fileTools
+}
+
+func TestResolveDispatchChain_ExplicitRole(t *testing.T) {
+	cfg := &config.Config{
+		Models: map[string]config.ModelConfig{
+			"lightweight": {Name: "speedy", Provider: "local"},
+		},
+	}
+	chain, err := resolveDispatchChain(cfg, "lightweight", []string{"local/parent"})
+	if err != nil {
+		t.Fatalf("resolveDispatchChain: %v", err)
+	}
+	if len(chain) != 1 || chain[0] != "local/speedy" {
+		t.Fatalf("explicit role must resolve its own chain, not the parent's: %v", chain)
+	}
+}
+
+func TestResolveDispatchChain_DefaultFollowsParentChain(t *testing.T) {
+	// No role: the child chain IS the parent chain (no-swap by construction).
+	// Config deliberately lacks any role so a regression to role resolution errors.
+	cfg := &config.Config{Models: map[string]config.ModelConfig{}}
+	chain, err := resolveDispatchChain(cfg, "", []string{"local/parent-a", "local/parent-b"})
+	if err != nil {
+		t.Fatalf("resolveDispatchChain: %v", err)
+	}
+	if len(chain) != 2 || chain[0] != "local/parent-a" || chain[1] != "local/parent-b" {
+		t.Fatalf("default must follow parent chain verbatim: %v", chain)
+	}
+}
+
+func TestResolveDispatchChain_DefaultWithEmptyParentChainIsRecommendMode(t *testing.T) {
+	// Recommend-mode parents have no chain; dispatch mirrors that instead of erroring.
+	chain, err := resolveDispatchChain(&config.Config{}, "", nil)
+	if err != nil {
+		t.Fatalf("resolveDispatchChain: %v", err)
+	}
+	if len(chain) != 0 {
+		t.Fatalf("empty parent chain must resolve to recommend mode: chain=%v", chain)
+	}
+}
+
+func TestResolveDispatchChain_ExplicitRoleNilConfig(t *testing.T) {
+	_, err := resolveDispatchChain(nil, "lightweight", nil)
+	if err == nil {
+		t.Fatal("explicit role with nil config should fail loudly, not no-op")
+	}
+	if !strings.Contains(err.Error(), "-dispatch-role requires a models.json") {
+		t.Fatalf("wrong failure category: %v", err)
+	}
+}
+
+func TestResolveDispatchChain_ExplicitUnknownRole(t *testing.T) {
+	cfg := &config.Config{Models: map[string]config.ModelConfig{}}
+	_, err := resolveDispatchChain(cfg, "lightweight", nil)
+	if err == nil {
+		t.Fatal("unknown role should error")
+	}
+	if !strings.Contains(err.Error(), `-dispatch-role "lightweight"`) {
+		t.Fatalf("error must name the failing role flag: %v", err)
+	}
+}
+
+func TestDispatchSystemFragment(t *testing.T) {
+	if dispatchSystemFragment(false) != "" {
+		t.Fatal("fragment must be empty when dispatch disabled")
+	}
+	on := dispatchSystemFragment(true)
+	for _, want := range []string{"dispatch", "sequential", "read"} {
+		if !strings.Contains(on, want) {
+			t.Fatalf("fragment should mention %q: %q", want, on)
+		}
+	}
+	for _, banned := range []string{"write_file", "edit_file", "run_command"} {
+		if strings.Contains(on, banned) {
+			t.Fatalf("read-only fragment must not mention %s: %q", banned, on)
+		}
+	}
+}
+
+func TestNewDispatchTool_MissingFileToolsError(t *testing.T) {
+	// Valid caller and budget: the ONLY invalid input is the empty available set.
+	_, err := newDispatchTool(&specRecordingCaller{}, false, agent.Budget{}, nil)
+	if err == nil {
+		t.Fatal("empty available set must error: children need the file readers")
+	}
+	if !strings.Contains(err.Error(), "required child tool") {
+		t.Fatalf("wrong failure category (want the library's missing-child-tool error): %v", err)
 	}
 }
 

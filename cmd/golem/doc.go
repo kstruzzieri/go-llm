@@ -18,6 +18,6 @@
 // lock-plan, then stops. The locked .agent/plan.lock.json is the durable output;
 // run it with -plan (task execution) separately. Planning is read-only and
 // mutually exclusive with -p, -plan, -allow-write, -allow-exec, -rag-db,
-// -delegate, -mcp-*, -evidence, and the -approve-plan-edits/-approve-plan-gates
-// execution approvals.
+// -delegate, -dispatch, -mcp-*, -evidence, and the
+// -approve-plan-edits/-approve-plan-gates execution approvals.
 package main
