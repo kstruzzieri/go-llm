@@ -1524,3 +1524,107 @@ func TestApplyGoalMode_WarnsOnIgnoredFlags(t *testing.T) {
 		t.Fatalf("expected no warnings when no ignored flags are set, got %v", warns)
 	}
 }
+
+func TestStartupNotices_DispatchLine(t *testing.T) {
+	lines := startupNotices(startupInfo{workspace: "/w", dispatchLine: "dispatch: enabled -> local/speedy"})
+	found := false
+	for _, l := range lines {
+		if l == "dispatch: enabled -> local/speedy" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("dispatch notice not surfaced: %v", lines)
+	}
+}
+
+func TestParseFlags_Dispatch(t *testing.T) {
+	f, err := parseFlags(nil)
+	if err != nil {
+		t.Fatalf("parseFlags: %v", err)
+	}
+	if f.dispatch || f.dispatchRole != "" {
+		t.Fatalf("defaults: dispatch=%v role=%q, want disabled with empty role (parent chain)", f.dispatch, f.dispatchRole)
+	}
+	f, err = parseFlags([]string{"-dispatch", "-dispatch-role", "lightweight"})
+	if err != nil {
+		t.Fatalf("parseFlags: %v", err)
+	}
+	if !f.dispatch || f.dispatchRole != "lightweight" {
+		t.Fatalf("parsed: dispatch=%v role=%q", f.dispatch, f.dispatchRole)
+	}
+}
+
+func TestValidateFlags_DispatchModes(t *testing.T) {
+	cases := []struct {
+		name       string
+		with       flags  // dispatch=true variant
+		without    flags  // dispatch=false control: must validate clean
+		wantSubstr string // "" => the dispatch variant must ALSO validate clean (allowed mode)
+	}{
+		{
+			name:       "task mode rejected",
+			with:       flags{planPath: "plan.json", approveEdits: true, approveGates: true, planWorkers: 1, dispatch: true},
+			without:    flags{planPath: "plan.json", approveEdits: true, approveGates: true, planWorkers: 1},
+			wantSubstr: "does not attach dispatch",
+		},
+		{
+			name:       "planning mode rejected",
+			with:       flags{goal: "g", goalSet: true, dispatch: true},
+			without:    flags{goal: "g", goalSet: true},
+			wantSubstr: "does not attach dispatch",
+		},
+		{
+			name:       "agentflow status rejected",
+			with:       flags{agentflowStatus: true, dispatch: true},
+			without:    flags{agentflowStatus: true},
+			wantSubstr: "cannot be combined",
+		},
+		{
+			name:       "agentflow resume rejected",
+			with:       flags{agentflowResume: true, planPath: "plan.json", planWorkers: 1, approveEdits: true, approveGates: true, dispatch: true},
+			without:    flags{agentflowResume: true, planPath: "plan.json", planWorkers: 1, approveEdits: true, approveGates: true},
+			wantSubstr: "cannot be combined",
+		},
+		{
+			name:       "dispatch-role without dispatch rejected",
+			with:       flags{dispatchRole: "fast"},
+			without:    flags{dispatch: true, dispatchRole: "fast"},
+			wantSubstr: "-dispatch-role requires -dispatch",
+		},
+		// Positive controls: the modes dispatch is FOR must not be rejected;
+		// an over-broad exclusion would pass every rejection case above.
+		{
+			name:    "interactive allowed",
+			with:    flags{dispatch: true},
+			without: flags{},
+		},
+		{
+			name:    "one-shot allowed",
+			with:    flags{prompt: "q", promptSet: true, dispatch: true},
+			without: flags{prompt: "q", promptSet: true},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := validateFlags(tc.with)
+			if tc.wantSubstr == "" {
+				if err != nil {
+					t.Fatalf("allowed mode rejected: %v", err)
+				}
+			} else {
+				if err == nil {
+					t.Fatal("dispatch variant: want error, got nil")
+				}
+				if !strings.Contains(err.Error(), tc.wantSubstr) {
+					t.Fatalf("error %q does not mention %q — a different rule fired", err, tc.wantSubstr)
+				}
+			}
+			// The control proves any error above is CAUSED by dispatch, not by
+			// the surrounding mode flags.
+			if err := validateFlags(tc.without); err != nil {
+				t.Fatalf("control without dispatch must validate clean: %v", err)
+			}
+		})
+	}
+}

@@ -47,6 +47,8 @@ type flags struct {
 	allowExec           bool
 	delegate            bool
 	delegateRole        string
+	dispatch            bool
+	dispatchRole        string
 	mcpStdio            stringSliceFlag
 	mcpHTTP             stringSliceFlag
 	noRag               bool
@@ -109,6 +111,8 @@ func parseFlags(args []string) (flags, error) {
 	fs.BoolVar(&f.allowExec, "allow-exec", false, "enable the approval-gated run_command exec tool")
 	fs.BoolVar(&f.delegate, "delegate", false, "enable the delegate_code tool (route a scoped codegen sub-task to a specialist model)")
 	fs.StringVar(&f.delegateRole, "delegate-role", "coding", "model role the delegate_code tool routes to")
+	fs.BoolVar(&f.dispatch, "dispatch", false, "enable the dispatch tool (bounded read-only exploration tasks run sequentially in child agents)")
+	fs.StringVar(&f.dispatchRole, "dispatch-role", "", "model role dispatch child agents route to (default: the primary agent chain, so children never force a model swap)")
 	fs.Var(&f.mcpStdio, "mcp-stdio", "attach an MCP server over stdio: \"[alias=]command args...\" (repeatable; use `env KEY=val cmd` for env vars)")
 	fs.Var(&f.mcpHTTP, "mcp-http", "attach an MCP server over streamable HTTP: \"[alias=]https://endpoint\" (repeatable)")
 	fs.BoolVar(&f.noRag, "no-rag", false, "disable the retrieve tool entirely (ignore any auto index)")
@@ -127,7 +131,7 @@ func parseFlags(args []string) (flags, error) {
 	fs.BoolVar(&f.feedback, "feedback", false, "enable local behavioral feedback collection and retrieval ranking")
 	fs.StringVar(&f.feedbackDB, "feedback-db", "", "override the behavioral feedback DB path (default: per-workspace under the data dir)")
 	fs.StringVar(&f.think, "think", "", "reasoning control for the agent model: off, on, low, medium, high (default: model decides); no-op with a notice when the model does not support thinking")
-	fs.StringVar(&f.planPath, "plan", "", "AgentFlow task mode: path to a plan document (JSON) to lock and execute; requires both -approve-plan-edits and -approve-plan-gates; mutually exclusive with -p, -allow-write/-allow-exec, -rag-db, -delegate, and -mcp-*")
+	fs.StringVar(&f.planPath, "plan", "", "AgentFlow task mode: path to a plan document (JSON) to lock and execute; requires both -approve-plan-edits and -approve-plan-gates; mutually exclusive with -p, -allow-write/-allow-exec, -rag-db, -delegate, -dispatch, and -mcp-*")
 	fs.IntVar(&f.planWorkers, "plan-workers", 1, "AgentFlow task mode: maximum workers for the initial parallel plan cohort (positive; requires -plan)")
 	fs.BoolVar(&f.approveEdits, "approve-plan-edits", false, "required in task mode: auto-approve step-scoped write/edit (still bounded by the step-scope and .agent guards)")
 	fs.BoolVar(&f.approveGates, "approve-plan-gates", false, "required in task mode: auto-run plan-declared validation gates")
@@ -216,7 +220,7 @@ func validateFlags(f flags) error {
 		}
 		if f.promptSet || f.goalSet || f.reviewManifest != "" || f.evidencePath != "" ||
 			f.wfProfileSet || f.wfReasonSet || f.workflowProfile != "" || f.workflowReason != "" ||
-			f.ragDB != "" || f.delegate || len(f.mcpStdio) > 0 || len(f.mcpHTTP) > 0 ||
+			f.ragDB != "" || f.delegate || f.dispatch || len(f.mcpStdio) > 0 || len(f.mcpHTTP) > 0 ||
 			f.allowWrite || f.allowExec || f.approvePlanLock {
 			return fmt.Errorf("golem: %s cannot be combined with planning, setup, review, or ambient tool flags", mode)
 		}
@@ -232,6 +236,9 @@ func validateFlags(f flags) error {
 	}
 	if f.noRag && f.ragDB != "" {
 		return fmt.Errorf("golem: -no-rag and -rag-db are mutually exclusive")
+	}
+	if f.dispatchRole != "" && !f.dispatch {
+		return fmt.Errorf("golem: -dispatch-role requires -dispatch")
 	}
 	if f.pressureWarn < 0 || f.pressureWarn > 100 {
 		return fmt.Errorf("golem: -pressure-warn must be between 0 and 100")
@@ -284,6 +291,9 @@ func validateFlags(f flags) error {
 	if f.planPath != "" && f.delegate {
 		return fmt.Errorf("golem: -plan (task mode) does not attach delegate_code; proof-mode tools are built from the locked plan")
 	}
+	if f.planPath != "" && f.dispatch {
+		return fmt.Errorf("golem: -plan (task mode) does not attach dispatch; proof-mode tools are built from the locked plan")
+	}
 	if f.planPath != "" && (len(f.mcpStdio) > 0 || len(f.mcpHTTP) > 0) {
 		return fmt.Errorf("golem: -plan (task mode) does not attach MCP tools; proof-mode tools are built from the locked plan")
 	}
@@ -307,6 +317,9 @@ func validateFlags(f flags) error {
 	}
 	if f.goalSet && f.delegate {
 		return fmt.Errorf("golem: -goal (planning mode) does not attach delegate_code")
+	}
+	if f.goalSet && f.dispatch {
+		return fmt.Errorf("golem: -goal (planning mode) does not attach dispatch")
 	}
 	if f.goalSet && (len(f.mcpStdio) > 0 || len(f.mcpHTTP) > 0) {
 		return fmt.Errorf("golem: -goal (planning mode) does not attach MCP tools")
@@ -419,6 +432,7 @@ type startupInfo struct {
 	agentMemoryLine    string
 	mcpLine            string
 	delegateLine       string
+	dispatchLine       string
 }
 
 // startupNotices renders the human-facing startup lines (written to stderr).
@@ -445,6 +459,9 @@ func startupNotices(info startupInfo) []string {
 	}
 	if info.delegateLine != "" {
 		out = append(out, info.delegateLine)
+	}
+	if info.dispatchLine != "" {
+		out = append(out, info.dispatchLine)
 	}
 	if info.projectContextLine != "" {
 		out = append(out, info.projectContextLine)
@@ -484,9 +501,25 @@ func startupNotices(info startupInfo) []string {
 //
 // It takes flags rather than a bool so the production call site cannot pass a
 // value other than the one -progressive parsed into.
+//
+// With -dispatch it also installs the per-run dispatch invocation cap.
 func newOrchestratorFactory(caller agent.ModelCaller, f flags) func() *agent.Orchestrator {
+	var opts []agent.Option
+	if f.dispatch {
+		// #282 coordination: cap dispatch INVOCATIONS per run so the parent
+		// cannot bypass child-local limits by re-dispatching fresh children;
+		// with the library's per-call task cap this bounds total children per
+		// run. The option fails fast on a Run whose tool set omits the named
+		// tool — sound here because -dispatch is rejected in -plan/-goal and
+		// agentflow modes, so every Run through this factory carries the
+		// dispatch tool.
+		opts = append(opts, agent.WithToolInvocationLimit(agent.ToolInvocationLimit{
+			Tool: agenttools.DispatchToolName,
+			Max:  agenttools.DefaultDispatchCallsPerRun,
+		}))
+	}
 	return func() *agent.Orchestrator {
-		return agent.New(caller, agent.ContextManager{Mixed: f.progressive})
+		return agent.New(caller, agent.ContextManager{Mixed: f.progressive}, opts...)
 	}
 }
 
@@ -755,11 +788,50 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 	if err != nil {
 		return err
 	}
+	// Everything appended after this point (retrieve, dispatch, memory, write,
+	// exec, delegate, MCP) lands in tools[readToolCount:], which is what the
+	// consumer runtime receives as EXTRA tools — it rebuilds the base file
+	// tools from its own workspace. Reorderings must keep the file tools first.
 	readToolCount := len(tools)
 	if retrieve != nil {
 		tools = append(tools, retrieve)
 	}
 	retrieveOmitted := retrieve == nil
+
+	// Dispatch is built here, before memory/write/exec/delegate/MCP are
+	// appended, so the child-visible set is exactly the read-only tools above.
+	dispatchLine := ""
+	if f.dispatch {
+		dchain, derr := resolveDispatchChain(bundle.Config, f.dispatchRole, plan.chain)
+		if derr != nil {
+			return derr
+		}
+		childCeiling := inputCeiling.ceiling
+		if f.dispatchRole != "" {
+			// The run-level preflight and input ceiling above cover plan.chain
+			// only. An explicit dispatch chain needs its own tool-capability
+			// gate (children always carry the file tools, so a chain without
+			// tool_call would otherwise fail only at invocation time) and its
+			// own context-derived ceiling.
+			dwarns, perr := preflightToolCapable(ctx, bundle.Models, dchain, resolveEndpoint, resolver)
+			warns = append(warns, dwarns...)
+			if perr != nil {
+				return perr
+			}
+			childCeiling = resolveInputCeiling(ctx, bundle.Models, dchain, f.inputCeiling, f.outputReserve, resolver != nil).ceiling
+		}
+		caller := newRouterChainCallerFor(bundle.Router, dchain, dispatchUseCase)
+		dpt, derr := newDispatchTool(caller, f.progressive, agent.Budget{InputCeiling: childCeiling, OutputReserve: f.outputReserve}, tools)
+		if derr != nil {
+			return derr
+		}
+		tools = append(tools, dpt)
+		head := "model recommendation"
+		if len(dchain) > 0 {
+			head = dchain[0]
+		}
+		dispatchLine = fmt.Sprintf("dispatch: enabled -> %s", head)
+	}
 
 	wantAgentMemory, agentMemoryWarn := agentMemoryRequest(f.agentMemory, f.noSession)
 	if agentMemoryWarn != "" {
@@ -836,6 +908,7 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 
 	baseSystem := buildSystemPrompt(f.allowWrite, f.allowExec)
 	baseSystem += delegateSystemFragment(f.delegate, f.allowWrite)
+	baseSystem += dispatchSystemFragment(f.dispatch)
 	baseSystem += memorySystemFragment(memoryEnabled)
 	projectContextLine := ""
 	projectContextBlock := ""
@@ -902,6 +975,7 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 		agentMemoryLine:    agentMemoryLine,
 		mcpLine:            mcpLine,
 		delegateLine:       delegateLine,
+		dispatchLine:       dispatchLine,
 	}) {
 		_, _ = fmt.Fprintln(stderr, line)
 	}
