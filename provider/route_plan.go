@@ -683,8 +683,9 @@ func (rp *RoutePlan) recordResult(err error, attempts []RouteAttempt, outcome *R
 	if err == nil {
 		rp.recordSuccess(actualKey, LatencyInfo{})
 		rp.recordWarmthUse(actualKey)
+		rp.recordSlotUse(actualKey)
 	} else if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-		rp.recordWarmthUse(actualKey) // model IS warm even if caller bailed
+		rp.recordWarmthUse(actualKey) // model IS warm even if caller bailed — but no slot signal
 	}
 	// Infrastructure failures continue to be recorded inline by Execute methods.
 
@@ -859,6 +860,25 @@ func (rp *RoutePlan) recordFailure(key ModelKey, err error) {
 func (rp *RoutePlan) recordWarmthUse(key ModelKey) {
 	if rp.recorder != nil {
 		rp.recorder.RecordWarmthUse(key)
+	}
+}
+
+// slotUseRecorder is the optional RouteRecorder extension consumed by
+// slot-capacity discovery (#399). RouteRecorder itself is unchanged so
+// external recorders installed via SetRecorder keep compiling; the Router
+// implements RecordSlotUse and is picked up here by type assertion.
+type slotUseRecorder interface {
+	RecordSlotUse(key ModelKey)
+}
+
+// recordSlotUse forwards a slot use signal when the recorder supports it.
+// Called ONLY from the success branch of recordResult: warmth deliberately
+// also fires on cancellation (the model is page-warm either way), but a
+// slot probe on behalf of a cancelled request could make llama-swap load a
+// model nobody is using.
+func (rp *RoutePlan) recordSlotUse(key ModelKey) {
+	if sr, ok := rp.recorder.(slotUseRecorder); ok {
+		sr.RecordSlotUse(key)
 	}
 }
 

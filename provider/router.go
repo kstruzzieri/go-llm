@@ -54,6 +54,7 @@ type Router struct {
 	providers       *Registry
 	breakers        map[string]*CircuitBreaker
 	warmth          WarmthSource
+	slots           SlotSource
 	tokenBudget     *TokenBudgetValidator
 	modelDefaults   map[ModelKey]SamplingDefaults
 	sticky          *stickyCache
@@ -97,6 +98,14 @@ type RouterOption func(*Router)
 func WithWarmthSource(ws WarmthSource) RouterOption {
 	return func(r *Router) {
 		r.warmth = ws
+	}
+}
+
+// WithSlotSource sets the slot-capacity source consulted by SlotCapacity
+// and fed by RecordSlotUse. The Router takes ownership: Close closes it.
+func WithSlotSource(ss SlotSource) RouterOption {
+	return func(r *Router) {
+		r.slots = ss
 	}
 }
 
@@ -317,7 +326,10 @@ func (r *Router) Close() error {
 		close(r.done)
 
 		if r.warmth != nil {
-			err = r.warmth.Close()
+			err = errors.Join(err, r.warmth.Close())
+		}
+		if r.slots != nil {
+			err = errors.Join(err, r.slots.Close())
 		}
 	})
 	return err
@@ -518,6 +530,24 @@ func (r *Router) RecordFailure(key ModelKey, err error) {
 func (r *Router) RecordWarmthUse(key ModelKey) {
 	if r.warmth != nil {
 		r.warmth.RecordUse(key)
+	}
+}
+
+// SlotCapacity reports backend parallel slot capacity for key via the
+// configured SlotSource. Without a source it reports (0, false): nothing
+// is governed and callers preserve existing behavior.
+func (r *Router) SlotCapacity(key ModelKey) (int, bool) {
+	if r.slots == nil {
+		return 0, false
+	}
+	return r.slots.Capacity(key)
+}
+
+// RecordSlotUse forwards a slot use signal if a slot source is configured.
+// It satisfies the route-plan's optional slotUseRecorder interface.
+func (r *Router) RecordSlotUse(key ModelKey) {
+	if r.slots != nil {
+		r.slots.RecordUse(key)
 	}
 }
 
