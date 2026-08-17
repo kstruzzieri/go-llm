@@ -94,6 +94,30 @@ func buildProviders(cfg *config.Config, override, ocOverrideProvider, ocOverride
 	return registered, ollamaClients, effective, nil
 }
 
+// slotBackends selects providers opted into slot discovery via
+// slot_discovery: true. Managed-local is declared by the operator, never
+// inferred from the host: loopback proves nothing (tunnels, Docker), and
+// auto-enrolling generic loopback openai-compat runtimes without /props
+// (vLLM, LM Studio) would serialize them through the capacity-1 fail-safe.
+// A flag on a non-openai-compat provider is a loud config error.
+func slotBackends(cfg *config.Config) (map[string]provider.SlotBackend, error) {
+	out := make(map[string]provider.SlotBackend)
+	for key, pc := range cfg.Providers {
+		if !pc.SlotDiscovery {
+			continue
+		}
+		apiFormat := pc.APIFormat
+		if apiFormat == "" {
+			apiFormat = "ollama"
+		}
+		if apiFormat != "openai-compat" {
+			return nil, fmt.Errorf("providerbootstrap: provider %q: slot_discovery requires api_format \"openai-compat\", got %q", key, apiFormat)
+		}
+		out[key] = provider.SlotBackend{BaseURL: pc.BaseURL, APIKey: pc.APIKey}
+	}
+	return out, nil
+}
+
 // buildProvider constructs one provider from its config. For ollama it also
 // returns the underlying client so the prober factory can reuse it.
 func buildProvider(key string, cfg config.ProviderConfig) (provider.Provider, *ollama.Client, error) {

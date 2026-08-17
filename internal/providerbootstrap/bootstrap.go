@@ -68,6 +68,14 @@ func New(ctx context.Context, opts Options) (*Bundle, error) {
 		return nil, err
 	}
 
+	// Validate slot_discovery before any provider registration or
+	// RefreshModels I/O: user config fails loud and fails FAST — an
+	// invalid config must error without touching any server.
+	slotBEs, err := slotBackends(effCfg)
+	if err != nil {
+		return nil, err
+	}
+
 	pReg := provider.NewRegistry()
 	registered := 0
 	var warnings []error
@@ -134,9 +142,15 @@ func New(ctx context.Context, opts Options) (*Bundle, error) {
 	if err != nil {
 		return nil, err
 	}
-	routerOpts := make([]provider.RouterOption, 0, len(opts.RouterOptions)+1)
+	routerOpts := make([]provider.RouterOption, 0, len(opts.RouterOptions)+2)
 	if len(modelDefaults) > 0 {
 		routerOpts = append(routerOpts, provider.WithModelDefaults(modelDefaults))
+	}
+	// A caller-supplied WithSlotSource (below, applied last) replaces the
+	// config-derived source, which holds no goroutines until its RecordUse
+	// is called and is simply collected — nothing to close.
+	if len(slotBEs) > 0 {
+		routerOpts = append(routerOpts, provider.WithSlotSource(provider.NewOpenAICompatSlotSource(slotBEs)))
 	}
 	// Explicit constructor options apply last, so caller-supplied defaults
 	// override config for matching model keys while preserving other config keys.
