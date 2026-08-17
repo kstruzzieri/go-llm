@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/kstruzzieri/go-llm/ollama"
 	"github.com/kstruzzieri/go-llm/provider"
@@ -12,9 +13,10 @@ import (
 // openAICompatJudgeClient adapts an *openaicompat.Provider to the Ollama-typed
 // judgeChatClient + judgeModelChecker seams the LLMJudgeScorer is built on. It
 // is a judge-only transport: it translates the narrow judge ChatRequest
-// (system + user messages, temperature, num_predict) to an OpenAI
-// /v1/chat/completions call and maps the response content back, leaving the
-// judge prompt contract and parser untouched.
+// (system + user messages, temperature, num_predict, think directive) to an
+// OpenAI /v1/chat/completions call and maps the response content back —
+// falling back to the server-separated reasoning when content is empty —
+// leaving the judge prompt contract and parser untouched.
 //
 // JSON-mode note: the Ollama path sets ChatRequest.Format="json", but the
 // openaicompat provider exposes no response_format field. The judge system
@@ -36,10 +38,15 @@ func newOpenAICompatJudge(p *openaicompat.Provider) *openAICompatJudgeClient {
 // mapping provider.ChatResponse.Content back onto ollama.ChatResponse so the
 // scorer's parser sees an unchanged shape.
 func (j *openAICompatJudgeClient) Chat(ctx context.Context, req ollama.ChatRequest) (*ollama.ChatResponse, error) {
+	popts := toProviderJudgeOptions(req.Options)
+	// The judge contract sets Think=false; forwarding it lets applyOptionsChat
+	// emit chat_template_kwargs.enable_thinking=false so a thinking-tuned
+	// judge model doesn't reason its token budget away before the verdict.
+	popts.Think = req.Think
 	presp, err := j.provider.Chat(ctx, provider.ChatRequest{
 		Model:    req.Model,
 		Messages: toProviderJudgeMessages(req.Messages),
-		Options:  toProviderJudgeOptions(req.Options),
+		Options:  popts,
 	})
 	if err != nil {
 		return nil, err
@@ -47,11 +54,19 @@ func (j *openAICompatJudgeClient) Chat(ctx context.Context, req ollama.ChatReque
 	if presp == nil {
 		return nil, fmt.Errorf("openai-compat judge: nil response")
 	}
+	content := presp.Content
+	if strings.TrimSpace(content) == "" && strings.TrimSpace(presp.Thinking) != "" {
+		// Templates that ignore enable_thinking (gemma4, measured 2026-08-16)
+		// can leave content empty with the verdict in reasoning_content, which
+		// the provider surfaces as Thinking. Non-empty content always wins;
+		// this fires only where the alternative is a guaranteed hard failure.
+		content = presp.Thinking
+	}
 	return &ollama.ChatResponse{
 		Model: presp.Model,
 		Message: ollama.ChatMessage{
 			Role:    "assistant",
-			Content: presp.Content,
+			Content: content,
 		},
 		Done: true,
 	}, nil
