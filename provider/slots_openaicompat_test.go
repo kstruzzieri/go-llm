@@ -423,12 +423,14 @@ func TestSlotSourceRecordUseAfterClose(t *testing.T) {
 
 // Close overlap, established rather than hoped for: overlap is PROVEN on
 // both sides of the Add/Wait handoff —
-//   (a) a resident probe is live in the backend (barrier) before Close;
-//   (b) one WORKER launch is trapped between its wg.Add (already done
-//       inside RecordUse, under the mutex) and the real go-launch, and is
-//       released only after Close has observably cancelled — so Close's
-//       wg.Wait provably overlaps a launch in flight, immune to scheduler
-//       luck.
+//
+//	(a) a resident probe is live in the backend (barrier) before Close;
+//	(b) one WORKER launch is trapped between its wg.Add (already done
+//	    inside RecordUse, under the mutex) and the real go-launch, and is
+//	    released only after Close has observably cancelled — so Close's
+//	    wg.Wait provably overlaps a launch in flight, immune to scheduler
+//	    luck.
+//
 // An atomic launch counter then proves the count stops changing once
 // Close returns.
 func TestSlotSourceCloseOverlapsLiveTraffic(t *testing.T) {
