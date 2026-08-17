@@ -267,3 +267,108 @@ func TestSlotSourceSingleFlight(t *testing.T) {
 		t.Fatalf("inflight = %d after drain, want 0", inflight)
 	}
 }
+
+// Acceptance: TTL boundary observable without wall-clock sleeps; stale value
+// replaced after expiry. Expired entries READ as fail-safe (1, true) — after
+// an 8-slot backend restarts with 1, serving the stale 8 would let #400
+// over-admit; unknown-by-age = unknown. Boundary: fresh iff
+// now < fetchedAt+TTL, so exactly-at-expiry is expired.
+func TestSlotSourceTTLBoundary(t *testing.T) {
+	var mu sync.Mutex
+	slots, count := 4, 0
+	srv := countingPropsServer(t, &mu, &slots, &count)
+	defer srv.Close()
+	ss, cl, now := newTestSlotSource(t, SlotBackend{BaseURL: srv.URL})
+	fetchedAt := *now // probes stamp entries with the injected clock
+
+	key := ModelKey{Provider: "lc", Model: "qwen3:8b"}
+	ss.RecordUse(key)
+	if ran := cl.drain(); ran != 1 {
+		t.Fatalf("initial probes = %d, want 1", ran)
+	}
+	if n, _ := ss.Capacity(key); n != 4 {
+		t.Fatalf("capacity = %d, want 4", n)
+	}
+
+	// Backend restarted with a different slot count; entry still fresh:
+	// RecordUse must not probe and the cached value must be served.
+	mu.Lock()
+	slots = 7
+	mu.Unlock()
+	*now = fetchedAt.Add(defaultSlotTTL - time.Second) // just inside
+	ss.RecordUse(key)
+	if cl.count() != 0 {
+		t.Fatalf("fresh entry captured a probe")
+	}
+	if n, ok := ss.Capacity(key); !ok || n != 4 {
+		t.Fatalf("fresh Capacity = (%d, %v), want (4, true)", n, ok)
+	}
+
+	// Exactly at expiry: the read degrades to fail-safe, and use re-probes.
+	*now = fetchedAt.Add(defaultSlotTTL)
+	if n, ok := ss.Capacity(key); !ok || n != 1 {
+		t.Fatalf("expired Capacity = (%d, %v), want (1, true)", n, ok)
+	}
+	ss.RecordUse(key)
+	if ran := cl.drain(); ran != 1 {
+		t.Fatalf("expired-entry probes = %d, want 1", ran)
+	}
+	if n, ok := ss.Capacity(key); !ok || n != 7 {
+		t.Fatalf("refreshed Capacity = (%d, %v), want (7, true)", n, ok)
+	}
+	mu.Lock()
+	if count != 2 {
+		mu.Unlock()
+		t.Fatalf("request count = %d, want 2", count)
+	}
+	mu.Unlock()
+}
+
+// Acceptance: error /props degrades to capacity 1 without failing the call
+// path. The fail-safe result is CACHED at TTL cadence — this is what
+// distinguishes "error caches 1" from "error writes nothing": with no write,
+// the immediate second RecordUse would capture another probe (the
+// constructed distinguishing input for that mutation).
+func TestSlotSourceFailSafeAndRecovery(t *testing.T) {
+	var mu sync.Mutex
+	healthy := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		ok := healthy
+		mu.Unlock()
+		if !ok {
+			http.Error(w, "no props here", http.StatusNotFound)
+			return
+		}
+		_, _ = w.Write([]byte(`{"total_slots": 6}`))
+	}))
+	defer srv.Close()
+	ss, cl, now := newTestSlotSource(t, SlotBackend{BaseURL: srv.URL})
+	start := *now
+
+	key := ModelKey{Provider: "lc", Model: "qwen3:8b"}
+	ss.RecordUse(key) // probe fails -> fail-safe 1, still governed
+	if ran := cl.drain(); ran != 1 {
+		t.Fatalf("probes = %d, want 1", ran)
+	}
+	if n, ok := ss.Capacity(key); !ok || n != 1 {
+		t.Fatalf("failed-probe Capacity = (%d, %v), want (1, true)", n, ok)
+	}
+	ss.RecordUse(key) // fail-safe entry is fresh: no re-probe
+	if cl.count() != 0 {
+		t.Fatalf("cached fail-safe captured a probe")
+	}
+
+	// Backend recovers; after the TTL the next use re-discovers reality.
+	mu.Lock()
+	healthy = true
+	mu.Unlock()
+	*now = start.Add(defaultSlotTTL + time.Second)
+	ss.RecordUse(key)
+	if ran := cl.drain(); ran != 1 {
+		t.Fatalf("recovery probes = %d, want 1", ran)
+	}
+	if n, ok := ss.Capacity(key); !ok || n != 6 {
+		t.Fatalf("recovered Capacity = (%d, %v), want (6, true)", n, ok)
+	}
+}

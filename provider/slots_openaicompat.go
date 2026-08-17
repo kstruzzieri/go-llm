@@ -145,14 +145,18 @@ func NewOpenAICompatSlotSource(backends map[string]SlotBackend, opts ...SlotSour
 	return ss
 }
 
-// Capacity implements SlotSource. It is a pure cache read.
+// Capacity implements SlotSource. It is a pure cache read. Expired entries
+// read as (1, true): a stale value is unknown-by-age and must not let an
+// admission gate over-admit after a backend restart shrank capacity. The
+// entry itself is retained so RecordUse still notices staleness and
+// refreshes. Fresh iff now < fetchedAt+TTL — exactly-at-expiry is expired.
 func (ss *OpenAICompatSlotSource) Capacity(key ModelKey) (int, bool) {
 	if _, governed := ss.backends[key.Provider]; !governed {
 		return 0, false
 	}
 	ss.mu.RLock()
 	defer ss.mu.RUnlock()
-	if e, ok := ss.entries[key]; ok {
+	if e, ok := ss.entries[key]; ok && ss.nowFn().Before(e.fetchedAt.Add(ss.ttl)) {
 		return e.capacity, true
 	}
 	return 1, true
@@ -167,6 +171,10 @@ func (ss *OpenAICompatSlotSource) RecordUse(key ModelKey) {
 	}
 	ss.mu.Lock()
 	if ss.closed {
+		ss.mu.Unlock()
+		return
+	}
+	if e, ok := ss.entries[key]; ok && ss.nowFn().Before(e.fetchedAt.Add(ss.ttl)) {
 		ss.mu.Unlock()
 		return
 	}
