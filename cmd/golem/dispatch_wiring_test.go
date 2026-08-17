@@ -322,6 +322,22 @@ func TestNewDispatchTool_TimeoutCoversAllSequentialTasks(t *testing.T) {
 	}
 }
 
+// TestNewDispatchTool_TinyCeilingFailsLoudly pins the fail-fast for degenerate
+// budgets: a resolved ceiling at or below the library's default 1024-token
+// child output reserve cannot host a child run, and dispatch must refuse at
+// STARTUP with the library's reserve-vs-ceiling error rather than let every
+// child fail at invocation time. A mutation that stops threading the budget
+// also flips this test (the library default ceiling would pass validation).
+func TestNewDispatchTool_TinyCeilingFailsLoudly(t *testing.T) {
+	_, err := newDispatchTool(&specRecordingCaller{}, false, agent.Budget{InputCeiling: 500}, validDispatchAvailable(t))
+	if err == nil {
+		t.Fatal("a 500-token ceiling cannot hold the default child output reserve; construction must fail loudly")
+	}
+	if !strings.Contains(err.Error(), "output reserve") {
+		t.Fatalf("wrong failure category: %v", err)
+	}
+}
+
 // TestNewDispatchTool_ChildBudgetThreadsThroughRuns proves the budget golem
 // passes reaches child model calls: Budget.OutputReserve becomes the child
 // request's NumPredict (the library's documented override), so a mutation that
@@ -480,10 +496,14 @@ func TestNewDispatchTool_ChildrenRunSequentially(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("first child never started")
 	}
+	// Absence proof with a bounded observation window, not an instant default:
+	// while the first child is still gated inside its model call, a second
+	// start under a MaxConcurrent>1 mutation lands here well within the
+	// window, so the mutation is caught before the gate release below.
 	select {
 	case second := <-caller.started:
 		t.Fatalf("child %q started while %q was still executing (children must be sequential)", second, first)
-	default:
+	case <-time.After(200 * time.Millisecond):
 	}
 	close(caller.gates[first])
 	var second string
