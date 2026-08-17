@@ -550,3 +550,58 @@ func TestSlotSourceCloseWaitsForInflightProbes(t *testing.T) {
 		}
 	})
 }
+
+// Acceptance: llama-swap fronts multiple upstreams and REQUIRES the
+// model-qualified /props form. The fake proxy 400s on a missing model param
+// (as the proxy cannot dispatch without it), so an implementation that drops
+// the param collapses every capacity to fail-safe 1 and the per-model
+// assertions below fail. The evicted model exercises the swap-out window:
+// a probe for a model the proxy can no longer serve must degrade to
+// fail-safe 1, not error into the call path.
+func TestSlotSourceLlamaSwapModelQualified(t *testing.T) {
+	totals := map[string]int{
+		"qwen3-coder-next": 4,
+		"gemma4:31b":       2,
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/props" {
+			http.NotFound(w, r)
+			return
+		}
+		m := r.URL.Query().Get("model")
+		if m == "" {
+			http.Error(w, "model query parameter required", http.StatusBadRequest)
+			return
+		}
+		n, ok := totals[m]
+		if !ok {
+			http.Error(w, "unknown model", http.StatusNotFound) // evicted/unknown upstream
+			return
+		}
+		_, _ = fmt.Fprintf(w, `{"total_slots": %d}`, n)
+	}))
+	defer srv.Close()
+	ss, cl, _ := newTestSlotSource(t, SlotBackend{BaseURL: srv.URL})
+
+	k1 := ModelKey{Provider: "lc", Model: "qwen3-coder-next"}
+	k2 := ModelKey{Provider: "lc", Model: "gemma4:31b"}
+	kEvicted := ModelKey{Provider: "lc", Model: "swapped-out"}
+	ss.RecordUse(k1)
+	ss.RecordUse(k2)
+	ss.RecordUse(kEvicted)
+	if ran := cl.drain(); ran != 3 {
+		t.Fatalf("probes = %d, want 3", ran)
+	}
+
+	// Per-model capacities must differ per key — a fake that ignored the
+	// forwarded key could not catch a swapped-key mutation.
+	if n, ok := ss.Capacity(k1); !ok || n != 4 {
+		t.Fatalf("qwen3-coder-next capacity = (%d, %v), want (4, true)", n, ok)
+	}
+	if n, ok := ss.Capacity(k2); !ok || n != 2 {
+		t.Fatalf("gemma4:31b capacity = (%d, %v), want (2, true)", n, ok)
+	}
+	if n, ok := ss.Capacity(kEvicted); !ok || n != 1 {
+		t.Fatalf("evicted capacity = (%d, %v), want fail-safe (1, true)", n, ok)
+	}
+}
