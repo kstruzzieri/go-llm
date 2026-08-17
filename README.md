@@ -103,7 +103,7 @@ Run `llama-swap --config llama-swap.yaml --listen 127.0.0.1:8080`, then point a 
 ```json
 {
   "providers": {
-    "llamacpp": { "base_url": "http://127.0.0.1:8080", "timeout": "5m", "api_format": "openai-compat" },
+    "llamacpp": { "base_url": "http://127.0.0.1:8080", "timeout": "5m", "api_format": "openai-compat", "slot_discovery": true },
     "ollama":   { "base_url": "http://localhost:11434", "timeout": "5m" }
   },
   "models": {
@@ -114,6 +114,8 @@ Run `llama-swap --config llama-swap.yaml --listen 127.0.0.1:8080`, then point a 
 ```
 
 The model `name` must match the `llama-swap` model key. Set the provider's `api_key` field only if the proxy requires a Bearer token. Models on a backend that lacks `/v1/completions` can carve their capability set down (e.g. `"capabilities": ["chat", "stream"]`).
+
+`"slot_discovery": true` makes go-llm read the server's `/props` `total_slots` so future slot-aware admission can size concurrency to the backend. It is a per-provider opt-in (the library default is off) and belongs only on `openai-compat` providers backed by llama.cpp's `llama-server` or llama-swap — the shipped `models.json` enables it on the `llamacpp` provider because that config targets llama-swap. Leave it off for backends without `/props` (vLLM, LM Studio): an enabled backend that cannot answer `/props` is treated as having a single slot.
 
 ### llama.cpp without a proxy (pinned servers)
 

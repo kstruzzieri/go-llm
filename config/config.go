@@ -54,6 +54,13 @@ type ProviderConfig struct {
 	Timeout   Duration `json:"timeout"`
 	APIKey    string   `json:"api_key,omitempty"`
 	APIFormat string   `json:"api_format,omitempty"`
+	// SlotDiscovery opts this provider into runtime slot-capability
+	// discovery (GET /props total_slots) and, downstream, slot-governed
+	// admission (#398). Opt-in; requires api_format "openai-compat" and a
+	// backend the operator manages (llama-server, llama-swap) — enabling
+	// it for a backend without /props degrades that backend to fail-safe
+	// serial admission. Default false: ungoverned, existing behavior.
+	SlotDiscovery bool `json:"slot_discovery,omitempty"`
 }
 
 // ModelConfig describes a model's identity, capabilities, and fallback chain.

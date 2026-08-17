@@ -3,7 +3,8 @@
     "llamacpp": {
       "base_url": "http://127.0.0.1:8080",
       "timeout": "5m",
-      "api_format": "openai-compat"
+      "api_format": "openai-compat",
+      "slot_discovery": true
     },
     "ollama": {
       "base_url": "http://localhost:11434",
