@@ -447,8 +447,9 @@ func TestRunShutdownDrainsBorrowedWeighterBeforeFeedbackClose(t *testing.T) {
 			var mu sync.Mutex
 			var events []string
 			runtimeClosed := make(chan struct{})
+			retrievalClosed := make(chan struct{})
 			feedbackClosed := make(chan struct{})
-			var runtimeOnce, feedbackOnce sync.Once
+			var runtimeOnce, retrievalOnce, feedbackOnce sync.Once
 			closed := func(name string) {
 				mu.Lock()
 				events = append(events, name)
@@ -456,9 +457,20 @@ func TestRunShutdownDrainsBorrowedWeighterBeforeFeedbackClose(t *testing.T) {
 				switch name {
 				case "runtime":
 					runtimeOnce.Do(func() { close(runtimeClosed) })
+				case "retrieval":
+					retrievalOnce.Do(func() { close(retrievalClosed) })
 				case "feedback":
 					feedbackOnce.Do(func() { close(feedbackClosed) })
 				}
+			}
+			// Recorded inside WeightsBatch before it returns, so the append
+			// happens-before inflight.Done and therefore before the "retrieval"
+			// event a draining close records; the final wantEvents order is a
+			// machine-enforced happens-before chain, not a scheduling sample.
+			weighter.done = func() {
+				mu.Lock()
+				events = append(events, "invoke-done")
+				mu.Unlock()
 			}
 
 			releaseResult := make(chan error, 1)
@@ -507,14 +519,24 @@ func TestRunShutdownDrainsBorrowedWeighterBeforeFeedbackClose(t *testing.T) {
 						case <-runtimeClosed:
 						case <-time.After(time.Second):
 							close(weighter.release)
-							releaseResult <- errors.New("retrieval drain ran before runtime close")
+							releaseResult <- errors.New("runtime did not close after shutdown began")
 							return
 						}
+						// Level-triggered: a closed channel stays ready, so a
+						// premature close is detected no matter when this select
+						// runs — unlike the previous non-blocking default, which
+						// had to win a scheduling race against run()'s defers.
+						// Under a correct drain neither channel can close while
+						// the weighter is still borrowed; the timeout is pure
+						// latency on the passing path, never a pass/fail edge.
 						select {
+						case <-retrievalClosed:
+							close(weighter.release)
+							releaseResult <- errors.New("retrieval closed while it still borrowed the feedback weighter")
 						case <-feedbackClosed:
 							close(weighter.release)
 							releaseResult <- errors.New("feedback closed while retrieval still borrowed its weighter")
-						default:
+						case <-time.After(500 * time.Millisecond):
 							close(weighter.release)
 							releaseResult <- nil
 						}
@@ -532,7 +554,7 @@ func TestRunShutdownDrainsBorrowedWeighterBeforeFeedbackClose(t *testing.T) {
 			mu.Lock()
 			gotEvents := append([]string(nil), events...)
 			mu.Unlock()
-			wantEvents := []string{"auto-index", "runtime", "retrieval", "feedback"}
+			wantEvents := []string{"auto-index", "runtime", "invoke-done", "retrieval", "feedback"}
 			if fmt.Sprint(gotEvents) != fmt.Sprint(wantEvents) {
 				t.Fatalf("shutdown events = %v, want %v", gotEvents, wantEvents)
 			}
@@ -544,11 +566,15 @@ type runBlockingWeighter struct {
 	entered chan struct{}
 	release chan struct{}
 	once    sync.Once
+	done    func() // runs after release, before WeightsBatch returns
 }
 
 func (w *runBlockingWeighter) WeightsBatch(context.Context, []string) (map[string]float64, error) {
 	w.once.Do(func() { close(w.entered) })
 	<-w.release
+	if w.done != nil {
+		w.done()
+	}
 	return map[string]float64{}, nil
 }
 
