@@ -289,6 +289,49 @@ func TestSlotSourceSingleFlight(t *testing.T) {
 	}
 }
 
+// Options must take effect and their invalid-value guards must hold: a
+// custom TTL moves the refresh boundary (asserted behaviorally, not by
+// field peeking), and non-positive/nil values leave defaults intact.
+func TestSlotSourceOptions(t *testing.T) {
+	var mu sync.Mutex
+	slots, count := 4, 0
+	srv := countingPropsServer(t, &mu, &slots, &count)
+	defer srv.Close()
+
+	custom := &http.Client{Timeout: time.Second}
+	ss, cl, now := newTestSlotSource(t, SlotBackend{BaseURL: srv.URL},
+		WithSlotTTL(time.Minute), WithSlotHTTPClient(custom))
+	if ss.client != custom {
+		t.Fatalf("WithSlotHTTPClient did not install the client")
+	}
+	start := *now
+
+	key := ModelKey{Provider: "lc", Model: "qwen3:8b"}
+	ss.RecordUse(key)
+	if ran := cl.drain(); ran != 1 {
+		t.Fatalf("probes = %d, want 1", ran)
+	}
+
+	// Under the default 5m TTL this entry would still be fresh at +2m;
+	// with the 1m custom TTL it is expired and a use re-probes.
+	*now = start.Add(2 * time.Minute)
+	ss.RecordUse(key)
+	if ran := cl.drain(); ran != 1 {
+		t.Fatalf("custom-TTL expiry probes = %d, want 1 (TTL option ignored?)", ran)
+	}
+
+	// Invalid values are ignored, defaults retained.
+	guarded := NewOpenAICompatSlotSource(map[string]SlotBackend{"lc": {BaseURL: srv.URL}},
+		WithSlotTTL(0), WithSlotTTL(-time.Second), WithSlotHTTPClient(nil))
+	defer func() { _ = guarded.Close() }()
+	if guarded.ttl != defaultSlotTTL {
+		t.Fatalf("ttl = %v after invalid options, want default %v", guarded.ttl, defaultSlotTTL)
+	}
+	if guarded.client == nil {
+		t.Fatalf("client = nil after WithSlotHTTPClient(nil), want default")
+	}
+}
+
 // Acceptance: TTL boundary observable without wall-clock sleeps; stale value
 // replaced after expiry. Expired entries READ as fail-safe (1, true) — after
 // an 8-slot backend restarts with 1, serving the stale 8 would let #400

@@ -118,6 +118,9 @@ func WithSlotTTL(d time.Duration) SlotSourceOption {
 }
 
 // WithSlotHTTPClient overrides the probe HTTP client (default: 5s timeout).
+// Each probe is additionally bounded by a 5s context deadline regardless of
+// the client's own timeout, so a longer client timeout does not extend how
+// long a probe can run.
 func WithSlotHTTPClient(hc *http.Client) SlotSourceOption {
 	return func(ss *OpenAICompatSlotSource) {
 		if hc != nil {
