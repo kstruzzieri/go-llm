@@ -55,6 +55,35 @@ func TestFetchSlotCapacity(t *testing.T) {
 			wantErr: true,
 		},
 		{
+			// ok=true implies n >= 1: a "< 1" check weakened to "== 0"
+			// would admit negative capacity.
+			name: "negative total_slots is an error",
+			handler: func(w http.ResponseWriter, r *http.Request) {
+				_, _ = w.Write([]byte(`{"total_slots": -3}`))
+			},
+			wantErr: true,
+		},
+		{
+			// Pins the LOWER bound of the read cap: llama-server /props
+			// legitimately carries large chat templates, so a response
+			// just under 1MB must still decode (a cap accidentally
+			// shrunk to a few KB fails here, while the oversized case
+			// below pins the upper bound).
+			name: "large response under the cap succeeds",
+			handler: func(w http.ResponseWriter, r *http.Request) {
+				_, _ = w.Write([]byte(`{"padding": "`))
+				pad := make([]byte, 64*1024)
+				for i := range pad {
+					pad[i] = 'x'
+				}
+				for range 14 { // ~896KB of padding, under the 1MB cap
+					_, _ = w.Write(pad)
+				}
+				_, _ = w.Write([]byte(`", "total_slots": 4}`))
+			},
+			want: 4,
+		},
+		{
 			// The read is bounded (a misconfigured backend must not make a
 			// probe slurp an arbitrarily large body): a response whose JSON
 			// object does not complete within the cap is an error, which
@@ -228,6 +257,12 @@ func TestSlotSourceCapacitySemantics(t *testing.T) {
 	if n, ok := ss.Capacity(key); !ok || n != 1 {
 		t.Fatalf("unprobed Capacity = (%d, %v), want (1, true)", n, ok)
 	}
+	// Capacity is the hot-path read: it must not QUEUE a probe either — a
+	// Capacity that called RecordUse would single-flight into the later
+	// explicit use and every other assertion would still pass.
+	if cl.count() != 0 {
+		t.Fatalf("unprobed Capacity queued %d probes, want 0", cl.count())
+	}
 	// Capacity and RecordUse are non-blocking; nothing has probed yet.
 	ss.RecordUse(key)
 	mu.Lock()
@@ -289,21 +324,42 @@ func TestSlotSourceSingleFlight(t *testing.T) {
 	}
 }
 
-// Options must take effect and their invalid-value guards must hold: a
-// custom TTL moves the refresh boundary (asserted behaviorally, not by
-// field peeking), and non-positive/nil values leave defaults intact.
+// countingTransport wraps the default RoundTripper and counts trips —
+// proof that probes go through the CUSTOM client, which pointer equality
+// on the field cannot give.
+type countingTransport struct {
+	mu    sync.Mutex
+	trips int
+}
+
+func (ct *countingTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	ct.mu.Lock()
+	ct.trips++
+	ct.mu.Unlock()
+	return http.DefaultTransport.RoundTrip(req)
+}
+
+func (ct *countingTransport) count() int {
+	ct.mu.Lock()
+	defer ct.mu.Unlock()
+	return ct.trips
+}
+
+// Options must take effect and their invalid-value guards must hold: the
+// custom client actually carries the probes (counted at its transport),
+// the custom TTL moves the refresh boundary on BOTH sides (a shortened or
+// ignored TTL fails one of them), and non-positive/nil values leave
+// defaults intact.
 func TestSlotSourceOptions(t *testing.T) {
 	var mu sync.Mutex
 	slots, count := 4, 0
 	srv := countingPropsServer(t, &mu, &slots, &count)
 	defer srv.Close()
 
-	custom := &http.Client{Timeout: time.Second}
+	ct := &countingTransport{}
+	custom := &http.Client{Timeout: time.Second, Transport: ct}
 	ss, cl, now := newTestSlotSource(t, SlotBackend{BaseURL: srv.URL},
 		WithSlotTTL(time.Minute), WithSlotHTTPClient(custom))
-	if ss.client != custom {
-		t.Fatalf("WithSlotHTTPClient did not install the client")
-	}
 	start := *now
 
 	key := ModelKey{Provider: "lc", Model: "qwen3:8b"}
@@ -311,10 +367,19 @@ func TestSlotSourceOptions(t *testing.T) {
 	if ran := cl.drain(); ran != 1 {
 		t.Fatalf("probes = %d, want 1", ran)
 	}
+	if ct.count() != 1 {
+		t.Fatalf("custom transport trips = %d, want 1 (probe bypassed the custom client)", ct.count())
+	}
 
-	// Under the default 5m TTL this entry would still be fresh at +2m;
-	// with the 1m custom TTL it is expired and a use re-probes.
-	*now = start.Add(2 * time.Minute)
+	// Just inside the custom TTL: still fresh, no probe.
+	*now = start.Add(time.Minute - time.Second)
+	ss.RecordUse(key)
+	if cl.count() != 0 {
+		t.Fatalf("entry fresh under custom TTL captured a probe (TTL shortened?)")
+	}
+	// Exactly at the custom TTL: expired, a use re-probes. Under the
+	// default 5m TTL this entry would still be fresh.
+	*now = start.Add(time.Minute)
 	ss.RecordUse(key)
 	if ran := cl.drain(); ran != 1 {
 		t.Fatalf("custom-TTL expiry probes = %d, want 1 (TTL option ignored?)", ran)
@@ -372,6 +437,10 @@ func TestSlotSourceTTLBoundary(t *testing.T) {
 	*now = fetchedAt.Add(defaultSlotTTL)
 	if n, ok := ss.Capacity(key); !ok || n != 1 {
 		t.Fatalf("expired Capacity = (%d, %v), want (1, true)", n, ok)
+	}
+	// Even an EXPIRED read stays pure: refresh is RecordUse's job.
+	if cl.count() != 0 {
+		t.Fatalf("expired Capacity queued %d probes, want 0", cl.count())
 	}
 	ss.RecordUse(key)
 	if ran := cl.drain(); ran != 1 {

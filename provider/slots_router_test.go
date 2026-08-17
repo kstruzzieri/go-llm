@@ -2,6 +2,7 @@ package provider
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"testing"
 )
@@ -16,6 +17,7 @@ type fakeSlotSource struct {
 	capacity     int
 	governed     bool
 	closed       int
+	closeErr     error
 }
 
 func (f *fakeSlotSource) Capacity(key ModelKey) (int, bool) {
@@ -35,7 +37,7 @@ func (f *fakeSlotSource) Close() error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.closed++
-	return nil
+	return f.closeErr
 }
 
 func TestRouterSlotCapacityWithoutSource(t *testing.T) {
@@ -156,5 +158,81 @@ func TestHandleResultSuccessWithLegacyRecorder(t *testing.T) {
 	_ = rp.handleResult(nil, 0, nil)
 	if got := rec.getSuccesses(); len(got) != 1 {
 		t.Fatalf("successes = %d, want 1", len(got))
+	}
+}
+
+// "Success only" means ONLY success: ordinary failures and deadline
+// expiry must produce zero slot signals too, not just context.Canceled —
+// a branch condition weakened to "anything but Canceled" would slip past
+// the cancellation test alone.
+func TestHandleResultNonSuccessRecordsNoSlotUse(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+	}{
+		{name: "infrastructure failure", err: &HTTPStatusError{StatusCode: 500}},
+		{name: "deadline exceeded", err: context.DeadlineExceeded},
+		{name: "plain error", err: errors.New("model exploded")},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rec := &slotMockRecorder{}
+			rp := newTestPlan(&rpMockProvider{name: "ollama", caps: CapChat}, &rec.rpMockRecorder)
+			rp.SetRecorder(rec)
+			attempts := []RouteAttempt{
+				{Key: ModelKey{Provider: "ollama", Model: "qwen3:8b"}, Status: AttemptStatusFailed, ErrorClass: "network"},
+			}
+			_ = rp.handleResult(tt.err, 0, attempts)
+			if got := rec.getSlotUses(); len(got) != 0 {
+				t.Fatalf("slotUses = %v, want none for %v", got, tt.err)
+			}
+		})
+	}
+}
+
+// fakeWarmthSource lets the Router close-error path be pinned for BOTH
+// subsystems: dropping either Close call, or losing either error in the
+// join, goes red here.
+type fakeWarmthSource struct {
+	mu       sync.Mutex
+	closed   int
+	closeErr error
+}
+
+func (f *fakeWarmthSource) IsWarm(ModelKey) bool             { return false }
+func (f *fakeWarmthSource) WarmthState(ModelKey) *WarmthInfo { return nil }
+func (f *fakeWarmthSource) RecordUse(ModelKey)               {}
+func (f *fakeWarmthSource) Snapshot() []WarmModel            { return nil }
+func (f *fakeWarmthSource) Close() error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.closed++
+	return f.closeErr
+}
+
+func TestRouterCloseJoinsWarmthAndSlotErrors(t *testing.T) {
+	warmthErr := errors.New("warmth close failed")
+	slotErr := errors.New("slot close failed")
+	warmth := &fakeWarmthSource{closeErr: warmthErr}
+	slots := &fakeSlotSource{governed: true, capacity: 1, closeErr: slotErr}
+	router, _ := setupTestRouter(t, WithWarmthSource(warmth), WithSlotSource(slots))
+
+	err := router.Close()
+	if !errors.Is(err, warmthErr) {
+		t.Fatalf("Close error %v does not wrap the warmth close error", err)
+	}
+	if !errors.Is(err, slotErr) {
+		t.Fatalf("Close error %v does not wrap the slot close error", err)
+	}
+	warmth.mu.Lock()
+	if warmth.closed != 1 {
+		warmth.mu.Unlock()
+		t.Fatalf("warmth Close calls = %d, want 1", warmth.closed)
+	}
+	warmth.mu.Unlock()
+	slots.mu.Lock()
+	defer slots.mu.Unlock()
+	if slots.closed != 1 {
+		t.Fatalf("slot Close calls = %d, want 1", slots.closed)
 	}
 }

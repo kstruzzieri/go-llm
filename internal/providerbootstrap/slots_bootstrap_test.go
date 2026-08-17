@@ -4,6 +4,8 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"reflect"
 	"sync"
 	"testing"
@@ -101,6 +103,64 @@ func TestNewRejectsSlotDiscoveryOnOllamaBeforeIO(t *testing.T) {
 	defer mu.Unlock()
 	if requests != 0 {
 		t.Fatalf("config validation performed %d network requests, want 0", requests)
+	}
+}
+
+// The flag must survive the real file path, not just struct literals: a
+// broken "slot_discovery" JSON tag — or config.Load defaulting/rewriting
+// fields in a way the selector does not expect — is invisible to tests
+// that construct ProviderConfig directly.
+func TestSlotDiscoveryRoundTripsThroughConfigLoad(t *testing.T) {
+	dir := t.TempDir()
+
+	valid := filepath.Join(dir, "valid.json")
+	if err := os.WriteFile(valid, []byte(`{
+  "providers": {
+    "lc":     { "base_url": "http://127.0.0.1:8090", "api_format": "openai-compat", "slot_discovery": true },
+    "ollama": { "base_url": "http://127.0.0.1:11434" }
+  },
+  "models": {
+    "default": { "name": "qwen3:8b", "provider": "lc", "type": "dense" }
+  },
+  "defaults": { "chat": "default" }
+}`), 0o600); err != nil {
+		t.Fatalf("write valid config: %v", err)
+	}
+	cfg, err := config.Load(valid)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !cfg.Providers["lc"].SlotDiscovery {
+		t.Fatal("slot_discovery: true did not round-trip through config.Load")
+	}
+	got, err := slotBackends(cfg)
+	if err != nil {
+		t.Fatalf("slotBackends on loaded config: %v", err)
+	}
+	if len(got) != 1 || got["lc"].BaseURL != "http://127.0.0.1:8090" {
+		t.Fatalf("slotBackends on loaded config = %#v, want only lc", got)
+	}
+
+	// The loud-error path must also hold for a file-backed config, after
+	// Load has applied its defaults.
+	invalid := filepath.Join(dir, "invalid.json")
+	if err := os.WriteFile(invalid, []byte(`{
+  "providers": {
+    "ollama": { "base_url": "http://127.0.0.1:11434", "slot_discovery": true }
+  },
+  "models": {
+    "default": { "name": "qwen3:8b", "provider": "ollama", "type": "dense" }
+  },
+  "defaults": { "chat": "default" }
+}`), 0o600); err != nil {
+		t.Fatalf("write invalid config: %v", err)
+	}
+	badCfg, err := config.Load(invalid)
+	if err != nil {
+		t.Fatalf("Load(invalid slot placement) should parse; validation is New's job: %v", err)
+	}
+	if _, err := New(context.Background(), Options{Config: badCfg}); err == nil {
+		t.Fatal("want New error for loaded config with slot_discovery on ollama provider")
 	}
 }
 
