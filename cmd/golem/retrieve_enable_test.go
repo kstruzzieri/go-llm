@@ -31,8 +31,8 @@ func seedIndex(t *testing.T, dbPath, workspaceID, vsid string) {
 
 func TestEnableRetrieve_NoRagSuppressesNotice(t *testing.T) {
 	got := enableRetrieve(context.Background(), embedCfg(), &provider.Router{}, retrieveOpts{noRag: true})
-	if got.tool != nil {
-		t.Error("no-rag should yield no tool")
+	if got.reader != nil {
+		t.Error("no-rag should register no retrieval generation")
 	}
 	if !got.suppressNotice {
 		t.Error("no-rag should suppress the generic no-index notice")
@@ -48,7 +48,7 @@ func TestEnableRetrieve_AutoRegistersOnMatch(t *testing.T) {
 	got := enableRetrieve(context.Background(), embedCfg(), &provider.Router{}, retrieveOpts{
 		autoDBPath: dbPath, workspaceID: "workspace:k",
 	})
-	if got.tool == nil {
+	if got.reader == nil {
 		t.Fatalf("auto index with matching vsid should register; warns=%v", got.warns)
 	}
 	if !strings.Contains(got.line, "auto index") {
@@ -65,7 +65,7 @@ func TestEnableRetrieve_AutoDisablesOnMismatch(t *testing.T) {
 	got := enableRetrieve(context.Background(), embedCfg(), &provider.Router{}, retrieveOpts{
 		autoDBPath: dbPath, workspaceID: "workspace:k",
 	})
-	if got.tool != nil {
+	if got.reader != nil {
 		t.Error("mismatched auto index must not register retrieve")
 	}
 	if len(got.warns) == 0 || !strings.Contains(got.warns[0], "golem index -full") {
@@ -87,7 +87,7 @@ func TestEnableRetrieve_AutoRequiresSidecar(t *testing.T) {
 	got := enableRetrieve(context.Background(), embedCfg(), &provider.Router{}, retrieveOpts{
 		autoDBPath: dbPath, workspaceID: "workspace:k",
 	})
-	if got.tool != nil {
+	if got.reader != nil {
 		t.Error("auto-discovery without a valid sidecar must not register")
 	}
 	if got.suppressNotice {
@@ -103,7 +103,7 @@ func TestEnableRetrieve_ExplicitMismatchHintHasNoFull(t *testing.T) {
 	got := enableRetrieve(context.Background(), embedCfg(), &provider.Router{}, retrieveOpts{
 		ragDB: dbPath,
 	})
-	if got.tool != nil {
+	if got.reader != nil {
 		t.Error("explicit -rag-db with mismatched vsid must not register")
 	}
 	if len(got.warns) == 0 {
@@ -124,7 +124,7 @@ func TestEnableRetrieve_ExplicitLegacyEmbeddingFormatRefusesWithoutMutation(t *t
 	}
 
 	got := enableRetrieve(context.Background(), embedCfg(), &provider.Router{}, retrieveOpts{ragDB: dbPath})
-	if got.tool != nil || len(got.warns) != 1 {
+	if got.reader != nil || len(got.warns) != 1 {
 		t.Fatalf("explicit legacy result = %+v", got)
 	}
 	if warning := got.warns[0]; !strings.Contains(warning, "legacy-json-f64") || !strings.Contains(warning, "will not") {

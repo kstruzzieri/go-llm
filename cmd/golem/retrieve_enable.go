@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/kstruzzieri/go-llm/agent"
 	"github.com/kstruzzieri/go-llm/config"
 	"github.com/kstruzzieri/go-llm/provider"
 	"github.com/kstruzzieri/go-llm/rag"
@@ -23,13 +22,17 @@ type retrieveOpts struct {
 	progressive bool // opt into the #189 progressive renderer
 }
 
-// retrieveResult is the startup outcome. line is the positive disclosure to show
-// when retrieve is registered; warns are problems to surface; suppressNotice
-// silences the generic "no index" line whenever a more specific outcome already
-// explains the situation (-no-rag, explicit -rag-db, or an existing-but-disabled
-// auto index). It stays false only when there genuinely is no usable index.
+// retrieveResult is the startup outcome. reader owns the registered generation
+// (nil when retrieve is disabled); it is deliberately the ONLY handle to the
+// tool, so every caller must register through a wrapper that admits invokes via
+// reader.inflight (readyRetrieve) -- exposing reader.tool raw would let
+// shutdown close the store and feedback service under an active retrieval.
+// line is the positive disclosure to show when retrieve is registered; warns
+// are problems to surface; suppressNotice silences the generic "no index" line
+// whenever a more specific outcome already explains the situation (-no-rag,
+// explicit -rag-db, or an existing-but-disabled auto index). It stays false
+// only when there genuinely is no usable index.
 type retrieveResult struct {
-	tool           agent.Tool
 	reader         *retrievalReader
 	line           string
 	warns          []string
@@ -52,7 +55,7 @@ func enableRetrieve(ctx context.Context, cfg *config.Config, router *provider.Ro
 		if reader == nil {
 			return retrieveResult{warns: []string{explicitMismatchWarning(opts.ragDB, dec, expected)}, suppressNotice: true}
 		}
-		return retrieveResult{tool: reader.tool, reader: reader, line: "retrieve: rag-db " + opts.ragDB, suppressNotice: true,
+		return retrieveResult{reader: reader, line: "retrieve: rag-db " + opts.ragDB, suppressNotice: true,
 			warns: legacyWarnIfAny(dec)}
 	}
 
@@ -77,7 +80,7 @@ func enableRetrieve(ctx context.Context, cfg *config.Config, router *provider.Ro
 		// stands alone; suppress the generic "no index" notice.
 		return retrieveResult{warns: []string{autoMismatchWarning(dec, expected)}, suppressNotice: true}
 	}
-	return retrieveResult{tool: reader.tool, reader: reader, line: autoGenerationLine(gen.metadata, stats), warns: legacyWarnIfAny(dec)}
+	return retrieveResult{reader: reader, line: autoGenerationLine(gen.metadata, stats), warns: legacyWarnIfAny(dec)}
 }
 
 // expectedVectorSpaces returns the provider-qualified vsid set the current

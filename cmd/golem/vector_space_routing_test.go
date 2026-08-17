@@ -196,16 +196,17 @@ func TestEnableRetrieve_ProgressiveRenderingIsOptIn(t *testing.T) {
 			got := enableRetrieve(context.Background(), cfg, router, retrieveOpts{
 				ragDB: dbPath, progressive: enabled,
 			})
-			if got.reader != nil {
-				defer func() {
-					if err := got.reader.closeAfterDrain(); err != nil {
-						t.Error(err)
-					}
-				}()
+			if got.reader == nil {
+				t.Fatalf("retrieve disabled: %v", got.warns)
 			}
-			tool, ok := got.tool.(*agenttools.Retrieve)
+			defer func() {
+				if err := got.reader.closeAfterDrain(); err != nil {
+					t.Error(err)
+				}
+			}()
+			tool, ok := got.reader.tool.(*agenttools.Retrieve)
 			if !ok {
-				t.Fatalf("retrieve tool = %T, want *tools.Retrieve", got.tool)
+				t.Fatalf("retrieve tool = %T, want *tools.Retrieve", got.reader.tool)
 			}
 			if tool.Progressive != enabled {
 				t.Fatalf("Progressive = %v, want %v", tool.Progressive, enabled)
@@ -314,7 +315,7 @@ func TestEnableRetrieve_FeedbackWeighterSharedByExplicitAndExistingAutoIndexes(t
 			weighter := &countingBehavioralWeighter{}
 			opts.weighter = weighter
 			got := enableRetrieve(context.Background(), cfg, router, opts)
-			if got.tool == nil {
+			if got.reader == nil {
 				t.Fatalf("retrieve disabled: %v", got.warns)
 			}
 			defer func() {
@@ -322,7 +323,7 @@ func TestEnableRetrieve_FeedbackWeighterSharedByExplicitAndExistingAutoIndexes(t
 					t.Error(err)
 				}
 			}()
-			result, err := got.tool.Invoke(context.Background(), json.RawMessage(`{"query":"find A"}`))
+			result, err := got.reader.tool.Invoke(context.Background(), json.RawMessage(`{"query":"find A"}`))
 			if err != nil {
 				t.Fatalf("Invoke: %v", err)
 			}
