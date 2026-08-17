@@ -6,7 +6,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"sync"
+	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 )
 
@@ -371,4 +373,180 @@ func TestSlotSourceFailSafeAndRecovery(t *testing.T) {
 	if n, ok := ss.Capacity(key); !ok || n != 6 {
 		t.Fatalf("recovered Capacity = (%d, %v), want (6, true)", n, ok)
 	}
+}
+
+// Close must (a) cancel in-flight probes, (b) wait for them, (c) never let
+// a cancelled probe write, (d) make later RecordUse a no-op, (e) be
+// idempotent. The handler blocks until the probe's own context is
+// cancelled by Close — no gates to release, fully deterministic.
+func TestSlotSourceClose(t *testing.T) {
+	started := make(chan struct{}, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		started <- struct{}{}
+		<-r.Context().Done()
+	}))
+	defer srv.Close()
+
+	ss := NewOpenAICompatSlotSource(map[string]SlotBackend{"lc": {BaseURL: srv.URL}})
+	// Default (real) launcher: this test IS about goroutine lifecycle.
+	key := ModelKey{Provider: "lc", Model: "qwen3:8b"}
+	ss.RecordUse(key)
+	<-started // probe goroutine is live and blocked in the backend
+
+	if err := ss.Close(); err != nil { // must cancel the probe and wait it out
+		t.Fatalf("Close: %v", err)
+	}
+	// Close returned => wg drained => probe finished => reading state is
+	// race-free. A cancelled probe must not have written fail-safe 1.
+	if len(ss.entries) != 0 {
+		t.Fatalf("entries after Close-aborted probe = %d, want 0", len(ss.entries))
+	}
+	if err := ss.Close(); err != nil {
+		t.Fatalf("second Close: %v", err)
+	}
+}
+
+// Post-Close RecordUse must not spawn. Deterministic via the capturing
+// launcher: after Close, nothing may be captured (a select/default check
+// on an async hook could miss a mutant's late goroutine; a captured-thunk
+// count cannot).
+func TestSlotSourceRecordUseAfterClose(t *testing.T) {
+	ss, cl, _ := newTestSlotSource(t, SlotBackend{BaseURL: "http://127.0.0.1:0"})
+	if err := ss.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	ss.RecordUse(ModelKey{Provider: "lc", Model: "qwen3:8b"})
+	if cl.count() != 0 {
+		t.Fatalf("RecordUse after Close captured %d probes, want 0", cl.count())
+	}
+}
+
+// Close overlap, established rather than hoped for: overlap is PROVEN on
+// both sides of the Add/Wait handoff —
+//   (a) a resident probe is live in the backend (barrier) before Close;
+//   (b) one WORKER launch is trapped between its wg.Add (already done
+//       inside RecordUse, under the mutex) and the real go-launch, and is
+//       released only after Close has observably cancelled — so Close's
+//       wg.Wait provably overlaps a launch in flight, immune to scheduler
+//       luck.
+// An atomic launch counter then proves the count stops changing once
+// Close returns.
+func TestSlotSourceCloseOverlapsLiveTraffic(t *testing.T) {
+	started := make(chan struct{}, 64)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		started <- struct{}{}
+		<-r.Context().Done()
+	}))
+	defer srv.Close()
+
+	ss := NewOpenAICompatSlotSource(map[string]SlotBackend{"lc": {BaseURL: srv.URL}})
+	inner := ss.launch
+	var launches atomic.Int64
+
+	// Phase 1: one probe live and blocked in the backend before Close.
+	ss.launch = func(f func()) {
+		launches.Add(1)
+		inner(f)
+	}
+	ss.RecordUse(ModelKey{Provider: "lc", Model: "resident"})
+	<-started
+
+	// Phase 2: the NEXT launch (a worker's) is held at a gate. Swapping
+	// ss.launch here is race-free: only this goroutine has used it so far,
+	// and the resident probe goroutine never reads it.
+	launchGate := make(chan struct{})
+	gateArmed := make(chan struct{})
+	var gateOnce sync.Once
+	ss.launch = func(f func()) {
+		launches.Add(1)
+		trapped := false
+		gateOnce.Do(func() { trapped = true })
+		if trapped {
+			close(gateArmed)
+			go func() {
+				<-launchGate
+				inner(f)
+			}()
+			return
+		}
+		inner(f)
+	}
+
+	stop := make(chan struct{})
+	var workers sync.WaitGroup
+	for i := range 8 {
+		workers.Add(1)
+		go func(i int) {
+			defer workers.Done()
+			for j := 0; ; j++ {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				k := ModelKey{Provider: "lc", Model: fmt.Sprintf("m%d", (i+j)%4)}
+				ss.RecordUse(k)
+				_, _ = ss.Capacity(k)
+			}
+		}(i)
+	}
+	<-gateArmed // a worker launch is now trapped mid-flight, wg.Add done
+
+	closeDone := make(chan error, 1)
+	go func() { closeDone <- ss.Close() }()
+	<-ss.ctx.Done()   // Close has marked closed and cancelled; it is now in wg.Wait
+	close(launchGate) // release the trapped launch INTO the closing source
+
+	if err := <-closeDone; err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	after := launches.Load()
+
+	// Workers are STILL hammering here; none of their post-Close
+	// RecordUse calls may launch.
+	ss.RecordUse(ModelKey{Provider: "lc", Model: "late"})
+	close(stop)
+	workers.Wait()
+	if got := launches.Load(); got != after {
+		t.Fatalf("launches grew from %d to %d after Close returned", after, got)
+	}
+	if err := ss.Close(); err != nil {
+		t.Fatalf("second Close: %v", err)
+	}
+}
+
+// Close must WAIT for in-flight probes — the drain itself, not just the
+// no-new-launches property. The overlap test above cannot kill a mutant
+// that deletes wg.Wait() (the trapped launch was already counted before
+// Close returned), so this test proves the block directly: with a probe
+// pending, synctest.Wait() parks every bubble goroutine, and Close must
+// NOT have returned; draining the probe is the only thing that releases
+// it. Sleep-free and deterministic. No real I/O runs in the bubble: Close
+// has already cancelled the source ctx, so the drained probe's fetch
+// fails before dialing (the BaseURL is never reachable anyway).
+func TestSlotSourceCloseWaitsForInflightProbes(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		ss := NewOpenAICompatSlotSource(map[string]SlotBackend{"lc": {BaseURL: "http://127.0.0.1:0"}})
+		cl := &capturingLauncher{}
+		ss.launch = cl.launch
+
+		ss.RecordUse(ModelKey{Provider: "lc", Model: "qwen3:8b"}) // wg.Add done, thunk pending
+
+		closeDone := make(chan error, 1)
+		go func() { closeDone <- ss.Close() }()
+		synctest.Wait() // all bubble goroutines durably blocked
+
+		select {
+		case err := <-closeDone:
+			t.Fatalf("Close returned (%v) with a probe still pending — wg.Wait is missing", err)
+		default:
+		}
+
+		if ran := cl.drain(); ran != 1 {
+			t.Fatalf("drained probes = %d, want 1", ran)
+		}
+		if err := <-closeDone; err != nil {
+			t.Fatalf("Close: %v", err)
+		}
+	})
 }
