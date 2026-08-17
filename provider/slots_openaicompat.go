@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"strings"
@@ -14,6 +15,11 @@ import (
 const (
 	defaultSlotTTL          = 5 * time.Minute
 	defaultSlotProbeTimeout = 5 * time.Second
+	// slotPropsMaxBody bounds the /props response read. Generous because
+	// llama-server's /props legitimately carries multi-KB chat templates;
+	// the cap only exists so a misconfigured backend cannot make a probe
+	// slurp an arbitrarily large body.
+	slotPropsMaxBody = 1 << 20
 )
 
 // SlotBackend describes one governed backend endpoint.
@@ -54,7 +60,7 @@ func fetchSlotCapacity(ctx context.Context, hc *http.Client, be SlotBackend, mod
 		return 0, fmt.Errorf("provider: slot probe %q: %s", model, resp.Status)
 	}
 	var props slotsPropsResponse
-	if err := json.NewDecoder(resp.Body).Decode(&props); err != nil {
+	if err := json.NewDecoder(io.LimitReader(resp.Body, slotPropsMaxBody)).Decode(&props); err != nil {
 		return 0, fmt.Errorf("provider: slot probe %q: decode /props: %w", model, err)
 	}
 	if props.TotalSlots < 1 {

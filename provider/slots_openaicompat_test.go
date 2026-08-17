@@ -54,6 +54,25 @@ func TestFetchSlotCapacity(t *testing.T) {
 			},
 			wantErr: true,
 		},
+		{
+			// The read is bounded (a misconfigured backend must not make a
+			// probe slurp an arbitrarily large body): a response whose JSON
+			// object does not complete within the cap is an error, which
+			// callers translate to fail-safe 1.
+			name: "oversized response is an error",
+			handler: func(w http.ResponseWriter, r *http.Request) {
+				_, _ = w.Write([]byte(`{"padding": "`))
+				pad := make([]byte, 64*1024)
+				for i := range pad {
+					pad[i] = 'x'
+				}
+				for range 20 { // ~1.25MB of padding, over the 1MB cap
+					_, _ = w.Write(pad)
+				}
+				_, _ = w.Write([]byte(`", "total_slots": 4}`))
+			},
+			wantErr: true,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
