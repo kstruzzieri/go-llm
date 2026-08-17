@@ -802,7 +802,26 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 	// appended, so the child-visible set is exactly the read-only tools above.
 	dispatchLine := ""
 	if f.dispatch {
-		dpt, dchain, derr := buildDispatchTool(bundle.Config, bundle.Router, f.dispatchRole, plan.chain, f.progressive, tools)
+		dchain, derr := resolveDispatchChain(bundle.Config, f.dispatchRole, plan.chain)
+		if derr != nil {
+			return derr
+		}
+		childCeiling := inputCeiling.ceiling
+		if f.dispatchRole != "" {
+			// The run-level preflight and input ceiling above cover plan.chain
+			// only. An explicit dispatch chain needs its own tool-capability
+			// gate (children always carry the file tools, so a chain without
+			// tool_call would otherwise fail only at invocation time) and its
+			// own context-derived ceiling.
+			dwarns, perr := preflightToolCapable(ctx, bundle.Models, dchain, resolveEndpoint, resolver)
+			warns = append(warns, dwarns...)
+			if perr != nil {
+				return perr
+			}
+			childCeiling = resolveInputCeiling(ctx, bundle.Models, dchain, f.inputCeiling, f.outputReserve, resolver != nil).ceiling
+		}
+		caller := newRouterChainCallerFor(bundle.Router, dchain, dispatchUseCase)
+		dpt, derr := newDispatchTool(caller, f.progressive, agent.Budget{InputCeiling: childCeiling, OutputReserve: f.outputReserve}, tools)
 		if derr != nil {
 			return derr
 		}

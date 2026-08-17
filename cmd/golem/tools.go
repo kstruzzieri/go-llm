@@ -87,50 +87,48 @@ func dispatchSystemFragment(enabled bool) string {
 // parent's "agent" use case by review.
 const dispatchUseCase = "agent"
 
-// buildDispatchTool returns the dispatch tool and the chain its children route
-// down. An empty role follows parentChain verbatim (which may itself be empty:
+// resolveDispatchChain returns the chain dispatch children route down. An
+// empty role follows parentChain verbatim (which may itself be empty:
 // recommend mode) so children route to the already-resident primary model and
 // never force a model swap. An explicit role resolves its own chain and fails
 // loudly when it cannot — an explicit -dispatch-role must not silently no-op.
-// available must already hold the parent's read-only tools (the four file
-// tools, plus retrieve when present); NewDispatch allowlists down to exactly
-// that set and rejects anything mutating.
-func buildDispatchTool(cfg *config.Config, router *provider.Router, role string, parentChain []string, mixed bool, available []agent.Tool) (agent.Tool, []string, error) {
-	chain := parentChain
-	if role != "" {
-		if cfg == nil {
-			return nil, nil, fmt.Errorf("golem: -dispatch-role requires a models.json with a %q role; none found", role)
-		}
-		resolved, err := cfg.RoleChain(role)
-		if err != nil {
-			return nil, nil, fmt.Errorf("golem: -dispatch-role %q: %w", role, err)
-		}
-		if len(resolved) == 0 {
-			return nil, nil, fmt.Errorf("golem: -dispatch-role %q resolved to an empty chain", role)
-		}
-		chain = resolved
+// The caller owns preflighting an explicit chain: the run-level agent
+// preflight only covers the parent chain.
+func resolveDispatchChain(cfg *config.Config, role string, parentChain []string) ([]string, error) {
+	if role == "" {
+		return parentChain, nil
 	}
-	caller := newRouterChainCallerFor(router, chain, dispatchUseCase)
-	dt, err := newDispatchTool(caller, mixed, available)
+	if cfg == nil {
+		return nil, fmt.Errorf("golem: -dispatch-role requires a models.json with a %q role; none found", role)
+	}
+	resolved, err := cfg.RoleChain(role)
 	if err != nil {
-		return nil, nil, err
+		return nil, fmt.Errorf("golem: -dispatch-role %q: %w", role, err)
 	}
-	return dt, chain, nil
+	if len(resolved) == 0 {
+		return nil, fmt.Errorf("golem: -dispatch-role %q resolved to an empty chain", role)
+	}
+	return resolved, nil
 }
 
-// newDispatchTool is the caller-injectable seam under buildDispatchTool: tests
-// drive child behavior (toolset pass-through, retrieve reuse, serial execution)
-// through it with a scripted caller, which a *provider.Router cannot fake.
-// mixed mirrors -progressive so child context assembly matches the shared
-// retrieve renderer, the same pairing newOrchestratorFactory enforces for the
-// parent. Limits keep every library default — MaxConcurrent=1 (sequential
-// children; fan-out is #403), 4 tasks, 6 steps, 32k tokens per child — except
-// Timeout: the library's 5m bounds the WHOLE invocation, and a live two-task
-// run on gemma4:31b measured task 2 starving behind task 1 (single model calls
-// ran 76-347s), so golem budgets that per-task ceiling times the 4-task
-// maximum. Revisit with governed fan-out (#403).
-func newDispatchTool(caller agent.ModelCaller, mixed bool, available []agent.Tool) (agent.Tool, error) {
+// newDispatchTool is the caller-injectable seam of the dispatch wiring: tests
+// drive child behavior (toolset pass-through, retrieve reuse, serial
+// execution, budget threading) through it with a scripted caller, which a
+// *provider.Router cannot fake. mixed mirrors -progressive so child context
+// assembly matches the shared retrieve renderer, the same pairing
+// newOrchestratorFactory enforces for the parent. budget carries the resolved
+// input ceiling and output reserve for the chain children route, so a child
+// never assembles a request larger than its backend accepts; zero fields fall
+// back to library defaults. Remaining limits keep every library default —
+// MaxConcurrent=1 (sequential children; fan-out is #403), 4 tasks, 6 steps,
+// 32k tokens per child — except Timeout: the library's 5m bounds the WHOLE
+// invocation, and a live two-task run on gemma4:31b measured task 2 starving
+// behind task 1 (single model calls ran 76-347s), so golem budgets that
+// per-task ceiling times the 4-task maximum. Revisit with governed fan-out
+// (#403).
+func newDispatchTool(caller agent.ModelCaller, mixed bool, budget agent.Budget, available []agent.Tool) (agent.Tool, error) {
 	dt, err := agenttools.NewDispatch(caller, agent.ContextManager{Mixed: mixed}, available, agenttools.DispatchLimits{
+		Budget:  budget,
 		Timeout: 20 * time.Minute, // 5m per task x 4 max tasks
 	})
 	if err != nil {

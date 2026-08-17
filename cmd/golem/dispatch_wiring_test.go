@@ -44,7 +44,7 @@ func dispatchOneShotHarness(t *testing.T) (configPath, root string, chatBodies f
 		switch r.URL.Path {
 		case "/v1/models":
 			w.Header().Set("Content-Type", "application/json")
-			_, _ = io.WriteString(w, `{"data":[{"id":"agent-model"}]}`)
+			_, _ = io.WriteString(w, `{"data":[{"id":"agent-model"},{"id":"weak-model"}]}`)
 		case "/v1/chat/completions":
 			body, err := io.ReadAll(r.Body)
 			if err != nil {
@@ -69,7 +69,9 @@ func dispatchOneShotHarness(t *testing.T) (configPath, root string, chatBodies f
   "providers": {"test": {"base_url": %q, "api_format": "openai-compat", "timeout": "5s"}},
   "models": {
     "agent": {"name": "agent-model", "provider": "test", "type": "dense", "context_window": 32768,
-      "capabilities": ["chat", "generate", "stream", "tool_call"]}
+      "capabilities": ["chat", "generate", "stream", "tool_call"]},
+    "weak": {"name": "weak-model", "provider": "test", "type": "dense", "context_window": 32768,
+      "capabilities": ["chat", "generate", "stream"]}
   },
   "defaults": {"agent": "agent"}
 }`, server.URL)
@@ -134,6 +136,27 @@ func TestRunOneShot_DispatchRegistration(t *testing.T) {
 				t.Fatalf("one-shot answer missing from stdout")
 			}
 		})
+	}
+}
+
+// TestRunOneShot_DispatchRolePreflightGate proves an explicit -dispatch-role
+// whose chain has no tool-capable model fails at STARTUP, before any model
+// call: children always carry the file tools, so a chain without tool_call can
+// only ever fail at invocation time otherwise.
+func TestRunOneShot_DispatchRolePreflightGate(t *testing.T) {
+	configPath, root, chatBodies := dispatchOneShotHarness(t)
+	stdin, stdout, stderr := runTestFiles(t)
+	err := run([]string{"-config", configPath, "-root", root, "-p", "say done",
+		"-no-probe", "-no-cap-probe", "-no-rag", "-no-project-context",
+		"-dispatch", "-dispatch-role", "weak"}, stdin, stdout, stderr)
+	if err == nil {
+		t.Fatalf("run must fail startup preflight for a non-tool-capable dispatch chain; stdout:\n%s", readRunTestFile(t, stdout))
+	}
+	if !strings.Contains(err.Error(), "tool-capability preflight") || !strings.Contains(err.Error(), "weak") {
+		t.Fatalf("error must name the capability preflight and the failing chain entry: %v", err)
+	}
+	if got := chatBodies(); len(got) != 0 {
+		t.Fatalf("no model call may happen after a failed dispatch preflight, got %d", len(got))
 	}
 }
 
@@ -225,11 +248,12 @@ func TestOrchestratorFactory_DispatchPerRunInvocationCap(t *testing.T) {
 	}
 }
 
-// specRecordingCaller records the tool specs of every child chat request and
-// answers immediately, ending each child run in one step.
+// specRecordingCaller records the tool specs and generation cap of every child
+// chat request and answers immediately, ending each child run in one step.
 type specRecordingCaller struct {
-	mu    sync.Mutex
-	tools [][]string
+	mu          sync.Mutex
+	tools       [][]string
+	numPredicts []int
 }
 
 func (c *specRecordingCaller) Chat(_ context.Context, req provider.ChatRequest, onToken func(provider.ChatResponse) error) (agent.ModelResult, error) {
@@ -239,6 +263,7 @@ func (c *specRecordingCaller) Chat(_ context.Context, req provider.ChatRequest, 
 	}
 	c.mu.Lock()
 	c.tools = append(c.tools, names)
+	c.numPredicts = append(c.numPredicts, req.Options.NumPredict)
 	c.mu.Unlock()
 	resp := provider.ChatResponse{Content: "child done", Done: true}
 	if onToken != nil {
@@ -288,12 +313,29 @@ func invokeDispatch(t *testing.T, tool agent.Tool, tasks []string) dispatchTestE
 // behind task 1 (single model calls ran 76-347s). Golem therefore budgets the
 // library's per-task ceiling times the 4-task maximum.
 func TestNewDispatchTool_TimeoutCoversAllSequentialTasks(t *testing.T) {
-	tool, err := newDispatchTool(&specRecordingCaller{}, false, validDispatchAvailable(t))
+	tool, err := newDispatchTool(&specRecordingCaller{}, false, agent.Budget{}, validDispatchAvailable(t))
 	if err != nil {
 		t.Fatalf("newDispatchTool: %v", err)
 	}
 	if got := tool.Effect().Timeout; got != 20*time.Minute {
 		t.Fatalf("dispatch invocation timeout = %v, want 20m (5m per task x 4 max tasks)", got)
+	}
+}
+
+// TestNewDispatchTool_ChildBudgetThreadsThroughRuns proves the budget golem
+// passes reaches child model calls: Budget.OutputReserve becomes the child
+// request's NumPredict (the library's documented override), so a mutation that
+// drops the Budget from the dispatch limits regresses to the library default
+// reserve and fails this test.
+func TestNewDispatchTool_ChildBudgetThreadsThroughRuns(t *testing.T) {
+	caller := &specRecordingCaller{}
+	tool, err := newDispatchTool(caller, false, agent.Budget{InputCeiling: 9000, OutputReserve: 777}, validDispatchAvailable(t))
+	if err != nil {
+		t.Fatalf("newDispatchTool: %v", err)
+	}
+	invokeDispatch(t, tool, []string{"inspect"})
+	if len(caller.numPredicts) != 1 || caller.numPredicts[0] != 777 {
+		t.Fatalf("child NumPredict = %v, want [777] (Budget.OutputReserve must reach child calls)", caller.numPredicts)
 	}
 }
 
@@ -312,7 +354,7 @@ func TestNewDispatchTool_ChildrenSeeExactlyTheReadToolset(t *testing.T) {
 				available = append(available, &sentinelRetrieve{})
 			}
 			caller := &specRecordingCaller{}
-			tool, err := newDispatchTool(caller, false, available)
+			tool, err := newDispatchTool(caller, false, agent.Budget{}, available)
 			if err != nil {
 				t.Fatalf("newDispatchTool: %v", err)
 			}
@@ -355,7 +397,7 @@ func (c *retrieveCallingCaller) Chat(_ context.Context, req provider.ChatRequest
 
 func TestNewDispatchTool_ChildInvokesTheSharedRetrieveInstance(t *testing.T) {
 	sentinel := &sentinelRetrieve{}
-	tool, err := newDispatchTool(&retrieveCallingCaller{}, false, append(validDispatchAvailable(t), sentinel))
+	tool, err := newDispatchTool(&retrieveCallingCaller{}, false, agent.Budget{}, append(validDispatchAvailable(t), sentinel))
 	if err != nil {
 		t.Fatalf("newDispatchTool: %v", err)
 	}
@@ -416,7 +458,7 @@ func TestNewDispatchTool_ChildrenRunSequentially(t *testing.T) {
 	for _, task := range tasks {
 		caller.gates[task] = make(chan struct{})
 	}
-	tool, err := newDispatchTool(caller, false, validDispatchAvailable(t))
+	tool, err := newDispatchTool(caller, false, agent.Budget{}, validDispatchAvailable(t))
 	if err != nil {
 		t.Fatalf("newDispatchTool: %v", err)
 	}
