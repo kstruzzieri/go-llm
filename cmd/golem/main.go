@@ -770,8 +770,19 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 			progressive: f.progressive,
 		})
 		if rr.reader != nil {
+			// Route the explicit generation through the same readyRetrieve
+			// wrapper the auto path uses: its Invoke admits calls through
+			// reader.inflight under lock, so close() drains in-flight
+			// retrievals before the store and feedback service shut down.
+			// A raw rr.tool would bypass admission and let shutdown close
+			// both under an active retrieval. Local on purpose: the outer
+			// `ready` gates background-refresh wiring, which an explicit
+			// -rag-db run must never start.
+			wrapped := newReadyRetrieve(warmingRetrieveMessage)
+			wrapped.install(rr.reader, rr.line)
+			retrieve = wrapped
 			defer func() {
-				if closeErr := rr.reader.closeAfterDrain(); closeErr != nil {
+				if closeErr := wrapped.close(); closeErr != nil {
 					_, _ = fmt.Fprintln(stderr, closeErr)
 				}
 				if hooks.closed != nil {
@@ -779,7 +790,6 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 				}
 			}()
 		}
-		retrieve = rr.tool
 		warns = append(warns, rr.warns...)
 		retrieveLine = rr.line
 		retrieveRequested = retrieveRequested || rr.suppressNotice
