@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/kstruzzieri/go-llm/agent"
 	agenttools "github.com/kstruzzieri/go-llm/agent/tools"
@@ -122,10 +123,16 @@ func buildDispatchTool(cfg *config.Config, router *provider.Router, role string,
 // through it with a scripted caller, which a *provider.Router cannot fake.
 // mixed mirrors -progressive so child context assembly matches the shared
 // retrieve renderer, the same pairing newOrchestratorFactory enforces for the
-// parent. DispatchLimits{} keeps every library default — MaxConcurrent=1
-// (sequential children; fan-out is #403), 4 tasks, 6 steps, 32k tokens, 5m.
+// parent. Limits keep every library default — MaxConcurrent=1 (sequential
+// children; fan-out is #403), 4 tasks, 6 steps, 32k tokens per child — except
+// Timeout: the library's 5m bounds the WHOLE invocation, and a live two-task
+// run on gemma4:31b measured task 2 starving behind task 1 (single model calls
+// ran 76-347s), so golem budgets that per-task ceiling times the 4-task
+// maximum. Revisit with governed fan-out (#403).
 func newDispatchTool(caller agent.ModelCaller, mixed bool, available []agent.Tool) (agent.Tool, error) {
-	dt, err := agenttools.NewDispatch(caller, agent.ContextManager{Mixed: mixed}, available, agenttools.DispatchLimits{})
+	dt, err := agenttools.NewDispatch(caller, agent.ContextManager{Mixed: mixed}, available, agenttools.DispatchLimits{
+		Timeout: 20 * time.Minute, // 5m per task x 4 max tasks
+	})
 	if err != nil {
 		return nil, fmt.Errorf("golem: build dispatch tool: %w", err)
 	}

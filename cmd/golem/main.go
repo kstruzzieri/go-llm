@@ -237,6 +237,9 @@ func validateFlags(f flags) error {
 	if f.noRag && f.ragDB != "" {
 		return fmt.Errorf("golem: -no-rag and -rag-db are mutually exclusive")
 	}
+	if f.dispatchRole != "" && !f.dispatch {
+		return fmt.Errorf("golem: -dispatch-role requires -dispatch")
+	}
 	if f.pressureWarn < 0 || f.pressureWarn > 100 {
 		return fmt.Errorf("golem: -pressure-warn must be between 0 and 100")
 	}
@@ -785,6 +788,10 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 	if err != nil {
 		return err
 	}
+	// Everything appended after this point (retrieve, dispatch, memory, write,
+	// exec, delegate, MCP) lands in tools[readToolCount:], which is what the
+	// consumer runtime receives as EXTRA tools — it rebuilds the base file
+	// tools from its own workspace. Reorderings must keep the file tools first.
 	readToolCount := len(tools)
 	if retrieve != nil {
 		tools = append(tools, retrieve)

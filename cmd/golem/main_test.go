@@ -1586,6 +1586,12 @@ func TestValidateFlags_DispatchModes(t *testing.T) {
 			without:    flags{agentflowResume: true, planPath: "plan.json", planWorkers: 1, approveEdits: true, approveGates: true},
 			wantSubstr: "cannot be combined",
 		},
+		{
+			name:       "dispatch-role without dispatch rejected",
+			with:       flags{dispatchRole: "fast"},
+			without:    flags{dispatch: true, dispatchRole: "fast"},
+			wantSubstr: "-dispatch-role requires -dispatch",
+		},
 		// Positive controls: the modes dispatch is FOR must not be rejected;
 		// an over-broad exclusion would pass every rejection case above.
 		{

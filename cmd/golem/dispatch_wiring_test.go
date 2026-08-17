@@ -282,6 +282,21 @@ func invokeDispatch(t *testing.T, tool agent.Tool, tasks []string) dispatchTestE
 	return envelope
 }
 
+// TestNewDispatchTool_TimeoutCoversAllSequentialTasks pins the golem-side
+// dispatch invocation ceiling: the library's 5m default bounds the WHOLE
+// invocation, and a live two-task smoke on gemma4:31b measured task 2 starving
+// behind task 1 (single model calls ran 76-347s). Golem therefore budgets the
+// library's per-task ceiling times the 4-task maximum.
+func TestNewDispatchTool_TimeoutCoversAllSequentialTasks(t *testing.T) {
+	tool, err := newDispatchTool(&specRecordingCaller{}, false, validDispatchAvailable(t))
+	if err != nil {
+		t.Fatalf("newDispatchTool: %v", err)
+	}
+	if got := tool.Effect().Timeout; got != 20*time.Minute {
+		t.Fatalf("dispatch invocation timeout = %v, want 20m (5m per task x 4 max tasks)", got)
+	}
+}
+
 func TestNewDispatchTool_ChildrenSeeExactlyTheReadToolset(t *testing.T) {
 	for _, tc := range []struct {
 		name         string
