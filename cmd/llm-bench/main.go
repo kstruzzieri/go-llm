@@ -83,6 +83,7 @@ func main() {
 	judgeTransport := flag.String("judge-transport", "", "Judge backend for -scorer llm-judge: ollama (default), openai-compat, or claude-cli (headless `claude -p`, subscription)")
 	judgeBaseURL := flag.String("judge-base-url", "", "Base URL for -judge-transport openai-compat (server root, no /v1 suffix)")
 	judgeAPIKey := flag.String("judge-api-key", "", "Bearer token for -judge-transport openai-compat; falls back to $"+judgeAPIKeyEnvVar)
+	judgeDisableThinking := flag.Bool("judge-disable-thinking", false, "Send chat_template_kwargs.enable_thinking=false on -judge-transport openai-compat so a thinking-tuned local judge (llama.cpp/vLLM) answers directly; leave off for api.openai.com, which rejects the kwarg")
 	candidateBaseURL := flag.String("candidate-base-url", "", "Base URL for openai-compat candidate targets (server root, no /v1 suffix)")
 	candidateAPIKey := flag.String("candidate-api-key", "", "Bearer token for openai-compat candidate targets; falls back to $"+candidateAPIKeyEnvVar)
 	corpusManifestPath := flag.String("corpus-manifest", "", "Path to a corpus manifest JSONL (partition/category per trace); enables partition-separated reporting")
@@ -322,13 +323,14 @@ func main() {
 		}
 		jt := resolveJudgeTransportConfig(*judgeTransport, *judgeBaseURL, *judgeAPIKey, os.Getenv)
 		scorer, err := newScorer(ctx, "llm-judge", scorerOptions{
-			ollamaURL:      judgeURL,
-			judgeModel:     judgeName,
-			judgeTimeout:   *judgeTimeout,
-			judgeCache:     cacheStore,
-			judgeTransport: jt.transport,
-			judgeBaseURL:   jt.baseURL,
-			judgeAPIKey:    jt.apiKey,
+			ollamaURL:            judgeURL,
+			judgeModel:           judgeName,
+			judgeTimeout:         *judgeTimeout,
+			judgeCache:           cacheStore,
+			judgeTransport:       jt.transport,
+			judgeBaseURL:         jt.baseURL,
+			judgeAPIKey:          jt.apiKey,
+			judgeDisableThinking: *judgeDisableThinking,
 			// Primary calibration run is cached; stability runs flip
 			// the flag internally (Task 23).
 			bypassCache: false,
@@ -910,14 +912,15 @@ func main() {
 
 	jt := resolveJudgeTransportConfig(*judgeTransport, *judgeBaseURL, *judgeAPIKey, os.Getenv)
 	scorer, err := newScorer(ctx, *scorerName, scorerOptions{
-		ollamaURL:        resolvedJudgeURL,
-		judgeModel:       resolvedJudgeModel,
-		judgeTimeout:     *judgeTimeout,
-		judgeCache:       cacheStore,
-		judgeTransport:   jt.transport,
-		judgeBaseURL:     jt.baseURL,
-		judgeAPIKey:      jt.apiKey,
-		manualLabelsPath: *labelsPath,
+		ollamaURL:            resolvedJudgeURL,
+		judgeModel:           resolvedJudgeModel,
+		judgeTimeout:         *judgeTimeout,
+		judgeCache:           cacheStore,
+		judgeTransport:       jt.transport,
+		judgeBaseURL:         jt.baseURL,
+		judgeAPIKey:          jt.apiKey,
+		judgeDisableThinking: *judgeDisableThinking,
+		manualLabelsPath:     *labelsPath,
 	})
 	if err != nil {
 		log.Fatalf("llm-bench: scorer: %v", err)
