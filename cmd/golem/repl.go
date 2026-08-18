@@ -40,15 +40,15 @@ type replSession struct {
 
 	records *memory.MemoryRecordStore // nil => agent memory disabled (-agent-memory absent or open failed)
 
-	lastModel    string           // last routed ActualModel for /model
-	journal      *mutationJournal // nil unless -allow-write enabled writes
+	lastModel string           // last routed ActualModel for /model
+	journal   *mutationJournal // nil unless -allow-write enabled writes
 	// grants is the session-scoped approval grant store (#341). Built once at
 	// startup; cleared unconditionally on /new and /clear, on successful
 	// /resume, and via /grants clear; read by the per-run approver. nil only
 	// in grant-free contexts (methods are nil-safe; the /auto-edits and
 	// /grants commands lazily initialize it).
-	grants     *approvalGrants
-	allowWrite bool
+	grants       *approvalGrants
+	allowWrite   bool
 	allowExec    bool
 	mcpAttached  bool    // true when external MCP tools are attached (force approver)
 	obs          *observ // nil unless -trace/-telemetry enabled
