@@ -137,6 +137,13 @@ can leak through shell history or process listings. Report provenance records
 the judge provider as `openai-compat:<endpoint-id>` so two endpoints with the
 same model id do not share cached digest-less verdicts.
 
+For a *local* thinking-tuned judge (llama.cpp/vLLM), add
+`-judge-disable-thinking` so the wire carries
+`chat_template_kwargs.enable_thinking=false` and the judge answers directly
+instead of reasoning its 512-token budget away. Leave it off for
+`api.openai.com`, which rejects the kwarg with HTTP 400. The flag is part of
+the judge-cache key: runs with and without it never share cached verdicts.
+
 For local subscription-backed diagnostics, `-judge-transport claude-cli`
 adapts `claude -p` headless mode:
 
