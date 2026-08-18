@@ -69,6 +69,20 @@ func TestCanonicalCacheKey_ThinkSensitive(t *testing.T) {
 	}
 }
 
+func TestCanonicalCacheKey_ThinkEnforcedSensitive(t *testing.T) {
+	// Think records the judge's intent; ThinkEnforced records whether the
+	// transport delivered it to the backend. An openai-compat run with
+	// -judge-disable-thinking and one without share every other envelope
+	// field, but their verdicts come from different judge regimes and must
+	// never alias.
+	base := judgeCacheRequest{Version: judgeCacheKeyVersion, JudgeProvider: "openai-compat:ep", JudgeModel: "m", SystemPrompt: "s", UserPrompt: "u", Format: "json", Temperature: 0.1, NumPredict: 100}
+	enforced := base
+	enforced.ThinkEnforced = true
+	if canonicalCacheKey(base) == canonicalCacheKey(enforced) {
+		t.Fatalf("think-enforced change did not invalidate key")
+	}
+}
+
 func TestCanonicalCacheKey_ExcludesExecutionOnlyFields(t *testing.T) {
 	// Sanity: judgeCacheRequest is the cache key envelope. If anyone adds
 	// KeepAlive / JudgeTimeout / OllamaURL to it, this test will be deleted

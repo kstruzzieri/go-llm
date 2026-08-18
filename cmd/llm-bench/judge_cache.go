@@ -23,7 +23,12 @@ import (
 // v3 adds JudgeProvider so frontier (openai-compat:<endpoint-id>) and local
 // (ollama) verdicts for an identically-named, digest-less judge model cannot
 // alias.
-const judgeCacheKeyVersion = 3
+// v4 adds ThinkEnforced and evicts every v3 row: on the openai-compat
+// transport, think:false in the envelope used to be recorded-but-dropped
+// (the wire carried no enable_thinking), so v3 rows judged by a freely
+// thinking judge would otherwise replay into runs judged under the
+// enforced regime.
+const judgeCacheKeyVersion = 4
 
 // judgeCacheRequest is the canonical envelope hashed to produce the cache
 // key. Fields here MUST be limited to inputs that affect judgment semantics.
@@ -35,16 +40,21 @@ const judgeCacheKeyVersion = 3
 // same model name produce different keys so a frontier-judge verdict never
 // reuses another provider's cached score.
 type judgeCacheRequest struct {
-	Version          int     `json:"version"`
-	JudgeProvider    string  `json:"judge_provider"`
-	JudgeModel       string  `json:"judge_model"`
-	JudgeModelDigest string  `json:"judge_model_digest"`
-	SystemPrompt     string  `json:"system_prompt"`
-	UserPrompt       string  `json:"user_prompt"`
-	Format           string  `json:"format"`
-	Think            *bool   `json:"think,omitempty"`
-	Temperature      float64 `json:"temperature"`
-	NumPredict       int     `json:"num_predict"`
+	Version          int    `json:"version"`
+	JudgeProvider    string `json:"judge_provider"`
+	JudgeModel       string `json:"judge_model"`
+	JudgeModelDigest string `json:"judge_model_digest"`
+	SystemPrompt     string `json:"system_prompt"`
+	UserPrompt       string `json:"user_prompt"`
+	Format           string `json:"format"`
+	Think            *bool  `json:"think,omitempty"`
+	// ThinkEnforced is whether the transport actually delivered Think to the
+	// backend (LLMJudgeScorer.ThinkEnforced). Think alone is insufficient:
+	// it records the judge's intent, which the openai-compat transport only
+	// enforces when -judge-disable-thinking is set.
+	ThinkEnforced bool    `json:"think_enforced"`
+	Temperature   float64 `json:"temperature"`
+	NumPredict    int     `json:"num_predict"`
 }
 
 // canonicalCacheKey hashes the envelope deterministically. Uses
@@ -68,8 +78,12 @@ func canonicalCacheKey(r judgeCacheRequest) string {
 }
 
 // judgeCacheEntry is the value half of a cache row. ResponseContent is the
-// raw judge Message.Content; AnswerQuality and Justification are the
-// parsed verdict (denormalized so cache audits don't need to re-parse).
+// content string callJudge returned — normally the raw judge
+// Message.Content, but on the openai-compat transport it may be the
+// server-separated reasoning_content when the reply's content was empty
+// (the adapter's verdict-in-reasoning fallback). AnswerQuality and
+// Justification are the parsed verdict (denormalized so cache audits
+// don't need to re-parse).
 type judgeCacheEntry struct {
 	CacheKey         string
 	JudgeProvider    string // provider instance identity (e.g. "ollama", "openai-compat:<endpoint-id>")

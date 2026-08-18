@@ -153,14 +153,15 @@ func newReasoningFallbackFixture(t *testing.T, respBody string) (*LLMJudgeScorer
 	return scorer, trace, actual, srv.Close
 }
 
-// TestOpenAICompatJudgeClient_ForwardsThinkFalseToWire pins that the judge's
-// request-level Think=false directive reaches the wire as
-// chat_template_kwargs.enable_thinking=false. Without it a thinking-tuned
-// judge model reasons freely, burns the judge token budget, and returns its
-// verdict in reasoning_content — measured live 2026-08-16 as 13/24
-// "malformed judge response: empty response" failures (gemma4:31b thinking
-// via llama-swap). Asserted on the raw request bytes captured server-side so
-// no shared translation helper can make this test blind.
+// TestOpenAICompatJudgeClient_ForwardsThinkFalseToWire pins that WITH the
+// -judge-disable-thinking opt-in, the judge's request-level Think=false
+// directive reaches the wire as chat_template_kwargs.enable_thinking=false.
+// Without it a thinking-tuned judge model reasons freely, burns the judge
+// token budget, and returns its verdict in reasoning_content — measured live
+// 2026-08-16 as 13/24 "malformed judge response: empty response" failures
+// (gemma4:31b thinking via llama-swap). Asserted on the raw request bytes
+// captured server-side so no shared translation helper can make this test
+// blind.
 func TestOpenAICompatJudgeClient_ForwardsThinkFalseToWire(t *testing.T) {
 	var rawBody string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -175,6 +176,7 @@ func TestOpenAICompatJudgeClient_ForwardsThinkFalseToWire(t *testing.T) {
 	defer srv.Close()
 
 	judge := newOpenAICompatJudge(openaicompat.NewProvider(openaicompat.NewClient(srv.URL)))
+	judge.disableThinking = true
 	think := false
 	_, err := judge.Chat(context.Background(), ollama.ChatRequest{
 		Model:    "claude-x",
@@ -191,9 +193,10 @@ func TestOpenAICompatJudgeClient_ForwardsThinkFalseToWire(t *testing.T) {
 }
 
 // TestOpenAICompatJudgeClient_NilThinkOmitsThinkControls pins the converse:
-// with no Think directive the wire request must carry neither
-// chat_template_kwargs nor reasoning_effort, preserving applyOptionsChat's
-// pre-#220 byte-identical guarantee for requests that never opted in.
+// even with the -judge-disable-thinking opt-in, a request with no Think
+// directive must carry neither chat_template_kwargs nor reasoning_effort,
+// preserving applyOptionsChat's pre-#220 byte-identical guarantee for
+// requests that never opted in.
 func TestOpenAICompatJudgeClient_NilThinkOmitsThinkControls(t *testing.T) {
 	var rawBody string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -208,6 +211,7 @@ func TestOpenAICompatJudgeClient_NilThinkOmitsThinkControls(t *testing.T) {
 	defer srv.Close()
 
 	judge := newOpenAICompatJudge(openaicompat.NewProvider(openaicompat.NewClient(srv.URL)))
+	judge.disableThinking = true
 	_, err := judge.Chat(context.Background(), ollama.ChatRequest{
 		Model:    "claude-x",
 		Messages: []ollama.ChatMessage{{Role: "user", Content: "evaluate"}},
@@ -218,6 +222,80 @@ func TestOpenAICompatJudgeClient_NilThinkOmitsThinkControls(t *testing.T) {
 	}
 	if strings.Contains(rawBody, "chat_template_kwargs") || strings.Contains(rawBody, "reasoning_effort") {
 		t.Fatalf("wire request carries think controls without a Think directive; body = %s", rawBody)
+	}
+}
+
+// TestOpenAICompatJudgeClient_DefaultKeepsThinkOffWire pins that WITHOUT the
+// operator opt-in, Think is never translated to the wire even when the judge
+// request carries Think=false. chat_template_kwargs is a llama.cpp/vLLM
+// template extension; api.openai.com (the documented frontier-judge endpoint,
+// docs/llm/README.md) rejects unrecognized top-level arguments with HTTP 400,
+// so the default must stay byte-identical to the pre-think-controls request.
+func TestOpenAICompatJudgeClient_DefaultKeepsThinkOffWire(t *testing.T) {
+	var rawBody string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Errorf("read request body: %v", err)
+		}
+		rawBody = string(b)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"x","model":"claude-x","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{}}`))
+	}))
+	defer srv.Close()
+
+	judge := newOpenAICompatJudge(openaicompat.NewProvider(openaicompat.NewClient(srv.URL)))
+	think := false
+	_, err := judge.Chat(context.Background(), ollama.ChatRequest{
+		Model:    "claude-x",
+		Messages: []ollama.ChatMessage{{Role: "user", Content: "evaluate"}},
+		Think:    &think,
+		Options:  &ollama.ModelOptions{Temperature: provider.Ptr(0.1), NumPredict: 512},
+	})
+	if err != nil {
+		t.Fatalf("Chat: %v", err)
+	}
+	if strings.Contains(rawBody, "chat_template_kwargs") || strings.Contains(rawBody, "reasoning_effort") {
+		t.Fatalf("wire request carries think controls without operator opt-in; body = %s", rawBody)
+	}
+}
+
+// TestLLMJudgeScorer_OpenAICompat_RefusesFallbackAtTokenBudget pins the
+// truncation guard: when the judge burned its full NumPredict budget
+// (completion_tokens >= 512) and produced no content, the reasoning text is a
+// truncated deliberation, not a verdict. The judge system prompt itself embeds
+// an on-grid example object ({"answer_quality":0.5,...}), so a truncated echo
+// of the schema would otherwise be minted into a real — and cached — score.
+// The fallback must refuse and fail hard instead.
+func TestLLMJudgeScorer_OpenAICompat_RefusesFallbackAtTokenBudget(t *testing.T) {
+	scorer, trace, actual, done := newReasoningFallbackFixture(t,
+		`{"id":"x","model":"claude-x","choices":[{"index":0,"message":{"role":"assistant","content":"","reasoning_content":"the schema is {\"answer_quality\":0.5,\"justification\":\"short reason\"} and I still need to check"},"finish_reason":"length"}],"usage":{"completion_tokens":512}}`)
+	defer done()
+
+	_, err := scorer.Score(context.Background(), trace, actual)
+	if !errors.Is(err, errMalformedJudgeResponse) {
+		t.Fatalf("Score err = %v; want errMalformedJudgeResponse (budget-truncated reasoning must not mint a verdict)", err)
+	}
+	if !strings.Contains(err.Error(), "refusing reasoning-content fallback") {
+		t.Fatalf("Score err = %v; want the truncation-refusal shape", err)
+	}
+}
+
+// TestLLMJudgeScorer_OpenAICompat_FallbackAllowedUnderTokenBudget pins the
+// other side of the guard: a judge that finished well under budget (the
+// server separated a complete verdict into reasoning_content) must still fall
+// back and score. Kills the mutant that refuses on any nonzero token count.
+func TestLLMJudgeScorer_OpenAICompat_FallbackAllowedUnderTokenBudget(t *testing.T) {
+	scorer, trace, actual, done := newReasoningFallbackFixture(t,
+		`{"id":"x","model":"claude-x","choices":[{"index":0,"message":{"role":"assistant","content":"","reasoning_content":"{\"answer_quality\":0.5,\"justification\":\"partial\"}"},"finish_reason":"stop"}],"usage":{"completion_tokens":100}}`)
+	defer done()
+
+	score, err := scorer.Score(context.Background(), trace, actual)
+	if err != nil {
+		t.Fatalf("Score: %v", err)
+	}
+	if score.AnswerQuality != 0.5 {
+		t.Fatalf("AnswerQuality = %v; want 0.5 (under-budget fallback must still score)", score.AnswerQuality)
 	}
 }
 
@@ -408,6 +486,61 @@ func TestNewScorer_OpenAICompatSetsJudgeProvider(t *testing.T) {
 	}
 	if !strings.HasPrefix(js.JudgeProvider, openAICompatTransport+":") {
 		t.Fatalf("JudgeProvider = %q; want %s:<endpoint-id>", js.JudgeProvider, openAICompatTransport)
+	}
+}
+
+// TestLLMJudgeScorer_ThinkEnforcedChangesCacheKey pins that the scorer folds
+// ThinkEnforced into the cache key it actually computes — the canonicalCacheKey
+// sensitivity test alone cannot detect the scorer dropping the field from the
+// envelope literal, because it builds the envelope by hand.
+func TestLLMJudgeScorer_ThinkEnforcedChangesCacheKey(t *testing.T) {
+	req := ollama.ChatRequest{
+		Model: "claude-x",
+		Messages: []ollama.ChatMessage{
+			{Role: "system", Content: judgeSystemPrompt},
+			{Role: "user", Content: "evaluate"},
+		},
+		Format: "json",
+	}
+	unenforced := &LLMJudgeScorer{JudgeModel: "claude-x", JudgeProvider: "openai-compat:ep"}
+	enforced := &LLMJudgeScorer{JudgeModel: "claude-x", JudgeProvider: "openai-compat:ep", ThinkEnforced: true}
+	if unenforced.cacheKeyForJudgeRequest(req) == enforced.cacheKeyForJudgeRequest(req) {
+		t.Fatalf("ThinkEnforced not folded into the scorer's cache key; enforced and unenforced regimes alias")
+	}
+}
+
+// TestNewScorer_ThreadsJudgeDisableThinkingToThinkEnforced pins the whole
+// flag path: scorerOptions.judgeDisableThinking must arrive on the built
+// scorer as ThinkEnforced (and default to false without the opt-in), so the
+// cache regime split can never silently detach from the wire behavior.
+func TestNewScorer_ThreadsJudgeDisableThinkingToThinkEnforced(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/models" {
+			_, _ = w.Write([]byte(`{"data":[{"id":"claude-x"}]}`))
+			return
+		}
+		t.Errorf("unexpected path %s", r.URL.Path)
+	}))
+	defer srv.Close()
+
+	for _, disable := range []bool{false, true} {
+		sc, err := newScorer(context.Background(), "llm-judge", scorerOptions{
+			judgeTransport:       "openai-compat",
+			judgeBaseURL:         srv.URL,
+			judgeModel:           "claude-x",
+			judgeTimeout:         5 * time.Second,
+			judgeDisableThinking: disable,
+		})
+		if err != nil {
+			t.Fatalf("newScorer(disable=%v): %v", disable, err)
+		}
+		js, ok := sc.(*LLMJudgeScorer)
+		if !ok {
+			t.Fatalf("scorer type %T; want *LLMJudgeScorer", sc)
+		}
+		if js.ThinkEnforced != disable {
+			t.Fatalf("ThinkEnforced = %v with judgeDisableThinking = %v; flag not threaded", js.ThinkEnforced, disable)
+		}
 	}
 }
 

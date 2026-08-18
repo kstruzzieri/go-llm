@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"os"
 	"strings"
 
 	"github.com/kstruzzieri/go-llm/ollama"
@@ -26,6 +27,13 @@ import (
 // provider package for one caller.
 type openAICompatJudgeClient struct {
 	provider *openaicompat.Provider
+	// disableThinking, when true, translates the judge's request-level
+	// Think directive to the wire (chat_template_kwargs.enable_thinking).
+	// Off by default because that kwarg is a llama.cpp/vLLM template
+	// extension: api.openai.com — the documented frontier-judge endpoint —
+	// rejects unrecognized top-level arguments with HTTP 400, so the wire
+	// must stay byte-identical there. Set from -judge-disable-thinking.
+	disableThinking bool
 }
 
 // newOpenAICompatJudge wraps an openaicompat provider as a judge transport.
@@ -35,14 +43,19 @@ func newOpenAICompatJudge(p *openaicompat.Provider) *openAICompatJudgeClient {
 
 // Chat implements judgeChatClient by translating the Ollama judge request to a
 // provider.ChatRequest, issuing it through the openaicompat provider, and
-// mapping provider.ChatResponse.Content back onto ollama.ChatResponse so the
-// scorer's parser sees an unchanged shape.
+// mapping provider.ChatResponse.Content back onto ollama.ChatResponse —
+// substituting the server-separated reasoning when content is empty and the
+// reply finished under the token budget — so the scorer's parser sees an
+// unchanged shape.
 func (j *openAICompatJudgeClient) Chat(ctx context.Context, req ollama.ChatRequest) (*ollama.ChatResponse, error) {
 	popts := toProviderJudgeOptions(req.Options)
-	// The judge contract sets Think=false; forwarding it lets applyOptionsChat
-	// emit chat_template_kwargs.enable_thinking=false so a thinking-tuned
-	// judge model doesn't reason its token budget away before the verdict.
-	popts.Think = req.Think
+	if j.disableThinking {
+		// The judge contract sets Think=false; translating it lets
+		// applyOptionsChat emit chat_template_kwargs.enable_thinking=false so
+		// a thinking-tuned judge model doesn't reason its token budget away
+		// before the verdict. Opt-in only — see the field doc.
+		popts.Think = req.Think
+	}
 	presp, err := j.provider.Chat(ctx, provider.ChatRequest{
 		Model:    req.Model,
 		Messages: toProviderJudgeMessages(req.Messages),
@@ -60,6 +73,17 @@ func (j *openAICompatJudgeClient) Chat(ctx context.Context, req ollama.ChatReque
 		// can leave content empty with the verdict in reasoning_content, which
 		// the provider surfaces as Thinking. Non-empty content always wins;
 		// this fires only where the alternative is a guaranteed hard failure.
+		if popts.NumPredict > 0 && presp.Usage.CompletionTokens >= popts.NumPredict {
+			// A reply that burned the whole budget with no content is a
+			// deliberation truncated mid-reasoning, not a routed verdict. The
+			// judge system prompt embeds an on-grid example object, so a
+			// truncated echo of the schema would be minted into a real —
+			// and cached — score if handed to the last-verdict-wins parser.
+			// (Servers that omit usage report 0 tokens and skip this guard;
+			// llama.cpp always reports usage.)
+			return nil, fmt.Errorf("%w: judge burned its %d-token budget mid-reasoning with no verdict content; refusing reasoning-content fallback", errMalformedJudgeResponse, popts.NumPredict)
+		}
+		_, _ = fmt.Fprintf(os.Stderr, "llm-bench: judge content empty; substituting reasoning_content (model=%s, %d chars)\n", req.Model, len(presp.Thinking))
 		content = presp.Thinking
 	}
 	return &ollama.ChatResponse{
