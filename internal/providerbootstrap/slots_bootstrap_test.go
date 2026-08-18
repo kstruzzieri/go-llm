@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"sync"
 	"testing"
 
@@ -217,5 +218,133 @@ func TestCallerSlotSourceOverridesConfig(t *testing.T) {
 	defer custom.mu.Unlock()
 	if custom.closed != 1 {
 		t.Fatalf("custom source Close calls = %d, want 1", custom.closed)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// slots override (#400 config override)
+// ---------------------------------------------------------------------------
+
+func TestBuildSlotOverridesRequiresGovernedProvider(t *testing.T) {
+	cfg := &config.Config{
+		Providers: map[string]config.ProviderConfig{
+			"lc": {BaseURL: "http://127.0.0.1:8090", APIFormat: "openai-compat"}, // no slot_discovery
+		},
+		Models: map[string]config.ModelConfig{
+			"default": {Name: "m1", Provider: "lc", Type: "dense", Slots: 4},
+		},
+	}
+	if _, err := buildSlotOverrides(cfg, map[string]provider.SlotBackend{}); err == nil {
+		t.Fatal("want error: slots override without slot_discovery on the provider")
+	}
+}
+
+func TestBuildSlotOverridesRejectsNegativeProgrammaticConfig(t *testing.T) {
+	// Programmatic Config never passes through config.Load, so bootstrap
+	// must recheck (context_window precedent).
+	cfg := &config.Config{
+		Providers: map[string]config.ProviderConfig{
+			"lc": {BaseURL: "http://127.0.0.1:8090", APIFormat: "openai-compat", SlotDiscovery: true},
+		},
+		Models: map[string]config.ModelConfig{
+			"default": {Name: "m1", Provider: "lc", Type: "dense", Slots: -1},
+		},
+	}
+	slotBEs, err := slotBackends(cfg)
+	if err != nil {
+		t.Fatalf("slotBackends: %v", err)
+	}
+	if _, err := buildSlotOverrides(cfg, slotBEs); err == nil {
+		t.Fatal("want error: negative slots must be rejected at bootstrap")
+	}
+}
+
+func TestBuildSlotOverridesConflictNamesBothRoles(t *testing.T) {
+	cfg := &config.Config{
+		Providers: map[string]config.ProviderConfig{
+			"lc": {BaseURL: "http://127.0.0.1:8090", APIFormat: "openai-compat", SlotDiscovery: true},
+		},
+		Models: map[string]config.ModelConfig{
+			"chat":  {Name: "m1", Provider: "lc", Type: "dense", Slots: 2},
+			"embed": {Name: "m1", Provider: "lc", Type: "dense", Slots: 8},
+		},
+	}
+	slotBEs, err := slotBackends(cfg)
+	if err != nil {
+		t.Fatalf("slotBackends: %v", err)
+	}
+	_, err = buildSlotOverrides(cfg, slotBEs)
+	if err == nil {
+		t.Fatal("want conflict error for differing slots on one ModelKey")
+	}
+	if got := err.Error(); !strings.Contains(got, "chat") || !strings.Contains(got, "embed") {
+		t.Fatalf("conflict error %q must name both roles", got)
+	}
+}
+
+func TestNewAppliesSlotOverrideWithoutProbing(t *testing.T) {
+	var mu sync.Mutex
+	propsRequests := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/models" {
+			_, _ = w.Write([]byte(`{"data":[{"id":"m1"}]}`))
+			return
+		}
+		if r.URL.Path == "/props" {
+			mu.Lock()
+			propsRequests++
+			mu.Unlock()
+		}
+		http.NotFound(w, r)
+	}))
+	defer srv.Close()
+
+	cfg := &config.Config{
+		Providers: map[string]config.ProviderConfig{
+			"lc": {BaseURL: srv.URL, APIFormat: "openai-compat", SlotDiscovery: true},
+		},
+		Models: map[string]config.ModelConfig{
+			"default": {Name: "m1", Provider: "lc", Type: "dense", Slots: 3},
+		},
+	}
+	b, err := New(context.Background(), Options{Config: cfg})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer func() { _ = b.Close() }()
+	key := provider.ModelKey{Provider: "lc", Model: "m1"}
+	if n, ok := b.Router.SlotCapacity(key); !ok || n != 3 {
+		t.Fatalf("SlotCapacity = (%d, %v), want pinned (3, true)", n, ok)
+	}
+	// RecordUse on a pinned key must never probe.
+	b.Router.RecordSlotUse(key)
+	mu.Lock()
+	defer mu.Unlock()
+	if propsRequests != 0 {
+		t.Fatalf("/props requests = %d for a pinned key, want 0", propsRequests)
+	}
+}
+
+func TestNewRejectsSlotOverrideWhenNoProviderHasDiscovery(t *testing.T) {
+	// slots overrides with NO slot-discovery provider at all is the same
+	// loud config error, not a silent no-op.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/models" {
+			_, _ = w.Write([]byte(`{"data":[{"id":"m1"}]}`))
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer srv.Close()
+	cfg := &config.Config{
+		Providers: map[string]config.ProviderConfig{
+			"lc": {BaseURL: srv.URL, APIFormat: "openai-compat"},
+		},
+		Models: map[string]config.ModelConfig{
+			"default": {Name: "m1", Provider: "lc", Type: "dense", Slots: 4},
+		},
+	}
+	if _, err := New(context.Background(), Options{Config: cfg}); err == nil {
+		t.Fatal("want New error for slots override with zero slot-discovery providers")
 	}
 }
