@@ -266,6 +266,8 @@ golem -root /path/to/project -allow-write -allow-exec
 
 Inside the REPL, use `/help`, `/tools`, `/model`, `/new`, `/clear`, `/undo`, and `/exit`. Any other line is sent to the agent as the current goal.
 
+Approval prompts marked `[y/N/a]` also accept `a` ("always this session"): the same exact command (for `run_command`) or any write/edit (for the file tools) is auto-approved for the rest of the session, with the preview still shown for every call. `/auto-edits on|off` toggles the write/edit grant explicitly, `/grants` counts the active session grants, and `/grants clear` revokes them all without touching history. Grants are in-memory only and die with `/new`, `/clear`, a successful `/resume`, or process exit.
+
 ### Scripting / one-shot mode
 
 `-p` runs a single agent turn without the REPL and prints only the final answer to stdout, so the output is safe to capture in scripts. All progress, warnings, and errors go to stderr, and failures exit non-zero. One-shot implies `-no-session`, `-no-compress`, and `-no-memory` (nothing is persisted, and no memory DB is opened), and approval-gated tools stay unavailable — `-allow-write`/`-allow-exec` are ignored because there is no interactive approver to answer the prompt.
