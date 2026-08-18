@@ -27,6 +27,13 @@ const (
 	fingerprintLen     = 12
 )
 
+// execApprovalKeyPrefix namespaces exec grant keys (#341) so a command
+// fingerprint can never collide with another tool class's key. The v1 tag
+// names the fingerprint recipe (argv, cwd, env NAME=value pairs, timeout,
+// resolved exe path), so any future recipe change is an explicit migration.
+// Unexported: the key is opaque to consumers.
+const execApprovalKeyPrefix = "exec:v1:"
+
 var defaultExecEnvAllowlist = []string{"PATH", "HOME", "LANG", "USER", "TMPDIR"}
 
 type runCommandArgs struct {
@@ -206,7 +213,7 @@ func (t *RunCommand) Plan(_ context.Context, raw json.RawMessage) (agent.ToolPla
 	if err != nil {
 		return agent.ToolPlan{Effect: eff}, fmt.Errorf("resolve %q: %w", args.Argv[0], err)
 	}
-	fp := commandFingerprint(args.Argv, dir, envNames, timeout)
+	fp := commandFingerprint(args.Argv, dir, env, timeout, path)
 	p := execPending{
 		path: path, identity: fi, argv: args.Argv, dir: dir, dirLabel: dirLabel,
 		dirIdentity: dirIdentity, env: env, envNames: envNames, timeout: timeout,
@@ -214,7 +221,11 @@ func (t *RunCommand) Plan(_ context.Context, raw json.RawMessage) (agent.ToolPla
 	}
 	t.store(ContentHash(raw), p)
 	eff.Timeout = timeout
-	return agent.ToolPlan{Effect: eff, Preview: renderExecPreview(p, args.Argv[0])}, nil
+	return agent.ToolPlan{
+		Effect:      eff,
+		Preview:     renderExecPreview(p, args.Argv[0]),
+		ApprovalKey: execApprovalKeyPrefix + fp,
+	}, nil
 }
 
 // resolveDirArg resolves the optional dir argument through the Workspace chokepoint,
@@ -391,11 +402,16 @@ func customLookPath(pathValue, name string) (string, os.FileInfo, error) {
 	return "", nil, fmt.Errorf("executable %q not found in PATH", name)
 }
 
-// commandFingerprint is a short, stable hash over the approval-relevant inputs
-// (argv, resolved cwd, exposed env-var NAMES, effective timeout). Surfaced in the
-// preview; reused by logs/tests and later 2.1c policy. Uses NUL separators so field
-// boundaries cannot be forged by embedded content.
-func commandFingerprint(argv []string, cwd string, envNames []string, timeout time.Duration) string {
+// commandFingerprint is a stable hash over the approval-relevant inputs of the
+// exact command (#341 v1 recipe): argv, resolved cwd, the sanitized env as
+// NAME=value pairs (values are keyed — a changed PATH/HOME/LANG/TMPDIR/USER
+// value changes behavior even when the shape is identical), effective timeout,
+// and the resolved executable path (resolution can change under an identical
+// env when a new binary shadows an earlier PATH directory). Returns the FULL
+// digest — the approval key uses all of it; display call sites truncate to
+// fingerprintLen. Uses NUL separators so field boundaries cannot be forged by
+// embedded content.
+func commandFingerprint(argv []string, cwd string, env []string, timeout time.Duration, exePath string) string {
 	h := sha256.New()
 	write := func(s string) { _, _ = h.Write([]byte(s)); _, _ = h.Write([]byte{0}) }
 	write("argv")
@@ -405,12 +421,14 @@ func commandFingerprint(argv []string, cwd string, envNames []string, timeout ti
 	write("cwd")
 	write(cwd)
 	write("env")
-	for _, n := range envNames {
-		write(n)
+	for _, kv := range env { // sanitized NAME=value pairs, deterministic allowlist order
+		write(kv)
 	}
 	write("timeout")
 	write(timeout.String())
-	return hex.EncodeToString(h.Sum(nil))[:fingerprintLen]
+	write("exe")
+	write(exePath)
+	return hex.EncodeToString(h.Sum(nil)) // full digest; callers truncate for display only
 }
 
 // fmtTimeout formats a duration as seconds (e.g. "60s") for the approval preview.
@@ -465,7 +483,13 @@ func renderExecPreview(p execPending, originalArgv0 string) string {
 		parts[i] = n + "(parent)"
 	}
 	fmt.Fprintf(&b, "  env:     %s\n", strings.Join(parts, ", "))
-	fmt.Fprintf(&b, "  id:      %s\n", p.fingerprint)
+	// The stored fingerprint is the full digest (the approval key uses all of
+	// it); the id line stays the short display form.
+	id := p.fingerprint
+	if len(id) > fingerprintLen {
+		id = id[:fingerprintLen]
+	}
+	fmt.Fprintf(&b, "  id:      %s\n", id)
 	return b.String()
 }
 

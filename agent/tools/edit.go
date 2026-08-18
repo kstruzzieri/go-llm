@@ -116,7 +116,7 @@ func (t *EditFile) Plan(_ context.Context, raw json.RawMessage) (agent.ToolPlan,
 		afterHash:    ContentHash(after),
 		summary:      fmt.Sprintf("edit %s", args.Path),
 	})
-	return agent.ToolPlan{Effect: eff, Preview: unifiedDiff(args.Path, before, after, true)}, nil
+	return agent.ToolPlan{Effect: eff, Preview: unifiedDiff(args.Path, before, after, true), ApprovalKey: WriteClassApprovalKey}, nil
 }
 
 func (t *EditFile) Invoke(_ context.Context, raw json.RawMessage) (agent.ToolResult, error) {
