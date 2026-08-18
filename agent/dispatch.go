@@ -64,6 +64,7 @@ func (o *Orchestrator) recordResult(ctx context.Context, res *Result, state *Sta
 		if err := tro.OnToolResult(ctx, ToolResultEvent{
 			Step: step, Call: call, Effect: effect, Result: out,
 			Denied: rec.Denied, Invoked: rec.Invoked, Latency: rec.Latency,
+			AutoApproved: rec.AutoApproved,
 		}); err != nil {
 			return false, err
 		}
@@ -128,7 +129,7 @@ func (o *Orchestrator) prepareCall(ctx context.Context, reg *toolRegistry, call 
 	}
 
 	effect := tool.Effect()
-	var preview string
+	var preview, approvalKey string
 	if pt, ok := tool.(PlanningTool); ok {
 		plan, err := pt.Plan(ctx, call.Function.Arguments)
 		if err != nil {
@@ -136,21 +137,22 @@ func (o *Orchestrator) prepareCall(ctx context.Context, reg *toolRegistry, call 
 			p.result = &ToolResult{IsError: true, Content: "plan failed: " + err.Error()}
 			return p, nil
 		}
-		effect, preview = plan.Effect, plan.Preview
+		effect, preview, approvalKey = plan.Effect, plan.Preview, plan.ApprovalKey
 	}
 	effect = normalizeEffect(effect)
 	p.effect = effect // capture now so a denial (which returns before invoke) still carries the effect
 
 	if needsApproval(effect.Approval, effect.Class) {
-		ok, err := approve(ctx, approver, call, preview)
+		d, err := approve(ctx, approver, call, preview, approvalKey)
 		if err != nil {
 			return p, err // ctx cancel / approver failure propagates
 		}
-		if !ok {
+		if !d.Approved {
 			p.rec.IsError, p.rec.Denied = true, true
 			p.result = &ToolResult{IsError: true, Content: "tool call denied by approver"}
 			return p, nil
 		}
+		p.rec.AutoApproved = d.ViaGrant
 	}
 	if limit, ok := gov.reserveInvocation(name); !ok {
 		p.rec.IsError = true
@@ -206,11 +208,18 @@ func (o *Orchestrator) dispatch(ctx context.Context, reg *toolRegistry, call pro
 
 // approve applies the fail-safe: a nil approver denies any call that reaches it
 // (read-only tools never reach it because needsApproval is false for them).
-func approve(ctx context.Context, approver Approver, call provider.ToolCall, preview string) (bool, error) {
+// A KeyedApprover receives the plan's structural ApprovalKey and returns the
+// full decision; a plain Approver keeps its existing signature, its bare bool
+// lifted into a decision with no grant provenance.
+func approve(ctx context.Context, approver Approver, call provider.ToolCall, preview, approvalKey string) (ApprovalDecision, error) {
 	if approver == nil {
-		return false, nil
+		return ApprovalDecision{}, nil
 	}
-	return approver.Approve(ctx, call, preview)
+	if ka, ok := approver.(KeyedApprover); ok {
+		return ka.ApproveKeyed(ctx, call, preview, approvalKey)
+	}
+	ok, err := approver.Approve(ctx, call, preview)
+	return ApprovalDecision{Approved: ok}, err
 }
 
 func capOutput(r ToolResult, limit int) ToolResult {

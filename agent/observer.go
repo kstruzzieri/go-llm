@@ -53,6 +53,12 @@ type ToolResultEvent struct {
 	Denied  bool
 	Invoked bool
 	Latency time.Duration
+	// AutoApproved mirrors ToolCallRecord.AutoApproved: the approval decision
+	// came from a session grant (#341). It is provenance of the DECISION, not
+	// of execution — it can be true with Invoked=false when the invocation
+	// budget blocks a grant-approved call. False for prompted approvals and
+	// denials.
+	AutoApproved bool
 }
 
 // ToolResultObserver is an OPTIONAL extension of Observer. When an Observer also

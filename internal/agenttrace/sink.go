@@ -111,6 +111,7 @@ func (s *TelemetrySink) OnToolResult(_ context.Context, e agent.ToolResultEvent)
 		Effect:        effectString(e.Effect.Class),
 		Invoked:       e.Invoked,
 		Denied:        e.Denied,
+		AutoApproved:  e.AutoApproved,
 		IsError:       e.Result.IsError,
 		Truncated:     e.Result.Truncated,
 		ContentBytes:  len(e.Result.Content),

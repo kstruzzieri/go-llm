@@ -444,3 +444,45 @@ func TestTelemetrySinkContextAssemblyAbsentWithoutMixed(t *testing.T) {
 		}
 	}
 }
+
+func TestOnToolResult_RecordsAutoApproved(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "trace.jsonl")
+	s, err := NewTelemetrySink(path, "run1", time.Unix(0, 0), func() time.Time { return time.Unix(0, 0) })
+	if err != nil {
+		t.Fatalf("NewTelemetrySink: %v", err)
+	}
+	if err := s.OnToolResult(context.Background(), agent.ToolResultEvent{
+		Step:         0,
+		Call:         provider.ToolCall{Function: provider.ToolCallFunction{Name: "run_command"}},
+		Effect:       agent.Effect{Class: agent.Exec},
+		Invoked:      true,
+		AutoApproved: true,
+		Result:       agent.ToolResult{Content: "ok"},
+	}); err != nil {
+		t.Fatalf("OnToolResult: %v", err)
+	}
+	_ = s.Close()
+	data, _ := os.ReadFile(path)
+	if !strings.Contains(string(data), `"auto_approved":true`) {
+		t.Fatalf("span missing auto_approved: %s", data)
+	}
+}
+
+func TestOnToolResult_OmitsAutoApprovedWhenFalse(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "trace.jsonl")
+	s, _ := NewTelemetrySink(path, "run1", time.Unix(0, 0), func() time.Time { return time.Unix(0, 0) })
+	_ = s.OnToolResult(context.Background(), agent.ToolResultEvent{
+		Step:    0,
+		Call:    provider.ToolCall{Function: provider.ToolCallFunction{Name: "run_command"}},
+		Effect:  agent.Effect{Class: agent.Exec},
+		Invoked: true,
+		Result:  agent.ToolResult{Content: "ok"},
+	})
+	_ = s.Close()
+	data, _ := os.ReadFile(path)
+	if strings.Contains(string(data), "auto_approved") {
+		t.Fatalf("false AutoApproved must be omitted (SchemaVersion 2 byte-identity): %s", data)
+	}
+}
