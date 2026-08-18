@@ -41,7 +41,13 @@ type replSession struct {
 
 	lastModel    string           // last routed ActualModel for /model
 	journal      *mutationJournal // nil unless -allow-write enabled writes
-	allowWrite   bool
+	// grants is the session-scoped approval grant store (#341). Built once at
+	// startup; cleared unconditionally on /new and /clear, on successful
+	// /resume, and via /grants clear; read by the per-run approver. nil only
+	// in grant-free contexts (methods are nil-safe; the /auto-edits and
+	// /grants commands lazily initialize it).
+	grants     *approvalGrants
+	allowWrite bool
 	allowExec    bool
 	mcpAttached  bool    // true when external MCP tools are attached (force approver)
 	obs          *observ // nil unless -trace/-telemetry enabled
@@ -189,6 +195,7 @@ func runOnce(ctx context.Context, out io.Writer, interrupts <-chan struct{}, ses
 	if src != nil && needsApprover(sess.allowWrite, sess.allowExec, sess.mcpAttached) {
 		ap := newReplApprover(src, renderOut, sess.color)
 		ap.beforeWrite = rend.breakLine
+		ap.grants = sess.grants
 		approver = ap
 	}
 
@@ -335,6 +342,10 @@ func dispatchSlash(ctx context.Context, out io.Writer, sess *replSession, line s
 	case "/help":
 		_, _ = fmt.Fprint(out, golemHelp)
 	case "/clear":
+		// Reset semantics (#341 D8): approval grants drop unconditionally,
+		// before the session branch — under --no-session a live approver can
+		// still hold grants.
+		sess.grants.clear()
 		if sess.session == nil {
 			_, _ = fmt.Fprintln(out, "session disabled (--no-session)")
 		} else if err := sess.session.clear(ctx); err != nil {
@@ -348,6 +359,9 @@ func dispatchSlash(ctx context.Context, out io.Writer, sess *replSession, line s
 			}
 		}
 	case "/new":
+		// Session switch (#341 D8): grants never outlive the session they
+		// were given in, with or without conversation persistence.
+		sess.grants.clear()
 		if sess.session == nil {
 			_, _ = fmt.Fprintln(out, "session disabled (--no-session)")
 		} else {
@@ -378,6 +392,9 @@ func dispatchSlash(ctx context.Context, out io.Writer, sess *replSession, line s
 		} else if info, err := sess.session.switchTo(ctx, id); err != nil {
 			_, _ = fmt.Fprintf(out, "resume failed: %v\n", err)
 		} else {
+			// Success only (#341 D8): a failed /resume leaves the active
+			// session — and therefore its grants — untouched.
+			sess.grants.clear()
 			_, _ = fmt.Fprintln(out, info.line())
 		}
 	case "/model":

@@ -130,6 +130,7 @@ func newTestSession(t *testing.T, caller agent.ModelCaller, root string) *replSe
 		baseSystem: system,
 		maxSteps:   16,
 		clock:      func() time.Time { return time.Unix(0, 0) },
+		grants:     newApprovalGrants(), // mirror the production default (main.go)
 	}
 }
 
@@ -1443,5 +1444,81 @@ func TestREPLIntegrationPartialInputDoubleCtrlCExits(t *testing.T) {
 	makeRaw, restore, _ := ops.counts()
 	if makeRaw == 0 || makeRaw != restore {
 		t.Fatalf("MakeRaw=%d Restore=%d, want equal and non-zero", makeRaw, restore)
+	}
+}
+
+func TestSlashNewClearsGrants(t *testing.T) {
+	root := t.TempDir()
+	sess := newSessionedTestSession(t, &captureCaller{answer: "x"}, root, "workspace:current")
+	sess.grants = newApprovalGrants()
+	sess.grants.grant(grantScopeExec, "exec:abc")
+	var out strings.Builder
+	if _, exit := dispatchSlash(context.Background(), &out, sess, "/new"); exit {
+		t.Fatal("/new must not exit")
+	}
+	if sess.grants.granted(grantScopeExec, "exec:abc") {
+		t.Fatal("/new must clear session grants")
+	}
+}
+
+func TestSlashNewClearsGrantsWithoutSession(t *testing.T) {
+	// --no-session still runs an approver, so grants can exist; /new must
+	// clear them even though there is no conversation session to renew (D8).
+	sess := &replSession{grants: newApprovalGrants()}
+	sess.grants.grant(grantScopeExec, "exec:abc")
+	var out strings.Builder
+	_, _ = dispatchSlash(context.Background(), &out, sess, "/new")
+	if sess.grants.granted(grantScopeExec, "exec:abc") {
+		t.Fatal("/new must clear grants under --no-session")
+	}
+}
+
+func TestSlashClearClearsGrants(t *testing.T) {
+	root := t.TempDir()
+	sess := newSessionedTestSession(t, &captureCaller{answer: "x"}, root, "workspace:current")
+	sess.grants = newApprovalGrants()
+	sess.grants.grant(grantScopeExec, "exec:abc")
+	var out strings.Builder
+	_, _ = dispatchSlash(context.Background(), &out, sess, "/clear")
+	if sess.grants.granted(grantScopeExec, "exec:abc") {
+		t.Fatal("/clear must clear session grants")
+	}
+}
+
+func TestSlashClearClearsGrantsWithoutSession(t *testing.T) {
+	sess := &replSession{grants: newApprovalGrants()}
+	sess.grants.grant(grantScopeExec, "exec:abc")
+	var out strings.Builder
+	_, _ = dispatchSlash(context.Background(), &out, sess, "/clear")
+	if sess.grants.granted(grantScopeExec, "exec:abc") {
+		t.Fatal("/clear must clear grants under --no-session")
+	}
+}
+
+func TestSlashResumeClearsGrantsOnlyOnSuccess(t *testing.T) {
+	root := t.TempDir()
+	sess := newSessionedTestSession(t, &captureCaller{answer: "x"}, root, "workspace:current")
+	sess.grants = newApprovalGrants()
+	if err := sess.session.store.Save(context.Background(), conversation.Conversation{
+		ID:    "user:other",
+		Title: "other question",
+		Messages: []conversation.Message{
+			{Role: "user", Content: "other question"},
+			{Role: "assistant", Content: "other answer"},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// Failure first: an unknown id must NOT clear grants.
+	sess.grants.grant(grantScopeExec, "exec:abc")
+	var out strings.Builder
+	_, _ = dispatchSlash(context.Background(), &out, sess, "/resume does-not-exist")
+	if !sess.grants.granted(grantScopeExec, "exec:abc") {
+		t.Fatal("failed /resume must keep grants")
+	}
+	// Success: switching to the saved session clears.
+	_, _ = dispatchSlash(context.Background(), &out, sess, "/resume user:other")
+	if sess.grants.granted(grantScopeExec, "exec:abc") {
+		t.Fatal("successful /resume must clear grants")
 	}
 }
