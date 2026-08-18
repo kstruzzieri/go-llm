@@ -271,6 +271,19 @@ func (rp *RoutePlan) ExecuteChatStream(ctx context.Context, fn func(ChatResponse
 	fallbacksUsed := 0
 	var outcome *RouteOutcome
 
+	// Admission bracket (#400): the permit spans the ENTIRE stream —
+	// ChatStream is synchronous (callback on the caller's goroutine,
+	// returns only when the stream completes, errors, or the caller's
+	// ctx cancels), so release-after-return covers completion, mid-stream
+	// error, and abandonment with one Once-guarded release point. The
+	// clock starts after admission so queue wait stays out of attempt
+	// latency.
+	release, admErr := rp.acquireFor(ctx, rp.Profile.Key)
+	if admErr != nil {
+		return admErr
+	}
+	defer release()
+
 	primaryStart := time.Now()
 	streamDone := false
 	var callbackErr error
@@ -305,6 +318,7 @@ func (rp *RoutePlan) ExecuteChatStream(ctx context.Context, fn func(ChatResponse
 	}
 
 	err := rp.Provider.ChatStream(ctx, req, wrappedFn)
+	release()
 	if streamDone && err != nil && (callbackErr == nil || !errors.Is(err, callbackErr)) {
 		// A provider may still surface transport/read errors after it has
 		// delivered a final Done chunk accepted by the callback. Treat the
@@ -331,6 +345,14 @@ func (rp *RoutePlan) ExecuteChatStream(ctx context.Context, fn func(ChatResponse
 		if !delivered {
 			for i, fb := range rp.Fallbacks {
 				fbReq := fb.buildChatRequest(true)
+				fbRelease, fbAdmErr := rp.acquireFor(ctx, fb.Profile.Key)
+				if fbAdmErr != nil {
+					// Terminal (cancel/closed): stop the walk; prior
+					// attempts and their signals stand (§4).
+					err = fbAdmErr
+					break
+				}
+				defer fbRelease()
 				delivered = false
 				fbStart := time.Now()
 				fbStreamDone := false
@@ -371,6 +393,7 @@ func (rp *RoutePlan) ExecuteChatStream(ctx context.Context, fn func(ChatResponse
 				}
 
 				err = fb.Provider.ChatStream(ctx, fbReq, wrappedFbFn)
+				fbRelease()
 				if fbStreamDone && err != nil && (fbCallbackErr == nil || !errors.Is(err, fbCallbackErr)) {
 					// See primary streamDone handling above.
 					err = nil
@@ -505,6 +528,14 @@ func (rp *RoutePlan) ExecuteGenerateStream(ctx context.Context, fn func(Generate
 	fallbacksUsed := 0
 	var outcome *RouteOutcome
 
+	// Admission bracket (#400): see ExecuteChatStream — the permit spans
+	// the entire stream and releases exactly once on every return path.
+	release, admErr := rp.acquireFor(ctx, rp.Profile.Key)
+	if admErr != nil {
+		return admErr
+	}
+	defer release()
+
 	primaryStart := time.Now()
 	streamDone := false
 	var callbackErr error
@@ -539,6 +570,7 @@ func (rp *RoutePlan) ExecuteGenerateStream(ctx context.Context, fn func(Generate
 	}
 
 	err := rp.Provider.GenerateStream(ctx, req, wrappedFn)
+	release()
 	if streamDone && err != nil && (callbackErr == nil || !errors.Is(err, callbackErr)) {
 		// A provider may still surface transport/read errors after it has
 		// delivered a final Done chunk accepted by the callback. Treat the
@@ -565,6 +597,14 @@ func (rp *RoutePlan) ExecuteGenerateStream(ctx context.Context, fn func(Generate
 		if !delivered {
 			for i, fb := range rp.Fallbacks {
 				fbReq := fb.buildGenerateRequest(true)
+				fbRelease, fbAdmErr := rp.acquireFor(ctx, fb.Profile.Key)
+				if fbAdmErr != nil {
+					// Terminal (cancel/closed): stop the walk; prior
+					// attempts and their signals stand (§4).
+					err = fbAdmErr
+					break
+				}
+				defer fbRelease()
 				delivered = false
 				fbStart := time.Now()
 				fbStreamDone := false
@@ -605,6 +645,7 @@ func (rp *RoutePlan) ExecuteGenerateStream(ctx context.Context, fn func(Generate
 				}
 
 				err = fb.Provider.GenerateStream(ctx, fbReq, wrappedFbFn)
+				fbRelease()
 				if fbStreamDone && err != nil && (fbCallbackErr == nil || !errors.Is(err, fbCallbackErr)) {
 					// See primary streamDone handling above.
 					err = nil
