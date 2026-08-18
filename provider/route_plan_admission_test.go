@@ -3,6 +3,7 @@ package provider
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -824,5 +825,208 @@ func TestStreamPrimaryAdmissionFailureMakesNoAttempt(t *testing.T) {
 				t.Fatalf("recorder signals = %d, want 0", n)
 			}
 		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// AdmittedEmbedder seam (Task 5)
+// ---------------------------------------------------------------------------
+
+// admittedEmbedFake implements Provider + AdmittedEmbedder, invoking the
+// admit func leader-style: acquire, wrap failures with %w (as the exported
+// contract requires), release after the underlying embed.
+type admittedEmbedFake struct {
+	*rpMockProvider
+	mu            sync.Mutex
+	admittedCalls int
+}
+
+func (f *admittedEmbedFake) EmbedAdmitted(ctx context.Context, req EmbedRequest, admit AdmitFunc) (*EmbedResponse, error) {
+	f.mu.Lock()
+	f.admittedCalls++
+	f.mu.Unlock()
+	release, err := admit(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("provider: fake: embed: admission: %w", err)
+	}
+	defer release()
+	return f.Embed(ctx, req)
+}
+
+func (f *admittedEmbedFake) getAdmittedCalls() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.admittedCalls
+}
+
+func admittedEmbedPlanPair(primaryErr error, rec *rpMockRecorder) (*RoutePlan, *admittedEmbedFake, *admittedEmbedFake) {
+	primary := &admittedEmbedFake{rpMockProvider: healthyMock("ollama-a")}
+	if primaryErr != nil {
+		primary.embedErr = primaryErr
+	}
+	fb := &admittedEmbedFake{rpMockProvider: healthyMock("ollama-b")}
+	plan := admissionFallbackPlan(primary.rpMockProvider, fb.rpMockProvider, rec)
+	plan.Provider = primary
+	plan.Fallbacks[0].Provider = fb
+	return plan, primary, fb
+}
+
+func TestExecuteEmbedDispatchesToAdmittedEmbedderWithPrimaryKey(t *testing.T) {
+	rec := &rpMockRecorder{}
+	plan, primary, _ := admittedEmbedPlanPair(nil, rec)
+	ra := &recordingAdmitter{}
+	plan.setAdmission(ra)
+
+	resp, err := plan.ExecuteEmbed(context.Background())
+	if err != nil || resp == nil {
+		t.Fatalf("ExecuteEmbed = (%v, %v)", resp, err)
+	}
+	if got := primary.getAdmittedCalls(); got != 1 {
+		t.Fatalf("EmbedAdmitted calls = %d, want 1 (dispatch must prefer the seam)", got)
+	}
+	want := []string{"acquire ollama-a/test-model", "release ollama-a/test-model"}
+	got := ra.getEvents()
+	if len(got) != 2 || got[0] != want[0] || got[1] != want[1] {
+		t.Fatalf("events = %v, want %v (admit bound to the PRIMARY key)", got, want)
+	}
+}
+
+func TestExecuteEmbedFallbackAdmitBoundToFallbackKey(t *testing.T) {
+	rec := &rpMockRecorder{}
+	plan, _, fb := admittedEmbedPlanPair(&HTTPStatusError{StatusCode: 503}, rec)
+	ra := &recordingAdmitter{}
+	plan.setAdmission(ra)
+
+	resp, err := plan.ExecuteEmbed(context.Background())
+	if err != nil || resp == nil {
+		t.Fatalf("ExecuteEmbed = (%v, %v)", resp, err)
+	}
+	if got := fb.getAdmittedCalls(); got != 1 {
+		t.Fatalf("fallback EmbedAdmitted calls = %d, want 1", got)
+	}
+	want := []string{
+		"acquire ollama-a/test-model", "release ollama-a/test-model",
+		"acquire ollama-b/test-model", "release ollama-b/test-model",
+	}
+	got := ra.getEvents()
+	if len(got) != len(want) {
+		t.Fatalf("events = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("events[%d] = %q, want %q (admit bound to each attempt's OWN key)", i, got[i], want[i])
+		}
+	}
+}
+
+func TestExecuteEmbedNilAdmissionStillUsesSeamWithNoopAdmit(t *testing.T) {
+	rec := &rpMockRecorder{}
+	plan, primary, _ := admittedEmbedPlanPair(nil, rec)
+	// no setAdmission: nil seam
+
+	resp, err := plan.ExecuteEmbed(context.Background())
+	if err != nil || resp == nil {
+		t.Fatalf("ExecuteEmbed = (%v, %v)", resp, err)
+	}
+	if got := primary.getAdmittedCalls(); got != 1 {
+		t.Fatalf("EmbedAdmitted calls = %d, want 1 (uniform path, admit is a no-op)", got)
+	}
+}
+
+func TestExecuteEmbedAdmissionFailureThroughProviderMintsNoAttempt(t *testing.T) {
+	rec := &rpMockRecorder{}
+	plan, primary, _ := admittedEmbedPlanPair(nil, rec)
+	key := ModelKey{Provider: "ollama-a", Model: "test-model"}
+	ra := &recordingAdmitter{errFor: map[ModelKey]error{key: ErrRouterClosed}}
+	plan.setAdmission(ra)
+
+	resp, err := plan.ExecuteEmbed(context.Background())
+	if resp != nil {
+		t.Fatalf("resp = %v, want nil", resp)
+	}
+	if !errors.Is(err, ErrRouterClosed) {
+		t.Fatalf("err = %v, want ErrRouterClosed", err)
+	}
+	var ae *admissionError
+	if errors.As(err, &ae) {
+		t.Fatalf("caller received the internal admissionError wrapper %v; want the unwrapped original", err)
+	}
+	if got := primary.getAdmittedCalls(); got != 1 {
+		t.Fatalf("EmbedAdmitted calls = %d, want 1 (the flight-that-failed-admission ran)", got)
+	}
+	if got := primary.getEmbedCalls(); got != 0 {
+		t.Fatalf("underlying embed calls = %d, want 0", got)
+	}
+	if n := len(rec.getSuccesses()) + len(rec.getFailures()) + len(rec.getWarmthUses()); n != 0 {
+		t.Fatalf("recorder signals = %d, want 0 (admission failure mints no attempt)", n)
+	}
+}
+
+func TestExecuteEmbedFallbackAdmissionFailureKeepsPriorAttempts(t *testing.T) {
+	rec := &rpMockRecorder{}
+	plan, primary, fb := admittedEmbedPlanPair(&HTTPStatusError{StatusCode: 503}, rec)
+	fbKey := ModelKey{Provider: "ollama-b", Model: "test-model"}
+	ra := &recordingAdmitter{errFor: map[ModelKey]error{fbKey: ErrRouterClosed}}
+	plan.setAdmission(ra)
+
+	resp, err := plan.ExecuteEmbed(context.Background())
+	if resp != nil {
+		t.Fatalf("resp = %v, want nil", resp)
+	}
+	if !errors.Is(err, ErrRouterClosed) {
+		t.Fatalf("err = %v, want ErrRouterClosed", err)
+	}
+	var ae *admissionError
+	if errors.As(err, &ae) {
+		t.Fatalf("caller received the internal admissionError wrapper %v", err)
+	}
+	if got := primary.getAdmittedCalls(); got != 1 {
+		t.Fatalf("primary EmbedAdmitted calls = %d, want 1", got)
+	}
+	if got := fb.getEmbedCalls(); got != 0 {
+		t.Fatalf("fallback underlying embed calls = %d, want 0", got)
+	}
+	failures := rec.getFailures()
+	if len(failures) != 1 || failures[0].Provider != "ollama-a" {
+		t.Fatalf("failures = %v, want exactly the primary's real infra failure", failures)
+	}
+}
+
+func TestExecuteEmbedDeadCallerRejectedBeforeFlightWhenGoverned(t *testing.T) {
+	rec := &rpMockRecorder{}
+	plan, primary, _ := admittedEmbedPlanPair(nil, rec)
+	ra := &recordingAdmitter{} // governed by default; rejects dead ctx
+	plan.setAdmission(ra)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	resp, err := plan.ExecuteEmbed(ctx)
+	if resp != nil || !errors.Is(err, context.Canceled) {
+		t.Fatalf("ExecuteEmbed = (%v, %v), want (nil, context.Canceled)", resp, err)
+	}
+	if got := primary.getAdmittedCalls(); got != 0 {
+		t.Fatalf("EmbedAdmitted calls = %d, want 0 (no flight for a dead caller)", got)
+	}
+	if n := len(rec.getSuccesses()) + len(rec.getFailures()) + len(rec.getWarmthUses()); n != 0 {
+		t.Fatalf("recorder signals = %d, want 0", n)
+	}
+}
+
+func TestExecuteEmbedDeadCallerUngovernedStillReachesProvider(t *testing.T) {
+	rec := &rpMockRecorder{}
+	plan, primary, _ := admittedEmbedPlanPair(nil, rec)
+	key := ModelKey{Provider: "ollama-a", Model: "test-model"}
+	ra := &recordingAdmitter{ungoverned: map[ModelKey]bool{key: true}}
+	plan.setAdmission(ra)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	// Bit-identity: today the provider receives the cancelled ctx and
+	// decides for itself; the admission layer must not intercept.
+	if _, err := plan.ExecuteEmbed(ctx); err != nil {
+		t.Fatalf("ExecuteEmbed = %v, want nil (fake ignores ctx, mirroring provider-owned handling)", err)
+	}
+	if got := primary.getAdmittedCalls(); got != 1 {
+		t.Fatalf("EmbedAdmitted calls = %d, want 1 (ungoverned dead caller passes through)", got)
 	}
 }

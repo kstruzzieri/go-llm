@@ -32,6 +32,41 @@ type RouteRecorder interface {
 }
 
 // ---------------------------------------------------------------------------
+// AdmittedEmbedder — optional provider extension (#400)
+// ---------------------------------------------------------------------------
+
+// AdmitFunc acquires an admission permit for the attempt's model key.
+// release is non-nil on success and must be called exactly once (it is
+// sync.Once-guarded, so a deferred call is safe).
+type AdmitFunc func(ctx context.Context) (release func(), err error)
+
+// AdmittedEmbedder is an optional Provider extension. Providers that
+// dedupe embeds internally implement it so admission can be acquired
+// inside the dedup leader (one permit per backend request, not per
+// caller). admit is never nil; providers call it in the leader only.
+//
+// Error-chain contract: when admit returns an error, the provider MUST
+// return it with the chain intact — wrap only via fmt.Errorf("...: %w",
+// err). The route layer detects admission failures by unwrapping the
+// returned error; breaking the chain converts an admission failure into
+// a fake provider attempt with breaker/feedback side effects.
+type AdmittedEmbedder interface {
+	EmbedAdmitted(ctx context.Context, req EmbedRequest, admit AdmitFunc) (*EmbedResponse, error)
+}
+
+// admissionError marks an error as originating in the admission layer so
+// ExecuteEmbed can distinguish it from a provider failure even after an
+// AdmittedEmbedder provider wraps it with %w (admission failures surface
+// through the provider's return path). Admission failures must not
+// produce RouteAttempts or recorder signals. Only admitFuncFor
+// constructs one, so providers cannot trip the detection with their own
+// errors.
+type admissionError struct{ err error }
+
+func (e *admissionError) Error() string { return "admission: " + e.err.Error() }
+func (e *admissionError) Unwrap() error { return e.err }
+
+// ---------------------------------------------------------------------------
 // RoutePlan
 // ---------------------------------------------------------------------------
 
@@ -704,18 +739,50 @@ func (rp *RoutePlan) ExecuteEmbed(ctx context.Context) (*EmbedResponse, error) {
 	var attempts []RouteAttempt
 	req := rp.buildEmbedRequest()
 
-	// Admission bracket (#400): see ExecuteChat for the full contract.
-	// This is the conservative per-caller bracket; Task 5 adds the
-	// AdmittedEmbedder dispatch for providers that dedupe internally.
-	release, admErr := rp.acquireFor(ctx, rp.Profile.Key)
-	if admErr != nil {
-		return nil, admErr
+	var resp *EmbedResponse
+	var err error
+	if ae, ok := rp.Provider.(AdmittedEmbedder); ok {
+		// Dead-caller pre-check (§6 amended contract): a caller whose
+		// ctx is already done must not start or join a shared flight on
+		// a GOVERNED key. No separate governance probe: a dead ctx is
+		// routed through acquireFor itself — the gate's governance-first
+		// entry ordering means ungoverned keys (and nil admission)
+		// return a no-op success and the call proceeds bit-identically
+		// to today, while governed keys return the context error before
+		// any flight exists. Healthy callers (ctx.Err() == nil) skip
+		// this entirely: zero extra work, no Capacity read.
+		if ctx.Err() != nil {
+			rel, admErr := rp.acquireFor(ctx, rp.Profile.Key)
+			if admErr != nil {
+				return nil, admErr // no flight, no attempt, no signals
+			}
+			rel() // no-op release: ungoverned pass-through
+		}
+		// Admission happens inside the provider's dedup leader (§6): no
+		// route-level bracket, or M identical callers would hold M
+		// permits and the gate would break the dedup itself.
+		start := time.Now()
+		resp, err = ae.EmbedAdmitted(ctx, req, rp.admitFuncFor(rp.Profile.Key))
+		var aErr *admissionError
+		if errors.As(err, &aErr) {
+			// Admission failure surfaced through the provider (§4): no
+			// attempt, no signals; return the original error.
+			return nil, aErr.Unwrap()
+		}
+		attempts = append(attempts, makeAttempt(rp.Profile.Key, err, time.Since(start)))
+	} else {
+		// Conservative per-caller bracket (§4) for providers without
+		// internal dedup; see ExecuteChat for the full contract.
+		release, admErr := rp.acquireFor(ctx, rp.Profile.Key)
+		if admErr != nil {
+			return nil, admErr
+		}
+		defer release()
+		start := time.Now()
+		resp, err = rp.Provider.Embed(ctx, req)
+		release()
+		attempts = append(attempts, makeAttempt(rp.Profile.Key, err, time.Since(start)))
 	}
-	defer release()
-	start := time.Now()
-	resp, err := rp.Provider.Embed(ctx, req)
-	release()
-	attempts = append(attempts, makeAttempt(rp.Profile.Key, err, time.Since(start)))
 
 	fallbacksUsed := 0
 	if err != nil && IsInfrastructureError(err) {
@@ -723,16 +790,37 @@ func (rp *RoutePlan) ExecuteEmbed(ctx context.Context) (*EmbedResponse, error) {
 
 		for i, fb := range rp.Fallbacks {
 			fbReq := fb.buildEmbedRequest()
-			fbRelease, fbAdmErr := rp.acquireFor(ctx, fb.Profile.Key)
-			if fbAdmErr != nil {
-				err = fbAdmErr
-				break
+			if ae, ok := fb.Provider.(AdmittedEmbedder); ok {
+				if ctx.Err() != nil {
+					rel, fbAdmErr := rp.acquireFor(ctx, fb.Profile.Key)
+					if fbAdmErr != nil {
+						err = fbAdmErr
+						break
+					}
+					rel()
+				}
+				fbStart := time.Now()
+				resp, err = ae.EmbedAdmitted(ctx, fbReq, rp.admitFuncFor(fb.Profile.Key))
+				var aErr *admissionError
+				if errors.As(err, &aErr) {
+					// Terminal (§4): stop the walk; prior attempts and
+					// their signals stand, no attempt for this one.
+					err = aErr.Unwrap()
+					break
+				}
+				attempts = append(attempts, makeAttempt(fb.Profile.Key, err, time.Since(fbStart)))
+			} else {
+				fbRelease, fbAdmErr := rp.acquireFor(ctx, fb.Profile.Key)
+				if fbAdmErr != nil {
+					err = fbAdmErr
+					break
+				}
+				defer fbRelease()
+				fbStart := time.Now()
+				resp, err = fb.Provider.Embed(ctx, fbReq)
+				fbRelease()
+				attempts = append(attempts, makeAttempt(fb.Profile.Key, err, time.Since(fbStart)))
 			}
-			defer fbRelease()
-			fbStart := time.Now()
-			resp, err = fb.Provider.Embed(ctx, fbReq)
-			fbRelease()
-			attempts = append(attempts, makeAttempt(fb.Profile.Key, err, time.Since(fbStart)))
 			if err == nil {
 				fallbacksUsed = i + 1
 				break
@@ -947,6 +1035,21 @@ func (rp *RoutePlan) buildEmbedRequest() EmbedRequest {
 // ---------------------------------------------------------------------------
 // Recorder helpers (nil-safe)
 // ---------------------------------------------------------------------------
+
+// admitFuncFor binds an AdmitFunc to one attempt's model key. Never
+// returns nil; on an ungoverned plan the returned func admits with a
+// no-op release, so AdmittedEmbedder providers take one uniform path.
+// Failures are wrapped in admissionError so ExecuteEmbed can tell them
+// apart from provider failures after the provider re-wraps them.
+func (rp *RoutePlan) admitFuncFor(key ModelKey) AdmitFunc {
+	return func(ctx context.Context) (func(), error) {
+		release, err := rp.acquireFor(ctx, key)
+		if err != nil {
+			return nil, &admissionError{err: err}
+		}
+		return release, nil
+	}
+}
 
 // acquireFor brackets one provider attempt with slot admission (#400).
 // Returns a no-op release when the plan has no admission seam (Router
