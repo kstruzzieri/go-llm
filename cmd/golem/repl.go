@@ -10,6 +10,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/kstruzzieri/go-llm/agent"
+	"github.com/kstruzzieri/go-llm/agent/tools"
 	"github.com/kstruzzieri/go-llm/conversation"
 	golemruntime "github.com/kstruzzieri/go-llm/golem"
 	"github.com/kstruzzieri/go-llm/internal/agenttrace"
@@ -424,6 +425,45 @@ func dispatchSlash(ctx context.Context, out io.Writer, sess *replSession, line s
 		if sess.retrieveOmitted {
 			_, _ = fmt.Fprintln(out, "retrieve omitted: no RAG index configured")
 		}
+		if sess.allowWrite {
+			_, _ = fmt.Fprintf(out, "auto-edits: %s\n", autoEditState(sess))
+		}
+	case "/auto-edits":
+		if !sess.allowWrite {
+			_, _ = fmt.Fprintln(out, "writes disabled (run with -allow-write)")
+			return "", false
+		}
+		if sess.grants == nil {
+			sess.grants = newApprovalGrants() // D9: the toggle must never lie
+		}
+		switch {
+		case len(fields) == 1:
+			_, _ = fmt.Fprintf(out, "auto-edits: %s\n", autoEditState(sess))
+		case len(fields) == 2 && fields[1] == "on":
+			sess.grants.grant(grantScopeFiles, tools.WriteClassApprovalKey)
+			_, _ = fmt.Fprintln(out, "auto-edits: on")
+		case len(fields) == 2 && fields[1] == "off":
+			sess.grants.revoke(grantScopeFiles, tools.WriteClassApprovalKey)
+			_, _ = fmt.Fprintln(out, "auto-edits: off")
+		default:
+			_, _ = fmt.Fprintln(out, "usage: /auto-edits [on|off]")
+		}
+	case "/grants":
+		if sess.grants == nil {
+			sess.grants = newApprovalGrants() // D9: state shown must be state stored
+		}
+		switch {
+		case len(fields) == 1:
+			_, _ = fmt.Fprintf(out, "session grants: %d\n", sess.grants.count())
+			if sess.allowWrite {
+				_, _ = fmt.Fprintf(out, "auto-edits: %s\n", autoEditState(sess))
+			}
+		case len(fields) == 2 && fields[1] == "clear":
+			sess.grants.clear()
+			_, _ = fmt.Fprintln(out, "session grants cleared")
+		default:
+			_, _ = fmt.Fprintln(out, "usage: /grants [clear]")
+		}
 	case "/edit":
 		// Capability is independent of the line editor: -no-editor selects
 		// the scanner for input but leaves /edit available on a real TTY. A
@@ -456,6 +496,16 @@ func dispatchSlash(ctx context.Context, out io.Writer, sess *replSession, line s
 	return "", false
 }
 
+// autoEditState reports the write-class grant as a toggle state. The "a"
+// answer on a write/edit prompt and /auto-edits on set the same grant, so
+// this is the single source of truth for both.
+func autoEditState(sess *replSession) string {
+	if sess.grants.granted(grantScopeFiles, tools.WriteClassApprovalKey) {
+		return "on"
+	}
+	return "off"
+}
+
 const golemHelp = `commands:
   /help          show this help
   /tools         list registered tools and their effect class
@@ -468,6 +518,10 @@ const golemHelp = `commands:
   /resume <id>   switch to a saved session
   /edit [seed]   compose a goal in $VISUAL/$EDITOR (quoting unsupported)
   /undo          revert the last applied write (when -allow-write)
+  /auto-edits [on|off]
+                 show or set session auto-approval for write/edit tools
+  /grants [clear]
+                 count active session approval grants, or revoke them all
   /remember [--global] <text>
                  save a memory (workspace scope unless --global)
   /forget <id>   delete a saved memory
@@ -477,6 +531,8 @@ const golemHelp = `commands:
                  list agent-memory records, forget one, or promote one (with -agent-memory)
   /exit, /quit   leave golem
 any other line is sent to the agent as a goal.
+approval prompts marked [y/N/a] accept "a": approve and allow the same
+action again for the rest of this session (exec: exact command only).
 `
 
 func printSessions(ctx context.Context, out io.Writer, s *session) error {

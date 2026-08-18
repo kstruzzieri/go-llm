@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/kstruzzieri/go-llm/agent"
+	"github.com/kstruzzieri/go-llm/agent/tools"
 	"github.com/kstruzzieri/go-llm/conversation"
 	feedbackpkg "github.com/kstruzzieri/go-llm/feedback"
 	golemruntime "github.com/kstruzzieri/go-llm/golem"
@@ -1520,5 +1521,124 @@ func TestSlashResumeClearsGrantsOnlyOnSuccess(t *testing.T) {
 	_, _ = dispatchSlash(context.Background(), &out, sess, "/resume user:other")
 	if sess.grants.granted(grantScopeExec, "exec:abc") {
 		t.Fatal("successful /resume must clear grants")
+	}
+}
+
+func autoEditsSession() *replSession {
+	return &replSession{allowWrite: true, grants: newApprovalGrants()}
+}
+
+func TestAutoEditsToggleAndStatus(t *testing.T) {
+	sess := autoEditsSession()
+	var out strings.Builder
+	_, _ = dispatchSlash(context.Background(), &out, sess, "/auto-edits")
+	if !strings.Contains(out.String(), "auto-edits: off") {
+		t.Fatalf("default state must report off:\n%s", out.String())
+	}
+	out.Reset()
+	_, _ = dispatchSlash(context.Background(), &out, sess, "/auto-edits on")
+	if !strings.Contains(out.String(), "auto-edits: on") {
+		t.Fatalf("on must confirm:\n%s", out.String())
+	}
+	if !sess.grants.granted(grantScopeFiles, tools.WriteClassApprovalKey) {
+		t.Fatal("/auto-edits on must grant the write-class key under the files scope")
+	}
+	out.Reset()
+	_, _ = dispatchSlash(context.Background(), &out, sess, "/auto-edits off")
+	if sess.grants.granted(grantScopeFiles, tools.WriteClassApprovalKey) {
+		t.Fatal("/auto-edits off must revoke the write-class key")
+	}
+}
+
+func TestAutoEditsReflectsApproverGrant(t *testing.T) {
+	// "a" on a write prompt and /auto-edits are one state: granting via the
+	// store must flip the reported status to on.
+	sess := autoEditsSession()
+	sess.grants.grant(grantScopeFiles, tools.WriteClassApprovalKey)
+	var out strings.Builder
+	_, _ = dispatchSlash(context.Background(), &out, sess, "/auto-edits")
+	if !strings.Contains(out.String(), "auto-edits: on") {
+		t.Fatalf("status must reflect an approver-set class grant:\n%s", out.String())
+	}
+}
+
+func TestAutoEditsLazyInitStoresForReal(t *testing.T) {
+	// D9 (REV 3): a nil store must never produce a lying "on". The command
+	// lazily initializes the store, so "on" always means stored.
+	sess := &replSession{allowWrite: true} // grants nil
+	var out strings.Builder
+	_, _ = dispatchSlash(context.Background(), &out, sess, "/auto-edits on")
+	if !strings.Contains(out.String(), "auto-edits: on") {
+		t.Fatalf("on must confirm:\n%s", out.String())
+	}
+	if sess.grants == nil || !sess.grants.granted(grantScopeFiles, tools.WriteClassApprovalKey) {
+		t.Fatal("reported on must be backed by a real stored grant")
+	}
+}
+
+func TestAutoEditsRequiresAllowWrite(t *testing.T) {
+	sess := &replSession{allowWrite: false, grants: newApprovalGrants()}
+	var out strings.Builder
+	_, _ = dispatchSlash(context.Background(), &out, sess, "/auto-edits on")
+	if !strings.Contains(out.String(), "writes disabled (run with -allow-write)") {
+		t.Fatalf("must mirror /undo's gate:\n%s", out.String())
+	}
+	if sess.grants.granted(grantScopeFiles, tools.WriteClassApprovalKey) {
+		t.Fatal("gated toggle must not grant")
+	}
+}
+
+func TestAutoEditsBadArgUsage(t *testing.T) {
+	sess := autoEditsSession()
+	var out strings.Builder
+	_, _ = dispatchSlash(context.Background(), &out, sess, "/auto-edits maybe")
+	if !strings.Contains(out.String(), "usage: /auto-edits [on|off]") {
+		t.Fatalf("bad arg must print usage:\n%s", out.String())
+	}
+}
+
+func TestToolsListsAutoEditState(t *testing.T) {
+	sess := autoEditsSession()
+	var out strings.Builder
+	_, _ = dispatchSlash(context.Background(), &out, sess, "/tools")
+	if !strings.Contains(out.String(), "auto-edits: off") {
+		t.Fatalf("/tools must surface auto-edit state when writes are enabled:\n%s", out.String())
+	}
+}
+
+func TestGrantsCommandCountAndClear(t *testing.T) {
+	sess := autoEditsSession()
+	sess.grants.grant(grantScopeExec, "exec:abc")
+	sess.grants.grant(grantScopeFiles, tools.WriteClassApprovalKey)
+	var out strings.Builder
+	_, _ = dispatchSlash(context.Background(), &out, sess, "/grants")
+	if !strings.Contains(out.String(), "session grants: 2") {
+		t.Fatalf("/grants must report the count:\n%s", out.String())
+	}
+	if !strings.Contains(out.String(), "auto-edits: on") {
+		t.Fatalf("/grants must surface auto-edit state when writes are enabled:\n%s", out.String())
+	}
+	out.Reset()
+	_, _ = dispatchSlash(context.Background(), &out, sess, "/grants clear")
+	if !strings.Contains(out.String(), "session grants cleared") {
+		t.Fatalf("/grants clear must confirm:\n%s", out.String())
+	}
+	if sess.grants.count() != 0 {
+		t.Fatal("/grants clear must revoke everything")
+	}
+	// Revoking everything includes the write-class grant: auto-edits reads off.
+	out.Reset()
+	_, _ = dispatchSlash(context.Background(), &out, sess, "/auto-edits")
+	if !strings.Contains(out.String(), "auto-edits: off") {
+		t.Fatalf("auto-edits must read off after /grants clear:\n%s", out.String())
+	}
+}
+
+func TestGrantsCommandBadArgUsage(t *testing.T) {
+	sess := autoEditsSession()
+	var out strings.Builder
+	_, _ = dispatchSlash(context.Background(), &out, sess, "/grants nonsense")
+	if !strings.Contains(out.String(), "usage: /grants [clear]") {
+		t.Fatalf("bad arg must print usage:\n%s", out.String())
 	}
 }
