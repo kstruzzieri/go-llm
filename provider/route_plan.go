@@ -53,6 +53,12 @@ type RoutePlan struct {
 	recorder  RouteRecorder    // internal: set by Router
 	feedback  *RoutingFeedback // internal: set by Router via SetFeedback; nil = no recording
 
+	// admission is the slot-admission seam (#400). nil = ungoverned
+	// Router (no slot source): every bracket is a no-op. Stamped by
+	// buildPlan; deliberately NOT derived from recorder so an external
+	// SetRecorder swap cannot silently disable admission.
+	admission slotAdmitter
+
 	// scoreBreakdown carries the winning candidate's unexported
 	// scoreBreakdown; buildOutcome translates it into the public
 	// ScoreBreakdown on the RouteOutcome. nil = no public breakdown.
@@ -102,6 +108,13 @@ func (rp *RoutePlan) SetFeedback(rf *RoutingFeedback) {
 // SetWasSticky marks the plan as having been selected via sticky routing.
 func (rp *RoutePlan) SetWasSticky(v bool) {
 	rp.wasSticky = v
+}
+
+// setAdmission stamps the slot-admission seam (#400). The Router calls
+// this from buildPlan; nil disables admission for this plan. Unexported:
+// admission is Router-owned plumbing, not public plan API.
+func (rp *RoutePlan) setAdmission(a slotAdmitter) {
+	rp.admission = a
 }
 
 // setScoreBreakdown stamps the winning candidate's score breakdown onto

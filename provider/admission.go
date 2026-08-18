@@ -5,7 +5,9 @@
 package provider
 
 import (
+	"cmp"
 	"context"
+	"slices"
 	"sync"
 )
 
@@ -208,4 +210,49 @@ func (sa *slotAdmission) exitWait(key ModelKey, rejected bool) {
 	if rejected {
 		g.rejected++
 	}
+}
+
+// SlotAdmissionInfo is one key's admission telemetry for operator
+// surfaces (Router.SlotAdmissionSnapshot).
+type SlotAdmissionInfo struct {
+	Provider string `json:"provider"`
+	Model    string `json:"model"`
+	Capacity int    `json:"capacity"`
+	InFlight int    `json:"in_flight"`
+	Waiting  int    `json:"waiting"`
+	Admitted uint64 `json:"admitted"`
+	Queued   uint64 `json:"queued"`
+	Rejected uint64 `json:"rejected"`
+}
+
+func (sa *slotAdmission) snapshot() []SlotAdmissionInfo {
+	// Two-phase on purpose: copy gate state under mu, resolve capacities
+	// AFTER unlocking. Capacity is contractually a pure cache read, but a
+	// custom SlotSource may take arbitrary locks or time, and sa.mu is on
+	// the hot admit path — foreign calls never run under it.
+	sa.mu.Lock()
+	out := make([]SlotAdmissionInfo, 0, len(sa.gates))
+	for key, g := range sa.gates {
+		out = append(out, SlotAdmissionInfo{
+			Provider: key.Provider,
+			Model:    key.Model,
+			InFlight: g.inflight,
+			Waiting:  g.waiting,
+			Admitted: g.admitted,
+			Queued:   g.queued,
+			Rejected: g.rejected,
+		})
+	}
+	sa.mu.Unlock()
+	for i := range out {
+		n, _ := sa.src.Capacity(ModelKey{Provider: out[i].Provider, Model: out[i].Model})
+		out[i].Capacity = n
+	}
+	slices.SortFunc(out, func(a, b SlotAdmissionInfo) int {
+		if c := cmp.Compare(a.Provider, b.Provider); c != 0 {
+			return c
+		}
+		return cmp.Compare(a.Model, b.Model)
+	})
+	return out
 }
