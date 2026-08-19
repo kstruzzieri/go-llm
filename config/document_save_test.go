@@ -2,10 +2,13 @@ package config
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
+	"sync/atomic"
 	"testing"
 )
 
@@ -80,6 +83,150 @@ func TestCanonicalBytesRoundTripIdempotent(t *testing.T) {
 	if !bytes.Equal(out1, out2) {
 		t.Fatal("canonicalization not idempotent")
 	}
+}
+
+func TestSaveNewCreateOnly(t *testing.T) {
+	d := loadTestDoc(t, rawWithUnknown)
+	p := filepath.Join(t.TempDir(), "new.json")
+	if err := d.SaveNew(p); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.SaveNew(p); !errors.Is(err, os.ErrExist) {
+		t.Fatalf("second SaveNew err = %v, want ErrExist", err)
+	}
+}
+
+func TestSaveReplaceConflictDetection(t *testing.T) {
+	d := loadTestDoc(t, rawWithUnknown)
+	p := filepath.Join(t.TempDir(), "c.json")
+	if err := d.SaveNew(p); err != nil {
+		t.Fatal(err)
+	}
+	rev := d.Revision()
+	external := []byte(`{"providers":{},"models":{},"defaults":{}}`)
+	if err := os.WriteFile(p, external, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.SaveReplace(p, rev); err == nil {
+		t.Fatal("SaveReplace must refuse a revision mismatch")
+	}
+	got, rerr := os.ReadFile(p)
+	if rerr != nil || !bytes.Equal(got, external) {
+		t.Fatal("refused save still modified the file")
+	}
+}
+
+func TestSaveUpdatesDocumentState(t *testing.T) {
+	d := loadTestDoc(t, rawWithUnknown)
+	p := filepath.Join(t.TempDir(), "s.json")
+	if err := d.SaveNew(p); err != nil {
+		t.Fatal(err)
+	}
+	onDisk, err := os.ReadFile(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sum := sha256.Sum256(onDisk)
+	if d.Revision() != hex.EncodeToString(sum[:]) {
+		t.Fatal("revision does not match written bytes")
+	}
+	if o := d.Origin(); o.Source != OriginExplicit || o.Path != p {
+		t.Fatalf("origin not updated: %+v", o)
+	}
+	// NOTE: baseline profile ID / Dirty are SLICE 3 caller-owned state —
+	// Document deliberately has no such fields to update here.
+}
+
+// Byte-stability proven by an injected publication counter, not timing.
+func TestSaveReplaceByteStableNoRewrite(t *testing.T) {
+	d := loadTestDoc(t, rawWithUnknown)
+	p := filepath.Join(t.TempDir(), "b.json")
+	if err := d.SaveNew(p); err != nil {
+		t.Fatal(err)
+	}
+	var publishes atomic.Int64
+	orig := publishReplaceFn
+	publishReplaceFn = func(path string, data []byte) error {
+		publishes.Add(1)
+		return orig(path, data)
+	}
+	t.Cleanup(func() { publishReplaceFn = orig })
+	if err := d.SaveReplace(p, d.Revision()); err != nil {
+		t.Fatal(err)
+	}
+	if publishes.Load() != 0 {
+		t.Fatalf("unchanged content published %d time(s), want 0", publishes.Load())
+	}
+}
+
+func TestSaveNeverWritesExpandedSecret(t *testing.T) {
+	d := loadTestDoc(t, rawWithUnknown)
+	p := filepath.Join(t.TempDir(), "sec.json")
+	if err := d.SaveNew(p); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(got, []byte("sekret-value")) {
+		t.Fatal("expanded secret on disk") // no dump
+	}
+	if !bytes.Contains(got, []byte("${DOC_TEST_KEY}")) {
+		t.Fatal("literal reference lost")
+	}
+}
+
+// After a durability-uncertain publication the bytes ARE live: document state
+// must converge to the published truth alongside the typed error.
+func TestSaveReplaceDurabilityUncertainUpdatesState(t *testing.T) {
+	d := loadTestDoc(t, rawWithUnknown)
+	p := filepath.Join(t.TempDir(), "du.json")
+	if err := d.SaveNew(p); err != nil {
+		t.Fatal(err)
+	}
+	// Change content so SaveReplace actually publishes.
+	m := d.authored.Models["agent"]
+	m.Description = "changed"
+	d.authored.Models["agent"] = m
+
+	origSync := syncDir
+	syncDir = func(string) error { return errors.New("injected dir-sync failure") }
+	t.Cleanup(func() { syncDir = origSync })
+
+	err := d.SaveReplace(p, d.Revision())
+	if !errors.Is(err, ErrDurabilityUncertain) {
+		t.Fatalf("err = %v, want ErrDurabilityUncertain", err)
+	}
+	onDisk, rerr := os.ReadFile(p)
+	if rerr != nil {
+		t.Fatal(rerr)
+	}
+	sum := sha256.Sum256(onDisk)
+	if d.Revision() != hex.EncodeToString(sum[:]) {
+		t.Fatal("document revision does not reflect published bytes after durability-uncertain save")
+	}
+}
+
+// Concurrent SaveReplace + reads under -race, exercising both mutexes.
+func TestSaveConcurrentWithReads(t *testing.T) {
+	d := loadTestDoc(t, rawWithUnknown)
+	p := filepath.Join(t.TempDir(), "cc.json")
+	if err := d.SaveNew(p); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; i < 50; i++ {
+			_ = d.SaveReplace(p, d.Revision())
+		}
+	}()
+	for i := 0; i < 200; i++ {
+		_ = d.Config()
+		_ = d.Revision()
+	}
+	<-done
 }
 
 // The known-key sets are reflection-derived — spot-pin them against the real

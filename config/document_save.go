@@ -1,6 +1,9 @@
 package config
 
 import (
+	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -8,6 +11,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 )
 
 // ErrDurabilityUncertain marks a save whose bytes ARE published (rename or
@@ -75,6 +79,103 @@ func publishReplace(path string, data []byte) error {
 		return fmt.Errorf("%w: %s: dir sync: %v", ErrDurabilityUncertain, path, err)
 	}
 	return nil
+}
+
+// publishReplaceFn is the injectable publication seam (byte-stability test).
+var publishReplaceFn = publishReplace
+
+// saveLocks serializes save windows per cleaned absolute target path. This is
+// a COOPERATIVE in-process lock: it makes this package's own read-compare-
+// publish windows atomic with respect to each other. Arbitrary external
+// writers cannot be excluded by portable pathname APIs — SaveReplace's
+// revision check is the cross-process guard.
+var saveLocks sync.Map // string → *sync.Mutex
+
+func lockForPath(path string) *sync.Mutex {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		abs = path
+	}
+	mu, _ := saveLocks.LoadOrStore(filepath.Clean(abs), &sync.Mutex{})
+	return mu.(*sync.Mutex)
+}
+
+// SaveNew writes the document to a path that must not exist (create-only,
+// race-free via link-based publication).
+//
+// Lock ordering invariant: saveLock (per target path) is always taken BEFORE
+// d.mu, never nested the other way.
+func (d *Document) SaveNew(path string) error {
+	mu := lockForPath(path)
+	mu.Lock()
+	defer mu.Unlock()
+	out, err := d.canonicalLocked()
+	if err != nil {
+		return err
+	}
+	if err := publishNew(path, out); err != nil {
+		if errors.Is(err, ErrDurabilityUncertain) {
+			d.commitSaved(out, path)
+		}
+		return err
+	}
+	d.commitSaved(out, path)
+	return nil
+}
+
+// SaveReplace overwrites path only while its current content digest matches
+// expectedRevision. The per-target lock holds across compare AND publish so
+// two in-process savers cannot interleave; external edits are caught by the
+// digest, not excluded. Unchanged canonical content publishes nothing
+// (byte-stability) but still converges document state.
+func (d *Document) SaveReplace(path, expectedRevision string) error {
+	mu := lockForPath(path)
+	mu.Lock()
+	defer mu.Unlock()
+	cur, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("config: save replace %q: %w", path, err)
+	}
+	sum := sha256.Sum256(cur)
+	if got := hex.EncodeToString(sum[:]); got != expectedRevision {
+		return fmt.Errorf("config: save replace %q: revision conflict", path)
+	}
+	out, err := d.canonicalLocked()
+	if err != nil {
+		return err
+	}
+	if bytes.Equal(out, cur) {
+		d.commitSaved(out, path) // state converges; no publication
+		return nil
+	}
+	if err := publishReplaceFn(path, out); err != nil {
+		if errors.Is(err, ErrDurabilityUncertain) {
+			// Bytes ARE live: document state must reflect the published truth.
+			d.commitSaved(out, path)
+		}
+		return err
+	}
+	d.commitSaved(out, path)
+	return nil
+}
+
+// canonicalLocked renders canonical bytes under the document mutex.
+func (d *Document) canonicalLocked() ([]byte, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.canonicalBytes()
+}
+
+// commitSaved updates rawBytes/revision/origin to the published bytes.
+// Baseline profile ID and Dirty are slice-3 caller-owned state — deliberately
+// absent here.
+func (d *Document) commitSaved(out []byte, path string) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	sum := sha256.Sum256(out)
+	d.rawBytes = out
+	d.revision = hex.EncodeToString(sum[:])
+	d.origin = Origin{Source: OriginExplicit, Path: path}
 }
 
 // knownKeys maps a struct's json tag names to their field types (pointers
