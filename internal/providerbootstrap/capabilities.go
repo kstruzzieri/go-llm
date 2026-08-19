@@ -418,3 +418,53 @@ func installCapabilityOverrides(mr *provider.ModelRegistry, cfg *config.Config) 
 	})
 	return nil
 }
+
+// buildSlotOverrides collects per-model pinned slot capacities (#400).
+// Mirrors buildContextWindowOverrides: sorted-role walk, silent skip of
+// entries without Provider/Name, conflict detection naming both roles.
+// Two loud errors beyond that idiom: negative values (revalidated here
+// because config.Load only covers file-loaded config — a programmatic
+// Config bypasses it, the context_window precedent), and an override
+// whose provider is not slot-discovery governed (a pin without a
+// governed source would silently do nothing).
+func buildSlotOverrides(cfg *config.Config, slotBEs map[string]provider.SlotBackend) (map[provider.ModelKey]int, error) {
+	out := make(map[provider.ModelKey]int)
+	if cfg == nil {
+		return out, nil
+	}
+	roles := make([]string, 0, len(cfg.Models))
+	for role := range cfg.Models {
+		roles = append(roles, role)
+	}
+	sort.Strings(roles)
+	type slotsEntry struct {
+		role  string
+		slots int
+	}
+	seen := make(map[provider.ModelKey]slotsEntry)
+	for _, role := range roles {
+		model := cfg.Models[role]
+		if model.Provider == "" || model.Name == "" || model.Slots == 0 {
+			continue
+		}
+		if model.Slots < 0 {
+			return nil, fmt.Errorf("providerbootstrap: model %q: slots must be >= 1", role)
+		}
+		if _, governed := slotBEs[model.Provider]; !governed {
+			return nil, fmt.Errorf(
+				"providerbootstrap: model %q: slots override requires slot_discovery: true on provider %q",
+				role, model.Provider,
+			)
+		}
+		key := provider.ModelKey{Provider: model.Provider, Model: model.Name}
+		if existing, ok := seen[key]; ok && existing.slots != model.Slots {
+			return nil, fmt.Errorf(
+				"providerbootstrap: conflicting slots for %s: models %q and %q",
+				key, existing.role, role,
+			)
+		}
+		seen[key] = slotsEntry{role: role, slots: model.Slots}
+		out[key] = model.Slots
+	}
+	return out, nil
+}

@@ -32,6 +32,55 @@ type RouteRecorder interface {
 }
 
 // ---------------------------------------------------------------------------
+// AdmittedEmbedder — optional provider extension (#400)
+// ---------------------------------------------------------------------------
+
+// AdmitFunc acquires an admission permit for the attempt's model key.
+// release is non-nil on success and must be called exactly once (it is
+// sync.Once-guarded, so a deferred call is safe).
+type AdmitFunc func(ctx context.Context) (release func(), err error)
+
+// AdmittedEmbedder is an optional Provider extension. Providers that
+// dedupe embeds internally implement it so admission can be acquired
+// inside the dedup leader (one permit per backend request, not per
+// caller). admit is never nil; providers call it in the leader only.
+//
+// Error-chain contract: when admit returns an error, the provider MUST
+// return it with the chain intact — wrap only via fmt.Errorf("...: %w",
+// err). The route layer detects admission failures by unwrapping the
+// returned error; breaking the chain converts an admission failure into
+// a fake provider attempt with breaker/feedback side effects.
+type AdmittedEmbedder interface {
+	EmbedAdmitted(ctx context.Context, req EmbedRequest, admit AdmitFunc) (*EmbedResponse, error)
+}
+
+// admissionError marks an error as originating in the admission layer so
+// ExecuteEmbed can distinguish it from a provider failure even after an
+// AdmittedEmbedder provider wraps it with %w (admission failures surface
+// through the provider's return path). Admission failures must not
+// produce RouteAttempts or recorder signals. Only admitFuncFor
+// constructs one, so providers cannot trip the detection with their own
+// errors.
+type admissionError struct{ err error }
+
+func (e *admissionError) Error() string { return "admission: " + e.err.Error() }
+func (e *admissionError) Unwrap() error { return e.err }
+
+// unwrapAdmissionError strips the internal admission marker before an
+// error is returned to the caller: callers see the bare cancellation or
+// ErrRouterClosed, exactly like a primary admission failure (§4). The
+// marker exists only so recordResult can tell an admission-gate exit
+// apart from an interrupted provider call — the former must not warm
+// the previous attempt's key.
+func unwrapAdmissionError(err error) error {
+	var admErr *admissionError
+	if errors.As(err, &admErr) {
+		return admErr.Unwrap()
+	}
+	return err
+}
+
+// ---------------------------------------------------------------------------
 // RoutePlan
 // ---------------------------------------------------------------------------
 
@@ -52,6 +101,12 @@ type RoutePlan struct {
 	wasSticky bool             // internal: propagated to RouteOutcome
 	recorder  RouteRecorder    // internal: set by Router
 	feedback  *RoutingFeedback // internal: set by Router via SetFeedback; nil = no recording
+
+	// admission is the slot-admission seam (#400). nil = ungoverned
+	// Router (no slot source): every bracket is a no-op. Stamped by
+	// buildPlan; deliberately NOT derived from recorder so an external
+	// SetRecorder swap cannot silently disable admission.
+	admission slotAdmitter
 
 	// scoreBreakdown carries the winning candidate's unexported
 	// scoreBreakdown; buildOutcome translates it into the public
@@ -102,6 +157,13 @@ func (rp *RoutePlan) SetFeedback(rf *RoutingFeedback) {
 // SetWasSticky marks the plan as having been selected via sticky routing.
 func (rp *RoutePlan) SetWasSticky(v bool) {
 	rp.wasSticky = v
+}
+
+// setAdmission stamps the slot-admission seam (#400). The Router calls
+// this from buildPlan; nil disables admission for this plan. Unexported:
+// admission is Router-owned plumbing, not public plan API.
+func (rp *RoutePlan) setAdmission(a slotAdmitter) {
+	rp.admission = a
 }
 
 // setScoreBreakdown stamps the winning candidate's score breakdown onto
@@ -164,8 +226,18 @@ func (rp *RoutePlan) ExecuteChat(ctx context.Context) (*ChatResponse, error) {
 	var attempts []RouteAttempt
 	req := rp.buildChatRequest(false)
 
+	// Admission bracket (#400): failure before any provider contact means
+	// no attempt, no recorder signals, no outcome. The deferred release is
+	// the panic/early-return backstop; the explicit release after the call
+	// (Once-guarded) is what enforces release-before-fallback-acquire.
+	release, admErr := rp.acquireFor(ctx, rp.Profile.Key)
+	if admErr != nil {
+		return nil, admErr
+	}
+	defer release()
 	start := time.Now()
 	resp, err := rp.Provider.Chat(ctx, req)
+	release()
 	attempts = append(attempts, makeAttempt(rp.Profile.Key, err, time.Since(start)))
 
 	fallbacksUsed := 0
@@ -174,8 +246,17 @@ func (rp *RoutePlan) ExecuteChat(ctx context.Context) (*ChatResponse, error) {
 
 		for i, fb := range rp.Fallbacks {
 			fbReq := fb.buildChatRequest(false)
+			fbRelease, fbAdmErr := rp.acquireFor(ctx, fb.Profile.Key)
+			if fbAdmErr != nil {
+				// Terminal (cancel/closed): stop the walk; prior attempts
+				// and their signals stand.
+				err = &admissionError{err: fbAdmErr}
+				break
+			}
+			defer fbRelease()
 			fbStart := time.Now()
 			resp, err = fb.Provider.Chat(ctx, fbReq)
+			fbRelease()
 			attempts = append(attempts, makeAttempt(fb.Profile.Key, err, time.Since(fbStart)))
 			if err == nil {
 				fallbacksUsed = i + 1
@@ -195,7 +276,7 @@ func (rp *RoutePlan) ExecuteChat(ctx context.Context) (*ChatResponse, error) {
 		resp.RouteOutcome = outcome
 	}
 
-	return resp, err
+	return resp, unwrapAdmissionError(err)
 }
 
 // ---------------------------------------------------------------------------
@@ -239,6 +320,19 @@ func (rp *RoutePlan) ExecuteChatStream(ctx context.Context, fn func(ChatResponse
 	fallbacksUsed := 0
 	var outcome *RouteOutcome
 
+	// Admission bracket (#400): the permit spans the ENTIRE stream —
+	// ChatStream is synchronous (callback on the caller's goroutine,
+	// returns only when the stream completes, errors, or the caller's
+	// ctx cancels), so release-after-return covers completion, mid-stream
+	// error, and abandonment with one Once-guarded release point. The
+	// clock starts after admission so queue wait stays out of attempt
+	// latency.
+	release, admErr := rp.acquireFor(ctx, rp.Profile.Key)
+	if admErr != nil {
+		return admErr
+	}
+	defer release()
+
 	primaryStart := time.Now()
 	streamDone := false
 	var callbackErr error
@@ -273,6 +367,7 @@ func (rp *RoutePlan) ExecuteChatStream(ctx context.Context, fn func(ChatResponse
 	}
 
 	err := rp.Provider.ChatStream(ctx, req, wrappedFn)
+	release()
 	if streamDone && err != nil && (callbackErr == nil || !errors.Is(err, callbackErr)) {
 		// A provider may still surface transport/read errors after it has
 		// delivered a final Done chunk accepted by the callback. Treat the
@@ -299,6 +394,14 @@ func (rp *RoutePlan) ExecuteChatStream(ctx context.Context, fn func(ChatResponse
 		if !delivered {
 			for i, fb := range rp.Fallbacks {
 				fbReq := fb.buildChatRequest(true)
+				fbRelease, fbAdmErr := rp.acquireFor(ctx, fb.Profile.Key)
+				if fbAdmErr != nil {
+					// Terminal (cancel/closed): stop the walk; prior
+					// attempts and their signals stand (§4).
+					err = &admissionError{err: fbAdmErr}
+					break
+				}
+				defer fbRelease()
 				delivered = false
 				fbStart := time.Now()
 				fbStreamDone := false
@@ -339,6 +442,7 @@ func (rp *RoutePlan) ExecuteChatStream(ctx context.Context, fn func(ChatResponse
 				}
 
 				err = fb.Provider.ChatStream(ctx, fbReq, wrappedFbFn)
+				fbRelease()
 				if fbStreamDone && err != nil && (fbCallbackErr == nil || !errors.Is(err, fbCallbackErr)) {
 					// See primary streamDone handling above.
 					err = nil
@@ -380,7 +484,7 @@ func (rp *RoutePlan) ExecuteChatStream(ctx context.Context, fn func(ChatResponse
 		rp.recordResult(nil, attempts, outcome)
 	}
 
-	return err
+	return unwrapAdmissionError(err)
 }
 
 // ---------------------------------------------------------------------------
@@ -397,8 +501,15 @@ func (rp *RoutePlan) ExecuteGenerate(ctx context.Context) (*GenerateResponse, er
 	var attempts []RouteAttempt
 	req := rp.buildGenerateRequest(false)
 
+	// Admission bracket (#400): see ExecuteChat for the full contract.
+	release, admErr := rp.acquireFor(ctx, rp.Profile.Key)
+	if admErr != nil {
+		return nil, admErr
+	}
+	defer release()
 	start := time.Now()
 	resp, err := rp.Provider.Generate(ctx, req)
+	release()
 	attempts = append(attempts, makeAttempt(rp.Profile.Key, err, time.Since(start)))
 
 	fallbacksUsed := 0
@@ -407,8 +518,15 @@ func (rp *RoutePlan) ExecuteGenerate(ctx context.Context) (*GenerateResponse, er
 
 		for i, fb := range rp.Fallbacks {
 			fbReq := fb.buildGenerateRequest(false)
+			fbRelease, fbAdmErr := rp.acquireFor(ctx, fb.Profile.Key)
+			if fbAdmErr != nil {
+				err = &admissionError{err: fbAdmErr}
+				break
+			}
+			defer fbRelease()
 			fbStart := time.Now()
 			resp, err = fb.Provider.Generate(ctx, fbReq)
+			fbRelease()
 			attempts = append(attempts, makeAttempt(fb.Profile.Key, err, time.Since(fbStart)))
 			if err == nil {
 				fallbacksUsed = i + 1
@@ -427,7 +545,7 @@ func (rp *RoutePlan) ExecuteGenerate(ctx context.Context) (*GenerateResponse, er
 		resp.RouteOutcome = outcome
 	}
 
-	return resp, err
+	return resp, unwrapAdmissionError(err)
 }
 
 // ---------------------------------------------------------------------------
@@ -458,6 +576,14 @@ func (rp *RoutePlan) ExecuteGenerateStream(ctx context.Context, fn func(Generate
 	delivered := false
 	fallbacksUsed := 0
 	var outcome *RouteOutcome
+
+	// Admission bracket (#400): see ExecuteChatStream — the permit spans
+	// the entire stream and releases exactly once on every return path.
+	release, admErr := rp.acquireFor(ctx, rp.Profile.Key)
+	if admErr != nil {
+		return admErr
+	}
+	defer release()
 
 	primaryStart := time.Now()
 	streamDone := false
@@ -493,6 +619,7 @@ func (rp *RoutePlan) ExecuteGenerateStream(ctx context.Context, fn func(Generate
 	}
 
 	err := rp.Provider.GenerateStream(ctx, req, wrappedFn)
+	release()
 	if streamDone && err != nil && (callbackErr == nil || !errors.Is(err, callbackErr)) {
 		// A provider may still surface transport/read errors after it has
 		// delivered a final Done chunk accepted by the callback. Treat the
@@ -519,6 +646,14 @@ func (rp *RoutePlan) ExecuteGenerateStream(ctx context.Context, fn func(Generate
 		if !delivered {
 			for i, fb := range rp.Fallbacks {
 				fbReq := fb.buildGenerateRequest(true)
+				fbRelease, fbAdmErr := rp.acquireFor(ctx, fb.Profile.Key)
+				if fbAdmErr != nil {
+					// Terminal (cancel/closed): stop the walk; prior
+					// attempts and their signals stand (§4).
+					err = &admissionError{err: fbAdmErr}
+					break
+				}
+				defer fbRelease()
 				delivered = false
 				fbStart := time.Now()
 				fbStreamDone := false
@@ -559,6 +694,7 @@ func (rp *RoutePlan) ExecuteGenerateStream(ctx context.Context, fn func(Generate
 				}
 
 				err = fb.Provider.GenerateStream(ctx, fbReq, wrappedFbFn)
+				fbRelease()
 				if fbStreamDone && err != nil && (fbCallbackErr == nil || !errors.Is(err, fbCallbackErr)) {
 					// See primary streamDone handling above.
 					err = nil
@@ -600,7 +736,7 @@ func (rp *RoutePlan) ExecuteGenerateStream(ctx context.Context, fn func(Generate
 		rp.recordResult(nil, attempts, outcome)
 	}
 
-	return err
+	return unwrapAdmissionError(err)
 }
 
 // ---------------------------------------------------------------------------
@@ -617,9 +753,54 @@ func (rp *RoutePlan) ExecuteEmbed(ctx context.Context) (*EmbedResponse, error) {
 	var attempts []RouteAttempt
 	req := rp.buildEmbedRequest()
 
-	start := time.Now()
-	resp, err := rp.Provider.Embed(ctx, req)
-	attempts = append(attempts, makeAttempt(rp.Profile.Key, err, time.Since(start)))
+	var resp *EmbedResponse
+	var err error
+	if ae, ok := rp.Provider.(AdmittedEmbedder); ok {
+		// Dead-caller pre-check (§6 amended contract): a caller whose
+		// ctx is already done must not start or join a shared flight on
+		// a GOVERNED key. No separate governance probe: a dead ctx is
+		// routed through acquireFor itself — the gate's governance-first
+		// entry ordering means ungoverned keys (and nil admission)
+		// return a no-op success and the call proceeds bit-identically
+		// to today, while governed keys return the context error before
+		// any flight exists. Healthy callers (ctx.Err() == nil) skip
+		// this entirely: zero extra work, no Capacity read. An already-
+		// cancelled UNGOVERNED caller pays one extra governance read
+		// here on top of the one inside the flight's admit — two
+		// lock-free map reads on a dead-caller edge path, accepted over
+		// plumbing governance knowledge into the admit func.
+		if ctx.Err() != nil {
+			rel, admErr := rp.acquireFor(ctx, rp.Profile.Key)
+			if admErr != nil {
+				return nil, admErr // no flight, no attempt, no signals
+			}
+			rel() // no-op release: ungoverned pass-through
+		}
+		// Admission happens inside the provider's dedup leader (§6): no
+		// route-level bracket, or M identical callers would hold M
+		// permits and the gate would break the dedup itself.
+		start := time.Now()
+		resp, err = ae.EmbedAdmitted(ctx, req, rp.admitFuncFor(rp.Profile.Key))
+		var aErr *admissionError
+		if errors.As(err, &aErr) {
+			// Admission failure surfaced through the provider (§4): no
+			// attempt, no signals; return the original error.
+			return nil, aErr.Unwrap()
+		}
+		attempts = append(attempts, makeAttempt(rp.Profile.Key, err, time.Since(start)))
+	} else {
+		// Conservative per-caller bracket (§4) for providers without
+		// internal dedup; see ExecuteChat for the full contract.
+		release, admErr := rp.acquireFor(ctx, rp.Profile.Key)
+		if admErr != nil {
+			return nil, admErr
+		}
+		defer release()
+		start := time.Now()
+		resp, err = rp.Provider.Embed(ctx, req)
+		release()
+		attempts = append(attempts, makeAttempt(rp.Profile.Key, err, time.Since(start)))
+	}
 
 	fallbacksUsed := 0
 	if err != nil && IsInfrastructureError(err) {
@@ -627,9 +808,39 @@ func (rp *RoutePlan) ExecuteEmbed(ctx context.Context) (*EmbedResponse, error) {
 
 		for i, fb := range rp.Fallbacks {
 			fbReq := fb.buildEmbedRequest()
-			fbStart := time.Now()
-			resp, err = fb.Provider.Embed(ctx, fbReq)
-			attempts = append(attempts, makeAttempt(fb.Profile.Key, err, time.Since(fbStart)))
+			if ae, ok := fb.Provider.(AdmittedEmbedder); ok {
+				if ctx.Err() != nil {
+					rel, fbAdmErr := rp.acquireFor(ctx, fb.Profile.Key)
+					if fbAdmErr != nil {
+						err = &admissionError{err: fbAdmErr}
+						break
+					}
+					rel()
+				}
+				fbStart := time.Now()
+				resp, err = ae.EmbedAdmitted(ctx, fbReq, rp.admitFuncFor(fb.Profile.Key))
+				var aErr *admissionError
+				if errors.As(err, &aErr) {
+					// Terminal (§4): stop the walk; prior attempts and
+					// their signals stand, no attempt for this one. The
+					// marker is kept so recordResult suppresses cancel-
+					// warmth; the return site unwraps it for the caller.
+					err = aErr
+					break
+				}
+				attempts = append(attempts, makeAttempt(fb.Profile.Key, err, time.Since(fbStart)))
+			} else {
+				fbRelease, fbAdmErr := rp.acquireFor(ctx, fb.Profile.Key)
+				if fbAdmErr != nil {
+					err = &admissionError{err: fbAdmErr}
+					break
+				}
+				defer fbRelease()
+				fbStart := time.Now()
+				resp, err = fb.Provider.Embed(ctx, fbReq)
+				fbRelease()
+				attempts = append(attempts, makeAttempt(fb.Profile.Key, err, time.Since(fbStart)))
+			}
 			if err == nil {
 				fallbacksUsed = i + 1
 				break
@@ -647,7 +858,7 @@ func (rp *RoutePlan) ExecuteEmbed(ctx context.Context) (*EmbedResponse, error) {
 		resp.RouteOutcome = outcome
 	}
 
-	return resp, err
+	return resp, unwrapAdmissionError(err)
 }
 
 // ---------------------------------------------------------------------------
@@ -680,10 +891,18 @@ func (rp *RoutePlan) recordResult(err error, attempts []RouteAttempt, outcome *R
 		actualKey = attempts[len(attempts)-1].Key
 	}
 
+	var admErr *admissionError
 	if err == nil {
 		rp.recordSuccess(actualKey, LatencyInfo{})
 		rp.recordWarmthUse(actualKey)
 		rp.recordSlotUse(actualKey)
+	} else if errors.As(err, &admErr) {
+		// The walk ended at a fallback's ADMISSION gate (#400): no
+		// provider call was interrupted, so the cancel-warmth branch
+		// below must not fire — actualKey is the previous (failed)
+		// attempt's key, whose signals already ran inline, and an
+		// infra-failed attempt never earned warmth pre-admission
+		// either. Outcome feedback below still records the turn.
 	} else if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		rp.recordWarmthUse(actualKey) // model IS warm even if caller bailed — but no slot signal
 	}
@@ -844,6 +1063,40 @@ func (rp *RoutePlan) buildEmbedRequest() EmbedRequest {
 // ---------------------------------------------------------------------------
 // Recorder helpers (nil-safe)
 // ---------------------------------------------------------------------------
+
+// admitFuncFor binds an AdmitFunc to one attempt's model key. Never
+// returns nil; on an ungoverned plan the returned func admits with a
+// no-op release, so AdmittedEmbedder providers take one uniform path.
+// Failures are wrapped in admissionError so ExecuteEmbed can tell them
+// apart from provider failures after the provider re-wraps them.
+func (rp *RoutePlan) admitFuncFor(key ModelKey) AdmitFunc {
+	return func(ctx context.Context) (func(), error) {
+		release, err := rp.acquireFor(ctx, key)
+		if err != nil {
+			return nil, &admissionError{err: err}
+		}
+		return release, nil
+	}
+}
+
+// acquireFor brackets one provider attempt with slot admission (#400).
+// Returns a no-op release when the plan has no admission seam (Router
+// without a slot source) — the ungoverned path allocates nothing and
+// serializes nothing. On error no permit is held and no provider call
+// may be made.
+func (rp *RoutePlan) acquireFor(ctx context.Context, key ModelKey) (func(), error) {
+	if rp.admission == nil {
+		return noopRelease, nil
+	}
+	release, err := rp.admission.acquireSlot(ctx, key)
+	if err != nil {
+		return nil, err
+	}
+	if release == nil {
+		release = noopRelease
+	}
+	return release, nil
+}
 
 func (rp *RoutePlan) recordSuccess(key ModelKey, latency LatencyInfo) {
 	if rp.recorder != nil {
