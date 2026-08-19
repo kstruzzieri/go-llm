@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sync"
 )
 
@@ -41,12 +42,13 @@ type Origin struct {
 // validated); effective is what Load produces today. All state is guarded by
 // mu — Documents are safe for concurrent use.
 type Document struct {
-	mu        sync.Mutex
-	rawBytes  []byte
-	revision  string
-	origin    Origin
-	authored  *Config
-	effective *Config
+	mu             sync.Mutex
+	rawBytes       []byte
+	revision       string
+	origin         Origin
+	originIdentity string
+	authored       *Config
+	effective      *Config
 }
 
 // LoadDocument reads a models.json from an explicit path into a Document.
@@ -89,12 +91,24 @@ func newDocument(data []byte, origin Origin) (*Document, error) {
 	}
 	sum := sha256.Sum256(data)
 	return &Document{
-		rawBytes:  data,
-		revision:  hex.EncodeToString(sum[:]),
-		origin:    origin,
-		authored:  &authored,
-		effective: &effective,
+		rawBytes:       data,
+		revision:       hex.EncodeToString(sum[:]),
+		origin:         origin,
+		originIdentity: documentPathIdentity(origin.Path),
+		authored:       &authored,
+		effective:      &effective,
 	}, nil
+}
+
+func documentPathIdentity(path string) string {
+	if path == "" {
+		return ""
+	}
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		abs = path
+	}
+	return filepath.Clean(abs)
 }
 
 // Origin returns the document's provenance.

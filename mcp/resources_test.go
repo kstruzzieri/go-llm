@@ -29,8 +29,11 @@ func TestConfigViewResource(t *testing.T) {
 	cfgPath := filepath.Join(t.TempDir(), "models.json")
 	cfgBody := `{
   "providers": {"local": {"base_url": "http://localhost:1", "api_format": "openai-compat"}},
-  "models": {"agent": {"name": "m1", "provider": "local", "type": "dense"}},
-  "defaults": {"chat": "agent", "embedding": "agent"}
+	"models": {
+	  "agent": {"name": "m1", "provider": "local", "type": "dense"},
+	  "completion": {"name": "fim", "provider": "local", "type": "dense", "capabilities": ["generate", "insert"]}
+	},
+	"defaults": {"chat": "agent", "completion": "completion", "embedding": "agent"}
 }`
 	if err := os.WriteFile(cfgPath, []byte(cfgBody), 0o600); err != nil {
 		t.Fatal(err)
@@ -82,6 +85,59 @@ func TestConfigViewResource(t *testing.T) {
 	}
 	if !sawChat {
 		t.Fatal("no chat binding in snapshot")
+	}
+
+	sawCompletion := false
+	for _, b := range snap.Bindings {
+		if b.UseCase != "completion" {
+			continue
+		}
+		for _, c := range b.Candidates {
+			if c.Selector != "local/fim" {
+				continue
+			}
+			sawCompletion = true
+			if c.Eligibility != configview.EligibilityEligible {
+				t.Fatalf("completion candidate %s = %s, want eligible", c.Selector, c.Eligibility)
+			}
+		}
+	}
+	if !sawCompletion {
+		t.Fatal("no local/fim completion candidate in snapshot")
+	}
+}
+
+func TestConfigViewResourceReportsAutoDiscoveredOrigin(t *testing.T) {
+	cfgPath := filepath.Join(t.TempDir(), "models.json")
+	cfgBody := `{
+  "providers": {"local": {"base_url": "http://localhost:1", "api_format": "openai-compat"}},
+  "models": {"agent": {"name": "m1", "provider": "local", "type": "dense"}},
+  "defaults": {"chat": "agent"}
+}`
+	if err := os.WriteFile(cfgPath, []byte(cfgBody), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GO_LLM_CONFIG", cfgPath)
+
+	env := newTestEnv(t, http.NotFoundHandler())
+	defer env.cleanup()
+
+	result, err := env.session.ReadResource(context.Background(), &gomcp.ReadResourceParams{
+		URI: "go-llm://configview/v1",
+	})
+	if err != nil {
+		t.Fatalf("ReadResource() error = %v", err)
+	}
+
+	var snap configview.Snapshot
+	if err := json.Unmarshal([]byte(result.Contents[0].Text), &snap); err != nil {
+		t.Fatalf("configview/v1 not a Snapshot: %v", err)
+	}
+	if snap.Origin.Source != "env_override" {
+		t.Fatalf("origin = %q, want env_override", snap.Origin.Source)
+	}
+	if strings.Contains(result.Contents[0].Text, cfgPath) {
+		t.Fatal("resource leaks the auto-discovered config path")
 	}
 }
 

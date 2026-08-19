@@ -94,6 +94,7 @@ type Server struct {
 
 	client           *ollama.Client
 	cfg              *config.Config
+	configOrigin     config.Origin
 	store            rag.VectorStore
 	indexer          *rag.Indexer
 	retriever        *rag.Retriever
@@ -366,9 +367,10 @@ func openRetrievalFeedbackWeighter(ctx context.Context, path string) (*sql.DB, r
 // degraded mode when Ollama is unavailable or configuration is missing.
 func NewServer(ctx context.Context, opts ...Option) (*Server, error) {
 	s := &Server{
-		ollamaURL: defaultOllamaURL,
-		ragPath:   defaultRAGPath(),
-		resolved:  make(map[string]config.ResolvedModel),
+		ollamaURL:    defaultOllamaURL,
+		configOrigin: config.Origin{Source: config.OriginProgrammatic},
+		ragPath:      defaultRAGPath(),
+		resolved:     make(map[string]config.ResolvedModel),
 	}
 	for _, opt := range opts {
 		opt(s)
@@ -378,19 +380,21 @@ func NewServer(ctx context.Context, opts ...Option) (*Server, error) {
 	// Explicit config path: hard error if it fails (user asked for this file).
 	// Auto-discovery: non-fatal if missing.
 	if s.configPath != "" {
-		cfg, err := config.Load(s.configPath)
+		doc, err := config.LoadDocument(s.configPath)
 		if err != nil {
 			return nil, fmt.Errorf("mcp: load config %q: %w", s.configPath, err)
 		}
-		s.cfg = cfg
+		s.cfg = doc.Config()
+		s.configOrigin = doc.Origin()
 	} else {
-		cfg, err := config.Default()
+		doc, err := config.DefaultDocument()
 		if err != nil {
 			if !errors.Is(err, config.ErrConfigNotFound) {
 				return nil, fmt.Errorf("mcp: auto-discover config: %w", err)
 			}
 		} else {
-			s.cfg = cfg
+			s.cfg = doc.Config()
+			s.configOrigin = doc.Origin()
 		}
 	}
 

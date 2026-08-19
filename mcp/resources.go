@@ -8,7 +8,6 @@ import (
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
 
-	"github.com/kstruzzieri/go-llm/config"
 	"github.com/kstruzzieri/go-llm/configview"
 	"github.com/kstruzzieri/go-llm/provider"
 )
@@ -173,17 +172,14 @@ func (s *Server) handleConfigResource(_ context.Context, req *gomcp.ReadResource
 // exist. Only unambiguous shapes are declared. The origin path stays
 // server-side; Build projects the Source enum only.
 func (s *Server) handleConfigViewResource(_ context.Context, _ *gomcp.ReadResourceRequest) (*gomcp.ReadResourceResult, error) {
-	origin := config.Origin{Source: config.OriginProgrammatic}
-	if s.configPath != "" {
-		origin = config.Origin{Source: config.OriginExplicit, Path: s.configPath}
-	}
 	snap := configview.Build(configview.BuildInput{
 		Doc: configview.DocSnapshot{
 			Config: s.cfg,
-			Origin: origin,
+			Origin: s.configOrigin,
 		},
 		Requirements: map[string]provider.Capability{
-			"embedding": provider.CapEmbed,
+			"completion": provider.CapGenerate | provider.CapInsert,
+			"embedding":  provider.CapEmbed,
 		},
 	})
 	return marshalResource("go-llm://configview/v1", snap)

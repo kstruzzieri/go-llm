@@ -55,14 +55,22 @@ func eligibilityFor(req, caps, known provider.Capability) (Eligibility, []string
 	return result, reasons
 }
 
-// capsFor resolves a selector's (caps, knownMask). An inventory entry wins —
-// the registry is the merged authority (catalog + fingerprint + runtime +
-// overrides). Config-only selectors split on authority: EXPLICIT
-// Capabilities entries REPLACE the derived set (config semantics), so their
-// omissions are DEFINITIVE — the known mask covers every canonical bit.
-// Type-derived caps are present-only knowledge: derivation can never assert
-// tool_call absence (the #219 trap), so absent bits stay unknown.
+// capsFor resolves a selector's (caps, knownMask). EXPLICIT Capabilities
+// entries REPLACE every discovered set (config semantics), so their omissions
+// are DEFINITIVE. Type-derived caps are present-only knowledge: derivation can
+// never assert tool_call absence (the #219 trap), so absent bits stay unknown.
 func capsFor(sel string, cfg *config.Config, inv map[string]InventoryModel) (provider.Capability, provider.Capability) {
+	for _, role := range sortedKeys(cfg.Models) {
+		mc := cfg.Models[role]
+		if mc.Provider+"/"+mc.Name != sel || len(mc.Capabilities) == 0 {
+			continue
+		}
+		caps, err := provider.ParseCapsStrict(mc.Capabilities)
+		if err != nil {
+			return 0, 0
+		}
+		return caps, allCanonicalBits()
+	}
 	if m, ok := inv[sel]; ok {
 		return m.Caps, m.KnownMask
 	}
@@ -74,9 +82,6 @@ func capsFor(sel string, cfg *config.Config, inv map[string]InventoryModel) (pro
 	if err != nil {
 		// Unparseable declared caps: claim nothing, know nothing.
 		return 0, 0
-	}
-	if len(mc.Capabilities) > 0 {
-		return caps, allCanonicalBits()
 	}
 	return caps, caps
 }

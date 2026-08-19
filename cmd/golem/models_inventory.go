@@ -34,24 +34,34 @@ func renderModelsJSON(w io.Writer, in configview.BuildInput) error {
 }
 
 // buildInventoryFromRegistry adapts registry profiles into a configview
-// Inventory. Explicit-command context only (network). A registry error is
-// PROPAGATED — an empty inventory must mean "nothing found", never
+// Inventory. Explicit-command context only (network). Every provider/list
+// error is propagated — an empty inventory must mean "nothing found", never
 // "something failed".
-func buildInventoryFromRegistry(ctx context.Context, models *provider.ModelRegistry) (configview.Inventory, error) {
-	profiles, err := models.All(ctx)
-	if err != nil {
-		return configview.Inventory{}, fmt.Errorf("list models for -json inventory: %w", err)
-	}
+func buildInventoryFromRegistry(ctx context.Context, providers *provider.Registry, models *provider.ModelRegistry) (configview.Inventory, error) {
 	inv := configview.Inventory{}
-	for _, p := range profiles {
-		inv.Models = append(inv.Models, configview.InventoryModel{
-			Key:           p.Key,
-			Family:        p.Family,
-			Caps:          p.Caps,
-			KnownMask:     p.Caps, // merged registry knowledge; present-only mask
-			ProfileSource: p.Source.String(),
-			ContextWindow: p.ContextWindow,
-		})
+	for _, name := range providers.Names() {
+		p, ok := providers.Get(name)
+		if !ok {
+			return configview.Inventory{}, fmt.Errorf("list models for -json inventory: provider %q disappeared", name)
+		}
+		infos, err := p.Models(ctx)
+		if err != nil {
+			return configview.Inventory{}, fmt.Errorf("list models for -json inventory from provider %q: %w", name, err)
+		}
+		for _, info := range infos {
+			profile, err := models.Lookup(ctx, provider.ModelKey{Provider: name, Model: info.Name})
+			if err != nil {
+				return configview.Inventory{}, fmt.Errorf("load model %q from provider %q for -json inventory: %w", info.Name, name, err)
+			}
+			inv.Models = append(inv.Models, configview.InventoryModel{
+				Key:           profile.Key,
+				Family:        profile.Family,
+				Caps:          profile.Caps,
+				KnownMask:     profile.Caps, // merged registry knowledge; present-only mask
+				ProfileSource: profile.Source.String(),
+				ContextWindow: profile.ContextWindow,
+			})
+		}
 	}
 	return inv, nil
 }

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/kstruzzieri/go-llm/config"
+	"github.com/kstruzzieri/go-llm/configview"
 	"github.com/kstruzzieri/go-llm/fingerprint"
 	"github.com/kstruzzieri/go-llm/internal/providerbootstrap"
 	"github.com/kstruzzieri/go-llm/provider"
@@ -72,6 +73,25 @@ func runModels(ctx context.Context, args []string, out, errOut io.Writer) error 
 		return fmt.Errorf("golem models: -json cannot be combined with -probe-all or -reprobe")
 	}
 
+	var doc *config.Document
+	var cfg *config.Config
+	var err error
+	if jsonOut {
+		doc, err = loadDocumentFor(configPath)
+		if err != nil {
+			return err
+		}
+		if doc == nil {
+			return renderModelsJSON(out, modelsJSONInput(nil, configview.Inventory{}))
+		}
+		cfg = doc.Config()
+	} else {
+		cfg, err = loadConfig(configPath)
+		if err != nil {
+			return err
+		}
+	}
+
 	root, err := filepath.Abs(rootFlag)
 	if err != nil {
 		return fmt.Errorf("resolve root: %w", err)
@@ -80,15 +100,10 @@ func runModels(ctx context.Context, args []string, out, errOut io.Writer) error 
 		return fmt.Errorf("resolve root: %w", err)
 	}
 
-	cfg, err := loadConfig(configPath)
-	if err != nil {
-		return err
-	}
-
 	backendRes, err := resolveBackend(ctx, cfg, backendResolveOpts{
 		flagBaseURL: baseURL,
 		flagSet:     baseURLSet,
-		noProbe:     noProbe,
+		noProbe:     noProbe || jsonOut,
 		lookupEnv:   os.LookupEnv,
 		prober:      openaicompat.DiscoverBaseURL,
 	})
@@ -143,11 +158,7 @@ func runModels(ctx context.Context, args []string, out, errOut io.Writer) error 
 	}
 
 	if jsonOut {
-		doc, derr := loadDocumentFor(configPath)
-		if derr != nil {
-			return derr
-		}
-		inv, ierr := buildInventoryFromRegistry(ctx, bundle.Models)
+		inv, ierr := buildInventoryFromRegistry(ctx, bundle.Providers, bundle.Models)
 		if ierr != nil {
 			return ierr
 		}

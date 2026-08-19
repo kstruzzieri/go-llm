@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"sync/atomic"
 	"testing"
 )
@@ -116,6 +117,40 @@ func TestSaveReplaceConflictDetection(t *testing.T) {
 	}
 }
 
+func TestSaveReplaceDetectsPublicationWindowConflict(t *testing.T) {
+	d := loadTestDoc(t, rawWithUnknown)
+	p := filepath.Join(t.TempDir(), "publication-window.json")
+	if err := d.SaveNew(p); err != nil {
+		t.Fatal(err)
+	}
+	expectedRevision := d.Revision()
+	m := d.authored.Models["agent"]
+	m.Description = "local edit"
+	d.authored.Models["agent"] = m
+
+	external := []byte(`{"providers":{},"models":{},"defaults":{},"external":true}`)
+	orig := publishReplaceFn
+	publishReplaceFn = func(path string, data []byte, expectedRevision string) error {
+		if err := os.WriteFile(path, external, 0o600); err != nil {
+			return err
+		}
+		return orig(path, data, expectedRevision)
+	}
+	t.Cleanup(func() { publishReplaceFn = orig })
+
+	err := d.SaveReplace(p, expectedRevision)
+	if err == nil || !strings.Contains(err.Error(), "revision conflict") {
+		t.Fatalf("SaveReplace err = %v, want revision conflict", err)
+	}
+	got, readErr := os.ReadFile(p)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if !bytes.Equal(got, external) {
+		t.Fatal("SaveReplace overwrote publication-window external edit")
+	}
+}
+
 func TestSaveUpdatesDocumentState(t *testing.T) {
 	d := loadTestDoc(t, rawWithUnknown)
 	p := filepath.Join(t.TempDir(), "s.json")
@@ -164,6 +199,112 @@ func TestSavePreservesSameFileOriginSource(t *testing.T) {
 	}
 }
 
+func TestSavePreservesOriginAcrossEquivalentPathSpellings(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		originPath func(string) string
+		savePath   func(string) string
+	}{
+		{"clean relative to dot relative", func(string) string { return "models.json" }, func(string) string { return "./models.json" }},
+		{"dot relative to absolute", func(string) string { return "./models.json" }, func(dir string) string { return filepath.Join(dir, "models.json") }},
+		{"absolute to relative", func(dir string) string { return filepath.Join(dir, "models.json") }, func(string) string { return "models.json" }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			p := filepath.Join(dir, "models.json")
+			d := loadTestDoc(t, rawWithUnknown)
+			if err := d.SaveNew(p); err != nil {
+				t.Fatal(err)
+			}
+			d.mu.Lock()
+			d.origin = Origin{Source: OriginWorkingDir, Path: tc.originPath(dir)}
+			d.mu.Unlock()
+			t.Chdir(dir)
+
+			if err := d.SaveReplace(tc.savePath(dir), d.Revision()); err != nil {
+				t.Fatal(err)
+			}
+			if got := d.Origin(); got.Source != OriginWorkingDir || got.Path != tc.originPath(dir) {
+				t.Fatalf("origin = %+v, want working-dir path %q", got, tc.originPath(dir))
+			}
+		})
+	}
+}
+
+func TestSavePreservesLoadedRelativeOriginAfterChdir(t *testing.T) {
+	root := t.TempDir()
+	originalDir := filepath.Join(root, "original")
+	otherDir := filepath.Join(root, "other")
+	for _, dir := range []string{originalDir, otherDir} {
+		if err := os.Mkdir(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	originalPath := filepath.Join(originalDir, "models.json")
+	if err := os.WriteFile(originalPath, []byte(rawWithUnknown), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("DOC_TEST_KEY", "sekret-value")
+	unsetEnvForTest(t, "GO_LLM_CONFIG")
+	t.Chdir(originalDir)
+	d, err := DefaultDocument()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	t.Chdir(otherDir)
+	if err := d.SaveReplace(originalPath, d.Revision()); err != nil {
+		t.Fatal(err)
+	}
+	if got := d.Origin(); got.Source != OriginWorkingDir || got.Path != "models.json" {
+		t.Fatalf("origin = %+v, want original working-dir origin", got)
+	}
+}
+
+func TestSaveDoesNotPreserveLoadedRelativeOriginInDifferentDirectory(t *testing.T) {
+	root := t.TempDir()
+	originalDir := filepath.Join(root, "original")
+	otherDir := filepath.Join(root, "other")
+	for _, dir := range []string{originalDir, otherDir} {
+		if err := os.Mkdir(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "models.json"), []byte(rawWithUnknown), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("DOC_TEST_KEY", "sekret-value")
+	unsetEnvForTest(t, "GO_LLM_CONFIG")
+	t.Chdir(originalDir)
+	d, err := DefaultDocument()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	t.Chdir(otherDir)
+	if err := d.SaveReplace("models.json", d.Revision()); err != nil {
+		t.Fatal(err)
+	}
+	if got := d.Origin(); got.Source != OriginExplicit || got.Path != "models.json" {
+		t.Fatalf("origin = %+v, want explicit path in new working directory", got)
+	}
+}
+
+func unsetEnvForTest(t *testing.T, name string) {
+	t.Helper()
+	value, ok := os.LookupEnv(name)
+	t.Cleanup(func() {
+		if ok {
+			_ = os.Setenv(name, value)
+		} else {
+			_ = os.Unsetenv(name)
+		}
+	})
+	if err := os.Unsetenv(name); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // Byte-stability proven by an injected publication counter, not timing.
 func TestSaveReplaceByteStableNoRewrite(t *testing.T) {
 	d := loadTestDoc(t, rawWithUnknown)
@@ -173,9 +314,9 @@ func TestSaveReplaceByteStableNoRewrite(t *testing.T) {
 	}
 	var publishes atomic.Int64
 	orig := publishReplaceFn
-	publishReplaceFn = func(path string, data []byte) error {
+	publishReplaceFn = func(path string, data []byte, expectedRevision string) error {
 		publishes.Add(1)
-		return orig(path, data)
+		return orig(path, data, expectedRevision)
 	}
 	t.Cleanup(func() { publishReplaceFn = orig })
 	if err := d.SaveReplace(p, d.Revision()); err != nil {
@@ -320,7 +461,7 @@ func TestKnownKeysCoverStructTags(t *testing.T) {
 func TestPublishReplaceWritesAtomically(t *testing.T) {
 	dir := t.TempDir()
 	p := filepath.Join(dir, "out.json")
-	if err := publishReplace(p, []byte("hello\n")); err != nil {
+	if err := publishReplace(p, []byte("hello\n"), ""); err != nil {
 		t.Fatal(err)
 	}
 	got, err := os.ReadFile(p)
@@ -375,7 +516,7 @@ func TestPublishDurabilityUncertain(t *testing.T) {
 	t.Cleanup(func() { syncDir = orig })
 
 	p := filepath.Join(t.TempDir(), "out.json")
-	err := publishReplace(p, []byte("data\n"))
+	err := publishReplace(p, []byte("data\n"), "")
 	if !errors.Is(err, ErrDurabilityUncertain) {
 		t.Fatalf("err = %v, want ErrDurabilityUncertain", err)
 	}

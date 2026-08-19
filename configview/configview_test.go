@@ -30,11 +30,19 @@ func testInput() BuildInput {
 		Doc: DocSnapshot{Config: testConfig(),
 			Origin: config.Origin{Source: config.OriginExplicit, Path: "/tmp/x/models.json"}, Revision: "r1"},
 		Inventory: Inventory{
-			Models: []InventoryModel{{
-				Key:  provider.ModelKey{Provider: "local", Model: "m2"},
-				Caps: provider.CapChat | provider.CapStream, KnownMask: provider.CapChat | provider.CapStream,
-				ProfileSource: "static",
-			}},
+			Models: []InventoryModel{
+				{
+					Key:  provider.ModelKey{Provider: "local", Model: "m2"},
+					Caps: provider.CapChat | provider.CapStream, KnownMask: provider.CapChat | provider.CapStream,
+					ProfileSource: "static",
+				},
+				{
+					Key:           provider.ModelKey{Provider: "local", Model: "m3"},
+					Caps:          provider.CapChat | provider.CapStream | provider.CapToolCall,
+					KnownMask:     provider.CapChat | provider.CapStream | provider.CapToolCall,
+					ProfileSource: "runtime",
+				},
+			},
 			Providers: []InventoryProvider{{Name: "local", Reachable: true}},
 		},
 		Requirements: map[string]provider.Capability{"agent": provider.CapChat | provider.CapStream | provider.CapToolCall},
@@ -88,8 +96,8 @@ func TestBuildResolutionNoneEligible(t *testing.T) {
 	}
 }
 
-// Explicit config capabilities are authoritative: tool_call omitted →
-// KNOWN-absent → ineligible. Type-derived stays present-only → unknown.
+// Explicit config capabilities are authoritative over inventory: tool_call
+// omitted → KNOWN-absent → ineligible. Type-derived stays present-only → unknown.
 func TestBuildCapsAuthority(t *testing.T) {
 	s := Build(testInput())
 	b := bindingFor(t, s, "agent")
@@ -105,6 +113,32 @@ func TestBuildCapsAuthority(t *testing.T) {
 		!reflect.DeepEqual(c.Reasons, []string{"capability_unknown:tool_call"}) {
 		t.Fatalf("type-derived candidate = %+v, want unknown", c)
 	}
+	for _, m := range s.Models {
+		if m.Selector == "local/m3" {
+			if want := []string{"chat", "stream"}; !reflect.DeepEqual(m.Caps, want) {
+				t.Fatalf("explicit-caps model summary = %v, want %v", m.Caps, want)
+			}
+			return
+		}
+	}
+	t.Fatal("local/m3 model summary missing")
+}
+
+func TestBuildCapsAuthorityForSharedSelector(t *testing.T) {
+	in := testInput()
+	in.Doc.Config.Models["a-derived"] = config.ModelConfig{Name: "m3", Provider: "local", Type: "dense"}
+
+	b := bindingFor(t, Build(in), "agent")
+	for _, c := range b.Candidates {
+		if c.Selector == "local/m3" {
+			if c.Eligibility != EligibilityIneligible ||
+				!reflect.DeepEqual(c.Reasons, []string{"missing_capability:tool_call"}) {
+				t.Fatalf("shared explicit-caps candidate = %+v, want ineligible/known-absent", c)
+			}
+			return
+		}
+	}
+	t.Fatal("local/m3 candidate missing")
 }
 
 // Exact sorted sequences — not just determinism.

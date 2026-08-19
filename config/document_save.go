@@ -21,17 +21,7 @@ var ErrDurabilityUncertain = errors.New("config: published but durability uncert
 
 // syncDir fsyncs a directory so a just-published rename/link is durable.
 // Injectable for durability-failure tests.
-var syncDir = func(dir string) error {
-	d, err := os.Open(dir)
-	if err != nil {
-		return err
-	}
-	if err := d.Sync(); err != nil {
-		_ = d.Close()
-		return err
-	}
-	return d.Close()
-}
+var syncDir = syncDirectory
 
 // writeSiblingTemp writes data to a unique 0600 sibling temp file, fsyncs and
 // closes it. Pre-publication phase: any error leaves the target untouched and
@@ -64,12 +54,22 @@ func writeSiblingTemp(path string, data []byte) (tmp string, err error) {
 }
 
 // publishReplace atomically replaces path with data (temp + rename + parent
-// sync). Pre-rename failure → target untouched. Post-rename sync failure →
-// bytes are live; returns ErrDurabilityUncertain (wrapped).
-func publishReplace(path string, data []byte) error {
+// sync). When expectedRevision is non-empty, the target is checked after the
+// synced temp is ready. Pre-rename failure → target untouched. Post-rename
+// sync failure → bytes are live; returns ErrDurabilityUncertain (wrapped).
+func publishReplace(path string, data []byte, expectedRevision string) error {
 	tmp, err := writeSiblingTemp(path, data)
 	if err != nil {
 		return err
+	}
+	if expectedRevision != "" {
+		// ponytail: this closes the temp-preparation window, not the final
+		// check-to-rename window; true arbitrary-writer CAS requires every
+		// writer to use a shared lock protocol or a versioned store.
+		if _, err := readExpectedRevision(path, expectedRevision); err != nil {
+			_ = os.Remove(tmp)
+			return err
+		}
 	}
 	if err := os.Rename(tmp, path); err != nil {
 		_ = os.Remove(tmp)
@@ -87,16 +87,13 @@ var publishReplaceFn = publishReplace
 // saveLocks serializes save windows per cleaned absolute target path. This is
 // a COOPERATIVE in-process lock: it makes this package's own read-compare-
 // publish windows atomic with respect to each other. Arbitrary external
-// writers cannot be excluded by portable pathname APIs — SaveReplace's
-// revision check is the cross-process guard.
+// writers cannot be excluded by portable pathname APIs; the final revision
+// check catches only changes that happen before it.
 var saveLocks sync.Map // string → *sync.Mutex
 
 func lockForPath(path string) *sync.Mutex {
-	abs, err := filepath.Abs(path)
-	if err != nil {
-		abs = path
-	}
-	mu, _ := saveLocks.LoadOrStore(filepath.Clean(abs), &sync.Mutex{})
+	key := documentPathIdentity(path)
+	mu, _ := saveLocks.LoadOrStore(key, &sync.Mutex{})
 	return mu.(*sync.Mutex)
 }
 
@@ -123,32 +120,33 @@ func (d *Document) SaveNew(path string) error {
 	return nil
 }
 
-// SaveReplace overwrites path only while its current content digest matches
-// expectedRevision. The per-target lock holds across compare AND publish so
-// two in-process savers cannot interleave; external edits are caught by the
-// digest, not excluded. Unchanged canonical content publishes nothing
-// (byte-stability) but still converges document state.
+// SaveReplace overwrites path after its digest matches expectedRevision at the
+// start of the save and again after the replacement temp is synced. The
+// per-target lock prevents cooperating in-process savers from interleaving.
+// An arbitrary writer can still modify path between the final digest check and
+// rename because portable pathname APIs do not provide compare-and-replace.
+// Unchanged canonical content publishes nothing (byte-stability) but still
+// converges document state after a final digest check.
 func (d *Document) SaveReplace(path, expectedRevision string) error {
 	mu := lockForPath(path)
 	mu.Lock()
 	defer mu.Unlock()
-	cur, err := os.ReadFile(path)
+	cur, err := readExpectedRevision(path, expectedRevision)
 	if err != nil {
-		return fmt.Errorf("config: save replace %q: %w", path, err)
-	}
-	sum := sha256.Sum256(cur)
-	if got := hex.EncodeToString(sum[:]); got != expectedRevision {
-		return fmt.Errorf("config: save replace %q: revision conflict", path)
+		return err
 	}
 	out, err := d.canonicalLocked()
 	if err != nil {
 		return err
 	}
 	if bytes.Equal(out, cur) {
+		if _, err := readExpectedRevision(path, expectedRevision); err != nil {
+			return err
+		}
 		d.commitSaved(out, path) // state converges; no publication
 		return nil
 	}
-	if err := publishReplaceFn(path, out); err != nil {
+	if err := publishReplaceFn(path, out, expectedRevision); err != nil {
 		if errors.Is(err, ErrDurabilityUncertain) {
 			// Bytes ARE live: document state must reflect the published truth.
 			d.commitSaved(out, path)
@@ -157,6 +155,18 @@ func (d *Document) SaveReplace(path, expectedRevision string) error {
 	}
 	d.commitSaved(out, path)
 	return nil
+}
+
+func readExpectedRevision(path, expectedRevision string) ([]byte, error) {
+	cur, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("config: save replace %q: %w", path, err)
+	}
+	sum := sha256.Sum256(cur)
+	if hex.EncodeToString(sum[:]) != expectedRevision {
+		return nil, fmt.Errorf("config: save replace %q: revision conflict", path)
+	}
+	return cur, nil
 }
 
 // canonicalLocked renders canonical bytes under the document mutex.
@@ -169,18 +179,21 @@ func (d *Document) canonicalLocked() ([]byte, error) {
 // commitSaved updates rawBytes/revision/origin to the published bytes.
 // Saving back to the document's own path preserves its discovery Source (an
 // env-override config saved in place is still the env-override config);
-// saving to a NEW path is an explicit-path act. Baseline profile ID and
-// Dirty are slice-3 caller-owned state — deliberately absent here.
+// saving to a NEW path is an explicit-path act. Path identity is lexical after
+// absolute cleaning; symlink aliases intentionally remain distinct origins.
+// Baseline profile ID and Dirty are slice-3 caller-owned state — deliberately
+// absent here.
 func (d *Document) commitSaved(out []byte, path string) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	sum := sha256.Sum256(out)
 	d.rawBytes = out
 	d.revision = hex.EncodeToString(sum[:])
-	if d.origin.Path == path && d.origin.Source != "" {
+	if d.origin.Source != "" && d.originIdentity != "" && d.originIdentity == documentPathIdentity(path) {
 		return // same file: provenance rule unchanged
 	}
 	d.origin = Origin{Source: OriginExplicit, Path: path}
+	d.originIdentity = documentPathIdentity(path)
 }
 
 // knownKeys maps a struct's json tag names to their field types (pointers

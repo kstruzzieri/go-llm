@@ -294,21 +294,19 @@ func collectSelectors(cfg *config.Config, inv map[string]InventoryModel) ([]stri
 }
 
 // buildModelSummaries renders one card per selector, sorted. Inventory wins
-// on caps/family/source/context; config supplies the declared type.
+// on family/source/context; caps use the same config authority as eligibility.
 func buildModelSummaries(cfg *config.Config, inv map[string]InventoryModel, selectors []string, types map[string]string) []ModelSummary {
 	out := make([]ModelSummary, 0, len(selectors))
 	for _, sel := range selectors {
-		ms := ModelSummary{Selector: sel, Type: types[sel]}
+		caps, _ := capsFor(sel, cfg, inv)
+		ms := ModelSummary{Selector: sel, Type: types[sel], Caps: caps.Names()}
 		if m, ok := inv[sel]; ok {
 			ms.Provider = m.Key.Provider
 			ms.Family = m.Family
-			ms.Caps = m.Caps.Names()
 			ms.ProfileSource = m.ProfileSource
 			ms.ContextWindow = m.ContextWindow
 		} else {
-			caps, _ := capsFor(sel, cfg, inv)
 			ms.Provider = selectorProvider(sel)
-			ms.Caps = caps.Names()
 			ms.ProfileSource = "config"
 			if mc, ok := configModelBySelector(cfg, sel); ok {
 				ms.ContextWindow = mc.ContextWindow
