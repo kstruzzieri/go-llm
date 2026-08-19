@@ -61,6 +61,20 @@ func LoadDocument(path string) (*Document, error) {
 	return newDocument(data, Origin{Source: OriginExplicit, Path: path})
 }
 
+// DefaultDocument resolves the same discovery order as Default and loads the
+// winning path as a Document, retaining WHICH rule won as the origin.
+func DefaultDocument() (*Document, error) {
+	path, src, err := discoverConfigPath()
+	if err != nil {
+		return nil, err
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("config: read %q: %w", path, err)
+	}
+	return newDocument(data, Origin{Source: src, Path: path})
+}
+
 func newDocument(data []byte, origin Origin) (*Document, error) {
 	var authored Config
 	if err := json.Unmarshal(data, &authored); err != nil {
