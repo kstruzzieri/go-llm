@@ -141,3 +141,53 @@ func TestDefaultDocumentWorkingDirAndPrecedence(t *testing.T) {
 		t.Fatalf("precedence: origin = %+v, want env-override %s", d2.Origin(), p2)
 	}
 }
+
+const docNestedConfig = `{
+  "providers": {"local": {"base_url": "http://localhost:8080"}},
+  "models": {
+    "agent": {"name": "m1", "provider": "local", "type": "dense",
+      "fallbacks": ["fast"],
+      "options": {"temperature": 0.2},
+      "think_tags": {"open": "<think>", "close": "</think>"}},
+    "fast": {"name": "m2", "provider": "local", "type": "dense"}
+  },
+  "defaults": {"agent": "agent"}
+}`
+
+// Nested pointers/slices must not alias across clones.
+func TestDocumentConfigDeepCloneNested(t *testing.T) {
+	t.Setenv("DOC_TEST_KEY", "v")
+	d, err := LoadDocument(writeTempConfig(t, docNestedConfig))
+	if err != nil {
+		t.Fatal(err)
+	}
+	c1 := d.Config()
+	m := c1.Models["agent"]
+	*m.Options.Temperature = 0.9
+	m.Fallbacks[0] = "hacked"
+	m.ThinkTags.Open = "hacked"
+	c2 := d.Config()
+	m2 := c2.Models["agent"]
+	if *m2.Options.Temperature != 0.2 || m2.Fallbacks[0] != "fast" || m2.ThinkTags.Open != "<think>" {
+		t.Fatalf("nested aliasing: %+v", m2)
+	}
+}
+
+// Concurrent readers must be race-free (run under -race).
+func TestDocumentConcurrentAccess(t *testing.T) {
+	d := loadTestDoc(t, docTestConfig)
+	done := make(chan struct{})
+	for i := 0; i < 8; i++ {
+		go func() {
+			defer func() { done <- struct{}{} }()
+			for j := 0; j < 100; j++ {
+				_ = d.Config()
+				_ = d.Revision()
+				_ = d.Origin()
+			}
+		}()
+	}
+	for i := 0; i < 8; i++ {
+		<-done
+	}
+}
