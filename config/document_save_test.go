@@ -208,6 +208,50 @@ func TestSaveReplaceDurabilityUncertainUpdatesState(t *testing.T) {
 	}
 }
 
+// SaveNew shares the durability-uncertain contract: bytes live → state
+// converges alongside the typed error.
+func TestSaveNewDurabilityUncertainUpdatesState(t *testing.T) {
+	d := loadTestDoc(t, rawWithUnknown)
+	p := filepath.Join(t.TempDir(), "ndu.json")
+
+	origSync := syncDir
+	syncDir = func(string) error { return errors.New("injected dir-sync failure") }
+	t.Cleanup(func() { syncDir = origSync })
+
+	err := d.SaveNew(p)
+	if !errors.Is(err, ErrDurabilityUncertain) {
+		t.Fatalf("err = %v, want ErrDurabilityUncertain", err)
+	}
+	onDisk, rerr := os.ReadFile(p)
+	if rerr != nil {
+		t.Fatal(rerr)
+	}
+	sum := sha256.Sum256(onDisk)
+	if d.Revision() != hex.EncodeToString(sum[:]) {
+		t.Fatal("document revision does not reflect published bytes after durability-uncertain SaveNew")
+	}
+}
+
+// Deleting a whole authored entry deletes it (and its raw unknowns) from the
+// canonical output: authored entries drive existence.
+func TestCanonicalBytesDeletesRemovedEntry(t *testing.T) {
+	d := loadTestDoc(t, rawWithUnknown)
+	delete(d.authored.Models, "agent")
+	d.authored.Defaults = map[string]string{} // keep config self-consistent
+	out, err := d.canonicalBytes()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, gone := range []string{`"agent"`, "x-model-note", "x-options-note"} {
+		if bytes.Contains(out, []byte(gone)) {
+			t.Fatalf("removed entry residue %q in canonical output", gone)
+		}
+	}
+	if !bytes.Contains(out, []byte("x-team-note")) || !bytes.Contains(out, []byte("x-provider-note")) {
+		t.Fatal("unrelated unknown fields lost")
+	}
+}
+
 // Concurrent SaveReplace + reads under -race, exercising both mutexes.
 func TestSaveConcurrentWithReads(t *testing.T) {
 	d := loadTestDoc(t, rawWithUnknown)
