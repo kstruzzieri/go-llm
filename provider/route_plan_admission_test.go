@@ -1030,3 +1030,91 @@ func TestExecuteEmbedDeadCallerUngovernedStillReachesProvider(t *testing.T) {
 		t.Fatalf("EmbedAdmitted calls = %d, want 1 (ungoverned dead caller passes through)", got)
 	}
 }
+
+// TestFallbackAdmissionCancelRecordsNoWarmthForPriorProvider pins the
+// finalization semantics when the fallback walk ends at an admission
+// gate with a cancellation: no provider call was interrupted, so the
+// cancel-warmth branch must NOT fire for the previous (infra-failed)
+// attempt's key — pre-#400, warmth-on-cancel only ever attributed to a
+// key whose call was actually cancelled, and an infra-failed attempt
+// never received warmth. The caller still sees the bare context error
+// (never the internal admission marker).
+func TestFallbackAdmissionCancelRecordsNoWarmthForPriorProvider(t *testing.T) {
+	fbKey := ModelKey{Provider: "ollama-b", Model: "test-model"}
+	infra := &HTTPStatusError{StatusCode: 503}
+
+	paths := []struct {
+		name string
+		run  func(ra *recordingAdmitter, rec *rpMockRecorder) error
+	}{
+		{name: "chat", run: func(ra *recordingAdmitter, rec *rpMockRecorder) error {
+			plan := admissionFallbackPlan(failingMock("ollama-a"), healthyMock("ollama-b"), rec)
+			plan.setAdmission(ra)
+			_, err := plan.ExecuteChat(context.Background())
+			return err
+		}},
+		{name: "generate", run: func(ra *recordingAdmitter, rec *rpMockRecorder) error {
+			plan := admissionFallbackPlan(failingMock("ollama-a"), healthyMock("ollama-b"), rec)
+			plan.setAdmission(ra)
+			_, err := plan.ExecuteGenerate(context.Background())
+			return err
+		}},
+		{name: "embed conservative", run: func(ra *recordingAdmitter, rec *rpMockRecorder) error {
+			plan := admissionFallbackPlan(failingMock("ollama-a"), healthyMock("ollama-b"), rec)
+			plan.setAdmission(ra)
+			_, err := plan.ExecuteEmbed(context.Background())
+			return err
+		}},
+		{name: "embed admitted", run: func(ra *recordingAdmitter, rec *rpMockRecorder) error {
+			plan, _, _ := admittedEmbedPlanPair(infra, rec)
+			plan.setAdmission(ra)
+			_, err := plan.ExecuteEmbed(context.Background())
+			return err
+		}},
+		{name: "chat stream", run: func(ra *recordingAdmitter, rec *rpMockRecorder) error {
+			primary := &rpMockProvider{
+				name: "ollama-a", caps: CapChat | CapStream, chatStreamErr: infra,
+			}
+			fb := &rpMockProvider{
+				name: "ollama-b", caps: CapChat | CapStream,
+				chatStreamChunks: []ChatResponse{{Content: "ok", Done: true}},
+			}
+			plan := admissionFallbackPlan(primary, fb, rec)
+			plan.setAdmission(ra)
+			return plan.ExecuteChatStream(context.Background(), func(ChatResponse) error { return nil })
+		}},
+		{name: "generate stream", run: func(ra *recordingAdmitter, rec *rpMockRecorder) error {
+			primary := &rpMockProvider{
+				name: "ollama-a", caps: CapGenerate | CapStream, genStreamErr: infra,
+			}
+			fb := &rpMockProvider{
+				name: "ollama-b", caps: CapGenerate | CapStream,
+				genStreamChunks: []GenerateResponse{{Response: "ok", Done: true}},
+			}
+			plan := admissionFallbackPlan(primary, fb, rec)
+			plan.setAdmission(ra)
+			return plan.ExecuteGenerateStream(context.Background(), func(GenerateResponse) error { return nil })
+		}},
+	}
+	for _, tc := range paths {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := &rpMockRecorder{}
+			ra := &recordingAdmitter{errFor: map[ModelKey]error{fbKey: context.Canceled}}
+			err := tc.run(ra, rec)
+			if !errors.Is(err, context.Canceled) {
+				t.Fatalf("err = %v, want context.Canceled", err)
+			}
+			var aErr *admissionError
+			if errors.As(err, &aErr) {
+				t.Fatalf("caller received the internal admission marker %v; want the bare error", err)
+			}
+			if got := rec.getWarmthUses(); len(got) != 0 {
+				t.Fatalf("warmthUses = %v, want NONE (no provider call was interrupted; the failed primary must not be warmed)", got)
+			}
+			failures := rec.getFailures()
+			if len(failures) != 1 || failures[0].Provider != "ollama-a" {
+				t.Fatalf("failures = %v, want exactly the primary's real infra failure", failures)
+			}
+		})
+	}
+}

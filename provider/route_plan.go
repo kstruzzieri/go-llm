@@ -66,6 +66,20 @@ type admissionError struct{ err error }
 func (e *admissionError) Error() string { return "admission: " + e.err.Error() }
 func (e *admissionError) Unwrap() error { return e.err }
 
+// unwrapAdmissionError strips the internal admission marker before an
+// error is returned to the caller: callers see the bare cancellation or
+// ErrRouterClosed, exactly like a primary admission failure (§4). The
+// marker exists only so recordResult can tell an admission-gate exit
+// apart from an interrupted provider call — the former must not warm
+// the previous attempt's key.
+func unwrapAdmissionError(err error) error {
+	var admErr *admissionError
+	if errors.As(err, &admErr) {
+		return admErr.Unwrap()
+	}
+	return err
+}
+
 // ---------------------------------------------------------------------------
 // RoutePlan
 // ---------------------------------------------------------------------------
@@ -236,7 +250,7 @@ func (rp *RoutePlan) ExecuteChat(ctx context.Context) (*ChatResponse, error) {
 			if fbAdmErr != nil {
 				// Terminal (cancel/closed): stop the walk; prior attempts
 				// and their signals stand.
-				err = fbAdmErr
+				err = &admissionError{err: fbAdmErr}
 				break
 			}
 			defer fbRelease()
@@ -262,7 +276,7 @@ func (rp *RoutePlan) ExecuteChat(ctx context.Context) (*ChatResponse, error) {
 		resp.RouteOutcome = outcome
 	}
 
-	return resp, err
+	return resp, unwrapAdmissionError(err)
 }
 
 // ---------------------------------------------------------------------------
@@ -384,7 +398,7 @@ func (rp *RoutePlan) ExecuteChatStream(ctx context.Context, fn func(ChatResponse
 				if fbAdmErr != nil {
 					// Terminal (cancel/closed): stop the walk; prior
 					// attempts and their signals stand (§4).
-					err = fbAdmErr
+					err = &admissionError{err: fbAdmErr}
 					break
 				}
 				defer fbRelease()
@@ -470,7 +484,7 @@ func (rp *RoutePlan) ExecuteChatStream(ctx context.Context, fn func(ChatResponse
 		rp.recordResult(nil, attempts, outcome)
 	}
 
-	return err
+	return unwrapAdmissionError(err)
 }
 
 // ---------------------------------------------------------------------------
@@ -506,7 +520,7 @@ func (rp *RoutePlan) ExecuteGenerate(ctx context.Context) (*GenerateResponse, er
 			fbReq := fb.buildGenerateRequest(false)
 			fbRelease, fbAdmErr := rp.acquireFor(ctx, fb.Profile.Key)
 			if fbAdmErr != nil {
-				err = fbAdmErr
+				err = &admissionError{err: fbAdmErr}
 				break
 			}
 			defer fbRelease()
@@ -531,7 +545,7 @@ func (rp *RoutePlan) ExecuteGenerate(ctx context.Context) (*GenerateResponse, er
 		resp.RouteOutcome = outcome
 	}
 
-	return resp, err
+	return resp, unwrapAdmissionError(err)
 }
 
 // ---------------------------------------------------------------------------
@@ -636,7 +650,7 @@ func (rp *RoutePlan) ExecuteGenerateStream(ctx context.Context, fn func(Generate
 				if fbAdmErr != nil {
 					// Terminal (cancel/closed): stop the walk; prior
 					// attempts and their signals stand (§4).
-					err = fbAdmErr
+					err = &admissionError{err: fbAdmErr}
 					break
 				}
 				defer fbRelease()
@@ -722,7 +736,7 @@ func (rp *RoutePlan) ExecuteGenerateStream(ctx context.Context, fn func(Generate
 		rp.recordResult(nil, attempts, outcome)
 	}
 
-	return err
+	return unwrapAdmissionError(err)
 }
 
 // ---------------------------------------------------------------------------
@@ -750,7 +764,11 @@ func (rp *RoutePlan) ExecuteEmbed(ctx context.Context) (*EmbedResponse, error) {
 		// return a no-op success and the call proceeds bit-identically
 		// to today, while governed keys return the context error before
 		// any flight exists. Healthy callers (ctx.Err() == nil) skip
-		// this entirely: zero extra work, no Capacity read.
+		// this entirely: zero extra work, no Capacity read. An already-
+		// cancelled UNGOVERNED caller pays one extra governance read
+		// here on top of the one inside the flight's admit — two
+		// lock-free map reads on a dead-caller edge path, accepted over
+		// plumbing governance knowledge into the admit func.
 		if ctx.Err() != nil {
 			rel, admErr := rp.acquireFor(ctx, rp.Profile.Key)
 			if admErr != nil {
@@ -794,7 +812,7 @@ func (rp *RoutePlan) ExecuteEmbed(ctx context.Context) (*EmbedResponse, error) {
 				if ctx.Err() != nil {
 					rel, fbAdmErr := rp.acquireFor(ctx, fb.Profile.Key)
 					if fbAdmErr != nil {
-						err = fbAdmErr
+						err = &admissionError{err: fbAdmErr}
 						break
 					}
 					rel()
@@ -804,15 +822,17 @@ func (rp *RoutePlan) ExecuteEmbed(ctx context.Context) (*EmbedResponse, error) {
 				var aErr *admissionError
 				if errors.As(err, &aErr) {
 					// Terminal (§4): stop the walk; prior attempts and
-					// their signals stand, no attempt for this one.
-					err = aErr.Unwrap()
+					// their signals stand, no attempt for this one. The
+					// marker is kept so recordResult suppresses cancel-
+					// warmth; the return site unwraps it for the caller.
+					err = aErr
 					break
 				}
 				attempts = append(attempts, makeAttempt(fb.Profile.Key, err, time.Since(fbStart)))
 			} else {
 				fbRelease, fbAdmErr := rp.acquireFor(ctx, fb.Profile.Key)
 				if fbAdmErr != nil {
-					err = fbAdmErr
+					err = &admissionError{err: fbAdmErr}
 					break
 				}
 				defer fbRelease()
@@ -838,7 +858,7 @@ func (rp *RoutePlan) ExecuteEmbed(ctx context.Context) (*EmbedResponse, error) {
 		resp.RouteOutcome = outcome
 	}
 
-	return resp, err
+	return resp, unwrapAdmissionError(err)
 }
 
 // ---------------------------------------------------------------------------
@@ -871,10 +891,18 @@ func (rp *RoutePlan) recordResult(err error, attempts []RouteAttempt, outcome *R
 		actualKey = attempts[len(attempts)-1].Key
 	}
 
+	var admErr *admissionError
 	if err == nil {
 		rp.recordSuccess(actualKey, LatencyInfo{})
 		rp.recordWarmthUse(actualKey)
 		rp.recordSlotUse(actualKey)
+	} else if errors.As(err, &admErr) {
+		// The walk ended at a fallback's ADMISSION gate (#400): no
+		// provider call was interrupted, so the cancel-warmth branch
+		// below must not fire — actualKey is the previous (failed)
+		// attempt's key, whose signals already ran inline, and an
+		// infra-failed attempt never earned warmth pre-admission
+		// either. Outcome feedback below still records the turn.
 	} else if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		rp.recordWarmthUse(actualKey) // model IS warm even if caller bailed — but no slot signal
 	}
