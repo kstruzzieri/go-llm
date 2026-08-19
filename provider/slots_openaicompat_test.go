@@ -738,3 +738,56 @@ func TestSlotSourceLlamaSwapModelQualified(t *testing.T) {
 		t.Fatalf("evicted capacity = (%d, %v), want fail-safe (1, true)", n, ok)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Capacity overrides (#400 config override)
+// ---------------------------------------------------------------------------
+
+func TestSlotOverridePinsCapacityAndSurvivesTTL(t *testing.T) {
+	key := ModelKey{Provider: "lc", Model: "m1"}
+	ss, cl, now := newTestSlotSource(t, SlotBackend{BaseURL: "http://127.0.0.1:1"},
+		WithSlotCapacityOverrides(map[ModelKey]int{key: 5}))
+	if n, ok := ss.Capacity(key); !ok || n != 5 {
+		t.Fatalf("Capacity = (%d, %v), want pinned (5, true)", n, ok)
+	}
+	*now = now.Add(24 * time.Hour) // far past any TTL: pinned keys never expire
+	if n, ok := ss.Capacity(key); !ok || n != 5 {
+		t.Fatalf("Capacity after TTL = (%d, %v), want still (5, true)", n, ok)
+	}
+	ss.RecordUse(key)
+	if got := cl.count(); got != 0 {
+		t.Fatalf("RecordUse on pinned key launched %d probes, want 0", got)
+	}
+	// Non-overridden keys on the same source still probe as before.
+	other := ModelKey{Provider: "lc", Model: "m2"}
+	ss.RecordUse(other)
+	if got := cl.count(); got != 1 {
+		t.Fatalf("RecordUse on unpinned key launched %d probes, want 1", got)
+	}
+}
+
+func TestSlotOverrideDoesNotGovernUnknownProvider(t *testing.T) {
+	// Governed check precedes the override lookup: stray override entries
+	// for providers outside the backends map stay ungoverned.
+	stray := ModelKey{Provider: "not-governed", Model: "m1"}
+	ss, _, _ := newTestSlotSource(t, SlotBackend{BaseURL: "http://127.0.0.1:1"},
+		WithSlotCapacityOverrides(map[ModelKey]int{stray: 7}))
+	if n, ok := ss.Capacity(stray); ok || n != 0 {
+		t.Fatalf("Capacity = (%d, %v), want ungoverned (0, false)", n, ok)
+	}
+}
+
+func TestSlotOverrideClampsContractViolatingValues(t *testing.T) {
+	// Public API entry point: the SlotSource contract (ok=true => n >= 1)
+	// must hold no matter who built the map.
+	zero := ModelKey{Provider: "lc", Model: "z"}
+	neg := ModelKey{Provider: "lc", Model: "n"}
+	ss, _, _ := newTestSlotSource(t, SlotBackend{BaseURL: "http://127.0.0.1:1"},
+		WithSlotCapacityOverrides(map[ModelKey]int{zero: 0, neg: -2}))
+	if n, ok := ss.Capacity(zero); !ok || n != 1 {
+		t.Fatalf("Capacity(zero) = (%d, %v), want clamped (1, true)", n, ok)
+	}
+	if n, ok := ss.Capacity(neg); !ok || n != 1 {
+		t.Fatalf("Capacity(neg) = (%d, %v), want clamped (1, true)", n, ok)
+	}
+}
