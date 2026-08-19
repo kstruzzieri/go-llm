@@ -1063,6 +1063,7 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 		retrieveOmitted:     retrieveOmitted,
 		session:             sessn,
 		journal:             journal,
+		grants:              newApprovalGrants(),
 		allowWrite:          f.allowWrite,
 		allowExec:           f.allowExec,
 		mcpAttached:         mcpAttached,

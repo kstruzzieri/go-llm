@@ -22,6 +22,13 @@ const (
 	diffContext = 3
 )
 
+// WriteClassApprovalKey is the shared structural grant key (#341) for the
+// write-class tools (write_file, edit_file): one session grant — the "a"
+// approval answer or golem's /auto-edits on — covers the whole class.
+// Exported because cmd/golem's /auto-edits toggle must reference the same
+// value. MCP tools and submit_plan never emit any key and are not covered.
+const WriteClassApprovalKey = "write-class:files"
+
 // ContentHash is the SHA-256 hex of b. Stable, distinct from absentHash, and reused by cmd/golem's undo journal to detect post-write changes.
 func ContentHash(b []byte) string {
 	sum := sha256.Sum256(b)

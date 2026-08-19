@@ -97,7 +97,7 @@ func (t *WriteFile) Plan(_ context.Context, raw json.RawMessage) (agent.ToolPlan
 		afterHash:    ContentHash(content),
 		summary:      fmt.Sprintf("write %s", args.Path),
 	})
-	return agent.ToolPlan{Effect: eff, Preview: preview}, nil
+	return agent.ToolPlan{Effect: eff, Preview: preview, ApprovalKey: WriteClassApprovalKey}, nil
 }
 
 func (t *WriteFile) Invoke(_ context.Context, raw json.RawMessage) (agent.ToolResult, error) {
