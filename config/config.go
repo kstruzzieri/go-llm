@@ -355,20 +355,25 @@ func Load(path string) (*Config, error) {
 		return nil, fmt.Errorf("config: parse %q: %w", path, err)
 	}
 
-	// Validate first (before materializing defaults).
-	if err := cfg.validate(); err != nil {
+	if err := cfg.finalize(); err != nil {
 		return nil, err
 	}
-
-	// Expand ${ENV} references in provider api_key fields (file-backed loads only).
-	if err := cfg.expandProviderAPIKeys(); err != nil {
-		return nil, err
-	}
-
-	// Apply defaults after validation passes.
-	cfg.applyDefaults()
 
 	return &cfg, nil
+}
+
+// finalize runs the post-unmarshal pipeline shared by Load and newDocument:
+// validate first (before materializing defaults), expand ${ENV} api_key
+// references (file-backed loads only), then apply defaults.
+func (c *Config) finalize() error {
+	if err := c.validate(); err != nil {
+		return err
+	}
+	if err := c.expandProviderAPIKeys(); err != nil {
+		return err
+	}
+	c.applyDefaults()
+	return nil
 }
 
 // expandAPIKeyRefs replaces every ${NAME} reference in value with the value of
