@@ -140,7 +140,7 @@ func TestBuildSelectorTypeConflict(t *testing.T) {
 	in := testInput()
 	cfg := in.Doc.Config
 	m := cfg.Models["fast"]
-	m.Name = "m1" // now agent and fast both point at local/m1...
+	m.Name = "m1"  // now agent and fast both point at local/m1...
 	m.Type = "moe" // ...with disagreeing types
 	cfg.Models["fast"] = m
 	s := Build(in)
