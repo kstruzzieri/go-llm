@@ -5,7 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strconv"
 	"strings"
+	"unicode"
 
 	"github.com/kstruzzieri/go-llm/agent"
 	"github.com/kstruzzieri/go-llm/provider"
@@ -66,6 +68,7 @@ func (a *replApprover) ApproveKeyed(ctx context.Context, call provider.ToolCall,
 	isPlan := call.Function.Name == submitPlanToolName
 	scope := grantScope(call.Function.Name)
 	grantable := key != "" && a.grants != nil && scope != ""
+	preview = sanitizeApprovalPreview(preview)
 	// The preview still renders here; only the question moves, because the
 	// source owns prompt printing and the editor repaints its prompt on every
 	// asynchronous write.
@@ -122,6 +125,19 @@ func (a *replApprover) ApproveKeyed(ctx context.Context, call provider.ToolCall,
 		_, _ = fmt.Fprintln(a.out)
 		return agent.ApprovalDecision{}, nil
 	}
+}
+
+func sanitizeApprovalPreview(preview string) string {
+	var safe strings.Builder
+	for _, r := range preview {
+		if r == '\n' || unicode.IsGraphic(r) {
+			safe.WriteRune(r)
+			continue
+		}
+		quoted := strconv.QuoteToGraphic(string(r))
+		safe.WriteString(quoted[1 : len(quoted)-1])
+	}
+	return safe.String()
 }
 
 // grantQuestion appends the grant answer only when this call can be granted.

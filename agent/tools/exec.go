@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -28,11 +29,12 @@ const (
 )
 
 // execApprovalKeyPrefix namespaces exec grant keys (#341) so a command
-// fingerprint can never collide with another tool class's key. The v1 tag
-// names the fingerprint recipe (argv, cwd, env NAME=value pairs, timeout,
-// resolved exe path), so any future recipe change is an explicit migration.
+// fingerprint can never collide with another tool class's key. The v2 tag
+// names the fingerprint recipe (argv, cwd, env NAME=value pairs, effective
+// and requested timeouts, resolved exe path), so any future recipe change is
+// an explicit migration.
 // Unexported: the key is opaque to consumers.
-const execApprovalKeyPrefix = "exec:v1:"
+const execApprovalKeyPrefix = "exec:v2:"
 
 var defaultExecEnvAllowlist = []string{"PATH", "HOME", "LANG", "USER", "TMPDIR"}
 
@@ -213,7 +215,7 @@ func (t *RunCommand) Plan(_ context.Context, raw json.RawMessage) (agent.ToolPla
 	if err != nil {
 		return agent.ToolPlan{Effect: eff}, fmt.Errorf("resolve %q: %w", args.Argv[0], err)
 	}
-	fp := commandFingerprint(args.Argv, dir, env, timeout, path)
+	fp := commandFingerprint(args.Argv, dir, env, timeout, requested, path)
 	p := execPending{
 		path: path, identity: fi, argv: args.Argv, dir: dir, dirLabel: dirLabel,
 		dirIdentity: dirIdentity, env: env, envNames: envNames, timeout: timeout,
@@ -403,15 +405,15 @@ func customLookPath(pathValue, name string) (string, os.FileInfo, error) {
 }
 
 // commandFingerprint is a stable hash over the approval-relevant inputs of the
-// exact command (#341 v1 recipe): argv, resolved cwd, the sanitized env as
+// exact command (#341 v2 recipe): argv, resolved cwd, the sanitized env as
 // NAME=value pairs (values are keyed — a changed PATH/HOME/LANG/TMPDIR/USER
-// value changes behavior even when the shape is identical), effective timeout,
-// and the resolved executable path (resolution can change under an identical
-// env when a new binary shadows an earlier PATH directory). Returns the FULL
-// digest — the approval key uses all of it; display call sites truncate to
-// fingerprintLen. Uses NUL separators so field boundaries cannot be forged by
-// embedded content.
-func commandFingerprint(argv []string, cwd string, env []string, timeout time.Duration, exePath string) string {
+// value changes behavior even when the shape is identical), effective and
+// requested timeouts, and the resolved executable path (resolution can change
+// under an identical env when a new binary shadows an earlier PATH directory).
+// Returns the FULL digest — the approval key uses all of it; display call sites
+// truncate to fingerprintLen. Uses NUL separators so field boundaries cannot
+// be forged by embedded content.
+func commandFingerprint(argv []string, cwd string, env []string, timeout time.Duration, requestedTimeout int, exePath string) string {
 	h := sha256.New()
 	write := func(s string) { _, _ = h.Write([]byte(s)); _, _ = h.Write([]byte{0}) }
 	write("argv")
@@ -426,6 +428,8 @@ func commandFingerprint(argv []string, cwd string, env []string, timeout time.Du
 	}
 	write("timeout")
 	write(timeout.String())
+	write("requested_timeout")
+	write(strconv.Itoa(requestedTimeout))
 	write("exe")
 	write(exePath)
 	return hex.EncodeToString(h.Sum(nil)) // full digest; callers truncate for display only

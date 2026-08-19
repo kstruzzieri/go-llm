@@ -42,8 +42,8 @@ func TestExecApprovalKeyStableAndNamespaced(t *testing.T) {
 	// White-box namespace + recipe pin: an exec key must never be
 	// constructible as a class key, and the recipe tag makes any future
 	// fingerprint change an explicit migration.
-	if !strings.HasPrefix(k1, "exec:v1:") {
-		t.Fatalf("exec key %q must be namespaced with \"exec:v1:\"", k1)
+	if !strings.HasPrefix(k1, "exec:v2:") {
+		t.Fatalf("exec key %q must be namespaced with \"exec:v2:\"", k1)
 	}
 }
 
@@ -82,26 +82,38 @@ func TestExecApprovalKeyVariesByEachInput(t *testing.T) {
 	}
 }
 
+func TestExecApprovalKeyVariesByRequestedTimeout(t *testing.T) {
+	rc, _ := planKeyRC(t)
+	omitted := execPlanKey(t, rc, `{"argv":["go","version"]}`)
+	explicitDefault := execPlanKey(t, rc, `{"argv":["go","version"],"timeout_seconds":60}`)
+	if omitted == explicitDefault {
+		t.Fatalf("omitted and explicit default timeouts must not share a key (%q)", omitted)
+	}
+	key601 := execPlanKey(t, rc, `{"argv":["go","version"],"timeout_seconds":601}`)
+	key999 := execPlanKey(t, rc, `{"argv":["go","version"],"timeout_seconds":999}`)
+	if key601 == key999 {
+		t.Fatalf("different requested timeouts must not share a key (%q)", key601)
+	}
+}
+
 func TestExecApprovalKeyVariesWithResolvedExecutable(t *testing.T) {
-	// The PATH-swap attack (D13): same argv, same env NAMES, but PATH's VALUE
-	// now resolves argv[0] to a different binary. The key must change or an
-	// old grant silently authorizes a different executable. (With env values
-	// hashed this case double-covers, but the resolved path also guards
-	// same-PATH shadowing, so it is pinned independently.)
+	// Same argv and environment, but a new binary shadows the old executable in
+	// an earlier PATH directory. The resolved path must independently change the
+	// key or an old grant silently authorizes a different executable.
 	if runtime.GOOS == "windows" {
 		t.Skip("unix PATH-resolution fixture")
 	}
 	rc, _ := planKeyRC(t)
 	dirA, dirB := t.TempDir(), t.TempDir()
-	for _, d := range []string{dirA, dirB} {
-		if err := os.WriteFile(filepath.Join(d, "mytool"), []byte("#!/bin/sh\n"), 0o755); err != nil {
-			t.Fatal(err)
-		}
+	if err := os.WriteFile(filepath.Join(dirB, "mytool"), []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
 	}
-	t.Setenv("PATH", dirA)
-	keyA := execPlanKey(t, rc, `{"argv":["mytool"]}`)
-	t.Setenv("PATH", dirB)
+	t.Setenv("PATH", dirA+string(os.PathListSeparator)+dirB)
 	keyB := execPlanKey(t, rc, `{"argv":["mytool"]}`)
+	if err := os.WriteFile(filepath.Join(dirA, "mytool"), []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	keyA := execPlanKey(t, rc, `{"argv":["mytool"]}`)
 	if keyA == keyB {
 		t.Fatalf("a different resolved executable must change the key (%q)", keyA)
 	}

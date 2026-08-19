@@ -131,6 +131,43 @@ func TestReplApproverColorRendersAnsi(t *testing.T) {
 	}
 }
 
+func TestApproverGrantPreviewNeutralizesTerminalControls(t *testing.T) {
+	preview := "+safe\x1b[2J\u009b\r\b\t\u202e.go\n context\n"
+	cases := []struct {
+		name  string
+		call  provider.ToolCall
+		key   string
+		color bool
+	}{
+		{name: "diff", call: newCall(), key: tools.WriteClassApprovalKey, color: true},
+		{name: "exec", call: execCall(), key: "exec:abc"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var out strings.Builder
+			grants := newApprovalGrants()
+			ap := newReplApprover(newScannerSource(strings.NewReader("a\n"), &out), &out, tc.color)
+			ap.grants = grants
+			d, err := ap.ApproveKeyed(context.Background(), tc.call, preview, tc.key)
+			if err != nil || !d.Approved {
+				t.Fatalf("ApproveKeyed: d=%+v err=%v", d, err)
+			}
+
+			got := out.String()
+			for _, raw := range []string{"\x1b[2J", "\u009b", "\r", "\b", "\t", "\u202e"} {
+				if strings.Contains(got, raw) {
+					t.Fatalf("approval output retained terminal control %q: %q", raw, got)
+				}
+			}
+			for _, escaped := range []string{`\x1b`, `\u009b`, `\r`, `\b`, `\t`, `\u202e`} {
+				if !strings.Contains(got, escaped) {
+					t.Fatalf("approval output omitted visible escape %q: %q", escaped, got)
+				}
+			}
+		})
+	}
+}
+
 // stubAnswerSource scripts ReadAnswer; every other lineSource method is inert.
 type stubAnswerSource struct {
 	line string

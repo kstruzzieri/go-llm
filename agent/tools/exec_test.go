@@ -207,23 +207,24 @@ func TestRenderExecPreviewClamped(t *testing.T) {
 }
 
 func TestCommandFingerprint(t *testing.T) {
-	base := commandFingerprint([]string{"go", "test"}, "/w", []string{"PATH=/usr/bin"}, 60*time.Second, "/w/bin/go")
+	base := commandFingerprint([]string{"go", "test"}, "/w", []string{"PATH=/usr/bin"}, 60*time.Second, 0, "/w/bin/go")
 	if len(base) != 64 { // full sha256 hex: the approval key uses all of it
 		t.Fatalf("len = %d, want 64", len(base))
 	}
-	if base != commandFingerprint([]string{"go", "test"}, "/w", []string{"PATH=/usr/bin"}, 60*time.Second, "/w/bin/go") {
+	if base != commandFingerprint([]string{"go", "test"}, "/w", []string{"PATH=/usr/bin"}, 60*time.Second, 0, "/w/bin/go") {
 		t.Error("must be stable for identical inputs")
 	}
 	diff := []struct {
 		name string
 		f    string
 	}{
-		{"argv", commandFingerprint([]string{"go", "vet"}, "/w", []string{"PATH=/usr/bin"}, 60*time.Second, "/w/bin/go")},
-		{"cwd", commandFingerprint([]string{"go", "test"}, "/x", []string{"PATH=/usr/bin"}, 60*time.Second, "/w/bin/go")},
-		{"env shape", commandFingerprint([]string{"go", "test"}, "/w", []string{"PATH=/usr/bin", "HOME=/home/x"}, 60*time.Second, "/w/bin/go")},
-		{"env value", commandFingerprint([]string{"go", "test"}, "/w", []string{"PATH=/opt/bin"}, 60*time.Second, "/w/bin/go")},
-		{"timeout", commandFingerprint([]string{"go", "test"}, "/w", []string{"PATH=/usr/bin"}, 30*time.Second, "/w/bin/go")},
-		{"exe", commandFingerprint([]string{"go", "test"}, "/w", []string{"PATH=/usr/bin"}, 60*time.Second, "/w/other/go")},
+		{"argv", commandFingerprint([]string{"go", "vet"}, "/w", []string{"PATH=/usr/bin"}, 60*time.Second, 0, "/w/bin/go")},
+		{"cwd", commandFingerprint([]string{"go", "test"}, "/x", []string{"PATH=/usr/bin"}, 60*time.Second, 0, "/w/bin/go")},
+		{"env shape", commandFingerprint([]string{"go", "test"}, "/w", []string{"PATH=/usr/bin", "HOME=/home/x"}, 60*time.Second, 0, "/w/bin/go")},
+		{"env value", commandFingerprint([]string{"go", "test"}, "/w", []string{"PATH=/opt/bin"}, 60*time.Second, 0, "/w/bin/go")},
+		{"timeout", commandFingerprint([]string{"go", "test"}, "/w", []string{"PATH=/usr/bin"}, 30*time.Second, 0, "/w/bin/go")},
+		{"requested timeout", commandFingerprint([]string{"go", "test"}, "/w", []string{"PATH=/usr/bin"}, 60*time.Second, 60, "/w/bin/go")},
+		{"exe", commandFingerprint([]string{"go", "test"}, "/w", []string{"PATH=/usr/bin"}, 60*time.Second, 0, "/w/other/go")},
 	}
 	for _, d := range diff {
 		if d.f == base {
