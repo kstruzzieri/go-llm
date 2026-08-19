@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"github.com/kstruzzieri/go-llm/config"
-	"github.com/kstruzzieri/go-llm/configview"
 	"github.com/kstruzzieri/go-llm/fingerprint"
 	"github.com/kstruzzieri/go-llm/internal/providerbootstrap"
 	"github.com/kstruzzieri/go-llm/provider"
@@ -152,15 +151,7 @@ func runModels(ctx context.Context, args []string, out, errOut io.Writer) error 
 		if ierr != nil {
 			return ierr
 		}
-		return renderModelsJSON(out, configview.BuildInput{
-			Doc: configview.DocSnapshot{
-				Config:   doc.Config(),
-				Origin:   doc.Origin(),
-				Revision: doc.Revision(),
-			},
-			Inventory:    inv,
-			Requirements: golemViewRequirements(),
-		})
+		return renderModelsJSON(out, modelsJSONInput(doc, inv))
 	}
 
 	resolveEndpoint := newPreflightEndpointResolver(bundle.Config, ollamaURL, backendRes.providerKey, backendRes.diagSource())

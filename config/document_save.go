@@ -167,14 +167,19 @@ func (d *Document) canonicalLocked() ([]byte, error) {
 }
 
 // commitSaved updates rawBytes/revision/origin to the published bytes.
-// Baseline profile ID and Dirty are slice-3 caller-owned state — deliberately
-// absent here.
+// Saving back to the document's own path preserves its discovery Source (an
+// env-override config saved in place is still the env-override config);
+// saving to a NEW path is an explicit-path act. Baseline profile ID and
+// Dirty are slice-3 caller-owned state — deliberately absent here.
 func (d *Document) commitSaved(out []byte, path string) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	sum := sha256.Sum256(out)
 	d.rawBytes = out
 	d.revision = hex.EncodeToString(sum[:])
+	if d.origin.Path == path && d.origin.Source != "" {
+		return // same file: provenance rule unchanged
+	}
 	d.origin = Origin{Source: OriginExplicit, Path: path}
 }
 

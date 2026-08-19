@@ -38,11 +38,21 @@ func TestEligibilityTriState(t *testing.T) {
 	}
 }
 
-// capBitByName must cover every canonical capability token — drift tripwire.
+// capBitByName must cover every canonical capability token AND map each to
+// the same bit provider's own parser assigns — coverage alone would not catch
+// a swapped bit.
 func TestCapBitByNameCoversCanonical(t *testing.T) {
 	for _, name := range provider.CanonicalCapabilityNames {
-		if _, ok := capBitByName[name]; !ok {
+		bit, ok := capBitByName[name]
+		if !ok {
 			t.Fatalf("capBitByName missing canonical token %q", name)
+		}
+		want, err := provider.ParseCapsStrict([]string{name})
+		if err != nil {
+			t.Fatalf("ParseCapsStrict(%q): %v", name, err)
+		}
+		if bit != want {
+			t.Fatalf("capBitByName[%q] = %v, provider parser says %v", name, bit, want)
 		}
 	}
 	if len(capBitByName) != len(provider.CanonicalCapabilityNames) {

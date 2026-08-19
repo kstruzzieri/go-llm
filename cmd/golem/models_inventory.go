@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 
@@ -55,10 +56,39 @@ func buildInventoryFromRegistry(ctx context.Context, models *provider.ModelRegis
 	return inv, nil
 }
 
-// loadDocumentFor mirrors loadConfig's path handling for the Document form.
+// loadDocumentFor mirrors loadConfig's path handling for the Document form,
+// including its configless mode: auto-discovery finding nothing returns
+// (nil, nil), same as loadConfig, so -json projects an honest not-ready
+// snapshot instead of hard-erroring where the text path would proceed.
 func loadDocumentFor(configPath string) (*config.Document, error) {
 	if configPath != "" {
 		return config.LoadDocument(configPath)
 	}
-	return config.DefaultDocument()
+	doc, err := config.DefaultDocument()
+	if err != nil {
+		if errors.Is(err, config.ErrConfigNotFound) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return doc, nil
+}
+
+// modelsJSONInput assembles the BuildInput for -json. A nil doc (configless
+// mode) projects as a not-ready snapshot with a config_missing diagnostic.
+func modelsJSONInput(doc *config.Document, inv configview.Inventory) configview.BuildInput {
+	in := configview.BuildInput{
+		Inventory:    inv,
+		Requirements: golemViewRequirements(),
+	}
+	if doc != nil {
+		in.Doc = configview.DocSnapshot{
+			Config:   doc.Config(),
+			Origin:   doc.Origin(),
+			Revision: doc.Revision(),
+		}
+	} else {
+		in.Doc = configview.DocSnapshot{Origin: config.Origin{Source: config.OriginProgrammatic}}
+	}
+	return in
 }

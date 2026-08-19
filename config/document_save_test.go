@@ -137,6 +137,33 @@ func TestSaveUpdatesDocumentState(t *testing.T) {
 	// Document deliberately has no such fields to update here.
 }
 
+// Saving back to the document's own path preserves its discovery Source; a
+// new path is an explicit-path act.
+func TestSavePreservesSameFileOriginSource(t *testing.T) {
+	d := loadTestDoc(t, rawWithUnknown)
+	p := filepath.Join(t.TempDir(), "o.json")
+	if err := d.SaveNew(p); err != nil {
+		t.Fatal(err)
+	}
+	// Simulate an env-override-discovered document at this path.
+	d.mu.Lock()
+	d.origin = Origin{Source: OriginEnvOverride, Path: p}
+	d.mu.Unlock()
+	if err := d.SaveReplace(p, d.Revision()); err != nil {
+		t.Fatal(err)
+	}
+	if o := d.Origin(); o.Source != OriginEnvOverride {
+		t.Fatalf("same-path save rewrote origin source: %+v", o)
+	}
+	p2 := filepath.Join(t.TempDir(), "o2.json")
+	if err := d.SaveNew(p2); err != nil {
+		t.Fatal(err)
+	}
+	if o := d.Origin(); o.Source != OriginExplicit || o.Path != p2 {
+		t.Fatalf("new-path save origin = %+v, want explicit-path", o)
+	}
+}
+
 // Byte-stability proven by an injected publication counter, not timing.
 func TestSaveReplaceByteStableNoRewrite(t *testing.T) {
 	d := loadTestDoc(t, rawWithUnknown)
