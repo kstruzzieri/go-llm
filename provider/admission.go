@@ -214,6 +214,12 @@ func (sa *slotAdmission) exitWait(key ModelKey, rejected bool) {
 
 // SlotAdmissionInfo is one key's admission telemetry for operator
 // surfaces (Router.SlotAdmissionSnapshot).
+//
+// Gate state and Capacity are sampled in two phases (state under the
+// gate mutex, capacity after unlocking — see snapshot), so they are not
+// one atomic observation: a capacity shrink landing between the phases
+// can transiently report InFlight > Capacity. Operator surfaces should
+// treat such a reading as sampling skew, not an over-admission.
 type SlotAdmissionInfo struct {
 	Provider string `json:"provider"`
 	Model    string `json:"model"`
