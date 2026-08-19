@@ -200,7 +200,10 @@ LLM_BENCH_JUDGE_API_KEY=... llm-bench -calibrate \
 
 `openai-compat` reports provider provenance as `openai-compat:<endpoint-id>`;
 the endpoint id is derived from the base URL so two compatible endpoints with
-the same model id do not share cached digest-less verdicts.
+the same model id do not share cached digest-less verdicts. When calibrating
+against a *local* thinking-tuned judge (llama.cpp/vLLM), add
+`-judge-disable-thinking`; leave it off for `api.openai.com`, which rejects
+the underlying `chat_template_kwargs` with HTTP 400.
 
 For subscription-backed Claude Code diagnostics:
 
