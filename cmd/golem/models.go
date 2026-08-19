@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/kstruzzieri/go-llm/config"
+	"github.com/kstruzzieri/go-llm/configview"
 	"github.com/kstruzzieri/go-llm/fingerprint"
 	"github.com/kstruzzieri/go-llm/internal/providerbootstrap"
 	"github.com/kstruzzieri/go-llm/provider"
@@ -48,6 +49,7 @@ func runModels(ctx context.Context, args []string, out, errOut io.Writer) error 
 		noProbe    bool
 		probeAll   bool
 		reprobe    bool
+		jsonOut    bool
 	)
 	fs := flag.NewFlagSet("golem models", flag.ContinueOnError)
 	fs.SetOutput(errOut)
@@ -58,6 +60,7 @@ func runModels(ctx context.Context, args []string, out, errOut io.Writer) error 
 	fs.StringVar(&ollamaURL, "ollama-url", "", "override Ollama base URL")
 	fs.BoolVar(&probeAll, "probe-all", false, "actively probe every non-explicit entry (no bounded-eager stop)")
 	fs.BoolVar(&reprobe, "reprobe", false, "delete cached probe verdicts for non-explicit entries then re-probe")
+	fs.BoolVar(&jsonOut, "json", false, "emit the configview snapshot as JSON (no probing; excludes -probe-all/-reprobe)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -66,6 +69,9 @@ func runModels(ctx context.Context, args []string, out, errOut io.Writer) error 
 			baseURLSet = true
 		}
 	})
+	if jsonOut && (probeAll || reprobe) {
+		return fmt.Errorf("golem models: -json cannot be combined with -probe-all or -reprobe")
+	}
 
 	root, err := filepath.Abs(rootFlag)
 	if err != nil {
@@ -135,6 +141,26 @@ func runModels(ctx context.Context, args []string, out, errOut io.Writer) error 
 	}
 	for _, w := range backendRes.warns {
 		_, _ = fmt.Fprintln(errOut, "warning: "+w)
+	}
+
+	if jsonOut {
+		doc, derr := loadDocumentFor(configPath)
+		if derr != nil {
+			return derr
+		}
+		inv, ierr := buildInventoryFromRegistry(ctx, bundle.Models)
+		if ierr != nil {
+			return ierr
+		}
+		return renderModelsJSON(out, configview.BuildInput{
+			Doc: configview.DocSnapshot{
+				Config:   doc.Config(),
+				Origin:   doc.Origin(),
+				Revision: doc.Revision(),
+			},
+			Inventory:    inv,
+			Requirements: golemViewRequirements(),
+		})
 	}
 
 	resolveEndpoint := newPreflightEndpointResolver(bundle.Config, ollamaURL, backendRes.providerKey, backendRes.diagSource())
