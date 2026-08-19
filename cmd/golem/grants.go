@@ -47,6 +47,11 @@ type grantID struct {
 // never need nil guards. (The /auto-edits and /grants commands lazily
 // initialize the store instead, so a toggle never reports state it did not
 // save.)
+//
+// #346 pointer discipline: capture sess.grants ONCE when spawning a background
+// consumer and hold that pointer. The slash-command lazy init reassigns
+// sess.grants only when it is nil, which the main.go construction makes
+// unreachable in production — but a captured pointer is immune either way.
 type approvalGrants struct {
 	mu   sync.Mutex
 	keys map[grantID]struct{}

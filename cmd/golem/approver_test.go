@@ -265,7 +265,7 @@ func TestApproverAlwaysAnswerGrantsKey(t *testing.T) {
 		if !g.granted(grantScopeExec, "exec:abc") {
 			t.Fatalf("input %q must store the grant under the exec scope", in)
 		}
-		if !strings.Contains(out.String(), "Run this command? [y/N/a] ") {
+		if !strings.Contains(out.String(), "Run this command? [y/N/a=always this command] ") {
 			t.Fatalf("grantable exec prompt must offer a:\n%s", out.String())
 		}
 	}
@@ -281,7 +281,7 @@ func TestApproverDifferentKeyPrompts(t *testing.T) {
 	if err != nil || d.Approved {
 		t.Fatalf("an ungranted key must prompt and here deny: d=%+v err=%v", d, err)
 	}
-	if !strings.Contains(out.String(), "Run this command? [y/N/a] ") {
+	if !strings.Contains(out.String(), "Run this command? [y/N/a=always this command] ") {
 		t.Fatalf("prompt missing for ungranted key:\n%s", out.String())
 	}
 }

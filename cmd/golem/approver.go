@@ -76,13 +76,16 @@ func (a *replApprover) ApproveKeyed(ctx context.Context, call provider.ToolCall,
 		question = "Lock this plan? [y/N] "
 	case isExec:
 		a.renderPlain(preview)
-		question = grantQuestion("Run this command?", grantable)
+		question = grantQuestion("Run this command?", grantable, "a=always this command")
 	case isMCP:
 		a.renderPlain(preview)
 		question = "Run this MCP tool? [y/N] "
 	default:
 		a.renderDiff(preview)
-		question = grantQuestion("Apply this change?", grantable)
+		// The legend spells out the asymmetry: an exec grant covers one exact
+		// command, but a write/edit grant covers the whole class — "a" here is
+		// /auto-edits on for the session, not "always this file".
+		question = grantQuestion("Apply this change?", grantable, "a=all edits this session")
 	}
 	if grantable && a.grants.granted(scope, key) {
 		_, _ = fmt.Fprintln(a.out, "auto-approved (session grant)")
@@ -122,9 +125,12 @@ func (a *replApprover) ApproveKeyed(ctx context.Context, call provider.ToolCall,
 }
 
 // grantQuestion appends the grant answer only when this call can be granted.
-func grantQuestion(q string, grantable bool) string {
+// The legend names the grant's real scope in the prompt itself, because the
+// two grantable classes are asymmetric (exact command vs whole write class)
+// and a bare "a" would let the user assume the narrower one.
+func grantQuestion(q string, grantable bool, legend string) string {
 	if grantable {
-		return q + " [y/N/a] "
+		return q + " [y/N/" + legend + "] "
 	}
 	return q + " [y/N] "
 }

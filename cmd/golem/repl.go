@@ -531,8 +531,10 @@ const golemHelp = `commands:
                  list agent-memory records, forget one, or promote one (with -agent-memory)
   /exit, /quit   leave golem
 any other line is sent to the agent as a goal.
-approval prompts marked [y/N/a] accept "a": approve and allow the same
-action again for the rest of this session (exec: exact command only).
+approval prompts offering "a" grant for the rest of this session; the
+prompt names the scope: a=always this command covers one exact command
+(not the contents of scripts it runs), a=all edits this session enables
+auto-approval for every write/edit (same as /auto-edits on).
 `
 
 func printSessions(ctx context.Context, out io.Writer, s *session) error {
