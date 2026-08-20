@@ -5,10 +5,141 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync/atomic"
 	"testing"
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
+
+	"github.com/kstruzzieri/go-llm/configview"
 )
+
+// TestConfigViewResource pins the additive go-llm://configview/v1 resource:
+// it renders the configview snapshot, performs ZERO network I/O on read, and
+// leaves the overloaded chat role requirement-less (candidates stay unknown).
+func TestConfigViewResource(t *testing.T) {
+	var hits atomic.Int64
+	mock := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		w.WriteHeader(http.StatusOK)
+	})
+
+	cfgPath := filepath.Join(t.TempDir(), "models.json")
+	cfgBody := `{
+  "providers": {"local": {"base_url": "http://localhost:1", "api_format": "openai-compat"}},
+	"models": {
+	  "agent": {"name": "m1", "provider": "local", "type": "dense"},
+	  "completion": {"name": "fim", "provider": "local", "type": "dense", "capabilities": ["generate", "insert"]}
+	},
+	"defaults": {"chat": "agent", "completion": "completion", "embedding": "agent"}
+}`
+	if err := os.WriteFile(cfgPath, []byte(cfgBody), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	env := newTestEnv(t, mock, WithConfig(cfgPath))
+	defer env.cleanup()
+
+	before := hits.Load()
+	result, err := env.session.ReadResource(context.Background(), &gomcp.ReadResourceParams{
+		URI: "go-llm://configview/v1",
+	})
+	if err != nil {
+		t.Fatalf("ReadResource() error = %v", err)
+	}
+	if got := hits.Load(); got != before {
+		t.Fatalf("configview read performed %d network request(s); must be zero", got-before)
+	}
+	if len(result.Contents) == 0 {
+		t.Fatal("expected non-empty contents")
+	}
+
+	var snap configview.Snapshot
+	if err := json.Unmarshal([]byte(result.Contents[0].Text), &snap); err != nil {
+		t.Fatalf("configview/v1 not a Snapshot: %v", err)
+	}
+	if !snap.Ready {
+		t.Fatalf("snapshot not ready: %+v", snap.Diagnostics)
+	}
+	if snap.Origin.Source != "explicit_path" {
+		t.Fatalf("origin = %q, want explicit_path", snap.Origin.Source)
+	}
+	if strings.Contains(result.Contents[0].Text, cfgPath) {
+		t.Fatal("resource leaks the config path")
+	}
+	// chat is deliberately requirement-less at the MCP boundary (it serves
+	// both chat and generate ops); its candidates must be unknown, not guessed.
+	sawChat := false
+	for _, b := range snap.Bindings {
+		if b.UseCase != "chat" {
+			continue
+		}
+		sawChat = true
+		for _, c := range b.Candidates {
+			if c.Eligibility != configview.EligibilityUnknown {
+				t.Fatalf("chat candidate %s = %s, want unknown (no declared shape)", c.Selector, c.Eligibility)
+			}
+		}
+	}
+	if !sawChat {
+		t.Fatal("no chat binding in snapshot")
+	}
+
+	sawCompletion := false
+	for _, b := range snap.Bindings {
+		if b.UseCase != "completion" {
+			continue
+		}
+		for _, c := range b.Candidates {
+			if c.Selector != "local/fim" {
+				continue
+			}
+			sawCompletion = true
+			if c.Eligibility != configview.EligibilityEligible {
+				t.Fatalf("completion candidate %s = %s, want eligible", c.Selector, c.Eligibility)
+			}
+		}
+	}
+	if !sawCompletion {
+		t.Fatal("no local/fim completion candidate in snapshot")
+	}
+}
+
+func TestConfigViewResourceReportsAutoDiscoveredOrigin(t *testing.T) {
+	cfgPath := filepath.Join(t.TempDir(), "models.json")
+	cfgBody := `{
+  "providers": {"local": {"base_url": "http://localhost:1", "api_format": "openai-compat"}},
+  "models": {"agent": {"name": "m1", "provider": "local", "type": "dense"}},
+  "defaults": {"chat": "agent"}
+}`
+	if err := os.WriteFile(cfgPath, []byte(cfgBody), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GO_LLM_CONFIG", cfgPath)
+
+	env := newTestEnv(t, http.NotFoundHandler())
+	defer env.cleanup()
+
+	result, err := env.session.ReadResource(context.Background(), &gomcp.ReadResourceParams{
+		URI: "go-llm://configview/v1",
+	})
+	if err != nil {
+		t.Fatalf("ReadResource() error = %v", err)
+	}
+
+	var snap configview.Snapshot
+	if err := json.Unmarshal([]byte(result.Contents[0].Text), &snap); err != nil {
+		t.Fatalf("configview/v1 not a Snapshot: %v", err)
+	}
+	if snap.Origin.Source != "env_override" {
+		t.Fatalf("origin = %q, want env_override", snap.Origin.Source)
+	}
+	if strings.Contains(result.Contents[0].Text, cfgPath) {
+		t.Fatal("resource leaks the auto-discovered config path")
+	}
+}
 
 func TestHealthResource(t *testing.T) {
 	mock := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

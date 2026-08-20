@@ -74,6 +74,17 @@ func (c Capability) String() string {
 	return strings.Join(parts, "|")
 }
 
+// Names returns the canonical capability tokens set in c, in String()'s
+// order; nil when no bits are set. Derived from String so the two renderings
+// can never drift apart.
+func (c Capability) Names() []string {
+	s := c.String()
+	if s == "none" {
+		return nil
+	}
+	return strings.Split(s, "|")
+}
+
 // ---------------------------------------------------------------------------
 // ModelKey
 // ---------------------------------------------------------------------------

@@ -277,10 +277,7 @@ func modelInfoFromProfile(profile *provider.ModelProfile) provider.ModelInfo {
 }
 
 func capabilityNames(caps provider.Capability) []string {
-	if caps == 0 {
-		return nil
-	}
-	return strings.Split(caps.String(), "|")
+	return caps.Names()
 }
 
 // pullerForModel returns the ModelPuller that should service a pull for name,
