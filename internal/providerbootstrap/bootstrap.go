@@ -150,7 +150,19 @@ func New(ctx context.Context, opts Options) (*Bundle, error) {
 	// config-derived source, which holds no goroutines until its RecordUse
 	// is called and is simply collected — nothing to close.
 	if len(slotBEs) > 0 {
-		routerOpts = append(routerOpts, provider.WithSlotSource(provider.NewOpenAICompatSlotSource(slotBEs)))
+		slotOverrides, err := buildSlotOverrides(effCfg, slotBEs)
+		if err != nil {
+			return nil, err
+		}
+		ssOpts := []provider.SlotSourceOption{}
+		if len(slotOverrides) > 0 {
+			ssOpts = append(ssOpts, provider.WithSlotCapacityOverrides(slotOverrides))
+		}
+		routerOpts = append(routerOpts, provider.WithSlotSource(provider.NewOpenAICompatSlotSource(slotBEs, ssOpts...)))
+	} else if _, err := buildSlotOverrides(effCfg, slotBEs); err != nil {
+		// slots overrides with NO slot-discovery provider at all is the
+		// same loud config error, not a silent no-op.
+		return nil, err
 	}
 	// Explicit constructor options apply last, so caller-supplied defaults
 	// override config for matching model keys while preserving other config keys.

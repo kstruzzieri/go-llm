@@ -10,6 +10,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/kstruzzieri/go-llm/agent"
+	"github.com/kstruzzieri/go-llm/agent/tools"
 	"github.com/kstruzzieri/go-llm/conversation"
 	golemruntime "github.com/kstruzzieri/go-llm/golem"
 	"github.com/kstruzzieri/go-llm/internal/agenttrace"
@@ -39,8 +40,14 @@ type replSession struct {
 
 	records *memory.MemoryRecordStore // nil => agent memory disabled (-agent-memory absent or open failed)
 
-	lastModel    string           // last routed ActualModel for /model
-	journal      *mutationJournal // nil unless -allow-write enabled writes
+	lastModel string           // last routed ActualModel for /model
+	journal   *mutationJournal // nil unless -allow-write enabled writes
+	// grants is the session-scoped approval grant store (#341). Built once at
+	// startup; cleared unconditionally on /new and /clear, on successful
+	// /resume, and via /grants clear; read by the per-run approver. nil only
+	// in grant-free contexts (methods are nil-safe; the /auto-edits and
+	// /grants commands lazily initialize it).
+	grants       *approvalGrants
 	allowWrite   bool
 	allowExec    bool
 	mcpAttached  bool    // true when external MCP tools are attached (force approver)
@@ -189,6 +196,7 @@ func runOnce(ctx context.Context, out io.Writer, interrupts <-chan struct{}, ses
 	if src != nil && needsApprover(sess.allowWrite, sess.allowExec, sess.mcpAttached) {
 		ap := newReplApprover(src, renderOut, sess.color)
 		ap.beforeWrite = rend.breakLine
+		ap.grants = sess.grants
 		approver = ap
 	}
 
@@ -335,6 +343,10 @@ func dispatchSlash(ctx context.Context, out io.Writer, sess *replSession, line s
 	case "/help":
 		_, _ = fmt.Fprint(out, golemHelp)
 	case "/clear":
+		// Reset semantics (#341 D8): approval grants drop unconditionally,
+		// before the session branch — under --no-session a live approver can
+		// still hold grants.
+		sess.grants.clear()
 		if sess.session == nil {
 			_, _ = fmt.Fprintln(out, "session disabled (--no-session)")
 		} else if err := sess.session.clear(ctx); err != nil {
@@ -348,6 +360,9 @@ func dispatchSlash(ctx context.Context, out io.Writer, sess *replSession, line s
 			}
 		}
 	case "/new":
+		// Session switch (#341 D8): grants never outlive the session they
+		// were given in, with or without conversation persistence.
+		sess.grants.clear()
 		if sess.session == nil {
 			_, _ = fmt.Fprintln(out, "session disabled (--no-session)")
 		} else {
@@ -378,6 +393,9 @@ func dispatchSlash(ctx context.Context, out io.Writer, sess *replSession, line s
 		} else if info, err := sess.session.switchTo(ctx, id); err != nil {
 			_, _ = fmt.Fprintf(out, "resume failed: %v\n", err)
 		} else {
+			// Success only (#341 D8): a failed /resume leaves the active
+			// session — and therefore its grants — untouched.
+			sess.grants.clear()
 			_, _ = fmt.Fprintln(out, info.line())
 		}
 	case "/model":
@@ -406,6 +424,45 @@ func dispatchSlash(ctx context.Context, out io.Writer, sess *replSession, line s
 		}
 		if sess.retrieveOmitted {
 			_, _ = fmt.Fprintln(out, "retrieve omitted: no RAG index configured")
+		}
+		if sess.allowWrite {
+			_, _ = fmt.Fprintf(out, "auto-edits: %s\n", autoEditState(sess))
+		}
+	case "/auto-edits":
+		if !sess.allowWrite {
+			_, _ = fmt.Fprintln(out, "writes disabled (run with -allow-write)")
+			return "", false
+		}
+		if sess.grants == nil {
+			sess.grants = newApprovalGrants() // D9: the toggle must never lie
+		}
+		switch {
+		case len(fields) == 1:
+			_, _ = fmt.Fprintf(out, "auto-edits: %s\n", autoEditState(sess))
+		case len(fields) == 2 && fields[1] == "on":
+			sess.grants.grant(grantScopeFiles, tools.WriteClassApprovalKey)
+			_, _ = fmt.Fprintln(out, "auto-edits: on")
+		case len(fields) == 2 && fields[1] == "off":
+			sess.grants.revoke(grantScopeFiles, tools.WriteClassApprovalKey)
+			_, _ = fmt.Fprintln(out, "auto-edits: off")
+		default:
+			_, _ = fmt.Fprintln(out, "usage: /auto-edits [on|off]")
+		}
+	case "/grants":
+		if sess.grants == nil {
+			sess.grants = newApprovalGrants() // D9: state shown must be state stored
+		}
+		switch {
+		case len(fields) == 1:
+			_, _ = fmt.Fprintf(out, "session grants: %d\n", sess.grants.count())
+			if sess.allowWrite {
+				_, _ = fmt.Fprintf(out, "auto-edits: %s\n", autoEditState(sess))
+			}
+		case len(fields) == 2 && fields[1] == "clear":
+			sess.grants.clear()
+			_, _ = fmt.Fprintln(out, "session grants cleared")
+		default:
+			_, _ = fmt.Fprintln(out, "usage: /grants [clear]")
 		}
 	case "/edit":
 		// Capability is independent of the line editor: -no-editor selects
@@ -439,6 +496,16 @@ func dispatchSlash(ctx context.Context, out io.Writer, sess *replSession, line s
 	return "", false
 }
 
+// autoEditState reports the write-class grant as a toggle state. The "a"
+// answer on a write/edit prompt and /auto-edits on set the same grant, so
+// this is the single source of truth for both.
+func autoEditState(sess *replSession) string {
+	if sess.grants.granted(grantScopeFiles, tools.WriteClassApprovalKey) {
+		return "on"
+	}
+	return "off"
+}
+
 const golemHelp = `commands:
   /help          show this help
   /tools         list registered tools and their effect class
@@ -451,6 +518,10 @@ const golemHelp = `commands:
   /resume <id>   switch to a saved session
   /edit [seed]   compose a goal in $VISUAL/$EDITOR (quoting unsupported)
   /undo          revert the last applied write (when -allow-write)
+  /auto-edits [on|off]
+                 show or set session auto-approval for write/edit tools
+  /grants [clear]
+                 count active session approval grants, or revoke them all
   /remember [--global] <text>
                  save a memory (workspace scope unless --global)
   /forget <id>   delete a saved memory
@@ -460,6 +531,10 @@ const golemHelp = `commands:
                  list agent-memory records, forget one, or promote one (with -agent-memory)
   /exit, /quit   leave golem
 any other line is sent to the agent as a goal.
+approval prompts offering "a" grant for the rest of this session; the
+prompt names the scope: a=always this command covers one exact command
+(not the contents of scripts it runs), a=all edits this session enables
+auto-approval for every write/edit (same as /auto-edits on).
 `
 
 func printSessions(ctx context.Context, out io.Writer, s *session) error {

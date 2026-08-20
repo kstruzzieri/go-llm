@@ -109,20 +109,25 @@ type modelStepSpan struct {
 }
 
 type toolCallSpan struct {
-	SchemaVersion int     `json:"schema_version"`
-	RunID         string  `json:"run_id"`
-	SpanID        string  `json:"span_id"`
-	ParentID      string  `json:"parent_id"`
-	Kind          string  `json:"kind"` // "tool_call"
-	Step          int     `json:"step"`
-	Name          string  `json:"name"`
-	Effect        string  `json:"effect,omitempty"`
-	Invoked       bool    `json:"invoked"`
-	Denied        bool    `json:"denied"`
-	IsError       bool    `json:"is_error"`
-	Truncated     bool    `json:"truncated"`
-	ContentBytes  int     `json:"content_bytes"`
-	DurationMS    float64 `json:"duration_ms"`
+	SchemaVersion int    `json:"schema_version"`
+	RunID         string `json:"run_id"`
+	SpanID        string `json:"span_id"`
+	ParentID      string `json:"parent_id"`
+	Kind          string `json:"kind"` // "tool_call"
+	Step          int    `json:"step"`
+	Name          string `json:"name"`
+	Effect        string `json:"effect,omitempty"`
+	Invoked       bool   `json:"invoked"`
+	Denied        bool   `json:"denied"`
+	// AutoApproved records that the approval decision came from a session
+	// grant (#341). Additive within SchemaVersion 2 (same rule as
+	// pressureLite's AnchorOmissions): omitempty keeps every pre-#341 span
+	// byte-identical.
+	AutoApproved bool    `json:"auto_approved,omitempty"`
+	IsError      bool    `json:"is_error"`
+	Truncated    bool    `json:"truncated"`
+	ContentBytes int     `json:"content_bytes"`
+	DurationMS   float64 `json:"duration_ms"`
 	// Delegated* record the model a delegating tool (e.g. delegate_code) routed
 	// to. Identity + fallback count only; omitempty so non-delegated spans are
 	// byte-identical to before.

@@ -82,6 +82,12 @@ type ModelConfig struct {
 	Capabilities  []string         `json:"capabilities,omitempty"`
 	Fallbacks     []string         `json:"fallbacks,omitempty"`
 	Options       *SamplingOptions `json:"options,omitempty"`
+	// Slots optionally pins backend parallel-slot capacity for this
+	// model, overriding runtime discovery (#400). Requires the model's
+	// provider to opt into slot_discovery; validated at bootstrap. Must
+	// be >= 1 when present (0 = unset; JSON cannot distinguish an
+	// explicit 0 from absent).
+	Slots int `json:"slots,omitempty"`
 	// ThinkMode optionally overrides the catalog/inferred think mode for
 	// this model: "none", "always", "toggle", or "auto" (lowercased at
 	// load). Empty means no override. Invalid values fail Load — user
@@ -602,6 +608,12 @@ func (cfg *Config) validate() error {
 				return fmt.Errorf("config: model %q: implicit provider \"ollama\" not found", role)
 			}
 			return fmt.Errorf("config: model %q: provider %q not found", role, providerKey)
+		}
+
+		// Validate slots (#400 admission-capacity override). Bootstrap
+		// rechecks for programmatic Configs that bypass Load.
+		if m.Slots < 0 {
+			return fmt.Errorf("config: model %q: slots must be >= 1", role)
 		}
 
 		// Validate and normalize think_mode (strict — user config fails loud

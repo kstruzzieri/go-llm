@@ -1103,3 +1103,42 @@ func TestLoad_LiteralAPIKeyUnchanged(t *testing.T) {
 		t.Errorf("api_key = %q, want unchanged literal", got)
 	}
 }
+
+// slots (#400 admission-capacity override): negative fails Load naming the
+// role; absent and positive both load (0 = unset, JSON cannot distinguish
+// an explicit 0 from absent).
+func TestLoad_SlotsValidation(t *testing.T) {
+	valid := writeTempJSON(t, `{
+  "providers": {
+    "lc": { "base_url": "http://127.0.0.1:8090", "api_format": "openai-compat", "slot_discovery": true }
+  },
+  "models": {
+    "default": { "name": "m1", "provider": "lc", "type": "dense", "slots": 4 }
+  },
+  "defaults": { "chat": "default" }
+}`)
+	cfg, err := Load(valid)
+	if err != nil {
+		t.Fatalf("Load with slots 4: %v", err)
+	}
+	if got := cfg.Models["default"].Slots; got != 4 {
+		t.Fatalf("Slots = %d after Load, want 4 (json tag round-trip)", got)
+	}
+
+	invalid := writeTempJSON(t, `{
+  "providers": {
+    "lc": { "base_url": "http://127.0.0.1:8090", "api_format": "openai-compat", "slot_discovery": true }
+  },
+  "models": {
+    "default": { "name": "m1", "provider": "lc", "type": "dense", "slots": -1 }
+  },
+  "defaults": { "chat": "default" }
+}`)
+	_, err = Load(invalid)
+	if err == nil {
+		t.Fatal("want Load error for negative slots")
+	}
+	if !contains(err.Error(), "default") || !contains(err.Error(), "slots") {
+		t.Fatalf("error %q must name the role and the field", err)
+	}
+}

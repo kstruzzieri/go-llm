@@ -266,6 +266,10 @@ golem -root /path/to/project -allow-write -allow-exec
 
 Inside the REPL, use `/help`, `/tools`, `/model`, `/new`, `/clear`, `/undo`, and `/exit`. Any other line is sent to the agent as the current goal.
 
+Approval prompts that offer an `a` answer also accept "always this session", and the prompt names the grant's scope because the two classes are deliberately asymmetric: `a` on a command prompt (`a=always this command`) covers only that exact command, while `a` on an edit prompt (`a=all edits this session`) enables auto-approval for **every** write/edit in the workspace — it is `/auto-edits on`, not "always this file". `/auto-edits on|off` toggles the write/edit grant explicitly, `/grants` counts the active session grants, and `/grants clear` revokes them all without touching history. Grants are in-memory only and die with `/new`, `/clear`, a successful `/resume`, or process exit.
+
+Two security properties to keep in mind before granting. First, an exec grant pins the command's identity (argv, cwd, sanitized environment values, timeout, resolved executable path) but not the contents of files that command reads or runs: `a` on `go test ./...` or `bash build.sh` keeps auto-approving after the test files or the script change. Second, the two grants compose: with auto-edits on and a test/build command granted, the model can modify workspace files and run them without any further prompt. That is the intended edit-test loop for trusted work — when processing untrusted content (web pages, third-party repos, external MCP output), leave auto-edits off and prefer `y` over `a`, or `/grants clear` before continuing.
+
 ### Scripting / one-shot mode
 
 `-p` runs a single agent turn without the REPL and prints only the final answer to stdout, so the output is safe to capture in scripts. All progress, warnings, and errors go to stderr, and failures exit non-zero. One-shot implies `-no-session`, `-no-compress`, and `-no-memory` (nothing is persisted, and no memory DB is opened), and approval-gated tools stay unavailable — `-allow-write`/`-allow-exec` are ignored because there is no interactive approver to answer the prompt.

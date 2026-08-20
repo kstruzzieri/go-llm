@@ -88,15 +88,19 @@ type slotEntry struct {
 type OpenAICompatSlotSource struct {
 	mu       sync.RWMutex
 	backends map[string]SlotBackend // provider name -> endpoint; read-only after construction
-	entries  map[ModelKey]slotEntry
-	inflight map[ModelKey]struct{}
-	closed   bool
-	wg       sync.WaitGroup
-	ttl      time.Duration
-	client   *http.Client
-	nowFn    func() time.Time
-	ctx      context.Context
-	cancel   context.CancelFunc
+	// overrides pins capacity per key (#400 config override); read-only
+	// after construction. Pinned keys are permanently fresh and never
+	// probed.
+	overrides map[ModelKey]int
+	entries   map[ModelKey]slotEntry
+	inflight  map[ModelKey]struct{}
+	closed    bool
+	wg        sync.WaitGroup
+	ttl       time.Duration
+	client    *http.Client
+	nowFn     func() time.Time
+	ctx       context.Context
+	cancel    context.CancelFunc
 
 	// launch starts a probe goroutine (default: go f()). Test seam: a
 	// capturing launcher makes spawn decisions and probe completion
@@ -113,6 +117,27 @@ func WithSlotTTL(d time.Duration) SlotSourceOption {
 	return func(ss *OpenAICompatSlotSource) {
 		if d > 0 {
 			ss.ttl = d
+		}
+	}
+}
+
+// WithSlotCapacityOverrides pins capacity for specific keys (#400
+// config override). Overridden keys report the pinned value (always
+// fresh) and are never probed. Keys whose provider is not governed by
+// this source are still (0, false) — the governed check runs first, so
+// direct constructors get consistent ungoverned behavior regardless of
+// stray override entries. Values < 1 are clamped to 1 at copy time:
+// this is public API and the SlotSource contract (ok=true implies
+// n >= 1) must hold no matter who built the map — fail-safe serial,
+// consistent with the probe-failure fail-safe.
+func WithSlotCapacityOverrides(o map[ModelKey]int) SlotSourceOption {
+	return func(ss *OpenAICompatSlotSource) {
+		ss.overrides = make(map[ModelKey]int, len(o))
+		for k, v := range o {
+			if v < 1 {
+				v = 1
+			}
+			ss.overrides[k] = v
 		}
 	}
 }
@@ -163,6 +188,9 @@ func (ss *OpenAICompatSlotSource) Capacity(key ModelKey) (int, bool) {
 	if _, governed := ss.backends[key.Provider]; !governed {
 		return 0, false
 	}
+	if n, pinned := ss.overrides[key]; pinned {
+		return n, true // permanently fresh; never probed
+	}
 	ss.mu.RLock()
 	defer ss.mu.RUnlock()
 	if e, ok := ss.entries[key]; ok && ss.nowFn().Before(e.fetchedAt.Add(ss.ttl)) {
@@ -177,6 +205,9 @@ func (ss *OpenAICompatSlotSource) RecordUse(key ModelKey) {
 	be, governed := ss.backends[key.Provider]
 	if !governed {
 		return
+	}
+	if _, pinned := ss.overrides[key]; pinned {
+		return // pinned keys never probe (no I/O ever)
 	}
 	ss.mu.Lock()
 	if ss.closed {

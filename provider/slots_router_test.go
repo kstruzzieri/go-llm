@@ -5,6 +5,7 @@ import (
 	"errors"
 	"sync"
 	"testing"
+	"time"
 )
 
 // fakeSlotSource records seam traffic — keys on BOTH methods, so a
@@ -235,4 +236,127 @@ func TestRouterCloseJoinsWarmthAndSlotErrors(t *testing.T) {
 	if slots.closed != 1 {
 		t.Fatalf("slot Close calls = %d, want 1", slots.closed)
 	}
+}
+
+// ---------------------------------------------------------------------------
+// Admission wiring (#400)
+// ---------------------------------------------------------------------------
+
+func TestRouterWithSlotSourceStampsAdmissionOnPlans(t *testing.T) {
+	fake := &fakeSlotSource{capacity: 2, governed: true}
+	router, _ := setupTestRouter(t, WithSlotSource(fake))
+	defer func() { _ = router.Close() }()
+	plan, err := router.Route(context.Background(), RoutingRequest{Model: "qwen3:8b", UseCase: "chat"})
+	if err != nil {
+		t.Fatalf("Route: %v", err)
+	}
+	if plan.admission == nil {
+		t.Fatal("plan built by a slot-sourced Router has nil admission seam")
+	}
+
+	bare, _ := setupTestRouter(t)
+	defer func() { _ = bare.Close() }()
+	barePlan, err := bare.Route(context.Background(), RoutingRequest{Model: "qwen3:8b", UseCase: "chat"})
+	if err != nil {
+		t.Fatalf("Route (no source): %v", err)
+	}
+	if barePlan.admission != nil {
+		t.Fatal("plan built by a source-less Router must have nil admission seam")
+	}
+}
+
+func TestSlotAdmissionSnapshotDeterministicOrderAndNilWithoutSource(t *testing.T) {
+	bare, _ := setupTestRouter(t)
+	defer func() { _ = bare.Close() }()
+	if got := bare.SlotAdmissionSnapshot(); got != nil {
+		t.Fatalf("no-source snapshot = %v, want nil", got)
+	}
+
+	src := newAdmFakeSource()
+	keys := []ModelKey{
+		{Provider: "p", Model: "b"},
+		{Provider: "p", Model: "a"},
+		{Provider: "o", Model: "z"},
+	}
+	for _, k := range keys {
+		src.set(k, 3)
+	}
+	router, _ := setupTestRouter(t, WithSlotSource(src))
+	defer func() { _ = router.Close() }()
+	// Create gate entries in deliberately unsorted order.
+	for _, k := range keys {
+		rel, err := router.acquireSlot(context.Background(), k)
+		if err != nil {
+			t.Fatalf("acquireSlot(%v): %v", k, err)
+		}
+		rel()
+	}
+	snap := router.SlotAdmissionSnapshot()
+	if len(snap) != 3 {
+		t.Fatalf("snapshot len = %d, want 3", len(snap))
+	}
+	wantOrder := []ModelKey{
+		{Provider: "o", Model: "z"},
+		{Provider: "p", Model: "a"},
+		{Provider: "p", Model: "b"},
+	}
+	for i, w := range wantOrder {
+		got := snap[i]
+		if got.Provider != w.Provider || got.Model != w.Model {
+			t.Fatalf("snapshot[%d] = %s/%s, want %s/%s", i, got.Provider, got.Model, w.Provider, w.Model)
+		}
+		if got.Capacity != 3 || got.InFlight != 0 || got.Waiting != 0 ||
+			got.Admitted != 1 || got.Queued != 0 || got.Rejected != 0 {
+			t.Fatalf("snapshot[%d] = %+v, want capacity 3, admitted 1, all else 0", i, got)
+		}
+	}
+}
+
+func TestRouterCloseUnblocksAdmissionWaiters(t *testing.T) {
+	src := newAdmFakeSource()
+	key := ModelKey{Provider: "p", Model: "m"}
+	src.set(key, 1)
+	router, _ := setupTestRouter(t, WithSlotSource(src))
+	queuedC := make(chan ModelKey, 1)
+	router.admission.queuedHook = func(k ModelKey) { queuedC <- k }
+
+	rel1, err := router.acquireSlot(context.Background(), key)
+	if err != nil {
+		t.Fatalf("acquireSlot: %v", err)
+	}
+	errC := make(chan error, 1)
+	go func() {
+		_, err := router.acquireSlot(context.Background(), key)
+		errC <- err
+	}()
+	select {
+	case <-queuedC:
+	case <-time.After(admWaitTimeout):
+		t.Fatal("waiter never queued")
+	}
+	if err := router.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	select {
+	case err := <-errC:
+		if !errors.Is(err, ErrRouterClosed) {
+			t.Fatalf("waiter err = %v, want ErrRouterClosed", err)
+		}
+	case <-time.After(admWaitTimeout):
+		t.Fatal("Router.Close did not unblock the admission waiter")
+	}
+	rel1() // release after close must be safe
+}
+
+// acquireSlot on a Router with no slot source must be a safe no-op, not a
+// nil dereference — the seam is real Router API surface even though the
+// route-plan bracket short-circuits before reaching it.
+func TestAcquireSlotWithoutSourceIsNoop(t *testing.T) {
+	bare, _ := setupTestRouter(t)
+	defer func() { _ = bare.Close() }()
+	rel, err := bare.acquireSlot(context.Background(), ModelKey{Provider: "p", Model: "m"})
+	if err != nil {
+		t.Fatalf("acquireSlot on source-less router: %v", err)
+	}
+	rel()
 }

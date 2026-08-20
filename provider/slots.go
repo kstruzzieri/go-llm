@@ -23,6 +23,9 @@ type SlotSource interface {
 	RecordUse(key ModelKey)
 	// Close stops background work and waits for in-flight probes to exit.
 	// After Close returns, RecordUse is a no-op and no probe goroutines
-	// remain. Safe to call multiple times.
+	// remain. Safe to call multiple times. Capacity must remain safe to
+	// call after Close (returning cached or fail-safe values): admission
+	// (#400) reads it for execute-after-Close calls and post-Close
+	// telemetry snapshots.
 	Close() error
 }

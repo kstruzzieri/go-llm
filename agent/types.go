@@ -209,6 +209,12 @@ type ToolCallRecord struct {
 	Denied  bool
 	Invoked bool          // false for synthetic pre-invoke outcomes (no Invoke ran)
 	Latency time.Duration // wall time of Invoke only; zero when !Invoked
+	// AutoApproved is true when the approval decision came from a session
+	// grant (KeyedApprover ViaGrant) rather than an explicit per-call answer.
+	// Decision provenance only: it can be true with Invoked=false when the
+	// invocation budget blocks a grant-approved call. omitempty keeps
+	// pre-#341 run traces byte-identical.
+	AutoApproved bool `json:"AutoApproved,omitempty"`
 	// RouteOutcome names the model a delegating tool routed to; nil for ordinary
 	// tools. Omitted from marshaled records when nil, so non-delegated run
 	// traces are byte-identical to before.

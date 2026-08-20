@@ -55,6 +55,7 @@ type Router struct {
 	breakers        map[string]*CircuitBreaker
 	warmth          WarmthSource
 	slots           SlotSource
+	admission       *slotAdmission
 	tokenBudget     *TokenBudgetValidator
 	modelDefaults   map[ModelKey]SamplingDefaults
 	sticky          *stickyCache
@@ -308,6 +309,13 @@ func NewRouter(registry *ModelRegistry, providers *Registry, opts ...RouterOptio
 		r.tokenBudget = NewTokenBudgetValidator()
 	}
 
+	// Admission (#400) exists only when a slot source governs anything.
+	// Nil admission means every RoutePlan bracket is a no-op and the
+	// ungoverned world is bit-identical to pre-#400 behavior.
+	if r.slots != nil {
+		r.admission = newSlotAdmission(r.slots, r.done)
+	}
+
 	return r
 }
 
@@ -549,6 +557,24 @@ func (r *Router) RecordSlotUse(key ModelKey) {
 	if r.slots != nil {
 		r.slots.RecordUse(key)
 	}
+}
+
+// acquireSlot implements the slotAdmitter seam RoutePlan consumes (#400).
+func (r *Router) acquireSlot(ctx context.Context, key ModelKey) (func(), error) {
+	if r.admission == nil {
+		return noopRelease, nil
+	}
+	return r.admission.acquire(ctx, key)
+}
+
+// SlotAdmissionSnapshot reports per-key admission counters for operator
+// surfaces (mirrors WarmthSnapshot). Nil when no slot source is
+// configured. Order is deterministic: provider, then model.
+func (r *Router) SlotAdmissionSnapshot() []SlotAdmissionInfo {
+	if r.admission == nil {
+		return nil
+	}
+	return r.admission.snapshot()
 }
 
 // ---------------------------------------------------------------------------
@@ -1132,6 +1158,12 @@ func (r *Router) buildPlan(winner scoredCandidate, fallbacks []scoredCandidate, 
 	plan.SetWasSticky(wasSticky)
 	plan.SetRecorder(r)
 	plan.SetFeedback(r.routingFeedback) // ← PR2 addition; nil is fine, SetFeedback handles it
+	// Admission seam (#400): the Router itself is the slotAdmitter;
+	// r.admission is its internal gate state. Source-less Routers leave
+	// the plan's seam nil, keeping every bracket a no-op.
+	if r.admission != nil {
+		plan.setAdmission(r)
+	}
 	// Stamp the per-Router warn state and logger onto the plan so
 	// newRouteIDWithWarn (called from buildOutcome) and
 	// recordOutcomeFeedback can fire once-logged warnings on RNG /
