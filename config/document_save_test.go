@@ -11,7 +11,135 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 )
+
+// P0 LINEARIZATION (spec amendment 6): a mutation cannot interleave between
+// a save's snapshot and its commit. With publication paused mid-save, a
+// concurrent mutation must BLOCK until the save completes; afterwards the
+// document's revision matches the on-disk bytes (pre-mutation content) and
+// the mutation's edit lives only in the draft.
+func TestSaveMutationLinearization(t *testing.T) {
+	d := loadTestDoc(t, rawWithUnknown)
+	p := filepath.Join(t.TempDir(), "lin.json")
+	if err := d.SaveNew(p); err != nil {
+		t.Fatal(err)
+	}
+	m := d.authored.Models["agent"]
+	m.Description = "pre-save edit"
+	d.authored.Models["agent"] = m
+
+	publishEntered := make(chan struct{})
+	releasePublish := make(chan struct{})
+	orig := publishReplaceFn
+	publishReplaceFn = func(path string, data []byte, rev string) error {
+		close(publishEntered)
+		<-releasePublish
+		return orig(path, data, rev)
+	}
+	t.Cleanup(func() { publishReplaceFn = orig })
+
+	saveDone := make(chan error, 1)
+	rev := d.Revision()
+	go func() { saveDone <- d.SaveReplace(p, rev) }()
+	<-publishEntered
+
+	// Any d.mu acquirer stands in for a draft mutation (BindUseCase arrives
+	// in a later task and re-exercises this via its concurrent test).
+	mutDone := make(chan struct{})
+	go func() {
+		d.mu.Lock()
+		m := d.authored.Models["agent"]
+		m.Description = "post-save edit"
+		d.authored.Models["agent"] = m
+		d.mu.Unlock()
+		close(mutDone)
+	}()
+
+	select {
+	case <-mutDone:
+		t.Fatal("mutation completed while save held the document — not linearized")
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(releasePublish)
+	if err := <-saveDone; err != nil {
+		t.Fatal(err)
+	}
+	<-mutDone
+	onDisk, err := os.ReadFile(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sum := sha256.Sum256(onDisk)
+	if d.Revision() != hex.EncodeToString(sum[:]) {
+		t.Fatal("revision does not match published bytes after interleaved mutation")
+	}
+	if !bytes.Contains(onDisk, []byte("pre-save edit")) {
+		t.Fatal("save lost the snapshot content")
+	}
+}
+
+// Revision conflicts are a typed sentinel.
+func TestSaveReplaceRevisionConflictSentinel(t *testing.T) {
+	d := loadTestDoc(t, rawWithUnknown)
+	p := filepath.Join(t.TempDir(), "sc.json")
+	if err := d.SaveNew(p); err != nil {
+		t.Fatal(err)
+	}
+	rev := d.Revision()
+	if err := os.WriteFile(p, []byte(`{"providers":{},"models":{},"defaults":{}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.SaveReplace(p, rev); !errors.Is(err, ErrRevisionConflict) {
+		t.Fatalf("err = %v, want ErrRevisionConflict", err)
+	}
+}
+
+// Profile saves record PROFILE provenance via the origin-aware variants.
+func TestSaveNewAsProfileOrigin(t *testing.T) {
+	d := loadTestDoc(t, rawWithUnknown)
+	p := filepath.Join(t.TempDir(), "prof.json")
+	if err := d.SaveNewAs(p, OriginProfile); err != nil {
+		t.Fatal(err)
+	}
+	if o := d.Origin(); o.Source != OriginProfile || o.Path != p {
+		t.Fatalf("origin = %+v, want profile@%s", o, p)
+	}
+}
+
+// Durability-uncertain via the As-variants: bytes live, state committed
+// WITH profile origin, typed error at the config layer (the profile store
+// converts it to a nil-error SaveOutcome warning — spec amendment 4).
+func TestSaveReplaceAsDurabilityUncertainCommitsProfileOrigin(t *testing.T) {
+	d := loadTestDoc(t, rawWithUnknown)
+	p := filepath.Join(t.TempDir(), "prof.json")
+	if err := d.SaveNewAs(p, OriginProfile); err != nil {
+		t.Fatal(err)
+	}
+	m := d.authored.Models["agent"]
+	m.Description = "changed"
+	d.authored.Models["agent"] = m
+
+	orig := syncDir
+	syncDir = func(string) error { return errors.New("injected") }
+	t.Cleanup(func() { syncDir = orig })
+
+	err := d.SaveReplaceAs(p, d.Revision(), OriginProfile)
+	if !errors.Is(err, ErrDurabilityUncertain) {
+		t.Fatalf("err = %v", err)
+	}
+	if o := d.Origin(); o.Source != OriginProfile {
+		t.Fatalf("lost profile origin: %+v", o)
+	}
+	onDisk, rerr := os.ReadFile(p)
+	if rerr != nil {
+		t.Fatal(rerr)
+	}
+	sum := sha256.Sum256(onDisk)
+	if d.Revision() != hex.EncodeToString(sum[:]) {
+		t.Fatal("state does not reflect published bytes")
+	}
+}
 
 const rawWithUnknown = `{
   "x-team-note": "keep me",
