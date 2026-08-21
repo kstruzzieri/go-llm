@@ -19,6 +19,12 @@ import (
 // (parent fsync failed). Callers must treat the on-disk state as current.
 var ErrDurabilityUncertain = errors.New("config: published but durability uncertain")
 
+// ErrRevisionConflict marks a save refused because the target's current
+// digest differs from the expected revision (external edit). The on-disk
+// file is untouched. Consumers that must not expose paths (the profile
+// store) match this sentinel rather than parsing the path-bearing message.
+var ErrRevisionConflict = errors.New("config: revision conflict")
+
 // syncDir fsyncs a directory so a just-published rename/link is durable.
 // Injectable for durability-failure tests.
 var syncDir = syncDirectory
@@ -98,44 +104,68 @@ func lockForPath(path string) *sync.Mutex {
 }
 
 // SaveNew writes the document to a path that must not exist (create-only,
-// race-free via link-based publication).
-//
-// Lock ordering invariant: saveLock (per target path) is always taken BEFORE
-// d.mu, never nested the other way.
+// race-free via link-based publication). Equivalent to SaveNewAs with an
+// empty origin source (same-path Source preservation, else explicit-path).
 func (d *Document) SaveNew(path string) error {
+	return d.SaveNewAs(path, "")
+}
+
+// SaveNewAs is SaveNew with an explicit origin source recorded on success —
+// profile stores pass OriginProfile so provenance survives the save.
+//
+// LINEARIZATION (spec amendment 6): d.mu is held from canonical snapshot
+// through publication AND state commit, so no draft mutation can interleave
+// between what was published and what is recorded. Lock ordering invariant:
+// saveLock (per target path) is always taken BEFORE d.mu, never nested the
+// other way. Holding d.mu across file I/O blocks reads during a save —
+// saves are rare and small; correctness wins by design.
+func (d *Document) SaveNewAs(path string, src OriginSource) error {
 	mu := lockForPath(path)
 	mu.Lock()
 	defer mu.Unlock()
-	out, err := d.canonicalLocked()
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	out, err := d.canonicalBytes()
 	if err != nil {
 		return err
 	}
 	if err := publishNew(path, out); err != nil {
 		if errors.Is(err, ErrDurabilityUncertain) {
-			d.commitSaved(out, path)
+			d.commitSavedLocked(out, path, src)
 		}
 		return err
 	}
-	d.commitSaved(out, path)
+	d.commitSavedLocked(out, path, src)
 	return nil
 }
 
 // SaveReplace overwrites path after its digest matches expectedRevision at the
-// start of the save and again after the replacement temp is synced. The
-// per-target lock prevents cooperating in-process savers from interleaving.
-// An arbitrary writer can still modify path between the final digest check and
-// rename because portable pathname APIs do not provide compare-and-replace.
-// Unchanged canonical content publishes nothing (byte-stability) but still
-// converges document state after a final digest check.
+// start of the save and again after the replacement temp is synced. Equivalent
+// to SaveReplaceAs with an empty origin source.
 func (d *Document) SaveReplace(path, expectedRevision string) error {
+	return d.SaveReplaceAs(path, expectedRevision, "")
+}
+
+// SaveReplaceAs is SaveReplace with an explicit origin source recorded on
+// success. The per-target lock prevents cooperating in-process savers from
+// interleaving, and d.mu is held from snapshot through publication and commit
+// (spec amendment 6) so saves and draft mutations are linearized. An
+// arbitrary EXTERNAL writer can still modify path between the final digest
+// check and rename because portable pathname APIs do not provide
+// compare-and-replace. Unchanged canonical content publishes nothing
+// (byte-stability) but still converges document state after a final digest
+// check.
+func (d *Document) SaveReplaceAs(path, expectedRevision string, src OriginSource) error {
 	mu := lockForPath(path)
 	mu.Lock()
 	defer mu.Unlock()
+	d.mu.Lock()
+	defer d.mu.Unlock()
 	cur, err := readExpectedRevision(path, expectedRevision)
 	if err != nil {
 		return err
 	}
-	out, err := d.canonicalLocked()
+	out, err := d.canonicalBytes()
 	if err != nil {
 		return err
 	}
@@ -143,17 +173,17 @@ func (d *Document) SaveReplace(path, expectedRevision string) error {
 		if _, err := readExpectedRevision(path, expectedRevision); err != nil {
 			return err
 		}
-		d.commitSaved(out, path) // state converges; no publication
+		d.commitSavedLocked(out, path, src) // state converges; no publication
 		return nil
 	}
 	if err := publishReplaceFn(path, out, expectedRevision); err != nil {
 		if errors.Is(err, ErrDurabilityUncertain) {
 			// Bytes ARE live: document state must reflect the published truth.
-			d.commitSaved(out, path)
+			d.commitSavedLocked(out, path, src)
 		}
 		return err
 	}
-	d.commitSaved(out, path)
+	d.commitSavedLocked(out, path, src)
 	return nil
 }
 
@@ -164,31 +194,28 @@ func readExpectedRevision(path, expectedRevision string) ([]byte, error) {
 	}
 	sum := sha256.Sum256(cur)
 	if hex.EncodeToString(sum[:]) != expectedRevision {
-		return nil, fmt.Errorf("config: save replace %q: revision conflict", path)
+		return nil, fmt.Errorf("config: save replace %q: %w", path, ErrRevisionConflict)
 	}
 	return cur, nil
 }
 
-// canonicalLocked renders canonical bytes under the document mutex.
-func (d *Document) canonicalLocked() ([]byte, error) {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	return d.canonicalBytes()
-}
-
-// commitSaved updates rawBytes/revision/origin to the published bytes.
-// Saving back to the document's own path preserves its discovery Source (an
-// env-override config saved in place is still the env-override config);
-// saving to a NEW path is an explicit-path act. Path identity is lexical after
-// absolute cleaning; symlink aliases intentionally remain distinct origins.
-// Baseline profile ID and Dirty are slice-3 caller-owned state — deliberately
-// absent here.
-func (d *Document) commitSaved(out []byte, path string) {
-	d.mu.Lock()
-	defer d.mu.Unlock()
+// commitSavedLocked updates rawBytes/revision/origin to the published bytes.
+// Callers hold d.mu. With an empty src, saving back to the document's own
+// path preserves its discovery Source (an env-override config saved in place
+// is still the env-override config) and a NEW path is an explicit-path act;
+// a non-empty src always wins (profile provenance). Path identity is lexical
+// after absolute cleaning; symlink aliases intentionally remain distinct
+// origins. Baseline profile ID and Dirty are slice-3 caller-owned state —
+// deliberately absent here.
+func (d *Document) commitSavedLocked(out []byte, path string, src OriginSource) {
 	sum := sha256.Sum256(out)
 	d.rawBytes = out
 	d.revision = hex.EncodeToString(sum[:])
+	if src != "" {
+		d.origin = Origin{Source: src, Path: path}
+		d.originIdentity = documentPathIdentity(path)
+		return
+	}
 	if d.origin.Source != "" && d.originIdentity != "" && d.originIdentity == documentPathIdentity(path) {
 		return // same file: provenance rule unchanged
 	}

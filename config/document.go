@@ -77,6 +77,15 @@ func DefaultDocument() (*Document, error) {
 	return newDocument(data, Origin{Source: src, Path: path})
 }
 
+// NewDocumentFromBytes builds a Document from raw models.json bytes with the
+// caller's origin (profile stores, embedded catalogs, tests). The input
+// slice is COPIED — the document never aliases caller memory.
+func NewDocumentFromBytes(data []byte, origin Origin) (*Document, error) {
+	owned := make([]byte, len(data))
+	copy(owned, data)
+	return newDocument(owned, origin)
+}
+
 func newDocument(data []byte, origin Origin) (*Document, error) {
 	var authored Config
 	if err := json.Unmarshal(data, &authored); err != nil {

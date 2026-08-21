@@ -556,6 +556,12 @@ func (cfg *Config) validate() error {
 		if !validModelTypes[m.Type] {
 			return fmt.Errorf("config: model %q: invalid type %q", role, m.Type)
 		}
+		if m.ContextWindow < 0 {
+			return fmt.Errorf("config: model %q: context_window must not be negative", role)
+		}
+		if m.Dimensions < 0 {
+			return fmt.Errorf("config: model %q: dimensions must not be negative", role)
+		}
 		if opts := m.Options; opts != nil {
 			if opts.Temperature != nil && *opts.Temperature < 0 {
 				return fmt.Errorf("config: model %q: temperature must be non-negative", role)

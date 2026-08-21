@@ -15,6 +15,7 @@ go-llm/
 ├── ollama/          # Ollama REST API client (chat, generate, embeddings, models)
 ├── config/          # Model configuration loader (models.json, resolve, fallback) + Document (origin/revision-aware load, secret-literal-preserving atomic writer)
 ├── configview/      # Pure projection of a config for panels/CLI/MCP (v1 wire contract, tri-state candidate eligibility, no I/O) — consumed by golem models -json, MCP configview resource, Firn config panel
+├── profiles/        # Profile catalog: curated go:embed configs (credential-free by pinned rule) + user store under a 0700 profiles/ boundary; stable IDs, bounded error codes, SaveOutcome writes (nil error whenever persisted) — the Firn config-panel write path
 ├── provider/        # Use-case-aware Router (chat/fim/embedding/reasoning/analysis/code-review/agent profiles), circuit breakers, warmth, slot-capacity discovery + slot-aware admission, sticky routing, scoring, fallback chains
 │   └── openaicompat/ # OpenAI /v1 client — reaches llama.cpp (primary), vLLM, LM Studio via api_format: openai-compat
 ├── rag/             # RAG: chunking, SQLite vector store, indexing, retrieval, managed document registry (stable IDs, lifecycle, freshness)
@@ -52,7 +53,7 @@ Keep minimal. Allowed external dependencies:
 - `golang.org/x/sync` — concurrency primitives (errgroup for bounded worker pools)
 - `golang.org/x/net` — h2c HTTP/2 cleartext transport (only imported by `mcp/`)
 - `golang.org/x/term` — VT100 line editor for the Golem REPL prompt (only imported by `cmd/golem/`). Pinned to v0.42.0, the version already selected transitively, so promoting it moves no other module.
-- `golang.org/x/sys` — already required transitively; imported directly only by `cmd/golem/`'s Linux PTY lifecycle test
+- `golang.org/x/sys` — already required transitively; imported directly only by `cmd/golem/`'s Linux PTY lifecycle test and `profiles/`'s Windows directory-fsync (build-tagged, mirrors `config/`'s pair)
 - `github.com/modelcontextprotocol/go-sdk` — official MCP Go SDK (imported by `mcp/` server side, `mcpclient/` client side, and `cmd/llm-bench/`)
 - `github.com/parquet-go/parquet-go` — Parquet file writer (only imported by `rag/parquet/`)
 - `github.com/santhosh-tekuri/jsonschema/v6` — JSON Schema validator (only imported by `cmd/llm-bench/`)

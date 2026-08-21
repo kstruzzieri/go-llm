@@ -1142,3 +1142,24 @@ func TestLoad_SlotsValidation(t *testing.T) {
 		t.Fatalf("error %q must name the role and the field", err)
 	}
 }
+
+func TestValidateRejectsNegativeCapacity(t *testing.T) {
+	for name, body := range map[string]string{
+		"negative context_window": `{"providers":{"local":{"base_url":"http://localhost:1"}},
+			"models":{"m":{"name":"x","provider":"local","type":"dense","context_window":-1}},
+			"defaults":{}}`,
+		"negative dimensions": `{"providers":{"local":{"base_url":"http://localhost:1"}},
+			"models":{"m":{"name":"x","provider":"local","type":"embedding","dimensions":-8}},
+			"defaults":{}}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			var cfg Config
+			if err := json.Unmarshal([]byte(body), &cfg); err != nil {
+				t.Fatal(err)
+			}
+			if err := cfg.validate(); err == nil {
+				t.Fatal("want validation error")
+			}
+		})
+	}
+}
