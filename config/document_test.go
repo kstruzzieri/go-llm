@@ -5,6 +5,8 @@ import (
 	"encoding/hex"
 	"os"
 	"path/filepath"
+	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -139,6 +141,49 @@ func TestDefaultDocumentWorkingDirAndPrecedence(t *testing.T) {
 	}
 	if d2.Origin().Source != OriginEnvOverride || d2.Origin().Path != p2 {
 		t.Fatalf("precedence: origin = %+v, want env-override %s", d2.Origin(), p2)
+	}
+}
+
+// Public byte constructor must not alias caller memory.
+func TestNewDocumentFromBytesCopiesInput(t *testing.T) {
+	t.Setenv("DOC_TEST_KEY", "v")
+	buf := []byte(docTestConfig)
+	d, err := NewDocumentFromBytes(buf, Origin{Source: OriginProfile, Path: "embedded:test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rev := d.Revision()
+	for i := range buf {
+		buf[i] = 'X'
+	}
+	if d.Revision() != rev {
+		t.Fatal("revision derived from aliased memory")
+	}
+	d.mu.Lock()
+	raw := string(d.rawBytes)
+	d.mu.Unlock()
+	if strings.Contains(raw, "XXXX") {
+		t.Fatal("document aliases caller-mutated memory")
+	}
+}
+
+// Parity with LoadDocument modulo origin.
+func TestNewDocumentFromBytesParity(t *testing.T) {
+	t.Setenv("DOC_TEST_KEY", "v")
+	p := writeTempConfig(t, docTestConfig)
+	viaFile, err := LoadDocument(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	viaBytes, err := NewDocumentFromBytes([]byte(docTestConfig), Origin{Source: OriginProfile})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if viaFile.Revision() != viaBytes.Revision() {
+		t.Fatal("revision differs by construction path")
+	}
+	if !reflect.DeepEqual(viaFile.authored, viaBytes.authored) {
+		t.Fatal("authored differs by construction path")
 	}
 }
 
