@@ -59,13 +59,14 @@ type ModelFacts struct {
 type SetRoleModelOpts struct {
 	// Requirements: per-use-case call shapes — the same map fed to
 	// configview.BuildInput. Aggregated over every use case whose
-	// default/fallback chain contains the role (amendment 5); a missing
-	// entry for an affected use case evaluates as unknown.
+	// default/fallback chain contains the role; when Capabilities changes
+	// selector-wide truth, this includes roles already sharing the target
+	// selector (amendment 5). A missing affected entry evaluates as unknown.
 	Requirements map[string]provider.Capability
 	// Caps/KnownMask: capability facts for the TARGET model. Ignored when
-	// Capabilities is supplied — an explicit override IS the persisted
-	// truth and is evaluated with full knowledge (amendment 2 + carve-down
-	// rule).
+	// the target selector has an explicit override — that override IS the
+	// persisted truth and is evaluated with full knowledge (amendment 2 +
+	// carve-down rule).
 	Caps, KnownMask provider.Capability
 	ConfirmUnknown  bool
 	// Explicit re-assertions on the NEW model; absent = cleared per the
@@ -112,8 +113,38 @@ func (d *Document) SetRoleModel(role string, facts ModelFacts, opts SetRoleModel
 
 		// Gate inside the lock, against the pre-mutation graph (the chains
 		// as the user saw them when choosing). Carve-down rule: an explicit
-		// override is the persisted truth — evaluate it with full knowledge
-		// (REPLACE semantics, omissions definitive). Facts otherwise.
+		// override is selector-wide persisted truth (REPLACE semantics,
+		// omissions definitive). An inherited override governs the joining
+		// role; a supplied override also changes existing selector roles, so
+		// evaluate all of them. Facts otherwise.
+		gateRoles := map[string]bool{role: true}
+		selectorRoles := map[string]bool{role: true}
+		var inheritedCaps provider.Capability
+		var inheritedRole string
+		for _, siblingRole := range sortedStringKeys(a.Models) {
+			if siblingRole == role {
+				continue
+			}
+			sibling := a.Models[siblingRole]
+			providerName := sibling.Provider
+			if providerName == "" {
+				providerName = "ollama"
+			}
+			if providerName != facts.Key.Provider || sibling.Name != facts.Key.Model {
+				continue
+			}
+			selectorRoles[siblingRole] = true
+			if len(opts.Capabilities) == 0 && len(sibling.Capabilities) > 0 {
+				parsed, perr := provider.ParseCapsStrict(sibling.Capabilities)
+				if perr != nil {
+					return fmt.Errorf("config: set role model %q: capabilities: %w", role, perr)
+				}
+				if inheritedRole != "" && parsed != inheritedCaps {
+					return fmt.Errorf("config: conflicting capability overrides for %s: models %q and %q", facts.Key, inheritedRole, siblingRole)
+				}
+				inheritedCaps, inheritedRole = parsed, siblingRole
+			}
+		}
 		evalCaps, evalKnown := opts.Caps, opts.KnownMask
 		if len(opts.Capabilities) > 0 {
 			parsed, perr := provider.ParseCapsStrict(opts.Capabilities)
@@ -121,8 +152,11 @@ func (d *Document) SetRoleModel(role string, facts ModelFacts, opts SetRoleModel
 				return fmt.Errorf("config: set role model %q: capabilities: %w", role, perr)
 			}
 			evalCaps, evalKnown = parsed, provider.CanonicalCaps()
+			gateRoles = selectorRoles
+		} else if inheritedRole != "" {
+			evalCaps, evalKnown = inheritedCaps, provider.CanonicalCaps()
 		}
-		verdict, reasons := aggregateVerdict(a, role, opts.Requirements, evalCaps, evalKnown)
+		verdict, reasons := aggregateVerdict(a, gateRoles, opts.Requirements, evalCaps, evalKnown)
 		switch verdict {
 		case provider.CapIneligible:
 			return fmt.Errorf("config: set role model %q: target %s/%s ineligible: %s",
@@ -173,16 +207,16 @@ func (d *Document) SetRoleModel(role string, facts ModelFacts, opts SetRoleModel
 }
 
 // aggregateVerdict computes the affected use-case set — every default whose
-// fallback chain (walked over Fallbacks, cycle-guarded) contains role — and
+// fallback chain (walked over Fallbacks, cycle-guarded) contains any role — and
 // takes the worst per-use-case verdict from provider.EvaluateCaps, with a
 // missing Requirements entry evaluating as req==0 (unknown). ZERO affected
-// use cases is unknown/no_requirements (amendment 5): a role nothing
-// references cannot be vacuously eligible. Reasons are prefixed
+// use cases is unknown/no_requirements (amendment 5): unreferenced roles
+// cannot be vacuously eligible. Reasons are prefixed
 // "uc=<use case>: ", deduplicated, sorted, capped.
-func aggregateVerdict(a *Config, role string, reqs map[string]provider.Capability, caps, known provider.Capability) (provider.CapVerdict, []string) {
+func aggregateVerdict(a *Config, roles map[string]bool, reqs map[string]provider.Capability, caps, known provider.Capability) (provider.CapVerdict, []string) {
 	affected := make([]string, 0, len(a.Defaults))
 	for _, uc := range sortedStringKeys(a.Defaults) {
-		if chainContainsRole(a, a.Defaults[uc], role) {
+		if chainContainsAnyRole(a, a.Defaults[uc], roles) {
 			affected = append(affected, uc)
 		}
 	}
@@ -231,8 +265,8 @@ func aggregateVerdict(a *Config, role string, reqs map[string]provider.Capabilit
 	return verdict, out
 }
 
-// chainContainsRole walks the fallback graph from start, cycle-guarded.
-func chainContainsRole(a *Config, start, role string) bool {
+// chainContainsAnyRole walks the fallback graph from start, cycle-guarded.
+func chainContainsAnyRole(a *Config, start string, roles map[string]bool) bool {
 	seen := map[string]bool{}
 	stack := []string{start}
 	for len(stack) > 0 {
@@ -242,7 +276,7 @@ func chainContainsRole(a *Config, start, role string) bool {
 			continue
 		}
 		seen[cur] = true
-		if cur == role {
+		if roles[cur] {
 			return true
 		}
 		m, ok := a.Models[cur]

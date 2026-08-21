@@ -127,6 +127,84 @@ func TestSetRoleModelCarveDownGate(t *testing.T) {
 	}
 }
 
+func TestSetRoleModelSelectorWideCapabilityGate(t *testing.T) {
+	target := ModelFacts{Key: provider.ModelKey{Provider: "ollama", Model: "shared"}, Type: "dense"}
+	tests := []struct {
+		name    string
+		body    string
+		opts    SetRoleModelOpts
+		wantErr string
+	}{
+		{
+			name: "existing override controls retarget",
+			body: `{"providers":{"ollama":{"base_url":"http://localhost:1"}},
+			  "models":{"agent":{"name":"old","provider":"ollama","type":"dense"},
+			            "sibling":{"name":"shared","type":"dense","capabilities":["chat"]}},
+			  "defaults":{"agent":"agent"}}`,
+			opts: SetRoleModelOpts{
+				Requirements: map[string]provider.Capability{"agent": provider.CapChat | provider.CapToolCall},
+				Caps:         provider.CapChat | provider.CapToolCall,
+				KnownMask:    provider.CapChat | provider.CapToolCall,
+			},
+			wantErr: "missing_capability:tool_call",
+		},
+		{
+			name: "new override protects sibling use cases",
+			body: `{"providers":{"ollama":{"base_url":"http://localhost:1"}},
+			  "models":{"agent":{"name":"old","provider":"ollama","type":"dense"},
+			            "tools":{"name":"shared","type":"dense"}},
+			  "defaults":{"agent":"agent","tools":"tools"}}`,
+			opts: SetRoleModelOpts{
+				Requirements: map[string]provider.Capability{
+					"agent": provider.CapChat,
+					"tools": provider.CapChat | provider.CapToolCall,
+				},
+				Capabilities: []string{"chat"},
+			},
+			wantErr: "missing_capability:tool_call",
+		},
+		{
+			name: "inherited override does not revalidate siblings",
+			body: `{"providers":{"ollama":{"base_url":"http://localhost:1"}},
+			  "models":{"agent":{"name":"old","provider":"ollama","type":"dense"},
+			            "tools":{"name":"shared","type":"dense","capabilities":["chat"]}},
+			  "defaults":{"agent":"agent","tools":"tools"}}`,
+			opts: SetRoleModelOpts{
+				Requirements: map[string]provider.Capability{"agent": provider.CapChat},
+				Caps:         provider.CapChat,
+				KnownMask:    provider.CapChat,
+			},
+		},
+		{
+			name: "conflicting inherited overrides are rejected",
+			body: `{"providers":{"ollama":{"base_url":"http://localhost:1"}},
+			  "models":{"agent":{"name":"old","provider":"ollama","type":"dense"},
+			            "chat":{"name":"shared","type":"dense","capabilities":["chat"]},
+			            "tools":{"name":"shared","type":"dense","capabilities":["tool_call"]}},
+			  "defaults":{"agent":"agent"}}`,
+			opts: SetRoleModelOpts{
+				Requirements: map[string]provider.Capability{"agent": provider.CapChat},
+				Caps:         provider.CapChat,
+				KnownMask:    provider.CapChat,
+			},
+			wantErr: "conflicting capability overrides",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			d := loadTestDoc(t, tc.body)
+			_, err := d.SetRoleModel("agent", target, tc.opts)
+			if tc.wantErr == "" && err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if tc.wantErr != "" && (err == nil || !strings.Contains(err.Error(), tc.wantErr)) {
+				t.Fatalf("err = %v, want %q", err, tc.wantErr)
+			}
+		})
+	}
+}
+
 // (d) Aggregation: per-use-case verdicts over fallback-chain membership; a
 // MISSING requirement for an affected use case counts as unknown and cannot
 // be masked by another known-satisfied requirement.
@@ -377,7 +455,7 @@ func TestAggregateVerdictReasonsBounded(t *testing.T) {
 		for i := range ucs {
 			ucs[i] = fmt.Sprintf("uc-%02d", i)
 		}
-		v, reasons := aggregateVerdict(mkConfig(ucs...), "agent", nil, 0, 0)
+		v, reasons := aggregateVerdict(mkConfig(ucs...), map[string]bool{"agent": true}, nil, 0, 0)
 		if v != provider.CapUnknown {
 			t.Fatalf("verdict = %v, want unknown", v)
 		}
@@ -398,7 +476,7 @@ func TestAggregateVerdictReasonsBounded(t *testing.T) {
 
 	t.Run("item cap rune-safe at 64 bytes", func(t *testing.T) {
 		uc := strings.Repeat("é", 40) // 80 bytes of 2-byte runes; byte 64 lands mid-rune
-		_, reasons := aggregateVerdict(mkConfig(uc), "agent", nil, 0, 0)
+		_, reasons := aggregateVerdict(mkConfig(uc), map[string]bool{"agent": true}, nil, 0, 0)
 		if len(reasons) != 1 {
 			t.Fatalf("reasons = %v, want 1", reasons)
 		}
@@ -413,7 +491,7 @@ func TestAggregateVerdictReasonsBounded(t *testing.T) {
 
 	t.Run("truncation collisions dedupe", func(t *testing.T) {
 		long := strings.Repeat("x", 70) // items differ only past the 64-byte cut
-		_, reasons := aggregateVerdict(mkConfig(long+"A", long+"B"), "agent", nil, 0, 0)
+		_, reasons := aggregateVerdict(mkConfig(long+"A", long+"B"), map[string]bool{"agent": true}, nil, 0, 0)
 		if len(reasons) != 1 {
 			t.Fatalf("reasons = %v, want truncation-identical items deduplicated to 1", reasons)
 		}
