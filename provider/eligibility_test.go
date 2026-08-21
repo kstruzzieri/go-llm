@@ -59,22 +59,27 @@ func TestCanonicalCaps(t *testing.T) {
 	}
 }
 
-// Reason lists are globally capped and deduplicated, each item bounded.
-func TestEvaluateCapsReasonsBoundedDeduped(t *testing.T) {
-	all := CanonicalCaps()
-	_, reasons := EvaluateCaps(all, 0, 0) // every bit unknown
-	if len(reasons) > maxReasons {
-		t.Fatalf("%d reasons, cap is %d", len(reasons), maxReasons)
+// All-unknown over the full canonical set yields exactly one bounded reason
+// per bit — pinned as an exact sorted list so any emission change (dupes,
+// renames, drops, ordering) goes red. The maxReasons cap is unreachable in
+// this package (at most 8 distinct reasons per call); its live coverage is
+// config's TestAggregateVerdictReasonsBounded.
+func TestEvaluateCapsReasonsExactOverCanonicalSet(t *testing.T) {
+	v, reasons := EvaluateCaps(CanonicalCaps(), 0, 0) // every bit unknown
+	if v != CapUnknown {
+		t.Fatalf("verdict = %v, want unknown", v)
 	}
-	seen := map[string]bool{}
-	for _, r := range reasons {
-		if seen[r] {
-			t.Fatalf("duplicate reason %q", r)
-		}
-		seen[r] = true
-		if len(r) > 64 {
-			t.Fatalf("reason exceeds 64 bytes: %q", r[:64])
-		}
+	want := []string{
+		"capability_unknown:chat",
+		"capability_unknown:embed",
+		"capability_unknown:generate",
+		"capability_unknown:insert",
+		"capability_unknown:stream",
+		"capability_unknown:thinking",
+		"capability_unknown:tool_call",
+	}
+	if !reflect.DeepEqual(reasons, want) {
+		t.Fatalf("reasons = %v, want %v", reasons, want)
 	}
 }
 

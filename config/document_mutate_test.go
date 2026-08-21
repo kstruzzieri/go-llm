@@ -2,9 +2,12 @@ package config
 
 import (
 	"errors"
+	"fmt"
 	"reflect"
+	"sort"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/kstruzzieri/go-llm/provider"
 )
@@ -349,6 +352,72 @@ func TestSetRoleModelConcurrentWithBind(t *testing.T) {
 		_, _ = d.SetRoleModel("agent", agentFacts(), SetRoleModelOpts{ConfirmUnknown: true})
 	}
 	<-done
+}
+
+// aggregateVerdict's bounding contract: reasons prefixed, deduplicated,
+// sorted, globally capped at 16 items of at most 64 bytes each, and byte
+// truncation must not split a UTF-8 rune (use-case keys are user-authored
+// JSON keys). This is the only layer where the cap is reachable —
+// provider.EvaluateCaps tops out at 8 distinct reasons per call — so the
+// bounds live or die here.
+func TestAggregateVerdictReasonsBounded(t *testing.T) {
+	mkConfig := func(ucs ...string) *Config {
+		defaults := make(map[string]string, len(ucs))
+		for _, uc := range ucs {
+			defaults[uc] = "agent"
+		}
+		return &Config{
+			Models:   map[string]ModelConfig{"agent": {Name: "m", Provider: "local", Type: "dense"}},
+			Defaults: defaults,
+		}
+	}
+
+	t.Run("global cap 16 sorted deduped", func(t *testing.T) {
+		ucs := make([]string, 20)
+		for i := range ucs {
+			ucs[i] = fmt.Sprintf("uc-%02d", i)
+		}
+		v, reasons := aggregateVerdict(mkConfig(ucs...), "agent", nil, 0, 0)
+		if v != provider.CapUnknown {
+			t.Fatalf("verdict = %v, want unknown", v)
+		}
+		if len(reasons) != 16 {
+			t.Fatalf("%d reasons, want global cap 16 (20 affected use cases)", len(reasons))
+		}
+		if !sort.StringsAreSorted(reasons) {
+			t.Fatalf("reasons not sorted: %v", reasons)
+		}
+		seen := map[string]bool{}
+		for _, r := range reasons {
+			if seen[r] {
+				t.Fatalf("duplicate reason %q", r)
+			}
+			seen[r] = true
+		}
+	})
+
+	t.Run("item cap rune-safe at 64 bytes", func(t *testing.T) {
+		uc := strings.Repeat("é", 40) // 80 bytes of 2-byte runes; byte 64 lands mid-rune
+		_, reasons := aggregateVerdict(mkConfig(uc), "agent", nil, 0, 0)
+		if len(reasons) != 1 {
+			t.Fatalf("reasons = %v, want 1", reasons)
+		}
+		r := reasons[0]
+		if len(r) > 64 {
+			t.Fatalf("reason is %d bytes, cap is 64", len(r))
+		}
+		if !utf8.ValidString(r) {
+			t.Fatalf("truncation split a rune: %q", r)
+		}
+	})
+
+	t.Run("truncation collisions dedupe", func(t *testing.T) {
+		long := strings.Repeat("x", 70) // items differ only past the 64-byte cut
+		_, reasons := aggregateVerdict(mkConfig(long+"A", long+"B"), "agent", nil, 0, 0)
+		if len(reasons) != 1 {
+			t.Fatalf("reasons = %v, want truncation-identical items deduplicated to 1", reasons)
+		}
+	})
 }
 
 var errTestVeto = errors.New("test veto")

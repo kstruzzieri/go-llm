@@ -5,6 +5,7 @@ import (
 	"reflect"
 	"sort"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/kstruzzieri/go-llm/provider"
 )
@@ -202,8 +203,16 @@ func aggregateVerdict(a *Config, role string, reqs map[string]provider.Capabilit
 		}
 		for _, r := range reasons {
 			item := "uc=" + uc + ": " + r
+			// Bounds (16 items, 64 bytes each) mirror provider.maxReasons
+			// and its item discipline; keep in lockstep. Cut on a rune
+			// boundary — use-case keys are user-authored and may be
+			// multi-byte.
 			if len(item) > 64 {
-				item = item[:64]
+				cut := 64
+				for cut > 0 && !utf8.RuneStart(item[cut]) {
+					cut--
+				}
+				item = item[:cut]
 			}
 			reasonSet[item] = true
 		}
@@ -274,6 +283,10 @@ func selectorConflicts(effective *Config, changed string) error {
 			return fmt.Errorf("config: conflicting sampling defaults for %s: models %q and %q; defaults are per provider/model, so use identical options or distinct provider keys", sel, changed, other)
 		}
 		if len(cm.Capabilities) > 0 && len(om.Capabilities) > 0 {
+			// Parse errors cannot occur here — validate round-trips every
+			// Capabilities list through ParseCapsStrict before this hook
+			// runs. Skipping on error (not failing) keeps the advisory
+			// direction: bootstrap stays the authority.
 			cb, cerr := provider.ParseCapsStrict(cm.Capabilities)
 			ob, oerr := provider.ParseCapsStrict(om.Capabilities)
 			if cerr == nil && oerr == nil && cb != ob {
@@ -286,6 +299,9 @@ func selectorConflicts(effective *Config, changed string) error {
 		if cm.ThinkTags != nil && om.ThinkTags != nil && *cm.ThinkTags != *om.ThinkTags {
 			return fmt.Errorf("config: conflicting think_tags for %s: models %q and %q", sel, changed, other)
 		}
+		// Unreachable via SetRoleModel today (it always clears Slots and
+		// finalize never populates it) — kept so the bootstrap mirror stays
+		// complete for any future mutation that authors slots.
 		if cm.Slots != 0 && om.Slots != 0 && cm.Slots != om.Slots {
 			return fmt.Errorf("config: conflicting slots for %s: models %q and %q", sel, changed, other)
 		}
