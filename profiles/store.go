@@ -117,7 +117,10 @@ func (s *Store) checkProfilesDir(forWrite bool) (present bool, err error) {
 		if !forWrite {
 			return false, nil
 		}
-		if err := os.Mkdir(pdir, 0o700); err != nil {
+		// A concurrent first write may have created it between the Lstat
+		// and here — that is success, and the re-Lstat below still applies
+		// the full safety checks to whatever now occupies the name.
+		if err := os.Mkdir(pdir, 0o700); err != nil && !errors.Is(err, fs.ErrExist) {
 			return false, codeErr(CodeIO, "", err)
 		}
 		if err := syncParentDir(pdir); err != nil {

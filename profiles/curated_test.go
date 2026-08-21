@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/kstruzzieri/go-llm/config"
 )
@@ -33,6 +34,23 @@ func TestEnvRefRule(t *testing.T) {
 		if envRefRe.MatchString(v) {
 			t.Fatal("invalid shape accepted") // no value in output
 		}
+	}
+}
+
+// ParseID error text is length-capped on a rune boundary — a multi-byte id
+// must not leave a partial rune behind the cut. %q would launder a split
+// byte into a literal \xNN escape, so absence of that artifact is the
+// observable (and the raw capped text stays valid UTF-8).
+func TestParseIDErrorTruncationRuneSafe(t *testing.T) {
+	_, err := ParseID("a" + strings.Repeat("é", 60)) // byte 80 lands mid-rune
+	if err == nil {
+		t.Fatal("want error")
+	}
+	if strings.Contains(err.Error(), `\x`) {
+		t.Fatalf("truncation split a rune: %q", err.Error())
+	}
+	if !utf8.ValidString(err.Error()) {
+		t.Fatalf("invalid UTF-8 in error: %q", err.Error())
 	}
 }
 

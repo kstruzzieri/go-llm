@@ -13,6 +13,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"unicode/utf8"
 )
 
 //go:embed curated/*.json
@@ -30,7 +31,11 @@ func ParseID(s string) (ID, error) {
 	if !ok || (ns != "curated" && ns != "user") || !slugRe.MatchString(slug) {
 		shown := s
 		if len(shown) > 80 {
-			shown = shown[:80] + "…"
+			cut := 80
+			for cut > 0 && !utf8.RuneStart(shown[cut]) {
+				cut--
+			}
+			shown = shown[:cut] + "…"
 		}
 		return "", fmt.Errorf("profiles: invalid id %q", shown)
 	}
