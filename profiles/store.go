@@ -82,17 +82,30 @@ func DefaultStore() (*Store, error) {
 	return NewStore(filepath.Join(base, "go-llm")), nil
 }
 
-// checkProfilesDir verifies the safety of <root>/profiles for reading.
-// present=false (nil error) means root or profiles dir is absent — reads
-// serve curated only. Symlinks, non-directories, and (on unix) loose modes
-// or foreign ownership are CodeStoreUnsafe. Write-side creation arrives
-// with SaveAs.
-func (s *Store) checkProfilesDir() (present bool, err error) {
+// checkProfilesDir verifies the safety of <root>/profiles. On reads
+// (forWrite=false), present=false with nil error means root or profiles dir
+// is absent — reads serve curated only and create nothing. On writes, the
+// missing directories are created (root with default modes, profiles/ 0700)
+// and each creation fsyncs its parent — first-use durability. Symlinks,
+// non-directories, and (on unix) loose modes or foreign ownership are
+// CodeStoreUnsafe.
+func (s *Store) checkProfilesDir(forWrite bool) (present bool, err error) {
 	fi, err := os.Lstat(s.root)
 	if errors.Is(err, fs.ErrNotExist) {
-		return false, nil
-	}
-	if err != nil {
+		if !forWrite {
+			return false, nil
+		}
+		if err := os.MkdirAll(s.root, 0o755); err != nil {
+			return false, codeErr(CodeIO, "", err)
+		}
+		if err := syncParentDir(s.root); err != nil {
+			return false, codeErr(CodeIO, "", err)
+		}
+		fi, err = os.Lstat(s.root)
+		if err != nil {
+			return false, codeErr(CodeIO, "", err)
+		}
+	} else if err != nil {
 		return false, codeErr(CodeIO, "", err)
 	}
 	if fi.Mode()&os.ModeSymlink != 0 || !fi.IsDir() {
@@ -101,15 +114,37 @@ func (s *Store) checkProfilesDir() (present bool, err error) {
 	pdir := filepath.Join(s.root, "profiles")
 	pfi, err := os.Lstat(pdir)
 	if errors.Is(err, fs.ErrNotExist) {
-		return false, nil
-	}
-	if err != nil {
+		if !forWrite {
+			return false, nil
+		}
+		if err := os.Mkdir(pdir, 0o700); err != nil {
+			return false, codeErr(CodeIO, "", err)
+		}
+		if err := syncParentDir(pdir); err != nil {
+			return false, codeErr(CodeIO, "", err)
+		}
+		pfi, err = os.Lstat(pdir)
+		if err != nil {
+			return false, codeErr(CodeIO, "", err)
+		}
+	} else if err != nil {
 		return false, codeErr(CodeIO, "", err)
 	}
 	if pfi.Mode()&os.ModeSymlink != 0 || !pfi.IsDir() || !ownerAndModeOK(pfi) {
 		return false, codeErr(CodeStoreUnsafe, "", nil)
 	}
 	return true, nil
+}
+
+// syncParentDir fsyncs the parent directory of path so a just-created
+// directory entry is durable.
+func syncParentDir(path string) error {
+	f, err := os.Open(filepath.Dir(path))
+	if err != nil {
+		return err
+	}
+	defer func() { _ = f.Close() }()
+	return f.Sync()
 }
 
 // List returns the curated block (sorted) followed by the user block
@@ -129,7 +164,7 @@ func (s *Store) List(ctx context.Context) ([]Info, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	present, err := s.checkProfilesDir()
+	present, err := s.checkProfilesDir(false)
 	if err != nil {
 		return nil, err
 	}
@@ -179,7 +214,7 @@ func (s *Store) Load(ctx context.Context, id ID) (*config.Document, error) {
 		}
 		return newProfileDocument(parsed, raw, "embedded:"+slug)
 	}
-	present, err := s.checkProfilesDir()
+	present, err := s.checkProfilesDir(false)
 	if err != nil {
 		return nil, err
 	}
@@ -202,6 +237,91 @@ func (s *Store) Load(ctx context.Context, id ID) (*config.Document, error) {
 		return nil, codeErr(CodeIO, parsed, err)
 	}
 	return newProfileDocument(parsed, raw, path)
+}
+
+// SaveOutcome reports what SaveAs actually did (spec amendment 4, round-3
+// error discipline). Persisted==true ⇒ the accompanying error is ALWAYS
+// nil; Warning carries the bounded durability code when applicable.
+type SaveOutcome struct {
+	Persisted bool
+	Warning   ErrorCode // "" or CodeDurability
+	Revision  string
+}
+
+// saveOutcomeFromErr maps a config-layer save error to the store contract.
+// Unexported and pure — the unit tests drive every branch without hooks.
+// Vanished targets (os.ErrNotExist mid-overwrite) are conflicts: the world
+// changed under the caller's expected revision.
+func saveOutcomeFromErr(err error, revision string, id ID) (SaveOutcome, error) {
+	switch {
+	case err == nil:
+		return SaveOutcome{Persisted: true, Revision: revision}, nil
+	case errors.Is(err, config.ErrDurabilityUncertain):
+		return SaveOutcome{Persisted: true, Warning: CodeDurability, Revision: revision}, nil
+	case errors.Is(err, os.ErrExist), errors.Is(err, config.ErrRevisionConflict), errors.Is(err, os.ErrNotExist):
+		return SaveOutcome{}, codeErr(CodeConflict, id, err)
+	default:
+		return SaveOutcome{}, codeErr(CodeIO, id, err)
+	}
+}
+
+// SaveAs persists the document as a user profile. Empty overwriteRevision
+// is create-only; a non-empty one is a compare-and-replace against the
+// stored revision. The document's origin becomes the profile path
+// (OriginProfile). Persisted==true always pairs with a nil error —
+// durability uncertainty travels inside the outcome as Warning.
+func (s *Store) SaveAs(ctx context.Context, id ID, d *config.Document, overwriteRevision string) (SaveOutcome, error) {
+	if err := ctx.Err(); err != nil {
+		return SaveOutcome{}, err
+	}
+	parsed, err := ParseID(string(id))
+	if err != nil {
+		return SaveOutcome{}, codeErr(CodeInvalidID, "", err)
+	}
+	ns, slug, _ := strings.Cut(string(parsed), "/")
+	if ns != "user" {
+		return SaveOutcome{}, codeErr(CodeCuratedReadOnly, parsed, nil)
+	}
+	if _, err := s.checkProfilesDir(true); err != nil {
+		return SaveOutcome{}, err
+	}
+	path := filepath.Join(s.root, "profiles", slug+".json")
+	if overwriteRevision != "" {
+		fi, err := os.Lstat(path)
+		if errors.Is(err, fs.ErrNotExist) {
+			return SaveOutcome{}, codeErr(CodeConflict, parsed, err)
+		}
+		if err != nil {
+			return SaveOutcome{}, codeErr(CodeIO, parsed, err)
+		}
+		if !fi.Mode().IsRegular() {
+			return SaveOutcome{}, codeErr(CodeStoreUnsafe, parsed, nil)
+		}
+		return saveOutcomeFromErr(d.SaveReplaceAs(path, overwriteRevision, config.OriginProfile), d.Revision(), parsed)
+	}
+	return saveOutcomeFromErr(d.SaveNewAs(path, config.OriginProfile), d.Revision(), parsed)
+}
+
+// Export writes profile id to destPath as a plain loadable models.json — a
+// host-CLI affordance excluded from the Wails surface. The destination must
+// not exist (os.ErrExist ⇒ CodeConflict); the source rides Load's full
+// Lstat discipline; the exported file's provenance is explicit-path.
+func (s *Store) Export(ctx context.Context, id ID, destPath string) error {
+	d, err := s.Load(ctx, id)
+	if err != nil {
+		return err
+	}
+	if err := d.SaveNewAs(destPath, config.OriginExplicit); err != nil {
+		switch {
+		case errors.Is(err, os.ErrExist):
+			return codeErr(CodeConflict, id, err)
+		case errors.Is(err, config.ErrDurabilityUncertain):
+			return nil // bytes are live; export has no outcome channel and the file is a copy
+		default:
+			return codeErr(CodeIO, id, err)
+		}
+	}
+	return nil
 }
 
 // newProfileDocument builds the Document with profile origin; content that
