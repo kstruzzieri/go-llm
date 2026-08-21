@@ -38,25 +38,18 @@ func TestEligibilityTriState(t *testing.T) {
 	}
 }
 
-// capBitByName must cover every canonical capability token AND map each to
-// the same bit provider's own parser assigns — coverage alone would not catch
-// a swapped bit.
-func TestCapBitByNameCoversCanonical(t *testing.T) {
-	for _, name := range provider.CanonicalCapabilityNames {
-		bit, ok := capBitByName[name]
-		if !ok {
-			t.Fatalf("capBitByName missing canonical token %q", name)
+// eligibilityFor must be a pure delegation to the single shared evaluator —
+// semantics live in provider.EvaluateCaps, and divergence here would fork
+// the tri-state contract between config's gate and this projection.
+func TestEligibilityForDelegatesToProvider(t *testing.T) {
+	req := provider.CapChat | provider.CapToolCall
+	for _, tc := range []struct{ caps, known provider.Capability }{
+		{req, req}, {provider.CapChat, req}, {provider.CapChat, provider.CapChat}, {0, 0},
+	} {
+		pv, pr := provider.EvaluateCaps(req, tc.caps, tc.known)
+		cv, cr := eligibilityFor(req, tc.caps, tc.known)
+		if string(pv) != string(cv) || !reflect.DeepEqual(pr, cr) {
+			t.Fatalf("divergence: %v/%v vs %v/%v", pv, pr, cv, cr)
 		}
-		want, err := provider.ParseCapsStrict([]string{name})
-		if err != nil {
-			t.Fatalf("ParseCapsStrict(%q): %v", name, err)
-		}
-		if bit != want {
-			t.Fatalf("capBitByName[%q] = %v, provider parser says %v", name, bit, want)
-		}
-	}
-	if len(capBitByName) != len(provider.CanonicalCapabilityNames) {
-		t.Fatalf("capBitByName has %d entries, canonical set has %d",
-			len(capBitByName), len(provider.CanonicalCapabilityNames))
 	}
 }

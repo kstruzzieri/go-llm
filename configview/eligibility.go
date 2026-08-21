@@ -1,58 +1,16 @@
 package configview
 
 import (
-	"sort"
-
 	"github.com/kstruzzieri/go-llm/config"
 	"github.com/kstruzzieri/go-llm/provider"
 )
 
-// capBitByName maps canonical capability tokens to their bits. The
-// TestCapBitByNameCoversCanonical tripwire pins it to
-// provider.CanonicalCapabilityNames.
-var capBitByName = map[string]provider.Capability{
-	"chat":      provider.CapChat,
-	"generate":  provider.CapGenerate,
-	"insert":    provider.CapInsert,
-	"embed":     provider.CapEmbed,
-	"stream":    provider.CapStream,
-	"tool_call": provider.CapToolCall,
-	"thinking":  provider.CapThinking,
-}
-
-// eligibilityFor evaluates required bits against known capabilities. A set
-// Caps bit counts as known regardless of KnownMask. Any definitive missing
-// bit → ineligible; else any unknown bit → unknown; else eligible.
-// req == 0 (no consumer-declared shape) → unknown, reason no_requirements.
+// eligibilityFor delegates to the single shared evaluator
+// provider.EvaluateCaps — evaluation semantics (tri-state, bounded sorted
+// reasons, non-canonical-bit handling) have exactly one implementation.
 func eligibilityFor(req, caps, known provider.Capability) (Eligibility, []string) {
-	if req == 0 {
-		return EligibilityUnknown, []string{"no_requirements"}
-	}
-	known |= caps
-	var reasons []string
-	result := EligibilityEligible
-	for _, name := range req.Names() {
-		bit, ok := capBitByName[name]
-		if !ok {
-			continue
-		}
-		switch {
-		case caps.Has(bit):
-		case known.Has(bit):
-			reasons = append(reasons, "missing_capability:"+name)
-			result = EligibilityIneligible
-		default:
-			reasons = append(reasons, "capability_unknown:"+name)
-			if result != EligibilityIneligible {
-				result = EligibilityUnknown
-			}
-		}
-	}
-	sort.Strings(reasons)
-	if result == EligibilityEligible {
-		reasons = nil
-	}
-	return result, reasons
+	v, reasons := provider.EvaluateCaps(req, caps, known)
+	return Eligibility(v), reasons
 }
 
 // capsFor resolves a selector's (caps, knownMask). EXPLICIT Capabilities
@@ -99,9 +57,5 @@ func configModelBySelector(cfg *config.Config, sel string) (config.ModelConfig, 
 }
 
 func allCanonicalBits() provider.Capability {
-	var all provider.Capability
-	for _, bit := range capBitByName {
-		all |= bit
-	}
-	return all
+	return provider.CanonicalCaps()
 }
