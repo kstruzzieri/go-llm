@@ -137,14 +137,9 @@ func (s *Store) checkProfilesDir(forWrite bool) (present bool, err error) {
 }
 
 // syncParentDir fsyncs the parent directory of path so a just-created
-// directory entry is durable.
+// directory entry is durable (build-tagged syncDir handles Windows).
 func syncParentDir(path string) error {
-	f, err := os.Open(filepath.Dir(path))
-	if err != nil {
-		return err
-	}
-	defer func() { _ = f.Close() }()
-	return f.Sync()
+	return syncDir(filepath.Dir(path))
 }
 
 // List returns the curated block (sorted) followed by the user block

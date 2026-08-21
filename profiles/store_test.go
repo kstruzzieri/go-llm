@@ -261,6 +261,17 @@ func TestExportDiscipline(t *testing.T) {
 	if err := s.Export(context.Background(), "user/../evil", filepath.Join(t.TempDir(), "o.json")); CodeOf(err) != CodeInvalidID {
 		t.Fatal("export must validate IDs")
 	}
+	target := filepath.Join(t.TempDir(), "outside.json")
+	if err := os.WriteFile(target, []byte(storeFixtureBody), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	seedUserProfile(t, root, "real", storeFixtureBody)
+	if err := os.Symlink(target, filepath.Join(root, "profiles", "sym.json")); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Export(context.Background(), "user/sym", filepath.Join(t.TempDir(), "s.json")); CodeOf(err) != CodeStoreUnsafe {
+		t.Fatalf("symlinked user source: %v", err)
+	}
 }
 
 func TestStoreContextCancelled(t *testing.T) {
