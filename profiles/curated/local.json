@@ -1,0 +1,84 @@
+{
+  "providers": {
+    "llamacpp": {
+      "base_url": "http://127.0.0.1:8080",
+      "timeout": "5m",
+      "api_format": "openai-compat",
+      "slot_discovery": true
+    },
+    "ollama": {
+      "base_url": "http://localhost:11434",
+      "timeout": "5m"
+    }
+  },
+  "models": {
+    "general": {
+      "name": "gemma4:31b",
+      "provider": "llamacpp",
+      "description": "Gemma 4 31B dense — reasoning, analysis, multimodal; configurable thinking mode. Served on demand via llama-swap.",
+      "type": "dense",
+      "parameters": "31B",
+      "context_window": 256000,
+      "fallbacks": ["fast", "lightweight"]
+    },
+    "agent": {
+      "name": "gemma4:31b",
+      "provider": "llamacpp",
+      "description": "Agent / tool-use — 86.4% τ2-bench, native function calling, 80.0% LiveCodeBench.",
+      "type": "dense",
+      "parameters": "31B",
+      "context_window": 256000,
+      "fallbacks": ["fast", "lightweight"]
+    },
+    "judge": {
+      "name": "gemma4:31b",
+      "provider": "llamacpp",
+      "description": "Local LLM-as-judge for trace replay scoring; must not score itself in llm-bench.",
+      "type": "dense",
+      "parameters": "31B",
+      "context_window": 256000,
+      "fallbacks": ["fast", "lightweight"]
+    },
+    "fast": {
+      "name": "qwen3.6:35b-a3b",
+      "provider": "llamacpp",
+      "description": "Qwen 3.6 MoE — 73.4% SWE-bench, 3B active for fast inference, tool use.",
+      "type": "moe",
+      "parameters": "35B total / 3B active",
+      "context_window": 256000,
+      "fallbacks": ["lightweight"]
+    },
+    "coding": {
+      "name": "qwen3-coder-next:latest",
+      "provider": "llamacpp",
+      "description": "Qwen3-Coder-Next MoE — 70.6% SWE-bench, dedicated agentic coding.",
+      "type": "moe",
+      "parameters": "80B total / 3.9B active",
+      "context_window": 262144,
+      "fallbacks": ["fast", "lightweight"]
+    },
+    "lightweight": {
+      "name": "qwen3.5:9b-mtp",
+      "provider": "llamacpp",
+      "description": "Qwen3.5 9B MTP — lightweight FIM / inline completion, simple tasks.",
+      "type": "dense",
+      "parameters": "9B",
+      "context_window": 262144
+    },
+    "embedding": {
+      "name": "qwen3-embedding:8b",
+      "provider": "llamacpp",
+      "description": "Qwen3 embedding — #1 MTEB multilingual, strong code retrieval. llama-swap entry must start llama-server with --embeddings.",
+      "type": "embedding",
+      "parameters": "8B",
+      "dimensions": 4096
+    }
+  },
+  "defaults": {
+    "chat": "general",
+    "completion": "coding",
+    "embedding": "embedding",
+    "agent": "agent",
+    "analysis": "general"
+  }
+}
