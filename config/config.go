@@ -550,6 +550,14 @@ func (cfg *Config) validate() error {
 			return diagWrap(CodeProviderEndpointInvalid, SubjectProvider, key,
 				fmt.Errorf("config: provider %q: base_url must include scheme and host", key))
 		}
+		// Defense-in-depth for programmatic Configs: file-loaded configs
+		// cannot reach here with a negative timeout (Duration.UnmarshalJSON
+		// rejects at parse). invalid_argument with a provider subject — an
+		// argument-level invariant, no new diagnostic code.
+		if p.Timeout.Duration < 0 {
+			return diagWrap(CodeInvalidArgument, SubjectProvider, key,
+				fmt.Errorf("config: provider %q: timeout must not be negative", key))
+		}
 		// Empty api_format defaults to "ollama" via applyDefaults; only
 		// reject explicit unknown values so a typo like "ollma" surfaces
 		// at load time instead of silently degrading.

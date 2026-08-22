@@ -49,6 +49,22 @@ func TestAddProvider(t *testing.T) {
 	}
 }
 
+// A negative Timeout must be rejected as invalid_argument, not allowed to
+// travel into the clone round-trip where Duration.UnmarshalJSON's invariant
+// turns it into a process panic.
+func TestAddUpdateProviderRejectNegativeTimeout(t *testing.T) {
+	d := newTestDoc(t)
+	neg := Duration{Duration: -5 * time.Second}
+	before := renderToString(t, d)
+	assertDiag(t, d.AddProvider("neg", ProviderSpec{BaseURL: "http://h", Timeout: neg}),
+		CodeInvalidArgument, SubjectNone, "")
+	assertDiag(t, d.UpdateProvider("p", ProviderSpec{BaseURL: "http://h", Timeout: neg}),
+		CodeInvalidArgument, SubjectNone, "")
+	if renderToString(t, d) != before {
+		t.Fatal("rejected negative-timeout mutation changed the draft")
+	}
+}
+
 func TestProviderSpecRoundTripsAllFields(t *testing.T) {
 	d := newTestDoc(t)
 	full := ProviderSpec{

@@ -40,6 +40,12 @@ func NewDocument(spec BootstrapSpec, opts DocumentOptions) (*Document, error) {
 		return nil, diagWrap(CodeInvalidArgument, SubjectNone, "",
 			fmt.Errorf("config: new document: provider name and role are required"))
 	}
+	// Reject before the render→reparse boundary, where Duration's
+	// UnmarshalJSON invariant would surface as an empty-path parse_error.
+	if spec.Provider.Timeout.Duration < 0 {
+		return nil, diagWrap(CodeInvalidArgument, SubjectNone, "",
+			fmt.Errorf("config: new document: provider timeout must not be negative"))
+	}
 	m := spec.Model
 	authored := &Config{
 		Providers: map[string]ProviderConfig{

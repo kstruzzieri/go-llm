@@ -182,9 +182,12 @@ func (d *Document) Config() *Config {
 	return d.effective.clone()
 }
 
-// clone deep-copies via JSON round-trip: every Config field is
-// JSON-serializable by construction (that is how configs load). Expansion is
-// NOT re-triggered — it lives in finalize, not UnmarshalJSON.
+// clone deep-copies via JSON round-trip. Configs are no longer solely
+// parse-derived: programmatic mutations must uphold the parse-boundary
+// invariants (validate plus the entry-point guards enforce them; e.g.
+// Duration's non-negative rule). The clone panics remain the backstop for
+// bugs, never a reachable rejection path. Expansion is NOT re-triggered —
+// it lives in finalize, not UnmarshalJSON.
 func (c *Config) clone() *Config {
 	data, err := json.Marshal(c)
 	if err != nil {

@@ -24,6 +24,13 @@ func (d *Document) AddProvider(name string, p ProviderSpec) error {
 			return diagWrap(CodeProviderNameInvalid, SubjectProvider, name,
 				fmt.Errorf("config: %w", err))
 		}
+		// Duration's non-negative invariant otherwise only lives in
+		// UnmarshalJSON, where the mutate clone round-trip turns it into a
+		// process panic.
+		if p.Timeout.Duration < 0 {
+			return diagWrap(CodeInvalidArgument, SubjectNone, "",
+				fmt.Errorf("config: provider timeout must not be negative"))
+		}
 		if _, exists := a.Providers[name]; exists {
 			return diagWrap(CodeProviderExists, SubjectProvider, name,
 				fmt.Errorf("config: add provider: %q already configured", name))
@@ -45,6 +52,10 @@ func (d *Document) AddProvider(name string, p ProviderSpec) error {
 // authored base use AuthoredProvider and overlay their edits.
 func (d *Document) UpdateProvider(name string, p ProviderSpec) error {
 	return d.mutate(func(a *Config) error {
+		if p.Timeout.Duration < 0 {
+			return diagWrap(CodeInvalidArgument, SubjectNone, "",
+				fmt.Errorf("config: provider timeout must not be negative"))
+		}
 		cur, ok := a.Providers[name]
 		if !ok {
 			return providerNotFoundErr("update provider", name)

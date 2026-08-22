@@ -55,6 +55,19 @@ func TestNewDocumentBootstrap(t *testing.T) {
 	}
 }
 
+// A negative provider Timeout is an argument-level defect and must classify
+// as invalid_argument — not fall through to the render→reparse boundary
+// where it surfaces as a misleading empty-path parse_error.
+func TestNewDocumentRejectsNegativeProviderTimeout(t *testing.T) {
+	_, err := NewDocument(BootstrapSpec{
+		ProviderName: "p",
+		Provider:     ProviderSpec{BaseURL: "http://h", Timeout: Duration{Duration: -5 * time.Second}},
+		Role:         "r",
+		Model:        ModelSpec{Name: "m", Type: "dense"},
+	}, DocumentOptions{})
+	assertDiag(t, err, CodeInvalidArgument, SubjectNone, "")
+}
+
 // TestNewDocumentFullFieldRoundTrip populates EVERY ModelSpec and
 // ProviderSpec field (slot-governed combo so slot policy passes) and pins
 // the effective model against a full ModelConfig literal — a dropped field

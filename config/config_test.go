@@ -668,6 +668,16 @@ func TestLoad_Validation(t *testing.T) {
 	}
 }
 
+// Defense-in-depth for programmatic Configs: file-loaded configs cannot
+// carry a negative timeout (Duration.UnmarshalJSON rejects at parse), so
+// this site is exercised directly.
+func TestValidate_RejectsNegativeProviderTimeout(t *testing.T) {
+	cfg := &Config{Providers: map[string]ProviderConfig{
+		"p": {BaseURL: "http://h", Timeout: Duration{Duration: -time.Second}},
+	}}
+	assertDiag(t, cfg.validate(), CodeInvalidArgument, SubjectProvider, "p")
+}
+
 func TestModelFor(t *testing.T) {
 	cfg, err := Load("testdata/valid.json")
 	if err != nil {
