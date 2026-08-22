@@ -175,6 +175,13 @@ func TestReadOnlyGatesExistingMutatorsAndEverySave(t *testing.T) {
 		}},
 		{"SaveReplace-stale", func(d *Document) error { return d.SaveReplace(stale, "stale") }},
 		{"SaveReplaceAs", func(d *Document) error { return d.SaveReplaceAs(stale, "stale", OriginProfile) }},
+		{"AddProvider", func(d *Document) error { return d.AddProvider("q", ProviderSpec{BaseURL: "http://h"}) }},
+		{"AddProvider-invalid-name", func(d *Document) error { return d.AddProvider("bad/name", ProviderSpec{BaseURL: "http://h"}) }},
+		{"UpdateProvider", func(d *Document) error { return d.UpdateProvider("p", ProviderSpec{BaseURL: "http://h"}) }},
+		{"RemoveProvider", func(d *Document) error { return d.RemoveProvider("p") }},
+		{"SetProviderAPIKey", func(d *Document) error { return d.SetProviderAPIKey("p", "k") }},
+		{"SetProviderAPIKey-empty", func(d *Document) error { return d.SetProviderAPIKey("p", "") }},
+		{"ClearProviderAPIKey", func(d *Document) error { return d.ClearProviderAPIKey("p") }},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
