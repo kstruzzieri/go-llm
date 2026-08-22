@@ -274,6 +274,72 @@ func TestExportDiscipline(t *testing.T) {
 	}
 }
 
+// Config-content failures classify as config_invalid (spec §8) with the
+// config diagnostic reachable through the profiles wrapper; CodeIO stays
+// filesystem-only.
+func TestLoadConfigFailureClassifiedConfigInvalid(t *testing.T) {
+	root := t.TempDir()
+	seedUserProfile(t, root, "broken", `{"providers": {}}`)
+	s := NewStore(root)
+	_, err := s.Load(context.Background(), ID("user/broken"))
+	if CodeOf(err) != CodeConfigInvalid {
+		t.Fatalf("code = %q, want config_invalid", CodeOf(err))
+	}
+	// config diagnostic reaches THROUGH the profiles wrapper
+	d, ok := config.DiagnosticOf(err)
+	if !ok || d.Code != config.CodeProviderRequired {
+		t.Fatalf("config diagnostic not reachable: %+v ok=%v", d, ok)
+	}
+
+	seedUserProfile(t, root, "bad-json", `{nope`)
+	_, err = s.Load(context.Background(), ID("user/bad-json"))
+	if CodeOf(err) != CodeConfigInvalid {
+		t.Fatalf("parse failure code = %q", CodeOf(err))
+	}
+	if d, ok := config.DiagnosticOf(err); !ok || d.Code != config.CodeParseError {
+		t.Fatalf("parse diagnostic = %+v ok=%v", d, ok)
+	}
+
+	// Read-only boundary pin: a collision profile loads read-only with NO
+	// store error — Firn maps ReadOnly separately; a future edit fabricating
+	// config_invalid for read-only docs must go red here.
+	seedUserProfile(t, root, "dup", `{"providers":{"local":{"base_url":"http://localhost:1"}},
+	  "models":{"agent":{"name":"m1","provider":"local","type":"dense"},
+	            "agent":{"name":"m2","provider":"local","type":"dense"}},
+	  "defaults":{"agent":"agent"}}`)
+	doc, err := s.Load(context.Background(), ID("user/dup"))
+	if err != nil {
+		t.Fatalf("collision profile must load without store error: %v", err)
+	}
+	if ro, ok := doc.ReadOnly(); !ok || ro.Code != config.CodeDuplicateKeys {
+		t.Fatalf("ReadOnly = %+v ok=%v, want duplicate_keys", ro, ok)
+	}
+}
+
+// NewStoreWithOptions threads DocumentOptions.LookupEnv into every profile
+// Document the store parses (spec §7); NewStore stays ambient.
+func TestStoreWithOptionsInjectsEnv(t *testing.T) {
+	t.Setenv("PROF_KEY", "")
+	root := t.TempDir()
+	seedUserProfile(t, root, "cloudish", fmt.Sprintf(`{
+	  "providers":{"p":{"base_url":"http://h","api_key":%q}},
+	  "models":{"agent":{"name":"m","type":"dense","provider":"p"}},
+	  "defaults":{"agent":"agent"}}`, "${PROF_KEY}"))
+	snap := map[string]string{"PROF_KEY": "v"}
+	s := NewStoreWithOptions(root, config.DocumentOptions{
+		LookupEnv: func(k string) (string, bool) { v, ok := snap[k]; return v, ok },
+	})
+	if _, err := s.Load(context.Background(), ID("user/cloudish")); err != nil {
+		t.Fatalf("injected env must satisfy the ref: %v", err)
+	}
+	// ambient store fails the same profile
+	s2 := NewStore(root)
+	_, err := s2.Load(context.Background(), ID("user/cloudish"))
+	if CodeOf(err) != CodeConfigInvalid {
+		t.Fatalf("ambient store: code = %q", CodeOf(err))
+	}
+}
+
 func TestStoreContextCancelled(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
