@@ -4,8 +4,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"os"
 	"path/filepath"
+	"reflect"
+	"sort"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -306,6 +312,117 @@ func TestDiagnosticCapabilityParserDriftGuard(t *testing.T) {
 	raw, _ := json.Marshal(base)
 	_, err := NewDocumentFromBytes(raw, Origin{Source: OriginExplicit})
 	assertDiag(t, err, CodeModelInvalid, SubjectRole, "agent")
+}
+
+// TestExportedErrorCodeSetMatchesContract pins the exported ErrorCode
+// constant SET to the approved 27-code vocabulary by parsing the package
+// source: adding, removing, renaming, or retyping an exported Code* const
+// breaks this test. (parser.ParseDir is deprecated since Go 1.22; per-file
+// ParseFile over os.ReadDir has the same semantics without SA1019.)
+func TestExportedErrorCodeSetMatchesContract(t *testing.T) {
+	want := map[string]bool{
+		"config_not_found": true, "config_discovery_invalid": true,
+		"io": true, "parse_error": true, "render_error": true,
+		"duplicate_keys": true, "provider_required": true,
+		"provider_name_invalid": true, "provider_endpoint_invalid": true,
+		"provider_format_invalid": true, "slot_policy_invalid": true,
+		"model_invalid": true, "think_invalid": true,
+		"provider_not_found": true, "defaults_invalid": true,
+		"key_reference_malformed": true, "key_reference_unavailable": true,
+		"invalid_argument": true, "role_not_found": true,
+		"provider_exists": true, "provider_in_use": true,
+		"eligibility_ineligible": true, "eligibility_unknown": true,
+		"selector_conflict": true, "target_exists": true,
+		"revision_conflict": true, "durability_uncertain": true,
+	}
+	if len(want) != 27 {
+		t.Fatalf("test contract has %d codes, want 27", len(want))
+	}
+
+	fset := token.NewFileSet()
+	entries, err := os.ReadDir(".")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]bool{}
+	for _, entry := range entries {
+		name := entry.Name()
+		if !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		file, err := parser.ParseFile(fset, name, nil, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, decl := range file.Decls {
+			gen, ok := decl.(*ast.GenDecl)
+			if !ok || gen.Tok != token.CONST {
+				continue
+			}
+			for _, spec := range gen.Specs {
+				values := spec.(*ast.ValueSpec)
+				typeName, explicitlyTyped := values.Type.(*ast.Ident)
+				for i, name := range values.Names {
+					// The exported Code* namespace is reserved for ErrorCode;
+					// name unrelated consts differently.
+					if !name.IsExported() || !strings.HasPrefix(name.Name, "Code") {
+						continue
+					}
+					if !explicitlyTyped || typeName.Name != "ErrorCode" {
+						t.Fatalf("%s must be explicitly typed ErrorCode", name.Name)
+					}
+					if i >= len(values.Values) {
+						t.Fatalf("%s must have an explicit string literal", name.Name)
+					}
+					lit, ok := values.Values[i].(*ast.BasicLit)
+					if !ok || lit.Kind != token.STRING {
+						t.Fatalf("%s must have an explicit string literal", name.Name)
+					}
+					value, err := strconv.Unquote(lit.Value)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if got[value] {
+						t.Fatalf("duplicate exported ErrorCode value %q", value)
+					}
+					got[value] = true
+				}
+			}
+		}
+	}
+	if !reflect.DeepEqual(got, want) {
+		var missing, extra []string
+		for v := range want {
+			if !got[v] {
+				missing = append(missing, v)
+			}
+		}
+		for v := range got {
+			if !want[v] {
+				extra = append(extra, v)
+			}
+		}
+		sort.Strings(missing)
+		sort.Strings(extra)
+		t.Fatalf("exported ErrorCode set drifted (missing=%v extra=%v): a deliberate "+
+			"vocabulary change must update this want set, the 27 count guard above, and the spec s6 code table",
+			missing, extra)
+	}
+}
+
+// TestDiagnosticRemainingSources provokes the two diagnostic sources no
+// other test reaches: render_error (unparseable retained raw bytes) and the
+// durability_uncertain source-wrap (dir-sync failure after publication).
+func TestDiagnosticRemainingSources(t *testing.T) {
+	_, err := renderCanonical([]byte("{"), &Config{})
+	assertDiag(t, err, CodeRenderError, SubjectNone, "")
+
+	d := loadTestDoc(t, rawWithUnknown)
+	original := syncDir
+	syncDir = func(string) error { return errors.New("injected sync failure") }
+	t.Cleanup(func() { syncDir = original })
+	err = d.SaveNew(filepath.Join(t.TempDir(), "durability.json"))
+	assertDiag(t, err, CodeDurabilityUncertain, SubjectNone, "")
 }
 
 func validBaseConfigMap() map[string]any {

@@ -733,3 +733,60 @@ func TestRenderCanonicalIdempotentForFreshContent(t *testing.T) {
 		t.Fatalf("render not idempotent:\nfirst:  %s\nsecond: %s", out1, out2)
 	}
 }
+
+// TestNonCanonicalSourceNormalizesExactlyOnce pins amended criterion 2: a
+// genuinely non-canonical on-disk source (compact, odd whitespace, unknown
+// key) publishes its canonical normalization on the FIRST zero-mutation save
+// and publishes nothing on the second — normalize once, then byte-stable.
+func TestNonCanonicalSourceNormalizesExactlyOnce(t *testing.T) {
+	raw := []byte("{\"defaults\":{\"agent\":\"agent\"},\n\t\"models\": {\"agent\":{\"type\":\"dense\",\"name\":\"m\",\"provider\":\"p\",\"x_note\":\"keep\"}},\"providers\":{\"p\":{\"base_url\":\"http://h\"}}}")
+	path := filepath.Join(t.TempDir(), "models.json")
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	d, err := LoadDocument(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var publishes int
+	original := publishReplaceFn
+	publishReplaceFn = func(path string, data []byte, revision string) error {
+		publishes++
+		return original(path, data, revision)
+	}
+	t.Cleanup(func() { publishReplaceFn = original })
+
+	// Zero mutations: first SaveReplace must publish canonical normalization.
+	if err := d.SaveReplace(path, d.Revision()); err != nil {
+		t.Fatal(err)
+	}
+	if publishes != 1 {
+		t.Fatalf("first save published %d times, want exactly 1", publishes)
+	}
+	first, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Equal(first, raw) {
+		t.Fatal("first save did not normalize the non-canonical source")
+	}
+	if !strings.Contains(string(first), `"x_note": "keep"`) {
+		t.Fatalf("normalization lost unknown member x_note:\n%s", first)
+	}
+
+	// Still zero mutations: the normalized document now publishes nothing.
+	if err := d.SaveReplace(path, d.Revision()); err != nil {
+		t.Fatal(err)
+	}
+	if publishes != 1 {
+		t.Fatalf("second save added a publication; total = %d", publishes)
+	}
+	second, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(first, second) {
+		t.Fatal("normalized bytes changed on the second save")
+	}
+}
