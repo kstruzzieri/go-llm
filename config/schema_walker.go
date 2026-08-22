@@ -8,10 +8,9 @@ import (
 )
 
 // schemaNode is one level of the config schema shared by the merge
-// renderer; the duplicate/alias detector lands on this walker in a later
-// task (spec §5: ONE walker). Reflected schema shape stays shared; render
-// and collision behavior remain pinned by their separate golden and
-// detector tests.
+// renderer and the duplicate/alias detector (spec §5: ONE walker).
+// Reflected schema shape stays shared; render and collision behavior
+// remain pinned by their separate golden and detector tests.
 //
 // Invariant: exactly one of known/mapNode is set on a non-leaf; a leaf is
 // a nil *schemaNode.

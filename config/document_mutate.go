@@ -18,6 +18,9 @@ import (
 func (d *Document) mutate(fn func(authored *Config) error) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	if err := d.readOnlyErrLocked(); err != nil {
+		return err
+	}
 	authored := d.authored.clone()
 	if err := fn(authored); err != nil {
 		return err

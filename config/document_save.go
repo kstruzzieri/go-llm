@@ -124,6 +124,9 @@ func (d *Document) SaveNewAs(path string, src OriginSource) error {
 	defer mu.Unlock()
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	if err := d.readOnlyErrLocked(); err != nil {
+		return err
+	}
 	out, err := d.canonicalBytes()
 	if err != nil {
 		return err
@@ -160,6 +163,11 @@ func (d *Document) SaveReplaceAs(path, expectedRevision string, src OriginSource
 	defer mu.Unlock()
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	// Read-only gate BEFORE any target I/O: duplicate_keys beats missing-
+	// target io and revision conflicts (save precedence, pinned by test).
+	if err := d.readOnlyErrLocked(); err != nil {
+		return err
+	}
 	cur, err := readExpectedRevision(path, expectedRevision)
 	if err != nil {
 		return err
@@ -323,7 +331,12 @@ func renderCanonical(rawBytes []byte, authored *Config) ([]byte, error) {
 
 // canonicalBytes renders the document for disk: the AUTHORED config merged
 // onto the retained raw tree via the shared schema walker. Callers hold d.mu.
+// Defense-in-depth: a collision-marked document never renders — the merge
+// would silently collapse the colliding keys.
 func (d *Document) canonicalBytes() ([]byte, error) {
+	if err := d.readOnlyErrLocked(); err != nil {
+		return nil, err
+	}
 	return renderCanonical(d.rawBytes, d.authored)
 }
 

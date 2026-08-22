@@ -50,6 +50,7 @@ type Document struct {
 	authored       *Config
 	effective      *Config
 	env            func(string) (string, bool)
+	readOnly       *Diagnostic
 }
 
 // DocumentOptions configures document construction (spec §7).
@@ -125,6 +126,15 @@ func newDocumentEnv(data []byte, origin Origin, env func(string) (string, bool))
 	if err := effective.finalizeEnv(env); err != nil {
 		return nil, err
 	}
+	diag, found, err := detectCollisions(data)
+	if err != nil {
+		return nil, diagWrap(CodeParseError, SubjectNone, "",
+			fmt.Errorf("config: parse %q: %w", origin.Path, err))
+	}
+	var readOnly *Diagnostic
+	if found {
+		readOnly = &diag
+	}
 	sum := sha256.Sum256(data)
 	return &Document{
 		rawBytes:       data,
@@ -134,6 +144,7 @@ func newDocumentEnv(data []byte, origin Origin, env func(string) (string, bool))
 		authored:       &authored,
 		effective:      &effective,
 		env:            env,
+		readOnly:       readOnly,
 	}, nil
 }
 
