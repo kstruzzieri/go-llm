@@ -62,7 +62,8 @@ type DocumentOptions struct {
 	// A ("", true) result is treated as unset by api_key expansion (same
 	// as ("", false)). The lookup runs under the document's internal
 	// mutex during mutations — keep it fast; a blocking lookup stalls all
-	// Document readers.
+	// Document readers. The lookup must not call back into the same
+	// Document (its mutex is held during mutations and is not reentrant).
 	LookupEnv func(string) (string, bool)
 }
 

@@ -120,13 +120,18 @@ func sanitizeSubject(s string) string {
 		}
 		b.WriteRune(r)
 	}
-	out := b.String()
-	if len(out) > 64 {
-		cut := 64
-		for cut > 0 && !utf8.RuneStart(out[cut]) {
-			cut--
-		}
-		out = out[:cut]
+	return truncateRuneSafe64(b.String())
+}
+
+// truncateRuneSafe64 cuts s to at most 64 bytes on a rune boundary —
+// the shared bound for diagnostic subjects and mutation reason items.
+func truncateRuneSafe64(s string) string {
+	if len(s) <= 64 {
+		return s
 	}
-	return out
+	cut := 64
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut]
 }

@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"sort"
 	"strings"
-	"unicode/utf8"
 
 	"github.com/kstruzzieri/go-llm/provider"
 )
@@ -249,14 +248,7 @@ func aggregateVerdict(a *Config, roles map[string]bool, reqs map[string]provider
 			// and its item discipline; keep in lockstep. Cut on a rune
 			// boundary — use-case keys are user-authored and may be
 			// multi-byte.
-			if len(item) > 64 {
-				cut := 64
-				for cut > 0 && !utf8.RuneStart(item[cut]) {
-					cut--
-				}
-				item = item[:cut]
-			}
-			reasonSet[item] = true
+			reasonSet[truncateRuneSafe64(item)] = true
 		}
 	}
 	if verdict == provider.CapEligible {

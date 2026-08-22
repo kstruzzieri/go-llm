@@ -184,8 +184,11 @@ func TestSetClearProviderAPIKey(t *testing.T) {
 	if strings.Contains(err.Error(), "sk-test-only") {
 		t.Fatal("prior key leaked into error text")
 	}
-	assertDiag(t, d.SetProviderAPIKey("p", "prefix${broken"),
-		CodeKeyReferenceMalformed, SubjectProvider, "p")
+	errMalformed := d.SetProviderAPIKey("p", "prefix${broken")
+	assertDiag(t, errMalformed, CodeKeyReferenceMalformed, SubjectProvider, "p")
+	if strings.Contains(errMalformed.Error(), "prefix${broken") {
+		t.Fatal("submitted key value leaked into error text")
+	}
 
 	if err := d.SetProviderAPIKey("p", "${KEY_REF}"); err != nil {
 		t.Fatal(err)
