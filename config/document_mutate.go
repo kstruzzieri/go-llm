@@ -23,7 +23,7 @@ func (d *Document) mutate(fn func(authored *Config) error) error {
 		return err
 	}
 	effective := authored.clone()
-	if err := effective.finalize(); err != nil {
+	if err := effective.finalizeEnv(d.env); err != nil {
 		return err
 	}
 	d.authored = authored

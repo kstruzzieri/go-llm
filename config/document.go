@@ -49,6 +49,28 @@ type Document struct {
 	originIdentity string
 	authored       *Config
 	effective      *Config
+	env            func(string) (string, bool)
+}
+
+// DocumentOptions configures document construction (spec §7).
+type DocumentOptions struct {
+	// LookupEnv resolves ${ENV} presence checks and expansion for this
+	// document. nil = ambient os.LookupEnv, consulted on parse and every
+	// mutation (compatibility). Hosts needing deterministic
+	// document-lifetime behavior pass a stable snapshot-backed function.
+	// A ("", true) result is treated as unset by api_key expansion (same
+	// as ("", false)). The lookup runs under the document's internal
+	// mutex during mutations — keep it fast; a blocking lookup stalls all
+	// Document readers.
+	LookupEnv func(string) (string, bool)
+}
+
+// ParseDocument is the low-level parse seam: caller-owned bytes in (copied,
+// never aliased), Document out. Performs no filesystem I/O. The bytes go
+// through the same finalize pipeline as Load — validation is NOT deferred.
+func ParseDocument(data []byte, origin Origin, opts DocumentOptions) (*Document, error) {
+	owned := append([]byte(nil), data...)
+	return newDocumentEnv(owned, origin, opts.LookupEnv)
 }
 
 // LoadDocument reads a models.json from an explicit path into a Document.
@@ -79,14 +101,19 @@ func DefaultDocument() (*Document, error) {
 
 // NewDocumentFromBytes builds a Document from raw models.json bytes with the
 // caller's origin (profile stores, embedded catalogs, tests). The input
-// slice is COPIED — the document never aliases caller memory.
+// slice is COPIED by ParseDocument — the document never aliases caller
+// memory.
 func NewDocumentFromBytes(data []byte, origin Origin) (*Document, error) {
-	owned := make([]byte, len(data))
-	copy(owned, data)
-	return newDocument(owned, origin)
+	return ParseDocument(data, origin, DocumentOptions{})
 }
 
+// newDocument is the ambient-env construction path shared by LoadDocument
+// and DefaultDocument; data must already be owned by the callee.
 func newDocument(data []byte, origin Origin) (*Document, error) {
+	return newDocumentEnv(data, origin, nil)
+}
+
+func newDocumentEnv(data []byte, origin Origin, env func(string) (string, bool)) (*Document, error) {
 	var authored Config
 	if err := json.Unmarshal(data, &authored); err != nil {
 		return nil, diagWrap(CodeParseError, SubjectNone, "", fmt.Errorf("config: parse %q: %w", origin.Path, err))
@@ -95,7 +122,7 @@ func newDocument(data []byte, origin Origin) (*Document, error) {
 	if err := json.Unmarshal(data, &effective); err != nil {
 		return nil, diagWrap(CodeParseError, SubjectNone, "", fmt.Errorf("config: parse %q: %w", origin.Path, err))
 	}
-	if err := effective.finalize(); err != nil {
+	if err := effective.finalizeEnv(env); err != nil {
 		return nil, err
 	}
 	sum := sha256.Sum256(data)
@@ -106,6 +133,7 @@ func newDocument(data []byte, origin Origin) (*Document, error) {
 		originIdentity: documentPathIdentity(origin.Path),
 		authored:       &authored,
 		effective:      &effective,
+		env:            env,
 	}, nil
 }
 

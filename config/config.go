@@ -388,11 +388,18 @@ func Load(path string) (*Config, error) {
 // finalize runs the post-unmarshal pipeline shared by Load and newDocument:
 // validate first (before materializing defaults), expand ${ENV} api_key
 // references (file-backed loads only), then apply defaults.
-func (c *Config) finalize() error {
+func (c *Config) finalize() error { return c.finalizeEnv(os.LookupEnv) }
+
+// finalizeEnv is finalize with an injectable environment lookup (spec §7);
+// nil falls back to ambient os.LookupEnv.
+func (c *Config) finalizeEnv(lookup func(string) (string, bool)) error {
+	if lookup == nil {
+		lookup = os.LookupEnv
+	}
 	if err := c.validate(); err != nil {
 		return err
 	}
-	if err := c.expandProviderAPIKeys(); err != nil {
+	if err := c.expandProviderAPIKeys(lookup); err != nil {
 		return err
 	}
 	c.applyDefaults()
@@ -400,12 +407,12 @@ func (c *Config) finalize() error {
 }
 
 // expandAPIKeyRefs replaces every ${NAME} reference in value with the value of
-// environment variable NAME. A value containing no "${" is returned verbatim, so
-// existing literal keys keep working. A referenced variable that is unset or
-// empty, or a malformed reference, returns an error naming providerName. Errors
-// never contain an expanded secret value. Only the provider api_key field uses
-// this helper.
-func expandAPIKeyRefs(providerName, value string) (string, error) {
+// environment variable NAME, resolved through lookup. A value containing no
+// "${" is returned verbatim, so existing literal keys keep working. A
+// referenced variable that is unset or empty, or a malformed reference,
+// returns an error naming providerName. Errors never contain an expanded
+// secret value. Only the provider api_key field uses this helper.
+func expandAPIKeyRefs(providerName, value string, lookup func(string) (string, bool)) (string, error) {
 	if !strings.Contains(value, "${") {
 		return value, nil
 	}
@@ -422,7 +429,7 @@ func expandAPIKeyRefs(providerName, value string) (string, error) {
 				return "", diagWrap(CodeKeyReferenceMalformed, SubjectProvider, providerName,
 					fmt.Errorf("config: provider %q api_key: malformed environment reference", providerName))
 			}
-			v, ok := os.LookupEnv(name)
+			v, ok := lookup(name)
 			if !ok || v == "" {
 				return "", diagWrap(CodeKeyReferenceUnavailable, SubjectProvider, providerName,
 					fmt.Errorf("config: provider %q api_key references unset or empty environment variable %q", providerName, name))
@@ -467,9 +474,9 @@ func MustLoad(path string) *Config {
 }
 
 // expandProviderAPIKeys rewrites each provider's api_key, expanding ${ENV}
-// references. Providers are visited in sorted order so the first error is
-// deterministic when several reference bad variables.
-func (cfg *Config) expandProviderAPIKeys() error {
+// references through lookup. Providers are visited in sorted order so the
+// first error is deterministic when several reference bad variables.
+func (cfg *Config) expandProviderAPIKeys(lookup func(string) (string, bool)) error {
 	keys := make([]string, 0, len(cfg.Providers))
 	for k := range cfg.Providers {
 		keys = append(keys, k)
@@ -477,7 +484,7 @@ func (cfg *Config) expandProviderAPIKeys() error {
 	sort.Strings(keys)
 	for _, k := range keys {
 		p := cfg.Providers[k]
-		expanded, err := expandAPIKeyRefs(k, p.APIKey)
+		expanded, err := expandAPIKeyRefs(k, p.APIKey, lookup)
 		if err != nil {
 			return err
 		}

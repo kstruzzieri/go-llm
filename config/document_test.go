@@ -1,8 +1,10 @@
 package config
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -235,4 +237,78 @@ func TestDocumentConcurrentAccess(t *testing.T) {
 	for i := 0; i < 8; i++ {
 		<-done
 	}
+}
+
+func TestParseDocumentInjectedEnv(t *testing.T) {
+	t.Setenv("INJECTED_KEY", "")
+	base := validBaseConfigMap()
+	base["providers"].(map[string]any)["p"].(map[string]any)["api_key"] = "${INJECTED_KEY}"
+	raw, _ := json.Marshal(base)
+
+	// Ambient var is set-but-empty, which expansion treats as unset.
+	snap := map[string]string{"INJECTED_KEY": "sekret"}
+	lookup := func(k string) (string, bool) { v, ok := snap[k]; return v, ok }
+	d, err := ParseDocument(raw, Origin{Source: OriginExplicit}, DocumentOptions{LookupEnv: lookup})
+	if err != nil {
+		t.Fatalf("injected env must satisfy the ref: %v", err)
+	}
+	if got := d.Config().Providers["p"].APIKey; got != "sekret" {
+		t.Fatal("injected value was not used") // never print credential material
+	}
+
+	// Same bytes without injection fail key_reference_unavailable.
+	_, err = ParseDocument(raw, Origin{Source: OriginExplicit}, DocumentOptions{})
+	assertDiag(t, err, CodeKeyReferenceUnavailable, SubjectProvider, "p")
+}
+
+func TestParseDocumentCopiesInput(t *testing.T) {
+	base := validBaseConfigMap()
+	raw, _ := json.Marshal(base)
+	want := append([]byte(nil), raw...)
+	d, err := ParseDocument(raw, Origin{Source: OriginExplicit}, DocumentOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := range raw {
+		raw[i] = 'X'
+	}
+	d.mu.Lock()
+	got := append([]byte(nil), d.rawBytes...)
+	d.mu.Unlock()
+	if !bytes.Equal(got, want) {
+		t.Fatal("caller slice mutation leaked into document")
+	}
+}
+
+func TestInjectedEnvStableAcrossMutations(t *testing.T) {
+	t.Setenv("SNAP_KEY", "ambient-before")
+	base := validBaseConfigMap()
+	base["providers"].(map[string]any)["p"].(map[string]any)["api_key"] = "${SNAP_KEY}"
+	raw, _ := json.Marshal(base)
+	snap := map[string]string{"SNAP_KEY": "v1"}
+	d, err := ParseDocument(raw, Origin{Source: OriginExplicit},
+		DocumentOptions{LookupEnv: func(k string) (string, bool) { v, ok := snap[k]; return v, ok }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("SNAP_KEY", "") // unrelated ambient change cannot affect snapshot host
+	if err := d.BindUseCase("chat", "agent"); err != nil {
+		t.Fatalf("stable injected snapshot changed across mutation: %v", err)
+	}
+	if got := d.Config().Providers["p"].APIKey; got != "v1" {
+		t.Fatal("snapshot value did not survive mutation")
+	}
+}
+
+func TestNilLookupRechecksAmbientOnMutation(t *testing.T) {
+	t.Setenv("AMBIENT_KEY", "present")
+	base := validBaseConfigMap()
+	base["providers"].(map[string]any)["p"].(map[string]any)["api_key"] = "${AMBIENT_KEY}"
+	raw, _ := json.Marshal(base)
+	d, err := ParseDocument(raw, Origin{Source: OriginExplicit}, DocumentOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("AMBIENT_KEY", "")
+	assertDiag(t, d.BindUseCase("chat", "agent"), CodeKeyReferenceUnavailable, SubjectProvider, "p")
 }
