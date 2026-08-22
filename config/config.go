@@ -413,15 +413,18 @@ func expandAPIKeyRefs(providerName, value string) (string, error) {
 		if value[i] == '$' && i+1 < len(value) && value[i+1] == '{' {
 			rel := strings.IndexByte(value[i+2:], '}')
 			if rel < 0 {
-				return "", fmt.Errorf("config: provider %q api_key: malformed environment reference", providerName)
+				return "", diagWrap(CodeKeyReferenceMalformed, SubjectProvider, providerName,
+					fmt.Errorf("config: provider %q api_key: malformed environment reference", providerName))
 			}
 			name := value[i+2 : i+2+rel]
 			if !validEnvName(name) {
-				return "", fmt.Errorf("config: provider %q api_key: malformed environment reference", providerName)
+				return "", diagWrap(CodeKeyReferenceMalformed, SubjectProvider, providerName,
+					fmt.Errorf("config: provider %q api_key: malformed environment reference", providerName))
 			}
 			v, ok := os.LookupEnv(name)
 			if !ok || v == "" {
-				return "", fmt.Errorf("config: provider %q api_key references unset or empty environment variable %q", providerName, name)
+				return "", diagWrap(CodeKeyReferenceUnavailable, SubjectProvider, providerName,
+					fmt.Errorf("config: provider %q api_key references unset or empty environment variable %q", providerName, name))
 			}
 			b.WriteString(v)
 			i += 2 + rel + 1
@@ -510,7 +513,8 @@ func (cfg *Config) applyDefaults() {
 func (cfg *Config) validate() error {
 	// At least one provider is required.
 	if len(cfg.Providers) == 0 {
-		return fmt.Errorf("config: at least one provider is required")
+		return diagWrap(CodeProviderRequired, SubjectNone, "",
+			fmt.Errorf("config: at least one provider is required"))
 	}
 
 	// Validate providers (sorted for deterministic errors).
@@ -521,24 +525,29 @@ func (cfg *Config) validate() error {
 	sort.Strings(providerKeys)
 	for _, key := range providerKeys {
 		if err := ValidateProviderName(key); err != nil {
-			return fmt.Errorf("config: %w", err)
+			return diagWrap(CodeProviderNameInvalid, SubjectProvider, key,
+				fmt.Errorf("config: %w", err))
 		}
 		p := cfg.Providers[key]
 		if p.BaseURL == "" {
-			return fmt.Errorf("config: provider %q: base_url is required", key)
+			return diagWrap(CodeProviderEndpointInvalid, SubjectProvider, key,
+				fmt.Errorf("config: provider %q: base_url is required", key))
 		}
 		u, err := url.ParseRequestURI(p.BaseURL)
 		if err != nil {
-			return fmt.Errorf("config: provider %q: invalid base_url: %w", key, err)
+			return diagWrap(CodeProviderEndpointInvalid, SubjectProvider, key,
+				fmt.Errorf("config: provider %q: invalid base_url: %w", key, err))
 		}
 		if u.Scheme == "" || u.Host == "" {
-			return fmt.Errorf("config: provider %q: base_url must include scheme and host", key)
+			return diagWrap(CodeProviderEndpointInvalid, SubjectProvider, key,
+				fmt.Errorf("config: provider %q: base_url must include scheme and host", key))
 		}
 		// Empty api_format defaults to "ollama" via applyDefaults; only
 		// reject explicit unknown values so a typo like "ollma" surfaces
 		// at load time instead of silently degrading.
 		if p.APIFormat != "" && !validAPIFormats[p.APIFormat] {
-			return fmt.Errorf("config: provider %q: invalid api_format %q", key, p.APIFormat)
+			return diagWrap(CodeProviderFormatInvalid, SubjectProvider, key,
+				fmt.Errorf("config: provider %q: invalid api_format %q", key, p.APIFormat))
 		}
 	}
 
@@ -551,29 +560,37 @@ func (cfg *Config) validate() error {
 	for _, role := range modelKeys {
 		m := cfg.Models[role]
 		if m.Name == "" {
-			return fmt.Errorf("config: model %q: name is required", role)
+			return diagWrap(CodeModelInvalid, SubjectRole, role,
+				fmt.Errorf("config: model %q: name is required", role))
 		}
 		if m.Type == "" {
-			return fmt.Errorf("config: model %q: type is required", role)
+			return diagWrap(CodeModelInvalid, SubjectRole, role,
+				fmt.Errorf("config: model %q: type is required", role))
 		}
 		if !validModelTypes[m.Type] {
-			return fmt.Errorf("config: model %q: invalid type %q", role, m.Type)
+			return diagWrap(CodeModelInvalid, SubjectRole, role,
+				fmt.Errorf("config: model %q: invalid type %q", role, m.Type))
 		}
 		if m.ContextWindow < 0 {
-			return fmt.Errorf("config: model %q: context_window must not be negative", role)
+			return diagWrap(CodeModelInvalid, SubjectRole, role,
+				fmt.Errorf("config: model %q: context_window must not be negative", role))
 		}
 		if m.Dimensions < 0 {
-			return fmt.Errorf("config: model %q: dimensions must not be negative", role)
+			return diagWrap(CodeModelInvalid, SubjectRole, role,
+				fmt.Errorf("config: model %q: dimensions must not be negative", role))
 		}
 		if opts := m.Options; opts != nil {
 			if opts.Temperature != nil && *opts.Temperature < 0 {
-				return fmt.Errorf("config: model %q: temperature must be non-negative", role)
+				return diagWrap(CodeModelInvalid, SubjectRole, role,
+					fmt.Errorf("config: model %q: temperature must be non-negative", role))
 			}
 			if opts.TopP != nil && (*opts.TopP <= 0 || *opts.TopP > 1) {
-				return fmt.Errorf("config: model %q: top_p must be greater than 0 and at most 1", role)
+				return diagWrap(CodeModelInvalid, SubjectRole, role,
+					fmt.Errorf("config: model %q: top_p must be greater than 0 and at most 1", role))
 			}
 			if opts.TopK != nil && *opts.TopK < 0 {
-				return fmt.Errorf("config: model %q: top_k must be non-negative", role)
+				return diagWrap(CodeModelInvalid, SubjectRole, role,
+					fmt.Errorf("config: model %q: top_k must be non-negative", role))
 			}
 		}
 
@@ -589,10 +606,12 @@ func (cfg *Config) validate() error {
 			for _, cap := range m.Capabilities {
 				lower := strings.ToLower(cap)
 				if !validCapabilityNames[lower] {
-					return fmt.Errorf("config: model %q: unknown or non-canonical capability %q (canonical names: %v)", role, cap, provider.CanonicalCapabilityNames)
+					return diagWrap(CodeModelInvalid, SubjectRole, role,
+						fmt.Errorf("config: model %q: unknown or non-canonical capability %q (canonical names: %v)", role, cap, provider.CanonicalCapabilityNames))
 				}
 				if m.Type == "embedding" && !embeddingOnlyCapabilities[lower] {
-					return fmt.Errorf("config: model %q: type %q must declare only embedding capabilities, got %q", role, m.Type, cap)
+					return diagWrap(CodeModelInvalid, SubjectRole, role,
+						fmt.Errorf("config: model %q: type %q must declare only embedding capabilities, got %q", role, m.Type, cap))
 				}
 			}
 			// Final round-trip check: provider must accept the same tokens.
@@ -601,7 +620,8 @@ func (cfg *Config) validate() error {
 			// is designed to make impossible, but worth asserting in case
 			// someone bypasses the list.
 			if _, err := provider.ParseCapsStrict(m.Capabilities); err != nil {
-				return fmt.Errorf("config: model %q: %w", role, err)
+				return diagWrap(CodeModelInvalid, SubjectRole, role,
+					fmt.Errorf("config: model %q: %w", role, err))
 			}
 		}
 
@@ -614,15 +634,18 @@ func (cfg *Config) validate() error {
 		}
 		if _, ok := cfg.Providers[providerKey]; !ok {
 			if implicit {
-				return fmt.Errorf("config: model %q: implicit provider \"ollama\" not found", role)
+				return diagWrap(CodeProviderNotFound, SubjectRole, role,
+					fmt.Errorf("config: model %q: implicit provider \"ollama\" not found", role))
 			}
-			return fmt.Errorf("config: model %q: provider %q not found", role, providerKey)
+			return diagWrap(CodeProviderNotFound, SubjectRole, role,
+				fmt.Errorf("config: model %q: provider %q not found", role, providerKey))
 		}
 
 		// Validate slots (#400 admission-capacity override). Bootstrap
 		// rechecks for programmatic Configs that bypass Load.
 		if m.Slots < 0 {
-			return fmt.Errorf("config: model %q: slots must be >= 1", role)
+			return diagWrap(CodeModelInvalid, SubjectRole, role,
+				fmt.Errorf("config: model %q: slots must be >= 1", role))
 		}
 
 		// Validate and normalize think_mode (strict — user config fails loud
@@ -631,7 +654,8 @@ func (cfg *Config) validate() error {
 		if m.ThinkMode != "" {
 			mode, err := provider.ParseThinkModeStrict(m.ThinkMode)
 			if err != nil {
-				return fmt.Errorf("config: model %q: %w", role, err)
+				return diagWrap(CodeThinkInvalid, SubjectRole, role,
+					fmt.Errorf("config: model %q: %w", role, err))
 			}
 			m.ThinkMode = mode.String()
 			cfg.Models[role] = m
@@ -641,30 +665,36 @@ func (cfg *Config) validate() error {
 		// Tags-only overrides (no think_mode) are allowed.
 		if tt := m.ThinkTags; tt != nil {
 			if tt.Open == "" || tt.Close == "" {
-				return fmt.Errorf("config: model %q: think_tags requires both open and close", role)
+				return diagWrap(CodeThinkInvalid, SubjectRole, role,
+					fmt.Errorf("config: model %q: think_tags requires both open and close", role))
 			}
 			if tt.Open == tt.Close {
-				return fmt.Errorf("config: model %q: think_tags open and close must differ", role)
+				return diagWrap(CodeThinkInvalid, SubjectRole, role,
+					fmt.Errorf("config: model %q: think_tags open and close must differ", role))
 			}
 			// The streaming think parser only enters tag matching on a '<'
 			// byte; any other leading byte validates but silently never
 			// matches, so reject it here instead.
 			if tt.Open[0] != '<' || tt.Close[0] != '<' {
-				return fmt.Errorf("config: model %q: think_tags open and close must start with '<' (streaming parser constraint)", role)
+				return diagWrap(CodeThinkInvalid, SubjectRole, role,
+					fmt.Errorf("config: model %q: think_tags open and close must start with '<' (streaming parser constraint)", role))
 			}
 		}
 
 		// Validate fallbacks.
 		for _, fb := range m.Fallbacks {
 			if fb == role {
-				return fmt.Errorf("config: model %q: lists itself as a fallback", role)
+				return diagWrap(CodeModelInvalid, SubjectRole, role,
+					fmt.Errorf("config: model %q: lists itself as a fallback", role))
 			}
 			fbModel, ok := cfg.Models[fb]
 			if !ok {
-				return fmt.Errorf("config: model %q: fallback %q references unknown role", role, fb)
+				return diagWrap(CodeModelInvalid, SubjectRole, role,
+					fmt.Errorf("config: model %q: fallback %q references unknown role", role, fb))
 			}
 			if !typeCompatible(m.Type, fbModel.Type) {
-				return fmt.Errorf("config: model %q: fallback %q has incompatible type", role, fb)
+				return diagWrap(CodeModelInvalid, SubjectRole, role,
+					fmt.Errorf("config: model %q: fallback %q has incompatible type", role, fb))
 			}
 		}
 	}
@@ -678,7 +708,8 @@ func (cfg *Config) validate() error {
 	for _, key := range defaultKeys {
 		role := cfg.Defaults[key]
 		if _, ok := cfg.Models[role]; !ok {
-			return fmt.Errorf("config: default %q references unknown role %q", key, role)
+			return diagWrap(CodeDefaultsInvalid, SubjectUseCase, key,
+				fmt.Errorf("config: default %q references unknown role %q", key, role))
 		}
 	}
 
@@ -706,7 +737,8 @@ func (cfg *Config) detectCycle(startRole string) error {
 	var walk func(role string) error
 	walk = func(role string) error {
 		if onPath[role] {
-			return fmt.Errorf("config: model %q: circular fallback chain", startRole)
+			return diagWrap(CodeModelInvalid, SubjectRole, startRole,
+				fmt.Errorf("config: model %q: circular fallback chain", startRole))
 		}
 		m, ok := cfg.Models[role]
 		if !ok {
