@@ -35,7 +35,7 @@ var syncDir = syncDirectory
 func writeSiblingTemp(path string, data []byte) (tmp string, err error) {
 	f, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".tmp-*")
 	if err != nil {
-		return "", fmt.Errorf("config: create temp for %q: %w", path, err)
+		return "", diagWrap(CodeIO, SubjectNone, "", fmt.Errorf("config: create temp for %q: %w", path, err))
 	}
 	tmp = f.Name()
 	defer func() {
@@ -45,16 +45,16 @@ func writeSiblingTemp(path string, data []byte) (tmp string, err error) {
 		}
 	}()
 	if err = f.Chmod(0o600); err != nil {
-		return "", fmt.Errorf("config: chmod %q: %w", tmp, err)
+		return "", diagWrap(CodeIO, SubjectNone, "", fmt.Errorf("config: chmod %q: %w", tmp, err))
 	}
 	if _, err = f.Write(data); err != nil {
-		return "", fmt.Errorf("config: write %q: %w", tmp, err)
+		return "", diagWrap(CodeIO, SubjectNone, "", fmt.Errorf("config: write %q: %w", tmp, err))
 	}
 	if err = f.Sync(); err != nil {
-		return "", fmt.Errorf("config: sync %q: %w", tmp, err)
+		return "", diagWrap(CodeIO, SubjectNone, "", fmt.Errorf("config: sync %q: %w", tmp, err))
 	}
 	if err = f.Close(); err != nil {
-		return "", fmt.Errorf("config: close %q: %w", tmp, err)
+		return "", diagWrap(CodeIO, SubjectNone, "", fmt.Errorf("config: close %q: %w", tmp, err))
 	}
 	return tmp, nil
 }
@@ -79,10 +79,11 @@ func publishReplace(path string, data []byte, expectedRevision string) error {
 	}
 	if err := os.Rename(tmp, path); err != nil {
 		_ = os.Remove(tmp)
-		return fmt.Errorf("config: rename %q: %w", path, err)
+		return diagWrap(CodeIO, SubjectNone, "", fmt.Errorf("config: rename %q: %w", path, err))
 	}
 	if err := syncDir(filepath.Dir(path)); err != nil {
-		return fmt.Errorf("%w: %s: dir sync: %v", ErrDurabilityUncertain, path, err)
+		return diagWrap(CodeDurabilityUncertain, SubjectNone, "",
+			fmt.Errorf("%w: %s: dir sync: %v", ErrDurabilityUncertain, path, err))
 	}
 	return nil
 }
@@ -190,11 +191,12 @@ func (d *Document) SaveReplaceAs(path, expectedRevision string, src OriginSource
 func readExpectedRevision(path, expectedRevision string) ([]byte, error) {
 	cur, err := os.ReadFile(path)
 	if err != nil {
-		return nil, fmt.Errorf("config: save replace %q: %w", path, err)
+		return nil, diagWrap(CodeIO, SubjectNone, "", fmt.Errorf("config: save replace %q: %w", path, err))
 	}
 	sum := sha256.Sum256(cur)
 	if hex.EncodeToString(sum[:]) != expectedRevision {
-		return nil, fmt.Errorf("config: save replace %q: %w", path, ErrRevisionConflict)
+		return nil, diagWrap(CodeRevisionConflict, SubjectNone, "",
+			fmt.Errorf("config: save replace %q: %w", path, ErrRevisionConflict))
 	}
 	return cur, nil
 }
@@ -370,11 +372,16 @@ func publishNew(path string, data []byte) error {
 	}
 	if err := os.Link(tmp, path); err != nil {
 		_ = os.Remove(tmp)
-		return fmt.Errorf("config: create %q: %w", path, err)
+		werr := fmt.Errorf("config: create %q: %w", path, err)
+		if errors.Is(err, os.ErrExist) {
+			return diagWrap(CodeTargetExists, SubjectNone, "", werr)
+		}
+		return diagWrap(CodeIO, SubjectNone, "", werr)
 	}
 	_ = os.Remove(tmp)
 	if err := syncDir(filepath.Dir(path)); err != nil {
-		return fmt.Errorf("%w: %s: dir sync: %v", ErrDurabilityUncertain, path, err)
+		return diagWrap(CodeDurabilityUncertain, SubjectNone, "",
+			fmt.Errorf("%w: %s: dir sync: %v", ErrDurabilityUncertain, path, err))
 	}
 	return nil
 }

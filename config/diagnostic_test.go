@@ -3,6 +3,8 @@ package config
 import (
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -100,5 +102,57 @@ func TestDiagnosticOfPrecedence(t *testing.T) {
 	d, ok = DiagnosticOf(mixed)
 	if !ok || d.Code != CodeTargetExists {
 		t.Fatalf("mixed chain: got %+v ok=%v", d, ok)
+	}
+}
+
+func TestDiagnosticSitesLoadAndSave(t *testing.T) {
+	// discovery: GO_LLM_CONFIG set but empty
+	t.Setenv("GO_LLM_CONFIG", "")
+	_, err := DefaultDocument()
+	assertDiag(t, err, CodeConfigDiscoveryInvalid, SubjectNone, "")
+
+	// io: DefaultDocument read failure (env points at a missing file)
+	t.Setenv("GO_LLM_CONFIG", filepath.Join(t.TempDir(), "missing.json"))
+	_, err = DefaultDocument()
+	assertDiag(t, err, CodeIO, SubjectNone, "")
+
+	// parse failure
+	_, err = NewDocumentFromBytes([]byte("{nope"), Origin{Source: OriginExplicit})
+	assertDiag(t, err, CodeParseError, SubjectNone, "")
+
+	// io: LoadDocument on a missing path
+	missing := filepath.Join(t.TempDir(), "absent.json")
+	_, err = LoadDocument(missing)
+	assertDiag(t, err, CodeIO, SubjectNone, "")
+	// Legacy Load is a Firn Phase-2 entry point too; it gets the same codes.
+	_, err = Load(missing)
+	assertDiag(t, err, CodeIO, SubjectNone, "")
+	bad := filepath.Join(t.TempDir(), "bad.json")
+	if err := os.WriteFile(bad, []byte("{nope"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err = Load(bad)
+	assertDiag(t, err, CodeParseError, SubjectNone, "")
+
+	// target_exists: SaveNew onto an existing file
+	d := loadTestDoc(t, rawWithUnknown)
+	p := filepath.Join(t.TempDir(), "m.json")
+	if err := d.SaveNew(p); err != nil {
+		t.Fatal(err)
+	}
+	assertDiag(t, d.SaveNew(p), CodeTargetExists, SubjectNone, "")
+
+	// revision_conflict via wrapped sentinel at source
+	assertDiag(t, d.SaveReplace(p, "deadbeef"), CodeRevisionConflict, SubjectNone, "")
+}
+
+func assertDiag(t *testing.T, err error, code ErrorCode, kind SubjectKind, subject string) {
+	t.Helper()
+	if err == nil {
+		t.Fatalf("want error with code %s, got nil", code)
+	}
+	d, ok := DiagnosticOf(err)
+	if !ok || d.Code != code || d.SubjectKind != kind || d.Subject != subject {
+		t.Fatalf("err=%v: got %+v ok=%v want {%s %s %q}", err, d, ok, code, kind, subject)
 	}
 }

@@ -325,7 +325,8 @@ func Default() (*Config, error) {
 func discoverConfigPath() (string, OriginSource, error) {
 	if envPath, ok := os.LookupEnv("GO_LLM_CONFIG"); ok {
 		if envPath == "" {
-			return "", "", fmt.Errorf("config: GO_LLM_CONFIG is set but empty")
+			return "", "", diagWrap(CodeConfigDiscoveryInvalid, SubjectNone, "",
+				fmt.Errorf("config: GO_LLM_CONFIG is set but empty"))
 		}
 		return envPath, OriginEnvOverride, nil
 	}
@@ -366,12 +367,14 @@ func discoverConfigPath() (string, OriginSource, error) {
 func Load(path string) (*Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return nil, fmt.Errorf("config: read %q: %w", path, err)
+		return nil, diagWrap(CodeIO, SubjectNone, "",
+			fmt.Errorf("config: read %q: %w", path, err))
 	}
 
 	var cfg Config
 	if err := json.Unmarshal(data, &cfg); err != nil {
-		return nil, fmt.Errorf("config: parse %q: %w", path, err)
+		return nil, diagWrap(CodeParseError, SubjectNone, "",
+			fmt.Errorf("config: parse %q: %w", path, err))
 	}
 
 	if err := cfg.finalize(); err != nil {

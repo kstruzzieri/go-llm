@@ -58,7 +58,7 @@ type Document struct {
 func LoadDocument(path string) (*Document, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return nil, fmt.Errorf("config: read %q: %w", path, err)
+		return nil, diagWrap(CodeIO, SubjectNone, "", fmt.Errorf("config: read %q: %w", path, err))
 	}
 	return newDocument(data, Origin{Source: OriginExplicit, Path: path})
 }
@@ -72,7 +72,7 @@ func DefaultDocument() (*Document, error) {
 	}
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return nil, fmt.Errorf("config: read %q: %w", path, err)
+		return nil, diagWrap(CodeIO, SubjectNone, "", fmt.Errorf("config: read %q: %w", path, err))
 	}
 	return newDocument(data, Origin{Source: src, Path: path})
 }
@@ -89,11 +89,11 @@ func NewDocumentFromBytes(data []byte, origin Origin) (*Document, error) {
 func newDocument(data []byte, origin Origin) (*Document, error) {
 	var authored Config
 	if err := json.Unmarshal(data, &authored); err != nil {
-		return nil, fmt.Errorf("config: parse %q: %w", origin.Path, err)
+		return nil, diagWrap(CodeParseError, SubjectNone, "", fmt.Errorf("config: parse %q: %w", origin.Path, err))
 	}
 	var effective Config
 	if err := json.Unmarshal(data, &effective); err != nil {
-		return nil, fmt.Errorf("config: parse %q: %w", origin.Path, err)
+		return nil, diagWrap(CodeParseError, SubjectNone, "", fmt.Errorf("config: parse %q: %w", origin.Path, err))
 	}
 	if err := effective.finalize(); err != nil {
 		return nil, err

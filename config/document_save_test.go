@@ -128,6 +128,9 @@ func TestSaveReplaceAsDurabilityUncertainCommitsProfileOrigin(t *testing.T) {
 	if !errors.Is(err, ErrDurabilityUncertain) {
 		t.Fatalf("err = %v", err)
 	}
+	// Pins the diagWrap at the dir-sync site: a future outer CodeIO wrap
+	// would shadow CodeDurabilityUncertain without tripping errors.Is above.
+	assertDiag(t, err, CodeDurabilityUncertain, SubjectNone, "")
 	if o := d.Origin(); o.Source != OriginProfile {
 		t.Fatalf("lost profile origin: %+v", o)
 	}
