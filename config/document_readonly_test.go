@@ -164,6 +164,11 @@ func TestReadOnlyGatesExistingMutatorsAndEverySave(t *testing.T) {
 		run  func(*Document) error
 	}{
 		{"BindUseCase", func(d *Document) error { return d.BindUseCase("chat", "agent") }},
+		{"BindUseCase-empty", func(d *Document) error { return d.BindUseCase("", "agent") }},
+		{"SetRoleModel-empty-facts", func(d *Document) error {
+			_, err := d.SetRoleModel("agent", ModelFacts{Type: "dense"}, SetRoleModelOpts{})
+			return err
+		}},
 		{"SetRoleModel", func(d *Document) error {
 			_, err := d.SetRoleModel("agent", facts, SetRoleModelOpts{ConfirmUnknown: true})
 			return err

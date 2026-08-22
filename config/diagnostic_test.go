@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/kstruzzieri/go-llm/provider"
 )
 
 func TestDiagnosticOfWrappedChain(t *testing.T) {
@@ -269,6 +271,28 @@ func TestDiagnosticSitesValidate(t *testing.T) {
 			assertDiag(t, derr, tc.code, tc.kind, tc.subject)
 		})
 	}
+}
+
+func TestDiagnosticSitesMutations(t *testing.T) {
+	d := newTestDoc(t)
+	assertDiag(t, d.BindUseCase("", "agent"), CodeInvalidArgument, SubjectNone, "")
+	assertDiag(t, d.BindUseCase("chat", "ghost"), CodeRoleNotFound, SubjectRole, "ghost")
+	_, err := d.SetRoleModel("agent", ModelFacts{Type: "dense"}, SetRoleModelOpts{})
+	assertDiag(t, err, CodeInvalidArgument, SubjectNone, "")
+	_, err = d.SetRoleModel("ghost", ModelFacts{Key: provider.ModelKey{Provider: "p", Model: "m"}, Type: "dense"}, SetRoleModelOpts{})
+	assertDiag(t, err, CodeRoleNotFound, SubjectRole, "ghost")
+	_, err = d.SetRoleModel("agent", ModelFacts{Key: provider.ModelKey{Provider: "nope", Model: "m"}, Type: "dense"}, SetRoleModelOpts{})
+	assertDiag(t, err, CodeProviderNotFound, SubjectProvider, "nope")
+	_, err = d.SetRoleModel("agent", ModelFacts{Key: provider.ModelKey{Provider: "p", Model: "m"}, Type: "quantum"}, SetRoleModelOpts{})
+	assertDiag(t, err, CodeInvalidArgument, SubjectNone, "")
+	_, err = d.SetRoleModel("agent", ModelFacts{Key: provider.ModelKey{Provider: "p", Model: "m"}, Type: "dense"},
+		SetRoleModelOpts{Capabilities: []string{"not-a-capability"}, ConfirmUnknown: true})
+	assertDiag(t, err, CodeModelInvalid, SubjectRole, "agent")
+	_, err = d.SetRoleModel("agent", ModelFacts{Key: provider.ModelKey{Provider: "p", Model: "m"}, Type: "dense"}, SetRoleModelOpts{}) // no ConfirmUnknown
+	assertDiag(t, err, CodeEligibilityUnknown, SubjectRole, "agent")
+	_, err = d.SetRoleModel("agent", ModelFacts{Key: provider.ModelKey{Provider: "p", Model: "m"}, Type: "dense"},
+		SetRoleModelOpts{Requirements: map[string]provider.Capability{"agent": provider.CapChat}, KnownMask: provider.CapChat})
+	assertDiag(t, err, CodeEligibilityIneligible, SubjectRole, "agent")
 }
 
 // Site config.go's ParseCapsStrict round-trip is unreachable via config input

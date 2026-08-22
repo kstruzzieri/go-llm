@@ -92,20 +92,27 @@ type SetRoleModelResult struct {
 // unchanged.
 func (d *Document) SetRoleModel(role string, facts ModelFacts, opts SetRoleModelOpts) (SetRoleModelResult, error) {
 	var zero SetRoleModelResult
-	if facts.Key.Provider == "" || facts.Key.Model == "" {
-		return zero, fmt.Errorf("config: set role model %q: empty provider or model", role)
-	}
-	if !validModelTypes[facts.Type] {
-		return zero, fmt.Errorf("config: set role model %q: type must be one of dense, moe, embedding", role)
-	}
 	var res SetRoleModelResult
 	err := d.mutate(func(a *Config) error {
+		// Argument checks live inside the closure so the central read-only
+		// gate wins even for invalid requests; order for valid documents is
+		// unchanged (args first, then role, then provider).
+		if facts.Key.Provider == "" || facts.Key.Model == "" {
+			return diagWrap(CodeInvalidArgument, SubjectNone, "",
+				fmt.Errorf("config: set role model %q: empty provider or model", role))
+		}
+		if !validModelTypes[facts.Type] {
+			return diagWrap(CodeInvalidArgument, SubjectNone, "",
+				fmt.Errorf("config: set role model %q: type must be one of dense, moe, embedding", role))
+		}
 		m, ok := a.Models[role]
 		if !ok {
-			return fmt.Errorf("config: set role model: role %q not defined", role)
+			return diagWrap(CodeRoleNotFound, SubjectRole, role,
+				fmt.Errorf("config: set role model: role %q not defined", role))
 		}
 		if _, ok := a.Providers[facts.Key.Provider]; !ok {
-			return fmt.Errorf("config: set role model %q: provider %q not configured", role, facts.Key.Provider)
+			return diagWrap(CodeProviderNotFound, SubjectProvider, facts.Key.Provider,
+				fmt.Errorf("config: set role model %q: provider %q not configured", role, facts.Key.Provider))
 		}
 
 		// Gate inside the lock, against the pre-mutation graph (the chains
@@ -134,7 +141,8 @@ func (d *Document) SetRoleModel(role string, facts ModelFacts, opts SetRoleModel
 			if len(opts.Capabilities) == 0 && len(sibling.Capabilities) > 0 {
 				parsed, perr := provider.ParseCapsStrict(sibling.Capabilities)
 				if perr != nil {
-					return fmt.Errorf("config: set role model %q: capabilities: %w", role, perr)
+					return diagWrap(CodeModelInvalid, SubjectRole, role,
+						fmt.Errorf("config: set role model %q: capabilities: %w", role, perr))
 				}
 				// Siblings cannot disagree here: validate's static selector
 				// check rejects any document holding conflicting capability
@@ -148,7 +156,8 @@ func (d *Document) SetRoleModel(role string, facts ModelFacts, opts SetRoleModel
 		if len(opts.Capabilities) > 0 {
 			parsed, perr := provider.ParseCapsStrict(opts.Capabilities)
 			if perr != nil {
-				return fmt.Errorf("config: set role model %q: capabilities: %w", role, perr)
+				return diagWrap(CodeModelInvalid, SubjectRole, role,
+					fmt.Errorf("config: set role model %q: capabilities: %w", role, perr))
 			}
 			evalCaps, evalKnown = parsed, provider.CanonicalCaps()
 			gateRoles = selectorRoles
@@ -158,12 +167,14 @@ func (d *Document) SetRoleModel(role string, facts ModelFacts, opts SetRoleModel
 		verdict, reasons := aggregateVerdict(a, gateRoles, opts.Requirements, evalCaps, evalKnown)
 		switch verdict {
 		case provider.CapIneligible:
-			return fmt.Errorf("config: set role model %q: target %s/%s ineligible: %s",
-				role, facts.Key.Provider, facts.Key.Model, strings.Join(reasons, ", "))
+			return diagWrap(CodeEligibilityIneligible, SubjectRole, role,
+				fmt.Errorf("config: set role model %q: target %s/%s ineligible: %s",
+					role, facts.Key.Provider, facts.Key.Model, strings.Join(reasons, ", ")))
 		case provider.CapUnknown:
 			if !opts.ConfirmUnknown {
-				return fmt.Errorf("config: set role model %q: target %s/%s eligibility unknown (%s); confirm to proceed",
-					role, facts.Key.Provider, facts.Key.Model, strings.Join(reasons, ", "))
+				return diagWrap(CodeEligibilityUnknown, SubjectRole, role,
+					fmt.Errorf("config: set role model %q: target %s/%s eligibility unknown (%s); confirm to proceed",
+						role, facts.Key.Provider, facts.Key.Model, strings.Join(reasons, ", ")))
 			}
 		}
 
@@ -297,12 +308,16 @@ func sortedStringKeys[V any](m map[string]V) []string {
 // BindUseCase points a use case at an EXISTING role (edits defaults). Role
 // existence is checked explicitly; chain validity rides the finalize gate.
 func (d *Document) BindUseCase(useCase, role string) error {
-	if useCase == "" || role == "" {
-		return fmt.Errorf("config: bind use case: empty use case or role")
-	}
 	return d.mutate(func(a *Config) error {
+		// Inside the closure so the central read-only gate wins for invalid
+		// requests too.
+		if useCase == "" || role == "" {
+			return diagWrap(CodeInvalidArgument, SubjectNone, "",
+				fmt.Errorf("config: bind use case: empty use case or role"))
+		}
 		if _, ok := a.Models[role]; !ok {
-			return fmt.Errorf("config: bind use case %q: role %q not defined", useCase, role)
+			return diagWrap(CodeRoleNotFound, SubjectRole, role,
+				fmt.Errorf("config: bind use case %q: role %q not defined", useCase, role))
 		}
 		if a.Defaults == nil {
 			a.Defaults = map[string]string{}
