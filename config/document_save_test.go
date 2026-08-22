@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"flag"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -572,19 +573,29 @@ func TestSaveConcurrentWithReads(t *testing.T) {
 	<-done
 }
 
-// The known-key sets are reflection-derived — spot-pin them against the real
+// The schema tree is reflection-derived — spot-pin it against the real
 // structs so schema evolution cannot silently drift.
-func TestKnownKeysCoverStructTags(t *testing.T) {
-	mk := knownKeys(reflect.TypeOf(ModelConfig{}))
-	for _, want := range []string{"name", "provider", "type", "parameters", "capabilities", "fallbacks", "options", "think_mode", "think_tags"} {
-		if _, ok := mk[want]; !ok {
-			t.Fatalf("ModelConfig known keys missing %q (check json tags)", want)
+func TestConfigSchemaCoversCurrentSectionsAndEntryTags(t *testing.T) {
+	root := configSchema()
+	for _, section := range []string{"providers", "models", "defaults"} {
+		if child, ok := root.known[section]; !ok || child == nil || !child.isMap() {
+			t.Fatalf("root schema missing map section %q", section)
 		}
 	}
-	pk := knownKeys(reflect.TypeOf(ProviderConfig{}))
-	for _, want := range []string{"base_url", "timeout", "api_key", "api_format", "slot_discovery"} {
-		if _, ok := pk[want]; !ok {
-			t.Fatalf("ProviderConfig known keys missing %q", want)
+	providerNode := root.known["providers"].elem
+	for _, tag := range []string{"base_url", "timeout", "api_key", "api_format", "slot_discovery"} {
+		if _, ok := providerNode.known[tag]; !ok {
+			t.Fatalf("provider schema missing %q", tag)
+		}
+	}
+	modelNode := root.known["models"].elem
+	for _, tag := range []string{
+		"name", "provider", "description", "type", "parameters",
+		"context_window", "dimensions", "capabilities", "fallbacks",
+		"options", "slots", "think_mode", "think_tags",
+	} {
+		if _, ok := modelNode.known[tag]; !ok {
+			t.Fatalf("model schema missing %q", tag)
 		}
 	}
 }
@@ -654,5 +665,71 @@ func TestPublishDurabilityUncertain(t *testing.T) {
 	got, rerr := os.ReadFile(p)
 	if rerr != nil || string(got) != "data\n" {
 		t.Fatal("bytes were not published despite post-rename phase")
+	}
+}
+
+var updateRenderGoldens = flag.Bool("update-render-goldens", false, "rewrite canonical render goldens")
+
+// TestCanonicalRenderCorpus pins the canonical render output byte-for-byte.
+// Goldens were generated from the pre-walker renderer; a diff means the
+// shared schema walker changed rendering — fix the walker, never the golden.
+func TestCanonicalRenderCorpus(t *testing.T) {
+	fixtures := []struct{ name, raw string }{
+		{"document", docTestConfig},
+		{"unknowns", rawWithUnknown},
+	}
+	for _, tc := range fixtures {
+		t.Run(tc.name, func(t *testing.T) {
+			d := loadTestDoc(t, tc.raw)
+			d.mu.Lock()
+			got, err := d.canonicalBytes()
+			d.mu.Unlock()
+			if err != nil {
+				t.Fatal(err)
+			}
+			path := filepath.Join("testdata", "render", tc.name+".json")
+			if *updateRenderGoldens {
+				if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(path, got, 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			want, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(got, want) {
+				t.Fatalf("canonical render differs from %s; inspect, then re-run with -update-render-goldens if intended", path)
+			}
+		})
+	}
+}
+
+func TestRenderCanonicalIdempotentForFreshContent(t *testing.T) {
+	// A config whose entries and nested structs have NO raw counterparts
+	// must render identically when its own output is fed back as raw:
+	// otherwise a freshly added entry costs a spurious publication on the
+	// next no-op save.
+	tp := 0.5
+	authored := &Config{
+		Providers: map[string]ProviderConfig{"p": {BaseURL: "http://h"}},
+		Models: map[string]ModelConfig{"agent": {
+			Name: "m", Type: "dense", Provider: "p",
+			Options: &SamplingOptions{TopP: &tp},
+		}},
+		Defaults: map[string]string{"agent": "agent"},
+	}
+	out1, err := renderCanonical([]byte("{}"), authored)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out2, err := renderCanonical(out1, authored)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(out1, out2) {
+		t.Fatalf("render not idempotent:\nfirst:  %s\nsecond: %s", out1, out2)
 	}
 }

@@ -9,8 +9,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"reflect"
-	"strings"
 	"sync"
 )
 
@@ -225,141 +223,108 @@ func (d *Document) commitSavedLocked(out []byte, path string, src OriginSource) 
 	d.originIdentity = documentPathIdentity(path)
 }
 
-// knownKeys maps a struct's json tag names to their field types (pointers
-// dereferenced). Reflection-derived so the merge can never drift from the
-// schema structs.
-func knownKeys(t reflect.Type) map[string]reflect.Type {
-	out := map[string]reflect.Type{}
-	for i := 0; i < t.NumField(); i++ {
-		f := t.Field(i)
-		tag := strings.Split(f.Tag.Get("json"), ",")[0]
-		if tag == "" || tag == "-" {
-			continue
+// mergeNode merges one authored value onto its raw counterpart under the
+// schema node: struct levels mirror authored known keys (absent = deleted)
+// and preserve unknown raw member/value content; map levels merge entry-by-entry
+// (authored drives existence); leaves take the authored value.
+func mergeNode(raw, auth json.RawMessage, n *schemaNode) (json.RawMessage, error) {
+	switch {
+	case n.isStruct():
+		var authMap map[string]json.RawMessage
+		if err := json.Unmarshal(auth, &authMap); err != nil {
+			return nil, fmt.Errorf("config: merge parse authored object: %w", err)
 		}
-		ft := f.Type
-		for ft.Kind() == reflect.Ptr {
-			ft = ft.Elem()
-		}
-		out[tag] = ft
-	}
-	return out
-}
-
-// mergeableStruct reports whether a known field's type should recurse during
-// the merge. Only plain structs recurse; custom-marshal types (Duration) are
-// leaves — their JSON shape is not their field set.
-func mergeableStruct(ft reflect.Type) bool {
-	return ft.Kind() == reflect.Struct && ft != reflect.TypeOf(Duration{})
-}
-
-// mergeKnownObject merges one authored object onto its raw counterpart:
-// known keys mirror the authored marshal exactly (absent authored key =
-// DELETED), unknown raw keys are preserved verbatim, and known struct-typed
-// fields recurse so nested unknowns (options, think_tags) survive too.
-func mergeKnownObject(raw, auth json.RawMessage, t reflect.Type) (json.RawMessage, error) {
-	var authMap map[string]json.RawMessage
-	if err := json.Unmarshal(auth, &authMap); err != nil {
-		return nil, fmt.Errorf("config: merge parse authored object: %w", err)
-	}
-	rawMap := map[string]json.RawMessage{}
-	if len(raw) > 0 {
-		if err := json.Unmarshal(raw, &rawMap); err != nil {
-			return nil, fmt.Errorf("config: merge parse raw object: %w", err)
-		}
-	}
-	known := knownKeys(t)
-	out := map[string]json.RawMessage{}
-	for k, v := range authMap {
-		if ft, ok := known[k]; ok && mergeableStruct(ft) && len(rawMap[k]) > 0 {
-			merged, err := mergeKnownObject(rawMap[k], v, ft)
-			if err != nil {
-				return nil, err
+		rawMap := map[string]json.RawMessage{}
+		if len(raw) > 0 {
+			if err := json.Unmarshal(raw, &rawMap); err != nil {
+				return nil, fmt.Errorf("config: merge parse raw object: %w", err)
 			}
-			out[k] = merged
-			continue
 		}
-		out[k] = v
-	}
-	for k, v := range rawMap {
-		if _, isKnown := known[k]; !isKnown {
-			out[k] = v // unknown at this level: preserved verbatim
+		out := map[string]json.RawMessage{}
+		for k, v := range authMap {
+			// Known non-leaf children ALWAYS recurse (raw may be empty) so
+			// every level re-encodes key-sorted — render stays idempotent.
+			if child, ok := n.known[k]; ok && child != nil {
+				merged, err := mergeNode(rawMap[k], v, child)
+				if err != nil {
+					return nil, fmt.Errorf("config: merge %q: %w", k, err)
+				}
+				out[k] = merged
+				continue
+			}
+			out[k] = v
 		}
+		// Authored keys are always a subset of known at struct levels (both
+		// derive from the same struct tags), so this raw-unknown preservation
+		// loop can never overwrite an authored value.
+		for k, v := range rawMap {
+			if _, isKnown := n.known[k]; !isKnown {
+				out[k] = v // unknown: preserved (content-wise; re-encoded canonically)
+			}
+		}
+		return json.Marshal(out) // Go maps marshal key-sorted → deterministic
+	case n.isMap():
+		var authEntries map[string]json.RawMessage
+		if err := json.Unmarshal(auth, &authEntries); err != nil {
+			return nil, fmt.Errorf("config: merge parse map: %w", err)
+		}
+		rawEntries := map[string]json.RawMessage{}
+		if len(raw) > 0 {
+			if err := json.Unmarshal(raw, &rawEntries); err != nil {
+				return nil, fmt.Errorf("config: merge parse raw map: %w", err)
+			}
+		}
+		out := map[string]json.RawMessage{}
+		for name, authEntry := range authEntries {
+			// Non-leaf entries ALWAYS recurse (raw may be empty): a fresh
+			// entry re-encodes key-sorted, keeping render idempotent. Leaf
+			// entries (defaults, elem=nil) are authored wholesale.
+			if n.elem != nil {
+				merged, err := mergeNode(rawEntries[name], authEntry, n.elem)
+				if err != nil {
+					return nil, fmt.Errorf("config: merge %q: %w", name, err)
+				}
+				out[name] = merged
+				continue
+			}
+			out[name] = authEntry
+		}
+		return json.Marshal(out)
+	default:
+		return auth, nil
 	}
-	return json.Marshal(out) // Go maps marshal key-sorted → deterministic
 }
 
-// mergeEntryMap re-merges a providers/models section entry-by-entry: authored
-// entries drive existence (deleted entry = deleted), and each surviving entry
-// merges against its raw counterpart with the element type so nested unknowns
-// survive.
-func mergeEntryMap(top, rawTop map[string]json.RawMessage, section string, elem reflect.Type) error {
-	authSection, ok := top[section]
-	if !ok {
-		return nil
-	}
-	var authEntries map[string]json.RawMessage
-	if err := json.Unmarshal(authSection, &authEntries); err != nil {
-		return fmt.Errorf("config: merge parse %s: %w", section, err)
-	}
-	rawEntries := map[string]json.RawMessage{}
-	if len(rawTop[section]) > 0 {
-		if err := json.Unmarshal(rawTop[section], &rawEntries); err != nil {
-			return fmt.Errorf("config: merge parse raw %s: %w", section, err)
-		}
-	}
-	out := map[string]json.RawMessage{}
-	for name, authEntry := range authEntries {
-		merged, err := mergeKnownObject(rawEntries[name], authEntry, elem)
-		if err != nil {
-			return err
-		}
-		out[name] = merged
-	}
-	buf, err := json.Marshal(out)
-	if err != nil {
-		return err
-	}
-	top[section] = buf
-	return nil
-}
-
-// canonicalBytes renders the document for disk: the AUTHORED config merged
-// onto the retained raw tree. Known schema fields mirror the authored struct
+// renderCanonical merges authored onto raw under the shared schema and
+// emits the canonical form: MarshalIndent(2) + trailing newline, so repeated
+// calls are byte-identical. Known schema fields mirror the authored struct
 // (cleared = deleted); unknown fields survive at top, entry, and nested
-// levels; ${ENV} api_key literals never expand. Output is MarshalIndent(2) +
-// trailing newline, so repeated calls are byte-identical. Callers hold d.mu.
-func (d *Document) canonicalBytes() ([]byte, error) {
-	var rawTop map[string]json.RawMessage
-	if err := json.Unmarshal(d.rawBytes, &rawTop); err != nil {
-		return nil, fmt.Errorf("config: reparse raw tree: %w", err)
-	}
-	authBytes, err := json.Marshal(d.authored)
+// levels; ${ENV} api_key literals never expand. rawBytes may be []byte("{}")
+// for from-scratch documents.
+func renderCanonical(rawBytes []byte, authored *Config) ([]byte, error) {
+	authBytes, err := json.Marshal(authored)
 	if err != nil {
-		return nil, err
+		return nil, diagWrap(CodeRenderError, SubjectNone, "", fmt.Errorf("config: render marshal: %w", err))
 	}
-	merged, err := mergeKnownObject(d.rawBytes, authBytes, reflect.TypeOf(Config{}))
+	merged, err := mergeNode(rawBytes, authBytes, configSchema())
 	if err != nil {
-		return nil, err
+		return nil, diagWrap(CodeRenderError, SubjectNone, "", err)
 	}
-	// mergeKnownObject treated the three known map sections as leaves
-	// (authored wholesale); re-merge providers/models entry-by-entry with
-	// their element types so per-entry unknown fields survive. Defaults is
-	// map[string]string — no unknowns inside, authored wholesale is right.
 	var top map[string]json.RawMessage
 	if err := json.Unmarshal(merged, &top); err != nil {
-		return nil, err
-	}
-	if err := mergeEntryMap(top, rawTop, "providers", reflect.TypeOf(ProviderConfig{})); err != nil {
-		return nil, err
-	}
-	if err := mergeEntryMap(top, rawTop, "models", reflect.TypeOf(ModelConfig{})); err != nil {
-		return nil, err
+		return nil, diagWrap(CodeRenderError, SubjectNone, "", err)
 	}
 	buf, err := json.MarshalIndent(top, "", "  ")
 	if err != nil {
-		return nil, err
+		return nil, diagWrap(CodeRenderError, SubjectNone, "", err)
 	}
 	return append(buf, '\n'), nil
+}
+
+// canonicalBytes renders the document for disk: the AUTHORED config merged
+// onto the retained raw tree via the shared schema walker. Callers hold d.mu.
+func (d *Document) canonicalBytes() ([]byte, error) {
+	return renderCanonical(d.rawBytes, d.authored)
 }
 
 // publishNew creates path with data only if it does not exist: the synced

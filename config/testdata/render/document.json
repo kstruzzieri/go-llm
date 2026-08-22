@@ -1,0 +1,21 @@
+{
+  "defaults": {
+    "agent": "agent",
+    "chat": "agent"
+  },
+  "models": {
+    "agent": {
+      "name": "m1",
+      "provider": "local",
+      "type": "dense"
+    }
+  },
+  "providers": {
+    "local": {
+      "api_format": "openai-compat",
+      "api_key": "${DOC_TEST_KEY}",
+      "base_url": "http://localhost:8080",
+      "timeout": "0s"
+    }
+  }
+}
