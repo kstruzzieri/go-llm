@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strings"
 	"time"
@@ -84,9 +85,9 @@ type ModelConfig struct {
 	Options       *SamplingOptions `json:"options,omitempty"`
 	// Slots optionally pins backend parallel-slot capacity for this
 	// model, overriding runtime discovery (#400). Requires the model's
-	// provider to opt into slot_discovery; validated at bootstrap. Must
-	// be >= 1 when present (0 = unset; JSON cannot distinguish an
-	// explicit 0 from absent).
+	// provider to opt into slot_discovery; validated at load and
+	// rechecked at bootstrap. Must be >= 1 when present (0 = unset;
+	// JSON cannot distinguish an explicit 0 from absent).
 	Slots int `json:"slots,omitempty"`
 	// ThinkMode optionally overrides the catalog/inferred think mode for
 	// this model: "none", "always", "toggle", or "auto" (lowercased at
@@ -549,6 +550,19 @@ func (cfg *Config) validate() error {
 			return diagWrap(CodeProviderFormatInvalid, SubjectProvider, key,
 				fmt.Errorf("config: provider %q: invalid api_format %q", key, p.APIFormat))
 		}
+		// Slot policy (410 spec s1): slot discovery is an openai-compat
+		// capability. Bootstrap rechecks for programmatic Configs that
+		// bypass Load.
+		if p.SlotDiscovery {
+			format := p.APIFormat
+			if format == "" {
+				format = "ollama"
+			}
+			if format != "openai-compat" {
+				return diagWrap(CodeSlotPolicyInvalid, SubjectProvider, key,
+					fmt.Errorf("config: provider %q: slot_discovery requires api_format \"openai-compat\", got %q", key, format))
+			}
+		}
 	}
 
 	// Validate models (sorted for deterministic errors).
@@ -647,6 +661,14 @@ func (cfg *Config) validate() error {
 			return diagWrap(CodeModelInvalid, SubjectRole, role,
 				fmt.Errorf("config: model %q: slots must be >= 1", role))
 		}
+		// Slot policy (410 spec s1): a slots pin is only meaningful on a
+		// slot-discovery-governed provider.
+		if m.Slots > 0 {
+			if !cfg.Providers[providerKey].SlotDiscovery {
+				return diagWrap(CodeSlotPolicyInvalid, SubjectRole, role,
+					fmt.Errorf("config: model %q: slots override requires slot_discovery: true on provider %q", role, providerKey))
+			}
+		}
 
 		// Validate and normalize think_mode (strict — user config fails loud
 		// on unknown values, unlike the lenient embedded-catalog parser).
@@ -713,6 +735,12 @@ func (cfg *Config) validate() error {
 		}
 	}
 
+	// Enforce per-selector conflict invariants. Runs after the model loop
+	// so think_mode is already normalized.
+	if err := cfg.validateSelectorConflicts(); err != nil {
+		return err
+	}
+
 	// Detect circular fallback chains.
 	// Sort roles for deterministic error reporting.
 	roles := make([]string, 0, len(cfg.Models))
@@ -726,6 +754,87 @@ func (cfg *Config) validate() error {
 		}
 	}
 
+	return nil
+}
+
+// validateSelectorConflicts enforces the five per-selector conflict
+// families statically (spec §1): roles sharing one effective
+// provider/model selector cannot disagree on non-zero context_window,
+// non-nil options, explicit capabilities, non-empty think_mode, non-nil
+// think_tags, or non-zero slots. Missing values mean "no override".
+// Deterministic: sorted roles, first conflicting sorted pair errors.
+// Bootstrap keeps its copies as defense in depth for programmatic Configs.
+func (cfg *Config) validateSelectorConflicts() error {
+	roles := make([]string, 0, len(cfg.Models))
+	for role := range cfg.Models {
+		roles = append(roles, role)
+	}
+	sort.Strings(roles)
+	groups := map[string][]string{} // selector string -> sorted roles
+	selectorOrder := make([]string, 0)
+	keyOf := func(m ModelConfig) string {
+		p := m.Provider
+		if p == "" {
+			p = "ollama"
+		}
+		return p + "/" + m.Name
+	}
+	for _, role := range roles {
+		k := keyOf(cfg.Models[role])
+		if _, seen := groups[k]; !seen {
+			selectorOrder = append(selectorOrder, k)
+		}
+		groups[k] = append(groups[k], role)
+	}
+	// Preserve first encounter while walking sorted roles. Sorting selector
+	// text here would report a later role pair when two selectors conflict.
+	for _, k := range selectorOrder {
+		group := groups[k]
+		for i := 0; i < len(group); i++ {
+			for j := i + 1; j < len(group); j++ {
+				a, b := cfg.Models[group[i]], cfg.Models[group[j]]
+				if err := selectorPairConflict(k, group[i], group[j], a, b); err != nil {
+					return err
+				}
+			}
+		}
+	}
+	return nil
+}
+
+// selectorPairConflict mirrors the bootstrap defense-in-depth comparison
+// list; maintain them together.
+func selectorPairConflict(sel, ra, rb string, a, b ModelConfig) error {
+	conflict := func(field string) error {
+		return diagWrap(CodeSelectorConflict, SubjectRole, ra,
+			fmt.Errorf("config: conflicting %s for %s: models %q and %q", field, sel, ra, rb))
+	}
+	if a.ContextWindow != 0 && b.ContextWindow != 0 && a.ContextWindow != b.ContextWindow {
+		return conflict("context_window")
+	}
+	if a.Options != nil && b.Options != nil && !reflect.DeepEqual(a.Options, b.Options) {
+		return diagWrap(CodeSelectorConflict, SubjectRole, ra,
+			fmt.Errorf("config: conflicting sampling defaults for %s: models %q and %q; defaults are per provider/model, so use identical options or distinct provider keys", sel, ra, rb))
+	}
+	if len(a.Capabilities) > 0 && len(b.Capabilities) > 0 {
+		// Parse errors are unreachable here — the model loop already
+		// rejected invalid capabilities; skipping (not failing) keeps this
+		// check advisory-shaped.
+		ca, aerr := provider.ParseCapsStrict(a.Capabilities)
+		cb, berr := provider.ParseCapsStrict(b.Capabilities)
+		if aerr == nil && berr == nil && ca != cb {
+			return conflict("capability overrides")
+		}
+	}
+	if a.ThinkMode != "" && b.ThinkMode != "" && a.ThinkMode != b.ThinkMode {
+		return conflict("think_mode")
+	}
+	if a.ThinkTags != nil && b.ThinkTags != nil && *a.ThinkTags != *b.ThinkTags {
+		return conflict("think_tags")
+	}
+	if a.Slots != 0 && b.Slots != 0 && a.Slots != b.Slots {
+		return conflict("slots")
+	}
 	return nil
 }
 

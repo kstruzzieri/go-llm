@@ -1163,3 +1163,93 @@ func TestValidateRejectsNegativeCapacity(t *testing.T) {
 		})
 	}
 }
+
+// --- (410 spec s1): slot policies + selector conflicts in validate ---
+
+func TestValidateSlotPolicies(t *testing.T) {
+	base := validBaseConfigMap()
+	// slot_discovery without openai-compat (implicit ollama format)
+	base["providers"].(map[string]any)["p"].(map[string]any)["slot_discovery"] = true
+	raw, _ := json.Marshal(base)
+	_, err := NewDocumentFromBytes(raw, Origin{Source: OriginExplicit})
+	assertDiag(t, err, CodeSlotPolicyInvalid, SubjectProvider, "p")
+
+	base = validBaseConfigMap()
+	// slots pin without governed provider
+	base["models"].(map[string]any)["agent"].(map[string]any)["slots"] = 2
+	raw, _ = json.Marshal(base)
+	_, err = NewDocumentFromBytes(raw, Origin{Source: OriginExplicit})
+	assertDiag(t, err, CodeSlotPolicyInvalid, SubjectRole, "agent")
+}
+
+func TestValidateSelectorConflicts(t *testing.T) {
+	// Each case creates two roles sharing one selector. Think is one design
+	// family with separate mode/tag branches, so the five families produce
+	// six branch cases here.
+	families := []struct {
+		name   string
+		mutate func(base, a, b map[string]any)
+	}{
+		{"context_window", func(_ map[string]any, a, b map[string]any) { a["context_window"] = 1024; b["context_window"] = 2048 }},
+		{"options", func(_ map[string]any, a, b map[string]any) {
+			a["options"] = map[string]any{"temperature": 0.1}
+			b["options"] = map[string]any{"temperature": 0.9}
+		}},
+		{"capabilities", func(_ map[string]any, a, b map[string]any) {
+			a["capabilities"] = []string{"chat"}
+			b["capabilities"] = []string{"chat", "stream"}
+		}},
+		{"think_mode", func(_ map[string]any, a, b map[string]any) { a["think_mode"] = "always"; b["think_mode"] = "none" }},
+		{"think_tags", func(_ map[string]any, a, b map[string]any) {
+			a["think_tags"] = map[string]any{"open": "<a>", "close": "<b>"}
+			b["think_tags"] = map[string]any{"open": "<c>", "close": "<d>"}
+		}},
+		{"slots", func(base, a, b map[string]any) {
+			p := base["providers"].(map[string]any)["p"].(map[string]any)
+			p["api_format"], p["slot_discovery"] = "openai-compat", true
+			a["slots"], b["slots"] = 1, 2
+		}},
+	}
+	for _, f := range families {
+		t.Run(f.name, func(t *testing.T) {
+			base := validBaseConfigMap()
+			models := base["models"].(map[string]any)
+			models["alpha"] = map[string]any{"name": "m", "type": "dense", "provider": "p"}
+			models["beta"] = map[string]any{"name": "m", "type": "dense", "provider": "p"}
+			f.mutate(base, models["alpha"].(map[string]any), models["beta"].(map[string]any))
+			base["defaults"].(map[string]any)["agent"] = "alpha"
+			raw, _ := json.Marshal(base)
+			_, err := NewDocumentFromBytes(raw, Origin{Source: OriginExplicit})
+			// subject = first role of the conflicting sorted pair
+			assertDiag(t, err, CodeSelectorConflict, SubjectRole, "alpha")
+		})
+	}
+}
+
+func TestValidateSelectorNoFalseConflict(t *testing.T) {
+	// Missing values are "no override", never a conflict.
+	base := validBaseConfigMap()
+	models := base["models"].(map[string]any)
+	models["alpha"] = map[string]any{"name": "m", "type": "dense", "provider": "p", "context_window": 1024}
+	models["beta"] = map[string]any{"name": "m", "type": "dense", "provider": "p"} // no override
+	base["defaults"].(map[string]any)["agent"] = "alpha"
+	raw, _ := json.Marshal(base)
+	if _, err := NewDocumentFromBytes(raw, Origin{Source: OriginExplicit}); err != nil {
+		t.Fatalf("no-override sibling must not conflict: %v", err)
+	}
+}
+
+func TestValidateSelectorConflictUsesFirstSortedRolePair(t *testing.T) {
+	// Selector p/z is encountered first by sorted role (alpha), while p/a
+	// sorts first by selector text. The contract is role-pair order.
+	base := validBaseConfigMap()
+	models := base["models"].(map[string]any)
+	models["alpha"] = map[string]any{"name": "z", "type": "dense", "provider": "p", "context_window": 1024}
+	models["beta"] = map[string]any{"name": "a", "type": "dense", "provider": "p", "context_window": 1024}
+	models["gamma"] = map[string]any{"name": "a", "type": "dense", "provider": "p", "context_window": 2048}
+	models["delta"] = map[string]any{"name": "z", "type": "dense", "provider": "p", "context_window": 2048}
+	base["defaults"].(map[string]any)["agent"] = "alpha"
+	raw, _ := json.Marshal(base)
+	_, err := NewDocumentFromBytes(raw, Origin{Source: OriginExplicit})
+	assertDiag(t, err, CodeSelectorConflict, SubjectRole, "alpha")
+}
