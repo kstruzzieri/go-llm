@@ -284,6 +284,11 @@ func saveOutcomeFromErr(err error, revision string, id ID) (SaveOutcome, error) 
 	case errors.Is(err, os.ErrExist), errors.Is(err, config.ErrRevisionConflict), errors.Is(err, os.ErrNotExist):
 		return SaveOutcome{}, codeErr(CodeConflict, id, err)
 	default:
+		// A read-only (duplicate_keys) refusal is a CONTENT failure, not a
+		// filesystem one — CodeIO stays filesystem-only (spec §8).
+		if d, ok := config.DiagnosticOf(err); ok && d.Code == config.CodeDuplicateKeys {
+			return SaveOutcome{}, codeErr(CodeConfigInvalid, id, err)
+		}
 		return SaveOutcome{}, codeErr(CodeIO, id, err)
 	}
 }
@@ -341,6 +346,10 @@ func (s *Store) Export(ctx context.Context, id ID, destPath string) error {
 		case errors.Is(err, config.ErrDurabilityUncertain):
 			return nil // bytes are live; export has no outcome channel and the file is a copy
 		default:
+			// Read-only refusal = content failure, mirroring saveOutcomeFromErr.
+			if d, ok := config.DiagnosticOf(err); ok && d.Code == config.CodeDuplicateKeys {
+				return codeErr(CodeConfigInvalid, id, err)
+			}
 			return codeErr(CodeIO, id, err)
 		}
 	}

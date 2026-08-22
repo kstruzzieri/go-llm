@@ -137,6 +137,22 @@ func TestRemoveProvider(t *testing.T) {
 	assertDiag(t, d.RemoveProvider("q"), CodeProviderInUse, SubjectRole, "agent")
 }
 
+// Removing the last provider of an unreferenced (zero-model) config fails at
+// the FINALIZE stage (provider_required), and that failure is transactional:
+// the draft renders identically before and after.
+func TestRemoveProviderFinalizeFailureIsTransactional(t *testing.T) {
+	d, err := ParseDocument([]byte(`{"providers":{"p":{"base_url":"http://h"}}}`),
+		Origin{Source: OriginExplicit}, DocumentOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	before := renderToString(t, d)
+	assertDiag(t, d.RemoveProvider("p"), CodeProviderRequired, SubjectNone, "")
+	if renderToString(t, d) != before {
+		t.Fatal("failed RemoveProvider changed the draft")
+	}
+}
+
 func TestAuthoredProviderIsAPIKeyFreeAuthoredViewAndWorksReadOnly(t *testing.T) {
 	d := newTestDoc(t)
 	spec, err := d.AuthoredProvider("p")
@@ -163,7 +179,14 @@ func TestAuthoredProviderIsAPIKeyFreeAuthoredViewAndWorksReadOnly(t *testing.T) 
 func TestSetClearProviderAPIKey(t *testing.T) {
 	t.Setenv("GO_LLM_TEST_UNSET_VAR", "")
 	t.Setenv("KEY_REF", "expanded-test-value")
-	d := newTestDoc(t)
+	// Seed an unknown member on the provider entry: key mutations must
+	// carry authored members they do not understand.
+	raw := strings.Replace(rawValid, `"base_url": "http://localhost:1234"`,
+		`"base_url":"http://localhost:1234","x_vendor":{"a":1}`, 1)
+	d, perr := parseRaw(t, raw)
+	if perr != nil {
+		t.Fatal(perr)
+	}
 	assertDiag(t, d.SetProviderAPIKey("p", ""), CodeInvalidArgument, SubjectNone, "")
 	assertDiag(t, d.SetProviderAPIKey("ghost", "value"),
 		CodeProviderNotFound, SubjectProvider, "ghost")
@@ -173,6 +196,9 @@ func TestSetClearProviderAPIKey(t *testing.T) {
 	}
 	if !strings.Contains(renderToString(t, d), `"api_key": "sk-test-only"`) {
 		t.Fatal("raw key did not enter authored render")
+	}
+	if !strings.Contains(renderToString(t, d), `"x_vendor"`) {
+		t.Fatal("SetProviderAPIKey lost unknown authored member")
 	}
 
 	before := renderToString(t, d)
@@ -207,6 +233,9 @@ func TestSetClearProviderAPIKey(t *testing.T) {
 	}
 	if strings.Contains(renderToString(t, d), `"api_key"`) {
 		t.Fatal("cleared key survived render")
+	}
+	if !strings.Contains(renderToString(t, d), `"x_vendor"`) {
+		t.Fatal("ClearProviderAPIKey lost unknown authored member")
 	}
 	if err := d.ClearProviderAPIKey("p"); err != nil {
 		t.Fatalf("clearing a keyless provider must succeed: %v", err)

@@ -316,6 +316,48 @@ func TestLoadConfigFailureClassifiedConfigInvalid(t *testing.T) {
 	}
 }
 
+// A collision-marked document refuses SaveAs/Export as CONTENT failures:
+// config_invalid with the duplicate_keys diagnostic reachable through the
+// profiles wrapper. CodeIO stays filesystem-only; nothing is persisted.
+func TestReadOnlyRefusalClassifiedConfigInvalid(t *testing.T) {
+	root := t.TempDir()
+	seedUserProfile(t, root, "dup", `{"providers":{"local":{"base_url":"http://localhost:1"}},
+	  "models":{"agent":{"name":"m1","provider":"local","type":"dense"},
+	            "agent":{"name":"m2","provider":"local","type":"dense"}},
+	  "defaults":{"agent":"agent"}}`)
+	s := NewStore(root)
+	doc, err := s.Load(context.Background(), ID("user/dup"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	out, err := s.SaveAs(context.Background(), "user/copy", doc, "")
+	if CodeOf(err) != CodeConfigInvalid {
+		t.Fatalf("SaveAs code = %q (%v), want config_invalid", CodeOf(err), err)
+	}
+	if d, ok := config.DiagnosticOf(err); !ok || d.Code != config.CodeDuplicateKeys {
+		t.Fatalf("SaveAs diagnostic = %+v ok=%v, want duplicate_keys", d, ok)
+	}
+	if out.Persisted || out.Warning != "" {
+		t.Fatalf("refusal must not report persistence: %+v", out)
+	}
+	if _, serr := os.Lstat(filepath.Join(root, "profiles", "copy.json")); !errors.Is(serr, os.ErrNotExist) {
+		t.Fatalf("refused SaveAs left a file: %v", serr)
+	}
+
+	dest := filepath.Join(t.TempDir(), "dup-export.json")
+	err = s.Export(context.Background(), "user/dup", dest)
+	if CodeOf(err) != CodeConfigInvalid {
+		t.Fatalf("Export code = %q (%v), want config_invalid", CodeOf(err), err)
+	}
+	if d, ok := config.DiagnosticOf(err); !ok || d.Code != config.CodeDuplicateKeys {
+		t.Fatalf("Export diagnostic = %+v ok=%v, want duplicate_keys", d, ok)
+	}
+	if _, serr := os.Lstat(dest); !errors.Is(serr, os.ErrNotExist) {
+		t.Fatalf("refused Export left a file: %v", serr)
+	}
+}
+
 // NewStoreWithOptions threads DocumentOptions.LookupEnv into every profile
 // Document the store parses (spec §7); NewStore stays ambient.
 func TestStoreWithOptionsInjectsEnv(t *testing.T) {

@@ -122,8 +122,8 @@ derives from `type`. Its semantics are deliberately strict:
   tools.)
 - **Cross-role consistency.** The same provider/model can back more than one
   role. If two roles declare an *explicit* `capabilities` list for the same
-  provider/model key, the lists must agree; a conflict is a hard load error
-  (and startup error for programmatic configs)
+  provider/model key, the lists must agree; a conflict is a hard load error —
+  startup error for programmatic configs —
   (`conflicting capability overrides for <provider>/<model>`). Floors (omitted
   lists) never conflict — they union.
 
