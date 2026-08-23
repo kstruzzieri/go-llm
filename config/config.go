@@ -865,10 +865,18 @@ func selectorPairConflict(sel, ra, rb string, a, b ModelConfig) error {
 // detectCycle checks for circular fallback chains starting from startRole.
 // It uses on-path tracking to avoid false positives on diamond-shaped graphs.
 func (cfg *Config) detectCycle(startRole string) error {
+	// Three-color DFS: onPath (grey) detects cycles without false positives
+	// on diamond-shaped graphs; done (black) memoizes roles already proven
+	// cycle-free so dense DAGs stay O(V+E). Without done, a diamond chain
+	// re-walks every branch and validation goes exponential (2^depth paths).
 	onPath := make(map[string]bool)
+	done := make(map[string]bool)
 
 	var walk func(role string) error
 	walk = func(role string) error {
+		if done[role] {
+			return nil
+		}
 		if onPath[role] {
 			return diagWrap(CodeModelInvalid, SubjectRole, startRole,
 				fmt.Errorf("config: model %q: circular fallback chain", startRole))
@@ -885,6 +893,7 @@ func (cfg *Config) detectCycle(startRole string) error {
 				return err
 			}
 		}
+		done[role] = true
 		return nil
 	}
 
