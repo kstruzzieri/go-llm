@@ -365,9 +365,9 @@ func (s *SQLiteStore) GetCapProbe(ctx context.Context, backendID, modelName, cap
 // SaveCapProbe persists a probe verdict using upsert semantics.
 //
 // The upsert only overwrites an existing row when the incoming probe is
-// at least as recent (by tested_at). This prevents a slow-finishing probe
-// for an old digest from overwriting a newer verdict during concurrent
-// probing, mirroring the guard on Save.
+// strictly newer (by tested_at). Equal persisted timestamps keep the first
+// verdict, so a slow-finishing probe cannot win a millisecond-resolution tie
+// after a newer probe has already saved.
 func (s *SQLiteStore) SaveCapProbe(ctx context.Context, probe CapProbe) error {
 	var expiresAt any // nil => NULL (no expiry)
 	if !probe.ExpiresAt.IsZero() {
@@ -384,7 +384,7 @@ func (s *SQLiteStore) SaveCapProbe(ctx context.Context, probe CapProbe) error {
 			probe_version = excluded.probe_version,
 			tested_at     = excluded.tested_at,
 			expires_at    = excluded.expires_at
-		WHERE excluded.tested_at >= capability_probes.tested_at`,
+		WHERE excluded.tested_at > capability_probes.tested_at`,
 		probe.BackendID, probe.ModelName, probe.Capability, string(probe.State),
 		probe.ModelDigest, probe.ProbeVersion, probe.TestedAt.UnixMilli(), expiresAt)
 	if err != nil {

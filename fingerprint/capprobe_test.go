@@ -55,6 +55,7 @@ func TestCapProbe_SaveUpsertsOnSameKey(t *testing.T) {
 	}
 	base.State = CapProbeYes
 	base.ExpiresAt = time.Time{}
+	base.TestedAt = base.TestedAt.Add(time.Millisecond)
 	if err := s.SaveCapProbe(ctx, base); err != nil {
 		t.Fatalf("save 2 (upsert): %v", err)
 	}
@@ -64,6 +65,33 @@ func TestCapProbe_SaveUpsertsOnSameKey(t *testing.T) {
 	}
 	if got.State != CapProbeYes || !got.ExpiresAt.IsZero() {
 		t.Fatalf("upsert did not replace: %+v", got)
+	}
+}
+
+func TestCapProbe_SaveEqualTimestampKeepsFirstVerdict(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	now := time.Now().Truncate(time.Millisecond)
+	first := CapProbe{
+		BackendID: "b", ModelName: "m", Capability: "tool_call",
+		State: CapProbeYes, ModelDigest: "new",
+		ProbeVersion: CurrentToolProbeVersion, TestedAt: now,
+	}
+	if err := s.SaveCapProbe(ctx, first); err != nil {
+		t.Fatalf("save first: %v", err)
+	}
+	tied := first
+	tied.State = CapProbeNo
+	tied.ModelDigest = "old"
+	if err := s.SaveCapProbe(ctx, tied); err != nil {
+		t.Fatalf("save tied: %v", err)
+	}
+	got, err := s.GetCapProbe(ctx, "b", "m", "tool_call")
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if got.State != CapProbeYes || got.ModelDigest != "new" {
+		t.Fatalf("equal-timestamp probe overwrote first verdict: %+v", got)
 	}
 }
 

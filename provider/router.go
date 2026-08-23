@@ -279,6 +279,11 @@ func WithRoutingFeedback(rf *RoutingFeedback) RouterOption {
 // ---------------------------------------------------------------------------
 
 // NewRouter creates a Router with the given registries and options.
+//
+// The Router installs itself as the registry's capability-probe admission
+// gate: at most ONE live Router may attach to a ModelRegistry (see the
+// ModelRegistry doc). Constructing a second Router over the same live
+// registry is unsupported.
 func NewRouter(registry *ModelRegistry, providers *Registry, opts ...RouterOption) *Router {
 	r := &Router{
 		registry:  registry,
@@ -314,6 +319,14 @@ func NewRouter(registry *ModelRegistry, providers *Registry, opts ...RouterOptio
 	// ungoverned world is bit-identical to pre-#400 behavior.
 	if r.slots != nil {
 		r.admission = newSlotAdmission(r.slots, r.done)
+	}
+
+	// Probe admission (#401): capability probes acquire through this
+	// Router's gate. Unconditional -- acquireSlot no-ops without a slot
+	// source, so ungoverned wiring stays bit-identical. One live Router
+	// per registry (see NewRouter doc).
+	if registry != nil {
+		registry.setSlotAdmitter(r)
 	}
 
 	return r
@@ -385,8 +398,20 @@ func (r *Router) Route(ctx context.Context, req RoutingRequest) (*RoutePlan, err
 	//    failures (e.g. 401 from the backend) — surfaced only if the route
 	//    ultimately fails, mirroring how chain routing joins lookupErrs.
 	candidates, probeDiags, err := r.resolveCandidates(ctx, req)
+	// Cancellation classification (#401): candidate discovery may aggregate
+	// a provider's context error, while probe failures surface as per-candidate
+	// diagnostics. Either would otherwise be buried inside a generic error or
+	// ErrNoViableCandidate (Golem would classify provider_unavailable,
+	// compat would answer 400 instead of 499/504). A dead context is the
+	// caller's exit, not a routing verdict -- return it raw.
+	if cErr := ctx.Err(); cErr != nil {
+		return nil, cErr
+	}
 	if err != nil {
 		return nil, err
+	}
+	if terminalErr := capabilityResolutionTerminalError(probeDiags); terminalErr != nil {
+		return nil, terminalErr
 	}
 	if len(candidates) == 0 {
 		return nil, joinNoViableCandidate(probeDiags)
@@ -808,6 +833,15 @@ func joinNoViableCandidate(diags []error) error {
 	return fmt.Errorf("%w: %s", ErrNoViableCandidate, errors.Join(diags...))
 }
 
+func capabilityResolutionTerminalError(diags []error) error {
+	for _, diag := range diags {
+		if errors.Is(diag, ErrRouterClosed) {
+			return diag
+		}
+	}
+	return nil
+}
+
 // recommendWithToolCallResolution runs ModelRegistry.Recommend for the
 // given required caps, lazily resolving tool_call when possible. Recommend
 // filters by caps BEFORE the router sees candidates, which would silently
@@ -823,11 +857,13 @@ func joinNoViableCandidate(diags []error) error {
 // Probe diagnostics (second return) are non-fatal; callers surface them
 // only when the route fails.
 //
-// Worst case on cache miss: N unknown models x up to ~30s active probe,
-// resolved sequentially inside EnsureToolCallResolved. Persisted verdicts
-// amortize this to zero on later routes, and the bounded-eager preflight
-// (Task 9) keeps this path rare. Transient-error models re-probe on every
-// route with no backoff — deliberate; add a backoff seam here if it bites.
+// Worst case on cache miss: U distinct unknown models x up to ~30s active
+// probe, resolved bounded-parallel inside EnsureToolCallResolved
+// (capResolveLimit-wide, so roughly ceil(U/4) x ~30s plus any admission
+// queueing). Persisted verdicts amortize this to zero on later routes, and
+// the bounded-eager preflight (Task 9) keeps this path rare.
+// Transient-error models re-probe on every route with no backoff —
+// deliberate; add a backoff seam here if it bites.
 func (r *Router) recommendWithToolCallResolution(ctx context.Context, opts RecommendOpts, reqCaps Capability) ([]*ModelProfile, []error, error) {
 	if !r.registry.canResolveToolCall() || !reqCaps.Has(CapToolCall) {
 		opts.RequiredCaps = reqCaps

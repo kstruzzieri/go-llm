@@ -6,6 +6,36 @@ All notable changes to `go-llm` are documented here. Downstream consumers
 
 ## [Unreleased]
 
+### Changed — provider: bounded parallel capability resolution (#401)
+
+`EnsureToolCallResolved` now resolves distinct unresolved model keys
+concurrently (bounded at 4 per invocation) instead of serially, so a cold
+route over U unknown models costs roughly `ceil(U/4) x ~30s` instead of
+`U x ~30s`. Chain routing batches every chain entry's candidates into one
+resolution wave. Live probes acquire through the Router's slot-admission
+gate (#400) where a backend is governed; cached verdicts, overrides, and
+merged capabilities never touch admission.
+
+- **Duplicate keys share one probe.** Within one call, unresolved
+  occurrences of the same key receive one resolution attempt and the same
+  result; transient failures are not retried until a later call.
+  Candidate order, pointer behavior, input immutability, and diagnostic
+  ordering are unchanged from the serial implementation.
+- **Cancellation now surfaces raw.** A route that dies with the caller's
+  context returns `ctx.Err()` (`context.Canceled` /
+  `context.DeadlineExceeded`) instead of burying it inside
+  `ErrNoViableCandidate` — Golem classifies cancellation correctly and
+  `compat` can answer 499/504 instead of 400. Ordinary probe failures
+  still classify as `ErrNoViableCandidate` with stringified diagnostics;
+  router closure remains a terminal `ErrRouterClosed`.
+- **Probe ordering and expiry use separate timestamps.** `TestedAt` is
+  captured before the cache read so an older slow probe cannot overwrite
+  a newer verdict; equal persisted timestamps keep the first verdict.
+  TTLs remain anchored after the probe returns.
+- **Ownership invariant.** At most one live `Router` may attach to a
+  `ModelRegistry`; `NewRouter` installs itself as the registry's probe
+  admission gate.
+
 ### Added — governed dispatch fan-out and per-child progress (#403)
 
 Golem's `-dispatch` tool now runs children concurrently when every backend

@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"golang.org/x/sync/errgroup"
 	"golang.org/x/sync/singleflight"
 
 	"github.com/kstruzzieri/go-llm/fingerprint"
@@ -42,6 +43,13 @@ type ProviderResolver interface {
 // Profiles are cached by ModelKey after the first Lookup. The initial
 // implementation returns the cached profile on cache hit without digest
 // revalidation; callers that need freshness guarantees must use Refresh.
+//
+// Ownership: at most ONE live Router may attach to a ModelRegistry.
+// NewRouter installs itself as the registry's probe-admission gate, and
+// registry-global singleflight means a second live Router (or its Close)
+// would silently route another Router's probes through the wrong gate.
+// Sharing a registry across live Routers is unsupported; if that
+// topology is ever needed, admission moves to a shared owner first.
 type ModelRegistry struct {
 	mu              sync.RWMutex
 	profiles        map[ModelKey]*ModelProfile
@@ -63,6 +71,12 @@ type ModelRegistry struct {
 	capProbeStore   fingerprint.CapProbeStore
 	capProber       FingerprintProberFactory
 	capResolveGroup singleflight.Group
+
+	// admitter, when non-nil, gates live capability probes through
+	// slot-aware admission (#400/#401). Set post-construction by NewRouter
+	// via setSlotAdmitter; guarded by mu. AT MOST ONE LIVE Router may own
+	// admission for a registry -- see setSlotAdmitter.
+	admitter slotAdmitter
 }
 
 // FingerprintProberSpec contains the model prober and digest identity the
@@ -382,12 +396,12 @@ func (r *ModelRegistry) ResolveToolCall(ctx context.Context, key ModelKey) (fing
 
 	// 4. Deduplicated slow path. The singleflight fn holds no registry
 	// locks; invalidateProfile takes mu only briefly after probe IO.
-	// Flight key uses an explicit NUL separator (not key.String(), whose
-	// "provider/model" join could collide across keys containing slashes).
+	// Flight key length-prefixes the provider so arbitrary provider/model
+	// bytes cannot produce the same composite key.
 	// Follower semantics: the leader's ctx governs the probe; followers
 	// block until the shared flight completes and receive its result even
 	// if their own ctx was canceled meanwhile.
-	flightKey := key.Provider + "\x00" + key.Model
+	flightKey := strconv.Itoa(len(key.Provider)) + ":" + key.Provider + key.Model
 	v, err, _ := r.capResolveGroup.Do(flightKey, func() (interface{}, error) {
 		return r.resolveToolCallSlow(ctx, key)
 	})
@@ -397,9 +411,24 @@ func (r *ModelRegistry) ResolveToolCall(ctx context.Context, key ModelKey) (fing
 	return v.(fingerprint.CapProbeState), nil
 }
 
+// setSlotAdmitter installs the admission gate live probes acquire
+// through (nil disables gating). Called by NewRouter; the singleflight
+// leader acquires exactly one permit per live probe, after the cached-row
+// check misses, releasing it as soon as the probe returns.
+//
+// AT MOST ONE LIVE Router per registry (see the ModelRegistry doc):
+// installing a second live Router's gate is unsupported -- probes led by
+// one Router's callers would consume the other's permits, and closing
+// either Router would fail probes admitted through its gate.
+func (r *ModelRegistry) setSlotAdmitter(a slotAdmitter) {
+	r.mu.Lock()
+	r.admitter = a
+	r.mu.Unlock()
+}
+
 // resolveToolCallSlow is the probe path behind ResolveToolCall's
-// singleflight: cache check, active probe, persistence, and profile-cache
-// invalidation. Must not be called while holding r.mu.
+// singleflight: cache check, admission, active probe, persistence, and
+// profile-cache invalidation. Must not be called while holding r.mu.
 func (r *ModelRegistry) resolveToolCallSlow(ctx context.Context, key ModelKey) (fingerprint.CapProbeState, error) {
 	p, err := r.providers.Resolve(key)
 	if err != nil {
@@ -433,17 +462,47 @@ func (r *ModelRegistry) resolveToolCallSlow(ctx context.Context, key ModelKey) (
 	digest := capProbeDigest(key, runtimeInfo)
 	backendID := key.Provider // EnsureProfile's existing backend_id convention
 
-	now := time.Now()
-	if row, gErr := r.capProbeStore.GetCapProbe(ctx, backendID, key.Model, capabilityToolCall); gErr == nil && row != nil && row.Valid(digest, now) {
+	// TestedAt orders concurrent store writes by when this resolution
+	// observed the cache. Capture it before the read so an older slow probe
+	// cannot finish last and overwrite a newer verdict.
+	testedAt := time.Now()
+	if row, gErr := r.capProbeStore.GetCapProbe(ctx, backendID, key.Model, capabilityToolCall); gErr == nil && row != nil && row.Valid(digest, time.Now()) {
 		return row.State, nil
 	}
 
-	outcome, err := prober.ProbeToolCall(ctx, key.Model)
+	// Admission (#401): a live probe is a model call against a possibly
+	// governed backend, so the singleflight leader acquires one permit --
+	// AFTER the valid-row miss (cached verdicts never gate) and only
+	// around the probe itself. Denied admission means no probe, no
+	// writes, no release. Latency under saturation is queue wait plus the
+	// probe; the queue is not FIFO (release broadcasts race) and the
+	// leader's ctx governs the wait.
+	r.mu.RLock()
+	admitter := r.admitter
+	r.mu.RUnlock()
+	release := noopRelease
+	if admitter != nil {
+		var aErr error
+		release, aErr = admitter.acquireSlot(ctx, key)
+		if aErr != nil {
+			return "", aErr
+		}
+	}
+	// Inner closure scopes the permit to the probe alone: release fires
+	// the moment ProbeToolCall returns (panic included), never spanning
+	// persistence or invalidation. release is sync.Once-guarded upstream.
+	outcome, err := func() (fingerprint.CapProbeOutcome, error) {
+		defer release()
+		return prober.ProbeToolCall(ctx, key.Model)
+	}()
 	if err != nil {
 		// Transient/diagnostic: never persisted, never a claim.
 		return "", err
 	}
 
+	// Expiry remains anchored after the probe so admission queueing and probe
+	// latency do not consume the persisted verdict's TTL.
+	completedAt := time.Now()
 	row := fingerprint.CapProbe{
 		BackendID:    backendID,
 		ModelName:    key.Model,
@@ -451,16 +510,16 @@ func (r *ModelRegistry) resolveToolCallSlow(ctx context.Context, key ModelKey) (
 		State:        outcome.State,
 		ModelDigest:  digest,
 		ProbeVersion: fingerprint.CurrentToolProbeVersion,
-		TestedAt:     now,
+		TestedAt:     testedAt,
 	}
 	if outcome.TTL > 0 {
-		row.ExpiresAt = now.Add(outcome.TTL)
+		row.ExpiresAt = completedAt.Add(outcome.TTL)
 	}
 	// Digestless negatives expire: a wedged "no" keyed only by name would
 	// silently block usage until a manual reprobe. A real digest keeps the
 	// prober-chosen TTL (ollama's curated "no" stays unbounded).
 	if outcome.State == fingerprint.CapProbeNo && digest == key.String() {
-		row.ExpiresAt = now.Add(fingerprint.CapProbeDigestlessNoTTL)
+		row.ExpiresAt = completedAt.Add(fingerprint.CapProbeDigestlessNoTTL)
 	}
 	// Persistence failure is non-fatal: the verdict stands for this caller.
 	_ = r.capProbeStore.SaveCapProbe(ctx, row)
@@ -493,6 +552,16 @@ func (r *ModelRegistry) canResolveToolCall() bool {
 	return r != nil && r.capProber != nil && r.capProbeStore != nil
 }
 
+// capResolveLimit bounds distinct unresolved-key resolution jobs within
+// one EnsureToolCallResolved call. With U distinct keys, immediately
+// available admission, and uniform probe durations, latency is
+// approximately ceil(U/4) x ~30s; admission queueing and concurrent
+// callers may extend it. The bound is per invocation -- not process-,
+// registry-, or backend-wide (admission is per ModelKey) -- and all four
+// workers may be waiting in admission at once, delaying later runnable
+// candidates: an accepted cold-path head-of-line ceiling.
+const capResolveLimit = 4
+
 // EnsureToolCallResolved resolves tool_call for candidate profiles that
 // lack CapToolCall, returning a slice where probe-yes candidates are
 // replaced by their refreshed profiles. Candidates are NEVER removed --
@@ -502,29 +571,104 @@ func (r *ModelRegistry) canResolveToolCall() bool {
 // No-op (input returned as-is) when resolution is disabled or required
 // does not include CapToolCall.
 //
+// Resolution is bounded-parallel across DISTINCT unresolved keys
+// (capResolveLimit); singleflight remains the cross-caller dedup layer.
+// Within one invocation, unresolved occurrences sharing a ModelKey use
+// one resolution job and receive the same state or transient error.
+// Transient failures are not retried within that invocation and are not
+// persisted; a later invocation may retry. Candidate order, pointer
+// behavior, input immutability, and diagnostic ordering match the former
+// serial implementation exactly; probe timing/attempt counts for
+// duplicate transient failures intentionally do not.
+//
 // The returned errors are per-candidate probe diagnostics labeled with
-// the model key (transient failures: network, auth, ...). They are
-// diagnostics ONLY -- never a rejection signal; the affected candidates
-// stay in the returned slice unchanged -- so operators can distinguish
-// "probe failed (e.g. 401)" from "genuinely not tool-capable" when a
-// route comes up empty. Callers thread them into the route-failure error.
+// the model key (transient failures: network, auth, ...), in candidate
+// index order. They are diagnostics ONLY -- never a rejection signal;
+// the affected candidates stay in the returned slice unchanged -- so
+// operators can distinguish "probe failed (e.g. 401)" from "genuinely
+// not tool-capable" when a route comes up empty. Callers thread them
+// into the route-failure error.
 func (r *ModelRegistry) EnsureToolCallResolved(ctx context.Context, profiles []*ModelProfile, required Capability) ([]*ModelProfile, []error) {
+	out, diagAt := r.ensureToolCallResolvedIndexed(ctx, profiles, required)
+	var diags []error
+	for _, d := range diagAt {
+		if d != nil {
+			diags = append(diags, d)
+		}
+	}
+	return out, diags
+}
+
+// ensureToolCallResolvedIndexed is EnsureToolCallResolved with
+// index-addressed diagnostics: diagAt[i] is candidate i's probe
+// diagnostic or nil. Chain batching consumes this form to repartition
+// per-entry diagnostics without re-deriving order. diagAt is nil on the
+// disabled/no-required fast path (input returned as-is).
+func (r *ModelRegistry) ensureToolCallResolvedIndexed(ctx context.Context, profiles []*ModelProfile, required Capability) ([]*ModelProfile, []error) {
 	if !r.canResolveToolCall() || !required.Has(CapToolCall) {
 		return profiles, nil
 	}
-	var diags []error
 	out := make([]*ModelProfile, len(profiles))
 	copy(out, profiles)
+
+	// Phase 1: distinct unresolved keys, first-occurrence order. Jobs
+	// launch from the ordered slice, never from map iteration.
+	type capResolution struct {
+		state fingerprint.CapProbeState
+		err   error
+	}
+	var keys []ModelKey
+	results := make(map[ModelKey]*capResolution)
+	for _, p := range out {
+		if p == nil || p.Caps.Has(CapToolCall) {
+			continue
+		}
+		if _, seen := results[p.Key]; seen {
+			continue
+		}
+		results[p.Key] = &capResolution{}
+		keys = append(keys, p.Key)
+	}
+	if len(keys) == 0 {
+		return out, nil
+	}
+
+	// Phase 2: bounded resolution, one job per distinct key. Workers
+	// touch only their own capResolution (the map is not mutated after
+	// phase 1) and never fail the group -- per-key outcomes are data.
+	// A single distinct key resolves inline: no goroutine overhead for
+	// the common warm/qualified-selector case.
+	if len(keys) == 1 {
+		res := results[keys[0]]
+		res.state, res.err = r.ResolveToolCall(ctx, keys[0])
+	} else {
+		var g errgroup.Group
+		g.SetLimit(capResolveLimit)
+		for _, key := range keys {
+			res := results[key]
+			g.Go(func() error {
+				res.state, res.err = r.ResolveToolCall(ctx, key)
+				return nil
+			})
+		}
+		_ = g.Wait() // joins every worker; no goroutine outlives the call
+	}
+
+	// Phase 3: serial replay in input order. Lookup/buildProfile stay
+	// out of the concurrent phase, diagnostics land per occurrence at
+	// their candidate index, and the lost-write fallback clones each
+	// original occurrence.
+	diagAt := make([]error, len(out))
 	for i, p := range out {
 		if p == nil || p.Caps.Has(CapToolCall) {
 			continue
 		}
-		state, err := r.ResolveToolCall(ctx, p.Key)
-		if err != nil {
-			diags = append(diags, fmt.Errorf("resolve tool_call %s: %w", p.Key, err))
+		res := results[p.Key]
+		if res.err != nil {
+			diagAt[i] = fmt.Errorf("resolve tool_call %s: %w", p.Key, res.err)
 			continue
 		}
-		if state != fingerprint.CapProbeYes {
+		if res.state != fingerprint.CapProbeYes {
 			continue
 		}
 		if refreshed, lErr := r.Lookup(ctx, p.Key); lErr == nil && refreshed.Caps.Has(CapToolCall) {
@@ -539,7 +683,7 @@ func (r *ModelRegistry) EnsureToolCallResolved(ctx context.Context, profiles []*
 		cp.Caps |= CapToolCall
 		out[i] = &cp
 	}
-	return out, diags
+	return out, diagAt
 }
 
 // LookupAny returns merged profiles for an unqualified model name across
