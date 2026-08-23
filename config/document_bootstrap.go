@@ -66,6 +66,9 @@ func NewDocument(spec BootstrapSpec, opts DocumentOptions) (*Document, error) {
 		},
 		Defaults: map[string]string{"agent": spec.Role},
 	}
+	if err := validateSamplingOptions(spec.Role, m.Options); err != nil {
+		return nil, err
+	}
 	// Render→reparse gives ParseDocument-owned copies of every
 	// caller-mutable input, runs the full finalize gate, and seeds rawBytes
 	// canonical so the first save publishes byte-identical.

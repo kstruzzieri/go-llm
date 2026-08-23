@@ -49,6 +49,7 @@ type Document struct {
 	originIdentity string
 	authored       *Config
 	effective      *Config
+	providerDrops  map[string]struct{} // provider names removed since the rawBytes baseline
 	env            func(string) (string, bool)
 	readOnly       *Diagnostic
 }

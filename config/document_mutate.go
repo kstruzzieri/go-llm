@@ -28,6 +28,15 @@ func (d *Document) mutate(fn func(authored *Config) error) error {
 	if err := effective.finalizeEnv(d.env); err != nil {
 		return err
 	}
+	for name := range d.authored.Providers {
+		if _, ok := authored.Providers[name]; ok {
+			continue
+		}
+		if d.providerDrops == nil {
+			d.providerDrops = make(map[string]struct{})
+		}
+		d.providerDrops[name] = struct{}{}
+	}
 	d.authored = authored
 	d.effective = effective
 	return nil

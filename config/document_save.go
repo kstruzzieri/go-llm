@@ -218,6 +218,7 @@ func readExpectedRevision(path, expectedRevision string) ([]byte, error) {
 func (d *Document) commitSavedLocked(out []byte, path string, src OriginSource) {
 	sum := sha256.Sum256(out)
 	d.rawBytes = out
+	d.providerDrops = nil
 	d.revision = hex.EncodeToString(sum[:])
 	if src != "" {
 		d.origin = Origin{Source: src, Path: path}
@@ -337,7 +338,30 @@ func (d *Document) canonicalBytes() ([]byte, error) {
 	if err := d.readOnlyErrLocked(); err != nil {
 		return nil, err
 	}
-	return renderCanonical(d.rawBytes, d.authored)
+	rawBytes := d.rawBytes
+	if len(d.providerDrops) > 0 {
+		var raw map[string]json.RawMessage
+		if err := json.Unmarshal(rawBytes, &raw); err != nil {
+			return nil, diagWrap(CodeRenderError, SubjectNone, "", err)
+		}
+		var providers map[string]json.RawMessage
+		if err := json.Unmarshal(raw["providers"], &providers); err != nil {
+			return nil, diagWrap(CodeRenderError, SubjectNone, "", err)
+		}
+		for name := range d.providerDrops {
+			delete(providers, name)
+		}
+		providersRaw, err := json.Marshal(providers)
+		if err != nil {
+			return nil, diagWrap(CodeRenderError, SubjectNone, "", err)
+		}
+		raw["providers"] = providersRaw
+		rawBytes, err = json.Marshal(raw)
+		if err != nil {
+			return nil, diagWrap(CodeRenderError, SubjectNone, "", err)
+		}
+	}
+	return renderCanonical(rawBytes, d.authored)
 }
 
 // publishNew creates path with data only if it does not exist: the synced

@@ -176,6 +176,51 @@ func TestCanonicalBytesPreservesUnknownRecursively(t *testing.T) {
 	}
 }
 
+func TestSaveProviderUnknownFieldLifecycle(t *testing.T) {
+	d := loadTestDoc(t, `{
+  "providers": {
+    "local": {"base_url": "http://old", "x-provider-note": "remove me"},
+    "q": {"base_url": "http://q"}
+  },
+  "models": {"agent": {"name": "m", "provider": "q", "type": "dense"}},
+  "defaults": {"agent": "agent"}
+}`)
+	path := d.Origin().Path
+	if err := d.UpdateProvider("local", ProviderSpec{BaseURL: "http://updated"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.SaveReplace(path, d.Revision()); err != nil {
+		t.Fatal(err)
+	}
+	updated, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(updated, []byte(`"x-provider-note"`)) {
+		t.Fatal("provider update lost unknown field")
+	}
+
+	if err := d.RemoveProvider("local"); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.AddProvider("local", ProviderSpec{BaseURL: "http://replacement"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.SaveReplace(path, "wrong revision"); !errors.Is(err, ErrRevisionConflict) {
+		t.Fatalf("pre-publication save err = %v, want ErrRevisionConflict", err)
+	}
+	if err := d.SaveReplace(path, d.Revision()); err != nil {
+		t.Fatal(err)
+	}
+	replaced, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(replaced, []byte(`"x-provider-note"`)) {
+		t.Fatal("replacement provider inherited removed provider's unknown field")
+	}
+}
+
 // A cleared known field is DELETED from output, not left stale in the raw tree.
 func TestCanonicalBytesDeletesClearedKnownField(t *testing.T) {
 	d := loadTestDoc(t, rawWithUnknown)

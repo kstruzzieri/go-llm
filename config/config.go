@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -608,19 +609,8 @@ func (cfg *Config) validate() error {
 			return diagWrap(CodeModelInvalid, SubjectRole, role,
 				fmt.Errorf("config: model %q: dimensions must not be negative", role))
 		}
-		if opts := m.Options; opts != nil {
-			if opts.Temperature != nil && *opts.Temperature < 0 {
-				return diagWrap(CodeModelInvalid, SubjectRole, role,
-					fmt.Errorf("config: model %q: temperature must be non-negative", role))
-			}
-			if opts.TopP != nil && (*opts.TopP <= 0 || *opts.TopP > 1) {
-				return diagWrap(CodeModelInvalid, SubjectRole, role,
-					fmt.Errorf("config: model %q: top_p must be greater than 0 and at most 1", role))
-			}
-			if opts.TopK != nil && *opts.TopK < 0 {
-				return diagWrap(CodeModelInvalid, SubjectRole, role,
-					fmt.Errorf("config: model %q: top_k must be non-negative", role))
-			}
+		if err := validateSamplingOptions(role, m.Options); err != nil {
+			return err
 		}
 
 		// Validate explicit capabilities (only when provided; empty defers to
@@ -769,6 +759,25 @@ func (cfg *Config) validate() error {
 		}
 	}
 
+	return nil
+}
+
+func validateSamplingOptions(role string, opts *SamplingOptions) error {
+	if opts == nil {
+		return nil
+	}
+	if opts.Temperature != nil && (math.IsNaN(*opts.Temperature) || math.IsInf(*opts.Temperature, 0) || *opts.Temperature < 0) {
+		return diagWrap(CodeModelInvalid, SubjectRole, role,
+			fmt.Errorf("config: model %q: temperature must be non-negative", role))
+	}
+	if opts.TopP != nil && (math.IsNaN(*opts.TopP) || math.IsInf(*opts.TopP, 0) || *opts.TopP <= 0 || *opts.TopP > 1) {
+		return diagWrap(CodeModelInvalid, SubjectRole, role,
+			fmt.Errorf("config: model %q: top_p must be greater than 0 and at most 1", role))
+	}
+	if opts.TopK != nil && *opts.TopK < 0 {
+		return diagWrap(CodeModelInvalid, SubjectRole, role,
+			fmt.Errorf("config: model %q: top_k must be non-negative", role))
+	}
 	return nil
 }
 

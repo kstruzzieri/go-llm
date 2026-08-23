@@ -1,6 +1,7 @@
 package config
 
 import (
+	"math"
 	"path/filepath"
 	"reflect"
 	"testing"
@@ -68,13 +69,40 @@ func TestNewDocumentRejectsNegativeProviderTimeout(t *testing.T) {
 	assertDiag(t, err, CodeInvalidArgument, SubjectNone, "")
 }
 
+func TestNewDocumentRejectsNonFiniteSamplingOptions(t *testing.T) {
+	ptr := func(v float64) *float64 { return &v }
+	tests := []struct {
+		name    string
+		options SamplingOptions
+	}{
+		{"temperature NaN", SamplingOptions{Temperature: ptr(math.NaN())}},
+		{"temperature +Inf", SamplingOptions{Temperature: ptr(math.Inf(1))}},
+		{"temperature -Inf", SamplingOptions{Temperature: ptr(math.Inf(-1))}},
+		{"top_p NaN", SamplingOptions{TopP: ptr(math.NaN())}},
+		{"top_p +Inf", SamplingOptions{TopP: ptr(math.Inf(1))}},
+		{"top_p -Inf", SamplingOptions{TopP: ptr(math.Inf(-1))}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := NewDocument(BootstrapSpec{
+				ProviderName: "p",
+				Provider:     ProviderSpec{BaseURL: "http://h"},
+				Role:         "sampler",
+				Model:        ModelSpec{Name: "m", Type: "dense", Options: &tt.options},
+			}, DocumentOptions{})
+			assertDiag(t, err, CodeModelInvalid, SubjectRole, "sampler")
+		})
+	}
+}
+
 // TestNewDocumentFullFieldRoundTrip populates EVERY ModelSpec and
 // ProviderSpec field (slot-governed combo so slot policy passes) and pins
 // the effective model against a full ModelConfig literal — a dropped field
 // in the constructor's copy goes red here. The effective view materializes
 // nothing on a fully-populated model: applyDefaults only touches provider
-// timeout/api_format and an EMPTY model Provider, and think_mode
-// normalization is a lowercase no-op for "toggle".
+// timeout/api_format and an EMPTY model Provider; think_mode normalizes from
+// authored "TOGGLE" to effective "toggle".
 func TestNewDocumentFullFieldRoundTrip(t *testing.T) {
 	temperature, topP, topK := 0.7, 0.9, 40
 	spec := BootstrapSpec{
@@ -96,7 +124,7 @@ func TestNewDocumentFullFieldRoundTrip(t *testing.T) {
 			Capabilities:  []string{"chat"},
 			Options:       &SamplingOptions{Temperature: &temperature, TopP: &topP, TopK: &topK},
 			Slots:         2,
-			ThinkMode:     "toggle",
+			ThinkMode:     "TOGGLE",
 			ThinkTags:     &ThinkTagsConfig{Open: "<t>", Close: "</t>"},
 		},
 	}
@@ -120,6 +148,9 @@ func TestNewDocumentFullFieldRoundTrip(t *testing.T) {
 	}
 	if got := d.Config().Models["coder"]; !reflect.DeepEqual(got, want) {
 		t.Fatalf("effective model = %+v, want %+v", got, want)
+	}
+	if got := d.authored.Models["coder"].ThinkMode; got != "TOGGLE" {
+		t.Fatalf("authored think_mode = %q, want %q", got, "TOGGLE")
 	}
 	gotP, err := d.AuthoredProvider("llamacpp")
 	if err != nil {
