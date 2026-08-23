@@ -111,6 +111,59 @@ func resolveDispatchChain(cfg *config.Config, role string, parentChain []string)
 	return resolved, nil
 }
 
+// dispatchFanout is the resolved fan-out policy newDispatchTool applies:
+// a static concurrency ceiling plus an optional per-invocation governor.
+type dispatchFanout struct {
+	maxConcurrent int
+	governor      func() int
+}
+
+// resolveDispatchFanout picks the dispatch fan-out policy (#403). Dispatch is
+// parallel-eligible only when every selector in the child chain is
+// provider-qualified and slot-governed: Router admission protects governed
+// backends from oversubscription, so it cannot protect an ungoverned
+// fallback, and an empty recommend-mode chain names no backend at all. Among
+// eligible chains the HEAD sizes fan-out — unused fallbacks never serve, so
+// their capacity caches stay cold and a chain-minimum would pin fan-out at
+// the fail-safe 1 forever. The governor re-reads capacity per invocation
+// because slot probes are use-triggered: a constructor-time read would freeze
+// the pre-probe fail-safe. Sizing is quality of service, not safety; a wrong
+// size only queues children at admission.
+func resolveDispatchFanout(capacity func(provider.ModelKey) (int, bool), chain []string) dispatchFanout {
+	serial := dispatchFanout{maxConcurrent: 1}
+	if capacity == nil || len(chain) == 0 {
+		return serial
+	}
+	keys := make([]provider.ModelKey, len(chain))
+	for i, selector := range chain {
+		key, ok := parseSelector(selector)
+		if !ok || key.Provider == "" || key.Model == "" {
+			return serial
+		}
+		keys[i] = key
+	}
+	for _, key := range keys {
+		if _, governed := capacity(key); !governed {
+			return serial
+		}
+	}
+	return dispatchFanout{
+		maxConcurrent: agenttools.MaxDispatchTasks,
+		governor: func() int {
+			n, governed := capacity(keys[0])
+			if !governed || n < 1 {
+				return 1
+			}
+			for _, key := range keys[1:] {
+				if _, governed := capacity(key); !governed {
+					return 1
+				}
+			}
+			return n
+		},
+	}
+}
+
 // newDispatchTool is the caller-injectable seam of the dispatch wiring: tests
 // drive child behavior (toolset pass-through, retrieve reuse, serial
 // execution, budget threading) through it with a scripted caller, which a
