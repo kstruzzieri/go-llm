@@ -42,6 +42,13 @@ type ProviderResolver interface {
 // Profiles are cached by ModelKey after the first Lookup. The initial
 // implementation returns the cached profile on cache hit without digest
 // revalidation; callers that need freshness guarantees must use Refresh.
+//
+// Ownership: at most ONE live Router may attach to a ModelRegistry.
+// NewRouter installs itself as the registry's probe-admission gate, and
+// registry-global singleflight means a second live Router (or its Close)
+// would silently route another Router's probes through the wrong gate.
+// Sharing a registry across live Routers is unsupported; if that
+// topology is ever needed, admission moves to a shared owner first.
 type ModelRegistry struct {
 	mu              sync.RWMutex
 	profiles        map[ModelKey]*ModelProfile
@@ -63,6 +70,12 @@ type ModelRegistry struct {
 	capProbeStore   fingerprint.CapProbeStore
 	capProber       FingerprintProberFactory
 	capResolveGroup singleflight.Group
+
+	// admitter, when non-nil, gates live capability probes through
+	// slot-aware admission (#400/#401). Set post-construction by NewRouter
+	// via setSlotAdmitter; guarded by mu. AT MOST ONE LIVE Router may own
+	// admission for a registry -- see setSlotAdmitter.
+	admitter slotAdmitter
 }
 
 // FingerprintProberSpec contains the model prober and digest identity the
@@ -397,9 +410,24 @@ func (r *ModelRegistry) ResolveToolCall(ctx context.Context, key ModelKey) (fing
 	return v.(fingerprint.CapProbeState), nil
 }
 
+// setSlotAdmitter installs the admission gate live probes acquire
+// through (nil disables gating). Called by NewRouter; the singleflight
+// leader acquires exactly one permit per live probe, after the cached-row
+// check misses, releasing it as soon as the probe returns.
+//
+// AT MOST ONE LIVE Router per registry (see the ModelRegistry doc):
+// installing a second live Router's gate is unsupported -- probes led by
+// one Router's callers would consume the other's permits, and closing
+// either Router would fail probes admitted through its gate.
+func (r *ModelRegistry) setSlotAdmitter(a slotAdmitter) {
+	r.mu.Lock()
+	r.admitter = a
+	r.mu.Unlock()
+}
+
 // resolveToolCallSlow is the probe path behind ResolveToolCall's
-// singleflight: cache check, active probe, persistence, and profile-cache
-// invalidation. Must not be called while holding r.mu.
+// singleflight: cache check, admission, active probe, persistence, and
+// profile-cache invalidation. Must not be called while holding r.mu.
 func (r *ModelRegistry) resolveToolCallSlow(ctx context.Context, key ModelKey) (fingerprint.CapProbeState, error) {
 	p, err := r.providers.Resolve(key)
 	if err != nil {
@@ -433,17 +461,44 @@ func (r *ModelRegistry) resolveToolCallSlow(ctx context.Context, key ModelKey) (
 	digest := capProbeDigest(key, runtimeInfo)
 	backendID := key.Provider // EnsureProfile's existing backend_id convention
 
-	now := time.Now()
-	if row, gErr := r.capProbeStore.GetCapProbe(ctx, backendID, key.Model, capabilityToolCall); gErr == nil && row != nil && row.Valid(digest, now) {
+	if row, gErr := r.capProbeStore.GetCapProbe(ctx, backendID, key.Model, capabilityToolCall); gErr == nil && row != nil && row.Valid(digest, time.Now()) {
 		return row.State, nil
 	}
 
-	outcome, err := prober.ProbeToolCall(ctx, key.Model)
+	// Admission (#401): a live probe is a model call against a possibly
+	// governed backend, so the singleflight leader acquires one permit --
+	// AFTER the valid-row miss (cached verdicts never gate) and only
+	// around the probe itself. Denied admission means no probe, no
+	// writes, no release. Latency under saturation is queue wait plus the
+	// probe; the queue is not FIFO (release broadcasts race) and the
+	// leader's ctx governs the wait.
+	r.mu.RLock()
+	admitter := r.admitter
+	r.mu.RUnlock()
+	release := noopRelease
+	if admitter != nil {
+		var aErr error
+		release, aErr = admitter.acquireSlot(ctx, key)
+		if aErr != nil {
+			return "", aErr
+		}
+	}
+	// Inner closure scopes the permit to the probe alone: release fires
+	// the moment ProbeToolCall returns (panic included), never spanning
+	// persistence or invalidation. release is sync.Once-guarded upstream.
+	outcome, err := func() (fingerprint.CapProbeOutcome, error) {
+		defer release()
+		return prober.ProbeToolCall(ctx, key.Model)
+	}()
 	if err != nil {
 		// Transient/diagnostic: never persisted, never a claim.
 		return "", err
 	}
 
+	// completedAt is captured AFTER the probe: admission queuing can sit
+	// between the cache check and the probe, and a pre-probe timestamp
+	// would persist minutes-stale TestedAt/TTL anchors.
+	completedAt := time.Now()
 	row := fingerprint.CapProbe{
 		BackendID:    backendID,
 		ModelName:    key.Model,
@@ -451,16 +506,16 @@ func (r *ModelRegistry) resolveToolCallSlow(ctx context.Context, key ModelKey) (
 		State:        outcome.State,
 		ModelDigest:  digest,
 		ProbeVersion: fingerprint.CurrentToolProbeVersion,
-		TestedAt:     now,
+		TestedAt:     completedAt,
 	}
 	if outcome.TTL > 0 {
-		row.ExpiresAt = now.Add(outcome.TTL)
+		row.ExpiresAt = completedAt.Add(outcome.TTL)
 	}
 	// Digestless negatives expire: a wedged "no" keyed only by name would
 	// silently block usage until a manual reprobe. A real digest keeps the
 	// prober-chosen TTL (ollama's curated "no" stays unbounded).
 	if outcome.State == fingerprint.CapProbeNo && digest == key.String() {
-		row.ExpiresAt = now.Add(fingerprint.CapProbeDigestlessNoTTL)
+		row.ExpiresAt = completedAt.Add(fingerprint.CapProbeDigestlessNoTTL)
 	}
 	// Persistence failure is non-fatal: the verdict stands for this caller.
 	_ = r.capProbeStore.SaveCapProbe(ctx, row)

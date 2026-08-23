@@ -279,6 +279,11 @@ func WithRoutingFeedback(rf *RoutingFeedback) RouterOption {
 // ---------------------------------------------------------------------------
 
 // NewRouter creates a Router with the given registries and options.
+//
+// The Router installs itself as the registry's capability-probe admission
+// gate: at most ONE live Router may attach to a ModelRegistry (see the
+// ModelRegistry doc). Constructing a second Router over the same live
+// registry is unsupported.
 func NewRouter(registry *ModelRegistry, providers *Registry, opts ...RouterOption) *Router {
 	r := &Router{
 		registry:  registry,
@@ -314,6 +319,14 @@ func NewRouter(registry *ModelRegistry, providers *Registry, opts ...RouterOptio
 	// ungoverned world is bit-identical to pre-#400 behavior.
 	if r.slots != nil {
 		r.admission = newSlotAdmission(r.slots, r.done)
+	}
+
+	// Probe admission (#401): capability probes acquire through this
+	// Router's gate. Unconditional -- acquireSlot no-ops without a slot
+	// source, so ungoverned wiring stays bit-identical. One live Router
+	// per registry (see NewRouter doc).
+	if registry != nil {
+		registry.setSlotAdmitter(r)
 	}
 
 	return r
