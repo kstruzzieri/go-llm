@@ -358,6 +358,49 @@ func TestReadOnlyRefusalClassifiedConfigInvalid(t *testing.T) {
 	}
 }
 
+func TestSaveAsReadOnlyPrecedesStoreIO(t *testing.T) {
+	doc := mustDoc(t, `{"providers":{"local":{"base_url":"http://localhost:1"}},
+	  "models":{"agent":{"name":"m1","provider":"local","type":"dense"},
+	            "agent":{"name":"m2","provider":"local","type":"dense"}},
+	  "defaults":{"agent":"agent"}}`)
+	assertRefused := func(t *testing.T, err error) {
+		t.Helper()
+		if CodeOf(err) != CodeConfigInvalid {
+			t.Fatalf("code = %q (%v), want config_invalid", CodeOf(err), err)
+		}
+		if d, ok := config.DiagnosticOf(err); !ok || d.Code != config.CodeDuplicateKeys {
+			t.Fatalf("diagnostic = %+v ok=%v, want duplicate_keys", d, ok)
+		}
+	}
+
+	t.Run("absent store remains absent", func(t *testing.T) {
+		root := filepath.Join(t.TempDir(), "absent")
+		_, err := NewStore(root).SaveAs(context.Background(), "user/copy", doc, "")
+		assertRefused(t, err)
+		if _, err := os.Lstat(root); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("refused save touched store: %v", err)
+		}
+	})
+
+	t.Run("unsafe store does not mask refusal", func(t *testing.T) {
+		root := filepath.Join(t.TempDir(), "not-a-directory")
+		if err := os.WriteFile(root, nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		_, err := NewStore(root).SaveAs(context.Background(), "user/copy", doc, "")
+		assertRefused(t, err)
+	})
+
+	t.Run("missing overwrite target does not mask refusal", func(t *testing.T) {
+		root := t.TempDir()
+		if err := os.Mkdir(filepath.Join(root, "profiles"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		_, err := NewStore(root).SaveAs(context.Background(), "user/missing", doc, "stale")
+		assertRefused(t, err)
+	})
+}
+
 // NewStoreWithOptions threads DocumentOptions.LookupEnv into every profile
 // Document the store parses (spec §7); NewStore stays ambient.
 func TestStoreWithOptionsInjectsEnv(t *testing.T) {

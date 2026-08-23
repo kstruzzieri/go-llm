@@ -181,3 +181,11 @@ func (d *Document) ReadOnly() (Diagnostic, bool) {
 	}
 	return *d.readOnly, true
 }
+
+// CheckWritable returns the same typed refusal used by mutations and saves.
+// Hosts call it before any filesystem work that must not precede that refusal.
+func (d *Document) CheckWritable() error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.readOnlyErrLocked()
+}

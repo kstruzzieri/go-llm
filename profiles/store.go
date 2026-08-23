@@ -310,6 +310,9 @@ func (s *Store) SaveAs(ctx context.Context, id ID, d *config.Document, overwrite
 	if ns != "user" {
 		return SaveOutcome{}, codeErr(CodeCuratedReadOnly, parsed, nil)
 	}
+	if err := d.CheckWritable(); err != nil {
+		return saveOutcomeFromErr(err, d.Revision(), parsed)
+	}
 	if _, err := s.checkProfilesDir(true); err != nil {
 		return SaveOutcome{}, err
 	}
