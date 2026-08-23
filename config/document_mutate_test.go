@@ -1,7 +1,6 @@
 package config
 
 import (
-	"errors"
 	"fmt"
 	"reflect"
 	"sort"
@@ -14,8 +13,11 @@ import (
 
 // setRoleFixture carries distinct nonzero old values on EVERY field the
 // preservation table touches, so clearing and replacement are each provable.
+// The provider is slot-discovery governed so the nonzero slots pin passes
+// validate's static slot policy.
 const setRoleFixture = `{
-  "providers": {"local": {"base_url": "http://localhost:1"}},
+  "providers": {"local": {"base_url": "http://localhost:1",
+    "api_format": "openai-compat", "slot_discovery": true}},
   "models": {
     "agent": {"name": "m1", "provider": "local", "type": "moe",
       "description": "keep me", "parameters": "30B", "context_window": 32768,
@@ -130,10 +132,11 @@ func TestSetRoleModelCarveDownGate(t *testing.T) {
 func TestSetRoleModelSelectorWideCapabilityGate(t *testing.T) {
 	target := ModelFacts{Key: provider.ModelKey{Provider: "ollama", Model: "shared"}, Type: "dense"}
 	tests := []struct {
-		name    string
-		body    string
-		opts    SetRoleModelOpts
-		wantErr string
+		name        string
+		body        string
+		opts        SetRoleModelOpts
+		wantErr     string
+		wantLoadErr string // nonempty: the fixture itself must be rejected at load
 	}{
 		{
 			name: "existing override controls retarget",
@@ -177,22 +180,28 @@ func TestSetRoleModelSelectorWideCapabilityGate(t *testing.T) {
 		},
 		{
 			name: "conflicting inherited overrides are rejected",
+			// Two siblings with conflicting capability overrides can no
+			// longer exist inside a Document: validate's static selector
+			// check (410 spec s1) rejects the config at load, before any
+			// retarget could inherit from them. Sorted-pair role order.
 			body: `{"providers":{"ollama":{"base_url":"http://localhost:1"}},
 			  "models":{"agent":{"name":"old","provider":"ollama","type":"dense"},
 			            "chat":{"name":"shared","type":"dense","capabilities":["chat"]},
 			            "tools":{"name":"shared","type":"dense","capabilities":["tool_call"]}},
 			  "defaults":{"agent":"agent"}}`,
-			opts: SetRoleModelOpts{
-				Requirements: map[string]provider.Capability{"agent": provider.CapChat},
-				Caps:         provider.CapChat,
-				KnownMask:    provider.CapChat,
-			},
-			wantErr: "conflicting capability overrides",
+			wantLoadErr: `conflicting capability overrides for ollama/shared: models "chat" and "tools"`,
 		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
+			if tc.wantLoadErr != "" {
+				_, err := NewDocumentFromBytes([]byte(tc.body), Origin{Source: OriginExplicit})
+				if err == nil || !strings.Contains(err.Error(), tc.wantLoadErr) {
+					t.Fatalf("load err = %v, want %q", err, tc.wantLoadErr)
+				}
+				return
+			}
 			d := loadTestDoc(t, tc.body)
 			_, err := d.SetRoleModel("agent", target, tc.opts)
 			if tc.wantErr == "" && err != nil {
@@ -498,8 +507,6 @@ func TestAggregateVerdictReasonsBounded(t *testing.T) {
 	})
 }
 
-var errTestVeto = errors.New("test veto")
-
 func canonicalOf(t *testing.T, d *Document) []byte {
 	t.Helper()
 	d.mu.Lock()
@@ -522,7 +529,7 @@ func TestMutateRollsBackOnFinalizeFailure(t *testing.T) {
 	err := d.mutate(func(a *Config) error {
 		a.Defaults["chat"] = "ghost"
 		return nil
-	}, nil)
+	})
 	if err == nil {
 		t.Fatal("want finalize failure")
 	}
@@ -531,22 +538,6 @@ func TestMutateRollsBackOnFinalizeFailure(t *testing.T) {
 	}
 	if d.Revision() != beforeRev || d.Origin() != beforeOrigin {
 		t.Fatal("finalize failure changed revision/origin")
-	}
-}
-
-// The post-finalize hook sees the FINALIZED effective candidate and can veto.
-func TestMutatePostHookVetoRollsBack(t *testing.T) {
-	d := loadTestDoc(t, docNestedConfig)
-	before := d.authored.clone()
-	err := d.mutate(
-		func(a *Config) error { a.Defaults["agent"] = "fast"; return nil },
-		func(effective *Config) error { return errTestVeto },
-	)
-	if err == nil || !strings.Contains(err.Error(), "veto") {
-		t.Fatalf("err = %v, want veto", err)
-	}
-	if !reflect.DeepEqual(d.authored, before) {
-		t.Fatal("vetoed mutation leaked")
 	}
 }
 

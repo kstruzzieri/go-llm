@@ -274,6 +274,157 @@ func TestExportDiscipline(t *testing.T) {
 	}
 }
 
+// Config-content failures classify as config_invalid (spec §8) with the
+// config diagnostic reachable through the profiles wrapper; CodeIO stays
+// filesystem-only.
+func TestLoadConfigFailureClassifiedConfigInvalid(t *testing.T) {
+	root := t.TempDir()
+	seedUserProfile(t, root, "broken", `{"providers": {}}`)
+	s := NewStore(root)
+	_, err := s.Load(context.Background(), ID("user/broken"))
+	if CodeOf(err) != CodeConfigInvalid {
+		t.Fatalf("code = %q, want config_invalid", CodeOf(err))
+	}
+	// config diagnostic reaches THROUGH the profiles wrapper
+	d, ok := config.DiagnosticOf(err)
+	if !ok || d.Code != config.CodeProviderRequired {
+		t.Fatalf("config diagnostic not reachable: %+v ok=%v", d, ok)
+	}
+
+	seedUserProfile(t, root, "bad-json", `{nope`)
+	_, err = s.Load(context.Background(), ID("user/bad-json"))
+	if CodeOf(err) != CodeConfigInvalid {
+		t.Fatalf("parse failure code = %q", CodeOf(err))
+	}
+	if d, ok := config.DiagnosticOf(err); !ok || d.Code != config.CodeParseError {
+		t.Fatalf("parse diagnostic = %+v ok=%v", d, ok)
+	}
+
+	// Read-only boundary pin: a collision profile loads read-only with NO
+	// store error — Firn maps ReadOnly separately; a future edit fabricating
+	// config_invalid for read-only docs must go red here.
+	seedUserProfile(t, root, "dup", `{"providers":{"local":{"base_url":"http://localhost:1"}},
+	  "models":{"agent":{"name":"m1","provider":"local","type":"dense"},
+	            "agent":{"name":"m2","provider":"local","type":"dense"}},
+	  "defaults":{"agent":"agent"}}`)
+	doc, err := s.Load(context.Background(), ID("user/dup"))
+	if err != nil {
+		t.Fatalf("collision profile must load without store error: %v", err)
+	}
+	if ro, ok := doc.ReadOnly(); !ok || ro.Code != config.CodeDuplicateKeys {
+		t.Fatalf("ReadOnly = %+v ok=%v, want duplicate_keys", ro, ok)
+	}
+}
+
+// A collision-marked document refuses SaveAs/Export as CONTENT failures:
+// config_invalid with the duplicate_keys diagnostic reachable through the
+// profiles wrapper. CodeIO stays filesystem-only; nothing is persisted.
+func TestReadOnlyRefusalClassifiedConfigInvalid(t *testing.T) {
+	root := t.TempDir()
+	seedUserProfile(t, root, "dup", `{"providers":{"local":{"base_url":"http://localhost:1"}},
+	  "models":{"agent":{"name":"m1","provider":"local","type":"dense"},
+	            "agent":{"name":"m2","provider":"local","type":"dense"}},
+	  "defaults":{"agent":"agent"}}`)
+	s := NewStore(root)
+	doc, err := s.Load(context.Background(), ID("user/dup"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	out, err := s.SaveAs(context.Background(), "user/copy", doc, "")
+	if CodeOf(err) != CodeConfigInvalid {
+		t.Fatalf("SaveAs code = %q (%v), want config_invalid", CodeOf(err), err)
+	}
+	if d, ok := config.DiagnosticOf(err); !ok || d.Code != config.CodeDuplicateKeys {
+		t.Fatalf("SaveAs diagnostic = %+v ok=%v, want duplicate_keys", d, ok)
+	}
+	if out.Persisted || out.Warning != "" {
+		t.Fatalf("refusal must not report persistence: %+v", out)
+	}
+	if _, serr := os.Lstat(filepath.Join(root, "profiles", "copy.json")); !errors.Is(serr, os.ErrNotExist) {
+		t.Fatalf("refused SaveAs left a file: %v", serr)
+	}
+
+	dest := filepath.Join(t.TempDir(), "dup-export.json")
+	err = s.Export(context.Background(), "user/dup", dest)
+	if CodeOf(err) != CodeConfigInvalid {
+		t.Fatalf("Export code = %q (%v), want config_invalid", CodeOf(err), err)
+	}
+	if d, ok := config.DiagnosticOf(err); !ok || d.Code != config.CodeDuplicateKeys {
+		t.Fatalf("Export diagnostic = %+v ok=%v, want duplicate_keys", d, ok)
+	}
+	if _, serr := os.Lstat(dest); !errors.Is(serr, os.ErrNotExist) {
+		t.Fatalf("refused Export left a file: %v", serr)
+	}
+}
+
+func TestSaveAsReadOnlyPrecedesStoreIO(t *testing.T) {
+	doc := mustDoc(t, `{"providers":{"local":{"base_url":"http://localhost:1"}},
+	  "models":{"agent":{"name":"m1","provider":"local","type":"dense"},
+	            "agent":{"name":"m2","provider":"local","type":"dense"}},
+	  "defaults":{"agent":"agent"}}`)
+	assertRefused := func(t *testing.T, err error) {
+		t.Helper()
+		if CodeOf(err) != CodeConfigInvalid {
+			t.Fatalf("code = %q (%v), want config_invalid", CodeOf(err), err)
+		}
+		if d, ok := config.DiagnosticOf(err); !ok || d.Code != config.CodeDuplicateKeys {
+			t.Fatalf("diagnostic = %+v ok=%v, want duplicate_keys", d, ok)
+		}
+	}
+
+	t.Run("absent store remains absent", func(t *testing.T) {
+		root := filepath.Join(t.TempDir(), "absent")
+		_, err := NewStore(root).SaveAs(context.Background(), "user/copy", doc, "")
+		assertRefused(t, err)
+		if _, err := os.Lstat(root); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("refused save touched store: %v", err)
+		}
+	})
+
+	t.Run("unsafe store does not mask refusal", func(t *testing.T) {
+		root := filepath.Join(t.TempDir(), "not-a-directory")
+		if err := os.WriteFile(root, nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		_, err := NewStore(root).SaveAs(context.Background(), "user/copy", doc, "")
+		assertRefused(t, err)
+	})
+
+	t.Run("missing overwrite target does not mask refusal", func(t *testing.T) {
+		root := t.TempDir()
+		if err := os.Mkdir(filepath.Join(root, "profiles"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		_, err := NewStore(root).SaveAs(context.Background(), "user/missing", doc, "stale")
+		assertRefused(t, err)
+	})
+}
+
+// NewStoreWithOptions threads DocumentOptions.LookupEnv into every profile
+// Document the store parses (spec §7); NewStore stays ambient.
+func TestStoreWithOptionsInjectsEnv(t *testing.T) {
+	t.Setenv("PROF_KEY", "")
+	root := t.TempDir()
+	seedUserProfile(t, root, "cloudish", fmt.Sprintf(`{
+	  "providers":{"p":{"base_url":"http://h","api_key":%q}},
+	  "models":{"agent":{"name":"m","type":"dense","provider":"p"}},
+	  "defaults":{"agent":"agent"}}`, "${PROF_KEY}"))
+	snap := map[string]string{"PROF_KEY": "v"}
+	s := NewStoreWithOptions(root, config.DocumentOptions{
+		LookupEnv: func(k string) (string, bool) { v, ok := snap[k]; return v, ok },
+	})
+	if _, err := s.Load(context.Background(), ID("user/cloudish")); err != nil {
+		t.Fatalf("injected env must satisfy the ref: %v", err)
+	}
+	// ambient store fails the same profile
+	s2 := NewStore(root)
+	_, err := s2.Load(context.Background(), ID("user/cloudish"))
+	if CodeOf(err) != CodeConfigInvalid {
+		t.Fatalf("ambient store: code = %q", CodeOf(err))
+	}
+}
+
 func TestStoreContextCancelled(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()

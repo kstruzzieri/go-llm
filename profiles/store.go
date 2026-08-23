@@ -29,7 +29,8 @@ const (
 	CodeConflict        ErrorCode = "conflict"
 	CodeDurability      ErrorCode = "durability_uncertain" // SaveOutcome.Warning value, never an error code path
 	CodeStoreUnsafe     ErrorCode = "store_unsafe"
-	CodeIO              ErrorCode = "io"
+	CodeIO              ErrorCode = "io"             // filesystem failures only — content failures are config_invalid
+	CodeConfigInvalid   ErrorCode = "config_invalid" // profile content failed config parse/validation
 )
 
 // storeError pairs a code with the profile id it concerns. Error text is
@@ -66,7 +67,10 @@ func CodeOf(err error) ErrorCode {
 
 // Store reads curated profiles from the embedded catalog and user profiles
 // from <root>/profiles.
-type Store struct{ root string }
+type Store struct {
+	root string
+	opts config.DocumentOptions
+}
 
 // NewStore returns a Store over root. The root is not touched until a
 // method needs it.
@@ -80,6 +84,27 @@ func DefaultStore() (*Store, error) {
 		return nil, err
 	}
 	return NewStore(filepath.Join(base, "go-llm")), nil
+}
+
+// NewStoreWithOptions is NewStore with document construction options
+// (spec §7): the LookupEnv seam threads into every profile Document this
+// store parses, so a host can resolve ${ENV} API-key refs in cloud
+// profiles without process-env mutation. Zero options = ambient behavior,
+// identical to NewStore.
+func NewStoreWithOptions(root string, opts config.DocumentOptions) *Store {
+	s := NewStore(root)
+	s.opts = opts
+	return s
+}
+
+// DefaultStoreWithOptions mirrors DefaultStore with options.
+func DefaultStoreWithOptions(opts config.DocumentOptions) (*Store, error) {
+	s, err := DefaultStore()
+	if err != nil {
+		return nil, err
+	}
+	s.opts = opts
+	return s, nil
 }
 
 // checkProfilesDir verifies the safety of <root>/profiles. On reads
@@ -210,7 +235,7 @@ func (s *Store) Load(ctx context.Context, id ID) (*config.Document, error) {
 		if err != nil {
 			return nil, codeErr(CodeNotFound, parsed, nil)
 		}
-		return newProfileDocument(parsed, raw, "embedded:"+slug)
+		return s.newProfileDocument(parsed, raw, "embedded:"+slug)
 	}
 	present, err := s.checkProfilesDir(false)
 	if err != nil {
@@ -234,7 +259,7 @@ func (s *Store) Load(ctx context.Context, id ID) (*config.Document, error) {
 	if err != nil {
 		return nil, codeErr(CodeIO, parsed, err)
 	}
-	return newProfileDocument(parsed, raw, path)
+	return s.newProfileDocument(parsed, raw, path)
 }
 
 // SaveOutcome reports what SaveAs actually did (spec amendment 4, round-3
@@ -259,6 +284,11 @@ func saveOutcomeFromErr(err error, revision string, id ID) (SaveOutcome, error) 
 	case errors.Is(err, os.ErrExist), errors.Is(err, config.ErrRevisionConflict), errors.Is(err, os.ErrNotExist):
 		return SaveOutcome{}, codeErr(CodeConflict, id, err)
 	default:
+		// A read-only (duplicate_keys) refusal is a CONTENT failure, not a
+		// filesystem one — CodeIO stays filesystem-only (spec §8).
+		if d, ok := config.DiagnosticOf(err); ok && d.Code == config.CodeDuplicateKeys {
+			return SaveOutcome{}, codeErr(CodeConfigInvalid, id, err)
+		}
 		return SaveOutcome{}, codeErr(CodeIO, id, err)
 	}
 }
@@ -279,6 +309,9 @@ func (s *Store) SaveAs(ctx context.Context, id ID, d *config.Document, overwrite
 	ns, slug, _ := strings.Cut(string(parsed), "/")
 	if ns != "user" {
 		return SaveOutcome{}, codeErr(CodeCuratedReadOnly, parsed, nil)
+	}
+	if err := d.CheckWritable(); err != nil {
+		return saveOutcomeFromErr(err, d.Revision(), parsed)
 	}
 	if _, err := s.checkProfilesDir(true); err != nil {
 		return SaveOutcome{}, err
@@ -316,18 +349,24 @@ func (s *Store) Export(ctx context.Context, id ID, destPath string) error {
 		case errors.Is(err, config.ErrDurabilityUncertain):
 			return nil // bytes are live; export has no outcome channel and the file is a copy
 		default:
+			// Read-only refusal = content failure, mirroring saveOutcomeFromErr.
+			if d, ok := config.DiagnosticOf(err); ok && d.Code == config.CodeDuplicateKeys {
+				return codeErr(CodeConfigInvalid, id, err)
+			}
 			return codeErr(CodeIO, id, err)
 		}
 	}
 	return nil
 }
 
-// newProfileDocument builds the Document with profile origin; content that
-// fails config validation surfaces as CodeIO with the cause unwrappable.
-func newProfileDocument(id ID, raw []byte, originPath string) (*config.Document, error) {
-	d, err := config.NewDocumentFromBytes(raw, config.Origin{Source: config.OriginProfile, Path: originPath})
+// newProfileDocument builds the Document with profile origin; config
+// parse/validation failures surface as CodeConfigInvalid with the cause
+// chain preserved, so config.DiagnosticOf answers "what exactly is wrong".
+// CodeIO remains for filesystem failures only.
+func (s *Store) newProfileDocument(id ID, raw []byte, originPath string) (*config.Document, error) {
+	d, err := config.ParseDocument(raw, config.Origin{Source: config.OriginProfile, Path: originPath}, s.opts)
 	if err != nil {
-		return nil, codeErr(CodeIO, id, err)
+		return nil, codeErr(CodeConfigInvalid, id, err)
 	}
 	return d, nil
 }

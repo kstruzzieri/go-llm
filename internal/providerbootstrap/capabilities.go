@@ -1,3 +1,6 @@
+// The per-selector conflict checks in this file are mirrored statically by
+// config.selectorPairConflict (config/config.go); maintain the two lists
+// together.
 package providerbootstrap
 
 import (

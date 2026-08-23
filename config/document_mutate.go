@@ -2,36 +2,40 @@ package config
 
 import (
 	"fmt"
-	"reflect"
 	"sort"
 	"strings"
-	"unicode/utf8"
 
 	"github.com/kstruzzieri/go-llm/provider"
 )
 
 // mutate applies fn to a clone of the authored config, re-derives the
-// effective view through finalize (the same gate Load applies), runs the
-// optional post hook against the FINALIZED effective candidate, and commits
+// effective view through finalize (the same gate Load applies), and commits
 // both views only if every stage succeeds — all under d.mu, so evaluation
 // and commit are one atomic step and no save can interleave (saves also
 // hold d.mu end-to-end; spec amendment 6). Any error leaves the document
 // unchanged. Draft-only: rawBytes/revision/origin never change here.
-func (d *Document) mutate(fn func(authored *Config) error, post func(effective *Config) error) error {
+func (d *Document) mutate(fn func(authored *Config) error) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	if err := d.readOnlyErrLocked(); err != nil {
+		return err
+	}
 	authored := d.authored.clone()
 	if err := fn(authored); err != nil {
 		return err
 	}
 	effective := authored.clone()
-	if err := effective.finalize(); err != nil {
+	if err := effective.finalizeEnv(d.env); err != nil {
 		return err
 	}
-	if post != nil {
-		if err := post(effective); err != nil {
-			return err
+	for name := range d.authored.Providers {
+		if _, ok := authored.Providers[name]; ok {
+			continue
 		}
+		if d.providerDrops == nil {
+			d.providerDrops = make(map[string]struct{})
+		}
+		d.providerDrops[name] = struct{}{}
 	}
 	d.authored = authored
 	d.effective = effective
@@ -90,25 +94,33 @@ type SetRoleModelResult struct {
 // capacity replaced from facts (empty = unknown, never stale);
 // Capabilities, ThinkMode, ThinkTags, Slots CLEARED unless re-asserted —
 // a stale override carried across models could falsely assert tool_call or
-// violate bootstrap's per-selector invariants. The eligibility gate, the
-// finalize gate, and the finalized selector-conflict check all run under
-// the document lock; any failure leaves the document unchanged.
+// violate the per-selector invariants. The eligibility gate and the
+// finalize gate (whose validate includes the static selector-conflict
+// check) run under the document lock; any failure leaves the document
+// unchanged.
 func (d *Document) SetRoleModel(role string, facts ModelFacts, opts SetRoleModelOpts) (SetRoleModelResult, error) {
 	var zero SetRoleModelResult
-	if facts.Key.Provider == "" || facts.Key.Model == "" {
-		return zero, fmt.Errorf("config: set role model %q: empty provider or model", role)
-	}
-	if !validModelTypes[facts.Type] {
-		return zero, fmt.Errorf("config: set role model %q: type must be one of dense, moe, embedding", role)
-	}
 	var res SetRoleModelResult
 	err := d.mutate(func(a *Config) error {
+		// Argument checks live inside the closure so the central read-only
+		// gate wins even for invalid requests; order for valid documents is
+		// unchanged (args first, then role, then provider).
+		if facts.Key.Provider == "" || facts.Key.Model == "" {
+			return diagWrap(CodeInvalidArgument, SubjectNone, "",
+				fmt.Errorf("config: set role model %q: empty provider or model", role))
+		}
+		if !validModelTypes[facts.Type] {
+			return diagWrap(CodeInvalidArgument, SubjectNone, "",
+				fmt.Errorf("config: set role model %q: type must be one of dense, moe, embedding", role))
+		}
 		m, ok := a.Models[role]
 		if !ok {
-			return fmt.Errorf("config: set role model: role %q not defined", role)
+			return diagWrap(CodeRoleNotFound, SubjectRole, role,
+				fmt.Errorf("config: set role model: role %q not defined", role))
 		}
 		if _, ok := a.Providers[facts.Key.Provider]; !ok {
-			return fmt.Errorf("config: set role model %q: provider %q not configured", role, facts.Key.Provider)
+			return diagWrap(CodeProviderNotFound, SubjectProvider, facts.Key.Provider,
+				fmt.Errorf("config: set role model %q: provider %q not configured", role, facts.Key.Provider))
 		}
 
 		// Gate inside the lock, against the pre-mutation graph (the chains
@@ -137,19 +149,23 @@ func (d *Document) SetRoleModel(role string, facts ModelFacts, opts SetRoleModel
 			if len(opts.Capabilities) == 0 && len(sibling.Capabilities) > 0 {
 				parsed, perr := provider.ParseCapsStrict(sibling.Capabilities)
 				if perr != nil {
-					return fmt.Errorf("config: set role model %q: capabilities: %w", role, perr)
+					return diagWrap(CodeModelInvalid, SubjectRole, role,
+						fmt.Errorf("config: set role model %q: capabilities: %w", role, perr))
 				}
-				if inheritedRole != "" && parsed != inheritedCaps {
-					return fmt.Errorf("config: conflicting capability overrides for %s: models %q and %q", facts.Key, inheritedRole, siblingRole)
+				// Siblings cannot disagree here: validate's static selector
+				// check rejects any document holding conflicting capability
+				// overrides on one selector. Retain the first.
+				if inheritedRole == "" {
+					inheritedCaps, inheritedRole = parsed, siblingRole
 				}
-				inheritedCaps, inheritedRole = parsed, siblingRole
 			}
 		}
 		evalCaps, evalKnown := opts.Caps, opts.KnownMask
 		if len(opts.Capabilities) > 0 {
 			parsed, perr := provider.ParseCapsStrict(opts.Capabilities)
 			if perr != nil {
-				return fmt.Errorf("config: set role model %q: capabilities: %w", role, perr)
+				return diagWrap(CodeModelInvalid, SubjectRole, role,
+					fmt.Errorf("config: set role model %q: capabilities: %w", role, perr))
 			}
 			evalCaps, evalKnown = parsed, provider.CanonicalCaps()
 			gateRoles = selectorRoles
@@ -159,12 +175,14 @@ func (d *Document) SetRoleModel(role string, facts ModelFacts, opts SetRoleModel
 		verdict, reasons := aggregateVerdict(a, gateRoles, opts.Requirements, evalCaps, evalKnown)
 		switch verdict {
 		case provider.CapIneligible:
-			return fmt.Errorf("config: set role model %q: target %s/%s ineligible: %s",
-				role, facts.Key.Provider, facts.Key.Model, strings.Join(reasons, ", "))
+			return diagWrap(CodeEligibilityIneligible, SubjectRole, role,
+				fmt.Errorf("config: set role model %q: target %s/%s ineligible: %s",
+					role, facts.Key.Provider, facts.Key.Model, strings.Join(reasons, ", ")))
 		case provider.CapUnknown:
 			if !opts.ConfirmUnknown {
-				return fmt.Errorf("config: set role model %q: target %s/%s eligibility unknown (%s); confirm to proceed",
-					role, facts.Key.Provider, facts.Key.Model, strings.Join(reasons, ", "))
+				return diagWrap(CodeEligibilityUnknown, SubjectRole, role,
+					fmt.Errorf("config: set role model %q: target %s/%s eligibility unknown (%s); confirm to proceed",
+						role, facts.Key.Provider, facts.Key.Model, strings.Join(reasons, ", ")))
 			}
 		}
 
@@ -197,8 +215,6 @@ func (d *Document) SetRoleModel(role string, facts ModelFacts, opts SetRoleModel
 		a.Models[role] = m
 		res = drops
 		return nil
-	}, func(effective *Config) error {
-		return selectorConflicts(effective, role)
 	})
 	if err != nil {
 		return zero, err
@@ -241,14 +257,7 @@ func aggregateVerdict(a *Config, roles map[string]bool, reqs map[string]provider
 			// and its item discipline; keep in lockstep. Cut on a rune
 			// boundary — use-case keys are user-authored and may be
 			// multi-byte.
-			if len(item) > 64 {
-				cut := 64
-				for cut > 0 && !utf8.RuneStart(item[cut]) {
-					cut--
-				}
-				item = item[:cut]
-			}
-			reasonSet[item] = true
+			reasonSet[truncateRuneSafe64(item)] = true
 		}
 	}
 	if verdict == provider.CapEligible {
@@ -288,61 +297,6 @@ func chainContainsAnyRole(a *Config, start string, roles map[string]bool) bool {
 	return false
 }
 
-// selectorConflicts pre-flights the per-selector invariants bootstrap
-// rejects at load (internal/providerbootstrap/capabilities.go: conflicting
-// context_window, sampling defaults, capability overrides, think_mode,
-// think_tags, slots) so a retarget cannot author a config bootstrap will
-// refuse. It runs on the FINALIZED candidate — providers defaulted,
-// think_mode normalized — because authored-level comparison would miss
-// implicit-provider collisions. Advisory pre-flight only; bootstrap remains
-// the authority. Maintained together with the bootstrap list.
-func selectorConflicts(effective *Config, changed string) error {
-	cm, ok := effective.Models[changed]
-	if !ok {
-		return nil
-	}
-	for _, other := range sortedStringKeys(effective.Models) {
-		if other == changed {
-			continue
-		}
-		om := effective.Models[other]
-		if om.Provider != cm.Provider || om.Name != cm.Name {
-			continue
-		}
-		sel := cm.Provider + "/" + cm.Name
-		if cm.ContextWindow != 0 && om.ContextWindow != 0 && cm.ContextWindow != om.ContextWindow {
-			return fmt.Errorf("config: conflicting context_window for %s: models %q and %q", sel, changed, other)
-		}
-		if cm.Options != nil && om.Options != nil && !reflect.DeepEqual(cm.Options, om.Options) {
-			return fmt.Errorf("config: conflicting sampling defaults for %s: models %q and %q; defaults are per provider/model, so use identical options or distinct provider keys", sel, changed, other)
-		}
-		if len(cm.Capabilities) > 0 && len(om.Capabilities) > 0 {
-			// Parse errors cannot occur here — validate round-trips every
-			// Capabilities list through ParseCapsStrict before this hook
-			// runs. Skipping on error (not failing) keeps the advisory
-			// direction: bootstrap stays the authority.
-			cb, cerr := provider.ParseCapsStrict(cm.Capabilities)
-			ob, oerr := provider.ParseCapsStrict(om.Capabilities)
-			if cerr == nil && oerr == nil && cb != ob {
-				return fmt.Errorf("config: conflicting capability overrides for %s: models %q and %q", sel, changed, other)
-			}
-		}
-		if cm.ThinkMode != "" && om.ThinkMode != "" && cm.ThinkMode != om.ThinkMode {
-			return fmt.Errorf("config: conflicting think_mode for %s: models %q and %q", sel, changed, other)
-		}
-		if cm.ThinkTags != nil && om.ThinkTags != nil && *cm.ThinkTags != *om.ThinkTags {
-			return fmt.Errorf("config: conflicting think_tags for %s: models %q and %q", sel, changed, other)
-		}
-		// Unreachable via SetRoleModel today (it always clears Slots and
-		// finalize never populates it) — kept so the bootstrap mirror stays
-		// complete for any future mutation that authors slots.
-		if cm.Slots != 0 && om.Slots != 0 && cm.Slots != om.Slots {
-			return fmt.Errorf("config: conflicting slots for %s: models %q and %q", sel, changed, other)
-		}
-	}
-	return nil
-}
-
 func sortedStringKeys[V any](m map[string]V) []string {
 	keys := make([]string, 0, len(m))
 	for k := range m {
@@ -355,17 +309,21 @@ func sortedStringKeys[V any](m map[string]V) []string {
 // BindUseCase points a use case at an EXISTING role (edits defaults). Role
 // existence is checked explicitly; chain validity rides the finalize gate.
 func (d *Document) BindUseCase(useCase, role string) error {
-	if useCase == "" || role == "" {
-		return fmt.Errorf("config: bind use case: empty use case or role")
-	}
 	return d.mutate(func(a *Config) error {
+		// Inside the closure so the central read-only gate wins for invalid
+		// requests too.
+		if useCase == "" || role == "" {
+			return diagWrap(CodeInvalidArgument, SubjectNone, "",
+				fmt.Errorf("config: bind use case: empty use case or role"))
+		}
 		if _, ok := a.Models[role]; !ok {
-			return fmt.Errorf("config: bind use case %q: role %q not defined", useCase, role)
+			return diagWrap(CodeRoleNotFound, SubjectRole, role,
+				fmt.Errorf("config: bind use case %q: role %q not defined", useCase, role))
 		}
 		if a.Defaults == nil {
 			a.Defaults = map[string]string{}
 		}
 		a.Defaults[useCase] = role
 		return nil
-	}, nil)
+	})
 }

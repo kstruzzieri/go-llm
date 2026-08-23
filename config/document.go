@@ -49,6 +49,31 @@ type Document struct {
 	originIdentity string
 	authored       *Config
 	effective      *Config
+	providerDrops  map[string]struct{} // provider names removed since the rawBytes baseline
+	env            func(string) (string, bool)
+	readOnly       *Diagnostic
+}
+
+// DocumentOptions configures document construction (spec §7).
+type DocumentOptions struct {
+	// LookupEnv resolves ${ENV} presence checks and expansion for this
+	// document. nil = ambient os.LookupEnv, consulted on parse and every
+	// mutation (compatibility). Hosts needing deterministic
+	// document-lifetime behavior pass a stable snapshot-backed function.
+	// A ("", true) result is treated as unset by api_key expansion (same
+	// as ("", false)). The lookup runs under the document's internal
+	// mutex during mutations — keep it fast; a blocking lookup stalls all
+	// Document readers. The lookup must not call back into the same
+	// Document (its mutex is held during mutations and is not reentrant).
+	LookupEnv func(string) (string, bool)
+}
+
+// ParseDocument is the low-level parse seam: caller-owned bytes in (copied,
+// never aliased), Document out. Performs no filesystem I/O. The bytes go
+// through the same finalize pipeline as Load — validation is NOT deferred.
+func ParseDocument(data []byte, origin Origin, opts DocumentOptions) (*Document, error) {
+	owned := append([]byte(nil), data...)
+	return newDocumentEnv(owned, origin, opts.LookupEnv)
 }
 
 // LoadDocument reads a models.json from an explicit path into a Document.
@@ -58,7 +83,7 @@ type Document struct {
 func LoadDocument(path string) (*Document, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return nil, fmt.Errorf("config: read %q: %w", path, err)
+		return nil, diagWrap(CodeIO, SubjectNone, "", fmt.Errorf("config: read %q: %w", path, err))
 	}
 	return newDocument(data, Origin{Source: OriginExplicit, Path: path})
 }
@@ -72,31 +97,45 @@ func DefaultDocument() (*Document, error) {
 	}
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return nil, fmt.Errorf("config: read %q: %w", path, err)
+		return nil, diagWrap(CodeIO, SubjectNone, "", fmt.Errorf("config: read %q: %w", path, err))
 	}
 	return newDocument(data, Origin{Source: src, Path: path})
 }
 
 // NewDocumentFromBytes builds a Document from raw models.json bytes with the
 // caller's origin (profile stores, embedded catalogs, tests). The input
-// slice is COPIED — the document never aliases caller memory.
+// slice is COPIED by ParseDocument — the document never aliases caller
+// memory.
 func NewDocumentFromBytes(data []byte, origin Origin) (*Document, error) {
-	owned := make([]byte, len(data))
-	copy(owned, data)
-	return newDocument(owned, origin)
+	return ParseDocument(data, origin, DocumentOptions{})
 }
 
+// newDocument is the ambient-env construction path shared by LoadDocument
+// and DefaultDocument; data must already be owned by the callee.
 func newDocument(data []byte, origin Origin) (*Document, error) {
+	return newDocumentEnv(data, origin, nil)
+}
+
+func newDocumentEnv(data []byte, origin Origin, env func(string) (string, bool)) (*Document, error) {
 	var authored Config
 	if err := json.Unmarshal(data, &authored); err != nil {
-		return nil, fmt.Errorf("config: parse %q: %w", origin.Path, err)
+		return nil, diagWrap(CodeParseError, SubjectNone, "", fmt.Errorf("config: parse %q: %w", origin.Path, err))
 	}
 	var effective Config
 	if err := json.Unmarshal(data, &effective); err != nil {
-		return nil, fmt.Errorf("config: parse %q: %w", origin.Path, err)
+		return nil, diagWrap(CodeParseError, SubjectNone, "", fmt.Errorf("config: parse %q: %w", origin.Path, err))
 	}
-	if err := effective.finalize(); err != nil {
+	if err := effective.finalizeEnv(env); err != nil {
 		return nil, err
+	}
+	diag, found, err := detectCollisions(data)
+	if err != nil {
+		return nil, diagWrap(CodeParseError, SubjectNone, "",
+			fmt.Errorf("config: parse %q: %w", origin.Path, err))
+	}
+	var readOnly *Diagnostic
+	if found {
+		readOnly = &diag
 	}
 	sum := sha256.Sum256(data)
 	return &Document{
@@ -106,6 +145,8 @@ func newDocument(data []byte, origin Origin) (*Document, error) {
 		originIdentity: documentPathIdentity(origin.Path),
 		authored:       &authored,
 		effective:      &effective,
+		env:            env,
+		readOnly:       readOnly,
 	}, nil
 }
 
@@ -142,9 +183,12 @@ func (d *Document) Config() *Config {
 	return d.effective.clone()
 }
 
-// clone deep-copies via JSON round-trip: every Config field is
-// JSON-serializable by construction (that is how configs load). Expansion is
-// NOT re-triggered — it lives in finalize, not UnmarshalJSON.
+// clone deep-copies via JSON round-trip. Configs are no longer solely
+// parse-derived: programmatic mutations must uphold the parse-boundary
+// invariants (validate plus the entry-point guards enforce them; e.g.
+// Duration's non-negative rule). The clone panics remain the backstop for
+// bugs, never a reachable rejection path. Expansion is NOT re-triggered —
+// it lives in finalize, not UnmarshalJSON.
 func (c *Config) clone() *Config {
 	data, err := json.Marshal(c)
 	if err != nil {

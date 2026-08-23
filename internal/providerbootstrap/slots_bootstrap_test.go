@@ -142,8 +142,11 @@ func TestSlotDiscoveryRoundTripsThroughConfigLoad(t *testing.T) {
 		t.Fatalf("slotBackends on loaded config = %#v, want only lc", got)
 	}
 
-	// The loud-error path must also hold for a file-backed config, after
-	// Load has applied its defaults.
+	// The loud-error path for a file-backed config now fires at Load
+	// itself: config.validate enforces the slot policy statically (410
+	// spec s1), classified as CodeSlotPolicyInvalid. Bootstrap retains
+	// its own check as defense in depth for programmatic Configs that
+	// bypass Load — pinned below.
 	invalid := filepath.Join(dir, "invalid.json")
 	if err := os.WriteFile(invalid, []byte(`{
   "providers": {
@@ -156,12 +159,22 @@ func TestSlotDiscoveryRoundTripsThroughConfigLoad(t *testing.T) {
 }`), 0o600); err != nil {
 		t.Fatalf("write invalid config: %v", err)
 	}
-	badCfg, err := config.Load(invalid)
-	if err != nil {
-		t.Fatalf("Load(invalid slot placement) should parse; validation is New's job: %v", err)
+	_, err = config.Load(invalid)
+	if err == nil {
+		t.Fatal("want Load error for slot_discovery on ollama-format provider")
 	}
+	if d, ok := config.DiagnosticOf(err); !ok || d.Code != config.CodeSlotPolicyInvalid {
+		t.Fatalf("Load diagnostic = %+v ok=%v, want code %s", d, ok, config.CodeSlotPolicyInvalid)
+	}
+
+	// The equivalent invalid Config built programmatically bypasses Load's
+	// validation entirely; New must still reject it loudly (the retained
+	// defense-in-depth path). No request is made: validation runs before IO.
+	badCfg := &config.Config{Providers: map[string]config.ProviderConfig{
+		"ollama": {BaseURL: "http://127.0.0.1:1", SlotDiscovery: true},
+	}}
 	if _, err := New(context.Background(), Options{Config: badCfg}); err == nil {
-		t.Fatal("want New error for loaded config with slot_discovery on ollama provider")
+		t.Fatal("want New error for programmatic config with slot_discovery on ollama provider")
 	}
 }
 

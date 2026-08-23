@@ -62,7 +62,7 @@ Everything else uses stdlib (`net/http`, `encoding/json`, `math`, `context`, etc
 
 ## Design Principles
 
-1. **Every public method takes `context.Context`** — cancellation is critical (IDE completions get cancelled constantly)
+1. **Public methods performing cancellable work take `context.Context`** — cancellation is critical (IDE completions get cancelled constantly); established synchronous APIs, including `config.Document` and its local-file operations, remain context-free
 2. **Streaming is first-class** — both chat and completions support streaming via callback functions
 3. **No global state** — multiple Client instances can coexist with different configs
 4. **Interfaces for extensibility** — `VectorStore` interface allows swapping SQLite for other backends
