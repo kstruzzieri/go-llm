@@ -118,6 +118,16 @@ func (r *Router) routeChain(ctx context.Context, req RoutingRequest) (*RoutePlan
 		}
 	}
 
+	// Cancellation classification (#401): checked after the final
+	// capability-resolution operation (chain wave + optional recommend
+	// tail), before scoring/classification -- a dead context is the
+	// caller's exit, not chain exhaustion. Mirrors Route's post-
+	// resolveCandidates check; classifyChainExhaustion keeps its
+	// stringified diagnostics.
+	if cErr := ctx.Err(); cErr != nil {
+		return nil, cErr
+	}
+
 	seen := make(map[ModelKey]bool)
 	breakerCount, budgetCount := 0, 0
 	resolvedAny := false

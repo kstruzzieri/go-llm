@@ -401,6 +401,15 @@ func (r *Router) Route(ctx context.Context, req RoutingRequest) (*RoutePlan, err
 	if err != nil {
 		return nil, err
 	}
+	// Cancellation classification (#401): probe failures caused by the
+	// caller's context ending surface as per-candidate diagnostics, and
+	// the stringifying joins below would bury them inside
+	// ErrNoViableCandidate (Golem would classify provider_unavailable,
+	// compat would answer 400 instead of 499/504). A dead context is the
+	// caller's exit, not a routing verdict -- return it raw.
+	if cErr := ctx.Err(); cErr != nil {
+		return nil, cErr
+	}
 	if len(candidates) == 0 {
 		return nil, joinNoViableCandidate(probeDiags)
 	}
