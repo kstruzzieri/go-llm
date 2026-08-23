@@ -398,17 +398,20 @@ func (r *Router) Route(ctx context.Context, req RoutingRequest) (*RoutePlan, err
 	//    failures (e.g. 401 from the backend) — surfaced only if the route
 	//    ultimately fails, mirroring how chain routing joins lookupErrs.
 	candidates, probeDiags, err := r.resolveCandidates(ctx, req)
-	if err != nil {
-		return nil, err
-	}
-	// Cancellation classification (#401): probe failures caused by the
-	// caller's context ending surface as per-candidate diagnostics, and
-	// the stringifying joins below would bury them inside
+	// Cancellation classification (#401): candidate discovery may aggregate
+	// a provider's context error, while probe failures surface as per-candidate
+	// diagnostics. Either would otherwise be buried inside a generic error or
 	// ErrNoViableCandidate (Golem would classify provider_unavailable,
 	// compat would answer 400 instead of 499/504). A dead context is the
 	// caller's exit, not a routing verdict -- return it raw.
 	if cErr := ctx.Err(); cErr != nil {
 		return nil, cErr
+	}
+	if err != nil {
+		return nil, err
+	}
+	if terminalErr := capabilityResolutionTerminalError(probeDiags); terminalErr != nil {
+		return nil, terminalErr
 	}
 	if len(candidates) == 0 {
 		return nil, joinNoViableCandidate(probeDiags)
@@ -828,6 +831,15 @@ func joinNoViableCandidate(diags []error) error {
 		return ErrNoViableCandidate
 	}
 	return fmt.Errorf("%w: %s", ErrNoViableCandidate, errors.Join(diags...))
+}
+
+func capabilityResolutionTerminalError(diags []error) error {
+	for _, diag := range diags {
+		if errors.Is(diag, ErrRouterClosed) {
+			return diag
+		}
+	}
+	return nil
 }
 
 // recommendWithToolCallResolution runs ModelRegistry.Recommend for the

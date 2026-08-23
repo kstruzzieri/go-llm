@@ -408,3 +408,58 @@ func TestEnsureToolCallResolved_DuplicateTransientSharedThenRetriedNextCall(t *t
 		t.Fatalf("second call: b probes = %d, want 2", got)
 	}
 }
+
+func TestEnsureToolCallResolved_DistinctNULKeysDoNotShareFlight(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		store := newFakeCapProbeStore()
+		prober := newGatedToolCallProber()
+		prober.outcomes["\x00b"] = fingerprint.CapProbeOutcome{State: fingerprint.CapProbeYes}
+		prober.outcomes["b"] = fingerprint.CapProbeOutcome{State: fingerprint.CapProbeNo}
+		prober.gates["\x00b"] = make(chan struct{})
+		prober.gates["b"] = make(chan struct{})
+
+		reg := &mrMockProviderRegistry{providers: map[string]Provider{
+			"a":     &mrMockProvider{name: "a", models: []ModelInfo{{Name: "\x00b"}}},
+			"a\x00": &mrMockProvider{name: "a\x00", models: []ModelInfo{{Name: "b"}}},
+		}}
+		mr, err := NewModelRegistry(reg, nil,
+			WithCapabilityProbeStore(store),
+			WithCapabilityProber(capProberFactory(prober)),
+		)
+		if err != nil {
+			t.Fatalf("NewModelRegistry() error: %v", err)
+		}
+
+		keys := []ModelKey{
+			{Provider: "a", Model: "\x00b"},
+			{Provider: "a\x00", Model: "b"},
+		}
+		profiles := make([]*ModelProfile, len(keys))
+		for i, key := range keys {
+			profiles[i], err = mr.Lookup(context.Background(), key)
+			if err != nil {
+				t.Fatalf("Lookup(%q) error: %v", key, err)
+			}
+		}
+
+		done := make(chan []*ModelProfile, 1)
+		go func() {
+			out, _ := mr.EnsureToolCallResolved(context.Background(), profiles, CapToolCall)
+			done <- out
+		}()
+		synctest.Wait()
+		close(prober.gates["\x00b"])
+		close(prober.gates["b"])
+		out := <-done
+
+		if got := prober.totalCalls(); got != 2 {
+			t.Fatalf("probe calls = %d, want 2 for distinct model keys", got)
+		}
+		if !out[0].Caps.Has(CapToolCall) {
+			t.Fatalf("out[0].Caps = %v, want tool_call", out[0].Caps)
+		}
+		if out[1].Caps.Has(CapToolCall) {
+			t.Fatalf("out[1].Caps = %v, want no tool_call", out[1].Caps)
+		}
+	})
+}

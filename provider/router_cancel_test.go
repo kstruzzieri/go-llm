@@ -89,6 +89,48 @@ func TestRoute_ContextEndPropagatesFromProbeResolution(t *testing.T) {
 	}
 }
 
+func TestRoute_ContextEndWinsCandidateResolutionError(t *testing.T) {
+	cases := []struct {
+		name    string
+		context func(t *testing.T) (context.Context, error)
+	}{
+		{"canceled", func(t *testing.T) (context.Context, error) {
+			ctx, cancel := context.WithCancel(context.Background())
+			cancel()
+			return ctx, context.Canceled
+		}},
+		{"deadline", func(t *testing.T) (context.Context, error) {
+			ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Hour))
+			t.Cleanup(cancel)
+			return ctx, context.DeadlineExceeded
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, wantErr := tc.context(t)
+			providers := NewRegistry()
+			if err := providers.Register(&mrMockProvider{name: "p", modelsErr: wantErr}); err != nil {
+				t.Fatalf("Register() error: %v", err)
+			}
+			registry, err := NewModelRegistry(providers, nil)
+			if err != nil {
+				t.Fatalf("NewModelRegistry() error: %v", err)
+			}
+			router := NewRouter(registry, providers)
+			cleanupRouter(t, router)
+
+			_, err = router.Route(ctx, RoutingRequest{
+				UseCase:      "chat",
+				RequiredCaps: CapChat,
+				Messages:     []ChatMessage{{Role: "user", Content: "hi"}},
+			})
+			if !errors.Is(err, wantErr) {
+				t.Fatalf("Route() error = %v, want errors.Is %v", err, wantErr)
+			}
+		})
+	}
+}
+
 func TestRoute_OrdinaryProbeFailureStillClassifiesNoViable(t *testing.T) {
 	for _, tc := range []struct {
 		name string

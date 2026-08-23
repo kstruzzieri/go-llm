@@ -396,12 +396,12 @@ func (r *ModelRegistry) ResolveToolCall(ctx context.Context, key ModelKey) (fing
 
 	// 4. Deduplicated slow path. The singleflight fn holds no registry
 	// locks; invalidateProfile takes mu only briefly after probe IO.
-	// Flight key uses an explicit NUL separator (not key.String(), whose
-	// "provider/model" join could collide across keys containing slashes).
+	// Flight key length-prefixes the provider so arbitrary provider/model
+	// bytes cannot produce the same composite key.
 	// Follower semantics: the leader's ctx governs the probe; followers
 	// block until the shared flight completes and receive its result even
 	// if their own ctx was canceled meanwhile.
-	flightKey := key.Provider + "\x00" + key.Model
+	flightKey := strconv.Itoa(len(key.Provider)) + ":" + key.Provider + key.Model
 	v, err, _ := r.capResolveGroup.Do(flightKey, func() (interface{}, error) {
 		return r.resolveToolCallSlow(ctx, key)
 	})
@@ -462,6 +462,10 @@ func (r *ModelRegistry) resolveToolCallSlow(ctx context.Context, key ModelKey) (
 	digest := capProbeDigest(key, runtimeInfo)
 	backendID := key.Provider // EnsureProfile's existing backend_id convention
 
+	// TestedAt orders concurrent store writes by when this resolution
+	// observed the cache. Capture it before the read so an older slow probe
+	// cannot finish last and overwrite a newer verdict.
+	testedAt := time.Now()
 	if row, gErr := r.capProbeStore.GetCapProbe(ctx, backendID, key.Model, capabilityToolCall); gErr == nil && row != nil && row.Valid(digest, time.Now()) {
 		return row.State, nil
 	}
@@ -496,9 +500,8 @@ func (r *ModelRegistry) resolveToolCallSlow(ctx context.Context, key ModelKey) (
 		return "", err
 	}
 
-	// completedAt is captured AFTER the probe: admission queuing can sit
-	// between the cache check and the probe, and a pre-probe timestamp
-	// would persist minutes-stale TestedAt/TTL anchors.
+	// Expiry remains anchored after the probe so admission queueing and probe
+	// latency do not consume the persisted verdict's TTL.
 	completedAt := time.Now()
 	row := fingerprint.CapProbe{
 		BackendID:    backendID,
@@ -507,7 +510,7 @@ func (r *ModelRegistry) resolveToolCallSlow(ctx context.Context, key ModelKey) (
 		State:        outcome.State,
 		ModelDigest:  digest,
 		ProbeVersion: fingerprint.CurrentToolProbeVersion,
-		TestedAt:     completedAt,
+		TestedAt:     testedAt,
 	}
 	if outcome.TTL > 0 {
 		row.ExpiresAt = completedAt.Add(outcome.TTL)

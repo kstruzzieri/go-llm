@@ -143,9 +143,9 @@ type CapProbe struct {
 	ModelName    string
 	Capability   string // canonical token, e.g. "tool_call"
 	State        CapProbeState
-	ModelDigest  string // runtime digest, or key fallback when digestless
-	ProbeVersion int    // CurrentToolProbeVersion at probe time
-	TestedAt     time.Time
+	ModelDigest  string    // runtime digest, or key fallback when digestless
+	ProbeVersion int       // CurrentToolProbeVersion at probe time
+	TestedAt     time.Time // cache-observation time used for stale-write ordering
 	ExpiresAt    time.Time // zero = does not expire
 }
 

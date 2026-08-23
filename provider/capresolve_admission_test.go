@@ -3,11 +3,12 @@
 // Tests for the #401 admission seam on capability resolution: the
 // registry-held slotAdmitter, permit scope (acquire after a valid-row
 // miss, release immediately after the probe returns, before
-// persistence), and the post-probe timestamp contract.
+// persistence), and separate write-order/expiry timestamp contracts.
 package provider
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"sync"
 	"testing"
@@ -67,10 +68,8 @@ func (s *hookedCapProbeStore) SaveCapProbe(ctx context.Context, probe fingerprin
 }
 
 // timedToolCallProber blocks each ProbeToolCall on gate, signals started
-// once, and records the time it resumed. entryAt is strictly after the
-// test closes gate, so asserting !row.TestedAt.Before(entryAt) proves the
-// persisted timestamp was captured after the probe ran -- deterministic
-// monotonic ordering, no clock abstraction, no elapsed-time assertions.
+// once, and records the time it resumed. The gap lets tests distinguish
+// pre-probe write ordering from post-probe expiry anchoring.
 type timedToolCallProber struct {
 	*fakeToolCallProber
 	started   chan struct{}
@@ -343,10 +342,10 @@ func TestResolveToolCall_AdmissionAcquireFailureSkipsProbe(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Post-probe timestamps
+// Probe timestamps
 // ---------------------------------------------------------------------------
 
-func TestResolveToolCall_TimestampsCapturedAfterProbe(t *testing.T) {
+func TestResolveToolCall_TimestampsSeparateOrderingFromExpiry(t *testing.T) {
 	cases := []struct {
 		name       string
 		outcome    fingerprint.CapProbeOutcome
@@ -404,13 +403,83 @@ func TestResolveToolCall_TimestampsCapturedAfterProbe(t *testing.T) {
 				t.Fatal("expected persisted row")
 			}
 			entry := prober.entry()
-			if row.TestedAt.Before(entry) {
-				t.Fatalf("TestedAt = %v is before probe entry %v; must be captured after the probe", row.TestedAt, entry)
+			if !row.TestedAt.Before(entry) {
+				t.Fatalf("TestedAt = %v, want before probe entry %v for stale-write ordering", row.TestedAt, entry)
 			}
-			if want := tc.wantExpiry(row.TestedAt); !row.ExpiresAt.Equal(want) {
-				t.Fatalf("ExpiresAt = %v, want %v (derived from post-probe TestedAt)", row.ExpiresAt, want)
+			if earliest := tc.wantExpiry(entry); row.ExpiresAt.Before(earliest) {
+				t.Fatalf("ExpiresAt = %v, want at least %v (derived after the probe)", row.ExpiresAt, earliest)
 			}
 		})
+	}
+}
+
+func TestResolveToolCall_StaleWriteAcrossRegistries(t *testing.T) {
+	ctx := context.Background()
+	db, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatalf("sql.Open() error: %v", err)
+	}
+	db.SetMaxOpenConns(1)
+	t.Cleanup(func() { _ = db.Close() })
+	store, err := fingerprint.NewStore(ctx, db)
+	if err != nil {
+		t.Fatalf("fingerprint.NewStore() error: %v", err)
+	}
+
+	oldProber := newTimedToolCallProber()
+	oldProber.outcomes["mystery-model"] = fingerprint.CapProbeOutcome{State: fingerprint.CapProbeNo}
+	oldRegistry := newCapResolveRegistry(t, "probe-prov", []string{"mystery-model"}, store, oldProber)
+	key := ModelKey{Provider: "probe-prov", Model: "mystery-model"}
+
+	type result struct {
+		state fingerprint.CapProbeState
+		err   error
+	}
+	oldDone := make(chan result, 1)
+	go func() {
+		state, err := oldRegistry.ResolveToolCall(ctx, key)
+		oldDone <- result{state: state, err: err}
+	}()
+	select {
+	case <-oldProber.started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("old probe did not start")
+	}
+	oldStartedAt := time.Now()
+	for time.Now().UnixMilli() <= oldStartedAt.UnixMilli() {
+		time.Sleep(time.Millisecond)
+	}
+
+	newProber := newFakeToolCallProber()
+	newProber.outcomes["mystery-model"] = fingerprint.CapProbeOutcome{State: fingerprint.CapProbeYes}
+	newRegistry := newCapResolveRegistry(t, "probe-prov", []string{"mystery-model"}, store, newProber)
+	if state, err := newRegistry.ResolveToolCall(ctx, key); err != nil || state != fingerprint.CapProbeYes {
+		t.Fatalf("new ResolveToolCall() = %q, %v; want yes, nil", state, err)
+	}
+	newer, err := store.GetCapProbe(ctx, key.Provider, key.Model, capabilityToolCall)
+	if err != nil {
+		t.Fatalf("GetCapProbe(newer) error: %v", err)
+	}
+	for time.Now().UnixMilli() <= newer.TestedAt.UnixMilli() {
+		time.Sleep(time.Millisecond)
+	}
+
+	close(oldProber.gate)
+	select {
+	case got := <-oldDone:
+		if got.err != nil || got.state != fingerprint.CapProbeNo {
+			t.Fatalf("old ResolveToolCall() = %q, %v; want no, nil", got.state, got.err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("old probe did not finish")
+	}
+
+	final, err := store.GetCapProbe(ctx, key.Provider, key.Model, capabilityToolCall)
+	if err != nil {
+		t.Fatalf("GetCapProbe(final) error: %v", err)
+	}
+	if final.State != fingerprint.CapProbeYes {
+		t.Fatalf("final persisted state = %q, want yes: older slow probe overwrote newer verdict", final.State)
 	}
 }
 

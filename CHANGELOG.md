@@ -26,10 +26,12 @@ merged capabilities never touch admission.
   `context.DeadlineExceeded`) instead of burying it inside
   `ErrNoViableCandidate` — Golem classifies cancellation correctly and
   `compat` can answer 499/504 instead of 400. Ordinary probe failures
-  still classify as `ErrNoViableCandidate` with stringified diagnostics.
-- **Probe rows timestamp after the probe.** `TestedAt` and TTL anchors
-  are captured when the probe returns, so admission queueing cannot
-  persist stale timestamps.
+  still classify as `ErrNoViableCandidate` with stringified diagnostics;
+  router closure remains a terminal `ErrRouterClosed`.
+- **Probe ordering and expiry use separate timestamps.** `TestedAt` is
+  captured before the cache read so an older slow probe cannot overwrite
+  a newer verdict; equal persisted timestamps keep the first verdict.
+  TTLs remain anchored after the probe returns.
 - **Ownership invariant.** At most one live `Router` may attach to a
   `ModelRegistry`; `NewRouter` installs itself as the registry's probe
   admission gate.

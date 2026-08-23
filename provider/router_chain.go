@@ -127,6 +127,9 @@ func (r *Router) routeChain(ctx context.Context, req RoutingRequest) (*RoutePlan
 	if cErr := ctx.Err(); cErr != nil {
 		return nil, cErr
 	}
+	if terminalErr := capabilityResolutionTerminalError(lookupErrs); terminalErr != nil {
+		return nil, terminalErr
+	}
 
 	seen := make(map[ModelKey]bool)
 	breakerCount, budgetCount := 0, 0

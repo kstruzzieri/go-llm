@@ -10,7 +10,6 @@ package provider
 import (
 	"context"
 	"errors"
-	"strings"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -213,85 +212,90 @@ func TestEnsureToolCallResolved_RouterCloseWhileQueued(t *testing.T) {
 	}
 }
 
-func TestRoute_CloseMidProbeClassifiesNoViableWithRouterClosedText(t *testing.T) {
-	ctx := context.Background()
-	provReg := NewRegistry()
-	if err := provReg.Register(&fakeChainProvider{name: "p", models: []string{"a"}}); err != nil {
-		t.Fatalf("register provider: %v", err)
-	}
-	store := newFakeCapProbeStore()
-	prober := newFakeToolCallProber()
-	prober.outcomes["a"] = fingerprint.CapProbeOutcome{State: fingerprint.CapProbeYes}
-	mr, err := NewModelRegistry(provReg, nil,
-		WithCapabilityProbeStore(store),
-		WithCapabilityProber(capProberFactory(prober)),
-	)
-	if err != nil {
-		t.Fatalf("new model registry: %v", err)
-	}
-	seedChainProfile(t, mr, &ModelProfile{
-		Key:           ModelKey{Provider: "p", Model: "a"},
-		Caps:          CapChat | CapGenerate | CapStream,
-		Quality:       TierGood,
-		Speed:         TierGood,
-		ContextWindow: 8192,
-	})
-	if err := provReg.RefreshModels(ctx, "p"); err != nil {
-		t.Fatalf("refresh models: %v", err)
-	}
-	src := &fakeSlotSource{capacity: 1, governed: true}
-	router := NewRouter(mr, provReg, WithSlotSource(src))
-	cleanupRouter(t, router)
-	key := ModelKey{Provider: "p", Model: "a"}
-
-	queued := make(chan ModelKey, 1)
-	router.admission.queuedHook = func(k ModelKey) { queued <- k }
-
-	release, aErr := router.acquireSlot(ctx, key)
-	if aErr != nil {
-		t.Fatalf("manual acquireSlot() error: %v", aErr)
-	}
-	defer release()
-
-	done := make(chan error, 1)
-	go func() {
-		_, rErr := router.Route(ctx, RoutingRequest{
+func TestRoute_CloseMidProbeReturnsRouterClosed(t *testing.T) {
+	requests := []struct {
+		name string
+		req  RoutingRequest
+	}{
+		{"direct", RoutingRequest{
+			UseCase:      "chat",
+			RequiredCaps: CapChat | CapToolCall,
+			Model:        "p/a",
+			Messages:     []ChatMessage{{Role: "user", Content: "hi"}},
+		}},
+		{"strict chain", RoutingRequest{
 			UseCase:        "chat",
 			RequiredCaps:   CapChat | CapToolCall,
 			PreferredChain: []string{"p/a"},
 			StrictChain:    true,
 			Messages:       []ChatMessage{{Role: "user", Content: "hi"}},
+		}},
+	}
+	for _, tc := range requests {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			provReg := NewRegistry()
+			if err := provReg.Register(&fakeChainProvider{name: "p", models: []string{"a"}}); err != nil {
+				t.Fatalf("register provider: %v", err)
+			}
+			store := newFakeCapProbeStore()
+			prober := newFakeToolCallProber()
+			prober.outcomes["a"] = fingerprint.CapProbeOutcome{State: fingerprint.CapProbeYes}
+			mr, err := NewModelRegistry(provReg, nil,
+				WithCapabilityProbeStore(store),
+				WithCapabilityProber(capProberFactory(prober)),
+			)
+			if err != nil {
+				t.Fatalf("new model registry: %v", err)
+			}
+			seedChainProfile(t, mr, &ModelProfile{
+				Key:           ModelKey{Provider: "p", Model: "a"},
+				Caps:          CapChat | CapGenerate | CapStream,
+				Quality:       TierGood,
+				Speed:         TierGood,
+				ContextWindow: 8192,
+			})
+			if err := provReg.RefreshModels(ctx, "p"); err != nil {
+				t.Fatalf("refresh models: %v", err)
+			}
+			router := NewRouter(mr, provReg, WithSlotSource(&fakeSlotSource{capacity: 1, governed: true}))
+			cleanupRouter(t, router)
+			key := ModelKey{Provider: "p", Model: "a"}
+			queued := make(chan ModelKey, 1)
+			router.admission.queuedHook = func(k ModelKey) { queued <- k }
+
+			release, err := router.acquireSlot(ctx, key)
+			if err != nil {
+				t.Fatalf("manual acquireSlot() error: %v", err)
+			}
+			defer release()
+
+			done := make(chan error, 1)
+			go func() {
+				_, err := router.Route(ctx, tc.req)
+				done <- err
+			}()
+			select {
+			case <-queued:
+			case <-time.After(2 * time.Second):
+				t.Fatal("probe did not queue behind the held permit")
+			}
+			if err := router.Close(); err != nil {
+				t.Fatalf("Close() error: %v", err)
+			}
+
+			select {
+			case routeErr := <-done:
+				if !errors.Is(routeErr, ErrRouterClosed) {
+					t.Fatalf("Route() error = %v, want ErrRouterClosed", routeErr)
+				}
+				if errors.Is(routeErr, ErrNoViableCandidate) {
+					t.Fatalf("Route() error = %v, must not classify router closure as no viable candidate", routeErr)
+				}
+			case <-time.After(2 * time.Second):
+				t.Fatal("Route did not finish after close")
+			}
 		})
-		done <- rErr
-	}()
-
-	select {
-	case <-queued:
-	case <-time.After(2 * time.Second):
-		t.Fatal("probe did not queue behind the held permit")
-	}
-	if err := router.Close(); err != nil {
-		t.Fatalf("Close() error: %v", err)
-	}
-
-	var routeErr error
-	select {
-	case routeErr = <-done:
-	case <-time.After(2 * time.Second):
-		t.Fatal("Route did not finish after close")
-	}
-	// The caller's ctx is alive, so close-mid-probe stays a routing
-	// verdict: no-viable-candidate whose stringified diagnostics carry
-	// the router-closed text. Diagnostics remain %s-joined, so the
-	// route error deliberately does NOT errors.Is-match ErrRouterClosed.
-	if !errors.Is(routeErr, ErrNoViableCandidate) {
-		t.Fatalf("Route() error = %v, want ErrNoViableCandidate", routeErr)
-	}
-	if !strings.Contains(routeErr.Error(), ErrRouterClosed.Error()) {
-		t.Fatalf("Route() error %q does not carry the router-closed diagnostic", routeErr)
-	}
-	if errors.Is(routeErr, ErrRouterClosed) {
-		t.Fatalf("Route() error = %v, diagnostics must stay stringified", routeErr)
 	}
 }
 
