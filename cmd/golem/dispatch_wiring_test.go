@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -313,7 +314,7 @@ func invokeDispatch(t *testing.T, tool agent.Tool, tasks []string) dispatchTestE
 // behind task 1 (single model calls ran 76-347s). Golem therefore budgets the
 // library's per-task ceiling times the 4-task maximum.
 func TestNewDispatchTool_TimeoutCoversAllSequentialTasks(t *testing.T) {
-	tool, err := newDispatchTool(&specRecordingCaller{}, false, agent.Budget{}, validDispatchAvailable(t))
+	tool, err := newDispatchTool(&specRecordingCaller{}, false, agent.Budget{}, dispatchFanout{maxConcurrent: 1}, nil, validDispatchAvailable(t))
 	if err != nil {
 		t.Fatalf("newDispatchTool: %v", err)
 	}
@@ -329,7 +330,7 @@ func TestNewDispatchTool_TimeoutCoversAllSequentialTasks(t *testing.T) {
 // child fail at invocation time. A mutation that stops threading the budget
 // also flips this test (the library default ceiling would pass validation).
 func TestNewDispatchTool_TinyCeilingFailsLoudly(t *testing.T) {
-	_, err := newDispatchTool(&specRecordingCaller{}, false, agent.Budget{InputCeiling: 500}, validDispatchAvailable(t))
+	_, err := newDispatchTool(&specRecordingCaller{}, false, agent.Budget{InputCeiling: 500}, dispatchFanout{maxConcurrent: 1}, nil, validDispatchAvailable(t))
 	if err == nil {
 		t.Fatal("a 500-token ceiling cannot hold the default child output reserve; construction must fail loudly")
 	}
@@ -345,7 +346,7 @@ func TestNewDispatchTool_TinyCeilingFailsLoudly(t *testing.T) {
 // reserve and fails this test.
 func TestNewDispatchTool_ChildBudgetThreadsThroughRuns(t *testing.T) {
 	caller := &specRecordingCaller{}
-	tool, err := newDispatchTool(caller, false, agent.Budget{InputCeiling: 9000, OutputReserve: 777}, validDispatchAvailable(t))
+	tool, err := newDispatchTool(caller, false, agent.Budget{InputCeiling: 9000, OutputReserve: 777}, dispatchFanout{maxConcurrent: 1}, nil, validDispatchAvailable(t))
 	if err != nil {
 		t.Fatalf("newDispatchTool: %v", err)
 	}
@@ -370,7 +371,7 @@ func TestNewDispatchTool_ChildrenSeeExactlyTheReadToolset(t *testing.T) {
 				available = append(available, &sentinelRetrieve{})
 			}
 			caller := &specRecordingCaller{}
-			tool, err := newDispatchTool(caller, false, agent.Budget{}, available)
+			tool, err := newDispatchTool(caller, false, agent.Budget{}, dispatchFanout{maxConcurrent: 1}, nil, available)
 			if err != nil {
 				t.Fatalf("newDispatchTool: %v", err)
 			}
@@ -413,7 +414,7 @@ func (c *retrieveCallingCaller) Chat(_ context.Context, req provider.ChatRequest
 
 func TestNewDispatchTool_ChildInvokesTheSharedRetrieveInstance(t *testing.T) {
 	sentinel := &sentinelRetrieve{}
-	tool, err := newDispatchTool(&retrieveCallingCaller{}, false, agent.Budget{}, append(validDispatchAvailable(t), sentinel))
+	tool, err := newDispatchTool(&retrieveCallingCaller{}, false, agent.Budget{}, dispatchFanout{maxConcurrent: 1}, nil, append(validDispatchAvailable(t), sentinel))
 	if err != nil {
 		t.Fatalf("newDispatchTool: %v", err)
 	}
@@ -461,7 +462,8 @@ func (c *gatedSerialCaller) Chat(ctx context.Context, req provider.ChatRequest, 
 	if onToken != nil {
 		_ = onToken(resp)
 	}
-	return agent.ModelResult{Response: resp}, nil
+	outcome := &provider.RouteOutcome{ActualModel: provider.ModelKey{Provider: "local", Model: "fast"}}
+	return agent.ModelResult{Response: resp, RouteOutcome: outcome}, nil
 }
 
 // TestNewDispatchTool_ChildrenRunSequentially proves golem keeps the library's
@@ -474,7 +476,7 @@ func TestNewDispatchTool_ChildrenRunSequentially(t *testing.T) {
 	for _, task := range tasks {
 		caller.gates[task] = make(chan struct{})
 	}
-	tool, err := newDispatchTool(caller, false, agent.Budget{}, validDispatchAvailable(t))
+	tool, err := newDispatchTool(caller, false, agent.Budget{}, dispatchFanout{maxConcurrent: 1}, nil, validDispatchAvailable(t))
 	if err != nil {
 		t.Fatalf("newDispatchTool: %v", err)
 	}
@@ -523,5 +525,140 @@ func TestNewDispatchTool_ChildrenRunSequentially(t *testing.T) {
 	}
 	if got := caller.max.Load(); got != 1 {
 		t.Fatalf("concurrent children high-water mark = %d, want 1", got)
+	}
+}
+
+// TestNewDispatchTool_ChildrenUseGovernedFanout proves newDispatchTool threads
+// the fan-out policy into DispatchLimits: with a governor returning 2 under a
+// ceiling of 4, exactly two children run per wave and the governor is read
+// once for the whole invocation.
+func TestNewDispatchTool_ChildrenUseGovernedFanout(t *testing.T) {
+	tasks := []string{"alpha", "beta", "gamma", "delta"}
+	caller := &gatedSerialCaller{
+		started: make(chan string, len(tasks)),
+		gates:   map[string]chan struct{}{},
+	}
+	for _, task := range tasks {
+		caller.gates[task] = make(chan struct{})
+	}
+	var governorReads atomic.Int32
+	tool, err := newDispatchTool(
+		caller, false, agent.Budget{},
+		dispatchFanout{
+			maxConcurrent: 4,
+			governor: func() int {
+				governorReads.Add(1)
+				return 2
+			},
+		}, nil,
+		validDispatchAvailable(t),
+	)
+	if err != nil {
+		t.Fatalf("newDispatchTool: %v", err)
+	}
+	type invokeResult struct {
+		out agent.ToolResult
+		err error
+	}
+	done := make(chan invokeResult, 1)
+	go func() {
+		raw, err := json.Marshal(map[string][]string{"tasks": tasks})
+		if err != nil {
+			done <- invokeResult{err: err}
+			return
+		}
+		out, err := tool.Invoke(context.Background(), raw)
+		done <- invokeResult{out: out, err: err}
+	}()
+	recvWave := func() []string {
+		t.Helper()
+		wave := make([]string, 0, 2)
+		for range 2 {
+			select {
+			case task := <-caller.started:
+				wave = append(wave, task)
+			case <-time.After(5 * time.Second):
+				t.Fatal("governed child wave did not start")
+			}
+		}
+		return wave
+	}
+	firstWave := recvWave()
+	// This is an absence/liveness watchdog, not a performance assertion: a
+	// dropped governor admits the third child while the first wave is gated.
+	select {
+	case task := <-caller.started:
+		t.Fatalf("child %q exceeded governed fan-out 2", task)
+	case <-time.After(200 * time.Millisecond):
+	}
+	for _, task := range firstWave {
+		close(caller.gates[task])
+	}
+	secondWave := recvWave()
+	for _, task := range secondWave {
+		close(caller.gates[task])
+	}
+	select {
+	case got := <-done:
+		if got.err != nil || got.out.IsError {
+			t.Fatalf("dispatch Invoke = %+v, %v", got.out, got.err)
+		}
+		var envelope dispatchTestEnvelope
+		if err := json.Unmarshal([]byte(got.out.Content), &envelope); err != nil {
+			t.Fatalf("decode envelope: %v", err)
+		}
+		if len(envelope.Results) != len(tasks) {
+			t.Fatalf("result count = %d, want %d", len(envelope.Results), len(tasks))
+		}
+		for i, result := range envelope.Results {
+			if result.Model != "local/fast" {
+				t.Fatalf("result %d model = %q, want local/fast", i, result.Model)
+			}
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("dispatch did not finish")
+	}
+	if got := caller.max.Load(); got != 2 {
+		t.Fatalf("concurrent children = %d, want 2", got)
+	}
+	if got := governorReads.Load(); got != 1 {
+		t.Fatalf("governor reads = %d, want 1", got)
+	}
+}
+
+// TestNewDispatchTool_CompletionNoticeUsesReboundSink proves per-child
+// completion notices flow through the late-bound feedbackNotifier into
+// replControl's mid-turn stderr path -- the same rebind main performs -- and
+// never the stale initial sink or the renderer's stdout stream.
+func TestNewDispatchTool_CompletionNoticeUsesReboundSink(t *testing.T) {
+	var fallback atomic.Int32
+	notifier := newFeedbackNotifier(func(string) { fallback.Add(1) })
+	tool, err := newDispatchTool(
+		&specRecordingCaller{}, false, agent.Budget{},
+		dispatchFanout{maxConcurrent: 1}, notifier.notify,
+		validDispatchAvailable(t),
+	)
+	if err != nil {
+		t.Fatalf("newDispatchTool: %v", err)
+	}
+	var stdout, stderr bytes.Buffer
+	ctrl := newReplControl(&stdout, &stderr, make(chan struct{}, 1), func() {})
+	ctrl.enterTurn()
+	notifier.set(ctrl.notice) // same late bind main performs before any turn
+	invokeDispatch(t, tool, []string{"one", "two"})
+	if fallback.Load() != 0 {
+		t.Fatalf("completion used stale fallback sink %d time(s)", fallback.Load())
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("mid-turn completion touched stdout: %q", stdout.String())
+	}
+	got := stderr.String()
+	for _, want := range []string{
+		"dispatch: child 1/2 finished",
+		"dispatch: child 2/2 finished",
+	} {
+		if strings.Count(got, want) != 1 {
+			t.Fatalf("completion notice %q count != 1 in %q", want, got)
+		}
 	}
 }

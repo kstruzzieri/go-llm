@@ -78,7 +78,7 @@ func dispatchSystemFragment(enabled bool) string {
 	if !enabled {
 		return ""
 	}
-	return " For broad read-only investigation you may call dispatch with up to a few independent exploration tasks; they run sequentially, each in a bounded child agent with only file-reading and retrieval tools, and each returns a summary, its stop reason, and the model that produced it. Use dispatch to keep bulk exploration out of your own context; children cannot modify anything or dispatch further children, and their summaries are evidence to verify, not conclusions to repeat blindly."
+	return " For broad read-only investigation you may call dispatch with up to a few independent exploration tasks; they run with backend-governed bounded concurrency when every routed backend is slot-governed and stay serial when any backend is ungoverned. Each runs in a bounded child agent with only file-reading and retrieval tools and returns a summary, its stop reason, and the model that produced it. Use dispatch to keep bulk exploration out of your own context; children cannot modify anything or dispatch further children, and their summaries are evidence to verify, not conclusions to repeat blindly."
 }
 
 // dispatchUseCase is the routing use-case for dispatch child agents. It names
@@ -165,24 +165,38 @@ func resolveDispatchFanout(capacity func(provider.ModelKey) (int, bool), chain [
 }
 
 // newDispatchTool is the caller-injectable seam of the dispatch wiring: tests
-// drive child behavior (toolset pass-through, retrieve reuse, serial
-// execution, budget threading) through it with a scripted caller, which a
-// *provider.Router cannot fake. mixed mirrors -progressive so child context
-// assembly matches the shared retrieve renderer, the same pairing
+// drive child behavior (toolset pass-through, retrieve reuse, fan-out,
+// budget threading, completion notices) through it with a scripted caller,
+// which a *provider.Router cannot fake. mixed mirrors -progressive so child
+// context assembly matches the shared retrieve renderer, the same pairing
 // newOrchestratorFactory enforces for the parent. budget carries the resolved
 // input ceiling and output reserve for the chain children route, so a child
 // never assembles a request larger than its backend accepts; zero fields fall
-// back to library defaults. Remaining limits keep every library default —
-// MaxConcurrent=1 (sequential children; fan-out is #403), 4 tasks, 6 steps,
-// 32k tokens per child — except Timeout: the library's 5m bounds the WHOLE
-// invocation, and a live two-task run on gemma4:31b measured task 2 starving
-// behind task 1 (single model calls ran 76-347s), so golem budgets that
-// per-task ceiling times the 4-task maximum. Revisit with governed fan-out
-// (#403).
-func newDispatchTool(caller agent.ModelCaller, mixed bool, budget agent.Budget, available []agent.Tool) (agent.Tool, error) {
+// back to library defaults. fan carries the resolved fan-out policy (#403):
+// a static ceiling plus the per-invocation capacity governor from
+// resolveDispatchFanout; the validated models.<role>.slots override reaches
+// it through Router.SlotCapacity, so no separate worker knob exists. notify,
+// when non-nil, receives one display-only line per completed child (#402
+// rider) from child goroutines after their permits release; golem points it
+// at the late-bound notice sink. Remaining limits keep every library
+// default — 4 tasks, 6 steps, 32k tokens per child — except Timeout: the
+// library's 5m bounds the WHOLE invocation, and a live two-task run on
+// gemma4:31b measured task 2 starving behind task 1 (single model calls ran
+// 76-347s), so golem budgets that per-task ceiling times the 4-task maximum;
+// governed fan-out only shrinks wall clock below that worst case.
+func newDispatchTool(caller agent.ModelCaller, mixed bool, budget agent.Budget, fan dispatchFanout, notify func(string), available []agent.Tool) (agent.Tool, error) {
+	var onChildComplete func(int, int)
+	if notify != nil {
+		onChildComplete = func(index, total int) {
+			notify(fmt.Sprintf("dispatch: child %d/%d finished", index+1, total))
+		}
+	}
 	dt, err := agenttools.NewDispatch(caller, agent.ContextManager{Mixed: mixed}, available, agenttools.DispatchLimits{
-		Budget:  budget,
-		Timeout: 20 * time.Minute, // 5m per task x 4 max tasks
+		Budget:          budget,
+		MaxConcurrent:   fan.maxConcurrent,
+		Concurrency:     fan.governor,
+		OnChildComplete: onChildComplete,
+		Timeout:         20 * time.Minute, // 5m per task x 4 max tasks
 	})
 	if err != nil {
 		return nil, fmt.Errorf("golem: build dispatch tool: %w", err)

@@ -257,10 +257,13 @@ func TestDispatchSystemFragment(t *testing.T) {
 		t.Fatal("fragment must be empty when dispatch disabled")
 	}
 	on := dispatchSystemFragment(true)
-	for _, want := range []string{"dispatch", "sequential", "read"} {
+	for _, want := range []string{"dispatch", "bounded concurrency", "ungoverned", "serial", "read"} {
 		if !strings.Contains(on, want) {
 			t.Fatalf("fragment should mention %q: %q", want, on)
 		}
+	}
+	if strings.Contains(on, "sequential") {
+		t.Fatalf("fragment must not claim sequential children under governed fan-out: %q", on)
 	}
 	for _, banned := range []string{"write_file", "edit_file", "run_command"} {
 		if strings.Contains(on, banned) {
@@ -271,7 +274,7 @@ func TestDispatchSystemFragment(t *testing.T) {
 
 func TestNewDispatchTool_MissingFileToolsError(t *testing.T) {
 	// Valid caller and budget: the ONLY invalid input is the empty available set.
-	_, err := newDispatchTool(&specRecordingCaller{}, false, agent.Budget{}, nil)
+	_, err := newDispatchTool(&specRecordingCaller{}, false, agent.Budget{}, dispatchFanout{maxConcurrent: 1}, nil, nil)
 	if err == nil {
 		t.Fatal("empty available set must error: children need the file readers")
 	}
