@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"golang.org/x/sync/errgroup"
 	"golang.org/x/sync/singleflight"
 
 	"github.com/kstruzzieri/go-llm/fingerprint"
@@ -548,6 +549,16 @@ func (r *ModelRegistry) canResolveToolCall() bool {
 	return r != nil && r.capProber != nil && r.capProbeStore != nil
 }
 
+// capResolveLimit bounds distinct unresolved-key resolution jobs within
+// one EnsureToolCallResolved call. With U distinct keys, immediately
+// available admission, and uniform probe durations, latency is
+// approximately ceil(U/4) x ~30s; admission queueing and concurrent
+// callers may extend it. The bound is per invocation -- not process-,
+// registry-, or backend-wide (admission is per ModelKey) -- and all four
+// workers may be waiting in admission at once, delaying later runnable
+// candidates: an accepted cold-path head-of-line ceiling.
+const capResolveLimit = 4
+
 // EnsureToolCallResolved resolves tool_call for candidate profiles that
 // lack CapToolCall, returning a slice where probe-yes candidates are
 // replaced by their refreshed profiles. Candidates are NEVER removed --
@@ -557,29 +568,104 @@ func (r *ModelRegistry) canResolveToolCall() bool {
 // No-op (input returned as-is) when resolution is disabled or required
 // does not include CapToolCall.
 //
+// Resolution is bounded-parallel across DISTINCT unresolved keys
+// (capResolveLimit); singleflight remains the cross-caller dedup layer.
+// Within one invocation, unresolved occurrences sharing a ModelKey use
+// one resolution job and receive the same state or transient error.
+// Transient failures are not retried within that invocation and are not
+// persisted; a later invocation may retry. Candidate order, pointer
+// behavior, input immutability, and diagnostic ordering match the former
+// serial implementation exactly; probe timing/attempt counts for
+// duplicate transient failures intentionally do not.
+//
 // The returned errors are per-candidate probe diagnostics labeled with
-// the model key (transient failures: network, auth, ...). They are
-// diagnostics ONLY -- never a rejection signal; the affected candidates
-// stay in the returned slice unchanged -- so operators can distinguish
-// "probe failed (e.g. 401)" from "genuinely not tool-capable" when a
-// route comes up empty. Callers thread them into the route-failure error.
+// the model key (transient failures: network, auth, ...), in candidate
+// index order. They are diagnostics ONLY -- never a rejection signal;
+// the affected candidates stay in the returned slice unchanged -- so
+// operators can distinguish "probe failed (e.g. 401)" from "genuinely
+// not tool-capable" when a route comes up empty. Callers thread them
+// into the route-failure error.
 func (r *ModelRegistry) EnsureToolCallResolved(ctx context.Context, profiles []*ModelProfile, required Capability) ([]*ModelProfile, []error) {
+	out, diagAt := r.ensureToolCallResolvedIndexed(ctx, profiles, required)
+	var diags []error
+	for _, d := range diagAt {
+		if d != nil {
+			diags = append(diags, d)
+		}
+	}
+	return out, diags
+}
+
+// ensureToolCallResolvedIndexed is EnsureToolCallResolved with
+// index-addressed diagnostics: diagAt[i] is candidate i's probe
+// diagnostic or nil. Chain batching consumes this form to repartition
+// per-entry diagnostics without re-deriving order. diagAt is nil on the
+// disabled/no-required fast path (input returned as-is).
+func (r *ModelRegistry) ensureToolCallResolvedIndexed(ctx context.Context, profiles []*ModelProfile, required Capability) ([]*ModelProfile, []error) {
 	if !r.canResolveToolCall() || !required.Has(CapToolCall) {
 		return profiles, nil
 	}
-	var diags []error
 	out := make([]*ModelProfile, len(profiles))
 	copy(out, profiles)
+
+	// Phase 1: distinct unresolved keys, first-occurrence order. Jobs
+	// launch from the ordered slice, never from map iteration.
+	type capResolution struct {
+		state fingerprint.CapProbeState
+		err   error
+	}
+	var keys []ModelKey
+	results := make(map[ModelKey]*capResolution)
+	for _, p := range out {
+		if p == nil || p.Caps.Has(CapToolCall) {
+			continue
+		}
+		if _, seen := results[p.Key]; seen {
+			continue
+		}
+		results[p.Key] = &capResolution{}
+		keys = append(keys, p.Key)
+	}
+	if len(keys) == 0 {
+		return out, nil
+	}
+
+	// Phase 2: bounded resolution, one job per distinct key. Workers
+	// touch only their own capResolution (the map is not mutated after
+	// phase 1) and never fail the group -- per-key outcomes are data.
+	// A single distinct key resolves inline: no goroutine overhead for
+	// the common warm/qualified-selector case.
+	if len(keys) == 1 {
+		res := results[keys[0]]
+		res.state, res.err = r.ResolveToolCall(ctx, keys[0])
+	} else {
+		var g errgroup.Group
+		g.SetLimit(capResolveLimit)
+		for _, key := range keys {
+			res := results[key]
+			g.Go(func() error {
+				res.state, res.err = r.ResolveToolCall(ctx, key)
+				return nil
+			})
+		}
+		_ = g.Wait() // joins every worker; no goroutine outlives the call
+	}
+
+	// Phase 3: serial replay in input order. Lookup/buildProfile stay
+	// out of the concurrent phase, diagnostics land per occurrence at
+	// their candidate index, and the lost-write fallback clones each
+	// original occurrence.
+	diagAt := make([]error, len(out))
 	for i, p := range out {
 		if p == nil || p.Caps.Has(CapToolCall) {
 			continue
 		}
-		state, err := r.ResolveToolCall(ctx, p.Key)
-		if err != nil {
-			diags = append(diags, fmt.Errorf("resolve tool_call %s: %w", p.Key, err))
+		res := results[p.Key]
+		if res.err != nil {
+			diagAt[i] = fmt.Errorf("resolve tool_call %s: %w", p.Key, res.err)
 			continue
 		}
-		if state != fingerprint.CapProbeYes {
+		if res.state != fingerprint.CapProbeYes {
 			continue
 		}
 		if refreshed, lErr := r.Lookup(ctx, p.Key); lErr == nil && refreshed.Caps.Has(CapToolCall) {
@@ -594,7 +680,7 @@ func (r *ModelRegistry) EnsureToolCallResolved(ctx context.Context, profiles []*
 		cp.Caps |= CapToolCall
 		out[i] = &cp
 	}
-	return out, diags
+	return out, diagAt
 }
 
 // LookupAny returns merged profiles for an unqualified model name across
