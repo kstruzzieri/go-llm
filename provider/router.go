@@ -836,11 +836,13 @@ func joinNoViableCandidate(diags []error) error {
 // Probe diagnostics (second return) are non-fatal; callers surface them
 // only when the route fails.
 //
-// Worst case on cache miss: N unknown models x up to ~30s active probe,
-// resolved sequentially inside EnsureToolCallResolved. Persisted verdicts
-// amortize this to zero on later routes, and the bounded-eager preflight
-// (Task 9) keeps this path rare. Transient-error models re-probe on every
-// route with no backoff — deliberate; add a backoff seam here if it bites.
+// Worst case on cache miss: U distinct unknown models x up to ~30s active
+// probe, resolved bounded-parallel inside EnsureToolCallResolved
+// (capResolveLimit-wide, so roughly ceil(U/4) x ~30s plus any admission
+// queueing). Persisted verdicts amortize this to zero on later routes, and
+// the bounded-eager preflight (Task 9) keeps this path rare.
+// Transient-error models re-probe on every route with no backoff —
+// deliberate; add a backoff seam here if it bites.
 func (r *Router) recommendWithToolCallResolution(ctx context.Context, opts RecommendOpts, reqCaps Capability) ([]*ModelProfile, []error, error) {
 	if !r.registry.canResolveToolCall() || !reqCaps.Has(CapToolCall) {
 		opts.RequiredCaps = reqCaps

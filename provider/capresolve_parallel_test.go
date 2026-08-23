@@ -293,7 +293,7 @@ func TestEnsureToolCallResolved_BoundedFanOutAcrossDistinctKeys(t *testing.T) {
 			t.Fatalf("probes started after one release = %d (%v), want 5", len(got), got)
 		}
 
-		for _, m := range models[0:] {
+		for _, m := range models {
 			gate := prober.gates[m]
 			select {
 			case <-gate:
