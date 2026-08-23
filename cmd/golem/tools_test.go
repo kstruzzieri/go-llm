@@ -11,6 +11,7 @@ import (
 	"github.com/kstruzzieri/go-llm/agent"
 	agenttools "github.com/kstruzzieri/go-llm/agent/tools"
 	"github.com/kstruzzieri/go-llm/config"
+	"github.com/kstruzzieri/go-llm/provider"
 )
 
 // stubTool is a minimal agent.Tool to stand in for retrieve.
@@ -256,10 +257,13 @@ func TestDispatchSystemFragment(t *testing.T) {
 		t.Fatal("fragment must be empty when dispatch disabled")
 	}
 	on := dispatchSystemFragment(true)
-	for _, want := range []string{"dispatch", "sequential", "read"} {
+	for _, want := range []string{"dispatch", "bounded concurrency", "ungoverned", "serial", "read"} {
 		if !strings.Contains(on, want) {
 			t.Fatalf("fragment should mention %q: %q", want, on)
 		}
+	}
+	if strings.Contains(on, "sequential") {
+		t.Fatalf("fragment must not claim sequential children under governed fan-out: %q", on)
 	}
 	for _, banned := range []string{"write_file", "edit_file", "run_command"} {
 		if strings.Contains(on, banned) {
@@ -270,7 +274,7 @@ func TestDispatchSystemFragment(t *testing.T) {
 
 func TestNewDispatchTool_MissingFileToolsError(t *testing.T) {
 	// Valid caller and budget: the ONLY invalid input is the empty available set.
-	_, err := newDispatchTool(&specRecordingCaller{}, false, agent.Budget{}, nil)
+	_, err := newDispatchTool(&specRecordingCaller{}, false, agent.Budget{}, dispatchFanout{maxConcurrent: 1}, nil, nil)
 	if err == nil {
 		t.Fatal("empty available set must error: children need the file readers")
 	}
@@ -295,5 +299,57 @@ func TestEffectClassName(t *testing.T) {
 		if got := effectClassName(c.in); got != c.want {
 			t.Errorf("effectClassName(%v) = %q, want %q", c.in, got, c.want)
 		}
+	}
+}
+
+func TestResolveDispatchFanout(t *testing.T) {
+	head := provider.ModelKey{Provider: "local", Model: "primary"}
+	fallback := provider.ModelKey{Provider: "local", Model: "fallback"}
+	type state struct {
+		n  int
+		ok bool
+	}
+	states := map[provider.ModelKey]state{
+		head:     {n: 3, ok: true},
+		fallback: {n: 1, ok: true},
+	}
+	capacity := func(key provider.ModelKey) (int, bool) {
+		s := states[key]
+		return s.n, s.ok
+	}
+	chain := []string{"local/primary", "local/fallback"}
+
+	fan := resolveDispatchFanout(capacity, chain)
+	if fan.maxConcurrent != agenttools.MaxDispatchTasks || fan.governor == nil {
+		t.Fatalf("governed fanout = %+v", fan)
+	}
+	if got := fan.governor(); got != 3 {
+		t.Fatalf("governor() = %d, want head capacity 3", got)
+	}
+	states[head] = state{n: 4, ok: true}
+	if got := fan.governor(); got != 4 {
+		t.Fatalf("governor() after head refresh = %d, want 4", got)
+	}
+	states[head] = state{n: 0, ok: true}
+	if got := fan.governor(); got != 1 {
+		t.Fatalf("governor() for invalid governed capacity = %d, want serial", got)
+	}
+	states[head] = state{n: 4, ok: true}
+	states[fallback] = state{n: 0, ok: false}
+	if got := fan.governor(); got != 1 {
+		t.Fatalf("governor() after governance loss = %d, want serial", got)
+	}
+
+	states[fallback] = state{n: 0, ok: false}
+	if got := resolveDispatchFanout(capacity, chain); got.maxConcurrent != 1 || got.governor != nil {
+		t.Fatalf("ungoverned fallback = %+v, want static serial", got)
+	}
+	for _, bad := range [][]string{nil, {"bare"}, {"/model"}, {"provider/"}} {
+		if got := resolveDispatchFanout(capacity, bad); got.maxConcurrent != 1 || got.governor != nil {
+			t.Fatalf("chain %v = %+v, want static serial", bad, got)
+		}
+	}
+	if got := resolveDispatchFanout(nil, chain); got.maxConcurrent != 1 || got.governor != nil {
+		t.Fatalf("nil capacity = %+v, want static serial", got)
 	}
 }

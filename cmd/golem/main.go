@@ -111,7 +111,7 @@ func parseFlags(args []string) (flags, error) {
 	fs.BoolVar(&f.allowExec, "allow-exec", false, "enable the approval-gated run_command exec tool")
 	fs.BoolVar(&f.delegate, "delegate", false, "enable the delegate_code tool (route a scoped codegen sub-task to a specialist model)")
 	fs.StringVar(&f.delegateRole, "delegate-role", "coding", "model role the delegate_code tool routes to")
-	fs.BoolVar(&f.dispatch, "dispatch", false, "enable the dispatch tool (bounded read-only exploration tasks run sequentially in child agents)")
+	fs.BoolVar(&f.dispatch, "dispatch", false, "enable the dispatch tool (bounded read-only exploration tasks use backend-governed concurrency; ungoverned routing stays serial)")
 	fs.StringVar(&f.dispatchRole, "dispatch-role", "", "model role dispatch child agents route to (default: the primary agent chain, so children never force a model swap)")
 	fs.Var(&f.mcpStdio, "mcp-stdio", "attach an MCP server over stdio: \"[alias=]command args...\" (repeatable; use `env KEY=val cmd` for env vars)")
 	fs.Var(&f.mcpHTTP, "mcp-http", "attach an MCP server over streamable HTTP: \"[alias=]https://endpoint\" (repeatable)")
@@ -810,6 +810,11 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 
 	// Dispatch is built here, before memory/write/exec/delegate/MCP are
 	// appended, so the child-visible set is exactly the read-only tools above.
+	// dispatchNotice is the late-binding seam for per-child completion lines:
+	// it starts on plain stderr (the one-shot path keeps that) and the
+	// interactive branch rebinds it to replControl.notice before any turn can
+	// invoke dispatch, mirroring feedbackSvc.warn.
+	var dispatchNotice *feedbackNotifier
 	dispatchLine := ""
 	if f.dispatch {
 		dchain, derr := resolveDispatchChain(bundle.Config, f.dispatchRole, plan.chain)
@@ -830,8 +835,12 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 			}
 			childCeiling = resolveInputCeiling(ctx, bundle.Models, dchain, f.inputCeiling, f.outputReserve, resolver != nil).ceiling
 		}
+		dispatchNotice = newFeedbackNotifier(func(line string) {
+			_, _ = fmt.Fprintln(stderr, line)
+		})
+		fan := resolveDispatchFanout(bundle.Router.SlotCapacity, dchain)
 		caller := newRouterChainCallerFor(bundle.Router, dchain, dispatchUseCase)
-		dpt, derr := newDispatchTool(caller, f.progressive, agent.Budget{InputCeiling: childCeiling, OutputReserve: f.outputReserve}, tools)
+		dpt, derr := newDispatchTool(caller, f.progressive, agent.Budget{InputCeiling: childCeiling, OutputReserve: f.outputReserve}, fan, dispatchNotice.notify, tools)
 		if derr != nil {
 			return derr
 		}
@@ -1107,6 +1116,9 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 		sess.control = ctrl
 		if feedbackSvc != nil {
 			feedbackSvc.warn.set(ctrl.notice)
+		}
+		if dispatchNotice != nil {
+			dispatchNotice.set(ctrl.notice)
 		}
 		notice = ctrl.notice
 		onInterrupt = ctrl.interrupt

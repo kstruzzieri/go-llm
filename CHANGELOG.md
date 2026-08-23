@@ -36,6 +36,27 @@ merged capabilities never touch admission.
   `ModelRegistry`; `NewRouter` installs itself as the registry's probe
   admission gate.
 
+### Added — governed dispatch fan-out and per-child progress (#403)
+
+Golem's `-dispatch` tool now runs children concurrently when every backend
+in the child chain is slot-governed, sized per invocation from the chain
+head's discovered slot capacity (`min(capacity, 4, tasks)`); ungoverned or
+unknown routing stays serial, and the existing validated
+`models.<role>.slots` override feeds sizing through `Router.SlotCapacity`.
+Router admission (#400) remains the oversubscription guard — fan-out sizing
+is quality of service only. Each completed child now emits a display-only
+`dispatch: task #<index> finished (<count> total)` notice (stderr mid-turn),
+where the index identifies the input task and notices may arrive out of order.
+
+Library API (`agent/tools`): `DispatchLimits` gains two optional function
+fields — `Concurrency func() int`, read once per Invoke and clamped to
+`[1, MaxConcurrent]`, and `OnChildComplete func(index, total int)`, called
+from child goroutines after both dispatch permits release. The struct is
+therefore no longer comparable. `MaxDispatchTasks` (4) is now exported. The
+instance-wide `MaxConcurrent` bound across overlapping invocations is
+unchanged; the dispatch envelope and `agent.Observer` contract are
+unchanged.
+
 ### Added — golem: REPL line editing, goal history, and multiline input (#340)
 
 The interactive `golem` prompt is now a real line editor
