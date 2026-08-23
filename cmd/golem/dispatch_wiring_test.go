@@ -759,6 +759,62 @@ func TestNewDispatchTool_ChildrenUseGovernedFanout(t *testing.T) {
 	}
 }
 
+// TestNewDispatchTool_OutOfOrderCompletionNoticeNamesTask proves the notice
+// number identifies the input task instead of masquerading as a completion
+// count when parallel children finish out of order.
+func TestNewDispatchTool_OutOfOrderCompletionNoticeNamesTask(t *testing.T) {
+	oneGate := make(chan struct{})
+	twoGate := make(chan struct{})
+	close(twoGate)
+	var releaseOne sync.Once
+	t.Cleanup(func() { releaseOne.Do(func() { close(oneGate) }) })
+	caller := &gatedSerialCaller{
+		started: make(chan string, 2),
+		gates:   map[string]chan struct{}{"one": oneGate, "two": twoGate},
+	}
+	notices := make(chan string, 2)
+	tool, err := newDispatchTool(
+		caller, false, agent.Budget{}, dispatchFanout{maxConcurrent: 2},
+		func(line string) { notices <- line }, validDispatchAvailable(t),
+	)
+	if err != nil {
+		t.Fatalf("newDispatchTool: %v", err)
+	}
+	done := make(chan error, 1)
+	go func() {
+		out, err := tool.Invoke(context.Background(), json.RawMessage(`{"tasks":["one","two"]}`))
+		if err == nil && out.IsError {
+			err = fmt.Errorf("dispatch returned an error result: %s", out.Content)
+		}
+		done <- err
+	}()
+	select {
+	case got := <-notices:
+		if want := "dispatch: task #2 finished (2 total)"; got != want {
+			t.Fatalf("first completion notice = %q, want %q", got, want)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("second input task did not finish")
+	}
+	releaseOne.Do(func() { close(oneGate) })
+	select {
+	case got := <-notices:
+		if want := "dispatch: task #1 finished (2 total)"; got != want {
+			t.Fatalf("second completion notice = %q, want %q", got, want)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("first input task did not finish")
+	}
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("dispatch Invoke: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("dispatch did not finish")
+	}
+}
+
 // TestNewDispatchTool_CompletionNoticeUsesReboundSink proves per-child
 // completion notices flow through the late-bound feedbackNotifier into
 // replControl's mid-turn stderr path -- the same rebind main performs -- and
@@ -787,8 +843,8 @@ func TestNewDispatchTool_CompletionNoticeUsesReboundSink(t *testing.T) {
 	}
 	got := stderr.String()
 	for _, want := range []string{
-		"dispatch: child 1/2 finished",
-		"dispatch: child 2/2 finished",
+		"dispatch: task #1 finished (2 total)",
+		"dispatch: task #2 finished (2 total)",
 	} {
 		if strings.Count(got, want) != 1 {
 			t.Fatalf("completion notice %q count != 1 in %q", want, got)

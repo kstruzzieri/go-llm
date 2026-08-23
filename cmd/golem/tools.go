@@ -188,7 +188,7 @@ func newDispatchTool(caller agent.ModelCaller, mixed bool, budget agent.Budget, 
 	var onChildComplete func(int, int)
 	if notify != nil {
 		onChildComplete = func(index, total int) {
-			notify(fmt.Sprintf("dispatch: child %d/%d finished", index+1, total))
+			notify(fmt.Sprintf("dispatch: task #%d finished (%d total)", index+1, total))
 		}
 	}
 	dt, err := agenttools.NewDispatch(caller, agent.ContextManager{Mixed: mixed}, available, agenttools.DispatchLimits{

@@ -15,7 +15,8 @@ unknown routing stays serial, and the existing validated
 `models.<role>.slots` override feeds sizing through `Router.SlotCapacity`.
 Router admission (#400) remains the oversubscription guard — fan-out sizing
 is quality of service only. Each completed child now emits a display-only
-`dispatch: child i/total finished` notice (stderr mid-turn).
+`dispatch: task #<index> finished (<count> total)` notice (stderr mid-turn),
+where the index identifies the input task and notices may arrive out of order.
 
 Library API (`agent/tools`): `DispatchLimits` gains two optional function
 fields — `Concurrency func() int`, read once per Invoke and clamped to
