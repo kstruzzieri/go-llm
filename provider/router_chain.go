@@ -40,31 +40,63 @@ func (r *Router) routeChain(ctx context.Context, req RoutingRequest) (*RoutePlan
 	// route, including candidates resolved before the failed read.
 	snap := r.buildFeedbackSnapshot(ctx, nil, req.UseCase)
 
-	var lookupErrs []error
-	chainSteps := make([][]*ModelProfile, 0, len(req.PreferredChain))
-	chainSeenForTail := make(map[ModelKey]bool)
-
+	// Chain batching (#401): selectors resolve serially into entry
+	// records -- a lookup error, or a [start,end) range into one flat
+	// candidate slice -- then EVERY entry's tool_call resolution runs as
+	// ONE bounded-parallel EnsureToolCallResolved invocation (distinct
+	// keys, capResolveLimit-wide: roughly ceil(U/4) x ~30s on a cold
+	// chain, plus admission queueing). All chain capability resolution
+	// completes before the first feedback read; selector, profile, and
+	// diagnostic ordering remain stable, while probe timing and
+	// concurrent-feedback observation time are not serial-equivalent.
+	type chainEntry struct {
+		selector   string
+		lookupErr  error
+		start, end int
+	}
+	entries := make([]chainEntry, 0, len(req.PreferredChain))
+	var flat []*ModelProfile
 	for _, selector := range req.PreferredChain {
 		profiles, err := r.resolveChainEntry(ctx, selector)
 		if err != nil {
 			r.recordChainLookupFailure(selector, err)
-			lookupErrs = append(lookupErrs, fmt.Errorf("chain entry %q: %w", selector, err))
+			entries = append(entries, chainEntry{selector: selector, lookupErr: err})
 			continue
 		}
+		entries = append(entries, chainEntry{selector: selector, start: len(flat), end: len(flat) + len(profiles)})
+		flat = append(flat, profiles...)
+	}
 
-		// Route-time lazy tool_call resolution (probe I/O) — strictly
-		// BEFORE this step's snap.readCandidates so feedback-snapshot
-		// reads never interleave with probe I/O and scorers stay pure.
-		// EnsureToolCallResolved never drops candidates; the capability
-		// gate in scoreChainStep remains the single rejection point.
-		// Probe diagnostics join lookupErrs so an exhausted route names
-		// probe failures (401 vs genuinely-not-capable). Worst case on
-		// cache miss: N unknown models x ~30s sequential probe; persisted
-		// verdicts amortize, Task 9's bounded-eager preflight keeps this
-		// rare (see recommendWithToolCallResolution).
-		var resolveDiags []error
-		profiles, resolveDiags = r.registry.EnsureToolCallResolved(ctx, profiles, req.RequiredCaps)
-		lookupErrs = append(lookupErrs, resolveDiags...)
+	// Probe I/O runs strictly BEFORE any snap.readCandidates so
+	// feedback-snapshot reads never interleave with probes and scorers
+	// stay pure. Resolution never drops candidates; the capability gate
+	// in scoreChainStep remains the single rejection point. diagAt is
+	// index-addressed (nil when resolution is disabled or nothing was
+	// unresolved) so the replay below can re-interleave diagnostics per
+	// selector. Persisted verdicts amortize the cold cost, Task 9's
+	// bounded-eager preflight keeps it rare (see
+	// recommendWithToolCallResolution).
+	resolved, diagAt := r.registry.ensureToolCallResolvedIndexed(ctx, flat, req.RequiredCaps)
+
+	// Replay entry records in selector order: each selector contributes
+	// its lookup error, or -- on successful lookup -- its candidates'
+	// probe diagnostics, exactly as the per-selector loop did.
+	var lookupErrs []error
+	chainSteps := make([][]*ModelProfile, 0, len(req.PreferredChain))
+	chainSeenForTail := make(map[ModelKey]bool)
+	for _, e := range entries {
+		if e.lookupErr != nil {
+			lookupErrs = append(lookupErrs, fmt.Errorf("chain entry %q: %w", e.selector, e.lookupErr))
+			continue
+		}
+		profiles := resolved[e.start:e.end]
+		if diagAt != nil {
+			for _, d := range diagAt[e.start:e.end] {
+				if d != nil {
+					lookupErrs = append(lookupErrs, d)
+				}
+			}
+		}
 
 		chainSteps = append(chainSteps, profiles)
 		r.markChainSeenForTail(chainSeenForTail, profiles, req)
