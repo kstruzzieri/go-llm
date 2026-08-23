@@ -344,7 +344,7 @@ func TestResolveDispatchFanout(t *testing.T) {
 	if got := resolveDispatchFanout(capacity, chain); got.maxConcurrent != 1 || got.governor != nil {
 		t.Fatalf("ungoverned fallback = %+v, want static serial", got)
 	}
-	for _, bad := range [][]string{nil, []string{"bare"}, []string{"/model"}, []string{"provider/"}} {
+	for _, bad := range [][]string{nil, {"bare"}, {"/model"}, {"provider/"}} {
 		if got := resolveDispatchFanout(capacity, bad); got.maxConcurrent != 1 || got.governor != nil {
 			t.Fatalf("chain %v = %+v, want static serial", bad, got)
 		}
