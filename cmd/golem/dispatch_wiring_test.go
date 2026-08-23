@@ -140,6 +140,139 @@ func TestRunOneShot_DispatchRegistration(t *testing.T) {
 	}
 }
 
+// TestRunOneShot_DispatchUsesConfiguredSlots covers the production composition
+// in main: the config-derived Router capacity must reach dispatch's governor.
+// The first two child HTTP requests stay blocked while the test proves a third
+// cannot start; a static-serial wiring regression instead times out waiting for
+// the second child.
+func TestRunOneShot_DispatchUsesConfiguredSlots(t *testing.T) {
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	tasks := []string{"alpha", "beta", "gamma", "delta"}
+	started := make(chan string, len(tasks))
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+
+	writeSSE := func(w http.ResponseWriter, chunks ...string) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		for _, chunk := range chunks {
+			_, _ = fmt.Fprintf(w, "data: %s\n\n", chunk)
+		}
+		_, _ = io.WriteString(w, "data: [DONE]\n\n")
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/models":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"data":[{"id":"agent-model"}]}`)
+		case "/v1/chat/completions":
+			var req struct {
+				Messages []struct {
+					Role    string `json:"role"`
+					Content string `json:"content"`
+				} `json:"messages"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			child, toolResult, task := false, false, ""
+			for _, message := range req.Messages {
+				child = child || message.Role == "system" && strings.Contains(message.Content, "read-only exploration subagent")
+				toolResult = toolResult || message.Role == "tool"
+				if message.Role == "user" {
+					task = message.Content
+				}
+			}
+			switch {
+			case child:
+				started <- task
+				select {
+				case <-release:
+				case <-r.Context().Done():
+					return
+				}
+				writeSSE(w,
+					fmt.Sprintf(`{"model":"agent-model","choices":[{"delta":{"content":%q}}]}`, "done "+task),
+					`{"model":"agent-model","choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`,
+				)
+			case toolResult:
+				writeSSE(w,
+					`{"model":"agent-model","choices":[{"delta":{"content":"parent done"}}]}`,
+					`{"model":"agent-model","choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`,
+				)
+			default:
+				writeSSE(w,
+					`{"model":"agent-model","choices":[{"delta":{"tool_calls":[{"index":0,"id":"dispatch-1","type":"function","function":{"name":"dispatch","arguments":"{\"tasks\":[\"alpha\",\"beta\",\"gamma\",\"delta\"]}"}}]}}]}`,
+					`{"model":"agent-model","choices":[{"delta":{},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`,
+				)
+			}
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(server.Close)
+	t.Cleanup(func() { releaseOnce.Do(func() { close(release) }) })
+
+	root := t.TempDir()
+	configPath := filepath.Join(t.TempDir(), "models.json")
+	configJSON := fmt.Sprintf(`{
+  "providers": {"test": {"base_url": %q, "api_format": "openai-compat", "timeout": "5s", "slot_discovery": true}},
+  "models": {
+    "agent": {"name": "agent-model", "provider": "test", "type": "dense", "context_window": 32768,
+      "capabilities": ["chat", "generate", "stream", "tool_call"], "slots": 2}
+  },
+  "defaults": {"agent": "agent"}
+}`, server.URL)
+	if err := os.WriteFile(configPath, []byte(configJSON), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	stdin, stdout, stderr := runTestFiles(t)
+	done := make(chan error, 1)
+	go func() {
+		done <- run([]string{"-config", configPath, "-root", root, "-p", "fan out",
+			"-dispatch", "-no-probe", "-no-cap-probe", "-no-rag", "-no-project-context"}, stdin, stdout, stderr)
+	}()
+
+	startedCount := 0
+	for range 2 {
+		select {
+		case <-started:
+			startedCount++
+		case err := <-done:
+			t.Fatalf("run ended before governed children started: %v\nstdout:\n%s\nstderr:\n%s", err,
+				readRunTestFile(t, stdout), readRunTestFile(t, stderr))
+		case <-time.After(5 * time.Second):
+			t.Fatalf("two governed children did not start concurrently through run wiring: started=%d", startedCount)
+		}
+	}
+	select {
+	case task := <-started:
+		t.Fatalf("child %q exceeded configured slot fan-out 2", task)
+	case <-time.After(200 * time.Millisecond):
+	}
+	releaseOnce.Do(func() { close(release) })
+	for startedCount < len(tasks) {
+		select {
+		case <-started:
+			startedCount++
+		case <-time.After(5 * time.Second):
+			t.Fatalf("started children = %d, want %d", startedCount, len(tasks))
+		}
+	}
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("run: %v\nstderr:\n%s", err, readRunTestFile(t, stderr))
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("one-shot dispatch run did not finish")
+	}
+	if !strings.Contains(readRunTestFile(t, stdout), "parent done") {
+		t.Fatalf("one-shot answer missing from stdout: %q", readRunTestFile(t, stdout))
+	}
+}
+
 // TestRunOneShot_DispatchRolePreflightGate proves an explicit -dispatch-role
 // whose chain has no tool-capable model fails at STARTUP, before any model
 // call: children always carry the file tools, so a chain without tool_call can
