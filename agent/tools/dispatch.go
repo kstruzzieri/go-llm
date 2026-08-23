@@ -19,10 +19,11 @@ const (
 	DispatchToolName = "dispatch"
 	// DefaultDispatchCallsPerRun bounds aggregate fan-out when installed with agent.WithToolInvocationLimit.
 	DefaultDispatchCallsPerRun = 4
+	// MaxDispatchTasks is the hard cap on tasks in one dispatch invocation.
+	MaxDispatchTasks = 4
 
-	maxDispatchTasks             = 4
 	maxDispatchTaskBytes         = 8 * 1024
-	maxDispatchArgsBytes         = maxDispatchTasks*maxDispatchTaskBytes*6 + 1024
+	maxDispatchArgsBytes         = MaxDispatchTasks*maxDispatchTaskBytes*6 + 1024
 	defaultDispatchMaxSteps      = 6
 	defaultDispatchTotalTokens   = 32 * 1024
 	defaultDispatchOutputReserve = 1024
@@ -44,7 +45,18 @@ type DispatchLimits struct {
 	// MaxConcurrent values above one require a ModelCaller, child tools, and a
 	// ContextManager (including any custom Compactor or Estimate) that support
 	// concurrent use.
-	MaxConcurrent   int
+	MaxConcurrent int
+	// Concurrency, when non-nil, is read once at the start of every valid
+	// Invoke. Its result is clamped to [1, MaxConcurrent]. It must be safe
+	// for concurrent use and return promptly.
+	Concurrency func() int
+	// OnChildComplete, when non-nil, is called synchronously after a started
+	// child finishes and after its dispatch permits are released. Index is the
+	// zero-based input task index and total is the invocation's task count.
+	// Calls may overlap and arrive in any order. The callback must be safe for
+	// concurrent use, return promptly, and not panic. It is not called for a
+	// task that never starts.
+	OnChildComplete func(index, total int)
 	MaxSummaryBytes int
 	MaxResultBytes  int
 	Timeout         time.Duration
@@ -128,6 +140,23 @@ func NewDispatch(caller agent.ModelCaller, ctxMgr agent.ContextManager, availabl
 	return &Dispatch{caller: caller, ctxMgr: ctxMgr, tools: tools, limits: limits, slots: make(chan struct{}, limits.MaxConcurrent)}, nil
 }
 
+// invokeConcurrency resolves one invocation's fan-out: the static
+// MaxConcurrent, lowered by the Concurrency governor when one is set. The
+// clamp to [1, MaxConcurrent] means a misbehaving governor can only waste
+// parallelism, never exceed the validated ceiling.
+func (d *Dispatch) invokeConcurrency() int {
+	n := d.limits.MaxConcurrent
+	if d.limits.Concurrency != nil {
+		if governed := d.limits.Concurrency(); governed < n {
+			n = governed
+		}
+	}
+	if n < 1 {
+		return 1
+	}
+	return n
+}
+
 // Spec returns the model-facing dispatch contract.
 func (d *Dispatch) Spec() agent.ToolSpec {
 	return agent.ToolSpec{
@@ -181,20 +210,39 @@ func (d *Dispatch) Invoke(ctx context.Context, raw json.RawMessage) (agent.ToolR
 	envelope := dispatchEnvelope{Results: make([]dispatchResult, len(args.Tasks))}
 	childErrors := make([]error, len(args.Tasks))
 	started := make([]bool, len(args.Tasks))
+	// The invocation-local semaphore applies this invocation's governed size
+	// without weakening the instance-wide d.slots bound shared by overlapping
+	// invocations. Children acquire local then shared, always in that order.
+	invokeSlots := make(chan struct{}, d.invokeConcurrency())
 	var wg sync.WaitGroup
 	for i, task := range args.Tasks {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			select {
-			case d.slots <- struct{}{}:
-			case <-ctx.Done():
-				return
-			}
-			defer func() { <-d.slots }()
-			if ctx.Err() == nil {
+			// The nested function scopes both permit releases so they run
+			// before OnChildComplete: the callback must never hold a slot.
+			startedChild := func() bool {
+				select {
+				case invokeSlots <- struct{}{}:
+				case <-ctx.Done():
+					return false
+				}
+				defer func() { <-invokeSlots }()
+				select {
+				case d.slots <- struct{}{}:
+				case <-ctx.Done():
+					return false
+				}
+				defer func() { <-d.slots }()
+				if ctx.Err() != nil {
+					return false
+				}
 				started[i] = true
 				envelope.Results[i], childErrors[i] = d.runChild(ctx, task)
+				return true
+			}()
+			if startedChild && d.limits.OnChildComplete != nil {
+				d.limits.OnChildComplete(i, len(args.Tasks))
 			}
 		}()
 	}
@@ -425,7 +473,7 @@ func normalizeDispatchLimits(limits DispatchLimits) (DispatchLimits, error) {
 		limits.MaxSteps = defaultDispatchMaxSteps
 	}
 	if limits.MaxTasks == 0 {
-		limits.MaxTasks = maxDispatchTasks
+		limits.MaxTasks = MaxDispatchTasks
 	}
 	if limits.MaxConcurrent == 0 {
 		limits.MaxConcurrent = 1
@@ -448,8 +496,8 @@ func normalizeDispatchLimits(limits DispatchLimits) (DispatchLimits, error) {
 	if limits.Budget.TotalTokens == 0 {
 		limits.Budget.TotalTokens = defaultDispatchTotalTokens
 	}
-	if limits.MaxTasks > maxDispatchTasks {
-		return DispatchLimits{}, fmt.Errorf("tools: dispatch: max tasks %d exceeds hard cap %d", limits.MaxTasks, maxDispatchTasks)
+	if limits.MaxTasks > MaxDispatchTasks {
+		return DispatchLimits{}, fmt.Errorf("tools: dispatch: max tasks %d exceeds hard cap %d", limits.MaxTasks, MaxDispatchTasks)
 	}
 	if limits.MaxConcurrent > limits.MaxTasks {
 		return DispatchLimits{}, fmt.Errorf("tools: dispatch: max concurrent children %d exceeds max tasks %d", limits.MaxConcurrent, limits.MaxTasks)

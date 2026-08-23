@@ -46,9 +46,11 @@ func TestDispatchCancellationStopsActiveChildrenAndSkipsQueuedChildren(t *testin
 		dispatchNamedTool{name: "glob", effect: read},
 		dispatchNamedTool{name: "list", effect: read},
 	}
+	var completions atomic.Int32
 	tool, err := NewDispatch(caller, agent.ContextManager{}, available, DispatchLimits{
 		MaxSteps: 2, Budget: agent.Budget{InputCeiling: 4096, OutputReserve: 123, TotalTokens: 10_000},
 		MaxTasks: 4, MaxConcurrent: 2, MaxSummaryBytes: 1024, MaxResultBytes: 4096, Timeout: time.Minute,
+		OnChildComplete: func(int, int) { completions.Add(1) },
 	})
 	if err != nil {
 		t.Fatalf("NewDispatch: %v", err)
@@ -82,6 +84,9 @@ func TestDispatchCancellationStopsActiveChildrenAndSkipsQueuedChildren(t *testin
 	case task := <-caller.started:
 		t.Fatalf("queued child %q started after cancellation", task)
 	default:
+	}
+	if got := completions.Load(); got != 2 {
+		t.Fatalf("completion callbacks = %d, want 2 (started children only)", got)
 	}
 }
 
@@ -660,7 +665,10 @@ func TestDispatchPreservesModelIdentityOnFirstCallError(t *testing.T) {
 		dispatchNamedTool{name: "glob", effect: read},
 		dispatchNamedTool{name: "list", effect: read},
 	}
-	tool, err := NewDispatch(firstCallErrorDispatchCaller{}, agent.ContextManager{}, available, DispatchLimits{})
+	var completions atomic.Int32
+	tool, err := NewDispatch(firstCallErrorDispatchCaller{}, agent.ContextManager{}, available, DispatchLimits{
+		OnChildComplete: func(int, int) { completions.Add(1) },
+	})
 	if err != nil {
 		t.Fatalf("NewDispatch: %v", err)
 	}
@@ -675,6 +683,9 @@ func TestDispatchPreservesModelIdentityOnFirstCallError(t *testing.T) {
 	got := envelope.Results[0]
 	if !out.IsError || got.Model != "local/fast" || got.StopReason != "error" || !strings.Contains(got.Error, "child stream failed") || strings.Contains(got.Error, "identity unavailable") {
 		t.Fatalf("result = %+v; tool error = %v", got, out.IsError)
+	}
+	if gotCalls := completions.Load(); gotCalls != 1 {
+		t.Fatalf("completion callbacks = %d, want 1 (failed child still started)", gotCalls)
 	}
 }
 
@@ -1148,5 +1159,148 @@ func TestDispatchBoundsConcurrencyAndPreservesResultOrder(t *testing.T) {
 		if envelope.Results[i].Summary != "summary: "+task {
 			t.Fatalf("result %d = %+v, want task %q", i, envelope.Results[i], task)
 		}
+	}
+}
+
+func TestInvokeConcurrencyClampsGovernor(t *testing.T) {
+	tests := []struct {
+		name     string
+		max, got int
+		want     int
+	}{
+		{"lowered", 4, 2, 2},
+		{"above ceiling", 2, 99, 2},
+		{"zero is serial", 4, 0, 1},
+		{"negative is serial", 4, -3, 1},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			d := &Dispatch{limits: DispatchLimits{
+				MaxConcurrent: tc.max,
+				Concurrency:   func() int { return tc.got },
+			}}
+			if got := d.invokeConcurrency(); got != tc.want {
+				t.Fatalf("invokeConcurrency() = %d, want %d", got, tc.want)
+			}
+		})
+	}
+	if got := (&Dispatch{limits: DispatchLimits{MaxConcurrent: 3}}).invokeConcurrency(); got != 3 {
+		t.Fatalf("nil governor = %d, want 3", got)
+	}
+}
+
+func TestDispatchGovernorReadOncePerInvocation(t *testing.T) {
+	read := agent.Effect{Class: agent.Read, Approval: agent.ApprovalNever}
+	available := []agent.Tool{
+		dispatchNamedTool{name: "read_file", effect: read},
+		dispatchNamedTool{name: "search", effect: read},
+		dispatchNamedTool{name: "glob", effect: read},
+		dispatchNamedTool{name: "list", effect: read},
+	}
+	var reads atomic.Int32
+	tool, err := NewDispatch(&dispatchCaller{}, agent.ContextManager{}, available, DispatchLimits{
+		MaxTasks: 4, MaxConcurrent: 4,
+		Concurrency: func() int { reads.Add(1); return 1 },
+	})
+	if err != nil {
+		t.Fatalf("NewDispatch: %v", err)
+	}
+	invalid, err := tool.Invoke(context.Background(), json.RawMessage(`{"tasks":[]}`))
+	if err != nil || !invalid.IsError || reads.Load() != 0 {
+		t.Fatalf("invalid Invoke = %+v, %v; governor reads = %d", invalid, err, reads.Load())
+	}
+	for invocation := int32(1); invocation <= 2; invocation++ {
+		if _, err := tool.Invoke(context.Background(), json.RawMessage(`{"tasks":["one"]}`)); err != nil {
+			t.Fatalf("Invoke %d: %v", invocation, err)
+		}
+		if got := reads.Load(); got != invocation {
+			t.Fatalf("governor reads after Invoke %d = %d, want %d", invocation, got, invocation)
+		}
+	}
+}
+
+func TestDispatchCompletionCallbackRunsAfterPermitsRelease(t *testing.T) {
+	caller := &gatedDispatchCaller{
+		started: make(chan string, 2),
+		gates: map[string]chan struct{}{
+			"one": make(chan struct{}),
+			"two": make(chan struct{}),
+		},
+	}
+	read := agent.Effect{Class: agent.Read, Approval: agent.ApprovalNever}
+	available := []agent.Tool{
+		dispatchNamedTool{name: "read_file", effect: read},
+		dispatchNamedTool{name: "search", effect: read},
+		dispatchNamedTool{name: "glob", effect: read},
+		dispatchNamedTool{name: "list", effect: read},
+	}
+	type event struct{ index, total int }
+	events := make(chan event, 2)
+	releaseCallbacks := make(chan struct{})
+	tool, err := NewDispatch(caller, agent.ContextManager{}, available, DispatchLimits{
+		MaxTasks: 2, MaxConcurrent: 1,
+		OnChildComplete: func(index, total int) {
+			events <- event{index: index, total: total}
+			<-releaseCallbacks
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewDispatch: %v", err)
+	}
+	type invokeResult struct {
+		out agent.ToolResult
+		err error
+	}
+	done := make(chan invokeResult, 1)
+	go func() {
+		out, err := tool.Invoke(context.Background(), json.RawMessage(`{"tasks":["one","two"]}`))
+		done <- invokeResult{out: out, err: err}
+	}()
+	recvTask := func(label string) string {
+		t.Helper()
+		select {
+		case task := <-caller.started:
+			return task
+		case <-time.After(2 * time.Second):
+			t.Fatalf("%s child did not start", label)
+			return ""
+		}
+	}
+	recvEvent := func(label string) event {
+		t.Helper()
+		select {
+		case e := <-events:
+			return e
+		case <-time.After(2 * time.Second):
+			t.Fatalf("%s callback did not run", label)
+			return event{}
+		}
+	}
+	firstTask := recvTask("first")
+	close(caller.gates[firstTask])
+	firstEvent := recvEvent("first") // first callback is now blocked
+	secondTask := recvTask("second") // proves both permits were released first
+	close(caller.gates[secondTask])
+	secondEvent := recvEvent("second") // second callback entered while first is blocked
+	close(releaseCallbacks)
+	var got invokeResult
+	select {
+	case got = <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("dispatch did not finish")
+	}
+	if got.err != nil || got.out.IsError {
+		t.Fatalf("Invoke = %+v, %v", got.out, got.err)
+	}
+	select {
+	case extra := <-events:
+		t.Fatalf("extra completion event = %+v", extra)
+	default:
+	}
+	if firstEvent.total != 2 || secondEvent.total != 2 ||
+		firstEvent.index == secondEvent.index ||
+		(firstEvent.index != 0 && firstEvent.index != 1) ||
+		(secondEvent.index != 0 && secondEvent.index != 1) {
+		t.Fatalf("completion events = %+v, %+v", firstEvent, secondEvent)
 	}
 }
