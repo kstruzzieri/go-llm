@@ -640,6 +640,19 @@ func TestBackgroundManagerStateTaxonomy(t *testing.T) {
 	}
 }
 
+// TestBackgroundManagerSentinelErrors proves the frozen error strings carry
+// errors.Is-able sentinels and the two classes never cross-match.
+func TestBackgroundManagerSentinelErrors(t *testing.T) {
+	m := newBackgroundManager(starterOf(), &countingRandom{})
+	if _, err := m.Stop(context.Background(), "bg-nope"); !errors.Is(err, errBackgroundUnknownHandle) || errors.Is(err, errBackgroundShutDown) {
+		t.Errorf("Stop unknown = %v, want errBackgroundUnknownHandle and not errBackgroundShutDown", err)
+	}
+	m.Shutdown()
+	if _, err := m.start(context.Background(), bgSpec(), "/w"); !errors.Is(err, errBackgroundShutDown) || errors.Is(err, errBackgroundUnknownHandle) {
+		t.Errorf("start after shutdown = %v, want errBackgroundShutDown and not errBackgroundUnknownHandle", err)
+	}
+}
+
 func TestBackgroundManagerStartAfterShutdown(t *testing.T) {
 	starter := starterOf(newFakeProc(1))
 	m := newBackgroundManager(starter, &countingRandom{})

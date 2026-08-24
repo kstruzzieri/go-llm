@@ -61,6 +61,10 @@ func TestBackgroundManagerUnixNaturalExitReapsResidualChild(t *testing.T) {
 // only after the job's completion is published as killed.
 func TestBackgroundManagerUnixShutdownKillsActiveGroup(t *testing.T) {
 	m := newBackgroundManager(newPlatformStarter(), rand.Reader)
+	// Safety net for a fatal before the explicit Shutdown below (e.g. a
+	// pidfile timeout): Shutdown is Once-guarded, so this is a no-op on the
+	// happy path but reaps the real leader and its group on the failure path.
+	t.Cleanup(m.Shutdown)
 	pidfile := t.TempDir() + "/grandchild.pid"
 	spec := helperSpec(t, "groupkill", pidfile)
 

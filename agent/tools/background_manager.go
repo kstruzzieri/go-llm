@@ -27,6 +27,20 @@ const (
 	backgroundStateKilled  = "killed"
 )
 
+// Sentinel errors for the manager's frozen error classes, so tools can
+// errors.Is-classify without string matching. The rendered text is frozen;
+// do not reword.
+var (
+	errBackgroundShutDown      = errors.New("background manager is shut down")
+	errBackgroundUnknownHandle = errors.New("unknown background job handle")
+)
+
+// errUnknownJobHandle wraps errBackgroundUnknownHandle with the offending
+// handle, rendering the frozen "unknown background job handle %q" text.
+func errUnknownJobHandle(handle string) error {
+	return fmt.Errorf("%w %q", errBackgroundUnknownHandle, handle)
+}
+
 // JobStatus is a point-in-time snapshot of one background job. Every snapshot
 // is a value copy: Argv never aliases manager state, and no process object or
 // buffer reference escapes.
@@ -157,7 +171,7 @@ func (m *BackgroundManager) start(ctx context.Context, spec execSpec, cwdDisplay
 	m.mu.Lock()
 	if m.closed {
 		m.mu.Unlock()
-		return JobStatus{}, errors.New("background manager is shut down")
+		return JobStatus{}, errBackgroundShutDown
 	}
 	if m.active >= backgroundActiveCap {
 		m.mu.Unlock()
@@ -211,7 +225,7 @@ func (m *BackgroundManager) start(ctx context.Context, spec execSpec, cwdDisplay
 		_, _ = proc.Wait()
 		m.releaseReservation(handle)
 		if closed {
-			return JobStatus{}, errors.New("background manager is shut down")
+			return JobStatus{}, errBackgroundShutDown
 		}
 		return JobStatus{}, ctx.Err()
 	}
@@ -308,7 +322,7 @@ func (m *BackgroundManager) tail(handle, stream string, cursor *uint64, maxBytes
 	job, ok := m.jobs[handle]
 	m.mu.Unlock()
 	if !ok {
-		return tailChunk{}, fmt.Errorf("unknown background job handle %q", handle)
+		return tailChunk{}, errUnknownJobHandle(handle)
 	}
 	var ring *tailRing
 	switch stream {
@@ -364,7 +378,7 @@ func (m *BackgroundManager) Stop(ctx context.Context, handle string) (JobStatus,
 	job, ok := m.jobs[handle]
 	if !ok {
 		m.mu.Unlock()
-		return JobStatus{}, fmt.Errorf("unknown background job handle %q", handle)
+		return JobStatus{}, errUnknownJobHandle(handle)
 	}
 	if !job.running {
 		st := m.snapshotLocked(job)
