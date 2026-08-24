@@ -105,6 +105,7 @@ func (f *fakeProjector) ProjectListedModels(ctx context.Context, providerName st
 			// swap in the caller's mapping.
 			Caps:          provider.CapChat,
 			KnownMask:     provider.CapChat | provider.CapEmbed,
+			ProfileSource: "proj-src",
 			ContextWindow: info.ContextWindow,
 		}
 	}

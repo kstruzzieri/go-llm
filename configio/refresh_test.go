@@ -39,9 +39,9 @@ func TestRefreshInventory_HappyPathSortedAndComplete(t *testing.T) {
 		t.Fatalf("Providers = %+v; want %+v", inv.Providers, wantProviders)
 	}
 	wantModels := []configview.InventoryModel{
-		{Key: key("alpha", "m-a"), Family: "fa", Caps: provider.CapChat, KnownMask: provider.CapChat | provider.CapEmbed, ContextWindow: 8192},
-		{Key: key("alpha", "m-b"), Family: "fb", Caps: provider.CapChat, KnownMask: provider.CapChat | provider.CapEmbed},
-		{Key: key("zeta", "z-1"), Caps: provider.CapChat, KnownMask: provider.CapChat | provider.CapEmbed},
+		{Key: key("alpha", "m-a"), Family: "fa", Caps: provider.CapChat, KnownMask: provider.CapChat | provider.CapEmbed, ProfileSource: "proj-src", ContextWindow: 8192},
+		{Key: key("alpha", "m-b"), Family: "fb", Caps: provider.CapChat, KnownMask: provider.CapChat | provider.CapEmbed, ProfileSource: "proj-src"},
+		{Key: key("zeta", "z-1"), Caps: provider.CapChat, KnownMask: provider.CapChat | provider.CapEmbed, ProfileSource: "proj-src"},
 	}
 	if !reflect.DeepEqual(inv.Models, wantModels) {
 		t.Fatalf("Models = %+v; want %+v", inv.Models, wantModels)

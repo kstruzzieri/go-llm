@@ -928,7 +928,7 @@ func (r *ModelRegistry) catalogProfileFor(parsed ParsedModel, runtimeInfo *Model
 type ToolCallExplanation struct {
 	Caps     Capability
 	Has      bool
-	Source   string                    // "explicit" | "catalog" | "runtime" | "probe" | "unknown"
+	Source   string                    // "explicit" | "catalog" | "runtime" | "probe" | "unknown" — configio.probeDurable matches these literals; keep in sync
 	State    fingerprint.CapProbeState // cached probe state, "" if none
 	TestedAt time.Time                 // zero when no probe row
 	Valid    bool                      // cached probe matches current identity/version and is unexpired

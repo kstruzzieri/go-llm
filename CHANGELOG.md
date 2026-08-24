@@ -19,7 +19,7 @@ the role-config stack (v4 spec slice 4), consumed by the Firn config panel
   probe verdicts (yes AND no) surface through `KnownMask`, validated
   against the listing identity, so they stick across sessions (digestless
   negatives bounded by a 7-day TTL). Refresh performs exactly one listing
-  call per provider and NO other I/O — no fingerprint probes, no
+  call per provider and NO other provider I/O — no fingerprint probes, no
   tool-call probes, no re-queries — and a cancelled refresh publishes
   nothing. Wall-clock is bounded per provider by the models.json
   `timeout` and overall by the caller's context.

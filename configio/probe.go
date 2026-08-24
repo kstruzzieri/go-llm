@@ -11,7 +11,8 @@ import (
 // ProbeToolCall performs the explicit, per-model tool_call probe (spec read
 // tier 3). It wraps the registry's on-demand resolution: authoritative
 // fast-path answers (explicit override, merged profile, valid cached row)
-// return without network I/O; otherwise the probe runs and the verdict is
+// return without probe I/O (the durability read may still perform provider
+// metadata listings); otherwise the probe runs and the verdict is
 // persisted via the capability-probe store.
 //
 // D9 dual-outcome contract: the returned State is valid for this session
@@ -84,6 +85,10 @@ func probeDurable(ctx context.Context, resolver ToolCallResolver, key provider.M
 	switch {
 	case exp.State == state && exp.Valid: // probe row holds this verdict and validates
 		return true
+	// Source literals are provider.ToolCallExplanation's documented vocabulary
+	// (model_registry.go: "explicit" | "catalog" | "runtime" | "probe" |
+	// "unknown"); a provider-side rename degrades this to conservative
+	// Persisted=false.
 	case exp.Source == "explicit" || exp.Source == "catalog":
 		return true // durable without a row
 	case state == fingerprint.CapProbeYes && exp.Has:

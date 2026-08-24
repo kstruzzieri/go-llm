@@ -51,6 +51,9 @@ func TestProjectListedModels_ListingFactsAndOrder(t *testing.T) {
 	if facts[0].KnownMask&facts[0].Caps != facts[0].Caps {
 		t.Fatalf("zeta KnownMask %v does not cover Caps %v", facts[0].KnownMask, facts[0].Caps)
 	}
+	if facts[0].ProfileSource != "merged" {
+		t.Fatalf("ProfileSource = %q; want %q (the projection always runs the full merge)", facts[0].ProfileSource, "merged")
+	}
 }
 
 func TestProjectListedModels_CapProbeRows(t *testing.T) {
