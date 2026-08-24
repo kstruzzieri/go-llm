@@ -1,6 +1,7 @@
 package rag
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -822,6 +823,94 @@ func TestManagedListDocumentsWorksOnReadOnlyStore(t *testing.T) {
 	}
 	if len(documents) != 1 || documents[0].ID != document.ID || documents[0].State != DocumentStateIndexed {
 		t.Fatalf("read-only documents = %#v, want the ingested indexed document", documents)
+	}
+}
+
+func TestManagedListDocumentsReconcilesReadOnlyStoreInMemory(t *testing.T) {
+	tests := []struct {
+		name          string
+		mutate        func(*SQLiteStore, string, Document) error
+		wantState     DocumentState
+		wantFreshness DocumentFreshness
+		wantError     bool
+	}{
+		{
+			name: "changed origin is stale",
+			mutate: func(_ *SQLiteStore, origin string, _ Document) error {
+				return os.WriteFile(origin, []byte("changed after ingest"), 0o600)
+			},
+			wantState:     DocumentStateIndexed,
+			wantFreshness: DocumentFreshnessStale,
+		},
+		{
+			name: "missing chunks are failed",
+			mutate: func(store *SQLiteStore, _ string, document Document) error {
+				_, err := store.db.Exec(`DELETE FROM chunks WHERE source = ?`, document.source)
+				return err
+			},
+			wantState:     DocumentStateFailed,
+			wantFreshness: DocumentFreshnessStale,
+			wantError:     true,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			dir := t.TempDir()
+			dbPath := filepath.Join(dir, "rag.db")
+			origin := filepath.Join(dir, "note.txt")
+			if err := os.WriteFile(origin, []byte("original content"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			store, err := NewSQLiteStore(dbPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			managed, _ := newManagedTestServiceOnStore(t, &managedTestEmbedder{vectorSpaceID: "test/v1"}, store)
+			document, err := managed.IngestFile(ctx, origin, DocumentOptions{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := tc.mutate(store, origin, document); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := store.db.Exec(`PRAGMA wal_checkpoint(TRUNCATE)`); err != nil {
+				t.Fatal(err)
+			}
+			if err := store.Close(); err != nil {
+				t.Fatal(err)
+			}
+			before, err := os.ReadFile(dbPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			readOnly, err := OpenSQLiteStoreReadOnly(dbPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = readOnly.Close() })
+			readOnlyManaged, err := NewManagedSources(nil, readOnly)
+			if err != nil {
+				t.Fatal(err)
+			}
+			documents, err := readOnlyManaged.ListDocuments(ctx, DocumentFilter{})
+			if err != nil {
+				t.Fatalf("ListDocuments(read-only) error: %v", err)
+			}
+			if len(documents) != 1 || documents[0].ID != document.ID ||
+				documents[0].State != tc.wantState ||
+				documents[0].Freshness != tc.wantFreshness ||
+				(tc.wantError != (documents[0].LastError != "")) {
+				t.Fatalf("read-only document = %#v", documents)
+			}
+			after, err := os.ReadFile(dbPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(after, before) {
+				t.Fatal("read-only reconciliation changed the database")
+			}
+		})
 	}
 }
 

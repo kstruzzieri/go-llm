@@ -415,6 +415,20 @@ func (m *ManagedSources) reconcileDocument(ctx context.Context, observed *Docume
 		return false, nil
 	}
 
+	// An immutable snapshot (published index generation) cannot persist the
+	// reconciled state; report it on the returned snapshot only. The writable
+	// owner of the registry persists the same transition on its next listing.
+	if m.store.immutable {
+		if provenanceMismatch || chunks != observed.ChunkCount {
+			observed.State = DocumentStateFailed
+			observed.Freshness = DocumentFreshnessStale
+			observed.LastError = "managed document chunks are missing or inconsistent"
+		} else {
+			observed.Freshness = desiredFreshness
+		}
+		return false, nil
+	}
+
 	tx, err := m.store.beginWriteTx(ctx)
 	if err != nil {
 		return false, fmt.Errorf("rag: reconcile managed document %q: begin transaction: %w", observed.ID, err)
