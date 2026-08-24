@@ -567,6 +567,47 @@ func TestStartCommandInvokeSpawnFailureReleasesSlot(t *testing.T) {
 	}
 }
 
+func TestStartCommandInvokeManagerShutDownRendering(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("unix exec semantics")
+	}
+	starter := starterOf(newFakeProc(1))
+	sc, m := newStartCommandFixture(t, starter)
+	raw := json.RawMessage(`{"argv":["mycmd"]}`)
+	mustPlan(t, sc, raw)
+	m.Shutdown()
+	res := mustInvoke(t, sc, raw)
+	if !res.IsError || res.Content != "background manager is shut down" {
+		t.Errorf("result = (%q, IsError=%v), want the frozen shut-down rendering", res.Content, res.IsError)
+	}
+	if starter.callCount() != 0 {
+		t.Errorf("starter called %d times after shutdown, want 0", starter.callCount())
+	}
+}
+
+func TestStartCommandInvokeActiveCapRendering(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("unix exec semantics")
+	}
+	var procs []*fakeProc
+	for i := 0; i < backgroundActiveCap; i++ {
+		procs = append(procs, newFakeProc(100+i))
+	}
+	sc, _ := newStartCommandFixture(t, starterOf(procs...))
+	raw := json.RawMessage(`{"argv":["mycmd"]}`)
+	for i := 0; i < backgroundActiveCap; i++ {
+		mustPlan(t, sc, raw)
+		if res := mustInvoke(t, sc, raw); res.IsError {
+			t.Fatalf("start %d: %s", i, res.Content)
+		}
+	}
+	mustPlan(t, sc, raw)
+	res := mustInvoke(t, sc, raw)
+	if !res.IsError || res.Content != "active background job limit reached (4); stop one first" {
+		t.Errorf("result = (%q, IsError=%v), want the frozen cap rendering", res.Content, res.IsError)
+	}
+}
+
 // --- Step 5.5: status and tail ---
 
 func TestCommandStatusGoldenRendering(t *testing.T) {
