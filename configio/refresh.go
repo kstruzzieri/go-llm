@@ -3,6 +3,7 @@ package configio
 import (
 	"context"
 	"sort"
+	"strings"
 
 	"github.com/kstruzzieri/go-llm/configview"
 	"github.com/kstruzzieri/go-llm/provider"
@@ -63,17 +64,20 @@ func RefreshInventory(ctx context.Context, providers ProviderLister, models List
 			continue
 		}
 		infos = append([]provider.ModelInfo(nil), infos...)
-		sort.Slice(infos, func(i, j int) bool { return infos[i].Name < infos[j].Name })
+		sort.SliceStable(infos, func(i, j int) bool { return infos[i].Name < infos[j].Name })
 		// Listing hygiene: a misbehaving server can return empty or
 		// duplicate model ids. Empty names are unaddressable (the probe
 		// op rejects them as invalid_argument) and duplicates would
 		// diverge between Inventory.Models and configview's by-name maps
 		// (last-wins there). Drop empties, keep the first of each name —
-		// deterministic under the sort above.
+		// with the stable sort, that is the first occurrence in provider
+		// order, a deterministic function of the listing. Names containing
+		// NUL — the store-key separator, never a legitimate id — are
+		// likewise dropped.
 		kept := infos[:0]
 		var prev string
 		for _, info := range infos {
-			if info.Name == "" || (len(kept) > 0 && info.Name == prev) {
+			if info.Name == "" || strings.ContainsRune(info.Name, 0) || (len(kept) > 0 && info.Name == prev) {
 				continue
 			}
 			kept = append(kept, info)

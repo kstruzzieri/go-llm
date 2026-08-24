@@ -202,9 +202,10 @@ func TestRefreshInventory_VanishedProviderIsUnreachable(t *testing.T) {
 }
 
 func TestRefreshInventory_HostileListingHygiene(t *testing.T) {
-	// A misbehaving server returns empty and duplicate model ids: empties
-	// are dropped, duplicates collapse to the first (post-sort), and the
-	// projector only ever sees the cleaned listing.
+	// A misbehaving server returns empty, NUL-containing, and duplicate
+	// model ids: empties and NUL names are dropped, duplicates collapse to
+	// the first (post-sort), and the projector only ever sees the cleaned
+	// listing.
 	lister := &fakeLister{
 		names: []string{"p"},
 		providers: map[string]provider.Provider{
@@ -213,6 +214,7 @@ func TestRefreshInventory_HostileListingHygiene(t *testing.T) {
 				{Name: ""},
 				{Name: "dup", Family: "first"},
 				{Name: "solo"},
+				{Name: "evil\x00name"},
 			}},
 		},
 	}
@@ -223,6 +225,9 @@ func TestRefreshInventory_HostileListingHygiene(t *testing.T) {
 	}
 	if len(inv.Models) != 2 || inv.Models[0].Key != key("p", "dup") || inv.Models[1].Key != key("p", "solo") {
 		t.Fatalf("Models = %+v; want exactly [p/dup p/solo]", inv.Models)
+	}
+	if inv.Models[0].Family != "second" {
+		t.Fatalf("dup survivor Family = %q; want %q (first occurrence in provider order, stable sort)", inv.Models[0].Family, "second")
 	}
 	seen := proj.seenFor("p")
 	if len(seen) != 2 || seen[0].Name != "dup" || seen[1].Name != "solo" {

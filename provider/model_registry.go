@@ -88,6 +88,10 @@ type FingerprintProberSpec struct {
 
 // FingerprintProberFactory builds the provider-specific ModelProber for a
 // model. Returning nil means fingerprinting is unavailable for this provider.
+// Factory CONSTRUCTION must be I/O-free — it may build clients and digests
+// but must not touch the network; probing belongs exclusively to the
+// returned Prober's methods (read-only paths such as ProjectListedModels
+// invoke the factory and rely on this).
 type FingerprintProberFactory func(ctx context.Context, key ModelKey, runtime *ModelInfo, p Provider) (*FingerprintProberSpec, error)
 
 // ModelRegistryOption configures ModelRegistry construction.
