@@ -2,6 +2,7 @@ package configio
 
 import (
 	"context"
+	"errors"
 	"reflect"
 	"testing"
 
@@ -38,9 +39,9 @@ func TestRefreshInventory_HappyPathSortedAndComplete(t *testing.T) {
 		t.Fatalf("Providers = %+v; want %+v", inv.Providers, wantProviders)
 	}
 	wantModels := []configview.InventoryModel{
-		{Key: key("alpha", "m-a"), Family: "fa", Caps: provider.CapChat, KnownMask: provider.CapChat, ContextWindow: 8192},
-		{Key: key("alpha", "m-b"), Family: "fb", Caps: provider.CapChat, KnownMask: provider.CapChat},
-		{Key: key("zeta", "z-1"), Caps: provider.CapChat, KnownMask: provider.CapChat},
+		{Key: key("alpha", "m-a"), Family: "fa", Caps: provider.CapChat, KnownMask: provider.CapChat | provider.CapEmbed, ContextWindow: 8192},
+		{Key: key("alpha", "m-b"), Family: "fb", Caps: provider.CapChat, KnownMask: provider.CapChat | provider.CapEmbed},
+		{Key: key("zeta", "z-1"), Caps: provider.CapChat, KnownMask: provider.CapChat | provider.CapEmbed},
 	}
 	if !reflect.DeepEqual(inv.Models, wantModels) {
 		t.Fatalf("Models = %+v; want %+v", inv.Models, wantModels)
@@ -81,5 +82,130 @@ func TestRefreshInventory_EmptyProviderSet(t *testing.T) {
 	}
 	if len(inv.Models) != 0 || len(inv.Providers) != 0 {
 		t.Fatalf("expected zero inventory, got %+v", inv)
+	}
+}
+
+func TestRefreshInventory_UnreachableProviderIsInValue(t *testing.T) {
+	lister := &fakeLister{
+		names: []string{"down", "up"},
+		providers: map[string]provider.Provider{
+			"down": &fakeProvider{name: "down", modelsErr: errors.New("connection refused")},
+			"up":   &fakeProvider{name: "up", models: []provider.ModelInfo{{Name: "m"}}},
+		},
+	}
+	inv, err := RefreshInventory(context.Background(), lister, newFakeProjector())
+	if err != nil {
+		t.Fatalf("RefreshInventory() error: %v; a down provider must not abort the refresh", err)
+	}
+	wantProviders := []configview.InventoryProvider{
+		{Name: "down", Reachable: false},
+		{Name: "up", Reachable: true},
+	}
+	if !reflect.DeepEqual(inv.Providers, wantProviders) {
+		t.Fatalf("Providers = %+v; want %+v", inv.Providers, wantProviders)
+	}
+	if len(inv.Models) != 1 || inv.Models[0].Key != key("up", "m") {
+		t.Fatalf("Models = %+v; want exactly the reachable provider's model", inv.Models)
+	}
+}
+
+func TestRefreshInventory_PreCancelledContext(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	inv, err := RefreshInventory(ctx, &fakeLister{names: []string{"p"}}, newFakeProjector())
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("error = %v; want context.Canceled", err)
+	}
+	if !reflect.DeepEqual(inv, configview.Inventory{}) {
+		t.Fatalf("pre-cancelled refresh published %+v; want zero Inventory", inv)
+	}
+}
+
+func TestRefreshInventory_CancelDuringOnlyProviderListing(t *testing.T) {
+	// SINGLE provider: no later loop-entry check can mask a missing
+	// error-branch barrier. Without the error-branch ctx check the
+	// provider would be recorded unreachable and the refresh would
+	// SUCCEED with a published value.
+	ctx, cancel := context.WithCancel(context.Background())
+	lister := &fakeLister{
+		names: []string{"only"},
+		providers: map[string]provider.Provider{
+			"only": &fakeProvider{name: "only", onModels: cancel, modelsErr: context.Canceled},
+		},
+	}
+	inv, err := RefreshInventory(ctx, lister, newFakeProjector())
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("error = %v; want context.Canceled", err)
+	}
+	if !reflect.DeepEqual(inv, configview.Inventory{}) {
+		t.Fatalf("cancelled refresh published %+v; want zero Inventory", inv)
+	}
+}
+
+func TestRefreshInventory_CancelAfterLastProviderSucceeds(t *testing.T) {
+	// Cancellation lands AFTER the only provider's listing and projection
+	// both succeed — only the FINAL barrier stands between this and a
+	// published value.
+	ctx, cancel := context.WithCancel(context.Background())
+	proj := newFakeProjector()
+	proj.onCall = func(context.Context) { cancel() }
+	lister := &fakeLister{
+		names: []string{"only"},
+		providers: map[string]provider.Provider{
+			"only": &fakeProvider{name: "only", models: []provider.ModelInfo{{Name: "m"}}},
+		},
+	}
+	inv, err := RefreshInventory(ctx, lister, proj)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("error = %v; want context.Canceled (final barrier)", err)
+	}
+	if !reflect.DeepEqual(inv, configview.Inventory{}) {
+		t.Fatalf("cancelled refresh published %+v; want zero Inventory", inv)
+	}
+}
+
+func TestRefreshInventory_ProjectionCancellationAborts(t *testing.T) {
+	// The projection's only error is cancellation; refresh must return it
+	// verbatim with the zero value — and must NOT record the provider
+	// unreachable (the listing succeeded; Reachable reports the provider).
+	ctx, cancel := context.WithCancel(context.Background())
+	proj := newFakeProjector()
+	proj.onCall = func(context.Context) { cancel() }
+	proj.err = context.Canceled
+	lister := &fakeLister{
+		names: []string{"only"},
+		providers: map[string]provider.Provider{
+			"only": &fakeProvider{name: "only", models: []provider.ModelInfo{{Name: "m"}}},
+		},
+	}
+	inv, err := RefreshInventory(ctx, lister, proj)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("error = %v; want context.Canceled", err)
+	}
+	if !reflect.DeepEqual(inv, configview.Inventory{}) {
+		t.Fatalf("cancelled refresh published %+v; want zero Inventory", inv)
+	}
+}
+
+func TestRefreshInventory_VanishedProviderIsUnreachable(t *testing.T) {
+	// Named by the lister but not resolvable via Get (racing unregister):
+	// recorded unreachable, refresh proceeds.
+	lister := &fakeLister{
+		names:     []string{"ghost", "real"},
+		providers: map[string]provider.Provider{"real": &fakeProvider{name: "real", models: []provider.ModelInfo{{Name: "m"}}}},
+	}
+	inv, err := RefreshInventory(context.Background(), lister, newFakeProjector())
+	if err != nil {
+		t.Fatalf("RefreshInventory() error: %v", err)
+	}
+	wantProviders := []configview.InventoryProvider{
+		{Name: "ghost", Reachable: false},
+		{Name: "real", Reachable: true},
+	}
+	if !reflect.DeepEqual(inv.Providers, wantProviders) {
+		t.Fatalf("Providers = %+v; want %+v", inv.Providers, wantProviders)
+	}
+	if len(inv.Models) != 1 || inv.Models[0].Key != key("real", "m") {
+		t.Fatalf("Models = %+v; want exactly the resolvable provider's model", inv.Models)
 	}
 }

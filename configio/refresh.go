@@ -18,7 +18,9 @@ import (
 //     timeout (models.json `timeout`) and the caller's ctx.
 //   - A provider whose LISTING fails is recorded as Reachable=false and
 //     the refresh proceeds — reachability is part of the value, not an
-//     error, and it reports PROVIDER reachability only.
+//     error, and it reports PROVIDER reachability only. A provider that
+//     vanishes between Names and Get (racing unregister) is likewise
+//     recorded unreachable.
 //   - Per-model facts come from the ListedProjector, read-only and TOTAL
 //     by contract: exactly one Models call per provider and NO other I/O
 //     — no probes (fingerprint or tool-call), no re-queries. The
@@ -41,7 +43,7 @@ func RefreshInventory(ctx context.Context, providers ProviderLister, models List
 		p, ok := providers.Get(name)
 		if !ok {
 			// Racing unregister between Names and Get: record as unreachable.
-			inv.Providers = append(inv.Providers, configview.InventoryProvider{Name: name})
+			inv.Providers = append(inv.Providers, configview.InventoryProvider{Name: name, Reachable: false})
 			continue
 		}
 		infos, err := p.Models(ctx)

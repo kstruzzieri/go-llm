@@ -96,7 +96,7 @@ func (f *fakeProjector) ProjectListedModels(ctx context.Context, providerName st
 			Key:           provider.ModelKey{Provider: providerName, Model: info.Name},
 			Family:        info.Family,
 			Caps:          provider.CapChat,
-			KnownMask:     provider.CapChat,
+			KnownMask:     provider.CapChat | provider.CapEmbed,
 			ContextWindow: info.ContextWindow,
 		}
 	}
