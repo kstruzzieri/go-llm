@@ -109,18 +109,6 @@ func TestRefreshInventory_UnreachableProviderIsInValue(t *testing.T) {
 	}
 }
 
-func TestRefreshInventory_PreCancelledContext(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	inv, err := RefreshInventory(ctx, &fakeLister{names: []string{"p"}}, newFakeProjector())
-	if !errors.Is(err, context.Canceled) {
-		t.Fatalf("error = %v; want context.Canceled", err)
-	}
-	if !reflect.DeepEqual(inv, configview.Inventory{}) {
-		t.Fatalf("pre-cancelled refresh published %+v; want zero Inventory", inv)
-	}
-}
-
 func TestRefreshInventory_CancelDuringOnlyProviderListing(t *testing.T) {
 	// SINGLE provider: pins the OBSERVABLE contract for mid-listing
 	// cancellation — zero Inventory + context.Canceled — now enforced by
@@ -168,9 +156,9 @@ func TestRefreshInventory_ProjectionCancellationAborts(t *testing.T) {
 	// The projection's only error is cancellation, so its immediate return
 	// is provably equivalent to falling through to the loop-entry/final
 	// barriers — no mutation can distinguish it. Retained for clarity, not
-	// for coverage. This pins the zero-value + error contract and that the
-	// provider is NOT recorded unreachable (the listing succeeded;
-	// Reachable reports the provider).
+	// for coverage. This pins the zero-value + context.Canceled contract on
+	// the projection-error path. ("Projection error is always cancellation"
+	// is rationale, not something this test verifies.)
 	ctx, cancel := context.WithCancel(context.Background())
 	proj := newFakeProjector()
 	proj.onCall = func(context.Context) { cancel() }

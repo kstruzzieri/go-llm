@@ -30,8 +30,10 @@ import (
 //   - Cancellation publishes nothing: the final barrier guarantees a
 //     cancelled call returns the zero Inventory and the context error
 //     regardless of where cancellation landed; the loop-entry check
-//     additionally stops further provider listings early. (In-branch
-//     re-checks were deliberately removed as provably redundant.)
+//     additionally stops further provider listings early; and the
+//     projection-error immediate return is a third enforcement path (the
+//     projector's only error is cancellation). In-branch ctx re-checks
+//     elsewhere were deliberately removed as provably redundant.
 func RefreshInventory(ctx context.Context, providers ProviderLister, models ListedProjector) (configview.Inventory, error) {
 	inv := configview.Inventory{}
 	names := append([]string(nil), providers.Names()...)

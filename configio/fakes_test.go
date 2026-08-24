@@ -41,6 +41,9 @@ type fakeProvider struct {
 func (p *fakeProvider) Name() string                      { return p.name }
 func (p *fakeProvider) Capabilities() provider.Capability { return 0 }
 func (p *fakeProvider) Health(context.Context) error      { return nil }
+
+// Models does not consult ctx; it always executes when called (which is
+// what makes modelsCalls a reliable was-it-attempted signal).
 func (p *fakeProvider) Models(context.Context) ([]provider.ModelInfo, error) {
 	p.modelsCalls++
 	if p.onModels != nil {
@@ -96,8 +99,10 @@ func (f *fakeProjector) ProjectListedModels(ctx context.Context, providerName st
 	out := make([]provider.ListedModelFacts, len(infos))
 	for i, info := range infos {
 		out[i] = provider.ListedModelFacts{
-			Key:           provider.ModelKey{Provider: providerName, Model: info.Name},
-			Family:        info.Family,
+			Key:    provider.ModelKey{Provider: providerName, Model: info.Name},
+			Family: info.Family,
+			// Caps/KnownMask distinct on purpose — catches a Caps/KnownMask
+			// swap in the caller's mapping.
 			Caps:          provider.CapChat,
 			KnownMask:     provider.CapChat | provider.CapEmbed,
 			ContextWindow: info.ContextWindow,
