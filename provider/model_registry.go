@@ -3,7 +3,6 @@ package provider
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"math"
 	"sort"
@@ -88,6 +87,10 @@ type FingerprintProberSpec struct {
 
 // FingerprintProberFactory builds the provider-specific ModelProber for a
 // model. Returning nil means fingerprinting is unavailable for this provider.
+// Factory CONSTRUCTION must be I/O-free — it may build clients and digests
+// but must not touch the network; probing belongs exclusively to the
+// returned Prober's methods (read-only paths such as ProjectListedModels
+// invoke the factory and rely on this).
 type FingerprintProberFactory func(ctx context.Context, key ModelKey, runtime *ModelInfo, p Provider) (*FingerprintProberSpec, error)
 
 // ModelRegistryOption configures ModelRegistry construction.
@@ -466,8 +469,9 @@ func (r *ModelRegistry) resolveToolCallSlow(ctx context.Context, key ModelKey) (
 	// observed the cache. Capture it before the read so an older slow probe
 	// cannot finish last and overwrite a newer verdict.
 	testedAt := time.Now()
-	if row, gErr := r.capProbeStore.GetCapProbe(ctx, backendID, key.Model, capabilityToolCall); gErr == nil && row != nil && row.Valid(digest, time.Now()) {
-		return row.State, nil
+	cached, cacheErr := r.capProbeStore.GetCapProbe(ctx, backendID, key.Model, capabilityToolCall)
+	if cacheErr == nil && cached != nil && validCapProbeState(cached.State) && cached.Valid(digest, time.Now()) {
+		return cached.State, nil
 	}
 
 	// Admission (#401): a live probe is a model call against a possibly
@@ -499,6 +503,9 @@ func (r *ModelRegistry) resolveToolCallSlow(ctx context.Context, key ModelKey) (
 		// Transient/diagnostic: never persisted, never a claim.
 		return "", err
 	}
+	if !validCapProbeState(outcome.State) {
+		return "", fmt.Errorf("provider: probe tool_call %v returned invalid state %q", key, outcome.State)
+	}
 
 	// Expiry remains anchored after the probe so admission queueing and probe
 	// latency do not consume the persisted verdict's TTL.
@@ -528,6 +535,15 @@ func (r *ModelRegistry) resolveToolCallSlow(ctx context.Context, key ModelKey) (
 		r.invalidateProfile(key)
 	}
 	return outcome.State, nil
+}
+
+func validCapProbeState(state fingerprint.CapProbeState) bool {
+	switch state {
+	case fingerprint.CapProbeYes, fingerprint.CapProbeNo, fingerprint.CapProbeInconclusive:
+		return true
+	default:
+		return false
+	}
 }
 
 // invalidateProfile drops one cached profile so the next Lookup re-merges.
@@ -928,21 +944,22 @@ func (r *ModelRegistry) catalogProfileFor(parsed ParsedModel, runtimeInfo *Model
 type ToolCallExplanation struct {
 	Caps     Capability
 	Has      bool
-	Source   string                    // "explicit" | "catalog" | "runtime" | "probe" | "unknown"
+	Source   string                    // "explicit" | "catalog" | "runtime" | "probe" | "unknown" — configio.probeDurable matches these literals; keep in sync
 	State    fingerprint.CapProbeState // cached probe state, "" if none
 	TestedAt time.Time                 // zero when no probe row
 	Valid    bool                      // cached probe matches current identity/version and is unexpired
 }
 
 // ExplainToolCall reports where a model's tool_call bit comes from (or why it
-// is absent). READ-ONLY: it consults the explicit override, the merged profile
-// (a cache read; Lookup never probes), the static catalog, and the cap-probe
-// cache -- it never triggers an active probe. Precedence mirrors
-// ResolveToolCall / merge():
+// is absent). READ-ONLY: it consults the explicit override, a fresh projection
+// of current runtime/static/fingerprint knowledge, and the cap-probe cache --
+// it never triggers an active probe or writes either profile store. Precedence
+// mirrors ResolveToolCall / merge():
 //  1. explicit override => "explicit" (present or absent per the declared set).
-//  2. merged profile carries CapToolCall => catalog / probe / runtime,
-//     distinguished by re-running the pure catalog lookup and the cached row.
-//  3. profile lacks tool_call but a probe row (any state) exists => "probe".
+//  2. fresh projection carries CapToolCall => catalog / probe / runtime,
+//     distinguished by re-running the pure catalog lookup, cached-row
+//     validation, and the fresh read-only projection.
+//  3. projection lacks tool_call but a recognized probe row exists => "probe".
 //  4. otherwise => "unknown".
 //
 // For non-explicit sources, State, TestedAt, and Valid are populated whenever a
@@ -964,35 +981,30 @@ func (r *ModelRegistry) ExplainToolCall(ctx context.Context, key ModelKey) (Tool
 		}
 	}
 
-	profile, err := r.Lookup(ctx, key)
+	runtimeInfo, err := r.queryRuntime(ctx, key)
 	if err != nil {
 		return ToolCallExplanation{}, err
 	}
-
-	// Read the cap-probe row (any state) once so State/TestedAt are always
-	// populated when a row exists. Uses the write-side digest convention.
+	// Projection and provenance share one row/time snapshot so a concurrent
+	// expiry or replacement cannot turn a probe bit into a runtime claim.
 	row := r.capProbeRow(ctx, key)
+	now := time.Now()
+	facts := r.projectListedModel(ctx, key, *runtimeInfo, row, now, r.snapshotListedProjectionPolicy())
+	if err := ctx.Err(); err != nil {
+		return ToolCallExplanation{}, err
+	}
 
-	exp := ToolCallExplanation{Caps: profile.Caps, Has: profile.Caps.Has(CapToolCall)}
-	var runtimeInfo *ModelInfo
+	exp := ToolCallExplanation{Caps: facts.Caps, Has: facts.Caps.Has(CapToolCall)}
 	if row != nil {
 		exp.State = row.State
 		exp.TestedAt = row.TestedAt
-		runtimeInfo, _ = r.queryRuntime(ctx, key)
-		exp.Valid = row.Valid(capProbeDigest(key, runtimeInfo), time.Now())
+		exp.Valid = row.Valid(capProbeDigest(key, runtimeInfo), now)
 	}
 
-	if profile.Caps.Has(CapToolCall) {
+	if exp.Has {
 		// Distinguish catalog vs probe vs runtime for a present bit. The catalog
 		// lookup is a pure in-memory read (no probe); if the catalog profile
 		// carries tool_call, that is the source.
-		// This queryRuntime is deliberate: Lookup above ran its own internal
-		// queryRuntime but does not expose the digest, and the probe-row Valid
-		// check below needs it (via capProbeDigest). It is a metadata read, not
-		// a tool-call probe -- the READ-ONLY contract holds.
-		if runtimeInfo == nil {
-			runtimeInfo, _ = r.queryRuntime(ctx, key)
-		}
 		parsed := ParseModelName(key.Model)
 		if static := r.catalogProfileFor(parsed, runtimeInfo); static != nil && static.Caps.Has(CapToolCall) {
 			exp.Source = "catalog"
@@ -1007,8 +1019,7 @@ func (r *ModelRegistry) ExplainToolCall(ctx context.Context, key ModelKey) (Tool
 			exp.Source = "probe"
 			return exp, nil
 		}
-		// Floor/fingerprint/runtime-supplied bit: registry/provider-layer
-		// knowledge, labeled "runtime" for operator diagnostics.
+		// The fresh projection proved a remaining floor/fingerprint/runtime bit.
 		exp.Source = "runtime"
 		return exp, nil
 	}
@@ -1035,22 +1046,33 @@ func capProbeDigest(key ModelKey, runtimeInfo *ModelInfo) string {
 	return key.String()
 }
 
-// capProbeRow reads the persisted tool-call probe row for a key (any state),
-// or nil when the store is absent or has no row. Uses the same digest-agnostic
-// read the merge layer uses: the row is returned even when stale so callers can
-// surface State/TestedAt; validity is the caller's concern. Pure cache read.
+// capProbeRow reads a valid-state persisted tool-call probe row for a key, or
+// nil when the store is absent, has no row, or contains a corrupt state. Uses
+// the same digest-agnostic read the merge layer uses: stale rows are returned so
+// callers can surface State/TestedAt; identity validity is the caller's concern.
+// Pure cache read.
 func (r *ModelRegistry) capProbeRow(ctx context.Context, key ModelKey) *fingerprint.CapProbe {
 	if r.capProbeStore == nil {
 		return nil
 	}
 	row, err := r.capProbeStore.GetCapProbe(ctx, key.Provider, key.Model, capabilityToolCall)
-	if err != nil || row == nil {
+	if err != nil || row == nil || !validCapProbeState(row.State) {
 		return nil
 	}
 	return row
 }
 
 func (r *ModelRegistry) fingerprintProfile(ctx context.Context, key ModelKey, runtimeInfo *ModelInfo) *fingerprint.Profile {
+	return r.fingerprintProfileMode(ctx, key, runtimeInfo, r.fpReadOnly)
+}
+
+// fingerprintProfileMode is fingerprintProfile with the profiling switch
+// explicit. readOnly=true NEVER calls EnsureProfile -- no probing, no
+// fingerprint-store writes -- regardless of how the registry was built.
+// The projection path forces readOnly=true. Prober-factory CONSTRUCTION
+// is assumed I/O-free (it builds clients and digests; EnsureProfile is
+// where probing happens), as required by FingerprintProberFactory's contract.
+func (r *ModelRegistry) fingerprintProfileMode(ctx context.Context, key ModelKey, runtimeInfo *ModelInfo, readOnly bool) *fingerprint.Profile {
 	if r.fpStore == nil {
 		return nil
 	}
@@ -1067,7 +1089,7 @@ func (r *ModelRegistry) fingerprintProfile(ctx context.Context, key ModelKey, ru
 				if modelDigest == "" {
 					modelDigest = key.String()
 				}
-				if !r.fpReadOnly && spec.Prober != nil {
+				if !readOnly && spec.Prober != nil {
 					profile, err := fingerprint.NewProfiler(r.fpStore, spec.Prober).EnsureProfile(ctx, key.Provider, key.Model, modelDigest)
 					if err == nil {
 						return profile
@@ -1078,7 +1100,7 @@ func (r *ModelRegistry) fingerprintProfile(ctx context.Context, key ModelKey, ru
 	}
 
 	fpProfile, _ := r.fpStore.Get(ctx, key.Provider, key.Model)
-	if (r.fpReadOnly || modelDigest != "") && !currentFingerprintProfile(fpProfile, modelDigest) {
+	if (readOnly || modelDigest != "") && !currentFingerprintProfile(fpProfile, modelDigest) {
 		return nil
 	}
 	// Ignore errors -- fingerprint is optional enrichment.
@@ -1093,19 +1115,8 @@ func currentFingerprintProfile(profile *fingerprint.Profile, modelDigest string)
 // returns the capability bits it contributes to the merge (CapToolCall for
 // a valid "yes" row, zero otherwise). Pure cache read; never probes.
 func (r *ModelRegistry) capProbeCaps(ctx context.Context, key ModelKey, runtimeInfo *ModelInfo) Capability {
-	if r.capProbeStore == nil {
-		return 0
-	}
 	digest := capProbeDigest(key, runtimeInfo)
-	row, err := r.capProbeStore.GetCapProbe(ctx, key.Provider, key.Model, capabilityToolCall)
-	if err != nil {
-		if errors.Is(err, fingerprint.ErrNotFound) {
-			return 0 // expected miss: never probed
-		}
-		// Real store error (corruption, IO): fail closed to "no bits" --
-		// enrichment is optional and must never block a profile build.
-		return 0
-	}
+	row := r.capProbeRow(ctx, key)
 	if row == nil {
 		return 0
 	}

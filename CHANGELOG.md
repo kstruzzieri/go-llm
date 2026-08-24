@@ -6,6 +6,48 @@ All notable changes to `go-llm` are documented here. Downstream consumers
 
 ## [Unreleased]
 
+### Added — configio: explicit inventory refresh and tool_call probe (#456)
+
+New leaf package `configio` implements the two explicit I/O operations of
+the role-config stack (v4 spec slice 4), consumed by the Firn config panel
+(firn-ide#263) and the upcoming golem CLI surfaces (slice 5):
+
+- `RefreshInventory(ctx, providers, models)` — explicit provider model
+  listing returning a new `configview.Inventory` value. Deterministic
+  ordering; a provider whose listing fails is reported in-value as
+  `Reachable: false` (provider reachability only). Persisted tool_call
+  probe verdicts (yes AND no) surface through `KnownMask`, validated
+  against the listing identity, so they stick across sessions (digestless
+  negatives bounded by a 7-day TTL). Refresh performs exactly one listing
+  call per provider and NO other provider I/O — no fingerprint probes, no
+  tool-call probes, no re-queries — and a cancelled refresh publishes
+  nothing. Wall-clock is bounded per provider by the models.json
+  `timeout` and overall by the caller's context.
+- `ProbeToolCall(ctx, resolver, key)` — explicit, per-model, consumer
+  consent-gated probe wrapping `ModelRegistry.ResolveToolCall`.
+  Returns `ProbeOutcome{State, Persisted}`: the verdict is valid for the
+  session immediately; `Persisted` is true only when the verdict is
+  durable (a currently-VALID probe row, or explicit/catalog/profile
+  knowledge that re-derives next session) — `Persisted=false` warns it
+  may not survive a restart, as a warning, never an error, and never raw
+  I/O text. A model no path can answer for yields `probe_unavailable`.
+  A cancelled caller receives nothing.
+- `provider.ModelRegistry.ProjectListedModels(ctx, provider, infos)` —
+  the read-only, list-fed fact projection behind refresh: reuses the
+  registry's merge layering with the runtime layer taken from the
+  supplied listing and the fingerprint layer forced read-only; never
+  probes, never re-queries, never writes the profile cache; total over
+  the listing (its only error is cancellation).
+- Errors carry bounded codes via `configio.CodeOf`: `invalid_argument`,
+  `probe_unavailable`, `probe_failed`. Caller cancellation is
+  UNCLASSIFIED (raw context error, no code). Firn mapping: add all three
+  codes to both closed allowlists; unknown future configio codes fall
+  back to the generic diagnostic with a cleared subject; configio errors
+  carry no subject. Consumers must forward only the bounded code across
+  projection boundaries — configio error messages deliberately retain
+  the wrapped cause text for CLI and log surfaces and are not
+  boundary-safe.
+
 ### Changed — provider: bounded parallel capability resolution (#401)
 
 `EnsureToolCallResolved` now resolves distinct unresolved model keys
