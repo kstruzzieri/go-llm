@@ -32,8 +32,10 @@ func (unixStarter) Start(spec execSpec, stdout, stderr io.Writer) (backgroundPro
 	if err := cmd.Start(); err != nil {
 		return nil, err
 	}
-	// Remember the PGID now (== child PID because Setpgid with Pgid 0); never
-	// re-derive it from a possibly-nil cmd.Process later.
+	// Remember the PGID now (== child PID because Setpgid with Pgid 0).
+	// cmd.Process is never nil after a successful Start; the real constraint
+	// is never re-deriving the group via Getpgid on a pid that may since have
+	// died or been reaped.
 	return &unixProcess{cmd: cmd, pgid: cmd.Process.Pid}, nil
 }
 
@@ -50,7 +52,11 @@ func (p *unixProcess) PID() int { return p.pgid }
 // leader's own exit is reported.
 func (p *unixProcess) Wait() (int, error) {
 	waitErr := p.cmd.Wait()
-	_ = syscall.Kill(-p.pgid, syscall.SIGKILL) // C1 residual-group cleanup, best-effort
+	// C1 residual-group cleanup, best-effort. C1-accepted PGID-reuse risk: the
+	// direct child was just reaped, so if no descendant survives the pgid may
+	// already be recycled to an unrelated same-uid group; the window between
+	// reap and this kill is microseconds.
+	_ = syscall.Kill(-p.pgid, syscall.SIGKILL)
 	if p.cmd.ProcessState == nil {
 		// ECHILD-class wait failure: no exit status exists. Not reachable in
 		// tests without faking wait(2); the guard is documented instead.
@@ -71,11 +77,22 @@ func (p *unixProcess) Wait() (int, error) {
 	return code, nil
 }
 
-// Kill SIGKILLs the whole managed group. Idempotent: an already-gone group
-// (ESRCH) is success. Never waits.
+// Kill SIGKILLs the whole managed group. Idempotent; never waits.
+//
+// ESRCH (group gone) is success. EPERM is success too: children run with our
+// real uid, so a LIVE member of our managed group is always signalable; EPERM
+// on the remembered pgid can only mean a zombie-only group (darwin returns
+// EPERM, not ESRCH, when the sole member is exited-but-unreaped — the routine
+// stop-vs-reap window) or a recycled pgid now owned by another uid. Both
+// correctly mean "nothing left for us to kill" under the C1 policy.
+//
+// C1-accepted PGID-reuse risk: once the last member is reaped the pgid can be
+// recycled; a late Kill could then signal an unrelated same-uid group. The
+// manager should prefer not to Kill after Wait has returned, which shrinks
+// the window to microseconds.
 func (p *unixProcess) Kill() error {
 	err := syscall.Kill(-p.pgid, syscall.SIGKILL)
-	if errors.Is(err, syscall.ESRCH) {
+	if errors.Is(err, syscall.ESRCH) || errors.Is(err, syscall.EPERM) {
 		return nil
 	}
 	return err

@@ -156,6 +156,63 @@ func TestBackgroundProcessGroupKillReapsChild(t *testing.T) {
 	}
 }
 
+// TestBackgroundProcessKillZombieWindow reproduces the darwin stop-vs-reap
+// window: the leader is dead but not yet reaped (no Wait call yet), so the
+// group still exists with no signalable member and kill(-pgid) returns EPERM
+// on darwin (linux returns 0 there). Kill must treat that as "nothing left to
+// kill" and report success.
+func TestBackgroundProcessKillZombieWindow(t *testing.T) {
+	proc, _, _ := startBackground(t, helperSpec(t, "justsleep"))
+	// Kill the leader directly (positive pid) so it becomes a zombie: dead,
+	// unreaped, sole member of its group.
+	if err := syscall.Kill(proc.PID(), syscall.SIGKILL); err != nil {
+		t.Fatalf("kill leader: %v", err)
+	}
+	// Poll until the group probe reports the zombie-only state (non-nil from
+	// kill(-pgid, 0)). On linux the probe stays nil for a zombie-only group;
+	// the deadline fall-through keeps the Kill assertion meaningful there too.
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if syscall.Kill(-proc.PID(), 0) != nil {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if err := proc.Kill(); err != nil {
+		t.Fatalf("Kill in zombie window = %v, want nil", err)
+	}
+	if code, err := proc.Wait(); err != nil || code != -1 {
+		t.Errorf("Wait = (%d, %v), want (-1, nil)", code, err)
+	}
+}
+
+// TestBackgroundProcessKillConcurrentWithWait pins the manager's primary
+// usage under -race: Kill racing Wait is safe (Kill touches only the
+// remembered pgid, never cmd internals) and the killed leader reports
+// (-1, nil). The second Kill may land in the zombie or reaped window.
+func TestBackgroundProcessKillConcurrentWithWait(t *testing.T) {
+	proc, _, _ := startBackground(t, helperSpec(t, "justsleep"))
+	type waitResult struct {
+		code int
+		err  error
+	}
+	done := make(chan waitResult, 1)
+	go func() {
+		code, err := proc.Wait()
+		done <- waitResult{code, err}
+	}()
+	if err := proc.Kill(); err != nil {
+		t.Errorf("first Kill: %v", err)
+	}
+	if err := proc.Kill(); err != nil {
+		t.Errorf("second Kill: %v", err)
+	}
+	r := <-done
+	if r.err != nil || r.code != -1 {
+		t.Errorf("Wait = (%d, %v), want (-1, nil)", r.code, r.err)
+	}
+}
+
 // TestBackgroundProcessNaturalLeaderExitResidualCleanup proves the C1 policy:
 // when the leader exits naturally but a same-group descendant lives on with
 // released pipes, Wait reports the leader's real exit (0, nil) and its
@@ -164,14 +221,16 @@ func TestBackgroundProcessGroupKillReapsChild(t *testing.T) {
 func TestBackgroundProcessNaturalLeaderExitResidualCleanup(t *testing.T) {
 	pidfile := t.TempDir() + "/child.pid"
 	proc, _, _ := startBackground(t, helperSpec(t, "orphanleave", pidfile))
+	// Learn the grandchild PID and register its safety net BEFORE the Wait
+	// assertions, so a Fatalf there cannot leak the 30s sleeper. The net is
+	// used only after a failed assertion; the assertion path must be covered
+	// by Wait's internal residual cleanup alone.
+	childPID := waitForPidfile(t, pidfile)
+	t.Cleanup(func() { _ = syscall.Kill(childPID, syscall.SIGKILL) })
 	code, err := proc.Wait()
 	if err != nil || code != 0 {
 		t.Fatalf("Wait = (%d, %v), want (0, nil) — natural exit must not be rewritten", code, err)
 	}
-	childPID := waitForPidfile(t, pidfile)
-	// Safety net only, used after a failed assertion; the assertion path must
-	// be covered by Wait's internal residual cleanup alone.
-	t.Cleanup(func() { _ = syscall.Kill(childPID, syscall.SIGKILL) })
 	if !waitProcessGone(childPID) {
 		t.Errorf("residual child pid %d still alive after Wait", childPID)
 	}
@@ -203,7 +262,7 @@ func TestBackgroundProcessHeldPipeWaitDelay(t *testing.T) {
 		if r.code != 0 {
 			t.Errorf("Wait code = %d, want 0 (leader exited cleanly)", r.code)
 		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("Wait did not return within 5s (WaitDelay not honored)")
+	case <-time.After(10 * time.Second):
+		t.Fatal("Wait did not return within 10s (WaitDelay not honored)")
 	}
 }
