@@ -76,7 +76,7 @@ func TestEnableRetrieve_AutoDisablesOnMismatch(t *testing.T) {
 	}
 }
 
-func TestEnableRetrieve_AutoRequiresSidecar(t *testing.T) {
+func TestEnableRetrieve_AutoRejectsIncompleteLegacyIndex(t *testing.T) {
 	dataDir := t.TempDir()
 	dbPath := filepath.Join(dataDir, "indexes", "k.db")
 	// Build the DB but DELETE the sidecar (copied/foreign DB).
@@ -90,8 +90,11 @@ func TestEnableRetrieve_AutoRequiresSidecar(t *testing.T) {
 	if got.reader != nil {
 		t.Error("auto-discovery without a valid sidecar must not register")
 	}
-	if got.suppressNotice {
-		t.Error("missing index should NOT suppress the generic notice")
+	if len(got.warns) != 1 || !strings.Contains(got.warns[0], "incomplete legacy index") {
+		t.Errorf("warning = %v, want incomplete legacy index", got.warns)
+	}
+	if !got.suppressNotice {
+		t.Error("specific invalid-index warning must suppress the contradictory generic notice")
 	}
 }
 

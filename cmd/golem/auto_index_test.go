@@ -418,8 +418,10 @@ func TestRunAutoIndex_InvalidSidecarRebuildsAndEndsReady(t *testing.T) {
 	if got := retrieveStateOf(job.ready); got != retrieveReady {
 		t.Fatalf("self-heal run must end ready, state = %d; notices = %v", got, notices)
 	}
-	if len(notices) != 1 || !strings.HasPrefix(notices[0], "retrieve: auto-index ready, ") {
-		t.Fatalf("notices = %v, want ready line", notices)
+	if len(notices) != 2 ||
+		!strings.Contains(notices[0], "incomplete legacy index") ||
+		!strings.HasPrefix(notices[1], "retrieve: auto-index ready, ") {
+		t.Fatalf("notices = %v, want invalid-index warning then ready line", notices)
 	}
 }
 

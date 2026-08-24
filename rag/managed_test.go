@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -248,6 +249,7 @@ func TestManagedSourcesFileRoundTripAndStableReindexID(t *testing.T) {
 		t.Fatalf("IngestFile() error: %v", err)
 	}
 	abs, _ := filepath.Abs(path)
+	abs, _ = filepath.EvalSymlinks(abs)
 	if document.Kind != DocumentKindFile || document.Origin != filepath.Clean(abs) || document.Title != "Guide.MD" {
 		t.Fatalf("document = %#v", document)
 	}
@@ -270,6 +272,84 @@ func TestManagedSourcesFileRoundTripAndStableReindexID(t *testing.T) {
 	chunks := requireManagedChunks(t, store, document.source)
 	if len(chunks) != 1 || chunks[0].Chunk.Content != "second version" {
 		t.Fatalf("reindexed chunks = %#v", chunks)
+	}
+}
+
+func TestManagedSourcesReindexRejectsChangedSymlinkTarget(t *testing.T) {
+	managed, _, store := newManagedTestService(t, &managedTestEmbedder{vectorSpaceID: "test/v1"})
+	ctx := context.Background()
+	dir := t.TempDir()
+	target := filepath.Join(dir, "runbook.md")
+	selected := filepath.Join(dir, "selected.md")
+	secret := filepath.Join(t.TempDir(), "secret.md")
+	if err := os.WriteFile(target, []byte("approved content"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(secret, []byte("host secret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, selected); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+
+	document, err := managed.IngestFile(ctx, selected, DocumentOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolvedTarget, err := filepath.EvalSymlinks(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if document.Origin != resolvedTarget {
+		t.Fatalf("origin = %q, want resolved target %q", document.Origin, resolvedTarget)
+	}
+	if err := os.Remove(target); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(secret, target); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := managed.ReindexDocument(ctx, document.ID); err == nil || !strings.Contains(err.Error(), "symbolic link") {
+		t.Fatalf("ReindexDocument() error = %v, want changed-symlink rejection", err)
+	}
+	chunks := requireManagedChunks(t, store, document.source)
+	if len(chunks) != 1 || chunks[0].Chunk.Content != "approved content" {
+		t.Fatalf("chunks after rejected reindex = %#v", chunks)
+	}
+}
+
+func TestManagedSourcesLegacySymlinkOriginRequiresReAdd(t *testing.T) {
+	managed, _, store := newManagedTestService(t, &managedTestEmbedder{vectorSpaceID: "test/v1"})
+	ctx := context.Background()
+	dir := t.TempDir()
+	targetDir := filepath.Join(dir, "target")
+	selectedDir := filepath.Join(dir, "selected")
+	if err := os.Mkdir(targetDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(targetDir, "runbook.md")
+	if err := os.WriteFile(target, []byte("approved content"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(targetDir, selectedDir); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	document, err := managed.IngestFile(ctx, target, DocumentOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacyOrigin := filepath.Join(selectedDir, filepath.Base(target))
+	if _, err := store.DB().Exec(`UPDATE managed_documents SET origin = ? WHERE id = ?`, legacyOrigin, document.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := managed.ReindexDocument(ctx, document.ID); err == nil || !strings.Contains(err.Error(), "remove and re-add") {
+		t.Fatalf("legacy symlink origin error = %v, want explicit migration guidance", err)
+	}
+	chunks := requireManagedChunks(t, store, document.source)
+	if len(chunks) != 1 || chunks[0].Chunk.Content != "approved content" {
+		t.Fatalf("chunks after rejected legacy reindex = %#v", chunks)
 	}
 }
 
@@ -1320,6 +1400,10 @@ func TestManagedSourcesIngestFileValidatesOptionsBeforeRead(t *testing.T) {
 
 func TestManagedSourcesIngestFilePropagatesCancellationToRead(t *testing.T) {
 	managed, _, _ := newManagedTestService(t, &managedTestEmbedder{vectorSpaceID: "test/v1"})
+	path := filepath.Join(t.TempDir(), "document.md")
+	if err := os.WriteFile(path, []byte("content"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	started := make(chan struct{})
 	managed.readFile = func(ctx context.Context, _ string) ([]byte, error) {
 		close(started)
@@ -1329,7 +1413,7 @@ func TestManagedSourcesIngestFilePropagatesCancellationToRead(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() {
-		_, err := managed.IngestFile(ctx, "document.md", DocumentOptions{})
+		_, err := managed.IngestFile(ctx, path, DocumentOptions{})
 		done <- err
 	}()
 	<-started
@@ -1348,6 +1432,78 @@ func TestReadManagedRegularFileRejectsCanceledContext(t *testing.T) {
 	cancel()
 	if _, err := readManagedRegularFile(ctx, path); !errors.Is(err, context.Canceled) {
 		t.Fatalf("readManagedRegularFile() error = %v, want context.Canceled", err)
+	}
+}
+
+func TestOpenManagedFileRejectsLeafSwapAfterInspection(t *testing.T) {
+	dir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "approved.md")
+	original := filepath.Join(dir, "approved-original.md")
+	attacker := filepath.Join(dir, "attacker.md")
+	if err := os.WriteFile(path, []byte("approved"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(attacker, []byte("attacker"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	f, err := openManagedFileWith(path, func(root *os.Root, name string) (*os.File, error) {
+		if err := os.Rename(path, original); err != nil {
+			return nil, err
+		}
+		if err := os.Rename(attacker, path); err != nil {
+			return nil, err
+		}
+		return openManagedFileAt(root, name)
+	})
+	if f != nil {
+		_ = f.Close()
+	}
+	if err == nil || !strings.Contains(err.Error(), "changed during open") {
+		t.Fatalf("leaf swap after inspection error = %v, want identity mismatch", err)
+	}
+}
+
+func TestOpenManagedFileKeepsInspectedAncestor(t *testing.T) {
+	rootDir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	approvedDir := filepath.Join(rootDir, "approved")
+	movedDir := filepath.Join(rootDir, "moved")
+	if err := os.Mkdir(approvedDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(approvedDir, "document.md")
+	if err := os.WriteFile(path, []byte("approved"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	f, err := openManagedFileWith(path, func(root *os.Root, name string) (*os.File, error) {
+		if err := os.Rename(approvedDir, movedDir); err != nil {
+			return nil, err
+		}
+		if err := os.Mkdir(approvedDir, 0o700); err != nil {
+			return nil, err
+		}
+		if err := os.WriteFile(path, []byte("attacker"), 0o600); err != nil {
+			return nil, err
+		}
+		return openManagedFileAt(root, name)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = f.Close() }()
+	data, err := io.ReadAll(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "approved" {
+		t.Fatalf("opened replacement content %q", data)
 	}
 }
 

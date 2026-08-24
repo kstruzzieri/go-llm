@@ -60,24 +60,92 @@ func TestSourceE2EAddRetrievableNextSession(t *testing.T) {
 	}
 }
 
-// TestSourceE2ERmRemovesChunks: raw SQL proof that delete removed the chunks
-// and the workspace survives.
+// TestSourceE2ERmRemovesChunks: deleting the sole managed source retires the
+// active generation, list reports empty, and a subsequent add starts fresh.
 func TestSourceE2ERmRemovesChunks(t *testing.T) {
 	deps, _ := sourceTestDeps(t, "test/space")
 	root := t.TempDir()
-	keep := filepath.Join(root, "keep.md")
 	gone := filepath.Join(root, "gone.md")
-	for _, p := range []string{keep, gone} {
-		if err := os.WriteFile(p, []byte("content "+p), 0o600); err != nil {
-			t.Fatal(err)
-		}
+	if err := os.WriteFile(gone, []byte("content "+gone), 0o600); err != nil {
+		t.Fatal(err)
 	}
-	_ = addTestDoc(t, deps, root, keep)
 	id := addTestDoc(t, deps, root, gone)
+	_, dbPath, workspaceID, err := sourceWorkspace(root, deps.getenv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A retired pointer remains authoritative even when a pre-generation
+	// legacy pair is still on disk.
+	seedIndex(t, dbPath, workspaceID, "test/space")
 	var out, errOut bytes.Buffer
 	if err := runSourceWith(context.Background(), []string{"rm", "-root", root, id}, strings.NewReader(""), &out, &errOut, sourceDeps{getenv: deps.getenv}); err != nil {
 		t.Fatalf("rm: %v\n%s%s", err, out.String(), errOut.String())
 	}
+	if _, err := resolveActiveGeneration(context.Background(), dbPath, workspaceID); !errors.Is(err, errNoActiveGeneration) {
+		t.Fatalf("resolve after deleting sole source = %v, want no active generation", err)
+	}
+	out.Reset()
+	errOut.Reset()
+	if err := runSourceWith(context.Background(), []string{"list", "-root", root, "-json"}, strings.NewReader(""), &out, &errOut, sourceDeps{getenv: deps.getenv}); err != nil {
+		t.Fatalf("list after rm: %v\n%s%s", err, out.String(), errOut.String())
+	}
+	if strings.TrimSpace(out.String()) != "[]" {
+		t.Fatalf("list after deleting sole source = %q, want []", out.String())
+	}
+
+	replacement := filepath.Join(root, "replacement.md")
+	if err := os.WriteFile(replacement, []byte("replacement content"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_ = addTestDoc(t, deps, root, replacement)
+	gen, err := resolveActiveGeneration(context.Background(), dbPath, workspaceID)
+	if err != nil {
+		t.Fatalf("resolve after replacement add: %v", err)
+	}
+	store, err := rag.OpenSQLiteStoreReadOnly(gen.dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = store.Close() }()
+	var deletedChunks int
+	if err := store.DB().QueryRow(
+		`SELECT COUNT(*) FROM chunks WHERE json_extract(metadata, '$.managed_document_id') = ?`, id,
+	).Scan(&deletedChunks); err != nil {
+		t.Fatal(err)
+	}
+	if deletedChunks != 0 {
+		t.Fatalf("replacement generation resurrected %d deleted chunks", deletedChunks)
+	}
+}
+
+func TestSourceE2ERmPreservesZeroChunkManagedSources(t *testing.T) {
+	deps, _ := sourceTestDeps(t, "test/space")
+	root := t.TempDir()
+	first := filepath.Join(root, "first.md")
+	zero := filepath.Join(root, "zero.md")
+	if err := os.WriteFile(first, []byte("first content"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(zero, []byte("content that becomes empty"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	firstID := addTestDoc(t, deps, root, first)
+	zeroID := addTestDoc(t, deps, root, zero)
+	if err := os.WriteFile(zero, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var out, errOut bytes.Buffer
+	if err := runSourceWith(context.Background(), []string{"reindex", "-root", root, zeroID}, strings.NewReader(""), &out, &errOut, deps); err != nil {
+		t.Fatalf("reindex empty file: %v\n%s%s", err, out.String(), errOut.String())
+	}
+
+	out.Reset()
+	errOut.Reset()
+	err := runSourceWith(context.Background(), []string{"rm", "-root", root, firstID}, strings.NewReader(""), &out, &errOut, sourceDeps{getenv: deps.getenv})
+	if !errors.Is(err, errSourceFailed) || !strings.Contains(errOut.String(), "zero-chunk managed sources remain") {
+		t.Fatalf("rm chunk-bearing source error=%v stdout=%q stderr=%q", err, out.String(), errOut.String())
+	}
+
 	_, dbPath, workspaceID, err := sourceWorkspace(root, deps.getenv)
 	if err != nil {
 		t.Fatal(err)
@@ -90,22 +158,32 @@ func TestSourceE2ERmRemovesChunks(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer func() { _ = store.Close() }()
-	var orphanChunks int
-	if err := store.DB().QueryRow(
-		`SELECT COUNT(*) FROM chunks WHERE json_extract(metadata, '$.managed_document_id') = ?`, id,
-	).Scan(&orphanChunks); err != nil {
+	managed, err := rag.NewManagedSources(nil, store)
+	if err != nil {
 		t.Fatal(err)
 	}
-	if orphanChunks != 0 {
-		t.Fatalf("deleted document left %d chunks", orphanChunks)
+	docs, err := managed.ListDocuments(context.Background(), rag.DocumentFilter{})
+	closeErr := store.Close()
+	if err != nil || closeErr != nil {
+		t.Fatal(errors.Join(err, closeErr))
 	}
-	var total int
-	if err := store.DB().QueryRow(`SELECT COUNT(*) FROM chunks`).Scan(&total); err != nil {
-		t.Fatal(err)
+	chunks := map[string]int{}
+	for _, doc := range docs {
+		chunks[doc.ID] = doc.ChunkCount
 	}
-	if total < 1 {
-		t.Fatal("surviving document lost its chunks")
+	if len(docs) != 2 || chunks[firstID] < 1 || chunks[zeroID] != 0 {
+		t.Fatalf("documents after refused rm = %#v", docs)
+	}
+
+	for _, id := range []string{zeroID, firstID} {
+		out.Reset()
+		errOut.Reset()
+		if err := runSourceWith(context.Background(), []string{"rm", "-root", root, id}, strings.NewReader(""), &out, &errOut, sourceDeps{getenv: deps.getenv}); err != nil {
+			t.Fatalf("rm %s: %v\n%s%s", id, err, out.String(), errOut.String())
+		}
+	}
+	if _, err := resolveActiveGeneration(context.Background(), dbPath, workspaceID); !errors.Is(err, errNoActiveGeneration) {
+		t.Fatalf("resolve after ordered removals = %v, want no active generation", err)
 	}
 }
 
@@ -209,62 +287,5 @@ func TestSourceE2EVectorSpaceMismatchRefused(t *testing.T) {
 	}
 	if gen.metadata.SourceCount != 1 || gen.metadata.VectorSpaceID != "space/alpha" {
 		t.Fatalf("mismatch attempt disturbed the active generation: %+v", gen.metadata)
-	}
-}
-
-// TestSourceE2ERmLastSourceRefused: acceptance edge from the spec (D11).
-func TestSourceE2ERmLastSourceRefused(t *testing.T) {
-	deps, _ := sourceTestDeps(t, "test/space")
-	root := t.TempDir()
-	only := filepath.Join(root, "only.md")
-	if err := os.WriteFile(only, []byte("solitary"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	id := addTestDoc(t, deps, root, only)
-	_, dbPath, workspaceID, err := sourceWorkspace(root, deps.getenv)
-	if err != nil {
-		t.Fatal(err)
-	}
-	pointerBefore, err := os.ReadFile(activePointerPath(dbPath))
-	if err != nil {
-		t.Fatal(err)
-	}
-	var out, errOut bytes.Buffer
-	err = runSourceWith(context.Background(), []string{"rm", "-root", root, id}, strings.NewReader(""), &out, &errOut, sourceDeps{getenv: deps.getenv})
-	if !errors.Is(err, errSourceFailed) {
-		t.Fatalf("want refusal, got %v", err)
-	}
-	if !strings.Contains(errOut.String(), "keep at least one source") {
-		t.Fatalf("refusal is not actionable: %q", errOut.String())
-	}
-	pointerAfter, err := os.ReadFile(activePointerPath(dbPath))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !bytes.Equal(pointerBefore, pointerAfter) {
-		t.Fatal("last-source refusal changed the active pointer")
-	}
-	gen, resolveErr := resolveActiveGeneration(context.Background(), dbPath, workspaceID)
-	if resolveErr != nil {
-		t.Fatalf("active generation must survive refusal: %v", resolveErr)
-	}
-	if gen.metadata.SourceCount != 1 {
-		t.Fatalf("refused rm still changed the generation: %+v", gen.metadata)
-	}
-	store, err := rag.OpenSQLiteStoreReadOnly(gen.dbPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = store.Close() }()
-	managed, err := rag.NewManagedSources(nil, store)
-	if err != nil {
-		t.Fatal(err)
-	}
-	documents, err := managed.ListDocuments(context.Background(), rag.DocumentFilter{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(documents) != 1 || documents[0].ID != id || documents[0].ChunkCount < 1 {
-		t.Fatalf("last-source refusal lost the surviving document/chunks: %#v", documents)
 	}
 }

@@ -198,9 +198,178 @@ func TestMutateModeRefusesVectorSpaceMismatch(t *testing.T) {
 	}
 }
 
-func TestMutateModeDeleteToEmptyRefused(t *testing.T) {
-	// Fresh index containing ONLY one managed doc; deleting it must refuse to
-	// publish an empty generation.
+func TestWorkspaceRebuildRefusesToDropManagedDocuments(t *testing.T) {
+	tests := []struct {
+		name              string
+		full              bool
+		actualVectorSpace string
+		removeMetadata    bool
+	}{
+		{name: "full rebuild", full: true, actualVectorSpace: "test/space"},
+		{name: "vector-space change", actualVectorSpace: "other/space"},
+		{name: "full rebuild with missing metadata", full: true, actualVectorSpace: "test/space", removeMetadata: true},
+		{name: "automatic rebuild with missing metadata", actualVectorSpace: "test/space", removeMetadata: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			baseDB, workspaceID, built := managedRebuildFixture(t)
+			if tt.removeMetadata {
+				if err := os.Remove(built.generation.metadataPath); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			root := t.TempDir()
+			if err := os.WriteFile(filepath.Join(root, "workspace.go"), []byte("package workspace\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			var out bytes.Buffer
+			_, err := buildIndexGeneration(context.Background(), generationBuildOptions{
+				root: root, dbPath: baseDB, workspaceID: workspaceID,
+				requestedModel: "test-model", actualVectorSpace: tt.actualVectorSpace,
+				embedder: autoIndexTestEmbedder(tt.actualVectorSpace, ""),
+				full:     tt.full, out: &out,
+			})
+			if err == nil || !strings.Contains(err.Error(), "managed sources") {
+				t.Fatalf("rebuild must refuse to drop managed sources, got %v", err)
+			}
+		})
+	}
+}
+
+func TestWorkspaceRebuildFailsClosedWhenManagedStateCannotBeInspected(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*testing.T, string, generationBuildResult)
+	}{
+		{
+			name: "malformed pointer",
+			mutate: func(t *testing.T, baseDB string, _ generationBuildResult) {
+				if err := os.WriteFile(activePointerPath(baseDB), []byte("{broken"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "dangling pointer symlink",
+			mutate: func(t *testing.T, baseDB string, _ generationBuildResult) {
+				if err := os.Remove(activePointerPath(baseDB)); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink("missing-active.json", activePointerPath(baseDB)); err != nil {
+					t.Skipf("symlinks unavailable: %v", err)
+				}
+			},
+		},
+		{
+			name: "unreadable database",
+			mutate: func(t *testing.T, _ string, built generationBuildResult) {
+				if err := os.WriteFile(built.generation.dbPath, []byte("not sqlite"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "unstatable database",
+			mutate: func(t *testing.T, _ string, built generationBuildResult) {
+				if err := os.Remove(built.generation.dbPath); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(filepath.Base(built.generation.dbPath), built.generation.dbPath); err != nil {
+					t.Skipf("symlinks unavailable: %v", err)
+				}
+			},
+		},
+		{
+			name: "dangling database symlink",
+			mutate: func(t *testing.T, _ string, built generationBuildResult) {
+				if err := os.Remove(built.generation.dbPath); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink("missing.db", built.generation.dbPath); err != nil {
+					t.Skipf("symlinks unavailable: %v", err)
+				}
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			baseDB, workspaceID, built := managedRebuildFixture(t)
+			tt.mutate(t, baseDB, built)
+			root := t.TempDir()
+			if err := os.WriteFile(filepath.Join(root, "workspace.go"), []byte("package workspace\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			var out bytes.Buffer
+			_, err := buildIndexGeneration(context.Background(), generationBuildOptions{
+				root: root, dbPath: baseDB, workspaceID: workspaceID,
+				requestedModel: "test-model", actualVectorSpace: "test/space",
+				embedder: autoIndexTestEmbedder("test/space", ""), full: true, out: &out,
+			})
+			if err == nil || !strings.Contains(err.Error(), "cannot verify damaged index") {
+				t.Fatalf("rebuild inspection error = %v", err)
+			}
+		})
+	}
+}
+
+func managedRebuildFixture(t *testing.T) (string, string, generationBuildResult) {
+	t.Helper()
+	baseDB, workspaceID := mutateFixture(t)
+	var out bytes.Buffer
+	built, err := buildIndexGeneration(context.Background(), generationBuildOptions{
+		dbPath: baseDB, workspaceID: workspaceID,
+		requestedModel: "test-model", actualVectorSpace: "test/space",
+		embedder: autoIndexTestEmbedder("test/space", ""), out: &out,
+		mutate: func(ctx context.Context, indexer *rag.Indexer, store *rag.SQLiteStore) error {
+			managed, err := rag.NewManagedSources(indexer, store)
+			if err != nil {
+				return err
+			}
+			_, err = managed.IngestText(ctx, "retained.txt", "irreplaceable stdin content", rag.DocumentOptions{})
+			return err
+		},
+	})
+	if err != nil {
+		t.Fatalf("seed managed source: %v", err)
+	}
+	publishBuilt(t, baseDB, workspaceID, built)
+	return baseDB, workspaceID, built
+}
+
+func TestWorkspaceRebuildAllowsGenerationWithoutManagedTable(t *testing.T) {
+	baseDB, workspaceID := mutateFixture(t)
+	active, err := resolveActiveGeneration(context.Background(), baseDB, workspaceID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := rag.NewSQLiteStore(active.dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.DB().Exec(`DROP TABLE managed_documents`); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "workspace.go"), []byte("package workspace\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	_, err = buildIndexGeneration(context.Background(), generationBuildOptions{
+		root: root, dbPath: baseDB, workspaceID: workspaceID,
+		requestedModel: "test-model", actualVectorSpace: "test/space",
+		embedder: autoIndexTestEmbedder("test/space", ""), full: true, out: &out,
+	})
+	if err != nil {
+		t.Fatalf("pre-managed generation should remain rebuildable: %v", err)
+	}
+}
+
+func TestMutateModeDeleteToEmptyReturnsRetirementSignal(t *testing.T) {
 	dir := t.TempDir()
 	baseDB := filepath.Join(dir, "ws.db")
 	workspaceID := "workspace:mutempty"
@@ -241,8 +410,21 @@ func TestMutateModeDeleteToEmptyRefused(t *testing.T) {
 			return managed.DeleteDocument(ctx, doc.ID)
 		},
 	})
-	if err == nil {
-		t.Fatal("deleting the last source must refuse to publish")
+	if !errors.Is(err, errEmptyStagingGeneration) {
+		t.Fatalf("delete last source build error = %v, want retirement signal", err)
+	}
+	active, err := resolveActiveGeneration(context.Background(), baseDB, workspaceID)
+	if err != nil || active.id != built.generation.id {
+		t.Fatalf("active generation changed after unpublishable staging: %+v, %v", active, err)
+	}
+	entries, err := os.ReadDir(generationsPath(baseDB))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), ".staging-") {
+			t.Fatalf("empty mutation leaked staging directory %q", entry.Name())
+		}
 	}
 }
 

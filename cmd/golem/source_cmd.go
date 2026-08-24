@@ -305,7 +305,10 @@ func sourceAddExecute(ctx context.Context, spec sourceAddSpec, stdin io.Reader, 
 	if err := publishSourceGeneration(ctx, dbPath, workspaceID, built); err != nil {
 		return err
 	}
-	printSourceDocument(out, doc)
+	if err := printSourceDocument(out, doc); err != nil {
+		_, _ = fmt.Fprintf(errOut, "golem source add: write result: %v\n", err)
+		return errSourceFailed
+	}
 	return nil
 }
 
@@ -324,12 +327,13 @@ func publishSourceGeneration(ctx context.Context, dbPath, workspaceID string, bu
 	return nil
 }
 
-func printSourceDocument(out io.Writer, doc rag.Document) {
+func printSourceDocument(out io.Writer, doc rag.Document) error {
 	origin := doc.Origin
 	if origin == "" {
 		origin = doc.Title
 	}
-	_, _ = fmt.Fprintf(out, "%s %s %s (%d chunks) -> %s\n", doc.ID, doc.Kind, doc.State, doc.ChunkCount, sourceHumanText(origin))
+	_, err := fmt.Fprintf(out, "%s %s %s (%d chunks) -> %s\n", doc.ID, doc.Kind, doc.State, doc.ChunkCount, sourceHumanText(origin))
+	return err
 }
 
 func sourceHumanText(value string) string {
@@ -385,7 +389,7 @@ func sourceRmExecute(ctx context.Context, rootFlag, id string, out, errOut io.Wr
 		}
 	}()
 	active, err := resolveActiveGeneration(ctx, dbPath, workspaceID)
-	if errors.Is(err, os.ErrNotExist) {
+	if errors.Is(err, errNoActiveGeneration) {
 		_, _ = fmt.Fprintln(errOut, "golem source rm: no workspace index")
 		return errSourceFailed
 	}
@@ -416,13 +420,27 @@ func sourceRmExecute(ctx context.Context, rootFlag, id string, out, errOut io.Wr
 			_, _ = fmt.Fprintf(errOut, "golem source rm: managed document not found: %s\n", id)
 			return errSourceFailed
 		}
+		if errors.Is(err, errEmptyStagingGeneration) {
+			if err := retireActiveGeneration(ctx, dbPath, workspaceID); err != nil {
+				_, _ = fmt.Fprintf(errOut, "golem source rm: retire empty workspace index: %v\n", err)
+				return errSourceFailed
+			}
+			if _, err := fmt.Fprintf(out, "deleted %s\n", id); err != nil {
+				_, _ = fmt.Fprintf(errOut, "golem source rm: write result: %v\n", err)
+				return errSourceFailed
+			}
+			return nil
+		}
 		_, _ = fmt.Fprintf(errOut, "golem source rm: %v\n", err)
 		return errSourceFailed
 	}
 	if err := publishSourceGeneration(ctx, dbPath, workspaceID, built); err != nil {
 		return err
 	}
-	_, _ = fmt.Fprintf(out, "deleted %s\n", id)
+	if _, err := fmt.Fprintf(out, "deleted %s\n", id); err != nil {
+		_, _ = fmt.Fprintf(errOut, "golem source rm: write result: %v\n", err)
+		return errSourceFailed
+	}
 	return nil
 }
 
@@ -476,7 +494,7 @@ func sourceReindexExecute(ctx context.Context, configPath, rootFlag, ollamaURL, 
 			_, _ = fmt.Fprintf(errOut, "golem: close index writer lease: %v\n", closeErr)
 		}
 	}()
-	if _, err := resolveActiveGeneration(ctx, dbPath, workspaceID); errors.Is(err, os.ErrNotExist) {
+	if _, err := resolveActiveGeneration(ctx, dbPath, workspaceID); errors.Is(err, errNoActiveGeneration) {
 		_, _ = fmt.Fprintln(errOut, "golem source reindex: no workspace index")
 		return errSourceFailed
 	} else if err != nil {
@@ -526,7 +544,10 @@ func sourceReindexExecute(ctx context.Context, configPath, rootFlag, ollamaURL, 
 	if err := publishSourceGeneration(ctx, dbPath, workspaceID, built); err != nil {
 		return err
 	}
-	printSourceDocument(out, doc)
+	if err := printSourceDocument(out, doc); err != nil {
+		_, _ = fmt.Fprintf(errOut, "golem source reindex: write result: %v\n", err)
+		return errSourceFailed
+	}
 	return nil
 }
 
@@ -607,18 +628,26 @@ func openResolvedSourceListStore(
 	return open(generation.dbPath)
 }
 
+func sourceListNoIndex(asJSON bool, out, errOut io.Writer) error {
+	_, _ = fmt.Fprintln(errOut, "golem source list: no workspace index; nothing to list")
+	if !asJSON {
+		return nil
+	}
+	if err := renderSourceDocuments(out, []rag.Document{}, true); err != nil {
+		_, _ = fmt.Fprintf(errOut, "golem source list: %v\n", err)
+		return errSourceFailed
+	}
+	return nil
+}
+
 func sourceListExecute(ctx context.Context, rootFlag string, asJSON bool, out, errOut io.Writer, deps sourceDeps) error {
 	_, dbPath, workspaceID, err := sourceWorkspace(rootFlag, deps.env())
 	if err != nil {
 		return err
 	}
 	gen, err := resolveActiveGeneration(ctx, dbPath, workspaceID)
-	if errors.Is(err, os.ErrNotExist) {
-		_, _ = fmt.Fprintln(errOut, "golem source list: no workspace index; nothing to list")
-		if asJSON {
-			_, _ = fmt.Fprintln(out, "[]")
-		}
-		return nil
+	if errors.Is(err, errNoActiveGeneration) {
+		return sourceListNoIndex(asJSON, out, errOut)
 	}
 	if err != nil {
 		_, _ = fmt.Fprintf(errOut, "golem source list: %v\n", err)
@@ -626,6 +655,9 @@ func sourceListExecute(ctx context.Context, rootFlag string, asJSON bool, out, e
 	}
 	store, err := openResolvedSourceListStore(
 		ctx, dbPath, workspaceID, gen, resolveActiveGeneration, rag.OpenSQLiteStoreReadOnly)
+	if errors.Is(err, errNoActiveGeneration) {
+		return sourceListNoIndex(asJSON, out, errOut)
+	}
 	if err != nil {
 		_, _ = fmt.Fprintf(errOut, "golem source list: open generation: %v\n", err)
 		return errSourceFailed
@@ -657,31 +689,38 @@ func renderSourceDocuments(out io.Writer, docs []rag.Document, asJSON bool) erro
 		if err != nil {
 			return fmt.Errorf("marshal: %w", err)
 		}
-		_, _ = fmt.Fprintln(out, string(data))
+		if _, err := fmt.Fprintln(out, string(data)); err != nil {
+			return fmt.Errorf("write JSON: %w", err)
+		}
 		return nil
 	}
-	renderSourceTable(out, docs)
-	return nil
+	return renderSourceTable(out, docs)
 }
 
-func renderSourceTable(out io.Writer, docs []rag.Document) {
+func renderSourceTable(out io.Writer, docs []rag.Document) error {
 	if len(docs) == 0 {
-		_, _ = fmt.Fprintln(out, "no managed sources")
-		return
+		_, err := fmt.Fprintln(out, "no managed sources")
+		return err
 	}
 	w := tabwriter.NewWriter(out, 2, 0, 2, ' ', 0)
-	_, _ = fmt.Fprintln(w, "ID\tKIND\tSTATE\tFRESHNESS\tCHUNKS\tUPDATED\tTITLE")
+	if _, err := fmt.Fprintln(w, "ID\tKIND\tSTATE\tFRESHNESS\tCHUNKS\tUPDATED\tTITLE"); err != nil {
+		return err
+	}
 	for _, doc := range docs {
 		title := doc.Title
 		if doc.Kind == rag.DocumentKindFile && doc.Origin != "" {
 			title = doc.Origin
 		}
-		_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%d\t%s\t%s\n",
+		if _, err := fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%d\t%s\t%s\n",
 			doc.ID, doc.Kind, doc.State, doc.Freshness, doc.ChunkCount,
-			time.Unix(doc.UpdatedAt, 0).UTC().Format(time.RFC3339), sourceHumanText(title))
+			time.Unix(doc.UpdatedAt, 0).UTC().Format(time.RFC3339), sourceHumanText(title)); err != nil {
+			return err
+		}
 		if doc.LastError != "" {
-			_, _ = fmt.Fprintf(w, "\tlast error: %s\n", sourceHumanText(doc.LastError))
+			if _, err := fmt.Fprintf(w, "\tlast error: %s\n", sourceHumanText(doc.LastError)); err != nil {
+				return err
+			}
 		}
 	}
-	_ = w.Flush()
+	return w.Flush()
 }

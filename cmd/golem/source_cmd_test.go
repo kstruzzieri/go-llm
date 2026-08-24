@@ -127,6 +127,74 @@ func TestSourceAddFileNoIndexCreatesGeneration(t *testing.T) {
 	}
 }
 
+func TestSourceMutationsPropagatePrimaryOutputFailure(t *testing.T) {
+	writeErr := errors.New("write failed")
+	t.Run("add", func(t *testing.T) {
+		deps, _ := sourceTestDeps(t, "test/space")
+		root := t.TempDir()
+		doc := filepath.Join(root, "notes.md")
+		if err := os.WriteFile(doc, []byte("managed output failure"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		var errOut bytes.Buffer
+		err := runSourceWith(context.Background(), []string{"add", "-root", root, doc}, strings.NewReader(""),
+			sourceErrorWriter{err: writeErr}, &errOut, deps)
+		if !errors.Is(err, errSourceFailed) || !strings.Contains(errOut.String(), writeErr.Error()) {
+			t.Fatalf("error=%v stderr=%q", err, errOut.String())
+		}
+	})
+
+	t.Run("rm", func(t *testing.T) {
+		deps, _ := sourceTestDeps(t, "test/space")
+		root := t.TempDir()
+		doc := filepath.Join(root, "notes.md")
+		if err := os.WriteFile(doc, []byte("managed output failure"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		other := filepath.Join(root, "other.md")
+		if err := os.WriteFile(other, []byte("keep one managed document"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		var addOut, errOut bytes.Buffer
+		if err := runSourceWith(context.Background(), []string{"add", "-root", root, doc}, strings.NewReader(""),
+			&addOut, &errOut, deps); err != nil {
+			t.Fatalf("seed add: %v: %s", err, errOut.String())
+		}
+		id := strings.Fields(addOut.String())[0]
+		if err := runSourceWith(context.Background(), []string{"add", "-root", root, other}, strings.NewReader(""),
+			io.Discard, &errOut, deps); err != nil {
+			t.Fatalf("seed second add: %v: %s", err, errOut.String())
+		}
+		errOut.Reset()
+		err := runSourceWith(context.Background(), []string{"rm", "-root", root, id}, strings.NewReader(""),
+			sourceErrorWriter{err: writeErr}, &errOut, deps)
+		if !errors.Is(err, errSourceFailed) || !strings.Contains(errOut.String(), writeErr.Error()) {
+			t.Fatalf("error=%v stderr=%q", err, errOut.String())
+		}
+	})
+
+	t.Run("reindex", func(t *testing.T) {
+		deps, _ := sourceTestDeps(t, "test/space")
+		root := t.TempDir()
+		doc := filepath.Join(root, "notes.md")
+		if err := os.WriteFile(doc, []byte("managed output failure"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		var addOut, errOut bytes.Buffer
+		if err := runSourceWith(context.Background(), []string{"add", "-root", root, doc}, strings.NewReader(""),
+			&addOut, &errOut, deps); err != nil {
+			t.Fatalf("seed add: %v: %s", err, errOut.String())
+		}
+		id := strings.Fields(addOut.String())[0]
+		errOut.Reset()
+		err := runSourceWith(context.Background(), []string{"reindex", "-root", root, id}, strings.NewReader(""),
+			sourceErrorWriter{err: writeErr}, &errOut, deps)
+		if !errors.Is(err, errSourceFailed) || !strings.Contains(errOut.String(), writeErr.Error()) {
+			t.Fatalf("error=%v stderr=%q", err, errOut.String())
+		}
+	})
+}
+
 func TestSourceAddTextFromStdin(t *testing.T) {
 	deps, _ := sourceTestDeps(t, "test/space")
 	root := t.TempDir()
@@ -542,6 +610,65 @@ func TestSourceListNoIndexExitsZero(t *testing.T) {
 	}
 }
 
+func TestSourceCommandsRejectDanglingActivePointer(t *testing.T) {
+	deps, _ := sourceTestDeps(t, "test/space")
+	root := t.TempDir()
+	doc := filepath.Join(root, "notes.md")
+	if err := os.WriteFile(doc, []byte("must not replace a dangling generation"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, dbPath, workspaceID, err := sourceWorkspace(root, deps.getenv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := publishActiveGeneration(context.Background(), dbPath, activeGenerationPointer{
+		SchemaVersion: activePointerSchemaVersion,
+		WorkspaceID:   workspaceID,
+		Generation:    strings.Repeat("a", 32),
+	}, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	id := strings.Repeat("b", 32)
+	for _, args := range [][]string{
+		{"list", "-root", root, "-json"},
+		{"add", "-root", root, doc},
+		{"rm", "-root", root, id},
+		{"reindex", "-root", root, id},
+	} {
+		var out, errOut bytes.Buffer
+		err := runSourceWith(context.Background(), args, strings.NewReader(""), &out, &errOut, deps)
+		if !errors.Is(err, errSourceFailed) || out.Len() != 0 ||
+			strings.Contains(errOut.String(), "no workspace index") ||
+			!strings.Contains(errOut.String(), "read generation metadata") {
+			t.Fatalf("args=%v error=%v stdout=%q stderr=%q", args, err, out.String(), errOut.String())
+		}
+	}
+}
+
+func TestSourceListRejectsIncompleteLegacyIndex(t *testing.T) {
+	getenv, _ := sourceTestEnv(t)
+	root := t.TempDir()
+	_, dbPath, _, err := sourceWorkspace(root, getenv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(dbPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(dbPath, []byte("orphaned legacy database"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var out, errOut bytes.Buffer
+	err = runSourceWith(context.Background(), []string{"list", "-root", root, "-json"}, strings.NewReader(""),
+		&out, &errOut, sourceDeps{getenv: getenv})
+	if !errors.Is(err, errSourceFailed) || out.Len() != 0 ||
+		strings.Contains(errOut.String(), "no workspace index") ||
+		!strings.Contains(errOut.String(), "incomplete legacy index") {
+		t.Fatalf("error=%v stdout=%q stderr=%q", err, out.String(), errOut.String())
+	}
+}
+
 // TestSourceListJSONKeepsStdoutMachineReadable: the -json contract — stdout
 // is exactly one JSON document even with no index ([]), notices go to stderr.
 func TestSourceListJSONKeepsStdoutMachineReadable(t *testing.T) {
@@ -557,6 +684,18 @@ func TestSourceListJSONKeepsStdoutMachineReadable(t *testing.T) {
 	var docs []rag.Document
 	if err := json.Unmarshal(out.Bytes(), &docs); err != nil {
 		t.Fatalf("stdout is not valid JSON: %v", err)
+	}
+}
+
+func TestSourceListNoIndexPropagatesJSONWriteFailure(t *testing.T) {
+	getenv, _ := sourceTestEnv(t)
+	root := t.TempDir()
+	writeErr := errors.New("write failed")
+	var errOut bytes.Buffer
+	err := runSourceWith(context.Background(), []string{"list", "-root", root, "-json"}, strings.NewReader(""),
+		sourceErrorWriter{err: writeErr}, &errOut, sourceDeps{getenv: getenv})
+	if !errors.Is(err, errSourceFailed) || !strings.Contains(errOut.String(), writeErr.Error()) {
+		t.Fatalf("error = %v, stderr = %q; want rendered write failure", err, errOut.String())
 	}
 }
 
@@ -597,6 +736,32 @@ func TestOpenResolvedSourceListStoreRetriesOneDisappearedGeneration(t *testing.T
 	}
 }
 
+func TestOpenResolvedSourceListStoreReportsRetirementRace(t *testing.T) {
+	dir := t.TempDir()
+	oldGeneration := indexGeneration{dbPath: filepath.Join(dir, "old.db")}
+	store, err := rag.NewSQLiteStore(oldGeneration.dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(oldGeneration.dbPath); err != nil {
+		t.Fatal(err)
+	}
+	resolve := func(context.Context, string, string) (indexGeneration, error) {
+		return indexGeneration{}, errNoActiveGeneration
+	}
+	got, err := openResolvedSourceListStore(context.Background(), "base.db", "workspace:test",
+		oldGeneration, resolve, rag.OpenSQLiteStoreReadOnly)
+	if got != nil {
+		_ = got.Close()
+	}
+	if !errors.Is(err, errNoActiveGeneration) {
+		t.Fatalf("retry error = %v, want retired-generation sentinel", err)
+	}
+}
+
 func TestRenderSourceDocumentsEscapesHumanControlsButPreservesJSON(t *testing.T) {
 	const hostile = "title\n\t\x1b\x7f\u009b"
 	document := rag.Document{
@@ -605,7 +770,9 @@ func TestRenderSourceDocumentsEscapesHumanControlsButPreservesJSON(t *testing.T)
 		ChunkCount: 1, UpdatedAt: 1700000000, LastError: "failed: " + hostile,
 	}
 	var summary bytes.Buffer
-	printSourceDocument(&summary, document)
+	if err := printSourceDocument(&summary, document); err != nil {
+		t.Fatal(err)
+	}
 	if strings.ContainsAny(summary.String(), "\t\x1b\x7f\u009b") ||
 		strings.Count(summary.String(), "\n") != 1 ||
 		!strings.Contains(summary.String(), `\x1b`) {
@@ -639,6 +806,23 @@ func TestRenderSourceDocumentsEscapesHumanControlsButPreservesJSON(t *testing.T)
 		decoded[0].State != document.State || decoded[0].Freshness != document.Freshness ||
 		decoded[0].ChunkCount != document.ChunkCount {
 		t.Fatalf("JSON changed document values: %#v", decoded)
+	}
+}
+
+type sourceErrorWriter struct{ err error }
+
+func (w sourceErrorWriter) Write([]byte) (int, error) { return 0, w.err }
+
+func TestRenderSourceDocumentsPropagatesWriteErrors(t *testing.T) {
+	writeErr := errors.New("write failed")
+	docs := []rag.Document{{ID: strings.Repeat("a", 32), Kind: rag.DocumentKindText, Title: "notes"}}
+	for _, asJSON := range []bool{false, true} {
+		t.Run(fmt.Sprintf("json=%t", asJSON), func(t *testing.T) {
+			err := renderSourceDocuments(sourceErrorWriter{err: writeErr}, docs, asJSON)
+			if !errors.Is(err, writeErr) {
+				t.Fatalf("error = %v, want write failure", err)
+			}
+		})
 	}
 }
 

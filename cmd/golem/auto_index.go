@@ -5,7 +5,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -141,7 +140,7 @@ func runAutoIndex(ctx context.Context, job autoIndexJob) {
 		pruneDeleted:      true,
 		out:               &buf,
 	})
-	if built.activeErr != nil && !errors.Is(built.activeErr, os.ErrNotExist) && ctx.Err() == nil {
+	if built.activeErr != nil && !errors.Is(built.activeErr, errNoActiveGeneration) && ctx.Err() == nil {
 		job.notice("warning: retrieve auto-index rebuilding private store: " + built.activeErr.Error())
 	}
 	if built.gcWarn != "" && ctx.Err() == nil {
