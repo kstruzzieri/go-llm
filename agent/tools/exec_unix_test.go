@@ -5,6 +5,7 @@ package tools
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"strconv"
@@ -34,6 +35,13 @@ func TestMain(m *testing.M) {
 //	                                  <pidfile>, then sleep 30s; used to verify that
 //	                                  a group-kill reaps the grandchild too
 //	["justsleep"]                  -> sleep 30s (grandchild target for groupkill test)
+//	["stdinprobe"]                 -> read stdin to EOF, print "stdin:<bytes>"
+//	["bothstreams"]                -> print "out-stream" to stdout, "err-stream" to stderr
+//	["orphanleave", <pidfile>]     -> spawn a same-group justsleep grandchild with
+//	                                  detached stdio (pipes released), write its PID
+//	                                  to <pidfile>, exit 0 immediately
+//	["holdpipe"]                   -> spawn a same-group justsleep grandchild that
+//	                                  INHERITS this stdout pipe, exit 0 immediately
 func helperMain(args []string) int {
 	if len(args) == 0 {
 		return 0
@@ -88,6 +96,63 @@ func helperMain(args []string) int {
 	case "justsleep":
 		// Grandchild target: just sleep; meant to be killed by a group SIGKILL.
 		time.Sleep(30 * time.Second)
+		return 0
+	case "stdinprobe":
+		// Reads stdin to EOF and reports the byte count; proves the nil-stdin
+		// contract (os/exec wires /dev/null, so this sees immediate EOF).
+		n, err := io.Copy(io.Discard, os.Stdin)
+		if err != nil {
+			_, _ = fmt.Fprintln(os.Stderr, "stdinprobe:", err)
+			return 1
+		}
+		_, _ = fmt.Fprintf(os.Stdout, "stdin:%d\n", n)
+		return 0
+	case "bothstreams":
+		_, _ = fmt.Fprintln(os.Stdout, "out-stream")
+		_, _ = fmt.Fprintln(os.Stderr, "err-stream")
+		return 0
+	case "orphanleave":
+		// Natural-leader-exit fixture: spawn a same-group child whose stdio is
+		// detached (nil Stdout/Stderr -> /dev/null, so the inherited pipes are
+		// released), write its PID to the pidfile, and exit 0 immediately. The
+		// child outlives this leader; only a residual group kill can reap it.
+		if len(args) < 2 {
+			_, _ = fmt.Fprintln(os.Stderr, "orphanleave: missing pidfile argument")
+			return 1
+		}
+		self, err := os.Executable()
+		if err != nil {
+			_, _ = fmt.Fprintln(os.Stderr, "orphanleave: os.Executable:", err)
+			return 1
+		}
+		child := exec.Command(self, "__golem_exec_helper__", "justsleep")
+		// No Setpgid: the child stays in this leader's process group.
+		if err := child.Start(); err != nil {
+			_, _ = fmt.Fprintln(os.Stderr, "orphanleave: child.Start:", err)
+			return 1
+		}
+		if err := os.WriteFile(args[1], []byte(strconv.Itoa(child.Process.Pid)), 0o600); err != nil {
+			_, _ = fmt.Fprintln(os.Stderr, "orphanleave: WriteFile:", err)
+			_ = child.Process.Kill()
+			return 1
+		}
+		return 0
+	case "holdpipe":
+		// Held-pipe fixture: spawn a same-group child that INHERITS this
+		// process's stdout pipe and sleeps 30s, then exit 0 immediately. The
+		// write end stays open past leader exit, so only WaitDelay unblocks
+		// the parent's Wait.
+		self, err := os.Executable()
+		if err != nil {
+			_, _ = fmt.Fprintln(os.Stderr, "holdpipe: os.Executable:", err)
+			return 1
+		}
+		child := exec.Command(self, "__golem_exec_helper__", "justsleep")
+		child.Stdout = os.Stdout // hold the leader's stdout pipe open
+		if err := child.Start(); err != nil {
+			_, _ = fmt.Fprintln(os.Stderr, "holdpipe: child.Start:", err)
+			return 1
+		}
 		return 0
 	}
 	return 0
