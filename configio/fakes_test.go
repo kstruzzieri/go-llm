@@ -123,10 +123,12 @@ type fakeResolver struct {
 	err    error
 	exp    provider.ToolCallExplanation
 	expErr error
-	// calls is unsynchronized: single-goroutine use only (all probe unit
-	// tests drive the resolver from the test goroutine).
-	calls  int
-	onCall func(ctx context.Context)
+	// calls and expCalls are unsynchronized: single-goroutine use only
+	// (all probe unit tests drive the resolver from the test goroutine).
+	calls     int
+	onCall    func(ctx context.Context)
+	expCalls  int
+	onExplain func()
 }
 
 func (f *fakeResolver) ResolveToolCall(ctx context.Context, _ provider.ModelKey) (fingerprint.CapProbeState, error) {
@@ -141,6 +143,10 @@ func (f *fakeResolver) ResolveToolCall(ctx context.Context, _ provider.ModelKey)
 }
 
 func (f *fakeResolver) ExplainToolCall(context.Context, provider.ModelKey) (provider.ToolCallExplanation, error) {
+	f.expCalls++
+	if f.onExplain != nil {
+		f.onExplain()
+	}
 	if f.expErr != nil {
 		return provider.ToolCallExplanation{}, f.expErr
 	}

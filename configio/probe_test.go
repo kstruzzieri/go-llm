@@ -189,4 +189,51 @@ func TestProbeToolCall_CancelledCallerGetsNothingEvenWithADeliveredResult(t *tes
 	if out != (ProbeOutcome{}) {
 		t.Fatalf("outcome = %+v; a cancelled caller must receive nothing", out)
 	}
+	if r.expCalls != 0 {
+		t.Fatalf("ExplainToolCall called %d times after cancellation; the post-resolve barrier must stop before the durability read", r.expCalls)
+	}
+}
+
+func TestProbeToolCall_CancelSurfacedAsResolveErrorStaysUnclassified(t *testing.T) {
+	// The resolver may surface the caller's cancellation AS its error.
+	// The post-resolve barrier must classify by the caller's ctx, not the
+	// error branch: a cancelled caller gets the raw context error, never
+	// probe_failed. (This is the fixture that falsifies deleting the
+	// post-resolve barrier; the err=nil fixture alone is masked by the
+	// post-durability barrier.)
+	ctx, cancel := context.WithCancel(context.Background())
+	r := &fakeResolver{err: context.Canceled}
+	r.onCall = func(context.Context) { cancel() }
+	out, err := ProbeToolCall(ctx, r, key("p", "m"))
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("error = %v; want context.Canceled", err)
+	}
+	if code, ok := CodeOf(err); ok {
+		t.Fatalf("cancellation classified as %q; must stay unclassified", code)
+	}
+	if out != (ProbeOutcome{}) {
+		t.Fatalf("outcome = %+v; want zero", out)
+	}
+}
+
+func TestProbeToolCall_CancelDuringDurabilityReadPublishesNothing(t *testing.T) {
+	// Cancellation landing inside the durability read (ExplainToolCall):
+	// only the post-durability barrier stands between this and a
+	// published outcome.
+	ctx, cancel := context.WithCancel(context.Background())
+	r := &fakeResolver{
+		state:     fingerprint.CapProbeYes,
+		exp:       provider.ToolCallExplanation{Source: "probe", State: fingerprint.CapProbeYes, Valid: true},
+		onExplain: cancel,
+	}
+	out, err := ProbeToolCall(ctx, r, key("p", "m"))
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("error = %v; want context.Canceled (post-durability barrier)", err)
+	}
+	if code, ok := CodeOf(err); ok {
+		t.Fatalf("cancellation classified as %q; must stay unclassified", code)
+	}
+	if out != (ProbeOutcome{}) {
+		t.Fatalf("outcome = %+v; a cancelled caller must receive nothing", out)
+	}
 }
