@@ -4,11 +4,12 @@
 // runs implicitly on view or build, and a cancelled operation returns a
 // zero value: the caller receives nothing.
 //
-// Error discipline mirrors config/profiles: message text passes through
-// unchanged for CLI and log surfaces, while CodeOf exposes a bounded
-// code that is the ONLY thing a projection boundary (e.g. Firn's Wails
-// layer) may forward. Raw provider/transport text never crosses a
-// consumer boundary via the code path. Caller cancellation is
+// Error discipline follows the config/profiles house rules — bounded
+// codes, message text passes through unchanged; CodeOf uses
+// config.DiagnosticOf's two-value shape. The bounded code is the ONLY
+// thing a projection boundary (e.g. Firn's Wails layer) may forward.
+// Raw provider/transport text never crosses a consumer boundary via the
+// code path. Caller cancellation is
 // deliberately UNCLASSIFIED: it surfaces as the raw context error with
 // no code, so consumers can distinguish "user cancelled" from "failed".
 //
@@ -106,3 +107,10 @@ type ToolCallResolver interface {
 	ResolveToolCall(ctx context.Context, key provider.ModelKey) (fingerprint.CapProbeState, error)
 	ExplainToolCall(ctx context.Context, key provider.ModelKey) (provider.ToolCallExplanation, error)
 }
+
+// Compile-time seam checks: the concrete registry types satisfy the seams.
+var (
+	_ ProviderLister   = (*provider.Registry)(nil)
+	_ ListedProjector  = (*provider.ModelRegistry)(nil)
+	_ ToolCallResolver = (*provider.ModelRegistry)(nil)
+)

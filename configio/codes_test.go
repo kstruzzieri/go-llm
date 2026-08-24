@@ -5,8 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"testing"
-
-	"github.com/kstruzzieri/go-llm/provider"
 )
 
 func TestCodeOf(t *testing.T) {
@@ -40,10 +38,3 @@ func TestCancellationIsUnclassified(t *testing.T) {
 		t.Fatalf("CodeOf(wrapped deadline) = %q, %v; cancellation must stay unclassified", code, ok)
 	}
 }
-
-// Compile-time seam checks: the concrete registry types satisfy the seams.
-var (
-	_ ProviderLister   = (*provider.Registry)(nil)
-	_ ListedProjector  = (*provider.ModelRegistry)(nil)
-	_ ToolCallResolver = (*provider.ModelRegistry)(nil)
-)
