@@ -59,6 +59,7 @@ func TestIntegration_CancelledProbeCallerReceivesNothing(t *testing.T) {
 	}, store, prober)
 
 	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 	type result struct {
 		out ProbeOutcome
 		err error
@@ -123,16 +124,16 @@ func TestIntegration_ProbeVerdictSticksAcrossRegistryLifetimes(t *testing.T) {
 		t.Fatalf("store rows = %d; want 2 persisted verdicts", store.count())
 	}
 
-	// Session boundary: brand-new registry AND provider objects sharing
-	// ONLY the store. No new probe calls may fire.
-	before := prober.totalCalls()
-	reg2, mr2 := newRealRegistry(t, mkProviders(), store, prober)
+	// Session boundary: brand-new registry, provider, AND prober objects
+	// sharing only the store. No new probe calls may fire.
+	prober2 := newCountingProber()
+	reg2, mr2 := newRealRegistry(t, mkProviders(), store, prober2)
 	inv, err := RefreshInventory(ctx, reg2, mr2)
 	if err != nil {
 		t.Fatalf("second-session RefreshInventory() error: %v", err)
 	}
-	if got := prober.totalCalls(); got != before {
-		t.Fatalf("second-session refresh fired %d new probe calls; want 0", got-before)
+	if got := prober2.totalCalls(); got != 0 {
+		t.Fatalf("second-session refresh fired %d probe calls; want 0", got)
 	}
 	if len(inv.Models) != 2 {
 		t.Fatalf("second-session Models = %+v; want exactly 2", inv.Models)
@@ -145,11 +146,19 @@ func TestIntegration_ProbeVerdictSticksAcrossRegistryLifetimes(t *testing.T) {
 	if len(byModel) != 2 {
 		t.Fatalf("distinct models = %d; want 2", len(byModel))
 	}
-	yes := inv.Models[byModel["says-yes"]]
+	yesIdx, ok := byModel["says-yes"]
+	if !ok {
+		t.Fatalf("says-yes missing from second-session inventory: %+v", inv.Models)
+	}
+	yes := inv.Models[yesIdx]
 	if !yes.Caps.Has(provider.CapToolCall) || !yes.KnownMask.Has(provider.CapToolCall) {
 		t.Fatalf("says-yes after restart: Caps=%v KnownMask=%v; want tool_call set in both", yes.Caps, yes.KnownMask)
 	}
-	no := inv.Models[byModel["says-no"]]
+	noIdx, ok := byModel["says-no"]
+	if !ok {
+		t.Fatalf("says-no missing from second-session inventory: %+v", inv.Models)
+	}
+	no := inv.Models[noIdx]
 	if no.Caps.Has(provider.CapToolCall) {
 		t.Fatalf("says-no after restart: Caps=%v; tool_call bit must stay clear", no.Caps)
 	}
