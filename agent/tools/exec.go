@@ -191,87 +191,115 @@ func (t *RunCommand) Plan(_ context.Context, raw json.RawMessage) (agent.ToolPla
 	if err := json.Unmarshal(raw, &args); err != nil {
 		return agent.ToolPlan{Effect: eff}, fmt.Errorf("invalid arguments: %w", err)
 	}
-	if len(args.Argv) == 0 {
-		return agent.ToolPlan{Effect: eff}, fmt.Errorf("argv is required and must be non-empty")
-	}
-	if strings.TrimSpace(args.Argv[0]) == "" {
-		return agent.ToolPlan{Effect: eff}, fmt.Errorf("argv[0] must not be blank")
-	}
-	for _, a := range args.Argv {
-		if strings.IndexByte(a, 0) >= 0 {
-			return agent.ToolPlan{Effect: eff}, fmt.Errorf("argv must not contain NUL bytes")
-		}
-	}
 	timeout, requested, clamped, err := resolveExecTimeout(args.TimeoutSeconds)
 	if err != nil {
 		return agent.ToolPlan{Effect: eff}, err
 	}
-	dir, dirLabel, dirIdentity, err := t.resolveDirArg(args.Dir)
+	p, err := prepareExecPlan(t.ws, args.Argv, args.Dir, timeout, requested, clamped)
 	if err != nil {
 		return agent.ToolPlan{Effect: eff}, err
-	}
-	env, envNames := buildExecEnv(os.LookupEnv)
-	path, fi, err := resolveExecutable(t.ws, dir, args.Argv[0], pathFromEnv(env))
-	if err != nil {
-		return agent.ToolPlan{Effect: eff}, fmt.Errorf("resolve %q: %w", args.Argv[0], err)
-	}
-	fp := commandFingerprint(args.Argv, dir, env, timeout, requested, path)
-	p := execPending{
-		path: path, identity: fi, argv: args.Argv, dir: dir, dirLabel: dirLabel,
-		dirIdentity: dirIdentity, env: env, envNames: envNames, timeout: timeout,
-		requestedTO: requested, clamped: clamped, fingerprint: fp,
 	}
 	t.store(ContentHash(raw), p)
 	eff.Timeout = timeout
 	return agent.ToolPlan{
 		Effect:      eff,
 		Preview:     renderExecPreview(p, args.Argv[0]),
-		ApprovalKey: execApprovalKeyPrefix + fp,
+		ApprovalKey: execApprovalKeyPrefix + p.fingerprint,
 	}, nil
 }
 
-// resolveDirArg resolves the optional dir argument through the Workspace chokepoint,
+// prepareExecPlan is the ONE place command preparation happens, shared by the
+// foreground run_command Plan and the background start_command tool (#346): argv
+// validation (empty/blank/NUL), dir resolution through the Workspace chokepoint,
+// sanitized-env construction, executable resolution, owned slice copies, and the
+// canonical approval fingerprint. Timeout parsing stays with the callers.
+func prepareExecPlan(ws *Workspace, argv []string, dir string, timeout time.Duration, requestedTimeout int, clamped bool) (execPending, error) {
+	if len(argv) == 0 {
+		return execPending{}, fmt.Errorf("argv is required and must be non-empty")
+	}
+	if strings.TrimSpace(argv[0]) == "" {
+		return execPending{}, fmt.Errorf("argv[0] must not be blank")
+	}
+	for _, a := range argv {
+		if strings.IndexByte(a, 0) >= 0 {
+			return execPending{}, fmt.Errorf("argv must not contain NUL bytes")
+		}
+	}
+	cwd, dirLabel, dirIdentity, err := resolveExecDir(ws, dir)
+	if err != nil {
+		return execPending{}, err
+	}
+	env, envNames := buildExecEnv(os.LookupEnv)
+	path, fi, err := resolveExecutable(ws, cwd, argv[0], pathFromEnv(env))
+	if err != nil {
+		return execPending{}, fmt.Errorf("resolve %q: %w", argv[0], err)
+	}
+	owned := append([]string(nil), argv...) // caller may mutate its slice after Plan
+	return execPending{
+		path: path, identity: fi, argv: owned, dir: cwd, dirLabel: dirLabel,
+		dirIdentity: dirIdentity, env: env, envNames: envNames, timeout: timeout,
+		requestedTO: requestedTimeout, clamped: clamped,
+		fingerprint: commandFingerprint(owned, cwd, env, timeout, requestedTimeout, path),
+	}, nil
+}
+
+// recheckExecPlan re-resolves and re-checks the approved cwd and executable
+// (path equality + os.SameFile identity) at spawn time, so an escape/symlink or
+// binary swap introduced after approval fails closed. On success it returns an
+// owned execSpec snapshot; on mismatch a descriptive error the caller renders
+// model-visible. Shared by foreground Invoke and the background tool (#346).
+func recheckExecPlan(ws *Workspace, pp execPending) (execSpec, error) {
+	dir, _, dirIdentity, err := resolveExecDir(ws, pp.dirLabel)
+	if err != nil || dir != pp.dir || pp.dirIdentity == nil || !os.SameFile(dirIdentity, pp.dirIdentity) {
+		return execSpec{}, errors.New("working directory changed since approval; retry")
+	}
+	path, fi, rerr := resolveExecutable(ws, pp.dir, pp.argv[0], pathFromEnv(pp.env))
+	if rerr != nil || path != pp.path || !os.SameFile(fi, pp.identity) {
+		return execSpec{}, errors.New("executable changed since approval; retry")
+	}
+	return execSpec{
+		Path: pp.path,
+		Argv: append([]string(nil), pp.argv...),
+		Dir:  pp.dir,
+		Env:  append([]string(nil), pp.env...),
+	}, nil
+}
+
+// resolveExecDir resolves the optional dir argument through the Workspace chokepoint,
 // returning the absolute cwd and a human label. Empty -> workspace root (label "").
 // The label is the workspace-relative path passed in, or "" for root; callers that need
 // a display string should substitute "(workspace root)" when the label is empty.
-func (t *RunCommand) resolveDirArg(dir string) (abs, label string, identity os.FileInfo, err error) {
+func resolveExecDir(ws *Workspace, dir string) (abs, label string, identity os.FileInfo, err error) {
 	if strings.TrimSpace(dir) == "" || filepath.Clean(dir) == "." {
-		fi, err := os.Lstat(t.ws.root)
+		fi, err := os.Lstat(ws.root)
 		if err != nil {
 			return "", "", nil, err
 		}
 		if !fi.IsDir() {
 			return "", "", nil, errNotDir
 		}
-		return t.ws.root, "", fi, nil
+		return ws.root, "", fi, nil
 	}
-	abs, identity, err = t.ws.resolveDir(dir)
+	abs, identity, err = ws.resolveDir(dir)
 	if err != nil {
 		return "", "", nil, fmt.Errorf("dir %q: %w", dir, err)
 	}
 	return abs, dir, identity, nil
 }
 
-// Invoke consumes the pending plan (fail-closed on hash mismatch), re-resolves and
-// re-checks the cwd and executable against what was approved, then spawns through the
-// runner. Non-zero exit is a normal observation; only infra failures are tool errors.
+// Invoke consumes the pending plan (fail-closed on hash mismatch), re-checks it via
+// recheckExecPlan, then spawns through the runner. Non-zero exit is a normal
+// observation; only infra failures are tool errors.
 func (t *RunCommand) Invoke(ctx context.Context, raw json.RawMessage) (agent.ToolResult, error) {
 	pp, ok := t.consume(ContentHash(raw))
 	if !ok {
 		return errResult("exec preview missing; retry"), nil
 	}
-	// Re-resolve cwd: an escape/symlink introduced after Plan fails closed.
-	dir, _, dirIdentity, err := t.resolveDirArg(pp.dirLabel)
-	if err != nil || dir != pp.dir || pp.dirIdentity == nil || !os.SameFile(dirIdentity, pp.dirIdentity) {
-		return errResult("working directory changed since approval; retry"), nil
+	spec, err := recheckExecPlan(t.ws, pp)
+	if err != nil {
+		return errResult(err.Error()), nil
 	}
-	// Re-resolve executable against the APPROVED env (stored PATH), compare path +
-	// identity (os.SameFile) so a symlink swap or same-path binary replacement fails closed.
-	path, fi, rerr := resolveExecutable(t.ws, pp.dir, pp.argv[0], pathFromEnv(pp.env))
-	if rerr != nil || path != pp.path || !os.SameFile(fi, pp.identity) {
-		return errResult("executable changed since approval; retry"), nil
-	}
-	res, runErr := t.runner.Run(ctx, execSpec{Path: pp.path, Argv: pp.argv, Dir: pp.dir, Env: pp.env})
+	res, runErr := t.runner.Run(ctx, spec)
 	if runErr != nil {
 		if res.TimedOut {
 			return errResult(fmt.Sprintf("command timed out after %s", pp.timeout)), nil
