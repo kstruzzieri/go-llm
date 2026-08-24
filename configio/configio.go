@@ -11,7 +11,9 @@
 // Raw provider/transport text never crosses a consumer boundary via the
 // code path. Caller cancellation is
 // deliberately UNCLASSIFIED: it surfaces as the raw context error with
-// no code, so consumers can distinguish "user cancelled" from "failed".
+// no code, so consumers can distinguish "user cancelled" from "failed"
+// (argument validation runs first: a structurally invalid request returns
+// invalid_argument even under a cancelled context).
 //
 // Import graph: configio -> provider, configview, fingerprint. It must
 // never be imported by config, configview, or provider.

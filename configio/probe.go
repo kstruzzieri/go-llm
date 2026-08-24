@@ -87,7 +87,13 @@ func probeDurable(ctx context.Context, resolver ToolCallResolver, key provider.M
 	case exp.Source == "explicit" || exp.Source == "catalog":
 		return true // durable without a row
 	case state == fingerprint.CapProbeYes && exp.Has:
-		return true // merged profile carries the bit (floor/runtime)
+		// Merged profile carries the bit. Reachable only with Source
+		// "runtime" (incl. the floor merge layer): "explicit"/"catalog"
+		// are caught by the case above, and a probe-sourced Has=true is
+		// always State==yes && Valid, caught by the row-match case. If
+		// ExplainToolCall ever gains a Source that can carry Has without
+		// Valid, this case must learn to exclude it.
+		return true
 	}
 	return false
 }
