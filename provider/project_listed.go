@@ -29,6 +29,26 @@ type ListedModelFacts struct {
 	ContextWindow int
 }
 
+type listedProjectionPolicy struct {
+	override        CapabilityOverride
+	floor           CapabilityFloor
+	thinkOverride   ThinkOverride
+	contextOverride ContextWindowOverride
+	rejectionHook   OverrideRejectionHook
+}
+
+func (r *ModelRegistry) snapshotListedProjectionPolicy() listedProjectionPolicy {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return listedProjectionPolicy{
+		override:        r.capOverride,
+		floor:           r.capFloor,
+		thinkOverride:   r.thinkOverride,
+		contextOverride: r.contextOverride,
+		rejectionHook:   r.rejectionHook,
+	}
+}
+
 // ProjectListedModels merges facts for models ALREADY LISTED by a provider
 // (spec slice 4: the explicit-refresh read path). Inputs are the listing's
 // own ModelInfo values; output order mirrors input order.
@@ -52,15 +72,7 @@ type ListedModelFacts struct {
 // requires a prober factory to anchor identity, and failing closed on an
 // unanchored profile is deliberate.
 func (r *ModelRegistry) ProjectListedModels(ctx context.Context, providerName string, infos []ModelInfo) ([]ListedModelFacts, error) {
-	// Snapshot policy hooks once, mirroring buildProfile's TOCTOU discipline.
-	r.mu.RLock()
-	override := r.capOverride
-	floor := r.capFloor
-	thinkOverride := r.thinkOverride
-	contextOverride := r.contextOverride
-	rejectionHook := r.rejectionHook
-	r.mu.RUnlock()
-
+	policy := r.snapshotListedProjectionPolicy()
 	now := time.Now()
 	out := make([]ListedModelFacts, 0, len(infos))
 	for i := range infos {
@@ -69,35 +81,8 @@ func (r *ModelRegistry) ProjectListedModels(ctx context.Context, providerName st
 		}
 		info := infos[i] // value copy; the caller's slice is never mutated
 		key := ModelKey{Provider: providerName, Model: info.Name}
-		parsed := ParseModelName(info.Name)
-		static := r.catalogProfileFor(parsed, &info)
-		fp := r.fingerprintProfileMode(ctx, key, &info, true) // read-only: never EnsureProfile
-
-		// Cap-probe layer, validated against THIS listing's identity --
-		// byte-symmetric with the write side (capProbeDigest). Missing
-		// rows and store failures are no-claim (capProbeRow returns nil).
-		digest := capProbeDigest(key, &info)
-		var probeYes Capability
-		known := Capability(0)
-		if row := r.capProbeRow(ctx, key); row != nil && row.Valid(digest, now) {
-			switch row.State {
-			case fingerprint.CapProbeYes:
-				probeYes = CapToolCall
-				known |= CapToolCall
-			case fingerprint.CapProbeNo:
-				known |= CapToolCall
-			}
-		}
-
-		profile := r.merge(key, &info, static, fp, parsed, override, floor, thinkOverride, contextOverride, rejectionHook, probeYes)
-		out = append(out, ListedModelFacts{
-			Key:           key,
-			Family:        profile.Family,
-			Caps:          profile.Caps,
-			KnownMask:     profile.Caps | known,
-			ProfileSource: profile.Source.String(),
-			ContextWindow: profile.ContextWindow,
-		})
+		row := r.capProbeRow(ctx, key)
+		out = append(out, r.projectListedModel(ctx, key, info, row, now, policy))
 	}
 	// Final barrier: cancellation landing mid-final-iteration (or arriving
 	// with an empty listing) must not return a degraded slice with nil error.
@@ -105,4 +90,41 @@ func (r *ModelRegistry) ProjectListedModels(ctx context.Context, providerName st
 		return nil, err
 	}
 	return out, nil
+}
+
+func (r *ModelRegistry) projectListedModel(
+	ctx context.Context,
+	key ModelKey,
+	info ModelInfo,
+	row *fingerprint.CapProbe,
+	now time.Time,
+	policy listedProjectionPolicy,
+) ListedModelFacts {
+	parsed := ParseModelName(info.Name)
+	static := r.catalogProfileFor(parsed, &info)
+	fp := r.fingerprintProfileMode(ctx, key, &info, true) // read-only: never EnsureProfile
+
+	// Validate the caller's single row snapshot against THIS listing's identity.
+	digest := capProbeDigest(key, &info)
+	var probeYes Capability
+	known := Capability(0)
+	if row != nil && row.Valid(digest, now) {
+		switch row.State {
+		case fingerprint.CapProbeYes:
+			probeYes = CapToolCall
+			known |= CapToolCall
+		case fingerprint.CapProbeNo:
+			known |= CapToolCall
+		}
+	}
+
+	profile := r.merge(key, &info, static, fp, parsed, policy.override, policy.floor, policy.thinkOverride, policy.contextOverride, policy.rejectionHook, probeYes)
+	return ListedModelFacts{
+		Key:           key,
+		Family:        profile.Family,
+		Caps:          profile.Caps,
+		KnownMask:     profile.Caps | known,
+		ProfileSource: profile.Source.String(),
+		ContextWindow: profile.ContextWindow,
+	}
 }

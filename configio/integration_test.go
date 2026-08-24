@@ -167,6 +167,114 @@ func TestIntegration_ProbeVerdictSticksAcrossRegistryLifetimes(t *testing.T) {
 	}
 }
 
+func TestIntegration_StaleCachedProbeBitIsNotDurable(t *testing.T) {
+	store := newMemCapProbeStore()
+	prober := newCountingProber()
+	prober.outcomes["m"] = fingerprint.CapProbeOutcome{State: fingerprint.CapProbeYes}
+	p := &fakeProvider{name: "prov", models: []provider.ModelInfo{{Name: "m", Digest: "old"}}}
+	_, mr := newRealRegistry(t, []*fakeProvider{p}, store, prober)
+
+	if out, err := ProbeToolCall(context.Background(), mr, key("prov", "m")); err != nil || !out.Persisted {
+		t.Fatalf("ProbeToolCall(prov/m) = %+v, %v; want persisted initial verdict", out, err)
+	}
+	if profile, err := mr.Lookup(context.Background(), key("prov", "m")); err != nil || !profile.Caps.Has(provider.CapToolCall) {
+		t.Fatalf("Lookup(prov/m) = %+v, %v; want cached probe bit", profile, err)
+	}
+
+	p.models[0].Digest = "new"
+	out, err := ProbeToolCall(context.Background(), mr, key("prov", "m"))
+	if err != nil {
+		t.Fatalf("ProbeToolCall(prov/m) error = %v, want nil", err)
+	}
+	if out.State != fingerprint.CapProbeYes || out.Persisted {
+		t.Fatalf("ProbeToolCall(prov/m) = %+v, want {State:yes Persisted:false} after digest change", out)
+	}
+}
+
+func TestIntegration_StaleCachedRuntimeBitIsNotDurable(t *testing.T) {
+	p := &fakeProvider{name: "prov", models: []provider.ModelInfo{{
+		Name:         "m",
+		Capabilities: []string{"tools"},
+	}}}
+	_, mr := newRealRegistry(t, []*fakeProvider{p}, nil, nil)
+
+	if out, err := ProbeToolCall(context.Background(), mr, key("prov", "m")); err != nil || !out.Persisted {
+		t.Fatalf("ProbeToolCall(prov/m) = %+v, %v; want persisted runtime verdict", out, err)
+	}
+
+	p.models[0].Capabilities = nil
+	out, err := ProbeToolCall(context.Background(), mr, key("prov", "m"))
+	if err != nil {
+		t.Fatalf("ProbeToolCall(prov/m) error = %v, want nil", err)
+	}
+	if out.State != fingerprint.CapProbeYes || out.Persisted {
+		t.Fatalf("ProbeToolCall(prov/m) = %+v, want {State:yes Persisted:false} after runtime capability removal", out)
+	}
+}
+
+func TestIntegration_InvalidProbeStateFailsWithoutPersistence(t *testing.T) {
+	tests := []struct {
+		name  string
+		state fingerprint.CapProbeState
+	}{
+		{name: "empty", state: ""},
+		{name: "unknown", state: "bogus"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store := newMemCapProbeStore()
+			prober := newCountingProber()
+			prober.outcomes["m"] = fingerprint.CapProbeOutcome{State: tt.state}
+			_, mr := newRealRegistry(t, []*fakeProvider{
+				{name: "prov", models: []provider.ModelInfo{{Name: "m"}}},
+			}, store, prober)
+
+			out, err := ProbeToolCall(context.Background(), mr, key("prov", "m"))
+			if code, ok := CodeOf(err); !ok || code != CodeProbeFailed {
+				t.Fatalf("CodeOf(ProbeToolCall(prov/m)) = %q, %v; want %q, true", code, ok, CodeProbeFailed)
+			}
+			if out != (ProbeOutcome{}) {
+				t.Fatalf("ProbeToolCall(prov/m) outcome = %+v, want zero", out)
+			}
+			if store.count() != 0 {
+				t.Fatalf("invalid probe state %q persisted %d rows, want 0", tt.state, store.count())
+			}
+		})
+	}
+}
+
+func TestIntegration_InvalidCachedProbeStateIsIgnored(t *testing.T) {
+	store := newMemCapProbeStore()
+	ctx := context.Background()
+	if err := store.SaveCapProbe(ctx, fingerprint.CapProbe{
+		BackendID:    "prov",
+		ModelName:    "m",
+		Capability:   "tool_call",
+		State:        "bogus",
+		ModelDigest:  key("prov", "m").String(),
+		ProbeVersion: fingerprint.CurrentToolProbeVersion,
+		TestedAt:     time.Now().Add(-time.Hour),
+	}); err != nil {
+		t.Fatalf("SaveCapProbe(invalid row) error = %v", err)
+	}
+	prober := newCountingProber()
+	prober.outcomes["m"] = fingerprint.CapProbeOutcome{State: fingerprint.CapProbeYes}
+	_, mr := newRealRegistry(t, []*fakeProvider{
+		{name: "prov", models: []provider.ModelInfo{{Name: "m"}}},
+	}, store, prober)
+
+	out, err := ProbeToolCall(ctx, mr, key("prov", "m"))
+	if err != nil {
+		t.Fatalf("ProbeToolCall(prov/m) error = %v, want nil", err)
+	}
+	if out.State != fingerprint.CapProbeYes || !out.Persisted {
+		t.Fatalf("ProbeToolCall(prov/m) = %+v, want {State:yes Persisted:true}", out)
+	}
+	if got := prober.totalCalls(); got != 1 {
+		t.Fatalf("ProbeToolCall(prov/m) prober calls = %d, want 1", got)
+	}
+}
+
 func TestIntegration_LostSaveReportsPersistedFalse(t *testing.T) {
 	// The registry swallows SaveCapProbe errors (documented best-effort);
 	// D9's outcome surfaces it: verdict returned, Persisted=false, no error.

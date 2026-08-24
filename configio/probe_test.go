@@ -62,6 +62,20 @@ func TestProbeToolCall_EmptyStateNilErrorIsUnavailable(t *testing.T) {
 	}
 }
 
+func TestProbeToolCall_InvalidResolverState(t *testing.T) {
+	r := &fakeResolver{state: "bogus"}
+	out, err := ProbeToolCall(context.Background(), r, key("p", "m"))
+	if code, ok := CodeOf(err); !ok || code != CodeProbeFailed {
+		t.Fatalf("CodeOf(ProbeToolCall(p/m)) = %q, %v; want %q, true", code, ok, CodeProbeFailed)
+	}
+	if out != (ProbeOutcome{}) {
+		t.Fatalf("ProbeToolCall(p/m) outcome = %+v, want zero", out)
+	}
+	if r.expCalls != 0 {
+		t.Fatalf("ProbeToolCall(p/m) ExplainToolCall calls = %d, want 0", r.expCalls)
+	}
+}
+
 func TestProbeToolCall_PersistedTrueRequiresValidRow(t *testing.T) {
 	// The row-match durability branch demands exp.Valid: ExplainToolCall
 	// reports stale-row State separately from validity, and a stale

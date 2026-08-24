@@ -57,12 +57,17 @@ func ProbeToolCall(ctx context.Context, resolver ToolCallResolver, key provider.
 		return ProbeOutcome{}, wrapCode(CodeProbeFailed,
 			fmt.Errorf("configio: probe tool_call %s: %w", key, err))
 	}
-	if state == "" {
+	switch state {
+	case "":
 		// ResolveToolCall's "" with nil error means no path could answer:
 		// resolution unwired, per-key prober spec absent, or the prober
 		// does not support tool-call probing.
 		return ProbeOutcome{}, wrapCode(CodeProbeUnavailable,
 			fmt.Errorf("configio: probe tool_call %s: resolution unavailable for this model", key))
+	case fingerprint.CapProbeYes, fingerprint.CapProbeNo, fingerprint.CapProbeInconclusive:
+	default:
+		return ProbeOutcome{}, wrapCode(CodeProbeFailed,
+			fmt.Errorf("configio: probe tool_call %s: resolver returned invalid state %q", key, state))
 	}
 	out := ProbeOutcome{State: state, Persisted: probeDurable(ctx, resolver, key, state)}
 	if cerr := ctx.Err(); cerr != nil {
@@ -91,13 +96,9 @@ func probeDurable(ctx context.Context, resolver ToolCallResolver, key provider.M
 	// Persisted=false.
 	case exp.Source == "explicit" || exp.Source == "catalog":
 		return true // durable without a row
-	case state == fingerprint.CapProbeYes && exp.Has:
-		// Merged profile carries the bit. Reachable only with Source
-		// "runtime" (incl. the floor merge layer): "explicit"/"catalog"
-		// are caught by the case above, and a probe-sourced Has=true is
-		// always State==yes && Valid, caught by the row-match case. If
-		// ExplainToolCall ever gains a Source that can carry Has without
-		// Valid, this case must learn to exclude it.
+	case state == fingerprint.CapProbeYes && exp.Has && exp.Source == "runtime":
+		// ExplainToolCall labels this "runtime" only when its fresh,
+		// read-only projection re-derives the cached profile bit.
 		return true
 	}
 	return false
