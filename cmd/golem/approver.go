@@ -64,6 +64,8 @@ func (a *replApprover) ApproveKeyed(ctx context.Context, call provider.ToolCall,
 		}
 	}
 	isExec := call.Function.Name == "run_command"
+	isStart := call.Function.Name == "start_command"
+	isStop := call.Function.Name == "stop_command"
 	isMCP := strings.HasPrefix(call.Function.Name, "mcp__")
 	isPlan := call.Function.Name == submitPlanToolName
 	scope := grantScope(call.Function.Name)
@@ -80,6 +82,16 @@ func (a *replApprover) ApproveKeyed(ctx context.Context, call provider.ToolCall,
 	case isExec:
 		a.renderPlain(preview)
 		question = grantQuestion("Run this command?", grantable, "a=always this command")
+	case isStart:
+		// #346: the grant covers this exact background command (the exec-bg
+		// key), one-time approval otherwise.
+		a.renderPlain(preview)
+		question = grantQuestion("Start this background command?", grantable, "a=always this command")
+	case isStop:
+		// stop_command's ApprovalKey is "" by frozen contract, so grantable is
+		// structurally false; the prompt stays yes/no and never shows a legend.
+		a.renderPlain(preview)
+		question = "Stop this background command? [y/N] "
 	case isMCP:
 		a.renderPlain(preview)
 		question = "Run this MCP tool? [y/N] "

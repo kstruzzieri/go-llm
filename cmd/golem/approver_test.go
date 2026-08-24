@@ -413,6 +413,175 @@ func TestApproverMCPAndPlanNeverGrantable(t *testing.T) {
 	}
 }
 
+func startCall() provider.ToolCall {
+	return provider.ToolCall{ID: "s1", Type: "function",
+		Function: provider.ToolCallFunction{Name: "start_command"}}
+}
+
+func stopCall() provider.ToolCall {
+	return provider.ToolCall{ID: "s2", Type: "function",
+		Function: provider.ToolCallFunction{Name: "stop_command"}}
+}
+
+func TestApproverStartPromptOffersExactCommandGrant(t *testing.T) {
+	// #346: start_command gets its own prompt with the one-time and
+	// "always this exact background command" choices, and "a" stores the
+	// exec-bg key under the exec scope.
+	var out strings.Builder
+	g := newApprovalGrants()
+	ap := newReplApprover(newScannerSource(strings.NewReader("a\n"), &out), &out, false)
+	ap.grants = g
+	d, err := ap.ApproveKeyed(context.Background(), startCall(),
+		"start background command:\n  argv: sleep 30\n", "exec-bg:v1:abc")
+	if err != nil || !d.Approved {
+		t.Fatalf("a must approve: d=%+v err=%v", d, err)
+	}
+	if d.ViaGrant {
+		t.Fatalf("a prompted approval is not ViaGrant: %+v", d)
+	}
+	if !g.granted(grantScopeExec, "exec-bg:v1:abc") {
+		t.Fatal("a must store the exec-bg key under the exec scope")
+	}
+	s := out.String()
+	if !strings.Contains(s, "Start this background command? [y/N/a=always this command] ") {
+		t.Fatalf("start prompt must offer the exact-command grant:\n%s", s)
+	}
+	if !strings.Contains(s, "argv: sleep 30") {
+		t.Fatalf("start approval must render the preview:\n%s", s)
+	}
+	for _, wrong := range []string{"Run this command?", "Apply this change?"} {
+		if strings.Contains(s, wrong) {
+			t.Fatalf("start_command must not reuse the %q prompt:\n%s", wrong, s)
+		}
+	}
+}
+
+func TestApproverStartGrantAutoApprovesSameKey(t *testing.T) {
+	var out strings.Builder
+	g := newApprovalGrants()
+	g.grant(grantScopeExec, "exec-bg:v1:abc")
+	ap := newReplApprover(&promptFatalSource{t: t}, &out, false)
+	ap.grants = g
+	d, err := ap.ApproveKeyed(context.Background(), startCall(),
+		"start background command:\n  argv: sleep 30\n", "exec-bg:v1:abc")
+	if err != nil || !d.Approved || !d.ViaGrant {
+		t.Fatalf("granted start key must auto-approve ViaGrant: d=%+v err=%v", d, err)
+	}
+	if !strings.Contains(out.String(), "auto-approved (session grant)") {
+		t.Fatalf("auto-approval must announce itself:\n%s", out.String())
+	}
+}
+
+func TestApproverStartDifferentKeyPrompts(t *testing.T) {
+	var out strings.Builder
+	g := newApprovalGrants()
+	g.grant(grantScopeExec, "exec-bg:v1:aaa")
+	ap := newReplApprover(newScannerSource(strings.NewReader("n\n"), &out), &out, false)
+	ap.grants = g
+	d, err := ap.ApproveKeyed(context.Background(), startCall(), "preview", "exec-bg:v1:bbb")
+	if err != nil || d.Approved {
+		t.Fatalf("an ungranted start key must prompt and here deny: d=%+v err=%v", d, err)
+	}
+	if !strings.Contains(out.String(), "Start this background command? [y/N/a=always this command] ") {
+		t.Fatalf("prompt missing for ungranted start key:\n%s", out.String())
+	}
+}
+
+func TestApproverStartNilGrantsKeepsPlainPrompt(t *testing.T) {
+	var out strings.Builder
+	ap := newReplApprover(newScannerSource(strings.NewReader("a\n"), &out), &out, false)
+	// grants nil: no grant path. "a" must deny; the prompt must not offer it.
+	d, err := ap.ApproveKeyed(context.Background(), startCall(), "preview", "exec-bg:v1:abc")
+	if err != nil || d.Approved {
+		t.Fatalf("nil grants must keep per-invocation prompting: d=%+v err=%v", d, err)
+	}
+	if !strings.Contains(out.String(), "Start this background command? [y/N] ") {
+		t.Fatalf("nil-grants start prompt must not offer a:\n%s", out.String())
+	}
+}
+
+func TestApproverStopNeverGrantable(t *testing.T) {
+	// Adversarial: grants exist for the presented key under every scope, and a
+	// non-empty key is passed (the real stop ApprovalKey is empty — structural
+	// refusal must not depend on that). "a" must deny and the prompt must
+	// never show a grant legend.
+	var out strings.Builder
+	g := newApprovalGrants()
+	g.grant(grantScopeExec, "exec-bg:v1:evil")
+	g.grant(grantScopeFiles, "exec-bg:v1:evil")
+	ap := newReplApprover(newScannerSource(strings.NewReader("a\n"), &out), &out, false)
+	ap.grants = g
+	d, err := ap.ApproveKeyed(context.Background(), stopCall(),
+		"stop background command:\n  handle: bg-1\n", "exec-bg:v1:evil")
+	if err != nil {
+		t.Fatalf("ApproveKeyed: %v", err)
+	}
+	if d.Approved {
+		t.Fatalf("stop_command auto-approved or accepted a: %+v", d)
+	}
+	s := out.String()
+	if !strings.Contains(s, "Stop this background command? [y/N] ") {
+		t.Fatalf("stop prompt must stay yes/no only:\n%s", s)
+	}
+	if strings.Contains(s, "a=always") {
+		t.Fatalf("stop prompt must never offer a grant legend:\n%s", s)
+	}
+}
+
+func TestApproverStopYesApprovesOnceWithoutStoringGrant(t *testing.T) {
+	// The real wiring: stop's ApprovalKey is "" so grantable is structurally
+	// false; "y" approves this one call and nothing is stored.
+	var out strings.Builder
+	g := newApprovalGrants()
+	ap := newReplApprover(newScannerSource(strings.NewReader("y\n"), &out), &out, false)
+	ap.grants = g
+	d, err := ap.ApproveKeyed(context.Background(), stopCall(),
+		"stop background command:\n  handle: bg-1\n", "")
+	if err != nil || !d.Approved {
+		t.Fatalf("y must approve the stop: d=%+v err=%v", d, err)
+	}
+	if g.count() != 0 {
+		t.Fatalf("stop approval must store no grant, count = %d", g.count())
+	}
+	if !strings.Contains(out.String(), "handle: bg-1") {
+		t.Fatalf("stop approval must render the preview:\n%s", out.String())
+	}
+}
+
+func TestApproverBackgroundPreviewsNeutralizeTerminalControls(t *testing.T) {
+	preview := "background command:\x1b[2J\u009b\r\u202e\n  argv: x\n"
+	cases := []struct {
+		name string
+		call provider.ToolCall
+		key  string
+	}{
+		{name: "start", call: startCall(), key: "exec-bg:v1:abc"},
+		{name: "stop", call: stopCall(), key: ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var out strings.Builder
+			ap := newReplApprover(newScannerSource(strings.NewReader("y\n"), &out), &out, false)
+			ap.grants = newApprovalGrants()
+			d, err := ap.ApproveKeyed(context.Background(), tc.call, preview, tc.key)
+			if err != nil || !d.Approved {
+				t.Fatalf("ApproveKeyed: d=%+v err=%v", d, err)
+			}
+			got := out.String()
+			for _, raw := range []string{"\x1b[2J", "\u009b", "\r", "\u202e"} {
+				if strings.Contains(got, raw) {
+					t.Fatalf("%s approval retained terminal control %q: %q", tc.name, raw, got)
+				}
+			}
+			for _, escaped := range []string{`\x1b`, `\u009b`, `\r`, `\u202e`} {
+				if !strings.Contains(got, escaped) {
+					t.Fatalf("%s approval omitted visible escape %q: %q", tc.name, escaped, got)
+				}
+			}
+		})
+	}
+}
+
 func TestApproverNilGrantsKeepsLegacyPrompt(t *testing.T) {
 	var out strings.Builder
 	ap := newReplApprover(newScannerSource(strings.NewReader("a\n"), &out), &out, false)

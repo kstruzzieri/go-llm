@@ -5,8 +5,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strconv"
 	"strings"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/kstruzzieri/go-llm/agent"
@@ -42,6 +44,11 @@ type replSession struct {
 
 	lastModel string           // last routed ActualModel for /model
 	journal   *mutationJournal // nil unless -allow-write enabled writes
+	// bgManager owns every background command (#346). nil => background exec
+	// disabled (-allow-exec absent or non-interactive mode). Process-scoped by
+	// the approved A1 policy: /new, /clear, and successful /resume leave its
+	// jobs and handles untouched (grants still clear at those boundaries).
+	bgManager *tools.BackgroundManager
 	// grants is the session-scoped approval grant store (#341). Built once at
 	// startup; cleared unconditionally on /new and /clear, on successful
 	// /resume, and via /grants clear; read by the per-run approver. nil only
@@ -410,6 +417,8 @@ func dispatchSlash(ctx context.Context, out io.Writer, sess *replSession, line s
 		} else {
 			sess.journal.undo(out)
 		}
+	case "/jobs":
+		handleJobs(ctx, out, sess, fields)
 	case "/remember":
 		handleRemember(ctx, out, sess, line)
 	case "/forget":
@@ -496,6 +505,85 @@ func dispatchSlash(ctx context.Context, out io.Writer, sess *replSession, line s
 	return "", false
 }
 
+// handleJobs implements /jobs (#346): pull-based visibility over the session's
+// background jobs plus a user-direct stop. The stop is user-initiated, so it
+// never routes through the model-call approver; the manager's frozen error
+// classes (unknown handle) render as-is.
+func handleJobs(ctx context.Context, out io.Writer, sess *replSession, fields []string) {
+	if sess.bgManager == nil {
+		_, _ = fmt.Fprintln(out, "background exec disabled (run with -allow-exec)")
+		return
+	}
+	switch {
+	case len(fields) == 1:
+		jobs := sess.bgManager.List()
+		if len(jobs) == 0 {
+			_, _ = fmt.Fprintln(out, "no background jobs")
+			return
+		}
+		for _, st := range jobs {
+			_, _ = fmt.Fprintln(out, renderJobLine(st))
+		}
+	case len(fields) == 3 && fields[1] == "stop":
+		st, err := sess.bgManager.Stop(ctx, fields[2])
+		if err != nil {
+			_, _ = fmt.Fprintln(out, err)
+			return
+		}
+		switch {
+		case st.State == "killed":
+			_, _ = fmt.Fprintf(out, "stopped %s (killed)\n", st.Handle)
+		case st.ExitKnown:
+			_, _ = fmt.Fprintf(out, "already finished: %s (exit %d)\n", st.Handle, st.ExitCode)
+		default:
+			_, _ = fmt.Fprintf(out, "already finished: %s (%s)\n", st.Handle, st.State)
+		}
+	default:
+		_, _ = fmt.Fprintln(out, "usage: /jobs [stop <handle>]")
+	}
+}
+
+// renderJobLine renders one /jobs listing line: handle, state (with exit code
+// when known), pid, then argv through the dedicated control-safe renderer.
+func renderJobLine(st tools.JobStatus) string {
+	state := st.State
+	if st.ExitKnown {
+		state = fmt.Sprintf("%s exit=%d", st.State, st.ExitCode)
+	}
+	return fmt.Sprintf("%s  %s  pid=%d  %s", st.Handle, state, st.PID, renderJobArgv(st.Argv))
+}
+
+// jobArgvDisplayCap bounds the rendered argv to one terminal-friendly line.
+const jobArgvDisplayCap = 60
+
+// renderJobArgv renders a job's argv as ONE control-safe display line. Every
+// non-graphic rune — C0 controls including newline/CR, DEL, the C1 range
+// including U+009B (CSI), and the bidi format controls U+202A-202E and
+// U+2066-2069 (category Cf, non-graphic) — renders as its escaped form via
+// strconv.QuoteToGraphic, and the result is rune-safely truncated to
+// jobArgvDisplayCap runes plus an ellipsis (escape-then-truncate, so a cut can
+// only ever land between graphic runes). It deliberately differs from
+// sanitizeApprovalPreview, which keeps newlines: approval previews are
+// multi-line by design, a listing line never is. Presentation only.
+func renderJobArgv(argv []string) string {
+	joined := strings.Join(argv, " ")
+	var b strings.Builder
+	for _, r := range joined {
+		if unicode.IsGraphic(r) {
+			b.WriteRune(r)
+			continue
+		}
+		quoted := strconv.QuoteToGraphic(string(r))
+		b.WriteString(quoted[1 : len(quoted)-1])
+	}
+	line := b.String()
+	runes := []rune(line)
+	if len(runes) > jobArgvDisplayCap {
+		return string(runes[:jobArgvDisplayCap]) + "..."
+	}
+	return line
+}
+
 // autoEditState reports the write-class grant as a toggle state. The "a"
 // answer on a write/edit prompt and /auto-edits on set the same grant, so
 // this is the single source of truth for both.
@@ -518,6 +606,8 @@ const golemHelp = `commands:
   /resume <id>   switch to a saved session
   /edit [seed]   compose a goal in $VISUAL/$EDITOR (quoting unsupported)
   /undo          revert the last applied write (when -allow-write)
+  /jobs [stop <handle>]
+                 list background jobs, or stop one (with -allow-exec)
   /auto-edits [on|off]
                  show or set session auto-approval for write/edit tools
   /grants [clear]

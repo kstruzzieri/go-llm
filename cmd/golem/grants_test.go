@@ -78,6 +78,28 @@ func TestGrantScopeAllowlist(t *testing.T) {
 	}
 }
 
+func TestGrantScopeBackgroundAllowlist(t *testing.T) {
+	// #346: only start_command joins the exec scope. Status/tail never prompt,
+	// so they need no scope; stop_command stays structurally ungrantable. The
+	// exec-bg:v1: key prefix already partitions the grant space from
+	// run_command's exec:v2:, so the shared scope cannot cross-authorize.
+	cases := map[string]string{
+		"start_command":  grantScopeExec,
+		"stop_command":   "",
+		"command_status": "",
+		"command_tail":   "",
+		// Pre-existing mappings must be unchanged.
+		"run_command": grantScopeExec,
+		"write_file":  grantScopeFiles,
+		"edit_file":   grantScopeFiles,
+	}
+	for name, want := range cases {
+		if got := grantScope(name); got != want {
+			t.Errorf("grantScope(%q) = %q, want %q", name, got, want)
+		}
+	}
+}
+
 // The store is the #346 background-exec contract: concurrent consult/update
 // must be race-free (run under -race).
 func TestApprovalGrantsConcurrentAccess(t *testing.T) {

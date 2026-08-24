@@ -12,10 +12,14 @@ const (
 )
 
 // grantScope maps a tool name to its grant scope. Everything not listed is
-// ungrantable ("").
+// ungrantable (""). start_command (#346) shares the exec scope safely: its
+// exec-bg:v1: key prefix partitions the grant space from run_command's
+// exec:v2:, so a foreground grant can never authorize a background start.
+// stop_command stays OFF the allowlist by frozen contract (every stop
+// prompts); command_status/command_tail never prompt, so they need no scope.
 func grantScope(toolName string) string {
 	switch toolName {
-	case "run_command":
+	case "run_command", "start_command":
 		return grantScopeExec
 	case "write_file", "edit_file":
 		return grantScopeFiles
