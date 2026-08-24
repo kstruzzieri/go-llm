@@ -3,6 +3,7 @@ package configio
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 
@@ -114,6 +115,8 @@ type fakeResolver struct {
 	err    error
 	exp    provider.ToolCallExplanation
 	expErr error
+	// calls is unsynchronized: single-goroutine use only (all probe unit
+	// tests drive the resolver from the test goroutine).
 	calls  int
 	onCall func(ctx context.Context)
 }
@@ -163,7 +166,7 @@ func (s *memCapProbeStore) GetCapProbe(_ context.Context, backendID, modelName, 
 		cp := row
 		return &cp, nil
 	}
-	return nil, nil
+	return nil, fingerprint.ErrNotFound
 }
 
 func (s *memCapProbeStore) SaveCapProbe(_ context.Context, probe fingerprint.CapProbe) error {
@@ -179,7 +182,12 @@ func (s *memCapProbeStore) SaveCapProbe(_ context.Context, probe fingerprint.Cap
 func (s *memCapProbeStore) DeleteCapProbes(_ context.Context, backendID, modelName string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	delete(s.rows, storeKey(backendID, modelName, "tool_call"))
+	prefix := backendID + "\x00" + modelName + "\x00"
+	for k := range s.rows {
+		if strings.HasPrefix(k, prefix) {
+			delete(s.rows, k)
+		}
+	}
 	return nil
 }
 
