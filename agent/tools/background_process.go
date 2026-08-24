@@ -12,7 +12,7 @@ type backgroundStarter interface {
 }
 
 // backgroundProcess is a started detached process — on unix, the leader of its
-// own process group. The manager (Task 4) owns its lifetime after publication.
+// own process group. The manager owns its lifetime after publication.
 type backgroundProcess interface {
 	PID() int
 	// Wait blocks until the process completes; single-shot. Callers code
@@ -23,7 +23,8 @@ type backgroundProcess interface {
 	//     descendant abandoned the stdio pipes. Classify as a normal exit
 	//     with an output caveat, never as infra failure.
 	//   - any other non-nil err (exitCode -1): infra failure.
-	// C1 residual-group cleanup happens inside, before return.
+	// Residual same-group cleanup (the managed-process-group containment
+	// policy) happens inside, before return.
 	Wait() (exitCode int, err error)
 	Kill() error // SIGKILL the whole managed group; idempotent; never blocks on Wait
 }

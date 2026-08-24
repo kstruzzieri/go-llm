@@ -266,6 +266,44 @@ func TestBackgroundManagerHandleCollisionRegenerates(t *testing.T) {
 	}
 }
 
+func TestBackgroundManagerCollisionThenRandomFailure(t *testing.T) {
+	// Reader yields A, A, error, then a working source: the second start
+	// collides, its in-lock regeneration read fails, and start must return
+	// the rand error with the mutex released and nothing reserved. A dropped
+	// unlock in that branch deadlocks this test (activeCount and the third
+	// start both need m.mu).
+	a := bytes.Repeat([]byte{0xaa}, 16)
+	random := io.MultiReader(
+		bytes.NewReader(append(append([]byte(nil), a...), a...)),
+		&flakyRandom{failsLeft: 1, src: &countingRandom{}},
+	)
+	starter := starterOf(newFakeProc(1), newFakeProc(2))
+	m := newBackgroundManager(starter, random)
+	t.Cleanup(m.Shutdown)
+
+	if _, err := m.start(context.Background(), bgSpec(), "/w"); err != nil {
+		t.Fatalf("start 1: %v", err)
+	}
+	_, err := m.start(context.Background(), bgSpec(), "/w")
+	if err == nil || !strings.Contains(err.Error(), "entropy exhausted") {
+		t.Fatalf("start 2 = %v, want the propagated rand error", err)
+	}
+	if starter.callCount() != 1 {
+		t.Errorf("starter called %d times after regeneration failure, want 1", starter.callCount())
+	}
+	if activeCount(m) != 1 {
+		t.Errorf("active = %d after regeneration failure, want 1 (failed start reserved nothing)", activeCount(m))
+	}
+	// The source now works again: a subsequent start must succeed.
+	st, err := m.start(context.Background(), bgSpec(), "/w")
+	if err != nil {
+		t.Fatalf("start 3 after regeneration failure: %v", err)
+	}
+	if st.Handle == "bg-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" {
+		t.Errorf("start 3 reused the colliding handle %q", st.Handle)
+	}
+}
+
 func TestBackgroundManagerSpawnFailureReleasesSlot(t *testing.T) {
 	fail := true
 	var mu sync.Mutex

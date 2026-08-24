@@ -29,4 +29,4 @@ jobs:
       # (#346): process-group lifecycle, manager suites, and the REPL
       # shutdown paths that kill and reap real process groups.
       - name: Background exec runtime
-        run: go test -race -run 'TestBackground(Process|Manager)|TestRunBackground' ./agent/tools ./cmd/golem
+        run: go test -race -run 'TestBackground(Process|Manager)|TestRunBackground|TestJobs' ./agent/tools ./cmd/golem

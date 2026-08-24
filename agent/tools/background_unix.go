@@ -46,13 +46,14 @@ type unixProcess struct {
 
 func (p *unixProcess) PID() int { return p.pgid }
 
-// Wait blocks for the direct child, then applies the C1 policy: best-effort
-// SIGKILL of the remembered process group reaps residual same-group
-// descendants before completion is reported, without rewriting how the
-// leader's own exit is reported.
+// Wait blocks for the direct child, then applies the managed-process-group
+// containment policy: best-effort SIGKILL of the remembered process group
+// reaps residual same-group descendants before completion is reported,
+// without rewriting how the leader's own exit is reported.
 func (p *unixProcess) Wait() (int, error) {
 	waitErr := p.cmd.Wait()
-	// C1 residual-group cleanup, best-effort. C1-accepted PGID-reuse risk: the
+	// Residual-group cleanup, best-effort. An accepted PGID-reuse limitation
+	// of that policy: the
 	// direct child was just reaped, so if no descendant survives the pgid may
 	// already be recycled to an unrelated same-uid group; the window between
 	// reap and this kill is microseconds.
@@ -84,9 +85,11 @@ func (p *unixProcess) Wait() (int, error) {
 // on the remembered pgid can only mean a zombie-only group (darwin returns
 // EPERM, not ESRCH, when the sole member is exited-but-unreaped — the routine
 // stop-vs-reap window) or a recycled pgid now owned by another uid. Both
-// correctly mean "nothing left for us to kill" under the C1 policy.
+// correctly mean "nothing left for us to kill" under the managed-process-group
+// containment policy.
 //
-// C1-accepted PGID-reuse risk: once the last member is reaped the pgid can be
+// An accepted PGID-reuse limitation of that policy: once the last member is
+// reaped the pgid can be
 // recycled; a late Kill could then signal an unrelated same-uid group. The
 // manager should prefer not to Kill after Wait has returned, which shrinks
 // the window to microseconds.

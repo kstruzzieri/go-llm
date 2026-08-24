@@ -46,8 +46,9 @@ type replSession struct {
 	journal   *mutationJournal // nil unless -allow-write enabled writes
 	// bgManager owns every background command (#346). nil => background exec
 	// disabled (-allow-exec absent or non-interactive mode). Process-scoped by
-	// the approved A1 policy: /new, /clear, and successful /resume leave its
-	// jobs and handles untouched (grants still clear at those boundaries).
+	// the interactive-process-scope policy: /new, /clear, and successful
+	// /resume leave its jobs and handles untouched (grants still clear at
+	// those boundaries).
 	bgManager *tools.BackgroundManager
 	// grants is the session-scoped approval grant store (#341). Built once at
 	// startup; cleared unconditionally on /new and /clear, on successful

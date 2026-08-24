@@ -61,7 +61,7 @@ func (r *tailRing) Write(p []byte) (int, error) {
 // evicted gap reported in dropped, and a cursor at or past end returns no
 // bytes with next = end. next is always the position after the last returned
 // byte (or the clamped cursor when nothing is returned). maxBytes < 1 is a
-// caller construction bug (Task 5 tools own validation) and panics.
+// caller construction bug (the calling tool owns validation) and panics.
 func (r *tailRing) Read(cursor *uint64, maxBytes int) (data []byte, next uint64, dropped uint64) {
 	if maxBytes < 1 {
 		panic("tools: tailRing.Read maxBytes must be >= 1")

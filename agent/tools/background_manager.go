@@ -11,9 +11,9 @@ import (
 	"sync"
 )
 
-// Background-exec policy constants (#346, plan B1): at most 4 concurrently
-// running jobs, the newest 8 completed jobs retained for inspection, and a
-// 64 KiB tail ring per stream per job.
+// Background-exec policy constants (#346), the bounded retained-set policy:
+// at most 4 concurrently running jobs, the newest 8 completed jobs retained
+// for inspection, and a 64 KiB tail ring per stream per job.
 const (
 	backgroundActiveCap   = 4
 	backgroundRetainedCap = 8

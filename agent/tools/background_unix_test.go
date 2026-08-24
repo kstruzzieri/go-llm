@@ -145,8 +145,8 @@ func TestBackgroundProcessGroupKillReapsChild(t *testing.T) {
 	if err := proc.Kill(); err != nil {
 		t.Fatalf("Kill: %v", err)
 	}
-	// Assert the grandchild died BEFORE calling Wait: Wait's own C1 residual
-	// cleanup also group-kills, and checking afterwards would mask a
+	// Assert the grandchild died BEFORE calling Wait: Wait's own residual
+	// group cleanup also group-kills, and checking afterwards would mask a
 	// leader-only Kill.
 	if !waitProcessGone(grandchildPID) {
 		t.Errorf("grandchild pid %d still alive after group kill", grandchildPID)
@@ -213,7 +213,8 @@ func TestBackgroundProcessKillConcurrentWithWait(t *testing.T) {
 	}
 }
 
-// TestBackgroundProcessNaturalLeaderExitResidualCleanup proves the C1 policy:
+// TestBackgroundProcessNaturalLeaderExitResidualCleanup proves the
+// managed-process-group containment policy:
 // when the leader exits naturally but a same-group descendant lives on with
 // released pipes, Wait reports the leader's real exit (0, nil) and its
 // internal residual group cleanup reaps the descendant — the test never calls

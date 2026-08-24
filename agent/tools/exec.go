@@ -143,8 +143,9 @@ func NewRunCommand(ws *Workspace, runner commandRunner) *RunCommand {
 	return &RunCommand{ws: ws, runner: runner}
 }
 
-// NewExecTools builds the exec tool set bound to one Workspace over root, using the
-// platform's real runner. Registered by cmd/golem only under -allow-exec.
+// NewExecTools builds the foreground-only exec tool set bound to one Workspace
+// over root, using the platform's real runner. Retained for existing callers;
+// cmd/golem registers NewExecToolsWithBackground under -allow-exec.
 func NewExecTools(root string) ([]agent.Tool, error) {
 	ws, err := NewWorkspace(root)
 	if err != nil {

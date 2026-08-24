@@ -251,7 +251,7 @@ func TestJobsListAndStopWithRealJobs(t *testing.T) {
 	}
 }
 
-// TestJobsStopCanceledContextReportsReaping covers the Task 7 polish: when
+// TestJobsStopCanceledContextReportsReaping covers context expiry: when
 // Stop returns (snapshot, ctx.Err()) — kill issued, reaping continues — /jobs
 // stop must report the stop as requested, not print the raw context error.
 // The context is canceled BEFORE the call, so Stop's ctx.Done() arm is ready
@@ -319,7 +319,7 @@ func TestJobsListSanitizesArgvFromRealJob(t *testing.T) {
 	}
 }
 
-// TestJobsSurviveSessionBoundariesWhileGrantsClear is the approved A1
+// TestJobsSurviveSessionBoundariesWhileGrantsClear pins the approved
 // process-scope policy: /new, /clear, and successful /resume leave manager
 // jobs and handles untouched while the session's approval grants still clear.
 func TestJobsSurviveSessionBoundariesWhileGrantsClear(t *testing.T) {
@@ -355,7 +355,7 @@ func TestJobsSurviveSessionBoundariesWhileGrantsClear(t *testing.T) {
 		}
 		list := mgr.List()
 		if len(list) != 1 || list[0].Handle != job.Handle || list[0].State != "running" {
-			t.Fatalf("%s must leave background jobs untouched (A1): %+v\n%s", cmd, list, out.String())
+			t.Fatalf("%s must leave background jobs untouched (process-scope policy): %+v\n%s", cmd, list, out.String())
 		}
 	}
 }
