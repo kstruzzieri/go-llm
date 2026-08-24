@@ -528,7 +528,12 @@ func handleJobs(ctx context.Context, out io.Writer, sess *replSession, fields []
 			_, _ = fmt.Fprintln(out, renderJobLine(st))
 		}
 	case len(fields) == 3 && fields[1] == "stop":
-		st, err := sess.bgManager.Stop(ctx, fields[2])
+		// Bound the reap wait to 10s, matching the model path's tool-call
+		// timeout (bgToolTimeout); expiry lands in the still-reaping branch
+		// below, so the prompt is never blocked indefinitely.
+		stopCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		defer cancel()
+		st, err := sess.bgManager.Stop(stopCtx, fields[2])
 		if err != nil {
 			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 				// Early return by contract: the kill is already issued; the

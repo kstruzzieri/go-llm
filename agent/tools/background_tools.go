@@ -100,7 +100,8 @@ func (t *StartCommand) Spec() agent.ToolSpec {
 		Name: "start_command",
 		Description: "Start a command in the background (argv-first, NO shell) and return an opaque handle immediately. " +
 			"The command is shown to the user and starts only after they approve it; it keeps running across turns until it exits, " +
-			"is stopped via stop_command, or the session shuts down. Poll with command_status and read output with command_tail.",
+			"is stopped via stop_command, or the session shuts down. When the command exits, background processes it left running " +
+			"in its process group are terminated. Poll with command_status and read output with command_tail.",
 		Parameters: json.RawMessage(`{
   "type":"object",
   "properties":{

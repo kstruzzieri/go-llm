@@ -36,9 +36,11 @@ cursors; `stop_command` kills the job and reports its final state.
   clear.
 - **Unix managed-process-group guarantee.** Every job is the leader of its
   own process group; stop and shutdown SIGKILL the whole group and the
-  REPL does not return before killed groups are reaped. Descendants that
-  escape the managed group (e.g. via setsid) are unsupported. Non-Unix
-  platforms fail closed: `start_command` reports exec unsupported.
+  REPL does not return before killed groups are reaped, and when the
+  command exits on its own, background processes it left running in the
+  group are also killed. Descendants that escape the managed group (e.g.
+  via setsid) are unsupported. Non-Unix platforms fail closed:
+  `start_command` reports exec unsupported.
 
 ### Changed — provider: bounded parallel capability resolution (#401)
 

@@ -53,10 +53,9 @@ func (p *unixProcess) PID() int { return p.pgid }
 func (p *unixProcess) Wait() (int, error) {
 	waitErr := p.cmd.Wait()
 	// Residual-group cleanup, best-effort. An accepted PGID-reuse limitation
-	// of that policy: the
-	// direct child was just reaped, so if no descendant survives the pgid may
-	// already be recycled to an unrelated same-uid group; the window between
-	// reap and this kill is microseconds.
+	// of that policy: the direct child was just reaped, so if no descendant
+	// survives the pgid may already be recycled to an unrelated same-uid
+	// group; the window between reap and this kill is microseconds.
 	_ = syscall.Kill(-p.pgid, syscall.SIGKILL)
 	if p.cmd.ProcessState == nil {
 		// ECHILD-class wait failure: no exit status exists. Not reachable in
@@ -80,19 +79,21 @@ func (p *unixProcess) Wait() (int, error) {
 
 // Kill SIGKILLs the whole managed group. Idempotent; never waits.
 //
-// ESRCH (group gone) is success. EPERM is success too: children run with our
-// real uid, so a LIVE member of our managed group is always signalable; EPERM
-// on the remembered pgid can only mean a zombie-only group (darwin returns
-// EPERM, not ESRCH, when the sole member is exited-but-unreaped — the routine
-// stop-vs-reap window) or a recycled pgid now owned by another uid. Both
-// correctly mean "nothing left for us to kill" under the managed-process-group
-// containment policy.
+// ESRCH (group gone) is success. EPERM is treated as success too: children
+// normally run with our real uid, so EPERM on the remembered pgid usually
+// means a zombie-only group (darwin returns EPERM, not ESRCH, when the sole
+// member is exited-but-unreaped — the routine stop-vs-reap window) or a
+// recycled pgid now owned by another uid, both correctly "nothing left for
+// us to kill" under the managed-process-group containment policy. Known
+// limitation of that policy: a group member whose real uid changed (which
+// requires the user to have approved a sudo-style command) is live but
+// unsignalable, so EPERM then masks it and the process lingers until it
+// exits on its own.
 //
 // An accepted PGID-reuse limitation of that policy: once the last member is
-// reaped the pgid can be
-// recycled; a late Kill could then signal an unrelated same-uid group. The
-// manager should prefer not to Kill after Wait has returned, which shrinks
-// the window to microseconds.
+// reaped the pgid can be recycled; a late Kill could then signal an
+// unrelated same-uid group. The manager should prefer not to Kill after
+// Wait has returned, which shrinks the window to microseconds.
 func (p *unixProcess) Kill() error {
 	err := syscall.Kill(-p.pgid, syscall.SIGKILL)
 	if errors.Is(err, syscall.ESRCH) || errors.Is(err, syscall.EPERM) {
