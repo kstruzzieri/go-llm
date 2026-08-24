@@ -238,7 +238,7 @@ func TestBackgroundProcessNaturalLeaderExitResidualCleanup(t *testing.T) {
 
 // TestBackgroundProcessHeldPipeWaitDelay proves WaitDelay bounds Wait when a
 // same-group descendant (alive for 30s) holds the leader's stdout pipe open:
-// Wait must return within 5s with the leader's real exit code and
+// Wait must return within 10s with the leader's real exit code and
 // exec.ErrWaitDelay preserved.
 func TestBackgroundProcessHeldPipeWaitDelay(t *testing.T) {
 	proc, _, _ := startBackground(t, helperSpec(t, "holdpipe"))
