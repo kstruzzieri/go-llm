@@ -508,7 +508,9 @@ func dispatchSlash(ctx context.Context, out io.Writer, sess *replSession, line s
 // handleJobs implements /jobs (#346): pull-based visibility over the session's
 // background jobs plus a user-direct stop. The stop is user-initiated, so it
 // never routes through the model-call approver; the manager's frozen error
-// classes (unknown handle) render as-is.
+// classes (unknown handle) render as-is. Context expiry mirrors the model
+// path (stop_command): the kill is already issued, so it reports the stop as
+// requested rather than printing a raw context error.
 func handleJobs(ctx context.Context, out io.Writer, sess *replSession, fields []string) {
 	if sess.bgManager == nil {
 		_, _ = fmt.Fprintln(out, "background exec disabled (run with -allow-exec)")
@@ -527,6 +529,12 @@ func handleJobs(ctx context.Context, out io.Writer, sess *replSession, fields []
 	case len(fields) == 3 && fields[1] == "stop":
 		st, err := sess.bgManager.Stop(ctx, fields[2])
 		if err != nil {
+			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				// Early return by contract: the kill is already issued; the
+				// manager finishes reaping on its own.
+				_, _ = fmt.Fprintf(out, "stop requested for %s; still reaping\n", st.Handle)
+				return
+			}
 			_, _ = fmt.Fprintln(out, err)
 			return
 		}

@@ -251,6 +251,43 @@ func TestJobsListAndStopWithRealJobs(t *testing.T) {
 	}
 }
 
+// TestJobsStopCanceledContextReportsReaping covers the Task 7 polish: when
+// Stop returns (snapshot, ctx.Err()) — kill issued, reaping continues — /jobs
+// stop must report the stop as requested, not print the raw context error.
+// The context is canceled BEFORE the call, so Stop's ctx.Done() arm is ready
+// while the just-killed job's completion is still being reaped.
+func TestJobsStopCanceledContextReportsReaping(t *testing.T) {
+	requireBinary(t, "sleep")
+	root := t.TempDir()
+	mgr := agenttools.NewBackgroundManager()
+	t.Cleanup(mgr.Shutdown)
+	execTools, err := buildExecTools(root, mgr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sess := &replSession{bgManager: mgr}
+	job := startBackgroundJob(t, mgr, execTools, "sleep", "30")
+
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	var out strings.Builder
+	if _, exit := dispatchSlash(canceled, &out, sess, "/jobs stop "+job.Handle); exit {
+		t.Fatal("/jobs stop must not exit")
+	}
+	got := out.String()
+	if !strings.Contains(got, "stop requested for "+job.Handle+"; still reaping") {
+		t.Fatalf("canceled-context stop must report stop requested / still reaping:\n%s", got)
+	}
+	if strings.Contains(got, context.Canceled.Error()) {
+		t.Fatalf("canceled-context stop must not print the raw context error:\n%s", got)
+	}
+	// The contract behind the message: the kill was issued and the manager
+	// finishes reaping without any further user action.
+	if err := waitGroupGone(job.PID, 5*time.Second); err != nil {
+		t.Fatalf("stop with canceled context must still have issued the kill: %v", err)
+	}
+}
+
 // TestJobsListSanitizesArgvFromRealJob proves the /jobs listing routes REAL
 // job argv through the control-safe renderer, not just that the renderer works
 // in isolation.
