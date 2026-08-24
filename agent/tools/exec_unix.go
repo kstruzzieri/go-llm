@@ -45,12 +45,21 @@ func (unixRunner) Run(ctx context.Context, spec execSpec) (execResult, error) {
 	}
 	waitErr := cmd.Wait()
 
+	// ProcessState can be nil when Wait fails at the syscall level before it is
+	// populated (ECHILD-class race: the child was reaped elsewhere). Calling
+	// ExitCode() on it would panic. Not deterministically testable — the race
+	// needs an external reaper — so the guard is documented here instead.
+	exitCode := -1
+	if cmd.ProcessState != nil {
+		exitCode = cmd.ProcessState.ExitCode()
+	}
+
 	res := execResult{
 		Stdout:          stdout.buf,
 		Stderr:          stderr.buf,
 		StdoutTruncated: stdout.truncated,
 		StderrTruncated: stderr.truncated,
-		ExitCode:        cmd.ProcessState.ExitCode(),
+		ExitCode:        exitCode,
 	}
 	if ctx.Err() != nil {
 		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
