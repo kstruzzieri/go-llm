@@ -122,10 +122,10 @@ func TestRefreshInventory_PreCancelledContext(t *testing.T) {
 }
 
 func TestRefreshInventory_CancelDuringOnlyProviderListing(t *testing.T) {
-	// SINGLE provider: no later loop-entry check can mask a missing
-	// error-branch barrier. Without the error-branch ctx check the
-	// provider would be recorded unreachable and the refresh would
-	// SUCCEED with a published value.
+	// SINGLE provider: pins the OBSERVABLE contract for mid-listing
+	// cancellation — zero Inventory + context.Canceled — now enforced by
+	// the final barrier alone (the in-branch re-check was removed as
+	// provably redundant with it).
 	ctx, cancel := context.WithCancel(context.Background())
 	lister := &fakeLister{
 		names: []string{"only"},
@@ -165,9 +165,12 @@ func TestRefreshInventory_CancelAfterLastProviderSucceeds(t *testing.T) {
 }
 
 func TestRefreshInventory_ProjectionCancellationAborts(t *testing.T) {
-	// The projection's only error is cancellation; refresh must return it
-	// verbatim with the zero value — and must NOT record the provider
-	// unreachable (the listing succeeded; Reachable reports the provider).
+	// The projection's only error is cancellation, so its immediate return
+	// is provably equivalent to falling through to the loop-entry/final
+	// barriers — no mutation can distinguish it. Retained for clarity, not
+	// for coverage. This pins the zero-value + error contract and that the
+	// provider is NOT recorded unreachable (the listing succeeded;
+	// Reachable reports the provider).
 	ctx, cancel := context.WithCancel(context.Background())
 	proj := newFakeProjector()
 	proj.onCall = func(context.Context) { cancel() }
@@ -207,5 +210,25 @@ func TestRefreshInventory_VanishedProviderIsUnreachable(t *testing.T) {
 	}
 	if len(inv.Models) != 1 || inv.Models[0].Key != key("real", "m") {
 		t.Fatalf("Models = %+v; want exactly the resolvable provider's model", inv.Models)
+	}
+}
+
+func TestRefreshInventory_PreCancelledFiresNoListings(t *testing.T) {
+	// The loop-entry check is an early-exit property: a cancelled refresh
+	// must not fire ANY provider listing. (The final barrier alone would
+	// return the right value but only after doing the work.)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	p := &fakeProvider{name: "p", models: []provider.ModelInfo{{Name: "m"}}}
+	lister := &fakeLister{names: []string{"p"}, providers: map[string]provider.Provider{"p": p}}
+	inv, err := RefreshInventory(ctx, lister, newFakeProjector())
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("error = %v; want context.Canceled", err)
+	}
+	if !reflect.DeepEqual(inv, configview.Inventory{}) {
+		t.Fatalf("pre-cancelled refresh published %+v; want zero Inventory", inv)
+	}
+	if p.modelsCalls != 0 {
+		t.Fatalf("pre-cancelled refresh fired %d listings; want 0", p.modelsCalls)
 	}
 }

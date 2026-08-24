@@ -34,12 +34,15 @@ type fakeProvider struct {
 	models    []provider.ModelInfo
 	modelsErr error
 	onModels  func()
+	// modelsCalls is unsynchronized: single-goroutine use only.
+	modelsCalls int
 }
 
 func (p *fakeProvider) Name() string                      { return p.name }
 func (p *fakeProvider) Capabilities() provider.Capability { return 0 }
 func (p *fakeProvider) Health(context.Context) error      { return nil }
 func (p *fakeProvider) Models(context.Context) ([]provider.ModelInfo, error) {
+	p.modelsCalls++
 	if p.onModels != nil {
 		p.onModels()
 	}

@@ -27,10 +27,11 @@ import (
 //     projector's only error is cancellation. Persisted probe verdicts
 //     (yes AND no) surface through KnownMask, validated against this
 //     listing's identity.
-//   - Cancellation publishes nothing: barriers at every loop entry, in
-//     the listing error branch, at projection error, and before the
-//     final return guarantee a cancelled call returns the zero Inventory
-//     and the context error.
+//   - Cancellation publishes nothing: the final barrier guarantees a
+//     cancelled call returns the zero Inventory and the context error
+//     regardless of where cancellation landed; the loop-entry check
+//     additionally stops further provider listings early. (In-branch
+//     re-checks were deliberately removed as provably redundant.)
 func RefreshInventory(ctx context.Context, providers ProviderLister, models ListedProjector) (configview.Inventory, error) {
 	inv := configview.Inventory{}
 	names := append([]string(nil), providers.Names()...)
@@ -48,9 +49,6 @@ func RefreshInventory(ctx context.Context, providers ProviderLister, models List
 		}
 		infos, err := p.Models(ctx)
 		if err != nil {
-			if cerr := ctx.Err(); cerr != nil {
-				return configview.Inventory{}, cerr
-			}
 			inv.Providers = append(inv.Providers, configview.InventoryProvider{Name: name, Reachable: false})
 			continue
 		}
