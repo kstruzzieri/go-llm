@@ -49,6 +49,11 @@ type indexGeneration struct {
 	legacy       bool
 }
 
+// stagingMutator applies a managed mutation to the staging store in place of
+// the workspace walk. indexer is nil when the build runs without an embedder
+// (delete needs none).
+type stagingMutator func(ctx context.Context, indexer *rag.Indexer, store *rag.SQLiteStore) error
+
 type generationBuildOptions struct {
 	root                string
 	dbPath              string
@@ -62,6 +67,7 @@ type generationBuildOptions struct {
 	refuseInvalidActive bool
 	out                 io.Writer
 	finalizationHook    finalizationHook
+	mutate              stagingMutator // non-nil: managed mutation instead of the workspace walk
 }
 
 type generationBuildResult struct {
@@ -78,8 +84,11 @@ func buildIndexGeneration(ctx context.Context, opts generationBuildOptions) (res
 	if err := ctx.Err(); err != nil {
 		return result, err
 	}
-	if opts.dbPath == "" || opts.workspaceID == "" || opts.requestedModel == "" || opts.actualVectorSpace == "" || opts.embedder == nil || opts.out == nil {
-		return result, fmt.Errorf("golem: build index generation: db path, workspace, requested model, actual vector space, embedder, and output are required")
+	if opts.dbPath == "" || opts.workspaceID == "" || opts.requestedModel == "" || opts.actualVectorSpace == "" || opts.out == nil {
+		return result, fmt.Errorf("golem: build index generation: db path, workspace, requested model, actual vector space, and output are required")
+	}
+	if opts.mutate == nil && (opts.root == "" || opts.embedder == nil) {
+		return result, fmt.Errorf("golem: build index generation: root and embedder are required for a workspace walk")
 	}
 	active, activeErr := resolveActiveGeneration(ctx, opts.dbPath, opts.workspaceID)
 	result.activeErr = activeErr
@@ -143,16 +152,32 @@ func buildIndexGeneration(ctx context.Context, opts generationBuildOptions) (res
 			}
 		}
 	}()
-	indexer, err := rag.NewIndexerWithEmbedder(opts.embedder, store, rag.WithEmbeddingModel(opts.requestedModel))
-	if err != nil {
-		return result, fmt.Errorf("golem: build staging indexer: %w", err)
+	var indexer *rag.Indexer
+	if opts.embedder != nil {
+		indexer, err = rag.NewIndexerWithEmbedder(opts.embedder, store, rag.WithEmbeddingModel(opts.requestedModel))
+		if err != nil {
+			return result, fmt.Errorf("golem: build staging indexer: %w", err)
+		}
 	}
-	result.index = executeIndex(ctx, indexJob{
-		indexer: indexer, store: store, root: opts.root,
-		dbPath: staging.dbPath, displayDBPath: opts.dbPath,
-		sidecarPath: staging.metadataPath, workspaceID: opts.workspaceID,
-		requestedModel: opts.requestedModel, out: opts.out, pruneDeleted: opts.pruneDeleted,
-	})
+	var inherited *generationMetadata
+	if !opts.full && activeErr == nil && active.metadata.VectorSpaceID == opts.actualVectorSpace {
+		inherited = &active.metadata
+	}
+	if opts.mutate != nil {
+		if err := opts.mutate(ctx, indexer, store); err != nil {
+			return result, err
+		}
+		if err := finishMutatedStaging(ctx, store, staging, opts, inherited); err != nil {
+			return result, err
+		}
+	} else {
+		result.index = executeIndex(ctx, indexJob{
+			indexer: indexer, store: store, root: opts.root,
+			dbPath: staging.dbPath, displayDBPath: opts.dbPath,
+			sidecarPath: staging.metadataPath, workspaceID: opts.workspaceID,
+			requestedModel: opts.requestedModel, out: opts.out, pruneDeleted: opts.pruneDeleted,
+		})
+	}
 	sc, sidecarErr := readSidecar(staging.metadataPath)
 	if sidecarErr != nil {
 		return result, fmt.Errorf("golem: read staging metadata %q: %w", staging.metadataPath, sidecarErr)
@@ -245,6 +270,42 @@ func checkpointGeneration(ctx context.Context, store *rag.SQLiteStore) error {
 		return fmt.Errorf("golem: checkpoint staging generation: %w", err)
 	}
 	return nil
+}
+
+// finishMutatedStaging validates the mutated staging store and writes its
+// sidecar: the managed-mutation counterpart of executeIndex's tail. A copied
+// partial generation keeps its unresolved workspace error count; only a fresh
+// managed-only generation starts complete.
+func finishMutatedStaging(ctx context.Context, store *rag.SQLiteStore, staging indexGeneration, opts generationBuildOptions, inherited *generationMetadata) error {
+	stats, err := store.Stats(ctx)
+	if err != nil {
+		return fmt.Errorf("golem: read mutated staging stats: %w", err)
+	}
+	probe, err := store.ProbeVectorSpaces(ctx)
+	if err != nil {
+		return fmt.Errorf("golem: probe mutated staging vector space: %w", err)
+	}
+	clean := len(probe.KnownIDs) == 1 && !probe.HasUnknown
+	if stats.TotalSources < 1 || !clean {
+		return fmt.Errorf("golem: refusing to publish an unusable index (sources=%d, vector spaces=%v, legacy=%v); a generation must keep at least one source",
+			stats.TotalSources, probe.KnownIDs, probe.HasUnknown)
+	}
+	if err := chmodIndexDBFiles(staging.dbPath); err != nil {
+		return err
+	}
+	status, errorCount := "complete", 0
+	if inherited != nil && inherited.Status == "partial" {
+		status, errorCount = inherited.Status, inherited.ErrorCount
+	}
+	return writeSidecar(staging.metadataPath, indexSidecar{
+		SchemaVersion:           indexSchemaVersion,
+		WorkspaceID:             opts.workspaceID,
+		RequestedEmbeddingModel: opts.requestedModel,
+		VectorSpaceID:           probe.KnownIDs[0],
+		IndexedAt:               time.Now().UTC().Format(time.RFC3339),
+		Status:                  status,
+		ErrorCount:              errorCount,
+	})
 }
 
 func indexPathStem(dbPath string) string {
