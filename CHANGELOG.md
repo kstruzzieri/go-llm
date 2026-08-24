@@ -6,6 +6,18 @@ All notable changes to `go-llm` are documented here. Downstream consumers
 
 ## [Unreleased]
 
+### Added — golem,rag: managed source lifecycle in the CLI (#349)
+
+`golem source add|list|rm|reindex` manages ad-hoc documents in the workspace
+index over immutable index generations: mutations acquire the writer lease,
+copy the active generation, apply the managed operation to the staging copy,
+and atomically publish; the active index is never modified in place. `list`
+reads the published generation read-only with non-mutating freshness
+reconciliation (`rag`: immutable stores now reconcile listing snapshots in
+memory instead of failing on the write). `rm` and `list` need no provider
+backend; `-json` list output is machine-clean (`[]`, never `null`; notices on
+stderr).
+
 ### Added — configio: explicit inventory refresh and tool_call probe (#456)
 
 New leaf package `configio` implements the two explicit I/O operations of
