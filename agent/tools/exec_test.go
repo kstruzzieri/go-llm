@@ -757,7 +757,7 @@ func TestRenderArgvForPreviewNoExtraQuotes(t *testing.T) {
 	}
 }
 
-// Task 1 (#346): shared preparation helpers usable by foreground and background tools.
+// #346: shared preparation helpers usable by foreground and background tools.
 
 // prepWS builds a Workspace plus a PATH dir holding "mycmd", with PATH/HOME pinned.
 func prepWS(t *testing.T) (*Workspace, string) {
