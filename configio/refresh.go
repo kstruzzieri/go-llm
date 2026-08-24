@@ -5,6 +5,7 @@ import (
 	"sort"
 
 	"github.com/kstruzzieri/go-llm/configview"
+	"github.com/kstruzzieri/go-llm/provider"
 )
 
 // RefreshInventory performs the explicit provider model listing (spec read
@@ -34,6 +35,13 @@ import (
 //     projection-error immediate return is a third enforcement path (the
 //     projector's only error is cancellation). In-branch ctx re-checks
 //     elsewhere were deliberately removed as provably redundant.
+//   - Listings are hygiene-filtered: empty model names are dropped and
+//     duplicate names collapse to the first (deterministic under the
+//     sort above); the projection and Inventory never carry unaddressable
+//     or colliding keys.
+//   - Policy hooks (capability overrides/floors) are snapshotted per
+//     provider by the projection, so a concurrent policy change can land
+//     between providers; each provider's block is internally coherent.
 func RefreshInventory(ctx context.Context, providers ProviderLister, models ListedProjector) (configview.Inventory, error) {
 	inv := configview.Inventory{}
 	names := append([]string(nil), providers.Names()...)
@@ -54,7 +62,24 @@ func RefreshInventory(ctx context.Context, providers ProviderLister, models List
 			inv.Providers = append(inv.Providers, configview.InventoryProvider{Name: name, Reachable: false})
 			continue
 		}
+		infos = append([]provider.ModelInfo(nil), infos...)
 		sort.Slice(infos, func(i, j int) bool { return infos[i].Name < infos[j].Name })
+		// Listing hygiene: a misbehaving server can return empty or
+		// duplicate model ids. Empty names are unaddressable (the probe
+		// op rejects them as invalid_argument) and duplicates would
+		// diverge between Inventory.Models and configview's by-name maps
+		// (last-wins there). Drop empties, keep the first of each name —
+		// deterministic under the sort above.
+		kept := infos[:0]
+		var prev string
+		for _, info := range infos {
+			if info.Name == "" || (len(kept) > 0 && info.Name == prev) {
+				continue
+			}
+			kept = append(kept, info)
+			prev = info.Name
+		}
+		infos = kept
 		facts, err := models.ProjectListedModels(ctx, name, infos)
 		if err != nil {
 			// The projection is total except cancellation; its error IS

@@ -190,7 +190,11 @@ func (s *memCapProbeStore) SaveCapProbe(_ context.Context, probe fingerprint.Cap
 	if s.saveErr != nil {
 		return s.saveErr
 	}
-	s.rows[storeKey(probe.BackendID, probe.ModelName, probe.Capability)] = probe
+	key := storeKey(probe.BackendID, probe.ModelName, probe.Capability)
+	if existing, ok := s.rows[key]; ok && !probe.TestedAt.After(existing.TestedAt) {
+		return nil // real store keeps the newer row; mirror it
+	}
+	s.rows[key] = probe
 	return nil
 }
 

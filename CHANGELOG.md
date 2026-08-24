@@ -43,7 +43,10 @@ the role-config stack (v4 spec slice 4), consumed by the Firn config panel
   UNCLASSIFIED (raw context error, no code). Firn mapping: add all three
   codes to both closed allowlists; unknown future configio codes fall
   back to the generic diagnostic with a cleared subject; configio errors
-  carry no subject.
+  carry no subject. Consumers must forward only the bounded code across
+  projection boundaries — configio error messages deliberately retain
+  the wrapped cause text for CLI and log surfaces and are not
+  boundary-safe.
 
 ### Changed — provider: bounded parallel capability resolution (#401)
 

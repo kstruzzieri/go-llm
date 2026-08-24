@@ -201,6 +201,35 @@ func TestRefreshInventory_VanishedProviderIsUnreachable(t *testing.T) {
 	}
 }
 
+func TestRefreshInventory_HostileListingHygiene(t *testing.T) {
+	// A misbehaving server returns empty and duplicate model ids: empties
+	// are dropped, duplicates collapse to the first (post-sort), and the
+	// projector only ever sees the cleaned listing.
+	lister := &fakeLister{
+		names: []string{"p"},
+		providers: map[string]provider.Provider{
+			"p": &fakeProvider{name: "p", models: []provider.ModelInfo{
+				{Name: "dup", Family: "second"},
+				{Name: ""},
+				{Name: "dup", Family: "first"},
+				{Name: "solo"},
+			}},
+		},
+	}
+	proj := newFakeProjector()
+	inv, err := RefreshInventory(context.Background(), lister, proj)
+	if err != nil {
+		t.Fatalf("RefreshInventory() error: %v", err)
+	}
+	if len(inv.Models) != 2 || inv.Models[0].Key != key("p", "dup") || inv.Models[1].Key != key("p", "solo") {
+		t.Fatalf("Models = %+v; want exactly [p/dup p/solo]", inv.Models)
+	}
+	seen := proj.seenFor("p")
+	if len(seen) != 2 || seen[0].Name != "dup" || seen[1].Name != "solo" {
+		t.Fatalf("projector saw %+v; want cleaned [dup solo]", seen)
+	}
+}
+
 func TestRefreshInventory_PreCancelledFiresNoListings(t *testing.T) {
 	// The loop-entry check is an early-exit property: a cancelled refresh
 	// must not fire ANY provider listing. (The final barrier alone would

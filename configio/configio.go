@@ -44,8 +44,11 @@ const (
 	// specific provider/model). Distinct from a probe that RAN and
 	// answered inconclusively.
 	CodeProbeUnavailable ErrorCode = "probe_unavailable"
-	// CodeProbeFailed reports a transient probe failure (network, auth,
-	// provider resolution). Nothing was persisted; the state is unknown.
+	// CodeProbeFailed reports a failed probe attempt: transient transport
+	// trouble (network, auth) or a resolution failure (unknown provider
+	// or model). Not necessarily retryable — the wrapped cause
+	// distinguishes, for log/CLI surfaces only. Nothing was persisted;
+	// the state is unknown.
 	CodeProbeFailed ErrorCode = "probe_failed"
 )
 
