@@ -1654,3 +1654,17 @@ func TestValidateFlags_DispatchModes(t *testing.T) {
 		})
 	}
 }
+
+func TestRunDispatchesSourceSubcommand(t *testing.T) {
+	stdin, stdout, stderr := runTestFiles(t)
+	err := run([]string{"source"}, stdin, stdout, stderr)
+	if !errors.Is(err, errSourceFailed) {
+		t.Fatalf("want errSourceFailed from bare source dispatch, got %v", err)
+	}
+	if got := readRunTestFile(t, stdout); got != "" {
+		t.Fatalf("bare source wrote stdout %q", got)
+	}
+	if got := readRunTestFile(t, stderr); !strings.Contains(got, "usage: golem source") {
+		t.Fatalf("bare source stderr = %q", got)
+	}
+}

@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"mime"
+	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -215,10 +216,19 @@ func (m *ManagedSources) IngestFile(ctx context.Context, path string, opts Docum
 		return Document{}, fmt.Errorf("rag: ingest file %q: resolve path: %w", path, err)
 	}
 	abs = filepath.Clean(abs)
-	opts, err = normalizeManagedDocumentOptions(filepath.Base(abs), opts)
+	name := filepath.Base(abs)
+	opts, err = normalizeManagedDocumentOptions(name, opts)
 	if err != nil {
 		return Document{}, err
 	}
+	if err := ctx.Err(); err != nil {
+		return Document{}, err
+	}
+	abs, err = filepath.EvalSymlinks(abs)
+	if err != nil {
+		return Document{}, fmt.Errorf("rag: ingest file %q: resolve symbolic links: %w", path, err)
+	}
+	abs = filepath.Clean(abs)
 	if err := ctx.Err(); err != nil {
 		return Document{}, err
 	}
@@ -229,7 +239,7 @@ func (m *ManagedSources) IngestFile(ctx context.Context, path string, opts Docum
 	if !utf8.Valid(data) {
 		return Document{}, fmt.Errorf("rag: ingest file %q: content must be valid UTF-8", abs)
 	}
-	return m.ingestLocked(ctx, filepath.Base(abs), string(data), DocumentKindFile, abs, "", opts)
+	return m.ingestLocked(ctx, name, string(data), DocumentKindFile, abs, "", opts)
 }
 
 func (m *ManagedSources) ingestLocked(ctx context.Context, name, content string, kind DocumentKind, origin, storedText string, opts DocumentOptions) (Document, error) {
@@ -412,6 +422,20 @@ func (m *ManagedSources) reconcileDocument(ctx context.Context, observed *Docume
 		return false, err
 	}
 	if !provenanceMismatch && chunks == observed.ChunkCount && desiredFreshness == observed.Freshness {
+		return false, nil
+	}
+
+	// An immutable snapshot (published index generation) cannot persist the
+	// reconciled state; report it on the returned snapshot only. The writable
+	// owner of the registry persists the same transition on its next listing.
+	if m.store.immutable {
+		if provenanceMismatch || chunks != observed.ChunkCount {
+			observed.State = DocumentStateFailed
+			observed.Freshness = DocumentFreshnessStale
+			observed.LastError = "managed document chunks are missing or inconsistent"
+		} else {
+			observed.Freshness = desiredFreshness
+		}
 		return false, nil
 	}
 
@@ -788,19 +812,6 @@ func readManagedRegularFile(ctx context.Context, path string) ([]byte, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	info, err := f.Stat()
-	if err != nil {
-		if ctxErr := ctx.Err(); ctxErr != nil {
-			return nil, ctxErr
-		}
-		return nil, err
-	}
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	if !info.Mode().IsRegular() {
-		return nil, errors.New("not a regular file")
-	}
 	data, err := io.ReadAll(io.LimitReader(f, MaxManagedDocumentBytes+1))
 	if err != nil {
 		if ctxErr := ctx.Err(); ctxErr != nil {
@@ -815,6 +826,87 @@ func readManagedRegularFile(ctx context.Context, path string) ([]byte, error) {
 		return nil, fmt.Errorf("document exceeds %d-byte limit", MaxManagedDocumentBytes)
 	}
 	return data, nil
+}
+
+type managedFileOpener func(*os.Root, string) (*os.File, error)
+
+func openManagedFile(path string) (*os.File, error) {
+	return openManagedFileWith(path, openManagedFileAt)
+}
+
+// openManagedFileWith binds each inspected path component to an open handle,
+// so a rename or symlink swap cannot redirect the eventual file open.
+func openManagedFileWith(path string, opener managedFileOpener) (_ *os.File, err error) {
+	path = filepath.Clean(path)
+	if !filepath.IsAbs(path) {
+		return nil, fmt.Errorf("managed file path %q is not absolute", path)
+	}
+	rootPath := filepath.VolumeName(path) + string(filepath.Separator)
+	rel, err := filepath.Rel(rootPath, path)
+	if err != nil {
+		return nil, err
+	}
+	parts := strings.Split(rel, string(filepath.Separator))
+	if rel == "." || len(parts) == 0 {
+		return nil, errors.New("not a regular file")
+	}
+
+	root, err := os.OpenRoot(rootPath)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = root.Close() }()
+	for _, part := range parts[:len(parts)-1] {
+		info, err := root.Lstat(part)
+		if err != nil {
+			return nil, err
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return nil, fmt.Errorf("managed file path contains a symbolic link at %q; remove and re-add the managed source", part)
+		}
+		if !info.IsDir() {
+			return nil, fmt.Errorf("managed file path component %q is not a directory", part)
+		}
+		next, err := root.OpenRoot(part)
+		if err != nil {
+			return nil, err
+		}
+		opened, err := next.Stat(".")
+		if err != nil || !os.SameFile(info, opened) {
+			_ = next.Close()
+			if err != nil {
+				return nil, err
+			}
+			return nil, fmt.Errorf("managed file path component %q changed during open", part)
+		}
+		_ = root.Close()
+		root = next
+	}
+
+	leaf := parts[len(parts)-1]
+	info, err := root.Lstat(leaf)
+	if err != nil {
+		return nil, err
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return nil, errors.New("managed file path contains a symbolic link; remove and re-add the managed source")
+	}
+	if !info.Mode().IsRegular() {
+		return nil, errors.New("not a regular file")
+	}
+	f, err := opener(root, leaf)
+	if err != nil {
+		return nil, err
+	}
+	opened, statErr := f.Stat()
+	if statErr != nil || !opened.Mode().IsRegular() || !os.SameFile(info, opened) {
+		_ = f.Close()
+		if statErr != nil {
+			return nil, statErr
+		}
+		return nil, errors.New("managed file changed during open")
+	}
+	return f, nil
 }
 
 func newManagedDocumentID() (string, error) {
