@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
 
 	"github.com/kstruzzieri/go-llm/config"
 	"github.com/kstruzzieri/go-llm/provider"
@@ -63,7 +62,7 @@ func enableRetrieve(ctx context.Context, cfg *config.Config, router *provider.Ro
 	// immutable legacy DB/sidecar pair only when no pointer exists.
 	gen, err := resolveActiveGeneration(ctx, opts.autoDBPath, opts.workspaceID)
 	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
+		if errors.Is(err, errNoActiveGeneration) {
 			return retrieveResult{}
 		}
 		return retrieveResult{warns: []string{"retrieve disabled: " + err.Error()}, suppressNotice: true}

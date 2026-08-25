@@ -539,7 +539,7 @@ func main() {
 			os.Exit(statusErr.ExitCode())
 		}
 		// runIndex/runOneShot already rendered their own output; just exit non-zero.
-		if errors.Is(err, errIndexFailed) || errors.Is(err, errOneShotFailed) || errors.Is(err, errAgentflowTaskFailed) {
+		if errors.Is(err, errIndexFailed) || errors.Is(err, errOneShotFailed) || errors.Is(err, errAgentflowTaskFailed) || errors.Is(err, errSourceFailed) {
 			os.Exit(1)
 		}
 		_, _ = fmt.Fprintf(os.Stderr, "golem: %v\n", err)
@@ -604,8 +604,10 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 			return runIndex(context.Background(), args[1:], stdout, stderr)
 		case "models":
 			return runModels(context.Background(), args[1:], stdout, stderr)
+		case "source":
+			return runSource(context.Background(), args[1:], stdin, stdout, stderr)
 		default:
-			return fmt.Errorf("unknown command %q (did you mean \"index\" or \"models\"?)", args[0])
+			return fmt.Errorf("unknown command %q (did you mean \"index\", \"models\", or \"source\"?)", args[0])
 		}
 	}
 

@@ -5,18 +5,12 @@ package rag
 import (
 	"errors"
 	"os"
+	"runtime"
 )
 
-func openManagedFile(path string) (*os.File, error) {
-	// Non-Unix platforms cannot request a nonblocking open. Pre-stat rejects
-	// special files early; readManagedRegularFile still verifies the opened
-	// handle because replacement between Stat and Open cannot be prevented here.
-	info, err := os.Stat(path)
-	if err != nil {
-		return nil, err
+func openManagedFileAt(root *os.Root, name string) (*os.File, error) {
+	if runtime.GOOS == "js" || runtime.GOOS == "plan9" {
+		return nil, errors.New("secure managed file open is unsupported on this platform")
 	}
-	if !info.Mode().IsRegular() {
-		return nil, errors.New("not a regular file")
-	}
-	return os.Open(path)
+	return root.Open(name)
 }

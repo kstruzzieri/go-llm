@@ -13,6 +13,18 @@
 // serve the agent model, startup scans 127.0.0.1:8080-8090 for it
 // (-no-probe disables the scan).
 //
+// The source subcommand manages ad-hoc documents in the workspace index over
+// the managed-document registry:
+//
+//	golem source add <path>              ingest a local UTF-8 file
+//	golem source add -text -name <name>  ingest stdin as a named text document
+//	golem source list [-json]            list managed sources with state and freshness
+//	golem source rm <id>                 delete a managed source and its chunks
+//	golem source reindex <id>            re-read and re-embed a managed source
+//
+// Mutations acquire the workspace index writer lease and publish a new
+// immutable index generation; the active index is never modified in place.
+//
 // Planning mode (-goal "<text>"): a local model authors an AgentFlow plan for
 // the goal using read-only tools, Golem compiles and locks it via agentflow
 // lock-plan, then stops. The locked .agent/plan.lock.json is the durable output;
