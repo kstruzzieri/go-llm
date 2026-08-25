@@ -40,8 +40,7 @@ func TestMain(m *testing.M) {
 //	["orphanleave", <pidfile>]     -> spawn a same-group justsleep grandchild with
 //	                                  detached stdio (pipes released), write its PID
 //	                                  to <pidfile>, exit 0 immediately
-//	["holdpipe"]                   -> spawn a same-group justsleep grandchild that
-//	                                  INHERITS this stdout pipe, exit 0 immediately
+//	["holdpipeescape", <pidfile>]  -> same, but the pipe holder escapes via setsid
 func helperMain(args []string) int {
 	if len(args) == 0 {
 		return 0
@@ -137,20 +136,26 @@ func helperMain(args []string) int {
 			return 1
 		}
 		return 0
-	case "holdpipe":
-		// Held-pipe fixture: spawn a same-group child that INHERITS this
-		// process's stdout pipe and sleeps 30s, then exit 0 immediately. The
-		// write end stays open past leader exit, so only WaitDelay unblocks
-		// the parent's Wait.
+	case "holdpipeescape":
+		if len(args) < 2 {
+			_, _ = fmt.Fprintln(os.Stderr, "holdpipeescape: missing pidfile argument")
+			return 1
+		}
 		self, err := os.Executable()
 		if err != nil {
-			_, _ = fmt.Fprintln(os.Stderr, "holdpipe: os.Executable:", err)
+			_, _ = fmt.Fprintln(os.Stderr, "holdpipeescape: os.Executable:", err)
 			return 1
 		}
 		child := exec.Command(self, "__golem_exec_helper__", "justsleep")
-		child.Stdout = os.Stdout // hold the leader's stdout pipe open
+		child.Stdout = os.Stdout
+		child.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 		if err := child.Start(); err != nil {
-			_, _ = fmt.Fprintln(os.Stderr, "holdpipe: child.Start:", err)
+			_, _ = fmt.Fprintln(os.Stderr, "holdpipeescape: child.Start:", err)
+			return 1
+		}
+		if err := os.WriteFile(args[1], []byte(strconv.Itoa(child.Process.Pid)), 0o600); err != nil {
+			_, _ = fmt.Fprintln(os.Stderr, "holdpipeescape: WriteFile:", err)
+			_ = child.Process.Kill()
 			return 1
 		}
 		return 0

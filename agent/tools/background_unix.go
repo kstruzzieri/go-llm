@@ -1,11 +1,13 @@
-//go:build unix
+//go:build linux || darwin
 
 package tools
 
 import (
 	"errors"
+	"fmt"
 	"io"
 	"os/exec"
+	"sync"
 	"syscall"
 )
 
@@ -32,49 +34,67 @@ func (unixStarter) Start(spec execSpec, stdout, stderr io.Writer) (backgroundPro
 	if err := cmd.Start(); err != nil {
 		return nil, err
 	}
+	observer, err := newProcessExitObserver(cmd.Process.Pid)
+	if err != nil {
+		// The child is still ours and unreaped, so this group signal cannot
+		// target a reused PGID. Fail closed when safe exit observation is not
+		// available on a shipped Unix platform.
+		_ = signalProcessGroup(cmd.Process.Pid)
+		_ = cmd.Wait()
+		return nil, fmt.Errorf("observe background process exit: %w", err)
+	}
 	// Remember the PGID now (== child PID because Setpgid with Pgid 0).
-	// cmd.Process is never nil after a successful Start; the real constraint
-	// is never re-deriving the group via Getpgid on a pid that may since have
-	// died or been reaped.
-	return &unixProcess{cmd: cmd, pgid: cmd.Process.Pid}, nil
+	return &unixProcess{
+		cmd:      cmd,
+		pgid:     cmd.Process.Pid,
+		observer: observer,
+		group:    processGroupGuard{pgid: cmd.Process.Pid},
+	}, nil
 }
 
 type unixProcess struct {
-	cmd  *exec.Cmd
-	pgid int
+	cmd      *exec.Cmd
+	pgid     int
+	observer processExitObserver
+	group    processGroupGuard
 }
 
 func (p *unixProcess) PID() int { return p.pgid }
 
-// Wait blocks for the direct child, then applies the managed-process-group
-// containment policy: best-effort SIGKILL of the remembered process group
-// reaps residual same-group descendants before completion is reported,
-// without rewriting how the leader's own exit is reported.
-func (p *unixProcess) Wait() (int, error) {
+// Wait observes the direct child's exit without reaping it, closes the group
+// signal gate with one residual SIGKILL while the child still pins the PGID,
+// and only then calls cmd.Wait. A concurrent or later Kill therefore either
+// linearizes before reap or becomes a no-op; it can never signal a reused ID.
+func (p *unixProcess) Wait() (int, bool, error) {
+	observeErr := p.observer.Wait()
+	_ = p.group.close(false)
+	_ = p.observer.Close()
 	waitErr := p.cmd.Wait()
-	// Residual-group cleanup, best-effort. An accepted PGID-reuse limitation
-	// of that policy: the direct child was just reaped, so if no descendant
-	// survives the pgid may already be recycled to an unrelated same-uid
-	// group; the window between reap and this kill is microseconds.
-	_ = syscall.Kill(-p.pgid, syscall.SIGKILL)
 	if p.cmd.ProcessState == nil {
 		// ECHILD-class wait failure: no exit status exists. Not reachable in
 		// tests without faking wait(2); the guard is documented instead.
-		return -1, waitErr
+		if observeErr != nil {
+			return -1, false, fmt.Errorf("observe background process exit: %w", observeErr)
+		}
+		return -1, false, waitErr
 	}
 	code := p.cmd.ProcessState.ExitCode() // killed-by-signal leader reports -1
+	managerKilled := p.group.wasManagerKill(code)
+	if observeErr != nil {
+		return code, managerKilled, fmt.Errorf("observe background process exit: %w", observeErr)
+	}
 	if waitErr != nil {
 		var ee *exec.ExitError
 		if errors.As(waitErr, &ee) {
 			// Normal process exit (non-zero or signal): real code, nil error.
-			return code, nil
+			return code, managerKilled, nil
 		}
 		// Preserve other wait errors, incl. exec.ErrWaitDelay — there the
 		// process HAS exited and ProcessState is valid, so the real code
 		// accompanies the error.
-		return code, waitErr
+		return code, managerKilled, waitErr
 	}
-	return code, nil
+	return code, managerKilled, nil
 }
 
 // Kill SIGKILLs the whole managed group. Idempotent; never waits.
@@ -89,15 +109,46 @@ func (p *unixProcess) Wait() (int, error) {
 // requires the user to have approved a sudo-style command) is live but
 // unsignalable, so EPERM then masks it and the process lingers until it
 // exits on its own.
-//
-// An accepted PGID-reuse limitation of that policy: once the last member is
-// reaped the pgid can be recycled; a late Kill could then signal an
-// unrelated same-uid group. The manager should prefer not to Kill after
-// Wait has returned, which shrinks the window to microseconds.
 func (p *unixProcess) Kill() error {
-	err := syscall.Kill(-p.pgid, syscall.SIGKILL)
+	return p.group.close(true)
+}
+
+type processGroupGuard struct {
+	mu              sync.Mutex
+	pgid            int
+	closed          bool
+	managerSignaled bool
+}
+
+func (g *processGroupGuard) close(manager bool) error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.closed {
+		return nil
+	}
+	err := signalProcessGroup(g.pgid)
+	if err == nil {
+		g.closed = true
+		g.managerSignaled = manager
+	}
+	return err
+}
+
+func (g *processGroupGuard) wasManagerKill(exitCode int) bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.managerSignaled && exitCode == -1
+}
+
+func signalProcessGroup(pgid int) error {
+	err := syscall.Kill(-pgid, syscall.SIGKILL)
 	if errors.Is(err, syscall.ESRCH) || errors.Is(err, syscall.EPERM) {
 		return nil
 	}
 	return err
+}
+
+type processExitObserver interface {
+	Wait() error
+	Close() error
 }

@@ -34,12 +34,12 @@ cursors; `stop_command` kills the job and reports its final state.
   directly with no model call and no approval prompt. Jobs survive
   `/new`, `/clear`, and `/resume` while session approval grants still
   clear.
-- **Unix managed-process-group guarantee.** Every job is the leader of its
+- **Linux/macOS managed-process-group guarantee.** Every job is the leader of its
   own process group; stop and shutdown SIGKILL the whole group and the
   REPL does not return before killed groups are reaped, and when the
   command exits on its own, background processes it left running in the
   group are also killed. Descendants that escape the managed group (e.g.
-  via setsid) are unsupported. Non-Unix platforms fail closed:
+  via setsid) are unsupported. Other platforms fail closed:
   `start_command` reports exec unsupported.
 
 ### Added — golem,rag: managed source lifecycle in the CLI (#349)

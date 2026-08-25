@@ -24,7 +24,8 @@ type backgroundProcess interface {
 	//     with an output caveat, never as infra failure.
 	//   - any other non-nil err (exitCode -1): infra failure.
 	// Residual same-group cleanup (the managed-process-group containment
-	// policy) happens inside, before return.
-	Wait() (exitCode int, err error)
+	// policy) happens before the leader is reaped. managerKilled reports that
+	// a manager SIGKILL attempt coincided with a signal-killed leader.
+	Wait() (exitCode int, managerKilled bool, err error)
 	Kill() error // SIGKILL the whole managed group; idempotent; never blocks on Wait
 }

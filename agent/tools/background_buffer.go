@@ -56,7 +56,8 @@ func (r *tailRing) Write(p []byte) (int, error) {
 
 // Read returns a fresh copy of stream bytes. With cursor == nil it is the
 // initial newest-tail mode: the NEWEST min(maxBytes, retained) bytes, next =
-// end, dropped = 0. With a cursor it returns at most maxBytes bytes starting
+// end, dropped = every byte already evicted before the retained floor. With a
+// cursor it returns at most maxBytes bytes starting
 // at that absolute offset; a cursor behind floor is clamped to floor with the
 // evicted gap reported in dropped, and a cursor at or past end returns no
 // bytes with next = end. next is always the position after the last returned
@@ -75,7 +76,7 @@ func (r *tailRing) Read(cursor *uint64, maxBytes int) (data []byte, next uint64,
 		}
 		data = make([]byte, n)
 		copy(data, r.buf[len(r.buf)-n:])
-		return data, r.end, 0
+		return data, r.end, r.floor
 	}
 	c := *cursor
 	if c > r.end {

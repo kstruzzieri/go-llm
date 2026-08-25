@@ -48,11 +48,14 @@ type fakeProc struct {
 	waitErr      error
 	killReleases bool
 
-	mu           sync.Mutex
-	kills        int
-	waitReturned bool
-	released     chan struct{}
-	releaseOnce  sync.Once
+	mu            sync.Mutex
+	kills         int
+	waitReturned  bool
+	managerKilled bool
+	released      chan struct{}
+	releaseOnce   sync.Once
+	waitObserved  chan struct{}
+	waitGate      <-chan struct{}
 }
 
 func newFakeProc(pid int) *fakeProc {
@@ -61,18 +64,29 @@ func newFakeProc(pid int) *fakeProc {
 
 func (p *fakeProc) PID() int { return p.pid }
 
-func (p *fakeProc) Wait() (int, error) {
+func (p *fakeProc) Wait() (int, bool, error) {
 	<-p.released
 	p.mu.Lock()
 	p.waitReturned = true
-	code, err := p.code, p.waitErr
+	code, managerKilled, err := p.code, p.managerKilled, p.waitErr
+	observed, gate := p.waitObserved, p.waitGate
 	p.mu.Unlock()
-	return code, err
+	if observed != nil {
+		close(observed)
+	}
+	if gate != nil {
+		<-gate
+	}
+	return code, managerKilled, err
 }
 
 func (p *fakeProc) Kill() error {
 	p.mu.Lock()
 	p.kills++
+	if !p.waitReturned {
+		p.code = -1
+		p.managerKilled = true
+	}
 	rel := p.killReleases
 	p.mu.Unlock()
 	if rel {
@@ -794,6 +808,36 @@ func TestBackgroundManagerStopAlreadyFinished(t *testing.T) {
 	}
 	if proc.killCount() != 0 {
 		t.Errorf("kill count = %d for already-finished job, want 0", proc.killCount())
+	}
+}
+
+func TestBackgroundManagerLateStopDoesNotRewriteNaturalExit(t *testing.T) {
+	proc := newFakeProc(1)
+	proc.killReleases = false
+	proc.waitObserved = make(chan struct{})
+	gate := make(chan struct{})
+	proc.waitGate = gate
+	m := newBackgroundManager(starterOf(proc), &countingRandom{})
+	t.Cleanup(m.Shutdown)
+
+	st, err := m.start(context.Background(), bgSpec(), "/w")
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	done := jobDoneChan(t, m, st.Handle)
+	proc.release()
+	<-proc.waitObserved // leader exited; manager publication is still gated
+
+	expired, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := m.Stop(expired, st.Handle); !errors.Is(err, context.Canceled) {
+		t.Fatalf("late Stop = %v, want context.Canceled while publication is gated", err)
+	}
+	close(gate)
+	<-done
+	final, ok := m.status(st.Handle)
+	if !ok || final.State != backgroundStateExited || !final.ExitKnown || final.ExitCode != 0 {
+		t.Errorf("final = (%+v, %v), want the leader's natural exited/0/known result", final, ok)
 	}
 }
 

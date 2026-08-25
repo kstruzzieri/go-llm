@@ -222,7 +222,7 @@ func (m *BackgroundManager) start(ctx context.Context, spec execSpec, cwdDisplay
 		// survives, then undo the reservation (which releases startWG and
 		// with it any Shutdown blocked on this start).
 		_ = proc.Kill()
-		_, _ = proc.Wait()
+		_, _, _ = proc.Wait()
 		m.releaseReservation(handle)
 		if closed {
 			return JobStatus{}, errBackgroundShutDown
@@ -243,11 +243,11 @@ func (m *BackgroundManager) start(ctx context.Context, spec execSpec, cwdDisplay
 // active slot, and applies completed-job retention — all before done closes.
 // Nothing that only presents or notifies may ever be added before the close.
 func (m *BackgroundManager) reap(job *backgroundJob) {
-	code, waitErr := job.proc.Wait()
+	code, managerKilled, waitErr := job.proc.Wait()
 
 	m.mu.Lock()
 	switch {
-	case job.killRequested:
+	case managerKilled:
 		// Manager-initiated kill (Stop or Shutdown).
 		job.state = backgroundStateKilled
 		job.exitCode = -1
@@ -422,9 +422,9 @@ func (m *BackgroundManager) Shutdown() {
 		var toKill []*backgroundJob
 		for _, job := range m.jobs {
 			jobs = append(jobs, job)
-			// Kill only jobs whose Wait has not returned (running is cleared
-			// in the same critical section that records the exit), and only
-			// if no Stop already issued the kill.
+			// Kill only jobs whose completion is not published, and only if no
+			// Stop already issued the kill. The process guard makes a call that
+			// races completed Wait cleanup a no-op.
 			if job.running && !job.killRequested {
 				job.killRequested = true
 				toKill = append(toKill, job)

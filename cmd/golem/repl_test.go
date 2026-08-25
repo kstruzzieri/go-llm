@@ -1685,6 +1685,14 @@ func TestJobsEmptyListUsageAndUnknownHandle(t *testing.T) {
 	}
 }
 
+func TestRenderJobStopResultCanceled(t *testing.T) {
+	var out strings.Builder
+	renderJobStopResult(&out, tools.JobStatus{Handle: "bg-1", State: "running"}, context.Canceled)
+	if got, want := out.String(), "stop requested for bg-1; still reaping\n"; got != want {
+		t.Errorf("renderJobStopResult(canceled) = %q, want %q", got, want)
+	}
+}
+
 func TestRenderJobLineNeutralizesTerminalControls(t *testing.T) {
 	// Every listed control class: newline/CR (C0), ESC, C1 CSI U+009B, bidi
 	// controls. The argv goes through the dedicated one-line renderer; raw

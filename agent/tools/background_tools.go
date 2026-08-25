@@ -173,10 +173,14 @@ func (t *StartCommand) Invoke(ctx context.Context, raw json.RawMessage) (agent.T
 // Presentation only, never parsed.
 func renderStartPreview(p execPending, originalArgv0 string) string {
 	var b strings.Builder
+	cwd := bgCwdDisplay(p.dirLabel)
+	if p.dirLabel != "" {
+		cwd = quoteArgForPreview(cwd)
+	}
 	b.WriteString("start background command:\n")
 	fmt.Fprintf(&b, "  argv:     %s\n", renderArgvForPreview(p.argv))
-	fmt.Fprintf(&b, "  exe:      %s -> %s\n", originalArgv0, p.path)
-	fmt.Fprintf(&b, "  cwd:      %s\n", bgCwdDisplay(p.dirLabel))
+	fmt.Fprintf(&b, "  exe:      %s -> %s\n", quoteArgForPreview(originalArgv0), quoteArgForPreview(p.path))
+	fmt.Fprintf(&b, "  cwd:      %s\n", cwd)
 	b.WriteString("  lifetime: manager-owned; runs until exit, approved stop, or session shutdown\n")
 	parts := make([]string, len(p.envNames))
 	for i, n := range p.envNames {
@@ -237,7 +241,8 @@ func (t *CommandStatus) Invoke(_ context.Context, raw json.RawMessage) (agent.To
 	if !ok {
 		return errResult(errUnknownJobHandle(args.Handle).Error()), nil
 	}
-	return agent.ToolResult{Content: renderStatusResult(st)}, nil
+	content, truncated := renderStatusResult(st)
+	return agent.ToolResult{Content: content, Truncated: truncated}, nil
 }
 
 // CommandTail reads one output stream of a background job through its capped
@@ -413,22 +418,30 @@ func renderStartResult(st JobStatus) string {
 
 // renderStatusResult renders the full snapshot. cwd is %q-quoted and argv is a
 // compact JSON array so control bytes cannot forge additional labels.
-func renderStatusResult(st JobStatus) string {
+func renderStatusResult(st JobStatus) (string, bool) {
 	argvJSON, _ := json.Marshal(st.Argv) // []string cannot fail to marshal
-	var b strings.Builder
-	fmt.Fprintf(&b, "handle: %s\n", st.Handle)
-	fmt.Fprintf(&b, "state: %s\n", st.State)
-	fmt.Fprintf(&b, "pid: %d\n", st.PID)
-	fmt.Fprintf(&b, "cwd: %q\n", st.Cwd)
-	fmt.Fprintf(&b, "argv: %s\n", argvJSON)
-	fmt.Fprintf(&b, "stdout_floor: %d\n", st.StdoutFloor)
-	fmt.Fprintf(&b, "stdout_cursor: %d\n", st.StdoutEnd)
-	fmt.Fprintf(&b, "stderr_floor: %d\n", st.StderrFloor)
-	fmt.Fprintf(&b, "stderr_cursor: %d\n", st.StderrEnd)
+	head := fmt.Sprintf("handle: %s\nstate: %s\npid: %d\n", st.Handle, st.State, st.PID)
+	tail := fmt.Sprintf("stdout_floor: %d\nstdout_cursor: %d\nstderr_floor: %d\nstderr_cursor: %d\n",
+		st.StdoutFloor, st.StdoutEnd, st.StderrFloor, st.StderrEnd)
 	if st.ExitKnown {
-		fmt.Fprintf(&b, "exit_code: %d\n", st.ExitCode)
+		tail += fmt.Sprintf("exit_code: %d\n", st.ExitCode)
 	}
-	return b.String()
+	cwd := fmt.Sprintf("%q", st.Cwd)
+	const marker = `"[truncated]"`
+	const argvMarker = `["[truncated]"]`
+	budget := bgSmallOutputCap - len(head) - len(tail) - len("cwd: \nargv: \n")
+	truncated := false
+	if len(cwd)+len(argvJSON) > budget {
+		if len(cwd)+len(argvMarker) > budget {
+			cwd = marker
+			truncated = true
+		}
+		if len(cwd)+len(argvJSON) > budget {
+			argvJSON = []byte(argvMarker)
+			truncated = true
+		}
+	}
+	return head + "cwd: " + cwd + "\nargv: " + string(argvJSON) + "\n" + tail, truncated
 }
 
 // renderTailResult renders the tail labels followed by the raw stream bytes

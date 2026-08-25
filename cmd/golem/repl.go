@@ -534,26 +534,30 @@ func handleJobs(ctx context.Context, out io.Writer, sess *replSession, fields []
 		stopCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 		defer cancel()
 		st, err := sess.bgManager.Stop(stopCtx, fields[2])
-		if err != nil {
-			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-				// Early return by contract: the kill is already issued; the
-				// manager finishes reaping on its own.
-				_, _ = fmt.Fprintf(out, "stop requested for %s; still reaping\n", st.Handle)
-				return
-			}
-			_, _ = fmt.Fprintln(out, err)
-			return
-		}
-		switch {
-		case st.State == "killed":
-			_, _ = fmt.Fprintf(out, "stopped %s (killed)\n", st.Handle)
-		case st.ExitKnown:
-			_, _ = fmt.Fprintf(out, "already finished: %s (exit %d)\n", st.Handle, st.ExitCode)
-		default:
-			_, _ = fmt.Fprintf(out, "already finished: %s (%s)\n", st.Handle, st.State)
-		}
+		renderJobStopResult(out, st, err)
 	default:
 		_, _ = fmt.Fprintln(out, "usage: /jobs [stop <handle>]")
+	}
+}
+
+func renderJobStopResult(out io.Writer, st tools.JobStatus, err error) {
+	if err != nil {
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			// Early return by contract: the kill is already issued; the manager
+			// finishes reaping on its own.
+			_, _ = fmt.Fprintf(out, "stop requested for %s; still reaping\n", st.Handle)
+			return
+		}
+		_, _ = fmt.Fprintln(out, err)
+		return
+	}
+	switch {
+	case st.State == "killed":
+		_, _ = fmt.Fprintf(out, "stopped %s (killed)\n", st.Handle)
+	case st.ExitKnown:
+		_, _ = fmt.Fprintf(out, "already finished: %s (exit %d)\n", st.Handle, st.ExitCode)
+	default:
+		_, _ = fmt.Fprintf(out, "already finished: %s (%s)\n", st.Handle, st.State)
 	}
 }
 

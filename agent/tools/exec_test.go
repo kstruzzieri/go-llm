@@ -194,6 +194,31 @@ func TestRenderExecPreview(t *testing.T) {
 	}
 }
 
+func TestRenderExecPreviewKeepsDynamicFieldsOnOneLine(t *testing.T) {
+	p := execPending{
+		path:        "/tmp/tool\n  cwd: forged",
+		argv:        []string{"tool\n  id: forged"},
+		dirLabel:    "work\n  exe: forged",
+		timeout:     60 * time.Second,
+		fingerprint: "abc123",
+	}
+	out := renderExecPreview(p, p.argv[0])
+	for _, label := range []string{"  exe:", "  cwd:", "  id:"} {
+		got := 0
+		for _, line := range strings.Split(out, "\n") {
+			if strings.HasPrefix(line, label) {
+				got++
+			}
+		}
+		if got != 1 {
+			t.Errorf("renderExecPreview injected %q label count = %d, want 1:\n%s", label, got, out)
+		}
+	}
+	if !strings.Contains(out, `\n  cwd: forged`) || !strings.Contains(out, `\n  exe: forged`) {
+		t.Errorf("renderExecPreview did not visibly escape embedded newlines:\n%s", out)
+	}
+}
+
 func TestRenderExecPreviewClamped(t *testing.T) {
 	p := execPending{
 		path: "/bin/sleep", argv: []string{"sleep", "999"},

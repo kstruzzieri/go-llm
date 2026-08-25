@@ -140,8 +140,8 @@ func TestTailRingWriteLargerThanCapacity(t *testing.T) {
 	if want := patSlice(12, 8); !bytes.Equal(data, want) {
 		t.Fatalf("data = %v, want newest 8 bytes %v", data, want)
 	}
-	if next != 20 || dropped != 0 {
-		t.Fatalf("(next, dropped) = (%d, %d), want (20, 0)", next, dropped)
+	if next != 20 || dropped != 12 {
+		t.Fatalf("(next, dropped) = (%d, %d), want (20, 12)", next, dropped)
 	}
 }
 

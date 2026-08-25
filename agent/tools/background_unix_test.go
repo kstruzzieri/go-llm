@@ -1,4 +1,4 @@
-//go:build unix
+//go:build linux || darwin
 
 package tools
 
@@ -66,7 +66,7 @@ func TestBackgroundProcessNilStdinEOF(t *testing.T) {
 	if proc.PID() <= 0 {
 		t.Errorf("PID = %d, want > 0", proc.PID())
 	}
-	code, err := proc.Wait()
+	code, _, err := proc.Wait()
 	if err != nil || code != 0 {
 		t.Fatalf("Wait = (%d, %v), want (0, nil)", code, err)
 	}
@@ -80,7 +80,7 @@ func TestBackgroundProcessNilStdinEOF(t *testing.T) {
 // into their own writers without crosstalk.
 func TestBackgroundProcessSeparateStreams(t *testing.T) {
 	proc, outRing, errRing := startBackground(t, helperSpec(t, "bothstreams"))
-	code, err := proc.Wait()
+	code, _, err := proc.Wait()
 	if err != nil || code != 0 {
 		t.Fatalf("Wait = (%d, %v), want (0, nil)", code, err)
 	}
@@ -98,7 +98,7 @@ func TestBackgroundProcessSeparateStreams(t *testing.T) {
 // completion (real code, nil error), never an infra error.
 func TestBackgroundProcessNonZeroExit(t *testing.T) {
 	proc, _, _ := startBackground(t, helperSpec(t, "fail"))
-	code, err := proc.Wait()
+	code, _, err := proc.Wait()
 	if err != nil {
 		t.Fatalf("non-zero exit must not be an error: %v", err)
 	}
@@ -123,7 +123,7 @@ func TestBackgroundProcessGroupAssignmentAndKill(t *testing.T) {
 	if err := proc.Kill(); err != nil {
 		t.Fatalf("Kill: %v", err)
 	}
-	code, err := proc.Wait()
+	code, _, err := proc.Wait()
 	if err != nil {
 		t.Fatalf("Wait after Kill: %v", err)
 	}
@@ -151,7 +151,7 @@ func TestBackgroundProcessGroupKillReapsChild(t *testing.T) {
 	if !waitProcessGone(grandchildPID) {
 		t.Errorf("grandchild pid %d still alive after group kill", grandchildPID)
 	}
-	if code, err := proc.Wait(); err != nil || code != -1 {
+	if code, _, err := proc.Wait(); err != nil || code != -1 {
 		t.Errorf("Wait = (%d, %v), want (-1, nil)", code, err)
 	}
 }
@@ -181,7 +181,7 @@ func TestBackgroundProcessKillZombieWindow(t *testing.T) {
 	if err := proc.Kill(); err != nil {
 		t.Fatalf("Kill in zombie window = %v, want nil", err)
 	}
-	if code, err := proc.Wait(); err != nil || code != -1 {
+	if code, _, err := proc.Wait(); err != nil || code != -1 {
 		t.Errorf("Wait = (%d, %v), want (-1, nil)", code, err)
 	}
 }
@@ -198,7 +198,7 @@ func TestBackgroundProcessKillConcurrentWithWait(t *testing.T) {
 	}
 	done := make(chan waitResult, 1)
 	go func() {
-		code, err := proc.Wait()
+		code, _, err := proc.Wait()
 		done <- waitResult{code, err}
 	}()
 	if err := proc.Kill(); err != nil {
@@ -228,7 +228,7 @@ func TestBackgroundProcessNaturalLeaderExitResidualCleanup(t *testing.T) {
 	// by Wait's internal residual cleanup alone.
 	childPID := waitForPidfile(t, pidfile)
 	t.Cleanup(func() { _ = syscall.Kill(childPID, syscall.SIGKILL) })
-	code, err := proc.Wait()
+	code, _, err := proc.Wait()
 	if err != nil || code != 0 {
 		t.Fatalf("Wait = (%d, %v), want (0, nil) — natural exit must not be rewritten", code, err)
 	}
@@ -237,14 +237,20 @@ func TestBackgroundProcessNaturalLeaderExitResidualCleanup(t *testing.T) {
 	}
 }
 
-// TestBackgroundProcessHeldPipeWaitDelay proves WaitDelay bounds Wait when a
-// same-group descendant (alive for 30s) holds the leader's stdout pipe open:
-// Wait must return within 10s with the leader's real exit code and
-// exec.ErrWaitDelay preserved.
-func TestBackgroundProcessHeldPipeWaitDelay(t *testing.T) {
-	proc, _, _ := startBackground(t, helperSpec(t, "holdpipe"))
-	// Registered immediately, but relied on only after a failed assertion.
+// TestBackgroundProcessHeldPipeCleanedBeforeReap proves natural-exit cleanup
+// signals the still-pinned group before cmd.Wait reaps the leader. Killing the
+// same-group pipe holder lets Wait return without reaching its 2s WaitDelay.
+func TestBackgroundProcessHeldPipeCleanedBeforeReap(t *testing.T) {
+	pidfile := t.TempDir() + "/holder.pid"
+	proc, _, _ := startBackground(t, execSpec{
+		Path: "/bin/sh",
+		Argv: []string{"/bin/sh", "-c", `sleep 30 & printf '%s' "$!" > "$1"`, "holdpipe", pidfile},
+		Dir:  t.TempDir(),
+		Env:  []string{"PATH=/usr/bin:/bin"},
+	})
 	t.Cleanup(func() { _ = proc.Kill() })
+	holderPID := waitForPidfile(t, pidfile)
+	t.Cleanup(func() { _ = syscall.Kill(holderPID, syscall.SIGKILL) })
 
 	type waitResult struct {
 		code int
@@ -252,18 +258,33 @@ func TestBackgroundProcessHeldPipeWaitDelay(t *testing.T) {
 	}
 	done := make(chan waitResult, 1)
 	go func() {
-		code, err := proc.Wait()
+		code, _, err := proc.Wait()
 		done <- waitResult{code, err}
 	}()
 	select {
 	case r := <-done:
-		if !errors.Is(r.err, exec.ErrWaitDelay) {
-			t.Errorf("Wait err = %v, want exec.ErrWaitDelay preserved", r.err)
+		if r.err != nil {
+			t.Errorf("Wait err = %v, want nil after pre-reap group cleanup", r.err)
 		}
 		if r.code != 0 {
 			t.Errorf("Wait code = %d, want 0 (leader exited cleanly)", r.code)
 		}
-	case <-time.After(10 * time.Second):
-		t.Fatal("Wait did not return within 10s (WaitDelay not honored)")
+	case <-time.After(execWaitDelay / 2):
+		t.Fatal("Wait reached the held-pipe delay; residual cleanup happened after reap")
+	}
+}
+
+func TestBackgroundProcessEscapedPipeStillHonorsWaitDelay(t *testing.T) {
+	pidfile := t.TempDir() + "/escaped.pid"
+	proc, _, _ := startBackground(t, helperSpec(t, "holdpipeescape", pidfile))
+	escapedPID := waitForPidfile(t, pidfile)
+	t.Cleanup(func() { _ = syscall.Kill(escapedPID, syscall.SIGKILL) })
+
+	code, _, err := proc.Wait()
+	if !errors.Is(err, exec.ErrWaitDelay) {
+		t.Errorf("Wait err = %v, want exec.ErrWaitDelay for an escaped pipe holder", err)
+	}
+	if code != 0 {
+		t.Errorf("Wait code = %d, want 0 (leader exited cleanly)", code)
 	}
 }

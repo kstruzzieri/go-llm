@@ -14,6 +14,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"github.com/kstruzzieri/go-llm/agent"
 )
@@ -36,7 +37,10 @@ const (
 // Unexported: the key is opaque to consumers.
 const execApprovalKeyPrefix = "exec:v2:"
 
-var defaultExecEnvAllowlist = []string{"PATH", "HOME", "LANG", "USER", "TMPDIR"}
+var (
+	defaultExecEnvAllowlist = []string{"PATH", "HOME", "LANG", "USER", "TMPDIR"}
+	errExecUnsupported      = errors.New("exec unsupported on this platform")
+)
 
 type runCommandArgs struct {
 	Argv           []string `json:"argv"`
@@ -469,17 +473,17 @@ func fmtTimeout(d time.Duration) string {
 	return fmt.Sprintf("%ds", int(d.Seconds()))
 }
 
-// quoteArgForPreview returns a quoted form of arg when it is empty or contains any
-// whitespace character (space, tab, newline), so an approval reviewer can see exact
-// argument boundaries. Simple arguments are returned bare.
+// quoteArgForPreview returns a quoted form of arg when it is empty or contains
+// whitespace or a non-graphic rune, so every dynamic approval value stays on
+// one visible line with exact argument boundaries. Simple arguments stay bare.
 func quoteArgForPreview(arg string) string {
-	for _, r := range arg {
-		if r == ' ' || r == '\t' || r == '\n' || r == '\r' {
-			return fmt.Sprintf("%q", arg)
-		}
-	}
 	if arg == "" {
 		return `""`
+	}
+	for _, r := range arg {
+		if unicode.IsSpace(r) || !unicode.IsGraphic(r) {
+			return strconv.QuoteToGraphic(arg)
+		}
 	}
 	return arg
 }
@@ -504,7 +508,10 @@ func renderExecPreview(p execPending, originalArgv0 string) string {
 	}
 	b.WriteString("run command:\n")
 	fmt.Fprintf(&b, "  argv:    %s\n", renderArgvForPreview(p.argv))
-	fmt.Fprintf(&b, "  exe:     %s -> %s\n", originalArgv0, p.path)
+	fmt.Fprintf(&b, "  exe:     %s -> %s\n", quoteArgForPreview(originalArgv0), quoteArgForPreview(p.path))
+	if p.dirLabel != "" {
+		dirDisplay = quoteArgForPreview(dirDisplay)
+	}
 	fmt.Fprintf(&b, "  cwd:     %s\n", dirDisplay)
 	if p.clamped {
 		fmt.Fprintf(&b, "  timeout: %s (requested %ds, clamped)\n", fmtTimeout(p.timeout), p.requestedTO)

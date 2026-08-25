@@ -263,6 +263,75 @@ func TestStartCommandPlanPreview(t *testing.T) {
 	}
 }
 
+func TestRenderStartPreviewKeepsDynamicFieldsOnOneLine(t *testing.T) {
+	p := execPending{
+		path:        "/tmp/tool\n  cwd: forged",
+		argv:        []string{"tool\n  id: forged"},
+		dirLabel:    "work\n  exe: forged",
+		fingerprint: "abc123",
+	}
+	out := renderStartPreview(p, p.argv[0])
+	for _, label := range []string{"  exe:", "  cwd:", "  id:"} {
+		got := 0
+		for _, line := range strings.Split(out, "\n") {
+			if strings.HasPrefix(line, label) {
+				got++
+			}
+		}
+		if got != 1 {
+			t.Errorf("renderStartPreview injected %q label count = %d, want 1:\n%s", label, got, out)
+		}
+	}
+	if !strings.Contains(out, `\n  cwd: forged`) || !strings.Contains(out, `\n  exe: forged`) {
+		t.Errorf("renderStartPreview did not visibly escape embedded newlines:\n%s", out)
+	}
+}
+
+func TestCommandPlansEscapeNewlineBearingPaths(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("newline-bearing Unix path semantics")
+	}
+	root := t.TempDir()
+	dir := "work\n  exe: forged"
+	if err := os.Mkdir(filepath.Join(root, dir), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	exe := "tool\n  cwd: forged"
+	writeExecutable(t, filepath.Join(root, dir, exe), "#!/bin/sh\n")
+	ws, err := NewWorkspace(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := newBackgroundManager(starterOf(), &countingRandom{})
+	t.Cleanup(m.Shutdown)
+	raw, err := json.Marshal(startCommandArgs{Argv: []string{"./" + exe}, Dir: dir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, tool := range map[string]agent.PlanningTool{
+		"run_command":   NewRunCommand(ws, &fakeRunner{}),
+		"start_command": NewStartCommand(ws, m),
+	} {
+		t.Run(name, func(t *testing.T) {
+			plan := mustPlan(t, tool, raw)
+			for _, label := range []string{"  exe:", "  cwd:", "  id:"} {
+				count := 0
+				for _, line := range strings.Split(plan.Preview, "\n") {
+					if strings.HasPrefix(line, label) {
+						count++
+					}
+				}
+				if count != 1 {
+					t.Errorf("Plan injected %q label count = %d, want 1:\n%s", label, count, plan.Preview)
+				}
+			}
+			if !strings.Contains(plan.Preview, `\n  cwd: forged`) || !strings.Contains(plan.Preview, `\n  exe: forged`) {
+				t.Errorf("Plan did not visibly escape newline-bearing paths:\n%s", plan.Preview)
+			}
+		})
+	}
+}
+
 func TestStartCommandApprovalKeyNamespaceAndDigest(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("unix exec semantics")
@@ -647,6 +716,41 @@ func TestCommandStatusKilledRendering(t *testing.T) {
 	}
 }
 
+func TestCommandStatusBoundsDynamicMetadataBeforeDispatch(t *testing.T) {
+	long := strings.Repeat("<", bgSmallOutputCap)
+	f := newBGJobFixture(t, []string{long, long}, long)
+	f.proc.code = 7
+	f.finish(t)
+	res := mustInvoke(t, NewCommandStatus(f.m), json.RawMessage(fmt.Sprintf(`{"handle":%q}`, f.handle)))
+	if !res.Truncated {
+		t.Error("command_status omitted ToolResult.Truncated after bounding metadata")
+	}
+	if got := len(res.Content); got > bgSmallOutputCap {
+		t.Fatalf("command_status content length = %d, want <= %d", got, bgSmallOutputCap)
+	}
+	for _, label := range []string{
+		"stdout_floor:", "stdout_cursor:", "stderr_floor:", "stderr_cursor:", "exit_code: 7",
+	} {
+		if !strings.Contains(res.Content, label) {
+			t.Errorf("bounded command_status content missing %q:\n%s", label, res.Content)
+		}
+	}
+	argvLine := ""
+	for _, line := range strings.Split(res.Content, "\n") {
+		if strings.HasPrefix(line, "argv: ") {
+			argvLine = strings.TrimPrefix(line, "argv: ")
+			break
+		}
+	}
+	var argv []string
+	if err := json.Unmarshal([]byte(argvLine), &argv); err != nil {
+		t.Fatalf("bounded argv %q is not valid JSON: %v", argvLine, err)
+	}
+	if !strings.Contains(argvLine, "truncated") {
+		t.Errorf("bounded argv = %q, want an explicit truncation marker", argvLine)
+	}
+}
+
 func TestCommandStatusUnknownHandle(t *testing.T) {
 	f := newBGJobFixture(t, []string{"cmd"}, "/w")
 	cs := NewCommandStatus(f.m)
@@ -704,6 +808,19 @@ func TestCommandTailOmittedCursorIsNewestTail(t *testing.T) {
 		if !strings.Contains(res.Content, want) {
 			t.Errorf("content missing %q:\n%s", want, res.Content)
 		}
+	}
+}
+
+func TestCommandTailOmittedCursorReportsPriorEviction(t *testing.T) {
+	f := newBGJobFixture(t, []string{"cmd"}, "/w")
+	f.write(t, f.stdout, strings.Repeat("x", backgroundRingCap+100))
+	res := mustInvoke(t, NewCommandTail(f.m),
+		json.RawMessage(fmt.Sprintf(`{"handle":%q,"max_bytes":10}`, f.handle)))
+	if got := tailPayload(t, res.Content); got != strings.Repeat("x", 10) {
+		t.Errorf("newest-tail payload = %q, want newest 10 bytes", got)
+	}
+	if !strings.Contains(res.Content, "dropped_bytes: 100\n") {
+		t.Errorf("omitted-cursor tail did not report 100 evicted bytes:\n%s", res.Content)
 	}
 }
 
