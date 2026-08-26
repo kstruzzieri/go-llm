@@ -20,7 +20,8 @@ func (d *Document) mutate(fn func(authored *Config) error) error {
 
 // mutateCommit is mutate with an optional post-swap hook running under
 // d.mu — bookkeeping that must commit atomically with the authored swap
-// (fork raw seeds) and must NOT run on any failure path.
+// (fork raw seeds) and must NOT run on any failure path. The hook must
+// not call Document methods (d.mu is not reentrant).
 func (d *Document) mutateCommit(fn func(authored *Config) error, commit func()) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()

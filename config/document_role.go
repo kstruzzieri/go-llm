@@ -164,11 +164,11 @@ func validateConfirmDrops(confirm []string) ([]string, error) {
 // source role and overlays the new selector/capacity plus opts re-assertions.
 // Copy-by-default preserves future typed fields unless a later contract
 // explicitly gives them replacement/drop semantics. The SetRoleModel
-// preservation table defines the fields cleared or re-asserted. The source's
-// projection-hidden ThinkTags/Slots
-// follow the exact drop-confirmation rule: the computed set must be
-// confirmed verbatim in opts.ConfirmDrops or the fork is refused before
-// any mutation (drop_confirmation_required; set via DropSetOf).
+// preservation table defines the fields cleared or re-asserted. The
+// source's projection-hidden ThinkTags/Slots follow the exact
+// drop-confirmation rule: the computed set must be confirmed verbatim in
+// opts.ConfirmDrops or the fork is refused before any mutation
+// (drop_confirmation_required; set via DropSetOf).
 // Eligibility semantics are AddRoleModel's (shared gate).
 func (d *Document) ForkRoleModel(sourceRole, role string, facts ModelFacts, opts ForkRoleModelOpts) error {
 	return d.mutateCommit(func(a *Config) error {

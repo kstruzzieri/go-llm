@@ -475,6 +475,14 @@ func TestForkRoleModelDropSetAllCombinations(t *testing.T) {
 	if !ok || !slices.Equal(drops, []string{"slots"}) {
 		t.Fatalf("DropSetOf = %v, %v", drops, ok)
 	}
+
+	// Wrong token, same length: slots-only source confirmed with think_tags.
+	d2 := loadTestDoc(t, body)
+	err = d2.ForkRoleModel("agent", "agent-m", forkFacts(), forkOpts("think_tags"))
+	assertDiag(t, err, CodeDropConfirmationRequired, SubjectRole, "agent")
+	if drops, ok := DropSetOf(err); !ok || !slices.Equal(drops, []string{"slots"}) {
+		t.Fatalf("DropSetOf = %v, %v", drops, ok)
+	}
 }
 
 // A re-asserted ThinkTags is not a drop; a source without think_tags/slots
