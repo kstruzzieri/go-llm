@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -315,7 +316,7 @@ func TestDiagnosticCapabilityParserDriftGuard(t *testing.T) {
 }
 
 // TestExportedErrorCodeSetMatchesContract pins the exported ErrorCode
-// constant SET to the approved 27-code vocabulary by parsing the package
+// constant SET to the approved 31-code vocabulary by parsing the package
 // source: adding, removing, renaming, or retyping an exported Code* const
 // breaks this test. (parser.ParseDir is deprecated since Go 1.22; per-file
 // ParseFile over os.ReadDir has the same semantics without SA1019.)
@@ -334,9 +335,12 @@ func TestExportedErrorCodeSetMatchesContract(t *testing.T) {
 		"eligibility_ineligible": true, "eligibility_unknown": true,
 		"selector_conflict": true, "target_exists": true,
 		"revision_conflict": true, "durability_uncertain": true,
+		"role_exists": true, "role_in_use": true,
+		"use_case_not_found":         true,
+		"drop_confirmation_required": true,
 	}
-	if len(want) != 27 {
-		t.Fatalf("test contract has %d codes, want 27", len(want))
+	if len(want) != 31 {
+		t.Fatalf("test contract has %d codes, want 31", len(want))
 	}
 
 	fset := token.NewFileSet()
@@ -405,8 +409,35 @@ func TestExportedErrorCodeSetMatchesContract(t *testing.T) {
 		sort.Strings(missing)
 		sort.Strings(extra)
 		t.Fatalf("exported ErrorCode set drifted (missing=%v extra=%v): a deliberate "+
-			"vocabulary change must update this want set, the 27 count guard above, and the spec s6 code table",
+			"vocabulary change must update this want set, the 31 count guard above, and the spec s6 code table",
 			missing, extra)
+	}
+}
+
+// DropSetOf extracts the computed drop set from a fork refusal through an
+// arbitrary wrap chain, returns a copy (never an alias), and reports false
+// for chains without a carrier.
+func TestDropSetOf(t *testing.T) {
+	base := diagWrap(CodeDropConfirmationRequired, SubjectRole, "agent",
+		fmt.Errorf("config: fork role model %q: unconfirmed drops from %q: slots, think_tags", "agent-m", "agent"))
+	err := fmt.Errorf("outer: %w", dropSetWrap([]string{"slots", "think_tags"}, base))
+
+	got, ok := DropSetOf(err)
+	if !ok || !slices.Equal(got, []string{"slots", "think_tags"}) {
+		t.Fatalf("DropSetOf = %v, %v", got, ok)
+	}
+	got[0] = "mutated"
+	again, _ := DropSetOf(err)
+	if again[0] != "slots" {
+		t.Fatal("DropSetOf result aliases the carrier")
+	}
+	// The diagnostic survives the same chain, and the message is unchanged.
+	assertDiag(t, err, CodeDropConfirmationRequired, SubjectRole, "agent")
+	if !strings.Contains(err.Error(), "unconfirmed drops from") {
+		t.Fatalf("wrapped message lost: %q", err.Error())
+	}
+	if _, ok := DropSetOf(fmt.Errorf("plain")); ok {
+		t.Fatal("false positive on plain error")
 	}
 }
 
