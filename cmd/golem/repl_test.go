@@ -935,7 +935,7 @@ func newWriteEnabledTestSession(t *testing.T, caller agent.ModelCaller, root str
 	if err != nil {
 		t.Fatalf("buildTools: %v", err)
 	}
-	writeTools, journal, err := buildWriteTools(root)
+	writeTools, journal, err := buildWriteTools(root, openTestStore(t, root))
 	if err != nil {
 		t.Fatalf("buildWriteTools: %v", err)
 	}
@@ -1763,5 +1763,215 @@ func TestRenderJobArgvTruncatesRuneSafely(t *testing.T) {
 func TestHelpListsJobs(t *testing.T) {
 	if !strings.Contains(golemHelp, "/jobs [stop <handle>]") {
 		t.Fatalf("help must document /jobs:\n%s", golemHelp)
+	}
+}
+
+func TestDispatchUndoAndCheckpoints(t *testing.T) {
+	t.Run("nil journal capability messages", func(t *testing.T) {
+		sess := &replSession{}
+		for _, line := range []string{"/undo", "/undo 3", "/checkpoints", "/checkpoints list"} {
+			var out strings.Builder
+			_, _ = dispatchSlash(context.Background(), &out, sess, line)
+			if !strings.Contains(out.String(), "writes disabled (run with -allow-write)") {
+				t.Errorf("%s -> %q, want capability message", line, out.String())
+			}
+		}
+	})
+
+	j, tools, root := newJournalFixture(t)
+	sess := &replSession{journal: j}
+
+	t.Run("undo argument validation", func(t *testing.T) {
+		for _, line := range []string{"/undo x", "/undo 0", "/undo -1", "/undo 1 2"} {
+			var out strings.Builder
+			_, _ = dispatchSlash(context.Background(), &out, sess, line)
+			if !strings.Contains(out.String(), "usage: /undo [n]") {
+				t.Errorf("%s -> %q, want usage", line, out.String())
+			}
+		}
+	})
+
+	t.Run("checkpoints argument validation", func(t *testing.T) {
+		var out strings.Builder
+		_, _ = dispatchSlash(context.Background(), &out, sess, "/checkpoints prune")
+		if !strings.Contains(out.String(), "usage: /checkpoints [list]") {
+			t.Errorf("output = %q", out.String())
+		}
+	})
+
+	t.Run("empty store", func(t *testing.T) {
+		var out strings.Builder
+		_, _ = dispatchSlash(context.Background(), &out, sess, "/checkpoints")
+		if !strings.Contains(out.String(), "no checkpoints") {
+			t.Errorf("output = %q", out.String())
+		}
+		out.Reset()
+		_, _ = dispatchSlash(context.Background(), &out, sess, "/undo")
+		if !strings.Contains(out.String(), "nothing to undo") {
+			t.Errorf("output = %q", out.String())
+		}
+	})
+
+	t.Run("list and undo a real turn", func(t *testing.T) {
+		_, _ = beginTestTurn(t, j, "hostile\ngoal\x1b[31m")
+		applyTool(t, tools, "write_file", map[string]any{"path": "a.txt", "content": "A1\n"})
+		mustSealTurn(t, j)
+
+		var out strings.Builder
+		_, _ = dispatchSlash(context.Background(), &out, sess, "/checkpoints list")
+		listing := out.String()
+		if lines := strings.Count(strings.TrimRight(listing, "\n"), "\n") + 1; lines != 1 {
+			t.Errorf("listing = %q, want exactly one row (hostile goal must not forge rows)", listing)
+		}
+		if !strings.Contains(listing, "1 file") || !strings.Contains(listing, "hostile goal[31m") {
+			t.Errorf("listing = %q", listing)
+		}
+		out.Reset()
+		_, _ = dispatchSlash(context.Background(), &out, sess, "/undo 1")
+		if _, err := os.Stat(filepath.Join(root, "a.txt")); !os.IsNotExist(err) {
+			t.Errorf("a.txt survives /undo 1: %v; output %q", err, out.String())
+		}
+	})
+}
+
+// errAfterCaller forwards to a scripted caller until failAt calls have been
+// made, then returns err from every later call.
+type errAfterCaller struct {
+	inner  *scriptCaller
+	failAt int
+	calls  int
+	err    error
+}
+
+func (c *errAfterCaller) Chat(ctx context.Context, req provider.ChatRequest, onToken func(provider.ChatResponse) error) (agent.ModelResult, error) {
+	c.calls++
+	if c.calls > c.failAt {
+		return agent.ModelResult{}, c.err
+	}
+	return c.inner.Chat(ctx, req, onToken)
+}
+
+// newCheckpointWriteSession builds a write-enabled session whose journal is
+// returned for direct assertions, with the write-class grant pre-granted so
+// scripted writes auto-approve.
+func newCheckpointWriteSession(t *testing.T, caller agent.ModelCaller, root string) (*replSession, *checkpointJournal) {
+	t.Helper()
+	writeTools, journal, err := buildWriteTools(root, openTestStore(t, root))
+	if err != nil {
+		t.Fatalf("buildWriteTools: %v", err)
+	}
+	system := buildSystemPrompt(true, false)
+	orch := agent.New(caller, agent.ContextManager{})
+	grants := newApprovalGrants()
+	grants.grant(grantScopeFiles, tools.WriteClassApprovalKey)
+	return &replSession{
+		orch:       orch,
+		runtime:    newTestRuntime(t, root, system, orch, writeTools),
+		tools:      writeTools,
+		baseSystem: system,
+		maxSteps:   16,
+		clock:      func() time.Time { return time.Unix(0, 0) },
+		journal:    journal,
+		allowWrite: true,
+		grants:     grants,
+	}, journal
+}
+
+func writeToolCallResponse(id, path, content string) agent.ModelResult {
+	args, _ := json.Marshal(map[string]string{"path": path, "content": content})
+	return agent.ModelResult{Response: provider.ChatResponse{ToolCalls: []provider.ToolCall{{
+		ID: id, Type: "function",
+		Function: provider.ToolCallFunction{Name: "write_file", Arguments: json.RawMessage(args)},
+	}}}}
+}
+
+func TestCheckpointRunOnceSealsEveryReturnPath(t *testing.T) {
+	cases := []struct {
+		name   string
+		caller func() agent.ModelCaller
+	}{
+		{"success", func() agent.ModelCaller {
+			return &scriptCaller{responses: []agent.ModelResult{
+				writeToolCallResponse("w1", "w.txt", "W\n"),
+				{Response: provider.ChatResponse{Content: "done"}},
+			}}
+		}},
+		{"provider error", func() agent.ModelCaller {
+			return &errAfterCaller{
+				inner:  &scriptCaller{responses: []agent.ModelResult{writeToolCallResponse("w1", "w.txt", "W\n")}},
+				failAt: 1, err: errors.New("provider exploded"),
+			}
+		}},
+		{"canceled", func() agent.ModelCaller {
+			return &errAfterCaller{
+				inner:  &scriptCaller{responses: []agent.ModelResult{writeToolCallResponse("w1", "w.txt", "W\n")}},
+				failAt: 1, err: context.Canceled,
+			}
+		}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			root := t.TempDir()
+			sess, j := newCheckpointWriteSession(t, c.caller(), root)
+			var out strings.Builder
+			src := &stubAnswerSource{line: "y", ok: true}
+			_, _ = runOnce(context.Background(), &out, nil, sess, "write w", src)
+
+			if got, err := os.ReadFile(filepath.Join(root, "w.txt")); err != nil || string(got) != "W\n" {
+				t.Fatalf("w.txt = %q,%v — the scripted write must land first", got, err)
+			}
+			infos, err := j.store.list(context.Background())
+			if err != nil {
+				t.Fatalf("list: %v", err)
+			}
+			if len(infos) != 1 || infos[0].state != checkpointCompleted || infos[0].files != 1 {
+				t.Fatalf("infos = %+v — runOnce must seal on the %s path", infos, c.name)
+			}
+		})
+	}
+}
+
+func TestCheckpointInterruptedUndoBlocksRunOnce(t *testing.T) {
+	root := t.TempDir()
+	caller := &scriptCaller{responses: []agent.ModelResult{
+		writeToolCallResponse("w1", "w.txt", "W\n"),
+		{Response: provider.ChatResponse{Content: "done"}},
+	}}
+	sess, j := newCheckpointWriteSession(t, caller, root)
+	src := &stubAnswerSource{line: "y", ok: true}
+
+	// Stage an interrupted undo.
+	var out strings.Builder
+	_, _ = runOnce(context.Background(), &out, nil, sess, "write w", src)
+	groups, err := j.store.newestCompleted(context.Background(), 1)
+	if err != nil || len(groups) != 1 {
+		t.Fatalf("newestCompleted: %v", err)
+	}
+	if err := j.store.markUndoing(context.Background(), []int64{groups[0].id}); err != nil {
+		t.Fatalf("markUndoing: %v", err)
+	}
+
+	callsBefore := caller.i
+	out.Reset()
+	_, rerr := runOnce(context.Background(), &out, nil, sess, "another goal", src)
+	if !errors.Is(rerr, errInterruptedUndoPending) {
+		t.Fatalf("runOnce = %v, want errInterruptedUndoPending", rerr)
+	}
+	if caller.i != callsBefore {
+		t.Fatal("the model was called despite the interrupted-undo gate")
+	}
+	if !strings.Contains(out.String(), "interrupted undo") {
+		t.Errorf("output = %q, want the gate explained", out.String())
+	}
+
+	// Resume, then a new model goal is allowed again.
+	out.Reset()
+	j.undo(context.Background(), &out, 1)
+	if !strings.Contains(out.String(), "resumed interrupted undo") {
+		t.Fatalf("resume output = %q", out.String())
+	}
+	out.Reset()
+	if _, err := runOnce(context.Background(), &out, nil, sess, "write w again", src); err != nil {
+		t.Fatalf("runOnce after resume: %v", err)
 	}
 }

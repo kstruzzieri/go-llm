@@ -251,6 +251,27 @@ func TestRunFeedbackConstructionGate(t *testing.T) {
 	}
 }
 
+func TestRunReturnsCheckpointStoreCloseError(t *testing.T) {
+	configPath, root := writeRunLifecycleConfig(t)
+	stdin, stdout, stderr := runTestFiles(t)
+	errStop := errors.New("stop after checkpoint open")
+
+	err := run([]string{"-config", configPath, "-root", root, "-allow-write", "-no-probe", "-no-cap-probe", "-no-session", "-no-memory", "-no-project-context", "-no-auto-index"}, stdin, stdout, stderr, runHooks{
+		afterCheckpointOpen: func(store *checkpointStore) error {
+			if err := store.lease.file.Close(); err != nil {
+				t.Fatalf("close checkpoint lease early: %v", err)
+			}
+			return errStop
+		},
+	})
+	if !errors.Is(err, errStop) {
+		t.Fatalf("run error = %v, want test stop", err)
+	}
+	if !errors.Is(err, os.ErrClosed) {
+		t.Fatalf("run error = %v, want checkpoint close error", err)
+	}
+}
+
 func TestRunReportsDerivedInputCeilingFromConfig(t *testing.T) {
 	configPath, root := writeRunLifecycleConfig(t)
 	stdin, stdout, stderr := runTestFiles(t)

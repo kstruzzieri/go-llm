@@ -3,8 +3,10 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -181,5 +183,58 @@ func TestEditFileRejectsNulNewString(t *testing.T) {
 	res, _ := ef.Invoke(context.Background(), raw)
 	if !res.IsError {
 		t.Fatal("NUL new_string must fail")
+	}
+}
+
+func TestEditFilePreparingJournalOrder(t *testing.T) {
+	root := t.TempDir()
+	writeSeed(t, root, "a.txt", "OLD\n")
+	pj := &prepJournal{}
+	var contentAtPrepare string
+	pj.onPrepare = func(MutationRecord) {
+		b, _ := os.ReadFile(filepath.Join(root, "a.txt"))
+		contentAtPrepare = string(b)
+	}
+	ef := NewEditFile(mustWorkspace(t, root), pj)
+
+	_, res := planThenInvoke(t, ef, map[string]any{
+		"path": "a.txt", "old_string": "OLD", "new_string": "NEW",
+	})
+	if res.IsError {
+		t.Fatalf("edit errored: %s", res.Content)
+	}
+	if contentAtPrepare != "OLD\n" {
+		t.Fatalf("content at Prepare = %q, want pre-write bytes", contentAtPrepare)
+	}
+	if want := []string{"prepare", "commit"}; !slices.Equal(pj.events, want) {
+		t.Fatalf("events = %v, want %v", pj.events, want)
+	}
+	if len(pj.prepared) != 1 || !pj.prepared[0].Existed || string(pj.prepared[0].PriorContent) != "OLD\n" {
+		t.Fatalf("prepared = %+v", pj.prepared)
+	}
+	got, _ := os.ReadFile(filepath.Join(root, "a.txt"))
+	if string(got) != "NEW\n" {
+		t.Fatalf("content = %q", got)
+	}
+}
+
+func TestEditFilePreparingJournalPrepareFailureLeavesFileUntouched(t *testing.T) {
+	root := t.TempDir()
+	writeSeed(t, root, "a.txt", "OLD\n")
+	pj := &prepJournal{prepareErr: errors.New("store down")}
+	ef := NewEditFile(mustWorkspace(t, root), pj)
+
+	_, res := planThenInvoke(t, ef, map[string]any{
+		"path": "a.txt", "old_string": "OLD", "new_string": "NEW",
+	})
+	if !res.IsError {
+		t.Fatal("want tool error when prepare fails")
+	}
+	got, _ := os.ReadFile(filepath.Join(root, "a.txt"))
+	if string(got) != "OLD\n" {
+		t.Fatalf("file = %q, want untouched", got)
+	}
+	if want := []string{"prepare"}; !slices.Equal(pj.events, want) {
+		t.Fatalf("events = %v, want %v", pj.events, want)
 	}
 }
