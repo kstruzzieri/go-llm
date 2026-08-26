@@ -193,6 +193,9 @@ func normalizeSandboxConfig(c SandboxConfig) (SandboxConfig, error) {
 	if c.CPULimit < 0 || math.IsNaN(c.CPULimit) || math.IsInf(c.CPULimit, 0) {
 		return SandboxConfig{}, fmt.Errorf("tools: sandbox CPULimit must be finite and not negative")
 	}
+	if c.CPULimit == 0 {
+		c.CPULimit = 0
+	}
 	caps := append([]string(nil), c.DropCaps...)
 	for _, name := range caps {
 		if strings.TrimSpace(name) == "" || containsControl(name) {

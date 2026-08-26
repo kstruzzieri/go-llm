@@ -132,6 +132,18 @@ func TestSandboxFingerprintCapsUseSetSemantics(t *testing.T) {
 	}
 }
 
+func TestSandboxApprovalCanonicalizesSignedZeroCPU(t *testing.T) {
+	positive := approvalForSandbox(mustNormalizeSandbox(t, SandboxConfig{
+		Runtime: "container", CPULimit: 0,
+	}))
+	negative := approvalForSandbox(mustNormalizeSandbox(t, SandboxConfig{
+		Runtime: "container", CPULimit: math.Copysign(0, -1),
+	}))
+	if negative != positive {
+		t.Fatalf("approvalForSandbox(CPULimit=-0) = %+v, want %+v", negative, positive)
+	}
+}
+
 func TestRenderSandboxLine(t *testing.T) {
 	cfg := mustNormalizeSandbox(t, SandboxConfig{
 		Runtime: "container", MemoryCapMB: 512, CPULimit: 1.5,
