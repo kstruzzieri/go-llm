@@ -420,7 +420,9 @@ func TestExportedErrorCodeSetMatchesContract(t *testing.T) {
 func TestDropSetOf(t *testing.T) {
 	base := diagWrap(CodeDropConfirmationRequired, SubjectRole, "agent",
 		fmt.Errorf("config: fork role model %q: unconfirmed drops from %q: slots, think_tags", "agent-m", "agent"))
-	err := fmt.Errorf("outer: %w", dropSetWrap([]string{"slots", "think_tags"}, base))
+	in := []string{"slots", "think_tags"}
+	err := fmt.Errorf("outer: %w", dropSetWrap(in, base))
+	in[0] = "clobbered" // wrap must have copied; slices.Equal below goes red otherwise
 
 	got, ok := DropSetOf(err)
 	if !ok || !slices.Equal(got, []string{"slots", "think_tags"}) {
