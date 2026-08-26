@@ -300,6 +300,63 @@ func TestDiagnosticSitesMutations(t *testing.T) {
 	_, err = d.SetRoleModel("agent", ModelFacts{Key: provider.ModelKey{Provider: "p", Model: "m"}, Type: "dense"},
 		SetRoleModelOpts{Requirements: map[string]provider.Capability{"agent": provider.CapChat}, KnownMask: provider.CapChat})
 	assertDiag(t, err, CodeEligibilityIneligible, SubjectRole, "agent")
+
+	facts := ModelFacts{Key: provider.ModelKey{Provider: "p", Model: "m"}, Type: "dense"}
+	assertDiag(t, d.AddRoleModel("agent", facts, SetRoleModelOpts{ConfirmUnknown: true}),
+		CodeRoleExists, SubjectRole, "agent")
+	assertDiag(t, d.ForkRoleModel("agent", "agent", facts, ForkRoleModelOpts{}),
+		CodeRoleExists, SubjectRole, "agent")
+	assertDiag(t, d.ForkRoleModel("ghost", "x", facts, ForkRoleModelOpts{}),
+		CodeRoleNotFound, SubjectRole, "ghost")
+	assertDiag(t, d.UnbindUseCase("missing"),
+		CodeUseCaseNotFound, SubjectUseCase, "missing")
+	assertDiag(t, d.SetRoleOverrides(provider.ModelKey{Provider: "p", Model: "missing"},
+		RoleOverrides{}, SetRoleOverridesOpts{ConfirmUnknown: true}),
+		CodeRoleNotFound, SubjectNone, "")
+
+	roles := loadTestDoc(t, roleFixture)
+	err = roles.ForkRoleModel("agent", "agent-m", forkFacts(), forkOpts())
+	assertDiag(t, err, CodeDropConfirmationRequired, SubjectRole, "agent")
+	if drops, ok := DropSetOf(err); !ok ||
+		!slices.Equal(drops, []string{"slots", "think_tags"}) {
+		t.Fatalf("DropSetOf = %v, %v", drops, ok)
+	}
+	assertDiag(t, roles.RemoveRole("agent"),
+		CodeRoleInUse, SubjectUseCase, "agent")
+	if err := roles.UnbindUseCase("chat"); err != nil {
+		t.Fatal(err)
+	}
+	assertDiag(t, roles.RemoveRole("fast"),
+		CodeRoleInUse, SubjectRole, "agent")
+
+	assertDiag(t, d.AddRoleModel("", facts, SetRoleModelOpts{}),
+		CodeInvalidArgument, SubjectNone, "")
+	assertDiag(t, d.ForkRoleModel("agent", "x", facts,
+		ForkRoleModelOpts{ConfirmDrops: []string{"bogus"}}),
+		CodeInvalidArgument, SubjectNone, "")
+	assertDiag(t, d.SetRoleOverrides(provider.ModelKey{Provider: "p", Model: "m"},
+		RoleOverrides{Capabilities: []string{}}, SetRoleOverridesOpts{}),
+		CodeInvalidArgument, SubjectNone, "")
+
+	ghostFacts := facts
+	ghostFacts.Key.Provider = "ghost"
+	assertDiag(t, d.AddRoleModel("x", ghostFacts, SetRoleModelOpts{ConfirmUnknown: true}),
+		CodeProviderNotFound, SubjectProvider, "ghost")
+	assertDiag(t, d.ForkRoleModel("agent", "x", ghostFacts, ForkRoleModelOpts{}),
+		CodeProviderNotFound, SubjectProvider, "ghost")
+	assertDiag(t, d.SetRoleOverrides(provider.ModelKey{Provider: "p", Model: "m"},
+		RoleOverrides{Capabilities: []string{"bogus"}}, SetRoleOverridesOpts{}),
+		CodeModelInvalid, SubjectRole, "agent")
+
+	joinFacts := ModelFacts{Key: provider.ModelKey{Provider: "local", Model: "m1"}, Type: "moe"}
+	assertDiag(t, roles.AddRoleModel("joiner", joinFacts, SetRoleModelOpts{
+		Requirements: map[string]provider.Capability{"agent": provider.CapChat},
+		Capabilities: []string{"embed"}, ConfirmUnknown: true,
+	}), CodeEligibilityIneligible, SubjectRole, "joiner")
+	assertDiag(t, roles.SetRoleOverrides(
+		provider.ModelKey{Provider: "local", Model: "m1"}, RoleOverrides{},
+		SetRoleOverridesOpts{Requirements: map[string]provider.Capability{"agent": provider.CapChat}}),
+		CodeEligibilityUnknown, SubjectRole, "agent")
 }
 
 // Site config.go's ParseCapsStrict round-trip is unreachable via config input
