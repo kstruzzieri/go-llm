@@ -161,6 +161,92 @@ func TestRemoveRoleAllowsRedundantSelectorState(t *testing.T) {
 	}
 }
 
+func TestRemoveRoleDerivedCapabilityFloor(t *testing.T) {
+	tests := []struct {
+		name             string
+		apiFormat        string
+		liveType         string
+		carrierType      string
+		liveCapabilities string
+		wantRefusal      bool
+	}{
+		{
+			name:        "embedding carrier and dense survivor",
+			apiFormat:   "openai-compat",
+			liveType:    "dense",
+			carrierType: "embedding",
+			wantRefusal: true,
+		},
+		{
+			name:        "dense carrier and embedding survivor",
+			apiFormat:   "openai-compat",
+			liveType:    "embedding",
+			carrierType: "dense",
+			wantRefusal: true,
+		},
+		{
+			name:        "dense carrier and moe survivor",
+			apiFormat:   "openai-compat",
+			liveType:    "moe",
+			carrierType: "dense",
+		},
+		{
+			name:        "redundant embedding carrier",
+			apiFormat:   "openai-compat",
+			liveType:    "embedding",
+			carrierType: "embedding",
+		},
+		{
+			name:             "surviving explicit override",
+			apiFormat:        "openai-compat",
+			liveType:         "dense",
+			carrierType:      "embedding",
+			liveCapabilities: `, "capabilities": ["chat", "embed", "generate", "stream"]`,
+		},
+		{
+			name:        "native ollama",
+			apiFormat:   "ollama",
+			liveType:    "dense",
+			carrierType: "embedding",
+		},
+		{
+			name:        "default ollama format",
+			liveType:    "dense",
+			carrierType: "embedding",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			raw := fmt.Sprintf(`{
+  "providers": {"ollama": {"base_url": "http://localhost:11434", "api_format": %q}},
+  "models": {
+    "live": {"name": "shared", "provider": "ollama", "type": %q%s},
+    "carrier": {"name": "shared", "type": %q}
+  },
+  "defaults": {"agent": "live"}
+}`, tt.apiFormat, tt.liveType, tt.liveCapabilities, tt.carrierType)
+			d := loadTestDoc(t, raw)
+
+			err := d.RemoveRole("carrier")
+			if tt.wantRefusal {
+				assertDiag(t, err, CodeRoleInUse, SubjectRole, "live")
+				if _, ok := d.authored.Models["carrier"]; !ok || len(d.modelDrops) != 0 {
+					t.Errorf("RemoveRole(%q) refusal state = models %v, drops %v; want carrier retained and no tombstone",
+						"carrier", d.authored.Models, d.modelDrops)
+				}
+				return
+			}
+			if err != nil {
+				t.Errorf("RemoveRole(%q) = %v, want nil", "carrier", err)
+				return
+			}
+			if _, ok := d.Config().Models["carrier"]; ok {
+				t.Errorf("RemoveRole(%q) left carrier in effective config", "carrier")
+			}
+		})
+	}
+}
+
 func TestRemoveRoleRefusals(t *testing.T) {
 	d := loadTestDoc(t, roleFixture)
 	assertDiag(t, d.RemoveRole(""), CodeInvalidArgument, SubjectNone, "")

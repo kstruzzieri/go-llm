@@ -112,7 +112,7 @@ func (d *Document) RemoveRole(role string) error {
 				}
 			}
 		}
-		if survivor, field := selectorStateDrop(a.Models, role); survivor != "" {
+		if survivor, field := selectorStateDrop(a, role); survivor != "" {
 			return diagWrap(CodeRoleInUse, SubjectRole, survivor,
 				fmt.Errorf("config: remove role %q: still supplies selector-wide %s used by role %q", role, field, survivor))
 		}
@@ -121,7 +121,8 @@ func (d *Document) RemoveRole(role string) error {
 	})
 }
 
-func selectorStateDrop(models map[string]ModelConfig, removedRole string) (string, string) {
+func selectorStateDrop(cfg *Config, removedRole string) (string, string) {
+	models := cfg.Models
 	removed := models[removedRole]
 	removedProvider := removed.Provider
 	if removedProvider == "" {
@@ -164,6 +165,8 @@ func selectorStateDrop(models map[string]ModelConfig, removedRole string) (strin
 		return len(m.Capabilities) > 0 && removedCapsErr == nil && err == nil && caps == removedCaps
 	}):
 		return survivorNames[0], "capabilities"
+	case derivedCapabilitiesDrop(cfg.Providers[removedProvider], removed, survivors):
+		return survivorNames[0], "capabilities"
 	case removed.ThinkMode != "" && !preserved(func(m ModelConfig) bool {
 		return m.ThinkMode != "" && strings.EqualFold(m.ThinkMode, removed.ThinkMode)
 	}):
@@ -179,6 +182,27 @@ func selectorStateDrop(models map[string]ModelConfig, removedRole string) (strin
 	default:
 		return "", ""
 	}
+}
+
+func derivedCapabilitiesDrop(provider ProviderConfig, removed ModelConfig, survivors []ModelConfig) bool {
+	if provider.APIFormat != "openai-compat" || len(removed.Capabilities) > 0 {
+		return false
+	}
+	survivorCaps := make(map[string]bool)
+	for _, survivor := range survivors {
+		if len(survivor.Capabilities) > 0 {
+			return false
+		}
+		for _, capability := range survivor.ResolvedCapabilities() {
+			survivorCaps[capability] = true
+		}
+	}
+	for _, capability := range removed.ResolvedCapabilities() {
+		if !survivorCaps[capability] {
+			return true
+		}
+	}
+	return false
 }
 
 // ForkRoleModelOpts carries the SetRoleModel option semantics plus the
