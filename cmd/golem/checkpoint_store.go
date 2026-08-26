@@ -641,3 +641,13 @@ func (s *checkpointStore) newestCompleted(ctx context.Context, n int) ([]checkpo
 func (s *checkpointStore) undoingGroups(ctx context.Context) ([]checkpointGroup, error) {
 	return s.loadGroups(ctx, checkpointUndoing, 0, true)
 }
+
+// countState reports how many checkpoints sit in the given state.
+func (s *checkpointStore) countState(ctx context.Context, state checkpointState) (int, error) {
+	var n int
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM checkpoints WHERE state = ?`, state).Scan(&n); err != nil {
+		return 0, fmt.Errorf("golem: checkpoint count %s: %w", state, err)
+	}
+	return n, nil
+}
