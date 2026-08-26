@@ -653,7 +653,7 @@ func TestCheckpointStoreSanitizesGoal(t *testing.T) {
 	s := openTestStore(t, t.TempDir())
 	cases := []struct{ in, want string }{
 		{"a\nb\x1b[31mc", "a b[31mc"},                        // newline flattened, ESC stripped
-		{"x‮evil", `x\u202eevil`},                            // bidi control escaped, cannot reorder
+		{"x\u202eevil", `x\u202eevil`},                       // bidi control escaped, cannot reorder
 		{strings.Repeat("é", 200), strings.Repeat("é", 160)}, // rune-safe truncation
 	}
 	for i, c := range cases {
