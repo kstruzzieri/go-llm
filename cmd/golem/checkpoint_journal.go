@@ -430,3 +430,47 @@ func (j *checkpointJournal) restoreFile(ctx context.Context, out io.Writer, f ch
 	_, _ = fmt.Fprintf(out, "undid %s\n", f.path)
 	return true
 }
+
+// formatCheckpointBytes renders a prior-content byte count for /checkpoints.
+func formatCheckpointBytes(n int64) string {
+	switch {
+	case n >= 1<<20:
+		return fmt.Sprintf("%.1f MiB", float64(n)/(1<<20))
+	case n >= 1<<10:
+		return fmt.Sprintf("%.1f KiB", float64(n)/(1<<10))
+	default:
+		return fmt.Sprintf("%d B", n)
+	}
+}
+
+// listCheckpoints prints this workspace's checkpoints newest first: index 1
+// is what /undo 1 reverts when no interrupted undo is pending. Goal labels
+// were stored control-safe, so one row can never render as several.
+func (j *checkpointJournal) listCheckpoints(ctx context.Context, out io.Writer) {
+	infos, err := j.store.list(ctx)
+	if err != nil {
+		_, _ = fmt.Fprintf(out, "checkpoints failed: %v\n", err)
+		return
+	}
+	if len(infos) == 0 {
+		_, _ = fmt.Fprintln(out, "no checkpoints")
+		return
+	}
+	for i, in := range infos {
+		marker := ""
+		switch in.state {
+		case checkpointUndoing:
+			marker = "[interrupted undo] "
+		case checkpointOpen:
+			marker = "[in progress] "
+		case checkpointCompleted:
+		}
+		fileWord := "files"
+		if in.files == 1 {
+			fileWord = "file"
+		}
+		_, _ = fmt.Fprintf(out, "%3d  %s  %d %s  %s  %s%s\n",
+			i+1, in.createdAt.Local().Format("2006-01-02 15:04:05"),
+			in.files, fileWord, formatCheckpointBytes(in.bytes), marker, in.goal)
+	}
+}

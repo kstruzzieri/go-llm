@@ -878,11 +878,31 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 		}
 	}()
 
-	var journal *mutationJournal
+	var journal *checkpointJournal
 	if f.allowWrite {
-		wt, j, werr := buildWriteTools(root)
+		// D6: -allow-write fails closed on ANY checkpoint lifecycle failure
+		// (store, lease, migration, recovery, state query, hardening) rather
+		// than silently dropping the #355 durability guarantee.
+		cpStore, cerr := openCheckpointStore(ctx, os.Getenv, root)
+		if cerr != nil {
+			return fmt.Errorf("golem: checkpoint store: %w", cerr)
+		}
+		defer func() { _ = cpStore.Close() }()
+		wt, j, werr := buildWriteTools(root, cpStore)
 		if werr != nil {
 			return werr
+		}
+		notice, rerr := j.recoverStartup(ctx)
+		if rerr != nil {
+			return fmt.Errorf("golem: checkpoint recovery: %w", rerr)
+		}
+		if notice != "" {
+			warns = append(warns, notice)
+		}
+		if n, ierr := cpStore.countState(ctx, checkpointUndoing); ierr != nil {
+			return fmt.Errorf("golem: checkpoint state: %w", ierr)
+		} else if n > 0 {
+			warns = append(warns, fmt.Sprintf("an interrupted undo exists (%d checkpoint(s)); /undo resumes it", n))
 		}
 		tools = append(tools, wt...)
 		journal = j

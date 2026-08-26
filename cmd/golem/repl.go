@@ -42,8 +42,8 @@ type replSession struct {
 
 	records *memory.MemoryRecordStore // nil => agent memory disabled (-agent-memory absent or open failed)
 
-	lastModel string           // last routed ActualModel for /model
-	journal   *mutationJournal // nil unless -allow-write enabled writes
+	lastModel string             // last routed ActualModel for /model
+	journal   *checkpointJournal // nil unless -allow-write enabled writes
 	// bgManager owns every background command (#346). nil => background exec
 	// disabled (-allow-exec absent or non-interactive mode). Process-scoped by
 	// the interactive-process-scope policy: /new, /clear, and successful
@@ -246,6 +246,19 @@ func runOnce(ctx context.Context, out io.Writer, interrupts <-chan struct{}, ses
 	if sess.session != nil {
 		threadID = sess.session.id
 	}
+	// Arm the durable checkpoint journal for this turn (#355). A refusal
+	// (interrupted undo pending, or the journal latched by an earlier
+	// failure) blocks the model turn before the provider is called; slash
+	// commands remain usable.
+	if sess.journal != nil {
+		if jerr := sess.journal.beginTurn(runCtx, line, cancel); jerr != nil {
+			writeRunLine("checkpoint: %v", jerr)
+			if ferr := rend.finish(); ferr != nil {
+				writeRunLine("warning: render flush incomplete: %v", ferr)
+			}
+			return agent.Result{}, jerr
+		}
+	}
 	res, runErr := sess.runtime.Run(runCtx, golemruntime.Turn{
 		ThreadID: threadID,
 		RunID:    runID,
@@ -253,6 +266,14 @@ func runOnce(ctx context.Context, out io.Writer, interrupts <-chan struct{}, ses
 		Approver: approver, // nil when read-only => runtime fail-safe denies Write/Exec
 		Observer: observer,
 	}, func(golemruntime.Event) error { return nil })
+	// Seal immediately after Run on every path: writes applied before an
+	// interrupt or provider error must stay undoable. The error is joined
+	// with the run error below, after the session-persistence demotion, so
+	// that demotion can never swallow a durability failure.
+	var sealErr error
+	if sess.journal != nil {
+		sealErr = sess.journal.sealTurn(ctx)
+	}
 	sess.feedback.finishRun(runID)
 	// An interrupted approval surfaces as context.Canceled from inside the run
 	// and races the interrupt watcher's cancel(). Synchronize the derived
@@ -269,6 +290,10 @@ func runOnce(ctx context.Context, out io.Writer, interrupts <-chan struct{}, ses
 		!errors.Is(runErr, context.DeadlineExceeded) {
 		sessionSaveErr = runErr
 		runErr = nil
+	}
+	if sealErr != nil {
+		writeRunLine("checkpoint: %v", sealErr)
+		runErr = errors.Join(runErr, sealErr)
 	}
 	// A failed tail flush loses only buffered display bytes on the progress
 	// stream; the run itself completed. Demoting it to a warning keeps a good
@@ -415,8 +440,30 @@ func dispatchSlash(ctx context.Context, out io.Writer, sess *replSession, line s
 	case "/undo":
 		if sess.journal == nil {
 			_, _ = fmt.Fprintln(out, "writes disabled (run with -allow-write)")
+			return "", false
+		}
+		n := 1
+		switch {
+		case len(fields) == 1:
+		case len(fields) == 2:
+			v, err := strconv.Atoi(fields[1])
+			if err != nil || v < 1 {
+				_, _ = fmt.Fprintln(out, "usage: /undo [n]")
+				return "", false
+			}
+			n = v
+		default:
+			_, _ = fmt.Fprintln(out, "usage: /undo [n]")
+			return "", false
+		}
+		sess.journal.undo(ctx, out, n)
+	case "/checkpoints":
+		if sess.journal == nil {
+			_, _ = fmt.Fprintln(out, "writes disabled (run with -allow-write)")
+		} else if len(fields) == 1 || (len(fields) == 2 && fields[1] == "list") {
+			sess.journal.listCheckpoints(ctx, out)
 		} else {
-			sess.journal.undo(out)
+			_, _ = fmt.Fprintln(out, "usage: /checkpoints [list]")
 		}
 	case "/jobs":
 		handleJobs(ctx, out, sess, fields)
@@ -623,7 +670,8 @@ const golemHelp = `commands:
                  search saved sessions
   /resume <id>   switch to a saved session
   /edit [seed]   compose a goal in $VISUAL/$EDITOR (quoting unsupported)
-  /undo          revert the last applied write (when -allow-write)
+  /undo [n]      revert the last n completed turns' writes (when -allow-write)
+  /checkpoints   list undoable turn checkpoints, newest first (when -allow-write)
   /jobs [stop <handle>]
                  list background jobs, or stop one (with -allow-exec)
   /auto-edits [on|off]
