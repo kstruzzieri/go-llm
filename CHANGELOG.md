@@ -6,6 +6,25 @@ All notable changes to `go-llm` are documented here. Downstream consumers
 
 ## [Unreleased]
 
+### Added — config: role lifecycle mutations and atomic credential scrub (#462)
+
+Six narrow `*config.Document` operations unblocking the Firn config
+workspace (firn-ide#263 Slice B): `AddRoleModel` (atomic complete-role
+creation with the SetRoleModel eligibility semantics), `ForkRoleModel`
+(lossless copy of the source's raw authored subtree — unknown/future JSON
+members survive — with exact drop confirmation for the projection-hidden
+think_tags/slots, refused before mutation; required set exposed via
+`DropSetOf`), `UnbindUseCase`, guarded `RemoveRole` (refuses while routed
+or fallback-referenced; generalized tombstones prevent stale raw members
+from resurrecting on re-add), `SetRoleOverrides` (selector-wide explicit
+capabilities/think-mode edits preserving every omitted authored field,
+ThinkTags and Slots included), and `ClearAllProviderAPIKeys` (atomically
+clears every authored provider api_key — literal and ${ENV} forms —
+returning no names, values, or Config). Four new diagnostic codes extend
+the closed vocabulary to 31: `role_exists`, `role_in_use`,
+`use_case_not_found`, `drop_confirmation_required`. `SetRoleModel` and
+all existing signatures are unchanged.
+
 ### Added — golem, tools: background command execution (#346)
 
 Golem can now start long-running commands in the background and keep
