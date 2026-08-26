@@ -554,6 +554,37 @@ func TestSaveReplaceDurabilityUncertainUpdatesState(t *testing.T) {
 	}
 }
 
+// A durability-uncertain publication is a real commit: pending model
+// bookkeeping (fork raw seeds, tombstones) is cleared alongside the typed
+// error, exactly as on a clean save — the published file carries the fork.
+func TestSaveReplaceDurabilityUncertainClearsModelBookkeeping(t *testing.T) {
+	d := loadTestDoc(t, roleFixture)
+	if err := d.ForkRoleModel("agent", "agent-m", forkFacts(),
+		forkOpts("slots", "think_tags")); err != nil {
+		t.Fatal(err)
+	}
+
+	origSync := syncDir
+	syncDir = func(string) error { return errors.New("injected dir-sync failure") }
+	t.Cleanup(func() { syncDir = origSync })
+
+	err := d.SaveReplace(d.Origin().Path, d.Revision())
+	if !errors.Is(err, ErrDurabilityUncertain) {
+		t.Fatalf("err = %v, want ErrDurabilityUncertain", err)
+	}
+	if d.modelDrops != nil || d.modelRawSeeds != nil || d.providerDrops != nil {
+		t.Fatalf("bookkeeping not cleared: drops=%v seeds=%v providerDrops=%v",
+			d.modelDrops, d.modelRawSeeds, d.providerDrops)
+	}
+	onDisk, rerr := os.ReadFile(d.Origin().Path)
+	if rerr != nil {
+		t.Fatal(rerr)
+	}
+	if !bytes.Contains(onDisk, []byte(`"agent-m"`)) {
+		t.Fatalf("published file missing fork:\n%s", onDisk)
+	}
+}
+
 // SaveNew shares the durability-uncertain contract: bytes live → state
 // converges alongside the typed error.
 func TestSaveNewDurabilityUncertainUpdatesState(t *testing.T) {

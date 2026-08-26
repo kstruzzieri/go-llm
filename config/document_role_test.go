@@ -215,6 +215,16 @@ func TestAddRoleModelRefusals(t *testing.T) {
 	assertDiag(t, d.AddRoleModel("x",
 		ModelFacts{Key: provider.ModelKey{Provider: "ghost", Model: "m"}, Type: "dense"},
 		eligibleAddOpts()), CodeProviderNotFound, SubjectProvider, "ghost")
+	// Malformed capabilities override dies at the eligibility gate, before
+	// any mutation. The finalize validate backstop shares code/subject but
+	// a different message shape, so pin the gate's wrap to stay non-blind.
+	opts := eligibleAddOpts()
+	opts.Capabilities = []string{"bogus"}
+	capErr := d.AddRoleModel("x2", facts, opts)
+	assertDiag(t, capErr, CodeModelInvalid, SubjectRole, "x2")
+	if !strings.Contains(capErr.Error(), `add role model "x2": capabilities:`) {
+		t.Fatalf("refusal not from eligibility gate: %v", capErr)
+	}
 }
 
 // Unrouted new role with no override: unknown/no_requirements requires
@@ -343,6 +353,20 @@ func TestAddRoleModelFinalizeFailureTransactional(t *testing.T) {
 	}
 	if len(d.modelDrops) != beforeDrops || len(d.modelRawSeeds) != beforeSeeds {
 		t.Fatal("raw bookkeeping changed on failure")
+	}
+}
+
+// A providers-only document (validate requires only >= 1 provider) has a
+// nil Models map after the clone round-trip; AddRoleModel materializes it.
+func TestAddRoleModelMaterializesNilModels(t *testing.T) {
+	body := `{"providers": {"local": {"base_url": "http://localhost:1"}}}`
+	d := loadTestDoc(t, body)
+	facts := ModelFacts{Key: provider.ModelKey{Provider: "local", Model: "m9"}, Type: "dense"}
+	if err := d.AddRoleModel("first", facts, SetRoleModelOpts{ConfirmUnknown: true}); err != nil {
+		t.Fatal(err)
+	}
+	if d.authored.Models["first"].Name != "m9" {
+		t.Fatalf("role not created: %+v", d.authored.Models)
 	}
 }
 
@@ -531,6 +555,16 @@ func TestForkRoleModelRefusals(t *testing.T) {
 	bad.Key.Provider = "ghost"
 	assertDiag(t, d.ForkRoleModel("agent", "x", bad, forkOpts("slots", "think_tags")),
 		CodeProviderNotFound, SubjectProvider, "ghost")
+	// Malformed capabilities override dies at the eligibility gate, before
+	// any mutation. The finalize validate backstop shares code/subject but
+	// a different message shape, so pin the gate's wrap to stay non-blind.
+	fopts := forkOpts("slots", "think_tags")
+	fopts.Capabilities = []string{"bogus"}
+	capErr := d.ForkRoleModel("agent", "x2", forkFacts(), fopts)
+	assertDiag(t, capErr, CodeModelInvalid, SubjectRole, "x2")
+	if !strings.Contains(capErr.Error(), `fork role model "x2": capabilities:`) {
+		t.Fatalf("refusal not from eligibility gate: %v", capErr)
+	}
 }
 
 // Guard precedence is contract-visible. Malformed confirmation is checked
@@ -950,6 +984,10 @@ func TestSetRoleOverridesLossless(t *testing.T) {
 	}
 	if string(entry["think_mode"]) != `"toggle"` {
 		t.Fatalf("think_mode not published: %s", entry["think_mode"])
+	}
+	var caps []string
+	if err := json.Unmarshal(entry["capabilities"], &caps); err != nil || !slices.Equal(caps, []string{"chat"}) {
+		t.Fatalf("capabilities not published: %s (%v)", entry["capabilities"], err)
 	}
 }
 
