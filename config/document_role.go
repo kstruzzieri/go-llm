@@ -25,6 +25,51 @@ func (d *Document) UnbindUseCase(useCase string) error {
 	})
 }
 
+// AddRoleModel atomically creates a new role born complete: identity and
+// capacity from facts, overrides only as re-asserted in opts (deep-copied;
+// SetRoleModel option semantics, documented there). Description, Fallbacks,
+// and Options start zero — the Slice B contract does not name them for
+// creation; additive later if a consumer asks. The eligibility gate runs
+// with full SetRoleModel semantics: an unrouted new role evaluates
+// unknown/no_requirements and needs ConfirmUnknown; a supplied capabilities
+// override joining an existing selector gates every selector role, because
+// the override changes selector-wide persisted truth for live routes. The
+// finalize gate (static selector conflicts included) validates the result;
+// failure leaves the document unchanged.
+func (d *Document) AddRoleModel(role string, facts ModelFacts, opts SetRoleModelOpts) error {
+	return d.mutate(func(a *Config) error {
+		if role == "" {
+			return diagWrap(CodeInvalidArgument, SubjectNone, "",
+				fmt.Errorf("config: add role model: empty role"))
+		}
+		if err := validateRoleFacts("add role model", role, facts); err != nil {
+			return err
+		}
+		if _, exists := a.Models[role]; exists {
+			return diagWrap(CodeRoleExists, SubjectRole, role,
+				fmt.Errorf("config: add role model: role %q already defined", role))
+		}
+		if _, ok := a.Providers[facts.Key.Provider]; !ok {
+			return diagWrap(CodeProviderNotFound, SubjectProvider, facts.Key.Provider,
+				fmt.Errorf("config: add role model %q: provider %q not configured", role, facts.Key.Provider))
+		}
+		if _, err := gateRoleEligibility(a, "add role model", role, facts, opts); err != nil {
+			return err
+		}
+		m := ModelConfig{
+			Name: facts.Key.Model, Provider: facts.Key.Provider,
+			Type: facts.Type, Parameters: facts.Parameters,
+			ContextWindow: facts.ContextWindow, Dimensions: facts.Dimensions,
+		}
+		applyRoleOverridesFromOpts(&m, opts)
+		if a.Models == nil {
+			a.Models = map[string]ModelConfig{}
+		}
+		a.Models[role] = m
+		return nil
+	})
+}
+
 // RemoveRole deletes a role nothing references. The explicit in-use
 // pre-check names the first blocker in deterministic order — routed use
 // cases (sorted) before fallback references (sorted) — mirroring

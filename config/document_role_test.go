@@ -3,8 +3,11 @@ package config
 import (
 	"encoding/json"
 	"os"
+	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/kstruzzieri/go-llm/provider"
 )
 
 // roleFixture: one provider, three roles, two routes. "spare" is
@@ -163,5 +166,179 @@ func TestRemoveRoleRender(t *testing.T) {
 	}
 	if len(d.modelDrops) != 0 {
 		t.Fatal("commitSavedLocked did not clear modelDrops")
+	}
+}
+
+func eligibleAddOpts() SetRoleModelOpts {
+	return SetRoleModelOpts{
+		Requirements:   map[string]provider.Capability{"agent": provider.CapChat},
+		Caps:           provider.CapChat | provider.CapStream,
+		KnownMask:      provider.CapChat | provider.CapStream,
+		ConfirmUnknown: true, // new roles are unrouted: unknown/no_requirements
+	}
+}
+
+func TestAddRoleModel(t *testing.T) {
+	d := loadTestDoc(t, roleFixture)
+	facts := ModelFacts{
+		Key:  provider.ModelKey{Provider: "local", Model: "m9"},
+		Type: "dense", Parameters: "9B", ContextWindow: 8192,
+	}
+	if err := d.AddRoleModel("fresh", facts, eligibleAddOpts()); err != nil {
+		t.Fatal(err)
+	}
+	m := d.authored.Models["fresh"]
+	if m.Name != "m9" || m.Provider != "local" || m.Type != "dense" ||
+		m.Parameters != "9B" || m.ContextWindow != 8192 {
+		t.Fatalf("identity/capacity: %+v", m)
+	}
+	if m.Description != "" || m.Fallbacks != nil || m.Options != nil ||
+		m.Capabilities != nil || m.ThinkMode != "" || m.ThinkTags != nil || m.Slots != 0 {
+		t.Fatalf("new role not born minimal: %+v", m)
+	}
+}
+
+func TestAddRoleModelRefusals(t *testing.T) {
+	d := loadTestDoc(t, roleFixture)
+	facts := ModelFacts{Key: provider.ModelKey{Provider: "local", Model: "m9"}, Type: "dense"}
+	assertDiag(t, d.AddRoleModel("", facts, eligibleAddOpts()),
+		CodeInvalidArgument, SubjectNone, "")
+	assertDiag(t, d.AddRoleModel("x", ModelFacts{Type: "dense"}, eligibleAddOpts()),
+		CodeInvalidArgument, SubjectNone, "")
+	assertDiag(t, d.AddRoleModel("x", ModelFacts{Key: facts.Key, Type: "huge"}, eligibleAddOpts()),
+		CodeInvalidArgument, SubjectNone, "")
+	assertDiag(t, d.AddRoleModel("agent", facts, eligibleAddOpts()),
+		CodeRoleExists, SubjectRole, "agent")
+	assertDiag(t, d.AddRoleModel("x",
+		ModelFacts{Key: provider.ModelKey{Provider: "ghost", Model: "m"}, Type: "dense"},
+		eligibleAddOpts()), CodeProviderNotFound, SubjectProvider, "ghost")
+}
+
+// Unrouted new role with no override: unknown/no_requirements requires
+// ConfirmUnknown (amendment-5 consistency — spec checkbox 2).
+func TestAddRoleModelUnroutedRequiresConfirm(t *testing.T) {
+	d := loadTestDoc(t, roleFixture)
+	facts := ModelFacts{Key: provider.ModelKey{Provider: "local", Model: "m9"}, Type: "dense"}
+	opts := eligibleAddOpts()
+	opts.ConfirmUnknown = false
+	assertDiag(t, d.AddRoleModel("fresh", facts, opts),
+		CodeEligibilityUnknown, SubjectRole, "fresh")
+}
+
+// A capabilities override joining a LIVE shared selector changes
+// selector-wide truth: the gate evaluates existing selector roles. "agent"
+// is routed and requires chat; an override without chat is ineligible.
+func TestAddRoleModelOverrideGatesSelectorRoles(t *testing.T) {
+	d := loadTestDoc(t, roleFixture)
+	facts := ModelFacts{Key: provider.ModelKey{Provider: "local", Model: "m1"}, Type: "moe"}
+	opts := SetRoleModelOpts{
+		Requirements:   map[string]provider.Capability{"agent": provider.CapChat},
+		Capabilities:   []string{"embed"}, // valid vocabulary, lacks chat
+		ConfirmUnknown: true,
+	}
+	assertDiag(t, d.AddRoleModel("joiner", facts, opts),
+		CodeEligibilityIneligible, SubjectRole, "joiner")
+}
+
+// Re-assertions install deep copies.
+func TestAddRoleModelReassertions(t *testing.T) {
+	d := loadTestDoc(t, roleFixture)
+	facts := ModelFacts{Key: provider.ModelKey{Provider: "local", Model: "m9"}, Type: "dense"}
+	caps := []string{"chat", "stream"}
+	tags := &ThinkTagsConfig{Open: "<r>", Close: "</r>"}
+	opts := eligibleAddOpts()
+	opts.Capabilities, opts.ThinkMode, opts.ThinkTags = caps, "toggle", tags
+	if err := d.AddRoleModel("fresh", facts, opts); err != nil {
+		t.Fatal(err)
+	}
+	caps[0] = "mutated"
+	tags.Open = "<mutated>"
+	m := d.authored.Models["fresh"]
+	if m.Capabilities[0] != "chat" || m.ThinkTags.Open != "<r>" || m.ThinkMode != "toggle" {
+		t.Fatalf("aliased inputs: %+v", m)
+	}
+}
+
+// Resurrection pin (the tombstone acceptance behavior): remove a role
+// whose raw entry has unknown members, re-add the same name, save — the
+// stale members must NOT come back.
+func TestAddRoleModelNoResurrection(t *testing.T) {
+	d := loadTestDoc(t, roleFixture)
+	if err := d.UnbindUseCase("agent"); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.RemoveRole("agent"); err != nil {
+		t.Fatal(err)
+	}
+	facts := ModelFacts{Key: provider.ModelKey{Provider: "local", Model: "m9"}, Type: "dense"}
+	if err := d.AddRoleModel("agent", facts, eligibleAddOpts()); err != nil {
+		t.Fatal(err)
+	}
+	path := d.Origin().Path
+	if err := d.SaveReplace(path, d.Revision()); err != nil {
+		t.Fatal(err)
+	}
+	out, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(out), "future_role_field") {
+		t.Fatalf("stale raw members resurrected:\n%s", out)
+	}
+	if !strings.Contains(string(out), `"m9"`) {
+		t.Fatalf("re-added role missing:\n%s", out)
+	}
+}
+
+// The baseline-reset variant: removal is saved first, then the same role
+// name is added and saved again. The old unknown subtree is gone from the
+// new raw baseline and cannot return.
+func TestAddRoleModelNoResurrectionAfterSavedRemoval(t *testing.T) {
+	d := loadTestDoc(t, roleFixture)
+	if err := d.UnbindUseCase("agent"); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.RemoveRole("agent"); err != nil {
+		t.Fatal(err)
+	}
+	path := d.Origin().Path
+	if err := d.SaveReplace(path, d.Revision()); err != nil {
+		t.Fatal(err)
+	}
+	facts := ModelFacts{Key: provider.ModelKey{Provider: "local", Model: "m9"}, Type: "dense"}
+	if err := d.AddRoleModel("agent", facts, eligibleAddOpts()); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.SaveReplace(path, d.Revision()); err != nil {
+		t.Fatal(err)
+	}
+	out, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(out), "future_role_field") {
+		t.Fatalf("saved stale raw members resurrected:\n%s", out)
+	}
+}
+
+// Transactionality through a finalize-stage failure: an invalid re-asserted
+// think mode passes the closure and dies at finalize; nothing changes.
+func TestAddRoleModelFinalizeFailureTransactional(t *testing.T) {
+	d := loadTestDoc(t, roleFixture)
+	beforeEffective := d.Config()
+	beforeRender := renderToString(t, d)
+	beforeDrops, beforeSeeds := len(d.modelDrops), len(d.modelRawSeeds)
+	facts := ModelFacts{Key: provider.ModelKey{Provider: "local", Model: "m9"}, Type: "dense"}
+	opts := eligibleAddOpts()
+	opts.ThinkMode = "sometimes"
+	assertDiag(t, d.AddRoleModel("fresh", facts, opts), CodeThinkInvalid, SubjectRole, "fresh")
+	if _, ok := d.authored.Models["fresh"]; ok {
+		t.Fatal("failed mutation left the role behind")
+	}
+	if !reflect.DeepEqual(beforeEffective, d.Config()) || beforeRender != renderToString(t, d) {
+		t.Fatal("effective view changed on failure")
+	}
+	if len(d.modelDrops) != beforeDrops || len(d.modelRawSeeds) != beforeSeeds {
+		t.Fatal("raw bookkeeping changed on failure")
 	}
 }
