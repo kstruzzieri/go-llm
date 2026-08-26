@@ -208,6 +208,21 @@ func runOnce(ctx context.Context, out io.Writer, interrupts <-chan struct{}, ses
 		approver = ap
 	}
 
+	// Arm the durable checkpoint journal for this turn (#355). A refusal
+	// (interrupted undo pending, or the journal latched by an earlier
+	// failure) blocks the model turn before the provider is called and
+	// before any telemetry sink opens for a run that will never happen;
+	// slash commands remain usable.
+	if sess.journal != nil {
+		if jerr := sess.journal.beginTurn(runCtx, line, cancel); jerr != nil {
+			writeRunLine("checkpoint: %v", jerr)
+			if ferr := rend.finish(); ferr != nil {
+				writeRunLine("warning: render flush incomplete: %v", ferr)
+			}
+			return agent.Result{}, jerr
+		}
+	}
+
 	var (
 		runID     = conversation.NewID()
 		startedAt time.Time
@@ -245,19 +260,6 @@ func runOnce(ctx context.Context, out io.Writer, interrupts <-chan struct{}, ses
 	threadID := ""
 	if sess.session != nil {
 		threadID = sess.session.id
-	}
-	// Arm the durable checkpoint journal for this turn (#355). A refusal
-	// (interrupted undo pending, or the journal latched by an earlier
-	// failure) blocks the model turn before the provider is called; slash
-	// commands remain usable.
-	if sess.journal != nil {
-		if jerr := sess.journal.beginTurn(runCtx, line, cancel); jerr != nil {
-			writeRunLine("checkpoint: %v", jerr)
-			if ferr := rend.finish(); ferr != nil {
-				writeRunLine("warning: render flush incomplete: %v", ferr)
-			}
-			return agent.Result{}, jerr
-		}
 	}
 	res, runErr := sess.runtime.Run(runCtx, golemruntime.Turn{
 		ThreadID: threadID,

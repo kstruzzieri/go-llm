@@ -6,6 +6,43 @@ All notable changes to `go-llm` are documented here. Downstream consumers
 
 ## [Unreleased]
 
+### Added — golem, agent/tools: multi-step persisted mutation checkpoints (#355)
+
+Golem's `/undo` is now durable and turn-scoped. Every interactive write is
+journaled write-ahead into a per-workspace hardened SQLite store
+(`<data>/golem/checkpoints/<workspace-hash>.db`, 0700/0600, WAL,
+single-connection) guarded by an exclusive OS file lease, and all mutations
+from one REPL turn group into one checkpoint.
+
+- **Write-ahead protocol.** `agent/tools` gains an optional
+  `PreparingJournal` capability: `write_file`/`edit_file` persist a
+  mutation intent BEFORE the workspace rename and mark it applied after,
+  so a crash can never leave an applied change the journal never saw.
+  Plain `Journal` consumers (AgentFlow's composite journal) keep the
+  post-write `Record` path unchanged.
+- **`/undo [n]` and `/checkpoints [list]`.** `/undo` reverts whole turns
+  (default 1), across restarts, with an all-file chain-simulated hash
+  preflight: any divergent, removed, symlink- or directory-replaced file
+  refuses with the existing message and changes nothing. Restores apply in
+  reverse mutation order with persisted per-file progress; a crash mid-undo
+  resumes idempotently on the next `/undo`, and new model turns are blocked
+  until the interrupted undo resolves. `/checkpoints` lists turns newest
+  first with control-safe single-line labels.
+- **Crash recovery.** Startup reconciles a crashed turn's intents by live
+  file state (never-landed intents are dropped; landed ones become an
+  undoable checkpoint) and reports one notice. Recovery refuses to guess on
+  unclassifiable paths and `-allow-write` fails closed on any store, lease,
+  migration, recovery, or hardening failure.
+- **Strict retention.** At most 50 completed checkpoints and 64 MiB of
+  prior content per workspace, enforced by pre-write admission (oldest
+  completed checkpoints are pruned; a mutation that cannot fit is refused
+  before touching the workspace). Open and undoing checkpoints are never
+  pruned.
+- **Process model.** One write-enabled golem per workspace: a second
+  process fails closed on the checkpoint lease instead of last-writer-wins.
+  Durability covers process crashes; host/power-loss fsync hardening
+  remains out of scope.
+
 ### Added — golem, tools: background command execution (#346)
 
 Golem can now start long-running commands in the background and keep
