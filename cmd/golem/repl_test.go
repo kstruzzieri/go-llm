@@ -12,6 +12,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/kstruzzieri/go-llm/agent"
 	"github.com/kstruzzieri/go-llm/agent/tools"
@@ -958,7 +959,9 @@ func newExecOnlyTestSession(t *testing.T, caller agent.ModelCaller, root string)
 	if err != nil {
 		t.Fatalf("buildTools: %v", err)
 	}
-	execTools, err := buildExecTools(root)
+	bg := tools.NewBackgroundManager()
+	t.Cleanup(bg.Shutdown)
+	execTools, err := buildExecTools(root, bg)
 	if err != nil {
 		t.Fatalf("buildExecTools: %v", err)
 	}
@@ -972,6 +975,7 @@ func newExecOnlyTestSession(t *testing.T, caller agent.ModelCaller, root string)
 		maxSteps:   16,
 		clock:      func() time.Time { return time.Unix(0, 0) },
 		allowExec:  true,
+		bgManager:  bg,
 	}
 }
 
@@ -1640,5 +1644,124 @@ func TestGrantsCommandBadArgUsage(t *testing.T) {
 	_, _ = dispatchSlash(context.Background(), &out, sess, "/grants nonsense")
 	if !strings.Contains(out.String(), "usage: /grants [clear]") {
 		t.Fatalf("bad arg must print usage:\n%s", out.String())
+	}
+}
+
+// --- /jobs (#346): pull-based visibility and user-direct stop ---
+
+func TestJobsDisabledWithoutManager(t *testing.T) {
+	sess := &replSession{}
+	var out strings.Builder
+	if _, exit := dispatchSlash(context.Background(), &out, sess, "/jobs"); exit {
+		t.Fatal("/jobs must not exit")
+	}
+	if !strings.Contains(out.String(), "background exec disabled (run with -allow-exec)") {
+		t.Fatalf("nil manager must report background exec disabled:\n%s", out.String())
+	}
+}
+
+func TestJobsEmptyListUsageAndUnknownHandle(t *testing.T) {
+	sess := &replSession{bgManager: tools.NewBackgroundManager()}
+	t.Cleanup(sess.bgManager.Shutdown)
+
+	var out strings.Builder
+	_, _ = dispatchSlash(context.Background(), &out, sess, "/jobs")
+	if !strings.Contains(out.String(), "no background jobs") {
+		t.Fatalf("empty manager must report no jobs:\n%s", out.String())
+	}
+
+	for _, bad := range []string{"/jobs stop", "/jobs bogus", "/jobs stop h extra"} {
+		out.Reset()
+		_, _ = dispatchSlash(context.Background(), &out, sess, bad)
+		if got := out.String(); !strings.Contains(got, "usage: /jobs [stop <handle>]") {
+			t.Fatalf("%q must print the exact usage line:\n%s", bad, got)
+		}
+	}
+
+	out.Reset()
+	_, _ = dispatchSlash(context.Background(), &out, sess, "/jobs stop bg-nope")
+	if !strings.Contains(out.String(), `unknown background job handle "bg-nope"`) {
+		t.Fatalf("unknown handle must surface the manager error:\n%s", out.String())
+	}
+}
+
+func TestRenderJobStopResultCanceled(t *testing.T) {
+	var out strings.Builder
+	renderJobStopResult(&out, tools.JobStatus{Handle: "bg-1", State: "running"}, context.Canceled)
+	if got, want := out.String(), "stop requested for bg-1; still reaping\n"; got != want {
+		t.Errorf("renderJobStopResult(canceled) = %q, want %q", got, want)
+	}
+}
+
+func TestRenderJobLineNeutralizesTerminalControls(t *testing.T) {
+	// Every listed control class: newline/CR (C0), ESC, C1 CSI U+009B, bidi
+	// controls. The argv goes through the dedicated one-line renderer; raw
+	// control bytes must never reach the terminal.
+	st := tools.JobStatus{
+		Handle: "bg-1",
+		State:  "running",
+		PID:    42,
+		Argv:   []string{"echo", "\x1b[2J", "\u009b", "a\nb", "c\rd", "\u202evil", "\u2066x\u2069"},
+	}
+	line := renderJobLine(st)
+	if strings.ContainsAny(line, "\n\r") {
+		t.Fatalf("job line must be one line: %q", line)
+	}
+	for _, raw := range []string{"\x1b", "\u009b", "\u202e", "\u2066", "\u2069"} {
+		if strings.Contains(line, raw) {
+			t.Fatalf("job line retained control %q: %q", raw, line)
+		}
+	}
+	for _, escaped := range []string{`\x1b`, `\u009b`, `\n`, `\r`, `\u202e`, `\u2066`, `\u2069`} {
+		if !strings.Contains(line, escaped) {
+			t.Fatalf("job line omitted visible escape %q: %q", escaped, line)
+		}
+	}
+	for _, want := range []string{"bg-1", "running", "pid=42"} {
+		if !strings.Contains(line, want) {
+			t.Fatalf("job line missing %q: %q", want, line)
+		}
+	}
+}
+
+func TestRenderJobLineShowsExitCodeWhenKnown(t *testing.T) {
+	st := tools.JobStatus{Handle: "bg-2", State: "exited", PID: 7, ExitCode: 3, ExitKnown: true,
+		Argv: []string{"true"}}
+	line := renderJobLine(st)
+	for _, want := range []string{"bg-2", "exited", "exit=3", "pid=7", "true"} {
+		if !strings.Contains(line, want) {
+			t.Fatalf("finished job line missing %q: %q", want, line)
+		}
+	}
+}
+
+func TestRenderJobArgvTruncatesRuneSafely(t *testing.T) {
+	// Multibyte runes at the cut boundary must never be split.
+	for _, r := range []string{"界", "\U0001F680"} { // CJK, emoji
+		long := strings.Repeat(r, jobArgvDisplayCap+10)
+		got := renderJobArgv([]string{long})
+		if !utf8.ValidString(got) {
+			t.Fatalf("truncation split a rune: %q", got)
+		}
+		if !strings.HasSuffix(got, "...") {
+			t.Fatalf("truncated argv must end in ellipsis: %q", got)
+		}
+		body := strings.TrimSuffix(got, "...")
+		if n := utf8.RuneCountInString(body); n != jobArgvDisplayCap {
+			t.Fatalf("truncated to %d runes, want %d: %q", n, jobArgvDisplayCap, got)
+		}
+		if body != strings.Repeat(r, jobArgvDisplayCap) {
+			t.Fatalf("truncation altered content: %q", got)
+		}
+	}
+	// Short argv passes through whole.
+	if got := renderJobArgv([]string{"sleep", "30"}); got != "sleep 30" {
+		t.Fatalf("short argv = %q, want %q", got, "sleep 30")
+	}
+}
+
+func TestHelpListsJobs(t *testing.T) {
+	if !strings.Contains(golemHelp, "/jobs [stop <handle>]") {
+		t.Fatalf("help must document /jobs:\n%s", golemHelp)
 	}
 }

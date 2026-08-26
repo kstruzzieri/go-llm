@@ -17,9 +17,10 @@ type unixRunner struct{}
 func newPlatformRunner() commandRunner { return unixRunner{} }
 
 func (unixRunner) Run(ctx context.Context, spec execSpec) (execResult, error) {
-	// CommandContext (NOT exec.Command) is REQUIRED: cmd.Cancel and cmd.WaitDelay are
-	// only consulted when the command was created with a context. With exec.Command the
-	// custom group-kill Cancel would never fire on timeout.
+	// CommandContext (NOT exec.Command) is REQUIRED: cmd.Cancel is only consulted
+	// when the command was created with a context — with exec.Command the custom
+	// group-kill Cancel would never fire on timeout. (cmd.WaitDelay, by contrast,
+	// works with plain exec.Command too; see background_unix.go.)
 	cmd := exec.CommandContext(ctx, spec.Path, spec.Argv[1:]...)
 	cmd.Dir = spec.Dir
 	cmd.Env = spec.Env

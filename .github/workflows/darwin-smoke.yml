@@ -24,3 +24,9 @@ jobs:
 
       - name: Compile smoke
         run: go test -run '^$' ./...
+
+      # Native darwin runtime coverage for background command execution
+      # (#346): process-group lifecycle, manager suites, and the REPL
+      # shutdown paths that kill and reap real process groups.
+      - name: Background exec runtime
+        run: go test -race -run 'TestBackground(Process|Manager)|TestRunBackground|TestJobs' ./agent/tools ./cmd/golem

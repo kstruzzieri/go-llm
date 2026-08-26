@@ -6,6 +6,42 @@ All notable changes to `go-llm` are documented here. Downstream consumers
 
 ## [Unreleased]
 
+### Added — golem, tools: background command execution (#346)
+
+Golem can now start long-running commands in the background and keep
+working. The `-allow-exec` tool set gains four model-facing tools:
+`start_command` launches a detached argv-first command (no shell) and
+returns an opaque handle immediately; `command_status` reports one job's
+state; `command_tail` reads stdout/stderr incrementally with resumable
+cursors; `stop_command` kills the job and reports its final state.
+
+- **Approval.** `start_command` is approval-gated under a distinct
+  background key namespace (`exec-bg:v1:` vs foreground `exec:v2:`), so a
+  foreground "don't ask again" grant never authorizes a background start
+  of the same command, and vice versa. `stop_command` always prompts (its
+  approval key is deliberately empty); `command_status` and `command_tail`
+  are read-only and never prompt.
+- **Output caps and retention.** Each job retains the newest 64 KiB per
+  stream in a tail ring; evictions are reported explicitly as
+  `dropped_bytes`, never as a silent gap. Tail reads return 8 KiB by
+  default, capped at 16 KiB per call. At most 4 jobs run concurrently and
+  the newest 8 finished jobs are retained; running jobs are never evicted.
+- **Interactive-process scope.** Background jobs run with stdin wired to
+  `/dev/null`: a child that prompts for input reads immediate EOF instead
+  of hanging. Interactive processes are out of scope.
+- **`/jobs` REPL command.** `/jobs` lists the session's background jobs
+  (one control-safe line per job); `/jobs stop <handle>` stops one
+  directly with no model call and no approval prompt. Jobs survive
+  `/new`, `/clear`, and `/resume` while session approval grants still
+  clear.
+- **Linux/macOS managed-process-group guarantee.** Every job is the leader of its
+  own process group; stop and shutdown SIGKILL the whole group and the
+  REPL does not return before killed groups are reaped, and when the
+  command exits on its own, background processes it left running in the
+  group are also killed. Descendants that escape the managed group (e.g.
+  via setsid) are unsupported. Other platforms fail closed:
+  `start_command` reports exec unsupported.
+
 ### Added — golem,rag: managed source lifecycle in the CLI (#349)
 
 `golem source add|list|rm|reindex` manages ad-hoc documents in the workspace

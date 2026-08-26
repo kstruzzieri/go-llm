@@ -107,12 +107,29 @@ func TestBuildSystemPrompt(t *testing.T) {
 }
 
 func TestBuildExecTools(t *testing.T) {
-	tools, err := buildExecTools(t.TempDir())
+	// #346: -allow-exec registers the foreground run_command plus the four
+	// background tools, built over one manager/workspace pair.
+	mgr := agenttools.NewBackgroundManager()
+	t.Cleanup(mgr.Shutdown)
+	tools, err := buildExecTools(t.TempDir(), mgr)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(tools) != 1 || tools[0].Spec().Name != "run_command" {
-		t.Fatalf("got %d tools", len(tools))
+	got := names(tools)
+	want := []string{"run_command", "start_command", "command_status", "command_tail", "stop_command"}
+	if len(got) != len(want) {
+		t.Fatalf("tool names = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("tool[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
+func TestBuildExecTools_NilManagerFailsLoudly(t *testing.T) {
+	if _, err := buildExecTools(t.TempDir(), nil); err == nil {
+		t.Fatal("nil manager must fail loudly, not register a broken tool set")
 	}
 }
 

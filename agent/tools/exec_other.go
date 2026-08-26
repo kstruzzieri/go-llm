@@ -4,10 +4,7 @@ package tools
 
 import (
 	"context"
-	"errors"
 )
-
-var errExecUnsupported = errors.New("exec unsupported on this platform")
 
 type unsupportedRunner struct{}
 

@@ -204,10 +204,13 @@ func newDispatchTool(caller agent.ModelCaller, mixed bool, budget agent.Budget, 
 	return dt, nil
 }
 
-// buildExecTools constructs the approval-gated exec tool set bound to one Workspace
-// over root. Returned only when -allow-exec is set.
-func buildExecTools(root string) ([]agent.Tool, error) {
-	tools, err := agenttools.NewExecTools(root)
+// buildExecTools constructs the approval-gated exec tool set — the foreground
+// run_command plus the four background tools (#346) — bound to ONE Workspace
+// over root and one shared manager, so foreground and background preparation
+// see identical containment. Returned only when interactive -allow-exec is set
+// (one-shot drops the flag; -plan/-goal reject it at validation).
+func buildExecTools(root string, manager *agenttools.BackgroundManager) ([]agent.Tool, error) {
+	tools, err := agenttools.NewExecToolsWithBackground(root, manager)
 	if err != nil {
 		return nil, fmt.Errorf("golem: build exec tools: %w", err)
 	}

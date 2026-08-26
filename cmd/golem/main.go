@@ -108,7 +108,7 @@ func parseFlags(args []string) (flags, error) {
 	fs.BoolVar(&f.noSession, "no-session", false, "disable persistent session memory")
 	fs.BoolVar(&f.fresh, "fresh", false, "start a new persistent session instead of resuming this workspace")
 	fs.BoolVar(&f.allowWrite, "allow-write", false, "enable approval-gated write_file/edit_file tools")
-	fs.BoolVar(&f.allowExec, "allow-exec", false, "enable the approval-gated run_command exec tool")
+	fs.BoolVar(&f.allowExec, "allow-exec", false, "enable the approval-gated run_command and background command tools (start/status/tail/stop)")
 	fs.BoolVar(&f.delegate, "delegate", false, "enable the delegate_code tool (route a scoped codegen sub-task to a specialist model)")
 	fs.StringVar(&f.delegateRole, "delegate-role", "coding", "model role the delegate_code tool routes to")
 	fs.BoolVar(&f.dispatch, "dispatch", false, "enable the dispatch tool (bounded read-only exploration tasks use backend-governed concurrency; ungoverned routing stays serial)")
@@ -564,7 +564,14 @@ type runHooks struct {
 	openFeedback        func(context.Context, string, string, func(string)) (*feedbackService, error)
 	startAutoIndex      func() func()
 	afterAutoIndexStart func(lineSourceMode, agent.Tool, *feedbackService) error
-	closed              func(string)
+	// afterBackgroundReady runs once in the interactive branch, after the exec
+	// tools are registered and the background manager's replCtx shutdown
+	// binding is in place (#346). It receives the real manager (nil when
+	// -allow-exec is off), the registered exec tools, and the REPL cancel
+	// function, so lifecycle tests can start real jobs and drive host-context
+	// cancellation through run.
+	afterBackgroundReady func(*agenttools.BackgroundManager, []agent.Tool, context.CancelFunc)
+	closed               func(string)
 }
 
 func formatFeedbackReport(report feedbackReport) string {
@@ -881,11 +888,27 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 		journal = j
 	}
 
+	// Background manager (#346): constructed only when interactive -allow-exec
+	// survives to this point (one-shot already forced allowExec false;
+	// -plan/-goal reject it at flag validation), so every manager gets the
+	// replCtx lifetime binding below. The deferred Shutdown is registered
+	// immediately so no error path between here and that binding can leak a
+	// process; sync.Once makes it safe beside the AfterFunc path.
+	var bgManager *agenttools.BackgroundManager
+	var bgExecTools []agent.Tool
 	if f.allowExec {
-		et, eerr := buildExecTools(root)
+		bgManager = agenttools.NewBackgroundManager()
+		defer func() {
+			bgManager.Shutdown()
+			if hooks.closed != nil {
+				hooks.closed("background")
+			}
+		}()
+		et, eerr := buildExecTools(root, bgManager)
 		if eerr != nil {
 			return eerr
 		}
+		bgExecTools = et
 		tools = append(tools, et...)
 	}
 
@@ -1074,6 +1097,7 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 		retrieveOmitted:     retrieveOmitted,
 		session:             sessn,
 		journal:             journal,
+		bgManager:           bgManager,
 		grants:              newApprovalGrants(),
 		allowWrite:          f.allowWrite,
 		allowExec:           f.allowExec,
@@ -1124,6 +1148,20 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 		}
 		notice = ctrl.notice
 		onInterrupt = ctrl.interrupt
+		if bgManager != nil {
+			// replCtx is the manager's host lifetime (#346): idle Ctrl-C quit
+			// and any other REPL-context cancellation tear every background job
+			// down even while run is still unwinding. Deferred AFTER the
+			// construction-time Shutdown defer, so LIFO stops an unstarted
+			// callback before normal deferred shutdown; Shutdown's sync.Once
+			// makes an already-running callback and normal teardown safe and
+			// blocking.
+			stopAfter := context.AfterFunc(replCtx, bgManager.Shutdown)
+			defer stopAfter()
+		}
+		if hooks.afterBackgroundReady != nil {
+			hooks.afterBackgroundReady(bgManager, bgExecTools, cancelREPL)
+		}
 	}
 	go func() {
 		for range sigCh {
