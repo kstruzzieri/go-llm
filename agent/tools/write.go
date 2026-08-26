@@ -100,7 +100,7 @@ func (t *WriteFile) Plan(_ context.Context, raw json.RawMessage) (agent.ToolPlan
 	return agent.ToolPlan{Effect: eff, Preview: preview, ApprovalKey: WriteClassApprovalKey}, nil
 }
 
-func (t *WriteFile) Invoke(_ context.Context, raw json.RawMessage) (agent.ToolResult, error) {
+func (t *WriteFile) Invoke(ctx context.Context, raw json.RawMessage) (agent.ToolResult, error) {
 	pp, ok := t.consume(ContentHash(raw))
 	if !ok {
 		return errResult("mutation preview missing; retry"), nil
@@ -129,12 +129,18 @@ func (t *WriteFile) Invoke(_ context.Context, raw json.RawMessage) (agent.ToolRe
 	// between this re-read and the rename below. WriteFileAtomic re-checks path TYPE
 	// (symlink/dir) before renaming but not content; without OS file locks this is an
 	// accepted limitation for a local single-user coding agent.
-	if err := t.ws.WriteFileAtomic(pp.path, pp.afterContent); err != nil {
-		return errResult(toolVisibleError(err).Error()), nil
-	}
-	record(t.j, MutationRecord{
+	rec := MutationRecord{
 		Path: pp.path, PriorContent: pp.priorContent, Existed: pp.priorExists,
 		AfterHash: pp.afterHash, Summary: pp.summary, At: time.Now(),
+	}
+	toolErr, internalErr := runJournaledWrite(ctx, t.j, rec, func() error {
+		return t.ws.WriteFileAtomic(pp.path, pp.afterContent)
 	})
+	if internalErr != nil {
+		return agent.ToolResult{}, internalErr
+	}
+	if toolErr != nil {
+		return errResult(toolVisibleError(toolErr).Error()), nil
+	}
 	return agent.ToolResult{Content: pp.summary, Preview: pp.summary}, nil
 }

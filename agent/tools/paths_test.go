@@ -86,6 +86,15 @@ func TestWorkspaceUnderRootPrefixSibling(t *testing.T) {
 	}
 }
 
+func TestWorkspaceUnderVolumeRoot(t *testing.T) {
+	root := filepath.VolumeName(os.TempDir()) + string(os.PathSeparator)
+	ws := &Workspace{root: root}
+	child := filepath.Join(root, "child")
+	if !ws.underRoot(child) {
+		t.Fatalf("underRoot(%q) rejected child of volume root %q", child, root)
+	}
+}
+
 func TestNewWorkspaceCanonicalizesRoot(t *testing.T) {
 	real := t.TempDir()
 	link := filepath.Join(t.TempDir(), "link")
@@ -99,6 +108,144 @@ func TestNewWorkspaceCanonicalizesRoot(t *testing.T) {
 	realCanon, _ := filepath.EvalSymlinks(real)
 	if ws.root != realCanon {
 		t.Fatalf("root not canonicalized: got %q want %q", ws.root, realCanon)
+	}
+}
+
+func TestNewWorkspaceAllowsSearchOnlyAncestor(t *testing.T) {
+	t.Parallel()
+
+	base := t.TempDir()
+	ancestor := filepath.Join(base, "search-only")
+	root := filepath.Join(ancestor, "workspace")
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		t.Fatalf("mkdir workspace: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := os.Chmod(ancestor, 0o700); err != nil {
+			t.Errorf("restore ancestor mode: %v", err)
+		}
+	})
+	if err := os.Chmod(ancestor, 0o111); err != nil {
+		t.Fatalf("make ancestor search-only: %v", err)
+	}
+	if _, err := os.ReadDir(ancestor); err == nil {
+		t.Skip("directory permissions are not enforced")
+	}
+
+	if _, err := NewWorkspace(root); err != nil {
+		t.Fatalf("NewWorkspace(%q) error = %v, want nil", root, err)
+	}
+}
+
+func TestWorkspaceCanonicalPathForUndoKeepsDistinctCaseSensitiveNames(t *testing.T) {
+	root := t.TempDir()
+	upper := filepath.Join(root, "Case.txt")
+	lower := filepath.Join(root, "case.txt")
+	if err := os.WriteFile(upper, []byte("upper"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(lower, []byte("lower"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	upperInfo, err := os.Stat(upper)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lowerInfo, err := os.Stat(lower)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if os.SameFile(upperInfo, lowerInfo) {
+		t.Skip("filesystem is case-insensitive")
+	}
+	ws, err := NewWorkspace(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gotUpper, err := ws.CanonicalPathForUndo("Case.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	gotLower, err := ws.CanonicalPathForUndo("case.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotUpper != "Case.txt" || gotLower != "case.txt" {
+		t.Fatalf("canonical paths = %q, %q; want distinct spellings", gotUpper, gotLower)
+	}
+}
+
+func TestWorkspaceCanonicalPathForUndoUsesNamedHardlinkAlias(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	named := filepath.Join(root, "target.txt")
+	if err := os.WriteFile(named, []byte("target"), 0o600); err != nil {
+		t.Fatalf("write target: %v", err)
+	}
+	if err := os.Link(named, filepath.Join(root, "a-hardlink.txt")); err != nil {
+		t.Skipf("hard links unavailable: %v", err)
+	}
+	requested := filepath.Join(root, "TARGET.TXT")
+	namedInfo, err := os.Stat(named)
+	if err != nil {
+		t.Fatalf("stat named target: %v", err)
+	}
+	requestedInfo, err := os.Stat(requested)
+	if err != nil || !os.SameFile(namedInfo, requestedInfo) {
+		t.Skip("filesystem is case-sensitive")
+	}
+
+	ws, err := NewWorkspace(root)
+	if err != nil {
+		t.Fatalf("NewWorkspace(%q): %v", root, err)
+	}
+	got, err := ws.CanonicalPathForUndo("TARGET.TXT")
+	if err != nil {
+		t.Fatalf("CanonicalPathForUndo(%q): %v", "TARGET.TXT", err)
+	}
+	if got != "target.txt" {
+		t.Errorf("CanonicalPathForUndo(%q) = %q, want %q", "TARGET.TXT", got, "target.txt")
+	}
+}
+
+func TestWorkspaceCanonicalPathForUndoRejectsAmbiguousHardlinks(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	composed := "\u00e9.txt"
+	decomposed := "e\u0301.txt"
+	named := filepath.Join(root, composed)
+	if err := os.WriteFile(named, []byte("target"), 0o600); err != nil {
+		t.Fatalf("write target: %v", err)
+	}
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		t.Fatalf("read target directory: %v", err)
+	}
+	requestedBase := decomposed
+	if len(entries) == 1 && entries[0].Name() == decomposed {
+		requestedBase = composed
+	}
+	requested := filepath.Join(root, requestedBase)
+	namedInfo, err := os.Stat(named)
+	if err != nil {
+		t.Fatalf("stat named target: %v", err)
+	}
+	requestedInfo, err := os.Stat(requested)
+	if err != nil || !os.SameFile(namedInfo, requestedInfo) || requestedBase == entries[0].Name() {
+		t.Skip("filesystem does not expose a differently-normalized alias")
+	}
+	if err := os.Link(named, filepath.Join(root, "a-hardlink.txt")); err != nil {
+		t.Skipf("hard links unavailable: %v", err)
+	}
+
+	ws, err := NewWorkspace(root)
+	if err != nil {
+		t.Fatalf("NewWorkspace(%q): %v", root, err)
+	}
+	if got, err := ws.CanonicalPathForUndo(requestedBase); err == nil {
+		t.Fatalf("CanonicalPathForUndo(%q) = %q, nil; want ambiguous hardlink error", requestedBase, got)
 	}
 }
 

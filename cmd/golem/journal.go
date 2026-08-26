@@ -9,12 +9,15 @@ import (
 	agenttools "github.com/kstruzzieri/go-llm/agent/tools"
 )
 
-// mutationJournal is the in-session undo stack. It implements agenttools.Journal,
-// receiving a record after each applied write, and restores the most recent
-// mutation on /undo via the same containment-checked Workspace primitives the tools
-// use. Records are RAM-only (lost at exit), which is acceptable for an interactive
-// REPL. peek -> verify -> restore -> pop: a refused or failed undo leaves the
-// record on the stack so nothing is lost.
+// mutationJournal is the RAM-only undo stack used by AgentFlow task mode's
+// compositeJournal (agentflow_driver.go). The interactive REPL's /undo is
+// backed by the durable checkpointJournal (#355); this type deliberately
+// keeps the pre-#355 semantics for task mode until a task-mode requirement
+// is filed. It implements agenttools.Journal, receiving a record after each
+// applied write, and restores the most recent mutation via the same
+// containment-checked Workspace primitives the tools use. peek -> verify ->
+// restore -> pop: a refused or failed undo leaves the record on the stack so
+// nothing is lost.
 type mutationJournal struct {
 	ws   *agenttools.Workspace
 	mu   sync.Mutex

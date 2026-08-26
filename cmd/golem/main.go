@@ -564,6 +564,7 @@ type runHooks struct {
 	openFeedback        func(context.Context, string, string, func(string)) (*feedbackService, error)
 	startAutoIndex      func() func()
 	afterAutoIndexStart func(lineSourceMode, agent.Tool, *feedbackService) error
+	afterCheckpointOpen func(*checkpointStore) error
 	// afterBackgroundReady runs once in the interactive branch, after the exec
 	// tools are registered and the background manager's replCtx shutdown
 	// binding is in place (#346). It receives the real manager (nil when
@@ -593,7 +594,7 @@ func formatFeedbackReport(report feedbackReport) string {
 		report.attempted, report.completed, report.dropped, dropReasons, report.presentationDuplicates, report.presentationJoinMisses)
 }
 
-func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...runHooks) error {
+func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...runHooks) (runErr error) {
 	var hooks runHooks
 	if len(testHooks) > 0 {
 		hooks = testHooks[0]
@@ -878,11 +879,36 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 		}
 	}()
 
-	var journal *mutationJournal
+	var journal *checkpointJournal
 	if f.allowWrite {
-		wt, j, werr := buildWriteTools(root)
+		// D6: -allow-write fails closed on ANY checkpoint lifecycle failure
+		// (store, lease, migration, recovery, state query, hardening) rather
+		// than silently dropping the #355 durability guarantee.
+		cpStore, cerr := openCheckpointStore(ctx, os.Getenv, root)
+		if cerr != nil {
+			return fmt.Errorf("golem: checkpoint store: %w", cerr)
+		}
+		defer func() { runErr = errors.Join(runErr, cpStore.Close()) }()
+		if hooks.afterCheckpointOpen != nil {
+			if err := hooks.afterCheckpointOpen(cpStore); err != nil {
+				return err
+			}
+		}
+		wt, j, werr := buildWriteTools(root, cpStore)
 		if werr != nil {
 			return werr
+		}
+		notice, rerr := j.recoverStartup(ctx)
+		if rerr != nil {
+			return fmt.Errorf("golem: checkpoint recovery: %w", rerr)
+		}
+		if notice != "" {
+			warns = append(warns, notice)
+		}
+		if n, ierr := cpStore.countState(ctx, checkpointUndoing); ierr != nil {
+			return fmt.Errorf("golem: checkpoint state: %w", ierr)
+		} else if n > 0 {
+			warns = append(warns, fmt.Sprintf("an interrupted undo exists (%d checkpoint(s)); /undo resumes it", n))
 		}
 		tools = append(tools, wt...)
 		journal = j

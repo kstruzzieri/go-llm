@@ -217,15 +217,16 @@ func buildExecTools(root string, manager *agenttools.BackgroundManager) ([]agent
 	return tools, nil
 }
 
-// buildWriteTools constructs the workspace-mutating tool set plus the in-session
-// journal that backs /undo, both bound to one Workspace over root. Returned only
+// buildWriteTools constructs the workspace-mutating tool set plus the durable
+// checkpoint journal that backs /undo and /checkpoints (#355), both bound to
+// one Workspace over root and the workspace's leased store. Returned only
 // when -allow-write is set.
-func buildWriteTools(root string) ([]agent.Tool, *mutationJournal, error) {
+func buildWriteTools(root string, store *checkpointStore) ([]agent.Tool, *checkpointJournal, error) {
 	ws, err := agenttools.NewWorkspace(root)
 	if err != nil {
 		return nil, nil, fmt.Errorf("golem: build write tools: %w", err)
 	}
-	journal := newMutationJournal(ws)
+	journal := newCheckpointJournal(ws, store)
 	return agenttools.NewMutatingTools(ws, journal), journal, nil
 }
 
