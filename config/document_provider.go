@@ -149,6 +149,29 @@ func (d *Document) ClearProviderAPIKey(name string) error {
 	})
 }
 
+// ClearAllProviderAPIKeys removes the authored api_key from EVERY provider
+// in one atomic mutation — literal values and ${ENV} reference forms
+// alike. It returns no provider names, no values, and no Config; the only
+// refusal is the document's own central read-only gate, and the scrub
+// itself contributes no provider identity to any error. Clearing is
+// unconditional (ClearProviderAPIKey precedent: consumers cannot read key
+// presence) and cannot fail the finalize gate — no provider requires a
+// key statically, and cleared keys leave expansion entirely. Consumers
+// needing a secret-free document (profile Apply, SaveAs, Export) call
+// this BEFORE any Config()/projection access. Firn's profile loader uses a
+// fixed non-secret sentinel LookupEnv for ambient-unset references, then
+// scrubs before first access. A reference unresolved by the Document's own
+// lookup still fails at load before this API can run (unchanged behavior).
+func (d *Document) ClearAllProviderAPIKeys() error {
+	return d.mutate(func(a *Config) error {
+		for name, p := range a.Providers {
+			p.APIKey = ""
+			a.Providers[name] = p
+		}
+		return nil
+	})
+}
+
 func providerNotFoundErr(op, name string) error {
 	return diagWrap(CodeProviderNotFound, SubjectProvider, name,
 		fmt.Errorf("config: %s: provider %q not configured", op, name))
