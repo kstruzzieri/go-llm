@@ -6,6 +6,8 @@ import (
 	"slices"
 	"sort"
 	"strings"
+
+	"github.com/kstruzzieri/go-llm/provider"
 )
 
 // UnbindUseCase removes a use-case route from defaults. An unknown use
@@ -220,6 +222,103 @@ func (d *Document) ForkRoleModel(sourceRole, role string, facts ModelFacts, opts
 		return nil
 	}, func() {
 		d.registerForkSeedLocked(sourceRole, role)
+	})
+}
+
+// RoleOverrides is the explicit selector-wide override truth for the two
+// projection-visible override fields. Replace semantics on exactly these
+// fields; every other authored field — ThinkTags and Slots included — is
+// preserved untouched (the mutation never reads or writes them).
+type RoleOverrides struct {
+	// Capabilities: nil clears the explicit override (capabilities derive
+	// from Type again); non-empty sets it. An empty non-nil slice is
+	// invalid_argument — a role cannot have zero capabilities.
+	Capabilities []string
+	// ThinkMode: "" clears the override; a value sets it (validated by
+	// the finalize gate against the closed think-mode vocabulary).
+	ThinkMode string
+}
+
+// SetRoleOverridesOpts is the eligibility-gate subset of the SetRoleModel
+// options — there is nothing to re-assert because the overrides ARE the
+// assertion. Caps/KnownMask are consulted only when clearing (evaluation
+// falls back to derived-from-type facts); a set override is evaluated as
+// selector-wide persisted truth with full knowledge (carve-down rule).
+type SetRoleOverridesOpts struct {
+	Requirements    map[string]provider.Capability
+	Caps, KnownMask provider.Capability
+	ConfirmUnknown  bool
+}
+
+// SetRoleOverrides applies ov to EVERY role whose effective selector
+// (implicit-ollama rule applied) equals sel, in one atomic mutation —
+// uniform values keep the static selector-conflict invariant satisfiable
+// by construction. Zero matching roles is role_not_found with no subject
+// (nothing to override). Firn uses this for same-selector capability/
+// think edits instead of SetRoleModel, whose replace semantics clear
+// omitted ThinkTags/Slots.
+func (d *Document) SetRoleOverrides(sel provider.ModelKey, ov RoleOverrides, opts SetRoleOverridesOpts) error {
+	return d.mutate(func(a *Config) error {
+		if sel.Provider == "" || sel.Model == "" {
+			return diagWrap(CodeInvalidArgument, SubjectNone, "",
+				fmt.Errorf("config: set role overrides: empty provider or model"))
+		}
+		if ov.Capabilities != nil && len(ov.Capabilities) == 0 {
+			return diagWrap(CodeInvalidArgument, SubjectNone, "",
+				fmt.Errorf("config: set role overrides: empty capabilities override (nil clears)"))
+		}
+		var matching []string
+		for _, role := range sortedStringKeys(a.Models) {
+			m := a.Models[role]
+			providerName := m.Provider
+			if providerName == "" {
+				providerName = "ollama"
+			}
+			if providerName == sel.Provider && m.Name == sel.Model {
+				matching = append(matching, role)
+			}
+		}
+		if len(matching) == 0 {
+			return diagWrap(CodeRoleNotFound, SubjectNone, "",
+				fmt.Errorf("config: set role overrides: no role uses %s/%s", sel.Provider, sel.Model))
+		}
+		evalCaps, evalKnown := opts.Caps, opts.KnownMask
+		if ov.Capabilities != nil {
+			parsed, perr := provider.ParseCapsStrict(ov.Capabilities)
+			if perr != nil {
+				return diagWrap(CodeModelInvalid, SubjectRole, matching[0],
+					fmt.Errorf("config: set role overrides: capabilities: %w", perr))
+			}
+			evalCaps, evalKnown = parsed, provider.CanonicalCaps()
+		}
+		gate := make(map[string]bool, len(matching))
+		for _, r := range matching {
+			gate[r] = true
+		}
+		verdict, reasons := aggregateVerdict(a, gate, opts.Requirements, evalCaps, evalKnown)
+		switch verdict {
+		case provider.CapIneligible:
+			return diagWrap(CodeEligibilityIneligible, SubjectRole, matching[0],
+				fmt.Errorf("config: set role overrides: %s/%s ineligible: %s",
+					sel.Provider, sel.Model, strings.Join(reasons, ", ")))
+		case provider.CapUnknown:
+			if !opts.ConfirmUnknown {
+				return diagWrap(CodeEligibilityUnknown, SubjectRole, matching[0],
+					fmt.Errorf("config: set role overrides: %s/%s eligibility unknown (%s); confirm to proceed",
+						sel.Provider, sel.Model, strings.Join(reasons, ", ")))
+			}
+		}
+		for _, role := range matching {
+			m := a.Models[role]
+			if ov.Capabilities != nil {
+				m.Capabilities = append([]string(nil), ov.Capabilities...)
+			} else {
+				m.Capabilities = nil
+			}
+			m.ThinkMode = ov.ThinkMode
+			a.Models[role] = m
+		}
+		return nil
 	})
 }
 

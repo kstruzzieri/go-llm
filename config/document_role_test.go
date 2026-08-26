@@ -892,3 +892,172 @@ func TestForkRoleModelByteStability(t *testing.T) {
 		t.Fatalf("no-op save published %d times", published)
 	}
 }
+
+// ACCEPTANCE GATE (firn-ide#263 Slice B Task 0): omitted authored fields
+// — ThinkTags, Slots, Options, Fallbacks, Description, unknown members —
+// survive SetRoleOverrides; only capabilities/think_mode change.
+func TestSetRoleOverridesLossless(t *testing.T) {
+	d := loadTestDoc(t, roleFixture)
+	var beforeFields map[string]json.RawMessage
+	beforeEntry := renderedModelEntries(t, []byte(renderToString(t, d)))["agent"]
+	if err := json.Unmarshal(beforeEntry, &beforeFields); err != nil {
+		t.Fatal(err)
+	}
+	sel := provider.ModelKey{Provider: "local", Model: "m1"}
+	ov := RoleOverrides{Capabilities: []string{"chat"}, ThinkMode: "toggle"}
+	opts := SetRoleOverridesOpts{
+		Requirements: map[string]provider.Capability{"agent": provider.CapChat},
+	}
+	if err := d.SetRoleOverrides(sel, ov, opts); err != nil {
+		t.Fatal(err)
+	}
+	m := d.authored.Models["agent"]
+	if !slices.Equal(m.Capabilities, []string{"chat"}) || m.ThinkMode != "toggle" {
+		t.Fatalf("overrides not applied: %+v", m)
+	}
+	if m.ThinkTags == nil || m.Slots != 2 || m.Options == nil ||
+		m.Description != "keep me" || len(m.Fallbacks) != 1 {
+		t.Fatalf("omitted fields lost: %+v", m)
+	}
+	path := d.Origin().Path
+	if err := d.SaveReplace(path, d.Revision()); err != nil {
+		t.Fatal(err)
+	}
+	out, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var entry map[string]json.RawMessage
+	if err := json.Unmarshal(renderedModelEntries(t, out)["agent"], &entry); err != nil {
+		t.Fatal(err)
+	}
+	for key, want := range beforeFields {
+		if key == "capabilities" || key == "think_mode" {
+			continue
+		}
+		if !bytes.Equal(entry[key], want) {
+			t.Fatalf("published bytes changed omitted field %q: before=%s after=%s",
+				key, want, entry[key])
+		}
+	}
+	for key := range entry {
+		if key == "capabilities" || key == "think_mode" {
+			continue
+		}
+		if _, existed := beforeFields[key]; !existed {
+			t.Fatalf("published bytes added unrelated field %q", key)
+		}
+	}
+	if string(entry["think_mode"]) != `"toggle"` {
+		t.Fatalf("think_mode not published: %s", entry["think_mode"])
+	}
+}
+
+func TestSetRoleOverridesNoOpByteStable(t *testing.T) {
+	d := loadTestDoc(t, roleFixture)
+	before := renderToString(t, d)
+	err := d.SetRoleOverrides(
+		provider.ModelKey{Provider: "local", Model: "m1"},
+		RoleOverrides{Capabilities: []string{"chat", "stream"}, ThinkMode: "always"},
+		SetRoleOverridesOpts{
+			Requirements: map[string]provider.Capability{"agent": provider.CapChat},
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after := renderToString(t, d); after != before {
+		t.Fatalf("no-op override changed canonical bytes:\nbefore=%s\nafter=%s", before, after)
+	}
+}
+
+// Selector-wide: every matching role gets identical values; clearing uses
+// nil capabilities / empty think mode.
+func TestSetRoleOverridesSelectorWideAndClear(t *testing.T) {
+	d := loadTestDoc(t, roleFixture)
+	// Put "spare" on agent's selector so two roles match.
+	facts := ModelFacts{Key: provider.ModelKey{Provider: "local", Model: "m1"}, Type: "moe"}
+	if _, err := d.SetRoleModel("spare", facts, SetRoleModelOpts{ConfirmUnknown: true}); err != nil {
+		t.Fatal(err)
+	}
+	sel := provider.ModelKey{Provider: "local", Model: "m1"}
+	ov := RoleOverrides{Capabilities: []string{"chat", "stream"}, ThinkMode: "auto"}
+	opts := SetRoleOverridesOpts{ConfirmUnknown: true}
+	if err := d.SetRoleOverrides(sel, ov, opts); err != nil {
+		t.Fatal(err)
+	}
+	for _, role := range []string{"agent", "spare"} {
+		m := d.authored.Models[role]
+		if !slices.Equal(m.Capabilities, []string{"chat", "stream"}) || m.ThinkMode != "auto" {
+			t.Fatalf("%s: not uniform: %+v", role, m)
+		}
+	}
+	// Clear both.
+	if err := d.SetRoleOverrides(sel, RoleOverrides{}, opts); err != nil {
+		t.Fatal(err)
+	}
+	for _, role := range []string{"agent", "spare"} {
+		m := d.authored.Models[role]
+		if m.Capabilities != nil || m.ThinkMode != "" {
+			t.Fatalf("%s: not cleared: %+v", role, m)
+		}
+		if role == "agent" && (m.ThinkTags == nil || m.Slots != 2) {
+			t.Fatalf("clear touched omitted fields: %+v", m)
+		}
+	}
+}
+
+func TestSetRoleOverridesRefusals(t *testing.T) {
+	d := loadTestDoc(t, roleFixture)
+	opts := SetRoleOverridesOpts{ConfirmUnknown: true}
+	assertDiag(t, d.SetRoleOverrides(provider.ModelKey{}, RoleOverrides{}, opts),
+		CodeInvalidArgument, SubjectNone, "")
+	assertDiag(t, d.SetRoleOverrides(provider.ModelKey{Provider: "local", Model: "m1"},
+		RoleOverrides{Capabilities: []string{}}, opts),
+		CodeInvalidArgument, SubjectNone, "")
+	assertDiag(t, d.SetRoleOverrides(provider.ModelKey{Provider: "local", Model: "nope"},
+		RoleOverrides{}, opts), CodeRoleNotFound, SubjectNone, "")
+	assertDiag(t, d.SetRoleOverrides(provider.ModelKey{Provider: "local", Model: "m1"},
+		RoleOverrides{Capabilities: []string{"bogus"}}, opts),
+		CodeModelInvalid, SubjectRole, "agent")
+}
+
+// Eligibility: setting an override that removes a required capability from
+// a routed selector refuses; clearing falls back to opts facts.
+func TestSetRoleOverridesEligibility(t *testing.T) {
+	d := loadTestDoc(t, roleFixture)
+	sel := provider.ModelKey{Provider: "local", Model: "m1"}
+	opts := SetRoleOverridesOpts{
+		Requirements: map[string]provider.Capability{"agent": provider.CapToolCall},
+	}
+	assertDiag(t, d.SetRoleOverrides(sel, RoleOverrides{Capabilities: []string{"chat"}}, opts),
+		CodeEligibilityIneligible, SubjectRole, "agent")
+	// Clearing with unknown facts: requires ConfirmUnknown.
+	clearOpts := SetRoleOverridesOpts{
+		Requirements: map[string]provider.Capability{"agent": provider.CapChat},
+	}
+	assertDiag(t, d.SetRoleOverrides(sel, RoleOverrides{}, clearOpts),
+		CodeEligibilityUnknown, SubjectRole, "agent")
+	clearOpts.Caps = provider.CapChat | provider.CapStream
+	clearOpts.KnownMask = provider.CapChat | provider.CapStream
+	if err := d.SetRoleOverrides(sel, RoleOverrides{}, clearOpts); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSetRoleOverridesFinalizeFailureTransactional(t *testing.T) {
+	d := loadTestDoc(t, roleFixture)
+	beforeEffective := d.Config()
+	beforeRender := renderToString(t, d)
+	err := d.SetRoleOverrides(
+		provider.ModelKey{Provider: "local", Model: "m1"},
+		RoleOverrides{Capabilities: []string{"chat", "stream"}, ThinkMode: "sometimes"},
+		SetRoleOverridesOpts{
+			Requirements: map[string]provider.Capability{"agent": provider.CapChat},
+		},
+	)
+	assertDiag(t, err, CodeThinkInvalid, SubjectRole, "agent")
+	if !reflect.DeepEqual(beforeEffective, d.Config()) || beforeRender != renderToString(t, d) {
+		t.Fatal("finalize refusal changed the document")
+	}
+}
