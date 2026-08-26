@@ -6,6 +6,13 @@ All notable changes to `go-llm` are documented here. Downstream consumers
 
 ## [Unreleased]
 
+### Added — tools: sandbox backend seam (#440)
+
+Added `SandboxConfig` and fail-closed sandbox backend construction for the
+foreground and background exec paths. Host remains the only implemented
+runtime and preserves existing execution, approval keys, and previews;
+non-host implementations land in #389, #441, and #442.
+
 ### Added — golem, tools: background command execution (#346)
 
 Golem can now start long-running commands in the background and keep
