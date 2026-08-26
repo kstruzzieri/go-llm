@@ -335,7 +335,7 @@ func TestWriteFilePreparingJournalAbortsOnWriteFailure(t *testing.T) {
 	if err := os.Chmod(root, 0o500); err != nil {
 		t.Fatalf("chmod: %v", err)
 	}
-	t.Cleanup(func() { _ = os.Chmod(root, 0o755) })
+	t.Cleanup(func() { _ = os.Chmod(root, 0o700) })
 	res, ierr := wf.Invoke(context.Background(), raw)
 	if ierr != nil {
 		t.Fatalf("Invoke internal error: %v", ierr)

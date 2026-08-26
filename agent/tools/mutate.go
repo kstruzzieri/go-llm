@@ -193,9 +193,14 @@ func record(j Journal, rec MutationRecord) {
 // write-ahead protocol: Prepare (when the journal supports it) -> write ->
 // Commit, calling Abort when the write fails. For a plain Journal the write
 // runs first and Record follows, exactly as before. toolErr is a model-visible
-// failure with the workspace unchanged (a failed Prepare or a failed write);
+// failure with the workspace unchanged (a failed Prepare or a failed write).
 // internalErr is an infrastructure failure AFTER the file changed (a failed
-// Commit) that must abort the run rather than become a model observation.
+// Commit). Note the orchestrator turns an Invoke error into a model-visible
+// observation too (agent/dispatch.go invokeCall); the run actually stops
+// because a PreparingJournal cancels its captured run context on commit
+// failure, which dispatch treats as a hard abort. The distinct internalErr
+// channel keeps the failure out of the tool-result path so a healthy-looking
+// summary is never reported for a write the journal failed to commit.
 func runJournaledWrite(j Journal, rec MutationRecord, write func() error) (toolErr, internalErr error) {
 	var prepared PreparedMutation
 	if pj, ok := j.(PreparingJournal); ok {
