@@ -80,9 +80,8 @@ type Workspace struct {
 }
 
 // CanonicalWorkspaceRoot resolves a workspace root to its absolute, symlink-free
-// path using the spelling stored by the filesystem. The final step collapses
-// case and Unicode aliases on filesystems that support them without folding
-// distinct names on case-sensitive filesystems.
+// path, canonicalizing filesystem spelling where directory enumeration is
+// permitted without folding distinct names on case-sensitive filesystems.
 func CanonicalWorkspaceRoot(root string) (string, error) {
 	if root == "" {
 		return "", errEmptyRoot
@@ -114,11 +113,20 @@ func NewWorkspace(root string) (*Workspace, error) {
 
 func canonicalExistingPath(path string) (string, error) {
 	volume := filepath.VolumeName(path)
-	current := volume + string(os.PathSeparator)
-	rest := strings.TrimPrefix(path, volume)
-	rest = strings.TrimLeft(rest, string(os.PathSeparator))
-	if rest == "" {
-		return filepath.Clean(current), nil
+	return canonicalExistingPathFrom(volume+string(os.PathSeparator), path)
+}
+
+func canonicalExistingPathFrom(root, path string) (string, error) {
+	current := filepath.Clean(root)
+	rest, err := filepath.Rel(current, path)
+	if err != nil {
+		return "", err
+	}
+	if rest == "." {
+		return current, nil
+	}
+	if rest == ".." || strings.HasPrefix(rest, ".."+string(os.PathSeparator)) {
+		return "", fmt.Errorf("path %q is outside canonical root %q", path, root)
 	}
 	for _, part := range strings.Split(rest, string(os.PathSeparator)) {
 		candidate := filepath.Join(current, part)
@@ -128,6 +136,11 @@ func canonicalExistingPath(path string) (string, error) {
 		}
 		entries, err := os.ReadDir(current)
 		if err != nil {
+			if errors.Is(err, fs.ErrPermission) {
+				// Search permission is sufficient to reach a valid descendant.
+				current = candidate
+				continue
+			}
 			return "", err
 		}
 		actual := ""
@@ -139,10 +152,25 @@ func canonicalExistingPath(path string) (string, error) {
 		}
 		if actual == "" {
 			for _, entry := range entries {
-				info, err := entry.Info()
-				if err == nil && os.SameFile(info, target) {
+				if strings.EqualFold(entry.Name(), part) {
+					if actual != "" {
+						return "", fmt.Errorf("filesystem entry for %q is ambiguous", candidate)
+					}
 					actual = entry.Name()
-					break
+				}
+			}
+		}
+		if actual == "" {
+			for _, entry := range entries {
+				info, err := entry.Info()
+				if err != nil {
+					return "", err
+				}
+				if os.SameFile(info, target) {
+					if actual != "" {
+						return "", fmt.Errorf("filesystem entry for %q is ambiguous", candidate)
+					}
+					actual = entry.Name()
 				}
 			}
 		}
@@ -154,12 +182,12 @@ func canonicalExistingPath(path string) (string, error) {
 	return filepath.Clean(current), nil
 }
 
-func canonicalFuturePath(path string) (string, error) {
+func canonicalFuturePath(root, path string) (string, error) {
 	current := path
 	var suffix []string
 	for {
 		if _, err := os.Lstat(current); err == nil {
-			canonical, err := canonicalExistingPath(current)
+			canonical, err := canonicalExistingPathFrom(root, current)
 			if err != nil {
 				return "", err
 			}
@@ -477,7 +505,7 @@ func (w *Workspace) CanonicalPathForUndo(p string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	canonical, err := canonicalFuturePath(abs)
+	canonical, err := canonicalFuturePath(w.root, abs)
 	if err != nil {
 		return "", err
 	}

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strconv"
 	"sync"
 	"time"
 
@@ -291,7 +292,8 @@ func (j *checkpointJournal) recoverStartup(ctx context.Context) (string, error) 
 			}
 			live, lerr := j.liveState(f.path)
 			if lerr != nil {
-				return "", fmt.Errorf("golem: checkpoint recovery cannot classify %s: %w", f.path, lerr)
+				return "", fmt.Errorf("golem: checkpoint recovery cannot classify %s: %w",
+					checkpointDisplayText(f.path), checkpointDisplayError{cause: lerr})
 			}
 			if live.equal(undoTarget(f)) {
 				if aerr := j.store.abortIntent(ctx, f.id); aerr != nil {
@@ -319,6 +321,20 @@ func (j *checkpointJournal) recoverStartup(ctx context.Context) (string, error) 
 // read errors (symlink/directory replacement), so refusal output never leaks
 // why a path could not be classified.
 const checkpointUndoRefusal = "cannot undo %s: file changed since golem wrote it\n"
+
+// checkpointDisplayText preserves ordinary text while escaping controls and
+// other non-graphic runes so a path or nested path error cannot forge output.
+func checkpointDisplayText(text string) string {
+	quoted := strconv.QuoteToGraphic(text)
+	return quoted[1 : len(quoted)-1]
+}
+
+// checkpointDisplayError keeps errors.Is/As working while preventing a nested
+// filesystem error from reintroducing a control-bearing path into its text.
+type checkpointDisplayError struct{ cause error }
+
+func (e checkpointDisplayError) Error() string { return checkpointDisplayText(e.cause.Error()) }
+func (e checkpointDisplayError) Unwrap() error { return e.cause }
 
 // matchesAfter reports whether cur is a valid starting state for undoing f:
 // exactly the recorded after state, or — parity with the RAM journal — an
@@ -372,13 +388,13 @@ func (j *checkpointJournal) undo(ctx context.Context, out io.Writer, n int) {
 			if !seen {
 				live, lerr := j.liveState(f.path)
 				if lerr != nil {
-					_, _ = fmt.Fprintf(out, checkpointUndoRefusal, f.path)
+					_, _ = fmt.Fprintf(out, checkpointUndoRefusal, checkpointDisplayText(f.path))
 					return
 				}
 				cur = live
 			}
 			if !matchesAfter(cur, f) {
-				_, _ = fmt.Fprintf(out, checkpointUndoRefusal, f.path)
+				_, _ = fmt.Fprintf(out, checkpointUndoRefusal, checkpointDisplayText(f.path))
 				return
 			}
 			expected[f.path] = undoTarget(f)
@@ -433,21 +449,23 @@ func (j *checkpointJournal) restoreGroups(ctx context.Context, out io.Writer, gr
 func (j *checkpointJournal) restoreFile(ctx context.Context, out io.Writer, f checkpointFile) bool {
 	cur, err := j.liveState(f.path)
 	if err != nil {
-		_, _ = fmt.Fprintf(out, checkpointUndoRefusal, f.path)
+		_, _ = fmt.Fprintf(out, checkpointUndoRefusal, checkpointDisplayText(f.path))
 		return false
 	}
 	if !cur.equal(undoTarget(f)) {
 		if !matchesAfter(cur, f) {
-			_, _ = fmt.Fprintf(out, checkpointUndoRefusal, f.path)
+			_, _ = fmt.Fprintf(out, checkpointUndoRefusal, checkpointDisplayText(f.path))
 			return false
 		}
 		if f.existed {
 			if werr := j.ws.WriteFileAtomic(f.path, f.priorContent); werr != nil {
-				_, _ = fmt.Fprintf(out, "undo failed for %s: %v\n", f.path, werr)
+				_, _ = fmt.Fprintf(out, "undo failed for %s: %s\n",
+					checkpointDisplayText(f.path), checkpointDisplayText(werr.Error()))
 				return false
 			}
 		} else if rerr := j.ws.RemoveFile(f.path); rerr != nil {
-			_, _ = fmt.Fprintf(out, "undo failed for %s: %v\n", f.path, rerr)
+			_, _ = fmt.Fprintf(out, "undo failed for %s: %s\n",
+				checkpointDisplayText(f.path), checkpointDisplayText(rerr.Error()))
 			return false
 		}
 	}
@@ -455,10 +473,12 @@ func (j *checkpointJournal) restoreFile(ctx context.Context, out io.Writer, f ch
 		j.crashAfterRestore(f.path)
 	}
 	if err := j.store.markRestored(ctx, f.id); err != nil {
-		_, _ = fmt.Fprintf(out, "undo failed for %s: %v\n", f.path, err)
+		j.latch(err)
+		_, _ = fmt.Fprintf(out, "undo failed for %s: %s\n",
+			checkpointDisplayText(f.path), checkpointDisplayText(err.Error()))
 		return false
 	}
-	_, _ = fmt.Fprintf(out, "undid %s\n", f.path)
+	_, _ = fmt.Fprintf(out, "undid %s\n", checkpointDisplayText(f.path))
 	return true
 }
 

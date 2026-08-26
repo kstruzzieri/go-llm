@@ -564,6 +564,7 @@ type runHooks struct {
 	openFeedback        func(context.Context, string, string, func(string)) (*feedbackService, error)
 	startAutoIndex      func() func()
 	afterAutoIndexStart func(lineSourceMode, agent.Tool, *feedbackService) error
+	afterCheckpointOpen func(*checkpointStore) error
 	// afterBackgroundReady runs once in the interactive branch, after the exec
 	// tools are registered and the background manager's replCtx shutdown
 	// binding is in place (#346). It receives the real manager (nil when
@@ -593,7 +594,7 @@ func formatFeedbackReport(report feedbackReport) string {
 		report.attempted, report.completed, report.dropped, dropReasons, report.presentationDuplicates, report.presentationJoinMisses)
 }
 
-func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...runHooks) error {
+func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...runHooks) (runErr error) {
 	var hooks runHooks
 	if len(testHooks) > 0 {
 		hooks = testHooks[0]
@@ -887,7 +888,12 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 		if cerr != nil {
 			return fmt.Errorf("golem: checkpoint store: %w", cerr)
 		}
-		defer func() { _ = cpStore.Close() }()
+		defer func() { runErr = errors.Join(runErr, cpStore.Close()) }()
+		if hooks.afterCheckpointOpen != nil {
+			if err := hooks.afterCheckpointOpen(cpStore); err != nil {
+				return err
+			}
+		}
 		wt, j, werr := buildWriteTools(root, cpStore)
 		if werr != nil {
 			return werr

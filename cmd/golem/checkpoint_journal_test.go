@@ -323,6 +323,47 @@ func TestCheckpointJournalHardeningFailureLatches(t *testing.T) {
 	}
 }
 
+func TestCheckpointMarkRestoredHardeningFailureLatches(t *testing.T) {
+	j, tools, root := newJournalFixture(t)
+	if err := os.WriteFile(filepath.Join(root, "a.txt"), []byte("A0\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, _ = beginTestTurn(t, j, "turn")
+	applyTool(t, tools, "write_file", map[string]any{"path": "a.txt", "content": "A1\n"})
+	mustSealTurn(t, j)
+
+	ctx := context.Background()
+	groups, err := j.store.newestCompleted(ctx, 1)
+	if err != nil || len(groups) != 1 {
+		t.Fatalf("newestCompleted: %v, %d group(s)", err, len(groups))
+	}
+	group := groups[0]
+	if err := j.store.markUndoing(ctx, []int64{group.id}); err != nil {
+		t.Fatalf("markUndoing: %v", err)
+	}
+
+	dbPath := j.store.dbPath
+	j.store.dbPath = t.TempDir()
+	var out bytes.Buffer
+	if j.restoreFile(ctx, &out, group.files[0]) {
+		t.Fatal("restoreFile reported success despite hardening failure")
+	}
+	if got, ok := readWorkspace(t, root, "a.txt"); !ok || string(got) != "A0\n" {
+		t.Fatalf("a.txt = %q,%v, want restored A0", got, ok)
+	}
+
+	// markRestored committed before hardening failed. Clear the completed undo
+	// so beginTurn can only refuse because the journal latched the failure.
+	j.store.dbPath = dbPath
+	if err := j.store.deleteRestored(ctx, group.id); err != nil {
+		t.Fatalf("deleteRestored cleanup: %v", err)
+	}
+	if err := j.beginTurn(context.Background(), "next", func() {}); err == nil ||
+		!strings.Contains(err.Error(), "checkpoint journal disabled") {
+		t.Fatalf("beginTurn = %v, want refusal from latched markRestored failure", err)
+	}
+}
+
 func TestCheckpointDeleteRestoredHardeningFailureLatches(t *testing.T) {
 	j, tools, _ := newJournalFixture(t)
 	_, _ = beginTestTurn(t, j, "turn")
@@ -573,6 +614,33 @@ func TestCheckpointRecoveryReadErrorFailsStartup(t *testing.T) {
 	}
 }
 
+func TestCheckpointRecoveryPathErrorIsControlSafe(t *testing.T) {
+	j, _, _ := newJournalFixture(t)
+	path := "safe.txt\nforged: recovery succeeded\x1b[31m"
+	ctx := context.Background()
+	if _, _, err := j.store.prepareIntent(ctx, "crashed", testNow, testRec(path, "A0", true)); err != nil {
+		t.Fatalf("prepareIntent: %v", err)
+	}
+	j.ws.SetScopeGuard(func(rel string, _ bool) error {
+		return &os.PathError{Op: "open", Path: rel, Err: os.ErrPermission}
+	})
+
+	_, err := j.recoverStartup(ctx)
+	if err == nil {
+		t.Fatal("recoverStartup succeeded despite the path error")
+	}
+	if !errors.Is(err, os.ErrPermission) {
+		t.Fatalf("recoverStartup error = %v, want wrapped permission error", err)
+	}
+	got := err.Error()
+	if strings.Contains(got, "\nforged:") || strings.Contains(got, "\x1b") {
+		t.Fatalf("recovery error contains a forged line or ANSI escape: %q", got)
+	}
+	if want := "safe.txt\\nforged: recovery succeeded\\x1b[31m"; !strings.Contains(got, want) {
+		t.Fatalf("recoverStartup error = %q, want control-safe path %q", got, want)
+	}
+}
+
 // runUndo executes /undo's engine directly, returning its printed output.
 func runUndo(t *testing.T, j *checkpointJournal, n int) string {
 	t.Helper()
@@ -613,6 +681,24 @@ func TestCheckpointUndoMultiFileTurn(t *testing.T) {
 	}
 	if ids := listIDs(t, j.store); len(ids) != 0 {
 		t.Errorf("checkpoints after undo = %v, want none", ids)
+	}
+}
+
+func TestCheckpointUndoPathOutputIsControlSafe(t *testing.T) {
+	j, tools, _ := newJournalFixture(t)
+	path := "safe.txt\nforged: undid checkpoint\x1b[31m"
+	_, _ = beginTestTurn(t, j, "turn")
+	if res := applyTool(t, tools, "write_file", map[string]any{"path": path, "content": "A1\n"}); res.IsError {
+		t.Fatalf("write malicious path: %s", res.Content)
+	}
+	mustSealTurn(t, j)
+
+	out := runUndo(t, j, 1)
+	if strings.Contains(out, "\nforged:") || strings.Contains(out, "\x1b") {
+		t.Fatalf("undo output contains a forged line or ANSI escape: %q", out)
+	}
+	if want := "undid safe.txt\\nforged: undid checkpoint\\x1b[31m\n"; !strings.Contains(out, want) {
+		t.Fatalf("undo output = %q, want control-safe path line %q", out, want)
 	}
 }
 
