@@ -36,6 +36,12 @@ func (d *Document) mutateCommit(fn func(authored *Config) error, commit func()) 
 	if err := effective.finalizeEnv(d.env); err != nil {
 		return err
 	}
+	// Both tombstone diffs below compare the closure's NET effect: an entry
+	// removed and re-created under the same name within ONE closure records
+	// no tombstone and keeps its stale raw continuity. Every current mutation
+	// performs a single logical change, so this is unreachable today; a
+	// future compound mutation must tombstone explicitly or split into two
+	// mutate calls.
 	for name := range d.authored.Providers {
 		if _, ok := authored.Providers[name]; ok {
 			continue
