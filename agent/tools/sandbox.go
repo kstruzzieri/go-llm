@@ -1,9 +1,12 @@
 package tools
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"math"
 	"slices"
+	"strconv"
 	"strings"
 	"unicode"
 )
@@ -41,10 +44,12 @@ type execBackend interface {
 	backgroundStarter
 }
 
-// resolvedExecBackend binds an implementation to its frozen policy.
+// resolvedExecBackend binds an implementation to the exact normalized
+// policy used to construct it and to render approvals.
 type resolvedExecBackend struct {
 	execBackend
-	sandbox SandboxConfig
+	sandbox  SandboxConfig
+	approval sandboxApproval
 }
 
 type hostBackend struct {
@@ -52,14 +57,101 @@ type hostBackend struct {
 	backgroundStarter
 }
 
-func newHostExecBackend(starter backgroundStarter) resolvedExecBackend {
+// bindExecBackend freezes one backend with its normalized policy and the
+// approval metadata derived from it. Future runtime switch cases must use
+// this helper and extend the key/preview with an immutable digest of any
+// execution-affecting policy not present in SandboxConfig before the case
+// is enabled.
+func bindExecBackend(backend execBackend, cfg SandboxConfig) resolvedExecBackend {
 	return resolvedExecBackend{
-		execBackend: hostBackend{
-			commandRunner:     newPlatformRunner(),
-			backgroundStarter: starter,
-		},
-		sandbox: SandboxConfig{Runtime: SandboxRuntimeHost},
+		execBackend: backend,
+		sandbox:     cfg,
+		approval:    approvalForSandbox(cfg),
 	}
+}
+
+func newHostExecBackend(starter backgroundStarter) resolvedExecBackend {
+	return bindExecBackend(hostBackend{
+		commandRunner:     newPlatformRunner(),
+		backgroundStarter: starter,
+	}, SandboxConfig{Runtime: SandboxRuntimeHost})
+}
+
+// sandboxApproval is the frozen approval metadata for one resolved backend:
+// the key-namespace component and the rendered preview line. The zero value
+// is the host identity (no component, no line — byte-identical approvals).
+type sandboxApproval struct {
+	keyComponent string
+	preview      string
+}
+
+// sandboxFingerprint hashes the approval-relevant sandbox identity using
+// the same labeled, NUL-separated style as commandFingerprint. It accepts
+// only a normalized config (caps sorted and de-duplicated, runtime and
+// capability names control-character-free).
+func sandboxFingerprint(cfg SandboxConfig) string {
+	h := sha256.New()
+	write := func(s string) {
+		_, _ = h.Write([]byte(s))
+		_, _ = h.Write([]byte{0})
+	}
+	write("runtime")
+	write(string(cfg.Runtime))
+	write("allow_network")
+	write(strconv.FormatBool(cfg.AllowNetwork))
+	write("memory_cap_mb")
+	write(strconv.Itoa(cfg.MemoryCapMB))
+	write("cpu_limit")
+	write(strconv.FormatFloat(cfg.CPULimit, 'g', -1, 64))
+	write("drop_caps")
+	for _, name := range cfg.DropCaps {
+		write(name)
+	}
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+// approvalForSandbox derives the approval metadata for a normalized config.
+// Host returns the zero value so host keys and previews stay byte-identical
+// to the pre-#440 recipe; every non-host config gets its own key namespace
+// ("sb:<digest>:") and preview line, so a grant never crosses a
+// runtime/policy boundary.
+func approvalForSandbox(cfg SandboxConfig) sandboxApproval {
+	if cfg.isHost() {
+		return sandboxApproval{}
+	}
+	return sandboxApproval{
+		keyComponent: "sb:" + sandboxFingerprint(cfg) + ":",
+		preview:      renderSandboxLine(cfg),
+	}
+}
+
+// renderSandboxLine renders the permission ceiling the user is approving.
+// Zero resource fields render as "none" (no requested limit, not a backend
+// default); runtime and capability strings are quoted/escaped so delimiters
+// cannot forge ambiguous fields. Presentation only, never parsed.
+func renderSandboxLine(cfg SandboxConfig) string {
+	network := "denied"
+	if cfg.AllowNetwork {
+		network = "allowed"
+	}
+	memory, cpu, caps := "none", "none", "[]"
+	if cfg.MemoryCapMB > 0 {
+		memory = fmt.Sprintf("%dMiB", cfg.MemoryCapMB)
+	}
+	if cfg.CPULimit > 0 {
+		cpu = strconv.FormatFloat(cfg.CPULimit, 'g', -1, 64)
+	}
+	if len(cfg.DropCaps) > 0 {
+		quoted := make([]string, len(cfg.DropCaps))
+		for i, name := range cfg.DropCaps {
+			quoted[i] = strconv.QuoteToGraphic(name)
+		}
+		caps = "[" + strings.Join(quoted, ",") + "]"
+	}
+	return fmt.Sprintf(
+		"runtime=%s network=%s memory_cap=%s cpu_limit=%s drop_caps=%s",
+		strconv.QuoteToGraphic(string(cfg.Runtime)), network, memory, cpu, caps,
+	)
 }
 
 // newExecBackend is the sole runtime-selection switch (#440). It normalizes
@@ -73,9 +165,10 @@ func newExecBackend(cfg SandboxConfig) (resolvedExecBackend, error) {
 	}
 	switch normalized.Runtime {
 	case SandboxRuntimeHost:
-		got := newHostExecBackend(newPlatformStarter())
-		got.sandbox = normalized
-		return got, nil
+		return bindExecBackend(hostBackend{
+			commandRunner:     newPlatformRunner(),
+			backgroundStarter: newPlatformStarter(),
+		}, normalized), nil
 	default:
 		return resolvedExecBackend{}, fmt.Errorf("tools: sandbox runtime %q is not implemented", normalized.Runtime)
 	}

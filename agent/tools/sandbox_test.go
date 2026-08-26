@@ -83,6 +83,83 @@ func TestNewExecBackendRejectsInvalidConfig(t *testing.T) {
 	}
 }
 
+func mustNormalizeSandbox(t *testing.T, cfg SandboxConfig) SandboxConfig {
+	t.Helper()
+	got, err := normalizeSandboxConfig(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return got
+}
+
+func TestSandboxApprovalHostIsEmpty(t *testing.T) {
+	got := approvalForSandbox(mustNormalizeSandbox(t, SandboxConfig{}))
+	if got != (sandboxApproval{}) {
+		t.Fatalf("host approval metadata = %+v, want zero value", got)
+	}
+}
+
+func TestSandboxFingerprintVariesByEveryField(t *testing.T) {
+	base := mustNormalizeSandbox(t, SandboxConfig{Runtime: "container"})
+	baseFP := sandboxFingerprint(base)
+	variants := []SandboxConfig{
+		{Runtime: "bubblewrap"},
+		{Runtime: "container", AllowNetwork: true},
+		{Runtime: "container", MemoryCapMB: 512},
+		{Runtime: "container", CPULimit: 1.5},
+		{Runtime: "container", DropCaps: []string{"ALL"}},
+	}
+	for _, cfg := range variants {
+		if got := sandboxFingerprint(mustNormalizeSandbox(t, cfg)); got == baseFP {
+			t.Errorf("config %+v reused base fingerprint", cfg)
+		}
+	}
+}
+
+func TestSandboxFingerprintCapsUseSetSemantics(t *testing.T) {
+	a := mustNormalizeSandbox(t, SandboxConfig{
+		Runtime: "container", DropCaps: []string{"SYS_ADMIN", "NET_RAW", "NET_RAW"},
+	})
+	b := mustNormalizeSandbox(t, SandboxConfig{
+		Runtime: "container", DropCaps: []string{"NET_RAW", "SYS_ADMIN"},
+	})
+	if sandboxFingerprint(a) != sandboxFingerprint(b) {
+		t.Fatal("equivalent capability sets produced different fingerprints")
+	}
+}
+
+func TestRenderSandboxLine(t *testing.T) {
+	cfg := mustNormalizeSandbox(t, SandboxConfig{
+		Runtime: "container", MemoryCapMB: 512, CPULimit: 1.5,
+		DropCaps: []string{"SYS_ADMIN", "NET_RAW"},
+	})
+	got := renderSandboxLine(cfg)
+	want := `runtime="container" network=denied memory_cap=512MiB cpu_limit=1.5 drop_caps=["NET_RAW","SYS_ADMIN"]`
+	if got != want {
+		t.Fatalf("renderSandboxLine() = %q, want %q", got, want)
+	}
+}
+
+func TestRenderSandboxLineNoRequestedLimits(t *testing.T) {
+	cfg := mustNormalizeSandbox(t, SandboxConfig{Runtime: "container", AllowNetwork: true})
+	got := renderSandboxLine(cfg)
+	want := `runtime="container" network=allowed memory_cap=none cpu_limit=none drop_caps=[]`
+	if got != want {
+		t.Fatalf("renderSandboxLine() = %q, want %q", got, want)
+	}
+}
+
+func TestRenderSandboxLineQuotesDelimiters(t *testing.T) {
+	cfg := mustNormalizeSandbox(t, SandboxConfig{
+		Runtime: "container=custom", DropCaps: []string{"NET_RAW,ALL"},
+	})
+	got := renderSandboxLine(cfg)
+	if !strings.Contains(got, `runtime="container=custom"`) ||
+		!strings.Contains(got, `drop_caps=["NET_RAW,ALL"]`) {
+		t.Fatalf("sandbox preview is structurally ambiguous: %q", got)
+	}
+}
+
 func TestNormalizeSandboxConfigOwnsCanonicalCaps(t *testing.T) {
 	input := []string{"SYS_ADMIN", "NET_RAW", "NET_RAW"}
 	got, err := normalizeSandboxConfig(SandboxConfig{Runtime: "container", DropCaps: input})
