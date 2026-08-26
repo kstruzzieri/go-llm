@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -495,5 +496,362 @@ func TestCheckpointRecoveryReadErrorFailsStartup(t *testing.T) {
 	groups, gerr := s.loadGroups(ctx, checkpointOpen, 0, false)
 	if gerr != nil || len(groups) != 1 || len(groups[0].files) != 1 {
 		t.Fatalf("open groups after failed recovery = %+v, %v", groups, gerr)
+	}
+}
+
+// runUndo executes /undo's engine directly, returning its printed output.
+func runUndo(t *testing.T, j *checkpointJournal, n int) string {
+	t.Helper()
+	var out bytes.Buffer
+	j.undo(context.Background(), &out, n)
+	return out.String()
+}
+
+// readWorkspace returns file bytes, or nil,false when absent.
+func readWorkspace(t *testing.T, root, rel string) ([]byte, bool) {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join(root, rel))
+	if os.IsNotExist(err) {
+		return nil, false
+	}
+	if err != nil {
+		t.Fatalf("read %s: %v", rel, err)
+	}
+	return b, true
+}
+
+func TestCheckpointUndoMultiFileTurn(t *testing.T) {
+	j, tools, root := newJournalFixture(t)
+	if err := os.WriteFile(filepath.Join(root, "a.txt"), []byte("A0\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, _ = beginTestTurn(t, j, "turn")
+	applyTool(t, tools, "write_file", map[string]any{"path": "a.txt", "content": "A1\n"})
+	applyTool(t, tools, "write_file", map[string]any{"path": "b.txt", "content": "B1\n"})
+	mustSealTurn(t, j)
+
+	out := runUndo(t, j, 1)
+	if got, ok := readWorkspace(t, root, "a.txt"); !ok || string(got) != "A0\n" {
+		t.Errorf("a.txt = %q,%v, want A0 restored; output: %s", got, ok, out)
+	}
+	if _, ok := readWorkspace(t, root, "b.txt"); ok {
+		t.Errorf("b.txt still exists, want the created file removed")
+	}
+	if ids := listIDs(t, j.store); len(ids) != 0 {
+		t.Errorf("checkpoints after undo = %v, want none", ids)
+	}
+}
+
+func TestCheckpointUndoDoubleWrite(t *testing.T) {
+	// Same path written twice in ONE turn: only reverse mutation order can
+	// unwind it — forward order hits a hash mismatch on the older record.
+	j, tools, root := newJournalFixture(t)
+	if err := os.WriteFile(filepath.Join(root, "a.txt"), []byte("A0\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, _ = beginTestTurn(t, j, "double write")
+	applyTool(t, tools, "write_file", map[string]any{"path": "a.txt", "content": "A1\n"})
+	applyTool(t, tools, "write_file", map[string]any{"path": "a.txt", "content": "A2\n"})
+	mustSealTurn(t, j)
+
+	runUndo(t, j, 1)
+	if got, ok := readWorkspace(t, root, "a.txt"); !ok || string(got) != "A0\n" {
+		t.Errorf("a.txt = %q,%v, want A0", got, ok)
+	}
+	if ids := listIDs(t, j.store); len(ids) != 0 {
+		t.Errorf("checkpoints = %v, want none", ids)
+	}
+}
+
+func TestCheckpointUndoMultiTurnChain(t *testing.T) {
+	j, tools, root := newJournalFixture(t)
+	_, _ = beginTestTurn(t, j, "t1")
+	applyTool(t, tools, "write_file", map[string]any{"path": "a.txt", "content": "A1\n"})
+	mustSealTurn(t, j)
+	_, _ = beginTestTurn(t, j, "t2")
+	applyTool(t, tools, "write_file", map[string]any{"path": "a.txt", "content": "A2\n"})
+	mustSealTurn(t, j)
+
+	runUndo(t, j, 2)
+	if _, ok := readWorkspace(t, root, "a.txt"); ok {
+		t.Errorf("a.txt exists, want absent after unwinding both turns")
+	}
+	if ids := listIDs(t, j.store); len(ids) != 0 {
+		t.Errorf("checkpoints = %v, want none", ids)
+	}
+}
+
+func TestCheckpointUndoCanonicalPathAliases(t *testing.T) {
+	j, tools, root := newJournalFixture(t)
+	_, _ = beginTestTurn(t, j, "t1")
+	applyTool(t, tools, "write_file", map[string]any{"path": "a.txt", "content": "A1\n"})
+	mustSealTurn(t, j)
+	_, _ = beginTestTurn(t, j, "t2")
+	applyTool(t, tools, "write_file", map[string]any{"path": "./a.txt", "content": "A2\n"})
+	mustSealTurn(t, j)
+
+	runUndo(t, j, 2)
+	if _, ok := readWorkspace(t, root, "a.txt"); ok {
+		t.Errorf("a.txt exists, want absent (aliases must share one chain)")
+	}
+	if ids := listIDs(t, j.store); len(ids) != 0 {
+		t.Errorf("checkpoints = %v, want none", ids)
+	}
+}
+
+func TestCheckpointUndoCreatedFileAlreadyAbsent(t *testing.T) {
+	j, tools, root := newJournalFixture(t)
+	_, _ = beginTestTurn(t, j, "create")
+	applyTool(t, tools, "write_file", map[string]any{"path": "gone.txt", "content": "G1\n"})
+	mustSealTurn(t, j)
+	if err := os.Remove(filepath.Join(root, "gone.txt")); err != nil {
+		t.Fatal(err)
+	}
+	runUndo(t, j, 1)
+	if ids := listIDs(t, j.store); len(ids) != 0 {
+		t.Errorf("checkpoints = %v, want none (already-absent create is the desired end state)", ids)
+	}
+}
+
+func TestCheckpointUndoRefusesWhenTooFew(t *testing.T) {
+	j, tools, root := newJournalFixture(t)
+	_, _ = beginTestTurn(t, j, "only")
+	applyTool(t, tools, "write_file", map[string]any{"path": "a.txt", "content": "A1\n"})
+	mustSealTurn(t, j)
+
+	out := runUndo(t, j, 3)
+	if !strings.Contains(out, "cannot undo 3: only 1 checkpoint(s) available") {
+		t.Errorf("output = %q", out)
+	}
+	if got, ok := readWorkspace(t, root, "a.txt"); !ok || string(got) != "A1\n" {
+		t.Errorf("a.txt = %q,%v, want untouched", got, ok)
+	}
+}
+
+func TestCheckpointUndoNothingToUndo(t *testing.T) {
+	j, _, _ := newJournalFixture(t)
+	if out := runUndo(t, j, 1); !strings.Contains(out, "nothing to undo") {
+		t.Errorf("output = %q", out)
+	}
+}
+
+func TestCheckpointUndoDivergenceZeroPartialWrites(t *testing.T) {
+	j, tools, root := newJournalFixture(t)
+	// b.txt pre-exists so its record is a MODIFY: absence, symlink, and
+	// directory replacement are then divergences, not the tolerated
+	// created-file-already-absent case.
+	if err := os.WriteFile(filepath.Join(root, "b.txt"), []byte("B0\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, _ = beginTestTurn(t, j, "turn")
+	applyTool(t, tools, "write_file", map[string]any{"path": "a.txt", "content": "A1\n"})
+	applyTool(t, tools, "write_file", map[string]any{"path": "b.txt", "content": "B1\n"})
+	applyTool(t, tools, "write_file", map[string]any{"path": "c.txt", "content": "C1\n"})
+	mustSealTurn(t, j)
+
+	divergences := []struct {
+		name   string
+		mutate func(t *testing.T)
+		bState string // expected b.txt content after refused undo ("" = absent)
+	}{
+		{"rewritten", func(t *testing.T) {
+			if err := os.WriteFile(filepath.Join(root, "b.txt"), []byte("B-ext\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}, "B-ext\n"},
+		{"removed", func(t *testing.T) {
+			if err := os.Remove(filepath.Join(root, "b.txt")); err != nil {
+				t.Fatal(err)
+			}
+		}, ""},
+		{"symlink", func(t *testing.T) {
+			_ = os.Remove(filepath.Join(root, "b.txt"))
+			if err := os.Symlink("/etc/hosts", filepath.Join(root, "b.txt")); err != nil {
+				t.Fatal(err)
+			}
+		}, ""},
+		{"directory", func(t *testing.T) {
+			_ = os.Remove(filepath.Join(root, "b.txt"))
+			if err := os.Mkdir(filepath.Join(root, "b.txt"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}, ""},
+	}
+	for _, d := range divergences {
+		t.Run(d.name, func(t *testing.T) {
+			d.mutate(t)
+			out := runUndo(t, j, 1)
+			if !strings.Contains(out, "cannot undo b.txt: file changed since golem wrote it") {
+				t.Errorf("output = %q, want the exact refusal for b.txt", out)
+			}
+			// ZERO partial writes on every divergence class.
+			if got, ok := readWorkspace(t, root, "a.txt"); !ok || string(got) != "A1\n" {
+				t.Errorf("a.txt = %q,%v, want untouched A1", got, ok)
+			}
+			if got, ok := readWorkspace(t, root, "c.txt"); !ok || string(got) != "C1\n" {
+				t.Errorf("c.txt = %q,%v, want untouched C1", got, ok)
+			}
+			infos, err := j.store.list(context.Background())
+			if err != nil || len(infos) != 1 || infos[0].state != checkpointCompleted {
+				t.Errorf("infos = %+v, %v — records must stay completed", infos, err)
+			}
+			// wantB documents the staged state; symlink/dir classes leave
+			// non-regular entries readWorkspace cannot read, so only check
+			// the regular-file classes.
+			if d.name == "rewritten" {
+				if got, _ := readWorkspace(t, root, "b.txt"); string(got) != d.bState {
+					t.Errorf("b.txt = %q, want %q untouched", got, d.bState)
+				}
+			}
+			// Restore b.txt to the recorded after state for the next class.
+			_ = os.RemoveAll(filepath.Join(root, "b.txt"))
+			if err := os.WriteFile(filepath.Join(root, "b.txt"), []byte("B1\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+func TestCheckpointUndoResumeSkipsRestoredEvenAfterUserEdit(t *testing.T) {
+	j, tools, root := newJournalFixture(t)
+	if err := os.WriteFile(filepath.Join(root, "a.txt"), []byte("A0\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, _ = beginTestTurn(t, j, "turn")
+	applyTool(t, tools, "write_file", map[string]any{"path": "a.txt", "content": "A1\n"})
+	applyTool(t, tools, "write_file", map[string]any{"path": "b.txt", "content": "B1\n"})
+	mustSealTurn(t, j)
+	ctx := context.Background()
+
+	// Simulate a crash mid-undo: intent committed, the newest file (b.txt in
+	// reverse order) restored on disk AND flagged, a.txt untouched.
+	groups, err := j.store.newestCompleted(ctx, 1)
+	if err != nil || len(groups) != 1 {
+		t.Fatalf("newestCompleted: %v", err)
+	}
+	if err := j.store.markUndoing(ctx, []int64{groups[0].id}); err != nil {
+		t.Fatalf("markUndoing: %v", err)
+	}
+	b := groups[0].files[0]
+	if b.path != "b.txt" {
+		t.Fatalf("reverse order: first file = %s, want b.txt", b.path)
+	}
+	if err := os.Remove(filepath.Join(root, "b.txt")); err != nil {
+		t.Fatal(err)
+	}
+	if err := j.store.markRestored(ctx, b.id); err != nil {
+		t.Fatalf("markRestored: %v", err)
+	}
+	// The user recreates b.txt after the crash: a restored row must be
+	// skipped regardless of the file's current state.
+	if err := os.WriteFile(filepath.Join(root, "b.txt"), []byte("B-user\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	out := runUndo(t, j, 1)
+	if !strings.Contains(out, "resumed interrupted undo") {
+		t.Errorf("output = %q, want resume message", out)
+	}
+	if got, ok := readWorkspace(t, root, "a.txt"); !ok || string(got) != "A0\n" {
+		t.Errorf("a.txt = %q,%v, want A0 restored by resume", got, ok)
+	}
+	if got, ok := readWorkspace(t, root, "b.txt"); !ok || string(got) != "B-user\n" {
+		t.Errorf("b.txt = %q,%v, want the user's post-crash content untouched", got, ok)
+	}
+	if ids := listIDs(t, j.store); len(ids) != 0 {
+		t.Errorf("checkpoints = %v, want none after completed resume", ids)
+	}
+}
+
+func TestCheckpointUndoResumeIdempotentAfterContentRestore(t *testing.T) {
+	// Crash BETWEEN the content restore and the progress flag: live state is
+	// already the target; resume must mark, not rewrite or refuse.
+	j, tools, root := newJournalFixture(t)
+	if err := os.WriteFile(filepath.Join(root, "a.txt"), []byte("A0\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, _ = beginTestTurn(t, j, "turn")
+	applyTool(t, tools, "write_file", map[string]any{"path": "a.txt", "content": "A1\n"})
+	mustSealTurn(t, j)
+	ctx := context.Background()
+	groups, err := j.store.newestCompleted(ctx, 1)
+	if err != nil || len(groups) != 1 {
+		t.Fatalf("newestCompleted: %v", err)
+	}
+	if err := j.store.markUndoing(ctx, []int64{groups[0].id}); err != nil {
+		t.Fatalf("markUndoing: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "a.txt"), []byte("A0\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	out := runUndo(t, j, 1)
+	if !strings.Contains(out, "resumed interrupted undo") {
+		t.Errorf("output = %q", out)
+	}
+	if got, ok := readWorkspace(t, root, "a.txt"); !ok || string(got) != "A0\n" {
+		t.Errorf("a.txt = %q,%v, want A0", got, ok)
+	}
+	if ids := listIDs(t, j.store); len(ids) != 0 {
+		t.Errorf("checkpoints = %v, want none", ids)
+	}
+}
+
+func TestCheckpointUndoInterruptedTakesPriorityOverN(t *testing.T) {
+	j, tools, root := newJournalFixture(t)
+	_, _ = beginTestTurn(t, j, "t1")
+	applyTool(t, tools, "write_file", map[string]any{"path": "a.txt", "content": "A1\n"})
+	mustSealTurn(t, j)
+	_, _ = beginTestTurn(t, j, "t2")
+	applyTool(t, tools, "write_file", map[string]any{"path": "b.txt", "content": "B1\n"})
+	mustSealTurn(t, j)
+	ctx := context.Background()
+	groups, err := j.store.newestCompleted(ctx, 1)
+	if err != nil || len(groups) != 1 {
+		t.Fatalf("newestCompleted: %v", err)
+	}
+	if err := j.store.markUndoing(ctx, []int64{groups[0].id}); err != nil {
+		t.Fatalf("markUndoing: %v", err)
+	}
+
+	out := runUndo(t, j, 2) // n=2 must NOT touch t1 while a resume is pending
+	if !strings.Contains(out, "resumed interrupted undo") {
+		t.Errorf("output = %q", out)
+	}
+	if got, ok := readWorkspace(t, root, "a.txt"); !ok || string(got) != "A1\n" {
+		t.Errorf("a.txt = %q,%v — /undo 2 touched t1 during a resume", got, ok)
+	}
+	if _, ok := readWorkspace(t, root, "b.txt"); ok {
+		t.Errorf("b.txt exists, want the resume to have removed it")
+	}
+}
+
+func TestCheckpointUndoResumeDivergenceRetainsRecord(t *testing.T) {
+	j, tools, root := newJournalFixture(t)
+	_, _ = beginTestTurn(t, j, "turn")
+	applyTool(t, tools, "write_file", map[string]any{"path": "a.txt", "content": "A1\n"})
+	mustSealTurn(t, j)
+	ctx := context.Background()
+	groups, err := j.store.newestCompleted(ctx, 1)
+	if err != nil || len(groups) != 1 {
+		t.Fatalf("newestCompleted: %v", err)
+	}
+	if err := j.store.markUndoing(ctx, []int64{groups[0].id}); err != nil {
+		t.Fatalf("markUndoing: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "a.txt"), []byte("A-ext\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	out := runUndo(t, j, 1)
+	if !strings.Contains(out, "cannot undo a.txt: file changed since golem wrote it") {
+		t.Errorf("output = %q", out)
+	}
+	infos, err := j.store.list(ctx)
+	if err != nil || len(infos) != 1 || infos[0].state != checkpointUndoing {
+		t.Errorf("infos = %+v, %v — the undoing record must be retained", infos, err)
+	}
+	if got, _ := readWorkspace(t, root, "a.txt"); string(got) != "A-ext\n" {
+		t.Errorf("a.txt = %q, want the divergent content untouched", got)
 	}
 }
