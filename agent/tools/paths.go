@@ -75,25 +75,108 @@ type ScopeGuard func(rel string, write bool) error
 // component is ever resolved through a symlink afterwards (symlink policy: never
 // follow).
 type Workspace struct {
-	root  string     // canonical absolute root, post-EvalSymlinks, no trailing separator
+	root  string     // canonical absolute root; volume roots retain their separator
 	guard ScopeGuard // nil => allow everything (default)
 }
 
-// NewWorkspace canonicalizes root via filepath.EvalSymlinks so the root itself
-// may legitimately be a symlinked path while no later access follows a symlink.
-func NewWorkspace(root string) (*Workspace, error) {
+// CanonicalWorkspaceRoot resolves a workspace root to its absolute, symlink-free
+// path using the spelling stored by the filesystem. The final step collapses
+// case and Unicode aliases on filesystems that support them without folding
+// distinct names on case-sensitive filesystems.
+func CanonicalWorkspaceRoot(root string) (string, error) {
 	if root == "" {
-		return nil, errEmptyRoot
+		return "", errEmptyRoot
 	}
 	abs, err := filepath.Abs(root)
 	if err != nil {
-		return nil, fmt.Errorf("tools: abs root: %w", err)
+		return "", fmt.Errorf("tools: abs root: %w", err)
 	}
-	canon, err := filepath.EvalSymlinks(abs)
+	abs, err = filepath.EvalSymlinks(abs)
 	if err != nil {
-		return nil, fmt.Errorf("tools: resolve root: %w", err)
+		return "", fmt.Errorf("tools: resolve root: %w", err)
+	}
+	canon, err := canonicalExistingPath(abs)
+	if err != nil {
+		return "", fmt.Errorf("tools: canonicalize root: %w", err)
+	}
+	return canon, nil
+}
+
+// NewWorkspace canonicalizes root so the root itself may legitimately be a
+// symlinked or filesystem-aliased path while no later access follows a symlink.
+func NewWorkspace(root string) (*Workspace, error) {
+	canon, err := CanonicalWorkspaceRoot(root)
+	if err != nil {
+		return nil, err
 	}
 	return &Workspace{root: canon}, nil
+}
+
+func canonicalExistingPath(path string) (string, error) {
+	volume := filepath.VolumeName(path)
+	current := volume + string(os.PathSeparator)
+	rest := strings.TrimPrefix(path, volume)
+	rest = strings.TrimLeft(rest, string(os.PathSeparator))
+	if rest == "" {
+		return filepath.Clean(current), nil
+	}
+	for _, part := range strings.Split(rest, string(os.PathSeparator)) {
+		candidate := filepath.Join(current, part)
+		target, err := os.Stat(candidate)
+		if err != nil {
+			return "", err
+		}
+		entries, err := os.ReadDir(current)
+		if err != nil {
+			return "", err
+		}
+		actual := ""
+		for _, entry := range entries {
+			if entry.Name() == part {
+				actual = part
+				break
+			}
+		}
+		if actual == "" {
+			for _, entry := range entries {
+				info, err := entry.Info()
+				if err == nil && os.SameFile(info, target) {
+					actual = entry.Name()
+					break
+				}
+			}
+		}
+		if actual == "" {
+			return "", fmt.Errorf("filesystem entry for %q disappeared", candidate)
+		}
+		current = filepath.Join(current, actual)
+	}
+	return filepath.Clean(current), nil
+}
+
+func canonicalFuturePath(path string) (string, error) {
+	current := path
+	var suffix []string
+	for {
+		if _, err := os.Lstat(current); err == nil {
+			canonical, err := canonicalExistingPath(current)
+			if err != nil {
+				return "", err
+			}
+			for i := len(suffix) - 1; i >= 0; i-- {
+				canonical = filepath.Join(canonical, suffix[i])
+			}
+			return filepath.Clean(canonical), nil
+		} else if !os.IsNotExist(err) {
+			return "", err
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			return "", fmt.Errorf("no existing ancestor for %q", path)
+		}
+		suffix = append(suffix, filepath.Base(current))
+		current = parent
+	}
 }
 
 // SetScopeGuard installs (or clears with nil) the proof-mode scope guard.
@@ -122,7 +205,11 @@ func (w *Workspace) underRoot(candidate string) bool {
 	if candidate == w.root {
 		return true
 	}
-	return strings.HasPrefix(candidate, w.root+string(os.PathSeparator))
+	prefix := w.root
+	if !os.IsPathSeparator(prefix[len(prefix)-1]) {
+		prefix += string(os.PathSeparator)
+	}
+	return strings.HasPrefix(candidate, prefix)
 }
 
 // cleanRel rejects NUL bytes and absolute inputs, joins (and cleans) the input
@@ -381,6 +468,27 @@ func (w *Workspace) resolveWriteTarget(p string) (abs string, priorExists bool, 
 		return "", false, errNotRegular
 	}
 	return abs, true, nil
+}
+
+// CanonicalPathForUndo returns the cleaned workspace-relative spelling used by
+// the filesystem for a current or future write target.
+func (w *Workspace) CanonicalPathForUndo(p string) (string, error) {
+	abs, _, err := w.resolveWriteTarget(p)
+	if err != nil {
+		return "", err
+	}
+	canonical, err := canonicalFuturePath(abs)
+	if err != nil {
+		return "", err
+	}
+	if !w.underRoot(canonical) {
+		return "", errEscape
+	}
+	rel, err := filepath.Rel(w.root, canonical)
+	if err != nil {
+		return "", err
+	}
+	return filepath.ToSlash(rel), nil
 }
 
 // WriteFileAtomic writes content to a workspace-relative path by creating a temp

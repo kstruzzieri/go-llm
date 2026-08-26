@@ -108,7 +108,9 @@ func (j *checkpointJournal) beginTurn(ctx context.Context, goal string, cancel c
 	}
 	n, err := j.store.countState(ctx, checkpointUndoing)
 	if err != nil {
-		j.fatal = err
+		if !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+			j.fatal = err
+		}
 		return err
 	}
 	if n > 0 {
@@ -140,10 +142,16 @@ func (j *checkpointJournal) Prepare(rec agenttools.MutationRecord) (agenttools.P
 	}
 	goal, at, cancel := j.goal, j.turnAt, j.cancel
 	j.mu.Unlock()
+	path, err := j.ws.CanonicalPathForUndo(rec.Path)
+	if err != nil {
+		release()
+		return nil, fmt.Errorf("golem: canonicalize checkpoint path: %w", err)
+	}
+	rec.Path = path
 
 	cpID, fileID, err := j.store.prepareIntent(context.Background(), goal, at, rec)
 	if err != nil {
-		if errors.Is(err, errCheckpointQuota) {
+		if checkpointQuotaOnly(err) {
 			// Expected policy refusal (D7/D8): cancel this turn, keep the
 			// journal healthy for the next one.
 			j.mu.Lock()
@@ -162,6 +170,28 @@ func (j *checkpointJournal) Prepare(rec agenttools.MutationRecord) (agenttools.P
 	j.cpID = cpID
 	j.mu.Unlock()
 	return &checkpointPrepared{j: j, fileID: fileID, release: release}, nil
+}
+
+func checkpointQuotaOnly(err error) bool {
+	if err == nil {
+		return false
+	}
+	if joined, ok := err.(interface{ Unwrap() []error }); ok {
+		errs := joined.Unwrap()
+		if len(errs) == 0 {
+			return false
+		}
+		for _, child := range errs {
+			if !checkpointQuotaOnly(child) {
+				return false
+			}
+		}
+		return true
+	}
+	if child := errors.Unwrap(err); child != nil {
+		return checkpointQuotaOnly(child)
+	}
+	return err == errCheckpointQuota
 }
 
 // Record satisfies agenttools.Journal for compatibility; production tools use
@@ -385,6 +415,7 @@ func (j *checkpointJournal) restoreGroups(ctx context.Context, out io.Writer, gr
 			}
 		}
 		if err := j.store.deleteRestored(ctx, g.id); err != nil {
+			j.latch(err)
 			_, _ = fmt.Fprintf(out, "undo failed: %v\n", err)
 			return false
 		}

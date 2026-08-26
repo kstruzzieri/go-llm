@@ -100,7 +100,7 @@ func (t *WriteFile) Plan(_ context.Context, raw json.RawMessage) (agent.ToolPlan
 	return agent.ToolPlan{Effect: eff, Preview: preview, ApprovalKey: WriteClassApprovalKey}, nil
 }
 
-func (t *WriteFile) Invoke(_ context.Context, raw json.RawMessage) (agent.ToolResult, error) {
+func (t *WriteFile) Invoke(ctx context.Context, raw json.RawMessage) (agent.ToolResult, error) {
 	pp, ok := t.consume(ContentHash(raw))
 	if !ok {
 		return errResult("mutation preview missing; retry"), nil
@@ -133,7 +133,7 @@ func (t *WriteFile) Invoke(_ context.Context, raw json.RawMessage) (agent.ToolRe
 		Path: pp.path, PriorContent: pp.priorContent, Existed: pp.priorExists,
 		AfterHash: pp.afterHash, Summary: pp.summary, At: time.Now(),
 	}
-	toolErr, internalErr := runJournaledWrite(t.j, rec, func() error {
+	toolErr, internalErr := runJournaledWrite(ctx, t.j, rec, func() error {
 		return t.ws.WriteFileAtomic(pp.path, pp.afterContent)
 	})
 	if internalErr != nil {

@@ -323,6 +323,68 @@ func TestCheckpointJournalHardeningFailureLatches(t *testing.T) {
 	}
 }
 
+func TestCheckpointDeleteRestoredHardeningFailureLatches(t *testing.T) {
+	j, tools, _ := newJournalFixture(t)
+	_, _ = beginTestTurn(t, j, "turn")
+	applyTool(t, tools, "write_file", map[string]any{"path": "a.txt", "content": "A1\n"})
+	mustSealTurn(t, j)
+	ctx := context.Background()
+	groups, err := j.store.newestCompleted(ctx, 1)
+	if err != nil || len(groups) != 1 {
+		t.Fatalf("newestCompleted: %v, %d group(s)", err, len(groups))
+	}
+	if err := j.store.markUndoing(ctx, []int64{groups[0].id}); err != nil {
+		t.Fatalf("markUndoing: %v", err)
+	}
+	for _, f := range groups[0].files {
+		if err := j.store.markRestored(ctx, f.id); err != nil {
+			t.Fatalf("markRestored: %v", err)
+		}
+	}
+	groups, err = j.store.undoingGroups(ctx)
+	if err != nil || len(groups) != 1 {
+		t.Fatalf("undoingGroups: %v, %d group(s)", err, len(groups))
+	}
+
+	j.store.dbPath = t.TempDir()
+	var out bytes.Buffer
+	if j.restoreGroups(ctx, &out, groups) {
+		t.Fatal("restoreGroups reported success despite hardening failure")
+	}
+	if !strings.Contains(out.String(), "undo failed") {
+		t.Fatalf("output = %q, want undo failure", out.String())
+	}
+	if ids := listIDs(t, j.store); len(ids) != 0 {
+		t.Fatalf("delete did not commit before hardening failed: %v", ids)
+	}
+	if err := j.beginTurn(context.Background(), "next", func() {}); err == nil {
+		t.Fatal("post-delete hardening failure must latch")
+	}
+}
+
+func TestCheckpointQuotaWithHardeningFailureLatches(t *testing.T) {
+	j, tools, root := newJournalFixture(t)
+	j.store.maxPriorBytes = 100
+	if err := os.WriteFile(filepath.Join(root, "big.txt"), []byte(strings.Repeat("x", 200)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ctx, _ := beginTestTurn(t, j, "quota and hardening")
+	j.store.dbPath = t.TempDir()
+	res := applyTool(t, tools, "write_file", map[string]any{"path": "big.txt", "content": "new\n"})
+	if !res.IsError {
+		t.Fatal("want quota refusal")
+	}
+	if ctx.Err() == nil {
+		t.Fatal("failure must cancel the current turn")
+	}
+	if err := j.sealTurn(context.Background()); !errors.Is(err, errCheckpointQuota) {
+		t.Fatalf("sealTurn = %v, want quota error retained", err)
+	}
+	if err := j.beginTurn(context.Background(), "next", func() {}); err == nil {
+		t.Fatal("combined quota and hardening failure must latch")
+	}
+}
+
 func TestCheckpointQuotaCancelsTurnWithoutPoisoningJournal(t *testing.T) {
 	j, tools, root := newJournalFixture(t)
 	j.store.maxPriorBytes = 100
@@ -376,6 +438,18 @@ func TestCheckpointJournalBeginTurnRefusedWhileUndoing(t *testing.T) {
 	err = j.beginTurn(context.Background(), "blocked", func() {})
 	if !errors.Is(err, errInterruptedUndoPending) {
 		t.Fatalf("beginTurn = %v, want errInterruptedUndoPending", err)
+	}
+}
+
+func TestCheckpointJournalCanceledBeginTurnDoesNotLatch(t *testing.T) {
+	j, _, _ := newJournalFixture(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := j.beginTurn(ctx, "canceled", func() {}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("beginTurn = %v, want context.Canceled", err)
+	}
+	if err := j.beginTurn(context.Background(), "next", func() {}); err != nil {
+		t.Fatalf("fresh turn refused after transient cancellation: %v", err)
 	}
 }
 
@@ -593,6 +667,43 @@ func TestCheckpointUndoCanonicalPathAliases(t *testing.T) {
 	runUndo(t, j, 2)
 	if _, ok := readWorkspace(t, root, "a.txt"); ok {
 		t.Errorf("a.txt exists, want absent (aliases must share one chain)")
+	}
+	if ids := listIDs(t, j.store); len(ids) != 0 {
+		t.Errorf("checkpoints = %v, want none", ids)
+	}
+}
+
+func TestCheckpointUndoCaseAliasesShareChain(t *testing.T) {
+	j, tools, root := newJournalFixture(t)
+	probe := filepath.Join(root, "CaseProbe")
+	if err := os.WriteFile(probe, []byte("probe"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	probeInfo, err := os.Stat(probe)
+	if err != nil {
+		t.Fatal(err)
+	}
+	aliasInfo, err := os.Stat(filepath.Join(root, "caseprobe"))
+	if err != nil || !os.SameFile(probeInfo, aliasInfo) {
+		t.Skip("filesystem is case-sensitive")
+	}
+	if err := os.Remove(probe); err != nil {
+		t.Fatal(err)
+	}
+
+	_, _ = beginTestTurn(t, j, "t1")
+	applyTool(t, tools, "write_file", map[string]any{"path": "Case.txt", "content": "A1\n"})
+	mustSealTurn(t, j)
+	_, _ = beginTestTurn(t, j, "t2")
+	applyTool(t, tools, "write_file", map[string]any{"path": "case.txt", "content": "A2\n"})
+	mustSealTurn(t, j)
+
+	out := runUndo(t, j, 2)
+	if strings.Contains(out, "cannot undo") {
+		t.Fatalf("case aliases split the undo chain: %s", out)
+	}
+	if _, ok := readWorkspace(t, root, "Case.txt"); ok {
+		t.Error("Case.txt exists, want absent after unwinding both turns")
 	}
 	if ids := listIDs(t, j.store); len(ids) != 0 {
 		t.Errorf("checkpoints = %v, want none", ids)

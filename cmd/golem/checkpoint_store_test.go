@@ -49,7 +49,11 @@ func TestCheckpointStoreOpenCreatesHardenedPerWorkspaceDB(t *testing.T) {
 	}
 	defer func() { _ = sa.Close() }()
 
-	hashA := strings.TrimPrefix(workspaceID(rootA), "workspace:")
+	canonicalA, err := agenttools.CanonicalWorkspaceRoot(rootA)
+	if err != nil {
+		t.Fatalf("canonical root A: %v", err)
+	}
+	hashA := strings.TrimPrefix(workspaceID(canonicalA), "workspace:")
 	wantPath := filepath.Join(dataDir, "golem", "checkpoints", hashA+".db")
 	if sa.dbPath != wantPath {
 		t.Fatalf("dbPath = %q, want %q", sa.dbPath, wantPath)
@@ -78,6 +82,38 @@ func TestCheckpointStoreOpenCreatesHardenedPerWorkspaceDB(t *testing.T) {
 	defer func() { _ = sb.Close() }()
 	if sb.dbPath == sa.dbPath {
 		t.Fatalf("two workspaces share one DB file: %q", sb.dbPath)
+	}
+}
+
+func TestCheckpointStoreCaseAliasSharesLease(t *testing.T) {
+	parent := t.TempDir()
+	root := filepath.Join(parent, "Workspace")
+	alias := filepath.Join(parent, "workspace")
+	if err := os.Mkdir(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	rootInfo, err := os.Stat(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	aliasInfo, err := os.Stat(alias)
+	if err != nil || !os.SameFile(rootInfo, aliasInfo) {
+		t.Skip("filesystem is case-sensitive")
+	}
+
+	ctx := context.Background()
+	getenv := testGetenv(t.TempDir())
+	first, err := openCheckpointStore(ctx, getenv, root)
+	if err != nil {
+		t.Fatalf("open root: %v", err)
+	}
+	defer func() { _ = first.Close() }()
+	second, err := openCheckpointStore(ctx, getenv, alias)
+	if second != nil {
+		defer func() { _ = second.Close() }()
+	}
+	if !errors.Is(err, errCheckpointLeaseHeld) {
+		t.Fatalf("open case alias = %v, want shared lease refusal", err)
 	}
 }
 

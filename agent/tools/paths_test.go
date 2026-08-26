@@ -86,6 +86,15 @@ func TestWorkspaceUnderRootPrefixSibling(t *testing.T) {
 	}
 }
 
+func TestWorkspaceUnderVolumeRoot(t *testing.T) {
+	root := filepath.VolumeName(os.TempDir()) + string(os.PathSeparator)
+	ws := &Workspace{root: root}
+	child := filepath.Join(root, "child")
+	if !ws.underRoot(child) {
+		t.Fatalf("underRoot(%q) rejected child of volume root %q", child, root)
+	}
+}
+
 func TestNewWorkspaceCanonicalizesRoot(t *testing.T) {
 	real := t.TempDir()
 	link := filepath.Join(t.TempDir(), "link")
@@ -99,6 +108,44 @@ func TestNewWorkspaceCanonicalizesRoot(t *testing.T) {
 	realCanon, _ := filepath.EvalSymlinks(real)
 	if ws.root != realCanon {
 		t.Fatalf("root not canonicalized: got %q want %q", ws.root, realCanon)
+	}
+}
+
+func TestWorkspaceCanonicalPathForUndoKeepsDistinctCaseSensitiveNames(t *testing.T) {
+	root := t.TempDir()
+	upper := filepath.Join(root, "Case.txt")
+	lower := filepath.Join(root, "case.txt")
+	if err := os.WriteFile(upper, []byte("upper"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(lower, []byte("lower"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	upperInfo, err := os.Stat(upper)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lowerInfo, err := os.Stat(lower)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if os.SameFile(upperInfo, lowerInfo) {
+		t.Skip("filesystem is case-insensitive")
+	}
+	ws, err := NewWorkspace(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gotUpper, err := ws.CanonicalPathForUndo("Case.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	gotLower, err := ws.CanonicalPathForUndo("case.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotUpper != "Case.txt" || gotLower != "case.txt" {
+		t.Fatalf("canonical paths = %q, %q; want distinct spellings", gotUpper, gotLower)
 	}
 }
 

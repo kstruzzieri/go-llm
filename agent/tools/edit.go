@@ -119,7 +119,7 @@ func (t *EditFile) Plan(_ context.Context, raw json.RawMessage) (agent.ToolPlan,
 	return agent.ToolPlan{Effect: eff, Preview: unifiedDiff(args.Path, before, after, true), ApprovalKey: WriteClassApprovalKey}, nil
 }
 
-func (t *EditFile) Invoke(_ context.Context, raw json.RawMessage) (agent.ToolResult, error) {
+func (t *EditFile) Invoke(ctx context.Context, raw json.RawMessage) (agent.ToolResult, error) {
 	var args editFileArgs
 	if err := json.Unmarshal(raw, &args); err != nil {
 		return errResult("invalid arguments: " + err.Error()), nil
@@ -145,7 +145,7 @@ func (t *EditFile) Invoke(_ context.Context, raw json.RawMessage) (agent.ToolRes
 		Path: pp.path, PriorContent: pp.priorContent, Existed: true,
 		AfterHash: pp.afterHash, Summary: pp.summary, At: time.Now(),
 	}
-	toolErr, internalErr := runJournaledWrite(t.j, rec, func() error {
+	toolErr, internalErr := runJournaledWrite(ctx, t.j, rec, func() error {
 		return t.ws.WriteFileAtomic(pp.path, pp.afterContent)
 	})
 	if internalErr != nil {

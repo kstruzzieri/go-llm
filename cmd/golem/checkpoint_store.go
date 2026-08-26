@@ -67,6 +67,10 @@ func checkpointDBPath(getenv func(string) string, root string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	root, err = agenttools.CanonicalWorkspaceRoot(root)
+	if err != nil {
+		return "", err
+	}
 	hash := strings.TrimPrefix(workspaceID(root), "workspace:")
 	return filepath.Join(base, "golem", "checkpoints", hash+".db"), nil
 }

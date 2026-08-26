@@ -274,6 +274,97 @@ func TestWriteFilePreparingJournalOrder(t *testing.T) {
 	}
 }
 
+func TestMutatingToolsAbortWhenContextCanceledDuringPrepare(t *testing.T) {
+	tests := []struct {
+		name    string
+		before  string
+		args    map[string]any
+		want    string
+		exists  bool
+		newTool func(*Workspace, Journal) agent.Tool
+	}{
+		{
+			name:   "write_file",
+			args:   map[string]any{"path": "a.txt", "content": "new\n"},
+			exists: false,
+			newTool: func(ws *Workspace, j Journal) agent.Tool {
+				return NewWriteFile(ws, j)
+			},
+		},
+		{
+			name:   "edit_file",
+			before: "old\n",
+			args:   map[string]any{"path": "a.txt", "old_string": "old", "new_string": "new"},
+			want:   "old\n",
+			exists: true,
+			newTool: func(ws *Workspace, j Journal) agent.Tool {
+				return NewEditFile(ws, j)
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			root := t.TempDir()
+			path := filepath.Join(root, "a.txt")
+			if tt.exists {
+				if err := os.WriteFile(path, []byte(tt.before), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			pj := &prepJournal{}
+			tool := tt.newTool(mustWorkspace(t, root), pj)
+			raw, err := json.Marshal(tt.args)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := tool.(agent.PlanningTool).Plan(context.Background(), raw); err != nil {
+				t.Fatalf("Plan: %v", err)
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			pj.onPrepare = func(MutationRecord) { cancel() }
+
+			res, err := tool.Invoke(ctx, raw)
+			if err != nil {
+				t.Fatalf("Invoke internal error: %v", err)
+			}
+			if !res.IsError {
+				t.Fatal("canceled mutation reported success")
+			}
+			if want := []string{"prepare", "abort"}; !slices.Equal(pj.events, want) {
+				t.Fatalf("events = %v, want %v", pj.events, want)
+			}
+			got, err := os.ReadFile(path)
+			if !tt.exists {
+				if !os.IsNotExist(err) {
+					t.Fatalf("write_file changed workspace after cancellation: %v", err)
+				}
+				return
+			}
+			if err != nil || string(got) != tt.want {
+				t.Fatalf("file = %q, %v; want unchanged %q", got, err, tt.want)
+			}
+		})
+	}
+}
+
+func TestRunJournaledWriteCanceledBeforePrepare(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	pj := &prepJournal{}
+	wrote := false
+	toolErr, internalErr := runJournaledWrite(ctx, pj, MutationRecord{Path: "a"}, func() error {
+		wrote = true
+		return nil
+	})
+	if !errors.Is(toolErr, context.Canceled) || internalErr != nil {
+		t.Fatalf("errors = %v, %v; want context.Canceled tool error", toolErr, internalErr)
+	}
+	if wrote || len(pj.events) != 0 {
+		t.Fatalf("canceled write ran protocol: wrote=%v events=%v", wrote, pj.events)
+	}
+}
+
 func TestPreparingJournalFailureLeavesWorkspaceUntouched(t *testing.T) {
 	root := t.TempDir()
 	pj := &prepJournal{prepareErr: errors.New("store down")}
@@ -294,7 +385,7 @@ func TestPreparingJournalFailureLeavesWorkspaceUntouched(t *testing.T) {
 func TestRunJournaledWriteAbortsOnWriteFailure(t *testing.T) {
 	pj := &prepJournal{}
 	writeErr := errors.New("disk full")
-	toolErr, internalErr := runJournaledWrite(pj, MutationRecord{Path: "a"}, func() error { return writeErr })
+	toolErr, internalErr := runJournaledWrite(context.Background(), pj, MutationRecord{Path: "a"}, func() error { return writeErr })
 	if internalErr != nil {
 		t.Fatalf("internal = %v, want nil (a failed write is model-visible)", internalErr)
 	}
@@ -309,7 +400,7 @@ func TestRunJournaledWriteAbortsOnWriteFailure(t *testing.T) {
 func TestRunJournaledWriteJoinsAbortFailure(t *testing.T) {
 	pj := &prepJournal{abortErr: errors.New("abort broke")}
 	writeErr := errors.New("disk full")
-	toolErr, internalErr := runJournaledWrite(pj, MutationRecord{Path: "a"}, func() error { return writeErr })
+	toolErr, internalErr := runJournaledWrite(context.Background(), pj, MutationRecord{Path: "a"}, func() error { return writeErr })
 	if internalErr != nil {
 		t.Fatalf("internal = %v, want nil", internalErr)
 	}

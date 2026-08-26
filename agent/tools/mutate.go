@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -201,22 +202,32 @@ func record(j Journal, rec MutationRecord) {
 // failure, which dispatch treats as a hard abort. The distinct internalErr
 // channel keeps the failure out of the tool-result path so a healthy-looking
 // summary is never reported for a write the journal failed to commit.
-func runJournaledWrite(j Journal, rec MutationRecord, write func() error) (toolErr, internalErr error) {
+func runJournaledWrite(ctx context.Context, j Journal, rec MutationRecord, write func() error) (toolErr, internalErr error) {
+	if err := ctx.Err(); err != nil {
+		return err, nil
+	}
 	var prepared PreparedMutation
+	abort := func(cause error) error {
+		if prepared == nil {
+			return cause
+		}
+		if err := prepared.Abort(); err != nil {
+			return errors.Join(cause, fmt.Errorf("journal abort failed: %w", err))
+		}
+		return cause
+	}
 	if pj, ok := j.(PreparingJournal); ok {
 		p, err := pj.Prepare(rec)
 		if err != nil {
 			return fmt.Errorf("journal prepare failed: %w", err), nil
 		}
 		prepared = p
+		if err := ctx.Err(); err != nil {
+			return abort(err), nil
+		}
 	}
 	if err := write(); err != nil {
-		if prepared != nil {
-			if aerr := prepared.Abort(); aerr != nil {
-				return errors.Join(err, fmt.Errorf("journal abort failed: %w", aerr)), nil
-			}
-		}
-		return err, nil
+		return abort(err), nil
 	}
 	if prepared == nil {
 		record(j, rec)
