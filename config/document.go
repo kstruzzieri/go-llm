@@ -50,8 +50,16 @@ type Document struct {
 	authored       *Config
 	effective      *Config
 	providerDrops  map[string]struct{} // provider names removed since the rawBytes baseline
-	env            func(string) (string, bool)
-	readOnly       *Diagnostic
+	// modelDrops and modelRawSeeds are the model-side raw bookkeeping
+	// (#462 spec §1): role names removed since the rawBytes baseline
+	// (generalized providerDrops tombstone — a re-added name must not
+	// resurrect stale unknown members), and fork-captured raw entry
+	// seeds keyed by NEW role name (unknown members travel with a fork).
+	// Both are applied by canonicalBytes and cleared on save commit.
+	modelDrops    map[string]struct{}
+	modelRawSeeds map[string]json.RawMessage
+	env           func(string) (string, bool)
+	readOnly      *Diagnostic
 }
 
 // DocumentOptions configures document construction (spec §7).

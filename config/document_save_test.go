@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"flag"
 	"os"
@@ -833,5 +834,37 @@ func TestNonCanonicalSourceNormalizesExactlyOnce(t *testing.T) {
 	}
 	if !bytes.Equal(first, second) {
 		t.Fatal("normalized bytes changed on the second save")
+	}
+}
+
+// The canonicalBytes raw rewrite tolerates a raw tree with a missing
+// models section when only drops are pending (defensive; seeds also
+// materialize it — pinned in the fork task).
+func TestRewriteRawSectionMissingSection(t *testing.T) {
+	raw := map[string]json.RawMessage{}
+	if err := rewriteRawSection(raw, "models",
+		map[string]struct{}{"gone": {}}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if string(raw["models"]) != "{}" {
+		t.Fatalf("models = %s", raw["models"])
+	}
+	if err := rewriteRawSection(raw, "models", nil,
+		map[string]json.RawMessage{"seeded": json.RawMessage(`{"a":1}`)}); err != nil {
+		t.Fatal(err)
+	}
+	if string(raw["models"]) != `{"seeded":{"a":1}}` {
+		t.Fatalf("seed not inserted: %s", raw["models"])
+	}
+	// Same-name reuse makes ordering observable: stale target first
+	// disappears, then the source seed wins.
+	raw["models"] = json.RawMessage(`{"reused":{"stale":true}}`)
+	if err := rewriteRawSection(raw, "models",
+		map[string]struct{}{"reused": {}},
+		map[string]json.RawMessage{"reused": json.RawMessage(`{"from_source":true}`)}); err != nil {
+		t.Fatal(err)
+	}
+	if string(raw["models"]) != `{"reused":{"from_source":true}}` {
+		t.Fatalf("seed did not replace stale target: %s", raw["models"])
 	}
 }

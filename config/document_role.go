@@ -24,3 +24,41 @@ func (d *Document) UnbindUseCase(useCase string) error {
 		return nil
 	})
 }
+
+// RemoveRole deletes a role nothing references. The explicit in-use
+// pre-check names the first blocker in deterministic order — routed use
+// cases (sorted) before fallback references (sorted) — mirroring
+// RemoveProvider's discipline; the finalize gate remains the authority
+// behind it. The mutate models diff records the tombstone so a later
+// re-add of the same name cannot resurrect stale unknown raw members.
+func (d *Document) RemoveRole(role string) error {
+	return d.mutate(func(a *Config) error {
+		if role == "" {
+			return diagWrap(CodeInvalidArgument, SubjectNone, "",
+				fmt.Errorf("config: remove role: empty role"))
+		}
+		if _, ok := a.Models[role]; !ok {
+			return diagWrap(CodeRoleNotFound, SubjectRole, role,
+				fmt.Errorf("config: remove role: role %q not defined", role))
+		}
+		for _, uc := range sortedStringKeys(a.Defaults) {
+			if a.Defaults[uc] == role {
+				return diagWrap(CodeRoleInUse, SubjectUseCase, uc,
+					fmt.Errorf("config: remove role %q: still routed by use case %q", role, uc))
+			}
+		}
+		for _, other := range sortedStringKeys(a.Models) {
+			if other == role {
+				continue
+			}
+			for _, fb := range a.Models[other].Fallbacks {
+				if fb == role {
+					return diagWrap(CodeRoleInUse, SubjectRole, other,
+						fmt.Errorf("config: remove role %q: still referenced by %q fallbacks", role, other))
+				}
+			}
+		}
+		delete(a.Models, role)
+		return nil
+	})
+}

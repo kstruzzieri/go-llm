@@ -37,6 +37,17 @@ func (d *Document) mutate(fn func(authored *Config) error) error {
 		}
 		d.providerDrops[name] = struct{}{}
 	}
+	for role := range d.authored.Models {
+		if _, ok := authored.Models[role]; ok {
+			continue
+		}
+		if d.modelDrops == nil {
+			d.modelDrops = make(map[string]struct{})
+		}
+		d.modelDrops[role] = struct{}{}
+		// A removed forked role must not be re-inserted at render.
+		delete(d.modelRawSeeds, role)
+	}
 	d.authored = authored
 	d.effective = effective
 	return nil
