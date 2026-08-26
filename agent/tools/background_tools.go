@@ -48,8 +48,11 @@ type commandTailArgs struct {
 
 // NewExecToolsWithBackground builds the full exec tool set — the foreground
 // run_command plus the four background tools — over ONE shared Workspace, so
-// foreground and background preparation see identical containment. The
-// existing NewExecTools(root) remains the foreground-only constructor.
+// foreground and background preparation see identical containment. Both
+// execution paths and the sandbox approval identity derive from the
+// manager's resolved backend (#440), so the two paths can never split
+// runtimes. The existing NewExecTools(root) remains the foreground-only
+// host constructor.
 func NewExecToolsWithBackground(root string, manager *BackgroundManager) ([]agent.Tool, error) {
 	if manager == nil || manager.backend.execBackend == nil {
 		return nil, fmt.Errorf("tools: build exec tools: background manager must have a resolved backend")
