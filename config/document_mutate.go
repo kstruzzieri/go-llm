@@ -15,6 +15,13 @@ import (
 // hold d.mu end-to-end; spec amendment 6). Any error leaves the document
 // unchanged. Draft-only: rawBytes/revision/origin never change here.
 func (d *Document) mutate(fn func(authored *Config) error) error {
+	return d.mutateCommit(fn, nil)
+}
+
+// mutateCommit is mutate with an optional post-swap hook running under
+// d.mu — bookkeeping that must commit atomically with the authored swap
+// (fork raw seeds) and must NOT run on any failure path.
+func (d *Document) mutateCommit(fn func(authored *Config) error, commit func()) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	if err := d.readOnlyErrLocked(); err != nil {
@@ -50,6 +57,9 @@ func (d *Document) mutate(fn func(authored *Config) error) error {
 	}
 	d.authored = authored
 	d.effective = effective
+	if commit != nil {
+		commit()
+	}
 	return nil
 }
 

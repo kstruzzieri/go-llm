@@ -1,9 +1,12 @@
 package config
 
 import (
+	"bytes"
 	"encoding/json"
+	"errors"
 	"os"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
@@ -340,5 +343,544 @@ func TestAddRoleModelFinalizeFailureTransactional(t *testing.T) {
 	}
 	if len(d.modelDrops) != beforeDrops || len(d.modelRawSeeds) != beforeSeeds {
 		t.Fatal("raw bookkeeping changed on failure")
+	}
+}
+
+func forkFacts() ModelFacts {
+	return ModelFacts{
+		Key:  provider.ModelKey{Provider: "local", Model: "m7"},
+		Type: "moe", Parameters: "7B", ContextWindow: 4096,
+	}
+}
+
+func forkOpts(confirm ...string) ForkRoleModelOpts {
+	return ForkRoleModelOpts{
+		SetRoleModelOpts: SetRoleModelOpts{ConfirmUnknown: true},
+		ConfirmDrops:     confirm,
+	}
+}
+
+// The fork overlay: role-level intent (Description, Fallbacks, Options)
+// travels; identity/capacity from facts; caps/think/slots cleared unless
+// re-asserted (SetRoleModel preservation table).
+func TestForkRoleModelOverlay(t *testing.T) {
+	d := loadTestDoc(t, roleFixture)
+	if err := d.ForkRoleModel("agent", "agent-m", forkFacts(),
+		forkOpts("slots", "think_tags")); err != nil {
+		t.Fatal(err)
+	}
+	src := d.authored.Models["agent"]
+	m := d.authored.Models["agent-m"]
+	if m.Name != "m7" || m.Provider != "local" || m.Type != "moe" ||
+		m.Parameters != "7B" || m.ContextWindow != 4096 {
+		t.Fatalf("identity/capacity: %+v", m)
+	}
+	if m.Description != "keep me" || !reflect.DeepEqual(m.Fallbacks, src.Fallbacks) ||
+		m.Options == nil || *m.Options.Temperature != 0.2 {
+		t.Fatalf("role-level intent not copied: %+v", m)
+	}
+	if m.Capabilities != nil || m.ThinkMode != "" || m.ThinkTags != nil || m.Slots != 0 {
+		t.Fatalf("model-specific fields not cleared: %+v", m)
+	}
+	// Deep copy: mutating the fork's Options cannot reach the source.
+	*m.Options.Temperature = 0.9
+	m.Fallbacks[0] = "mutated"
+	if *d.authored.Models["agent"].Options.Temperature != 0.2 {
+		t.Fatal("Options aliased between source and fork")
+	}
+	if d.authored.Models["agent"].Fallbacks[0] != "fast" {
+		t.Fatal("Fallbacks aliased between source and fork")
+	}
+	// Source untouched.
+	if src.Slots != 2 || src.ThinkTags == nil {
+		t.Fatalf("source mutated: %+v", src)
+	}
+}
+
+// Drop confirmation: exact sorted match or refusal BEFORE mutation, with
+// the computed set extractable via DropSetOf.
+func TestForkRoleModelDropConfirmation(t *testing.T) {
+	cases := []struct {
+		name    string
+		confirm []string
+	}{
+		{"missing", nil},
+		{"partial", []string{"slots"}},
+		{"unknown-token", []string{"slots", "think_tags", "capabilities"}},
+		{"duplicate", []string{"slots", "slots", "think_tags"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			d := loadTestDoc(t, roleFixture)
+			err := d.ForkRoleModel("agent", "agent-m", forkFacts(), forkOpts(tc.confirm...))
+			if err == nil {
+				t.Fatal("expected refusal")
+			}
+			if _, ok := d.authored.Models["agent-m"]; ok {
+				t.Fatal("refusal mutated the document")
+			}
+			switch tc.name {
+			case "unknown-token", "duplicate":
+				assertDiag(t, err, CodeInvalidArgument, SubjectNone, "")
+			default:
+				assertDiag(t, err, CodeDropConfirmationRequired, SubjectRole, "agent")
+				drops, ok := DropSetOf(err)
+				if !ok || !slices.Equal(drops, []string{"slots", "think_tags"}) {
+					t.Fatalf("DropSetOf = %v, %v", drops, ok)
+				}
+			}
+		})
+	}
+}
+
+// Pin every ThinkTags present/absent × Slots set/unset combination. A
+// valid-vocabulary superset is a confirmation mismatch, not invalid input.
+func TestForkRoleModelDropSetAllCombinations(t *testing.T) {
+	cases := []struct {
+		name     string
+		hasSlots bool
+		hasTags  bool
+		want     []string
+	}{
+		{"neither", false, false, nil},
+		{"slots-only", true, false, []string{"slots"}},
+		{"tags-only", false, true, []string{"think_tags"}},
+		{"both", true, true, []string{"slots", "think_tags"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			body := roleFixture
+			if !tc.hasSlots {
+				body = strings.Replace(body, `"slots": 2,`, "", 1)
+			}
+			if !tc.hasTags {
+				body = strings.Replace(body,
+					`"think_tags": {"open": "<t>", "close": "</t>"},`, "", 1)
+			}
+			d := loadTestDoc(t, body)
+			if err := d.ForkRoleModel("agent", "agent-m", forkFacts(),
+				forkOpts(tc.want...)); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+
+	body := strings.Replace(roleFixture,
+		`"think_tags": {"open": "<t>", "close": "</t>"},`, "", 1)
+	d := loadTestDoc(t, body) // slots-only
+	err := d.ForkRoleModel("agent", "agent-m", forkFacts(),
+		forkOpts("slots", "think_tags"))
+	assertDiag(t, err, CodeDropConfirmationRequired, SubjectRole, "agent")
+	drops, ok := DropSetOf(err)
+	if !ok || !slices.Equal(drops, []string{"slots"}) {
+		t.Fatalf("DropSetOf = %v, %v", drops, ok)
+	}
+}
+
+// A re-asserted ThinkTags is not a drop; a source without think_tags/slots
+// requires an empty confirmation; unordered confirmation is accepted
+// (compared sorted).
+func TestForkRoleModelDropSetVariants(t *testing.T) {
+	d := loadTestDoc(t, roleFixture)
+	opts := forkOpts("slots")
+	opts.ThinkTags = &ThinkTagsConfig{Open: "<n>", Close: "</n>"}
+	if err := d.ForkRoleModel("agent", "agent-m", forkFacts(), opts); err != nil {
+		t.Fatal(err)
+	}
+	if d.authored.Models["agent-m"].ThinkTags.Open != "<n>" {
+		t.Fatal("re-asserted think tags missing")
+	}
+	// fast: no think_tags, no slots -> empty drop set, empty confirm.
+	if err := d.ForkRoleModel("fast", "fast-m", forkFacts(), forkOpts()); err != nil {
+		t.Fatal(err)
+	}
+	// Unordered confirmation.
+	if err := d.ForkRoleModel("agent", "agent-m2", forkFacts(),
+		forkOpts("think_tags", "slots")); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestForkRoleModelRefusals(t *testing.T) {
+	d := loadTestDoc(t, roleFixture)
+	assertDiag(t, d.ForkRoleModel("", "x", forkFacts(), forkOpts()),
+		CodeInvalidArgument, SubjectNone, "")
+	assertDiag(t, d.ForkRoleModel("agent", "", forkFacts(), forkOpts()),
+		CodeInvalidArgument, SubjectNone, "")
+	missingModel := forkFacts()
+	missingModel.Key.Model = ""
+	assertDiag(t, d.ForkRoleModel("agent", "x", missingModel, forkOpts()),
+		CodeInvalidArgument, SubjectNone, "")
+	badType := forkFacts()
+	badType.Type = "quantum"
+	assertDiag(t, d.ForkRoleModel("agent", "x", badType, forkOpts()),
+		CodeInvalidArgument, SubjectNone, "")
+	assertDiag(t, d.ForkRoleModel("ghost", "x", forkFacts(), forkOpts()),
+		CodeRoleNotFound, SubjectRole, "ghost")
+	assertDiag(t, d.ForkRoleModel("agent", "fast", forkFacts(), forkOpts("slots", "think_tags")),
+		CodeRoleExists, SubjectRole, "fast")
+	bad := forkFacts()
+	bad.Key.Provider = "ghost"
+	assertDiag(t, d.ForkRoleModel("agent", "x", bad, forkOpts("slots", "think_tags")),
+		CodeProviderNotFound, SubjectProvider, "ghost")
+}
+
+// Guard precedence is contract-visible. Malformed confirmation is checked
+// only after facts, source, destination, and provider guards.
+func TestForkRoleModelRefusalPrecedence(t *testing.T) {
+	d := loadTestDoc(t, roleFixture)
+	badDrops := forkOpts("bogus")
+	assertDiag(t, d.ForkRoleModel("ghost", "x", forkFacts(), badDrops),
+		CodeRoleNotFound, SubjectRole, "ghost")
+	assertDiag(t, d.ForkRoleModel("agent", "fast", forkFacts(), badDrops),
+		CodeRoleExists, SubjectRole, "fast")
+	badProvider := forkFacts()
+	badProvider.Key.Provider = "ghost"
+	assertDiag(t, d.ForkRoleModel("agent", "x", badProvider, badDrops),
+		CodeProviderNotFound, SubjectProvider, "ghost")
+}
+
+// A supplied capability override joining a live selector gates the existing
+// selector role before the fork can mutate anything.
+func TestForkRoleModelOverrideGatesSelectorRoles(t *testing.T) {
+	d := loadTestDoc(t, roleFixture)
+	facts := ModelFacts{Key: provider.ModelKey{Provider: "local", Model: "m1"}, Type: "moe"}
+	opts := forkOpts("slots", "think_tags")
+	opts.Capabilities = []string{"embed"}
+	opts.Requirements = map[string]provider.Capability{"agent": provider.CapChat}
+	assertDiag(t, d.ForkRoleModel("agent", "agent-m", facts, opts),
+		CodeEligibilityIneligible, SubjectRole, "agent-m")
+}
+
+// Copied role-level intent still passes the normal finalize authority. A
+// changed type that makes a copied fallback incompatible is refused.
+func TestForkRoleModelCopiedFallbackMustRemainCompatible(t *testing.T) {
+	d := loadTestDoc(t, roleFixture)
+	before := renderToString(t, d)
+	facts := forkFacts()
+	facts.Type = "embedding"
+	err := d.ForkRoleModel("agent", "agent-m", facts,
+		forkOpts("slots", "think_tags"))
+	assertDiag(t, err, CodeModelInvalid, SubjectRole, "agent-m")
+	if renderToString(t, d) != before || len(d.modelRawSeeds) != 0 {
+		t.Fatal("incompatible copied fallback mutated the document")
+	}
+}
+
+// Fork transactionality through a finalize failure: re-asserted
+// capabilities that conflict with the source selector's authored override
+// die at validate's selector-conflict check when the fork keeps the same
+// selector; the document is unchanged and no seed is registered.
+func TestForkRoleModelFinalizeFailureTransactional(t *testing.T) {
+	d := loadTestDoc(t, roleFixture)
+	beforeEffective := d.Config()
+	beforeRender := renderToString(t, d)
+	beforeDrops, beforeSeeds := len(d.modelDrops), len(d.modelRawSeeds)
+	sameSelector := ModelFacts{
+		Key:  provider.ModelKey{Provider: "local", Model: "m1"},
+		Type: "moe",
+	}
+	opts := forkOpts("slots", "think_tags")
+	opts.Capabilities = []string{"chat"} // agent has ["chat","stream"]: conflict
+	opts.Requirements = map[string]provider.Capability{"agent": provider.CapChat}
+	err := d.ForkRoleModel("agent", "agent-m", sameSelector, opts)
+	assertDiag(t, err, CodeSelectorConflict, SubjectRole, "agent")
+	if _, ok := d.authored.Models["agent-m"]; ok {
+		t.Fatal("failed fork left the role")
+	}
+	if !reflect.DeepEqual(beforeEffective, d.Config()) || beforeRender != renderToString(t, d) ||
+		len(d.modelDrops) != beforeDrops || len(d.modelRawSeeds) != beforeSeeds {
+		t.Fatal("failed fork changed authored/effective/raw bookkeeping state")
+	}
+}
+
+func renderedModelEntries(t *testing.T, data []byte) map[string]json.RawMessage {
+	t.Helper()
+	var doc struct {
+		Models map[string]json.RawMessage `json:"models"`
+	}
+	if err := json.Unmarshal(data, &doc); err != nil {
+		t.Fatal(err)
+	}
+	return doc.Models
+}
+
+// ACCEPTANCE GATE (firn-ide#263 Slice B Task 0): unknown/future authored
+// JSON members survive ForkRoleModel into the published bytes; the
+// dropped think_tags/slots do not; the source entry equals its canonical
+// pre-fork baseline. The unknown subtree's duplicate keys stay duplicated.
+func TestForkRoleModelLosslessUnknownMembers(t *testing.T) {
+	d := loadTestDoc(t, roleFixture)
+	beforeEntries := renderedModelEntries(t, []byte(renderToString(t, d)))
+	sourceBefore := append(json.RawMessage(nil), beforeEntries["agent"]...)
+	if err := d.ForkRoleModel("agent", "agent-m", forkFacts(),
+		forkOpts("slots", "think_tags")); err != nil {
+		t.Fatal(err)
+	}
+	path := d.Origin().Path
+	if err := d.SaveReplace(path, d.Revision()); err != nil {
+		t.Fatal(err)
+	}
+	out, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	entries := renderedModelEntries(t, out)
+	if !bytes.Equal(entries["agent"], sourceBefore) {
+		t.Fatalf("source changed:\nbefore=%s\nafter=%s", sourceBefore, entries["agent"])
+	}
+	var source, fork map[string]json.RawMessage
+	if err := json.Unmarshal(entries["agent"], &source); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(entries["agent-m"], &fork); err != nil {
+		t.Fatal(err)
+	}
+	if fork == nil {
+		t.Fatalf("fork missing from published bytes:\n%s", out)
+	}
+	if !bytes.Equal(fork["future_role_field"], source["future_role_field"]) ||
+		bytes.Count(fork["future_role_field"], []byte(`"dup"`)) != 2 {
+		t.Fatalf("unknown duplicate subtree changed: source=%s fork=%s",
+			source["future_role_field"], fork["future_role_field"])
+	}
+	if _, ok := fork["think_tags"]; ok {
+		t.Fatal("dropped think_tags survived in fork")
+	}
+	if _, ok := fork["slots"]; ok {
+		t.Fatal("dropped slots survived in fork")
+	}
+	if string(fork["name"]) != `"m7"` {
+		t.Fatalf("fork selector wrong: %s", fork["name"])
+	}
+	// Source keeps everything.
+	if _, ok := source["think_tags"]; !ok {
+		t.Fatal("source lost think_tags")
+	}
+	if string(source["future_role_field"]) == "" {
+		t.Fatal("source lost unknown member")
+	}
+}
+
+// Chained fork in one draft: A -> B, then fork B -> C carries A's unknown members.
+func TestForkRoleModelChained(t *testing.T) {
+	d := loadTestDoc(t, roleFixture)
+	if err := d.ForkRoleModel("agent", "b", forkFacts(),
+		forkOpts("slots", "think_tags")); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.ForkRoleModel("b", "c", forkFacts(), forkOpts()); err != nil {
+		t.Fatal(err)
+	}
+	path := d.Origin().Path
+	if err := d.SaveReplace(path, d.Revision()); err != nil {
+		t.Fatal(err)
+	}
+	out, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc struct {
+		Models map[string]map[string]json.RawMessage `json:"models"`
+	}
+	if err := json.Unmarshal(out, &doc); err != nil {
+		t.Fatal(err)
+	}
+	if string(doc.Models["c"]["future_role_field"]) == "" {
+		t.Fatal("chained fork lost the unknown member")
+	}
+}
+
+// A source born in-draft has no raw continuity: fork succeeds with no seed.
+func TestForkRoleModelFromInDraftRole(t *testing.T) {
+	d := loadTestDoc(t, roleFixture)
+	facts := ModelFacts{Key: provider.ModelKey{Provider: "local", Model: "m9"}, Type: "dense"}
+	if err := d.AddRoleModel("fresh", facts, eligibleAddOpts()); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.ForkRoleModel("fresh", "fresh-m", forkFacts(), forkOpts()); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := d.modelRawSeeds["fresh-m"]; ok {
+		t.Fatal("seed registered for a source with no raw entry")
+	}
+}
+
+// A source re-created after in-draft removal has no raw continuity either:
+// the tombstone blocks the stale raw entry from seeding the fork.
+func TestForkRoleModelTombstonedSource(t *testing.T) {
+	d := loadTestDoc(t, roleFixture)
+	if err := d.UnbindUseCase("agent"); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.RemoveRole("agent"); err != nil {
+		t.Fatal(err)
+	}
+	facts := ModelFacts{Key: provider.ModelKey{Provider: "local", Model: "m9"}, Type: "dense"}
+	if err := d.AddRoleModel("agent", facts, eligibleAddOpts()); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.ForkRoleModel("agent", "agent-m", forkFacts(), forkOpts()); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := d.modelRawSeeds["agent-m"]; ok {
+		t.Fatal("tombstoned source seeded stale raw members")
+	}
+}
+
+// Removing a forked role deletes its pending seed (mutate diff rule).
+func TestRemoveForkedRoleDeletesSeed(t *testing.T) {
+	d := loadTestDoc(t, roleFixture)
+	if err := d.ForkRoleModel("agent", "agent-m", forkFacts(),
+		forkOpts("slots", "think_tags")); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := d.modelRawSeeds["agent-m"]; !ok {
+		t.Fatal("seed not registered")
+	}
+	if err := d.RemoveRole("agent-m"); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := d.modelRawSeeds["agent-m"]; ok {
+		t.Fatal("seed survived removal")
+	}
+}
+
+// A removed target name may be reused by a fork in the same draft. The
+// tombstone deletes the target's stale raw subtree, then the source seed wins.
+func TestForkRoleModelReusedTargetUsesSourceSeed(t *testing.T) {
+	d := loadTestDoc(t, roleFixture)
+	if err := d.RemoveRole("spare"); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.ForkRoleModel("agent", "spare", forkFacts(),
+		forkOpts("slots", "think_tags")); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := d.modelDrops["spare"]; !ok {
+		t.Fatal("reused target lost its tombstone")
+	}
+	if _, ok := d.modelRawSeeds["spare"]; !ok {
+		t.Fatal("reused target did not receive the source seed")
+	}
+	path := d.Origin().Path
+	if err := d.SaveReplace(path, d.Revision()); err != nil {
+		t.Fatal(err)
+	}
+	out, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(renderedModelEntries(t, out)["spare"], &fields); err != nil {
+		t.Fatal(err)
+	}
+	if fields["future_role_field"] == nil || fields["stale_spare_field"] != nil {
+		t.Fatalf("wrong raw subtree won: %v", fields)
+	}
+}
+
+// Ordinary pre-publication failure retains a fork seed and the old revision;
+// retry still publishes the lossless fork.
+func TestForkRoleModelFailedSaveRetry(t *testing.T) {
+	d := loadTestDoc(t, roleFixture)
+	if err := d.ForkRoleModel("agent", "agent-m", forkFacts(),
+		forkOpts("slots", "think_tags")); err != nil {
+		t.Fatal(err)
+	}
+	path, revision := d.Origin().Path, d.Revision()
+	orig := publishReplaceFn
+	t.Cleanup(func() { publishReplaceFn = orig })
+	publishReplaceFn = func(string, []byte, string) error {
+		return errors.New("injected pre-publication failure")
+	}
+	err := d.SaveReplace(path, revision)
+	publishReplaceFn = orig
+	if err == nil || d.Revision() != revision || d.modelRawSeeds["agent-m"] == nil {
+		t.Fatalf("failed save consumed pending state: err=%v", err)
+	}
+	if err := d.SaveReplace(path, revision); err != nil {
+		t.Fatal(err)
+	}
+	out, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(renderedModelEntries(t, out)["agent-m"], &fields); err != nil {
+		t.Fatal(err)
+	}
+	if fields["future_role_field"] == nil {
+		t.Fatal("retry lost fork seed")
+	}
+}
+
+// The same retry invariant holds for a tombstoned remove/re-add: stale raw
+// members remain suppressed after the failed publication and retry.
+func TestAddRoleModelFailedSaveRetryDoesNotResurrect(t *testing.T) {
+	d := loadTestDoc(t, roleFixture)
+	if err := d.UnbindUseCase("agent"); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.RemoveRole("agent"); err != nil {
+		t.Fatal(err)
+	}
+	facts := ModelFacts{Key: provider.ModelKey{Provider: "local", Model: "m9"}, Type: "dense"}
+	if err := d.AddRoleModel("agent", facts, eligibleAddOpts()); err != nil {
+		t.Fatal(err)
+	}
+	path, revision := d.Origin().Path, d.Revision()
+	orig := publishReplaceFn
+	t.Cleanup(func() { publishReplaceFn = orig })
+	publishReplaceFn = func(string, []byte, string) error {
+		return errors.New("injected pre-publication failure")
+	}
+	err := d.SaveReplace(path, revision)
+	publishReplaceFn = orig
+	if err == nil || d.Revision() != revision {
+		t.Fatalf("failed save changed revision: err=%v", err)
+	}
+	if _, ok := d.modelDrops["agent"]; !ok {
+		t.Fatal("failed save consumed tombstone")
+	}
+	if err := d.SaveReplace(path, revision); err != nil {
+		t.Fatal(err)
+	}
+	out, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(out), "future_role_field") {
+		t.Fatal("retry resurrected stale raw members")
+	}
+}
+
+// Byte-stability: fork -> save publishes once; an immediate second save
+// publishes nothing (seeds cleared at commit; published bytes canonical).
+func TestForkRoleModelByteStability(t *testing.T) {
+	d := loadTestDoc(t, roleFixture)
+	if err := d.ForkRoleModel("agent", "agent-m", forkFacts(),
+		forkOpts("slots", "think_tags")); err != nil {
+		t.Fatal(err)
+	}
+	path := d.Origin().Path
+	if err := d.SaveReplace(path, d.Revision()); err != nil {
+		t.Fatal(err)
+	}
+	if len(d.modelRawSeeds) != 0 || len(d.modelDrops) != 0 {
+		t.Fatal("commit did not clear model bookkeeping")
+	}
+	published := 0
+	orig := publishReplaceFn
+	publishReplaceFn = func(p string, data []byte, rev string) error {
+		published++
+		return orig(p, data, rev)
+	}
+	defer func() { publishReplaceFn = orig }()
+	if err := d.SaveReplace(path, d.Revision()); err != nil {
+		t.Fatal(err)
+	}
+	if published != 0 {
+		t.Fatalf("no-op save published %d times", published)
 	}
 }

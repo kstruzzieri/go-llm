@@ -1,6 +1,12 @@
 package config
 
-import "fmt"
+import (
+	"encoding/json"
+	"fmt"
+	"slices"
+	"sort"
+	"strings"
+)
 
 // UnbindUseCase removes a use-case route from defaults. An unknown use
 // case is refused loudly (use_case_not_found) — unbinding a route that is
@@ -106,4 +112,153 @@ func (d *Document) RemoveRole(role string) error {
 		delete(a.Models, role)
 		return nil
 	})
+}
+
+// ForkRoleModelOpts carries the SetRoleModel option semantics plus the
+// exact drop confirmation for the source's projection-hidden fields.
+type ForkRoleModelOpts struct {
+	SetRoleModelOpts
+	// ConfirmDrops must match the computed drop set exactly (compared
+	// sorted and duplicate-free; closed vocabulary "slots" |
+	// "think_tags"); otherwise the fork is refused before any mutation
+	// and the required set is extractable from the error via DropSetOf.
+	ConfirmDrops []string
+}
+
+// forkDropSet computes the projection-hidden fields the fork would drop,
+// sorted ("slots" < "think_tags"): think_tags unless re-asserted; slots
+// always when set (never re-assertable — the fork targets a different
+// model).
+func forkDropSet(src ModelConfig, opts SetRoleModelOpts) []string {
+	var out []string
+	if src.Slots != 0 {
+		out = append(out, "slots")
+	}
+	if src.ThinkTags != nil && opts.ThinkTags == nil {
+		out = append(out, "think_tags")
+	}
+	return out
+}
+
+// validateConfirmDrops rejects tokens outside the vocabulary and
+// duplicates, and returns the sorted copy used for comparison.
+func validateConfirmDrops(confirm []string) ([]string, error) {
+	out := append([]string(nil), confirm...)
+	sort.Strings(out)
+	for i, tok := range out {
+		if tok != "slots" && tok != "think_tags" {
+			return nil, diagWrap(CodeInvalidArgument, SubjectNone, "",
+				fmt.Errorf("config: fork role model: unknown confirm drop %q", tok))
+		}
+		if i > 0 && out[i-1] == tok {
+			return nil, diagWrap(CodeInvalidArgument, SubjectNone, "",
+				fmt.Errorf("config: fork role model: duplicate confirm drop %q", tok))
+		}
+	}
+	return out, nil
+}
+
+// ForkRoleModel atomically copies sourceRole's complete raw authored
+// subtree — unknown/future JSON members included, via the raw seed
+// mechanism (spec §1) — then starts from a deep clone of the complete typed
+// source role and overlays the new selector/capacity plus opts re-assertions.
+// Copy-by-default preserves future typed fields unless a later contract
+// explicitly gives them replacement/drop semantics. The SetRoleModel
+// preservation table defines the fields cleared or re-asserted. The source's
+// projection-hidden ThinkTags/Slots
+// follow the exact drop-confirmation rule: the computed set must be
+// confirmed verbatim in opts.ConfirmDrops or the fork is refused before
+// any mutation (drop_confirmation_required; set via DropSetOf).
+// Eligibility semantics are AddRoleModel's (shared gate).
+func (d *Document) ForkRoleModel(sourceRole, role string, facts ModelFacts, opts ForkRoleModelOpts) error {
+	return d.mutateCommit(func(a *Config) error {
+		if sourceRole == "" || role == "" {
+			return diagWrap(CodeInvalidArgument, SubjectNone, "",
+				fmt.Errorf("config: fork role model: empty source or role"))
+		}
+		if err := validateRoleFacts("fork role model", role, facts); err != nil {
+			return err
+		}
+		src, ok := a.Models[sourceRole]
+		if !ok {
+			return diagWrap(CodeRoleNotFound, SubjectRole, sourceRole,
+				fmt.Errorf("config: fork role model: role %q not defined", sourceRole))
+		}
+		if _, exists := a.Models[role]; exists {
+			return diagWrap(CodeRoleExists, SubjectRole, role,
+				fmt.Errorf("config: fork role model: role %q already defined", role))
+		}
+		if _, ok := a.Providers[facts.Key.Provider]; !ok {
+			return diagWrap(CodeProviderNotFound, SubjectProvider, facts.Key.Provider,
+				fmt.Errorf("config: fork role model %q: provider %q not configured", role, facts.Key.Provider))
+		}
+		confirmed, err := validateConfirmDrops(opts.ConfirmDrops)
+		if err != nil {
+			return err
+		}
+		required := forkDropSet(src, opts.SetRoleModelOpts)
+		if !slices.Equal(required, confirmed) {
+			return dropSetWrap(required,
+				diagWrap(CodeDropConfirmationRequired, SubjectRole, sourceRole,
+					fmt.Errorf("config: fork role model %q: unconfirmed drops from %q: %s",
+						role, sourceRole, strings.Join(required, ", "))))
+		}
+		if _, err := gateRoleEligibility(a, "fork role model", role, facts, opts.SetRoleModelOpts); err != nil {
+			return err
+		}
+		// Config.clone is the existing generic deep-copy primitive. The extra
+		// whole-config clone is acceptable on this rare user mutation and avoids
+		// a field list that would silently lose future typed members.
+		m := a.clone().Models[sourceRole]
+		m.Name, m.Provider = facts.Key.Model, facts.Key.Provider
+		m.Type = facts.Type
+		m.Parameters = facts.Parameters
+		m.ContextWindow = facts.ContextWindow
+		m.Dimensions = facts.Dimensions
+		applyRoleOverridesFromOpts(&m, opts.SetRoleModelOpts)
+		a.Models[role] = m
+		return nil
+	}, func() {
+		d.registerForkSeedLocked(sourceRole, role)
+	})
+}
+
+// registerForkSeedLocked captures the source's raw continuity for the new
+// role (spec §1). Runs as a mutateCommit hook: under d.mu, after the
+// authored swap, only on success.
+func (d *Document) registerForkSeedLocked(sourceRole, role string) {
+	seed, ok := d.forkSeedSourceLocked(sourceRole)
+	if !ok {
+		return
+	}
+	if d.modelRawSeeds == nil {
+		d.modelRawSeeds = make(map[string]json.RawMessage)
+	}
+	d.modelRawSeeds[role] = seed
+}
+
+// forkSeedSourceLocked resolves sourceRole's raw continuity: a pending
+// seed (chained fork), else the rawBytes models entry unless the name is
+// tombstoned (a role re-created after in-draft removal has no raw
+// continuity). The result is always a copy, never an alias.
+func (d *Document) forkSeedSourceLocked(sourceRole string) (json.RawMessage, bool) {
+	if seed, ok := d.modelRawSeeds[sourceRole]; ok {
+		return append(json.RawMessage(nil), seed...), true
+	}
+	if _, dropped := d.modelDrops[sourceRole]; dropped {
+		return nil, false
+	}
+	var raw struct {
+		Models map[string]json.RawMessage `json:"models"`
+	}
+	// rawBytes is parse-valid by Document invariant. Mirror Config.clone's
+	// bug backstop: never silently turn invariant corruption into a lossy fork.
+	if err := json.Unmarshal(d.rawBytes, &raw); err != nil {
+		panic(fmt.Sprintf("config: fork seed parse raw: %v", err))
+	}
+	entry, ok := raw.Models[sourceRole]
+	if !ok {
+		return nil, false
+	}
+	return append(json.RawMessage(nil), entry...), true
 }
