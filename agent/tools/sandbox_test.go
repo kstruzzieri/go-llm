@@ -1,6 +1,8 @@
 package tools
 
 import (
+	"context"
+	"encoding/json"
 	"math"
 	"slices"
 	"strings"
@@ -157,6 +159,54 @@ func TestRenderSandboxLineQuotesDelimiters(t *testing.T) {
 	if !strings.Contains(got, `runtime="container=custom"`) ||
 		!strings.Contains(got, `drop_caps=["NET_RAW,ALL"]`) {
 		t.Fatalf("sandbox preview is structurally ambiguous: %q", got)
+	}
+}
+
+type markerRunner struct{ calls int }
+
+func (m *markerRunner) Run(context.Context, execSpec) (execResult, error) {
+	m.calls++
+	return execResult{ExitCode: 0, Stdout: []byte("marker")}, nil
+}
+
+func TestExecToolsWithBackgroundUseManagerBackend(t *testing.T) {
+	marker := &markerRunner{}
+	backend := bindExecBackend(hostBackend{
+		commandRunner: marker, backgroundStarter: starterOf(),
+	}, mustNormalizeSandbox(t, SandboxConfig{}))
+	m := newBackgroundManagerWithBackend(backend, &countingRandom{})
+	t.Cleanup(m.Shutdown)
+
+	toolsList, err := NewExecToolsWithBackground(t.TempDir(), m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rc := toolsList[0].(*RunCommand)
+	raw := json.RawMessage(`{"argv":["go","version"]}`)
+	if _, err := rc.Plan(context.Background(), raw); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := rc.Invoke(context.Background(), raw); err != nil {
+		t.Fatal(err)
+	}
+	if marker.calls != 1 {
+		t.Fatalf("run_command bypassed manager backend; calls = %d", marker.calls)
+	}
+}
+
+func TestSandboxedConstructorsFailClosed(t *testing.T) {
+	cfg := SandboxConfig{Runtime: "container"}
+	if _, err := NewSandboxedBackgroundManager(cfg); err == nil {
+		t.Fatal("background manager accepted unimplemented runtime")
+	}
+	if _, err := NewSandboxedExecTools(t.TempDir(), cfg); err == nil {
+		t.Fatal("foreground tools accepted unimplemented runtime")
+	}
+}
+
+func TestNewExecToolsWithBackgroundRejectsUnresolvedManager(t *testing.T) {
+	if _, err := NewExecToolsWithBackground(t.TempDir(), &BackgroundManager{}); err == nil {
+		t.Fatal("accepted manager without a resolved backend")
 	}
 }
 

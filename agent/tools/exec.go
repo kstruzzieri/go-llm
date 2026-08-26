@@ -138,8 +138,9 @@ func (c *cappedBuffer) Write(p []byte) (int, error) {
 // RunCommand is the argv-first, approval-gated exec tool. PlanningTool: Plan validates
 // and previews; Invoke re-checks and spawns through the runner seam.
 type RunCommand struct {
-	ws     *Workspace
-	runner commandRunner
+	ws      *Workspace
+	runner  commandRunner
+	sandbox sandboxApproval // zero value = host; set by the sandboxed constructors
 	execPlanCache
 }
 
@@ -156,6 +157,25 @@ func NewExecTools(root string) ([]agent.Tool, error) {
 		return nil, fmt.Errorf("tools: build exec tools: %w", err)
 	}
 	return []agent.Tool{NewRunCommand(ws, newPlatformRunner())}, nil
+}
+
+// NewSandboxedExecTools builds the foreground-only exec tool set with the
+// isolation runtime selected by cfg (#440). The zero config is exactly
+// NewExecTools. Unimplemented or invalid configs fail closed. For the
+// combined foreground+background set, build a NewSandboxedBackgroundManager
+// and pass it to NewExecToolsWithBackground instead.
+func NewSandboxedExecTools(root string, cfg SandboxConfig) ([]agent.Tool, error) {
+	backend, err := newExecBackend(cfg)
+	if err != nil {
+		return nil, fmt.Errorf("tools: build exec tools: %w", err)
+	}
+	ws, err := NewWorkspace(root)
+	if err != nil {
+		return nil, fmt.Errorf("tools: build exec tools: %w", err)
+	}
+	rc := NewRunCommand(ws, backend)
+	rc.sandbox = backend.approval
+	return []agent.Tool{rc}, nil
 }
 
 func (t *RunCommand) Spec() agent.ToolSpec {

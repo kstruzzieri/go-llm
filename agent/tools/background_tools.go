@@ -51,15 +51,17 @@ type commandTailArgs struct {
 // foreground and background preparation see identical containment. The
 // existing NewExecTools(root) remains the foreground-only constructor.
 func NewExecToolsWithBackground(root string, manager *BackgroundManager) ([]agent.Tool, error) {
-	if manager == nil {
-		return nil, fmt.Errorf("tools: build exec tools: background manager must not be nil")
+	if manager == nil || manager.backend.execBackend == nil {
+		return nil, fmt.Errorf("tools: build exec tools: background manager must have a resolved backend")
 	}
 	ws, err := NewWorkspace(root)
 	if err != nil {
 		return nil, fmt.Errorf("tools: build exec tools: %w", err)
 	}
+	rc := NewRunCommand(ws, manager.backend)
+	rc.sandbox = manager.backend.approval
 	return []agent.Tool{
-		NewRunCommand(ws, newPlatformRunner()),
+		rc,
 		NewStartCommand(ws, manager),
 		NewCommandStatus(manager),
 		NewCommandTail(manager),
