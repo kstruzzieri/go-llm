@@ -272,6 +272,45 @@ func TestStartCommandPlanRejectsUnresolvedManager(t *testing.T) {
 	}
 }
 
+// TestHostPlansCarryNoSandboxArtifacts pins the host shape ABSOLUTELY, not
+// relative to another constructor: equivalence checks cannot catch a defect
+// that alters both sides identically (an unconditional sandbox line renders
+// on legacy and zero-config plans alike). Host previews must not contain a
+// sandbox line and host keys must not contain the sandbox namespace.
+func TestHostPlansCarryNoSandboxArtifacts(t *testing.T) {
+	raw := json.RawMessage(`{"argv":["go","version"]}`)
+
+	rc, _ := planKeyRC(t)
+	fgPlan, err := rc.Plan(context.Background(), raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(fgPlan.Preview, "sandbox") {
+		t.Fatalf("host foreground preview must carry no sandbox line:\n%s", fgPlan.Preview)
+	}
+	if strings.Contains(fgPlan.ApprovalKey, "sb:") {
+		t.Fatalf("host foreground key must carry no sandbox namespace: %q", fgPlan.ApprovalKey)
+	}
+
+	m := NewBackgroundManager()
+	t.Cleanup(m.Shutdown)
+	ws, err := NewWorkspace(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	sc := NewStartCommand(ws, m)
+	bgPlan, err := sc.Plan(context.Background(), raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(bgPlan.Preview, "sandbox") {
+		t.Fatalf("host background preview must carry no sandbox line:\n%s", bgPlan.Preview)
+	}
+	if strings.Contains(bgPlan.ApprovalKey, "sb:") {
+		t.Fatalf("host background key must carry no sandbox namespace: %q", bgPlan.ApprovalKey)
+	}
+}
+
 func TestZeroConfigConstructorsMatchLegacyHostPlans(t *testing.T) {
 	raw := json.RawMessage(`{"argv":["go","version"]}`)
 	root := t.TempDir()
