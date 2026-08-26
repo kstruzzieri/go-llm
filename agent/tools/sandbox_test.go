@@ -48,6 +48,41 @@ func TestNormalizeSandboxConfig(t *testing.T) {
 	}
 }
 
+func TestNewExecBackendHost(t *testing.T) {
+	for _, cfg := range []SandboxConfig{{}, {Runtime: SandboxRuntimeHost}} {
+		got, err := newExecBackend(cfg)
+		if err != nil {
+			t.Fatalf("newExecBackend(%+v): %v", cfg, err)
+		}
+		host, ok := got.execBackend.(hostBackend)
+		if !ok {
+			t.Fatalf("backend = %T, want hostBackend", got.execBackend)
+		}
+		if host.commandRunner == nil || host.backgroundStarter == nil {
+			t.Fatal("host backend must contain both execution seams")
+		}
+		if got.sandbox.Runtime != SandboxRuntimeHost {
+			t.Fatalf("stored runtime = %q, want host", got.sandbox.Runtime)
+		}
+	}
+}
+
+func TestNewExecBackendFailsClosed(t *testing.T) {
+	got, err := newExecBackend(SandboxConfig{Runtime: "container"})
+	if err == nil || got.execBackend != nil {
+		t.Fatalf("unimplemented runtime returned backend=%T err=%v", got.execBackend, err)
+	}
+	if !strings.Contains(err.Error(), `"container"`) {
+		t.Fatalf("error must name runtime: %v", err)
+	}
+}
+
+func TestNewExecBackendRejectsInvalidConfig(t *testing.T) {
+	if _, err := newExecBackend(SandboxConfig{MemoryCapMB: 1}); err == nil {
+		t.Fatal("dispatch accepted invalid host constraints")
+	}
+}
+
 func TestNormalizeSandboxConfigOwnsCanonicalCaps(t *testing.T) {
 	input := []string{"SYS_ADMIN", "NET_RAW", "NET_RAW"}
 	got, err := normalizeSandboxConfig(SandboxConfig{Runtime: "container", DropCaps: input})

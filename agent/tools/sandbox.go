@@ -35,6 +35,52 @@ func containsControl(s string) bool {
 	return strings.IndexFunc(s, unicode.IsControl) >= 0
 }
 
+// execBackend covers both command lifetimes for one runtime.
+type execBackend interface {
+	commandRunner
+	backgroundStarter
+}
+
+// resolvedExecBackend binds an implementation to its frozen policy.
+type resolvedExecBackend struct {
+	execBackend
+	sandbox SandboxConfig
+}
+
+type hostBackend struct {
+	commandRunner
+	backgroundStarter
+}
+
+func newHostExecBackend(starter backgroundStarter) resolvedExecBackend {
+	return resolvedExecBackend{
+		execBackend: hostBackend{
+			commandRunner:     newPlatformRunner(),
+			backgroundStarter: starter,
+		},
+		sandbox: SandboxConfig{Runtime: SandboxRuntimeHost},
+	}
+}
+
+// newExecBackend is the sole runtime-selection switch (#440). It normalizes
+// first, then dispatches; every non-host runtime fails construction until
+// its implementing ticket (#389, #441, #442) adds a case. There is no host
+// fallback.
+func newExecBackend(cfg SandboxConfig) (resolvedExecBackend, error) {
+	normalized, err := normalizeSandboxConfig(cfg)
+	if err != nil {
+		return resolvedExecBackend{}, err
+	}
+	switch normalized.Runtime {
+	case SandboxRuntimeHost:
+		got := newHostExecBackend(newPlatformStarter())
+		got.sandbox = normalized
+		return got, nil
+	default:
+		return resolvedExecBackend{}, fmt.Errorf("tools: sandbox runtime %q is not implemented", normalized.Runtime)
+	}
+}
+
 // normalizeSandboxConfig validates and canonicalizes a caller-supplied
 // config: it bounds-checks memory and CPU, rejects unsafe runtime and
 // capability names, canonicalizes the empty runtime to host, deep-copies,
