@@ -86,6 +86,7 @@ type execPending struct {
 	requestedTO int
 	clamped     bool
 	fingerprint string
+	sandbox     sandboxApproval // stamped by the owning tool, NOT by prepareExecPlan
 }
 
 type execPlanCache struct {
@@ -138,8 +139,9 @@ func (c *cappedBuffer) Write(p []byte) (int, error) {
 // RunCommand is the argv-first, approval-gated exec tool. PlanningTool: Plan validates
 // and previews; Invoke re-checks and spawns through the runner seam.
 type RunCommand struct {
-	ws     *Workspace
-	runner commandRunner
+	ws      *Workspace
+	runner  commandRunner
+	sandbox sandboxApproval // zero value = host; set by the sandboxed constructors
 	execPlanCache
 }
 
@@ -156,6 +158,25 @@ func NewExecTools(root string) ([]agent.Tool, error) {
 		return nil, fmt.Errorf("tools: build exec tools: %w", err)
 	}
 	return []agent.Tool{NewRunCommand(ws, newPlatformRunner())}, nil
+}
+
+// NewSandboxedExecTools builds the foreground-only exec tool set with the
+// isolation runtime selected by cfg (#440). The zero config is exactly
+// NewExecTools. Unimplemented or invalid configs fail closed. For the
+// combined foreground+background set, build a NewSandboxedBackgroundManager
+// and pass it to NewExecToolsWithBackground instead.
+func NewSandboxedExecTools(root string, cfg SandboxConfig) ([]agent.Tool, error) {
+	backend, err := newExecBackend(cfg)
+	if err != nil {
+		return nil, fmt.Errorf("tools: build exec tools: %w", err)
+	}
+	ws, err := NewWorkspace(root)
+	if err != nil {
+		return nil, fmt.Errorf("tools: build exec tools: %w", err)
+	}
+	rc := NewRunCommand(ws, backend)
+	rc.sandbox = backend.approval
+	return []agent.Tool{rc}, nil
 }
 
 func (t *RunCommand) Spec() agent.ToolSpec {
@@ -204,12 +225,13 @@ func (t *RunCommand) Plan(_ context.Context, raw json.RawMessage) (agent.ToolPla
 	if err != nil {
 		return agent.ToolPlan{Effect: eff}, err
 	}
+	p.sandbox = t.sandbox
 	t.store(ContentHash(raw), p)
 	eff.Timeout = timeout
 	return agent.ToolPlan{
 		Effect:      eff,
 		Preview:     renderExecPreview(p, args.Argv[0]),
-		ApprovalKey: execApprovalKeyPrefix + p.fingerprint,
+		ApprovalKey: execApprovalKeyPrefix + p.sandbox.keyComponent + p.fingerprint,
 	}, nil
 }
 
@@ -523,6 +545,9 @@ func renderExecPreview(p execPending, originalArgv0 string) string {
 		parts[i] = n + "(parent)"
 	}
 	fmt.Fprintf(&b, "  env:     %s\n", strings.Join(parts, ", "))
+	if p.sandbox.preview != "" {
+		fmt.Fprintf(&b, "  sandbox: %s\n", p.sandbox.preview)
+	}
 	// The stored fingerprint is the full digest (the approval key uses all of
 	// it); the id line stays the short display form.
 	id := p.fingerprint

@@ -2,11 +2,10 @@ package tools
 
 import "io"
 
-// backgroundStarter is the detached-process seam (#346). Deliberately separate
-// from commandRunner (run-to-completion) and deliberately minimal: sandbox work
-// (#440) wraps it later — do not widen it. newPlatformStarter (defined per
-// platform in background_unix.go / background_other.go) returns the host
-// implementation.
+// backgroundStarter is the detached-process seam (#346). It stays separate
+// from commandRunner and deliberately minimal; execBackend composes both
+// lifetimes behind the #440 runtime-selection boundary. newPlatformStarter
+// returns the host implementation for the current platform.
 type backgroundStarter interface {
 	Start(spec execSpec, stdout, stderr io.Writer) (backgroundProcess, error)
 }

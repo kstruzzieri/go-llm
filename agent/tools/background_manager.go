@@ -94,7 +94,7 @@ type backgroundJob struct {
 // leaves no process behind. Model tools use the package-private start/status/
 // tail operations; hosts use the exported List, Stop, and Shutdown.
 type BackgroundManager struct {
-	starter backgroundStarter
+	backend resolvedExecBackend
 	random  io.Reader
 	randMu  sync.Mutex
 
@@ -111,14 +111,35 @@ type BackgroundManager struct {
 }
 
 // NewBackgroundManager returns a production manager wired to the host
-// platform's process starter and crypto/rand entropy.
+// platform's process starter and crypto/rand entropy — the host sandbox
+// runtime. Use NewSandboxedBackgroundManager to select another runtime.
 func NewBackgroundManager() *BackgroundManager {
 	return newBackgroundManager(newPlatformStarter(), rand.Reader)
 }
 
+// NewSandboxedBackgroundManager resolves cfg through the runtime dispatch
+// point (#440) and returns a manager whose background starter, foreground
+// runner, and approval metadata all derive from that one resolved backend,
+// so the exec tool set built over it cannot split runtimes between paths.
+// Unimplemented or invalid configs fail closed.
+func NewSandboxedBackgroundManager(cfg SandboxConfig) (*BackgroundManager, error) {
+	backend, err := newExecBackend(cfg)
+	if err != nil {
+		return nil, fmt.Errorf("tools: build background manager: %w", err)
+	}
+	return newBackgroundManagerWithBackend(backend, rand.Reader), nil
+}
+
+// newBackgroundManager remains the starter-injection test seam: it wraps the
+// supplied starter in a host-policy paired backend. Production runtime
+// selection goes through newExecBackend.
 func newBackgroundManager(starter backgroundStarter, random io.Reader) *BackgroundManager {
+	return newBackgroundManagerWithBackend(newHostExecBackend(starter), random)
+}
+
+func newBackgroundManagerWithBackend(backend resolvedExecBackend, random io.Reader) *BackgroundManager {
 	return &BackgroundManager{
-		starter: starter,
+		backend: backend,
 		random:  random,
 		pending: map[string]struct{}{},
 		jobs:    map[string]*backgroundJob{},
@@ -195,7 +216,7 @@ func (m *BackgroundManager) start(ctx context.Context, spec execSpec, cwdDisplay
 
 	stdout := newTailRing(backgroundRingCap)
 	stderr := newTailRing(backgroundRingCap)
-	proc, err := m.starter.Start(spec, stdout, stderr)
+	proc, err := m.backend.Start(spec, stdout, stderr)
 	if err != nil {
 		m.releaseReservation(handle)
 		return JobStatus{}, fmt.Errorf("start background command: %w", err)

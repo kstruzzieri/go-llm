@@ -48,18 +48,23 @@ type commandTailArgs struct {
 
 // NewExecToolsWithBackground builds the full exec tool set — the foreground
 // run_command plus the four background tools — over ONE shared Workspace, so
-// foreground and background preparation see identical containment. The
-// existing NewExecTools(root) remains the foreground-only constructor.
+// foreground and background preparation see identical containment. Both
+// execution paths and the sandbox approval identity derive from the
+// manager's resolved backend (#440), so the two paths can never split
+// runtimes. The existing NewExecTools(root) remains the foreground-only
+// host constructor.
 func NewExecToolsWithBackground(root string, manager *BackgroundManager) ([]agent.Tool, error) {
-	if manager == nil {
-		return nil, fmt.Errorf("tools: build exec tools: background manager must not be nil")
+	if manager == nil || manager.backend.execBackend == nil {
+		return nil, fmt.Errorf("tools: build exec tools: background manager must have a resolved backend")
 	}
 	ws, err := NewWorkspace(root)
 	if err != nil {
 		return nil, fmt.Errorf("tools: build exec tools: %w", err)
 	}
+	rc := NewRunCommand(ws, manager.backend)
+	rc.sandbox = manager.backend.approval
 	return []agent.Tool{
-		NewRunCommand(ws, newPlatformRunner()),
+		rc,
 		NewStartCommand(ws, manager),
 		NewCommandStatus(manager),
 		NewCommandTail(manager),
@@ -129,6 +134,9 @@ func (t *StartCommand) Effect() agent.Effect {
 // pending plan keyed by the raw-args hash, and renders the approval preview.
 func (t *StartCommand) Plan(_ context.Context, raw json.RawMessage) (agent.ToolPlan, error) {
 	eff := t.Effect()
+	if t.manager == nil || t.manager.backend.execBackend == nil {
+		return agent.ToolPlan{Effect: eff}, fmt.Errorf("background manager must have a resolved backend")
+	}
 	var args startCommandArgs
 	if err := json.Unmarshal(raw, &args); err != nil {
 		return agent.ToolPlan{Effect: eff}, fmt.Errorf("invalid arguments: %w", err)
@@ -137,11 +145,14 @@ func (t *StartCommand) Plan(_ context.Context, raw json.RawMessage) (agent.ToolP
 	if err != nil {
 		return agent.ToolPlan{Effect: eff}, err
 	}
+	// The manager is the source of truth for sandbox identity on EVERY
+	// construction path, including direct NewStartCommand callers.
+	p.sandbox = t.manager.backend.approval
 	t.store(ContentHash(raw), p)
 	return agent.ToolPlan{
 		Effect:      eff,
 		Preview:     renderStartPreview(p, args.Argv[0]),
-		ApprovalKey: bgExecApprovalKeyPrefix + p.fingerprint,
+		ApprovalKey: bgExecApprovalKeyPrefix + p.sandbox.keyComponent + p.fingerprint,
 	}, nil
 }
 
@@ -187,6 +198,9 @@ func renderStartPreview(p execPending, originalArgv0 string) string {
 		parts[i] = n + "(parent)"
 	}
 	fmt.Fprintf(&b, "  env:      %s\n", strings.Join(parts, ", "))
+	if p.sandbox.preview != "" {
+		fmt.Fprintf(&b, "  sandbox:  %s\n", p.sandbox.preview)
+	}
 	id := p.fingerprint
 	if len(id) > fingerprintLen {
 		id = id[:fingerprintLen]
