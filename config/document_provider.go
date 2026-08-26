@@ -163,13 +163,18 @@ func (d *Document) ClearProviderAPIKey(name string) error {
 // scrubs before first access. A reference unresolved by the Document's own
 // lookup still fails at load before this API can run (unchanged behavior).
 func (d *Document) ClearAllProviderAPIKeys() error {
-	return d.mutate(func(a *Config) error {
+	err := d.mutate(func(a *Config) error {
 		for name, p := range a.Providers {
 			p.APIKey = ""
 			a.Providers[name] = p
 		}
 		return nil
 	})
+	if diag, ok := DiagnosticOf(err); ok && diag.Code == CodeDuplicateKeys {
+		return diagWrap(CodeDuplicateKeys, SubjectNone, "",
+			fmt.Errorf("config: document is read-only: duplicate or case-alias keys"))
+	}
+	return err
 }
 
 func providerNotFoundErr(op, name string) error {

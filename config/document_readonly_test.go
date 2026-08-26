@@ -1,6 +1,7 @@
 package config
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -212,13 +213,27 @@ func TestReadOnlyGatesExistingMutatorsAndEverySave(t *testing.T) {
 		{"SetRoleOverrides-empty", func(d *Document) error {
 			return d.SetRoleOverrides(provider.ModelKey{}, RoleOverrides{}, SetRoleOverridesOpts{})
 		}},
-		{"ClearAllProviderAPIKeys", func(d *Document) error { return d.ClearAllProviderAPIKeys() }},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			assertDiag(t, tc.run(newRO(t)), CodeDuplicateKeys, SubjectProvider, "p")
 		})
 	}
+	t.Run("ClearAllProviderAPIKeys", func(t *testing.T) {
+		err := newRO(t).ClearAllProviderAPIKeys()
+		assertDiag(t, err, CodeDuplicateKeys, SubjectNone, "")
+		if strings.Contains(err.Error(), `provider "p"`) {
+			t.Errorf("ClearAllProviderAPIKeys() error = %q, want no provider identity", err)
+		}
+		for cause := errors.Unwrap(err); cause != nil; cause = errors.Unwrap(cause) {
+			if diag, ok := DiagnosticOf(cause); ok && diag.Subject != "" {
+				t.Errorf("ClearAllProviderAPIKeys() unwrap diagnostic = %+v, want no subject", diag)
+			}
+			if strings.Contains(cause.Error(), `provider "p"`) {
+				t.Errorf("ClearAllProviderAPIKeys() unwrap error = %q, want no provider identity", cause)
+			}
+		}
+	})
 
 	d := newRO(t)
 	d.mu.Lock()

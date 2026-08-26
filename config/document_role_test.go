@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"reflect"
 	"slices"
@@ -102,6 +103,61 @@ func TestRemoveRole(t *testing.T) {
 	}
 	if _, ok := d.modelDrops["spare"]; !ok {
 		t.Fatal("tombstone not recorded")
+	}
+}
+
+func TestRemoveRoleRefusesSelectorStateDrop(t *testing.T) {
+	tests := []struct {
+		name  string
+		field string
+	}{
+		{"context window", `"context_window": 8192`},
+		{"sampling options", `"options": {"temperature": 0.2}`},
+		{"capabilities", `"capabilities": ["chat"]`},
+		{"think mode", `"think_mode": "always"`},
+		{"think tags", `"think_tags": {"open": "<t>", "close": "</t>"}`},
+		{"slots", `"slots": 2`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			raw := fmt.Sprintf(`{
+  "providers": {"ollama": {"base_url": "http://localhost:11434", "api_format": "openai-compat", "slot_discovery": true}},
+  "models": {
+    "live": {"name": "shared", "provider": "ollama", "type": "dense"},
+    "carrier": {"name": "shared", "type": "dense", %s}
+  },
+  "defaults": {"agent": "live"}
+}`, tt.field)
+			d := loadTestDoc(t, raw)
+
+			err := d.RemoveRole("carrier")
+			assertDiag(t, err, CodeRoleInUse, SubjectRole, "live")
+			if _, ok := d.authored.Models["carrier"]; !ok {
+				t.Errorf("RemoveRole(%q) removed the selector-state carrier after refusal", "carrier")
+			}
+		})
+	}
+}
+
+func TestRemoveRoleAllowsRedundantSelectorState(t *testing.T) {
+	const raw = `{
+  "providers": {"local": {"base_url": "http://localhost:1", "api_format": "openai-compat", "slot_discovery": true}},
+  "models": {
+    "live": {"name": "shared", "provider": "local", "type": "dense",
+      "context_window": 8192, "options": {"temperature": 0.2},
+      "capabilities": ["chat", "stream"], "think_mode": "ALWAYS",
+      "think_tags": {"open": "<t>", "close": "</t>"}, "slots": 2},
+    "carrier": {"name": "shared", "provider": "local", "type": "dense",
+      "context_window": 8192, "options": {"temperature": 0.2},
+      "capabilities": ["STREAM", "CHAT"], "think_mode": "always",
+      "think_tags": {"open": "<t>", "close": "</t>"}, "slots": 2}
+  },
+  "defaults": {"agent": "live"}
+}`
+	d := loadTestDoc(t, raw)
+
+	if err := d.RemoveRole("carrier"); err != nil {
+		t.Errorf("RemoveRole(%q) = %v, want nil for redundant selector state", "carrier", err)
 	}
 }
 

@@ -3,6 +3,7 @@ package config
 import (
 	"encoding/json"
 	"fmt"
+	"reflect"
 	"slices"
 	"sort"
 	"strings"
@@ -111,9 +112,73 @@ func (d *Document) RemoveRole(role string) error {
 				}
 			}
 		}
+		if survivor, field := selectorStateDrop(a.Models, role); survivor != "" {
+			return diagWrap(CodeRoleInUse, SubjectRole, survivor,
+				fmt.Errorf("config: remove role %q: still supplies selector-wide %s used by role %q", role, field, survivor))
+		}
 		delete(a.Models, role)
 		return nil
 	})
+}
+
+func selectorStateDrop(models map[string]ModelConfig, removedRole string) (string, string) {
+	removed := models[removedRole]
+	removedProvider := removed.Provider
+	if removedProvider == "" {
+		removedProvider = "ollama"
+	}
+	var survivorNames []string
+	var survivors []ModelConfig
+	for _, role := range sortedStringKeys(models) {
+		if role == removedRole {
+			continue
+		}
+		m := models[role]
+		providerName := m.Provider
+		if providerName == "" {
+			providerName = "ollama"
+		}
+		if providerName == removedProvider && m.Name == removed.Name {
+			survivorNames = append(survivorNames, role)
+			survivors = append(survivors, m)
+		}
+	}
+	if len(survivors) == 0 {
+		return "", ""
+	}
+	preserved := func(match func(ModelConfig) bool) bool {
+		return slices.ContainsFunc(survivors, match)
+	}
+	removedCaps, removedCapsErr := provider.ParseCapsStrict(removed.Capabilities)
+	switch {
+	case removed.ContextWindow != 0 && !preserved(func(m ModelConfig) bool {
+		return m.ContextWindow == removed.ContextWindow
+	}):
+		return survivorNames[0], "context_window"
+	case removed.Options != nil && !preserved(func(m ModelConfig) bool {
+		return m.Options != nil && reflect.DeepEqual(m.Options, removed.Options)
+	}):
+		return survivorNames[0], "options"
+	case len(removed.Capabilities) > 0 && !preserved(func(m ModelConfig) bool {
+		caps, err := provider.ParseCapsStrict(m.Capabilities)
+		return len(m.Capabilities) > 0 && removedCapsErr == nil && err == nil && caps == removedCaps
+	}):
+		return survivorNames[0], "capabilities"
+	case removed.ThinkMode != "" && !preserved(func(m ModelConfig) bool {
+		return m.ThinkMode != "" && strings.EqualFold(m.ThinkMode, removed.ThinkMode)
+	}):
+		return survivorNames[0], "think_mode"
+	case removed.ThinkTags != nil && !preserved(func(m ModelConfig) bool {
+		return m.ThinkTags != nil && *m.ThinkTags == *removed.ThinkTags
+	}):
+		return survivorNames[0], "think_tags"
+	case removed.Slots != 0 && !preserved(func(m ModelConfig) bool {
+		return m.Slots == removed.Slots
+	}):
+		return survivorNames[0], "slots"
+	default:
+		return "", ""
+	}
 }
 
 // ForkRoleModelOpts carries the SetRoleModel option semantics plus the
