@@ -129,12 +129,18 @@ func (t *WriteFile) Invoke(_ context.Context, raw json.RawMessage) (agent.ToolRe
 	// between this re-read and the rename below. WriteFileAtomic re-checks path TYPE
 	// (symlink/dir) before renaming but not content; without OS file locks this is an
 	// accepted limitation for a local single-user coding agent.
-	if err := t.ws.WriteFileAtomic(pp.path, pp.afterContent); err != nil {
-		return errResult(toolVisibleError(err).Error()), nil
-	}
-	record(t.j, MutationRecord{
+	rec := MutationRecord{
 		Path: pp.path, PriorContent: pp.priorContent, Existed: pp.priorExists,
 		AfterHash: pp.afterHash, Summary: pp.summary, At: time.Now(),
+	}
+	toolErr, internalErr := runJournaledWrite(t.j, rec, func() error {
+		return t.ws.WriteFileAtomic(pp.path, pp.afterContent)
 	})
+	if internalErr != nil {
+		return agent.ToolResult{}, internalErr
+	}
+	if toolErr != nil {
+		return errResult(toolVisibleError(toolErr).Error()), nil
+	}
 	return agent.ToolResult{Content: pp.summary, Preview: pp.summary}, nil
 }

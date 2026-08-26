@@ -141,12 +141,18 @@ func (t *EditFile) Invoke(_ context.Context, raw json.RawMessage) (agent.ToolRes
 	if ContentHash(before) != pp.beforeHash {
 		return errResult("file changed since preview; retry"), nil
 	}
-	if err := t.ws.WriteFileAtomic(pp.path, pp.afterContent); err != nil {
-		return errResult(toolVisibleError(err).Error()), nil
-	}
-	record(t.j, MutationRecord{
+	rec := MutationRecord{
 		Path: pp.path, PriorContent: pp.priorContent, Existed: true,
 		AfterHash: pp.afterHash, Summary: pp.summary, At: time.Now(),
+	}
+	toolErr, internalErr := runJournaledWrite(t.j, rec, func() error {
+		return t.ws.WriteFileAtomic(pp.path, pp.afterContent)
 	})
+	if internalErr != nil {
+		return agent.ToolResult{}, internalErr
+	}
+	if toolErr != nil {
+		return errResult(toolVisibleError(toolErr).Error()), nil
+	}
 	return agent.ToolResult{Content: pp.summary, Preview: pp.summary}, nil
 }
