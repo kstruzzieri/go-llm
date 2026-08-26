@@ -86,6 +86,7 @@ type execPending struct {
 	requestedTO int
 	clamped     bool
 	fingerprint string
+	sandbox     sandboxApproval // stamped by the owning tool, NOT by prepareExecPlan
 }
 
 type execPlanCache struct {
@@ -224,12 +225,13 @@ func (t *RunCommand) Plan(_ context.Context, raw json.RawMessage) (agent.ToolPla
 	if err != nil {
 		return agent.ToolPlan{Effect: eff}, err
 	}
+	p.sandbox = t.sandbox
 	t.store(ContentHash(raw), p)
 	eff.Timeout = timeout
 	return agent.ToolPlan{
 		Effect:      eff,
 		Preview:     renderExecPreview(p, args.Argv[0]),
-		ApprovalKey: execApprovalKeyPrefix + p.fingerprint,
+		ApprovalKey: execApprovalKeyPrefix + p.sandbox.keyComponent + p.fingerprint,
 	}, nil
 }
 
@@ -543,6 +545,9 @@ func renderExecPreview(p execPending, originalArgv0 string) string {
 		parts[i] = n + "(parent)"
 	}
 	fmt.Fprintf(&b, "  env:     %s\n", strings.Join(parts, ", "))
+	if p.sandbox.preview != "" {
+		fmt.Fprintf(&b, "  sandbox: %s\n", p.sandbox.preview)
+	}
 	// The stored fingerprint is the full digest (the approval key uses all of
 	// it); the id line stays the short display form.
 	id := p.fingerprint

@@ -7,6 +7,8 @@ import (
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/kstruzzieri/go-llm/agent"
 )
 
 func TestNormalizeSandboxConfig(t *testing.T) {
@@ -207,6 +209,120 @@ func TestSandboxedConstructorsFailClosed(t *testing.T) {
 func TestNewExecToolsWithBackgroundRejectsUnresolvedManager(t *testing.T) {
 	if _, err := NewExecToolsWithBackground(t.TempDir(), &BackgroundManager{}); err == nil {
 		t.Fatal("accepted manager without a resolved backend")
+	}
+}
+
+func TestRunCommandSandboxApproval(t *testing.T) {
+	rc, _ := planKeyRC(t)
+	cfg := mustNormalizeSandbox(t, SandboxConfig{
+		Runtime: "container", MemoryCapMB: 512, CPULimit: 1.5,
+		DropCaps: []string{"SYS_ADMIN", "NET_RAW"},
+	})
+	rc.sandbox = approvalForSandbox(cfg)
+	plan, err := rc.Plan(context.Background(), json.RawMessage(`{"argv":["go","version"]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "exec:v2:" + rc.sandbox.keyComponent; !strings.HasPrefix(plan.ApprovalKey, want) {
+		t.Fatalf("key = %q, want prefix %q", plan.ApprovalKey, want)
+	}
+	if !strings.Contains(plan.Preview, "sandbox: "+rc.sandbox.preview) {
+		t.Fatalf("preview missing sandbox policy:\n%s", plan.Preview)
+	}
+}
+
+func TestStartCommandDerivesSandboxApprovalFromManager(t *testing.T) {
+	cfg := mustNormalizeSandbox(t, SandboxConfig{Runtime: "container", MemoryCapMB: 512})
+	backend := bindExecBackend(hostBackend{
+		commandRunner: &markerRunner{}, backgroundStarter: starterOf(),
+	}, cfg)
+	m := newBackgroundManagerWithBackend(backend, &countingRandom{})
+	t.Cleanup(m.Shutdown)
+	ws, err := NewWorkspace(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Direct construction is the regression path: no tool-set constructor may
+	// be required to stamp the manager's sandbox identity.
+	sc := NewStartCommand(ws, m)
+	plan, err := sc.Plan(context.Background(), json.RawMessage(`{"argv":["go","version"]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "exec-bg:v1:" + backend.approval.keyComponent; !strings.HasPrefix(plan.ApprovalKey, want) {
+		t.Fatalf("key = %q, want prefix %q", plan.ApprovalKey, want)
+	}
+	if !strings.Contains(plan.Preview, "sandbox:  "+backend.approval.preview) {
+		t.Fatalf("preview missing manager sandbox policy:\n%s", plan.Preview)
+	}
+}
+
+func TestStartCommandPlanRejectsUnresolvedManager(t *testing.T) {
+	raw := json.RawMessage(`{"argv":["go","version"]}`)
+	for name, manager := range map[string]*BackgroundManager{
+		"nil":  nil,
+		"zero": {},
+	} {
+		t.Run(name, func(t *testing.T) {
+			sc := NewStartCommand(nil, manager)
+			if _, err := sc.Plan(context.Background(), raw); err == nil {
+				t.Fatal("Plan accepted a manager without a resolved backend")
+			}
+		})
+	}
+}
+
+func TestZeroConfigConstructorsMatchLegacyHostPlans(t *testing.T) {
+	raw := json.RawMessage(`{"argv":["go","version"]}`)
+	root := t.TempDir()
+
+	legacyFG, err := NewExecTools(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	zeroFG, err := NewSandboxedExecTools(root, SandboxConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacyPlan, err := legacyFG[0].(*RunCommand).Plan(context.Background(), raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	zeroPlan, err := zeroFG[0].(*RunCommand).Plan(context.Background(), raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if legacyPlan.ApprovalKey != zeroPlan.ApprovalKey || legacyPlan.Preview != zeroPlan.Preview {
+		t.Fatal("zero-config foreground plan differs from legacy host plan")
+	}
+
+	legacyManager := NewBackgroundManager()
+	zeroManager, err := NewSandboxedBackgroundManager(SandboxConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(legacyManager.Shutdown)
+	t.Cleanup(zeroManager.Shutdown)
+	legacyBG, err := NewExecToolsWithBackground(root, legacyManager)
+	if err != nil {
+		t.Fatal(err)
+	}
+	zeroBG, err := NewExecToolsWithBackground(root, zeroManager)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, index := range []int{0, 1} {
+		left, err := legacyBG[index].(agent.PlanningTool).Plan(context.Background(), raw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		right, err := zeroBG[index].(agent.PlanningTool).Plan(context.Background(), raw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if left.ApprovalKey != right.ApprovalKey || left.Preview != right.Preview {
+			t.Fatalf("zero-config tool index %d differs from legacy host plan", index)
+		}
 	}
 }
 

@@ -131,6 +131,9 @@ func (t *StartCommand) Effect() agent.Effect {
 // pending plan keyed by the raw-args hash, and renders the approval preview.
 func (t *StartCommand) Plan(_ context.Context, raw json.RawMessage) (agent.ToolPlan, error) {
 	eff := t.Effect()
+	if t.manager == nil || t.manager.backend.execBackend == nil {
+		return agent.ToolPlan{Effect: eff}, fmt.Errorf("background manager must have a resolved backend")
+	}
 	var args startCommandArgs
 	if err := json.Unmarshal(raw, &args); err != nil {
 		return agent.ToolPlan{Effect: eff}, fmt.Errorf("invalid arguments: %w", err)
@@ -139,11 +142,14 @@ func (t *StartCommand) Plan(_ context.Context, raw json.RawMessage) (agent.ToolP
 	if err != nil {
 		return agent.ToolPlan{Effect: eff}, err
 	}
+	// The manager is the source of truth for sandbox identity on EVERY
+	// construction path, including direct NewStartCommand callers.
+	p.sandbox = t.manager.backend.approval
 	t.store(ContentHash(raw), p)
 	return agent.ToolPlan{
 		Effect:      eff,
 		Preview:     renderStartPreview(p, args.Argv[0]),
-		ApprovalKey: bgExecApprovalKeyPrefix + p.fingerprint,
+		ApprovalKey: bgExecApprovalKeyPrefix + p.sandbox.keyComponent + p.fingerprint,
 	}, nil
 }
 
@@ -189,6 +195,9 @@ func renderStartPreview(p execPending, originalArgv0 string) string {
 		parts[i] = n + "(parent)"
 	}
 	fmt.Fprintf(&b, "  env:      %s\n", strings.Join(parts, ", "))
+	if p.sandbox.preview != "" {
+		fmt.Fprintf(&b, "  sandbox:  %s\n", p.sandbox.preview)
+	}
 	id := p.fingerprint
 	if len(id) > fingerprintLen {
 		id = id[:fingerprintLen]
