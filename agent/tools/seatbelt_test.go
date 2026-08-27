@@ -188,6 +188,15 @@ func TestSeatbeltProfileRejectsBroadRoots(t *testing.T) {
 		"data alias executable": func(p *seatbeltPolicy) { p.exePath = "/System/Volumes/Data/Users/x/tool" },
 		"relative system root":  func(p *seatbeltPolicy) { p.systemReadRoots = []string{"usr/lib"} },
 		"relative workspace":    func(p *seatbeltPolicy) { p.workspaceRoot = "private/tmp/ws" },
+		// Un-normalized spellings must be rejected outright: the kernel
+		// normalizes paths before matching, so a dot-dot spelling could evade
+		// the broad-root string check while enforcing something else entirely.
+		"dot-dot data evasion": func(p *seatbeltPolicy) {
+			p.systemReadRoots = []string{"/System/Volumes/../Volumes/Data/Users"}
+		},
+		"dot-dot to volume root": func(p *seatbeltPolicy) { p.workspaceRoot = "/private/tmp/ws/../../.." },
+		"trailing slash":         func(p *seatbeltPolicy) { p.tempRoot = "/private/tmp/pt/" },
+		"trailing dot":           func(p *seatbeltPolicy) { p.workspaceRoot = "/private/tmp/ws/." },
 	}
 	for name, mutate := range tests {
 		t.Run(name, func(t *testing.T) {

@@ -7,11 +7,23 @@ package tools
 
 import (
 	"fmt"
-	"path/filepath"
+	"path"
 	"slices"
 	"strings"
 	"unicode/utf8"
 )
+
+// seatbeltCleanAbs reports whether p is an absolute POSIX path in canonical
+// spelling. SBPL paths are always POSIX (Seatbelt exists only on macOS), so
+// the stdlib path package is used deliberately instead of filepath: the
+// builder must behave identically on the Linux CI hosts that unit-test it.
+// Canonical spelling matters for security, not style — the kernel normalizes
+// paths before matching, so an un-normalized spelling (dot-dot, trailing
+// slash) could evade the broad-root string checks while enforcing something
+// else entirely.
+func seatbeltCleanAbs(p string) bool {
+	return strings.HasPrefix(p, "/") && path.Clean(p) == p
+}
 
 // sbplQuote renders path as an SBPL string literal. Paths are data: backslash
 // and double quote are escaped, and any invalid UTF-8 or Unicode control
@@ -43,10 +55,10 @@ func sbplQuote(path string) (string, error) {
 func seatbeltMetadataAncestors(paths []string) ([]string, error) {
 	seen := map[string]bool{}
 	for _, p := range paths {
-		if !filepath.IsAbs(p) {
-			return nil, fmt.Errorf("tools: seatbelt ancestor computation requires absolute paths, got %q", p)
+		if !seatbeltCleanAbs(p) {
+			return nil, fmt.Errorf("tools: seatbelt ancestor computation requires clean absolute paths, got %q", p)
 		}
-		for dir := filepath.Dir(filepath.Clean(p)); ; dir = filepath.Dir(dir) {
+		for dir := path.Dir(p); ; dir = path.Dir(dir) {
 			seen[dir] = true
 			if dir == "/" {
 				break
@@ -85,8 +97,8 @@ func seatbeltAllowancePath(kind, p string) (string, error) {
 	if p == "" {
 		return "", fmt.Errorf("tools: seatbelt profile requires a %s path", kind)
 	}
-	if !filepath.IsAbs(p) {
-		return "", fmt.Errorf("tools: seatbelt %s path %q must be absolute", kind, p)
+	if !seatbeltCleanAbs(p) {
+		return "", fmt.Errorf("tools: seatbelt %s path %q must be absolute and in canonical spelling", kind, p)
 	}
 	if seatbeltBroadRoot(p) {
 		return "", fmt.Errorf("tools: seatbelt %s path %q is a broad or data-bearing root", kind, p)
@@ -126,8 +138,8 @@ func buildSeatbeltProfile(p seatbeltPolicy) (string, error) {
 	ancestors := slices.Compact(slices.Sorted(slices.Values(p.metadataAncestors)))
 	ancQ := make([]string, 0, len(ancestors))
 	for _, dir := range ancestors {
-		if !filepath.IsAbs(dir) {
-			return "", fmt.Errorf("tools: seatbelt metadata ancestor %q must be absolute", dir)
+		if !seatbeltCleanAbs(dir) {
+			return "", fmt.Errorf("tools: seatbelt metadata ancestor %q must be absolute and in canonical spelling", dir)
 		}
 		q, err := sbplQuote(dir)
 		if err != nil {
