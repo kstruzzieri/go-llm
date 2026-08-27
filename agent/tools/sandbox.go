@@ -18,6 +18,12 @@ type SandboxRuntime string
 // alias retained so SandboxConfig{} preserves pre-#440 behavior.
 const SandboxRuntimeHost SandboxRuntime = "host"
 
+// SandboxRuntimeSeatbelt selects the macOS Seatbelt (sandbox-exec) backend
+// (#442): per-invocation deny-default profiles scoping reads/writes to the
+// workspace plus a private temp directory. Selecting it off-darwin, or on a
+// host whose Seatbelt capability probe fails, fails closed at construction.
+const SandboxRuntimeSeatbelt SandboxRuntime = "seatbelt"
+
 // SandboxConfig is a permission ceiling for a non-host execution runtime: a
 // backend may enforce stricter isolation but must never silently provide
 // less. The zero value is the compatibility exception and means direct host
@@ -148,10 +154,17 @@ func renderSandboxLine(cfg SandboxConfig) string {
 		}
 		caps = "[" + strings.Join(quoted, ",") + "]"
 	}
-	return fmt.Sprintf(
+	line := fmt.Sprintf(
 		"runtime=%s network=%s memory_cap=%s cpu_limit=%s drop_caps=%s",
 		strconv.QuoteToGraphic(string(cfg.Runtime)), network, memory, cpu, caps,
 	)
+	// Seatbelt-only marker (#442): the user approves that the command's temp
+	// directory is a fresh private one, not the ambient TMPDIR. Other runtimes
+	// must not claim a behavior they do not implement.
+	if cfg.Runtime == SandboxRuntimeSeatbelt {
+		line += " temp=private"
+	}
+	return line
 }
 
 // newExecBackend is the sole runtime-selection switch (#440). It normalizes
