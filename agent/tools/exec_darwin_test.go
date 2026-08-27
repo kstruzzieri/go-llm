@@ -5,6 +5,7 @@ package tools
 import (
 	"context"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -384,6 +385,153 @@ func TestSeatbeltRunReplacementRaceLeavesForeignDir(t *testing.T) {
 		t.Fatalf("cleanup outcome overwrote the command result: res=%+v err=%v", res, err)
 	}
 	if _, err := os.Stat(foreignMarker); err != nil {
+		t.Fatalf("guarded cleanup deleted the foreign directory's contents: %v", err)
+	}
+	if _, err := os.Stat(stolen); err != nil {
+		t.Fatalf("original temp directory unexpectedly gone: %v", err)
+	}
+}
+
+type captureStarter struct {
+	spec   execSpec
+	proc   backgroundProcess
+	err    error
+	called int
+}
+
+func (c *captureStarter) Start(s execSpec, _, _ io.Writer) (backgroundProcess, error) {
+	c.called++
+	c.spec = s
+	if c.err != nil {
+		return nil, c.err
+	}
+	return c.proc, nil
+}
+
+type fakeProcess struct {
+	pid           int
+	code          int
+	managerKilled bool
+	waitErr       error
+	killErr       error
+	killCalls     int
+}
+
+func (f *fakeProcess) PID() int                 { return f.pid }
+func (f *fakeProcess) Wait() (int, bool, error) { return f.code, f.managerKilled, f.waitErr }
+func (f *fakeProcess) Kill() error              { f.killCalls++; return f.killErr }
+
+func TestSeatbeltStartWrapsSpecAndCleansAfterWait(t *testing.T) {
+	starter := &captureStarter{proc: &fakeProcess{pid: 42, code: 7, managerKilled: true}}
+	b, base := testSeatbeltBackend(t, nil)
+	b.starter = starter
+	ws := canonTempDirT(t)
+	proc, err := b.Start(seatbeltSpec(t, ws), io.Discard, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if starter.spec.Path != seatbeltExecPath || starter.spec.Argv[1] != "-p" {
+		t.Fatalf("delegate did not receive the wrapped spec: %q", starter.spec.Argv)
+	}
+	childTemp := tmpdirOf(t, starter.spec.Env)
+	if _, err := os.Stat(childTemp); err != nil {
+		t.Fatalf("private temp must exist while the process is outstanding: %v", err)
+	}
+	if !strings.Contains(starter.spec.Argv[2], `(subpath "`+ws+`")`) {
+		t.Fatalf("profile missing workspace:\n%s", starter.spec.Argv[2])
+	}
+	code, managerKilled, err := proc.Wait()
+	if code != 7 || !managerKilled || err != nil {
+		t.Fatalf("Wait result altered: code=%d managerKilled=%v err=%v", code, managerKilled, err)
+	}
+	assertEmptyDir(t, base)
+}
+
+func TestSeatbeltStartRejectsBadRootBeforeDelegate(t *testing.T) {
+	starter := &captureStarter{proc: &fakeProcess{}}
+	b, base := testSeatbeltBackend(t, nil)
+	b.starter = starter
+	spec := seatbeltSpec(t, canonTempDirT(t))
+	spec.WorkspaceRoot = ""
+	if _, err := b.Start(spec, io.Discard, io.Discard); err == nil {
+		t.Fatal("empty workspace root accepted by Start")
+	}
+	if starter.called != 0 {
+		t.Fatal("delegate ran despite rejected root")
+	}
+	assertEmptyDir(t, base)
+}
+
+func TestSeatbeltStartSpawnFailureCleansTemp(t *testing.T) {
+	starter := &captureStarter{err: errors.New("spawn failed")}
+	b, base := testSeatbeltBackend(t, nil)
+	b.starter = starter
+	if _, err := b.Start(seatbeltSpec(t, canonTempDirT(t)), io.Discard, io.Discard); err == nil {
+		t.Fatal("spawn failure swallowed")
+	}
+	assertEmptyDir(t, base)
+}
+
+func TestSeatbeltProcessDelegatesPIDAndKill(t *testing.T) {
+	killErr := errors.New("kill unavailable")
+	inner := &fakeProcess{pid: 4242, killErr: killErr}
+	proc := &seatbeltProcess{backgroundProcess: inner, cleanup: func() error { return nil }}
+	if proc.PID() != 4242 {
+		t.Fatalf("PID = %d, want delegate's 4242", proc.PID())
+	}
+	if err := proc.Kill(); !errors.Is(err, killErr) {
+		t.Fatalf("Kill error altered: %v", err)
+	}
+	if inner.killCalls != 1 {
+		t.Fatalf("Kill delegate calls = %d, want 1", inner.killCalls)
+	}
+}
+
+func TestSeatbeltProcessWaitCleansOnceAndPreservesErrors(t *testing.T) {
+	waitErr := errors.New("observer broke")
+	cleanups := 0
+	proc := &seatbeltProcess{
+		backgroundProcess: &fakeProcess{code: -1, waitErr: waitErr},
+		cleanup: func() error {
+			cleanups++
+			return errors.New("cleanup failed")
+		},
+	}
+	code, managerKilled, err := proc.Wait()
+	if code != -1 || managerKilled || !errors.Is(err, waitErr) {
+		t.Fatalf("Wait result rewritten by cleanup failure: code=%d mk=%v err=%v", code, managerKilled, err)
+	}
+	if cleanups != 1 {
+		t.Fatalf("cleanup calls after Wait = %d, want 1", cleanups)
+	}
+}
+
+// TestSeatbeltStartReplacementRaceLeavesForeignDir mirrors the foreground
+// race regression through the background Wait path.
+func TestSeatbeltStartReplacementRaceLeavesForeignDir(t *testing.T) {
+	starter := &captureStarter{proc: &fakeProcess{}}
+	b, base := testSeatbeltBackend(t, nil)
+	b.starter = starter
+	proc, err := b.Start(seatbeltSpec(t, canonTempDirT(t)), io.Discard, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	temp := tmpdirOf(t, starter.spec.Env)
+	stolen := filepath.Join(base, "stolen")
+	if err := os.Rename(temp, stolen); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(temp, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	marker := filepath.Join(temp, "marker")
+	if err := os.WriteFile(marker, []byte("keep"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if code, _, err := proc.Wait(); code != 0 || err != nil {
+		t.Fatalf("Wait result altered: code=%d err=%v", code, err)
+	}
+	if _, err := os.Stat(marker); err != nil {
 		t.Fatalf("guarded cleanup deleted the foreign directory's contents: %v", err)
 	}
 	if _, err := os.Stat(stolen); err != nil {

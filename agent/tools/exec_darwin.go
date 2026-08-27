@@ -249,8 +249,34 @@ func (b *seatbeltBackend) Run(ctx context.Context, spec execSpec) (execResult, e
 	return res, runErr
 }
 
-// Start is wired in the next commit of #442; until then the background path
-// fails closed rather than ever running a target unsandboxed.
-func (b *seatbeltBackend) Start(execSpec, io.Writer, io.Writer) (backgroundProcess, error) {
-	return nil, errors.New("tools: seatbelt background execution is not wired yet")
+// seatbeltProcess decorates the delegate background process with the guarded
+// private-temp cleanup, run exactly once after the underlying Wait. PID and
+// Kill delegate unchanged via embedding; the manager's group-termination and
+// reap semantics are untouched. A cleanup failure never rewrites the
+// process's exit code, managerKilled flag, or error taxonomy.
+type seatbeltProcess struct {
+	backgroundProcess
+	cleanup func() error
+}
+
+func (p *seatbeltProcess) Wait() (int, bool, error) {
+	code, managerKilled, err := p.backgroundProcess.Wait()
+	_ = p.cleanup()
+	return code, managerKilled, err
+}
+
+// Start launches one background command under its per-invocation profile
+// through the same preparation as Run. Spawn failure cleans the private temp;
+// after publication the returned process owns cleanup at Wait/reap time.
+func (b *seatbeltBackend) Start(spec execSpec, stdout, stderr io.Writer) (backgroundProcess, error) {
+	wrapped, cleanup, err := b.prepare(spec)
+	if err != nil {
+		return nil, err
+	}
+	proc, err := b.starter.Start(wrapped, stdout, stderr)
+	if err != nil {
+		_ = cleanup()
+		return nil, err
+	}
+	return &seatbeltProcess{backgroundProcess: proc, cleanup: cleanup}, nil
 }
