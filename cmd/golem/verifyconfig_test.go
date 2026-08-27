@@ -348,3 +348,31 @@ func TestLoadVerifyConfigBoundsArgvForTheApprovalPrompt(t *testing.T) {
 		t.Fatalf("exactly at the entry limit must be accepted: %v", err)
 	}
 }
+
+// TestLoadVerifyConfigBoundsItsOwnDiagnostics pins that a workspace cannot
+// flood the terminal through an error message. encoding/json echoes an unknown
+// field's name verbatim, and a rejected dir is quoted back, so both are
+// workspace-controlled text inside a diagnostic.
+func TestLoadVerifyConfigBoundsItsOwnDiagnostics(t *testing.T) {
+	huge := strings.Repeat("A", verifyConfigMaxBytes/2)
+	cases := map[string]string{
+		"unknown field name": `{"` + huge + `":1}`,
+		"rejected dir":       `{"verify":{"argv":["go"],"dir":"/` + huge + `"}}`,
+	}
+	for name, body := range cases {
+		t.Run(name, func(t *testing.T) {
+			root := t.TempDir()
+			writeGolemJSON(t, root, body)
+			_, err := loadVerifyConfig(root)
+			if err == nil {
+				t.Fatal("expected a refusal")
+			}
+			if len(err.Error()) > verifyMessageMaxBytes+32 {
+				t.Fatalf("diagnostic not bounded: %d bytes", len(err.Error()))
+			}
+			if !strings.Contains(err.Error(), verifyConfigName) {
+				t.Fatalf("truncation must keep the file name: %q", err)
+			}
+		})
+	}
+}

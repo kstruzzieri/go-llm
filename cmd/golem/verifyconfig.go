@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 const (
@@ -36,6 +37,11 @@ const (
 	// budget. A real check needs a handful of short arguments.
 	verifyMaxArgv      = 64
 	verifyMaxArgvBytes = 4096
+	// verifyMessageMaxBytes bounds every diagnostic this loader emits. The
+	// messages quote workspace-controlled text — encoding/json echoes an
+	// unknown field's name verbatim, and a bad dir is quoted back — so a single
+	// enormous key in a 64 KiB file would otherwise flood the startup output.
+	verifyMessageMaxBytes = 240
 )
 
 // golemWorkspaceConfig is the whole of .golem.json. Every field is optional;
@@ -71,7 +77,8 @@ func (s *verifySpec) Timeout() time.Duration {
 func loadVerifyConfig(root string) (*verifySpec, error) {
 	path := filepath.Join(root, verifyConfigName)
 	fail := func(format string, args ...any) (*verifySpec, error) {
-		return nil, fmt.Errorf("%s: "+format, append([]any{verifyConfigName}, args...)...)
+		return nil, errors.New(truncateMessage(
+			verifyConfigName + ": " + fmt.Sprintf(format, args...)))
 	}
 
 	// Lstat, not Stat: a symlink here would let a workspace point the loader
@@ -157,4 +164,17 @@ func validateVerifySpec(s *verifySpec) error {
 			verifyMaxTimeoutSeconds, *s.TimeoutSeconds)
 	}
 	return nil
+}
+
+// truncateMessage bounds a diagnostic that quotes workspace-controlled text.
+// The cut lands on a rune boundary so an escaped sequence is never split.
+func truncateMessage(s string) string {
+	if len(s) <= verifyMessageMaxBytes {
+		return s
+	}
+	end := verifyMessageMaxBytes
+	for end > 0 && !utf8.RuneStart(s[end]) {
+		end--
+	}
+	return s[:end] + "… [truncated]"
 }
