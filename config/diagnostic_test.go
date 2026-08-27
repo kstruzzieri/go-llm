@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -299,6 +300,63 @@ func TestDiagnosticSitesMutations(t *testing.T) {
 	_, err = d.SetRoleModel("agent", ModelFacts{Key: provider.ModelKey{Provider: "p", Model: "m"}, Type: "dense"},
 		SetRoleModelOpts{Requirements: map[string]provider.Capability{"agent": provider.CapChat}, KnownMask: provider.CapChat})
 	assertDiag(t, err, CodeEligibilityIneligible, SubjectRole, "agent")
+
+	facts := ModelFacts{Key: provider.ModelKey{Provider: "p", Model: "m"}, Type: "dense"}
+	assertDiag(t, d.AddRoleModel("agent", facts, SetRoleModelOpts{ConfirmUnknown: true}),
+		CodeRoleExists, SubjectRole, "agent")
+	assertDiag(t, d.ForkRoleModel("agent", "agent", facts, ForkRoleModelOpts{}),
+		CodeRoleExists, SubjectRole, "agent")
+	assertDiag(t, d.ForkRoleModel("ghost", "x", facts, ForkRoleModelOpts{}),
+		CodeRoleNotFound, SubjectRole, "ghost")
+	assertDiag(t, d.UnbindUseCase("missing"),
+		CodeUseCaseNotFound, SubjectUseCase, "missing")
+	assertDiag(t, d.SetRoleOverrides(provider.ModelKey{Provider: "p", Model: "missing"},
+		RoleOverrides{}, SetRoleOverridesOpts{ConfirmUnknown: true}),
+		CodeRoleNotFound, SubjectNone, "")
+
+	roles := loadTestDoc(t, roleFixture)
+	err = roles.ForkRoleModel("agent", "agent-m", forkFacts(), forkOpts())
+	assertDiag(t, err, CodeDropConfirmationRequired, SubjectRole, "agent")
+	if drops, ok := DropSetOf(err); !ok ||
+		!slices.Equal(drops, []string{"slots", "think_tags"}) {
+		t.Fatalf("DropSetOf = %v, %v", drops, ok)
+	}
+	assertDiag(t, roles.RemoveRole("agent"),
+		CodeRoleInUse, SubjectUseCase, "agent")
+	if err := roles.UnbindUseCase("chat"); err != nil {
+		t.Fatal(err)
+	}
+	assertDiag(t, roles.RemoveRole("fast"),
+		CodeRoleInUse, SubjectRole, "agent")
+
+	assertDiag(t, d.AddRoleModel("", facts, SetRoleModelOpts{}),
+		CodeInvalidArgument, SubjectNone, "")
+	assertDiag(t, d.ForkRoleModel("agent", "x", facts,
+		ForkRoleModelOpts{ConfirmDrops: []string{"bogus"}}),
+		CodeInvalidArgument, SubjectNone, "")
+	assertDiag(t, d.SetRoleOverrides(provider.ModelKey{Provider: "p", Model: "m"},
+		RoleOverrides{Capabilities: []string{}}, SetRoleOverridesOpts{}),
+		CodeInvalidArgument, SubjectNone, "")
+
+	ghostFacts := facts
+	ghostFacts.Key.Provider = "ghost"
+	assertDiag(t, d.AddRoleModel("x", ghostFacts, SetRoleModelOpts{ConfirmUnknown: true}),
+		CodeProviderNotFound, SubjectProvider, "ghost")
+	assertDiag(t, d.ForkRoleModel("agent", "x", ghostFacts, ForkRoleModelOpts{}),
+		CodeProviderNotFound, SubjectProvider, "ghost")
+	assertDiag(t, d.SetRoleOverrides(provider.ModelKey{Provider: "p", Model: "m"},
+		RoleOverrides{Capabilities: []string{"bogus"}}, SetRoleOverridesOpts{}),
+		CodeModelInvalid, SubjectRole, "agent")
+
+	joinFacts := ModelFacts{Key: provider.ModelKey{Provider: "local", Model: "m1"}, Type: "moe"}
+	assertDiag(t, roles.AddRoleModel("joiner", joinFacts, SetRoleModelOpts{
+		Requirements: map[string]provider.Capability{"agent": provider.CapChat},
+		Capabilities: []string{"embed"}, ConfirmUnknown: true,
+	}), CodeEligibilityIneligible, SubjectRole, "joiner")
+	assertDiag(t, roles.SetRoleOverrides(
+		provider.ModelKey{Provider: "local", Model: "m1"}, RoleOverrides{},
+		SetRoleOverridesOpts{Requirements: map[string]provider.Capability{"agent": provider.CapChat}}),
+		CodeEligibilityUnknown, SubjectRole, "agent")
 }
 
 // Site config.go's ParseCapsStrict round-trip is unreachable via config input
@@ -315,7 +373,7 @@ func TestDiagnosticCapabilityParserDriftGuard(t *testing.T) {
 }
 
 // TestExportedErrorCodeSetMatchesContract pins the exported ErrorCode
-// constant SET to the approved 27-code vocabulary by parsing the package
+// constant SET to the approved 31-code vocabulary by parsing the package
 // source: adding, removing, renaming, or retyping an exported Code* const
 // breaks this test. (parser.ParseDir is deprecated since Go 1.22; per-file
 // ParseFile over os.ReadDir has the same semantics without SA1019.)
@@ -334,9 +392,12 @@ func TestExportedErrorCodeSetMatchesContract(t *testing.T) {
 		"eligibility_ineligible": true, "eligibility_unknown": true,
 		"selector_conflict": true, "target_exists": true,
 		"revision_conflict": true, "durability_uncertain": true,
+		"role_exists": true, "role_in_use": true,
+		"use_case_not_found":         true,
+		"drop_confirmation_required": true,
 	}
-	if len(want) != 27 {
-		t.Fatalf("test contract has %d codes, want 27", len(want))
+	if len(want) != 31 {
+		t.Fatalf("test contract has %d codes, want 31", len(want))
 	}
 
 	fset := token.NewFileSet()
@@ -405,8 +466,37 @@ func TestExportedErrorCodeSetMatchesContract(t *testing.T) {
 		sort.Strings(missing)
 		sort.Strings(extra)
 		t.Fatalf("exported ErrorCode set drifted (missing=%v extra=%v): a deliberate "+
-			"vocabulary change must update this want set, the 27 count guard above, and the spec s6 code table",
+			"vocabulary change must update this want set, the 31 count guard above, and the spec s6 code table",
 			missing, extra)
+	}
+}
+
+// DropSetOf extracts the computed drop set from a fork refusal through an
+// arbitrary wrap chain, returns a copy (never an alias), and reports false
+// for chains without a carrier.
+func TestDropSetOf(t *testing.T) {
+	base := diagWrap(CodeDropConfirmationRequired, SubjectRole, "agent",
+		fmt.Errorf("config: fork role model %q: unconfirmed drops from %q: slots, think_tags", "agent-m", "agent"))
+	in := []string{"slots", "think_tags"}
+	err := fmt.Errorf("outer: %w", dropSetWrap(in, base))
+	in[0] = "clobbered" // wrap must have copied; slices.Equal below goes red otherwise
+
+	got, ok := DropSetOf(err)
+	if !ok || !slices.Equal(got, []string{"slots", "think_tags"}) {
+		t.Fatalf("DropSetOf = %v, %v", got, ok)
+	}
+	got[0] = "mutated"
+	again, _ := DropSetOf(err)
+	if again[0] != "slots" {
+		t.Fatal("DropSetOf result aliases the carrier")
+	}
+	// The diagnostic survives the same chain, and the message is unchanged.
+	assertDiag(t, err, CodeDropConfirmationRequired, SubjectRole, "agent")
+	if !strings.Contains(err.Error(), "unconfirmed drops from") {
+		t.Fatalf("wrapped message lost: %q", err.Error())
+	}
+	if _, ok := DropSetOf(fmt.Errorf("plain")); ok {
+		t.Fatal("false positive on plain error")
 	}
 }
 

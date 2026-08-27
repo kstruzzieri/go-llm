@@ -1,6 +1,8 @@
 package config
 
 import (
+	"errors"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -255,5 +257,110 @@ func TestSetClearProviderAPIKey(t *testing.T) {
 	}
 	if err := d.ClearProviderAPIKey("p"); err != nil {
 		t.Fatalf("clearing a keyless provider must succeed: %v", err)
+	}
+}
+
+// ACCEPTANCE GATE (firn-ide#263 Slice B Task 0): ClearAllProviderAPIKeys
+// removes BOTH literal api_key values AND ${ENV} reference forms before
+// any Config()/projection access; nothing about providers or keys is
+// returned or leaked.
+func TestClearAllProviderAPIKeys(t *testing.T) {
+	t.Setenv("SCRUB_TEST_KEY", "expanded-secret")
+	unsetEnvForTest(t, "SCRUB_UNSET_KEY")
+	body := `{
+	  "providers": {
+	    "lit": {"base_url": "http://localhost:1", "api_key": "raw-literal-key",
+	      "future_provider_field": true},
+	    "env": {"base_url": "http://localhost:2", "api_key": "${SCRUB_TEST_KEY}"},
+	    "unset": {"base_url": "http://localhost:3", "api_key": "${SCRUB_UNSET_KEY}"},
+	    "none": {"base_url": "http://localhost:4"}
+	  },
+	  "models": {"agent": {"name": "m", "provider": "lit", "type": "dense"}},
+	  "defaults": {"agent": "agent"}
+	}`
+	// Firn's profile loader resolves an ambient-unset name with a fixed,
+	// non-secret sentinel solely so the authored document can be scrubbed.
+	d, err := ParseDocument([]byte(body), Origin{Source: OriginProfile},
+		DocumentOptions{LookupEnv: func(name string) (string, bool) {
+			if value, ok := os.LookupEnv(name); ok && value != "" {
+				return value, true
+			}
+			return "firn-nonsecret-sentinel", true
+		}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := d.ClearAllProviderAPIKeys(); err != nil {
+		t.Fatal(err)
+	}
+	// An ordinary pre-publication failure must not roll the scrub back.
+	path := writeTempConfig(t, body)
+	revision := d.Revision()
+	orig := publishReplaceFn
+	t.Cleanup(func() { publishReplaceFn = orig })
+	publishReplaceFn = func(string, []byte, string) error {
+		return errors.New("injected pre-publication failure")
+	}
+	if err := d.SaveReplace(path, revision); err == nil {
+		t.Fatal("expected injected save failure")
+	}
+	publishReplaceFn = orig
+	// First Config access after the scrub: no key material anywhere.
+	cfg := d.Config()
+	for name, p := range cfg.Providers {
+		if p.APIKey != "" {
+			t.Fatalf("effective %s still has a key", name)
+		}
+	}
+	for name, p := range d.authored.Providers {
+		if p.APIKey != "" {
+			t.Fatalf("authored %s still has a key", name)
+		}
+	}
+	if err := d.SaveReplace(path, revision); err != nil {
+		t.Fatal(err)
+	}
+	out, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(out)
+	for _, forbidden := range []string{
+		"api_key", "raw-literal-key", "expanded-secret",
+		"firn-nonsecret-sentinel", "${",
+	} {
+		if strings.Contains(s, forbidden) {
+			t.Fatalf("published bytes contain %q:\n%s", forbidden, s)
+		}
+	}
+	// Unknown provider members survive the scrub.
+	if !strings.Contains(s, "future_provider_field") {
+		t.Fatalf("scrub dropped unknown provider member:\n%s", s)
+	}
+}
+
+// Truly unresolved references still refuse during construction; this slice
+// does not add a raw/authored-only Document mode.
+func TestClearAllProviderAPIKeysDoesNotChangeUnresolvedLoadRule(t *testing.T) {
+	body := `{
+	  "providers": {"unset": {"base_url": "http://localhost:1",
+	    "api_key": "${SCRUB_UNSET_KEY}"}},
+	  "models": {"agent": {"name": "m", "provider": "unset", "type": "dense"}},
+	  "defaults": {"agent": "agent"}
+	}`
+	_, err := ParseDocument([]byte(body), Origin{Source: OriginProfile},
+		DocumentOptions{LookupEnv: func(string) (string, bool) { return "", false }})
+	assertDiag(t, err, CodeKeyReferenceUnavailable, SubjectProvider, "unset")
+}
+
+// Zero keyed providers is success (Clear-is-unconditional precedent), and
+// the operation is idempotent.
+func TestClearAllProviderAPIKeysIdempotent(t *testing.T) {
+	d := newTestDoc(t)
+	if err := d.ClearAllProviderAPIKeys(); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.ClearAllProviderAPIKeys(); err != nil {
+		t.Fatal(err)
 	}
 }

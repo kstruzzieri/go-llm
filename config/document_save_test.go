@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"flag"
 	"os"
@@ -553,6 +554,37 @@ func TestSaveReplaceDurabilityUncertainUpdatesState(t *testing.T) {
 	}
 }
 
+// A durability-uncertain publication is a real commit: pending model
+// bookkeeping (fork raw seeds, tombstones) is cleared alongside the typed
+// error, exactly as on a clean save — the published file carries the fork.
+func TestSaveReplaceDurabilityUncertainClearsModelBookkeeping(t *testing.T) {
+	d := loadTestDoc(t, roleFixture)
+	if err := d.ForkRoleModel("agent", "agent-m", forkFacts(),
+		forkOpts("slots", "think_tags")); err != nil {
+		t.Fatal(err)
+	}
+
+	origSync := syncDir
+	syncDir = func(string) error { return errors.New("injected dir-sync failure") }
+	t.Cleanup(func() { syncDir = origSync })
+
+	err := d.SaveReplace(d.Origin().Path, d.Revision())
+	if !errors.Is(err, ErrDurabilityUncertain) {
+		t.Fatalf("err = %v, want ErrDurabilityUncertain", err)
+	}
+	if d.modelDrops != nil || d.modelRawSeeds != nil || d.providerDrops != nil {
+		t.Fatalf("bookkeeping not cleared: drops=%v seeds=%v providerDrops=%v",
+			d.modelDrops, d.modelRawSeeds, d.providerDrops)
+	}
+	onDisk, rerr := os.ReadFile(d.Origin().Path)
+	if rerr != nil {
+		t.Fatal(rerr)
+	}
+	if !bytes.Contains(onDisk, []byte(`"agent-m"`)) {
+		t.Fatalf("published file missing fork:\n%s", onDisk)
+	}
+}
+
 // SaveNew shares the durability-uncertain contract: bytes live → state
 // converges alongside the typed error.
 func TestSaveNewDurabilityUncertainUpdatesState(t *testing.T) {
@@ -833,5 +865,37 @@ func TestNonCanonicalSourceNormalizesExactlyOnce(t *testing.T) {
 	}
 	if !bytes.Equal(first, second) {
 		t.Fatal("normalized bytes changed on the second save")
+	}
+}
+
+// The canonicalBytes raw rewrite tolerates a raw tree with a missing
+// models section when only drops are pending (defensive; seeds also
+// materialize it — pinned in the fork task).
+func TestRewriteRawSectionMissingSection(t *testing.T) {
+	raw := map[string]json.RawMessage{}
+	if err := rewriteRawSection(raw, "models",
+		map[string]struct{}{"gone": {}}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if string(raw["models"]) != "{}" {
+		t.Fatalf("models = %s", raw["models"])
+	}
+	if err := rewriteRawSection(raw, "models", nil,
+		map[string]json.RawMessage{"seeded": json.RawMessage(`{"a":1}`)}); err != nil {
+		t.Fatal(err)
+	}
+	if string(raw["models"]) != `{"seeded":{"a":1}}` {
+		t.Fatalf("seed not inserted: %s", raw["models"])
+	}
+	// Same-name reuse makes ordering observable: stale target first
+	// disappears, then the source seed wins.
+	raw["models"] = json.RawMessage(`{"reused":{"stale":true}}`)
+	if err := rewriteRawSection(raw, "models",
+		map[string]struct{}{"reused": {}},
+		map[string]json.RawMessage{"reused": json.RawMessage(`{"from_source":true}`)}); err != nil {
+		t.Fatal(err)
+	}
+	if string(raw["models"]) != `{"reused":{"from_source":true}}` {
+		t.Fatalf("seed did not replace stale target: %s", raw["models"])
 	}
 }

@@ -219,6 +219,8 @@ func (d *Document) commitSavedLocked(out []byte, path string, src OriginSource) 
 	sum := sha256.Sum256(out)
 	d.rawBytes = out
 	d.providerDrops = nil
+	d.modelDrops = nil
+	d.modelRawSeeds = nil
 	d.revision = hex.EncodeToString(sum[:])
 	if src != "" {
 		d.origin = Origin{Source: src, Path: path}
@@ -339,29 +341,55 @@ func (d *Document) canonicalBytes() ([]byte, error) {
 		return nil, err
 	}
 	rawBytes := d.rawBytes
-	if len(d.providerDrops) > 0 {
+	if len(d.providerDrops) > 0 || len(d.modelDrops) > 0 || len(d.modelRawSeeds) > 0 {
 		var raw map[string]json.RawMessage
 		if err := json.Unmarshal(rawBytes, &raw); err != nil {
 			return nil, diagWrap(CodeRenderError, SubjectNone, "", err)
 		}
-		var providers map[string]json.RawMessage
-		if err := json.Unmarshal(raw["providers"], &providers); err != nil {
-			return nil, diagWrap(CodeRenderError, SubjectNone, "", err)
+		if len(d.providerDrops) > 0 {
+			if err := rewriteRawSection(raw, "providers", d.providerDrops, nil); err != nil {
+				return nil, diagWrap(CodeRenderError, SubjectNone, "", err)
+			}
 		}
-		for name := range d.providerDrops {
-			delete(providers, name)
+		if len(d.modelDrops) > 0 || len(d.modelRawSeeds) > 0 {
+			if err := rewriteRawSection(raw, "models", d.modelDrops, d.modelRawSeeds); err != nil {
+				return nil, diagWrap(CodeRenderError, SubjectNone, "", err)
+			}
 		}
-		providersRaw, err := json.Marshal(providers)
-		if err != nil {
-			return nil, diagWrap(CodeRenderError, SubjectNone, "", err)
-		}
-		raw["providers"] = providersRaw
+		var err error
 		rawBytes, err = json.Marshal(raw)
 		if err != nil {
 			return nil, diagWrap(CodeRenderError, SubjectNone, "", err)
 		}
 	}
 	return renderCanonical(rawBytes, d.authored)
+}
+
+// rewriteRawSection deletes dropped entry names from one raw map section
+// and inserts seed entries. A missing or null section is treated as empty
+// and materialized, so a seed can land in a raw tree that never had the
+// section. Drops apply before seeds: when a removed target name is reused
+// by a fork in the same draft, its stale subtree disappears before the
+// source seed is installed under that name.
+func rewriteRawSection(raw map[string]json.RawMessage, section string, drops map[string]struct{}, seeds map[string]json.RawMessage) error {
+	entries := map[string]json.RawMessage{}
+	if sec, ok := raw[section]; ok && len(sec) > 0 && string(sec) != "null" {
+		if err := json.Unmarshal(sec, &entries); err != nil {
+			return fmt.Errorf("config: rewrite %s: %w", section, err)
+		}
+	}
+	for name := range drops {
+		delete(entries, name)
+	}
+	for name, seed := range seeds {
+		entries[name] = seed
+	}
+	out, err := json.Marshal(entries)
+	if err != nil {
+		return fmt.Errorf("config: rewrite %s: %w", section, err)
+	}
+	raw[section] = out
+	return nil
 }
 
 // publishNew creates path with data only if it does not exist: the synced

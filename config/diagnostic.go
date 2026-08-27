@@ -47,6 +47,13 @@ const (
 	CodeTargetExists            ErrorCode = "target_exists"
 	CodeRevisionConflict        ErrorCode = "revision_conflict"
 	CodeDurabilityUncertain     ErrorCode = "durability_uncertain"
+
+	// Codes added by the role-lifecycle slice (#462): 27 -> 31. Consumers
+	// extend their closed allowlists in lockstep (firn-ide#263 Slice B).
+	CodeRoleExists               ErrorCode = "role_exists"
+	CodeRoleInUse                ErrorCode = "role_in_use"
+	CodeUseCaseNotFound          ErrorCode = "use_case_not_found"
+	CodeDropConfirmationRequired ErrorCode = "drop_confirmation_required"
 )
 
 // Subject kind constants — classify what a Diagnostic's Subject names.
@@ -103,6 +110,34 @@ func DiagnosticOf(err error) (Diagnostic, bool) {
 		return Diagnostic{Code: CodeConfigNotFound}, true
 	}
 	return Diagnostic{}, false
+}
+
+// dropSetError carries the exact sorted drop set a ForkRoleModel refusal
+// requires, alongside the normal diagnostic chain. Unexported, mirroring
+// diagError: the message is the wrapped message, unchanged.
+type dropSetError struct {
+	drops []string
+	err   error
+}
+
+func (e *dropSetError) Error() string { return e.err.Error() }
+func (e *dropSetError) Unwrap() error { return e.err }
+
+// dropSetWrap attaches a computed drop set to err. drops must already be
+// sorted and vocabulary-bounded ("slots" | "think_tags").
+func dropSetWrap(drops []string, err error) error {
+	return &dropSetError{drops: append([]string(nil), drops...), err: err}
+}
+
+// DropSetOf extracts the required drop set from a
+// drop_confirmation_required refusal: the exact sorted, closed-vocabulary
+// set ForkRoleModel computed. The result is a copy. Mirrors DiagnosticOf.
+func DropSetOf(err error) ([]string, bool) {
+	var e *dropSetError
+	if errors.As(err, &e) {
+		return append([]string(nil), e.drops...), true
+	}
+	return nil, false
 }
 
 // sanitizeSubject: fixed order per spec §6 — repair invalid UTF-8 to

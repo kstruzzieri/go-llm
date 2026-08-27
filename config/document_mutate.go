@@ -15,6 +15,14 @@ import (
 // hold d.mu end-to-end; spec amendment 6). Any error leaves the document
 // unchanged. Draft-only: rawBytes/revision/origin never change here.
 func (d *Document) mutate(fn func(authored *Config) error) error {
+	return d.mutateCommit(fn, nil)
+}
+
+// mutateCommit is mutate with an optional post-swap hook running under
+// d.mu — bookkeeping that must commit atomically with the authored swap
+// (fork raw seeds) and must NOT run on any failure path. The hook must
+// not call Document methods (d.mu is not reentrant).
+func (d *Document) mutateCommit(fn func(authored *Config) error, commit func()) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	if err := d.readOnlyErrLocked(); err != nil {
@@ -28,6 +36,12 @@ func (d *Document) mutate(fn func(authored *Config) error) error {
 	if err := effective.finalizeEnv(d.env); err != nil {
 		return err
 	}
+	// Both tombstone diffs below compare the closure's NET effect: an entry
+	// removed and re-created under the same name within ONE closure records
+	// no tombstone and keeps its stale raw continuity. Every current mutation
+	// performs a single logical change, so this is unreachable today; a
+	// future compound mutation must tombstone explicitly or split into two
+	// mutate calls.
 	for name := range d.authored.Providers {
 		if _, ok := authored.Providers[name]; ok {
 			continue
@@ -37,8 +51,22 @@ func (d *Document) mutate(fn func(authored *Config) error) error {
 		}
 		d.providerDrops[name] = struct{}{}
 	}
+	for role := range d.authored.Models {
+		if _, ok := authored.Models[role]; ok {
+			continue
+		}
+		if d.modelDrops == nil {
+			d.modelDrops = make(map[string]struct{})
+		}
+		d.modelDrops[role] = struct{}{}
+		// A removed forked role must not be re-inserted at render.
+		delete(d.modelRawSeeds, role)
+	}
 	d.authored = authored
 	d.effective = effective
+	if commit != nil {
+		commit()
+	}
 	return nil
 }
 
@@ -89,6 +117,109 @@ type SetRoleModelResult struct {
 	Verdict                   provider.CapVerdict
 }
 
+// validateRoleFacts applies the shared facts argument checks. op names the
+// calling operation for pinned message compatibility.
+func validateRoleFacts(op, role string, facts ModelFacts) error {
+	if facts.Key.Provider == "" || facts.Key.Model == "" {
+		return diagWrap(CodeInvalidArgument, SubjectNone, "",
+			fmt.Errorf("config: %s %q: empty provider or model", op, role))
+	}
+	if !validModelTypes[facts.Type] {
+		return diagWrap(CodeInvalidArgument, SubjectNone, "",
+			fmt.Errorf("config: %s %q: type must be one of dense, moe, embedding", op, role))
+	}
+	return nil
+}
+
+// gateRoleEligibility applies the SetRoleModel eligibility semantics for
+// role joining facts.Key's selector, gating inside the lock against the
+// pre-mutation graph (the chains as the user saw them when choosing).
+// Carve-down rule: an explicit override is selector-wide persisted truth
+// (REPLACE semantics, omissions definitive). An inherited override governs
+// the joining role; a supplied override also changes existing selector
+// roles, so evaluate all of them. Facts otherwise. Verdict aggregation runs
+// over affected use cases with zero-affected = unknown/no_requirements. On
+// success it returns the verdict (CapEligible or the confirmed CapUnknown)
+// for SetRoleModelResult. Moved verbatim from SetRoleModel; shared by
+// AddRoleModel and ForkRoleModel (spec checkbox 2).
+func gateRoleEligibility(a *Config, op, role string, facts ModelFacts, opts SetRoleModelOpts) (provider.CapVerdict, error) {
+	gateRoles := map[string]bool{role: true}
+	selectorRoles := map[string]bool{role: true}
+	var inheritedCaps provider.Capability
+	var inheritedRole string
+	for _, siblingRole := range sortedStringKeys(a.Models) {
+		if siblingRole == role {
+			continue
+		}
+		sibling := a.Models[siblingRole]
+		providerName := sibling.Provider
+		if providerName == "" {
+			providerName = "ollama"
+		}
+		if providerName != facts.Key.Provider || sibling.Name != facts.Key.Model {
+			continue
+		}
+		selectorRoles[siblingRole] = true
+		if len(opts.Capabilities) == 0 && len(sibling.Capabilities) > 0 {
+			parsed, perr := provider.ParseCapsStrict(sibling.Capabilities)
+			if perr != nil {
+				return "", diagWrap(CodeModelInvalid, SubjectRole, role,
+					fmt.Errorf("config: %s %q: capabilities: %w", op, role, perr))
+			}
+			// Siblings cannot disagree here: validate's static selector
+			// check rejects any document holding conflicting capability
+			// overrides on one selector. Retain the first.
+			if inheritedRole == "" {
+				inheritedCaps, inheritedRole = parsed, siblingRole
+			}
+		}
+	}
+	evalCaps, evalKnown := opts.Caps, opts.KnownMask
+	if len(opts.Capabilities) > 0 {
+		parsed, perr := provider.ParseCapsStrict(opts.Capabilities)
+		if perr != nil {
+			return "", diagWrap(CodeModelInvalid, SubjectRole, role,
+				fmt.Errorf("config: %s %q: capabilities: %w", op, role, perr))
+		}
+		evalCaps, evalKnown = parsed, provider.CanonicalCaps()
+		gateRoles = selectorRoles
+	} else if inheritedRole != "" {
+		evalCaps, evalKnown = inheritedCaps, provider.CanonicalCaps()
+	}
+	verdict, reasons := aggregateVerdict(a, gateRoles, opts.Requirements, evalCaps, evalKnown)
+	switch verdict {
+	case provider.CapIneligible:
+		return "", diagWrap(CodeEligibilityIneligible, SubjectRole, role,
+			fmt.Errorf("config: %s %q: target %s/%s ineligible: %s",
+				op, role, facts.Key.Provider, facts.Key.Model, strings.Join(reasons, ", ")))
+	case provider.CapUnknown:
+		if !opts.ConfirmUnknown {
+			return "", diagWrap(CodeEligibilityUnknown, SubjectRole, role,
+				fmt.Errorf("config: %s %q: target %s/%s eligibility unknown (%s); confirm to proceed",
+					op, role, facts.Key.Provider, facts.Key.Model, strings.Join(reasons, ", ")))
+		}
+	}
+	return verdict, nil
+}
+
+// applyRoleOverridesFromOpts installs the deep-copied re-assertions per the
+// cleared-unless-re-asserted preservation table; Slots is always cleared.
+func applyRoleOverridesFromOpts(m *ModelConfig, opts SetRoleModelOpts) {
+	if len(opts.Capabilities) > 0 {
+		m.Capabilities = append([]string(nil), opts.Capabilities...)
+	} else {
+		m.Capabilities = nil
+	}
+	m.ThinkMode = opts.ThinkMode
+	if opts.ThinkTags != nil {
+		tt := *opts.ThinkTags
+		m.ThinkTags = &tt
+	} else {
+		m.ThinkTags = nil
+	}
+	m.Slots = 0
+}
+
 // SetRoleModel points role at a different provider/model. Preservation:
 // Fallbacks/Description/Options preserved (role-level intent); identity and
 // capacity replaced from facts (empty = unknown, never stale);
@@ -105,13 +236,8 @@ func (d *Document) SetRoleModel(role string, facts ModelFacts, opts SetRoleModel
 		// Argument checks live inside the closure so the central read-only
 		// gate wins even for invalid requests; order for valid documents is
 		// unchanged (args first, then role, then provider).
-		if facts.Key.Provider == "" || facts.Key.Model == "" {
-			return diagWrap(CodeInvalidArgument, SubjectNone, "",
-				fmt.Errorf("config: set role model %q: empty provider or model", role))
-		}
-		if !validModelTypes[facts.Type] {
-			return diagWrap(CodeInvalidArgument, SubjectNone, "",
-				fmt.Errorf("config: set role model %q: type must be one of dense, moe, embedding", role))
+		if err := validateRoleFacts("set role model", role, facts); err != nil {
+			return err
 		}
 		m, ok := a.Models[role]
 		if !ok {
@@ -123,67 +249,9 @@ func (d *Document) SetRoleModel(role string, facts ModelFacts, opts SetRoleModel
 				fmt.Errorf("config: set role model %q: provider %q not configured", role, facts.Key.Provider))
 		}
 
-		// Gate inside the lock, against the pre-mutation graph (the chains
-		// as the user saw them when choosing). Carve-down rule: an explicit
-		// override is selector-wide persisted truth (REPLACE semantics,
-		// omissions definitive). An inherited override governs the joining
-		// role; a supplied override also changes existing selector roles, so
-		// evaluate all of them. Facts otherwise.
-		gateRoles := map[string]bool{role: true}
-		selectorRoles := map[string]bool{role: true}
-		var inheritedCaps provider.Capability
-		var inheritedRole string
-		for _, siblingRole := range sortedStringKeys(a.Models) {
-			if siblingRole == role {
-				continue
-			}
-			sibling := a.Models[siblingRole]
-			providerName := sibling.Provider
-			if providerName == "" {
-				providerName = "ollama"
-			}
-			if providerName != facts.Key.Provider || sibling.Name != facts.Key.Model {
-				continue
-			}
-			selectorRoles[siblingRole] = true
-			if len(opts.Capabilities) == 0 && len(sibling.Capabilities) > 0 {
-				parsed, perr := provider.ParseCapsStrict(sibling.Capabilities)
-				if perr != nil {
-					return diagWrap(CodeModelInvalid, SubjectRole, role,
-						fmt.Errorf("config: set role model %q: capabilities: %w", role, perr))
-				}
-				// Siblings cannot disagree here: validate's static selector
-				// check rejects any document holding conflicting capability
-				// overrides on one selector. Retain the first.
-				if inheritedRole == "" {
-					inheritedCaps, inheritedRole = parsed, siblingRole
-				}
-			}
-		}
-		evalCaps, evalKnown := opts.Caps, opts.KnownMask
-		if len(opts.Capabilities) > 0 {
-			parsed, perr := provider.ParseCapsStrict(opts.Capabilities)
-			if perr != nil {
-				return diagWrap(CodeModelInvalid, SubjectRole, role,
-					fmt.Errorf("config: set role model %q: capabilities: %w", role, perr))
-			}
-			evalCaps, evalKnown = parsed, provider.CanonicalCaps()
-			gateRoles = selectorRoles
-		} else if inheritedRole != "" {
-			evalCaps, evalKnown = inheritedCaps, provider.CanonicalCaps()
-		}
-		verdict, reasons := aggregateVerdict(a, gateRoles, opts.Requirements, evalCaps, evalKnown)
-		switch verdict {
-		case provider.CapIneligible:
-			return diagWrap(CodeEligibilityIneligible, SubjectRole, role,
-				fmt.Errorf("config: set role model %q: target %s/%s ineligible: %s",
-					role, facts.Key.Provider, facts.Key.Model, strings.Join(reasons, ", ")))
-		case provider.CapUnknown:
-			if !opts.ConfirmUnknown {
-				return diagWrap(CodeEligibilityUnknown, SubjectRole, role,
-					fmt.Errorf("config: set role model %q: target %s/%s eligibility unknown (%s); confirm to proceed",
-						role, facts.Key.Provider, facts.Key.Model, strings.Join(reasons, ", ")))
-			}
+		verdict, gerr := gateRoleEligibility(a, "set role model", role, facts, opts)
+		if gerr != nil {
+			return gerr
 		}
 
 		drops := SetRoleModelResult{
@@ -199,19 +267,7 @@ func (d *Document) SetRoleModel(role string, facts ModelFacts, opts SetRoleModel
 		m.Parameters = facts.Parameters
 		m.ContextWindow = facts.ContextWindow
 		m.Dimensions = facts.Dimensions
-		if len(opts.Capabilities) > 0 {
-			m.Capabilities = append([]string(nil), opts.Capabilities...)
-		} else {
-			m.Capabilities = nil
-		}
-		m.ThinkMode = opts.ThinkMode
-		if opts.ThinkTags != nil {
-			tt := *opts.ThinkTags
-			m.ThinkTags = &tt
-		} else {
-			m.ThinkTags = nil
-		}
-		m.Slots = 0
+		applyRoleOverridesFromOpts(&m, opts)
 		a.Models[role] = m
 		res = drops
 		return nil

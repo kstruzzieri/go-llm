@@ -13,7 +13,7 @@
 ```
 go-llm/
 ├── ollama/          # Ollama REST API client (chat, generate, embeddings, models)
-├── config/          # Model configuration loader (models.json, resolve, fallback) + Document (origin/revision-aware load, secret-literal-preserving atomic writer)
+├── config/          # Model configuration loader (models.json, resolve, fallback) + Document (origin/revision-aware load, secret-literal-preserving atomic writer, role lifecycle + selector overrides + credential scrub)
 ├── configview/      # Pure projection of a config for panels/CLI/MCP (v1 wire contract, tri-state candidate eligibility, no I/O) — consumed by golem models -json, MCP configview resource, Firn config panel
 ├── configio/        # Explicit I/O tier for the config stack: RefreshInventory (provider listing → configview.Inventory value via the read-only ProjectListedModels projection) + ProbeToolCall (consent-gated per-model probe, ProbeOutcome{State,Persisted}) — never implicit, values in/out, bounded error codes (CodeOf), cancellation unclassified
 ├── profiles/        # Profile catalog: curated go:embed configs (credential-free by pinned rule) + user store under a 0700 profiles/ boundary; stable IDs, bounded error codes, SaveOutcome writes (nil error whenever persisted) — the Firn config-panel write path

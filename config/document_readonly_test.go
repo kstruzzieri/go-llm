@@ -1,6 +1,7 @@
 package config
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -187,12 +188,52 @@ func TestReadOnlyGatesExistingMutatorsAndEverySave(t *testing.T) {
 		{"SetProviderAPIKey", func(d *Document) error { return d.SetProviderAPIKey("p", "k") }},
 		{"SetProviderAPIKey-empty", func(d *Document) error { return d.SetProviderAPIKey("p", "") }},
 		{"ClearProviderAPIKey", func(d *Document) error { return d.ClearProviderAPIKey("p") }},
+		{"AddRoleModel", func(d *Document) error {
+			return d.AddRoleModel("x", facts, SetRoleModelOpts{ConfirmUnknown: true})
+		}},
+		{"AddRoleModel-empty", func(d *Document) error {
+			return d.AddRoleModel("", ModelFacts{}, SetRoleModelOpts{})
+		}},
+		{"ForkRoleModel", func(d *Document) error {
+			return d.ForkRoleModel("agent", "x", facts, ForkRoleModelOpts{
+				SetRoleModelOpts: SetRoleModelOpts{ConfirmUnknown: true}})
+		}},
+		{"ForkRoleModel-bad-drops", func(d *Document) error {
+			return d.ForkRoleModel("agent", "x", facts, ForkRoleModelOpts{
+				ConfirmDrops: []string{"bogus"}})
+		}},
+		{"UnbindUseCase", func(d *Document) error { return d.UnbindUseCase("agent") }},
+		{"UnbindUseCase-empty", func(d *Document) error { return d.UnbindUseCase("") }},
+		{"RemoveRole", func(d *Document) error { return d.RemoveRole("agent") }},
+		{"RemoveRole-empty", func(d *Document) error { return d.RemoveRole("") }},
+		{"SetRoleOverrides", func(d *Document) error {
+			return d.SetRoleOverrides(provider.ModelKey{Provider: "p", Model: "m"},
+				RoleOverrides{}, SetRoleOverridesOpts{ConfirmUnknown: true})
+		}},
+		{"SetRoleOverrides-empty", func(d *Document) error {
+			return d.SetRoleOverrides(provider.ModelKey{}, RoleOverrides{}, SetRoleOverridesOpts{})
+		}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			assertDiag(t, tc.run(newRO(t)), CodeDuplicateKeys, SubjectProvider, "p")
 		})
 	}
+	t.Run("ClearAllProviderAPIKeys", func(t *testing.T) {
+		err := newRO(t).ClearAllProviderAPIKeys()
+		assertDiag(t, err, CodeDuplicateKeys, SubjectNone, "")
+		if strings.Contains(err.Error(), `provider "p"`) {
+			t.Errorf("ClearAllProviderAPIKeys() error = %q, want no provider identity", err)
+		}
+		for cause := errors.Unwrap(err); cause != nil; cause = errors.Unwrap(cause) {
+			if diag, ok := DiagnosticOf(cause); ok && diag.Subject != "" {
+				t.Errorf("ClearAllProviderAPIKeys() unwrap diagnostic = %+v, want no subject", diag)
+			}
+			if strings.Contains(cause.Error(), `provider "p"`) {
+				t.Errorf("ClearAllProviderAPIKeys() unwrap error = %q, want no provider identity", cause)
+			}
+		}
+	})
 
 	d := newRO(t)
 	d.mu.Lock()
