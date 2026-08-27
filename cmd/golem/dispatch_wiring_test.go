@@ -345,7 +345,7 @@ func TestOrchestratorFactory_DispatchPerRunInvocationCap(t *testing.T) {
 			responses = append(responses, agent.ModelResult{Response: provider.ChatResponse{Content: "done", Done: true}})
 			stub := &countingDispatchStub{}
 			caller := &scriptCaller{responses: responses}
-			orch := newOrchestratorFactory(caller, flags{dispatch: tc.dispatch})()
+			orch := newOrchestratorFactory(caller, flags{dispatch: tc.dispatch}, nil)()
 			res, err := orch.Run(context.Background(), agent.Request{
 				Goal:  "explore",
 				Tools: []agent.Tool{stub},

@@ -101,7 +101,7 @@ func assertMixedAssembly(t *testing.T, wantMixed bool) {
 		{Response: provider.ChatResponse{Content: "final", Done: true}},
 	}}
 	rec := &assemblyRecorder{}
-	orch := newOrchestratorFactory(caller, flags{progressive: wantMixed})()
+	orch := newOrchestratorFactory(caller, flags{progressive: wantMixed}, nil)()
 	if _, err := orch.Run(context.Background(), agent.Request{
 		Goal:  "GOAL",
 		Tools: []agent.Tool{mixedWiringTool{}},

@@ -502,9 +502,15 @@ func startupNotices(info startupInfo) []string {
 // It takes flags rather than a bool so the production call site cannot pass a
 // value other than the one -progressive parsed into.
 //
-// With -dispatch it also installs the per-run dispatch invocation cap.
-func newOrchestratorFactory(caller agent.ModelCaller, f flags) func() *agent.Orchestrator {
+// With -dispatch it also installs the per-run dispatch invocation cap, and
+// with a workspace-declared verifier (#347) the post-write verification hook.
+func newOrchestratorFactory(caller agent.ModelCaller, f flags, verifier *verifyRunner) func() *agent.Orchestrator {
 	var opts []agent.Option
+	// #347: a typed-nil would satisfy the interface and panic on first use, so
+	// the option is installed only for a real verifier.
+	if verifier != nil {
+		opts = append(opts, agent.WithVerifier(verifier))
+	}
 	if f.dispatch {
 		// #282 coordination: cap dispatch INVOCATIONS per run so the parent
 		// cannot bypass child-local limits by re-dispatching fresh children;
@@ -880,6 +886,7 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 	}()
 
 	var journal *checkpointJournal
+	var verifier *verifyRunner
 	if f.allowWrite {
 		// D6: -allow-write fails closed on ANY checkpoint lifecycle failure
 		// (store, lease, migration, recovery, state query, hardening) rather
@@ -912,6 +919,14 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 		}
 		tools = append(tools, wt...)
 		journal = j
+
+		// #347: read only here, so no other mode ever touches .golem.json.
+		// applyOneShotMode has already cleared allowWrite for -p, and task,
+		// planning and Agentflow modes reject it at validation.
+		var vwarn string
+		if verifier, vwarn = buildVerifier(root); vwarn != "" {
+			warns = append(warns, vwarn)
+		}
 	}
 
 	// Background manager (#346): constructed only when interactive -allow-exec
@@ -1062,7 +1077,7 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 		sourceSummarizer = routerSourceSummaryGenerator(bundle.Router, summarizeChain)
 	}
 
-	newOrchestrator := newOrchestratorFactory(newRouterChainCaller(bundle.Router, plan.chain), f)
+	newOrchestrator := newOrchestratorFactory(newRouterChainCaller(bundle.Router, plan.chain), f, verifier)
 	orch := newOrchestrator()
 
 	obsv, err := newObserv(os.Getenv, root, f.trace, f.telemetry, time.Now)

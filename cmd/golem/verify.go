@@ -166,3 +166,35 @@ func capVerifyOutput(s string) (string, bool) {
 func sanitizeVerifyLine(s string) string {
 	return strings.TrimSpace(strings.ReplaceAll(strings.ReplaceAll(s, "\r", " "), "\n", " "))
 }
+
+// buildVerifier resolves the workspace's post-write verification command
+// (#347). It returns (nil, "") when the workspace declares none — the
+// byte-for-byte unchanged path — and (nil, warning) when it declares one that
+// cannot be armed, so a malformed or uninstalled verifier costs a startup line
+// rather than the session.
+//
+// Callers must invoke it only while -allow-write is still true, which is AFTER
+// mode normalization: applyOneShotMode clears the flag, and task, planning and
+// Agentflow modes reject it outright, so that one condition is what keeps every
+// non-interactive mode from reading the file at all.
+func buildVerifier(root string) (*verifyRunner, string) {
+	disabled := func(err error) (*verifyRunner, string) {
+		return nil, "verification disabled: " + err.Error()
+	}
+	spec, err := loadVerifyConfig(root)
+	if err != nil {
+		return disabled(err)
+	}
+	if spec == nil {
+		return nil, ""
+	}
+	ws, err := agenttools.NewWorkspace(root)
+	if err != nil {
+		return disabled(err)
+	}
+	cmd, err := agenttools.NewVerifyCommand(ws, spec.Argv, spec.Dir, spec.Timeout())
+	if err != nil {
+		return disabled(err)
+	}
+	return newVerifyRunner(cmd), ""
+}
