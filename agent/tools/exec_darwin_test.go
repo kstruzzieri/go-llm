@@ -236,6 +236,31 @@ func TestSeatbeltRunRejectsBadWorkspaceRoot(t *testing.T) {
 	}
 }
 
+// TestSeatbeltRunRejectsEmptyArgv guards the argv[1:] slice: a hand-built
+// spec with no argv (or no path) must fail closed, never panic, and never
+// reach the delegate.
+func TestSeatbeltRunRejectsEmptyArgv(t *testing.T) {
+	for name, mutate := range map[string]func(*execSpec){
+		"nil argv":   func(s *execSpec) { s.Argv = nil },
+		"empty argv": func(s *execSpec) { s.Argv = []string{} },
+		"empty path": func(s *execSpec) { s.Path = "" },
+	} {
+		t.Run(name, func(t *testing.T) {
+			fake := &captureRunner{}
+			b, base := testSeatbeltBackend(t, fake)
+			spec := seatbeltSpec(t, canonTempDirT(t))
+			mutate(&spec)
+			if _, err := b.Run(context.Background(), spec); err == nil {
+				t.Fatal("empty argv/path accepted")
+			}
+			if fake.called != 0 {
+				t.Fatal("delegate ran despite empty argv/path")
+			}
+			assertEmptyDir(t, base)
+		})
+	}
+}
+
 func TestSeatbeltRunWrapsSpec(t *testing.T) {
 	fake := &captureRunner{res: execResult{ExitCode: 0, Stdout: []byte("hi")}}
 	b, base := testSeatbeltBackend(t, fake)

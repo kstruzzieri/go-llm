@@ -119,9 +119,16 @@ func newSeatbeltExecBackendAt(execPath string, probe seatbeltProbeFunc, cfg Sand
 		starter:      unixStarter{},
 		tempBase:     seatbeltTempBase,
 		systemRoots: func(workspaceRoot string) ([]string, error) {
-			// A missing home only skips the home-parent guard; the workspace
-			// guard and broad-root rejection still apply.
+			// Canonicalize home so the coverage check compares like inodes
+			// with the EvalSymlinks-resolved system roots: a symlinked $HOME
+			// would otherwise miss a system root aliased into its real target.
+			// Best-effort — a missing or unresolvable home only skips the
+			// home-parent guard; the workspace guard and broad-root rejection
+			// still apply.
 			home, _ := os.UserHomeDir()
+			if canon, err := filepath.EvalSymlinks(home); err == nil {
+				home = canon
+			}
 			return seatbeltCollectSystemRoots(seatbeltDefaultSystemRoots, workspaceRoot, home)
 		},
 	}, nil
@@ -159,6 +166,9 @@ func seatbeltTempCleanup(dir string, created os.FileInfo) func() error {
 // may spawn. The stamped WorkspaceRoot is consumed as-is — re-resolving it
 // here could silently change the policy after approval.
 func (b *seatbeltBackend) prepare(spec execSpec) (execSpec, func() error, error) {
+	if len(spec.Argv) == 0 || spec.Path == "" {
+		return execSpec{}, nil, errors.New("tools: seatbelt requires a non-empty argv and executable path")
+	}
 	if spec.WorkspaceRoot == "" {
 		return execSpec{}, nil, errors.New("tools: seatbelt requires a workspace root in the exec spec")
 	}
