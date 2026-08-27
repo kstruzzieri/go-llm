@@ -37,6 +37,10 @@
 // bounded result is appended to that batch's last successful write, so the
 // model sees a break in the same turn. A failure never fails the run.
 //
+// It runs once per mutating BATCH, not once per turn, so a turn that edits in
+// several steps pays for it several times: prefer a fast check, a build over a
+// full test suite. Only the first few kilobytes reach the model, stderr first.
+//
 // Because a repository-supplied argv is still arbitrary host execution, the
 // resolved command and cwd are approved once per session at first use, under
 // their own grant namespace: a verification grant can never authorize

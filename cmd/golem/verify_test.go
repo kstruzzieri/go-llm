@@ -157,7 +157,7 @@ func TestVerifyRunnerObservationBytes(t *testing.T) {
 			want: header + "command: go test ./...\nstatus: passed\nexit_code: 0\n",
 		},
 		{
-			name: "failed carries bounded output",
+			name: "failed leads with stderr",
 			res: agenttools.VerifyResult{
 				ExitCode: 2,
 				Stdout:   []byte("building\n"),
@@ -165,12 +165,12 @@ func TestVerifyRunnerObservationBytes(t *testing.T) {
 			},
 			want: header + "command: go test ./...\nstatus: failed\nexit_code: 2\n" +
 				"timed_out: false\noutput_truncated: false\n" +
-				"--- stdout ---\nbuilding\n--- stderr ---\n./foo.go:12:2: undefined: bar\n",
+				"--- stderr ---\n./foo.go:12:2: undefined: bar\n--- stdout ---\nbuilding\n",
 		},
 		{
-			name: "timeout",
-			res:  agenttools.VerifyResult{TimedOut: true, Stderr: []byte("partial\n")},
-			want: header + "command: go test ./...\nstatus: failed\nexit_code: 0\n" +
+			name: "timeout omits the exit code the process never chose",
+			res:  agenttools.VerifyResult{ExitCode: -1, TimedOut: true, Stderr: []byte("partial\n")},
+			want: header + "command: go test ./...\nstatus: failed\n" +
 				"timed_out: true\noutput_truncated: false\n" +
 				"--- stderr ---\npartial\n",
 		},
@@ -215,7 +215,7 @@ func TestVerifyRunnerCapsModelVisibleOutput(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Verify: %v", err)
 	}
-	if len(out) > verifyObservationCap*2 {
+	if len(out) > verifyObservationCap+1024 {
 		t.Fatalf("observation not capped: %d bytes", len(out))
 	}
 	if !strings.Contains(out, "output_truncated: true") {
@@ -224,6 +224,76 @@ func TestVerifyRunnerCapsModelVisibleOutput(t *testing.T) {
 	// Head-first: a compiler's first error is the actionable one.
 	if !strings.Contains(out, "--- stderr ---\n"+strings.Repeat("e", 64)) {
 		t.Fatalf("cap must keep the HEAD of the output")
+	}
+}
+
+// TestVerifyRunnerNeverLosesStderrToAChattyStdout is the regression pin for
+// the failure this ordering exists to prevent: a verifier that prints a lot on
+// stdout and reports its actual error on stderr must not have the error cut
+// off by the cap.
+func TestVerifyRunnerNeverLosesStderrToAChattyStdout(t *testing.T) {
+	out, err := newVerifyRunner(&stubVerifyExec{res: agenttools.VerifyResult{
+		ExitCode: 2,
+		Stdout:   []byte(strings.Repeat("noise\n", verifyObservationCap)),
+		Stderr:   []byte("./foo.go:12:2: undefined: bar\n"),
+	}}).Verify(context.Background(), approved())
+	if err != nil {
+		t.Fatalf("Verify: %v", err)
+	}
+	if !strings.Contains(out, "./foo.go:12:2: undefined: bar") {
+		t.Fatalf("the actionable stderr was lost to stdout:\n%s", out[:400])
+	}
+	if !strings.Contains(out, "--- stdout ---") {
+		t.Fatalf("stdout must still be represented:\n%s", out[:400])
+	}
+	// The whole point of splitting the budget is that verifyObservationCap
+	// bounds the TOTAL, not each stream: a cap*2 allowance here would be
+	// satisfied by capping the streams independently at full size.
+	if len(out) > verifyObservationCap+1024 {
+		t.Fatalf("two capped streams must share the budget, got %d bytes", len(out))
+	}
+	if strings.Index(out, "--- stderr ---") > strings.Index(out, "--- stdout ---") {
+		t.Fatal("stderr must be rendered before stdout")
+	}
+}
+
+// TestVerifyRunnerBoundsTheTotalAcrossBothStreams is the case that actually
+// distinguishes a shared budget from two independent per-stream caps: with a
+// short stderr the split changes nothing observable, so both streams must be
+// over the limit for the total to be the assertion.
+func TestVerifyRunnerBoundsTheTotalAcrossBothStreams(t *testing.T) {
+	big := strings.Repeat("x", verifyObservationCap*2)
+	out, err := newVerifyRunner(&stubVerifyExec{res: agenttools.VerifyResult{
+		ExitCode: 1, Stdout: []byte(big), Stderr: []byte(big),
+	}}).Verify(context.Background(), approved())
+	if err != nil {
+		t.Fatalf("Verify: %v", err)
+	}
+	if len(out) > verifyObservationCap+1024 {
+		t.Fatalf("two over-cap streams must SHARE the budget, got %d bytes", len(out))
+	}
+	for _, want := range []string{"--- stderr ---", "--- stdout ---", "output_truncated: true"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("missing %q in:\n%s", want, out[:300])
+		}
+	}
+}
+
+func TestVerifyRunnerSingleStreamGetsTheFullBudget(t *testing.T) {
+	// With only one stream populated there is nothing to split the budget
+	// with, so the halving must not apply.
+	body := strings.Repeat("e", verifyObservationCap-100)
+	out, err := newVerifyRunner(&stubVerifyExec{res: agenttools.VerifyResult{
+		ExitCode: 1, Stderr: []byte(body),
+	}}).Verify(context.Background(), approved())
+	if err != nil {
+		t.Fatalf("Verify: %v", err)
+	}
+	if !strings.Contains(out, body) {
+		t.Fatalf("a single stream below the cap must not be trimmed (len %d)", len(out))
+	}
+	if strings.Contains(out, "output_truncated: true") {
+		t.Fatalf("nothing was over the cap:\n%s", out[:200])
 	}
 }
 

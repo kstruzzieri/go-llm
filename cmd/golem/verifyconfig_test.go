@@ -316,3 +316,35 @@ type allowAllApprover struct{}
 func (allowAllApprover) Approve(context.Context, provider.ToolCall, string) (bool, error) {
 	return true, nil
 }
+
+func TestLoadVerifyConfigBoundsArgvForTheApprovalPrompt(t *testing.T) {
+	build := func(n int, arg string) string {
+		parts := make([]string, n)
+		for i := range parts {
+			parts[i] = `"` + arg + `"`
+		}
+		return `{"verify":{"argv":[` + strings.Join(parts, ",") + `]}}`
+	}
+	cases := map[string]struct{ body, want string }{
+		"too many entries": {build(verifyMaxArgv+1, "x"), "limit 64"},
+		"too many bytes":   {build(4, strings.Repeat("y", verifyMaxArgvBytes/3)), "limit 4096"},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			root := t.TempDir()
+			writeGolemJSON(t, root, tc.body)
+			spec, err := loadVerifyConfig(root)
+			if err == nil {
+				t.Fatalf("expected a refusal, got %+v", spec)
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("error %q must state the bound %q", err, tc.want)
+			}
+		})
+	}
+	root := t.TempDir()
+	writeGolemJSON(t, root, build(verifyMaxArgv, "x"))
+	if _, err := loadVerifyConfig(root); err != nil {
+		t.Fatalf("exactly at the entry limit must be accepted: %v", err)
+	}
+}

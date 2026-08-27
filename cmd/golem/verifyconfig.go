@@ -27,6 +27,15 @@ const (
 	// is refused rather than clamped: a workspace-declared value is explicit,
 	// so a mistake should be surfaced, not quietly rewritten.
 	verifyMaxTimeoutSeconds = 600
+	// verifyMaxArgv and verifyMaxArgvBytes bound what the approval prompt has
+	// to render. The file may be 64 KiB, and unlike run_command's argv (which
+	// comes from the already-gated model) this one comes from a repository
+	// that may be hostile: thousands of arguments would scroll the [y/N/a]
+	// question off the screen and turn the prompt into a blind approval. The
+	// same bound keeps the command line inside the model-visible observation's
+	// budget. A real check needs a handful of short arguments.
+	verifyMaxArgv      = 64
+	verifyMaxArgvBytes = 4096
 )
 
 // golemWorkspaceConfig is the whole of .golem.json. Every field is optional;
@@ -121,10 +130,18 @@ func validateVerifySpec(s *verifySpec) error {
 	if strings.TrimSpace(s.Argv[0]) == "" {
 		return errors.New("argv[0] must not be blank")
 	}
+	if len(s.Argv) > verifyMaxArgv {
+		return fmt.Errorf("argv has %d entries, limit %d", len(s.Argv), verifyMaxArgv)
+	}
+	total := 0
 	for _, a := range s.Argv {
 		if strings.IndexByte(a, 0) >= 0 {
 			return errors.New("argv must not contain NUL bytes")
 		}
+		total += len(a)
+	}
+	if total > verifyMaxArgvBytes {
+		return fmt.Errorf("argv is %d bytes, limit %d", total, verifyMaxArgvBytes)
 	}
 	if s.Dir != "" {
 		if filepath.IsAbs(s.Dir) {

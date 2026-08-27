@@ -124,39 +124,60 @@ func (v *verifyRunner) renderResult(res agenttools.VerifyResult) string {
 	if res.ExitCode == 0 && !res.TimedOut {
 		return v.render("passed", "exit_code: 0\n")
 	}
-	body, capped := capVerifyOutput(verifyOutputBody(res))
-	return v.render("failed", fmt.Sprintf("exit_code: %d\ntimed_out: %t\noutput_truncated: %t\n%s",
-		res.ExitCode, res.TimedOut, res.Truncated || capped, body))
+	body, capped := verifyOutputBody(res)
+	// exit_code is omitted on a timeout: the process was killed, so the
+	// platform runner reports -1, and pairing "failed" with a numeric code the
+	// command never chose invites the model to reason about it.
+	head := fmt.Sprintf("exit_code: %d\n", res.ExitCode)
+	if res.TimedOut {
+		head = ""
+	}
+	return v.render("failed", fmt.Sprintf("%stimed_out: %t\noutput_truncated: %t\n%s",
+		head, res.TimedOut, res.Truncated || capped, body))
 }
 
 // verifyOutputBody lays out the captured streams, omitting an empty one so a
-// build failure is not padded with blank section headers.
-func verifyOutputBody(res agenttools.VerifyResult) string {
+// failure is not padded with blank section headers.
+//
+// stderr comes FIRST and each stream is capped independently. Capping the
+// joined body head-first would let a chatty-but-irrelevant stdout consume the
+// whole budget and cut the stderr section off entirely — and stderr is exactly
+// where compilers and test runners put the failure the check exists to
+// surface. Splitting the budget only when both streams have content keeps the
+// common single-stream case at full size.
+func verifyOutputBody(res agenttools.VerifyResult) (string, bool) {
+	budget := verifyObservationCap
+	if len(res.Stdout) > 0 && len(res.Stderr) > 0 {
+		budget /= 2
+	}
 	var b strings.Builder
+	capped := false
 	for _, section := range []struct {
 		label string
 		data  []byte
-	}{{"stdout", res.Stdout}, {"stderr", res.Stderr}} {
+	}{{"stderr", res.Stderr}, {"stdout", res.Stdout}} {
 		if len(section.data) == 0 {
 			continue
 		}
+		text, cut := capVerifyOutput(string(section.data), budget)
+		capped = capped || cut
 		fmt.Fprintf(&b, "--- %s ---\n", section.label)
-		b.Write(section.data)
-		if section.data[len(section.data)-1] != '\n' {
+		b.WriteString(text)
+		if !strings.HasSuffix(text, "\n") {
 			b.WriteByte('\n')
 		}
 	}
-	return b.String()
+	return b.String(), capped
 }
 
-// capVerifyOutput trims to verifyObservationCap from the HEAD: a compiler or
-// test runner reports its first failure first, and that is the actionable one.
-// The cut lands on a rune boundary so the model never reads a split rune.
-func capVerifyOutput(s string) (string, bool) {
-	if len(s) <= verifyObservationCap {
+// capVerifyOutput trims one stream to limit from the HEAD: a compiler or test
+// runner reports its first failure first, and that is the actionable one. The
+// cut lands on a rune boundary so the model never reads a split rune.
+func capVerifyOutput(s string, limit int) (string, bool) {
+	if len(s) <= limit {
 		return s, false
 	}
-	end := verifyObservationCap
+	end := limit
 	for end > 0 && !utf8.RuneStart(s[end]) {
 		end--
 	}
