@@ -68,6 +68,7 @@ func (a *replApprover) ApproveKeyed(ctx context.Context, call provider.ToolCall,
 	isStop := call.Function.Name == "stop_command"
 	isMCP := strings.HasPrefix(call.Function.Name, "mcp__")
 	isPlan := call.Function.Name == submitPlanToolName
+	isVerify := call.Function.Name == verifyToolName
 	scope := grantScope(call.Function.Name)
 	grantable := key != "" && a.grants != nil && scope != ""
 	preview = sanitizeApprovalPreview(preview)
@@ -79,6 +80,11 @@ func (a *replApprover) ApproveKeyed(ctx context.Context, call provider.ToolCall,
 	case isPlan:
 		a.renderPlain(preview)
 		question = "Lock this plan? [y/N] "
+	case isVerify:
+		// #347: an argv and a cwd, not a diff — rendered plain like exec. The
+		// grant covers this exact verifier for the session.
+		a.renderPlain(preview)
+		question = grantQuestion("Run this verification command?", grantable, "a=always this verifier")
 	case isExec:
 		a.renderPlain(preview)
 		question = grantQuestion("Run this command?", grantable, "a=always this command")
