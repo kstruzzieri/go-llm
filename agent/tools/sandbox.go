@@ -182,6 +182,12 @@ func newExecBackend(cfg SandboxConfig) (resolvedExecBackend, error) {
 			commandRunner:     newPlatformRunner(),
 			backgroundStarter: newPlatformStarter(),
 		}, normalized), nil
+	case SandboxRuntimeSeatbelt:
+		backend, err := newSeatbeltExecBackend(normalized)
+		if err != nil {
+			return resolvedExecBackend{}, err
+		}
+		return bindExecBackend(backend, normalized), nil
 	default:
 		return resolvedExecBackend{}, fmt.Errorf("tools: sandbox runtime %q is not implemented", normalized.Runtime)
 	}
