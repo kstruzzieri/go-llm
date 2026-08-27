@@ -42,8 +42,69 @@ func TestExecApprovalKeyStableAndNamespaced(t *testing.T) {
 	// White-box namespace + recipe pin: an exec key must never be
 	// constructible as a class key, and the recipe tag makes any future
 	// fingerprint change an explicit migration.
-	if !strings.HasPrefix(k1, "exec:v2:") {
-		t.Fatalf("exec key %q must be namespaced with \"exec:v2:\"", k1)
+	if !strings.HasPrefix(k1, "exec:v3:") {
+		t.Fatalf("exec key %q must be namespaced with \"exec:v3:\"", k1)
+	}
+}
+
+// TestExecApprovalKeyVariesByWorkspaceRoot pins the #442 v3 recipe: the
+// canonical workspace root bounds a sandbox backend's write allowance, so two
+// nested workspaces resolving the SAME cwd with the SAME argv/env must never
+// share a foreground grant.
+func TestExecApprovalKeyVariesByWorkspaceRoot(t *testing.T) {
+	outer := t.TempDir()
+	inner := filepath.Join(outer, "inner")
+	if err := os.Mkdir(inner, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	wsOuter, err := NewWorkspace(outer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wsInner, err := NewWorkspace(inner)
+	if err != nil {
+		t.Fatal(err)
+	}
+	outerKey := execPlanKey(t, NewRunCommand(wsOuter, nil), `{"argv":["go","version"],"dir":"inner"}`)
+	innerKey := execPlanKey(t, NewRunCommand(wsInner, nil), `{"argv":["go","version"]}`)
+	if outerKey == innerKey {
+		t.Fatalf("nested workspaces with one cwd must not share a foreground key (%q)", outerKey)
+	}
+}
+
+// TestBackgroundApprovalKeyVariesByWorkspaceRoot is the background twin of the
+// nested-root pin, plus the exec-bg:v2: recipe-tag pin.
+func TestBackgroundApprovalKeyVariesByWorkspaceRoot(t *testing.T) {
+	outer := t.TempDir()
+	inner := filepath.Join(outer, "inner")
+	if err := os.Mkdir(inner, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	m := NewBackgroundManager()
+	t.Cleanup(m.Shutdown)
+	wsOuter, err := NewWorkspace(outer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wsInner, err := NewWorkspace(inner)
+	if err != nil {
+		t.Fatal(err)
+	}
+	outerPlan, err := NewStartCommand(wsOuter, m).Plan(context.Background(),
+		json.RawMessage(`{"argv":["go","version"],"dir":"inner"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	innerPlan, err := NewStartCommand(wsInner, m).Plan(context.Background(),
+		json.RawMessage(`{"argv":["go","version"]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(outerPlan.ApprovalKey, "exec-bg:v2:") {
+		t.Fatalf("background key %q must be namespaced with \"exec-bg:v2:\"", outerPlan.ApprovalKey)
+	}
+	if outerPlan.ApprovalKey == innerPlan.ApprovalKey {
+		t.Fatalf("nested workspaces with one cwd must not share a background key (%q)", outerPlan.ApprovalKey)
 	}
 }
 

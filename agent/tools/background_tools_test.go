@@ -257,7 +257,7 @@ func TestStartCommandPlanPreview(t *testing.T) {
 		t.Errorf("start preview must not carry a timeout line:\n%s", plan.Preview)
 	}
 	// The id line is the short display form of the full-digest key suffix.
-	suffix := strings.TrimPrefix(plan.ApprovalKey, "exec-bg:v1:")
+	suffix := strings.TrimPrefix(plan.ApprovalKey, "exec-bg:v2:")
 	if !strings.Contains(plan.Preview, suffix[:fingerprintLen]) {
 		t.Errorf("preview id is not the short form of the key digest:\n%s", plan.Preview)
 	}
@@ -338,8 +338,8 @@ func TestStartCommandApprovalKeyNamespaceAndDigest(t *testing.T) {
 	}
 	sc, _ := newStartCommandFixture(t, starterOf())
 	plan := mustPlan(t, sc, json.RawMessage(`{"argv":["mycmd"]}`))
-	if !strings.HasPrefix(plan.ApprovalKey, "exec-bg:v1:") {
-		t.Fatalf("key %q must be namespaced with \"exec-bg:v1:\"", plan.ApprovalKey)
+	if !strings.HasPrefix(plan.ApprovalKey, "exec-bg:v2:") {
+		t.Fatalf("key %q must be namespaced with \"exec-bg:v2:\"", plan.ApprovalKey)
 	}
 	// Step 5.3: the digest suffix must equal the CANONICAL fingerprint function
 	// applied with zero effective and requested timeouts (manager-owned
@@ -350,8 +350,8 @@ func TestStartCommandApprovalKeyNamespaceAndDigest(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := commandFingerprint([]string{"mycmd"}, sc.ws.root, env, 0, 0, path)
-	if got := strings.TrimPrefix(plan.ApprovalKey, "exec-bg:v1:"); got != want {
+	want := commandFingerprint([]string{"mycmd"}, sc.ws.root, sc.ws.root, env, 0, 0, path)
+	if got := strings.TrimPrefix(plan.ApprovalKey, "exec-bg:v2:"); got != want {
 		t.Errorf("key digest = %q, want canonical zero-timeout fingerprint %q", got, want)
 	}
 }
@@ -368,11 +368,11 @@ func TestStartCommandKeySeparateFromRunCommand(t *testing.T) {
 	if startKey == runKey {
 		t.Fatalf("same argv/dir produced one key for foreground and background: %q", startKey)
 	}
-	if !strings.HasPrefix(startKey, "exec-bg:v1:") || strings.HasPrefix(startKey, "exec:v2:") {
-		t.Errorf("start key %q must live in the exec-bg:v1: namespace, never exec:v2:", startKey)
+	if !strings.HasPrefix(startKey, "exec-bg:v2:") || strings.HasPrefix(startKey, "exec:v3:") {
+		t.Errorf("start key %q must live in the exec-bg:v2: namespace, never exec:v3:", startKey)
 	}
-	if !strings.HasPrefix(runKey, "exec:v2:") {
-		t.Errorf("run key %q must keep the exec:v2: namespace", runKey)
+	if !strings.HasPrefix(runKey, "exec:v3:") {
+		t.Errorf("run key %q must keep the exec:v3: namespace", runKey)
 	}
 }
 

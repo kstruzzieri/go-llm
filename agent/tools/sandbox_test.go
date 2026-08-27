@@ -235,7 +235,7 @@ func TestRunCommandSandboxApproval(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := "exec:v2:" + rc.sandbox.keyComponent; !strings.HasPrefix(plan.ApprovalKey, want) {
+	if want := "exec:v3:" + rc.sandbox.keyComponent; !strings.HasPrefix(plan.ApprovalKey, want) {
 		t.Fatalf("key = %q, want prefix %q", plan.ApprovalKey, want)
 	}
 	if !strings.Contains(plan.Preview, "sandbox: "+rc.sandbox.preview) {
@@ -261,7 +261,7 @@ func TestStartCommandDerivesSandboxApprovalFromManager(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := "exec-bg:v1:" + backend.approval.keyComponent; !strings.HasPrefix(plan.ApprovalKey, want) {
+	if want := "exec-bg:v2:" + backend.approval.keyComponent; !strings.HasPrefix(plan.ApprovalKey, want) {
 		t.Fatalf("key = %q, want prefix %q", plan.ApprovalKey, want)
 	}
 	if !strings.Contains(plan.Preview, "sandbox:  "+backend.approval.preview) {

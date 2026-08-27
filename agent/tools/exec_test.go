@@ -232,24 +232,25 @@ func TestRenderExecPreviewClamped(t *testing.T) {
 }
 
 func TestCommandFingerprint(t *testing.T) {
-	base := commandFingerprint([]string{"go", "test"}, "/w", []string{"PATH=/usr/bin"}, 60*time.Second, 0, "/w/bin/go")
+	base := commandFingerprint([]string{"go", "test"}, "/w", "/w", []string{"PATH=/usr/bin"}, 60*time.Second, 0, "/w/bin/go")
 	if len(base) != 64 { // full sha256 hex: the approval key uses all of it
 		t.Fatalf("len = %d, want 64", len(base))
 	}
-	if base != commandFingerprint([]string{"go", "test"}, "/w", []string{"PATH=/usr/bin"}, 60*time.Second, 0, "/w/bin/go") {
+	if base != commandFingerprint([]string{"go", "test"}, "/w", "/w", []string{"PATH=/usr/bin"}, 60*time.Second, 0, "/w/bin/go") {
 		t.Error("must be stable for identical inputs")
 	}
 	diff := []struct {
 		name string
 		f    string
 	}{
-		{"argv", commandFingerprint([]string{"go", "vet"}, "/w", []string{"PATH=/usr/bin"}, 60*time.Second, 0, "/w/bin/go")},
-		{"cwd", commandFingerprint([]string{"go", "test"}, "/x", []string{"PATH=/usr/bin"}, 60*time.Second, 0, "/w/bin/go")},
-		{"env shape", commandFingerprint([]string{"go", "test"}, "/w", []string{"PATH=/usr/bin", "HOME=/home/x"}, 60*time.Second, 0, "/w/bin/go")},
-		{"env value", commandFingerprint([]string{"go", "test"}, "/w", []string{"PATH=/opt/bin"}, 60*time.Second, 0, "/w/bin/go")},
-		{"timeout", commandFingerprint([]string{"go", "test"}, "/w", []string{"PATH=/usr/bin"}, 30*time.Second, 0, "/w/bin/go")},
-		{"requested timeout", commandFingerprint([]string{"go", "test"}, "/w", []string{"PATH=/usr/bin"}, 60*time.Second, 60, "/w/bin/go")},
-		{"exe", commandFingerprint([]string{"go", "test"}, "/w", []string{"PATH=/usr/bin"}, 60*time.Second, 0, "/w/other/go")},
+		{"argv", commandFingerprint([]string{"go", "vet"}, "/w", "/w", []string{"PATH=/usr/bin"}, 60*time.Second, 0, "/w/bin/go")},
+		{"cwd", commandFingerprint([]string{"go", "test"}, "/x", "/w", []string{"PATH=/usr/bin"}, 60*time.Second, 0, "/w/bin/go")},
+		{"workspace root", commandFingerprint([]string{"go", "test"}, "/w", "/", []string{"PATH=/usr/bin"}, 60*time.Second, 0, "/w/bin/go")},
+		{"env shape", commandFingerprint([]string{"go", "test"}, "/w", "/w", []string{"PATH=/usr/bin", "HOME=/home/x"}, 60*time.Second, 0, "/w/bin/go")},
+		{"env value", commandFingerprint([]string{"go", "test"}, "/w", "/w", []string{"PATH=/opt/bin"}, 60*time.Second, 0, "/w/bin/go")},
+		{"timeout", commandFingerprint([]string{"go", "test"}, "/w", "/w", []string{"PATH=/usr/bin"}, 30*time.Second, 0, "/w/bin/go")},
+		{"requested timeout", commandFingerprint([]string{"go", "test"}, "/w", "/w", []string{"PATH=/usr/bin"}, 60*time.Second, 60, "/w/bin/go")},
+		{"exe", commandFingerprint([]string{"go", "test"}, "/w", "/w", []string{"PATH=/usr/bin"}, 60*time.Second, 0, "/w/other/go")},
 	}
 	for _, d := range diff {
 		if d.f == base {
@@ -931,7 +932,7 @@ func TestExecPrepareFingerprintMatchesForeground(t *testing.T) {
 	argv := []string{"mycmd", "arg"}
 	env, _ := buildExecEnv(os.LookupEnv)
 	wantPath := filepath.Join(pathDir, "mycmd")
-	want := commandFingerprint(argv, ws.root, env, 90*time.Second, 90, wantPath)
+	want := commandFingerprint(argv, ws.root, ws.root, env, 90*time.Second, 90, wantPath)
 
 	p, err := prepareExecPlan(ws, argv, "", 90*time.Second, 90, false)
 	if err != nil {
@@ -1046,5 +1047,71 @@ func TestExecRecheckExecutableChanged(t *testing.T) {
 	}
 	if _, err := recheckExecPlan(ws, pp); err == nil || err.Error() != "executable changed since approval; retry" {
 		t.Errorf("err = %v, want exact executable-changed message", err)
+	}
+}
+
+// TestRecheckExecPlanStampsWorkspaceRoot pins the #442 contract: the spec a
+// backend receives carries the canonical root of the Workspace the plan was
+// approved against, so sandbox backends can scope allowances without a second
+// resolution that could drift from the approval.
+func TestRecheckExecPlanStampsWorkspaceRoot(t *testing.T) {
+	root := t.TempDir()
+	ws, err := NewWorkspace(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pp, err := prepareExecPlan(ws, []string{"go", "version"}, "", execDefaultTimeout, 0, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	spec, err := recheckExecPlan(ws, pp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Independent expectation: canonicalize the root we created ourselves,
+	// not whatever the Workspace happens to hold.
+	want, err := CanonicalWorkspaceRoot(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if spec.WorkspaceRoot != want {
+		t.Fatalf("spec.WorkspaceRoot = %q, want %q", spec.WorkspaceRoot, want)
+	}
+}
+
+// TestRecheckExecPlanRejectsReplacedWorkspaceRoot swaps the workspace root for
+// a fresh directory while PRESERVING the approved cwd's inode (rename the root
+// away, recreate it, move the original subdirectory back). The cwd identity
+// check alone cannot see this substitution; only a root identity check can.
+func TestRecheckExecPlanRejectsReplacedWorkspaceRoot(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("unix inode/SameFile semantics")
+	}
+	base := t.TempDir()
+	root := filepath.Join(base, "root")
+	sub := filepath.Join(root, "sub")
+	if err := os.MkdirAll(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	ws, err := NewWorkspace(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pp, err := prepareExecPlan(ws, []string{"go", "version"}, "sub", execDefaultTimeout, 0, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	moved := filepath.Join(base, "moved")
+	if err := os.Rename(root, moved); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(filepath.Join(moved, "sub"), sub); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := recheckExecPlan(ws, pp); err == nil || err.Error() != "workspace root changed since approval; retry" {
+		t.Errorf("err = %v, want exact root-changed message", err)
 	}
 }
