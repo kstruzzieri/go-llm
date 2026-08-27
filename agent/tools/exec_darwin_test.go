@@ -3,6 +3,7 @@
 package tools
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -10,11 +11,16 @@ import (
 	"io"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
+
+	"github.com/kstruzzieri/go-llm/agent"
 )
 
 // writeFakeSandboxExec writes an executable shell script standing in for
@@ -604,6 +610,17 @@ func TestSeatbeltHelperProcess(t *testing.T) {
 			fail(err)
 		}
 		fmt.Printf("HELPER-OK: %s\n", data)
+	case "tmpreport":
+		fmt.Printf("HELPER-TMP: %s\n", os.TempDir())
+	case "spawnchild":
+		cmd := exec.Command("/bin/sleep", "300")
+		if err := cmd.Start(); err != nil {
+			fail(err)
+		}
+		fmt.Printf("HELPER-CHILD: %d\n", cmd.Process.Pid)
+		// A timer sleep, not select{}: an empty select trips Go's deadlock
+		// detector and exits the helper before the test can Kill it.
+		time.Sleep(300 * time.Second)
 	case "tcp", "unix":
 		conn, err := net.DialTimeout(mode, args[1], 3*time.Second)
 		if err != nil {
@@ -1027,6 +1044,264 @@ func TestSeatbeltBehavioralPublicWiring(t *testing.T) {
 }
 
 func seatbeltTestCfg() SandboxConfig { return SandboxConfig{Runtime: SandboxRuntimeSeatbelt} }
+
+// --- Background lifetime acceptance (Task 7) ---
+
+type lockedBuffer struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (l *lockedBuffer) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.Write(p)
+}
+
+func (l *lockedBuffer) String() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.String()
+}
+
+// helperStart launches the helper entry point as a background process under
+// the real Seatbelt backend, returning the process and its live stdout.
+func helperStart(t *testing.T, ws, mode string, modeArgs ...string) (backgroundProcess, *lockedBuffer) {
+	t.Helper()
+	if raceInstrumented {
+		t.Skip("race-instrumented helper cannot initialize under the sandbox; helper legs run in the non-race pass")
+	}
+	backend, err := newExecBackend(seatbeltTestCfg())
+	if err != nil {
+		t.Fatal(err)
+	}
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	argv := append([]string{exe, "-test.run=^TestSeatbeltHelperProcess$", "-test.v", "--", mode}, modeArgs...)
+	spec := execSpec{
+		Path:          exe,
+		Argv:          argv,
+		Dir:           ws,
+		Env:           []string{"PATH=/usr/bin:/bin", "GO_LLM_SEATBELT_HELPER=1"},
+		WorkspaceRoot: ws,
+	}
+	out := &lockedBuffer{}
+	proc, err := backend.Start(spec, out, io.Discard)
+	if err != nil {
+		t.Fatalf("start helper %q: %v", mode, err)
+	}
+	return proc, out
+}
+
+// awaitHelperLine polls the live stdout for a "PREFIX: value" line.
+func awaitHelperLine(t *testing.T, out *lockedBuffer, prefix string) string {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		for _, line := range strings.Split(out.String(), "\n") {
+			if v, ok := strings.CutPrefix(strings.TrimSpace(line), prefix+": "); ok {
+				return v
+			}
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatalf("helper never printed %q; output so far:\n%s", prefix, out.String())
+	return ""
+}
+
+func pidAlive(pid int) bool {
+	return syscall.Kill(pid, 0) == nil
+}
+
+// TestSeatbeltBehavioralBackgroundPIDIdentity proves sandbox-exec applies the
+// profile and execs the target IN PLACE: the sandboxed process's own PID must
+// equal the group-leader PID the manager remembers, or group termination
+// would target the wrong process.
+func TestSeatbeltBehavioralBackgroundPIDIdentity(t *testing.T) {
+	requireSeatbeltCapability(t)
+	proc, out := helperStart(t, canonTempDirT(t), "pid")
+	defer func() { _ = proc.Kill() }()
+	reported := awaitHelperLine(t, out, "HELPER-PID")
+	code, _, err := proc.Wait()
+	if err != nil || code != 0 {
+		t.Fatalf("helper exit: code=%d err=%v output:\n%s", code, err, out.String())
+	}
+	if reported != fmt.Sprintf("%d", proc.PID()) {
+		t.Fatalf("in-sandbox PID %s != manager leader PID %d", reported, proc.PID())
+	}
+}
+
+// TestSeatbeltBehavioralBackgroundDescendantKill proves a sandboxed leader's
+// same-group child dies on Kill: sandboxing must not break the managed
+// process-group containment policy.
+func TestSeatbeltBehavioralBackgroundDescendantKill(t *testing.T) {
+	requireSeatbeltCapability(t)
+	proc, out := helperStart(t, canonTempDirT(t), "spawnchild")
+	childStr := awaitHelperLine(t, out, "HELPER-CHILD")
+	var childPID int
+	if _, err := fmt.Sscanf(childStr, "%d", &childPID); err != nil {
+		t.Fatalf("bad child pid %q: %v", childStr, err)
+	}
+	if !pidAlive(childPID) {
+		t.Fatalf("descendant %d not alive before Kill", childPID)
+	}
+	if err := proc.Kill(); err != nil {
+		t.Fatalf("kill: %v", err)
+	}
+	done := make(chan struct{})
+	go func() {
+		_, managerKilled, _ := proc.Wait()
+		if !managerKilled {
+			t.Error("manager kill not observed by Wait")
+		}
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("sandboxed background leader did not die after Kill")
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for pidAlive(childPID) && time.Now().Before(deadline) {
+		time.Sleep(50 * time.Millisecond)
+	}
+	if pidAlive(childPID) {
+		t.Fatalf("descendant %d survived the group kill", childPID)
+	}
+}
+
+// TestSeatbeltBehavioralBackgroundTempReaped proves the real private temp
+// directory is removed after background reap.
+func TestSeatbeltBehavioralBackgroundTempReaped(t *testing.T) {
+	requireSeatbeltCapability(t)
+	proc, out := helperStart(t, canonTempDirT(t), "tmpreport")
+	tempDir := awaitHelperLine(t, out, "HELPER-TMP")
+	if !strings.HasPrefix(tempDir, seatbeltTempBase+"/") {
+		t.Fatalf("helper temp %q not under %q", tempDir, seatbeltTempBase)
+	}
+	if code, _, err := proc.Wait(); err != nil || code != 0 {
+		t.Fatalf("helper exit: code=%d err=%v", code, err)
+	}
+	if _, err := os.Lstat(tempDir); err == nil {
+		t.Fatalf("private temp %q survived background reap", tempDir)
+	}
+}
+
+func bgToolsByName(t *testing.T, root string, cfg SandboxConfig) map[string]agent.Tool {
+	t.Helper()
+	m, err := NewSandboxedBackgroundManager(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(m.Shutdown)
+	toolsList, err := NewExecToolsWithBackground(root, m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	byName := map[string]agent.Tool{}
+	for _, tool := range toolsList {
+		byName[tool.Spec().Name] = tool
+	}
+	return byName
+}
+
+func bgStart(t *testing.T, byName map[string]agent.Tool, argvJSON string) string {
+	t.Helper()
+	sc := byName["start_command"].(*StartCommand)
+	raw := json.RawMessage(argvJSON)
+	plan, err := sc.Plan(context.Background(), raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(plan.Preview, `runtime="seatbelt"`) || !strings.Contains(plan.Preview, "temp=private") {
+		t.Fatalf("start_command preview missing seatbelt identity:\n%s", plan.Preview)
+	}
+	res, err := sc.Invoke(context.Background(), raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, line := range strings.Split(res.Content, "\n") {
+		if h, ok := strings.CutPrefix(line, "handle: "); ok {
+			return h
+		}
+	}
+	t.Fatalf("no handle in start result:\n%s", res.Content)
+	return ""
+}
+
+func bgAwaitExit(t *testing.T, byName map[string]agent.Tool, handle string) string {
+	t.Helper()
+	status := byName["command_status"].(*CommandStatus)
+	raw := json.RawMessage(fmt.Sprintf(`{"handle":%q}`, handle))
+	deadline := time.Now().Add(15 * time.Second)
+	for time.Now().Before(deadline) {
+		res, err := status.Invoke(context.Background(), raw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(res.Content, "state: running") {
+			return res.Content
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatal("background job never exited")
+	return ""
+}
+
+// TestSeatbeltBehavioralBackgroundPublicConfinement drives the PUBLIC
+// background constructors end to end: an outside write is denied (the probe
+// file never appears) while a workspace write succeeds — through
+// NewSandboxedBackgroundManager + NewExecToolsWithBackground, so no tool-set
+// construction path can split runtimes.
+func TestSeatbeltBehavioralBackgroundPublicConfinement(t *testing.T) {
+	requireSeatbeltCapability(t)
+	root := t.TempDir()
+	canonRoot, err := CanonicalWorkspaceRoot(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	byName := bgToolsByName(t, root, seatbeltTestCfg())
+	dir, _ := outsideCanaryDir(t, canonRoot)
+	probe := filepath.Join(dir, "bg-write-probe")
+
+	handle := bgStart(t, byName, fmt.Sprintf(`{"argv":["/usr/bin/touch",%q]}`, probe))
+	final := bgAwaitExit(t, byName, handle)
+	if strings.Contains(final, "exit_code: 0") {
+		t.Fatalf("outside background write reported success:\n%s", final)
+	}
+	if _, err := os.Lstat(probe); err == nil {
+		t.Fatal("probe file exists: the background write escaped the sandbox")
+	}
+
+	inside := filepath.Join(canonRoot, "bg-probe-ws")
+	handle = bgStart(t, byName, fmt.Sprintf(`{"argv":["/usr/bin/touch",%q]}`, inside))
+	final = bgAwaitExit(t, byName, handle)
+	if !strings.Contains(final, "exit_code: 0") {
+		t.Fatalf("control background workspace write failed:\n%s", final)
+	}
+	if _, err := os.Lstat(inside); err != nil {
+		t.Fatalf("control background file missing: %v", err)
+	}
+}
+
+// TestSeatbeltPrepareMissingExecutableCleansTemp covers real-prepare spawn
+// preconditions: a vanished executable fails after temp creation, so the
+// private directory must still be reaped and the delegate never called.
+func TestSeatbeltPrepareMissingExecutableCleansTemp(t *testing.T) {
+	fake := &captureRunner{}
+	b, base := testSeatbeltBackend(t, fake)
+	spec := seatbeltSpec(t, canonTempDirT(t))
+	spec.Path = "/nonexistent-go-llm-tool"
+	if _, err := b.Run(context.Background(), spec); err == nil {
+		t.Fatal("missing executable accepted")
+	}
+	if fake.called != 0 {
+		t.Fatal("delegate ran despite missing executable")
+	}
+	assertEmptyDir(t, base)
+}
 
 // TestNewExecBackendSeatbeltMatchesRealCapability is the characterization pin:
 // public construction succeeds exactly when the real active probe succeeds on
