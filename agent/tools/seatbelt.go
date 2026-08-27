@@ -169,6 +169,14 @@ func buildSeatbeltProfile(p seatbeltPolicy) (string, error) {
 		fmt.Fprintf(&b, "\n  (literal %s)", q)
 	}
 	b.WriteString(")\n")
+	// dyld aborts (SIGABRT) during image loading without read-data on the
+	// root directory itself. A literal grants reading "/" the directory —
+	// top-level entry names only — never its subtrees.
+	b.WriteString("(allow file-read-data (literal \"/\"))\n")
+	// The Go runtime (and other modern binaries) reads hardware sysctls at
+	// startup ("failed to get system page size" without it). The hw. prefix
+	// exposes hardware constants only — never kern.* process information.
+	b.WriteString("(allow sysctl-read (sysctl-name-prefix \"hw.\"))\n")
 
 	fmt.Fprintf(&b, "(allow file-write*\n  (subpath %s)\n  (subpath %s))\n", wsQ, tempQ)
 	b.WriteString("(allow file-write-data (literal \"/dev/null\"))\n")

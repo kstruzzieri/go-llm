@@ -114,6 +114,8 @@ func TestSeatbeltProfileGolden(t *testing.T) {
   (literal "/private")
   (literal "/private/tmp")
   (literal "/usr"))
+(allow file-read-data (literal "/"))
+(allow sysctl-read (sysctl-name-prefix "hw."))
 (allow file-write*
   (subpath "/private/tmp/ws")
   (subpath "/private/tmp/pt"))
@@ -147,6 +149,7 @@ func TestSeatbeltProfileScopesMetadata(t *testing.T) {
 	for _, forbidden := range []string{
 		"(allow file-read-metadata)",
 		"(allow file-read-metadata\n)",
+		"(allow sysctl-read)",
 	} {
 		if strings.Contains(prof, forbidden) {
 			t.Fatalf("profile contains unfiltered metadata allowance:\n%s", prof)

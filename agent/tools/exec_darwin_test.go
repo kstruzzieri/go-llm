@@ -4,11 +4,15 @@ package tools
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -538,6 +542,491 @@ func TestSeatbeltStartReplacementRaceLeavesForeignDir(t *testing.T) {
 		t.Fatalf("original temp directory unexpectedly gone: %v", err)
 	}
 }
+
+// --- Behavioral acceptance: real processes under real sandbox-exec ---
+
+// requireSeatbeltCapability gates behavioral tests on the real active probe.
+// Default mode skips with the probe's reason (e.g. a nested-sandbox host);
+// GO_LLM_REQUIRE_SEATBELT=1 turns the skip into a hard failure so the release
+// gate cannot silently pass without exercising confinement.
+func requireSeatbeltCapability(t *testing.T) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), seatbeltProbeTimeout)
+	defer cancel()
+	if err := probeSeatbelt(ctx, seatbeltExecPath); err != nil {
+		if os.Getenv("GO_LLM_REQUIRE_SEATBELT") == "1" {
+			t.Fatalf("GO_LLM_REQUIRE_SEATBELT=1 but Seatbelt is unavailable: %v", err)
+		}
+		t.Skipf("Seatbelt unavailable on this host: %v", err)
+	}
+}
+
+// TestSeatbeltHelperProcess is the argv-selected helper entry point that runs
+// INSIDE the sandbox. It is not a test: without the sentinel env it skips.
+// Results are printed with the HELPER- prefix so assertions never confuse
+// them with go-test chatter.
+func TestSeatbeltHelperProcess(t *testing.T) {
+	if os.Getenv("GO_LLM_SEATBELT_HELPER") != "1" {
+		t.Skip("helper process entry point")
+	}
+	args := os.Args
+	for i, a := range args {
+		if a == "--" {
+			args = args[i+1:]
+			break
+		}
+	}
+	if len(args) == 0 {
+		fmt.Println("HELPER-ERR: no mode")
+		os.Exit(2)
+	}
+	mode := args[0]
+	fail := func(err error) {
+		fmt.Printf("HELPER-ERR: %v\n", err)
+		os.Exit(1)
+	}
+	switch mode {
+	case "pid":
+		fmt.Printf("HELPER-PID: %d\n", os.Getpid())
+	case "tmprw":
+		p := filepath.Join(os.TempDir(), "canary.txt")
+		if err := os.WriteFile(p, []byte("temp-canary"), 0o600); err != nil {
+			fail(err)
+		}
+		data, err := os.ReadFile(p)
+		if err != nil {
+			fail(err)
+		}
+		fmt.Printf("HELPER-OK: %s\n", data)
+	case "read":
+		data, err := os.ReadFile(args[1])
+		if err != nil {
+			fail(err)
+		}
+		fmt.Printf("HELPER-OK: %s\n", data)
+	case "tcp", "unix":
+		conn, err := net.DialTimeout(mode, args[1], 3*time.Second)
+		if err != nil {
+			fail(err)
+		}
+		_, _ = conn.Write([]byte("ping"))
+		_ = conn.Close()
+		fmt.Println("HELPER-OK: connected")
+	case "udp":
+		conn, err := net.Dial("udp", args[1])
+		if err != nil {
+			fail(err)
+		}
+		if _, err := conn.Write([]byte("ping")); err != nil {
+			fail(err)
+		}
+		_ = conn.Close()
+		fmt.Println("HELPER-OK: sent")
+	default:
+		fmt.Printf("HELPER-ERR: unknown mode %q\n", mode)
+		os.Exit(2)
+	}
+	os.Exit(0)
+}
+
+// realSeatbeltRun executes argv under the real Seatbelt backend rooted at ws.
+// extraEnv entries are appended to the sanitized base env.
+func realSeatbeltRun(t *testing.T, cfg SandboxConfig, ws string, argv []string, extraEnv ...string) execResult {
+	t.Helper()
+	backend, err := newExecBackend(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	spec := execSpec{
+		Path:          argv[0],
+		Argv:          argv,
+		Dir:           ws,
+		Env:           append([]string{"PATH=/usr/bin:/bin", "HOME=" + os.Getenv("HOME")}, extraEnv...),
+		WorkspaceRoot: ws,
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	res, err := backend.Run(ctx, spec)
+	if err != nil {
+		t.Fatalf("infra failure running %q: %v (stderr: %s)", argv, err, res.Stderr)
+	}
+	return res
+}
+
+// helperRun executes this test binary's helper entry point inside the sandbox.
+func helperRun(t *testing.T, cfg SandboxConfig, ws, mode string, modeArgs ...string) execResult {
+	t.Helper()
+	if raceInstrumented {
+		t.Skip("race-instrumented helper cannot initialize under the sandbox; helper legs run in the non-race pass")
+	}
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	argv := append([]string{exe, "-test.run=^TestSeatbeltHelperProcess$", "-test.v", "--", mode}, modeArgs...)
+	return realSeatbeltRun(t, cfg, ws, argv, "GO_LLM_SEATBELT_HELPER=1")
+}
+
+// outsideCanaryDir creates a unique directory under the real home holding a
+// secret canary, asserting first that it is outside every allowance.
+func outsideCanaryDir(t *testing.T, ws string) (dir, canary string) {
+	t.Helper()
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir, err = os.MkdirTemp(home, "go-llm-seatbelt-canary-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	assertOutsideAllowances(t, dir, ws)
+	canary = filepath.Join(dir, "secret.txt")
+	if err := os.WriteFile(canary, []byte("SEATBELT-ESCAPE-CANARY"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return dir, canary
+}
+
+// assertOutsideAllowances proves a probe path is not covered by the canonical
+// workspace, the private temp base, or any fixed system read root — so a
+// denial on it can only come from the deny-default policy.
+func assertOutsideAllowances(t *testing.T, p, ws string) {
+	t.Helper()
+	covered := func(root string) bool {
+		return p == root || strings.HasPrefix(p, root+"/")
+	}
+	if covered(ws) || covered(seatbeltTempBase) || covered("/dev") {
+		t.Fatalf("probe path %q is inside an allowance", p)
+	}
+	for _, root := range seatbeltDefaultSystemRoots {
+		if covered(root) {
+			t.Fatalf("probe path %q is inside system root %q", p, root)
+		}
+	}
+}
+
+func TestSeatbeltBehavioralSimpleCommand(t *testing.T) {
+	requireSeatbeltCapability(t)
+	res := realSeatbeltRun(t, seatbeltTestCfg(), canonTempDirT(t), []string{"/bin/echo", "hi"})
+	if res.ExitCode != 0 || !strings.Contains(string(res.Stdout), "hi") {
+		t.Fatalf("exit=%d stdout=%q stderr=%q", res.ExitCode, res.Stdout, res.Stderr)
+	}
+}
+
+func TestSeatbeltBehavioralReadConfinement(t *testing.T) {
+	requireSeatbeltCapability(t)
+	ws := canonTempDirT(t)
+	_, canary := outsideCanaryDir(t, ws)
+
+	res := realSeatbeltRun(t, seatbeltTestCfg(), ws, []string{"/bin/cat", canary})
+	if res.ExitCode == 0 {
+		t.Fatal("cat of a $HOME canary succeeded inside the sandbox")
+	}
+	if strings.Contains(string(res.Stdout), "SEATBELT-ESCAPE-CANARY") {
+		t.Fatal("canary content leaked through the sandbox")
+	}
+
+	// Same-binary control: a workspace read must succeed, so the denial above
+	// cannot be an unrelated failure of cat.
+	inside := filepath.Join(ws, "readable.txt")
+	if err := os.WriteFile(inside, []byte("inside-ok"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ctrl := realSeatbeltRun(t, seatbeltTestCfg(), ws, []string{"/bin/cat", inside})
+	if ctrl.ExitCode != 0 || !strings.Contains(string(ctrl.Stdout), "inside-ok") {
+		t.Fatalf("control read failed: exit=%d stdout=%q stderr=%q", ctrl.ExitCode, ctrl.Stdout, ctrl.Stderr)
+	}
+}
+
+func TestSeatbeltBehavioralMetadataConfinement(t *testing.T) {
+	requireSeatbeltCapability(t)
+	ws := canonTempDirT(t)
+	_, canary := outsideCanaryDir(t, ws)
+	inside := filepath.Join(ws, "stat-me.txt")
+	if err := os.WriteFile(inside, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ctrl := realSeatbeltRun(t, seatbeltTestCfg(), ws, []string{"/usr/bin/stat", inside})
+	if ctrl.ExitCode != 0 {
+		t.Fatalf("control stat failed: stderr=%q", ctrl.Stderr)
+	}
+	res := realSeatbeltRun(t, seatbeltTestCfg(), ws, []string{"/usr/bin/stat", canary})
+	if res.ExitCode == 0 {
+		t.Fatalf("stat of an outside canary succeeded: metadata is globally exposed:\n%s", res.Stdout)
+	}
+}
+
+func TestSeatbeltBehavioralWriteConfinement(t *testing.T) {
+	requireSeatbeltCapability(t)
+	ws := canonTempDirT(t)
+	dir, _ := outsideCanaryDir(t, ws)
+	probe := filepath.Join(dir, "write-probe")
+
+	res := realSeatbeltRun(t, seatbeltTestCfg(), ws, []string{"/usr/bin/touch", probe})
+	if res.ExitCode == 0 {
+		t.Fatal("touch outside the workspace succeeded inside the sandbox")
+	}
+	if _, err := os.Lstat(probe); err == nil {
+		t.Fatal("probe file exists: the write escaped the sandbox")
+	}
+
+	insideWS := filepath.Join(ws, "probe-ws")
+	ctrl := realSeatbeltRun(t, seatbeltTestCfg(), ws, []string{"/usr/bin/touch", insideWS})
+	if ctrl.ExitCode != 0 {
+		t.Fatalf("control workspace write failed: stderr=%q", ctrl.Stderr)
+	}
+	if _, err := os.Lstat(insideWS); err != nil {
+		t.Fatalf("control workspace file missing: %v", err)
+	}
+}
+
+func TestSeatbeltBehavioralPrivateTempReadWrite(t *testing.T) {
+	requireSeatbeltCapability(t)
+	res := helperRun(t, seatbeltTestCfg(), canonTempDirT(t), "tmprw")
+	if res.ExitCode != 0 || !strings.Contains(string(res.Stdout), "HELPER-OK: temp-canary") {
+		t.Fatalf("private temp read/write failed: exit=%d stdout=%q stderr=%q",
+			res.ExitCode, res.Stdout, res.Stderr)
+	}
+}
+
+func TestSeatbeltBehavioralSymlinkEscapeDenied(t *testing.T) {
+	requireSeatbeltCapability(t)
+	ws := canonTempDirT(t)
+	dir, canary := outsideCanaryDir(t, ws)
+
+	readLink := filepath.Join(ws, "read-link")
+	if err := os.Symlink(canary, readLink); err != nil {
+		t.Fatal(err)
+	}
+	res := realSeatbeltRun(t, seatbeltTestCfg(), ws, []string{"/bin/cat", readLink})
+	if res.ExitCode == 0 || strings.Contains(string(res.Stdout), "SEATBELT-ESCAPE-CANARY") {
+		t.Fatalf("read through a workspace symlink escaped: exit=%d stdout=%q", res.ExitCode, res.Stdout)
+	}
+
+	writeTarget := filepath.Join(dir, "symlink-write-probe")
+	writeLink := filepath.Join(ws, "write-link")
+	if err := os.Symlink(writeTarget, writeLink); err != nil {
+		t.Fatal(err)
+	}
+	res = realSeatbeltRun(t, seatbeltTestCfg(), ws, []string{"/usr/bin/touch", writeLink})
+	if res.ExitCode == 0 {
+		t.Fatal("write through a workspace symlink succeeded")
+	}
+	if _, err := os.Lstat(writeTarget); err == nil {
+		t.Fatal("symlink write probe exists outside the workspace")
+	}
+}
+
+func TestSeatbeltBehavioralHardLinkCreationDenied(t *testing.T) {
+	requireSeatbeltCapability(t)
+	ws := canonTempDirT(t)
+	_, canary := outsideCanaryDir(t, ws)
+	linkPath := filepath.Join(ws, "hard-link")
+	res := realSeatbeltRun(t, seatbeltTestCfg(), ws, []string{"/bin/ln", canary, linkPath})
+	if res.ExitCode == 0 {
+		t.Fatal("hard-link creation from an outside canary succeeded")
+	}
+	if _, err := os.Lstat(linkPath); err == nil {
+		t.Fatal("hard link exists inside the workspace")
+	}
+}
+
+// TestSeatbeltBehavioralPreexistingHardLinkLimitation documents the pathname
+// boundary: a hard link created into the workspace BEFORE sandboxing names an
+// inode inside the allowed namespace, so the sandboxed read succeeds. SBPL
+// cannot provide inode-origin isolation; this is a disclosed limitation, not
+// a defect this test could fix.
+func TestSeatbeltBehavioralPreexistingHardLinkLimitation(t *testing.T) {
+	requireSeatbeltCapability(t)
+	ws := canonTempDirT(t)
+	_, canary := outsideCanaryDir(t, ws)
+	linked := filepath.Join(ws, "pre-linked")
+	if err := os.Link(canary, linked); err != nil {
+		t.Skipf("cannot hard-link across these paths: %v", err)
+	}
+	res := realSeatbeltRun(t, seatbeltTestCfg(), ws, []string{"/bin/cat", linked})
+	if res.ExitCode != 0 || !strings.Contains(string(res.Stdout), "SEATBELT-ESCAPE-CANARY") {
+		t.Fatalf("characterization changed: pre-existing hard link no longer readable (exit=%d) — update the documented limitation", res.ExitCode)
+	}
+}
+
+// TestSeatbeltBehavioralDataVolumeAliasDenied: /System/Volumes/Data aliases
+// user data on current macOS. Reading the alias spelling of the outside
+// canary must fail — this catches an accidental broad /System rule.
+func TestSeatbeltBehavioralDataVolumeAliasDenied(t *testing.T) {
+	requireSeatbeltCapability(t)
+	ws := canonTempDirT(t)
+	_, canary := outsideCanaryDir(t, ws)
+	alias := filepath.Join("/System/Volumes/Data", canary)
+	afi, err := os.Stat(alias)
+	if err != nil {
+		t.Skipf("Data-volume alias not present on this host: %v", err)
+	}
+	cfi, err := os.Stat(canary)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !os.SameFile(afi, cfi) {
+		t.Skip("alias names a different file on this host")
+	}
+	res := realSeatbeltRun(t, seatbeltTestCfg(), ws, []string{"/bin/cat", alias})
+	if res.ExitCode == 0 || strings.Contains(string(res.Stdout), "SEATBELT-ESCAPE-CANARY") {
+		t.Fatalf("Data-volume alias read escaped: exit=%d", res.ExitCode)
+	}
+}
+
+// TestSeatbeltBehavioralSocketConfinement observes denial at the LISTENERS:
+// with AllowNetwork false no TCP connection, UDP datagram, or Unix-domain
+// connection arrives; with true the same helper reaches each one, proving the
+// profile (not the environment) causes the denial.
+func TestSeatbeltBehavioralSocketConfinement(t *testing.T) {
+	requireSeatbeltCapability(t)
+	// Short workspace: macOS caps sun_path at 104 bytes, so the Unix socket
+	// cannot live under the deep /var/folders test dir.
+	ws, err := os.MkdirTemp("/private/tmp", "sbws-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(ws) })
+
+	tcpLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = tcpLn.Close() }()
+	var tcpAccepts atomic.Int64
+	go func() {
+		for {
+			conn, err := tcpLn.Accept()
+			if err != nil {
+				return
+			}
+			tcpAccepts.Add(1)
+			_ = conn.Close()
+		}
+	}()
+
+	udpConn, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = udpConn.Close() }()
+	var udpPackets atomic.Int64
+	go func() {
+		buf := make([]byte, 16)
+		for {
+			if _, _, err := udpConn.ReadFrom(buf); err != nil {
+				return
+			}
+			udpPackets.Add(1)
+		}
+	}()
+
+	sockPath := filepath.Join(ws, "test.sock")
+	if !strings.HasPrefix(sockPath, ws+"/") {
+		t.Fatalf("unix socket %q must live inside the workspace", sockPath)
+	}
+	unixLn, err := net.Listen("unix", sockPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = unixLn.Close() }()
+	var unixAccepts atomic.Int64
+	go func() {
+		for {
+			conn, err := unixLn.Accept()
+			if err != nil {
+				return
+			}
+			unixAccepts.Add(1)
+			_ = conn.Close()
+		}
+	}()
+
+	targets := map[string][]string{
+		"tcp":  {"tcp", tcpLn.Addr().String()},
+		"udp":  {"udp", udpConn.LocalAddr().String()},
+		"unix": {"unix", sockPath},
+	}
+	for name, args := range targets {
+		res := helperRun(t, seatbeltTestCfg(), ws, args[0], args[1])
+		if res.ExitCode == 0 {
+			t.Errorf("%s helper succeeded under the denied profile: stdout=%q", name, res.Stdout)
+		}
+	}
+	if got := tcpAccepts.Load(); got != 0 {
+		t.Errorf("TCP listener accepted %d connections from a sandboxed process", got)
+	}
+	if got := udpPackets.Load(); got != 0 {
+		t.Errorf("UDP listener received %d datagrams from a sandboxed process", got)
+	}
+	if got := unixAccepts.Load(); got != 0 {
+		t.Errorf("Unix listener accepted %d connections from a sandboxed process", got)
+	}
+
+	allowCfg := SandboxConfig{Runtime: SandboxRuntimeSeatbelt, AllowNetwork: true}
+	for name, args := range targets {
+		res := helperRun(t, allowCfg, ws, args[0], args[1])
+		if res.ExitCode != 0 {
+			t.Errorf("%s AllowNetwork control failed: stdout=%q stderr=%q", name, res.Stdout, res.Stderr)
+		}
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if tcpAccepts.Load() > 0 && udpPackets.Load() > 0 && unixAccepts.Load() > 0 {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if tcpAccepts.Load() == 0 || udpPackets.Load() == 0 || unixAccepts.Load() == 0 {
+		t.Errorf("AllowNetwork controls did not reach the listeners (tcp=%d udp=%d unix=%d)",
+			tcpAccepts.Load(), udpPackets.Load(), unixAccepts.Load())
+	}
+}
+
+func TestSeatbeltBehavioralResultTaxonomy(t *testing.T) {
+	requireSeatbeltCapability(t)
+	ws := canonTempDirT(t)
+	if res := realSeatbeltRun(t, seatbeltTestCfg(), ws, []string{"/usr/bin/false"}); res.ExitCode != 1 {
+		t.Fatalf("non-zero exit not preserved: %d", res.ExitCode)
+	}
+	res := realSeatbeltRun(t, seatbeltTestCfg(), ws, []string{"/usr/bin/head", "-c", "100000", "/dev/urandom"})
+	if res.ExitCode != 0 || !res.StdoutTruncated || len(res.Stdout) != execStdoutCap {
+		t.Fatalf("output caps not preserved: exit=%d truncated=%v len=%d",
+			res.ExitCode, res.StdoutTruncated, len(res.Stdout))
+	}
+}
+
+// TestSeatbeltBehavioralPublicWiring runs the public foreground constructor
+// end to end: approval identity in the plan, sandboxed execution in Invoke.
+func TestSeatbeltBehavioralPublicWiring(t *testing.T) {
+	requireSeatbeltCapability(t)
+	toolsList, err := NewSandboxedExecTools(t.TempDir(), seatbeltTestCfg())
+	if err != nil {
+		t.Fatal(err)
+	}
+	rc := toolsList[0].(*RunCommand)
+	raw := json.RawMessage(`{"argv":["/bin/echo","sandboxed"]}`)
+	plan, err := rc.Plan(context.Background(), raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(plan.Preview, `runtime="seatbelt"`) ||
+		!strings.Contains(plan.Preview, "temp=private") ||
+		!strings.Contains(plan.ApprovalKey, "sb:") {
+		t.Fatalf("plan missing seatbelt approval identity:\nkey=%q\n%s", plan.ApprovalKey, plan.Preview)
+	}
+	res, err := rc.Invoke(context.Background(), raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(res.Content, "exit code: 0") || !strings.Contains(res.Content, "sandboxed") {
+		t.Fatalf("unexpected result:\n%s", res.Content)
+	}
+}
+
+func seatbeltTestCfg() SandboxConfig { return SandboxConfig{Runtime: SandboxRuntimeSeatbelt} }
 
 // TestNewExecBackendSeatbeltMatchesRealCapability is the characterization pin:
 // public construction succeeds exactly when the real active probe succeeds on
