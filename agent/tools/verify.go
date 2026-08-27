@@ -89,6 +89,13 @@ func (v *VerifyCommand) ApprovalKey() string {
 	return verifyApprovalKeyPrefix + v.pending.fingerprint
 }
 
+// Command renders the argv for the model-visible observation. It is the
+// display form, quoted so argument boundaries are unambiguous; it is never
+// parsed and never used to spawn anything.
+func (v *VerifyCommand) Command() string {
+	return renderArgvForPreview(v.pending.argv)
+}
+
 // Preview is the human approval rendering: never parsed, never shown to the
 // model, and it lists environment NAMES only, never values. The closing note
 // is the honest statement of what approval buys — the argv is fixed, but the

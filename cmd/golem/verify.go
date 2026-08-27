@@ -1,0 +1,168 @@
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"strings"
+	"unicode/utf8"
+
+	"github.com/kstruzzieri/go-llm/agent"
+	agenttools "github.com/kstruzzieri/go-llm/agent/tools"
+	"github.com/kstruzzieri/go-llm/provider"
+)
+
+const (
+	// verifyToolName is the synthetic identity the post-write verification
+	// command is approved under (#347). It is NOT a registered tool: the model
+	// never sees it and cannot call it. The name exists so the approver can
+	// render an action-appropriate prompt and so grantScope can give
+	// verification its own grant namespace.
+	verifyToolName = "verify_command"
+	// verifyObservationCap bounds the captured output the MODEL reads, well
+	// below the runner's own 32 KiB per-stream caps. A build or test failure
+	// is actionable in its first lines; the rest is tokens the model pays for
+	// and does not need.
+	verifyObservationCap = 4 * 1024
+
+	verifyHeader = "\n--- post-batch verification (ran after all calls in this batch) ---\n"
+)
+
+// verifyExecutor is the bounded command the policy drives. The interface
+// exists so the policy's approval and rendering can be tested without
+// spawning a process; *agenttools.VerifyCommand is the production
+// implementation.
+type verifyExecutor interface {
+	Command() string
+	Preview() string
+	ApprovalKey() string
+	Run(ctx context.Context) (agenttools.VerifyResult, error)
+}
+
+// verifyRunner is golem's post-write verification policy: approve the exact
+// workspace-declared command, run it bounded, and render the outcome for the
+// model. It satisfies agent.Verifier.
+type verifyRunner struct {
+	cmd  verifyExecutor
+	call provider.ToolCall
+}
+
+var (
+	_ agent.Verifier = (*verifyRunner)(nil)
+	// The production executor must keep satisfying the seam the policy drives.
+	_ verifyExecutor = (*agenttools.VerifyCommand)(nil)
+)
+
+func newVerifyRunner(cmd verifyExecutor) *verifyRunner {
+	return &verifyRunner{
+		cmd: cmd,
+		call: provider.ToolCall{
+			Type: "function",
+			Function: provider.ToolCallFunction{
+				Name:      verifyToolName,
+				Arguments: json.RawMessage(`{}`),
+			},
+		},
+	}
+}
+
+// Verify implements agent.Verifier. Everything the CHECK decides — denial, a
+// spawn failure, a non-zero exit, a timeout — is an observation with a nil
+// error. Only an approval or control-plane failure and cancellation abort the
+// run; see agent.Verifier for why that channel cannot be a ctx.Err() check.
+func (v *verifyRunner) Verify(ctx context.Context, approver agent.Approver) (string, error) {
+	if approver == nil {
+		// Unreachable in practice: with no approver the runtime's fail-safe
+		// denies every write, so no batch ever reaches verification. Fail
+		// closed rather than run an unapproved command.
+		return "", nil
+	}
+	d, err := approveVerify(ctx, approver, v.call, v.cmd.Preview(), v.cmd.ApprovalKey())
+	if err != nil {
+		return "", err
+	}
+	if !d.Approved {
+		return v.render("skipped", "reason: not approved\n"), nil
+	}
+
+	res, runErr := v.cmd.Run(ctx)
+	if runErr != nil {
+		if ctx.Err() != nil || errors.Is(runErr, context.Canceled) ||
+			errors.Is(runErr, context.DeadlineExceeded) {
+			return "", runErr
+		}
+		return v.render("error", "reason: "+sanitizeVerifyLine(runErr.Error())+"\n"), nil
+	}
+	return v.renderResult(res), nil
+}
+
+// approveVerify mirrors the runtime's own approval call: a KeyedApprover
+// receives the structural key, a plain Approver does not (and is therefore
+// never grantable).
+func approveVerify(ctx context.Context, approver agent.Approver, call provider.ToolCall,
+	preview, key string) (agent.ApprovalDecision, error) {
+
+	if ka, ok := approver.(agent.KeyedApprover); ok {
+		return ka.ApproveKeyed(ctx, call, preview, key)
+	}
+	ok, err := approver.Approve(ctx, call, preview)
+	return agent.ApprovalDecision{Approved: ok}, err
+}
+
+// render builds the observation shell shared by every outcome.
+func (v *verifyRunner) render(status, tail string) string {
+	return fmt.Sprintf("%scommand: %s\nstatus: %s\n%s", verifyHeader, v.cmd.Command(), status, tail)
+}
+
+// renderResult renders a completed run. A pass carries status and exit code
+// only: its output is noise the model pays for. A failure carries the bounded
+// streams, because that is the whole point of the check.
+func (v *verifyRunner) renderResult(res agenttools.VerifyResult) string {
+	if res.ExitCode == 0 && !res.TimedOut {
+		return v.render("passed", "exit_code: 0\n")
+	}
+	body, capped := capVerifyOutput(verifyOutputBody(res))
+	return v.render("failed", fmt.Sprintf("exit_code: %d\ntimed_out: %t\noutput_truncated: %t\n%s",
+		res.ExitCode, res.TimedOut, res.Truncated || capped, body))
+}
+
+// verifyOutputBody lays out the captured streams, omitting an empty one so a
+// build failure is not padded with blank section headers.
+func verifyOutputBody(res agenttools.VerifyResult) string {
+	var b strings.Builder
+	for _, section := range []struct {
+		label string
+		data  []byte
+	}{{"stdout", res.Stdout}, {"stderr", res.Stderr}} {
+		if len(section.data) == 0 {
+			continue
+		}
+		fmt.Fprintf(&b, "--- %s ---\n", section.label)
+		b.Write(section.data)
+		if section.data[len(section.data)-1] != '\n' {
+			b.WriteByte('\n')
+		}
+	}
+	return b.String()
+}
+
+// capVerifyOutput trims to verifyObservationCap from the HEAD: a compiler or
+// test runner reports its first failure first, and that is the actionable one.
+// The cut lands on a rune boundary so the model never reads a split rune.
+func capVerifyOutput(s string) (string, bool) {
+	if len(s) <= verifyObservationCap {
+		return s, false
+	}
+	end := verifyObservationCap
+	for end > 0 && !utf8.RuneStart(s[end]) {
+		end--
+	}
+	return s[:end] + "\n... [truncated]\n", true
+}
+
+// sanitizeVerifyLine keeps a failure reason to one line so it cannot forge
+// additional observation fields.
+func sanitizeVerifyLine(s string) string {
+	return strings.TrimSpace(strings.ReplaceAll(strings.ReplaceAll(s, "\r", " "), "\n", " "))
+}
