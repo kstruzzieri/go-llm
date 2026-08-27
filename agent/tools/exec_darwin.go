@@ -13,7 +13,9 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -60,6 +62,28 @@ func probeSeatbelt(ctx context.Context, execPath string) error {
 // seatbeltProbeFunc is the injectable probe seam for deterministic unit tests.
 type seatbeltProbeFunc func(context.Context, string) error
 
+// seatbeltTempBase is the fixed parent for private per-invocation temp
+// directories. Deliberately NOT the ambient TMPDIR: inherited temp locations
+// are command input, never policy (D5).
+const seatbeltTempBase = "/private/tmp"
+
+// seatbeltDefaultSystemRoots is the reviewed, minimal read-only system
+// execution surface (D1). Broad mutable roots (/System, /usr, /Library,
+// /private/etc, /dev, Homebrew prefixes) are deliberately absent — on current
+// macOS /System/Volumes/Data aliases user data, and the rest are not runtime
+// prerequisites. Additions require a demonstrated denial, the narrowest
+// filtered rule, and a cross-platform profile test.
+var seatbeltDefaultSystemRoots = []string{
+	"/System/Library",
+	"/System/Cryptexes/OS",
+	"/usr/bin",
+	"/usr/lib",
+	"/usr/libexec",
+	"/usr/share",
+	"/bin",
+	"/sbin",
+}
+
 // seatbeltBackend runs both command lifetimes under per-invocation Seatbelt
 // profiles by rewriting the re-checked spec to sandbox-exec and delegating to
 // the host unix implementations.
@@ -68,6 +92,8 @@ type seatbeltBackend struct {
 	allowNetwork bool
 	runner       commandRunner
 	starter      backgroundStarter
+	tempBase     string
+	systemRoots  func(workspaceRoot string) ([]string, error)
 }
 
 // newSeatbeltExecBackend constructs the real Seatbelt backend, failing closed
@@ -91,15 +117,140 @@ func newSeatbeltExecBackendAt(execPath string, probe seatbeltProbeFunc, cfg Sand
 		allowNetwork: cfg.AllowNetwork,
 		runner:       unixRunner{},
 		starter:      unixStarter{},
+		tempBase:     seatbeltTempBase,
+		systemRoots: func(workspaceRoot string) ([]string, error) {
+			// A missing home only skips the home-parent guard; the workspace
+			// guard and broad-root rejection still apply.
+			home, _ := os.UserHomeDir()
+			return seatbeltCollectSystemRoots(seatbeltDefaultSystemRoots, workspaceRoot, home)
+		},
 	}, nil
 }
 
-// Run and Start are wired in the follow-up commits of #442; until then the
-// backend fails closed rather than ever running a target unsandboxed.
-func (b *seatbeltBackend) Run(context.Context, execSpec) (execResult, error) {
-	return execResult{}, errors.New("tools: seatbelt foreground execution is not wired yet")
+// seatbeltTempCleanup returns the single-shot guarded remover for one private
+// temp directory. Before recursive removal the path must still name the
+// directory that was created (os.SameFile on the recorded Lstat identity); a
+// vanished or replaced path abandons cleanup rather than deleting a
+// replacement or claiming the original was reaped. The directory is 0700, so
+// an abandoned one leaks nothing and macOS temp cleanup reaps it eventually.
+func seatbeltTempCleanup(dir string, created os.FileInfo) func() error {
+	var once sync.Once
+	var err error
+	return func() error {
+		once.Do(func() {
+			fi, statErr := os.Lstat(dir)
+			if statErr != nil {
+				err = fmt.Errorf("tools: seatbelt temp %s vanished before cleanup; not reaped: %w", dir, statErr)
+				return
+			}
+			if !os.SameFile(fi, created) {
+				err = fmt.Errorf("tools: seatbelt temp %s was replaced; cleanup abandoned", dir)
+				return
+			}
+			err = os.RemoveAll(dir)
+		})
+		return err
+	}
 }
 
+// prepare builds the per-invocation private temp directory, SBPL profile, and
+// wrapper spec. On success the returned cleanup is the guarded temp remover;
+// on failure prepare has already attempted guarded cleanup itself and nothing
+// may spawn. The stamped WorkspaceRoot is consumed as-is — re-resolving it
+// here could silently change the policy after approval.
+func (b *seatbeltBackend) prepare(spec execSpec) (execSpec, func() error, error) {
+	if spec.WorkspaceRoot == "" {
+		return execSpec{}, nil, errors.New("tools: seatbelt requires a workspace root in the exec spec")
+	}
+	if !seatbeltCleanAbs(spec.WorkspaceRoot) || seatbeltBroadRoot(spec.WorkspaceRoot) {
+		return execSpec{}, nil, fmt.Errorf("tools: seatbelt workspace root %q must be a canonical non-root path", spec.WorkspaceRoot)
+	}
+	canonBase, err := filepath.EvalSymlinks(b.tempBase)
+	if err != nil {
+		return execSpec{}, nil, fmt.Errorf("tools: seatbelt temp base: %w", err)
+	}
+	tempDir, err := os.MkdirTemp(b.tempBase, "go-llm-seatbelt-*")
+	if err != nil {
+		return execSpec{}, nil, fmt.Errorf("tools: seatbelt private temp: %w", err)
+	}
+	created, err := os.Lstat(tempDir)
+	if err != nil {
+		_ = os.Remove(tempDir)
+		return execSpec{}, nil, fmt.Errorf("tools: seatbelt private temp identity: %w", err)
+	}
+	cleanup := seatbeltTempCleanup(tempDir, created)
+	fail := func(err error) (execSpec, func() error, error) {
+		_ = cleanup()
+		return execSpec{}, nil, err
+	}
+	canonTemp, err := filepath.EvalSymlinks(tempDir)
+	if err != nil {
+		return fail(fmt.Errorf("tools: seatbelt private temp: %w", err))
+	}
+	if !seatbeltCleanAbs(canonTemp) || seatbeltBroadRoot(canonTemp) || filepath.Dir(canonTemp) != canonBase {
+		return fail(fmt.Errorf("tools: seatbelt private temp %q has an unexpected parent", canonTemp))
+	}
+	if canonTemp != tempDir {
+		// The guard identity was recorded on the created spelling; cleanup
+		// targets that spelling, so the profile must use the same directory.
+		fi, err := os.Lstat(canonTemp)
+		if err != nil || !os.SameFile(fi, created) {
+			return fail(fmt.Errorf("tools: seatbelt private temp %q lost its identity", canonTemp))
+		}
+	}
+	canonExe, err := filepath.EvalSymlinks(spec.Path)
+	if err != nil {
+		return fail(fmt.Errorf("tools: seatbelt resolve executable target: %w", err))
+	}
+	sysRoots, err := b.systemRoots(spec.WorkspaceRoot)
+	if err != nil {
+		return fail(err)
+	}
+	ancestorSources := append(append([]string(nil), sysRoots...),
+		spec.WorkspaceRoot, canonTemp, canonExe,
+		"/dev/null", "/dev/random", "/dev/urandom")
+	if canonExe != spec.Path && seatbeltCleanAbs(spec.Path) {
+		// A symlinked approved path needs metadata on its own spine to be
+		// resolvable; the content allowance stays on the canonical target.
+		ancestorSources = append(ancestorSources, spec.Path)
+	}
+	ancestors, err := seatbeltMetadataAncestors(ancestorSources)
+	if err != nil {
+		return fail(err)
+	}
+	profile, err := buildSeatbeltProfile(seatbeltPolicy{
+		workspaceRoot:     spec.WorkspaceRoot,
+		tempRoot:          canonTemp,
+		exePath:           canonExe,
+		systemReadRoots:   sysRoots,
+		metadataAncestors: ancestors,
+		allowNetwork:      b.allowNetwork,
+	})
+	if err != nil {
+		return fail(err)
+	}
+	wrapped := spec
+	wrapped.Env = seatbeltChildEnv(spec.Env, canonTemp)
+	wrapped.Path = b.execPath
+	wrapped.Argv = append([]string{"sandbox-exec", "-p", profile, spec.Path}, spec.Argv[1:]...)
+	return wrapped, cleanup, nil
+}
+
+// Run executes one foreground command under its per-invocation profile. A
+// cleanup failure never overwrites the command's observed result: the private
+// directory is 0700 and host temp reaping is the documented fallback.
+func (b *seatbeltBackend) Run(ctx context.Context, spec execSpec) (execResult, error) {
+	wrapped, cleanup, err := b.prepare(spec)
+	if err != nil {
+		return execResult{}, err
+	}
+	res, runErr := b.runner.Run(ctx, wrapped)
+	_ = cleanup()
+	return res, runErr
+}
+
+// Start is wired in the next commit of #442; until then the background path
+// fails closed rather than ever running a target unsandboxed.
 func (b *seatbeltBackend) Start(execSpec, io.Writer, io.Writer) (backgroundProcess, error) {
 	return nil, errors.New("tools: seatbelt background execution is not wired yet")
 }

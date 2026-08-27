@@ -8,6 +8,7 @@ package tools
 import (
 	"fmt"
 	"path"
+	"path/filepath"
 	"slices"
 	"strings"
 	"unicode/utf8"
@@ -176,6 +177,47 @@ func buildSeatbeltProfile(p seatbeltPolicy) (string, error) {
 		b.WriteString("(allow network*)\n")
 	}
 	return b.String(), nil
+}
+
+// seatbeltChildEnv returns env with every inherited TMPDIR entry removed and
+// exactly one TMPDIR naming the private per-invocation directory. Inherited
+// TMPDIR values are command input, never authority to widen the profile (D5).
+func seatbeltChildEnv(env []string, privateTemp string) []string {
+	out := make([]string, 0, len(env)+1)
+	for _, e := range env {
+		if strings.HasPrefix(e, "TMPDIR=") {
+			continue
+		}
+		out = append(out, e)
+	}
+	return append(out, "TMPDIR="+privateTemp)
+}
+
+// seatbeltCollectSystemRoots canonicalizes the fixed system read roots for one
+// invocation. Missing roots are omitted (strictly narrower); a root that
+// canonicalizes to a broad root, or to the workspace/home or a parent of
+// either, fails closed — it must never enter the profile, and silently
+// dropping it would hide an attack indicator (a system path aliased at or
+// above user data).
+func seatbeltCollectSystemRoots(roots []string, workspaceRoot, home string) ([]string, error) {
+	coveredBy := func(root, target string) bool {
+		return target != "" && (root == target || strings.HasPrefix(target, root+"/"))
+	}
+	out := make([]string, 0, len(roots))
+	for _, root := range roots {
+		canon, err := filepath.EvalSymlinks(root)
+		if err != nil {
+			continue // missing root: omitted, strictly narrower
+		}
+		if seatbeltBroadRoot(canon) || !seatbeltCleanAbs(canon) {
+			return nil, fmt.Errorf("tools: seatbelt system root %q canonicalizes to broad root %q", root, canon)
+		}
+		if coveredBy(canon, workspaceRoot) || coveredBy(canon, home) {
+			return nil, fmt.Errorf("tools: seatbelt system root %q (%q) covers the workspace or home", root, canon)
+		}
+		out = append(out, canon)
+	}
+	return out, nil
 }
 
 // seatbeltConfigSupport rejects ceiling fields Seatbelt cannot enforce. The

@@ -1,6 +1,8 @@
 package tools
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -244,6 +246,89 @@ func TestSeatbeltConfigSupport(t *testing.T) {
 		Runtime: SandboxRuntimeSeatbelt, AllowNetwork: true,
 	}); err != nil {
 		t.Fatalf("AllowNetwork must be supported: %v", err)
+	}
+}
+
+func TestSeatbeltChildEnvReplacesTMPDIR(t *testing.T) {
+	env := seatbeltChildEnv(
+		[]string{"PATH=/usr/bin", "TMPDIR=/", "HOME=/Users/x", "TMPDIR=/etc"},
+		"/private/tmp/pt1")
+	var tmpdirs, rest []string
+	for _, e := range env {
+		if strings.HasPrefix(e, "TMPDIR=") {
+			tmpdirs = append(tmpdirs, e)
+		} else {
+			rest = append(rest, e)
+		}
+	}
+	if len(tmpdirs) != 1 || tmpdirs[0] != "TMPDIR=/private/tmp/pt1" {
+		t.Fatalf("TMPDIR entries = %q, want exactly the private directory", tmpdirs)
+	}
+	if len(rest) != 2 || rest[0] != "PATH=/usr/bin" || rest[1] != "HOME=/Users/x" {
+		t.Fatalf("non-TMPDIR entries altered: %q", rest)
+	}
+}
+
+func TestSeatbeltChildEnvAddsTMPDIRWhenAbsent(t *testing.T) {
+	env := seatbeltChildEnv([]string{"PATH=/usr/bin"}, "/private/tmp/pt2")
+	if len(env) != 2 || env[1] != "TMPDIR=/private/tmp/pt2" {
+		t.Fatalf("env = %q, want appended private TMPDIR", env)
+	}
+}
+
+func TestSeatbeltCollectSystemRootsCanonicalizesAndOmitsMissing(t *testing.T) {
+	base := t.TempDir()
+	real := filepath.Join(base, "real")
+	if err := os.Mkdir(real, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(base, "link")
+	if err := os.Symlink(real, link); err != nil {
+		t.Fatal(err)
+	}
+	canonReal, err := filepath.EvalSymlinks(real)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := seatbeltCollectSystemRoots(
+		[]string{link, filepath.Join(base, "missing")}, "/w", "/home/u")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0] != canonReal {
+		t.Fatalf("roots = %q, want [%q] (canonicalized, missing omitted)", got, canonReal)
+	}
+}
+
+// TestSeatbeltCollectSystemRootsFailsClosed pins D1's collector rule: a fixed
+// root that canonicalizes to a broad root or to a parent of the workspace or
+// home errors out — it never silently enters or leaves the profile.
+func TestSeatbeltCollectSystemRootsFailsClosed(t *testing.T) {
+	base := t.TempDir()
+	toRoot := filepath.Join(base, "toroot")
+	if err := os.Symlink("/", toRoot); err != nil {
+		t.Fatal(err)
+	}
+	canonBase, err := filepath.EvalSymlinks(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tests := map[string]struct {
+		roots []string
+		ws    string
+		home  string
+	}{
+		"canonicalizes to volume root": {[]string{toRoot}, "/w", "/home/u"},
+		"parent of workspace":          {[]string{canonBase}, filepath.Join(canonBase, "ws"), "/home/u"},
+		"equals workspace":             {[]string{canonBase}, canonBase, "/home/u"},
+		"parent of home":               {[]string{canonBase}, "/w", filepath.Join(canonBase, "me")},
+	}
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			if _, err := seatbeltCollectSystemRoots(tt.roots, tt.ws, tt.home); err == nil {
+				t.Fatalf("%s accepted into the profile", name)
+			}
+		})
 	}
 }
 
