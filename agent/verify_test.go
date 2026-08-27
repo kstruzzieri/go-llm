@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/kstruzzieri/go-llm/contextdepth"
 	"github.com/kstruzzieri/go-llm/provider"
 )
 
@@ -395,5 +396,95 @@ func TestVerifyBatchAppendsToTheAnchorOnSuccess(t *testing.T) {
 	}
 	if want := "wrote" + verifyObs; st.Messages[0].Content != want {
 		t.Fatalf("Content = %q, want %q", st.Messages[0].Content, want)
+	}
+}
+
+// recordingCaller captures every assembled request so a test can assert on what
+// the MODEL actually reads, rather than on State — the two differ under mixed
+// assembly, which is the whole point of this test.
+type recordingCaller struct {
+	responses []ModelResult
+	calls     int
+	requests  []provider.ChatRequest
+}
+
+func (r *recordingCaller) Chat(_ context.Context, req provider.ChatRequest,
+	_ func(provider.ChatResponse) error) (ModelResult, error) {
+	r.requests = append(r.requests, req)
+	out := r.responses[r.calls]
+	r.calls++
+	return out, nil
+}
+
+func verifySurvivalSet() *ContextSet {
+	return &ContextSet{Groups: []ContextGroup{{
+		Desc: contextdepth.GroupDesc{
+			Subject: contextdepth.SubjectRef{Domain: contextdepth.DomainRAG, ID: "one.go"},
+			Rank:    1,
+		},
+		Alternatives: []ContextAlternative{{
+			Desc: contextdepth.AlternativeDesc{Representations: []contextdepth.RepresentationDesc{
+				{Depth: contextdepth.DepthL0, Kind: contextdepth.RepresentationMetadata},
+			}},
+			Content: "structured-alternative",
+		}},
+	}}}
+}
+
+// TestVerifyObservationReachesTheModelUnderBothAssemblies pins the reason the
+// anchor is the last successful WRITE and not the batch's last result: the
+// batch ends with a structured retrieval anchor, whose Content mixed assembly
+// replaces at materialization. Anchoring on the last message would put the
+// verification somewhere the model never reads under -progressive.
+func TestVerifyObservationReachesTheModelUnderBothAssemblies(t *testing.T) {
+	for _, mixed := range []bool{false, true} {
+		name := "legacy"
+		if mixed {
+			name = "mixed"
+		}
+		t.Run(name, func(t *testing.T) {
+			mc := &recordingCaller{responses: []ModelResult{
+				{Response: provider.ChatResponse{ToolCalls: []provider.ToolCall{
+					toolCall("w1", "write_file", "{}"),
+					toolCall("c1", "retrieve", "{}"),
+				}}},
+				{Response: provider.ChatResponse{Content: "done", Done: true}},
+			}}
+			o := New(mc, ContextManager{Mixed: mixed, Estimate: runeEstimator},
+				WithVerifier(&fakeVerifier{out: verifyObs}))
+
+			if _, err := o.Run(context.Background(), Request{Goal: "q", Tools: []Tool{
+				fakeWriteTool{name: "write_file", approval: ApprovalNever},
+				&ctxTool{name: "retrieve", set: verifySurvivalSet(), class: Read},
+			}}, nil); err != nil {
+				t.Fatalf("Run: %v", err)
+			}
+			if len(mc.requests) != 2 {
+				t.Fatalf("expected a second model call after the batch, got %d", len(mc.requests))
+			}
+
+			var write, retrieve string
+			var sawWrite, sawRetrieve bool
+			for _, m := range mc.requests[1].Messages {
+				switch m.ToolCallID {
+				case "w1":
+					write, sawWrite = m.Content, true
+				case "c1":
+					retrieve, sawRetrieve = m.Content, true
+				}
+			}
+			if !sawWrite || !sawRetrieve {
+				t.Fatalf("both observations must reach the model: write=%v retrieve=%v", sawWrite, sawRetrieve)
+			}
+			if !strings.HasSuffix(write, verifyObs) {
+				t.Fatalf("model-visible write observation lost the verification: %q", write)
+			}
+			if strings.Contains(retrieve, "post-batch verification") {
+				t.Fatalf("verification must not ride on the retrieval anchor: %q", retrieve)
+			}
+			if mixed && retrieve != "structured-alternative" {
+				t.Fatalf("fixture invalid: mixed assembly must have rewritten the anchor, got %q", retrieve)
+			}
+		})
 	}
 }
