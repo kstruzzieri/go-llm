@@ -73,10 +73,12 @@ func newVerifyRunner(cmd verifyExecutor) *verifyRunner {
 // run; see agent.Verifier for why that channel cannot be a ctx.Err() check.
 func (v *verifyRunner) Verify(ctx context.Context, approver agent.Approver) (string, error) {
 	if approver == nil {
-		// Unreachable in practice: with no approver the runtime's fail-safe
-		// denies every write, so no batch ever reaches verification. Fail
-		// closed rather than run an unapproved command.
-		return "", nil
+		// Unreachable in golem: with no approver the runtime's fail-safe denies
+		// every write, so no batch reaches verification. Another consumer of
+		// the seam could still get here with auto-approved writes. Fail closed
+		// — never run an unapproved command — but say so rather than going
+		// silently missing, which would read as a clean check.
+		return v.render("skipped", "reason: no approver available\n"), nil
 	}
 	d, err := approveVerify(ctx, approver, v.call, v.cmd.Preview(), v.cmd.ApprovalKey())
 	if err != nil {

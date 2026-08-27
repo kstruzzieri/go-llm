@@ -239,3 +239,23 @@ func TestVerifyRunnerCapNeverSplitsARune(t *testing.T) {
 		t.Fatal("capped observation is not valid UTF-8")
 	}
 }
+
+// TestVerifyRunnerWithoutAnApproverFailsClosedVisibly covers the seam being
+// used by a consumer whose writes are auto-approved. Skipping must never look
+// like a clean check.
+func TestVerifyRunnerWithoutAnApproverFailsClosedVisibly(t *testing.T) {
+	exec := &stubVerifyExec{}
+	out, err := newVerifyRunner(exec).Verify(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("a missing approver must not fail the run: %v", err)
+	}
+	if exec.runs != 0 {
+		t.Fatalf("must not run unapproved, got %d runs", exec.runs)
+	}
+	if !strings.Contains(out, "status: skipped") || !strings.Contains(out, "no approver") {
+		t.Fatalf("the skip must be visible to the model, got %q", out)
+	}
+	if strings.Contains(out, "status: passed") {
+		t.Fatalf("a skip must never read as a pass: %q", out)
+	}
+}

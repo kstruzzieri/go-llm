@@ -488,3 +488,66 @@ func TestVerifyObservationReachesTheModelUnderBothAssemblies(t *testing.T) {
 		})
 	}
 }
+
+// planFailWriteTool is a workspace mutator whose Plan fails, producing a
+// synthetic pre-invoke failure — a path no other fixture reaches.
+type planFailWriteTool struct{ name string }
+
+func (p planFailWriteTool) Spec() ToolSpec {
+	return ToolSpec{Name: p.name, Parameters: json.RawMessage(`{"type":"object"}`)}
+}
+func (planFailWriteTool) Effect() Effect { return Effect{Class: Write, Approval: ApprovalNever} }
+func (planFailWriteTool) Invoke(context.Context, json.RawMessage) (ToolResult, error) {
+	return ToolResult{Content: "must not run"}, nil
+}
+func (p planFailWriteTool) Plan(context.Context, json.RawMessage) (ToolPlan, error) {
+	return ToolPlan{Effect: p.Effect()}, errors.New("path is required")
+}
+
+func TestVerifySkippedWhenPlanningFails(t *testing.T) {
+	v := &fakeVerifier{out: verifyObs}
+	o := newTestOrchestrator(batchThenAnswer(toolCall("w1", "write_file", "{}")), WithVerifier(v))
+	res, err := o.Run(context.Background(), Request{Goal: "q", Tools: []Tool{
+		planFailWriteTool{name: "write_file"},
+	}}, nil)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if !res.ToolCalls[0].IsError || res.ToolCalls[0].Invoked {
+		t.Fatalf("fixture must produce a pre-invoke plan failure: %+v", res.ToolCalls[0])
+	}
+	if v.calls != 0 {
+		t.Fatalf("a plan failure mutated nothing and must not verify, got %d", v.calls)
+	}
+}
+
+// TestVerifyAnchorsOnTheInvokedWriteWhenTheBudgetBlocksALaterOne pins that a
+// call blocked by the invocation budget cannot become the anchor: it produced
+// no observation the model would associate with a mutation, and nothing
+// changed on disk for it.
+func TestVerifyAnchorsOnTheInvokedWriteWhenTheBudgetBlocksALaterOne(t *testing.T) {
+	v := &fakeVerifier{out: verifyObs}
+	o := newTestOrchestrator(batchThenAnswer(
+		toolCall("w1", "write_file", "{}"),
+		toolCall("w2", "write_file", "{}"),
+	), WithVerifier(v), WithToolInvocationLimit(ToolInvocationLimit{Tool: "write_file", Max: 1}))
+
+	res, err := o.Run(context.Background(), Request{Goal: "q", Tools: []Tool{
+		fakeWriteTool{name: "write_file", approval: ApprovalNever},
+	}}, nil)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(res.ToolCalls) != 2 || !res.ToolCalls[0].Invoked || res.ToolCalls[1].Invoked {
+		t.Fatalf("fixture must invoke the first write and budget-block the second: %+v", res.ToolCalls)
+	}
+	if v.calls != 1 {
+		t.Fatalf("expected one verification, got %d", v.calls)
+	}
+	if got := observationFor(t, res.Messages, "w1"); !strings.HasSuffix(got, verifyObs) {
+		t.Fatalf("verification must anchor on the INVOKED write, got %q", got)
+	}
+	if got := observationFor(t, res.Messages, "w2"); strings.Contains(got, "post-batch verification") {
+		t.Fatalf("a budget-blocked call must not carry the verification, got %q", got)
+	}
+}

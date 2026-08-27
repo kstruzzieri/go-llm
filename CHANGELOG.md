@@ -26,7 +26,7 @@ failure, or cancellation.
 `agent/tools` gains `VerifyCommand`, which reuses `run_command`'s bounded
 preparation — argv validation, workspace-contained cwd, the fixed environment
 allowlist, executable identity re-check at spawn, process-group kill, output
-caps — through the `#440` backend seam at the host runtime.
+caps — through the #440 backend seam at the host runtime.
 
 Golem reads `.golem.json` at the workspace root, only under `-allow-write` and
 with no ancestor search, accepting `argv`, a relative `dir` and
@@ -38,7 +38,7 @@ to the batch's last successful write under a separate 4 KiB model-visible cap.
 Behavior is byte-for-byte unchanged when no `.golem.json` declares a verifier,
 which includes one-shot, task, planning and Agentflow modes: all of them
 either clear or reject `-allow-write`. Verification runs on the host with no
-isolation, so a verifier that writes produces changes `#355` checkpoints did
+isolation, so a verifier that writes produces changes #355 checkpoints did
 not capture and `/undo` will not restore.
 
 ### Added — config: role lifecycle mutations and atomic credential scrub (#462)
