@@ -6,6 +6,41 @@ All notable changes to `go-llm` are documented here. Downstream consumers
 
 ## [Unreleased]
 
+### Added — golem, agent, agent/tools: post-write verification hook (#347)
+
+An optional, workspace-declared command that runs after any tool-call batch
+which successfully ran `write_file` or `edit_file`, before that batch's
+result returns to the model, so a break is visible in the same turn instead
+of surfacing to the user turns later.
+
+`agent` gains a hidden `Verifier` seam installed with `agent.WithVerifier`.
+It is not a model-visible tool and is absent from the tool schema. The hook
+runs at the shared `runToolCalls` boundary, and eligibility is the exact tool
+names `write_file`/`edit_file` rather than `EffectClass`: `Write` also covers
+agent-memory writes, and `IsMutating` covers the exec tools, which already
+report their own outcome. `Verify` returns `(string, error)`; every outcome of
+the check itself is data on the string return and can never fail a run, while
+the error channel carries only an interrupted approval, a control-plane
+failure, or cancellation.
+
+`agent/tools` gains `VerifyCommand`, which reuses `run_command`'s bounded
+preparation — argv validation, workspace-contained cwd, the fixed environment
+allowlist, executable identity re-check at spawn, process-group kill, output
+caps — through the `#440` backend seam at the host runtime.
+
+Golem reads `.golem.json` at the workspace root, only under `-allow-write` and
+with no ancestor search, accepting `argv`, a relative `dir` and
+`timeout_seconds` and nothing else. The resolved command is approved once per
+session under its own grant namespace, so a verification grant can never
+authorize `run_command`/`start_command` or the reverse. Failures are appended
+to the batch's last successful write under a separate 4 KiB model-visible cap.
+
+Behavior is byte-for-byte unchanged when no `.golem.json` declares a verifier,
+which includes one-shot, task, planning and Agentflow modes: all of them
+either clear or reject `-allow-write`. Verification runs on the host with no
+isolation, so a verifier that writes produces changes `#355` checkpoints did
+not capture and `/undo` will not restore.
+
 ### Added — config: role lifecycle mutations and atomic credential scrub (#462)
 
 Six narrow `*config.Document` operations unblocking the Firn config
