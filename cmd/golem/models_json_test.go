@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -42,8 +43,105 @@ func TestGolemViewRequirementsShapes(t *testing.T) {
 	if req["agent"] != provider.CapChat|provider.CapStream|provider.CapToolCall {
 		t.Fatalf("agent requirements = %v", req["agent"])
 	}
+	// Plan authoring always registers plan tools, so its shape is the
+	// tool-bearing streamed-chat shape -- the same one the agent route
+	// declares, spelled with the same constant the callers use.
+	if req["planning"] != provider.CapChat|provider.CapStream|provider.CapToolCall {
+		t.Fatalf("planning requirements = %v", req["planning"])
+	}
 	if _, ok := req["embedding"]; !ok {
 		t.Fatal("embedding shape missing")
+	}
+}
+
+// bindingByUseCase returns the projected binding for a use case, if any.
+func bindingByUseCase(snap configview.Snapshot, useCase string) (configview.RoleBinding, bool) {
+	for _, b := range snap.Bindings {
+		if b.UseCase == useCase {
+			return b, true
+		}
+	}
+	return configview.RoleBinding{}, false
+}
+
+func TestModelsJSONProjectsAuthoredPlanningEligibility(t *testing.T) {
+	// An explicit Capabilities list REPLACES every discovered set and its
+	// omissions are definitive, so this model is provably missing tool_call.
+	// Binding chat and planning to the SAME model is what makes the assertion
+	// meaningful: if planning's requirement were not applied, both rows would
+	// read eligible, and if everything were ineligible the chat row would say
+	// so too.
+	cfg := &config.Config{
+		Providers: map[string]config.ProviderConfig{"local": {BaseURL: "http://localhost:8080"}},
+		Models: map[string]config.ModelConfig{
+			"planner": {Name: "big", Provider: "local", Type: "dense", Capabilities: []string{"chat", "stream"}},
+		},
+		Defaults: map[string]string{"planning": "planner", "chat": "planner"},
+	}
+	snap := configview.Build(configview.BuildInput{
+		Doc:          configview.DocSnapshot{Config: cfg, Origin: config.Origin{Source: config.OriginExplicit, Path: "/x"}},
+		Requirements: golemViewRequirements(),
+	})
+
+	planning, ok := bindingByUseCase(snap, "planning")
+	if !ok {
+		t.Fatalf("no planning binding projected for an authored defaults.planning; bindings = %+v", snap.Bindings)
+	}
+	if planning.Role != "planner" {
+		t.Errorf("planning role = %q, want %q", planning.Role, "planner")
+	}
+	if len(planning.Candidates) == 0 {
+		t.Fatal("planning binding has no candidates")
+	}
+	var planningVerdict configview.Eligibility
+	var planningReasons []string
+	for _, c := range planning.Candidates {
+		if c.Selector == "local/big" {
+			planningVerdict, planningReasons = c.Eligibility, c.Reasons
+		}
+	}
+	if planningVerdict != configview.Eligibility(provider.CapIneligible) {
+		t.Errorf("planning eligibility for local/big = %q, want ineligible (declares chat+stream, not tool_call)", planningVerdict)
+	}
+	if !slices.Contains(planningReasons, "missing_capability:tool_call") {
+		t.Errorf("planning reasons = %v, want missing_capability:tool_call", planningReasons)
+	}
+
+	chat, ok := bindingByUseCase(snap, "chat")
+	if !ok {
+		t.Fatal("no chat binding projected")
+	}
+	for _, c := range chat.Candidates {
+		if c.Selector == "local/big" && c.Eligibility != configview.Eligibility(provider.CapEligible) {
+			t.Errorf("chat eligibility for the same model = %q, want eligible; planning's verdict must come from its own requirement, not from a model nothing can satisfy", c.Eligibility)
+		}
+	}
+}
+
+func TestModelsJSONDoesNotSynthesizeAbsentPlanningBinding(t *testing.T) {
+	// Golem declares a planning REQUIREMENT unconditionally, but a
+	// requirement is not a binding. configview.Build projects authored
+	// defaults only, so a config that never writes defaults.planning shows no
+	// planning row -- even though planning WOULD resolve at runtime through
+	// the reasoning/analysis/agent fallbacks. Surfacing effective fallback
+	// destinations is #477's manifest, not this projection's job; synthesizing
+	// a row here would claim the user authored something they did not.
+	cfg := &config.Config{
+		Providers: map[string]config.ProviderConfig{"local": {BaseURL: "http://localhost:8080"}},
+		Models: map[string]config.ModelConfig{
+			"agent": {Name: "m1", Provider: "local", Type: "dense", Capabilities: []string{"chat", "stream", "tool_call"}},
+		},
+		Defaults: map[string]string{"agent": "agent"},
+	}
+	snap := configview.Build(configview.BuildInput{
+		Doc:          configview.DocSnapshot{Config: cfg, Origin: config.Origin{Source: config.OriginExplicit, Path: "/x"}},
+		Requirements: golemViewRequirements(),
+	})
+	if _, ok := bindingByUseCase(snap, "planning"); ok {
+		t.Errorf("planning binding synthesized for a config that never authors it; bindings = %+v", snap.Bindings)
+	}
+	if _, ok := bindingByUseCase(snap, "agent"); !ok {
+		t.Error("agent binding missing, so the absent-planning assertion above proves nothing")
 	}
 }
 
