@@ -167,6 +167,14 @@ func TestNewDestinationRejectsUnsafeInput(t *testing.T) {
 		{"fragment", "https://api.example.com/v1#frag"},
 		{"empty host", "https:///v1"},
 		{"ipv6 zone id", "http://[fe80::1%25en0]:8090"},
+		// A base path that escapes itself misdescribes its scope on the
+		// consent surface and makes the transport's "under the base path"
+		// check meaningless.
+		{"parent dot segments", "https://api.example.com/v1/../../admin"},
+		{"trailing parent segment", "https://api.example.com/v1/.."},
+		{"current dot segment", "https://api.example.com/./v1"},
+		{"escaped parent segments", "https://api.example.com/v1/%2e%2e/admin"},
+		{"escaped current segment", "https://api.example.com/%2e/v1"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -221,6 +229,8 @@ func TestDestinationErrorsNeverEchoRawInput(t *testing.T) {
 		{"query", "https://example.com/v1?token=" + canarySecret},
 		{"empty host", "https:///" + canarySecret},
 		{"zone id", "http://[fe80::1%25" + canarySecret + "]:8090"},
+		{"dot segment", "https://example.com/" + canarySecret + "/../admin"},
+		{"escaped dot segment", "https://example.com/" + canarySecret + "/%2e%2e/admin"},
 		{"everything at once", canaryURL},
 	}
 	for _, tt := range tests {
@@ -271,6 +281,57 @@ func TestDestinationLocalityIsLiteralOnly(t *testing.T) {
 			}
 		})
 	}
+}
+
+// Loopback spellings decide whether a destination is auto-admitted with no
+// prompt, so both directions are pinned here rather than left to inference.
+//
+// The mapped-IPv6 form is a genuine alias for a loopback address and must
+// collapse onto it. The obfuscated forms are NOT recognized as IP literals by
+// net.ParseIP, so they classify as remote and require an explicit grant even
+// though a resolver would reach 127.0.0.1. That is the fail-safe direction —
+// over-prompting, never silent admission — and this test exists so a future
+// switch to a more permissive IP parser cannot quietly turn them into
+// auto-admitted destinations.
+func TestDestinationLoopbackSpellingsAreClassifiedConservatively(t *testing.T) {
+	t.Run("mapped ipv6 loopback collapses onto the ipv4 form", func(t *testing.T) {
+		mapped, err := NewDestination("p", "http://[::ffff:127.0.0.1]:8090")
+		if err != nil {
+			t.Fatal(err)
+		}
+		plain, err := NewDestination("p", "http://127.0.0.1:8090")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if mapped != plain {
+			t.Errorf("mapped form %q must be the same destination as %q",
+				mapped.BaseURL(), plain.BaseURL())
+		}
+		if !mapped.IsLocal() {
+			t.Error("mapped loopback must classify as local")
+		}
+	})
+
+	t.Run("obfuscated ipv4 forms are remote, never auto-admitted", func(t *testing.T) {
+		for _, raw := range []string{
+			"http://2130706433:8090", // decimal 127.0.0.1
+			"http://0177.0.0.1:8090", // octal-looking
+			"http://127.1:8090",      // short form
+			"http://127.0.0.1.nip.io:8090",
+		} {
+			d, err := NewDestination("p", raw)
+			if err != nil {
+				t.Fatalf("NewDestination(%q): %v", raw, err)
+			}
+			if d.IsLocal() {
+				t.Errorf("%q classified as local; it would be auto-admitted with no prompt", raw)
+			}
+			var zero DestinationPolicy
+			if zero.Permits(d) {
+				t.Errorf("%q permitted by the zero policy", raw)
+			}
+		}
+	})
 }
 
 // D1: the repeatable CLI grant form, split at the first slash.

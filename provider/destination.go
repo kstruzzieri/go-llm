@@ -194,8 +194,29 @@ func canonicalizeEndpoint(raw string) (canonical string, local bool, err error) 
 	// EscapedPath preserves percent-encoding: "/a%2Fb" is not "/a/b", and
 	// decoding here would merge two different paths into one grant.
 	path := strings.TrimRight(u.EscapedPath(), "/")
+	// A base path carrying "." or ".." segments misdescribes its own scope on
+	// the surface the user consents from: "https://h/v1/../../admin" reads as
+	// scoped under /v1 while the effective root is /admin. It also makes the
+	// transport's "request path stays under the base path" check meaningless,
+	// since "under" is not a property of unresolved text. Resolving the
+	// segments instead would silently grant a root the user never wrote, so
+	// reject. Both spellings are checked: a server may resolve "%2e%2e" as a
+	// dot segment even though the escaped form does not look like one.
+	if hasDotSegment(path) || hasDotSegment(strings.TrimRight(u.Path, "/")) {
+		return "", false, errors.New("base URL path must not contain \".\" or \"..\" segments")
+	}
 	local = host == "localhost" || (ip != nil && ip.IsLoopback())
 	return scheme + "://" + hostPart + path, local, nil
+}
+
+// hasDotSegment reports whether any "/"-separated segment is "." or "..".
+func hasDotSegment(path string) bool {
+	for seg := range strings.SplitSeq(path, "/") {
+		if seg == "." || seg == ".." {
+			return true
+		}
+	}
+	return false
 }
 
 func defaultPortForScheme(scheme string) string {
