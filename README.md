@@ -228,6 +228,7 @@ golem index -root /path/to/project              # explicit index rebuild
 golem -root /path/to/project -no-auto-index     # disable the startup refresh
 golem -root /path/to/project -no-rag            # disable retrieval entirely
 golem -root /path/to/project -progressive       # L0/L1 source summaries + mixed context assembly
+golem -root /path/to/project -grounding        # check the answer's claims against the evidence it was given
 ```
 
 `-progressive` is opt-in and does two things. It generates and serves the L0/L1
@@ -241,6 +242,24 @@ results. That rewrites the model-visible bytes of every tool anchor, so the
 transcript a run sends differs from the non-`-progressive` one even when no
 summary model is configured. Add `-progressive` to `golem index` for the same
 summary behavior on an explicit rebuild.
+
+`-grounding` is opt-in and independent of `-progressive`; it works on both
+retrieval modes. After a completed turn that used `retrieve`, a lightweight
+judge checks the final answer's claims against the retrieval evidence that
+actually reached the answering prompt, and Golem prints one line:
+
+```text
+grounding · partial · 3/4 claims · 5 evidence · 1.2s · 850 tok
+```
+
+It is fail-open. A routing failure, malformed verifier output, the 60-second
+ceiling, or Ctrl-C during the check prints one line and changes nothing else -
+not the answer, not the exit code, not the recorded run status. Evidence the
+CLI cannot reconstruct exactly is reported rather than judged, so a verdict is
+never issued over a partial evidence set. Turns that never retrieved stay
+silent. Verifier tokens are reported separately from the run's own usage, and
+`-trace` persists the full per-claim report. Note this is unrelated to the
+`.golem.json` `verify` command, which checks the workspace after a write.
 
 Summaries are generated once per source and refreshed only when the source's
 content or vector space changes, so the model cost lands on the first indexing

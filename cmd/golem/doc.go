@@ -53,6 +53,46 @@
 // (a formatter, a codegen step) produces changes the checkpoint journal did
 // not capture and /undo will not restore. Prefer a read-only check.
 //
+// -grounding is a SEPARATE, unrelated check: it verifies the ANSWER, not the
+// workspace. The .golem.json "verify" command above runs a workspace command
+// after a write; -grounding asks a model whether the final answer's claims are
+// supported by the retrieval evidence that reached the answering prompt. They
+// share no configuration, no approval, and no naming.
+//
+// When a completed turn used retrieve and its answering prompt carried
+// retrieval attribution, Golem runs the claim-support judge over exactly that
+// evidence and prints one dim line:
+//
+//	grounding · partial · 3/4 claims · 5 evidence · 1.2s · 850 tok
+//
+// It works on both retrieval modes. Verification is fail-open and never
+// changes the answer, the agent result, the session, the recorded run status,
+// or the exit code: a routing failure, malformed verify output, or the 60s
+// ceiling prints one line naming a stable reason (timeout, judge_failed) and
+// nothing else. Ctrl-C during the judge cancels grounding alone; the answer is
+// already yours. A turn that ran no retrieve is silent, while a turn that
+// retrieved but whose answering prompt carried no evidence says so
+// (no_final_evidence) rather than passing for a turn that never retrieved.
+//
+// Evidence the CLI cannot reconstruct exactly is never judged. A retrieved
+// chunk that was capped, or an identity that resolves to two different chunks,
+// reports evidence_incomplete and makes no model call, because a verdict over
+// a silently reduced evidence subset would report claims as unsupported that
+// the model had support for.
+//
+// The two verifier stages route by their own extract/verify side-task
+// use-cases at background priority, so grounding never displaces the primary
+// agent model; with no verify/extract, analysis, or chat default configured,
+// startup warns once and the flag has no effect. Verifier tokens are reported
+// only on the grounding line and in the trace, never in the run's own usage
+// footer or in telemetry.
+//
+// -trace additionally persists the complete report - every claim, its verdict,
+// the evidence it cites, and any missing-evidence queries - under the trace's
+// "grounding" key. That trace is content-full and already carries workspace
+// text; telemetry receives no grounding field at all. Task and planning modes
+// ignore -grounding with a warning, since neither runs an answer turn.
+//
 // Planning mode (-goal "<text>"): a local model authors an AgentFlow plan for
 // the goal using read-only tools, Golem compiles and locks it via agentflow
 // lock-plan, then stops. The locked .agent/plan.lock.json is the durable output;

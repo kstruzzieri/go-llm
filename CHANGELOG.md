@@ -80,6 +80,65 @@ renders `runtime="bwrap"` with the `temp=private` marker and, when a cap is
 set, the `/process` memory scope. Preview text is presentation only and is
 not part of the key, so no existing grant changes meaning.
 
+### Added — golem: grounding verification for retrieval-backed answers (#348)
+
+`-grounding` (default off) runs claim-support verification over a completed
+turn's final answer. When the turn used `retrieve` and the answering prompt
+carried retrieval attribution, `analysis.SupportJudge` judges the answer
+against exactly that evidence and one dim line is printed:
+
+```text
+grounding · partial · 3/4 claims · 5 evidence · 1.2s · 850 tok
+```
+
+Evidence is captured from the retriever's own results and joined to the
+post-assembly `RetrievalPresentationObserver` attribution, so the judge sees
+what the model actually read rather than the raw retrieval set. Both the
+legacy and progressive retrieval paths are eligible. The capture is
+turn-scoped and byte-bounded; anything it cannot reconstruct exactly - a
+capped chunk, or an identity resolving to two different chunks - is reported
+as `evidence_incomplete` with no model call, because a verdict over a
+silently reduced evidence subset would mark supported claims unsupported.
+
+Fail-open throughout. A routing failure, malformed verifier output, the
+60-second ceiling, or Ctrl-C during the judge changes nothing about the
+answer, `agent.Result`, the session, the recorded run status, or the exit
+code. The two verifier stages route by their own `extract`/`verify`
+side-task use-cases at background priority, so verification never displaces
+the primary agent model. Verifier tokens and latency are reported only in
+the grounding payload: they are absent from the run's usage footer, from
+`agent.Result`, and from telemetry.
+
+Frozen payload for #352. The report object is fixed by an exact-bytes golden
+test and #352 will serialize it verbatim:
+
+```json
+{
+  "status": "supported|partial|unsupported|skipped|error",
+  "reason": "no_final_evidence|evidence_incomplete|canceled|timeout|judge_failed|evidence_truncated",
+  "tokens": 0,
+  "duration_ms": 0,
+  "report": { "status": "...", "claims": [], "evidence": [],
+              "missing_evidence": [], "missing_evidence_queries": [] }
+}
+```
+
+`reason` is omitted for a verdict and required for every `skipped` or
+`error`; `report` is present only for a verdict. Raw provider and router
+error text never enters the payload - it is terminal diagnostic output only.
+#348 freezes this shape but emits no runtime event: `golemruntime.Run`
+emits its terminal `run.finished` before post-run grounding exists, so #352
+buffers that terminal event at the CLI adapter, runs grounding, and adds the
+object to the protocol-v1 payload before writing it. `golem/runtime.go` is
+unchanged.
+
+Consumer notes: `internal/agenttrace.TraceRecord` gains an optional raw
+`grounding` object, additive within schema version 2, so a trace without one
+is byte-identical to a pre-#348 trace. `-telemetry` receives no grounding
+field. `-grounding` is unrelated to the `.golem.json` `verify` command
+(#347), which checks the workspace after a write; task and planning modes
+ignore the flag with a warning because neither runs an answer turn.
+
 ### Added — agent/tools: macOS Seatbelt sandbox backend (#442)
 
 A `SandboxRuntimeSeatbelt` execution backend behind the #440 exec-backend
