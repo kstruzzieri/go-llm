@@ -1019,6 +1019,7 @@ func (rp *RoutePlan) buildOutcome(fallbacksUsed int, attempts []RouteAttempt) *R
 	out := &RouteOutcome{
 		PlannedModel:  rp.Profile.Key,
 		ActualModel:   actualKey,
+		UseCase:       rp.Request.UseCase,
 		FallbacksUsed: fallbacksUsed,
 		WasSticky:     rp.wasSticky,
 		Score:         rp.Score,

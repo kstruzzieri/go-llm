@@ -674,6 +674,19 @@ type RouteOutcome struct {
 	Score     float64 `json:"score"`
 	Reason    string  `json:"reason"`
 
+	// UseCase is the RoutingRequest.UseCase that asked for this route (#476).
+	// Provenance only: never load-bearing for routing.
+	//
+	// This is the REQUESTED key, which is what identifies the phase that
+	// produced a route. Which use-case key actually SUPPLIED the role is
+	// config-layer knowledge (Config.RoleForUseCase walks a fallback table);
+	// the Router does not know about that table and must not learn, so the
+	// resolved-via hop is deliberately absent here.
+	//
+	// omitempty keeps outcomes that carry no use case byte-identical to their
+	// pre-#476 JSON shape.
+	UseCase string `json:"use_case,omitempty"`
+
 	// Attempts is the ordered list of execution attempts (primary first).
 	// Nil/empty pre-PR2 because nothing populates it yet; the
 	// RoutingFeedback seam treats nil as "no per-attempt data" and is a

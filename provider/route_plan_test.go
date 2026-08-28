@@ -1157,6 +1157,83 @@ func TestBuildOutcomeActualModelOnFallbackSuccess(t *testing.T) {
 	}
 }
 
+func TestBuildOutcomeStampsRequestedUseCase(t *testing.T) {
+	// Provenance is the REQUESTED use case: what asked for the route, not
+	// what served it. PlannedModel/ActualModel already report the result, and
+	// which use-case key SUPPLIED the role is config-layer knowledge the
+	// Router does not have and must not acquire.
+	tests := []struct {
+		name    string
+		useCase string
+		want    string
+	}{
+		{"planning", "planning", "planning"},
+		{"agent", "agent", "agent"},
+		{"unset stays unset", "", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rp := newTestPlan(&rpMockProvider{name: "ollama-a", caps: CapChat}, &rpMockRecorder{})
+			rp.Profile.Key = ModelKey{Provider: "ollama-a", Model: "qwen3:8b"}
+			rp.Request.UseCase = tt.useCase
+
+			out := rp.buildOutcome(0, nil)
+			if out.UseCase != tt.want {
+				t.Errorf("RouteOutcome.UseCase = %q, want %q", out.UseCase, tt.want)
+			}
+			// Provenance must not disturb the decision it describes.
+			if out.PlannedModel != rp.Profile.Key || out.ActualModel != rp.Profile.Key {
+				t.Errorf("model identity moved: planned=%+v actual=%+v, want both %+v",
+					out.PlannedModel, out.ActualModel, rp.Profile.Key)
+			}
+		})
+	}
+}
+
+func TestRouteOutcomeUseCaseJSONCompatibility(t *testing.T) {
+	// Additive public JSON field. A non-empty use case serializes and
+	// round-trips; an empty one is omitted entirely, so outcomes that carry no
+	// use case keep their pre-#476 shape byte for byte.
+	t.Run("non-empty serializes and round-trips", func(t *testing.T) {
+		for _, uc := range []string{"agent", "planning"} {
+			data, err := json.Marshal(RouteOutcome{UseCase: uc})
+			if err != nil {
+				t.Fatalf("marshal %q: %v", uc, err)
+			}
+			if !strings.Contains(string(data), `"use_case":"`+uc+`"`) {
+				t.Errorf("marshal(%q) = %s, want a use_case field", uc, data)
+			}
+			var back RouteOutcome
+			if err := json.Unmarshal(data, &back); err != nil {
+				t.Fatalf("unmarshal %q: %v", uc, err)
+			}
+			if back.UseCase != uc {
+				t.Errorf("round-trip UseCase = %q, want %q", back.UseCase, uc)
+			}
+		}
+	})
+
+	t.Run("empty is omitted", func(t *testing.T) {
+		data, err := json.Marshal(RouteOutcome{})
+		if err != nil {
+			t.Fatalf("marshal: %v", err)
+		}
+		if strings.Contains(string(data), "use_case") {
+			t.Errorf("marshal = %s, want no use_case key for an empty use case", data)
+		}
+	})
+
+	t.Run("an old payload without the field still decodes", func(t *testing.T) {
+		var back RouteOutcome
+		if err := json.Unmarshal([]byte(`{"planned_model":{"provider":"p","model":"m"},"actual_model":{"provider":"p","model":"m"},"fallbacks_used":0,"WasSticky":false,"Score":0,"Reason":"r"}`), &back); err != nil {
+			t.Fatalf("unmarshal legacy payload: %v", err)
+		}
+		if back.UseCase != "" {
+			t.Errorf("UseCase = %q, want empty for a payload that predates the field", back.UseCase)
+		}
+	})
+}
+
 func TestExecuteChatStreamPendingAttemptsClonedFromIteration(t *testing.T) {
 	// Regression test for the aliasing bug fixed in c7e6db1 / slices.Clone.
 	// Setup: primary + 3 fallbacks where the first two fail infra (driving
