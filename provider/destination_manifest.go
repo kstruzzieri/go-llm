@@ -222,7 +222,14 @@ func (g *DestinationGate) Narrow(keep func(DestinationEdge) bool) error {
 	if err != nil {
 		return err
 	}
-	g.snap.Store(&destinationSnapshot{manifest: m, policy: cur.policy})
+	// Compare-and-swap, not Store: a Clear (revocation) or re-Install that
+	// landed since the load above must win. Blindly storing would overwrite
+	// the newer generation with data derived from the older one — after a
+	// Clear that is resurrected authority the user just revoked. On loss the
+	// gate is left exactly as the concurrent writer set it.
+	if !g.snap.CompareAndSwap(cur, &destinationSnapshot{manifest: m, policy: cur.policy}) {
+		return fmt.Errorf("%w: narrow lost to a concurrent generation change", ErrDestinationInvalid)
+	}
 	return nil
 }
 

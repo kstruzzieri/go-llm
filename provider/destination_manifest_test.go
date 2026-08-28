@@ -353,6 +353,31 @@ func TestDestinationGateNarrowIsSubsetOnly(t *testing.T) {
 	}
 }
 
+// A Clear that lands while a Narrow is in progress is a REVOCATION and must
+// win: Narrow read the pre-Clear generation, and blindly storing its result
+// would resurrect authority the user just revoked. The keep callback runs
+// between Narrow's load and its store, so calling Clear inside it exercises
+// exactly that interleaving, deterministically.
+func TestDestinationGateNarrowLosesRaceToClear(t *testing.T) {
+	remote := mustDest(t, "opencode", "https://opencode.ai/zen/go")
+	g := installTestGate(t, DestinationEdge{Purpose: "agent", Destination: remote})
+
+	cleared := false
+	err := g.Narrow(func(DestinationEdge) bool {
+		if !cleared {
+			cleared = true
+			g.Clear() // revocation arrives mid-narrow
+		}
+		return true
+	})
+	if err == nil {
+		t.Fatal("Narrow succeeded over a concurrent Clear; revocation was undone")
+	}
+	if _, bindErr := g.Bind(context.Background(), "agent", "opencode"); !errors.Is(bindErr, ErrDestinationDenied) {
+		t.Errorf("gate not deny-all after Clear raced Narrow: %v", bindErr)
+	}
+}
+
 // Bind/authorize race Install/Clear; -race is the assertion.
 func TestDestinationGateConcurrentBindInstallClear(t *testing.T) {
 	remote := mustDest(t, "opencode", "https://opencode.ai/zen/go")
