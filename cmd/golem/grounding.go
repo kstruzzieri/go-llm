@@ -2,9 +2,18 @@ package main
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"strings"
 	"sync"
+	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/kstruzzieri/go-llm/agent"
+	"github.com/kstruzzieri/go-llm/analysis"
+	"github.com/kstruzzieri/go-llm/config"
+	"github.com/kstruzzieri/go-llm/provider"
 	"github.com/kstruzzieri/go-llm/rag"
 )
 
@@ -282,3 +291,268 @@ func (c *groundingCollector) sawRetrieveCall() bool { return c.retrieves > 0 }
 // evidenceComplete reports whether every successful retrieve observation was
 // whole. False forces a visible skip with no judge call.
 func (c *groundingCollector) evidenceComplete() bool { return !c.truncated }
+
+// ---------------------------------------------------------------------------
+// Frozen report, rendering, and the verification service.
+// ---------------------------------------------------------------------------
+
+// Grounding statuses. The first three mirror analysis.SupportStatus; the last
+// two are outcomes a verdict cannot express and a machine consumer must still
+// be able to distinguish. Frozen for #352, which serializes these verbatim.
+const (
+	groundingSupported   = "supported"
+	groundingPartial     = "partial"
+	groundingUnsupported = "unsupported"
+	groundingSkipped     = "skipped"
+	groundingError       = "error"
+)
+
+// Stable machine reason codes. Raw provider and router error text never enters
+// the payload: it is unbounded, provider-specific prose that would freeze into
+// a contract #352 has to keep honoring. Diagnostics travel beside the report
+// and end up on stderr instead.
+const (
+	groundingReasonNoFinalEvidence    = "no_final_evidence"
+	groundingReasonEvidenceIncomplete = "evidence_incomplete"
+	groundingReasonCanceled           = "canceled"
+	groundingReasonTimeout            = "timeout"
+	groundingReasonJudgeFailed        = "judge_failed"
+	groundingReasonEvidenceTruncated  = "evidence_truncated"
+)
+
+const (
+	// groundingTimeout bounds the whole two-stage judge.
+	groundingTimeout = 60 * time.Second
+	// groundingDiagnosticMaxBytes bounds the terminal diagnostic appended to a
+	// non-verdict line. Provider errors can be arbitrarily long.
+	groundingDiagnosticMaxBytes = 160
+)
+
+// groundingReport is the frozen result shape: rendered as one line today and
+// serialized verbatim by #352. It carries no payload version because the
+// containing trace and event protocols are already versioned, and an exact
+// golden test pins these bytes.
+type groundingReport struct {
+	Status     string                  `json:"status"`
+	Reason     string                  `json:"reason,omitempty"`
+	Tokens     int                     `json:"tokens,omitempty"`
+	DurationMS int64                   `json:"duration_ms,omitempty"`
+	Report     *analysis.SupportReport `json:"report,omitempty"`
+}
+
+// groundingJudge is the analysis seam. maxEvidenceChars is an explicit
+// parameter rather than an analysis.SupportOption because a SupportOption
+// closes over an unexported config that no test outside analysis can read
+// back, so passing the wrong budget would be invisible.
+type groundingJudge interface {
+	Judge(ctx context.Context, answer string, evidence []rag.SearchResult, maxEvidenceChars int) (*analysis.SupportReport, error)
+}
+
+// supportJudgeAdapter is the one-line translation from the explicit parameter
+// to the analysis option.
+type supportJudgeAdapter struct{ judge *analysis.SupportJudge }
+
+func (a supportJudgeAdapter) Judge(ctx context.Context, answer string, evidence []rag.SearchResult, maxEvidenceChars int) (*analysis.SupportReport, error) {
+	return a.judge.Judge(ctx, answer, evidence, analysis.WithMaxEvidenceChars(maxEvidenceChars))
+}
+
+// groundingRouteFunc routes and executes one verifier chat. It is the seam the
+// routing tests drive; production supplies router.Route + RoutePlan.ExecuteChat.
+type groundingRouteFunc func(ctx context.Context, rr provider.RoutingRequest) (*provider.ChatResponse, error)
+
+// newGroundingChat builds the analysis.ChatFunc the judge's two stages call,
+// plus a reader for their combined token usage. Each stage keeps its own use
+// case and chain: collapsing them would route claim extraction through the
+// verify chain. StrictChain suppresses the router's safety-net tail, and
+// background priority keeps a verifier from displacing the primary agent model
+// under slot admission.
+func newGroundingChat(route groundingRouteFunc, chains map[string][]string) (analysis.ChatFunc, func() int) {
+	var tokens int
+	chat := func(ctx context.Context, useCase string, req provider.ChatRequest) (*provider.ChatResponse, error) {
+		resp, err := route(ctx, provider.RoutingRequest{
+			UseCase:        useCase,
+			RequiredCaps:   provider.CapChat,
+			Messages:       req.Messages,
+			Options:        req.Options,
+			ExpectedOutput: provider.DefaultExpectedOutput(useCase),
+			Priority:       provider.PriorityBackground,
+			PreferredChain: chains[useCase],
+			StrictChain:    true,
+		})
+		if resp != nil {
+			tokens += resp.Usage.TotalTokens
+		}
+		return resp, err
+	}
+	return chat, func() int { return tokens }
+}
+
+// groundingService runs claim-support verification over one finished turn.
+// newJudge builds a judge and a usage reader per call, so token accounting
+// never leaks across turns.
+type groundingService struct {
+	rec      *evidenceRecorder
+	timeout  time.Duration
+	now      func() time.Time
+	newJudge func() (groundingJudge, func() int, error)
+}
+
+// verify returns the report, a terminal-only diagnostic, and whether anything
+// should be shown. show=false is the silent case: the turn ran no successful
+// retrieve, or produced no answer to judge.
+//
+// Every path that cannot reconstruct the model's exact evidence returns without
+// calling the judge. A verdict over a silently reduced evidence subset would
+// report "unsupported" for claims the model actually had support for.
+func (s *groundingService) verify(ctx context.Context, answer string, c *groundingCollector) (groundingReport, string, bool) {
+	if s == nil || c == nil {
+		return groundingReport{}, "", false
+	}
+	if strings.TrimSpace(answer) == "" || !c.sawRetrieveCall() {
+		return groundingReport{}, "", false
+	}
+	sources := c.finalSources()
+	if len(sources) == 0 {
+		// Checked before completeness: with nothing in the answer's prompt there
+		// is no attribution to be incomplete about.
+		return groundingReport{Status: groundingSkipped, Reason: groundingReasonNoFinalEvidence}, "", true
+	}
+	if !c.evidenceComplete() {
+		return groundingReport{Status: groundingSkipped, Reason: groundingReasonEvidenceIncomplete}, "", true
+	}
+	evidence := make([]rag.SearchResult, 0, len(sources))
+	for _, src := range sources {
+		chunk, ok := s.rec.lookup(src)
+		if !ok {
+			return groundingReport{Status: groundingSkipped, Reason: groundingReasonEvidenceIncomplete}, "", true
+		}
+		evidence = append(evidence, rag.SearchResult{Chunk: chunk, Score: src.Score})
+	}
+
+	judge, usage, err := s.newJudge()
+	if err != nil {
+		return groundingReport{Status: groundingError, Reason: groundingReasonJudgeFailed}, err.Error(), true
+	}
+	jctx, cancel := context.WithTimeout(ctx, s.timeout)
+	defer cancel()
+	started := s.now()
+	// The judge's evidence budget equals the recorder's retained-body budget, so
+	// analysis never silently drops the tail; any shortfall is treated as a hard
+	// failure below rather than published as a subset verdict.
+	report, judgeErr := judge.Judge(jctx, answer, evidence, groundingEvidenceMaxBytes)
+	rep := groundingReport{
+		Tokens:     usage(),
+		DurationMS: s.now().Sub(started).Milliseconds(),
+	}
+	switch {
+	case judgeErr != nil && ctx.Err() != nil:
+		// The caller's context died: an interrupt, not a verifier fault.
+		rep.Status, rep.Reason = groundingSkipped, groundingReasonCanceled
+	case errors.Is(judgeErr, context.DeadlineExceeded):
+		rep.Status, rep.Reason = groundingError, groundingReasonTimeout
+	case judgeErr != nil:
+		rep.Status, rep.Reason = groundingError, groundingReasonJudgeFailed
+		return rep, judgeErr.Error(), true
+	case report == nil:
+		rep.Status, rep.Reason = groundingError, groundingReasonJudgeFailed
+	case len(report.Evidence) < len(evidence):
+		// analysis returns refs only for blocks it actually included, so a
+		// shortfall means the verdict covers less than the model read.
+		rep.Status, rep.Reason = groundingError, groundingReasonEvidenceTruncated
+	default:
+		rep.Status, rep.Report = string(report.Status), report
+	}
+	return rep, "", true
+}
+
+// groundingSummaryLine renders the single line the CLI prints. diagnostic is
+// terminal-only detail for a non-verdict outcome and is ignored for a verdict.
+func groundingSummaryLine(rep groundingReport, diagnostic string) string {
+	if rep.Report == nil {
+		line := fmt.Sprintf("grounding · %s · %s", rep.Status, rep.Reason)
+		if d := boundGroundingText(diagnostic, groundingDiagnosticMaxBytes); d != "" {
+			line += ": " + d
+		}
+		return line
+	}
+	supported := 0
+	for _, claim := range rep.Report.Claims {
+		if claim.Status == analysis.StatusSupported {
+			supported++
+		}
+	}
+	line := fmt.Sprintf("grounding · %s · %d/%d claims · %d evidence · %.1fs",
+		rep.Status, supported, len(rep.Report.Claims), len(rep.Report.Evidence),
+		float64(rep.DurationMS)/1000)
+	if rep.Tokens > 0 {
+		line += fmt.Sprintf(" · %d tok", rep.Tokens)
+	}
+	return line
+}
+
+// boundGroundingText flattens text to one line and truncates it on a rune
+// boundary so a multi-byte rune straddling the cap cannot produce invalid UTF-8.
+// Every space-like and control rune collapses to an ASCII space: the exotic
+// separators (U+0085, U+2028, U+2029) break the one-line guarantee just as
+// surely as a newline, and unicode.IsSpace already covers them.
+func boundGroundingText(text string, maxBytes int) string {
+	flat := strings.TrimSpace(strings.Map(func(r rune) rune {
+		if unicode.IsSpace(r) || unicode.IsControl(r) {
+			return ' '
+		}
+		return r
+	}, text))
+	if len(flat) <= maxBytes {
+		return flat
+	}
+	end := maxBytes
+	for end > 0 && !utf8.RuneStart(flat[end]) {
+		end--
+	}
+	return strings.TrimSpace(flat[:end])
+}
+
+// groundingNoChainWarning is the startup notice when the verifier's side-task
+// use-cases resolve to nothing. Same shape as the -progressive summary notice:
+// the flag is a no-op, not a fatal misconfiguration.
+const groundingNoChainWarning = "-grounding had no effect: no verify/extract, analysis, " +
+	"or chat default is configured, so no verifier model could be selected"
+
+// newGroundingService builds the production service. Returns (nil, warning)
+// when either stage's chain cannot resolve, so the caller can disable the
+// feature with one notice instead of failing every turn.
+func newGroundingService(cfg *config.Config, router *provider.Router, rec *evidenceRecorder) (*groundingService, string) {
+	if cfg == nil || router == nil || rec == nil {
+		return nil, groundingNoChainWarning
+	}
+	chains := make(map[string][]string, 2)
+	for _, useCase := range []string{config.UseCaseExtract, config.UseCaseVerify} {
+		chain, err := cfg.RoleFallbackChain(useCase)
+		if err != nil || len(chain) == 0 {
+			return nil, groundingNoChainWarning
+		}
+		chains[useCase] = chain
+	}
+	route := func(ctx context.Context, rr provider.RoutingRequest) (*provider.ChatResponse, error) {
+		plan, err := router.Route(ctx, rr)
+		if err != nil {
+			return nil, err
+		}
+		return plan.ExecuteChat(ctx)
+	}
+	return &groundingService{
+		rec:     rec,
+		timeout: groundingTimeout,
+		now:     time.Now,
+		newJudge: func() (groundingJudge, func() int, error) {
+			chat, tokens := newGroundingChat(route, chains)
+			judge, err := analysis.NewSupportJudgeWithChat(chat, "")
+			if err != nil {
+				return nil, nil, err
+			}
+			// Model pin left empty on purpose: each stage routes by its own
+			// use-case chain, so the two may land on different models.
+			return supportJudgeAdapter{judge: judge}, tokens, nil
+		},
+	}, ""
+}

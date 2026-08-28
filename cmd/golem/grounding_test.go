@@ -3,13 +3,18 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
 	"testing"
+	"time"
+	"unicode/utf8"
 
 	"github.com/kstruzzieri/go-llm/agent"
 	agenttools "github.com/kstruzzieri/go-llm/agent/tools"
+	"github.com/kstruzzieri/go-llm/analysis"
+	"github.com/kstruzzieri/go-llm/config"
 	"github.com/kstruzzieri/go-llm/provider"
 	"github.com/kstruzzieri/go-llm/rag"
 )
@@ -423,5 +428,459 @@ func TestGroundingCollectorTruncatedRetrievePoisonsCompleteness(t *testing.T) {
 	})
 	if c.evidenceComplete() {
 		t.Fatal("a truncated successful retrieve must poison completeness")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Task 2: frozen report, rendering, and the verification service.
+// ---------------------------------------------------------------------------
+
+// TestGroundingReportGoldenJSON pins the EXACT bytes #352 will serialize,
+// including every nested analysis field name. A structural assertion would let
+// a rename in analysis silently change the wire shape golem promised.
+func TestGroundingReportGoldenJSON(t *testing.T) {
+	rep := groundingReport{
+		Status:     groundingPartial,
+		Tokens:     850,
+		DurationMS: 1200,
+		Report: &analysis.SupportReport{
+			Status: analysis.StatusPartial,
+			Claims: []analysis.ClaimSupport{{
+				ID:           "C1",
+				Claim:        "the parser rejects tabs",
+				Status:       analysis.StatusUnsupported,
+				EvidenceIDs:  []string{"E1"},
+				Contradicted: true,
+				Reason:       "E1 shows tabs accepted",
+			}},
+			Evidence: []analysis.EvidenceRef{{
+				ID: "E1", ChunkID: "c1", Source: "a.go", StartLine: 1, EndLine: 9,
+			}},
+			MissingEvidence:        []string{"tab handling"},
+			MissingEvidenceQueries: []string{"tab handling parser"},
+		},
+	}
+	const want = `{"status":"partial","tokens":850,"duration_ms":1200,` +
+		`"report":{"status":"partial",` +
+		`"claims":[{"id":"C1","claim":"the parser rejects tabs","status":"unsupported",` +
+		`"evidence_ids":["E1"],"contradicted":true,"reason":"E1 shows tabs accepted"}],` +
+		`"evidence":[{"id":"E1","chunk_id":"c1","source":"a.go","start_line":1,"end_line":9}],` +
+		`"missing_evidence":["tab handling"],` +
+		`"missing_evidence_queries":["tab handling parser"]}}`
+
+	got, err := json.Marshal(rep)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != want {
+		t.Fatalf("frozen payload drifted\ngot  %s\nwant %s", got, want)
+	}
+}
+
+func TestGroundingReportOmitsReasonForAVerdictAndReportForASkip(t *testing.T) {
+	verdict, err := json.Marshal(groundingReport{
+		Status: groundingSupported,
+		Report: &analysis.SupportReport{Status: analysis.StatusSupported},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(verdict), `"reason"`) {
+		t.Fatalf("a verdict must omit reason: %s", verdict)
+	}
+
+	skip, err := json.Marshal(groundingReport{Status: groundingSkipped, Reason: groundingReasonNoFinalEvidence})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(skip) != `{"status":"skipped","reason":"no_final_evidence"}` {
+		t.Fatalf("skip payload = %s", skip)
+	}
+}
+
+func TestGroundingSummaryLine(t *testing.T) {
+	verdict := func(status analysis.SupportStatus, supported, total, evidence int) *analysis.SupportReport {
+		r := &analysis.SupportReport{Status: status}
+		for i := range total {
+			s := analysis.StatusUnsupported
+			if i < supported {
+				s = analysis.StatusSupported
+			}
+			r.Claims = append(r.Claims, analysis.ClaimSupport{Status: s})
+		}
+		for i := range evidence {
+			r.Evidence = append(r.Evidence, analysis.EvidenceRef{ID: fmt.Sprintf("E%d", i+1)})
+		}
+		return r
+	}
+	for _, tc := range []struct {
+		name string
+		rep  groundingReport
+		diag string
+		want string
+	}{
+		{name: "supported", want: "grounding · supported · 2/2 claims · 3 evidence · 1.2s · 850 tok",
+			rep: groundingReport{Status: groundingSupported, Tokens: 850, DurationMS: 1200,
+				Report: verdict(analysis.StatusSupported, 2, 2, 3)}},
+		{name: "partial", want: "grounding · partial · 1/2 claims · 1 evidence · 0.5s · 12 tok",
+			rep: groundingReport{Status: groundingPartial, Tokens: 12, DurationMS: 500,
+				Report: verdict(analysis.StatusPartial, 1, 2, 1)}},
+		{name: "unsupported", want: "grounding · unsupported · 0/1 claims · 1 evidence · 0.1s · 7 tok",
+			rep: groundingReport{Status: groundingUnsupported, Tokens: 7, DurationMS: 100,
+				Report: verdict(analysis.StatusUnsupported, 0, 1, 1)}},
+		{name: "zero tokens omits the token field", want: "grounding · supported · 1/1 claims · 1 evidence · 0.1s",
+			rep: groundingReport{Status: groundingSupported, DurationMS: 100,
+				Report: verdict(analysis.StatusSupported, 1, 1, 1)}},
+		{name: "skip", want: "grounding · skipped · no_final_evidence",
+			rep: groundingReport{Status: groundingSkipped, Reason: groundingReasonNoFinalEvidence}},
+		{name: "error with a multiline diagnostic",
+			want: "grounding · error · judge_failed: route verify: no provider reachable",
+			rep:  groundingReport{Status: groundingError, Reason: groundingReasonJudgeFailed},
+			diag: "route verify:\nno provider reachable\r\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := groundingSummaryLine(tc.rep, tc.diag)
+			if got != tc.want {
+				t.Fatalf("got  %q\nwant %q", got, tc.want)
+			}
+			if strings.ContainsAny(got, "\n\r") {
+				t.Fatalf("summary must be exactly one line: %q", got)
+			}
+		})
+	}
+}
+
+func TestGroundingSummaryLineBoundsTheDiagnostic(t *testing.T) {
+	// A multi-byte rune straddling the cap must not be split into invalid UTF-8.
+	diag := strings.Repeat("é", 300)
+	got := groundingSummaryLine(groundingReport{Status: groundingError, Reason: groundingReasonJudgeFailed}, diag)
+	if !utf8.ValidString(got) {
+		t.Fatal("summary line must remain valid UTF-8")
+	}
+	if len(got) > groundingDiagnosticMaxBytes+64 {
+		t.Fatalf("diagnostic not bounded: %d bytes", len(got))
+	}
+}
+
+// stubJudge replaces analysis.SupportJudge so the service's own policy is
+// testable without a model.
+type stubJudge struct {
+	rep      *analysis.SupportReport
+	err      error
+	block    chan struct{}
+	calls    int
+	answer   string
+	evidence []rag.SearchResult
+	maxChars int
+}
+
+func (s *stubJudge) Judge(ctx context.Context, answer string, evidence []rag.SearchResult, maxEvidenceChars int) (*analysis.SupportReport, error) {
+	s.calls++
+	s.answer, s.evidence, s.maxChars = answer, evidence, maxEvidenceChars
+	if s.block != nil {
+		select {
+		case <-s.block:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+	return s.rep, s.err
+}
+
+func testGroundingService(j *stubJudge, rec *evidenceRecorder) *groundingService {
+	return &groundingService{
+		rec:     rec,
+		timeout: 2 * time.Second,
+		now:     time.Now,
+		newJudge: func() (groundingJudge, func() int, error) {
+			return j, func() int { return 42 }, nil
+		},
+	}
+}
+
+// groundedFixture wires a recorder and a collector that presented n chunks on
+// the final step, in order.
+func groundedFixture(t *testing.T, n int) (*evidenceRecorder, *groundingCollector) {
+	t.Helper()
+	rec := newEvidenceRecorder(1 << 20)
+	rec.beginTurn()
+	c := &groundingCollector{}
+	_ = c.OnToolResult(context.Background(), agent.ToolResultEvent{Call: retrieveCall("t1"), Invoked: true})
+	srcs := make([]agent.RetrievedSource, 0, n)
+	for i := range n {
+		chunk := chunkWithExtras(
+			fmt.Sprintf("c%d", i), fmt.Sprintf("sk%d", i),
+			fmt.Sprintf("f%d.go", i), fmt.Sprintf("body-%d", i), 1, 2)
+		rec.record([]rag.SearchResult{{Chunk: chunk}})
+		s := sourceFor(chunk)
+		s.Score = float64(i) / 10
+		srcs = append(srcs, s)
+	}
+	_ = c.OnRetrievalPresentation(context.Background(), presentation(0, srcs...))
+	_ = c.OnStep(context.Background(), agent.StepEvent{Index: 0})
+	return rec, c
+}
+
+func TestGroundingVerifySilentCases(t *testing.T) {
+	rec, c := groundedFixture(t, 1)
+	for _, tc := range []struct {
+		name   string
+		answer string
+		coll   *groundingCollector
+	}{
+		{"no retrieve call at all", "an answer", &groundingCollector{}},
+		{"empty answer", "   \n  ", c},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			j := &stubJudge{}
+			rep, diag, show := testGroundingService(j, rec).verify(context.Background(), tc.answer, tc.coll)
+			if show || diag != "" || rep.Status != "" || j.calls != 0 {
+				t.Fatalf("must be silent: rep=%+v diag=%q show=%v calls=%d", rep, diag, show, j.calls)
+			}
+		})
+	}
+}
+
+// TestGroundingVerifyVisibleSkipWhenFinalPromptHadNoEvidence covers AC5: the
+// turn retrieved, but the answering prompt carried nothing. Reporting a verdict
+// here would judge claims against evidence from an earlier step.
+func TestGroundingVerifyVisibleSkipWhenFinalPromptHadNoEvidence(t *testing.T) {
+	c := &groundingCollector{}
+	_ = c.OnToolResult(context.Background(), agent.ToolResultEvent{Call: retrieveCall("t1"), Invoked: true})
+	_ = c.OnStep(context.Background(), agent.StepEvent{Index: 0})
+
+	j := &stubJudge{}
+	rep, _, show := testGroundingService(j, newEvidenceRecorder(1<<20)).verify(context.Background(), "a", c)
+	if !show || rep.Status != groundingSkipped || rep.Reason != groundingReasonNoFinalEvidence {
+		t.Fatalf("rep=%+v show=%v", rep, show)
+	}
+	if j.calls != 0 {
+		t.Fatal("a skip must make no judge call")
+	}
+}
+
+// TestGroundingVerifyPrefersNoFinalEvidenceOverIncomplete pins the precedence
+// between the two skip reasons when both apply. An empty final prompt is the
+// more accurate description: with no attribution on the answering step there is
+// nothing for a truncated observation to have over-credited, and reporting
+// evidence_incomplete would send a reader looking for a capture bug that is not
+// there.
+func TestGroundingVerifyPrefersNoFinalEvidenceOverIncomplete(t *testing.T) {
+	c := &groundingCollector{}
+	_ = c.OnToolResult(context.Background(), agent.ToolResultEvent{
+		Call: retrieveCall("t1"), Invoked: true, Result: agent.ToolResult{Truncated: true}})
+	_ = c.OnStep(context.Background(), agent.StepEvent{Index: 0})
+
+	j := &stubJudge{}
+	rep, _, show := testGroundingService(j, newEvidenceRecorder(1<<20)).verify(context.Background(), "a", c)
+	if !show || rep.Status != groundingSkipped || rep.Reason != groundingReasonNoFinalEvidence {
+		t.Fatalf("rep=%+v show=%v, want skipped/%s", rep, show, groundingReasonNoFinalEvidence)
+	}
+	if j.calls != 0 {
+		t.Fatal("either skip reason must make zero judge calls")
+	}
+}
+
+func TestGroundingVerifyJoinsEvidenceInPresentationOrder(t *testing.T) {
+	rec, c := groundedFixture(t, 3)
+	j := &stubJudge{rep: &analysis.SupportReport{
+		Status:   analysis.StatusSupported,
+		Evidence: []analysis.EvidenceRef{{ID: "E1"}, {ID: "E2"}, {ID: "E3"}},
+	}}
+	rep, diag, show := testGroundingService(j, rec).verify(context.Background(), "the answer", c)
+	if !show || diag != "" || rep.Status != groundingSupported || rep.Reason != "" {
+		t.Fatalf("rep=%+v diag=%q show=%v", rep, diag, show)
+	}
+	if j.answer != "the answer" {
+		t.Fatalf("judge received answer %q", j.answer)
+	}
+	if len(j.evidence) != 3 {
+		t.Fatalf("judge received %d evidence blocks", len(j.evidence))
+	}
+	for i, e := range j.evidence {
+		if want := fmt.Sprintf("body-%d", i); e.Chunk.Content != want {
+			t.Fatalf("evidence[%d] = %q, want %q (presentation order)", i, e.Chunk.Content, want)
+		}
+		if want := float64(i) / 10; e.Score != want {
+			t.Fatalf("evidence[%d] score = %v, want the presented %v", i, e.Score, want)
+		}
+	}
+	// The recorder budget, not analysis's 6000-char default: five 2 KB chunks
+	// already exceed the default, and a silent tail drop manufactures
+	// unsupported verdicts.
+	if j.maxChars != groundingEvidenceMaxBytes {
+		t.Fatalf("evidence cap = %d, want the recorder budget %d", j.maxChars, groundingEvidenceMaxBytes)
+	}
+	if rep.Tokens != 42 {
+		t.Fatalf("verifier tokens = %d, want 42", rep.Tokens)
+	}
+	if rep.Report == nil || rep.Report.Status != analysis.StatusSupported {
+		t.Fatalf("verdict not carried: %+v", rep.Report)
+	}
+}
+
+func TestGroundingVerifySkipsOnIncompleteEvidence(t *testing.T) {
+	base := func(t *testing.T) (*evidenceRecorder, *groundingCollector) { return groundedFixture(t, 2) }
+
+	for _, tc := range []struct {
+		name    string
+		prepare func(t *testing.T) (*evidenceRecorder, *groundingCollector)
+	}{
+		{"a presented identity was never recorded", func(t *testing.T) (*evidenceRecorder, *groundingCollector) {
+			rec, c := base(t)
+			_ = c.OnRetrievalPresentation(context.Background(), presentation(0, src("never-recorded")))
+			_ = c.OnStep(context.Background(), agent.StepEvent{Index: 0})
+			return rec, c
+		}},
+		{"a presented identity is ambiguous", func(t *testing.T) (*evidenceRecorder, *groundingCollector) {
+			rec, c := base(t)
+			rec.record([]rag.SearchResult{{Chunk: chunkWithExtras("other", "sk0", "f0.go", "DIFFERENT", 1, 2)}})
+			return rec, c
+		}},
+		{"a successful retrieve observation was truncated", func(t *testing.T) (*evidenceRecorder, *groundingCollector) {
+			rec, c := base(t)
+			_ = c.OnToolResult(context.Background(), agent.ToolResultEvent{
+				Call: retrieveCall("t2"), Invoked: true, Result: agent.ToolResult{Truncated: true}})
+			return rec, c
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rec, c := tc.prepare(t)
+			j := &stubJudge{rep: &analysis.SupportReport{Status: analysis.StatusSupported}}
+			rep, _, show := testGroundingService(j, rec).verify(context.Background(), "a", c)
+			if !show || rep.Status != groundingSkipped || rep.Reason != groundingReasonEvidenceIncomplete {
+				t.Fatalf("rep=%+v show=%v", rep, show)
+			}
+			// The invariant: never a verdict over a silently reduced subset.
+			if j.calls != 0 {
+				t.Fatalf("incomplete evidence must make zero judge calls, made %d", j.calls)
+			}
+		})
+	}
+}
+
+func TestGroundingVerifyFailOpenOutcomes(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		judge      func() *stubJudge
+		cancel     bool
+		timeout    time.Duration
+		wantStatus string
+		wantReason string
+		wantDiag   bool
+	}{
+		{name: "judge error", wantStatus: groundingError, wantReason: groundingReasonJudgeFailed, wantDiag: true,
+			judge: func() *stubJudge { return &stubJudge{err: analysis.ErrSupportVerifyMalformed} }},
+		{name: "nil report without an error", wantStatus: groundingError, wantReason: groundingReasonJudgeFailed,
+			judge: func() *stubJudge { return &stubJudge{} }},
+		{name: "timeout", wantStatus: groundingError, wantReason: groundingReasonTimeout, timeout: 10 * time.Millisecond,
+			judge: func() *stubJudge { return &stubJudge{block: make(chan struct{})} }},
+		{name: "caller cancellation", wantStatus: groundingSkipped, wantReason: groundingReasonCanceled, cancel: true,
+			judge: func() *stubJudge { return &stubJudge{block: make(chan struct{})} }},
+		{name: "judge dropped evidence blocks", wantStatus: groundingError, wantReason: groundingReasonEvidenceTruncated,
+			judge: func() *stubJudge {
+				return &stubJudge{rep: &analysis.SupportReport{Status: analysis.StatusSupported,
+					Evidence: []analysis.EvidenceRef{{ID: "E1"}}}} // 1 ref for 2 joined blocks
+			}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rec, c := groundedFixture(t, 2)
+			j := tc.judge()
+			if j.block != nil {
+				defer close(j.block)
+			}
+			svc := testGroundingService(j, rec)
+			if tc.timeout > 0 {
+				svc.timeout = tc.timeout
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			if tc.cancel {
+				go func() { time.Sleep(10 * time.Millisecond); cancel() }()
+			}
+			rep, diag, show := svc.verify(ctx, "an answer", c)
+			if !show || rep.Status != tc.wantStatus || rep.Reason != tc.wantReason {
+				t.Fatalf("rep=%+v show=%v, want %s/%s", rep, show, tc.wantStatus, tc.wantReason)
+			}
+			if rep.Report != nil {
+				t.Fatalf("a non-verdict outcome must carry no report: %+v", rep.Report)
+			}
+			if tc.wantDiag && diag == "" {
+				t.Fatal("a provider/judge failure must supply a terminal diagnostic")
+			}
+			// Stable codes only: raw error prose must never reach the payload.
+			if strings.ContainsAny(rep.Reason, " :") {
+				t.Fatalf("reason %q is not a stable code", rep.Reason)
+			}
+		})
+	}
+}
+
+// TestGroundingChatRoutesEachStageIndependently pins D5. The two stages are
+// distinct use cases with distinct chains; collapsing them would silently route
+// claim extraction through the verify chain.
+func TestGroundingChatRoutesEachStageIndependently(t *testing.T) {
+	var got []provider.RoutingRequest
+	route := func(_ context.Context, rr provider.RoutingRequest) (*provider.ChatResponse, error) {
+		got = append(got, rr)
+		return &provider.ChatResponse{Usage: provider.Usage{TotalTokens: 11}}, nil
+	}
+	chains := map[string][]string{
+		config.UseCaseExtract: {"ollama:extract-model"},
+		config.UseCaseVerify:  {"ollama:verify-model"},
+	}
+	chat, tokens := newGroundingChat(route, chains)
+
+	for _, uc := range []string{config.UseCaseExtract, config.UseCaseVerify} {
+		if _, err := chat(context.Background(), uc, provider.ChatRequest{
+			Messages: []provider.ChatMessage{{Role: "user", Content: "x"}},
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(got) != 2 {
+		t.Fatalf("want 2 routed requests, got %d", len(got))
+	}
+	for i, uc := range []string{config.UseCaseExtract, config.UseCaseVerify} {
+		rr := got[i]
+		if rr.UseCase != uc {
+			t.Fatalf("request %d use case = %q, want %q", i, rr.UseCase, uc)
+		}
+		if len(rr.PreferredChain) != 1 || rr.PreferredChain[0] != chains[uc][0] {
+			t.Fatalf("request %d chain = %v, want %v", i, rr.PreferredChain, chains[uc])
+		}
+		if !rr.StrictChain {
+			t.Fatalf("request %d must route strictly; a safety-net tail can swap the primary model", i)
+		}
+		if rr.RequiredCaps != provider.CapChat {
+			t.Fatalf("request %d caps = %v, want CapChat", i, rr.RequiredCaps)
+		}
+		if rr.ExpectedOutput != provider.DefaultExpectedOutput(uc) {
+			t.Fatalf("request %d expected output = %d", i, rr.ExpectedOutput)
+		}
+		// PriorityBackground is the zero value, so this assertion pins intent
+		// rather than distinguishing "set" from "defaulted".
+		if rr.Priority != provider.PriorityBackground {
+			t.Fatalf("request %d priority = %v", i, rr.Priority)
+		}
+		if rr.Model != "" {
+			t.Fatalf("request %d pinned a model: %q", i, rr.Model)
+		}
+	}
+	if n := tokens(); n != 22 {
+		t.Fatalf("combined stage usage = %d, want 22", n)
+	}
+}
+
+func TestGroundingChatPropagatesRouteFailure(t *testing.T) {
+	route := func(context.Context, provider.RoutingRequest) (*provider.ChatResponse, error) {
+		return nil, errors.New("no provider reachable")
+	}
+	chat, tokens := newGroundingChat(route, map[string][]string{config.UseCaseVerify: {"m"}})
+	if _, err := chat(context.Background(), config.UseCaseVerify, provider.ChatRequest{}); err == nil {
+		t.Fatal("route failure must propagate")
+	}
+	if n := tokens(); n != 0 {
+		t.Fatalf("a failed call must contribute no tokens, got %d", n)
 	}
 }
