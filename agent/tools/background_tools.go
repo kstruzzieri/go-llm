@@ -138,6 +138,9 @@ func (t *StartCommand) Plan(_ context.Context, raw json.RawMessage) (agent.ToolP
 	if t.manager == nil || t.manager.backend.execBackend == nil {
 		return agent.ToolPlan{Effect: eff}, fmt.Errorf("background manager must have a resolved backend")
 	}
+	if err := t.manager.backend.approval.validateWorkspace(t.ws.root); err != nil {
+		return agent.ToolPlan{Effect: eff}, err
+	}
 	var args startCommandArgs
 	if err := json.Unmarshal(raw, &args); err != nil {
 		return agent.ToolPlan{Effect: eff}, fmt.Errorf("invalid arguments: %w", err)

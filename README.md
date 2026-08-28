@@ -700,7 +700,7 @@ Run the same full suite manually:
 docker compose -f docker-compose.ci.yml run --rm ci ./scripts/ci-local --mode full
 ```
 
-`full` includes `golangci-lint fmt --diff`, `golangci-lint run`, `go test -race ./...`, and `go test -run '^$' ./...`. The pre-push hook runs that full suite automatically before pushes. GitHub still runs the required `Lint & Test` workflow on PRs to satisfy branch protection; push-triggered Actions and macOS smoke remain disabled unless manually dispatched. See [`docs/local-ci.md`](docs/local-ci.md) for the full local CI workflow.
+`full` includes `golangci-lint fmt --diff`, `golangci-lint run`, `go test -race ./...`, and `go test -run '^$' ./...`. The pre-push hook runs that full suite automatically before pushes. GitHub runs the required `Lint & Test` and `macOS Compile Smoke` workflows on PRs; ordinary push-triggered Actions remain disabled, and either workflow can also be dispatched manually. See [`docs/local-ci.md`](docs/local-ci.md) for the full local CI workflow.
 
 ## License
 

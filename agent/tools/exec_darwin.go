@@ -11,11 +11,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -160,6 +162,76 @@ func seatbeltTempCleanup(dir string, created os.FileInfo) func() error {
 	}
 }
 
+// validateSeatbeltWorkspaceLinks rejects an inode with any directory entry
+// outside root. Seatbelt authorizes pathnames, so an allowed workspace hard
+// link would otherwise let a child mutate the same inode through an outside
+// name. Internal-only hard links remain valid. This is the final host check;
+// an unsandboxed same-UID process can still race it by the documented threat
+// model.
+func validateSeatbeltWorkspaceLinks(root string) error {
+	type inode struct {
+		dev uint64
+		ino uint64
+	}
+	type linkRecord struct {
+		total uint64
+		seen  uint64
+		first string
+	}
+
+	links := make(map[inode]linkRecord)
+	order := make([]inode, 0)
+	err := filepath.WalkDir(root, func(name string, entry fs.DirEntry, walkErr error) error {
+		rel, relErr := filepath.Rel(root, name)
+		if relErr != nil {
+			return fmt.Errorf("tools: seatbelt inspect workspace links: %w", relErr)
+		}
+		rel = filepath.ToSlash(rel)
+		if walkErr != nil {
+			return fmt.Errorf("tools: seatbelt inspect workspace entry %q: %w", rel, walkErr)
+		}
+		if entry.IsDir() || entry.Type()&os.ModeSymlink != 0 {
+			return nil
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return fmt.Errorf("tools: seatbelt inspect workspace entry %q: %w", rel, err)
+		}
+		stat, ok := info.Sys().(*syscall.Stat_t)
+		if !ok {
+			return fmt.Errorf("tools: seatbelt inspect workspace entry %q: link metadata unavailable", rel)
+		}
+		total := uint64(stat.Nlink)
+		if total <= 1 {
+			return nil
+		}
+		key := inode{dev: uint64(stat.Dev), ino: uint64(stat.Ino)}
+		record, exists := links[key]
+		if !exists {
+			record = linkRecord{total: total, first: rel}
+			order = append(order, key)
+		} else if record.total != total {
+			return fmt.Errorf("tools: seatbelt workspace link count changed while inspecting %q", rel)
+		}
+		record.seen++
+		links[key] = record
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	for _, key := range order {
+		record := links[key]
+		if record.seen < record.total {
+			return fmt.Errorf("tools: seatbelt workspace entry %q is linked outside the workspace", record.first)
+		}
+		if record.seen > record.total {
+			return fmt.Errorf("tools: seatbelt workspace link count changed while inspecting %q", record.first)
+		}
+	}
+	return nil
+}
+
 // prepare builds the per-invocation private temp directory, SBPL profile, and
 // wrapper spec. On success the returned cleanup is the guarded temp remover;
 // on failure prepare has already attempted guarded cleanup itself and nothing
@@ -237,6 +309,9 @@ func (b *seatbeltBackend) prepare(spec execSpec) (execSpec, func() error, error)
 		allowNetwork:      b.allowNetwork,
 	})
 	if err != nil {
+		return fail(err)
+	}
+	if err := validateSeatbeltWorkspaceLinks(spec.WorkspaceRoot); err != nil {
 		return fail(err)
 	}
 	wrapped := spec

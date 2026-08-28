@@ -89,6 +89,18 @@ func newHostExecBackend(starter backgroundStarter) resolvedExecBackend {
 type sandboxApproval struct {
 	keyComponent string
 	preview      string
+	runtime      SandboxRuntime
+}
+
+// validateWorkspace rejects roots that cannot safely bound the selected
+// sandbox before Plan returns an approval prompt. Host execution deliberately
+// keeps accepting volume roots for backward compatibility.
+func (s sandboxApproval) validateWorkspace(root string) error {
+	if s.runtime != SandboxRuntimeSeatbelt {
+		return nil
+	}
+	_, err := seatbeltAllowancePath("workspace root", root)
+	return err
 }
 
 // sandboxFingerprint hashes the approval-relevant sandbox identity using
@@ -128,6 +140,7 @@ func approvalForSandbox(cfg SandboxConfig) sandboxApproval {
 	return sandboxApproval{
 		keyComponent: "sb:" + sandboxFingerprint(cfg) + ":",
 		preview:      renderSandboxLine(cfg),
+		runtime:      cfg.Runtime,
 	}
 }
 

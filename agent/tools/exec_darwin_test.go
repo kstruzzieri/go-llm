@@ -432,11 +432,15 @@ type captureStarter struct {
 	proc   backgroundProcess
 	err    error
 	called int
+	during func(execSpec)
 }
 
 func (c *captureStarter) Start(s execSpec, _, _ io.Writer) (backgroundProcess, error) {
 	c.called++
 	c.spec = s
+	if c.during != nil {
+		c.during(s)
+	}
 	if c.err != nil {
 		return nil, c.err
 	}
@@ -874,23 +878,79 @@ func TestSeatbeltBehavioralHardLinkCreationDenied(t *testing.T) {
 	}
 }
 
-// TestSeatbeltBehavioralPreexistingHardLinkLimitation documents the pathname
-// boundary: a hard link created into the workspace BEFORE sandboxing names an
-// inode inside the allowed namespace, so the sandboxed read succeeds. SBPL
-// cannot provide inode-origin isolation; this is a disclosed limitation, not
-// a defect this test could fix.
-func TestSeatbeltBehavioralPreexistingHardLinkLimitation(t *testing.T) {
-	requireSeatbeltCapability(t)
+// TestSeatbeltRejectsWorkspaceHardLinkToOutsideInode reproduces the pathname
+// escape without requiring a usable nested sandbox: a delegate writing the
+// allowed workspace name mutates the outside inode unless prepare rejects the
+// workspace before either foreground or background spawn.
+func TestSeatbeltRejectsWorkspaceHardLinkToOutsideInode(t *testing.T) {
+	for _, lifetime := range []string{"foreground", "background"} {
+		t.Run(lifetime, func(t *testing.T) {
+			ws := canonTempDirT(t)
+			outside := filepath.Join(t.TempDir(), "outside-canary")
+			if err := os.WriteFile(outside, []byte("safe"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			linked := filepath.Join(ws, "pre-linked")
+			if err := os.Link(outside, linked); err != nil {
+				t.Skipf("hard links unavailable: %v", err)
+			}
+
+			writeThroughLink := func(execSpec) {
+				if err := os.WriteFile(linked, []byte("escaped"), 0o600); err != nil {
+					t.Fatalf("simulated workspace write: %v", err)
+				}
+			}
+			runner := &captureRunner{during: writeThroughLink}
+			starter := &captureStarter{proc: &fakeProcess{}, during: writeThroughLink}
+			b, base := testSeatbeltBackend(t, runner)
+			b.starter = starter
+
+			var err error
+			if lifetime == "foreground" {
+				_, err = b.Run(context.Background(), seatbeltSpec(t, ws))
+			} else {
+				var proc backgroundProcess
+				proc, err = b.Start(seatbeltSpec(t, ws), io.Discard, io.Discard)
+				if proc != nil {
+					_, _, _ = proc.Wait()
+				}
+			}
+			if err == nil {
+				t.Error("Seatbelt launch error = nil, want outside-hard-link rejection")
+			}
+			if calls := runner.called + starter.called; calls != 0 {
+				t.Errorf("delegate calls = %d, want 0", calls)
+			}
+			got, readErr := os.ReadFile(outside)
+			if readErr != nil {
+				t.Fatal(readErr)
+			}
+			if string(got) != "safe" {
+				t.Errorf("outside canary = %q, want %q", got, "safe")
+			}
+			assertEmptyDir(t, base)
+		})
+	}
+}
+
+func TestSeatbeltAllowsHardLinksWhollyInsideWorkspace(t *testing.T) {
 	ws := canonTempDirT(t)
-	_, canary := outsideCanaryDir(t, ws)
-	linked := filepath.Join(ws, "pre-linked")
-	if err := os.Link(canary, linked); err != nil {
-		t.Skipf("cannot hard-link across these paths: %v", err)
+	first := filepath.Join(ws, "first")
+	if err := os.WriteFile(first, []byte("inside"), 0o600); err != nil {
+		t.Fatal(err)
 	}
-	res := realSeatbeltRun(t, seatbeltTestCfg(), ws, []string{"/bin/cat", linked})
-	if res.ExitCode != 0 || !strings.Contains(string(res.Stdout), "SEATBELT-ESCAPE-CANARY") {
-		t.Fatalf("characterization changed: pre-existing hard link no longer readable (exit=%d) — update the documented limitation", res.ExitCode)
+	if err := os.Link(first, filepath.Join(ws, "second")); err != nil {
+		t.Skipf("hard links unavailable: %v", err)
 	}
+	fake := &captureRunner{}
+	b, base := testSeatbeltBackend(t, fake)
+	if _, err := b.Run(context.Background(), seatbeltSpec(t, ws)); err != nil {
+		t.Fatalf("Seatbelt Run with internal hard links: %v", err)
+	}
+	if fake.called != 1 {
+		t.Errorf("delegate calls = %d, want 1", fake.called)
+	}
+	assertEmptyDir(t, base)
 }
 
 // TestSeatbeltBehavioralDataVolumeAliasDenied: /System/Volumes/Data aliases

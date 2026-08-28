@@ -221,6 +221,9 @@ func (t *RunCommand) Effect() agent.Effect { return t.baseEffect() }
 // returns an error so dispatch reports it without prompting for approval.
 func (t *RunCommand) Plan(_ context.Context, raw json.RawMessage) (agent.ToolPlan, error) {
 	eff := t.baseEffect()
+	if err := t.sandbox.validateWorkspace(t.ws.root); err != nil {
+		return agent.ToolPlan{Effect: eff}, err
+	}
 	var args runCommandArgs
 	if err := json.Unmarshal(raw, &args); err != nil {
 		return agent.ToolPlan{Effect: eff}, fmt.Errorf("invalid arguments: %w", err)

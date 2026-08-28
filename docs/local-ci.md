@@ -35,7 +35,7 @@ The Docker runner builds from `Dockerfile.ci`, mounts the repository at `/worksp
 1. Make code changes normally.
 2. Run `scripts/ci-local --mode pre-push` for a faster host-side check while iterating, or use the Docker command above when you want the pinned CI toolchain.
 3. Push the branch. The `.githooks/pre-push` hook automatically runs the Docker-backed `full` suite and blocks the push on failure.
-4. GitHub runs the required `Lint & Test` workflow on PRs to satisfy branch protection. Push-triggered Actions and macOS smoke are disabled unless manually dispatched.
+4. GitHub runs the required `Lint & Test` and `macOS Compile Smoke` workflows on PRs to satisfy branch protection. Ordinary push-triggered Actions remain disabled.
 
 ## Command Contract
 
@@ -93,9 +93,9 @@ git config core.hooksPath .githooks
 
 ## GitHub Actions
 
-The `CI` workflow still runs on `pull_request` so the protected `develop` branch receives the required `Lint & Test` status. It does not run on ordinary pushes.
+The `CI` workflow runs on `pull_request` so protected branches receive the required `Lint & Test` status. It does not run on ordinary pushes.
 
-The macOS compile-smoke workflow is kept as a manual fallback check through `workflow_dispatch`. Local Docker CI is the blocking path before pushes during normal development.
+The macOS compile-smoke workflow also runs on pull requests to `develop` and `main`, providing the required native-Darwin status and real Seatbelt confinement coverage. It remains available as a manual fallback through `workflow_dispatch`. Local Docker CI is the blocking path before pushes during normal development.
 
 ## Notes
 

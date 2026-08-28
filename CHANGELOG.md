@@ -15,9 +15,11 @@ and background alike — under a per-invocation `sandbox-exec` (Seatbelt)
 profile:
 
 - Writes are confined to the canonical workspace and one fresh `0700`
-  private temp directory created per invocation. The inherited `TMPDIR` is
-  never trusted as policy: it is command input, replaced in the child
-  environment with the private directory.
+  private temp directory created per invocation. Before each spawn, the
+  backend rejects any workspace inode with a hard-link name outside that
+  root while allowing hard links whose names are all internal. The inherited
+  `TMPDIR` is never trusted as policy: it is command input, replaced in the
+  child environment with the private directory.
 - Reads outside the workspace/private-temp are limited to the exact
   executable target, a minimal reviewed set of read-only system runtime
   subtrees (loaders, system libraries), and the fixed device literals
@@ -40,13 +42,12 @@ check alone is a false positive), and for the `MemoryCapMB`, `CPULimit`, and
 
 Limitations, disclosed deliberately: `sandbox-exec` and SBPL are deprecated
 by Apple (active probing turns removal or disablement into a clear
-unavailable-runtime error, not a replacement); the boundary is pathname
-based, so a hard link created into the workspace *before* sandboxing remains
-readable and a same-UID unsandboxed process can still race pathname
-replacement; and Homebrew/MacPorts/custom-dylib tools whose libraries live
-outside the reviewed roots may fail rather than run with a widened profile.
-Runtime selection is a library capability until #347 wires it into
-`cmd/golem`.
+unavailable-runtime error, not a replacement); the pre-spawn hard-link audit
+walks all workspace entries, and a same-UID unsandboxed process can still race
+filesystem mutation after that final host check; and Homebrew/MacPorts/custom-
+dylib tools whose libraries live outside the reviewed roots may fail rather
+than run with a widened profile. Runtime selection is a library capability
+until #347 wires it into `cmd/golem`.
 
 As part of this change the exec approval-key recipe gained the canonical
 workspace root (foreground `exec:v2:` → `exec:v3:`, background
