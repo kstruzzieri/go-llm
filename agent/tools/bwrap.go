@@ -36,21 +36,22 @@ func bwrapBroadRoot(p string) bool {
 
 // bwrapPolicy is the per-invocation input to bwrap argv construction. All
 // paths must already be clean POSIX absolutes; collectors canonicalize the
-// roots they own, while exePath is the resolved executable target. The
-// builder validates lexical shape, treats every value as data (exec argv, no
-// quoting layer), and performs no filesystem I/O so it is unit-testable on
-// every platform.
+// roots they own and retain reviewed alias destinations separately, while
+// exePath is the resolved executable target. The builder validates lexical
+// shape, treats every value as data (exec argv, no quoting layer), and
+// performs no filesystem I/O so it is unit-testable on every platform.
 type bwrapPolicy struct {
-	workspaceRoot   string
-	exePath         string
-	chdir           string
-	systemReadRoots []string
-	topLevelDirs    []string          // exact fixed-layout directory binds
-	topLevelLinks   map[string]string // dest -> relative link target
-	etcLiterals     []string
-	payloadEnv      []string // ordered approved NAME=VALUE entries
-	allowNetwork    bool
-	tmpfsSizeBytes  int64
+	workspaceRoot     string
+	exePath           string
+	chdir             string
+	systemReadRoots   []string
+	systemRootAliases map[string]string // original destination -> canonical source
+	topLevelDirs      []string          // exact fixed-layout directory binds
+	topLevelLinks     map[string]string // dest -> relative link target
+	etcLiterals       []string
+	payloadEnv        []string // ordered approved NAME=VALUE entries
+	allowNetwork      bool
+	tmpfsSizeBytes    int64
 }
 
 // bwrapLayoutDirs is the fixed set of top-level compatibility entries a
@@ -176,8 +177,8 @@ func bwrapExeCoveredByReadOnly(exe string, sysRoots, layoutDirs, linkDests []str
 
 // buildBwrapArgs renders the bwrap policy argv for one invocation in the
 // fixed D5 order: isolation prefix, payload environment, /proc and /dev,
-// quota'd private /dev/shm, reviewed read-only system roots, fixed-layout
-// directories and symlinks, /etc literals, quota'd private /tmp, the
+// quota'd private /dev/shm, reviewed read-only system roots and aliases,
+// fixed-layout directories and symlinks, /etc literals, quota'd private /tmp, the
 // workspace as the only host-visible writable mount, the executable literal,
 // the approved cwd, and finally the read-only root remount. List inputs are
 // sorted and de-duplicated into owned copies; ordering is part of the policy.
@@ -197,6 +198,7 @@ func buildBwrapArgs(p bwrapPolicy) ([]string, error) {
 	}
 
 	sysRoots := slices.Compact(slices.Sorted(slices.Values(p.systemReadRoots)))
+	sysRootSet := make(map[string]bool, len(sysRoots))
 	for _, root := range sysRoots {
 		// Depth >= 2 rather than the broad-root name list: every reviewed root
 		// is /usr/<x>, and a canonicalized root that lands on an unlisted
@@ -212,6 +214,20 @@ func buildBwrapArgs(p bwrapPolicy) ([]string, error) {
 		// the part unit-tested on every platform -- must hold the invariant too.
 		if pathCovers(root, p.workspaceRoot) {
 			return nil, fmt.Errorf("tools: bwrap system read root %q covers the workspace %q", root, p.workspaceRoot)
+		}
+		sysRootSet[root] = true
+	}
+	aliasDests := slices.Sorted(maps.Keys(p.systemRootAliases))
+	for _, dest := range aliasDests {
+		source := p.systemRootAliases[dest]
+		if !slices.Contains(bwrapDefaultSystemRoots, dest) {
+			return nil, fmt.Errorf("tools: bwrap system root alias destination %q is outside the reviewed root set", dest)
+		}
+		if !sysRootSet[source] {
+			return nil, fmt.Errorf("tools: bwrap system root alias %q references uncollected source %q", dest, source)
+		}
+		if dest == source || sysRootSet[dest] {
+			return nil, fmt.Errorf("tools: bwrap system root alias destination %q is already canonical", dest)
 		}
 	}
 
@@ -262,6 +278,9 @@ func buildBwrapArgs(p bwrapPolicy) ([]string, error) {
 	args = append(args, "--tmpfs", "/dev/shm")
 	for _, root := range sysRoots {
 		args = append(args, "--ro-bind", root, root)
+	}
+	for _, dest := range aliasDests {
+		args = append(args, "--ro-bind", p.systemRootAliases[dest], dest)
 	}
 	for _, dir := range layoutDirs {
 		args = append(args, "--ro-bind", dir, dir)

@@ -216,21 +216,33 @@ func pathCovers(root, target string) bool {
 // system path aliased at or above user data). Shared by the Seatbelt (#442)
 // and bwrap (#441) collectors; each passes its own broad-root predicate.
 func collectSystemRoots(roots []string, workspaceRoot, home string, broad func(string) bool) ([]string, error) {
+	canonical, _, err := collectSystemRootMounts(roots, workspaceRoot, home, broad)
+	return canonical, err
+}
+
+// collectSystemRootMounts additionally retains each symlink spelling as a
+// mount destination for bwrap while keeping the canonical path as authority.
+// Seatbelt needs only the canonical roots and uses collectSystemRoots above.
+func collectSystemRootMounts(roots []string, workspaceRoot, home string, broad func(string) bool) ([]string, map[string]string, error) {
 	out := make([]string, 0, len(roots))
+	aliases := make(map[string]string)
 	for _, root := range roots {
 		canon, err := filepath.EvalSymlinks(root)
 		if err != nil {
 			continue // missing root: omitted, strictly narrower
 		}
 		if broad(canon) || !posixCleanAbs(canon) {
-			return nil, fmt.Errorf("tools: sandbox system root %q canonicalizes to broad root %q", root, canon)
+			return nil, nil, fmt.Errorf("tools: sandbox system root %q canonicalizes to broad root %q", root, canon)
 		}
 		if pathCovers(canon, workspaceRoot) || pathCovers(canon, home) {
-			return nil, fmt.Errorf("tools: sandbox system root %q (%q) covers the workspace or home", root, canon)
+			return nil, nil, fmt.Errorf("tools: sandbox system root %q (%q) covers the workspace or home", root, canon)
 		}
 		out = append(out, canon)
+		if root != canon {
+			aliases[root] = canon
+		}
 	}
-	return out, nil
+	return out, aliases, nil
 }
 
 // seatbeltConfigSupport rejects ceiling fields Seatbelt cannot enforce. The

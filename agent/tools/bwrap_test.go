@@ -7,6 +7,7 @@ package tools
 import (
 	"math"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -171,6 +172,27 @@ func TestBuildBwrapArgsSplitLayoutDirs(t *testing.T) {
 	}
 }
 
+func TestBuildBwrapArgsBindsCanonicalRootAtAliasDestination(t *testing.T) {
+	p := validBwrapPolicy()
+	p.systemReadRoots = []string{"/usr/lib"}
+	p.systemRootAliases = map[string]string{"/usr/lib64": "/usr/lib"}
+	p.topLevelDirs = nil
+	p.topLevelLinks = map[string]string{"/lib64": "usr/lib64"}
+
+	got, err := buildBwrapArgs(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	joined := " " + strings.Join(got, " ") + " "
+	want := " --ro-bind /usr/lib /usr/lib64 --symlink usr/lib64 /lib64 "
+	if !strings.Contains(joined, want) {
+		t.Fatalf("buildBwrapArgs(alias) = %q, want ordered sequence %q", got, want)
+	}
+	if bad := " --ro-bind /usr/lib64 /usr/lib64 "; strings.Contains(joined, bad) {
+		t.Fatalf("buildBwrapArgs(alias) uses mutable symlink source %q: %q", bad, got)
+	}
+}
+
 func TestBuildBwrapArgsDeterministicUnderShuffledInputs(t *testing.T) {
 	a := validBwrapPolicy()
 	a.systemReadRoots = []string{"/usr/lib", "/usr/bin", "/usr/share", "/usr/lib"}
@@ -206,6 +228,9 @@ func TestBuildBwrapArgsRejections(t *testing.T) {
 		"root covers workspace":  {func(p *bwrapPolicy) { p.systemReadRoots = []string{"/home/u"} }, "covers the workspace"},
 		"relative system root":   {func(p *bwrapPolicy) { p.systemReadRoots = []string{"usr/lib"} }, "system read root"},
 		"ws equals system root":  {func(p *bwrapPolicy) { p.systemReadRoots = []string{"/home/u/proj"} }, "covers the workspace"},
+		"alias dest off-list":    {func(p *bwrapPolicy) { p.systemRootAliases = map[string]string{"/opt/lib64": "/usr/lib"} }, "alias destination"},
+		"alias source missing":   {func(p *bwrapPolicy) { p.systemRootAliases = map[string]string{"/usr/lib64": "/opt/lib"} }, "uncollected source"},
+		"alias dest canonical":   {func(p *bwrapPolicy) { p.systemRootAliases = map[string]string{"/usr/lib": "/usr/lib"} }, "already canonical"},
 		"etc outside /etc":       {func(p *bwrapPolicy) { p.etcLiterals = []string{"/home/u/x"} }, "/etc"},
 		"etc root itself":        {func(p *bwrapPolicy) { p.etcLiterals = []string{"/etc"} }, "/etc"},
 		"layout dir off-list":    {func(p *bwrapPolicy) { p.topLevelDirs = []string{"/opt"} }, "layout"},
@@ -263,8 +288,11 @@ func TestBwrapMemoryCapBytes(t *testing.T) {
 	if got, err := bwrapMemoryCapBytes(4096); err != nil || got != 4294967296 {
 		t.Fatalf("4096MiB cap = (%d, %v), want (4294967296, nil) on every arch", got, err)
 	}
-	if _, err := bwrapMemoryCapBytes(math.MaxInt64/(1024*1024) + 1); err == nil {
-		t.Skip("MemoryCapMB is int; this bound is unreachable on this architecture")
+	if strconv.IntSize == 64 {
+		overflowMB := int64(math.MaxInt64/(1024*1024) + 1)
+		if _, err := bwrapMemoryCapBytes(int(overflowMB)); err == nil {
+			t.Fatal("overflowing cap accepted")
+		}
 	}
 	if _, err := bwrapMemoryCapBytes(-1); err == nil {
 		t.Fatal("negative cap accepted")

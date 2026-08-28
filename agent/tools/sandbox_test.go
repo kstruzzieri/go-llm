@@ -436,7 +436,7 @@ func TestNormalizeSandboxConfigOwnsCanonicalCaps(t *testing.T) {
 func TestRenderSandboxLineBwrapPrivateTempMarker(t *testing.T) {
 	cfg := mustNormalizeSandbox(t, SandboxConfig{Runtime: SandboxRuntimeBwrap})
 	got := renderSandboxLine(cfg)
-	want := `runtime="bwrap" network=denied memory_cap=none cpu_limit=none drop_caps=[] temp=private`
+	want := `runtime="bwrap" network=ip-denied memory_cap=none cpu_limit=none drop_caps=[] temp=private`
 	if got != want {
 		t.Fatalf("renderSandboxLine() = %q, want %q", got, want)
 	}
@@ -480,7 +480,7 @@ func TestBwrapApprovalValidatesWorkspace(t *testing.T) {
 func TestRenderSandboxLineBwrapQualifiesMemoryScope(t *testing.T) {
 	cfg := mustNormalizeSandbox(t, SandboxConfig{Runtime: SandboxRuntimeBwrap, MemoryCapMB: 512})
 	got := renderSandboxLine(cfg)
-	want := `runtime="bwrap" network=denied memory_cap=512MiB/process cpu_limit=none drop_caps=[] temp=private`
+	want := `runtime="bwrap" network=ip-denied memory_cap=512MiB/process cpu_limit=none drop_caps=[] temp=private`
 	if got != want {
 		t.Fatalf("renderSandboxLine() = %q, want %q", got, want)
 	}

@@ -68,10 +68,16 @@ func writeFakeBinary(t *testing.T, mode os.FileMode) string {
 func TestBwrapConstructorRejectsUnsupportedConfigBeforeProbe(t *testing.T) {
 	probe := &recordingProbe{t: t}
 	bwrap := writeFakeBinary(t, 0o755)
-	for name, cfg := range map[string]SandboxConfig{
-		"cpu limit":       {Runtime: SandboxRuntimeBwrap, CPULimit: 0.5},
-		"overflowing cap": {Runtime: SandboxRuntimeBwrap, MemoryCapMB: 1 << 45},
-	} {
+	configs := map[string]SandboxConfig{
+		"cpu limit": {Runtime: SandboxRuntimeBwrap, CPULimit: 0.5},
+	}
+	if strconv.IntSize == 64 {
+		overflowingCap := int64(1) << 45
+		configs["overflowing cap"] = SandboxConfig{
+			Runtime: SandboxRuntimeBwrap, MemoryCapMB: int(overflowingCap),
+		}
+	}
+	for name, cfg := range configs {
 		if _, err := newBwrapExecBackendAt(bwrap, bwrap, probe.probe, cfg); err == nil {
 			t.Errorf("%s accepted", name)
 		}
@@ -86,6 +92,9 @@ func TestBwrapConstructorChecksBinariesBeforeProbe(t *testing.T) {
 	missing := filepath.Join(t.TempDir(), "missing")
 	nonExec := writeFakeBinary(t, 0o644)
 	setuid := writeFakeBinary(t, 0o755|os.ModeSetuid)
+	setgid := writeFakeBinary(t, 0o755|os.ModeSetgid)
+	groupWritable := writeFakeBinary(t, 0o775)
+	otherWritable := writeFakeBinary(t, 0o757)
 	worldWritable := writeFakeBinary(t, 0o777)
 	symlinked := filepath.Join(t.TempDir(), "link")
 	if err := os.Symlink(good, symlinked); err != nil {
@@ -95,6 +104,9 @@ func TestBwrapConstructorChecksBinariesBeforeProbe(t *testing.T) {
 		"missing":        missing,
 		"non-executable": nonExec,
 		"setuid":         setuid,
+		"setgid":         setgid,
+		"group-writable": groupWritable,
+		"other-writable": otherWritable,
 		"world-writable": worldWritable,
 		"symlink":        symlinked,
 	}
@@ -347,6 +359,34 @@ func TestCollectBwrapLayout(t *testing.T) {
 	})
 }
 
+func TestCollectSystemRootMountsRetainsAliasDestination(t *testing.T) {
+	root := t.TempDir()
+	target := filepath.Join(root, "real")
+	alias := filepath.Join(root, "alias")
+	if err := os.Mkdir(target, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("real", alias); err != nil {
+		t.Fatal(err)
+	}
+	canonTarget, err := filepath.EvalSymlinks(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	roots, aliases, err := collectSystemRootMounts(
+		[]string{alias}, "/workspace", "/home/user", bwrapBroadRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(roots, []string{canonTarget}) {
+		t.Fatalf("collectSystemRootMounts(alias) roots = %q, want %q", roots, []string{canonTarget})
+	}
+	if len(aliases) != 1 || aliases[alias] != canonTarget {
+		t.Fatalf("collectSystemRootMounts(alias) aliases = %q, want {%q: %q}", aliases, alias, canonTarget)
+	}
+}
+
 // TestNewExecBackendBwrapNeverHost pins the dispatch contract on Linux: the
 // bwrap runtime either constructs a real bwrap backend or fails — it never
 // silently returns host execution (e.g. inside Docker where the probe fails).
@@ -410,8 +450,8 @@ func testBwrapBackend(runner commandRunner, starter backgroundStarter, cfg Sandb
 		capBytes:    capBytes,
 		runner:      runner,
 		starter:     starter,
-		collect: func(string) ([]string, []string, map[string]string, error) {
-			return []string{"/usr/bin", "/usr/lib"}, []string{"/lib"},
+		collect: func(string) ([]string, map[string]string, []string, map[string]string, error) {
+			return []string{"/usr/bin", "/usr/lib"}, nil, []string{"/lib"},
 				map[string]string{"/bin": "usr/bin"}, nil
 		},
 	}
@@ -726,7 +766,7 @@ func TestSafeEtcPolicyPaths(t *testing.T) {
 // (e.g. passing an empty home) is otherwise invisible to the whole suite.
 func TestDefaultBwrapCollect(t *testing.T) {
 	ws := wsTempDir(t)
-	roots, layoutDirs, links, err := defaultBwrapCollect(ws)
+	roots, aliases, layoutDirs, links, err := defaultBwrapCollect(ws)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -743,6 +783,14 @@ func TestDefaultBwrapCollect(t *testing.T) {
 		}
 		if home != "" && pathCovers(r, home) {
 			t.Errorf("root %q covers home %q", r, home)
+		}
+	}
+	for dest, source := range aliases {
+		if !slices.Contains(bwrapDefaultSystemRoots, dest) {
+			t.Errorf("system root alias %q outside the reviewed set", dest)
+		}
+		if !slices.Contains(roots, source) {
+			t.Errorf("system root alias %q references uncollected source %q", dest, source)
 		}
 	}
 	for _, d := range layoutDirs {

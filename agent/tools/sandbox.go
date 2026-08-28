@@ -164,6 +164,11 @@ func approvalForSandbox(cfg SandboxConfig) sandboxApproval {
 // cannot forge ambiguous fields. Presentation only, never parsed.
 func renderSandboxLine(cfg SandboxConfig) string {
 	network := "denied"
+	// bwrap unshares the IP network namespace, but pathname Unix sockets in
+	// the shared workspace remain reachable.
+	if cfg.Runtime == SandboxRuntimeBwrap {
+		network = "ip-denied"
+	}
 	if cfg.AllowNetwork {
 		network = "allowed"
 	}

@@ -308,18 +308,8 @@ func TestBwrapDeniesOutboundTCPUDPAndAbstractUnix(t *testing.T) {
 		}
 	}()
 
-	abstractName := "go-llm-bwrap-" + token
-	abstractLn, err := net.Listen("unix", "@"+abstractName)
-	if err != nil {
-		t.Skipf("abstract unix sockets unavailable: %v", err)
-	}
-	defer func() { _ = abstractLn.Close() }()
-
 	if res := realBwrapRun(t, cfg, ws, bwrapHelperArgv(helper, "tcp", tcpLn.Addr().String())); res.ExitCode == 0 {
 		t.Fatalf("TCP dial succeeded inside --unshare-net: %s", helperOutput(t, res))
-	}
-	if res := realBwrapRun(t, cfg, ws, bwrapHelperArgv(helper, "abstract", abstractName)); res.ExitCode == 0 {
-		t.Fatalf("abstract unix dial succeeded inside --unshare-net: %s", helperOutput(t, res))
 	}
 	// UDP has no handshake: sender-side success or failure are both
 	// acceptable — host non-receipt is the denial assertion.
@@ -330,6 +320,17 @@ func TestBwrapDeniesOutboundTCPUDPAndAbstractUnix(t *testing.T) {
 	case got := <-udpGot:
 		t.Fatalf("host UDP listener received %q from the sandbox", got)
 	case <-time.After(500 * time.Millisecond):
+	}
+
+	abstractName := "go-llm-bwrap-" + token
+	abstractLn, err := net.Listen("unix", "@"+abstractName)
+	if err != nil {
+		t.Logf("abstract unix sockets unavailable; skipping abstract assertion: %v", err)
+		return
+	}
+	defer func() { _ = abstractLn.Close() }()
+	if res := realBwrapRun(t, cfg, ws, bwrapHelperArgv(helper, "abstract", abstractName)); res.ExitCode == 0 {
+		t.Fatalf("abstract unix dial succeeded inside --unshare-net: %s", helperOutput(t, res))
 	}
 }
 
@@ -552,7 +553,7 @@ print("HELPER-FSSIZE:", st.f_blocks * st.f_frsize)
 `
 
 const bwrapQuotaFillPython = `
-import sys
+import errno, sys
 buf = b"x" * 1048576
 written = 0
 try:
@@ -560,7 +561,9 @@ try:
         for _ in range(int(sys.argv[2])):
             f.write(buf)
             written += 1
-except OSError:
+except OSError as err:
+    if err.errno != errno.ENOSPC:
+        raise
     print("HELPER-ENOSPC:", written)
     raise SystemExit(0)
 print("HELPER-OVER:", written)
@@ -588,6 +591,14 @@ func TestBwrapTmpfsQuotasRejectExcess(t *testing.T) {
 	requireBwrapPython(t)
 	ws := wsTempDir(t)
 	cfg := SandboxConfig{Runtime: SandboxRuntimeBwrap, MemoryCapMB: 512}
+	nonQuota := realBwrapRun(t, cfg, ws, []string{
+		"/usr/bin/python3", "-c", bwrapQuotaFillPython, "/go-llm-missing/fill.bin", "1",
+	})
+	nonQuotaOut := helperOutput(t, nonQuota)
+	if nonQuota.ExitCode == 0 || strings.Contains(nonQuotaOut, "HELPER-ENOSPC:") {
+		t.Fatalf("non-ENOSPC write failure was accepted as quota enforcement: exit=%d %s",
+			nonQuota.ExitCode, nonQuotaOut)
+	}
 	for _, dest := range []string{"/tmp", "/dev/shm"} {
 		res := realBwrapRun(t, cfg, ws, []string{"/usr/bin/python3", "-c", bwrapQuotaReportPython, dest})
 		out := helperOutput(t, res)

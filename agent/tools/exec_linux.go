@@ -172,17 +172,19 @@ func collectBwrapLayout(root string, coveredRoots []string) (dirs []string, link
 
 // defaultBwrapCollect is the production per-invocation policy collector:
 // canonicalized reviewed system roots (fail-closed on aliasing over the
-// workspace or home) plus the typed top-level layout of the real root.
-func defaultBwrapCollect(workspaceRoot string) (roots, layoutDirs []string, links map[string]string, err error) {
-	roots, err = collectSystemRoots(bwrapDefaultSystemRoots, workspaceRoot, canonicalHome(), bwrapBroadRoot)
+// workspace or home), their original mount destinations, and the typed
+// top-level layout of the real root.
+func defaultBwrapCollect(workspaceRoot string) (roots []string, aliases map[string]string, layoutDirs []string, links map[string]string, err error) {
+	roots, aliases, err = collectSystemRootMounts(
+		bwrapDefaultSystemRoots, workspaceRoot, canonicalHome(), bwrapBroadRoot)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, nil, nil, err
 	}
 	layoutDirs, links, err = collectBwrapLayout("/", roots)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, nil, nil, err
 	}
-	return roots, layoutDirs, links, nil
+	return roots, aliases, layoutDirs, links, nil
 }
 
 // bwrapBackend runs both command lifetimes inside per-invocation Bubblewrap
@@ -195,7 +197,7 @@ type bwrapBackend struct {
 	capBytes    int64 // checked once by bwrapMemoryCapBytes
 	runner      commandRunner
 	starter     backgroundStarter
-	collect     func(workspaceRoot string) (roots, layoutDirs []string, links map[string]string, err error)
+	collect     func(workspaceRoot string) (roots []string, aliases map[string]string, layoutDirs []string, links map[string]string, err error)
 }
 
 // newBwrapExecBackend constructs the real bwrap backend, failing closed when
@@ -351,7 +353,7 @@ func (b *bwrapBackend) prepare(spec execSpec) (execSpec, error) {
 	if !posixCleanAbs(spec.WorkspaceRoot) || bwrapBroadRoot(spec.WorkspaceRoot) {
 		return execSpec{}, fmt.Errorf("tools: bwrap workspace root %q must be a canonical non-root path", spec.WorkspaceRoot)
 	}
-	roots, layoutDirs, links, err := b.collect(spec.WorkspaceRoot)
+	roots, aliases, layoutDirs, links, err := b.collect(spec.WorkspaceRoot)
 	if err != nil {
 		return execSpec{}, err
 	}
@@ -382,16 +384,17 @@ func (b *bwrapBackend) prepare(spec execSpec) (execSpec, error) {
 		return execSpec{}, fmt.Errorf("tools: bwrap executable %q resolves to a non-regular file", spec.Path)
 	}
 	args, err := buildBwrapArgs(bwrapPolicy{
-		workspaceRoot:   spec.WorkspaceRoot,
-		exePath:         canonExe,
-		chdir:           spec.Dir,
-		systemReadRoots: roots,
-		topLevelDirs:    layoutDirs,
-		topLevelLinks:   links,
-		etcLiterals:     etc,
-		payloadEnv:      sandboxChildEnv(spec.Env, "/tmp"),
-		allowNetwork:    b.cfg.AllowNetwork,
-		tmpfsSizeBytes:  b.capBytes,
+		workspaceRoot:     spec.WorkspaceRoot,
+		exePath:           canonExe,
+		chdir:             spec.Dir,
+		systemReadRoots:   roots,
+		systemRootAliases: aliases,
+		topLevelDirs:      layoutDirs,
+		topLevelLinks:     links,
+		etcLiterals:       etc,
+		payloadEnv:        sandboxChildEnv(spec.Env, "/tmp"),
+		allowNetwork:      b.cfg.AllowNetwork,
+		tmpfsSizeBytes:    b.capBytes,
 	})
 	if err != nil {
 		return execSpec{}, err
