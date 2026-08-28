@@ -359,7 +359,11 @@ func runOnce(ctx context.Context, out io.Writer, interrupts <-chan struct{}, ses
 	if sess.grounding != nil && status == "completed" {
 		rep, diag, show := sess.grounding.verify(runCtx, res.Answer, groundCollector)
 		if show {
-			writeRunLine("%s", groundingSummaryLine(rep, diag))
+			// Dim, like the run footer: this is a status line about the turn, not
+			// part of the answer. Writing it through the renderer also keeps it
+			// ordered against the streamed answer instead of racing the markdown
+			// buffer, and a failed write costs only display bytes.
+			_ = rend.writeDim(groundingSummaryLine(rep, diag))
 			if raw, merr := json.Marshal(rep); merr == nil {
 				groundingRaw = raw
 			}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -70,7 +71,9 @@ type groundingE2EOpts struct {
 	// script is the model's per-step output. Default: retrieve, then answer.
 	script []agent.ModelResult
 	// grounding false leaves sess.grounding nil, the flag-off path.
-	grounding   bool
+	grounding bool
+	// color enables ANSI styling, so a test can see the dim treatment.
+	color       bool
 	progressive bool
 	judge       *stubJudge
 	// trace/telemetry enable the observability tiers under a controllable clock.
@@ -79,7 +82,6 @@ type groundingE2EOpts struct {
 	// judgeDelay advances the grounding clock while the judge runs, so a test
 	// can tell verifier latency apart from agent latency without sleeping.
 	judgeDelay time.Duration
-	timeout    time.Duration
 	// results overrides the retriever's corpus.
 	results []rag.SearchResult
 	// recorderBytes overrides the evidence recorder's per-turn budget.
@@ -95,7 +97,6 @@ type groundingE2EOpts struct {
 type groundingE2E struct {
 	sess     *replSession
 	judge    *stubJudge
-	rec      *evidenceRecorder
 	retr     *fakeGroundingRetriever
 	traceDir string
 	telePath string
@@ -146,7 +147,7 @@ func newGroundingE2E(t *testing.T, opts groundingE2EOpts) *groundingE2E {
 	// Golem couples both halves of -progressive: the renderer and mixed assembly.
 	orch := agent.New(caller, agent.ContextManager{Mixed: opts.progressive})
 
-	e := &groundingE2E{judge: opts.judge, rec: rec, retr: retr, out: &strings.Builder{},
+	e := &groundingE2E{judge: opts.judge, retr: retr, out: &strings.Builder{},
 		now: time.Unix(0, 0), ctx: turnCtx}
 	e.sess = &replSession{
 		orch:       orch,
@@ -157,6 +158,7 @@ func newGroundingE2E(t *testing.T, opts groundingE2EOpts) *groundingE2E {
 		clock:      func() time.Time { return time.Unix(0, 0) },
 		grants:     newApprovalGrants(),
 		mixed:      opts.progressive,
+		color:      opts.color,
 	}
 
 	if opts.grounding {
@@ -169,13 +171,11 @@ func newGroundingE2E(t *testing.T, opts groundingE2EOpts) *groundingE2E {
 			}}
 			e.judge = judge
 		}
-		timeout := opts.timeout
-		if timeout == 0 {
-			timeout = 2 * time.Second
-		}
 		e.sess.grounding = &groundingService{
-			rec:     rec,
-			timeout: timeout,
+			rec: rec,
+			// Generous: no test exercises the production ceiling here, and the
+			// timeout policy itself is covered by the service tests.
+			timeout: 2 * time.Second,
 			// Advancing the SHARED clock is what lets a test tell a timestamp
 			// taken before grounding from one taken after it.
 			now: func() time.Time {
@@ -210,7 +210,7 @@ func evidenceRefsFor(results []rag.SearchResult) []analysis.EvidenceRef {
 	refs := make([]analysis.EvidenceRef, 0, len(results))
 	for i, r := range results {
 		refs = append(refs, analysis.EvidenceRef{
-			ID: "E" + string(rune('1'+i)), ChunkID: r.Chunk.ID, Source: r.Chunk.Source,
+			ID: fmt.Sprintf("E%d", i+1), ChunkID: r.Chunk.ID, Source: r.Chunk.Source,
 			StartLine: r.Chunk.StartLine, EndLine: r.Chunk.EndLine,
 		})
 	}
@@ -651,5 +651,21 @@ func TestGroundingSkippedWhenTheRunDidNotComplete(t *testing.T) {
 				t.Fatalf("an incomplete run printed a grounding line:\n%s", e.out.String())
 			}
 		})
+	}
+}
+
+// The verdict is a status line about the turn, not part of the answer, so it
+// gets the same dim treatment as the run footer. With color off the two
+// renderings are byte-identical, so only a color-enabled run can see this.
+func TestGroundingSummaryLineIsDimmedLikeTheFooter(t *testing.T) {
+	e := newGroundingE2E(t, groundingE2EOpts{grounding: true, color: true})
+	e.run(t, context.Background(), nil)
+
+	out := e.out.String()
+	if !strings.Contains(out, "\x1b[2mgrounding · supported") {
+		t.Fatalf("grounding line is not dim:\n%q", out)
+	}
+	if !strings.Contains(out, "\x1b[2mdone · ") {
+		t.Fatalf("fixture did not produce a dim footer to compare against:\n%q", out)
 	}
 }

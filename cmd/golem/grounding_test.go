@@ -168,12 +168,10 @@ func TestEvidenceRecorderConcurrentRecordAndLookup(t *testing.T) {
 type fakeGroundingRetriever struct {
 	results     []rag.SearchResult
 	renderCount int
-	gotK        int
 	progressive bool
 }
 
-func (f *fakeGroundingRetriever) Retrieve(_ context.Context, _ string, k int) ([]rag.SearchResult, error) {
-	f.gotK = k
+func (f *fakeGroundingRetriever) Retrieve(context.Context, string, int) ([]rag.SearchResult, error) {
 	return f.results, nil
 }
 
