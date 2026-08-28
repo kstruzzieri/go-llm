@@ -56,3 +56,43 @@ jobs:
           # Keep in exact lockstep with .github/workflows/release.yml.
           version: 2.17.0
           args: check
+
+  # Real bwrap confinement (#441) on a full VM: Docker-based local CI cannot
+  # create user namespaces, so this pinned runner is the behavioral gate.
+  # GO_LLM_REQUIRE_BWRAP=1 turns a capability skip into a hard failure, so a
+  # runner that cannot apply the sandbox fails loudly instead of passing.
+  linux-sandbox:
+    name: Linux Sandbox (bwrap)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version-file: go.mod
+
+      - name: Install sandbox dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            apparmor-profiles apparmor-utils bubblewrap python3-minimal util-linux
+
+      # Ubuntu 24.04 mediates unprivileged user namespaces. noble ships this
+      # profile in apparmor-profiles: it grants namespace setup only to the
+      # fixed /usr/bin/bwrap TCB and keeps children restricted. Never disable
+      # kernel.apparmor_restrict_unprivileged_userns globally for this gate.
+      - name: Load Bubblewrap AppArmor profile when required
+        run: |
+          if sysctl -n kernel.apparmor_restrict_unprivileged_userns 2>/dev/null | grep -qx 1; then
+            sudo apparmor_parser -r /usr/share/apparmor/extra-profiles/bwrap-userns-restrict
+          fi
+
+      - name: Bwrap confinement (non-race)
+        env:
+          GO_LLM_REQUIRE_BWRAP: "1"
+        run: go test -count=1 -run '^(TestBwrap|TestBuildBwrap|TestCollectBwrap|TestProbeBwrap|TestExistingPolicyPaths)' ./agent/tools
+
+      - name: Bwrap confinement (race)
+        env:
+          GO_LLM_REQUIRE_BWRAP: "1"
+        run: go test -race -count=1 -run '^(TestBwrap|TestBuildBwrap|TestCollectBwrap|TestProbeBwrap|TestExistingPolicyPaths)' ./agent/tools

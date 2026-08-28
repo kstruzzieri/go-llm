@@ -97,6 +97,23 @@ The `CI` workflow runs on `pull_request` so protected branches receive the requi
 
 The macOS compile-smoke workflow also runs on pull requests to `develop` and `main`, providing the required native-Darwin status and real Seatbelt confinement coverage. It remains available as a manual fallback through `workflow_dispatch`. Local Docker CI is the blocking path before pushes during normal development.
 
+### Linux sandbox confinement (#441)
+
+The `Linux Sandbox (bwrap)` job in the `CI` workflow runs the bwrap
+behavioral suite on a pinned `ubuntu-24.04` VM with
+`GO_LLM_REQUIRE_BWRAP=1`, which turns a capability skip into a hard
+failure. This job is the required behavioral gate for the bwrap backend:
+the Docker-backed local CI container runs the cross-platform policy and
+unit tests, but its default seccomp profile blocks `CLONE_NEWUSER`, so
+real user-namespace confinement always skips there (by the backend's own
+capability probe — a skipped confinement test is reported as a skip, never
+as a pass). Do not add a privileged or security-opt-weakened compose
+service to emulate that runner; the VM job is the gate.
+
+When Ubuntu's unprivileged-userns AppArmor restriction is active, the job
+loads the distro's narrow `bwrap-userns-restrict` profile for
+`/usr/bin/bwrap` instead of disabling the global sysctl.
+
 ## Notes
 
 The CI image is based on `golang:1.25-alpine` to match `go.mod`. It installs `build-base` and sets `CGO_ENABLED=1` because Go's race detector requires cgo support even though the module itself avoids cgo-only dependencies.
