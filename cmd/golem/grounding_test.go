@@ -298,6 +298,13 @@ func retrieveCall(id string) provider.ToolCall {
 	return call
 }
 
+func successfulRetrieveEvent(id string) agent.ToolResultEvent {
+	return agent.ToolResultEvent{
+		Call: retrieveCall(id), Invoked: true,
+		Result: agent.ToolResult{Attrib: &agent.RetrievalAttribution{}},
+	}
+}
+
 func presentation(step int, srcs ...agent.RetrievedSource) agent.RetrievalPresentationEvent {
 	return agent.RetrievalPresentationEvent{
 		Step:        step,
@@ -402,7 +409,8 @@ func TestGroundingCollectorCountsOnlySuccessfulRetrieveCalls(t *testing.T) {
 		{"denied", agent.ToolResultEvent{Call: retrieveCall("t1"), Invoked: true, Denied: true}, false},
 		{"tool error", agent.ToolResultEvent{Call: retrieveCall("t1"), Invoked: true,
 			Result: agent.ToolResult{IsError: true}}, false},
-		{"successful", agent.ToolResultEvent{Call: retrieveCall("t1"), Invoked: true}, true},
+		{"status-only wrapper response", agent.ToolResultEvent{Call: retrieveCall("t1"), Invoked: true}, false},
+		{"successful", successfulRetrieveEvent("t1"), true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			c := &groundingCollector{}
@@ -422,10 +430,9 @@ func TestGroundingCollectorTruncatedRetrievePoisonsCompleteness(t *testing.T) {
 	if !c.evidenceComplete() {
 		t.Fatal("a fresh collector must report complete evidence")
 	}
-	_ = c.OnToolResult(ctx, agent.ToolResultEvent{
-		Call: retrieveCall("t1"), Invoked: true,
-		Result: agent.ToolResult{Truncated: true},
-	})
+	e := successfulRetrieveEvent("t1")
+	e.Result.Truncated = true
+	_ = c.OnToolResult(ctx, e)
 	if c.evidenceComplete() {
 		t.Fatal("a truncated successful retrieve must poison completeness")
 	}
@@ -605,7 +612,7 @@ func groundedFixture(t *testing.T, n int) (*evidenceRecorder, *groundingCollecto
 	rec := newEvidenceRecorder(1 << 20)
 	rec.beginTurn()
 	c := &groundingCollector{}
-	_ = c.OnToolResult(context.Background(), agent.ToolResultEvent{Call: retrieveCall("t1"), Invoked: true})
+	_ = c.OnToolResult(context.Background(), successfulRetrieveEvent("t1"))
 	srcs := make([]agent.RetrievedSource, 0, n)
 	for i := range n {
 		chunk := chunkWithExtras(
@@ -641,12 +648,56 @@ func TestGroundingVerifySilentCases(t *testing.T) {
 	}
 }
 
+func TestGroundingVerifyCapRefusalFailsClosedForTurnOnly(t *testing.T) {
+	rec := newEvidenceRecorder(groundingEvidenceEntryOverhead + 64)
+	rec.beginTurn()
+	rejected := chunkWithExtras("large", "same", "same.go", strings.Repeat("x", 256), 1, 2)
+	substitute := chunkWithExtras("small", "same", "same.go", "tiny", 1, 2)
+	rec.record([]rag.SearchResult{{Chunk: rejected}, {Chunk: substitute}})
+
+	c := &groundingCollector{}
+	_ = c.OnToolResult(context.Background(), successfulRetrieveEvent("t1"))
+	_ = c.OnRetrievalPresentation(context.Background(), presentation(0, sourceFor(rejected)))
+	_ = c.OnStep(context.Background(), agent.StepEvent{Index: 0})
+	j := &stubJudge{rep: &analysis.SupportReport{
+		Status: analysis.StatusSupported, Evidence: []analysis.EvidenceRef{{ID: "E1"}},
+	}}
+	rep, _, show := testGroundingService(j, rec).verify(context.Background(), "answer", c)
+	if !show || rep.Status != groundingSkipped || rep.Reason != groundingReasonEvidenceIncomplete {
+		t.Errorf("verify(cap-refused collision) = %+v, show=%v; want skipped/%s, show=true",
+			rep, show, groundingReasonEvidenceIncomplete)
+	}
+	if j.calls != 0 {
+		t.Errorf("verify(cap-refused collision) judge calls = %d, want 0", j.calls)
+	}
+
+	// The refusal is turn-local; resetting must make later complete evidence
+	// eligible again.
+	rec.beginTurn()
+	good := chunkWithExtras("good", "good", "good.go", "body", 3, 4)
+	rec.record([]rag.SearchResult{{Chunk: good}})
+	c = &groundingCollector{}
+	_ = c.OnToolResult(context.Background(), successfulRetrieveEvent("t2"))
+	_ = c.OnRetrievalPresentation(context.Background(), presentation(0, sourceFor(good)))
+	_ = c.OnStep(context.Background(), agent.StepEvent{Index: 0})
+	j = &stubJudge{rep: &analysis.SupportReport{
+		Status: analysis.StatusSupported, Evidence: []analysis.EvidenceRef{{ID: "E1"}},
+	}}
+	rep, _, show = testGroundingService(j, rec).verify(context.Background(), "answer", c)
+	if !show || rep.Status != groundingSupported || rep.Report == nil {
+		t.Errorf("verify(after beginTurn) = %+v, show=%v; want supported verdict, show=true", rep, show)
+	}
+	if j.calls != 1 {
+		t.Errorf("verify(after beginTurn) judge calls = %d, want 1", j.calls)
+	}
+}
+
 // TestGroundingVerifyVisibleSkipWhenFinalPromptHadNoEvidence covers AC5: the
 // turn retrieved, but the answering prompt carried nothing. Reporting a verdict
 // here would judge claims against evidence from an earlier step.
 func TestGroundingVerifyVisibleSkipWhenFinalPromptHadNoEvidence(t *testing.T) {
 	c := &groundingCollector{}
-	_ = c.OnToolResult(context.Background(), agent.ToolResultEvent{Call: retrieveCall("t1"), Invoked: true})
+	_ = c.OnToolResult(context.Background(), successfulRetrieveEvent("t1"))
 	_ = c.OnStep(context.Background(), agent.StepEvent{Index: 0})
 
 	j := &stubJudge{}
@@ -667,8 +718,9 @@ func TestGroundingVerifyVisibleSkipWhenFinalPromptHadNoEvidence(t *testing.T) {
 // there.
 func TestGroundingVerifyPrefersNoFinalEvidenceOverIncomplete(t *testing.T) {
 	c := &groundingCollector{}
-	_ = c.OnToolResult(context.Background(), agent.ToolResultEvent{
-		Call: retrieveCall("t1"), Invoked: true, Result: agent.ToolResult{Truncated: true}})
+	e := successfulRetrieveEvent("t1")
+	e.Result.Truncated = true
+	_ = c.OnToolResult(context.Background(), e)
 	_ = c.OnStep(context.Background(), agent.StepEvent{Index: 0})
 
 	j := &stubJudge{}
@@ -739,8 +791,9 @@ func TestGroundingVerifySkipsOnIncompleteEvidence(t *testing.T) {
 		}},
 		{"a successful retrieve observation was truncated", func(t *testing.T) (*evidenceRecorder, *groundingCollector) {
 			rec, c := base(t)
-			_ = c.OnToolResult(context.Background(), agent.ToolResultEvent{
-				Call: retrieveCall("t2"), Invoked: true, Result: agent.ToolResult{Truncated: true}})
+			e := successfulRetrieveEvent("t2")
+			e.Result.Truncated = true
+			_ = c.OnToolResult(context.Background(), e)
 			return rec, c
 		}},
 	} {

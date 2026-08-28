@@ -77,6 +77,9 @@ type evidenceRecorder struct {
 	entries  map[evidenceKey]evidenceEntry
 	bytes    int
 	maxBytes int
+	// ponytail: one refusal invalidates this turn; use bounded per-key
+	// tombstones only if cap-driven false skips become measurable.
+	capped bool
 }
 
 func newEvidenceRecorder(maxBytes int) *evidenceRecorder {
@@ -92,6 +95,7 @@ func (r *evidenceRecorder) beginTurn() {
 	defer r.mu.Unlock()
 	r.entries = make(map[evidenceKey]evidenceEntry)
 	r.bytes = 0
+	r.capped = false
 }
 
 // record stores the minimal projection of each result. A result whose charge
@@ -121,11 +125,21 @@ func (r *evidenceRecorder) record(results []rag.SearchResult) {
 		}
 		charge := len(c.Content) + len(c.ID) + len(c.Source) + len(c.StableKey) + groundingEvidenceEntryOverhead
 		if r.bytes+charge > r.maxBytes {
+			r.capped = true
 			continue
 		}
 		r.entries[key] = next
 		r.bytes += charge
 	}
+}
+
+func (r *evidenceRecorder) evidenceComplete() bool {
+	if r == nil {
+		return false
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return !r.capped
 }
 
 // lookup resolves one presented identity to its chunk. ok is false when the
@@ -250,7 +264,9 @@ func (c *groundingCollector) OnRetrievalPresentation(_ context.Context, e agent.
 }
 
 func (c *groundingCollector) OnToolResult(_ context.Context, e agent.ToolResultEvent) error {
-	if e.Call.Function.Name != "retrieve" || !e.Invoked || e.Denied || e.Result.IsError {
+	successfulRetrieve := e.Call.Function.Name == "retrieve" && e.Invoked && !e.Denied &&
+		!e.Result.IsError && e.Result.Attrib != nil
+	if !successfulRetrieve {
 		return nil
 	}
 	c.retrieves++
@@ -417,7 +433,7 @@ func (s *groundingService) verify(ctx context.Context, answer string, c *groundi
 		// is no attribution to be incomplete about.
 		return groundingReport{Status: groundingSkipped, Reason: groundingReasonNoFinalEvidence}, "", true
 	}
-	if !c.evidenceComplete() {
+	if !c.evidenceComplete() || !s.rec.evidenceComplete() {
 		return groundingReport{Status: groundingSkipped, Reason: groundingReasonEvidenceIncomplete}, "", true
 	}
 	evidence := make([]rag.SearchResult, 0, len(sources))
