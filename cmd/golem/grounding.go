@@ -298,9 +298,6 @@ func (c *groundingCollector) finalSources() []agent.RetrievedSource {
 	return out
 }
 
-// retrieved reports whether the answer's prompt carried retrieval evidence.
-func (c *groundingCollector) retrieved() bool { return len(c.finalSources()) > 0 }
-
 // sawRetrieveCall reports whether this turn ran the retrieve tool successfully.
 func (c *groundingCollector) sawRetrieveCall() bool { return c.retrieves > 0 }
 

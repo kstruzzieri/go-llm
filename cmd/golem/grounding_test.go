@@ -361,9 +361,6 @@ func TestGroundingCollectorEvidenceFreeFinalStepClearsEarlierEvidence(t *testing
 	if got := c.finalSources(); len(got) != 0 {
 		t.Fatalf("an evidence-free final step must present no evidence, got %+v", got)
 	}
-	if c.retrieved() {
-		t.Fatal("retrieved() must be false when the final step carried no evidence")
-	}
 }
 
 // TestGroundingCollectorIgnoresPendingFromAnotherStep pins the fail-closed
