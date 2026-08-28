@@ -14,7 +14,7 @@ import (
 	"unicode/utf8"
 )
 
-// seatbeltCleanAbs reports whether p is an absolute POSIX path in canonical
+// posixCleanAbs reports whether p is an absolute POSIX path in canonical
 // spelling. SBPL paths are always POSIX (Seatbelt exists only on macOS), so
 // the stdlib path package is used deliberately instead of filepath: the
 // builder must behave identically on the Linux CI hosts that unit-test it.
@@ -22,7 +22,7 @@ import (
 // paths before matching, so an un-normalized spelling (dot-dot, trailing
 // slash) could evade the broad-root string checks while enforcing something
 // else entirely.
-func seatbeltCleanAbs(p string) bool {
+func posixCleanAbs(p string) bool {
 	return strings.HasPrefix(p, "/") && path.Clean(p) == p
 }
 
@@ -56,7 +56,7 @@ func sbplQuote(path string) (string, error) {
 func seatbeltMetadataAncestors(paths []string) ([]string, error) {
 	seen := map[string]bool{}
 	for _, p := range paths {
-		if !seatbeltCleanAbs(p) {
+		if !posixCleanAbs(p) {
 			return nil, fmt.Errorf("tools: seatbelt ancestor computation requires clean absolute paths, got %q", p)
 		}
 		for dir := path.Dir(p); ; dir = path.Dir(dir) {
@@ -98,7 +98,7 @@ func seatbeltAllowancePath(kind, p string) (string, error) {
 	if p == "" {
 		return "", fmt.Errorf("tools: seatbelt profile requires a %s path", kind)
 	}
-	if !seatbeltCleanAbs(p) {
+	if !posixCleanAbs(p) {
 		return "", fmt.Errorf("tools: seatbelt %s path %q must be absolute and in canonical spelling", kind, p)
 	}
 	if seatbeltBroadRoot(p) {
@@ -139,7 +139,7 @@ func buildSeatbeltProfile(p seatbeltPolicy) (string, error) {
 	ancestors := slices.Compact(slices.Sorted(slices.Values(p.metadataAncestors)))
 	ancQ := make([]string, 0, len(ancestors))
 	for _, dir := range ancestors {
-		if !seatbeltCleanAbs(dir) {
+		if !posixCleanAbs(dir) {
 			return "", fmt.Errorf("tools: seatbelt metadata ancestor %q must be absolute and in canonical spelling", dir)
 		}
 		q, err := sbplQuote(dir)
@@ -187,10 +187,10 @@ func buildSeatbeltProfile(p seatbeltPolicy) (string, error) {
 	return b.String(), nil
 }
 
-// seatbeltChildEnv returns env with every inherited TMPDIR entry removed and
+// sandboxChildEnv returns env with every inherited TMPDIR entry removed and
 // exactly one TMPDIR naming the private per-invocation directory. Inherited
 // TMPDIR values are command input, never authority to widen the profile (D5).
-func seatbeltChildEnv(env []string, privateTemp string) []string {
+func sandboxChildEnv(env []string, privateTemp string) []string {
 	out := make([]string, 0, len(env)+1)
 	for _, e := range env {
 		if strings.HasPrefix(e, "TMPDIR=") {
@@ -201,13 +201,14 @@ func seatbeltChildEnv(env []string, privateTemp string) []string {
 	return append(out, "TMPDIR="+privateTemp)
 }
 
-// seatbeltCollectSystemRoots canonicalizes the fixed system read roots for one
+// collectSystemRoots canonicalizes fixed system read roots for one
 // invocation. Missing roots are omitted (strictly narrower); a root that
-// canonicalizes to a broad root, or to the workspace/home or a parent of
-// either, fails closed — it must never enter the profile, and silently
-// dropping it would hide an attack indicator (a system path aliased at or
-// above user data).
-func seatbeltCollectSystemRoots(roots []string, workspaceRoot, home string) ([]string, error) {
+// canonicalizes to a broad root per the runtime's predicate, or to the
+// workspace/home or a parent of either, fails closed — it must never enter
+// the policy, and silently dropping it would hide an attack indicator (a
+// system path aliased at or above user data). Shared by the Seatbelt (#442)
+// and bwrap (#441) collectors; each passes its own broad-root predicate.
+func collectSystemRoots(roots []string, workspaceRoot, home string, broad func(string) bool) ([]string, error) {
 	coveredBy := func(root, target string) bool {
 		return target != "" && (root == target || strings.HasPrefix(target, root+"/"))
 	}
@@ -217,11 +218,11 @@ func seatbeltCollectSystemRoots(roots []string, workspaceRoot, home string) ([]s
 		if err != nil {
 			continue // missing root: omitted, strictly narrower
 		}
-		if seatbeltBroadRoot(canon) || !seatbeltCleanAbs(canon) {
-			return nil, fmt.Errorf("tools: seatbelt system root %q canonicalizes to broad root %q", root, canon)
+		if broad(canon) || !posixCleanAbs(canon) {
+			return nil, fmt.Errorf("tools: sandbox system root %q canonicalizes to broad root %q", root, canon)
 		}
 		if coveredBy(canon, workspaceRoot) || coveredBy(canon, home) {
-			return nil, fmt.Errorf("tools: seatbelt system root %q (%q) covers the workspace or home", root, canon)
+			return nil, fmt.Errorf("tools: sandbox system root %q (%q) covers the workspace or home", root, canon)
 		}
 		out = append(out, canon)
 	}
