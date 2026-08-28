@@ -148,6 +148,24 @@ func bwrapPayloadEnvArgs(env []string) ([]string, error) {
 	return args, nil
 }
 
+// bwrapExeCoveredByReadOnly reports whether the resolved executable path is
+// lexically inside one of the read-only mounted regions (a reviewed system
+// root, a fixed-layout directory bind, or a fixed-layout symlink whose
+// canonical target the collector already verified is covered).
+func bwrapExeCoveredByReadOnly(exe string, sysRoots, layoutDirs, linkDests []string) bool {
+	within := func(root string) bool {
+		return exe == root || strings.HasPrefix(exe, root+"/")
+	}
+	for _, set := range [][]string{sysRoots, layoutDirs, linkDests} {
+		for _, root := range set {
+			if within(root) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // buildBwrapArgs renders the bwrap policy argv for one invocation in the
 // fixed D5 order: isolation prefix, payload environment, /proc and /dev,
 // quota'd private /dev/shm, reviewed read-only system roots, fixed-layout
@@ -244,7 +262,17 @@ func buildBwrapArgs(p bwrapPolicy) ([]string, error) {
 	}
 	args = append(args, "--tmpfs", "/tmp")
 	args = append(args, "--bind", p.workspaceRoot, p.workspaceRoot)
-	args = append(args, "--ro-bind", p.exePath, p.exePath)
+	// The executable literal is emitted only when the resolved path is NOT
+	// already inside a read-only mounted region: a redundant file bind into
+	// an RO bind fails mountpoint creation ("Can't create file"), and the
+	// executable is already readable there. A workspace-resident executable
+	// keeps the literal (read-only over the rw bind, blocking
+	// self-modification of the approved binary), and an out-of-policy path
+	// keeps it so the payload is reachable at all (bwrap creates the parent
+	// spine in the still-writable base tmpfs).
+	if !bwrapExeCoveredByReadOnly(p.exePath, sysRoots, layoutDirs, linkDests) {
+		args = append(args, "--ro-bind", p.exePath, p.exePath)
+	}
 	args = append(args, "--chdir", p.chdir)
 	args = append(args, "--remount-ro", "/")
 	return args, nil

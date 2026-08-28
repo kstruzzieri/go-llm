@@ -92,7 +92,6 @@ func TestBuildBwrapArgsFullPolicy(t *testing.T) {
 		"--ro-bind", "/etc/ld.so.cache", "/etc/ld.so.cache",
 		"--size", "536870912", "--tmpfs", "/tmp",
 		"--bind", "/home/u/proj", "/home/u/proj",
-		"--ro-bind", "/usr/bin/go", "/usr/bin/go",
 		"--chdir", "/home/u/proj/sub",
 		"--remount-ro", "/",
 	}
@@ -125,7 +124,6 @@ func TestBuildBwrapArgsAllowNetworkOmitsUnshareNet(t *testing.T) {
 		"--ro-bind", "/etc/ld.so.cache", "/etc/ld.so.cache",
 		"--size", "536870912", "--tmpfs", "/tmp",
 		"--bind", "/home/u/proj", "/home/u/proj",
-		"--ro-bind", "/usr/bin/go", "/usr/bin/go",
 		"--chdir", "/home/u/proj/sub",
 		"--remount-ro", "/",
 	}
@@ -281,5 +279,37 @@ func TestBwrapConfigSupport(t *testing.T) {
 		DropCaps: []string{"NET_RAW"},
 	}); err != nil {
 		t.Fatalf("supported config rejected: %v", err)
+	}
+}
+
+// TestBuildBwrapArgsExeBindOnlyWhenUncovered pins the executable-literal
+// rule: a bind into an already read-only-mounted region fails mountpoint
+// creation and is redundant, so it is emitted only for workspace-resident
+// and out-of-policy executables.
+func TestBuildBwrapArgsExeBindOnlyWhenUncovered(t *testing.T) {
+	cases := map[string]struct {
+		exe  string
+		want bool
+	}{
+		"under system root":  {"/usr/bin/go", false},
+		"under layout dir":   {"/lib/ld-musl.so", false},
+		"under layout link":  {"/bin/true", false},
+		"inside workspace":   {"/home/u/proj/tool", true},
+		"out-of-policy path": {"/data/tools/custom", true},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			p := validBwrapPolicy()
+			p.exePath = tc.exe
+			got, err := buildBwrapArgs(p)
+			if err != nil {
+				t.Fatal(err)
+			}
+			joined := " " + strings.Join(got, " ") + " "
+			has := strings.Contains(joined, " --ro-bind "+tc.exe+" "+tc.exe+" ")
+			if has != tc.want {
+				t.Fatalf("exe bind present=%v, want %v: %q", has, tc.want, got)
+			}
+		})
 	}
 }

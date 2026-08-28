@@ -440,7 +440,6 @@ func TestBwrapPrepareWrapsRunSpec(t *testing.T) {
 		" --bind " + ws + " " + ws + " ",
 		" --chdir " + ws + " ",
 		" --setenv TMPDIR /tmp ",
-		" --ro-bind /usr/bin/true /usr/bin/true ",
 		" --remount-ro / /usr/bin/true ",
 	} {
 		if !strings.Contains(joined, must) {
@@ -455,6 +454,28 @@ func TestBwrapPrepareWrapsRunSpec(t *testing.T) {
 	}
 	if got.Dir != ws {
 		t.Fatalf("Dir = %q, want %q", got.Dir, ws)
+	}
+	// /usr/bin/true is covered by the fake /usr/bin read-only root, so no
+	// redundant executable literal may appear (it would fail mountpoint
+	// creation inside the RO bind).
+	if strings.Contains(joined, " --ro-bind /usr/bin/true /usr/bin/true ") {
+		t.Fatalf("covered executable still literal-bound: %q", got.Argv)
+	}
+}
+
+func TestBwrapPrepareBindsWorkspaceResidentExecutable(t *testing.T) {
+	ws := wsTempDir(t)
+	runner := &captureRunner{}
+	b := testBwrapBackend(runner, &captureStarter{proc: fakeProcess{}}, SandboxConfig{Runtime: SandboxRuntimeBwrap}, 0)
+	spec := bwrapTestSpec(t, ws)
+	exe := ws + "/tool"
+	spec.Path = exe
+	if _, err := b.Run(context.Background(), spec); err != nil {
+		t.Fatal(err)
+	}
+	joined := " " + strings.Join(runner.spec.Argv, " ") + " "
+	if !strings.Contains(joined, " --ro-bind "+exe+" "+exe+" ") {
+		t.Fatalf("workspace-resident executable lost its read-only literal: %q", runner.spec.Argv)
 	}
 }
 
