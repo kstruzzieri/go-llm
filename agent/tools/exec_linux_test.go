@@ -628,8 +628,8 @@ func TestBwrapPrepareRejectsInheritableFDs(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer r.Close()
-	defer w.Close()
+	defer func() { _ = r.Close() }()
+	defer func() { _ = w.Close() }()
 
 	runner := &captureRunner{}
 	b := testBwrapBackend(runner, &captureStarter{proc: fakeProcess{}}, SandboxConfig{Runtime: SandboxRuntimeBwrap}, 0)
@@ -639,7 +639,9 @@ func TestBwrapPrepareRejectsInheritableFDs(t *testing.T) {
 		t.Fatalf("CLOEXEC descriptors rejected: %v", err)
 	}
 
-	fd := int(w.Fd()) // Fd() clears CLOEXEC as a side effect on some paths; force-set state explicitly below
+	// Go pipe fds are created CLOEXEC; clear the flag explicitly to simulate
+	// an inheritable host descriptor, and restore it afterwards.
+	fd := int(w.Fd())
 	if _, _, errno := syscall.Syscall(syscall.SYS_FCNTL, uintptr(fd), syscall.F_SETFD, 0); errno != 0 {
 		t.Fatal(errno)
 	}
