@@ -47,8 +47,11 @@ background alike — inside per-invocation Bubblewrap namespaces:
   reservations, so VM-heavy runtimes need generous caps. True aggregate
   enforcement requires delegated cgroup v2 and is deliberately out of scope.
   `/dev` is remounted read-only because `--dev` creates its own tmpfs that
-  neither `RLIMIT_AS` nor either quota would otherwise bound. `CPULimit` is
-  rejected; requested `DropCaps` are subsumed by the unconditional drop-ALL.
+  neither `RLIMIT_AS` nor either quota would otherwise bound. Because a bare
+  number would read as a total ceiling the backend does not enforce, the
+  approval preview renders the scope: `memory_cap=512MiB/process`. `CPULimit`
+  is rejected; requested `DropCaps` are subsumed by the unconditional
+  drop-ALL.
 - Fail closed, never a host fallback: missing or unsafely packaged
   `/usr/bin/bwrap` (and, for capped configs, `/usr/bin/prlimit`), or a
   failed active capability probe of the production namespace prefix,
@@ -73,7 +76,9 @@ background alike — inside per-invocation Bubblewrap namespaces:
 Approval identity: bwrap grants live in their own `sb:<digest>:` key
 namespace derived from the approved `SandboxConfig`; the `exec:v3` /
 `exec-bg:v2` fingerprint recipes are unchanged. The approval preview
-renders `runtime="bwrap"` with the `temp=private` marker.
+renders `runtime="bwrap"` with the `temp=private` marker and, when a cap is
+set, the `/process` memory scope. Preview text is presentation only and is
+not part of the key, so no existing grant changes meaning.
 
 ### Added — agent/tools: macOS Seatbelt sandbox backend (#442)
 

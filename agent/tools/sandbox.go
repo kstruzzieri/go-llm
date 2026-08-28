@@ -170,6 +170,17 @@ func renderSandboxLine(cfg SandboxConfig) string {
 	memory, cpu, caps := "none", "none", "[]"
 	if cfg.MemoryCapMB > 0 {
 		memory = fmt.Sprintf("%dMiB", cfg.MemoryCapMB)
+		// Scope qualifier (#441): bwrap spends the approved value as three
+		// independent, additive budgets -- RLIMIT_AS plus a quota on each
+		// private tmpfs -- and RLIMIT_AS is per process, so a forking payload
+		// is not bounded by it at all. A bare "512MiB" reads as a total
+		// ceiling the backend does not enforce, and an approval prompt must
+		// not claim more than it delivers. Aggregate enforcement needs
+		// delegated cgroup v2 and is deliberately out of scope; until then
+		// the number is qualified rather than inflated.
+		if cfg.Runtime == SandboxRuntimeBwrap {
+			memory += "/process"
+		}
 	}
 	if cfg.CPULimit > 0 {
 		cpu = strconv.FormatFloat(cfg.CPULimit, 'g', -1, 64)
