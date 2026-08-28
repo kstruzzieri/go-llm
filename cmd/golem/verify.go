@@ -25,6 +25,9 @@ const (
 	// is actionable in its first lines; the rest is tokens the model pays for
 	// and does not need.
 	verifyObservationCap = 4 * 1024
+	// Keep a long command from crowding failure status and diagnostics out of
+	// the observation budget.
+	verifyCommandCap = verifyObservationCap / 4
 
 	verifyHeader = "\n--- post-batch verification (ran after all calls in this batch) ---\n"
 )
@@ -114,7 +117,12 @@ func approveVerify(ctx context.Context, approver agent.Approver, call provider.T
 
 // render builds the observation shell shared by every outcome.
 func (v *verifyRunner) render(status, tail string) string {
-	return fmt.Sprintf("%scommand: %s\nstatus: %s\n%s", verifyHeader, v.cmd.Command(), status, tail)
+	command, _ := capVerifyOutput(v.cmd.Command(), verifyCommandCap)
+	out, _ := capVerifyOutput(
+		fmt.Sprintf("%scommand: %s\nstatus: %s\n%s", verifyHeader, command, status, tail),
+		verifyObservationCap,
+	)
+	return out
 }
 
 // renderResult renders a completed run. A pass carries status and exit code
@@ -132,8 +140,14 @@ func (v *verifyRunner) renderResult(res agenttools.VerifyResult) string {
 	if res.TimedOut {
 		head = ""
 	}
-	return v.render("failed", fmt.Sprintf("%stimed_out: %t\noutput_truncated: %t\n%s",
-		head, res.TimedOut, res.Truncated || capped, body))
+	truncated := res.Truncated || capped
+	tail := fmt.Sprintf("%stimed_out: %t\noutput_truncated: %t\n", head, res.TimedOut, truncated)
+	body, observationCapped := capVerifyOutput(body, verifyObservationCap-len(v.render("failed", tail)))
+	if observationCapped {
+		truncated = true
+		tail = fmt.Sprintf("%stimed_out: %t\noutput_truncated: %t\n", head, res.TimedOut, truncated)
+	}
+	return v.render("failed", tail+body)
 }
 
 // verifyOutputBody lays out the captured streams, omitting an empty one so a
@@ -174,14 +188,22 @@ func verifyOutputBody(res agenttools.VerifyResult) (string, bool) {
 // runner reports its first failure first, and that is the actionable one. The
 // cut lands on a rune boundary so the model never reads a split rune.
 func capVerifyOutput(s string, limit int) (string, bool) {
+	s = strings.ToValidUTF8(s, "\uFFFD")
 	if len(s) <= limit {
 		return s, false
 	}
-	end := limit
+	if limit <= 0 {
+		return "", true
+	}
+	const suffix = "\n... [truncated]\n"
+	if limit <= len(suffix) {
+		return suffix[:limit], true
+	}
+	end := limit - len(suffix)
 	for end > 0 && !utf8.RuneStart(s[end]) {
 		end--
 	}
-	return s[:end] + "\n... [truncated]\n", true
+	return s[:end] + suffix, true
 }
 
 // sanitizeVerifyLine keeps a failure reason to one line so it cannot forge

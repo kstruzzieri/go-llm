@@ -15,12 +15,18 @@ import (
 // stubVerifyExec scripts the bounded command so the policy layer can be tested
 // without spawning anything.
 type stubVerifyExec struct {
-	res  agenttools.VerifyResult
-	err  error
-	runs int
+	res     agenttools.VerifyResult
+	err     error
+	runs    int
+	command string
 }
 
-func (s *stubVerifyExec) Command() string { return "go test ./..." }
+func (s *stubVerifyExec) Command() string {
+	if s.command != "" {
+		return s.command
+	}
+	return "go test ./..."
+}
 func (s *stubVerifyExec) Preview() string {
 	return "post-write verification command:\n  argv: go test ./...\n"
 }
@@ -227,6 +233,71 @@ func TestVerifyRunnerCapsModelVisibleOutput(t *testing.T) {
 	}
 }
 
+func TestVerifyRunnerCapsTheEntireModelVisibleFailureObservation(t *testing.T) {
+	const failure = "./foo.go:12:2: undefined: bar\n"
+	out, err := newVerifyRunner(&stubVerifyExec{res: agenttools.VerifyResult{
+		ExitCode: 2,
+		Stderr:   []byte(failure + strings.Repeat("stderr noise\n", verifyObservationCap)),
+		Stdout:   []byte(strings.Repeat("stdout noise\n", verifyObservationCap)),
+	}}).Verify(context.Background(), approved())
+	if err != nil {
+		t.Fatalf("Verify: %v", err)
+	}
+	if len(out) > verifyObservationCap {
+		t.Fatalf("entire model-visible observation exceeds cap: %d bytes", len(out))
+	}
+	for _, want := range []string{
+		"command: go test ./...", "status: failed", "exit_code: 2",
+		"timed_out: false", "output_truncated: true", "--- stderr ---", failure,
+		"--- stdout ---",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("missing %q in observation:\n%s", want, out[:300])
+		}
+	}
+	if strings.Index(out, "--- stderr ---") > strings.Index(out, "--- stdout ---") {
+		t.Fatal("stderr must be rendered before stdout")
+	}
+	if !utf8.ValidString(out) {
+		t.Fatal("capped observation is not valid UTF-8")
+	}
+}
+
+func TestVerifyRunnerCapsLongCommandObservation(t *testing.T) {
+	const failure = "./foo.go:12:2: undefined: bar"
+	out, err := newVerifyRunner(&stubVerifyExec{
+		command: strings.Repeat("x", verifyObservationCap),
+		res: agenttools.VerifyResult{
+			ExitCode: 1,
+			Stderr:   []byte(failure),
+		},
+	}).Verify(context.Background(), approved())
+	if err != nil {
+		t.Fatalf("Verify: %v", err)
+	}
+	if len(out) > verifyObservationCap {
+		t.Fatalf("long command made observation exceed cap: %d bytes", len(out))
+	}
+	for _, want := range []string{"status: failed", "exit_code: 1", failure} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("long command hid %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestVerifyRunnerNormalizesInvalidUTF8Observation(t *testing.T) {
+	out, err := newVerifyRunner(&stubVerifyExec{res: agenttools.VerifyResult{
+		ExitCode: 1,
+		Stderr:   []byte{'b', 'a', 'd', ':', ' ', 0xff, 0xfe},
+	}}).Verify(context.Background(), approved())
+	if err != nil {
+		t.Fatalf("Verify: %v", err)
+	}
+	if !utf8.ValidString(out) {
+		t.Fatalf("observation is not valid UTF-8: %q", out)
+	}
+}
+
 // TestVerifyRunnerNeverLosesStderrToAChattyStdout is the regression pin for
 // the failure this ordering exists to prevent: a verifier that prints a lot on
 // stdout and reports its actual error on stderr must not have the error cut
@@ -279,10 +350,10 @@ func TestVerifyRunnerBoundsTheTotalAcrossBothStreams(t *testing.T) {
 	}
 }
 
-func TestVerifyRunnerSingleStreamGetsTheFullBudget(t *testing.T) {
-	// With only one stream populated there is nothing to split the budget
-	// with, so the halving must not apply.
-	body := strings.Repeat("e", verifyObservationCap-100)
+func TestVerifyRunnerSingleStreamDoesNotSplitItsAvailableBudget(t *testing.T) {
+	// With only one stream populated there is nothing to split the available
+	// body budget with, so the two-stream halving must not apply.
+	body := strings.Repeat("e", verifyObservationCap/2+100)
 	out, err := newVerifyRunner(&stubVerifyExec{res: agenttools.VerifyResult{
 		ExitCode: 1, Stderr: []byte(body),
 	}}).Verify(context.Background(), approved())

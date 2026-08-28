@@ -133,6 +133,55 @@ func TestLoadVerifyConfigRefusesSymlink(t *testing.T) {
 	}
 }
 
+func TestLoadVerifyConfigRefusesPathReplacedAfterLstat(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("unix symlink semantics")
+	}
+	root := t.TempDir()
+	path := filepath.Join(root, verifyConfigName)
+	writeGolemJSON(t, root, `{"verify":{"argv":["go","original"]}}`)
+	replacement := filepath.Join(t.TempDir(), "replacement.json")
+	if err := os.WriteFile(replacement, []byte(`{"verify":{"argv":["go","replacement"]}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	afterVerifyConfigLstatForTest = func() {
+		if err := os.Remove(path); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(replacement, path); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Cleanup(func() { afterVerifyConfigLstatForTest = nil })
+
+	spec, err := loadVerifyConfig(root)
+	if err == nil || spec != nil {
+		t.Fatalf("a replacement after Lstat must be refused, got spec=%+v err=%v", spec, err)
+	}
+}
+
+func TestLoadVerifyConfigRefusesFileGrownAfterLstat(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, verifyConfigName)
+	writeGolemJSON(t, root, `{"verify":{"argv":["go"]}}`)
+	afterVerifyConfigLstatForTest = func() {
+		f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = f.Close() }()
+		if _, err := f.WriteString(strings.Repeat(" ", verifyConfigMaxBytes)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Cleanup(func() { afterVerifyConfigLstatForTest = nil })
+
+	spec, err := loadVerifyConfig(root)
+	if err == nil || spec != nil || !strings.Contains(err.Error(), "too large") {
+		t.Fatalf("a file grown after Lstat must be refused as too large, got spec=%+v err=%v", spec, err)
+	}
+}
+
 func TestLoadVerifyConfigRefusesDirectory(t *testing.T) {
 	root := t.TempDir()
 	if err := os.Mkdir(filepath.Join(root, verifyConfigName), 0o755); err != nil {

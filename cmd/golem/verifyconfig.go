@@ -60,6 +60,11 @@ type verifySpec struct {
 	TimeoutSeconds *int     `json:"timeout_seconds"`
 }
 
+// afterVerifyConfigLstatForTest lets the regression test deterministically
+// replace the pathname after it has been inspected but before it is opened.
+// It is nil in production.
+var afterVerifyConfigLstatForTest func()
+
 // Timeout is the effective per-run deadline.
 func (s *verifySpec) Timeout() time.Duration {
 	if s.TimeoutSeconds == nil {
@@ -82,7 +87,8 @@ func loadVerifyConfig(root string) (*verifySpec, error) {
 	}
 
 	// Lstat, not Stat: a symlink here would let a workspace point the loader
-	// at a file outside it.
+	// at a file outside it. The opened descriptor is compared below, so a
+	// replacement between this check and open is rejected too.
 	fi, err := os.Lstat(path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -96,10 +102,34 @@ func loadVerifyConfig(root string) (*verifySpec, error) {
 	if fi.Size() > verifyConfigMaxBytes {
 		return fail("too large (%d bytes, limit %d)", fi.Size(), verifyConfigMaxBytes)
 	}
+	if afterVerifyConfigLstatForTest != nil {
+		afterVerifyConfigLstatForTest()
+	}
 
-	raw, err := os.ReadFile(path)
+	f, err := os.Open(path)
 	if err != nil {
 		return fail("%v", err)
+	}
+	defer func() { _ = f.Close() }()
+	opened, err := f.Stat()
+	if err != nil {
+		return fail("%v", err)
+	}
+	if !opened.Mode().IsRegular() {
+		return fail("must be a regular file, got mode %s", opened.Mode().Type())
+	}
+	if !os.SameFile(fi, opened) {
+		return fail("changed while opening")
+	}
+
+	// The pre-open size is only an early refusal. Limit the descriptor read as
+	// well because the file can grow after that check.
+	raw, err := io.ReadAll(io.LimitReader(f, verifyConfigMaxBytes+1))
+	if err != nil {
+		return fail("%v", err)
+	}
+	if len(raw) > verifyConfigMaxBytes {
+		return fail("too large (%d bytes, limit %d)", len(raw), verifyConfigMaxBytes)
 	}
 	// Checked before decoding so a non-object file gets a message about the
 	// schema instead of the decoder's Go type name.

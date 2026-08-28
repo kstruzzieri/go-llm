@@ -122,6 +122,8 @@ func (v *VerifyCommand) Preview() string {
 	fmt.Fprintf(&b, "  timeout: %s\n", fmtTimeout(v.pending.timeout))
 	fmt.Fprintf(&b, "  env:     %s\n", strings.Join(names, ", "))
 	fmt.Fprintf(&b, "  id:      %s\n", id)
+	b.WriteString("  warning: unsandboxed; runs with the host user's filesystem and network authority\n")
+	b.WriteString("           verifier writes are outside /undo\n")
 	b.WriteString("  note:    declared by this workspace; later edits to files here\n")
 	b.WriteString("           may change the code this command runs\n")
 	return b.String()

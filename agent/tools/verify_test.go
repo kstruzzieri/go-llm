@@ -130,7 +130,10 @@ func TestVerifyCommandPreview(t *testing.T) {
 	}
 	v := newTestVerifyCommand(t, ws, &stubRunner{}, helperArgv(t, "echo", "hi"), "sub", 45*time.Second)
 	preview := v.Preview()
-	for _, want := range []string{"__golem_exec_helper__", "sub", "45s", "may change the code this command runs"} {
+	for _, want := range []string{
+		"__golem_exec_helper__", "sub", "45s", "may change the code this command runs",
+		"unsandboxed", "host user's filesystem", "network authority", "outside /undo",
+	} {
 		if !strings.Contains(preview, want) {
 			t.Fatalf("preview missing %q:\n%s", want, preview)
 		}
