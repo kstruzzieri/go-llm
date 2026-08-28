@@ -855,7 +855,7 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 	}
 
 	thinkOpts, thinkLine := resolveThinkOptions(ctx, bundle.Models, plan.chain, f.think)
-	inputCeiling := resolveInputCeiling(ctx, bundle.Models, plan.chain, f.inputCeiling, f.outputReserve, resolver != nil)
+	inputCeiling := resolveInputCeiling(ctx, bundle.Models, plan.chain, plan.useCase, f.inputCeiling, f.outputReserve, resolver != nil)
 
 	if autoErr != nil && !f.noRag && f.ragDB == "" {
 		warns = append(warns, "retrieve auto-index disabled: "+autoErr.Error())
@@ -1010,7 +1010,9 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 			if perr != nil {
 				return perr
 			}
-			childCeiling = resolveInputCeiling(ctx, bundle.Models, dchain, f.inputCeiling, f.outputReserve, resolver != nil).ceiling
+			// Same constant the dispatch caller below routes with, so the
+			// child's ceiling and the child's route can never disagree.
+			childCeiling = resolveInputCeiling(ctx, bundle.Models, dchain, dispatchUseCase, f.inputCeiling, f.outputReserve, resolver != nil).ceiling
 		}
 		dispatchNotice = newFeedbackNotifier(func(line string) {
 			_, _ = fmt.Fprintln(stderr, line)

@@ -40,7 +40,16 @@ func (r inputCeilingResolution) line() string {
 	return fmt.Sprintf("input ceiling: %d tokens (%s)", r.ceiling, source)
 }
 
-func resolveInputCeiling(ctx context.Context, reg capChecker, chain []string, explicit, outputReserve int, canResolveToolCall bool) inputCeilingResolution {
+// resolveInputCeiling derives the per-turn input ceiling for the chain that
+// will actually serve, under the use case it will actually be routed as.
+//
+// useCase is a parameter rather than a literal because both inputs below are
+// use-case dependent, and the router applies the CALLER's use case, not
+// "agent": EffectiveContextWindow honors a model's QualityCtxCeiling only for
+// quality-sensitive use cases, and DefaultExpectedOutput varies per use case.
+// A ceiling derived under one use case and spent under another sizes context
+// against a budget the router never applies (#476 D4).
+func resolveInputCeiling(ctx context.Context, reg capChecker, chain []string, useCase string, explicit, outputReserve int, canResolveToolCall bool) inputCeilingResolution {
 	if explicit > 0 {
 		return inputCeilingResolution{ceiling: explicit, source: inputCeilingExplicit}
 	}
@@ -51,18 +60,18 @@ func resolveInputCeiling(ctx context.Context, reg capChecker, chain []string, ex
 		window := agent.DefaultInputCeiling
 		if profile != nil && profile.ContextWindow > 0 {
 			// Mirror the router's admission budget: it validates input against
-			// EffectiveContextWindow("agent") minus the request's expected
+			// EffectiveContextWindow(useCase) minus the request's expected
 			// output, and a zero -output-reserve leaves ExpectedOutput unset,
-			// so the router reserves DefaultExpectedOutput("agent") implicitly.
+			// so the router reserves DefaultExpectedOutput(useCase) implicitly.
 			// Without that reserve here, a long session assembles past the
 			// router budget and routing fails with ErrBudgetAdaptationRequired
 			// instead of compacting. A nonzero -output-reserve is already
 			// subtracted on both sides (turnBudget and ExpectedOutput), so the
 			// full window is correct then.
-			window = profile.EffectiveContextWindow("agent")
+			window = profile.EffectiveContextWindow(useCase)
 			reserve := outputReserve
 			if reserve <= 0 {
-				reserve = provider.DefaultExpectedOutput("agent")
+				reserve = provider.DefaultExpectedOutput(useCase)
 			}
 			if window <= reserve {
 				// The router's budget for this model is zero: it can never be
