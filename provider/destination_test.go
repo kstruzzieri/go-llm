@@ -381,6 +381,37 @@ func TestDestinationPolicyExactSet(t *testing.T) {
 	}
 }
 
+// I12 crossed with I20: loopback is auto-admitted independently of the grant
+// set, so a user who grants one remote destination does not thereby have to
+// enumerate their local backends. Tested separately from the zero-value case
+// because a guard like "local && len(allowed) == 0" satisfies the zero-value
+// test while silently breaking every local route the moment one remote
+// destination is granted.
+func TestDestinationPolicyPermitsUnlistedLoopbackAlongsideExactGrants(t *testing.T) {
+	remote, err := NewDestination("opencode", "https://opencode.ai/zen/go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := NewDestinationPolicy(remote)
+
+	for _, raw := range []string{
+		"http://127.0.0.1:8090",
+		"http://localhost:11434",
+		"http://[::1]:8080",
+	} {
+		local, err := NewDestination("llamacpp", raw)
+		if err != nil {
+			t.Fatalf("NewDestination(%q): %v", raw, err)
+		}
+		if !p.Permits(local) {
+			t.Errorf("exact-set policy denied unlisted loopback %q", raw)
+		}
+	}
+	if !p.Permits(remote) {
+		t.Error("exact-set policy lost its remote grant")
+	}
+}
+
 func TestDestinationPolicyIsImmutableAfterConstruction(t *testing.T) {
 	granted, err := NewDestination("opencode", "https://opencode.ai/zen/go")
 	if err != nil {
