@@ -154,6 +154,7 @@ func TestBwrapProbeArgvUncappedDeniedNet(t *testing.T) {
 		"--ro-bind", "/", "/", "--proc", "/proc", "--dev", "/dev",
 		"--tmpfs", "/dev/shm",
 		"--tmpfs", "/tmp",
+		"--remount-ro", "/dev",
 		"--remount-ro", "/",
 		"/bin/true",
 	}
@@ -180,6 +181,7 @@ func TestBwrapProbeArgvCappedAllowedNet(t *testing.T) {
 		"--ro-bind", "/", "/", "--proc", "/proc", "--dev", "/dev",
 		"--size", "268435456", "--tmpfs", "/dev/shm",
 		"--size", "268435456", "--tmpfs", "/tmp",
+		"--remount-ro", "/dev",
 		"--remount-ro", "/",
 		"/bin/true",
 	}
@@ -418,8 +420,8 @@ func testBwrapBackend(runner commandRunner, starter backgroundStarter, cfg Sandb
 func bwrapTestSpec(t *testing.T, ws string) execSpec {
 	t.Helper()
 	return execSpec{
-		Path:          "/usr/bin/true",
-		Argv:          []string{"true", "arg1"},
+		Path:          "/bin/sh",
+		Argv:          []string{"sh", "arg1"},
 		Dir:           ws,
 		Env:           []string{"PATH=/usr/bin", "HOME=/home/u", "TMPDIR=/ambient"},
 		WorkspaceRoot: ws,
@@ -456,7 +458,7 @@ func TestBwrapPrepareWrapsRunSpec(t *testing.T) {
 	}
 	// The payload command is the exact suffix; interior policy ordering is
 	// pinned literally by the Task 3 builder tests.
-	if !slices.Equal(got.Argv[len(got.Argv)-2:], []string{"/usr/bin/true", "arg1"}) {
+	if !slices.Equal(got.Argv[len(got.Argv)-2:], []string{"/bin/sh", "arg1"}) {
 		t.Fatalf("payload suffix = %q", got.Argv[len(got.Argv)-2:])
 	}
 	joined := " " + strings.Join(got.Argv, " ") + " "
@@ -464,7 +466,7 @@ func TestBwrapPrepareWrapsRunSpec(t *testing.T) {
 		" --bind " + ws + " " + ws + " ",
 		" --chdir " + ws + " ",
 		" --setenv TMPDIR /tmp ",
-		" --remount-ro / /usr/bin/true ",
+		" --remount-ro / /bin/sh ",
 	} {
 		if !strings.Contains(joined, must) {
 			t.Fatalf("wrapped argv missing %q:\n%q", must, got.Argv)
@@ -479,10 +481,10 @@ func TestBwrapPrepareWrapsRunSpec(t *testing.T) {
 	if got.Dir != ws {
 		t.Fatalf("Dir = %q, want %q", got.Dir, ws)
 	}
-	// /usr/bin/true is covered by the fake /usr/bin read-only root, so no
-	// redundant executable literal may appear (it would fail mountpoint
-	// creation inside the RO bind).
-	if strings.Contains(joined, " --ro-bind /usr/bin/true /usr/bin/true ") {
+	// /bin/sh canonicalizes under a covered read-only region, so no redundant
+	// executable literal may appear (it would fail mountpoint creation inside
+	// the RO bind).
+	if strings.Contains(joined, " --ro-bind /bin/sh ") {
 		t.Fatalf("covered executable still literal-bound: %q", got.Argv)
 	}
 }
@@ -492,7 +494,10 @@ func TestBwrapPrepareBindsWorkspaceResidentExecutable(t *testing.T) {
 	runner := &captureRunner{}
 	b := testBwrapBackend(runner, &captureStarter{proc: fakeProcess{}}, SandboxConfig{Runtime: SandboxRuntimeBwrap}, 0)
 	spec := bwrapTestSpec(t, ws)
-	exe := ws + "/tool"
+	exe := filepath.Join(ws, "tool")
+	if err := os.WriteFile(exe, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
 	spec.Path = exe
 	if _, err := b.Run(context.Background(), spec); err != nil {
 		t.Fatal(err)
@@ -616,32 +621,77 @@ func TestBwrapStartPropagatesSpawnError(t *testing.T) {
 	}
 }
 
-func TestExistingPolicyPaths(t *testing.T) {
+func TestSafeEtcPolicyPaths(t *testing.T) {
 	dir := t.TempDir()
+	ws := filepath.Join(dir, "ws")
+	home := filepath.Join(dir, "home")
+	for _, d := range []string{ws, home, filepath.Join(dir, "sub")} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
 	file := filepath.Join(dir, "file")
 	if err := os.WriteFile(file, []byte("x"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	sub := filepath.Join(dir, "sub")
-	if err := os.Mkdir(sub, 0o755); err != nil {
+	// The systemd shape: /etc/resolv.conf -> /run/systemd/resolve/... . A
+	// canonical target outside /etc is legitimate and must stay accepted.
+	benignLink := filepath.Join(dir, "benign-link")
+	if err := os.Symlink(file, benignLink); err != nil {
 		t.Fatal(err)
 	}
-	linked := filepath.Join(dir, "linked")
-	if err := os.Symlink(file, linked); err != nil {
+	toRoot := filepath.Join(dir, "to-root")
+	if err := os.Symlink("/", toRoot); err != nil {
 		t.Fatal(err)
 	}
-	missing := filepath.Join(dir, "missing")
+	toWorkspace := filepath.Join(dir, "to-ws")
+	if err := os.Symlink(ws, toWorkspace); err != nil {
+		t.Fatal(err)
+	}
+	toWorkspaceParent := filepath.Join(dir, "to-ws-parent")
+	if err := os.Symlink(dir, toWorkspaceParent); err != nil {
+		t.Fatal(err)
+	}
+	toHome := filepath.Join(dir, "to-home")
+	if err := os.Symlink(home, toHome); err != nil {
+		t.Fatal(err)
+	}
+	dangling := filepath.Join(dir, "dangling")
+	if err := os.Symlink(filepath.Join(dir, "gone"), dangling); err != nil {
+		t.Fatal(err)
+	}
 
-	got, err := existingPolicyPaths([]string{file, sub, linked, missing})
+	kept, err := safeEtcPolicyPaths(
+		[]string{file, filepath.Join(dir, "sub"), benignLink, filepath.Join(dir, "missing"), dangling}, ws, home)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !slices.Equal(got, []string{file, sub, linked}) {
-		t.Fatalf("kept = %q", got)
+	if !slices.Equal(kept, []string{file, filepath.Join(dir, "sub"), benignLink}) {
+		t.Fatalf("kept = %q", kept)
 	}
 
-	if err := syscall.Mkfifo(filepath.Join(dir, "fifo"), 0o600); err == nil {
-		if _, err := existingPolicyPaths([]string{filepath.Join(dir, "fifo")}); err == nil {
+	rejects := map[string]struct {
+		path string
+		frag string
+	}{
+		"symlink to volume root":  {toRoot, "broad root"},
+		"symlink to workspace":    {toWorkspace, "covers the workspace"},
+		"symlink above workspace": {toWorkspaceParent, "covers the workspace"},
+		"symlink to home":         {toHome, "covers the workspace or home"},
+	}
+	for name, tc := range rejects {
+		t.Run(name, func(t *testing.T) {
+			if _, err := safeEtcPolicyPaths([]string{tc.path}, ws, home); err == nil {
+				t.Fatalf("accepted aliased policy path %q", tc.path)
+			} else if !strings.Contains(err.Error(), tc.frag) || !strings.Contains(err.Error(), tc.path) {
+				t.Fatalf("error %q must name the path and mention %q", err, tc.frag)
+			}
+		})
+	}
+
+	fifo := filepath.Join(dir, "fifo")
+	if err := syscall.Mkfifo(fifo, 0o600); err == nil {
+		if _, err := safeEtcPolicyPaths([]string{fifo}, ws, home); err == nil {
 			t.Fatal("fifo accepted as policy path")
 		}
 	}
@@ -659,10 +709,94 @@ func TestExistingPolicyPaths(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = os.Chmod(locked, 0o755) })
 	if os.Getuid() != 0 {
-		if _, err := existingPolicyPaths([]string{inside}); err == nil ||
+		if _, err := safeEtcPolicyPaths([]string{inside}, ws, home); err == nil ||
 			!strings.Contains(err.Error(), inside) {
 			t.Fatalf("permission failure must fail closed with the path: %v", err)
 		}
+	}
+}
+
+// TestDefaultBwrapCollect covers the PRODUCTION collector directly. The
+// constructor test can only assert it is non-nil, so dropping a guard here
+// (e.g. passing an empty home) is otherwise invisible to the whole suite.
+func TestDefaultBwrapCollect(t *testing.T) {
+	ws := wsTempDir(t)
+	roots, layoutDirs, links, err := defaultBwrapCollect(ws)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(roots) == 0 {
+		t.Fatal("no reviewed system roots collected on this host")
+	}
+	home := canonicalHome()
+	for _, r := range roots {
+		if !posixCleanAbs(r) {
+			t.Errorf("root %q is not canonical", r)
+		}
+		if pathCovers(r, ws) {
+			t.Errorf("root %q covers the workspace %q", r, ws)
+		}
+		if home != "" && pathCovers(r, home) {
+			t.Errorf("root %q covers home %q", r, home)
+		}
+	}
+	for _, d := range layoutDirs {
+		if !slices.Contains(bwrapLayoutDirs, d) {
+			t.Errorf("layout dir %q outside the fixed set", d)
+		}
+	}
+	for dest, target := range links {
+		if !slices.Contains(bwrapLayoutDirs, dest) {
+			t.Errorf("layout link %q outside the fixed set", dest)
+		}
+		if strings.HasPrefix(target, "/") {
+			t.Errorf("layout link %q has absolute target %q", dest, target)
+		}
+	}
+}
+
+// TestDefaultBwrapCollectRejectsRootAliasedIntoHome pins the home guard that a
+// mutation proved invisible: with the guard dropped, a system root aliased
+// into $HOME silently enters the read-only policy.
+func TestDefaultBwrapCollectRejectsRootAliasedIntoHome(t *testing.T) {
+	home := canonicalHome()
+	if home == "" {
+		t.Skip("no resolvable home on this host")
+	}
+	// collectSystemRoots is the unit the guard lives in; drive it with a root
+	// that canonicalizes above home, which is exactly the aliasing shape.
+	if _, err := collectSystemRoots([]string{home}, "/w", home, bwrapBroadRoot); err == nil {
+		t.Fatal("a system root equal to home was accepted")
+	}
+	parent := filepath.Dir(home)
+	if parent == home || parent == "/" {
+		return
+	}
+	if _, err := collectSystemRoots([]string{parent}, "/w", home, bwrapBroadRoot); err == nil {
+		t.Fatalf("a system root above home (%q) was accepted", parent)
+	}
+}
+
+func TestCollectBwrapLayoutOmitsDanglingLink(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "usr", "bin"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Debian/Ubuntu ship /lib32 -> usr/lib32 from base-files while the target
+	// belongs to separate 32-bit packages; purging those leaves this shape.
+	if err := os.Symlink("usr/lib32", filepath.Join(root, "lib32")); err != nil {
+		t.Fatal(err)
+	}
+	covered, err := filepath.EvalSymlinks(filepath.Join(root, "usr", "bin"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	dirs, links, err := collectBwrapLayout(root, []string{covered})
+	if err != nil {
+		t.Fatalf("dangling compatibility link must be omitted, not fatal: %v", err)
+	}
+	if len(dirs) != 0 || len(links) != 0 {
+		t.Fatalf("dangling link entered the policy: dirs=%q links=%q", dirs, links)
 	}
 }
 
@@ -699,5 +833,73 @@ func TestBwrapPrepareRejectsInheritableFDs(t *testing.T) {
 	}
 	if runner.called != 1 {
 		t.Fatalf("runner calls = %d, want 1 (control only)", runner.called)
+	}
+}
+
+// TestBwrapPrepareBindsCanonicalExecutableTarget is the discriminator for exe
+// canonicalization. --ro-bind resolves its source in the kernel, so binding a
+// symlink spelling mounts whatever the link points at when bwrap runs rather
+// than what was approved -- and a workspace symlink is writable by the payload
+// itself, which the disclosed same-UID host race does not cover. Fixtures
+// whose spelling and canonical target are both inside covered regions cannot
+// tell the two apart (proven: reverting to spec.Path left the rest of the
+// suite green), so this case puts the target outside every covered region,
+// where exactly one of the two spellings can appear.
+func TestBwrapPrepareBindsCanonicalExecutableTarget(t *testing.T) {
+	ws := wsTempDir(t)
+	outside := filepath.Join(t.TempDir(), "real-tool")
+	if err := os.WriteFile(outside, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	canonOutside, err := filepath.EvalSymlinks(outside)
+	if err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(ws, "link")
+	if err := os.Symlink(outside, link); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+
+	runner := &captureRunner{}
+	b := testBwrapBackend(runner, &captureStarter{proc: fakeProcess{}}, SandboxConfig{Runtime: SandboxRuntimeBwrap}, 0)
+	spec := bwrapTestSpec(t, ws)
+	spec.Path = link
+	if _, err := b.Run(context.Background(), spec); err != nil {
+		t.Fatal(err)
+	}
+	joined := " " + strings.Join(runner.spec.Argv, " ") + " "
+	if !strings.Contains(joined, " --ro-bind "+canonOutside+" "+canonOutside+" ") {
+		t.Fatalf("executable bind source is not the canonical target: %q", runner.spec.Argv)
+	}
+	if strings.Contains(joined, " --ro-bind "+link+" "+link+" ") {
+		t.Fatalf("executable bound by its symlink spelling: %q", runner.spec.Argv)
+	}
+	// The approved spelling is still what gets executed; inside the namespace
+	// it resolves through the workspace bind to the same object.
+	if runner.spec.Argv[len(runner.spec.Argv)-2] != link {
+		t.Fatalf("payload path changed from the approved spelling: %q", runner.spec.Argv)
+	}
+}
+
+// TestBwrapPrepareRejectsNonRegularExecutable pins the companion guard: the
+// canonical target must be a regular file, so a symlink retargeted at a
+// directory cannot become a recursive read-only mount of that subtree.
+func TestBwrapPrepareRejectsNonRegularExecutable(t *testing.T) {
+	ws := wsTempDir(t)
+	dir := t.TempDir()
+	link := filepath.Join(ws, "dirlink")
+	if err := os.Symlink(dir, link); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	runner := &captureRunner{}
+	b := testBwrapBackend(runner, &captureStarter{proc: fakeProcess{}}, SandboxConfig{Runtime: SandboxRuntimeBwrap}, 0)
+	spec := bwrapTestSpec(t, ws)
+	spec.Path = link
+	if _, err := b.Run(context.Background(), spec); err == nil ||
+		!strings.Contains(err.Error(), "non-regular file") {
+		t.Fatalf("directory-targeted executable accepted: %v", err)
+	}
+	if runner.called != 0 {
+		t.Fatal("runner ran despite a non-regular executable target")
 	}
 }

@@ -55,7 +55,7 @@ func probeBwrapArgv(bwrapPath, prlimitPath string, cfg SandboxConfig, capBytes i
 	if capBytes > 0 {
 		args = append(args, "--size", size)
 	}
-	args = append(args, "--tmpfs", "/tmp", "--remount-ro", "/", "/bin/true")
+	args = append(args, "--tmpfs", "/tmp", "--remount-ro", "/dev", "--remount-ro", "/", "/bin/true")
 	if capBytes > 0 {
 		args = append([]string{prlimitPath, "--as=" + size}, args...)
 	}
@@ -144,6 +144,15 @@ func collectBwrapLayout(root string, coveredRoots []string) (dirs []string, link
 			}
 			canon, cerr := filepath.EvalSymlinks(hostPath)
 			if cerr != nil {
+				if errors.Is(cerr, fs.ErrNotExist) {
+					// Dangling compatibility link: grants nothing, so it is
+					// omitted exactly like an absent entry. Debian and Ubuntu
+					// ship /lib32 -> usr/lib32 from base-files while the target
+					// belongs to separate 32-bit packages, so purging those
+					// leaves this shape on an otherwise healthy host. Failing
+					// here would break every sandboxed command permanently.
+					continue
+				}
 				return nil, nil, fmt.Errorf("tools: bwrap resolve layout link %q: %w", dest, cerr)
 			}
 			if !coveredBy(canon) {
@@ -163,16 +172,7 @@ func collectBwrapLayout(root string, coveredRoots []string) (dirs []string, link
 // canonicalized reviewed system roots (fail-closed on aliasing over the
 // workspace or home) plus the typed top-level layout of the real root.
 func defaultBwrapCollect(workspaceRoot string) (roots, layoutDirs []string, links map[string]string, err error) {
-	// Canonicalize home so the coverage check compares like paths with the
-	// EvalSymlinks-resolved system roots: a symlinked $HOME would otherwise
-	// miss a system root aliased into its real target. Best-effort — a
-	// missing or unresolvable home only skips the home guard; the workspace
-	// guard and broad-root rejection still apply.
-	home, _ := os.UserHomeDir()
-	if canon, cerr := filepath.EvalSymlinks(home); cerr == nil {
-		home = canon
-	}
-	roots, err = collectSystemRoots(bwrapDefaultSystemRoots, workspaceRoot, home, bwrapBroadRoot)
+	roots, err = collectSystemRoots(bwrapDefaultSystemRoots, workspaceRoot, canonicalHome(), bwrapBroadRoot)
 	if err != nil {
 		return nil, nil, nil, err
 	}
@@ -235,20 +235,59 @@ func newBwrapExecBackendAt(bwrapPath, prlimitPath string, probe bwrapProbeFunc, 
 	}, nil
 }
 
-// existingPolicyPaths stat-filters fixed policy literals: an absent path is
-// omitted (strictly narrower), while any other inspection failure — or an
-// entry that resolves to neither a regular file nor a directory — fails
-// closed so permission or I/O problems never become silent policy changes. A
-// symlink to a regular file or directory is allowed because bwrap binds the
-// resolved object.
-func existingPolicyPaths(paths []string) ([]string, error) {
+// canonicalHome resolves the invoking user's home directory so coverage checks
+// compare like paths with EvalSymlinks-resolved policy paths: a symlinked $HOME
+// would otherwise miss an alias into its real target. Best-effort — an
+// unresolvable home yields "" and only skips the home guard; the workspace
+// guard and broad-root rejection still apply.
+func canonicalHome() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	if canon, cerr := filepath.EvalSymlinks(home); cerr == nil {
+		return canon
+	}
+	return home
+}
+
+// safeEtcPolicyPaths filters the reviewed /etc literals for one invocation.
+// An absent or dangling literal is omitted (strictly narrower); any other
+// resolution failure fails closed so permission or I/O problems never become
+// silent policy changes.
+//
+// Every present literal is canonicalized and rejected when it resolves to a
+// broad root, or to the workspace or home or a parent of either: --ro-bind
+// mounts the RESOLVED object at the literal's path, so a symlinked literal
+// would otherwise mount an arbitrary subtree — up to all of / — read-only at
+// an approved /etc location. This mirrors the discipline collectSystemRoots
+// and collectBwrapLayout already apply; an aliased policy path is an attack
+// indicator, never silently accepted.
+//
+// A canonical target outside /etc is legitimate and must stay allowed:
+// systemd hosts ship /etc/resolv.conf -> /run/systemd/resolve/stub-resolv.conf,
+// and Debian's /etc/alternatives entries point into /usr. Only the broad-root
+// and coverage predicates apply, never a "must stay under /etc" rule. The
+// returned paths keep their source spelling so each mount lands where the
+// approved policy says it does.
+func safeEtcPolicyPaths(paths []string, workspaceRoot, home string) ([]string, error) {
 	out := make([]string, 0, len(paths))
 	for _, p := range paths {
-		fi, err := os.Stat(p)
+		canon, err := filepath.EvalSymlinks(p)
 		if err != nil {
 			if errors.Is(err, fs.ErrNotExist) {
 				continue
 			}
+			return nil, fmt.Errorf("tools: bwrap inspect policy path %q: %w", p, err)
+		}
+		if !posixCleanAbs(canon) || bwrapBroadRoot(canon) {
+			return nil, fmt.Errorf("tools: bwrap policy path %q resolves to broad root %q", p, canon)
+		}
+		if pathCovers(canon, workspaceRoot) || pathCovers(canon, home) {
+			return nil, fmt.Errorf("tools: bwrap policy path %q (%q) covers the workspace or home", p, canon)
+		}
+		fi, err := os.Stat(canon)
+		if err != nil {
 			return nil, fmt.Errorf("tools: bwrap inspect policy path %q: %w", p, err)
 		}
 		if !fi.Mode().IsRegular() && !fi.IsDir() {
@@ -286,7 +325,9 @@ func rejectInheritableFDs() error {
 			return fmt.Errorf("tools: bwrap audit fd %d: %w", fd, errno)
 		}
 		if flags&syscall.FD_CLOEXEC == 0 {
-			return fmt.Errorf("tools: bwrap refuses to spawn with inheritable host fd %d (missing FD_CLOEXEC)", fd)
+			return fmt.Errorf("tools: bwrap refuses to spawn with inheritable host fd %d (missing FD_CLOEXEC); "+
+				"it was inherited from the process that launched this agent, which must set FD_CLOEXEC "+
+				"on its own descriptors before spawning", fd)
 		}
 	}
 	return nil
@@ -316,13 +357,30 @@ func (b *bwrapBackend) prepare(spec execSpec) (execSpec, error) {
 	if b.cfg.AllowNetwork {
 		etc = append(etc, bwrapNetworkEtcLiterals...)
 	}
-	etc, err = existingPolicyPaths(etc)
+	etc, err = safeEtcPolicyPaths(etc, spec.WorkspaceRoot, canonicalHome())
 	if err != nil {
 		return execSpec{}, err
 	}
+	// Resolve the approved executable before it becomes a bind source.
+	// --ro-bind resolves its source in the kernel, so binding a symlink
+	// spelling would mount whatever the link points at when bwrap runs, not
+	// what was approved — and a workspace symlink is writable by the payload
+	// itself, which the disclosed same-UID race does not cover. Binding the
+	// canonical target closes that and matches the Seatbelt backend, which
+	// has always canonicalized here. The approved spelling is still what is
+	// executed: it resolves through the workspace bind to this same object.
+	canonExe, err := filepath.EvalSymlinks(spec.Path)
+	if err != nil {
+		return execSpec{}, fmt.Errorf("tools: bwrap resolve executable target: %w", err)
+	}
+	if fi, serr := os.Stat(canonExe); serr != nil {
+		return execSpec{}, fmt.Errorf("tools: bwrap inspect executable target: %w", serr)
+	} else if !fi.Mode().IsRegular() {
+		return execSpec{}, fmt.Errorf("tools: bwrap executable %q resolves to a non-regular file", spec.Path)
+	}
 	args, err := buildBwrapArgs(bwrapPolicy{
 		workspaceRoot:   spec.WorkspaceRoot,
-		exePath:         spec.Path,
+		exePath:         canonExe,
 		chdir:           spec.Dir,
 		systemReadRoots: roots,
 		topLevelDirs:    layoutDirs,

@@ -201,6 +201,13 @@ func sandboxChildEnv(env []string, privateTemp string) []string {
 	return append(out, "TMPDIR="+privateTemp)
 }
 
+// pathCovers reports whether root is target or one of its ancestors. An empty
+// target is never covered, so an unresolvable home only skips that guard
+// instead of rejecting every root.
+func pathCovers(root, target string) bool {
+	return target != "" && (root == target || strings.HasPrefix(target, root+"/"))
+}
+
 // collectSystemRoots canonicalizes fixed system read roots for one
 // invocation. Missing roots are omitted (strictly narrower); a root that
 // canonicalizes to a broad root per the runtime's predicate, or to the
@@ -209,9 +216,6 @@ func sandboxChildEnv(env []string, privateTemp string) []string {
 // system path aliased at or above user data). Shared by the Seatbelt (#442)
 // and bwrap (#441) collectors; each passes its own broad-root predicate.
 func collectSystemRoots(roots []string, workspaceRoot, home string, broad func(string) bool) ([]string, error) {
-	coveredBy := func(root, target string) bool {
-		return target != "" && (root == target || strings.HasPrefix(target, root+"/"))
-	}
 	out := make([]string, 0, len(roots))
 	for _, root := range roots {
 		canon, err := filepath.EvalSymlinks(root)
@@ -221,7 +225,7 @@ func collectSystemRoots(roots []string, workspaceRoot, home string, broad func(s
 		if broad(canon) || !posixCleanAbs(canon) {
 			return nil, fmt.Errorf("tools: sandbox system root %q canonicalizes to broad root %q", root, canon)
 		}
-		if coveredBy(canon, workspaceRoot) || coveredBy(canon, home) {
+		if pathCovers(canon, workspaceRoot) || pathCovers(canon, home) {
 			return nil, fmt.Errorf("tools: sandbox system root %q (%q) covers the workspace or home", root, canon)
 		}
 		out = append(out, canon)

@@ -38,12 +38,17 @@ background alike — inside per-invocation Bubblewrap namespaces:
   arguments; the outer prlimit/bwrap chain runs with an empty
   environment).
 - `MemoryCapMB` maps to a per-process `RLIMIT_AS` soft+hard ceiling via a
-  `/usr/bin/prlimit` exec chain, plus matching `--size` quotas on both
-  private tmpfs mounts. This denies further address-space allocation; it
-  is not an aggregate tree-memory cap (a fork bomb splits allocations),
-  and `RLIMIT_AS` counts virtual reservations, so VM-heavy runtimes need
-  generous caps. `CPULimit` is rejected; requested `DropCaps` are
-  subsumed by the unconditional drop-ALL.
+  `/usr/bin/prlimit` exec chain, plus `--size` quotas on both private tmpfs
+  mounts. These are three independent, additive budgets rather than one
+  ceiling: a single invocation can hold roughly three times the configured
+  value of host memory (address space plus each tmpfs). It is not an
+  aggregate tree cap either — the figure is per process, so a fork bomb
+  splits allocations across children — and `RLIMIT_AS` counts virtual
+  reservations, so VM-heavy runtimes need generous caps. True aggregate
+  enforcement requires delegated cgroup v2 and is deliberately out of scope.
+  `/dev` is remounted read-only because `--dev` creates its own tmpfs that
+  neither `RLIMIT_AS` nor either quota would otherwise bound. `CPULimit` is
+  rejected; requested `DropCaps` are subsumed by the unconditional drop-ALL.
 - Fail closed, never a host fallback: missing or unsafely packaged
   `/usr/bin/bwrap` (and, for capped configs, `/usr/bin/prlimit`), or a
   failed active capability probe of the production namespace prefix,
@@ -56,7 +61,14 @@ background alike — inside per-invocation Bubblewrap namespaces:
   workspace files are rejected at prepare time; an unsandboxed same-UID
   process can still race pathname replacement before bind resolution),
   and the pre-spawn inheritable-FD audit is not kernel-atomic with the
-  spawn.
+  spawn. That audit is also process-global: a descriptor leaked in by
+  whatever launched the agent — which go-llm neither created nor may close —
+  fails every sandboxed command until the launcher sets `FD_CLOEXEC` on its
+  own descriptors, which the error message says explicitly.
+- Scope boundary: this backend governs the exec tools. The post-write
+  verification command (#347) deliberately runs on the host runtime, so a
+  session using the bwrap runtime still has one unsandboxed exec path, as
+  that command's own approval preview states.
 
 Approval identity: bwrap grants live in their own `sb:<digest>:` key
 namespace derived from the approved `SandboxConfig`; the `exec:v3` /

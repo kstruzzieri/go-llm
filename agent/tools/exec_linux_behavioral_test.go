@@ -11,6 +11,7 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -71,6 +72,12 @@ func TestBwrapHelperProcess(t *testing.T) {
 	switch mode := args[0]; mode {
 	case "pid":
 		fmt.Printf("HELPER-PID: %d\n", os.Getpid())
+	case "listdir":
+		entries, err := os.ReadDir(args[1])
+		if err != nil {
+			fail(err)
+		}
+		fmt.Printf("HELPER-DIR: %d entries\n", len(entries))
 	case "read":
 		data, err := os.ReadFile(args[1])
 		if err != nil {
@@ -78,7 +85,15 @@ func TestBwrapHelperProcess(t *testing.T) {
 		}
 		fmt.Printf("HELPER-OK: %s\n", data)
 	case "trywrite":
+		// Report the errno, not just failure: a write that fails with ENOENT
+		// because the parent never existed in the namespace proves nothing
+		// about policy, and a test asserting only "non-zero exit" cannot tell
+		// the two apart.
 		if err := os.WriteFile(args[1], []byte("escaped"), 0o600); err != nil {
+			var errno syscall.Errno
+			if errors.As(err, &errno) {
+				fmt.Printf("HELPER-ERRNO: %s\n", errno.Error())
+			}
 			fail(err)
 		}
 		fmt.Println("HELPER-OK: wrote")
@@ -213,6 +228,20 @@ func bwrapHelperArgv(helper string, mode string, extra ...string) []string {
 
 const bwrapTestHome = "/home/bwrap-test"
 
+// bwrapToken returns a token unique across the whole package run.
+// filepath.Base(t.TempDir()) is Go's per-test counter and is "001" for nearly
+// every test, so pgrep-style matchers built from it are not the unique
+// matchers they read as.
+func bwrapToken(t *testing.T) string {
+	t.Helper()
+	return strings.Map(func(r rune) rune {
+		if r == '/' || r == ' ' {
+			return '-'
+		}
+		return r
+	}, t.Name()) + "-" + strconv.Itoa(os.Getpid())
+}
+
 // realBwrapRun executes argv under the real bwrap backend rooted at ws. An
 // infra error fails the test; a non-zero payload exit is a normal result.
 func realBwrapRun(t *testing.T, cfg SandboxConfig, ws string, argv []string) execResult {
@@ -247,7 +276,7 @@ func TestBwrapDeniesOutboundTCPUDPAndAbstractUnix(t *testing.T) {
 	ws := wsTempDir(t)
 	helper := bwrapHelperBinary(t, ws)
 	cfg := SandboxConfig{Runtime: SandboxRuntimeBwrap}
-	token := filepath.Base(ws)
+	token := bwrapToken(t)
 
 	tcpLn, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -309,7 +338,7 @@ func TestBwrapAllowNetworkControl(t *testing.T) {
 	ws := wsTempDir(t)
 	helper := bwrapHelperBinary(t, ws)
 	cfg := SandboxConfig{Runtime: SandboxRuntimeBwrap, AllowNetwork: true}
-	token := filepath.Base(ws)
+	token := bwrapToken(t)
 
 	tcpLn, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -392,7 +421,7 @@ func TestBwrapWorkspaceWriteAllowedOutsideDenied(t *testing.T) {
 	ws := wsTempDir(t)
 	helper := bwrapHelperBinary(t, ws)
 	cfg := SandboxConfig{Runtime: SandboxRuntimeBwrap}
-	token := filepath.Base(ws)
+	token := bwrapToken(t)
 
 	inWs := filepath.Join(ws, "out.txt")
 	if res := realBwrapRun(t, cfg, ws, bwrapHelperArgv(helper, "trywrite", inWs)); res.ExitCode != 0 {
@@ -403,17 +432,32 @@ func TestBwrapWorkspaceWriteAllowedOutsideDenied(t *testing.T) {
 		t.Fatalf("workspace write not host-visible: %q err=%v", data, err)
 	}
 
+	// Each denial must be a POLICY denial. Asserting only a non-zero exit
+	// lets an ENOENT (parent absent in the namespace regardless of policy)
+	// masquerade as enforcement -- mutation-proven: a full read-write /home
+	// bind left the old assertion green.
 	for _, target := range []string{
 		"/bwrap-root-canary-" + token,
 		"/usr/bin/bwrap-canary-" + token,
-		bwrapTestHome + "/bwrap-canary-" + token,
 	} {
-		if res := realBwrapRun(t, cfg, ws, bwrapHelperArgv(helper, "trywrite", target)); res.ExitCode == 0 {
-			t.Fatalf("outside write to %q succeeded: %s", target, helperOutput(t, res))
+		res := realBwrapRun(t, cfg, ws, bwrapHelperArgv(helper, "trywrite", target))
+		out := helperOutput(t, res)
+		if res.ExitCode == 0 {
+			t.Fatalf("outside write to %q succeeded: %s", target, out)
+		}
+		if !strings.Contains(out, "HELPER-ERRNO: read-only file system") &&
+			!strings.Contains(out, "HELPER-ERRNO: permission denied") {
+			t.Fatalf("write to %q was not denied by policy (want EROFS/EACCES): %s", target, out)
 		}
 		if _, err := os.Lstat(target); err == nil {
 			t.Fatalf("outside write to %q became host-visible", target)
 		}
+	}
+	// The workspace-resident executable is read-only over the read-write
+	// workspace bind: the approved binary cannot rewrite itself.
+	res := realBwrapRun(t, cfg, ws, bwrapHelperArgv(helper, "trywrite", helper))
+	if res.ExitCode == 0 || !strings.Contains(helperOutput(t, res), "HELPER-ERRNO: read-only file system") {
+		t.Fatalf("approved executable is self-modifiable: %s", helperOutput(t, res))
 	}
 }
 
@@ -423,12 +467,30 @@ func TestBwrapHomeDataInvisible(t *testing.T) {
 	helper := bwrapHelperBinary(t, ws)
 	cfg := SandboxConfig{Runtime: SandboxRuntimeBwrap}
 
+	// A canary under t.TempDir() lives in /tmp, which the namespace replaces
+	// with a fresh tmpfs -- it proves tmpfs shadowing, not that $HOME is
+	// unmounted. Mutation-proven: adding a read-write /home bind left the old
+	// assertion green. Plant the canary in the REAL home as well.
 	outside := filepath.Join(t.TempDir(), "host-secret")
 	if err := os.WriteFile(outside, []byte("host-only"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if res := realBwrapRun(t, cfg, ws, bwrapHelperArgv(helper, "read", outside)); res.ExitCode == 0 {
 		t.Fatalf("host file outside the workspace readable: %s", helperOutput(t, res))
+	}
+	if home := canonicalHome(); home != "" && !pathCovers(home, ws) {
+		homeCanary := filepath.Join(home, ".go-llm-bwrap-canary-"+bwrapToken(t))
+		if err := os.WriteFile(homeCanary, []byte("home-only"), 0o600); err != nil {
+			t.Logf("home canary unwritable, skipping that leg: %v", err)
+		} else {
+			t.Cleanup(func() { _ = os.Remove(homeCanary) })
+			if res := realBwrapRun(t, cfg, ws, bwrapHelperArgv(helper, "read", homeCanary)); res.ExitCode == 0 {
+				t.Fatalf("real $HOME file readable inside the namespace: %s", helperOutput(t, res))
+			}
+			if res := realBwrapRun(t, cfg, ws, bwrapHelperArgv(helper, "listdir", home)); res.ExitCode == 0 {
+				t.Fatalf("real $HOME is listable inside the namespace: %s", helperOutput(t, res))
+			}
+		}
 	}
 	inside := filepath.Join(ws, "copied-secret")
 	if err := os.WriteFile(inside, []byte("host-only"), 0o600); err != nil {
@@ -445,7 +507,7 @@ func TestBwrapPrivateTempAndShm(t *testing.T) {
 	ws := wsTempDir(t)
 	helper := bwrapHelperBinary(t, ws)
 	cfg := SandboxConfig{Runtime: SandboxRuntimeBwrap}
-	token := filepath.Base(ws)
+	token := bwrapToken(t)
 
 	canaries := []string{filepath.Join("/tmp", "bwrap-host-"+token)}
 	if fi, err := os.Stat("/dev/shm"); err == nil && fi.IsDir() {
@@ -480,6 +542,15 @@ func TestBwrapPrivateTempAndShm(t *testing.T) {
 
 // bwrapQuotaFillPython streams a reusable 1 MiB buffer so the writer stays
 // far below the RLIMIT_AS ceiling while exceeding the tmpfs quota.
+// bwrapQuotaReportPython reports the exact tmpfs size, so a quota set far
+// BELOW the approved cap is caught too. The fill probe alone is one-sided:
+// mutation-proven, dividing --size by 512 left it green.
+const bwrapQuotaReportPython = `
+import os, sys
+st = os.statvfs(sys.argv[1])
+print("HELPER-FSSIZE:", st.f_blocks * st.f_frsize)
+`
+
 const bwrapQuotaFillPython = `
 import sys
 buf = b"x" * 1048576
@@ -517,6 +588,13 @@ func TestBwrapTmpfsQuotasRejectExcess(t *testing.T) {
 	requireBwrapPython(t)
 	ws := wsTempDir(t)
 	cfg := SandboxConfig{Runtime: SandboxRuntimeBwrap, MemoryCapMB: 512}
+	for _, dest := range []string{"/tmp", "/dev/shm"} {
+		res := realBwrapRun(t, cfg, ws, []string{"/usr/bin/python3", "-c", bwrapQuotaReportPython, dest})
+		out := helperOutput(t, res)
+		if res.ExitCode != 0 || !strings.Contains(out, "HELPER-FSSIZE: 536870912") {
+			t.Fatalf("%s quota is not exactly the approved 512MiB: exit=%d %s", dest, res.ExitCode, out)
+		}
+	}
 	for _, dest := range []string{"/tmp/fill.bin", "/dev/shm/fill.bin"} {
 		res := realBwrapRun(t, cfg, ws, []string{
 			"/usr/bin/python3", "-c", bwrapQuotaFillPython, dest, "513",
@@ -525,6 +603,14 @@ func TestBwrapTmpfsQuotasRejectExcess(t *testing.T) {
 		if res.ExitCode != 0 || !strings.Contains(out, "HELPER-ENOSPC:") {
 			t.Fatalf("quota on %s not enforced: exit=%d %s", dest, res.ExitCode, out)
 		}
+	}
+	// /dev is its own tmpfs and --size attaches to the following --tmpfs, so
+	// without the read-only remount it is an unbounded host-RAM sink that
+	// neither RLIMIT_AS nor either quota bounds.
+	helper := bwrapHelperBinary(t, ws)
+	res := realBwrapRun(t, cfg, ws, bwrapHelperArgv(helper, "trywrite", "/dev/bwrap-fill"))
+	if res.ExitCode == 0 {
+		t.Fatalf("/dev is writable: unbounded memory sink under an approved cap: %s", helperOutput(t, res))
 	}
 }
 
@@ -568,7 +654,7 @@ func TestBwrapTimeoutKillsTree(t *testing.T) {
 	requireBwrapCapability(t)
 	ws := wsTempDir(t)
 	helper := bwrapHelperBinary(t, ws)
-	token := "bwrap-tree-" + filepath.Base(ws)
+	token := "bwrap-tree-" + bwrapToken(t)
 
 	backend, err := newExecBackend(SandboxConfig{Runtime: SandboxRuntimeBwrap})
 	if err != nil {
@@ -623,7 +709,7 @@ func TestBwrapBackgroundLifetime(t *testing.T) {
 	requireBwrapCapability(t)
 	ws := wsTempDir(t)
 	helper := bwrapHelperBinary(t, ws)
-	token := "bwrap-bg-" + filepath.Base(ws)
+	token := "bwrap-bg-" + bwrapToken(t)
 
 	mgr, err := NewSandboxedBackgroundManager(SandboxConfig{Runtime: SandboxRuntimeBwrap})
 	if err != nil {
@@ -728,9 +814,14 @@ func TestBwrapProcessInvariants(t *testing.T) {
 	// with CLONE_NEWUSER always fails EINVAL from a multithreaded Go
 	// process, which would pass this assertion with or without
 	// --disable-userns (a blind assertion, proven by mutation).
-	if fi, err := os.Stat("/usr/bin/unshare"); err != nil || !isExecutableFile(fi) {
+	fi, err := os.Stat("/usr/bin/unshare")
+	if err != nil || !isExecutableFile(fi) {
+		if os.Getenv("GO_LLM_REQUIRE_BWRAP") == "1" {
+			t.Fatalf("GO_LLM_REQUIRE_BWRAP=1 but /usr/bin/unshare is unavailable: %v", err)
+		}
 		t.Skipf("/usr/bin/unshare unavailable: %v", err)
-	} else {
+	}
+	{
 		res = realBwrapRun(t, cfg, ws, []string{"/usr/bin/unshare", "--user", "/bin/true"})
 		if res.ExitCode == 0 {
 			t.Fatalf("nested user namespace creation succeeded despite --disable-userns: %s", helperOutput(t, res))

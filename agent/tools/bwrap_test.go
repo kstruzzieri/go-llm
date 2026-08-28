@@ -93,6 +93,7 @@ func TestBuildBwrapArgsFullPolicy(t *testing.T) {
 		"--size", "536870912", "--tmpfs", "/tmp",
 		"--bind", "/home/u/proj", "/home/u/proj",
 		"--chdir", "/home/u/proj/sub",
+		"--remount-ro", "/dev",
 		"--remount-ro", "/",
 	}
 	if !slices.Equal(got, want) {
@@ -125,6 +126,7 @@ func TestBuildBwrapArgsAllowNetworkOmitsUnshareNet(t *testing.T) {
 		"--size", "536870912", "--tmpfs", "/tmp",
 		"--bind", "/home/u/proj", "/home/u/proj",
 		"--chdir", "/home/u/proj/sub",
+		"--remount-ro", "/dev",
 		"--remount-ro", "/",
 	}
 	if !slices.Equal(got, want) {
@@ -200,8 +202,10 @@ func TestBuildBwrapArgsRejections(t *testing.T) {
 		"chdir outside ws":       {func(p *bwrapPolicy) { p.chdir = "/home/u/other" }, "chdir"},
 		"chdir prefix trick":     {func(p *bwrapPolicy) { p.chdir = "/home/u/proj-evil" }, "chdir"},
 		"broad system root":      {func(p *bwrapPolicy) { p.systemReadRoots = []string{"/usr"} }, "system read root"},
+		"depth-1 system root":    {func(p *bwrapPolicy) { p.systemReadRoots = []string{"/data"} }, "two components deep"},
+		"root covers workspace":  {func(p *bwrapPolicy) { p.systemReadRoots = []string{"/home/u"} }, "covers the workspace"},
 		"relative system root":   {func(p *bwrapPolicy) { p.systemReadRoots = []string{"usr/lib"} }, "system read root"},
-		"ws equals system root":  {func(p *bwrapPolicy) { p.systemReadRoots = []string{"/home/u/proj"} }, "system read root"},
+		"ws equals system root":  {func(p *bwrapPolicy) { p.systemReadRoots = []string{"/home/u/proj"} }, "covers the workspace"},
 		"etc outside /etc":       {func(p *bwrapPolicy) { p.etcLiterals = []string{"/home/u/x"} }, "/etc"},
 		"etc root itself":        {func(p *bwrapPolicy) { p.etcLiterals = []string{"/etc"} }, "/etc"},
 		"layout dir off-list":    {func(p *bwrapPolicy) { p.topLevelDirs = []string{"/opt"} }, "layout"},
@@ -252,12 +256,15 @@ func TestBwrapMemoryCapBytes(t *testing.T) {
 	if got, err := bwrapMemoryCapBytes(256); err != nil || got != 268435456 {
 		t.Fatalf("256MiB cap = (%d, %v), want (268435456, nil)", got, err)
 	}
-	maxMB := math.MaxInt / (1024 * 1024)
-	if got, err := bwrapMemoryCapBytes(maxMB); err != nil || got != int64(maxMB)*1024*1024 {
-		t.Fatalf("max cap = (%d, %v), want representable", got, err)
+	// Literal expectations, never derived from the bound under test: a
+	// self-referential bound cannot detect a wrong (or arch-dependent) one.
+	// 4 GiB must be accepted on every architecture, including 32-bit where
+	// math.MaxInt/(1024*1024) is only 2047.
+	if got, err := bwrapMemoryCapBytes(4096); err != nil || got != 4294967296 {
+		t.Fatalf("4096MiB cap = (%d, %v), want (4294967296, nil) on every arch", got, err)
 	}
-	if _, err := bwrapMemoryCapBytes(maxMB + 1); err == nil {
-		t.Fatal("overflowing cap accepted")
+	if _, err := bwrapMemoryCapBytes(math.MaxInt64/(1024*1024) + 1); err == nil {
+		t.Skip("MemoryCapMB is int; this bound is unreachable on this architecture")
 	}
 	if _, err := bwrapMemoryCapBytes(-1); err == nil {
 		t.Fatal("negative cap accepted")
@@ -270,9 +277,9 @@ func TestBwrapConfigSupport(t *testing.T) {
 		t.Fatalf("CPULimit must be rejected: %v", err)
 	}
 	if err := bwrapConfigSupport(SandboxConfig{
-		Runtime: SandboxRuntimeBwrap, MemoryCapMB: math.MaxInt/(1024*1024) + 1,
-	}); err == nil {
-		t.Fatal("overflowing MemoryCapMB must be rejected")
+		Runtime: SandboxRuntimeBwrap, MemoryCapMB: 4096,
+	}); err != nil {
+		t.Fatalf("4 GiB cap must be supported on every arch: %v", err)
 	}
 	if err := bwrapConfigSupport(SandboxConfig{
 		Runtime: SandboxRuntimeBwrap, MemoryCapMB: 512, AllowNetwork: true,
@@ -350,5 +357,20 @@ func TestBwrapReviewedPolicySets(t *testing.T) {
 	}
 	if !slices.Equal(bwrapNetworkEtcLiterals, wantNetEtc) {
 		t.Fatalf("reviewed network /etc literals changed: %q", bwrapNetworkEtcLiterals)
+	}
+}
+
+// TestBuildBwrapArgsRemountsDevReadOnly pins the /dev sink fix: --dev creates
+// its own tmpfs and --size attaches to the following --tmpfs (/dev/shm), so
+// without this remount a payload can fill host RAM through /dev/<file> under
+// an approved memory cap, bounded by neither RLIMIT_AS nor either quota.
+func TestBuildBwrapArgsRemountsDevReadOnly(t *testing.T) {
+	got, err := buildBwrapArgs(validBwrapPolicy())
+	if err != nil {
+		t.Fatal(err)
+	}
+	joined := " " + strings.Join(got, " ") + " "
+	if !strings.Contains(joined, " --remount-ro /dev --remount-ro / ") {
+		t.Fatalf("/dev is not remounted read-only before the root remount: %q", got)
 	}
 }

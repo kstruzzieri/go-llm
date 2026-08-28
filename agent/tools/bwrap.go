@@ -108,7 +108,10 @@ func bwrapMemoryCapBytes(memoryCapMB int) (int64, error) {
 	if memoryCapMB == 0 {
 		return 0, nil
 	}
-	if memoryCapMB < 0 || memoryCapMB > math.MaxInt/(1024*1024) {
+	// Bound against MaxInt64, not MaxInt: the result is int64, so a MaxInt
+	// bound would reject a 4 GiB cap on 32-bit Linux while accepting it on
+	// amd64 -- the same config answering differently per architecture.
+	if memoryCapMB < 0 || int64(memoryCapMB) > math.MaxInt64/(1024*1024) {
 		return 0, fmt.Errorf("tools: bwrap MemoryCapMB %d is outside the representable byte range", memoryCapMB)
 	}
 	return int64(memoryCapMB) * 1024 * 1024, nil
@@ -195,11 +198,20 @@ func buildBwrapArgs(p bwrapPolicy) ([]string, error) {
 
 	sysRoots := slices.Compact(slices.Sorted(slices.Values(p.systemReadRoots)))
 	for _, root := range sysRoots {
-		if !posixCleanAbs(root) || bwrapBroadRoot(root) {
-			return nil, fmt.Errorf("tools: bwrap system read root %q must be canonical and outside broad roots", root)
+		// Depth >= 2 rather than the broad-root name list: every reviewed root
+		// is /usr/<x>, and a canonicalized root that lands on an unlisted
+		// top-level name (a /usr/share aliased to /data) would otherwise mount
+		// that whole volume read-only. Layout entries are depth 1 by
+		// definition and are validated against the fixed set instead.
+		if !posixCleanAbs(root) || strings.Count(root, "/") < 2 {
+			return nil, fmt.Errorf("tools: bwrap system read root %q must be canonical and at least two components deep", root)
 		}
-		if root == p.workspaceRoot {
-			return nil, fmt.Errorf("tools: bwrap system read root %q equals the workspace", root)
+		// Containment, not equality: a root at or above the workspace would
+		// mount user data read-only. collectSystemRoots enforces this on the
+		// canonicalized roots, but b.collect is injectable, so the builder --
+		// the part unit-tested on every platform -- must hold the invariant too.
+		if pathCovers(root, p.workspaceRoot) {
+			return nil, fmt.Errorf("tools: bwrap system read root %q covers the workspace %q", root, p.workspaceRoot)
 		}
 	}
 
@@ -270,15 +282,26 @@ func buildBwrapArgs(p bwrapPolicy) ([]string, error) {
 	// The executable literal is emitted only when the resolved path is NOT
 	// already inside a read-only mounted region: a redundant file bind into
 	// an RO bind fails mountpoint creation ("Can't create file"), and the
-	// executable is already readable there. A workspace-resident executable
-	// keeps the literal (read-only over the rw bind, blocking
-	// self-modification of the approved binary), and an out-of-policy path
-	// keeps it so the payload is reachable at all (bwrap creates the parent
-	// spine in the still-writable base tmpfs).
+	// executable is already readable there. An out-of-policy path keeps the
+	// literal so the payload is reachable at all (bwrap creates the parent
+	// spine in the still-writable base tmpfs), and a workspace-resident
+	// executable keeps it read-only over the rw bind, which additionally
+	// blocks self-modification of the approved binary -- except where the
+	// workspace itself sits under a fixed-layout directory, where the layout
+	// bind already covers it and that secondary property does not apply.
 	if !bwrapExeCoveredByReadOnly(p.exePath, sysRoots, layoutDirs, linkDests) {
 		args = append(args, "--ro-bind", p.exePath, p.exePath)
 	}
 	args = append(args, "--chdir", p.chdir)
+	// --dev creates its own tmpfs, and --size is a next-operation modifier
+	// that attaches to the following --tmpfs (/dev/shm), so /dev itself is
+	// otherwise writable and unquota'd: a payload can fill host RAM through
+	// /dev/<file> under an approved memory cap, bounded by neither RLIMIT_AS
+	// (tmpfs pages are page cache) nor either --size. Remounting it read-only
+	// closes that sink; device writes such as /dev/null are governed by the
+	// device, not the mount, and /dev/shm is a separate mount that keeps its
+	// own quota and write access.
+	args = append(args, "--remount-ro", "/dev")
 	args = append(args, "--remount-ro", "/")
 	return args, nil
 }
