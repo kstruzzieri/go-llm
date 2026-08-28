@@ -18,6 +18,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -234,13 +235,139 @@ func newBwrapExecBackendAt(bwrapPath, prlimitPath string, probe bwrapProbeFunc, 
 	}, nil
 }
 
-// Run and Start are wired to prepare in the following commit; until then the
-// constructed backend fails closed at invocation rather than executing on
-// the host.
-func (b *bwrapBackend) Run(context.Context, execSpec) (execResult, error) {
-	return execResult{}, errors.New("tools: bwrap execution wiring incomplete")
+// existingPolicyPaths stat-filters fixed policy literals: an absent path is
+// omitted (strictly narrower), while any other inspection failure — or an
+// entry that resolves to neither a regular file nor a directory — fails
+// closed so permission or I/O problems never become silent policy changes. A
+// symlink to a regular file or directory is allowed because bwrap binds the
+// resolved object.
+func existingPolicyPaths(paths []string) ([]string, error) {
+	out := make([]string, 0, len(paths))
+	for _, p := range paths {
+		fi, err := os.Stat(p)
+		if err != nil {
+			if errors.Is(err, fs.ErrNotExist) {
+				continue
+			}
+			return nil, fmt.Errorf("tools: bwrap inspect policy path %q: %w", p, err)
+		}
+		if !fi.Mode().IsRegular() && !fi.IsDir() {
+			return nil, fmt.Errorf("tools: bwrap policy path %q is neither a regular file nor a directory", p)
+		}
+		out = append(out, p)
+	}
+	return out, nil
 }
 
-func (b *bwrapBackend) Start(execSpec, io.Writer, io.Writer) (backgroundProcess, error) {
-	return nil, errors.New("tools: bwrap execution wiring incomplete")
+// rejectInheritableFDs enumerates /proc/self/fd immediately before spawn and
+// fails closed on any host descriptor above stdio without FD_CLOEXEC: bwrap
+// passes inherited descriptors through to the payload. An EBADF entry that
+// vanished during the scan is ignored; the audit never mutates descriptors
+// it does not own. The scan and os/exec are not one kernel-atomic operation
+// — that residual interval is the documented D10 limitation.
+func rejectInheritableFDs() error {
+	entries, err := os.ReadDir("/proc/self/fd")
+	if err != nil {
+		return fmt.Errorf("tools: bwrap audit inherited fds: %w", err)
+	}
+	for _, e := range entries {
+		fd, convErr := strconv.Atoi(e.Name())
+		if convErr != nil {
+			return fmt.Errorf("tools: bwrap audit inherited fds: unexpected entry %q", e.Name())
+		}
+		if fd <= 2 {
+			continue
+		}
+		flags, _, errno := syscall.Syscall(syscall.SYS_FCNTL, uintptr(fd), syscall.F_GETFD, 0)
+		if errno == syscall.EBADF {
+			continue // closed between the directory read and inspection
+		}
+		if errno != 0 {
+			return fmt.Errorf("tools: bwrap audit fd %d: %w", fd, errno)
+		}
+		if flags&syscall.FD_CLOEXEC == 0 {
+			return fmt.Errorf("tools: bwrap refuses to spawn with inheritable host fd %d (missing FD_CLOEXEC)", fd)
+		}
+	}
+	return nil
+}
+
+// prepare validates the re-checked spec, collects the per-invocation policy,
+// and rewrites the spec to the [prlimit] bwrap chain. The outer chain
+// receives a non-nil empty environment — the approved payload environment
+// crosses only as --setenv policy arguments, so loader-control variables can
+// never reach the TCB binaries. The stamped WorkspaceRoot is consumed as-is;
+// re-resolving it here could silently change the policy after approval.
+func (b *bwrapBackend) prepare(spec execSpec) (execSpec, error) {
+	if len(spec.Argv) == 0 || spec.Path == "" || spec.Dir == "" {
+		return execSpec{}, errors.New("tools: bwrap requires a non-empty argv, executable path, and working directory")
+	}
+	if spec.WorkspaceRoot == "" {
+		return execSpec{}, errors.New("tools: bwrap requires a workspace root in the exec spec")
+	}
+	if !posixCleanAbs(spec.WorkspaceRoot) || bwrapBroadRoot(spec.WorkspaceRoot) {
+		return execSpec{}, fmt.Errorf("tools: bwrap workspace root %q must be a canonical non-root path", spec.WorkspaceRoot)
+	}
+	roots, layoutDirs, links, err := b.collect(spec.WorkspaceRoot)
+	if err != nil {
+		return execSpec{}, err
+	}
+	etc := append([]string(nil), bwrapEtcLiterals...)
+	if b.cfg.AllowNetwork {
+		etc = append(etc, bwrapNetworkEtcLiterals...)
+	}
+	etc, err = existingPolicyPaths(etc)
+	if err != nil {
+		return execSpec{}, err
+	}
+	args, err := buildBwrapArgs(bwrapPolicy{
+		workspaceRoot:   spec.WorkspaceRoot,
+		exePath:         spec.Path,
+		chdir:           spec.Dir,
+		systemReadRoots: roots,
+		topLevelDirs:    layoutDirs,
+		topLevelLinks:   links,
+		etcLiterals:     etc,
+		payloadEnv:      sandboxChildEnv(spec.Env, "/tmp"),
+		allowNetwork:    b.cfg.AllowNetwork,
+		tmpfsSizeBytes:  b.capBytes,
+	})
+	if err != nil {
+		return execSpec{}, err
+	}
+	if err := validateSandboxWorkspaceLinks(spec.WorkspaceRoot); err != nil {
+		return execSpec{}, err
+	}
+	wrapped := spec
+	wrapped.Env = []string{} // non-nil: the outer prlimit/bwrap chain inherits nothing
+	wrapped.Path = b.bwrapPath
+	wrapped.Argv = append(append(append([]string{"bwrap"}, args...), spec.Path), spec.Argv[1:]...)
+	if b.capBytes > 0 {
+		wrapped.Argv = append([]string{"prlimit", "--as=" + strconv.FormatInt(b.capBytes, 10), b.bwrapPath}, wrapped.Argv[1:]...)
+		wrapped.Path = b.prlimitPath
+	}
+	if err := rejectInheritableFDs(); err != nil {
+		return execSpec{}, err
+	}
+	return wrapped, nil
+}
+
+// Run executes one foreground command inside its per-invocation namespaces.
+// The private tmpfs mounts vanish with the namespace, so no cleanup exists.
+func (b *bwrapBackend) Run(ctx context.Context, spec execSpec) (execResult, error) {
+	wrapped, err := b.prepare(spec)
+	if err != nil {
+		return execResult{}, err
+	}
+	return b.runner.Run(ctx, wrapped)
+}
+
+// Start launches one background command through the same preparation as Run;
+// the manager's group-termination and reap semantics are untouched.
+func (b *bwrapBackend) Start(spec execSpec, stdout, stderr io.Writer) (backgroundProcess, error) {
+	wrapped, err := b.prepare(spec)
+	if err != nil {
+		return nil, err
+	}
+	return b.starter.Start(wrapped, stdout, stderr)
 }
