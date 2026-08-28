@@ -54,6 +54,13 @@ func (t *destinationTransport) RoundTrip(req *http.Request) (*http.Response, err
 // path at or under the base path on a segment boundary. "Under" is only
 // meaningful on dot-free text, which is why dot segments deny rather than
 // resolve.
+//
+// Known limitation: containment is judged on the canonical text, so a server
+// that applies its own non-standard normalization (the Tomcat-style "..;/"
+// trick) could map an in-bounds path outside the base path. That crossing
+// stays within one admitted ORIGIN and matters only when two providers share
+// a host split by base path — both of which the user granted individually —
+// so it is accepted rather than guessed at with server-specific rules.
 func (t *destinationTransport) targetsBound(u *url.URL) bool {
 	if u == nil || u.User != nil || u.Opaque != "" {
 		return false

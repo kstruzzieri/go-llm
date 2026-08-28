@@ -102,6 +102,17 @@ func TestGuardedTransportDeniesBareContext(t *testing.T) {
 	if got := spy.calls.Load(); got != 0 {
 		t.Errorf("delegate called %d times on denial, want 0", got)
 	}
+
+	// Callers use client.Do, which wraps transport errors in *url.Error.
+	// errors.Is must survive that wrap — it is the match every caller's
+	// denial handling depends on, so it is pinned here, not assumed.
+	_, err = client.Do(mustReq(t, context.Background(), "https://opencode.ai/zen/go/v1/chat/completions"))
+	if !errors.Is(err, ErrDestinationDenied) {
+		t.Fatalf("client.Do wrap broke errors.Is: %v", err)
+	}
+	if got := spy.calls.Load(); got != 0 {
+		t.Errorf("delegate called %d times via Do denial, want 0", got)
+	}
 }
 
 func TestGuardedTransportAllowsBoundRequestIntact(t *testing.T) {
