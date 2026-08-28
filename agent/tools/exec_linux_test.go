@@ -156,7 +156,7 @@ func TestBwrapProbeArgvUncappedDeniedNet(t *testing.T) {
 		"--tmpfs", "/tmp",
 		"--remount-ro", "/dev",
 		"--remount-ro", "/",
-		"/bin/true",
+		"--argv0", "/bin/true", "/bin/true",
 	}
 	if !slices.Equal(probe.argv, want) {
 		t.Fatalf("probe argv mismatch:\n got %q\nwant %q", probe.argv, want)
@@ -183,7 +183,7 @@ func TestBwrapProbeArgvCappedAllowedNet(t *testing.T) {
 		"--size", "268435456", "--tmpfs", "/tmp",
 		"--remount-ro", "/dev",
 		"--remount-ro", "/",
-		"/bin/true",
+		"--argv0", "/bin/true", "/bin/true",
 	}
 	if !slices.Equal(probe.argv, want) {
 		t.Fatalf("probe argv mismatch:\n got %q\nwant %q", probe.argv, want)
@@ -441,9 +441,14 @@ func wsTempDir(t *testing.T) string {
 
 func TestBwrapPrepareWrapsRunSpec(t *testing.T) {
 	ws := wsTempDir(t)
+	spec := bwrapTestSpec(t, ws)
+	wantExe, err := filepath.EvalSymlinks(spec.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
 	runner := &captureRunner{}
 	b := testBwrapBackend(runner, &captureStarter{proc: fakeProcess{}}, SandboxConfig{Runtime: SandboxRuntimeBwrap}, 0)
-	if _, err := b.Run(context.Background(), bwrapTestSpec(t, ws)); err != nil {
+	if _, err := b.Run(context.Background(), spec); err != nil {
 		t.Fatal(err)
 	}
 	if runner.called != 1 {
@@ -456,9 +461,9 @@ func TestBwrapPrepareWrapsRunSpec(t *testing.T) {
 	if len(got.Argv) < 3 || got.Argv[0] != "bwrap" {
 		t.Fatalf("argv[0] = %q, want bwrap", got.Argv)
 	}
-	// The payload command is the exact suffix; interior policy ordering is
+	// The canonical payload command is the exact suffix; interior policy ordering is
 	// pinned literally by the Task 3 builder tests.
-	if !slices.Equal(got.Argv[len(got.Argv)-2:], []string{"/bin/sh", "arg1"}) {
+	if !slices.Equal(got.Argv[len(got.Argv)-2:], []string{wantExe, "arg1"}) {
 		t.Fatalf("payload suffix = %q", got.Argv[len(got.Argv)-2:])
 	}
 	joined := " " + strings.Join(got.Argv, " ") + " "
@@ -466,7 +471,7 @@ func TestBwrapPrepareWrapsRunSpec(t *testing.T) {
 		" --bind " + ws + " " + ws + " ",
 		" --chdir " + ws + " ",
 		" --setenv TMPDIR /tmp ",
-		" --remount-ro / /bin/sh ",
+		" --remount-ro / --argv0 " + spec.Path + " " + wantExe + " ",
 	} {
 		if !strings.Contains(joined, must) {
 			t.Fatalf("wrapped argv missing %q:\n%q", must, got.Argv)
@@ -836,16 +841,11 @@ func TestBwrapPrepareRejectsInheritableFDs(t *testing.T) {
 	}
 }
 
-// TestBwrapPrepareBindsCanonicalExecutableTarget is the discriminator for exe
-// canonicalization. --ro-bind resolves its source in the kernel, so binding a
-// symlink spelling mounts whatever the link points at when bwrap runs rather
-// than what was approved -- and a workspace symlink is writable by the payload
-// itself, which the disclosed same-UID host race does not cover. Fixtures
-// whose spelling and canonical target are both inside covered regions cannot
-// tell the two apart (proven: reverting to spec.Path left the rest of the
-// suite green), so this case puts the target outside every covered region,
-// where exactly one of the two spellings can appear.
-func TestBwrapPrepareBindsCanonicalExecutableTarget(t *testing.T) {
+// TestBwrapPrepareBindsAndExecutesCanonicalExecutableTarget is the
+// discriminator for executable canonicalization. The checked object must be
+// both the bind source and the executed path; resolving an approved spelling
+// again after bwrap changes namespaces or cwd can select a different object.
+func TestBwrapPrepareBindsAndExecutesCanonicalExecutableTarget(t *testing.T) {
 	ws := wsTempDir(t)
 	outside := filepath.Join(t.TempDir(), "real-tool")
 	if err := os.WriteFile(outside, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
@@ -855,7 +855,7 @@ func TestBwrapPrepareBindsCanonicalExecutableTarget(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	link := filepath.Join(ws, "link")
+	link := filepath.Join(t.TempDir(), "link")
 	if err := os.Symlink(outside, link); err != nil {
 		t.Skipf("symlinks unavailable: %v", err)
 	}
@@ -874,10 +874,11 @@ func TestBwrapPrepareBindsCanonicalExecutableTarget(t *testing.T) {
 	if strings.Contains(joined, " --ro-bind "+link+" "+link+" ") {
 		t.Fatalf("executable bound by its symlink spelling: %q", runner.spec.Argv)
 	}
-	// The approved spelling is still what gets executed; inside the namespace
-	// it resolves through the workspace bind to the same object.
-	if runner.spec.Argv[len(runner.spec.Argv)-2] != link {
-		t.Fatalf("payload path changed from the approved spelling: %q", runner.spec.Argv)
+	if !strings.Contains(joined, " --argv0 "+link+" "+canonOutside+" ") {
+		t.Fatalf("canonical command does not preserve approved argv[0]: %q", runner.spec.Argv)
+	}
+	if runner.spec.Argv[len(runner.spec.Argv)-2] != canonOutside {
+		t.Fatalf("payload path is not the canonical target: %q", runner.spec.Argv)
 	}
 }
 

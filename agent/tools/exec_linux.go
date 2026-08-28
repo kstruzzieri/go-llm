@@ -41,8 +41,9 @@ type bwrapProbeFunc func(ctx context.Context, argv []string) error
 // config: the exact isolation/capability prefix production uses, an empty
 // environment declaration, a broad read-only root acceptable only because
 // the probe runs the trusted /bin/true (mirroring Seatbelt's allow-default
-// probe), both private tmpfs mounts with their production quotas, and the
-// prlimit chain exactly when the config caps memory.
+// probe), both private tmpfs mounts with their production quotas, the argv0
+// override used to separate command identity from process-visible spelling,
+// and the prlimit chain exactly when the config caps memory.
 func probeBwrapArgv(bwrapPath, prlimitPath string, cfg SandboxConfig, capBytes int64) []string {
 	args := append([]string{bwrapPath}, bwrapIsolationArgs(cfg.AllowNetwork)...)
 	args = append(args, "--clearenv",
@@ -55,7 +56,8 @@ func probeBwrapArgv(bwrapPath, prlimitPath string, cfg SandboxConfig, capBytes i
 	if capBytes > 0 {
 		args = append(args, "--size", size)
 	}
-	args = append(args, "--tmpfs", "/tmp", "--remount-ro", "/dev", "--remount-ro", "/", "/bin/true")
+	args = append(args, "--tmpfs", "/tmp", "--remount-ro", "/dev", "--remount-ro", "/",
+		"--argv0", "/bin/true", "/bin/true")
 	if capBytes > 0 {
 		args = append([]string{prlimitPath, "--as=" + size}, args...)
 	}
@@ -367,8 +369,9 @@ func (b *bwrapBackend) prepare(spec execSpec) (execSpec, error) {
 	// what was approved — and a workspace symlink is writable by the payload
 	// itself, which the disclosed same-UID race does not cover. Binding the
 	// canonical target closes that and matches the Seatbelt backend, which
-	// has always canonicalized here. The approved spelling is still what is
-	// executed: it resolves through the workspace bind to this same object.
+	// has always canonicalized here. Execute that same path so namespace or
+	// cwd changes cannot make the approved spelling resolve to another file;
+	// --argv0 retains the spelling only as inert process-visible data.
 	canonExe, err := filepath.EvalSymlinks(spec.Path)
 	if err != nil {
 		return execSpec{}, fmt.Errorf("tools: bwrap resolve executable target: %w", err)
@@ -399,7 +402,7 @@ func (b *bwrapBackend) prepare(spec execSpec) (execSpec, error) {
 	wrapped := spec
 	wrapped.Env = []string{} // non-nil: the outer prlimit/bwrap chain inherits nothing
 	wrapped.Path = b.bwrapPath
-	wrapped.Argv = append(append(append([]string{"bwrap"}, args...), spec.Path), spec.Argv[1:]...)
+	wrapped.Argv = append(append(append([]string{"bwrap"}, args...), "--argv0", spec.Path, canonExe), spec.Argv[1:]...)
 	if b.capBytes > 0 {
 		wrapped.Argv = append([]string{"prlimit", "--as=" + strconv.FormatInt(b.capBytes, 10), b.bwrapPath}, wrapped.Argv[1:]...)
 		wrapped.Path = b.prlimitPath

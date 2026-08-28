@@ -36,7 +36,7 @@ func bwrapBroadRoot(p string) bool {
 
 // bwrapPolicy is the per-invocation input to bwrap argv construction. All
 // paths must already be clean POSIX absolutes; collectors canonicalize the
-// roots they own, while exePath may retain an approved symlink spelling. The
+// roots they own, while exePath is the resolved executable target. The
 // builder validates lexical shape, treats every value as data (exec argv, no
 // quoting layer), and performs no filesystem I/O so it is unit-testable on
 // every platform.
