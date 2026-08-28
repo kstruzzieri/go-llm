@@ -432,3 +432,31 @@ func TestNormalizeSandboxConfigOwnsCanonicalCaps(t *testing.T) {
 		t.Fatalf("DropCaps = %q, want canonical owned copy %q", got.DropCaps, want)
 	}
 }
+
+func TestRenderSandboxLineBwrapPrivateTempMarker(t *testing.T) {
+	cfg := mustNormalizeSandbox(t, SandboxConfig{Runtime: SandboxRuntimeBwrap})
+	got := renderSandboxLine(cfg)
+	want := `runtime="bwrap" network=denied memory_cap=none cpu_limit=none drop_caps=[] temp=private`
+	if got != want {
+		t.Fatalf("renderSandboxLine() = %q, want %q", got, want)
+	}
+}
+
+func TestBwrapApprovalKeyDistinctFromSeatbeltAndHost(t *testing.T) {
+	bwrap := approvalForSandbox(mustNormalizeSandbox(t, SandboxConfig{Runtime: SandboxRuntimeBwrap}))
+	seatbelt := approvalForSandbox(mustNormalizeSandbox(t, SandboxConfig{Runtime: SandboxRuntimeSeatbelt}))
+	host := approvalForSandbox(mustNormalizeSandbox(t, SandboxConfig{}))
+	if bwrap.keyComponent == "" || !strings.HasPrefix(bwrap.keyComponent, "sb:") ||
+		!strings.HasSuffix(bwrap.keyComponent, ":") {
+		t.Fatalf("bwrap key component malformed: %q", bwrap.keyComponent)
+	}
+	if bwrap.keyComponent == seatbelt.keyComponent {
+		t.Fatalf("bwrap and seatbelt approval namespaces collide: %q", bwrap.keyComponent)
+	}
+	if host.keyComponent != "" {
+		t.Fatalf("host key component = %q, want empty", host.keyComponent)
+	}
+	if bwrap.runtime != SandboxRuntimeBwrap {
+		t.Fatalf("stored runtime = %q, want bwrap", bwrap.runtime)
+	}
+}

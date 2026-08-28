@@ -24,6 +24,13 @@ const SandboxRuntimeHost SandboxRuntime = "host"
 // host whose Seatbelt capability probe fails, fails closed at construction.
 const SandboxRuntimeSeatbelt SandboxRuntime = "seatbelt"
 
+// SandboxRuntimeBwrap selects the Linux Bubblewrap backend (#441): a fresh
+// user/mount/pid namespace set per invocation, deny-default by construction,
+// with network unshared unless AllowNetwork is true. Selecting it off Linux,
+// or on a host whose namespace-capability probe fails, fails closed at
+// construction.
+const SandboxRuntimeBwrap SandboxRuntime = "bwrap"
+
 // SandboxConfig is a permission ceiling for a non-host execution runtime: a
 // backend may enforce stricter isolation but must never silently provide
 // less. The zero value is the compatibility exception and means direct host
@@ -171,10 +178,12 @@ func renderSandboxLine(cfg SandboxConfig) string {
 		"runtime=%s network=%s memory_cap=%s cpu_limit=%s drop_caps=%s",
 		strconv.QuoteToGraphic(string(cfg.Runtime)), network, memory, cpu, caps,
 	)
-	// Seatbelt-only marker (#442): the user approves that the command's temp
-	// directory is a fresh private one, not the ambient TMPDIR. Other runtimes
-	// must not claim a behavior they do not implement.
-	if cfg.Runtime == SandboxRuntimeSeatbelt {
+	// Private-temp marker (#442, extended by #441): the user approves that the
+	// command's temp directory is a fresh private one, not the ambient TMPDIR.
+	// Seatbelt provides a private host directory; bwrap provides a
+	// namespace-local tmpfs. Other runtimes must not claim a behavior they do
+	// not implement.
+	if cfg.Runtime == SandboxRuntimeSeatbelt || cfg.Runtime == SandboxRuntimeBwrap {
 		line += " temp=private"
 	}
 	return line
