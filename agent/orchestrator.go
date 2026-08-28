@@ -17,6 +17,9 @@ type Orchestrator struct {
 	ctxMgr    ContextManager
 	now       func() time.Time // wall clock for latency; time.Now unless overridden
 	toolLimit ToolInvocationLimit
+	// verifier is the optional post-write verification hook (#347). nil is the
+	// default and leaves every batch byte-for-byte unchanged.
+	verifier Verifier
 }
 
 // Option configures an Orchestrator at construction. New stays source-compatible

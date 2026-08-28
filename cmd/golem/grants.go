@@ -7,8 +7,9 @@ import "sync"
 // key, so a future tool that emits (or reuses) another tool's key cannot
 // inherit its grant. #346's background exec consults grantScopeExec.
 const (
-	grantScopeExec  = "exec"
-	grantScopeFiles = "files"
+	grantScopeExec   = "exec"
+	grantScopeFiles  = "files"
+	grantScopeVerify = "verify"
 )
 
 // grantScope maps a tool name to its grant scope. Everything not listed is
@@ -23,6 +24,13 @@ func grantScope(toolName string) string {
 		return grantScopeExec
 	case "write_file", "edit_file":
 		return grantScopeFiles
+	case verifyToolName:
+		// #347's post-write verification gets its OWN scope, never exec.
+		// Verification is approved on the strength of -allow-write alone, so
+		// sharing the exec scope would let one approval authorize the other
+		// direction: a verify grant must never run the model's commands, and
+		// an exec grant must never run the workspace's verifier.
+		return grantScopeVerify
 	}
 	return ""
 }

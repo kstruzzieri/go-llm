@@ -306,11 +306,14 @@ func recheckExecPlan(ws *Workspace, pp execPending) (execSpec, error) {
 	if rerr != nil || path != pp.path || !os.SameFile(fi, pp.identity) {
 		return execSpec{}, errors.New("executable changed since approval; retry")
 	}
+	// Env is []string{} and never []string(nil): os/exec treats a nil Env as
+	// "inherit the parent environment", which would silently defeat the
+	// allowlist when none of its variables are set.
 	return execSpec{
 		Path:          pp.path,
 		Argv:          append([]string(nil), pp.argv...),
 		Dir:           pp.dir,
-		Env:           append([]string(nil), pp.env...),
+		Env:           append([]string{}, pp.env...),
 		WorkspaceRoot: ws.root,
 	}, nil
 }
