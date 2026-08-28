@@ -350,6 +350,7 @@ func runOnce(ctx context.Context, out io.Writer, interrupts <-chan struct{}, ses
 			}
 		}
 	}
+	runDuration := rend.now().Sub(rend.runStart)
 
 	// Grounding verification (#348). Only a completed run has a final answer
 	// worth judging, and only runCtx makes Ctrl-C during the judge prompt. It
@@ -405,7 +406,7 @@ func runOnce(ctx context.Context, out io.Writer, interrupts <-chan struct{}, ses
 			writeRunLine("warning: session state not refreshed: %v", err)
 		}
 	}
-	rend.finalFooter(res)
+	rend.finalFooter(res, runDuration)
 	return res, nil
 }
 

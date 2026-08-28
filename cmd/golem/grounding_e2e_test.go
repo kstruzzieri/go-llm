@@ -155,7 +155,7 @@ func newGroundingE2E(t *testing.T, opts groundingE2EOpts) *groundingE2E {
 		tools:      []agent.Tool{tool},
 		baseSystem: system,
 		maxSteps:   16,
-		clock:      func() time.Time { return time.Unix(0, 0) },
+		clock:      func() time.Time { return e.now },
 		grants:     newApprovalGrants(),
 		mixed:      opts.progressive,
 		color:      opts.color,
@@ -560,6 +560,9 @@ func TestGroundingUsageAndLatencyStayOutOfTheAgentRun(t *testing.T) {
 	// clock by 5s twice, so a timestamp taken after grounding would read 10s.
 	if got, want := string(rec["ended_at"]), `"1970-01-01T00:00:00Z"`; got != want {
 		t.Fatalf("ended_at = %s, want the pre-grounding snapshot %s", got, want)
+	}
+	if got := e.out.String(); !strings.Contains(got, "done · 2 steps · 0.0s · 0 tok") {
+		t.Fatalf("run footer absorbed grounding latency:\n%s", got)
 	}
 }
 
