@@ -87,6 +87,27 @@
 // only on the grounding line and in the trace, never in the run's own usage
 // footer or in telemetry.
 //
+// What the verdict MEANS is narrower than "is this answer correct". It measures
+// only whether each claim is supported by the retrieval evidence in that
+// prompt. An answer that correctly explains a retrieved function using ordinary
+// language or standard-library knowledge will have those claims marked
+// unsupported, because that knowledge was not in the evidence. A "partial" is
+// therefore a prompt for a human to look, not a finding that the answer is
+// wrong.
+//
+// It also costs: two sequential model calls on every retrieval-backed turn, so
+// an answer that took a few seconds can take noticeably longer to ground. A
+// notice is printed while the check runs.
+//
+// The verifier reads retrieved workspace content, which is untrusted. The judge
+// prompt fences evidence with a per-request key and instructs the model to
+// treat everything inside as data, and evidence ids are echoed rather than
+// accepted from the model, so a hostile chunk cannot invent a citation. It can
+// still argue: the per-claim status, reason, and contradicted values come back
+// from the model, so a corpus containing instructions aimed at the judge can
+// influence a verdict. Treat "supported" as evidence of grounding, not as a
+// security boundary over a corpus you do not trust.
+//
 // -trace additionally persists the complete report - every claim, its verdict,
 // the evidence it cites, and any missing-evidence queries - under the trace's
 // "grounding" key. That trace is content-full and already carries workspace

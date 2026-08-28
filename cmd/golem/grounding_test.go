@@ -650,7 +650,7 @@ func TestGroundingVerifySilentCases(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			j := &stubJudge{}
-			rep, diag, show := testGroundingService(j, rec).verify(context.Background(), tc.answer, tc.coll)
+			rep, diag, show := testGroundingService(j, rec).verify(context.Background(), tc.answer, tc.coll, nil)
 			if show || diag != "" || rep.Status != "" || j.calls != 0 {
 				t.Fatalf("must be silent: rep=%+v diag=%q show=%v calls=%d", rep, diag, show, j.calls)
 			}
@@ -672,7 +672,7 @@ func TestGroundingVerifyCapRefusalFailsClosedForTurnOnly(t *testing.T) {
 	j := &stubJudge{rep: &analysis.SupportReport{
 		Status: analysis.StatusSupported, Evidence: []analysis.EvidenceRef{{ID: "E1"}},
 	}}
-	rep, _, show := testGroundingService(j, rec).verify(context.Background(), "answer", c)
+	rep, _, show := testGroundingService(j, rec).verify(context.Background(), "answer", c, nil)
 	if !show || rep.Status != groundingSkipped || rep.Reason != groundingReasonEvidenceIncomplete {
 		t.Errorf("verify(cap-refused collision) = %+v, show=%v; want skipped/%s, show=true",
 			rep, show, groundingReasonEvidenceIncomplete)
@@ -693,7 +693,7 @@ func TestGroundingVerifyCapRefusalFailsClosedForTurnOnly(t *testing.T) {
 	j = &stubJudge{rep: &analysis.SupportReport{
 		Status: analysis.StatusSupported, Evidence: []analysis.EvidenceRef{{ID: "E1"}},
 	}}
-	rep, _, show = testGroundingService(j, rec).verify(context.Background(), "answer", c)
+	rep, _, show = testGroundingService(j, rec).verify(context.Background(), "answer", c, nil)
 	if !show || rep.Status != groundingSupported || rep.Report == nil {
 		t.Errorf("verify(after beginTurn) = %+v, show=%v; want supported verdict, show=true", rep, show)
 	}
@@ -711,7 +711,7 @@ func TestGroundingVerifyVisibleSkipWhenFinalPromptHadNoEvidence(t *testing.T) {
 	_ = c.OnStep(context.Background(), agent.StepEvent{Index: 0})
 
 	j := &stubJudge{}
-	rep, _, show := testGroundingService(j, newEvidenceRecorder(1<<20)).verify(context.Background(), "a", c)
+	rep, _, show := testGroundingService(j, newEvidenceRecorder(1<<20)).verify(context.Background(), "a", c, nil)
 	if !show || rep.Status != groundingSkipped || rep.Reason != groundingReasonNoFinalEvidence {
 		t.Fatalf("rep=%+v show=%v", rep, show)
 	}
@@ -734,7 +734,7 @@ func TestGroundingVerifyPrefersNoFinalEvidenceOverIncomplete(t *testing.T) {
 	_ = c.OnStep(context.Background(), agent.StepEvent{Index: 0})
 
 	j := &stubJudge{}
-	rep, _, show := testGroundingService(j, newEvidenceRecorder(1<<20)).verify(context.Background(), "a", c)
+	rep, _, show := testGroundingService(j, newEvidenceRecorder(1<<20)).verify(context.Background(), "a", c, nil)
 	if !show || rep.Status != groundingSkipped || rep.Reason != groundingReasonNoFinalEvidence {
 		t.Fatalf("rep=%+v show=%v, want skipped/%s", rep, show, groundingReasonNoFinalEvidence)
 	}
@@ -749,7 +749,7 @@ func TestGroundingVerifyJoinsEvidenceInPresentationOrder(t *testing.T) {
 		Status:   analysis.StatusSupported,
 		Evidence: []analysis.EvidenceRef{{ID: "E1"}, {ID: "E2"}, {ID: "E3"}},
 	}}
-	rep, diag, show := testGroundingService(j, rec).verify(context.Background(), "the answer", c)
+	rep, diag, show := testGroundingService(j, rec).verify(context.Background(), "the answer", c, nil)
 	if !show || diag != "" || rep.Status != groundingSupported || rep.Reason != "" {
 		t.Fatalf("rep=%+v diag=%q show=%v", rep, diag, show)
 	}
@@ -810,7 +810,7 @@ func TestGroundingVerifySkipsOnIncompleteEvidence(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			rec, c := tc.prepare(t)
 			j := &stubJudge{rep: &analysis.SupportReport{Status: analysis.StatusSupported}}
-			rep, _, show := testGroundingService(j, rec).verify(context.Background(), "a", c)
+			rep, _, show := testGroundingService(j, rec).verify(context.Background(), "a", c, nil)
 			if !show || rep.Status != groundingSkipped || rep.Reason != groundingReasonEvidenceIncomplete {
 				t.Fatalf("rep=%+v show=%v", rep, show)
 			}
@@ -861,7 +861,7 @@ func TestGroundingVerifyFailOpenOutcomes(t *testing.T) {
 			if tc.cancel {
 				go func() { time.Sleep(10 * time.Millisecond); cancel() }()
 			}
-			rep, diag, show := svc.verify(ctx, "an answer", c)
+			rep, diag, show := svc.verify(ctx, "an answer", c, nil)
 			if !show || rep.Status != tc.wantStatus || rep.Reason != tc.wantReason {
 				t.Fatalf("rep=%+v show=%v, want %s/%s", rep, show, tc.wantStatus, tc.wantReason)
 			}
@@ -907,7 +907,7 @@ func TestGroundingVerifyContextOutcomeOverridesSuccessfulJudge(t *testing.T) {
 				svc.timeout = 0
 			}
 
-			rep, diag, show := svc.verify(ctx, "an answer", c)
+			rep, diag, show := svc.verify(ctx, "an answer", c, nil)
 			if !show || rep.Status != tc.wantStatus || rep.Reason != tc.wantReason || rep.Report != nil {
 				t.Errorf("verify(%s) = rep=%+v show=%v, want %s/%s without a report",
 					tc.name, rep, show, tc.wantStatus, tc.wantReason)

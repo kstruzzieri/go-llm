@@ -421,7 +421,13 @@ type groundingService struct {
 // Every path that cannot reconstruct the model's exact evidence returns without
 // calling the judge. A verdict over a silently reduced evidence subset would
 // report "unsupported" for claims the model actually had support for.
-func (s *groundingService) verify(ctx context.Context, answer string, c *groundingCollector) (groundingReport, string, bool) {
+//
+// onJudgeStart, when non-nil, runs immediately before the model call and only
+// when one is actually made — never on a skip. It runs on THIS goroutine, so a
+// caller may write to its renderer from it without racing the streamed answer.
+// The judge is two sequential model calls bounded at groundingTimeout, which on
+// a local backend is long enough that silence reads as a hang.
+func (s *groundingService) verify(ctx context.Context, answer string, c *groundingCollector, onJudgeStart func()) (groundingReport, string, bool) {
 	if s == nil || c == nil {
 		return groundingReport{}, "", false
 	}
@@ -452,6 +458,9 @@ func (s *groundingService) verify(ctx context.Context, answer string, c *groundi
 	}
 	jctx, cancel := context.WithTimeout(ctx, s.timeout)
 	defer cancel()
+	if onJudgeStart != nil {
+		onJudgeStart()
+	}
 	started := s.now()
 	// The judge's evidence budget equals the recorder's retained-body budget, so
 	// analysis never silently drops the tail; any shortfall is treated as a hard
@@ -603,3 +612,12 @@ func (s *groundingService) beginTurn() {
 	}
 	s.rec.beginTurn()
 }
+
+// groundingCheckingLine is the notice shown while the verifier runs. It is
+// printed only when a model call is actually made, so a skipped turn still
+// produces no notice at all.
+//
+// It deliberately does NOT use the "grounding · " outcome prefix: exactly one
+// line per turn carries that prefix and it is always the verdict, which keeps
+// both the eye and a log grep able to separate progress from outcome.
+const groundingCheckingLine = "grounding: checking the answer against its evidence..."

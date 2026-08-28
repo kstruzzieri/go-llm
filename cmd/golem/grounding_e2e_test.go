@@ -672,3 +672,39 @@ func TestGroundingSummaryLineIsDimmedLikeTheFooter(t *testing.T) {
 		t.Fatalf("fixture did not produce a dim footer to compare against:\n%q", out)
 	}
 }
+
+// A verifier is two sequential model calls; on a local backend the answer can
+// finish streaming and leave the REPL silent for tens of seconds. The notice
+// says what is happening, and fires ONLY when a model call is really made, so a
+// skipped turn still produces exactly one line.
+func TestGroundingCheckingNoticePrecedesTheVerdictOnly(t *testing.T) {
+	t.Run("verdict turn announces the check first", func(t *testing.T) {
+		e := newGroundingE2E(t, groundingE2EOpts{grounding: true})
+		e.run(t, context.Background(), nil)
+
+		out := e.out.String()
+		notice := strings.Index(out, groundingCheckingLine)
+		verdict := strings.Index(out, "grounding · supported")
+		if notice < 0 {
+			t.Fatalf("no checking notice:\n%s", out)
+		}
+		if verdict < 0 || notice > verdict {
+			t.Fatalf("notice must precede the verdict:\n%s", out)
+		}
+	})
+
+	t.Run("skipped turn makes no model call and no notice", func(t *testing.T) {
+		// No retrieval evidence in the answering prompt: verify returns before
+		// ever reaching the judge.
+		e := newGroundingE2E(t, groundingE2EOpts{grounding: true, results: []rag.SearchResult{}})
+		e.run(t, context.Background(), nil)
+
+		out := e.out.String()
+		if strings.Contains(out, groundingCheckingLine) {
+			t.Fatalf("a skip must not announce a check it never runs:\n%s", out)
+		}
+		if !strings.Contains(out, "grounding · skipped · "+groundingReasonNoFinalEvidence) {
+			t.Fatalf("want the skip line:\n%s", out)
+		}
+	})
+}

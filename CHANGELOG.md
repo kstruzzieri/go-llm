@@ -100,6 +100,15 @@ capped chunk, or an identity resolving to two different chunks - is reported
 as `evidence_incomplete` with no model call, because a verdict over a
 silently reduced evidence subset would mark supported claims unsupported.
 
+The verdict is scoped: it measures support against the retrieval evidence in
+that prompt, not overall correctness, so claims drawn from ordinary language or
+standard-library knowledge read as unsupported. It costs two sequential model
+calls per retrieval-backed turn and prints a notice while running. The judge
+prompt fences evidence as untrusted data and echoes evidence ids rather than
+accepting them, but per-claim verdict fields still come back from the model, so
+`supported` is evidence of grounding rather than a security boundary over an
+untrusted corpus.
+
 Fail-open throughout. A routing failure, malformed verifier output, the
 60-second ceiling, or Ctrl-C during the judge changes nothing about the
 answer, `agent.Result`, the session, the recorded run status, or the exit

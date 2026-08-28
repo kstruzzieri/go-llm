@@ -358,7 +358,13 @@ func runOnce(ctx context.Context, out io.Writer, interrupts <-chan struct{}, ses
 	// agent outcome.
 	var groundingRaw json.RawMessage
 	if sess.grounding != nil && status == "completed" {
-		rep, diag, show := sess.grounding.verify(runCtx, res.Answer, groundCollector)
+		rep, diag, show := sess.grounding.verify(runCtx, res.Answer, groundCollector, func() {
+			// Only fires when a model call is actually being made. Two sequential
+			// verifier calls on a local backend can take tens of seconds, and the
+			// answer has already finished streaming, so without this the REPL
+			// looks hung until the verdict lands.
+			_ = rend.writeDim(groundingCheckingLine)
+		})
 		if show {
 			// Dim, like the run footer: this is a status line about the turn, not
 			// part of the answer. Writing it through the renderer also keeps it

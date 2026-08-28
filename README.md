@@ -252,6 +252,13 @@ actually reached the answering prompt, and Golem prints one line:
 grounding · partial · 3/4 claims · 5 evidence · 1.2s · 850 tok
 ```
 
+The verdict answers a narrow question: is each claim supported by the retrieval
+evidence that reached the prompt? Claims the model made from ordinary language
+or standard-library knowledge count as unsupported, because that knowledge was
+not in the evidence - so `partial` is a reason to look, not a finding that the
+answer is wrong. It costs two sequential model calls per retrieval-backed turn,
+and prints a notice while it runs.
+
 It is fail-open. A routing failure, malformed verifier output, the 60-second
 ceiling, or Ctrl-C during the check prints one line and changes nothing else -
 not the answer, not the exit code, not the recorded run status. Evidence the
