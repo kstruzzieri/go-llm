@@ -201,13 +201,19 @@ func (f *fakeGroundingRetriever) RenderProgressiveWithGroups(_ context.Context, 
 	return "progressive-context", trace, nil, nil
 }
 
-func threeResults() []rag.SearchResult {
+func threeResults() []rag.SearchResult { return threeResultsFrom(0) }
+
+// threeResultsFrom builds three distinct results whose per-entry recorder
+// charge is identical for any start, so a byte budget sized for one corpus is
+// sized for every corpus.
+func threeResultsFrom(start int) []rag.SearchResult {
 	out := make([]rag.SearchResult, 3)
 	for i := range out {
+		n := start + i
 		out[i] = rag.SearchResult{
 			Chunk: chunkWithExtras(
-				fmt.Sprintf("c%d", i), fmt.Sprintf("sk%d", i),
-				fmt.Sprintf("f%d.go", i), fmt.Sprintf("body-%d", i), 1, 2),
+				fmt.Sprintf("c%d", n), fmt.Sprintf("sk%d", n),
+				fmt.Sprintf("f%d.go", n), fmt.Sprintf("body-%d", n), 1, 2),
 			Score: float64(i),
 		}
 	}
@@ -580,6 +586,7 @@ type stubJudge struct {
 	rep      *analysis.SupportReport
 	err      error
 	block    chan struct{}
+	started  chan struct{}
 	calls    int
 	answer   string
 	evidence []rag.SearchResult
@@ -589,6 +596,9 @@ type stubJudge struct {
 func (s *stubJudge) Judge(ctx context.Context, answer string, evidence []rag.SearchResult, maxEvidenceChars int) (*analysis.SupportReport, error) {
 	s.calls++
 	s.answer, s.evidence, s.maxChars = answer, evidence, maxEvidenceChars
+	if s.started != nil {
+		close(s.started)
+	}
 	if s.block != nil {
 		select {
 		case <-s.block:

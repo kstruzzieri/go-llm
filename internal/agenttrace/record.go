@@ -1,6 +1,7 @@
 package agenttrace
 
 import (
+	"encoding/json"
 	"strings"
 	"time"
 
@@ -54,6 +55,12 @@ type TraceRecord struct {
 	Request       TraceRequest `json:"request"`
 	Result        agent.Result `json:"result"`
 	Error         string       `json:"error,omitempty"`
+	// Grounding is the #348 grounding-verification report, embedded verbatim as
+	// a JSON object. Raw rather than typed so agenttrace keeps no dependency on
+	// the analysis package for a payload it only stores. Additive within
+	// SchemaVersion 2 (same rule as the spans below): omitempty leaves every
+	// pre-#348 trace byte-identical.
+	Grounding json.RawMessage `json:"grounding,omitempty"`
 }
 
 // --- telemetry spans (#239, content-light) ---

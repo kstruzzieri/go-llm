@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"hash/fnv"
@@ -86,11 +87,15 @@ func (o *observ) startSink(runID string, started time.Time) (*agenttrace.Telemet
 // writeTrace writes one content-full trace, retrying with a numeric suffix on a
 // run-id path collision (create-exclusive). Best-effort: returns an error the
 // caller logs but does not propagate as a turn failure.
-func (o *observ) writeTrace(runID, startedAt, endedAt string, meta agenttrace.TraceMeta, res agent.Result, status string, partial bool, runErr error) error {
+// grounding is the already-marshaled #348 report, or nil when the turn produced
+// none. It is stored verbatim so this tier keeps no opinion about a payload
+// cmd/golem owns.
+func (o *observ) writeTrace(runID, startedAt, endedAt string, meta agenttrace.TraceMeta, res agent.Result, status string, partial bool, runErr error, grounding json.RawMessage) error {
 	rec := agenttrace.BuildTrace(meta, res, status, partial, runErr)
 	rec.RunID = runID
 	rec.StartedAt = startedAt
 	rec.EndedAt = endedAt
+	rec.Grounding = grounding
 	nameStartedAt := strings.NewReplacer(":", "-", "/", "-", "\\", "-").Replace(startedAt)
 	base := filepath.Join(o.traceDir, nameStartedAt+"-"+runID)
 	for i := 0; i < 5; i++ {

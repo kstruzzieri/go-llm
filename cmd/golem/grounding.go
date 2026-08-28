@@ -593,3 +593,12 @@ func groundingStartupWarning(enabled, retrievalAvailable bool, chainWarn string)
 		return chainWarn
 	}
 }
+
+// beginTurn clears the previous turn's captured evidence. Nil-safe so the
+// caller needs no second check beyond the one that decides to observe at all.
+func (s *groundingService) beginTurn() {
+	if s == nil {
+		return
+	}
+	s.rec.beginTurn()
+}
