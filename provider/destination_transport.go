@@ -246,7 +246,19 @@ func loopbackTransport(inner http.RoundTripper, lookup lookupIPFunc) (*http.Tran
 					return nil, fmt.Errorf("provider: destination guard: localhost resolved to non-loopback %s; refusing", ip)
 				}
 			}
-			addr = net.JoinHostPort(ips[0].String(), port)
+			// Try every verified address, like the stdlib dialer would: a
+			// resolver commonly returns [::1, 127.0.0.1] while the local
+			// backend listens on only one stack, and giving up after the
+			// first address would fail setups the unguarded client served.
+			var dialErrs []error
+			for _, ip := range ips {
+				conn, err := baseDial(ctx, network, net.JoinHostPort(ip.String(), port))
+				if err == nil {
+					return conn, nil
+				}
+				dialErrs = append(dialErrs, err)
+			}
+			return nil, errors.Join(dialErrs...)
 		}
 		return baseDial(ctx, network, addr)
 	}

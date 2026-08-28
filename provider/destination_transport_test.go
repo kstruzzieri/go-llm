@@ -466,6 +466,20 @@ func TestGuardedLocalhostDialValidatesResolution(t *testing.T) {
 		}
 	})
 
+	// The stdlib dialer tries every resolved address; the guard must not
+	// regress that. macOS commonly resolves localhost to [::1, 127.0.0.1]
+	// while a local llama-server binds only 127.0.0.1 — if the guard dialed
+	// just the first address, every guarded localhost setup on such a host
+	// would fail where the unguarded client worked.
+	t.Run("all-loopback resolution tries every address", func(t *testing.T) {
+		client, ctx := newClient(t, []net.IP{net.ParseIP("::1"), net.ParseIP("127.0.0.1")}, nil)
+		resp, err := client.Do(mustReq(t, ctx, baseURL+"/v1/models"))
+		if err != nil {
+			t.Fatalf("dial gave up before trying 127.0.0.1: %v", err)
+		}
+		_ = resp.Body.Close()
+	})
+
 	t.Run("resolution failure refused", func(t *testing.T) {
 		client, ctx := newClient(t, nil, fmt.Errorf("resolver down"))
 		if resp, err := client.Do(mustReq(t, ctx, baseURL+"/v1/models")); err == nil {
