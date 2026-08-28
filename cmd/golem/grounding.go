@@ -71,7 +71,11 @@ type evidenceEntry struct {
 // which makes the join direct and drops the collision case entirely.
 //
 // Retriever calls run from parallel read-only dispatch goroutines (#235), so
-// every operation is mutex-guarded.
+// every operation is mutex-guarded. Dispatch CHILD agents share the wrapped
+// retrieve tool and therefore record into this same turn's recorder. That is
+// deliberate slack, not a leak: child retrievals never appear in the parent's
+// presented attribution, so at worst they spend cap budget — and a cap trip
+// fails closed as evidence_incomplete rather than thinning the evidence.
 type evidenceRecorder struct {
 	mu       sync.Mutex
 	entries  map[evidenceKey]evidenceEntry
