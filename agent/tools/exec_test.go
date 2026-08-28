@@ -975,6 +975,26 @@ func TestExecRecheckSuccessReturnsOwnedSpec(t *testing.T) {
 	}
 }
 
+func TestExecRecheckPreservesEmptySanitizedEnv(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("unix exec semantics")
+	}
+	ws, pathDir := prepWS(t)
+	pp, err := prepareExecPlan(ws, []string{filepath.Join(pathDir, "mycmd")}, "", execDefaultTimeout, 0, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pp.env = nil
+
+	spec, err := recheckExecPlan(ws, pp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if spec.Env == nil {
+		t.Fatal("empty sanitized environment became nil, which makes os/exec inherit the parent environment")
+	}
+}
+
 func TestExecRecheckDirChanged(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("unix symlink semantics")

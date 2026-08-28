@@ -594,3 +594,119 @@ func TestApproverNilGrantsKeepsLegacyPrompt(t *testing.T) {
 		t.Fatalf("nil-grants prompt must not offer a:\n%s", out.String())
 	}
 }
+
+func verifyToolCall() provider.ToolCall {
+	return provider.ToolCall{
+		ID: "v1", Type: "function",
+		Function: provider.ToolCallFunction{Name: verifyToolName},
+	}
+}
+
+func TestGrantScopeGivesVerificationItsOwnNamespace(t *testing.T) {
+	scope := grantScope(verifyToolName)
+	if scope == "" {
+		t.Fatal("verify_command must be grantable")
+	}
+	if scope == grantScope("run_command") || scope == grantScope("write_file") {
+		t.Fatalf("verify scope %q must differ from the exec and files scopes", scope)
+	}
+	if scope != grantScopeVerify {
+		t.Fatalf("scope = %q, want %q", scope, grantScopeVerify)
+	}
+}
+
+// TestVerifyGrantsDoNotCrossAuthorize is the security pin: a grant is
+// authorized by (scope, key), and scope comes from the TOOL NAME, so even an
+// identical key cannot move authorization between verification and command
+// execution in either direction.
+func TestVerifyGrantsDoNotCrossAuthorize(t *testing.T) {
+	const sharedKey = "identical-structural-key"
+	cases := []struct {
+		name          string
+		grantedTool   string
+		attemptedTool string
+	}{
+		{"verify grant does not authorize run_command", verifyToolName, "run_command"},
+		{"verify grant does not authorize start_command", verifyToolName, "start_command"},
+		{"exec grant does not authorize verification", "run_command", verifyToolName},
+		{"files grant does not authorize verification", "write_file", verifyToolName},
+		{"verify grant does not authorize write_file", verifyToolName, "write_file"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			grants := newApprovalGrants()
+			grants.grant(grantScope(tc.grantedTool), sharedKey)
+			if !grants.granted(grantScope(tc.grantedTool), sharedKey) {
+				t.Fatal("fixture invalid: the grant was not stored")
+			}
+			if grants.granted(grantScope(tc.attemptedTool), sharedKey) {
+				t.Fatalf("a %s grant must not authorize %s", tc.grantedTool, tc.attemptedTool)
+			}
+		})
+	}
+}
+
+func TestReplApproverVerifyPromptIsPlainAndGrantable(t *testing.T) {
+	var out strings.Builder
+	src := newScannerSource(strings.NewReader("y\n"), &out)
+	ap := newReplApprover(src, &out, false)
+	ap.grants = newApprovalGrants()
+
+	preview := "post-write verification command:\n  argv:    go test ./...\n"
+	d, err := ap.ApproveKeyed(context.Background(), verifyToolCall(), preview, "verify:v1:abc")
+	if err != nil || !d.Approved {
+		t.Fatalf("approve: d=%+v err=%v", d, err)
+	}
+	rendered := out.String()
+	if !strings.Contains(rendered, "go test ./...") {
+		t.Fatalf("verify preview must render the command:\n%s", rendered)
+	}
+	if strings.Contains(rendered, "Apply this change?") {
+		t.Fatalf("verification must not use the diff/edit prompt:\n%s", rendered)
+	}
+	if !strings.Contains(rendered, "Run this verification command?") {
+		t.Fatalf("verification prompt missing:\n%s", rendered)
+	}
+	if !strings.Contains(rendered, "a=always") {
+		t.Fatalf("a grantable verify prompt must offer the grant legend:\n%s", rendered)
+	}
+}
+
+func TestReplApproverVerifyGrantAutoApprovesTheSameCommandOnly(t *testing.T) {
+	var out strings.Builder
+	src := newScannerSource(strings.NewReader("a\n"), &out)
+	ap := newReplApprover(src, &out, false)
+	ap.grants = newApprovalGrants()
+
+	if d, err := ap.ApproveKeyed(context.Background(), verifyToolCall(), "preview", "verify:v1:abc"); err != nil || !d.Approved {
+		t.Fatalf("grant turn: d=%+v err=%v", d, err)
+	}
+	if ap.grants.count() != 1 {
+		t.Fatalf("grant not stored, count=%d", ap.grants.count())
+	}
+
+	// A second batch with the SAME command auto-approves with no input left.
+	ap.src = newScannerSource(strings.NewReader(""), &out)
+	d, err := ap.ApproveKeyed(context.Background(), verifyToolCall(), "preview", "verify:v1:abc")
+	if err != nil || !d.Approved || !d.ViaGrant {
+		t.Fatalf("same command must auto-approve via grant: d=%+v err=%v", d, err)
+	}
+
+	// A CHANGED command (different key) must prompt again, and EOF denies.
+	d, err = ap.ApproveKeyed(context.Background(), verifyToolCall(), "preview", "verify:v1:changed")
+	if err != nil || d.Approved {
+		t.Fatalf("a changed verify command must not inherit the grant: d=%+v err=%v", d, err)
+	}
+}
+
+func TestVerifyGrantsAreClearedWithTheSession(t *testing.T) {
+	grants := newApprovalGrants()
+	grants.grant(grantScopeVerify, "verify:v1:abc")
+	if grants.count() != 1 {
+		t.Fatalf("count = %d, want 1", grants.count())
+	}
+	grants.clear()
+	if grants.count() != 0 || grants.granted(grantScopeVerify, "verify:v1:abc") {
+		t.Fatal("verify grants must not survive a session clear")
+	}
+}

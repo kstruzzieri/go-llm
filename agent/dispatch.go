@@ -12,19 +12,37 @@ import (
 // runToolCalls routes a batch to the parallel path when every call is read-only
 // and independent (canRunParallel); otherwise to the serial path. Single-call
 // batches always go serial (no benefit, zero behavior change).
+//
+// It also owns the post-batch policy (#347). The hook lives HERE, at the shared
+// boundary, rather than at the bottom of the serial runner: mutating batches
+// are serial today only because parallelSafe demands a strictly-Read effect and
+// canRunParallel rejects planning tools, and write effect and planning
+// capability are separate concepts.
 func (o *Orchestrator) runToolCalls(ctx context.Context, res *Result, state *State,
 	reg *toolRegistry, calls []provider.ToolCall, approver Approver, obs Observer, step int,
 	gov *restraintGovernor) error {
 
+	b := newBatch()
+	var err error
 	if len(calls) >= 2 && canRunParallel(reg, calls) && gov.parallelUncapped(calls) {
-		return o.runToolCallsParallel(ctx, res, state, reg, calls, approver, obs, step, gov)
+		err = o.runToolCallsParallel(ctx, res, state, reg, calls, approver, obs, step, gov, &b)
+	} else {
+		err = o.runToolCallsSerial(ctx, res, state, reg, calls, approver, obs, step, gov, &b)
 	}
-	return o.runToolCallsSerial(ctx, res, state, reg, calls, approver, obs, step, gov)
+	if err != nil {
+		return err
+	}
+	if res.StopReason != Completed {
+		// The governor tripped mid-batch: the run is stopping and the model
+		// gets no further turn, so the observation would never be read.
+		return nil
+	}
+	return o.verifyBatch(ctx, state, approver, &b)
 }
 
 func (o *Orchestrator) runToolCallsSerial(ctx context.Context, res *Result, state *State,
 	reg *toolRegistry, calls []provider.ToolCall, approver Approver, obs Observer, step int,
-	gov *restraintGovernor) error {
+	gov *restraintGovernor, b *batch) error {
 
 	for _, call := range calls {
 		res.Events = append(res.Events, EventRecord{Step: step, Kind: "tool_call"})
@@ -32,7 +50,7 @@ func (o *Orchestrator) runToolCallsSerial(ctx context.Context, res *Result, stat
 		if err != nil {
 			return err // hard abort (ctx cancel / approver error): no ToolResult, no OnToolResult
 		}
-		stop, err := o.recordResult(ctx, res, state, obs, gov, step, call, effect, rec, out)
+		stop, err := o.recordResult(ctx, res, state, obs, gov, step, call, effect, rec, out, b)
 		if err != nil {
 			return err
 		}
@@ -52,10 +70,12 @@ func (o *Orchestrator) runToolCallsSerial(ctx context.Context, res *Result, stat
 // byte-identical to the model's later input. It returns stop=true (and sets
 // res.StopReason) when the governor trips, or an error to hard-abort the run.
 // It is a method so the mixed-assembly flag is read from o.ctxMgr in ONE place:
-// a flag threaded from each caller could drift between the two paths.
+// a flag threaded from each caller could drift between the two paths. For the
+// same reason b (the post-batch policy accumulator, #347) is updated here and
+// not in either runner.
 func (o *Orchestrator) recordResult(ctx context.Context, res *Result, state *State, obs Observer,
 	gov *restraintGovernor, step int, call provider.ToolCall, effect Effect, rec ToolCallRecord,
-	out ToolResult) (stop bool, err error) {
+	out ToolResult, b *batch) (stop bool, err error) {
 
 	rec.RouteOutcome = out.RouteOutcome
 	res.ToolCalls = append(res.ToolCalls, rec)
@@ -83,6 +103,7 @@ func (o *Orchestrator) recordResult(ctx context.Context, res *Result, state *Sta
 		msg.Context = out.Context.clone() // clone is nil-safe
 	}
 	state.Messages = append(state.Messages, msg)
+	b.note(state, call, rec, out)
 	gov.observe(call, out)
 	if sr, tripped := gov.stopReason(); tripped {
 		res.StopReason = sr

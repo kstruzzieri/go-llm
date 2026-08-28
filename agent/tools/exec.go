@@ -288,7 +288,7 @@ func recheckExecPlan(ws *Workspace, pp execPending) (execSpec, error) {
 		Path: pp.path,
 		Argv: append([]string(nil), pp.argv...),
 		Dir:  pp.dir,
-		Env:  append([]string(nil), pp.env...),
+		Env:  append([]string{}, pp.env...),
 	}, nil
 }
 
