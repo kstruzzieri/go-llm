@@ -18,6 +18,12 @@ type SandboxRuntime string
 // alias retained so SandboxConfig{} preserves pre-#440 behavior.
 const SandboxRuntimeHost SandboxRuntime = "host"
 
+// SandboxRuntimeSeatbelt selects the macOS Seatbelt (sandbox-exec) backend
+// (#442): per-invocation deny-default profiles scoping reads/writes to the
+// workspace plus a private temp directory. Selecting it off-darwin, or on a
+// host whose Seatbelt capability probe fails, fails closed at construction.
+const SandboxRuntimeSeatbelt SandboxRuntime = "seatbelt"
+
 // SandboxConfig is a permission ceiling for a non-host execution runtime: a
 // backend may enforce stricter isolation but must never silently provide
 // less. The zero value is the compatibility exception and means direct host
@@ -83,6 +89,18 @@ func newHostExecBackend(starter backgroundStarter) resolvedExecBackend {
 type sandboxApproval struct {
 	keyComponent string
 	preview      string
+	runtime      SandboxRuntime
+}
+
+// validateWorkspace rejects roots that cannot safely bound the selected
+// sandbox before Plan returns an approval prompt. Host execution deliberately
+// keeps accepting volume roots for backward compatibility.
+func (s sandboxApproval) validateWorkspace(root string) error {
+	if s.runtime != SandboxRuntimeSeatbelt {
+		return nil
+	}
+	_, err := seatbeltAllowancePath("workspace root", root)
+	return err
 }
 
 // sandboxFingerprint hashes the approval-relevant sandbox identity using
@@ -122,6 +140,7 @@ func approvalForSandbox(cfg SandboxConfig) sandboxApproval {
 	return sandboxApproval{
 		keyComponent: "sb:" + sandboxFingerprint(cfg) + ":",
 		preview:      renderSandboxLine(cfg),
+		runtime:      cfg.Runtime,
 	}
 }
 
@@ -148,10 +167,17 @@ func renderSandboxLine(cfg SandboxConfig) string {
 		}
 		caps = "[" + strings.Join(quoted, ",") + "]"
 	}
-	return fmt.Sprintf(
+	line := fmt.Sprintf(
 		"runtime=%s network=%s memory_cap=%s cpu_limit=%s drop_caps=%s",
 		strconv.QuoteToGraphic(string(cfg.Runtime)), network, memory, cpu, caps,
 	)
+	// Seatbelt-only marker (#442): the user approves that the command's temp
+	// directory is a fresh private one, not the ambient TMPDIR. Other runtimes
+	// must not claim a behavior they do not implement.
+	if cfg.Runtime == SandboxRuntimeSeatbelt {
+		line += " temp=private"
+	}
+	return line
 }
 
 // newExecBackend is the sole runtime-selection switch (#440). It normalizes
@@ -169,6 +195,12 @@ func newExecBackend(cfg SandboxConfig) (resolvedExecBackend, error) {
 			commandRunner:     newPlatformRunner(),
 			backgroundStarter: newPlatformStarter(),
 		}, normalized), nil
+	case SandboxRuntimeSeatbelt:
+		backend, err := newSeatbeltExecBackend(normalized)
+		if err != nil {
+			return resolvedExecBackend{}, err
+		}
+		return bindExecBackend(backend, normalized), nil
 	default:
 		return resolvedExecBackend{}, fmt.Errorf("tools: sandbox runtime %q is not implemented", normalized.Runtime)
 	}

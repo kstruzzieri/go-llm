@@ -235,12 +235,56 @@ func TestRunCommandSandboxApproval(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := "exec:v2:" + rc.sandbox.keyComponent; !strings.HasPrefix(plan.ApprovalKey, want) {
+	if want := "exec:v3:" + rc.sandbox.keyComponent; !strings.HasPrefix(plan.ApprovalKey, want) {
 		t.Fatalf("key = %q, want prefix %q", plan.ApprovalKey, want)
 	}
 	if !strings.Contains(plan.Preview, "sandbox: "+rc.sandbox.preview) {
 		t.Fatalf("preview missing sandbox policy:\n%s", plan.Preview)
 	}
+}
+
+func TestSeatbeltPlansRejectVolumeRootBeforeApproval(t *testing.T) {
+	ws, err := NewWorkspace("/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw := json.RawMessage(`{"argv":["go","version"]}`)
+	cfg := mustNormalizeSandbox(t, SandboxConfig{Runtime: SandboxRuntimeSeatbelt})
+	approval := approvalForSandbox(cfg)
+
+	t.Run("foreground", func(t *testing.T) {
+		rc := NewRunCommand(ws, &markerRunner{})
+		rc.sandbox = approval
+		plan, err := rc.Plan(context.Background(), raw)
+		if err == nil || !strings.Contains(err.Error(), "workspace root") {
+			t.Fatalf("RunCommand.Plan(/) error = %v, want Seatbelt workspace-root rejection", err)
+		}
+		if plan.ApprovalKey != "" {
+			t.Errorf("RunCommand.Plan(/) approval key = %q, want empty", plan.ApprovalKey)
+		}
+	})
+
+	t.Run("direct background", func(t *testing.T) {
+		backend := bindExecBackend(hostBackend{
+			commandRunner: &markerRunner{}, backgroundStarter: starterOf(),
+		}, cfg)
+		manager := newBackgroundManagerWithBackend(backend, &countingRandom{})
+		t.Cleanup(manager.Shutdown)
+		plan, err := NewStartCommand(ws, manager).Plan(context.Background(), raw)
+		if err == nil || !strings.Contains(err.Error(), "workspace root") {
+			t.Fatalf("StartCommand.Plan(/) error = %v, want Seatbelt workspace-root rejection", err)
+		}
+		if plan.ApprovalKey != "" {
+			t.Errorf("StartCommand.Plan(/) approval key = %q, want empty", plan.ApprovalKey)
+		}
+	})
+
+	t.Run("host control", func(t *testing.T) {
+		rc := NewRunCommand(ws, &markerRunner{})
+		if _, err := rc.Plan(context.Background(), raw); err != nil {
+			t.Fatalf("host RunCommand.Plan(/): %v", err)
+		}
+	})
 }
 
 func TestStartCommandDerivesSandboxApprovalFromManager(t *testing.T) {
@@ -261,7 +305,7 @@ func TestStartCommandDerivesSandboxApprovalFromManager(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := "exec-bg:v1:" + backend.approval.keyComponent; !strings.HasPrefix(plan.ApprovalKey, want) {
+	if want := "exec-bg:v2:" + backend.approval.keyComponent; !strings.HasPrefix(plan.ApprovalKey, want) {
 		t.Fatalf("key = %q, want prefix %q", plan.ApprovalKey, want)
 	}
 	if !strings.Contains(plan.Preview, "sandbox:  "+backend.approval.preview) {

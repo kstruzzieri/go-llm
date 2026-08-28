@@ -6,6 +6,53 @@ All notable changes to `go-llm` are documented here. Downstream consumers
 
 ## [Unreleased]
 
+### Added — agent/tools: macOS Seatbelt sandbox backend (#442)
+
+A `SandboxRuntimeSeatbelt` execution backend behind the #440 exec-backend
+seam, part of the zero-trust epic (#429, Phase 3). On a capable, unsandboxed
+macOS host it runs every approved command — and its descendants, foreground
+and background alike — under a per-invocation `sandbox-exec` (Seatbelt)
+profile:
+
+- Writes are confined to the canonical workspace and one fresh `0700`
+  private temp directory created per invocation. Before each spawn, the
+  backend rejects any workspace inode with a hard-link name outside that
+  root while allowing hard links whose names are all internal. The inherited
+  `TMPDIR` is never trusted as policy: it is command input, replaced in the
+  child environment with the private directory.
+- Reads outside the workspace/private-temp are limited to the exact
+  executable target, a minimal reviewed set of read-only system runtime
+  subtrees (loaders, system libraries), and the fixed device literals
+  `/dev/null`, `/dev/random`, `/dev/urandom`. `$HOME` and other user data
+  are unreadable — so, for example, a sandboxed `git` cannot read
+  `~/.gitconfig`; that is the boundary working as intended. Broad or
+  data-bearing roots (`/System`, `/usr`, the `/System/Volumes/Data`
+  firmlink) are never granted.
+- File metadata access is scoped to allowed subtrees plus the exact
+  traversal ancestors, never globally.
+- Outbound TCP, UDP, and Unix-domain sockets are denied unless
+  `AllowNetwork` is set; `AllowNetwork` is an all-or-nothing network-class
+  relaxation, not an egress firewall.
+
+The backend fails closed with no host fallback: off macOS, when
+`sandbox-exec` is missing, when an active capability probe cannot apply a
+profile (a nested-sandbox host returns `sandbox_apply` EPERM — an existence
+check alone is a false positive), and for the `MemoryCapMB`, `CPULimit`, and
+`DropCaps` ceilings Seatbelt cannot enforce.
+
+Limitations, disclosed deliberately: `sandbox-exec` and SBPL are deprecated
+by Apple (active probing turns removal or disablement into a clear
+unavailable-runtime error, not a replacement); the pre-spawn hard-link audit
+walks all workspace entries, and a same-UID unsandboxed process can still race
+filesystem mutation after that final host check; and Homebrew/MacPorts/custom-
+dylib tools whose libraries live outside the reviewed roots may fail rather
+than run with a widened profile. Runtime selection is a library capability
+until #347 wires it into `cmd/golem`.
+
+As part of this change the exec approval-key recipe gained the canonical
+workspace root (foreground `exec:v2:` → `exec:v3:`, background
+`exec-bg:v1:` → `exec-bg:v2:`) so a grant cannot cross workspace
+boundaries. Grants are session-scoped, so there is no persisted migration.
 ### Added — golem, agent, agent/tools: post-write verification hook (#347)
 
 An optional, workspace-declared command that runs after any tool-call batch

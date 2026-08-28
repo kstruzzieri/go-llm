@@ -12,12 +12,13 @@ import (
 )
 
 // Background model-tool constants (#346, frozen contract). The approval-key
-// namespace is DISTINCT from run_command's "exec:v2:" so a foreground grant can
-// never authorize a background start; the v1 tag names the fingerprint recipe
+// namespace is DISTINCT from run_command's "exec:v3:" so a foreground grant can
+// never authorize a background start; the v2 tag names the fingerprint recipe
 // (commandFingerprint with zero effective and requested timeouts — the process
-// lifetime is manager-owned, no timeout participates).
+// lifetime is manager-owned, no timeout participates). v1 -> v2 (#442): the
+// underlying commandFingerprint recipe gained the canonical workspace root.
 const (
-	bgExecApprovalKeyPrefix = "exec-bg:v1:"
+	bgExecApprovalKeyPrefix = "exec-bg:v2:"
 	bgToolTimeout           = 10 * time.Second // tool-call bound, never the job lifetime
 	bgSmallOutputCap        = 4096
 	bgTailOutputCap         = 20 * 1024
@@ -136,6 +137,9 @@ func (t *StartCommand) Plan(_ context.Context, raw json.RawMessage) (agent.ToolP
 	eff := t.Effect()
 	if t.manager == nil || t.manager.backend.execBackend == nil {
 		return agent.ToolPlan{Effect: eff}, fmt.Errorf("background manager must have a resolved backend")
+	}
+	if err := t.manager.backend.approval.validateWorkspace(t.ws.root); err != nil {
+		return agent.ToolPlan{Effect: eff}, err
 	}
 	var args startCommandArgs
 	if err := json.Unmarshal(raw, &args); err != nil {

@@ -32,3 +32,19 @@ jobs:
       # shutdown paths that kill and reap real process groups.
       - name: Background exec runtime
         run: go test -race -run 'TestBackground(Process|Manager)|TestRunBackground|TestJobs' ./agent/tools ./cmd/golem
+
+      # Real Seatbelt confinement (#442). GO_LLM_REQUIRE_SEATBELT=1 turns a
+      # skip into a hard failure, so a runner that cannot apply Seatbelt (a
+      # nested sandbox) fails the gate rather than silently passing. The
+      # non-race pass exercises the helper-process legs (a race-instrumented
+      # child cannot initialize inside the profile); the race pass covers the
+      # rest under the detector.
+      - name: Seatbelt confinement (non-race)
+        env:
+          GO_LLM_REQUIRE_SEATBELT: "1"
+        run: go test -run '^(TestSeatbelt|TestSBPL|TestProbeSeatbelt)' ./agent/tools
+
+      - name: Seatbelt confinement (race)
+        env:
+          GO_LLM_REQUIRE_SEATBELT: "1"
+        run: go test -race -run '^(TestSeatbelt|TestSBPL|TestProbeSeatbelt)' ./agent/tools

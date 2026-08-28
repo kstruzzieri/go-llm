@@ -30,12 +30,14 @@ const (
 )
 
 // execApprovalKeyPrefix namespaces exec grant keys (#341) so a command
-// fingerprint can never collide with another tool class's key. The v2 tag
-// names the fingerprint recipe (argv, cwd, env NAME=value pairs, effective
-// and requested timeouts, resolved exe path), so any future recipe change is
-// an explicit migration.
+// fingerprint can never collide with another tool class's key. The v3 tag
+// names the fingerprint recipe (argv, cwd, canonical workspace root, env
+// NAME=value pairs, effective and requested timeouts, resolved exe path), so
+// any future recipe change is an explicit migration. v2 -> v3 (#442): the
+// workspace root bounds a sandbox backend's write allowance, so it is part of
+// the approved identity.
 // Unexported: the key is opaque to consumers.
-const execApprovalKeyPrefix = "exec:v2:"
+const execApprovalKeyPrefix = "exec:v3:"
 
 var (
 	defaultExecEnvAllowlist = []string{"PATH", "HOME", "LANG", "USER", "TMPDIR"}
@@ -53,6 +55,10 @@ type execSpec struct {
 	Argv []string
 	Dir  string
 	Env  []string
+	// WorkspaceRoot is the canonical root of the Workspace the plan was
+	// resolved and re-checked against. Sandboxing backends scope their
+	// allowances to it; the host runner ignores it.
+	WorkspaceRoot string
 }
 
 type execResult struct {
@@ -74,19 +80,21 @@ type commandRunner interface {
 
 // execPending is the state Plan computes and Invoke consumes, keyed by raw-args hash.
 type execPending struct {
-	path        string
-	identity    os.FileInfo
-	argv        []string
-	dir         string
-	dirLabel    string
-	dirIdentity os.FileInfo
-	env         []string
-	envNames    []string
-	timeout     time.Duration
-	requestedTO int
-	clamped     bool
-	fingerprint string
-	sandbox     sandboxApproval // stamped by the owning tool, NOT by prepareExecPlan
+	path              string
+	identity          os.FileInfo
+	argv              []string
+	dir               string
+	dirLabel          string
+	dirIdentity       os.FileInfo
+	workspaceRoot     string
+	workspaceIdentity os.FileInfo
+	env               []string
+	envNames          []string
+	timeout           time.Duration
+	requestedTO       int
+	clamped           bool
+	fingerprint       string
+	sandbox           sandboxApproval // stamped by the owning tool, NOT by prepareExecPlan
 }
 
 type execPlanCache struct {
@@ -213,6 +221,9 @@ func (t *RunCommand) Effect() agent.Effect { return t.baseEffect() }
 // returns an error so dispatch reports it without prompting for approval.
 func (t *RunCommand) Plan(_ context.Context, raw json.RawMessage) (agent.ToolPlan, error) {
 	eff := t.baseEffect()
+	if err := t.sandbox.validateWorkspace(t.ws.root); err != nil {
+		return agent.ToolPlan{Effect: eff}, err
+	}
 	var args runCommandArgs
 	if err := json.Unmarshal(raw, &args); err != nil {
 		return agent.ToolPlan{Effect: eff}, fmt.Errorf("invalid arguments: %w", err)
@@ -256,6 +267,10 @@ func prepareExecPlan(ws *Workspace, argv []string, dir string, timeout time.Dura
 	if err != nil {
 		return execPending{}, err
 	}
+	rootIdentity, err := os.Lstat(ws.root)
+	if err != nil {
+		return execPending{}, fmt.Errorf("workspace root: %w", err)
+	}
 	env, envNames := buildExecEnv(os.LookupEnv)
 	path, fi, err := resolveExecutable(ws, cwd, argv[0], pathFromEnv(env))
 	if err != nil {
@@ -264,31 +279,42 @@ func prepareExecPlan(ws *Workspace, argv []string, dir string, timeout time.Dura
 	owned := append([]string(nil), argv...) // caller may mutate its slice after Plan
 	return execPending{
 		path: path, identity: fi, argv: owned, dir: cwd, dirLabel: dirLabel,
-		dirIdentity: dirIdentity, env: env, envNames: envNames, timeout: timeout,
+		dirIdentity: dirIdentity, workspaceRoot: ws.root, workspaceIdentity: rootIdentity,
+		env: env, envNames: envNames, timeout: timeout,
 		requestedTO: requestedTimeout, clamped: clamped,
-		fingerprint: commandFingerprint(owned, cwd, env, timeout, requestedTimeout, path),
+		fingerprint: commandFingerprint(owned, cwd, ws.root, env, timeout, requestedTimeout, path),
 	}, nil
 }
 
-// recheckExecPlan re-resolves and re-checks the approved cwd and executable
-// (path equality + os.SameFile identity) at spawn time, so an escape/symlink or
-// binary swap introduced after approval fails closed. On success it returns an
-// owned execSpec snapshot; on mismatch a descriptive error the caller renders
-// model-visible. Shared by foreground Invoke and the background tool (#346).
+// recheckExecPlan re-resolves and re-checks the approved cwd, workspace root,
+// and executable (path equality + os.SameFile identity) at spawn time, so an
+// escape/symlink, root substitution, or binary swap introduced after approval
+// fails closed. On success it returns an owned execSpec snapshot; on mismatch
+// a descriptive error the caller renders model-visible. Shared by foreground
+// Invoke and the background tool (#346).
 func recheckExecPlan(ws *Workspace, pp execPending) (execSpec, error) {
 	dir, _, dirIdentity, err := resolveExecDir(ws, pp.dirLabel)
 	if err != nil || dir != pp.dir || pp.dirIdentity == nil || !os.SameFile(dirIdentity, pp.dirIdentity) {
 		return execSpec{}, errors.New("working directory changed since approval; retry")
 	}
+	rootIdentity, rootErr := os.Lstat(ws.root)
+	if rootErr != nil || ws.root != pp.workspaceRoot || pp.workspaceIdentity == nil ||
+		!os.SameFile(rootIdentity, pp.workspaceIdentity) {
+		return execSpec{}, errors.New("workspace root changed since approval; retry")
+	}
 	path, fi, rerr := resolveExecutable(ws, pp.dir, pp.argv[0], pathFromEnv(pp.env))
 	if rerr != nil || path != pp.path || !os.SameFile(fi, pp.identity) {
 		return execSpec{}, errors.New("executable changed since approval; retry")
 	}
+	// Env is []string{} and never []string(nil): os/exec treats a nil Env as
+	// "inherit the parent environment", which would silently defeat the
+	// allowlist when none of its variables are set.
 	return execSpec{
-		Path: pp.path,
-		Argv: append([]string(nil), pp.argv...),
-		Dir:  pp.dir,
-		Env:  append([]string{}, pp.env...),
+		Path:          pp.path,
+		Argv:          append([]string(nil), pp.argv...),
+		Dir:           pp.dir,
+		Env:           append([]string{}, pp.env...),
+		WorkspaceRoot: ws.root,
 	}, nil
 }
 
@@ -460,15 +486,17 @@ func customLookPath(pathValue, name string) (string, os.FileInfo, error) {
 }
 
 // commandFingerprint is a stable hash over the approval-relevant inputs of the
-// exact command (#341 v2 recipe): argv, resolved cwd, the sanitized env as
-// NAME=value pairs (values are keyed — a changed PATH/HOME/LANG/TMPDIR/USER
-// value changes behavior even when the shape is identical), effective and
-// requested timeouts, and the resolved executable path (resolution can change
-// under an identical env when a new binary shadows an earlier PATH directory).
+// exact command (#341 v3 recipe): argv, resolved cwd, the canonical workspace
+// root (#442 — it bounds a sandbox backend's allowances, so nested workspaces
+// sharing a cwd must not share grants), the sanitized env as NAME=value pairs
+// (values are keyed — a changed PATH/HOME/LANG/TMPDIR/USER value changes
+// behavior even when the shape is identical), effective and requested
+// timeouts, and the resolved executable path (resolution can change under an
+// identical env when a new binary shadows an earlier PATH directory).
 // Returns the FULL digest — the approval key uses all of it; display call sites
 // truncate to fingerprintLen. Uses NUL separators so field boundaries cannot
 // be forged by embedded content.
-func commandFingerprint(argv []string, cwd string, env []string, timeout time.Duration, requestedTimeout int, exePath string) string {
+func commandFingerprint(argv []string, cwd, workspaceRoot string, env []string, timeout time.Duration, requestedTimeout int, exePath string) string {
 	h := sha256.New()
 	write := func(s string) { _, _ = h.Write([]byte(s)); _, _ = h.Write([]byte{0}) }
 	write("argv")
@@ -477,6 +505,8 @@ func commandFingerprint(argv []string, cwd string, env []string, timeout time.Du
 	}
 	write("cwd")
 	write(cwd)
+	write("workspace_root")
+	write(workspaceRoot)
 	write("env")
 	for _, kv := range env { // sanitized NAME=value pairs, deterministic allowlist order
 		write(kv)
