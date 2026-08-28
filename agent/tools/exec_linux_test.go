@@ -9,10 +9,34 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
 )
+
+// platformTestSetup makes the test process a clean bwrap parent. CI runners
+// (observed: GitHub Actions leaks an inheritable descriptor into the test
+// process) would otherwise trip the backend's fail-closed FD audit on every
+// prepare. Marking an inherited descriptor close-on-exec only changes what
+// FUTURE children of this process inherit; the owner's use of its own copy
+// is untouched. Production keeps the strict fail-closed audit.
+func platformTestSetup() {
+	entries, err := os.ReadDir("/proc/self/fd")
+	if err != nil {
+		return
+	}
+	for _, e := range entries {
+		fd, convErr := strconv.Atoi(e.Name())
+		if convErr != nil || fd <= 2 {
+			continue
+		}
+		flags, _, errno := syscall.Syscall(syscall.SYS_FCNTL, uintptr(fd), syscall.F_GETFD, 0)
+		if errno == 0 && flags&syscall.FD_CLOEXEC == 0 {
+			_, _, _ = syscall.Syscall(syscall.SYS_FCNTL, uintptr(fd), syscall.F_SETFD, flags|syscall.FD_CLOEXEC)
+		}
+	}
+}
 
 // recordingProbe fails the test if the probe runs when construction must have
 // already failed, and records the argv it receives otherwise.

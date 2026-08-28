@@ -1414,3 +1414,8 @@ func TestNewExecBackendSeatbeltMatchesRealCapability(t *testing.T) {
 		t.Fatalf("preview = %q, want %q", got.approval.preview, want)
 	}
 }
+
+// platformTestSetup is the Darwin no-op counterpart of the Linux test-parent
+// descriptor hygiene in exec_linux_test.go; TestMain calls it on every unix
+// platform.
+func platformTestSetup() {}

@@ -61,9 +61,14 @@ var bwrapLayoutDirs = []string{"/bin", "/sbin", "/lib", "/lib32", "/lib64"}
 // bwrapDefaultSystemRoots is the reviewed, minimal read-only execution
 // surface, mirroring seatbeltDefaultSystemRoots' discipline: additions
 // require a demonstrated denial, the narrowest rule, and a builder test.
+// Every bwrapLayoutDirs entry's usr-merge target must be present here, or a
+// benign standard layout fails the collector's covered-target check —
+// observed on ubuntu-24.04, where the stock /lib32 -> usr/lib32 link failed
+// prepare with: layout link "/lib32" resolves to "/usr/lib32" outside the
+// reviewed read-only roots. Absent roots are omitted (strictly narrower).
 var bwrapDefaultSystemRoots = []string{
-	"/usr/bin", "/usr/sbin", "/usr/lib", "/usr/lib64", "/usr/libexec",
-	"/usr/share",
+	"/usr/bin", "/usr/sbin", "/usr/lib", "/usr/lib32", "/usr/lib64",
+	"/usr/libexec", "/usr/share",
 }
 
 // bwrapEtcLiterals is the exec-critical /etc surface (dynamic linker cache

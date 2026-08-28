@@ -313,3 +313,42 @@ func TestBuildBwrapArgsExeBindOnlyWhenUncovered(t *testing.T) {
 		})
 	}
 }
+
+// TestBwrapReviewedPolicySets pins the compiled-in reviewed mount policy:
+// any widening (or narrowing) of the execution surface must show up as an
+// explicit test change, and every fixed-layout entry's usr-merge target must
+// be present in the reviewed roots so benign standard layouts pass the
+// collector's covered-target check.
+func TestBwrapReviewedPolicySets(t *testing.T) {
+	wantRoots := []string{
+		"/usr/bin", "/usr/sbin", "/usr/lib", "/usr/lib32", "/usr/lib64",
+		"/usr/libexec", "/usr/share",
+	}
+	if !slices.Equal(bwrapDefaultSystemRoots, wantRoots) {
+		t.Fatalf("reviewed system roots changed: %q", bwrapDefaultSystemRoots)
+	}
+	wantLayout := []string{"/bin", "/sbin", "/lib", "/lib32", "/lib64"}
+	if !slices.Equal(bwrapLayoutDirs, wantLayout) {
+		t.Fatalf("fixed layout set changed: %q", bwrapLayoutDirs)
+	}
+	for _, dir := range bwrapLayoutDirs {
+		if !slices.Contains(bwrapDefaultSystemRoots, "/usr"+dir) {
+			t.Fatalf("layout entry %q lacks its usr-merge target /usr%s in the reviewed roots", dir, dir)
+		}
+	}
+	wantEtc := []string{
+		"/etc/ld.so.cache", "/etc/ld.so.conf", "/etc/ld.so.conf.d",
+		"/etc/alternatives",
+	}
+	if !slices.Equal(bwrapEtcLiterals, wantEtc) {
+		t.Fatalf("reviewed /etc literals changed: %q", bwrapEtcLiterals)
+	}
+	wantNetEtc := []string{
+		"/etc/resolv.conf", "/etc/hosts", "/etc/nsswitch.conf",
+		"/etc/ssl/certs", "/etc/ssl/cert.pem", "/etc/pki/tls/certs",
+		"/etc/pki/ca-trust/extracted",
+	}
+	if !slices.Equal(bwrapNetworkEtcLiterals, wantNetEtc) {
+		t.Fatalf("reviewed network /etc literals changed: %q", bwrapNetworkEtcLiterals)
+	}
+}
