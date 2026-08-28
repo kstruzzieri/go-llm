@@ -185,7 +185,14 @@ func TestNewDestinationRejectsUnsafeInput(t *testing.T) {
 }
 
 func TestNewDestinationRejectsBadProviderName(t *testing.T) {
-	for _, name := range []string{"", "has/slash"} {
+	// Control characters would forge lines in the admission manifest. Invalid
+	// UTF-8 is rejected for the neighbouring reason: distinct byte sequences
+	// all render as U+FFFD, so two different grant keys would be
+	// indistinguishable on the surface the user reads before consenting.
+	for _, name := range []string{
+		"", "has/slash", "a\nb", "a\rb", "a\x00b", "a\x7fb",
+		"a\xffb", "\xc3\x28", "a\u0085b", "a\u2028b", "a\u2029b",
+	} {
 		if _, err := NewDestination(name, "https://api.example.com/v1"); err == nil {
 			t.Errorf("NewDestination(%q, ...) = nil error, want rejection", name)
 		} else if !errors.Is(err, ErrDestinationInvalid) {
@@ -300,8 +307,15 @@ func TestParseDestinationRejectsMalformed(t *testing.T) {
 		"opencode/https://u:p@h.com/", // userinfo survives no path
 	} {
 		t.Run(s, func(t *testing.T) {
-			if d, err := ParseDestination(s); err == nil {
-				t.Errorf("ParseDestination(%q) = %q, want error", s, d.String())
+			d, err := ParseDestination(s)
+			if err == nil {
+				t.Fatalf("ParseDestination(%q) = %q, want error", s, d.String())
+			}
+			if !errors.Is(err, ErrDestinationInvalid) {
+				t.Errorf("error %v does not match ErrDestinationInvalid", err)
+			}
+			if !d.IsZero() {
+				t.Error("a rejected destination must be the zero value")
 			}
 		})
 	}

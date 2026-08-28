@@ -6,6 +6,8 @@ import (
 	"net"
 	"net/url"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 )
 
 // DestinationSchemeVersion labels the normalization below. It is recorded in
@@ -76,21 +78,52 @@ func (d Destination) String() string { return d.provider + "/" + d.baseURL }
 // back in a diagnostic would disclose the secret. For the same reason no
 // error below includes the raw input.
 func NewDestination(providerName, rawBaseURL string) (Destination, error) {
-	// The provider-name rule is duplicated from config.ValidateProviderName
-	// rather than called: config imports provider, so importing it back would
-	// cycle. The rule is two lines and pinned by test on both sides.
-	if providerName == "" {
-		return Destination{}, fmt.Errorf("%w: provider name is empty", ErrDestinationInvalid)
-	}
-	if strings.Contains(providerName, "/") {
-		return Destination{}, fmt.Errorf("%w: provider name %q must not contain %q",
-			ErrDestinationInvalid, providerName, "/")
+	if err := validateDestinationProviderName(providerName); err != nil {
+		return Destination{}, fmt.Errorf("%w: %s", ErrDestinationInvalid, err)
 	}
 	canonical, local, err := canonicalizeEndpoint(rawBaseURL)
 	if err != nil {
 		return Destination{}, fmt.Errorf("%w: provider %q: %s", ErrDestinationInvalid, providerName, err)
 	}
 	return Destination{provider: providerName, baseURL: canonical, local: local}, nil
+}
+
+// validateDestinationProviderName accepts a strict SUBSET of what
+// config.ValidateProviderName accepts. The rule is duplicated rather than
+// called because config imports provider, so importing it back would cycle;
+// destination_pin_test.go pins the subset relation so the two cannot drift
+// into disagreement.
+//
+// Being stricter than config is the safe direction: it can only refuse to
+// build a destination, never admit one config would have rejected. The extra
+// rule is control characters. config permits them in a provider key, and the
+// admission manifest is the line-oriented text a user reads before granting;
+// a key containing a newline could forge manifest lines and misrepresent what
+// is about to be admitted. This bounds structural forgery only -- it is not
+// protection against visually confusable names, which #477 does not attempt.
+func validateDestinationProviderName(name string) error {
+	if name == "" {
+		return errors.New("provider name is empty")
+	}
+	if strings.Contains(name, "/") {
+		return fmt.Errorf("provider name %q must not contain %q", name, "/")
+	}
+	if !utf8.ValidString(name) {
+		return errors.New("provider name is not valid UTF-8")
+	}
+	for _, r := range name {
+		// unicode.IsControl covers category Cc, which includes NUL, DEL, CR,
+		// LF, and NEL -- but NOT U+2028 LINE SEPARATOR or U+2029 PARAGRAPH
+		// SEPARATOR, which are Zl/Zp. Those are line breaks by definition and
+		// do break line structure in some renderers, so a Cc-only check would
+		// leave the guard incomplete against the forgery it exists to stop.
+		if unicode.IsControl(r) || unicode.Is(unicode.Zl, r) || unicode.Is(unicode.Zp, r) {
+			// %q escapes the offending rune, so the diagnostic cannot itself
+			// carry the forgery into whatever renders it.
+			return fmt.Errorf("provider name %q must not contain line-breaking or control characters", name)
+		}
+	}
+	return nil
 }
 
 // ParseDestination reads the "<provider>/<base URL>" CLI grant form.
