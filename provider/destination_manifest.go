@@ -200,6 +200,13 @@ func (g *DestinationGate) Clear() {
 // edge set, it cannot add authority (#477 D11: discovery narrows its
 // candidate envelope to the selected backend). The policy carries over
 // unchanged. Narrowing an uninstalled gate is an error, not a silent deny-all.
+//
+// Like any generation change, Narrow invalidates capabilities issued by the
+// previous snapshot — including ones for edges that were KEPT. A request that
+// bound before the narrow and authorizes after it denies transiently; that is
+// the fail-closed direction, and in the required ordering Narrow runs in the
+// quiet window between discovery and the first refresh, where no route
+// traffic is in flight.
 func (g *DestinationGate) Narrow(keep func(DestinationEdge) bool) error {
 	cur := g.snap.Load()
 	if cur == nil {

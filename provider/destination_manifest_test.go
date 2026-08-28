@@ -666,6 +666,83 @@ func TestRoutePlanFallbackMissingEdgeStopsWalkWithoutContact(t *testing.T) {
 	}
 }
 
+// A denied PRIMARY fails loud without falling through to an admitted
+// fallback. A missing primary edge is a manifest-wiring bug, not a runtime
+// availability condition — silently serving from the fallback would mask it
+// exactly the way the original #477 leak was masked, so neither provider may
+// be contacted.
+func TestRoutePlanDeniedPrimaryDoesNotFallThroughToAdmittedFallback(t *testing.T) {
+	fbDest := mustDest(t, "fallback", "https://fallback.example.com")
+	for _, kind := range executeKinds {
+		t.Run(kind.name, func(t *testing.T) {
+			// Only the FALLBACK's edge is admitted; the primary has none.
+			gate := installTestGate(t, DestinationEdge{Purpose: "agent", Destination: fbDest, IsFallback: true})
+			primary := &destCaptureProvider{name: "primary", fail: true}
+			fb := &destCaptureProvider{name: "fallback"}
+			plan := destPlan(primary, "agent", gate)
+			fbPlan := *destPlan(fb, "agent", gate)
+			plan.Fallbacks = []RoutePlan{fbPlan}
+
+			err := kind.run(context.Background(), plan)
+			if !errors.Is(err, ErrDestinationDenied) {
+				t.Fatalf("%s denied primary = %v, want ErrDestinationDenied", kind.name, err)
+			}
+			if got := primary.callCount(); got != 0 {
+				t.Errorf("denied primary contacted %d times, want 0", got)
+			}
+			if got := fb.callCount(); got != 0 {
+				t.Errorf("fallback contacted %d times after primary denial, want 0", got)
+			}
+		})
+	}
+}
+
+// Router stamping, strict-chain path: golem routes exclusively through
+// PreferredChain+StrictChain (routeChain), so the stamp must hold there —
+// covering only the scored Route path would leave the production route
+// unverified.
+func TestRouterStampsDestinationGateOntoStrictChainPlans(t *testing.T) {
+	local := mustDest(t, "cap", "http://127.0.0.1:9999")
+	gate := installTestGate(t, DestinationEdge{Purpose: "chat", Destination: local})
+
+	prov := &destCaptureProvider{name: "cap", models: []ModelInfo{{
+		Name:          "test-model",
+		Family:        "test",
+		ParameterSize: "8B",
+		ContextWindow: 32768,
+		Capabilities:  []string{"completion"},
+	}}}
+	reg := NewRegistry()
+	if err := reg.Register(prov); err != nil {
+		t.Fatal(err)
+	}
+	if err := reg.RefreshModels(context.Background(), "cap"); err != nil {
+		t.Fatal(err)
+	}
+	mr, err := NewModelRegistry(reg, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	router := NewRouter(mr, reg, WithDestinationGate(gate))
+	t.Cleanup(func() { _ = router.Close() })
+
+	plan, err := router.Route(context.Background(), RoutingRequest{
+		UseCase:        "chat",
+		Messages:       []ChatMessage{{Role: "user", Content: "hi"}},
+		PreferredChain: []string{"cap/test-model"},
+		StrictChain:    true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := plan.ExecuteChat(context.Background()); err != nil {
+		t.Fatalf("gated strict-chain plan: %v", err)
+	}
+	if err := gate.authorize(prov.lastCtx(t), "cap", local); err != nil {
+		t.Errorf("strict-chain plan's provider ctx does not authorize: %v", err)
+	}
+}
+
 // Router stamping: a Router built WithDestinationGate stamps the gate onto
 // the plans it builds, so gating does not depend on callers remembering a
 // per-plan setter.
