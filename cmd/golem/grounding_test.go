@@ -879,6 +879,46 @@ func TestGroundingVerifyFailOpenOutcomes(t *testing.T) {
 	}
 }
 
+func TestGroundingVerifyContextOutcomeOverridesSuccessfulJudge(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		cancel     bool
+		timeout    bool
+		wantStatus string
+		wantReason string
+	}{
+		{"caller cancellation", true, false, groundingSkipped, groundingReasonCanceled},
+		{"verifier timeout", false, true, groundingError, groundingReasonTimeout},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rec, c := groundedFixture(t, 1)
+			j := &stubJudge{rep: &analysis.SupportReport{
+				Status:   analysis.StatusSupported,
+				Evidence: []analysis.EvidenceRef{{ID: "E1"}},
+			}}
+			svc := testGroundingService(j, rec)
+			ctx := context.Background()
+			if tc.cancel {
+				var cancel context.CancelFunc
+				ctx, cancel = context.WithCancel(ctx)
+				cancel()
+			}
+			if tc.timeout {
+				svc.timeout = 0
+			}
+
+			rep, diag, show := svc.verify(ctx, "an answer", c)
+			if !show || rep.Status != tc.wantStatus || rep.Reason != tc.wantReason || rep.Report != nil {
+				t.Errorf("verify(%s) = rep=%+v show=%v, want %s/%s without a report",
+					tc.name, rep, show, tc.wantStatus, tc.wantReason)
+			}
+			if diag != "" {
+				t.Errorf("verify(%s) diagnostic = %q, want empty", tc.name, diag)
+			}
+		})
+	}
+}
+
 // TestGroundingChatRoutesEachStageIndependently pins D5. The two stages are
 // distinct use cases with distinct chains; collapsing them would silently route
 // claim extraction through the verify chain.

@@ -462,10 +462,10 @@ func (s *groundingService) verify(ctx context.Context, answer string, c *groundi
 		DurationMS: s.now().Sub(started).Milliseconds(),
 	}
 	switch {
-	case judgeErr != nil && ctx.Err() != nil:
-		// The caller's context died: an interrupt, not a verifier fault.
+	case ctx.Err() != nil:
+		// The caller's context wins even if a racing judge reports success.
 		rep.Status, rep.Reason = groundingSkipped, groundingReasonCanceled
-	case errors.Is(judgeErr, context.DeadlineExceeded):
+	case errors.Is(jctx.Err(), context.DeadlineExceeded) || errors.Is(judgeErr, context.DeadlineExceeded):
 		rep.Status, rep.Reason = groundingError, groundingReasonTimeout
 	case judgeErr != nil:
 		rep.Status, rep.Reason = groundingError, groundingReasonJudgeFailed
