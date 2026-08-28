@@ -103,11 +103,18 @@ type sandboxApproval struct {
 // sandbox before Plan returns an approval prompt. Host execution deliberately
 // keeps accepting volume roots for backward compatibility.
 func (s sandboxApproval) validateWorkspace(root string) error {
-	if s.runtime != SandboxRuntimeSeatbelt {
+	switch s.runtime {
+	case SandboxRuntimeSeatbelt:
+		_, err := seatbeltAllowancePath("workspace root", root)
+		return err
+	case SandboxRuntimeBwrap:
+		if !posixCleanAbs(root) || bwrapBroadRoot(root) {
+			return fmt.Errorf("tools: bwrap workspace root %q must be a canonical non-root path outside top-level system directories", root)
+		}
+		return nil
+	default:
 		return nil
 	}
-	_, err := seatbeltAllowancePath("workspace root", root)
-	return err
 }
 
 // sandboxFingerprint hashes the approval-relevant sandbox identity using
@@ -206,6 +213,12 @@ func newExecBackend(cfg SandboxConfig) (resolvedExecBackend, error) {
 		}, normalized), nil
 	case SandboxRuntimeSeatbelt:
 		backend, err := newSeatbeltExecBackend(normalized)
+		if err != nil {
+			return resolvedExecBackend{}, err
+		}
+		return bindExecBackend(backend, normalized), nil
+	case SandboxRuntimeBwrap:
+		backend, err := newBwrapExecBackend(normalized)
 		if err != nil {
 			return resolvedExecBackend{}, err
 		}

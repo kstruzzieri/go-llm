@@ -460,3 +460,15 @@ func TestBwrapApprovalKeyDistinctFromSeatbeltAndHost(t *testing.T) {
 		t.Fatalf("stored runtime = %q, want bwrap", bwrap.runtime)
 	}
 }
+
+func TestBwrapApprovalValidatesWorkspace(t *testing.T) {
+	appr := sandboxApproval{runtime: SandboxRuntimeBwrap}
+	for _, bad := range []string{"/", "/usr", "rel/path", "/home/u/../u", ""} {
+		if err := appr.validateWorkspace(bad); err == nil {
+			t.Errorf("workspace %q accepted", bad)
+		}
+	}
+	if err := appr.validateWorkspace("/home/user/proj"); err != nil {
+		t.Errorf("valid workspace rejected: %v", err)
+	}
+}
