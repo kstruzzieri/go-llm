@@ -287,8 +287,13 @@ func (p DestinationPolicy) Permits(d Destination) bool {
 // without a grant. It names the destination and the purpose that reached it,
 // so the diagnostic identifies which route to fix. It carries no credential,
 // header, or payload.
+//
+// Provider stands in when Destination is zero: a manifest miss knows which
+// provider a purpose tried to reach but has no destination to name — that
+// absence is exactly what was denied.
 type DestinationDeniedError struct {
 	Destination Destination
+	Provider    string // used when Destination is zero (no edge to name)
 	Purpose     string // routing use case or internal operation
 }
 
@@ -297,8 +302,11 @@ func (e *DestinationDeniedError) Error() string {
 	if purpose == "" {
 		purpose = "unknown purpose"
 	}
-	return fmt.Sprintf("provider: destination %s not admitted for %s",
-		e.Destination.String(), purpose)
+	target := e.Destination.String()
+	if e.Destination.IsZero() {
+		target = "provider " + e.Provider
+	}
+	return fmt.Sprintf("provider: destination %s not admitted for %s", target, purpose)
 }
 
 // Unwrap makes errors.Is(err, ErrDestinationDenied) hold, so callers can

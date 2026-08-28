@@ -56,6 +56,7 @@ type Router struct {
 	warmth          WarmthSource
 	slots           SlotSource
 	admission       *slotAdmission
+	destGate        *DestinationGate
 	tokenBudget     *TokenBudgetValidator
 	modelDefaults   map[ModelKey]SamplingDefaults
 	sticky          *stickyCache
@@ -99,6 +100,18 @@ type RouterOption func(*Router)
 func WithWarmthSource(ws WarmthSource) RouterOption {
 	return func(r *Router) {
 		r.warmth = ws
+	}
+}
+
+// WithDestinationGate wires the destination-admission gate (#477) so every
+// plan this Router builds binds a per-attempt destination capability before
+// contacting a provider. Without it plans are ungated: they add no
+// capability, and a guarded transport downstream denies on its own — the
+// fail-closed direction. The gate is shared, not owned: Close leaves it
+// alone, because the same gate backs every transport in the process.
+func WithDestinationGate(g *DestinationGate) RouterOption {
+	return func(r *Router) {
+		r.destGate = g
 	}
 }
 
@@ -1199,6 +1212,12 @@ func (r *Router) buildPlan(winner scoredCandidate, fallbacks []scoredCandidate, 
 	// the plan's seam nil, keeping every bracket a no-op.
 	if r.admission != nil {
 		plan.setAdmission(r)
+	}
+	// Destination-admission seam (#477): stamped like the slot seam above.
+	// Fallback sub-plans are not stamped — Execute* walks them through the
+	// primary rp, which is where bindDestination reads the gate.
+	if r.destGate != nil {
+		plan.setDestinationGate(r.destGate)
 	}
 	// Stamp the per-Router warn state and logger onto the plan so
 	// newRouteIDWithWarn (called from buildOutcome) and
