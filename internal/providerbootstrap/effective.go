@@ -54,7 +54,12 @@ func materializeEffectiveConfig(cfg *config.Config, ollamaOverride, ocOverridePr
 			return nil, fmt.Errorf("providerbootstrap: no providers configured")
 		}
 		// Always copy: overrides and api_format normalization write into
-		// the provider map, and the caller's config must stay theirs.
+		// the provider map, and the caller's config must stay theirs. The
+		// copy is deliberately shallow beyond Providers — Defaults, Models,
+		// and the other maps are shared with the caller because
+		// materialization only ever writes provider entries. Anything that
+		// later needs to rewrite those maps must copy-on-write the same way,
+		// not mutate through the effective config.
 		cp := *cfg
 		cp.Providers = make(map[string]config.ProviderConfig, len(cfg.Providers))
 		maps.Copy(cp.Providers, cfg.Providers)

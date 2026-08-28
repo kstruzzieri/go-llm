@@ -103,6 +103,37 @@ func TestMaterializeRejectsUnsafeBaseURLs(t *testing.T) {
 	}
 }
 
+// An override-supplied URL goes through the same destination validation as a
+// config-borne one: the -base-url flag and WithOllamaURL are user input too,
+// and a credential-bearing value there must fail just as loudly (and just as
+// quietly in the diagnostic).
+func TestMaterializeValidatesOverrideURLs(t *testing.T) {
+	const secret = "SECRET-CANARY-77413"
+
+	t.Run("openai-compat override", func(t *testing.T) {
+		cfg := &config.Config{Providers: map[string]config.ProviderConfig{
+			"llamacpp": {APIFormat: "openai-compat", BaseURL: "http://127.0.0.1:8080"},
+		}}
+		_, err := materializeEffectiveConfig(cfg, "", "llamacpp", "http://127.0.0.1:8083?token="+secret)
+		if !errors.Is(err, provider.ErrDestinationInvalid) {
+			t.Fatalf("query-bearing oc override = %v, want ErrDestinationInvalid", err)
+		}
+		if strings.Contains(err.Error(), secret) {
+			t.Errorf("error echoed the secret: %v", err)
+		}
+	})
+
+	t.Run("ollama override", func(t *testing.T) {
+		_, err := materializeEffectiveConfig(nil, "http://user:"+secret+"@127.0.0.1:11434", "", "")
+		if !errors.Is(err, provider.ErrDestinationInvalid) {
+			t.Fatalf("userinfo-bearing ollama override = %v, want ErrDestinationInvalid", err)
+		}
+		if strings.Contains(err.Error(), secret) {
+			t.Errorf("error echoed the secret: %v", err)
+		}
+	})
+}
+
 // The effective copy carries the DEFAULTED api_format, so every consumer of
 // the effective config — destination derivation included — sees the same
 // value the constructed client acts on, instead of re-deriving the default
