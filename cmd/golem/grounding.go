@@ -572,3 +572,24 @@ func newGroundingService(cfg *config.Config, router *provider.Router, rec *evide
 		},
 	}, ""
 }
+
+// groundingNoRetrieveWarning is the startup notice when -grounding is on but no
+// retrieve tool is mounted. A warming auto-index wrapper still counts as
+// available: its later generation is built through the same recorder.
+const groundingNoRetrieveWarning = "-grounding had no effect: the retrieve tool is not available, " +
+	"so no turn can produce retrieval evidence to verify"
+
+// groundingStartupWarning returns the single startup notice for -grounding, or
+// "" when the feature is off or usable. Retrieval unavailability wins over an
+// unresolved verifier chain: two lines about one disabled flag read like two
+// separate problems, and retrieval is the one the user acts on first.
+func groundingStartupWarning(enabled, retrievalAvailable bool, chainWarn string) string {
+	switch {
+	case !enabled:
+		return ""
+	case !retrievalAvailable:
+		return groundingNoRetrieveWarning
+	default:
+		return chainWarn
+	}
+}

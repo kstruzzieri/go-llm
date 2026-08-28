@@ -67,6 +67,11 @@ type replSession struct {
 	// model actually read. Same -progressive flag, one source.
 	mixed bool
 
+	// grounding runs claim-support verification after a completed turn (#348).
+	// nil unless -grounding is active AND both retrieval and a verifier chain
+	// resolved at startup.
+	grounding *groundingService
+
 	modelOptions provider.ModelOptions // per-run model options (-think)
 
 	// control coordinates the prompt, async notices, and Ctrl-C. nil in tests

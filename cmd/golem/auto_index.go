@@ -57,6 +57,7 @@ type autoIndexJob struct {
 	weighter    rag.BehavioralWeighter
 	progressive bool
 	summarize   rag.SourceSummaryGenerator
+	recorder    *evidenceRecorder // -grounding evidence capture; nil => no capture
 	ready       *readyRetrieve
 	notice      func(string)
 
@@ -218,7 +219,7 @@ func (job autoIndexJob) open(ctx context.Context, dbPath string) (*retrievalRead
 	if job.openRetriever != nil {
 		return job.openRetriever(ctx, dbPath)
 	}
-	return buildGatedRetriever(ctx, job.cfg, job.router, dbPath, job.embChain, job.weighter, job.progressive)
+	return buildGatedRetriever(ctx, job.cfg, job.router, dbPath, job.embChain, job.weighter, job.progressive, job.recorder)
 }
 
 // adoptActiveGeneration installs the generation a competing writer published

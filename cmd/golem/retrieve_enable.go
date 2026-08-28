@@ -19,6 +19,9 @@ type retrieveOpts struct {
 	workspaceID string // workspace:<sha16> for sidecar validation
 	weighter    rag.BehavioralWeighter
 	progressive bool // opt into the #189 progressive renderer
+	// recorder captures retrieval evidence for -grounding. nil => no capture and
+	// no wrapper, so the flag-off path constructs exactly what it did before.
+	recorder *evidenceRecorder
 }
 
 // retrieveResult is the startup outcome. reader owns the registered generation
@@ -47,7 +50,7 @@ func enableRetrieve(ctx context.Context, cfg *config.Config, router *provider.Ro
 	}
 
 	if opts.ragDB != "" {
-		reader, dec, _, err := buildGatedRetriever(ctx, cfg, router, opts.ragDB, expected, opts.weighter, opts.progressive)
+		reader, dec, _, err := buildGatedRetriever(ctx, cfg, router, opts.ragDB, expected, opts.weighter, opts.progressive, opts.recorder)
 		if err != nil {
 			return retrieveResult{warns: []string{"retrieve disabled: " + err.Error()}, suppressNotice: true}
 		}
@@ -67,7 +70,7 @@ func enableRetrieve(ctx context.Context, cfg *config.Config, router *provider.Ro
 		}
 		return retrieveResult{warns: []string{"retrieve disabled: " + err.Error()}, suppressNotice: true}
 	}
-	reader, dec, stats, err := buildGatedRetriever(ctx, cfg, router, gen.dbPath, expected, opts.weighter, opts.progressive)
+	reader, dec, stats, err := buildGatedRetriever(ctx, cfg, router, gen.dbPath, expected, opts.weighter, opts.progressive, opts.recorder)
 	if err != nil {
 		// An index exists but could not be opened/probed: a specific warning
 		// already explains why, so suppress the contradictory generic "no index"

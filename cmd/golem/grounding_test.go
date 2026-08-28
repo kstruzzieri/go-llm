@@ -5,6 +5,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -935,5 +940,332 @@ func TestGroundingChatPropagatesRouteFailure(t *testing.T) {
 	}
 	if n := tokens(); n != 0 {
 		t.Fatalf("a failed call must contribute no tokens, got %d", n)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Task 3: flag, startup disable, and every retrieval construction path.
+// ---------------------------------------------------------------------------
+
+func TestGroundingFlagParsesAndDefaultsOff(t *testing.T) {
+	on, err := parseFlags([]string{"-grounding"})
+	if err != nil || !on.grounding {
+		t.Fatalf("parseFlags(-grounding) = %v, %v", on.grounding, err)
+	}
+	off, err := parseFlags(nil)
+	if err != nil || off.grounding {
+		t.Fatalf("grounding must default off, got %v (%v)", off.grounding, err)
+	}
+	// #347 owns "verify" in golem's vocabulary (verify_command, .golem.json).
+	// Registering -verify here would make two unrelated features share a word.
+	if _, err := parseFlags([]string{"-verify"}); err == nil {
+		t.Fatal("-verify must remain unregistered")
+	}
+}
+
+func TestGroundingIgnoredInModesThatRunNoAnswerTurn(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		apply func(flags) (flags, []string)
+		in    flags
+	}{
+		{"task mode", applyTaskMode, flags{planPath: "plan.json", grounding: true}},
+		{"planning mode", applyGoalMode, flags{goalSet: true, grounding: true}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			out, warns := tc.apply(tc.in)
+			if out.grounding {
+				t.Fatal("grounding must be cleared: these modes never reach runOnce")
+			}
+			hits := 0
+			for _, w := range warns {
+				if strings.Contains(w, "-grounding") {
+					hits++
+				}
+			}
+			if hits != 1 {
+				t.Fatalf("want exactly one -grounding warning, got %d in %v", hits, warns)
+			}
+		})
+	}
+}
+
+func TestGroundingStartupWarning(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		enabled   bool
+		available bool
+		chainWarn string
+		want      string
+	}{
+		{name: "off is silent", available: true},
+		{name: "on and usable is silent", enabled: true, available: true},
+		{name: "no retrieval", enabled: true, want: groundingNoRetrieveWarning},
+		{name: "no chain", enabled: true, available: true,
+			chainWarn: groundingNoChainWarning, want: groundingNoChainWarning},
+		// Both broken: one warning, and it names the cause the user can act on
+		// first. Two lines about one disabled flag reads like two problems.
+		{name: "retrieval takes precedence over chain", enabled: true,
+			chainWarn: groundingNoChainWarning, want: groundingNoRetrieveWarning},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := groundingStartupWarning(tc.enabled, tc.available, tc.chainWarn); got != tc.want {
+				t.Fatalf("got %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestGroundingRecorderReachesEveryRetrievalConstructionPath is the wiring
+// guard: golem builds a retriever in three places, and a path that forgets the
+// recorder produces a silent, permanent evidence_incomplete for every turn that
+// uses it.
+//
+// Each case drives the REAL tool and joins on the attribution the tool itself
+// produced, so it also pins the contract that recorder keys and presented
+// identities agree.
+func TestGroundingRecorderReachesEveryRetrievalConstructionPath(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		open func(t *testing.T, cfg *config.Config, router *provider.Router, dbPath string, rec *evidenceRecorder) *retrievalReader
+	}{
+		{name: "explicit -rag-db", open: func(t *testing.T, cfg *config.Config, router *provider.Router, dbPath string, rec *evidenceRecorder) *retrievalReader {
+			got := enableRetrieve(context.Background(), cfg, router, retrieveOpts{ragDB: dbPath, recorder: rec})
+			if got.reader == nil {
+				t.Fatalf("retrieve disabled: %v", got.warns)
+			}
+			return got.reader
+		}},
+		{name: "discovered auto index", open: func(t *testing.T, cfg *config.Config, router *provider.Router, dbPath string, rec *evidenceRecorder) *retrievalReader {
+			got := enableRetrieve(context.Background(), cfg, router, retrieveOpts{
+				autoDBPath: dbPath, workspaceID: "workspace:k", recorder: rec})
+			if got.reader == nil {
+				t.Fatalf("retrieve disabled: %v", got.warns)
+			}
+			return got.reader
+		}},
+		{name: "background auto-index replacement", open: func(t *testing.T, cfg *config.Config, router *provider.Router, dbPath string, rec *evidenceRecorder) *retrievalReader {
+			job := autoIndexJob{cfg: cfg, router: router, embChain: expectedVectorSpaces(cfg), recorder: rec}
+			reader, _, _, err := job.open(context.Background(), dbPath)
+			if err != nil {
+				t.Fatalf("job.open: %v", err)
+			}
+			return reader
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dbPath := filepath.Join(t.TempDir(), "indexes", "k.db")
+			seedIndex(t, dbPath, "workspace:k", "embed-test/a")
+			cfg, router, _ := testRoutingEmbedder(t)
+			rec := newEvidenceRecorder(1 << 20)
+			rec.beginTurn()
+
+			reader := tc.open(t, cfg, router, dbPath, rec)
+			defer func() {
+				if err := reader.closeAfterDrain(); err != nil {
+					t.Error(err)
+				}
+			}()
+			out, err := reader.tool.Invoke(context.Background(), json.RawMessage(`{"query":"find A"}`))
+			if err != nil || out.IsError {
+				t.Fatalf("Invoke: %v %q", err, out.Content)
+			}
+			if out.Attrib == nil || len(out.Attrib.Sources) == 0 {
+				t.Fatal("retrieve produced no attribution to join against")
+			}
+			for _, src := range out.Attrib.Sources {
+				chunk, ok := rec.lookup(src)
+				if !ok {
+					t.Fatalf("recorder never saw presented source %+v", src)
+				}
+				if chunk.Content == "" {
+					t.Fatalf("recorded chunk for %+v carries no text", src)
+				}
+			}
+		})
+	}
+}
+
+func TestGroundingRetrieverWrappedOnlyWhenRecording(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		rec  *evidenceRecorder
+		want bool
+	}{
+		{name: "no recorder leaves the retriever untouched"},
+		{name: "recorder installs the wrapper", rec: newEvidenceRecorder(1 << 20), want: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dbPath := filepath.Join(t.TempDir(), "explicit.db")
+			seedIndex(t, dbPath, "workspace:ignored", "embed-test/a")
+			cfg, router, _ := testRoutingEmbedder(t)
+
+			reader, _, _, err := buildGatedRetriever(
+				context.Background(), cfg, router, dbPath, expectedVectorSpaces(cfg), nil, false, tc.rec)
+			if err != nil {
+				t.Fatalf("buildGatedRetriever: %v", err)
+			}
+			defer func() {
+				if cerr := reader.closeAfterDrain(); cerr != nil {
+					t.Error(cerr)
+				}
+			}()
+			tool, ok := reader.tool.(*agenttools.Retrieve)
+			if !ok {
+				t.Fatalf("retrieve tool = %T", reader.tool)
+			}
+			_, wrapped := tool.R.(*recordingRetriever)
+			if wrapped != tc.want {
+				t.Fatalf("wrapped = %v, want %v (R is %T)", wrapped, tc.want, tool.R)
+			}
+		})
+	}
+}
+
+// writeGroundingRunConfig mirrors writeRunLifecycleConfig but adds a chat
+// default, so config.RoleFallbackChain resolves the verify/extract side-task
+// use-cases through their analysis -> chat fallback. Without it the verifier
+// has no chain and -grounding disables itself, which is a different case
+// (covered below).
+func writeGroundingRunConfig(t *testing.T, withChatDefault bool) (string, string) {
+	t.Helper()
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/v1/models":
+			_, _ = io.WriteString(w, `{"data":[{"id":"agent-model"},{"id":"qwen3-embedding:8b"}]}`)
+		case "/v1/embeddings":
+			embedding := make([]float64, 768)
+			embedding[0] = 1
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"data":  []any{map[string]any{"embedding": embedding, "index": 0}},
+				"model": "qwen3-embedding:8b",
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(server.Close)
+	defaults := `{"agent": "agent", "embedding": "embedding"}`
+	if withChatDefault {
+		defaults = `{"agent": "agent", "embedding": "embedding", "chat": "agent"}`
+	}
+	root := t.TempDir()
+	configPath := filepath.Join(t.TempDir(), "models.json")
+	configJSON := fmt.Sprintf(`{
+  "providers": {"test": {"base_url": %q, "api_format": "openai-compat", "timeout": "2s"}},
+  "models": {
+    "agent": {"name": "agent-model", "provider": "test", "type": "dense", "context_window": 32768,
+      "capabilities": ["chat", "stream", "tool_call"]},
+    "embedding": {"name": "qwen3-embedding:8b", "provider": "test", "type": "embedding", "dimensions": 768,
+      "capabilities": ["embed"]}
+  },
+  "defaults": %s
+}`, server.URL, defaults)
+	if err := os.WriteFile(configPath, []byte(configJSON), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return configPath, root
+}
+
+// TestRunWiresGroundingThroughStartup drives the REAL run(). The seam tests
+// above prove each construction path honors a recorder it is given; this proves
+// startup actually gives it one, keeps the service only when the feature can
+// work, and hands it to the session. Every one of those is a separate
+// assignment in run(), and a feature that silently does nothing is the failure
+// mode this whole flag has.
+func TestRunWiresGroundingThroughStartup(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		chatDefault bool
+		args        []string
+		seedRagDB   bool
+		seedAuto    bool
+		wantService bool
+		wantWrapped bool
+		wantWarn    string
+	}{
+		{name: "active with an explicit rag-db", chatDefault: true, seedRagDB: true,
+			args: []string{"-grounding"}, wantService: true, wantWrapped: true},
+		// The auto-index path is a SEPARATE enableRetrieve call site in run().
+		{name: "active with a discovered auto index", chatDefault: true, seedAuto: true,
+			args: []string{"-grounding"}, wantService: true, wantWrapped: true},
+		{name: "flag off wraps nothing", chatDefault: true, seedRagDB: true},
+		{name: "no retrieval disables the service", chatDefault: true,
+			args: []string{"-grounding", "-no-rag"}, wantWarn: groundingNoRetrieveWarning},
+		{name: "no verifier chain disables the service", seedRagDB: true,
+			args: []string{"-grounding"}, wantWarn: groundingNoChainWarning},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			configPath, root := writeGroundingRunConfig(t, tc.chatDefault)
+			stdin, stdout, stderr := runTestFiles(t)
+			args := []string{"-config", configPath, "-root", root, "-no-probe", "-no-cap-probe",
+				"-no-session", "-no-memory", "-no-project-context"}
+			if tc.seedAuto {
+				// run() canonicalizes -root before deriving the workspace id, and
+				// on macOS /var is a symlink to /private/var. Seeding under the
+				// raw path yields a different id and a silently undiscovered index.
+				canonical, err := filepath.EvalSymlinks(root)
+				if err != nil {
+					t.Fatal(err)
+				}
+				dbPath, workspaceID, err := indexDBPathForWorkspace(os.Getenv, canonical)
+				if err != nil {
+					t.Fatal(err)
+				}
+				seedIndex(t, dbPath, workspaceID, "test/qwen3-embedding:8b")
+			} else {
+				args = append(args, "-no-auto-index")
+			}
+			if tc.seedRagDB {
+				dbPath := filepath.Join(t.TempDir(), "explicit.db")
+				seedIndex(t, dbPath, "workspace:ignored", "test/qwen3-embedding:8b")
+				args = append(args, "-rag-db", dbPath)
+			}
+			args = append(args, tc.args...)
+
+			errStop := errors.New("stop after startup")
+			var gotService bool
+			var gotWrapped bool
+			err := run(args, stdin, stdout, stderr, runHooks{
+				startAutoIndex: func() func() { return func() {} },
+				afterSessionReady: func(sess *replSession) error {
+					gotService = sess.grounding != nil
+					for _, tool := range sess.tools {
+						ready, ok := tool.(*readyRetrieve)
+						if !ok {
+							continue
+						}
+						ready.mu.RLock()
+						reader := ready.reader
+						ready.mu.RUnlock()
+						if reader == nil {
+							continue
+						}
+						if rt, ok := reader.tool.(*agenttools.Retrieve); ok {
+							_, gotWrapped = rt.R.(*recordingRetriever)
+						}
+					}
+					return errStop
+				},
+			})
+			if !errors.Is(err, errStop) {
+				t.Fatalf("run error = %v, want the test stop (stderr: %s)", err, readRunTestFile(t, stderr))
+			}
+			if gotService != tc.wantService {
+				t.Errorf("session grounding service present = %v, want %v", gotService, tc.wantService)
+			}
+			if gotWrapped != tc.wantWrapped {
+				t.Errorf("retrieve wrapped for capture = %v, want %v", gotWrapped, tc.wantWrapped)
+			}
+			out := readRunTestFile(t, stderr)
+			if tc.wantWarn != "" && !strings.Contains(out, tc.wantWarn) {
+				t.Errorf("stderr missing %q:\n%s", tc.wantWarn, out)
+			}
+			if tc.wantWarn == "" && strings.Contains(out, "-grounding had no effect") {
+				t.Errorf("unexpected grounding warning:\n%s", out)
+			}
+		})
 	}
 }
