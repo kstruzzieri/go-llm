@@ -101,7 +101,7 @@ func TestObserv_WriteTraceCollisionRetry(t *testing.T) {
 		t.Fatalf("seed: %v", werr)
 	}
 	res := agent.Result{Steps: []agent.StepRecord{{Index: 0}}, StopReason: agent.Completed}
-	if werr := o.writeTrace(runID, startedAt, startedAt, agenttrace.TraceMeta{Goal: "g"}, res, "completed", false, nil); werr != nil {
+	if werr := o.writeTrace(runID, startedAt, startedAt, agenttrace.TraceMeta{Goal: "g"}, res, "completed", false, nil, nil); werr != nil {
 		t.Fatalf("writeTrace: %v", werr)
 	}
 	suffixed := filepath.Join(o.traceDir, startedAt+"-"+runID+"-1.json")
@@ -128,7 +128,7 @@ func TestObserv_WriteTraceSanitizesStartedAtFilename(t *testing.T) {
 	}
 	startedAt := "2026-06-29T10:20:30.123456789Z"
 	res := agent.Result{StopReason: agent.Completed}
-	if err := o.writeTrace("run1", startedAt, startedAt, agenttrace.TraceMeta{Goal: "g"}, res, "completed", false, nil); err != nil {
+	if err := o.writeTrace("run1", startedAt, startedAt, agenttrace.TraceMeta{Goal: "g"}, res, "completed", false, nil, nil); err != nil {
 		t.Fatalf("writeTrace: %v", err)
 	}
 
@@ -301,7 +301,7 @@ func TestObserv_TraceAndTelemetryShareRunID(t *testing.T) {
 
 	if err := o.writeTrace(runID,
 		started.UTC().Format(time.RFC3339Nano), started.UTC().Format(time.RFC3339Nano),
-		agenttrace.TraceMeta{Goal: "g"}, res, "completed", false, nil); err != nil {
+		agenttrace.TraceMeta{Goal: "g"}, res, "completed", false, nil, nil); err != nil {
 		t.Fatalf("writeTrace: %v", err)
 	}
 

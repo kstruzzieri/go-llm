@@ -89,11 +89,10 @@ func (r *renderer) OnStep(_ context.Context, e agent.StepEvent) error {
 	return r.writeDim(line)
 }
 
-func (r *renderer) finalFooter(res agent.Result) {
+func (r *renderer) finalFooter(res agent.Result, elapsed time.Duration) {
 	_ = r.markdown.Finish()
-	total := r.now().Sub(r.runStart).Seconds()
 	line := fmt.Sprintf("done · %s · %.1fs · %d tok",
-		plural(len(res.Steps), "step", "steps"), total, res.Usage.TotalTokens)
+		plural(len(res.Steps), "step", "steps"), elapsed.Seconds(), res.Usage.TotalTokens)
 	if res.StopReason != agent.Completed {
 		// Double space (not " · ") deliberately sets the stop reason apart from
 		// the metric fields above it — it is a status suffix, not another metric.

@@ -51,7 +51,7 @@ func TestRenderer_FinalFooter_Stopped(t *testing.T) {
 		Steps:      make([]agent.StepRecord, 2),
 		Usage:      provider.Usage{TotalTokens: 128},
 		StopReason: agent.StepCapReached,
-	})
+	}, 3*time.Second)
 	want := "done · 2 steps · 3.0s · 128 tok  stopped: step_cap_reached\n"
 	if buf.String() != want {
 		t.Errorf("final footer = %q, want %q", buf.String(), want)
@@ -85,7 +85,7 @@ func TestRenderer_FinalFooter_Completed_NoStoppedSuffix(t *testing.T) {
 		Steps:      make([]agent.StepRecord, 1),
 		Usage:      provider.Usage{TotalTokens: 42},
 		StopReason: agent.Completed,
-	})
+	}, 2*time.Second)
 	want := "done · 1 step · 2.0s · 42 tok\n"
 	if buf.String() != want {
 		t.Errorf("completed footer = %q, want %q (no stopped suffix)", buf.String(), want)

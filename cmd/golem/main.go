@@ -54,6 +54,7 @@ type flags struct {
 	noRag               bool
 	noAutoIndex         bool
 	progressive         bool
+	grounding           bool
 	noProjectContext    bool
 	noCompress          bool
 	noMemory            bool
@@ -118,6 +119,7 @@ func parseFlags(args []string) (flags, error) {
 	fs.BoolVar(&f.noRag, "no-rag", false, "disable the retrieve tool entirely (ignore any auto index)")
 	fs.BoolVar(&f.noAutoIndex, "no-auto-index", false, "disable startup auto-index refresh; existing auto indexes may still be used")
 	fs.BoolVar(&f.progressive, "progressive", false, "generate and retrieve opt-in L0/L1 progressive source summaries; enable mixed context assembly")
+	fs.BoolVar(&f.grounding, "grounding", false, "verify the final answer's claims against the retrieval evidence in the final prompt; prints one supported/partial/unsupported line (full report under -trace)")
 	fs.BoolVar(&f.noProjectContext, "no-project-context", false, "do not load AGENTS.md project-context files into the system prompt")
 	fs.BoolVar(&f.noCompress, "no-compress", false, "disable post-turn conversation compression into a durable summary")
 	fs.BoolVar(&f.noMemory, "no-memory", false, "disable explicit local memories (/remember, /memories, memory_search)")
@@ -354,6 +356,10 @@ func applyTaskMode(f flags) (flags, []string) {
 	if f.trace || f.telemetry {
 		warns = append(warns, "task mode: -trace/-telemetry are not wired for the task run; the AgentFlow proof pack is the durable record")
 	}
+	if f.grounding {
+		warns = append(warns, "task mode: -grounding ignored (task mode runs a locked plan, not answer turns)")
+		f.grounding = false
+	}
 	f.noSession = true
 	f.noCompress = true
 	f.noMemory = true
@@ -381,6 +387,10 @@ func applyGoalMode(f flags) (flags, []string) {
 	}
 	if f.trace || f.telemetry {
 		warns = append(warns, "planning mode: -trace/-telemetry are not wired for the planner run; the locked plan is the durable record")
+	}
+	if f.grounding {
+		warns = append(warns, "planning mode: -grounding ignored (planning mode authors a plan, it runs no answer turn)")
+		f.grounding = false
 	}
 	f.noSession = true
 	f.noCompress = true
@@ -578,7 +588,13 @@ type runHooks struct {
 	// function, so lifecycle tests can start real jobs and drive host-context
 	// cancellation through run.
 	afterBackgroundReady func(*agenttools.BackgroundManager, []agent.Tool, context.CancelFunc)
-	closed               func(string)
+	// afterSessionReady runs once, immediately after the replSession is built
+	// and every startup decision that can disable a feature has been applied.
+	// It is the only place a test can observe what the session actually got
+	// (#348 wires -grounding through five separate points), and returning an
+	// error stops the run before any input is read.
+	afterSessionReady func(*replSession) error
+	closed            func(string)
 }
 
 func formatFeedbackReport(report feedbackReport) string {
@@ -744,6 +760,23 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 		}
 	}()
 	feedbackWeighter := feedbackSvc.behavioralWeighter()
+
+	// Grounding (#348) is resolved BEFORE retrieval so its recorder can be
+	// threaded into every retriever generation golem builds. The chain warning
+	// is held rather than emitted: if retrieval also turns out to be
+	// unavailable, that is the one warning worth printing.
+	var (
+		groundingRec       *evidenceRecorder
+		groundingSvc       *groundingService
+		groundingChainWarn string
+	)
+	if f.grounding {
+		groundingRec = newEvidenceRecorder(groundingEvidenceMaxBytes)
+		groundingSvc, groundingChainWarn = newGroundingService(bundle.Config, bundle.Router, groundingRec)
+		if groundingSvc == nil {
+			groundingRec = nil // no verifier: capture nothing and wrap nothing
+		}
+	}
 	embChain, embChainErr := embeddingChain(bundle.Config)
 	var retrieve agent.Tool
 	retrieveLine := ""
@@ -764,7 +797,7 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 		retrieve = ready
 		rr := enableRetrieve(ctx, bundle.Config, bundle.Router, retrieveOpts{
 			autoDBPath:  autoDBPath,
-			workspaceID: autoWorkspaceID, weighter: feedbackWeighter, progressive: f.progressive,
+			workspaceID: autoWorkspaceID, weighter: feedbackWeighter, progressive: f.progressive, recorder: groundingRec,
 		})
 		warns = append(warns, rr.warns...)
 		if rr.reader != nil {
@@ -784,6 +817,7 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 			workspaceID: autoWorkspaceID,
 			weighter:    feedbackWeighter,
 			progressive: f.progressive,
+			recorder:    groundingRec,
 		})
 		if rr.reader != nil {
 			// Route the explicit generation through the same readyRetrieve
@@ -823,6 +857,13 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 		tools = append(tools, retrieve)
 	}
 	retrieveOmitted := retrieve == nil
+
+	// A warming readyRetrieve counts as available: its later generation is built
+	// through the same recorder.
+	if warn := groundingStartupWarning(f.grounding, retrieve != nil, groundingChainWarn); warn != "" {
+		warns = append(warns, warn)
+		groundingSvc = nil
+	}
 
 	// Dispatch is built here, before memory/write/exec/delegate/MCP are
 	// appended, so the child-visible set is exactly the read-only tools above.
@@ -1151,10 +1192,16 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 		feedback:            feedbackSvc,
 		pressureWarn:        f.pressureWarn > 0,
 		mixed:               f.progressive,
+		grounding:           groundingSvc,
 		modelOptions:        thinkOpts,
 	}
 	if sess.maxSteps == 0 {
 		sess.maxSteps = 16 // mirror agent defaultMaxSteps so the footer's k/max is accurate
+	}
+	if hooks.afterSessionReady != nil {
+		if err := hooks.afterSessionReady(sess); err != nil {
+			return err
+		}
 	}
 
 	interrupts := make(chan struct{}, 1)
@@ -1235,6 +1282,7 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 					embChain:    embChain,
 					weighter:    feedbackWeighter,
 					progressive: f.progressive,
+					recorder:    groundingRec,
 					summarize:   sourceSummarizer,
 					ready:       ready,
 					notice:      notice,

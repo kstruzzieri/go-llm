@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -66,6 +67,11 @@ type replSession struct {
 	// the renderer can tell whether a tool result's flat Content is what the
 	// model actually read. Same -progressive flag, one source.
 	mixed bool
+
+	// grounding runs claim-support verification after a completed turn (#348).
+	// nil unless -grounding is active AND both retrieval and a verifier chain
+	// resolved at startup.
+	grounding *groundingService
 
 	modelOptions provider.ModelOptions // per-run model options (-think)
 
@@ -243,7 +249,20 @@ func runOnce(ctx context.Context, out io.Writer, interrupts <-chan struct{}, ses
 	if sess.feedback != nil {
 		feedbackObserver = sess.feedback.observer(runID)
 	}
-	observer := composeObserver(rend, sink, feedbackObserver)
+	// Grounding capture is per turn: the recorder holds only what THIS turn
+	// retrieved, and the collector only observes when the feature is active. A
+	// typed nil would still satisfy agent.Observer, so the variable stays an
+	// interface and composeObserver drops it when it is nil.
+	var (
+		groundCollector *groundingCollector
+		groundObserver  agent.Observer
+	)
+	if sess.grounding != nil {
+		sess.grounding.beginTurn()
+		groundCollector = &groundingCollector{}
+		groundObserver = groundCollector
+	}
+	observer := composeObserver(rend, sink, feedbackObserver, groundObserver)
 
 	// Trace metadata only: the runtime builds the real agent.Request. Tools,
 	// Approver, and Options are deliberately absent — the runtime supplies its
@@ -304,31 +323,74 @@ func runOnce(ctx context.Context, out io.Writer, interrupts <-chan struct{}, ses
 		writeRunLine("warning: render flush incomplete: %v", ferr)
 	}
 
+	// The agent run's outcome is SNAPSHOTTED here, before grounding, because
+	// grounding is a post-run model call that can block, time out, or be
+	// interrupted.
+	//
+	// The end time is load-bearing: taken after grounding it would fold the
+	// verifier's wall time into the agent run's recorded duration. The status is
+	// ordering insurance rather than a live guard — runStatus returns
+	// "completed" whenever runErr is nil, ahead of its cancellation case, and
+	// grounding runs only when the status already IS "completed" and never
+	// touches runErr, so recomputing it later would agree today. It is
+	// snapshotted anyway so that a future change to runStatus's precedence
+	// cannot silently relabel a completed answer as canceled because its
+	// verifier was interrupted.
+	status, partial := runStatus(runErr, runCtx.Err() != nil)
+	endedStr := ""
 	// Post-run observability on EVERY exit path. Uses the parent ctx (not runCtx)
 	// so a canceled turn still flushes its partial trace.
 	if sess.obs != nil {
-		status, partial := runStatus(runErr, runCtx.Err() != nil)
+		endedStr = sess.obs.clock().UTC().Format(time.RFC3339Nano)
+		// Telemetry's root run span closes from its own clock, so it must finish
+		// BEFORE grounding runs or the span absorbs the verifier's wall time.
 		if sink != nil {
 			if ferr := sink.Finish(res, status); ferr != nil {
 				writeRunLine("warning: telemetry write incomplete: %v", ferr)
 			}
 		}
-		if sess.obs.trace {
-			meta := agenttrace.TraceMeta{
-				Goal:           req.Goal,
-				System:         req.System,
-				HistorySummary: req.HistorySummary,
-				History:        req.History,
-				MaxSteps:       req.MaxSteps,
-				Budget:         req.Budget,
-				ToolSchemaHash: toolSchemaHash(sess.tools),
-				ModelHint:      lastRoutedModel(res),
+	}
+	runDuration := rend.now().Sub(rend.runStart)
+
+	// Grounding verification (#348). Only a completed run has a final answer
+	// worth judging, and only runCtx makes Ctrl-C during the judge prompt. It
+	// never assigns to res, res.Usage, or runErr: a verifier outcome is not an
+	// agent outcome.
+	var groundingRaw json.RawMessage
+	if sess.grounding != nil && status == "completed" {
+		rep, diag, show := sess.grounding.verify(runCtx, res.Answer, groundCollector, func() {
+			// Only fires when a model call is actually being made. Two sequential
+			// verifier calls on a local backend can take tens of seconds, and the
+			// answer has already finished streaming, so without this the REPL
+			// looks hung until the verdict lands.
+			_ = rend.writeDim(groundingCheckingLine)
+		})
+		if show {
+			// Dim, like the run footer: this is a status line about the turn, not
+			// part of the answer. Writing it through the renderer also keeps it
+			// ordered against the streamed answer instead of racing the markdown
+			// buffer, and a failed write costs only display bytes.
+			_ = rend.writeDim(groundingSummaryLine(rep, diag))
+			if raw, merr := json.Marshal(rep); merr == nil {
+				groundingRaw = raw
 			}
-			startedStr := startedAt.UTC().Format(time.RFC3339Nano)
-			endedStr := sess.obs.clock().UTC().Format(time.RFC3339Nano)
-			if terr := sess.obs.writeTrace(runID, startedStr, endedStr, meta, res, status, partial, runErr); terr != nil {
-				writeRunLine("warning: trace not written: %v", terr)
-			}
+		}
+	}
+
+	if sess.obs != nil && sess.obs.trace {
+		meta := agenttrace.TraceMeta{
+			Goal:           req.Goal,
+			System:         req.System,
+			HistorySummary: req.HistorySummary,
+			History:        req.History,
+			MaxSteps:       req.MaxSteps,
+			Budget:         req.Budget,
+			ToolSchemaHash: toolSchemaHash(sess.tools),
+			ModelHint:      lastRoutedModel(res),
+		}
+		startedStr := startedAt.UTC().Format(time.RFC3339Nano)
+		if terr := sess.obs.writeTrace(runID, startedStr, endedStr, meta, res, status, partial, runErr, groundingRaw); terr != nil {
+			writeRunLine("warning: trace not written: %v", terr)
 		}
 	}
 
@@ -350,7 +412,7 @@ func runOnce(ctx context.Context, out io.Writer, interrupts <-chan struct{}, ses
 			writeRunLine("warning: session state not refreshed: %v", err)
 		}
 	}
-	rend.finalFooter(res)
+	rend.finalFooter(res, runDuration)
 	return res, nil
 }
 

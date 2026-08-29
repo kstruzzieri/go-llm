@@ -132,7 +132,7 @@ func TestBuildGatedRetriever_PinsStoredVectorSpace(t *testing.T) {
 			cfg, router, p := testRoutingEmbedder(t)
 
 			reader, _, _, err := buildGatedRetriever(
-				context.Background(), cfg, router, dbPath, expectedVectorSpaces(cfg), nil, false,
+				context.Background(), cfg, router, dbPath, expectedVectorSpaces(cfg), nil, false, nil,
 			)
 			if err != nil {
 				t.Fatalf("buildGatedRetriever: %v", err)
@@ -163,7 +163,7 @@ func TestBuildGatedRetriever_FeedbackWeighterInstalledBeforeServing(t *testing.T
 	weighter := &countingBehavioralWeighter{}
 
 	reader, _, _, err := buildGatedRetriever(
-		context.Background(), cfg, router, dbPath, expectedVectorSpaces(cfg), weighter, false,
+		context.Background(), cfg, router, dbPath, expectedVectorSpaces(cfg), weighter, false, nil,
 	)
 	if err != nil {
 		t.Fatalf("buildGatedRetriever: %v", err)
@@ -223,7 +223,7 @@ func TestBuildGatedRetriever_RequiredVectorSpaceUnavailableDoesNotUsePrimary(t *
 	cfg, router, p := testRoutingEmbedder(t, "a")
 
 	reader, _, _, err := buildGatedRetriever(
-		context.Background(), cfg, router, dbPath, expectedVectorSpaces(cfg), nil, false,
+		context.Background(), cfg, router, dbPath, expectedVectorSpaces(cfg), nil, false, nil,
 	)
 	if err != nil {
 		t.Fatalf("buildGatedRetriever: %v", err)
@@ -256,7 +256,7 @@ func TestBuildGatedRetriever_ExecutionFailureNamesRequiredVectorSpace(t *testing
 	p.failEmbedding(errors.New("backend offline"))
 
 	reader, _, _, err := buildGatedRetriever(
-		context.Background(), cfg, router, dbPath, expectedVectorSpaces(cfg), nil, false,
+		context.Background(), cfg, router, dbPath, expectedVectorSpaces(cfg), nil, false, nil,
 	)
 	if err != nil {
 		t.Fatalf("buildGatedRetriever: %v", err)
@@ -361,7 +361,7 @@ func TestBuildGatedRetriever_LegacyCorpusKeepsConfiguredChainBehavior(t *testing
 	cfg, router, p := testRoutingEmbedder(t)
 
 	reader, dec, _, err := buildGatedRetriever(
-		context.Background(), cfg, router, dbPath, expectedVectorSpaces(cfg), nil, false,
+		context.Background(), cfg, router, dbPath, expectedVectorSpaces(cfg), nil, false, nil,
 	)
 	if err != nil {
 		t.Fatalf("buildGatedRetriever: %v", err)

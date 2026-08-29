@@ -345,7 +345,12 @@ func embeddingChain(cfg *config.Config) ([]string, error) {
 //     embedder is unavailable.
 //
 // The returned retrievalReader owns and closes the opened store.
-func buildGatedRetriever(ctx context.Context, cfg *config.Config, router *provider.Router, dbPath string, expected []string, weighter rag.BehavioralWeighter, progressive bool) (*retrievalReader, vsDecision, rag.StoreStats, error) {
+//
+// rec is the -grounding evidence recorder, or nil. It is the ONE place golem
+// builds a retrieve tool, so wrapping here is what reaches the explicit
+// -rag-db generation, the discovered auto index, and every background
+// auto-index replacement alike.
+func buildGatedRetriever(ctx context.Context, cfg *config.Config, router *provider.Router, dbPath string, expected []string, weighter rag.BehavioralWeighter, progressive bool, rec *evidenceRecorder) (*retrievalReader, vsDecision, rag.StoreStats, error) {
 	if cfg == nil || router == nil {
 		return nil, vsDecision{}, rag.StoreStats{}, fmt.Errorf("golem: no provider configured for embeddings")
 	}
@@ -403,7 +408,14 @@ func buildGatedRetriever(ctx context.Context, cfg *config.Config, router *provid
 		return nil, vsDecision{}, rag.StoreStats{}, closeStore(fmt.Errorf("golem: build retriever for %q: %w", dbPath, err))
 	}
 	store.SetBehavioralWeighter(weighter)
-	tool := &agenttools.Retrieve{R: retr, K: 5, MaxTokens: 2048, Progressive: progressive}
+	// Typed, not any-plus-assertion: groundingRetriever is exactly the method
+	// set agenttools.Retrieve needs, so a wrapper that loses one fails to
+	// compile here instead of silently downgrading retrieval at run time.
+	var source groundingRetriever = retr
+	if rec != nil {
+		source = &recordingRetriever{inner: retr, rec: rec}
+	}
+	tool := &agenttools.Retrieve{R: source, K: 5, MaxTokens: 2048, Progressive: progressive}
 	return newOwnedRetrievalReader(tool, store), dec, stats, nil
 }
 
