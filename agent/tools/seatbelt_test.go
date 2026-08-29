@@ -253,7 +253,7 @@ func TestSeatbeltConfigSupport(t *testing.T) {
 }
 
 func TestSeatbeltChildEnvReplacesTMPDIR(t *testing.T) {
-	env := seatbeltChildEnv(
+	env := sandboxChildEnv(
 		[]string{"PATH=/usr/bin", "TMPDIR=/", "HOME=/Users/x", "TMPDIR=/etc"},
 		"/private/tmp/pt1")
 	var tmpdirs, rest []string
@@ -273,7 +273,7 @@ func TestSeatbeltChildEnvReplacesTMPDIR(t *testing.T) {
 }
 
 func TestSeatbeltChildEnvAddsTMPDIRWhenAbsent(t *testing.T) {
-	env := seatbeltChildEnv([]string{"PATH=/usr/bin"}, "/private/tmp/pt2")
+	env := sandboxChildEnv([]string{"PATH=/usr/bin"}, "/private/tmp/pt2")
 	if len(env) != 2 || env[1] != "TMPDIR=/private/tmp/pt2" {
 		t.Fatalf("env = %q, want appended private TMPDIR", env)
 	}
@@ -293,8 +293,8 @@ func TestSeatbeltCollectSystemRootsCanonicalizesAndOmitsMissing(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	got, err := seatbeltCollectSystemRoots(
-		[]string{link, filepath.Join(base, "missing")}, "/w", "/home/u")
+	got, err := collectSystemRoots(
+		[]string{link, filepath.Join(base, "missing")}, "/w", "/home/u", seatbeltBroadRoot)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -328,7 +328,7 @@ func TestSeatbeltCollectSystemRootsFailsClosed(t *testing.T) {
 	}
 	for name, tt := range tests {
 		t.Run(name, func(t *testing.T) {
-			if _, err := seatbeltCollectSystemRoots(tt.roots, tt.ws, tt.home); err == nil {
+			if _, err := collectSystemRoots(tt.roots, tt.ws, tt.home, seatbeltBroadRoot); err == nil {
 				t.Fatalf("%s accepted into the profile", name)
 			}
 		})

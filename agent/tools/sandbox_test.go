@@ -432,3 +432,71 @@ func TestNormalizeSandboxConfigOwnsCanonicalCaps(t *testing.T) {
 		t.Fatalf("DropCaps = %q, want canonical owned copy %q", got.DropCaps, want)
 	}
 }
+
+func TestRenderSandboxLineBwrapPrivateTempMarker(t *testing.T) {
+	cfg := mustNormalizeSandbox(t, SandboxConfig{Runtime: SandboxRuntimeBwrap})
+	got := renderSandboxLine(cfg)
+	want := `runtime="bwrap" network=ip-denied memory_cap=none cpu_limit=none drop_caps=[] temp=private`
+	if got != want {
+		t.Fatalf("renderSandboxLine() = %q, want %q", got, want)
+	}
+}
+
+func TestBwrapApprovalKeyDistinctFromSeatbeltAndHost(t *testing.T) {
+	bwrap := approvalForSandbox(mustNormalizeSandbox(t, SandboxConfig{Runtime: SandboxRuntimeBwrap}))
+	seatbelt := approvalForSandbox(mustNormalizeSandbox(t, SandboxConfig{Runtime: SandboxRuntimeSeatbelt}))
+	host := approvalForSandbox(mustNormalizeSandbox(t, SandboxConfig{}))
+	if bwrap.keyComponent == "" || !strings.HasPrefix(bwrap.keyComponent, "sb:") ||
+		!strings.HasSuffix(bwrap.keyComponent, ":") {
+		t.Fatalf("bwrap key component malformed: %q", bwrap.keyComponent)
+	}
+	if bwrap.keyComponent == seatbelt.keyComponent {
+		t.Fatalf("bwrap and seatbelt approval namespaces collide: %q", bwrap.keyComponent)
+	}
+	if host.keyComponent != "" {
+		t.Fatalf("host key component = %q, want empty", host.keyComponent)
+	}
+	if bwrap.runtime != SandboxRuntimeBwrap {
+		t.Fatalf("stored runtime = %q, want bwrap", bwrap.runtime)
+	}
+}
+
+func TestBwrapApprovalValidatesWorkspace(t *testing.T) {
+	appr := sandboxApproval{runtime: SandboxRuntimeBwrap}
+	for _, bad := range []string{"/", "/usr", "rel/path", "/home/u/../u", ""} {
+		if err := appr.validateWorkspace(bad); err == nil {
+			t.Errorf("workspace %q accepted", bad)
+		}
+	}
+	if err := appr.validateWorkspace("/home/user/proj"); err != nil {
+		t.Errorf("valid workspace rejected: %v", err)
+	}
+}
+
+// TestRenderSandboxLineBwrapQualifiesMemoryScope pins the scope qualifier: the
+// approved value is spent as three additive budgets (RLIMIT_AS plus a quota on
+// each private tmpfs) and RLIMIT_AS is per process, so a bare "512MiB" would
+// claim a total ceiling the backend does not enforce.
+func TestRenderSandboxLineBwrapQualifiesMemoryScope(t *testing.T) {
+	cfg := mustNormalizeSandbox(t, SandboxConfig{Runtime: SandboxRuntimeBwrap, MemoryCapMB: 512})
+	got := renderSandboxLine(cfg)
+	want := `runtime="bwrap" network=ip-denied memory_cap=512MiB/process cpu_limit=none drop_caps=[] temp=private`
+	if got != want {
+		t.Fatalf("renderSandboxLine() = %q, want %q", got, want)
+	}
+}
+
+// TestRenderSandboxLineQualifierIsBwrapOnly keeps the qualifier from leaking
+// onto runtimes whose ceiling semantics it does not describe: Seatbelt rejects
+// MemoryCapMB outright, and an uncapped bwrap config has no number to qualify.
+func TestRenderSandboxLineQualifierIsBwrapOnly(t *testing.T) {
+	other := mustNormalizeSandbox(t, SandboxConfig{Runtime: "container", MemoryCapMB: 512})
+	if got := renderSandboxLine(other); strings.Contains(got, "/process") {
+		t.Fatalf("non-bwrap runtime carries the bwrap scope qualifier: %q", got)
+	}
+	uncapped := mustNormalizeSandbox(t, SandboxConfig{Runtime: SandboxRuntimeBwrap})
+	if got := renderSandboxLine(uncapped); !strings.Contains(got, "memory_cap=none") ||
+		strings.Contains(got, "/process") {
+		t.Fatalf("uncapped bwrap config must render an unqualified none: %q", got)
+	}
+}

@@ -314,7 +314,8 @@ func TestResolveExecTimeout(t *testing.T) {
 		{"clamp", p(900), 600 * time.Second, 900, true, false},
 	}
 	if strconv.IntSize == 64 {
-		huge := int(int64(10_000_000_000))
+		hugeValue := int64(10_000_000_000)
+		huge := int(hugeValue)
 		cases = append(cases, struct {
 			name      string
 			in        *int

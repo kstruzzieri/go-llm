@@ -21,6 +21,7 @@ func TestMain(m *testing.M) {
 	if len(os.Args) > 1 && os.Args[1] == "__golem_exec_helper__" {
 		os.Exit(helperMain(os.Args[2:]))
 	}
+	platformTestSetup()
 	os.Exit(m.Run())
 }
 

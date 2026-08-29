@@ -24,6 +24,13 @@ const SandboxRuntimeHost SandboxRuntime = "host"
 // host whose Seatbelt capability probe fails, fails closed at construction.
 const SandboxRuntimeSeatbelt SandboxRuntime = "seatbelt"
 
+// SandboxRuntimeBwrap selects the Linux Bubblewrap backend (#441): a fresh
+// user/mount/pid namespace set per invocation, deny-default by construction,
+// with network unshared unless AllowNetwork is true. Selecting it off Linux,
+// or on a host whose namespace-capability probe fails, fails closed at
+// construction.
+const SandboxRuntimeBwrap SandboxRuntime = "bwrap"
+
 // SandboxConfig is a permission ceiling for a non-host execution runtime: a
 // backend may enforce stricter isolation but must never silently provide
 // less. The zero value is the compatibility exception and means direct host
@@ -96,11 +103,18 @@ type sandboxApproval struct {
 // sandbox before Plan returns an approval prompt. Host execution deliberately
 // keeps accepting volume roots for backward compatibility.
 func (s sandboxApproval) validateWorkspace(root string) error {
-	if s.runtime != SandboxRuntimeSeatbelt {
+	switch s.runtime {
+	case SandboxRuntimeSeatbelt:
+		_, err := seatbeltAllowancePath("workspace root", root)
+		return err
+	case SandboxRuntimeBwrap:
+		if !posixCleanAbs(root) || bwrapBroadRoot(root) {
+			return fmt.Errorf("tools: bwrap workspace root %q must be a canonical non-root path outside top-level system directories", root)
+		}
+		return nil
+	default:
 		return nil
 	}
-	_, err := seatbeltAllowancePath("workspace root", root)
-	return err
 }
 
 // sandboxFingerprint hashes the approval-relevant sandbox identity using
@@ -150,12 +164,28 @@ func approvalForSandbox(cfg SandboxConfig) sandboxApproval {
 // cannot forge ambiguous fields. Presentation only, never parsed.
 func renderSandboxLine(cfg SandboxConfig) string {
 	network := "denied"
+	// bwrap unshares the IP network namespace, but pathname Unix sockets in
+	// the shared workspace remain reachable.
+	if cfg.Runtime == SandboxRuntimeBwrap {
+		network = "ip-denied"
+	}
 	if cfg.AllowNetwork {
 		network = "allowed"
 	}
 	memory, cpu, caps := "none", "none", "[]"
 	if cfg.MemoryCapMB > 0 {
 		memory = fmt.Sprintf("%dMiB", cfg.MemoryCapMB)
+		// Scope qualifier (#441): bwrap spends the approved value as three
+		// independent, additive budgets -- RLIMIT_AS plus a quota on each
+		// private tmpfs -- and RLIMIT_AS is per process, so a forking payload
+		// is not bounded by it at all. A bare "512MiB" reads as a total
+		// ceiling the backend does not enforce, and an approval prompt must
+		// not claim more than it delivers. Aggregate enforcement needs
+		// delegated cgroup v2 and is deliberately out of scope; until then
+		// the number is qualified rather than inflated.
+		if cfg.Runtime == SandboxRuntimeBwrap {
+			memory += "/process"
+		}
 	}
 	if cfg.CPULimit > 0 {
 		cpu = strconv.FormatFloat(cfg.CPULimit, 'g', -1, 64)
@@ -171,10 +201,12 @@ func renderSandboxLine(cfg SandboxConfig) string {
 		"runtime=%s network=%s memory_cap=%s cpu_limit=%s drop_caps=%s",
 		strconv.QuoteToGraphic(string(cfg.Runtime)), network, memory, cpu, caps,
 	)
-	// Seatbelt-only marker (#442): the user approves that the command's temp
-	// directory is a fresh private one, not the ambient TMPDIR. Other runtimes
-	// must not claim a behavior they do not implement.
-	if cfg.Runtime == SandboxRuntimeSeatbelt {
+	// Private-temp marker (#442, extended by #441): the user approves that the
+	// command's temp directory is a fresh private one, not the ambient TMPDIR.
+	// Seatbelt provides a private host directory; bwrap provides a
+	// namespace-local tmpfs. Other runtimes must not claim a behavior they do
+	// not implement.
+	if cfg.Runtime == SandboxRuntimeSeatbelt || cfg.Runtime == SandboxRuntimeBwrap {
 		line += " temp=private"
 	}
 	return line
@@ -197,6 +229,12 @@ func newExecBackend(cfg SandboxConfig) (resolvedExecBackend, error) {
 		}, normalized), nil
 	case SandboxRuntimeSeatbelt:
 		backend, err := newSeatbeltExecBackend(normalized)
+		if err != nil {
+			return resolvedExecBackend{}, err
+		}
+		return bindExecBackend(backend, normalized), nil
+	case SandboxRuntimeBwrap:
+		backend, err := newBwrapExecBackend(normalized)
 		if err != nil {
 			return resolvedExecBackend{}, err
 		}

@@ -6,6 +6,80 @@ All notable changes to `go-llm` are documented here. Downstream consumers
 
 ## [Unreleased]
 
+### Added — agent/tools: Linux Bubblewrap sandbox backend (#441)
+
+A `SandboxRuntimeBwrap` execution backend behind the #440 exec-backend
+seam, part of the zero-trust epic (#429, Phase 3). On a capable Linux
+host it runs every approved command — and its descendants, foreground and
+background alike — inside per-invocation Bubblewrap namespaces:
+
+- Deny-default by construction: an empty mount namespace populated only
+  with reviewed read-only system roots (`/usr/{bin,sbin,lib,lib64,
+  libexec,share}`), typed top-level layout binds/symlinks, exec-critical
+  `/etc` literals (linker cache, alternatives; resolver and narrow trust
+  stores only when `AllowNetwork` is true), a minimal `/dev` and a
+  PID-namespace-private `/proc`, the workspace as the only host-visible
+  writable mount, and a final read-only remount of the base root.
+- Zero IP egress unless `AllowNetwork` is true: a fresh network namespace
+  denies outbound TCP/UDP and host abstract Unix sockets. A pathname Unix
+  socket inside the writable workspace deliberately remains a host
+  channel; stdio and inherited descriptors are TCB channels. No broader
+  "all egress" claim is made.
+- Fresh user namespace with nested creation disabled
+  (`--disable-userns`), PID/IPC/UTS isolation, all capabilities dropped,
+  `--die-with-parent`, and a new session; the existing timeout plus group
+  kill plus PID-namespace teardown removes the whole tree, including
+  session-detached descendants.
+- Private temp is a namespace-local tmpfs (`/tmp`, plus a private
+  `/dev/shm`): born empty, invisible to the host and other invocations,
+  destroyed with the namespace — no cleanup machinery exists. Inherited
+  `TMPDIR` stays command input; the payload sees exactly the approved
+  allowlist environment (carried as `--clearenv`/`--setenv` policy
+  arguments; the outer prlimit/bwrap chain runs with an empty
+  environment).
+- `MemoryCapMB` maps to a per-process `RLIMIT_AS` soft+hard ceiling via a
+  `/usr/bin/prlimit` exec chain, plus `--size` quotas on both private tmpfs
+  mounts. These are three independent, additive budgets rather than one
+  ceiling: a single invocation can hold roughly three times the configured
+  value of host memory (address space plus each tmpfs). It is not an
+  aggregate tree cap either — the figure is per process, so a fork bomb
+  splits allocations across children — and `RLIMIT_AS` counts virtual
+  reservations, so VM-heavy runtimes need generous caps. True aggregate
+  enforcement requires delegated cgroup v2 and is deliberately out of scope.
+  `/dev` is remounted read-only because `--dev` creates its own tmpfs that
+  neither `RLIMIT_AS` nor either quota would otherwise bound. Because a bare
+  number would read as a total ceiling the backend does not enforce, the
+  approval preview renders the scope: `memory_cap=512MiB/process`. `CPULimit`
+  is rejected; requested `DropCaps` are subsumed by the unconditional
+  drop-ALL.
+- Fail closed, never a host fallback: missing or unsafely packaged
+  `/usr/bin/bwrap` (and, for capped configs, `/usr/bin/prlimit`), or a
+  failed active capability probe of the production namespace prefix,
+  fails construction with a remediating error. Docker's default seccomp
+  blocks user namespaces, so confinement is exercised by the pinned
+  `Linux Sandbox (bwrap)` CI job (`GO_LLM_REQUIRE_BWRAP=1`), not by the
+  Docker-based local CI.
+- Known limitations, unchanged from the pathname threat model: the
+  workspace bind shares inodes with the host (externally hard-linked
+  workspace files are rejected at prepare time; an unsandboxed same-UID
+  process can still race pathname replacement before bind resolution),
+  and the pre-spawn inheritable-FD audit is not kernel-atomic with the
+  spawn. That audit is also process-global: a descriptor leaked in by
+  whatever launched the agent — which go-llm neither created nor may close —
+  fails every sandboxed command until the launcher sets `FD_CLOEXEC` on its
+  own descriptors, which the error message says explicitly.
+- Scope boundary: this backend governs the exec tools. The post-write
+  verification command (#347) deliberately runs on the host runtime, so a
+  session using the bwrap runtime still has one unsandboxed exec path, as
+  that command's own approval preview states.
+
+Approval identity: bwrap grants live in their own `sb:<digest>:` key
+namespace derived from the approved `SandboxConfig`; the `exec:v3` /
+`exec-bg:v2` fingerprint recipes are unchanged. The approval preview
+renders `runtime="bwrap"` with the `temp=private` marker and, when a cap is
+set, the `/process` memory scope. Preview text is presentation only and is
+not part of the key, so no existing grant changes meaning.
+
 ### Added — agent/tools: macOS Seatbelt sandbox backend (#442)
 
 A `SandboxRuntimeSeatbelt` execution backend behind the #440 exec-backend
