@@ -66,9 +66,17 @@ func planAgentRoute(cfg *config.Config) (PlannedRoute, error) {
 // planOptionalUseCaseRoute resolves an optional side-task use case the way
 // the runtime consumes it: a resolvable use case is a strict chain, and an
 // absent one is a RECOMMEND route — not "disabled" — because the runtime
-// caller (agent.NewRouterSummarizer with an empty chain) routes non-strict
-// across every configured provider. Modeling absence as no-route would hide
-// exactly the reachability #477 exists to surface.
+// caller (agent.NewRouterSummarizer with an empty chain, and both source
+// summary generators) routes non-strict across every configured provider.
+// Modeling absence as no-route would hide exactly the reachability #477
+// exists to surface.
+//
+// This helper is ONLY for use cases whose runtime caller degrades to
+// non-strict routing on absence — the summarize family. It is WRONG for
+// embedding: an absent defaults.embedding disables the RAG feature entirely
+// (no route at all), and planning it as recommend would manufacture
+// reachability the runtime does not have. Feature-gated routes belong at the
+// entry point: plan no route when the feature is off, planRoleRoute when on.
 func planOptionalUseCaseRoute(cfg *config.Config, useCase string) (PlannedRoute, error) {
 	if cfg == nil {
 		return PlannedRoute{UseCase: useCase, Recommend: true}, nil
