@@ -105,6 +105,24 @@ type Options struct {
 	// Orchestrator overrides the config-driven bootstrap. The caller retains
 	// ownership: Close never releases it or its providers.
 	Orchestrator *agent.Orchestrator
+	// DestinationPolicy governs which REMOTE model destinations the
+	// config-driven runtime may reach (#477). The zero value fails closed:
+	// local-only configurations work unchanged, and any reachable remote
+	// destination returns a typed error (matching
+	// provider.ErrDestinationDenied) before any outbound byte. Hosts opt in
+	// with an exact provider.NewDestinationPolicy(...) set or an explicit,
+	// greppable provider.AllowAllDestinations().
+	//
+	// Upgrade note for config-driven callers (e.g. Firn's commit-message
+	// generator): a models.json whose resolved routes reach a hosted
+	// provider now requires one of those two policies; a local-only config
+	// needs nothing.
+	//
+	// Supplying a NONZERO policy together with Orchestrator is refused with
+	// ErrDestinationPolicyIneffective: a custom orchestrator owns its own
+	// transports, and accepting the policy would imply protection that does
+	// not exist.
+	DestinationPolicy provider.DestinationPolicy
 	// Progressive enables #331 mixed context assembly on the orchestrator this
 	// package bootstraps. That is ALL it does here. Off preserves current
 	// behavior exactly.
@@ -216,13 +234,17 @@ func New(ctx context.Context, opts Options) (*Runtime, error) {
 	summarizer := opts.Summarizer
 	if orchestrator == nil {
 		var defaultSummarizer conversation.Summarizer
-		orchestrator, bundle, defaultSummarizer, err = bootstrapOrchestrator(ctx, opts.ConfigPath, opts.Progressive, opts.OnWarning)
+		orchestrator, bundle, defaultSummarizer, err = bootstrapOrchestrator(ctx, opts.ConfigPath, opts.DestinationPolicy, opts.Progressive, opts.OnWarning)
 		if err != nil {
 			return nil, err
 		}
 		if summarizer == nil {
 			summarizer = defaultSummarizer
 		}
+	} else if !opts.DestinationPolicy.IsZero() {
+		// #477 D9: with a caller-supplied orchestrator this package owns no
+		// provider transports, so the policy would guard nothing.
+		return nil, ErrDestinationPolicyIneffective
 	}
 	if err := ctx.Err(); err != nil {
 		_ = bundle.Close()

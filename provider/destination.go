@@ -266,6 +266,16 @@ func AllowAllDestinations() DestinationPolicy {
 	return DestinationPolicy{allowAll: true}
 }
 
+// IsZero reports whether this policy is the unconfigured zero value — the
+// fail-closed default that permits literal loopback and denies every remote
+// destination. Hosts use it to distinguish "no policy chosen" from an
+// explicit empty grant set... which are deliberately the SAME policy; the
+// distinction exists only so a host can refuse a policy that would protect
+// nothing (e.g. golem.New with a caller-supplied orchestrator).
+func (p DestinationPolicy) IsZero() bool {
+	return !p.allowAll && len(p.allowed) == 0
+}
+
 // Permits reports whether this policy grants d. Literal loopback always
 // passes; a destination still needs a manifest-purpose capability at the
 // transport, which this function does not supply.
