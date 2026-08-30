@@ -157,16 +157,42 @@ func (s *Server) chainFor(useCase string) ([]string, error) {
 
 func (s *Server) modelChecker() config.ModelChecker {
 	if pReg := s.providerRegistrySnapshot(); pReg != nil {
-		return providerRegistryModelChecker{registry: pReg}
+		return providerRegistryModelChecker{registry: pReg, bind: s.bindProviderMeta}
 	}
 	if s.client != nil {
-		return s.client
+		return boundLegacyChecker{s: s}
 	}
 	return nil
 }
 
+// bindProviderMeta attaches the model-refresh capability for one provider's
+// listing traffic (#477 I14): the checker's refreshes run through guarded
+// clients and must carry a fresh capability per call.
+func (s *Server) bindProviderMeta(ctx context.Context, providerName string) (context.Context, error) {
+	if s.destGate == nil {
+		return ctx, nil
+	}
+	return s.destGate.Bind(ctx, provider.DestinationPurposeModelRefresh, providerName)
+}
+
+// boundLegacyChecker wraps the direct ollama client as a ModelChecker with
+// the model-refresh capability bound — the fallback path when the provider
+// registry failed to build.
+type boundLegacyChecker struct{ s *Server }
+
+func (c boundLegacyChecker) AvailableModels(ctx context.Context) ([]string, error) {
+	bctx, err := c.s.bindMeta(ctx, provider.DestinationPurposeModelRefresh)
+	if err != nil {
+		return nil, err
+	}
+	return c.s.client.AvailableModels(bctx)
+}
+
 type providerRegistryModelChecker struct {
 	registry *provider.Registry
+	// bind attaches the per-provider model-refresh capability (#477); nil
+	// keeps the caller's context (ungated).
+	bind func(ctx context.Context, providerName string) (context.Context, error)
 }
 
 func (c providerRegistryModelChecker) AvailableModels(ctx context.Context) ([]string, error) {
@@ -193,7 +219,18 @@ func (c providerRegistryModelChecker) AvailableModelKeys(ctx context.Context) ([
 	var keys []provider.ModelKey
 	var firstErr error
 	for _, p := range c.registry.All() {
-		models, err := c.registry.RefreshModelsAndList(ctx, p.Name())
+		pctx := ctx
+		if c.bind != nil {
+			var bindErr error
+			pctx, bindErr = c.bind(ctx, p.Name())
+			if bindErr != nil {
+				if firstErr == nil {
+					firstErr = fmt.Errorf("mcp: list models for provider %q: %w", p.Name(), bindErr)
+				}
+				continue
+			}
+		}
+		models, err := c.registry.RefreshModelsAndList(pctx, p.Name())
 		if err != nil {
 			if firstErr == nil {
 				firstErr = fmt.Errorf("mcp: list models for provider %q: %w", p.Name(), err)

@@ -51,9 +51,13 @@ func TestNewServerWithOptions(t *testing.T) {
 	ctx := context.Background()
 	customURL := "http://custom:1234"
 
+	// #477: a REMOTE ollama URL is a remote destination; standalone MCP
+	// fails closed without a policy (covered by the admission tests), so
+	// this options-plumbing test supplies one.
 	s, err := NewServer(ctx,
 		WithOllamaURL(customURL),
 		WithRAGDisabled(),
+		WithDestinationPolicy(provider.AllowAllDestinations()),
 	)
 	if err != nil {
 		t.Fatalf("NewServer() error = %v", err)
