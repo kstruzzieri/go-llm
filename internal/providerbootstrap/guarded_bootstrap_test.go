@@ -22,7 +22,14 @@ type countingOpenAIServer struct {
 	models     atomic.Int64
 	chats      atomic.Int64
 	props      atomic.Int64
+	others     atomic.Int64 // any other path — a blind spot here would hide stray traffic
 	totalSlots int
+}
+
+// total is the complete request count; zero-request assertions use it so no
+// endpoint escapes observation.
+func (s *countingOpenAIServer) total() int64 {
+	return s.models.Load() + s.chats.Load() + s.props.Load() + s.others.Load()
 }
 
 func newCountingOpenAIServer(t *testing.T) *countingOpenAIServer {
@@ -46,6 +53,7 @@ func newCountingOpenAIServer(t *testing.T) *countingOpenAIServer {
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`{"total_slots": 4}`))
 		default:
+			s.others.Add(1)
 			http.NotFound(w, r)
 		}
 	}))
@@ -118,7 +126,7 @@ func TestNewGatedRefreshesOnlyActiveProviders(t *testing.T) {
 	if got := a.models.Load(); got != 1 {
 		t.Errorf("active provider refreshed %d times, want 1", got)
 	}
-	if got := b.models.Load() + b.chats.Load() + b.props.Load(); got != 0 {
+	if got := b.total(); got != 0 {
 		t.Errorf("inactive provider received %d requests, want 0", got)
 	}
 	// The inactive slot-discovery backend leaves governance entirely:
@@ -149,7 +157,7 @@ func TestNewGatedDenialIsFatalWithZeroRequests(t *testing.T) {
 	if !errors.Is(err, provider.ErrDestinationDenied) {
 		t.Fatalf("New under deny-all = %v, want ErrDestinationDenied", err)
 	}
-	if got := a.models.Load(); got != 0 {
+	if got := a.total(); got != 0 {
 		t.Errorf("denied bootstrap sent %d requests, want 0", got)
 	}
 }
