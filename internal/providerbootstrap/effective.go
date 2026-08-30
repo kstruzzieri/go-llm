@@ -9,11 +9,11 @@ import (
 	"github.com/kstruzzieri/go-llm/provider"
 )
 
-// effectiveProviders is the pure output of materialization: the ONE config
+// Effective is the pure output of materialization: the ONE config
 // every later consumer reads — display, network plan, manifest, client
 // construction, receipt — plus a validated destination identity per
 // provider. Nothing here has performed I/O.
-type effectiveProviders struct {
+type Effective struct {
 	cfg *config.Config
 	// dests maps provider key -> validated destination/v1 identity, derived
 	// from the SAME effective base URLs the clients will dial. Task 5's
@@ -22,7 +22,7 @@ type effectiveProviders struct {
 	dests map[string]provider.Destination
 }
 
-// materializeEffectiveConfig applies the nil-config default and BOTH URL
+// Materialize applies the nil-config default and BOTH URL
 // override families onto a copied config, normalizes the defaulted
 // api_format, and validates every provider's base URL as a destination
 // identity. Pure: no I/O, and the caller's config is never mutated.
@@ -39,7 +39,7 @@ type effectiveProviders struct {
 // userinfo, a query, or a fragment loads today but is rejected here with a
 // typed error naming the provider — before any client is constructed, and
 // without echoing the value, which may embed a credential.
-func materializeEffectiveConfig(cfg *config.Config, ollamaOverride, ocOverrideProvider, ocOverrideURL string) (*effectiveProviders, error) {
+func Materialize(cfg *config.Config, ollamaOverride, ocOverrideProvider, ocOverrideURL string) (*Effective, error) {
 	var effective *config.Config
 	if cfg == nil {
 		url := ollamaOverride
@@ -112,12 +112,24 @@ func materializeEffectiveConfig(cfg *config.Config, ollamaOverride, ocOverridePr
 		}
 		dests[key] = d
 	}
-	return &effectiveProviders{cfg: effective, dests: dests}, nil
+	return &Effective{cfg: effective, dests: dests}, nil
+}
+
+// Config returns the materialized effective config — the ONE config every
+// consumer reads.
+func (e *Effective) Config() *config.Config { return e.cfg }
+
+// Destinations returns the validated destination identity per provider key,
+// derived from the same effective base URLs the clients dial.
+func (e *Effective) Destinations() map[string]provider.Destination {
+	out := make(map[string]provider.Destination, len(e.dests))
+	maps.Copy(out, e.dests)
+	return out
 }
 
 // sortedProviderKeys returns the effective provider keys in deterministic
 // order for construction and rendering.
-func (e *effectiveProviders) sortedProviderKeys() []string {
+func (e *Effective) sortedProviderKeys() []string {
 	keys := make([]string, 0, len(e.cfg.Providers))
 	for key := range e.cfg.Providers {
 		keys = append(keys, key)

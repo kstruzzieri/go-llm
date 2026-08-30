@@ -18,7 +18,7 @@ func TestMaterializeOllamaOverrideLandsInEffectiveConfig(t *testing.T) {
 	cfg := &config.Config{Providers: map[string]config.ProviderConfig{
 		"ollama": {BaseURL: "http://configured.example:11434", APIFormat: "ollama"},
 	}}
-	eff, err := materializeEffectiveConfig(cfg, "http://override.example:9999", "", "")
+	eff, err := Materialize(cfg, "http://override.example:9999", "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -43,7 +43,7 @@ func TestMaterializeOllamaOverrideLandsInEffectiveConfig(t *testing.T) {
 // destination must classify remote so admission later gates it, not wave it
 // through under the "default ollama is local" assumption.
 func TestMaterializeNilConfigRemoteOllamaOverride(t *testing.T) {
-	eff, err := materializeEffectiveConfig(nil, "http://lan-box.example:11434", "", "")
+	eff, err := Materialize(nil, "http://lan-box.example:11434", "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -57,7 +57,7 @@ func TestMaterializeNilConfigRemoteOllamaOverride(t *testing.T) {
 }
 
 func TestMaterializeNilConfigDefaultIsLoopback(t *testing.T) {
-	eff, err := materializeEffectiveConfig(nil, "", "", "")
+	eff, err := Materialize(nil, "", "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -86,7 +86,7 @@ func TestMaterializeRejectsUnsafeBaseURLs(t *testing.T) {
 			cfg := &config.Config{Providers: map[string]config.ProviderConfig{
 				"opencode": {BaseURL: raw, APIFormat: "openai-compat"},
 			}}
-			_, err := materializeEffectiveConfig(cfg, "", "", "")
+			_, err := Materialize(cfg, "", "", "")
 			if err == nil {
 				t.Fatal("unsafe base URL accepted")
 			}
@@ -114,7 +114,7 @@ func TestMaterializeValidatesOverrideURLs(t *testing.T) {
 		cfg := &config.Config{Providers: map[string]config.ProviderConfig{
 			"llamacpp": {APIFormat: "openai-compat", BaseURL: "http://127.0.0.1:8080"},
 		}}
-		_, err := materializeEffectiveConfig(cfg, "", "llamacpp", "http://127.0.0.1:8083?token="+secret)
+		_, err := Materialize(cfg, "", "llamacpp", "http://127.0.0.1:8083?token="+secret)
 		if !errors.Is(err, provider.ErrDestinationInvalid) {
 			t.Fatalf("query-bearing oc override = %v, want ErrDestinationInvalid", err)
 		}
@@ -124,7 +124,7 @@ func TestMaterializeValidatesOverrideURLs(t *testing.T) {
 	})
 
 	t.Run("ollama override", func(t *testing.T) {
-		_, err := materializeEffectiveConfig(nil, "http://user:"+secret+"@127.0.0.1:11434", "", "")
+		_, err := Materialize(nil, "http://user:"+secret+"@127.0.0.1:11434", "", "")
 		if !errors.Is(err, provider.ErrDestinationInvalid) {
 			t.Fatalf("userinfo-bearing ollama override = %v, want ErrDestinationInvalid", err)
 		}
@@ -142,7 +142,7 @@ func TestMaterializeNormalizesAPIFormatOnTheCopy(t *testing.T) {
 	cfg := &config.Config{Providers: map[string]config.ProviderConfig{
 		"ollama": {BaseURL: "http://localhost:11434"}, // APIFormat empty
 	}}
-	eff, err := materializeEffectiveConfig(cfg, "", "", "")
+	eff, err := Materialize(cfg, "", "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -161,7 +161,7 @@ func TestMaterializeBothOverrideFamilies(t *testing.T) {
 		"llamacpp": {APIFormat: "openai-compat", BaseURL: "http://127.0.0.1:8080"},
 		"ollama":   {APIFormat: "ollama", BaseURL: "http://localhost:11434"},
 	}}
-	eff, err := materializeEffectiveConfig(cfg, "http://127.0.0.1:7777", "llamacpp", "http://127.0.0.1:8083")
+	eff, err := Materialize(cfg, "http://127.0.0.1:7777", "llamacpp", "http://127.0.0.1:8083")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -188,7 +188,7 @@ func TestMaterializeOllamaOverrideSkipsNonOllamaFormat(t *testing.T) {
 	cfg := &config.Config{Providers: map[string]config.ProviderConfig{
 		"ollama": {APIFormat: "openai-compat", BaseURL: "http://127.0.0.1:8080"},
 	}}
-	eff, err := materializeEffectiveConfig(cfg, "http://127.0.0.1:7777", "", "")
+	eff, err := Materialize(cfg, "http://127.0.0.1:7777", "", "")
 	if err != nil {
 		t.Fatal(err)
 	}

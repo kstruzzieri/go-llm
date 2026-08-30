@@ -139,7 +139,11 @@ func TestBuildDelegateTool_ResolvesCodingRole(t *testing.T) {
 			"coding": {Name: "coder", Provider: "local"},
 		},
 	}
-	tool, chain, err := buildDelegateTool(cfg, nil, "coding", nil)
+	resolved, err := resolveDelegateChain(cfg, "coding")
+	if err != nil {
+		t.Fatalf("resolveDelegateChain: %v", err)
+	}
+	tool, chain, err := buildDelegateTool(nil, "coding", resolved, nil)
 	if err != nil {
 		t.Fatalf("buildDelegateTool: %v", err)
 	}
@@ -151,16 +155,22 @@ func TestBuildDelegateTool_ResolvesCodingRole(t *testing.T) {
 	}
 }
 
-func TestBuildDelegateTool_NilConfig(t *testing.T) {
-	if _, _, err := buildDelegateTool(nil, nil, "coding", nil); err == nil {
+func TestResolveDelegateChain_NilConfig(t *testing.T) {
+	if _, err := resolveDelegateChain(nil, "coding"); err == nil {
 		t.Fatal("nil config should fail loudly, not no-op")
 	}
 }
 
-func TestBuildDelegateTool_UnknownRole(t *testing.T) {
+func TestResolveDelegateChain_UnknownRole(t *testing.T) {
 	cfg := &config.Config{Models: map[string]config.ModelConfig{}}
-	if _, _, err := buildDelegateTool(cfg, nil, "coding", nil); err == nil {
+	if _, err := resolveDelegateChain(cfg, "coding"); err == nil {
 		t.Fatal("unknown role should error")
+	}
+}
+
+func TestBuildDelegateTool_EmptyChain(t *testing.T) {
+	if _, _, err := buildDelegateTool(nil, "coding", nil, nil); err == nil {
+		t.Fatal("empty pre-resolved chain should error, not build a broken tool")
 	}
 }
 
@@ -171,7 +181,11 @@ func TestBuildDelegateTool_WithStreamSink(t *testing.T) {
 		},
 	}
 	var sink = func(string) {} // non-nil sink
-	tool, _, err := buildDelegateTool(cfg, nil, "coding", sink)
+	resolved, rerr := resolveDelegateChain(cfg, "coding")
+	if rerr != nil {
+		t.Fatalf("resolveDelegateChain: %v", rerr)
+	}
+	tool, _, err := buildDelegateTool(nil, "coding", resolved, sink)
 	if err != nil {
 		t.Fatalf("buildDelegateTool with sink: %v", err)
 	}

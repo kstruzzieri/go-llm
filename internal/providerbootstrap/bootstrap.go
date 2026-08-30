@@ -87,7 +87,7 @@ func New(ctx context.Context, opts Options) (*Bundle, error) {
 	// effCfg is the synthetic config when opts.Config is nil; reuse it for the
 	// prober factory, capability overrides, and Bundle.Config so all four see the
 	// same providers New actually built.
-	eff, err := materializeEffectiveConfig(opts.Config, opts.OllamaURLOverride,
+	eff, err := Materialize(opts.Config, opts.OllamaURLOverride,
 		opts.OpenAICompatURLOverrideProvider, opts.OpenAICompatURLOverride)
 	if err != nil {
 		return nil, err

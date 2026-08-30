@@ -14,6 +14,7 @@ import (
 
 	"github.com/kstruzzieri/go-llm/agent"
 	agenttools "github.com/kstruzzieri/go-llm/agent/tools"
+	"github.com/kstruzzieri/go-llm/config"
 	"github.com/kstruzzieri/go-llm/fingerprint"
 	golemruntime "github.com/kstruzzieri/go-llm/golem"
 	"github.com/kstruzzieri/go-llm/internal/providerbootstrap"
@@ -671,15 +672,108 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 		return err
 	}
 
-	backendRes, err := resolveBackend(ctx, cfg, backendResolveOpts{
-		flagBaseURL: f.baseURL,
-		flagSet:     f.baseURLSet,
-		noProbe:     f.noProbe,
-		lookupEnv:   os.LookupEnv,
-		prober:      openaicompat.DiscoverBaseURL,
-	})
+	// #477 required ordering: resolve every enabled route and build the
+	// frozen network plan BEFORE any outbound byte, admit the manifest,
+	// only then discover, bootstrap, refresh, probe, or infer.
+	agentRoute, err := providerbootstrap.PlanAgentRoute(cfg)
+	if err != nil {
+		return err
+	}
+	plan := chainPlan{chain: agentRoute.Chain, useRecommend: agentRoute.Recommend}
+	summarizeRoute, err := providerbootstrap.PlanOptionalUseCaseRoute(cfg, config.UseCaseSummarize)
+	if err != nil {
+		return err
+	}
+	routes := []providerbootstrap.PlannedRoute{agentRoute, summarizeRoute}
+	// Embedding is feature-gated, not optional-recommend: an absent or
+	// unresolvable embedding default disables RAG later with the same
+	// warning it always has, and plans no route.
+	embChain, embChainErr := embeddingChain(cfg)
+	if embChainErr == nil && !f.noRag {
+		routes = append(routes, providerbootstrap.PlannedRoute{UseCase: "embedding", Chain: embChain})
+	}
+	var dchain []string
+	if f.dispatch {
+		dchain, err = resolveDispatchChain(cfg, f.dispatchRole, agentRoute.Chain)
+		if err != nil {
+			return err
+		}
+		routes = append(routes, providerbootstrap.PlannedRoute{
+			UseCase: dispatchUseCase, Chain: dchain, Recommend: len(dchain) == 0,
+		})
+	}
+	var delegateChain []string
+	if f.delegate {
+		delegateChain, err = resolveDelegateChain(cfg, f.delegateRole)
+		if err != nil {
+			return err
+		}
+		routes = append(routes, providerbootstrap.PlannedRoute{UseCase: delegateUseCase, Chain: delegateChain})
+	}
+
+	explicitURL, _, err := explicitBaseURL(f.baseURL, f.baseURLSet, os.LookupEnv)
 	if err != nil {
 		return err // explicit-override validation error: fatal, matches validateFlags semantics
+	}
+	targetKey, _, targetOK := openAICompatTargetFromRoute(cfg, agentRoute)
+	ocProv, ocURL := "", ""
+	if explicitURL != "" && targetOK {
+		// The explicit override lands in the EFFECTIVE config before the
+		// manifest derives (I9): what the user consents to is what dials.
+		ocProv, ocURL = targetKey, explicitURL
+	}
+	eff, err := providerbootstrap.Materialize(cfg, f.ollamaURL, ocProv, ocURL)
+	if err != nil {
+		return err
+	}
+	netPlan, err := providerbootstrap.BuildNetworkPlan(eff, routes, providerbootstrap.PlanOptions{
+		CapabilityProbes: !f.noCapProbe,
+	})
+	if err != nil {
+		return err
+	}
+
+	gate := provider.NewDestinationGate()
+	interactive := !f.promptSet && realTermOps{}.IsTerminal(int(stdin.Fd()))
+	adm, err := newDestinationAdmission(destinationAdmissionConfig{
+		Gate:        gate,
+		Edges:       netPlan.Edges,
+		AllowFlags:  f.allowDestinations,
+		Interactive: interactive,
+		PromptYN:    startupPromptYN(stdin, stderr),
+		Out:         stderr,
+	})
+	if err != nil {
+		return err
+	}
+	if err := adm.ensure(ctx); err != nil {
+		return err
+	}
+
+	// Guarded, loopback-only discovery runs strictly after admission: each
+	// scan candidate probes through its own bound no-redirect client, and a
+	// hit re-pins the target provider's admitted destination to the
+	// discovered loopback URL before any client is constructed.
+	backendRes, err := resolveBackend(ctx, eff.Config(), backendResolveOpts{
+		flagBaseURL:    f.baseURL,
+		flagSet:        f.baseURLSet,
+		noProbe:        f.noProbe,
+		lookupEnv:      os.LookupEnv,
+		prober:         openaicompat.DiscoverBaseURL,
+		agentRoute:     &agentRoute,
+		guardCandidate: discoveryCandidateGuard(ctx, targetKey),
+	})
+	if err != nil {
+		return err
+	}
+	if backendRes.source == "discovered" {
+		pinned, perr := provider.NewDestination(backendRes.providerKey, backendRes.baseURL)
+		if perr != nil {
+			return fmt.Errorf("golem: pin discovered backend: %w", perr)
+		}
+		if perr := adm.pinLoopback(backendRes.providerKey, pinned); perr != nil {
+			return perr
+		}
 	}
 
 	var capStore fingerprint.CapProbeStore
@@ -704,16 +798,13 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 		OpenAICompatURLOverride:         backendRes.baseURL,
 		FingerprintProfileStore:         profileStore,
 		CapabilityProbeStore:            capStore, // nil when -no-cap-probe or open fully failed
+		DestinationGate:                 gate,
+		ActiveProviders:                 netPlan.ActiveProviders,
 	})
 	if err != nil {
 		return fmt.Errorf("bootstrap providers: %w", err)
 	}
 	defer func() { _ = bundle.Close() }()
-
-	plan, err := resolveAgentChain(bundle.Config)
-	if err != nil {
-		return err
-	}
 
 	resolveEndpoint := newPreflightEndpointResolver(bundle.Config, f.ollamaURL, backendRes.providerKey, backendRes.diagSource())
 	var resolver toolCallResolver
@@ -779,7 +870,7 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 			groundingRec = nil // no verifier: capture nothing and wrap nothing
 		}
 	}
-	embChain, embChainErr := embeddingChain(bundle.Config)
+	// #477 D8: embChain/embChainErr resolved once at plan time above.
 	var retrieve agent.Tool
 	retrieveLine := ""
 	retrieveRequested := f.ragDB != "" || f.noRag
@@ -876,10 +967,8 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 	var dispatchNotice *feedbackNotifier
 	dispatchLine := ""
 	if f.dispatch {
-		dchain, derr := resolveDispatchChain(bundle.Config, f.dispatchRole, plan.chain)
-		if derr != nil {
-			return derr
-		}
+		// #477 D8: dchain was resolved at plan time and its reachability
+		// admitted; re-resolving here could diverge from the manifest.
 		childCeiling := inputCeiling.ceiling
 		if f.dispatchRole != "" {
 			// The run-level preflight and input ceiling above cover plan.chain
@@ -998,7 +1087,7 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 
 	delegateLine := ""
 	if f.delegate {
-		dt, dchain, derr := buildDelegateTool(bundle.Config, bundle.Router, f.delegateRole, nil)
+		dt, dchain, derr := buildDelegateTool(bundle.Router, f.delegateRole, delegateChain, nil)
 		if derr != nil {
 			return derr
 		}
@@ -1108,10 +1197,10 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 		_, _ = fmt.Fprintln(stderr, line)
 	}
 
-	summarizeChain, err := resolveSummarizeChain(bundle.Config)
-	if err != nil {
-		return err
-	}
+	// #477 D8: the summarize chain comes from the frozen route resolved
+	// before admission — never re-resolved here. A recommend route is the
+	// empty chain, which NewRouterSummarizer routes non-strict, unchanged.
+	summarizeChain := summarizeRoute.Chain
 	var sourceSummarizer rag.SourceSummaryGenerator
 	if f.progressive {
 		if len(summarizeChain) == 0 {
@@ -1183,6 +1272,7 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 		journal:             journal,
 		bgManager:           bgManager,
 		grants:              newApprovalGrants(),
+		destAdmission:       adm,
 		allowWrite:          f.allowWrite,
 		allowExec:           f.allowExec,
 		mcpAttached:         mcpAttached,
@@ -1386,6 +1476,10 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 		// handler uses, keeping one interrupt taxonomy for both modes.
 		OnInterrupt: onInterrupt,
 	}), func(src lineSource) error {
+		// #477: post-startup re-admissions (after /grants clear) prompt
+		// through the SAME lineSource as every other read, never a second
+		// stdin reader racing the editor.
+		sess.destAdmission.setPrompt(lineSourcePromptYN(src))
 		// Bound before the auto-index goroutine can emit a notice, so no
 		// asynchronous message is ever rendered through the default display
 		// while a source exists.

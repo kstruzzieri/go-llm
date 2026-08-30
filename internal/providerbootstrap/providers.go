@@ -12,14 +12,14 @@ import (
 )
 
 // buildProviders materializes the effective config (see
-// materializeEffectiveConfig) and constructs every provider from it, sorted
+// Materialize) and constructs every provider from it, sorted
 // by config key. It returns the registered providers, the ollama clients
 // keyed by provider name (for provider-specific fingerprint probers), and
 // the effective config. All overrides are already IN the effective config by
 // the time any client is constructed, so the returned config always reflects
 // the live client URLs.
 func buildProviders(cfg *config.Config, override, ocOverrideProvider, ocOverrideURL string) ([]provider.Provider, map[string]*ollama.Client, *config.Config, error) {
-	eff, err := materializeEffectiveConfig(cfg, override, ocOverrideProvider, ocOverrideURL)
+	eff, err := Materialize(cfg, override, ocOverrideProvider, ocOverrideURL)
 	if err != nil {
 		return nil, nil, nil, err
 	}
@@ -42,7 +42,7 @@ func buildProviders(cfg *config.Config, override, ocOverrideProvider, ocOverride
 // reuse these same clients (the ollama client map and the openai-compat
 // provider), so capability-probe traffic is guarded by construction rather
 // than by a second wrapping site.
-func constructProviders(eff *effectiveProviders, gate *provider.DestinationGate) ([]provider.Provider, map[string]*ollama.Client, error) {
+func constructProviders(eff *Effective, gate *provider.DestinationGate) ([]provider.Provider, map[string]*ollama.Client, error) {
 	keys := eff.sortedProviderKeys()
 	registered := make([]provider.Provider, 0, len(keys))
 	ollamaClients := make(map[string]*ollama.Client)

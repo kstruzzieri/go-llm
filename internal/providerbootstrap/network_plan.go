@@ -13,7 +13,7 @@ import (
 // PlannedRoute is one enabled route in a mode's frozen network plan: the
 // RoutingRequest.UseCase the runtime will bind, plus either the exact strict
 // selector chain or the recommend marker. Exactly one of Chain/Recommend is
-// meaningful; buildNetworkPlan rejects a route carrying neither or both
+// meaningful; BuildNetworkPlan rejects a route carrying neither or both
 // halves empty.
 //
 // One purpose may be fed by several routes — golem's dispatch tool binds
@@ -25,8 +25,8 @@ type PlannedRoute struct {
 	Recommend bool     // non-strict: reaches every configured provider
 }
 
-// planOpts carries the mode toggles that add metadata reachability.
-type planOpts struct {
+// PlanOptions carries the mode toggles that add metadata reachability.
+type PlanOptions struct {
 	// CapabilityProbes adds a capability-probe edge per active provider —
 	// set when the mode may run live tool-capability probes (cap store
 	// present and probing not disabled).
@@ -46,10 +46,10 @@ type NetworkPlan struct {
 	Edges           []provider.DestinationEdge
 }
 
-// planAgentRoute mirrors cmd/golem's resolveAgentChain exactly: the LITERAL
+// PlanAgentRoute mirrors cmd/golem's resolveAgentChain exactly: the LITERAL
 // defaults["agent"] check (not RoleForUseCase), absent or nil config means
 // recommend, present-but-unresolvable is fatal.
-func planAgentRoute(cfg *config.Config) (PlannedRoute, error) {
+func PlanAgentRoute(cfg *config.Config) (PlannedRoute, error) {
 	if cfg == nil {
 		return PlannedRoute{UseCase: "agent", Recommend: true}, nil
 	}
@@ -63,7 +63,7 @@ func planAgentRoute(cfg *config.Config) (PlannedRoute, error) {
 	return PlannedRoute{UseCase: "agent", Chain: chain}, nil
 }
 
-// planOptionalUseCaseRoute resolves an optional side-task use case the way
+// PlanOptionalUseCaseRoute resolves an optional side-task use case the way
 // the runtime consumes it: a resolvable use case is a strict chain, and an
 // absent one is a RECOMMEND route — not "disabled" — because the runtime
 // caller (agent.NewRouterSummarizer with an empty chain, and both source
@@ -76,8 +76,8 @@ func planAgentRoute(cfg *config.Config) (PlannedRoute, error) {
 // embedding: an absent defaults.embedding disables the RAG feature entirely
 // (no route at all), and planning it as recommend would manufacture
 // reachability the runtime does not have. Feature-gated routes belong at the
-// entry point: plan no route when the feature is off, planRoleRoute when on.
-func planOptionalUseCaseRoute(cfg *config.Config, useCase string) (PlannedRoute, error) {
+// entry point: plan no route when the feature is off, PlanRoleRoute when on.
+func PlanOptionalUseCaseRoute(cfg *config.Config, useCase string) (PlannedRoute, error) {
 	if cfg == nil {
 		return PlannedRoute{UseCase: useCase, Recommend: true}, nil
 	}
@@ -91,12 +91,12 @@ func planOptionalUseCaseRoute(cfg *config.Config, useCase string) (PlannedRoute,
 	return PlannedRoute{UseCase: useCase, Chain: chain}, nil
 }
 
-// planRoleRoute resolves a role-pinned route (delegate, dispatch-role,
+// PlanRoleRoute resolves a role-pinned route (delegate, dispatch-role,
 // embedding): the role's chain served under the given use case. Mirrors the
 // existing flag semantics — a named role that does not resolve is fatal, and
 // an empty chain is fatal, because an explicitly requested feature must not
 // silently no-op.
-func planRoleRoute(cfg *config.Config, role, useCase string) (PlannedRoute, error) {
+func PlanRoleRoute(cfg *config.Config, role, useCase string) (PlannedRoute, error) {
 	if cfg == nil {
 		return PlannedRoute{}, fmt.Errorf("providerbootstrap: role %q requires a config; none found", role)
 	}
@@ -117,7 +117,7 @@ func selectorProvider(selector string) string {
 	return prov
 }
 
-// buildNetworkPlan freezes a mode's reachability: which providers its routes
+// BuildNetworkPlan freezes a mode's reachability: which providers its routes
 // can reach, and the destination edges the admission manifest is built from.
 // Pure — the only inputs are the materialized effective config and the
 // already-resolved routes.
@@ -132,7 +132,7 @@ func selectorProvider(selector string) string {
 // Metadata edges are added for ACTIVE providers only (I7): model-refresh
 // always, slot-probe when the provider opted into slot discovery, and
 // capability-probe when the mode enables probing.
-func buildNetworkPlan(eff *effectiveProviders, routes []PlannedRoute, opts planOpts) (*NetworkPlan, error) {
+func BuildNetworkPlan(eff *Effective, routes []PlannedRoute, opts PlanOptions) (*NetworkPlan, error) {
 	type edgeKey struct{ purpose, provider string }
 	edgeIdx := make(map[edgeKey]int)
 	var edges []provider.DestinationEdge

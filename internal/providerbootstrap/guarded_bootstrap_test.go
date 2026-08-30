@@ -64,10 +64,10 @@ func newCountingOpenAIServer(t *testing.T) *countingOpenAIServer {
 // gateFromPlan materializes, plans, and installs a gate over the plan's
 // edges with every destination granted — the composition Task 8's entry
 // points will perform.
-func gateFromPlan(t *testing.T, cfg *config.Config, routes []PlannedRoute, opts planOpts) (*provider.DestinationGate, *NetworkPlan) {
+func gateFromPlan(t *testing.T, cfg *config.Config, routes []PlannedRoute, opts PlanOptions) (*provider.DestinationGate, *NetworkPlan) {
 	t.Helper()
 	eff := mustEff(t, cfg)
-	plan, err := buildNetworkPlan(eff, routes, opts)
+	plan, err := BuildNetworkPlan(eff, routes, opts)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -107,11 +107,11 @@ func TestNewGatedRefreshesOnlyActiveProviders(t *testing.T) {
 	pcB.SlotDiscovery = true
 	cfg.Providers["b"] = pcB
 
-	route, err := planRoleRoute(cfg, "chatrole", "chat")
+	route, err := PlanRoleRoute(cfg, "chatrole", "chat")
 	if err != nil {
 		t.Fatal(err)
 	}
-	gate, plan := gateFromPlan(t, cfg, []PlannedRoute{route}, planOpts{})
+	gate, plan := gateFromPlan(t, cfg, []PlannedRoute{route}, PlanOptions{})
 
 	bundle, err := New(t.Context(), Options{
 		Config:          cfg,
@@ -171,11 +171,11 @@ func TestNewGatedRoutedChatEndToEnd(t *testing.T) {
 	b := newCountingOpenAIServer(t)
 	cfg := twoProviderConfig(a.srv.URL, b.srv.URL)
 
-	route, err := planRoleRoute(cfg, "chatrole", "chat")
+	route, err := PlanRoleRoute(cfg, "chatrole", "chat")
 	if err != nil {
 		t.Fatal(err)
 	}
-	gate, plan := gateFromPlan(t, cfg, []PlannedRoute{route}, planOpts{})
+	gate, plan := gateFromPlan(t, cfg, []PlannedRoute{route}, PlanOptions{})
 
 	bundle, err := New(t.Context(), Options{
 		Config:          cfg,
@@ -232,11 +232,11 @@ func TestNewGatedDirectProviderCallDeniedWithoutCapability(t *testing.T) {
 	b := newCountingOpenAIServer(t)
 	cfg := twoProviderConfig(a.srv.URL, b.srv.URL)
 
-	route, err := planRoleRoute(cfg, "chatrole", "chat")
+	route, err := PlanRoleRoute(cfg, "chatrole", "chat")
 	if err != nil {
 		t.Fatal(err)
 	}
-	gate, plan := gateFromPlan(t, cfg, []PlannedRoute{route}, planOpts{})
+	gate, plan := gateFromPlan(t, cfg, []PlannedRoute{route}, PlanOptions{})
 	bundle, err := New(t.Context(), Options{
 		Config:          cfg,
 		DestinationGate: gate,
@@ -295,11 +295,11 @@ func TestNewGatedOllamaProvider(t *testing.T) {
 		Models:   map[string]config.ModelConfig{"chatrole": {Provider: "ollama", Name: "m1", Type: "dense", ContextWindow: 32768}},
 		Defaults: map[string]string{"chat": "chatrole"},
 	}
-	route, err := planRoleRoute(cfg, "chatrole", "chat")
+	route, err := PlanRoleRoute(cfg, "chatrole", "chat")
 	if err != nil {
 		t.Fatal(err)
 	}
-	gate, plan := gateFromPlan(t, cfg, []PlannedRoute{route}, planOpts{})
+	gate, plan := gateFromPlan(t, cfg, []PlannedRoute{route}, PlanOptions{})
 
 	bundle, err := New(t.Context(), Options{
 		Config:          cfg,
@@ -360,13 +360,13 @@ func TestNewGatedSlotProbeDeniedWithoutEdge(t *testing.T) {
 		Models:   map[string]config.ModelConfig{"chatrole": {Provider: "a", Name: "m1", Type: "dense", ContextWindow: 32768}},
 		Defaults: map[string]string{"chat": "chatrole"},
 	}
-	route, err := planRoleRoute(cfg, "chatrole", "chat")
+	route, err := PlanRoleRoute(cfg, "chatrole", "chat")
 	if err != nil {
 		t.Fatal(err)
 	}
 	// Manifest WITHOUT the slot-probe edge: keep only chat + model-refresh.
 	eff := mustEff(t, cfg)
-	plan, err := buildNetworkPlan(eff, []PlannedRoute{route}, planOpts{})
+	plan, err := BuildNetworkPlan(eff, []PlannedRoute{route}, PlanOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -426,11 +426,11 @@ func TestNewGatedSlotProbeAdmitted(t *testing.T) {
 		Models:   map[string]config.ModelConfig{"chatrole": {Provider: "a", Name: "m1", Type: "dense", ContextWindow: 32768}},
 		Defaults: map[string]string{"chat": "chatrole"},
 	}
-	route, err := planRoleRoute(cfg, "chatrole", "chat")
+	route, err := PlanRoleRoute(cfg, "chatrole", "chat")
 	if err != nil {
 		t.Fatal(err)
 	}
-	gate, plan := gateFromPlan(t, cfg, []PlannedRoute{route}, planOpts{})
+	gate, plan := gateFromPlan(t, cfg, []PlannedRoute{route}, PlanOptions{})
 
 	bundle, err := New(t.Context(), Options{
 		Config:          cfg,
@@ -497,11 +497,11 @@ func TestNewGateRequiresActiveProviders(t *testing.T) {
 	a := newCountingOpenAIServer(t)
 	b := newCountingOpenAIServer(t)
 	okCfg := twoProviderConfig(a.srv.URL, b.srv.URL)
-	route, err := planRoleRoute(okCfg, "chatrole", "chat")
+	route, err := PlanRoleRoute(okCfg, "chatrole", "chat")
 	if err != nil {
 		t.Fatal(err)
 	}
-	gate, plan := gateFromPlan(t, okCfg, []PlannedRoute{route}, planOpts{})
+	gate, plan := gateFromPlan(t, okCfg, []PlannedRoute{route}, PlanOptions{})
 	_, err = New(context.Background(), Options{
 		Config:          okCfg,
 		DestinationGate: gate,

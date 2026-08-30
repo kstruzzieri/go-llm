@@ -36,9 +36,9 @@ func planFixtureConfig() *config.Config {
 	}
 }
 
-func mustEff(t *testing.T, cfg *config.Config) *effectiveProviders {
+func mustEff(t *testing.T, cfg *config.Config) *Effective {
 	t.Helper()
-	eff, err := materializeEffectiveConfig(cfg, "", "", "")
+	eff, err := Materialize(cfg, "", "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -62,26 +62,26 @@ func edgeSet(t *testing.T, plan *NetworkPlan) map[string]provider.DestinationEdg
 func TestNetworkPlanEveryPlannedRouteHasEdges(t *testing.T) {
 	eff := mustEff(t, planFixtureConfig())
 
-	agent, err := planAgentRoute(eff.cfg)
+	agent, err := PlanAgentRoute(eff.cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
-	summarize, err := planOptionalUseCaseRoute(eff.cfg, config.UseCaseSummarize)
+	summarize, err := PlanOptionalUseCaseRoute(eff.cfg, config.UseCaseSummarize)
 	if err != nil {
 		t.Fatal(err)
 	}
-	embedding, err := planRoleRoute(eff.cfg, "embedding", "embedding")
+	embedding, err := PlanRoleRoute(eff.cfg, "embedding", "embedding")
 	if err != nil {
 		t.Fatal(err)
 	}
 	dispatch := PlannedRoute{UseCase: "agent", Chain: slices.Clone(agent.Chain)}
-	delegate, err := planRoleRoute(eff.cfg, "coding", "coding")
+	delegate, err := PlanRoleRoute(eff.cfg, "coding", "coding")
 	if err != nil {
 		t.Fatal(err)
 	}
 	planning := PlannedRoute{UseCase: "planning", Chain: []string{"opencode/deepseek-pro"}}
 
-	plan, err := buildNetworkPlan(eff, []PlannedRoute{agent, summarize, embedding, dispatch, delegate, planning}, planOpts{})
+	plan, err := BuildNetworkPlan(eff, []PlannedRoute{agent, summarize, embedding, dispatch, delegate, planning}, PlanOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -116,11 +116,11 @@ func TestNetworkPlanEveryPlannedRouteHasEdges(t *testing.T) {
 // as fallback — reachability, not just the primary, is what gets admitted.
 func TestNetworkPlanRemoteFallbackProducesRemoteEdge(t *testing.T) {
 	eff := mustEff(t, planFixtureConfig())
-	agent, err := planAgentRoute(eff.cfg)
+	agent, err := PlanAgentRoute(eff.cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
-	plan, err := buildNetworkPlan(eff, []PlannedRoute{agent}, planOpts{})
+	plan, err := BuildNetworkPlan(eff, []PlannedRoute{agent}, PlanOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -150,11 +150,11 @@ func TestNetworkPlanRemoteFallbackProducesRemoteEdge(t *testing.T) {
 // refresh, probe, or prompt for it.
 func TestNetworkPlanUnusedProviderIsInactive(t *testing.T) {
 	eff := mustEff(t, planFixtureConfig())
-	agent, err := planAgentRoute(eff.cfg)
+	agent, err := PlanAgentRoute(eff.cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
-	plan, err := buildNetworkPlan(eff, []PlannedRoute{agent}, planOpts{})
+	plan, err := BuildNetworkPlan(eff, []PlannedRoute{agent}, PlanOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -183,14 +183,14 @@ func TestNetworkPlanRecommendActivatesEveryProvider(t *testing.T) {
 	delete(cfg.Defaults, "agent") // recommend mode
 	eff := mustEff(t, cfg)
 
-	agent, err := planAgentRoute(eff.cfg)
+	agent, err := PlanAgentRoute(eff.cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !agent.Recommend {
 		t.Fatal("agent route without defaults.agent must be a recommend route")
 	}
-	plan, err := buildNetworkPlan(eff, []PlannedRoute{agent}, planOpts{})
+	plan, err := BuildNetworkPlan(eff, []PlannedRoute{agent}, PlanOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -208,14 +208,14 @@ func TestNetworkPlanEmptySummarizeIsRecommend(t *testing.T) {
 	delete(cfg.Defaults, "analysis") // summarize falls through analysis -> chat -> nothing
 	eff := mustEff(t, cfg)
 
-	summarize, err := planOptionalUseCaseRoute(eff.cfg, config.UseCaseSummarize)
+	summarize, err := PlanOptionalUseCaseRoute(eff.cfg, config.UseCaseSummarize)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !summarize.Recommend {
 		t.Fatal("unresolvable summarize must be a recommend route, mirroring the non-strict runtime summarizer")
 	}
-	plan, err := buildNetworkPlan(eff, []PlannedRoute{summarize}, planOpts{})
+	plan, err := BuildNetworkPlan(eff, []PlannedRoute{summarize}, PlanOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -230,14 +230,14 @@ func TestNetworkPlanEmptySummarizeIsRecommend(t *testing.T) {
 // now visible as edges instead of silent egress).
 func TestNetworkPlanSummarizeViaAnalysisFallbackIsStrictRemote(t *testing.T) {
 	eff := mustEff(t, planFixtureConfig())
-	summarize, err := planOptionalUseCaseRoute(eff.cfg, config.UseCaseSummarize)
+	summarize, err := PlanOptionalUseCaseRoute(eff.cfg, config.UseCaseSummarize)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if summarize.Recommend {
 		t.Fatal("summarize resolving via the analysis fallback must be strict")
 	}
-	plan, err := buildNetworkPlan(eff, []PlannedRoute{summarize}, planOpts{})
+	plan, err := BuildNetworkPlan(eff, []PlannedRoute{summarize}, PlanOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -262,11 +262,11 @@ func TestNetworkPlanDisabledFeatureAddsNoEdges(t *testing.T) {
 	cfg.Models["embedding"] = m
 	eff := mustEff(t, cfg)
 
-	delegate, err := planRoleRoute(eff.cfg, "coding", "coding")
+	delegate, err := PlanRoleRoute(eff.cfg, "coding", "coding")
 	if err != nil {
 		t.Fatal(err)
 	}
-	plan, err := buildNetworkPlan(eff, []PlannedRoute{delegate}, planOpts{})
+	plan, err := BuildNetworkPlan(eff, []PlannedRoute{delegate}, PlanOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -285,13 +285,13 @@ func TestNetworkPlanMetadataEdges(t *testing.T) {
 	cfg.Providers["llamacpp"] = pc
 	eff := mustEff(t, cfg)
 
-	agent, err := planAgentRoute(eff.cfg)
+	agent, err := PlanAgentRoute(eff.cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	t.Run("with capability probes", func(t *testing.T) {
-		plan, err := buildNetworkPlan(eff, []PlannedRoute{agent}, planOpts{CapabilityProbes: true})
+		plan, err := BuildNetworkPlan(eff, []PlannedRoute{agent}, PlanOptions{CapabilityProbes: true})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -316,7 +316,7 @@ func TestNetworkPlanMetadataEdges(t *testing.T) {
 	})
 
 	t.Run("without capability probes", func(t *testing.T) {
-		plan, err := buildNetworkPlan(eff, []PlannedRoute{agent}, planOpts{})
+		plan, err := BuildNetworkPlan(eff, []PlannedRoute{agent}, PlanOptions{})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -333,16 +333,16 @@ func TestNetworkPlanMetadataEdges(t *testing.T) {
 // keeps the strongest (primary) marking.
 func TestNetworkPlanUnionsChainsPerPurpose(t *testing.T) {
 	eff := mustEff(t, planFixtureConfig())
-	agent, err := planAgentRoute(eff.cfg)
+	agent, err := PlanAgentRoute(eff.cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
 	// dispatch role pins the same purpose to a different chain.
-	dispatch, err := planRoleRoute(eff.cfg, "cloud-pro", "agent")
+	dispatch, err := PlanRoleRoute(eff.cfg, "cloud-pro", "agent")
 	if err != nil {
 		t.Fatal(err)
 	}
-	plan, err := buildNetworkPlan(eff, []PlannedRoute{agent, dispatch}, planOpts{})
+	plan, err := BuildNetworkPlan(eff, []PlannedRoute{agent, dispatch}, PlanOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -372,11 +372,11 @@ func TestNetworkPlanRecommendEdgesAreDeterministicallyOrdered(t *testing.T) {
 	want := []string{"llamacpp", "opencode", "unused"}
 
 	for range 20 {
-		agent, err := planAgentRoute(eff.cfg)
+		agent, err := PlanAgentRoute(eff.cfg)
 		if err != nil {
 			t.Fatal(err)
 		}
-		plan, err := buildNetworkPlan(eff, []PlannedRoute{agent}, planOpts{})
+		plan, err := BuildNetworkPlan(eff, []PlannedRoute{agent}, PlanOptions{})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -396,12 +396,12 @@ func TestNetworkPlanRecommendEdgesAreDeterministicallyOrdered(t *testing.T) {
 // build must not change what the plan carries.
 func TestNetworkPlanIsImmuneToCallerMutation(t *testing.T) {
 	eff := mustEff(t, planFixtureConfig())
-	agent, err := planAgentRoute(eff.cfg)
+	agent, err := PlanAgentRoute(eff.cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
 	routes := []PlannedRoute{agent}
-	plan, err := buildNetworkPlan(eff, routes, planOpts{})
+	plan, err := BuildNetworkPlan(eff, routes, PlanOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -427,34 +427,34 @@ func TestNetworkPlanIsImmuneToCallerMutation(t *testing.T) {
 func TestNetworkPlanRejectsUnknownSelectorProvider(t *testing.T) {
 	eff := mustEff(t, planFixtureConfig())
 	bogus := PlannedRoute{UseCase: "agent", Chain: []string{"ghost/model-x"}}
-	if _, err := buildNetworkPlan(eff, []PlannedRoute{bogus}, planOpts{}); err == nil {
+	if _, err := BuildNetworkPlan(eff, []PlannedRoute{bogus}, PlanOptions{}); err == nil {
 		t.Fatal("unknown selector provider accepted")
 	}
 }
 
 func TestNetworkPlanRejectsEmptyAndConflictingRoutes(t *testing.T) {
 	eff := mustEff(t, planFixtureConfig())
-	if _, err := buildNetworkPlan(eff, []PlannedRoute{{UseCase: ""}}, planOpts{}); err == nil {
+	if _, err := BuildNetworkPlan(eff, []PlannedRoute{{UseCase: ""}}, PlanOptions{}); err == nil {
 		t.Error("route with empty use case accepted")
 	}
-	if _, err := buildNetworkPlan(eff, []PlannedRoute{{UseCase: "agent"}}, planOpts{}); err == nil {
+	if _, err := BuildNetworkPlan(eff, []PlannedRoute{{UseCase: "agent"}}, PlanOptions{}); err == nil {
 		t.Error("route with neither chain nor recommend accepted")
 	}
 }
 
-// planAgentRoute mirrors resolveAgentChain exactly: the literal
+// PlanAgentRoute mirrors resolveAgentChain exactly: the literal
 // defaults["agent"] check, not RoleForUseCase.
 func TestPlanAgentRouteMirrorsResolveAgentChain(t *testing.T) {
 	t.Run("nil config recommends", func(t *testing.T) {
-		r, err := planAgentRoute(nil)
+		r, err := PlanAgentRoute(nil)
 		if err != nil || !r.Recommend {
-			t.Fatalf("planAgentRoute(nil) = %+v, %v; want recommend", r, err)
+			t.Fatalf("PlanAgentRoute(nil) = %+v, %v; want recommend", r, err)
 		}
 	})
 	t.Run("unresolvable agent default is fatal", func(t *testing.T) {
 		cfg := planFixtureConfig()
 		cfg.Defaults["agent"] = "no-such-role"
-		if _, err := planAgentRoute(cfg); err == nil {
+		if _, err := PlanAgentRoute(cfg); err == nil {
 			t.Fatal("unresolvable defaults.agent must be fatal, mirroring resolveAgentChain")
 		}
 	})
@@ -462,10 +462,10 @@ func TestPlanAgentRouteMirrorsResolveAgentChain(t *testing.T) {
 
 func TestPlanRoleRouteErrors(t *testing.T) {
 	eff := mustEff(t, planFixtureConfig())
-	if _, err := planRoleRoute(nil, "coding", "coding"); err == nil {
+	if _, err := PlanRoleRoute(nil, "coding", "coding"); err == nil {
 		t.Error("nil config accepted")
 	}
-	if _, err := planRoleRoute(eff.cfg, "no-such-role", "coding"); err == nil {
+	if _, err := PlanRoleRoute(eff.cfg, "no-such-role", "coding"); err == nil {
 		t.Error("unknown role accepted")
 	}
 }
@@ -475,11 +475,11 @@ func TestPlanRoleRouteErrors(t *testing.T) {
 // destination admits the whole plan.
 func TestNetworkPlanEdgesInstallAgainstGate(t *testing.T) {
 	eff := mustEff(t, planFixtureConfig())
-	agent, err := planAgentRoute(eff.cfg)
+	agent, err := PlanAgentRoute(eff.cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
-	plan, err := buildNetworkPlan(eff, []PlannedRoute{agent}, planOpts{})
+	plan, err := BuildNetworkPlan(eff, []PlannedRoute{agent}, PlanOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}

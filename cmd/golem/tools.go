@@ -29,20 +29,30 @@ func buildSystemPrompt(allowWrite, allowExec bool) string {
 // the model via the StrictChain-pinned chain.
 const delegateUseCase = "coding"
 
-// buildDelegateTool resolves the delegate role chain and returns the
-// delegate_code tool backed by a caller pinned to that chain (UseCase
-// delegateUseCase). It fails when the role cannot be resolved — an explicit
-// -delegate must not silently no-op. The returned chain is for the caller
-// wiring / the startup notice. The stream sink is optional: nil disables
-// streaming (default runs unchanged); non-nil surfaces generation progress.
-func buildDelegateTool(cfg *config.Config, router *provider.Router, role string, stream func(string)) (agent.Tool, []string, error) {
+// resolveDelegateChain resolves the delegate role chain at PLAN time (#477
+// D8), so its reachability is admitted with everything else and never
+// re-resolved later. It fails when the role cannot be resolved — an explicit
+// -delegate must not silently no-op.
+func resolveDelegateChain(cfg *config.Config, role string) ([]string, error) {
 	if cfg == nil {
-		return nil, nil, fmt.Errorf("golem: -delegate requires a models.json with a %q role; none found", role)
+		return nil, fmt.Errorf("golem: -delegate requires a models.json with a %q role; none found", role)
 	}
 	chain, err := cfg.RoleChain(role)
 	if err != nil {
-		return nil, nil, fmt.Errorf("golem: -delegate-role %q: %w", role, err)
+		return nil, fmt.Errorf("golem: -delegate-role %q: %w", role, err)
 	}
+	if len(chain) == 0 {
+		return nil, fmt.Errorf("golem: -delegate-role %q resolved to an empty chain", role)
+	}
+	return chain, nil
+}
+
+// buildDelegateTool returns the delegate_code tool backed by a caller pinned
+// to the pre-resolved chain (UseCase delegateUseCase). The chain comes from
+// the frozen network plan via resolveDelegateChain; this function performs
+// no resolution of its own. The stream sink is optional: nil disables
+// streaming (default runs unchanged); non-nil surfaces generation progress.
+func buildDelegateTool(router *provider.Router, role string, chain []string, stream func(string)) (agent.Tool, []string, error) {
 	if len(chain) == 0 {
 		return nil, nil, fmt.Errorf("golem: -delegate-role %q resolved to an empty chain", role)
 	}
