@@ -362,6 +362,65 @@ func TestNetworkPlanUnionsChainsPerPurpose(t *testing.T) {
 	}
 }
 
+// Recommend-route edges come out in sorted provider order, run after run —
+// map iteration order must never reach the consent surface. Twenty builds
+// make a lucky ordering from unsorted iteration vanishingly improbable.
+func TestNetworkPlanRecommendEdgesAreDeterministicallyOrdered(t *testing.T) {
+	cfg := planFixtureConfig()
+	delete(cfg.Defaults, "agent")
+	eff := mustEff(t, cfg)
+	want := []string{"llamacpp", "opencode", "unused"}
+
+	for range 20 {
+		agent, err := planAgentRoute(eff.cfg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		plan, err := buildNetworkPlan(eff, []PlannedRoute{agent}, planOpts{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var got []string
+		for _, e := range plan.Edges {
+			if e.Purpose == "agent" {
+				got = append(got, e.Destination.Provider())
+			}
+		}
+		if !slices.Equal(got, want) {
+			t.Fatalf("recommend edge order = %v, want sorted %v", got, want)
+		}
+	}
+}
+
+// Frozen means frozen: mutating the caller's route slice or chain after the
+// build must not change what the plan carries.
+func TestNetworkPlanIsImmuneToCallerMutation(t *testing.T) {
+	eff := mustEff(t, planFixtureConfig())
+	agent, err := planAgentRoute(eff.cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	routes := []PlannedRoute{agent}
+	plan, err := buildNetworkPlan(eff, routes, planOpts{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	routes[0].UseCase = "hijacked"
+	if len(agent.Chain) > 0 {
+		agent.Chain[0] = "ghost/replaced"
+	}
+
+	if plan.Routes[0].UseCase != "agent" {
+		t.Error("plan route mutated through the caller's slice")
+	}
+	for _, sel := range plan.Routes[0].Chain {
+		if sel == "ghost/replaced" {
+			t.Error("plan chain mutated through the caller's slice")
+		}
+	}
+}
+
 // A strict selector naming an unknown provider is a wiring error, caught at
 // plan construction — never a silent skip that would leave the route
 // half-admitted.

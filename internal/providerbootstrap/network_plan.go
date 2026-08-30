@@ -2,6 +2,7 @@ package providerbootstrap
 
 import (
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 
@@ -160,7 +161,11 @@ func buildNetworkPlan(eff *effectiveProviders, routes []PlannedRoute, opts planO
 			if len(r.Chain) != 0 {
 				return nil, fmt.Errorf("providerbootstrap: route %q carries both a chain and the recommend marker", r.UseCase)
 			}
-			for prov := range eff.cfg.Providers {
+			// Sorted, not map order: plan edges feed renderings beyond the
+			// (internally sorted) manifest, and a consent surface that
+			// shuffles between runs asks the user to re-read what did not
+			// change.
+			for _, prov := range eff.sortedProviderKeys() {
 				if err := addEdge(r.UseCase, prov, false); err != nil {
 					return nil, err
 				}
@@ -198,8 +203,16 @@ func buildNetworkPlan(eff *effectiveProviders, routes []PlannedRoute, opts planO
 		}
 	}
 
+	// Frozen means frozen: the plan owns private copies of the routes and
+	// their chains, so a caller mutating its input slices after the build
+	// cannot desynchronize the consumed chains from the admitted edges.
+	frozen := make([]PlannedRoute, len(routes))
+	for i, r := range routes {
+		r.Chain = slices.Clone(r.Chain)
+		frozen[i] = r
+	}
 	return &NetworkPlan{
-		Routes:          routes,
+		Routes:          frozen,
 		ActiveProviders: activeSorted,
 		Edges:           edges,
 	}, nil
