@@ -135,6 +135,8 @@ func runSourceAdd(ctx context.Context, args []string, stdin io.Reader, out, errO
 	fs.StringVar(&title, "title", "", "optional display title")
 	fs.StringVar(&collection, "collection", "", "optional collection")
 	fs.Var(&tags, "tag", "optional tag (repeatable)")
+	var allowDest stringSliceFlag
+	fs.Var(&allowDest, "allow-destination", "admit a remote model destination: \"<provider>/<canonical base URL>\" (repeatable; this command never prompts)")
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return err
@@ -160,7 +162,8 @@ func runSourceAdd(ctx context.Context, args []string, stdin io.Reader, out, errO
 	}
 	return sourceAddExecute(ctx, sourceAddSpec{
 		configPath: configPath, rootFlag: rootFlag, ollamaURL: ollamaURL,
-		text: text, name: name, path: firstArg(fs),
+		allowDest: allowDest,
+		text:      text, name: name, path: firstArg(fs),
 		opts: rag.DocumentOptions{Title: title, Collection: collection, Tags: []string(tags)},
 	}, stdin, out, errOut, deps)
 }
@@ -174,6 +177,7 @@ func firstArg(fs *flag.FlagSet) string {
 
 type sourceAddSpec struct {
 	configPath, rootFlag, ollamaURL string
+	allowDest                       []string
 	text                            bool
 	name, path                      string
 	opts                            rag.DocumentOptions
@@ -182,7 +186,7 @@ type sourceAddSpec struct {
 // sourceEmbedderFor returns the embedder + chain for a mutating command: the
 // injected test seam when present, else a provider bundle built from config.
 // The returned closer releases bundle resources (no-op for the seam).
-func sourceEmbedderFor(ctx context.Context, configPath, ollamaURL string, deps sourceDeps, errOut io.Writer) (rag.Embedder, []string, func(), error) {
+func sourceEmbedderFor(ctx context.Context, configPath, ollamaURL string, allowDest []string, deps sourceDeps, errOut io.Writer) (rag.Embedder, []string, func(), error) {
 	if deps.embedder != nil {
 		return deps.embedder, deps.embChain, func() {}, nil
 	}
@@ -190,7 +194,24 @@ func sourceEmbedderFor(ctx context.Context, configPath, ollamaURL string, deps s
 	if err != nil {
 		return nil, nil, nil, err
 	}
-	bundle, err := providerbootstrap.New(ctx, providerbootstrap.Options{Config: cfg, OllamaURLOverride: ollamaURL})
+	// #477: the embedding route is the command's whole reachability; admit
+	// it (allowlist only, never a prompt) before bootstrap.
+	embChain, err := embeddingChain(cfg)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	gate, netPlan, _, err := admitForSubcommand(ctx, cfg,
+		[]providerbootstrap.PlannedRoute{{UseCase: "embedding", Chain: embChain}},
+		providerbootstrap.PlanOptions{}, allowDest, ollamaURL, "", "", errOut)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	bundle, err := providerbootstrap.New(ctx, providerbootstrap.Options{
+		Config:            cfg,
+		OllamaURLOverride: ollamaURL,
+		DestinationGate:   gate,
+		ActiveProviders:   netPlan.ActiveProviders,
+	})
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("golem: bootstrap providers: %w", err)
 	}
@@ -198,11 +219,6 @@ func sourceEmbedderFor(ctx context.Context, configPath, ollamaURL string, deps s
 		if closeErr := bundle.Close(); closeErr != nil {
 			_, _ = fmt.Fprintf(errOut, "golem: close provider bundle: %v\n", closeErr)
 		}
-	}
-	embChain, err := embeddingChain(bundle.Config)
-	if err != nil {
-		closer()
-		return nil, nil, nil, err
 	}
 	embedder := newChainEmbedder(func(rc context.Context, rr provider.RoutingRequest) (embedExecutor, error) {
 		return bundle.Router.Route(rc, rr)
@@ -244,7 +260,7 @@ func sourceAddExecute(ctx context.Context, spec sourceAddSpec, stdin io.Reader, 
 	if deps.afterInputPreflight != nil {
 		deps.afterInputPreflight()
 	}
-	embedder, embChain, closeBundle, err := sourceEmbedderFor(ctx, spec.configPath, spec.ollamaURL, deps, errOut)
+	embedder, embChain, closeBundle, err := sourceEmbedderFor(ctx, spec.configPath, spec.ollamaURL, spec.allowDest, deps, errOut)
 	if err != nil {
 		return err
 	}
@@ -446,11 +462,13 @@ func sourceRmExecute(ctx context.Context, rootFlag, id string, out, errOut io.Wr
 
 func runSourceReindex(ctx context.Context, args []string, out, errOut io.Writer, deps sourceDeps) error {
 	var configPath, rootFlag, ollamaURL string
+	var allowDest stringSliceFlag
 	fs := flag.NewFlagSet("golem source reindex", flag.ContinueOnError)
 	fs.SetOutput(errOut)
 	fs.StringVar(&configPath, "config", "", "path to models.json (default: auto-discover)")
 	fs.StringVar(&rootFlag, "root", ".", "workspace root")
 	fs.StringVar(&ollamaURL, "ollama-url", "", "override Ollama base URL")
+	fs.Var(&allowDest, "allow-destination", "admit a remote model destination: \"<provider>/<canonical base URL>\" (repeatable; this command never prompts)")
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return err
@@ -472,10 +490,10 @@ func runSourceReindex(ctx context.Context, args []string, out, errOut io.Writer,
 	if !validSourceDocumentID("reindex", id, errOut) {
 		return errSourceFailed
 	}
-	return sourceReindexExecute(ctx, configPath, rootFlag, ollamaURL, id, out, errOut, deps)
+	return sourceReindexExecute(ctx, configPath, rootFlag, ollamaURL, allowDest, id, out, errOut, deps)
 }
 
-func sourceReindexExecute(ctx context.Context, configPath, rootFlag, ollamaURL, id string, out, errOut io.Writer, deps sourceDeps) error {
+func sourceReindexExecute(ctx context.Context, configPath, rootFlag, ollamaURL string, allowDest []string, id string, out, errOut io.Writer, deps sourceDeps) error {
 	_, dbPath, workspaceID, err := sourceWorkspace(rootFlag, deps.env())
 	if err != nil {
 		return err
@@ -501,7 +519,7 @@ func sourceReindexExecute(ctx context.Context, configPath, rootFlag, ollamaURL, 
 		_, _ = fmt.Fprintf(errOut, "golem source reindex: %v\n", err)
 		return errSourceFailed
 	}
-	embedder, embChain, closeBundle, err := sourceEmbedderFor(ctx, configPath, ollamaURL, deps, errOut)
+	embedder, embChain, closeBundle, err := sourceEmbedderFor(ctx, configPath, ollamaURL, allowDest, deps, errOut)
 	if err != nil {
 		_, _ = fmt.Fprintf(errOut, "golem source reindex: %v\n", err)
 		return errSourceFailed

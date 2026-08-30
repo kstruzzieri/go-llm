@@ -37,14 +37,25 @@ func renderModelsJSON(w io.Writer, in configview.BuildInput) error {
 // Inventory. Explicit-command context only (network). Every provider/list
 // error is propagated — an empty inventory must mean "nothing found", never
 // "something failed".
-func buildInventoryFromRegistry(ctx context.Context, providers *provider.Registry, models *provider.ModelRegistry) (configview.Inventory, error) {
+// bind attaches the model-refresh destination capability per provider when a
+// gate is armed (#477 I14: the inventory sweep is repository-owned metadata
+// traffic through guarded clients); nil keeps the ungated context.
+func buildInventoryFromRegistry(ctx context.Context, providers *provider.Registry, models *provider.ModelRegistry, bind func(context.Context, string) (context.Context, error)) (configview.Inventory, error) {
 	inv := configview.Inventory{}
 	for _, name := range providers.Names() {
 		p, ok := providers.Get(name)
 		if !ok {
 			return configview.Inventory{}, fmt.Errorf("list models for -json inventory: provider %q disappeared", name)
 		}
-		infos, err := p.Models(ctx)
+		pctx := ctx
+		if bind != nil {
+			var err error
+			pctx, err = bind(ctx, name)
+			if err != nil {
+				return configview.Inventory{}, fmt.Errorf("list models for -json inventory from provider %q: %w", name, err)
+			}
+		}
+		infos, err := p.Models(pctx)
 		if err != nil {
 			return configview.Inventory{}, fmt.Errorf("list models for -json inventory from provider %q: %w", name, err)
 		}

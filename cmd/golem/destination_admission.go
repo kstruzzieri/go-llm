@@ -9,6 +9,8 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/kstruzzieri/go-llm/config"
+	"github.com/kstruzzieri/go-llm/internal/providerbootstrap"
 	"github.com/kstruzzieri/go-llm/provider"
 )
 
@@ -49,6 +51,10 @@ type destinationAdmission struct {
 	// silently admit whatever a future manifest adds. Held for /grants
 	// display and pinned by test.
 	granted provider.DestinationPolicy
+	// effectiveCfg is the materialized config the edges derive from, held so
+	// discovery consumers read the same URLs the manifest admitted. Set by
+	// admitForSubcommand; main.go passes eff.Config() to discovery directly.
+	effectiveCfg *config.Config
 }
 
 // newDestinationAdmission validates the allow flags and freezes the manifest.
@@ -337,4 +343,58 @@ func discoveryCandidateGuard(ctx context.Context, providerKey string) func(candi
 		}
 		return hc, bctx, nil
 	}
+}
+
+// effectiveConfigForDiscovery returns the config discovery should read.
+// The admission was built from the EFFECTIVE config's edges; discovery must
+// see the same base URLs, so a caller that only holds the raw config asks
+// here rather than re-materializing. Falls back to the raw config when the
+// admission carries no effective copy (never the case for subcommands).
+func (a *destinationAdmission) effectiveConfigForDiscovery(raw *config.Config) *config.Config {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.effectiveCfg != nil {
+		return a.effectiveCfg
+	}
+	return raw
+}
+
+// admitForSubcommand is the shared noninteractive admission sequence for the
+// semantic one-shot subcommands (models/index/source): materialize, plan,
+// render, admit via the exact -allow-destination set — NEVER a prompt (D10;
+// these commands do not read stdin for consent). A remote destination outside
+// the allowlist fails closed with the diagnostic naming it and the flag that
+// would cover it.
+func admitForSubcommand(
+	ctx context.Context,
+	cfg *config.Config,
+	routes []providerbootstrap.PlannedRoute,
+	opts providerbootstrap.PlanOptions,
+	allow []string,
+	ollamaOverride, ocProv, ocURL string,
+	errOut io.Writer,
+) (*provider.DestinationGate, *providerbootstrap.NetworkPlan, *destinationAdmission, error) {
+	eff, err := providerbootstrap.Materialize(cfg, ollamaOverride, ocProv, ocURL)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	netPlan, err := providerbootstrap.BuildNetworkPlan(eff, routes, opts)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	gate := provider.NewDestinationGate()
+	adm, err := newDestinationAdmission(destinationAdmissionConfig{
+		Gate:       gate,
+		Edges:      netPlan.Edges,
+		AllowFlags: allow,
+		Out:        errOut,
+	})
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	adm.effectiveCfg = eff.Config()
+	if err := adm.ensure(ctx); err != nil {
+		return nil, nil, nil, err
+	}
+	return gate, netPlan, adm, nil
 }
