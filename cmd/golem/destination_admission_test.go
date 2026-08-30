@@ -136,6 +136,19 @@ func TestAdmissionInteractiveBatchDecision(t *testing.T) {
 		}
 	})
 
+	t.Run("prompt error admits nothing", func(t *testing.T) {
+		// A Ctrl-C or read failure at the consent question is neither a yes
+		// nor a quiet no-op: the error surfaces and the gate stays deny-all.
+		p := &fakePrompt{answer: true, err: errors.New("interrupted")}
+		adm, _ := newTestAdmission(t, admEdges(t), nil, true, p)
+		if err := adm.ensure(context.Background()); err == nil {
+			t.Fatal("prompt error swallowed")
+		}
+		if _, err := adm.gate.Bind(context.Background(), "agent", "llamacpp"); !errors.Is(err, provider.ErrDestinationDenied) {
+			t.Error("gate not deny-all after prompt error")
+		}
+	})
+
 	t.Run("declined", func(t *testing.T) {
 		p := &fakePrompt{answer: false}
 		adm, _ := newTestAdmission(t, admEdges(t), nil, true, p)
