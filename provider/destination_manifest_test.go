@@ -151,6 +151,52 @@ func TestDestinationGateInstallRejectsUngrantedRemoteEdge(t *testing.T) {
 	}
 }
 
+func TestDestinationGateFailedInstallRevokesPreviousGeneration(t *testing.T) {
+	remote := mustDest(t, "opencode", "https://opencode.ai/zen/go")
+	edge := DestinationEdge{Purpose: "agent", Destination: remote}
+	manifest, err := NewDestinationManifest(edge)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	tests := []struct {
+		name    string
+		install func(*DestinationGate) error
+	}{
+		{
+			name: "nil manifest",
+			install: func(g *DestinationGate) error {
+				return g.Install(NewDestinationPolicy(remote), nil)
+			},
+		},
+		{
+			name: "denied manifest",
+			install: func(g *DestinationGate) error {
+				return g.Install(DestinationPolicy{}, manifest)
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			g := installTestGate(t, edge)
+			oldCtx, err := g.Bind(context.Background(), "agent", "opencode")
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			if err := tt.install(g); err == nil {
+				t.Fatal("failed Install() = nil error, want rejection")
+			}
+			if _, err := g.Bind(context.Background(), "agent", "opencode"); !errors.Is(err, ErrDestinationDenied) {
+				t.Errorf("Bind() after failed Install() = %v, want ErrDestinationDenied", err)
+			}
+			if err := g.authorize(oldCtx, "opencode", remote); !errors.Is(err, ErrDestinationDenied) {
+				t.Errorf("authorize(old capability) after failed Install() = %v, want ErrDestinationDenied", err)
+			}
+		})
+	}
+}
+
 // I12/I20: an all-loopback manifest installs under the zero policy with no
 // grants at all — local-only workflows continue prompt-free.
 func TestDestinationGateLoopbackInstallsUnderZeroPolicy(t *testing.T) {

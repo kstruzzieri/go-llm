@@ -212,3 +212,131 @@ func TestNewServerUnservedPurposeDenied(t *testing.T) {
 		t.Fatalf("unserved purpose = %v, want ErrDestinationDenied", err)
 	}
 }
+
+func TestNewServerKeepsLegacyOllamaIdentitySeparateFromOpenAICompatNamedOllama(t *testing.T) {
+	openAI := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/models" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"object":"list","data":[]}`)
+	}))
+	t.Cleanup(openAI.Close)
+
+	configPath := filepath.Join(t.TempDir(), "models.json")
+	cfg := fmt.Sprintf(`{
+  "providers": {
+    "ollama": {"base_url": %q, "api_format": "openai-compat"},
+    "ollama-legacy": {"base_url": %q, "api_format": "openai-compat"}
+  }
+}`, openAI.URL, openAI.URL)
+	if err := os.WriteFile(configPath, []byte(cfg), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var legacyName string
+	for range 2 {
+		s, err := NewServer(context.Background(), WithConfig(configPath), WithRAGDisabled())
+		if err != nil {
+			t.Fatalf("NewServer() error = %v, want separate degraded legacy client", err)
+		}
+		if s.legacyProviderName == "ollama" || s.legacyProviderName == "ollama-legacy" {
+			t.Errorf("legacy provider name = %q, want unused identity", s.legacyProviderName)
+		}
+		if got := s.legacyDest.BaseURL(); got != defaultOllamaURL {
+			t.Errorf("legacy destination = %q, want %q", got, defaultOllamaURL)
+		}
+		if legacyName != "" && s.legacyProviderName != legacyName {
+			t.Errorf("legacy provider name = %q, want deterministic %q", s.legacyProviderName, legacyName)
+		}
+		legacyName = s.legacyProviderName
+		_ = s.Close()
+	}
+}
+
+func TestNewServerExplicitLegacyURLUsesDistinctIdentityWhenConfiguredDestinationDiffers(t *testing.T) {
+	configured := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/tags" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"models":[]}`)
+	}))
+	t.Cleanup(configured.Close)
+	legacy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/", "/api/tags":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"models":[]}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(legacy.Close)
+
+	configPath := filepath.Join(t.TempDir(), "models.json")
+	cfg := fmt.Sprintf(`{
+  "providers": {
+    "shared-ollama": {"base_url": %q, "api_format": "ollama"}
+  }
+}`, configured.URL)
+	if err := os.WriteFile(configPath, []byte(cfg), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	s, err := NewServer(context.Background(),
+		WithConfig(configPath),
+		WithOllamaURL(legacy.URL),
+		WithRAGDisabled(),
+	)
+	if err != nil {
+		t.Fatalf("NewServer() error = %v, want distinct legacy identity", err)
+	}
+	defer func() { _ = s.Close() }()
+
+	if s.legacyProviderName == "shared-ollama" {
+		t.Errorf("legacy provider name = %q, want identity distinct from configured provider", s.legacyProviderName)
+	}
+	if got := s.legacyDest.BaseURL(); got != legacy.URL {
+		t.Errorf("legacy destination = %q, want %q", got, legacy.URL)
+	}
+}
+
+func TestNewServerReusesOllamaProviderIdentityForCanonicalLegacyDestination(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/", "/api/tags":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"models":[]}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(backend.Close)
+
+	configPath := filepath.Join(t.TempDir(), "models.json")
+	cfg := fmt.Sprintf(`{
+  "providers": {
+    "shared-ollama": {"base_url": %q, "api_format": "ollama"}
+  }
+}`, backend.URL+"/")
+	if err := os.WriteFile(configPath, []byte(cfg), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	s, err := NewServer(context.Background(),
+		WithConfig(configPath),
+		WithOllamaURL(backend.URL),
+		WithRAGDisabled(),
+	)
+	if err != nil {
+		t.Fatalf("NewServer() error = %v", err)
+	}
+	defer func() { _ = s.Close() }()
+
+	if got := s.legacyProviderName; got != "shared-ollama" {
+		t.Errorf("legacy provider name = %q, want %q", got, "shared-ollama")
+	}
+}

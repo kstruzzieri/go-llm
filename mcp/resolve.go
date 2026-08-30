@@ -296,9 +296,7 @@ func (s *Server) inferProviderForExplicitModel(ctx context.Context, model string
 		return providerName, err
 	}
 
-	for _, name := range pReg.Names() {
-		_ = pReg.RefreshModels(ctx, name)
-	}
+	s.refreshProviderModelIndexes(ctx)
 	if providerName, ok, err := inferProviderFromRegistryIndex(pReg, model); ok || err != nil {
 		return providerName, err
 	}

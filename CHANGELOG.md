@@ -24,9 +24,10 @@ surface existed.
 - The frozen network plan resolves every enabled route once, before any
   I/O, and derives the manifest the user consents to: deduplicated
   destinations, every use-case edge visible with primary/fallback marking.
-- Enforcement is structural, not enumerative: every repository-owned HTTP
-  client is wrapped by a guard bound to one destination, and requests must
-  carry a purpose capability issued by the current admission generation.
+- Enforcement is structural, not enumerative: model-runtime HTTP clients
+  constructed by the migrated Golem, bootstrap, and MCP paths are wrapped by
+  a guard bound to one destination, and requests must carry a purpose
+  capability issued by the current admission generation.
   Redirects are refused (same-origin included); loopback bypasses proxies
   and validates `localhost` resolution at dial time; admitted remote
   traffic keeps configured proxies.
@@ -52,7 +53,8 @@ surface existed.
   caller-supplied `Orchestrator` is refused
   (`golem.ErrDestinationPolicyIneffective`) — the host owns those
   transports.
-- Standalone MCP: new `mcp.WithDestinationPolicy`. Same zero-value
+- Standalone MCP: new `mcp.WithDestinationPolicy` and repeatable
+  `-allow-destination "provider=https://host/base"` grants. Same zero-value
   fail-closed contract; the server never prompts. Health, warmth polling,
   model listing/pull, and the resolution sweep all run through guarded,
   capability-bound clients; a destination denial at startup is fatal rather

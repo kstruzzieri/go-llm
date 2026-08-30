@@ -1135,9 +1135,12 @@ func (r *ModelRegistry) fingerprintProfileMode(ctx context.Context, key ModelKey
 					modelDigest = key.String()
 				}
 				if !readOnly && spec.Prober != nil {
-					profile, err := fingerprint.NewProfiler(r.fpStore, spec.Prober).EnsureProfile(ctx, key.Provider, key.Model, modelDigest)
-					if err == nil {
-						return profile
+					probeCtx, bindErr := r.bindMetaPurpose(ctx, DestinationPurposeCapabilityProbe, key.Provider)
+					if bindErr == nil {
+						profile, err := fingerprint.NewProfiler(r.fpStore, spec.Prober).EnsureProfile(probeCtx, key.Provider, key.Model, modelDigest)
+						if err == nil {
+							return profile
+						}
 					}
 				}
 			}

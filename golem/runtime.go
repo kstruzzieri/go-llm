@@ -234,7 +234,7 @@ func New(ctx context.Context, opts Options) (*Runtime, error) {
 	summarizer := opts.Summarizer
 	if orchestrator == nil {
 		var defaultSummarizer conversation.Summarizer
-		orchestrator, bundle, defaultSummarizer, err = bootstrapOrchestrator(ctx, opts.ConfigPath, opts.DestinationPolicy, opts.Progressive, opts.OnWarning)
+		orchestrator, bundle, defaultSummarizer, err = bootstrapOrchestrator(ctx, opts.ConfigPath, opts.DestinationPolicy, opts.Progressive, !opts.DisableCompression && summarizer == nil, opts.OnWarning)
 		if err != nil {
 			return nil, err
 		}

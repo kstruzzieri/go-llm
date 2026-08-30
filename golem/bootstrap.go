@@ -27,7 +27,7 @@ var ErrDestinationPolicyIneffective = errors.New(
 // registry, and router are all gated. progressive enables #331 mixed context
 // assembly on the returned orchestrator's ContextManager; off leaves the
 // legacy assembly path untouched.
-func bootstrapOrchestrator(ctx context.Context, configPath string, policy provider.DestinationPolicy, progressive bool, onWarning func(error)) (*agent.Orchestrator, *providerbootstrap.Bundle, conversation.Summarizer, error) {
+func bootstrapOrchestrator(ctx context.Context, configPath string, policy provider.DestinationPolicy, progressive, useBuiltInSummarizer bool, onWarning func(error)) (*agent.Orchestrator, *providerbootstrap.Bundle, conversation.Summarizer, error) {
 	cfg, err := loadConfig(configPath)
 	if err != nil {
 		return nil, nil, nil, err
@@ -36,16 +36,21 @@ func bootstrapOrchestrator(ctx context.Context, configPath string, policy provid
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("golem: resolve agent chain: %w", err)
 	}
-	summarizeRoute, err := providerbootstrap.PlanOptionalUseCaseRoute(cfg, config.UseCaseSummarize)
-	if err != nil {
-		return nil, nil, nil, fmt.Errorf("golem: resolve summarize chain: %w", err)
+	routes := []providerbootstrap.PlannedRoute{agentRoute}
+	var summarizeRoute providerbootstrap.PlannedRoute
+	if useBuiltInSummarizer {
+		summarizeRoute, err = providerbootstrap.PlanOptionalUseCaseRoute(cfg, config.UseCaseSummarize)
+		if err != nil {
+			return nil, nil, nil, fmt.Errorf("golem: resolve summarize chain: %w", err)
+		}
+		routes = append(routes, summarizeRoute)
 	}
 	eff, err := providerbootstrap.Materialize(cfg, "", "", "")
 	if err != nil {
 		return nil, nil, nil, err
 	}
 	plan, err := providerbootstrap.BuildNetworkPlan(eff,
-		[]providerbootstrap.PlannedRoute{agentRoute, summarizeRoute},
+		routes,
 		providerbootstrap.PlanOptions{})
 	if err != nil {
 		return nil, nil, nil, err
@@ -77,8 +82,11 @@ func bootstrapOrchestrator(ctx context.Context, configPath string, policy provid
 	// #477 D8: the chains come from the frozen routes above, never
 	// re-resolved after admission. A recommend route is the nil chain,
 	// preserving both callers' non-strict behavior exactly.
-	return agent.New(agent.NewRouterModelCallerWithChain(bundle.Router, agentRoute.Chain), agent.ContextManager{Mixed: progressive}),
-		bundle, agent.NewRouterSummarizer(bundle.Router, summarizeRoute.Chain), nil
+	var summarizer conversation.Summarizer
+	if useBuiltInSummarizer {
+		summarizer = agent.NewRouterSummarizer(bundle.Router, summarizeRoute.Chain)
+	}
+	return agent.New(agent.NewRouterModelCallerWithChain(bundle.Router, agentRoute.Chain), agent.ContextManager{Mixed: progressive}), bundle, summarizer, nil
 }
 
 func loadConfig(path string) (*config.Config, error) {

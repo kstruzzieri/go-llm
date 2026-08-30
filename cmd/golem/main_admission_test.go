@@ -87,38 +87,69 @@ func admissionArgs(configPath, root string) []string {
 		"-no-session", "-no-memory"}
 }
 
-// The reported bug, restaged end to end through the real run(): a config
-// authoring no summarize key with a hosted analysis role must FAIL CLOSED in
-// a noninteractive run, naming the remote destination, a use case that
-// reaches it, and the exact -allow-destination fix — with ZERO requests to
-// ANY provider, local included, because admission precedes bootstrap.
-func TestRunNoninteractiveDeniesRemoteSummarizeFallback(t *testing.T) {
+// One-shot mode disables compression, so its remote summarize fallback is not
+// reachable and must not require destination consent.
+func TestRunOneShotOmitsRemoteSummarizeRoute(t *testing.T) {
 	configPath, root, requests := admissionHarness(t, "https://opencode.invalid/zen/go")
 	stdin, stdout, stderr := runTestFiles(t)
 
 	err := run(admissionArgs(configPath, root), stdin, stdout, stderr)
-	if err == nil {
-		t.Fatalf("run succeeded; want destination denial\nstderr:\n%s", readRunTestFile(t, stderr))
+	if err != nil {
+		t.Fatalf("one-shot run = %v\nstderr:\n%s", err, readRunTestFile(t, stderr))
 	}
-	msg := err.Error()
-	for _, want := range []string{
-		"opencode", "https://opencode.invalid/zen/go",
-		"-allow-destination", "opencode/https://opencode.invalid/zen/go",
-	} {
-		if !strings.Contains(msg, want) {
-			t.Errorf("denial missing %q: %s", want, msg)
-		}
+	if !strings.Contains(readRunTestFile(t, stdout), "done") {
+		t.Errorf("final answer missing:\n%s", readRunTestFile(t, stdout))
 	}
-	if got := requests.Load(); got != 0 {
-		t.Errorf("denied startup sent %d requests to the LOCAL provider, want 0 (admission precedes bootstrap)", got)
+	if got := requests.Load(); got == 0 {
+		t.Error("local provider received no requests; the one-shot turn cannot have run")
 	}
-	// The consent surface rendered before the denial: the manifest names the
-	// remote and the summarize edge that reaches it.
 	errOut := readRunTestFile(t, stderr)
-	for _, want := range []string{"destinations:", "summarize"} {
-		if !strings.Contains(errOut, want) {
-			t.Errorf("stderr missing %q:\n%s", want, errOut)
+	if strings.Contains(errOut, "summarize") || strings.Contains(errOut, "opencode.invalid") {
+		t.Errorf("one-shot admitted unreachable summarize fallback:\n%s", errOut)
+	}
+}
+
+func TestRunConfiglessGroundingDegradesWithoutPanic(t *testing.T) {
+	t.Chdir(t.TempDir())
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/tags":
+			_, _ = io.WriteString(w, `{"models":[{"name":"qwen3:8b"}]}`)
+		case "/api/show":
+			_, _ = io.WriteString(w, `{"details":{"family":"qwen3","parameter_size":"8B"},"capabilities":["completion","tools"]}`)
+		default:
+			http.NotFound(w, r)
 		}
+	}))
+	t.Cleanup(server.Close)
+	oldConfig, hadConfig := os.LookupEnv("GO_LLM_CONFIG")
+	if err := os.Unsetenv("GO_LLM_CONFIG"); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if hadConfig {
+			_ = os.Setenv("GO_LLM_CONFIG", oldConfig)
+		}
+	})
+	stdin, stdout, stderr := runTestFiles(t)
+
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("configless -grounding panicked: %v", r)
+		}
+	}()
+	errStop := errors.New("stop after startup")
+	err := run([]string{"-root", t.TempDir(), "-p", "say done", "-ollama-url", server.URL, "-grounding", "-no-rag", "-no-probe", "-no-cap-probe", "-no-project-context", "-no-session", "-no-memory"}, stdin, stdout, stderr, runHooks{
+		afterSessionReady: func(*replSession) error { return errStop },
+	})
+	if !errors.Is(err, errStop) {
+		t.Fatalf("configless run error = %v, want test stop after startup", err)
+	}
+	if got := readRunTestFile(t, stderr); !strings.Contains(got, groundingNoRetrieveWarning) {
+		t.Errorf("configless run stderr missing %q:\n%s", groundingNoRetrieveWarning, got)
 	}
 }
 

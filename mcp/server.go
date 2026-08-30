@@ -874,7 +874,11 @@ func (s *Server) refreshProviderModelIndexes(ctx context.Context) {
 		return
 	}
 	for _, name := range pReg.Names() {
-		_ = pReg.RefreshModels(ctx, name)
+		pctx, err := s.bindProviderMeta(ctx, name)
+		if err != nil {
+			continue
+		}
+		_ = pReg.RefreshModels(pctx, name)
 	}
 }
 
@@ -1082,30 +1086,10 @@ func (s *Server) buildDestinationGate() error {
 		return fmt.Errorf("mcp: %w", err)
 	}
 
-	// The legacy direct client's destination: the config's ollama-format
-	// provider when one exists, else the synthetic default endpoint. Its
-	// health (and warmth) traffic is part of the manifest like everything
-	// else.
-	s.legacyProviderName = "ollama"
-	if s.cfg != nil {
-		if cfgProvider := s.legacyOllamaProviderConfig(); cfgProvider != nil {
-			for key, pc := range s.cfg.Providers {
-				if providerConfigIsOllama(pc) && pc.BaseURL == cfgProvider.BaseURL {
-					s.legacyProviderName = key
-					break
-				}
-			}
-		}
-	}
 	dests := eff.Destinations()
-	if d, ok := dests[s.legacyProviderName]; ok && !s.ollamaURLExplicit {
-		s.legacyDest = d
-	} else {
-		d, derr := provider.NewDestination(s.legacyProviderName, s.ollamaURL)
-		if derr != nil {
-			return fmt.Errorf("mcp: %w", derr)
-		}
-		s.legacyDest = d
+	s.legacyProviderName, s.legacyDest, err = s.legacyDestination(eff.Config(), dests)
+	if err != nil {
+		return err
 	}
 	edges := append([]provider.DestinationEdge(nil), plan.Edges...)
 	edges = append(edges, provider.DestinationEdge{
@@ -1137,6 +1121,37 @@ func (s *Server) buildDestinationGate() error {
 	s.destGate = gate
 	s.activeProviders = plan.ActiveProviders
 	return nil
+}
+
+func (s *Server) legacyDestination(cfg *config.Config, dests map[string]provider.Destination) (string, provider.Destination, error) {
+	actual, err := provider.NewDestination("ollama-legacy", s.ollamaURL)
+	if err != nil {
+		return "", provider.Destination{}, fmt.Errorf("mcp: %w", err)
+	}
+
+	keys := make([]string, 0, len(cfg.Providers))
+	for key := range cfg.Providers {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		if d := dests[key]; providerConfigIsOllama(cfg.Providers[key]) && d.BaseURL() == actual.BaseURL() {
+			return key, d, nil
+		}
+	}
+
+	name := "ollama-legacy"
+	for suffix := 2; ; suffix++ {
+		if _, exists := dests[name]; !exists {
+			break
+		}
+		name = fmt.Sprintf("ollama-legacy-%d", suffix)
+	}
+	d, err := provider.NewDestination(name, s.ollamaURL)
+	if err != nil {
+		return "", provider.Destination{}, fmt.Errorf("mcp: %w", err)
+	}
+	return name, d, nil
 }
 
 // checkOllamaAvailable probes the legacy endpoint through the guarded

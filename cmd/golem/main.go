@@ -15,6 +15,7 @@ import (
 	"github.com/kstruzzieri/go-llm/agent"
 	agenttools "github.com/kstruzzieri/go-llm/agent/tools"
 	"github.com/kstruzzieri/go-llm/config"
+	"github.com/kstruzzieri/go-llm/conversation"
 	"github.com/kstruzzieri/go-llm/fingerprint"
 	golemruntime "github.com/kstruzzieri/go-llm/golem"
 	"github.com/kstruzzieri/go-llm/internal/providerbootstrap"
@@ -192,6 +193,14 @@ func parseFlags(args []string) (flags, error) {
 // handled at the wiring site.
 func shouldStartAutoIndex(f flags) bool {
 	return !f.promptSet && !f.goalSet && !f.noAutoIndex && !f.noRag && f.ragDB == ""
+}
+
+func shouldPlanSummarize(f flags, autoErr, embChainErr error) bool {
+	return !f.noCompress || (f.progressive && autoIndexEnabled(f, autoErr, embChainErr))
+}
+
+func destinationAdmissionInteractive(f flags, terminal bool) bool {
+	return terminal && lineSourceModeFor(f) != sourceNone
 }
 
 // autoIndexEnabled is the wiring gate for the background auto-index job:
@@ -671,6 +680,7 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 	if err != nil {
 		return err
 	}
+	autoDBPath, autoWorkspaceID, autoErr := indexDBPathForWorkspace(os.Getenv, root)
 
 	// #477 required ordering: resolve every enabled route and build the
 	// frozen network plan BEFORE any outbound byte, admit the manifest,
@@ -680,19 +690,23 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 		return err
 	}
 	plan := chainPlan{chain: agentRoute.Chain, useRecommend: agentRoute.Recommend}
-	summarizeRoute, err := providerbootstrap.PlanOptionalUseCaseRoute(cfg, config.UseCaseSummarize)
-	if err != nil {
-		return err
-	}
-	routes := []providerbootstrap.PlannedRoute{agentRoute, summarizeRoute}
 	// Embedding is feature-gated, not optional-recommend: an absent or
 	// unresolvable embedding default disables RAG later with the same
 	// warning it always has, and plans no route.
 	embChain, embChainErr := embeddingChain(cfg)
+	routes := []providerbootstrap.PlannedRoute{agentRoute}
+	var summarizeRoute providerbootstrap.PlannedRoute
+	if shouldPlanSummarize(f, autoErr, embChainErr) {
+		summarizeRoute, err = providerbootstrap.PlanOptionalUseCaseRoute(cfg, config.UseCaseSummarize)
+		if err != nil {
+			return err
+		}
+		routes = append(routes, summarizeRoute)
+	}
 	if embChainErr == nil && !f.noRag {
 		routes = append(routes, providerbootstrap.PlannedRoute{UseCase: "embedding", Chain: embChain})
 	}
-	if f.grounding {
+	if f.grounding && cfg != nil {
 		// Grounding (#348, merged via #480) binds the extract and verify use
 		// cases at runtime. Mirror newGroundingService's resolution: BOTH
 		// must resolve or the feature degrades with its own warning and no
@@ -750,7 +764,7 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 	}
 
 	gate := provider.NewDestinationGate()
-	interactive := !f.promptSet && realTermOps{}.IsTerminal(int(stdin.Fd()))
+	interactive := destinationAdmissionInteractive(f, realTermOps{}.IsTerminal(int(stdin.Fd())))
 	adm, err := newDestinationAdmission(destinationAdmissionConfig{
 		Gate:        gate,
 		Edges:       netPlan.Edges,
@@ -843,7 +857,6 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 	thinkOpts, thinkLine := resolveThinkOptions(ctx, bundle.Models, plan.chain, f.think)
 	inputCeiling := resolveInputCeiling(ctx, bundle.Models, plan.chain, f.inputCeiling, f.outputReserve, resolver != nil)
 
-	autoDBPath, autoWorkspaceID, autoErr := indexDBPathForWorkspace(os.Getenv, root)
 	if autoErr != nil && !f.noRag && f.ragDB == "" {
 		warns = append(warns, "retrieve auto-index disabled: "+autoErr.Error())
 	}
@@ -1218,7 +1231,7 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 	// empty chain, which NewRouterSummarizer routes non-strict, unchanged.
 	summarizeChain := summarizeRoute.Chain
 	var sourceSummarizer rag.SourceSummaryGenerator
-	if f.progressive {
+	if f.progressive && autoIndexEnabled(f, autoErr, embChainErr) {
 		if len(summarizeChain) == 0 {
 			_, _ = fmt.Fprintln(stderr, "golem: warning: "+progressiveNoChainWarning(true))
 		}
@@ -1239,7 +1252,10 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 		// monotonic clamp + defaults); golem only supplies the warn fraction.
 		budget.Pressure = agent.PressureThresholdsForWarn(float64(f.pressureWarn) / 100)
 	}
-	summarizer := agent.NewRouterSummarizer(bundle.Router, summarizeChain)
+	var summarizer conversation.Summarizer
+	if !f.noCompress {
+		summarizer = agent.NewRouterSummarizer(bundle.Router, summarizeChain)
+	}
 	runtime, err := golemruntime.New(ctx, golemruntime.Options{
 		Root:     root,
 		System:   baseSystem,

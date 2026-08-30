@@ -1002,6 +1002,46 @@ func TestShouldStartAutoIndex(t *testing.T) {
 	}
 }
 
+func TestShouldPlanSummarize(t *testing.T) {
+	boom := errors.New("unavailable")
+	for _, tc := range []struct {
+		name        string
+		f           flags
+		autoErr     error
+		embChainErr error
+		want        bool
+	}{
+		{"interactive compression", flags{}, nil, nil, true},
+		{"one-shot", applyOneShotForTest(flags{promptSet: true, prompt: "x"}), nil, nil, false},
+		{"task", applyTaskForTest(flags{planPath: "plan.json"}), nil, nil, false},
+		{"auto-approved goal", applyGoalForTest(flags{goalSet: true, approvePlanLock: true}), nil, nil, false},
+		{"progressive auto-index", flags{noCompress: true, progressive: true}, nil, nil, true},
+		{"progressive unavailable embedding", flags{noCompress: true, progressive: true}, nil, boom, false},
+		{"progressive without auto-index", flags{noCompress: true, progressive: true, noAutoIndex: true}, nil, nil, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := shouldPlanSummarize(tc.f, tc.autoErr, tc.embChainErr); got != tc.want {
+				t.Fatalf("shouldPlanSummarize = %t, want %t", got, tc.want)
+			}
+		})
+	}
+}
+
+func applyOneShotForTest(f flags) flags {
+	f, _ = applyOneShotMode(f)
+	return f
+}
+
+func applyTaskForTest(f flags) flags {
+	f, _ = applyTaskMode(f)
+	return f
+}
+
+func applyGoalForTest(f flags) flags {
+	f, _ = applyGoalMode(f)
+	return f
+}
+
 func TestAutoIndexEnabled(t *testing.T) {
 	boom := errors.New("boom")
 	tests := []struct {

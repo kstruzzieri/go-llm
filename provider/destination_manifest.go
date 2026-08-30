@@ -171,11 +171,13 @@ func NewDestinationGate() *DestinationGate {
 }
 
 // Install validates that policy grants every edge in manifest and atomically
-// makes the pair the current generation. On any ungranted edge it installs
-// nothing and returns a DestinationDeniedError naming the first denied edge
-// in deterministic order — the destination plus the purpose that reached it,
-// which is what a user needs to fix an -allow-destination invocation.
+// makes the pair the current generation. Install first revokes any current
+// generation, so every failed install leaves the gate deny-all. On any
+// ungranted edge it returns a DestinationDeniedError naming the first denied
+// edge in deterministic order — the destination plus the purpose that reached
+// it, which is what a user needs to fix an -allow-destination invocation.
 func (g *DestinationGate) Install(policy DestinationPolicy, manifest *DestinationManifest) error {
+	g.snap.Store(nil)
 	if manifest == nil {
 		return fmt.Errorf("%w: nil manifest", ErrDestinationInvalid)
 	}

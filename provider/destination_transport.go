@@ -33,13 +33,15 @@ type destinationTransport struct {
 }
 
 // RoundTrip enforces capability, origin, and base-path binding, then
-// delegates. Denial errors name only the canonical destination and purpose —
-// never the request URL, whose query may carry request data (I19).
+// delegates. Guard-generated denial errors name only the canonical
+// destination and purpose, never the request URL; delegate errors are
+// returned unchanged.
 func (t *destinationTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	if err := t.gate.authorize(req.Context(), t.dest.Provider(), t.dest); err != nil {
 		return nil, err
 	}
-	if !t.targetsBound(req.URL) {
+	// NewRequest populates Host from URL; only a differing value is an override.
+	if req.URL == nil || (req.Host != "" && req.Host != req.URL.Host) || !t.targetsBound(req.URL) {
 		purpose := ""
 		if cap := capabilityFromContext(req.Context()); cap != nil {
 			purpose = cap.purpose
@@ -191,10 +193,10 @@ func guardHTTPClient(gate *DestinationGate, dest Destination, base *http.Client,
 }
 
 // loopbackTransport prepares the delegate for a loopback destination: clone
-// the *http.Transport (or the default), strip the proxy, and validate
-// "localhost" resolution at dial time. An opaque RoundTripper cannot be
-// retrofitted with either property, so it is refused — silently passing it
-// through would ship an unguarded proxy path under a guaranteed-local label.
+// the *http.Transport (or the default), reject TLS dial hooks that bypass
+// DialContext, strip the proxy, and validate "localhost" resolution at dial
+// time. An opaque RoundTripper cannot be retrofitted with these properties,
+// so it is refused rather than treated as guaranteed-local.
 func loopbackTransport(inner http.RoundTripper, lookup lookupIPFunc) (*http.Transport, error) {
 	var tr *http.Transport
 	switch v := inner.(type) {
@@ -204,6 +206,9 @@ func loopbackTransport(inner http.RoundTripper, lookup lookupIPFunc) (*http.Tran
 		tr = v.Clone()
 	default:
 		return nil, fmt.Errorf("%w: loopback destination requires an *http.Transport delegate", ErrDestinationInvalid)
+	}
+	if tr.DialTLSContext != nil || tr.DialTLS != nil { //nolint:staticcheck // DialTLS is deprecated but still bypasses DialContext when set.
+		return nil, fmt.Errorf("%w: loopback destination does not support custom TLS dial hooks", ErrDestinationInvalid)
 	}
 	tr.Proxy = nil
 

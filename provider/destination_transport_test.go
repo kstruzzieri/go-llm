@@ -85,6 +85,66 @@ func TestGuardHTTPClientValidatesInputs(t *testing.T) {
 	}
 }
 
+func TestGuardHTTPClientRejectsLoopbackTLSDialHooks(t *testing.T) {
+	dest := mustDest(t, "llamacpp", "https://localhost:8443")
+	gate := NewDestinationGate()
+
+	tests := []struct {
+		name      string
+		transport *http.Transport
+	}{
+		{
+			name: "DialTLSContext",
+			transport: &http.Transport{DialTLSContext: func(context.Context, string, string) (net.Conn, error) {
+				return nil, errors.New("must not dial")
+			}},
+		},
+		{
+			name: "DialTLS",
+			transport: &http.Transport{DialTLS: func(string, string) (net.Conn, error) {
+				return nil, errors.New("must not dial")
+			}},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if _, err := GuardHTTPClient(gate, dest, &http.Client{Transport: tt.transport}); !errors.Is(err, ErrDestinationInvalid) {
+				t.Errorf("GuardHTTPClient(loopback transport with %s) = %v, want ErrDestinationInvalid", tt.name, err)
+			}
+		})
+	}
+}
+
+func TestGuardedHTTPSLocalhostRejectsPoisonedResolutionBeforeDial(t *testing.T) {
+	dest := mustDest(t, "llamacpp", "https://localhost:8443")
+	gate := installTestGate(t, DestinationEdge{Purpose: "agent", Destination: dest})
+	var dials atomic.Int64
+	base := &http.Client{Transport: &http.Transport{
+		DialContext: func(context.Context, string, string) (net.Conn, error) {
+			dials.Add(1)
+			return nil, errors.New("unexpected dial")
+		},
+	}}
+	client, err := guardHTTPClient(gate, dest, base, func(context.Context, string) ([]net.IP, error) {
+		return []net.IP{net.ParseIP("192.168.1.5")}, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, err := gate.Bind(context.Background(), "agent", "llamacpp")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if resp, err := client.Do(mustReq(t, ctx, "https://localhost:8443/v1/models")); err == nil {
+		_ = resp.Body.Close()
+		t.Error("client.Do(poisoned localhost) = nil error, want rejection")
+	}
+	if got := dials.Load(); got != 0 {
+		t.Errorf("DialContext calls after poisoned localhost resolution = %d, want 0", got)
+	}
+}
+
 type staticJar struct{}
 
 func (staticJar) SetCookies(_ *url.URL, _ []*http.Cookie) {}
@@ -138,6 +198,24 @@ func TestGuardedTransportAllowsBoundRequestIntact(t *testing.T) {
 	}
 	if seen.Header.Get("Authorization") != "Bearer test-token" {
 		t.Error("guard dropped the Authorization header")
+	}
+}
+
+func TestGuardedTransportRejectsRequestHostOverride(t *testing.T) {
+	client, gate, _, spy := guardedForTest(t, "agent", "opencode", "https://opencode.ai/zen/go")
+	ctx, err := gate.Bind(context.Background(), "agent", "opencode")
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := mustReq(t, ctx, "https://opencode.ai/zen/go/v1/chat/completions")
+	req.Host = "evil.example.com"
+
+	_, err = client.Transport.RoundTrip(req)
+	if !errors.Is(err, ErrDestinationDenied) {
+		t.Errorf("RoundTrip(Request.Host=%q) = %v, want ErrDestinationDenied", req.Host, err)
+	}
+	if got := spy.calls.Load(); got != 0 {
+		t.Errorf("delegate calls after Request.Host override = %d, want 0", got)
 	}
 }
 

@@ -375,7 +375,12 @@ func (s *Server) handlePullModel(ctx context.Context, req *gomcp.CallToolRequest
 			modelName), nil
 	}
 
-	ctx, bindErr := s.bindMeta(ctx, provider.DestinationPurposeModelRefresh)
+	var bindErr error
+	if p, ok := puller.(provider.Provider); ok {
+		ctx, bindErr = s.bindProviderMeta(ctx, p.Name())
+	} else {
+		ctx, bindErr = s.bindMeta(ctx, provider.DestinationPurposeModelRefresh)
+	}
 	if bindErr != nil {
 		return toolError("provider", "pull model: %v", bindErr), nil
 	}

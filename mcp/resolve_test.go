@@ -2,15 +2,88 @@ package mcp
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/kstruzzieri/go-llm/config"
 	"github.com/kstruzzieri/go-llm/ollama"
 	"github.com/kstruzzieri/go-llm/provider"
 )
+
+type guardedOllamaBackend struct {
+	name     string
+	model    string
+	tagHits  atomic.Int64
+	pullHits atomic.Int64
+}
+
+func newGuardedOllamaRegistry(t *testing.T, backends ...*guardedOllamaBackend) (*provider.Registry, *provider.DestinationGate) {
+	t.Helper()
+
+	type endpoint struct {
+		backend *guardedOllamaBackend
+		url     string
+		dest    provider.Destination
+	}
+	endpoints := make([]endpoint, 0, len(backends))
+	edges := make([]provider.DestinationEdge, 0, len(backends))
+	for _, backend := range backends {
+		backend := backend
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch r.URL.Path {
+			case "/api/tags":
+				backend.tagHits.Add(1)
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = fmt.Fprintf(w, `{"models":[{"name":%q}]}`, backend.model)
+			case "/api/pull":
+				backend.pullHits.Add(1)
+				w.WriteHeader(http.StatusOK)
+			default:
+				http.NotFound(w, r)
+			}
+		}))
+		t.Cleanup(srv.Close)
+
+		dest, err := provider.NewDestination(backend.name, srv.URL)
+		if err != nil {
+			t.Fatalf("NewDestination(%q) error = %v", backend.name, err)
+		}
+		endpoints = append(endpoints, endpoint{backend: backend, url: srv.URL, dest: dest})
+		edges = append(edges, provider.DestinationEdge{
+			Purpose:     provider.DestinationPurposeModelRefresh,
+			Destination: dest,
+		})
+	}
+
+	manifest, err := provider.NewDestinationManifest(edges...)
+	if err != nil {
+		t.Fatalf("NewDestinationManifest() error = %v", err)
+	}
+	gate := provider.NewDestinationGate()
+	if err := gate.Install(provider.DestinationPolicy{}, manifest); err != nil {
+		t.Fatalf("DestinationGate.Install() error = %v", err)
+	}
+
+	reg := provider.NewRegistry()
+	for _, endpoint := range endpoints {
+		client, err := provider.GuardHTTPClient(gate, endpoint.dest, nil)
+		if err != nil {
+			t.Fatalf("GuardHTTPClient(%q) error = %v", endpoint.backend.name, err)
+		}
+		p := provider.NewOllamaProvider(
+			ollama.NewClient(ollama.WithBaseURL(endpoint.url), ollama.WithHTTPClient(client)),
+			provider.WithProviderName(endpoint.backend.name),
+		)
+		if err := reg.Register(p); err != nil {
+			t.Fatalf("Register(%q) error = %v", endpoint.backend.name, err)
+		}
+	}
+	return reg, gate
+}
 
 func TestResolveModelExplicit(t *testing.T) {
 	s := &Server{
@@ -88,6 +161,27 @@ func TestProviderRegistryModelCheckerRefreshesModelIndex(t *testing.T) {
 	}
 	if len(providers) != 1 || providers[0].Name() != "vllm-local" {
 		t.Fatalf("ProvidersForModel(new-model) = %+v, want vllm-local", providers)
+	}
+}
+
+func TestInferProviderForExplicitModelBindsRefreshPerProvider(t *testing.T) {
+	a := &guardedOllamaBackend{name: "ollama-a", model: "model-a"}
+	b := &guardedOllamaBackend{name: "ollama-b", model: "model-b"}
+	reg, gate := newGuardedOllamaRegistry(t, a, b)
+	s := &Server{providerRegistry: reg, destGate: gate}
+
+	got, err := s.inferProviderForExplicitModel(context.Background(), "model-b")
+	if err != nil {
+		t.Fatalf("inferProviderForExplicitModel(%q) error = %v", "model-b", err)
+	}
+	if got != "ollama-b" {
+		t.Errorf("inferProviderForExplicitModel(%q) = %q, want %q", "model-b", got, "ollama-b")
+	}
+	if got := a.tagHits.Load(); got != 1 {
+		t.Errorf("provider %q refresh hits = %d, want 1", a.name, got)
+	}
+	if got := b.tagHits.Load(); got != 1 {
+		t.Errorf("provider %q refresh hits = %d, want 1", b.name, got)
 	}
 }
 

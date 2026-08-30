@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/kstruzzieri/go-llm/agent"
+	"github.com/kstruzzieri/go-llm/conversation"
 	"github.com/kstruzzieri/go-llm/golem"
 	"github.com/kstruzzieri/go-llm/provider"
 )
@@ -100,6 +101,35 @@ func TestNewZeroPolicyDeniesRemoteBeforeIO(t *testing.T) {
 	// Typed error BEFORE any I/O: the local provider saw nothing either.
 	if got := requests.Load(); got != 0 {
 		t.Errorf("denied construction sent %d requests, want 0", got)
+	}
+}
+
+// Compression is the only consumer of the built-in summarize route. A
+// disabled compressor or caller-owned summarizer must not admit that route's
+// remote fallback during bootstrap.
+func TestNewSkipsBuiltInSummarizeRouteWhenCompressionCannotUseIt(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		opts golem.Options
+	}{
+		{"disabled", golem.Options{DisableCompression: true}},
+		{"custom summarizer", golem.Options{Summarizer: conversation.FallbackSummarizer}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			configPath, requests := policyHarness(t)
+			opts := tc.opts
+			opts.Root = t.TempDir()
+			opts.ConfigPath = configPath
+
+			rt, err := golem.New(context.Background(), opts)
+			if err != nil {
+				t.Fatalf("New = %v, want local bootstrap without remote summarize admission", err)
+			}
+			defer func() { _ = rt.Close() }()
+			if got := requests.Load(); got == 0 {
+				t.Fatal("local agent route was not bootstrapped")
+			}
+		})
 	}
 }
 
