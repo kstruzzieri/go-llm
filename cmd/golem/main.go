@@ -692,6 +692,22 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 	if embChainErr == nil && !f.noRag {
 		routes = append(routes, providerbootstrap.PlannedRoute{UseCase: "embedding", Chain: embChain})
 	}
+	if f.grounding {
+		// Grounding (#348, merged via #480) binds the extract and verify use
+		// cases at runtime. Mirror newGroundingService's resolution: BOTH
+		// must resolve or the feature degrades with its own warning and no
+		// route is planned — absence here is feature-off, never recommend.
+		groundingRoutes := make([]providerbootstrap.PlannedRoute, 0, 2)
+		for _, uc := range []string{config.UseCaseExtract, config.UseCaseVerify} {
+			chain, cerr := cfg.RoleFallbackChain(uc)
+			if cerr != nil || len(chain) == 0 {
+				groundingRoutes = nil
+				break
+			}
+			groundingRoutes = append(groundingRoutes, providerbootstrap.PlannedRoute{UseCase: uc, Chain: chain})
+		}
+		routes = append(routes, groundingRoutes...)
+	}
 	var dchain []string
 	if f.dispatch {
 		dchain, err = resolveDispatchChain(cfg, f.dispatchRole, agentRoute.Chain)

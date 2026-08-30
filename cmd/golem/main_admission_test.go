@@ -122,6 +122,29 @@ func TestRunNoninteractiveDeniesRemoteSummarizeFallback(t *testing.T) {
 	}
 }
 
+// #480 grounding integration: -grounding binds extract and verify at
+// runtime, so those routes join the plan and their remote reachability
+// shows on the consent surface and in the denial.
+func TestRunGroundingRoutesJoinTheManifest(t *testing.T) {
+	configPath, root, requests := admissionHarness(t, "https://opencode.invalid/zen/go")
+	stdin, stdout, stderr := runTestFiles(t)
+
+	args := append(admissionArgs(configPath, root), "-grounding")
+	err := run(args, stdin, stdout, stderr)
+	if err == nil {
+		t.Fatalf("grounding run with remote fallback succeeded\nstderr:\n%s", readRunTestFile(t, stderr))
+	}
+	errOut := readRunTestFile(t, stderr)
+	for _, want := range []string{"verify", "extract"} {
+		if !strings.Contains(errOut, want) {
+			t.Errorf("manifest missing grounding purpose %q:\n%s", want, errOut)
+		}
+	}
+	if got := requests.Load(); got != 0 {
+		t.Errorf("denied grounding startup sent %d requests, want 0", got)
+	}
+}
+
 // The exact allowlist unblocks the same run: the turn completes on the local
 // provider and the remote — although admitted — receives nothing, because
 // admission is consent, not traffic.
