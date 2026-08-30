@@ -108,6 +108,14 @@ func New(ctx context.Context, opts Options) (*Bundle, error) {
 
 	active := make(map[string]bool, len(opts.ActiveProviders))
 	for _, name := range opts.ActiveProviders {
+		if gate != nil {
+			if _, ok := eff.cfg.Providers[name]; !ok {
+				// A typo here would otherwise skip every refresh silently
+				// and boot a bundle whose consent receipt covers providers
+				// that were never touched.
+				return nil, fmt.Errorf("providerbootstrap: ActiveProviders names unknown provider %q", name)
+			}
+		}
 		active[name] = true
 	}
 	if gate != nil {

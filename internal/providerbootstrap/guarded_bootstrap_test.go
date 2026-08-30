@@ -470,7 +470,9 @@ func TestNewUngatedRefreshesEveryProvider(t *testing.T) {
 }
 
 // A gate without ActiveProviders is a wiring bug, not a silent
-// nothing-refreshed startup.
+// nothing-refreshed startup — and so is an active name that matches no
+// configured provider, which would skip every refresh while the consent
+// receipt claims coverage.
 func TestNewGateRequiresActiveProviders(t *testing.T) {
 	cfg := twoProviderConfig("http://127.0.0.1:1", "http://127.0.0.1:2")
 	_, err := New(context.Background(), Options{
@@ -479,5 +481,25 @@ func TestNewGateRequiresActiveProviders(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("gated New with no ActiveProviders accepted")
+	}
+
+	// The unknown-name check must discriminate on its own, so the gate here
+	// ADMITS everything the plan reaches — with a deny-all gate the known
+	// provider's refresh denial would mask a dropped check.
+	a := newCountingOpenAIServer(t)
+	b := newCountingOpenAIServer(t)
+	okCfg := twoProviderConfig(a.srv.URL, b.srv.URL)
+	route, err := planRoleRoute(okCfg, "chatrole", "chat")
+	if err != nil {
+		t.Fatal(err)
+	}
+	gate, plan := gateFromPlan(t, okCfg, []PlannedRoute{route}, planOpts{})
+	_, err = New(context.Background(), Options{
+		Config:          okCfg,
+		DestinationGate: gate,
+		ActiveProviders: append([]string{"no-such-provider"}, plan.ActiveProviders...),
+	})
+	if err == nil {
+		t.Fatal("gated New with an unknown active provider accepted")
 	}
 }
