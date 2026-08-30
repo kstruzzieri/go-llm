@@ -98,9 +98,16 @@ type OpenAICompatSlotSource struct {
 	wg        sync.WaitGroup
 	ttl       time.Duration
 	client    *http.Client
-	nowFn     func() time.Time
-	ctx       context.Context
-	cancel    context.CancelFunc
+	// clientFor supplies a per-backend probe client (#477): guarded
+	// transports are bound per destination. nil, or a nil return, falls
+	// back to the shared client. Read-only after construction.
+	clientFor func(providerName string) *http.Client
+	// bind attaches the slot-probe destination capability per probe
+	// (#477). nil disables binding (ungated). Read-only after construction.
+	bind   func(ctx context.Context, providerName string) (context.Context, error)
+	nowFn  func() time.Time
+	ctx    context.Context
+	cancel context.CancelFunc
 
 	// launch starts a probe goroutine (default: go f()). Test seam: a
 	// capturing launcher makes spawn decisions and probe completion
@@ -151,6 +158,33 @@ func WithSlotHTTPClient(hc *http.Client) SlotSourceOption {
 		if hc != nil {
 			ss.client = hc
 		}
+	}
+}
+
+// WithSlotClientFor installs a per-backend probe client factory (#477): the
+// destination guard binds a transport to ONE provider and base URL, so a
+// source governing several backends needs one guarded client each, not a
+// shared one. A nil factory, or a factory returning nil for a provider,
+// falls back to the shared client.
+func WithSlotClientFor(clientFor func(providerName string) *http.Client) SlotSourceOption {
+	return func(ss *OpenAICompatSlotSource) {
+		ss.clientFor = clientFor
+	}
+}
+
+// WithSlotProbeBinder installs a per-probe context binder (#477): before a
+// probe dials, bind is called with the probe context and the backend's
+// provider name, and its returned context — carrying the slot-probe
+// destination capability — is what the request runs under. A bind error
+// aborts the probe with ZERO requests and records the existing fail-safe
+// serial capacity.
+//
+// The binder runs on every probe, never cached: a capability is bound to the
+// gate generation that issued it, so caching one would leave the source
+// permanently denied after a revoke-and-re-admit cycle.
+func WithSlotProbeBinder(bind func(ctx context.Context, providerName string) (context.Context, error)) SlotSourceOption {
+	return func(ss *OpenAICompatSlotSource) {
+		ss.bind = bind
 	}
 }
 
@@ -236,7 +270,26 @@ func (ss *OpenAICompatSlotSource) probe(key ModelKey, be SlotBackend) {
 	defer ss.wg.Done()
 	ctx, cancel := context.WithTimeout(ss.ctx, defaultSlotProbeTimeout)
 	defer cancel()
-	n, err := fetchSlotCapacity(ctx, ss.client, be, key.Model)
+
+	hc := ss.client
+	if ss.clientFor != nil {
+		if c := ss.clientFor(key.Provider); c != nil {
+			hc = c
+		}
+	}
+	var n int
+	var err error
+	if ss.bind != nil {
+		var bctx context.Context
+		bctx, err = ss.bind(ctx, key.Provider)
+		if err == nil {
+			n, err = fetchSlotCapacity(bctx, hc, be, key.Model)
+		}
+		// A bind denial reaches the shared error path below with ZERO
+		// requests made: fail-safe serial capacity, same as a probe failure.
+	} else {
+		n, err = fetchSlotCapacity(ctx, hc, be, key.Model)
+	}
 
 	ss.mu.Lock()
 	defer ss.mu.Unlock()
