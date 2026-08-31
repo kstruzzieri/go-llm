@@ -371,11 +371,26 @@ runnable examples lives in **[docs/library.md](docs/library.md)**. The
 30-second version:
 
 ```go
-client := ollama.NewClient()
-resp, err := client.Chat(context.Background(), ollama.ChatRequest{
-    Model:    "gemma4:31b",
-    Messages: []ollama.ChatMessage{{Role: "user", Content: "hello"}},
-})
+package main
+
+import (
+    "context"
+    "fmt"
+
+    "github.com/kstruzzieri/go-llm/ollama"
+)
+
+func main() {
+    client := ollama.NewClient()
+    resp, err := client.Chat(context.Background(), ollama.ChatRequest{
+        Model:    "gemma4:31b",
+        Messages: []ollama.ChatMessage{{Role: "user", Content: "hello"}},
+    })
+    if err != nil {
+        panic(err)
+    }
+    fmt.Println(resp.Message.Content)
+}
 ```
 
 ## MCP Server

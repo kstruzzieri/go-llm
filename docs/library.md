@@ -189,18 +189,33 @@ Fill-in-the-Middle completion for IDE integration with automatic context window 
 ```go
 import "github.com/kstruzzieri/go-llm/completion"
 
-provider := completion.NewProvider(client, "qwen3-coder-next")
+// cfg.FIM comes from the resolved model profile; the model must support
+// native prefix+suffix FIM. See cmd/fim-smoke for the full registry wiring.
+cfg, err := completion.ProviderConfigFromProfile(profile) // profile: *provider.ModelProfile
+if err != nil {
+    log.Fatal(err) // model does not support native FIM
+}
 
-resp, _ := provider.Complete(ctx, completion.FIMRequest{
+prov, err := completion.NewProvider(client, "qwen3-coder-next", cfg)
+if err != nil {
+    log.Fatal(err)
+}
+
+req := completion.FIMRequest{
     Prefix:    "func fibonacci(n int) int {\n\t",
     Suffix:    "\n}",
     FilePath:  "math.go",
     MaxTokens: 128,
-})
+}
+
+resp, err := prov.Complete(ctx, req)
+if err != nil {
+    log.Fatal(err)
+}
 fmt.Println(resp.Completion)
 
 // Streaming variant
-provider.CompleteStream(ctx, req, func(token string) error {
+err = prov.CompleteStream(ctx, req, func(token string) error {
     fmt.Print(token)
     return nil
 })
