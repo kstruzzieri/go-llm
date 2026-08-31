@@ -31,7 +31,7 @@ func TestRejectedDestinationCredentialsAreNotRendered(t *testing.T) {
 			if strings.Contains(message, "SECRET") {
 				t.Errorf("go-llm-mcp rendered rejected credential: %q", message)
 			}
-			for _, want := range []string{tt.want, "expected provider=https://host/base"} {
+			for _, want := range []string{tt.want, "-allow-destination"} {
 				if !strings.Contains(message, want) {
 					t.Errorf("go-llm-mcp rejection = %q, want substring %q", message, want)
 				}
@@ -114,12 +114,48 @@ func TestDestinationGrantsPreserveEqualsInProviderName(t *testing.T) {
 	}
 }
 
-func TestDestinationGrantsRequireEqualsGrammar(t *testing.T) {
+// -allow-destination accepts the canonical "<provider>/<base URL>" grant and
+// the deprecated "<provider>=<base URL>" spelling this binary historically
+// required; both normalize to the same canonical destination identity.
+func TestDestinationGrantsAcceptCanonicalAndLegacyForms(t *testing.T) {
+	tests := []struct {
+		name     string
+		grant    string
+		provider string
+		baseURL  string
+	}{
+		{name: "canonical https", grant: "hosted/https://HOST:443/base/", provider: "hosted", baseURL: "https://host/base"},
+		{name: "canonical http", grant: "backup/http://example.com:80/root", provider: "backup", baseURL: "http://example.com/root"},
+		{name: "legacy https", grant: "hosted=https://HOST:443/base/", provider: "hosted", baseURL: "https://host/base"},
+		{name: "legacy http", grant: "backup=http://example.com:80/root", provider: "backup", baseURL: "http://example.com/root"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var grants destinationGrants
+			if err := grants.Set(tt.grant); err != nil {
+				t.Fatalf("destinationGrants.Set() error = %v", err)
+			}
+			policy, err := grants.policy()
+			if err != nil {
+				t.Fatalf("destinationGrants.policy() error = %v", err)
+			}
+			dest, err := provider.NewDestination(tt.provider, tt.baseURL)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !policy.Permits(dest) {
+				t.Errorf("destination policy does not permit parsed grant %s", dest)
+			}
+		})
+	}
+}
+
+func TestDestinationGrantsRejectMissingSeparator(t *testing.T) {
 	var grants destinationGrants
-	if err := grants.Set("hosted/https://host/base"); err != nil {
+	if err := grants.Set("not-a-destination"); err != nil {
 		t.Fatalf("destinationGrants.Set() error = %v, want deferred validation", err)
 	}
-	if _, err := grants.policy(); err == nil || !strings.Contains(err.Error(), "expected provider=https://host/base") {
-		t.Errorf("destinationGrants.policy() error = %v, want equals-only grammar", err)
+	if _, err := grants.policy(); err == nil || !strings.Contains(err.Error(), `expected "<provider>/<base URL>"`) {
+		t.Errorf("destinationGrants.policy() error = %v, want canonical-grammar hint", err)
 	}
 }

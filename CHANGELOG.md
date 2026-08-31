@@ -6,6 +6,16 @@ All notable changes to `go-llm` are documented here. Downstream consumers
 
 ## [Unreleased]
 
+### Changed
+
+- The repeatable `-allow-destination` flag now takes the same syntax in both
+  binaries: the canonical `"<provider>/<canonical base URL>"` grant form
+  (`provider.ParseDestination` identity). `go-llm-mcp` previously required
+  `"provider=https://host/base"`; that legacy `=` spelling now parses in both
+  binaries during a deprecation window via the shared
+  `provider.ParseDestinationFlag` parser, normalizing to the same canonical
+  destination identity.
+
 ## [0.2.0] - 2026-08-30
 
 ### Added — destination admission before discovery, probe, or inference (#477)
