@@ -6,6 +6,8 @@ All notable changes to `go-llm` are documented here. Downstream consumers
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-08-30
+
 ### Added — destination admission before discovery, probe, or inference (#477)
 
 A consent boundary between chain resolution and any outbound byte, part of
