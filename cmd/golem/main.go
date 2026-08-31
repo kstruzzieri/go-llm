@@ -441,6 +441,7 @@ type startupInfo struct {
 	agentflowState     bool
 	backendLine        string
 	useRecommend       bool
+	activeUseCase      string // the mode's routing use case; names the recommend notice (#476 D5)
 	bootstrapWarns     []error
 	preflightWarns     []string
 	retrieveLine       string
@@ -492,7 +493,7 @@ func startupNotices(info startupInfo) []string {
 		out = append(out, info.retrieveLine)
 	}
 	if info.useRecommend {
-		out = append(out, "no defaults.agent configured; using model recommendation (run will route to the recommended model)")
+		out = append(out, recommendNotice(info.activeUseCase))
 	}
 	if info.thinkLine != "" {
 		out = append(out, info.thinkLine)
@@ -685,16 +686,21 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 	// #477 required ordering: resolve every enabled route and build the
 	// frozen network plan BEFORE any outbound byte, admit the manifest,
 	// only then discover, bootstrap, refresh, probe, or infer.
-	agentRoute, err := providerbootstrap.PlanAgentRoute(cfg)
+	//
+	// The active route is mode-selected (#476 D3): plan authoring in -goal
+	// mode routes as "planning", everything else as "agent". One value feeds
+	// admission, discovery targeting, preflight, the input ceiling, and the
+	// caller, so no seam can quietly disagree about which route is live.
+	activeRoute, err := planActiveRoute(cfg, f.goalSet)
 	if err != nil {
 		return err
 	}
-	plan := chainPlan{chain: agentRoute.Chain, useRecommend: agentRoute.Recommend}
+	plan := chainPlanFor(activeRoute)
 	// Embedding is feature-gated, not optional-recommend: an absent or
 	// unresolvable embedding default disables RAG later with the same
 	// warning it always has, and plans no route.
 	embChain, embChainErr := embeddingChain(cfg)
-	routes := []providerbootstrap.PlannedRoute{agentRoute}
+	routes := []providerbootstrap.PlannedRoute{activeRoute}
 	var summarizeRoute providerbootstrap.PlannedRoute
 	if shouldPlanSummarize(f, autoErr, embChainErr) {
 		summarizeRoute, err = providerbootstrap.PlanOptionalUseCaseRoute(cfg, config.UseCaseSummarize)
@@ -724,7 +730,10 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 	}
 	var dchain []string
 	if f.dispatch {
-		dchain, err = resolveDispatchChain(cfg, f.dispatchRole, agentRoute.Chain)
+		// -dispatch is rejected in goal mode at validation, so whenever this
+		// branch runs the active route IS the agent route the children
+		// default to.
+		dchain, err = resolveDispatchChain(cfg, f.dispatchRole, activeRoute.Chain)
 		if err != nil {
 			return err
 		}
@@ -745,7 +754,7 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 	if err != nil {
 		return err // explicit-override validation error: fatal, matches validateFlags semantics
 	}
-	targetKey, _, targetOK := openAICompatTargetFromRoute(cfg, agentRoute)
+	targetKey, _, targetOK := openAICompatTargetFromRoute(cfg, activeRoute)
 	ocProv, ocURL := "", ""
 	if explicitURL != "" && targetOK {
 		// The explicit override lands in the EFFECTIVE config before the
@@ -790,7 +799,7 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 		noProbe:        f.noProbe,
 		lookupEnv:      os.LookupEnv,
 		prober:         openaicompat.DiscoverBaseURL,
-		agentRoute:     &agentRoute,
+		activeRoute:    &activeRoute,
 		guardCandidate: discoveryCandidateGuard(ctx, targetKey),
 	})
 	if err != nil {
@@ -854,7 +863,15 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 		warns = append(warns, capStoreWarn)
 	}
 
-	thinkOpts, thinkLine := resolveThinkOptions(ctx, bundle.Models, plan.chain, f.think)
+	// Goal mode skips the -think chain lookup entirely: plannerModelOptions
+	// force-disables thinking on the author request, so the lookup could not
+	// affect anything and its registry reads would be pointless provider
+	// metadata I/O for a mode that authors one plan and exits (#476 D4).
+	var thinkOpts provider.ModelOptions
+	thinkLine := ""
+	if !f.goalSet {
+		thinkOpts, thinkLine = resolveThinkOptions(ctx, bundle.Models, plan.chain, f.think)
+	}
 	inputCeiling := resolveInputCeiling(ctx, bundle.Models, plan.chain, plan.useCase, f.inputCeiling, f.outputReserve, resolver != nil)
 
 	if autoErr != nil && !f.noRag && f.ragDB == "" {
@@ -1210,6 +1227,7 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 		agentflowState:     shouldShowAgentflowHint(f) && agentflowStateDetected(root),
 		backendLine:        backendRes.notice,
 		useRecommend:       plan.useRecommend,
+		activeUseCase:      plan.useCase,
 		bootstrapWarns:     bundle.Warnings,
 		preflightWarns:     warns,
 		retrieveLine:       retrieveLine,
@@ -1240,7 +1258,7 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 		sourceSummarizer = routerSourceSummaryGenerator(bundle.Router, summarizeChain)
 	}
 
-	newOrchestrator := newOrchestratorFactory(newRouterChainCaller(bundle.Router, plan.chain), f, verifier)
+	newOrchestrator := newOrchestratorFactory(newActiveChainCaller(bundle.Router, plan), f, verifier)
 	orch := newOrchestrator()
 
 	obsv, err := newObserv(os.Getenv, root, f.trace, f.telemetry, time.Now)

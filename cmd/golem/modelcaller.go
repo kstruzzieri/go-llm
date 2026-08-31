@@ -35,9 +35,12 @@ type chainModelCaller struct {
 	route   func(ctx context.Context, rr provider.RoutingRequest) (chatStreamer, error)
 }
 
-// newRouterChainCaller builds the default agent caller (UseCase "agent").
-func newRouterChainCaller(r *provider.Router, chain []string) agent.ModelCaller {
-	return newRouterChainCallerFor(r, chain, "agent")
+// newActiveChainCaller builds the process's ONE orchestrator caller from the
+// resolved active chainPlan (#476 D3): the chain and the use case arrive as
+// the single value the network plan admitted, so the caller cannot route a
+// different use case than the one whose destinations were consented.
+func newActiveChainCaller(r *provider.Router, plan chainPlan) agent.ModelCaller {
+	return newRouterChainCallerFor(r, plan.chain, plan.useCase)
 }
 
 // newRouterChainCallerFor builds a chainModelCaller that routes UseCase useCase

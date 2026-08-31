@@ -106,12 +106,13 @@ type backendResolveOpts struct {
 	noProbe     bool
 	lookupEnv   func(string) (string, bool)
 	prober      backendProber
-	// agentRoute, when non-nil, is the frozen agent route from the mode's
-	// network plan (#477 D8): the discovery target derives from the ACTIVE
-	// chain's primary instead of re-reading defaults.agent, so a mode whose
-	// route differs from the default cannot discover the wrong backend.
-	// nil keeps the legacy defaults.agent derivation.
-	agentRoute *providerbootstrap.PlannedRoute
+	// activeRoute, when non-nil, is the mode's frozen ACTIVE route from the
+	// network plan (#477 D8, #476 D3): the discovery target derives from the
+	// active chain's primary instead of re-reading defaults.agent, so a mode
+	// whose route differs from the default -- goal mode routing "planning" --
+	// cannot discover the wrong backend. nil keeps the legacy defaults.agent
+	// derivation.
+	activeRoute *providerbootstrap.PlannedRoute
 	// guardCandidate, when non-nil, supplies a per-candidate guarded HTTP
 	// client and a context carrying the discovery capability (#477): the
 	// scan then probes each candidate through its own bound, no-redirect
@@ -134,8 +135,8 @@ func resolveBackend(ctx context.Context, cfg *config.Config, o backendResolveOpt
 
 	var key, model string
 	var ok bool
-	if o.agentRoute != nil {
-		key, model, ok = openAICompatTargetFromRoute(cfg, *o.agentRoute)
+	if o.activeRoute != nil {
+		key, model, ok = openAICompatTargetFromRoute(cfg, *o.activeRoute)
 	} else {
 		key, model, ok = openAICompatAgentTarget(cfg)
 	}

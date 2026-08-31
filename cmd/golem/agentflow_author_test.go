@@ -14,6 +14,7 @@ import (
 
 	"github.com/kstruzzieri/go-llm/agent"
 	"github.com/kstruzzieri/go-llm/agentflow"
+	"github.com/kstruzzieri/go-llm/config"
 	"github.com/kstruzzieri/go-llm/provider"
 )
 
@@ -1170,12 +1171,36 @@ func TestPlannerBudgetAlignsTurnBudgetWithRouterAdmission(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := plannerBudget(tt.budget, plannerModelOptions(tt.options))
+			// config.UseCasePlanning is what the author call site passes; its
+			// DefaultExpectedOutput is the same 2048 chat fallback the old
+			// hard-coded "agent" produced, so every expectation above is the
+			// pre-parameterization value -- the proof this change moved
+			// nothing for the production path.
+			got := plannerBudget(tt.budget, plannerModelOptions(tt.options), config.UseCasePlanning)
 			if got.OutputReserve != tt.wantReserve || got.InputCeiling != tt.wantCeiling {
 				t.Fatalf("plannerBudget = {ceiling %d, reserve %d}, want {ceiling %d, reserve %d}",
 					got.InputCeiling, got.OutputReserve, tt.wantCeiling, tt.wantReserve)
 			}
 		})
+	}
+}
+
+func TestPlannerBudget_UsesTheGivenUseCaseDefault(t *testing.T) {
+	// The probe use case is "reasoning", not "planning": planning and agent
+	// both fall back to chat's 2048 default today, so a planning-vs-agent
+	// comparison could not fail whichever literal the implementation
+	// hard-coded. "reasoning" is 4096 in defaultExpectedOutputs, which is
+	// what makes a hard-coded use case detectable at all.
+	opts := provider.ModelOptions{NumPredict: minPlannerOutput}
+	base := agent.Budget{InputCeiling: 100_000}
+
+	if got := plannerBudget(base, opts, "agent"); got.InputCeiling != 100_000-(minPlannerOutput-2_048) {
+		t.Errorf("agent: InputCeiling = %d, want %d", got.InputCeiling, 100_000-(minPlannerOutput-2_048))
+	}
+	// reasoning's 4096 exceeds the planner's 3500 NumPredict, so the delta is
+	// negative and the ceiling must stay untouched.
+	if got := plannerBudget(base, opts, "reasoning"); got.InputCeiling != 100_000 {
+		t.Errorf("reasoning: InputCeiling = %d, want the ceiling untouched (100000)", got.InputCeiling)
 	}
 }
 

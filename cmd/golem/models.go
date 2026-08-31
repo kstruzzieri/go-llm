@@ -137,7 +137,7 @@ func runModels(ctx context.Context, args []string, out, errOut io.Writer) error 
 		noProbe:        noProbe || jsonOut,
 		lookupEnv:      os.LookupEnv,
 		prober:         openaicompat.DiscoverBaseURL,
-		agentRoute:     &agentRoute,
+		activeRoute:    &agentRoute,
 		guardCandidate: discoveryCandidateGuard(ctx, targetKey),
 	})
 	if err != nil {

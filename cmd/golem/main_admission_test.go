@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -14,6 +15,7 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/kstruzzieri/go-llm/agent"
 	"github.com/kstruzzieri/go-llm/config"
 	"github.com/kstruzzieri/go-llm/internal/providerbootstrap"
 	"github.com/kstruzzieri/go-llm/provider"
@@ -323,7 +325,7 @@ func TestResolveBackendGuardedScan(t *testing.T) {
 	res, err := resolveBackend(context.Background(), cfg, backendResolveOpts{
 		lookupEnv:      func(string) (string, bool) { return "", false },
 		prober:         prober,
-		agentRoute:     &route,
+		activeRoute:    &route,
 		guardCandidate: discoveryCandidateGuard(context.Background(), "lc"),
 	})
 	if err != nil {
@@ -459,5 +461,186 @@ func TestRunDiscoveryPinsAndCompletes(t *testing.T) {
 	}
 	if got := requests.Load(); got == 0 {
 		t.Error("discovered backend received no requests")
+	}
+}
+
+// goalHarness serves TWO counted loopback providers: "agentprov" backing the
+// agent role and "planprov" backing the role the planning use case resolves
+// to. lastPlanModel records the model name of the most recent chat request
+// the planning provider served.
+func goalHarness(t *testing.T, planningDefaults string) (configPath, root string, agentReqs, planReqs *atomic.Int64, lastPlanModel *atomic.Pointer[string]) {
+	t.Helper()
+	agentReqs, planReqs = &atomic.Int64{}, &atomic.Int64{}
+	lastPlanModel = &atomic.Pointer[string]{}
+	agentSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		agentReqs.Add(1)
+		serveCompat(w, r, "agent-model", nil)
+	}))
+	t.Cleanup(agentSrv.Close)
+	planSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		planReqs.Add(1)
+		serveCompat(w, r, "planner-model", lastPlanModel)
+	}))
+	t.Cleanup(planSrv.Close)
+
+	root = t.TempDir()
+	configPath = filepath.Join(t.TempDir(), "models.json")
+	configJSON := fmt.Sprintf(`{
+  "providers": {
+    "agentprov": {"base_url": %q, "api_format": "openai-compat", "timeout": "5s"},
+    "planprov":  {"base_url": %q, "api_format": "openai-compat", "timeout": "5s"}
+  },
+  "models": {
+    "agent":   {"name": "agent-model", "provider": "agentprov", "type": "dense", "context_window": 32768,
+      "capabilities": ["chat", "generate", "stream", "tool_call"]},
+    "planner": {"name": "planner-model", "provider": "planprov", "type": "dense", "context_window": 32768,
+      "capabilities": ["chat", "generate", "stream", "tool_call"]}
+  },
+  "defaults": {"agent": "agent", %s}
+}`, agentSrv.URL, planSrv.URL, planningDefaults)
+	if err := os.WriteFile(configPath, []byte(configJSON), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return configPath, root, agentReqs, planReqs, lastPlanModel
+}
+
+// serveCompat answers /v1/models and /v1/chat/completions for one model,
+// recording the requested model name of chat calls when record is non-nil.
+func serveCompat(w http.ResponseWriter, r *http.Request, model string, record *atomic.Pointer[string]) {
+	switch r.URL.Path {
+	case "/v1/models":
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprintf(w, `{"data":[{"id":%q}]}`, model)
+	case "/v1/chat/completions":
+		if record != nil {
+			body, _ := io.ReadAll(r.Body)
+			var req struct {
+				Model string `json:"model"`
+			}
+			_ = json.Unmarshal(body, &req)
+			m := req.Model
+			record.Store(&m)
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = fmt.Fprintf(w, "data: {\"model\":%q,\"choices\":[{\"delta\":{\"content\":\"noop\"},\"finish_reason\":null}]}\n\n", model)
+		_, _ = fmt.Fprintf(w, "data: {\"model\":%q,\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":1,\"total_tokens\":2}}\n\n", model)
+		_, _ = io.WriteString(w, "data: [DONE]\n\n")
+	default:
+		http.NotFound(w, r)
+	}
+}
+
+func goalArgs(configPath, root string) []string {
+	return []string{"-config", configPath, "-root", root, "-goal", "outline a refactor",
+		"-max-steps", "2", "-no-probe", "-no-cap-probe", "-no-project-context"}
+}
+
+// driveGoalTurn runs a goal-mode startup through the real run(), then drives
+// ONE model turn through sess.orch -- the very orchestrator instance plan
+// authoring runs on (#476 D3) -- and stops before the author loop, which
+// would otherwise require a real agentflow CLI on the host. The turn's
+// requested model proves which route the session's caller carries.
+func driveGoalTurn(t *testing.T, configPath, root string) {
+	t.Helper()
+	stdin, stdout, stderr := runTestFiles(t)
+	errStop := errors.New("stop after the routed turn")
+	err := run(goalArgs(configPath, root), stdin, stdout, stderr, runHooks{
+		afterSessionReady: func(sess *replSession) error {
+			_, runErr := sess.orch.Run(context.Background(),
+				agent.Request{Goal: "say noop", MaxSteps: 1}, nil)
+			if runErr != nil {
+				t.Errorf("goal-session turn: %v", runErr)
+			}
+			return errStop
+		},
+	})
+	if !errors.Is(err, errStop) {
+		t.Fatalf("run error = %v, want the test stop after the routed turn\nstderr:\n%s",
+			err, readRunTestFile(t, stderr))
+	}
+}
+
+// Goal mode's active route IS the planning route (#476 D3/I5): a turn on the
+// session's orchestrator must reach the provider the planning use case
+// resolves to, with that role's model -- and the agent provider, INACTIVE in
+// goal mode, must receive zero requests: no refresh, no probe, no inference
+// (I10).
+func TestRunGoalModeSessionRoutesThePlanningChain(t *testing.T) {
+	configPath, root, agentReqs, planReqs, lastPlanModel := goalHarness(t,
+		`"planning": "planner"`)
+
+	driveGoalTurn(t, configPath, root)
+
+	if got := planReqs.Load(); got == 0 {
+		t.Error("planning provider received no requests; the session cannot have routed there")
+	}
+	if m := lastPlanModel.Load(); m == nil || *m != "planner-model" {
+		got := "<none>"
+		if m != nil {
+			got = *m
+		}
+		t.Errorf("session turn requested model %q, want %q (the planning role's model)", got, "planner-model")
+	}
+	if got := agentReqs.Load(); got != 0 {
+		t.Errorf("agent provider received %d requests in goal mode, want 0 (inactive route)", got)
+	}
+}
+
+// The reasoning hop is a real route: a config with no planning key but a
+// reasoning default routes the goal session through it (#476 D2). The model
+// assertion keeps this non-vacuous -- a bare request counter would already be
+// satisfied by the metadata refresh.
+func TestRunGoalModeFallsBackToTheReasoningRole(t *testing.T) {
+	configPath, root, agentReqs, _, lastPlanModel := goalHarness(t,
+		`"reasoning": "planner"`)
+
+	driveGoalTurn(t, configPath, root)
+
+	if m := lastPlanModel.Load(); m == nil || *m != "planner-model" {
+		got := "<none>"
+		if m != nil {
+			got = *m
+		}
+		t.Errorf("session turn requested model %q, want %q (the reasoning role's model via the planning fallback)", got, "planner-model")
+	}
+	if got := agentReqs.Load(); got != 0 {
+		t.Errorf("agent provider received %d requests in goal mode, want 0 (inactive route)", got)
+	}
+}
+
+// A remote planning fallback fails closed in noninteractive goal mode: the
+// run dies naming the destination and the exact flag, and NO provider --
+// including the local agent provider -- receives a single request, because
+// admission precedes discovery, refresh, probe, and inference (#477).
+func TestRunGoalModeRemotePlanningFallbackFailsClosed(t *testing.T) {
+	configPath, root, agentReqs, _, _ := goalHarness(t,
+		`"analysis": "remoteplan"`)
+	// Point the planning fallback at an unreachable REMOTE provider: the
+	// analysis hop resolves planning to it.
+	raw, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	amended := strings.Replace(string(raw), `"planner":`, `"remoteplan": {"name": "remote-model", "provider": "remote", "type": "dense", "context_window": 32768,
+      "capabilities": ["chat", "generate", "stream", "tool_call"]},
+    "planner":`, 1)
+	amended = strings.Replace(amended, `"planprov":`, `"remote": {"base_url": "https://opencode.invalid/zen/go", "api_format": "openai-compat", "timeout": "5s"},
+    "planprov":`, 1)
+	if err := os.WriteFile(configPath, []byte(amended), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	stdin, stdout, stderr := runTestFiles(t)
+
+	err = run(goalArgs(configPath, root), stdin, stdout, stderr)
+	if err == nil {
+		t.Fatalf("run = nil error, want fail-closed on the unconsented remote planning destination\nstderr:\n%s",
+			readRunTestFile(t, stderr))
+	}
+	msg := err.Error() + readRunTestFile(t, stderr)
+	if !strings.Contains(msg, "opencode.invalid") || !strings.Contains(msg, "-allow-destination") {
+		t.Errorf("failure names neither the destination nor the flag:\n%s", msg)
+	}
+	if got := agentReqs.Load(); got != 0 {
+		t.Errorf("agent provider received %d requests before fail-closed admission, want 0", got)
 	}
 }

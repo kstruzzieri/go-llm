@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"github.com/kstruzzieri/go-llm/config"
+	"github.com/kstruzzieri/go-llm/internal/providerbootstrap"
 )
 
 // agentUseCase is the routing use case for ordinary execution: REPL and
@@ -50,73 +51,49 @@ func loadConfig(path string) (*config.Config, error) {
 	return cfg, nil
 }
 
-// resolveAgentChain gates strict-chain vs recommend on the EFFECTIVE config
-// (bundle.Config). defaults.agent absent (or nil cfg) => recommend; present
-// and resolvable => strict chain; present but unresolvable => fatal.
-func resolveAgentChain(cfg *config.Config) (chainPlan, error) {
-	if cfg == nil {
-		return chainPlan{useRecommend: true, useCase: agentUseCase}, nil
-	}
-	if _, ok := cfg.Defaults[agentUseCase]; !ok {
-		return chainPlan{useRecommend: true, useCase: agentUseCase}, nil
-	}
-	chain, err := cfg.RoleFallbackChain(agentUseCase)
-	if err != nil {
-		return chainPlan{}, fmt.Errorf("golem: resolve agent chain: %w", err)
-	}
-	return chainPlan{chain: chain, useCase: agentUseCase}, nil
-}
-
-// resolvePlanningChain resolves the AgentFlow plan-authoring route (#476).
-//
-// It differs from resolveAgentChain in one way that matters: the presence
-// check goes through RoleForUseCase, so an absent "planning" key still
-// resolves through the ordered fallbacks (reasoning, analysis, agent) instead
-// of dropping straight to recommendation. Only when none of those is
-// configured does planning fall back to recommendation, matching the agent
-// route's own configless behavior.
-//
-// A resolvable use case whose ROLE is invalid or circular is fatal here, as it
-// is for the agent chain: a plan authored by an unresolvable route is worse
-// than a startup error.
-func resolvePlanningChain(cfg *config.Config) (chainPlan, error) {
-	if cfg == nil {
-		return chainPlan{useRecommend: true, useCase: config.UseCasePlanning}, nil
-	}
-	if _, ok := cfg.RoleForUseCase(config.UseCasePlanning); !ok {
-		return chainPlan{useRecommend: true, useCase: config.UseCasePlanning}, nil
-	}
-	chain, err := cfg.RoleFallbackChain(config.UseCasePlanning)
-	if err != nil {
-		return chainPlan{}, fmt.Errorf("golem: resolve planning chain: %w", err)
-	}
-	return chainPlan{chain: chain, useCase: config.UseCasePlanning}, nil
-}
-
-// resolveActiveChain resolves the SINGLE model route this process runs on.
+// planActiveRoute resolves the SINGLE model route this process runs on (#476
+// D3): the planning route in -goal mode, the agent route otherwise.
 //
 // -goal (AgentFlow plan authoring) is mutually exclusive with every execution
 // mode -- task plans, -p, write/exec, RAG, delegate, dispatch, MCP -- and
 // exits after locking a plan. One live route per process is therefore
 // sufficient, and a second orchestrator or a phase state machine would be
 // machinery with nothing to select between.
-func resolveActiveChain(cfg *config.Config, goalMode bool) (chainPlan, error) {
+//
+// Resolution is delegated to the providerbootstrap planners because the #477
+// network plan is the ONLY place chains may be resolved -- nothing after the
+// plan may call RoleFallbackChain independently, or the consumed chain and
+// the admitted chain could diverge. The planning route uses the optional
+// use-case planner: an absent "planning" key resolves through the ordered
+// fallbacks (reasoning, analysis, agent), and only when none of those is
+// configured does planning degrade to recommendation, matching the agent
+// route's own configless behavior. A resolvable use case whose ROLE is
+// invalid or circular is fatal either way: a plan authored by an
+// unresolvable route is worse than a startup error.
+func planActiveRoute(cfg *config.Config, goalMode bool) (providerbootstrap.PlannedRoute, error) {
 	if goalMode {
-		return resolvePlanningChain(cfg)
+		return providerbootstrap.PlanOptionalUseCaseRoute(cfg, config.UseCasePlanning)
 	}
-	return resolveAgentChain(cfg)
+	return providerbootstrap.PlanAgentRoute(cfg)
 }
 
-func resolveSummarizeChain(cfg *config.Config) ([]string, error) {
-	if cfg == nil {
-		return nil, nil
+// recommendNotice renders the startup line for a mode whose active route
+// resolved to recommendation. Parameterized by the active use case rather
+// than duplicated per mode (#476 D5): the agent wording is byte-identical to
+// the pre-#476 line, and goal mode names what was actually absent -- the
+// planning key AND every one of its fallbacks, since RoleForUseCase walked
+// them all before recommending.
+func recommendNotice(useCase string) string {
+	if useCase == config.UseCasePlanning {
+		return "no defaults.planning configured (and no reasoning, analysis, or agent fallback); using model recommendation (run will route to the recommended model)"
 	}
-	if _, ok := cfg.RoleForUseCase(config.UseCaseSummarize); !ok {
-		return nil, nil
-	}
-	chain, err := cfg.RoleFallbackChain(config.UseCaseSummarize)
-	if err != nil {
-		return nil, fmt.Errorf("golem: resolve summarize chain: %w", err)
-	}
-	return chain, nil
+	return "no defaults.agent configured; using model recommendation (run will route to the recommended model)"
+}
+
+// chainPlanFor derives the cmd-local chainPlan from the planned active route.
+// This is the ONLY chainPlan constructor wiring may use: deriving from the
+// PlannedRoute that entered the network plan is what keeps the consumed
+// chain, the admitted chain, and the stamped use case one value (#476 I5).
+func chainPlanFor(route providerbootstrap.PlannedRoute) chainPlan {
+	return chainPlan{chain: route.Chain, useRecommend: route.Recommend, useCase: route.UseCase}
 }
