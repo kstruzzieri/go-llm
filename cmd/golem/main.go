@@ -404,6 +404,14 @@ func applyGoalMode(f flags) (flags, []string) {
 		warns = append(warns, "planning mode: -grounding ignored (planning mode authors a plan, it runs no answer turn)")
 		f.grounding = false
 	}
+	if f.think != "" {
+		// The planner force-disables extended thinking on its request, and
+		// -think sets nothing else, so the flag cannot take effect. Clearing
+		// it here also skips the think chain lookup entirely -- registry
+		// metadata reads for a mode that authors one plan and exits (#476 D4).
+		warns = append(warns, "planning mode: -think ignored (the planner disables extended thinking)")
+		f.think = ""
+	}
 	f.noSession = true
 	f.noCompress = true
 	f.noMemory = true
@@ -863,15 +871,9 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 		warns = append(warns, capStoreWarn)
 	}
 
-	// Goal mode skips the -think chain lookup entirely: plannerModelOptions
-	// force-disables thinking on the author request, so the lookup could not
-	// affect anything and its registry reads would be pointless provider
-	// metadata I/O for a mode that authors one plan and exits (#476 D4).
-	var thinkOpts provider.ModelOptions
-	thinkLine := ""
-	if !f.goalSet {
-		thinkOpts, thinkLine = resolveThinkOptions(ctx, bundle.Models, plan.chain, f.think)
-	}
+	// In goal mode f.think is always "" (applyGoalMode clears it with a
+	// warning), so this performs no chain lookups there by construction.
+	thinkOpts, thinkLine := resolveThinkOptions(ctx, bundle.Models, plan.chain, f.think)
 	inputCeiling := resolveInputCeiling(ctx, bundle.Models, plan.chain, plan.useCase, f.inputCeiling, f.outputReserve, resolver != nil)
 
 	if autoErr != nil && !f.noRag && f.ragDB == "" {

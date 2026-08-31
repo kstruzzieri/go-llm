@@ -135,16 +135,24 @@ func resolveBackend(ctx context.Context, cfg *config.Config, o backendResolveOpt
 
 	var key, model string
 	var ok bool
+	// The active route's use case names the ignored-override warning: telling
+	// a goal-mode user defaults.agent is the problem when the active route is
+	// planning would send them to the wrong config key.
+	routeUseCase := "agent"
 	if o.activeRoute != nil {
 		key, model, ok = openAICompatTargetFromRoute(cfg, *o.activeRoute)
+		if o.activeRoute.UseCase != "" {
+			routeUseCase = o.activeRoute.UseCase
+		}
 	} else {
 		key, model, ok = openAICompatAgentTarget(cfg)
 	}
 	if !ok {
 		var res backendResolution
 		if explicitURL != "" {
-			res.warns = append(res.warns,
-				source+" ignored: no openai-compat agent provider to apply it to (defaults.agent unset, unresolvable, or primary model's provider is not openai-compat)")
+			res.warns = append(res.warns, fmt.Sprintf(
+				"%s ignored: no openai-compat %s provider to apply it to (no applicable %s route, unresolvable, or primary model's provider is not openai-compat)",
+				source, routeUseCase, routeUseCase))
 		}
 		return res, nil
 	}

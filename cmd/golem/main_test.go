@@ -1612,6 +1612,28 @@ func TestApplyGoalMode_WarnsOnIgnoredFlags(t *testing.T) {
 	}
 }
 
+func TestApplyGoalMode_ThinkIsClearedLoudly(t *testing.T) {
+	// -think cannot take effect in planning mode: the planner force-disables
+	// extended thinking, and the flag sets nothing else. It must be IGNORED
+	// LOUDLY -- a warning plus a cleared flag -- and the cleared flag is also
+	// what guarantees the startup think lookup performs no registry reads in
+	// goal mode (#476 D4): resolveThinkOptions with an empty flag value
+	// returns before touching the chain.
+	f, warns := applyGoalMode(flags{goalSet: true, think: "hard"})
+	if f.think != "" {
+		t.Errorf("think = %q, want cleared", f.think)
+	}
+	found := false
+	for _, w := range warns {
+		if strings.Contains(w, "-think ignored") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("no -think warning surfaced; a silently dead flag is worse than a rejected one: %v", warns)
+	}
+}
+
 func TestStartupNotices_DispatchLine(t *testing.T) {
 	lines := startupNotices(startupInfo{workspace: "/w", dispatchLine: "dispatch: enabled -> local/speedy"})
 	found := false
