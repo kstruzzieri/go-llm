@@ -241,6 +241,38 @@ func TestAdmissionRejectsMalformedAllowFlag(t *testing.T) {
 	}
 }
 
+// -allow-destination accepts the canonical "<provider>/<base URL>" grant and
+// the deprecated "<provider>=<base URL>" spelling go-llm-mcp historically
+// used; both admit the same canonical destination identity.
+func TestAdmissionAllowFlagBothForms(t *testing.T) {
+	tests := []struct {
+		name string
+		flag string
+	}{
+		{name: "canonical", flag: "opencode/HTTPS://opencode.ai:443/zen/go/"},
+		// The legacy marker is the historic go-llm-mcp grammar exactly: a
+		// lowercase scheme directly after "=". Canonicalization stays
+		// case-insensitive past the marker (the canonical row above admits an
+		// uppercase scheme), but the marker itself is not.
+		{name: "legacy equals", flag: "opencode=https://opencode.ai:443/zen/go/"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p := &fakePrompt{answer: false} // must not be consulted
+			adm, _ := newTestAdmission(t, admEdges(t), []string{tt.flag}, false, p)
+			if err := adm.ensure(context.Background()); err != nil {
+				t.Fatalf("allowlisted noninteractive admission: %v", err)
+			}
+			if p.calls != 0 {
+				t.Error("allowlisted path consulted the prompt")
+			}
+			if _, err := adm.gate.Bind(context.Background(), "summarize", "opencode"); err != nil {
+				t.Errorf("allowlisted remote edge denied: %v", err)
+			}
+		})
+	}
+}
+
 // I15/M16: destination authority and tool grants are separate stores. A tool
 // grant confers nothing on the gate, and admission writes nothing into the
 // tool-grant store.

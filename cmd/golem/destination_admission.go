@@ -69,7 +69,7 @@ func newDestinationAdmission(cfg destinationAdmissionConfig) (*destinationAdmiss
 	}
 	allowed := make([]provider.Destination, 0, len(cfg.AllowFlags))
 	for _, raw := range cfg.AllowFlags {
-		d, err := provider.ParseDestination(raw)
+		d, err := provider.ParseDestinationFlag(raw)
 		if err != nil {
 			// Never echo the raw flag: it may carry the very credential the
 			// destination identity refuses to hold.

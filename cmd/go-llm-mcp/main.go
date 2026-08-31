@@ -9,7 +9,6 @@ import (
 	"log"
 	"os"
 	"os/signal"
-	"strings"
 	"syscall"
 	"time"
 
@@ -29,16 +28,11 @@ func (g *destinationGrants) Set(value string) error {
 func (g destinationGrants) policy() (provider.DestinationPolicy, error) {
 	destinations := make([]provider.Destination, 0, len(g))
 	for _, value := range g {
-		delimiter := strings.Index(value, "=http://")
-		if https := strings.Index(value, "=https://"); delimiter < 0 || https >= 0 && https < delimiter {
-			delimiter = https
-		}
-		if delimiter < 0 {
-			return provider.DestinationPolicy{}, fmt.Errorf("expected provider=https://host/base")
-		}
-		destination, err := provider.ParseDestination(value[:delimiter] + "/" + value[delimiter+1:])
+		destination, err := provider.ParseDestinationFlag(value)
 		if err != nil {
-			return provider.DestinationPolicy{}, fmt.Errorf("%w; expected provider=https://host/base", err)
+			// Never echo the raw flag: it may carry the very credential the
+			// destination identity refuses to hold.
+			return provider.DestinationPolicy{}, fmt.Errorf("-allow-destination: %w", err)
 		}
 		destinations = append(destinations, destination)
 	}
@@ -57,7 +51,7 @@ func main() {
 	tlsCert := flag.String("tls-cert", "", "TLS certificate file (enables HTTPS)")
 	tlsKey := flag.String("tls-key", "", "TLS private key file")
 	var allowDestinations destinationGrants
-	flag.Var(&allowDestinations, "allow-destination", "Allow exact remote destination provider=https://host/base (repeatable)")
+	flag.Var(&allowDestinations, "allow-destination", "Allow exact remote destination \"<provider>/<canonical base URL>\" (repeatable; the deprecated \"<provider>=<base URL>\" form is still accepted)")
 	flag.Parse()
 
 	destinationPolicy, err := allowDestinations.policy()
