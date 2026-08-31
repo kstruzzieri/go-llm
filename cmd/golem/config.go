@@ -8,12 +8,6 @@ import (
 	"github.com/kstruzzieri/go-llm/internal/providerbootstrap"
 )
 
-// agentUseCase is the routing use case for ordinary execution: REPL and
-// one-shot turns, AgentFlow task steps, parallel workers, and dispatch
-// children. Named rather than repeated as a literal so the one place that
-// chooses between it and planning is greppable.
-const agentUseCase = "agent"
-
 // chainPlan is the resolved routing strategy for ONE use case. Exactly one of
 // chain or useRecommend is meaningful; both are zero only when the resolver
 // also returns an error, so callers must check err before reading them.

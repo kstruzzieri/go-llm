@@ -44,8 +44,8 @@ func TestPlanActiveRoute_SelectsRouteByMode(t *testing.T) {
 	if err != nil {
 		t.Fatalf("execution mode: %v", err)
 	}
-	if exec.UseCase != agentUseCase {
-		t.Errorf("execution UseCase = %q, want %q", exec.UseCase, agentUseCase)
+	if exec.UseCase != "agent" {
+		t.Errorf("execution UseCase = %q, want %q", exec.UseCase, "agent")
 	}
 	if !reflect.DeepEqual(exec.Chain, []string{"ollama/fast"}) {
 		t.Errorf("execution chain = %v, want the agent chain [ollama/fast]", exec.Chain)
@@ -122,7 +122,7 @@ func TestPlanActiveRoute_NilConfigRecommendsUnderTheModeUseCase(t *testing.T) {
 	if err != nil {
 		t.Fatalf("exec: %v", err)
 	}
-	if !exec.Recommend || exec.UseCase != agentUseCase {
+	if !exec.Recommend || exec.UseCase != "agent" {
 		t.Errorf("exec route = %+v, want recommend under agent", exec)
 	}
 }
@@ -175,9 +175,9 @@ func TestChainPlanFor_CarriesTheRouteUnchanged(t *testing.T) {
 		t.Errorf("chainPlanFor(strict) = %+v, want chain/useCase carried and no recommend", got)
 	}
 
-	rec := providerbootstrap.PlannedRoute{UseCase: agentUseCase, Recommend: true}
+	rec := providerbootstrap.PlannedRoute{UseCase: "agent", Recommend: true}
 	got = chainPlanFor(rec)
-	if got.chain != nil || !got.useRecommend || got.useCase != agentUseCase {
+	if got.chain != nil || !got.useRecommend || got.useCase != "agent" {
 		t.Errorf("chainPlanFor(recommend) = %+v, want recommend under agent with nil chain", got)
 	}
 }
@@ -187,7 +187,7 @@ func TestRecommendNotice_NamesTheActiveUseCase(t *testing.T) {
 	// goal mode names what was actually absent -- the planning key AND every
 	// fallback RoleForUseCase walked before recommending.
 	agentWant := "no defaults.agent configured; using model recommendation (run will route to the recommended model)"
-	if got := recommendNotice(agentUseCase); got != agentWant {
+	if got := recommendNotice("agent"); got != agentWant {
 		t.Errorf("recommendNotice(agent) = %q, want the pre-#476 line %q", got, agentWant)
 	}
 	got := recommendNotice(config.UseCasePlanning)

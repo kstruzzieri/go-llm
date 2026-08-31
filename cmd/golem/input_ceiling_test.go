@@ -289,10 +289,10 @@ func TestResolveInputCeiling(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// agentUseCase throughout: every expectation in this table is the
+			// "agent" throughout: every expectation in this table is the
 			// pre-#476 value, so an unchanged result here is the proof that
 			// parameterizing the use case did not move ordinary execution.
-			got := resolveInputCeiling(context.Background(), tt.reg, tt.chain, agentUseCase, tt.explicit, tt.outputReserve, tt.resolveTool)
+			got := resolveInputCeiling(context.Background(), tt.reg, tt.chain, "agent", tt.explicit, tt.outputReserve, tt.resolveTool)
 			if got.ceiling != tt.want || got.source != tt.wantSource {
 				t.Fatalf("resolveInputCeiling() = %+v, want ceiling=%d source=%q", got, tt.want, tt.wantSource)
 			}
@@ -305,8 +305,8 @@ func TestResolveInputCeilingRecomputesForChangedChain(t *testing.T) {
 		{Provider: "test", Model: "first"}:  {ContextWindow: 32_768, Caps: toolRouteCaps},
 		{Provider: "test", Model: "second"}: {ContextWindow: 131_072, Caps: toolRouteCaps},
 	}}
-	first := resolveInputCeiling(context.Background(), reg, []string{"test/first"}, agentUseCase, 0, 0, false)
-	second := resolveInputCeiling(context.Background(), reg, []string{"test/second"}, agentUseCase, 0, 0, false)
+	first := resolveInputCeiling(context.Background(), reg, []string{"test/first"}, "agent", 0, 0, false)
+	second := resolveInputCeiling(context.Background(), reg, []string{"test/second"}, "agent", 0, 0, false)
 	if first.ceiling != 30_720 || second.ceiling != 129_024 {
 		t.Fatalf("changed chain ceilings = %d then %d, want 30720 then 129024", first.ceiling, second.ceiling)
 	}
@@ -334,7 +334,7 @@ func TestResolveInputCeiling_HonorsTheCallersUseCase(t *testing.T) {
 
 	t.Run("zero reserve: both window and implicit reserve follow the use case", func(t *testing.T) {
 		// agent: full 100000 window, minus the implicit 2048 chat-default reserve.
-		if got := resolveInputCeiling(context.Background(), reg, chain, agentUseCase, 0, 0, false); got.ceiling != 97_952 {
+		if got := resolveInputCeiling(context.Background(), reg, chain, "agent", 0, 0, false); got.ceiling != 97_952 {
 			t.Errorf("agent ceiling = %d, want 97952 (100000 - 2048)", got.ceiling)
 		}
 		// reasoning: quality ceiling 32768, minus its own 4096 reserve.
@@ -346,7 +346,7 @@ func TestResolveInputCeiling_HonorsTheCallersUseCase(t *testing.T) {
 	t.Run("nonzero reserve isolates the window from the reserve", func(t *testing.T) {
 		// An explicit reserve is subtracted by turnBudget, not here, so the
 		// only remaining use-case input is EffectiveContextWindow.
-		if got := resolveInputCeiling(context.Background(), reg, chain, agentUseCase, 0, 8_000, false); got.ceiling != 100_000 {
+		if got := resolveInputCeiling(context.Background(), reg, chain, "agent", 0, 8_000, false); got.ceiling != 100_000 {
 			t.Errorf("agent ceiling = %d, want the full 100000 window", got.ceiling)
 		}
 		if got := resolveInputCeiling(context.Background(), reg, chain, "reasoning", 0, 8_000, false); got.ceiling != 32_768 {
@@ -367,7 +367,7 @@ func TestResolveInputCeiling_HonorsTheCallersUseCase(t *testing.T) {
 			},
 		}}
 		tightChain := []string{"test/tiny"}
-		if got := resolveInputCeiling(context.Background(), tight, tightChain, agentUseCase, 0, 0, false); got.ceiling != 952 {
+		if got := resolveInputCeiling(context.Background(), tight, tightChain, "agent", 0, 0, false); got.ceiling != 952 {
 			t.Errorf("agent ceiling = %d, want 952 (3000 - 2048)", got.ceiling)
 		}
 		got := resolveInputCeiling(context.Background(), tight, tightChain, "reasoning", 0, 0, false)
