@@ -16,7 +16,8 @@ Use it directly in a terminal through **Golem**, the bundled local coding agent;
 ### What's included
 
 - **Model backends** — `openai-compat` provider (llama.cpp / vLLM / LM Studio) and a native Ollama REST client; chat, completions, embeddings, model management, and tool calling with streaming support
-- **Golem terminal agent** — local workspace assistant with provider routing, project-context loading, persistent sessions, optional RAG retrieval, and approval-gated write/exec tools
+- **Golem terminal agent** — local workspace assistant with provider routing, project-context loading, persistent sessions, optional RAG retrieval, approval-gated write/exec tools with scoped session grants, background command jobs, and destination admission: a consent boundary that shows every remote model endpoint the active config can reach and asks before the first outbound byte
+- **Execution sandboxing (library)** — deny-default sandbox backends for the exec tools in `agent/`: macOS Seatbelt (`sandbox-exec` per-invocation profiles scoping reads/writes to the workspace plus a private temp directory) and Linux Bubblewrap (fresh user/mount/pid namespaces per invocation, network unshared unless allowed). Selecting a runtime the host cannot enforce fails closed — there is no silent host fallback
 - **RAG pipeline** — code-aware chunking, SQLite vector store, concurrent indexing with `.gitignore` support, and context-building retrieval
 - **FIM completion** — Fill-in-the-Middle for IDE inline suggestions with context window management
 - **Model config** — `models.json`-driven configuration with provider settings, role-based defaults, and fallback chain resolution
@@ -28,7 +29,16 @@ Use it directly in a terminal through **Golem**, the bundled local coding agent;
 | Package | Description |
 |---------|-------------|
 | `ollama/` | HTTP client for the Ollama REST API — chat, text generation, embeddings, model management, tool calling. Streaming support via callbacks. |
-| `config/` | Model configuration loader (`models.json`) with provider settings, role-based defaults, and fallback chain resolution against available models. |
+| `config/` | Model configuration loader (`models.json`) with provider settings, role-based defaults, fallback chain resolution, role lifecycle, selector overrides, and credential scrub via a secret-literal-preserving atomic writer. |
+| `configview/` | Pure projection of a config for panels/CLI/MCP — a versioned wire contract with tri-state candidate eligibility, no I/O. Consumed by `golem models -json`, the MCP configview resource, and the Firn config panel. |
+| `configio/` | Explicit I/O tier for the config stack — provider inventory refresh and consent-gated per-model probes with bounded error codes. Never implicit; values in, values out. |
+| `profiles/` | Profile catalog — curated embedded configs (credential-free by pinned rule) plus a user store under a private directory boundary, with stable IDs and bounded error codes. |
+| `agent/` | Agent runtime — plan-act-observe loop, tool registry, observers, budgets, approval seams, and the sandboxed exec backends (Seatbelt, Bubblewrap). |
+| `golem/` | Embeddable Golem runtime — the system prompt and agent wiring behind `cmd/golem`, for consumers that embed the agent instead of shelling out. |
+| `agentflow/` | AgentFlow integration — locked plan validation, journaled execution, and proof artifacts for task-mode runs. |
+| `memory/` | Explicit user-controlled local memories and agent-memory records (SQLite, scope-filtered FTS5 search). Backs Golem `/remember` and the MCP agent-memory tools. |
+| `mcpclient/` | MCP client — adapts external MCP servers' tools into agent tools over stdio or streamable HTTP. |
+| `projectcontext/` | AGENTS.md-style project-context loader — discovery, safe capped reads, and deterministic ordering. |
 | `provider/` | Intelligent model routing — Router with circuit breakers, warmth tracking, token budget, sticky routing, and multi-model scoring. |
 | `rag/` | Code-aware text chunking, SQLite vector store with cosine similarity and FTS5 hybrid search, concurrent file/directory indexer with `.gitignore` support, diff-aware incremental reindexing, and context-building retriever. |
 | `rag/parquet/` | Parquet dataset exporter for ML pipeline interop — exports vector store contents with quality metrics and configurable precision. |
@@ -151,6 +161,23 @@ rather than a remote 401. Literal keys still work, but `${ENV_VAR}` is recommend
 export OPENAI_API_KEY=sk-...
 golem -config models.json
 ```
+
+**Destination admission:** before the first outbound byte, Golem resolves the
+config's full network plan and shows a manifest of every remote endpoint it
+could reach — deduplicated destinations with each use-case route marked
+primary or fallback — and asks for consent. Literal loopback endpoints
+(llama.cpp, Ollama on `127.0.0.1`/`localhost`) auto-admit; anything remote
+waits for a yes. For scripts and one-shot runs, pre-admit exact destinations
+with the repeatable flag:
+
+```bash
+golem -p "..." -allow-destination "openai/https://api.openai.com"
+```
+
+The standalone MCP server is gated too but never prompts, and it admits per
+provider rather than per route — pre-admit each remote provider with
+`-allow-destination provider=https://host/base` (repeatable); see
+[MCP Server](#mcp-server-1).
 
 ```json
 {
@@ -290,7 +317,7 @@ golem -root /path/to/project -allow-write
 golem -root /path/to/project -allow-write -allow-exec
 ```
 
-Inside the REPL, use `/help`, `/tools`, `/model`, `/new`, `/clear`, `/undo`, and `/exit`. Any other line is sent to the agent as the current goal.
+Inside the REPL, `/help` lists every command: sessions (`/new`, `/clear`, `/resume`, `/sessions`, `/search-sessions`, `/checkpoints`, `/undo`), memory (`/remember`, `/memories`, `/records`, `/forget`), approvals (`/grants`, `/auto-edits`), background jobs (`/jobs`), plus `/model`, `/tools`, `/edit`, and `/exit`. Any other line is sent to the agent as the current goal.
 
 Approval prompts that offer an `a` answer also accept "always this session", and the prompt names the grant's scope because the two classes are deliberately asymmetric: `a` on a command prompt (`a=always this command`) covers only that exact command, while `a` on an edit prompt (`a=all edits this session`) enables auto-approval for **every** write/edit in the workspace — it is `/auto-edits on`, not "always this file". `/auto-edits on|off` toggles the write/edit grant explicitly, `/grants` counts the active session grants, and `/grants clear` revokes them all without touching history. Grants are in-memory only and die with `/new`, `/clear`, a successful `/resume`, or process exit.
 
@@ -628,7 +655,7 @@ Claude Desktop configuration (`claude_desktop_config.json`):
 }
 ```
 
-The server exposes 19 tools by default (chat, generate, code completion, embeddings, RAG, model management, analysis) plus 3 opt-in agent-memory tools (`agent_memory_search`, `agent_memory_create`, `agent_memory_promote`) registered only when `--agent-memory-db <path>` is set, 4 prompt templates, 7 concrete resources, and 1 resource template. Chat, generate, completion, embedding, and analysis tools accept an optional `model` parameter; when omitted, the request is routed by `provider.Router` using a use-case-appropriate weight profile (chat / fim / embedding / reasoning / analysis / code-review / agent), with circuit-breaker-aware fallback. Routing state for diagnostics is exposed via the `route://breakers`, `route://warmth`, and `route://sticky` resources. (The actual model that served a given call is computed internally as `RouteOutcome.ActualModel` but is not currently included in tool responses; see Roadmap.)
+The server exposes tools for chat, generation, code completion, embeddings, RAG, model management, and analysis, plus opt-in agent-memory tools (`agent_memory_search`, `agent_memory_create`, `agent_memory_promote`) registered only when `--agent-memory-db <path>` is set, along with prompt templates and routing/config resources. Remote model destinations are denied unless pre-admitted: the standalone server never prompts, so pass `-allow-destination provider=https://host/base` (repeatable) for each remote endpoint. Its admission scope is broader than Golem's route-derived manifest — any configured provider may be reached for any served purpose, plus health, model-listing, and warmth checks — so admit every remote provider the config declares, not just the destinations Golem's manifest showed. Chat, generate, completion, embedding, and analysis tools accept an optional `model` parameter; when omitted, the request is routed by `provider.Router` using a use-case-appropriate weight profile (chat / fim / embedding / reasoning / analysis / code-review / agent), with circuit-breaker-aware fallback. Routing state for diagnostics is exposed via the `route://breakers`, `route://warmth`, and `route://sticky` resources. (The actual model that served a given call is computed internally as `RouteOutcome.ActualModel` but is not currently included in tool responses; see Roadmap.)
 
 `rag_search` and chat requests with `use_rag=true` also accept optional `current_file`, `workspace_root`, and `open_files` fields for contextual ranking; chat rejects non-empty context fields when `use_rag=false`. Omitted or empty fields preserve the current hybrid-by-default retrieval path, response shape, and compact chat prompt. `rag_search` can additionally set `explain_scores=true` to return the existing scored-result JSON, including fused `RankScore` and available per-signal `Signals`; without that flag, contextual results are flattened back to the ordinary semantic-similarity `SearchResult` shape.
 
@@ -668,24 +695,30 @@ insight, _ := analyzer.AnalyzeTraining(ctx, analysis.TrainingMetrics{
 
 ## Roadmap
 
-### Recently shipped
+### Recently shipped (v0.2.0 — governed local agent)
 
 | Feature | Description |
 |---------|-------------|
-| Provider Router → MCP | `mcp/` chat/generate/embed/completion tools and analysis handlers route through `provider.Router` with use-case-aware weight profiles, circuit breakers, warmth scoring, and sticky preference. Routing state surfaced via `route://breakers`, `route://warmth`, `route://sticky` resources. |
-| FIM via Router | Completion routing with FIM-family pinning, template prompt support, and empty-suffix semantics — `provider.Router` chooses the actual completion model under the hood. |
+| Destination admission | A consent boundary between config resolution and any outbound byte: one manifest of every remote endpoint the active config can reach, admitted explicitly (loopback auto-admits). Wired into Golem, its subcommands, and the standalone MCP server. |
+| Execution sandboxing | Deny-default sandbox backends for the exec tools: macOS Seatbelt and Linux Bubblewrap, per-invocation profiles, fail-closed with no host fallback. |
+| Approval grants and background jobs | Scoped session grants for commands and edits (`/grants`, `/auto-edits`), plus background command jobs (`start_command` / `command_status` / `command_tail` / `stop_command`, `/jobs`). |
+| Verification | Opt-in `-grounding` claim checking against retrieval evidence, and post-write workspace verification via the `.golem.json` `verify` command. |
+| Config stack | Role lifecycle and selector overrides, credential scrub with a secret-preserving atomic writer, `configview`/`configio` projection and I/O tiers, and the `profiles` catalog. |
+
+See the full [CHANGELOG](CHANGELOG.md) — v0.2.0 also includes checkpoints, managed RAG sources, agent memory, AgentFlow task mode, and the REPL line editor.
 
 ### In progress
 
 | Feature | Description |
 |---------|-------------|
-| OpenAI-compatible endpoint | `compat/` package exposes local Ollama models via an OpenAI-compatible chat/completions API for clients that speak OpenAI's API but want a local backend. Concurrency limiter and model-alias resolution are in place; further hardening ongoing. |
-| Persistent drift signature | Per-chunk vector-space identity in the RAG SQLite store so cross-run drift across embedding-model boundaries is detected at query time. Closes the chain-fallback channel that the in-memory drift guard left open. |
+| Phase-based model routing | Plan authoring resolves through its own `planning` use case, separate from execution's `agent` route, degrading to existing routes when unconfigured. |
+| Evidence-governed feedback | Run/session provenance for feedback, explicit `/feedback` ratings, and an evaluated, human-reviewed workflow-playbook loop. |
 
 ### Future
 
 | Feature | Description |
 |---------|-------------|
+| Hosted-native transports | Anthropic Messages, Gemini generateContent, and OpenAI Responses transports for hosted providers beyond the OpenAI-compatible layer. |
 | Agentic RAG | Opt-in agentic orchestration planned on top of the current hybrid-by-default retrieval path. Contextual score explanations remain opt-in. |
 | In-band routing transparency | Surface `RouteOutcome` (actual model, fallbacks used, sticky decision) in MCP tool responses so callers see which model served a request rather than only the planned default. Out-of-band today via `route://*` resources. |
 | Vision support | Image inputs in chat messages |
@@ -698,7 +731,9 @@ Minimal by design:
 - `modernc.org/sqlite` — pure Go SQLite driver (no CGo)
 - `golang.org/x/sync` — concurrency primitives (bounded worker pools for indexing)
 - `golang.org/x/net` — h2c HTTP/2 cleartext transport (only imported by `mcp/`)
-- `github.com/modelcontextprotocol/go-sdk` — official MCP Go SDK (only imported by `mcp/`)
+- `golang.org/x/term` — VT100 line editor for the Golem REPL prompt (only imported by `cmd/golem/`)
+- `golang.org/x/sys` — build-tagged platform helpers (Linux PTY test support in `cmd/golem/`, Windows directory fsync in `profiles/`)
+- `github.com/modelcontextprotocol/go-sdk` — official MCP Go SDK (imported by `mcp/`, `mcpclient/`, and `cmd/llm-bench/`)
 - `github.com/parquet-go/parquet-go` — Parquet file writer (only imported by `rag/parquet/`)
 - `github.com/santhosh-tekuri/jsonschema/v6` — JSON Schema validator (only imported by `cmd/llm-bench/`)
 
