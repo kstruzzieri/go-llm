@@ -13,6 +13,29 @@ Use it directly in a terminal through **Golem**, the bundled local coding agent;
 
 > **Backends:** go-llm targets local models through two provider API formats, selected per provider in `models.json` and routed by `provider.Router`: `openai-compat` (llama.cpp, vLLM, LM Studio, any OpenAI `/v1` server — **recommended**) and `ollama` (the native Ollama REST API). See [Local model backends](#local-model-backends).
 
+## Contents
+
+- [What's included](#whats-included)
+- [Packages](#packages)
+- [Requirements](#requirements) · [Installation](#installation)
+- [Local model backends](#local-model-backends)
+  - [llama.cpp via llama-swap (recommended)](#llamacpp-via-llama-swap-recommended)
+  - [llama.cpp without a proxy](#llamacpp-without-a-proxy-pinned-servers)
+  - [Ollama](#ollama-supported-alternative)
+- [Use a hosted API (bring your own key)](#use-a-hosted-api-bring-your-own-key)
+- [Terminal Quick Start](#terminal-quick-start)
+  - [Scripting / one-shot mode](#scripting--one-shot-mode)
+  - [MCP server quick start](#mcp-server)
+- [Use as a Go library](#use-as-a-go-library)
+- [RAG Details](#rag-details)
+- [Ollama Client](#ollama-client)
+- [Inline Completion (FIM)](#inline-completion-fim)
+- [Model Configuration](#model-configuration)
+- [MCP Server](#mcp-server-1)
+- [Parquet Export](#parquet-export) · [Analysis](#analysis)
+- [Roadmap](#roadmap)
+- [Dependencies](#dependencies) · [Testing](#testing) · [License](#license)
+
 ### What's included
 
 - **Model backends** — `openai-compat` provider (llama.cpp / vLLM / LM Studio) and a native Ollama REST client; chat, completions, embeddings, model management, and tool calling with streaming support
