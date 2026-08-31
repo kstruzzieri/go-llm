@@ -114,11 +114,23 @@
 // text; telemetry receives no grounding field at all. Task and planning modes
 // ignore -grounding with a warning, since neither runs an answer turn.
 //
-// Planning mode (-goal "<text>"): a local model authors an AgentFlow plan for
+// Planning mode (-goal "<text>"): a model authors an AgentFlow plan for
 // the goal using read-only tools, Golem compiles and locks it via agentflow
 // lock-plan, then stops. The locked .agent/plan.lock.json is the durable output;
 // run it with -plan (task execution) separately. Planning is read-only and
 // mutually exclusive with -p, -plan, -allow-write, -allow-exec, -rag-db,
 // -delegate, -dispatch, -mcp-*, -evidence, and the
 // -approve-plan-edits/-approve-plan-gates execution approvals.
+//
+// Planning mode routes through the "planning" use case (#476), not "agent":
+// a models.json authoring defaults.planning sends plan authoring to that
+// role, and one that does not degrades in order through reasoning, analysis,
+// and agent before falling back to model recommendation. The planning route
+// is the process's single active route -- it is what destination admission
+// consents, tool preflight proves, the input ceiling is sized from, and the
+// orchestrator caller routes -- so goal mode performs no discovery, refresh,
+// probe, or inference for the inactive agent, embedding, or summarize
+// routes. Because the fallbacks can select a role on a different provider
+// than agent, a remote planning route is subject to the same
+// -allow-destination consent as every other remote destination.
 package main
