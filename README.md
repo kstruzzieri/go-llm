@@ -9,9 +9,27 @@
 
 A local-first LLM toolkit and terminal coding agent for Go. Run models through **[llama.cpp](https://github.com/ggml-org/llama.cpp)** — the recommended, primary backend for best local performance, via its OpenAI-compatible server — or through [Ollama](https://ollama.com). go-llm provides the plumbing for model management, routing, RAG-powered retrieval, MCP integration, and domain-specific analysis — local-first by default, no cloud account required — with optional bring-your-own-key access to hosted OpenAI-compatible APIs (see [Use a hosted API](#use-a-hosted-api-bring-your-own-key)).
 
-Use it directly in a terminal through **Golem**, the bundled local coding agent; expose it as a standalone [MCP server](#mcp-server); or embed the Go packages in your own application. Pure Go with minimal dependencies (no CGo).
+Use it directly in a terminal through **Golem**, the bundled local coding agent; expose it as a standalone [MCP server](#mcp-server); or embed the Go packages in your own application ([library reference](docs/library.md)). Pure Go with minimal dependencies (no CGo).
 
 > **Backends:** go-llm targets local models through two provider API formats, selected per provider in `models.json` and routed by `provider.Router`: `openai-compat` (llama.cpp, vLLM, LM Studio, any OpenAI `/v1` server — **recommended**) and `ollama` (the native Ollama REST API). See [Local model backends](#local-model-backends).
+
+## Contents
+
+- [What's included](#whats-included)
+- [Packages](#packages)
+- [Requirements](#requirements) · [Installation](#installation)
+- [Local model backends](#local-model-backends)
+  - [llama.cpp via llama-swap (recommended)](#llamacpp-via-llama-swap-recommended)
+  - [llama.cpp without a proxy](#llamacpp-without-a-proxy-pinned-servers)
+  - [Ollama](#ollama-supported-alternative)
+- [Use a hosted API (bring your own key)](#use-a-hosted-api-bring-your-own-key)
+- [Terminal Quick Start](#terminal-quick-start)
+  - [Scripting / one-shot mode](#scripting--one-shot-mode)
+  - [MCP server quick start](#mcp-server)
+- [Use as a Go library](#use-as-a-go-library) — full API reference in [docs/library.md](docs/library.md)
+- [MCP Server](#mcp-server-1)
+- [Roadmap](#roadmap)
+- [Dependencies](#dependencies) · [Testing](#testing) · [License](#license)
 
 ### What's included
 
@@ -346,7 +364,11 @@ go-llm-mcp --ollama-url http://gpu-server:11434
 
 ## Use as a Go library
 
-### Chat with a local model
+Everything is available as plain Go packages — chat, streaming, tool calling,
+embeddings, RAG indexing and retrieval, FIM completion, model configuration,
+Parquet export, and the analysis helpers. The full API walkthrough with
+runnable examples lives in **[docs/library.md](docs/library.md)**. The
+30-second version:
 
 ```go
 package main
@@ -354,17 +376,15 @@ package main
 import (
     "context"
     "fmt"
+
     "github.com/kstruzzieri/go-llm/ollama"
 )
 
 func main() {
     client := ollama.NewClient()
-
     resp, err := client.Chat(context.Background(), ollama.ChatRequest{
-        Model: "gemma4:31b",
-        Messages: []ollama.ChatMessage{
-            {Role: "user", Content: "Explain walk-forward validation for trading strategies"},
-        },
+        Model:    "gemma4:31b",
+        Messages: []ollama.ChatMessage{{Role: "user", Content: "hello"}},
     })
     if err != nil {
         panic(err)
@@ -372,254 +392,6 @@ func main() {
     fmt.Println(resp.Message.Content)
 }
 ```
-
-### Streaming chat
-
-```go
-err := client.ChatStream(ctx, ollama.ChatRequest{
-    Model:    "gemma4:31b",
-    Messages: []ollama.ChatMessage{{Role: "user", Content: "Hello"}},
-}, func(resp ollama.ChatResponse) error {
-    fmt.Print(resp.Message.Content)
-    return nil
-})
-```
-
-### Tool calling
-
-```go
-// Define a tool with the builder API
-weatherTool := ollama.NewTool(
-    "get_weather",
-    "Get current weather for a location",
-    ollama.ObjectParams(
-        ollama.Param("location", ollama.ParamTypeString, "City name"),
-        ollama.Param("unit", ollama.ParamTypeString, "Temperature unit").
-            WithEnum("celsius", "fahrenheit"),
-    ).Required("location"),
-)
-
-// Send a chat request with tools
-resp, _ := client.Chat(ctx, ollama.ChatRequest{
-    Model:    "gemma4:31b",
-    Messages: []ollama.ChatMessage{{Role: "user", Content: "What's the weather in NYC?"}},
-    Tools:    []ollama.Tool{weatherTool},
-})
-
-// The model may respond with tool calls
-if len(resp.Message.ToolCalls) > 0 {
-    call := resp.Message.ToolCalls[0]
-    // Execute the tool, then return the result
-    result := ollama.ToolResultMessageFor(call, `{"temp": 72, "unit": "fahrenheit"}`)
-    // Continue the conversation with the tool result...
-}
-```
-
-### Generate embeddings
-
-```go
-embedding, err := client.Embed(ctx, "qwen3-embedding:8b", "mean reversion strategy")
-// embedding is []float64 with 4096 dimensions
-```
-
-### Index a codebase for RAG
-
-```go
-import (
-    "github.com/kstruzzieri/go-llm/ollama"
-    "github.com/kstruzzieri/go-llm/rag"
-)
-
-client := ollama.NewClient()
-store, _ := rag.NewSQLiteStore("vectors.db")
-defer store.Close()
-
-indexer := rag.NewIndexer(client, store,
-    rag.WithEmbeddingModel("qwen3-embedding:8b"),
-)
-indexer.IndexDirectory(ctx, "/path/to/project")
-```
-
-### Query with RAG context
-
-```go
-retriever := rag.NewRetriever(client, store,
-    rag.WithRetrieverModel("qwen3-embedding:8b"),
-)
-results, _ := retriever.Retrieve(ctx, "how does the pairs trading strategy work?", 5)
-context := retriever.BuildContext(results, 4096)
-
-// Feed context into a chat completion
-resp, _ := client.Chat(ctx, ollama.ChatRequest{
-    Model: "gemma4:31b",
-    Messages: []ollama.ChatMessage{
-        {Role: "system", Content: "Answer using the following code context:\n\n" + context},
-        {Role: "user", Content: "How does the pairs trading strategy calculate hedge ratios?"},
-    },
-})
-```
-
-## RAG Details
-
-### Chunking
-
-The code-aware chunker splits files at function/method/class boundaries for Go, Python, TypeScript, JavaScript, Rust, Java, and Ruby. Unknown file types fall back to a sliding window chunker.
-
-```go
-chunker := rag.NewCodeChunker(
-    rag.WithMaxChunkSize(1500),
-    rag.WithOverlap(200),
-)
-```
-
-### Vector Store
-
-SQLite-backed with brute-force cosine similarity search. Performant for codebases up to ~100k chunks (~50ms search). In-memory mode available for testing.
-
-```go
-// File-backed (production)
-store, _ := rag.NewSQLiteStore("vectors.db")
-
-// In-memory (testing)
-store, _ := rag.NewSQLiteStore(":memory:")
-```
-
-### Indexing
-
-- **Concurrent**: configurable worker pool (default: 4 workers) via `golang.org/x/sync/errgroup`
-- **Atomic**: existing data is preserved if embedding fails mid-index
-- **`.gitignore`-aware**: automatically loads root and nested `.gitignore` files (globs, `**` wildcards, directory-only rules). Note: negation patterns (`!`) cannot re-include files inside an ignored directory because the directory tree is skipped eagerly
-- Configurable file extensions and exclusion patterns
-
-```go
-indexer.IndexDirectory(ctx, dir,
-    rag.WithExtensions(".go", ".py", ".ts", ".md"),
-    rag.WithExclude("node_modules", ".git", "vendor"),
-    rag.WithConcurrency(8), // default: 4
-)
-```
-
-## Ollama Client
-
-### Options
-
-```go
-client := ollama.NewClient(
-    ollama.WithBaseURL("http://localhost:11434"),  // default
-    ollama.WithTimeout(5 * time.Minute),           // default
-)
-```
-
-### Model Management
-
-```go
-models, _ := client.ListModels(ctx)
-info, _ := client.ShowModel(ctx, "gemma4:31b")
-client.PullModel(ctx, "qwen3:8b", func(status string, completed, total int64) {
-    fmt.Printf("%s: %d/%d\n", status, completed, total)
-})
-```
-
-## Inline Completion (FIM)
-
-Fill-in-the-Middle completion for IDE integration with automatic context window management.
-
-```go
-import "github.com/kstruzzieri/go-llm/completion"
-
-provider := completion.NewProvider(client, "qwen3-coder-next")
-
-resp, _ := provider.Complete(ctx, completion.FIMRequest{
-    Prefix:    "func fibonacci(n int) int {\n\t",
-    Suffix:    "\n}",
-    FilePath:  "math.go",
-    MaxTokens: 128,
-})
-fmt.Println(resp.Completion)
-
-// Streaming variant
-provider.CompleteStream(ctx, req, func(token string) error {
-    fmt.Print(token)
-    return nil
-})
-```
-
-## Model Configuration
-
-Load model settings from `models.json` with provider configs, role-based defaults, and fallback chains that resolve against available provider models.
-
-`go-llm` does not hard-code a model roster — `models.json` is the sole source of truth. Substitute any model your configured provider can load by editing `models.json`; capabilities (chat / embedding / tool-call) are detected at runtime by `fingerprint/`. See [`docs/llm/`](docs/llm/) for the reference lineup shipped by default and the full BYO guide.
-
-Model entries may set static sampling defaults with `options`:
-
-```json
-"coding": {
-  "name": "qwen3-coder-next:latest",
-  "provider": "llamacpp",
-  "type": "moe",
-  "options": { "temperature": 0.15, "top_p": 0.9, "top_k": 40 }
-}
-```
-
-Defaults are keyed by provider/model identity; roles that share the same model
-must declare identical options. Explicit request values, including zero, win.
-`top_k` is a llama.cpp/Ollama extension, so omit it for strict hosted OpenAI
-endpoints that reject unknown request fields.
-
-```go
-import "github.com/kstruzzieri/go-llm/config"
-
-cfg, _ := config.Default() // auto-discovers models.json
-
-// Simple lookup
-model := cfg.ModelFor("chat") // e.g., "gemma4:31b"
-
-// Resolve with fallback chain (checks which models are actually available)
-resolved, _ := cfg.Resolve(ctx, client, "chat")
-fmt.Printf("Using %s (fallback: %v)\n", resolved.Name, resolved.IsFallback)
-```
-
-### Auxiliary model defaults
-
-`models.json` can optionally define side-task defaults for runtime helpers:
-`summarize`, `route`, `rerank`, `verify`, `extract`, `approval`, and `vision`.
-If one is omitted, go-llm falls back to existing defaults:
-
-| Side task | Fallback defaults |
-| --- | --- |
-| `summarize` | `analysis`, then `chat` |
-| `route` | `analysis`, then `chat` |
-| `rerank` | `analysis`, then `chat` |
-| `verify` | `analysis`, then `chat` |
-| `extract` | `analysis`, then `chat` |
-| `approval` | `agent`, then `chat` |
-| `vision` | `chat` |
-
-Explicit side-task defaults always win:
-
-```json
-{
-  "defaults": {
-    "chat": "general",
-    "analysis": "general",
-    "agent": "agent",
-    "summarize": "lightweight"
-  }
-}
-```
-
-`ModelFor`, `Resolve`, `ResolveCandidates`, and `RoleFallbackChain` all apply
-this fallback behavior. `ResolveAll` only enumerates defaults explicitly present
-in `models.json`.
-
-The `vision` slot is model selection only; image message payload support is
-tracked separately.
-
-The auxiliary use-case keys are exported as untyped string constants
-(`config.UseCaseSummarize`, `config.UseCaseRerank`, and the rest), enumerated by
-`config.SideTaskUseCases()`, and resolved to a model role by
-`cfg.RoleForUseCase(useCase)` — the same fallback semantics, exposed for callers
-that pick a side-task model without walking the full chain.
 
 ## MCP Server
 
@@ -658,40 +430,6 @@ Claude Desktop configuration (`claude_desktop_config.json`):
 The server exposes tools for chat, generation, code completion, embeddings, RAG, model management, and analysis, plus opt-in agent-memory tools (`agent_memory_search`, `agent_memory_create`, `agent_memory_promote`) registered only when `--agent-memory-db <path>` is set, along with prompt templates and routing/config resources. Remote model destinations are denied unless pre-admitted: the standalone server never prompts, so pass `-allow-destination provider=https://host/base` (repeatable) for each remote endpoint. Its admission scope is broader than Golem's route-derived manifest — any configured provider may be reached for any served purpose, plus health, model-listing, and warmth checks — so admit every remote provider the config declares, not just the destinations Golem's manifest showed. Chat, generate, completion, embedding, and analysis tools accept an optional `model` parameter; when omitted, the request is routed by `provider.Router` using a use-case-appropriate weight profile (chat / fim / embedding / reasoning / analysis / code-review / agent), with circuit-breaker-aware fallback. Routing state for diagnostics is exposed via the `route://breakers`, `route://warmth`, and `route://sticky` resources. (The actual model that served a given call is computed internally as `RouteOutcome.ActualModel` but is not currently included in tool responses; see Roadmap.)
 
 `rag_search` and chat requests with `use_rag=true` also accept optional `current_file`, `workspace_root`, and `open_files` fields for contextual ranking; chat rejects non-empty context fields when `use_rag=false`. Omitted or empty fields preserve the current hybrid-by-default retrieval path, response shape, and compact chat prompt. `rag_search` can additionally set `explain_scores=true` to return the existing scored-result JSON, including fused `RankScore` and available per-signal `Signals`; without that flag, contextual results are flattened back to the ordinary semantic-similarity `SearchResult` shape.
-
-## Parquet Export
-
-Export vector store contents to Parquet format for ML pipeline interop.
-
-```go
-import "github.com/kstruzzieri/go-llm/rag/parquet"
-
-info, _ := parquet.ExportVectorStore(ctx, store, "dataset.parquet",
-    parquet.WithDType(parquet.Float32),
-    parquet.WithSourcePattern("*.go"),
-    parquet.WithModel("qwen3-embedding:8b"),
-)
-fmt.Printf("Exported %d rows (%d clean, %d flagged)\n",
-    info.RowCount, info.Quality.CleanRows, info.Quality.FlaggedRows)
-```
-
-## Analysis
-
-Domain-specific analysis helpers that leverage Ollama models.
-
-```go
-import "github.com/kstruzzieri/go-llm/analysis"
-
-// Code review (optionally backed by RAG context)
-reviewer, _ := analysis.NewCodeReviewer(client, retriever, "gemma4:31b")
-review, _ := reviewer.Review(ctx, code, analysis.WithLanguage("go"))
-
-// ML training metrics analysis
-analyzer, _ := analysis.NewMetricsAnalyzer(client, "gemma4:31b")
-insight, _ := analyzer.AnalyzeTraining(ctx, analysis.TrainingMetrics{
-    Epoch: 10, Loss: 0.42, LearningRate: 1e-4,
-})
-```
 
 ## Roadmap
 
