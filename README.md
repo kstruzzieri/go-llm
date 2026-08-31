@@ -103,7 +103,7 @@ Run `llama-swap --config llama-swap.yaml --listen 127.0.0.1:8080`, then point a 
 ```json
 {
   "providers": {
-    "llamacpp": { "base_url": "http://127.0.0.1:8080", "timeout": "5m", "api_format": "openai-compat" },
+    "llamacpp": { "base_url": "http://127.0.0.1:8080", "timeout": "5m", "api_format": "openai-compat", "slot_discovery": true },
     "ollama":   { "base_url": "http://localhost:11434", "timeout": "5m" }
   },
   "models": {
@@ -114,6 +114,8 @@ Run `llama-swap --config llama-swap.yaml --listen 127.0.0.1:8080`, then point a 
 ```
 
 The model `name` must match the `llama-swap` model key. Set the provider's `api_key` field only if the proxy requires a Bearer token. Models on a backend that lacks `/v1/completions` can carve their capability set down (e.g. `"capabilities": ["chat", "stream"]`).
+
+`"slot_discovery": true` makes go-llm read the server's `/props` `total_slots` so future slot-aware admission can size concurrency to the backend. It is a per-provider opt-in (the library default is off) and belongs only on `openai-compat` providers backed by llama.cpp's `llama-server` or llama-swap — the shipped `models.json` enables it on the `llamacpp` provider because that config targets llama-swap. Leave it off for backends without `/props` (vLLM, LM Studio): an enabled backend that cannot answer `/props` is treated as having a single slot.
 
 ### llama.cpp without a proxy (pinned servers)
 
@@ -225,7 +227,51 @@ Golem builds and refreshes the workspace RAG index automatically in the backgrou
 golem index -root /path/to/project              # explicit index rebuild
 golem -root /path/to/project -no-auto-index     # disable the startup refresh
 golem -root /path/to/project -no-rag            # disable retrieval entirely
+golem -root /path/to/project -progressive       # L0/L1 source summaries + mixed context assembly
+golem -root /path/to/project -grounding        # check the answer's claims against the evidence it was given
 ```
+
+`-progressive` is opt-in and does two things. It generates and serves the L0/L1
+source summaries, using `defaults.summarize` and falling back to an existing
+`analysis` or `chat` default; with none configured, Golem warns that the
+summary half had no effect and every source keeps the deterministic metadata
+overview. It also switches the agent runtime to **mixed context assembly**,
+which allocates RAG results, conversation spans and agent-memory records at
+mixed fidelity under one global token budget instead of dropping whole tool
+results. That rewrites the model-visible bytes of every tool anchor, so the
+transcript a run sends differs from the non-`-progressive` one even when no
+summary model is configured. Add `-progressive` to `golem index` for the same
+summary behavior on an explicit rebuild.
+
+`-grounding` is opt-in and independent of `-progressive`; it works on both
+retrieval modes. After a completed turn that used `retrieve`, a lightweight
+judge checks the final answer's claims against the retrieval evidence that
+actually reached the answering prompt, and Golem prints one line:
+
+```text
+grounding · partial · 3/4 claims · 5 evidence · 1.2s · 850 tok
+```
+
+The verdict answers a narrow question: is each claim supported by the retrieval
+evidence that reached the prompt? Claims the model made from ordinary language
+or standard-library knowledge count as unsupported, because that knowledge was
+not in the evidence - so `partial` is a reason to look, not a finding that the
+answer is wrong. It costs two sequential model calls per retrieval-backed turn,
+and prints a notice while it runs.
+
+It is fail-open. A routing failure, malformed verifier output, the 60-second
+ceiling, or Ctrl-C during the check prints one line and changes nothing else -
+not the answer, not the exit code, not the recorded run status. Evidence the
+CLI cannot reconstruct exactly is reported rather than judged, so a verdict is
+never issued over a partial evidence set. Turns that never retrieved stay
+silent. Verifier tokens are reported separately from the run's own usage, and
+`-trace` persists the full per-claim report. Note this is unrelated to the
+`.golem.json` `verify` command, which checks the workspace after a write.
+
+Summaries are generated once per source and refreshed only when the source's
+content or vector space changes, so the model cost lands on the first indexing
+run after you enable the flag. A source that fails to summarize keeps the
+metadata overview and never blocks index publication.
 
 Use a specific config or backend endpoint:
 
@@ -245,6 +291,10 @@ golem -root /path/to/project -allow-write -allow-exec
 ```
 
 Inside the REPL, use `/help`, `/tools`, `/model`, `/new`, `/clear`, `/undo`, and `/exit`. Any other line is sent to the agent as the current goal.
+
+Approval prompts that offer an `a` answer also accept "always this session", and the prompt names the grant's scope because the two classes are deliberately asymmetric: `a` on a command prompt (`a=always this command`) covers only that exact command, while `a` on an edit prompt (`a=all edits this session`) enables auto-approval for **every** write/edit in the workspace — it is `/auto-edits on`, not "always this file". `/auto-edits on|off` toggles the write/edit grant explicitly, `/grants` counts the active session grants, and `/grants clear` revokes them all without touching history. Grants are in-memory only and die with `/new`, `/clear`, a successful `/resume`, or process exit.
+
+Two security properties to keep in mind before granting. First, an exec grant pins the command's identity (argv, cwd, sanitized environment values, timeout, resolved executable path) but not the contents of files that command reads or runs: `a` on `go test ./...` or `bash build.sh` keeps auto-approving after the test files or the script change. Second, the two grants compose: with auto-edits on and a test/build command granted, the model can modify workspace files and run them without any further prompt. That is the intended edit-test loop for trusted work — when processing untrusted content (web pages, third-party repos, external MCP output), leave auto-edits off and prefer `y` over `a`, or `/grants clear` before continuing.
 
 ### Scripting / one-shot mode
 
@@ -676,7 +726,7 @@ Run the same full suite manually:
 docker compose -f docker-compose.ci.yml run --rm ci ./scripts/ci-local --mode full
 ```
 
-`full` includes `golangci-lint run`, `go test -race ./...`, and `go test -run '^$' ./...`. The pre-push hook runs that full suite automatically before pushes. GitHub still runs the required `Lint & Test` workflow on PRs to satisfy branch protection; push-triggered Actions and macOS smoke remain disabled unless manually dispatched. See [`docs/local-ci.md`](docs/local-ci.md) for the full local CI workflow.
+`full` includes `golangci-lint fmt --diff`, `golangci-lint run`, `go test -race ./...`, and `go test -run '^$' ./...`. The pre-push hook runs that full suite automatically before pushes. GitHub runs the required `Lint & Test` and `macOS Compile Smoke` workflows on PRs; ordinary push-triggered Actions remain disabled, and either workflow can also be dispatched manually. See [`docs/local-ci.md`](docs/local-ci.md) for the full local CI workflow.
 
 ## License
 

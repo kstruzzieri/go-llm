@@ -1,0 +1,117 @@
+{
+  "id": "mem-collector-cert-rotate-mixed",
+  "source": "assembly-corpus-mixed",
+  "captured_at": "0001-01-01T00:00:00Z",
+  "system": "You are the driftwatch assistant. driftwatch is a self-hosted telemetry ingest and alerting daemon. Answer using only the provided conversation, memory records, and retrieved context.",
+  "tools": null,
+  "turns": [
+    {
+      "role": "user",
+      "content": "Collector 2.4 rollout day. The canary ring took the build overnight - can you walk its metrics against the 2.3 baseline before we let the wave scheduler start on the general fleet this afternoon?"
+    },
+    {
+      "role": "assistant",
+      "content": "Walked the canary ring against the 2.3 baseline: scrape latency and memory are flat, and the one divergence is the known startup log volume change from the new config parser. Nothing blocks the wave scheduler."
+    },
+    {
+      "role": "user",
+      "content": "Good. Two boxes in the canary ring are still pinned to 2.2 from the incident freeze in the spring, and the pin file outlived the freeze. Can you lift the stale pins so the waves do not skip them forever?"
+    },
+    {
+      "role": "assistant",
+      "content": "Lifted both stale 2.2 pins and left a note in the freeze log pointing at today's lift; the wave scheduler picked both boxes up for the first general wave and neither shows any residue from the old freeze."
+    },
+    {
+      "role": "user",
+      "content": "The rollout dashboard also needs its version breakdown panel fixed - it still groups 2.4 release candidates with the final build, which made the canary numbers unreadable last time. Can you split them properly?"
+    },
+    {
+      "role": "assistant",
+      "content": "Split the version breakdown panel so release candidates chart separately from the final 2.4 build; the canary week is now legible in hindsight and future rollouts inherit the corrected grouping."
+    },
+    {
+      "role": "user",
+      "content": "Last rollout chore: the wave scheduler's pause thresholds have not been revisited since the fleet grew by a third. Can you re-derive them so one bad rack does not pause a wave that is actually healthy?"
+    },
+    {
+      "role": "assistant",
+      "content": "Re-derived the wave pause thresholds against the current fleet size with rack-level failure isolation; a single bad rack now flags for review without pausing an otherwise healthy wave, and the derivation is linked from the scheduler config."
+    },
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "id": "c1",
+          "name": "agent_memory_search",
+          "arguments": {
+            "query": ""
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "content": "rec-canary-ring · working · created:2025-07-27 · updated:2025-07-27 · scope:session · ns: · src:\nrec-cert-cadence · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src: · collector client certs rotate every 20 days through cert-loader\nrec-freeze-log · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:\nrec-wave-thresholds · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:",
+      "tool_call_id": "c1",
+      "name": "agent_memory_search"
+    },
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "id": "c2",
+          "name": "retrieve",
+          "arguments": {
+            "query": "collector client certificate rotation cadence",
+            "k": 3
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "content": "### source: \"docs/tls.md\"\npurpose: TLS guide: mutual TLS everywhere, rotation via cert-loader.\nlanguage: markdown\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n--- source: \"docs/tls.md\" (lines 1-9, similarity: 1.00) ---\n1| # driftwatch TLS\n2| \n3| Everything between collectors and the ingest edge speaks mutual TLS.\n4| Public guidance suggests rotating client certificates every 90 days;\n5| driftwatch fleets run a tighter cadence set in deployment config,\n6| because a collector that misses one rotation window should still be\n7| inside its trust lifetime at the next one. Rotation is handled by\n8| cert-loader, which swaps certificates without restarting the\n9| collector process.\n\n### source: \"internal/collector/certloader.go\"\npurpose: Restart-free client certificate hot-swapping.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n\n### source: \"internal/collector/dial.go\"\npurpose: Bounded-backoff dialing that re-reads certificates per attempt.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n",
+      "tool_call_id": "c2",
+      "name": "retrieve"
+    },
+    {
+      "role": "user",
+      "content": "On what cadence do collector client certificates rotate?"
+    }
+  ],
+  "golden": {
+    "tool_calls": null,
+    "final_answer_criteria": "States that collector client certificates rotate every 20 days (through cert-loader). Answers that only say the cadence is set in deployment config score 0. An answer giving the public every-90-days guidance as the fleet cadence scores 0. An answer presenting both the correct and a competing value without committing to one scores 0."
+  },
+  "assembly_eval": {
+    "pair_id": "mem-collector-cert-rotate",
+    "mode": "mixed",
+    "candidate_ids": [
+      "01e379af1db98149285be3aa1674e3293f374f71c6851e1ff18f13a923706f0c",
+      "d16ae2fbb37d61dcede167c1b8612be294e2a41f2326b630e682dd7bf0c9e138",
+      "e5ee7ee014c732b75d3b89d2a6a4c922ac1fe3ea5b63775008fa20fa625b5af5",
+      "rec-canary-ring",
+      "rec-cert-cadence",
+      "rec-freeze-log",
+      "rec-wave-thresholds"
+    ],
+    "estimated_prompt_tokens": 878,
+    "state_digest": "05b14536af2118bdbf4156f08064a4179f3ecf1cbbd07134062ff98630f35150",
+    "subjects": [
+      "(c1|memory|rec-canary-ring)",
+      "(c1|memory|rec-cert-cadence)",
+      "(c1|memory|rec-freeze-log)",
+      "(c1|memory|rec-wave-thresholds)",
+      "(c2|rag|docs/tls.md)",
+      "(c2|rag|internal/collector/certloader.go)",
+      "(c2|rag|internal/collector/dial.go)"
+    ],
+    "stratum": "memory_only",
+    "answer_home": "memory",
+    "scenario_family": "collector-cert-mem",
+    "budget": 923,
+    "raw_state_tokens": 1539,
+    "pressure_level": "critical",
+    "shed_bytes": 2231
+  }
+}

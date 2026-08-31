@@ -1,0 +1,26 @@
+{
+  "id": "conv-spool-flush-early-topline",
+  "source": "assembly-corpus-mixed",
+  "captured_at": "0001-01-01T00:00:00Z",
+  "system": "You are the driftwatch assistant. driftwatch is a self-hosted telemetry ingest and alerting daemon. Answer using only the provided conversation, memory records, and retrieved context.",
+  "tools": null,
+  "turns": [
+    {
+      "role": "user",
+      "content": "Facts:\nThe team agreed in conversation to hold the canary spool flush at 45 seconds through the weekend soak; the shipped default in internal/spool/spool.go stays at 30 seconds and profile overrides come from deployment config.\n\nQuestion: What flush cadence did we settle on for the canary spool while the soak runs?"
+    }
+  ],
+  "golden": {
+    "tool_calls": null,
+    "final_answer_criteria": "States the canary spool flush cadence is 45 seconds. Answering 30 seconds (or twice a minute, the shipped default) scores 0. An answer presenting both the correct and a competing value without committing to one scores 0."
+  },
+  "assembly_eval": {
+    "pair_id": "conv-spool-flush-early",
+    "mode": "topline",
+    "candidate_ids": null,
+    "estimated_prompt_tokens": 125,
+    "stratum": "conversation_only",
+    "answer_home": "conversation",
+    "scenario_family": "spool-flush-window"
+  }
+}

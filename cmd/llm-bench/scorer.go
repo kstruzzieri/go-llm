@@ -116,6 +116,13 @@ type scorerOptions struct {
 	judgeTransport string
 	judgeBaseURL   string
 	judgeAPIKey    string
+	// judgeDisableThinking opts the openai-compat judge transport into
+	// translating the judge's Think=false directive onto the wire as
+	// chat_template_kwargs.enable_thinking=false (a llama.cpp/vLLM template
+	// extension). Off by default: api.openai.com rejects unrecognized
+	// top-level arguments with HTTP 400. Ignored by other transports (the
+	// Ollama client always forwards think natively).
+	judgeDisableThinking bool
 	// manualLabelsPath is the human labels JSONL consumed by the "manual"
 	// scorer (AnswerQuality = expected_answer_quality).
 	manualLabelsPath string
@@ -146,6 +153,7 @@ func newScorer(ctx context.Context, name string, opts scorerOptions) (Scorer, er
 			return nil, err
 		}
 		scorer.JudgeProvider = transport.providerName
+		scorer.ThinkEnforced = transport.thinkEnforced
 		if err := validateJudgeModel(ctx, transport.checker, scorer.JudgeModel); err != nil {
 			return nil, err
 		}
@@ -179,6 +187,13 @@ type judgeTransport struct {
 	chat         judgeChatClient
 	checker      judgeModelChecker
 	providerName string
+	// thinkEnforced records whether this transport actually delivers the
+	// judge's Think=false directive to the backend: true for the Ollama
+	// client (native think field) and for openai-compat with
+	// judgeDisableThinking set; false for openai-compat without the opt-in
+	// and for the Claude CLI transport. Folded into the cache key so
+	// verdicts judged under different think regimes can never alias.
+	thinkEnforced bool
 }
 
 // newJudgeTransport resolves opts.judgeTransport to a judge backend. Empty or
@@ -195,7 +210,7 @@ func newJudgeTransport(opts scorerOptions) (judgeTransport, error) {
 		if err != nil {
 			return judgeTransport{}, fmt.Errorf("llm-judge client: %w", err)
 		}
-		return judgeTransport{chat: client, checker: client, providerName: defaultBenchProvider}, nil
+		return judgeTransport{chat: client, checker: client, providerName: defaultBenchProvider, thinkEnforced: true}, nil
 	case openAICompatTransport:
 		baseURL := strings.TrimSpace(opts.judgeBaseURL)
 		if baseURL == "" {
@@ -214,7 +229,8 @@ func newJudgeTransport(opts scorerOptions) (judgeTransport, error) {
 			openaicompat.WithProviderName(providerName),
 		)
 		adapter := newOpenAICompatJudge(prov)
-		return judgeTransport{chat: adapter, checker: adapter, providerName: prov.Name()}, nil
+		adapter.disableThinking = opts.judgeDisableThinking
+		return judgeTransport{chat: adapter, checker: adapter, providerName: prov.Name(), thinkEnforced: opts.judgeDisableThinking}, nil
 	case claudeCLITransport:
 		adapter := newClaudeCLIJudge(opts.judgeModel)
 		return judgeTransport{chat: adapter, checker: adapter, providerName: claudeCLIProviderName}, nil
@@ -247,6 +263,7 @@ func canonicalOpenAICompatBaseURL(raw string) string {
 	u.Host = strings.ToLower(u.Host)
 	u.User = nil
 	u.RawQuery = ""
+	u.ForceQuery = false
 	u.Fragment = ""
 	u.RawPath = ""
 	u.Path = strings.TrimRight(u.Path, "/")
@@ -339,10 +356,15 @@ type LLMJudgeScorer struct {
 	JudgeProvider    string // provider instance identity (e.g. "ollama", "openai-compat:<endpoint-id>"); folded into the cache key and persisted for provenance
 	JudgeModel       string
 	JudgeModelDigest string // optional; empty when /api/show was unavailable
-	JudgeTimeout     time.Duration
-	Cache            judgeCacheStore  // optional; nil disables caching
-	BypassCache      bool             // when true, Score skips both Get and Put
-	Clock            func() time.Time // injectable; defaults to time.Now().UTC()
+	// ThinkEnforced records whether the transport delivers the judge's
+	// Think=false directive to the backend (see judgeTransport.thinkEnforced).
+	// Part of the cache key: a verdict judged by a freely-thinking judge and
+	// one judged with thinking disabled are different measurements.
+	ThinkEnforced bool
+	JudgeTimeout  time.Duration
+	Cache         judgeCacheStore  // optional; nil disables caching
+	BypassCache   bool             // when true, Score skips both Get and Put
+	Clock         func() time.Time // injectable; defaults to time.Now().UTC()
 }
 
 // now returns the scorer's notion of the current time. Injected via Clock
@@ -600,6 +622,7 @@ func (s *LLMJudgeScorer) cacheKeyForJudgeRequest(req ollama.ChatRequest) string 
 		UserPrompt:       judgeUserPromptOf(req),
 		Format:           req.Format,
 		Think:            req.Think,
+		ThinkEnforced:    s.ThinkEnforced,
 		Temperature:      judgeTemperature,
 		NumPredict:       judgeTokenBudget,
 	})
@@ -944,6 +967,27 @@ func modelSelectorWithoutBenchProvider(s string) string {
 		}
 	}
 	return s
+}
+
+func canonicalCandidateModelKey(s string) string {
+	selector := strings.TrimSpace(s)
+	provider, model, found := strings.Cut(selector, "/")
+	if !found {
+		return normalizeModelSelector(selector)
+	}
+	provider = normalizeModelSelector(provider)
+	model = normalizeModelSelector(model)
+	switch provider {
+	case defaultBenchProvider:
+		if nestedProvider, _, ok := strings.Cut(model, "/"); ok && supportedCandidateProvider(nestedProvider) {
+			return provider + "/" + model
+		}
+		return model
+	case openAICompatTransport:
+		return provider + "/" + model
+	default:
+		return normalizeModelSelector(selector)
+	}
 }
 
 func joinScoreNotes(parts ...string) string {

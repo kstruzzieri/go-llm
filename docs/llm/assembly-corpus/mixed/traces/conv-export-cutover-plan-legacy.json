@@ -1,0 +1,65 @@
+{
+  "id": "conv-export-cutover-plan-legacy",
+  "source": "assembly-corpus-mixed",
+  "captured_at": "0001-01-01T00:00:00Z",
+  "system": "You are the driftwatch assistant. driftwatch is a self-hosted telemetry ingest and alerting daemon. Answer using only the provided conversation, memory records, and retrieved context.",
+  "tools": null,
+  "turns": [
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "id": "c2",
+          "name": "agent_memory_search",
+          "arguments": {
+            "query": ""
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "content": "rec-cutover-checklist · working · 2025-07-27 · endpoint cutovers follow the staged checklist in the deploy repo; both endpoints run in parallel until the flip is signed off\nrec-loader-contact · semantic · 2025-07-27 · warehouse loader questions go to the data platform channel; they watch it during business hours\nrec-warehouse-window · semantic · 2025-07-27 · the warehouse maintenance window closes at 01:45 UTC; loads that start earlier contend with their vacuum jobs",
+      "tool_call_id": "c2",
+      "name": "agent_memory_search"
+    },
+    {
+      "role": "user",
+      "content": "When is the production exporter cutover scheduled?"
+    }
+  ],
+  "golden": {
+    "tool_calls": null,
+    "final_answer_criteria": "States the production exporter cutover runs at 02:30 UTC Wednesday. Answering 01:45 UTC (the warehouse maintenance-window close from memory) scores 0. An answer presenting both the correct and a competing value without committing to one scores 0."
+  },
+  "assembly_eval": {
+    "pair_id": "conv-export-cutover-plan",
+    "mode": "legacy",
+    "candidate_ids": [
+      "25d25ff90f60d152134116595e300001a0b81ca288df0d0ae3e91c5f2bd46ed1",
+      "caab255c6cfa3b2c3e4e2ba5b8f400d11ff791ae6abca9a2b9cd62f93be3102c",
+      "d1991767b933e34354355e8c7ac697dd70725b3d3af09e18b64315c9533c31fa",
+      "rec-cutover-checklist",
+      "rec-loader-contact",
+      "rec-warehouse-window"
+    ],
+    "estimated_prompt_tokens": 179,
+    "state_digest": "f90ba019d304232791bef5f004689551ef2e51be53fbeb001855064cc22bb100",
+    "subjects": [
+      "(c1|rag|internal/export/exporter.go)",
+      "(c1|rag|internal/export/backlog.go)",
+      "(c1|rag|docs/export.md)",
+      "(c2|memory|rec-cutover-checklist)",
+      "(c2|memory|rec-loader-contact)",
+      "(c2|memory|rec-warehouse-window)"
+    ],
+    "stratum": "conversation_only",
+    "answer_home": "conversation",
+    "scenario_family": "export-cutover-conv",
+    "budget": 1180,
+    "raw_state_tokens": 1967,
+    "pressure_level": "ok",
+    "shed_messages": 14,
+    "shed_bytes": 6591
+  }
+}

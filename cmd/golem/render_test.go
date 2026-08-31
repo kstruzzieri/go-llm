@@ -15,7 +15,7 @@ import (
 func TestRenderer_StreamToolStepFinal(t *testing.T) {
 	var buf bytes.Buffer
 	clock := time.Unix(0, 0)
-	r := newRenderer(&buf, false, 16, func() time.Time { return clock })
+	r := newRenderer(&buf, false, 16, func() time.Time { return clock }, false)
 
 	ctx := context.Background()
 	_ = r.OnToken(ctx, agent.TokenEvent{Step: 0, Content: "hello "})
@@ -45,13 +45,13 @@ func TestRenderer_StreamToolStepFinal(t *testing.T) {
 func TestRenderer_FinalFooter_Stopped(t *testing.T) {
 	var buf bytes.Buffer
 	clock := time.Unix(0, 0)
-	r := newRenderer(&buf, false, 16, func() time.Time { return clock })
+	r := newRenderer(&buf, false, 16, func() time.Time { return clock }, false)
 	clock = clock.Add(3 * time.Second)
 	r.finalFooter(agent.Result{
 		Steps:      make([]agent.StepRecord, 2),
 		Usage:      provider.Usage{TotalTokens: 128},
 		StopReason: agent.StepCapReached,
-	})
+	}, 3*time.Second)
 	want := "done · 2 steps · 3.0s · 128 tok  stopped: step_cap_reached\n"
 	if buf.String() != want {
 		t.Errorf("final footer = %q, want %q", buf.String(), want)
@@ -61,7 +61,7 @@ func TestRenderer_FinalFooter_Stopped(t *testing.T) {
 func TestRenderer_OnStepStartsNewLineAfterUnterminatedToken(t *testing.T) {
 	var buf bytes.Buffer
 	clock := time.Unix(0, 0)
-	r := newRenderer(&buf, false, 16, func() time.Time { return clock })
+	r := newRenderer(&buf, false, 16, func() time.Time { return clock }, false)
 
 	if err := r.OnToken(context.Background(), agent.TokenEvent{Content: "answer"}); err != nil {
 		t.Fatalf("OnToken: %v", err)
@@ -79,13 +79,13 @@ func TestRenderer_OnStepStartsNewLineAfterUnterminatedToken(t *testing.T) {
 func TestRenderer_FinalFooter_Completed_NoStoppedSuffix(t *testing.T) {
 	var buf bytes.Buffer
 	clock := time.Unix(0, 0)
-	r := newRenderer(&buf, false, 16, func() time.Time { return clock })
+	r := newRenderer(&buf, false, 16, func() time.Time { return clock }, false)
 	clock = clock.Add(2 * time.Second)
 	r.finalFooter(agent.Result{
 		Steps:      make([]agent.StepRecord, 1),
 		Usage:      provider.Usage{TotalTokens: 42},
 		StopReason: agent.Completed,
-	})
+	}, 2*time.Second)
 	want := "done · 1 step · 2.0s · 42 tok\n"
 	if buf.String() != want {
 		t.Errorf("completed footer = %q, want %q (no stopped suffix)", buf.String(), want)
@@ -95,7 +95,7 @@ func TestRenderer_FinalFooter_Completed_NoStoppedSuffix(t *testing.T) {
 func TestRenderer_OnStep_NilRouteOutcome_RendersQuestionMark(t *testing.T) {
 	var buf bytes.Buffer
 	clock := time.Unix(0, 0)
-	r := newRenderer(&buf, false, 16, func() time.Time { return clock })
+	r := newRenderer(&buf, false, 16, func() time.Time { return clock }, false)
 	if err := r.OnStep(context.Background(), agent.StepEvent{Index: 0, Pressure: agent.Pressure{}}); err != nil {
 		t.Fatalf("OnStep: %v", err)
 	}
@@ -107,7 +107,7 @@ func TestRenderer_OnStep_NilRouteOutcome_RendersQuestionMark(t *testing.T) {
 
 func TestRenderer_OnToolCall_NoArgs_OmitsTrailingSpace(t *testing.T) {
 	var buf bytes.Buffer
-	r := newRenderer(&buf, false, 16, func() time.Time { return time.Unix(0, 0) })
+	r := newRenderer(&buf, false, 16, func() time.Time { return time.Unix(0, 0) }, false)
 	if err := r.OnToolCall(context.Background(), agent.ToolCallEvent{
 		Call: provider.ToolCall{Function: provider.ToolCallFunction{Name: "list"}},
 	}); err != nil {
@@ -121,7 +121,7 @@ func TestRenderer_OnToolCall_NoArgs_OmitsTrailingSpace(t *testing.T) {
 func TestRenderer_Color_WrapsFooter(t *testing.T) {
 	var buf bytes.Buffer
 	clock := time.Unix(0, 0)
-	r := newRenderer(&buf, true, 16, func() time.Time { return clock })
+	r := newRenderer(&buf, true, 16, func() time.Time { return clock }, false)
 	_ = r.OnStep(context.Background(), agent.StepEvent{Index: 0, Pressure: agent.Pressure{}})
 	got := buf.String()
 	if got[:4] != "\x1b[2m" || got[len(got)-5:] != "\x1b[0m\n" {
@@ -129,10 +129,105 @@ func TestRenderer_Color_WrapsFooter(t *testing.T) {
 	}
 }
 
+func TestRendererMarkdownStreamsAndResetsBeforeStepFooter(t *testing.T) {
+	var buf bytes.Buffer
+	r := newRenderer(&buf, true, 16, func() time.Time { return time.Unix(0, 0) }, false)
+	ctx := context.Background()
+	for _, chunk := range []string{"#", " Heading"} {
+		if err := r.OnToken(ctx, agent.TokenEvent{Content: chunk}); err != nil {
+			t.Fatalf("OnToken(%q): %v", chunk, err)
+		}
+	}
+	if err := r.OnStep(ctx, agent.StepEvent{Index: 0, Pressure: agent.Pressure{}}); err != nil {
+		t.Fatalf("OnStep: %v", err)
+	}
+
+	want := "\x1b[1m# Heading\x1b[0m\n\x1b[2m? · 0.0s · ctx 0% · step 1/16\x1b[0m\n"
+	if got := buf.String(); got != want {
+		t.Fatalf("renderer output mismatch:\n got: %q\nwant: %q", got, want)
+	}
+}
+
+func TestRendererMarkdownFenceContinuesAcrossStepChrome(t *testing.T) {
+	var buf bytes.Buffer
+	r := newRenderer(&buf, true, 16, func() time.Time { return time.Unix(0, 0) }, false)
+	ctx := context.Background()
+	if err := r.OnToken(ctx, agent.TokenEvent{Content: "```go\npart"}); err != nil {
+		t.Fatalf("OnToken opener: %v", err)
+	}
+	if err := r.OnStep(ctx, agent.StepEvent{Index: 0}); err != nil {
+		t.Fatalf("OnStep: %v", err)
+	}
+	if err := r.OnToken(ctx, agent.TokenEvent{Content: "rest\n```\n"}); err != nil {
+		t.Fatalf("OnToken closer: %v", err)
+	}
+	if err := r.finish(); err != nil {
+		t.Fatalf("finish: %v", err)
+	}
+
+	want := markdownAccent + "rest" + markdownReset + "\n" + markdownFence + "```" + markdownReset + "\n"
+	if got := buf.String(); !strings.Contains(got, want) {
+		t.Fatalf("step chrome discarded the open fence:\n got: %q\nwant substring: %q", got, want)
+	}
+}
+
+func TestRendererMarkdownFenceClosesAtStepBoundary(t *testing.T) {
+	var buf bytes.Buffer
+	r := newRenderer(&buf, true, 16, func() time.Time { return time.Unix(0, 0) }, false)
+	ctx := context.Background()
+	if err := r.OnToken(ctx, agent.TokenEvent{Content: "```go\ncode\n```"}); err != nil {
+		t.Fatalf("OnToken fence: %v", err)
+	}
+	if err := r.OnStep(ctx, agent.StepEvent{Index: 0}); err != nil {
+		t.Fatalf("OnStep: %v", err)
+	}
+	if err := r.OnToken(ctx, agent.TokenEvent{Content: "plain\n"}); err != nil {
+		t.Fatalf("OnToken prose: %v", err)
+	}
+	if err := r.finish(); err != nil {
+		t.Fatalf("finish: %v", err)
+	}
+
+	want := markdownFence + "```" + markdownReset + "\n" +
+		"\x1b[2m? · 0.0s · ctx 0% · step 1/16\x1b[0m\nplain\n"
+	if got := buf.String(); !strings.Contains(got, want) {
+		t.Fatalf("step boundary did not close the fence:\n got: %q\nwant substring: %q", got, want)
+	}
+}
+
+func TestRendererMarkdownFenceOpensAtStepBoundary(t *testing.T) {
+	for _, opener := range []string{"```", "```go"} {
+		t.Run(opener, func(t *testing.T) {
+			var buf bytes.Buffer
+			r := newRenderer(&buf, true, 16, func() time.Time { return time.Unix(0, 0) }, false)
+			ctx := context.Background()
+			if err := r.OnToken(ctx, agent.TokenEvent{Content: opener}); err != nil {
+				t.Fatalf("OnToken opener: %v", err)
+			}
+			if err := r.OnStep(ctx, agent.StepEvent{Index: 0}); err != nil {
+				t.Fatalf("OnStep: %v", err)
+			}
+			if err := r.OnToken(ctx, agent.TokenEvent{Content: "code\n```\n"}); err != nil {
+				t.Fatalf("OnToken body: %v", err)
+			}
+			if err := r.finish(); err != nil {
+				t.Fatalf("finish: %v", err)
+			}
+
+			want := markdownFence + opener + markdownReset + "\n" +
+				"\x1b[2m? · 0.0s · ctx 0% · step 1/16\x1b[0m\n" +
+				markdownAccent + "code" + markdownReset + "\n" + markdownFence + "```" + markdownReset + "\n"
+			if got := buf.String(); !strings.Contains(got, want) {
+				t.Fatalf("step boundary did not open the fence:\n got: %q\nwant substring: %q", got, want)
+			}
+		})
+	}
+}
+
 func renderResult(t *testing.T, name string, res agent.ToolResult) string {
 	t.Helper()
 	var buf bytes.Buffer
-	r := newRenderer(&buf, false, 16, func() time.Time { return time.Unix(0, 0) })
+	r := newRenderer(&buf, false, 16, func() time.Time { return time.Unix(0, 0) }, false)
 	ev := agent.ToolResultEvent{
 		Call:   provider.ToolCall{Function: provider.ToolCallFunction{Name: name}},
 		Result: res,
@@ -175,7 +270,7 @@ func TestResultSummary_ByTool(t *testing.T) {
 
 func TestOnToolResult_NewlineAfterUnterminatedToken(t *testing.T) {
 	var buf bytes.Buffer
-	r := newRenderer(&buf, false, 16, func() time.Time { return time.Unix(0, 0) })
+	r := newRenderer(&buf, false, 16, func() time.Time { return time.Unix(0, 0) }, false)
 	ctx := context.Background()
 	if err := r.OnToken(ctx, agent.TokenEvent{Content: "partial"}); err != nil {
 		t.Fatalf("OnToken: %v", err)
@@ -194,7 +289,7 @@ func TestOnToolResult_NewlineAfterUnterminatedToken(t *testing.T) {
 
 func TestRendererOnPressureGatedOncePerRun(t *testing.T) {
 	var buf bytes.Buffer
-	r := newRenderer(&buf, false, 16, func() time.Time { return time.Unix(0, 0) })
+	r := newRenderer(&buf, false, 16, func() time.Time { return time.Unix(0, 0) }, false)
 	r.warnPressure = true
 	warn := agent.PressureEvent{Pressure: agent.Pressure{Level: agent.LevelWarn, UsedPct: 0.80, Cause: agent.CauseHistory}}
 	below := agent.PressureEvent{Pressure: agent.Pressure{Level: agent.LevelWatch, UsedPct: 0.65}}
@@ -221,7 +316,7 @@ func TestRendererOnPressureGatedOncePerRun(t *testing.T) {
 
 func TestRendererOnPressureDisabled(t *testing.T) {
 	var buf bytes.Buffer
-	r := newRenderer(&buf, false, 16, func() time.Time { return time.Unix(0, 0) })
+	r := newRenderer(&buf, false, 16, func() time.Time { return time.Unix(0, 0) }, false)
 	r.warnPressure = false
 	warn := agent.PressureEvent{Pressure: agent.Pressure{Level: agent.LevelCritical, UsedPct: 0.95}}
 	if err := r.OnPressure(context.Background(), warn); err != nil {
@@ -229,5 +324,44 @@ func TestRendererOnPressureDisabled(t *testing.T) {
 	}
 	if buf.Len() != 0 {
 		t.Fatalf("disabled renderer must not print: %q", buf.String())
+	}
+}
+
+// TestResultSummaryTruncatedUnderMixed pins the three cells that matter.
+// ToolResult.Truncated describes the FLAT Content; under mixed assembly a
+// structured result's flat content is replaced wholesale, so the marker would
+// name a rendering nobody read. The two negative cells are what stop the fix
+// from degenerating into "never print (truncated)".
+func TestResultSummaryTruncatedUnderMixed(t *testing.T) {
+	structured := &agent.ContextSet{Groups: []agent.ContextGroup{{}}}
+	for _, tc := range []struct {
+		name   string
+		mixed  bool
+		ctxSet *agent.ContextSet
+		want   bool
+	}{
+		{"mixed off, structured result: flat content is what the model read", false, structured, true},
+		{"mixed on, plain result: flat content is kept verbatim", true, nil, true},
+		{"mixed on, structured result: flat content was discarded", true, structured, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			r := newRenderer(&buf, false, 16, func() time.Time { return time.Unix(0, 0) }, tc.mixed)
+			err := r.OnToolResult(context.Background(), agent.ToolResultEvent{
+				Call:   provider.ToolCall{Function: provider.ToolCallFunction{Name: "read_file"}},
+				Result: agent.ToolResult{Content: "a\nb\n", Truncated: true, Context: tc.ctxSet},
+			})
+			if err != nil {
+				t.Fatalf("OnToolResult: %v", err)
+			}
+			// Assert on the rendered LINE, not on a recomputed suffix: the bug was
+			// in what reached the terminal.
+			if got := strings.Contains(buf.String(), "(truncated)"); got != tc.want {
+				t.Errorf("output %q contains (truncated) = %v, want %v", buf.String(), got, tc.want)
+			}
+			if !strings.Contains(buf.String(), "2 lines") {
+				t.Errorf("summary body lost: %q", buf.String())
+			}
+		})
 	}
 }

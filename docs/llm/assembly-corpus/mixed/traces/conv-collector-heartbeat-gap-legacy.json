@@ -1,0 +1,65 @@
+{
+  "id": "conv-collector-heartbeat-gap-legacy",
+  "source": "assembly-corpus-mixed",
+  "captured_at": "0001-01-01T00:00:00Z",
+  "system": "You are the driftwatch assistant. driftwatch is a self-hosted telemetry ingest and alerting daemon. Answer using only the provided conversation, memory records, and retrieved context.",
+  "tools": null,
+  "turns": [
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "id": "c2",
+          "name": "agent_memory_search",
+          "arguments": {
+            "query": ""
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "content": "rec-fleet-history · semantic · 2025-07-27 · the pre-reorg fleet ran the collector heartbeat every 60 seconds; the migration notes call that era underinstrumented\nrec-migration-board · semantic · 2025-07-27 · the collector migration board tracks per-fleet progress; two fleets remain on the old registration path\nrec-slow-start · working · 2025-07-27 · slow-start regressions show up in the first minutes after a collector restart; keep the restart annotations on",
+      "tool_call_id": "c2",
+      "name": "agent_memory_search"
+    },
+    {
+      "role": "user",
+      "content": "What interval is the collector heartbeat being held at through the migration?"
+    }
+  ],
+  "golden": {
+    "tool_calls": null,
+    "final_answer_criteria": "States the collector heartbeat is held at 20 seconds through the migration. Answering 60 seconds (the pre-reorg interval from memory) scores 0. An answer presenting both the correct and a competing value without committing to one scores 0."
+  },
+  "assembly_eval": {
+    "pair_id": "conv-collector-heartbeat-gap",
+    "mode": "legacy",
+    "candidate_ids": [
+      "33b4c34a06b7ca07a15481ebaf408ee7287d4e8a93ad9bea848487e9f3ed792a",
+      "8ac1c35b1ce12c0c73a23f06f14411ee21966abc98a0f040f2ef51cbea0d35e5",
+      "e93bc35bc0be2f9a828b6f9fbce1c181225c236c49882a52aad029de4416a17f",
+      "rec-fleet-history",
+      "rec-migration-board",
+      "rec-slow-start"
+    ],
+    "estimated_prompt_tokens": 184,
+    "state_digest": "1e6294113bafe322d65134b8098c536c30701c0a71b5d767ef329d5cbbc17c14",
+    "subjects": [
+      "(c1|rag|internal/collector/heartbeat.go)",
+      "(c1|rag|internal/collector/registry.go)",
+      "(c1|rag|docs/collectors.md)",
+      "(c2|memory|rec-fleet-history)",
+      "(c2|memory|rec-migration-board)",
+      "(c2|memory|rec-slow-start)"
+    ],
+    "stratum": "conversation_only",
+    "answer_home": "conversation",
+    "scenario_family": "collector-heartbeat-conv",
+    "budget": 1184,
+    "raw_state_tokens": 1974,
+    "pressure_level": "ok",
+    "shed_messages": 14,
+    "shed_bytes": 6602
+  }
+}

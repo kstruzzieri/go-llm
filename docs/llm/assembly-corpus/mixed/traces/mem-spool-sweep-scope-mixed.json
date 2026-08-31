@@ -1,0 +1,111 @@
+{
+  "id": "mem-spool-sweep-scope-mixed",
+  "source": "assembly-corpus-mixed",
+  "captured_at": "0001-01-01T00:00:00Z",
+  "system": "You are the driftwatch assistant. driftwatch is a self-hosted telemetry ingest and alerting daemon. Answer using only the provided conversation, memory records, and retrieved context.",
+  "tools": null,
+  "turns": [
+    {
+      "role": "user",
+      "content": "Good. The mover script itself is still installed fleet-wide with its cron entry disabled. I would rather it not linger where someone can re-enable it by accident. Can you uninstall it everywhere and archive one copy next to the migration notes?"
+    },
+    {
+      "role": "assistant",
+      "content": "Uninstalled the mover script and its cron entry from every box, archived one copy with the migration notes, and left a tombstone entry naming the archive location so future spelunkers know where it went."
+    },
+    {
+      "role": "user",
+      "content": "The capacity dashboards still chart the old and new segment names as separate series, which makes every graph look like a cliff followed by a ramp. Can you merge the series so the history reads continuously across the rename?"
+    },
+    {
+      "role": "assistant",
+      "content": "Merged the old and new series in the capacity dashboards with a rename-aware join; every graph now reads continuously across the migration and I spot-checked the totals against the raw counters."
+    },
+    {
+      "role": "user",
+      "content": "Last migration chore: the rollback notes still describe reverting to the old naming as if the mover were installed. Since it no longer is, can you rewrite the rollback section so it points at the archived copy and the restore steps instead?"
+    },
+    {
+      "role": "assistant",
+      "content": "Rewrote the rollback section: it now points at the archived mover copy, walks the restore steps in order, and flags that a rollback after retention trims is partial by nature. The old instructions are gone."
+    },
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "id": "c1",
+          "name": "agent_memory_search",
+          "arguments": {
+            "query": ""
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "content": "rec-capacity-series · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src: · capacity dashboards use the rename-aware join; raw counters remain the source of truth if a graph ever looks off\nrec-migration-tally · working · created:2025-07-27 · updated:2025-07-27 · scope:session · ns: · src:\nrec-rollback-scope · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:\nrec-sweep-batch · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src: · one sweep pass retires at most 12 segments before yielding the lock",
+      "tool_call_id": "c1",
+      "name": "agent_memory_search"
+    },
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "id": "c2",
+          "name": "retrieve",
+          "arguments": {
+            "query": "sweep pass segment batch bound",
+            "k": 3
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "content": "### source: \"internal/spool/sweeppass.go\"\npurpose: Bounded sweep passes under the directory lock, bound from config.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n--- source: \"internal/spool/sweeppass.go\" (lines 1-18, similarity: 1.00) ---\n1| package spool\n2| \n3| // sweepOnce trims eligible rolled segments in index order under the\n4| // directory lock. The per-pass bound ships from deployment config; an\n5| // early proposal sized passes at 48 segments, but it never shipped and\n6| // the bound has always been config-supplied. Holding the lock for an\n7| // unbounded pass would stall rolls on a busy box, which is the whole\n8| // reason passes are bounded and the sweeper yields between them.\n9| func (s *sweeper) sweepOnce() {\n10| \ts.mu.Lock()\n11| \tdefer s.mu.Unlock()\n12| \tfor i, seg := range s.eligible() {\n13| \t\tif i \u003e= s.passBound {\n14| \t\t\treturn\n15| \t\t}\n16| \t\ts.retire(seg)\n17| \t}\n18| }\n\n### source: \"internal/spool/lock.go\"\npurpose: Coarse directory lock serializing structural segment changes.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n\n### source: \"docs/spool-retention.md\"\npurpose: Retention guide: horizon and per-pass bound knobs, interruption safety.\nlanguage: markdown\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n",
+      "tool_call_id": "c2",
+      "name": "retrieve"
+    },
+    {
+      "role": "user",
+      "content": "How many rolled segments does a single sweep pass retire at most?"
+    }
+  ],
+  "golden": {
+    "tool_calls": null,
+    "final_answer_criteria": "States that one sweep pass retires at most 12 segments. Answers that only say the per-pass bound comes from deployment config score 0. An answer giving the never-shipped 48 segments figure scores 0. An answer presenting both the correct and a competing value without committing to one scores 0."
+  },
+  "assembly_eval": {
+    "pair_id": "mem-spool-sweep-scope",
+    "mode": "mixed",
+    "candidate_ids": [
+      "4dbee19218eb320c6d9e3388a62f3648dea34e5dd87663e360c922547e85004b",
+      "b808f4d4ebd018c737454b3f8e73b898238783b6e7f96b4a7eca3ee1015f7e59",
+      "cb4665b3ba6f635c028fdf09a80e55e28e8f24a3cd2863ad7764d597e1ebc694",
+      "rec-capacity-series",
+      "rec-migration-tally",
+      "rec-rollback-scope",
+      "rec-sweep-batch"
+    ],
+    "estimated_prompt_tokens": 887,
+    "state_digest": "183d919b257dd1e3d76f54c41eb4a7f9b6d711791100fc43cec18f2b7fd7565b",
+    "subjects": [
+      "(c1|memory|rec-capacity-series)",
+      "(c1|memory|rec-migration-tally)",
+      "(c1|memory|rec-rollback-scope)",
+      "(c1|memory|rec-sweep-batch)",
+      "(c2|rag|internal/spool/sweeppass.go)",
+      "(c2|rag|internal/spool/lock.go)",
+      "(c2|rag|docs/spool-retention.md)"
+    ],
+    "stratum": "memory_only",
+    "answer_home": "memory",
+    "scenario_family": "spool-sweep-mem",
+    "budget": 937,
+    "raw_state_tokens": 1562,
+    "pressure_level": "critical",
+    "shed_messages": 2,
+    "shed_bytes": 2286,
+    "omitted_subjects": 1
+  }
+}

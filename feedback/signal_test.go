@@ -16,6 +16,7 @@ func TestDefaultStrength(t *testing.T) {
 		{"query repeated", SignalQueryRepeated, -0.5},
 		{"insight acted on", SignalInsightActedOn, 0.5},
 		{"insight dismissed", SignalInsightDismissed, -0.5},
+		{"window expired", SignalWindowExpired, 0},
 		{"unknown kind", SignalKind("unknown"), 0},
 	}
 
@@ -26,6 +27,22 @@ func TestDefaultStrength(t *testing.T) {
 				t.Errorf("DefaultStrength(%q) = %v, want %v", tt.kind, got, tt.expected)
 			}
 		})
+	}
+}
+
+func TestSignalKindSerialization(t *testing.T) {
+	tests := []struct {
+		kind SignalKind
+		want string
+	}{
+		{SignalQueryRepeated, "query_repeated"},
+		{SignalWindowExpired, "window_expired"},
+	}
+
+	for _, tt := range tests {
+		if got := string(tt.kind); got != tt.want {
+			t.Errorf("string(%q) = %q, want %q", tt.kind, got, tt.want)
+		}
 	}
 }
 

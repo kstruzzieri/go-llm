@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"unicode/utf8"
 
 	"github.com/kstruzzieri/go-llm/provider"
@@ -11,27 +12,45 @@ import (
 // runToolCalls routes a batch to the parallel path when every call is read-only
 // and independent (canRunParallel); otherwise to the serial path. Single-call
 // batches always go serial (no benefit, zero behavior change).
+//
+// It also owns the post-batch policy (#347). The hook lives HERE, at the shared
+// boundary, rather than at the bottom of the serial runner: mutating batches
+// are serial today only because parallelSafe demands a strictly-Read effect and
+// canRunParallel rejects planning tools, and write effect and planning
+// capability are separate concepts.
 func (o *Orchestrator) runToolCalls(ctx context.Context, res *Result, state *State,
 	reg *toolRegistry, calls []provider.ToolCall, approver Approver, obs Observer, step int,
 	gov *restraintGovernor) error {
 
-	if len(calls) >= 2 && canRunParallel(reg, calls) {
-		return o.runToolCallsParallel(ctx, res, state, reg, calls, approver, obs, step, gov)
+	b := newBatch()
+	var err error
+	if len(calls) >= 2 && canRunParallel(reg, calls) && gov.parallelUncapped(calls) {
+		err = o.runToolCallsParallel(ctx, res, state, reg, calls, approver, obs, step, gov, &b)
+	} else {
+		err = o.runToolCallsSerial(ctx, res, state, reg, calls, approver, obs, step, gov, &b)
 	}
-	return o.runToolCallsSerial(ctx, res, state, reg, calls, approver, obs, step, gov)
+	if err != nil {
+		return err
+	}
+	if res.StopReason != Completed {
+		// The governor tripped mid-batch: the run is stopping and the model
+		// gets no further turn, so the observation would never be read.
+		return nil
+	}
+	return o.verifyBatch(ctx, state, approver, &b)
 }
 
 func (o *Orchestrator) runToolCallsSerial(ctx context.Context, res *Result, state *State,
 	reg *toolRegistry, calls []provider.ToolCall, approver Approver, obs Observer, step int,
-	gov *restraintGovernor) error {
+	gov *restraintGovernor, b *batch) error {
 
 	for _, call := range calls {
 		res.Events = append(res.Events, EventRecord{Step: step, Kind: "tool_call"})
-		out, effect, rec, err := o.dispatch(ctx, reg, call, approver, obs, step)
+		out, effect, rec, err := o.dispatch(ctx, reg, call, approver, obs, step, gov)
 		if err != nil {
 			return err // hard abort (ctx cancel / approver error): no ToolResult, no OnToolResult
 		}
-		stop, err := recordResult(ctx, res, state, obs, gov, step, call, effect, rec, out)
+		stop, err := o.recordResult(ctx, res, state, obs, gov, step, call, effect, rec, out, b)
 		if err != nil {
 			return err
 		}
@@ -45,13 +64,18 @@ func (o *Orchestrator) runToolCallsSerial(ctx context.Context, res *Result, stat
 // recordResult appends one completed tool call's record, result event, optional
 // observer callback, state observation, and governor update — the shared tail used
 // by BOTH the serial and parallel paths so their model-visible semantics cannot
-// drift. `out` is the exact ToolResult appended to State (Invoke results are
-// already capOutput-ed; synthetic failures are short and uncapped) — so the
-// observer sees what the model sees. It returns stop=true (and sets
+// drift. `out` is the capped canonical fallback immediately after execution
+// (synthetic failures are short and uncapped). The observer sees it before its
+// Context is cloned onto State and before mixed assembly, so it is not promised
+// byte-identical to the model's later input. It returns stop=true (and sets
 // res.StopReason) when the governor trips, or an error to hard-abort the run.
-func recordResult(ctx context.Context, res *Result, state *State, obs Observer,
+// It is a method so the mixed-assembly flag is read from o.ctxMgr in ONE place:
+// a flag threaded from each caller could drift between the two paths. For the
+// same reason b (the post-batch policy accumulator, #347) is updated here and
+// not in either runner.
+func (o *Orchestrator) recordResult(ctx context.Context, res *Result, state *State, obs Observer,
 	gov *restraintGovernor, step int, call provider.ToolCall, effect Effect, rec ToolCallRecord,
-	out ToolResult) (stop bool, err error) {
+	out ToolResult, b *batch) (stop bool, err error) {
 
 	rec.RouteOutcome = out.RouteOutcome
 	res.ToolCalls = append(res.ToolCalls, rec)
@@ -60,11 +84,26 @@ func recordResult(ctx context.Context, res *Result, state *State, obs Observer,
 		if err := tro.OnToolResult(ctx, ToolResultEvent{
 			Step: step, Call: call, Effect: effect, Result: out,
 			Denied: rec.Denied, Invoked: rec.Invoked, Latency: rec.Latency,
+			AutoApproved: rec.AutoApproved,
 		}); err != nil {
 			return false, err
 		}
 	}
-	state.Messages = append(state.Messages, toolObservation(call, out))
+	if o.ctxMgr.Mixed {
+		if err := validateContextSetCardinality(call.ID, out.Context); err != nil {
+			return false, err
+		}
+	}
+	msg := toolObservation(call, out)
+	msg.OutputCap = effect.OutputCap
+	// The structured payload is deep-copied only when mixed assembly is on:
+	// with Mixed off nothing reads it, so cloning would make State retain a
+	// guaranteed-dead copy of every alternative for the rest of the run.
+	if o.ctxMgr.Mixed {
+		msg.Context = out.Context.clone() // clone is nil-safe
+	}
+	state.Messages = append(state.Messages, msg)
+	b.note(state, call, rec, out)
 	gov.observe(call, out)
 	if sr, tripped := gov.stopReason(); tripped {
 		res.StopReason = sr
@@ -76,7 +115,8 @@ func recordResult(ctx context.Context, res *Result, state *State, obs Observer,
 // preparedCall is the outcome of the serial, observer/approval phase of one tool
 // call. When prepareCall returns a nil error, exactly one of two states holds:
 //   - result != nil: a synthetic outcome (unknown tool / bad JSON / plan failure /
-//     approval denied). The caller must NOT Invoke; use result directly.
+//     approval denied / invocation budget exhausted). The caller must NOT Invoke;
+//     use result directly.
 //   - result == nil: tool and effect are populated; the caller runs invokeCall.
 type preparedCall struct {
 	call   provider.ToolCall
@@ -92,7 +132,7 @@ type preparedCall struct {
 // A non-nil error is a hard abort (ctx cancel / approver failure / observer error);
 // p.rec is still returned so the caller can record it.
 func (o *Orchestrator) prepareCall(ctx context.Context, reg *toolRegistry, call provider.ToolCall,
-	approver Approver, obs Observer, step int) (preparedCall, error) {
+	approver Approver, obs Observer, step int, gov *restraintGovernor) (preparedCall, error) {
 
 	name := call.Function.Name
 	p := preparedCall{call: call, rec: ToolCallRecord{Step: step, Name: name}}
@@ -110,7 +150,7 @@ func (o *Orchestrator) prepareCall(ctx context.Context, reg *toolRegistry, call 
 	}
 
 	effect := tool.Effect()
-	var preview string
+	var preview, approvalKey string
 	if pt, ok := tool.(PlanningTool); ok {
 		plan, err := pt.Plan(ctx, call.Function.Arguments)
 		if err != nil {
@@ -118,21 +158,27 @@ func (o *Orchestrator) prepareCall(ctx context.Context, reg *toolRegistry, call 
 			p.result = &ToolResult{IsError: true, Content: "plan failed: " + err.Error()}
 			return p, nil
 		}
-		effect, preview = plan.Effect, plan.Preview
+		effect, preview, approvalKey = plan.Effect, plan.Preview, plan.ApprovalKey
 	}
 	effect = normalizeEffect(effect)
 	p.effect = effect // capture now so a denial (which returns before invoke) still carries the effect
 
 	if needsApproval(effect.Approval, effect.Class) {
-		ok, err := approve(ctx, approver, call, preview)
+		d, err := approve(ctx, approver, call, preview, approvalKey)
 		if err != nil {
 			return p, err // ctx cancel / approver failure propagates
 		}
-		if !ok {
+		if !d.Approved {
 			p.rec.IsError, p.rec.Denied = true, true
 			p.result = &ToolResult{IsError: true, Content: "tool call denied by approver"}
 			return p, nil
 		}
+		p.rec.AutoApproved = d.ViaGrant
+	}
+	if limit, ok := gov.reserveInvocation(name); !ok {
+		p.rec.IsError = true
+		p.result = &ToolResult{IsError: true, Content: fmt.Sprintf("tool invocation budget reached for %s (%d per run)", name, limit)}
+		return p, nil
 	}
 
 	if err := obs.OnToolCall(ctx, ToolCallEvent{Step: step, Call: call, Effect: effect, Preview: preview}); err != nil {
@@ -161,9 +207,9 @@ func (o *Orchestrator) invokeCall(ctx context.Context, tool Tool, effect Effect,
 // A cancelled PARENT context after invoke is a hard abort (distinct from a tool's
 // own per-call timeout, which stays a model-visible IsError observation).
 func (o *Orchestrator) dispatch(ctx context.Context, reg *toolRegistry, call provider.ToolCall,
-	approver Approver, obs Observer, step int) (ToolResult, Effect, ToolCallRecord, error) {
+	approver Approver, obs Observer, step int, gov *restraintGovernor) (ToolResult, Effect, ToolCallRecord, error) {
 
-	p, err := o.prepareCall(ctx, reg, call, approver, obs, step)
+	p, err := o.prepareCall(ctx, reg, call, approver, obs, step, gov)
 	if err != nil {
 		return ToolResult{}, p.effect, p.rec, err
 	}
@@ -183,11 +229,18 @@ func (o *Orchestrator) dispatch(ctx context.Context, reg *toolRegistry, call pro
 
 // approve applies the fail-safe: a nil approver denies any call that reaches it
 // (read-only tools never reach it because needsApproval is false for them).
-func approve(ctx context.Context, approver Approver, call provider.ToolCall, preview string) (bool, error) {
+// A KeyedApprover receives the plan's structural ApprovalKey and returns the
+// full decision; a plain Approver keeps its existing signature, its bare bool
+// lifted into a decision with no grant provenance.
+func approve(ctx context.Context, approver Approver, call provider.ToolCall, preview, approvalKey string) (ApprovalDecision, error) {
 	if approver == nil {
-		return false, nil
+		return ApprovalDecision{}, nil
 	}
-	return approver.Approve(ctx, call, preview)
+	if ka, ok := approver.(KeyedApprover); ok {
+		return ka.ApproveKeyed(ctx, call, preview, approvalKey)
+	}
+	ok, err := approver.Approve(ctx, call, preview)
+	return ApprovalDecision{Approved: ok}, err
 }
 
 func capOutput(r ToolResult, limit int) ToolResult {

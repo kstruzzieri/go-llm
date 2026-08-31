@@ -54,6 +54,9 @@ type Router struct {
 	providers       *Registry
 	breakers        map[string]*CircuitBreaker
 	warmth          WarmthSource
+	slots           SlotSource
+	admission       *slotAdmission
+	destGate        *DestinationGate
 	tokenBudget     *TokenBudgetValidator
 	modelDefaults   map[ModelKey]SamplingDefaults
 	sticky          *stickyCache
@@ -97,6 +100,26 @@ type RouterOption func(*Router)
 func WithWarmthSource(ws WarmthSource) RouterOption {
 	return func(r *Router) {
 		r.warmth = ws
+	}
+}
+
+// WithDestinationGate wires the destination-admission gate (#477) so every
+// plan this Router builds binds a per-attempt destination capability before
+// contacting a provider. Without it plans are ungated: they add no
+// capability, and a guarded transport downstream denies on its own — the
+// fail-closed direction. The gate is shared, not owned: Close leaves it
+// alone, because the same gate backs every transport in the process.
+func WithDestinationGate(g *DestinationGate) RouterOption {
+	return func(r *Router) {
+		r.destGate = g
+	}
+}
+
+// WithSlotSource sets the slot-capacity source consulted by SlotCapacity
+// and fed by RecordSlotUse. The Router takes ownership: Close closes it.
+func WithSlotSource(ss SlotSource) RouterOption {
+	return func(r *Router) {
+		r.slots = ss
 	}
 }
 
@@ -269,6 +292,11 @@ func WithRoutingFeedback(rf *RoutingFeedback) RouterOption {
 // ---------------------------------------------------------------------------
 
 // NewRouter creates a Router with the given registries and options.
+//
+// The Router installs itself as the registry's capability-probe admission
+// gate: at most ONE live Router may attach to a ModelRegistry (see the
+// ModelRegistry doc). Constructing a second Router over the same live
+// registry is unsupported.
 func NewRouter(registry *ModelRegistry, providers *Registry, opts ...RouterOption) *Router {
 	r := &Router{
 		registry:  registry,
@@ -299,6 +327,21 @@ func NewRouter(registry *ModelRegistry, providers *Registry, opts ...RouterOptio
 		r.tokenBudget = NewTokenBudgetValidator()
 	}
 
+	// Admission (#400) exists only when a slot source governs anything.
+	// Nil admission means every RoutePlan bracket is a no-op and the
+	// ungoverned world is bit-identical to pre-#400 behavior.
+	if r.slots != nil {
+		r.admission = newSlotAdmission(r.slots, r.done)
+	}
+
+	// Probe admission (#401): capability probes acquire through this
+	// Router's gate. Unconditional -- acquireSlot no-ops without a slot
+	// source, so ungoverned wiring stays bit-identical. One live Router
+	// per registry (see NewRouter doc).
+	if registry != nil {
+		registry.setSlotAdmitter(r)
+	}
+
 	return r
 }
 
@@ -317,7 +360,10 @@ func (r *Router) Close() error {
 		close(r.done)
 
 		if r.warmth != nil {
-			err = r.warmth.Close()
+			err = errors.Join(err, r.warmth.Close())
+		}
+		if r.slots != nil {
+			err = errors.Join(err, r.slots.Close())
 		}
 	})
 	return err
@@ -365,8 +411,20 @@ func (r *Router) Route(ctx context.Context, req RoutingRequest) (*RoutePlan, err
 	//    failures (e.g. 401 from the backend) — surfaced only if the route
 	//    ultimately fails, mirroring how chain routing joins lookupErrs.
 	candidates, probeDiags, err := r.resolveCandidates(ctx, req)
+	// Cancellation classification (#401): candidate discovery may aggregate
+	// a provider's context error, while probe failures surface as per-candidate
+	// diagnostics. Either would otherwise be buried inside a generic error or
+	// ErrNoViableCandidate (Golem would classify provider_unavailable,
+	// compat would answer 400 instead of 499/504). A dead context is the
+	// caller's exit, not a routing verdict -- return it raw.
+	if cErr := ctx.Err(); cErr != nil {
+		return nil, cErr
+	}
 	if err != nil {
 		return nil, err
+	}
+	if terminalErr := capabilityResolutionTerminalError(probeDiags); terminalErr != nil {
+		return nil, terminalErr
 	}
 	if len(candidates) == 0 {
 		return nil, joinNoViableCandidate(probeDiags)
@@ -519,6 +577,42 @@ func (r *Router) RecordWarmthUse(key ModelKey) {
 	if r.warmth != nil {
 		r.warmth.RecordUse(key)
 	}
+}
+
+// SlotCapacity reports backend parallel slot capacity for key via the
+// configured SlotSource. Without a source it reports (0, false): nothing
+// is governed and callers preserve existing behavior.
+func (r *Router) SlotCapacity(key ModelKey) (int, bool) {
+	if r.slots == nil {
+		return 0, false
+	}
+	return r.slots.Capacity(key)
+}
+
+// RecordSlotUse forwards a slot use signal if a slot source is configured.
+// It satisfies the route-plan's optional slotUseRecorder interface.
+func (r *Router) RecordSlotUse(key ModelKey) {
+	if r.slots != nil {
+		r.slots.RecordUse(key)
+	}
+}
+
+// acquireSlot implements the slotAdmitter seam RoutePlan consumes (#400).
+func (r *Router) acquireSlot(ctx context.Context, key ModelKey) (func(), error) {
+	if r.admission == nil {
+		return noopRelease, nil
+	}
+	return r.admission.acquire(ctx, key)
+}
+
+// SlotAdmissionSnapshot reports per-key admission counters for operator
+// surfaces (mirrors WarmthSnapshot). Nil when no slot source is
+// configured. Order is deterministic: provider, then model.
+func (r *Router) SlotAdmissionSnapshot() []SlotAdmissionInfo {
+	if r.admission == nil {
+		return nil
+	}
+	return r.admission.snapshot()
 }
 
 // ---------------------------------------------------------------------------
@@ -752,6 +846,15 @@ func joinNoViableCandidate(diags []error) error {
 	return fmt.Errorf("%w: %s", ErrNoViableCandidate, errors.Join(diags...))
 }
 
+func capabilityResolutionTerminalError(diags []error) error {
+	for _, diag := range diags {
+		if errors.Is(diag, ErrRouterClosed) {
+			return diag
+		}
+	}
+	return nil
+}
+
 // recommendWithToolCallResolution runs ModelRegistry.Recommend for the
 // given required caps, lazily resolving tool_call when possible. Recommend
 // filters by caps BEFORE the router sees candidates, which would silently
@@ -767,11 +870,13 @@ func joinNoViableCandidate(diags []error) error {
 // Probe diagnostics (second return) are non-fatal; callers surface them
 // only when the route fails.
 //
-// Worst case on cache miss: N unknown models x up to ~30s active probe,
-// resolved sequentially inside EnsureToolCallResolved. Persisted verdicts
-// amortize this to zero on later routes, and the bounded-eager preflight
-// (Task 9) keeps this path rare. Transient-error models re-probe on every
-// route with no backoff — deliberate; add a backoff seam here if it bites.
+// Worst case on cache miss: U distinct unknown models x up to ~30s active
+// probe, resolved bounded-parallel inside EnsureToolCallResolved
+// (capResolveLimit-wide, so roughly ceil(U/4) x ~30s plus any admission
+// queueing). Persisted verdicts amortize this to zero on later routes, and
+// the bounded-eager preflight (Task 9) keeps this path rare.
+// Transient-error models re-probe on every route with no backoff —
+// deliberate; add a backoff seam here if it bites.
 func (r *Router) recommendWithToolCallResolution(ctx context.Context, opts RecommendOpts, reqCaps Capability) ([]*ModelProfile, []error, error) {
 	if !r.registry.canResolveToolCall() || !reqCaps.Has(CapToolCall) {
 		opts.RequiredCaps = reqCaps
@@ -1102,6 +1207,18 @@ func (r *Router) buildPlan(winner scoredCandidate, fallbacks []scoredCandidate, 
 	plan.SetWasSticky(wasSticky)
 	plan.SetRecorder(r)
 	plan.SetFeedback(r.routingFeedback) // ← PR2 addition; nil is fine, SetFeedback handles it
+	// Admission seam (#400): the Router itself is the slotAdmitter;
+	// r.admission is its internal gate state. Source-less Routers leave
+	// the plan's seam nil, keeping every bracket a no-op.
+	if r.admission != nil {
+		plan.setAdmission(r)
+	}
+	// Destination-admission seam (#477): stamped like the slot seam above.
+	// Fallback sub-plans are not stamped — Execute* walks them through the
+	// primary rp, which is where bindDestination reads the gate.
+	if r.destGate != nil {
+		plan.setDestinationGate(r.destGate)
+	}
 	// Stamp the per-Router warn state and logger onto the plan so
 	// newRouteIDWithWarn (called from buildOutcome) and
 	// recordOutcomeFeedback can fire once-logged warnings on RNG /

@@ -1,0 +1,133 @@
+{
+  "id": "join-downsample-tier-raw-mixed",
+  "source": "assembly-corpus-mixed",
+  "captured_at": "0001-01-01T00:00:00Z",
+  "system": "You are the driftwatch assistant. driftwatch is a self-hosted telemetry ingest and alerting daemon. Answer using only the provided conversation, memory records, and retrieved context.",
+  "tools": null,
+  "turns": [
+    {
+      "role": "user",
+      "content": "The tier bytes forecast needs its growth model refreshed as well; it still extrapolates from before the two big tenant onboardings, so the disk planning numbers it feeds are fiction and procurement keeps quoting them in threads. Have procurement's copy watermark the model version prominently, since their threads have a habit of outliving the numbers, and a two-quarter-old screenshot with no version stamp is how the fiction spread last time."
+    },
+    {
+      "role": "assistant",
+      "content": "Refreshed the growth model with the post-onboarding baseline and re-ran the forecast; procurement has the corrected numbers with the model change annotated. Watermarked the version and generation date on every exported page of the forecast, so any screenshot that escapes into a thread carries its own expiry information with it."
+    },
+    {
+      "role": "user",
+      "content": "There is also a slow-query hunt owed on the storage board: three panels time out at the month view since the panel refactor, and the storage rotation keeps screenshotting week views as a workaround, which is silly. While hunting, check whether the month view actually needs raw resolution anywhere at all, because if a single panel legitimately does, it should say so in its title rather than surprising the next person who profiles the board."
+    },
+    {
+      "role": "assistant",
+      "content": "Found the three panels fanning out to raw resolution at month scale, repointed them at the appropriate rollups, and the month view paints inside the timeout with margin now. None of the month-view panels needed raw; the one borderline case was the drill-down preview, which now states its resolution in the title so future profiling starts informed."
+    },
+    {
+      "role": "user",
+      "content": "The downsample pass metrics got renamed in the storage migration and half the alerts on them silently went stale; audit every alert that references the old names and repoint them before something real hides behind a stale alert. The alert audit should also produce a standing list mapping old metric names to new ones, because the rename will keep biting ad-hoc queries and dashboards that live outside the rule repo for months yet."
+    },
+    {
+      "role": "assistant",
+      "content": "Audited the alert set, repointed the six rules still reading old metric names, and added a lint that fails a rule referencing a metric the store no longer emits. Published the rename mapping as a standing reference linked from the storage board header, and the lint's error message points at it so every future hit teaches the mapping."
+    },
+    {
+      "role": "user",
+      "content": "Exporter lease visibility is the other gap: the downsample pass skips leased shards by design, but nothing shows which shards are leased right now, so a wedged exporter looks identical to a busy one on the board. Give the lease panel the same per-tenant split as the depth panels while you are in there, since a single tenant's stuck export has different ownership than a fleet-wide exporter problem and the page should say which it is."
+    },
+    {
+      "role": "assistant",
+      "content": "Added a live lease panel with per-shard lease age next to the pass progress panel; a wedged exporter now stands out from a merely busy one at a glance. Split the lease panel per tenant with a fleet rollup row on top, so the page can tell a single stuck tenant from a systemic exporter issue before anyone opens a dashboard."
+    },
+    {
+      "role": "user",
+      "content": "Also for the record, the redesign draft's 1h dashboard default died in review; it was aimed at the old sparse boards and bringing it up now just reopens a settled argument."
+    },
+    {
+      "role": "assistant",
+      "content": "Archived the draft with the review outcome on top; the boards doc links the settled decision instead of the draft."
+    },
+    {
+      "role": "user",
+      "content": "So the decision on record stands: dashboards default to the 5m rollup fleet-wide, with raw drill-down staying one click away on every panel."
+    },
+    {
+      "role": "assistant",
+      "content": "Confirmed and applied: dashboards default to the 5m rollup, and the drill-down link is verified on every panel template."
+    },
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "id": "c1",
+          "name": "retrieve",
+          "arguments": {
+            "query": "downsample pass shard behaviour",
+            "k": 3
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "content": "### source: \"internal/store/downsample.go\"\npurpose: Downsample pass: oldest-first shard sweep, lease-aware skips, durable folds.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n--- source: \"internal/store/downsample.go\" (lines 1-33, similarity: 1.00) ---\n1| package store\n2| \n3| // pass runs one downsample sweep over the shard set, oldest shard\n4| // first. A shard holding an active export lease is skipped rather\n5| // than raced: the exporter is reading raw resolution, and\n6| // downsampling under it would hand the warehouse a mid-copy\n7| // resolution change. Skips are recorded in the ledger the storage\n8| // rotation reviews.\n9| func (s *Store) pass() error {\n10| \tfor _, shard := range s.shardsOldestFirst() {\n11| \t\tif s.leases.active(shard) {\n12| \t\t\ts.ledger.recordSkip(shard)\n13| \t\t\tcontinue\n14| \t\t}\n15| \t\tif err := s.downsampleShard(shard); err != nil {\n16| \t\t\treturn err\n17| \t\t}\n18| \t}\n19| \treturn nil\n20| }\n21| \n22| // downsampleShard folds one shard's samples into the next tier and\n23| // releases the raw segments it consumed once the fold is durable.\n24| func (s *Store) downsampleShard(shard shardID) error {\n25| \tfold, err := s.fold(shard)\n26| \tif err != nil {\n27| \t\treturn err\n28| \t}\n29| \tif err := s.commit(fold); err != nil {\n30| \t\treturn err\n31| \t}\n32| \treturn s.releaseRaw(shard)\n33| }\n\n### source: \"internal/store/tiers.go\"\npurpose: Rollup tier ladder: manifest-driven rungs, coarsest-tier query resolution.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n\n### source: \"docs/downsample.md\"\npurpose: Downsampling guide: tier folding, lease-aware passes, ops-recorded raw hold.\nlanguage: markdown\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n",
+      "tool_call_id": "c1",
+      "name": "retrieve"
+    },
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "id": "c2",
+          "name": "agent_memory_search",
+          "arguments": {
+            "query": ""
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "content": "rec-board-owners · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:\nrec-raw-hold · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:\nrec-tier-ladder · working · created:2025-07-27 · updated:2025-07-27 · scope:session · ns: · src: · tier ladder panels live on the storage board; per-tier bytes split by region",
+      "tool_call_id": "c2",
+      "name": "agent_memory_search"
+    },
+    {
+      "role": "user",
+      "content": "Locking the boards doc: which rollup do dashboards default to, and how long do raw 1s samples sit before the first downsample pass?"
+    }
+  ],
+  "golden": {
+    "tool_calls": null,
+    "final_answer_criteria": "BOTH halves required: dashboards default to the 5m rollup, AND raw 1s samples are held 48 hours before the first downsample pass. A missing half caps the score at 0.5; a stated but incorrect half scores 0. An answer giving the dead 1h draft default scores 0. An answer presenting both the correct and a competing value without committing to one scores 0."
+  },
+  "assembly_eval": {
+    "pair_id": "join-downsample-tier-raw",
+    "mode": "mixed",
+    "candidate_ids": [
+      "37f3cb6472e8d5de4b37b29cf914a32d519aed92a7a3147b179b267ad63eae4d",
+      "7b48c2362ef3e928857810a564ce10f15dd9feb8d5508098856699a966ccee8b",
+      "f5c3c0fbb0fec0da1d1f7dd39afa82bfa43e6e268adb779b42b55b018645f414",
+      "rec-board-owners",
+      "rec-raw-hold",
+      "rec-tier-ladder"
+    ],
+    "estimated_prompt_tokens": 1536,
+    "state_digest": "811aed8102e7b36588b948b4606e82ccc8eaf8171b9543e7fbf7aff8113a151e",
+    "subjects": [
+      "(c1|rag|internal/store/downsample.go)",
+      "(c1|rag|internal/store/tiers.go)",
+      "(c1|rag|docs/downsample.md)",
+      "(c2|memory|rec-board-owners)",
+      "(c2|memory|rec-raw-hold)",
+      "(c2|memory|rec-tier-ladder)"
+    ],
+    "stratum": "cross_domain_join",
+    "answer_home": "join",
+    "scenario_family": "downsample-tier-join",
+    "budget": 1589,
+    "raw_state_tokens": 2648,
+    "pressure_level": "critical",
+    "shed_messages": 2,
+    "shed_bytes": 3836,
+    "omitted_subjects": 1
+  }
+}

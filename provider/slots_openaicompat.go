@@ -1,0 +1,322 @@
+package provider
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"net/url"
+	"strings"
+	"sync"
+	"time"
+)
+
+const (
+	defaultSlotTTL          = 5 * time.Minute
+	defaultSlotProbeTimeout = 5 * time.Second
+	// slotPropsMaxBody bounds the /props response read. Generous because
+	// llama-server's /props legitimately carries multi-KB chat templates;
+	// the cap only exists so a misconfigured backend cannot make a probe
+	// slurp an arbitrarily large body.
+	slotPropsMaxBody = 1 << 20
+)
+
+// SlotBackend describes one governed backend endpoint.
+type SlotBackend struct {
+	// BaseURL is the server root, without /v1 (matching openaicompat.NewClient).
+	BaseURL string
+	// APIKey, when non-empty, is sent as a Bearer token — the same auth
+	// convention as the provider's own client. Never logged.
+	APIKey string
+}
+
+// slotsPropsResponse is the subset of llama-server's GET /props JSON we read.
+type slotsPropsResponse struct {
+	TotalSlots int `json:"total_slots"`
+}
+
+// fetchSlotCapacity queries {base}/props?model={model} and returns
+// total_slots. The query is ALWAYS model-qualified: llama-swap (and
+// llama-server's model-dispatched router mode) requires it to route to the
+// right upstream, and single-model llama-server ignores the unknown
+// parameter — one code path covers both. A response without a positive
+// total_slots is an error; callers translate errors to fail-safe capacity 1.
+func fetchSlotCapacity(ctx context.Context, hc *http.Client, be SlotBackend, model string) (int, error) {
+	u := strings.TrimRight(be.BaseURL, "/") + "/props?model=" + url.QueryEscape(model)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+	if err != nil {
+		return 0, fmt.Errorf("provider: slot probe %q: %w", model, err)
+	}
+	if be.APIKey != "" {
+		req.Header.Set("Authorization", "Bearer "+be.APIKey)
+	}
+	resp, err := hc.Do(req)
+	if err != nil {
+		return 0, fmt.Errorf("provider: slot probe %q: %w", model, err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		return 0, fmt.Errorf("provider: slot probe %q: %s", model, resp.Status)
+	}
+	var props slotsPropsResponse
+	if err := json.NewDecoder(io.LimitReader(resp.Body, slotPropsMaxBody)).Decode(&props); err != nil {
+		return 0, fmt.Errorf("provider: slot probe %q: decode /props: %w", model, err)
+	}
+	if props.TotalSlots < 1 {
+		return 0, fmt.Errorf("provider: slot probe %q: /props total_slots %d", model, props.TotalSlots)
+	}
+	return props.TotalSlots, nil
+}
+
+// slotEntry is one cached capacity observation.
+type slotEntry struct {
+	capacity  int
+	fetchedAt time.Time
+}
+
+// OpenAICompatSlotSource discovers parallel slot capacity for openai-compat
+// backends via GET /props?model=... (total_slots) and caches it per ModelKey.
+//
+// Refresh is triggered by RecordUse, never by a background poll loop: through
+// llama-swap, /props?model=X is proxied to model X's upstream, which the
+// proxy starts on demand — blanket polling would churn model swaps. RecordUse
+// fires only after key successfully served a request, so its model is
+// normally resident and the probe is swap-free (if another model evicted it
+// in the window, the probe either swaps it back or errors into fail-safe 1 —
+// bounded to one probe per key per TTL). Idle models are never probed.
+type OpenAICompatSlotSource struct {
+	mu       sync.RWMutex
+	backends map[string]SlotBackend // provider name -> endpoint; read-only after construction
+	// overrides pins capacity per key (#400 config override); read-only
+	// after construction. Pinned keys are permanently fresh and never
+	// probed.
+	overrides map[ModelKey]int
+	entries   map[ModelKey]slotEntry
+	inflight  map[ModelKey]struct{}
+	closed    bool
+	wg        sync.WaitGroup
+	ttl       time.Duration
+	client    *http.Client
+	// clientFor supplies a per-backend probe client (#477): guarded
+	// transports are bound per destination. nil, or a nil return, falls
+	// back to the shared client. Read-only after construction.
+	clientFor func(providerName string) *http.Client
+	// bind attaches the slot-probe destination capability per probe
+	// (#477). nil disables binding (ungated). Read-only after construction.
+	bind   func(ctx context.Context, providerName string) (context.Context, error)
+	nowFn  func() time.Time
+	ctx    context.Context
+	cancel context.CancelFunc
+
+	// launch starts a probe goroutine (default: go f()). Test seam: a
+	// capturing launcher makes spawn decisions and probe completion
+	// deterministic without sleeps.
+	launch func(func())
+}
+
+// SlotSourceOption configures an OpenAICompatSlotSource.
+type SlotSourceOption func(*OpenAICompatSlotSource)
+
+// WithSlotTTL sets how long a cached capacity is considered fresh. Values
+// <= 0 are ignored and the default (5m) is used.
+func WithSlotTTL(d time.Duration) SlotSourceOption {
+	return func(ss *OpenAICompatSlotSource) {
+		if d > 0 {
+			ss.ttl = d
+		}
+	}
+}
+
+// WithSlotCapacityOverrides pins capacity for specific keys (#400
+// config override). Overridden keys report the pinned value (always
+// fresh) and are never probed. Keys whose provider is not governed by
+// this source are still (0, false) — the governed check runs first, so
+// direct constructors get consistent ungoverned behavior regardless of
+// stray override entries. Values < 1 are clamped to 1 at copy time:
+// this is public API and the SlotSource contract (ok=true implies
+// n >= 1) must hold no matter who built the map — fail-safe serial,
+// consistent with the probe-failure fail-safe.
+func WithSlotCapacityOverrides(o map[ModelKey]int) SlotSourceOption {
+	return func(ss *OpenAICompatSlotSource) {
+		ss.overrides = make(map[ModelKey]int, len(o))
+		for k, v := range o {
+			if v < 1 {
+				v = 1
+			}
+			ss.overrides[k] = v
+		}
+	}
+}
+
+// WithSlotHTTPClient overrides the probe HTTP client (default: 5s timeout).
+// Each probe is additionally bounded by a 5s context deadline regardless of
+// the client's own timeout, so a longer client timeout does not extend how
+// long a probe can run.
+func WithSlotHTTPClient(hc *http.Client) SlotSourceOption {
+	return func(ss *OpenAICompatSlotSource) {
+		if hc != nil {
+			ss.client = hc
+		}
+	}
+}
+
+// WithSlotClientFor installs a per-backend probe client factory (#477): the
+// destination guard binds a transport to ONE provider and base URL, so a
+// source governing several backends needs one guarded client each, not a
+// shared one. A nil factory, or a factory returning nil for a provider,
+// falls back to the shared client.
+func WithSlotClientFor(clientFor func(providerName string) *http.Client) SlotSourceOption {
+	return func(ss *OpenAICompatSlotSource) {
+		ss.clientFor = clientFor
+	}
+}
+
+// WithSlotProbeBinder installs a per-probe context binder (#477): before a
+// probe dials, bind is called with the probe context and the backend's
+// provider name, and its returned context — carrying the slot-probe
+// destination capability — is what the request runs under. A bind error
+// aborts the probe with ZERO requests and records the existing fail-safe
+// serial capacity.
+//
+// The binder runs on every probe, never cached: a capability is bound to the
+// gate generation that issued it, so caching one would leave the source
+// permanently denied after a revoke-and-re-admit cycle.
+func WithSlotProbeBinder(bind func(ctx context.Context, providerName string) (context.Context, error)) SlotSourceOption {
+	return func(ss *OpenAICompatSlotSource) {
+		ss.bind = bind
+	}
+}
+
+// NewOpenAICompatSlotSource creates a SlotSource governing the given
+// backends (provider name -> endpoint). Providers not in the map are
+// ungoverned: Capacity reports (0, false) and RecordUse is a no-op for
+// them. The map is copied; trailing slashes on base URLs are stripped.
+func NewOpenAICompatSlotSource(backends map[string]SlotBackend, opts ...SlotSourceOption) *OpenAICompatSlotSource {
+	ss := &OpenAICompatSlotSource{
+		backends: make(map[string]SlotBackend, len(backends)),
+		entries:  make(map[ModelKey]slotEntry),
+		inflight: make(map[ModelKey]struct{}),
+		ttl:      defaultSlotTTL,
+		client:   &http.Client{Timeout: defaultSlotProbeTimeout},
+		nowFn:    time.Now,
+		launch:   func(f func()) { go f() },
+	}
+	for k, v := range backends {
+		v.BaseURL = strings.TrimRight(v.BaseURL, "/")
+		ss.backends[k] = v
+	}
+	for _, opt := range opts {
+		opt(ss)
+	}
+	ss.ctx, ss.cancel = context.WithCancel(context.Background())
+	return ss
+}
+
+// Capacity implements SlotSource. It is a pure cache read. Expired entries
+// read as (1, true): a stale value is unknown-by-age and must not let an
+// admission gate over-admit after a backend restart shrank capacity. The
+// entry itself is retained so RecordUse still notices staleness and
+// refreshes. Fresh iff now < fetchedAt+TTL — exactly-at-expiry is expired.
+func (ss *OpenAICompatSlotSource) Capacity(key ModelKey) (int, bool) {
+	if _, governed := ss.backends[key.Provider]; !governed {
+		return 0, false
+	}
+	if n, pinned := ss.overrides[key]; pinned {
+		return n, true // permanently fresh; never probed
+	}
+	ss.mu.RLock()
+	defer ss.mu.RUnlock()
+	if e, ok := ss.entries[key]; ok && ss.nowFn().Before(e.fetchedAt.Add(ss.ttl)) {
+		return e.capacity, true
+	}
+	return 1, true
+}
+
+// RecordUse implements SlotSource. Spawn decisions are linearized under the
+// mutex with Close: no probe can be launched after Close returns.
+func (ss *OpenAICompatSlotSource) RecordUse(key ModelKey) {
+	be, governed := ss.backends[key.Provider]
+	if !governed {
+		return
+	}
+	if _, pinned := ss.overrides[key]; pinned {
+		return // pinned keys never probe (no I/O ever)
+	}
+	ss.mu.Lock()
+	if ss.closed {
+		ss.mu.Unlock()
+		return
+	}
+	if e, ok := ss.entries[key]; ok && ss.nowFn().Before(e.fetchedAt.Add(ss.ttl)) {
+		ss.mu.Unlock()
+		return
+	}
+	if _, busy := ss.inflight[key]; busy {
+		ss.mu.Unlock()
+		return
+	}
+	ss.inflight[key] = struct{}{}
+	ss.wg.Add(1)
+	ss.mu.Unlock()
+	ss.launch(func() { ss.probe(key, be) })
+}
+
+// probe fetches capacity for key and records the result. Errors degrade to
+// capacity 1 (fail-safe serial) at the same TTL cadence, so a broken,
+// evicted, or auth-failing backend is retried and recovers. A probe that
+// loses to Close writes nothing (a cancellation must not clobber state).
+func (ss *OpenAICompatSlotSource) probe(key ModelKey, be SlotBackend) {
+	defer ss.wg.Done()
+	ctx, cancel := context.WithTimeout(ss.ctx, defaultSlotProbeTimeout)
+	defer cancel()
+
+	hc := ss.client
+	if ss.clientFor != nil {
+		if c := ss.clientFor(key.Provider); c != nil {
+			hc = c
+		}
+	}
+	var n int
+	var err error
+	if ss.bind != nil {
+		var bctx context.Context
+		bctx, err = ss.bind(ctx, key.Provider)
+		if err == nil {
+			n, err = fetchSlotCapacity(bctx, hc, be, key.Model)
+		}
+		// A bind denial reaches the shared error path below with ZERO
+		// requests made: fail-safe serial capacity, same as a probe failure.
+	} else {
+		n, err = fetchSlotCapacity(ctx, hc, be, key.Model)
+	}
+
+	ss.mu.Lock()
+	defer ss.mu.Unlock()
+	delete(ss.inflight, key)
+	if ss.closed {
+		return
+	}
+	if err != nil {
+		n = 1
+	}
+	ss.entries[key] = slotEntry{capacity: n, fetchedAt: ss.nowFn()}
+}
+
+// Close implements SlotSource. closed and the probe WaitGroup are
+// manipulated under the same mutex as RecordUse's spawn decision, so
+// "spawned after Close returned" cannot happen; Wait drains in-flight
+// probes (their HTTP aborts via the cancelled ctx).
+func (ss *OpenAICompatSlotSource) Close() error {
+	ss.mu.Lock()
+	if !ss.closed {
+		ss.closed = true
+		ss.cancel()
+	}
+	ss.mu.Unlock()
+	ss.wg.Wait()
+	return nil
+}
+
+// compile-time interface check
+var _ SlotSource = (*OpenAICompatSlotSource)(nil)

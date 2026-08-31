@@ -6,9 +6,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"net/url"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strings"
 	"time"
@@ -54,6 +56,13 @@ type ProviderConfig struct {
 	Timeout   Duration `json:"timeout"`
 	APIKey    string   `json:"api_key,omitempty"`
 	APIFormat string   `json:"api_format,omitempty"`
+	// SlotDiscovery opts this provider into runtime slot-capability
+	// discovery (GET /props total_slots) and, downstream, slot-governed
+	// admission (#398). Opt-in; requires api_format "openai-compat" and a
+	// backend the operator manages (llama-server, llama-swap) — enabling
+	// it for a backend without /props degrades that backend to fail-safe
+	// serial admission. Default false: ungoverned, existing behavior.
+	SlotDiscovery bool `json:"slot_discovery,omitempty"`
 }
 
 // ModelConfig describes a model's identity, capabilities, and fallback chain.
@@ -75,6 +84,12 @@ type ModelConfig struct {
 	Capabilities  []string         `json:"capabilities,omitempty"`
 	Fallbacks     []string         `json:"fallbacks,omitempty"`
 	Options       *SamplingOptions `json:"options,omitempty"`
+	// Slots optionally pins backend parallel-slot capacity for this
+	// model, overriding runtime discovery (#400). Requires the model's
+	// provider to opt into slot_discovery; validated at load and
+	// rechecked at bootstrap. Must be >= 1 when present (0 = unset;
+	// JSON cannot distinguish an explicit 0 from absent).
+	Slots int `json:"slots,omitempty"`
 	// ThinkMode optionally overrides the catalog/inferred think mode for
 	// this model: "none", "always", "toggle", or "auto" (lowercased at
 	// load). Empty means no override. Invalid values fail Load — user
@@ -289,37 +304,51 @@ func (c *Config) ProviderFor(role string) *ProviderConfig {
 //
 // Returns a descriptive error if no configuration file is found at any location.
 func Default() (*Config, error) {
-	// 1. $GO_LLM_CONFIG env var (if set and non-empty).
+	path, _, err := discoverConfigPath()
+	if err != nil {
+		return nil, err
+	}
+	return Load(path)
+}
+
+// discoverConfigPath resolves the models.json discovery order shared by
+// Default and DefaultDocument, reporting which rule won:
+//
+//  1. $GO_LLM_CONFIG (set-but-empty is a hard error).
+//  2. ./models.json in the current working directory.
+//  3. Platform-standard user config directory (e.g., ~/.config on Linux,
+//     ~/Library/Application Support on macOS, %AppData% on Windows).
+//  4. Legacy fallback ~/.config/go-llm/models.json — preserves backward
+//     compatibility for users who created configs at the old hardcoded path
+//     on platforms where os.UserConfigDir() returns a different directory.
+//
+// When nothing matches, the error wraps ErrConfigNotFound with the same
+// remediation hint Default has always produced.
+func discoverConfigPath() (string, OriginSource, error) {
 	if envPath, ok := os.LookupEnv("GO_LLM_CONFIG"); ok {
 		if envPath == "" {
-			return nil, fmt.Errorf("config: GO_LLM_CONFIG is set but empty")
+			return "", "", diagWrap(CodeConfigDiscoveryInvalid, SubjectNone, "",
+				fmt.Errorf("config: GO_LLM_CONFIG is set but empty"))
 		}
-		return Load(envPath)
+		return envPath, OriginEnvOverride, nil
 	}
 
-	// 2. ./models.json in current working directory.
 	if _, err := os.Stat("models.json"); err == nil {
-		return Load("models.json")
+		return "models.json", OriginWorkingDir, nil
 	}
 
-	// 3. Platform-standard user config directory (e.g., ~/.config on Linux,
-	// ~/Library/Application Support on macOS, %AppData% on Windows).
 	configDir, configDirErr := os.UserConfigDir()
 	if configDirErr == nil {
 		configPath := filepath.Join(configDir, "go-llm", "models.json")
 		if _, err := os.Stat(configPath); err == nil {
-			return Load(configPath)
+			return configPath, OriginUserConfig, nil
 		}
 	}
 
-	// 4. Legacy fallback: ~/.config/go-llm/models.json. Preserves backward
-	// compatibility for users who created configs at the old hardcoded path
-	// on platforms where os.UserConfigDir() returns a different directory
-	// (e.g., macOS returns ~/Library/Application Support, not ~/.config).
 	if home, err := os.UserHomeDir(); err == nil {
 		legacyPath := filepath.Join(home, ".config", "go-llm", "models.json")
 		if _, err := os.Stat(legacyPath); err == nil {
-			return Load(legacyPath)
+			return legacyPath, OriginLegacy, nil
 		}
 	}
 
@@ -328,7 +357,7 @@ func Default() (*Config, error) {
 	if configDirErr == nil {
 		configHint = filepath.Join(configDir, "go-llm", "models.json")
 	}
-	return nil, fmt.Errorf("%w; set GO_LLM_CONFIG, "+
+	return "", "", fmt.Errorf("%w; set GO_LLM_CONFIG, "+
 		"place models.json in the working directory, or create %s", ErrConfigNotFound, configHint)
 }
 
@@ -340,37 +369,51 @@ func Default() (*Config, error) {
 func Load(path string) (*Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return nil, fmt.Errorf("config: read %q: %w", path, err)
+		return nil, diagWrap(CodeIO, SubjectNone, "",
+			fmt.Errorf("config: read %q: %w", path, err))
 	}
 
 	var cfg Config
 	if err := json.Unmarshal(data, &cfg); err != nil {
-		return nil, fmt.Errorf("config: parse %q: %w", path, err)
+		return nil, diagWrap(CodeParseError, SubjectNone, "",
+			fmt.Errorf("config: parse %q: %w", path, err))
 	}
 
-	// Validate first (before materializing defaults).
-	if err := cfg.validate(); err != nil {
+	if err := cfg.finalize(); err != nil {
 		return nil, err
 	}
-
-	// Expand ${ENV} references in provider api_key fields (file-backed loads only).
-	if err := cfg.expandProviderAPIKeys(); err != nil {
-		return nil, err
-	}
-
-	// Apply defaults after validation passes.
-	cfg.applyDefaults()
 
 	return &cfg, nil
 }
 
+// finalize runs the post-unmarshal pipeline shared by Load and newDocument:
+// validate first (before materializing defaults), expand ${ENV} api_key
+// references (file-backed loads only), then apply defaults.
+func (c *Config) finalize() error { return c.finalizeEnv(os.LookupEnv) }
+
+// finalizeEnv is finalize with an injectable environment lookup (spec §7);
+// nil falls back to ambient os.LookupEnv.
+func (c *Config) finalizeEnv(lookup func(string) (string, bool)) error {
+	if lookup == nil {
+		lookup = os.LookupEnv
+	}
+	if err := c.validate(); err != nil {
+		return err
+	}
+	if err := c.expandProviderAPIKeys(lookup); err != nil {
+		return err
+	}
+	c.applyDefaults()
+	return nil
+}
+
 // expandAPIKeyRefs replaces every ${NAME} reference in value with the value of
-// environment variable NAME. A value containing no "${" is returned verbatim, so
-// existing literal keys keep working. A referenced variable that is unset or
-// empty, or a malformed reference, returns an error naming providerName. Errors
-// never contain an expanded secret value. Only the provider api_key field uses
-// this helper.
-func expandAPIKeyRefs(providerName, value string) (string, error) {
+// environment variable NAME, resolved through lookup. A value containing no
+// "${" is returned verbatim, so existing literal keys keep working. A
+// referenced variable that is unset or empty, or a malformed reference,
+// returns an error naming providerName. Errors never contain an expanded
+// secret value. Only the provider api_key field uses this helper.
+func expandAPIKeyRefs(providerName, value string, lookup func(string) (string, bool)) (string, error) {
 	if !strings.Contains(value, "${") {
 		return value, nil
 	}
@@ -379,15 +422,18 @@ func expandAPIKeyRefs(providerName, value string) (string, error) {
 		if value[i] == '$' && i+1 < len(value) && value[i+1] == '{' {
 			rel := strings.IndexByte(value[i+2:], '}')
 			if rel < 0 {
-				return "", fmt.Errorf("config: provider %q api_key: malformed environment reference", providerName)
+				return "", diagWrap(CodeKeyReferenceMalformed, SubjectProvider, providerName,
+					fmt.Errorf("config: provider %q api_key: malformed environment reference", providerName))
 			}
 			name := value[i+2 : i+2+rel]
 			if !validEnvName(name) {
-				return "", fmt.Errorf("config: provider %q api_key: malformed environment reference", providerName)
+				return "", diagWrap(CodeKeyReferenceMalformed, SubjectProvider, providerName,
+					fmt.Errorf("config: provider %q api_key: malformed environment reference", providerName))
 			}
-			v, ok := os.LookupEnv(name)
+			v, ok := lookup(name)
 			if !ok || v == "" {
-				return "", fmt.Errorf("config: provider %q api_key references unset or empty environment variable %q", providerName, name)
+				return "", diagWrap(CodeKeyReferenceUnavailable, SubjectProvider, providerName,
+					fmt.Errorf("config: provider %q api_key references unset or empty environment variable %q", providerName, name))
 			}
 			b.WriteString(v)
 			i += 2 + rel + 1
@@ -429,9 +475,9 @@ func MustLoad(path string) *Config {
 }
 
 // expandProviderAPIKeys rewrites each provider's api_key, expanding ${ENV}
-// references. Providers are visited in sorted order so the first error is
-// deterministic when several reference bad variables.
-func (cfg *Config) expandProviderAPIKeys() error {
+// references through lookup. Providers are visited in sorted order so the
+// first error is deterministic when several reference bad variables.
+func (cfg *Config) expandProviderAPIKeys(lookup func(string) (string, bool)) error {
 	keys := make([]string, 0, len(cfg.Providers))
 	for k := range cfg.Providers {
 		keys = append(keys, k)
@@ -439,7 +485,7 @@ func (cfg *Config) expandProviderAPIKeys() error {
 	sort.Strings(keys)
 	for _, k := range keys {
 		p := cfg.Providers[k]
-		expanded, err := expandAPIKeyRefs(k, p.APIKey)
+		expanded, err := expandAPIKeyRefs(k, p.APIKey, lookup)
 		if err != nil {
 			return err
 		}
@@ -476,7 +522,8 @@ func (cfg *Config) applyDefaults() {
 func (cfg *Config) validate() error {
 	// At least one provider is required.
 	if len(cfg.Providers) == 0 {
-		return fmt.Errorf("config: at least one provider is required")
+		return diagWrap(CodeProviderRequired, SubjectNone, "",
+			fmt.Errorf("config: at least one provider is required"))
 	}
 
 	// Validate providers (sorted for deterministic errors).
@@ -487,24 +534,50 @@ func (cfg *Config) validate() error {
 	sort.Strings(providerKeys)
 	for _, key := range providerKeys {
 		if err := ValidateProviderName(key); err != nil {
-			return fmt.Errorf("config: %w", err)
+			return diagWrap(CodeProviderNameInvalid, SubjectProvider, key,
+				fmt.Errorf("config: %w", err))
 		}
 		p := cfg.Providers[key]
 		if p.BaseURL == "" {
-			return fmt.Errorf("config: provider %q: base_url is required", key)
+			return diagWrap(CodeProviderEndpointInvalid, SubjectProvider, key,
+				fmt.Errorf("config: provider %q: base_url is required", key))
 		}
 		u, err := url.ParseRequestURI(p.BaseURL)
 		if err != nil {
-			return fmt.Errorf("config: provider %q: invalid base_url: %w", key, err)
+			return diagWrap(CodeProviderEndpointInvalid, SubjectProvider, key,
+				fmt.Errorf("config: provider %q: invalid base_url: %w", key, err))
 		}
 		if u.Scheme == "" || u.Host == "" {
-			return fmt.Errorf("config: provider %q: base_url must include scheme and host", key)
+			return diagWrap(CodeProviderEndpointInvalid, SubjectProvider, key,
+				fmt.Errorf("config: provider %q: base_url must include scheme and host", key))
+		}
+		// Defense-in-depth for programmatic Configs: file-loaded configs
+		// cannot reach here with a negative timeout (Duration.UnmarshalJSON
+		// rejects at parse). invalid_argument with a provider subject — an
+		// argument-level invariant, no new diagnostic code.
+		if p.Timeout.Duration < 0 {
+			return diagWrap(CodeInvalidArgument, SubjectProvider, key,
+				fmt.Errorf("config: provider %q: timeout must not be negative", key))
 		}
 		// Empty api_format defaults to "ollama" via applyDefaults; only
 		// reject explicit unknown values so a typo like "ollma" surfaces
 		// at load time instead of silently degrading.
 		if p.APIFormat != "" && !validAPIFormats[p.APIFormat] {
-			return fmt.Errorf("config: provider %q: invalid api_format %q", key, p.APIFormat)
+			return diagWrap(CodeProviderFormatInvalid, SubjectProvider, key,
+				fmt.Errorf("config: provider %q: invalid api_format %q", key, p.APIFormat))
+		}
+		// Slot policy (410 spec s1): slot discovery is an openai-compat
+		// capability. Bootstrap rechecks for programmatic Configs that
+		// bypass Load.
+		if p.SlotDiscovery {
+			format := p.APIFormat
+			if format == "" {
+				format = "ollama"
+			}
+			if format != "openai-compat" {
+				return diagWrap(CodeSlotPolicyInvalid, SubjectProvider, key,
+					fmt.Errorf("config: provider %q: slot_discovery requires api_format \"openai-compat\", got %q", key, format))
+			}
 		}
 	}
 
@@ -517,24 +590,27 @@ func (cfg *Config) validate() error {
 	for _, role := range modelKeys {
 		m := cfg.Models[role]
 		if m.Name == "" {
-			return fmt.Errorf("config: model %q: name is required", role)
+			return diagWrap(CodeModelInvalid, SubjectRole, role,
+				fmt.Errorf("config: model %q: name is required", role))
 		}
 		if m.Type == "" {
-			return fmt.Errorf("config: model %q: type is required", role)
+			return diagWrap(CodeModelInvalid, SubjectRole, role,
+				fmt.Errorf("config: model %q: type is required", role))
 		}
 		if !validModelTypes[m.Type] {
-			return fmt.Errorf("config: model %q: invalid type %q", role, m.Type)
+			return diagWrap(CodeModelInvalid, SubjectRole, role,
+				fmt.Errorf("config: model %q: invalid type %q", role, m.Type))
 		}
-		if opts := m.Options; opts != nil {
-			if opts.Temperature != nil && *opts.Temperature < 0 {
-				return fmt.Errorf("config: model %q: temperature must be non-negative", role)
-			}
-			if opts.TopP != nil && (*opts.TopP <= 0 || *opts.TopP > 1) {
-				return fmt.Errorf("config: model %q: top_p must be greater than 0 and at most 1", role)
-			}
-			if opts.TopK != nil && *opts.TopK < 0 {
-				return fmt.Errorf("config: model %q: top_k must be non-negative", role)
-			}
+		if m.ContextWindow < 0 {
+			return diagWrap(CodeModelInvalid, SubjectRole, role,
+				fmt.Errorf("config: model %q: context_window must not be negative", role))
+		}
+		if m.Dimensions < 0 {
+			return diagWrap(CodeModelInvalid, SubjectRole, role,
+				fmt.Errorf("config: model %q: dimensions must not be negative", role))
+		}
+		if err := validateSamplingOptions(role, m.Options); err != nil {
+			return err
 		}
 
 		// Validate explicit capabilities (only when provided; empty defers to
@@ -549,10 +625,12 @@ func (cfg *Config) validate() error {
 			for _, cap := range m.Capabilities {
 				lower := strings.ToLower(cap)
 				if !validCapabilityNames[lower] {
-					return fmt.Errorf("config: model %q: unknown or non-canonical capability %q (canonical names: %v)", role, cap, provider.CanonicalCapabilityNames)
+					return diagWrap(CodeModelInvalid, SubjectRole, role,
+						fmt.Errorf("config: model %q: unknown or non-canonical capability %q (canonical names: %v)", role, cap, provider.CanonicalCapabilityNames))
 				}
 				if m.Type == "embedding" && !embeddingOnlyCapabilities[lower] {
-					return fmt.Errorf("config: model %q: type %q must declare only embedding capabilities, got %q", role, m.Type, cap)
+					return diagWrap(CodeModelInvalid, SubjectRole, role,
+						fmt.Errorf("config: model %q: type %q must declare only embedding capabilities, got %q", role, m.Type, cap))
 				}
 			}
 			// Final round-trip check: provider must accept the same tokens.
@@ -561,7 +639,8 @@ func (cfg *Config) validate() error {
 			// is designed to make impossible, but worth asserting in case
 			// someone bypasses the list.
 			if _, err := provider.ParseCapsStrict(m.Capabilities); err != nil {
-				return fmt.Errorf("config: model %q: %w", role, err)
+				return diagWrap(CodeModelInvalid, SubjectRole, role,
+					fmt.Errorf("config: model %q: %w", role, err))
 			}
 		}
 
@@ -574,9 +653,26 @@ func (cfg *Config) validate() error {
 		}
 		if _, ok := cfg.Providers[providerKey]; !ok {
 			if implicit {
-				return fmt.Errorf("config: model %q: implicit provider \"ollama\" not found", role)
+				return diagWrap(CodeProviderNotFound, SubjectRole, role,
+					fmt.Errorf("config: model %q: implicit provider \"ollama\" not found", role))
 			}
-			return fmt.Errorf("config: model %q: provider %q not found", role, providerKey)
+			return diagWrap(CodeProviderNotFound, SubjectRole, role,
+				fmt.Errorf("config: model %q: provider %q not found", role, providerKey))
+		}
+
+		// Validate slots (#400 admission-capacity override). Bootstrap
+		// rechecks for programmatic Configs that bypass Load.
+		if m.Slots < 0 {
+			return diagWrap(CodeModelInvalid, SubjectRole, role,
+				fmt.Errorf("config: model %q: slots must be >= 1", role))
+		}
+		// Slot policy (410 spec s1): a slots pin is only meaningful on a
+		// slot-discovery-governed provider.
+		if m.Slots > 0 {
+			if !cfg.Providers[providerKey].SlotDiscovery {
+				return diagWrap(CodeSlotPolicyInvalid, SubjectRole, role,
+					fmt.Errorf("config: model %q: slots override requires slot_discovery: true on provider %q", role, providerKey))
+			}
 		}
 
 		// Validate and normalize think_mode (strict — user config fails loud
@@ -585,7 +681,8 @@ func (cfg *Config) validate() error {
 		if m.ThinkMode != "" {
 			mode, err := provider.ParseThinkModeStrict(m.ThinkMode)
 			if err != nil {
-				return fmt.Errorf("config: model %q: %w", role, err)
+				return diagWrap(CodeThinkInvalid, SubjectRole, role,
+					fmt.Errorf("config: model %q: %w", role, err))
 			}
 			m.ThinkMode = mode.String()
 			cfg.Models[role] = m
@@ -595,30 +692,36 @@ func (cfg *Config) validate() error {
 		// Tags-only overrides (no think_mode) are allowed.
 		if tt := m.ThinkTags; tt != nil {
 			if tt.Open == "" || tt.Close == "" {
-				return fmt.Errorf("config: model %q: think_tags requires both open and close", role)
+				return diagWrap(CodeThinkInvalid, SubjectRole, role,
+					fmt.Errorf("config: model %q: think_tags requires both open and close", role))
 			}
 			if tt.Open == tt.Close {
-				return fmt.Errorf("config: model %q: think_tags open and close must differ", role)
+				return diagWrap(CodeThinkInvalid, SubjectRole, role,
+					fmt.Errorf("config: model %q: think_tags open and close must differ", role))
 			}
 			// The streaming think parser only enters tag matching on a '<'
 			// byte; any other leading byte validates but silently never
 			// matches, so reject it here instead.
 			if tt.Open[0] != '<' || tt.Close[0] != '<' {
-				return fmt.Errorf("config: model %q: think_tags open and close must start with '<' (streaming parser constraint)", role)
+				return diagWrap(CodeThinkInvalid, SubjectRole, role,
+					fmt.Errorf("config: model %q: think_tags open and close must start with '<' (streaming parser constraint)", role))
 			}
 		}
 
 		// Validate fallbacks.
 		for _, fb := range m.Fallbacks {
 			if fb == role {
-				return fmt.Errorf("config: model %q: lists itself as a fallback", role)
+				return diagWrap(CodeModelInvalid, SubjectRole, role,
+					fmt.Errorf("config: model %q: lists itself as a fallback", role))
 			}
 			fbModel, ok := cfg.Models[fb]
 			if !ok {
-				return fmt.Errorf("config: model %q: fallback %q references unknown role", role, fb)
+				return diagWrap(CodeModelInvalid, SubjectRole, role,
+					fmt.Errorf("config: model %q: fallback %q references unknown role", role, fb))
 			}
 			if !typeCompatible(m.Type, fbModel.Type) {
-				return fmt.Errorf("config: model %q: fallback %q has incompatible type", role, fb)
+				return diagWrap(CodeModelInvalid, SubjectRole, role,
+					fmt.Errorf("config: model %q: fallback %q has incompatible type", role, fb))
 			}
 		}
 	}
@@ -632,8 +735,15 @@ func (cfg *Config) validate() error {
 	for _, key := range defaultKeys {
 		role := cfg.Defaults[key]
 		if _, ok := cfg.Models[role]; !ok {
-			return fmt.Errorf("config: default %q references unknown role %q", key, role)
+			return diagWrap(CodeDefaultsInvalid, SubjectUseCase, key,
+				fmt.Errorf("config: default %q references unknown role %q", key, role))
 		}
+	}
+
+	// Enforce per-selector conflict invariants. Runs after the model loop
+	// so think_mode is already normalized.
+	if err := cfg.validateSelectorConflicts(); err != nil {
+		return err
 	}
 
 	// Detect circular fallback chains.
@@ -652,15 +762,124 @@ func (cfg *Config) validate() error {
 	return nil
 }
 
+func validateSamplingOptions(role string, opts *SamplingOptions) error {
+	if opts == nil {
+		return nil
+	}
+	if opts.Temperature != nil && (math.IsNaN(*opts.Temperature) || math.IsInf(*opts.Temperature, 0) || *opts.Temperature < 0) {
+		return diagWrap(CodeModelInvalid, SubjectRole, role,
+			fmt.Errorf("config: model %q: temperature must be non-negative", role))
+	}
+	if opts.TopP != nil && (math.IsNaN(*opts.TopP) || math.IsInf(*opts.TopP, 0) || *opts.TopP <= 0 || *opts.TopP > 1) {
+		return diagWrap(CodeModelInvalid, SubjectRole, role,
+			fmt.Errorf("config: model %q: top_p must be greater than 0 and at most 1", role))
+	}
+	if opts.TopK != nil && *opts.TopK < 0 {
+		return diagWrap(CodeModelInvalid, SubjectRole, role,
+			fmt.Errorf("config: model %q: top_k must be non-negative", role))
+	}
+	return nil
+}
+
+// validateSelectorConflicts enforces the five per-selector conflict
+// families statically (spec §1): roles sharing one effective
+// provider/model selector cannot disagree on non-zero context_window,
+// non-nil options, explicit capabilities, non-empty think_mode, non-nil
+// think_tags, or non-zero slots. Missing values mean "no override".
+// Deterministic: sorted roles, first conflicting sorted pair errors.
+// Bootstrap keeps its copies as defense in depth for programmatic Configs.
+func (cfg *Config) validateSelectorConflicts() error {
+	roles := make([]string, 0, len(cfg.Models))
+	for role := range cfg.Models {
+		roles = append(roles, role)
+	}
+	sort.Strings(roles)
+	groups := map[string][]string{} // selector string -> sorted roles
+	selectorOrder := make([]string, 0)
+	keyOf := func(m ModelConfig) string {
+		p := m.Provider
+		if p == "" {
+			p = "ollama"
+		}
+		return p + "/" + m.Name
+	}
+	for _, role := range roles {
+		k := keyOf(cfg.Models[role])
+		if _, seen := groups[k]; !seen {
+			selectorOrder = append(selectorOrder, k)
+		}
+		groups[k] = append(groups[k], role)
+	}
+	// Preserve first encounter while walking sorted roles. Sorting selector
+	// text here would report a later role pair when two selectors conflict.
+	for _, k := range selectorOrder {
+		group := groups[k]
+		for i := 0; i < len(group); i++ {
+			for j := i + 1; j < len(group); j++ {
+				a, b := cfg.Models[group[i]], cfg.Models[group[j]]
+				if err := selectorPairConflict(k, group[i], group[j], a, b); err != nil {
+					return err
+				}
+			}
+		}
+	}
+	return nil
+}
+
+// selectorPairConflict mirrors the bootstrap defense-in-depth comparison
+// list; maintain them together.
+func selectorPairConflict(sel, ra, rb string, a, b ModelConfig) error {
+	conflict := func(field string) error {
+		return diagWrap(CodeSelectorConflict, SubjectRole, ra,
+			fmt.Errorf("config: conflicting %s for %s: models %q and %q", field, sel, ra, rb))
+	}
+	if a.ContextWindow != 0 && b.ContextWindow != 0 && a.ContextWindow != b.ContextWindow {
+		return conflict("context_window")
+	}
+	if a.Options != nil && b.Options != nil && !reflect.DeepEqual(a.Options, b.Options) {
+		return diagWrap(CodeSelectorConflict, SubjectRole, ra,
+			fmt.Errorf("config: conflicting sampling defaults for %s: models %q and %q; defaults are per provider/model, so use identical options or distinct provider keys", sel, ra, rb))
+	}
+	if len(a.Capabilities) > 0 && len(b.Capabilities) > 0 {
+		// Parse errors are unreachable here — the model loop already
+		// rejected invalid capabilities; skipping (not failing) keeps this
+		// check advisory-shaped.
+		ca, aerr := provider.ParseCapsStrict(a.Capabilities)
+		cb, berr := provider.ParseCapsStrict(b.Capabilities)
+		if aerr == nil && berr == nil && ca != cb {
+			return conflict("capability overrides")
+		}
+	}
+	if a.ThinkMode != "" && b.ThinkMode != "" && a.ThinkMode != b.ThinkMode {
+		return conflict("think_mode")
+	}
+	if a.ThinkTags != nil && b.ThinkTags != nil && *a.ThinkTags != *b.ThinkTags {
+		return conflict("think_tags")
+	}
+	if a.Slots != 0 && b.Slots != 0 && a.Slots != b.Slots {
+		return conflict("slots")
+	}
+	return nil
+}
+
 // detectCycle checks for circular fallback chains starting from startRole.
 // It uses on-path tracking to avoid false positives on diamond-shaped graphs.
 func (cfg *Config) detectCycle(startRole string) error {
+	// Three-color DFS: onPath (grey) detects cycles without false positives
+	// on diamond-shaped graphs; done (black) memoizes roles already proven
+	// cycle-free so dense DAGs stay O(V+E). Without done, a diamond chain
+	// re-walks every branch and validation goes exponential (2^depth paths).
 	onPath := make(map[string]bool)
+	done := make(map[string]bool)
 
 	var walk func(role string) error
 	walk = func(role string) error {
+		if done[role] {
+			return nil
+		}
 		if onPath[role] {
-			return fmt.Errorf("config: model %q: circular fallback chain", startRole)
+			return diagWrap(CodeModelInvalid, SubjectRole, startRole,
+				fmt.Errorf("config: model %q: circular fallback chain", startRole))
 		}
 		m, ok := cfg.Models[role]
 		if !ok {
@@ -674,6 +893,7 @@ func (cfg *Config) detectCycle(startRole string) error {
 				return err
 			}
 		}
+		done[role] = true
 		return nil
 	}
 

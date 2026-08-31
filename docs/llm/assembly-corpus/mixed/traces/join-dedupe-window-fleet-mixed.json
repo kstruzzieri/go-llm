@@ -1,0 +1,125 @@
+{
+  "id": "join-dedupe-window-fleet-mixed",
+  "source": "assembly-corpus-mixed",
+  "captured_at": "0001-01-01T00:00:00Z",
+  "system": "You are the driftwatch assistant. driftwatch is a self-hosted telemetry ingest and alerting daemon. Answer using only the provided conversation, memory records, and retrieved context.",
+  "tools": null,
+  "turns": [
+    {
+      "role": "user",
+      "content": "We also promised the capacity folks a dry-run report: replay a day of fleet traffic through the rollout config in shadow mode and hand them the admission deltas before anything ships. Have the shadow replay cover the weekend traffic shape too, not just a weekday, since the last rollout's only surprise came from the Sunday batch pattern that the weekday replay never exercised."
+    },
+    {
+      "role": "assistant",
+      "content": "Shadow replay is done; the admission deltas are in the report with the two outlier edges annotated, and the capacity folks have it. Replayed both a weekday and the Sunday shape; the report carries both admission delta tables and the Sunday pattern showed nothing the weekday run had not already surfaced."
+    },
+    {
+      "role": "user",
+      "content": "The rollback path needs a rehearsal too. Last quarter's rehearsal found the config snapshotting racing the reload; make sure that fix actually landed and rehearse the rollback on one edge before the fleet touches this. The rehearsal should also verify the rollback leaves the wave report generator in a consistent state, because a half-written wave report after a rollback would poison the next wave's baseline comparison."
+    },
+    {
+      "role": "assistant",
+      "content": "Verified the snapshot fix landed, rehearsed the rollback on one edge, and the restore came back byte-identical with the reload race gone. Verified: the rollback path closes out the in-flight wave report as aborted rather than leaving it half-written, and the next wave's baseline comparison ignores aborted reports by construction."
+    },
+    {
+      "role": "user",
+      "content": "Observability again: the fleet board needs the same per-edge dedupe panels the canary got, or wave regressions will hide in the fleet average exactly the way the canary review warned about. Group the new fleet panels by wave number rather than by region, since waves are the unit we make decisions on, and add the wave's pin state to the panel title so a glance says which waves are still pinned."
+    },
+    {
+      "role": "assistant",
+      "content": "Cloned the per-edge dedupe panels to the fleet board grouped by wave; a wave that regresses will stand out against its neighbours immediately. Grouped by wave with the pin state in each title, and the panel set collapses waves that have cleared so the board stays readable as the rollout progresses through the fleet."
+    },
+    {
+      "role": "user",
+      "content": "One more comms item: the wave schedule should go to the regional oncalls before wave one, with the pin windows marked, so a page during a wave starts from context instead of from surprise; the last rollout generated three confused pages purely from missing context."
+    },
+    {
+      "role": "assistant",
+      "content": "Sent the schedule to all regional oncalls with pin windows marked and the rollout thread linked for live status; each regional channel confirmed receipt."
+    },
+    {
+      "role": "user",
+      "content": "Rollout call is made then. For the record, the 600-second window from the incident retro draft never shipped and that draft is closed; it was written against the old lazy-expiry cost model. The fleet keeps the code default at steady state, and rollout waves run pinned to a 240-second window until their wave report clears."
+    },
+    {
+      "role": "assistant",
+      "content": "Locked: waves run at the 240-second window until each wave report clears, then drop back to the code default; the pin and its exit condition are both in the wave runbook."
+    },
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "id": "c1",
+          "name": "retrieve",
+          "arguments": {
+            "query": "dedupe remembered window default",
+            "k": 3
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "content": "### source: \"internal/ingest/dedupe.go\"\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nnote: metadata overview (summary omitted: budget)\n--- source: \"internal/ingest/dedupe.go\" (lines 1-38, similarity: 1.00) ---\n1| package ingest\n2| \n3| import (\n4| \t\"sync\"\n5| \t\"time\"\n6| )\n7| \n8| // dedupeWindow is the code default for how long a batch key stays\n9| // remembered for duplicate rejection. It is the steady-state fleet\n10| // posture; waves under rollout pin their own window through\n11| // deployment config and drop back when the pin's exit condition is\n12| // met.\n13| const dedupeWindow = 90 * time.Second\n14| \n15| // window holds recently seen keys with their first-seen times, one\n16| // map per shard so burst load spreads across locks.\n17| type window struct {\n18| \tmu   sync.Mutex\n19| \tseen map[string]time.Time\n20| }\n21| \n22| // duplicate reports whether the key was seen inside the window,\n23| // recording it either way. Entries expire lazily on the scan that\n24| // finds them, so idle shards cost nothing between bursts.\n25| func (w *window) duplicate(key string, now time.Time, ttl time.Duration) bool {\n26| \tw.mu.Lock()\n27| \tdefer w.mu.Unlock()\n28| \tif first, ok := w.seen[key]; ok \u0026\u0026 now.Sub(first) \u003c= ttl {\n29| \t\treturn true\n30| \t}\n31| \tfor k, t := range w.seen {\n32| \t\tif now.Sub(t) \u003e ttl {\n33| \t\t\tdelete(w.seen, k)\n34| \t\t}\n35| \t}\n36| \tw.seen[key] = now\n37| \treturn false\n38| }\n\n### source: \"internal/ingest/rolloutpin.go\"\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nnote: metadata overview (summary omitted: budget)\n\n### source: \"docs/rollout.md\"\nlanguage: markdown\nindexed: 2025-07-27T00:00:00Z\nnote: metadata overview (summary omitted: budget)\n",
+      "tool_call_id": "c1",
+      "name": "retrieve"
+    },
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "id": "c2",
+          "name": "agent_memory_search",
+          "arguments": {
+            "query": ""
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "content": "rec-rollback-drill · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:\nrec-shadow-report · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:\nrec-wave-plan · working · created:2025-07-27 · updated:2025-07-27 · scope:session · ns: · src:",
+      "tool_call_id": "c2",
+      "name": "agent_memory_search"
+    },
+    {
+      "role": "user",
+      "content": "For the wave runbook header: what window does the code default hold at steady state, and what do rollout waves run pinned to?"
+    }
+  ],
+  "golden": {
+    "tool_calls": null,
+    "final_answer_criteria": "BOTH halves required: the code default dedupe window is 90 seconds at steady state, AND rollout waves run pinned to a 240-second window until their wave report clears. A missing half caps the score at 0.5; a stated but incorrect half scores 0. An answer giving the never-shipped 600-second window scores 0. An answer presenting both the correct and a competing value without committing to one scores 0."
+  },
+  "assembly_eval": {
+    "pair_id": "join-dedupe-window-fleet",
+    "mode": "mixed",
+    "candidate_ids": [
+      "319835108219fe4ff37095dfad3119f2cff70831455897aaf3aa4b11fed2ff59",
+      "a50e69b769c736f616615fd10bea586ed343eb265c1ab30a17183cffc33b662e",
+      "d7fdfd4a2f8e16ffc191f00da80821ac91dc184fcd44851a82ba784a8f438f63",
+      "rec-rollback-drill",
+      "rec-shadow-report",
+      "rec-wave-plan"
+    ],
+    "estimated_prompt_tokens": 1340,
+    "state_digest": "d3df7c0e43ad5fcbd3ea3373a5ed8d7b935ac81b69126c8a29cd93403ba33069",
+    "subjects": [
+      "(c1|rag|internal/ingest/dedupe.go)",
+      "(c1|rag|internal/ingest/rolloutpin.go)",
+      "(c1|rag|docs/rollout.md)",
+      "(c2|memory|rec-rollback-drill)",
+      "(c2|memory|rec-shadow-report)",
+      "(c2|memory|rec-wave-plan)"
+    ],
+    "stratum": "cross_domain_join",
+    "answer_home": "join",
+    "scenario_family": "dedupe-window-join",
+    "budget": 1383,
+    "raw_state_tokens": 2305,
+    "pressure_level": "critical",
+    "shed_messages": 2,
+    "shed_bytes": 3309,
+    "omitted_subjects": 1
+  }
+}

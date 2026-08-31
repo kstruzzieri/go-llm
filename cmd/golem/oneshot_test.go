@@ -102,21 +102,26 @@ func TestOneShot_PrintsOnlyAnswerToStdout(t *testing.T) {
 			Function: provider.ToolCallFunction{Name: "read_file", Arguments: json.RawMessage(`{"path":"hello.txt"}`)},
 		}},
 	}
-	finalAns := provider.ChatResponse{Content: "feat: add greeting file\n"}
+	answer := "# Result\n- item\n```go\nfmt.Println(\"hi\")\n```\n"
+	finalAns := provider.ChatResponse{Content: answer}
 	caller := &scriptCaller{responses: []agent.ModelResult{{Response: toolCall}, {Response: finalAns}}}
 	sess := newTestSession(t, caller, root)
+	sess.color = true
 
 	var stdout, stderr strings.Builder
 	if err := runOneShot(context.Background(), &stdout, &stderr, nil, sess, "commit message please"); err != nil {
 		t.Fatalf("runOneShot: %v", err)
 	}
 	// stdout purity: exactly the final answer plus one trailing newline.
-	if stdout.String() != "feat: add greeting file\n" {
+	if stdout.String() != answer {
 		t.Errorf("stdout = %q, want the bare answer with one trailing newline", stdout.String())
 	}
 	// All chrome (tool lines, footer) belongs to stderr.
 	if !strings.Contains(stderr.String(), "read_file") {
 		t.Errorf("tool-call progress missing from stderr:\n%s", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "\x1b[") {
+		t.Fatalf("test precondition failed: colored progress stream contains no ANSI:\n%s", stderr.String())
 	}
 	for _, banned := range []string{"golem>", "done ·", "\x1b["} {
 		if strings.Contains(stdout.String(), banned) {

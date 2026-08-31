@@ -572,6 +572,23 @@ func (p *Provider) GenerateStream(ctx context.Context, req provider.GenerateRequ
 // to the request Input position. Most servers preserve order in practice,
 // but the reorder makes the contract explicit.
 func (p *Provider) Embed(ctx context.Context, req provider.EmbedRequest) (*provider.EmbedResponse, error) {
+	return p.embed(ctx, req, nil)
+}
+
+// EmbedAdmitted implements provider.AdmittedEmbedder: identical to Embed,
+// but slot admission (#400) is acquired inside the singleflight leader —
+// one permit per backend request, regardless of how many callers join the
+// flight (only the leader's closure runs, so only the leader's admit is
+// used; the flight was admitted once, on behalf of everyone). admit runs
+// on the flight's uncancellable context: a queued flight is unblocked by
+// capacity or Router close, never by one caller's cancellation (the
+// caller's own select still honors its ctx, exactly as with the
+// uncancellable HTTP call today).
+func (p *Provider) EmbedAdmitted(ctx context.Context, req provider.EmbedRequest, admit provider.AdmitFunc) (*provider.EmbedResponse, error) {
+	return p.embed(ctx, req, admit)
+}
+
+func (p *Provider) embed(ctx context.Context, req provider.EmbedRequest, admit provider.AdmitFunc) (*provider.EmbedResponse, error) {
 	if req.Model == "" {
 		return nil, fmt.Errorf("provider: openaicompat: embed: model name is required")
 	}
@@ -582,6 +599,16 @@ func (p *Provider) Embed(ctx context.Context, req provider.EmbedRequest) (*provi
 	key := embedKey(req.Model, req.Input)
 	sharedCtx := context.WithoutCancel(ctx)
 	ch := p.embedGroup.DoChan(key, func() (any, error) {
+		if admit != nil {
+			release, err := admit(sharedCtx)
+			if err != nil {
+				// %w REQUIRED: the route layer detects admission
+				// failures via errors.As on the wrapped chain —
+				// breaking it would mint fake RouteAttempts.
+				return nil, fmt.Errorf("provider: openaicompat: embed: admission: %w", err)
+			}
+			defer release()
+		}
 		body := embedRequest{Model: req.Model, Input: req.Input}
 		var resp embedResponse
 		if err := p.client.postJSON(sharedCtx, "/v1/embeddings", body, &resp); err != nil {
@@ -613,6 +640,9 @@ func (p *Provider) Embed(ctx context.Context, req provider.EmbedRequest) (*provi
 		}, nil
 	})
 
+	// This select is the first consumer of ctx.Done() in this method and
+	// runs only after DoChan has registered the caller's flight — the
+	// doneObservingCtx test helper depends on that ordering.
 	select {
 	case res := <-ch:
 		if res.Err != nil {

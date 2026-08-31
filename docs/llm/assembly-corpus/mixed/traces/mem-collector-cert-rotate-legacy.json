@@ -1,0 +1,68 @@
+{
+  "id": "mem-collector-cert-rotate-legacy",
+  "source": "assembly-corpus-mixed",
+  "captured_at": "0001-01-01T00:00:00Z",
+  "system": "You are the driftwatch assistant. driftwatch is a self-hosted telemetry ingest and alerting daemon. Answer using only the provided conversation, memory records, and retrieved context.",
+  "tools": null,
+  "turns": [
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "id": "c2",
+          "name": "retrieve",
+          "arguments": {
+            "query": "collector client certificate rotation cadence",
+            "k": 3
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "content": "### source: \"docs/tls.md\"\npurpose: TLS guide: mutual TLS everywhere, rotation via cert-loader.\noverview: tls.md covers mutual TLS between collectors and the edge, the public every-90-days guidance versus the tighter config-set fleet cadence, and cert-loader's restart-free certificate swaps.\nlanguage: markdown\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n--- source: \"docs/tls.md\" (lines 1-9, similarity: 1.00) ---\n1| # driftwatch TLS\n2| \n3| Everything between collectors and the ingest edge speaks mutual TLS.\n4| Public guidance suggests rotating client certificates every 90 days;\n5| driftwatch fleets run a tighter cadence set in deployment config,\n6| because a collector that misses one rotation window should still be\n7| inside its trust lifetime at the next one. Rotation is handled by\n8| cert-loader, which swaps certificates without restarting the\n9| collector process.\n\n### source: \"internal/collector/certloader.go\"\npurpose: Restart-free client certificate hot-swapping.\noverview: certloader.go serves the current client certificate per handshake so swapped files take effect on the next dial, and keeps the previous certificate live if a reload fails.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n--- source: \"internal/collector/certloader.go\" (lines 1-19, similarity: 1.00) ---\n1| package collector\n2| \n3| import \"crypto/tls\"\n4| \n5| // certLoader hot-swaps the client certificate without a process\n6| // restart. The collector asks for the current certificate on every\n7| // handshake, so a swapped file takes effect on the next dial; no\n8| // connection is torn down early, and a failed load keeps the previous\n9| // certificate live rather than dropping to nothing.\n10| type certLoader struct {\n11| \tcurrent *tls.Certificate\n12| }\n13| \n14| func (l *certLoader) get() (*tls.Certificate, error) {\n15| \tif c := l.reload(); c != nil {\n16| \t\tl.current = c\n17| \t}\n18| \treturn l.current, nil\n19| }\n\n### source: \"internal/collector/dial.go\"\npurpose: Bounded-backoff dialing that re-reads certificates per attempt.\noverview: dial.go connects collectors to the edge with bounded backoff, reuses the resolver cache for one cycle to avoid thundering herds, and re-reads the client certificate each attempt.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n--- source: \"internal/collector/dial.go\" (lines 1-25, similarity: 1.00) ---\n1| package collector\n2| \n3| import (\n4| \t\"context\"\n5| \t\"time\"\n6| )\n7| \n8| // dial connects the collector to its ingest edge with bounded\n9| // backoff. Redials reuse the resolver cache for one cycle so a DNS\n10| // blip does not amplify into a thundering herd, and every attempt\n11| // re-reads the client certificate through the loader, which is what\n12| // makes certificate rotation invisible to the dial path.\n13| func (c *Collector) dial(ctx context.Context) error {\n14| \tfor wait := time.Second; ; wait = bounded(wait * 2) {\n15| \t\tif conn, err := c.connect(ctx); err == nil {\n16| \t\t\tc.conn = conn\n17| \t\t\treturn nil\n18| \t\t}\n19| \t\tselect {\n20| \t\tcase \u003c-time.After(wait):\n21| \t\tcase \u003c-ctx.Done():\n22| \t\t\treturn ctx.Err()\n23| \t\t}\n24| \t}\n25| }\n",
+      "tool_call_id": "c2",
+      "name": "retrieve"
+    },
+    {
+      "role": "user",
+      "content": "On what cadence do collector client certificates rotate?"
+    }
+  ],
+  "golden": {
+    "tool_calls": null,
+    "final_answer_criteria": "States that collector client certificates rotate every 20 days (through cert-loader). Answers that only say the cadence is set in deployment config score 0. An answer giving the public every-90-days guidance as the fleet cadence scores 0. An answer presenting both the correct and a competing value without committing to one scores 0."
+  },
+  "assembly_eval": {
+    "pair_id": "mem-collector-cert-rotate",
+    "mode": "legacy",
+    "candidate_ids": [
+      "01e379af1db98149285be3aa1674e3293f374f71c6851e1ff18f13a923706f0c",
+      "d16ae2fbb37d61dcede167c1b8612be294e2a41f2326b630e682dd7bf0c9e138",
+      "e5ee7ee014c732b75d3b89d2a6a4c922ac1fe3ea5b63775008fa20fa625b5af5",
+      "rec-canary-ring",
+      "rec-cert-cadence",
+      "rec-freeze-log",
+      "rec-wave-thresholds"
+    ],
+    "estimated_prompt_tokens": 861,
+    "state_digest": "05b14536af2118bdbf4156f08064a4179f3ecf1cbbd07134062ff98630f35150",
+    "subjects": [
+      "(c1|memory|rec-canary-ring)",
+      "(c1|memory|rec-cert-cadence)",
+      "(c1|memory|rec-freeze-log)",
+      "(c1|memory|rec-wave-thresholds)",
+      "(c2|rag|docs/tls.md)",
+      "(c2|rag|internal/collector/certloader.go)",
+      "(c2|rag|internal/collector/dial.go)"
+    ],
+    "stratum": "memory_only",
+    "answer_home": "memory",
+    "scenario_family": "collector-cert-mem",
+    "budget": 923,
+    "raw_state_tokens": 1539,
+    "pressure_level": "critical",
+    "shed_messages": 10,
+    "shed_bytes": 2283
+  }
+}

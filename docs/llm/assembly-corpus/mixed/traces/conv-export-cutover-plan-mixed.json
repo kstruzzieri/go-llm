@@ -1,0 +1,131 @@
+{
+  "id": "conv-export-cutover-plan-mixed",
+  "source": "assembly-corpus-mixed",
+  "captured_at": "0001-01-01T00:00:00Z",
+  "system": "You are the driftwatch assistant. driftwatch is a self-hosted telemetry ingest and alerting daemon. Answer using only the provided conversation, memory records, and retrieved context.",
+  "tools": null,
+  "turns": [
+    {
+      "role": "user",
+      "content": "Warehouse migration prep continues. First: the staging exporter is still pointed at the old warehouse endpoint even though staging finished its migration last week. Flip staging over now so we shake out the config shape early instead of during the production week."
+    },
+    {
+      "role": "assistant",
+      "content": "Flipped staging to the new endpoint through the staged checklist; both endpoints ran in parallel for an hour and the flip signed off clean."
+    },
+    {
+      "role": "user",
+      "content": "The export dashboard's backlog panel needs the same bytes-remaining treatment the replay panel got. Segment counts alone made the last drain review guesswork, and the migration week is going to lean on that panel hard."
+    },
+    {
+      "role": "assistant",
+      "content": "Added bytes-remaining to the backlog panel alongside the segment count, matching the replay panel layout so the two read the same way."
+    },
+    {
+      "role": "user",
+      "content": "Docs: the export guide still describes the single-endpoint world. Add the staged cutover section so the production flip is written down somewhere other than tribal knowledge and the migration channel scroll."
+    },
+    {
+      "role": "assistant",
+      "content": "Added the staged cutover section to the export guide with the parallel-run and sign-off steps spelled out."
+    },
+    {
+      "role": "user",
+      "content": "Scheduling call from the migration sync just ended: production runs the exporter cutover at 02:30 UTC Wednesday, safely after the warehouse side clears their maintenance, with both endpoints in parallel from midnight and the flip sign-off in the migration channel. Put it on the ops calendar and brief oncall."
+    },
+    {
+      "role": "assistant",
+      "content": "Calendar entry created and oncall briefed; the parallel-run start and the sign-off point are both on the entry."
+    },
+    {
+      "role": "user",
+      "content": "The old warehouse credentials expire mid-migration. Confirm the new endpoint's credentials are actually in the secret store before the parallel run starts, not just promised."
+    },
+    {
+      "role": "assistant",
+      "content": "Confirmed: the new endpoint credentials are in the secret store and the exporter reads them at start; no inline copies anywhere."
+    },
+    {
+      "role": "user",
+      "content": "And the loader team asked for a heads-up whenever our batch sizes change. The new endpoint batches differently, so send them the expected shape before Wednesday."
+    },
+    {
+      "role": "assistant",
+      "content": "Sent the loader team the expected batch shape and cadence for the new endpoint with a link to our export config."
+    },
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "id": "c1",
+          "name": "retrieve",
+          "arguments": {
+            "query": "exporter endpoint cutover procedure",
+            "k": 3
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "content": "### source: \"internal/export/exporter.go\"\npurpose: Warehouse exporter; endpoint and batch shape from deployment config.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n--- source: \"internal/export/exporter.go\" (lines 1-44, similarity: 1.00) ---\n1| package export\n2| \n3| import (\n4| \t\"context\"\n5| \t\"time\"\n6| )\n7| \n8| // Exporter ships rolled segments to the warehouse endpoint. The\n9| // endpoint, credentials, and batch shape all come from deployment\n10| // config; cutting over to a new warehouse is a config change, not a\n11| // rebuild.\n12| type Exporter struct {\n13| \tendpoint string\n14| \tbatch    BatchShape\n15| \tbackoff  time.Duration\n16| }\n17| \n18| // Run ships batches until cancelled. A failed ship retries with\n19| // backoff against the same endpoint; the exporter never fails over\n20| // between endpoints on its own, because a half-cutover discovered by\n21| // accident is worse than a loud stall. The warehouse maintenance\n22| // window closing at 01:45 UTC is their constraint, not one read here.\n23| func (e *Exporter) Run(ctx context.Context) error {\n24| \tfor {\n25| \t\tb, err := e.nextBatch(ctx)\n26| \t\tif err != nil {\n27| \t\t\treturn err\n28| \t\t}\n29| \t\tif err := e.ship(ctx, b); err != nil {\n30| \t\t\te.retry(ctx, b)\n31| \t\t}\n32| \t}\n33| }\n34| \n35| // ship posts one batch and records the acknowledgement offset the\n36| // backlog accounting reads.\n37| func (e *Exporter) ship(ctx context.Context, b Batch) error {\n38| \tack, err := e.post(ctx, b)\n39| \tif err != nil {\n40| \t\treturn err\n41| \t}\n42| \te.recordAck(ack)\n43| \treturn nil\n44| }\n\n### source: \"internal/export/backlog.go\"\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nnote: metadata overview (summary omitted: budget)\n\n### source: \"docs/export.md\"\nlanguage: markdown\nindexed: 2025-07-27T00:00:00Z\nnote: metadata overview (summary omitted: budget)\n",
+      "tool_call_id": "c1",
+      "name": "retrieve"
+    },
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "id": "c2",
+          "name": "agent_memory_search",
+          "arguments": {
+            "query": ""
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "content": "rec-cutover-checklist · working · created:2025-07-27 · updated:2025-07-27 · scope:session · ns: · src:\nrec-loader-contact · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:\nrec-warehouse-window · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:",
+      "tool_call_id": "c2",
+      "name": "agent_memory_search"
+    },
+    {
+      "role": "user",
+      "content": "When is the production exporter cutover scheduled?"
+    }
+  ],
+  "golden": {
+    "tool_calls": null,
+    "final_answer_criteria": "States the production exporter cutover runs at 02:30 UTC Wednesday. Answering 01:45 UTC (the warehouse maintenance-window close from memory) scores 0. An answer presenting both the correct and a competing value without committing to one scores 0."
+  },
+  "assembly_eval": {
+    "pair_id": "conv-export-cutover-plan",
+    "mode": "mixed",
+    "candidate_ids": [
+      "25d25ff90f60d152134116595e300001a0b81ca288df0d0ae3e91c5f2bd46ed1",
+      "caab255c6cfa3b2c3e4e2ba5b8f400d11ff791ae6abca9a2b9cd62f93be3102c",
+      "d1991767b933e34354355e8c7ac697dd70725b3d3af09e18b64315c9533c31fa",
+      "rec-cutover-checklist",
+      "rec-loader-contact",
+      "rec-warehouse-window"
+    ],
+    "estimated_prompt_tokens": 1124,
+    "state_digest": "f90ba019d304232791bef5f004689551ef2e51be53fbeb001855064cc22bb100",
+    "subjects": [
+      "(c1|rag|internal/export/exporter.go)",
+      "(c1|rag|internal/export/backlog.go)",
+      "(c1|rag|docs/export.md)",
+      "(c2|memory|rec-cutover-checklist)",
+      "(c2|memory|rec-loader-contact)",
+      "(c2|memory|rec-warehouse-window)"
+    ],
+    "stratum": "conversation_only",
+    "answer_home": "conversation",
+    "scenario_family": "export-cutover-conv",
+    "budget": 1180,
+    "raw_state_tokens": 1967,
+    "pressure_level": "critical",
+    "shed_bytes": 2832
+  }
+}

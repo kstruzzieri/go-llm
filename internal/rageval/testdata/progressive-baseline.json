@@ -1,0 +1,806 @@
+{
+  "schema_version": "rag-progressive-eval/v1",
+  "corpus": {
+    "chunks": 1401,
+    "sources": 138,
+    "queries": 20,
+    "dimensions": 768,
+    "selected_k": 10
+  },
+  "max_tokens": 512,
+  "queries": [
+    {
+      "id": "outline-query-00",
+      "category": "direct_symbol",
+      "candidate_sets_equal": true,
+      "flat": {
+        "candidate_ids": [
+          "outline-support-00-0",
+          "outline-filler-1242",
+          "outline-filler-1380",
+          "outline-filler-0828",
+          "outline-filler-0138",
+          "outline-filler-0276",
+          "outline-filler-0966",
+          "outline-filler-0414",
+          "outline-filler-1104",
+          "outline-filler-0690"
+        ],
+        "context_tokens": 443,
+        "context_bytes": 1771
+      },
+      "progressive": {
+        "candidate_ids": [
+          "outline-support-00-0",
+          "outline-filler-1242",
+          "outline-filler-1380",
+          "outline-filler-0828",
+          "outline-filler-0138",
+          "outline-filler-0276",
+          "outline-filler-0966",
+          "outline-filler-0414",
+          "outline-filler-1104",
+          "outline-filler-0690"
+        ],
+        "context_tokens": 485,
+        "context_bytes": 1940,
+        "render_format_version": 2,
+        "sources_with_evidence": 1
+      }
+    },
+    {
+      "id": "outline-query-01",
+      "category": "direct_symbol",
+      "candidate_sets_equal": true,
+      "flat": {
+        "candidate_ids": [
+          "outline-support-01-0",
+          "outline-filler-0830",
+          "outline-filler-0416",
+          "outline-filler-0692",
+          "outline-filler-1244",
+          "outline-filler-1382",
+          "outline-filler-1106",
+          "outline-filler-0554",
+          "outline-filler-0278",
+          "outline-filler-0968"
+        ],
+        "context_tokens": 443,
+        "context_bytes": 1772
+      },
+      "progressive": {
+        "candidate_ids": [
+          "outline-support-01-0",
+          "outline-filler-0830",
+          "outline-filler-0416",
+          "outline-filler-0692",
+          "outline-filler-1244",
+          "outline-filler-1382",
+          "outline-filler-1106",
+          "outline-filler-0554",
+          "outline-filler-0278",
+          "outline-filler-0968"
+        ],
+        "context_tokens": 486,
+        "context_bytes": 1941,
+        "render_format_version": 2,
+        "sources_with_evidence": 1
+      }
+    },
+    {
+      "id": "outline-query-02",
+      "category": "direct_symbol",
+      "candidate_sets_equal": true,
+      "flat": {
+        "candidate_ids": [
+          "outline-support-02-0",
+          "outline-filler-0418",
+          "outline-filler-0556",
+          "outline-filler-0142",
+          "outline-filler-0694",
+          "outline-filler-1108",
+          "outline-filler-0280",
+          "outline-filler-1384",
+          "outline-filler-0970",
+          "outline-filler-0832"
+        ],
+        "context_tokens": 444,
+        "context_bytes": 1773
+      },
+      "progressive": {
+        "candidate_ids": [
+          "outline-support-02-0",
+          "outline-filler-0418",
+          "outline-filler-0556",
+          "outline-filler-0142",
+          "outline-filler-0694",
+          "outline-filler-1108",
+          "outline-filler-0280",
+          "outline-filler-1384",
+          "outline-filler-0970",
+          "outline-filler-0832"
+        ],
+        "context_tokens": 486,
+        "context_bytes": 1942,
+        "render_format_version": 2,
+        "sources_with_evidence": 1
+      }
+    },
+    {
+      "id": "outline-query-03",
+      "category": "direct_symbol",
+      "candidate_sets_equal": true,
+      "flat": {
+        "candidate_ids": [
+          "outline-support-03-0",
+          "outline-filler-0558",
+          "outline-filler-1110",
+          "outline-filler-0972",
+          "outline-filler-0834",
+          "outline-filler-0144",
+          "outline-filler-0420",
+          "outline-filler-1386",
+          "outline-filler-0696",
+          "outline-filler-0282"
+        ],
+        "context_tokens": 443,
+        "context_bytes": 1772
+      },
+      "progressive": {
+        "candidate_ids": [
+          "outline-support-03-0",
+          "outline-filler-0558",
+          "outline-filler-1110",
+          "outline-filler-0972",
+          "outline-filler-0834",
+          "outline-filler-0144",
+          "outline-filler-0420",
+          "outline-filler-1386",
+          "outline-filler-0696",
+          "outline-filler-0282"
+        ],
+        "context_tokens": 486,
+        "context_bytes": 1941,
+        "render_format_version": 2,
+        "sources_with_evidence": 1
+      }
+    },
+    {
+      "id": "outline-query-04",
+      "category": "path_and_pairing",
+      "candidate_sets_equal": true,
+      "flat": {
+        "candidate_ids": [
+          "outline-support-04-0",
+          "outline-filler-0974",
+          "outline-filler-0284",
+          "outline-filler-0560",
+          "outline-filler-0422",
+          "outline-filler-0836",
+          "outline-filler-1112",
+          "outline-filler-0146",
+          "outline-filler-1388",
+          "outline-filler-1250"
+        ],
+        "context_tokens": 443,
+        "context_bytes": 1770
+      },
+      "progressive": {
+        "candidate_ids": [
+          "outline-support-04-0",
+          "outline-filler-0974",
+          "outline-filler-0284",
+          "outline-filler-0560",
+          "outline-filler-0422",
+          "outline-filler-0836",
+          "outline-filler-1112",
+          "outline-filler-0146",
+          "outline-filler-1388",
+          "outline-filler-1250"
+        ],
+        "context_tokens": 485,
+        "context_bytes": 1938,
+        "render_format_version": 2,
+        "sources_with_evidence": 1
+      }
+    },
+    {
+      "id": "outline-query-05",
+      "category": "path_and_pairing",
+      "candidate_sets_equal": true,
+      "flat": {
+        "candidate_ids": [
+          "outline-support-05-0",
+          "outline-filler-0424",
+          "outline-filler-1390",
+          "outline-filler-0838",
+          "outline-filler-1252",
+          "outline-filler-0700",
+          "outline-filler-0148",
+          "outline-filler-0286",
+          "outline-filler-0976",
+          "outline-filler-1114"
+        ],
+        "context_tokens": 443,
+        "context_bytes": 1771
+      },
+      "progressive": {
+        "candidate_ids": [
+          "outline-support-05-0",
+          "outline-filler-0424",
+          "outline-filler-1390",
+          "outline-filler-0838",
+          "outline-filler-1252",
+          "outline-filler-0700",
+          "outline-filler-0148",
+          "outline-filler-0286",
+          "outline-filler-0976",
+          "outline-filler-1114"
+        ],
+        "context_tokens": 485,
+        "context_bytes": 1939,
+        "render_format_version": 2,
+        "sources_with_evidence": 1
+      }
+    },
+    {
+      "id": "outline-query-06",
+      "category": "path_and_pairing",
+      "candidate_sets_equal": true,
+      "flat": {
+        "candidate_ids": [
+          "outline-support-06-0",
+          "outline-filler-1254",
+          "outline-filler-0978",
+          "outline-filler-0288",
+          "outline-filler-0702",
+          "outline-filler-1116",
+          "outline-filler-0150",
+          "outline-filler-0564",
+          "outline-filler-0840",
+          "outline-filler-0426"
+        ],
+        "context_tokens": 443,
+        "context_bytes": 1771
+      },
+      "progressive": {
+        "candidate_ids": [
+          "outline-support-06-0",
+          "outline-filler-1254",
+          "outline-filler-0978",
+          "outline-filler-0288",
+          "outline-filler-0702",
+          "outline-filler-1116",
+          "outline-filler-0150",
+          "outline-filler-0564",
+          "outline-filler-0840",
+          "outline-filler-0426"
+        ],
+        "context_tokens": 485,
+        "context_bytes": 1940,
+        "render_format_version": 2,
+        "sources_with_evidence": 1
+      }
+    },
+    {
+      "id": "outline-query-07",
+      "category": "path_and_pairing",
+      "candidate_sets_equal": true,
+      "flat": {
+        "candidate_ids": [
+          "outline-support-07-0",
+          "outline-filler-0704",
+          "outline-filler-0566",
+          "outline-filler-1394",
+          "outline-filler-0428",
+          "outline-filler-0290",
+          "outline-filler-0980",
+          "outline-filler-1256",
+          "outline-filler-1118",
+          "outline-filler-0152"
+        ],
+        "context_tokens": 443,
+        "context_bytes": 1770
+      },
+      "progressive": {
+        "candidate_ids": [
+          "outline-support-07-0",
+          "outline-filler-0704",
+          "outline-filler-0566",
+          "outline-filler-1394",
+          "outline-filler-0428",
+          "outline-filler-0290",
+          "outline-filler-0980",
+          "outline-filler-1256",
+          "outline-filler-1118",
+          "outline-filler-0152"
+        ],
+        "context_tokens": 485,
+        "context_bytes": 1939,
+        "render_format_version": 2,
+        "sources_with_evidence": 1
+      }
+    },
+    {
+      "id": "outline-query-08",
+      "category": "outline_summary",
+      "candidate_sets_equal": true,
+      "flat": {
+        "candidate_ids": [
+          "outline-support-08-0",
+          "outline-filler-0154",
+          "outline-filler-0844",
+          "outline-filler-0982",
+          "outline-filler-1120",
+          "outline-filler-0568",
+          "outline-filler-1258",
+          "outline-filler-0706",
+          "outline-filler-1396",
+          "outline-filler-0292"
+        ],
+        "context_tokens": 443,
+        "context_bytes": 1771
+      },
+      "progressive": {
+        "candidate_ids": [
+          "outline-support-08-0",
+          "outline-filler-0154",
+          "outline-filler-0844",
+          "outline-filler-0982",
+          "outline-filler-1120",
+          "outline-filler-0568",
+          "outline-filler-1258",
+          "outline-filler-0706",
+          "outline-filler-1396",
+          "outline-filler-0292"
+        ],
+        "context_tokens": 493,
+        "context_bytes": 1970,
+        "render_format_version": 2,
+        "sources_with_evidence": 1
+      }
+    },
+    {
+      "id": "outline-query-09",
+      "category": "outline_summary",
+      "candidate_sets_equal": true,
+      "flat": {
+        "candidate_ids": [
+          "outline-support-09-0",
+          "outline-filler-1122",
+          "outline-filler-0432",
+          "outline-filler-0708",
+          "outline-filler-0570",
+          "outline-filler-1398",
+          "outline-filler-0294",
+          "outline-filler-0156",
+          "outline-filler-0846",
+          "outline-filler-0984"
+        ],
+        "context_tokens": 442,
+        "context_bytes": 1767
+      },
+      "progressive": {
+        "candidate_ids": [
+          "outline-support-09-0",
+          "outline-filler-1122",
+          "outline-filler-0432",
+          "outline-filler-0708",
+          "outline-filler-0570",
+          "outline-filler-1398",
+          "outline-filler-0294",
+          "outline-filler-0156",
+          "outline-filler-0846",
+          "outline-filler-0984"
+        ],
+        "context_tokens": 492,
+        "context_bytes": 1966,
+        "render_format_version": 2,
+        "sources_with_evidence": 1
+      }
+    },
+    {
+      "id": "outline-query-10",
+      "category": "outline_summary",
+      "candidate_sets_equal": true,
+      "flat": {
+        "candidate_ids": [
+          "outline-support-10-0",
+          "outline-filler-0986",
+          "outline-filler-0158",
+          "outline-filler-0710",
+          "outline-filler-1400",
+          "outline-filler-0434",
+          "outline-filler-0572",
+          "outline-filler-0848",
+          "outline-filler-1262",
+          "outline-filler-1124"
+        ],
+        "context_tokens": 443,
+        "context_bytes": 1769
+      },
+      "progressive": {
+        "candidate_ids": [
+          "outline-support-10-0",
+          "outline-filler-0986",
+          "outline-filler-0158",
+          "outline-filler-0710",
+          "outline-filler-1400",
+          "outline-filler-0434",
+          "outline-filler-0572",
+          "outline-filler-0848",
+          "outline-filler-1262",
+          "outline-filler-1124"
+        ],
+        "context_tokens": 492,
+        "context_bytes": 1968,
+        "render_format_version": 2,
+        "sources_with_evidence": 1
+      }
+    },
+    {
+      "id": "outline-query-11",
+      "category": "outline_summary",
+      "candidate_sets_equal": true,
+      "flat": {
+        "candidate_ids": [
+          "outline-support-11-0",
+          "outline-filler-0712",
+          "outline-filler-0988",
+          "outline-filler-0160",
+          "outline-filler-0436",
+          "outline-filler-0574",
+          "outline-filler-1126",
+          "outline-filler-0298",
+          "outline-filler-0850",
+          "outline-filler-1264"
+        ],
+        "context_tokens": 443,
+        "context_bytes": 1771
+      },
+      "progressive": {
+        "candidate_ids": [
+          "outline-support-11-0",
+          "outline-filler-0712",
+          "outline-filler-0988",
+          "outline-filler-0160",
+          "outline-filler-0436",
+          "outline-filler-0574",
+          "outline-filler-1126",
+          "outline-filler-0298",
+          "outline-filler-0850",
+          "outline-filler-1264"
+        ],
+        "context_tokens": 493,
+        "context_bytes": 1970,
+        "render_format_version": 2,
+        "sources_with_evidence": 1
+      }
+    },
+    {
+      "id": "outline-query-12",
+      "category": "content_only",
+      "candidate_sets_equal": true,
+      "flat": {
+        "candidate_ids": [
+          "outline-support-12-0",
+          "outline-filler-0714",
+          "outline-filler-0852",
+          "outline-filler-0576",
+          "outline-filler-0300",
+          "outline-filler-0438",
+          "outline-filler-0162",
+          "outline-filler-1128",
+          "outline-filler-1266",
+          "outline-filler-0990"
+        ],
+        "context_tokens": 451,
+        "context_bytes": 1801
+      },
+      "progressive": {
+        "candidate_ids": [
+          "outline-support-12-0",
+          "outline-filler-0714",
+          "outline-filler-0852",
+          "outline-filler-0576",
+          "outline-filler-0300",
+          "outline-filler-0438",
+          "outline-filler-0162",
+          "outline-filler-1128",
+          "outline-filler-1266",
+          "outline-filler-0990"
+        ],
+        "context_tokens": 500,
+        "context_bytes": 2000,
+        "render_format_version": 2,
+        "sources_with_evidence": 1
+      }
+    },
+    {
+      "id": "outline-query-13",
+      "category": "content_only",
+      "candidate_sets_equal": true,
+      "flat": {
+        "candidate_ids": [
+          "outline-support-13-0",
+          "outline-filler-0302",
+          "outline-filler-0440",
+          "outline-filler-0578",
+          "outline-filler-0992",
+          "outline-filler-1268",
+          "outline-filler-0854",
+          "outline-filler-0716",
+          "outline-filler-1130",
+          "outline-filler-0164"
+        ],
+        "context_tokens": 451,
+        "context_bytes": 1802
+      },
+      "progressive": {
+        "candidate_ids": [
+          "outline-support-13-0",
+          "outline-filler-0302",
+          "outline-filler-0440",
+          "outline-filler-0578",
+          "outline-filler-0992",
+          "outline-filler-1268",
+          "outline-filler-0854",
+          "outline-filler-0716",
+          "outline-filler-1130",
+          "outline-filler-0164"
+        ],
+        "context_tokens": 501,
+        "context_bytes": 2001,
+        "render_format_version": 2,
+        "sources_with_evidence": 1
+      }
+    },
+    {
+      "id": "outline-query-14",
+      "category": "content_only",
+      "candidate_sets_equal": true,
+      "flat": {
+        "candidate_ids": [
+          "outline-support-14-0",
+          "outline-filler-0994",
+          "outline-filler-0166",
+          "outline-filler-0856",
+          "outline-filler-1132",
+          "outline-filler-0718",
+          "outline-filler-0304",
+          "outline-filler-0442",
+          "outline-filler-1270",
+          "outline-filler-0580"
+        ],
+        "context_tokens": 450,
+        "context_bytes": 1800
+      },
+      "progressive": {
+        "candidate_ids": [
+          "outline-support-14-0",
+          "outline-filler-0994",
+          "outline-filler-0166",
+          "outline-filler-0856",
+          "outline-filler-1132",
+          "outline-filler-0718",
+          "outline-filler-0304",
+          "outline-filler-0442",
+          "outline-filler-1270",
+          "outline-filler-0580"
+        ],
+        "context_tokens": 500,
+        "context_bytes": 1999,
+        "render_format_version": 2,
+        "sources_with_evidence": 1
+      }
+    },
+    {
+      "id": "outline-query-15",
+      "category": "content_only",
+      "candidate_sets_equal": true,
+      "flat": {
+        "candidate_ids": [
+          "outline-support-15-0",
+          "outline-filler-1272",
+          "outline-filler-0582",
+          "outline-filler-1134",
+          "outline-filler-0858",
+          "outline-filler-0444",
+          "outline-filler-0168",
+          "outline-filler-0996",
+          "outline-filler-0306",
+          "outline-filler-0720"
+        ],
+        "context_tokens": 451,
+        "context_bytes": 1801
+      },
+      "progressive": {
+        "candidate_ids": [
+          "outline-support-15-0",
+          "outline-filler-1272",
+          "outline-filler-0582",
+          "outline-filler-1134",
+          "outline-filler-0858",
+          "outline-filler-0444",
+          "outline-filler-0168",
+          "outline-filler-0996",
+          "outline-filler-0306",
+          "outline-filler-0720"
+        ],
+        "context_tokens": 500,
+        "context_bytes": 2000,
+        "render_format_version": 2,
+        "sources_with_evidence": 1
+      }
+    },
+    {
+      "id": "outline-query-16",
+      "category": "distributed_support",
+      "candidate_sets_equal": true,
+      "flat": {
+        "candidate_ids": [
+          "outline-support-16-1",
+          "outline-support-16-0",
+          "outline-filler-1129",
+          "outline-filler-0343",
+          "outline-filler-1017",
+          "outline-filler-0350",
+          "outline-filler-1108",
+          "outline-filler-0508",
+          "outline-filler-0759",
+          "outline-filler-0305"
+        ],
+        "context_tokens": 421,
+        "context_bytes": 1683
+      },
+      "progressive": {
+        "candidate_ids": [
+          "outline-support-16-1",
+          "outline-support-16-0",
+          "outline-filler-1129",
+          "outline-filler-0343",
+          "outline-filler-1017",
+          "outline-filler-0350",
+          "outline-filler-1108",
+          "outline-filler-0508",
+          "outline-filler-0759",
+          "outline-filler-0305"
+        ],
+        "context_tokens": 496,
+        "context_bytes": 1983,
+        "render_format_version": 2,
+        "sources_at_l0": 9,
+        "sources_with_evidence": 1
+      }
+    },
+    {
+      "id": "outline-query-17",
+      "category": "distributed_support",
+      "candidate_sets_equal": true,
+      "flat": {
+        "candidate_ids": [
+          "outline-support-17-1",
+          "outline-support-17-0",
+          "outline-filler-1042",
+          "outline-filler-1011",
+          "outline-filler-1104",
+          "outline-filler-0834",
+          "outline-filler-0513",
+          "outline-filler-0226",
+          "outline-filler-0779",
+          "outline-filler-1256"
+        ],
+        "context_tokens": 422,
+        "context_bytes": 1688
+      },
+      "progressive": {
+        "candidate_ids": [
+          "outline-support-17-1",
+          "outline-support-17-0",
+          "outline-filler-1042",
+          "outline-filler-1011",
+          "outline-filler-1104",
+          "outline-filler-0834",
+          "outline-filler-0513",
+          "outline-filler-0226",
+          "outline-filler-0779",
+          "outline-filler-1256"
+        ],
+        "context_tokens": 497,
+        "context_bytes": 1987,
+        "render_format_version": 2,
+        "sources_at_l0": 7,
+        "sources_at_l1": 1,
+        "sources_with_evidence": 2
+      }
+    },
+    {
+      "id": "outline-query-18",
+      "category": "distributed_support",
+      "candidate_sets_equal": true,
+      "flat": {
+        "candidate_ids": [
+          "outline-support-18-1",
+          "outline-support-18-0",
+          "outline-filler-0755",
+          "outline-filler-0330",
+          "outline-filler-0342",
+          "outline-filler-1358",
+          "outline-filler-1077",
+          "outline-filler-1010",
+          "outline-filler-0858",
+          "outline-filler-0487"
+        ],
+        "context_tokens": 421,
+        "context_bytes": 1681
+      },
+      "progressive": {
+        "candidate_ids": [
+          "outline-support-18-1",
+          "outline-support-18-0",
+          "outline-filler-0755",
+          "outline-filler-0330",
+          "outline-filler-0342",
+          "outline-filler-1358",
+          "outline-filler-1077",
+          "outline-filler-1010",
+          "outline-filler-0858",
+          "outline-filler-0487"
+        ],
+        "context_tokens": 487,
+        "context_bytes": 1945,
+        "render_format_version": 2,
+        "sources_at_l0": 8,
+        "sources_with_evidence": 2
+      }
+    },
+    {
+      "id": "outline-query-19",
+      "category": "distributed_support",
+      "candidate_sets_equal": true,
+      "flat": {
+        "candidate_ids": [
+          "outline-support-19-0",
+          "outline-support-19-1",
+          "outline-filler-0338",
+          "outline-filler-0861",
+          "outline-filler-1353",
+          "outline-filler-1165",
+          "outline-filler-0720",
+          "outline-filler-1013",
+          "outline-filler-1207",
+          "outline-filler-1308"
+        ],
+        "context_tokens": 422,
+        "context_bytes": 1685
+      },
+      "progressive": {
+        "candidate_ids": [
+          "outline-support-19-0",
+          "outline-support-19-1",
+          "outline-filler-0338",
+          "outline-filler-0861",
+          "outline-filler-1353",
+          "outline-filler-1165",
+          "outline-filler-0720",
+          "outline-filler-1013",
+          "outline-filler-1207",
+          "outline-filler-1308"
+        ],
+        "context_tokens": 487,
+        "context_bytes": 1945,
+        "render_format_version": 2,
+        "sources_at_l0": 7,
+        "sources_with_evidence": 3
+      }
+    }
+  ],
+  "summary": {
+    "queries": 20,
+    "all_candidate_sets_equal": true,
+    "mean_token_reduction": -0.11590863073404493,
+    "mean_bytes_reduction": -0.11603664772969699,
+    "total_omitted_sources": 0,
+    "total_metadata_fallback": 27
+  }
+}

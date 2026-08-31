@@ -51,8 +51,13 @@ func TestBuildProviders_ConfigProvidersSortedAndNamed(t *testing.T) {
 	if len(provs) != 2 || provs[0].Name() != "alpha" || provs[1].Name() != "zeta" {
 		t.Fatalf("providers not sorted by key: %v", provs)
 	}
-	if eff != cfg {
-		t.Fatalf("effective config should be the passed config when non-nil")
+	// #477 D7: the effective config is always a materialized copy; content
+	// matches the input (plus defaulted api_format), pointer never does.
+	if eff == cfg {
+		t.Fatalf("effective config must be a copy, not the passed config")
+	}
+	if got := eff.Providers["alpha"].BaseURL; got != cfg.Providers["alpha"].BaseURL {
+		t.Fatalf("effective base URL diverged with no override: %q", got)
 	}
 }
 
@@ -152,6 +157,9 @@ func TestBuildProviders_OllamaOverrideUnchangedBesideOCOverride(t *testing.T) {
 	if got := eff.Providers["llamacpp"].BaseURL; got != "http://127.0.0.1:8083" {
 		t.Fatalf("llamacpp BaseURL = %q, want oc override", got)
 	}
-	// Note: the ollama override is applied to the live client (pc local copy),
-	// not written back into effective.Providers -- existing behavior, unchanged.
+	// #477 D7 (F10 fix): the ollama override lands in the effective config,
+	// so display, manifest, and client all read the URL the client dials.
+	if got := eff.Providers["ollama"].BaseURL; got != "http://127.0.0.1:7777" {
+		t.Fatalf("ollama BaseURL = %q, want the override in the effective config", got)
+	}
 }

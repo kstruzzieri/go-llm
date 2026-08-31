@@ -23,6 +23,7 @@ import (
 type fakeCapProbeStore struct {
 	mu      sync.Mutex
 	rows    map[string]fingerprint.CapProbe
+	gets    int
 	saveErr error // when non-nil, SaveCapProbe fails with it
 }
 
@@ -37,6 +38,7 @@ func capRowKey(backendID, modelName, capability string) string {
 func (s *fakeCapProbeStore) GetCapProbe(_ context.Context, backendID, modelName, capability string) (*fingerprint.CapProbe, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.gets++
 	row, ok := s.rows[capRowKey(backendID, modelName, capability)]
 	if !ok {
 		return nil, fingerprint.ErrNotFound
@@ -78,6 +80,12 @@ func (s *fakeCapProbeStore) count() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return len(s.rows)
+}
+
+func (s *fakeCapProbeStore) getCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.gets
 }
 
 // fakeToolCallProber implements fingerprint.ModelProber (stubs) plus
@@ -828,11 +836,17 @@ func TestExplainToolCall_Provenance(t *testing.T) {
 		if exp.State != fingerprint.CapProbeYes {
 			t.Fatalf("State = %q, want yes", exp.State)
 		}
+		if !exp.Valid {
+			t.Fatal("Valid = false, want true")
+		}
 		if exp.TestedAt.IsZero() {
 			t.Fatalf("TestedAt is zero, want the probe row timestamp")
 		}
 		if got := prober.totalCalls(); got != 0 {
 			t.Fatalf("prober calls = %d, want 0 (Explain never probes)", got)
+		}
+		if got := store.getCount(); got != 1 {
+			t.Fatalf("capability-row reads = %d, want one projection/provenance snapshot", got)
 		}
 	})
 
@@ -867,6 +881,9 @@ func TestExplainToolCall_Provenance(t *testing.T) {
 		}
 		if exp.State != fingerprint.CapProbeNo {
 			t.Fatalf("State = %q, want no", exp.State)
+		}
+		if !exp.Valid {
+			t.Fatal("Valid = false, want true")
 		}
 	})
 
@@ -912,6 +929,9 @@ func TestExplainToolCall_Provenance(t *testing.T) {
 		if exp.State != fingerprint.CapProbeYes || exp.TestedAt.IsZero() {
 			t.Fatalf("State/TestedAt = %q/%v, want the stale row still surfaced", exp.State, exp.TestedAt)
 		}
+		if exp.Valid {
+			t.Fatal("Valid = true, want false for stale row")
+		}
 	})
 
 	// Truly nothing: no override, no catalog tool_call, no probe row => unknown.
@@ -937,4 +957,72 @@ func TestExplainToolCall_Provenance(t *testing.T) {
 			t.Fatalf("TestedAt = %v, want zero (no row)", exp.TestedAt)
 		}
 	})
+}
+
+func TestExplainToolCall_NeverProfilesOrCaches(t *testing.T) {
+	ctx := context.Background()
+	prov := &mrMockProvider{
+		name:   "prov",
+		models: []ModelInfo{{Name: "mystery-model"}},
+	}
+	reg := &mrMockProviderRegistry{providers: map[string]Provider{"prov": prov}}
+	store := newMrMockFingerprintStore()
+	prober := &mrRecordingFingerprintProber{}
+	mr, err := NewModelRegistry(reg, store, WithFingerprintProberFactory(
+		func(context.Context, ModelKey, *ModelInfo, Provider) (*FingerprintProberSpec, error) {
+			return &FingerprintProberSpec{Prober: prober, ModelDigest: "digest"}, nil
+		},
+	))
+	if err != nil {
+		t.Fatalf("NewModelRegistry() error: %v", err)
+	}
+
+	if _, err := mr.ExplainToolCall(ctx, ModelKey{Provider: "prov", Model: "mystery-model"}); err != nil {
+		t.Fatalf("ExplainToolCall() error: %v", err)
+	}
+	if calls := prober.detectCalls + prober.chatCalls; calls != 0 {
+		t.Fatalf("ExplainToolCall() fired %d fingerprint probe calls; want 0", calls)
+	}
+	if got := len(store.profiles); got != 0 {
+		t.Fatalf("ExplainToolCall() wrote %d fingerprint profiles; want 0", got)
+	}
+	mr.mu.RLock()
+	cached := len(mr.profiles)
+	mr.mu.RUnlock()
+	if cached != 0 {
+		t.Fatalf("ExplainToolCall() wrote %d registry profiles; want 0", cached)
+	}
+}
+
+func TestExplainToolCall_InvalidProbeStateIsIgnored(t *testing.T) {
+	ctx := context.Background()
+	store := newFakeCapProbeStore()
+	key := ModelKey{Provider: "prov", Model: "mystery-model"}
+	if err := store.SaveCapProbe(ctx, fingerprint.CapProbe{
+		BackendID:    key.Provider,
+		ModelName:    key.Model,
+		Capability:   capabilityToolCall,
+		State:        "bogus",
+		ModelDigest:  key.String(),
+		ProbeVersion: fingerprint.CurrentToolProbeVersion,
+		TestedAt:     time.Now(),
+	}); err != nil {
+		t.Fatalf("SaveCapProbe() error: %v", err)
+	}
+	mr := newCapResolveRegistry(t, key.Provider, []string{key.Model}, store, nil)
+
+	exp, err := mr.ExplainToolCall(ctx, key)
+	if err != nil {
+		t.Fatalf("ExplainToolCall() error: %v", err)
+	}
+	if exp.State != "" || exp.Valid || exp.Source != "unknown" || exp.Has {
+		t.Fatalf("ExplainToolCall() = %+v; want corrupt row ignored", exp)
+	}
+	facts, err := mr.ProjectListedModels(ctx, key.Provider, []ModelInfo{{Name: key.Model}})
+	if err != nil {
+		t.Fatalf("ProjectListedModels() error: %v", err)
+	}
+	if len(facts) != 1 || facts[0].Caps.Has(CapToolCall) || facts[0].KnownMask.Has(CapToolCall) {
+		t.Fatalf("ProjectListedModels() = %+v; want corrupt row to claim nothing", facts)
+	}
 }

@@ -1,0 +1,84 @@
+{
+  "id": "stale-notifier-timeout-page-legacy",
+  "source": "assembly-corpus-mixed",
+  "captured_at": "0001-01-01T00:00:00Z",
+  "system": "You are the driftwatch assistant. driftwatch is a self-hosted telemetry ingest and alerting daemon. Answer using only the provided conversation, memory records, and retrieved context.",
+  "tools": null,
+  "turns": [
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "id": "c1",
+          "name": "retrieve",
+          "arguments": {
+            "query": "pager notifier delivery path",
+            "k": 3
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "content": "### source: \"internal/notify/pager.go\"\npurpose: Pager delivery: provider send plus acknowledgement wait under the profile ceiling.\noverview: pager.go sends pages and waits on the asynchronous acknowledgement flow under the profile-supplied ceiling; no wait value is hard-coded here.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n--- source: \"internal/notify/pager.go\" (lines 1-13, similarity: 1.00) ---\n1| package notify\n2| \n3| // deliverPage sends one page to the provider and waits for the\n4| // delivery verdict. The wait ceiling comes from the delivery profile;\n5| // the poll loop below owns the asynchronous acknowledgement flow the\n6| // provider introduced.\n7| func (n *Notifier) deliverPage(p Page) error {\n8| \treceipt, err := n.provider.Send(p)\n9| \tif err != nil {\n10| \t\treturn err\n11| \t}\n12| \treturn n.awaitAck(receipt)\n13| }\n\n### source: \"internal/notify/ackpoll.go\"\npurpose: Acknowledgement polling with geometric backoff and fail-safe receipt handling.\noverview: ackpoll.go polls delivery receipts to a terminal state under the wait ceiling, backs off geometrically, and treats vanished receipts as failures so a lost receipt can never silently drop a page.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n--- source: \"internal/notify/ackpoll.go\" (lines 1-26, similarity: 1.00) ---\n1| package notify\n2| \n3| import \"time\"\n4| \n5| // awaitAck polls the provider's receipt endpoint until the delivery\n6| // reaches a terminal state. Polling backs off geometrically from the\n7| // initial interval; a receipt that vanishes from the provider's side\n8| // is treated as failed, never as delivered, because a lost receipt\n9| // after a real delivery re-pages harmlessly while the reverse drops\n10| // a page.\n11| func (n *Notifier) awaitAck(r Receipt) error {\n12| \tinterval := n.pollInitial\n13| \tdeadline := n.clock.Now().Add(n.waitCeiling)\n14| \tfor n.clock.Now().Before(deadline) {\n15| \t\tstate, err := n.provider.Receipt(r)\n16| \t\tif err == nil \u0026\u0026 state.Terminal() {\n17| \t\t\tif state.Delivered() {\n18| \t\t\t\treturn nil\n19| \t\t\t}\n20| \t\t\treturn errDeliveryFailed\n21| \t\t}\n22| \t\tn.clock.Sleep(interval)\n23| \t\tinterval = n.nextInterval(interval)\n24| \t}\n25| \treturn errAckTimeout\n26| }\n\n### source: \"docs/paging-delivery.md\"\npurpose: Pager delivery guide: acknowledgement-confirmed delivery and the escalation handoff.\noverview: paging-delivery.md explains acknowledgement-based delivery confirmation, when a delivery counts as failed, and where the failure path escalates.\nlanguage: markdown\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n--- source: \"docs/paging-delivery.md\" (lines 1-11, similarity: 1.00) ---\n1| # driftwatch pager delivery\n2| \n3| Pages route through the paging provider; delivery is confirmed by\n4| acknowledgement, not by the send call returning.\n5| \n6| ## Acknowledgement\n7| \n8| The provider acknowledges asynchronously. A delivery counts as\n9| failed only after the acknowledgement poll drains without reaching a\n10| terminal delivered state; the failure path then escalates through\n11| the policy ladder rather than retrying the same responder.\n",
+      "tool_call_id": "c1",
+      "name": "retrieve"
+    },
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "id": "c2",
+          "name": "agent_memory_search",
+          "arguments": {
+            "query": ""
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "content": "rec-migration-log · working · 2025-07-27 · paging migration log records the cutover trail; the retro agenda seeds from its delivery items\nrec-pager-timeout · semantic · 2025-07-27 · pager notifier timeout at 45 seconds, raised during the paging-provider migration; the new provider acknowledges asynchronously, a delivery only counts failed after the acknowledgement poll drains, and short timeouts double-page during provider brownouts, which the migration doc calls out beside the sweep that settled the value\nrec-pager-window · semantic · 2025-07-27 · pager notifier gives up a delivery at 10 seconds",
+      "tool_call_id": "c2",
+      "name": "agent_memory_search"
+    },
+    {
+      "role": "user",
+      "content": "How long does the pager notifier wait on a delivery before giving up?"
+    }
+  ],
+  "golden": {
+    "tool_calls": null,
+    "final_answer_criteria": "States the pager notifier waits 45 seconds before giving up a delivery. An answer of 10 seconds scores 0. An answer presenting both the correct and a competing value without committing to one scores 0."
+  },
+  "assembly_eval": {
+    "pair_id": "stale-notifier-timeout-page",
+    "mode": "legacy",
+    "candidate_ids": [
+      "2b15f587044c16df7d3dad0ea4167f51c06c462036b688faa343090c9f21346d",
+      "6001883ce8cc87faec478677cfdb2ed0c8ede5bfd3fe143adc053c4e8182801c",
+      "e8775fb66744a8927b6c360c35024281f766bbc5e101ff2f2c3b11b06730cf13",
+      "rec-migration-log",
+      "rec-pager-timeout",
+      "rec-pager-window"
+    ],
+    "estimated_prompt_tokens": 1014,
+    "state_digest": "87bc1cd3928f625b3aae929db6888b2381b037e79f099a4a8a2ed8cd0f973b64",
+    "subjects": [
+      "(c1|rag|internal/notify/pager.go)",
+      "(c1|rag|internal/notify/ackpoll.go)",
+      "(c1|rag|docs/paging-delivery.md)",
+      "(c2|memory|rec-migration-log)",
+      "(c2|memory|rec-pager-timeout)",
+      "(c2|memory|rec-pager-window)"
+    ],
+    "stratum": "stale_vs_fresh",
+    "answer_home": "memory",
+    "scenario_family": "notifier-timeout-staleness",
+    "budget": 1109,
+    "raw_state_tokens": 1849,
+    "pressure_level": "critical",
+    "shed_messages": 18,
+    "shed_bytes": 2578
+  }
+}

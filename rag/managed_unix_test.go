@@ -59,6 +59,10 @@ func TestReadManagedRegularFileReadsRegularFile(t *testing.T) {
 	if err := os.WriteFile(path, []byte("regular content"), 0o600); err != nil {
 		t.Fatalf("write file: %v", err)
 	}
+	path, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		t.Fatalf("resolve file: %v", err)
+	}
 	data, err := readManagedRegularFile(context.Background(), path)
 	if err != nil {
 		t.Fatalf("readManagedRegularFile() error = %v", err)

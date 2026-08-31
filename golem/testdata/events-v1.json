@@ -1,0 +1,92 @@
+[
+  {
+    "protocol": 1,
+    "threadId": "thread-1",
+    "runId": "run-success",
+    "seq": 1,
+    "type": "run.started",
+    "payload": {}
+  },
+  {
+    "protocol": 1,
+    "threadId": "thread-1",
+    "runId": "run-success",
+    "seq": 2,
+    "type": "message.delta",
+    "payload": {
+      "messageId": "run-success:0",
+      "text": "hello"
+    }
+  },
+  {
+    "protocol": 1,
+    "threadId": "thread-1",
+    "runId": "run-success",
+    "seq": 3,
+    "type": "tool.started",
+    "payload": {
+      "toolCallId": "call-1",
+      "name": "read_file",
+      "preview": "main.go"
+    }
+  },
+  {
+    "protocol": 1,
+    "threadId": "thread-1",
+    "runId": "run-success",
+    "seq": 4,
+    "type": "tool.finished",
+    "payload": {
+      "toolCallId": "call-1",
+      "name": "read_file",
+      "preview": "42 lines",
+      "isError": false
+    }
+  },
+  {
+    "protocol": 1,
+    "threadId": "thread-1",
+    "runId": "run-success",
+    "seq": 5,
+    "type": "run.finished",
+    "payload": {
+      "stopReason": "completed",
+      "model": "local/model"
+    }
+  },
+  {
+    "protocol": 1,
+    "threadId": "thread-1",
+    "runId": "run-failure",
+    "seq": 1,
+    "type": "run.started",
+    "payload": {}
+  },
+  {
+    "protocol": 1,
+    "threadId": "thread-1",
+    "runId": "run-failure",
+    "seq": 2,
+    "type": "run.failed",
+    "payload": {
+      "code": "provider_unavailable",
+      "message": "provider unavailable"
+    }
+  },
+  {
+    "protocol": 1,
+    "threadId": "thread-1",
+    "runId": "run-cancel",
+    "seq": 1,
+    "type": "run.started",
+    "payload": {}
+  },
+  {
+    "protocol": 1,
+    "threadId": "thread-1",
+    "runId": "run-cancel",
+    "seq": 2,
+    "type": "run.canceled",
+    "payload": {}
+  }
+]

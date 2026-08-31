@@ -2,14 +2,27 @@ package main
 
 import (
 	"bytes"
+	"context"
+	"encoding/json"
 	"errors"
+	"flag"
 	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
+	"time"
+
+	"github.com/kstruzzieri/go-llm/agent"
+	"github.com/kstruzzieri/go-llm/fingerprint"
+	"github.com/kstruzzieri/go-llm/rag"
 )
 
 func TestParseFlagsAllowWrite(t *testing.T) {
@@ -24,6 +37,88 @@ func TestParseFlagsAllowWrite(t *testing.T) {
 	if f2.allowWrite {
 		t.Fatal("allowWrite must default to false")
 	}
+}
+
+func TestColorPermittedTruthTable(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		noColor bool
+		env     map[string]string
+		want    bool
+	}{
+		{name: "default", env: map[string]string{"NO_COLOR": "", "TERM": "xterm-256color"}, want: true},
+		{name: "no-color flag", noColor: true, env: map[string]string{"NO_COLOR": "", "TERM": "xterm-256color"}, want: false},
+		{name: "NO_COLOR env", env: map[string]string{"NO_COLOR": "1", "TERM": "xterm-256color"}, want: false},
+		{name: "TERM dumb", env: map[string]string{"NO_COLOR": "", "TERM": "dumb"}, want: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			for k, v := range tc.env {
+				t.Setenv(k, v)
+			}
+			if got := colorPermitted(tc.noColor); got != tc.want {
+				t.Fatalf("colorPermitted(%v) = %v, want %v", tc.noColor, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestColorEnabledHonorsTerminalAndEnvironment(t *testing.T) {
+	t.Setenv("NO_COLOR", "")
+	t.Setenv("TERM", "xterm-256color")
+	null, err := os.Open(os.DevNull)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = null.Close() }()
+	if colorEnabled(null, false) {
+		t.Fatal("character device without a terminal must disable ANSI")
+	}
+
+	if runtime.GOOS != "windows" {
+		t.Run("pty", func(t *testing.T) {
+			terminal := openTestTerminal(t)
+
+			if !colorEnabled(terminal, false) {
+				t.Fatal("PTY should enable ANSI by default")
+			}
+			if colorEnabled(terminal, true) {
+				t.Fatal("-no-color must disable ANSI")
+			}
+			t.Setenv("NO_COLOR", "1")
+			if colorEnabled(terminal, false) {
+				t.Fatal("NO_COLOR must disable ANSI")
+			}
+			t.Setenv("NO_COLOR", "")
+			t.Setenv("TERM", "dumb")
+			if colorEnabled(terminal, false) {
+				t.Fatal("TERM=dumb must disable ANSI")
+			}
+		})
+	}
+
+	regular, err := os.CreateTemp(t.TempDir(), "stdout")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = regular.Close() }()
+	t.Setenv("TERM", "xterm-256color")
+	if colorEnabled(regular, false) {
+		t.Fatal("non-terminal output must disable ANSI")
+	}
+}
+
+// openTestTerminal opens the controlling terminal, skipping in non-interactive
+// runs. Legacy /dev/pty?? nodes are dead on modern Darwin (open returns
+// EAGAIN), so only interactive runs exercise the TTY-true branch; the flag and
+// environment gates are pinned terminal-free by TestColorPermittedTruthTable.
+func openTestTerminal(t *testing.T) *os.File {
+	t.Helper()
+	terminal, err := os.OpenFile("/dev/tty", os.O_RDWR, 0)
+	if err != nil {
+		t.Skipf("open terminal: %v", err)
+	}
+	t.Cleanup(func() { _ = terminal.Close() })
+	return terminal
 }
 
 func TestStartupNotices(t *testing.T) {
@@ -80,6 +175,529 @@ func TestParseFlags_Defaults(t *testing.T) {
 	}
 	if f.root != "." {
 		t.Errorf("root = %q, want \".\"", f.root)
+	}
+}
+
+func TestMainFeedbackConstructionGate(t *testing.T) {
+	root := t.TempDir()
+	paths, opens := 0, 0
+	getenv := func(string) string { paths++; return t.TempDir() }
+	opener := func(context.Context, string, string, func(string)) (*feedbackService, error) {
+		opens++
+		return nil, errors.New("open failed")
+	}
+
+	service, warning := openConfiguredFeedback(context.Background(), false, root, "", getenv, func(string) {}, opener)
+	if service != nil || warning != "" || paths != 0 || opens != 0 {
+		t.Fatalf("flag-off gate: service=%v warning=%q paths=%d opens=%d", service, warning, paths, opens)
+	}
+	service, warning = openConfiguredFeedback(context.Background(), true, root, filepath.Join(t.TempDir(), "feedback.db"), getenv, func(string) {}, opener)
+	if service != nil || opens != 1 || strings.Count(warning, "behavioral feedback disabled") != 1 {
+		t.Fatalf("open failure: service=%v warning=%q opens=%d", service, warning, opens)
+	}
+}
+
+func TestRunFeedbackConstructionGate(t *testing.T) {
+	configPath, root := writeRunLifecycleConfig(t)
+	baseArgs := []string{"-config", configPath, "-root", root, "-p", "done", "-no-probe", "-no-cap-probe", "-no-session", "-no-memory", "-no-project-context"}
+	errStop := errors.New("stop after startup")
+
+	for _, tc := range []struct {
+		name         string
+		args         []string
+		wantOpens    int
+		wantWarnings int
+		openSucceeds bool
+	}{
+		{name: "flag off", wantOpens: 0},
+		{name: "no rag", args: []string{"-feedback", "-no-rag"}, wantOpens: 0},
+		{name: "open failure", args: []string{"-feedback"}, wantOpens: 1, wantWarnings: 1},
+		{name: "empty report", args: []string{"-feedback"}, wantOpens: 1, openSucceeds: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stdin, stdout, stderr := runTestFiles(t)
+			opens := 0
+			var svc *feedbackService
+			if tc.openSucceeds {
+				svc = feedbackServiceForStore(root, &feedbackBlockingStore{}, feedbackTestWarn(t))
+			}
+			err := run(append(append([]string{}, baseArgs...), tc.args...), stdin, stdout, stderr, runHooks{
+				openFeedback: func(context.Context, string, string, func(string)) (*feedbackService, error) {
+					opens++
+					if svc != nil {
+						return svc, nil
+					}
+					return nil, errors.New("open failed")
+				},
+				startAutoIndex: func() func() { return func() {} },
+				afterAutoIndexStart: func(lineSourceMode, agent.Tool, *feedbackService) error {
+					return errStop
+				},
+			})
+			if !errors.Is(err, errStop) {
+				t.Fatalf("run error = %v, want test stop", err)
+			}
+			if opens != tc.wantOpens {
+				t.Fatalf("feedback opens = %d, want %d", opens, tc.wantOpens)
+			}
+			warningText := readRunTestFile(t, stderr)
+			if got := strings.Count(warningText, "behavioral feedback disabled"); got != tc.wantWarnings {
+				t.Fatalf("feedback warnings = %d, want %d; stderr:\n%s", got, tc.wantWarnings, warningText)
+			}
+			if strings.Contains(warningText, "behavioral feedback: attempted=") {
+				t.Fatalf("empty or disabled feedback printed a shutdown report:\n%s", warningText)
+			}
+		})
+	}
+}
+
+func TestRunReturnsCheckpointStoreCloseError(t *testing.T) {
+	configPath, root := writeRunLifecycleConfig(t)
+	stdin, stdout, stderr := runTestFiles(t)
+	errStop := errors.New("stop after checkpoint open")
+
+	err := run([]string{"-config", configPath, "-root", root, "-allow-write", "-no-probe", "-no-cap-probe", "-no-session", "-no-memory", "-no-project-context", "-no-auto-index"}, stdin, stdout, stderr, runHooks{
+		afterCheckpointOpen: func(store *checkpointStore) error {
+			if err := store.lease.file.Close(); err != nil {
+				t.Fatalf("close checkpoint lease early: %v", err)
+			}
+			return errStop
+		},
+	})
+	if !errors.Is(err, errStop) {
+		t.Fatalf("run error = %v, want test stop", err)
+	}
+	if !errors.Is(err, os.ErrClosed) {
+		t.Fatalf("run error = %v, want checkpoint close error", err)
+	}
+}
+
+func TestRunReportsDerivedInputCeilingFromConfig(t *testing.T) {
+	configPath, root := writeRunLifecycleConfig(t)
+	stdin, stdout, stderr := runTestFiles(t)
+	errStop := errors.New("stop after startup")
+	err := run([]string{"-config", configPath, "-root", root, "-no-probe", "-no-cap-probe", "-no-session", "-no-memory", "-no-project-context", "-no-auto-index"}, stdin, stdout, stderr, runHooks{
+		startAutoIndex: func() func() { return func() {} },
+		afterAutoIndexStart: func(lineSourceMode, agent.Tool, *feedbackService) error {
+			return errStop
+		},
+	})
+	if !errors.Is(err, errStop) {
+		t.Fatalf("run error = %v, want test stop", err)
+	}
+	got := readRunTestFile(t, stderr)
+	if !strings.Contains(got, "input ceiling: 30720 tokens (chain minimum)") {
+		t.Fatalf("stderr missing derived input ceiling:\n%s", got)
+	}
+}
+
+func TestRunReportsDerivedInputCeilingFromFingerprint(t *testing.T) {
+	configPath, root := writeRunLifecycleConfig(t) // isolates XDG_DATA_HOME
+	raw, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	withoutContext := strings.Replace(string(raw), `, "context_window": 32768`, "", 1)
+	if withoutContext == string(raw) {
+		t.Fatal("test config did not contain context_window")
+	}
+	if err := os.WriteFile(configPath, []byte(withoutContext), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	handle, warning := openCapProbeStore(context.Background(), os.Getenv, root)
+	if handle == nil || warning != "" {
+		t.Fatalf("open fingerprint store = %v, warning %q", handle, warning)
+	}
+	if err := handle.profiles.Save(context.Background(), fingerprint.Profile{
+		BackendID:        "test",
+		ModelName:        "agent-model",
+		ModelDigest:      "config-caps:chat,stream,tool_call",
+		ProfileVersion:   fingerprint.CurrentProfileVersion,
+		EffectiveContext: 24_576,
+		TestedAt:         time.Now(),
+	}); err != nil {
+		t.Fatalf("save fingerprint profile: %v", err)
+	}
+	if err := handle.db.Close(); err != nil {
+		t.Fatalf("close fingerprint store: %v", err)
+	}
+
+	stdin, stdout, stderr := runTestFiles(t)
+	errStop := errors.New("stop after startup")
+	err = run([]string{"-config", configPath, "-root", root, "-no-probe", "-no-cap-probe", "-no-session", "-no-memory", "-no-project-context", "-no-auto-index"}, stdin, stdout, stderr, runHooks{
+		startAutoIndex: func() func() { return func() {} },
+		afterAutoIndexStart: func(lineSourceMode, agent.Tool, *feedbackService) error {
+			return errStop
+		},
+	})
+	if !errors.Is(err, errStop) {
+		t.Fatalf("run error = %v, want test stop", err)
+	}
+	got := readRunTestFile(t, stderr)
+	if !strings.Contains(got, "input ceiling: 22528 tokens (chain minimum)") {
+		t.Fatalf("stderr missing fingerprint-derived input ceiling:\n%s", got)
+	}
+}
+
+func TestRunWarnsWhenFingerprintCacheDegradesWithCapProbeDisabled(t *testing.T) {
+	blocker := filepath.Join(t.TempDir(), "blocker")
+	if err := os.WriteFile(blocker, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	configPath, root := writeRunLifecycleConfig(t)
+	// Override the helper's isolated XDG_DATA_HOME with a non-directory so the
+	// store open fails and degrades.
+	t.Setenv("XDG_DATA_HOME", blocker)
+	stdin, stdout, stderr := runTestFiles(t)
+	errStop := errors.New("stop after startup")
+	err := run([]string{"-config", configPath, "-root", root, "-no-probe", "-no-cap-probe", "-no-session", "-no-memory", "-no-project-context", "-no-auto-index"}, stdin, stdout, stderr, runHooks{
+		startAutoIndex: func() func() { return func() {} },
+		afterAutoIndexStart: func(lineSourceMode, agent.Tool, *feedbackService) error {
+			return errStop
+		},
+	})
+	if !errors.Is(err, errStop) {
+		t.Fatalf("run error = %v, want test stop", err)
+	}
+	if got := readRunTestFile(t, stderr); !strings.Contains(got, "fingerprint cache degraded to in-memory") {
+		t.Fatalf("stderr missing fingerprint degradation warning:\n%s", got)
+	}
+}
+
+func TestRunStopsAutoIndexInEveryDispatchBranch(t *testing.T) {
+	configPath, root := writeRunLifecycleConfig(t)
+	baseArgs := []string{"-config", configPath, "-root", root, "-no-probe", "-no-cap-probe", "-no-session", "-no-memory", "-no-project-context", "-no-auto-index"}
+	errStop := errors.New("stop after auto-index start")
+
+	for _, tc := range []struct {
+		name string
+		args []string
+		mode lineSourceMode
+	}{
+		{name: "answer only", args: []string{"-goal", "plan it"}, mode: sourceAnswerOnly},
+		{name: "noninteractive", args: []string{"-p", "done"}, mode: sourceNone},
+		{name: "repl", mode: sourceREPL},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stdin, stdout, stderr := runTestFiles(t)
+			var events []string
+			err := run(append(append([]string{}, baseArgs...), tc.args...), stdin, stdout, stderr, runHooks{
+				startAutoIndex: func() func() {
+					return func() { events = append(events, "auto-index") }
+				},
+				afterAutoIndexStart: func(got lineSourceMode, _ agent.Tool, _ *feedbackService) error {
+					if got != tc.mode {
+						t.Fatalf("dispatch mode = %v, want %v", got, tc.mode)
+					}
+					return errStop
+				},
+				closed: func(name string) { events = append(events, name) },
+			})
+			if !errors.Is(err, errStop) {
+				t.Fatalf("run error = %v, want test stop", err)
+			}
+			if len(events) == 0 || events[0] != "auto-index" {
+				t.Fatalf("shutdown events = %v, want branch-local auto-index stop first", events)
+			}
+			if got := strings.Count(strings.Join(events, ","), "auto-index"); got != 1 {
+				t.Fatalf("auto-index stop count = %d, events = %v", got, events)
+			}
+		})
+	}
+}
+
+func TestRunRendersCumulativeFeedbackShutdownReport(t *testing.T) {
+	configPath, root := writeRunLifecycleConfig(t)
+	stdin, stdout, stderr := runTestFiles(t)
+	svc := feedbackServiceForStore(root, &feedbackBlockingStore{}, feedbackTestWarn(t))
+	svc.report = feedbackReport{
+		attempted:              9,
+		completed:              4,
+		dropped:                5,
+		reasons:                map[string]int{dropOverflowNewest: 3, dropOperationFailed: 2},
+		presentationDuplicates: 6,
+		presentationJoinMisses: 7,
+	}
+	closeErr := errors.New("close failed")
+	svc.closeWriter = func() error { return closeErr }
+	errStop := errors.New("stop after startup")
+
+	err := run([]string{"-config", configPath, "-root", root, "-feedback", "-no-probe", "-no-cap-probe", "-no-session", "-no-memory", "-no-project-context", "-no-auto-index"}, stdin, stdout, stderr, runHooks{
+		openFeedback: func(context.Context, string, string, func(string)) (*feedbackService, error) {
+			return svc, nil
+		},
+		startAutoIndex: func() func() { return func() {} },
+		afterAutoIndexStart: func(lineSourceMode, agent.Tool, *feedbackService) error {
+			return errStop
+		},
+	})
+	if !errors.Is(err, errStop) {
+		t.Fatalf("run error = %v, want test stop", err)
+	}
+	got := readRunTestFile(t, stderr)
+	want := "behavioral feedback: attempted=9 completed=4 dropped=5 drop_reasons=operation-failed:2,overflow-newest:3 duplicates=6 join_misses=7\n"
+	if !strings.Contains(got, want) {
+		t.Fatalf("stderr missing cumulative report %q:\n%s", want, got)
+	}
+	if count := strings.Count(got, "behavioral feedback close failed: close failed"); count != 1 {
+		t.Fatalf("close error count = %d, want 1; stderr:\n%s", count, got)
+	}
+}
+
+func TestRunShutdownDrainsBorrowedWeighterBeforeFeedbackClose(t *testing.T) {
+	for _, current := range []bool{false, true} {
+		name := "ready generation"
+		if current {
+			name = "current explicit generation"
+		}
+		t.Run(name, func(t *testing.T) {
+			configPath, root := writeRunLifecycleConfig(t)
+			stdin, stdout, stderr := runTestFiles(t)
+			errStop := errors.New("stop with retrieval active")
+			weighter := &runBlockingWeighter{entered: make(chan struct{}), release: make(chan struct{})}
+			svc := feedbackServiceForStore(root, &feedbackBlockingStore{}, feedbackTestWarn(t))
+			svc.weighter = weighter
+			args := []string{"-config", configPath, "-root", root, "-feedback", "-no-probe", "-no-cap-probe", "-no-session", "-no-memory", "-no-project-context"}
+			if current {
+				dbPath := filepath.Join(t.TempDir(), "explicit.db")
+				seedIndex(t, dbPath, workspaceID(root), "test/qwen3-embedding:8b")
+				args = append(args, "-rag-db", dbPath)
+			}
+
+			var mu sync.Mutex
+			var events []string
+			runtimeClosed := make(chan struct{})
+			retrievalClosed := make(chan struct{})
+			feedbackClosed := make(chan struct{})
+			var runtimeOnce, retrievalOnce, feedbackOnce sync.Once
+			closed := func(name string) {
+				mu.Lock()
+				events = append(events, name)
+				mu.Unlock()
+				switch name {
+				case "runtime":
+					runtimeOnce.Do(func() { close(runtimeClosed) })
+				case "retrieval":
+					retrievalOnce.Do(func() { close(retrievalClosed) })
+				case "feedback":
+					feedbackOnce.Do(func() { close(feedbackClosed) })
+				}
+			}
+			// Recorded inside WeightsBatch before it returns, so the append
+			// happens-before inflight.Done and therefore before the "retrieval"
+			// event a draining close records; the final wantEvents order is a
+			// machine-enforced happens-before chain, not a scheduling sample.
+			weighter.done = func() {
+				mu.Lock()
+				events = append(events, "invoke-done")
+				mu.Unlock()
+			}
+
+			releaseResult := make(chan error, 1)
+			err := run(args, stdin, stdout, stderr, runHooks{
+				openFeedback: func(context.Context, string, string, func(string)) (*feedbackService, error) {
+					return svc, nil
+				},
+				startAutoIndex: func() func() {
+					return func() {
+						mu.Lock()
+						events = append(events, "auto-index")
+						mu.Unlock()
+					}
+				},
+				afterAutoIndexStart: func(mode lineSourceMode, retrieve agent.Tool, gotSvc *feedbackService) error {
+					if mode != sourceREPL || gotSvc != svc {
+						t.Fatalf("startup hook mode/service = %v/%p, want REPL/%p", mode, gotSvc, svc)
+					}
+					active := retrieve
+					if !current {
+						ready, ok := retrieve.(*readyRetrieve)
+						if !ok {
+							t.Fatalf("retrieve tool = %T, want *readyRetrieve", retrieve)
+						}
+						ready.install(newRetrievalReader(runBorrowingTool{weighter: gotSvc.behavioralWeighter()}, func() error { return nil }), "ready")
+						active = ready
+					}
+					type invokeOutcome struct {
+						result agent.ToolResult
+						err    error
+					}
+					invokeResult := make(chan invokeOutcome, 1)
+					go func() {
+						result, invokeErr := active.Invoke(context.Background(), json.RawMessage(`{"query":"active"}`))
+						invokeResult <- invokeOutcome{result: result, err: invokeErr}
+					}()
+					select {
+					case <-weighter.entered:
+					case outcome := <-invokeResult:
+						t.Fatalf("retrieval returned before borrowing the feedback weighter: result=%+v err=%v", outcome.result, outcome.err)
+					case <-time.After(time.Second):
+						t.Fatal("retrieval did not borrow the feedback weighter")
+					}
+					go func() {
+						select {
+						case <-runtimeClosed:
+						case <-time.After(time.Second):
+							close(weighter.release)
+							releaseResult <- errors.New("runtime did not close after shutdown began")
+							return
+						}
+						// Level-triggered: a closed channel stays ready, so a
+						// premature close is detected no matter when this select
+						// runs — unlike the previous non-blocking default, which
+						// had to win a scheduling race against run()'s defers.
+						// Under a correct drain neither channel can close while
+						// the weighter is still borrowed; the timeout is pure
+						// latency on the passing path, never a pass/fail edge.
+						select {
+						case <-retrievalClosed:
+							close(weighter.release)
+							releaseResult <- errors.New("retrieval closed while it still borrowed the feedback weighter")
+						case <-feedbackClosed:
+							close(weighter.release)
+							releaseResult <- errors.New("feedback closed while retrieval still borrowed its weighter")
+						case <-time.After(500 * time.Millisecond):
+							close(weighter.release)
+							releaseResult <- nil
+						}
+					}()
+					return errStop
+				},
+				closed: closed,
+			})
+			if !errors.Is(err, errStop) {
+				t.Fatalf("run error = %v, want test stop", err)
+			}
+			if releaseErr := <-releaseResult; releaseErr != nil {
+				t.Fatal(releaseErr)
+			}
+			mu.Lock()
+			gotEvents := append([]string(nil), events...)
+			mu.Unlock()
+			wantEvents := []string{"auto-index", "runtime", "invoke-done", "retrieval", "feedback"}
+			if fmt.Sprint(gotEvents) != fmt.Sprint(wantEvents) {
+				t.Fatalf("shutdown events = %v, want %v", gotEvents, wantEvents)
+			}
+		})
+	}
+}
+
+type runBlockingWeighter struct {
+	entered chan struct{}
+	release chan struct{}
+	once    sync.Once
+	done    func() // runs after release, before WeightsBatch returns
+}
+
+func (w *runBlockingWeighter) WeightsBatch(context.Context, []string) (map[string]float64, error) {
+	w.once.Do(func() { close(w.entered) })
+	<-w.release
+	if w.done != nil {
+		w.done()
+	}
+	return map[string]float64{}, nil
+}
+
+type runBorrowingTool struct{ weighter rag.BehavioralWeighter }
+
+func (runBorrowingTool) Spec() agent.ToolSpec {
+	return agent.ToolSpec{Name: "retrieve", Parameters: json.RawMessage(`{"type":"object"}`)}
+}
+func (runBorrowingTool) Effect() agent.Effect { return agent.Effect{Class: agent.Read} }
+func (t runBorrowingTool) Invoke(ctx context.Context, _ json.RawMessage) (agent.ToolResult, error) {
+	_, err := t.weighter.WeightsBatch(ctx, []string{"chunk"})
+	return agent.ToolResult{Content: "done"}, err
+}
+
+func writeRunLifecycleConfig(t *testing.T) (string, string) {
+	t.Helper()
+	// run() opens the shared fingerprint DB whenever the ceiling is derived,
+	// even under -no-cap-probe; isolate every lifecycle test from the
+	// developer's real $XDG_DATA_HOME/golem/fingerprints.db. Tests that need
+	// a custom location override after calling this helper.
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/v1/models":
+			_, _ = io.WriteString(w, `{"data":[{"id":"agent-model"},{"id":"qwen3-embedding:8b"}]}`)
+		case "/v1/embeddings":
+			embedding := make([]float64, 768)
+			embedding[0] = 1
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"data":  []any{map[string]any{"embedding": embedding, "index": 0}},
+				"model": "qwen3-embedding:8b",
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(server.Close)
+	root := t.TempDir()
+	configPath := filepath.Join(t.TempDir(), "models.json")
+	configJSON := fmt.Sprintf(`{
+  "providers": {"test": {"base_url": %q, "api_format": "openai-compat", "timeout": "2s"}},
+  "models": {
+    "agent": {"name": "agent-model", "provider": "test", "type": "dense", "context_window": 32768,
+      "capabilities": ["chat", "stream", "tool_call"]},
+	"embedding": {"name": "qwen3-embedding:8b", "provider": "test", "type": "embedding", "dimensions": 768,
+      "capabilities": ["embed"]}
+  },
+  "defaults": {"agent": "agent", "embedding": "embedding"}
+}`, server.URL)
+	if err := os.WriteFile(configPath, []byte(configJSON), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return configPath, root
+}
+
+func runTestFiles(t *testing.T) (*os.File, *os.File, *os.File) {
+	t.Helper()
+	files := make([]*os.File, 3)
+	for i := range files {
+		file, err := os.CreateTemp(t.TempDir(), "run-file")
+		if err != nil {
+			t.Fatal(err)
+		}
+		files[i] = file
+		t.Cleanup(func() { _ = file.Close() })
+	}
+	return files[0], files[1], files[2]
+}
+
+func readRunTestFile(t *testing.T, file *os.File) string {
+	t.Helper()
+	if _, err := file.Seek(0, io.SeekStart); err != nil {
+		t.Fatal(err)
+	}
+	contents, err := io.ReadAll(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(contents)
+}
+
+func TestParseFlags_FeedbackHelpDescribesCollectionAndRanking(t *testing.T) {
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	original := os.Stderr
+	t.Cleanup(func() { os.Stderr = original })
+	os.Stderr = w
+	_, parseErr := parseFlags([]string{"-help"})
+	os.Stderr = original
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = r.Close() }()
+	help, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !errors.Is(parseErr, flag.ErrHelp) || !strings.Contains(string(help), "enable local behavioral feedback collection and retrieval ranking") {
+		t.Fatalf("parse error=%v help=%q", parseErr, help)
 	}
 }
 
@@ -330,6 +948,23 @@ func TestParseFlags_NoAutoIndex(t *testing.T) {
 	}
 }
 
+func TestParseFlags_ProgressiveIsOptIn(t *testing.T) {
+	f, err := parseFlags(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if f.progressive {
+		t.Fatal("progressive summaries must default to disabled")
+	}
+	f, err = parseFlags([]string{"-progressive"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !f.progressive {
+		t.Fatal("-progressive did not enable progressive summaries")
+	}
+}
+
 func TestParseFlags_NoAutoIndexNoConflicts(t *testing.T) {
 	for _, args := range [][]string{
 		{"-no-auto-index", "-rag-db", "x.db"},
@@ -365,6 +1000,46 @@ func TestShouldStartAutoIndex(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestShouldPlanSummarize(t *testing.T) {
+	boom := errors.New("unavailable")
+	for _, tc := range []struct {
+		name        string
+		f           flags
+		autoErr     error
+		embChainErr error
+		want        bool
+	}{
+		{"interactive compression", flags{}, nil, nil, true},
+		{"one-shot", applyOneShotForTest(flags{promptSet: true, prompt: "x"}), nil, nil, false},
+		{"task", applyTaskForTest(flags{planPath: "plan.json"}), nil, nil, false},
+		{"auto-approved goal", applyGoalForTest(flags{goalSet: true, approvePlanLock: true}), nil, nil, false},
+		{"progressive auto-index", flags{noCompress: true, progressive: true}, nil, nil, true},
+		{"progressive unavailable embedding", flags{noCompress: true, progressive: true}, nil, boom, false},
+		{"progressive without auto-index", flags{noCompress: true, progressive: true, noAutoIndex: true}, nil, nil, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := shouldPlanSummarize(tc.f, tc.autoErr, tc.embChainErr); got != tc.want {
+				t.Fatalf("shouldPlanSummarize = %t, want %t", got, tc.want)
+			}
+		})
+	}
+}
+
+func applyOneShotForTest(f flags) flags {
+	f, _ = applyOneShotMode(f)
+	return f
+}
+
+func applyTaskForTest(f flags) flags {
+	f, _ = applyTaskMode(f)
+	return f
+}
+
+func applyGoalForTest(f flags) flags {
+	f, _ = applyGoalMode(f)
+	return f
 }
 
 func TestAutoIndexEnabled(t *testing.T) {
@@ -934,5 +1609,123 @@ func TestApplyGoalMode_WarnsOnIgnoredFlags(t *testing.T) {
 	_, warns = applyGoalMode(flags{goalSet: true})
 	if len(warns) != 0 {
 		t.Fatalf("expected no warnings when no ignored flags are set, got %v", warns)
+	}
+}
+
+func TestStartupNotices_DispatchLine(t *testing.T) {
+	lines := startupNotices(startupInfo{workspace: "/w", dispatchLine: "dispatch: enabled -> local/speedy"})
+	found := false
+	for _, l := range lines {
+		if l == "dispatch: enabled -> local/speedy" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("dispatch notice not surfaced: %v", lines)
+	}
+}
+
+func TestParseFlags_Dispatch(t *testing.T) {
+	f, err := parseFlags(nil)
+	if err != nil {
+		t.Fatalf("parseFlags: %v", err)
+	}
+	if f.dispatch || f.dispatchRole != "" {
+		t.Fatalf("defaults: dispatch=%v role=%q, want disabled with empty role (parent chain)", f.dispatch, f.dispatchRole)
+	}
+	f, err = parseFlags([]string{"-dispatch", "-dispatch-role", "lightweight"})
+	if err != nil {
+		t.Fatalf("parseFlags: %v", err)
+	}
+	if !f.dispatch || f.dispatchRole != "lightweight" {
+		t.Fatalf("parsed: dispatch=%v role=%q", f.dispatch, f.dispatchRole)
+	}
+}
+
+func TestValidateFlags_DispatchModes(t *testing.T) {
+	cases := []struct {
+		name       string
+		with       flags  // dispatch=true variant
+		without    flags  // dispatch=false control: must validate clean
+		wantSubstr string // "" => the dispatch variant must ALSO validate clean (allowed mode)
+	}{
+		{
+			name:       "task mode rejected",
+			with:       flags{planPath: "plan.json", approveEdits: true, approveGates: true, planWorkers: 1, dispatch: true},
+			without:    flags{planPath: "plan.json", approveEdits: true, approveGates: true, planWorkers: 1},
+			wantSubstr: "does not attach dispatch",
+		},
+		{
+			name:       "planning mode rejected",
+			with:       flags{goal: "g", goalSet: true, dispatch: true},
+			without:    flags{goal: "g", goalSet: true},
+			wantSubstr: "does not attach dispatch",
+		},
+		{
+			name:       "agentflow status rejected",
+			with:       flags{agentflowStatus: true, dispatch: true},
+			without:    flags{agentflowStatus: true},
+			wantSubstr: "cannot be combined",
+		},
+		{
+			name:       "agentflow resume rejected",
+			with:       flags{agentflowResume: true, planPath: "plan.json", planWorkers: 1, approveEdits: true, approveGates: true, dispatch: true},
+			without:    flags{agentflowResume: true, planPath: "plan.json", planWorkers: 1, approveEdits: true, approveGates: true},
+			wantSubstr: "cannot be combined",
+		},
+		{
+			name:       "dispatch-role without dispatch rejected",
+			with:       flags{dispatchRole: "fast"},
+			without:    flags{dispatch: true, dispatchRole: "fast"},
+			wantSubstr: "-dispatch-role requires -dispatch",
+		},
+		// Positive controls: the modes dispatch is FOR must not be rejected;
+		// an over-broad exclusion would pass every rejection case above.
+		{
+			name:    "interactive allowed",
+			with:    flags{dispatch: true},
+			without: flags{},
+		},
+		{
+			name:    "one-shot allowed",
+			with:    flags{prompt: "q", promptSet: true, dispatch: true},
+			without: flags{prompt: "q", promptSet: true},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := validateFlags(tc.with)
+			if tc.wantSubstr == "" {
+				if err != nil {
+					t.Fatalf("allowed mode rejected: %v", err)
+				}
+			} else {
+				if err == nil {
+					t.Fatal("dispatch variant: want error, got nil")
+				}
+				if !strings.Contains(err.Error(), tc.wantSubstr) {
+					t.Fatalf("error %q does not mention %q — a different rule fired", err, tc.wantSubstr)
+				}
+			}
+			// The control proves any error above is CAUSED by dispatch, not by
+			// the surrounding mode flags.
+			if err := validateFlags(tc.without); err != nil {
+				t.Fatalf("control without dispatch must validate clean: %v", err)
+			}
+		})
+	}
+}
+
+func TestRunDispatchesSourceSubcommand(t *testing.T) {
+	stdin, stdout, stderr := runTestFiles(t)
+	err := run([]string{"source"}, stdin, stdout, stderr)
+	if !errors.Is(err, errSourceFailed) {
+		t.Fatalf("want errSourceFailed from bare source dispatch, got %v", err)
+	}
+	if got := readRunTestFile(t, stdout); got != "" {
+		t.Fatalf("bare source wrote stdout %q", got)
+	}
+	if got := readRunTestFile(t, stderr); !strings.Contains(got, "usage: golem source") {
+		t.Fatalf("bare source stderr = %q", got)
 	}
 }

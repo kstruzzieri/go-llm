@@ -1,0 +1,28 @@
+{
+  "id": "dx-worker-count-flat",
+  "source": "assembly-corpus",
+  "captured_at": "0001-01-01T00:00:00Z",
+  "system": "Answer the question using ONLY the provided context. If the context does not contain the answer, say so explicitly.",
+  "tools": null,
+  "turns": [
+    {
+      "role": "user",
+      "content": "Context:\nRelevant code context:\n\n--- internal/relay/fanout.go (lines 1-30, similarity: 1.00) ---\n1| package relay\n2| \n3| import (\n4| \t\"context\"\n5| \t\"sync\"\n6| )\n7| \n8| // defaultWorkers is the delivery pool size when the operator does not\n9| // override it.\n10| const defaultWorkers = 8\n11| \n12| // Fanout drains the queue and posts each claimed event to its\n13| // subscriber endpoint. Failures are rescheduled using retryDelay.\n14| type Fanout struct {\n15| \tq  Queue\n16| \twg sync.WaitGroup\n17| }\n18| \n19| func (f *Fanout) Run(ctx context.Context) {\n20| \tfor i := 0; i \u003c defaultWorkers; i++ {\n21| \t\tf.wg.Add(1)\n22| \t\tgo f.worker(ctx)\n23| \t}\n24| }\n25| \n26| // Drain blocks until every in-flight delivery has completed. Callers\n27| // bound it with a context; the pool itself imposes no deadline.\n28| func (f *Fanout) Drain() {\n29| \tf.wg.Wait()\n30| }\n\n--- internal/ratelimit/bucket.go (lines 1-34, similarity: 1.00) ---\n1| package ratelimit\n2| \n3| import (\n4| \t\"sync\"\n5| \t\"time\"\n6| )\n7| \n8| // Per-client token bucket for the ingest endpoint. A client may burst\n9| // up to `burst` publishes; sustained throughput is refillPerSec.\n10| const (\n11| \tburst        = 40\n12| \trefillPerSec = 10\n13| )\n14| \n15| type bucket struct {\n16| \tmu     sync.Mutex\n17| \ttokens float64\n18| \tlast   time.Time\n19| }\n20| \n21| func (b *bucket) Allow(now time.Time) bool {\n22| \tb.mu.Lock()\n23| \tdefer b.mu.Unlock()\n24| \tb.tokens += now.Sub(b.last).Seconds() * refillPerSec\n25| \tif b.tokens \u003e burst {\n26| \t\tb.tokens = burst\n27| \t}\n28| \tb.last = now\n29| \tif b.tokens \u003c 1 {\n30| \t\treturn false\n31| \t}\n32| \tb.tokens--\n33| \treturn true\n34| }\n\n\n\nQuestion: How many delivery workers does the fanout pool start by default?"
+    }
+  ],
+  "golden": {
+    "tool_calls": null,
+    "final_answer_criteria": "States the pool starts 8 workers, from defaultWorkers in internal/relay/fanout.go. The rate-limit refill rate, claim batch size, and other counts in context are wrong answers."
+  },
+  "assembly_eval": {
+    "pair_id": "dx-worker-count",
+    "mode": "flat",
+    "candidate_ids": [
+      "7bd603dd16774ac195449851669f89133812e7615af3bc319baff9e67a0d4b18",
+      "fc8a2f43adb099dea854f33fdde9526606d168928ba2a2cef9116c2dae3d6597",
+      "ff93d51ff6ea7a95637fdf73af23719a5b962beb41b310679ed82e870d021931",
+      "673ae45b7a7d6a50563c1f8912e11bde719652c4218e084bbfd76277466bb676"
+    ],
+    "estimated_prompt_tokens": 451
+  }
+}

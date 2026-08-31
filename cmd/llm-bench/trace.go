@@ -29,6 +29,9 @@ type Trace struct {
 	Tools      []json.RawMessage `json:"tools"`
 	Turns      []Turn            `json:"turns"`
 	Golden     Golden            `json:"golden"`
+	// AssemblyEval is present only on assembly-corpus traces (#331); nil for
+	// every other trace and omitted from their JSON.
+	AssemblyEval *AssemblyEval `json:"assembly_eval,omitempty"`
 }
 
 // Turn represents a single role/content pair, optionally with tool calls or
@@ -48,8 +51,12 @@ type Turn struct {
 	Raw        json.RawMessage `json:"raw,omitempty"`
 }
 
-// ToolCall is a minimal representation of a tool invocation.
+// ToolCall is a minimal representation of a tool invocation. ID is set on
+// prefilled-mode assembly traces (#331 slice 3c) so tool-result turns can
+// reference the originating assistant call via ToolCallID; it is omitempty,
+// so legacy traces and their hashes are unaffected.
 type ToolCall struct {
+	ID        string          `json:"id,omitempty"`
 	Name      string          `json:"name"`
 	Arguments json.RawMessage `json:"arguments"`
 }
@@ -111,6 +118,125 @@ func validateTrace(t Trace) error {
 		if _, ok := validRestraintDifficulties[d]; !ok {
 			return fmt.Errorf("golden.difficulty %q invalid (want obvious, tempting, adversarial, or empty)", d)
 		}
+	}
+	if t.AssemblyEval != nil {
+		ae := t.AssemblyEval
+		if ae.PairID == "" {
+			return fmt.Errorf("assembly_eval: blank pair_id")
+		}
+		switch ae.Mode {
+		case AssemblyFlat, AssemblyProgressive:
+			if len(ae.CandidateIDs) == 0 {
+				return fmt.Errorf("assembly_eval: empty candidate_ids")
+			}
+			if ae.EstimatedPromptTokens <= 0 {
+				return fmt.Errorf("assembly_eval: non-positive estimated_prompt_tokens")
+			}
+		case AssemblyLegacy, AssemblyMixed:
+			if ae.Budget <= 0 {
+				return fmt.Errorf("assembly_eval: %s arm requires positive budget", ae.Mode)
+			}
+			if ae.StateDigest == "" {
+				return fmt.Errorf("assembly_eval: %s arm requires state_digest", ae.Mode)
+			}
+		case AssemblyTopline:
+			// pair_id is the only requirement; topline arms are unpaired
+			// descriptive ceilings with no budget or digest contract.
+		default:
+			return fmt.Errorf("assembly_eval: unknown mode %q", ae.Mode)
+		}
+		if prefilledAssemblyMode(t) {
+			if err := validatePrefilledTurns(t.Turns); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// prefilledAssemblyMode reports whether a trace carries a prefilled
+// assembled history (#331 slice 3c legacy/mixed/topline arms). Prefilled
+// traces are replayed with a single generation call over their verbatim
+// Turns; every other trace (including 3a flat/progressive) keeps the legacy
+// scripted-replacement replay and turn rules.
+func prefilledAssemblyMode(t Trace) bool {
+	if t.AssemblyEval == nil {
+		return false
+	}
+	switch t.AssemblyEval.Mode {
+	case AssemblyLegacy, AssemblyMixed, AssemblyTopline:
+		return true
+	}
+	return false
+}
+
+// anyPrefilledAssemblyTrace reports whether any trace in the set is a
+// prefilled assembly arm (legacy/mixed/topline).
+func anyPrefilledAssemblyTrace(traces []Trace) bool {
+	for _, t := range traces {
+		if prefilledAssemblyMode(t) {
+			return true
+		}
+	}
+	return false
+}
+
+// validatePrefilledTurns enforces the prefilled-history turn rules: roles
+// user/assistant/tool only; each tool turn answers exactly one earlier
+// assistant tool call by ToolCallID; every declared assistant tool call is
+// answered exactly once (IDs required non-empty); and the final turn is a
+// user question with non-empty content (the single generation prompt the
+// candidate answers).
+func validatePrefilledTurns(turns []Turn) error {
+	declared := map[string]struct{}{} // assistant tool-call IDs seen so far
+	var declaredOrder []string
+	answered := map[string]struct{}{}
+	for i, turn := range turns {
+		switch turn.Role {
+		case "user":
+		case "assistant":
+			for j, call := range turn.ToolCalls {
+				id := strings.TrimSpace(call.ID)
+				if id == "" {
+					// A blank-ID call could never be answered by any tool
+					// turn, so it is the same unanswered-call hazard the
+					// post-loop check below rejects.
+					return fmt.Errorf("turn %d tool_call %d: prefilled assistant tool call requires non-empty id", i, j)
+				}
+				if _, ok := declared[id]; ok {
+					return fmt.Errorf("turn %d tool_call %d: duplicate assistant tool-call id %q", i, j, id)
+				}
+				declared[id] = struct{}{}
+				declaredOrder = append(declaredOrder, id)
+			}
+		case "tool":
+			id := strings.TrimSpace(turn.ToolCallID)
+			if id == "" {
+				return fmt.Errorf("turn %d: prefilled tool turn requires non-empty tool_call_id", i)
+			}
+			if _, ok := declared[id]; !ok {
+				return fmt.Errorf("turn %d: tool_call_id %q does not reference a preceding assistant tool call", i, id)
+			}
+			if _, ok := answered[id]; ok {
+				return fmt.Errorf("turn %d: assistant tool call %q already answered", i, id)
+			}
+			answered[id] = struct{}{}
+		default:
+			return fmt.Errorf("turn %d role %q: prefilled traces allow only user, assistant, tool", i, turn.Role)
+		}
+	}
+	// Every declared call must be answered: llama.cpp strict chat templates
+	// reject histories with unanswered assistant tool calls at capture time,
+	// and both 3b assemblers keep call/result chains atomic, so an assembled
+	// State never legitimately contains one.
+	for _, id := range declaredOrder {
+		if _, ok := answered[id]; !ok {
+			return fmt.Errorf("assistant tool call %q is never answered by a tool turn (assembled chains are atomic; built corpora always answer every declared call)", id)
+		}
+	}
+	final := turns[len(turns)-1]
+	if final.Role != "user" || strings.TrimSpace(final.Content) == "" {
+		return fmt.Errorf("prefilled final turn must be role user with non-empty content, got role %q", final.Role)
 	}
 	return nil
 }

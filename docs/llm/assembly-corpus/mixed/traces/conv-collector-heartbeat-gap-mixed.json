@@ -1,0 +1,131 @@
+{
+  "id": "conv-collector-heartbeat-gap-mixed",
+  "source": "assembly-corpus-mixed",
+  "captured_at": "0001-01-01T00:00:00Z",
+  "system": "You are the driftwatch assistant. driftwatch is a self-hosted telemetry ingest and alerting daemon. Answer using only the provided conversation, memory records, and retrieved context.",
+  "tools": null,
+  "turns": [
+    {
+      "role": "user",
+      "content": "Migration standup notes first: two fleets are still on the old registration path and the board shows them stalled since Thursday. Ping their owners and find out whether it is real blockers or just backlog priorities."
+    },
+    {
+      "role": "assistant",
+      "content": "Pinged both fleet owners; one is pure backlog and will move this week, the other has a real blocker with the proxy and I opened a thread on it with the workaround options."
+    },
+    {
+      "role": "user",
+      "content": "On the reporting question from standup: we are keeping the collector heartbeat at 20 seconds through the whole migration. The gap analysis showed anything sparser hides slow-start regressions on restarts, and I would rather pay the beat traffic than miss another one. Revisit only after the last fleet moves."
+    },
+    {
+      "role": "assistant",
+      "content": "Recorded the hold with the gap-analysis link and a revisit condition of the last fleet completing; the migration board carries the note now."
+    },
+    {
+      "role": "user",
+      "content": "The registry expiry warning fired twice this week for collectors that were merely restarting. Can the restart annotations flow into the registry view so oncall stops chasing ghosts during rolling restarts?"
+    },
+    {
+      "role": "assistant",
+      "content": "Wired the restart annotations into the registry view; expiry warnings now show the restart context inline."
+    },
+    {
+      "role": "user",
+      "content": "Docs: the collectors guide still shows the old registration handshake. The two remaining fleets will follow it straight into the proxy blocker if we leave it stale through their migration windows."
+    },
+    {
+      "role": "assistant",
+      "content": "Updated the guide to the new handshake and added the proxy caveat with the workaround from the blocker thread."
+    },
+    {
+      "role": "user",
+      "content": "Dashboard request from the migration channel: a per-fleet heartbeat freshness panel so the progress reviews stop scrolling the raw registry list every week."
+    },
+    {
+      "role": "assistant",
+      "content": "Added the per-fleet freshness panel and linked it from the migration board header."
+    },
+    {
+      "role": "user",
+      "content": "Last: the standup notes template still has the decommissioned queue-depth section in it. Drop it before the next scribe copies it forward again."
+    },
+    {
+      "role": "assistant",
+      "content": "Dropped the dead section from the template and archived the old copies with a pointer to the new shape."
+    },
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "id": "c1",
+          "name": "retrieve",
+          "arguments": {
+            "query": "collector heartbeat interval config",
+            "k": 3
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "content": "### source: \"internal/collector/heartbeat.go\"\npurpose: Periodic collector heartbeat; interval supplied by deployment config.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n--- source: \"internal/collector/heartbeat.go\" (lines 1-41, similarity: 1.00) ---\n1| package collector\n2| \n3| import (\n4| \t\"context\"\n5| \t\"time\"\n6| )\n7| \n8| // heartbeater sends the periodic collector beat carrying the health\n9| // summary: queue depth, last-batch age, and the config revision the\n10| // collector is running. The interval comes from deployment config;\n11| // the pre-reorg fleet's 60 seconds default lives only in history.\n12| type heartbeater struct {\n13| \tevery  time.Duration\n14| \tmissed int\n15| \tsend   func(context.Context, beat) error\n16| }\n17| \n18| type beat struct {\n19| \tqueueDepth int\n20| \tlastBatch  time.Time\n21| \tconfigRev  string\n22| }\n23| \n24| // run sends beats on the configured interval until cancelled. A send\n25| // failure is counted and skipped, never retried inline: the next beat\n26| // is a fresher summary than a delayed copy of the last one, and the\n27| // registry treats missed beats as the health signal anyway.\n28| func (h *heartbeater) run(ctx context.Context) {\n29| \tt := time.NewTicker(h.every)\n30| \tdefer t.Stop()\n31| \tfor {\n32| \t\tselect {\n33| \t\tcase \u003c-ctx.Done():\n34| \t\t\treturn\n35| \t\tcase \u003c-t.C:\n36| \t\t\tif err := h.send(ctx, h.snapshot()); err != nil {\n37| \t\t\t\th.missed++\n38| \t\t\t}\n39| \t\t}\n40| \t}\n41| }\n\n### source: \"internal/collector/registry.go\"\npurpose: Collector registry keyed by beats; expiry counted in missed beats.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n\n### source: \"docs/collectors.md\"\npurpose: Collectors guide: registration handshake, heartbeat health, beat-counted expiry.\nlanguage: markdown\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n",
+      "tool_call_id": "c1",
+      "name": "retrieve"
+    },
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "id": "c2",
+          "name": "agent_memory_search",
+          "arguments": {
+            "query": ""
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "content": "rec-fleet-history · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:\nrec-migration-board · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src: · the collector migration board tracks per-fleet progress; two fleets remain on the old registration path\nrec-slow-start · working · created:2025-07-27 · updated:2025-07-27 · scope:session · ns: · src:",
+      "tool_call_id": "c2",
+      "name": "agent_memory_search"
+    },
+    {
+      "role": "user",
+      "content": "What interval is the collector heartbeat being held at through the migration?"
+    }
+  ],
+  "golden": {
+    "tool_calls": null,
+    "final_answer_criteria": "States the collector heartbeat is held at 20 seconds through the migration. Answering 60 seconds (the pre-reorg interval from memory) scores 0. An answer presenting both the correct and a competing value without committing to one scores 0."
+  },
+  "assembly_eval": {
+    "pair_id": "conv-collector-heartbeat-gap",
+    "mode": "mixed",
+    "candidate_ids": [
+      "33b4c34a06b7ca07a15481ebaf408ee7287d4e8a93ad9bea848487e9f3ed792a",
+      "8ac1c35b1ce12c0c73a23f06f14411ee21966abc98a0f040f2ef51cbea0d35e5",
+      "e93bc35bc0be2f9a828b6f9fbce1c181225c236c49882a52aad029de4416a17f",
+      "rec-fleet-history",
+      "rec-migration-board",
+      "rec-slow-start"
+    ],
+    "estimated_prompt_tokens": 1135,
+    "state_digest": "1e6294113bafe322d65134b8098c536c30701c0a71b5d767ef329d5cbbc17c14",
+    "subjects": [
+      "(c1|rag|internal/collector/heartbeat.go)",
+      "(c1|rag|internal/collector/registry.go)",
+      "(c1|rag|docs/collectors.md)",
+      "(c2|memory|rec-fleet-history)",
+      "(c2|memory|rec-migration-board)",
+      "(c2|memory|rec-slow-start)"
+    ],
+    "stratum": "conversation_only",
+    "answer_home": "conversation",
+    "scenario_family": "collector-heartbeat-conv",
+    "budget": 1184,
+    "raw_state_tokens": 1974,
+    "pressure_level": "critical",
+    "shed_bytes": 2809
+  }
+}

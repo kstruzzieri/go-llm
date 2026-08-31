@@ -13,9 +13,13 @@ import (
 
 // Orchestrator runs the plan->act->observe loop.
 type Orchestrator struct {
-	model  ModelCaller
-	ctxMgr ContextManager
-	now    func() time.Time // wall clock for latency; time.Now unless overridden
+	model     ModelCaller
+	ctxMgr    ContextManager
+	now       func() time.Time // wall clock for latency; time.Now unless overridden
+	toolLimit ToolInvocationLimit
+	// verifier is the optional post-write verification hook (#347). nil is the
+	// default and leaves every batch byte-for-byte unchanged.
+	verifier Verifier
 }
 
 // Option configures an Orchestrator at construction. New stays source-compatible
@@ -33,9 +37,23 @@ func WithClock(now func() time.Time) Option {
 	}
 }
 
+// WithToolInvocationLimit caps actual Invoke calls for one named tool in each
+// Run. Synthetic failures do not count, and the zero value disables the cap.
+// A non-zero limit must name a tool registered in every Run's Request.Tools;
+// a Run whose tool set omits it fails fast instead of silently ignoring the cap.
+func WithToolInvocationLimit(limit ToolInvocationLimit) Option {
+	return func(o *Orchestrator) { o.toolLimit = limit }
+}
+
 // New constructs an Orchestrator from a ModelCaller and ContextManager.
+//
+// The manager is stored UNNORMALIZED. Installing the default compactor here
+// would make every mixed manager look like it carries a custom one, and mixed
+// assembly rejects that combination (ErrMixedCompactor). Legacy behavior is
+// unchanged: assembleLegacy applies the same default at the same effective
+// point.
 func New(model ModelCaller, ctxMgr ContextManager, opts ...Option) *Orchestrator {
-	o := &Orchestrator{model: model, ctxMgr: normalizeContextManager(ctxMgr), now: time.Now}
+	o := &Orchestrator{model: model, ctxMgr: ctxMgr, now: time.Now}
 	for _, opt := range opts {
 		opt(o)
 	}
@@ -90,13 +108,16 @@ func (o *Orchestrator) Run(ctx context.Context, req Request, obs Observer) (Resu
 	toolSchemaTokens := o.ctxMgr.estimate(toolSchemaString(specs))
 	budget := turnBudget(req.Budget)
 
+	gov, err := newRestraintGovernor(o.toolLimit, reg)
+	if err != nil {
+		return Result{}, err
+	}
 	state := initState(req)
 	historyLen := len(req.History)
-	gov := &restraintGovernor{} // per-Run loop state; never shared across Run calls
 	var res Result
 
 	for step := 0; step < maxSteps; step++ {
-		assembled, pressure, err := o.ctxMgr.Assemble(ctx, state, toolSchemaTokens, budget)
+		assembled, pressure, atrace, err := o.ctxMgr.AssembleWithTrace(ctx, state, toolSchemaTokens, budget)
 		// Emit pressure before the model call on the success path and on the
 		// exhaustion path; skip only opaque compactor failures (pressure is zero).
 		if err == nil || errors.Is(err, ErrContextExhausted) {
@@ -108,6 +129,27 @@ func (o *Orchestrator) Run(ctx context.Context, req Request, obs Observer) (Resu
 		}
 		if err != nil {
 			return res, err
+		}
+		// Mixed assemblies only. The discriminator is nil Subjects, not Mixed and
+		// not a length: legacy, no-anchor and error paths return a zero trace,
+		// while a successful mixed assembly always carries a non-nil slice — even
+		// the all-omitted one an operator most wants to see, and even a zero-ROW
+		// one (TestMixedTraceWithNoRowsIsStillNonNil), which is why length is the
+		// wrong test.
+		if cao, ok := obs.(ContextAssemblyObserver); ok && atrace.Subjects != nil {
+			if aerr := cao.OnContextAssembly(ctx, ContextAssemblyEvent{Step: step, Trace: atrace}); aerr != nil {
+				return res, aerr
+			}
+		}
+		if rpo, ok := obs.(RetrievalPresentationObserver); ok {
+			for _, msg := range assembled.Messages {
+				if msg.ToolCallID == "" || msg.Attrib == nil || len(msg.Attrib.Sources) == 0 {
+					continue
+				}
+				if rerr := rpo.OnRetrievalPresentation(ctx, retrievalPresentationEvent(step, msg)); rerr != nil {
+					return res, rerr
+				}
+			}
 		}
 		if pressure.Compactions > 0 {
 			res.Events = append(res.Events, EventRecord{Step: step, Kind: "compaction"})
@@ -134,6 +176,15 @@ func (o *Orchestrator) Run(ctx context.Context, req Request, obs Observer) (Resu
 		})
 		modelLatency := o.now().Sub(modelStart)
 		if err != nil {
+			// A failed stream may still return collected text. Preserve only that
+			// text; any tool-call fragments may be incomplete.
+			if strings.TrimSpace(modelResult.Response.Content) != "" {
+				state.Messages = append(state.Messages, Message{
+					ChatMessage: provider.ChatMessage{Role: "assistant", Content: modelResult.Response.Content},
+					Segment:     Elastic,
+				})
+			}
+			res.Messages = resultMessages(state, historyLen)
 			return res, err
 		}
 		resp := modelResult.Response
@@ -230,6 +281,45 @@ type restraintGovernor struct {
 	lastSig           uint64
 	hasSig            bool
 	repeatCount       int
+	invocationLimit   ToolInvocationLimit
+	invocations       int
+}
+
+func newRestraintGovernor(limit ToolInvocationLimit, reg *toolRegistry) (*restraintGovernor, error) {
+	g := &restraintGovernor{invocationLimit: limit}
+	if limit == (ToolInvocationLimit{}) {
+		return g, nil
+	}
+	if limit.Tool == "" {
+		return nil, fmt.Errorf("agent: tool invocation budget has an empty tool name")
+	}
+	if limit.Max <= 0 {
+		return nil, fmt.Errorf("agent: tool invocation budget %q must be positive, got %d", limit.Tool, limit.Max)
+	}
+	if _, ok := reg.lookup(limit.Tool); !ok {
+		return nil, fmt.Errorf("agent: tool invocation budget names unregistered tool %q", limit.Tool)
+	}
+	return g, nil
+}
+
+func (g *restraintGovernor) reserveInvocation(name string) (int, bool) {
+	if name != g.invocationLimit.Tool {
+		return 0, true
+	}
+	if g.invocations >= g.invocationLimit.Max {
+		return g.invocationLimit.Max, false
+	}
+	g.invocations++
+	return g.invocationLimit.Max, true
+}
+
+func (g *restraintGovernor) parallelUncapped(calls []provider.ToolCall) bool {
+	for _, call := range calls {
+		if call.Function.Name == g.invocationLimit.Tool {
+			return false
+		}
+	}
+	return true
 }
 
 // toolCallSignature hashes the call identity together with its result so that a

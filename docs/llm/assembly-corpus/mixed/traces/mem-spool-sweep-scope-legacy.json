@@ -1,0 +1,68 @@
+{
+  "id": "mem-spool-sweep-scope-legacy",
+  "source": "assembly-corpus-mixed",
+  "captured_at": "0001-01-01T00:00:00Z",
+  "system": "You are the driftwatch assistant. driftwatch is a self-hosted telemetry ingest and alerting daemon. Answer using only the provided conversation, memory records, and retrieved context.",
+  "tools": null,
+  "turns": [
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "id": "c2",
+          "name": "retrieve",
+          "arguments": {
+            "query": "sweep pass segment batch bound",
+            "k": 3
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "content": "### source: \"internal/spool/sweeppass.go\"\npurpose: Bounded sweep passes under the directory lock, bound from config.\noverview: sweeppass.go trims eligible rolled segments in index order under the directory lock, bounded per pass by deployment config; the never-shipped 48 segments sizing proposal is noted for history.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n--- source: \"internal/spool/sweeppass.go\" (lines 1-18, similarity: 1.00) ---\n1| package spool\n2| \n3| // sweepOnce trims eligible rolled segments in index order under the\n4| // directory lock. The per-pass bound ships from deployment config; an\n5| // early proposal sized passes at 48 segments, but it never shipped and\n6| // the bound has always been config-supplied. Holding the lock for an\n7| // unbounded pass would stall rolls on a busy box, which is the whole\n8| // reason passes are bounded and the sweeper yields between them.\n9| func (s *sweeper) sweepOnce() {\n10| \ts.mu.Lock()\n11| \tdefer s.mu.Unlock()\n12| \tfor i, seg := range s.eligible() {\n13| \t\tif i \u003e= s.passBound {\n14| \t\t\treturn\n15| \t\t}\n16| \t\ts.retire(seg)\n17| \t}\n18| }\n\n### source: \"internal/spool/lock.go\"\npurpose: Coarse directory lock serializing structural segment changes.\noverview: lock.go serializes rolls, retention trims, and replay window changes under one coarse lock, leaving sealed-segment reads lock-free thanks to post-roll immutability.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n--- source: \"internal/spool/lock.go\" (lines 1-18, similarity: 1.00) ---\n1| package spool\n2| \n3| import \"sync\"\n4| \n5| // dirLock serializes structural changes to the segment directory:\n6| // rolls, retention trims, and replay's read window all take it. Reads\n7| // of sealed segments do not - immutability after the roll rename is\n8| // what makes lock-free reads safe. The lock is deliberately coarse; a\n9| // per-segment scheme was rejected as complexity without a measured win.\n10| type dirLock struct {\n11| \tmu sync.Mutex\n12| }\n13| \n14| func (l *dirLock) with(f func()) {\n15| \tl.mu.Lock()\n16| \tdefer l.mu.Unlock()\n17| \tf()\n18| }\n\n### source: \"docs/spool-retention.md\"\npurpose: Retention guide: horizon and per-pass bound knobs, interruption safety.\noverview: spool-retention.md explains the two config knobs - horizon and per-pass bound - when to raise each, and why interrupted trims recover cleanly from recomputed segment ages.\nlanguage: markdown\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n--- source: \"docs/spool-retention.md\" (lines 1-11, similarity: 1.00) ---\n1| # Spool retention\n2| \n3| Retention trims rolled segments past their horizon. Two knobs ship in\n4| deployment config: the horizon itself and the per-pass bound. Raise\n5| the horizon when replay drills need deeper history; raise the bound\n6| only if trims visibly lag churn, because every retired segment extends\n7| the time the directory lock is held.\n8| \n9| Trims are safe to interrupt: eligibility is recomputed from segment\n10| age on every pass, so a killed sweeper simply picks up where the ages\n11| say it should.\n",
+      "tool_call_id": "c2",
+      "name": "retrieve"
+    },
+    {
+      "role": "user",
+      "content": "How many rolled segments does a single sweep pass retire at most?"
+    }
+  ],
+  "golden": {
+    "tool_calls": null,
+    "final_answer_criteria": "States that one sweep pass retires at most 12 segments. Answers that only say the per-pass bound comes from deployment config score 0. An answer giving the never-shipped 48 segments figure scores 0. An answer presenting both the correct and a competing value without committing to one scores 0."
+  },
+  "assembly_eval": {
+    "pair_id": "mem-spool-sweep-scope",
+    "mode": "legacy",
+    "candidate_ids": [
+      "4dbee19218eb320c6d9e3388a62f3648dea34e5dd87663e360c922547e85004b",
+      "b808f4d4ebd018c737454b3f8e73b898238783b6e7f96b4a7eca3ee1015f7e59",
+      "cb4665b3ba6f635c028fdf09a80e55e28e8f24a3cd2863ad7764d597e1ebc694",
+      "rec-capacity-series",
+      "rec-migration-tally",
+      "rec-rollback-scope",
+      "rec-sweep-batch"
+    ],
+    "estimated_prompt_tokens": 850,
+    "state_digest": "183d919b257dd1e3d76f54c41eb4a7f9b6d711791100fc43cec18f2b7fd7565b",
+    "subjects": [
+      "(c1|memory|rec-capacity-series)",
+      "(c1|memory|rec-migration-tally)",
+      "(c1|memory|rec-rollback-scope)",
+      "(c1|memory|rec-sweep-batch)",
+      "(c2|rag|internal/spool/sweeppass.go)",
+      "(c2|rag|internal/spool/lock.go)",
+      "(c2|rag|docs/spool-retention.md)"
+    ],
+    "stratum": "memory_only",
+    "answer_home": "memory",
+    "scenario_family": "spool-sweep-mem",
+    "budget": 937,
+    "raw_state_tokens": 1562,
+    "pressure_level": "critical",
+    "shed_messages": 10,
+    "shed_bytes": 2421
+  }
+}

@@ -1,3 +1,6 @@
+// The per-selector conflict checks in this file are mirrored statically by
+// config.selectorPairConflict (config/config.go); maintain the two lists
+// together.
 package providerbootstrap
 
 import (
@@ -11,6 +14,57 @@ import (
 type modelDefaultsEntry struct {
 	role string
 	opts provider.SamplingDefaults
+}
+
+type contextWindowEntry struct {
+	role   string
+	window int
+}
+
+func buildContextWindowOverrides(cfg *config.Config) (map[provider.ModelKey]int, error) {
+	out := make(map[provider.ModelKey]int)
+	if cfg == nil {
+		return out, nil
+	}
+	roles := make([]string, 0, len(cfg.Models))
+	for role := range cfg.Models {
+		roles = append(roles, role)
+	}
+	sort.Strings(roles)
+	seen := make(map[provider.ModelKey]contextWindowEntry)
+	for _, role := range roles {
+		model := cfg.Models[role]
+		if model.Provider == "" || model.Name == "" || model.ContextWindow == 0 {
+			continue
+		}
+		if model.ContextWindow < 0 {
+			return nil, fmt.Errorf("providerbootstrap: model %q context_window must be positive", role)
+		}
+		key := provider.ModelKey{Provider: model.Provider, Model: model.Name}
+		if existing, ok := seen[key]; ok && existing.window != model.ContextWindow {
+			return nil, fmt.Errorf(
+				"providerbootstrap: conflicting context_window for %s: models %q and %q",
+				key, existing.role, role,
+			)
+		}
+		seen[key] = contextWindowEntry{role: role, window: model.ContextWindow}
+		out[key] = model.ContextWindow
+	}
+	return out, nil
+}
+
+func installContextWindowOverrides(mr *provider.ModelRegistry, cfg *config.Config) error {
+	if mr == nil || cfg == nil {
+		return nil
+	}
+	overrides, err := buildContextWindowOverrides(cfg)
+	if err != nil {
+		return err
+	}
+	if len(overrides) > 0 {
+		mr.SetContextWindowOverride(func(key provider.ModelKey) int { return overrides[key] })
+	}
+	return nil
 }
 
 func buildModelDefaults(cfg *config.Config) (map[provider.ModelKey]provider.SamplingDefaults, error) {
@@ -366,4 +420,54 @@ func installCapabilityOverrides(mr *provider.ModelRegistry, cfg *config.Config) 
 		return out
 	})
 	return nil
+}
+
+// buildSlotOverrides collects per-model pinned slot capacities (#400).
+// Mirrors buildContextWindowOverrides: sorted-role walk, silent skip of
+// entries without Provider/Name, conflict detection naming both roles.
+// Two loud errors beyond that idiom: negative values (revalidated here
+// because config.Load only covers file-loaded config — a programmatic
+// Config bypasses it, the context_window precedent), and an override
+// whose provider is not slot-discovery governed (a pin without a
+// governed source would silently do nothing).
+func buildSlotOverrides(cfg *config.Config, slotBEs map[string]provider.SlotBackend) (map[provider.ModelKey]int, error) {
+	out := make(map[provider.ModelKey]int)
+	if cfg == nil {
+		return out, nil
+	}
+	roles := make([]string, 0, len(cfg.Models))
+	for role := range cfg.Models {
+		roles = append(roles, role)
+	}
+	sort.Strings(roles)
+	type slotsEntry struct {
+		role  string
+		slots int
+	}
+	seen := make(map[provider.ModelKey]slotsEntry)
+	for _, role := range roles {
+		model := cfg.Models[role]
+		if model.Provider == "" || model.Name == "" || model.Slots == 0 {
+			continue
+		}
+		if model.Slots < 0 {
+			return nil, fmt.Errorf("providerbootstrap: model %q: slots must be >= 1", role)
+		}
+		if _, governed := slotBEs[model.Provider]; !governed {
+			return nil, fmt.Errorf(
+				"providerbootstrap: model %q: slots override requires slot_discovery: true on provider %q",
+				role, model.Provider,
+			)
+		}
+		key := provider.ModelKey{Provider: model.Provider, Model: model.Name}
+		if existing, ok := seen[key]; ok && existing.slots != model.Slots {
+			return nil, fmt.Errorf(
+				"providerbootstrap: conflicting slots for %s: models %q and %q",
+				key, existing.role, role,
+			)
+		}
+		seen[key] = slotsEntry{role: role, slots: model.Slots}
+		out[key] = model.Slots
+	}
+	return out, nil
 }

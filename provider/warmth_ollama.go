@@ -31,6 +31,9 @@ type OllamaWarmthSource struct {
 	client       *http.Client
 	cancel       context.CancelFunc
 	closeOnce    sync.Once
+	// bind attaches the warmth-poll destination capability per poll (#477).
+	// nil disables binding (ungated). Read-only after construction.
+	bind func(ctx context.Context, providerName string) (context.Context, error)
 }
 
 // OllamaWarmthOption configures an OllamaWarmthSource.
@@ -43,6 +46,32 @@ func WithPollInterval(d time.Duration) OllamaWarmthOption {
 		if d > 0 {
 			ws.pollInterval = d
 		}
+	}
+}
+
+// WithWarmthHTTPClient replaces the poll HTTP client (#477: the destination
+// guard binds a transport per destination, so a gated deployment supplies a
+// guarded client for the polled backend). nil is ignored.
+func WithWarmthHTTPClient(hc *http.Client) OllamaWarmthOption {
+	return func(ws *OllamaWarmthSource) {
+		if hc != nil {
+			ws.client = hc
+		}
+	}
+}
+
+// WithWarmthPollBinder installs a per-poll context binder (#477): before each
+// /api/ps request, bind is called and its returned context — carrying the
+// warmth-poll destination capability — is what the request runs under. A bind
+// error skips the poll with ZERO requests; warmth simply stays stale, the
+// existing degraded behavior for an unreachable backend.
+//
+// The binder runs on every poll, never cached: a capability is bound to the
+// gate generation that issued it, so caching one would leave polling
+// permanently dead after a revoke-and-re-admit cycle.
+func WithWarmthPollBinder(bind func(ctx context.Context, providerName string) (context.Context, error)) OllamaWarmthOption {
+	return func(ws *OllamaWarmthSource) {
+		ws.bind = bind
 	}
 }
 
@@ -209,6 +238,15 @@ type ollamaPsModel struct {
 // errors and JSON parse errors are silently ignored to avoid crashing the
 // background poller.
 func (ws *OllamaWarmthSource) poll(ctx context.Context) {
+	if ws.bind != nil {
+		bctx, err := ws.bind(ctx, ws.providerName)
+		if err != nil {
+			// Denied: zero requests this poll; warmth stays stale exactly
+			// as it would for an unreachable backend.
+			return
+		}
+		ctx = bctx
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, ws.baseURL+"/api/ps", nil)
 	if err != nil {
 		return

@@ -1,0 +1,125 @@
+{
+  "id": "join-export-window-lag-mixed",
+  "source": "assembly-corpus-mixed",
+  "captured_at": "0001-01-01T00:00:00Z",
+  "system": "You are the driftwatch assistant. driftwatch is a self-hosted telemetry ingest and alerting daemon. Answer using only the provided conversation, memory records, and retrieved context.",
+  "tools": null,
+  "turns": [
+    {
+      "role": "user",
+      "content": "The loader team also asked that our shard manifests carry the source segment range explicitly. They reconstruct it today by parsing filenames, which broke twice during the outage replay. While the schema is open, add the producing edge's build stamp to the manifest too; support asked for it twice during the outage when they were matching shards to the deploy that wrote them."
+    },
+    {
+      "role": "assistant",
+      "content": "Added the segment range to the shard manifest schema and backfilled manifests for the outage window; the loader reads ranges natively now. The build stamp rides the manifest now as well, and the loader's validation suite passed against a sample shard carrying all three new fields, so nothing on their side special-cases the additions."
+    },
+    {
+      "role": "user",
+      "content": "While you are in there, the export dashboard's failure panel still counts the outage's skipped runs as failures, which makes the month look worse than it was. Split skipped from failed in the panel. Keep the skipped series in the same color family as the failed one but lighter, the way the ingest board does it, so the distinction survives the projector in the ops review room."
+    },
+    {
+      "role": "assistant",
+      "content": "Split the panel into failed and skipped series with the outage window annotated; month-over-month comparisons read clean again. Used the ingest board's palette convention exactly, and checked the panel on the review room projector during the empty slot this morning; both series stay distinguishable at distance."
+    },
+    {
+      "role": "user",
+      "content": "Compliance flagged that the outage postmortem references shard checksums we do not actually publish. Either start publishing them alongside the shards or fix the postmortem text before it circulates. If publishing turns out to be the smaller change, make sure the checksum algorithm lands in the manifest alongside the digest itself, or the loader will hard-code an assumption we regret at the next algorithm bump."
+    },
+    {
+      "role": "assistant",
+      "content": "Started publishing shard checksums with each manifest, which was the smaller change, and the postmortem text now matches reality. The manifest names the algorithm next to each digest, so a future algorithm change is a new manifest field rather than a coordinated flag day with the loader team."
+    },
+    {
+      "role": "user",
+      "content": "Also give the loader team a heads-up schedule for tonight so their oncall knows when shards start arriving and when the burst should taper; last outage they learned the timing from the traffic graph and were half an hour behind the whole night."
+    },
+    {
+      "role": "assistant",
+      "content": "Sent the schedule with start, expected peak, and taper windows, and their oncall acknowledged in the channel with the run window pinned on their side."
+    },
+    {
+      "role": "user",
+      "content": "Then we are set for tonight. For the record, the surge-era sizing draft that penciled in 12 uploaders for catch-up runs is shelved; it predates the loader's memory limits. Sizing call from the loader team review: the catch-up runs with 8 uploaders and the shard cap stays where it is; their side is provisioned for exactly that."
+    },
+    {
+      "role": "assistant",
+      "content": "Locked in: tonight's catch-up runs with 8 uploaders, shard cap unchanged, and the loader team has the run window on their calendar."
+    },
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "id": "c1",
+          "name": "retrieve",
+          "arguments": {
+            "query": "shard upload worker pool",
+            "k": 3
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "content": "### source: \"internal/export/upload.go\"\npurpose: Shard upload pool: code default parallelism, invocation override for catch-up runs.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n--- source: \"internal/export/upload.go\" (lines 1-19, similarity: 1.00) ---\n1| package export\n2| \n3| // uploaderParallelism is the code default for concurrent shard\n4| // uploads in one export run. The pool is sized against steady-state\n5| // warehouse ingestion; catch-up runs override it from the run\n6| // invocation when the loader side is provisioned for more.\n7| const uploaderParallelism = 4\n8| \n9| // upload drains the shard queue with the configured worker count.\n10| // Workers share one retry ledger, so a shard that fails on one worker\n11| // is retried by whichever worker frees first rather than\n12| // head-blocking its original lane.\n13| func (u *Uploader) upload(shards \u003c-chan string) error {\n14| \tworkers := u.parallelism\n15| \tif workers \u003c= 0 {\n16| \t\tworkers = uploaderParallelism\n17| \t}\n18| \treturn u.pool.run(workers, shards)\n19| }\n\n### source: \"internal/export/manifest.go\"\npurpose: Shard manifests: the loader contract with ranges and checksums, written atomically.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n\n### source: \"docs/export-recovery.md\"\npurpose: Export recovery guide: shard-level resume, catch-up ordering, loader-bounded pools.\nlanguage: markdown\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n",
+      "tool_call_id": "c1",
+      "name": "retrieve"
+    },
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "id": "c2",
+          "name": "agent_memory_search",
+          "arguments": {
+            "query": ""
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "content": "rec-loader-window · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:\nrec-manifest-note · working · created:2025-07-27 · updated:2025-07-27 · scope:session · ns: · src:\nrec-outage-retro · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:",
+      "tool_call_id": "c2",
+      "name": "agent_memory_search"
+    },
+    {
+      "role": "user",
+      "content": "Final check for the run book: how many uploaders does tonight's catch-up use, and what parallelism does the uploader pool default to in code?"
+    }
+  ],
+  "golden": {
+    "tool_calls": null,
+    "final_answer_criteria": "BOTH halves required: tonight's catch-up runs with 8 uploaders, AND the uploader pool's code default parallelism is 4. A missing half caps the score at 0.5; a stated but incorrect half scores 0. An answer giving the shelved 12-uploader figure scores 0. An answer presenting both the correct and a competing value without committing to one scores 0."
+  },
+  "assembly_eval": {
+    "pair_id": "join-export-window-lag",
+    "mode": "mixed",
+    "candidate_ids": [
+      "62fb272f50ca6df2d5a36521d3b7a8f735341c8704f19bfc622bd786376bb325",
+      "90db85e9f432cd5b6be85e46b01a351681f7a52731d4afb213829be6bc677813",
+      "aa15e52e4721e4cf702b64f09eddb9924776d8201c2234489008a2712cf91bd1",
+      "rec-loader-window",
+      "rec-manifest-note",
+      "rec-outage-retro"
+    ],
+    "estimated_prompt_tokens": 1289,
+    "state_digest": "42d42e6d3d6da46862acc97533d663c674d44123095bf221acdb03442941bd52",
+    "subjects": [
+      "(c1|rag|internal/export/upload.go)",
+      "(c1|rag|internal/export/manifest.go)",
+      "(c1|rag|docs/export-recovery.md)",
+      "(c2|memory|rec-loader-window)",
+      "(c2|memory|rec-manifest-note)",
+      "(c2|memory|rec-outage-retro)"
+    ],
+    "stratum": "cross_domain_join",
+    "answer_home": "join",
+    "scenario_family": "export-shard-schedule",
+    "budget": 1339,
+    "raw_state_tokens": 2231,
+    "pressure_level": "critical",
+    "shed_messages": 2,
+    "shed_bytes": 3225,
+    "omitted_subjects": 1
+  }
+}

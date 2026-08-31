@@ -1,6 +1,7 @@
 package agenttrace
 
 import (
+	"encoding/json"
 	"strings"
 	"time"
 
@@ -38,9 +39,12 @@ type TraceRequest struct {
 	Budget         agent.Budget           `json:"budget"`
 }
 
-// TraceRecord is one content-full run trace (#238). It embeds agent.Result; the
-// embedded record uses Go's default JSON shape (e.g. Latency as integer
-// nanoseconds) - the schema documents that rather than forking a trace-only copy.
+// TraceRecord is one content-full run trace (#238). It embeds agent.Result but
+// does not serialize structured ContextAssemblyTrace rows or row fields; those
+// are available live to ContextAssemblyObserver. Its model-visible messages may
+// independently contain tool-call, source, or record identifiers. The embedded
+// record uses Go's default JSON shape (e.g. Latency as integer nanoseconds) -
+// the schema documents that rather than forking a trace-only copy.
 type TraceRecord struct {
 	SchemaVersion int          `json:"schema_version"`
 	RunID         string       `json:"run_id"`
@@ -51,6 +55,12 @@ type TraceRecord struct {
 	Request       TraceRequest `json:"request"`
 	Result        agent.Result `json:"result"`
 	Error         string       `json:"error,omitempty"`
+	// Grounding is the #348 grounding-verification report, embedded verbatim as
+	// a JSON object. Raw rather than typed so agenttrace keeps no dependency on
+	// the analysis package for a payload it only stores. Additive within
+	// SchemaVersion 2 (same rule as the spans below): omitempty leaves every
+	// pre-#348 trace byte-identical.
+	Grounding json.RawMessage `json:"grounding,omitempty"`
 }
 
 // --- telemetry spans (#239, content-light) ---
@@ -65,11 +75,14 @@ type pressureLite struct {
 	UsedPct     float64 `json:"used_pct"`
 	Evicted     int     `json:"evicted"`
 	Compactions int     `json:"compactions"`
-	Level       string  `json:"level"`
-	Cause       string  `json:"cause"`
-	Mitigation  string  `json:"mitigation"`
-	InputTokens int     `json:"input_tokens"`
-	InputBudget int     `json:"input_budget"`
+	// Additive within SchemaVersion 2: omitempty keeps every span a legacy or
+	// lossless mixed turn emits byte-identical to what v2 already emitted.
+	AnchorOmissions int    `json:"anchor_omissions,omitempty"`
+	Level           string `json:"level"`
+	Cause           string `json:"cause"`
+	Mitigation      string `json:"mitigation"`
+	InputTokens     int    `json:"input_tokens"`
+	InputBudget     int    `json:"input_budget"`
 }
 
 type runSpan struct {
@@ -103,20 +116,25 @@ type modelStepSpan struct {
 }
 
 type toolCallSpan struct {
-	SchemaVersion int     `json:"schema_version"`
-	RunID         string  `json:"run_id"`
-	SpanID        string  `json:"span_id"`
-	ParentID      string  `json:"parent_id"`
-	Kind          string  `json:"kind"` // "tool_call"
-	Step          int     `json:"step"`
-	Name          string  `json:"name"`
-	Effect        string  `json:"effect,omitempty"`
-	Invoked       bool    `json:"invoked"`
-	Denied        bool    `json:"denied"`
-	IsError       bool    `json:"is_error"`
-	Truncated     bool    `json:"truncated"`
-	ContentBytes  int     `json:"content_bytes"`
-	DurationMS    float64 `json:"duration_ms"`
+	SchemaVersion int    `json:"schema_version"`
+	RunID         string `json:"run_id"`
+	SpanID        string `json:"span_id"`
+	ParentID      string `json:"parent_id"`
+	Kind          string `json:"kind"` // "tool_call"
+	Step          int    `json:"step"`
+	Name          string `json:"name"`
+	Effect        string `json:"effect,omitempty"`
+	Invoked       bool   `json:"invoked"`
+	Denied        bool   `json:"denied"`
+	// AutoApproved records that the approval decision came from a session
+	// grant (#341). Additive within SchemaVersion 2 (same rule as
+	// pressureLite's AnchorOmissions): omitempty keeps every pre-#341 span
+	// byte-identical.
+	AutoApproved bool    `json:"auto_approved,omitempty"`
+	IsError      bool    `json:"is_error"`
+	Truncated    bool    `json:"truncated"`
+	ContentBytes int     `json:"content_bytes"`
+	DurationMS   float64 `json:"duration_ms"`
 	// Delegated* record the model a delegating tool (e.g. delegate_code) routed
 	// to. Identity + fallback count only; omitempty so non-delegated spans are
 	// byte-identical to before.
@@ -146,6 +164,46 @@ type runtimeStageSpan struct {
 	InputBudget   int     `json:"input_budget"`
 	Evicted       int     `json:"evicted"`
 	Compactions   int     `json:"compactions"`
+	// Additive within SchemaVersion 2: see pressureLite.AnchorOmissions.
+	AnchorOmissions int `json:"anchor_omissions,omitempty"`
+}
+
+// contextAssemblySpan is one mixed-assembly outcome (#331). A NEW span kind, so
+// it is additive within SchemaVersion 2 by construction: no record any existing
+// run emits changes a byte, and only a mixed assembly emits this one at all.
+//
+// It is AGGREGATE on purpose. ContextAssemblyTrace is content-free but not
+// privacy-free — its rows carry source paths, memory record IDs and tool call
+// IDs — and this sink persists no such identifier today (tool spans carry the
+// tool NAME and a content byte count, never arguments, output or call IDs).
+// Emitting the rows would widen what telemetry retains about a workspace, so the
+// span keeps the counts and drops the names: ByDecision says whether the upgrade
+// pass is doing anything, ByOmissionReason is what makes Pressure.AnchorOmissions
+// actionable (byte_cap vs token_budget vs chain_evicted), and neither can
+// identify a file. Telemetry retains only these aggregates; -trace does not
+// serialize structured ContextAssemblyTrace rows or row fields, though its
+// model-visible messages can independently contain the same identifiers. The
+// rows themselves are available only to the live ContextAssemblyObserver.
+type contextAssemblySpan struct {
+	SchemaVersion      int    `json:"schema_version"`
+	RunID              string `json:"run_id"`
+	SpanID             string `json:"span_id"`
+	ParentID           string `json:"parent_id"`
+	Kind               string `json:"kind"` // "context_assembly"
+	Step               int    `json:"step"`
+	MaxTokens          int    `json:"max_tokens"`
+	UsedTokens         int    `json:"used_tokens"`
+	FreeTokens         int    `json:"free_tokens"`
+	Subjects           int    `json:"subjects"`
+	Rendered           int    `json:"rendered"`
+	Omitted            int    `json:"omitted"`
+	VerbatimShortfalls int    `json:"verbatim_shortfalls"`
+	RenderedBytes      int    `json:"rendered_bytes"`
+	// Keyed by agent's fixed Decision/Omit vocabulary, so the keys are a closed
+	// set and never payload-derived. Omitted when empty rather than written as
+	// null, which keeps a zero-subject assembly's span readable.
+	ByDecision       map[string]int `json:"by_decision,omitempty"`
+	ByOmissionReason map[string]int `json:"by_omission_reason,omitempty"`
 }
 
 // effectString renders an EffectClass bitset as a stable, content-light label.

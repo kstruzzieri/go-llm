@@ -106,6 +106,20 @@ func buildThresholds() ThresholdSummary {
 
 // WriteReport writes a stable, pretty JSON report.
 func WriteReport(path string, report *Report) error {
+	return writeJSONReport(path, report)
+}
+
+// WriteOutlineReport writes a stable, pretty JSON outline experiment report.
+func WriteOutlineReport(path string, report *OutlineReport) error {
+	return writeJSONReport(path, report)
+}
+
+// WriteProgressiveReport writes a stable, pretty JSON progressive experiment report.
+func WriteProgressiveReport(path string, report *ProgressiveReport) error {
+	return writeJSONReport(path, report)
+}
+
+func writeJSONReport(path string, report any) error {
 	data, err := json.MarshalIndent(report, "", "  ")
 	if err != nil {
 		return fmt.Errorf("rag eval: marshal report: %w", err)
@@ -214,7 +228,7 @@ func buildStore(ctx context.Context, fixture *Fixture) (*rag.SQLiteStore, error)
 			})
 			embeddings = append(embeddings, append([]float64(nil), fixtureChunk.Embedding...))
 		}
-		if err := store.ReplaceSourceWithHashAndVectorSpaceID(ctx, source, chunks, embeddings, "fixture:"+source, vectorSpaceID); err != nil {
+		if err := store.ReplaceSourceWithHashAndVectorSpaceID(ctx, source, chunks, embeddings, fixtureSourceSignature(chunks), vectorSpaceID); err != nil {
 			_ = store.Close()
 			return nil, fmt.Errorf("rag eval: seed source %q: %w", source, err)
 		}

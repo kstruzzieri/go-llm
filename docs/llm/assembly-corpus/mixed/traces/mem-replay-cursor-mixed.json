@@ -1,0 +1,115 @@
+{
+  "id": "mem-replay-cursor-mixed",
+  "source": "assembly-corpus-mixed",
+  "captured_at": "0001-01-01T00:00:00Z",
+  "system": "You are the driftwatch assistant. driftwatch is a self-hosted telemetry ingest and alerting daemon. Answer using only the provided conversation, memory records, and retrieved context.",
+  "tools": null,
+  "turns": [
+    {
+      "role": "user",
+      "content": "Couple of chores before the replay drill this afternoon. The staging exporter has been pointed at the throwaway bucket since the schema test; can you point it back at the normal staging bucket so the drill writes land somewhere we can inspect?"
+    },
+    {
+      "role": "assistant",
+      "content": "Repointed the staging exporter at the normal staging bucket and verified a test batch landed there with the expected layout."
+    },
+    {
+      "role": "user",
+      "content": "Also the drill runbook still references the old data directory layout from before the segment rename. Can you sweep it for stale paths so nobody follows a dead instruction mid-drill?"
+    },
+    {
+      "role": "assistant",
+      "content": "Swept the runbook and replaced the stale paths with the current layout; I also added a note pointing at the layout doc for future renames."
+    },
+    {
+      "role": "user",
+      "content": "The lab box needs its scratch volume cleared again too, the last soak capture is still sitting there and the drill will want the space."
+    },
+    {
+      "role": "assistant",
+      "content": "Cleared the scratch volume and confirmed the drill has enough headroom for a full capture plus the replay working set."
+    },
+    {
+      "role": "user",
+      "content": "And can you double-check the drill calendar invite includes the platform observer this time? They missed the last one because the invite went to the old alias."
+    },
+    {
+      "role": "assistant",
+      "content": "Fixed the invite to use the current alias and the platform observer accepted; the drill roster is complete."
+    },
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "id": "c1",
+          "name": "retrieve",
+          "arguments": {
+            "query": "replay checkpoint cursor",
+            "k": 3
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "content": "### source: \"internal/replay/replay.go\"\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nnote: metadata overview (summary omitted: budget)\n--- source: \"internal/replay/replay.go\" (lines 1-19, similarity: 1.00) ---\n1| package replay\n2| \n3| import \"context\"\n4| \n5| // Replayer re-reads rolled spool segments and feeds them to the\n6| // exporter. Progress is checkpointed through the cursor file named by\n7| // deployment config so a restart resumes instead of starting over.\n8| type Replayer struct {\n9| \tcursor cursorFile\n10| \tsegs   segmentWalker\n11| }\n12| \n13| func (r *Replayer) Run(ctx context.Context) error {\n14| \tstart, err := r.cursor.load()\n15| \tif err != nil {\n16| \t\treturn err\n17| \t}\n18| \treturn r.walk(ctx, start)\n19| }\n\n### source: \"internal/replay/window.go\"\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nnote: metadata overview (summary omitted: budget)\n\n### source: \"docs/replay.md\"\nlanguage: markdown\nindexed: 2025-07-27T00:00:00Z\nnote: metadata overview (summary omitted: budget)\n--- source: \"docs/replay.md\" (lines 1-20, similarity: 1.00) ---\n1| # driftwatch replay\n2| \n3| Replay re-reads rolled spool segments and hands them to the exporter.\n4| It exists for exporter outages and for backfills after a schema\n5| change; it never touches the active segment, so ingest keeps running\n6| while a replay is in flight.\n7| \n8| ## Running a replay\n9| \n10| Start the daemon with the replay subcommand and a segment range, or\n11| omit the range to resume from the checkpoint. Progress is\n12| checkpointed continuously, so an interrupted replay resumes where it\n13| left off rather than re-reading from the start.\n14| \n15| ## Drills\n16| \n17| Run the monthly drill against staging with a bounded range first.\n18| Watch the exporter lag panel during the drill; replay deliberately\n19| yields to live ingest when the exporter falls behind, so a slow drill\n20| is usually a sign of exporter pressure, not replay trouble.\n",
+      "tool_call_id": "c1",
+      "name": "retrieve"
+    },
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "id": "c2",
+          "name": "agent_memory_search",
+          "arguments": {
+            "query": ""
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "content": "rec-drill-cadence · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:\nrec-lab-scratch · working · created:2025-07-27 · updated:2025-07-27 · scope:session · ns: · src:\nrec-replay-cursor · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:",
+      "tool_call_id": "c2",
+      "name": "agent_memory_search"
+    },
+    {
+      "role": "user",
+      "content": "Where on disk does the replay checkpoint cursor live?"
+    }
+  ],
+  "golden": {
+    "tool_calls": null,
+    "final_answer_criteria": "States the replay checkpoint cursor lives at spool/replay.cursor (under the data directory). Answers that only say the cursor file is named by config score 0. An answer presenting both the correct and a competing value without committing to one scores 0."
+  },
+  "assembly_eval": {
+    "pair_id": "mem-replay-cursor",
+    "mode": "mixed",
+    "candidate_ids": [
+      "62c07df5d9bc968b1121519bb88dffecbee4fdbbaeaea44ceaaabb4763aabf8f",
+      "91f883214018d39943f18ec6bfa8dab28773c0c056cfdc34f5ead1af639a6653",
+      "d69a4f7273bf6bfa715e1f00a5ed6922ed089e328edc8790cf6de4085bf66c5c",
+      "rec-drill-cadence",
+      "rec-lab-scratch",
+      "rec-replay-cursor"
+    ],
+    "estimated_prompt_tokens": 921,
+    "state_digest": "09a96fbeae2888c66f03f4724db92b97b05408501726767232b6dd1909ab54d3",
+    "subjects": [
+      "(c1|rag|internal/replay/replay.go)",
+      "(c1|rag|internal/replay/window.go)",
+      "(c1|rag|docs/replay.md)",
+      "(c2|memory|rec-drill-cadence)",
+      "(c2|memory|rec-lab-scratch)",
+      "(c2|memory|rec-replay-cursor)"
+    ],
+    "stratum": "memory_only",
+    "answer_home": "memory",
+    "scenario_family": "replay-cursor-note",
+    "budget": 971,
+    "raw_state_tokens": 1619,
+    "pressure_level": "critical",
+    "shed_bytes": 2371
+  }
+}

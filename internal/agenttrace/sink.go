@@ -9,9 +9,10 @@ import (
 )
 
 var (
-	_ agent.Observer           = (*TelemetrySink)(nil)
-	_ agent.ToolResultObserver = (*TelemetrySink)(nil)
-	_ agent.PressureObserver   = (*TelemetrySink)(nil)
+	_ agent.Observer                = (*TelemetrySink)(nil)
+	_ agent.ToolResultObserver      = (*TelemetrySink)(nil)
+	_ agent.PressureObserver        = (*TelemetrySink)(nil)
+	_ agent.ContextAssemblyObserver = (*TelemetrySink)(nil)
 )
 
 // TelemetrySink is a content-light agent.Observer (+ ToolResultObserver +
@@ -74,14 +75,15 @@ func (s *TelemetrySink) OnStep(_ context.Context, e agent.StepEvent) error {
 			Total:      e.Response.Usage.TotalTokens,
 		},
 		Pressure: pressureLite{
-			UsedPct:     e.Pressure.UsedPct,
-			Evicted:     e.Pressure.Evicted,
-			Compactions: e.Pressure.Compactions,
-			Level:       e.Pressure.Level.String(),
-			Cause:       e.Pressure.Cause.String(),
-			Mitigation:  e.Pressure.Mitigation.String(),
-			InputTokens: e.Pressure.InputTokens,
-			InputBudget: e.Pressure.InputBudget,
+			UsedPct:         e.Pressure.UsedPct,
+			Evicted:         e.Pressure.Evicted,
+			Compactions:     e.Pressure.Compactions,
+			AnchorOmissions: e.Pressure.AnchorOmissions,
+			Level:           e.Pressure.Level.String(),
+			Cause:           e.Pressure.Cause.String(),
+			Mitigation:      e.Pressure.Mitigation.String(),
+			InputTokens:     e.Pressure.InputTokens,
+			InputBudget:     e.Pressure.InputBudget,
 		},
 	}
 	if e.RouteOutcome != nil {
@@ -109,6 +111,7 @@ func (s *TelemetrySink) OnToolResult(_ context.Context, e agent.ToolResultEvent)
 		Effect:        effectString(e.Effect.Class),
 		Invoked:       e.Invoked,
 		Denied:        e.Denied,
+		AutoApproved:  e.AutoApproved,
 		IsError:       e.Result.IsError,
 		Truncated:     e.Result.Truncated,
 		ContentBytes:  len(e.Result.Content),
@@ -145,24 +148,67 @@ func (s *TelemetrySink) OnPressure(_ context.Context, e agent.PressureEvent) err
 		outcome = "exhausted"
 	}
 	s.record(runtimeStageSpan{
-		SchemaVersion: SchemaVersion,
-		RunID:         s.runID,
-		SpanID:        fmt.Sprintf("%s-stage-assemble-%d", s.runID, e.Step),
-		ParentID:      s.runID + "-run",
-		Kind:          "runtime_stage",
-		Stage:         "assemble",
-		Step:          e.Step,
-		Level:         p.Level.String(),
-		Cause:         p.Cause.String(),
-		Mitigation:    p.Mitigation.String(),
-		Outcome:       outcome,
-		UsedPct:       p.UsedPct,
-		UsedPctDelta:  delta,
-		InputTokens:   p.InputTokens,
-		InputBudget:   p.InputBudget,
-		Evicted:       p.Evicted,
-		Compactions:   p.Compactions,
+		SchemaVersion:   SchemaVersion,
+		RunID:           s.runID,
+		SpanID:          fmt.Sprintf("%s-stage-assemble-%d", s.runID, e.Step),
+		ParentID:        s.runID + "-run",
+		Kind:            "runtime_stage",
+		Stage:           "assemble",
+		Step:            e.Step,
+		Level:           p.Level.String(),
+		Cause:           p.Cause.String(),
+		Mitigation:      p.Mitigation.String(),
+		Outcome:         outcome,
+		UsedPct:         p.UsedPct,
+		UsedPctDelta:    delta,
+		InputTokens:     p.InputTokens,
+		InputBudget:     p.InputBudget,
+		Evicted:         p.Evicted,
+		Compactions:     p.Compactions,
+		AnchorOmissions: p.AnchorOmissions,
 	})
+	return nil
+}
+
+// OnContextAssembly writes one aggregate context_assembly span per MIXED
+// assembly. Legacy and no-anchor turns never fire the callback, so a run that
+// never enables mixed assembly emits a byte-identical telemetry file to before.
+//
+// The per-subject rows are deliberately reduced to counts here; see
+// contextAssemblySpan for why. Best-effort like every other callback: write
+// errors are retained and nil is returned so telemetry never aborts a run.
+func (s *TelemetrySink) OnContextAssembly(_ context.Context, e agent.ContextAssemblyEvent) error {
+	tr := e.Trace
+	span := contextAssemblySpan{
+		SchemaVersion:      SchemaVersion,
+		RunID:              s.runID,
+		SpanID:             fmt.Sprintf("%s-stage-context-%d", s.runID, e.Step),
+		ParentID:           s.runID + "-run",
+		Kind:               "context_assembly",
+		Step:               e.Step,
+		MaxTokens:          tr.MaxTokens,
+		UsedTokens:         tr.EstimatedTokensUsed,
+		FreeTokens:         tr.EstimatedTokensFree,
+		Subjects:           tr.SelectedSubjects,
+		Rendered:           tr.RenderedSubjects,
+		Omitted:            tr.OmittedSubjects,
+		VerbatimShortfalls: tr.VerbatimShortfalls,
+	}
+	for _, sub := range tr.Subjects {
+		if sub.Omitted {
+			if span.ByOmissionReason == nil {
+				span.ByOmissionReason = map[string]int{}
+			}
+			span.ByOmissionReason[sub.OmissionReason]++
+			continue
+		}
+		span.RenderedBytes += sub.Bytes
+		if span.ByDecision == nil {
+			span.ByDecision = map[string]int{}
+		}
+		span.ByDecision[sub.Decision]++
+	}
+	s.record(span)
 	return nil
 }
 

@@ -1,0 +1,155 @@
+{
+  "id": "stale-backfill-chunk-replay-mixed",
+  "source": "assembly-corpus-mixed",
+  "captured_at": "0001-01-01T00:00:00Z",
+  "system": "You are the driftwatch assistant. driftwatch is a self-hosted telemetry ingest and alerting daemon. Answer using only the provided conversation, memory records, and retrieved context.",
+  "tools": null,
+  "turns": [
+    {
+      "role": "user",
+      "content": "Columnar rewrite cleanup. The rewrite feature branch is merged but the old row-assembly benchmarks still run nightly; retire them and keep only the columnar suite so the perf dashboard stops mixing eras."
+    },
+    {
+      "role": "assistant",
+      "content": "Retired the row-assembly benchmarks and archived their history; the perf dashboard now graphs the columnar suite alone with an era marker at the merge."
+    },
+    {
+      "role": "user",
+      "content": "The rewrite doc should get the operator-facing summary section we promised; the design detail is all there but oncall needs the two-paragraph version."
+    },
+    {
+      "role": "assistant",
+      "content": "Added the operator summary up top: what changed on the replay path, what to watch during backfills, and where the deep detail lives."
+    },
+    {
+      "role": "user",
+      "content": "Can you sweep the feature flags left from the rewrite rollout? At least two are permanently on now and should become defaults."
+    },
+    {
+      "role": "assistant",
+      "content": "Swept the flags: promoted the two permanent ones to defaults and deleted their flag checks; one experimental flag remains with an owner and an expiry."
+    },
+    {
+      "role": "user",
+      "content": "The staging cluster still runs mixed binaries from the rollout waves. Roll it forward to the merged build so staging results stop depending on which node you land on."
+    },
+    {
+      "role": "assistant",
+      "content": "Rolled staging forward to the merged build across all nodes and verified the version banner matches everywhere."
+    },
+    {
+      "role": "user",
+      "content": "Also the rewrite changed the segment flush cadence assumptions; make sure the capacity model spreadsheet picked up the new write pattern."
+    },
+    {
+      "role": "assistant",
+      "content": "Updated the capacity model with the post-rewrite write pattern and left the old columns hidden but intact for comparison."
+    },
+    {
+      "role": "user",
+      "content": "The data team asked for a heads-up channel before large backfills run; set up the notification hook so their materialized views stop getting surprised."
+    },
+    {
+      "role": "assistant",
+      "content": "Wired a backfill-start notification into the data team's channel with size and expected duration, and documented the hook in the rewrite doc."
+    },
+    {
+      "role": "user",
+      "content": "Someone hit a confusing error when a backfill raced a retention sweep last week. Confirm the guard ordering and file whatever the fix is."
+    },
+    {
+      "role": "assistant",
+      "content": "Confirmed the sweep now yields to staging backfills with the guard ordering fixed and filed; the confusing error message got rewritten too."
+    },
+    {
+      "role": "user",
+      "content": "The rewrite retro wants concrete numbers; pull the before-and-after replay throughput from the burn windows into the retro doc."
+    },
+    {
+      "role": "assistant",
+      "content": "Pulled both windows into the retro doc: replay throughput roughly tripled after the rewrite, with the caveat notes on measurement windows attached."
+    },
+    {
+      "role": "user",
+      "content": "Last: the old row-assembly design doc should be marked superseded with a pointer forward, so searches stop landing people on the dead design."
+    },
+    {
+      "role": "assistant",
+      "content": "Marked the old design doc superseded with a banner linking the rewrite doc, and fixed the three wiki pages that still linked the old one."
+    },
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "id": "c1",
+          "name": "retrieve",
+          "arguments": {
+            "query": "replay backfill staging path",
+            "k": 3
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "content": "### source: \"internal/replay/stage.go\"\npurpose: Backfill chunk staging: whole-chunk writes into flush-bound segments.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n--- source: \"internal/replay/stage.go\" (lines 1-16, similarity: 1.00) ---\n1| package replay\n2| \n3| // stageChunk writes one backfill chunk into the staging segment and\n4| // hands it to the flush path. Chunk sizing is owned by the backfill\n5| // planner; staging only enforces that a chunk arrives whole, because\n6| // a partial chunk after a crash would replay rows twice.\n7| func (b *Backfill) stageChunk(c Chunk) error {\n8| \tif err := c.complete(); err != nil {\n9| \t\treturn err\n10| \t}\n11| \tseg := b.staging.current()\n12| \tif err := seg.append(c); err != nil {\n13| \t\treturn err\n14| \t}\n15| \treturn b.flusher.enqueue(seg)\n16| }\n\n### source: \"internal/replay/columnar.go\"\npurpose: Columnar assembly for staged chunks: per-field vectors with validity bitmaps.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n\n### source: \"docs/replay-backfill.md\"\nlanguage: markdown\nindexed: 2025-07-27T00:00:00Z\nnote: metadata overview (summary omitted: budget)\n",
+      "tool_call_id": "c1",
+      "name": "retrieve"
+    },
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "id": "c2",
+          "name": "agent_memory_search",
+          "arguments": {
+            "query": ""
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "content": "rec-backfill-chunk · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:\nrec-backfill-notify · working · created:2025-07-27 · updated:2025-07-27 · scope:session · ns: · src:\nrec-backfill-walk · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src: · replay backfill walks 5000-row chunks",
+      "tool_call_id": "c2",
+      "name": "agent_memory_search"
+    },
+    {
+      "role": "user",
+      "content": "How many rows does a replay backfill chunk carry?"
+    }
+  ],
+  "golden": {
+    "tool_calls": null,
+    "final_answer_criteria": "States a replay backfill chunk carries 50000 rows. 50000 and 50,000 are equivalent correct forms. An answer of 5000 rows scores 0. An answer presenting both the correct and a competing value without committing to one scores 0."
+  },
+  "assembly_eval": {
+    "pair_id": "stale-backfill-chunk-replay",
+    "mode": "mixed",
+    "candidate_ids": [
+      "55fb9ba03307a6c3763f7185efa8ff66f7d92e33899fe40405e290f5a3ea9b21",
+      "72c9efa779e2115035332a1f27dcaf635ab75c53de864317e09aebabdb09871e",
+      "a0793fc31e7f3f7e109c646038d4e40e71194a2aaa1de353bd8bd1c45f5634fa",
+      "rec-backfill-chunk",
+      "rec-backfill-notify",
+      "rec-backfill-walk"
+    ],
+    "estimated_prompt_tokens": 1099,
+    "state_digest": "70182bff136ba1a27c094d21b0bf45c1e968de8a8be42a208a852eb868134ea2",
+    "subjects": [
+      "(c1|rag|internal/replay/stage.go)",
+      "(c1|rag|internal/replay/columnar.go)",
+      "(c1|rag|docs/replay-backfill.md)",
+      "(c2|memory|rec-backfill-chunk)",
+      "(c2|memory|rec-backfill-notify)",
+      "(c2|memory|rec-backfill-walk)"
+    ],
+    "stratum": "stale_vs_fresh",
+    "answer_home": "memory",
+    "scenario_family": "backfill-chunk-staleness",
+    "budget": 1157,
+    "raw_state_tokens": 1928,
+    "pressure_level": "critical",
+    "shed_bytes": 2581
+  }
+}

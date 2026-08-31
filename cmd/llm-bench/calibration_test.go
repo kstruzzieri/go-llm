@@ -103,8 +103,12 @@ func TestRunCalibrateCapture_FailsWhenNoArtifactsWritten(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "no artifacts written") {
 		t.Fatalf("runCalibrateCapture err = %v; want no artifacts written", err)
 	}
-	if _, statErr := os.Stat(out); !os.IsNotExist(statErr) {
-		t.Fatalf("output stat err = %v; want file not created", statErr)
+	raw, readErr := os.ReadFile(out)
+	if readErr != nil {
+		t.Fatalf("read empty output: %v", readErr)
+	}
+	if len(raw) != 0 {
+		t.Fatalf("output = %q; want an empty JSONL file", raw)
 	}
 }
 
@@ -150,7 +154,7 @@ func TestRunCalibrateCapture_PartialCaptureProceedsWithSuccessfulResults(t *test
 	}
 	stderrText := string(stderr)
 	for _, want := range []string{
-		"calibrate-capture: skipped t2/ollama/cand: context deadline exceeded",
+		"calibrate-capture: skipped t2/ollama/cand: <error: timeout>",
 		"calibrate-capture: WARNING partial capture",
 		"wrote 2 artifact(s), 1 of 3 runs failed",
 	} {
@@ -326,6 +330,33 @@ func TestLoadLabelsAndArtifacts_DuplicateMatchedLabelRejected(t *testing.T) {
 	_, _, err := loadLabelsMatchedAgainst(labels, arts)
 	if err == nil || !strings.Contains(err.Error(), "duplicate label for artifact_hash") {
 		t.Fatalf("loadLabelsMatchedAgainst err = %v; want duplicate label error", err)
+	}
+}
+
+func TestLoadArtifactsRejectsHashMismatch(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "artifacts.jsonl")
+	artifact := testCalibrationArtifact("t1", "original")
+	artifact.ActualFinalAnswer = "tampered"
+	if err := writeJSONL(path, []any{artifact}); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := loadArtifacts(path)
+	if err == nil || !strings.Contains(err.Error(), "artifact_hash mismatch") {
+		t.Fatalf("loadArtifacts error = %v, want artifact_hash mismatch", err)
+	}
+}
+
+func TestLoadArtifactsRejectsDuplicateHash(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "artifacts.jsonl")
+	artifact := testCalibrationArtifact("t1", "answer")
+	if err := writeJSONL(path, []any{artifact, artifact}); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := loadArtifacts(path)
+	if err == nil || !strings.Contains(err.Error(), "duplicate artifact_hash") {
+		t.Fatalf("loadArtifacts error = %v, want duplicate artifact_hash", err)
 	}
 }
 

@@ -1,0 +1,72 @@
+{
+  "id": "ctl-weekly-report-home-legacy",
+  "source": "assembly-corpus-mixed",
+  "captured_at": "0001-01-01T00:00:00Z",
+  "system": "You are the driftwatch assistant. driftwatch is a self-hosted telemetry ingest and alerting daemon. Answer using only the provided conversation, memory records, and retrieved context.",
+  "tools": null,
+  "turns": [
+    {
+      "role": "user",
+      "content": "The weekly ingest health report needs a stable home. Right now it lands wherever whoever wrote it happened to be typing."
+    },
+    {
+      "role": "assistant",
+      "content": "This week's draft went to the alerts channel, which buried an actual page within the hour."
+    },
+    {
+      "role": "user",
+      "content": "Let's still try the alerts channel for one cycle; at least everyone already watches it."
+    },
+    {
+      "role": "assistant",
+      "content": "The noise complaints arrived immediately. Two people muted the channel, which defeats its purpose."
+    },
+    {
+      "role": "user",
+      "content": "Fair, that settles it. The alerts-channel experiment is over: from this week on the report is posted in the ops-weekly thread, and the alerts channel carries pages only."
+    },
+    {
+      "role": "assistant",
+      "content": "Posted this week's report in the ops-weekly thread and added a pointer in the channel topic so nobody goes looking in alerts."
+    },
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "id": "c1",
+          "name": "fixture_echo",
+          "arguments": {
+            "content": "channel audit: one report entry in ops-weekly, alerts channel shows pages only."
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "content": "channel audit: one report entry in ops-weekly, alerts channel shows pages only.",
+      "tool_call_id": "c1",
+      "name": "fixture_echo"
+    },
+    {
+      "role": "user",
+      "content": "Where does the weekly ingest health report get posted?"
+    }
+  ],
+  "golden": {
+    "tool_calls": null,
+    "final_answer_criteria": "Control pair: the two arms are identical by construction; scores here measure decode and labeling noise, not assembly. The conversation first tries the alerts channel and then settles the question: the alerts-channel experiment ended, the report is posted in the ops-weekly thread, and the alerts channel carries pages only. An answer stating the ops-weekly thread scores 1; an answer stating the alerts channel scores 0. An answer presenting both the correct and a competing value without committing to one scores 0."
+  },
+  "assembly_eval": {
+    "pair_id": "ctl-weekly-report-home",
+    "mode": "legacy",
+    "candidate_ids": [],
+    "estimated_prompt_tokens": 255,
+    "state_digest": "b7f9d0c509f7adade786528537418e6e04380d23711c1b0444123199b7c32ca2",
+    "stratum": "cross_domain_join",
+    "answer_home": "join",
+    "control": true,
+    "budget": 391,
+    "raw_state_tokens": 327,
+    "pressure_level": "watch"
+  }
+}

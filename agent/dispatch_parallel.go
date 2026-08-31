@@ -62,13 +62,13 @@ func canRunParallel(reg *toolRegistry, calls []provider.ToolCall) bool {
 //	  order, with the same short-circuit-and-discard semantics as the serial path.
 func (o *Orchestrator) runToolCallsParallel(ctx context.Context, res *Result, state *State,
 	reg *toolRegistry, calls []provider.ToolCall, approver Approver, obs Observer, step int,
-	gov *restraintGovernor) error {
+	gov *restraintGovernor, b *batch) error {
 
 	// Phase 1: prepare serially, in model order.
 	prepared := make([]preparedCall, len(calls))
 	for i, call := range calls {
 		res.Events = append(res.Events, EventRecord{Step: step, Kind: "tool_call"})
-		p, err := o.prepareCall(ctx, reg, call, approver, obs, step)
+		p, err := o.prepareCall(ctx, reg, call, approver, obs, step, gov)
 		if err != nil {
 			return err // hard abort: no invokes launched, nothing to cancel
 		}
@@ -100,7 +100,7 @@ func (o *Orchestrator) runToolCallsParallel(ctx context.Context, res *Result, st
 		rec.IsError = results[i].IsError
 		rec.Invoked = true
 		rec.Latency = latencies[i]
-		stop, err := recordResult(ctx, res, state, obs, gov, step, prepared[i].call, prepared[i].effect, rec, results[i])
+		stop, err := o.recordResult(ctx, res, state, obs, gov, step, prepared[i].call, prepared[i].effect, rec, results[i], b)
 		if err != nil {
 			return err
 		}

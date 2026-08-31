@@ -1,0 +1,59 @@
+{
+  "id": "chain-retain-quota-refill-legacy",
+  "source": "assembly-corpus-mixed",
+  "captured_at": "0001-01-01T00:00:00Z",
+  "system": "You are the driftwatch assistant. driftwatch is a self-hosted telemetry ingest and alerting daemon. Answer using only the provided conversation, memory records, and retrieved context.",
+  "tools": null,
+  "turns": [
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "id": "c2",
+          "name": "fixture_echo",
+          "arguments": {
+            "content": "limiter counter scrape from the staging edge, pasted verbatim:\ningest_limiter_refill_passes_total 118204\ningest_limiter_refill_tenants_walked_total 9456320\ningest_limiter_quota_rejects_total{tenant=\"atlas\"} 112\ningest_limiter_quota_rejects_total{tenant=\"borealis\"} 3049\ningest_limiter_bucket_underflow_clamps_total 0\nscrape note: the tick=900ms series a few old dashboards still chart came from the perf-spike shadow profile; that profile never shipped and its series reads zero on every live edge.\ningest_limiter_refill_walk_duration_seconds_sum 3801.4\n"
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "content": "limiter counter scrape from the staging edge, pasted verbatim:\ningest_limiter_refill_passes_total 118204\ningest_limiter_refill_tenants_walked_total 9456320\ningest_limiter_quota_rejects_total{tenant=\"atlas\"} 112\ningest_limiter_quota_rejects_total{tenant=\"borealis\"} 3049\ningest_limiter_bucket_underflow_clamps_total 0\nscrape note: the tick=900ms series a few old dashboards still chart came from the perf-spike shadow profile; that profile never shipped and its series reads zero on every live edge.\ningest_limiter_refill_walk_duration_seconds_sum 3801.4\n",
+      "tool_call_id": "c2",
+      "name": "fixture_echo"
+    },
+    {
+      "role": "user",
+      "content": "How often does the tenant limiter refill its token buckets?"
+    }
+  ],
+  "golden": {
+    "tool_calls": null,
+    "final_answer_criteria": "States the tenant limiter refills on a 350 millisecond tick. Equivalent phrasings (350ms, 0.35 seconds, roughly three times a second) are acceptable when the 350ms figure is stated. The 900ms shadow-profile tick named in the pasted scrape scores 0. An answer presenting both the correct and a competing value without committing to one scores 0."
+  },
+  "assembly_eval": {
+    "pair_id": "chain-retain-quota-refill",
+    "mode": "legacy",
+    "candidate_ids": [
+      "5f75d9a08fb7ff4b24217fc729300e795801ece84aada739b24ee17ad6cbaaee",
+      "7b2da155b08b89592a22754ed8f3aa4305ede43120ec65af6bdefa096d1be531",
+      "b58fc8fb6630915ac56448b0438a7b3a2eef3b3ca8fadb93afe8e6c4e4fdcfab"
+    ],
+    "estimated_prompt_tokens": 200,
+    "state_digest": "56132b8b77738a8f163ef2235302f1a8407fbf9762ec0cd667378c61f434efc3",
+    "subjects": [
+      "(c1|rag|internal/ingest/refill.go)",
+      "(c1|rag|internal/ingest/bucket.go)",
+      "(c1|rag|docs/limiter.md)"
+    ],
+    "stratum": "chain_retention",
+    "answer_home": "rag",
+    "scenario_family": "tenant-quota-chain",
+    "budget": 889,
+    "raw_state_tokens": 1481,
+    "pressure_level": "ok",
+    "shed_messages": 4,
+    "shed_bytes": 4892
+  }
+}

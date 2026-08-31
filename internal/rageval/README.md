@@ -147,3 +147,174 @@ Notable invariants:
   hand). Latency fields are deliberately excluded — they vary run-to-run.
   On a drift failure, run `go generate ./internal/rageval` if the change
   was intentional.
+
+## Outline retrieval experiment (#246)
+
+Run the production-scale comparison with:
+
+```sh
+go run ./cmd/rag-eval \
+  -experiment outline \
+  -dimensions 768 \
+  -candidate-m 50 \
+  -samples 5 \
+  -out /private/tmp/go-llm-246-outline-report.json
+```
+
+`-samples` sets the outline measured-sample count (default 5); `-warm-runs` sets
+the baseline warm-run count (default 3). For back-compatibility `-warm-runs` is
+still accepted as a deprecated alias for `-samples` in outline mode when
+`-samples` is not given. Every experiment requires an explicit `-out` path, so
+no invocation can overwrite the committed baseline.
+The outline report compares:
+
+- `full_corpus_search_multi`: mutable `SearchMulti` over all corpus chunks.
+- `resident_exact`: the #291 resident snapshot, exact scoring over all chunks
+  with only the final results hydrated.
+- `bounded_semantic_keyword_union`: semantic top-M plus non-zero FTS5 keyword
+  top-M, stable-identity deduplication, then final scoring.
+- `outline_then_content`: deterministic metadata-only top-M selection, final
+  scoring, then content hydration.
+- `hierarchical`: resident-exact retrieval of M hydrated candidates followed
+  by the existing hierarchical post-retrieval policy.
+
+Quality fields are recall, reciprocal rank (MRR), expected-source coverage,
+`source_path_precision`, and final formatted-context tokens at K=5 and K=10.
+`source_path_precision` is only the fraction of returned chunks whose source
+path is one of the expected support paths. It is a retrieval proxy; no
+generated citation or answer quality is measured.
+
+Cost fields are P50/P95 latency, bytes and allocations, and four distinct work
+counters: `candidates_inspected` is the unique candidate records consulted
+before final hydration (lean rows in the snapshot/planning adapters, full rows
+in the full-corpus mode); `ranked_candidates` is the upstream final scoring
+set; `hydrated_content_chunks` is every full-content row loaded by the adapter;
+and `post_retrieval_candidates_inspected` counts a separate downstream
+selection stage. Hierarchical retrieval ranks all 1,401 chunks upstream, then
+post-inspects and hydrates 50. Modes without a post-retrieval stage report zero.
+`deterministic_ordering` checks repeated result-ID order. `planning_tokens` is
+`null` because all selectors are deterministic and model-free.
+
+This is a generated 1,401-chunk, 138-source corpus persisted to a temporary
+SQLite file. Its embeddings and queries are deterministic, so it isolates
+retrieval behavior without representing live-repository relevance, production
+concurrency, or model answer quality. Allowed outline token sets are precomputed
+once before measurements; their build cost and retained memory, like
+long-lived persistent-memory pressure, are excluded. The raw JSON contains
+measurements only and no recommendation or conclusion. See the measured
+[issue #246 report](../../docs/rag/outline-retrieval-eval-246.md).
+
+## Progressive rendering experiment (#331)
+
+Run with:
+
+```sh
+go run ./cmd/rag-eval \
+  -experiment progressive \
+  -dimensions 768 \
+  -out internal/rageval/testdata/progressive-baseline.json
+```
+
+This experiment measures flat `Retriever.BuildContext` against
+`Retriever.RenderProgressive` at equal budget over the same outline fixture
+corpus used by `#246`. Retrieval selection runs once per query so both arms
+render the identical result slice (`candidate_sets_equal` records this rather
+than asserting it). Fresh summaries are seeded on the even-indexed half of the
+corpus sources before rendering; the other half exercises the deterministic
+metadata-overview fallback, so `summary.total_metadata_fallback` should always
+be nonzero on a passing regeneration.
+
+On this fixture `summary.mean_token_reduction` is negative (~-0.116):
+`total_omitted_sources` is 0 across the corpus (the 512-token budget never
+binds), and 16 of 20 queries select all top-10 chunks from a single source, so
+progressive rendering only adds its orientation block and v2 headers on top of
+content the flat renderer already emits in full — pure overhead in this
+regime. That is a mechanical property of this fixture's selection, not a
+quality verdict on progressive rendering: the depth-for-coverage trade the
+renderer exists for needs either a `MaxTokens` budget below flat's natural
+~445-token size, or a selection spanning more distinct sources, to actually
+engage. Relatedly, the one query with `sources_at_l1 > 0` is a reachability
+indicator, not a measurement: L1 can only appear on the 4 multi-source
+(`distributed_support`) queries, and the fixture is intentionally thin there;
+broadening it is out of scope for this baseline.
+
+`contextPrecision` is deliberately not claimed for this experiment: the frozen
+`BuildContext` exposes no emitted-result trace to compute it against (spec
+3.8), so only token/byte reduction and progressive-arm trace counters
+(`sources_at_l0`, `sources_at_l1`, `sources_with_evidence`, `omitted_sources`)
+are reported.
+
+Like the outline baseline, every experiment requires an explicit `-out` path,
+so no invocation can overwrite the committed baseline by accident.
+
+## Mixed-assembly experiment (#331 slice 3c)
+
+Run — this exact invocation is also the baseline regeneration command — with:
+
+```sh
+go run ./cmd/rag-eval \
+  -experiment mixed \
+  -out internal/rageval/testdata/mixed-baseline.json
+```
+
+This is the deterministic companion to `cmd/llm-bench`'s human-labeled mixed
+corpus: llm-bench measures answer quality on arms-differ-gated cases, while
+this experiment measures assembly SHAPE only. Five hand-built states — one per
+stratum flavor (`conversation_only`, `memory_only`, `cross_domain_join`,
+`stale_vs_fresh`, `chain_retention`) — are built through the production tool
+producers (`agent/tools.Retrieve` in progressive mode over a seeded rag store,
+`agent/tools.AgentMemorySearch` over a seeded record store) and assembled by
+BOTH arms (legacy `ContextManager{}` and `ContextManager{Mixed: true}`) at
+budget fractions {0.4, 0.6, 0.8} of the registered raw state size.
+
+Every case carries at least one structured anchor, so the mixed path engages
+and the two arms differ in assembled shape at every fraction (pinned by
+`TestMixedEvalMixedPathEngagedEverywhere`). The two cases that were
+degenerate before W4 now each exercise a distinct contrast:
+
+- `conversation_only` — the answer-bearing fact still lives ONLY in the
+  first plain exchange (shed first under pressure), but the transcript also
+  carries one IRRELEVANT progressive retrieve chain over an off-topic
+  distractor store. The sweep records how each arm trades the
+  useless-but-structured anchors against the answer-bearing plain turns: at
+  f=0.4 legacy keeps only the pinned goal while mixed renders 5 of 9
+  subjects.
+- `chain_retention` — the UNSTRUCTURED echo-style chain (plain `Content`,
+  nil `Context`) remains the stratum's point and stays the oldest
+  shed-eligible chain, but a structured retrieve chain later in the
+  transcript engages the mixed path, so the sweep shows how each arm treats
+  the plain completed chain when structured anchors compete for the same
+  budget.
+
+Budgets are `max(minViable, round(f*raw))` with `minViable = est(system) +
+est(final pinned goal) + 64` on the registered `est=(len+3)/4` basis — the
+same formula as llm-bench's `mixedCaseBudget`. Floor semantics: when the floor
+wins, fraction rows collapse. `memory_only` is sized to show this — f=0.4 and
+f=0.6 both floor to budget 218 and produce identical rows; only f=0.8 clears
+the floor. That is the floor working as designed, not a missing sweep point.
+
+How to read the per-arm fields:
+
+- `decision_histogram` (mixed arm only) counts trace subject rows by the fixed
+  decision vocabulary — `base`, `floor`, `upgrade`, `omitted` — covering
+  conversation spans, chain spans, and structured-anchor subjects alike.
+- `omitted_subjects` is the trace total of omitted rows (evicted spans and
+  evicted chains' subjects included); `anchor_omissions` is the narrower
+  Pressure counter — subjects dropped from a RETAINED anchor only.
+- `pressure_level` is each arm's own classification and routinely disagrees
+  between arms at the same budget: legacy under-fills after whole-chain drops
+  (often `ok`) while mixed packs the budget (often `critical`).
+
+Every metric is recorded PER ARM and NEVER diffed across arms, and the report
+schema carries no cross-arm diff field (a reflection test pins the full key
+set). This is policy, not omission: slice 3b documented that `Pressure.Cause`
+shifts between arms for the same transcript (agent/types.go) — the same anchor
+can count as `retrieval` under legacy and `tool_output` under mixed — so a
+cross-arm delta of decisions or causes would compare vocabularies, not
+behavior.
+
+The experiment runs the whole sweep twice internally and byte-compares the
+marshaled reports; any difference is a hard error, so a returned report always
+carries `summary.all_deterministic: true`. `TestMixedEvalBaselineUpToDate` is
+the regeneration gate: the committed `testdata/mixed-baseline.json` must equal
+the live report byte-for-byte.

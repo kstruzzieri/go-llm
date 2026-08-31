@@ -1,0 +1,141 @@
+{
+  "id": "join-ingest-token-audit-mixed",
+  "source": "assembly-corpus-mixed",
+  "captured_at": "0001-01-01T00:00:00Z",
+  "system": "You are the driftwatch assistant. driftwatch is a self-hosted telemetry ingest and alerting daemon. Answer using only the provided conversation, memory records, and retrieved context.",
+  "tools": null,
+  "turns": [
+    {
+      "role": "user",
+      "content": "The producer SDK changelog is overdue as well. Three releases went out without entries and the integrators channel noticed; backfill the missing entries from the merge log and set the release script to refuse a tag when the changelog lacks a section for it."
+    },
+    {
+      "role": "assistant",
+      "content": "Backfilled all three changelog sections from the merge history and wired the refusal into the release script; a tag without a matching changelog section now fails before it publishes."
+    },
+    {
+      "role": "user",
+      "content": "Somebody also has to clean the fixture tenants out of the staging tenants file. Half of them date back to the load tests from spring and every capacity summary counts them as real integrations, which inflates the staging numbers and confuses the platform reviews."
+    },
+    {
+      "role": "assistant",
+      "content": "Removed the stale fixture tenants, tagged the two the soak suite still uses so they are obviously synthetic, and the staging capacity summary now reports only real integrations."
+    },
+    {
+      "role": "user",
+      "content": "The edge metrics board got slow again after the panel additions last month. Prune the queries that fan out per tenant and fold them into the rollup the ingest overview already computes, so oncall stops waiting ten seconds for the board to paint during pages."
+    },
+    {
+      "role": "assistant",
+      "content": "Folded the per-tenant fanout queries into the existing rollup and the board paints in under two seconds now; the removed queries are archived in the board history if anyone misses them."
+    },
+    {
+      "role": "user",
+      "content": "Docs next: the quickstart still walks new producers through the old enrollment flow with screenshots of the retired console. Refresh the walkthrough against the current console and swap the screenshots before the next integrator cohort lands on it."
+    },
+    {
+      "role": "assistant",
+      "content": "Refreshed the quickstart against the current console, replaced every screenshot, and added a note at the top pointing existing integrators at the migration appendix instead."
+    },
+    {
+      "role": "user",
+      "content": "The support rotation calendar drifted from the actual roster again; two people who left the team are still listed on upcoming weeks. Sync it from the roster source of truth and set it to regenerate weekly instead of being hand-edited."
+    },
+    {
+      "role": "assistant",
+      "content": "Synced the rotation calendar from the roster and scheduled the weekly regeneration; hand edits now get overwritten on the next sync, which is the point."
+    },
+    {
+      "role": "user",
+      "content": "Also the ingest soak suite has been red on one flaky comparison since Tuesday. It is masking real regressions; either stabilize the comparison or quarantine that one check so the suite goes back to meaning something."
+    },
+    {
+      "role": "assistant",
+      "content": "Stabilized the comparison by pinning its input window; the suite is green again and the flake ticket has the analysis attached for the record."
+    },
+    {
+      "role": "user",
+      "content": "Last chore before the window: the platform observer asked for a single page that tracks producer counts by token generation during the migration, so they can watch the drain without paging through raw metrics."
+    },
+    {
+      "role": "assistant",
+      "content": "Built the migration tracking page with producer counts by generation and linked it from the flip runbook; the observer confirmed it covers what they need."
+    },
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "id": "c1",
+          "name": "retrieve",
+          "arguments": {
+            "query": "token verification cache behaviour",
+            "k": 3
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "content": "### source: \"internal/ingest/verifycache.go\"\npurpose: Verified-token trust cache with a bounded re-check TTL.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n--- source: \"internal/ingest/verifycache.go\" (lines 1-32, similarity: 1.00) ---\n1| package ingest\n2| \n3| import \"time\"\n4| \n5| // verifyCacheTTL bounds how long a successful token verification is\n6| // trusted before the edge re-checks the token against the live\n7| // accepted set. The cache exists to keep hot producers off the\n8| // verifier during bursts; the TTL keeps a revoked token from riding\n9| // the cache long after the accepted set narrowed.\n10| // Eval edges still run the retired 5-minute verify cache build;\n11| // prod narrowed re-checks to the TTL below when the accepted-set\n12| // work landed.\n13| const verifyCacheTTL = 15 * time.Minute\n14| \n15| type verifyCache struct {\n16| \tentries map[string]time.Time\n17| }\n18| \n19| // trusted reports whether a prior verification of this token is still\n20| // inside the TTL. Expired entries are deleted on sight so the map\n21| // tracks only live trust.\n22| func (c *verifyCache) trusted(token string, now time.Time) bool {\n23| \tseen, ok := c.entries[token]\n24| \tif !ok {\n25| \t\treturn false\n26| \t}\n27| \tif now.Sub(seen) \u003e verifyCacheTTL {\n28| \t\tdelete(c.entries, token)\n29| \t\treturn false\n30| \t}\n31| \treturn true\n32| }\n\n### source: \"internal/ingest/revokelog.go\"\npurpose: Append-only revocation audit log with spool-grade sync.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n\n### source: \"docs/rotation.md\"\npurpose: Rotation guide: staged flip, generation drain, audit close-out.\nlanguage: markdown\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n",
+      "tool_call_id": "c1",
+      "name": "retrieve"
+    },
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "id": "c2",
+          "name": "agent_memory_search",
+          "arguments": {
+            "query": ""
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "content": "rec-flip-checklist · working · created:2025-07-27 · updated:2025-07-27 · scope:session · ns: · src: · flip-day checklist lives in the deploy repo; tick items in order, the edge steps assume the producer steps finished\nrec-observer-invite · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src: · platform observer joins the flip call fifteen minutes before the window opens\nrec-revoke-sweep · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:",
+      "tool_call_id": "c2",
+      "name": "agent_memory_search"
+    },
+    {
+      "role": "user",
+      "content": "Booking the flip for tonight: how long after it does the revocation sweep land, and how long can a verified token sit in the verify cache before re-check?"
+    }
+  ],
+  "golden": {
+    "tool_calls": null,
+    "final_answer_criteria": "BOTH halves required: the revocation sweep lands 96 hours after the flip, AND a verified token is re-checked after 15 minutes in the verify cache. A missing half caps the score at 0.5; a stated but incorrect half scores 0. An answer giving 5 minutes as the production re-check bound scores 0; a committed 15-minute answer that notes the eval-edge 5-minute caveat is still correct. An answer presenting both the correct and a competing value without committing to one scores 0."
+  },
+  "assembly_eval": {
+    "pair_id": "join-ingest-token-audit",
+    "mode": "mixed",
+    "candidate_ids": [
+      "34257656917177746de023ff33f5e4ebc4c579899b5dcd9da23ab12de8a059fc",
+      "87f58009aa119f56ed6c71e7dce746589eaf49a5b83321d62595668a26278f75",
+      "f9de909934565bc04edc506c54063c326b9f083ca03c5623f0986fce176b2a25",
+      "rec-flip-checklist",
+      "rec-observer-invite",
+      "rec-revoke-sweep"
+    ],
+    "estimated_prompt_tokens": 1380,
+    "state_digest": "c82ed6891593ff18d9c7a571903463b56deab43864c87adbde6c96212757cc22",
+    "subjects": [
+      "(c1|rag|internal/ingest/verifycache.go)",
+      "(c1|rag|internal/ingest/revokelog.go)",
+      "(c1|rag|docs/rotation.md)",
+      "(c2|memory|rec-flip-checklist)",
+      "(c2|memory|rec-observer-invite)",
+      "(c2|memory|rec-revoke-sweep)"
+    ],
+    "stratum": "cross_domain_join",
+    "answer_home": "join",
+    "scenario_family": "ingest-token-join",
+    "budget": 1445,
+    "raw_state_tokens": 2408,
+    "pressure_level": "critical",
+    "shed_messages": 2,
+    "shed_bytes": 3438,
+    "omitted_subjects": 1
+  }
+}

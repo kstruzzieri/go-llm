@@ -1,16 +1,23 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"hash/fnv"
+	"io"
+	"net/url"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
+
+	"github.com/kstruzzieri/go-llm/ollama"
 )
 
 // Artifact is one frozen candidate output for a (trace, candidate model)
@@ -26,6 +33,42 @@ type Artifact struct {
 	ActualToolCalls   []string  `json:"actual_tool_calls"`
 	ActualTranscript  []Turn    `json:"actual_transcript"`
 	CapturedAt        time.Time `json:"captured_at"`
+	// Capture records controlled-capture provenance for assembly-mode traces
+	// (#331 slice 3c): nil on every other artifact so their JSON stays
+	// byte-identical to the pre-3c shape. Deliberately excluded from
+	// artifactHash: provenance describes HOW an output was captured, not
+	// WHAT was captured, so it must not change artifact identity.
+	Capture *CaptureProvenance `json:"capture,omitempty"`
+}
+
+// CaptureProvenance pins the controlled conditions one assembly artifact was
+// captured under. Temperature is the registered greedy-decoding setting.
+// Seed is always nil today: neither ollama.ModelOptions nor the
+// openai-compat request shape exposes a seed field, so temperature-0 is the
+// sole registered decoding control on both transports. ModelDigest is the
+// ollama /api/show digest when the transport exposes one; openai-compat
+// servers have no digest endpoint, so it stays empty there.
+type CaptureProvenance struct {
+	// OrderIndex is the trace's position in the counterbalanced capture
+	// order (the per-target replay sequence); artifacts of the same trace
+	// under different targets share it.
+	OrderIndex  int      `json:"order_index"`
+	Temperature *float64 `json:"temperature,omitempty"`
+	Seed        *int     `json:"seed,omitempty"`
+	Transport   string   `json:"transport"`
+	Model       string   `json:"model"`
+	ModelDigest string   `json:"model_digest,omitempty"`
+	// KNOWN GAP: a provider that omits usage counts JSON-decodes to 0
+	// tokens — a plausible-looking value — so "usage not reported" is
+	// indistinguishable from a genuine zero. Closing it needs presence
+	// signals (*int) threaded from the transports; deferred because the
+	// replay usage plumbing is shared with Score's token fields.
+	PromptTokens int `json:"prompt_tokens"`
+	GenTokens    int `json:"gen_tokens"`
+	// CapturedOrder is "legacy-first" or "mixed-first" for legacy/mixed pair
+	// members (which arm of the pair the counterbalanced order ran first);
+	// empty for topline artifacts.
+	CapturedOrder string `json:"captured_order,omitempty"`
 }
 
 // Label is the human-supplied truth for one frozen Artifact. ArtifactHash
@@ -57,6 +100,11 @@ type artifactHashInput struct {
 	ActualTranscript  []Turn   `json:"actual_transcript"`
 }
 
+type captureProvenanceHashInput struct {
+	CapturedAt time.Time          `json:"captured_at"`
+	Capture    *CaptureProvenance `json:"capture"`
+}
+
 // artifactHash returns the canonical sha256 hash for an Artifact. Stable
 // under JSON struct-tag ordering; sensitive to every input including
 // tool-call sequence order.
@@ -71,6 +119,84 @@ func artifactHash(a Artifact) string {
 	})
 	sum := sha256.Sum256(raw)
 	return fmt.Sprintf("sha256:%s", hex.EncodeToString(sum[:]))
+}
+
+// captureProvenanceHash seals the output-only fields deliberately excluded
+// from artifactHash. New v2 manifests bind this digest to each artifact;
+// v1 files retain their historical unbound semantics.
+func captureProvenanceHash(a Artifact) string {
+	raw, _ := json.Marshal(captureProvenanceHashInput{CapturedAt: a.CapturedAt, Capture: a.Capture})
+	sum := sha256.Sum256(raw)
+	return "sha256:" + hex.EncodeToString(sum[:])
+}
+
+// candidateDigestResolver is the minimal ShowModel surface needed to
+// resolve candidate model digests (satisfied by *ollama.Client).
+type candidateDigestResolver interface {
+	ShowModel(ctx context.Context, name string) (*ollama.ModelInfo, error)
+}
+
+// digestResolutionTimeout bounds the digest-resolution client only; the
+// capture replay client keeps the operator-configured -timeout.
+const digestResolutionTimeout = 10 * time.Second
+
+// resolveCaptureModelDigests constructs a short-timeout ollama client and
+// resolves candidate digests for capture provenance. Failures degrade to
+// missing digests with one stderr line each, never a capture failure.
+func resolveCaptureModelDigests(ctx context.Context, ollamaURL string, targets []ModelTarget) map[string]string {
+	client, err := newOllamaClient(ollamaURL, ollama.WithTimeout(digestResolutionTimeout))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "calibrate-capture: digest resolution skipped: %s\n", redactErrorMessage(err.Error()))
+		return nil
+	}
+	return resolveCandidateDigests(ctx, client, targets)
+}
+
+// resolveCandidateDigests resolves the content digest for each ollama
+// candidate target via /api/show, keyed by the normalized Display selector.
+// Per-target errors degrade to a missing digest (with a stderr note) per
+// resolveJudgeDigest precedent — degraded provenance, not a capture
+// failure. openai-compat targets are skipped — that transport has no digest
+// endpoint, so their provenance ModelDigest stays empty by design.
+func resolveCandidateDigests(ctx context.Context, resolver candidateDigestResolver, targets []ModelTarget) map[string]string {
+	digests := make(map[string]string, len(targets))
+	for _, target := range targets {
+		if normalizeModelSelector(target.Provider) != defaultBenchProvider {
+			continue
+		}
+		info, err := resolver.ShowModel(ctx, target.Model)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "calibrate-capture: digest resolution skipped for %q: %s\n", target.Display, redactErrorMessage(err.Error()))
+			continue
+		}
+		if info == nil || info.Digest == "" {
+			// A successful ShowModel with no digest degrades exactly like the
+			// error branch above — noted, never silent.
+			fmt.Fprintf(os.Stderr, "calibrate-capture: digest resolution skipped for %q: ShowModel returned no digest\n", target.Display)
+			continue
+		}
+		digest := canonicalSHA256Digest(info.Digest)
+		if digest == "" {
+			fmt.Fprintf(os.Stderr, "calibrate-capture: digest resolution skipped for %q: invalid digest\n", target.Display)
+			continue
+		}
+		digests[normalizeModelSelector(target.Display)] = digest
+	}
+	return digests
+}
+
+func canonicalSHA256Digest(raw string) string {
+	hexDigest := raw
+	if len(raw) == len("sha256:")+sha256.Size*2 && strings.EqualFold(raw[:len("sha256:")], "sha256:") {
+		hexDigest = raw[len("sha256:"):]
+	}
+	if len(hexDigest) != sha256.Size*2 {
+		return ""
+	}
+	if _, err := hex.DecodeString(hexDigest); err != nil {
+		return ""
+	}
+	return "sha256:" + strings.ToLower(hexDigest)
 }
 
 // calibrationRunner abstracts Runner.RunAll so calibration tests can
@@ -90,13 +216,702 @@ type calibrateCaptureOptions struct {
 	Traces     []Trace
 	OutputPath string
 	Clock      func() time.Time
+	// ModelDigests maps a normalized target Display selector to the model
+	// content digest recorded on assembly-artifact capture provenance.
+	// Resolved by the caller (see resolveCandidateDigests); missing entries
+	// leave CaptureProvenance.ModelDigest empty.
+	ModelDigests map[string]string
+	// OllamaURL and OpenAICompatBaseURL are the capture endpoints, recorded
+	// on the run manifest (#331 W3) when the trace set contains assembly
+	// modes.
+	OllamaURL           string
+	OpenAICompatBaseURL string
+	// Stdout receives the manifest_digest line (the pack's committed report
+	// embeds it); nil defaults to os.Stdout.
+	Stdout io.Writer
 }
 
-// runCalibrateCapture replays each (trace, candidate) and writes one
-// Artifact per non-failed Result to OutputPath as JSONL. Artifacts have
-// no ExpectedAnswerQuality — labels are a separate file the operator
-// hand-edits.
-func runCalibrateCapture(ctx context.Context, opts calibrateCaptureOptions) (retErr error) {
+// Capture run manifest (#331 W3). A -calibrate-capture over traces
+// containing assembly modes (legacy/mixed/topline) MUST also write
+// <artifacts-out>.manifest.json pinning the run conditions; the registered
+// -assembly-report run verifies pairs against it (-capture-manifest).
+const (
+	// captureManifestSchemaVersion is the LEGACY v1 schema: per_artifact rows
+	// for successful captures only, no run ledger. The committed slice-3c
+	// manifests are v1 and sealed; the report keeps v1 semantics for v1 files.
+	captureManifestSchemaVersion = "mixed-capture-manifest/v1"
+	// captureManifestSchemaVersionV2 adds the `expected` run ledger — one row
+	// per (trace x model) attempt, failures included — so a failed run leaves
+	// auditable evidence instead of vanishing (external PR review P1). New
+	// captures write v2.
+	captureManifestSchemaVersionV2 = "mixed-capture-manifest/v2"
+)
+
+// captureManifestPath is the manifest's sibling path for one artifacts
+// output path.
+func captureManifestPath(artifactsOut string) string {
+	return artifactsOut + ".manifest.json"
+}
+
+type captureManifest struct {
+	SchemaVersion        string                  `json:"schema_version"`
+	CreatedAt            time.Time               `json:"created_at"`
+	Endpoint             string                  `json:"endpoint"`
+	Transport            string                  `json:"transport"`
+	ModelTargets         []captureManifestTarget `json:"model_targets"`
+	ServerProbe          captureServerProbe      `json:"server_probe"`
+	Decoding             captureDecoding         `json:"decoding"`
+	CounterbalanceScheme string                  `json:"counterbalance_scheme"`
+	// ArtifactCount counts SUCCESSFUL captures only (one per PerArtifact
+	// row) — unchanged from v1.
+	ArtifactCount int                  `json:"artifact_count"`
+	PerArtifact   []captureManifestRow `json:"per_artifact"`
+	// ExpectedCount / Expected are the v2 run ledger: one row per
+	// (trace x model) the capture attempted, failures included. Absent on v1
+	// manifests; required on v2.
+	ExpectedCount int                  `json:"expected_count,omitempty"`
+	Expected      []captureExpectedRow `json:"expected,omitempty"`
+	// RequestedTraces is the result-independent v2 trace universe, in the
+	// exact order used to build Expected. It makes failed-row deletion loud.
+	RequestedTraces []captureRequestedTrace `json:"requested_traces,omitempty"`
+}
+
+type captureRequestedTrace struct {
+	TraceID string `json:"trace_id"`
+	PairID  string `json:"pair_id,omitempty"`
+	Arm     string `json:"arm,omitempty"`
+}
+
+// captureExpectedRow is one v2-ledger entry: a (trace x model) run the
+// capture attempted. Status "captured" rows carry the written artifact's
+// hash; "failed" rows carry the (path-redacted) error and no hash — they
+// produced no artifact and cannot be labeled, but they no longer vanish:
+// the report synthesizes their pairs into missing-arm exclusions.
+//
+// Attempts is 1 or 2: the registered one-retry policy runs IN-RUN — a cell
+// that fails (or gets no result) on the first attempt is retried exactly
+// once within the same invocation, and the ledger records whether the retry
+// happened. Loading rejects any value outside 1..2.
+type captureExpectedRow struct {
+	TraceID string `json:"trace_id"`
+	Model   string `json:"model"`
+	// PairID/Arm locate assembly traces: Arm is legacy/mixed/topline (empty
+	// for non-assembly traces); PairID is set on legacy/mixed arms only.
+	PairID       string `json:"pair_id,omitempty"`
+	Arm          string `json:"arm,omitempty"`
+	Status       string `json:"status"` // captured | failed
+	Attempts     int    `json:"attempts"`
+	Error        string `json:"error,omitempty"`
+	ArtifactHash string `json:"artifact_hash,omitempty"`
+}
+
+type captureManifestTarget struct {
+	Selector string `json:"selector"`
+	// ResolvedDigest is the ollama ShowModel digest, or empty when the
+	// transport exposes none (openai-compat) or resolution degraded.
+	ResolvedDigest string `json:"resolved_digest"`
+}
+
+// captureServerProbe records safe Ollama model digests resolved before capture.
+type captureServerProbe struct {
+	OllamaDigests map[string]string `json:"ollama_digests,omitempty"`
+}
+
+// captureDecoding pins the registered decoding controls. SeedSupported is
+// false today on both transports (see CaptureProvenance.Seed).
+type captureDecoding struct {
+	Temperature   float64 `json:"temperature"`
+	SeedSupported bool    `json:"seed_supported"`
+}
+
+// captureManifestRow is one written artifact's manifest entry. UsagePresent
+// reports whether the replay carried non-zero prompt AND gen token counts —
+// the report's -capture-manifest verification excludes pairs whose arms
+// lack it (a provider that omits usage decodes to 0, so zero is treated as
+// "not verified").
+type captureManifestRow struct {
+	TraceID        string `json:"trace_id"`
+	ArtifactHash   string `json:"artifact_hash"`
+	ProvenanceHash string `json:"provenance_hash,omitempty"`
+	OrderIndex     int    `json:"order_index"`
+	UsagePresent   bool   `json:"usage_present"`
+}
+
+// captureEndpointTransport derives the manifest endpoint/transport pair from
+// the target set. Registered runs are single-transport; a mixed target set
+// records transport "mixed" with both URLs space-joined, ollama first.
+func captureEndpointTransport(targets []ModelTarget, ollamaURL, compatURL string) (endpoint, transport string, err error) {
+	hasOllama, hasCompat := false, false
+	for _, t := range targets {
+		if normalizeModelSelector(t.Provider) == openAICompatTransport {
+			hasCompat = true
+		} else {
+			hasOllama = true
+		}
+	}
+	var ollamaEndpoint, compatEndpoint string
+	if hasOllama {
+		ollamaEndpoint, err = sanitizeCaptureEndpoint(ollamaURL)
+		if err != nil {
+			return "", "", err
+		}
+		if ollamaEndpoint == "" {
+			return "", "", errors.New("calibrate-capture: empty ollama endpoint")
+		}
+	}
+	if hasCompat {
+		compatEndpoint, err = sanitizeCaptureEndpoint(compatURL)
+		if err != nil {
+			return "", "", err
+		}
+		if compatEndpoint == "" {
+			return "", "", errors.New("calibrate-capture: empty openai-compat endpoint")
+		}
+	}
+	switch {
+	case hasCompat && hasOllama:
+		return ollamaEndpoint + " " + compatEndpoint, "mixed", nil
+	case hasCompat:
+		return compatEndpoint, openAICompatTransport, nil
+	default:
+		return ollamaEndpoint, defaultBenchProvider, nil
+	}
+}
+
+func sanitizeCaptureEndpoint(raw string) (string, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return "", nil
+	}
+	u, err := url.Parse(raw)
+	if err != nil || !u.IsAbs() || u.Host == "" || u.Opaque != "" {
+		return "", errors.New("calibrate-capture: invalid capture endpoint")
+	}
+	u.User = nil
+	u.RawQuery = ""
+	u.ForceQuery = false
+	u.Fragment = ""
+	u.RawFragment = ""
+	return u.String(), nil
+}
+
+// loadCaptureManifestForReport reads a capture run manifest for
+// -assembly-report verification, returning the embedded reference (the
+// FILE's sha256 digest + artifact count) and the verification set the pair
+// verification consults. v1 manifests (the sealed slice-3c run) keep exactly
+// the pre-ledger semantics: a usage-present hash set and nothing else. v2
+// manifests additionally validate the expected run ledger against the
+// per_artifact rows (hash match, both directions) and surface the expected
+// legacy-mixed pair keys for missing-pair synthesis.
+func loadCaptureManifestForReport(path string) (AssemblyCaptureManifest, *captureVerification, error) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return AssemblyCaptureManifest{}, nil, fmt.Errorf("capture-manifest: read %q: %w", path, err)
+	}
+	var m captureManifest
+	if err := json.Unmarshal(raw, &m); err != nil {
+		return AssemblyCaptureManifest{}, nil, fmt.Errorf("capture-manifest: decode %q: %w", path, err)
+	}
+	if m.ArtifactCount != len(m.PerArtifact) {
+		return AssemblyCaptureManifest{}, nil, fmt.Errorf("capture-manifest: %q artifact_count %d does not match its %d per_artifact row(s) (corrupt or hand-edited manifest)", path, m.ArtifactCount, len(m.PerArtifact))
+	}
+	verify := &captureVerification{usagePresent: make(map[string]bool, len(m.PerArtifact))}
+	for _, row := range m.PerArtifact {
+		verify.usagePresent[row.ArtifactHash] = row.UsagePresent
+	}
+	switch m.SchemaVersion {
+	case captureManifestSchemaVersion:
+		// v1: no ledger may ride along — a hand-added one would silently
+		// change pair discovery on a schema that never carried it.
+		if m.ExpectedCount != 0 || len(m.Expected) > 0 {
+			return AssemblyCaptureManifest{}, nil, fmt.Errorf("capture-manifest: v1 manifest %q carries a v2 expected ledger (%d row(s)); re-run the capture or fix the schema_version", path, len(m.Expected))
+		}
+		if len(m.RequestedTraces) > 0 {
+			return AssemblyCaptureManifest{}, nil, fmt.Errorf("capture-manifest: v1 manifest %q carries v2 requested_traces; re-run the capture or fix the schema_version", path)
+		}
+		verify.legacyV1ModelIdentity = true
+	case captureManifestSchemaVersionV2:
+		pairs, err := validateCaptureLedger(m)
+		if err != nil {
+			return AssemblyCaptureManifest{}, nil, fmt.Errorf("capture-manifest: %q: %w", path, err)
+		}
+		verify.expectedPairs = pairs
+		verify.v2Manifest = &m
+		verify.expectedArtifacts = make(map[string]captureExpectedArtifact, m.ArtifactCount)
+		for _, row := range m.Expected {
+			if row.Status == "captured" {
+				verify.expectedArtifacts[row.ArtifactHash] = captureExpectedArtifact{
+					traceID: row.TraceID, model: modelKey(row.Model), pairID: row.PairID, arm: row.Arm,
+				}
+			}
+		}
+	default:
+		return AssemblyCaptureManifest{}, nil, fmt.Errorf("capture-manifest: %q schema_version %q (want %q or %q)", path, m.SchemaVersion, captureManifestSchemaVersion, captureManifestSchemaVersionV2)
+	}
+	sum := sha256.Sum256(raw)
+	ref := AssemblyCaptureManifest{
+		Digest:        "sha256:" + hex.EncodeToString(sum[:]),
+		ArtifactCount: m.ArtifactCount,
+	}
+	return ref, verify, nil
+}
+
+func validateCaptureArtifacts(arts []Artifact, verify *captureVerification) error {
+	if verify == nil || verify.expectedArtifacts == nil {
+		return nil
+	}
+	actual := make(map[string]*Artifact, len(arts))
+	for i := range arts {
+		actual[arts[i].ArtifactHash] = &arts[i]
+	}
+	expectedHashes := make([]string, 0, len(verify.expectedArtifacts))
+	for hash := range verify.expectedArtifacts {
+		expectedHashes = append(expectedHashes, hash)
+	}
+	sort.Strings(expectedHashes)
+	for _, hash := range expectedHashes {
+		if actual[hash] == nil {
+			return fmt.Errorf("capture-manifest v2 artifact binding: expected artifact hash %q is missing from artifacts", hash)
+		}
+	}
+	actualHashes := make([]string, 0, len(actual))
+	for hash := range actual {
+		actualHashes = append(actualHashes, hash)
+	}
+	sort.Strings(actualHashes)
+	for _, hash := range actualHashes {
+		if _, ok := verify.expectedArtifacts[hash]; !ok {
+			return fmt.Errorf("capture-manifest v2 artifact binding: artifact hash %q is absent from the captured ledger", hash)
+		}
+	}
+	for _, hash := range expectedHashes {
+		expected := verify.expectedArtifacts[hash]
+		artifact := actual[hash]
+		if artifact.TraceID != expected.traceID {
+			return fmt.Errorf("capture-manifest v2 artifact binding: artifact hash %q trace_id mismatch", hash)
+		}
+		if artifact.Trace.ID != expected.traceID {
+			return fmt.Errorf("capture-manifest v2 artifact binding: artifact hash %q trace.id mismatch", hash)
+		}
+		if modelKey(artifact.CandidateModel) != expected.model {
+			return fmt.Errorf("capture-manifest v2 artifact binding: artifact hash %q candidate_model mismatch", hash)
+		}
+		pairID, arm := "", ""
+		if prefilledAssemblyMode(artifact.Trace) {
+			arm = string(artifact.Trace.AssemblyEval.Mode)
+			if artifact.Trace.AssemblyEval.Mode == AssemblyLegacy || artifact.Trace.AssemblyEval.Mode == AssemblyMixed {
+				pairID = artifact.Trace.AssemblyEval.PairID
+			}
+		}
+		if pairID != expected.pairID {
+			return fmt.Errorf("capture-manifest v2 artifact binding: artifact hash %q pair_id mismatch", hash)
+		}
+		if arm != expected.arm {
+			return fmt.Errorf("capture-manifest v2 artifact binding: artifact hash %q arm mismatch", hash)
+		}
+	}
+	return validateV2CaptureProvenance(arts, *verify.v2Manifest, verify.expectedArtifacts)
+}
+
+type captureTargetControl struct {
+	provider, digest string
+}
+
+func validateV2CaptureProvenance(arts []Artifact, m captureManifest, expectedArtifacts map[string]captureExpectedArtifact) error {
+	if m.CounterbalanceScheme != captureCounterbalanceScheme {
+		return fmt.Errorf("capture-manifest v2 counterbalance_scheme mismatch")
+	}
+	if m.Decoding.Temperature != assemblyCaptureTemperature {
+		return fmt.Errorf("capture-manifest v2 temperature %v does not match the registered %v", m.Decoding.Temperature, assemblyCaptureTemperature)
+	}
+	if m.Decoding.SeedSupported {
+		return fmt.Errorf("capture-manifest v2 seed support is not registered")
+	}
+	if len(m.ModelTargets) == 0 {
+		return fmt.Errorf("capture-manifest v2 model_targets is empty")
+	}
+	targets := make(map[string]captureTargetControl, len(m.ModelTargets))
+	probeKeys := make(map[string]captureTargetControl, len(m.ModelTargets))
+	hasOllama, hasCompat := false, false
+	for i, row := range m.ModelTargets {
+		target, err := parseModelTarget(row.Selector)
+		if err != nil {
+			return fmt.Errorf("capture-manifest v2 model_targets row %d is invalid", i)
+		}
+		key := modelKey(row.Selector)
+		if _, dup := targets[key]; dup {
+			return fmt.Errorf("capture-manifest v2 model_targets row %d duplicates model %q", i, key)
+		}
+		if row.ResolvedDigest != "" && canonicalSHA256Digest(row.ResolvedDigest) != row.ResolvedDigest {
+			return fmt.Errorf("capture-manifest v2 model_targets row %d resolved_digest is not canonical", i)
+		}
+		control := captureTargetControl{provider: target.Provider, digest: row.ResolvedDigest}
+		targets[key] = control
+		switch target.Provider {
+		case defaultBenchProvider:
+			hasOllama = true
+			probeKeys[normalizeModelSelector(row.Selector)] = control
+		case openAICompatTransport:
+			hasCompat = true
+			if row.ResolvedDigest != "" {
+				return fmt.Errorf("capture-manifest v2 model_targets row %d openai-compat resolved_digest must be empty", i)
+			}
+		}
+	}
+	wantTransport := defaultBenchProvider
+	if hasCompat {
+		wantTransport = openAICompatTransport
+	}
+	if hasCompat && hasOllama {
+		wantTransport = "mixed"
+	}
+	if m.Transport != wantTransport {
+		return fmt.Errorf("capture-manifest v2 transport %q does not match model_targets transport %q", m.Transport, wantTransport)
+	}
+	endpointTransports := []string{wantTransport}
+	if wantTransport == "mixed" {
+		endpointTransports = []string{defaultBenchProvider, openAICompatTransport}
+	}
+	endpoints := strings.Split(m.Endpoint, " ")
+	if len(endpoints) != len(endpointTransports) {
+		if wantTransport == "mixed" {
+			return fmt.Errorf("capture-manifest v2 mixed endpoint must contain exactly two sanitized URLs")
+		}
+		return fmt.Errorf("capture-manifest v2 %s endpoint must contain exactly one sanitized URL", wantTransport)
+	}
+	compatProvider := ""
+	for i, endpoint := range endpoints {
+		sanitized, err := sanitizeCaptureEndpoint(endpoint)
+		if err != nil || sanitized == "" || sanitized != endpoint {
+			return fmt.Errorf("capture-manifest v2 %s endpoint is not sanitized", endpointTransports[i])
+		}
+		if endpointTransports[i] == openAICompatTransport {
+			compatProvider = openAICompatCandidateProviderName(sanitized)
+		}
+	}
+	for key, digest := range m.ServerProbe.OllamaDigests {
+		control, ok := probeKeys[key]
+		if !ok {
+			return fmt.Errorf("capture-manifest v2 server_probe contains unknown Ollama target")
+		}
+		if canonicalSHA256Digest(digest) != digest || digest != control.digest {
+			return fmt.Errorf("capture-manifest v2 server_probe model_digest mismatch")
+		}
+	}
+	for key, control := range probeKeys {
+		if m.ServerProbe.OllamaDigests[key] != control.digest {
+			return fmt.Errorf("capture-manifest v2 model_targets/server_probe model_digest mismatch")
+		}
+	}
+
+	perArtifact := make(map[string]captureManifestRow, len(m.PerArtifact))
+	for _, row := range m.PerArtifact {
+		perArtifact[row.ArtifactHash] = row
+	}
+	targetSeen := make(map[string]bool, len(targets))
+	modelPosition := make(map[string]int, len(targets))
+	expectedOrder := make(map[string]int, len(expectedArtifacts))
+	pairArms := make(map[string]map[string]string)
+	for i, row := range m.Expected {
+		key := modelKey(row.Model)
+		if _, ok := targets[key]; !ok {
+			return fmt.Errorf("capture-manifest v2 expected row %d model is absent from model_targets", i)
+		}
+		targetSeen[key] = true
+		position := modelPosition[key]
+		modelPosition[key] = position + 1
+		if row.Status == "captured" {
+			expectedOrder[row.ArtifactHash] = position
+		}
+		if row.Arm == string(AssemblyLegacy) || row.Arm == string(AssemblyMixed) {
+			if pairArms[row.PairID] == nil {
+				pairArms[row.PairID] = make(map[string]string, 2)
+			}
+			if traceID := pairArms[row.PairID][row.Arm]; traceID != "" && traceID != row.TraceID {
+				return fmt.Errorf("capture-manifest v2 pair %q arm %q maps to multiple trace_ids", row.PairID, row.Arm)
+			}
+			pairArms[row.PairID][row.Arm] = row.TraceID
+		}
+	}
+	for key := range targets {
+		if !targetSeen[key] {
+			return fmt.Errorf("capture-manifest v2 model_targets model %q has no expected rows", key)
+		}
+	}
+	completePairIDs := make([]string, 0, len(pairArms))
+	for pairID, arms := range pairArms {
+		if arms[string(AssemblyLegacy)] != "" && arms[string(AssemblyMixed)] != "" {
+			completePairIDs = append(completePairIDs, pairID)
+		}
+	}
+	_, capturedOrders := counterbalancePairOrder(completePairIDs)
+
+	actual := make(map[string]*Artifact, len(arts))
+	for i := range arts {
+		actual[arts[i].ArtifactHash] = &arts[i]
+	}
+	for hash, expected := range expectedArtifacts {
+		artifact := actual[hash]
+		row := perArtifact[hash]
+		if captureProvenanceHash(*artifact) != row.ProvenanceHash {
+			return fmt.Errorf("capture-manifest v2 artifact binding: artifact hash %q provenance_hash mismatch", hash)
+		}
+		if row.OrderIndex != expectedOrder[hash] {
+			return fmt.Errorf("capture-manifest v2 artifact binding: artifact hash %q order_index mismatch", hash)
+		}
+		if !prefilledAssemblyMode(artifact.Trace) {
+			if artifact.Capture != nil {
+				return fmt.Errorf("capture-manifest v2 artifact binding: artifact hash %q non-assembly artifact carries capture provenance", hash)
+			}
+			continue
+		}
+		capture := artifact.Capture
+		if capture == nil {
+			return fmt.Errorf("capture-manifest v2 artifact binding: artifact hash %q capture provenance is missing", hash)
+		}
+		if capture.OrderIndex != row.OrderIndex {
+			return fmt.Errorf("capture-manifest v2 artifact binding: artifact hash %q order_index mismatch", hash)
+		}
+		usagePresent := capture.PromptTokens > 0 && capture.GenTokens > 0
+		if usagePresent != row.UsagePresent {
+			return fmt.Errorf("capture-manifest v2 artifact binding: artifact hash %q usage_present mismatch", hash)
+		}
+		if modelKey(capture.Model) != expected.model {
+			return fmt.Errorf("capture-manifest v2 artifact binding: artifact hash %q capture model mismatch", hash)
+		}
+		control := targets[expected.model]
+		wantCaptureTransport := control.provider
+		if control.provider == openAICompatTransport {
+			wantCaptureTransport = compatProvider
+		}
+		if capture.Transport != wantCaptureTransport {
+			return fmt.Errorf("capture-manifest v2 artifact binding: artifact hash %q transport mismatch", hash)
+		}
+		if capture.ModelDigest != control.digest {
+			return fmt.Errorf("capture-manifest v2 artifact binding: artifact hash %q model_digest mismatch", hash)
+		}
+		if capture.Temperature == nil || *capture.Temperature != m.Decoding.Temperature {
+			return fmt.Errorf("capture-manifest v2 artifact binding: artifact hash %q temperature mismatch", hash)
+		}
+		if capture.Seed != nil {
+			return fmt.Errorf("capture-manifest v2 artifact binding: artifact hash %q seed is not supported", hash)
+		}
+		wantOrder := ""
+		if expected.arm == string(AssemblyLegacy) || expected.arm == string(AssemblyMixed) {
+			wantOrder = capturedOrders[expected.pairID]
+		}
+		if capture.CapturedOrder != wantOrder {
+			return fmt.Errorf("capture-manifest v2 artifact binding: artifact hash %q captured_order mismatch", hash)
+		}
+	}
+	return nil
+}
+
+func validateRequestedTraceUniverse(rows []captureRequestedTrace) error {
+	if len(rows) == 0 {
+		return fmt.Errorf("v2 manifest has no requested_traces rows")
+	}
+	requestedIDs := make(map[string]struct{}, len(rows))
+	requestedPairArms := make(map[[2]string]string, len(rows))
+	for i, row := range rows {
+		if strings.TrimSpace(row.TraceID) == "" {
+			return fmt.Errorf("requested_traces row %d: trace_id must be nonblank", i)
+		}
+		if _, dup := requestedIDs[row.TraceID]; dup {
+			return fmt.Errorf("requested_traces row %d: duplicate trace_id %q", i, row.TraceID)
+		}
+		requestedIDs[row.TraceID] = struct{}{}
+		switch row.Arm {
+		case "", string(AssemblyTopline):
+			if row.PairID != "" {
+				return fmt.Errorf("requested_traces row %d (%s): pair_id %q on a non-paired arm %q", i, row.TraceID, row.PairID, row.Arm)
+			}
+		case string(AssemblyLegacy), string(AssemblyMixed):
+			if strings.TrimSpace(row.PairID) == "" {
+				return fmt.Errorf("requested_traces row %d (%s): %s arm requires a pair_id", i, row.TraceID, row.Arm)
+			}
+			key := [2]string{row.PairID, row.Arm}
+			if prior := requestedPairArms[key]; prior != "" {
+				return fmt.Errorf("requested_traces row %d (%s): duplicate pair_id/arm %s/%s (already %s)", i, row.TraceID, row.PairID, row.Arm, prior)
+			}
+			requestedPairArms[key] = row.TraceID
+		default:
+			return fmt.Errorf("requested_traces row %d (%s): invalid arm %q", i, row.TraceID, row.Arm)
+		}
+	}
+	return nil
+}
+
+// validateCaptureLedger checks a v2 manifest's expected run ledger against
+// its per_artifact rows and returns the deduplicated expected legacy-mixed
+// pair keys (file order). Every violation is loud: the ledger is the audit
+// trail for failed runs, so a corrupt or hand-edited one must never verify.
+func validateCaptureLedger(m captureManifest) ([]assemblyPairKey, error) {
+	if m.ExpectedCount != len(m.Expected) {
+		return nil, fmt.Errorf("expected_count %d does not match its %d expected row(s)", m.ExpectedCount, len(m.Expected))
+	}
+	if len(m.Expected) == 0 {
+		return nil, fmt.Errorf("v2 manifest has no expected ledger rows")
+	}
+	if err := validateRequestedTraceUniverse(m.RequestedTraces); err != nil {
+		return nil, err
+	}
+	wantExpected := len(m.ModelTargets) * len(m.RequestedTraces)
+	if m.ExpectedCount != wantExpected {
+		return nil, fmt.Errorf("expected_count %d does not equal model_targets %d x requested_traces %d", m.ExpectedCount, len(m.ModelTargets), len(m.RequestedTraces))
+	}
+	perArtifact := make(map[string]string, len(m.PerArtifact))
+	for i, row := range m.PerArtifact {
+		if strings.TrimSpace(row.TraceID) == "" || strings.TrimSpace(row.ArtifactHash) == "" {
+			return nil, fmt.Errorf("per_artifact row %d: trace_id and artifact_hash must be nonblank", i)
+		}
+		if row.ProvenanceHash == "" || canonicalSHA256Digest(row.ProvenanceHash) != row.ProvenanceHash {
+			return nil, fmt.Errorf("per_artifact row %d: provenance_hash must be a canonical sha256 digest", i)
+		}
+		if _, dup := perArtifact[row.ArtifactHash]; dup {
+			return nil, fmt.Errorf("per_artifact row %d: duplicate artifact_hash %q", i, row.ArtifactHash)
+		}
+		perArtifact[row.ArtifactHash] = row.TraceID
+	}
+	seen := make(map[[2]string]struct{}, len(m.Expected))
+	capturedHashes := make(map[string]struct{}, len(m.Expected))
+	var pairs []assemblyPairKey
+	seenPair := map[assemblyPairKey]struct{}{}
+	for i, row := range m.Expected {
+		if strings.TrimSpace(row.TraceID) == "" || strings.TrimSpace(row.Model) == "" {
+			return nil, fmt.Errorf("expected row %d: trace_id and model must be nonblank", i)
+		}
+		key := [2]string{row.TraceID, modelKey(row.Model)}
+		if _, dup := seen[key]; dup {
+			return nil, fmt.Errorf("expected row %d: duplicate (trace_id, model) (%s, %s)", i, row.TraceID, row.Model)
+		}
+		seen[key] = struct{}{}
+		if row.Attempts < 1 || row.Attempts > 2 {
+			return nil, fmt.Errorf("expected row %d (%s/%s): attempts %d outside the registered 1..2 range (one initial attempt plus at most one in-run retry)", i, row.TraceID, row.Model, row.Attempts)
+		}
+		switch row.Arm {
+		case "", string(AssemblyTopline):
+			if row.PairID != "" {
+				return nil, fmt.Errorf("expected row %d (%s/%s): pair_id %q on a non-paired arm %q", i, row.TraceID, row.Model, row.PairID, row.Arm)
+			}
+		case string(AssemblyLegacy), string(AssemblyMixed):
+			if row.PairID == "" {
+				return nil, fmt.Errorf("expected row %d (%s/%s): %s arm requires a pair_id", i, row.TraceID, row.Model, row.Arm)
+			}
+		default:
+			return nil, fmt.Errorf("expected row %d (%s/%s): invalid arm %q", i, row.TraceID, row.Model, row.Arm)
+		}
+		switch row.Status {
+		case "captured":
+			if row.ArtifactHash == "" {
+				return nil, fmt.Errorf("expected row %d (%s/%s): captured row without an artifact_hash", i, row.TraceID, row.Model)
+			}
+			if row.Error != "" {
+				return nil, fmt.Errorf("expected row %d (%s/%s): captured row carries error %q", i, row.TraceID, row.Model, row.Error)
+			}
+			if _, dup := capturedHashes[row.ArtifactHash]; dup {
+				return nil, fmt.Errorf("expected row %d (%s/%s): duplicate captured artifact_hash %q", i, row.TraceID, row.Model, row.ArtifactHash)
+			}
+			traceID, ok := perArtifact[row.ArtifactHash]
+			if !ok {
+				return nil, fmt.Errorf("expected row %d (%s/%s): captured hash %q is not in per_artifact", i, row.TraceID, row.Model, row.ArtifactHash)
+			}
+			if traceID != row.TraceID {
+				return nil, fmt.Errorf("expected row %d (%s/%s): captured artifact_hash %q maps to per_artifact trace_id %q", i, row.TraceID, row.Model, row.ArtifactHash, traceID)
+			}
+			capturedHashes[row.ArtifactHash] = struct{}{}
+		case "failed":
+			if row.Attempts != 2 {
+				return nil, fmt.Errorf("expected row %d (%s/%s): failed row attempts %d (want 2 after the in-run retry)", i, row.TraceID, row.Model, row.Attempts)
+			}
+			if row.ArtifactHash != "" {
+				return nil, fmt.Errorf("expected row %d (%s/%s): failed row carries artifact_hash %q (failed runs produce no artifact)", i, row.TraceID, row.Model, row.ArtifactHash)
+			}
+			switch row.Error {
+			case "<error: no-result>", "<error: timeout>", "<error: network>", "<error: parse>", "<error: other>":
+			default:
+				return nil, fmt.Errorf("expected row %d (%s/%s): failed row error %q is not a categorized error stub", i, row.TraceID, row.Model, row.Error)
+			}
+		default:
+			return nil, fmt.Errorf("expected row %d (%s/%s): invalid status %q (want captured or failed)", i, row.TraceID, row.Model, row.Status)
+		}
+		if row.Arm == string(AssemblyLegacy) || row.Arm == string(AssemblyMixed) {
+			k := assemblyPairKey{assemblyKindLegacyMixed, row.PairID, modelKey(row.Model)}
+			if _, dup := seenPair[k]; !dup {
+				seenPair[k] = struct{}{}
+				pairs = append(pairs, k)
+			}
+		}
+	}
+	for modelIndex, target := range m.ModelTargets {
+		for traceIndex, requested := range m.RequestedTraces {
+			i := modelIndex*len(m.RequestedTraces) + traceIndex
+			row := m.Expected[i]
+			if modelKey(row.Model) != modelKey(target.Selector) {
+				return nil, fmt.Errorf("expected row %d model %q does not match model_targets row %d %q", i, row.Model, modelIndex, target.Selector)
+			}
+			if row.TraceID != requested.TraceID {
+				return nil, fmt.Errorf("expected row %d trace_id %q does not match requested_traces row %d %q", i, row.TraceID, traceIndex, requested.TraceID)
+			}
+			if row.PairID != requested.PairID {
+				return nil, fmt.Errorf("expected row %d pair_id %q does not match requested_traces row %d %q", i, row.PairID, traceIndex, requested.PairID)
+			}
+			if row.Arm != requested.Arm {
+				return nil, fmt.Errorf("expected row %d arm %q does not match requested_traces row %d %q", i, row.Arm, traceIndex, requested.Arm)
+			}
+		}
+	}
+	// Both directions: every per_artifact row must be vouched for by a
+	// captured ledger row too, or the ledger under-reports the run.
+	for _, row := range m.PerArtifact {
+		if _, ok := capturedHashes[row.ArtifactHash]; !ok {
+			return nil, fmt.Errorf("per_artifact hash %q has no captured row in the expected ledger", row.ArtifactHash)
+		}
+	}
+	return pairs, nil
+}
+
+// writeCaptureManifest marshals and writes the manifest, then emits the
+// manifest_digest line (sha256 of the file bytes) to stdout. Any failure
+// here fails the capture loudly — an assembly capture without its manifest
+// cannot be verified by the registered report.
+func writeCaptureManifest(path string, m captureManifest, stdout io.Writer) error {
+	raw, err := marshalCaptureManifest(m)
+	if err != nil {
+		return err
+	}
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		return fmt.Errorf("calibrate-capture: write manifest: %w", err)
+	}
+	emitCaptureManifestDigest(raw, stdout)
+	return nil
+}
+
+func marshalCaptureManifest(m captureManifest) ([]byte, error) {
+	raw, err := json.MarshalIndent(m, "", "  ")
+	if err != nil {
+		return nil, fmt.Errorf("calibrate-capture: marshal manifest: %w", err)
+	}
+	return append(raw, '\n'), nil
+}
+
+func emitCaptureManifestDigest(raw []byte, stdout io.Writer) {
+	sum := sha256.Sum256(raw)
+	if stdout == nil {
+		stdout = os.Stdout
+	}
+	_, _ = fmt.Fprintf(stdout, "manifest_digest sha256:%s\n", hex.EncodeToString(sum[:]))
+}
+
+// runCalibrateCapture replays each (trace, candidate) cell — retrying every
+// failed cell exactly once in-run (the registered one-retry policy) — and
+// writes one Artifact per captured cell to OutputPath as JSONL. Artifacts
+// have no ExpectedAnswerQuality — labels are a separate file the operator
+// hand-edits. The v2 manifest ledger derives from the requested
+// (target x trace) universe, so a cell the runner never answered for still
+// appears as failed, and an all-failed assembly run still writes its
+// manifest before erroring: evidence must persist.
+func runCalibrateCapture(ctx context.Context, opts calibrateCaptureOptions) error {
 	if opts.Runner == nil {
 		return fmt.Errorf("calibrate-capture: nil runner")
 	}
@@ -109,6 +924,40 @@ func runCalibrateCapture(ctx context.Context, opts calibrateCaptureOptions) (ret
 	if len(opts.Targets) == 0 {
 		return errors.New("calibrate-capture: no targets")
 	}
+	seenTargets := make(map[[2]string]struct{}, len(opts.Targets))
+	for _, target := range opts.Targets {
+		key := canonicalModelTargetKey(target)
+		if _, ok := seenTargets[key]; ok {
+			return fmt.Errorf("calibrate-capture: duplicate model target %q", target.Display)
+		}
+		seenTargets[key] = struct{}{}
+	}
+	assemblyCapture := anyPrefilledAssemblyTrace(opts.Traces)
+	var endpoint, transport string
+	if assemblyCapture {
+		var err error
+		endpoint, transport, err = captureEndpointTransport(opts.Targets, opts.OllamaURL, opts.OpenAICompatBaseURL)
+		if err != nil {
+			return err
+		}
+	}
+	modelDigests := make(map[string]string, len(opts.ModelDigests))
+	for _, target := range opts.Targets {
+		if canonicalModelTargetKey(target)[0] != defaultBenchProvider {
+			continue
+		}
+		selector := normalizeModelSelector(target.Display)
+		raw := opts.ModelDigests[selector]
+		if raw == "" {
+			continue
+		}
+		digest := canonicalSHA256Digest(raw)
+		if digest == "" {
+			fmt.Fprintf(os.Stderr, "calibrate-capture: digest resolution skipped for %q: invalid digest\n", target.Display)
+			continue
+		}
+		modelDigests[selector] = digest
+	}
 	traceByID := make(map[string]Trace, len(opts.Traces))
 	for _, trace := range opts.Traces {
 		if _, ok := traceByID[trace.ID]; ok {
@@ -116,70 +965,374 @@ func runCalibrateCapture(ctx context.Context, opts calibrateCaptureOptions) (ret
 		}
 		traceByID[trace.ID] = trace
 	}
-	results, err := opts.Runner.RunAll(ctx, opts.Targets, opts.Traces)
+	ordered, capturedOrders := counterbalanceCaptureTraces(opts.Traces)
+	requestedTraces := make([]captureRequestedTrace, 0, len(ordered))
+	for _, trace := range ordered {
+		row := captureRequestedTrace{TraceID: trace.ID}
+		if prefilledAssemblyMode(trace) {
+			row.Arm = string(trace.AssemblyEval.Mode)
+			if trace.AssemblyEval.Mode == AssemblyLegacy || trace.AssemblyEval.Mode == AssemblyMixed {
+				row.PairID = trace.AssemblyEval.PairID
+			}
+		}
+		requestedTraces = append(requestedTraces, row)
+	}
+	if err := validateRequestedTraceUniverse(requestedTraces); err != nil {
+		return fmt.Errorf("calibrate-capture: invalid requested trace universe: %w", err)
+	}
+	orderIndex := make(map[string]int, len(ordered))
+	for i, trace := range ordered {
+		orderIndex[trace.ID] = i
+	}
+	// The run ledger derives from the REQUESTED (target x trace) universe,
+	// never from whatever results came back (external PR review round 2 P2):
+	// a cell the runner silently dropped still appears — as failed — in the
+	// manifest.
+	type captureCell struct {
+		trace    Trace
+		res      *Result
+		attempts int
+	}
+	type cellKey struct{ model, trace string }
+	cells := make(map[cellKey]*captureCell, len(opts.Targets)*len(ordered))
+	cellOrder := make([]cellKey, 0, len(opts.Targets)*len(ordered))
+	for _, target := range opts.Targets {
+		for _, trace := range ordered {
+			k := cellKey{target.Display, trace.ID}
+			cells[k] = &captureCell{trace: trace}
+			cellOrder = append(cellOrder, k)
+		}
+	}
+	results, err := opts.Runner.RunAll(ctx, opts.Targets, ordered)
 	if err != nil {
-		return fmt.Errorf("calibrate-capture: run: %w", err)
+		return fmt.Errorf("calibrate-capture: run: %s", redactErrorMessage(err.Error()))
+	}
+	for i := range results {
+		r := &results[i]
+		c, ok := cells[cellKey{r.Model, r.TraceID}]
+		if !ok {
+			return fmt.Errorf("calibrate-capture: result %s/%s has no matching trace context", r.TraceID, r.Model)
+		}
+		if c.res != nil {
+			return fmt.Errorf("calibrate-capture: duplicate result for %s/%s", r.TraceID, r.Model)
+		}
+		c.res = r
+		c.attempts = 1
+	}
+	// One in-run retry per failed cell (the registered one-retry policy,
+	// external PR review round 2 P2): each target's failed or unanswered
+	// traces are re-run once, in their original counterbalanced order.
+	// Attempts records 1 (captured first try) or 2 (retried, either outcome).
+	for _, target := range opts.Targets {
+		var retryTraces []Trace
+		for _, trace := range ordered {
+			if c := cells[cellKey{target.Display, trace.ID}]; c.res == nil || c.res.Err != nil {
+				retryTraces = append(retryTraces, trace)
+			}
+		}
+		if len(retryTraces) == 0 {
+			continue
+		}
+		retryResults, err := opts.Runner.RunAll(ctx, []ModelTarget{target}, retryTraces)
+		if err != nil {
+			return fmt.Errorf("calibrate-capture: retry run: %s", redactErrorMessage(err.Error()))
+		}
+		pending := make(map[cellKey]bool, len(retryTraces))
+		for _, trace := range retryTraces {
+			k := cellKey{target.Display, trace.ID}
+			pending[k] = true
+			cells[k].attempts = 2 // the retry was attempted, result or not
+		}
+		for i := range retryResults {
+			r := &retryResults[i]
+			k := cellKey{r.Model, r.TraceID}
+			// Only the retried cells may be updated (canned test runners can
+			// replay unrelated results), and only once each.
+			if pending[k] {
+				cells[k].res = r
+				pending[k] = false
+			}
+		}
 	}
 	now := func() time.Time { return time.Now().UTC() }
 	if opts.Clock != nil {
 		now = opts.Clock
 	}
 	var artifacts []Artifact
+	var manifestRows []captureManifestRow
+	expected := make([]captureExpectedRow, 0, len(cellOrder))
 	failed := 0
-	for _, r := range results {
-		if r.Err != nil {
+	for _, k := range cellOrder {
+		c := cells[k]
+		row := captureExpectedRow{TraceID: k.trace, Model: k.model, Status: "captured", Attempts: c.attempts}
+		if prefilledAssemblyMode(c.trace) {
+			row.Arm = string(c.trace.AssemblyEval.Mode)
+			switch c.trace.AssemblyEval.Mode {
+			case AssemblyLegacy, AssemblyMixed:
+				row.PairID = c.trace.AssemblyEval.PairID
+			}
+		}
+		switch {
+		case c.res == nil:
+			// The runner returned no Result for this cell on either attempt.
+			fmt.Fprintf(os.Stderr, "calibrate-capture: skipped %s/%s: runner returned no result\n", k.trace, k.model)
+			failed++
+			row.Status = "failed"
+			row.Error = "<error: no-result>"
+		case c.res.Err != nil:
 			// Skip failed runs — they cannot be labeled coherently.
 			// Surface the per-pair reason: a silently dropped result makes a
 			// partial corpus look complete and hides timeout-vs-refusal.
-			fmt.Fprintf(os.Stderr, "calibrate-capture: skipped %s/%s: %v\n", r.TraceID, r.Model, r.Err)
+			fmt.Fprintf(os.Stderr, "calibrate-capture: skipped %s/%s: %s\n", k.trace, k.model, redactErrorMessage(c.res.Err.Error()))
 			failed++
-			continue
+			row.Status = "failed"
+			// The manifest is committed evidence and an openai-compat error can
+			// embed arbitrary server response text (up to 64 KiB, API keys
+			// included) — record only the redactErrorMessage category stub,
+			// never the raw text.
+			row.Error = redactErrorMessage(c.res.Err.Error())
+		default:
+			r := *c.res
+			artifact := Artifact{
+				TraceID:           r.TraceID,
+				CandidateModel:    r.Model,
+				Trace:             c.trace,
+				ActualFinalAnswer: lastAssistantContent(r.Transcript),
+				ActualToolCalls:   extractToolNames(r.Transcript),
+				ActualTranscript:  r.Transcript,
+				CapturedAt:        now(),
+				Capture:           captureProvenance(c.trace, r, orderIndex, capturedOrders, modelDigests),
+			}
+			artifact.ArtifactHash = artifactHash(artifact)
+			artifacts = append(artifacts, artifact)
+			row.ArtifactHash = artifact.ArtifactHash
+			manifestRows = append(manifestRows, captureManifestRow{
+				TraceID:        r.TraceID,
+				ArtifactHash:   artifact.ArtifactHash,
+				ProvenanceHash: captureProvenanceHash(artifact),
+				OrderIndex:     orderIndex[r.TraceID],
+				// Zero counts mean "usage not reported" (see the KNOWN GAP on
+				// CaptureProvenance), so presence requires both counts non-zero.
+				UsagePresent: r.Score.PromptEvalTokens > 0 && r.Score.GenTokens > 0,
+			})
 		}
-		trace, ok := traceByID[r.TraceID]
-		if !ok {
-			return fmt.Errorf("calibrate-capture: result %s/%s has no matching trace context", r.TraceID, r.Model)
-		}
-		artifact := Artifact{
-			TraceID:           r.TraceID,
-			CandidateModel:    r.Model,
-			Trace:             trace,
-			ActualFinalAnswer: lastAssistantContent(r.Transcript),
-			ActualToolCalls:   extractToolNames(r.Transcript),
-			ActualTranscript:  r.Transcript,
-			CapturedAt:        now(),
-		}
-		artifact.ArtifactHash = artifactHash(artifact)
-		artifacts = append(artifacts, artifact)
+		expected = append(expected, row)
 	}
-	if len(artifacts) == 0 {
-		return fmt.Errorf("calibrate-capture: no artifacts written; %d results returned, %d failed", len(results), failed)
-	}
-	if failed > 0 {
-		// Partial capture is a valid best-effort outcome (the caller can gap-fill
-		// the missing pairs), so this is a warning, not an error — but it must be
-		// loud: a partial corpus that prints only the success line reads as complete.
-		fmt.Fprintf(os.Stderr, "calibrate-capture: WARNING partial capture — wrote %d artifact(s), %d of %d runs failed\n", len(artifacts), failed, len(results))
-	}
-
-	if err := os.MkdirAll(filepath.Dir(opts.OutputPath), 0o755); err != nil {
-		return fmt.Errorf("calibrate-capture: mkdir: %w", err)
-	}
-	f, err := os.OpenFile(opts.OutputPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
-	if err != nil {
-		return fmt.Errorf("calibrate-capture: open output: %w", err)
-	}
-	defer func() {
-		if closeErr := f.Close(); retErr == nil && closeErr != nil {
-			retErr = fmt.Errorf("calibrate-capture: close output: %w", closeErr)
-		}
-	}()
-	enc := json.NewEncoder(f)
+	var artifactRaw bytes.Buffer
+	artifactEncoder := json.NewEncoder(&artifactRaw)
 	for _, artifact := range artifacts {
-		if err := enc.Encode(artifact); err != nil {
+		if err := artifactEncoder.Encode(artifact); err != nil {
 			return fmt.Errorf("calibrate-capture: encode artifact %s/%s: %w", artifact.TraceID, artifact.CandidateModel, err)
 		}
 	}
+	// Assembly captures REQUIRE the run manifest (#331 W3): the registered
+	// report verifies pairs against it, so a capture that cannot write it
+	// fails loudly. Non-assembly captures stay manifest-free.
+	var manifestPath string
+	var manifestRaw []byte
+	if assemblyCapture {
+		targets := make([]captureManifestTarget, 0, len(opts.Targets))
+		for _, target := range opts.Targets {
+			targets = append(targets, captureManifestTarget{
+				Selector:       target.Display,
+				ResolvedDigest: modelDigests[normalizeModelSelector(target.Display)],
+			})
+		}
+		manifest := captureManifest{
+			SchemaVersion:        captureManifestSchemaVersionV2,
+			CreatedAt:            now(),
+			Endpoint:             endpoint,
+			Transport:            transport,
+			ModelTargets:         targets,
+			ServerProbe:          captureServerProbe{OllamaDigests: modelDigests},
+			Decoding:             captureDecoding{Temperature: assemblyCaptureTemperature, SeedSupported: false},
+			CounterbalanceScheme: captureCounterbalanceScheme,
+			ArtifactCount:        len(manifestRows),
+			PerArtifact:          manifestRows,
+			ExpectedCount:        len(expected),
+			Expected:             expected,
+			RequestedTraces:      requestedTraces,
+		}
+		manifestPath = captureManifestPath(opts.OutputPath)
+		var err error
+		manifestRaw, err = marshalCaptureManifest(manifest)
+		if err != nil {
+			return err
+		}
+	}
+	if err := os.MkdirAll(filepath.Dir(opts.OutputPath), 0o755); err != nil {
+		return fmt.Errorf("calibrate-capture: mkdir: %w", err)
+	}
+	replacements := []filePublication{{target: opts.OutputPath, data: artifactRaw.Bytes(), mode: 0o600}}
+	if manifestPath != "" {
+		replacements = append(replacements, filePublication{target: manifestPath, data: manifestRaw, mode: 0o600})
+	}
+	publication, err := publishFileSet(replacements, nil)
+	if err != nil {
+		return fmt.Errorf("calibrate-capture: publish evidence: %w", err)
+	}
+	writeFilePublicationWarnings(os.Stderr, "calibrate-capture", publication)
+	if manifestPath != "" {
+		emitCaptureManifestDigest(manifestRaw, opts.Stdout)
+	}
+	if failed > 0 && len(artifacts) > 0 {
+		// Partial capture is a valid best-effort outcome (the caller can gap-fill
+		// the missing pairs), so this is a warning, not an error — but it must be
+		// loud: a partial corpus that prints only the success line reads as complete.
+		fmt.Fprintf(os.Stderr, "calibrate-capture: WARNING partial capture — wrote %d artifact(s), %d of %d runs failed\n", len(artifacts), failed, len(cellOrder))
+	}
+	if len(artifacts) == 0 {
+		return fmt.Errorf("calibrate-capture: no artifacts written; %d run(s) attempted, %d failed", len(cellOrder), failed)
+	}
 	return nil
+}
+
+// counterbalanceCaptureTraces returns the deterministic capture order for a
+// mixed trace set — non-assembly traces (and 3a flat/progressive arms) first
+// in their input order, then legacy/mixed pairs in the registered
+// counterbalance order (counterbalancePairOrder: FNV-1a-64(PairID) ascending,
+// first arm alternating), then topline traces sorted by trace ID — plus the
+// pair-ID -> captured-order label map the pair ordering was derived from, so
+// the recorded captured_order provenance can never disagree with the actual
+// order. A set with no legacy/mixed/topline traces is returned untouched,
+// preserving today's capture order byte-for-byte.
+func counterbalanceCaptureTraces(traces []Trace) ([]Trace, map[string]string) {
+	var plain, topline []Trace
+	var pairIDs []string
+	pairs := map[string][]Trace{}
+	for _, t := range traces {
+		if !prefilledAssemblyMode(t) {
+			plain = append(plain, t)
+			continue
+		}
+		switch t.AssemblyEval.Mode {
+		case AssemblyLegacy, AssemblyMixed:
+			id := t.AssemblyEval.PairID
+			if _, ok := pairs[id]; !ok {
+				pairIDs = append(pairIDs, id)
+			}
+			pairs[id] = append(pairs[id], t)
+		default: // AssemblyTopline
+			topline = append(topline, t)
+		}
+	}
+	// Only pairs with BOTH arms present are counterbalanced (and labeled):
+	// a single-arm pair has no within-pair order to balance, so it must not
+	// carry a captured_order label or consume an alternation slot.
+	var completeIDs, incompleteIDs []string
+	for _, id := range pairIDs {
+		if pairArmsComplete(pairs[id]) {
+			completeIDs = append(completeIDs, id)
+		} else {
+			incompleteIDs = append(incompleteIDs, id)
+		}
+	}
+	pairOrder, labels := counterbalancePairOrder(completeIDs)
+	incompleteOrder, _ := counterbalancePairOrder(incompleteIDs) // hash order only; labels discarded
+	pairOrder = append(pairOrder, incompleteOrder...)
+	if len(pairOrder) == 0 && len(topline) == 0 {
+		return traces, labels
+	}
+	sort.Slice(topline, func(i, j int) bool { return topline[i].ID < topline[j].ID })
+	out := make([]Trace, 0, len(traces))
+	out = append(out, plain...)
+	for _, id := range pairOrder {
+		first := AssemblyLegacy
+		if labels[id] == "mixed-first" {
+			first = AssemblyMixed
+		}
+		for _, t := range pairs[id] {
+			if t.AssemblyEval.Mode == first {
+				out = append(out, t)
+			}
+		}
+		for _, t := range pairs[id] {
+			if t.AssemblyEval.Mode != first {
+				out = append(out, t)
+			}
+		}
+	}
+	return append(out, topline...), labels
+}
+
+// pairArmsComplete reports whether a pair's collected traces include at
+// least one legacy AND one mixed arm.
+func pairArmsComplete(ts []Trace) bool {
+	var hasLegacy, hasMixed bool
+	for _, t := range ts {
+		switch t.AssemblyEval.Mode {
+		case AssemblyLegacy:
+			hasLegacy = true
+		case AssemblyMixed:
+			hasMixed = true
+		}
+	}
+	return hasLegacy && hasMixed
+}
+
+// pairIDHash is the registered counterbalance hash: FNV-1a 64 of the PairID.
+func pairIDHash(pairID string) uint64 {
+	h := fnv.New64a()
+	_, _ = h.Write([]byte(pairID))
+	return h.Sum64()
+}
+
+// captureCounterbalanceScheme names the registered counterbalance rule for
+// the capture manifest. Single source: counterbalancePairOrder implements
+// exactly this sentence.
+const captureCounterbalanceScheme = "pairs sorted by fnv1a64(pair_id) ascending; first arm alternates by position (even=legacy-first, odd=mixed-first)"
+
+// counterbalancePairOrder is the REGISTERED balanced counterbalance (#331
+// W3): pair IDs sorted by FNV-1a-64(PairID) ascending (PairID breaks the
+// astronomically unlikely hash tie), then the first arm ALTERNATES by
+// position — even position => "legacy-first", odd => "mixed-first". Balanced
+// within 1 by construction, unlike the retired per-pair hash parity, which
+// could skew arbitrarily far on an unlucky ID set.
+func counterbalancePairOrder(pairIDs []string) ([]string, map[string]string) {
+	ordered := append([]string(nil), pairIDs...)
+	sort.Slice(ordered, func(i, j int) bool {
+		hi, hj := pairIDHash(ordered[i]), pairIDHash(ordered[j])
+		if hi != hj {
+			return hi < hj
+		}
+		return ordered[i] < ordered[j]
+	})
+	labels := make(map[string]string, len(ordered))
+	for i, id := range ordered {
+		if i%2 == 1 {
+			labels[id] = "mixed-first"
+		} else {
+			labels[id] = "legacy-first"
+		}
+	}
+	return ordered, labels
+}
+
+// captureProvenance builds the controlled-capture provenance for one
+// result, or nil for non-assembly traces so their artifacts stay
+// byte-identical to the pre-3c shape. Prompt/gen tokens come from the
+// replay usage carried on Result.Score; capturedOrders is the label map the
+// actual capture order was derived from (counterbalanceCaptureTraces), the
+// single source for CapturedOrder.
+func captureProvenance(trace Trace, r Result, orderIndex map[string]int, capturedOrders map[string]string, digests map[string]string) *CaptureProvenance {
+	if !prefilledAssemblyMode(trace) {
+		return nil
+	}
+	temp := assemblyCaptureTemperature
+	prov := &CaptureProvenance{
+		OrderIndex:   orderIndex[trace.ID],
+		Temperature:  &temp,
+		Transport:    r.CandidateProvider,
+		Model:        r.Model,
+		ModelDigest:  digests[normalizeModelSelector(r.Model)],
+		PromptTokens: r.Score.PromptEvalTokens,
+		GenTokens:    r.Score.GenTokens,
+	}
+	switch trace.AssemblyEval.Mode {
+	case AssemblyLegacy, AssemblyMixed:
+		prov.CapturedOrder = capturedOrders[trace.AssemblyEval.PairID]
+	}
+	return prov
 }
 
 // matchedLabel pairs a Label with its current Artifact so the calibration
@@ -234,6 +1387,24 @@ func matchLabels(labels []Label, arts []Artifact) ([]matchedLabel, []Label, erro
 	return matched, stale, nil
 }
 
+// requireJSONDecoderEOF asserts a json.Decoder has consumed its entire input:
+// exactly one more Decode must return io.EOF. Decoder.More() cannot do this —
+// it reports false at a closing ']' or '}', so a JSONL file (or single-value
+// document) with a stray bracket or brace after the final value would pass a
+// More()-based end check silently (external PR review P3). Whitespace-only
+// tails still pass (Decode returns io.EOF).
+func requireJSONDecoderEOF(dec *json.Decoder, kind string) error {
+	var trailing json.RawMessage
+	switch err := dec.Decode(&trailing); {
+	case err == nil:
+		return fmt.Errorf("%s: trailing data after the final value", kind)
+	case errors.Is(err, io.EOF):
+		return nil
+	default:
+		return fmt.Errorf("%s: trailing data after the final value: %w", kind, err)
+	}
+}
+
 func loadArtifacts(path string) ([]Artifact, error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -241,13 +1412,25 @@ func loadArtifacts(path string) ([]Artifact, error) {
 	}
 	defer func() { _ = f.Close() }()
 	var out []Artifact
+	seen := make(map[string]struct{})
 	dec := json.NewDecoder(f)
 	for dec.More() {
 		var a Artifact
 		if err := dec.Decode(&a); err != nil {
 			return nil, fmt.Errorf("decode artifact: %w", err)
 		}
+		if want := artifactHash(a); a.ArtifactHash != want {
+			return nil, fmt.Errorf("artifact %d: artifact_hash mismatch: got %q, want %q",
+				len(out)+1, a.ArtifactHash, want)
+		}
+		if _, ok := seen[a.ArtifactHash]; ok {
+			return nil, fmt.Errorf("artifact %d: duplicate artifact_hash %q", len(out)+1, a.ArtifactHash)
+		}
+		seen[a.ArtifactHash] = struct{}{}
 		out = append(out, a)
+	}
+	if err := requireJSONDecoderEOF(dec, "artifacts"); err != nil {
+		return nil, err
 	}
 	return out, nil
 }
@@ -276,6 +1459,9 @@ func loadLabels(path string) ([]Label, error) {
 				l.TraceID, l.CandidateModel, l.ExpectedAnswerQuality)
 		}
 		out = append(out, l)
+	}
+	if err := requireJSONDecoderEOF(dec, "labels"); err != nil {
+		return nil, err
 	}
 	return out, nil
 }

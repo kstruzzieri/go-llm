@@ -1,0 +1,28 @@
+{
+  "id": "na-postgres-version-progressive",
+  "source": "assembly-corpus",
+  "captured_at": "0001-01-01T00:00:00Z",
+  "system": "Answer the question using ONLY the provided context. If the context does not contain the answer, say so explicitly.",
+  "tools": null,
+  "turns": [
+    {
+      "role": "user",
+      "content": "Context:\n### source: \"internal/queue/sqlite.go\"\npurpose: Durable SQLite-backed event queue: enqueue, claim, ack.\noverview: sqlite.go implements the queue over a local database file. Workers claim pending rows in small batches under a lease; lapsed claims become claimable again automatically.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n--- source: \"internal/queue/sqlite.go\" (lines 1-32, similarity: 1.00) ---\n1| package queue\n2| \n3| import (\n4| \t\"context\"\n5| \t\"database/sql\"\n6| \t\"time\"\n7| )\n8| \n9| // claimBatch is how many pending events one dequeue claims at a time.\n10| // Small batches keep redelivery cheap when a worker dies mid-claim.\n11| const claimBatch = 25\n12| \n13| // claimLease is how long a claim holds before the row becomes\n14| // claimable again.\n15| const claimLease = 30 * time.Second\n16| \n17| // ClaimPending marks up to claimBatch rows as claimed by this worker\n18| // and returns them in enqueue order.\n19| func (q *Queue) ClaimPending(ctx context.Context, worker string) ([]Event, error) {\n20| \tuntil := time.Now().Add(claimLease).Unix()\n21| \trows, err := q.db.QueryContext(ctx, `\n22| \t\tUPDATE events SET state = 'claimed', claimed_by = ?, claimed_until = ?\n23| \t\tWHERE id IN (\n24| \t\t\tSELECT id FROM events\n25| \t\t\tWHERE state = 'pending' OR claimed_until \u003c unixepoch()\n26| \t\t\tORDER BY id LIMIT ?\n27| \t\t) RETURNING id, subscriber, payload`, worker, until, claimBatch)\n28| \tif err != nil {\n29| \t\treturn nil, err\n30| \t}\n31| \treturn scanEvents(rows)\n32| }\n\n### source: \"internal/queue/schema.sql\"\nlanguage: sql\nindexed: 2025-07-27T00:00:00Z\nnote: metadata overview (no summary: missing)\n\n### source: \"internal/config/config.go\"\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nnote: metadata overview (no summary: missing)\n\n### source: \"docs/operations.md\"\npurpose: Production deployment and restart runbook for beacond.\nlanguage: markdown\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n\n\nQuestion: Which PostgreSQL version does the beacond queue backend require?"
+    }
+  ],
+  "golden": {
+    "tool_calls": null,
+    "final_answer_criteria": "The provided context never mentions PostgreSQL or any PostgreSQL version requirement (the queue shown is SQLite-backed); the correct behavior is to state explicitly that the answer is not in the provided context, WITHOUT inventing a version."
+  },
+  "assembly_eval": {
+    "pair_id": "na-postgres-version",
+    "mode": "progressive",
+    "candidate_ids": [
+      "ff93d51ff6ea7a95637fdf73af23719a5b962beb41b310679ed82e870d021931",
+      "1d21d3120ce43add0e6e512f8c7a2f2c629c8b272bf7a23a14a3bc3f2ac3d9b6",
+      "6a8d6ac532644efa3481a7489b50c41cada2d4bc555e3e36a9a330f38dbb9904",
+      "d89110773bc5f989b982305bd88c0fa56a1a41f0f567a900b3b71518751c822d"
+    ],
+    "estimated_prompt_tokens": 544
+  }
+}

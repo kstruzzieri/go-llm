@@ -33,8 +33,6 @@ const warmingRetrieveMessage = "retrieve: the workspace index is warming in the 
 // Invoke may run from parallel read-only dispatch goroutines (#235) while the
 // background job transitions state, so all state is RWMutex-guarded; Invoke
 // copies the delegate under lock and never holds the lock during retrieval.
-// The wrapper owns any behavioralWeighterHandle installed with the delegate
-// and releases it in close().
 type readyRetrieve struct {
 	mu       sync.RWMutex
 	state    retrieveReadyState
@@ -51,8 +49,6 @@ type readyRetrieve struct {
 // concurrent with a new Add for the retired reader.
 type retrievalReader struct {
 	tool      agent.Tool
-	store     interface{ Close() error }
-	feedback  *behavioralWeighterHandle
 	inflight  sync.WaitGroup
 	closeOnce sync.Once
 	closeFn   func() error
@@ -63,15 +59,10 @@ func newRetrievalReader(tool agent.Tool, closeFn func() error) *retrievalReader 
 	return &retrievalReader{tool: tool, closeFn: closeFn}
 }
 
-func newOwnedRetrievalReader(tool agent.Tool, store interface{ Close() error }, feedback *behavioralWeighterHandle) *retrievalReader {
-	reader := &retrievalReader{tool: tool, store: store, feedback: feedback}
+func newOwnedRetrievalReader(tool agent.Tool, store interface{ Close() error }) *retrievalReader {
+	reader := &retrievalReader{tool: tool}
 	reader.closeFn = func() error {
 		var closeErr error
-		if feedback != nil && feedback.db != nil {
-			if err := feedback.db.Close(); err != nil {
-				closeErr = errors.Join(closeErr, fmt.Errorf("golem: close behavioral feedback database: %w", err))
-			}
-		}
 		if store != nil {
 			if err := store.Close(); err != nil {
 				closeErr = errors.Join(closeErr, fmt.Errorf("golem: close retrieval generation store: %w", err))
@@ -155,25 +146,8 @@ func (r *readyRetrieve) install(reader *retrievalReader, message string) bool {
 	return true
 }
 
-// markReady installs the opened retriever, records the ready message (kept
-// for diagnostics; Invoke delegates instead of serving it), and takes
-// ownership of the feedback handle that buildGatedRetriever returned
-// alongside the retriever (nil when behavioral ranking is off). First
-// terminal transition wins: a late markReady after markFailed is ignored so
-// racing outcomes cannot flap the tool.
-func (r *readyRetrieve) markReady(tool agent.Tool, message string, feedback *behavioralWeighterHandle) {
-	r.install(newRetrievalReader(tool, func() error {
-		if feedback != nil && feedback.db != nil {
-			if err := feedback.db.Close(); err != nil {
-				return fmt.Errorf("golem: close behavioral feedback database: %w", err)
-			}
-		}
-		return nil
-	}), message)
-}
-
 // markFailed records the terminal failure message served to the model. First
-// terminal transition wins, mirroring markReady.
+// terminal transition wins, mirroring install.
 func (r *readyRetrieve) markFailed(message string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -190,8 +164,7 @@ func (r *readyRetrieve) hasReader() bool {
 	return r.reader != nil
 }
 
-// close releases the retained feedback DB handle. Nil-safe and idempotent so
-// main can defer it unconditionally in auto mode.
+// recordCloseError retains asynchronous retirement failures for close.
 func (r *readyRetrieve) recordCloseError(err error) {
 	if err == nil {
 		return

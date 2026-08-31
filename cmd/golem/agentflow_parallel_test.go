@@ -676,13 +676,7 @@ func TestParallelWorkersRunConcurrentlyAndValidateExactDiff(t *testing.T) {
 	t.Cleanup(func() { _ = c.cleanup(context.Background()) })
 	done := make(chan error, 1)
 	go func() { done <- c.runWorkers(context.Background()) }()
-	for i := 0; i < 2; i++ {
-		select {
-		case <-started:
-		case <-time.After(2 * time.Second):
-			t.Fatal("workers did not overlap")
-		}
-	}
+	awaitWorkerStarts(t, started, done, 2)
 	close(release)
 	if err := <-done; err != nil {
 		t.Fatal(err)
@@ -867,13 +861,7 @@ func TestParallelWaveInterruptCancelsEveryWorker(t *testing.T) {
 		_, err := c.runCohort(context.Background())
 		done <- err
 	}()
-	for range 2 {
-		select {
-		case <-started:
-		case <-time.After(2 * time.Second):
-			t.Fatal("parallel workers did not start")
-		}
-	}
+	awaitWorkerStarts(t, started, done, 2)
 	interrupts <- struct{}{}
 	if err := <-done; err == nil || !errors.Is(err, context.Canceled) {
 		t.Fatalf("wave interrupt error = %v", err)
@@ -1907,6 +1895,32 @@ func readTestFile(t *testing.T, path string) string {
 		t.Fatal(err)
 	}
 	return string(b)
+}
+
+// awaitWorkerStarts blocks until n workers have signaled that they are running,
+// or until the cohort finishes early -- which means the workers never ran, so
+// the cohort's own error is the useful failure rather than a stalled wait.
+//
+// There is deliberately no wall-clock bound. Any fixed budget is a flake once
+// the machine is loaded (several packages compiling and running concurrently
+// under -race), and a genuine hang is better served by the `go test` timeout
+// panic, whose goroutine dump shows exactly where each worker parked. Callers
+// tune that bound with -timeout, the knob that already exists for it. Do not
+// reintroduce a select with time.After here.
+//
+// Assumes workers stay alive after signaling (they block on a release or on
+// ctx.Done()). A caller whose workers signal and return immediately could
+// leave both channels ready at once, and select would pick between them at
+// random; drain started first if such a caller ever appears.
+func awaitWorkerStarts(t *testing.T, started <-chan struct{}, done <-chan error, n int) {
+	t.Helper()
+	for range n {
+		select {
+		case <-started:
+		case err := <-done:
+			t.Fatalf("cohort finished before all %d workers started: %v", n, err)
+		}
+	}
 }
 
 func workerStepIDs(workers []parallelWorker) []string {

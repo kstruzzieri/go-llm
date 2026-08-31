@@ -89,6 +89,29 @@ func TestResolveActiveGeneration_DoesNotFallbackWhenPointerIsCorrupt(t *testing.
 	}
 }
 
+func TestResolveActiveGeneration_RetiredPointer(t *testing.T) {
+	baseDB := filepath.Join(t.TempDir(), "k.db")
+	if err := retireActiveGeneration(context.Background(), baseDB, "workspace:k"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := resolveActiveGeneration(context.Background(), baseDB, "workspace:k"); !errors.Is(err, errNoActiveGeneration) {
+		t.Fatalf("retired pointer resolve = %v, want no active generation", err)
+	}
+
+	bad := activeGenerationPointer{
+		SchemaVersion: activePointerSchemaVersion,
+		WorkspaceID:   "workspace:k",
+		Generation:    strings.Repeat("a", 32),
+		Retired:       true,
+	}
+	if err := writeAtomicJSON(context.Background(), activePointerPath(baseDB), bad, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := resolveActiveGeneration(context.Background(), baseDB, "workspace:k"); err == nil || errors.Is(err, errNoActiveGeneration) {
+		t.Fatalf("contradictory retired pointer must fail closed, got %v", err)
+	}
+}
+
 func TestResolveActiveGeneration_RejectsInvalidMetadataAndDatabase(t *testing.T) {
 	tests := []struct {
 		name   string

@@ -1,6 +1,8 @@
 name: macOS Compile Smoke
 
 on:
+  pull_request:
+    branches: [develop, main]
   workflow_dispatch:
 
 # Cancel stale PR runs on new pushes; let push builds on develop/main complete
@@ -16,11 +18,33 @@ jobs:
     name: macOS Compile Smoke
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
-      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
           go-version-file: go.mod
 
       - name: Compile smoke
         run: go test -run '^$' ./...
+
+      # Native darwin runtime coverage for background command execution
+      # (#346): process-group lifecycle, manager suites, and the REPL
+      # shutdown paths that kill and reap real process groups.
+      - name: Background exec runtime
+        run: go test -race -run 'TestBackground(Process|Manager)|TestRunBackground|TestJobs' ./agent/tools ./cmd/golem
+
+      # Real Seatbelt confinement (#442). GO_LLM_REQUIRE_SEATBELT=1 turns a
+      # skip into a hard failure, so a runner that cannot apply Seatbelt (a
+      # nested sandbox) fails the gate rather than silently passing. The
+      # non-race pass exercises the helper-process legs (a race-instrumented
+      # child cannot initialize inside the profile); the race pass covers the
+      # rest under the detector.
+      - name: Seatbelt confinement (non-race)
+        env:
+          GO_LLM_REQUIRE_SEATBELT: "1"
+        run: go test -run '^(TestSeatbelt|TestSBPL|TestProbeSeatbelt)' ./agent/tools
+
+      - name: Seatbelt confinement (race)
+        env:
+          GO_LLM_REQUIRE_SEATBELT: "1"
+        run: go test -race -run '^(TestSeatbelt|TestSBPL|TestProbeSeatbelt)' ./agent/tools

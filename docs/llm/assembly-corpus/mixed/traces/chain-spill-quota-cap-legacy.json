@@ -1,0 +1,59 @@
+{
+  "id": "chain-spill-quota-cap-legacy",
+  "source": "assembly-corpus-mixed",
+  "captured_at": "0001-01-01T00:00:00Z",
+  "system": "You are the driftwatch assistant. driftwatch is a self-hosted telemetry ingest and alerting daemon. Answer using only the provided conversation, memory records, and retrieved context.",
+  "tools": null,
+  "turns": [
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "id": "c2",
+          "name": "fixture_echo",
+          "arguments": {
+            "content": "weekend spill usage sample from the staging box, pasted verbatim:\n2025-07-25T22:00:00Z spill_used_gb=3.1 spill_files=44 oldest_age_h=2.2\n2025-07-26T04:00:00Z spill_used_gb=7.8 spill_files=101 oldest_age_h=6.9\n2025-07-26T10:00:00Z spill_used_gb=11.4 spill_files=139 oldest_age_h=11.0\n2025-07-26T16:00:00Z spill_used_gb=6.2 spill_files=77 oldest_age_h=3.4\nsample note: the 96 GB sizing that still appears in the old capacity draft was rejected in review; it never reached config or code and the draft is archived.\nsample summary: usage peaked mid-window and drained back below baseline before the sample closed.\n"
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "content": "weekend spill usage sample from the staging box, pasted verbatim:\n2025-07-25T22:00:00Z spill_used_gb=3.1 spill_files=44 oldest_age_h=2.2\n2025-07-26T04:00:00Z spill_used_gb=7.8 spill_files=101 oldest_age_h=6.9\n2025-07-26T10:00:00Z spill_used_gb=11.4 spill_files=139 oldest_age_h=11.0\n2025-07-26T16:00:00Z spill_used_gb=6.2 spill_files=77 oldest_age_h=3.4\nsample note: the 96 GB sizing that still appears in the old capacity draft was rejected in review; it never reached config or code and the draft is archived.\nsample summary: usage peaked mid-window and drained back below baseline before the sample closed.\n",
+      "tool_call_id": "c2",
+      "name": "fixture_echo"
+    },
+    {
+      "role": "user",
+      "content": "How much disk may the spool spill area use now?"
+    }
+  ],
+  "golden": {
+    "tool_calls": null,
+    "final_answer_criteria": "States the spool spill area may use 24 GB. The rejected 96 GB capacity-draft sizing named in the pasted sample scores 0. An answer presenting both the correct and a competing value without committing to one scores 0."
+  },
+  "assembly_eval": {
+    "pair_id": "chain-spill-quota-cap",
+    "mode": "legacy",
+    "candidate_ids": [
+      "693ef32a3f788818f0f392118347f1097b0dc7de83c66841fecf48626874c845",
+      "bcc7cb82f6941389969a558f97c7346f51cf72f4c8911a7281efd69445cf9d73",
+      "f2b6b253e1da76f21a065162b02c80878978cf041a506a59266d9f43e7050b69"
+    ],
+    "estimated_prompt_tokens": 211,
+    "state_digest": "5f6bac917ff67d72786d3168eae9472d69d5fafe9fa00ef06baf3b8fc7d5d66b",
+    "subjects": [
+      "(c1|rag|internal/spool/spill.go)",
+      "(c1|rag|internal/spool/spillage.go)",
+      "(c1|rag|docs/spool-spill.md)"
+    ],
+    "stratum": "chain_retention",
+    "answer_home": "rag",
+    "scenario_family": "spill-quota-chain",
+    "budget": 857,
+    "raw_state_tokens": 1429,
+    "pressure_level": "ok",
+    "shed_messages": 4,
+    "shed_bytes": 4644
+  }
+}

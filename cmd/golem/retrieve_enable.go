@@ -4,9 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
 
-	"github.com/kstruzzieri/go-llm/agent"
 	"github.com/kstruzzieri/go-llm/config"
 	"github.com/kstruzzieri/go-llm/provider"
 	"github.com/kstruzzieri/go-llm/rag"
@@ -19,16 +17,24 @@ type retrieveOpts struct {
 	ragDB       string // explicit -rag-db path
 	autoDBPath  string // per-workspace index DB path
 	workspaceID string // workspace:<sha16> for sidecar validation
-	feedbackDB  string // resolved feedback DB path; "" => behavioral ranking off
+	weighter    rag.BehavioralWeighter
+	progressive bool // opt into the #189 progressive renderer
+	// recorder captures retrieval evidence for -grounding. nil => no capture and
+	// no wrapper, so the flag-off path constructs exactly what it did before.
+	recorder *evidenceRecorder
 }
 
-// retrieveResult is the startup outcome. line is the positive disclosure to show
-// when retrieve is registered; warns are problems to surface; suppressNotice
-// silences the generic "no index" line whenever a more specific outcome already
-// explains the situation (-no-rag, explicit -rag-db, or an existing-but-disabled
-// auto index). It stays false only when there genuinely is no usable index.
+// retrieveResult is the startup outcome. reader owns the registered generation
+// (nil when retrieve is disabled); it is deliberately the ONLY handle to the
+// tool, so every caller must register through a wrapper that admits invokes via
+// reader.inflight (readyRetrieve) -- exposing reader.tool raw would let
+// shutdown close the store and feedback service under an active retrieval.
+// line is the positive disclosure to show when retrieve is registered; warns
+// are problems to surface; suppressNotice silences the generic "no index" line
+// whenever a more specific outcome already explains the situation (-no-rag,
+// explicit -rag-db, or an existing-but-disabled auto index). It stays false
+// only when there genuinely is no usable index.
 type retrieveResult struct {
-	tool           agent.Tool
 	reader         *retrievalReader
 	line           string
 	warns          []string
@@ -44,31 +50,27 @@ func enableRetrieve(ctx context.Context, cfg *config.Config, router *provider.Ro
 	}
 
 	if opts.ragDB != "" {
-		reader, feedbackWarn, dec, _, err := buildGatedRetriever(ctx, cfg, router, opts.ragDB, expected, opts.feedbackDB)
+		reader, dec, _, err := buildGatedRetriever(ctx, cfg, router, opts.ragDB, expected, opts.weighter, opts.progressive, opts.recorder)
 		if err != nil {
 			return retrieveResult{warns: []string{"retrieve disabled: " + err.Error()}, suppressNotice: true}
 		}
 		if reader == nil {
 			return retrieveResult{warns: []string{explicitMismatchWarning(opts.ragDB, dec, expected)}, suppressNotice: true}
 		}
-		warns := legacyWarnIfAny(dec)
-		if feedbackWarn != "" {
-			warns = append(warns, feedbackWarn)
-		}
-		return retrieveResult{tool: reader.tool, reader: reader, line: "retrieve: rag-db " + opts.ragDB, suppressNotice: true,
-			warns: warns}
+		return retrieveResult{reader: reader, line: "retrieve: rag-db " + opts.ragDB, suppressNotice: true,
+			warns: legacyWarnIfAny(dec)}
 	}
 
 	// Auto-discovery resolves the atomic pointer first and falls back to the
 	// immutable legacy DB/sidecar pair only when no pointer exists.
 	gen, err := resolveActiveGeneration(ctx, opts.autoDBPath, opts.workspaceID)
 	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
+		if errors.Is(err, errNoActiveGeneration) {
 			return retrieveResult{}
 		}
 		return retrieveResult{warns: []string{"retrieve disabled: " + err.Error()}, suppressNotice: true}
 	}
-	reader, feedbackWarn, dec, stats, err := buildGatedRetriever(ctx, cfg, router, gen.dbPath, expected, opts.feedbackDB)
+	reader, dec, stats, err := buildGatedRetriever(ctx, cfg, router, gen.dbPath, expected, opts.weighter, opts.progressive, opts.recorder)
 	if err != nil {
 		// An index exists but could not be opened/probed: a specific warning
 		// already explains why, so suppress the contradictory generic "no index"
@@ -80,11 +82,7 @@ func enableRetrieve(ctx context.Context, cfg *config.Config, router *provider.Ro
 		// stands alone; suppress the generic "no index" notice.
 		return retrieveResult{warns: []string{autoMismatchWarning(dec, expected)}, suppressNotice: true}
 	}
-	warns := legacyWarnIfAny(dec)
-	if feedbackWarn != "" {
-		warns = append(warns, feedbackWarn)
-	}
-	return retrieveResult{tool: reader.tool, reader: reader, line: autoGenerationLine(gen.metadata, stats), warns: warns}
+	return retrieveResult{reader: reader, line: autoGenerationLine(gen.metadata, stats), warns: legacyWarnIfAny(dec)}
 }
 
 // expectedVectorSpaces returns the provider-qualified vsid set the current

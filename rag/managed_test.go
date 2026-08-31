@@ -1,10 +1,12 @@
 package rag
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -247,6 +249,7 @@ func TestManagedSourcesFileRoundTripAndStableReindexID(t *testing.T) {
 		t.Fatalf("IngestFile() error: %v", err)
 	}
 	abs, _ := filepath.Abs(path)
+	abs, _ = filepath.EvalSymlinks(abs)
 	if document.Kind != DocumentKindFile || document.Origin != filepath.Clean(abs) || document.Title != "Guide.MD" {
 		t.Fatalf("document = %#v", document)
 	}
@@ -269,6 +272,84 @@ func TestManagedSourcesFileRoundTripAndStableReindexID(t *testing.T) {
 	chunks := requireManagedChunks(t, store, document.source)
 	if len(chunks) != 1 || chunks[0].Chunk.Content != "second version" {
 		t.Fatalf("reindexed chunks = %#v", chunks)
+	}
+}
+
+func TestManagedSourcesReindexRejectsChangedSymlinkTarget(t *testing.T) {
+	managed, _, store := newManagedTestService(t, &managedTestEmbedder{vectorSpaceID: "test/v1"})
+	ctx := context.Background()
+	dir := t.TempDir()
+	target := filepath.Join(dir, "runbook.md")
+	selected := filepath.Join(dir, "selected.md")
+	secret := filepath.Join(t.TempDir(), "secret.md")
+	if err := os.WriteFile(target, []byte("approved content"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(secret, []byte("host secret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, selected); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+
+	document, err := managed.IngestFile(ctx, selected, DocumentOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolvedTarget, err := filepath.EvalSymlinks(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if document.Origin != resolvedTarget {
+		t.Fatalf("origin = %q, want resolved target %q", document.Origin, resolvedTarget)
+	}
+	if err := os.Remove(target); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(secret, target); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := managed.ReindexDocument(ctx, document.ID); err == nil || !strings.Contains(err.Error(), "symbolic link") {
+		t.Fatalf("ReindexDocument() error = %v, want changed-symlink rejection", err)
+	}
+	chunks := requireManagedChunks(t, store, document.source)
+	if len(chunks) != 1 || chunks[0].Chunk.Content != "approved content" {
+		t.Fatalf("chunks after rejected reindex = %#v", chunks)
+	}
+}
+
+func TestManagedSourcesLegacySymlinkOriginRequiresReAdd(t *testing.T) {
+	managed, _, store := newManagedTestService(t, &managedTestEmbedder{vectorSpaceID: "test/v1"})
+	ctx := context.Background()
+	dir := t.TempDir()
+	targetDir := filepath.Join(dir, "target")
+	selectedDir := filepath.Join(dir, "selected")
+	if err := os.Mkdir(targetDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(targetDir, "runbook.md")
+	if err := os.WriteFile(target, []byte("approved content"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(targetDir, selectedDir); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	document, err := managed.IngestFile(ctx, target, DocumentOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacyOrigin := filepath.Join(selectedDir, filepath.Base(target))
+	if _, err := store.DB().Exec(`UPDATE managed_documents SET origin = ? WHERE id = ?`, legacyOrigin, document.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := managed.ReindexDocument(ctx, document.ID); err == nil || !strings.Contains(err.Error(), "remove and re-add") {
+		t.Fatalf("legacy symlink origin error = %v, want explicit migration guidance", err)
+	}
+	chunks := requireManagedChunks(t, store, document.source)
+	if len(chunks) != 1 || chunks[0].Chunk.Content != "approved content" {
+		t.Fatalf("chunks after rejected legacy reindex = %#v", chunks)
 	}
 }
 
@@ -825,6 +906,94 @@ func TestManagedListDocumentsWorksOnReadOnlyStore(t *testing.T) {
 	}
 }
 
+func TestManagedListDocumentsReconcilesReadOnlyStoreInMemory(t *testing.T) {
+	tests := []struct {
+		name          string
+		mutate        func(*SQLiteStore, string, Document) error
+		wantState     DocumentState
+		wantFreshness DocumentFreshness
+		wantError     bool
+	}{
+		{
+			name: "changed origin is stale",
+			mutate: func(_ *SQLiteStore, origin string, _ Document) error {
+				return os.WriteFile(origin, []byte("changed after ingest"), 0o600)
+			},
+			wantState:     DocumentStateIndexed,
+			wantFreshness: DocumentFreshnessStale,
+		},
+		{
+			name: "missing chunks are failed",
+			mutate: func(store *SQLiteStore, _ string, document Document) error {
+				_, err := store.db.Exec(`DELETE FROM chunks WHERE source = ?`, document.source)
+				return err
+			},
+			wantState:     DocumentStateFailed,
+			wantFreshness: DocumentFreshnessStale,
+			wantError:     true,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			dir := t.TempDir()
+			dbPath := filepath.Join(dir, "rag.db")
+			origin := filepath.Join(dir, "note.txt")
+			if err := os.WriteFile(origin, []byte("original content"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			store, err := NewSQLiteStore(dbPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			managed, _ := newManagedTestServiceOnStore(t, &managedTestEmbedder{vectorSpaceID: "test/v1"}, store)
+			document, err := managed.IngestFile(ctx, origin, DocumentOptions{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := tc.mutate(store, origin, document); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := store.db.Exec(`PRAGMA wal_checkpoint(TRUNCATE)`); err != nil {
+				t.Fatal(err)
+			}
+			if err := store.Close(); err != nil {
+				t.Fatal(err)
+			}
+			before, err := os.ReadFile(dbPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			readOnly, err := OpenSQLiteStoreReadOnly(dbPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = readOnly.Close() })
+			readOnlyManaged, err := NewManagedSources(nil, readOnly)
+			if err != nil {
+				t.Fatal(err)
+			}
+			documents, err := readOnlyManaged.ListDocuments(ctx, DocumentFilter{})
+			if err != nil {
+				t.Fatalf("ListDocuments(read-only) error: %v", err)
+			}
+			if len(documents) != 1 || documents[0].ID != document.ID ||
+				documents[0].State != tc.wantState ||
+				documents[0].Freshness != tc.wantFreshness ||
+				(tc.wantError != (documents[0].LastError != "")) {
+				t.Fatalf("read-only document = %#v", documents)
+			}
+			after, err := os.ReadFile(dbPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(after, before) {
+				t.Fatal("read-only reconciliation changed the database")
+			}
+		})
+	}
+}
+
 func TestManagedListExposesUpdatedAtForOrphanedIndexing(t *testing.T) {
 	managed, _, store := newManagedTestService(t, &managedTestEmbedder{vectorSpaceID: "test/v1"})
 	ctx := context.Background()
@@ -1231,6 +1400,10 @@ func TestManagedSourcesIngestFileValidatesOptionsBeforeRead(t *testing.T) {
 
 func TestManagedSourcesIngestFilePropagatesCancellationToRead(t *testing.T) {
 	managed, _, _ := newManagedTestService(t, &managedTestEmbedder{vectorSpaceID: "test/v1"})
+	path := filepath.Join(t.TempDir(), "document.md")
+	if err := os.WriteFile(path, []byte("content"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	started := make(chan struct{})
 	managed.readFile = func(ctx context.Context, _ string) ([]byte, error) {
 		close(started)
@@ -1240,7 +1413,7 @@ func TestManagedSourcesIngestFilePropagatesCancellationToRead(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() {
-		_, err := managed.IngestFile(ctx, "document.md", DocumentOptions{})
+		_, err := managed.IngestFile(ctx, path, DocumentOptions{})
 		done <- err
 	}()
 	<-started
@@ -1259,6 +1432,78 @@ func TestReadManagedRegularFileRejectsCanceledContext(t *testing.T) {
 	cancel()
 	if _, err := readManagedRegularFile(ctx, path); !errors.Is(err, context.Canceled) {
 		t.Fatalf("readManagedRegularFile() error = %v, want context.Canceled", err)
+	}
+}
+
+func TestOpenManagedFileRejectsLeafSwapAfterInspection(t *testing.T) {
+	dir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "approved.md")
+	original := filepath.Join(dir, "approved-original.md")
+	attacker := filepath.Join(dir, "attacker.md")
+	if err := os.WriteFile(path, []byte("approved"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(attacker, []byte("attacker"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	f, err := openManagedFileWith(path, func(root *os.Root, name string) (*os.File, error) {
+		if err := os.Rename(path, original); err != nil {
+			return nil, err
+		}
+		if err := os.Rename(attacker, path); err != nil {
+			return nil, err
+		}
+		return openManagedFileAt(root, name)
+	})
+	if f != nil {
+		_ = f.Close()
+	}
+	if err == nil || !strings.Contains(err.Error(), "changed during open") {
+		t.Fatalf("leaf swap after inspection error = %v, want identity mismatch", err)
+	}
+}
+
+func TestOpenManagedFileKeepsInspectedAncestor(t *testing.T) {
+	rootDir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	approvedDir := filepath.Join(rootDir, "approved")
+	movedDir := filepath.Join(rootDir, "moved")
+	if err := os.Mkdir(approvedDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(approvedDir, "document.md")
+	if err := os.WriteFile(path, []byte("approved"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	f, err := openManagedFileWith(path, func(root *os.Root, name string) (*os.File, error) {
+		if err := os.Rename(approvedDir, movedDir); err != nil {
+			return nil, err
+		}
+		if err := os.Mkdir(approvedDir, 0o700); err != nil {
+			return nil, err
+		}
+		if err := os.WriteFile(path, []byte("attacker"), 0o600); err != nil {
+			return nil, err
+		}
+		return openManagedFileAt(root, name)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = f.Close() }()
+	data, err := io.ReadAll(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "approved" {
+		t.Fatalf("opened replacement content %q", data)
 	}
 }
 
@@ -2004,5 +2249,116 @@ func TestManagedSourcesValidationAndNilIndexer(t *testing.T) {
 	}
 	if _, err := NewManagedSources(nil, nil); err == nil {
 		t.Fatal("NewManagedSources(nil, nil) succeeded")
+	}
+}
+
+func TestDeleteDocumentRemovesSourceSummary(t *testing.T) {
+	ctx := context.Background()
+	m, _, store := newManagedTestService(t, &managedTestEmbedder{vectorSpaceID: "test/v1"})
+
+	doc, err := m.IngestText(ctx, "note.md", "# Hello\nBody.", DocumentOptions{})
+	if err != nil {
+		t.Fatalf("ingest: %v", err)
+	}
+	row := validSummary()
+	row.Source = doc.source // unexported field is visible: same package
+	if err := store.UpsertSourceSummary(ctx, row); err != nil {
+		t.Fatalf("upsert summary: %v", err)
+	}
+
+	if err := m.DeleteDocument(ctx, doc.ID); err != nil {
+		t.Fatalf("delete document: %v", err)
+	}
+	got, err := store.SourceSummaryBatch(ctx, []string{doc.source})
+	if err != nil {
+		t.Fatalf("summary batch: %v", err)
+	}
+	if len(got) != 0 {
+		t.Fatal("managed delete must remove the summary in the same transaction")
+	}
+}
+
+func TestDeleteDocumentRollbackKeepsSummary(t *testing.T) {
+	// A failing delete transaction must leave BOTH the registry row and the
+	// summary row intact (spec section 14 lifecycle rollback case).
+	ctx := context.Background()
+	m, _, store := newManagedTestService(t, &managedTestEmbedder{vectorSpaceID: "test/v1"})
+
+	doc, err := m.IngestText(ctx, "keep.md", "# Keep\nBody.", DocumentOptions{})
+	if err != nil {
+		t.Fatalf("ingest: %v", err)
+	}
+	row := validSummary()
+	row.Source = doc.source
+	if err := store.UpsertSourceSummary(ctx, row); err != nil {
+		t.Fatalf("upsert summary: %v", err)
+	}
+	// Force the transaction to abort at the registry delete.
+	if _, err := store.db.Exec(`
+		CREATE TRIGGER fail_managed_delete BEFORE DELETE ON managed_documents
+		BEGIN SELECT RAISE(ABORT, 'induced failure'); END`); err != nil {
+		t.Fatalf("create trigger: %v", err)
+	}
+	if err := m.DeleteDocument(ctx, doc.ID); err == nil {
+		t.Fatal("delete must fail under the abort trigger")
+	}
+	if _, err := store.db.Exec(`DROP TRIGGER fail_managed_delete`); err != nil {
+		t.Fatalf("drop trigger: %v", err)
+	}
+	got, err := store.SourceSummaryBatch(ctx, []string{doc.source})
+	if err != nil {
+		t.Fatalf("summary batch: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatal("rolled-back delete must keep the summary row")
+	}
+}
+
+// TestDeleteDocumentSummaryFailureRollsBackRegistry pins that the summary
+// delete is part of the SAME transaction as the registry/chunks delete, not
+// merely sequenced after it. TestDeleteDocumentRollbackKeepsSummary aborts at
+// the managed_documents delete, so it cannot tell a summary delete inside the
+// transaction apart from one issued separately right after a successful
+// commit -- in both shapes that trigger fires before either delete runs.
+// Failing here instead, at the summary delete, is the distinguishing case: if
+// the summary delete were hoisted out of the transaction (e.g. executed via
+// m.store.db after tx.Commit()), the registry row and chunks would already be
+// committed by the time this failure surfaces, leaving a deleted document
+// with an orphaned summary that nothing reclaims.
+func TestDeleteDocumentSummaryFailureRollsBackRegistry(t *testing.T) {
+	ctx := context.Background()
+	m, _, store := newManagedTestService(t, &managedTestEmbedder{vectorSpaceID: "test/v1"})
+
+	doc, err := m.IngestText(ctx, "atomic.md", "# Atomic\nBody.", DocumentOptions{})
+	if err != nil {
+		t.Fatalf("ingest: %v", err)
+	}
+	row := validSummary()
+	row.Source = doc.source
+	if err := store.UpsertSourceSummary(ctx, row); err != nil {
+		t.Fatalf("upsert summary: %v", err)
+	}
+	// Force the transaction to abort at the summary delete, not the registry delete.
+	if _, err := store.db.Exec(`
+		CREATE TRIGGER fail_summary_delete BEFORE DELETE ON source_summaries
+		BEGIN SELECT RAISE(ABORT, 'induced failure'); END`); err != nil {
+		t.Fatalf("create trigger: %v", err)
+	}
+	if err := m.DeleteDocument(ctx, doc.ID); err == nil {
+		t.Fatal("delete must fail under the abort trigger")
+	}
+	if _, err := store.db.Exec(`DROP TRIGGER fail_summary_delete`); err != nil {
+		t.Fatalf("drop trigger: %v", err)
+	}
+
+	var registryCount int
+	if err := store.db.QueryRow(`SELECT COUNT(*) FROM managed_documents WHERE id = ?`, doc.ID).Scan(&registryCount); err != nil {
+		t.Fatalf("count managed_documents: %v", err)
+	}
+	if registryCount != 1 {
+		t.Fatal("summary-delete failure must roll back the registry row too (same transaction)")
+	}
+	if len(requireManagedChunks(t, store, doc.source)) == 0 {
+		t.Fatal("summary-delete failure must roll back the chunk delete too (same transaction)")
 	}
 }

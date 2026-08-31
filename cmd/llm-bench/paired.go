@@ -261,11 +261,11 @@ func newCellKey(trace, model string) cellKey {
 	return cellKey{trace: normalizeModelSelector(trace), model: modelKey(model)}
 }
 
-// modelKey canonicalizes a model selector for cell matching: strip the bench
-// provider prefix then lowercase/trim, so a label stored bare ("qwen3:8b")
-// matches a prefixed artifact ("ollama/qwen3:8b"). Mirrors manualScorerKey.
+// modelKey canonicalizes a model selector for cell matching: strip only the
+// default Ollama prefix then lowercase/trim, leaving explicit other providers
+// distinct. Mirrors manualScorerKey.
 func modelKey(model string) string {
-	return normalizeModelSelector(modelSelectorWithoutBenchProvider(model))
+	return canonicalCandidateModelKey(model)
 }
 
 // computePairedAnalysis turns matched labels (+ stale labels + the full

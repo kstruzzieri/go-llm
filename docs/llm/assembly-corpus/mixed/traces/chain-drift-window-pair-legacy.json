@@ -1,0 +1,71 @@
+{
+  "id": "chain-drift-window-pair-legacy",
+  "source": "assembly-corpus-mixed",
+  "captured_at": "0001-01-01T00:00:00Z",
+  "system": "You are the driftwatch assistant. driftwatch is a self-hosted telemetry ingest and alerting daemon. Answer using only the provided conversation, memory records, and retrieved context.",
+  "tools": null,
+  "turns": [
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "id": "c3",
+          "name": "fixture_echo",
+          "arguments": {
+            "content": "detector eval log from the staging replay, pasted verbatim:\n2025-07-26T04:12:00Z eval begin series=418 replayed_hours=6\n2025-07-26T04:12:09Z scored series=418 flagged=11 suppressed=2\n2025-07-26T04:12:09Z top offsets: srs-2214 z=4.1 srs-1808 z=3.7 srs-0917 z=3.2\n2025-07-26T04:12:10Z eval end verdict=clean drift_alerts_emitted=9\neval note: the 10-minute prototype window was abandoned after the false-positive storm in the pilot; nothing shipped with it and the replay harness no longer accepts it.\n"
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "content": "detector eval log from the staging replay, pasted verbatim:\n2025-07-26T04:12:00Z eval begin series=418 replayed_hours=6\n2025-07-26T04:12:09Z scored series=418 flagged=11 suppressed=2\n2025-07-26T04:12:09Z top offsets: srs-2214 z=4.1 srs-1808 z=3.7 srs-0917 z=3.2\n2025-07-26T04:12:10Z eval end verdict=clean drift_alerts_emitted=9\neval note: the 10-minute prototype window was abandoned after the false-positive storm in the pilot; nothing shipped with it and the replay harness no longer accepts it.\n",
+      "tool_call_id": "c3",
+      "name": "fixture_echo"
+    },
+    {
+      "role": "user",
+      "content": "What window does the drift detector average over, and which tier's alerts does the drift gate cover right now?"
+    }
+  ],
+  "golden": {
+    "tool_calls": null,
+    "final_answer_criteria": "BOTH halves required: the drift detector averages over a 35 minute window, AND the drift gate currently covers warm-tier alerts only. A missing half caps the score at 0.5; a stated but incorrect half scores 0. The abandoned 10-minute prototype window named in the pasted eval log scores 0 for the window half. An answer presenting both the correct and a competing value without committing to one scores 0."
+  },
+  "assembly_eval": {
+    "pair_id": "chain-drift-window-pair",
+    "mode": "legacy",
+    "candidate_ids": [
+      "1a36eda838822a60678d5140c450145650dc1a53ed10e6286b7e3013405c4547",
+      "aeace8320573fad839aee3e159a80485e3f60da9134cfc6fd6bb9545d2cd33a8",
+      "b499e2b237cd8058a1726a6c8b50dad3ac662bb1d33609f9a45dceb6db897dba",
+      "rec-drift-gate",
+      "rec-eval-replays",
+      "rec-pilot-review",
+      "rec-review-section",
+      "rec-series-owners",
+      "rec-suppression-log"
+    ],
+    "estimated_prompt_tokens": 199,
+    "state_digest": "24dc3db36b677a4e900eed0a379eefaf318d1cbfe5ad78d3212b009300824cc8",
+    "subjects": [
+      "(c1|memory|rec-drift-gate)",
+      "(c1|memory|rec-eval-replays)",
+      "(c1|memory|rec-pilot-review)",
+      "(c1|memory|rec-review-section)",
+      "(c1|memory|rec-series-owners)",
+      "(c1|memory|rec-suppression-log)",
+      "(c2|rag|internal/drift/detector.go)",
+      "(c2|rag|internal/drift/route.go)",
+      "(c2|rag|docs/drift-alerts.md)"
+    ],
+    "stratum": "chain_retention",
+    "answer_home": "join",
+    "scenario_family": "drift-window-chain",
+    "budget": 1125,
+    "raw_state_tokens": 1875,
+    "pressure_level": "ok",
+    "shed_messages": 8,
+    "shed_bytes": 6345
+  }
+}

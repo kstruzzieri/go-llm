@@ -76,14 +76,14 @@ func (t *ReadFile) Invoke(ctx context.Context, raw json.RawMessage) (agent.ToolR
 
 	f, err := t.ws.openRegularFile(args.Path)
 	if err != nil {
-		return errResult(err.Error()), nil
+		return errResult(toolErrMessage(err)), nil
 	}
 	defer func() { _ = f.Close() }()
 
 	// Read at most readFileMaxBytes+1 so we can detect overflow.
 	buf, err := io.ReadAll(io.LimitReader(f, int64(readFileMaxBytes+1)))
 	if err != nil {
-		return errResult(err.Error()), nil
+		return errResult(toolErrMessage(err)), nil
 	}
 	sniff := buf
 	if len(sniff) > binarySniffBytes {

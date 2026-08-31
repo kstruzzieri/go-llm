@@ -158,10 +158,21 @@ func (m *mrMockFingerprintStore) SaveFailure(_ context.Context, _, _, _, _ strin
 type mrRecordingFingerprintProber struct {
 	detectCalls int
 	chatCalls   int
+	purposes    []string
 }
 
-func (m *mrRecordingFingerprintProber) DetectKind(context.Context, string) (*fingerprint.KindDetection, error) {
+func (m *mrRecordingFingerprintProber) recordPurpose(ctx context.Context) {
+	cap := capabilityFromContext(ctx)
+	if cap == nil {
+		m.purposes = append(m.purposes, "")
+		return
+	}
+	m.purposes = append(m.purposes, cap.purpose)
+}
+
+func (m *mrRecordingFingerprintProber) DetectKind(ctx context.Context, _ string) (*fingerprint.KindDetection, error) {
 	m.detectCalls++
+	m.recordPurpose(ctx)
 	return &fingerprint.KindDetection{
 		Kind:         fingerprint.ModelKindChat,
 		Source:       "capabilities",
@@ -169,8 +180,9 @@ func (m *mrRecordingFingerprintProber) DetectKind(context.Context, string) (*fin
 	}, nil
 }
 
-func (m *mrRecordingFingerprintProber) ProbeChat(context.Context, string, any) (*fingerprint.ChatMetrics, error) {
+func (m *mrRecordingFingerprintProber) ProbeChat(ctx context.Context, _ string, _ any) (*fingerprint.ChatMetrics, error) {
 	m.chatCalls++
+	m.recordPurpose(ctx)
 	return &fingerprint.ChatMetrics{TokensPerSecond: 42}, nil
 }
 
@@ -260,6 +272,133 @@ func TestModelRegistry_Lookup_CatalogMatch(t *testing.T) {
 	}
 }
 
+func TestModelRegistry_ContextWindowOverrideWins(t *testing.T) {
+	ctx := context.Background()
+	prov := &mrMockProvider{name: "test", models: []ModelInfo{{Name: "model", ContextWindow: 65_536}}}
+	mr, err := NewModelRegistry(&mrMockProviderRegistry{providers: map[string]Provider{"test": prov}}, nil)
+	if err != nil {
+		t.Fatalf("NewModelRegistry: %v", err)
+	}
+	key := ModelKey{Provider: "test", Model: "model"}
+	mr.SetContextWindowOverride(func(got ModelKey) int {
+		if got == key {
+			return 32_768
+		}
+		return 0
+	})
+	profile, err := mr.Lookup(ctx, key)
+	if err != nil {
+		t.Fatalf("Lookup: %v", err)
+	}
+	if profile.ContextWindow != 32_768 {
+		t.Fatalf("ContextWindow = %d, want configured override 32768", profile.ContextWindow)
+	}
+}
+
+func TestModelRegistry_FingerprintContextWindowFallback(t *testing.T) {
+	ctx := context.Background()
+	key := ModelKey{Provider: "test", Model: "unknown-model"}
+	prov := &mrMockProvider{name: "test", models: []ModelInfo{{Name: key.Model}}}
+	store := newMrMockFingerprintStore()
+	store.profiles["test\x00unknown-model"] = &fingerprint.Profile{
+		BackendID: key.Provider, ModelName: key.Model, ModelDigest: key.String(),
+		ProfileVersion: fingerprint.CurrentProfileVersion, EffectiveContext: 24_576,
+	}
+	prober := &mrRecordingFingerprintProber{}
+	mr, err := NewModelRegistry(
+		&mrMockProviderRegistry{providers: map[string]Provider{"test": prov}},
+		store,
+		WithReadOnlyFingerprintProfiles(func(context.Context, ModelKey, *ModelInfo, Provider) (*FingerprintProberSpec, error) {
+			return &FingerprintProberSpec{Prober: prober, ModelDigest: key.String()}, nil
+		}),
+	)
+	if err != nil {
+		t.Fatalf("NewModelRegistry: %v", err)
+	}
+	profile, err := mr.Lookup(ctx, key)
+	if err != nil {
+		t.Fatalf("Lookup: %v", err)
+	}
+	if profile.ContextWindow != 24_576 {
+		t.Fatalf("ContextWindow = %d, want fingerprint fallback 24576", profile.ContextWindow)
+	}
+	if prober.detectCalls != 0 || prober.chatCalls != 0 {
+		t.Fatalf("read-only fingerprint path probed: detect=%d chat=%d", prober.detectCalls, prober.chatCalls)
+	}
+}
+
+// TestModelRegistry_ReadOnlyFingerprintFailsClosedOnFactoryError pins the
+// conservative direction of the staleness gate: when the read-only factory
+// cannot establish the model's identity (error -> empty digest), even a
+// stored profile that would validate against the current digest is dropped
+// rather than trusted unvalidated.
+func TestModelRegistry_ReadOnlyFingerprintFailsClosedOnFactoryError(t *testing.T) {
+	ctx := context.Background()
+	key := ModelKey{Provider: "test", Model: "unknown-model"}
+	prov := &mrMockProvider{name: "test", models: []ModelInfo{{Name: key.Model}}}
+	store := newMrMockFingerprintStore()
+	store.profiles["test\x00unknown-model"] = &fingerprint.Profile{
+		BackendID: key.Provider, ModelName: key.Model, ModelDigest: key.String(),
+		ProfileVersion: fingerprint.CurrentProfileVersion, EffectiveContext: 24_576,
+	}
+	mr, err := NewModelRegistry(
+		&mrMockProviderRegistry{providers: map[string]Provider{"test": prov}},
+		store,
+		WithReadOnlyFingerprintProfiles(func(context.Context, ModelKey, *ModelInfo, Provider) (*FingerprintProberSpec, error) {
+			return nil, errors.New("identity unavailable")
+		}),
+	)
+	if err != nil {
+		t.Fatalf("NewModelRegistry: %v", err)
+	}
+	profile, err := mr.Lookup(ctx, key)
+	if err != nil {
+		t.Fatalf("Lookup: %v", err)
+	}
+	if profile.ContextWindow != 0 {
+		t.Fatalf("ContextWindow = %d, want 0 (unvalidated profile must be dropped)", profile.ContextWindow)
+	}
+}
+
+func TestModelRegistry_ReadOnlyFingerprintRejectsStaleProfile(t *testing.T) {
+	ctx := context.Background()
+	key := ModelKey{Provider: "test", Model: "unknown-model"}
+	for _, tt := range []struct {
+		name    string
+		digest  string
+		version int
+	}{
+		{name: "digest mismatch", digest: "old-digest", version: fingerprint.CurrentProfileVersion},
+		{name: "obsolete profile version", digest: key.String(), version: fingerprint.CurrentProfileVersion - 1},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			prov := &mrMockProvider{name: "test", models: []ModelInfo{{Name: key.Model}}}
+			store := newMrMockFingerprintStore()
+			store.profiles["test\x00unknown-model"] = &fingerprint.Profile{
+				BackendID: key.Provider, ModelName: key.Model, ModelDigest: tt.digest,
+				ProfileVersion: tt.version, EffectiveContext: 65_536,
+			}
+			mr, err := NewModelRegistry(
+				&mrMockProviderRegistry{providers: map[string]Provider{"test": prov}},
+				store,
+				WithReadOnlyFingerprintProfiles(func(context.Context, ModelKey, *ModelInfo, Provider) (*FingerprintProberSpec, error) {
+					return &FingerprintProberSpec{Prober: &mrRecordingFingerprintProber{}, ModelDigest: key.String()}, nil
+				}),
+			)
+			if err != nil {
+				t.Fatalf("NewModelRegistry: %v", err)
+			}
+			profile, err := mr.Lookup(ctx, key)
+			if err != nil {
+				t.Fatalf("Lookup: %v", err)
+			}
+			if profile.ContextWindow != 0 {
+				t.Fatalf("ContextWindow = %d, want stale fingerprint ignored", profile.ContextWindow)
+			}
+		})
+	}
+}
+
 func TestModelRegistry_Lookup_RunsFingerprintProberFactory(t *testing.T) {
 	ctx := context.Background()
 
@@ -327,6 +466,76 @@ func TestModelRegistry_Lookup_RunsFingerprintProberFactory(t *testing.T) {
 	}
 	if saved.GenerationTokensPerSecond != 42 {
 		t.Fatalf("saved GenerationTokensPerSecond = %v, want 42", saved.GenerationTokensPerSecond)
+	}
+}
+
+func TestModelRegistryFullFingerprintBindsCapabilityProbePurpose(t *testing.T) {
+	key := ModelKey{Provider: "test", Model: "model"}
+	dest := mustDest(t, key.Provider, "https://provider.example.com")
+	gate := installTestGate(t,
+		DestinationEdge{Purpose: DestinationPurposeModelRefresh, Destination: dest},
+		DestinationEdge{Purpose: DestinationPurposeCapabilityProbe, Destination: dest},
+	)
+	ctx, err := gate.Bind(context.Background(), DestinationPurposeModelRefresh, key.Provider)
+	if err != nil {
+		t.Fatal(err)
+	}
+	prober := &mrRecordingFingerprintProber{}
+	prov := &mrMockProvider{name: key.Provider, models: []ModelInfo{{Name: key.Model}}}
+	mr, err := NewModelRegistry(
+		&mrMockProviderRegistry{providers: map[string]Provider{key.Provider: prov}},
+		newMrMockFingerprintStore(),
+		WithModelRegistryDestinationGate(gate),
+		WithFingerprintProberFactory(func(context.Context, ModelKey, *ModelInfo, Provider) (*FingerprintProberSpec, error) {
+			return &FingerprintProberSpec{Prober: prober, ModelDigest: "digest"}, nil
+		}),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := mr.Lookup(ctx, key); err != nil {
+		t.Fatalf("Lookup(%v) error = %v, want nil", key, err)
+	}
+	if len(prober.purposes) == 0 {
+		t.Fatal("Lookup() fingerprint prober calls = 0, want at least 1")
+	}
+	for i, got := range prober.purposes {
+		if got != DestinationPurposeCapabilityProbe {
+			t.Errorf("fingerprint prober call %d purpose = %q, want %q", i, got, DestinationPurposeCapabilityProbe)
+		}
+	}
+}
+
+func TestModelRegistryFullFingerprintRequiresCapabilityProbeEdge(t *testing.T) {
+	key := ModelKey{Provider: "test", Model: "model"}
+	dest := mustDest(t, key.Provider, "https://provider.example.com")
+	gate := installTestGate(t,
+		DestinationEdge{Purpose: DestinationPurposeModelRefresh, Destination: dest},
+	)
+	ctx, err := gate.Bind(context.Background(), DestinationPurposeModelRefresh, key.Provider)
+	if err != nil {
+		t.Fatal(err)
+	}
+	prober := &mrRecordingFingerprintProber{}
+	prov := &mrMockProvider{name: key.Provider, models: []ModelInfo{{Name: key.Model}}}
+	mr, err := NewModelRegistry(
+		&mrMockProviderRegistry{providers: map[string]Provider{key.Provider: prov}},
+		newMrMockFingerprintStore(),
+		WithModelRegistryDestinationGate(gate),
+		WithFingerprintProberFactory(func(context.Context, ModelKey, *ModelInfo, Provider) (*FingerprintProberSpec, error) {
+			return &FingerprintProberSpec{Prober: prober, ModelDigest: "digest"}, nil
+		}),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := mr.Lookup(ctx, key); err != nil {
+		t.Fatalf("Lookup(%v) error = %v, want nil", key, err)
+	}
+	if prober.detectCalls != 0 || prober.chatCalls != 0 {
+		t.Errorf("fingerprint prober calls without capability-probe edge = detect %d, chat %d; want 0, 0", prober.detectCalls, prober.chatCalls)
 	}
 }
 

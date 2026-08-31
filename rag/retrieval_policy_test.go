@@ -1102,6 +1102,7 @@ func TestRetrieveRequestCapsOverReturnedCandidatesBeforeFreshness(t *testing.T) 
 	ctx := context.Background()
 	managed, _, store := newManagedTestService(t, &managedTestEmbedder{vectorSpaceID: "test/v1"})
 	paths := []string{filepath.Join(t.TempDir(), "first.md"), filepath.Join(t.TempDir(), "outside.md")}
+	origins := make([]string, 0, len(paths))
 	results := make([]ScoredResult, 0, len(paths))
 	for _, path := range paths {
 		if err := os.WriteFile(path, []byte(path), 0o600); err != nil {
@@ -1111,6 +1112,7 @@ func TestRetrieveRequestCapsOverReturnedCandidatesBeforeFreshness(t *testing.T) 
 		if err != nil {
 			t.Fatal(err)
 		}
+		origins = append(origins, document.Origin)
 		results = append(results, ScoredResult{SearchResult: SearchResult{Chunk: requireManagedChunks(t, store, document.source)[0].Chunk}})
 	}
 
@@ -1123,8 +1125,8 @@ func TestRetrieveRequestCapsOverReturnedCandidatesBeforeFreshness(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(got) != 1 || len(freshness) != 1 || !slices.Equal(reads, paths[:1]) {
-		t.Fatalf("results/freshness/reads = %d/%d/%v, want 1/1/%v", len(got), len(freshness), reads, paths[:1])
+	if len(got) != 1 || len(freshness) != 1 || !slices.Equal(reads, origins[:1]) {
+		t.Fatalf("results/freshness/reads = %d/%d/%v, want 1/1/%v", len(got), len(freshness), reads, origins[:1])
 	}
 }
 

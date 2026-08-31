@@ -1,0 +1,109 @@
+{
+  "id": "chain-merge-fanin-lock-mixed",
+  "source": "assembly-corpus-mixed",
+  "captured_at": "0001-01-01T00:00:00Z",
+  "system": "You are the driftwatch assistant. driftwatch is a self-hosted telemetry ingest and alerting daemon. Answer using only the provided conversation, memory records, and retrieved context.",
+  "tools": null,
+  "turns": [
+    {
+      "role": "user",
+      "content": "Storage sync ran long; before the merge notes, two cleanups. The compaction dashboard's cohort panel still charts the retired staging shelf; drop that series before the review screenshots go out."
+    },
+    {
+      "role": "assistant",
+      "content": "Dropped the retired shelf's series from the cohort panel and regenerated the panel snapshot the notes embed; only the live shelves chart now."
+    },
+    {
+      "role": "user",
+      "content": "Also fold in a line on why the lock ceiling exists at all; reviewers keep asking and the wiki paragraph everyone links is marked stale."
+    },
+    {
+      "role": "assistant",
+      "content": "Will do; the lock section will state the ceiling, the reason it exists, and where raises get reviewed, all sourced rather than folklore."
+    },
+    {
+      "role": "user",
+      "content": "And the merge notes template lost its decisions-up-top layout in the last edit; restore it before this round or the reviewers will complain about it again."
+    },
+    {
+      "role": "assistant",
+      "content": "Restored the decisions-up-top layout and locked the template section so casual edits cannot reflow it again; the template changelog records the lock."
+    },
+    {
+      "role": "user",
+      "content": "One decision did land at the sync: merge lock trips page the storage rotation, not the ingest rotation. Put that in the merge notes verbatim, then pull the lock source so the ceiling row quotes code."
+    },
+    {
+      "role": "assistant",
+      "content": "Noted the paging split in the merge notes; pulling the compactor lock source next so the ceiling row cites the constant rather than the wiki."
+    },
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "id": "c1",
+          "name": "retrieve",
+          "arguments": {
+            "query": "compactor merge pass lock ceiling",
+            "k": 3
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "content": "### source: \"internal/compact/mergelock.go\"\npurpose: Merge tier-lock ceiling constant and the yielding lock wrapper.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n--- source: \"internal/compact/mergelock.go\" (lines 1-16, similarity: 1.00) ---\n1| package compact\n2| \n3| import \"time\"\n4| \n5| // mergeLockMax bounds how long one merge cohort may hold a tier\n6| // lock. A cohort that would exceed it yields and re-queues its\n7| // remaining segments, so readers never starve behind a long merge.\n8| // The bound is a code constant: it protects reader latency, which\n9| // is not a per-deploy preference.\n10| const mergeLockMax = 25 * time.Second\n11| \n12| func (m *Merger) withLock(tier string, fn func() error) error {\n13| \tlease := m.locks.acquire(tier, mergeLockMax)\n14| \tdefer lease.release()\n15| \treturn fn()\n16| }\n\n### source: \"internal/compact/requeue.go\"\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nnote: metadata overview (summary omitted: budget)\n\n### source: \"docs/merge-ops.md\"\nlanguage: markdown\nindexed: 2025-07-27T00:00:00Z\nnote: metadata overview (summary omitted: budget)\n",
+      "tool_call_id": "c1",
+      "name": "retrieve"
+    },
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "id": "c2",
+          "name": "fixture_echo",
+          "arguments": {
+            "content": "one merge pass from the staging shelf, pasted verbatim:\n2025-07-26T03:10:11Z merge pass begin tier=warm cohorts=3\n2025-07-26T03:10:14Z merged s0412+s0415+s0419+s0421+s0424+s0430 out=m1120 held_lock=2.9s\n2025-07-26T03:10:18Z merged s0433+s0437+s0440+s0444+s0447+s0451 out=m1121 held_lock=3.4s\n2025-07-26T03:10:22Z merged s0455+s0458+s0462+s0463+s0468+s0471 out=m1122 held_lock=3.1s\n2025-07-26T03:10:22Z merge pass end merged=18 requeued=0 yields=0\nlog note: the 8-second ceiling a few runbooks still quote is the pre-refresh wiki figure; it was retired and the wiki page carries a stale banner now.\n"
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "content": "one merge pass from the staging shelf, pasted verbatim:\n2025-07-26T03:10:11Z merge pass begin tier=warm cohorts=3\n2025-07-26T03:10:14Z merged s0412+s0415+s0419+s0421+s0424+s0430 out=m1120 held_lock=2.9s\n2025-07-26T03:10:18Z merged s0433+s0437+s0440+s0444+s0447+s0451 out=m1121 held_lock=3.4s\n2025-07-26T03:10:22Z merged s0455+s0458+s0462+s0463+s0468+s0471 out=m1122 held_lock=3.1s\n2025-07-26T03:10:22Z merge pass end merged=18 requeued=0 yields=0\nlog note: the 8-second ceiling a few runbooks still quote is the pre-refresh wiki figure; it was retired and the wiki page carries a stale banner now.\n",
+      "tool_call_id": "c2",
+      "name": "fixture_echo"
+    },
+    {
+      "role": "user",
+      "content": "What is the merge pass lock ceiling, and which rotation gets paged when it trips?"
+    }
+  ],
+  "golden": {
+    "tool_calls": null,
+    "final_answer_criteria": "BOTH halves required: the merge pass lock ceiling is 25 seconds, AND a lock trip pages the storage rotation. A missing half caps the score at 0.5; a stated but incorrect half scores 0. The retired 8-second wiki figure scores 0 for the ceiling half. An answer presenting both the correct and a competing value without committing to one scores 0."
+  },
+  "assembly_eval": {
+    "pair_id": "chain-merge-fanin-lock",
+    "mode": "mixed",
+    "candidate_ids": [
+      "015b4f81a81d27c1ce4d107234a233fe65576d13825fdf3dda8b3bc0b99d44d2",
+      "26ba31084bfad57cf2e7d58f1de43d3eb8c08470f938ad7ad4598b1e44afb454",
+      "c8a0f1acf9755edca0285a59bac302aa31aebef4993f78896157b99807d5c029"
+    ],
+    "estimated_prompt_tokens": 816,
+    "state_digest": "f658453bc60dacea9f6e2f6c3b09946dfe2b747bec3aab9f2639b408f4a8912d",
+    "subjects": [
+      "(c1|rag|internal/compact/mergelock.go)",
+      "(c1|rag|internal/compact/requeue.go)",
+      "(c1|rag|docs/merge-ops.md)"
+    ],
+    "stratum": "chain_retention",
+    "answer_home": "join",
+    "scenario_family": "merge-fanin-chain",
+    "budget": 1014,
+    "raw_state_tokens": 1690,
+    "pressure_level": "critical",
+    "shed_bytes": 3080
+  }
+}

@@ -33,6 +33,12 @@ type ToolSpec struct {
 type ToolPlan struct {
 	Effect  Effect
 	Preview string
+	// ApprovalKey is an opaque structural identity for the planned action,
+	// used by consumers to key session-scoped approval grants (#341, #346).
+	// It is derived only from structural inputs (never from Preview, which
+	// stays presentation-only), and empty means the action is ungrantable:
+	// consumers must always prompt.
+	ApprovalKey string
 }
 
 // ToolResult is the outcome fed back as a tool-role observation.
@@ -42,6 +48,11 @@ type ToolResult struct {
 	Preview   string
 	Truncated bool
 	Attrib    *RetrievalAttribution // set by retrieval-style tools; copied to Message.Attrib
+	// Context is the optional structured payload for mixed assembly (#331).
+	// Content remains the canonical fallback for legacy mode and persisted
+	// transcripts; in mixed mode the set's groups replace it in the
+	// model-visible anchor. Nil for ordinary tools.
+	Context *ContextSet
 	// RouteOutcome is set by tools that make their own model call (e.g.
 	// delegate_code) so the run can record which model authored the result.
 	// Nil for ordinary tools. Display-only fields (Preview) and the model-facing
@@ -100,6 +111,26 @@ const (
 // Approver gates a tool call before invocation.
 type Approver interface {
 	Approve(ctx context.Context, call provider.ToolCall, preview string) (bool, error)
+}
+
+// ApprovalDecision is the structured outcome of a keyed approval (#341).
+// A struct, not a bool, so #346's background-exec consumers can extend the
+// outcome without breaking KeyedApprover again.
+type ApprovalDecision struct {
+	// Approved reports whether the call may run.
+	Approved bool
+	// ViaGrant is true when the approval decision came from a pre-existing
+	// session grant and no prompt was shown. Dispatch records it as
+	// AutoApproved on the run record and the tool-result event.
+	ViaGrant bool
+}
+
+// KeyedApprover is optionally implemented by an Approver that understands
+// structural approval keys (#341). When implemented, the runtime calls
+// ApproveKeyed with the plan's ApprovalKey — "" when the tool is not a
+// PlanningTool or emitted no key — instead of Approve.
+type KeyedApprover interface {
+	ApproveKeyed(ctx context.Context, call provider.ToolCall, preview, approvalKey string) (ApprovalDecision, error)
 }
 
 func needsApproval(p ApprovalPolicy, c EffectClass) bool {

@@ -1,0 +1,314 @@
+package config
+
+import (
+	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"os"
+	"path/filepath"
+	"reflect"
+	"strings"
+	"testing"
+)
+
+func writeTempConfig(t *testing.T, body string) string {
+	t.Helper()
+	p := filepath.Join(t.TempDir(), "models.json")
+	if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
+const docTestConfig = `{
+  "providers": {
+    "local": {"base_url": "http://localhost:8080", "api_format": "openai-compat", "api_key": "${DOC_TEST_KEY}"}
+  },
+  "models": {
+    "agent": {"name": "m1", "provider": "local", "type": "dense"}
+  },
+  "defaults": {"chat": "agent", "agent": "agent"}
+}`
+
+func loadTestDoc(t *testing.T, body string) *Document {
+	t.Helper()
+	t.Setenv("DOC_TEST_KEY", "sekret-value")
+	d, err := LoadDocument(writeTempConfig(t, body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return d
+}
+
+func TestLoadDocumentOriginAndRevision(t *testing.T) {
+	t.Setenv("DOC_TEST_KEY", "v")
+	p := writeTempConfig(t, docTestConfig)
+	d, err := LoadDocument(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := d.Origin(); got.Source != OriginExplicit || got.Path != p {
+		t.Fatalf("origin = %+v", got)
+	}
+	sum := sha256.Sum256([]byte(docTestConfig))
+	if got, want := d.Revision(), hex.EncodeToString(sum[:]); got != want {
+		t.Fatalf("revision = %q, want %q", got, want)
+	}
+}
+
+// Effective is expanded; authored keeps the literal; Config() is a copy.
+func TestLoadDocumentSecretsSplitAndCopy(t *testing.T) {
+	d := loadTestDoc(t, docTestConfig)
+	if got := d.Config().Providers["local"].APIKey; got != "sekret-value" {
+		t.Fatalf("effective api_key = %q, want expanded", got)
+	}
+	if got := d.authored.Providers["local"].APIKey; got != "${DOC_TEST_KEY}" {
+		t.Fatalf("authored api_key = %q, want literal", got)
+	}
+	c := d.Config()
+	c.Defaults["chat"] = "hacked"
+	if d.Config().Defaults["chat"] != "agent" {
+		t.Fatal("Config() aliases document state")
+	}
+}
+
+func TestLoadDocumentMissingFile(t *testing.T) {
+	if _, err := LoadDocument(filepath.Join(t.TempDir(), "absent.json")); err == nil {
+		t.Fatal("want error")
+	}
+}
+
+// Invalid config (defaults naming a missing role) must fail exactly like Load.
+func TestLoadDocumentValidatesEffective(t *testing.T) {
+	t.Setenv("DOC_TEST_KEY", "v")
+	bad := `{"providers":{},"models":{},"defaults":{"chat":"ghost"}}`
+	if _, err := LoadDocument(writeTempConfig(t, bad)); err == nil {
+		t.Fatal("want validation error")
+	}
+}
+
+func TestDefaultDocumentEnvOverride(t *testing.T) {
+	t.Setenv("DOC_TEST_KEY", "v")
+	p := writeTempConfig(t, docTestConfig)
+	t.Setenv("GO_LLM_CONFIG", p)
+	d, err := DefaultDocument()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := d.Origin(); got.Source != OriginEnvOverride || got.Path != p {
+		t.Fatalf("origin = %+v", got)
+	}
+}
+
+func TestDefaultDocumentEnvSetButEmpty(t *testing.T) {
+	t.Setenv("GO_LLM_CONFIG", "")
+	if _, err := DefaultDocument(); err == nil {
+		t.Fatal("want hard error for set-but-empty GO_LLM_CONFIG (Default parity)")
+	}
+}
+
+// Working-dir winner, and env-beats-working-dir precedence. The user-config
+// and legacy winners depend on os.UserConfigDir/os.UserHomeDir, which are not
+// env-fakeable on darwin; they stay covered by discoverConfigPath being the
+// single implementation shared with Default() and Default's existing tests.
+func TestDefaultDocumentWorkingDirAndPrecedence(t *testing.T) {
+	t.Setenv("DOC_TEST_KEY", "v")
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "models.json"), []byte(docTestConfig), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(dir)
+	// Unset GO_LLM_CONFIG for the working-dir leg, restoring whatever the
+	// invoking shell had (it is commonly exported on dev machines).
+	if prev, ok := os.LookupEnv("GO_LLM_CONFIG"); ok {
+		t.Cleanup(func() { _ = os.Setenv("GO_LLM_CONFIG", prev) })
+	}
+	if err := os.Unsetenv("GO_LLM_CONFIG"); err != nil {
+		t.Fatal(err)
+	}
+	d, err := DefaultDocument()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d.Origin().Source != OriginWorkingDir {
+		t.Fatalf("origin = %+v, want working-dir", d.Origin())
+	}
+	// env override beats the working-dir file
+	p2 := writeTempConfig(t, docTestConfig)
+	t.Setenv("GO_LLM_CONFIG", p2)
+	d2, err := DefaultDocument()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d2.Origin().Source != OriginEnvOverride || d2.Origin().Path != p2 {
+		t.Fatalf("precedence: origin = %+v, want env-override %s", d2.Origin(), p2)
+	}
+}
+
+// Public byte constructor must not alias caller memory.
+func TestNewDocumentFromBytesCopiesInput(t *testing.T) {
+	t.Setenv("DOC_TEST_KEY", "v")
+	buf := []byte(docTestConfig)
+	d, err := NewDocumentFromBytes(buf, Origin{Source: OriginProfile, Path: "embedded:test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rev := d.Revision()
+	for i := range buf {
+		buf[i] = 'X'
+	}
+	if d.Revision() != rev {
+		t.Fatal("revision derived from aliased memory")
+	}
+	d.mu.Lock()
+	raw := string(d.rawBytes)
+	d.mu.Unlock()
+	if strings.Contains(raw, "XXXX") {
+		t.Fatal("document aliases caller-mutated memory")
+	}
+}
+
+// Parity with LoadDocument modulo origin.
+func TestNewDocumentFromBytesParity(t *testing.T) {
+	t.Setenv("DOC_TEST_KEY", "v")
+	p := writeTempConfig(t, docTestConfig)
+	viaFile, err := LoadDocument(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	viaBytes, err := NewDocumentFromBytes([]byte(docTestConfig), Origin{Source: OriginProfile})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if viaFile.Revision() != viaBytes.Revision() {
+		t.Fatal("revision differs by construction path")
+	}
+	if !reflect.DeepEqual(viaFile.authored, viaBytes.authored) {
+		t.Fatal("authored differs by construction path")
+	}
+}
+
+const docNestedConfig = `{
+  "providers": {"local": {"base_url": "http://localhost:8080"}},
+  "models": {
+    "agent": {"name": "m1", "provider": "local", "type": "dense",
+      "fallbacks": ["fast"],
+      "options": {"temperature": 0.2},
+      "think_tags": {"open": "<think>", "close": "</think>"}},
+    "fast": {"name": "m2", "provider": "local", "type": "dense"}
+  },
+  "defaults": {"agent": "agent"}
+}`
+
+// Nested pointers/slices must not alias across clones.
+func TestDocumentConfigDeepCloneNested(t *testing.T) {
+	t.Setenv("DOC_TEST_KEY", "v")
+	d, err := LoadDocument(writeTempConfig(t, docNestedConfig))
+	if err != nil {
+		t.Fatal(err)
+	}
+	c1 := d.Config()
+	m := c1.Models["agent"]
+	*m.Options.Temperature = 0.9
+	m.Fallbacks[0] = "hacked"
+	m.ThinkTags.Open = "hacked"
+	c2 := d.Config()
+	m2 := c2.Models["agent"]
+	if *m2.Options.Temperature != 0.2 || m2.Fallbacks[0] != "fast" || m2.ThinkTags.Open != "<think>" {
+		t.Fatalf("nested aliasing: %+v", m2)
+	}
+}
+
+// Concurrent readers must be race-free (run under -race).
+func TestDocumentConcurrentAccess(t *testing.T) {
+	d := loadTestDoc(t, docTestConfig)
+	done := make(chan struct{})
+	for i := 0; i < 8; i++ {
+		go func() {
+			defer func() { done <- struct{}{} }()
+			for j := 0; j < 100; j++ {
+				_ = d.Config()
+				_ = d.Revision()
+				_ = d.Origin()
+			}
+		}()
+	}
+	for i := 0; i < 8; i++ {
+		<-done
+	}
+}
+
+func TestParseDocumentInjectedEnv(t *testing.T) {
+	t.Setenv("INJECTED_KEY", "")
+	base := validBaseConfigMap()
+	base["providers"].(map[string]any)["p"].(map[string]any)["api_key"] = "${INJECTED_KEY}"
+	raw, _ := json.Marshal(base)
+
+	// Ambient var is set-but-empty, which expansion treats as unset.
+	snap := map[string]string{"INJECTED_KEY": "sekret"}
+	lookup := func(k string) (string, bool) { v, ok := snap[k]; return v, ok }
+	d, err := ParseDocument(raw, Origin{Source: OriginExplicit}, DocumentOptions{LookupEnv: lookup})
+	if err != nil {
+		t.Fatalf("injected env must satisfy the ref: %v", err)
+	}
+	if got := d.Config().Providers["p"].APIKey; got != "sekret" {
+		t.Fatal("injected value was not used") // never print credential material
+	}
+
+	// Same bytes without injection fail key_reference_unavailable.
+	_, err = ParseDocument(raw, Origin{Source: OriginExplicit}, DocumentOptions{})
+	assertDiag(t, err, CodeKeyReferenceUnavailable, SubjectProvider, "p")
+}
+
+func TestParseDocumentCopiesInput(t *testing.T) {
+	base := validBaseConfigMap()
+	raw, _ := json.Marshal(base)
+	want := append([]byte(nil), raw...)
+	d, err := ParseDocument(raw, Origin{Source: OriginExplicit}, DocumentOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := range raw {
+		raw[i] = 'X'
+	}
+	d.mu.Lock()
+	got := append([]byte(nil), d.rawBytes...)
+	d.mu.Unlock()
+	if !bytes.Equal(got, want) {
+		t.Fatal("caller slice mutation leaked into document")
+	}
+}
+
+func TestInjectedEnvStableAcrossMutations(t *testing.T) {
+	t.Setenv("SNAP_KEY", "ambient-before")
+	base := validBaseConfigMap()
+	base["providers"].(map[string]any)["p"].(map[string]any)["api_key"] = "${SNAP_KEY}"
+	raw, _ := json.Marshal(base)
+	snap := map[string]string{"SNAP_KEY": "v1"}
+	d, err := ParseDocument(raw, Origin{Source: OriginExplicit},
+		DocumentOptions{LookupEnv: func(k string) (string, bool) { v, ok := snap[k]; return v, ok }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("SNAP_KEY", "") // unrelated ambient change cannot affect snapshot host
+	if err := d.BindUseCase("chat", "agent"); err != nil {
+		t.Fatalf("stable injected snapshot changed across mutation: %v", err)
+	}
+	if got := d.Config().Providers["p"].APIKey; got != "v1" {
+		t.Fatal("snapshot value did not survive mutation")
+	}
+}
+
+func TestNilLookupRechecksAmbientOnMutation(t *testing.T) {
+	t.Setenv("AMBIENT_KEY", "present")
+	base := validBaseConfigMap()
+	base["providers"].(map[string]any)["p"].(map[string]any)["api_key"] = "${AMBIENT_KEY}"
+	raw, _ := json.Marshal(base)
+	d, err := ParseDocument(raw, Origin{Source: OriginExplicit}, DocumentOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("AMBIENT_KEY", "")
+	assertDiag(t, d.BindUseCase("chat", "agent"), CodeKeyReferenceUnavailable, SubjectProvider, "p")
+}

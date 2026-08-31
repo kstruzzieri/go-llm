@@ -24,6 +24,8 @@ docs/llm/traces/first-accepted-run/*
 .DS_Store
 /.worktrees/
 /golem
+!/golem/
+!/golem/**
 
 # GoReleaser build output
 /dist/

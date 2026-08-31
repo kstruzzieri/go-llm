@@ -1,0 +1,27 @@
+{
+  "id": "co-retry-backoff-progressive",
+  "source": "assembly-corpus",
+  "captured_at": "0001-01-01T00:00:00Z",
+  "system": "Answer the question using ONLY the provided context. If the context does not contain the answer, say so explicitly.",
+  "tools": null,
+  "turns": [
+    {
+      "role": "user",
+      "content": "Context:\n### source: \"internal/relay/retry.go\"\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nnote: metadata overview (no summary: missing)\n--- source: \"internal/relay/retry.go\" (lines 1-27, similarity: 1.00) ---\n1| package relay\n2| \n3| import (\n4| \t\"math/rand\"\n5| \t\"time\"\n6| )\n7| \n8| // retryDelay computes the wait before the next delivery attempt.\n9| // Growth is exponential with full jitter; the ceiling keeps a flapping\n10| // endpoint from pushing waits past what operators expect.\n11| const (\n12| \tbaseDelay  = 400 * time.Millisecond\n13| \tmaxDelay   = 2 * time.Minute\n14| \tgrowFactor = 2.0\n15| )\n16| \n17| func retryDelay(attempt int) time.Duration {\n18| \td := baseDelay\n19| \tfor i := 0; i \u003c attempt \u0026\u0026 d \u003c maxDelay; i++ {\n20| \t\td = time.Duration(float64(d) * growFactor)\n21| \t}\n22| \tif d \u003e maxDelay {\n23| \t\td = maxDelay\n24| \t}\n25| \t// Full jitter: uniform in [0, d].\n26| \treturn time.Duration(rand.Int63n(int64(d) + 1))\n27| }\n\n### source: \"internal/relay/fanout.go\"\npurpose: Delivery worker pool that drains the queue and posts events to subscribers.\noverview: fanout.go starts the delivery workers, claims batches from the queue, posts each event to its subscriber endpoint, and reschedules failures using the retry pacing helpers. It owns worker lifecycle and shutdown draining, not the pacing constants themselves.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n\n### source: \"docs/operations.md\"\nlanguage: markdown\nindexed: 2025-07-27T00:00:00Z\nnote: metadata overview (no summary: missing)\n\n\nQuestion: What base delay does beacond use before the first webhook delivery retry?"
+    }
+  ],
+  "golden": {
+    "tool_calls": null,
+    "final_answer_criteria": "States the base retry delay is 400 milliseconds (400ms), as set by baseDelay in internal/relay/retry.go. Answers derived only from summaries or paths cannot contain this value."
+  },
+  "assembly_eval": {
+    "pair_id": "co-retry-backoff",
+    "mode": "progressive",
+    "candidate_ids": [
+      "d0f5e1dcc104ba962315855e153d5def50cc7f0c3588e56fe0e6f85084b4991e",
+      "7bd603dd16774ac195449851669f89133812e7615af3bc319baff9e67a0d4b18",
+      "d89110773bc5f989b982305bd88c0fa56a1a41f0f567a900b3b71518751c822d"
+    ],
+    "estimated_prompt_tokens": 436
+  }
+}

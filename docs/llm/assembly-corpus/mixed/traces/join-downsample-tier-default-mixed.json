@@ -1,0 +1,125 @@
+{
+  "id": "join-downsample-tier-default-mixed",
+  "source": "assembly-corpus-mixed",
+  "captured_at": "0001-01-01T00:00:00Z",
+  "system": "You are the driftwatch assistant. driftwatch is a self-hosted telemetry ingest and alerting daemon. Answer using only the provided conversation, memory records, and retrieved context.",
+  "tools": null,
+  "turns": [
+    {
+      "role": "user",
+      "content": "The alert latency complaint from the review also needs a proper writeup: evaluation cost spiked whenever rules crossed tier boundaries mid-window, and the perf folks want the mechanism documented before we tune anything else. Attach the reproduction query set to the writeup too, since the next tuning pass will want to replay the exact spike shapes rather than reconstruct them from the flame graphs and guesswork."
+    },
+    {
+      "role": "assistant",
+      "content": "Wrote up the boundary-crossing mechanism with flame graphs from the spike windows attached; the writeup is linked from the review notes. Attached the reproduction queries with their window parameters, and the writeup's appendix explains how to replay them against a staging store so the next pass starts from evidence."
+    },
+    {
+      "role": "user",
+      "content": "Board hygiene: the rule-evaluation panels were cloned from the dashboard template and still carry dashboard-oriented legends, which confuses every new responder who reads them during a page. Keep one legacy-legend panel screenshotted in the change thread for reference, because two responders learned the old legends by muscle memory and the transition note should show both forms side by side."
+    },
+    {
+      "role": "assistant",
+      "content": "Rebuilt the rule-evaluation panels on the alerting template with evaluation-oriented legends; the storage rotation reviewed them and signed off. The change thread carries a side-by-side of old and new legends with the mapping annotated, and both responders confirmed the new form reads correctly during a live page."
+    },
+    {
+      "role": "user",
+      "content": "The compaction overrun alarm needs its threshold revisited too; it fired twice during normal Sunday load and both pages were shrugged, which is how alarm fatigue starts. Document the threshold's tuning window in the alarm comment as well, so the next person who sees a Sunday fire knows which quarter of data the threshold was tuned against before they start second-guessing it."
+    },
+    {
+      "role": "assistant",
+      "content": "Retuned the overrun threshold against the last quarter of Sunday runs and both shrugged pages would not have fired under it; the alarm carries the tuning rationale in its comment now. The alarm comment now names the tuning window and links the analysis, so a future Sunday fire starts from the tuning context instead of from suspicion."
+    },
+    {
+      "role": "user",
+      "content": "And the export lease metric the downsample pass depends on should surface on the alerting board as well, since a wedged lease eventually becomes an alerting problem when raw drill-downs go missing. Set the lease alert's threshold from the pass skip rule's actual constant rather than a copied number, because the two drifting apart would recreate exactly the silent mismatch class we keep finding this month."
+    },
+    {
+      "role": "assistant",
+      "content": "Surfaced the lease age metric on the alerting board with a threshold matching the pass skip rule; wedged leases will page before drill-downs degrade. Wired the alert threshold to read the skip rule's constant directly at rule generation time, so the two values cannot drift apart without the generator failing loudly."
+    },
+    {
+      "role": "user",
+      "content": "Query routing decision is final from the perf review then: alert queries pin to the 1m tier so evaluation cost stays flat, and dashboards keep their own default."
+    },
+    {
+      "role": "assistant",
+      "content": "Applied: alert queries pin to the 1m tier across the rule fleet, and the evaluation cost graphs are annotated with the switch."
+    },
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "id": "c1",
+          "name": "retrieve",
+          "arguments": {
+            "query": "rollup tier query routing",
+            "k": 3
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "content": "### source: \"internal/store/query.go\"\npurpose: Query tier routing: caller pins honored, ladder resolution otherwise.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n--- source: \"internal/store/query.go\" (lines 1-13, similarity: 1.00) ---\n1| package store\n2| \n3| // route picks the tier a query reads. Callers may pin a tier through\n4| // their query config; unpinned queries resolve through the ladder to\n5| // the coarsest tier meeting the window's resolution floor. Pins exist\n6| // for callers whose cost must stay flat across window sizes, and the\n7| // pin is honored even when the ladder would choose coarser.\n8| func (s *Store) route(q query) tier {\n9| \tif q.pinnedTier != \"\" {\n10| \t\treturn s.ladder.byName(q.pinnedTier)\n11| \t}\n12| \treturn s.ladder.resolve(q.window)\n13| }\n\n### source: \"internal/store/compact.go\"\npurpose: Rollup compaction: small-file merges on an operations-owned schedule.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n\n### source: \"docs/tiers.md\"\npurpose: Tier guide: ladder routing, flat-cost pins, ops-scheduled compaction.\noverview: tiers.md explains ladder-based query routing with caller pins for flat-cost paths, and compaction as an operations-scheduled maintenance task balanced against the export window.\nlanguage: markdown\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n",
+      "tool_call_id": "c1",
+      "name": "retrieve"
+    },
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "id": "c2",
+          "name": "agent_memory_search",
+          "arguments": {
+            "query": ""
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "content": "rec-board-panels · working · created:2025-07-27 · updated:2025-07-27 · scope:session · ns: · src: · storage board owns the compaction panels; alerts fire on overrun only\nrec-compact-slot · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src: · rollup compaction runs Sundays at 03:40, after the export window clears\nrec-sheet-slot · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src: · the sizing sheet's Saturday compaction slot was scrapped before rollout",
+      "tool_call_id": "c2",
+      "name": "agent_memory_search"
+    },
+    {
+      "role": "user",
+      "content": "Perf review follow-up needs both facts: which tier do alert queries pin to, and when does rollup compaction run?"
+    }
+  ],
+  "golden": {
+    "tool_calls": null,
+    "final_answer_criteria": "BOTH halves required: alert queries pin to the 1m tier, AND rollup compaction runs Sundays at 03:40. A missing half caps the score at 0.5; a stated but incorrect half scores 0. An answer giving the scrapped Saturday compaction slot scores 0. An answer presenting both the correct and a competing value without committing to one scores 0."
+  },
+  "assembly_eval": {
+    "pair_id": "join-downsample-tier-default",
+    "mode": "mixed",
+    "candidate_ids": [
+      "8128bf713400610bf79a1fb96fb5c74c4b1e696b7744866645659b4519d3484b",
+      "acdfd196baab9db96b87cc48307bbffc8eada65cd38d6e6b3550c2b2b51920d0",
+      "f5b89b4d48245e2aecab564e7fc954f17dceb63f76d17fbb3d51f5205e782597",
+      "rec-board-panels",
+      "rec-compact-slot",
+      "rec-sheet-slot"
+    ],
+    "estimated_prompt_tokens": 1361,
+    "state_digest": "00190f6ed5910b52b2cc4b244d7e8e1b28d3c9d2660e7e7a7d265ded2c12ce1e",
+    "subjects": [
+      "(c1|rag|internal/store/query.go)",
+      "(c1|rag|internal/store/compact.go)",
+      "(c1|rag|docs/tiers.md)",
+      "(c2|memory|rec-board-panels)",
+      "(c2|memory|rec-compact-slot)",
+      "(c2|memory|rec-sheet-slot)"
+    ],
+    "stratum": "cross_domain_join",
+    "answer_home": "join",
+    "scenario_family": "downsample-tier-join",
+    "budget": 1410,
+    "raw_state_tokens": 2350,
+    "pressure_level": "critical",
+    "shed_messages": 2,
+    "shed_bytes": 3407,
+    "omitted_subjects": 1
+  }
+}

@@ -1,6 +1,9 @@
 package agent
 
-import "context"
+import (
+	"context"
+	"math"
+)
 
 // TokenBudget is the input-token budget available to the State messages
 // (system + transcript), already net of tool-schema tokens. Thresholds carries
@@ -35,28 +38,55 @@ func (rc RecencyCompactor) estimate(s string) int {
 	if rc.Estimate != nil {
 		return rc.Estimate(s)
 	}
-	return (len(s) + 3) / 4
+	if s == "" {
+		return 0
+	}
+	return 1 + (len(s)-1)/4
 }
 
 func (rc RecencyCompactor) messageCost(m Message) int {
-	n := rc.estimate(m.Content)
-	for _, tc := range m.ToolCalls {
-		n += rc.estimate(tc.ID)
-		n += rc.estimate(tc.Type)
-		n += rc.estimate(tc.Function.Name)
-		n += rc.estimate(string(tc.Function.Arguments))
-	}
-	n += rc.estimate(m.ToolName)
-	n += rc.estimate(m.ToolCallID)
+	n, _ := rc.checkedMessageCost(m)
 	return n
 }
 
+func (rc RecencyCompactor) checkedMessageCost(m Message) (int, bool) {
+	n := rc.estimate(m.Content)
+	add := func(cost int) bool {
+		var ok bool
+		n, ok = checkedTokenAdd(n, cost)
+		return ok
+	}
+	for _, tc := range m.ToolCalls {
+		if !add(rc.estimate(tc.ID)) || !add(rc.estimate(tc.Type)) ||
+			!add(rc.estimate(tc.Function.Name)) || !add(rc.estimate(string(tc.Function.Arguments))) {
+			return n, false
+		}
+	}
+	if !add(rc.estimate(m.ToolName)) || !add(rc.estimate(m.ToolCallID)) {
+		return n, false
+	}
+	return n, true
+}
+
 func (rc RecencyCompactor) total(st State) int {
+	n, _ := rc.checkedTotal(st)
+	return n
+}
+
+func (rc RecencyCompactor) checkedTotal(st State) (int, bool) {
 	n := rc.estimate(st.System)
 	for _, m := range st.Messages {
-		n += rc.messageCost(m)
+		cost, costOK := rc.checkedMessageCost(m)
+		if !costOK {
+			return cost, false
+		}
+		var ok bool
+		n, ok = checkedTokenAdd(n, cost)
+		if !ok {
+			return n, false
+		}
 	}
-	return n
+	return n, true
 }
 
 type compactionGroupKind int
@@ -70,10 +100,11 @@ const (
 )
 
 type compactionGroup struct {
-	msgs   []Message
-	tokens int
-	kind   compactionGroupKind
-	drop   bool
+	msgs     []Message
+	tokens   int
+	kind     compactionGroupKind
+	drop     bool
+	overflow bool
 }
 
 // pairableExchange reports whether msgs[i] is a plain Elastic user turn
@@ -151,13 +182,22 @@ func (rc RecencyCompactor) groups(st State) []compactionGroup {
 			end = i + 1 // evict the user->assistant exchange atomically
 		}
 		tokens := 0
+		overflow := false
 		for _, m := range st.Messages[i : end+1] {
-			tokens += rc.messageCost(m)
+			cost, costOK := rc.checkedMessageCost(m)
+			var addOK bool
+			tokens, addOK = checkedTokenAdd(tokens, cost)
+			if !costOK || !addOK {
+				overflow = true
+				tokens = int(^uint(0) >> 1)
+				break
+			}
 		}
 		out = append(out, compactionGroup{
-			msgs:   st.Messages[i : end+1],
-			tokens: tokens,
-			kind:   classifyGroup(st.Messages, i, end, firstPinned),
+			msgs:     st.Messages[i : end+1],
+			tokens:   tokens,
+			kind:     classifyGroup(st.Messages, i, end, firstPinned),
+			overflow: overflow,
 		})
 		i = end + 1
 	}
@@ -165,22 +205,31 @@ func (rc RecencyCompactor) groups(st State) []compactionGroup {
 }
 
 func (rc RecencyCompactor) Compact(_ context.Context, st State, b TokenBudget) (State, CompactionReport, error) {
-	before := rc.total(st)
+	before, ok := rc.checkedTotal(st)
+	if !ok {
+		return st, CompactionReport{Strategy: "recency", TokensBefore: before, TokensAfter: before}, ErrContextExhausted
+	}
 	if before <= b.Input {
 		return st, CompactionReport{Strategy: "recency", TokensBefore: before, TokensAfter: before}, nil
 	}
 
 	groups := rc.groups(st)
+	for _, g := range groups {
+		if g.overflow {
+			return st, CompactionReport{Strategy: "recency", TokensBefore: before, TokensAfter: math.MaxInt}, ErrContextExhausted
+		}
+	}
 	remaining := before
 	dropped := 0
+	arithmeticOK := true
 	dropKind := func(kind compactionGroupKind) {
 		for i := range groups {
-			if remaining <= b.Input {
+			if !arithmeticOK || remaining <= b.Input {
 				return
 			}
 			if groups[i].kind == kind {
 				groups[i].drop = true
-				remaining -= groups[i].tokens
+				remaining, arithmeticOK = checkedTokenSub(remaining, groups[i].tokens)
 				dropped++
 			}
 		}
@@ -193,6 +242,9 @@ func (rc RecencyCompactor) Compact(_ context.Context, st State, b TokenBudget) (
 	dropKind(groupHistory)
 	dropKind(groupCompletedTool)
 	dropKind(groupPlainElastic)
+	if !arithmeticOK {
+		return st, CompactionReport{Strategy: "recency", DroppedCount: dropped, TokensBefore: before, TokensAfter: math.MaxInt}, ErrContextExhausted
+	}
 
 	out := State{System: st.System}
 	for _, g := range groups {
@@ -201,7 +253,10 @@ func (rc RecencyCompactor) Compact(_ context.Context, st State, b TokenBudget) (
 		}
 	}
 
-	after := rc.total(out)
+	after, ok := rc.checkedTotal(out)
+	if !ok {
+		return out, CompactionReport{Strategy: "recency", DroppedCount: dropped, TokensBefore: before, TokensAfter: math.MaxInt}, ErrContextExhausted
+	}
 	return out, CompactionReport{
 		Strategy:     "recency",
 		DroppedCount: dropped,

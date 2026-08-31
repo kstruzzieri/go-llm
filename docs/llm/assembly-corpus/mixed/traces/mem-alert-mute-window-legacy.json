@@ -1,0 +1,65 @@
+{
+  "id": "mem-alert-mute-window-legacy",
+  "source": "assembly-corpus-mixed",
+  "captured_at": "0001-01-01T00:00:00Z",
+  "system": "You are the driftwatch assistant. driftwatch is a self-hosted telemetry ingest and alerting daemon. Answer using only the provided conversation, memory records, and retrieved context.",
+  "tools": null,
+  "turns": [
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "id": "c2",
+          "name": "agent_memory_search",
+          "arguments": {
+            "query": ""
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "content": "rec-mute-draft · semantic · 2025-07-27 · the 90-minute mute figure lived only in the draft runbook; never shipped\nrec-mute-window · semantic · 2025-07-27 · a maintenance mute suppresses alerting for 25 minutes and then re-arms on its own; nobody extended it after the pager consolidation, and stacking mutes back to back was rejected at review - plan maintenance in slices that fit the window\nrec-status-cadence · working · 2025-07-27 · weekly status sweep happens Monday morning; the fleet digest goes out the same afternoon",
+      "tool_call_id": "c2",
+      "name": "agent_memory_search"
+    },
+    {
+      "role": "user",
+      "content": "Edge maintenance starts within the hour - how long does one maintenance mute suppress alerting?"
+    }
+  ],
+  "golden": {
+    "tool_calls": null,
+    "final_answer_criteria": "States a maintenance mute suppresses alerting for 25 minutes before re-arming on its own. Answers that only say the duration comes from the alerting configuration score 0. An answer giving the draft 90-minute figure scores 0. An answer presenting both the correct and a competing value without committing to one scores 0."
+  },
+  "assembly_eval": {
+    "pair_id": "mem-alert-mute-window",
+    "mode": "legacy",
+    "candidate_ids": [
+      "1677df20ac8b4b59b1b9a2435a0eeabaf62c2e22cb3ab79e6548595c6e1081b4",
+      "a06856ff4a8e04ed50716fbd750ecf1bc549244e91b69864b7fd25b4314e6b04",
+      "d0cd93e0e26eb2b44dcb73fe743a4cf25cb858efcfa46013cd38360ef44ff7cb",
+      "rec-mute-draft",
+      "rec-mute-window",
+      "rec-status-cadence"
+    ],
+    "estimated_prompt_tokens": 204,
+    "state_digest": "01c08174ad989cac5ff4a9b31eb2147e5560c0cb230c35bbfbbd810bdc4ae84e",
+    "subjects": [
+      "(c1|rag|docs/maintenance.md)",
+      "(c1|rag|internal/alert/mute.go)",
+      "(c1|rag|internal/alert/router.go)",
+      "(c2|memory|rec-mute-draft)",
+      "(c2|memory|rec-mute-window)",
+      "(c2|memory|rec-status-cadence)"
+    ],
+    "stratum": "memory_only",
+    "answer_home": "memory",
+    "scenario_family": "alert-mute-mem",
+    "budget": 937,
+    "raw_state_tokens": 1562,
+    "pressure_level": "ok",
+    "shed_messages": 10,
+    "shed_bytes": 5002
+  }
+}

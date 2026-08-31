@@ -8,6 +8,7 @@ import (
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"github.com/kstruzzieri/go-llm/configview"
 	"github.com/kstruzzieri/go-llm/provider"
 )
 
@@ -39,6 +40,13 @@ func (s *Server) registerResources() {
 		Description: "Current resolved model configuration",
 		MIMEType:    "application/json",
 	}, s.handleConfigResource)
+
+	s.mcpServer.AddResource(&gomcp.Resource{
+		URI:         "go-llm://configview/v1",
+		Name:        "configview",
+		Description: "Pure configuration snapshot (configview v1 wire contract): bindings, models, providers. No network I/O, no probing.",
+		MIMEType:    "application/json",
+	}, s.handleConfigViewResource)
 
 	s.mcpServer.AddResourceTemplate(&gomcp.ResourceTemplate{
 		URITemplate: "go-llm://models/{name}",
@@ -87,7 +95,13 @@ func marshalResource(uri string, v any) (*gomcp.ReadResourceResult, error) {
 }
 
 func (s *Server) handleHealthResource(ctx context.Context, req *gomcp.ReadResourceRequest) (*gomcp.ReadResourceResult, error) {
-	ollamaOK := s.client.IsAvailable(ctx)
+	ollamaOK, herr := s.checkOllamaAvailable(ctx)
+	if herr != nil {
+		// A denial here cannot happen for an installed generation (the
+		// health edge is always in the manifest); surface it as unavailable
+		// rather than panicking a resource read.
+		ollamaOK = false
+	}
 
 	health := map[string]any{
 		"ollama": map[string]any{
@@ -154,6 +168,27 @@ func (s *Server) handleConfigResource(_ context.Context, req *gomcp.ReadResource
 		"resolved":   resolved,
 	}
 	return marshalResource("go-llm://config", result)
+}
+
+// handleConfigViewResource projects the server's loaded config through
+// configview.Build. Deliberately no Inventory and near-empty Requirements:
+// resource reads are no-network by contract, and MCP's overloaded chat role
+// (chat + generate ops with different shapes) gets NO declared requirement —
+// its candidates stay honestly "unknown" until operation-specific projections
+// exist. Only unambiguous shapes are declared. The origin path stays
+// server-side; Build projects the Source enum only.
+func (s *Server) handleConfigViewResource(_ context.Context, _ *gomcp.ReadResourceRequest) (*gomcp.ReadResourceResult, error) {
+	snap := configview.Build(configview.BuildInput{
+		Doc: configview.DocSnapshot{
+			Config: s.cfg,
+			Origin: s.configOrigin,
+		},
+		Requirements: map[string]provider.Capability{
+			"completion": provider.CapGenerate | provider.CapInsert,
+			"embedding":  provider.CapEmbed,
+		},
+	})
+	return marshalResource("go-llm://configview/v1", snap)
 }
 
 func (s *Server) handleModelDetailResource(ctx context.Context, req *gomcp.ReadResourceRequest) (*gomcp.ReadResourceResult, error) {

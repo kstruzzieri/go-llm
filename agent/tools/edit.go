@@ -64,7 +64,7 @@ func (t *EditFile) computeEdit(args editFileArgs) (before, after []byte, err err
 	}
 	before, err = t.ws.readAll(args.Path)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, toolVisibleError(err)
 	}
 	if len(before) > mutateMaxBytes {
 		return nil, nil, fmt.Errorf("file exceeds size limit")
@@ -116,10 +116,10 @@ func (t *EditFile) Plan(_ context.Context, raw json.RawMessage) (agent.ToolPlan,
 		afterHash:    ContentHash(after),
 		summary:      fmt.Sprintf("edit %s", args.Path),
 	})
-	return agent.ToolPlan{Effect: eff, Preview: unifiedDiff(args.Path, before, after, true)}, nil
+	return agent.ToolPlan{Effect: eff, Preview: unifiedDiff(args.Path, before, after, true), ApprovalKey: WriteClassApprovalKey}, nil
 }
 
-func (t *EditFile) Invoke(_ context.Context, raw json.RawMessage) (agent.ToolResult, error) {
+func (t *EditFile) Invoke(ctx context.Context, raw json.RawMessage) (agent.ToolResult, error) {
 	var args editFileArgs
 	if err := json.Unmarshal(raw, &args); err != nil {
 		return errResult("invalid arguments: " + err.Error()), nil
@@ -141,12 +141,18 @@ func (t *EditFile) Invoke(_ context.Context, raw json.RawMessage) (agent.ToolRes
 	if ContentHash(before) != pp.beforeHash {
 		return errResult("file changed since preview; retry"), nil
 	}
-	if err := t.ws.WriteFileAtomic(pp.path, pp.afterContent); err != nil {
-		return errResult(err.Error()), nil
-	}
-	record(t.j, MutationRecord{
+	rec := MutationRecord{
 		Path: pp.path, PriorContent: pp.priorContent, Existed: true,
 		AfterHash: pp.afterHash, Summary: pp.summary, At: time.Now(),
+	}
+	toolErr, internalErr := runJournaledWrite(ctx, t.j, rec, func() error {
+		return t.ws.WriteFileAtomic(pp.path, pp.afterContent)
 	})
+	if internalErr != nil {
+		return agent.ToolResult{}, internalErr
+	}
+	if toolErr != nil {
+		return errResult(toolVisibleError(toolErr).Error()), nil
+	}
 	return agent.ToolResult{Content: pp.summary, Preview: pp.summary}, nil
 }

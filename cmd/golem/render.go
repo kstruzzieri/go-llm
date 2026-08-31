@@ -14,40 +14,39 @@ import (
 // prints one-line tool-call and tool-result notices, a dim per-step footer, and
 // (via finalFooter) a dim summary after Run.
 type renderer struct {
-	out          io.Writer
+	markdown     *markdownWriter
 	color        bool
 	maxSteps     int
 	now          func() time.Time
 	lastMark     time.Time
 	runStart     time.Time
-	lastNL       bool
 	warnPressure bool // print a one-line context-pressure warning
 	warned       bool // ensures at most one pressure line per run
 	thinkOpen    bool // "[thinking]" header printed for the current step
+	// mixed mirrors ContextManager.Mixed for the run this renderer observes. It
+	// is a constructor PARAMETER rather than a settable field like warnPressure
+	// because forgetting it at a new call site would not fail loudly — it would
+	// silently restore the wrong "(truncated)" marker resultSummary exists to
+	// suppress.
+	mixed bool
 }
 
-func newRenderer(out io.Writer, color bool, maxSteps int, now func() time.Time) *renderer {
+func newRenderer(out io.Writer, color bool, maxSteps int, now func() time.Time, mixed bool) *renderer {
 	if now == nil {
 		now = time.Now
 	}
 	start := now()
-	return &renderer{out: out, color: color, maxSteps: maxSteps, now: now, lastMark: start, runStart: start, lastNL: true}
+	return &renderer{markdown: newMarkdownWriter(out, color), color: color, maxSteps: maxSteps, now: now, lastMark: start, runStart: start, mixed: mixed}
 }
 
 func (r *renderer) OnToken(_ context.Context, e agent.TokenEvent) error {
 	if r.thinkOpen {
 		r.thinkOpen = false
-		if !r.lastNL {
-			if _, err := io.WriteString(r.out, "\n"); err != nil {
-				return err
-			}
-			r.lastNL = true
+		if err := r.markdown.BreakLine(); err != nil {
+			return err
 		}
 	}
-	_, err := io.WriteString(r.out, e.Content)
-	if err == nil && e.Content != "" {
-		r.lastNL = strings.HasSuffix(e.Content, "\n")
-	}
+	_, err := io.WriteString(r.markdown, e.Content)
 	return err
 }
 
@@ -55,17 +54,9 @@ func (r *renderer) OnToolCall(_ context.Context, e agent.ToolCallEvent) error {
 	// Some tools take no arguments; omit the trailing space when args are empty
 	// so the line reads "> name" rather than "> name ".
 	if args := string(e.Call.Function.Arguments); args != "" {
-		_, err := fmt.Fprintf(r.out, "\n> %s %s\n", e.Call.Function.Name, args)
-		if err == nil {
-			r.lastNL = true
-		}
-		return err
+		return r.writeRaw(fmt.Sprintf("\n> %s %s\n", e.Call.Function.Name, args))
 	}
-	_, err := fmt.Fprintf(r.out, "\n> %s\n", e.Call.Function.Name)
-	if err == nil {
-		r.lastNL = true
-	}
-	return err
+	return r.writeRaw(fmt.Sprintf("\n> %s\n", e.Call.Function.Name))
 }
 
 // OnThinking streams reasoning deltas dim, under a one-per-step "[thinking]"
@@ -73,22 +64,15 @@ func (r *renderer) OnToolCall(_ context.Context, e agent.ToolCallEvent) error {
 // text so non-TTY logs stay parseable.
 func (r *renderer) OnThinking(_ context.Context, e agent.ThinkingEvent) error {
 	if !r.thinkOpen {
-		if !r.lastNL {
-			if _, err := io.WriteString(r.out, "\n"); err != nil {
-				return err
-			}
+		if err := r.markdown.BreakLine(); err != nil {
+			return err
 		}
-		if _, err := io.WriteString(r.out, r.dim("[thinking]")+"\n"); err != nil {
+		if err := r.writeRaw(r.dim("[thinking]") + "\n"); err != nil {
 			return err
 		}
 		r.thinkOpen = true
-		r.lastNL = true
 	}
-	_, err := io.WriteString(r.out, r.dim(e.Content))
-	if err == nil && e.Content != "" {
-		r.lastNL = strings.HasSuffix(e.Content, "\n")
-	}
-	return err
+	return r.writeDimContent(e.Content)
 }
 
 func (r *renderer) OnStep(_ context.Context, e agent.StepEvent) error {
@@ -105,10 +89,10 @@ func (r *renderer) OnStep(_ context.Context, e agent.StepEvent) error {
 	return r.writeDim(line)
 }
 
-func (r *renderer) finalFooter(res agent.Result) {
-	total := r.now().Sub(r.runStart).Seconds()
+func (r *renderer) finalFooter(res agent.Result, elapsed time.Duration) {
+	_ = r.markdown.Finish()
 	line := fmt.Sprintf("done · %s · %.1fs · %d tok",
-		plural(len(res.Steps), "step", "steps"), total, res.Usage.TotalTokens)
+		plural(len(res.Steps), "step", "steps"), elapsed.Seconds(), res.Usage.TotalTokens)
 	if res.StopReason != agent.Completed {
 		// Double space (not " · ") deliberately sets the stop reason apart from
 		// the metric fields above it — it is a status suffix, not another metric.
@@ -118,16 +102,32 @@ func (r *renderer) finalFooter(res agent.Result) {
 }
 
 func (r *renderer) writeDim(line string) error {
-	if !r.lastNL {
-		if _, err := io.WriteString(r.out, "\n"); err != nil {
-			return err
-		}
+	if err := r.markdown.BreakLine(); err != nil {
+		return err
 	}
-	_, err := io.WriteString(r.out, r.dim(line)+"\n")
-	if err == nil {
-		r.lastNL = true
-	}
+	return r.writeRaw(r.dim(line) + "\n")
+}
+
+func (r *renderer) writeRaw(s string) error {
+	_, err := r.markdown.WriteRaw([]byte(s))
 	return err
+}
+
+func (r *renderer) writeDimContent(s string) error {
+	if !r.color {
+		return r.writeRaw(s)
+	}
+	_, err := r.markdown.WriteStyled("\x1b[2m", []byte(s))
+	return err
+}
+
+func (r *renderer) breakLine() error { return r.markdown.BreakLine() }
+
+func (r *renderer) rawWriter() io.Writer { return markdownRawWriter{markdown: r.markdown} }
+
+func (r *renderer) finish() error {
+	r.thinkOpen = false
+	return r.markdown.Finish()
 }
 
 // dim wraps s in the SGR faint sequence when color is on; otherwise s as-is.
@@ -143,16 +143,10 @@ func (r *renderer) dim(s string) string {
 // tool, malformed args, plan failure, denied) may appear result-only with no preceding call.
 // The summary is never persisted and never fed back to the model.
 func (r *renderer) OnToolResult(_ context.Context, e agent.ToolResultEvent) error {
-	if !r.lastNL {
-		if _, err := io.WriteString(r.out, "\n"); err != nil {
-			return err
-		}
+	if err := r.markdown.BreakLine(); err != nil {
+		return err
 	}
-	_, err := io.WriteString(r.out, "< "+resultSummary(e)+"\n")
-	if err == nil {
-		r.lastNL = true
-	}
-	return err
+	return r.writeRaw("< " + r.resultSummary(e) + "\n")
 }
 
 // OnPressure prints a single dim context-pressure warning per run when warnings
@@ -169,7 +163,19 @@ func (r *renderer) OnPressure(_ context.Context, e agent.PressureEvent) error {
 
 // resultSummary derives a terse one-line summary from the result. A tool-set
 // Preview wins; otherwise the summary is keyed on the tool name. Display-only.
-func resultSummary(e agent.ToolResultEvent) string {
+//
+// ToolResult.Truncated describes ToolResult.Content, which capOutput trimmed to
+// the tool's output cap. Under MIXED assembly that string is not what the model
+// reads: the assembler replaces the anchor's content with the alternatives it
+// selected from ToolResult.Context, so a "(truncated)" marker would describe a
+// rendering that was discarded. It cannot be recomputed here either — assembly
+// runs before the NEXT step's model call, against a global budget this event
+// predates. So it is suppressed, and only for results that actually carry a
+// structured set: a plain tool under mixed keeps its flat content verbatim and
+// its truncation is real. What replaces the signal under mixed is
+// Pressure.AnchorOmissions and the telemetry context_assembly span, both of
+// which describe what the model was actually given.
+func (r *renderer) resultSummary(e agent.ToolResultEvent) string {
 	res := e.Result
 	if res.Preview != "" {
 		return res.Preview
@@ -177,8 +183,9 @@ func resultSummary(e agent.ToolResultEvent) string {
 	if res.IsError {
 		return "error: " + firstLine(res.Content)
 	}
+	flatDiscarded := r.mixed && res.Context != nil
 	suffix := ""
-	if res.Truncated {
+	if res.Truncated && !flatDiscarded {
 		suffix = " (truncated)"
 	}
 	switch e.Call.Function.Name {

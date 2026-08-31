@@ -81,16 +81,23 @@ func (s *Server) handleListModels(ctx context.Context, req *gomcp.CallToolReques
 
 func (s *Server) listModels(ctx context.Context) ([]listedModelInfo, error) {
 	if pReg := s.providerRegistrySnapshot(); pReg != nil {
-		return listProviderRegistryModels(ctx, pReg)
+		return listProviderRegistryModels(ctx, pReg, s.bindProviderMeta)
 	}
 	return s.listLegacyOllamaModels(ctx)
 }
 
-func listProviderRegistryModels(ctx context.Context, pReg *provider.Registry) ([]listedModelInfo, error) {
+func listProviderRegistryModels(ctx context.Context, pReg *provider.Registry, bind func(context.Context, string) (context.Context, error)) ([]listedModelInfo, error) {
 	var out []listedModelInfo
 	var firstErr error
 	for _, p := range pReg.All() {
-		models, err := pReg.RefreshModelsAndList(ctx, p.Name())
+		pctx, bindErr := bind(ctx, p.Name())
+		if bindErr != nil {
+			if firstErr == nil {
+				firstErr = bindErr
+			}
+			continue
+		}
+		models, err := pReg.RefreshModelsAndList(pctx, p.Name())
 		if err != nil {
 			if firstErr == nil {
 				firstErr = fmt.Errorf("list models for provider %q: %w", p.Name(), err)
@@ -120,6 +127,10 @@ func listProviderRegistryModels(ctx context.Context, pReg *provider.Registry) ([
 }
 
 func (s *Server) listLegacyOllamaModels(ctx context.Context) ([]listedModelInfo, error) {
+	ctx, bindErr := s.bindMeta(ctx, provider.DestinationPurposeModelRefresh)
+	if bindErr != nil {
+		return nil, bindErr
+	}
 	models, err := s.client.ListModels(ctx)
 	if err != nil {
 		return nil, err
@@ -185,6 +196,10 @@ func (s *Server) showModel(ctx context.Context, name, providerName string) (any,
 		return nil, fmt.Errorf("model %q not found in any registered provider", name)
 	}
 
+	ctx, bindErr := s.bindMeta(ctx, provider.DestinationPurposeModelRefresh)
+	if bindErr != nil {
+		return nil, bindErr
+	}
 	info, err := s.client.ShowModel(ctx, name)
 	if err != nil {
 		return nil, err
@@ -216,6 +231,10 @@ func (s *Server) lookupProviderModelInfo(ctx context.Context, key provider.Model
 		return listedModelInfo{}, fmt.Errorf("provider registry unavailable")
 	}
 
+	ctx, bindErr := s.bindProviderMeta(ctx, key.Provider)
+	if bindErr != nil {
+		return listedModelInfo{}, bindErr
+	}
 	models, err := pReg.RefreshModelsAndList(ctx, key.Provider)
 	if err != nil {
 		if info, ok := s.refreshProviderModelInfo(ctx, key); ok {
@@ -277,10 +296,7 @@ func modelInfoFromProfile(profile *provider.ModelProfile) provider.ModelInfo {
 }
 
 func capabilityNames(caps provider.Capability) []string {
-	if caps == 0 {
-		return nil
-	}
-	return strings.Split(caps.String(), "|")
+	return caps.Names()
 }
 
 // pullerForModel returns the ModelPuller that should service a pull for name,
@@ -359,6 +375,15 @@ func (s *Server) handlePullModel(ctx context.Context, req *gomcp.CallToolRequest
 			modelName), nil
 	}
 
+	var bindErr error
+	if p, ok := puller.(provider.Provider); ok {
+		ctx, bindErr = s.bindProviderMeta(ctx, p.Name())
+	} else {
+		ctx, bindErr = s.bindMeta(ctx, provider.DestinationPurposeModelRefresh)
+	}
+	if bindErr != nil {
+		return toolError("provider", "pull model: %v", bindErr), nil
+	}
 	if err := puller.PullModel(ctx, modelName, nil); err != nil {
 		return toolError("provider", "%v", err), nil
 	}

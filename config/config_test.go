@@ -668,6 +668,16 @@ func TestLoad_Validation(t *testing.T) {
 	}
 }
 
+// Defense-in-depth for programmatic Configs: file-loaded configs cannot
+// carry a negative timeout (Duration.UnmarshalJSON rejects at parse), so
+// this site is exercised directly.
+func TestValidate_RejectsNegativeProviderTimeout(t *testing.T) {
+	cfg := &Config{Providers: map[string]ProviderConfig{
+		"p": {BaseURL: "http://h", Timeout: Duration{Duration: -time.Second}},
+	}}
+	assertDiag(t, cfg.validate(), CodeInvalidArgument, SubjectProvider, "p")
+}
+
 func TestModelFor(t *testing.T) {
 	cfg, err := Load("testdata/valid.json")
 	if err != nil {
@@ -1004,7 +1014,7 @@ func TestExpandAPIKeyRefs(t *testing.T) {
 					}
 				})
 			}
-			got, err := expandAPIKeyRefs(tc.provider, tc.value)
+			got, err := expandAPIKeyRefs(tc.provider, tc.value, os.LookupEnv)
 			if tc.wantErr != "" {
 				if err == nil || !contains(err.Error(), tc.wantErr) {
 					t.Fatalf("err = %v, want substring %q", err, tc.wantErr)
@@ -1102,4 +1112,154 @@ func TestLoad_LiteralAPIKeyUnchanged(t *testing.T) {
 	if got := loaded.Providers["hosted"].APIKey; got != "sk-plain" {
 		t.Errorf("api_key = %q, want unchanged literal", got)
 	}
+}
+
+// slots (#400 admission-capacity override): negative fails Load naming the
+// role; absent and positive both load (0 = unset, JSON cannot distinguish
+// an explicit 0 from absent).
+func TestLoad_SlotsValidation(t *testing.T) {
+	valid := writeTempJSON(t, `{
+  "providers": {
+    "lc": { "base_url": "http://127.0.0.1:8090", "api_format": "openai-compat", "slot_discovery": true }
+  },
+  "models": {
+    "default": { "name": "m1", "provider": "lc", "type": "dense", "slots": 4 }
+  },
+  "defaults": { "chat": "default" }
+}`)
+	cfg, err := Load(valid)
+	if err != nil {
+		t.Fatalf("Load with slots 4: %v", err)
+	}
+	if got := cfg.Models["default"].Slots; got != 4 {
+		t.Fatalf("Slots = %d after Load, want 4 (json tag round-trip)", got)
+	}
+
+	invalid := writeTempJSON(t, `{
+  "providers": {
+    "lc": { "base_url": "http://127.0.0.1:8090", "api_format": "openai-compat", "slot_discovery": true }
+  },
+  "models": {
+    "default": { "name": "m1", "provider": "lc", "type": "dense", "slots": -1 }
+  },
+  "defaults": { "chat": "default" }
+}`)
+	_, err = Load(invalid)
+	if err == nil {
+		t.Fatal("want Load error for negative slots")
+	}
+	if !contains(err.Error(), "default") || !contains(err.Error(), "slots") {
+		t.Fatalf("error %q must name the role and the field", err)
+	}
+}
+
+func TestValidateRejectsNegativeCapacity(t *testing.T) {
+	for name, body := range map[string]string{
+		"negative context_window": `{"providers":{"local":{"base_url":"http://localhost:1"}},
+			"models":{"m":{"name":"x","provider":"local","type":"dense","context_window":-1}},
+			"defaults":{}}`,
+		"negative dimensions": `{"providers":{"local":{"base_url":"http://localhost:1"}},
+			"models":{"m":{"name":"x","provider":"local","type":"embedding","dimensions":-8}},
+			"defaults":{}}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			var cfg Config
+			if err := json.Unmarshal([]byte(body), &cfg); err != nil {
+				t.Fatal(err)
+			}
+			if err := cfg.validate(); err == nil {
+				t.Fatal("want validation error")
+			}
+		})
+	}
+}
+
+// --- (410 spec s1): slot policies + selector conflicts in validate ---
+
+func TestValidateSlotPolicies(t *testing.T) {
+	base := validBaseConfigMap()
+	// slot_discovery without openai-compat (implicit ollama format)
+	base["providers"].(map[string]any)["p"].(map[string]any)["slot_discovery"] = true
+	raw, _ := json.Marshal(base)
+	_, err := NewDocumentFromBytes(raw, Origin{Source: OriginExplicit})
+	assertDiag(t, err, CodeSlotPolicyInvalid, SubjectProvider, "p")
+
+	base = validBaseConfigMap()
+	// slots pin without governed provider
+	base["models"].(map[string]any)["agent"].(map[string]any)["slots"] = 2
+	raw, _ = json.Marshal(base)
+	_, err = NewDocumentFromBytes(raw, Origin{Source: OriginExplicit})
+	assertDiag(t, err, CodeSlotPolicyInvalid, SubjectRole, "agent")
+}
+
+func TestValidateSelectorConflicts(t *testing.T) {
+	// Each case creates two roles sharing one selector. Think is one design
+	// family with separate mode/tag branches, so the five families produce
+	// six branch cases here.
+	families := []struct {
+		name   string
+		mutate func(base, a, b map[string]any)
+	}{
+		{"context_window", func(_ map[string]any, a, b map[string]any) { a["context_window"] = 1024; b["context_window"] = 2048 }},
+		{"options", func(_ map[string]any, a, b map[string]any) {
+			a["options"] = map[string]any{"temperature": 0.1}
+			b["options"] = map[string]any{"temperature": 0.9}
+		}},
+		{"capabilities", func(_ map[string]any, a, b map[string]any) {
+			a["capabilities"] = []string{"chat"}
+			b["capabilities"] = []string{"chat", "stream"}
+		}},
+		{"think_mode", func(_ map[string]any, a, b map[string]any) { a["think_mode"] = "always"; b["think_mode"] = "none" }},
+		{"think_tags", func(_ map[string]any, a, b map[string]any) {
+			a["think_tags"] = map[string]any{"open": "<a>", "close": "<b>"}
+			b["think_tags"] = map[string]any{"open": "<c>", "close": "<d>"}
+		}},
+		{"slots", func(base, a, b map[string]any) {
+			p := base["providers"].(map[string]any)["p"].(map[string]any)
+			p["api_format"], p["slot_discovery"] = "openai-compat", true
+			a["slots"], b["slots"] = 1, 2
+		}},
+	}
+	for _, f := range families {
+		t.Run(f.name, func(t *testing.T) {
+			base := validBaseConfigMap()
+			models := base["models"].(map[string]any)
+			models["alpha"] = map[string]any{"name": "m", "type": "dense", "provider": "p"}
+			models["beta"] = map[string]any{"name": "m", "type": "dense", "provider": "p"}
+			f.mutate(base, models["alpha"].(map[string]any), models["beta"].(map[string]any))
+			base["defaults"].(map[string]any)["agent"] = "alpha"
+			raw, _ := json.Marshal(base)
+			_, err := NewDocumentFromBytes(raw, Origin{Source: OriginExplicit})
+			// subject = first role of the conflicting sorted pair
+			assertDiag(t, err, CodeSelectorConflict, SubjectRole, "alpha")
+		})
+	}
+}
+
+func TestValidateSelectorNoFalseConflict(t *testing.T) {
+	// Missing values are "no override", never a conflict.
+	base := validBaseConfigMap()
+	models := base["models"].(map[string]any)
+	models["alpha"] = map[string]any{"name": "m", "type": "dense", "provider": "p", "context_window": 1024}
+	models["beta"] = map[string]any{"name": "m", "type": "dense", "provider": "p"} // no override
+	base["defaults"].(map[string]any)["agent"] = "alpha"
+	raw, _ := json.Marshal(base)
+	if _, err := NewDocumentFromBytes(raw, Origin{Source: OriginExplicit}); err != nil {
+		t.Fatalf("no-override sibling must not conflict: %v", err)
+	}
+}
+
+func TestValidateSelectorConflictUsesFirstSortedRolePair(t *testing.T) {
+	// Selector p/z is encountered first by sorted role (alpha), while p/a
+	// sorts first by selector text. The contract is role-pair order.
+	base := validBaseConfigMap()
+	models := base["models"].(map[string]any)
+	models["alpha"] = map[string]any{"name": "z", "type": "dense", "provider": "p", "context_window": 1024}
+	models["beta"] = map[string]any{"name": "a", "type": "dense", "provider": "p", "context_window": 1024}
+	models["gamma"] = map[string]any{"name": "a", "type": "dense", "provider": "p", "context_window": 2048}
+	models["delta"] = map[string]any{"name": "z", "type": "dense", "provider": "p", "context_window": 2048}
+	base["defaults"].(map[string]any)["agent"] = "alpha"
+	raw, _ := json.Marshal(base)
+	_, err := NewDocumentFromBytes(raw, Origin{Source: OriginExplicit})
+	assertDiag(t, err, CodeSelectorConflict, SubjectRole, "alpha")
 }

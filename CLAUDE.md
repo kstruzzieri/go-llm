@@ -13,8 +13,11 @@
 ```
 go-llm/
 ├── ollama/          # Ollama REST API client (chat, generate, embeddings, models)
-├── config/          # Model configuration loader (models.json, resolve, fallback)
-├── provider/        # Use-case-aware Router (chat/fim/embedding/reasoning/analysis/code-review/agent profiles), circuit breakers, warmth, sticky routing, scoring, fallback chains
+├── config/          # Model configuration loader (models.json, resolve, fallback) + Document (origin/revision-aware load, secret-literal-preserving atomic writer, role lifecycle + selector overrides + credential scrub)
+├── configview/      # Pure projection of a config for panels/CLI/MCP (v1 wire contract, tri-state candidate eligibility, no I/O) — consumed by golem models -json, MCP configview resource, Firn config panel
+├── configio/        # Explicit I/O tier for the config stack: RefreshInventory (provider listing → configview.Inventory value via the read-only ProjectListedModels projection) + ProbeToolCall (consent-gated per-model probe, ProbeOutcome{State,Persisted}) — never implicit, values in/out, bounded error codes (CodeOf), cancellation unclassified
+├── profiles/        # Profile catalog: curated go:embed configs (credential-free by pinned rule) + user store under a 0700 profiles/ boundary; stable IDs, bounded error codes, SaveOutcome writes (nil error whenever persisted) — the Firn config-panel write path
+├── provider/        # Use-case-aware Router (chat/fim/embedding/reasoning/analysis/code-review/agent profiles), circuit breakers, warmth, slot-capacity discovery + slot-aware admission, sticky routing, scoring, fallback chains
 │   └── openaicompat/ # OpenAI /v1 client — reaches llama.cpp (primary), vLLM, LM Studio via api_format: openai-compat
 ├── rag/             # RAG: chunking, SQLite vector store, indexing, retrieval, managed document registry (stable IDs, lifecycle, freshness)
 ├── rag/ast/         # Scoped structural symbol graph: Extractor + SymbolStore interfaces (skeleton)
@@ -30,6 +33,7 @@ go-llm/
 ├── prefetch/        # Predictive cache-warming engine for RAG retrieval
 ├── compat/          # OpenAI-compatible endpoint shim (chat, completions, model aliases, concurrency limiter)
 ├── cmd/
+│   ├── golem/       # Golem CLI: agent REPL. Interactive input goes through one lineSource seam — a golang.org/x/term line editor on a TTY (arrow editing, per-workspace goal history, bracketed-paste composition, `/edit`, Ctrl-C arm/quit) or the bufio.Scanner for pipes, -no-editor, dumb terminals, and Windows
 │   ├── go-llm-mcp/  # Standalone MCP server binary (stdio + HTTP/2)
 │   ├── fim-smoke/   # FIM smoke-test harness
 │   └── llm-bench/   # Model evaluation harness (AnswerQuality, tool-use, tool-restraint, latency, tokens; paired Δ + bootstrap CIs; llama.cpp via openai-compat)
@@ -49,6 +53,8 @@ Keep minimal. Allowed external dependencies:
 - `modernc.org/sqlite` — pure Go SQLite driver (no CGo)
 - `golang.org/x/sync` — concurrency primitives (errgroup for bounded worker pools)
 - `golang.org/x/net` — h2c HTTP/2 cleartext transport (only imported by `mcp/`)
+- `golang.org/x/term` — VT100 line editor for the Golem REPL prompt (only imported by `cmd/golem/`). Pinned to v0.42.0, the version already selected transitively, so promoting it moves no other module.
+- `golang.org/x/sys` — already required transitively; imported directly only by `cmd/golem/`'s Linux PTY lifecycle test and `profiles/`'s Windows directory-fsync (build-tagged, mirrors `config/`'s pair)
 - `github.com/modelcontextprotocol/go-sdk` — official MCP Go SDK (imported by `mcp/` server side, `mcpclient/` client side, and `cmd/llm-bench/`)
 - `github.com/parquet-go/parquet-go` — Parquet file writer (only imported by `rag/parquet/`)
 - `github.com/santhosh-tekuri/jsonschema/v6` — JSON Schema validator (only imported by `cmd/llm-bench/`)
@@ -57,7 +63,7 @@ Everything else uses stdlib (`net/http`, `encoding/json`, `math`, `context`, etc
 
 ## Design Principles
 
-1. **Every public method takes `context.Context`** — cancellation is critical (IDE completions get cancelled constantly)
+1. **Public methods performing cancellable work take `context.Context`** — cancellation is critical (IDE completions get cancelled constantly); established synchronous APIs, including `config.Document` and its local-file operations, remain context-free
 2. **Streaming is first-class** — both chat and completions support streaming via callback functions
 3. **No global state** — multiple Client instances can coexist with different configs
 4. **Interfaces for extensibility** — `VectorStore` interface allows swapping SQLite for other backends

@@ -1,0 +1,30 @@
+{
+  "id": "dx-max-payload-flat",
+  "source": "assembly-corpus",
+  "captured_at": "0001-01-01T00:00:00Z",
+  "system": "Answer the question using ONLY the provided context. If the context does not contain the answer, say so explicitly.",
+  "tools": null,
+  "turns": [
+    {
+      "role": "user",
+      "content": "Context:\nRelevant code context:\n\n--- internal/config/config.go (lines 1-22, similarity: 1.00) ---\n1| package config\n2| \n3| import \"time\"\n4| \n5| // Config is the resolved beacond runtime configuration.\n6| type Config struct {\n7| \tListenAddr     string\n8| \tDeliverTimeout time.Duration\n9| \tQueuePath      string\n10| \tSigningKeyPath string\n11| }\n12| \n13| // Defaults returns the configuration used when no file or environment\n14| // override is present.\n15| func Defaults() Config {\n16| \treturn Config{\n17| \t\tListenAddr:     \":9091\",\n18| \t\tDeliverTimeout: 10 * time.Second,\n19| \t\tQueuePath:      \"beacond.db\",\n20| \t\tSigningKeyPath: \"beacond.key\",\n21| \t}\n22| }\n\n--- internal/relay/handler.go (lines 1-28, similarity: 1.00) ---\n1| package relay\n2| \n3| import (\n4| \t\"io\"\n5| \t\"net/http\"\n6| )\n7| \n8| // maxBody caps an ingest request body at 1 MiB. Oversized publishes\n9| // are rejected before the payload is read into memory.\n10| const maxBody = 1 \u003c\u003c 20\n11| \n12| // Ingest accepts a signed event publish and enqueues it for fanout.\n13| func (s *Server) Ingest(w http.ResponseWriter, r *http.Request) {\n14| \tbody, err := io.ReadAll(io.LimitReader(r.Body, maxBody+1))\n15| \tif err != nil || int64(len(body)) \u003e maxBody {\n16| \t\thttp.Error(w, \"payload too large\", http.StatusRequestEntityTooLarge)\n17| \t\treturn\n18| \t}\n19| \tif err := s.signer.Verify(r, body); err != nil {\n20| \t\thttp.Error(w, \"bad signature\", http.StatusUnauthorized)\n21| \t\treturn\n22| \t}\n23| \tif err := s.queue.Enqueue(r.Context(), body); err != nil {\n24| \t\thttp.Error(w, \"enqueue failed\", http.StatusServiceUnavailable)\n25| \t\treturn\n26| \t}\n27| \tw.WriteHeader(http.StatusAccepted)\n28| }\n\n\n\nQuestion: What is the largest request body the ingest endpoint accepts?"
+    }
+  ],
+  "golden": {
+    "tool_calls": null,
+    "final_answer_criteria": "States the cap is 1 MiB (1 \u003c\u003c 20 bytes), enforced by maxBody in internal/relay/handler.go. Queue, rate-limit, and config numbers in context are not the body cap."
+  },
+  "assembly_eval": {
+    "pair_id": "dx-max-payload",
+    "mode": "flat",
+    "candidate_ids": [
+      "6a8d6ac532644efa3481a7489b50c41cada2d4bc555e3e36a9a330f38dbb9904",
+      "d9036c4e5c8818fc730235510c92128ecc764c38703bd17f2129bb6bd9abdcb1",
+      "ff93d51ff6ea7a95637fdf73af23719a5b962beb41b310679ed82e870d021931",
+      "fc8a2f43adb099dea854f33fdde9526606d168928ba2a2cef9116c2dae3d6597",
+      "3558db9a788ebb34c3d123726b0d1db8f1e6f954a7249dd4c39c58a653d30e19",
+      "4c9ae3199e40cc7d2ac99118c880909f03e9458c025a9ad04d54782b942e4e1c"
+    ],
+    "estimated_prompt_tokens": 458
+  }
+}

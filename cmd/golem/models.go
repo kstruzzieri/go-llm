@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/kstruzzieri/go-llm/config"
+	"github.com/kstruzzieri/go-llm/configview"
 	"github.com/kstruzzieri/go-llm/fingerprint"
 	"github.com/kstruzzieri/go-llm/internal/providerbootstrap"
 	"github.com/kstruzzieri/go-llm/provider"
@@ -48,6 +49,7 @@ func runModels(ctx context.Context, args []string, out, errOut io.Writer) error 
 		noProbe    bool
 		probeAll   bool
 		reprobe    bool
+		jsonOut    bool
 	)
 	fs := flag.NewFlagSet("golem models", flag.ContinueOnError)
 	fs.SetOutput(errOut)
@@ -58,6 +60,9 @@ func runModels(ctx context.Context, args []string, out, errOut io.Writer) error 
 	fs.StringVar(&ollamaURL, "ollama-url", "", "override Ollama base URL")
 	fs.BoolVar(&probeAll, "probe-all", false, "actively probe every non-explicit entry (no bounded-eager stop)")
 	fs.BoolVar(&reprobe, "reprobe", false, "delete cached probe verdicts for non-explicit entries then re-probe")
+	fs.BoolVar(&jsonOut, "json", false, "emit the configview snapshot as JSON (no probing; excludes -probe-all/-reprobe)")
+	var allowDest stringSliceFlag
+	fs.Var(&allowDest, "allow-destination", "admit a remote model destination: \"<provider>/<canonical base URL>\" (repeatable; this command never prompts)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -66,6 +71,28 @@ func runModels(ctx context.Context, args []string, out, errOut io.Writer) error 
 			baseURLSet = true
 		}
 	})
+	if jsonOut && (probeAll || reprobe) {
+		return fmt.Errorf("golem models: -json cannot be combined with -probe-all or -reprobe")
+	}
+
+	var doc *config.Document
+	var cfg *config.Config
+	var err error
+	if jsonOut {
+		doc, err = loadDocumentFor(configPath)
+		if err != nil {
+			return err
+		}
+		if doc == nil {
+			return renderModelsJSON(out, modelsJSONInput(nil, configview.Inventory{}))
+		}
+		cfg = doc.Config()
+	} else {
+		cfg, err = loadConfig(configPath)
+		if err != nil {
+			return err
+		}
+	}
 
 	root, err := filepath.Abs(rootFlag)
 	if err != nil {
@@ -75,20 +102,55 @@ func runModels(ctx context.Context, args []string, out, errOut io.Writer) error 
 		return fmt.Errorf("resolve root: %w", err)
 	}
 
-	cfg, err := loadConfig(configPath)
+	// #477: plan and admit BEFORE discovery and bootstrap. -json lists the
+	// full inventory, so it activates every configured provider (a recommend
+	// route); the normal listing activates the agent route's providers.
+	var routes []providerbootstrap.PlannedRoute
+	agentRoute, err := providerbootstrap.PlanAgentRoute(cfg)
+	if err != nil {
+		return err
+	}
+	if jsonOut {
+		routes = []providerbootstrap.PlannedRoute{{UseCase: "agent", Recommend: true}}
+	} else {
+		routes = []providerbootstrap.PlannedRoute{agentRoute}
+	}
+	explicitURL, _, err := explicitBaseURL(baseURL, baseURLSet, os.LookupEnv)
+	if err != nil {
+		return err
+	}
+	targetKey, _, targetOK := openAICompatTargetFromRoute(cfg, agentRoute)
+	ocProv, ocURL := "", ""
+	if explicitURL != "" && targetOK {
+		ocProv, ocURL = targetKey, explicitURL
+	}
+	gate, netPlan, adm, err := admitForSubcommand(ctx, cfg, routes,
+		providerbootstrap.PlanOptions{CapabilityProbes: !jsonOut},
+		allowDest, ollamaURL, ocProv, ocURL, errOut)
 	if err != nil {
 		return err
 	}
 
-	backendRes, err := resolveBackend(ctx, cfg, backendResolveOpts{
-		flagBaseURL: baseURL,
-		flagSet:     baseURLSet,
-		noProbe:     noProbe,
-		lookupEnv:   os.LookupEnv,
-		prober:      openaicompat.DiscoverBaseURL,
+	backendRes, err := resolveBackend(ctx, adm.effectiveConfigForDiscovery(cfg), backendResolveOpts{
+		flagBaseURL:    baseURL,
+		flagSet:        baseURLSet,
+		noProbe:        noProbe || jsonOut,
+		lookupEnv:      os.LookupEnv,
+		prober:         openaicompat.DiscoverBaseURL,
+		agentRoute:     &agentRoute,
+		guardCandidate: discoveryCandidateGuard(ctx, targetKey),
 	})
 	if err != nil {
 		return err
+	}
+	if backendRes.source == "discovered" {
+		pinned, perr := provider.NewDestination(backendRes.providerKey, backendRes.baseURL)
+		if perr != nil {
+			return fmt.Errorf("golem models: pin discovered backend: %w", perr)
+		}
+		if perr := adm.pinLoopback(backendRes.providerKey, pinned); perr != nil {
+			return perr
+		}
 	}
 
 	// The cap-probe store is required for cached provenance in normal listings
@@ -123,18 +185,30 @@ func runModels(ctx context.Context, args []string, out, errOut io.Writer) error 
 		OpenAICompatURLOverrideProvider: backendRes.providerKey,
 		OpenAICompatURLOverride:         backendRes.baseURL,
 		CapabilityProbeStore:            capStore,
+		DestinationGate:                 gate,
+		ActiveProviders:                 netPlan.ActiveProviders,
 	})
 	if err != nil {
 		return fmt.Errorf("bootstrap providers: %w", err)
 	}
 	defer func() { _ = bundle.Close() }()
 
-	plan, err := resolveAgentChain(bundle.Config)
-	if err != nil {
-		return err
-	}
+	// #477 D8: the agent chain comes from the frozen route, never
+	// re-resolved after admission.
+	plan := chainPlan{chain: agentRoute.Chain, useRecommend: agentRoute.Recommend}
 	for _, w := range backendRes.warns {
 		_, _ = fmt.Fprintln(errOut, "warning: "+w)
+	}
+
+	if jsonOut {
+		inv, ierr := buildInventoryFromRegistry(ctx, bundle.Providers, bundle.Models,
+			func(bctx context.Context, name string) (context.Context, error) {
+				return gate.Bind(bctx, provider.DestinationPurposeModelRefresh, name)
+			})
+		if ierr != nil {
+			return ierr
+		}
+		return renderModelsJSON(out, modelsJSONInput(doc, inv))
 	}
 
 	resolveEndpoint := newPreflightEndpointResolver(bundle.Config, ollamaURL, backendRes.providerKey, backendRes.diagSource())

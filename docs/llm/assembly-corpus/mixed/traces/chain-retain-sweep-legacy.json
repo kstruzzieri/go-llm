@@ -1,0 +1,83 @@
+{
+  "id": "chain-retain-sweep-legacy",
+  "source": "assembly-corpus-mixed",
+  "captured_at": "0001-01-01T00:00:00Z",
+  "system": "You are the driftwatch assistant. driftwatch is a self-hosted telemetry ingest and alerting daemon. Answer using only the provided conversation, memory records, and retrieved context.",
+  "tools": null,
+  "turns": [
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "id": "c2",
+          "name": "fixture_echo",
+          "arguments": {
+            "content": "one overnight sweep pass from the lab box, pasted verbatim:\n2025-07-26T00:12:03Z sweep pass begin tier=warm segments=141\n2025-07-26T00:12:07Z tier=warm shard=00 scanned=24160 removed=655 kept=23505\n2025-07-26T00:12:11Z tier=warm shard=01 scanned=24051 removed=629 kept=23422\n2025-07-26T00:12:11Z tier=warm done scanned=48211 removed=1284 kept=46927 dur=8.4s\n2025-07-26T00:12:11Z sweep pass begin tier=cold segments=87\n2025-07-26T00:12:20Z tier=cold done scanned=30556 removed=922 kept=29634 dur=9.1s iocap=engaged\n2025-07-26T00:12:20Z sweep pass end freed_mb=2411 deferrals=0 watermark_holds=0\nnote: single clean pass, io cap engaged on the cold volume, no deferrals and no watermark holds."
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "content": "one overnight sweep pass from the lab box, pasted verbatim:\n2025-07-26T00:12:03Z sweep pass begin tier=warm segments=141\n2025-07-26T00:12:07Z tier=warm shard=00 scanned=24160 removed=655 kept=23505\n2025-07-26T00:12:11Z tier=warm shard=01 scanned=24051 removed=629 kept=23422\n2025-07-26T00:12:11Z tier=warm done scanned=48211 removed=1284 kept=46927 dur=8.4s\n2025-07-26T00:12:11Z sweep pass begin tier=cold segments=87\n2025-07-26T00:12:20Z tier=cold done scanned=30556 removed=922 kept=29634 dur=9.1s iocap=engaged\n2025-07-26T00:12:20Z sweep pass end freed_mb=2411 deferrals=0 watermark_holds=0\nnote: single clean pass, io cap engaged on the cold volume, no deferrals and no watermark holds.",
+      "tool_call_id": "c2",
+      "name": "fixture_echo"
+    },
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "id": "c3",
+          "name": "agent_memory_search",
+          "arguments": {
+            "query": ""
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "content": "rec-cold-tier · semantic · 2025-07-27 · cold tier lives on the slow volume; sweeps there are io-capped so live ingest never contends\nrec-lab-logs · working · 2025-07-27 · overnight lab logs rotate weekly; pull them before Friday or they are gone\nrec-tier-review · semantic · 2025-07-27 · retention tier review is scheduled with the platform team; capacity note goes out beforehand",
+      "tool_call_id": "c3",
+      "name": "agent_memory_search"
+    },
+    {
+      "role": "user",
+      "content": "How often does the retention sweeper make a pass?"
+    }
+  ],
+  "golden": {
+    "tool_calls": null,
+    "final_answer_criteria": "States the retention sweeper passes every 6 hours. The pasted log shows only a single pass and cannot yield the cadence; answers without the 6-hour figure score 0. An answer presenting both the correct and a competing value without committing to one scores 0."
+  },
+  "assembly_eval": {
+    "pair_id": "chain-retain-sweep",
+    "mode": "legacy",
+    "candidate_ids": [
+      "8be0b2e595e1972ce4661b7ede67c40fb22363be6175017453d974254d0c5e5c",
+      "e657766e5783d39aad709dd9d03c5ab99318830a44d82b0d4d542c26e7ff93f8",
+      "e6e72c2db68e94cbf055fdc9cf2218f130ea4a520a41f73d1eccd29e22cd5a4f",
+      "rec-cold-tier",
+      "rec-lab-logs",
+      "rec-tier-review"
+    ],
+    "estimated_prompt_tokens": 330,
+    "state_digest": "f37d1b39e85612e659ce061a19a1afae791570fcb8af71dfd1baf5ab83c76d02",
+    "subjects": [
+      "(c1|rag|internal/retain/sweeper.go)",
+      "(c1|rag|internal/retain/tiers.go)",
+      "(c1|rag|docs/retention.md)",
+      "(c3|memory|rec-cold-tier)",
+      "(c3|memory|rec-lab-logs)",
+      "(c3|memory|rec-tier-review)"
+    ],
+    "stratum": "chain_retention",
+    "answer_home": "rag",
+    "scenario_family": "retention-sweep-chain",
+    "budget": 919,
+    "raw_state_tokens": 1531,
+    "pressure_level": "ok",
+    "shed_messages": 4,
+    "shed_bytes": 4510
+  }
+}

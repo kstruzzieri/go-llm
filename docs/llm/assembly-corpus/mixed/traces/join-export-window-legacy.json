@@ -1,0 +1,65 @@
+{
+  "id": "join-export-window-legacy",
+  "source": "assembly-corpus-mixed",
+  "captured_at": "0001-01-01T00:00:00Z",
+  "system": "You are the driftwatch assistant. driftwatch is a self-hosted telemetry ingest and alerting daemon. Answer using only the provided conversation, memory records, and retrieved context.",
+  "tools": null,
+  "turns": [
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "id": "c2",
+          "name": "agent_memory_search",
+          "arguments": {
+            "query": ""
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "content": "rec-export-window · semantic · 2025-07-27 · nightly export kicks off at 02:15 UTC, after the warehouse maintenance window closes; do not move it earlier\nrec-loader-contact · semantic · 2025-07-27 · warehouse loader questions go to the data platform channel; they watch it during business hours\nrec-shard-review · working · 2025-07-27 · shard sizing changes need a heads-up to the warehouse team; their pipeline tunes parallelism to our layout",
+      "tool_call_id": "c2",
+      "name": "agent_memory_search"
+    },
+    {
+      "role": "user",
+      "content": "When does the nightly export kick off, and how many rows go into each shard?"
+    }
+  ],
+  "golden": {
+    "tool_calls": null,
+    "final_answer_criteria": "BOTH halves required: the nightly export kicks off at 02:15 UTC, AND each shard holds 250000 rows. A missing half caps the score at 0.5; a stated but incorrect half scores 0. An answer presenting both the correct and a competing value without committing to one scores 0."
+  },
+  "assembly_eval": {
+    "pair_id": "join-export-window",
+    "mode": "legacy",
+    "candidate_ids": [
+      "68746a199d5d9b41835955455c42c3b530a48c26a19161cd59c5468c18e8b359",
+      "d2823d7d9a7298785b79d926c55afe3ac2b5ab2caad2d38aaa955932d2198f47",
+      "e5d7e1580c387e7080ef8565fc2bbab475e55ada9a4d03f5eca04c18196c2bb7",
+      "rec-export-window",
+      "rec-loader-contact",
+      "rec-shard-review"
+    ],
+    "estimated_prompt_tokens": 178,
+    "state_digest": "5337eb913fee0bb7f57461650068e1852aa8990d534fc49595bb5ece7a93aef3",
+    "subjects": [
+      "(c1|rag|internal/export/parquet.go)",
+      "(c1|rag|internal/export/schedule.go)",
+      "(c1|rag|docs/export.md)",
+      "(c2|memory|rec-export-window)",
+      "(c2|memory|rec-loader-contact)",
+      "(c2|memory|rec-shard-review)"
+    ],
+    "stratum": "cross_domain_join",
+    "answer_home": "join",
+    "scenario_family": "export-shard-schedule",
+    "budget": 1015,
+    "raw_state_tokens": 1691,
+    "pressure_level": "ok",
+    "shed_messages": 12,
+    "shed_bytes": 5560
+  }
+}

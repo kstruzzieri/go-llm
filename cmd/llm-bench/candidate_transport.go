@@ -26,7 +26,21 @@ type candidateTransport struct {
 }
 
 type candidateChatClient interface {
-	Chat(ctx context.Context, req ollama.ChatRequest) (candidateChatResponse, error)
+	Chat(ctx context.Context, req candidateChatRequest) (candidateChatResponse, error)
+}
+
+// candidateChatRequest wraps the ollama-shaped chat request with the
+// prefilled fixtures' raw tool-call argument bytes (#331 W3 byte fidelity).
+// RawToolArgs mirrors Messages: RawToolArgs[i][j] is the byte-exact fixture
+// argument payload for Messages[i].ToolCalls[j]. A nil slice (whole,
+// per-message, or per-call entry) means "no raw bytes — marshal the decoded
+// map", the pre-W3 behavior. Only replayPrefilled populates it: fixture
+// bytes are the thing being replayed verbatim there; candidate RESPONSES in
+// the scripted tool loop were already decoded by the transport and carry no
+// authoritative byte form.
+type candidateChatRequest struct {
+	ollama.ChatRequest
+	RawToolArgs [][]json.RawMessage
 }
 
 type candidateChatResponse struct {
@@ -88,8 +102,15 @@ type ollamaCandidateClient struct {
 	client *ollama.Client
 }
 
-func (c ollamaCandidateClient) Chat(ctx context.Context, req ollama.ChatRequest) (candidateChatResponse, error) {
-	resp, err := c.client.Chat(ctx, req)
+// Chat sends the request over the native Ollama transport. FROZEN BOUNDARY
+// (#331 W3): ollama.ToolCallFunction.Arguments is map[string]any on the
+// frozen wire struct itself, so req.RawToolArgs cannot reach this wire —
+// argument bytes are re-encoded by the ollama client (sorted keys, canonical
+// whitespace). Semantic equality is the ceiling here; byte-exact fixture
+// args are achievable only on transports whose frozen types accept raw JSON
+// (see openAICompatCandidateClient).
+func (c ollamaCandidateClient) Chat(ctx context.Context, req candidateChatRequest) (candidateChatResponse, error) {
+	resp, err := c.client.Chat(ctx, req.ChatRequest)
 	if err != nil {
 		return candidateChatResponse{}, err
 	}
@@ -114,10 +135,10 @@ type openAICompatCandidateClient struct {
 	provider *openaicompat.Provider
 }
 
-func (c openAICompatCandidateClient) Chat(ctx context.Context, req ollama.ChatRequest) (candidateChatResponse, error) {
+func (c openAICompatCandidateClient) Chat(ctx context.Context, req candidateChatRequest) (candidateChatResponse, error) {
 	presp, err := c.provider.Chat(ctx, provider.ChatRequest{
 		Model:    req.Model,
-		Messages: toProviderCandidateMessages(req.Messages),
+		Messages: toProviderCandidateMessages(req.Messages, req.RawToolArgs),
 		Tools:    toProviderCandidateTools(req.Tools),
 		Options:  toProviderCandidateOptions(req.Options),
 	})
@@ -153,15 +174,23 @@ func (c openAICompatCandidateClient) Chat(ctx context.Context, req ollama.ChatRe
 	}, nil
 }
 
-func toProviderCandidateMessages(in []ollama.ChatMessage) []provider.ChatMessage {
+// toProviderCandidateMessages converts ollama-shaped history to provider
+// messages. rawArgs (may be nil) mirrors in per candidateChatRequest: when a
+// message carries raw fixture argument bytes they pass through verbatim
+// instead of being re-marshaled from the decoded map (#331 W3).
+func toProviderCandidateMessages(in []ollama.ChatMessage, rawArgs [][]json.RawMessage) []provider.ChatMessage {
 	out := make([]provider.ChatMessage, len(in))
 	for i, m := range in {
+		var raw []json.RawMessage
+		if i < len(rawArgs) {
+			raw = rawArgs[i]
+		}
 		out[i] = provider.ChatMessage{
 			Role:       m.Role,
 			Content:    m.Content,
 			ToolName:   m.ToolName,
 			ToolCallID: m.ToolCallID,
-			ToolCalls:  toProviderCandidateToolCalls(m.ToolCalls),
+			ToolCalls:  toProviderCandidateToolCalls(m.ToolCalls, raw),
 		}
 	}
 	return out
@@ -203,13 +232,25 @@ func toProviderCandidateOptions(opts *ollama.ModelOptions) provider.ModelOptions
 	return out
 }
 
-func toProviderCandidateToolCalls(in []ollama.ToolCall) []provider.ToolCall {
+// toProviderCandidateToolCalls converts tool calls, preferring the byte-exact
+// raw fixture arguments in rawArgs[i] over re-marshaling the decoded map.
+// provider.ToolCallFunction.Arguments and the openai-compat wire's
+// arguments envelope are both json.RawMessage, and the frozen
+// encodeToolCallArguments string-wraps raw JSON verbatim (edge-trimmed), so
+// the fixture bytes — key order and interior whitespace included — survive
+// to the wire on this transport.
+func toProviderCandidateToolCalls(in []ollama.ToolCall, rawArgs []json.RawMessage) []provider.ToolCall {
 	if len(in) == 0 {
 		return nil
 	}
 	out := make([]provider.ToolCall, len(in))
 	for i, tc := range in {
-		args, _ := json.Marshal(tc.Function.Arguments)
+		var args json.RawMessage
+		if i < len(rawArgs) && len(rawArgs[i]) > 0 {
+			args = rawArgs[i]
+		} else {
+			args, _ = json.Marshal(tc.Function.Arguments)
+		}
 		out[i] = provider.ToolCall{
 			ID:   tc.ID,
 			Type: firstNonEmpty(tc.Type, "function"),

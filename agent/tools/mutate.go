@@ -1,8 +1,10 @@
 package tools
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -21,6 +23,13 @@ const (
 	// diffContext is the number of unchanged lines shown around a change.
 	diffContext = 3
 )
+
+// WriteClassApprovalKey is the shared structural grant key (#341) for the
+// write-class tools (write_file, edit_file): one session grant — the "a"
+// approval answer or golem's /auto-edits on — covers the whole class.
+// Exported because cmd/golem's /auto-edits toggle must reference the same
+// value. MCP tools and submit_plan never emit any key and are not covered.
+const WriteClassApprovalKey = "write-class:files"
 
 // ContentHash is the SHA-256 hex of b. Stable, distinct from absentHash, and reused by cmd/golem's undo journal to detect post-write changes.
 func ContentHash(b []byte) string {
@@ -114,6 +123,24 @@ type Journal interface {
 	Record(MutationRecord)
 }
 
+// PreparedMutation is the open intent handle a PreparingJournal returns from
+// Prepare. Exactly one of Commit or Abort must be called: Commit after the
+// workspace write landed, Abort when it failed so the intent is discarded.
+type PreparedMutation interface {
+	Commit() error
+	Abort() error
+}
+
+// PreparingJournal is an optional Journal capability for consumers that must
+// persist a write-ahead intent BEFORE the workspace mutation (durable
+// checkpoints, #355): a crash between the filesystem rename and a post-write
+// Record would otherwise leave an applied change no journal ever saw. Plain
+// Journals keep the post-write Record path unchanged.
+type PreparingJournal interface {
+	Journal
+	Prepare(MutationRecord) (PreparedMutation, error)
+}
+
 // pendingPlan is the state a mutating tool computes in Plan and consumes in Invoke.
 // agent.ToolPlan exposes only Effect+Preview, and Invoke receives only raw args,
 // so the tool carries the previewed result itself, keyed by a hash of the raw args.
@@ -161,6 +188,55 @@ func record(j Journal, rec MutationRecord) {
 	if j != nil {
 		j.Record(rec)
 	}
+}
+
+// runJournaledWrite executes one approved mutation under the optional
+// write-ahead protocol: Prepare (when the journal supports it) -> write ->
+// Commit, calling Abort when the write fails. For a plain Journal the write
+// runs first and Record follows, exactly as before. toolErr is a model-visible
+// failure with the workspace unchanged (a failed Prepare or a failed write).
+// internalErr is an infrastructure failure AFTER the file changed (a failed
+// Commit). Note the orchestrator turns an Invoke error into a model-visible
+// observation too (agent/dispatch.go invokeCall); the run actually stops
+// because a PreparingJournal cancels its captured run context on commit
+// failure, which dispatch treats as a hard abort. The distinct internalErr
+// channel keeps the failure out of the tool-result path so a healthy-looking
+// summary is never reported for a write the journal failed to commit.
+func runJournaledWrite(ctx context.Context, j Journal, rec MutationRecord, write func() error) (toolErr, internalErr error) {
+	if err := ctx.Err(); err != nil {
+		return err, nil
+	}
+	var prepared PreparedMutation
+	abort := func(cause error) error {
+		if prepared == nil {
+			return cause
+		}
+		if err := prepared.Abort(); err != nil {
+			return errors.Join(cause, fmt.Errorf("journal abort failed: %w", err))
+		}
+		return cause
+	}
+	if pj, ok := j.(PreparingJournal); ok {
+		p, err := pj.Prepare(rec)
+		if err != nil {
+			return fmt.Errorf("journal prepare failed: %w", err), nil
+		}
+		prepared = p
+		if err := ctx.Err(); err != nil {
+			return abort(err), nil
+		}
+	}
+	if err := write(); err != nil {
+		return abort(err), nil
+	}
+	if prepared == nil {
+		record(j, rec)
+		return nil, nil
+	}
+	if err := prepared.Commit(); err != nil {
+		return nil, fmt.Errorf("journal commit failed after %s was written: %w", rec.Path, err)
+	}
+	return nil, nil
 }
 
 // NewMutatingTools builds the workspace-mutating tool set (write_file, edit_file)

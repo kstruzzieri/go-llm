@@ -1,0 +1,386 @@
+{
+  "schema_version": "fc-sidemap/v2",
+  "pairs": {
+    "chain-drift-window-baseline|qwen3-coder-next:latest": {
+      "legacy_is_a": false,
+      "hash_a": "sha256:f88c0d7c9494675a8c31e2a75f6fd791557201c4ec77f03cd71ede8873d1053a",
+      "hash_b": "sha256:a5b56841f325d865bce20c2fd183ac250897992fe45727b0e23c674f80dcb5fe"
+    },
+    "chain-drift-window-pair|qwen3-coder-next:latest": {
+      "legacy_is_a": true,
+      "hash_a": "sha256:b9502ce3e2d05a5f3912e607f7aaf5da5832b775e381200aef49258811429975",
+      "hash_b": "sha256:468ac7c7f2e4563f3f16b4aef986d562a16852bc3cca5ccb824d6a24057007b5"
+    },
+    "chain-listen-queue-depth|qwen3-coder-next:latest": {
+      "legacy_is_a": false,
+      "hash_a": "sha256:5ea805eb43f98cd9929d0283b10ed7d5a495c1e602c9e5fd80b23310ee533721",
+      "hash_b": "sha256:5607b2b88cdcde73fa7e6f85c666456c01d7efd3643eecbe82ff280889be5743"
+    },
+    "chain-listen-queue-drops|qwen3-coder-next:latest": {
+      "legacy_is_a": false,
+      "hash_a": "sha256:d91c49c4c2761206ed6a314f498d881f3fe8ec2ca4159b1401ff3c040de6408e",
+      "hash_b": "sha256:d5aaa64ab679a774292d76da0765e5fc4c5b0acbb80549ee6db2131506d45f4b"
+    },
+    "chain-merge-fanin-flash|qwen3-coder-next:latest": {
+      "legacy_is_a": true,
+      "hash_a": "sha256:23db606683001f96e2a4c7e45759d22c5b11dbc756c5db24452c2e40538333a1",
+      "hash_b": "sha256:c9bef60356842cdff850e2a712e49268a7487430e9d3638e7c83e3f47b87a74d"
+    },
+    "chain-merge-fanin-lock|qwen3-coder-next:latest": {
+      "legacy_is_a": true,
+      "hash_a": "sha256:79e641afd99b2fdb9baab8451afcb4d1bab7c7439891e66f21462d059f2394f0",
+      "hash_b": "sha256:709add63c41cdf3001f763e792fe2e4b9772628d0a5c7ee50db56cac5b033a8d"
+    },
+    "chain-retain-quota-refill|qwen3-coder-next:latest": {
+      "legacy_is_a": true,
+      "hash_a": "sha256:9b8fd3a7446bd0009ab5ea7c23441c39f2e232656331ea51f6567aedfb1c7915",
+      "hash_b": "sha256:af334c48dab485e0c1f94c2723b50d1eb7d66cde596d1c60356fd7342b24f6a6"
+    },
+    "chain-retain-quota|qwen3-coder-next:latest": {
+      "legacy_is_a": false,
+      "hash_a": "sha256:4395eda1f957596833d19c11910702c20b3b60b85ae64ff77339be7779b0a728",
+      "hash_b": "sha256:febb9ff4da5f33c86733f0eecb1fe24ca0625199afc59faa2c317807624c488c"
+    },
+    "chain-retain-sweep-iocap|qwen3-coder-next:latest": {
+      "legacy_is_a": false,
+      "hash_a": "sha256:0d28d1004f8c9c5f6a0a1f785edbbac4fb00cda3649db952eff1e76f29380892",
+      "hash_b": "sha256:621483aa95cbc3138102bdeb4532bcc74b465b890a0f03ac19372c2de4872f02"
+    },
+    "chain-retain-sweep|qwen3-coder-next:latest": {
+      "legacy_is_a": false,
+      "hash_a": "sha256:3060e0ef3c1b21c4f6270a7e4b6ba24b2ebe48ae074e43ab29347b580127545d",
+      "hash_b": "sha256:dd5d3a1ecaaf03197fdae27a4f630dbe36ab349ce2684cc7dd10f5bb677a7f3c"
+    },
+    "chain-spill-drain-rate|qwen3-coder-next:latest": {
+      "legacy_is_a": false,
+      "hash_a": "sha256:d08e450fc3a15bef41a13f5a6ef362a894f5d2d6a7fee17747cbab783d013e49",
+      "hash_b": "sha256:03f3be0edd7f12b06c6e392d473bba60e01e208d07091902a92aafe83186a00d"
+    },
+    "chain-spill-quota-cap|qwen3-coder-next:latest": {
+      "legacy_is_a": false,
+      "hash_a": "sha256:7985bb9444dd7f7f38de755e8332c3d2dea9cc15598243689130ce44ce9c9f2f",
+      "hash_b": "sha256:1aede07c396affa5c8c69c2950a2101d2023a682b78ee2ac6a1aa13e0828b2ff"
+    },
+    "chain-uplink-part-size|qwen3-coder-next:latest": {
+      "legacy_is_a": true,
+      "hash_a": "sha256:079da74014daf17ae82822f571cd0ec1f0c0c8b5b98f4047e937d6ade186a57e",
+      "hash_b": "sha256:aa8ddf582d948e1cedf42e2531745e1e1f8dd5eb07c4fb1d0b69cf8ab13028f0"
+    },
+    "chain-uplink-verify|qwen3-coder-next:latest": {
+      "legacy_is_a": false,
+      "hash_a": "sha256:4cad4c3e1b4bdf47e902b8b9fb780e91fa67820b5e9eedaf617d771c7f13951d",
+      "hash_b": "sha256:3f690722ab5d3512c14444694f2c15bca898238276e5c31f01412b89b6779fda"
+    },
+    "conv-collector-heartbeat-gap|qwen3-coder-next:latest": {
+      "legacy_is_a": false,
+      "hash_a": "sha256:e134efb147e998ae448128fe2f33c25f9aed669df24515644e61a80cea980a2c",
+      "hash_b": "sha256:751e726591925f3fcc817f1ef82cf1bb11eb0fe4baa1c958717db2f1c9d7f81a"
+    },
+    "conv-collector-heartbeat-settle|qwen3-coder-next:latest": {
+      "legacy_is_a": false,
+      "hash_a": "sha256:662fb39eb7c3615a03f56c6bf30d085b49171bfe361d1d9786893501bb57e043",
+      "hash_b": "sha256:7db5188e1627099dd4e80c60c4614302951d280e41e83b396571cd1f0d05f52f"
+    },
+    "conv-export-cutover-freeze|qwen3-coder-next:latest": {
+      "legacy_is_a": false,
+      "hash_a": "sha256:cceea35b087ce5a2a7de3a9b22b8e9d0cac666d462eb458f2ce37f65c8c89048",
+      "hash_b": "sha256:299f46ca835e1d30012eea2b89e8b7744eba98c1c8b23bf15e79523aea399ee9"
+    },
+    "conv-export-cutover-plan|qwen3-coder-next:latest": {
+      "legacy_is_a": true,
+      "hash_a": "sha256:6b6eabe1bc9b5a49b29e046d495262b990a0728348610f6932e460277f0d74e9",
+      "hash_b": "sha256:01ca7094a287f6871d47e2d4182ca2ab6b757586288ce6a9f440101c75f2fc2d"
+    },
+    "conv-ingest-token-late|qwen3-coder-next:latest": {
+      "legacy_is_a": false,
+      "hash_a": "sha256:a13595eb7b776c2a3c19878114296ff6c4df61f455fc155bad83f0576b772bda",
+      "hash_b": "sha256:e80a1da93ab0373fd80fb3bd180adda892bcdf0e2cfa6fc6a80b8e6fddeaf006"
+    },
+    "conv-ingest-token-recheck|qwen3-coder-next:latest": {
+      "legacy_is_a": false,
+      "hash_a": "sha256:cea818c3c6e6ab9f19171f7bb8194467f5a43aa2cbb8d6fb3dfb6538a17358f9",
+      "hash_b": "sha256:dbf1bc50732f9fe44bb7400d2f3662c2cdbdb320591d78940a7f17e518683f3c"
+    },
+    "conv-pager-channel-mid|qwen3-coder-next:latest": {
+      "legacy_is_a": false,
+      "hash_a": "sha256:61bd3f2bb39e9a4a8fa81c2760c7dc68a27fabce617a64839d56885b6a170d0e",
+      "hash_b": "sha256:35fb0962cd693a9cbfb22b6e5f7d91e4cc12642d0f34e3c5fd4eb5f77f846d87"
+    },
+    "conv-pager-channel-recheck|qwen3-coder-next:latest": {
+      "legacy_is_a": true,
+      "hash_a": "sha256:fe34f6092071fe78bd6d7854eb362c75788aa951cb81103d7f0fd743e3d47659",
+      "hash_b": "sha256:d24f065fa35329348c4d7ae1b3c12de3e7b76e298779df5256ce548bf06db88d"
+    },
+    "conv-replay-throttle-confirm|qwen3-coder-next:latest": {
+      "legacy_is_a": false,
+      "hash_a": "sha256:47b6ebe6c87dbc0971186eb6c37147d6d485d051a869031e56d714cab01f5a9d",
+      "hash_b": "sha256:c8bb38bd5415286efc520f36861ab94ec329fccf190e5a652d23bc560c4896dc"
+    },
+    "conv-replay-throttle-plan|qwen3-coder-next:latest": {
+      "legacy_is_a": true,
+      "hash_a": "sha256:1a442e555aa01696972bba38ed986ce2500028b37475eae12b8fc5a558d083c4",
+      "hash_b": "sha256:4d6ac5f70b9c91a2f2ab8ead91dbca485cfca214e2f37019f8dcdfe68e9a7c91"
+    },
+    "conv-spool-flush-early|qwen3-coder-next:latest": {
+      "legacy_is_a": true,
+      "hash_a": "sha256:8f9768de966e8b6357d4ecf27424657ee1f2c06d80a21a3bcf0ee169db928223",
+      "hash_b": "sha256:5271b406b632ace5c9514466831a07187f06d0ede105abfb6e0fc97919b49cd7"
+    },
+    "conv-spool-flush-fleet|qwen3-coder-next:latest": {
+      "legacy_is_a": true,
+      "hash_a": "sha256:a1a1f3b98768f2bf526269e9428ea4a464230b11e5e7bf9f1533d7908e02aaed",
+      "hash_b": "sha256:ce718158d9813f80fb9b68a95e5bd6fb44aa979034343bdf92a20936e8d040ad"
+    },
+    "conv-tenant-rate-floor|qwen3-coder-next:latest": {
+      "legacy_is_a": true,
+      "hash_a": "sha256:a65288651b961ab3761770210453cab48ea04475fbb084337949081df490bc09",
+      "hash_b": "sha256:2ca8ab0dd611ffaefb50ddd8379beb23f9f37267185dbc92a138eeb280ae7536"
+    },
+    "conv-tenant-rate-settle|qwen3-coder-next:latest": {
+      "legacy_is_a": true,
+      "hash_a": "sha256:e2691eea0904732b2fe91554f1449295f31ad3d9bed144cf1acdd939c2d5f3ee",
+      "hash_b": "sha256:be19abec7a39c27a4a01ce1b758f713b9a06b2d7503538eba976a2964ecfbf8c"
+    },
+    "ctl-incident-archive|qwen3-coder-next:latest": {
+      "legacy_is_a": true,
+      "hash_a": "sha256:ba820bcb756f60cf73db2290ad61c2c26d39a7d8492dc706fbad185c1d93ed1a",
+      "hash_b": "sha256:956aa2717f2ffeb2a7eb8b7c0591d691da67b09ab2d1932f4660ea037398ed0f"
+    },
+    "ctl-notes-recap|qwen3-coder-next:latest": {
+      "legacy_is_a": true,
+      "hash_a": "sha256:6e1f6c8a41afd0784fb4f1c79f516e73139ef4a8f49b298cc60aa02b297439d9",
+      "hash_b": "sha256:1dd0488546df5b022dc4b118a98680c784b7707bfe3dbb7b87de5b45d151ed80"
+    },
+    "ctl-review-slot|qwen3-coder-next:latest": {
+      "legacy_is_a": false,
+      "hash_a": "sha256:db569d83bf435a149dc33896a1da31cc3c45d5c9e1774041056be95cc9c43c0d",
+      "hash_b": "sha256:aeb10633dac6b2a2fcde77cb43a44b0eedb973b8d1673008465aa3c324b67feb"
+    },
+    "ctl-runbook-tidy|qwen3-coder-next:latest": {
+      "legacy_is_a": false,
+      "hash_a": "sha256:288f62a7e4366589183a5c25e3e3e997c668db8ce5b7d9839d99e4fcba7f72b5",
+      "hash_b": "sha256:d3396c9301935b91c526867168debde947a6f60df8a00d9104d01749e2af5b47"
+    },
+    "ctl-triage-handoff|qwen3-coder-next:latest": {
+      "legacy_is_a": true,
+      "hash_a": "sha256:9a8d061efd9b8834485ee9ed98948082382178b63c7cb804e3686b31b56f72eb",
+      "hash_b": "sha256:ade6dede21307414b5d206873084b4f202c51b1a7c77a41b18b5edd8d2096c29"
+    },
+    "ctl-weekly-report-home|qwen3-coder-next:latest": {
+      "legacy_is_a": false,
+      "hash_a": "sha256:0d52bf18a3cc395adbe46707b5e5cd31cbe8cac7aaa210d748f3ea4f4d15f5ed",
+      "hash_b": "sha256:6ac64ce90bea5a1a051d3d28563d561f7b9f30b0c56454feb4e8889d87a958f4"
+    },
+    "join-alert-debounce-pager|qwen3-coder-next:latest": {
+      "legacy_is_a": true,
+      "hash_a": "sha256:d5a51d3b8e2a110ab8c15e40121ccc43b0b6f566976016e88c2e532add757f9b",
+      "hash_b": "sha256:1a9cfb964eba180498b5040a00bfd49a30bced694cc382259ba0ce8b1a672015"
+    },
+    "join-alert-debounce|qwen3-coder-next:latest": {
+      "legacy_is_a": false,
+      "hash_a": "sha256:31a3fc2ad1493fe89dcaf46af0ba1f55955185cbd42d48da339395c51a7db6cc",
+      "hash_b": "sha256:110c50419c2639368ed34cec04f133f3034b0b20c2aabc3fb3a39905e4f968bb"
+    },
+    "join-checkpoint-cycle-freeze|qwen3-coder-next:latest": {
+      "legacy_is_a": false,
+      "hash_a": "sha256:aa42d98ab43cb0715c83f954a413bdc795e86d8e305a7f2076e54bc232b35e85",
+      "hash_b": "sha256:939f7e2cd6ea2238b20b2a072101cc770d8db1ea3931abae1ec7ca46c476e942"
+    },
+    "join-checkpoint-cycle-plan|qwen3-coder-next:latest": {
+      "legacy_is_a": true,
+      "hash_a": "sha256:d514144cf5d516a8a8d1336a0753ba88de8630ac0f8526cb714cd599e3dc53b8",
+      "hash_b": "sha256:b47e8c132b6bf10a98ee7babb8920102dd07526ae5b14b42653fb1dab8dd4ccd"
+    },
+    "join-dedupe-window-edge|qwen3-coder-next:latest": {
+      "legacy_is_a": true,
+      "hash_a": "sha256:ec213388865a15501adb656f063bda83cdcacb24de61afe91b788096526dbefa",
+      "hash_b": "sha256:4cfa3f3ffab7317be684afb108143fc837cb508a6c54757985d8fcc56555d9fb"
+    },
+    "join-dedupe-window-fleet|qwen3-coder-next:latest": {
+      "legacy_is_a": true,
+      "hash_a": "sha256:301077f729d320ebc973de4229a04f50a843e7bff1bff1785a1608351f0febf2",
+      "hash_b": "sha256:b5d63b3e281c7ac00af7d704fe133520222350b51125363e9c08ecae39c2bec0"
+    },
+    "join-downsample-tier-default|qwen3-coder-next:latest": {
+      "legacy_is_a": false,
+      "hash_a": "sha256:d6ea42db55a24d102c22273d605536d6a5c75a737687837c0cb6691f2c81b931",
+      "hash_b": "sha256:2dfe3114453c8b9f2d5aac1a570bee4ce1e0fb0ebc579628d6f778c391ca02be"
+    },
+    "join-downsample-tier-raw|qwen3-coder-next:latest": {
+      "legacy_is_a": false,
+      "hash_a": "sha256:e7cb0f0bcbd3345375f085cb3758ca343bb9bdf5cc67d31dce1192018192b941",
+      "hash_b": "sha256:a12f21496f164a989ab55da9107d1e880bffe20218b7c2ac89f69b757b4dd382"
+    },
+    "join-export-window-lag|qwen3-coder-next:latest": {
+      "legacy_is_a": true,
+      "hash_a": "sha256:277af556e29ca6b5fc14ae3b961e27f5ec8f28bfe1854d30b327617206abd5f2",
+      "hash_b": "sha256:09a91efb25d4b60f002c07a154438a7aec8b2fc81fec07c86db49390a8eb3483"
+    },
+    "join-export-window|qwen3-coder-next:latest": {
+      "legacy_is_a": true,
+      "hash_a": "sha256:6376fd119952ee1107543c1562fad83ecb0c34c05bc68d4ee650d9addc66fe98",
+      "hash_b": "sha256:7ba44004ca856a84112e18056358b30b02e466971ba188fbdb4ce73eed3765a1"
+    },
+    "join-ingest-token-audit|qwen3-coder-next:latest": {
+      "legacy_is_a": false,
+      "hash_a": "sha256:17433d31972c0a82fc260b9c04afb2114bc8df8053c938246af349d0e59d61f8",
+      "hash_b": "sha256:08d1525d960e6dc8a20e6fa682bce049f58df01fc9eaae93afb717df3db0d352"
+    },
+    "join-ingest-token|qwen3-coder-next:latest": {
+      "legacy_is_a": false,
+      "hash_a": "sha256:afbceb17e56c0a2f4fb72fa8ea6bad74cba7014cd63a3eb6db133ea77ced9ea6",
+      "hash_b": "sha256:f8e4a86e5c942e1ab26bd07aee550db3a176b814d3c11a319d992e664436d8a6"
+    },
+    "join-quarantine-policy-cap|qwen3-coder-next:latest": {
+      "legacy_is_a": false,
+      "hash_a": "sha256:7dfb7ebd49c6f4ed8e3d6a88d70c1d4c6eb9ff5c28deddaef068d9ddd90ed325",
+      "hash_b": "sha256:3a6a9b5b8fa2d14946e9e0145cb8889a151d98b812dea603ef750cd10c1a9728"
+    },
+    "join-quarantine-policy-redrive|qwen3-coder-next:latest": {
+      "legacy_is_a": true,
+      "hash_a": "sha256:f5a480b2d7d6732506f8e8721af02ed56da2a1b200202402803c724f98a041ed",
+      "hash_b": "sha256:8f20becccd8158b5458b91620ca8969ff5080a5c7c8e37d33ce46b4ede289cd2"
+    },
+    "mem-alert-mute-scope|qwen3-coder-next:latest": {
+      "legacy_is_a": true,
+      "hash_a": "sha256:6b9513dacce753603eb2f0ecdc4385c1ba89ed8ebe39d4aecb697d08b1fbe493",
+      "hash_b": "sha256:289bb2289dd6bf4281931aa5207aa5082e2575eaa2f99c149f747aef460d0ec7"
+    },
+    "mem-alert-mute-window|qwen3-coder-next:latest": {
+      "legacy_is_a": true,
+      "hash_a": "sha256:63517cf69c089fee8beaa2e58c09aeb3e261316c5fd39a6d1341abfb3afe3ca4",
+      "hash_b": "sha256:4d279cb145f90d87a2ba8839e03bf7d18f4f0b9c23d12be178630a52f513f64a"
+    },
+    "mem-collector-cert-bundle|qwen3-coder-next:latest": {
+      "legacy_is_a": false,
+      "hash_a": "sha256:4049337a62e4fa89c5a4f4f0dfa6be2d7122a68b2d8cf1e6882ad47dc02c082d",
+      "hash_b": "sha256:ed630468cb8396a0492d4619a1b32a5fff84e3ac40cefc3ecf0797d9384547a5"
+    },
+    "mem-collector-cert-rotate|qwen3-coder-next:latest": {
+      "legacy_is_a": true,
+      "hash_a": "sha256:e0601ce6101a6ae46e34295157ff49e4c80ac8540c05aa3be52881940ba9b0eb",
+      "hash_b": "sha256:d27d7c46b9517359ec1335be5ed29340f20b4bed2ef328f3770c8d84ac67f7f4"
+    },
+    "mem-export-bucket-layout|qwen3-coder-next:latest": {
+      "legacy_is_a": true,
+      "hash_a": "sha256:c7ae58f6731924c059caf0dd18b3f7c036aec5db70a66b85ec2c8292cc5a6072",
+      "hash_b": "sha256:ee1c40262ad5a72411d078229dad820cf83526416c04fdcb03bf538deaa9bbe4"
+    },
+    "mem-export-bucket-region|qwen3-coder-next:latest": {
+      "legacy_is_a": true,
+      "hash_a": "sha256:ac98b032ef5c7de3f19add8d9e5b61286a07f3a7a51c20f86be9d19c6cb081cd",
+      "hash_b": "sha256:0ed81aa8b83be94a629ffed8931e98922426e4081539090ed1060ee4fcb40ea6"
+    },
+    "mem-ingest-token|qwen3-coder-next:latest": {
+      "legacy_is_a": true,
+      "hash_a": "sha256:18f1f8ee3c8ccf56c0b947a349cb99489afec9661c25f490bbef64b4b57f7e07",
+      "hash_b": "sha256:bdbc5b7cb880d87fbc961ce18c2683bbac2708c2addc06f55781f8e91dd71896"
+    },
+    "mem-replay-cursor|qwen3-coder-next:latest": {
+      "legacy_is_a": false,
+      "hash_a": "sha256:8f693fb979d6ad898339398348eaa36b5b58dd5a0357f0aea34fb948251fdc82",
+      "hash_b": "sha256:132a368ccc27fbbdc20f0ec703ae0f9c3e6c41a60d0f0265167f47c879fa9c7d"
+    },
+    "mem-replay-throttle|qwen3-coder-next:latest": {
+      "legacy_is_a": true,
+      "hash_a": "sha256:a47c3681b8119484895c91a9f9ce35e9c14227ebe8423a008998678575153fa1",
+      "hash_b": "sha256:0f9861ee39c9047b3b3d5b882cbda8bd0b10b1e376918cd09747ea6ad3b57150"
+    },
+    "mem-retention-floor-audit|qwen3-coder-next:latest": {
+      "legacy_is_a": false,
+      "hash_a": "sha256:c74ca9b5b6a659754d6ac7878644fbb1d6eafddf1ee969aac6824e5ca685526a",
+      "hash_b": "sha256:027d42bdbd47b5df3656be3eaadd03fdf515291f5496c9086caf727a3db70538"
+    },
+    "mem-retention-floor-days|qwen3-coder-next:latest": {
+      "legacy_is_a": true,
+      "hash_a": "sha256:21dc8e9bf16717cf835f108be300f4e382c6cd9dc16987075d7405e60a688497",
+      "hash_b": "sha256:266ead9f277b9f3499c6a4aa75a248383313fbb2a0236d5ed20b73a458aa04a7"
+    },
+    "mem-spool-sweep-interval|qwen3-coder-next:latest": {
+      "legacy_is_a": false,
+      "hash_a": "sha256:b2e178f5aa1d69f710ac14c6fc25ab5641bbb3671b0b419c95db00aab90c27a8",
+      "hash_b": "sha256:3ce0f4c5db209ee297579d365f1611f2de2dfc5eb346f70cc2df8ecd8b3a181a"
+    },
+    "mem-spool-sweep-scope|qwen3-coder-next:latest": {
+      "legacy_is_a": false,
+      "hash_a": "sha256:810cf9fdb368d94bd2fdd1c8b071ec087057f43b10a4e069931a140023e4b0d3",
+      "hash_b": "sha256:91a20f7603f136a1566044a82a49f59c29c031d9135b93db6dd906ecf81cfece"
+    },
+    "mem-token-staging|qwen3-coder-next:latest": {
+      "legacy_is_a": false,
+      "hash_a": "sha256:c6cecbb0877997e1d710c347d790cafa1d933a75dfd6728b4ff9cf4949865998",
+      "hash_b": "sha256:3535c0055738014240ea4101ec0d6d6c3883c258b4517ea7d29771c6ba77bd4d"
+    },
+    "stale-backfill-chunk-index|qwen3-coder-next:latest": {
+      "legacy_is_a": false,
+      "hash_a": "sha256:30e0b68def2166ff12b00b1fe617c251fd6f711ae62106e028bb3d58ddcdd5be",
+      "hash_b": "sha256:e36709beafbbe32c942030e155d5429778190c3afd420cf343ebdfb18479e8f7"
+    },
+    "stale-backfill-chunk-replay|qwen3-coder-next:latest": {
+      "legacy_is_a": false,
+      "hash_a": "sha256:a25ed232bc8c4e6e4b5ee466673bcc3d3ec65729e5ea7d726e16bdee551197c8",
+      "hash_b": "sha256:f4bb256fcf4870499b3c827bcd120ade1b22f00fbc6159416deafeb0de028d96"
+    },
+    "stale-fanout-webhook|qwen3-coder-next:latest": {
+      "legacy_is_a": false,
+      "hash_a": "sha256:d5f8b4ec29bff98e1822377a32848a8c8846d884e3fefe3ae1438e9fa79f07dc",
+      "hash_b": "sha256:1c5cba94eb6148a3fdaba9db067e5f2a79951af8c0d1c52492cb1549ad6d123a"
+    },
+    "stale-fanout-workers|qwen3-coder-next:latest": {
+      "legacy_is_a": false,
+      "hash_a": "sha256:2db800ee5095859a840cfd73e767986b7e8fb02c9a3f3077e7ea39a9dfa36825",
+      "hash_b": "sha256:120e7417753aa76df7a6fbe07d7519f205dfd755fa6f5bc178dffe76b8eb5eea"
+    },
+    "stale-gossip-interval-edge|qwen3-coder-next:latest": {
+      "legacy_is_a": true,
+      "hash_a": "sha256:e4b8c1b6f057e8f7282d707f150a3ae208154d8dc3ce7d1b66762aad7aac49d1",
+      "hash_b": "sha256:3acc569c33256572f8bf2cb84e881f1121afd53f375393ca7291509fc3d7aba2"
+    },
+    "stale-gossip-interval-mesh|qwen3-coder-next:latest": {
+      "legacy_is_a": false,
+      "hash_a": "sha256:3f825e00e3a5b54d21e0a7679522b9858f6d60e1869ea674e82b17ac57465e14",
+      "hash_b": "sha256:2637d4d3dc1300aa7680c5958d2d0bd12ff1eb57de05c1a2691be135a22b82c6"
+    },
+    "stale-notifier-timeout-hook|qwen3-coder-next:latest": {
+      "legacy_is_a": false,
+      "hash_a": "sha256:3f8577a49050c23fcc09db2e0971b0fe00849e9c63bb60fce7c24c8cc43b1902",
+      "hash_b": "sha256:ca10babed803c9dc3edc4c5495348ec8011c4850a807d7dc40230d2d4c6acfca"
+    },
+    "stale-notifier-timeout-page|qwen3-coder-next:latest": {
+      "legacy_is_a": true,
+      "hash_a": "sha256:fdf4fbdfc5feb549348b2c9c7010b402772c68b02a17cda1bfc79418179d65f5",
+      "hash_b": "sha256:14552e3a25e8861f9d3e71e4b8901285c1c4f9c15e1308a41ec44e95ccae440a"
+    },
+    "stale-probe-timeout-core|qwen3-coder-next:latest": {
+      "legacy_is_a": true,
+      "hash_a": "sha256:defe14afa6d25594cab7bcde2d5959177074adbd482b70d88d29b94e06bdeb1a",
+      "hash_b": "sha256:95d031d0cecb4e9f971904188afb4a8eb4242414f7df9d93ce5127efe8b252c7"
+    },
+    "stale-probe-timeout-edge|qwen3-coder-next:latest": {
+      "legacy_is_a": false,
+      "hash_a": "sha256:984965c5474e003a7c78c0ee94165b8fd0efce7fb25ddece248a509c4c1dd686",
+      "hash_b": "sha256:75159977507c9e2fc191399a6072fa4073bf528274f0a3f879c16c61975e8925"
+    },
+    "stale-spool-cap|qwen3-coder-next:latest": {
+      "legacy_is_a": true,
+      "hash_a": "sha256:26e400a8173c42ca66874ea4498a3f9cba0c977c7fd97b1bed524195716e2656",
+      "hash_b": "sha256:bc341913621912759298eb5dc58894d97abf6d76c87e3c4d82873c27dfe6beaf"
+    },
+    "stale-spool-edge-cap|qwen3-coder-next:latest": {
+      "legacy_is_a": false,
+      "hash_a": "sha256:78ff0f137cbfaf628b615d9d0a1900c80f745e02b96cb044d213a1b576b088c6",
+      "hash_b": "sha256:882477fb24efde7107dc0a2ee795ed3f47c95e75f9e5210d86ac0cec8a340523"
+    },
+    "stale-wal-segment-index|qwen3-coder-next:latest": {
+      "legacy_is_a": false,
+      "hash_a": "sha256:f57a5c194eec6c3ff69c9f3c48b990f555c06745e037ef4f52a269feb44f1e22",
+      "hash_b": "sha256:799494a6a66fa28690d45c7ea69aad274e88484b2f0195a2e5b980c72022eb93"
+    },
+    "stale-wal-segment-ingest|qwen3-coder-next:latest": {
+      "legacy_is_a": false,
+      "hash_a": "sha256:1d19658ea49301d3eee5c0f3025fa88d218af5b49073516f7691b3be97caba83",
+      "hash_b": "sha256:d23b20d7ad12823a67477cb623223fc3ddf08104c99ab6585a6071443c4ebb63"
+    }
+  },
+  "sealed_digest": ""
+}

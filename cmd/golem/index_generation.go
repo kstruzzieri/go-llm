@@ -22,10 +22,16 @@ const (
 	generationCleanupTimeout   = 5 * time.Second
 )
 
+var (
+	errNoActiveGeneration     = errors.New("golem: no active generation")
+	errEmptyStagingGeneration = errors.New("golem: mutated staging generation is empty")
+)
+
 type activeGenerationPointer struct {
 	SchemaVersion int    `json:"schemaVersion"`
 	WorkspaceID   string `json:"workspaceID"`
-	Generation    string `json:"generation"`
+	Generation    string `json:"generation,omitempty"`
+	Retired       bool   `json:"retired,omitempty"`
 }
 
 type generationMetadata struct {
@@ -49,6 +55,11 @@ type indexGeneration struct {
 	legacy       bool
 }
 
+// stagingMutator applies a managed mutation to the staging store in place of
+// the workspace walk. indexer is nil when the build runs without an embedder
+// (delete needs none).
+type stagingMutator func(ctx context.Context, indexer *rag.Indexer, store *rag.SQLiteStore) error
+
 type generationBuildOptions struct {
 	root                string
 	dbPath              string
@@ -56,11 +67,13 @@ type generationBuildOptions struct {
 	requestedModel      string
 	actualVectorSpace   string
 	embedder            rag.Embedder
+	summarize           rag.SourceSummaryGenerator
 	full                bool
 	pruneDeleted        bool
 	refuseInvalidActive bool
 	out                 io.Writer
 	finalizationHook    finalizationHook
+	mutate              stagingMutator // non-nil: managed mutation instead of the workspace walk
 }
 
 type generationBuildResult struct {
@@ -70,14 +83,18 @@ type generationBuildResult struct {
 	index      indexResult
 	activeErr  error
 	gcWarn     string // non-fatal superseded-generation removal failure
+	summaryErr error  // non-fatal optional summary generation failures
 }
 
 func buildIndexGeneration(ctx context.Context, opts generationBuildOptions) (result generationBuildResult, err error) {
 	if err := ctx.Err(); err != nil {
 		return result, err
 	}
-	if opts.dbPath == "" || opts.workspaceID == "" || opts.requestedModel == "" || opts.actualVectorSpace == "" || opts.embedder == nil || opts.out == nil {
-		return result, fmt.Errorf("golem: build index generation: db path, workspace, requested model, actual vector space, embedder, and output are required")
+	if opts.dbPath == "" || opts.workspaceID == "" || opts.requestedModel == "" || opts.actualVectorSpace == "" || opts.out == nil {
+		return result, fmt.Errorf("golem: build index generation: db path, workspace, requested model, actual vector space, and output are required")
+	}
+	if opts.mutate == nil && (opts.root == "" || opts.embedder == nil) {
+		return result, fmt.Errorf("golem: build index generation: root and embedder are required for a workspace walk")
 	}
 	active, activeErr := resolveActiveGeneration(ctx, opts.dbPath, opts.workspaceID)
 	result.activeErr = activeErr
@@ -86,10 +103,27 @@ func buildIndexGeneration(ctx context.Context, opts generationBuildOptions) (res
 		case activeErr == nil && active.metadata.VectorSpaceID != opts.actualVectorSpace:
 			return result, fmt.Errorf("golem: existing index uses vector space %s, successful embedding route is %s; run \"golem index -full\" to rebuild",
 				active.metadata.VectorSpaceID, opts.actualVectorSpace)
-		case activeErr != nil && !errors.Is(activeErr, os.ErrNotExist):
+		case activeErr != nil && !errors.Is(activeErr, errNoActiveGeneration):
 			return result, fmt.Errorf("golem: existing index is invalid (%v); run \"golem index -full\" to rebuild", activeErr)
-		case errors.Is(activeErr, os.ErrNotExist) && (fileExists(opts.dbPath) || fileExists(sidecarPath(opts.dbPath))):
-			return result, fmt.Errorf("golem: existing index has no valid sidecar; run \"golem index -full\" to rebuild")
+		}
+	}
+	rebuildsFromScratch := opts.full || activeErr != nil || active.metadata.VectorSpaceID != opts.actualVectorSpace
+	if rebuildsFromScratch {
+		candidate, inspect, recoveryErr := managedSourceRecoveryGeneration(ctx, opts.dbPath, opts.workspaceID, active, activeErr)
+		if recoveryErr != nil {
+			return result, fmt.Errorf("golem: refusing workspace rebuild: cannot verify damaged index for managed sources: %w; back up or remove the damaged index before rebuilding", recoveryErr)
+		}
+		if inspect {
+			hasManaged, inspectErr := generationHasManagedSources(ctx, candidate)
+			if inspectErr != nil {
+				return result, fmt.Errorf("golem: refusing workspace rebuild: cannot verify damaged index for managed sources: %w; back up or remove the damaged index before rebuilding", inspectErr)
+			}
+			if hasManaged {
+				if activeErr != nil {
+					return result, fmt.Errorf("golem: refusing workspace rebuild: damaged active index contains managed sources that a fresh rebuild cannot preserve; restore its generation metadata, then remove them with \"golem source rm\"")
+				}
+				return result, fmt.Errorf("golem: refusing workspace rebuild: active index contains managed sources that a fresh rebuild cannot preserve; remove them with \"golem source rm\" before rebuilding")
+			}
 		}
 	}
 	keepID := ""
@@ -99,8 +133,9 @@ func buildIndexGeneration(ctx context.Context, opts generationBuildOptions) (res
 		// active.id is "" for a legacy pair, so every finalized directory is a
 		// pre-publication orphan and collectable.
 		gcFinalized, keepID = true, active.id
-	case errors.Is(activeErr, os.ErrNotExist):
-		// Nothing was ever published: finalized directories are crash orphans.
+	case errors.Is(activeErr, errNoActiveGeneration):
+		// No generation is active: finalized directories are crash or retired
+		// generation orphans.
 		gcFinalized = true
 	}
 	gcWarn, err := cleanupStaleGenerations(ctx, opts.dbPath, keepID, gcFinalized)
@@ -141,26 +176,31 @@ func buildIndexGeneration(ctx context.Context, opts generationBuildOptions) (res
 			}
 		}
 	}()
-	indexer, err := rag.NewIndexerWithEmbedder(opts.embedder, store, rag.WithEmbeddingModel(opts.requestedModel))
-	if err != nil {
-		return result, fmt.Errorf("golem: build staging indexer: %w", err)
+	var indexer *rag.Indexer
+	if opts.embedder != nil {
+		indexer, err = rag.NewIndexerWithEmbedder(opts.embedder, store, rag.WithEmbeddingModel(opts.requestedModel))
+		if err != nil {
+			return result, fmt.Errorf("golem: build staging indexer: %w", err)
+		}
 	}
-	result.index = executeIndex(ctx, indexJob{
-		indexer: indexer, store: store, root: opts.root,
-		dbPath: staging.dbPath, displayDBPath: opts.dbPath,
-		sidecarPath: staging.metadataPath, workspaceID: opts.workspaceID,
-		requestedModel: opts.requestedModel, out: opts.out, pruneDeleted: opts.pruneDeleted,
-	})
-	if checkpointErr := checkpointGeneration(ctx, store); checkpointErr != nil {
-		return result, checkpointErr
+	var inherited *generationMetadata
+	if !opts.full && activeErr == nil && active.metadata.VectorSpaceID == opts.actualVectorSpace {
+		inherited = &active.metadata
 	}
-	if closeErr := store.Close(); closeErr != nil {
-		storeClosed = true
-		return result, fmt.Errorf("golem: close staging database %q: %w", staging.dbPath, closeErr)
-	}
-	storeClosed = true
-	if err := ctx.Err(); err != nil {
-		return result, err
+	if opts.mutate != nil {
+		if err := opts.mutate(ctx, indexer, store); err != nil {
+			return result, err
+		}
+		if err := finishMutatedStaging(ctx, store, staging, opts, inherited); err != nil {
+			return result, err
+		}
+	} else {
+		result.index = executeIndex(ctx, indexJob{
+			indexer: indexer, store: store, root: opts.root,
+			dbPath: staging.dbPath, displayDBPath: opts.dbPath,
+			sidecarPath: staging.metadataPath, workspaceID: opts.workspaceID,
+			requestedModel: opts.requestedModel, out: opts.out, pruneDeleted: opts.pruneDeleted,
+		})
 	}
 	sc, sidecarErr := readSidecar(staging.metadataPath)
 	if sidecarErr != nil {
@@ -171,6 +211,25 @@ func buildIndexGeneration(ctx context.Context, opts generationBuildOptions) (res
 	}
 	if result.index.exitErr != nil && sc.Status != "partial" {
 		return result, fmt.Errorf("golem: indexing did not produce a publishable generation")
+	}
+	if opts.summarize != nil {
+		if err := store.GenerateSourceSummaries(ctx, opts.summarize); err != nil {
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return result, ctxErr
+			}
+			result.summaryErr = fmt.Errorf("golem: generate staged source summaries: %w", err)
+		}
+	}
+	if checkpointErr := checkpointGeneration(ctx, store); checkpointErr != nil {
+		return result, checkpointErr
+	}
+	if closeErr := store.Close(); closeErr != nil {
+		storeClosed = true
+		return result, fmt.Errorf("golem: close staging database %q: %w", staging.dbPath, closeErr)
+	}
+	storeClosed = true
+	if err := ctx.Err(); err != nil {
+		return result, err
 	}
 	readOnly, err := rag.OpenSQLiteStoreReadOnly(staging.dbPath)
 	if err != nil {
@@ -224,6 +283,73 @@ func buildIndexGeneration(ctx context.Context, opts generationBuildOptions) (res
 	return result, nil
 }
 
+func generationHasManagedSources(ctx context.Context, generation indexGeneration) (has bool, err error) {
+	store, err := rag.OpenSQLiteStoreReadOnly(generation.dbPath)
+	if err != nil {
+		return false, fmt.Errorf("golem: inspect active generation for managed sources: %w", err)
+	}
+	defer func() {
+		if closeErr := store.Close(); closeErr != nil {
+			err = errors.Join(err, fmt.Errorf("golem: close active generation after managed-source inspection: %w", closeErr))
+		}
+	}()
+	return storeHasManagedSources(ctx, store)
+}
+
+// managedSourceRecoveryGeneration finds the database still named by an
+// authoritative pointer (or the legacy database when no pointer exists), even
+// when generation metadata is damaged. An absent target is rebuildable; an
+// unreadable candidate must fail closed because it may retain managed rows.
+func managedSourceRecoveryGeneration(
+	ctx context.Context,
+	dbPath, workspaceID string,
+	active indexGeneration,
+	activeErr error,
+) (indexGeneration, bool, error) {
+	if activeErr == nil {
+		return active, true, nil
+	}
+	pointer, err := readActivePointer(ctx, dbPath)
+	if err == nil {
+		if err := validatePointer(pointer, workspaceID); err != nil {
+			return indexGeneration{}, false, err
+		}
+		if pointer.Retired {
+			return indexGeneration{}, false, nil
+		}
+		generation := generationPaths(dbPath, pointer.Generation)
+		exists, err := indexArtifactExists(generation.dbPath)
+		if err != nil {
+			return indexGeneration{}, false, err
+		}
+		return generation, exists, nil
+	}
+	if !errors.Is(err, os.ErrNotExist) {
+		return indexGeneration{}, false, err
+	}
+	exists, err := indexArtifactExists(dbPath)
+	if err != nil {
+		return indexGeneration{}, false, err
+	}
+	return indexGeneration{dbPath: dbPath, legacy: true}, exists, nil
+}
+
+func storeHasManagedSources(ctx context.Context, store *rag.SQLiteStore) (bool, error) {
+	var tableExists bool
+	if err := store.DB().QueryRowContext(ctx,
+		`SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'managed_documents')`).Scan(&tableExists); err != nil {
+		return false, fmt.Errorf("golem: inspect managed-source schema: %w", err)
+	}
+	if !tableExists {
+		return false, nil
+	}
+	var has bool
+	if err := store.DB().QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM managed_documents)`).Scan(&has); err != nil {
+		return false, fmt.Errorf("golem: inspect managed sources: %w", err)
+	}
+	return has, nil
+}
+
 func checkpointGeneration(ctx context.Context, store *rag.SQLiteStore) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -235,6 +361,52 @@ func checkpointGeneration(ctx context.Context, store *rag.SQLiteStore) error {
 		return fmt.Errorf("golem: checkpoint staging generation: %w", err)
 	}
 	return nil
+}
+
+// finishMutatedStaging validates the mutated staging store and writes its
+// sidecar: the managed-mutation counterpart of executeIndex's tail. A copied
+// partial generation keeps its unresolved workspace error count; only a fresh
+// managed-only generation starts complete.
+func finishMutatedStaging(ctx context.Context, store *rag.SQLiteStore, staging indexGeneration, opts generationBuildOptions, inherited *generationMetadata) error {
+	stats, err := store.Stats(ctx)
+	if err != nil {
+		return fmt.Errorf("golem: read mutated staging stats: %w", err)
+	}
+	probe, err := store.ProbeVectorSpaces(ctx)
+	if err != nil {
+		return fmt.Errorf("golem: probe mutated staging vector space: %w", err)
+	}
+	if stats.TotalSources == 0 && stats.TotalChunks == 0 && len(probe.KnownIDs) == 0 && !probe.HasUnknown {
+		hasManaged, err := storeHasManagedSources(ctx, store)
+		if err != nil {
+			return err
+		}
+		if hasManaged {
+			return errors.New("golem: refusing to remove the last chunk-bearing source while zero-chunk managed sources remain; remove those sources first")
+		}
+		return errEmptyStagingGeneration
+	}
+	clean := len(probe.KnownIDs) == 1 && !probe.HasUnknown
+	if stats.TotalSources < 1 || !clean {
+		return fmt.Errorf("golem: refusing to publish an unusable index (sources=%d, vector spaces=%v, legacy=%v); a generation must keep at least one source",
+			stats.TotalSources, probe.KnownIDs, probe.HasUnknown)
+	}
+	if err := chmodIndexDBFiles(staging.dbPath); err != nil {
+		return err
+	}
+	status, errorCount := "complete", 0
+	if inherited != nil && inherited.Status == "partial" {
+		status, errorCount = inherited.Status, inherited.ErrorCount
+	}
+	return writeSidecar(staging.metadataPath, indexSidecar{
+		SchemaVersion:           indexSchemaVersion,
+		WorkspaceID:             opts.workspaceID,
+		RequestedEmbeddingModel: opts.requestedModel,
+		VectorSpaceID:           probe.KnownIDs[0],
+		IndexedAt:               time.Now().UTC().Format(time.RFC3339),
+		Status:                  status,
+		ErrorCount:              errorCount,
+	})
 }
 
 func indexPathStem(dbPath string) string {
@@ -366,9 +538,20 @@ func readStrictJSON(ctx context.Context, path string, dst any) (err error) {
 }
 
 func readActivePointer(ctx context.Context, dbPath string) (activeGenerationPointer, error) {
+	if err := ctx.Err(); err != nil {
+		return activeGenerationPointer{}, err
+	}
+	path := activePointerPath(dbPath)
+	info, err := os.Lstat(path)
+	if err != nil {
+		return activeGenerationPointer{}, fmt.Errorf("golem: inspect active generation pointer %q: %w", path, err)
+	}
+	if !info.Mode().IsRegular() {
+		return activeGenerationPointer{}, fmt.Errorf("golem: active generation pointer %q is not a regular file", path)
+	}
 	var pointer activeGenerationPointer
-	if err := readStrictJSON(ctx, activePointerPath(dbPath), &pointer); err != nil {
-		return activeGenerationPointer{}, fmt.Errorf("golem: read active generation pointer %q: %w", activePointerPath(dbPath), err)
+	if err := readStrictJSON(ctx, path, &pointer); err != nil {
+		return activeGenerationPointer{}, fmt.Errorf("golem: read active generation pointer %q: %w", path, err)
 	}
 	return pointer, nil
 }
@@ -379,6 +562,12 @@ func validatePointer(pointer activeGenerationPointer, workspaceID string) error 
 	}
 	if pointer.WorkspaceID != workspaceID {
 		return fmt.Errorf("golem: active generation pointer workspaceID %q does not match %q", pointer.WorkspaceID, workspaceID)
+	}
+	if pointer.Retired {
+		if pointer.Generation != "" {
+			return fmt.Errorf("golem: retired active generation pointer names generation %q", pointer.Generation)
+		}
+		return nil
 	}
 	if !validGenerationID(pointer.Generation) {
 		return fmt.Errorf("golem: active generation pointer has invalid generation %q", pointer.Generation)
@@ -473,6 +662,9 @@ func resolveActiveGeneration(ctx context.Context, dbPath, workspaceID string) (i
 		if err := validatePointer(pointer, workspaceID); err != nil {
 			return indexGeneration{}, err
 		}
+		if pointer.Retired {
+			return indexGeneration{}, fmt.Errorf("%w for %q", errNoActiveGeneration, dbPath)
+		}
 		gen := generationPaths(dbPath, pointer.Generation)
 		if err := readStrictJSON(ctx, gen.metadataPath, &gen.metadata); err != nil {
 			return indexGeneration{}, fmt.Errorf("golem: read generation metadata %q: %w", gen.metadataPath, err)
@@ -488,8 +680,20 @@ func resolveActiveGeneration(ctx context.Context, dbPath, workspaceID string) (i
 	if !os.IsNotExist(errors.Unwrap(err)) && !errors.Is(err, os.ErrNotExist) {
 		return indexGeneration{}, err
 	}
-	if !fileExists(dbPath) || !fileExists(sidecarPath(dbPath)) {
-		return indexGeneration{}, fmt.Errorf("golem: %w: no active generation for %q", os.ErrNotExist, dbPath)
+	dbExists, err := indexArtifactExists(dbPath)
+	if err != nil {
+		return indexGeneration{}, err
+	}
+	metadataExists, err := indexArtifactExists(sidecarPath(dbPath))
+	if err != nil {
+		return indexGeneration{}, err
+	}
+	if !dbExists && !metadataExists {
+		return indexGeneration{}, fmt.Errorf("%w for %q", errNoActiveGeneration, dbPath)
+	}
+	if !dbExists || !metadataExists {
+		return indexGeneration{}, fmt.Errorf("golem: incomplete legacy index for %q (database=%t metadata=%t); run \"golem index -full\" to rebuild",
+			dbPath, dbExists, metadataExists)
 	}
 	// A live write-ahead log means an interrupted pre-generation writer: the
 	// immutable read-only open would silently serve (and the staging copy
@@ -542,6 +746,20 @@ func resolveActiveGeneration(ctx context.Context, dbPath, workspaceID string) (i
 	return legacy, nil
 }
 
+func indexArtifactExists(path string) (bool, error) {
+	info, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if !info.Mode().IsRegular() {
+		return false, fmt.Errorf("golem: index artifact %q is not a regular file", path)
+	}
+	return true, nil
+}
+
 func validateGenerationMetadataLegacy(metadata generationMetadata, pointer activeGenerationPointer) error {
 	metadata.Generation = strings.Repeat("0", 32)
 	pointer.Generation = metadata.Generation
@@ -563,12 +781,27 @@ func publishActiveGeneration(ctx context.Context, dbPath string, pointer activeG
 	if err := validatePointer(pointer, pointer.WorkspaceID); err != nil {
 		return err
 	}
+	if pointer.Retired {
+		return errors.New("golem: publish active generation: retired pointer is not a generation")
+	}
 	return writeAtomicJSON(ctx, activePointerPath(dbPath), pointer, func(boundary publicationBoundary) error {
 		if hook == nil {
 			return nil
 		}
 		return hook(boundary)
 	})
+}
+
+func retireActiveGeneration(ctx context.Context, dbPath, workspaceID string) error {
+	pointer := activeGenerationPointer{
+		SchemaVersion: activePointerSchemaVersion,
+		WorkspaceID:   workspaceID,
+		Retired:       true,
+	}
+	if err := validatePointer(pointer, workspaceID); err != nil {
+		return err
+	}
+	return writeAtomicJSON(ctx, activePointerPath(dbPath), pointer, nil)
 }
 
 func writeAtomicJSON(ctx context.Context, path string, value any, hook publicationHook) (err error) {

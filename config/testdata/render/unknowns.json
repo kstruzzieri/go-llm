@@ -1,0 +1,30 @@
+{
+  "defaults": {
+    "agent": "agent"
+  },
+  "models": {
+    "agent": {
+      "capabilities": [
+        "chat",
+        "tool_call"
+      ],
+      "name": "m1",
+      "options": {
+        "temperature": 0.2,
+        "x-options-note": "nested unknown survives"
+      },
+      "provider": "local",
+      "type": "dense",
+      "x-model-note": "also me"
+    }
+  },
+  "providers": {
+    "local": {
+      "api_key": "${DOC_TEST_KEY}",
+      "base_url": "http://localhost:8080",
+      "timeout": "0s",
+      "x-provider-note": "keep me too"
+    }
+  },
+  "x-team-note": "keep me"
+}

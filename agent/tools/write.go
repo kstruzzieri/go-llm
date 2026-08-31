@@ -69,14 +69,14 @@ func (t *WriteFile) Plan(_ context.Context, raw json.RawMessage) (agent.ToolPlan
 	}
 	_, priorExists, err := t.ws.resolveWriteTarget(args.Path)
 	if err != nil {
-		return agent.ToolPlan{Effect: eff}, err
+		return agent.ToolPlan{Effect: eff}, toolVisibleError(err)
 	}
 	var prior []byte
 	beforeHash := absentHash
 	if priorExists {
 		prior, err = t.ws.readAll(args.Path)
 		if err != nil {
-			return agent.ToolPlan{Effect: eff}, err
+			return agent.ToolPlan{Effect: eff}, toolVisibleError(err)
 		}
 		if len(prior) > mutateMaxBytes {
 			return agent.ToolPlan{Effect: eff}, fmt.Errorf("file exceeds size limit")
@@ -97,10 +97,10 @@ func (t *WriteFile) Plan(_ context.Context, raw json.RawMessage) (agent.ToolPlan
 		afterHash:    ContentHash(content),
 		summary:      fmt.Sprintf("write %s", args.Path),
 	})
-	return agent.ToolPlan{Effect: eff, Preview: preview}, nil
+	return agent.ToolPlan{Effect: eff, Preview: preview, ApprovalKey: WriteClassApprovalKey}, nil
 }
 
-func (t *WriteFile) Invoke(_ context.Context, raw json.RawMessage) (agent.ToolResult, error) {
+func (t *WriteFile) Invoke(ctx context.Context, raw json.RawMessage) (agent.ToolResult, error) {
 	pp, ok := t.consume(ContentHash(raw))
 	if !ok {
 		return errResult("mutation preview missing; retry"), nil
@@ -112,13 +112,13 @@ func (t *WriteFile) Invoke(_ context.Context, raw json.RawMessage) (agent.ToolRe
 	}
 	_, nowExists, err := t.ws.resolveWriteTarget(pp.path)
 	if err != nil {
-		return errResult(err.Error()), nil
+		return errResult(toolVisibleError(err).Error()), nil
 	}
 	curHash := absentHash
 	if nowExists {
 		cur, rerr := t.ws.readAll(pp.path)
 		if rerr != nil {
-			return errResult(rerr.Error()), nil
+			return errResult(toolVisibleError(rerr).Error()), nil
 		}
 		curHash = ContentHash(cur)
 	}
@@ -129,12 +129,18 @@ func (t *WriteFile) Invoke(_ context.Context, raw json.RawMessage) (agent.ToolRe
 	// between this re-read and the rename below. WriteFileAtomic re-checks path TYPE
 	// (symlink/dir) before renaming but not content; without OS file locks this is an
 	// accepted limitation for a local single-user coding agent.
-	if err := t.ws.WriteFileAtomic(pp.path, pp.afterContent); err != nil {
-		return errResult(err.Error()), nil
-	}
-	record(t.j, MutationRecord{
+	rec := MutationRecord{
 		Path: pp.path, PriorContent: pp.priorContent, Existed: pp.priorExists,
 		AfterHash: pp.afterHash, Summary: pp.summary, At: time.Now(),
+	}
+	toolErr, internalErr := runJournaledWrite(ctx, t.j, rec, func() error {
+		return t.ws.WriteFileAtomic(pp.path, pp.afterContent)
 	})
+	if internalErr != nil {
+		return agent.ToolResult{}, internalErr
+	}
+	if toolErr != nil {
+		return errResult(toolVisibleError(toolErr).Error()), nil
+	}
 	return agent.ToolResult{Content: pp.summary, Preview: pp.summary}, nil
 }

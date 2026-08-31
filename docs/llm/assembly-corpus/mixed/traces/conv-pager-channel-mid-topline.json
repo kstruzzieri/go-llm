@@ -1,0 +1,26 @@
+{
+  "id": "conv-pager-channel-mid-topline",
+  "source": "assembly-corpus-mixed",
+  "captured_at": "0001-01-01T00:00:00Z",
+  "system": "You are the driftwatch assistant. driftwatch is a self-hosted telemetry ingest and alerting daemon. Answer using only the provided conversation, memory records, and retrieved context.",
+  "tools": null,
+  "turns": [
+    {
+      "role": "user",
+      "content": "Facts:\nThe conversation settled page-escalation routing on the #dw-crow-watch channel, keeping the general ops room for non-paging chatter; the notifier itself reads its destination channel from deployment config.\n\nQuestion: Which channel did we pick for page escalations?"
+    }
+  ],
+  "golden": {
+    "tool_calls": null,
+    "final_answer_criteria": "Names the #dw-crow-watch channel as the destination for page escalations. Answers naming the general ops room or claiming the channel is only set in deployment config score 0. An answer presenting both the correct and a competing value without committing to one scores 0."
+  },
+  "assembly_eval": {
+    "pair_id": "conv-pager-channel-mid",
+    "mode": "topline",
+    "candidate_ids": null,
+    "estimated_prompt_tokens": 114,
+    "stratum": "conversation_only",
+    "answer_home": "conversation",
+    "scenario_family": "pager-escalation-channel"
+  }
+}

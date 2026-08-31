@@ -8,6 +8,7 @@ import (
 	"unicode/utf8"
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
+	"golang.org/x/sync/errgroup"
 
 	"github.com/kstruzzieri/go-llm/agent"
 )
@@ -31,6 +32,11 @@ const (
 	// background loop on its own context, so cancelling here does not close the
 	// live session, which is later driven by per-call dispatch contexts.
 	connectTimeout = 30 * time.Second
+	// maxConcurrentConnects bounds concurrent dials in Connect. Dials fork/exec
+	// a subprocess per stdio server (unlike tool calls, which ride established
+	// connections at parallelToolCallLimit=8), so the bound also caps the
+	// startup process-spawn burst.
+	maxConcurrentConnects = 4
 )
 
 // lister is the minimal slice of *gomcp.ClientSession for paginated tools/list.
@@ -96,12 +102,26 @@ func (m *Manager) Close() error {
 	return errors.Join(errs...)
 }
 
-// Connect dials each server, lists its tools (paginated), and adapts them.
+// Connect dials each server (concurrently, bounded by maxConcurrentConnects),
+// lists its tools (paginated), and adapts them. Sessions, tools, and warnings
+// are aggregated in config order regardless of dial completion order.
 // Fatal error: invalid or duplicate alias (config error). Everything else -- a
 // server that fails to connect/list, a tool skipped for an invalid name/schema,
 // a per-server cap truncation -- is a non-fatal warning, so one bad server never
 // aborts startup.
 func Connect(ctx context.Context, impl Implementation, servers []Server) (*Manager, []error, error) {
+	return connectWithHooks(ctx, impl, servers, nil)
+}
+
+// connectHooks carries test-only observation callbacks; nil in production.
+// launched fires on the caller's goroutine immediately before a server's dial
+// is dispatched; published fires after that server's result is recorded.
+type connectHooks struct {
+	launched  func(i int)
+	published func(i int)
+}
+
+func connectWithHooks(ctx context.Context, impl Implementation, servers []Server, h *connectHooks) (*Manager, []error, error) {
 	seen := make(map[string]bool, len(servers))
 	for _, s := range servers {
 		if !validAlias(s.Alias) {
@@ -113,18 +133,47 @@ func Connect(ctx context.Context, impl Implementation, servers []Server) (*Manag
 		seen[s.Alias] = true
 	}
 
+	// Dial concurrently (bounded), but keep aggregate state deterministic:
+	// each worker writes only its own results slot, and g.Wait() supplies the
+	// happens-before edge, so the serial aggregation below reproduces the
+	// serial implementation's sessions/tools/warnings byte-for-byte for the
+	// same per-server outcomes regardless of completion order.
+	results := make([]connectResult, len(servers))
+	var g errgroup.Group
+	g.SetLimit(maxConcurrentConnects)
+	for i, s := range servers {
+		if h != nil && h.launched != nil {
+			h.launched(i)
+		}
+		g.Go(func() error {
+			session, tools, warns := connectOne(ctx, impl, s)
+			results[i] = connectResult{session: session, tools: tools, warns: warns}
+			if h != nil && h.published != nil {
+				h.published(i)
+			}
+			return nil // failures are per-server warnings, never group errors
+		})
+	}
+	_ = g.Wait()
+
 	m := &Manager{}
 	var warnings []error
-	for _, s := range servers {
-		session, tools, warns := connectOne(ctx, impl, s)
-		warnings = append(warnings, warns...)
-		if session == nil {
+	for _, r := range results {
+		warnings = append(warnings, r.warns...)
+		if r.session == nil {
 			continue
 		}
-		m.sessions = append(m.sessions, session)
-		m.tools = append(m.tools, tools...)
+		m.sessions = append(m.sessions, r.session)
+		m.tools = append(m.tools, r.tools...)
 	}
 	return m, warnings, nil
+}
+
+// connectResult is one server's dial outcome, slotted by config index.
+type connectResult struct {
+	session *gomcp.ClientSession
+	tools   []agent.Tool
+	warns   []error
 }
 
 func connectOne(ctx context.Context, impl Implementation, s Server) (*gomcp.ClientSession, []agent.Tool, []error) {

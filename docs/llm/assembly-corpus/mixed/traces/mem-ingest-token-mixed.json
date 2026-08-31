@@ -1,0 +1,116 @@
+{
+  "id": "mem-ingest-token-mixed",
+  "source": "assembly-corpus-mixed",
+  "captured_at": "0001-01-01T00:00:00Z",
+  "system": "You are the driftwatch assistant. driftwatch is a self-hosted telemetry ingest and alerting daemon. Answer using only the provided conversation, memory records, and retrieved context.",
+  "tools": null,
+  "turns": [
+    {
+      "role": "user",
+      "content": "Busy morning. The docs site search index is stale again and people keep landing on the pre-rename package pages. Can you kick a reindex and add it to the publish pipeline so it stops drifting?"
+    },
+    {
+      "role": "assistant",
+      "content": "Reindexed the docs site and wired the reindex step into the publish pipeline so every deploy refreshes search."
+    },
+    {
+      "role": "user",
+      "content": "Also the ingest edge dashboards got rearranged during the reorg and the latency heatmap ended up below the fold. Can you move it back up next to the error-rate panel where oncall expects it?"
+    },
+    {
+      "role": "assistant",
+      "content": "Moved the latency heatmap back beside the error-rate panel and locked the row layout so future edits do not shuffle it again."
+    },
+    {
+      "role": "user",
+      "content": "The weekly retro keeps colliding with the platform team's review. Can you find a slot that works for both groups and move the recurring invite?"
+    },
+    {
+      "role": "assistant",
+      "content": "Moved the retro to a slot clear of the platform review and updated the recurring invite; both leads confirmed the new time works."
+    },
+    {
+      "role": "user",
+      "content": "And the collector's debug logging is still at the verbose level from last week's incident. Can you drop it back to normal before the log budget alarms start firing?"
+    },
+    {
+      "role": "assistant",
+      "content": "Dropped the collector logging back to the normal level and added a reminder to the incident checklist so verbose logging gets reverted at close-out."
+    },
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "id": "c1",
+          "name": "retrieve",
+          "arguments": {
+            "query": "ingest token rotation handling",
+            "k": 3
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "content": "### source: \"internal/ingest/auth.go\"\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nnote: metadata overview (summary omitted: budget)\n--- source: \"internal/ingest/auth.go\" (lines 1-15, similarity: 1.00) ---\n1| package ingest\n2| \n3| import \"strings\"\n4| \n5| // authenticate checks the presented ingest token against the accepted\n6| // prefixes from deployment config. Rotations are staged by widening\n7| // and later narrowing that set; no prefix is hard-coded here.\n8| func (g *Gateway) authenticate(token string) bool {\n9| \tfor _, p := range g.cfg.AcceptedPrefixes {\n10| \t\tif strings.HasPrefix(token, p) {\n11| \t\t\treturn g.verify(token)\n12| \t\t}\n13| \t}\n14| \treturn false\n15| }\n\n### source: \"internal/ingest/limits.go\"\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nnote: metadata overview (summary omitted: budget)\n\n### source: \"docs/operations.md\"\nlanguage: markdown\nindexed: 2025-07-27T00:00:00Z\nnote: metadata overview (summary omitted: budget)\n--- source: \"docs/operations.md\" (lines 1-24, similarity: 1.00) ---\n1| # driftwatch operations\n2| \n3| driftwatch ships as a single static binary. Run it under a process\n4| supervisor with the spool on local disk, and point producers at a\n5| stable DNS name rather than an address.\n6| \n7| ## Restarts\n8| \n9| Send SIGTERM and wait. Ingest stops accepting, the spool drains for a\n10| bounded grace period, and anything still buffered is picked up on the\n11| next start. No manual intervention is required.\n12| \n13| ## Credential rotation\n14| \n15| Rotations are staged through config: add the incoming credential shape\n16| to the accepted set, migrate producers, then narrow the accepted set\n17| again once the drain completes. Never narrow first; producers signing\n18| with retired credentials are rejected at the edge.\n19| \n20| ## Tenants\n21| \n22| Per-tenant ingest budgets live in the tenants file and hot-reload on\n23| change. Prefer explicit entries for every production tenant; the\n24| built-in default exists for evaluation, not for steady state.\n",
+      "tool_call_id": "c1",
+      "name": "retrieve"
+    },
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "id": "c2",
+          "name": "agent_memory_search",
+          "arguments": {
+            "query": ""
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "content": "rec-dash-refresh · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:\nrec-oncall-handoff · working · created:2025-07-27 · updated:2025-07-27 · scope:session · ns: · src:\nrec-token-rotation · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:",
+      "tool_call_id": "c2",
+      "name": "agent_memory_search"
+    },
+    {
+      "role": "user",
+      "content": "Which prefix do rotated ingest tokens carry?"
+    }
+  ],
+  "golden": {
+    "tool_calls": null,
+    "final_answer_criteria": "States that rotated ingest tokens carry the dwk2- prefix. Answers that only describe config-supplied prefixes without naming dwk2- score 0. An answer presenting both the correct and a competing value without committing to one scores 0."
+  },
+  "assembly_eval": {
+    "pair_id": "mem-ingest-token",
+    "mode": "mixed",
+    "candidate_ids": [
+      "524f76002d4e73828a49c8dd027719b83c1117ea3e662a667c10fac1feebd215",
+      "52d7da19cbb27d258b3b3f59d9733414701fc088ff30626d86e61c41c40fea77",
+      "b0e0aeb52f72729936efafa42a6d6cae742557e98ef7472652ad5a94d395e206",
+      "rec-dash-refresh",
+      "rec-oncall-handoff",
+      "rec-token-rotation"
+    ],
+    "estimated_prompt_tokens": 937,
+    "state_digest": "71de272dec4e10aeaa79b098c35318110ee1b12dbcb96df1662cc2fe252fe53d",
+    "subjects": [
+      "(c1|rag|internal/ingest/auth.go)",
+      "(c1|rag|internal/ingest/limits.go)",
+      "(c1|rag|docs/operations.md)",
+      "(c2|memory|rec-dash-refresh)",
+      "(c2|memory|rec-oncall-handoff)",
+      "(c2|memory|rec-token-rotation)"
+    ],
+    "stratum": "memory_only",
+    "answer_home": "memory",
+    "scenario_family": "ingest-token-mem",
+    "twin_group": "tw-ingest-token",
+    "budget": 982,
+    "raw_state_tokens": 1637,
+    "pressure_level": "critical",
+    "shed_bytes": 2385
+  }
+}

@@ -35,7 +35,7 @@ The Docker runner builds from `Dockerfile.ci`, mounts the repository at `/worksp
 1. Make code changes normally.
 2. Run `scripts/ci-local --mode pre-push` for a faster host-side check while iterating, or use the Docker command above when you want the pinned CI toolchain.
 3. Push the branch. The `.githooks/pre-push` hook automatically runs the Docker-backed `full` suite and blocks the push on failure.
-4. GitHub runs the required `Lint & Test` workflow on PRs to satisfy branch protection. Push-triggered Actions and macOS smoke are disabled unless manually dispatched.
+4. GitHub runs the required `Lint & Test` and `macOS Compile Smoke` workflows on PRs to satisfy branch protection. Ordinary push-triggered Actions remain disabled.
 
 ## Command Contract
 
@@ -67,6 +67,7 @@ docker compose -f docker-compose.ci.yml run --rm ci ./scripts/ci-local --mode fu
 
 `pre-push` runs:
 
+- `golangci-lint fmt --diff` (all Go files, including inactive build tags)
 - `golangci-lint run`
 - `go test -race ./...`
 
@@ -92,9 +93,26 @@ git config core.hooksPath .githooks
 
 ## GitHub Actions
 
-The `CI` workflow still runs on `pull_request` so the protected `develop` branch receives the required `Lint & Test` status. It does not run on ordinary pushes.
+The `CI` workflow runs on `pull_request` so protected branches receive the required `Lint & Test` status. It does not run on ordinary pushes.
 
-The macOS compile-smoke workflow is kept as a manual fallback check through `workflow_dispatch`. Local Docker CI is the blocking path before pushes during normal development.
+The macOS compile-smoke workflow also runs on pull requests to `develop` and `main`, providing the required native-Darwin status and real Seatbelt confinement coverage. It remains available as a manual fallback through `workflow_dispatch`. Local Docker CI is the blocking path before pushes during normal development.
+
+### Linux sandbox confinement (#441)
+
+The `Linux Sandbox (bwrap)` job in the `CI` workflow runs the bwrap
+behavioral suite on a pinned `ubuntu-24.04` VM with
+`GO_LLM_REQUIRE_BWRAP=1`, which turns a capability skip into a hard
+failure. This job is the required behavioral gate for the bwrap backend:
+the Docker-backed local CI container runs the cross-platform policy and
+unit tests, but its default seccomp profile blocks `CLONE_NEWUSER`, so
+real user-namespace confinement always skips there (by the backend's own
+capability probe — a skipped confinement test is reported as a skip, never
+as a pass). Do not add a privileged or security-opt-weakened compose
+service to emulate that runner; the VM job is the gate.
+
+When Ubuntu's unprivileged-userns AppArmor restriction is active, the job
+loads the distro's narrow `bwrap-userns-restrict` profile for
+`/usr/bin/bwrap` instead of disabling the global sysctl.
 
 ## Notes
 

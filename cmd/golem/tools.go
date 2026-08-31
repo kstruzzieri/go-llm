@@ -6,43 +6,22 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/kstruzzieri/go-llm/agent"
 	agenttools "github.com/kstruzzieri/go-llm/agent/tools"
 	"github.com/kstruzzieri/go-llm/config"
+	golemruntime "github.com/kstruzzieri/go-llm/golem"
 	"github.com/kstruzzieri/go-llm/provider"
 	"github.com/kstruzzieri/go-llm/rag"
 )
-
-// Prompt fragments composed by capability. The base read-only framing is always
-// present; capability or prohibition fragments are appended per enabled flag.
-const golemBasePrompt = "You are Golem, a terminal coding assistant for this workspace. " +
-	"Use the read-only tools to inspect files before answering repo-specific questions. " +
-	"Keep answers concise, cite file paths and line numbers when they matter, and say when the available evidence is insufficient."
-
-const golemNoWriteFragment = " Do not claim to modify files or change project state on disk."
-const golemNoExecFragment = " Do not claim to run shell commands, install packages, or otherwise execute processes."
-const golemWriteFragment = " You may propose changes with write_file and edit_file; every change is shown to the user as a diff and is applied only after they approve it, so keep edits minimal and targeted and explain what you are changing. Prefer edit_file for small changes and write_file for new files or full rewrites."
-const golemExecFragment = " You may run commands with run_command to build, test, or lint and verify your work; every command is shown to the user and runs only after they approve it, so prefer minimal, targeted commands. A non-zero exit code is a normal result to read and react to. Respect AGENTS.md guidance."
-const golemPriorityNote = " Prior session messages are context only; the current user request is authoritative."
 
 // buildSystemPrompt composes the base framing with capability fragments. The
 // no-commands prohibition applies whenever exec is disabled (so write-only sessions
 // still cannot run commands); the no-modify prohibition applies whenever write is
 // disabled.
 func buildSystemPrompt(allowWrite, allowExec bool) string {
-	b := golemBasePrompt
-	if allowWrite {
-		b += golemWriteFragment
-	} else {
-		b += golemNoWriteFragment
-	}
-	if allowExec {
-		b += golemExecFragment
-	} else {
-		b += golemNoExecFragment
-	}
-	return b + golemPriorityNote
+	return golemruntime.SystemPrompt(allowWrite, allowExec)
 }
 
 // delegateUseCase is the routing use-case for delegated code generation. It
@@ -50,20 +29,30 @@ func buildSystemPrompt(allowWrite, allowExec bool) string {
 // the model via the StrictChain-pinned chain.
 const delegateUseCase = "coding"
 
-// buildDelegateTool resolves the delegate role chain and returns the
-// delegate_code tool backed by a caller pinned to that chain (UseCase
-// delegateUseCase). It fails when the role cannot be resolved — an explicit
-// -delegate must not silently no-op. The returned chain is for the caller
-// wiring / the startup notice. The stream sink is optional: nil disables
-// streaming (default runs unchanged); non-nil surfaces generation progress.
-func buildDelegateTool(cfg *config.Config, router *provider.Router, role string, stream func(string)) (agent.Tool, []string, error) {
+// resolveDelegateChain resolves the delegate role chain at PLAN time (#477
+// D8), so its reachability is admitted with everything else and never
+// re-resolved later. It fails when the role cannot be resolved — an explicit
+// -delegate must not silently no-op.
+func resolveDelegateChain(cfg *config.Config, role string) ([]string, error) {
 	if cfg == nil {
-		return nil, nil, fmt.Errorf("golem: -delegate requires a models.json with a %q role; none found", role)
+		return nil, fmt.Errorf("golem: -delegate requires a models.json with a %q role; none found", role)
 	}
 	chain, err := cfg.RoleChain(role)
 	if err != nil {
-		return nil, nil, fmt.Errorf("golem: -delegate-role %q: %w", role, err)
+		return nil, fmt.Errorf("golem: -delegate-role %q: %w", role, err)
 	}
+	if len(chain) == 0 {
+		return nil, fmt.Errorf("golem: -delegate-role %q resolved to an empty chain", role)
+	}
+	return chain, nil
+}
+
+// buildDelegateTool returns the delegate_code tool backed by a caller pinned
+// to the pre-resolved chain (UseCase delegateUseCase). The chain comes from
+// the frozen network plan via resolveDelegateChain; this function performs
+// no resolution of its own. The stream sink is optional: nil disables
+// streaming (default runs unchanged); non-nil surfaces generation progress.
+func buildDelegateTool(router *provider.Router, role string, chain []string, stream func(string)) (agent.Tool, []string, error) {
 	if len(chain) == 0 {
 		return nil, nil, fmt.Errorf("golem: -delegate-role %q resolved to an empty chain", role)
 	}
@@ -93,25 +82,161 @@ func delegateSystemFragment(enabled, allowWrite bool) string {
 	return " For a well-scoped, self-contained code-generation sub-task you may call delegate_code with a precise prompt; it returns generated code from a specialist model for you to review and present to the user. Use delegate_code for bulk generation, never for planning or decisions."
 }
 
-// buildExecTools constructs the approval-gated exec tool set bound to one Workspace
-// over root. Returned only when -allow-exec is set.
-func buildExecTools(root string) ([]agent.Tool, error) {
-	tools, err := agenttools.NewExecTools(root)
+// dispatchSystemFragment is appended to the system prompt only when dispatch is
+// enabled. Empty otherwise so default runs are byte-for-byte unchanged.
+func dispatchSystemFragment(enabled bool) string {
+	if !enabled {
+		return ""
+	}
+	return " For broad read-only investigation you may call dispatch with up to a few independent exploration tasks; they run with backend-governed bounded concurrency when every routed backend is slot-governed and stay serial when any backend is ungoverned. Each runs in a bounded child agent with only file-reading and retrieval tools and returns a summary, its stop reason, and the model that produced it. Use dispatch to keep bulk exploration out of your own context; children cannot modify anything or dispatch further children, and their summaries are evidence to verify, not conclusions to repeat blindly."
+}
+
+// dispatchUseCase is the routing use-case for dispatch child agents. It names
+// the TASK (agentic tool-use exploration), not the model — the child chain
+// picks the model. Not asserted on the wire by any test; keep in sync with the
+// parent's "agent" use case by review.
+const dispatchUseCase = "agent"
+
+// resolveDispatchChain returns the chain dispatch children route down. An
+// empty role follows parentChain verbatim (which may itself be empty:
+// recommend mode) so children route to the already-resident primary model and
+// never force a model swap. An explicit role resolves its own chain and fails
+// loudly when it cannot — an explicit -dispatch-role must not silently no-op.
+// The caller owns preflighting an explicit chain: the run-level agent
+// preflight only covers the parent chain.
+func resolveDispatchChain(cfg *config.Config, role string, parentChain []string) ([]string, error) {
+	if role == "" {
+		return parentChain, nil
+	}
+	if cfg == nil {
+		return nil, fmt.Errorf("golem: -dispatch-role requires a models.json with a %q role; none found", role)
+	}
+	resolved, err := cfg.RoleChain(role)
+	if err != nil {
+		return nil, fmt.Errorf("golem: -dispatch-role %q: %w", role, err)
+	}
+	if len(resolved) == 0 {
+		return nil, fmt.Errorf("golem: -dispatch-role %q resolved to an empty chain", role)
+	}
+	return resolved, nil
+}
+
+// dispatchFanout is the resolved fan-out policy newDispatchTool applies:
+// a static concurrency ceiling plus an optional per-invocation governor.
+type dispatchFanout struct {
+	maxConcurrent int
+	governor      func() int
+}
+
+// resolveDispatchFanout picks the dispatch fan-out policy (#403). Dispatch is
+// parallel-eligible only when every selector in the child chain is
+// provider-qualified and slot-governed: Router admission protects governed
+// backends from oversubscription, so it cannot protect an ungoverned
+// fallback, and an empty recommend-mode chain names no backend at all. Among
+// eligible chains the HEAD sizes fan-out — unused fallbacks never serve, so
+// their capacity caches stay cold and a chain-minimum would pin fan-out at
+// the fail-safe 1 forever. The governor re-reads capacity per invocation
+// because slot probes are use-triggered: a constructor-time read would freeze
+// the pre-probe fail-safe. Sizing is quality of service, not safety; a wrong
+// size only queues children at admission.
+func resolveDispatchFanout(capacity func(provider.ModelKey) (int, bool), chain []string) dispatchFanout {
+	serial := dispatchFanout{maxConcurrent: 1}
+	if capacity == nil || len(chain) == 0 {
+		return serial
+	}
+	keys := make([]provider.ModelKey, len(chain))
+	for i, selector := range chain {
+		key, ok := parseSelector(selector)
+		if !ok || key.Provider == "" || key.Model == "" {
+			return serial
+		}
+		keys[i] = key
+	}
+	for _, key := range keys {
+		if _, governed := capacity(key); !governed {
+			return serial
+		}
+	}
+	return dispatchFanout{
+		maxConcurrent: agenttools.MaxDispatchTasks,
+		governor: func() int {
+			n, governed := capacity(keys[0])
+			if !governed || n < 1 {
+				return 1
+			}
+			for _, key := range keys[1:] {
+				if _, governed := capacity(key); !governed {
+					return 1
+				}
+			}
+			return n
+		},
+	}
+}
+
+// newDispatchTool is the caller-injectable seam of the dispatch wiring: tests
+// drive child behavior (toolset pass-through, retrieve reuse, fan-out,
+// budget threading, completion notices) through it with a scripted caller,
+// which a *provider.Router cannot fake. mixed mirrors -progressive so child
+// context assembly matches the shared retrieve renderer, the same pairing
+// newOrchestratorFactory enforces for the parent. budget carries the resolved
+// input ceiling and output reserve for the chain children route, so a child
+// never assembles a request larger than its backend accepts; zero fields fall
+// back to library defaults. fan carries the resolved fan-out policy (#403):
+// a static ceiling plus the per-invocation capacity governor from
+// resolveDispatchFanout; the validated models.<role>.slots override reaches
+// it through Router.SlotCapacity, so no separate worker knob exists. notify,
+// when non-nil, receives one display-only line per completed child (#402
+// rider) from child goroutines after their permits release; golem points it
+// at the late-bound notice sink. Remaining limits keep every library
+// default — 4 tasks, 6 steps, 32k tokens per child — except Timeout: the
+// library's 5m bounds the WHOLE invocation, and a live two-task run on
+// gemma4:31b measured task 2 starving behind task 1 (single model calls ran
+// 76-347s), so golem budgets that per-task ceiling times the 4-task maximum;
+// governed fan-out only shrinks wall clock below that worst case.
+func newDispatchTool(caller agent.ModelCaller, mixed bool, budget agent.Budget, fan dispatchFanout, notify func(string), available []agent.Tool) (agent.Tool, error) {
+	var onChildComplete func(int, int)
+	if notify != nil {
+		onChildComplete = func(index, total int) {
+			notify(fmt.Sprintf("dispatch: task #%d finished (%d total)", index+1, total))
+		}
+	}
+	dt, err := agenttools.NewDispatch(caller, agent.ContextManager{Mixed: mixed}, available, agenttools.DispatchLimits{
+		Budget:          budget,
+		MaxConcurrent:   fan.maxConcurrent,
+		Concurrency:     fan.governor,
+		OnChildComplete: onChildComplete,
+		Timeout:         20 * time.Minute, // 5m per task x 4 max tasks
+	})
+	if err != nil {
+		return nil, fmt.Errorf("golem: build dispatch tool: %w", err)
+	}
+	return dt, nil
+}
+
+// buildExecTools constructs the approval-gated exec tool set — the foreground
+// run_command plus the four background tools (#346) — bound to ONE Workspace
+// over root and one shared manager, so foreground and background preparation
+// see identical containment. Returned only when interactive -allow-exec is set
+// (one-shot drops the flag; -plan/-goal reject it at validation).
+func buildExecTools(root string, manager *agenttools.BackgroundManager) ([]agent.Tool, error) {
+	tools, err := agenttools.NewExecToolsWithBackground(root, manager)
 	if err != nil {
 		return nil, fmt.Errorf("golem: build exec tools: %w", err)
 	}
 	return tools, nil
 }
 
-// buildWriteTools constructs the workspace-mutating tool set plus the in-session
-// journal that backs /undo, both bound to one Workspace over root. Returned only
+// buildWriteTools constructs the workspace-mutating tool set plus the durable
+// checkpoint journal that backs /undo and /checkpoints (#355), both bound to
+// one Workspace over root and the workspace's leased store. Returned only
 // when -allow-write is set.
-func buildWriteTools(root string) ([]agent.Tool, *mutationJournal, error) {
+func buildWriteTools(root string, store *checkpointStore) ([]agent.Tool, *checkpointJournal, error) {
 	ws, err := agenttools.NewWorkspace(root)
 	if err != nil {
 		return nil, nil, fmt.Errorf("golem: build write tools: %w", err)
 	}
-	journal := newMutationJournal(ws)
+	journal := newCheckpointJournal(ws, store)
 	return agenttools.NewMutatingTools(ws, journal), journal, nil
 }
 
@@ -222,38 +347,37 @@ func embeddingChain(cfg *config.Config) ([]string, error) {
 
 // buildGatedRetriever stats dbPath, opens it, probes its stored vector space,
 // reads store stats for startup display, and applies the §6.1 gate against
-// expected. It returns (tool, feedback, feedbackWarn, decision, stats, err):
+// expected. It returns (tool, decision, stats, err):
 //   - tool/decision/stats set, err nil when the corpus is registerable
 //     (decision.kind may be vsLegacy, surfaced as a soft warning by the caller);
 //   - nil tool, err nil when the gate disables retrieve (vsMismatch/vsInconsistent);
 //   - nil tool, zero stats, err set when the DB cannot be opened/probed or the
 //     embedder is unavailable.
 //
-// When feedbackDB != "" it best-effort opens a consume-only behavioral weighter
-// and injects it into the store. feedback is non-nil only on success (the caller
-// owns it and must close feedback.db); it stays nil when feedback is disabled or
-// fails to open. feedbackWarn is non-empty when feedback failed to open, in which
-// case retrieval still registers and ranks neutrally.
-//
 // The returned retrievalReader owns and closes the opened store.
-func buildGatedRetriever(ctx context.Context, cfg *config.Config, router *provider.Router, dbPath string, expected []string, feedbackDB string) (*retrievalReader, string, vsDecision, rag.StoreStats, error) {
+//
+// rec is the -grounding evidence recorder, or nil. It is the ONE place golem
+// builds a retrieve tool, so wrapping here is what reaches the explicit
+// -rag-db generation, the discovered auto index, and every background
+// auto-index replacement alike.
+func buildGatedRetriever(ctx context.Context, cfg *config.Config, router *provider.Router, dbPath string, expected []string, weighter rag.BehavioralWeighter, progressive bool, rec *evidenceRecorder) (*retrievalReader, vsDecision, rag.StoreStats, error) {
 	if cfg == nil || router == nil {
-		return nil, "", vsDecision{}, rag.StoreStats{}, fmt.Errorf("golem: no provider configured for embeddings")
+		return nil, vsDecision{}, rag.StoreStats{}, fmt.Errorf("golem: no provider configured for embeddings")
 	}
 	embChain, err := embeddingChain(cfg)
 	if err != nil {
-		return nil, "", vsDecision{}, rag.StoreStats{}, err
+		return nil, vsDecision{}, rag.StoreStats{}, err
 	}
 	info, err := os.Stat(dbPath)
 	if err != nil {
-		return nil, "", vsDecision{}, rag.StoreStats{}, fmt.Errorf("golem: rag-db %q: %w", dbPath, err)
+		return nil, vsDecision{}, rag.StoreStats{}, fmt.Errorf("golem: rag-db %q: %w", dbPath, err)
 	}
 	if info.IsDir() {
-		return nil, "", vsDecision{}, rag.StoreStats{}, fmt.Errorf("golem: rag-db %q is a directory, not a SQLite file", dbPath)
+		return nil, vsDecision{}, rag.StoreStats{}, fmt.Errorf("golem: rag-db %q is a directory, not a SQLite file", dbPath)
 	}
 	store, err := rag.OpenSQLiteStoreReadOnly(dbPath)
 	if err != nil {
-		return nil, "", vsDecision{}, rag.StoreStats{}, fmt.Errorf("golem: open index db %q: %w", dbPath, err)
+		return nil, vsDecision{}, rag.StoreStats{}, fmt.Errorf("golem: open index db %q: %w", dbPath, err)
 	}
 	closeStore := func(cause error) error {
 		if closeErr := store.Close(); closeErr != nil {
@@ -263,20 +387,20 @@ func buildGatedRetriever(ctx context.Context, cfg *config.Config, router *provid
 	}
 	stats, err := store.Stats(ctx)
 	if err != nil {
-		return nil, "", vsDecision{}, rag.StoreStats{}, closeStore(fmt.Errorf("golem: read index stats %q: %w", dbPath, err))
+		return nil, vsDecision{}, rag.StoreStats{}, closeStore(fmt.Errorf("golem: read index stats %q: %w", dbPath, err))
 	}
 	if stats.EmbeddingFormat != rag.EmbeddingFormatEmpty && stats.EmbeddingFormat != rag.EmbeddingFormatPackedFloat32 {
-		return nil, "", vsDecision{}, stats, closeStore(fmt.Errorf(
+		return nil, vsDecision{}, stats, closeStore(fmt.Errorf(
 			"golem: rag-db %q uses embedding format %s; explicit indexes are read-only and will not be migrated; rebuild it deliberately or remove -rag-db to use the packed auto index",
 			dbPath, stats.EmbeddingFormat))
 	}
 	probe, err := store.ProbeVectorSpaces(ctx)
 	if err != nil {
-		return nil, "", vsDecision{}, rag.StoreStats{}, closeStore(fmt.Errorf("golem: probe index db %q: %w", dbPath, err))
+		return nil, vsDecision{}, rag.StoreStats{}, closeStore(fmt.Errorf("golem: probe index db %q: %w", dbPath, err))
 	}
 	dec := vsGateDecision(probe.KnownIDs, probe.HasUnknown, expected)
 	if !dec.register {
-		return nil, "", dec, stats, closeStore(nil)
+		return nil, dec, stats, closeStore(nil)
 	}
 	queryChain := embChain
 	queryModel := embChain[0]
@@ -291,20 +415,18 @@ func buildGatedRetriever(ctx context.Context, cfg *config.Config, router *provid
 	}, queryChain)
 	retr, err := rag.NewRetrieverWithEmbedder(embedder, store, rag.WithRetrieverModel(queryModel))
 	if err != nil {
-		return nil, "", vsDecision{}, rag.StoreStats{}, closeStore(fmt.Errorf("golem: build retriever for %q: %w", dbPath, err))
+		return nil, vsDecision{}, rag.StoreStats{}, closeStore(fmt.Errorf("golem: build retriever for %q: %w", dbPath, err))
 	}
-	var feedbackHandle *behavioralWeighterHandle
-	feedbackWarn := ""
-	if feedbackDB != "" {
-		if h, warn := openBehavioralWeighter(ctx, feedbackDB); h != nil {
-			store.SetBehavioralWeighter(h.weighter)
-			feedbackHandle = h
-		} else if warn != "" {
-			feedbackWarn = warn
-		}
+	store.SetBehavioralWeighter(weighter)
+	// Typed, not any-plus-assertion: groundingRetriever is exactly the method
+	// set agenttools.Retrieve needs, so a wrapper that loses one fails to
+	// compile here instead of silently downgrading retrieval at run time.
+	var source groundingRetriever = retr
+	if rec != nil {
+		source = &recordingRetriever{inner: retr, rec: rec}
 	}
-	tool := &agenttools.Retrieve{R: retr, K: 5, MaxTokens: 2048}
-	return newOwnedRetrievalReader(tool, store, feedbackHandle), feedbackWarn, dec, stats, nil
+	tool := &agenttools.Retrieve{R: source, K: 5, MaxTokens: 2048, Progressive: progressive}
+	return newOwnedRetrievalReader(tool, store), dec, stats, nil
 }
 
 // effectClassName renders an agent.EffectClass bitset for /tools. The agent

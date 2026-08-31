@@ -1,0 +1,57 @@
+{
+  "id": "chain-retain-quota-legacy",
+  "source": "assembly-corpus-mixed",
+  "captured_at": "0001-01-01T00:00:00Z",
+  "system": "You are the driftwatch assistant. driftwatch is a self-hosted telemetry ingest and alerting daemon. Answer using only the provided conversation, memory records, and retrieved context.",
+  "tools": null,
+  "turns": [
+    {
+      "role": "user",
+      "content": "What ingest rate is the atlas tenant allowed now?"
+    }
+  ],
+  "golden": {
+    "tool_calls": null,
+    "final_answer_criteria": "States the atlas tenant ingest quota is now 40 rps. Answers that only describe the tenants-file mechanism without the 40 rps figure score 0. An answer presenting both the correct and a competing value without committing to one scores 0."
+  },
+  "assembly_eval": {
+    "pair_id": "chain-retain-quota",
+    "mode": "legacy",
+    "candidate_ids": [
+      "8581d858596167ec6855bf7a6dfb9d44e509f742d9f36fdfad7b0df9c79c1b49",
+      "be22823621746a66fe7ac944e7ee9bf1d78e63ce19c424301324febd791cfeea",
+      "fc387579b1e9544d31d69380e7ee5fe078eb85b659ae7861bcef3115b5f8f093",
+      "rec-atlas-quota",
+      "rec-burst-review",
+      "rec-ingest-drill",
+      "rec-lint-rollout",
+      "rec-oncall-cycle",
+      "rec-standby-node",
+      "rec-tenant-tags",
+      "rec-warehouse-sync"
+    ],
+    "estimated_prompt_tokens": 59,
+    "state_digest": "9a646a24f6593025016995834d247e2ec49ebcb6675a0ae0fd263e9f82a70db2",
+    "subjects": [
+      "(c1|memory|rec-atlas-quota)",
+      "(c1|memory|rec-burst-review)",
+      "(c1|memory|rec-ingest-drill)",
+      "(c1|memory|rec-lint-rollout)",
+      "(c1|memory|rec-oncall-cycle)",
+      "(c1|memory|rec-standby-node)",
+      "(c1|memory|rec-tenant-tags)",
+      "(c1|memory|rec-warehouse-sync)",
+      "(c2|rag|internal/ingest/limiter.go)",
+      "(c2|rag|internal/ingest/admission.go)",
+      "(c2|rag|docs/tenants.md)"
+    ],
+    "stratum": "chain_retention",
+    "answer_home": "memory",
+    "scenario_family": "tenant-quota-chain",
+    "budget": 983,
+    "raw_state_tokens": 1638,
+    "pressure_level": "ok",
+    "shed_messages": 10,
+    "shed_bytes": 5953
+  }
+}

@@ -9,6 +9,7 @@ import (
 	"sync"
 	"testing"
 
+	agenttools "github.com/kstruzzieri/go-llm/agent/tools"
 	"github.com/kstruzzieri/go-llm/config"
 	"github.com/kstruzzieri/go-llm/provider"
 	"github.com/kstruzzieri/go-llm/rag"
@@ -19,6 +20,24 @@ type routingEmbedProvider struct {
 	lastModel string
 	models    []string
 	embedErr  error
+}
+
+type countingBehavioralWeighter struct {
+	mu    sync.Mutex
+	calls int
+}
+
+func (w *countingBehavioralWeighter) WeightsBatch(context.Context, []string) (map[string]float64, error) {
+	w.mu.Lock()
+	w.calls++
+	w.mu.Unlock()
+	return map[string]float64{}, nil
+}
+
+func (w *countingBehavioralWeighter) callCount() int {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.calls
 }
 
 func (*routingEmbedProvider) Name() string                      { return "embed-test" }
@@ -112,8 +131,8 @@ func TestBuildGatedRetriever_PinsStoredVectorSpace(t *testing.T) {
 			seedIndex(t, dbPath, "workspace:ignored", tc.stored)
 			cfg, router, p := testRoutingEmbedder(t)
 
-			reader, _, _, _, err := buildGatedRetriever(
-				context.Background(), cfg, router, dbPath, expectedVectorSpaces(cfg), "",
+			reader, _, _, err := buildGatedRetriever(
+				context.Background(), cfg, router, dbPath, expectedVectorSpaces(cfg), nil, false, nil,
 			)
 			if err != nil {
 				t.Fatalf("buildGatedRetriever: %v", err)
@@ -137,14 +156,74 @@ func TestBuildGatedRetriever_PinsStoredVectorSpace(t *testing.T) {
 	}
 }
 
+func TestBuildGatedRetriever_FeedbackWeighterInstalledBeforeServing(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "explicit.db")
+	seedIndex(t, dbPath, "workspace:ignored", "embed-test/a")
+	cfg, router, _ := testRoutingEmbedder(t)
+	weighter := &countingBehavioralWeighter{}
+
+	reader, _, _, err := buildGatedRetriever(
+		context.Background(), cfg, router, dbPath, expectedVectorSpaces(cfg), weighter, false, nil,
+	)
+	if err != nil {
+		t.Fatalf("buildGatedRetriever: %v", err)
+	}
+	defer func() {
+		if err := reader.closeAfterDrain(); err != nil {
+			t.Error(err)
+		}
+	}()
+	result, err := reader.tool.Invoke(context.Background(), json.RawMessage(`{"query":"find A"}`))
+	if err != nil || result.IsError {
+		t.Fatalf("Invoke = %+v, %v", result, err)
+	}
+	if got := weighter.callCount(); got != 1 {
+		t.Fatalf("behavioral weight calls = %d, want 1", got)
+	}
+}
+
+// TestEnableRetrieve_ProgressiveRenderingIsOptIn covers BOTH halves -progressive
+// drives, independently, for the same flag value: the Retrieve renderer and
+// (#331) the orchestrator's mixed context assembly. Threading it to one and not
+// the other must fail here.
+func TestEnableRetrieve_ProgressiveRenderingIsOptIn(t *testing.T) {
+	for _, enabled := range []bool{false, true} {
+		t.Run(map[bool]string{false: "default off", true: "enabled"}[enabled], func(t *testing.T) {
+			dbPath := filepath.Join(t.TempDir(), "explicit.db")
+			seedIndex(t, dbPath, "workspace:ignored", "embed-test/a")
+			cfg, router, _ := testRoutingEmbedder(t)
+
+			got := enableRetrieve(context.Background(), cfg, router, retrieveOpts{
+				ragDB: dbPath, progressive: enabled,
+			})
+			if got.reader == nil {
+				t.Fatalf("retrieve disabled: %v", got.warns)
+			}
+			defer func() {
+				if err := got.reader.closeAfterDrain(); err != nil {
+					t.Error(err)
+				}
+			}()
+			tool, ok := got.reader.tool.(*agenttools.Retrieve)
+			if !ok {
+				t.Fatalf("retrieve tool = %T, want *tools.Retrieve", got.reader.tool)
+			}
+			if tool.Progressive != enabled {
+				t.Fatalf("Progressive = %v, want %v", tool.Progressive, enabled)
+			}
+			assertMixedAssembly(t, enabled)
+		})
+	}
+}
+
 func TestBuildGatedRetriever_RequiredVectorSpaceUnavailableDoesNotUsePrimary(t *testing.T) {
 	const stored = "embed-test/b"
 	dbPath := filepath.Join(t.TempDir(), "explicit.db")
 	seedIndex(t, dbPath, "workspace:ignored", stored)
 	cfg, router, p := testRoutingEmbedder(t, "a")
 
-	reader, _, _, _, err := buildGatedRetriever(
-		context.Background(), cfg, router, dbPath, expectedVectorSpaces(cfg), "",
+	reader, _, _, err := buildGatedRetriever(
+		context.Background(), cfg, router, dbPath, expectedVectorSpaces(cfg), nil, false, nil,
 	)
 	if err != nil {
 		t.Fatalf("buildGatedRetriever: %v", err)
@@ -176,8 +255,8 @@ func TestBuildGatedRetriever_ExecutionFailureNamesRequiredVectorSpace(t *testing
 	cfg, router, p := testRoutingEmbedder(t)
 	p.failEmbedding(errors.New("backend offline"))
 
-	reader, _, _, _, err := buildGatedRetriever(
-		context.Background(), cfg, router, dbPath, expectedVectorSpaces(cfg), "",
+	reader, _, _, err := buildGatedRetriever(
+		context.Background(), cfg, router, dbPath, expectedVectorSpaces(cfg), nil, false, nil,
 	)
 	if err != nil {
 		t.Fatalf("buildGatedRetriever: %v", err)
@@ -204,7 +283,7 @@ func TestBuildGatedRetriever_ExecutionFailureNamesRequiredVectorSpace(t *testing
 	}
 }
 
-func TestEnableRetrieve_PinsStoredVectorSpaceForExplicitAndAutoIndexes(t *testing.T) {
+func TestEnableRetrieve_FeedbackWeighterSharedByExplicitAndExistingAutoIndexes(t *testing.T) {
 	const stored = "embed-test/b"
 	tests := []struct {
 		name string
@@ -232,11 +311,19 @@ func TestEnableRetrieve_PinsStoredVectorSpaceForExplicitAndAutoIndexes(t *testin
 			seedIndex(t, dbPath, "workspace:test", stored)
 			cfg, router, p := testRoutingEmbedder(t)
 
-			got := enableRetrieve(context.Background(), cfg, router, tc.opts(dbPath))
-			if got.tool == nil {
+			opts := tc.opts(dbPath)
+			weighter := &countingBehavioralWeighter{}
+			opts.weighter = weighter
+			got := enableRetrieve(context.Background(), cfg, router, opts)
+			if got.reader == nil {
 				t.Fatalf("retrieve disabled: %v", got.warns)
 			}
-			result, err := got.tool.Invoke(context.Background(), json.RawMessage(`{"query":"find A"}`))
+			defer func() {
+				if err := got.reader.closeAfterDrain(); err != nil {
+					t.Error(err)
+				}
+			}()
+			result, err := got.reader.tool.Invoke(context.Background(), json.RawMessage(`{"query":"find A"}`))
 			if err != nil {
 				t.Fatalf("Invoke: %v", err)
 			}
@@ -245,6 +332,9 @@ func TestEnableRetrieve_PinsStoredVectorSpaceForExplicitAndAutoIndexes(t *testin
 			}
 			if got := p.embeddedModel(); got != "b" {
 				t.Fatalf("embedded model = %q, want b for stored vector space %s", got, stored)
+			}
+			if got := weighter.callCount(); got != 1 {
+				t.Fatalf("behavioral weight calls = %d, want 1", got)
 			}
 		})
 	}
@@ -270,8 +360,8 @@ func TestBuildGatedRetriever_LegacyCorpusKeepsConfiguredChainBehavior(t *testing
 	}
 	cfg, router, p := testRoutingEmbedder(t)
 
-	reader, _, dec, _, err := buildGatedRetriever(
-		context.Background(), cfg, router, dbPath, expectedVectorSpaces(cfg), "",
+	reader, dec, _, err := buildGatedRetriever(
+		context.Background(), cfg, router, dbPath, expectedVectorSpaces(cfg), nil, false, nil,
 	)
 	if err != nil {
 		t.Fatalf("buildGatedRetriever: %v", err)

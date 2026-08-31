@@ -932,33 +932,58 @@ func validateQueryVectorSpace(queryVectorSpaceID string, probe VectorSpaceProbe)
 // inspect the supporting evidence. The header retains source, line range, and
 // similarity attribution, and the existing max-token truncation is preserved.
 func (r *Retriever) BuildContext(results []SearchResult, maxTokens int) string {
+	context, _ := r.BuildContextWithRenderedCount(results, maxTokens)
+	return context
+}
+
+// BuildContextWithRenderedCount constructs a context string and reports how
+// many leading results it rendered before the token budget was exhausted.
+func (r *Retriever) BuildContextWithRenderedCount(results []SearchResult, maxTokens int) (string, int) {
 	if len(results) == 0 {
-		return ""
+		return "", 0
 	}
 
 	maxChars := maxTokens * 4 // rough approximation
 	var b strings.Builder
 	b.WriteString("Relevant code context:\n\n")
 
+	count := 0
 	for _, res := range results {
+		// The source sits inside a line-start block delimiter and is untrusted:
+		// newlines are legal in POSIX filenames, nothing in the write path rejects
+		// control characters on chunks.source, and the managed-document path takes
+		// source straight from the caller. Flatten it to exactly one line or a path
+		// can forge a second block with fabricated attribution. Content needs no
+		// such treatment here -- numberLines' per-line prefix already blocks it.
 		entry := fmt.Sprintf("--- %s (lines %d-%d, similarity: %.2f) ---\n%s\n",
-			res.Chunk.Source, res.Chunk.StartLine, res.Chunk.EndLine,
+			replaceOrientationLineBreaks(res.Chunk.Source), res.Chunk.StartLine, res.Chunk.EndLine,
 			res.Score, numberLines(res.Chunk.Content, res.Chunk.StartLine))
 
 		if maxChars > 0 && b.Len()+len(entry) > maxChars {
 			break
 		}
 		b.WriteString(entry)
+		count++
 	}
 
-	return b.String()
+	return b.String(), count
 }
+
+var contentLineBreakReplacer = strings.NewReplacer(
+	"\r\n", "\n", "\r", "\n", "\v", "\n", "\f", "\n",
+	"\u0085", "\n", "\u2028", "\n", "\u2029", "\n",
+)
 
 // numberLines prefixes each line of content with a 1-based source line number
 // starting at startLine, producing line-anchored output (e.g. "42| code").
 // A single trailing newline is dropped so it does not yield a phantom empty
 // numbered line. The returned string ends with a newline when non-empty.
+//
+// Security note: the "%d| " prefix is load-bearing, not just cosmetic — it
+// stops each content line from forging a "--- " block header. Model-visible
+// line separators are canonicalized first so every line receives the prefix.
 func numberLines(content string, startLine int) string {
+	content = contentLineBreakReplacer.Replace(content)
 	lines := strings.Split(content, "\n")
 	if n := len(lines); n > 0 && lines[n-1] == "" {
 		lines = lines[:n-1] // ignore the empty tail from a trailing newline

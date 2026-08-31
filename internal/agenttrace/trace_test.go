@@ -73,3 +73,52 @@ func TestWriteTrace_ExclusiveAndSecured(t *testing.T) {
 		t.Fatalf("second WriteTrace err = %v, want exists error", err)
 	}
 }
+
+// TestTraceRecordGroundingIsAdditive pins the compatibility contract for the
+// #348 grounding payload: a trace without one must serialize to the exact bytes
+// it did before the field existed, and one with a payload must embed it as a
+// JSON object rather than a quoted string. json.RawMessage gets both wrong if
+// the field is declared as a plain string or loses omitempty.
+func TestTraceRecordGroundingIsAdditive(t *testing.T) {
+	rec := BuildTrace(TraceMeta{Goal: "g", System: "s", MaxSteps: 4}, sampleResult(), "completed", false, nil)
+
+	without, err := json.Marshal(rec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(without), "grounding") {
+		t.Fatalf("a trace with no grounding must omit the key entirely:\n%s", without)
+	}
+
+	rec.Grounding = json.RawMessage(`{"status":"partial","reason":"","tokens":7}`)
+	with, err := json.Marshal(rec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(with), `"grounding":{"status":"partial","reason":"","tokens":7}`) {
+		t.Fatalf("grounding not embedded verbatim as an object:\n%s", with)
+	}
+	if rec.SchemaVersion != 2 {
+		t.Fatalf("an additive omitempty field must not bump the schema: %d", rec.SchemaVersion)
+	}
+
+	// The only difference between the two encodings is the appended key: the
+	// rest of the record must be byte-identical, so a pre-#348 consumer reading
+	// a grounding-free trace sees exactly what it always did.
+	var a, b map[string]json.RawMessage
+	if err := json.Unmarshal(without, &a); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(with, &b); err != nil {
+		t.Fatal(err)
+	}
+	delete(b, "grounding")
+	if len(a) != len(b) {
+		t.Fatalf("grounding changed the record shape: %d keys vs %d", len(a), len(b))
+	}
+	for k, v := range a {
+		if string(b[k]) != string(v) {
+			t.Fatalf("field %q changed: %s vs %s", k, v, b[k])
+		}
+	}
+}

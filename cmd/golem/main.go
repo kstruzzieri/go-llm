@@ -8,17 +8,21 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
 	"github.com/kstruzzieri/go-llm/agent"
 	agenttools "github.com/kstruzzieri/go-llm/agent/tools"
+	"github.com/kstruzzieri/go-llm/config"
 	"github.com/kstruzzieri/go-llm/conversation"
 	"github.com/kstruzzieri/go-llm/fingerprint"
+	golemruntime "github.com/kstruzzieri/go-llm/golem"
 	"github.com/kstruzzieri/go-llm/internal/providerbootstrap"
 	"github.com/kstruzzieri/go-llm/mcpclient"
 	"github.com/kstruzzieri/go-llm/provider"
 	"github.com/kstruzzieri/go-llm/provider/openaicompat"
+	"github.com/kstruzzieri/go-llm/rag"
 )
 
 type flags struct {
@@ -37,6 +41,7 @@ type flags struct {
 	inputCeiling        int
 	outputReserve       int
 	noColor             bool
+	noEditor            bool
 	noSession           bool
 	fresh               bool
 	sessionID           string
@@ -44,10 +49,15 @@ type flags struct {
 	allowExec           bool
 	delegate            bool
 	delegateRole        string
+	dispatch            bool
+	dispatchRole        string
 	mcpStdio            stringSliceFlag
 	mcpHTTP             stringSliceFlag
+	allowDestinations   stringSliceFlag
 	noRag               bool
 	noAutoIndex         bool
+	progressive         bool
+	grounding           bool
 	noProjectContext    bool
 	noCompress          bool
 	noMemory            bool
@@ -95,19 +105,25 @@ func parseFlags(args []string) (flags, error) {
 	fs.StringVar(&f.prompt, "p", "", "one-shot mode: run a single agent turn with this prompt and exit; only the final answer goes to stdout (implies -no-session -no-compress -no-memory; approval-gated tools are unavailable, so -allow-write/-allow-exec are ignored)")
 	fs.StringVar(&f.ragDB, "rag-db", "", "path to a prebuilt RAG SQLite DB to enable the retrieve tool")
 	fs.IntVar(&f.maxSteps, "max-steps", 0, "max agent steps per prompt (0 => default 16)")
-	fs.IntVar(&f.inputCeiling, "input-ceiling", 0, "token input ceiling (0 => default)")
+	fs.IntVar(&f.inputCeiling, "input-ceiling", 0, "token input ceiling (0 => derive from model context)")
 	fs.IntVar(&f.outputReserve, "output-reserve", 0, "token output reserve")
-	fs.BoolVar(&f.noColor, "no-color", false, "disable dim ANSI footers")
+	fs.BoolVar(&f.noColor, "no-color", false, "disable ANSI styling (automatic for non-terminal output, NO_COLOR, or TERM=dumb)")
+	fs.BoolVar(&f.noEditor, "no-editor", false, "disable TTY line editing and history; read plain lines from stdin")
 	fs.BoolVar(&f.noSession, "no-session", false, "disable persistent session memory")
 	fs.BoolVar(&f.fresh, "fresh", false, "start a new persistent session instead of resuming this workspace")
 	fs.BoolVar(&f.allowWrite, "allow-write", false, "enable approval-gated write_file/edit_file tools")
-	fs.BoolVar(&f.allowExec, "allow-exec", false, "enable the approval-gated run_command exec tool")
+	fs.BoolVar(&f.allowExec, "allow-exec", false, "enable the approval-gated run_command and background command tools (start/status/tail/stop)")
 	fs.BoolVar(&f.delegate, "delegate", false, "enable the delegate_code tool (route a scoped codegen sub-task to a specialist model)")
 	fs.StringVar(&f.delegateRole, "delegate-role", "coding", "model role the delegate_code tool routes to")
+	fs.BoolVar(&f.dispatch, "dispatch", false, "enable the dispatch tool (bounded read-only exploration tasks use backend-governed concurrency; ungoverned routing stays serial)")
+	fs.StringVar(&f.dispatchRole, "dispatch-role", "", "model role dispatch child agents route to (default: the primary agent chain, so children never force a model swap)")
 	fs.Var(&f.mcpStdio, "mcp-stdio", "attach an MCP server over stdio: \"[alias=]command args...\" (repeatable; use `env KEY=val cmd` for env vars)")
 	fs.Var(&f.mcpHTTP, "mcp-http", "attach an MCP server over streamable HTTP: \"[alias=]https://endpoint\" (repeatable)")
+	fs.Var(&f.allowDestinations, "allow-destination", "admit a remote model destination without prompting: \"<provider>/<canonical base URL>\" (repeatable; required for remote destinations in noninteractive runs)")
 	fs.BoolVar(&f.noRag, "no-rag", false, "disable the retrieve tool entirely (ignore any auto index)")
 	fs.BoolVar(&f.noAutoIndex, "no-auto-index", false, "disable startup auto-index refresh; existing auto indexes may still be used")
+	fs.BoolVar(&f.progressive, "progressive", false, "generate and retrieve opt-in L0/L1 progressive source summaries; enable mixed context assembly")
+	fs.BoolVar(&f.grounding, "grounding", false, "verify the final answer's claims against the retrieval evidence in the final prompt; prints one supported/partial/unsupported line (full report under -trace)")
 	fs.BoolVar(&f.noProjectContext, "no-project-context", false, "do not load AGENTS.md project-context files into the system prompt")
 	fs.BoolVar(&f.noCompress, "no-compress", false, "disable post-turn conversation compression into a durable summary")
 	fs.BoolVar(&f.noMemory, "no-memory", false, "disable explicit local memories (/remember, /memories, memory_search)")
@@ -118,10 +134,10 @@ func parseFlags(args []string) (flags, error) {
 	fs.BoolVar(&f.trace, "trace", false, "persist a content-full run trace per turn (outside the workspace; may contain workspace/user/memory content)")
 	fs.BoolVar(&f.telemetry, "telemetry", false, "append content-light run telemetry (timings, route, usage; no prompt/output)")
 	fs.IntVar(&f.pressureWarn, "pressure-warn", 75, "context-pressure warn threshold percent 1-100 (0 disables the warning line)")
-	fs.BoolVar(&f.feedback, "feedback", false, "enable optional behavioral feedback ranking (consume-only; reads a per-workspace feedback DB)")
+	fs.BoolVar(&f.feedback, "feedback", false, "enable local behavioral feedback collection and retrieval ranking")
 	fs.StringVar(&f.feedbackDB, "feedback-db", "", "override the behavioral feedback DB path (default: per-workspace under the data dir)")
 	fs.StringVar(&f.think, "think", "", "reasoning control for the agent model: off, on, low, medium, high (default: model decides); no-op with a notice when the model does not support thinking")
-	fs.StringVar(&f.planPath, "plan", "", "AgentFlow task mode: path to a plan document (JSON) to lock and execute; requires both -approve-plan-edits and -approve-plan-gates; mutually exclusive with -p, -allow-write/-allow-exec, -rag-db, -delegate, and -mcp-*")
+	fs.StringVar(&f.planPath, "plan", "", "AgentFlow task mode: path to a plan document (JSON) to lock and execute; requires both -approve-plan-edits and -approve-plan-gates; mutually exclusive with -p, -allow-write/-allow-exec, -rag-db, -delegate, -dispatch, and -mcp-*")
 	fs.IntVar(&f.planWorkers, "plan-workers", 1, "AgentFlow task mode: maximum workers for the initial parallel plan cohort (positive; requires -plan)")
 	fs.BoolVar(&f.approveEdits, "approve-plan-edits", false, "required in task mode: auto-approve step-scoped write/edit (still bounded by the step-scope and .agent guards)")
 	fs.BoolVar(&f.approveGates, "approve-plan-gates", false, "required in task mode: auto-run plan-declared validation gates")
@@ -179,6 +195,14 @@ func shouldStartAutoIndex(f flags) bool {
 	return !f.promptSet && !f.goalSet && !f.noAutoIndex && !f.noRag && f.ragDB == ""
 }
 
+func shouldPlanSummarize(f flags, autoErr, embChainErr error) bool {
+	return !f.noCompress || (f.progressive && autoIndexEnabled(f, autoErr, embChainErr))
+}
+
+func destinationAdmissionInteractive(f flags, terminal bool) bool {
+	return terminal && lineSourceModeFor(f) != sourceNone
+}
+
 // autoIndexEnabled is the wiring gate for the background auto-index job:
 // the flag decision plus the two startup resolution errors (auto index path,
 // embedding chain) that force the immediate enableRetrieve path instead.
@@ -210,7 +234,7 @@ func validateFlags(f flags) error {
 		}
 		if f.promptSet || f.goalSet || f.reviewManifest != "" || f.evidencePath != "" ||
 			f.wfProfileSet || f.wfReasonSet || f.workflowProfile != "" || f.workflowReason != "" ||
-			f.ragDB != "" || f.delegate || len(f.mcpStdio) > 0 || len(f.mcpHTTP) > 0 ||
+			f.ragDB != "" || f.delegate || f.dispatch || len(f.mcpStdio) > 0 || len(f.mcpHTTP) > 0 ||
 			f.allowWrite || f.allowExec || f.approvePlanLock {
 			return fmt.Errorf("golem: %s cannot be combined with planning, setup, review, or ambient tool flags", mode)
 		}
@@ -226,6 +250,9 @@ func validateFlags(f flags) error {
 	}
 	if f.noRag && f.ragDB != "" {
 		return fmt.Errorf("golem: -no-rag and -rag-db are mutually exclusive")
+	}
+	if f.dispatchRole != "" && !f.dispatch {
+		return fmt.Errorf("golem: -dispatch-role requires -dispatch")
 	}
 	if f.pressureWarn < 0 || f.pressureWarn > 100 {
 		return fmt.Errorf("golem: -pressure-warn must be between 0 and 100")
@@ -278,6 +305,9 @@ func validateFlags(f flags) error {
 	if f.planPath != "" && f.delegate {
 		return fmt.Errorf("golem: -plan (task mode) does not attach delegate_code; proof-mode tools are built from the locked plan")
 	}
+	if f.planPath != "" && f.dispatch {
+		return fmt.Errorf("golem: -plan (task mode) does not attach dispatch; proof-mode tools are built from the locked plan")
+	}
 	if f.planPath != "" && (len(f.mcpStdio) > 0 || len(f.mcpHTTP) > 0) {
 		return fmt.Errorf("golem: -plan (task mode) does not attach MCP tools; proof-mode tools are built from the locked plan")
 	}
@@ -301,6 +331,9 @@ func validateFlags(f flags) error {
 	}
 	if f.goalSet && f.delegate {
 		return fmt.Errorf("golem: -goal (planning mode) does not attach delegate_code")
+	}
+	if f.goalSet && f.dispatch {
+		return fmt.Errorf("golem: -goal (planning mode) does not attach dispatch")
 	}
 	if f.goalSet && (len(f.mcpStdio) > 0 || len(f.mcpHTTP) > 0) {
 		return fmt.Errorf("golem: -goal (planning mode) does not attach MCP tools")
@@ -335,6 +368,10 @@ func applyTaskMode(f flags) (flags, []string) {
 	if f.trace || f.telemetry {
 		warns = append(warns, "task mode: -trace/-telemetry are not wired for the task run; the AgentFlow proof pack is the durable record")
 	}
+	if f.grounding {
+		warns = append(warns, "task mode: -grounding ignored (task mode runs a locked plan, not answer turns)")
+		f.grounding = false
+	}
 	f.noSession = true
 	f.noCompress = true
 	f.noMemory = true
@@ -362,6 +399,10 @@ func applyGoalMode(f flags) (flags, []string) {
 	}
 	if f.trace || f.telemetry {
 		warns = append(warns, "planning mode: -trace/-telemetry are not wired for the planner run; the locked plan is the durable record")
+	}
+	if f.grounding {
+		warns = append(warns, "planning mode: -grounding ignored (planning mode authors a plan, it runs no answer turn)")
+		f.grounding = false
 	}
 	f.noSession = true
 	f.noCompress = true
@@ -406,12 +447,14 @@ type startupInfo struct {
 	retrieveOmitted    bool
 	retrieveRequested  bool // -rag-db, -no-rag, or auto suppress the generic no-index notice
 	thinkLine          string
+	inputCeilingLine   string
 	sessionLine        string
 	projectContextLine string
 	memoryLine         string
 	agentMemoryLine    string
 	mcpLine            string
 	delegateLine       string
+	dispatchLine       string
 }
 
 // startupNotices renders the human-facing startup lines (written to stderr).
@@ -439,6 +482,9 @@ func startupNotices(info startupInfo) []string {
 	if info.delegateLine != "" {
 		out = append(out, info.delegateLine)
 	}
+	if info.dispatchLine != "" {
+		out = append(out, info.dispatchLine)
+	}
 	if info.projectContextLine != "" {
 		out = append(out, info.projectContextLine)
 	}
@@ -450,6 +496,9 @@ func startupNotices(info startupInfo) []string {
 	}
 	if info.thinkLine != "" {
 		out = append(out, info.thinkLine)
+	}
+	if info.inputCeilingLine != "" {
+		out = append(out, info.inputCeilingLine)
 	}
 	for _, w := range info.bootstrapWarns {
 		out = append(out, "warning: "+w.Error())
@@ -464,6 +513,42 @@ func startupNotices(info startupInfo) []string {
 		out = append(out, "retrieve unavailable: no RAG index configured; using file/search tools")
 	}
 	return out
+}
+
+// newOrchestratorFactory returns the session's orchestrator constructor. The
+// session builds one per agentflow parallel worker on top of the startup
+// orchestrator, and every one must see the same context policy: -progressive
+// drives BOTH the Retrieve renderer and #331 mixed context assembly, from one
+// flag.
+//
+// It takes flags rather than a bool so the production call site cannot pass a
+// value other than the one -progressive parsed into.
+//
+// With -dispatch it also installs the per-run dispatch invocation cap, and
+// with a workspace-declared verifier (#347) the post-write verification hook.
+func newOrchestratorFactory(caller agent.ModelCaller, f flags, verifier *verifyRunner) func() *agent.Orchestrator {
+	var opts []agent.Option
+	// #347: a typed-nil would satisfy the interface and panic on first use, so
+	// the option is installed only for a real verifier.
+	if verifier != nil {
+		opts = append(opts, agent.WithVerifier(verifier))
+	}
+	if f.dispatch {
+		// #282 coordination: cap dispatch INVOCATIONS per run so the parent
+		// cannot bypass child-local limits by re-dispatching fresh children;
+		// with the library's per-call task cap this bounds total children per
+		// run. The option fails fast on a Run whose tool set omits the named
+		// tool — sound here because -dispatch is rejected in -plan/-goal and
+		// agentflow modes, so every Run through this factory carries the
+		// dispatch tool.
+		opts = append(opts, agent.WithToolInvocationLimit(agent.ToolInvocationLimit{
+			Tool: agenttools.DispatchToolName,
+			Max:  agenttools.DefaultDispatchCallsPerRun,
+		}))
+	}
+	return func() *agent.Orchestrator {
+		return agent.New(caller, agent.ContextManager{Mixed: f.progressive}, opts...)
+	}
 }
 
 func shouldShowAgentflowHint(f flags) bool {
@@ -482,7 +567,7 @@ func main() {
 			os.Exit(statusErr.ExitCode())
 		}
 		// runIndex/runOneShot already rendered their own output; just exit non-zero.
-		if errors.Is(err, errIndexFailed) || errors.Is(err, errOneShotFailed) || errors.Is(err, errAgentflowTaskFailed) {
+		if errors.Is(err, errIndexFailed) || errors.Is(err, errOneShotFailed) || errors.Is(err, errAgentflowTaskFailed) || errors.Is(err, errSourceFailed) {
 			os.Exit(1)
 		}
 		_, _ = fmt.Fprintf(os.Stderr, "golem: %v\n", err)
@@ -490,15 +575,74 @@ func main() {
 	}
 }
 
-func run(args []string, stdin *os.File, stdout, stderr *os.File) error {
+func colorEnabled(out *os.File, noColor bool) bool {
+	return colorPermitted(noColor) && realTermOps{}.IsTerminal(int(out.Fd()))
+}
+
+// colorPermitted holds the flag/environment gates separately from the TTY
+// probe so their truth table is testable without a terminal.
+func colorPermitted(noColor bool) bool {
+	return !noColor && os.Getenv("NO_COLOR") == "" && os.Getenv("TERM") != "dumb"
+}
+
+// runHooks exposes only the process lifecycle boundaries that package tests
+// must control or observe deterministically. A zero value is the production
+// path; it neither replaces composition nor coordinates shutdown.
+type runHooks struct {
+	openFeedback        func(context.Context, string, string, func(string)) (*feedbackService, error)
+	startAutoIndex      func() func()
+	afterAutoIndexStart func(lineSourceMode, agent.Tool, *feedbackService) error
+	afterCheckpointOpen func(*checkpointStore) error
+	// afterBackgroundReady runs once in the interactive branch, after the exec
+	// tools are registered and the background manager's replCtx shutdown
+	// binding is in place (#346). It receives the real manager (nil when
+	// -allow-exec is off), the registered exec tools, and the REPL cancel
+	// function, so lifecycle tests can start real jobs and drive host-context
+	// cancellation through run.
+	afterBackgroundReady func(*agenttools.BackgroundManager, []agent.Tool, context.CancelFunc)
+	// afterSessionReady runs once, immediately after the replSession is built
+	// and every startup decision that can disable a feature has been applied.
+	// It is the only place a test can observe what the session actually got
+	// (#348 wires -grounding through five separate points), and returning an
+	// error stops the run before any input is read.
+	afterSessionReady func(*replSession) error
+	closed            func(string)
+}
+
+func formatFeedbackReport(report feedbackReport) string {
+	reasons := make([]string, 0, len(report.reasons))
+	for reason, count := range report.reasons {
+		if count != 0 {
+			reasons = append(reasons, fmt.Sprintf("%s:%d", reason, count))
+		}
+	}
+	if report.attempted == 0 && report.completed == 0 && report.dropped == 0 && len(reasons) == 0 && report.presentationDuplicates == 0 && report.presentationJoinMisses == 0 {
+		return ""
+	}
+	sort.Strings(reasons)
+	dropReasons := "none"
+	if len(reasons) > 0 {
+		dropReasons = strings.Join(reasons, ",")
+	}
+	return fmt.Sprintf("behavioral feedback: attempted=%d completed=%d dropped=%d drop_reasons=%s duplicates=%d join_misses=%d",
+		report.attempted, report.completed, report.dropped, dropReasons, report.presentationDuplicates, report.presentationJoinMisses)
+}
+
+func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...runHooks) (runErr error) {
+	var hooks runHooks
+	if len(testHooks) > 0 {
+		hooks = testHooks[0]
+	}
 	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
 		switch args[0] {
 		case "index":
 			return runIndex(context.Background(), args[1:], stdout, stderr)
 		case "models":
 			return runModels(context.Background(), args[1:], stdout, stderr)
+		case "source":
+			return runSource(context.Background(), args[1:], stdin, stdout, stderr)
 		default:
-			return fmt.Errorf("unknown command %q (did you mean \"index\" or \"models\"?)", args[0])
+			return fmt.Errorf("unknown command %q (did you mean \"index\", \"models\", or \"source\"?)", args[0])
 		}
 	}
 
@@ -536,27 +680,145 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File) error {
 	if err != nil {
 		return err
 	}
+	autoDBPath, autoWorkspaceID, autoErr := indexDBPathForWorkspace(os.Getenv, root)
 
-	backendRes, err := resolveBackend(ctx, cfg, backendResolveOpts{
-		flagBaseURL: f.baseURL,
-		flagSet:     f.baseURLSet,
-		noProbe:     f.noProbe,
-		lookupEnv:   os.LookupEnv,
-		prober:      openaicompat.DiscoverBaseURL,
-	})
+	// #477 required ordering: resolve every enabled route and build the
+	// frozen network plan BEFORE any outbound byte, admit the manifest,
+	// only then discover, bootstrap, refresh, probe, or infer.
+	agentRoute, err := providerbootstrap.PlanAgentRoute(cfg)
+	if err != nil {
+		return err
+	}
+	plan := chainPlan{chain: agentRoute.Chain, useRecommend: agentRoute.Recommend}
+	// Embedding is feature-gated, not optional-recommend: an absent or
+	// unresolvable embedding default disables RAG later with the same
+	// warning it always has, and plans no route.
+	embChain, embChainErr := embeddingChain(cfg)
+	routes := []providerbootstrap.PlannedRoute{agentRoute}
+	var summarizeRoute providerbootstrap.PlannedRoute
+	if shouldPlanSummarize(f, autoErr, embChainErr) {
+		summarizeRoute, err = providerbootstrap.PlanOptionalUseCaseRoute(cfg, config.UseCaseSummarize)
+		if err != nil {
+			return err
+		}
+		routes = append(routes, summarizeRoute)
+	}
+	if embChainErr == nil && !f.noRag {
+		routes = append(routes, providerbootstrap.PlannedRoute{UseCase: "embedding", Chain: embChain})
+	}
+	if f.grounding && cfg != nil {
+		// Grounding (#348, merged via #480) binds the extract and verify use
+		// cases at runtime. Mirror newGroundingService's resolution: BOTH
+		// must resolve or the feature degrades with its own warning and no
+		// route is planned — absence here is feature-off, never recommend.
+		groundingRoutes := make([]providerbootstrap.PlannedRoute, 0, 2)
+		for _, uc := range []string{config.UseCaseExtract, config.UseCaseVerify} {
+			chain, cerr := cfg.RoleFallbackChain(uc)
+			if cerr != nil || len(chain) == 0 {
+				groundingRoutes = nil
+				break
+			}
+			groundingRoutes = append(groundingRoutes, providerbootstrap.PlannedRoute{UseCase: uc, Chain: chain})
+		}
+		routes = append(routes, groundingRoutes...)
+	}
+	var dchain []string
+	if f.dispatch {
+		dchain, err = resolveDispatchChain(cfg, f.dispatchRole, agentRoute.Chain)
+		if err != nil {
+			return err
+		}
+		routes = append(routes, providerbootstrap.PlannedRoute{
+			UseCase: dispatchUseCase, Chain: dchain, Recommend: len(dchain) == 0,
+		})
+	}
+	var delegateChain []string
+	if f.delegate {
+		delegateChain, err = resolveDelegateChain(cfg, f.delegateRole)
+		if err != nil {
+			return err
+		}
+		routes = append(routes, providerbootstrap.PlannedRoute{UseCase: delegateUseCase, Chain: delegateChain})
+	}
+
+	explicitURL, _, err := explicitBaseURL(f.baseURL, f.baseURLSet, os.LookupEnv)
 	if err != nil {
 		return err // explicit-override validation error: fatal, matches validateFlags semantics
 	}
+	targetKey, _, targetOK := openAICompatTargetFromRoute(cfg, agentRoute)
+	ocProv, ocURL := "", ""
+	if explicitURL != "" && targetOK {
+		// The explicit override lands in the EFFECTIVE config before the
+		// manifest derives (I9): what the user consents to is what dials.
+		ocProv, ocURL = targetKey, explicitURL
+	}
+	eff, err := providerbootstrap.Materialize(cfg, f.ollamaURL, ocProv, ocURL)
+	if err != nil {
+		return err
+	}
+	netPlan, err := providerbootstrap.BuildNetworkPlan(eff, routes, providerbootstrap.PlanOptions{
+		CapabilityProbes: !f.noCapProbe,
+	})
+	if err != nil {
+		return err
+	}
+
+	gate := provider.NewDestinationGate()
+	interactive := destinationAdmissionInteractive(f, realTermOps{}.IsTerminal(int(stdin.Fd())))
+	adm, err := newDestinationAdmission(destinationAdmissionConfig{
+		Gate:        gate,
+		Edges:       netPlan.Edges,
+		AllowFlags:  f.allowDestinations,
+		Interactive: interactive,
+		PromptYN:    startupPromptYN(stdin, stderr),
+		Out:         stderr,
+	})
+	if err != nil {
+		return err
+	}
+	if err := adm.ensure(ctx); err != nil {
+		return err
+	}
+
+	// Guarded, loopback-only discovery runs strictly after admission: each
+	// scan candidate probes through its own bound no-redirect client, and a
+	// hit re-pins the target provider's admitted destination to the
+	// discovered loopback URL before any client is constructed.
+	backendRes, err := resolveBackend(ctx, eff.Config(), backendResolveOpts{
+		flagBaseURL:    f.baseURL,
+		flagSet:        f.baseURLSet,
+		noProbe:        f.noProbe,
+		lookupEnv:      os.LookupEnv,
+		prober:         openaicompat.DiscoverBaseURL,
+		agentRoute:     &agentRoute,
+		guardCandidate: discoveryCandidateGuard(ctx, targetKey),
+	})
+	if err != nil {
+		return err
+	}
+	if backendRes.source == "discovered" {
+		pinned, perr := provider.NewDestination(backendRes.providerKey, backendRes.baseURL)
+		if perr != nil {
+			return fmt.Errorf("golem: pin discovered backend: %w", perr)
+		}
+		if perr := adm.pinLoopback(backendRes.providerKey, pinned); perr != nil {
+			return perr
+		}
+	}
 
 	var capStore fingerprint.CapProbeStore
+	var profileStore fingerprint.Store
 	capStoreWarn := ""
-	if !f.noCapProbe {
-		var capHandle *capProbeHandle
-		capHandle, capStoreWarn = openCapProbeStore(ctx, os.Getenv, root)
+	if !f.noCapProbe || f.inputCeiling <= 0 {
+		capHandle, warning := openCapProbeStore(ctx, os.Getenv, root)
 		if capHandle != nil {
-			capStore = capHandle.store
+			profileStore = capHandle.profiles
+			if !f.noCapProbe {
+				capStore = capHandle.store
+			}
 			defer func() { _ = capHandle.db.Close() }()
 		}
+		capStoreWarn = warning
 	}
 
 	bundle, err := providerbootstrap.New(ctx, providerbootstrap.Options{
@@ -564,17 +826,15 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File) error {
 		OllamaURLOverride:               f.ollamaURL,
 		OpenAICompatURLOverrideProvider: backendRes.providerKey,
 		OpenAICompatURLOverride:         backendRes.baseURL,
+		FingerprintProfileStore:         profileStore,
 		CapabilityProbeStore:            capStore, // nil when -no-cap-probe or open fully failed
+		DestinationGate:                 gate,
+		ActiveProviders:                 netPlan.ActiveProviders,
 	})
 	if err != nil {
 		return fmt.Errorf("bootstrap providers: %w", err)
 	}
 	defer func() { _ = bundle.Close() }()
-
-	plan, err := resolveAgentChain(bundle.Config)
-	if err != nil {
-		return err
-	}
 
 	resolveEndpoint := newPreflightEndpointResolver(bundle.Config, f.ollamaURL, backendRes.providerKey, backendRes.diagSource())
 	var resolver toolCallResolver
@@ -595,26 +855,51 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File) error {
 	}
 
 	thinkOpts, thinkLine := resolveThinkOptions(ctx, bundle.Models, plan.chain, f.think)
+	inputCeiling := resolveInputCeiling(ctx, bundle.Models, plan.chain, f.inputCeiling, f.outputReserve, resolver != nil)
 
-	autoDBPath, autoWorkspaceID, autoErr := indexDBPathForWorkspace(os.Getenv, root)
 	if autoErr != nil && !f.noRag && f.ragDB == "" {
 		warns = append(warns, "retrieve auto-index disabled: "+autoErr.Error())
 	}
-	feedbackDB := ""
-	if f.feedback && !f.noRag {
-		if f.feedbackDB != "" {
-			if err := validatePathOutsideWorkspace(f.feedbackDB, root); err != nil {
-				warns = append(warns, "behavioral feedback disabled: "+err.Error())
-			} else {
-				feedbackDB = f.feedbackDB
-			}
-		} else if p, ferr := feedbackDBPathForWorkspace(os.Getenv, root); ferr != nil {
-			warns = append(warns, "behavioral feedback disabled: "+ferr.Error())
-		} else {
-			feedbackDB = p
+	feedbackOpener := hooks.openFeedback
+	if feedbackOpener == nil {
+		feedbackOpener = openFeedbackService
+	}
+	feedbackSvc, feedbackWarning := openConfiguredFeedback(ctx, f.feedback && !f.noRag, root, f.feedbackDB, os.Getenv,
+		func(line string) { _, _ = fmt.Fprintln(stderr, line) }, feedbackOpener)
+	if feedbackWarning != "" {
+		warns = append(warns, feedbackWarning)
+	}
+	defer func() {
+		report, closeErr := feedbackSvc.close()
+		if line := formatFeedbackReport(report); line != "" {
+			_, _ = fmt.Fprintln(stderr, line)
+		}
+		if closeErr != nil {
+			_, _ = fmt.Fprintln(stderr, "behavioral feedback close failed: "+closeErr.Error())
+		}
+		if hooks.closed != nil {
+			hooks.closed("feedback")
+		}
+	}()
+	feedbackWeighter := feedbackSvc.behavioralWeighter()
+
+	// Grounding (#348) is resolved BEFORE retrieval so its recorder can be
+	// threaded into every retriever generation golem builds. The chain warning
+	// is held rather than emitted: if retrieval also turns out to be
+	// unavailable, that is the one warning worth printing.
+	var (
+		groundingRec       *evidenceRecorder
+		groundingSvc       *groundingService
+		groundingChainWarn string
+	)
+	if f.grounding {
+		groundingRec = newEvidenceRecorder(groundingEvidenceMaxBytes)
+		groundingSvc, groundingChainWarn = newGroundingService(bundle.Config, bundle.Router, groundingRec)
+		if groundingSvc == nil {
+			groundingRec = nil // no verifier: capture nothing and wrap nothing
 		}
 	}
-	embChain, embChainErr := embeddingChain(bundle.Config)
+	// #477 D8: embChain/embChainErr resolved once at plan time above.
 	var retrieve agent.Tool
 	retrieveLine := ""
 	retrieveRequested := f.ragDB != "" || f.noRag
@@ -627,11 +912,14 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File) error {
 			if closeErr := ready.close(); closeErr != nil {
 				_, _ = fmt.Fprintln(stderr, closeErr)
 			}
+			if hooks.closed != nil {
+				hooks.closed("retrieval")
+			}
 		}()
 		retrieve = ready
 		rr := enableRetrieve(ctx, bundle.Config, bundle.Router, retrieveOpts{
 			autoDBPath:  autoDBPath,
-			workspaceID: autoWorkspaceID, feedbackDB: feedbackDB,
+			workspaceID: autoWorkspaceID, weighter: feedbackWeighter, progressive: f.progressive, recorder: groundingRec,
 		})
 		warns = append(warns, rr.warns...)
 		if rr.reader != nil {
@@ -649,25 +937,97 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File) error {
 			ragDB:       f.ragDB,
 			autoDBPath:  autoDBPath,
 			workspaceID: autoWorkspaceID,
-			feedbackDB:  feedbackDB,
+			weighter:    feedbackWeighter,
+			progressive: f.progressive,
+			recorder:    groundingRec,
 		})
 		if rr.reader != nil {
+			// Route the explicit generation through the same readyRetrieve
+			// wrapper the auto path uses: its Invoke admits calls through
+			// reader.inflight under lock, so close() drains in-flight
+			// retrievals before the store and feedback service shut down.
+			// A raw rr.tool would bypass admission and let shutdown close
+			// both under an active retrieval. Local on purpose: the outer
+			// `ready` gates background-refresh wiring, which an explicit
+			// -rag-db run must never start.
+			wrapped := newReadyRetrieve(warmingRetrieveMessage)
+			wrapped.install(rr.reader, rr.line)
+			retrieve = wrapped
 			defer func() {
-				if closeErr := rr.reader.closeAfterDrain(); closeErr != nil {
+				if closeErr := wrapped.close(); closeErr != nil {
 					_, _ = fmt.Fprintln(stderr, closeErr)
+				}
+				if hooks.closed != nil {
+					hooks.closed("retrieval")
 				}
 			}()
 		}
-		retrieve = rr.tool
 		warns = append(warns, rr.warns...)
 		retrieveLine = rr.line
 		retrieveRequested = retrieveRequested || rr.suppressNotice
 	}
-	tools, err := buildTools(root, retrieve)
+	tools, err := buildTools(root, nil)
 	if err != nil {
 		return err
 	}
+	// Everything appended after this point (retrieve, dispatch, memory, write,
+	// exec, delegate, MCP) lands in tools[readToolCount:], which is what the
+	// consumer runtime receives as EXTRA tools — it rebuilds the base file
+	// tools from its own workspace. Reorderings must keep the file tools first.
+	readToolCount := len(tools)
+	if retrieve != nil {
+		tools = append(tools, retrieve)
+	}
 	retrieveOmitted := retrieve == nil
+
+	// A warming readyRetrieve counts as available: its later generation is built
+	// through the same recorder.
+	if warn := groundingStartupWarning(f.grounding, retrieve != nil, groundingChainWarn); warn != "" {
+		warns = append(warns, warn)
+		groundingSvc = nil
+	}
+
+	// Dispatch is built here, before memory/write/exec/delegate/MCP are
+	// appended, so the child-visible set is exactly the read-only tools above.
+	// dispatchNotice is the late-binding seam for per-child completion lines:
+	// it starts on plain stderr (the one-shot path keeps that) and the
+	// interactive branch rebinds it to replControl.notice before any turn can
+	// invoke dispatch, mirroring feedbackSvc.warn.
+	var dispatchNotice *feedbackNotifier
+	dispatchLine := ""
+	if f.dispatch {
+		// #477 D8: dchain was resolved at plan time and its reachability
+		// admitted; re-resolving here could diverge from the manifest.
+		childCeiling := inputCeiling.ceiling
+		if f.dispatchRole != "" {
+			// The run-level preflight and input ceiling above cover plan.chain
+			// only. An explicit dispatch chain needs its own tool-capability
+			// gate (children always carry the file tools, so a chain without
+			// tool_call would otherwise fail only at invocation time) and its
+			// own context-derived ceiling.
+			dwarns, perr := preflightToolCapable(ctx, bundle.Models, dchain, resolveEndpoint, resolver)
+			warns = append(warns, dwarns...)
+			if perr != nil {
+				return perr
+			}
+			childCeiling = resolveInputCeiling(ctx, bundle.Models, dchain, f.inputCeiling, f.outputReserve, resolver != nil).ceiling
+		}
+		dispatchNotice = newFeedbackNotifier(func(line string) {
+			_, _ = fmt.Fprintln(stderr, line)
+		})
+		fan := resolveDispatchFanout(bundle.Router.SlotCapacity, dchain)
+		caller := newRouterChainCallerFor(bundle.Router, dchain, dispatchUseCase)
+		dpt, derr := newDispatchTool(caller, f.progressive, agent.Budget{InputCeiling: childCeiling, OutputReserve: f.outputReserve}, fan, dispatchNotice.notify, tools)
+		if derr != nil {
+			return derr
+		}
+		tools = append(tools, dpt)
+		head := "model recommendation"
+		if len(dchain) > 0 {
+			head = dchain[0]
+		}
+		dispatchLine = fmt.Sprintf("dispatch: enabled -> %s", head)
+	}
 
 	wantAgentMemory, agentMemoryWarn := agentMemoryRequest(f.agentMemory, f.noSession)
 	if agentMemoryWarn != "" {
@@ -686,27 +1046,77 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File) error {
 		}
 	}()
 
-	var journal *mutationJournal
+	var journal *checkpointJournal
+	var verifier *verifyRunner
 	if f.allowWrite {
-		wt, j, werr := buildWriteTools(root)
+		// D6: -allow-write fails closed on ANY checkpoint lifecycle failure
+		// (store, lease, migration, recovery, state query, hardening) rather
+		// than silently dropping the #355 durability guarantee.
+		cpStore, cerr := openCheckpointStore(ctx, os.Getenv, root)
+		if cerr != nil {
+			return fmt.Errorf("golem: checkpoint store: %w", cerr)
+		}
+		defer func() { runErr = errors.Join(runErr, cpStore.Close()) }()
+		if hooks.afterCheckpointOpen != nil {
+			if err := hooks.afterCheckpointOpen(cpStore); err != nil {
+				return err
+			}
+		}
+		wt, j, werr := buildWriteTools(root, cpStore)
 		if werr != nil {
 			return werr
 		}
+		notice, rerr := j.recoverStartup(ctx)
+		if rerr != nil {
+			return fmt.Errorf("golem: checkpoint recovery: %w", rerr)
+		}
+		if notice != "" {
+			warns = append(warns, notice)
+		}
+		if n, ierr := cpStore.countState(ctx, checkpointUndoing); ierr != nil {
+			return fmt.Errorf("golem: checkpoint state: %w", ierr)
+		} else if n > 0 {
+			warns = append(warns, fmt.Sprintf("an interrupted undo exists (%d checkpoint(s)); /undo resumes it", n))
+		}
 		tools = append(tools, wt...)
 		journal = j
+
+		// #347: read only here, so no other mode ever touches .golem.json.
+		// applyOneShotMode has already cleared allowWrite for -p, and task,
+		// planning and Agentflow modes reject it at validation.
+		var vwarn string
+		if verifier, vwarn = buildVerifier(root); vwarn != "" {
+			warns = append(warns, vwarn)
+		}
 	}
 
+	// Background manager (#346): constructed only when interactive -allow-exec
+	// survives to this point (one-shot already forced allowExec false;
+	// -plan/-goal reject it at flag validation), so every manager gets the
+	// replCtx lifetime binding below. The deferred Shutdown is registered
+	// immediately so no error path between here and that binding can leak a
+	// process; sync.Once makes it safe beside the AfterFunc path.
+	var bgManager *agenttools.BackgroundManager
+	var bgExecTools []agent.Tool
 	if f.allowExec {
-		et, eerr := buildExecTools(root)
+		bgManager = agenttools.NewBackgroundManager()
+		defer func() {
+			bgManager.Shutdown()
+			if hooks.closed != nil {
+				hooks.closed("background")
+			}
+		}()
+		et, eerr := buildExecTools(root, bgManager)
 		if eerr != nil {
 			return eerr
 		}
+		bgExecTools = et
 		tools = append(tools, et...)
 	}
 
 	delegateLine := ""
 	if f.delegate {
-		dt, dchain, derr := buildDelegateTool(bundle.Config, bundle.Router, f.delegateRole, nil)
+		dt, dchain, derr := buildDelegateTool(bundle.Router, f.delegateRole, delegateChain, nil)
 		if derr != nil {
 			return derr
 		}
@@ -744,6 +1154,7 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File) error {
 
 	baseSystem := buildSystemPrompt(f.allowWrite, f.allowExec)
 	baseSystem += delegateSystemFragment(f.delegate, f.allowWrite)
+	baseSystem += dispatchSystemFragment(f.dispatch)
 	baseSystem += memorySystemFragment(memoryEnabled)
 	projectContextLine := ""
 	projectContextBlock := ""
@@ -803,74 +1214,118 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File) error {
 		retrieveOmitted:    retrieveOmitted,
 		retrieveRequested:  retrieveRequested,
 		thinkLine:          thinkLine,
+		inputCeilingLine:   inputCeiling.line(),
 		sessionLine:        sessionLine,
 		projectContextLine: projectContextLine,
 		memoryLine:         memoryLine,
 		agentMemoryLine:    agentMemoryLine,
 		mcpLine:            mcpLine,
 		delegateLine:       delegateLine,
+		dispatchLine:       dispatchLine,
 	}) {
 		_, _ = fmt.Fprintln(stderr, line)
 	}
 
-	maxHistoryTokens := f.inputCeiling
-	if maxHistoryTokens <= 0 {
-		maxHistoryTokens = agent.DefaultInputCeiling
-	}
-	maxHistoryTokens /= 2
-	summarizeChain, err := resolveSummarizeChain(bundle.Config)
-	if err != nil {
-		return err
+	// #477 D8: the summarize chain comes from the frozen route resolved
+	// before admission — never re-resolved here. A recommend route is the
+	// empty chain, which NewRouterSummarizer routes non-strict, unchanged.
+	summarizeChain := summarizeRoute.Chain
+	var sourceSummarizer rag.SourceSummaryGenerator
+	if f.progressive && autoIndexEnabled(f, autoErr, embChainErr) {
+		if len(summarizeChain) == 0 {
+			_, _ = fmt.Fprintln(stderr, "golem: warning: "+progressiveNoChainWarning(true))
+		}
+		sourceSummarizer = routerSourceSummaryGenerator(bundle.Router, summarizeChain)
 	}
 
-	caller := newRouterChainCaller(bundle.Router, plan.chain)
-	newOrchestrator := func() *agent.Orchestrator {
-		return agent.New(caller, agent.ContextManager{})
-	}
+	newOrchestrator := newOrchestratorFactory(newRouterChainCaller(bundle.Router, plan.chain), f, verifier)
+	orch := newOrchestrator()
 
 	obsv, err := newObserv(os.Getenv, root, f.trace, f.telemetry, time.Now)
 	if err != nil {
 		return fmt.Errorf("golem: observability setup: %w", err)
 	}
 
-	budget := agent.Budget{InputCeiling: f.inputCeiling, OutputReserve: f.outputReserve}
+	budget := agent.Budget{InputCeiling: inputCeiling.ceiling, OutputReserve: f.outputReserve}
 	if f.pressureWarn > 0 {
 		// The agent package owns the band layout (single source of truth for the
 		// monotonic clamp + defaults); golem only supplies the warn fraction.
 		budget.Pressure = agent.PressureThresholdsForWarn(float64(f.pressureWarn) / 100)
 	}
+	var summarizer conversation.Summarizer
+	if !f.noCompress {
+		summarizer = agent.NewRouterSummarizer(bundle.Router, summarizeChain)
+	}
+	runtime, err := golemruntime.New(ctx, golemruntime.Options{
+		Root:     root,
+		System:   baseSystem,
+		Tools:    tools[readToolCount:],
+		MaxSteps: f.maxSteps,
+		Budget:   budget,
+		// The REPL line reader accepts lines up to 1 MiB; keep the runtime's
+		// message bound in lockstep so a pasted log or diff is not rejected.
+		MaxMessageBytes: maxGoalBytes,
+		ModelOptions:    thinkOpts,
+		Summarizer:      summarizer,
+		// The CLI is the trusted host: -trace records include model reasoning.
+		RetainReasoning:    true,
+		DisableCompression: f.noCompress,
+		OnWarning: func(err error) {
+			_, _ = fmt.Fprintf(stderr, "warning: %v\n", err)
+		},
+		Orchestrator: orch,
+	})
+	if err != nil {
+		return err
+	}
+	defer func() {
+		_ = runtime.Close()
+		if hooks.closed != nil {
+			hooks.closed("runtime")
+		}
+	}()
+
+	renderOut := stdout
+	if f.promptSet {
+		renderOut = stderr
+	}
 	sess := &replSession{
-		orch:                newOrchestrator(),
+		orch:                orch,
+		runtime:             runtime,
 		newOrchestrator:     newOrchestrator,
 		tools:               tools,
 		baseSystem:          baseSystem,
 		projectContextBlock: projectContextBlock,
 		maxSteps:            f.maxSteps,
 		budget:              budget,
-		color:               !f.noColor,
+		color:               colorEnabled(renderOut, f.noColor),
 		retrieveOmitted:     retrieveOmitted,
 		session:             sessn,
-		compress: compressPolicy{
-			summarize:          agent.NewRouterSummarizer(bundle.Router, summarizeChain),
-			estimate:           conversation.CharRatioEstimator(4.0),
-			maxHistoryTokens:   maxHistoryTokens,
-			minRecentExchanges: 4,
-			enabled:            !f.noCompress,
-		},
-		journal:      journal,
-		allowWrite:   f.allowWrite,
-		allowExec:    f.allowExec,
-		mcpAttached:  mcpAttached,
-		memory:       mrt.user,
-		memoryDBPath: mrt.dbPath,
-		records:      mrt.records,
-		workspaceID:  workspaceID(root),
-		obs:          obsv,
-		pressureWarn: f.pressureWarn > 0,
-		modelOptions: thinkOpts,
+		journal:             journal,
+		bgManager:           bgManager,
+		grants:              newApprovalGrants(),
+		destAdmission:       adm,
+		allowWrite:          f.allowWrite,
+		allowExec:           f.allowExec,
+		mcpAttached:         mcpAttached,
+		memory:              mrt.user,
+		memoryDBPath:        mrt.dbPath,
+		records:             mrt.records,
+		workspaceID:         workspaceID(root),
+		obs:                 obsv,
+		feedback:            feedbackSvc,
+		pressureWarn:        f.pressureWarn > 0,
+		mixed:               f.progressive,
+		grounding:           groundingSvc,
+		modelOptions:        thinkOpts,
 	}
 	if sess.maxSteps == 0 {
 		sess.maxSteps = 16 // mirror agent defaultMaxSteps so the footer's k/max is accurate
+	}
+	if hooks.afterSessionReady != nil {
+		if err := hooks.afterSessionReady(sess); err != nil {
+			return err
+		}
 	}
 
 	interrupts := make(chan struct{}, 1)
@@ -897,8 +1352,28 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File) error {
 		defer cancelREPL()
 		ctrl := newReplControl(stdout, stderr, interrupts, cancelREPL)
 		sess.control = ctrl
+		if feedbackSvc != nil {
+			feedbackSvc.warn.set(ctrl.notice)
+		}
+		if dispatchNotice != nil {
+			dispatchNotice.set(ctrl.notice)
+		}
 		notice = ctrl.notice
 		onInterrupt = ctrl.interrupt
+		if bgManager != nil {
+			// replCtx is the manager's host lifetime (#346): idle Ctrl-C quit
+			// and any other REPL-context cancellation tear every background job
+			// down even while run is still unwinding. Deferred AFTER the
+			// construction-time Shutdown defer, so LIFO stops an unstarted
+			// callback before normal deferred shutdown; Shutdown's sync.Once
+			// makes an already-running callback and normal teardown safe and
+			// blocking.
+			stopAfter := context.AfterFunc(replCtx, bgManager.Shutdown)
+			defer stopAfter()
+		}
+		if hooks.afterBackgroundReady != nil {
+			hooks.afterBackgroundReady(bgManager, bgExecTools, cancelREPL)
+		}
 	}
 	go func() {
 		for range sigCh {
@@ -906,47 +1381,160 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File) error {
 		}
 	}()
 
+	// startAutoIndex is nil unless auto-indexing is enabled. It is a closure so
+	// the REPL branch can start it after binding the idle display and stop it
+	// before the source closes; every other mode never starts it at all.
+	var startAutoIndex func() func()
 	if ready != nil {
-		// Launched after startup construction succeeds so async notices never
-		// interleave the synchronous startup block, and setup errors do not race
-		// the background job against deferred provider cleanup.
-		autoCtx, cancelAuto := context.WithCancel(ctx)
-		autoDone := make(chan struct{})
-		go func() {
-			defer close(autoDone)
-			runAutoIndex(autoCtx, autoIndexJob{
-				root:        root,
-				dbPath:      autoDBPath,
-				workspaceID: autoWorkspaceID,
-				cfg:         bundle.Config,
-				router:      bundle.Router,
-				embedder: newChainEmbedder(func(rc context.Context, rreq provider.RoutingRequest) (embedExecutor, error) {
-					return bundle.Router.Route(rc, rreq)
-				}, embChain),
-				embChain:   embChain,
-				feedbackDB: feedbackDB,
-				ready:      ready,
-				notice:     notice,
-			})
-		}()
-		// Registered after the reader/provider defers, so shutdown first
-		// cancels and joins the writer while all of its dependencies are live.
-		defer func() {
-			cancelAuto()
-			<-autoDone
-		}()
+		startAutoIndex = func() func() {
+			// Launched after startup construction succeeds so async notices never
+			// interleave the synchronous startup block, and setup errors do not race
+			// the background job against deferred provider cleanup.
+			autoCtx, cancelAuto := context.WithCancel(ctx)
+			autoDone := make(chan struct{})
+			go func() {
+				defer close(autoDone)
+				runAutoIndex(autoCtx, autoIndexJob{
+					root:        root,
+					dbPath:      autoDBPath,
+					workspaceID: autoWorkspaceID,
+					cfg:         bundle.Config,
+					router:      bundle.Router,
+					embedder: newChainEmbedder(func(rc context.Context, rreq provider.RoutingRequest) (embedExecutor, error) {
+						return bundle.Router.Route(rc, rreq)
+					}, embChain),
+					embChain:    embChain,
+					weighter:    feedbackWeighter,
+					progressive: f.progressive,
+					recorder:    groundingRec,
+					summarize:   sourceSummarizer,
+					ready:       ready,
+					notice:      notice,
+				})
+			}()
+			return func() {
+				cancelAuto()
+				<-autoDone
+			}
+		}
+	}
+	if hooks.startAutoIndex != nil {
+		startAutoIndex = hooks.startAutoIndex
 	}
 
-	if f.goalSet {
-		return runAgentflowAuthor(ctx, stdin, stdout, stderr, interrupts, sess, f, root)
-	}
-	if f.planPath != "" {
-		return runAgentflowTask(ctx, stdout, stderr, interrupts, sess, f, root)
-	}
-	if f.promptSet {
+	// Final dispatch. A line source is created only where an interactive read
+	// can actually happen, so the modes that never read stdin open no reader.
+	//
+	// Auto-indexing is orthogonal to input and every branch must start it when
+	// enabled: shouldStartAutoIndex excludes only -p and -goal, so -plan wants
+	// the background refresh without wanting a reader. Only the REPL has to
+	// bind the idle display first, which is why it starts the job itself rather
+	// than here. Keeping the guarded call in all three branches makes that
+	// invariant structural -- a branch that forgets it leaves the retrieve
+	// wrapper on its warming message for the whole run while the startup banner
+	// has already announced a refresh that never starts.
+	switch lineSourceModeFor(f) {
+	case sourceAnswerOnly:
+		// Interactive -goal reads only the plan-lock approval: a source, but
+		// no idle display and no history.
+		if startAutoIndex != nil {
+			stopAutoIndex := startAutoIndex()
+			defer stopAutoIndex()
+			if hooks.afterAutoIndexStart != nil {
+				if err := hooks.afterAutoIndexStart(sourceAnswerOnly, retrieve, feedbackSvc); err != nil {
+					return err
+				}
+			}
+		}
+		return withLineSource(newInput(inputConfig{
+			Stdin:       stdin,
+			Stdout:      stdout,
+			Stderr:      stderr,
+			NoEditor:    f.noEditor,
+			Getenv:      os.Getenv,
+			Root:        root,
+			OnInterrupt: onInterrupt,
+		}), func(src lineSource) error {
+			return runAgentflowAuthor(ctx, src, stdout, stderr, interrupts, sess, f, root)
+		})
+	case sourceNone:
+		if startAutoIndex != nil {
+			stopAutoIndex := startAutoIndex()
+			defer stopAutoIndex()
+			if hooks.afterAutoIndexStart != nil {
+				if err := hooks.afterAutoIndexStart(sourceNone, retrieve, feedbackSvc); err != nil {
+					return err
+				}
+			}
+		}
+		if f.goalSet {
+			return runAgentflowAuthor(ctx, nil, stdout, stderr, interrupts, sess, f, root)
+		}
+		if f.planPath != "" {
+			return runAgentflowTask(ctx, stdout, stderr, interrupts, sess, f, root)
+		}
 		return runOneShot(ctx, stdout, stderr, interrupts, sess, f.prompt)
 	}
-	return runREPL(replCtx, stdin, stdout, interrupts, sess)
+
+	// /edit is wired regardless of -no-editor: the flag disables the inline
+	// line editor, not external composition. Availability is still gated on
+	// real terminals at dispatch time.
+	base, derr := dataDirBase(os.Getenv)
+	if derr != nil {
+		// Reported, not discarded. Leaving goalEditor nil rendered "/edit
+		// requires an interactive terminal", which sends a user with a HOME-less
+		// environment hunting a terminal problem that does not exist.
+		_, _ = fmt.Fprintf(stderr, "golem: /edit unavailable: %v\n", derr)
+	} else {
+		sess.goalEditor = &ttyGoalEditor{
+			stdin: stdin, stdout: stdout, stderr: stderr,
+			getenv:  os.Getenv,
+			ops:     realTermOps{},
+			run:     runEditorProcess,
+			dataDir: filepath.Join(base, "golem"),
+			root:    root,
+		}
+	}
+	return withLineSource(newInput(inputConfig{
+		Stdin:      stdin,
+		Stdout:     stdout,
+		Stderr:     stderr,
+		NoEditor:   f.noEditor,
+		UseHistory: true, // only the default REPL reads goals worth recalling
+		Getenv:     os.Getenv,
+		Root:       root,
+		// Raw mode disables ISIG, so the editor sees Ctrl-C as an in-band
+		// byte; it delivers the event to the same policy owner the SIGINT
+		// handler uses, keeping one interrupt taxonomy for both modes.
+		OnInterrupt: onInterrupt,
+	}), func(src lineSource) error {
+		// #477: post-startup re-admissions (after /grants clear) prompt
+		// through the SAME lineSource as every other read, never a second
+		// stdin reader racing the editor.
+		sess.destAdmission.setPrompt(lineSourcePromptYN(src))
+		// Bound before the auto-index goroutine can emit a notice, so no
+		// asynchronous message is ever rendered through the default display
+		// while a source exists.
+		if sess.control != nil {
+			sess.control.setIdleDisplay(src.IdleDisplay)
+			// Unbound after the notice producer is joined and before the
+			// source closes, so the Ctrl-C window between runREPL returning
+			// and signal.Stop cannot render through a closed source.
+			defer sess.control.setIdleDisplay(nil)
+		}
+		if startAutoIndex != nil {
+			stopAutoIndex := startAutoIndex()
+			// Cancels and joins the writer before withLineSource closes the
+			// source, so no notice can reach a closed source.
+			defer stopAutoIndex()
+			if hooks.afterAutoIndexStart != nil {
+				if err := hooks.afterAutoIndexStart(sourceREPL, retrieve, feedbackSvc); err != nil {
+					return err
+				}
+			}
+		}
+		return runREPL(replCtx, src, stdout, interrupts, sess)
+	})
 }
 
 func interruptSignals() []os.Signal {

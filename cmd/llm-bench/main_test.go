@@ -662,7 +662,7 @@ func TestMainBlindIngestRequiresExplicitLabelsOutWithCustomArtifacts(t *testing.
 		t.Fatal(err)
 	}
 	wsPath := filepath.Join(dir, "worksheet.txt")
-	worksheet := fillScores(renderBlindWorksheet([]Artifact{a}), map[string]string{a.ArtifactHash: "1"})
+	worksheet := fillScores(mustRenderBlind(t, []Artifact{a}, 0), map[string]string{a.ArtifactHash: "1"})
 	if err := os.WriteFile(wsPath, []byte(worksheet), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -694,7 +694,7 @@ func TestMainBlindIngestRejectsCleanedPathCollision(t *testing.T) {
 		t.Fatal(err)
 	}
 	wsPath := filepath.Join(dir, "worksheet.txt")
-	if err := os.WriteFile(wsPath, []byte(renderBlindWorksheet([]Artifact{a})), 0o600); err != nil {
+	if err := os.WriteFile(wsPath, []byte(mustRenderBlind(t, []Artifact{a}, 0)), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
@@ -726,7 +726,7 @@ func TestMainBlindIngestRejectsSameFileViaSymlink(t *testing.T) {
 		t.Fatal(err)
 	}
 	wsPath := filepath.Join(dir, "worksheet.txt")
-	if err := os.WriteFile(wsPath, []byte(renderBlindWorksheet([]Artifact{a})), 0o600); err != nil {
+	if err := os.WriteFile(wsPath, []byte(mustRenderBlind(t, []Artifact{a}, 0)), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	linkPath := filepath.Join(dir, "labels-link.jsonl")
@@ -762,7 +762,7 @@ func TestMainBlindIngestRejectsFullyUnscoredWorksheet(t *testing.T) {
 		t.Fatal(err)
 	}
 	wsPath := filepath.Join(dir, "worksheet.txt")
-	if err := os.WriteFile(wsPath, []byte(renderBlindWorksheet([]Artifact{a})), 0o600); err != nil {
+	if err := os.WriteFile(wsPath, []byte(mustRenderBlind(t, []Artifact{a}, 0)), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	labelsOut := filepath.Join(dir, "labels.jsonl")

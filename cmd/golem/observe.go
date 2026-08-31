@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"hash/fnv"
@@ -86,11 +87,15 @@ func (o *observ) startSink(runID string, started time.Time) (*agenttrace.Telemet
 // writeTrace writes one content-full trace, retrying with a numeric suffix on a
 // run-id path collision (create-exclusive). Best-effort: returns an error the
 // caller logs but does not propagate as a turn failure.
-func (o *observ) writeTrace(runID, startedAt, endedAt string, meta agenttrace.TraceMeta, res agent.Result, status string, partial bool, runErr error) error {
+// grounding is the already-marshaled #348 report, or nil when the turn produced
+// none. It is stored verbatim so this tier keeps no opinion about a payload
+// cmd/golem owns.
+func (o *observ) writeTrace(runID, startedAt, endedAt string, meta agenttrace.TraceMeta, res agent.Result, status string, partial bool, runErr error, grounding json.RawMessage) error {
 	rec := agenttrace.BuildTrace(meta, res, status, partial, runErr)
 	rec.RunID = runID
 	rec.StartedAt = startedAt
 	rec.EndedAt = endedAt
+	rec.Grounding = grounding
 	nameStartedAt := strings.NewReplacer(":", "-", "/", "-", "\\", "-").Replace(startedAt)
 	base := filepath.Join(o.traceDir, nameStartedAt+"-"+runID)
 	for i := 0; i < 5; i++ {
@@ -111,20 +116,34 @@ func (o *observ) writeTrace(runID, startedAt, endedAt string, meta agenttrace.Tr
 	return fmt.Errorf("golem: trace path collision for run %s", runID)
 }
 
-// composeObserver returns the renderer alone when sink is nil, else a fan-out
-// observer driving both. The sink never errors, so only the renderer can abort.
-func composeObserver(rend agent.Observer, sink *agenttrace.TelemetrySink) agent.Observer {
-	if sink == nil {
-		return rend
+// composeObserver returns the renderer alone when it is the only child, else a
+// fan-out observer. The sink remains second, after the renderer.
+func composeObserver(rend agent.Observer, sink *agenttrace.TelemetrySink, extras ...agent.Observer) agent.Observer {
+	children := make([]agent.Observer, 0, len(extras)+2)
+	if rend != nil {
+		children = append(children, rend)
 	}
-	return &multiObserver{children: []agent.Observer{rend, sink}}
+	if sink != nil {
+		children = append(children, sink)
+	}
+	for _, child := range extras {
+		if child != nil {
+			children = append(children, child)
+		}
+	}
+	if len(children) == 1 {
+		return children[0]
+	}
+	return &multiObserver{children: children}
 }
 
 // multiObserver fans every callback out to its children in order, propagating
 // the first error. It implements the optional ToolResultObserver, Thinking-
-// Observer, and PressureObserver extensions, forwarding each callback only to
-// children that implement it.
+// Observer, PressureObserver, and ContextAssemblyObserver extensions, forwarding
+// each callback only to children that implement it.
 type multiObserver struct{ children []agent.Observer }
+
+var _ agent.RetrievalPresentationObserver = (*multiObserver)(nil)
 
 func (m *multiObserver) OnStep(ctx context.Context, e agent.StepEvent) error {
 	for _, c := range m.children {
@@ -179,6 +198,34 @@ func (m *multiObserver) OnPressure(ctx context.Context, e agent.PressureEvent) e
 	for _, c := range m.children {
 		if po, ok := c.(agent.PressureObserver); ok {
 			if err := po.OnPressure(ctx, e); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// OnContextAssembly fans the #331 mixed-assembly trace out to children that
+// opted in. The telemetry sink consumes it (an aggregate context_assembly span);
+// Golem's renderer does not. The type-switch shape still matters because when
+// telemetry is enabled this wrapper IS the CLI's observer (composeObserver
+// returns the renderer alone otherwise), so an unimplemented callback here would
+// silently swallow the event for every child.
+func (m *multiObserver) OnContextAssembly(ctx context.Context, e agent.ContextAssemblyEvent) error {
+	for _, c := range m.children {
+		if cao, ok := c.(agent.ContextAssemblyObserver); ok {
+			if err := cao.OnContextAssembly(ctx, e); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func (m *multiObserver) OnRetrievalPresentation(ctx context.Context, e agent.RetrievalPresentationEvent) error {
+	for _, c := range m.children {
+		if rpo, ok := c.(agent.RetrievalPresentationObserver); ok {
+			if err := rpo.OnRetrievalPresentation(ctx, e); err != nil {
 				return err
 			}
 		}

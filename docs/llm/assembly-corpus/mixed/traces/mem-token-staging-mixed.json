@@ -1,0 +1,117 @@
+{
+  "id": "mem-token-staging-mixed",
+  "source": "assembly-corpus-mixed",
+  "captured_at": "0001-01-01T00:00:00Z",
+  "system": "You are the driftwatch assistant. driftwatch is a self-hosted telemetry ingest and alerting daemon. Answer using only the provided conversation, memory records, and retrieved context.",
+  "tools": null,
+  "turns": [
+    {
+      "role": "user",
+      "content": "Rough morning on the eval edge. The staging gateway restarted twice overnight and the collector heartbeat panel went blank both times. Can you check whether that was the watchdog acting up or something new we should worry about?"
+    },
+    {
+      "role": "assistant",
+      "content": "Both restarts were the watchdog reacting to a wedged config reload, not a new failure. I pinned the reload lock fix onto the eval edge and the heartbeat panel has been solid since the second restart."
+    },
+    {
+      "role": "user",
+      "content": "Thanks. The synthetic producer we run against staging is still publishing under the old namespace from before the reorg, so the dashboards double-count its stream. Can you move it over so the graphs stop lying?"
+    },
+    {
+      "role": "assistant",
+      "content": "Moved the synthetic producer to the new namespace and rebuilt its dashboard queries; the double-counted series flatlined immediately and the remaining lines now match real eval traffic one to one."
+    },
+    {
+      "role": "user",
+      "content": "The eval tenants file also still lists the two teams that left the pilot last quarter. Their dead budgets keep skewing the admission graphs. Can you prune them and archive whatever bookkeeping goes with them?"
+    },
+    {
+      "role": "assistant",
+      "content": "Pruned both departed teams from the eval tenants file and archived their budget rows next to the pilot notes; the admission graphs now track only tenants that are actually sending."
+    },
+    {
+      "role": "user",
+      "content": "Last one: the staging spool disk keeps flirting with the usage alarm every soak night. Can you grow the volume before the next soak fills it and pages whoever is on call for no good reason?"
+    },
+    {
+      "role": "assistant",
+      "content": "Grew the staging spool volume and re-ran the soak projection; the next run fits with comfortable headroom and the usage alarm threshold is no longer within reach of a normal soak."
+    },
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "id": "c1",
+          "name": "agent_memory_search",
+          "arguments": {
+            "query": ""
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "content": "rec-eval-refresh · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:\nrec-pilot-notes · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:\nrec-soak-window · working · created:2025-07-27 · updated:2025-07-27 · scope:session · ns: · src: · soak tests get the staging fleet to themselves Thursday nights; anything else scheduled there moves to another slot\nrec-staging-token · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src: · staging ingest tokens carry the dwst5- prefix; the eval gateway accepts nothing else",
+      "tool_call_id": "c1",
+      "name": "agent_memory_search"
+    },
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "id": "c2",
+          "name": "retrieve",
+          "arguments": {
+            "query": "staging ingest token prefix acceptance",
+            "k": 3
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "content": "### source: \"internal/ingest/staging.go\"\npurpose: Staging gateway admission against config-supplied token prefixes.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n--- source: \"internal/ingest/staging.go\" (lines 1-16, similarity: 1.00) ---\n1| package ingest\n2| \n3| import \"strings\"\n4| \n5| // stagingGateway admits eval traffic. Accepted token prefixes ship\n6| // from deployment config, exactly as on prod; nothing is hard-coded.\n7| // The dwst3- prefix was retired when the eval gateway moved behind\n8| // the edge, and producers still signing with it are rejected here.\n9| func (g *stagingGateway) admit(token string) bool {\n10| \tfor _, p := range g.cfg.AcceptedPrefixes {\n11| \t\tif strings.HasPrefix(token, p) {\n12| \t\t\treturn g.verify(token)\n13| \t\t}\n14| \t}\n15| \treturn false\n16| }\n\n### source: \"internal/ingest/tenants.go\"\npurpose: Tenant admission budgets loaded from the hot-reloaded tenants file.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n\n### source: \"docs/staging.md\"\npurpose: Staging fleet guide: topology, credential rehearsals, soak nights.\nlanguage: markdown\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n",
+      "tool_call_id": "c2",
+      "name": "retrieve"
+    },
+    {
+      "role": "user",
+      "content": "Which prefix do staging ingest tokens carry?"
+    }
+  ],
+  "golden": {
+    "tool_calls": null,
+    "final_answer_criteria": "States that staging ingest tokens carry the dwst5- prefix. Answers that only say the accepted prefixes come from deployment config score 0. An answer naming the retired dwst3- prefix scores 0. An answer presenting both the correct and a competing value without committing to one scores 0."
+  },
+  "assembly_eval": {
+    "pair_id": "mem-token-staging",
+    "mode": "mixed",
+    "candidate_ids": [
+      "1e869080261c82691204215843383ec211e16aef36605dc39134a9c902424581",
+      "d4f25cf19632d4d969af2c8162abd996b4886d539b5170b9d83bf94fdb6cd4d1",
+      "efeff9727fd66cdb05cbef0caed50cf5f73f74f020855fcde25e3cfe5d8925fb",
+      "rec-eval-refresh",
+      "rec-pilot-notes",
+      "rec-soak-window",
+      "rec-staging-token"
+    ],
+    "estimated_prompt_tokens": 923,
+    "state_digest": "793fd925b2f6fe6b0e0e9ed997430db1ba716cedcda6cd19414f34c2311c0672",
+    "subjects": [
+      "(c1|memory|rec-eval-refresh)",
+      "(c1|memory|rec-pilot-notes)",
+      "(c1|memory|rec-soak-window)",
+      "(c1|memory|rec-staging-token)",
+      "(c2|rag|internal/ingest/staging.go)",
+      "(c2|rag|internal/ingest/tenants.go)",
+      "(c2|rag|docs/staging.md)"
+    ],
+    "stratum": "memory_only",
+    "answer_home": "memory",
+    "scenario_family": "ingest-token-mem",
+    "budget": 997,
+    "raw_state_tokens": 1662,
+    "pressure_level": "critical",
+    "shed_bytes": 2541
+  }
+}

@@ -1,0 +1,133 @@
+{
+  "id": "join-dedupe-window-edge-mixed",
+  "source": "assembly-corpus-mixed",
+  "captured_at": "0001-01-01T00:00:00Z",
+  "system": "You are the driftwatch assistant. driftwatch is a self-hosted telemetry ingest and alerting daemon. Answer using only the provided conversation, memory records, and retrieved context.",
+  "tools": null,
+  "turns": [
+    {
+      "role": "user",
+      "content": "The edge config linter also needs to learn the new listener stanza before the rollout; right now it flags every migrated edge as malformed and the rollout script refuses to proceed past the lint gate, which is going to block the canary the moment we touch it. The stanza work should also cover the rollback direction: an edge that reverts to the old listener config must lint clean as well, because a rollback that trips the lint gate during an incident would be the worst possible time to discover it."
+    },
+    {
+      "role": "assistant",
+      "content": "Taught the linter the new listener stanza and added both stanza forms to its fixture corpus; migrated edges lint clean and the rollout script proceeds normally. Covered the rollback direction in the fixture corpus too, so both migration directions lint clean; the rollout script's dry-run mode now exercises revert configs as part of its preflight."
+    },
+    {
+      "role": "user",
+      "content": "Also the packet capture volume on the canary host filled up during last week's debugging session and nobody released it. Clear the captures, and put a size cap on that volume so a debugging session cannot brick the canary again the night before a rollout. Rotate the existing captures into the archive tier before you cap the volume, since two of them are still referenced from open tickets and deleting them out from under the investigations would just generate new captures next week."
+    },
+    {
+      "role": "assistant",
+      "content": "Cleared the captures and capped the volume; captures now rotate out oldest-first at the cap instead of filling the disk, and the debugging runbook mentions the cap so nobody is surprised mid-session. Archived the ticket-referenced captures with their ticket links preserved and rotated the rest out; the cap landed after the archive pass so nothing an open investigation needs was touched."
+    },
+    {
+      "role": "user",
+      "content": "The ingest error taxonomy doc drifted from the code again; three rejection codes the edge actually emits are missing from the table integrators read. Regenerate the table from the source enum and wire the generation into the docs build so the drift stops recurring every quarter. Generate the table into both the integrator docs and the internal runbook from the same source, because the two copies have already diverged once and the support rotation quoted the wrong one to a tenant during the spring incident."
+    },
+    {
+      "role": "assistant",
+      "content": "Regenerated the rejection table from the enum and wired the generation into the docs build; the three missing codes are documented and future enum additions fail the build until they are documented too. Both copies now generate from the same enum source in the same build step, so they cannot diverge again; the runbook copy carries the internal-only columns and the integrator copy stays public-safe."
+    },
+    {
+      "role": "user",
+      "content": "One more before the decision: the edge deploy notes from the spring listener migration are still the top internal search hit for edge rollout, and they describe the old traffic split. Archive them with a banner pointing at the current rollout guide before someone follows them into a wall. Check the wiki sidebar links while you are at it; at least three of them still point at the archived spring notes through redirect chains, and people end up on the old traffic split without ever touching search."
+    },
+    {
+      "role": "assistant",
+      "content": "Archived the spring notes with a superseded banner linking the current guide, and bumped the guide's search weight so it comes up first now. Straightened the sidebar links to land on the current guide directly, removed the redirect chains, and added a link checker to the docs build so a future archive leaves no dangling paths behind."
+    },
+    {
+      "role": "user",
+      "content": "The observability side wants the dedupe hit counters exported per edge rather than fleet-aggregated for the rollout period, so the canary's behaviour is visible on its own instead of being averaged away."
+    },
+    {
+      "role": "assistant",
+      "content": "Split the dedupe hit counters per edge for the rollout period with a rollup view kept for the fleet number; the canary has its own panel now."
+    },
+    {
+      "role": "user",
+      "content": "Decision from the rollout review, so we are aligned: the pre-GA 45-second window stays dead where the changelog left it, the shipped default stays where the code has it, and the canary edge is pinned to a 300-second dedupe window for the burn-in fortnight."
+    },
+    {
+      "role": "assistant",
+      "content": "Aligned: the canary edge holds the 300-second dedupe window for the fortnight, shipped default untouched, and the pin carries a review date so it cannot silently become permanent."
+    },
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "id": "c1",
+          "name": "retrieve",
+          "arguments": {
+            "query": "ingest duplicate rejection behaviour",
+            "k": 3
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "content": "### source: \"internal/ingest/batchkey.go\"\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nnote: metadata overview (summary omitted: budget)\n--- source: \"internal/ingest/batchkey.go\" (lines 1-37, similarity: 1.00) ---\n1| package ingest\n2| \n3| import (\n4| \t\"crypto/sha256\"\n5| \t\"encoding/binary\"\n6| \t\"encoding/hex\"\n7| )\n8| \n9| // batchKey fingerprints one accepted batch for duplicate detection.\n10| // The key covers tenant, producer, and the content digest, but\n11| // deliberately NOT the receive timestamp: a producer that retries the\n12| // same batch after a network error must collide with its earlier\n13| // self, and timestamps would make every retry unique.\n14| func batchKey(tenant, producer string, payload []byte) string {\n15| \th := sha256.New()\n16| \th.Write([]byte(tenant))\n17| \th.Write([]byte{0})\n18| \th.Write([]byte(producer))\n19| \th.Write([]byte{0})\n20| \tvar n [8]byte\n21| \tbinary.BigEndian.PutUint64(n[:], uint64(len(payload)))\n22| \th.Write(n[:])\n23| \th.Write(payload)\n24| \treturn hex.EncodeToString(h.Sum(nil)[:16])\n25| }\n26| \n27| // shardFor buckets a key into one of the dedupe shards. Sharding is\n28| // stable across restarts so a key seen before a crash lands in the\n29| // same shard's window after recovery, and a fleet of edges spreads\n30| // keys identically for the same shard count.\n31| func shardFor(key string, shards int) int {\n32| \tvar v uint32\n33| \tfor i := 0; i \u003c 4 \u0026\u0026 i \u003c len(key); i++ {\n34| \t\tv = v\u003c\u003c8 | uint32(key[i])\n35| \t}\n36| \treturn int(v % uint32(shards))\n37| }\n\n### source: \"internal/ingest/dedupe.go\"\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nnote: metadata overview (summary omitted: budget)\n\n### source: \"docs/dedupe.md\"\nlanguage: markdown\nindexed: 2025-07-27T00:00:00Z\nnote: metadata overview (summary omitted: budget)\n",
+      "tool_call_id": "c1",
+      "name": "retrieve"
+    },
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "id": "c2",
+          "name": "agent_memory_search",
+          "arguments": {
+            "query": ""
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "content": "rec-canary-panel · working · created:2025-07-27 · updated:2025-07-27 · scope:session · ns: · src:\nrec-capture-cap · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:\nrec-rollout-review · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:",
+      "tool_call_id": "c2",
+      "name": "agent_memory_search"
+    },
+    {
+      "role": "user",
+      "content": "So the runbook reads right: what dedupe window does the shipped default hold, and what is the canary edge pinned to for the burn-in?"
+    }
+  ],
+  "golden": {
+    "tool_calls": null,
+    "final_answer_criteria": "BOTH halves required: the shipped dedupe default remembers keys for 120 seconds, AND the canary edge is pinned to a 300-second dedupe window for the burn-in. A missing half caps the score at 0.5; a stated but incorrect half scores 0. An answer giving the pre-GA 45-second window scores 0. An answer presenting both the correct and a competing value without committing to one scores 0."
+  },
+  "assembly_eval": {
+    "pair_id": "join-dedupe-window-edge",
+    "mode": "mixed",
+    "candidate_ids": [
+      "375576cc57768d37e7c8a72e968660682d3c2cce94b30ef3c2e2138e4899cfa5",
+      "6ff52eebd441e9efe244cda1c89374832044cab83315626cbe8eecd8a482d58e",
+      "afed7ef1fe33b22e3946e3b6fd941c3efb4c7f3b21a07e6eba5aa1a3f86a795e",
+      "rec-canary-panel",
+      "rec-capture-cap",
+      "rec-rollout-review"
+    ],
+    "estimated_prompt_tokens": 1666,
+    "state_digest": "7fc94ee4aa946cbaf38463f6cce971bcf1c6db19b658a2eecedd35133d076398",
+    "subjects": [
+      "(c1|rag|internal/ingest/batchkey.go)",
+      "(c1|rag|internal/ingest/dedupe.go)",
+      "(c1|rag|docs/dedupe.md)",
+      "(c2|memory|rec-canary-panel)",
+      "(c2|memory|rec-capture-cap)",
+      "(c2|memory|rec-rollout-review)"
+    ],
+    "stratum": "cross_domain_join",
+    "answer_home": "join",
+    "scenario_family": "dedupe-window-join",
+    "budget": 1707,
+    "raw_state_tokens": 2845,
+    "pressure_level": "critical",
+    "shed_messages": 2,
+    "shed_bytes": 4105,
+    "omitted_subjects": 1
+  }
+}

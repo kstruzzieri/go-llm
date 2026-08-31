@@ -1,0 +1,133 @@
+{
+  "id": "join-quarantine-policy-cap-mixed",
+  "source": "assembly-corpus-mixed",
+  "captured_at": "0001-01-01T00:00:00Z",
+  "system": "You are the driftwatch assistant. driftwatch is a self-hosted telemetry ingest and alerting daemon. Answer using only the provided conversation, memory records, and retrieved context.",
+  "tools": null,
+  "turns": [
+    {
+      "role": "user",
+      "content": "Debugging retention next: malformed-batch samples are kept forever right now, which is a privacy problem and a disk problem at once. Scope sample retention to the debugging window the parser team actually uses and make the cleanup automatic instead of someone remembering. Coordinate the retention window with the privacy review's data map as well, since the map currently lists quarantine samples as indefinite and the mismatch would fail the next audit cycle on paper even after we fix the practice."
+    },
+    {
+      "role": "assistant",
+      "content": "Scoped sample retention to the parser team's debugging window with automatic cleanup, and the retention choice is documented next to the sampling config so the privacy review can point at it. Updated the data map alongside the retention change, so practice and paper agree; the privacy review has the diff and confirmed the audit line item closes with it."
+    },
+    {
+      "role": "user",
+      "content": "The tenant notification templates for quarantined batches also read like a stack trace wearing a tie. Rewrite them so an integrator learns what was held, why, and what to fix, without needing one of us on a call to translate the rejection code. Run the rewritten templates past the developer-experience folks before they ship, because the last wording change confused two integrators into re-sending held batches in a loop and the queue graphs looked like an attack."
+    },
+    {
+      "role": "assistant",
+      "content": "Rewrote the templates around the rejection taxonomy with a fix-it link per code family; the integrator support channel already noticed the difference in the trial tenant. The developer-experience folks reviewed the wording and the templates now explicitly say not to re-send held batches; the trial tenant's behaviour confirms the loop pattern is gone."
+    },
+    {
+      "role": "user",
+      "content": "Quarantine visibility is still thin on the admission board: depth is there but age is not, and an old held batch is the actual signal that something is wedged rather than merely bursty. Add oldest-held-age panels split by tenant next to the depth ones. Backfill the age panels from the retained history where possible too, because a panel that starts empty tonight cannot distinguish a wedge that began last week from one that began at panel creation."
+    },
+    {
+      "role": "assistant",
+      "content": "Added oldest-held-age panels beside the depth panels with the per-tenant split; the board now distinguishes a wedge from a burst at a glance. Backfilled age history from the retained hold records, so the panels open with a week of context and a pre-existing wedge reads as old on day one instead of hiding as new."
+    },
+    {
+      "role": "user",
+      "content": "And drop the admission log back from the incident verbosity; it has been logging every accepted batch for three weeks and the log budget graph is a ski jump. Keep the verbose form for rejections only. Make the verbosity change through the logging config layer rather than the code path, so the next incident can turn accepted-batch logging back on with a reload instead of waiting on a deploy."
+    },
+    {
+      "role": "assistant",
+      "content": "Dropped accepted-batch logging back to the normal level, kept verbose rejection logging, and the log budget graph is already flattening. Moved the verbosity control into the logging config layer with a reload hook; incident responders can flip it live, and the setting documents its own log-budget cost next to the flag."
+    },
+    {
+      "role": "user",
+      "content": "Scope note so the thread stops resurfacing: the 2000-batch quarantine cap from the incident draft is dead; it was sized for the old single-lane spool and quoting it in sizing threads just muddies the review."
+    },
+    {
+      "role": "assistant",
+      "content": "Marked the draft dead with a superseded banner and linked the current sizing sheet; the number should stop leaking into threads now."
+    },
+    {
+      "role": "user",
+      "content": "Then the review's call stands as final: the per-tenant quarantine cap lands at 500 batches, with the overflow policy unchanged until the next capacity pass."
+    },
+    {
+      "role": "assistant",
+      "content": "Recorded: the cap lands at 500 batches per tenant, overflow policy untouched; the sizing sheet and the admission runbook both quote the review link."
+    },
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "id": "c1",
+          "name": "retrieve",
+          "arguments": {
+            "query": "quarantine lane admission behaviour",
+            "k": 3
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "content": "### source: \"internal/ingest/quarantine.go\"\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nnote: metadata overview (summary omitted: budget)\n--- source: \"internal/ingest/quarantine.go\" (lines 1-28, similarity: 1.00) ---\n1| package ingest\n2| \n3| // quarantine routes batches that fail strict parsing into the\n4| // quarantine lane instead of dropping them: malformed telemetry is\n5| // usually a producer bug, and the payload is the evidence. The lane\n6| // is accounted per tenant, and the per-tenant cap comes from\n7| // deployment config so capacity reviews can move it without a\n8| // rebuild.\n9| func (g *Gateway) quarantine(tenant string, batch []byte, code rejectCode) error {\n10| \tif !g.lanes.admit(tenant) {\n11| \t\tg.metrics.quarantineOverflow.Inc()\n12| \t\treturn g.overflow(tenant, batch, code)\n13| \t}\n14| \treturn g.lanes.hold(tenant, batch, code)\n15| }\n16| \n17| // overflow applies the configured overflow policy when a tenant's\n18| // lane is at cap. The shipped policy parks the oldest held batch to\n19| // make room, on the theory that the newest failure carries the\n20| // freshest evidence about the producer bug.\n21| func (g *Gateway) overflow(tenant string, batch []byte, code rejectCode) error {\n22| \toldest, err := g.lanes.evictOldest(tenant)\n23| \tif err != nil {\n24| \t\treturn err\n25| \t}\n26| \tg.park(oldest)\n27| \treturn g.lanes.hold(tenant, batch, code)\n28| }\n\n### source: \"internal/ingest/parser.go\"\npurpose: Strict batch parsing with stable rejection codes from the taxonomy enum.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n\n### source: \"docs/quarantine.md\"\npurpose: Quarantine guide: hold-not-drop, config-owned caps, ops-owned re-drive policy.\nlanguage: markdown\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n",
+      "tool_call_id": "c1",
+      "name": "retrieve"
+    },
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "id": "c2",
+          "name": "agent_memory_search",
+          "arguments": {
+            "query": ""
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "content": "rec-parser-fuzz · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:\nrec-quarantine-board · working · created:2025-07-27 · updated:2025-07-27 · scope:session · ns: · src:\nrec-redrive-policy · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:",
+      "tool_call_id": "c2",
+      "name": "agent_memory_search"
+    },
+    {
+      "role": "user",
+      "content": "Signing off the runbook: where did the per-tenant quarantine cap land, and how long after intake do held batches re-enter the parser?"
+    }
+  ],
+  "golden": {
+    "tool_calls": null,
+    "final_answer_criteria": "BOTH halves required: the per-tenant quarantine cap lands at 500 batches, AND held batches go back through the parser 6 hours after intake. A missing half caps the score at 0.5; a stated but incorrect half scores 0. An answer giving the dead 2000-batch draft cap scores 0. An answer presenting both the correct and a competing value without committing to one scores 0."
+  },
+  "assembly_eval": {
+    "pair_id": "join-quarantine-policy-cap",
+    "mode": "mixed",
+    "candidate_ids": [
+      "d4f0ff52b67faf6d3fdb3fbee33c77e1b6fddbf1e362231fa4c276bca03969ad",
+      "e05b9c6ae83e9ad096442b809322d748463f2d99ce306c4d07fb839abde29352",
+      "e5ada8b8e1608badfae98e1a4dbade9f3e34cdf76b0e069c4799bdfff962fb9d",
+      "rec-parser-fuzz",
+      "rec-quarantine-board",
+      "rec-redrive-policy"
+    ],
+    "estimated_prompt_tokens": 1563,
+    "state_digest": "d42de86c6fe7c19b890c0a3f9453ebc409de102971ce587a5a00b2841e791fec",
+    "subjects": [
+      "(c1|rag|internal/ingest/quarantine.go)",
+      "(c1|rag|internal/ingest/parser.go)",
+      "(c1|rag|docs/quarantine.md)",
+      "(c2|memory|rec-parser-fuzz)",
+      "(c2|memory|rec-quarantine-board)",
+      "(c2|memory|rec-redrive-policy)"
+    ],
+    "stratum": "cross_domain_join",
+    "answer_home": "join",
+    "scenario_family": "quarantine-policy-join",
+    "budget": 1614,
+    "raw_state_tokens": 2690,
+    "pressure_level": "critical",
+    "shed_messages": 2,
+    "shed_bytes": 3892,
+    "omitted_subjects": 1
+  }
+}

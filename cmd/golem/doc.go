@@ -13,11 +13,112 @@
 // serve the agent model, startup scans 127.0.0.1:8080-8090 for it
 // (-no-probe disables the scan).
 //
+// The source subcommand manages ad-hoc documents in the workspace index over
+// the managed-document registry:
+//
+//	golem source add <path>              ingest a local UTF-8 file
+//	golem source add -text -name <name>  ingest stdin as a named text document
+//	golem source list [-json]            list managed sources with state and freshness
+//	golem source rm <id>                 delete a managed source and its chunks
+//	golem source reindex <id>            re-read and re-embed a managed source
+//
+// Mutations acquire the workspace index writer lease and publish a new
+// immutable index generation; the active index is never modified in place.
+//
+// A workspace may declare a post-write verification command in .golem.json at
+// its root, read only under -allow-write and only from that exact path (no
+// ancestor search):
+//
+//	{"verify": {"argv": ["go", "build", "./..."], "dir": ".", "timeout_seconds": 60}}
+//
+// Structured argv only: there is no shell, and the file cannot supply an
+// environment, an output limit, or a sandbox policy. After any tool-call batch
+// that successfully ran write_file or edit_file, the command runs once and its
+// bounded result is appended to that batch's last successful write, so the
+// model sees a break in the same turn. A failure never fails the run.
+//
+// It runs once per mutating BATCH, not once per turn, so a turn that edits in
+// several steps pays for it several times: prefer a fast check, a build over a
+// full test suite. Only the first few kilobytes reach the model, stderr first.
+//
+// Because a repository-supplied argv is still arbitrary host execution, the
+// resolved command and cwd are approved once per session at first use, under
+// their own grant namespace: a verification grant can never authorize
+// run_command or start_command, or the reverse. The command is resolved and
+// frozen at startup, so editing .golem.json mid-session changes nothing until
+// the next run; a malformed file warns and disables verification rather than
+// failing the session.
+//
+// Verification runs on the host with no isolation, so a verifier that writes
+// (a formatter, a codegen step) produces changes the checkpoint journal did
+// not capture and /undo will not restore. Prefer a read-only check.
+//
+// -grounding is a SEPARATE, unrelated check: it verifies the ANSWER, not the
+// workspace. The .golem.json "verify" command above runs a workspace command
+// after a write; -grounding asks a model whether the final answer's claims are
+// supported by the retrieval evidence that reached the answering prompt. They
+// share no configuration, no approval, and no naming.
+//
+// When a completed turn used retrieve and its answering prompt carried
+// retrieval attribution, Golem runs the claim-support judge over exactly that
+// evidence and prints one dim line:
+//
+//	grounding · partial · 3/4 claims · 5 evidence · 1.2s · 850 tok
+//
+// It works on both retrieval modes. Verification is fail-open and never
+// changes the answer, the agent result, the session, the recorded run status,
+// or the exit code: a routing failure, malformed verify output, or the 60s
+// ceiling prints one line naming a stable reason (timeout, judge_failed) and
+// nothing else. Ctrl-C during the judge cancels grounding alone; the answer is
+// already yours. A turn that ran no retrieve is silent, while a turn that
+// retrieved but whose answering prompt carried no evidence says so
+// (no_final_evidence) rather than passing for a turn that never retrieved.
+//
+// Evidence the CLI cannot reconstruct exactly is never judged. A retrieved
+// chunk that was capped, or an identity that resolves to two different chunks,
+// reports evidence_incomplete and makes no model call, because a verdict over
+// a silently reduced evidence subset would report claims as unsupported that
+// the model had support for.
+//
+// The two verifier stages route by their own extract/verify side-task
+// use-cases at background priority, so grounding never displaces the primary
+// agent model; with no verify/extract, analysis, or chat default configured,
+// startup warns once and the flag has no effect. Verifier tokens are reported
+// only on the grounding line and in the trace, never in the run's own usage
+// footer or in telemetry.
+//
+// What the verdict MEANS is narrower than "is this answer correct". It measures
+// only whether each claim is supported by the retrieval evidence in that
+// prompt. An answer that correctly explains a retrieved function using ordinary
+// language or standard-library knowledge will have those claims marked
+// unsupported, because that knowledge was not in the evidence. A "partial" is
+// therefore a prompt for a human to look, not a finding that the answer is
+// wrong.
+//
+// It also costs: two sequential model calls on every retrieval-backed turn, so
+// an answer that took a few seconds can take noticeably longer to ground. A
+// notice is printed while the check runs.
+//
+// The verifier reads retrieved workspace content, which is untrusted. The judge
+// prompt fences evidence with a per-request key and instructs the model to
+// treat everything inside as data, and evidence ids are echoed rather than
+// accepted from the model, so a hostile chunk cannot invent a citation. It can
+// still argue: the per-claim status, reason, and contradicted values come back
+// from the model, so a corpus containing instructions aimed at the judge can
+// influence a verdict. Treat "supported" as evidence of grounding, not as a
+// security boundary over a corpus you do not trust.
+//
+// -trace additionally persists the complete report - every claim, its verdict,
+// the evidence it cites, and any missing-evidence queries - under the trace's
+// "grounding" key. That trace is content-full and already carries workspace
+// text; telemetry receives no grounding field at all. Task and planning modes
+// ignore -grounding with a warning, since neither runs an answer turn.
+//
 // Planning mode (-goal "<text>"): a local model authors an AgentFlow plan for
 // the goal using read-only tools, Golem compiles and locks it via agentflow
 // lock-plan, then stops. The locked .agent/plan.lock.json is the durable output;
 // run it with -plan (task execution) separately. Planning is read-only and
 // mutually exclusive with -p, -plan, -allow-write, -allow-exec, -rag-db,
-// -delegate, -mcp-*, -evidence, and the -approve-plan-edits/-approve-plan-gates
-// execution approvals.
+// -delegate, -dispatch, -mcp-*, -evidence, and the
+// -approve-plan-edits/-approve-plan-gates execution approvals.
 package main

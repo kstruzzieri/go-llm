@@ -1,0 +1,101 @@
+{
+  "id": "mem-export-bucket-region-mixed",
+  "source": "assembly-corpus-mixed",
+  "captured_at": "0001-01-01T00:00:00Z",
+  "system": "You are the driftwatch assistant. driftwatch is a self-hosted telemetry ingest and alerting daemon. Answer using only the provided conversation, memory records, and retrieved context.",
+  "tools": null,
+  "turns": [
+    {
+      "role": "user",
+      "content": "Capacity review follow-ups. The archive store's growth curve crossed the projection line last month; can you break the overage down by tenant so we know whether it is one loud tenant or a general drift?"
+    },
+    {
+      "role": "assistant",
+      "content": "Broke the overage down: two tenants account for most of the excess after enabling verbose payloads, and the rest of the fleet tracks projection. Tenant-level charts are attached to the review page."
+    },
+    {
+      "role": "user",
+      "content": "That matches my guess. Can you also refresh the storage cost model with the current archive pricing? The one in the deck still uses last year's tiers and finance will notice."
+    },
+    {
+      "role": "assistant",
+      "content": "Refreshed the cost model with current archive pricing tiers and re-ran the projections; the deck now carries this year's numbers with the tier change footnoted for finance."
+    },
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "id": "c1",
+          "name": "retrieve",
+          "arguments": {
+            "query": "archive export bucket write target",
+            "k": 3
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "content": "### source: \"internal/export/target.go\"\npurpose: Archive bucket resolution from deployment config.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n--- source: \"internal/export/target.go\" (lines 1-8, similarity: 1.00) ---\n1| package export\n2| \n3| // target resolves the archive bucket for a batch. The write target\n4| // ships from deployment config; dw-archive-us predates the residency\n5| // review and holds legacy objects only, with no new writes.\n6| func (w *writer) target() string {\n7| \treturn w.cfg.ArchiveBucket\n8| }\n\n### source: \"internal/export/retry.go\"\npurpose: Capped exponential retry for failed batch shipments.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n\n### source: \"docs/export-runbook.md\"\npurpose: Runbook for safe export re-runs and what to watch.\nlanguage: markdown\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n",
+      "tool_call_id": "c1",
+      "name": "retrieve"
+    },
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "id": "c2",
+          "name": "agent_memory_search",
+          "arguments": {
+            "query": ""
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "content": "rec-cost-model · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:\nrec-export-bucket · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src: · archive exports write to the dw-archive-eu bucket; nothing else is approved\nrec-legacy-bucket · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:\nrec-verbose-tenants · working · created:2025-07-27 · updated:2025-07-27 · scope:session · ns: · src:",
+      "tool_call_id": "c2",
+      "name": "agent_memory_search"
+    },
+    {
+      "role": "user",
+      "content": "We are re-running the June archive export - which bucket should the writes land in?"
+    }
+  ],
+  "golden": {
+    "tool_calls": null,
+    "final_answer_criteria": "States that the June re-run's writes land in the dw-archive-eu bucket. Answers that only say the target comes from deployment config score 0. An answer naming the legacy dw-archive-us bucket scores 0. An answer presenting both the correct and a competing value without committing to one scores 0."
+  },
+  "assembly_eval": {
+    "pair_id": "mem-export-bucket-region",
+    "mode": "mixed",
+    "candidate_ids": [
+      "19d42122af3b11c650e7ef5011773917c6bd192540e5eac63686473ad76eb07e",
+      "56766166d90bb9fc85ab53b4b37c803672c8e20112a3b808aa7369c3e5efc49a",
+      "7914b72605d28836ac839ff6639d9c0a9747ed89cefc1d200eac4b9687a15cfe",
+      "rec-cost-model",
+      "rec-export-bucket",
+      "rec-legacy-bucket",
+      "rec-verbose-tenants"
+    ],
+    "estimated_prompt_tokens": 620,
+    "state_digest": "d55dcf2d7b2f709916cf43a7bac547cf87082b9096feeeb5d48d9a40a1a8825b",
+    "subjects": [
+      "(c1|rag|internal/export/target.go)",
+      "(c1|rag|internal/export/retry.go)",
+      "(c1|rag|docs/export-runbook.md)",
+      "(c2|memory|rec-cost-model)",
+      "(c2|memory|rec-export-bucket)",
+      "(c2|memory|rec-legacy-bucket)",
+      "(c2|memory|rec-verbose-tenants)"
+    ],
+    "stratum": "memory_only",
+    "answer_home": "memory",
+    "scenario_family": "export-bucket-mem",
+    "budget": 673,
+    "raw_state_tokens": 1121,
+    "pressure_level": "critical",
+    "shed_bytes": 1718
+  }
+}

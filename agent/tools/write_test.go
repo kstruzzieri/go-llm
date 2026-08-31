@@ -3,8 +3,10 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -15,6 +17,47 @@ import (
 type recJournal struct{ recs []MutationRecord }
 
 func (r *recJournal) Record(m MutationRecord) { r.recs = append(r.recs, m) }
+
+// prepJournal is a PreparingJournal test double recording protocol events in
+// order, with injectable failures for each protocol step.
+type prepJournal struct {
+	events     []string
+	recs       []MutationRecord
+	prepared   []MutationRecord
+	prepareErr error
+	commitErr  error
+	abortErr   error
+	onPrepare  func(MutationRecord)
+}
+
+func (p *prepJournal) Record(m MutationRecord) {
+	p.events = append(p.events, "record")
+	p.recs = append(p.recs, m)
+}
+
+func (p *prepJournal) Prepare(m MutationRecord) (PreparedMutation, error) {
+	p.events = append(p.events, "prepare")
+	if p.onPrepare != nil {
+		p.onPrepare(m)
+	}
+	if p.prepareErr != nil {
+		return nil, p.prepareErr
+	}
+	p.prepared = append(p.prepared, m)
+	return &prepHandle{p: p}, nil
+}
+
+type prepHandle struct{ p *prepJournal }
+
+func (h *prepHandle) Commit() error {
+	h.p.events = append(h.p.events, "commit")
+	return h.p.commitErr
+}
+
+func (h *prepHandle) Abort() error {
+	h.p.events = append(h.p.events, "abort")
+	return h.p.abortErr
+}
 
 // planThenInvoke runs Plan then Invoke with the SAME raw args, mirroring dispatch.
 func planThenInvoke(t *testing.T, tool agent.Tool, args any) (agent.ToolPlan, agent.ToolResult) {
@@ -199,5 +242,239 @@ func TestWriteFileRejectsBinaryPrior(t *testing.T) {
 	raw, _ := json.Marshal(map[string]any{"path": "bin.txt", "content": "text"})
 	if _, err := wf.Plan(context.Background(), raw); err == nil || !strings.Contains(err.Error(), "binary") {
 		t.Fatalf("binary prior Plan error = %v, want binary", err)
+	}
+}
+
+func TestWriteFilePreparingJournalOrder(t *testing.T) {
+	root := t.TempDir()
+	pj := &prepJournal{}
+	var existsAtPrepare bool
+	pj.onPrepare = func(MutationRecord) {
+		_, err := os.Stat(filepath.Join(root, "new.txt"))
+		existsAtPrepare = err == nil
+	}
+	wf := NewWriteFile(mustWorkspace(t, root), pj)
+
+	_, res := planThenInvoke(t, wf, map[string]any{"path": "new.txt", "content": "hello\n"})
+	if res.IsError {
+		t.Fatalf("write errored: %s", res.Content)
+	}
+	if existsAtPrepare {
+		t.Fatal("file existed at Prepare time; the intent must precede the workspace write")
+	}
+	if want := []string{"prepare", "commit"}; !slices.Equal(pj.events, want) {
+		t.Fatalf("events = %v, want %v", pj.events, want)
+	}
+	if len(pj.prepared) != 1 || pj.prepared[0].Existed || pj.prepared[0].AfterHash != ContentHash([]byte("hello\n")) {
+		t.Fatalf("prepared record wrong: %+v", pj.prepared)
+	}
+	got, _ := os.ReadFile(filepath.Join(root, "new.txt"))
+	if string(got) != "hello\n" {
+		t.Fatalf("content = %q", got)
+	}
+}
+
+func TestMutatingToolsAbortWhenContextCanceledDuringPrepare(t *testing.T) {
+	tests := []struct {
+		name    string
+		before  string
+		args    map[string]any
+		want    string
+		exists  bool
+		newTool func(*Workspace, Journal) agent.Tool
+	}{
+		{
+			name:   "write_file",
+			args:   map[string]any{"path": "a.txt", "content": "new\n"},
+			exists: false,
+			newTool: func(ws *Workspace, j Journal) agent.Tool {
+				return NewWriteFile(ws, j)
+			},
+		},
+		{
+			name:   "edit_file",
+			before: "old\n",
+			args:   map[string]any{"path": "a.txt", "old_string": "old", "new_string": "new"},
+			want:   "old\n",
+			exists: true,
+			newTool: func(ws *Workspace, j Journal) agent.Tool {
+				return NewEditFile(ws, j)
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			root := t.TempDir()
+			path := filepath.Join(root, "a.txt")
+			if tt.exists {
+				if err := os.WriteFile(path, []byte(tt.before), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			pj := &prepJournal{}
+			tool := tt.newTool(mustWorkspace(t, root), pj)
+			raw, err := json.Marshal(tt.args)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := tool.(agent.PlanningTool).Plan(context.Background(), raw); err != nil {
+				t.Fatalf("Plan: %v", err)
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			pj.onPrepare = func(MutationRecord) { cancel() }
+
+			res, err := tool.Invoke(ctx, raw)
+			if err != nil {
+				t.Fatalf("Invoke internal error: %v", err)
+			}
+			if !res.IsError {
+				t.Fatal("canceled mutation reported success")
+			}
+			if want := []string{"prepare", "abort"}; !slices.Equal(pj.events, want) {
+				t.Fatalf("events = %v, want %v", pj.events, want)
+			}
+			got, err := os.ReadFile(path)
+			if !tt.exists {
+				if !os.IsNotExist(err) {
+					t.Fatalf("write_file changed workspace after cancellation: %v", err)
+				}
+				return
+			}
+			if err != nil || string(got) != tt.want {
+				t.Fatalf("file = %q, %v; want unchanged %q", got, err, tt.want)
+			}
+		})
+	}
+}
+
+func TestRunJournaledWriteCanceledBeforePrepare(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	pj := &prepJournal{}
+	wrote := false
+	toolErr, internalErr := runJournaledWrite(ctx, pj, MutationRecord{Path: "a"}, func() error {
+		wrote = true
+		return nil
+	})
+	if !errors.Is(toolErr, context.Canceled) || internalErr != nil {
+		t.Fatalf("errors = %v, %v; want context.Canceled tool error", toolErr, internalErr)
+	}
+	if wrote || len(pj.events) != 0 {
+		t.Fatalf("canceled write ran protocol: wrote=%v events=%v", wrote, pj.events)
+	}
+}
+
+func TestPreparingJournalFailureLeavesWorkspaceUntouched(t *testing.T) {
+	root := t.TempDir()
+	pj := &prepJournal{prepareErr: errors.New("store down")}
+	wf := NewWriteFile(mustWorkspace(t, root), pj)
+
+	_, res := planThenInvoke(t, wf, map[string]any{"path": "new.txt", "content": "hello\n"})
+	if !res.IsError {
+		t.Fatal("want tool error when prepare fails")
+	}
+	if _, err := os.Stat(filepath.Join(root, "new.txt")); !os.IsNotExist(err) {
+		t.Fatalf("workspace touched despite prepare failure: %v", err)
+	}
+	if want := []string{"prepare"}; !slices.Equal(pj.events, want) {
+		t.Fatalf("events = %v, want %v", pj.events, want)
+	}
+}
+
+func TestRunJournaledWriteAbortsOnWriteFailure(t *testing.T) {
+	pj := &prepJournal{}
+	writeErr := errors.New("disk full")
+	toolErr, internalErr := runJournaledWrite(context.Background(), pj, MutationRecord{Path: "a"}, func() error { return writeErr })
+	if internalErr != nil {
+		t.Fatalf("internal = %v, want nil (a failed write is model-visible)", internalErr)
+	}
+	if !errors.Is(toolErr, writeErr) {
+		t.Fatalf("toolErr = %v, want the write error", toolErr)
+	}
+	if want := []string{"prepare", "abort"}; !slices.Equal(pj.events, want) {
+		t.Fatalf("events = %v, want %v", pj.events, want)
+	}
+}
+
+func TestRunJournaledWriteJoinsAbortFailure(t *testing.T) {
+	pj := &prepJournal{abortErr: errors.New("abort broke")}
+	writeErr := errors.New("disk full")
+	toolErr, internalErr := runJournaledWrite(context.Background(), pj, MutationRecord{Path: "a"}, func() error { return writeErr })
+	if internalErr != nil {
+		t.Fatalf("internal = %v, want nil", internalErr)
+	}
+	if !errors.Is(toolErr, writeErr) || !strings.Contains(toolErr.Error(), "abort broke") {
+		t.Fatalf("toolErr = %v, want write and abort errors joined", toolErr)
+	}
+}
+
+func TestWriteFilePreparingJournalAbortsOnWriteFailure(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("write-failure injection via chmod is a no-op for root")
+	}
+	root := t.TempDir()
+	pj := &prepJournal{}
+	wf := NewWriteFile(mustWorkspace(t, root), pj)
+	raw, err := json.Marshal(map[string]any{"path": "new.txt", "content": "hello\n"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := wf.Plan(context.Background(), raw); err != nil {
+		t.Fatalf("Plan: %v", err)
+	}
+	if err := os.Chmod(root, 0o500); err != nil {
+		t.Fatalf("chmod: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(root, 0o700) })
+	res, ierr := wf.Invoke(context.Background(), raw)
+	if ierr != nil {
+		t.Fatalf("Invoke internal error: %v", ierr)
+	}
+	if !res.IsError {
+		t.Fatal("want tool error for failed workspace write")
+	}
+	if want := []string{"prepare", "abort"}; !slices.Equal(pj.events, want) {
+		t.Fatalf("events = %v, want %v", pj.events, want)
+	}
+	if _, err := os.Stat(filepath.Join(root, "new.txt")); !os.IsNotExist(err) {
+		t.Fatal("file created despite write failure")
+	}
+}
+
+func TestWriteFilePreparingJournalCommitErrorIsInternal(t *testing.T) {
+	root := t.TempDir()
+	pj := &prepJournal{commitErr: errors.New("wal broke")}
+	wf := NewWriteFile(mustWorkspace(t, root), pj)
+	raw, err := json.Marshal(map[string]any{"path": "new.txt", "content": "hello\n"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := wf.Plan(context.Background(), raw); err != nil {
+		t.Fatalf("Plan: %v", err)
+	}
+	_, ierr := wf.Invoke(context.Background(), raw)
+	if ierr == nil {
+		t.Fatal("want internal invocation error: commit failed after the file changed")
+	}
+	if !strings.Contains(ierr.Error(), "wal broke") {
+		t.Fatalf("internal error = %v", ierr)
+	}
+	got, rerr := os.ReadFile(filepath.Join(root, "new.txt"))
+	if rerr != nil || string(got) != "hello\n" {
+		t.Fatalf("file = %q,%v — the write landed before commit failed", got, rerr)
+	}
+}
+
+func TestPlainJournalRecordsAfterWrite(t *testing.T) {
+	root := t.TempDir()
+	jr := &recJournal{}
+	wf := NewWriteFile(mustWorkspace(t, root), jr)
+	_, res := planThenInvoke(t, wf, map[string]any{"path": "p.txt", "content": "x\n"})
+	if res.IsError || res.Content != "write p.txt" || res.Preview != "write p.txt" {
+		t.Fatalf("result = %+v", res)
+	}
+	if len(jr.recs) != 1 {
+		t.Fatalf("records = %d, want exactly 1 post-success Record", len(jr.recs))
 	}
 }

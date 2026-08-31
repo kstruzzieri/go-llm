@@ -1,0 +1,65 @@
+{
+  "id": "conv-replay-throttle-plan-legacy",
+  "source": "assembly-corpus-mixed",
+  "captured_at": "0001-01-01T00:00:00Z",
+  "system": "You are the driftwatch assistant. driftwatch is a self-hosted telemetry ingest and alerting daemon. Answer using only the provided conversation, memory records, and retrieved context.",
+  "tools": null,
+  "turns": [
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "id": "c2",
+          "name": "agent_memory_search",
+          "arguments": {
+            "query": ""
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "content": "rec-cursor-note · working · 2025-07-27 · the replay checkpoint cursor lives under the data directory; delete it only with the daemon stopped\nrec-drill-cadence · semantic · 2025-07-27 · replay drills run monthly; the drill lead rotates with the oncall schedule\nrec-drill-wideopen · semantic · 2025-07-27 · the March replay drill ran wide open at 24 MB/s and starved live ingest; the retro says never run an uncapped drill on a production-shaped node again",
+      "tool_call_id": "c2",
+      "name": "agent_memory_search"
+    },
+    {
+      "role": "user",
+      "content": "What per-node rate is business-hours catch-up replay capped at?"
+    }
+  ],
+  "golden": {
+    "tool_calls": null,
+    "final_answer_criteria": "States business-hours catch-up replay is capped at 6 MB/s per node. Answering 24 MB/s (the uncapped March drill rate from memory) scores 0. An answer presenting both the correct and a competing value without committing to one scores 0."
+  },
+  "assembly_eval": {
+    "pair_id": "conv-replay-throttle-plan",
+    "mode": "legacy",
+    "candidate_ids": [
+      "71e36aaa00e63717a8de7f9604bee55b827a4ef0e6b2a5f98c9391d47dd2a0a8",
+      "84d971fe9d9ef121d73e01456c43e1bac7359485116652a1d1c7b1279e590267",
+      "af44a2f7e6270d5ddeeb9b455451073b303d1e1731f7e69cd372bcc3ebe15e0f",
+      "rec-cursor-note",
+      "rec-drill-cadence",
+      "rec-drill-wideopen"
+    ],
+    "estimated_prompt_tokens": 178,
+    "state_digest": "e6859b0616a19c254d3d0581929089d228ba6ae22e32211162de2c82eaa71a1b",
+    "subjects": [
+      "(c1|rag|internal/replay/replay.go)",
+      "(c1|rag|internal/replay/cursor.go)",
+      "(c1|rag|docs/replay.md)",
+      "(c2|memory|rec-cursor-note)",
+      "(c2|memory|rec-drill-cadence)",
+      "(c2|memory|rec-drill-wideopen)"
+    ],
+    "stratum": "conversation_only",
+    "answer_home": "conversation",
+    "scenario_family": "replay-throttle-conv",
+    "budget": 1153,
+    "raw_state_tokens": 1922,
+    "pressure_level": "ok",
+    "shed_messages": 14,
+    "shed_bytes": 6413
+  }
+}
