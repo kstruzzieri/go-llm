@@ -28,6 +28,7 @@ func TestPreflightConnectivityWarn(t *testing.T) {
 
 	tests := []struct {
 		name     string
+		useCase  string
 		sel      string
 		provider string
 		ep       preflightEndpoint
@@ -39,6 +40,11 @@ func TestPreflightConnectivityWarn(t *testing.T) {
 			name: "status hit + endpoint", sel: "llamacpp/gemma4:31b", provider: "llamacpp",
 			ep: ep, epOK: true, err: wrapped,
 			want: `agent fallback "llamacpp/gemma4:31b": cannot reach provider "llamacpp" at http://127.0.0.1:8080 (GET /v1/models -> 404 Not Found); check server/base_url`,
+		},
+		{
+			name: "planning route", useCase: "planning", sel: "llamacpp/planner", provider: "llamacpp",
+			ep: ep, epOK: true, err: wrapped,
+			want: `planning fallback "llamacpp/planner": cannot reach provider "llamacpp" at http://127.0.0.1:8080 (GET /v1/models -> 404 Not Found); check server/base_url`,
 		},
 		{
 			name: "no status + endpoint", sel: "llamacpp/gemma4:31b", provider: "llamacpp",
@@ -84,7 +90,7 @@ func TestPreflightConnectivityWarn(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := preflightConnectivityWarn(tt.sel, tt.provider, tt.ep, tt.epOK, tt.err)
+			got := preflightConnectivityWarn(tt.useCase, tt.sel, tt.provider, tt.ep, tt.epOK, tt.err)
 			if got != tt.want {
 				t.Errorf("\n got = %q\nwant = %q", got, tt.want)
 			}

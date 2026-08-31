@@ -45,7 +45,7 @@ func TestGolemViewRequirementsShapes(t *testing.T) {
 	}
 	// Plan authoring always registers plan tools, so its shape is the
 	// tool-bearing streamed-chat shape -- the same one the agent route
-	// declares, spelled with the same constant the callers use.
+	// declares, calculated by the same helper the callers use.
 	if req["planning"] != provider.CapChat|provider.CapStream|provider.CapToolCall {
 		t.Fatalf("planning requirements = %v", req["planning"])
 	}
@@ -111,10 +111,17 @@ func TestModelsJSONProjectsAuthoredPlanningEligibility(t *testing.T) {
 	if !ok {
 		t.Fatal("no chat binding projected")
 	}
+	chatFound := false
 	for _, c := range chat.Candidates {
-		if c.Selector == "local/big" && c.Eligibility != configview.Eligibility(provider.CapEligible) {
-			t.Errorf("chat eligibility for the same model = %q, want eligible; planning's verdict must come from its own requirement, not from a model nothing can satisfy", c.Eligibility)
+		if c.Selector == "local/big" {
+			chatFound = true
+			if c.Eligibility != configview.Eligibility(provider.CapEligible) {
+				t.Errorf("chat eligibility for the same model = %q, want eligible; planning's verdict must come from its own requirement, not from a model nothing can satisfy", c.Eligibility)
+			}
 		}
+	}
+	if !chatFound {
+		t.Fatal("chat binding has no local/big candidate")
 	}
 }
 

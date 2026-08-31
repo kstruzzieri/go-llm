@@ -19,9 +19,10 @@ import (
 // lets them silently disagree; carrying both on one value makes the mismatch
 // unrepresentable (#476 I5).
 type chainPlan struct {
-	chain        []string // strict PreferredChain when non-empty
-	useRecommend bool     // true => empty-Model recommend (no applicable default, or nil cfg)
-	useCase      string   // the routing use case this plan was resolved FOR
+	chain             []string // strict PreferredChain when non-empty
+	useRecommend      bool     // true => empty-Model recommend (no applicable default, or nil cfg)
+	useCase           string   // the routing use case this plan was resolved FOR
+	suppliedByUseCase string   // Defaults key that supplied the active role
 }
 
 // loadConfig applies golem's config-discovery rules. An explicit path that
@@ -89,5 +90,10 @@ func recommendNotice(useCase string) string {
 // PlannedRoute that entered the network plan is what keeps the consumed
 // chain, the admitted chain, and the stamped use case one value (#476 I5).
 func chainPlanFor(route providerbootstrap.PlannedRoute) chainPlan {
-	return chainPlan{chain: route.Chain, useRecommend: route.Recommend, useCase: route.UseCase}
+	return chainPlan{
+		chain:             route.Chain,
+		useRecommend:      route.Recommend,
+		useCase:           route.UseCase,
+		suppliedByUseCase: route.SuppliedByUseCase,
+	}
 }

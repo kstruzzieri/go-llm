@@ -237,6 +237,9 @@ func TestNetworkPlanSummarizeViaAnalysisFallbackIsStrictRemote(t *testing.T) {
 	if summarize.Recommend {
 		t.Fatal("summarize resolving via the analysis fallback must be strict")
 	}
+	if summarize.SuppliedByUseCase != "analysis" {
+		t.Fatalf("summarize role source = %q, want analysis", summarize.SuppliedByUseCase)
+	}
 	plan, err := BuildNetworkPlan(eff, []PlannedRoute{summarize}, PlanOptions{})
 	if err != nil {
 		t.Fatal(err)

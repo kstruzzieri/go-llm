@@ -65,7 +65,7 @@ func (r inputCeilingTestRegistry) ExplainToolCall(_ context.Context, key provide
 func TestResolveInputCeiling(t *testing.T) {
 	key := func(model string) provider.ModelKey { return provider.ModelKey{Provider: "test", Model: model} }
 	profile := func(model string, window int) *provider.ModelProfile {
-		return &provider.ModelProfile{Key: key(model), ContextWindow: window, Caps: toolRouteCaps}
+		return &provider.ModelProfile{Key: key(model), ContextWindow: window, Caps: agent.ModelCallCapabilities(true)}
 	}
 
 	tests := []struct {
@@ -108,7 +108,7 @@ func TestResolveInputCeiling(t *testing.T) {
 			// the derivation must match or the two budgets diverge again.
 			name: "quality ceiling does not shrink agent window",
 			reg: inputCeilingTestRegistry{profiles: map[provider.ModelKey]*provider.ModelProfile{
-				key("yarn"): {Key: key("yarn"), ContextWindow: 32_768, QualityCtxCeiling: 16_384, Caps: toolRouteCaps},
+				key("yarn"): {Key: key("yarn"), ContextWindow: 32_768, QualityCtxCeiling: 16_384, Caps: agent.ModelCallCapabilities(true)},
 			}},
 			chain:      []string{"test/yarn"},
 			want:       30_720,
@@ -302,8 +302,8 @@ func TestResolveInputCeiling(t *testing.T) {
 
 func TestResolveInputCeilingRecomputesForChangedChain(t *testing.T) {
 	reg := inputCeilingTestRegistry{profiles: map[provider.ModelKey]*provider.ModelProfile{
-		{Provider: "test", Model: "first"}:  {ContextWindow: 32_768, Caps: toolRouteCaps},
-		{Provider: "test", Model: "second"}: {ContextWindow: 131_072, Caps: toolRouteCaps},
+		{Provider: "test", Model: "first"}:  {ContextWindow: 32_768, Caps: agent.ModelCallCapabilities(true)},
+		{Provider: "test", Model: "second"}: {ContextWindow: 131_072, Caps: agent.ModelCallCapabilities(true)},
 	}}
 	first := resolveInputCeiling(context.Background(), reg, []string{"test/first"}, "agent", 0, 0, false)
 	second := resolveInputCeiling(context.Background(), reg, []string{"test/second"}, "agent", 0, 0, false)
@@ -327,7 +327,7 @@ func TestResolveInputCeiling_HonorsTheCallersUseCase(t *testing.T) {
 			Key:               provider.ModelKey{Provider: "test", Model: "yarn"},
 			ContextWindow:     100_000,
 			QualityCtxCeiling: 32_768,
-			Caps:              toolRouteCaps,
+			Caps:              agent.ModelCallCapabilities(true),
 		},
 	}}
 	chain := []string{"test/yarn"}
@@ -363,7 +363,7 @@ func TestResolveInputCeiling_HonorsTheCallersUseCase(t *testing.T) {
 			{Provider: "test", Model: "tiny"}: {
 				Key:           provider.ModelKey{Provider: "test", Model: "tiny"},
 				ContextWindow: 3_000,
-				Caps:          toolRouteCaps,
+				Caps:          agent.ModelCallCapabilities(true),
 			},
 		}}
 		tightChain := []string{"test/tiny"}

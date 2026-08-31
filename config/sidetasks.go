@@ -60,13 +60,20 @@ func SideTaskUseCases() []string {
 // existing defaults per sideTaskUseCaseFallbacks. ok is false when neither the
 // use-case nor any of its fallbacks is configured.
 func (c *Config) RoleForUseCase(useCase string) (string, bool) {
+	role, _, ok := c.RoleForUseCaseWithSource(useCase)
+	return role, ok
+}
+
+// RoleForUseCaseWithSource resolves a use-case and also returns the Defaults
+// key that supplied the role. The source equals useCase for an explicit entry.
+func (c *Config) RoleForUseCaseWithSource(useCase string) (role, source string, ok bool) {
 	if role, ok := c.Defaults[useCase]; ok {
-		return role, true
+		return role, useCase, true
 	}
 	for _, fallback := range sideTaskUseCaseFallbacks[useCase] {
 		if role, ok := c.Defaults[fallback]; ok {
-			return role, true
+			return role, fallback, true
 		}
 	}
-	return "", false
+	return "", "", false
 }

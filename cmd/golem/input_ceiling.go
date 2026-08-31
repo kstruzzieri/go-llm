@@ -94,7 +94,7 @@ func resolveInputCeiling(ctx context.Context, reg capChecker, chain []string, us
 		if profile == nil {
 			return true
 		}
-		if !profile.Caps.Has(toolRouteCaps &^ provider.CapToolCall) {
+		if !profile.Caps.Has(agent.ModelCallCapabilities(false)) {
 			return false
 		}
 		if profileToolCapable(profile) {
@@ -123,7 +123,7 @@ func resolveInputCeiling(ctx context.Context, reg capChecker, chain []string, us
 	if reg == nil {
 		add(nil)
 	} else if len(chain) == 0 {
-		requiredCaps := toolRouteCaps
+		requiredCaps := agent.ModelCallCapabilities(true)
 		if canResolveToolCall {
 			requiredCaps &^= provider.CapToolCall
 		}

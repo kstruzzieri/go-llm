@@ -99,7 +99,7 @@ func parseFlags(args []string) (flags, error) {
 	fs.StringVar(&f.configPath, "config", "", "path to models.json (default: auto-discover)")
 	fs.StringVar(&f.root, "root", ".", "workspace root the tools are scoped to")
 	fs.StringVar(&f.ollamaURL, "ollama-url", "", "override Ollama base URL")
-	fs.StringVar(&f.baseURL, "base-url", "", "override the openai-compat backend base URL for the primary agent model (server root, without /v1); used exactly as given, disables discovery")
+	fs.StringVar(&f.baseURL, "base-url", "", "override the openai-compat backend base URL for the active model route (server root, without /v1); used exactly as given, disables discovery")
 	fs.BoolVar(&f.noProbe, "no-probe", false, "disable openai-compat backend port discovery; explicit and configured URLs are still used as resolved")
 	fs.BoolVar(&f.noCapProbe, "no-cap-probe", false, "disable the active tool-capability probe for undeclared models (catalog and explicit capabilities still apply)")
 	fs.StringVar(&f.prompt, "p", "", "one-shot mode: run a single agent turn with this prompt and exit; only the final answer goes to stdout (implies -no-session -no-compress -no-memory; approval-gated tools are unavailable, so -allow-write/-allow-exec are ignored)")
@@ -450,6 +450,7 @@ type startupInfo struct {
 	backendLine        string
 	useRecommend       bool
 	activeUseCase      string // the mode's routing use case; names the recommend notice (#476 D5)
+	suppliedByUseCase  string // Defaults key that supplied the active role
 	bootstrapWarns     []error
 	preflightWarns     []string
 	retrieveLine       string
@@ -499,6 +500,9 @@ func startupNotices(info startupInfo) []string {
 	}
 	if info.retrieveLine != "" {
 		out = append(out, info.retrieveLine)
+	}
+	if info.activeUseCase == config.UseCasePlanning && info.suppliedByUseCase != "" && info.suppliedByUseCase != info.activeUseCase {
+		out = append(out, "planning route: using defaults."+info.suppliedByUseCase)
 	}
 	if info.useRecommend {
 		out = append(out, recommendNotice(info.activeUseCase))
@@ -858,7 +862,7 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 	if !f.noCapProbe && capStore != nil {
 		resolver = bundle.Models // concrete *provider.ModelRegistry; always non-nil after bootstrap
 	}
-	warns, err := preflightToolCapable(ctx, bundle.Models, plan.chain, resolveEndpoint, resolver)
+	warns, err := preflightToolCapable(ctx, bundle.Models, plan.chain, plan.useCase, resolveEndpoint, resolver)
 	warns = append(backendRes.warns, warns...)
 	if err != nil {
 		if len(backendRes.warns) > 0 {
@@ -1024,7 +1028,7 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 			// gate (children always carry the file tools, so a chain without
 			// tool_call would otherwise fail only at invocation time) and its
 			// own context-derived ceiling.
-			dwarns, perr := preflightToolCapable(ctx, bundle.Models, dchain, resolveEndpoint, resolver)
+			dwarns, perr := preflightToolCapable(ctx, bundle.Models, dchain, dispatchUseCase, resolveEndpoint, resolver)
 			warns = append(warns, dwarns...)
 			if perr != nil {
 				return perr
@@ -1230,6 +1234,7 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 		backendLine:        backendRes.notice,
 		useRecommend:       plan.useRecommend,
 		activeUseCase:      plan.useCase,
+		suppliedByUseCase:  plan.suppliedByUseCase,
 		bootstrapWarns:     bundle.Warnings,
 		preflightWarns:     warns,
 		retrieveLine:       retrieveLine,

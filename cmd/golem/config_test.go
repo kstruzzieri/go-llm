@@ -70,23 +70,24 @@ func TestPlanActiveRoute_PlanningHopsAndSelectors(t *testing.T) {
 		name          string
 		defaults      map[string]string
 		wantChain     []string
+		wantSource    string
 		wantRecommend bool
 	}{
 		{"explicit planning wins, with its model fallbacks",
 			map[string]string{"planning": "planner", "reasoning": "reasoner", "agent": "agentic"},
-			[]string{"ollama/big", "ollama/small"}, false},
+			[]string{"ollama/big", "ollama/small"}, "planning", false},
 		{"reasoning hop",
 			map[string]string{"reasoning": "reasoner", "analysis": "analyst", "agent": "agentic"},
-			[]string{"openai/think"}, false},
+			[]string{"openai/think"}, "reasoning", false},
 		{"analysis hop",
 			map[string]string{"analysis": "analyst", "agent": "agentic"},
-			[]string{"ollama/mid"}, false},
+			[]string{"ollama/mid"}, "analysis", false},
 		{"agent hop",
 			map[string]string{"agent": "agentic"},
-			[]string{"ollama/fast"}, false},
+			[]string{"ollama/fast"}, "agent", false},
 		{"no applicable default falls back to recommendation",
 			map[string]string{"chat": "chatty"},
-			nil, true},
+			nil, "", true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -100,6 +101,9 @@ func TestPlanActiveRoute_PlanningHopsAndSelectors(t *testing.T) {
 			}
 			if !reflect.DeepEqual(route.Chain, tt.wantChain) {
 				t.Errorf("chain = %v, want %v", route.Chain, tt.wantChain)
+			}
+			if route.SuppliedByUseCase != tt.wantSource {
+				t.Errorf("role source = %q, want %q", route.SuppliedByUseCase, tt.wantSource)
 			}
 			if route.UseCase != config.UseCasePlanning {
 				t.Errorf("UseCase = %q, want %q", route.UseCase, config.UseCasePlanning)
@@ -167,11 +171,12 @@ func TestChainPlanFor_CarriesTheRouteUnchanged(t *testing.T) {
 	// one value (#476 I5). Dropping any field here silently detaches a seam
 	// from the admitted plan.
 	strict := providerbootstrap.PlannedRoute{
-		UseCase: config.UseCasePlanning,
-		Chain:   []string{"ollama/big", "ollama/small"},
+		UseCase:           config.UseCasePlanning,
+		SuppliedByUseCase: "analysis",
+		Chain:             []string{"ollama/big", "ollama/small"},
 	}
 	got := chainPlanFor(strict)
-	if !reflect.DeepEqual(got.chain, strict.Chain) || got.useRecommend || got.useCase != config.UseCasePlanning {
+	if !reflect.DeepEqual(got.chain, strict.Chain) || got.useRecommend || got.useCase != config.UseCasePlanning || got.suppliedByUseCase != "analysis" {
 		t.Errorf("chainPlanFor(strict) = %+v, want chain/useCase carried and no recommend", got)
 	}
 

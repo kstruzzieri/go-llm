@@ -195,7 +195,7 @@ func runModels(ctx context.Context, args []string, out, errOut io.Writer) error 
 
 	// #477 D8: the agent chain comes from the frozen route, never
 	// re-resolved after admission.
-	plan := chainPlan{chain: agentRoute.Chain, useRecommend: agentRoute.Recommend}
+	plan := chainPlanFor(agentRoute)
 	for _, w := range backendRes.warns {
 		_, _ = fmt.Fprintln(errOut, "warning: "+w)
 	}
@@ -250,14 +250,14 @@ func runModelsWith(
 		// diagnostic the startup preflight uses, rather than a bare zero row.
 		if _, lerr := reg.Lookup(ctx, key); lerr != nil {
 			ep, epOK := resolvePreflightEndpoint(resolveEndpoint, key.Provider)
-			_, _ = fmt.Fprintf(out, "%s\t%s\n", sel, preflightConnectivityWarn(sel, key.Provider, ep, epOK, lerr))
+			_, _ = fmt.Fprintf(out, "%s\t%s\n", sel, preflightConnectivityWarn("agent", sel, key.Provider, ep, epOK, lerr))
 			continue
 		}
 
 		exp, err := reg.ExplainToolCall(ctx, key)
 		if err != nil {
 			ep, epOK := resolvePreflightEndpoint(resolveEndpoint, key.Provider)
-			_, _ = fmt.Fprintf(out, "%s\t%s\n", sel, preflightConnectivityWarn(sel, key.Provider, ep, epOK, err))
+			_, _ = fmt.Fprintf(out, "%s\t%s\n", sel, preflightConnectivityWarn("agent", sel, key.Provider, ep, epOK, err))
 			continue
 		}
 		explicit := exp.Source == "explicit"

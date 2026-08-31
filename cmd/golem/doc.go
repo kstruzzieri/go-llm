@@ -10,7 +10,7 @@
 //
 // The openai-compat backend URL can be overridden with -base-url (or
 // GO_LLM_BASE_URL); otherwise, when the configured loopback URL does not
-// serve the agent model, startup scans 127.0.0.1:8080-8090 for it
+// serve the active model route, startup scans 127.0.0.1:8080-8090 for it
 // (-no-probe disables the scan).
 //
 // The source subcommand manages ad-hoc documents in the workspace index over

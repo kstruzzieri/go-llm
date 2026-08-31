@@ -636,6 +636,9 @@ func TestRunGoalModeRemotePlanningFallbackFailsClosed(t *testing.T) {
 		t.Fatalf("run = nil error, want fail-closed on the unconsented remote planning destination\nstderr:\n%s",
 			readRunTestFile(t, stderr))
 	}
+	if !errors.Is(err, provider.ErrDestinationDenied) {
+		t.Fatalf("run error = %v, want ErrDestinationDenied", err)
+	}
 	msg := err.Error() + readRunTestFile(t, stderr)
 	if !strings.Contains(msg, "opencode.invalid") || !strings.Contains(msg, "-allow-destination") {
 		t.Errorf("failure names neither the destination nor the flag:\n%s", msg)

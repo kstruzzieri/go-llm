@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 
+	"github.com/kstruzzieri/go-llm/agent"
 	"github.com/kstruzzieri/go-llm/config"
 	"github.com/kstruzzieri/go-llm/configview"
 	"github.com/kstruzzieri/go-llm/provider"
@@ -25,10 +26,10 @@ import (
 // a config that never writes defaults.planning shows no planning row.
 func golemViewRequirements() map[string]provider.Capability {
 	return map[string]provider.Capability{
-		"agent":      toolRouteCaps,
-		"planning":   toolRouteCaps,
-		"chat":       provider.CapChat | provider.CapStream,
-		"analysis":   provider.CapChat | provider.CapStream,
+		"agent":      agent.ModelCallCapabilities(true),
+		"planning":   agent.ModelCallCapabilities(true),
+		"chat":       agent.ModelCallCapabilities(false),
+		"analysis":   agent.ModelCallCapabilities(false),
 		"embedding":  provider.CapEmbed,
 		"completion": provider.CapGenerate | provider.CapInsert,
 	}

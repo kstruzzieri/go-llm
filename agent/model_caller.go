@@ -22,6 +22,16 @@ type ModelResult struct {
 	RouteOutcome *provider.RouteOutcome
 }
 
+// ModelCallCapabilities returns the routing capabilities required by a
+// streaming chat call, adding tool_call only when tools are present.
+func ModelCallCapabilities(hasTools bool) provider.Capability {
+	caps := provider.CapChat | provider.CapStream
+	if hasTools {
+		caps |= provider.CapToolCall
+	}
+	return caps
+}
+
 // planExecutor is the minimal slice of *provider.RoutePlan the adapter needs;
 // abstracting it lets tests fake the streaming execution.
 type planExecutor interface {
@@ -58,10 +68,7 @@ func (m *routerModelCaller) Chat(ctx context.Context, req provider.ChatRequest,
 		Tools:          req.Tools,
 		Options:        req.Options,
 		ExpectedOutput: req.Options.NumPredict,
-		RequiredCaps:   provider.CapChat | provider.CapStream,
-	}
-	if len(req.Tools) > 0 {
-		rr.RequiredCaps |= provider.CapToolCall
+		RequiredCaps:   ModelCallCapabilities(len(req.Tools) > 0),
 	}
 	if len(m.chain) > 0 {
 		rr.PreferredChain = append([]string(nil), m.chain...)
@@ -132,7 +139,7 @@ func (s *routerSummarizer) Summarize(ctx context.Context, prior string, msgs []c
 		},
 		Options:        provider.ModelOptions{NumPredict: DefaultSummaryOutputReserve},
 		ExpectedOutput: DefaultSummaryOutputReserve,
-		RequiredCaps:   provider.CapChat | provider.CapStream,
+		RequiredCaps:   ModelCallCapabilities(false),
 	}
 	if len(s.chain) > 0 {
 		rr.PreferredChain = append([]string(nil), s.chain...)

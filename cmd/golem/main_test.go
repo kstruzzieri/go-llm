@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/kstruzzieri/go-llm/agent"
+	"github.com/kstruzzieri/go-llm/config"
 	"github.com/kstruzzieri/go-llm/fingerprint"
 	"github.com/kstruzzieri/go-llm/rag"
 )
@@ -140,6 +141,26 @@ func TestStartupNotices(t *testing.T) {
 		if !strings.Contains(joined, want) {
 			t.Errorf("notices missing %q in:\n%s", want, joined)
 		}
+	}
+}
+
+func TestStartupNotices_PlanningFallbackSource(t *testing.T) {
+	got := startupNotices(startupInfo{
+		workspace:         "/r",
+		activeUseCase:     config.UseCasePlanning,
+		suppliedByUseCase: "analysis",
+	})
+	if joined := strings.Join(got, "\n"); !strings.Contains(joined, "planning route: using defaults.analysis") {
+		t.Fatalf("startup notices missing planning fallback source:\n%s", joined)
+	}
+
+	got = startupNotices(startupInfo{
+		workspace:         "/r",
+		activeUseCase:     config.UseCasePlanning,
+		suppliedByUseCase: config.UseCasePlanning,
+	})
+	if joined := strings.Join(got, "\n"); strings.Contains(joined, "planning route: using defaults.") {
+		t.Fatalf("explicit planning default reported as a fallback:\n%s", joined)
 	}
 }
 
