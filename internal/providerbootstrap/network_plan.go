@@ -20,9 +20,10 @@ import (
 // UseCase "agent" with a chain that can differ from the agent chain — and
 // the plan unions their reachability under that purpose.
 type PlannedRoute struct {
-	UseCase   string
-	Chain     []string // strict provider/model selectors, nil when Recommend
-	Recommend bool     // non-strict: reaches every configured provider
+	UseCase           string
+	SuppliedByUseCase string   // Defaults key that supplied the role, when applicable
+	Chain             []string // strict provider/model selectors, nil when Recommend
+	Recommend         bool     // non-strict: reaches every configured provider
 }
 
 // PlanOptions carries the mode toggles that add metadata reachability.
@@ -60,7 +61,7 @@ func PlanAgentRoute(cfg *config.Config) (PlannedRoute, error) {
 	if err != nil {
 		return PlannedRoute{}, fmt.Errorf("providerbootstrap: resolve agent chain: %w", err)
 	}
-	return PlannedRoute{UseCase: "agent", Chain: chain}, nil
+	return PlannedRoute{UseCase: "agent", SuppliedByUseCase: "agent", Chain: chain}, nil
 }
 
 // PlanOptionalUseCaseRoute resolves an optional side-task use case the way
@@ -81,14 +82,15 @@ func PlanOptionalUseCaseRoute(cfg *config.Config, useCase string) (PlannedRoute,
 	if cfg == nil {
 		return PlannedRoute{UseCase: useCase, Recommend: true}, nil
 	}
-	if _, ok := cfg.RoleForUseCase(useCase); !ok {
+	role, source, ok := cfg.RoleForUseCaseWithSource(useCase)
+	if !ok {
 		return PlannedRoute{UseCase: useCase, Recommend: true}, nil
 	}
-	chain, err := cfg.RoleFallbackChain(useCase)
+	chain, err := cfg.RoleChain(role)
 	if err != nil {
 		return PlannedRoute{}, fmt.Errorf("providerbootstrap: resolve %s chain: %w", useCase, err)
 	}
-	return PlannedRoute{UseCase: useCase, Chain: chain}, nil
+	return PlannedRoute{UseCase: useCase, SuppliedByUseCase: source, Chain: chain}, nil
 }
 
 // PlanRoleRoute resolves a role-pinned route (delegate, dispatch-role,

@@ -97,7 +97,7 @@ func TestPreflight_HeadCapable(t *testing.T) {
 	reg := fakeReg{byKey: map[provider.ModelKey]provider.Capability{
 		{Provider: "ollama", Model: "m1"}: fullCaps,
 	}}
-	warns, err := preflightToolCapable(context.Background(), reg, []string{"ollama/m1"}, noEndpoints, nil)
+	warns, err := preflightToolCapable(context.Background(), reg, []string{"ollama/m1"}, "agent", noEndpoints, nil)
 	if err != nil {
 		t.Fatalf("err = %v, want nil", err)
 	}
@@ -111,7 +111,7 @@ func TestPreflight_PrimaryIncapableFallbackCapable(t *testing.T) {
 		{Provider: "ollama", Model: "m1"}: provider.CapChat | provider.CapStream, // no tool_call
 		{Provider: "ollama", Model: "m2"}: fullCaps,
 	}}
-	warns, err := preflightToolCapable(context.Background(), reg, []string{"ollama/m1", "ollama/m2"}, noEndpoints, nil)
+	warns, err := preflightToolCapable(context.Background(), reg, []string{"ollama/m1", "ollama/m2"}, "agent", noEndpoints, nil)
 	if err != nil {
 		t.Fatalf("err = %v, want nil", err)
 	}
@@ -120,11 +120,24 @@ func TestPreflight_PrimaryIncapableFallbackCapable(t *testing.T) {
 	}
 }
 
+func TestPreflight_PlanningWarningNamesActiveRoute(t *testing.T) {
+	reg := fakeReg{byKey: map[provider.ModelKey]provider.Capability{
+		{Provider: "ollama", Model: "planner"}: provider.CapChat | provider.CapStream,
+	}}
+	warns, err := preflightToolCapable(context.Background(), reg, []string{"ollama/planner"}, "planning", noEndpoints, nil)
+	if err == nil {
+		t.Fatal("err = nil, want failure (planner is not tool-capable)")
+	}
+	if len(warns) != 1 || !strings.Contains(warns[0], `planning fallback "ollama/planner"`) || strings.Contains(warns[0], "agent fallback") {
+		t.Fatalf("warnings = %v, want planning route label", warns)
+	}
+}
+
 func TestPreflight_NoneCapable(t *testing.T) {
 	reg := fakeReg{byKey: map[provider.ModelKey]provider.Capability{
 		{Provider: "ollama", Model: "m1"}: provider.CapChat | provider.CapStream,
 	}}
-	_, err := preflightToolCapable(context.Background(), reg, []string{"ollama/m1"}, noEndpoints, nil)
+	_, err := preflightToolCapable(context.Background(), reg, []string{"ollama/m1"}, "agent", noEndpoints, nil)
 	if err == nil {
 		t.Fatal("err = nil, want failure (no tool-capable entry)")
 	}
@@ -132,11 +145,11 @@ func TestPreflight_NoneCapable(t *testing.T) {
 
 func TestPreflight_EmptyChain_UsesRecommend(t *testing.T) {
 	ok := fakeReg{recommend: []provider.Capability{fullCaps}}
-	if _, err := preflightToolCapable(context.Background(), ok, nil, noEndpoints, nil); err != nil {
+	if _, err := preflightToolCapable(context.Background(), ok, nil, "agent", noEndpoints, nil); err != nil {
 		t.Fatalf("recommend-capable err = %v, want nil", err)
 	}
 	empty := fakeReg{recommend: nil}
-	if _, err := preflightToolCapable(context.Background(), empty, nil, noEndpoints, nil); err == nil {
+	if _, err := preflightToolCapable(context.Background(), empty, nil, "agent", noEndpoints, nil); err == nil {
 		t.Fatal("empty recommend err = nil, want failure")
 	}
 }
@@ -148,7 +161,7 @@ func TestPreflight_BareModelNotFound(t *testing.T) {
 	reg := fakeReg{byKey: map[provider.ModelKey]provider.Capability{
 		{Provider: "ollama", Model: "other"}: fullCaps,
 	}}
-	warns, err := preflightToolCapable(context.Background(), reg, []string{"ghost"}, noEndpoints, nil)
+	warns, err := preflightToolCapable(context.Background(), reg, []string{"ghost"}, "agent", noEndpoints, nil)
 	if err == nil {
 		t.Fatal("err = nil for bare model with no capable match, want failure")
 	}
@@ -168,7 +181,7 @@ func TestPreflight_BareSelectorProbesUntilProviderCapable(t *testing.T) {
 		a: fingerprint.CapProbeNo,
 		b: fingerprint.CapProbeYes,
 	}}
-	warns, err := preflightToolCapable(context.Background(), reg, []string{"shared"}, noEndpoints, res)
+	warns, err := preflightToolCapable(context.Background(), reg, []string{"shared"}, "agent", noEndpoints, res)
 	if err != nil {
 		t.Fatalf("err = %v, want nil (second provider probes capable)", err)
 	}
@@ -191,7 +204,7 @@ func TestPreflight_LookupErrorIsConnectivity(t *testing.T) {
 	resolve := fixedEndpoints(map[string]preflightEndpoint{
 		"llamacpp": {BaseURL: "http://127.0.0.1:8080", ModelsPath: "/v1/models"},
 	})
-	warns, err := preflightToolCapable(context.Background(), reg, []string{"llamacpp/gemma4:31b"}, resolve, nil)
+	warns, err := preflightToolCapable(context.Background(), reg, []string{"llamacpp/gemma4:31b"}, "agent", resolve, nil)
 	if err == nil {
 		t.Fatal("err = nil, want failure")
 	}
@@ -219,7 +232,7 @@ func TestPreflight_LookupErrorResolverMiss(t *testing.T) {
 	reg := fakeReg{errByKey: map[provider.ModelKey]error{
 		key: fmt.Errorf("boom: %w", connStatusErr{404}),
 	}}
-	warns, err := preflightToolCapable(context.Background(), reg, []string{"llamacpp/gemma4:31b"}, noEndpoints, nil)
+	warns, err := preflightToolCapable(context.Background(), reg, []string{"llamacpp/gemma4:31b"}, "agent", noEndpoints, nil)
 	if err == nil {
 		t.Fatal("err = nil, want failure")
 	}
@@ -240,7 +253,7 @@ func TestPreflight_LookupErrorNonStatus(t *testing.T) {
 	resolve := fixedEndpoints(map[string]preflightEndpoint{
 		"llamacpp": {BaseURL: "http://127.0.0.1:8080", ModelsPath: "/v1/models"},
 	})
-	warns, err := preflightToolCapable(context.Background(), reg, []string{"llamacpp/gemma4:31b"}, resolve, nil)
+	warns, err := preflightToolCapable(context.Background(), reg, []string{"llamacpp/gemma4:31b"}, "agent", resolve, nil)
 	if err == nil {
 		t.Fatal("err = nil, want failure")
 	}
@@ -266,7 +279,7 @@ func TestPreflight_QualifiedModelNotFoundIsLookupFailure(t *testing.T) {
 	resolve := fixedEndpoints(map[string]preflightEndpoint{
 		"ollama": {BaseURL: "http://localhost:11434", ModelsPath: "/api/tags"},
 	})
-	warns, err := preflightToolCapable(context.Background(), reg, []string{"ollama/missing"}, resolve, nil)
+	warns, err := preflightToolCapable(context.Background(), reg, []string{"ollama/missing"}, "agent", resolve, nil)
 	if err == nil {
 		t.Fatal("err = nil, want failure")
 	}
@@ -295,7 +308,7 @@ func TestPreflight_MixedCapableAndErrored(t *testing.T) {
 		"llamacpp": {BaseURL: "http://127.0.0.1:8080", ModelsPath: "/v1/models"},
 	})
 	warns, err := preflightToolCapable(context.Background(), reg,
-		[]string{"ollama/m1", "llamacpp/down"}, resolve, nil)
+		[]string{"ollama/m1", "llamacpp/down"}, "agent", resolve, nil)
 	if err != nil {
 		t.Fatalf("err = %v, want nil (one entry capable)", err)
 	}
@@ -317,7 +330,7 @@ func TestPreflight_MixedErroredAndNonCapable(t *testing.T) {
 		"llamacpp": {BaseURL: "http://127.0.0.1:8080", ModelsPath: "/v1/models"},
 	})
 	_, err := preflightToolCapable(context.Background(), reg,
-		[]string{"llamacpp/down", "ollama/m1"}, resolve, nil)
+		[]string{"llamacpp/down", "ollama/m1"}, "agent", resolve, nil)
 	if err == nil {
 		t.Fatal("err = nil, want failure")
 	}
@@ -337,7 +350,7 @@ func TestPreflight_BareLookupAnyError(t *testing.T) {
 	reg := fakeReg{errByModel: map[string]error{
 		"gemma4:31b": fmt.Errorf("provider: lookup any %q: all providers failed: %w", "gemma4:31b", connStatusErr{404}),
 	}}
-	warns, err := preflightToolCapable(context.Background(), reg, []string{"gemma4:31b"}, noEndpoints, nil)
+	warns, err := preflightToolCapable(context.Background(), reg, []string{"gemma4:31b"}, "agent", noEndpoints, nil)
 	if err == nil {
 		t.Fatal("err = nil, want failure")
 	}
@@ -363,7 +376,7 @@ func TestPreflight_BoundedEager_StopsAfterFirstCapable(t *testing.T) {
 		a: fingerprint.CapProbeYes,
 	}}
 	warns, err := preflightToolCapable(context.Background(), reg,
-		[]string{"ollama/a", "ollama/b", "ollama/c"}, noEndpoints, res)
+		[]string{"ollama/a", "ollama/b", "ollama/c"}, "agent", noEndpoints, res)
 	if err != nil {
 		t.Fatalf("err = %v, want nil (A probes capable)", err)
 	}
@@ -397,7 +410,7 @@ func TestPreflight_ProbeNoContinuesToNextEntry(t *testing.T) {
 		a: fingerprint.CapProbeNo,
 	}}
 	warns, err := preflightToolCapable(context.Background(), reg,
-		[]string{"ollama/a", "ollama/b"}, noEndpoints, res)
+		[]string{"ollama/a", "ollama/b"}, "agent", noEndpoints, res)
 	if err != nil {
 		t.Fatalf("err = %v, want nil (B capable)", err)
 	}
@@ -437,7 +450,7 @@ func TestPreflight_AllExhaustedFatalIncludesProbeOutcomes(t *testing.T) {
 		"llamacpp": {BaseURL: "http://127.0.0.1:8080", ModelsPath: "/v1/models"},
 	})
 	_, err := preflightToolCapable(context.Background(), reg,
-		[]string{"ollama/a", "ollama/b", "llamacpp/down"}, resolve, res)
+		[]string{"ollama/a", "ollama/b", "llamacpp/down"}, "agent", resolve, res)
 	if err == nil {
 		t.Fatal("err = nil, want failure (none capable)")
 	}
@@ -463,7 +476,7 @@ func TestPreflight_NoCapProbe_NeverResolves(t *testing.T) {
 	regCapable := fakeReg{byKey: map[provider.ModelKey]provider.Capability{
 		{Provider: "ollama", Model: "m1"}: fullCaps,
 	}}
-	warns, err := preflightToolCapable(context.Background(), regCapable, []string{"ollama/m1"}, noEndpoints, nil)
+	warns, err := preflightToolCapable(context.Background(), regCapable, []string{"ollama/m1"}, "agent", noEndpoints, nil)
 	if err != nil || len(warns) != 0 {
 		t.Fatalf("capable-with-nil-resolver: warns=%v err=%v, want none/nil", warns, err)
 	}
@@ -476,7 +489,7 @@ func TestPreflight_NoCapProbe_NeverResolves(t *testing.T) {
 	resolve := fixedEndpoints(map[string]preflightEndpoint{
 		"llamacpp": {BaseURL: "http://127.0.0.1:8080", ModelsPath: "/v1/models"},
 	})
-	warns, err = preflightToolCapable(context.Background(), regDown, []string{"llamacpp/gemma4:31b"}, resolve, nil)
+	warns, err = preflightToolCapable(context.Background(), regDown, []string{"llamacpp/gemma4:31b"}, "agent", resolve, nil)
 	if err == nil {
 		t.Fatal("err = nil, want connectivity failure")
 	}
@@ -496,7 +509,7 @@ func TestPreflight_NoCapProbe_CatalogKnownStillCapable(t *testing.T) {
 		{Provider: "ollama", Model: "miss"}:  provider.CapChat | provider.CapStream, // undeclared
 	}}
 	warns, err := preflightToolCapable(context.Background(), reg,
-		[]string{"ollama/known", "ollama/miss"}, noEndpoints, nil)
+		[]string{"ollama/known", "ollama/miss"}, "agent", noEndpoints, nil)
 	if err != nil {
 		t.Fatalf("err = %v, want nil (known entry capable)", err)
 	}
@@ -539,7 +552,7 @@ func TestPreflight_EmptyChainRecommendResolves(t *testing.T) {
 	res := &fakeToolResolver{states: map[provider.ModelKey]fingerprint.CapProbeState{
 		key: fingerprint.CapProbeYes,
 	}}
-	if _, err := preflightToolCapable(context.Background(), reg, nil, noEndpoints, res); err != nil {
+	if _, err := preflightToolCapable(context.Background(), reg, nil, "agent", noEndpoints, res); err != nil {
 		t.Fatalf("err = %v, want nil (recommend model probes capable)", err)
 	}
 	if !reg.recommendHit {
@@ -566,7 +579,7 @@ func TestPreflight_ProbeErrorNonFatalButNotCapable(t *testing.T) {
 	res := &fakeToolResolver{errs: map[provider.ModelKey]error{
 		a: fmt.Errorf("dial tcp: connection refused"),
 	}}
-	warns, err := preflightToolCapable(context.Background(), reg, []string{"ollama/a"}, noEndpoints, res)
+	warns, err := preflightToolCapable(context.Background(), reg, []string{"ollama/a"}, "agent", noEndpoints, res)
 	if err == nil {
 		t.Fatal("err = nil, want failure (only entry probed with error, not capable)")
 	}

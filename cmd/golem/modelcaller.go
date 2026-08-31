@@ -35,9 +35,12 @@ type chainModelCaller struct {
 	route   func(ctx context.Context, rr provider.RoutingRequest) (chatStreamer, error)
 }
 
-// newRouterChainCaller builds the default agent caller (UseCase "agent").
-func newRouterChainCaller(r *provider.Router, chain []string) agent.ModelCaller {
-	return newRouterChainCallerFor(r, chain, "agent")
+// newActiveChainCaller builds the process's ONE orchestrator caller from the
+// resolved active chainPlan (#476 D3): the chain and the use case arrive as
+// the single value the network plan admitted, so the caller cannot route a
+// different use case than the one whose destinations were consented.
+func newActiveChainCaller(r *provider.Router, plan chainPlan) agent.ModelCaller {
+	return newRouterChainCallerFor(r, plan.chain, plan.useCase)
 }
 
 // newRouterChainCallerFor builds a chainModelCaller that routes UseCase useCase
@@ -68,10 +71,7 @@ func (m *chainModelCaller) Chat(ctx context.Context, req provider.ChatRequest, o
 		Tools:          req.Tools,
 		Options:        req.Options,
 		ExpectedOutput: req.Options.NumPredict,
-		RequiredCaps:   provider.CapChat | provider.CapStream,
-	}
-	if len(req.Tools) > 0 {
-		rr.RequiredCaps |= provider.CapToolCall
+		RequiredCaps:   agent.ModelCallCapabilities(len(req.Tools) > 0),
 	}
 	if len(m.chain) > 0 {
 		rr.PreferredChain = m.chain
@@ -106,8 +106,6 @@ type capChecker interface {
 	Recommend(ctx context.Context, opts provider.RecommendOpts) ([]*provider.ModelProfile, error)
 }
 
-const toolRouteCaps = provider.CapChat | provider.CapStream | provider.CapToolCall
-
 // toolCallResolver is the narrow slice of *provider.ModelRegistry the preflight
 // needs for active capability resolution. A nil resolver disables probing
 // (-no-cap-probe or no store), in which case the preflight relies solely on the
@@ -127,12 +125,19 @@ func remediationHint(sel string) string {
 	return fmt.Sprintf("if it supports function calling, add %s to the model entry for %q in models.json", remediationCaps, sel)
 }
 
+// fallbackLabel names the active route and preserves "agent" for legacy
+// callers that do not stamp a use case.
+func fallbackLabel(useCase string) string {
+	if useCase == "" {
+		useCase = "agent"
+	}
+	return useCase + " fallback"
+}
+
 // notToolCapableWarn is the bare capability-gap warning for a selector that
-// resolved (or matched no provider) without tool_call, with its remediation
-// hint. Used wherever a probe cannot or need not run: nil resolver, unknown
-// verdict (probing disabled for the provider), and bare-selector no-match.
-func notToolCapableWarn(sel string) string {
-	return fmt.Sprintf("agent fallback %q is not tool-capable (chat|stream|tool_call); %s", sel, remediationHint(sel))
+// resolved (or matched no provider) without tool_call.
+func notToolCapableWarn(useCase, sel string) string {
+	return fmt.Sprintf("%s %q is not tool-capable (chat|stream|tool_call); %s", fallbackLabel(useCase), sel, remediationHint(sel))
 }
 
 // preflightEndpoint is the discovery endpoint a provider exposes. It is used
@@ -265,9 +270,9 @@ func providerDiscoveryFailure(err error) bool {
 // failure, it surfaces the underlying error verbatim under a neutral
 // "provider lookup failed" framing.
 // The returned string is bare: the startup renderer prepends "warning: ".
-func preflightConnectivityWarn(sel, providerName string, ep preflightEndpoint, epOK bool, lookupErr error) string {
+func preflightConnectivityWarn(useCase, sel, providerName string, ep preflightEndpoint, epOK bool, lookupErr error) string {
 	if !epOK || ep.BaseURL == "" || !providerDiscoveryFailure(lookupErr) {
-		return fmt.Sprintf("agent fallback %q: provider lookup failed: %v", sel, lookupErr)
+		return fmt.Sprintf("%s %q: provider lookup failed: %v", fallbackLabel(useCase), sel, lookupErr)
 	}
 	addr := redactBaseURL(ep.BaseURL)
 	if ep.Source != "" {
@@ -277,17 +282,15 @@ func preflightConnectivityWarn(sel, providerName string, ep preflightEndpoint, e
 	}
 	var hs httpStatuser
 	if errors.As(lookupErr, &hs) {
-		return fmt.Sprintf("agent fallback %q: cannot reach provider %q at %s (GET %s -> %s); check server/base_url",
-			sel, providerName, addr, ep.ModelsPath, statusLabel(hs.HTTPStatusCode()))
+		return fmt.Sprintf("%s %q: cannot reach provider %q at %s (GET %s -> %s); check server/base_url",
+			fallbackLabel(useCase), sel, providerName, addr, ep.ModelsPath, statusLabel(hs.HTTPStatusCode()))
 	}
-	return fmt.Sprintf("agent fallback %q: cannot reach provider %q at %s (GET %s): %v",
-		sel, providerName, addr, ep.ModelsPath, lookupErr)
+	return fmt.Sprintf("%s %q: cannot reach provider %q at %s (GET %s): %v",
+		fallbackLabel(useCase), sel, providerName, addr, ep.ModelsPath, lookupErr)
 }
 
 func profileToolCapable(p *provider.ModelProfile) bool {
-	// Capability.Has tests c&flag == flag across all bits, so reusing the
-	// toolRouteCaps mask keeps the required-capability set defined in one place.
-	return p != nil && p.Caps.Has(toolRouteCaps)
+	return p != nil && p.Caps.Has(agent.ModelCallCapabilities(true))
 }
 
 func parseSelector(sel string) (provider.ModelKey, bool) {
@@ -298,7 +301,7 @@ func parseSelector(sel string) (provider.ModelKey, bool) {
 	return provider.ModelKey{Provider: pname, Model: model}, true
 }
 
-// preflightToolCapable verifies the agent chain can route a tool-capable model.
+// preflightToolCapable verifies the active chain can route a tool-capable model.
 // For each configured entry it classifies the outcome as capable,
 // not-tool-capable (resolved but lacks tool_call), or lookup-errored
 // (provider unreachable / config failure). It returns a bare warning per
@@ -315,7 +318,7 @@ func parseSelector(sel string) (provider.ModelKey, bool) {
 // proves ONE usable model then stops loading fallbacks (llama-swap load cost);
 // unknown entries reached after that resolve lazily at route time, reported here
 // as a non-fatal "probed on first use" line.
-func preflightToolCapable(ctx context.Context, reg capChecker, chain []string, resolveEndpoint endpointResolver, resolver toolCallResolver) (warnings []string, err error) {
+func preflightToolCapable(ctx context.Context, reg capChecker, chain []string, useCase string, resolveEndpoint endpointResolver, resolver toolCallResolver) (warnings []string, err error) {
 	if len(chain) == 0 {
 		return preflightRecommendToolCapable(ctx, reg, resolver)
 	}
@@ -325,7 +328,7 @@ func preflightToolCapable(ctx context.Context, reg capChecker, chain []string, r
 		// Probe only until the first capable entry is proven; later unknowns
 		// are deferred to route time.
 		allowProbe := capable == 0
-		ok, warn := evalChainEntry(ctx, reg, sel, resolveEndpoint, resolver, allowProbe)
+		ok, warn := evalChainEntry(ctx, reg, sel, useCase, resolveEndpoint, resolver, allowProbe)
 		if ok {
 			capable++
 			continue
@@ -346,7 +349,7 @@ func preflightToolCapable(ctx context.Context, reg capChecker, chain []string, r
 // passing on the first that already declares tool_call or probes yes.
 func preflightRecommendToolCapable(ctx context.Context, reg capChecker, resolver toolCallResolver) ([]string, error) {
 	if resolver == nil {
-		profs, rerr := reg.Recommend(ctx, provider.RecommendOpts{RequiredCaps: toolRouteCaps})
+		profs, rerr := reg.Recommend(ctx, provider.RecommendOpts{RequiredCaps: agent.ModelCallCapabilities(true)})
 		if rerr != nil {
 			return nil, fmt.Errorf("golem: tool-capability preflight (recommend): %w", rerr)
 		}
@@ -356,7 +359,7 @@ func preflightRecommendToolCapable(ctx context.Context, reg capChecker, resolver
 		return nil, nil
 	}
 
-	profs, rerr := reg.Recommend(ctx, provider.RecommendOpts{RequiredCaps: toolRouteCaps &^ provider.CapToolCall})
+	profs, rerr := reg.Recommend(ctx, provider.RecommendOpts{RequiredCaps: agent.ModelCallCapabilities(false)})
 	if rerr != nil {
 		return nil, fmt.Errorf("golem: tool-capability preflight (recommend): %w", rerr)
 	}
@@ -376,23 +379,23 @@ func preflightRecommendToolCapable(ctx context.Context, reg capChecker, resolver
 	return nil, fmt.Errorf("golem: no tool-capable model available (require chat|stream|tool_call)")
 }
 
-// evalChainEntry classifies one agent-chain selector. It returns capable=true
+// evalChainEntry classifies one active-chain selector. It returns capable=true
 // when the selector resolves to a tool-capable model; otherwise it returns a
 // bare warning string: a connectivity diagnostic when the registry lookup
 // errored, or a capability message (possibly a probe outcome) when the model
 // resolved without a declared tool_call. allowProbe gates active probing per the
 // bounded-eager policy.
-func evalChainEntry(ctx context.Context, reg capChecker, sel string, resolveEndpoint endpointResolver, resolver toolCallResolver, allowProbe bool) (capable bool, warning string) {
+func evalChainEntry(ctx context.Context, reg capChecker, sel, useCase string, resolveEndpoint endpointResolver, resolver toolCallResolver, allowProbe bool) (capable bool, warning string) {
 	if key, parsed := parseSelector(sel); parsed {
 		p, lerr := reg.Lookup(ctx, key)
 		if lerr != nil {
 			ep, epOK := resolvePreflightEndpoint(resolveEndpoint, key.Provider)
-			return false, preflightConnectivityWarn(sel, key.Provider, ep, epOK, lerr)
+			return false, preflightConnectivityWarn(useCase, sel, key.Provider, ep, epOK, lerr)
 		}
 		if profileToolCapable(p) {
 			return true, ""
 		}
-		return classifyToolCapability(ctx, sel, key, resolver, allowProbe)
+		return classifyToolCapability(ctx, sel, useCase, key, resolver, allowProbe)
 	}
 
 	// Bare model name: resolve across providers. A bare selector names no single
@@ -400,7 +403,7 @@ func evalChainEntry(ctx context.Context, reg capChecker, sel string, resolveEndp
 	// builder's no-endpoint branch (epOK=false) so the message has one source.
 	profs, lerr := reg.LookupAny(ctx, sel)
 	if lerr != nil {
-		return false, preflightConnectivityWarn(sel, "", preflightEndpoint{}, false, lerr)
+		return false, preflightConnectivityWarn(useCase, sel, "", preflightEndpoint{}, false, lerr)
 	}
 	for _, p := range profs {
 		if profileToolCapable(p) {
@@ -409,14 +412,14 @@ func evalChainEntry(ctx context.Context, reg capChecker, sel string, resolveEndp
 	}
 	if len(profs) == 0 {
 		// No matching provider: nothing to probe, and no single provider to name.
-		return false, notToolCapableWarn(sel)
+		return false, notToolCapableWarn(useCase, sel)
 	}
-	warning = notToolCapableWarn(sel)
+	warning = notToolCapableWarn(useCase, sel)
 	for _, p := range profs {
 		if p == nil {
 			continue
 		}
-		capable, w := classifyToolCapability(ctx, sel, p.Key, resolver, allowProbe)
+		capable, w := classifyToolCapability(ctx, sel, useCase, p.Key, resolver, allowProbe)
 		if capable {
 			return true, ""
 		}
@@ -432,24 +435,24 @@ func evalChainEntry(ctx context.Context, reg capChecker, sel string, resolveEndp
 // this entry (bounded-eager: a capable entry already found), it reports a
 // non-fatal / capability-gap message rather than making a call. Otherwise it
 // probes and maps the tri-state verdict to a capable flag + diagnostic.
-func classifyToolCapability(ctx context.Context, sel string, key provider.ModelKey, resolver toolCallResolver, allowProbe bool) (bool, string) {
+func classifyToolCapability(ctx context.Context, sel, useCase string, key provider.ModelKey, resolver toolCallResolver, allowProbe bool) (bool, string) {
 	if resolver == nil {
-		return false, notToolCapableWarn(sel)
+		return false, notToolCapableWarn(useCase, sel)
 	}
 	if !allowProbe {
-		return false, fmt.Sprintf("agent fallback %q: tool capability unknown; probed on first use", sel)
+		return false, fmt.Sprintf("%s %q: tool capability unknown; probed on first use", fallbackLabel(useCase), sel)
 	}
 	state, err := resolver.ResolveToolCall(ctx, key)
 	switch {
 	case err != nil:
-		return false, fmt.Sprintf("agent fallback %q: tool-capability probe failed: %v; %s", sel, err, remediationHint(sel))
+		return false, fmt.Sprintf("%s %q: tool-capability probe failed: %v; %s", fallbackLabel(useCase), sel, err, remediationHint(sel))
 	case state == fingerprint.CapProbeYes:
 		return true, ""
 	case state == fingerprint.CapProbeNo:
-		return false, fmt.Sprintf("agent fallback %q: model did not produce a tool call when probed; %s", sel, remediationHint(sel))
+		return false, fmt.Sprintf("%s %q: model did not produce a tool call when probed; %s", fallbackLabel(useCase), sel, remediationHint(sel))
 	case state == fingerprint.CapProbeInconclusive:
-		return false, fmt.Sprintf("agent fallback %q: tool-capability probe was inconclusive; declare capabilities to override: %s", sel, remediationHint(sel))
+		return false, fmt.Sprintf("%s %q: tool-capability probe was inconclusive; declare capabilities to override: %s", fallbackLabel(useCase), sel, remediationHint(sel))
 	default: // "" unknown: resolution disabled for this provider (no prober/store)
-		return false, notToolCapableWarn(sel)
+		return false, notToolCapableWarn(useCase, sel)
 	}
 }

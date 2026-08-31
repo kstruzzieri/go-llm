@@ -14,6 +14,12 @@ const (
 	UseCaseExtract   = "extract"
 	UseCaseApproval  = "approval"
 	UseCaseVision    = "vision"
+	// UseCasePlanning routes agent plan AUTHORING (#476). It names the TASK,
+	// not a model property: "reasoning" is a model trait and appears below
+	// only as a fallback target. Execution deliberately has no key of its own
+	// -- "agent" already is the execution route, so a second name would be a
+	// synonym for the route it falls back to.
+	UseCasePlanning = "planning"
 )
 
 // sideTaskUseCaseFallbacks keeps auxiliary side-task use-cases optional.
@@ -29,6 +35,12 @@ var sideTaskUseCaseFallbacks = map[string][]string{
 	UseCaseExtract:   {"analysis", "chat"},
 	UseCaseApproval:  {"agent", "chat"},
 	UseCaseVision:    {"chat"},
+	// Planning degrades to a strong reasoner first, then the general analysis
+	// route, and finally the agent route a runnable config always has. This
+	// order is deliberately behavior-changing: a config that never mentions
+	// planning can still author plans through an existing "reasoning" or
+	// "analysis" role, which may live on a different provider than "agent".
+	UseCasePlanning: {"reasoning", "analysis", "agent"},
 }
 
 // SideTaskUseCases returns the auxiliary side-task use-case keys, sorted.
@@ -48,13 +60,20 @@ func SideTaskUseCases() []string {
 // existing defaults per sideTaskUseCaseFallbacks. ok is false when neither the
 // use-case nor any of its fallbacks is configured.
 func (c *Config) RoleForUseCase(useCase string) (string, bool) {
+	role, _, ok := c.RoleForUseCaseWithSource(useCase)
+	return role, ok
+}
+
+// RoleForUseCaseWithSource resolves a use-case and also returns the Defaults
+// key that supplied the role. The source equals useCase for an explicit entry.
+func (c *Config) RoleForUseCaseWithSource(useCase string) (role, source string, ok bool) {
 	if role, ok := c.Defaults[useCase]; ok {
-		return role, true
+		return role, useCase, true
 	}
 	for _, fallback := range sideTaskUseCaseFallbacks[useCase] {
 		if role, ok := c.Defaults[fallback]; ok {
-			return role, true
+			return role, fallback, true
 		}
 	}
-	return "", false
+	return "", "", false
 }

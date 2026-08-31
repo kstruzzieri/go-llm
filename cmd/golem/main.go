@@ -99,7 +99,7 @@ func parseFlags(args []string) (flags, error) {
 	fs.StringVar(&f.configPath, "config", "", "path to models.json (default: auto-discover)")
 	fs.StringVar(&f.root, "root", ".", "workspace root the tools are scoped to")
 	fs.StringVar(&f.ollamaURL, "ollama-url", "", "override Ollama base URL")
-	fs.StringVar(&f.baseURL, "base-url", "", "override the openai-compat backend base URL for the primary agent model (server root, without /v1); used exactly as given, disables discovery")
+	fs.StringVar(&f.baseURL, "base-url", "", "override the openai-compat backend base URL for the active model route (server root, without /v1); used exactly as given, disables discovery")
 	fs.BoolVar(&f.noProbe, "no-probe", false, "disable openai-compat backend port discovery; explicit and configured URLs are still used as resolved")
 	fs.BoolVar(&f.noCapProbe, "no-cap-probe", false, "disable the active tool-capability probe for undeclared models (catalog and explicit capabilities still apply)")
 	fs.StringVar(&f.prompt, "p", "", "one-shot mode: run a single agent turn with this prompt and exit; only the final answer goes to stdout (implies -no-session -no-compress -no-memory; approval-gated tools are unavailable, so -allow-write/-allow-exec are ignored)")
@@ -404,6 +404,14 @@ func applyGoalMode(f flags) (flags, []string) {
 		warns = append(warns, "planning mode: -grounding ignored (planning mode authors a plan, it runs no answer turn)")
 		f.grounding = false
 	}
+	if f.think != "" {
+		// The planner force-disables extended thinking on its request, and
+		// -think sets nothing else, so the flag cannot take effect. Clearing
+		// it here also skips the think chain lookup entirely -- registry
+		// metadata reads for a mode that authors one plan and exits (#476 D4).
+		warns = append(warns, "planning mode: -think ignored (the planner disables extended thinking)")
+		f.think = ""
+	}
 	f.noSession = true
 	f.noCompress = true
 	f.noMemory = true
@@ -441,6 +449,8 @@ type startupInfo struct {
 	agentflowState     bool
 	backendLine        string
 	useRecommend       bool
+	activeUseCase      string // the mode's routing use case; names the recommend notice (#476 D5)
+	suppliedByUseCase  string // Defaults key that supplied the active role
 	bootstrapWarns     []error
 	preflightWarns     []string
 	retrieveLine       string
@@ -491,8 +501,11 @@ func startupNotices(info startupInfo) []string {
 	if info.retrieveLine != "" {
 		out = append(out, info.retrieveLine)
 	}
+	if info.activeUseCase == config.UseCasePlanning && info.suppliedByUseCase != "" && info.suppliedByUseCase != info.activeUseCase {
+		out = append(out, "planning route: using defaults."+info.suppliedByUseCase)
+	}
 	if info.useRecommend {
-		out = append(out, "no defaults.agent configured; using model recommendation (run will route to the recommended model)")
+		out = append(out, recommendNotice(info.activeUseCase))
 	}
 	if info.thinkLine != "" {
 		out = append(out, info.thinkLine)
@@ -685,16 +698,21 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 	// #477 required ordering: resolve every enabled route and build the
 	// frozen network plan BEFORE any outbound byte, admit the manifest,
 	// only then discover, bootstrap, refresh, probe, or infer.
-	agentRoute, err := providerbootstrap.PlanAgentRoute(cfg)
+	//
+	// The active route is mode-selected (#476 D3): plan authoring in -goal
+	// mode routes as "planning", everything else as "agent". One value feeds
+	// admission, discovery targeting, preflight, the input ceiling, and the
+	// caller, so no seam can quietly disagree about which route is live.
+	activeRoute, err := planActiveRoute(cfg, f.goalSet)
 	if err != nil {
 		return err
 	}
-	plan := chainPlan{chain: agentRoute.Chain, useRecommend: agentRoute.Recommend}
+	plan := chainPlanFor(activeRoute)
 	// Embedding is feature-gated, not optional-recommend: an absent or
 	// unresolvable embedding default disables RAG later with the same
 	// warning it always has, and plans no route.
 	embChain, embChainErr := embeddingChain(cfg)
-	routes := []providerbootstrap.PlannedRoute{agentRoute}
+	routes := []providerbootstrap.PlannedRoute{activeRoute}
 	var summarizeRoute providerbootstrap.PlannedRoute
 	if shouldPlanSummarize(f, autoErr, embChainErr) {
 		summarizeRoute, err = providerbootstrap.PlanOptionalUseCaseRoute(cfg, config.UseCaseSummarize)
@@ -724,7 +742,10 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 	}
 	var dchain []string
 	if f.dispatch {
-		dchain, err = resolveDispatchChain(cfg, f.dispatchRole, agentRoute.Chain)
+		// -dispatch is rejected in goal mode at validation, so whenever this
+		// branch runs the active route IS the agent route the children
+		// default to.
+		dchain, err = resolveDispatchChain(cfg, f.dispatchRole, activeRoute.Chain)
 		if err != nil {
 			return err
 		}
@@ -745,7 +766,7 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 	if err != nil {
 		return err // explicit-override validation error: fatal, matches validateFlags semantics
 	}
-	targetKey, _, targetOK := openAICompatTargetFromRoute(cfg, agentRoute)
+	targetKey, _, targetOK := openAICompatTargetFromRoute(cfg, activeRoute)
 	ocProv, ocURL := "", ""
 	if explicitURL != "" && targetOK {
 		// The explicit override lands in the EFFECTIVE config before the
@@ -790,7 +811,7 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 		noProbe:        f.noProbe,
 		lookupEnv:      os.LookupEnv,
 		prober:         openaicompat.DiscoverBaseURL,
-		agentRoute:     &agentRoute,
+		activeRoute:    &activeRoute,
 		guardCandidate: discoveryCandidateGuard(ctx, targetKey),
 	})
 	if err != nil {
@@ -841,7 +862,7 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 	if !f.noCapProbe && capStore != nil {
 		resolver = bundle.Models // concrete *provider.ModelRegistry; always non-nil after bootstrap
 	}
-	warns, err := preflightToolCapable(ctx, bundle.Models, plan.chain, resolveEndpoint, resolver)
+	warns, err := preflightToolCapable(ctx, bundle.Models, plan.chain, plan.useCase, resolveEndpoint, resolver)
 	warns = append(backendRes.warns, warns...)
 	if err != nil {
 		if len(backendRes.warns) > 0 {
@@ -854,8 +875,10 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 		warns = append(warns, capStoreWarn)
 	}
 
+	// In goal mode f.think is always "" (applyGoalMode clears it with a
+	// warning), so this performs no chain lookups there by construction.
 	thinkOpts, thinkLine := resolveThinkOptions(ctx, bundle.Models, plan.chain, f.think)
-	inputCeiling := resolveInputCeiling(ctx, bundle.Models, plan.chain, f.inputCeiling, f.outputReserve, resolver != nil)
+	inputCeiling := resolveInputCeiling(ctx, bundle.Models, plan.chain, plan.useCase, f.inputCeiling, f.outputReserve, resolver != nil)
 
 	if autoErr != nil && !f.noRag && f.ragDB == "" {
 		warns = append(warns, "retrieve auto-index disabled: "+autoErr.Error())
@@ -1005,12 +1028,14 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 			// gate (children always carry the file tools, so a chain without
 			// tool_call would otherwise fail only at invocation time) and its
 			// own context-derived ceiling.
-			dwarns, perr := preflightToolCapable(ctx, bundle.Models, dchain, resolveEndpoint, resolver)
+			dwarns, perr := preflightToolCapable(ctx, bundle.Models, dchain, dispatchUseCase, resolveEndpoint, resolver)
 			warns = append(warns, dwarns...)
 			if perr != nil {
 				return perr
 			}
-			childCeiling = resolveInputCeiling(ctx, bundle.Models, dchain, f.inputCeiling, f.outputReserve, resolver != nil).ceiling
+			// Same constant the dispatch caller below routes with, so the
+			// child's ceiling and the child's route can never disagree.
+			childCeiling = resolveInputCeiling(ctx, bundle.Models, dchain, dispatchUseCase, f.inputCeiling, f.outputReserve, resolver != nil).ceiling
 		}
 		dispatchNotice = newFeedbackNotifier(func(line string) {
 			_, _ = fmt.Fprintln(stderr, line)
@@ -1208,6 +1233,8 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 		agentflowState:     shouldShowAgentflowHint(f) && agentflowStateDetected(root),
 		backendLine:        backendRes.notice,
 		useRecommend:       plan.useRecommend,
+		activeUseCase:      plan.useCase,
+		suppliedByUseCase:  plan.suppliedByUseCase,
 		bootstrapWarns:     bundle.Warnings,
 		preflightWarns:     warns,
 		retrieveLine:       retrieveLine,
@@ -1238,7 +1265,7 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 		sourceSummarizer = routerSourceSummaryGenerator(bundle.Router, summarizeChain)
 	}
 
-	newOrchestrator := newOrchestratorFactory(newRouterChainCaller(bundle.Router, plan.chain), f, verifier)
+	newOrchestrator := newOrchestratorFactory(newActiveChainCaller(bundle.Router, plan), f, verifier)
 	orch := newOrchestrator()
 
 	obsv, err := newObserv(os.Getenv, root, f.trace, f.telemetry, time.Now)

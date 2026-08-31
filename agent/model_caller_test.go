@@ -11,6 +11,23 @@ import (
 
 var _ func(*provider.Router) ModelCaller = NewRouterModelCaller
 
+func TestModelCallCapabilities(t *testing.T) {
+	for _, tt := range []struct {
+		name     string
+		hasTools bool
+		want     provider.Capability
+	}{
+		{"without tools", false, provider.CapChat | provider.CapStream},
+		{"with tools", true, provider.CapChat | provider.CapStream | provider.CapToolCall},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := ModelCallCapabilities(tt.hasTools); got != tt.want {
+				t.Fatalf("ModelCallCapabilities(%v) = %s, want %s", tt.hasTools, got, tt.want)
+			}
+		})
+	}
+}
+
 // fakePlan emits two content deltas then a Done chunk carrying RouteOutcome.
 type fakePlan struct {
 	outcome *provider.RouteOutcome

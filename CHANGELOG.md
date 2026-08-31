@@ -6,6 +6,36 @@ All notable changes to `go-llm` are documented here. Downstream consumers
 
 ## [Unreleased]
 
+### Added — phase-based model routing: the planning use case (#476)
+
+Golem's plan-authoring mode (`-goal`) now routes through its own `planning`
+use case instead of `agent`, so a config can author plans with a different
+model than the one that executes them.
+
+- A `models.json` authoring `defaults.planning` sends plan authoring to that
+  role. One that does not degrades in order through `reasoning`, `analysis`,
+  and `agent` — deliberately behavior-changing: a config that never mentions
+  planning can author plans through an existing reasoning or analysis role.
+  Only when none of those is configured does planning fall back to model
+  recommendation, and the startup notice names exactly what was absent.
+- The planning route is goal mode's single active route: destination
+  admission (#477) consents it, tool-capability preflight proves it, the
+  input ceiling is sized from it under the `planning` use case, and the
+  orchestrator caller routes it. Goal mode performs no discovery, refresh,
+  probe, or inference for the inactive agent, embedding, or summarize routes,
+  and a remote planning route — including one reached through the fallbacks —
+  fails closed without `-allow-destination`.
+- `RouteOutcome` records the requesting use case (`use_case`, omitted when
+  empty), so route telemetry can attribute a route to the phase that asked
+  for it. `resolveInputCeiling` and `plannerBudget` now take the caller's use
+  case instead of hard-coding `agent`.
+- Golem's config view declares the `planning` requirement
+  (`chat|stream|tool_call`); an authored `defaults.planning` binding projects
+  with eligibility, an absent one is not synthesized.
+- Execution seams are unchanged: REPL and one-shot turns, task execution,
+  parallel workers, and dispatch children keep the `agent` use case;
+  `delegate_code` keeps `coding`; summarization keeps `summarize`.
+
 ### Changed
 
 - The repeatable `-allow-destination` flag now takes the same syntax in both

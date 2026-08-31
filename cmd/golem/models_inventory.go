@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 
+	"github.com/kstruzzieri/go-llm/agent"
 	"github.com/kstruzzieri/go-llm/config"
 	"github.com/kstruzzieri/go-llm/configview"
 	"github.com/kstruzzieri/go-llm/provider"
@@ -15,12 +16,20 @@ import (
 // golemViewRequirements declares the CLI's call shapes for configview
 // eligibility. The agent path always registers tools, so tool_call is part
 // of its shape (agent/model_caller.go adds CapToolCall whenever tools ride
-// the request).
+// the request). AgentFlow plan authoring passes plan tools unconditionally,
+// so planning carries the same tool-bearing shape (#476 D6).
+//
+// This is Golem's CONSUMER declaration, not a library floor table:
+// configview.BuildInput.Requirements is consumer-declared by contract, and
+// MCP declares its own operation-specific shapes. A declared requirement is
+// also not a binding -- configview.Build projects authored defaults only, so
+// a config that never writes defaults.planning shows no planning row.
 func golemViewRequirements() map[string]provider.Capability {
 	return map[string]provider.Capability{
-		"agent":      provider.CapChat | provider.CapStream | provider.CapToolCall,
-		"chat":       provider.CapChat | provider.CapStream,
-		"analysis":   provider.CapChat | provider.CapStream,
+		"agent":      agent.ModelCallCapabilities(true),
+		"planning":   agent.ModelCallCapabilities(true),
+		"chat":       agent.ModelCallCapabilities(false),
+		"analysis":   agent.ModelCallCapabilities(false),
 		"embedding":  provider.CapEmbed,
 		"completion": provider.CapGenerate | provider.CapInsert,
 	}

@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/kstruzzieri/go-llm/config"
+	"github.com/kstruzzieri/go-llm/internal/providerbootstrap"
 	"github.com/kstruzzieri/go-llm/provider"
 	"github.com/kstruzzieri/go-llm/rag"
 )
@@ -98,10 +99,14 @@ func TestProgressiveWithoutSummarizeChainProducesNoGenerator(t *testing.T) {
 		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			chain, err := resolveSummarizeChain(tc.cfg)
+			// The production chain source: main derives summarizeChain from the
+			// planned route's Chain, so an absent summarize default is a
+			// recommend route whose Chain is empty.
+			route, err := providerbootstrap.PlanOptionalUseCaseRoute(tc.cfg, config.UseCaseSummarize)
 			if err != nil {
-				t.Fatalf("resolveSummarizeChain: %v", err)
+				t.Fatalf("PlanOptionalUseCaseRoute: %v", err)
 			}
+			chain := route.Chain
 			if len(chain) != 0 {
 				t.Fatalf("chain = %v, want empty (warning would be dead code)", chain)
 			}
@@ -143,10 +148,11 @@ func TestProgressiveWithSummarizeFallbackProducesGenerator(t *testing.T) {
 				Models:   map[string]config.ModelConfig{"m": {Name: "m", Provider: "ollama", Type: "chat"}},
 				Defaults: map[string]string{role: "m"},
 			}
-			chain, err := resolveSummarizeChain(cfg)
+			route, err := providerbootstrap.PlanOptionalUseCaseRoute(cfg, config.UseCaseSummarize)
 			if err != nil {
-				t.Fatalf("resolveSummarizeChain: %v", err)
+				t.Fatalf("PlanOptionalUseCaseRoute: %v", err)
 			}
+			chain := route.Chain
 			if len(chain) == 0 {
 				t.Fatalf("%q default did not resolve a summarize chain", role)
 			}

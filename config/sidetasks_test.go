@@ -17,6 +17,7 @@ func TestUseCaseConstants(t *testing.T) {
 		{UseCaseExtract, "extract"},
 		{UseCaseApproval, "approval"},
 		{UseCaseVision, "vision"},
+		{UseCasePlanning, "planning"},
 	}
 	for _, c := range cases {
 		if c.got != c.want {
@@ -27,7 +28,7 @@ func TestUseCaseConstants(t *testing.T) {
 
 func TestSideTaskUseCases_SortedAndMatchesFallbackKeys(t *testing.T) {
 	got := SideTaskUseCases()
-	want := []string{"approval", "extract", "rerank", "route", "summarize", "verify", "vision"}
+	want := []string{"approval", "extract", "planning", "rerank", "route", "summarize", "verify", "vision"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("SideTaskUseCases() = %v, want %v (sorted)", got, want)
 	}
@@ -50,6 +51,7 @@ func TestSideTaskUseCaseFallbacks_ValuesAndOrder(t *testing.T) {
 		"extract":   {"analysis", "chat"},
 		"approval":  {"agent", "chat"},
 		"vision":    {"chat"},
+		"planning":  {"reasoning", "analysis", "agent"},
 	}
 	if !reflect.DeepEqual(sideTaskUseCaseFallbacks, want) {
 		t.Fatalf("sideTaskUseCaseFallbacks = %v, want %v", sideTaskUseCaseFallbacks, want)
@@ -98,5 +100,38 @@ func TestRoleForUseCase_WalksToSecondFallback(t *testing.T) {
 	cfg := &Config{Defaults: map[string]string{"chat": "general"}}
 	if role, ok := cfg.RoleForUseCase(UseCaseSummarize); role != "general" || !ok {
 		t.Fatalf("RoleForUseCase(summarize) = (%q,%v), want chat fallback (general,true)", role, ok)
+	}
+}
+
+func TestRoleForUseCase_PlanningHops(t *testing.T) {
+	tests := []struct {
+		name     string
+		defaults map[string]string
+		wantRole string
+		wantFrom string
+		wantOK   bool
+	}{
+		{"explicit planning beats every fallback",
+			map[string]string{"planning": "p", "reasoning": "r", "analysis": "a", "agent": "g"}, "p", "planning", true},
+		{"reasoning is preferred over analysis",
+			map[string]string{"reasoning": "r", "analysis": "a", "agent": "g"}, "r", "reasoning", true},
+		{"analysis is preferred over agent",
+			map[string]string{"analysis": "a", "agent": "g"}, "a", "analysis", true},
+		{"agent is the last resort",
+			map[string]string{"agent": "g"}, "g", "agent", true},
+		{"chat alone does not route planning",
+			map[string]string{"chat": "c"}, "", "", false},
+		{"no defaults at all",
+			map[string]string{}, "", "", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := &Config{Defaults: tt.defaults}
+			role, from, ok := cfg.RoleForUseCaseWithSource(UseCasePlanning)
+			if role != tt.wantRole || from != tt.wantFrom || ok != tt.wantOK {
+				t.Errorf("RoleForUseCaseWithSource(planning) = (%q,%q,%v), want (%q,%q,%v)",
+					role, from, ok, tt.wantRole, tt.wantFrom, tt.wantOK)
+			}
+		})
 	}
 }

@@ -21,6 +21,7 @@ import (
 	"github.com/kstruzzieri/go-llm/agent"
 	agenttools "github.com/kstruzzieri/go-llm/agent/tools"
 	"github.com/kstruzzieri/go-llm/agentflow"
+	"github.com/kstruzzieri/go-llm/config"
 	"github.com/kstruzzieri/go-llm/provider"
 )
 
@@ -109,11 +110,17 @@ func plannerModelOptions(options provider.ModelOptions) provider.ModelOptions {
 // on the same reserve). A zero reserve leaves NumPredict untouched, but the
 // router's ExpectedOutput then comes from the planner's NumPredict
 // (>= minPlannerOutput) while the derived input ceiling reserved only the
-// implicit DefaultExpectedOutput("agent"); lower the ceiling by the
+// implicit DefaultExpectedOutput(useCase); lower the ceiling by the
 // difference, or long planner sessions assemble input in a band every
 // candidate must refuse (ErrBudgetAdaptationRequired) instead of compacting.
+//
+// useCase is the use case the author's caller actually routes with (#476
+// D4). It is a parameter, not a literal: hard-coding a peer's use case here
+// silently desynchronizes this reservation from the router's ExpectedOutput
+// the moment the two use cases get different defaults.
+//
 // options is the planner's already-floored ModelOptions.
-func plannerBudget(budget agent.Budget, options provider.ModelOptions) agent.Budget {
+func plannerBudget(budget agent.Budget, options provider.ModelOptions, useCase string) agent.Budget {
 	if budget.OutputReserve > 0 {
 		budget.OutputReserve = max(budget.OutputReserve, minPlannerOutput)
 		return budget
@@ -122,7 +129,7 @@ func plannerBudget(budget agent.Budget, options provider.ModelOptions) agent.Bud
 	if ceiling <= 0 {
 		ceiling = agent.DefaultInputCeiling
 	}
-	if delta := options.NumPredict - provider.DefaultExpectedOutput("agent"); delta > 0 {
+	if delta := options.NumPredict - provider.DefaultExpectedOutput(useCase); delta > 0 {
 		// Keep the result positive: a zero InputCeiling means "unset" to
 		// turnBudget and would silently restore the full default ceiling.
 		budget.InputCeiling = max(ceiling-delta, 1)
@@ -1467,7 +1474,7 @@ func runAgentflowAuthorWithClient(ctx context.Context, stdout, stderr io.Writer,
 		System:   system,
 		Tools:    planTools,
 		MaxSteps: sess.maxSteps,
-		Budget:   plannerBudget(sess.budget, plannerOpts),
+		Budget:   plannerBudget(sess.budget, plannerOpts, config.UseCasePlanning),
 		Options:  plannerOpts,
 		Approver: &authorPlanApprover{delegate: approver, sess: as},
 	}
