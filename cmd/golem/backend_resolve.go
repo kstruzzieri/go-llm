@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/kstruzzieri/go-llm/config"
+	"github.com/kstruzzieri/go-llm/internal/providerbootstrap"
 	"github.com/kstruzzieri/go-llm/provider/openaicompat"
 )
 
@@ -44,8 +45,7 @@ func validateBaseURLOverride(raw, source string) (string, error) {
 }
 
 const (
-	backendScanPortLow  = 8080
-	backendScanPortHigh = 8090
+
 	// backendProbeTimeout bounds each discovery probe. Loopback-only targets,
 	// so a short timeout keeps the worst case — up to 12 probes (configured
 	// URL + 11-port band) x 800ms, ~10s worst case — paid only when the
@@ -62,6 +62,15 @@ const (
 
 // backendProber matches openaicompat.DiscoverBaseURL. A seam so policy tests
 // never open sockets.
+// Scan band bounds. Variables, not constants, for exactly one reason: the
+// end-to-end discovery test must aim the band at a listener it owns, and a
+// fixed 8080..8090 band cannot be bound reliably in CI. Production never
+// mutates them.
+var (
+	backendScanPortLow  = 8080
+	backendScanPortHigh = 8090
+)
+
 type backendProber func(ctx context.Context, candidates []string, wantModel string, opts ...openaicompat.ClientOption) (string, error)
 
 // backendResolution is the single resolved backend value shared by provider
@@ -97,6 +106,17 @@ type backendResolveOpts struct {
 	noProbe     bool
 	lookupEnv   func(string) (string, bool)
 	prober      backendProber
+	// agentRoute, when non-nil, is the frozen agent route from the mode's
+	// network plan (#477 D8): the discovery target derives from the ACTIVE
+	// chain's primary instead of re-reading defaults.agent, so a mode whose
+	// route differs from the default cannot discover the wrong backend.
+	// nil keeps the legacy defaults.agent derivation.
+	agentRoute *providerbootstrap.PlannedRoute
+	// guardCandidate, when non-nil, supplies a per-candidate guarded HTTP
+	// client and a context carrying the discovery capability (#477): the
+	// scan then probes each candidate through its own bound, no-redirect
+	// client. nil keeps the legacy shared unguarded probe client.
+	guardCandidate func(candidate string) (*http.Client, context.Context, error)
 }
 
 // resolveBackend resolves the openai-compat backend URL for the primary agent
@@ -112,7 +132,13 @@ func resolveBackend(ctx context.Context, cfg *config.Config, o backendResolveOpt
 		return backendResolution{}, err
 	}
 
-	key, model, ok := openAICompatAgentTarget(cfg)
+	var key, model string
+	var ok bool
+	if o.agentRoute != nil {
+		key, model, ok = openAICompatTargetFromRoute(cfg, *o.agentRoute)
+	} else {
+		key, model, ok = openAICompatAgentTarget(cfg)
+	}
 	if !ok {
 		var res backendResolution
 		if explicitURL != "" {
@@ -153,7 +179,16 @@ func resolveBackend(ctx context.Context, cfg *config.Config, o backendResolveOpt
 	if pc.APIKey != "" {
 		copts = append(copts, openaicompat.WithAPIKey(pc.APIKey))
 	}
-	hit, derr := o.prober(ctx, candidates, model, copts...)
+	var hit string
+	var derr error
+	if o.guardCandidate != nil {
+		// Guarded scan (#477): each candidate probes through its own bound
+		// client, so discovery traffic carries the discovery capability and
+		// can never leave the candidate's loopback origin.
+		hit, derr = probeCandidatesGuarded(ctx, candidates, model, pc.APIKey, o)
+	} else {
+		hit, derr = o.prober(ctx, candidates, model, copts...)
+	}
 	if derr != nil {
 		return backendResolution{warns: []string{
 			fmt.Sprintf("openai-compat backend discovery: %v", derr),
@@ -169,6 +204,56 @@ func resolveBackend(ctx context.Context, cfg *config.Config, o backendResolveOpt
 		notice: fmt.Sprintf("openai-compat backend: resolved to %s (configured %s did not serve %q)",
 			redactBaseURL(hit), redactBaseURL(pc.BaseURL), model),
 	}, nil
+}
+
+// probeCandidatesGuarded runs the discovery scan one candidate at a time,
+// each through the guarded client and capability-bound context supplied by
+// guardCandidate. The first candidate that serves the model wins, matching
+// the shared-prober loop; a guard refusal for a candidate skips it the same
+// way a probe failure would.
+func probeCandidatesGuarded(ctx context.Context, candidates []string, model, apiKey string, o backendResolveOpts) (string, error) {
+	var errs []string
+	for _, cand := range candidates {
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
+		hc, bctx, err := o.guardCandidate(cand)
+		if err != nil {
+			errs = append(errs, err.Error())
+			continue
+		}
+		copts := []openaicompat.ClientOption{openaicompat.WithHTTPClient(hc)}
+		if apiKey != "" {
+			copts = append(copts, openaicompat.WithAPIKey(apiKey))
+		}
+		hit, err := o.prober(bctx, []string{cand}, model, copts...)
+		if err != nil {
+			errs = append(errs, err.Error())
+			continue
+		}
+		return hit, nil
+	}
+	return "", fmt.Errorf("no candidate serves %q: %s", model, strings.Join(errs, "; "))
+}
+
+// openAICompatTargetFromRoute is the plan-derived twin of
+// openAICompatAgentTarget (#477 D8): the target is the ROUTE's primary
+// selector, so discovery follows whatever chain the mode actually runs on. A
+// recommend route has no single primary and disables discovery, exactly as
+// an absent defaults.agent does on the legacy path.
+func openAICompatTargetFromRoute(cfg *config.Config, route providerbootstrap.PlannedRoute) (providerKey, model string, ok bool) {
+	if cfg == nil || route.Recommend || len(route.Chain) == 0 {
+		return "", "", false
+	}
+	mk, selOK := parseSelector(route.Chain[0])
+	if !selOK {
+		return "", "", false
+	}
+	pc, present := cfg.Providers[mk.Provider]
+	if !present || pc.APIFormat != "openai-compat" {
+		return "", "", false
+	}
+	return mk.Provider, mk.Model, true
 }
 
 // explicitBaseURL applies the explicit-override precedence: -base-url flag

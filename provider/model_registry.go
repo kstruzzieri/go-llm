@@ -67,8 +67,14 @@ type ModelRegistry struct {
 	// Capability-probe resolution (ResolveToolCall). Both fields are set
 	// only at construction via options and never mutated afterward, so
 	// they are read without holding mu.
-	capProbeStore   fingerprint.CapProbeStore
-	capProber       FingerprintProberFactory
+	capProbeStore fingerprint.CapProbeStore
+	capProber     FingerprintProberFactory
+	// destGate binds the registry's own metadata traffic (#477): live
+	// model queries carry a model-refresh capability and active probes a
+	// capability-probe one, so registry-initiated requests through guarded
+	// provider clients authorize without every caller pre-binding. nil =
+	// ungated passthrough.
+	destGate        *DestinationGate
 	capResolveGroup singleflight.Group
 
 	// admitter, when non-nil, gates live capability probes through
@@ -95,6 +101,27 @@ type FingerprintProberFactory func(ctx context.Context, key ModelKey, runtime *M
 
 // ModelRegistryOption configures ModelRegistry construction.
 type ModelRegistryOption func(*ModelRegistry)
+
+// WithModelRegistryDestinationGate wires the destination-admission gate
+// (#477) into the registry's own provider traffic: live model queries bind
+// the model-refresh purpose and active capability probes bind
+// capability-probe, per call, so the guarded transports under the provider
+// clients see a fresh capability from the gate's current generation. Denial
+// fails the specific lookup or probe closed; it never panics or bypasses.
+func WithModelRegistryDestinationGate(g *DestinationGate) ModelRegistryOption {
+	return func(r *ModelRegistry) {
+		r.destGate = g
+	}
+}
+
+// bindMetaPurpose attaches the named metadata capability when a gate is
+// wired; without one the context passes through untouched.
+func (r *ModelRegistry) bindMetaPurpose(ctx context.Context, purpose, providerName string) (context.Context, error) {
+	if r.destGate == nil {
+		return ctx, nil
+	}
+	return r.destGate.Bind(ctx, purpose, providerName)
+}
 
 // WithFingerprintProberFactory installs provider-aware fingerprint prober
 // selection. The factory is used only when NewModelRegistry also receives a
@@ -433,6 +460,13 @@ func (r *ModelRegistry) setSlotAdmitter(a slotAdmitter) {
 // singleflight: cache check, admission, active probe, persistence, and
 // profile-cache invalidation. Must not be called while holding r.mu.
 func (r *ModelRegistry) resolveToolCallSlow(ctx context.Context, key ModelKey) (fingerprint.CapProbeState, error) {
+	// The active probe is capability-probe traffic (#477); queryRuntime
+	// below re-binds its own model-refresh purpose over this for its one
+	// listing call.
+	ctx, err := r.bindMetaPurpose(ctx, DestinationPurposeCapabilityProbe, key.Provider)
+	if err != nil {
+		return "", err
+	}
 	p, err := r.providers.Resolve(key)
 	if err != nil {
 		return "", err
@@ -745,7 +779,14 @@ func (r *ModelRegistry) All(ctx context.Context) ([]*ModelProfile, error) {
 	var providerErrors int
 
 	for _, p := range allProviders {
-		models, err := p.Models(ctx)
+		pctx, bindErr := r.bindMetaPurpose(ctx, DestinationPurposeModelRefresh, p.Name())
+		if bindErr != nil {
+			// Unadmitted provider: fail-closed skip with zero requests —
+			// the sweep lists what the session may reach, nothing more.
+			providerErrors++
+			continue
+		}
+		models, err := p.Models(pctx)
 		if err != nil {
 			providerErrors++
 			continue
@@ -832,6 +873,10 @@ func (r *ModelRegistry) recommendSourceProfiles(ctx context.Context, providerNam
 		return nil, fmt.Errorf("restricted provider %q: %w", providerName, err)
 	}
 
+	ctx, err = r.bindMetaPurpose(ctx, DestinationPurposeModelRefresh, providerName)
+	if err != nil {
+		return nil, fmt.Errorf("query models from restricted provider %q: %w", providerName, err)
+	}
 	models, err := prov.Models(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("query models from restricted provider %q: %w", providerName, err)
@@ -1090,9 +1135,12 @@ func (r *ModelRegistry) fingerprintProfileMode(ctx context.Context, key ModelKey
 					modelDigest = key.String()
 				}
 				if !readOnly && spec.Prober != nil {
-					profile, err := fingerprint.NewProfiler(r.fpStore, spec.Prober).EnsureProfile(ctx, key.Provider, key.Model, modelDigest)
-					if err == nil {
-						return profile
+					probeCtx, bindErr := r.bindMetaPurpose(ctx, DestinationPurposeCapabilityProbe, key.Provider)
+					if bindErr == nil {
+						profile, err := fingerprint.NewProfiler(r.fpStore, spec.Prober).EnsureProfile(probeCtx, key.Provider, key.Model, modelDigest)
+						if err == nil {
+							return profile
+						}
 					}
 				}
 			}
@@ -1132,6 +1180,10 @@ func (r *ModelRegistry) queryRuntime(ctx context.Context, key ModelKey) (*ModelI
 	p, err := r.providers.Resolve(key)
 	if err != nil {
 		return nil, err
+	}
+	ctx, err = r.bindMetaPurpose(ctx, DestinationPurposeModelRefresh, key.Provider)
+	if err != nil {
+		return nil, fmt.Errorf("query models from %q: %w", key.Provider, err)
 	}
 	direct, _ := p.(directModelInfoProvider)
 

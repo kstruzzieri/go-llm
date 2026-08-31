@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/kstruzzieri/go-llm/config"
 	"github.com/kstruzzieri/go-llm/internal/providerbootstrap"
 	"github.com/kstruzzieri/go-llm/provider"
 	"github.com/kstruzzieri/go-llm/rag"
@@ -172,6 +173,8 @@ func runIndex(ctx context.Context, args []string, out, errOut io.Writer) error {
 	fs.BoolVar(&full, "full", false, "clean rebuild (drop the existing index first)")
 	fs.BoolVar(&progressive, "progressive", false, "generate opt-in L0/L1 progressive source summaries")
 	fs.Bool("no-color", false, "disable dim ANSI footers in summary")
+	var allowDest stringSliceFlag
+	fs.Var(&allowDest, "allow-destination", "admit a remote model destination: \"<provider>/<canonical base URL>\" (repeatable; this command never prompts)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -188,9 +191,34 @@ func runIndex(ctx context.Context, args []string, out, errOut io.Writer) error {
 	if err != nil {
 		return err
 	}
+	// #477: plan and admit before bootstrap. Embedding is REQUIRED for
+	// indexing (unresolvable is fatal, unchanged); the summarize route joins
+	// the plan only under -progressive.
+	embChain, err := embeddingChain(cfg)
+	if err != nil {
+		return err
+	}
+	routes := []providerbootstrap.PlannedRoute{{UseCase: "embedding", Chain: embChain}}
+	var summarizeChain []string
+	if progressive {
+		summarizeRoute, serr := providerbootstrap.PlanOptionalUseCaseRoute(cfg, config.UseCaseSummarize)
+		if serr != nil {
+			return serr
+		}
+		routes = append(routes, summarizeRoute)
+		summarizeChain = summarizeRoute.Chain
+	}
+	gate, netPlan, _, err := admitForSubcommand(ctx, cfg, routes,
+		providerbootstrap.PlanOptions{}, allowDest, ollamaURL, "", "", errOut)
+	if err != nil {
+		return err
+	}
+
 	bundle, err := providerbootstrap.New(ctx, providerbootstrap.Options{
 		Config:            cfg,
 		OllamaURLOverride: ollamaURL,
+		DestinationGate:   gate,
+		ActiveProviders:   netPlan.ActiveProviders,
 	})
 	if err != nil {
 		return fmt.Errorf("golem: bootstrap providers: %w", err)
@@ -201,16 +229,9 @@ func runIndex(ctx context.Context, args []string, out, errOut io.Writer) error {
 		}
 	}()
 
-	embChain, err := embeddingChain(bundle.Config)
-	if err != nil {
-		return err
-	}
 	var summarize rag.SourceSummaryGenerator
 	if progressive {
-		summarizeChain, err := resolveSummarizeChain(bundle.Config)
-		if err != nil {
-			return err
-		}
+		// #477 D8: the chain comes from the admitted route above.
 		if len(summarizeChain) == 0 {
 			_, _ = fmt.Fprintln(errOut, "golem index: warning: "+progressiveNoChainWarning(false))
 		}

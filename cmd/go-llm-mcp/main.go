@@ -9,11 +9,41 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
 	"github.com/kstruzzieri/go-llm/mcp"
+	"github.com/kstruzzieri/go-llm/provider"
 )
+
+type destinationGrants []string
+
+func (*destinationGrants) String() string { return "" }
+
+func (g *destinationGrants) Set(value string) error {
+	*g = append(*g, value)
+	return nil
+}
+
+func (g destinationGrants) policy() (provider.DestinationPolicy, error) {
+	destinations := make([]provider.Destination, 0, len(g))
+	for _, value := range g {
+		delimiter := strings.Index(value, "=http://")
+		if https := strings.Index(value, "=https://"); delimiter < 0 || https >= 0 && https < delimiter {
+			delimiter = https
+		}
+		if delimiter < 0 {
+			return provider.DestinationPolicy{}, fmt.Errorf("expected provider=https://host/base")
+		}
+		destination, err := provider.ParseDestination(value[:delimiter] + "/" + value[delimiter+1:])
+		if err != nil {
+			return provider.DestinationPolicy{}, fmt.Errorf("%w; expected provider=https://host/base", err)
+		}
+		destinations = append(destinations, destination)
+	}
+	return provider.NewDestinationPolicy(destinations...), nil
+}
 
 func main() {
 	transport := flag.String("transport", "stdio", "Transport mode: stdio or http")
@@ -26,9 +56,15 @@ func main() {
 	noRAG := flag.Bool("no-rag", false, "Disable RAG tools")
 	tlsCert := flag.String("tls-cert", "", "TLS certificate file (enables HTTPS)")
 	tlsKey := flag.String("tls-key", "", "TLS private key file")
+	var allowDestinations destinationGrants
+	flag.Var(&allowDestinations, "allow-destination", "Allow exact remote destination provider=https://host/base (repeatable)")
 	flag.Parse()
 
-	var opts []mcp.Option
+	destinationPolicy, err := allowDestinations.policy()
+	if err != nil {
+		log.Fatal(err)
+	}
+	opts := []mcp.Option{mcp.WithDestinationPolicy(destinationPolicy)}
 	if *ollamaURL != "" {
 		opts = append(opts, mcp.WithOllamaURL(*ollamaURL))
 	}

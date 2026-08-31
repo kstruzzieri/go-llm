@@ -6,6 +6,66 @@ All notable changes to `go-llm` are documented here. Downstream consumers
 
 ## [Unreleased]
 
+### Added — destination admission before discovery, probe, or inference (#477)
+
+A consent boundary between chain resolution and any outbound byte, part of
+the zero-trust epic (#57). Previously, a config whose side-task use cases
+fell back onto a hosted role (for example `summarize -> analysis` with
+`analysis` on a remote provider) sent conversation-derived content — with
+the provider credential attached — to that endpoint with no prompt, and
+provider bootstrap refreshed every configured provider before any consent
+surface existed.
+
+- One canonical endpoint identity per provider: `{provider, canonical base
+  URL}` under the `destination/v1` normalization (credentials, models, and
+  use cases excluded; userinfo/query/fragment-bearing base URLs are rejected
+  rather than stripped). Literal loopback auto-admits; everything else is
+  remote.
+- The frozen network plan resolves every enabled route once, before any
+  I/O, and derives the manifest the user consents to: deduplicated
+  destinations, every use-case edge visible with primary/fallback marking.
+- Enforcement is structural, not enumerative: model-runtime HTTP clients
+  constructed by the migrated Golem, bootstrap, and MCP paths are wrapped by
+  a guard bound to one destination, and requests must carry a purpose
+  capability issued by the current admission generation.
+  Redirects are refused (same-origin included); loopback bypasses proxies
+  and validates `localhost` resolution at dial time; admitted remote
+  traffic keeps configured proxies.
+- `golem`: renders the destination manifest at startup and collects one
+  batch consent for the remote set on a TTY. Noninteractive runs (`-p`,
+  piped stdin) and the `models`/`index`/`source` subcommands never prompt:
+  remote destinations require the repeatable
+  `-allow-destination "<provider>/<canonical base URL>"` flag or fail
+  closed naming the destination, a use case that reaches it, and the exact
+  flag value. `/grants clear` revokes destination grants and re-runs the
+  batch gate before the next goal; `/new`, `/clear`, and `/resume` keep
+  clearing tool grants but leave destination authority standing. Backend
+  discovery runs strictly after admission, guarded per loopback candidate,
+  and pins the discovered URL into the admitted manifest without adding
+  authority.
+- `golem.New` (library): new `Options.DestinationPolicy`. BREAKING for
+  config-driven callers whose resolved routes reach a remote destination:
+  the zero value fails closed with an error matching
+  `provider.ErrDestinationDenied` before any outbound byte. Local-only
+  configurations are unaffected. Opt in with an exact
+  `provider.NewDestinationPolicy(...)` or an explicit
+  `provider.AllowAllDestinations()`. A nonzero policy with a
+  caller-supplied `Orchestrator` is refused
+  (`golem.ErrDestinationPolicyIneffective`) — the host owns those
+  transports.
+- Standalone MCP: new `mcp.WithDestinationPolicy` and repeatable
+  `-allow-destination "provider=https://host/base"` grants. Same zero-value
+  fail-closed contract; the server never prompts. Health, warmth polling,
+  model listing/pull, and the resolution sweep all run through guarded,
+  capability-bound clients; a destination denial at startup is fatal rather
+  than a degraded start.
+- Bootstrap: the Ollama URL override now lands in the effective config
+  (previously it was applied only to the constructed client, so
+  `Bundle.Config` reported a URL the client was not dialing), refresh runs
+  only for providers on the active plan, and slot probes, capability
+  probes, and registry-initiated model queries bind their own metadata
+  purposes.
+
 ### Added — agent/tools: Linux Bubblewrap sandbox backend (#441)
 
 A `SandboxRuntimeBwrap` execution backend behind the #440 exec-backend

@@ -479,6 +479,38 @@ func TestPullModel_ExplicitProviderWithQualifiedNameNormalizesModelName(t *testi
 	}
 }
 
+func TestPullModelBindsSelectedProviderAndRefreshesEachProvider(t *testing.T) {
+	a := &guardedOllamaBackend{name: "ollama-a", model: "model-a"}
+	b := &guardedOllamaBackend{name: "ollama-b", model: "model-b"}
+	reg, gate := newGuardedOllamaRegistry(t, a, b)
+	s := &Server{
+		providerRegistry:   reg,
+		destGate:           gate,
+		legacyProviderName: a.name,
+	}
+
+	result, err := s.handlePullModel(context.Background(), &gomcp.CallToolRequest{
+		Params: &gomcp.CallToolParamsRaw{
+			Arguments: json.RawMessage(`{"provider":"ollama-b","name":"new-model"}`),
+		},
+	})
+	if err != nil {
+		t.Fatalf("handlePullModel() error = %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("handlePullModel() isError = true, content = %v", extractText(result))
+	}
+	if got := b.pullHits.Load(); got != 1 {
+		t.Errorf("provider %q pull hits = %d, want 1", b.name, got)
+	}
+	if got := a.tagHits.Load(); got != 1 {
+		t.Errorf("provider %q post-pull refresh hits = %d, want 1", a.name, got)
+	}
+	if got := b.tagHits.Load(); got != 1 {
+		t.Errorf("provider %q post-pull refresh hits = %d, want 1", b.name, got)
+	}
+}
+
 func TestPullModel_ExplicitProviderRejectsMismatchedQualifiedName(t *testing.T) {
 	recA := &recordingPullProvider{
 		fakeRouteProvider: fakeRouteProvider{name: "ollama-a"},

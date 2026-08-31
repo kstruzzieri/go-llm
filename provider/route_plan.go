@@ -132,6 +132,13 @@ type RoutePlan struct {
 	// instance; shared with every plan the Router constructs. nil
 	// disables emission. Set by buildPlan via setFeedbackTelemetry.
 	feedbackWarn *feedbackWarningState
+
+	// destGate is the destination-admission seam (#477). nil = ungated
+	// Router: every bind is a no-op and requests carry no capability, so
+	// a guarded transport downstream still denies — absence fails closed
+	// at the transport, never open here. Stamped by buildPlan; like
+	// admission, deliberately not derived from recorder.
+	destGate *DestinationGate
 }
 
 // String returns a human-readable summary of the route plan.
@@ -172,6 +179,25 @@ func (rp *RoutePlan) setAdmission(a slotAdmitter) {
 // nil disables the public ScoreBreakdown on this plan's outcomes.
 // Unexported because it takes an unexported type; external callers
 // cannot legally pass a *scoreBreakdown anyway.
+// setDestinationGate stamps the destination-admission gate (#477). Package-
+// internal: the Router wires it in buildPlan via WithDestinationGate.
+func (rp *RoutePlan) setDestinationGate(g *DestinationGate) {
+	rp.destGate = g
+}
+
+// bindDestination attaches the destination capability for this plan's use
+// case and the attempt's provider. It runs once per provider attempt —
+// primary and each fallback — BEFORE the admission bracket, so a denied
+// attempt neither holds a slot nor records an attempt. With no gate the
+// context passes through unchanged: the plan adds no authority, and any
+// guarded transport downstream denies the bare context on its own.
+func (rp *RoutePlan) bindDestination(ctx context.Context, key ModelKey) (context.Context, error) {
+	if rp.destGate == nil {
+		return ctx, nil
+	}
+	return rp.destGate.Bind(ctx, rp.Request.UseCase, key.Provider)
+}
+
 func (rp *RoutePlan) setScoreBreakdown(bd *scoreBreakdown) {
 	rp.scoreBreakdown = bd
 }
@@ -226,6 +252,13 @@ func (rp *RoutePlan) ExecuteChat(ctx context.Context) (*ChatResponse, error) {
 	var attempts []RouteAttempt
 	req := rp.buildChatRequest(false)
 
+	// Destination bind (#477) precedes the admission bracket: a denied
+	// destination must not consume a slot, and like admission failure it
+	// means no attempt, no recorder signals, no outcome.
+	bctx, bindErr := rp.bindDestination(ctx, rp.Profile.Key)
+	if bindErr != nil {
+		return nil, bindErr
+	}
 	// Admission bracket (#400): failure before any provider contact means
 	// no attempt, no recorder signals, no outcome. The deferred release is
 	// the panic/early-return backstop; the explicit release after the call
@@ -236,7 +269,7 @@ func (rp *RoutePlan) ExecuteChat(ctx context.Context) (*ChatResponse, error) {
 	}
 	defer release()
 	start := time.Now()
-	resp, err := rp.Provider.Chat(ctx, req)
+	resp, err := rp.Provider.Chat(bctx, req)
 	release()
 	attempts = append(attempts, makeAttempt(rp.Profile.Key, err, time.Since(start)))
 
@@ -246,6 +279,13 @@ func (rp *RoutePlan) ExecuteChat(ctx context.Context) (*ChatResponse, error) {
 
 		for i, fb := range rp.Fallbacks {
 			fbReq := fb.buildChatRequest(false)
+			// Destination bind (#477): terminal like the admission errors
+			// below — stop the walk without contacting the denied fallback.
+			fbCtx, fbBindErr := rp.bindDestination(ctx, fb.Profile.Key)
+			if fbBindErr != nil {
+				err = &admissionError{err: fbBindErr}
+				break
+			}
 			fbRelease, fbAdmErr := rp.acquireFor(ctx, fb.Profile.Key)
 			if fbAdmErr != nil {
 				// Terminal (cancel/closed): stop the walk; prior attempts
@@ -255,7 +295,7 @@ func (rp *RoutePlan) ExecuteChat(ctx context.Context) (*ChatResponse, error) {
 			}
 			defer fbRelease()
 			fbStart := time.Now()
-			resp, err = fb.Provider.Chat(ctx, fbReq)
+			resp, err = fb.Provider.Chat(fbCtx, fbReq)
 			fbRelease()
 			attempts = append(attempts, makeAttempt(fb.Profile.Key, err, time.Since(fbStart)))
 			if err == nil {
@@ -320,6 +360,12 @@ func (rp *RoutePlan) ExecuteChatStream(ctx context.Context, fn func(ChatResponse
 	fallbacksUsed := 0
 	var outcome *RouteOutcome
 
+	// Destination bind (#477) precedes the admission bracket; see
+	// ExecuteChat for the contract.
+	bctx, bindErr := rp.bindDestination(ctx, rp.Profile.Key)
+	if bindErr != nil {
+		return bindErr
+	}
 	// Admission bracket (#400): the permit spans the ENTIRE stream —
 	// ChatStream is synchronous (callback on the caller's goroutine,
 	// returns only when the stream completes, errors, or the caller's
@@ -366,7 +412,7 @@ func (rp *RoutePlan) ExecuteChatStream(ctx context.Context, fn func(ChatResponse
 		return nil
 	}
 
-	err := rp.Provider.ChatStream(ctx, req, wrappedFn)
+	err := rp.Provider.ChatStream(bctx, req, wrappedFn)
 	release()
 	if streamDone && err != nil && (callbackErr == nil || !errors.Is(err, callbackErr)) {
 		// A provider may still surface transport/read errors after it has
@@ -394,6 +440,12 @@ func (rp *RoutePlan) ExecuteChatStream(ctx context.Context, fn func(ChatResponse
 		if !delivered {
 			for i, fb := range rp.Fallbacks {
 				fbReq := fb.buildChatRequest(true)
+				// Destination bind (#477): terminal, no contact (§4).
+				fbCtx, fbBindErr := rp.bindDestination(ctx, fb.Profile.Key)
+				if fbBindErr != nil {
+					err = &admissionError{err: fbBindErr}
+					break
+				}
 				fbRelease, fbAdmErr := rp.acquireFor(ctx, fb.Profile.Key)
 				if fbAdmErr != nil {
 					// Terminal (cancel/closed): stop the walk; prior
@@ -441,7 +493,7 @@ func (rp *RoutePlan) ExecuteChatStream(ctx context.Context, fn func(ChatResponse
 					return nil
 				}
 
-				err = fb.Provider.ChatStream(ctx, fbReq, wrappedFbFn)
+				err = fb.Provider.ChatStream(fbCtx, fbReq, wrappedFbFn)
 				fbRelease()
 				if fbStreamDone && err != nil && (fbCallbackErr == nil || !errors.Is(err, fbCallbackErr)) {
 					// See primary streamDone handling above.
@@ -501,14 +553,19 @@ func (rp *RoutePlan) ExecuteGenerate(ctx context.Context) (*GenerateResponse, er
 	var attempts []RouteAttempt
 	req := rp.buildGenerateRequest(false)
 
-	// Admission bracket (#400): see ExecuteChat for the full contract.
+	// Destination bind (#477), then the admission bracket (#400): see
+	// ExecuteChat for the full contract.
+	bctx, bindErr := rp.bindDestination(ctx, rp.Profile.Key)
+	if bindErr != nil {
+		return nil, bindErr
+	}
 	release, admErr := rp.acquireFor(ctx, rp.Profile.Key)
 	if admErr != nil {
 		return nil, admErr
 	}
 	defer release()
 	start := time.Now()
-	resp, err := rp.Provider.Generate(ctx, req)
+	resp, err := rp.Provider.Generate(bctx, req)
 	release()
 	attempts = append(attempts, makeAttempt(rp.Profile.Key, err, time.Since(start)))
 
@@ -518,6 +575,12 @@ func (rp *RoutePlan) ExecuteGenerate(ctx context.Context) (*GenerateResponse, er
 
 		for i, fb := range rp.Fallbacks {
 			fbReq := fb.buildGenerateRequest(false)
+			// Destination bind (#477): terminal, no contact.
+			fbCtx, fbBindErr := rp.bindDestination(ctx, fb.Profile.Key)
+			if fbBindErr != nil {
+				err = &admissionError{err: fbBindErr}
+				break
+			}
 			fbRelease, fbAdmErr := rp.acquireFor(ctx, fb.Profile.Key)
 			if fbAdmErr != nil {
 				err = &admissionError{err: fbAdmErr}
@@ -525,7 +588,7 @@ func (rp *RoutePlan) ExecuteGenerate(ctx context.Context) (*GenerateResponse, er
 			}
 			defer fbRelease()
 			fbStart := time.Now()
-			resp, err = fb.Provider.Generate(ctx, fbReq)
+			resp, err = fb.Provider.Generate(fbCtx, fbReq)
 			fbRelease()
 			attempts = append(attempts, makeAttempt(fb.Profile.Key, err, time.Since(fbStart)))
 			if err == nil {
@@ -577,8 +640,13 @@ func (rp *RoutePlan) ExecuteGenerateStream(ctx context.Context, fn func(Generate
 	fallbacksUsed := 0
 	var outcome *RouteOutcome
 
-	// Admission bracket (#400): see ExecuteChatStream — the permit spans
-	// the entire stream and releases exactly once on every return path.
+	// Destination bind (#477), then the admission bracket (#400): see
+	// ExecuteChatStream — the permit spans the entire stream and releases
+	// exactly once on every return path.
+	bctx, bindErr := rp.bindDestination(ctx, rp.Profile.Key)
+	if bindErr != nil {
+		return bindErr
+	}
 	release, admErr := rp.acquireFor(ctx, rp.Profile.Key)
 	if admErr != nil {
 		return admErr
@@ -618,7 +686,7 @@ func (rp *RoutePlan) ExecuteGenerateStream(ctx context.Context, fn func(Generate
 		return nil
 	}
 
-	err := rp.Provider.GenerateStream(ctx, req, wrappedFn)
+	err := rp.Provider.GenerateStream(bctx, req, wrappedFn)
 	release()
 	if streamDone && err != nil && (callbackErr == nil || !errors.Is(err, callbackErr)) {
 		// A provider may still surface transport/read errors after it has
@@ -646,6 +714,12 @@ func (rp *RoutePlan) ExecuteGenerateStream(ctx context.Context, fn func(Generate
 		if !delivered {
 			for i, fb := range rp.Fallbacks {
 				fbReq := fb.buildGenerateRequest(true)
+				// Destination bind (#477): terminal, no contact (§4).
+				fbCtx, fbBindErr := rp.bindDestination(ctx, fb.Profile.Key)
+				if fbBindErr != nil {
+					err = &admissionError{err: fbBindErr}
+					break
+				}
 				fbRelease, fbAdmErr := rp.acquireFor(ctx, fb.Profile.Key)
 				if fbAdmErr != nil {
 					// Terminal (cancel/closed): stop the walk; prior
@@ -693,7 +767,7 @@ func (rp *RoutePlan) ExecuteGenerateStream(ctx context.Context, fn func(Generate
 					return nil
 				}
 
-				err = fb.Provider.GenerateStream(ctx, fbReq, wrappedFbFn)
+				err = fb.Provider.GenerateStream(fbCtx, fbReq, wrappedFbFn)
 				fbRelease()
 				if fbStreamDone && err != nil && (fbCallbackErr == nil || !errors.Is(err, fbCallbackErr)) {
 					// See primary streamDone handling above.
@@ -755,6 +829,13 @@ func (rp *RoutePlan) ExecuteEmbed(ctx context.Context) (*EmbedResponse, error) {
 
 	var resp *EmbedResponse
 	var err error
+	// Destination bind (#477) precedes both admission shapes below: a
+	// denied destination must neither start a shared flight nor hold a
+	// per-caller slot.
+	bctx, bindErr := rp.bindDestination(ctx, rp.Profile.Key)
+	if bindErr != nil {
+		return nil, bindErr
+	}
 	if ae, ok := rp.Provider.(AdmittedEmbedder); ok {
 		// Dead-caller pre-check (§6 amended contract): a caller whose
 		// ctx is already done must not start or join a shared flight on
@@ -780,7 +861,7 @@ func (rp *RoutePlan) ExecuteEmbed(ctx context.Context) (*EmbedResponse, error) {
 		// route-level bracket, or M identical callers would hold M
 		// permits and the gate would break the dedup itself.
 		start := time.Now()
-		resp, err = ae.EmbedAdmitted(ctx, req, rp.admitFuncFor(rp.Profile.Key))
+		resp, err = ae.EmbedAdmitted(bctx, req, rp.admitFuncFor(rp.Profile.Key))
 		var aErr *admissionError
 		if errors.As(err, &aErr) {
 			// Admission failure surfaced through the provider (§4): no
@@ -797,7 +878,7 @@ func (rp *RoutePlan) ExecuteEmbed(ctx context.Context) (*EmbedResponse, error) {
 		}
 		defer release()
 		start := time.Now()
-		resp, err = rp.Provider.Embed(ctx, req)
+		resp, err = rp.Provider.Embed(bctx, req)
 		release()
 		attempts = append(attempts, makeAttempt(rp.Profile.Key, err, time.Since(start)))
 	}
@@ -808,6 +889,12 @@ func (rp *RoutePlan) ExecuteEmbed(ctx context.Context) (*EmbedResponse, error) {
 
 		for i, fb := range rp.Fallbacks {
 			fbReq := fb.buildEmbedRequest()
+			// Destination bind (#477): terminal, no contact, either shape.
+			fbCtx, fbBindErr := rp.bindDestination(ctx, fb.Profile.Key)
+			if fbBindErr != nil {
+				err = &admissionError{err: fbBindErr}
+				break
+			}
 			if ae, ok := fb.Provider.(AdmittedEmbedder); ok {
 				if ctx.Err() != nil {
 					rel, fbAdmErr := rp.acquireFor(ctx, fb.Profile.Key)
@@ -818,7 +905,7 @@ func (rp *RoutePlan) ExecuteEmbed(ctx context.Context) (*EmbedResponse, error) {
 					rel()
 				}
 				fbStart := time.Now()
-				resp, err = ae.EmbedAdmitted(ctx, fbReq, rp.admitFuncFor(fb.Profile.Key))
+				resp, err = ae.EmbedAdmitted(fbCtx, fbReq, rp.admitFuncFor(fb.Profile.Key))
 				var aErr *admissionError
 				if errors.As(err, &aErr) {
 					// Terminal (§4): stop the walk; prior attempts and
@@ -837,7 +924,7 @@ func (rp *RoutePlan) ExecuteEmbed(ctx context.Context) (*EmbedResponse, error) {
 				}
 				defer fbRelease()
 				fbStart := time.Now()
-				resp, err = fb.Provider.Embed(ctx, fbReq)
+				resp, err = fb.Provider.Embed(fbCtx, fbReq)
 				fbRelease()
 				attempts = append(attempts, makeAttempt(fb.Profile.Key, err, time.Since(fbStart)))
 			}

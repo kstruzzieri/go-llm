@@ -158,10 +158,21 @@ func (m *mrMockFingerprintStore) SaveFailure(_ context.Context, _, _, _, _ strin
 type mrRecordingFingerprintProber struct {
 	detectCalls int
 	chatCalls   int
+	purposes    []string
 }
 
-func (m *mrRecordingFingerprintProber) DetectKind(context.Context, string) (*fingerprint.KindDetection, error) {
+func (m *mrRecordingFingerprintProber) recordPurpose(ctx context.Context) {
+	cap := capabilityFromContext(ctx)
+	if cap == nil {
+		m.purposes = append(m.purposes, "")
+		return
+	}
+	m.purposes = append(m.purposes, cap.purpose)
+}
+
+func (m *mrRecordingFingerprintProber) DetectKind(ctx context.Context, _ string) (*fingerprint.KindDetection, error) {
 	m.detectCalls++
+	m.recordPurpose(ctx)
 	return &fingerprint.KindDetection{
 		Kind:         fingerprint.ModelKindChat,
 		Source:       "capabilities",
@@ -169,8 +180,9 @@ func (m *mrRecordingFingerprintProber) DetectKind(context.Context, string) (*fin
 	}, nil
 }
 
-func (m *mrRecordingFingerprintProber) ProbeChat(context.Context, string, any) (*fingerprint.ChatMetrics, error) {
+func (m *mrRecordingFingerprintProber) ProbeChat(ctx context.Context, _ string, _ any) (*fingerprint.ChatMetrics, error) {
 	m.chatCalls++
+	m.recordPurpose(ctx)
 	return &fingerprint.ChatMetrics{TokensPerSecond: 42}, nil
 }
 
@@ -454,6 +466,76 @@ func TestModelRegistry_Lookup_RunsFingerprintProberFactory(t *testing.T) {
 	}
 	if saved.GenerationTokensPerSecond != 42 {
 		t.Fatalf("saved GenerationTokensPerSecond = %v, want 42", saved.GenerationTokensPerSecond)
+	}
+}
+
+func TestModelRegistryFullFingerprintBindsCapabilityProbePurpose(t *testing.T) {
+	key := ModelKey{Provider: "test", Model: "model"}
+	dest := mustDest(t, key.Provider, "https://provider.example.com")
+	gate := installTestGate(t,
+		DestinationEdge{Purpose: DestinationPurposeModelRefresh, Destination: dest},
+		DestinationEdge{Purpose: DestinationPurposeCapabilityProbe, Destination: dest},
+	)
+	ctx, err := gate.Bind(context.Background(), DestinationPurposeModelRefresh, key.Provider)
+	if err != nil {
+		t.Fatal(err)
+	}
+	prober := &mrRecordingFingerprintProber{}
+	prov := &mrMockProvider{name: key.Provider, models: []ModelInfo{{Name: key.Model}}}
+	mr, err := NewModelRegistry(
+		&mrMockProviderRegistry{providers: map[string]Provider{key.Provider: prov}},
+		newMrMockFingerprintStore(),
+		WithModelRegistryDestinationGate(gate),
+		WithFingerprintProberFactory(func(context.Context, ModelKey, *ModelInfo, Provider) (*FingerprintProberSpec, error) {
+			return &FingerprintProberSpec{Prober: prober, ModelDigest: "digest"}, nil
+		}),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := mr.Lookup(ctx, key); err != nil {
+		t.Fatalf("Lookup(%v) error = %v, want nil", key, err)
+	}
+	if len(prober.purposes) == 0 {
+		t.Fatal("Lookup() fingerprint prober calls = 0, want at least 1")
+	}
+	for i, got := range prober.purposes {
+		if got != DestinationPurposeCapabilityProbe {
+			t.Errorf("fingerprint prober call %d purpose = %q, want %q", i, got, DestinationPurposeCapabilityProbe)
+		}
+	}
+}
+
+func TestModelRegistryFullFingerprintRequiresCapabilityProbeEdge(t *testing.T) {
+	key := ModelKey{Provider: "test", Model: "model"}
+	dest := mustDest(t, key.Provider, "https://provider.example.com")
+	gate := installTestGate(t,
+		DestinationEdge{Purpose: DestinationPurposeModelRefresh, Destination: dest},
+	)
+	ctx, err := gate.Bind(context.Background(), DestinationPurposeModelRefresh, key.Provider)
+	if err != nil {
+		t.Fatal(err)
+	}
+	prober := &mrRecordingFingerprintProber{}
+	prov := &mrMockProvider{name: key.Provider, models: []ModelInfo{{Name: key.Model}}}
+	mr, err := NewModelRegistry(
+		&mrMockProviderRegistry{providers: map[string]Provider{key.Provider: prov}},
+		newMrMockFingerprintStore(),
+		WithModelRegistryDestinationGate(gate),
+		WithFingerprintProberFactory(func(context.Context, ModelKey, *ModelInfo, Provider) (*FingerprintProberSpec, error) {
+			return &FingerprintProberSpec{Prober: prober, ModelDigest: "digest"}, nil
+		}),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := mr.Lookup(ctx, key); err != nil {
+		t.Fatalf("Lookup(%v) error = %v, want nil", key, err)
+	}
+	if prober.detectCalls != 0 || prober.chatCalls != 0 {
+		t.Errorf("fingerprint prober calls without capability-probe edge = detect %d, chat %d; want 0, 0", prober.detectCalls, prober.chatCalls)
 	}
 }
 

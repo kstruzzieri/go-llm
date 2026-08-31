@@ -14,7 +14,9 @@ import (
 	"path/filepath"
 	"reflect"
 	"sort"
+	"strings"
 	"sync"
+	"time"
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -92,17 +94,30 @@ type Server struct {
 	tlsCert           string
 	tlsKey            string
 
-	client           *ollama.Client
-	cfg              *config.Config
-	configOrigin     config.Origin
-	store            rag.VectorStore
-	indexer          *rag.Indexer
-	retriever        *rag.Retriever
-	managedSources   *rag.ManagedSources
-	completer        *completion.Provider
-	modelRegistry    *provider.ModelRegistry
-	providerRegistry *provider.Registry
-	ollamaProv       provider.Provider // default "ollama"-format provider when warmth is wired; set for parity assertions, no production reader
+	client *ollama.Client
+	// destPolicy is the #477 destination-admission input (WithDestinationPolicy).
+	// The zero value fails closed for remote destinations; standalone MCP
+	// never prompts, so remote access requires an explicit policy.
+	destPolicy provider.DestinationPolicy
+	// destGate is the installed admission generation; nil only before
+	// buildDestinationGate runs. Guards every repository-owned client.
+	destGate *provider.DestinationGate
+	// legacyProviderName/legacyDest identify the direct ollama client's
+	// destination for health, model listing, and warmth binding.
+	legacyProviderName string
+	legacyDest         provider.Destination
+	legacyHTTP         *http.Client
+	activeProviders    []string
+	cfg                *config.Config
+	configOrigin       config.Origin
+	store              rag.VectorStore
+	indexer            *rag.Indexer
+	retriever          *rag.Retriever
+	managedSources     *rag.ManagedSources
+	completer          *completion.Provider
+	modelRegistry      *provider.ModelRegistry
+	providerRegistry   *provider.Registry
+	ollamaProv         provider.Provider // default "ollama"-format provider when warmth is wired; set for parity assertions, no production reader
 
 	router       routeEngine
 	warmthSource provider.WarmthSource
@@ -183,6 +198,19 @@ func WithOllamaURL(url string) Option {
 	return func(s *Server) {
 		s.ollamaURL = url
 		s.ollamaURLExplicit = true
+	}
+}
+
+// WithDestinationPolicy sets the #477 destination-admission policy. The
+// ZERO value (also the default) fails closed: a configuration whose
+// reachable model destinations include any remote endpoint makes NewServer
+// return an error matching provider.ErrDestinationDenied — standalone MCP
+// has no interactive consent surface, so remote access requires an explicit
+// exact provider.NewDestinationPolicy(...) set or
+// provider.AllowAllDestinations(). Local-only deployments need nothing.
+func WithDestinationPolicy(p provider.DestinationPolicy) Option {
+	return func(s *Server) {
+		s.destPolicy = p
 	}
 }
 
@@ -398,24 +426,46 @@ func NewServer(ctx context.Context, opts ...Option) (*Server, error) {
 		}
 	}
 
-	// Step 2: Build the Ollama client, honoring provider settings from config
-	// unless the caller explicitly overrode the base URL.
-	clientOpts := []ollama.Option{ollama.WithBaseURL(s.ollamaURL)}
+	// Step 2: Resolve the legacy Ollama base URL from config (unless the
+	// caller explicitly overrode it), then build the #477 destination gate
+	// BEFORE any client exists: standalone MCP never prompts, so the policy
+	// decides here, fatally, with zero outbound bytes.
+	timeout := time.Duration(0)
 	if s.cfg != nil {
 		if cfgProvider := s.legacyOllamaProviderConfig(); cfgProvider != nil {
 			if !s.ollamaURLExplicit && cfgProvider.BaseURL != "" {
 				s.ollamaURL = cfgProvider.BaseURL
-				clientOpts[0] = ollama.WithBaseURL(s.ollamaURL)
 			}
-			if cfgProvider.Timeout.Duration > 0 {
-				clientOpts = append(clientOpts, ollama.WithTimeout(cfgProvider.Timeout.Duration))
-			}
+			timeout = cfgProvider.Timeout.Duration
 		}
 	}
+	if err := s.buildDestinationGate(); err != nil {
+		return nil, err
+	}
+	clientOpts := []ollama.Option{ollama.WithBaseURL(s.ollamaURL)}
+	if timeout > 0 {
+		clientOpts = append(clientOpts, ollama.WithTimeout(timeout))
+	}
+	base := &http.Client{Timeout: 5 * time.Minute}
+	if timeout > 0 {
+		base.Timeout = timeout
+	}
+	guarded, err := provider.GuardHTTPClient(s.destGate, s.legacyDest, base)
+	if err != nil {
+		return nil, fmt.Errorf("mcp: guard ollama client: %w", err)
+	}
+	s.legacyHTTP = guarded
+	clientOpts = append(clientOpts, ollama.WithHTTPClient(guarded))
 	s.client = ollama.NewClient(clientOpts...)
 
-	// Step 3: Check Ollama availability (non-fatal, degraded mode on failure).
-	s.ollamaAvailable = s.client.IsAvailable(ctx)
+	// Step 3: Check Ollama availability. Genuine unavailability degrades as
+	// before; a destination DENIAL is fatal (#477 M22) — it means the gate
+	// and this probe disagree, never a network condition to degrade around.
+	available, err := s.checkOllamaAvailable(ctx)
+	if err != nil {
+		return nil, err
+	}
+	s.ollamaAvailable = available
 
 	// Step 3b: Build the provider-level model registry (and Router/warmth) even
 	// in degraded mode so explicit completion requests can recover once Ollama
@@ -645,7 +695,28 @@ func (s *Server) ensureModelRegistry(ctx context.Context) error {
 	// Warmth source is wired only for the default "ollama" provider, matching the
 	// prior NewServer Step 4c predicate (s.ollamaProv.Name()=="ollama").
 	if providerConfigHasDefaultOllama(s.cfg) {
-		warmthSource = provider.NewOllamaWarmthSource(s.ollamaURL, "ollama")
+		var wsOpts []provider.OllamaWarmthOption
+		if s.destGate != nil {
+			// #477: warmth polls run through a guarded client and bind a
+			// fresh warmth-poll capability per poll — a cached one would die
+			// at the first generation change. A nil gate (direct Server
+			// construction in tests, pre-admission paths) keeps the legacy
+			// unguarded poller.
+			warmthClient, werr := provider.GuardHTTPClient(s.destGate, s.legacyDest,
+				&http.Client{Timeout: 5 * time.Second})
+			if werr != nil {
+				return fmt.Errorf("mcp: guard warmth client: %w", werr)
+			}
+			gate := s.destGate
+			name := s.legacyProviderName
+			wsOpts = append(wsOpts,
+				provider.WithWarmthHTTPClient(warmthClient),
+				provider.WithWarmthPollBinder(func(bctx context.Context, _ string) (context.Context, error) {
+					return gate.Bind(bctx, provider.DestinationPurposeWarmthPoll, name)
+				}),
+			)
+		}
+		warmthSource = provider.NewOllamaWarmthSource(s.ollamaURL, "ollama", wsOpts...)
 		routerOpts = append(routerOpts, provider.WithWarmthSource(warmthSource))
 	}
 
@@ -654,6 +725,8 @@ func (s *Server) ensureModelRegistry(ctx context.Context) error {
 		FingerprintStore:  s.fingerprintStore,
 		OllamaURLOverride: override,
 		RouterOptions:     routerOpts,
+		DestinationGate:   s.destGate,
+		ActiveProviders:   s.activeProviders,
 	})
 	if err != nil {
 		if warmthSource != nil {
@@ -801,7 +874,11 @@ func (s *Server) refreshProviderModelIndexes(ctx context.Context) {
 		return
 	}
 	for _, name := range pReg.Names() {
-		_ = pReg.RefreshModels(ctx, name)
+		pctx, err := s.bindProviderMeta(ctx, name)
+		if err != nil {
+			continue
+		}
+		_ = pReg.RefreshModels(pctx, name)
 	}
 }
 
@@ -971,4 +1048,141 @@ func (s *Server) close(ctx context.Context) error {
 		agentMemoryErr = amem.Close()
 	}
 	return errors.Join(routerErr, storeErr, transcriptErr, feedbackErr, agentMemoryErr)
+}
+
+// mcpServedPurposes is the conservative purpose set standalone MCP exposes:
+// every tool that accepts a runtime model selector routes under one of these
+// use cases, and each is planned as a RECOMMEND route so every configured
+// provider is reachable (D10). A selector routing outside this set is
+// rejected by the gate at bind time — the frozen plan is the whole
+// vocabulary, never a silent pass-through.
+var mcpServedPurposes = []string{
+	"chat", "embedding", "fim", "analysis", "code-review",
+	config.UseCaseVerify, config.UseCaseExtract,
+}
+
+// buildDestinationGate freezes the MCP network plan and installs the
+// admission generation (#477). Every configured provider is reachable from
+// every served purpose (recommend routes); the legacy direct-ollama endpoint
+// additionally carries health and — when warmth is wired — warmth-poll
+// edges. Install failure is fatal and typed: standalone MCP never prompts.
+func (s *Server) buildDestinationGate() error {
+	override := ""
+	if s.ollamaURLExplicit {
+		override = s.ollamaURL
+	}
+	eff, err := providerbootstrap.Materialize(s.cfg, override, "", "")
+	if err != nil {
+		return fmt.Errorf("mcp: %w", err)
+	}
+	routes := make([]providerbootstrap.PlannedRoute, 0, len(mcpServedPurposes))
+	for _, purpose := range mcpServedPurposes {
+		routes = append(routes, providerbootstrap.PlannedRoute{UseCase: purpose, Recommend: true})
+	}
+	plan, err := providerbootstrap.BuildNetworkPlan(eff, routes, providerbootstrap.PlanOptions{
+		CapabilityProbes: s.fingerprintStore != nil,
+	})
+	if err != nil {
+		return fmt.Errorf("mcp: %w", err)
+	}
+
+	dests := eff.Destinations()
+	s.legacyProviderName, s.legacyDest, err = s.legacyDestination(eff.Config(), dests)
+	if err != nil {
+		return err
+	}
+	edges := append([]provider.DestinationEdge(nil), plan.Edges...)
+	edges = append(edges, provider.DestinationEdge{
+		Purpose:     provider.DestinationPurposeHealth,
+		Destination: s.legacyDest,
+	})
+	if providerConfigHasDefaultOllama(s.cfg) {
+		edges = append(edges, provider.DestinationEdge{
+			Purpose:     provider.DestinationPurposeWarmthPoll,
+			Destination: s.legacyDest,
+		})
+	}
+	// The direct client also lists and pulls models (tools_models): that is
+	// model-refresh traffic to the legacy destination, present even when the
+	// provider is not in the config.
+	edges = append(edges, provider.DestinationEdge{
+		Purpose:     provider.DestinationPurposeModelRefresh,
+		Destination: s.legacyDest,
+	})
+
+	manifest, err := provider.NewDestinationManifest(edges...)
+	if err != nil {
+		return fmt.Errorf("mcp: %w", err)
+	}
+	gate := provider.NewDestinationGate()
+	if err := gate.Install(s.destPolicy, manifest); err != nil {
+		return fmt.Errorf("mcp: destination admission: %w", err)
+	}
+	s.destGate = gate
+	s.activeProviders = plan.ActiveProviders
+	return nil
+}
+
+func (s *Server) legacyDestination(cfg *config.Config, dests map[string]provider.Destination) (string, provider.Destination, error) {
+	actual, err := provider.NewDestination("ollama-legacy", s.ollamaURL)
+	if err != nil {
+		return "", provider.Destination{}, fmt.Errorf("mcp: %w", err)
+	}
+
+	keys := make([]string, 0, len(cfg.Providers))
+	for key := range cfg.Providers {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		if d := dests[key]; providerConfigIsOllama(cfg.Providers[key]) && d.BaseURL() == actual.BaseURL() {
+			return key, d, nil
+		}
+	}
+
+	name := "ollama-legacy"
+	for suffix := 2; ; suffix++ {
+		if _, exists := dests[name]; !exists {
+			break
+		}
+		name = fmt.Sprintf("ollama-legacy-%d", suffix)
+	}
+	d, err := provider.NewDestination(name, s.ollamaURL)
+	if err != nil {
+		return "", provider.Destination{}, fmt.Errorf("mcp: %w", err)
+	}
+	return name, d, nil
+}
+
+// checkOllamaAvailable probes the legacy endpoint through the guarded
+// client. A destination denial returns an ERROR (fatal to NewServer, #477
+// M22); every other failure is genuine unavailability and degrades.
+func (s *Server) checkOllamaAvailable(ctx context.Context) (bool, error) {
+	hctx, err := s.destGate.Bind(ctx, provider.DestinationPurposeHealth, s.legacyProviderName)
+	if err != nil {
+		return false, fmt.Errorf("mcp: health probe: %w", err)
+	}
+	req, err := http.NewRequestWithContext(hctx, http.MethodGet, strings.TrimRight(s.ollamaURL, "/"), nil)
+	if err != nil {
+		return false, nil
+	}
+	resp, err := s.legacyHTTP.Do(req)
+	if err != nil {
+		if errors.Is(err, provider.ErrDestinationDenied) {
+			return false, fmt.Errorf("mcp: health probe: %w", err)
+		}
+		return false, nil
+	}
+	_ = resp.Body.Close()
+	return resp.StatusCode == http.StatusOK, nil
+}
+
+// bindMeta attaches a metadata capability for the legacy destination —
+// tools_models listing/pulls and the resources health line run through the
+// same guarded client and need the matching purpose (#477 I14).
+func (s *Server) bindMeta(ctx context.Context, purpose string) (context.Context, error) {
+	if s.destGate == nil {
+		return ctx, nil
+	}
+	return s.destGate.Bind(ctx, purpose, s.legacyProviderName)
 }

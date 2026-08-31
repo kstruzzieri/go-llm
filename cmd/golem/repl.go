@@ -56,13 +56,19 @@ type replSession struct {
 	// /resume, and via /grants clear; read by the per-run approver. nil only
 	// in grant-free contexts (methods are nil-safe; the /auto-edits and
 	// /grants commands lazily initialize it).
-	grants       *approvalGrants
-	allowWrite   bool
-	allowExec    bool
-	mcpAttached  bool    // true when external MCP tools are attached (force approver)
-	obs          *observ // nil unless -trace/-telemetry enabled
-	feedback     *feedbackService
-	pressureWarn bool // enable the one-per-run context-pressure warning line
+	grants *approvalGrants
+	// destAdmission is the destination-consent surface (#477). Its lifetime
+	// is deliberately different from grants: conversation resets (/new,
+	// /clear, /resume) leave destination authority standing, while
+	// /grants clear revokes it and the next GOAL re-runs the batch gate.
+	// nil in ungated contexts.
+	destAdmission *destinationAdmission
+	allowWrite    bool
+	allowExec     bool
+	mcpAttached   bool    // true when external MCP tools are attached (force approver)
+	obs           *observ // nil unless -trace/-telemetry enabled
+	feedback      *feedbackService
+	pressureWarn  bool // enable the one-per-run context-pressure warning line
 	// mixed mirrors what newOrchestratorFactory puts in ContextManager.Mixed, so
 	// the renderer can tell whether a tool result's flat Content is what the
 	// model actually read. Same -progressive flag, one source.
@@ -136,6 +142,16 @@ func runREPL(ctx context.Context, src lineSource, out io.Writer, interrupts <-ch
 		if !utf8.ValidString(line) {
 			_, _ = fmt.Fprintln(out, invalidUTF8Warning)
 			continue
+		}
+		// Pre-turn boundary (#477 D12): a /grants clear leaves ensure
+		// re-armed, and the SAME batch gate re-runs here — before the goal,
+		// never mid-turn. Denial (or decline) keeps the session usable for
+		// slash commands but runs no goal.
+		if sess.destAdmission != nil {
+			if err := sess.destAdmission.ensure(ctx); err != nil {
+				_, _ = fmt.Fprintf(out, "destination admission: %v\n", err)
+				continue
+			}
 		}
 		// Recorded only here: after trimming, after the empty and slash checks,
 		// and after validation, so a blank line, a command, or malformed bytes
@@ -579,9 +595,17 @@ func dispatchSlash(ctx context.Context, out io.Writer, sess *replSession, line s
 			if sess.allowWrite {
 				_, _ = fmt.Fprintf(out, "auto-edits: %s\n", autoEditState(sess))
 			}
+			if sess.destAdmission != nil {
+				sess.destAdmission.render(out)
+			}
 		case len(fields) == 2 && fields[1] == "clear":
 			sess.grants.clear()
-			_, _ = fmt.Fprintln(out, "session grants cleared")
+			if sess.destAdmission != nil {
+				sess.destAdmission.revoke()
+				_, _ = fmt.Fprintln(out, "session grants cleared (destination grants revoked; re-approval before the next goal)")
+			} else {
+				_, _ = fmt.Fprintln(out, "session grants cleared")
+			}
 		default:
 			_, _ = fmt.Fprintln(out, "usage: /grants [clear]")
 		}

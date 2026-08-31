@@ -435,8 +435,14 @@ func TestNew_OpenAICompatConfigInstallsOverridesAndBuilds(t *testing.T) {
 	if b.Router == nil || b.Models == nil || b.Providers == nil {
 		t.Fatalf("New returned incomplete bundle: %+v", b)
 	}
-	if b.Config != cfg {
-		t.Fatalf("Bundle.Config should be the passed config")
+	// #477 D7: Bundle.Config is the materialized EFFECTIVE config — always a
+	// copy, so overrides and normalization can never mutate the caller's
+	// value. Same content (modulo defaulted api_format), different pointer.
+	if b.Config == cfg {
+		t.Fatalf("Bundle.Config must be the materialized copy, not the caller's config")
+	}
+	if got := b.Config.Providers["lc"].BaseURL; got != cfg.Providers["lc"].BaseURL {
+		t.Fatalf("effective base URL diverged with no override: %q", got)
 	}
 }
 

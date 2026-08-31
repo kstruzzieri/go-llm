@@ -38,6 +38,28 @@ func TestLineSourceModeFor(t *testing.T) {
 	}
 }
 
+func TestDestinationAdmissionInteractive(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		f    flags
+		term bool
+		want bool
+	}{
+		{"REPL terminal", flags{}, true, true},
+		{"goal approval terminal", flags{goalSet: true}, true, true},
+		{"one-shot terminal", flags{promptSet: true}, true, false},
+		{"task terminal", flags{planPath: "plan.json"}, true, false},
+		{"auto-approved goal terminal", flags{goalSet: true, approvePlanLock: true}, true, false},
+		{"REPL pipe", flags{}, false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := destinationAdmissionInteractive(tc.f, tc.term); got != tc.want {
+				t.Fatalf("destination admission interactive = %t, want %t", got, tc.want)
+			}
+		})
+	}
+}
+
 // countingSource records lifecycle calls so ownership can be asserted.
 type countingSource struct {
 	closes  int

@@ -6,7 +6,9 @@ package providerbootstrap
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"net/http"
 
 	"github.com/kstruzzieri/go-llm/config"
 	"github.com/kstruzzieri/go-llm/fingerprint"
@@ -41,6 +43,24 @@ type Options struct {
 	// can rely on FingerprintStore's SQLiteStore also satisfying
 	// fingerprint.CapProbeStore (interface-assert fallback below).
 	CapabilityProbeStore fingerprint.CapProbeStore
+
+	// DestinationGate arms the destination-admission boundary (#477). When
+	// non-nil, every provider HTTP client — ollama, openai-compat, and the
+	// slot-probe client — is wrapped by the destination guard bound to that
+	// provider's effective destination, the Router stamps the gate onto
+	// every plan it builds, and RefreshModels runs ONLY for ActiveProviders
+	// with a model-refresh capability bound per call. A denial anywhere in
+	// bootstrap is FATAL, never a Bundle warning: an unadmitted destination
+	// must produce zero requests, not a degraded start.
+	//
+	// nil keeps the pre-#477 behavior for callers that have not yet
+	// migrated; each entry point must make that choice deliberately (I18).
+	DestinationGate *provider.DestinationGate
+	// ActiveProviders is the sorted provider set from the mode's frozen
+	// network plan. Required when DestinationGate is set: a gate with no
+	// active set would silently refresh nothing, and a wiring bug should be
+	// loud.
+	ActiveProviders []string
 }
 
 // Bundle is the assembled provider stack. Warnings collects non-fatal,
@@ -59,14 +79,24 @@ const defaultOllamaURL = "http://localhost:11434"
 // New builds the provider stack. It errors only when no provider can be
 // constructed/registered or the model registry/router cannot be built.
 func New(ctx context.Context, opts Options) (*Bundle, error) {
+	gate := opts.DestinationGate
+	if gate != nil && len(opts.ActiveProviders) == 0 {
+		return nil, fmt.Errorf("providerbootstrap: DestinationGate set without ActiveProviders; a gated bootstrap that refreshes nothing is a wiring bug, not a mode")
+	}
+
 	// effCfg is the synthetic config when opts.Config is nil; reuse it for the
 	// prober factory, capability overrides, and Bundle.Config so all four see the
 	// same providers New actually built.
-	provs, ollamaClients, effCfg, err := buildProviders(opts.Config, opts.OllamaURLOverride,
+	eff, err := Materialize(opts.Config, opts.OllamaURLOverride,
 		opts.OpenAICompatURLOverrideProvider, opts.OpenAICompatURLOverride)
 	if err != nil {
 		return nil, err
 	}
+	provs, ollamaClients, err := constructProviders(eff, gate)
+	if err != nil {
+		return nil, err
+	}
+	effCfg := eff.cfg
 
 	// Validate slot_discovery before any provider registration or
 	// RefreshModels I/O: user config fails loud and fails FAST — an
@@ -74,6 +104,30 @@ func New(ctx context.Context, opts Options) (*Bundle, error) {
 	slotBEs, err := slotBackends(effCfg)
 	if err != nil {
 		return nil, err
+	}
+
+	active := make(map[string]bool, len(opts.ActiveProviders))
+	for _, name := range opts.ActiveProviders {
+		if gate != nil {
+			if _, ok := eff.cfg.Providers[name]; !ok {
+				// A typo here would otherwise skip every refresh silently
+				// and boot a bundle whose consent receipt covers providers
+				// that were never touched.
+				return nil, fmt.Errorf("providerbootstrap: ActiveProviders names unknown provider %q", name)
+			}
+		}
+		active[name] = true
+	}
+	if gate != nil {
+		// I7: an inactive provider must see zero requests, so its backend
+		// leaves slot governance entirely rather than fail-safe-probing.
+		// Nothing routes to it either (it is on no planned route), so the
+		// ungoverned-unlimited admission default is unreachable for it.
+		for name := range slotBEs {
+			if !active[name] {
+				delete(slotBEs, name)
+			}
+		}
 	}
 
 	pReg := provider.NewRegistry()
@@ -85,7 +139,26 @@ func New(ctx context.Context, opts Options) (*Bundle, error) {
 			continue
 		}
 		registered++
-		if err := pReg.RefreshModels(ctx, p.Name()); err != nil {
+		// Gated bootstrap refreshes ONLY the active providers (I7), each
+		// call bound to a model-refresh capability. A denial — at the bind
+		// or surfacing through the guarded client — is fatal (never a
+		// warning): it means the admitted manifest and this refresh
+		// disagree, and degrading would start a session whose consent
+		// receipt does not match its traffic.
+		rctx := ctx
+		if gate != nil {
+			if !active[p.Name()] {
+				continue
+			}
+			rctx, err = gate.Bind(ctx, provider.DestinationPurposeModelRefresh, p.Name())
+			if err != nil {
+				return nil, fmt.Errorf("providerbootstrap: refresh %q: %w", p.Name(), err)
+			}
+		}
+		if err := pReg.RefreshModels(rctx, p.Name()); err != nil {
+			if errors.Is(err, provider.ErrDestinationDenied) {
+				return nil, fmt.Errorf("providerbootstrap: refresh %q: %w", p.Name(), err)
+			}
 			warnings = append(warnings, fmt.Errorf("providerbootstrap: refresh %q: %w", p.Name(), err))
 		}
 	}
@@ -94,6 +167,11 @@ func New(ctx context.Context, opts Options) (*Bundle, error) {
 	}
 
 	mrOpts := []provider.ModelRegistryOption{}
+	if gate != nil {
+		// Registry-initiated traffic (live model queries during routing,
+		// active capability probes) binds its own metadata purposes (#477).
+		mrOpts = append(mrOpts, provider.WithModelRegistryDestinationGate(gate))
+	}
 	factory := proberFactory(effCfg, ollamaClients)
 	if opts.FingerprintStore != nil {
 		mrOpts = append(mrOpts, provider.WithFingerprintProberFactory(factory))
@@ -158,11 +236,36 @@ func New(ctx context.Context, opts Options) (*Bundle, error) {
 		if len(slotOverrides) > 0 {
 			ssOpts = append(ssOpts, provider.WithSlotCapacityOverrides(slotOverrides))
 		}
+		if gate != nil {
+			// Slot probes are repository-owned metadata traffic (I14):
+			// per-backend guarded clients, and a slot-probe capability
+			// bound freshly per probe so re-admission after a revoke
+			// restores probing instead of leaving a dead cached context.
+			slotClients := make(map[string]*http.Client, len(slotBEs))
+			for name := range slotBEs {
+				gc, gerr := provider.GuardHTTPClient(gate, eff.dests[name],
+					&http.Client{Timeout: defaultSlotProbeClientTimeout})
+				if gerr != nil {
+					return nil, fmt.Errorf("providerbootstrap: slot probe client %q: %w", name, gerr)
+				}
+				slotClients[name] = gc
+			}
+			ssOpts = append(ssOpts,
+				provider.WithSlotClientFor(func(name string) *http.Client { return slotClients[name] }),
+				provider.WithSlotProbeBinder(func(ctx context.Context, name string) (context.Context, error) {
+					return gate.Bind(ctx, provider.DestinationPurposeSlotProbe, name)
+				}),
+			)
+		}
 		routerOpts = append(routerOpts, provider.WithSlotSource(provider.NewOpenAICompatSlotSource(slotBEs, ssOpts...)))
 	} else if _, err := buildSlotOverrides(effCfg, slotBEs); err != nil {
 		// slots overrides with NO slot-discovery provider at all is the
 		// same loud config error, not a silent no-op.
 		return nil, err
+	}
+	if gate != nil {
+		// Router plans bind per-attempt destination capabilities (#477).
+		routerOpts = append(routerOpts, provider.WithDestinationGate(gate))
 	}
 	// Explicit constructor options apply last, so caller-supplied defaults
 	// override config for matching model keys while preserving other config keys.
