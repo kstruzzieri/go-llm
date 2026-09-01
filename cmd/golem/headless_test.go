@@ -2,12 +2,16 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"os"
+	"reflect"
+	"sort"
 	"strings"
 	"testing"
 
+	"github.com/kstruzzieri/go-llm/agent"
 	"github.com/kstruzzieri/go-llm/provider"
 )
 
@@ -247,6 +251,93 @@ func TestAllowToolSetAuthorizesNothingWhenEmpty(t *testing.T) {
 	for _, name := range append(append([]string{}, allowToolNames...), "read_file", "mcp__x__y") {
 		if set.authorized(name) {
 			t.Errorf("an empty set must authorize nothing, but authorized %q", name)
+		}
+	}
+}
+
+// fakeNamedTool is the minimal agent.Tool: a name and nothing else, so the
+// filter's identity source (Spec().Name) is the only thing under test.
+type fakeNamedTool struct{ name string }
+
+func (f fakeNamedTool) Spec() agent.ToolSpec { return agent.ToolSpec{Name: f.name} }
+func (f fakeNamedTool) Effect() agent.Effect { return agent.Effect{} }
+func (f fakeNamedTool) Invoke(context.Context, json.RawMessage) (agent.ToolResult, error) {
+	return agent.ToolResult{}, nil
+}
+
+func toolNames(tools []agent.Tool) []string {
+	names := make([]string, 0, len(tools))
+	for _, tool := range tools {
+		names = append(names, tool.Spec().Name)
+	}
+	sort.Strings(names)
+	return names
+}
+
+func fakeTools(names ...string) []agent.Tool {
+	tools := make([]agent.Tool, 0, len(names))
+	for _, n := range names {
+		tools = append(tools, fakeNamedTool{name: n})
+	}
+	return tools
+}
+
+func TestFilterAllowedToolsMountsOnlyNamedPlusUngatedCompanions(t *testing.T) {
+	// The full built sets, exactly as buildWriteTools/buildExecTools return them.
+	built := fakeTools("write_file", "edit_file", "run_command", "start_command", "command_status", "command_tail", "stop_command")
+	cases := []struct {
+		named []string
+		want  []string
+	}{
+		{[]string{"run_command"}, []string{"run_command"}},
+		{[]string{"write_file"}, []string{"write_file"}},
+		{[]string{"write_file", "edit_file"}, []string{"edit_file", "write_file"}},
+		// start_command drags in its ungated readers; without them its output
+		// could never be read. stop_command is gated and stays out.
+		{[]string{"start_command"}, []string{"command_status", "command_tail", "start_command"}},
+		{[]string{"start_command", "stop_command"}, []string{"command_status", "command_tail", "start_command", "stop_command"}},
+		// stop_command alone does NOT pull in the readers: it is not a producer.
+		{[]string{"stop_command"}, []string{"stop_command"}},
+		{nil, nil},
+	}
+	for _, tc := range cases {
+		t.Run(strings.Join(tc.named, "+"), func(t *testing.T) {
+			set, err := newAllowToolSet(tc.named)
+			if err != nil {
+				t.Fatalf("newAllowToolSet: %v", err)
+			}
+			got := toolNames(filterAllowedTools(built, set))
+			if len(got) == 0 && len(tc.want) == 0 {
+				return
+			}
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Errorf("filterAllowedTools = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestFilterAllowedToolsNeverMountsAnUnbuiltTool(t *testing.T) {
+	// Naming a tool that was not built (e.g. -allow-tool run_command in a
+	// configuration where exec tools were not constructed) must mount nothing,
+	// never fabricate one.
+	set, _ := newAllowToolSet([]string{"run_command"})
+	if got := filterAllowedTools(fakeTools("write_file"), set); len(got) != 0 {
+		t.Errorf("filterAllowedTools = %v, want empty", toolNames(got))
+	}
+}
+
+func TestFilterAllowedToolsPreservesBuildOrder(t *testing.T) {
+	built := fakeTools("start_command", "command_status", "command_tail")
+	set, _ := newAllowToolSet([]string{"start_command"})
+	got := filterAllowedTools(built, set)
+	want := []string{"start_command", "command_status", "command_tail"}
+	if len(got) != len(want) {
+		t.Fatalf("got %d tools, want %d", len(got), len(want))
+	}
+	for i, tool := range got {
+		if tool.Spec().Name != want[i] {
+			t.Fatalf("order = %v, want %v (build order must be preserved)", toolNames(got), want)
 		}
 	}
 }

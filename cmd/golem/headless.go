@@ -141,6 +141,38 @@ func resolveStdinPrompt(stdin io.Reader, isTTY bool) (string, error) {
 	return string(buf), nil
 }
 
+// filterAllowedTools narrows a built gated-tool set to what -allow-tool named,
+// preserving the builder's order (#352).
+//
+// It admits a named tool plus that tool's UNGATED companions: start_command's
+// result is only readable through command_status/command_tail, so mounting
+// start_command without them mounts a tool whose output can never be observed.
+// Neither companion ever prompts, so this widens usability, not authorization —
+// the approver still authorizes by exact name, and stop_command (gated) is
+// never a companion.
+//
+// A named tool that was never built is simply absent: this filters, it never
+// fabricates.
+func filterAllowedTools(built []agent.Tool, allow allowToolSet) []agent.Tool {
+	if allow.empty() {
+		return nil
+	}
+	mount := make(map[string]struct{}, len(built))
+	for name := range allow.names {
+		mount[name] = struct{}{}
+		for _, companion := range allowToolCompanions[name] {
+			mount[companion] = struct{}{}
+		}
+	}
+	var out []agent.Tool
+	for _, tool := range built {
+		if _, ok := mount[tool.Spec().Name]; ok {
+			out = append(out, tool)
+		}
+	}
+	return out
+}
+
 // headlessApprover is the non-interactive approver -allow-tool installs for
 // one-shot runs (#352). It replaces the nil-approver fail-safe (which denies
 // everything) with an exact-name allowlist, and nothing else changes: there is
