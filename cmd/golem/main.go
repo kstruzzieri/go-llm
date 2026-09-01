@@ -684,6 +684,16 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 	if err := validateFlags(f); err != nil {
 		return maybeUsageError(err, f.promptSet)
 	}
+	// #352: resolve "-p -" immediately after validation and before anything
+	// else reads f.prompt. The TTY probe uses the run() stdin descriptor, so
+	// tests drive it with ordinary files.
+	if stdinPromptRequested(f) {
+		p, perr := resolveStdinPrompt(stdin, realTermOps{}.IsTerminal(int(stdin.Fd())))
+		if perr != nil {
+			return perr
+		}
+		f.prompt = p
+	}
 	f, taskWarns := applyTaskMode(f)
 	f, goalWarns := applyGoalMode(f)
 	taskWarns = append(taskWarns, goalWarns...)

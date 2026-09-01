@@ -1,6 +1,8 @@
 package main
 
 import (
+	"io"
+	"os"
 	"strings"
 	"testing"
 )
@@ -73,5 +75,110 @@ func TestValidateFlagsOutputFormatRequiresOneShot(t *testing.T) {
 	}
 	if err := validateFlags(flags{outputFormat: "text"}); err != nil {
 		t.Fatalf("an explicit text format is valid without -p (it is the default behavior): %v", err)
+	}
+}
+
+func TestResolveStdinPromptReadsToEOF(t *testing.T) {
+	got, err := resolveStdinPrompt(strings.NewReader("summarize this diff\n"), false)
+	if err != nil {
+		t.Fatalf("resolveStdinPrompt: %v", err)
+	}
+	if got != "summarize this diff\n" {
+		t.Errorf("prompt = %q, want the stdin bytes verbatim", got)
+	}
+}
+
+func TestResolveStdinPromptRejectsTTY(t *testing.T) {
+	_, err := resolveStdinPrompt(strings.NewReader("ignored"), true)
+	if err == nil {
+		t.Fatal("a TTY stdin must fail fast")
+	}
+	if exitCodeFor(err) != 2 {
+		t.Errorf("TTY refusal must be a usage error (exit 2), got %d", exitCodeFor(err))
+	}
+	if !strings.Contains(err.Error(), "pipe") {
+		t.Errorf("error %q must give usage guidance mentioning a pipe", err)
+	}
+}
+
+func TestResolveStdinPromptRejectsEmptyAndBlank(t *testing.T) {
+	for _, in := range []string{"", "   ", "\n\n\t\n"} {
+		_, err := resolveStdinPrompt(strings.NewReader(in), false)
+		if err == nil {
+			t.Fatalf("stdin %q must be rejected as an empty prompt", in)
+		}
+		if exitCodeFor(err) != 2 {
+			t.Errorf("empty stdin must be a usage error (exit 2), got %d", exitCodeFor(err))
+		}
+	}
+}
+
+func TestResolveStdinPromptEnforcesByteCap(t *testing.T) {
+	// Exactly at the cap is admitted; one byte over is refused. The cap equals
+	// maxGoalBytes, which is what main.go already passes as the runtime's
+	// MaxMessageBytes, so the CLI never admits input the runtime would reject.
+	atCap := strings.Repeat("a", maxGoalBytes)
+	got, err := resolveStdinPrompt(strings.NewReader(atCap), false)
+	if err != nil {
+		t.Fatalf("a prompt exactly at the cap must be admitted: %v", err)
+	}
+	if len(got) != maxGoalBytes {
+		t.Errorf("len(prompt) = %d, want %d", len(got), maxGoalBytes)
+	}
+	_, err = resolveStdinPrompt(strings.NewReader(atCap+"a"), false)
+	if err == nil {
+		t.Fatal("a prompt one byte over the cap must be refused")
+	}
+	if exitCodeFor(err) != 2 {
+		t.Errorf("over-cap stdin must be a usage error (exit 2), got %d", exitCodeFor(err))
+	}
+}
+
+// stdinFileWith returns run()-compatible stdio files with the given bytes
+// preloaded on stdin, positioned at the start.
+func stdinFileWith(t *testing.T, content string) (stdin, stdout, stderr *os.File) {
+	t.Helper()
+	stdin, stdout, stderr = runTestFiles(t)
+	if _, err := stdin.WriteString(content); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := stdin.Seek(0, io.SeekStart); err != nil {
+		t.Fatal(err)
+	}
+	return stdin, stdout, stderr
+}
+
+func TestRunStdinPromptOverCapExitsTwo(t *testing.T) {
+	// Drives the real run() wiring, not just the helper: a giant piped prompt
+	// must be refused as a usage error before any provider work happens.
+	stdin, stdout, stderr := stdinFileWith(t, strings.Repeat("a", maxGoalBytes+1))
+	err := run([]string{"-p", "-"}, stdin, stdout, stderr)
+	if exitCodeFor(err) != 2 {
+		t.Fatalf("exitCodeFor(%v) = %d, want 2", err, exitCodeFor(err))
+	}
+}
+
+func TestRunStdinPromptEmptyExitsTwo(t *testing.T) {
+	stdin, stdout, stderr := stdinFileWith(t, "   \n")
+	err := run([]string{"-p", "-"}, stdin, stdout, stderr)
+	if exitCodeFor(err) != 2 {
+		t.Fatalf("exitCodeFor(%v) = %d, want 2", err, exitCodeFor(err))
+	}
+}
+
+func TestStdinPromptRequestedOnlyForTheSentinel(t *testing.T) {
+	cases := []struct {
+		f    flags
+		want bool
+	}{
+		{flags{promptSet: true, prompt: "-"}, true},
+		{flags{promptSet: true, prompt: "hello"}, false},
+		{flags{promptSet: true, prompt: "--"}, false},
+		{flags{promptSet: false, prompt: "-"}, false},
+	}
+	for _, tc := range cases {
+		if got := stdinPromptRequested(tc.f); got != tc.want {
+			t.Errorf("stdinPromptRequested(%+v) = %v, want %v", tc.f, got, tc.want)
+		}
 	}
 }
