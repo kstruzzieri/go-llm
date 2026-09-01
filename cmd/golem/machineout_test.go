@@ -420,6 +420,107 @@ func TestRunOneShotMachineModeProviderFailureStillWritesAResult(t *testing.T) {
 	}
 }
 
+// normalizeMachineGolden replaces the nondeterministic fields — the run id on
+// protocol lines, the model name on run.finished and on the result record —
+// so the fixture pins the CONTRACT (envelope shape, event set, ordering,
+// record shape) rather than one run's identity.
+func normalizeMachineGolden(t *testing.T, out string) string {
+	t.Helper()
+	var b strings.Builder
+	for _, line := range strings.Split(strings.TrimSuffix(out, "\n"), "\n") {
+		var probe map[string]json.RawMessage
+		if err := json.Unmarshal([]byte(line), &probe); err != nil {
+			t.Fatalf("golden line not JSON: %v (%q)", err, line)
+		}
+		_, hasProtocol := probe["protocol"]
+		_, hasSchema := probe["schema"]
+		if hasProtocol == hasSchema {
+			t.Fatalf("discrimination rule violated: line must carry exactly one of protocol/schema: %q", line)
+		}
+		if hasProtocol {
+			var e golemruntime.Event
+			if err := json.Unmarshal([]byte(line), &e); err != nil {
+				t.Fatalf("protocol line: %v", err)
+			}
+			e.RunID = "RUNID"
+			if e.Type == "run.finished" {
+				e.Payload = normalizeModelField(t, e.Payload)
+			}
+			if e.Type == "message.delta" {
+				// messageId is "<runID>:<step>" (golem/runtime.go emitDelta);
+				// the run id half is nondeterministic, the step half is
+				// contract-relevant ordering, so keep it.
+				var p struct {
+					MessageID string `json:"messageId"`
+					Text      string `json:"text"`
+				}
+				if err := json.Unmarshal(e.Payload, &p); err != nil {
+					t.Fatalf("delta payload: %v", err)
+				}
+				if i := strings.LastIndex(p.MessageID, ":"); i >= 0 {
+					p.MessageID = "RUNID" + p.MessageID[i:]
+				}
+				raw, err := json.Marshal(p)
+				if err != nil {
+					t.Fatalf("re-encode delta: %v", err)
+				}
+				e.Payload = raw
+			}
+			raw, err := json.Marshal(e)
+			if err != nil {
+				t.Fatalf("re-encode event: %v", err)
+			}
+			b.Write(raw)
+		} else {
+			probe["model"] = json.RawMessage(`"MODEL"`)
+			raw, err := json.Marshal(probe)
+			if err != nil {
+				t.Fatalf("re-encode record: %v", err)
+			}
+			b.Write(raw)
+		}
+		b.WriteByte('\n')
+	}
+	return b.String()
+}
+
+func normalizeModelField(t *testing.T, payload json.RawMessage) json.RawMessage {
+	t.Helper()
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(payload, &m); err != nil {
+		t.Fatalf("payload: %v", err)
+	}
+	m["model"] = json.RawMessage(`"MODEL"`)
+	raw, err := json.Marshal(m)
+	if err != nil {
+		t.Fatalf("re-encode: %v", err)
+	}
+	return raw
+}
+
+func TestMachineOutputGoldenFixtures(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		format outputFormat
+		golden string
+	}{
+		{"json", outputJSON, "testdata/headless/json.golden"},
+		{"stream-json", outputStreamJSON, "testdata/headless/stream-json.golden"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stdout, _ := runMachineModeHarness(t, tc.format)
+			got := normalizeMachineGolden(t, stdout)
+			want, err := os.ReadFile(tc.golden)
+			if err != nil {
+				t.Fatalf("read golden: %v", err)
+			}
+			if got != string(want) {
+				t.Errorf("machine output drifted from the frozen contract.\n got:\n%s\nwant:\n%s", got, want)
+			}
+		})
+	}
+}
+
 func TestPreRunFailureResult(t *testing.T) {
 	rec := preRunFailureResult("provider_unavailable", "no backend answered")
 	var buf bytes.Buffer
