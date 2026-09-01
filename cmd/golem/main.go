@@ -1110,9 +1110,24 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 		}
 	}()
 
+	// #352: -allow-tool mounts gated tools for a headless run. The set was
+	// already validated in validateFlags, so this cannot fail here; the error
+	// is still checked rather than discarded. The write/exec construction
+	// below is shared: -allow-write/-allow-exec drive it interactively,
+	// -allow-tool drives it headlessly. Neither can be true at the same time
+	// as the other for a given kind, because applyOneShotMode clears both
+	// allow flags whenever -p is set.
+	allowTools, aterr := newAllowToolSet(f.allowTools)
+	if aterr != nil {
+		return aterr
+	}
+	buildWrite := f.allowWrite || allowTools.authorized("write_file") || allowTools.authorized("edit_file")
+	buildExec := f.allowExec || allowTools.authorized("run_command") ||
+		allowTools.authorized("start_command") || allowTools.authorized("stop_command")
+
 	var journal *checkpointJournal
 	var verifier *verifyRunner
-	if f.allowWrite {
+	if buildWrite {
 		// D6: -allow-write fails closed on ANY checkpoint lifecycle failure
 		// (store, lease, migration, recovery, state query, hardening) rather
 		// than silently dropping the #355 durability guarantee.
@@ -1142,27 +1157,38 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 		} else if n > 0 {
 			warns = append(warns, fmt.Sprintf("an interrupted undo exists (%d checkpoint(s)); /undo resumes it", n))
 		}
-		tools = append(tools, wt...)
+		if f.allowWrite {
+			tools = append(tools, wt...)
+		} else {
+			tools = append(tools, filterAllowedTools(wt, allowTools)...)
+		}
 		journal = j
 
 		// #347: read only here, so no other mode ever touches .golem.json.
 		// applyOneShotMode has already cleared allowWrite for -p, and task,
-		// planning and Agentflow modes reject it at validation.
-		var vwarn string
-		if verifier, vwarn = buildVerifier(root); vwarn != "" {
-			warns = append(warns, vwarn)
+		// planning and Agentflow modes reject it at validation. Deliberately
+		// gated on f.allowWrite, NOT buildWrite: a headless -allow-tool run
+		// must not read .golem.json or mount post-write verification —
+		// verify_command is not an -allow-tool name.
+		if f.allowWrite {
+			var vwarn string
+			if verifier, vwarn = buildVerifier(root); vwarn != "" {
+				warns = append(warns, vwarn)
+			}
 		}
 	}
 
-	// Background manager (#346): constructed only when interactive -allow-exec
+	// Background manager (#346): constructed when interactive -allow-exec
 	// survives to this point (one-shot already forced allowExec false;
-	// -plan/-goal reject it at flag validation), so every manager gets the
-	// replCtx lifetime binding below. The deferred Shutdown is registered
-	// immediately so no error path between here and that binding can leak a
-	// process; sync.Once makes it safe beside the AfterFunc path.
+	// -plan/-goal reject it at flag validation) or when #352's -allow-tool
+	// named an exec tool — one manager per invocation either way, so every
+	// manager gets the replCtx lifetime binding below. The deferred Shutdown
+	// is registered immediately so no error path between here and that
+	// binding can leak a process; sync.Once makes it safe beside the
+	// AfterFunc path.
 	var bgManager *agenttools.BackgroundManager
 	var bgExecTools []agent.Tool
-	if f.allowExec {
+	if buildExec {
 		bgManager = agenttools.NewBackgroundManager()
 		defer func() {
 			bgManager.Shutdown()
@@ -1175,7 +1201,11 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 			return eerr
 		}
 		bgExecTools = et
-		tools = append(tools, et...)
+		if f.allowExec {
+			tools = append(tools, et...)
+		} else {
+			tools = append(tools, filterAllowedTools(et, allowTools)...)
+		}
 	}
 
 	delegateLine := ""
@@ -1216,7 +1246,21 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 		}
 	}()
 
-	baseSystem := buildSystemPrompt(f.allowWrite, f.allowExec)
+	var baseSystem string
+	if !allowTools.empty() {
+		// #352/F6: a selectively mounted run gets a prompt built from the
+		// EXACT mounted set; the group prompt would advertise tools that do
+		// not exist and an interactive approval flow that never happens.
+		baseSystem = golemruntime.SystemPromptHeadless(golemruntime.HeadlessToolCaps{
+			WriteFile:    allowTools.authorized("write_file"),
+			EditFile:     allowTools.authorized("edit_file"),
+			RunCommand:   allowTools.authorized("run_command"),
+			StartCommand: allowTools.authorized("start_command"),
+			StopCommand:  allowTools.authorized("stop_command"),
+		})
+	} else {
+		baseSystem = buildSystemPrompt(f.allowWrite, f.allowExec)
+	}
 	baseSystem += delegateSystemFragment(f.delegate, f.allowWrite)
 	baseSystem += dispatchSystemFragment(f.dispatch)
 	baseSystem += memorySystemFragment(memoryEnabled)
@@ -1371,6 +1415,7 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 		bgManager:           bgManager,
 		grants:              newApprovalGrants(),
 		destAdmission:       adm,
+		headlessApprover:    headlessApproverFor(allowTools),
 		allowWrite:          f.allowWrite,
 		allowExec:           f.allowExec,
 		mcpAttached:         mcpAttached,

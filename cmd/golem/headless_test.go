@@ -435,6 +435,23 @@ func TestHeadlessApproverSatisfiesBothContracts(t *testing.T) {
 	}
 }
 
+func TestApplyOneShotModeKeepsExistingAllowFlagWarningVerbatim(t *testing.T) {
+	// -allow-write/-allow-exec keep being dropped with the byte-identical
+	// pre-#352 warning; -allow-tool is the only headless authorization path.
+	_, warns := applyOneShotMode(flags{promptSet: true, prompt: "x", allowWrite: true, allowExec: true, allowTools: stringSliceFlag{"run_command"}})
+	const want = "one-shot: -allow-write/-allow-exec ignored (approval prompts need the REPL); write/exec tools unavailable"
+	if len(warns) != 1 || warns[0] != want {
+		t.Fatalf("warns = %q, want exactly [%q]", warns, want)
+	}
+}
+
+func TestApplyOneShotModeDoesNotClearAllowTools(t *testing.T) {
+	got, _ := applyOneShotMode(flags{promptSet: true, prompt: "x", allowTools: stringSliceFlag{"run_command"}})
+	if len(got.allowTools) != 1 || got.allowTools[0] != "run_command" {
+		t.Fatalf("allowTools = %v, want it preserved through one-shot normalization", got.allowTools)
+	}
+}
+
 func TestValidateFlagsAllowToolRequiresOneShot(t *testing.T) {
 	err := validateFlags(flags{allowTools: stringSliceFlag{"run_command"}})
 	if err == nil {

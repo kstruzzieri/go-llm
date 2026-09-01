@@ -197,6 +197,16 @@ func newHeadlessApprover(allow allowToolSet) *headlessApprover {
 	return &headlessApprover{allow: allow}
 }
 
+// headlessApproverFor returns the -allow-tool approver, or nil when nothing was
+// authorized. A nil approver is the pre-#352 behavior: the runtime's fail-safe
+// denies every gated call.
+func headlessApproverFor(allow allowToolSet) *headlessApprover {
+	if allow.empty() {
+		return nil
+	}
+	return newHeadlessApprover(allow)
+}
+
 // Approve satisfies the plain contract by delegating; no key, same answer.
 func (a *headlessApprover) Approve(ctx context.Context, call provider.ToolCall, preview string) (bool, error) {
 	d, err := a.ApproveKeyed(ctx, call, preview, "")

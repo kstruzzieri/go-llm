@@ -63,8 +63,12 @@ type replSession struct {
 	// /grants clear revokes it and the next GOAL re-runs the batch gate.
 	// nil in ungated contexts.
 	destAdmission *destinationAdmission
-	allowWrite    bool
-	allowExec     bool
+	// headlessApprover is the non-interactive -allow-tool approver (#352). It
+	// is non-nil only for one-shot runs that named at least one gated tool;
+	// the REPL never has one, and a nil value keeps the pre-#352 fail-safe.
+	headlessApprover *headlessApprover
+	allowWrite       bool
+	allowExec        bool
 	mcpAttached   bool    // true when external MCP tools are attached (force approver)
 	obs           *observ // nil unless -trace/-telemetry enabled
 	feedback      *feedbackService
@@ -222,8 +226,15 @@ func runOnce(ctx context.Context, out io.Writer, interrupts <-chan struct{}, ses
 	// in production, read-only sessions in tests. It is capability absence, not
 	// a mode assertion: the runtime's nil-approver fail-safe then denies every
 	// gated call.
+	//
+	// #352: -allow-tool installs a non-interactive approver instead. It is
+	// checked FIRST because a headless run has no line source by construction,
+	// so the interactive branch could never be reached for it.
 	var approver agent.Approver
-	if src != nil && needsApprover(sess.allowWrite, sess.allowExec, sess.mcpAttached) {
+	switch {
+	case sess.headlessApprover != nil:
+		approver = sess.headlessApprover
+	case src != nil && needsApprover(sess.allowWrite, sess.allowExec, sess.mcpAttached):
 		ap := newReplApprover(src, renderOut, sess.color)
 		ap.beforeWrite = rend.breakLine
 		ap.grants = sess.grants
