@@ -90,6 +90,7 @@ type flags struct {
 	goal                string // AgentFlow planning mode goal (-goal)
 	goalSet             bool   // -goal was passed (distinguishes an explicit empty goal)
 	approvePlanLock     bool   // -approve-plan-lock: non-interactive planning-mode lock approval
+	outputFormat        string // -output-format: text|json|stream-json (#352)
 }
 
 func parseFlags(args []string) (flags, error) {
@@ -153,6 +154,7 @@ func parseFlags(args []string) (flags, error) {
 	fs.StringVar(&f.workflowReason, "workflow-reason", "", "Agentflow modes: non-empty rationale paired with -workflow-profile")
 	fs.StringVar(&f.goal, "goal", "", "AgentFlow planning mode: author and preview a traceable plan, require approval to lock it, then stop")
 	fs.BoolVar(&f.approvePlanLock, "approve-plan-lock", false, "planning mode: print the plan preview and approve the lock without prompting (non-interactive -goal)")
+	fs.StringVar(&f.outputFormat, "output-format", "text", "one-shot mode: stdout format — text (the final answer), json (one golem.result.v1 record), or stream-json (one protocol-v1 event per line, then the same record); requires -p")
 	if err := fs.Parse(args); err != nil {
 		return flags{}, err
 	}
@@ -241,6 +243,15 @@ func validateFlags(f flags) error {
 	}
 	if f.promptSet && strings.TrimSpace(f.prompt) == "" {
 		return fmt.Errorf("golem: -p requires a non-empty prompt")
+	}
+	// #352: the requires-p check comes FIRST, so a non-headless invocation gets
+	// a plain mode error (exit 1) and never reaches the headless-classified
+	// value check below.
+	if f.outputFormat != "" && f.outputFormat != "text" && !f.promptSet {
+		return fmt.Errorf("golem: -output-format requires -p (one-shot mode)")
+	}
+	if _, err := parseOutputFormat(f.outputFormat); err != nil {
+		return err
 	}
 	if f.promptSet && (f.fresh || f.sessionID != "") {
 		return fmt.Errorf("golem: -p (one-shot) is incompatible with -session and -fresh")
