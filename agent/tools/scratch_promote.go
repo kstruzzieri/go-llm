@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strconv"
 	"sync"
@@ -23,6 +24,9 @@ import (
 type PromoteArtifact struct {
 	ws *Workspace
 	rt *scratchRuntime
+	// install is the filesystem commit seam; production uses
+	// installPromotedCreate and tests inject post-install failures.
+	install func(string, scratchChange) (bool, error)
 
 	mu         sync.Mutex
 	argsHash   string
@@ -42,7 +46,7 @@ type promotePending struct {
 
 // NewPromoteArtifact builds the promotion tool over the shared runtime.
 func NewPromoteArtifact(ws *Workspace, rt *scratchRuntime) *PromoteArtifact {
-	return &PromoteArtifact{ws: ws, rt: rt}
+	return &PromoteArtifact{ws: ws, rt: rt, install: installPromotedCreate}
 }
 
 type promoteArtifactArgs struct {
@@ -191,9 +195,18 @@ func (t *PromoteArtifact) Invoke(ctx context.Context, raw json.RawMessage) (agen
 		TrackedMode: true,
 		AfterMode:   p.change.mode.Perm(),
 	}
+	var postInstallErr error
 	toolErr, internalErr := runJournaledWrite(ctx, t.rt.journal, rec, func() error {
-		return installPromotedCreate(t.ws.root, p.change)
+		installed, err := t.install(t.ws.root, p.change)
+		if installed {
+			postInstallErr = err
+			return nil // commit the prepared intent for every landed file
+		}
+		return err
 	})
+	if postInstallErr != nil {
+		internalErr = errors.Join(internalErr, postInstallErr)
+	}
 	if internalErr != nil {
 		t.rt.store.consume(p.id, p.path)
 		return errResult(fmt.Sprintf(

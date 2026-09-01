@@ -1,6 +1,8 @@
 package tools
 
 import (
+	"fmt"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -97,6 +99,16 @@ func TestScratchConfigNormalizeRejects(t *testing.T) {
 	}
 }
 
+func TestScratchRuntimeRejectsWorkspaceAtTempBase(t *testing.T) {
+	base, err := CanonicalWorkspaceRoot(scratchTempBase())
+	if err != nil {
+		t.Skipf("scratch temp base unavailable: %v", err)
+	}
+	if _, err := newScratchRuntime(base, ScratchConfig{Enabled: true}, nil); err == nil {
+		t.Fatalf("scratch runtime accepted workspace equal to temp base %q", base)
+	}
+}
+
 func TestScratchEffectGraceIsFiveSeconds(t *testing.T) {
 	if scratchEffectGrace != 5*time.Second {
 		t.Fatalf("scratchEffectGrace = %v, approved value is 5s", scratchEffectGrace)
@@ -109,7 +121,7 @@ func TestScratchOuterTimeoutSum(t *testing.T) {
 	if err != nil {
 		t.Fatalf("outer timeout: %v", err)
 	}
-	want := 30*time.Second + 90*time.Second + 30*time.Second + 5*time.Second
+	want := 30*time.Second + 90*time.Second + 2*30*time.Second + 5*time.Second
 	if got != want {
 		t.Fatalf("outer timeout = %v, want %v", got, want)
 	}
@@ -204,6 +216,13 @@ func TestScratchApprovalPromotionAvailabilityRekeys(t *testing.T) {
 	}
 }
 
+func TestScratchTempBaseRekeys(t *testing.T) {
+	cfg := enabledScratchConfig()
+	if scratchFingerprint(cfg, false, "/safe/temp") == scratchFingerprint(cfg, false, "/shared/temp") {
+		t.Fatal("temp-base policy change did not re-key")
+	}
+}
+
 func TestScratchApprovalPreviewContent(t *testing.T) {
 	a, err := approvalForScratch(enabledScratchConfig(), true)
 	if err != nil {
@@ -215,8 +234,8 @@ func TestScratchApprovalPreviewContent(t *testing.T) {
 		"sessions<=2",
 		"setup<=30s",
 		"capture<=30s",
+		"cleanup<=30s",
 		"grace=5s",
-		"temp=private",
 		"git-metadata=omitted",
 		"promote=available",
 	} {
@@ -224,12 +243,18 @@ func TestScratchApprovalPreviewContent(t *testing.T) {
 			t.Fatalf("preview missing %q:\n%s", want, a.preview)
 		}
 	}
-	// The preview is policy, never path material: nothing resembling a temp
-	// path may appear (the ephemeral root is created long after Plan).
-	for _, forbid := range []string{"/tmp", "/private", "go-llm-scratch"} {
-		if strings.Contains(a.preview, forbid) {
-			t.Fatalf("preview leaks path material %q:\n%s", forbid, a.preview)
+	if runtime.GOOS == "darwin" || runtime.GOOS == "linux" {
+		if !strings.Contains(a.preview, "temp=private") {
+			t.Fatalf("preview missing fixed private temp policy:\n%s", a.preview)
 		}
+		// The ephemeral root is created long after Plan and never appears.
+		for _, forbid := range []string{"/tmp", "/private", "go-llm-scratch"} {
+			if strings.Contains(a.preview, forbid) {
+				t.Fatalf("preview leaks ephemeral path material %q:\n%s", forbid, a.preview)
+			}
+		}
+	} else if !strings.Contains(a.preview, fmt.Sprintf("temp=%q", a.tempBase)) {
+		t.Fatalf("preview omits environment-selected temp policy %q:\n%s", a.tempBase, a.preview)
 	}
 }
 

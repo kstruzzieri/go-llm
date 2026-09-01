@@ -317,7 +317,7 @@ func (t *RunCommand) Plan(_ context.Context, raw json.RawMessage) (agent.ToolPla
 	t.store(ContentHash(raw), p)
 	eff.Timeout = timeout
 	if t.scratchRT != nil {
-		// The outer effect budget covers setup + command + capture + grace;
+		// The outer effect budget covers setup + command + capture + cleanup + grace;
 		// Invoke gives each phase its own bounded child context (D6).
 		outer, err := scratchOuterTimeout(t.scratchRT.cfg, timeout)
 		if err != nil {
@@ -480,9 +480,19 @@ func (t *RunCommand) invokeScratched(ctx context.Context, pp execPending, spec e
 		}
 		return errResult("command canceled"), nil
 	}
-	captureCtx, cancelCapture := context.WithTimeout(context.Background(), t.scratchRT.cfg.CaptureTimeout)
+	if t.scratchRT.beforeCapture != nil {
+		t.scratchRT.beforeCapture()
+	}
+	captureCtx, cancelCapture := context.WithTimeout(ctx, t.scratchRT.cfg.CaptureTimeout)
 	session.finish(captureCtx)
 	cancelCapture()
+	if ctx.Err() != nil {
+		session.discard()
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			return errResult("scratch effect budget exhausted; result discarded"), nil
+		}
+		return errResult("command canceled"), nil
+	}
 	summary := renderScratchResultLine(t.scratchRT, session.id)
 
 	if runErr != nil {
@@ -517,7 +527,10 @@ func renderScratchResultLine(rt *scratchRuntime, id string) string {
 	if out.captureErr != "" {
 		line += " capture-error"
 	}
-	if len(out.changes) > 0 {
+	if out.cleanupErr != "" {
+		line += " cleanup-error"
+	}
+	if len(out.changes) > 0 || out.truncated || out.captureErr != "" || out.cleanupErr != "" {
 		line += " (details: scratch_changes)"
 	}
 	return line + "\n"

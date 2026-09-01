@@ -3,6 +3,7 @@ package tools
 import (
 	"bytes"
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"sort"
@@ -355,9 +356,16 @@ func TestScratchDiffAgentAndReservedExcluded(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(f.workspace, scratchPromoteTempPrefix+"abc"), []byte("temp"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	stage := filepath.Join(f.workspace, scratchPromoteTempPrefix+"stage")
+	if err := os.Mkdir(stage, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(stage, "artifact"), []byte("temp"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	out := f.diff(t)
 	for _, c := range out.changes {
-		if strings.HasPrefix(c.path, ".agent") || strings.HasPrefix(filepath.Base(c.path), scratchPromoteTempPrefix) {
+		if strings.HasPrefix(c.path, ".agent") || isScratchPromoteTempPath(c.path) {
 			t.Fatalf("reserved path leaked into the changeset: %+v", c)
 		}
 	}
@@ -430,10 +438,103 @@ func TestScratchDiffCompareRespectsContext(t *testing.T) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if _, _, err := compareFilePair(ctx, filepath.Join(dir, "a"), filepath.Join(dir, "b")); err == nil {
+	man, err := walkSource(context.Background(), dir, cloneFixtureConfig(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	entries := map[string]snapshotEntry{}
+	for _, entry := range man.entries {
+		entries[entry.path] = entry
+	}
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = root.Close() }()
+	if _, _, err := compareFilePair(ctx, root, entries["a"], root, entries["b"]); err == nil {
 		t.Fatal("cancelled context must stop the stream compare")
 	}
-	if _, err := hashFile(ctx, filepath.Join(dir, "a")); err == nil {
+	if _, err := hashFile(ctx, root, entries["a"]); err == nil {
 		t.Fatal("cancelled context must stop the stream hash")
+	}
+}
+
+func TestOpenManifestRegularRejectsSymlinkSwap(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "entry")
+	if err := os.WriteFile(path, []byte("inside"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	man, err := walkSource(context.Background(), dir, cloneFixtureConfig(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var entry snapshotEntry
+	for _, candidate := range man.entries {
+		if candidate.path == "entry" {
+			entry = candidate
+		}
+	}
+	if entry.path == "" {
+		t.Fatal("manifest missing entry")
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	outside := filepath.Join(t.TempDir(), "outside")
+	if err := os.WriteFile(outside, []byte("secret"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, path); err != nil {
+		t.Skipf("symlinks unsupported: %v", err)
+	}
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = root.Close() }()
+	if f, err := openManifestRegular(root, entry); err == nil {
+		_ = f.Close()
+		t.Fatal("capture opened a path swapped from a regular file to a symlink")
+	}
+}
+
+type cancelAfterErrChecks struct {
+	context.Context
+	checks int
+	after  int
+}
+
+func (c *cancelAfterErrChecks) Err() error {
+	c.checks++
+	if c.checks >= c.after {
+		return context.Canceled
+	}
+	return nil
+}
+
+func TestReadStableChecksContextBetweenChunks(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "large"), bytes.Repeat([]byte("x"), 1<<20), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	man, err := walkSource(context.Background(), dir, cloneFixtureConfig(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var entry snapshotEntry
+	for _, candidate := range man.entries {
+		if candidate.path == "large" {
+			entry = candidate
+		}
+	}
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = root.Close() }()
+	ctx := &cancelAfterErrChecks{Context: context.Background(), after: 3}
+	if _, err := readStable(ctx, root, entry); !errors.Is(err, context.Canceled) {
+		t.Fatalf("chunked read error = %v, want context.Canceled", err)
 	}
 }

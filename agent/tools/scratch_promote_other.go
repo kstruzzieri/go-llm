@@ -15,6 +15,6 @@ const scratchPromotionSupported = false
 // fsModePermMask is the permission-bit mask used by post-commit checks.
 const fsModePermMask = fs.FileMode(0o777)
 
-func installPromotedCreate(root string, change scratchChange) error {
-	return errors.New("tools: scratch promotion is unsupported on this platform")
+func installPromotedCreate(root string, change scratchChange) (bool, error) {
+	return false, errors.New("tools: scratch promotion is unsupported on this platform")
 }

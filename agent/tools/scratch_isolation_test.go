@@ -10,6 +10,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -271,6 +272,31 @@ func TestScratchForegroundParentCancelDiscards(t *testing.T) {
 	}
 }
 
+func TestScratchForegroundCancelDuringCaptureDiscards(t *testing.T) {
+	root := buildIsolationWorkspace(t)
+	rc, rt, _ := scratchExecTools(t, root, ScratchConfig{Enabled: true})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	rt.beforeCapture = cancel
+	raw := `{"argv":["sh","-c","true"]}`
+	if _, err := rc.Plan(context.Background(), json.RawMessage(raw)); err != nil {
+		t.Fatal(err)
+	}
+	res, err := rc.Invoke(ctx, json.RawMessage(raw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.IsError || !strings.Contains(res.Content, "canceled") || strings.Contains(res.Content, "scratch: id=") {
+		t.Fatalf("capture cancellation must discard the outcome: %+v", res)
+	}
+	rt.store.mu.Lock()
+	completed := len(rt.store.completed)
+	rt.store.mu.Unlock()
+	if completed != 0 {
+		t.Fatalf("capture cancellation published %d outcomes", completed)
+	}
+}
+
 func TestScratchForegroundApprovalKeyOrderAndPreview(t *testing.T) {
 	root := buildIsolationWorkspace(t)
 	rc, _, _ := scratchExecTools(t, root, ScratchConfig{Enabled: true})
@@ -304,7 +330,7 @@ func TestScratchForegroundEffectBudget(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := rt.cfg.SnapshotTimeout + 90*time.Second + rt.cfg.CaptureTimeout + scratchEffectGrace
+	want := rt.cfg.SnapshotTimeout + 90*time.Second + 2*rt.cfg.CaptureTimeout + scratchEffectGrace
 	if plan.Effect.Timeout != want {
 		t.Fatalf("outer effect timeout = %v, want %v", plan.Effect.Timeout, want)
 	}
@@ -590,7 +616,7 @@ func TestScratchBackgroundEffectBudget(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := rt.cfg.SnapshotTimeout + bgToolTimeout + rt.cfg.CaptureTimeout + scratchEffectGrace
+	want := rt.cfg.SnapshotTimeout + bgToolTimeout + 2*rt.cfg.CaptureTimeout + scratchEffectGrace
 	if plan.Effect.Timeout != want {
 		t.Fatalf("outer start effect = %v, want %v", plan.Effect.Timeout, want)
 	}
@@ -886,5 +912,81 @@ func TestScratchChangesOutputCapCoversWorstCase(t *testing.T) {
 	cap := tool.Effect().OutputCap
 	if cap <= 0 || len(res.Content) > cap {
 		t.Fatalf("declared OutputCap %d does not cover the worst-case render (%d bytes)", cap, len(res.Content))
+	}
+}
+
+func TestScratchChangesPaginatesConfiguredChangeLimit(t *testing.T) {
+	rt, _ := newTestScratchRuntime(t, ScratchConfig{Enabled: true, MaxChangedFiles: 130})
+	tool := ScratchChanges{rt: rt}
+	changes := make([]scratchChange, 130)
+	for i := range changes {
+		changes[i] = scratchChange{path: fmt.Sprintf("change-%03d", i), kind: scratchChangeCreate, size: 1}
+	}
+	rt.store.beginPending("scr-pages")
+	rt.store.completePending("scr-pages", scratchOutcome{changes: changes})
+
+	first, err := tool.Invoke(context.Background(), json.RawMessage(`{"id":"scr-pages"}`))
+	if err != nil || first.IsError || !first.Truncated {
+		t.Fatalf("first page: %+v err=%v", first, err)
+	}
+	if !strings.Contains(first.Content, "change-063") || strings.Contains(first.Content, "change-064") ||
+		!strings.Contains(first.Content, `"offset":64`) {
+		t.Fatalf("first page boundary/continuation wrong:\n%s", first.Content)
+	}
+	second, err := tool.Invoke(context.Background(), json.RawMessage(`{"id":"scr-pages","offset":64}`))
+	if err != nil || second.IsError || !second.Truncated {
+		t.Fatalf("second page: %+v err=%v", second, err)
+	}
+	if strings.Contains(second.Content, "change-063") || !strings.Contains(second.Content, "change-127") ||
+		strings.Contains(second.Content, "change-128") || !strings.Contains(second.Content, `"offset":128`) {
+		t.Fatalf("second page boundary/continuation wrong:\n%s", second.Content)
+	}
+	last, err := tool.Invoke(context.Background(), json.RawMessage(`{"id":"scr-pages","offset":128}`))
+	if err != nil || last.IsError || last.Truncated || !strings.Contains(last.Content, "change-129") {
+		t.Fatalf("last page: %+v err=%v", last, err)
+	}
+}
+
+func TestScratchChangesContinuationFitsByteBudget(t *testing.T) {
+	rt, _ := newTestScratchRuntime(t, ScratchConfig{Enabled: true, MaxChangedFiles: 64})
+	tool := ScratchChanges{rt: rt}
+	hostile := strings.Repeat("\x01", 32_767)
+	changes := make([]scratchChange, 64)
+	for i := range changes {
+		changes[i] = scratchChange{
+			path:   fmt.Sprintf("%02d-%s", i, hostile),
+			kind:   scratchChangeCreate,
+			size:   1,
+			reason: hostile,
+		}
+	}
+	rt.store.beginPending("scr-byte-pages")
+	rt.store.completePending("scr-byte-pages", scratchOutcome{changes: changes})
+
+	first, err := tool.Invoke(context.Background(), json.RawMessage(`{"id":"scr-byte-pages"}`))
+	if err != nil || first.IsError || !first.Truncated {
+		t.Fatalf("first byte-bounded page: %+v err=%v", first, err)
+	}
+	if len(first.Content) > tool.Effect().OutputCap {
+		t.Fatalf("page exceeds output cap: %d > %d", len(first.Content), tool.Effect().OutputCap)
+	}
+	marker := `"offset":`
+	start := strings.LastIndex(first.Content, marker)
+	if start < 0 {
+		t.Fatalf("byte-bounded page lost continuation:\n%s", first.Content)
+	}
+	start += len(marker)
+	end := strings.IndexByte(first.Content[start:], '}')
+	if end < 0 {
+		t.Fatal("malformed continuation offset")
+	}
+	next, err := strconv.Atoi(first.Content[start : start+end])
+	if err != nil || next <= 0 || next >= 64 {
+		t.Fatalf("continuation offset = %d err=%v, want 1..63", next, err)
+	}
+	secondRaw := json.RawMessage(fmt.Sprintf(`{"id":"scr-byte-pages","offset":%d}`, next))
+	second, err := tool.Invoke(context.Background(), secondRaw)
+	if err != nil || second.IsError || !strings.Contains(second.Content, fmt.Sprintf("%02d-", next)) {
+		t.Fatalf("continuation did not resume exactly at %d: %+v err=%v", next, second, err)
 	}
 }

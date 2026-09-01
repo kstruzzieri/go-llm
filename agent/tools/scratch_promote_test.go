@@ -184,6 +184,15 @@ func TestPromoteArtifactCreateLandsExactly(t *testing.T) {
 	if fi.Mode().Perm() != 0o640 || !fi.Mode().IsRegular() {
 		t.Fatalf("promoted mode = %v", fi.Mode())
 	}
+	entries, err := os.ReadDir(filepath.Join(f.root, "dir"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), scratchPromoteTempPrefix) {
+			t.Fatalf("successful promotion left staging residue %q", entry.Name())
+		}
+	}
 	if len(f.journal.records) != 1 {
 		t.Fatalf("journal records = %d, want 1", len(f.journal.records))
 	}
@@ -378,6 +387,35 @@ func TestPromoteArtifactCommitFailureIsIndeterminate(t *testing.T) {
 	}
 	if _, err := os.Lstat(filepath.Join(f.root, "dir/new.txt")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatal("refused retry must not rewrite the file")
+	}
+}
+
+func TestPromoteArtifactPostInstallFailureIsIndeterminate(t *testing.T) {
+	f := newPromoteFixture(t)
+	realInstall := f.tool.install
+	f.tool.install = func(root string, change scratchChange) (bool, error) {
+		installed, err := realInstall(root, change)
+		if err != nil {
+			return installed, err
+		}
+		return true, errors.New("sync parent failed")
+	}
+	raw := promoteArgs(f.id, "dir/new.txt")
+	if _, err := f.tool.Plan(context.Background(), raw); err != nil {
+		t.Fatal(err)
+	}
+	res, err := f.tool.Invoke(context.Background(), raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.IsError || !strings.Contains(res.Content, "indeterminate") {
+		t.Fatalf("post-install failure must be indeterminate: %+v", res)
+	}
+	if len(f.journal.records) != 1 {
+		t.Fatalf("landed promotion must commit its journal intent, got %d records", len(f.journal.records))
+	}
+	if _, err := os.Lstat(filepath.Join(f.root, "dir/new.txt")); err != nil {
+		t.Fatal("filesystem commit must remain visible")
 	}
 }
 

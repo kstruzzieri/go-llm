@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -14,13 +15,14 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 	"unicode/utf8"
 )
 
 const (
 	// scratchPromoteTempPrefix reserves the basename namespace promotion uses
-	// for its same-directory temp files. Entries carrying it are never
+	// for its same-directory staging directories. Subtrees carrying it are never
 	// captured as artifacts, so promotion can never collide with a
 	// command-created file of the same name.
 	scratchPromoteTempPrefix = ".golem-scratch-promote-"
@@ -101,6 +103,16 @@ func diffTreesWithHook(ctx context.Context, reference, workspace string, canonic
 	if err != nil {
 		return scratchOutcome{}, fmt.Errorf("tools: walk work tree: %w", err)
 	}
+	refRoot, err := os.OpenRoot(reference)
+	if err != nil {
+		return scratchOutcome{}, fmt.Errorf("tools: open reference tree: %w", err)
+	}
+	defer func() { _ = refRoot.Close() }()
+	workRoot, err := os.OpenRoot(workspace)
+	if err != nil {
+		return scratchOutcome{}, fmt.Errorf("tools: open work tree: %w", err)
+	}
+	defer func() { _ = workRoot.Close() }()
 	refEntries := diffIndex(refMan)
 	workEntries := diffIndex(workMan)
 	canonEntries := map[string]snapshotEntry{}
@@ -127,7 +139,7 @@ func diffTreesWithHook(ctx context.Context, reference, workspace string, canonic
 		}
 		ref, inRef := refEntries[p]
 		work, inWork := workEntries[p]
-		change, changed, err := classifyChange(ctx, reference, workspace, p, ref, inRef, work, inWork)
+		change, changed, err := classifyChange(ctx, refRoot, workRoot, p, ref, inRef, work, inWork)
 		if err != nil {
 			return scratchOutcome{}, err
 		}
@@ -140,7 +152,7 @@ func diffTreesWithHook(ctx context.Context, reference, workspace string, canonic
 			break
 		}
 		if change.kind == scratchChangeCreate && change.promotable {
-			gateCreate(ctx, workspace, &change, canonEntries, cfg, &retained)
+			gateCreate(ctx, workRoot, &change, work, canonEntries, cfg, &retained)
 		}
 		out.changes = append(out.changes, change)
 	}
@@ -191,7 +203,7 @@ func diffIndex(man snapshotManifest) map[string]snapshotEntry {
 		if e.path == ".agent" || strings.HasPrefix(e.path, ".agent/") {
 			continue
 		}
-		if strings.HasPrefix(path.Base(e.path), scratchPromoteTempPrefix) {
+		if isScratchPromoteTempPath(e.path) {
 			continue
 		}
 		m[e.path] = e
@@ -199,10 +211,19 @@ func diffIndex(man snapshotManifest) map[string]snapshotEntry {
 	return m
 }
 
+func isScratchPromoteTempPath(p string) bool {
+	for _, component := range strings.Split(p, "/") {
+		if strings.HasPrefix(component, scratchPromoteTempPrefix) {
+			return true
+		}
+	}
+	return false
+}
+
 // classifyChange decides whether one path changed and what kind of change it
 // is. A create starts out promotable=true and is then gated by gateCreate;
 // every other kind is report-only by construction (D5).
-func classifyChange(ctx context.Context, reference, workspace, p string, ref snapshotEntry, inRef bool, work snapshotEntry, inWork bool) (scratchChange, bool, error) {
+func classifyChange(ctx context.Context, reference, workspace *os.Root, p string, ref snapshotEntry, inRef bool, work snapshotEntry, inWork bool) (scratchChange, bool, error) {
 	switch {
 	case inWork && !inRef:
 		c := scratchChange{
@@ -231,7 +252,7 @@ func classifyChange(ctx context.Context, reference, workspace, p string, ref sna
 }
 
 // classifyCommon compares a path present in both trees.
-func classifyCommon(ctx context.Context, reference, workspace, p string, ref, work snapshotEntry) (scratchChange, bool, error) {
+func classifyCommon(ctx context.Context, reference, workspace *os.Root, p string, ref, work snapshotEntry) (scratchChange, bool, error) {
 	base := scratchChange{
 		path:  p,
 		mode:  work.typ | work.mode,
@@ -265,9 +286,7 @@ func classifyCommon(ctx context.Context, reference, workspace, p string, ref, wo
 			// Same size proves nothing: stream-compare the pair. Metadata
 			// may prove difference, never equality.
 			var err error
-			equal, workHash, err = compareFilePair(ctx,
-				filepath.Join(reference, filepath.FromSlash(p)),
-				filepath.Join(workspace, filepath.FromSlash(p)))
+			equal, workHash, err = compareFilePair(ctx, reference, ref, workspace, work)
 			if err != nil {
 				return scratchChange{}, false, err
 			}
@@ -281,7 +300,7 @@ func classifyCommon(ctx context.Context, reference, workspace, p string, ref, wo
 			return scratchChange{}, false, nil
 		}
 		if workHash == "" {
-			if h, herr := hashFile(ctx, filepath.Join(workspace, filepath.FromSlash(p))); herr == nil {
+			if h, herr := hashFile(ctx, workspace, work); herr == nil {
 				workHash = h
 			}
 		}
@@ -299,7 +318,7 @@ func classifyCommon(ctx context.Context, reference, workspace, p string, ref, wo
 // gateCreate applies the D5 promotable matrix to a regular-file create and
 // retains bounded content for those that pass every gate. Retained cost
 // counts data plus the rendered preview against MaxTotalBytes.
-func gateCreate(ctx context.Context, workspace string, c *scratchChange, canonical map[string]snapshotEntry, cfg ScratchConfig, retained *int64) {
+func gateCreate(ctx context.Context, workspace *os.Root, c *scratchChange, work snapshotEntry, canonical map[string]snapshotEntry, cfg ScratchConfig, retained *int64) {
 	demote := func(reason string) {
 		c.promotable = false
 		c.data = nil
@@ -325,13 +344,17 @@ func gateCreate(ctx context.Context, workspace string, c *scratchChange, canonic
 		c.parent.dev, c.parent.ino, c.parent.mode = pe.dev, pe.ino, pe.fullMode
 	}
 	if c.size > cfg.MaxFileBytes {
-		if hash, err := hashFile(ctx, filepath.Join(workspace, filepath.FromSlash(c.path))); err == nil {
+		if hash, err := hashFile(ctx, workspace, work); err == nil {
 			c.hash = hash
 		}
 		demote(fmt.Sprintf("create exceeds the %d-byte retention cap", cfg.MaxFileBytes))
 		return
 	}
-	data, err := readStable(filepath.Join(workspace, filepath.FromSlash(c.path)), c.size)
+	if c.size > cfg.MaxTotalBytes-*retained {
+		demote("retention budget exhausted; create is report-only")
+		return
+	}
+	data, err := readStable(ctx, workspace, work)
 	if err != nil {
 		demote(fmt.Sprintf("create could not be read stably: %v", err))
 		return
@@ -356,41 +379,66 @@ func gateCreate(ctx context.Context, workspace string, c *scratchChange, canonic
 	c.preview = preview
 }
 
-// readStable reads a private-tree file through one handle with before/after
-// stat checks, so content mutating mid-read is refused rather than retained.
-func readStable(p string, wantSize int64) ([]byte, error) {
-	f, err := os.Open(p)
+// readStable reads a classified private-tree file through one rooted handle,
+// refusing identity or metadata drift before or after the bounded read.
+func readStable(ctx context.Context, root *os.Root, expected snapshotEntry) ([]byte, error) {
+	f, err := openManifestRegular(root, expected)
 	if err != nil {
 		return nil, err
 	}
 	defer func() { _ = f.Close() }()
-	before, err := f.Stat()
-	if err != nil {
+	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	if before.Size() != wantSize {
-		return nil, fmt.Errorf("size changed before read")
+	data := make([]byte, 0, int(min(expected.size, 64<<10)))
+	buf := make([]byte, 64<<10)
+	remaining := expected.size
+	for remaining > 0 {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		want := int64(len(buf))
+		if remaining < want {
+			want = remaining
+		}
+		n, readErr := f.Read(buf[:want])
+		if n > 0 {
+			data = append(data, buf[:n]...)
+			remaining -= int64(n)
+		}
+		if readErr != nil {
+			if errors.Is(readErr, io.EOF) {
+				return nil, fmt.Errorf("short read")
+			}
+			return nil, readErr
+		}
+		if n == 0 {
+			return nil, io.ErrNoProgress
+		}
 	}
-	data, err := io.ReadAll(io.LimitReader(f, wantSize+1))
-	if err != nil {
+	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	if int64(len(data)) != wantSize {
-		return nil, fmt.Errorf("short or grown read")
+	var extra [1]byte
+	n, readErr := f.Read(extra[:])
+	if n != 0 {
+		return nil, fmt.Errorf("grown read")
 	}
-	after, err := f.Stat()
-	if err != nil {
+	if readErr == nil {
+		return nil, io.ErrNoProgress
+	}
+	if !errors.Is(readErr, io.EOF) {
+		return nil, readErr
+	}
+	if err := checkManifestRegular(f, expected); err != nil {
 		return nil, err
-	}
-	if after.Size() != before.Size() || !after.ModTime().Equal(before.ModTime()) {
-		return nil, fmt.Errorf("content changed during read")
 	}
 	return data, nil
 }
 
-// hashFile streams one file into ContentHash form without retaining bytes.
-func hashFile(ctx context.Context, p string) (string, error) {
-	f, err := os.Open(p)
+// hashFile streams one classified file into ContentHash form.
+func hashFile(ctx context.Context, root *os.Root, expected snapshotEntry) (string, error) {
+	f, err := openManifestRegular(root, expected)
 	if err != nil {
 		return "", err
 	}
@@ -410,18 +458,21 @@ func hashFile(ctx context.Context, p string) (string, error) {
 			return "", rerr
 		}
 	}
+	if err := checkManifestRegular(f, expected); err != nil {
+		return "", err
+	}
 	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
-// compareFilePair stream-compares two files and returns equality plus the
-// second file's content hash.
-func compareFilePair(ctx context.Context, a, b string) (bool, string, error) {
-	fa, err := os.Open(a)
+// compareFilePair stream-compares two classified files and returns equality
+// plus the second file's content hash.
+func compareFilePair(ctx context.Context, aRoot *os.Root, a snapshotEntry, bRoot *os.Root, b snapshotEntry) (bool, string, error) {
+	fa, err := openManifestRegular(aRoot, a)
 	if err != nil {
 		return false, "", err
 	}
 	defer func() { _ = fa.Close() }()
-	fb, err := os.Open(b)
+	fb, err := openManifestRegular(bRoot, b)
 	if err != nil {
 		return false, "", err
 	}
@@ -452,17 +503,43 @@ func compareFilePair(ctx context.Context, a, b string) (bool, string, error) {
 			if !doneA || !doneB {
 				equal = false
 			}
-			// Drain the longer side into the hash so the reported hash is
-			// always the complete work-side content.
-			if !doneB {
-				if _, err := io.Copy(h, fb); err != nil {
-					return false, "", err
-				}
-			}
 			break
 		}
 	}
+	if err := checkManifestRegular(fa, a); err != nil {
+		return false, "", err
+	}
+	if err := checkManifestRegular(fb, b); err != nil {
+		return false, "", err
+	}
 	return equal, hex.EncodeToString(h.Sum(nil)), nil
+}
+
+// openManifestRegular opens one classified private-tree entry through an
+// os.Root handle, so symlink swaps cannot escape the tree. O_NONBLOCK keeps a
+// regular-to-FIFO swap from hanging before the opened identity can be checked.
+func openManifestRegular(root *os.Root, expected snapshotEntry) (*os.File, error) {
+	f, err := root.OpenFile(filepath.FromSlash(expected.path), os.O_RDONLY|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		return nil, err
+	}
+	if err := checkManifestRegular(f, expected); err != nil {
+		_ = f.Close()
+		return nil, err
+	}
+	return f, nil
+}
+
+func checkManifestRegular(f *os.File, expected snapshotEntry) error {
+	fi, err := f.Stat()
+	if err != nil {
+		return err
+	}
+	actual := manifestEntry(expected.path, fi)
+	if !actual.typ.IsRegular() || !snapshotEntriesEqual(expected, actual) {
+		return fmt.Errorf("tools: capture path %q changed after classification: %w", expected.path, errSnapshotDrift)
+	}
+	return nil
 }
 
 // renderAdditionsPreview renders the complete all-additions diff for one

@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // newTestScratchRuntime builds an enabled runtime rooted at a fresh canonical
@@ -206,6 +207,28 @@ func TestScratchSessionSlotReleasedOnBeginFailure(t *testing.T) {
 	s.discard()
 }
 
+func TestScratchSessionExpiredSetupUsesFreshCleanupBudget(t *testing.T) {
+	rt, canon := newTestScratchRuntime(t, ScratchConfig{Enabled: true, MaxConcurrentSessions: 1})
+	ctx, cancel := context.WithCancel(context.Background())
+	rt.clone = func(*os.File, string) error {
+		cancel()
+		return errors.New("stop setup")
+	}
+	if _, _, err := beginScratchSession(ctx, rt, testSpec(canon)); err == nil {
+		t.Fatal("canceled setup must fail")
+	}
+	entries, err := os.ReadDir(rt.tempBase)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("expired setup left private roots: %v", entries)
+	}
+	if len(rt.slots) != 0 {
+		t.Fatal("expired setup leaked its admission slot")
+	}
+}
+
 func TestScratchSessionFinishCapturesAndRemoves(t *testing.T) {
 	rt, canon := newTestScratchRuntime(t, ScratchConfig{Enabled: true, MaxConcurrentSessions: 1})
 	spec := testSpec(canon)
@@ -249,9 +272,10 @@ func TestScratchSessionFinishCaptureErrorStillCleans(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cancelled, cancel := context.WithCancel(context.Background())
-	cancel()
-	session.finish(cancelled)
+	if err := os.RemoveAll(session.reference); err != nil {
+		t.Fatal(err)
+	}
+	session.finish(context.Background())
 	out, status := rt.store.get(session.id)
 	if status != scratchStatusCaptured {
 		t.Fatalf("capture failure must still publish an outcome, status=%v", status)
@@ -263,6 +287,32 @@ func TestScratchSessionFinishCaptureErrorStillCleans(t *testing.T) {
 		if _, err := os.Lstat(p); !errors.Is(err, os.ErrNotExist) {
 			t.Fatalf("capture failure must not block cleanup of %s", p)
 		}
+	}
+}
+
+func TestScratchSessionFinishUsesFreshCleanupBudget(t *testing.T) {
+	rt, canon := newTestScratchRuntime(t, ScratchConfig{Enabled: true, MaxConcurrentSessions: 1})
+	session, _, err := beginScratchSession(context.Background(), rt, testSpec(canon))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	session.finish(cancelled)
+	out, status := rt.store.get(session.id)
+	if status != scratchStatusCaptured || out.cleanupErr != "" {
+		t.Fatalf("capture cancellation must not consume cleanup's budget: status=%v out=%+v", status, out)
+	}
+	for _, p := range []string{filepath.Dir(session.reference), filepath.Dir(session.work)} {
+		if _, err := os.Lstat(p); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("fresh cleanup must remove private root %s: %v", p, err)
+		}
+	}
+	select {
+	case rt.slots <- struct{}{}:
+		<-rt.slots
+	default:
+		t.Fatal("cleanup deadline must still release the admission slot")
 	}
 }
 
@@ -299,6 +349,57 @@ func TestScratchSessionCleanupGuardAbandonsImpostor(t *testing.T) {
 	if status != scratchStatusCaptured || out.cleanupErr == "" {
 		t.Fatalf("abandoned cleanup must be queryable on the outcome: status=%v out=%+v", status, out)
 	}
+}
+
+func TestScratchSessionDeferredReaperRetainsAdmission(t *testing.T) {
+	rt, canon := newTestScratchRuntime(t, ScratchConfig{
+		Enabled:               true,
+		MaxConcurrentSessions: 1,
+		CaptureTimeout:        time.Nanosecond,
+	})
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	rt.beforeReap = func() {
+		close(entered)
+		<-release
+	}
+	session, _, err := beginScratchSession(context.Background(), rt, testSpec(canon))
+	if err != nil {
+		t.Fatal(err)
+	}
+	parents := []string{session.refParent, session.execParent}
+	session.discard()
+	select {
+	case <-entered:
+	case <-time.After(time.Second):
+		t.Fatal("deferred reaper did not start")
+	}
+	if _, _, err := beginScratchSession(context.Background(), rt, testSpec(canon)); err == nil {
+		t.Fatal("cleanup backlog released its admission slot before reaping")
+	}
+	for _, p := range parents {
+		if _, err := os.Lstat(p); err != nil {
+			t.Fatalf("reaper no longer owned %s while blocked: %v", p, err)
+		}
+	}
+	close(release)
+	select {
+	case <-session.cleanupDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("deferred reaper did not finish")
+	}
+	for _, p := range parents {
+		if _, err := os.Lstat(p); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("deferred reaper left %s: %v", p, err)
+		}
+	}
+	rt.beforeReap = nil
+	next, _, err := beginScratchSession(context.Background(), rt, testSpec(canon))
+	if err != nil {
+		t.Fatalf("reaper did not restore admission: %v", err)
+	}
+	next.discard()
+	<-next.cleanupDone
 }
 
 func TestScratchSessionDoubleFinishAndDiscard(t *testing.T) {

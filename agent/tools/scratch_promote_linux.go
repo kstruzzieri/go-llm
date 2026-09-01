@@ -8,6 +8,6 @@ import "golang.org/x/sys/unix"
 // atomic, descriptor-relative, and never replaces a destination that
 // appeared after validation. Filesystems that reject it fail closed with no
 // link or copy fallback.
-func promoteRename(parentFd int, tmpName, dstName string) error {
-	return unix.Renameat2(parentFd, tmpName, parentFd, dstName, unix.RENAME_NOREPLACE)
+func promoteRename(srcFd int, tmpName string, dstFd int, dstName string) error {
+	return unix.Renameat2(srcFd, tmpName, dstFd, dstName, unix.RENAME_NOREPLACE)
 }

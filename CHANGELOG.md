@@ -24,8 +24,10 @@ and they compose without either knowing about the other.
   workspace-local executable, and `TMPDIR`, runs the command, stream-diffs
   the two private trees into a bounded in-RAM outcome, and removes both
   roots. Foreground and background share one runtime; background capture is
-  owned by the process `Wait` wrapper, so `Shutdown` still guarantees no
-  scratch root survives it.
+  owned by the process `Wait` wrapper. Cleanup gets its own bounded phase and
+  one fixed deferred-reaper grace window; a persistent filesystem failure is
+  reported and quarantines that admission slot, bounding live-process
+  residue without hanging manager `Shutdown`.
 - Threat model, stated plainly: on the host runtime this is accident
   isolation (cwd-relative build droppings, `rm` in scripts) — a malicious
   process can still address the canonical tree by absolute path. Composed
@@ -35,10 +37,10 @@ and they compose without either knowing about the other.
   file-by-file clone is not a point-in-time filesystem snapshot, and a
   drifting canonical source retries once, then fails closed. Crash/SIGKILL
   orphans under the platform temp base are an accepted limitation (0700,
-  OS-reaped; no shared startup sweep), and a crash between promotion's
-  temp-create and its rename can leave one reserved
-  `.golem-scratch-promote-*` 0600 temp in the canonical parent — the same
-  posture as the repository's existing atomic-write temps. A background
+  OS-reaped; no shared startup sweep), and a crash before promotion's rename
+  can leave one reserved 0700 `.golem-scratch-promote-*` staging directory in
+  the canonical parent. Its staged file may already have the approved final
+  mode but remains protected by that directory. A background
   scratch job holds its session slot (default 2) for its whole
   manager-owned lifetime, so long-lived scratched jobs can defer new
   scratched commands until one finishes.
@@ -46,10 +48,14 @@ and they compose without either knowing about the other.
   `scr:<digest>:` component after the `exec:v3:`/`exec-bg:v2:` prefixes (the
   `sb:` precedent — recipes unchanged, no version bump), so a host grant
   never authorizes a scratch run or vice versa; the ephemeral path is never
-  identity. The outer effect budget is setup + command + capture + a fixed
-  5s grace, each phase under its own child context.
-- `scratch_changes` (read-only, approval-free) reports per-change metadata,
-  never artifact bytes. `promote_artifact` applies exactly one captured
+  identity. The outer effect budget is setup + command + capture + cleanup +
+  a fixed 5s grace, each phase under its own child context.
+- `scratch_changes` (read-only, approval-free) reports per-change metadata in
+  byte-budgeted continuation pages, never artifact bytes. Symlink aliases back
+  into the canonical tree are rewritten into each clone; external directories,
+  unresolvable targets, and regular hard links not proven to be canonical are
+  rejected rather than preserving a possible write path. `promote_artifact`
+  applies exactly one captured
   create per call: always-prompting (empty structural key), create-only
   (updates, deletes, modes, links, binary, and preview-oversize content are
   report-only), fully previewed (complete escaped additions, 64 KiB cap),

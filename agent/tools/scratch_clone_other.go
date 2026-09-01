@@ -17,6 +17,8 @@ func cloneFile(src *os.File, dst string) error {
 // cloneFallbackErrnos is empty: only the sentinel permits fallback here.
 var cloneFallbackErrnos []error
 
+const scratchIdentitySupported = false
+
 // statIdentity has no portable identity on this platform; manifest
 // comparison degrades to path/type/mode/size/mtime.
 func statIdentity(fi fs.FileInfo) (dev, ino, nlink uint64, ctime time.Time) {

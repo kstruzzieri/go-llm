@@ -39,6 +39,8 @@ func cloneFile(src *os.File, dst string) error {
 // corruption, disk-full) is fatal.
 var cloneFallbackErrnos = []error{unix.EOPNOTSUPP, unix.ENOTTY, unix.EXDEV, unix.EINVAL}
 
+const scratchIdentitySupported = true
+
 // statIdentity extracts platform file identity for manifest comparison.
 func statIdentity(fi fs.FileInfo) (dev, ino, nlink uint64, ctime time.Time) {
 	st, ok := fi.Sys().(*syscall.Stat_t)

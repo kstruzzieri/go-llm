@@ -83,3 +83,15 @@ func TestScratchChangesTruncatedAndErrors(t *testing.T) {
 		}
 	}
 }
+
+func TestScratchResultLineReportsCleanupErrorWithoutChanges(t *testing.T) {
+	rt, _ := newChangesFixture(t)
+	rt.store.beginPending("scr-cleanup")
+	rt.store.completePending("scr-cleanup", scratchOutcome{cleanupErr: "cleanup deferred"})
+	line := renderScratchResultLine(rt, "scr-cleanup")
+	for _, want := range []string{"changes=0", "cleanup-error", "details: scratch_changes"} {
+		if !strings.Contains(line, want) {
+			t.Fatalf("scratch result line missing %q: %s", want, line)
+		}
+	}
+}

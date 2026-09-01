@@ -30,7 +30,7 @@ const (
 	// digest. A semantic policy change bumps this literal; the outer key
 	// prefixes (exec:v3:, exec-bg:v2:) stay untouched because the command
 	// fingerprint recipe itself is unchanged.
-	scratchRecipeVersion = "scratch-recipe-v1"
+	scratchRecipeVersion = "scratch-recipe-v2"
 
 	// scratchEffectGrace is the fixed orchestration allowance added on top of
 	// the setup, command, and capture budgets when sizing the outer effect
@@ -46,6 +46,8 @@ const (
 	scratchDefaultMaxTotalBytes         = 4 << 20
 	scratchDefaultSnapshotTimeout       = 30 * time.Second
 	scratchDefaultCaptureTimeout        = 30 * time.Second
+	scratchChangesPageSize              = 64
+	scratchChangesOutputCap             = 4 << 20
 )
 
 // ScratchConfig configures ephemeral scratchpad execution (#443). The zero
@@ -73,7 +75,8 @@ type ScratchConfig struct {
 	// SnapshotTimeout bounds session setup (both clones plus manifest
 	// verification). Default 30s.
 	SnapshotTimeout time.Duration
-	// CaptureTimeout bounds post-command diff and cleanup. Default 30s.
+	// CaptureTimeout independently bounds post-command diff and cleanup.
+	// Default 30s per phase.
 	CaptureTimeout time.Duration
 }
 
@@ -132,11 +135,12 @@ func normalizeScratchConfig(cfg ScratchConfig) (ScratchConfig, error) {
 }
 
 // scratchOuterTimeout is the overflow-checked outer effect budget for one
-// scratched invocation: setup + command (or admission) + capture + the fixed
-// grace. Each component must be non-negative and the sum must not wrap.
+// scratched invocation: setup + command (or admission) + capture + cleanup +
+// the fixed grace. Each component must be non-negative and the sum must not
+// wrap.
 func scratchOuterTimeout(cfg ScratchConfig, command time.Duration) (time.Duration, error) {
 	sum := time.Duration(0)
-	for _, d := range []time.Duration{cfg.SnapshotTimeout, command, cfg.CaptureTimeout, scratchEffectGrace} {
+	for _, d := range []time.Duration{cfg.SnapshotTimeout, command, cfg.CaptureTimeout, cfg.CaptureTimeout, scratchEffectGrace} {
 		if d < 0 {
 			return 0, fmt.Errorf("tools: scratch effect timeout component is negative: %v", d)
 		}
@@ -156,14 +160,14 @@ func scratchOuterTimeout(cfg ScratchConfig, command time.Duration) (time.Duratio
 type scratchApproval struct {
 	keyComponent string
 	preview      string
+	tempBase     string
 }
 
 // scratchFingerprint hashes the approval-relevant scratch policy using the
 // same labeled, NUL-separated style as sandboxFingerprint. It accepts only a
-// normalized enabled config. The ephemeral root path is deliberately absent:
-// it is created after approval, like the Seatbelt private temp dir, and is
-// policy output, not identity.
-func scratchFingerprint(cfg ScratchConfig, promotable bool) string {
+// normalized enabled config. The frozen parent is policy identity; the random
+// per-session root beneath it is deliberately absent.
+func scratchFingerprint(cfg ScratchConfig, promotable bool, tempBase string) string {
 	h := sha256.New()
 	write := func(s string) {
 		_, _ = h.Write([]byte(s))
@@ -190,7 +194,7 @@ func scratchFingerprint(cfg ScratchConfig, promotable bool) string {
 	write("effect_grace")
 	write(scratchEffectGrace.String())
 	write("temp")
-	write("private-session")
+	write(tempBase)
 	write("promotion_available")
 	write(strconv.FormatBool(promotable))
 	return hex.EncodeToString(h.Sum(nil))
@@ -210,9 +214,14 @@ func approvalForScratch(cfg ScratchConfig, promotable bool) (scratchApproval, er
 	if !normalized.Enabled {
 		return scratchApproval{}, nil
 	}
+	tempBase, err := CanonicalWorkspaceRoot(scratchTempBase())
+	if err != nil {
+		return scratchApproval{}, fmt.Errorf("tools: scratch temp base: %w", err)
+	}
 	return scratchApproval{
-		keyComponent: "scr:" + scratchFingerprint(normalized, promotable) + ":",
-		preview:      renderScratchLine(normalized, promotable),
+		keyComponent: "scr:" + scratchFingerprint(normalized, promotable, tempBase) + ":",
+		preview:      renderScratchLine(normalized, promotable, tempBase),
+		tempBase:     tempBase,
 	}, nil
 }
 
@@ -221,24 +230,28 @@ func approvalForScratch(cfg ScratchConfig, promotable bool) (scratchApproval, er
 // (#443 threat model): the copy protects against cwd-relative accidents, and
 // only a composed sandbox line upgrades that to an enforced boundary. No
 // ephemeral path material may ever appear here.
-func renderScratchLine(cfg ScratchConfig, promotable bool) string {
+func renderScratchLine(cfg ScratchConfig, promotable bool, tempBase string) string {
 	promote := "promote=unavailable"
 	if promotable {
 		promote = "promote=available"
 	}
+	temp := "temp=private"
+	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
+		temp = fmt.Sprintf("temp=%q", tempBase)
+	}
 	return fmt.Sprintf(
 		"disposable cwd copy; host process remains unrestricted"+
 			" git-metadata=omitted files<=%d tree-bytes<=%d changes<=%d change-bytes<=%d/%d sessions<=%d"+
-			" setup<=%s capture<=%s grace=%s temp=private %s",
+			" setup<=%s capture<=%s cleanup<=%s grace=%s %s %s",
 		cfg.MaxWorkspaceFiles, cfg.MaxWorkspaceBytes, cfg.MaxChangedFiles,
 		cfg.MaxFileBytes, cfg.MaxTotalBytes, cfg.MaxConcurrentSessions,
-		cfg.SnapshotTimeout, cfg.CaptureTimeout, scratchEffectGrace, promote,
+		cfg.SnapshotTimeout, cfg.CaptureTimeout, cfg.CaptureTimeout, scratchEffectGrace, temp, promote,
 	)
 }
 
-// scratchTempBase returns the platform scratch parent. Like the Seatbelt
-// temp base (D5 there), it is policy, never inherited from the environment:
-// inherited temp locations are command input.
+// scratchTempBase returns the platform scratch parent. Golem's primary
+// platforms use fixed policy paths; other ports use the OS default. The
+// canonical result is frozen into the approval identity and preview.
 func scratchTempBase() string {
 	switch runtime.GOOS {
 	case "darwin":
@@ -383,6 +396,32 @@ func (s *scratchStore) get(id string) (scratchOutcome, scratchStatus) {
 	return cp, scratchStatusCaptured
 }
 
+// page returns bounded metadata for scratch_changes without copying retained
+// artifact bytes or the rest of a potentially large outcome.
+func (s *scratchStore) page(id string, offset, limit int) (scratchOutcome, int, scratchStatus) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.pending[id]; ok {
+		return scratchOutcome{id: id}, 0, scratchStatusPending
+	}
+	out, ok := s.completed[id]
+	if !ok {
+		return scratchOutcome{}, 0, scratchStatusUnknown
+	}
+	total := len(out.changes)
+	cp := out
+	cp.changes = nil
+	if offset >= 0 && offset < total {
+		end := min(offset+limit, total)
+		cp.changes = append([]scratchChange(nil), out.changes[offset:end]...)
+		for i := range cp.changes {
+			cp.changes[i].data = nil
+			cp.changes[i].preview = ""
+		}
+	}
+	return cp, total, scratchStatusCaptured
+}
+
 // claim atomically reserves one (id, path) for promotion. A consumed path
 // can never be claimed again; a released claim can.
 func (s *scratchStore) claim(id, path string) error {
@@ -451,6 +490,10 @@ type scratchRuntime struct {
 	store    *scratchStore
 	slots    chan struct{}
 	clone    func(*os.File, string) error
+	// beforeCapture is a deterministic test seam for cancellation races.
+	beforeCapture func()
+	// beforeReap is a deterministic test seam for deferred-cleanup ownership.
+	beforeReap func()
 }
 
 // newScratchRuntime builds the shared scratch engine for one factory.
@@ -473,12 +516,20 @@ func newScratchRuntime(root string, cfg ScratchConfig, journal PreparingJournal)
 	if err != nil {
 		return nil, fmt.Errorf("tools: scratch canonical root: %w", err)
 	}
+	tempBase := approval.tempBase
+	_, tempInside, err := relativeToRootIdentity(context.Background(), canonical, tempBase)
+	if err != nil {
+		return nil, fmt.Errorf("tools: compare scratch temp base to workspace: %w", err)
+	}
+	if tempInside {
+		return nil, fmt.Errorf("tools: scratch temp base %q must be outside workspace root %q", tempBase, canonical)
+	}
 	return &scratchRuntime{
 		cfg:      normalized,
 		approval: approval,
 		journal:  journal,
 		root:     canonical,
-		tempBase: scratchTempBase(),
+		tempBase: tempBase,
 		store:    newScratchStore(cryptorand.Reader),
 		slots:    make(chan struct{}, normalized.MaxConcurrentSessions),
 		clone:    cloneFile,
@@ -493,31 +544,30 @@ type ScratchChanges struct {
 }
 
 type scratchChangesArgs struct {
-	ID string `json:"id"`
+	ID     string `json:"id"`
+	Offset int    `json:"offset"`
 }
 
 // Spec implements agent.Tool.
 func (ScratchChanges) Spec() agent.ToolSpec {
 	return agent.ToolSpec{
 		Name:        "scratch_changes",
-		Description: "Report what an isolated scratch command changed: per-file kind, size, hash, and whether promote_artifact can apply it. Metadata only; content appears only in a promotion approval prompt.",
+		Description: "Report what an isolated scratch command changed: per-file kind, size, hash, and whether promote_artifact can apply it. Metadata only; content appears only in a promotion approval prompt. When more changes remain, repeat with the returned offset.",
 		Parameters: json.RawMessage(`{
   "type":"object",
   "properties":{
-    "id":{"type":"string","description":"scratch id from a run_command/start_command result"}
+    "id":{"type":"string","description":"scratch id from a run_command/start_command result"},
+    "offset":{"type":"integer","minimum":0,"description":"continuation offset returned by a previous scratch_changes page"}
   },
   "required":["id"]
 }`),
 	}
 }
 
-// Effect implements agent.Tool. The output cap covers the tool's real
-// bounded worst case so dispatch never clips a change report: 64 changes x
-// (a PATH_MAX path %q-expanded up to 4x (~16 KiB) + a sanitized reason that
-// can embed another escaped path + fixed fields) is under 3 MiB; 4 MiB
-// leaves margin. Typical reports are a few hundred bytes.
+// Effect implements agent.Tool. Invoke byte-budgets every page below this
+// cap, including its exact continuation marker, so dispatch never clips it.
 func (ScratchChanges) Effect() agent.Effect {
-	return agent.Effect{Class: agent.Read, Approval: agent.ApprovalNever, OutputCap: 4 << 20}
+	return agent.Effect{Class: agent.Read, Approval: agent.ApprovalNever, OutputCap: scratchChangesOutputCap}
 }
 
 // Invoke implements agent.Tool.
@@ -529,15 +579,24 @@ func (t ScratchChanges) Invoke(ctx context.Context, raw json.RawMessage) (agent.
 	if strings.TrimSpace(args.ID) == "" {
 		return agent.ToolResult{IsError: true, Content: "id is required"}, nil
 	}
-	out, status := t.rt.store.get(args.ID)
+	if args.Offset < 0 {
+		return agent.ToolResult{IsError: true, Content: "offset must be non-negative"}, nil
+	}
+	out, total, status := t.rt.store.page(args.ID, args.Offset, scratchChangesPageSize)
 	switch status {
 	case scratchStatusUnknown:
 		return agent.ToolResult{IsError: true, Content: fmt.Sprintf("unknown scratch id %q (evicted or never issued)", args.ID)}, nil
 	case scratchStatusPending:
 		return agent.ToolResult{Content: fmt.Sprintf("scratch %s: pending (command still running or capture not finished)", args.ID)}, nil
 	}
+	if args.Offset > total {
+		return agent.ToolResult{IsError: true, Content: fmt.Sprintf("offset %d exceeds %d captured changes", args.Offset, total)}, nil
+	}
 	var b strings.Builder
-	fmt.Fprintf(&b, "scratch %s: %d change(s)", args.ID, len(out.changes))
+	fmt.Fprintf(&b, "scratch %s: %d change(s)", args.ID, total)
+	if args.Offset > 0 {
+		fmt.Fprintf(&b, " (offset %d)", args.Offset)
+	}
 	if out.truncated {
 		b.WriteString(" [truncated: nothing promotable]")
 	}
@@ -547,18 +606,41 @@ func (t ScratchChanges) Invoke(ctx context.Context, raw json.RawMessage) (agent.
 	if out.cleanupErr != "" {
 		fmt.Fprintf(&b, " cleanup-error: %s", out.cleanupErr)
 	}
-	for _, c := range out.changes {
-		fmt.Fprintf(&b, "\n%s %q size=%d", c.kind, c.path, c.size)
+	for i, c := range out.changes {
+		var line strings.Builder
+		fmt.Fprintf(&line, "\n%s %q size=%d", c.kind, c.path, c.size)
 		if c.hash != "" {
-			fmt.Fprintf(&b, " hash=%s", c.hash[:min(len(c.hash), fingerprintLen)])
+			fmt.Fprintf(&line, " hash=%s", c.hash[:min(len(c.hash), fingerprintLen)])
 		}
 		if c.promotable {
-			b.WriteString(" promotable")
+			line.WriteString(" promotable")
 		} else if c.reason != "" {
-			fmt.Fprintf(&b, " (%s)", c.reason)
+			fmt.Fprintf(&line, " (%s)", c.reason)
 		}
+		next := args.Offset + i + 1
+		marker := scratchChangesContinuation(args.ID, next)
+		if next >= total {
+			marker = ""
+		}
+		if b.Len()+line.Len()+len(marker) > scratchChangesOutputCap {
+			if i == 0 {
+				return agent.ToolResult{IsError: true, Content: fmt.Sprintf("change metadata at offset %d exceeds the scratch_changes output cap", args.Offset)}, nil
+			}
+			b.WriteString(scratchChangesContinuation(args.ID, next-1))
+			return agent.ToolResult{Content: b.String(), Truncated: true}, nil
+		}
+		b.WriteString(line.String())
 	}
-	return agent.ToolResult{Content: b.String()}, nil
+	end := args.Offset + len(out.changes)
+	more := end < total
+	if more {
+		b.WriteString(scratchChangesContinuation(args.ID, end))
+	}
+	return agent.ToolResult{Content: b.String(), Truncated: more}, nil
+}
+
+func scratchChangesContinuation(id string, offset int) string {
+	return fmt.Sprintf("\n[more changes; call scratch_changes with {\"id\":%q,\"offset\":%d}]", id, offset)
 }
 
 // sanitizeScratchText makes command-influenced diagnostic text (reasons,
