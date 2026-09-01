@@ -1772,3 +1772,32 @@ func TestRunDispatchesSourceSubcommand(t *testing.T) {
 		t.Fatalf("bare source stderr = %q", got)
 	}
 }
+
+// --- #443 Task 10: -scratch flag policy ---
+
+func TestScratchFlagRequiresAllowExec(t *testing.T) {
+	if err := validateFlags(flags{scratch: true}); err == nil {
+		t.Fatal("-scratch without -allow-exec must be rejected")
+	}
+	if err := validateFlags(flags{scratch: true, allowExec: true}); err != nil {
+		t.Fatalf("-scratch with -allow-exec must validate: %v", err)
+	}
+	f, err := parseFlags([]string{"-scratch", "-allow-exec"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !f.scratch || !f.allowExec {
+		t.Fatalf("parseFlags dropped -scratch: %+v", f)
+	}
+}
+
+func TestScratchFlagDroppedInOneShotMode(t *testing.T) {
+	f := flags{promptSet: true, allowExec: true, scratch: true}
+	out, warns := applyOneShotMode(f)
+	if out.scratch || out.allowExec {
+		t.Fatalf("one-shot must drop scratch with exec: %+v", out)
+	}
+	if len(warns) == 0 {
+		t.Fatal("dropping -scratch in one-shot mode must warn")
+	}
+}
