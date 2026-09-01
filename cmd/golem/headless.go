@@ -1,9 +1,13 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"strings"
+
+	"github.com/kstruzzieri/go-llm/agent"
+	"github.com/kstruzzieri/go-llm/provider"
 )
 
 // outputFormat is the -output-format selection (#352). text is the default and
@@ -135,4 +139,47 @@ func resolveStdinPrompt(stdin io.Reader, isTTY bool) (string, error) {
 		return "", newUsageError("golem: -p requires a non-empty prompt")
 	}
 	return string(buf), nil
+}
+
+// headlessApprover is the non-interactive approver -allow-tool installs for
+// one-shot runs (#352). It replaces the nil-approver fail-safe (which denies
+// everything) with an exact-name allowlist, and nothing else changes: there is
+// no prompt, no preview rendering, no grant store, and no session state.
+//
+// Authorization is by tool name ONLY. The preview is never parsed — it is
+// model-influenced text — and the ApprovalKey is never parsed or compared,
+// keeping the #341 rule that a colliding key can never transfer authorization
+// across tools. The key is accepted and ignored purely to satisfy the
+// KeyedApprover signature.
+//
+// It never records a grant: an approval authorizes exactly the call in front of
+// it, and the process exits at the end of the turn.
+type headlessApprover struct{ allow allowToolSet }
+
+var (
+	_ agent.Approver      = (*headlessApprover)(nil)
+	_ agent.KeyedApprover = (*headlessApprover)(nil)
+)
+
+func newHeadlessApprover(allow allowToolSet) *headlessApprover {
+	return &headlessApprover{allow: allow}
+}
+
+// Approve satisfies the plain contract by delegating; no key, same answer.
+func (a *headlessApprover) Approve(ctx context.Context, call provider.ToolCall, preview string) (bool, error) {
+	d, err := a.ApproveKeyed(ctx, call, preview, "")
+	return d.Approved, err
+}
+
+// ApproveKeyed approves iff the exact tool name was named by -allow-tool. A
+// canceled context denies and returns the error so the run aborts, matching the
+// interactive approver's cancellation semantics.
+func (a *headlessApprover) ApproveKeyed(ctx context.Context, call provider.ToolCall, _, _ string) (agent.ApprovalDecision, error) {
+	if err := ctx.Err(); err != nil {
+		return agent.ApprovalDecision{}, err
+	}
+	// ViaGrant stays false by construction: this decision came from a flag, not
+	// from a session grant, and reporting otherwise would mislabel the run
+	// record and the tool-result event.
+	return agent.ApprovalDecision{Approved: a.allow.authorized(call.Function.Name)}, nil
 }

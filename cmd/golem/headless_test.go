@@ -1,10 +1,14 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"io"
 	"os"
 	"strings"
 	"testing"
+
+	"github.com/kstruzzieri/go-llm/provider"
 )
 
 func TestParseOutputFormat(t *testing.T) {
@@ -244,6 +248,99 @@ func TestAllowToolSetAuthorizesNothingWhenEmpty(t *testing.T) {
 		if set.authorized(name) {
 			t.Errorf("an empty set must authorize nothing, but authorized %q", name)
 		}
+	}
+}
+
+func headlessCall(name string) provider.ToolCall {
+	call := provider.ToolCall{ID: "c1"}
+	call.Function.Name = name
+	return call
+}
+
+func TestHeadlessApproverApprovesOnlyNamedTools(t *testing.T) {
+	set, err := newAllowToolSet([]string{"run_command"})
+	if err != nil {
+		t.Fatalf("newAllowToolSet: %v", err)
+	}
+	ap := newHeadlessApprover(set)
+	cases := []struct {
+		name string
+		want bool
+	}{
+		{"run_command", true},
+		{"write_file", false},
+		{"start_command", false},
+		{"stop_command", false},
+		{"mcp__server__tool", false},
+		{submitPlanToolName, false},
+		{verifyToolName, false},
+	}
+	for _, tc := range cases {
+		d, err := ap.ApproveKeyed(context.Background(), headlessCall(tc.name), "preview", "exec:v3:abc")
+		if err != nil {
+			t.Fatalf("%s: ApproveKeyed: %v", tc.name, err)
+		}
+		if d.Approved != tc.want {
+			t.Errorf("%s: Approved = %v, want %v", tc.name, d.Approved, tc.want)
+		}
+		if d.ViaGrant {
+			t.Errorf("%s: headless approval must never report ViaGrant", tc.name)
+		}
+	}
+}
+
+func TestHeadlessApproverIgnoresPreviewAndKey(t *testing.T) {
+	// Authorization is by tool NAME only. A preview that says "run_command" and
+	// a key borrowed from an authorized tool must not authorize anything.
+	set, _ := newAllowToolSet([]string{"run_command"})
+	ap := newHeadlessApprover(set)
+	d, err := ap.ApproveKeyed(context.Background(), headlessCall("write_file"), "run_command: rm -rf /", "exec:v3:same-key-as-run_command")
+	if err != nil {
+		t.Fatalf("ApproveKeyed: %v", err)
+	}
+	if d.Approved {
+		t.Fatal("a preview or key naming an authorized tool must not authorize a different tool")
+	}
+}
+
+func TestHeadlessApproverCreatesNoSessionGrants(t *testing.T) {
+	// The grant store must be untouched after any number of approvals: headless
+	// authorization is per-call and per-process, never a session grant (#341).
+	grants := newApprovalGrants()
+	set, _ := newAllowToolSet([]string{"run_command", "write_file"})
+	ap := newHeadlessApprover(set)
+	for i := 0; i < 3; i++ {
+		for _, name := range []string{"run_command", "write_file"} {
+			if _, err := ap.ApproveKeyed(context.Background(), headlessCall(name), "p", "k"); err != nil {
+				t.Fatalf("ApproveKeyed: %v", err)
+			}
+		}
+	}
+	if got := grants.count(); got != 0 {
+		t.Errorf("grants.count() = %d, want 0 — headless runs create no session grants", got)
+	}
+}
+
+func TestHeadlessApproverHonorsContextCancellation(t *testing.T) {
+	set, _ := newAllowToolSet([]string{"run_command"})
+	ap := newHeadlessApprover(set)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	d, err := ap.ApproveKeyed(ctx, headlessCall("run_command"), "p", "k")
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want context.Canceled", err)
+	}
+	if d.Approved {
+		t.Fatal("a canceled context must not approve")
+	}
+}
+
+func TestHeadlessApproverSatisfiesBothContracts(t *testing.T) {
+	set, _ := newAllowToolSet([]string{"run_command"})
+	ap := newHeadlessApprover(set)
+	ok, err := ap.Approve(context.Background(), headlessCall("run_command"), "p")
+	if err != nil || !ok {
+		t.Fatalf("Approve = %v, %v; want true, nil", ok, err)
 	}
 }
 
