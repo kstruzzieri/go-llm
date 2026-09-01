@@ -215,3 +215,23 @@ func guardedRemoveAll(path string, created os.FileInfo) error {
 	}
 	return nil
 }
+
+// scratchProcess decorates a background process so Wait owns the session's
+// capture and cleanup (the seatbeltProcess pattern): it runs before reap
+// publishes exit state and before job.done closes, so BackgroundManager.
+// Shutdown's existing barrier already guarantees no scratch root survives
+// shutdown. Capture uses a fresh Background-derived context — the tool
+// call's context is long dead by the time a job exits — and never rewrites
+// the exit code, managerKilled, or wait-error classification.
+type scratchProcess struct {
+	backgroundProcess
+	session *scratchSession
+}
+
+func (p *scratchProcess) Wait() (int, bool, error) {
+	code, managerKilled, err := p.backgroundProcess.Wait()
+	captureCtx, cancel := context.WithTimeout(context.Background(), p.session.rt.cfg.CaptureTimeout)
+	p.session.finish(captureCtx)
+	cancel()
+	return code, managerKilled, err
+}

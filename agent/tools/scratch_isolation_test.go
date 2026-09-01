@@ -2,9 +2,11 @@ package tools
 
 import (
 	"context"
+	cryptorand "crypto/rand"
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -424,5 +426,376 @@ func TestScratchSandboxedFactoryZeroDelegates(t *testing.T) {
 	}
 	if len(tools) != 2 {
 		t.Fatalf("scratch-enabled sandboxed factory must add scratch_changes, got %d", len(tools))
+	}
+}
+
+// --- Task 6: background scratch integration ---
+
+// scratchBackgroundTools builds the combined tool set with scratch enabled
+// and returns the pieces background tests need.
+func scratchBackgroundTools(t *testing.T, root string, cfg ScratchConfig, manager *BackgroundManager) (*StartCommand, *scratchRuntime) {
+	t.Helper()
+	tools, err := NewExecToolsWithBackgroundOptions(root, manager, ExecToolsOptions{Scratch: cfg})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sc *StartCommand
+	var rc *RunCommand
+	var changes *ScratchChanges
+	for _, tool := range tools {
+		switch v := tool.(type) {
+		case *StartCommand:
+			sc = v
+		case *RunCommand:
+			rc = v
+		case ScratchChanges:
+			c := v
+			changes = &c
+		}
+	}
+	if sc == nil || rc == nil || changes == nil {
+		t.Fatalf("combined factory must return run/start/scratch_changes, got %d tools", len(tools))
+	}
+	if sc.scratchRT == nil || sc.scratchRT != rc.scratchRT || sc.scratchRT != changes.rt {
+		t.Fatal("foreground, background, and query tools must share one scratch runtime")
+	}
+	sc.scratchRT.tempBase = t.TempDir()
+	return sc, sc.scratchRT
+}
+
+func planAndStart(t *testing.T, sc *StartCommand, raw string) agent.ToolResult {
+	t.Helper()
+	if _, err := sc.Plan(context.Background(), json.RawMessage(raw)); err != nil {
+		t.Fatalf("plan: %v", err)
+	}
+	res, err := sc.Invoke(context.Background(), json.RawMessage(raw))
+	if err != nil {
+		t.Fatalf("invoke: %v", err)
+	}
+	return res
+}
+
+func awaitCaptured(t *testing.T, rt *scratchRuntime, id string) scratchOutcome {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if out, status := rt.store.get(id); status == scratchStatusCaptured {
+			return out
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("outcome %s never captured", id)
+	return scratchOutcome{}
+}
+
+func scratchIDFromResult(t *testing.T, content string) string {
+	t.Helper()
+	idx := strings.Index(content, "scratch: id=")
+	if idx < 0 {
+		t.Fatalf("no scratch id in result:\n%s", content)
+	}
+	rest := content[idx+len("scratch: id="):]
+	end := strings.IndexAny(rest, " \n")
+	if end < 0 {
+		end = len(rest)
+	}
+	return rest[:end]
+}
+
+func TestScratchBackgroundLifecycle(t *testing.T) {
+	root := buildIsolationWorkspace(t)
+	manager := NewBackgroundManager()
+	defer manager.Shutdown()
+	sc, rt := scratchBackgroundTools(t, root, ScratchConfig{Enabled: true}, manager)
+	before := treeHash(t, root)
+
+	res := planAndStart(t, sc, `{"argv":["sh","-c","echo made > bg-artifact.txt; sleep 0.3"]}`)
+	if res.IsError {
+		t.Fatalf("start failed: %s", res.Content)
+	}
+	if !strings.HasPrefix(res.Content, "scratch: id=scr-") {
+		t.Fatalf("start result must lead with the scratch id:\n%s", res.Content)
+	}
+	id := scratchIDFromResult(t, res.Content)
+	// While the job runs, the session is pending and its roots exist.
+	if _, status := rt.store.get(id); status != scratchStatusPending {
+		t.Fatalf("status while running = %v, want pending", status)
+	}
+	entries, err := os.ReadDir(rt.tempBase)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) == 0 {
+		t.Fatal("scratch roots must outlive the tool call while the job runs")
+	}
+	out := awaitCaptured(t, rt, id)
+	found := false
+	for _, c := range out.changes {
+		if c.path == "bg-artifact.txt" && c.kind == scratchChangeCreate {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("capture missing bg-artifact.txt: %+v", out.changes)
+	}
+	// Roots removed by Wait-owned cleanup; canonical untouched.
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		entries, err = os.ReadDir(rt.tempBase)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(entries) == 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("scratch roots not removed after exit: %v", entries)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !mapsEqualStr(before, treeHash(t, root)) {
+		t.Fatal("canonical workspace changed by a background scratch job")
+	}
+}
+
+func TestScratchBackgroundShutdownRemovesRoots(t *testing.T) {
+	root := buildIsolationWorkspace(t)
+	manager := NewBackgroundManager()
+	sc, rt := scratchBackgroundTools(t, root, ScratchConfig{Enabled: true}, manager)
+	res := planAndStart(t, sc, `{"argv":["sh","-c","echo x > long.txt; sleep 30"]}`)
+	if res.IsError {
+		t.Fatalf("start failed: %s", res.Content)
+	}
+	id := scratchIDFromResult(t, res.Content)
+	manager.Shutdown()
+	// Immediately after Shutdown returns: no scratch roots, outcome captured.
+	entries, err := os.ReadDir(rt.tempBase)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("Shutdown returned with scratch roots on disk: %v", entries)
+	}
+	if _, status := rt.store.get(id); status != scratchStatusCaptured {
+		t.Fatalf("killed job must still capture, status=%v", status)
+	}
+}
+
+func TestScratchBackgroundEffectBudget(t *testing.T) {
+	root := buildIsolationWorkspace(t)
+	manager := NewBackgroundManager()
+	defer manager.Shutdown()
+	sc, rt := scratchBackgroundTools(t, root, ScratchConfig{Enabled: true}, manager)
+	plan, err := sc.Plan(context.Background(), json.RawMessage(`{"argv":["sh","-c","true"]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := rt.cfg.SnapshotTimeout + bgToolTimeout + rt.cfg.CaptureTimeout + scratchEffectGrace
+	if plan.Effect.Timeout != want {
+		t.Fatalf("outer start effect = %v, want %v", plan.Effect.Timeout, want)
+	}
+	if !strings.HasPrefix(plan.ApprovalKey, bgExecApprovalKeyPrefix+rt.approval.keyComponent) {
+		t.Fatalf("background key must carry the scr: component after the prefix: %s", plan.ApprovalKey)
+	}
+	if !strings.Contains(plan.Preview, "scratch:") {
+		t.Fatalf("start preview must disclose scratch:\n%s", plan.Preview)
+	}
+}
+
+func TestScratchBackgroundFailedStartMatrix(t *testing.T) {
+	root := buildIsolationWorkspace(t)
+
+	assertNoLeak := func(t *testing.T, rt *scratchRuntime) {
+		t.Helper()
+		entries, err := os.ReadDir(rt.tempBase)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(entries) != 0 {
+			t.Fatalf("failed start leaked scratch roots: %v", entries)
+		}
+		rt.store.mu.Lock()
+		pending, completed := len(rt.store.pending), len(rt.store.completed)
+		rt.store.mu.Unlock()
+		if pending != 0 || completed != 0 {
+			t.Fatalf("failed start leaked store entries: pending=%d completed=%d", pending, completed)
+		}
+	}
+
+	t.Run("closed manager", func(t *testing.T) {
+		manager := NewBackgroundManager()
+		sc, rt := scratchBackgroundTools(t, root, ScratchConfig{Enabled: true}, manager)
+		manager.Shutdown()
+		res := planAndStart(t, sc, `{"argv":["sh","-c","true"]}`)
+		if !res.IsError {
+			t.Fatalf("start on a closed manager must fail: %s", res.Content)
+		}
+		assertNoLeak(t, rt)
+	})
+
+	t.Run("active cap", func(t *testing.T) {
+		manager := NewBackgroundManager()
+		defer manager.Shutdown()
+		sc, rt := scratchBackgroundTools(t, root, ScratchConfig{Enabled: true, MaxConcurrentSessions: 8}, manager)
+		// Fill the manager's four slots directly (no scratch).
+		for i := 0; i < backgroundActiveCap; i++ {
+			spec := execSpec{Path: "/bin/sh", Argv: []string{"sh", "-c", "sleep 30"}, Dir: root, Env: []string{"PATH=/usr/bin:/bin"}, WorkspaceRoot: root}
+			if _, err := manager.start(context.Background(), spec, "(workspace root)"); err != nil {
+				t.Fatal(err)
+			}
+		}
+		res := planAndStart(t, sc, `{"argv":["sh","-c","true"]}`)
+		if !res.IsError || !strings.Contains(res.Content, "limit") {
+			t.Fatalf("cap-rejected start: %+v", res)
+		}
+		assertNoLeak(t, rt)
+	})
+
+	t.Run("entropy failure", func(t *testing.T) {
+		manager := NewBackgroundManager()
+		defer manager.Shutdown()
+		sc, rt := scratchBackgroundTools(t, root, ScratchConfig{Enabled: true}, manager)
+		rt.store.random = &fixedReader{}
+		res := planAndStart(t, sc, `{"argv":["sh","-c","true"]}`)
+		if !res.IsError || !strings.Contains(res.Content, "command not started") {
+			t.Fatalf("entropy failure must fail closed before start: %+v", res)
+		}
+		assertNoLeak(t, rt)
+	})
+
+	t.Run("pre-canceled context", func(t *testing.T) {
+		manager := NewBackgroundManager()
+		defer manager.Shutdown()
+		sc, rt := scratchBackgroundTools(t, root, ScratchConfig{Enabled: true}, manager)
+		raw := `{"argv":["sh","-c","true"]}`
+		if _, err := sc.Plan(context.Background(), json.RawMessage(raw)); err != nil {
+			t.Fatal(err)
+		}
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		res, err := sc.Invoke(ctx, json.RawMessage(raw))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !res.IsError {
+			t.Fatalf("pre-canceled start must fail: %s", res.Content)
+		}
+		assertNoLeak(t, rt)
+	})
+
+	t.Run("backend start failure", func(t *testing.T) {
+		manager := newBackgroundManager(failingStarter{}, cryptoRandReader(t))
+		defer manager.Shutdown()
+		sc, rt := scratchBackgroundTools(t, root, ScratchConfig{Enabled: true}, manager)
+		res := planAndStart(t, sc, `{"argv":["sh","-c","true"]}`)
+		if !res.IsError {
+			t.Fatalf("backend failure must surface: %s", res.Content)
+		}
+		assertNoLeak(t, rt)
+	})
+}
+
+// failingStarter is a backgroundStarter whose every Start fails.
+type failingStarter struct{}
+
+func (failingStarter) Start(spec execSpec, stdout, stderr io.Writer) (backgroundProcess, error) {
+	return nil, fmt.Errorf("backend start refused")
+}
+
+// cryptoRandReader returns the production entropy source for manager
+// construction in tests.
+func cryptoRandReader(t *testing.T) io.Reader {
+	t.Helper()
+	return cryptorand.Reader
+}
+
+// cancelDuringStartStarter wraps the real starter and cancels the given
+// context inside Start, deterministically producing the
+// spawned-but-unregistered abandonment path in startWrapped.
+type cancelDuringStartStarter struct {
+	inner  backgroundStarter
+	cancel context.CancelFunc
+}
+
+func (s cancelDuringStartStarter) Start(spec execSpec, stdout, stderr io.Writer) (backgroundProcess, error) {
+	proc, err := s.inner.Start(spec, stdout, stderr)
+	s.cancel()
+	return proc, err
+}
+
+func TestScratchBackgroundSpawnedButUnregisteredCleans(t *testing.T) {
+	root := buildIsolationWorkspace(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	manager := newBackgroundManager(cancelDuringStartStarter{inner: newPlatformStarter(), cancel: cancel}, cryptoRandReader(t))
+	defer manager.Shutdown()
+	sc, rt := scratchBackgroundTools(t, root, ScratchConfig{Enabled: true}, manager)
+	raw := `{"argv":["sh","-c","sleep 5"]}`
+	if _, err := sc.Plan(context.Background(), json.RawMessage(raw)); err != nil {
+		t.Fatal(err)
+	}
+	res, err := sc.Invoke(ctx, json.RawMessage(raw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.IsError || !strings.Contains(res.Content, "start canceled") {
+		t.Fatalf("spawned-but-unregistered start must report cancellation: %+v", res)
+	}
+	// The wrapper's Wait already captured during the synchronous reap; the
+	// tool's discard must have deleted that unreachable outcome, and the
+	// roots must be gone.
+	rt.store.mu.Lock()
+	pending, completed := len(rt.store.pending), len(rt.store.completed)
+	rt.store.mu.Unlock()
+	if pending != 0 || completed != 0 {
+		t.Fatalf("abandoned start leaked store entries: pending=%d completed=%d", pending, completed)
+	}
+	entries, err := os.ReadDir(rt.tempBase)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("abandoned start leaked scratch roots: %v", entries)
+	}
+}
+
+// TestScratchBackgroundWrapCoversAbandonedReap pins the wrap-before-
+// registration contract directly at the manager seam, with NO tool-level
+// discard as a second line of defense: when the abandoned-start branch
+// synchronously reaps a spawned-but-unregistered process, the wrapped Wait
+// must still run capture and cleanup.
+func TestScratchBackgroundWrapCoversAbandonedReap(t *testing.T) {
+	root := buildIsolationWorkspace(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	manager := newBackgroundManager(cancelDuringStartStarter{inner: newPlatformStarter(), cancel: cancel}, cryptoRandReader(t))
+	defer manager.Shutdown()
+	rt, err := newScratchRuntime(root, ScratchConfig{Enabled: true}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rt.tempBase = t.TempDir()
+	spec := execSpec{Path: "/bin/sh", Argv: []string{"sh", "-c", "sleep 5"}, Dir: rt.root, Env: []string{"PATH=/usr/bin:/bin"}, WorkspaceRoot: rt.root}
+	session, rewritten, err := beginScratchSession(context.Background(), rt, spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, startErr := manager.startWrapped(ctx, rewritten, "(workspace root)", func(bp backgroundProcess) backgroundProcess {
+		return &scratchProcess{backgroundProcess: bp, session: session}
+	})
+	if startErr == nil {
+		t.Fatal("cancellation inside Start must abandon the job")
+	}
+	// No discard here: the wrapper's Wait inside the abandoned reap is the
+	// only cleanup. The outcome must be captured and the roots gone.
+	if _, status := rt.store.get(session.id); status != scratchStatusCaptured {
+		t.Fatalf("abandoned reap must run the wrapped capture, status=%v", status)
+	}
+	entries, err := os.ReadDir(rt.tempBase)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("abandoned reap left scratch roots: %v", entries)
 	}
 }

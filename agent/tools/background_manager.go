@@ -184,6 +184,15 @@ func (m *BackgroundManager) releaseReservation(handle string) {
 // closure observed before registration kills and reaps the process
 // synchronously and returns no handle.
 func (m *BackgroundManager) start(ctx context.Context, spec execSpec, cwdDisplay string) (JobStatus, error) {
+	return m.startWrapped(ctx, spec, cwdDisplay, nil)
+}
+
+// startWrapped is start with a generic post-start process decorator (#443):
+// wrap, when non-nil, is applied to the spawned process immediately after
+// backend.Start and before registration, so the wrapped Wait owns per-job
+// resource cleanup on every path — including the spawned-but-unregistered
+// abandonment below. The manager stays ignorant of what the wrapper does.
+func (m *BackgroundManager) startWrapped(ctx context.Context, spec execSpec, cwdDisplay string, wrap func(backgroundProcess) backgroundProcess) (JobStatus, error) {
 	handle, err := m.readHandle()
 	if err != nil {
 		return JobStatus{}, err
@@ -220,6 +229,9 @@ func (m *BackgroundManager) start(ctx context.Context, spec execSpec, cwdDisplay
 	if err != nil {
 		m.releaseReservation(handle)
 		return JobStatus{}, fmt.Errorf("start background command: %w", err)
+	}
+	if wrap != nil {
+		proc = wrap(proc)
 	}
 
 	job := &backgroundJob{
