@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -37,7 +38,10 @@ const (
 // checkpointSchemaVersion is the newest schema this binary understands. The
 // schema is internal: #347 consumes the semantic mutation/turn contract, never
 // these tables.
-const checkpointSchemaVersion = 1
+// v2 (#443) adds the nullable checkpoint_files.after_mode column: the exact
+// tracked permission bits of a promoted create, NULL for every legacy and
+// write/edit row.
+const checkpointSchemaVersion = 2
 
 // errCheckpointLeaseHeld reports that another live golem process owns this
 // workspace's checkpoint store. Checkpoints fail closed on contention (D10):
@@ -130,8 +134,11 @@ func openCheckpointStore(ctx context.Context, getenv func(string) string, root s
 	return s, nil
 }
 
-// migrate applies the v1 schema and version stamp in one transaction, so a
-// crash mid-migration leaves version 0 and a clean retry. A database from a
+// migrate steps the schema to the current version in one transaction per
+// starting version, so a crash mid-migration leaves the old version intact
+// and a clean retry. v0 creates the full v2 schema; v1 gains the nullable
+// after_mode column additively — existing rows are never copied or replaced
+// (a destructive table rebuild would risk undo history). A database from a
 // newer binary is rejected rather than guessed at.
 func (s *checkpointStore) migrate(ctx context.Context) error {
 	var version int
@@ -145,39 +152,50 @@ func (s *checkpointStore) migrate(ctx context.Context) error {
 	if version == checkpointSchemaVersion {
 		return nil
 	}
+	var stmts []string
+	switch version {
+	case 0:
+		stmts = []string{
+			`CREATE TABLE checkpoints (
+				id         INTEGER PRIMARY KEY AUTOINCREMENT,
+				created_at TEXT    NOT NULL,
+				goal       TEXT    NOT NULL,
+				state      TEXT    NOT NULL
+					CHECK (state IN ('open', 'completed', 'undoing'))
+			)`,
+			`CREATE UNIQUE INDEX checkpoints_one_open
+				ON checkpoints(state) WHERE state = 'open'`,
+			`CREATE INDEX checkpoints_state_id ON checkpoints(state, id DESC)`,
+			`CREATE TABLE checkpoint_files (
+				id            INTEGER PRIMARY KEY AUTOINCREMENT,
+				checkpoint_id INTEGER NOT NULL
+					REFERENCES checkpoints(id) ON DELETE CASCADE,
+				path          TEXT    NOT NULL,
+				prior_content BLOB,
+				prior_hash    TEXT    NOT NULL,
+				existed       INTEGER NOT NULL CHECK (existed IN (0, 1)),
+				after_hash    TEXT    NOT NULL,
+				summary       TEXT    NOT NULL,
+				at            TEXT    NOT NULL,
+				applied       INTEGER NOT NULL DEFAULT 0 CHECK (applied IN (0, 1)),
+				restored      INTEGER NOT NULL DEFAULT 0 CHECK (restored IN (0, 1)),
+				after_mode    INTEGER,
+				CHECK (restored = 0 OR applied = 1)
+			)`,
+			`CREATE INDEX checkpoint_files_checkpoint
+				ON checkpoint_files(checkpoint_id, id DESC)`,
+		}
+	case 1:
+		stmts = []string{
+			`ALTER TABLE checkpoint_files ADD COLUMN after_mode INTEGER`,
+		}
+	default:
+		return fmt.Errorf("golem: checkpoint db %s has unexpected schema v%d", s.dbPath, version)
+	}
+	stmts = append(stmts, fmt.Sprintf("PRAGMA user_version = %d", checkpointSchemaVersion))
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("golem: checkpoint migrate begin: %w", err)
-	}
-	stmts := []string{
-		`CREATE TABLE checkpoints (
-			id         INTEGER PRIMARY KEY AUTOINCREMENT,
-			created_at TEXT    NOT NULL,
-			goal       TEXT    NOT NULL,
-			state      TEXT    NOT NULL
-				CHECK (state IN ('open', 'completed', 'undoing'))
-		)`,
-		`CREATE UNIQUE INDEX checkpoints_one_open
-			ON checkpoints(state) WHERE state = 'open'`,
-		`CREATE INDEX checkpoints_state_id ON checkpoints(state, id DESC)`,
-		`CREATE TABLE checkpoint_files (
-			id            INTEGER PRIMARY KEY AUTOINCREMENT,
-			checkpoint_id INTEGER NOT NULL
-				REFERENCES checkpoints(id) ON DELETE CASCADE,
-			path          TEXT    NOT NULL,
-			prior_content BLOB,
-			prior_hash    TEXT    NOT NULL,
-			existed       INTEGER NOT NULL CHECK (existed IN (0, 1)),
-			after_hash    TEXT    NOT NULL,
-			summary       TEXT    NOT NULL,
-			at            TEXT    NOT NULL,
-			applied       INTEGER NOT NULL DEFAULT 0 CHECK (applied IN (0, 1)),
-			restored      INTEGER NOT NULL DEFAULT 0 CHECK (restored IN (0, 1)),
-			CHECK (restored = 0 OR applied = 1)
-		)`,
-		`CREATE INDEX checkpoint_files_checkpoint
-			ON checkpoint_files(checkpoint_id, id DESC)`,
-		fmt.Sprintf("PRAGMA user_version = %d", checkpointSchemaVersion),
 	}
 	for _, stmt := range stmts {
 		if _, err := tx.ExecContext(ctx, stmt); err != nil {
@@ -225,6 +243,10 @@ type checkpointFile struct {
 	afterHash    string
 	applied      bool
 	restored     bool
+	// afterMode/trackedMode mirror MutationRecord (#443): the exact tracked
+	// permission bits of a promoted create. A NULL column loads untracked.
+	afterMode   fs.FileMode
+	trackedMode bool
 }
 
 // checkpointGroup is one checkpoint with its file rows in reverse mutation
@@ -373,12 +395,16 @@ func (s *checkpointStore) prepareIntent(ctx context.Context, goal string, at tim
 		} else if verr != nil {
 			return fmt.Errorf("golem: checkpoint find open: %w", verr)
 		}
+		var afterMode any // NULL for every untracked record
+		if rec.TrackedMode {
+			afterMode = int64(rec.AfterMode)
+		}
 		res, ierr := tx.ExecContext(ctx,
 			`INSERT INTO checkpoint_files
-			 (checkpoint_id, path, prior_content, prior_hash, existed, after_hash, summary, at)
-			 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+			 (checkpoint_id, path, prior_content, prior_hash, existed, after_hash, summary, at, after_mode)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			cpID, path, rec.PriorContent, priorHash, existed, rec.AfterHash,
-			rec.Summary, formatCheckpointTime(rec.At))
+			rec.Summary, formatCheckpointTime(rec.At), afterMode)
 		if ierr != nil {
 			return fmt.Errorf("golem: checkpoint intent %s: %w", path, ierr)
 		}
@@ -607,7 +633,7 @@ func (s *checkpointStore) loadGroups(ctx context.Context, state checkpointState,
 }
 
 func (s *checkpointStore) loadFiles(ctx context.Context, cpID int64, appliedOnly bool) ([]checkpointFile, error) {
-	q := `SELECT id, path, prior_content, prior_hash, existed, after_hash, applied, restored
+	q := `SELECT id, path, prior_content, prior_hash, existed, after_hash, applied, restored, after_mode
 	      FROM checkpoint_files WHERE checkpoint_id = ?`
 	if appliedOnly {
 		q += ` AND applied = 1`
@@ -622,11 +648,16 @@ func (s *checkpointStore) loadFiles(ctx context.Context, cpID int64, appliedOnly
 	for rows.Next() {
 		var f checkpointFile
 		var existed, applied, restored int
+		var afterMode sql.NullInt64
 		if err := rows.Scan(&f.id, &f.path, &f.priorContent, &f.priorHash,
-			&existed, &f.afterHash, &applied, &restored); err != nil {
+			&existed, &f.afterHash, &applied, &restored, &afterMode); err != nil {
 			return nil, fmt.Errorf("golem: checkpoint files scan: %w", err)
 		}
 		f.existed, f.applied, f.restored = existed != 0, applied != 0, restored != 0
+		if afterMode.Valid {
+			f.trackedMode = true
+			f.afterMode = fs.FileMode(afterMode.Int64)
+		}
 		out = append(out, f)
 	}
 	if err := rows.Err(); err != nil {

@@ -1052,3 +1052,120 @@ func TestCheckpointUndoResumeDivergenceRetainsRecord(t *testing.T) {
 		t.Errorf("a.txt = %q, want the divergent content untouched", got)
 	}
 }
+
+// --- #443 Task 8: tracked-mode guard on durable undo ---
+
+// prepareTrackedCreate simulates a promotion inside the open turn: the file
+// lands with the recorded mode and the journal sees a tracked create.
+func prepareTrackedCreate(t *testing.T, j *checkpointJournal, root, rel, content string, mode os.FileMode) {
+	t.Helper()
+	rec := agenttools.MutationRecord{
+		Path:        rel,
+		Existed:     false,
+		AfterHash:   agenttools.ContentHash([]byte(content)),
+		Summary:     "promote " + rel,
+		At:          time.Now(),
+		TrackedMode: true,
+		AfterMode:   mode,
+	}
+	prepared, err := j.Prepare(rec)
+	if err != nil {
+		t.Fatalf("Prepare: %v", err)
+	}
+	p := filepath.Join(root, rel)
+	if err := os.WriteFile(p, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(p, mode); err != nil {
+		t.Fatal(err)
+	}
+	if err := prepared.Commit(); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+}
+
+func TestCheckpointUndoTrackedModeGuard(t *testing.T) {
+	j, _, root := newJournalFixture(t)
+	beginTestTurn(t, j, "promote artifact")
+	prepareTrackedCreate(t, j, root, "promoted.txt", "artifact", 0o640)
+	mustSealTurn(t, j)
+
+	p := filepath.Join(root, "promoted.txt")
+	if err := os.Chmod(p, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	var out strings.Builder
+	j.undo(context.Background(), &out, 1)
+	if !strings.Contains(out.String(), "cannot undo") {
+		t.Fatalf("mode drift with identical bytes must refuse before any change: %q", out.String())
+	}
+	if _, err := os.Lstat(p); err != nil {
+		t.Fatal("refused undo must not delete the file")
+	}
+
+	if err := os.Chmod(p, 0o640); err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
+	j.undo(context.Background(), &out, 1)
+	if !strings.Contains(out.String(), "undid checkpoint") {
+		t.Fatalf("exact mode must permit undo: %q", out.String())
+	}
+	if _, err := os.Lstat(p); !os.IsNotExist(err) {
+		t.Fatalf("undo must delete the promoted create, err=%v", err)
+	}
+}
+
+// TestCheckpointUndoTrackedModeChain covers the simulation case: a tracked
+// create in one turn, then a legacy write_file update of the same path in a
+// later turn. WriteFileAtomic preserves permission bits, so the simulated
+// state after undoing the legacy update carries the live mode, and the
+// tracked create's guard must accept it end to end.
+func TestCheckpointUndoTrackedModeChain(t *testing.T) {
+	j, tools, root := newJournalFixture(t)
+	beginTestTurn(t, j, "promote artifact")
+	prepareTrackedCreate(t, j, root, "chain.txt", "first", 0o640)
+	mustSealTurn(t, j)
+
+	beginTestTurn(t, j, "legacy update")
+	res := applyTool(t, tools, "write_file", map[string]any{"path": "chain.txt", "content": "second"})
+	if res.IsError {
+		t.Fatalf("legacy update failed: %s", res.Content)
+	}
+	mustSealTurn(t, j)
+
+	fi, err := os.Lstat(filepath.Join(root, "chain.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fi.Mode().Perm() != 0o640 {
+		t.Fatalf("fixture assumption broken: WriteFileAtomic changed the mode to %v", fi.Mode().Perm())
+	}
+
+	var out strings.Builder
+	j.undo(context.Background(), &out, 2)
+	if strings.Contains(out.String(), "cannot undo") {
+		t.Fatalf("chain undo must accept the carried mode: %q", out.String())
+	}
+	if _, err := os.Lstat(filepath.Join(root, "chain.txt")); !os.IsNotExist(err) {
+		t.Fatalf("chain undo must remove the created file, err=%v", err)
+	}
+}
+
+func TestCheckpointUndoLegacyRecordsIgnoreMode(t *testing.T) {
+	j, tools, root := newJournalFixture(t)
+	beginTestTurn(t, j, "legacy create")
+	res := applyTool(t, tools, "write_file", map[string]any{"path": "legacy.txt", "content": "bytes"})
+	if res.IsError {
+		t.Fatalf("write failed: %s", res.Content)
+	}
+	mustSealTurn(t, j)
+	if err := os.Chmod(filepath.Join(root, "legacy.txt"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	var out strings.Builder
+	j.undo(context.Background(), &out, 1)
+	if strings.Contains(out.String(), "cannot undo") {
+		t.Fatalf("legacy records must keep byte-hash-only semantics: %q", out.String())
+	}
+}
