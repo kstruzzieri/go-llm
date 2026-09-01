@@ -197,6 +197,11 @@ func NewSandboxedExecTools(root string, cfg SandboxConfig) ([]agent.Tool, error)
 // shared scratch runtime and the scratch_changes query tool. A promotion
 // journal without scratch is a misconfiguration and fails construction.
 func NewExecToolsWithOptions(root string, opts ExecToolsOptions) ([]agent.Tool, error) {
+	if _, err := normalizeScratchConfig(opts.Scratch); err != nil {
+		// Fail closed: a disabled config with fields set is a dropped
+		// Enabled flag, never a request for direct execution.
+		return nil, err
+	}
 	if !opts.Scratch.Enabled {
 		if opts.PromotionJournal != nil {
 			return nil, fmt.Errorf("tools: promotion journal requires an enabled scratch config")
@@ -225,6 +230,9 @@ func NewExecToolsWithOptions(root string, opts ExecToolsOptions) ([]agent.Tool, 
 // rewrites execSpec.WorkspaceRoot before dispatch and the backend binds its
 // write policy to whatever root it receives.
 func NewSandboxedExecToolsWithOptions(root string, sandbox SandboxConfig, opts ExecToolsOptions) ([]agent.Tool, error) {
+	if _, err := normalizeScratchConfig(opts.Scratch); err != nil {
+		return nil, err
+	}
 	if !opts.Scratch.Enabled {
 		if opts.PromotionJournal != nil {
 			return nil, fmt.Errorf("tools: promotion journal requires an enabled scratch config")

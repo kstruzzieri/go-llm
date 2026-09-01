@@ -81,6 +81,9 @@ func NewExecToolsWithBackground(root string, manager *BackgroundManager) ([]agen
 // backend stays the sole sandbox source of truth; no scratch policy lives
 // on the manager.
 func NewExecToolsWithBackgroundOptions(root string, manager *BackgroundManager, opts ExecToolsOptions) ([]agent.Tool, error) {
+	if _, err := normalizeScratchConfig(opts.Scratch); err != nil {
+		return nil, err
+	}
 	if !opts.Scratch.Enabled {
 		if opts.PromotionJournal != nil {
 			return nil, fmt.Errorf("tools: promotion journal requires an enabled scratch config")

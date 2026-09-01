@@ -511,9 +511,13 @@ func (ScratchChanges) Spec() agent.ToolSpec {
 	}
 }
 
-// Effect implements agent.Tool.
+// Effect implements agent.Tool. The output cap covers the tool's real
+// bounded worst case so dispatch never clips a change report: 64 changes x
+// (a PATH_MAX path %q-expanded up to 4x (~16 KiB) + a sanitized reason that
+// can embed another escaped path + fixed fields) is under 3 MiB; 4 MiB
+// leaves margin. Typical reports are a few hundred bytes.
 func (ScratchChanges) Effect() agent.Effect {
-	return agent.Effect{Class: agent.Read, Approval: agent.ApprovalNever}
+	return agent.Effect{Class: agent.Read, Approval: agent.ApprovalNever, OutputCap: 4 << 20}
 }
 
 // Invoke implements agent.Tool.

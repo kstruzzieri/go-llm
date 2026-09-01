@@ -833,3 +833,58 @@ func TestScratchForegroundTimeoutStillCaptures(t *testing.T) {
 		t.Fatalf("outcome missing slow.txt: %+v", out.changes)
 	}
 }
+
+// TestScratchOptionsRejectDisabledWithFields pins fail-closed construction
+// (codex review): a scratch config with fields set but Enabled dropped must
+// refuse in every options factory, never silently run unscratched.
+func TestScratchOptionsRejectDisabledWithFields(t *testing.T) {
+	root := buildIsolationWorkspace(t)
+	bad := ExecToolsOptions{Scratch: ScratchConfig{MaxChangedFiles: 1}}
+	if _, err := NewExecToolsWithOptions(root, bad); err == nil {
+		t.Fatal("foreground factory accepted a disabled-with-fields scratch config")
+	}
+	if _, err := NewSandboxedExecToolsWithOptions(root, SandboxConfig{}, bad); err == nil {
+		t.Fatal("sandboxed factory accepted a disabled-with-fields scratch config")
+	}
+	manager := NewBackgroundManager()
+	defer manager.Shutdown()
+	if _, err := NewExecToolsWithBackgroundOptions(root, manager, bad); err == nil {
+		t.Fatal("combined factory accepted a disabled-with-fields scratch config")
+	}
+}
+
+// TestScratchChangesOutputCapCoversWorstCase pins the query tool's declared
+// output cap against its real bounded worst case (codex review): 64 changes
+// with pathological %q-expanded paths and reasons must render completely
+// under the tool's own OutputCap, so dispatch never clips the report.
+func TestScratchChangesOutputCapCoversWorstCase(t *testing.T) {
+	rt, _ := newTestScratchRuntime(t, ScratchConfig{Enabled: true})
+	tool := ScratchChanges{rt: rt}
+	longPath := strings.Repeat("\x01", 4096) // %q-expands 4x to ~16 KiB
+	longReason := strings.Repeat("r", 1024)
+	changes := make([]scratchChange, 64)
+	for i := range changes {
+		changes[i] = scratchChange{
+			path:   fmt.Sprintf("%03d-%s", i, longPath),
+			kind:   scratchChangeCreate,
+			size:   1,
+			hash:   strings.Repeat("a", 64),
+			reason: longReason,
+		}
+	}
+	rt.store.beginPending("scr-full")
+	rt.store.completePending("scr-full", scratchOutcome{changes: changes})
+	res, err := tool.Invoke(context.Background(), json.RawMessage(`{"id":"scr-full"}`))
+	if err != nil || res.IsError {
+		t.Fatalf("render: %+v err=%v", res, err)
+	}
+	for i := 0; i < 64; i++ {
+		if !strings.Contains(res.Content, fmt.Sprintf("%03d-", i)) {
+			t.Fatalf("change %d missing from the report", i)
+		}
+	}
+	cap := tool.Effect().OutputCap
+	if cap <= 0 || len(res.Content) > cap {
+		t.Fatalf("declared OutputCap %d does not cover the worst-case render (%d bytes)", cap, len(res.Content))
+	}
+}
