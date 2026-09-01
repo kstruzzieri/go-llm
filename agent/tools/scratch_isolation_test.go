@@ -799,3 +799,30 @@ func TestScratchBackgroundWrapCoversAbandonedReap(t *testing.T) {
 		t.Fatalf("abandoned reap left scratch roots: %v", entries)
 	}
 }
+
+func TestScratchForegroundTimeoutStillCaptures(t *testing.T) {
+	root := buildIsolationWorkspace(t)
+	rc, rt, _ := scratchExecTools(t, root, ScratchConfig{Enabled: true})
+	raw := `{"argv":["sh","-c","echo made > slow.txt; sleep 3"],"timeout_seconds":1}`
+	res := planAndInvoke(t, rc, raw)
+	if !res.IsError || !strings.Contains(res.Content, "timed out") {
+		t.Fatalf("timeout must surface: %+v", res)
+	}
+	if !strings.Contains(res.Content, "scratch: id=scr-") {
+		t.Fatalf("timeout result must expose the scratch id:\n%s", res.Content)
+	}
+	id := scratchIDFromResult(t, res.Content)
+	out, status := rt.store.get(id)
+	if status != scratchStatusCaptured {
+		t.Fatalf("timeout must still capture, status=%v", status)
+	}
+	found := false
+	for _, c := range out.changes {
+		if c.path == "slow.txt" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("outcome missing slow.txt: %+v", out.changes)
+	}
+}

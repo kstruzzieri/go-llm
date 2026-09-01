@@ -6,6 +6,59 @@ All notable changes to `go-llm` are documented here. Downstream consumers
 
 ## [Unreleased]
 
+### Added — ephemeral scratch workspaces for approved commands (#443, ZT-204)
+
+Approved build/test commands can run against a disposable copy-on-write
+snapshot of the workspace, closing the execution-sandboxing mini-epic
+(#440–#443): #441/#442 are the syscall layer, this is the filesystem layer,
+and they compose without either knowing about the other.
+
+- `agent/tools`: `ScratchConfig` + `ExecToolsOptions` with additive
+  constructors (`NewExecToolsWithOptions`,
+  `NewSandboxedExecToolsWithOptions`, `NewExecToolsWithBackgroundOptions`);
+  zero options stay byte-identical to the legacy constructors. A session
+  snapshots the canonical tree twice (CoW via `clonefile`/`FICLONE`, exact
+  plain-copy fallback only for enumerated unsupported/cross-device errnos)
+  into a pristine reference root and an execution root holding `workspace/`
+  and `tmp/`, rewrites the approved spec's workspace root, cwd,
+  workspace-local executable, and `TMPDIR`, runs the command, stream-diffs
+  the two private trees into a bounded in-RAM outcome, and removes both
+  roots. Foreground and background share one runtime; background capture is
+  owned by the process `Wait` wrapper, so `Shutdown` still guarantees no
+  scratch root survives it.
+- Threat model, stated plainly: on the host runtime this is accident
+  isolation (cwd-relative build droppings, `rm` in scripts) — a malicious
+  process can still address the canonical tree by absolute path. Composed
+  with Seatbelt or bwrap the rewritten root becomes an enforced write
+  boundary, proven behaviorally on both platforms. `.git` is omitted at
+  every depth (no `git describe`/VCS stamping inside scratch); the
+  file-by-file clone is not a point-in-time filesystem snapshot, and a
+  drifting canonical source retries once, then fails closed. Crash/SIGKILL
+  orphans under the platform temp base are an accepted limitation (0700,
+  OS-reaped; no shared startup sweep).
+- Approval identity: an enabled scratch policy inserts a versioned
+  `scr:<digest>:` component after the `exec:v3:`/`exec-bg:v2:` prefixes (the
+  `sb:` precedent — recipes unchanged, no version bump), so a host grant
+  never authorizes a scratch run or vice versa; the ephemeral path is never
+  identity. The outer effect budget is setup + command + capture + a fixed
+  5s grace, each phase under its own child context.
+- `scratch_changes` (read-only, approval-free) reports per-change metadata,
+  never artifact bytes. `promote_artifact` applies exactly one captured
+  create per call: always-prompting (empty structural key), create-only
+  (updates, deletes, modes, links, binary, and preview-oversize content are
+  report-only), fully previewed (complete escaped additions, 64 KiB cap),
+  journaled with a write-ahead intent and a tracked after-mode, and
+  installed descriptor-anchored with `renameatx_np(RENAME_EXCL)` /
+  `renameat2(RENAME_NOREPLACE)` — no overwrite, no fallback. Checkpoint
+  schema v2 adds a nullable `after_mode` column (v1 migrates additively);
+  `/undo` refuses to delete a promoted create whose complete mode drifted
+  even with identical bytes. Promotion-enabled construction fails on
+  platforms without the tested no-replace install; capture/query still work.
+- `cmd/golem -scratch` (requires interactive `-allow-exec`; one-shot drops
+  it with a warning): registers the scratch tools, passes the checkpoint
+  journal only when `-allow-write` built it, and prints one startup notice
+  naming the accident-vs-enforced split and whether promotion is armed.
+
 ### Added — phase-based model routing: the planning use case (#476)
 
 Golem's plan-authoring mode (`-goal`) now routes through its own `planning`
