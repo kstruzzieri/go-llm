@@ -213,7 +213,11 @@ func NewExecToolsWithOptions(root string, opts ExecToolsOptions) ([]agent.Tool, 
 	}
 	rc := NewRunCommand(ws, newPlatformRunner())
 	rc.scratchRT = rt
-	return []agent.Tool{rc, ScratchChanges{rt: rt}}, nil
+	tools := []agent.Tool{rc, ScratchChanges{rt: rt}}
+	if opts.PromotionJournal != nil {
+		tools = append(tools, NewPromoteArtifact(ws, rt))
+	}
+	return tools, nil
 }
 
 // NewSandboxedExecToolsWithOptions composes a sandbox runtime (#440-#442)
@@ -242,7 +246,11 @@ func NewSandboxedExecToolsWithOptions(root string, sandbox SandboxConfig, opts E
 	rc := NewRunCommand(ws, backend)
 	rc.sandbox = backend.approval
 	rc.scratchRT = rt
-	return []agent.Tool{rc, ScratchChanges{rt: rt}}, nil
+	tools := []agent.Tool{rc, ScratchChanges{rt: rt}}
+	if opts.PromotionJournal != nil {
+		tools = append(tools, NewPromoteArtifact(ws, rt))
+	}
+	return tools, nil
 }
 
 func (t *RunCommand) Spec() agent.ToolSpec {

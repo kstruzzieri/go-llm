@@ -103,14 +103,18 @@ func NewExecToolsWithBackgroundOptions(root string, manager *BackgroundManager, 
 	rc.scratchRT = rt
 	sc := NewStartCommand(ws, manager)
 	sc.scratchRT = rt
-	return []agent.Tool{
+	tools := []agent.Tool{
 		rc,
 		sc,
 		NewCommandStatus(manager),
 		NewCommandTail(manager),
 		NewStopCommand(manager),
 		ScratchChanges{rt: rt},
-	}, nil
+	}
+	if opts.PromotionJournal != nil {
+		tools = append(tools, NewPromoteArtifact(ws, rt))
+	}
+	return tools, nil
 }
 
 // bgCwdDisplay maps a workspace-relative dir label to the display string

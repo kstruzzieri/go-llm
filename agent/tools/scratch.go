@@ -452,6 +452,9 @@ func newScratchRuntime(root string, cfg ScratchConfig, journal PreparingJournal)
 	if !normalized.Enabled {
 		return nil, fmt.Errorf("tools: scratch runtime requires an enabled config")
 	}
+	if journal != nil && !scratchPromotionSupported {
+		return nil, fmt.Errorf("tools: scratch promotion is unsupported on this platform; construct without a promotion journal (S5)")
+	}
 	approval, err := approvalForScratch(normalized, journal != nil)
 	if err != nil {
 		return nil, err
