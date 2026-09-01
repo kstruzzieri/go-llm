@@ -1,11 +1,21 @@
 package tools
 
 import (
+	"context"
+	cryptorand "crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
+	"io"
+	"os"
+	"runtime"
 	"strconv"
+	"strings"
+	"sync"
 	"time"
+
+	"github.com/kstruzzieri/go-llm/agent"
 )
 
 // Scratch execution (#443, ZT-204): approved commands run against a
@@ -224,4 +234,312 @@ func renderScratchLine(cfg ScratchConfig, promotable bool) string {
 		cfg.MaxFileBytes, cfg.MaxTotalBytes, cfg.MaxConcurrentSessions,
 		cfg.SnapshotTimeout, cfg.CaptureTimeout, scratchEffectGrace, promote,
 	)
+}
+
+// scratchTempBase returns the platform scratch parent. Like the Seatbelt
+// temp base (D5 there), it is policy, never inherited from the environment:
+// inherited temp locations are command input.
+func scratchTempBase() string {
+	switch runtime.GOOS {
+	case "darwin":
+		return "/private/tmp"
+	case "linux":
+		return "/tmp"
+	default:
+		return os.TempDir()
+	}
+}
+
+// scratchStatus is the query-tool view of one scratch id.
+type scratchStatus int
+
+const (
+	scratchStatusUnknown scratchStatus = iota
+	scratchStatusPending
+	scratchStatusCaptured
+)
+
+// scratchStoreRetainedCap bounds completed outcomes (FIFO, mirroring
+// backgroundRetainedCap). Pending sessions are never evicted.
+const scratchStoreRetainedCap = 8
+
+// scratchStore is the session-scoped registry of scratch outcomes. IDs are
+// 128-bit random capability handles; completed outcomes are bounded FIFO;
+// promotion claims/consumption are tracked per (id, path) so one artifact
+// can never be promoted twice or concurrently.
+type scratchStore struct {
+	mu        sync.Mutex
+	random    io.Reader
+	pending   map[string]struct{}
+	completed map[string]scratchOutcome
+	order     []string
+	claimed   map[string]map[string]bool
+	consumed  map[string]map[string]bool
+}
+
+func newScratchStore(random io.Reader) *scratchStore {
+	return &scratchStore{
+		random:    random,
+		pending:   make(map[string]struct{}),
+		completed: make(map[string]scratchOutcome),
+		claimed:   make(map[string]map[string]bool),
+		consumed:  make(map[string]map[string]bool),
+	}
+}
+
+// newID draws a fresh 128-bit capability id, regenerating on collision.
+func (s *scratchStore) newID() (string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for {
+		var buf [16]byte
+		if _, err := io.ReadFull(s.random, buf[:]); err != nil {
+			return "", fmt.Errorf("tools: scratch id entropy: %w", err)
+		}
+		id := "scr-" + hex.EncodeToString(buf[:])
+		if _, dup := s.pending[id]; dup {
+			continue
+		}
+		if _, dup := s.completed[id]; dup {
+			continue
+		}
+		return id, nil
+	}
+}
+
+func (s *scratchStore) beginPending(id string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.pending[id] = struct{}{}
+}
+
+// completePending publishes one outcome, evicting the oldest completed
+// entries beyond the retained cap (pending sessions are never evicted).
+func (s *scratchStore) completePending(id string, out scratchOutcome) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.pending, id)
+	out.id = id
+	s.completed[id] = out
+	s.order = append(s.order, id)
+	for len(s.order) > scratchStoreRetainedCap {
+		oldest := s.order[0]
+		s.order = s.order[1:]
+		delete(s.completed, oldest)
+		delete(s.claimed, oldest)
+		delete(s.consumed, oldest)
+	}
+}
+
+func (s *scratchStore) dropPending(id string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.pending, id)
+}
+
+// delete removes every trace of one id (pending, outcome, claims).
+func (s *scratchStore) delete(id string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.pending, id)
+	if _, ok := s.completed[id]; ok {
+		delete(s.completed, id)
+		for i, o := range s.order {
+			if o == id {
+				s.order = append(s.order[:i], s.order[i+1:]...)
+				break
+			}
+		}
+	}
+	delete(s.claimed, id)
+	delete(s.consumed, id)
+}
+
+// get returns a deep copy of one outcome and its status; callers can never
+// mutate stored state through the result.
+func (s *scratchStore) get(id string) (scratchOutcome, scratchStatus) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.pending[id]; ok {
+		return scratchOutcome{id: id}, scratchStatusPending
+	}
+	out, ok := s.completed[id]
+	if !ok {
+		return scratchOutcome{}, scratchStatusUnknown
+	}
+	cp := out
+	cp.changes = make([]scratchChange, len(out.changes))
+	copy(cp.changes, out.changes)
+	for i := range cp.changes {
+		if cp.changes[i].data != nil {
+			cp.changes[i].data = append([]byte(nil), cp.changes[i].data...)
+		}
+	}
+	return cp, scratchStatusCaptured
+}
+
+// claim atomically reserves one (id, path) for promotion. A consumed path
+// can never be claimed again; a released claim can.
+func (s *scratchStore) claim(id, path string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out, ok := s.completed[id]
+	if !ok {
+		return fmt.Errorf("tools: unknown scratch id %q", id)
+	}
+	found := false
+	for _, c := range out.changes {
+		if c.path == path {
+			found = true
+			break
+		}
+	}
+	if !found {
+		return fmt.Errorf("tools: scratch %s has no change for %q", id, path)
+	}
+	if s.consumed[id][path] {
+		return fmt.Errorf("tools: scratch %s path %q already promoted or indeterminate", id, path)
+	}
+	if s.claimed[id][path] {
+		return fmt.Errorf("tools: scratch %s path %q promotion already in progress", id, path)
+	}
+	if s.claimed[id] == nil {
+		s.claimed[id] = make(map[string]bool)
+	}
+	s.claimed[id][path] = true
+	return nil
+}
+
+func (s *scratchStore) release(id, path string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.claimed[id], path)
+}
+
+// consume permanently retires one (id, path): promoted, or indeterminate
+// after a post-write failure — either way never retryable automatically.
+func (s *scratchStore) consume(id, path string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.claimed[id], path)
+	if s.consumed[id] == nil {
+		s.consumed[id] = make(map[string]bool)
+	}
+	s.consumed[id][path] = true
+}
+
+// scratchRuntime is the one shared engine behind every scratch tool a
+// factory returns: normalized policy, approval identity, canonical-root
+// binding, bounded admission, entropy, temp placement, the outcome store,
+// and the optional promotion journal. Frozen at construction.
+type scratchRuntime struct {
+	cfg      ScratchConfig
+	approval scratchApproval
+	journal  PreparingJournal
+	root     string // canonical workspace root every session must match
+	tempBase string
+	store    *scratchStore
+	slots    chan struct{}
+	clone    func(*os.File, string) error
+}
+
+// newScratchRuntime builds the shared scratch engine for one factory.
+func newScratchRuntime(root string, cfg ScratchConfig, journal PreparingJournal) (*scratchRuntime, error) {
+	normalized, err := normalizeScratchConfig(cfg)
+	if err != nil {
+		return nil, err
+	}
+	if !normalized.Enabled {
+		return nil, fmt.Errorf("tools: scratch runtime requires an enabled config")
+	}
+	approval, err := approvalForScratch(normalized, journal != nil)
+	if err != nil {
+		return nil, err
+	}
+	canonical, err := CanonicalWorkspaceRoot(root)
+	if err != nil {
+		return nil, fmt.Errorf("tools: scratch canonical root: %w", err)
+	}
+	return &scratchRuntime{
+		cfg:      normalized,
+		approval: approval,
+		journal:  journal,
+		root:     canonical,
+		tempBase: scratchTempBase(),
+		store:    newScratchStore(cryptorand.Reader),
+		slots:    make(chan struct{}, normalized.MaxConcurrentSessions),
+		clone:    cloneFile,
+	}, nil
+}
+
+// ScratchChanges is the read-only, approval-free query tool for scratch
+// outcomes: status, bounded per-change metadata, and reasons — never
+// artifact bytes or previews (those appear only inside a promotion prompt).
+type ScratchChanges struct {
+	rt *scratchRuntime
+}
+
+type scratchChangesArgs struct {
+	ID string `json:"id"`
+}
+
+// Spec implements agent.Tool.
+func (ScratchChanges) Spec() agent.ToolSpec {
+	return agent.ToolSpec{
+		Name:        "scratch_changes",
+		Description: "Report what an isolated scratch command changed: per-file kind, size, hash, and whether promote_artifact can apply it. Metadata only; content appears only in a promotion approval prompt.",
+		Parameters: json.RawMessage(`{
+  "type":"object",
+  "properties":{
+    "id":{"type":"string","description":"scratch id from a run_command/start_command result"}
+  },
+  "required":["id"]
+}`),
+	}
+}
+
+// Effect implements agent.Tool.
+func (ScratchChanges) Effect() agent.Effect {
+	return agent.Effect{Class: agent.Read, Approval: agent.ApprovalNever}
+}
+
+// Invoke implements agent.Tool.
+func (t ScratchChanges) Invoke(ctx context.Context, raw json.RawMessage) (agent.ToolResult, error) {
+	var args scratchChangesArgs
+	if err := json.Unmarshal(raw, &args); err != nil {
+		return agent.ToolResult{IsError: true, Content: "invalid arguments: " + err.Error()}, nil
+	}
+	if strings.TrimSpace(args.ID) == "" {
+		return agent.ToolResult{IsError: true, Content: "id is required"}, nil
+	}
+	out, status := t.rt.store.get(args.ID)
+	switch status {
+	case scratchStatusUnknown:
+		return agent.ToolResult{IsError: true, Content: fmt.Sprintf("unknown scratch id %q (evicted or never issued)", args.ID)}, nil
+	case scratchStatusPending:
+		return agent.ToolResult{Content: fmt.Sprintf("scratch %s: pending (command still running or capture not finished)", args.ID)}, nil
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "scratch %s: %d change(s)", args.ID, len(out.changes))
+	if out.truncated {
+		b.WriteString(" [truncated: nothing promotable]")
+	}
+	if out.captureErr != "" {
+		fmt.Fprintf(&b, " capture-error: %s", out.captureErr)
+	}
+	if out.cleanupErr != "" {
+		fmt.Fprintf(&b, " cleanup-error: %s", out.cleanupErr)
+	}
+	for _, c := range out.changes {
+		fmt.Fprintf(&b, "\n%s %q size=%d", c.kind, c.path, c.size)
+		if c.hash != "" {
+			fmt.Fprintf(&b, " hash=%s", c.hash[:min(len(c.hash), fingerprintLen)])
+		}
+		if c.promotable {
+			b.WriteString(" promotable")
+		} else if c.reason != "" {
+			fmt.Fprintf(&b, " (%s)", c.reason)
+		}
+	}
+	return agent.ToolResult{Content: b.String()}, nil
 }
