@@ -272,15 +272,23 @@ func TestScratchSessionCleanupGuardAbandonsImpostor(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Replace the execution parent with an impostor directory.
+	// Replace the execution parent with an impostor directory. The impostor's
+	// inode is allocated BEFORE the original is removed and installed via
+	// rename — never remove+recreate, which lets ext4-style inode reuse hand
+	// the impostor the original's identity and blind os.SameFile (the
+	// inode-reuse lesson; this exact construction failed in docker CI).
 	execParent := filepath.Dir(session.work)
+	impostor := filepath.Join(t.TempDir(), "impostor")
+	if err := os.Mkdir(impostor, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(impostor, "innocent.txt"), []byte("keep me"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.RemoveAll(execParent); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Mkdir(execParent, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(execParent, "innocent.txt"), []byte("keep me"), 0o644); err != nil {
+	if err := os.Rename(impostor, execParent); err != nil {
 		t.Fatal(err)
 	}
 	session.finish(context.Background())
