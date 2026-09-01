@@ -206,12 +206,12 @@ func TestAllowToolSetAcceptsExactlyTheSupportedGatedTools(t *testing.T) {
 
 func TestAllowToolSetRejectsExcludedAndUnknownNames(t *testing.T) {
 	for _, name := range []string{
-		"verify_command",    // synthetic, never a registered tool (#347)
-		"submit_plan",       // planning mode only
-		"mcp__server__tool", // MCP is excluded by contract
-		"command_status",    // ungated; nothing to authorize
-		"command_tail",      // ungated; nothing to authorize
-		"read_file",         // ungated
+		"verify_command",              // synthetic, never a registered tool (#347)
+		"submit_plan",                 // planning mode only
+		"mcp__server__tool",           // MCP is excluded by contract
+		"command_status",              // ungated; nothing to authorize
+		"command_tail",                // ungated; nothing to authorize
+		"read_file",                   // ungated
 		"run_commands", "Run_Command", // typo and wrong case
 		"*", "", "  run_command",
 	} {

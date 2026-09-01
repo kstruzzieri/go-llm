@@ -87,9 +87,9 @@ type flags struct {
 	workflowReason      string // required rationale paired with workflowProfile
 	wfProfileSet        bool
 	wfReasonSet         bool
-	goal                string // AgentFlow planning mode goal (-goal)
-	goalSet             bool   // -goal was passed (distinguishes an explicit empty goal)
-	approvePlanLock     bool   // -approve-plan-lock: non-interactive planning-mode lock approval
+	goal                string          // AgentFlow planning mode goal (-goal)
+	goalSet             bool            // -goal was passed (distinguishes an explicit empty goal)
+	approvePlanLock     bool            // -approve-plan-lock: non-interactive planning-mode lock approval
 	outputFormat        string          // -output-format: text|json|stream-json (#352)
 	allowTools          stringSliceFlag // -allow-tool: exact gated tool names for headless runs (#352)
 }

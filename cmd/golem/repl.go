@@ -70,13 +70,13 @@ type replSession struct {
 	// machine is the -output-format json/stream-json writer (#352). It is nil
 	// in text mode and in the REPL, and every call site treats nil as "no
 	// machine output", so no existing path changes shape.
-	machine *machineWriter
-	allowWrite       bool
-	allowExec        bool
-	mcpAttached   bool    // true when external MCP tools are attached (force approver)
-	obs           *observ // nil unless -trace/-telemetry enabled
-	feedback      *feedbackService
-	pressureWarn  bool // enable the one-per-run context-pressure warning line
+	machine      *machineWriter
+	allowWrite   bool
+	allowExec    bool
+	mcpAttached  bool    // true when external MCP tools are attached (force approver)
+	obs          *observ // nil unless -trace/-telemetry enabled
+	feedback     *feedbackService
+	pressureWarn bool // enable the one-per-run context-pressure warning line
 	// mixed mirrors what newOrchestratorFactory puts in ContextManager.Mixed, so
 	// the renderer can tell whether a tool result's flat Content is what the
 	// model actually read. Same -progressive flag, one source.
