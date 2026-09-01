@@ -67,6 +67,10 @@ type replSession struct {
 	// is non-nil only for one-shot runs that named at least one gated tool;
 	// the REPL never has one, and a nil value keeps the pre-#352 fail-safe.
 	headlessApprover *headlessApprover
+	// machine is the -output-format json/stream-json writer (#352). It is nil
+	// in text mode and in the REPL, and every call site treats nil as "no
+	// machine output", so no existing path changes shape.
+	machine *machineWriter
 	allowWrite       bool
 	allowExec        bool
 	mcpAttached   bool    // true when external MCP tools are attached (force approver)
@@ -169,13 +173,31 @@ func runREPL(ctx context.Context, src lineSource, out io.Writer, interrupts <-ch
 // on stderr; main exits non-zero without printing a second message.
 var errOneShotFailed = errors.New("one-shot run failed")
 
-// runOneShot executes exactly one agent turn for -p. Only the final answer is
-// written to stdout (with a single trailing newline); every other line the
-// turn produces — tool progress, warnings, errors — goes to stderr via
-// runOnce. A nil line source means no interactive approver exists, so the
-// runtime fail-safe denies any approval-gated tool call.
+// runOneShot executes exactly one agent turn for -p. In text mode only the
+// final answer is written to stdout (with a single trailing newline); every
+// other line the turn produces — tool progress, warnings, errors — goes to
+// stderr via runOnce. A nil line source means no interactive approver exists,
+// so absent a #352 headless approver the runtime fail-safe denies any
+// approval-gated tool call.
+//
+// #352: in a machine format, stdout carries the protocol event stream
+// (stream-json) or nothing yet (json), and then exactly one golem.result.v1
+// record — written on EVERY outcome, including failures and cancellations, so
+// a consumer always ends on a result line. The record, not the protocol
+// terminal event, completes the stream.
 func runOneShot(ctx context.Context, stdout, stderr io.Writer, interrupts <-chan struct{}, sess *replSession, prompt string) error {
 	res, runErr := runOnce(ctx, stderr, interrupts, sess, prompt, nil)
+	if sess.machine != nil {
+		rec := sess.machine.buildResult(res, runErr)
+		if werr := writeJSONLine(stdout, rec); werr != nil {
+			_, _ = fmt.Fprintf(stderr, "golem: machine output incomplete: %v\n", werr)
+			return errOneShotFailed
+		}
+		if runErr != nil || rec.Status != "completed" {
+			return errOneShotFailed // reported in the record; exit 1
+		}
+		return nil
+	}
 	if runErr != nil {
 		return errOneShotFailed // runOnce already reported the failure on stderr
 	}
@@ -313,7 +335,7 @@ func runOnce(ctx context.Context, out io.Writer, interrupts <-chan struct{}, ses
 		Message:  line,
 		Approver: approver, // nil when read-only => runtime fail-safe denies Write/Exec
 		Observer: observer,
-	}, func(golemruntime.Event) error { return nil })
+	}, sess.machine.sink())
 	// Seal immediately after Run on every path: writes applied before an
 	// interrupt or provider error must stay undoable. The error is joined
 	// with the run error below, after the session-persistence demotion, so
@@ -400,6 +422,9 @@ func runOnce(ctx context.Context, out io.Writer, interrupts <-chan struct{}, ses
 			_ = rend.writeDim(groundingSummaryLine(rep, diag))
 			if raw, merr := json.Marshal(rep); merr == nil {
 				groundingRaw = raw
+				// #352: the machine surface reuses the SAME marshalled report
+				// the trace records, so the two can never disagree.
+				sess.machine.setGrounding(raw)
 			}
 		}
 	}

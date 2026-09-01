@@ -5,11 +5,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"os"
 	"strings"
 	"testing"
 
 	"github.com/kstruzzieri/go-llm/agent"
 	golemruntime "github.com/kstruzzieri/go-llm/golem"
+	"github.com/kstruzzieri/go-llm/provider"
 )
 
 func ev(seq uint64, typ, payload string) golemruntime.Event {
@@ -251,6 +253,170 @@ func TestBuildResultNoTerminalFallsBackToInvalidRequest(t *testing.T) {
 	var e struct{ Code string }
 	if err := json.Unmarshal(m["error"], &e); err != nil || e.Code != "invalid_request" {
 		t.Errorf("error = %s, want the reserved invalid_request code", m["error"])
+	}
+}
+
+// runMachineModeHarness executes one deterministic scripted one-shot run — a
+// read_file tool call, a streamed answer, then runOneShot's result path — in
+// the given format, returning stdout and stderr. The same buffer backs the
+// writer and runOneShot's stdout, exactly as main.go wires production.
+func runMachineModeHarness(t *testing.T, format outputFormat) (string, string) {
+	t.Helper()
+	root := t.TempDir()
+	if err := os.WriteFile(root+"/hello.txt", []byte("hi there"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	toolCall := provider.ChatResponse{
+		ToolCalls: []provider.ToolCall{{
+			ID: "c1", Type: "function",
+			Function: provider.ToolCallFunction{Name: "read_file", Arguments: json.RawMessage(`{"path":"hello.txt"}`)},
+		}},
+	}
+	finalAns := provider.ChatResponse{Content: "machine answer"}
+	caller := &scriptCaller{responses: []agent.ModelResult{{Response: toolCall}, {Response: finalAns}}}
+	sess := newTestSession(t, caller, root)
+	var stdout, stderr strings.Builder
+	sess.machine = newMachineWriter(&stdout, format)
+	if err := runOneShot(context.Background(), &stdout, &stderr, nil, sess, "read the file"); err != nil {
+		t.Fatalf("runOneShot: %v; stderr=%s", err, stderr.String())
+	}
+	return stdout.String(), stderr.String()
+}
+
+// splitMachineLines classifies stdout lines by the frozen discrimination rule:
+// exactly one of "protocol"/"schema" per line.
+func splitMachineLines(t *testing.T, out string) (events []golemruntime.Event, results []map[string]json.RawMessage) {
+	t.Helper()
+	if out == "" {
+		return nil, nil
+	}
+	if !strings.HasSuffix(out, "\n") {
+		t.Fatalf("machine output must end with a newline: %q", out)
+	}
+	for i, line := range strings.Split(strings.TrimSuffix(out, "\n"), "\n") {
+		var probe map[string]json.RawMessage
+		if err := json.Unmarshal([]byte(line), &probe); err != nil {
+			t.Fatalf("line %d not JSON: %v (%q)", i, err, line)
+		}
+		_, hasProtocol := probe["protocol"]
+		_, hasSchema := probe["schema"]
+		if hasProtocol == hasSchema {
+			t.Fatalf("line %d violates the discrimination rule (exactly one of protocol/schema): %q", i, line)
+		}
+		if hasProtocol {
+			if len(results) > 0 {
+				t.Fatalf("protocol event after the result record; the record must complete the stream: %q", line)
+			}
+			var e golemruntime.Event
+			if err := json.Unmarshal([]byte(line), &e); err != nil {
+				t.Fatalf("line %d: %v", i, err)
+			}
+			events = append(events, e)
+		} else {
+			results = append(results, decodeResult(t, line))
+		}
+	}
+	return events, results
+}
+
+func TestRunOneShotStreamJSONEmitsEventsThenOneResultTrailer(t *testing.T) {
+	stdout, stderr := runMachineModeHarness(t, outputStreamJSON)
+	events, results := splitMachineLines(t, stdout)
+	if len(results) != 1 {
+		t.Fatalf("got %d result records, want exactly 1:\n%s", len(results), stdout)
+	}
+	types := make([]string, 0, len(events))
+	terminals := 0
+	for _, e := range events {
+		types = append(types, e.Type)
+		if _, ok := terminalEventTypes[e.Type]; ok {
+			terminals++
+		}
+	}
+	if terminals != 1 || events[len(events)-1].Type != "run.finished" {
+		t.Fatalf("want exactly one terminal run.finished as the LAST protocol event, got %v", types)
+	}
+	joined := strings.Join(types, ",")
+	for _, want := range []string{"run.started", "tool.started", "tool.finished", "message.delta"} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("stream must carry %s, got %v", want, types)
+		}
+	}
+	if got := string(results[0]["answer"]); got != `"machine answer"` {
+		t.Errorf("result answer = %s, want the final answer", got)
+	}
+	// The plain answer must not ALSO appear as a bare stdout line.
+	for _, line := range strings.Split(stdout, "\n") {
+		if line == "machine answer" {
+			t.Error("the bare answer line must be suppressed in machine modes")
+		}
+	}
+	if stderr == "" {
+		t.Error("the human progress stream must still reach stderr")
+	}
+}
+
+func TestRunOneShotJSONWritesExactlyOneResultLine(t *testing.T) {
+	stdout, _ := runMachineModeHarness(t, outputJSON)
+	events, results := splitMachineLines(t, stdout)
+	if len(events) != 0 {
+		t.Fatalf("json mode must write no protocol events, got %d:\n%s", len(events), stdout)
+	}
+	if len(results) != 1 {
+		t.Fatalf("json mode must write exactly one result line, got %d:\n%s", len(results), stdout)
+	}
+	if got := string(results[0]["status"]); got != `"completed"` {
+		t.Errorf("status = %s, want completed", got)
+	}
+	if got := string(results[0]["answer"]); got != `"machine answer"` {
+		t.Errorf("answer = %s, want the final answer", got)
+	}
+}
+
+func TestRunOneShotTextModeIsByteIdenticalToPre352(t *testing.T) {
+	// Regression pin for acceptance criterion 4: with no machine writer the
+	// stdout bytes are exactly the answer plus one trailing newline.
+	root := t.TempDir()
+	caller := &scriptCaller{responses: []agent.ModelResult{{Response: provider.ChatResponse{Content: "plain answer"}}}}
+	sess := newTestSession(t, caller, root)
+	var stdout, stderr strings.Builder
+	if err := runOneShot(context.Background(), &stdout, &stderr, nil, sess, "say it"); err != nil {
+		t.Fatalf("runOneShot: %v", err)
+	}
+	if stdout.String() != "plain answer\n" {
+		t.Fatalf("stdout = %q, want %q byte-identical", stdout.String(), "plain answer\n")
+	}
+}
+
+func TestRunOneShotMachineModeProviderFailureStillWritesAResult(t *testing.T) {
+	sess := newTestSession(t, errCaller{err: errors.New("model unreachable")}, t.TempDir())
+	var stdout, stderr strings.Builder
+	sess.machine = newMachineWriter(&stdout, outputStreamJSON)
+	err := runOneShot(context.Background(), &stdout, &stderr, nil, sess, "anything")
+	if !errors.Is(err, errOneShotFailed) {
+		t.Fatalf("want errOneShotFailed, got %v", err)
+	}
+	events, results := splitMachineLines(t, stdout.String())
+	if len(results) != 1 {
+		t.Fatalf("a failed run must still end on one result record:\n%s", stdout.String())
+	}
+	if got := string(results[0]["status"]); got != `"error"` {
+		t.Errorf("status = %s, want error", got)
+	}
+	var failedCode string
+	for _, e := range events {
+		if e.Type == "run.failed" {
+			var p struct{ Code string }
+			_ = json.Unmarshal(e.Payload, &p)
+			failedCode = p.Code
+		}
+	}
+	if failedCode == "" {
+		t.Fatalf("stream must carry the run.failed event:\n%s", stdout.String())
+	}
+	var recErr struct{ Code string }
+	if err := json.Unmarshal(results[0]["error"], &recErr); err != nil || recErr.Code != failedCode {
+		t.Errorf("result error.code = %q, want the stream's run.failed code %q", recErr.Code, failedCode)
 	}
 }
 

@@ -705,6 +705,12 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 		}
 		f.prompt = p
 	}
+	// #352: the value was validated above, so this cannot fail; the error is
+	// still checked rather than discarded.
+	outFormat, ferr := parseOutputFormat(f.outputFormat)
+	if ferr != nil {
+		return maybeUsageError(ferr, f.promptSet)
+	}
 	f, taskWarns := applyTaskMode(f)
 	f, goalWarns := applyGoalMode(f)
 	taskWarns = append(taskWarns, goalWarns...)
@@ -837,7 +843,11 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 		return err
 	}
 	if err := adm.ensure(ctx); err != nil {
-		return err
+		// #352: a destination-admission denial is a typed local policy
+		// decision — a caller error (exit 2) on the headless surface, and one
+		// of the two pre-run failures that still writes a result record.
+		reportPreRunFailure(stdout, outFormat, resultCodeDestDenied, err)
+		return maybeUsageError(err, f.promptSet)
 	}
 
 	// Guarded, loopback-only discovery runs strictly after admission: each
@@ -892,7 +902,12 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 		ActiveProviders:                 netPlan.ActiveProviders,
 	})
 	if err != nil {
-		return fmt.Errorf("bootstrap providers: %w", err)
+		// #352: a provider failure during pre-run bootstrap is a provider
+		// failure (exit 1), never caller misuse; machine modes still get
+		// their result record.
+		err = fmt.Errorf("bootstrap providers: %w", err)
+		reportPreRunFailure(stdout, outFormat, resultCodeProviderPreRun, err)
+		return err
 	}
 	defer func() { _ = bundle.Close() }()
 
@@ -905,8 +920,10 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 	warns = append(backendRes.warns, warns...)
 	if err != nil {
 		if len(backendRes.warns) > 0 {
-			return fmt.Errorf("%s\n%w", strings.Join(backendRes.warns, "\n"), err)
+			err = fmt.Errorf("%s\n%w", strings.Join(backendRes.warns, "\n"), err)
 		}
+		// #352: preflight probes the provider — same class as bootstrap.
+		reportPreRunFailure(stdout, outFormat, resultCodeProviderPreRun, err)
 		return err
 	}
 	warns = append(warns, oneShotWarns...)
@@ -1416,6 +1433,7 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 		grants:              newApprovalGrants(),
 		destAdmission:       adm,
 		headlessApprover:    headlessApproverFor(allowTools),
+		machine:             newMachineWriter(stdout, outFormat),
 		allowWrite:          f.allowWrite,
 		allowExec:           f.allowExec,
 		mcpAttached:         mcpAttached,

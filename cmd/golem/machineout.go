@@ -197,3 +197,14 @@ func preRunFailureResult(code, message string) headlessResult {
 		Error:  &headlessResultError{Code: code, Message: message},
 	}
 }
+
+// reportPreRunFailure writes the machine-mode record for a failure before
+// Runtime.Run. In text mode it does nothing — stderr already carries the
+// diagnostic through the normal error path. The write error is deliberately
+// dropped: the invocation is already failing with a more specific cause.
+func reportPreRunFailure(stdout io.Writer, format outputFormat, code string, err error) {
+	if !format.machine() {
+		return
+	}
+	_ = writeJSONLine(stdout, preRunFailureResult(code, err.Error()))
+}

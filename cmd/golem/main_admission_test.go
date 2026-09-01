@@ -647,3 +647,88 @@ func TestRunGoalModeRemotePlanningFallbackFailsClosed(t *testing.T) {
 		t.Errorf("agent provider received %d requests before fail-closed admission, want 0", got)
 	}
 }
+
+// TestOneShotMachineModeDestinationDenialWritesResultAndExitsTwo (#352):
+// a non-interactive one-shot whose AGENT route lands on an unadmitted remote
+// destination must fail closed with exit 2 AND still put exactly one
+// golem.result.v1 record on stdout, carrying the destination_denied code.
+func TestOneShotMachineModeDestinationDenialWritesResultAndExitsTwo(t *testing.T) {
+	root := t.TempDir()
+	configPath := filepath.Join(t.TempDir(), "models.json")
+	configJSON := `{
+  "providers": {"opencode": {"base_url": "https://opencode.invalid/zen/go", "api_format": "openai-compat", "timeout": "5s"}},
+  "models": {"agent": {"name": "remote-model", "provider": "opencode", "type": "dense", "context_window": 32768,
+    "capabilities": ["chat", "generate", "stream", "tool_call"]}},
+  "defaults": {"agent": "agent"}
+}`
+	if err := os.WriteFile(configPath, []byte(configJSON), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	stdin, stdout, stderr := runTestFiles(t)
+
+	err := run([]string{"-config", configPath, "-root", root, "-p", "say done", "-output-format", "json",
+		"-no-probe", "-no-cap-probe", "-no-rag", "-no-project-context", "-no-session", "-no-memory"},
+		stdin, stdout, stderr)
+	if !errors.Is(err, provider.ErrDestinationDenied) {
+		t.Fatalf("run error = %v, want ErrDestinationDenied", err)
+	}
+	if got := exitCodeFor(err); got != 2 {
+		t.Fatalf("exitCodeFor(%v) = %d, want 2 (a typed local policy denial is a caller error)", err, got)
+	}
+	out := readRunTestFile(t, stdout)
+	lines := strings.Split(strings.TrimSuffix(out, "\n"), "\n")
+	if len(lines) != 1 {
+		t.Fatalf("machine-mode denial must write exactly one stdout line, got %d:\n%s", len(lines), out)
+	}
+	m := decodeResult(t, lines[0])
+	var recErr struct{ Code string }
+	if err := json.Unmarshal(m["error"], &recErr); err != nil || recErr.Code != "destination_denied" {
+		t.Errorf("error = %s, want code destination_denied", m["error"])
+	}
+}
+
+// TestRunAllowToolWiresHeadlessPromptAndApprover (#352, spec F6): through the
+// real run() wiring, -allow-tool run_command must install the headless
+// approver AND build the system prompt from the exact mounted set — naming
+// run_command, never the unmounted background suite, and never interactive
+// approval prose.
+func TestRunAllowToolWiresHeadlessPromptAndApprover(t *testing.T) {
+	configPath, root, _ := admissionHarness(t, "https://opencode.invalid/zen/go")
+	stdin, stdout, stderr := runTestFiles(t)
+
+	errStop := errors.New("stop after startup")
+	err := run(append(admissionArgs(configPath, root), "-allow-tool", "run_command"), stdin, stdout, stderr, runHooks{
+		afterSessionReady: func(sess *replSession) error {
+			if sess.headlessApprover == nil {
+				t.Error("-allow-tool must install the headless approver")
+			}
+			if sess.machine != nil {
+				t.Error("text mode must have no machine writer")
+			}
+			if !strings.Contains(sess.baseSystem, "run_command") {
+				t.Errorf("headless prompt must name run_command:\n%s", sess.baseSystem)
+			}
+			for _, banned := range []string{"start_command", "command_status", "command_tail", "stop_command", "after they approve"} {
+				if strings.Contains(sess.baseSystem, banned) {
+					t.Errorf("headless prompt must not carry %q:\n%s", banned, sess.baseSystem)
+				}
+			}
+			mounted := map[string]bool{}
+			for _, tool := range sess.tools {
+				mounted[tool.Spec().Name] = true
+			}
+			if !mounted["run_command"] {
+				t.Errorf("run_command must be mounted, tools = %v", mounted)
+			}
+			for _, banned := range []string{"start_command", "command_status", "command_tail", "stop_command", "write_file", "edit_file"} {
+				if mounted[banned] {
+					t.Errorf("unnamed gated tool %q must not be mounted, tools = %v", banned, mounted)
+				}
+			}
+			return errStop
+		},
+	})
+	if !errors.Is(err, errStop) {
+		t.Fatalf("run = %v, want the harness stop sentinel", err)
+	}
+}
