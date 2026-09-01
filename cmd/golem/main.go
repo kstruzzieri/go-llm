@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/kstruzzieri/go-llm/agent"
 	agenttools "github.com/kstruzzieri/go-llm/agent/tools"
@@ -91,6 +92,7 @@ type flags struct {
 	goalSet             bool            // -goal was passed (distinguishes an explicit empty goal)
 	approvePlanLock     bool            // -approve-plan-lock: non-interactive planning-mode lock approval
 	outputFormat        string          // -output-format: text|json|stream-json (#352)
+	outputFormatSet     bool            // -output-format was passed (distinguishes an explicit empty value)
 	allowTools          stringSliceFlag // -allow-tool: exact gated tool names for headless runs (#352)
 }
 
@@ -177,6 +179,8 @@ func parseFlags(args []string) (flags, error) {
 			f.planWorkersSet = true
 		case "base-url":
 			f.baseURLSet = true
+		case "output-format":
+			f.outputFormatSet = true
 		case "goal":
 			f.goalSet = true
 		case "task-brief":
@@ -249,11 +253,15 @@ func validateFlags(f flags) error {
 	// #352: the requires-p check comes FIRST, so a non-headless invocation gets
 	// a plain mode error (exit 1) and never reaches the headless-classified
 	// value check below.
-	if f.outputFormat != "" && f.outputFormat != "text" && !f.promptSet {
+	if f.outputFormatSet && !f.promptSet {
 		return fmt.Errorf("golem: -output-format requires -p (one-shot mode)")
 	}
-	if _, err := parseOutputFormat(f.outputFormat); err != nil {
-		return err
+	// A zero-value flags struct is used by tests and helpers; parseFlags always
+	// supplies the real default, "text". An explicitly empty value is invalid.
+	if f.outputFormat != "" || f.outputFormatSet {
+		if _, err := parseOutputFormat(f.outputFormat); err != nil {
+			return err
+		}
 	}
 	// #352: same ordering discipline as -output-format — the mode check first
 	// (plain error, exit 1), then the headless-only exact-name check (usage
@@ -688,6 +696,9 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 		// exit-0 check.
 		return maybeUsageError(err, argsRequestOneShot(args))
 	}
+	if f.version && (f.promptSet || f.outputFormatSet || len(f.allowTools) > 0) {
+		return maybeUsageError(fmt.Errorf("golem: -version cannot be combined with one-shot flags"), headlessExitApplies(f))
+	}
 	if f.version {
 		_, _ = fmt.Fprintln(stdout, versionString())
 		return nil
@@ -705,11 +716,23 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 		}
 		f.prompt = p
 	}
+	if f.promptSet {
+		if len(f.prompt) > maxGoalBytes {
+			return newUsageError("golem: -p prompt exceeds %d bytes", maxGoalBytes)
+		}
+		if !utf8.ValidString(f.prompt) {
+			return newUsageError("golem: -p prompt must be valid UTF-8")
+		}
+	}
 	// #352: the value was validated above, so this cannot fail; the error is
 	// still checked rather than discarded.
 	outFormat, ferr := parseOutputFormat(f.outputFormat)
 	if ferr != nil {
 		return maybeUsageError(ferr, headlessExitApplies(f))
+	}
+	mcpServers, merr := parseMCPServers(f.mcpStdio, f.mcpHTTP)
+	if merr != nil {
+		return maybeUsageError(merr, headlessExitApplies(f))
 	}
 	f, taskWarns := applyTaskMode(f)
 	f, goalWarns := applyGoalMode(f)
@@ -762,7 +785,7 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 	if shouldPlanSummarize(f, autoErr, embChainErr) {
 		summarizeRoute, err = providerbootstrap.PlanOptionalUseCaseRoute(cfg, config.UseCaseSummarize)
 		if err != nil {
-			return err
+			return maybeUsageError(err, headlessExitApplies(f))
 		}
 		routes = append(routes, summarizeRoute)
 	}
@@ -792,7 +815,7 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 		// default to.
 		dchain, err = resolveDispatchChain(cfg, f.dispatchRole, activeRoute.Chain)
 		if err != nil {
-			return err
+			return maybeUsageError(err, headlessExitApplies(f))
 		}
 		routes = append(routes, providerbootstrap.PlannedRoute{
 			UseCase: dispatchUseCase, Chain: dchain, Recommend: len(dchain) == 0,
@@ -802,14 +825,14 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 	if f.delegate {
 		delegateChain, err = resolveDelegateChain(cfg, f.delegateRole)
 		if err != nil {
-			return err
+			return maybeUsageError(err, headlessExitApplies(f))
 		}
 		routes = append(routes, providerbootstrap.PlannedRoute{UseCase: delegateUseCase, Chain: delegateChain})
 	}
 
 	explicitURL, _, err := explicitBaseURL(f.baseURL, f.baseURLSet, os.LookupEnv)
 	if err != nil {
-		return err // explicit-override validation error: fatal, matches validateFlags semantics
+		return maybeUsageError(err, headlessExitApplies(f))
 	}
 	targetKey, _, targetOK := openAICompatTargetFromRoute(cfg, activeRoute)
 	ocProv, ocURL := "", ""
@@ -820,13 +843,13 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 	}
 	eff, err := providerbootstrap.Materialize(cfg, f.ollamaURL, ocProv, ocURL)
 	if err != nil {
-		return err
+		return maybeUsageError(err, headlessExitApplies(f))
 	}
 	netPlan, err := providerbootstrap.BuildNetworkPlan(eff, routes, providerbootstrap.PlanOptions{
 		CapabilityProbes: !f.noCapProbe,
 	})
 	if err != nil {
-		return err
+		return maybeUsageError(err, headlessExitApplies(f))
 	}
 
 	gate := provider.NewDestinationGate()
@@ -840,7 +863,7 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 		Out:         stderr,
 	})
 	if err != nil {
-		return err
+		return maybeUsageError(err, headlessExitApplies(f))
 	}
 	if err := adm.ensure(ctx); err != nil {
 		// #352: a destination-admission denial is a typed local policy
@@ -922,7 +945,11 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 		if len(backendRes.warns) > 0 {
 			err = fmt.Errorf("%s\n%w", strings.Join(backendRes.warns, "\n"), err)
 		}
-		// #352: preflight probes the provider — same class as bootstrap.
+		if isPreflightCapabilityError(err) {
+			return maybeUsageError(err, headlessExitApplies(f))
+		}
+		// #352: remaining preflight failures depend on provider lookup/probing —
+		// the same class as bootstrap.
 		reportPreRunFailure(stdout, outFormat, resultCodeProviderPreRun, err)
 		return err
 	}
@@ -1087,7 +1114,7 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 			dwarns, perr := preflightToolCapable(ctx, bundle.Models, dchain, dispatchUseCase, resolveEndpoint, resolver)
 			warns = append(warns, dwarns...)
 			if perr != nil {
-				return perr
+				return maybeUsageError(perr, headlessExitApplies(f) && isPreflightCapabilityError(perr))
 			}
 			// Same constant the dispatch caller below routes with, so the
 			// child's ceiling and the child's route can never disagree.
@@ -1238,10 +1265,8 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 	var mcpManager *mcpclient.Manager
 	mcpAttached := false
 	mcpLine := ""
-	if servers, perr := parseMCPServers(f.mcpStdio, f.mcpHTTP); perr != nil {
-		return perr // fatal: bad flag config / explicit duplicate alias
-	} else if len(servers) > 0 {
-		mgr, mcpWarns, cerr := mcpclient.Connect(ctx, mcpClientImpl(), servers)
+	if len(mcpServers) > 0 {
+		mgr, mcpWarns, cerr := mcpclient.Connect(ctx, mcpClientImpl(), mcpServers)
 		if cerr != nil {
 			return cerr // fatal: invalid / duplicate alias
 		}
@@ -1255,7 +1280,7 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 		// Positive confirmation so a silently-failed server attach is visible:
 		// attached-tool count against the configured-server count (failures and
 		// skipped tools appear as the "mcp: ..." warnings above).
-		mcpLine = fmt.Sprintf("mcp: attached %d tool(s) from %d configured server(s)", len(mcpTools), len(servers))
+		mcpLine = fmt.Sprintf("mcp: attached %d tool(s) from %d configured server(s)", len(mcpTools), len(mcpServers))
 	}
 	defer func() {
 		if mcpManager != nil {

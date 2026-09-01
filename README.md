@@ -367,7 +367,10 @@ git diff | golem -p - -output-format json
 ```
 
 **Machine-readable output.** `-output-format` selects what stdout carries. It
-requires `-p`; stderr is unchanged in every format.
+requires `-p`; stderr is unchanged in every format. Early flag, prompt, and
+configuration-validation errors write a diagnostic to stderr, leave stdout
+empty, and exit 2; the result-record guarantees below apply once those checks
+succeed.
 
 | value | stdout |
 |---|---|
@@ -395,12 +398,12 @@ Every key is always present (`null` over absent). `status` is `completed`,
 `budget_reached`, `tool_error_cap_reached`, or `repeat_limit_reached`; `error`
 carries a bounded `code` plus a diagnostic `message` (runtime codes come from
 the run's `run.failed` event; the CLI adds `empty_answer`,
-`provider_unavailable`, and `destination_denied`); `grounding` is the verbatim
-`-grounding` report object when verification ran. The record has **no size
-cap** — a large answer is one large line, so do not read the stream with a
-fixed 64 KiB line buffer. To tell the two shapes apart: a protocol event has a
-top-level `protocol` key and never `schema`; the result record has `schema`
-and never `protocol`. The result record, not the protocol terminal event, is
+`provider_unavailable`, and `destination_denied`); `grounding` is the same
+`-grounding` report object, field for field, when verification ran. The record
+has **no size cap** — a large answer is one large line, so do not read the
+stream with a fixed 64 KiB line buffer. To tell the two shapes apart: a protocol
+event has a top-level `protocol` key and never `schema`; the result record has
+`schema` and never `protocol`. The result record, not the protocol terminal event, is
 the last line of the stream.
 
 **Non-interactive tool authorization.** `-allow-tool NAME` mounts and

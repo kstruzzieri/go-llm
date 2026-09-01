@@ -21,7 +21,7 @@ func TestParseOutputFormat(t *testing.T) {
 		want    outputFormat
 		wantErr bool
 	}{
-		{"", outputText, false},
+		{"", 0, true},
 		{"text", outputText, false},
 		{"json", outputJSON, false},
 		{"stream-json", outputStreamJSON, false},
@@ -64,25 +64,44 @@ func TestOutputFormatMachineReportsOnlyJSONModes(t *testing.T) {
 }
 
 func TestValidateFlagsOutputFormatRequiresOneShot(t *testing.T) {
-	err := validateFlags(flags{outputFormat: "json"})
+	err := validateFlags(flags{outputFormat: "json", outputFormatSet: true})
 	if err == nil {
 		t.Fatal("-output-format without -p must be rejected")
 	}
 	if exitCodeFor(err) != 1 {
 		t.Errorf("the requires-p rejection is a mode error, not a headless usage error: exit %d, want 1", exitCodeFor(err))
 	}
-	if err := validateFlags(flags{outputFormat: "json", promptSet: true, prompt: "hi"}); err != nil {
+	if err := validateFlags(flags{outputFormat: "json", outputFormatSet: true, promptSet: true, prompt: "hi"}); err != nil {
 		t.Fatalf("-output-format with -p must be accepted: %v", err)
 	}
-	if err := validateFlags(flags{outputFormat: "bogus", promptSet: true, prompt: "hi"}); err == nil {
+	if err := validateFlags(flags{outputFormat: "bogus", outputFormatSet: true, promptSet: true, prompt: "hi"}); err == nil {
 		t.Fatal("unknown -output-format must be rejected")
 	}
 	// The default (unset) must stay valid in every mode, including the REPL.
 	if err := validateFlags(flags{}); err != nil {
 		t.Fatalf("default flags must stay valid: %v", err)
 	}
-	if err := validateFlags(flags{outputFormat: "text"}); err != nil {
-		t.Fatalf("an explicit text format is valid without -p (it is the default behavior): %v", err)
+	if err := validateFlags(flags{outputFormat: "text", outputFormatSet: true}); err == nil {
+		t.Fatal("an explicit -output-format requires -p even when its value is text")
+	}
+}
+
+func TestParseFlagsTracksExplicitOutputFormat(t *testing.T) {
+	for _, tc := range []struct {
+		args []string
+		want bool
+	}{
+		{nil, false},
+		{[]string{"-output-format", "text"}, true},
+		{[]string{"-output-format="}, true},
+	} {
+		got, err := parseFlags(tc.args)
+		if err != nil {
+			t.Fatalf("parseFlags(%v): %v", tc.args, err)
+		}
+		if got.outputFormatSet != tc.want {
+			t.Errorf("parseFlags(%v).outputFormatSet = %v, want %v", tc.args, got.outputFormatSet, tc.want)
+		}
 	}
 }
 

@@ -29,7 +29,7 @@ const (
 // "stream_json" today would make them contract forever.
 func parseOutputFormat(v string) (outputFormat, error) {
 	switch v {
-	case "", "text":
+	case "text":
 		return outputText, nil
 	case "json":
 		return outputJSON, nil

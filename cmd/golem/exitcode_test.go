@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -29,13 +31,20 @@ func TestExitCodeTaxonomy(t *testing.T) {
 		{"unknown flag with -p", []string{"-p", "hi", "-nope"}, "", 2},
 		{"unknown flag without -p", []string{"-nope"}, "", 1},
 		{"bad output-format", []string{"-p", "hi", "-output-format", "yaml"}, "", 2},
+		{"empty output-format", []string{"-p", "hi", "-output-format="}, "", 2},
 		{"output-format without -p", []string{"-output-format", "json"}, "", 1},
+		{"text output-format without -p", []string{"-output-format", "text"}, "", 1},
 		{"unknown allow-tool", []string{"-p", "hi", "-allow-tool", "rm"}, "", 2},
 		{"excluded allow-tool", []string{"-p", "hi", "-allow-tool", "submit_plan"}, "", 2},
 		{"allow-tool without -p", []string{"-allow-tool", "run_command"}, "", 1},
 		{"empty stdin prompt", []string{"-p", "-"}, "  \n", 2},
 		{"oversize stdin prompt", []string{"-p", "-"}, strings.Repeat("a", maxGoalBytes+1), 2},
+		{"invalid UTF-8 stdin prompt", []string{"-p", "-"}, "\xff", 2},
+		{"oversize direct prompt", []string{"-p", strings.Repeat("a", maxGoalBytes+1)}, "", 2},
+		{"invalid UTF-8 direct prompt", []string{"-p", "\xff"}, "", 2},
 		{"incompatible modes", []string{"-p", "hi", "-session", "s"}, "", 2},
+		{"version with one-shot", []string{"-version", "-p", "hi", "-output-format", "json"}, "", 2},
+		{"version ignores unrelated validation", []string{"-version", "-pressure-warn", "999"}, "", 0},
 		{"missing config with -p", []string{"-p", "hi", "-config", "/nonexistent/models.json"}, "", 2},
 		{"validation failure without -p", []string{"-pressure-warn", "999"}, "", 1},
 		// An Agentflow mode combined with -p must NOT exit 2: -agentflow-status
@@ -52,6 +61,101 @@ func TestExitCodeTaxonomy(t *testing.T) {
 			err := run(tc.args, stdin, stdout, stderr)
 			if got := exitCodeFor(err); got != tc.want {
 				t.Errorf("run(%v) exit = %d (err %v), want %d", tc.args, got, err, tc.want)
+			}
+			if tc.want == 2 && readRunTestFile(t, stdout) != "" {
+				t.Errorf("pre-run caller error wrote to stdout")
+			}
+			if tc.name == "version ignores unrelated validation" && readRunTestFile(t, stdout) != versionString()+"\n" {
+				t.Errorf("-version did not preserve its legacy output")
+			}
+		})
+	}
+}
+
+func TestHeadlessCallerConfigurationFailuresExitTwo(t *testing.T) {
+	configPath, root, _ := admissionHarness(t, "https://opencode.invalid/zen/go")
+	base := admissionArgs(configPath, root)
+	for _, tc := range []struct {
+		name string
+		args []string
+	}{
+		{"invalid base URL", append(append([]string{}, base...), "-base-url", "://")},
+		{"invalid destination", append(append([]string{}, base...), "-allow-destination", "not-a-destination")},
+		{"unknown dispatch role", append(append([]string{}, base...), "-dispatch", "-dispatch-role", "missing")},
+		{"unknown delegate role", append(append([]string{}, base...), "-delegate", "-delegate-role", "missing")},
+		{"invalid MCP HTTP server", append(append([]string{}, base...), "-mcp-http=")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stdin, stdout, stderr := runTestFiles(t)
+			err := run(tc.args, stdin, stdout, stderr)
+			if got := exitCodeFor(err); got != 2 {
+				t.Fatalf("exit = %d (err %v), want 2", got, err)
+			}
+		})
+	}
+}
+
+func TestHeadlessMaterializationFailureExitsTwo(t *testing.T) {
+	root := t.TempDir()
+	configPath := filepath.Join(t.TempDir(), "models.json")
+	configJSON := `{
+  "providers": {"local": {"base_url": "http://127.0.0.1:11434?token=secret", "api_format": "openai-compat"}},
+  "models": {"agent": {"name": "agent-model", "provider": "local", "type": "dense", "context_window": 32768,
+    "capabilities": ["chat", "generate", "stream", "tool_call"]}},
+  "defaults": {"agent": "agent"}
+}`
+	if err := os.WriteFile(configPath, []byte(configJSON), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	stdin, stdout, stderr := runTestFiles(t)
+	err := run(admissionArgs(configPath, root), stdin, stdout, stderr)
+	if got := exitCodeFor(err); got != 2 {
+		t.Fatalf("exit = %d (err %v), want 2", got, err)
+	}
+}
+
+func TestHeadlessDeclaredCapabilityFailuresExitTwo(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/models" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":[{"id":"agent-model"},{"id":"dispatch-model"}]}`))
+	}))
+	t.Cleanup(server.Close)
+
+	for _, tc := range []struct {
+		name      string
+		agentCaps string
+		extraArgs []string
+	}{
+		{"active route", `["chat", "generate", "stream"]`, nil},
+		{"dispatch route", `["chat", "generate", "stream", "tool_call"]`, []string{"-dispatch", "-dispatch-role", "analysis"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			configPath := filepath.Join(t.TempDir(), "models.json")
+			configJSON := `{
+  "providers": {"local": {"base_url": "` + server.URL + `", "api_format": "openai-compat"}},
+  "models": {
+    "agent": {"name": "agent-model", "provider": "local", "type": "dense", "context_window": 32768, "capabilities": ` + tc.agentCaps + `},
+    "analysis": {"name": "dispatch-model", "provider": "local", "type": "dense", "context_window": 32768, "capabilities": ["chat", "generate", "stream"]}
+  },
+  "defaults": {"agent": "agent", "analysis": "analysis"}
+}`
+			if err := os.WriteFile(configPath, []byte(configJSON), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			args := append(admissionArgs(configPath, root), "-output-format", "json")
+			args = append(args, tc.extraArgs...)
+			stdin, stdout, stderr := runTestFiles(t)
+			err := run(args, stdin, stdout, stderr)
+			if got := exitCodeFor(err); got != 2 {
+				t.Fatalf("exit = %d (err %v), want 2", got, err)
+			}
+			if got := readRunTestFile(t, stdout); got != "" {
+				t.Fatalf("pure config failure wrote machine stdout: %s", got)
 			}
 		})
 	}

@@ -18,12 +18,14 @@ tool-name set and the machine output shapes below are public contract.
   `golem.result.v1` record; `stream-json` emits the protocol-v1 events one per
   line followed by the same record as the final line. Protocol events are
   never modified; the record is a separate versioned contract carrying the
-  exact `Result.Answer`, a bounded failure code, and the verbatim `-grounding`
-  report object, with no size cap and every key always present. A protocol
-  event carries `protocol` and never `schema`; the record carries `schema` and
-  never `protocol`, and the record completes the stream. Diagnostics stay on
-  stderr in every format, and `text` is byte-identical to before. Both shapes
-  are frozen by golden fixtures. Protocol v1 reports execution progress only —
+  exact `Result.Answer`, a bounded failure code, and the same `-grounding`
+  report object field for field, with no size cap and every key always present.
+  A protocol event carries `protocol` and never `schema`; the record carries
+  `schema` and never `protocol`, and the record completes the stream. Diagnostics stay on
+  stderr in every format, and `text` is byte-identical to before. Early flag,
+  prompt, and configuration-validation errors leave stdout empty and exit 2;
+  the record guarantees begin after those checks. Both shapes are frozen by
+  golden fixtures. Protocol v1 reports execution progress only —
   a tool call rejected before invocation emits no event; denial observability
   is follow-up work.
 - `golem -allow-tool NAME` (repeatable) mounts and non-interactively approves
@@ -49,10 +51,10 @@ tool-name set and the machine output shapes below are public contract.
 - The #348 entry below states that #352 would buffer the terminal protocol
   event at the CLI adapter and add the grounding object to its protocol-v1
   payload. That mechanism is superseded: the 128 KiB protocol event cap cannot
-  carry an unbounded report, so the report object is serialized verbatim
+  carry an unbounded report, so the report object is serialized
   inside the `golem.result.v1` record instead — which keeps the promise's
-  substance (the frozen report shape ships byte-for-byte, pinned against the
-  trace by test). `golem/runtime.go` remains unchanged either way.
+  substance (the frozen report shape ships field for field, pinned against
+  the trace by test). `golem/runtime.go` remains unchanged either way.
 
 ### Added — phase-based model routing: the planning use case (#476)
 
@@ -269,7 +271,7 @@ the grounding payload: they are absent from the run's usage footer, from
 `agent.Result`, and from telemetry.
 
 Frozen payload for #352. The report object is fixed by an exact-bytes golden
-test and #352 will serialize it verbatim:
+test and #352 will serialize the same fields:
 
 ```json
 {

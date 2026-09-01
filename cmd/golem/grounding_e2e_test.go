@@ -502,8 +502,7 @@ func TestGroundingOneShotKeepsStdoutAnswerOnly(t *testing.T) {
 // TestGroundingVerdictSurfacesIdenticallyInAllThreeModes (#352): the #348
 // outcome must not depend on -output-format. The stderr line renders in every
 // mode; the machine modes additionally carry the verdict in the result record,
-// byte-identical to what the trace stores (the "serialize it verbatim"
-// promise).
+// field-identical to what the trace stores.
 func TestGroundingVerdictSurfacesIdenticallyInAllThreeModes(t *testing.T) {
 	statuses := map[string]string{}
 	for _, tc := range []struct {
