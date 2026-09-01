@@ -581,10 +581,10 @@ func main() {
 		}
 		// runIndex/runOneShot already rendered their own output; just exit non-zero.
 		if errors.Is(err, errIndexFailed) || errors.Is(err, errOneShotFailed) || errors.Is(err, errAgentflowTaskFailed) || errors.Is(err, errSourceFailed) {
-			os.Exit(1)
+			os.Exit(exitCodeFor(err))
 		}
 		_, _ = fmt.Fprintf(os.Stderr, "golem: %v\n", err)
-		os.Exit(1)
+		os.Exit(exitCodeFor(err))
 	}
 }
 
@@ -661,14 +661,17 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 
 	f, err := parseFlags(args)
 	if err != nil {
-		return err
+		// #352: promptSet is unknowable on a parse failure, so headless intent
+		// comes from the raw argv. flag.ErrHelp survives the wrap for main()'s
+		// exit-0 check.
+		return maybeUsageError(err, argsRequestOneShot(args))
 	}
 	if f.version {
 		_, _ = fmt.Fprintln(stdout, versionString())
 		return nil
 	}
 	if err := validateFlags(f); err != nil {
-		return err
+		return maybeUsageError(err, f.promptSet)
 	}
 	f, taskWarns := applyTaskMode(f)
 	f, goalWarns := applyGoalMode(f)
@@ -678,10 +681,10 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 
 	root, err := filepath.Abs(f.root)
 	if err != nil {
-		return fmt.Errorf("resolve root: %w", err)
+		return maybeUsageError(fmt.Errorf("resolve root: %w", err), f.promptSet)
 	}
 	if root, err = filepath.EvalSymlinks(root); err != nil {
-		return fmt.Errorf("resolve root: %w", err)
+		return maybeUsageError(fmt.Errorf("resolve root: %w", err), f.promptSet)
 	}
 
 	ctx := context.Background()
@@ -689,9 +692,13 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 		return runAgentflowStatus(ctx, stdout, root, f.agentflowSrc, f.jsonOutput)
 	}
 
+	// #352: config load/resolution failures are caller errors (exit 2) on the
+	// headless surface; the classification stops at these pure-config sites —
+	// provider bootstrap, discovery, and probing below stay exit 1 (a provider
+	// failure is never caller misuse).
 	cfg, err := loadConfig(f.configPath)
 	if err != nil {
-		return err
+		return maybeUsageError(err, f.promptSet)
 	}
 	autoDBPath, autoWorkspaceID, autoErr := indexDBPathForWorkspace(os.Getenv, root)
 
@@ -705,7 +712,7 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 	// caller, so no seam can quietly disagree about which route is live.
 	activeRoute, err := planActiveRoute(cfg, f.goalSet)
 	if err != nil {
-		return err
+		return maybeUsageError(err, f.promptSet)
 	}
 	plan := chainPlanFor(activeRoute)
 	// Embedding is feature-gated, not optional-recommend: an absent or
