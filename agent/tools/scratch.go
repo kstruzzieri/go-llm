@@ -228,7 +228,7 @@ func renderScratchLine(cfg ScratchConfig, promotable bool) string {
 	}
 	return fmt.Sprintf(
 		"disposable cwd copy; host process remains unrestricted"+
-			" files<=%d tree-bytes<=%d changes<=%d change-bytes<=%d/%d sessions<=%d"+
+			" git-metadata=omitted files<=%d tree-bytes<=%d changes<=%d change-bytes<=%d/%d sessions<=%d"+
 			" setup<=%s capture<=%s grace=%s temp=private %s",
 		cfg.MaxWorkspaceFiles, cfg.MaxWorkspaceBytes, cfg.MaxChangedFiles,
 		cfg.MaxFileBytes, cfg.MaxTotalBytes, cfg.MaxConcurrentSessions,
@@ -318,6 +318,11 @@ func (s *scratchStore) beginPending(id string) {
 func (s *scratchStore) completePending(id string, out scratchOutcome) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if _, ok := s.pending[id]; !ok {
+		// A concurrent discard already deleted this session; a late finish
+		// must not resurrect the outcome as an unreachable zombie.
+		return
+	}
 	delete(s.pending, id)
 	out.id = id
 	s.completed[id] = out
@@ -422,6 +427,11 @@ func (s *scratchStore) consume(id, path string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	delete(s.claimed[id], path)
+	if _, ok := s.completed[id]; !ok {
+		// Evicted mid-promotion: nothing references this id any more, so
+		// recreating permanent consumed state would leak forever.
+		return
+	}
 	if s.consumed[id] == nil {
 		s.consumed[id] = make(map[string]bool)
 	}
@@ -545,4 +555,13 @@ func (t ScratchChanges) Invoke(ctx context.Context, raw json.RawMessage) (agent.
 		}
 	}
 	return agent.ToolResult{Content: b.String()}, nil
+}
+
+// sanitizeScratchText makes command-influenced diagnostic text (reasons,
+// capture/cleanup errors — which can embed hostile filenames) control-safe
+// before it is stored, so no render path can leak ANSI sequences or forged
+// lines to the model or the terminal. Presentation only, never parsed.
+func sanitizeScratchText(s string) string {
+	q := strconv.QuoteToGraphic(s)
+	return q[1 : len(q)-1]
 }

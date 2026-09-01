@@ -469,5 +469,5 @@ func scratchExecOptions(scratch bool, journal *checkpointJournal) (agenttools.Ex
 		opts.PromotionJournal = journal
 		promote = "promote_artifact prompts per artifact"
 	}
-	return opts, "scratch: commands run in a disposable snapshot (accident isolation on host; enforced under a sandbox runtime); " + promote
+	return opts, "scratch: commands run in a disposable snapshot with .git omitted (accident isolation on host; enforced under a sandbox runtime); " + promote
 }

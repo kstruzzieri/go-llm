@@ -467,6 +467,9 @@ func (t *RunCommand) invokeScratched(ctx context.Context, pp execPending, spec e
 
 	if ctx.Err() != nil {
 		session.discard()
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			return errResult("scratch effect budget exhausted; result discarded"), nil
+		}
 		return errResult("command canceled"), nil
 	}
 	captureCtx, cancelCapture := context.WithTimeout(context.Background(), t.scratchRT.cfg.CaptureTimeout)

@@ -384,3 +384,56 @@ func TestScratchDiffControlCharacterPathSurvives(t *testing.T) {
 		t.Fatalf("control-character path must be classified: %+v", c)
 	}
 }
+
+// --- review round ---
+
+func TestScratchDiffSizeDifferingUpdateCarriesHash(t *testing.T) {
+	f := newDiffFixture(t, cloneFixtureConfig())
+	next := []byte("after is longer")
+	if err := os.WriteFile(filepath.Join(f.workspace, "update.txt"), next, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out := f.diff(t)
+	c := changeByPath(t, out, "update.txt")
+	if c.hash != ContentHash(next) {
+		t.Fatalf("size-differing update must carry the work-side hash, got %q", c.hash)
+	}
+}
+
+func TestScratchDiffHostileReasonEscaped(t *testing.T) {
+	f := newDiffFixture(t, cloneFixtureConfig())
+	// A command-created unreadable file whose read failure would embed raw
+	// path bytes in the reason; the stored reason must be control-safe.
+	p := filepath.Join(f.workspace, "evil\x1b[31mname.txt")
+	if err := os.WriteFile(p, []byte("x"), 0o644); err != nil {
+		t.Skipf("filesystem rejects control characters: %v", err)
+	}
+	if err := os.Chmod(p, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(p, 0o644) })
+	out := f.diff(t)
+	for _, c := range out.changes {
+		if strings.ContainsRune(c.reason, 0x1b) || strings.ContainsRune(c.reason, '\n') {
+			t.Fatalf("reason leaked control bytes: %q", c.reason)
+		}
+	}
+}
+
+func TestScratchDiffCompareRespectsContext(t *testing.T) {
+	dir := t.TempDir()
+	big := bytes.Repeat([]byte("z"), 1<<20)
+	for _, name := range []string{"a", "b"} {
+		if err := os.WriteFile(filepath.Join(dir, name), big, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, _, err := compareFilePair(ctx, filepath.Join(dir, "a"), filepath.Join(dir, "b")); err == nil {
+		t.Fatal("cancelled context must stop the stream compare")
+	}
+	if _, err := hashFile(ctx, filepath.Join(dir, "a")); err == nil {
+		t.Fatal("cancelled context must stop the stream hash")
+	}
+}

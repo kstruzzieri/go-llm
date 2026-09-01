@@ -35,7 +35,13 @@ and they compose without either knowing about the other.
   file-by-file clone is not a point-in-time filesystem snapshot, and a
   drifting canonical source retries once, then fails closed. Crash/SIGKILL
   orphans under the platform temp base are an accepted limitation (0700,
-  OS-reaped; no shared startup sweep).
+  OS-reaped; no shared startup sweep), and a crash between promotion's
+  temp-create and its rename can leave one reserved
+  `.golem-scratch-promote-*` 0600 temp in the canonical parent — the same
+  posture as the repository's existing atomic-write temps. A background
+  scratch job holds its session slot (default 2) for its whole
+  manager-owned lifetime, so long-lived scratched jobs can defer new
+  scratched commands until one finishes.
 - Approval identity: an enabled scratch policy inserts a versioned
   `scr:<digest>:` component after the `exec:v3:`/`exec-bg:v2:` prefixes (the
   `sb:` precedent — recipes unchanged, no version bump), so a host grant

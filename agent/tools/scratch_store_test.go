@@ -141,3 +141,34 @@ func TestScratchStoreConcurrency(t *testing.T) {
 	}
 	wg.Wait()
 }
+
+// --- review round ---
+
+func TestScratchStoreCompletePendingRequiresPending(t *testing.T) {
+	s := newTestStore(&fixedReader{})
+	// A discard that raced ahead deleted the pending entry; the late finish
+	// must not resurrect the outcome.
+	s.beginPending("scr-race")
+	s.delete("scr-race")
+	s.completePending("scr-race", scratchOutcome{id: "scr-race"})
+	if _, status := s.get("scr-race"); status != scratchStatusUnknown {
+		t.Fatalf("completePending without a pending entry must be a no-op, status=%v", status)
+	}
+}
+
+func TestScratchStoreConsumeAfterEvictionIsNoOp(t *testing.T) {
+	s := newTestStore(&fixedReader{})
+	s.beginPending("scr-evicted")
+	s.completePending("scr-evicted", scratchOutcome{changes: []scratchChange{{path: "p"}}})
+	if err := s.claim("scr-evicted", "p"); err != nil {
+		t.Fatal(err)
+	}
+	s.delete("scr-evicted") // eviction while the claim is in flight
+	s.consume("scr-evicted", "p")
+	s.mu.Lock()
+	_, leaked := s.consumed["scr-evicted"]
+	s.mu.Unlock()
+	if leaked {
+		t.Fatal("consume after eviction must not recreate permanent state")
+	}
+}

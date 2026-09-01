@@ -339,3 +339,40 @@ func TestScratchSessionDoubleFinishAndDiscard(t *testing.T) {
 		t.Fatal("finish after discard must not resurrect an outcome")
 	}
 }
+
+// TestScratchSessionReadOnlyDirectoryCleansUp pins forced cleanup: a
+// read-only directory cloned into the scratch trees must not block their
+// removal (the trees are session-private, so forcing writability is safe).
+func TestScratchSessionReadOnlyDirectoryCleansUp(t *testing.T) {
+	rt, canon := newTestScratchRuntime(t, ScratchConfig{Enabled: true})
+	if err := os.MkdirAll(filepath.Join(canon, "ro"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(canon, "ro/f.txt"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(filepath.Join(canon, "ro"), 0o555); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(filepath.Join(canon, "ro"), 0o755) })
+
+	session, _, err := beginScratchSession(context.Background(), rt, testSpec(canon))
+	if err != nil {
+		t.Fatal(err)
+	}
+	session.finish(context.Background())
+	out, status := rt.store.get(session.id)
+	if status != scratchStatusCaptured {
+		t.Fatalf("status=%v", status)
+	}
+	if out.cleanupErr != "" {
+		t.Fatalf("read-only dir must not break cleanup: %s", out.cleanupErr)
+	}
+	entries, err := os.ReadDir(rt.tempBase)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("scratch roots leaked: %v", entries)
+	}
+}

@@ -1797,7 +1797,13 @@ func TestScratchFlagDroppedInOneShotMode(t *testing.T) {
 	if out.scratch || out.allowExec {
 		t.Fatalf("one-shot must drop scratch with exec: %+v", out)
 	}
-	if len(warns) == 0 {
-		t.Fatal("dropping -scratch in one-shot mode must warn")
+	found := false
+	for _, w := range warns {
+		if strings.Contains(w, "-scratch") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("dropping -scratch in one-shot mode must warn about -scratch specifically")
 	}
 }

@@ -663,7 +663,10 @@ func TestScratchBackgroundFailedStartMatrix(t *testing.T) {
 		assertNoLeak(t, rt)
 	})
 
-	t.Run("pre-canceled context", func(t *testing.T) {
+	// NOTE: a pre-canceled context fails inside beginScratchSession's setup
+	// walk (snapshot-failure path), not the manager's pre-registration
+	// check; the mid-Start cancel test covers the manager path.
+	t.Run("pre-canceled context (snapshot-failure path)", func(t *testing.T) {
 		manager := NewBackgroundManager()
 		defer manager.Shutdown()
 		sc, rt := scratchBackgroundTools(t, root, ScratchConfig{Enabled: true}, manager)
@@ -788,8 +791,12 @@ func TestScratchBackgroundWrapCoversAbandonedReap(t *testing.T) {
 	}
 	// No discard here: the wrapper's Wait inside the abandoned reap is the
 	// only cleanup. The outcome must be captured and the roots gone.
-	if _, status := rt.store.get(session.id); status != scratchStatusCaptured {
+	out, status := rt.store.get(session.id)
+	if status != scratchStatusCaptured {
 		t.Fatalf("abandoned reap must run the wrapped capture, status=%v", status)
+	}
+	if out.truncated {
+		t.Fatalf("abandoned-reap capture must be healthy, not truncated: %+v", out)
 	}
 	entries, err := os.ReadDir(rt.tempBase)
 	if err != nil {

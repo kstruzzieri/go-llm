@@ -127,7 +127,7 @@ func diffTreesWithHook(ctx context.Context, reference, workspace string, canonic
 		}
 		ref, inRef := refEntries[p]
 		work, inWork := workEntries[p]
-		change, changed, err := classifyChange(reference, workspace, p, ref, inRef, work, inWork)
+		change, changed, err := classifyChange(ctx, reference, workspace, p, ref, inRef, work, inWork)
 		if err != nil {
 			return scratchOutcome{}, err
 		}
@@ -140,7 +140,7 @@ func diffTreesWithHook(ctx context.Context, reference, workspace string, canonic
 			break
 		}
 		if change.kind == scratchChangeCreate && change.promotable {
-			gateCreate(workspace, &change, canonEntries, cfg, &retained)
+			gateCreate(ctx, workspace, &change, canonEntries, cfg, &retained)
 		}
 		out.changes = append(out.changes, change)
 	}
@@ -202,7 +202,7 @@ func diffIndex(man snapshotManifest) map[string]snapshotEntry {
 // classifyChange decides whether one path changed and what kind of change it
 // is. A create starts out promotable=true and is then gated by gateCreate;
 // every other kind is report-only by construction (D5).
-func classifyChange(reference, workspace, p string, ref snapshotEntry, inRef bool, work snapshotEntry, inWork bool) (scratchChange, bool, error) {
+func classifyChange(ctx context.Context, reference, workspace, p string, ref snapshotEntry, inRef bool, work snapshotEntry, inWork bool) (scratchChange, bool, error) {
 	switch {
 	case inWork && !inRef:
 		c := scratchChange{
@@ -226,12 +226,12 @@ func classifyChange(reference, workspace, p string, ref snapshotEntry, inRef boo
 			reason: "deletes are report-only in MVP",
 		}, true, nil
 	default:
-		return classifyCommon(reference, workspace, p, ref, work)
+		return classifyCommon(ctx, reference, workspace, p, ref, work)
 	}
 }
 
 // classifyCommon compares a path present in both trees.
-func classifyCommon(reference, workspace, p string, ref, work snapshotEntry) (scratchChange, bool, error) {
+func classifyCommon(ctx context.Context, reference, workspace, p string, ref, work snapshotEntry) (scratchChange, bool, error) {
 	base := scratchChange{
 		path:  p,
 		mode:  work.typ | work.mode,
@@ -252,7 +252,7 @@ func classifyCommon(reference, workspace, p string, ref, work snapshotEntry) (sc
 		}
 		return scratchChange{}, false, nil
 	case work.typ.IsDir():
-		if ref.mode != work.mode {
+		if ref.fullMode != work.fullMode {
 			base.kind = scratchChangeOther
 			base.reason = "directory mode changed; report-only"
 			return base, true, nil
@@ -265,7 +265,7 @@ func classifyCommon(reference, workspace, p string, ref, work snapshotEntry) (sc
 			// Same size proves nothing: stream-compare the pair. Metadata
 			// may prove difference, never equality.
 			var err error
-			equal, workHash, err = compareFilePair(
+			equal, workHash, err = compareFilePair(ctx,
 				filepath.Join(reference, filepath.FromSlash(p)),
 				filepath.Join(workspace, filepath.FromSlash(p)))
 			if err != nil {
@@ -273,12 +273,17 @@ func classifyCommon(reference, workspace, p string, ref, work snapshotEntry) (sc
 			}
 		}
 		if equal {
-			if ref.mode != work.mode {
+			if ref.fullMode != work.fullMode {
 				base.kind = scratchChangeOther
 				base.reason = "mode-only change; report-only"
 				return base, true, nil
 			}
 			return scratchChange{}, false, nil
+		}
+		if workHash == "" {
+			if h, herr := hashFile(ctx, filepath.Join(workspace, filepath.FromSlash(p))); herr == nil {
+				workHash = h
+			}
 		}
 		base.kind = scratchChangeUpdate
 		base.hash = workHash
@@ -294,12 +299,12 @@ func classifyCommon(reference, workspace, p string, ref, work snapshotEntry) (sc
 // gateCreate applies the D5 promotable matrix to a regular-file create and
 // retains bounded content for those that pass every gate. Retained cost
 // counts data plus the rendered preview against MaxTotalBytes.
-func gateCreate(workspace string, c *scratchChange, canonical map[string]snapshotEntry, cfg ScratchConfig, retained *int64) {
+func gateCreate(ctx context.Context, workspace string, c *scratchChange, canonical map[string]snapshotEntry, cfg ScratchConfig, retained *int64) {
 	demote := func(reason string) {
 		c.promotable = false
 		c.data = nil
 		c.preview = ""
-		c.reason = reason
+		c.reason = sanitizeScratchText(reason)
 	}
 	if c.nlink > 1 {
 		demote("command-created hard-link topology is not promotable")
@@ -314,13 +319,13 @@ func gateCreate(workspace string, c *scratchChange, canonical map[string]snapsho
 	c.parent = scratchParentEvidence{path: parentPath, existed: true}
 	if parentPath == "." {
 		if rootEntry, ok := canonical["."]; ok {
-			c.parent.dev, c.parent.ino, c.parent.mode = rootEntry.dev, rootEntry.ino, rootEntry.typ|rootEntry.mode
+			c.parent.dev, c.parent.ino, c.parent.mode = rootEntry.dev, rootEntry.ino, rootEntry.fullMode
 		}
 	} else {
-		c.parent.dev, c.parent.ino, c.parent.mode = pe.dev, pe.ino, pe.typ|pe.mode
+		c.parent.dev, c.parent.ino, c.parent.mode = pe.dev, pe.ino, pe.fullMode
 	}
 	if c.size > cfg.MaxFileBytes {
-		if hash, err := hashFile(filepath.Join(workspace, filepath.FromSlash(c.path))); err == nil {
+		if hash, err := hashFile(ctx, filepath.Join(workspace, filepath.FromSlash(c.path))); err == nil {
 			c.hash = hash
 		}
 		demote(fmt.Sprintf("create exceeds the %d-byte retention cap", cfg.MaxFileBytes))
@@ -384,22 +389,33 @@ func readStable(p string, wantSize int64) ([]byte, error) {
 }
 
 // hashFile streams one file into ContentHash form without retaining bytes.
-func hashFile(p string) (string, error) {
+func hashFile(ctx context.Context, p string) (string, error) {
 	f, err := os.Open(p)
 	if err != nil {
 		return "", err
 	}
 	defer func() { _ = f.Close() }()
 	h := sha256.New()
-	if _, err := io.Copy(h, f); err != nil {
-		return "", err
+	buf := make([]byte, 64<<10)
+	for {
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
+		n, rerr := f.Read(buf)
+		_, _ = h.Write(buf[:n])
+		if rerr == io.EOF {
+			break
+		}
+		if rerr != nil {
+			return "", rerr
+		}
 	}
 	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
 // compareFilePair stream-compares two files and returns equality plus the
 // second file's content hash.
-func compareFilePair(a, b string) (bool, string, error) {
+func compareFilePair(ctx context.Context, a, b string) (bool, string, error) {
 	fa, err := os.Open(a)
 	if err != nil {
 		return false, "", err
@@ -415,6 +431,9 @@ func compareFilePair(a, b string) (bool, string, error) {
 	bufA := make([]byte, 64<<10)
 	bufB := make([]byte, 64<<10)
 	for {
+		if err := ctx.Err(); err != nil {
+			return false, "", err
+		}
 		na, errA := io.ReadFull(fa, bufA)
 		nb, errB := io.ReadFull(fb, bufB)
 		_, _ = h.Write(bufB[:nb])

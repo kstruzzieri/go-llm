@@ -30,10 +30,16 @@ var errSnapshotDrift = errors.New("tools: canonical tree changed during snapshot
 // snapshotEntry records one source entry's approval-relevant identity for
 // drift detection and for the diff layer (link counts, times, identity).
 type snapshotEntry struct {
-	path       string      // slash-separated, root-relative ("." for the root)
-	typ        fs.FileMode // type bits only (0 for a regular file)
-	mode       fs.FileMode // permission bits as found on the source
-	size       int64       // regular files only
+	path string      // slash-separated, root-relative ("." for the root)
+	typ  fs.FileMode // type bits only (0 for a regular file)
+	mode fs.FileMode // permission bits as found on the source
+	// fullMode is the complete source mode including special bits
+	// (setuid/setgid/sticky). The clone applies mode (special bits
+	// stripped, the snapshot contract), but drift detection and promotion's
+	// parent pinning must compare the complete mode: a setgid parent is not
+	// drift, and a special-bit flip must be visible.
+	fullMode   fs.FileMode
+	size       int64 // regular files only
 	modTime    time.Time
 	changeTime time.Time // zero where the platform offers none
 	dev, ino   uint64    // zero where the platform offers none
@@ -53,13 +59,13 @@ type snapshotManifest struct {
 func snapshotCanonical(ctx context.Context, src, dst string, cfg ScratchConfig, clone func(*os.File, string) error) (snapshotManifest, error) {
 	man, err := snapshotOnce(ctx, src, dst, cfg, clone)
 	if errors.Is(err, errSnapshotDrift) {
-		if rmErr := os.RemoveAll(dst); rmErr != nil {
+		if rmErr := forcedRemoveAll(dst); rmErr != nil {
 			return snapshotManifest{}, fmt.Errorf("tools: remove drifted snapshot: %w", rmErr)
 		}
 		man, err = snapshotOnce(ctx, src, dst, cfg, clone)
 	}
 	if err != nil {
-		_ = os.RemoveAll(dst)
+		_ = forcedRemoveAll(dst)
 		return snapshotManifest{}, err
 	}
 	return man, nil
@@ -164,6 +170,7 @@ func manifestEntry(src, rel string, fi fs.FileInfo) snapshotEntry {
 		path:       rel,
 		typ:        fi.Mode().Type(),
 		mode:       fi.Mode().Perm(),
+		fullMode:   fi.Mode(),
 		modTime:    fi.ModTime(),
 		changeTime: ctime,
 		dev:        dev,
@@ -187,7 +194,7 @@ func manifestsEqual(a, b snapshotManifest) bool {
 	}
 	for i := range a.entries {
 		x, y := a.entries[i], b.entries[i]
-		if x.path != y.path || x.typ != y.typ || x.mode != y.mode || x.size != y.size ||
+		if x.path != y.path || x.typ != y.typ || x.fullMode != y.fullMode || x.size != y.size ||
 			x.dev != y.dev || x.ino != y.ino || x.nlink != y.nlink ||
 			!x.modTime.Equal(y.modTime) || !x.changeTime.Equal(y.changeTime) ||
 			x.linkTarget != y.linkTarget {
@@ -330,12 +337,16 @@ func rewriteSymlinkTarget(srcRoot, rel, target string) (string, error) {
 	}
 	inside := absTarget == srcRoot || strings.HasPrefix(absTarget, srcRoot+string(filepath.Separator))
 	if inside {
-		if !filepath.IsAbs(target) {
-			return target, nil
-		}
+		// Always normalize to the relative form anchored at the link's own
+		// directory — never verbatim. A verbatim relative target that
+		// lexically leaves and re-enters the root ("../<rootname>/x") would
+		// classify differently on the second clone pass (its prefix no
+		// longer matches the new root), dangling in the work tree and
+		// producing a phantom diff entry on every capture. Rel() is a fixed
+		// point, so both passes agree.
 		relTarget, err := filepath.Rel(linkDir, absTarget)
 		if err != nil {
-			return "", fmt.Errorf("tools: rewrite internal absolute symlink %q: %w", rel, err)
+			return "", fmt.Errorf("tools: rewrite internal symlink %q: %w", rel, err)
 		}
 		return relTarget, nil
 	}

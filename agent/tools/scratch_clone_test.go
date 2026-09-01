@@ -271,7 +271,7 @@ func TestSnapshotDriftRetriesOnceThenFails(t *testing.T) {
 	if _, err := snapshotCanonical(context.Background(), src, dst, cloneFixtureConfig(), mutating); err == nil {
 		t.Fatal("persistent source drift must fail the snapshot")
 	}
-	if passes < 2 {
+	if passes != 2 {
 		t.Fatalf("snapshot must retry the whole pass exactly once, observed %d passes", passes)
 	}
 
@@ -319,4 +319,90 @@ func TestSnapshotManifestRecordsEntries(t *testing.T) {
 	if _, ok := byPath["link-dangling-inside"]; !ok {
 		t.Fatal("manifest must record symlinks")
 	}
+}
+
+// --- review round: confirmed findings ---
+
+// TestCloneTreeReentrantSymlinkStable pins the double-clone idempotence of
+// symlink rewriting: a relative target that lexically leaves and re-enters
+// the root ("../<rootname>/file") must normalize to the same in-root
+// relative form in BOTH passes, resolve inside the work tree, and produce
+// zero phantom diff entries.
+func TestCloneTreeReentrantSymlinkStable(t *testing.T) {
+	parent := t.TempDir()
+	src := filepath.Join(parent, "proj")
+	if err := os.MkdirAll(src, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(src, "top.txt"), []byte("t"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("../proj/top.txt", filepath.Join(src, "reentrant")); err != nil {
+		t.Fatal(err)
+	}
+	cfg := cloneFixtureConfig()
+	ref := filepath.Join(t.TempDir(), "reference")
+	man, err := snapshotCanonical(context.Background(), src, ref, cfg, cloneFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	work := filepath.Join(t.TempDir(), "workspace")
+	if _, err := snapshotCanonical(context.Background(), ref, work, cfg, cloneFile); err != nil {
+		t.Fatal(err)
+	}
+	refTarget, err := os.Readlink(filepath.Join(ref, "reentrant"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	workTarget, err := os.Readlink(filepath.Join(work, "reentrant"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if refTarget != workTarget {
+		t.Fatalf("rewrite is not idempotent across passes: ref=%q work=%q", refTarget, workTarget)
+	}
+	if fi, err := os.Stat(filepath.Join(work, "reentrant")); err != nil || !fi.Mode().IsRegular() {
+		t.Fatalf("re-entrant link must resolve inside the work tree: %v", err)
+	}
+	out, err := diffTrees(context.Background(), ref, work, man, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(out.changes) != 0 {
+		t.Fatalf("untouched trees must diff empty, got phantom changes: %+v", out.changes)
+	}
+}
+
+// TestSnapshotManifestRecordsSpecialBits pins full-mode evidence: a setgid
+// directory keeps its special bit in the manifest so promotion's live
+// comparison does not false-refuse, and special-bit drift is detectable.
+func TestSnapshotManifestRecordsSpecialBits(t *testing.T) {
+	src := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(src, "sg"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(filepath.Join(src, "sg"), 0o755|os.ModeSetgid); err != nil {
+		t.Skipf("cannot set setgid here: %v", err)
+	}
+	fi, err := os.Lstat(filepath.Join(src, "sg"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fi.Mode()&os.ModeSetgid == 0 {
+		t.Skip("filesystem dropped setgid")
+	}
+	dst := filepath.Join(t.TempDir(), "clone")
+	man, err := snapshotCanonical(context.Background(), src, dst, cloneFixtureConfig(), cloneFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range man.entries {
+		if e.path == "sg" {
+			if e.fullMode&os.ModeSetgid == 0 {
+				t.Fatalf("manifest must record special bits, got fullMode=%v", e.fullMode)
+			}
+			return
+		}
+	}
+	t.Fatal("manifest missing sg entry")
 }

@@ -114,7 +114,7 @@ func parseFlags(args []string) (flags, error) {
 	fs.BoolVar(&f.fresh, "fresh", false, "start a new persistent session instead of resuming this workspace")
 	fs.BoolVar(&f.allowWrite, "allow-write", false, "enable approval-gated write_file/edit_file tools")
 	fs.BoolVar(&f.allowExec, "allow-exec", false, "enable the approval-gated run_command and background command tools (start/status/tail/stop)")
-	fs.BoolVar(&f.scratch, "scratch", false, "run approved commands in a disposable snapshot of the workspace (requires -allow-exec): accident isolation on the host runtime, an enforced write boundary under a sandbox runtime; artifacts reach the real workspace only via approved promote_artifact (needs -allow-write)")
+	fs.BoolVar(&f.scratch, "scratch", false, "run approved commands in a disposable snapshot of the workspace with .git omitted (requires -allow-exec): accident isolation on the host runtime, an enforced write boundary under a sandbox runtime; artifacts reach the real workspace only via approved promote_artifact (needs -allow-write)")
 	fs.BoolVar(&f.delegate, "delegate", false, "enable the delegate_code tool (route a scoped codegen sub-task to a specialist model)")
 	fs.StringVar(&f.delegateRole, "delegate-role", "coding", "model role the delegate_code tool routes to")
 	fs.BoolVar(&f.dispatch, "dispatch", false, "enable the dispatch tool (bounded read-only exploration tasks use backend-governed concurrency; ungoverned routing stays serial)")

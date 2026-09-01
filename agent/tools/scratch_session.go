@@ -56,10 +56,10 @@ func beginScratchSession(ctx context.Context, rt *scratchRuntime, spec execSpec)
 	s := &scratchSession{id: id, rt: rt}
 	fail := func(err error) (*scratchSession, execSpec, error) {
 		if s.refParent != "" {
-			_ = os.RemoveAll(s.refParent)
+			_ = forcedRemoveAll(s.refParent)
 		}
 		if s.execParent != "" {
-			_ = os.RemoveAll(s.execParent)
+			_ = forcedRemoveAll(s.execParent)
 		}
 		rt.store.dropPending(id)
 		release()
@@ -147,7 +147,7 @@ func (s *scratchSession) finish(ctx context.Context) {
 
 	out, err := diffTrees(ctx, s.reference, s.work, s.manifest, s.rt.cfg)
 	if err != nil {
-		out = scratchOutcome{truncated: true, captureErr: err.Error()}
+		out = scratchOutcome{truncated: true, captureErr: sanitizeScratchText(err.Error())}
 	}
 	var cleanupErrs []string
 	for _, target := range []struct {
@@ -159,7 +159,7 @@ func (s *scratchSession) finish(ctx context.Context) {
 		}
 	}
 	if len(cleanupErrs) > 0 {
-		out.cleanupErr = strings.Join(cleanupErrs, "; ")
+		out.cleanupErr = sanitizeScratchText(strings.Join(cleanupErrs, "; "))
 	}
 	s.rt.store.completePending(s.id, out)
 	<-s.rt.slots
@@ -210,10 +210,33 @@ func guardedRemoveAll(path string, created os.FileInfo) error {
 	if !os.SameFile(created, fi) {
 		return fmt.Errorf("tools: scratch root %q was replaced; abandoning cleanup", path)
 	}
-	if err := os.RemoveAll(path); err != nil {
+	if err := forcedRemoveAll(path); err != nil {
 		return fmt.Errorf("tools: remove scratch root %q: %w", path, err)
 	}
 	return nil
+}
+
+// forcedRemoveAll removes a session-private tree even when the snapshot
+// faithfully cloned read-only directories (os.RemoveAll cannot unlink their
+// children). The tree belongs to this session alone, so forcing directories
+// writable is safe; without it every run against a workspace containing a
+// 0555 directory would leak both scratch roots — with a workspace copy
+// inside — to the temp base.
+func forcedRemoveAll(path string) error {
+	err := os.RemoveAll(path)
+	if err == nil {
+		return nil
+	}
+	_ = filepath.WalkDir(path, func(p string, d fs.DirEntry, werr error) error {
+		if werr != nil {
+			return nil // keep walking what we can
+		}
+		if d.IsDir() {
+			_ = os.Chmod(p, 0o700)
+		}
+		return nil
+	})
+	return os.RemoveAll(path)
 }
 
 // scratchProcess decorates a background process so Wait owns the session's

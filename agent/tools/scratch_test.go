@@ -217,6 +217,7 @@ func TestScratchApprovalPreviewContent(t *testing.T) {
 		"capture<=30s",
 		"grace=5s",
 		"temp=private",
+		"git-metadata=omitted",
 		"promote=available",
 	} {
 		if !strings.Contains(a.preview, want) {
