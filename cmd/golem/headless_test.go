@@ -182,3 +182,83 @@ func TestStdinPromptRequestedOnlyForTheSentinel(t *testing.T) {
 		}
 	}
 }
+
+func TestAllowToolSetAcceptsExactlyTheSupportedGatedTools(t *testing.T) {
+	// The frozen list (#341/#346). Anything else is a hard error before the run.
+	for _, name := range []string{"write_file", "edit_file", "run_command", "start_command", "stop_command"} {
+		set, err := newAllowToolSet([]string{name})
+		if err != nil {
+			t.Fatalf("newAllowToolSet(%q): %v", name, err)
+		}
+		if !set.authorized(name) {
+			t.Errorf("%q must be authorized after being named", name)
+		}
+	}
+}
+
+func TestAllowToolSetRejectsExcludedAndUnknownNames(t *testing.T) {
+	for _, name := range []string{
+		"verify_command",    // synthetic, never a registered tool (#347)
+		"submit_plan",       // planning mode only
+		"mcp__server__tool", // MCP is excluded by contract
+		"command_status",    // ungated; nothing to authorize
+		"command_tail",      // ungated; nothing to authorize
+		"read_file",         // ungated
+		"run_commands", "Run_Command", // typo and wrong case
+		"*", "", "  run_command",
+	} {
+		_, err := newAllowToolSet([]string{name})
+		if err == nil {
+			t.Fatalf("newAllowToolSet(%q) must fail", name)
+		}
+		if exitCodeFor(err) != 2 {
+			t.Errorf("%q: unknown -allow-tool must be a usage error (exit 2), got %d", name, exitCodeFor(err))
+		}
+		for _, want := range allowToolNames {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("%q: error %q must list the accepted name %q", name, err, want)
+			}
+		}
+	}
+}
+
+func TestAllowToolSetDuplicatesAreIdempotent(t *testing.T) {
+	set, err := newAllowToolSet([]string{"run_command", "run_command"})
+	if err != nil {
+		t.Fatalf("duplicates must be accepted: %v", err)
+	}
+	if !set.authorized("run_command") || set.authorized("write_file") {
+		t.Error("duplicate handling must not widen or narrow the set")
+	}
+}
+
+func TestAllowToolSetAuthorizesNothingWhenEmpty(t *testing.T) {
+	set, err := newAllowToolSet(nil)
+	if err != nil {
+		t.Fatalf("an empty -allow-tool list is not an error: %v", err)
+	}
+	if !set.empty() {
+		t.Error("an empty list must report empty()")
+	}
+	for _, name := range append(append([]string{}, allowToolNames...), "read_file", "mcp__x__y") {
+		if set.authorized(name) {
+			t.Errorf("an empty set must authorize nothing, but authorized %q", name)
+		}
+	}
+}
+
+func TestValidateFlagsAllowToolRequiresOneShot(t *testing.T) {
+	err := validateFlags(flags{allowTools: stringSliceFlag{"run_command"}})
+	if err == nil {
+		t.Fatal("-allow-tool without -p must be rejected")
+	}
+	if exitCodeFor(err) != 1 {
+		t.Errorf("the requires-p rejection is a mode error, not a headless usage error: exit %d, want 1", exitCodeFor(err))
+	}
+	if err := validateFlags(flags{allowTools: stringSliceFlag{"run_command"}, promptSet: true, prompt: "hi"}); err != nil {
+		t.Fatalf("-allow-tool with -p must be accepted: %v", err)
+	}
+	if err := validateFlags(flags{allowTools: stringSliceFlag{"nope"}, promptSet: true, prompt: "hi"}); err == nil {
+		t.Fatal("an unknown -allow-tool name must be rejected at validation, before the run")
+	}
+}

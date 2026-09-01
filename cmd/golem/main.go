@@ -90,7 +90,8 @@ type flags struct {
 	goal                string // AgentFlow planning mode goal (-goal)
 	goalSet             bool   // -goal was passed (distinguishes an explicit empty goal)
 	approvePlanLock     bool   // -approve-plan-lock: non-interactive planning-mode lock approval
-	outputFormat        string // -output-format: text|json|stream-json (#352)
+	outputFormat        string          // -output-format: text|json|stream-json (#352)
+	allowTools          stringSliceFlag // -allow-tool: exact gated tool names for headless runs (#352)
 }
 
 func parseFlags(args []string) (flags, error) {
@@ -155,6 +156,7 @@ func parseFlags(args []string) (flags, error) {
 	fs.StringVar(&f.goal, "goal", "", "AgentFlow planning mode: author and preview a traceable plan, require approval to lock it, then stop")
 	fs.BoolVar(&f.approvePlanLock, "approve-plan-lock", false, "planning mode: print the plan preview and approve the lock without prompting (non-interactive -goal)")
 	fs.StringVar(&f.outputFormat, "output-format", "text", "one-shot mode: stdout format — text (the final answer), json (one golem.result.v1 record), or stream-json (one protocol-v1 event per line, then the same record); requires -p")
+	fs.Var(&f.allowTools, "allow-tool", "one-shot mode: mount and non-interactively approve one exact built-in gated tool by name (repeatable; write_file, edit_file, run_command, start_command, stop_command); creates no session grants; MCP tools and submit_plan are never eligible; requires -p")
 	if err := fs.Parse(args); err != nil {
 		return flags{}, err
 	}
@@ -251,6 +253,15 @@ func validateFlags(f flags) error {
 		return fmt.Errorf("golem: -output-format requires -p (one-shot mode)")
 	}
 	if _, err := parseOutputFormat(f.outputFormat); err != nil {
+		return err
+	}
+	// #352: same ordering discipline as -output-format — the mode check first
+	// (plain error, exit 1), then the headless-only exact-name check (usage
+	// error, exit 2).
+	if len(f.allowTools) > 0 && !f.promptSet {
+		return fmt.Errorf("golem: -allow-tool requires -p (one-shot mode); the REPL approves interactively")
+	}
+	if _, err := newAllowToolSet(f.allowTools); err != nil {
 		return err
 	}
 	if f.promptSet && (f.fresh || f.sessionID != "") {

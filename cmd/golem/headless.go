@@ -39,6 +39,66 @@ func parseOutputFormat(v string) (outputFormat, error) {
 // stdout instead of the plain answer.
 func (f outputFormat) machine() bool { return f == outputJSON || f == outputStreamJSON }
 
+// allowToolNames is the frozen set of built-in gated tools that -allow-tool can
+// authorize (#352). This ticket freezes it as public contract for scripting
+// consumers, so adding a name here is a contract change.
+//
+// Deliberately absent:
+//   - verify_command   — a synthetic approval identity, never a registered
+//     tool; the model cannot call it (cmd/golem/verify.go).
+//   - submit_plan      — planning mode only, and -goal is incompatible with -p.
+//   - mcp__*           — excluded by the issue; MCP tools stay mounted under
+//     -p and stay denied.
+//   - command_status,
+//     command_tail     — mounted alongside start_command but never gated, so
+//     there is no authorization to grant (see allowToolCompanions).
+var allowToolNames = []string{"write_file", "edit_file", "run_command", "start_command", "stop_command"}
+
+// allowToolCompanions names the UNGATED tools a named tool needs to be usable.
+// start_command's output is readable only through command_status/command_tail;
+// mounting them is a dependency closure, not an authorization expansion,
+// because neither ever prompts.
+var allowToolCompanions = map[string][]string{
+	"start_command": {"command_status", "command_tail"},
+}
+
+// allowToolSet is the exact-name authorization set built from -allow-tool. It
+// is consulted by name only: the approver never parses a preview and never
+// parses or derives from an ApprovalKey, mirroring the #341 discipline that
+// scope comes from the tool name and never from the key.
+type allowToolSet struct{ names map[string]struct{} }
+
+// newAllowToolSet validates every name against the frozen list and returns the
+// authorization set. An unknown or excluded name is a usage error: it must fail
+// before the run rather than silently authorizing nothing.
+func newAllowToolSet(values []string) (allowToolSet, error) {
+	allowed := make(map[string]struct{}, len(allowToolNames))
+	for _, n := range allowToolNames {
+		allowed[n] = struct{}{}
+	}
+	set := allowToolSet{names: make(map[string]struct{}, len(values))}
+	for _, v := range values {
+		if _, ok := allowed[v]; !ok {
+			return allowToolSet{}, newUsageError(
+				"golem: unknown -allow-tool %q (want one of: %s)", v, strings.Join(allowToolNames, ", "))
+		}
+		set.names[v] = struct{}{}
+	}
+	return set, nil
+}
+
+// authorized reports whether this exact tool name was named by -allow-tool.
+func (s allowToolSet) authorized(name string) bool {
+	if s.names == nil {
+		return false
+	}
+	_, ok := s.names[name]
+	return ok
+}
+
+// empty reports whether -allow-tool authorized nothing.
+func (s allowToolSet) empty() bool { return len(s.names) == 0 }
+
 // stdinPromptSentinel is the -p value that means "read the prompt from stdin".
 // A literal prompt of "-" is unreachable by design and documented as such.
 const stdinPromptSentinel = "-"
