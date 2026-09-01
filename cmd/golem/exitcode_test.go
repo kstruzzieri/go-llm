@@ -38,6 +38,13 @@ func TestExitCodeTaxonomy(t *testing.T) {
 		{"incompatible modes", []string{"-p", "hi", "-session", "s"}, "", 2},
 		{"missing config with -p", []string{"-p", "hi", "-config", "/nonexistent/models.json"}, "", 2},
 		{"validation failure without -p", []string{"-pressure-warn", "999"}, "", 1},
+		// An Agentflow mode combined with -p must NOT exit 2: -agentflow-status
+		// consumers read 2 as "resume serially" (agentflow_recovery.go), so a
+		// mode-conflict caller bug has to fail loudly with the pre-#352 exit 1
+		// rather than impersonate a state-machine instruction.
+		{"agentflow-status with -p", []string{"-agentflow-status", "-p", "hi"}, "", 1},
+		{"agentflow-status with -p and a bad flag", []string{"-agentflow-status", "-p", "hi", "-nope"}, "", 1},
+		{"agentflow-resume with -p", []string{"-agentflow-resume", "-p", "hi"}, "", 1},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

@@ -57,17 +57,33 @@ func maybeUsageError(err error, headless bool) error {
 	return wrapUsageError(err)
 }
 
+// headlessExitApplies reports whether the #352 exit taxonomy governs this
+// invocation. Requiring -p is not enough: an Agentflow mode combined with -p
+// is a mode conflict, and -agentflow-status consumers read exit 2 as "resume
+// serially" (agentflow_recovery.go) — so the presence of an Agentflow flag
+// always keeps the pre-#352 exit 1, and a mode-conflict bug fails loudly
+// instead of impersonating a state-machine instruction.
+func headlessExitApplies(f flags) bool {
+	return f.promptSet && !f.agentflowStatus && !f.agentflowResume
+}
+
 // argsRequestOneShot reports one-shot INTENT from raw argv, for the one moment
-// promptSet is unknowable: a flag-parse failure. A literal -p token (in any of
-// the flag package's accepted spellings) is the signal; a "-p" appearing as
-// another flag's value only matters when the parse FAILS, and misclassifying
-// that pathological spelling costs nothing — the invocation is broken either
-// way.
+// the parsed flags are unknowable: a flag-parse failure. A literal -p token
+// (in any of the flag package's accepted spellings) is the signal, vetoed by
+// any Agentflow-mode token for the same reason headlessExitApplies vetoes the
+// parsed flags. A "-p" appearing as another flag's value only matters when the
+// parse FAILS, and misclassifying that pathological spelling costs nothing —
+// the invocation is broken either way.
 func argsRequestOneShot(args []string) bool {
+	sawPrompt := false
 	for _, a := range args {
 		if a == "-p" || a == "--p" || strings.HasPrefix(a, "-p=") || strings.HasPrefix(a, "--p=") {
-			return true
+			sawPrompt = true
+		}
+		if trimmed := strings.TrimPrefix(strings.TrimPrefix(a, "-"), "-"); trimmed == "agentflow-status" || trimmed == "agentflow-resume" ||
+			strings.HasPrefix(trimmed, "agentflow-status=") || strings.HasPrefix(trimmed, "agentflow-resume=") {
+			return false
 		}
 	}
-	return false
+	return sawPrompt
 }

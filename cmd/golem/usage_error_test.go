@@ -76,6 +76,10 @@ func TestArgsRequestOneShot(t *testing.T) {
 		{[]string{"-nope"}, false},
 		{[]string{"-plan", "x.json"}, false}, // -plan is not -p
 		{[]string{"-config", "-p"}, true},    // conservative: a literal -p token counts
+		// An Agentflow-mode token vetoes headless intent outright: exit 2
+		// belongs to -agentflow-status's own semantics (resume serially).
+		{[]string{"-agentflow-status", "-p", "hi", "-nope"}, false},
+		{[]string{"-p", "hi", "--agentflow-resume", "-nope"}, false},
 		{nil, false},
 	}
 	for _, tc := range cases {

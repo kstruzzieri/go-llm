@@ -693,7 +693,7 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 		return nil
 	}
 	if err := validateFlags(f); err != nil {
-		return maybeUsageError(err, f.promptSet)
+		return maybeUsageError(err, headlessExitApplies(f))
 	}
 	// #352: resolve "-p -" immediately after validation and before anything
 	// else reads f.prompt. The TTY probe uses the run() stdin descriptor, so
@@ -709,7 +709,7 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 	// still checked rather than discarded.
 	outFormat, ferr := parseOutputFormat(f.outputFormat)
 	if ferr != nil {
-		return maybeUsageError(ferr, f.promptSet)
+		return maybeUsageError(ferr, headlessExitApplies(f))
 	}
 	f, taskWarns := applyTaskMode(f)
 	f, goalWarns := applyGoalMode(f)
@@ -719,10 +719,10 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 
 	root, err := filepath.Abs(f.root)
 	if err != nil {
-		return maybeUsageError(fmt.Errorf("resolve root: %w", err), f.promptSet)
+		return maybeUsageError(fmt.Errorf("resolve root: %w", err), headlessExitApplies(f))
 	}
 	if root, err = filepath.EvalSymlinks(root); err != nil {
-		return maybeUsageError(fmt.Errorf("resolve root: %w", err), f.promptSet)
+		return maybeUsageError(fmt.Errorf("resolve root: %w", err), headlessExitApplies(f))
 	}
 
 	ctx := context.Background()
@@ -736,7 +736,7 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 	// failure is never caller misuse).
 	cfg, err := loadConfig(f.configPath)
 	if err != nil {
-		return maybeUsageError(err, f.promptSet)
+		return maybeUsageError(err, headlessExitApplies(f))
 	}
 	autoDBPath, autoWorkspaceID, autoErr := indexDBPathForWorkspace(os.Getenv, root)
 
@@ -750,7 +750,7 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 	// caller, so no seam can quietly disagree about which route is live.
 	activeRoute, err := planActiveRoute(cfg, f.goalSet)
 	if err != nil {
-		return maybeUsageError(err, f.promptSet)
+		return maybeUsageError(err, headlessExitApplies(f))
 	}
 	plan := chainPlanFor(activeRoute)
 	// Embedding is feature-gated, not optional-recommend: an absent or
@@ -847,7 +847,7 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 		// decision — a caller error (exit 2) on the headless surface, and one
 		// of the two pre-run failures that still writes a result record.
 		reportPreRunFailure(stdout, outFormat, resultCodeDestDenied, err)
-		return maybeUsageError(err, f.promptSet)
+		return maybeUsageError(err, headlessExitApplies(f))
 	}
 
 	// Guarded, loopback-only discovery runs strictly after admission: each
