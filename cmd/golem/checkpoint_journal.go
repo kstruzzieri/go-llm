@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"strconv"
 	"sync"
@@ -53,36 +54,47 @@ func newCheckpointJournal(ws *agenttools.Workspace, store *checkpointStore) *che
 }
 
 // fileState is a live or simulated file state: a content hash, or absent.
+// mode/modeKnown carry the complete file mode where available (live reads,
+// and simulated states derived from them); equal() deliberately compares
+// content identity only — mode participates solely through matchesAfter's
+// tracked-record guard (#443).
 type fileState struct {
-	absent bool
-	hash   string
+	absent    bool
+	hash      string
+	mode      fs.FileMode
+	modeKnown bool
 }
 
 func (a fileState) equal(b fileState) bool {
 	return a.absent == b.absent && a.hash == b.hash
 }
 
-// undoTarget is the state a file reaches after undoing f.
-func undoTarget(f checkpointFile) fileState {
+// undoTargetFrom is the state a file reaches after undoing f, derived from
+// the state cur it currently holds. A create undoes to absent. An update
+// undoes via WriteFileAtomic, which preserves the existing permission bits —
+// so the simulated state carries cur's mode forward, keeping a tracked
+// older record verifiable across intervening legacy updates (#443).
+func undoTargetFrom(cur fileState, f checkpointFile) fileState {
 	if !f.existed {
 		return fileState{absent: true}
 	}
-	return fileState{hash: f.priorHash}
+	return fileState{hash: f.priorHash, mode: cur.mode, modeKnown: cur.modeKnown}
 }
 
 // liveState reads a workspace file through the same containment-checked
-// primitive the RAM journal uses. Absence is a state, not an error; any other
-// read failure (symlink, directory, permission) is surfaced so callers refuse
-// rather than guess.
+// primitive the RAM journal uses, taking bytes and the complete mode from
+// one open handle. Absence is a state, not an error; any other read failure
+// (symlink, directory, permission) is surfaced so callers refuse rather
+// than guess.
 func (j *checkpointJournal) liveState(path string) (fileState, error) {
-	cur, err := j.ws.ReadFileForUndo(path)
+	cur, mode, err := j.ws.ReadFileWithModeForUndo(path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return fileState{absent: true}, nil
 		}
 		return fileState{}, err
 	}
-	return fileState{hash: agenttools.ContentHash(cur)}, nil
+	return fileState{hash: agenttools.ContentHash(cur), mode: mode, modeKnown: true}, nil
 }
 
 // latch records the first fatal failure and cancels the captured run context.
@@ -295,7 +307,7 @@ func (j *checkpointJournal) recoverStartup(ctx context.Context) (string, error) 
 				return "", fmt.Errorf("golem: checkpoint recovery cannot classify %s: %w",
 					checkpointDisplayText(f.path), checkpointDisplayError{cause: lerr})
 			}
-			if live.equal(undoTarget(f)) {
+			if live.equal(undoTargetFrom(live, f)) {
 				if aerr := j.store.abortIntent(ctx, f.id); aerr != nil {
 					return "", aerr
 				}
@@ -338,12 +350,21 @@ func (e checkpointDisplayError) Unwrap() error { return e.cause }
 
 // matchesAfter reports whether cur is a valid starting state for undoing f:
 // exactly the recorded after state, or — parity with the RAM journal — an
-// already-absent file when the record was a create.
+// already-absent file when the record was a create. A tracked record (#443
+// promotion) additionally requires the complete mode to match: identical
+// bytes with drifted permission, special, or type bits refuse, and an
+// unknown mode fails closed rather than guessing.
 func matchesAfter(cur fileState, f checkpointFile) bool {
 	if cur.absent {
 		return !f.existed
 	}
-	return cur.hash == f.afterHash
+	if cur.hash != f.afterHash {
+		return false
+	}
+	if f.trackedMode {
+		return cur.modeKnown && cur.mode == f.afterMode
+	}
+	return true
 }
 
 // undo reverts the n newest completed checkpoints (#355): resume-first when an
@@ -397,7 +418,7 @@ func (j *checkpointJournal) undo(ctx context.Context, out io.Writer, n int) {
 				_, _ = fmt.Fprintf(out, checkpointUndoRefusal, checkpointDisplayText(f.path))
 				return
 			}
-			expected[f.path] = undoTarget(f)
+			expected[f.path] = undoTargetFrom(cur, f)
 		}
 	}
 
@@ -452,7 +473,7 @@ func (j *checkpointJournal) restoreFile(ctx context.Context, out io.Writer, f ch
 		_, _ = fmt.Fprintf(out, checkpointUndoRefusal, checkpointDisplayText(f.path))
 		return false
 	}
-	if !cur.equal(undoTarget(f)) {
+	if !cur.equal(undoTargetFrom(cur, f)) {
 		if !matchesAfter(cur, f) {
 			_, _ = fmt.Fprintf(out, checkpointUndoRefusal, checkpointDisplayText(f.path))
 			return false

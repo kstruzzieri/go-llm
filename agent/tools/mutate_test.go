@@ -1,6 +1,10 @@
 package tools
 
 import (
+	"context"
+	"io/fs"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -96,5 +100,81 @@ func TestNewMutatingTools(t *testing.T) {
 		if !seen {
 			t.Fatalf("missing %q", name)
 		}
+	}
+}
+
+// --- #443 Task 8: tracked after-mode validation ---
+
+func TestMutationRecordTrackedModeValidation(t *testing.T) {
+	base := MutationRecord{Path: "a.txt", AfterHash: ContentHash([]byte("x"))}
+	cases := []struct {
+		name    string
+		mut     func(*MutationRecord)
+		wantErr bool
+	}{
+		{"legacy zero-value ok", func(r *MutationRecord) {}, false},
+		{"tracked create rwx ok", func(r *MutationRecord) { r.TrackedMode = true; r.AfterMode = 0o640 }, false},
+		{"after-mode without tracking", func(r *MutationRecord) { r.AfterMode = 0o640 }, true},
+		{"tracked on update", func(r *MutationRecord) { r.TrackedMode = true; r.AfterMode = 0o640; r.Existed = true }, true},
+		{"tracked with setuid", func(r *MutationRecord) { r.TrackedMode = true; r.AfterMode = 0o640 | fs.ModeSetuid }, true},
+		{"tracked with sticky", func(r *MutationRecord) { r.TrackedMode = true; r.AfterMode = 0o640 | fs.ModeSticky }, true},
+		{"tracked with type bit", func(r *MutationRecord) { r.TrackedMode = true; r.AfterMode = 0o640 | fs.ModeDir }, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := base
+			tc.mut(&rec)
+			wrote := false
+			toolErr, internalErr := runJournaledWrite(context.Background(), nil, rec, func() error {
+				wrote = true
+				return nil
+			})
+			if internalErr != nil {
+				t.Fatalf("internal error: %v", internalErr)
+			}
+			if tc.wantErr {
+				if toolErr == nil {
+					t.Fatal("invalid tracked-mode record must be rejected before the write")
+				}
+				if wrote {
+					t.Fatal("rejected record must not write")
+				}
+				return
+			}
+			if toolErr != nil {
+				t.Fatalf("valid record rejected: %v", toolErr)
+			}
+			if !wrote {
+				t.Fatal("valid record must write")
+			}
+		})
+	}
+}
+
+func TestReadFileWithModeForUndo(t *testing.T) {
+	root := t.TempDir()
+	ws, err := NewWorkspace(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "f.txt"), []byte("data"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	data, mode, err := ws.ReadFileWithModeForUndo("f.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "data" || mode.Perm() != 0o640 || mode&fs.ModeType != 0 {
+		t.Fatalf("data=%q mode=%v", data, mode)
+	}
+	// Same containment semantics as ReadFileForUndo: a symlink is refused.
+	if err := os.Symlink("f.txt", filepath.Join(root, "ln")); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := ws.ReadFileWithModeForUndo("ln"); err == nil {
+		t.Fatal("symlink must be refused")
+	}
+	if _, _, err := ws.ReadFileWithModeForUndo("missing.txt"); !os.IsNotExist(err) {
+		t.Fatalf("missing file must report IsNotExist, got %v", err)
 	}
 }
