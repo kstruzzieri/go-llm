@@ -6,6 +6,123 @@ All notable changes to `go-llm` are documented here. Downstream consumers
 
 ## [Unreleased]
 
+### Added — golem headless integration surface (#352)
+
+One-shot mode (`-p`) gains a machine surface for scripting consumers. The
+tool-name set and the machine output shapes below are public contract.
+
+- `golem -p -` reads the one-shot prompt from stdin to EOF, bounded at 1 MiB
+  (the same ceiling the runtime already enforces on a turn message); a
+  terminal stdin fails fast with usage guidance.
+- `golem -output-format text|json|stream-json`. `json` emits one
+  `golem.result.v1` record; `stream-json` emits the protocol-v1 events one per
+  line followed by the same record as the final line. Protocol events are
+  never modified; the record is a separate versioned contract carrying the
+  exact `Result.Answer`, a bounded failure code, and the same `-grounding`
+  report object field for field, with no size cap and every key always present.
+  A protocol event carries `protocol` and never `schema`; the record carries
+  `schema` and never `protocol`, and the record completes the stream. Diagnostics stay on
+  stderr in every format, and `text` is byte-identical to before. Early flag,
+  argument, prompt, and configuration parse/validation errors leave stdout
+  empty and exit 2. Among pre-run failures, exactly `destination_denied`
+  (exit 2) and `provider_unavailable` (exit 1) emit a result record; all other
+  pre-run failures leave stdout empty. Both shapes are frozen by golden
+  fixtures. Protocol v1 reports execution progress only —
+  a tool call rejected before invocation emits no event; denial observability
+  is follow-up work.
+- `golem -allow-tool NAME` (repeatable) mounts and non-interactively approves
+  one exact built-in gated tool for a one-shot run: `write_file`, `edit_file`,
+  `run_command`, `start_command`, `stop_command`. Naming `start_command` also
+  mounts its ungated `command_status`/`command_tail` readers (a dependency
+  closure, not an authorization expansion). Authorization is by exact tool
+  name only — previews and approval keys are never parsed — no session grants
+  are created, and MCP tools and `submit_plan` are never eligible. The system
+  prompt for such a run is built from the exact mounted tool set instead of
+  the interactive group prompt, and never describes per-call approval.
+
+### Changed — one-shot exit codes (#352)
+
+- One-shot (`-p`) invocations now exit 2 for caller errors (flag, input,
+  configuration, and destination-admission failures) and 1 for run failures,
+  including a provider failure during startup probing; previously every
+  failure exited 1. Non-`-p` invocations are unchanged, including
+  `-agentflow-status`'s exit 2/3 semantics.
+
+### Amended — #348 grounding delivery mechanism (#352)
+
+- The #348 entry below states that #352 would buffer the terminal protocol
+  event at the CLI adapter and add the grounding object to its protocol-v1
+  payload. That mechanism is superseded: the 128 KiB protocol event cap cannot
+  carry an unbounded report, so the report object is serialized
+  inside the `golem.result.v1` record instead — which keeps the promise's
+  substance (the frozen report shape ships field for field, pinned against
+  the trace by test). `golem/runtime.go` remains unchanged either way.
+
+### Added — ephemeral scratch workspaces for approved commands (#443, ZT-204)
+
+Approved build/test commands can run against a disposable copy-on-write
+snapshot of the workspace, closing the execution-sandboxing mini-epic
+(#440–#443): #441/#442 are the syscall layer, this is the filesystem layer,
+and they compose without either knowing about the other.
+
+- `agent/tools`: `ScratchConfig` + `ExecToolsOptions` with additive
+  constructors (`NewExecToolsWithOptions`,
+  `NewSandboxedExecToolsWithOptions`, `NewExecToolsWithBackgroundOptions`);
+  zero options stay byte-identical to the legacy constructors. A session
+  snapshots the canonical tree twice (CoW via `clonefile`/`FICLONE`, exact
+  plain-copy fallback only for enumerated unsupported/cross-device errnos)
+  into a pristine reference root and an execution root holding `workspace/`
+  and `tmp/`, rewrites the approved spec's workspace root, cwd,
+  workspace-local executable, and `TMPDIR`, runs the command, stream-diffs
+  the two private trees into a bounded in-RAM outcome, and removes both
+  roots. Foreground and background share one runtime; background capture is
+  owned by the process `Wait` wrapper. Cleanup gets its own bounded phase and
+  one fixed deferred-reaper grace window; a persistent filesystem failure is
+  reported and quarantines that admission slot, bounding live-process
+  residue without hanging manager `Shutdown`.
+- Threat model, stated plainly: on the host runtime this is accident
+  isolation (cwd-relative build droppings, `rm` in scripts) — a malicious
+  process can still address the canonical tree by absolute path. Composed
+  with Seatbelt or bwrap the rewritten root becomes an enforced write
+  boundary, proven behaviorally on both platforms. `.git` is omitted at
+  every depth (no `git describe`/VCS stamping inside scratch); the
+  file-by-file clone is not a point-in-time filesystem snapshot, and a
+  drifting canonical source retries once, then fails closed. Crash/SIGKILL
+  orphans under the platform temp base are an accepted limitation (0700,
+  OS-reaped; no shared startup sweep), and a crash before promotion's rename
+  can leave one reserved 0700 `.golem-scratch-promote-*` staging directory in
+  the canonical parent. Its staged file may already have the approved final
+  mode but remains protected by that directory. A background
+  scratch job holds its session slot (default 2) for its whole
+  manager-owned lifetime, so long-lived scratched jobs can defer new
+  scratched commands until one finishes.
+- Approval identity: an enabled scratch policy inserts a versioned
+  `scr:<digest>:` component after the `exec:v3:`/`exec-bg:v2:` prefixes (the
+  `sb:` precedent — recipes unchanged, no version bump), so a host grant
+  never authorizes a scratch run or vice versa; the ephemeral path is never
+  identity. The outer effect budget is setup + command + capture + cleanup +
+  a fixed 5s grace, each phase under its own child context.
+- `scratch_changes` (read-only, approval-free) reports per-change metadata in
+  byte-budgeted continuation pages, never artifact bytes. Symlink aliases back
+  into the canonical tree are rewritten into each clone; external directories,
+  unresolvable targets, and regular hard links not proven to be canonical are
+  rejected rather than preserving a possible write path. `promote_artifact`
+  applies exactly one captured
+  create per call: always-prompting (empty structural key), create-only
+  (updates, deletes, modes, links, binary, and preview-oversize content are
+  report-only), fully previewed (complete escaped additions, 64 KiB cap),
+  journaled with a write-ahead intent and a tracked after-mode, and
+  installed descriptor-anchored with `renameatx_np(RENAME_EXCL)` /
+  `renameat2(RENAME_NOREPLACE)` — no overwrite, no fallback. Checkpoint
+  schema v2 adds a nullable `after_mode` column (v1 migrates additively);
+  `/undo` refuses to delete a promoted create whose complete mode drifted
+  even with identical bytes. Promotion-enabled construction fails on
+  platforms without the tested no-replace install; capture/query still work.
+- `cmd/golem -scratch` (requires interactive `-allow-exec`; one-shot drops
+  it with a warning): registers the scratch tools, passes the checkpoint
+  journal only when `-allow-write` built it, and prints one startup notice
+  naming the accident-vs-enforced split and whether promotion is armed.
+
 ### Added — phase-based model routing: the planning use case (#476)
 
 Golem's plan-authoring mode (`-goal`) now routes through its own `planning`
@@ -221,7 +338,7 @@ the grounding payload: they are absent from the run's usage footer, from
 `agent.Result`, and from telemetry.
 
 Frozen payload for #352. The report object is fixed by an exact-bytes golden
-test and #352 will serialize it verbatim:
+test and #352 will serialize the same fields:
 
 ```json
 {

@@ -343,7 +343,13 @@ Two security properties to keep in mind before granting. First, an exec grant pi
 
 ### Scripting / one-shot mode
 
-`-p` runs a single agent turn without the REPL and prints only the final answer to stdout, so the output is safe to capture in scripts. All progress, warnings, and errors go to stderr, and failures exit non-zero. One-shot implies `-no-session`, `-no-compress`, and `-no-memory` (nothing is persisted, and no memory DB is opened), and approval-gated tools stay unavailable — `-allow-write`/`-allow-exec` are ignored because there is no interactive approver to answer the prompt.
+`-p` runs a single agent turn without the REPL. In the default `text` format it
+prints only the final answer to stdout, so the output is safe to capture in
+scripts. All progress, warnings, and errors go to stderr. One-shot implies
+`-no-session`, `-no-compress`, and `-no-memory` (nothing is persisted, and no
+memory DB is opened), and `-allow-write`/`-allow-exec` are ignored because
+there is no interactive approver to answer the prompt — use `-allow-tool`
+instead.
 
 Generate a commit message from a staged diff:
 
@@ -351,6 +357,80 @@ Generate a commit message from a staged diff:
 msg=$(golem -root /path/to/project -p "Write a conventional commit message for this diff, output only the message: $(git diff --cached)")
 git commit -m "$msg"
 ```
+
+**Prompt from stdin.** `-p -` reads the prompt from stdin to EOF, up to 1 MiB.
+Stdin must be a pipe or a redirect; on a terminal it fails immediately rather
+than hanging. A literal prompt of `-` is not expressible.
+
+```bash
+git diff | golem -p - -output-format json
+```
+
+**Machine-readable output.** `-output-format` selects what stdout carries. It
+requires `-p`; stderr is unchanged in every format. Early flag, argument,
+prompt, and configuration parse/validation errors write a diagnostic to stderr,
+leave stdout empty, and exit 2. Among pre-run failures, exactly
+`destination_denied` (exit 2) and `provider_unavailable` (exit 1) emit a
+`golem.result.v1` record; all other pre-run failures leave stdout empty.
+
+| value | stdout |
+|---|---|
+| `text` (default) | the final answer, one trailing newline |
+| `json` | exactly one `golem.result.v1` record (below) |
+| `stream-json` | one protocol-v1 event object per line, then the same `golem.result.v1` record as the final line |
+
+Protocol events carry the versioned envelope
+`{"protocol":1,"runId":...,"seq":...,"type":...,"payload":{...}}` with the
+event types `run.started`, `message.delta`, `tool.started`, `tool.finished`,
+and exactly one terminal `run.finished`, `run.failed`, or `run.canceled` —
+verbatim, never decorated. `tool.started` events are not guaranteed to be
+paired, and the stream reports execution progress only — it is not an
+authorization audit stream: a tool call rejected before invocation (denied,
+unknown, malformed arguments, over budget) currently emits no event.
+
+The result record is a separate, versioned contract:
+
+```json
+{"schema":"golem.result.v1","status":"completed","answer":"...","stopReason":"completed","model":"llama.cpp/qwen3-coder-next","error":null,"grounding":null}
+```
+
+Every key is always present (`null` over absent). `status` is `completed`,
+`error`, or `canceled`; `stopReason` is `completed`, `step_cap_reached`,
+`budget_reached`, `tool_error_cap_reached`, or `repeat_limit_reached`; `error`
+carries a bounded `code` plus a diagnostic `message` (runtime codes come from
+the run's `run.failed` event; the CLI adds `empty_answer`,
+`provider_unavailable`, and `destination_denied`); `grounding` is the same
+`-grounding` report object, field for field, when verification ran. The record
+has **no size cap** — a large answer is one large line, so do not read the
+stream with a fixed 64 KiB line buffer. To tell the two shapes apart: a protocol
+event has a top-level `protocol` key and never `schema`; the result record has
+`schema` and never `protocol`. The result record, not the protocol terminal event, is
+the last line of the stream.
+
+**Non-interactive tool authorization.** `-allow-tool NAME` mounts and
+auto-approves one exact built-in gated tool. It is repeatable, requires `-p`,
+and creates no session grants — authorization lasts for the process only.
+
+```bash
+golem -p "run the tests and summarize the failures" -allow-tool run_command
+```
+
+Accepted names: `write_file`, `edit_file`, `run_command`, `start_command`,
+`stop_command`. Naming `start_command` also mounts its ungated readers
+`command_status` and `command_tail` (a dependency closure — the job's output
+is unreadable without them; neither ever requires approval). Any other name —
+including `submit_plan`, any `mcp__*` tool, or a typo — is rejected before the
+run. MCP tools cannot be authorized headlessly and stay denied.
+
+**Exit codes (one-shot only).** These apply to `-p` invocations;
+`-agentflow-status` keeps its own documented exit semantics, and other modes
+exit 0/1 as before.
+
+| code | meaning |
+|---|---|
+| `0` | the run completed (a tool call the agent handled and recovered from does not change this) |
+| `1` | the run failed: provider or runtime error — including a provider failure during startup probing — cancellation, or no final answer |
+| `2` | caller error: bad flag or input, unknown `-allow-tool` name, unreadable or oversized stdin, missing or malformed configuration, or a destination admission denial |
 
 ### MCP server
 

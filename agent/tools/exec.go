@@ -95,6 +95,7 @@ type execPending struct {
 	clamped           bool
 	fingerprint       string
 	sandbox           sandboxApproval // stamped by the owning tool, NOT by prepareExecPlan
+	scratch           scratchApproval // stamped by the owning tool (#443); zero = disabled
 }
 
 type execPlanCache struct {
@@ -150,6 +151,9 @@ type RunCommand struct {
 	ws      *Workspace
 	runner  commandRunner
 	sandbox sandboxApproval // zero value = host; set by the sandboxed constructors
+	// scratchRT is the shared scratch engine (#443); nil = scratch disabled
+	// and behavior is byte-identical to pre-#443.
+	scratchRT *scratchRuntime
 	execPlanCache
 }
 
@@ -185,6 +189,76 @@ func NewSandboxedExecTools(root string, cfg SandboxConfig) ([]agent.Tool, error)
 	rc := NewRunCommand(ws, backend)
 	rc.sandbox = backend.approval
 	return []agent.Tool{rc}, nil
+}
+
+// NewExecToolsWithOptions builds the foreground exec tool set with the
+// frozen per-factory policy in opts (#443). Zero options delegate to
+// NewExecTools and stay byte-identical; an enabled scratch policy adds the
+// shared scratch runtime and the scratch_changes query tool. A promotion
+// journal without scratch is a misconfiguration and fails construction.
+func NewExecToolsWithOptions(root string, opts ExecToolsOptions) ([]agent.Tool, error) {
+	if _, err := normalizeScratchConfig(opts.Scratch); err != nil {
+		// Fail closed: a disabled config with fields set is a dropped
+		// Enabled flag, never a request for direct execution.
+		return nil, err
+	}
+	if !opts.Scratch.Enabled {
+		if opts.PromotionJournal != nil {
+			return nil, fmt.Errorf("tools: promotion journal requires an enabled scratch config")
+		}
+		return NewExecTools(root)
+	}
+	ws, err := NewWorkspace(root)
+	if err != nil {
+		return nil, fmt.Errorf("tools: build exec tools: %w", err)
+	}
+	rt, err := newScratchRuntime(root, opts.Scratch, opts.PromotionJournal)
+	if err != nil {
+		return nil, err
+	}
+	rc := NewRunCommand(ws, newPlatformRunner())
+	rc.scratchRT = rt
+	tools := []agent.Tool{rc, ScratchChanges{rt: rt}}
+	if opts.PromotionJournal != nil {
+		tools = append(tools, NewPromoteArtifact(ws, rt))
+	}
+	return tools, nil
+}
+
+// NewSandboxedExecToolsWithOptions composes a sandbox runtime (#440-#442)
+// with the scratch policy (#443). The layers stay orthogonal: scratch
+// rewrites execSpec.WorkspaceRoot before dispatch and the backend binds its
+// write policy to whatever root it receives.
+func NewSandboxedExecToolsWithOptions(root string, sandbox SandboxConfig, opts ExecToolsOptions) ([]agent.Tool, error) {
+	if _, err := normalizeScratchConfig(opts.Scratch); err != nil {
+		return nil, err
+	}
+	if !opts.Scratch.Enabled {
+		if opts.PromotionJournal != nil {
+			return nil, fmt.Errorf("tools: promotion journal requires an enabled scratch config")
+		}
+		return NewSandboxedExecTools(root, sandbox)
+	}
+	backend, err := newExecBackend(sandbox)
+	if err != nil {
+		return nil, fmt.Errorf("tools: build exec tools: %w", err)
+	}
+	ws, err := NewWorkspace(root)
+	if err != nil {
+		return nil, fmt.Errorf("tools: build exec tools: %w", err)
+	}
+	rt, err := newScratchRuntime(root, opts.Scratch, opts.PromotionJournal)
+	if err != nil {
+		return nil, err
+	}
+	rc := NewRunCommand(ws, backend)
+	rc.sandbox = backend.approval
+	rc.scratchRT = rt
+	tools := []agent.Tool{rc, ScratchChanges{rt: rt}}
+	if opts.PromotionJournal != nil {
+		tools = append(tools, NewPromoteArtifact(ws, rt))
+	}
+	return tools, nil
 }
 
 func (t *RunCommand) Spec() agent.ToolSpec {
@@ -237,12 +311,24 @@ func (t *RunCommand) Plan(_ context.Context, raw json.RawMessage) (agent.ToolPla
 		return agent.ToolPlan{Effect: eff}, err
 	}
 	p.sandbox = t.sandbox
+	if t.scratchRT != nil {
+		p.scratch = t.scratchRT.approval
+	}
 	t.store(ContentHash(raw), p)
 	eff.Timeout = timeout
+	if t.scratchRT != nil {
+		// The outer effect budget covers setup + command + capture + cleanup + grace;
+		// Invoke gives each phase its own bounded child context (D6).
+		outer, err := scratchOuterTimeout(t.scratchRT.cfg, timeout)
+		if err != nil {
+			return agent.ToolPlan{Effect: eff}, err
+		}
+		eff.Timeout = outer
+	}
 	return agent.ToolPlan{
 		Effect:      eff,
 		Preview:     renderExecPreview(p, args.Argv[0]),
-		ApprovalKey: execApprovalKeyPrefix + p.sandbox.keyComponent + p.fingerprint,
+		ApprovalKey: execApprovalKeyPrefix + p.scratch.keyComponent + p.sandbox.keyComponent + p.fingerprint,
 	}, nil
 }
 
@@ -352,6 +438,9 @@ func (t *RunCommand) Invoke(ctx context.Context, raw json.RawMessage) (agent.Too
 	if err != nil {
 		return errResult(err.Error()), nil
 	}
+	if t.scratchRT != nil {
+		return t.invokeScratched(ctx, pp, spec)
+	}
 	res, runErr := t.runner.Run(ctx, spec)
 	if runErr != nil {
 		if res.TimedOut {
@@ -363,6 +452,88 @@ func (t *RunCommand) Invoke(ctx context.Context, raw json.RawMessage) (agent.Too
 		return errResult("command failed to run: " + runErr.Error()), nil
 	}
 	return agent.ToolResult{Content: formatExecResult(res)}, nil
+}
+
+// invokeScratched runs one approved command inside a scratch session (#443):
+// setup, the command, and capture each get their own bounded child context so
+// a slow snapshot can never eat the approved command budget. Every delivered
+// result leads with the scratch id (scratch-first rendering, so command
+// output can never truncate it); a parent-run cancellation discards the
+// unreachable outcome instead of publishing it.
+func (t *RunCommand) invokeScratched(ctx context.Context, pp execPending, spec execSpec) (agent.ToolResult, error) {
+	setupCtx, cancelSetup := context.WithTimeout(ctx, t.scratchRT.cfg.SnapshotTimeout)
+	session, rewritten, err := beginScratchSession(setupCtx, t.scratchRT, spec)
+	cancelSetup()
+	if err != nil {
+		// Fail closed: scratch never silently degrades to direct host
+		// execution.
+		return errResult("scratch snapshot failed; command not run: " + err.Error()), nil
+	}
+	runCtx, cancelRun := context.WithTimeout(ctx, pp.timeout)
+	res, runErr := t.runner.Run(runCtx, rewritten)
+	cancelRun()
+
+	if ctx.Err() != nil {
+		session.discard()
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			return errResult("scratch effect budget exhausted; result discarded"), nil
+		}
+		return errResult("command canceled"), nil
+	}
+	if t.scratchRT.beforeCapture != nil {
+		t.scratchRT.beforeCapture()
+	}
+	captureCtx, cancelCapture := context.WithTimeout(ctx, t.scratchRT.cfg.CaptureTimeout)
+	session.finish(captureCtx)
+	cancelCapture()
+	if ctx.Err() != nil {
+		session.discard()
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			return errResult("scratch effect budget exhausted; result discarded"), nil
+		}
+		return errResult("command canceled"), nil
+	}
+	summary := renderScratchResultLine(t.scratchRT, session.id)
+
+	if runErr != nil {
+		if res.TimedOut {
+			return errResult(summary + fmt.Sprintf("command timed out after %s", pp.timeout)), nil
+		}
+		if errors.Is(runErr, context.Canceled) {
+			return errResult(summary + "command canceled"), nil
+		}
+		return errResult(summary + "command failed to run: " + runErr.Error()), nil
+	}
+	return agent.ToolResult{Content: summary + formatExecResult(res)}, nil
+}
+
+// renderScratchResultLine is the bounded scratch-first line every scratched
+// result starts with: id, change counts, and pointers — never content.
+func renderScratchResultLine(rt *scratchRuntime, id string) string {
+	out, status := rt.store.get(id)
+	if status != scratchStatusCaptured {
+		return fmt.Sprintf("scratch: id=%s status=pending\n", id)
+	}
+	promotable := 0
+	for _, c := range out.changes {
+		if c.promotable {
+			promotable++
+		}
+	}
+	line := fmt.Sprintf("scratch: id=%s changes=%d promotable=%d", id, len(out.changes), promotable)
+	if out.truncated {
+		line += " truncated"
+	}
+	if out.captureErr != "" {
+		line += " capture-error"
+	}
+	if out.cleanupErr != "" {
+		line += " cleanup-error"
+	}
+	if len(out.changes) > 0 || out.truncated || out.captureErr != "" || out.cleanupErr != "" {
+		line += " (details: scratch_changes)"
+	}
+	return line + "\n"
 }
 
 // resolveExecTimeout maps timeout_seconds to an effective duration. nil -> default;
@@ -577,6 +748,9 @@ func renderExecPreview(p execPending, originalArgv0 string) string {
 	fmt.Fprintf(&b, "  env:     %s\n", strings.Join(parts, ", "))
 	if p.sandbox.preview != "" {
 		fmt.Fprintf(&b, "  sandbox: %s\n", p.sandbox.preview)
+	}
+	if p.scratch.preview != "" {
+		fmt.Fprintf(&b, "  scratch: %s\n", p.scratch.preview)
 	}
 	// The stored fingerprint is the full digest (the approval key uses all of
 	// it); the id line stays the short display form.

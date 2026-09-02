@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
@@ -111,7 +113,7 @@ func TestBuildExecTools(t *testing.T) {
 	// background tools, built over one manager/workspace pair.
 	mgr := agenttools.NewBackgroundManager()
 	t.Cleanup(mgr.Shutdown)
-	tools, err := buildExecTools(t.TempDir(), mgr)
+	tools, err := buildExecTools(t.TempDir(), mgr, agenttools.ExecToolsOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -128,7 +130,7 @@ func TestBuildExecTools(t *testing.T) {
 }
 
 func TestBuildExecTools_NilManagerFailsLoudly(t *testing.T) {
-	if _, err := buildExecTools(t.TempDir(), nil); err == nil {
+	if _, err := buildExecTools(t.TempDir(), nil, agenttools.ExecToolsOptions{}); err == nil {
 		t.Fatal("nil manager must fail loudly, not register a broken tool set")
 	}
 }
@@ -199,8 +201,8 @@ func TestDelegateSystemFragment(t *testing.T) {
 		t.Fatal("fragment must be empty when delegation disabled, regardless of allowWrite")
 	}
 	withWrite := delegateSystemFragment(true, true)
-	if !strings.Contains(withWrite, "delegate_code") || !strings.Contains(withWrite, "write_file") {
-		t.Fatalf("write-enabled fragment should mention delegate_code and write_file: %q", withWrite)
+	if !strings.Contains(withWrite, "delegate_code") || !strings.Contains(withWrite, "write it") {
+		t.Fatalf("write-enabled fragment should describe applying delegated code: %q", withWrite)
 	}
 	noWrite := delegateSystemFragment(true, false)
 	if !strings.Contains(noWrite, "delegate_code") {
@@ -382,5 +384,91 @@ func TestResolveDispatchFanout(t *testing.T) {
 	}
 	if got := resolveDispatchFanout(nil, chain); got.maxConcurrent != 1 || got.governor != nil {
 		t.Fatalf("nil capacity = %+v, want static serial", got)
+	}
+}
+
+// --- #443 Task 10: -scratch wiring ---
+
+func execToolNames(tools []agent.Tool) []string {
+	names := make([]string, len(tools))
+	for i, t := range tools {
+		names[i] = t.Spec().Name
+	}
+	return names
+}
+
+func TestBuildExecToolsScratchMatrix(t *testing.T) {
+	root := t.TempDir()
+	base := []string{"run_command", "start_command", "command_status", "command_tail", "stop_command"}
+
+	legacyMgr := agenttools.NewBackgroundManager()
+	defer legacyMgr.Shutdown()
+	tools, err := buildExecTools(root, legacyMgr, agenttools.ExecToolsOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := execToolNames(tools); !reflect.DeepEqual(got, base) {
+		t.Fatalf("zero options must reproduce the legacy tool set: %v", got)
+	}
+
+	scratchMgr := agenttools.NewBackgroundManager()
+	defer scratchMgr.Shutdown()
+	tools, err = buildExecTools(root, scratchMgr, agenttools.ExecToolsOptions{
+		Scratch: agenttools.ScratchConfig{Enabled: true},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	names := execToolNames(tools)
+	if !slices.Contains(names, "scratch_changes") || slices.Contains(names, "promote_artifact") {
+		t.Fatalf("scratch without write must register the query tool and no promotion: %v", names)
+	}
+
+	ws, err := agenttools.NewWorkspace(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := openTestStore(t, root)
+	journal := newCheckpointJournal(ws, store)
+	promoMgr := agenttools.NewBackgroundManager()
+	defer promoMgr.Shutdown()
+	tools, err = buildExecTools(root, promoMgr, agenttools.ExecToolsOptions{
+		Scratch:          agenttools.ScratchConfig{Enabled: true},
+		PromotionJournal: journal,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	names = execToolNames(tools)
+	if !slices.Contains(names, "promote_artifact") {
+		t.Fatalf("scratch with the checkpoint journal must register promotion: %v", names)
+	}
+}
+
+func TestScratchExecOptionsJournalGate(t *testing.T) {
+	opts, line := scratchExecOptions(false, nil)
+	if opts.Scratch.Enabled || opts.PromotionJournal != nil || line != "" {
+		t.Fatalf("scratch off must be the zero policy: %+v %q", opts, line)
+	}
+	opts, line = scratchExecOptions(true, nil)
+	if !opts.Scratch.Enabled || line == "" {
+		t.Fatalf("scratch on must enable and announce: %+v %q", opts, line)
+	}
+	// The concrete-nil check must keep a typed nil out of the interface:
+	// -allow-exec alone never registers promotion.
+	if opts.PromotionJournal != nil {
+		t.Fatal("nil journal must never become a non-nil PromotionJournal interface")
+	}
+	if !strings.Contains(line, "disabled") {
+		t.Fatalf("notice must say promotion is disabled without -allow-write: %q", line)
+	}
+	ws, err := agenttools.NewWorkspace(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	j := newCheckpointJournal(ws, openTestStore(t, t.TempDir()))
+	opts, line = scratchExecOptions(true, j)
+	if opts.PromotionJournal == nil || !strings.Contains(line, "prompts per artifact") {
+		t.Fatalf("a real journal must enable promotion: %+v %q", opts, line)
 	}
 }

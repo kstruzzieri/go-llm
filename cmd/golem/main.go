@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/kstruzzieri/go-llm/agent"
 	agenttools "github.com/kstruzzieri/go-llm/agent/tools"
@@ -47,6 +48,7 @@ type flags struct {
 	sessionID           string
 	allowWrite          bool
 	allowExec           bool
+	scratch             bool
 	delegate            bool
 	delegateRole        string
 	dispatch            bool
@@ -87,9 +89,12 @@ type flags struct {
 	workflowReason      string // required rationale paired with workflowProfile
 	wfProfileSet        bool
 	wfReasonSet         bool
-	goal                string // AgentFlow planning mode goal (-goal)
-	goalSet             bool   // -goal was passed (distinguishes an explicit empty goal)
-	approvePlanLock     bool   // -approve-plan-lock: non-interactive planning-mode lock approval
+	goal                string          // AgentFlow planning mode goal (-goal)
+	goalSet             bool            // -goal was passed (distinguishes an explicit empty goal)
+	approvePlanLock     bool            // -approve-plan-lock: non-interactive planning-mode lock approval
+	outputFormat        string          // -output-format: text|json|stream-json (#352)
+	outputFormatSet     bool            // -output-format was passed (distinguishes an explicit empty value)
+	allowTools          stringSliceFlag // -allow-tool: exact gated tool names for headless runs (#352)
 }
 
 func parseFlags(args []string) (flags, error) {
@@ -113,6 +118,7 @@ func parseFlags(args []string) (flags, error) {
 	fs.BoolVar(&f.fresh, "fresh", false, "start a new persistent session instead of resuming this workspace")
 	fs.BoolVar(&f.allowWrite, "allow-write", false, "enable approval-gated write_file/edit_file tools")
 	fs.BoolVar(&f.allowExec, "allow-exec", false, "enable the approval-gated run_command and background command tools (start/status/tail/stop)")
+	fs.BoolVar(&f.scratch, "scratch", false, "run approved commands in a disposable snapshot of the workspace with .git omitted (requires -allow-exec): accident isolation on the host runtime, an enforced write boundary under a sandbox runtime; artifacts reach the real workspace only via approved promote_artifact (needs -allow-write)")
 	fs.BoolVar(&f.delegate, "delegate", false, "enable the delegate_code tool (route a scoped codegen sub-task to a specialist model)")
 	fs.StringVar(&f.delegateRole, "delegate-role", "coding", "model role the delegate_code tool routes to")
 	fs.BoolVar(&f.dispatch, "dispatch", false, "enable the dispatch tool (bounded read-only exploration tasks use backend-governed concurrency; ungoverned routing stays serial)")
@@ -153,6 +159,8 @@ func parseFlags(args []string) (flags, error) {
 	fs.StringVar(&f.workflowReason, "workflow-reason", "", "Agentflow modes: non-empty rationale paired with -workflow-profile")
 	fs.StringVar(&f.goal, "goal", "", "AgentFlow planning mode: author and preview a traceable plan, require approval to lock it, then stop")
 	fs.BoolVar(&f.approvePlanLock, "approve-plan-lock", false, "planning mode: print the plan preview and approve the lock without prompting (non-interactive -goal)")
+	fs.StringVar(&f.outputFormat, "output-format", "text", "one-shot mode: stdout format — text (the final answer), json (one golem.result.v1 record), or stream-json (one protocol-v1 event per line, then the same record); requires -p")
+	fs.Var(&f.allowTools, "allow-tool", "one-shot mode: mount and non-interactively approve one exact built-in gated tool by name (repeatable; write_file, edit_file, run_command, start_command, stop_command); creates no session grants; MCP tools and submit_plan are never eligible; requires -p")
 	if err := fs.Parse(args); err != nil {
 		return flags{}, err
 	}
@@ -173,6 +181,8 @@ func parseFlags(args []string) (flags, error) {
 			f.planWorkersSet = true
 		case "base-url":
 			f.baseURLSet = true
+		case "output-format":
+			f.outputFormatSet = true
 		case "goal":
 			f.goalSet = true
 		case "task-brief":
@@ -212,6 +222,9 @@ func autoIndexEnabled(f flags, autoErr, embChainErr error) bool {
 
 // validateFlags rejects flag values flag.Parse cannot police.
 func validateFlags(f flags) error {
+	if f.scratch && !f.allowExec {
+		return fmt.Errorf("golem: -scratch requires -allow-exec")
+	}
 	if f.agentflowStatus && f.agentflowResume {
 		return fmt.Errorf("golem: -agentflow-status and -agentflow-resume are mutually exclusive")
 	}
@@ -241,6 +254,28 @@ func validateFlags(f flags) error {
 	}
 	if f.promptSet && strings.TrimSpace(f.prompt) == "" {
 		return fmt.Errorf("golem: -p requires a non-empty prompt")
+	}
+	// #352: the requires-p check comes FIRST, so a non-headless invocation gets
+	// a plain mode error (exit 1) and never reaches the headless-classified
+	// value check below.
+	if f.outputFormatSet && !f.promptSet {
+		return fmt.Errorf("golem: -output-format requires -p (one-shot mode)")
+	}
+	// A zero-value flags struct is used by tests and helpers; parseFlags always
+	// supplies the real default, "text". An explicitly empty value is invalid.
+	if f.outputFormat != "" || f.outputFormatSet {
+		if _, err := parseOutputFormat(f.outputFormat); err != nil {
+			return err
+		}
+	}
+	// #352: same ordering discipline as -output-format — the mode check first
+	// (plain error, exit 1), then the headless-only exact-name check (usage
+	// error, exit 2).
+	if len(f.allowTools) > 0 && !f.promptSet {
+		return fmt.Errorf("golem: -allow-tool requires -p (one-shot mode); the REPL approves interactively")
+	}
+	if _, err := newAllowToolSet(f.allowTools); err != nil {
+		return err
 	}
 	if f.promptSet && (f.fresh || f.sessionID != "") {
 		return fmt.Errorf("golem: -p (one-shot) is incompatible with -session and -fresh")
@@ -440,6 +475,10 @@ func applyOneShotMode(f flags) (flags, []string) {
 		warns = append(warns, "one-shot: -allow-write/-allow-exec ignored (approval prompts need the REPL); write/exec tools unavailable")
 		f.allowWrite = false
 		f.allowExec = false
+		if f.scratch {
+			warns = append(warns, "one-shot: -scratch ignored (it requires interactive -allow-exec)")
+			f.scratch = false
+		}
 	}
 	return f, warns
 }
@@ -464,6 +503,7 @@ type startupInfo struct {
 	agentMemoryLine    string
 	mcpLine            string
 	delegateLine       string
+	scratchLine        string
 	dispatchLine       string
 }
 
@@ -491,6 +531,9 @@ func startupNotices(info startupInfo) []string {
 	}
 	if info.delegateLine != "" {
 		out = append(out, info.delegateLine)
+	}
+	if info.scratchLine != "" {
+		out = append(out, info.scratchLine)
 	}
 	if info.dispatchLine != "" {
 		out = append(out, info.dispatchLine)
@@ -581,10 +624,10 @@ func main() {
 		}
 		// runIndex/runOneShot already rendered their own output; just exit non-zero.
 		if errors.Is(err, errIndexFailed) || errors.Is(err, errOneShotFailed) || errors.Is(err, errAgentflowTaskFailed) || errors.Is(err, errSourceFailed) {
-			os.Exit(1)
+			os.Exit(exitCodeFor(err))
 		}
 		_, _ = fmt.Fprintf(os.Stderr, "golem: %v\n", err)
-		os.Exit(1)
+		os.Exit(exitCodeFor(err))
 	}
 }
 
@@ -661,14 +704,48 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 
 	f, err := parseFlags(args)
 	if err != nil {
-		return err
+		// #352: promptSet is unknowable on a parse failure, so headless intent
+		// comes from the raw argv. flag.ErrHelp survives the wrap for main()'s
+		// exit-0 check.
+		return maybeUsageError(err, argsRequestOneShot(args))
+	}
+	if f.version && (f.promptSet || f.outputFormatSet || len(f.allowTools) > 0) {
+		return maybeUsageError(fmt.Errorf("golem: -version cannot be combined with one-shot flags"), headlessExitApplies(f))
 	}
 	if f.version {
 		_, _ = fmt.Fprintln(stdout, versionString())
 		return nil
 	}
 	if err := validateFlags(f); err != nil {
-		return err
+		return maybeUsageError(err, headlessExitApplies(f))
+	}
+	// #352: resolve "-p -" immediately after validation and before anything
+	// else reads f.prompt. The TTY probe uses the run() stdin descriptor, so
+	// tests drive it with ordinary files.
+	if stdinPromptRequested(f) {
+		p, perr := resolveStdinPrompt(stdin, realTermOps{}.IsTerminal(int(stdin.Fd())))
+		if perr != nil {
+			return perr
+		}
+		f.prompt = p
+	}
+	if f.promptSet {
+		if len(f.prompt) > maxGoalBytes {
+			return newUsageError("golem: -p prompt exceeds %d bytes", maxGoalBytes)
+		}
+		if !utf8.ValidString(f.prompt) {
+			return newUsageError("golem: -p prompt must be valid UTF-8")
+		}
+	}
+	// #352: the value was validated above, so this cannot fail; the error is
+	// still checked rather than discarded.
+	outFormat, ferr := parseOutputFormat(f.outputFormat)
+	if ferr != nil {
+		return maybeUsageError(ferr, headlessExitApplies(f))
+	}
+	mcpServers, merr := parseMCPServers(f.mcpStdio, f.mcpHTTP)
+	if merr != nil {
+		return maybeUsageError(merr, headlessExitApplies(f))
 	}
 	f, taskWarns := applyTaskMode(f)
 	f, goalWarns := applyGoalMode(f)
@@ -678,10 +755,10 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 
 	root, err := filepath.Abs(f.root)
 	if err != nil {
-		return fmt.Errorf("resolve root: %w", err)
+		return maybeUsageError(fmt.Errorf("resolve root: %w", err), headlessExitApplies(f))
 	}
 	if root, err = filepath.EvalSymlinks(root); err != nil {
-		return fmt.Errorf("resolve root: %w", err)
+		return maybeUsageError(fmt.Errorf("resolve root: %w", err), headlessExitApplies(f))
 	}
 
 	ctx := context.Background()
@@ -689,9 +766,13 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 		return runAgentflowStatus(ctx, stdout, root, f.agentflowSrc, f.jsonOutput)
 	}
 
+	// #352: config load/resolution failures are caller errors (exit 2) on the
+	// headless surface; the classification stops at these pure-config sites —
+	// provider bootstrap, discovery, and probing below stay exit 1 (a provider
+	// failure is never caller misuse).
 	cfg, err := loadConfig(f.configPath)
 	if err != nil {
-		return err
+		return maybeUsageError(err, headlessExitApplies(f))
 	}
 	autoDBPath, autoWorkspaceID, autoErr := indexDBPathForWorkspace(os.Getenv, root)
 
@@ -705,7 +786,7 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 	// caller, so no seam can quietly disagree about which route is live.
 	activeRoute, err := planActiveRoute(cfg, f.goalSet)
 	if err != nil {
-		return err
+		return maybeUsageError(err, headlessExitApplies(f))
 	}
 	plan := chainPlanFor(activeRoute)
 	// Embedding is feature-gated, not optional-recommend: an absent or
@@ -717,7 +798,7 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 	if shouldPlanSummarize(f, autoErr, embChainErr) {
 		summarizeRoute, err = providerbootstrap.PlanOptionalUseCaseRoute(cfg, config.UseCaseSummarize)
 		if err != nil {
-			return err
+			return maybeUsageError(err, headlessExitApplies(f))
 		}
 		routes = append(routes, summarizeRoute)
 	}
@@ -747,7 +828,7 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 		// default to.
 		dchain, err = resolveDispatchChain(cfg, f.dispatchRole, activeRoute.Chain)
 		if err != nil {
-			return err
+			return maybeUsageError(err, headlessExitApplies(f))
 		}
 		routes = append(routes, providerbootstrap.PlannedRoute{
 			UseCase: dispatchUseCase, Chain: dchain, Recommend: len(dchain) == 0,
@@ -757,14 +838,14 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 	if f.delegate {
 		delegateChain, err = resolveDelegateChain(cfg, f.delegateRole)
 		if err != nil {
-			return err
+			return maybeUsageError(err, headlessExitApplies(f))
 		}
 		routes = append(routes, providerbootstrap.PlannedRoute{UseCase: delegateUseCase, Chain: delegateChain})
 	}
 
 	explicitURL, _, err := explicitBaseURL(f.baseURL, f.baseURLSet, os.LookupEnv)
 	if err != nil {
-		return err // explicit-override validation error: fatal, matches validateFlags semantics
+		return maybeUsageError(err, headlessExitApplies(f))
 	}
 	targetKey, _, targetOK := openAICompatTargetFromRoute(cfg, activeRoute)
 	ocProv, ocURL := "", ""
@@ -775,13 +856,13 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 	}
 	eff, err := providerbootstrap.Materialize(cfg, f.ollamaURL, ocProv, ocURL)
 	if err != nil {
-		return err
+		return maybeUsageError(err, headlessExitApplies(f))
 	}
 	netPlan, err := providerbootstrap.BuildNetworkPlan(eff, routes, providerbootstrap.PlanOptions{
 		CapabilityProbes: !f.noCapProbe,
 	})
 	if err != nil {
-		return err
+		return maybeUsageError(err, headlessExitApplies(f))
 	}
 
 	gate := provider.NewDestinationGate()
@@ -795,10 +876,14 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 		Out:         stderr,
 	})
 	if err != nil {
-		return err
+		return maybeUsageError(err, headlessExitApplies(f))
 	}
 	if err := adm.ensure(ctx); err != nil {
-		return err
+		// #352: a destination-admission denial is a typed local policy
+		// decision — a caller error (exit 2) on the headless surface, and one
+		// of the two pre-run failures that still writes a result record.
+		reportPreRunFailure(stdout, outFormat, resultCodeDestDenied, err)
+		return maybeUsageError(err, headlessExitApplies(f))
 	}
 
 	// Guarded, loopback-only discovery runs strictly after admission: each
@@ -853,7 +938,12 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 		ActiveProviders:                 netPlan.ActiveProviders,
 	})
 	if err != nil {
-		return fmt.Errorf("bootstrap providers: %w", err)
+		// #352: a provider failure during pre-run bootstrap is a provider
+		// failure (exit 1), never caller misuse; machine modes still get
+		// their result record.
+		err = fmt.Errorf("bootstrap providers: %w", err)
+		reportPreRunFailure(stdout, outFormat, resultCodeProviderPreRun, err)
+		return err
 	}
 	defer func() { _ = bundle.Close() }()
 
@@ -866,8 +956,14 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 	warns = append(backendRes.warns, warns...)
 	if err != nil {
 		if len(backendRes.warns) > 0 {
-			return fmt.Errorf("%s\n%w", strings.Join(backendRes.warns, "\n"), err)
+			err = fmt.Errorf("%s\n%w", strings.Join(backendRes.warns, "\n"), err)
 		}
+		if isPreflightCapabilityError(err) {
+			return maybeUsageError(err, headlessExitApplies(f))
+		}
+		// #352: remaining preflight failures depend on provider lookup/probing —
+		// the same class as bootstrap.
+		reportPreRunFailure(stdout, outFormat, resultCodeProviderPreRun, err)
 		return err
 	}
 	warns = append(warns, oneShotWarns...)
@@ -1031,6 +1127,10 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 			dwarns, perr := preflightToolCapable(ctx, bundle.Models, dchain, dispatchUseCase, resolveEndpoint, resolver)
 			warns = append(warns, dwarns...)
 			if perr != nil {
+				if isPreflightCapabilityError(perr) {
+					return maybeUsageError(perr, headlessExitApplies(f))
+				}
+				reportPreRunFailure(stdout, outFormat, resultCodeProviderPreRun, perr)
 				return perr
 			}
 			// Same constant the dispatch caller below routes with, so the
@@ -1071,9 +1171,24 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 		}
 	}()
 
+	// #352: -allow-tool mounts gated tools for a headless run. The set was
+	// already validated in validateFlags, so this cannot fail here; the error
+	// is still checked rather than discarded. The write/exec construction
+	// below is shared: -allow-write/-allow-exec drive it interactively,
+	// -allow-tool drives it headlessly. Neither can be true at the same time
+	// as the other for a given kind, because applyOneShotMode clears both
+	// allow flags whenever -p is set.
+	allowTools, aterr := newAllowToolSet(f.allowTools)
+	if aterr != nil {
+		return aterr
+	}
+	buildWrite := f.allowWrite || allowTools.authorized("write_file") || allowTools.authorized("edit_file")
+	buildExec := f.allowExec || allowTools.authorized("run_command") ||
+		allowTools.authorized("start_command") || allowTools.authorized("stop_command")
+
 	var journal *checkpointJournal
 	var verifier *verifyRunner
-	if f.allowWrite {
+	if buildWrite {
 		// D6: -allow-write fails closed on ANY checkpoint lifecycle failure
 		// (store, lease, migration, recovery, state query, hardening) rather
 		// than silently dropping the #355 durability guarantee.
@@ -1103,27 +1218,39 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 		} else if n > 0 {
 			warns = append(warns, fmt.Sprintf("an interrupted undo exists (%d checkpoint(s)); /undo resumes it", n))
 		}
-		tools = append(tools, wt...)
+		if f.allowWrite {
+			tools = append(tools, wt...)
+		} else {
+			tools = append(tools, filterAllowedTools(wt, allowTools)...)
+		}
 		journal = j
 
 		// #347: read only here, so no other mode ever touches .golem.json.
 		// applyOneShotMode has already cleared allowWrite for -p, and task,
-		// planning and Agentflow modes reject it at validation.
-		var vwarn string
-		if verifier, vwarn = buildVerifier(root); vwarn != "" {
-			warns = append(warns, vwarn)
+		// planning and Agentflow modes reject it at validation. Deliberately
+		// gated on f.allowWrite, NOT buildWrite: a headless -allow-tool run
+		// must not read .golem.json or mount post-write verification —
+		// verify_command is not an -allow-tool name.
+		if f.allowWrite {
+			var vwarn string
+			if verifier, vwarn = buildVerifier(root); vwarn != "" {
+				warns = append(warns, vwarn)
+			}
 		}
 	}
 
-	// Background manager (#346): constructed only when interactive -allow-exec
+	// Background manager (#346): constructed when interactive -allow-exec
 	// survives to this point (one-shot already forced allowExec false;
-	// -plan/-goal reject it at flag validation), so every manager gets the
-	// replCtx lifetime binding below. The deferred Shutdown is registered
-	// immediately so no error path between here and that binding can leak a
-	// process; sync.Once makes it safe beside the AfterFunc path.
+	// -plan/-goal reject it at flag validation) or when #352's -allow-tool
+	// named an exec tool — one manager per invocation either way, so every
+	// manager gets the replCtx lifetime binding below. The deferred Shutdown
+	// is registered immediately so no error path between here and that
+	// binding can leak a process; sync.Once makes it safe beside the
+	// AfterFunc path.
+	scratchLine := ""
 	var bgManager *agenttools.BackgroundManager
 	var bgExecTools []agent.Tool
-	if f.allowExec {
+	if buildExec {
 		bgManager = agenttools.NewBackgroundManager()
 		defer func() {
 			bgManager.Shutdown()
@@ -1131,12 +1258,23 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 				hooks.closed("background")
 			}
 		}()
-		et, eerr := buildExecTools(root, bgManager)
+		// Scratch policy (#443): frozen at construction. Scratch is interactive,
+		// so its checkpoint journal exists only when -allow-write built it;
+		// promotion is registered exactly when both consents exist. Without
+		// -allow-write, scratch still captures and queries but promote_artifact
+		// is absent.
+		execOpts, line := scratchExecOptions(f.scratch, journal)
+		scratchLine = line
+		et, eerr := buildExecTools(root, bgManager, execOpts)
 		if eerr != nil {
 			return eerr
 		}
 		bgExecTools = et
-		tools = append(tools, et...)
+		if f.allowExec {
+			tools = append(tools, et...)
+		} else {
+			tools = append(tools, filterAllowedTools(et, allowTools)...)
+		}
 	}
 
 	delegateLine := ""
@@ -1152,10 +1290,8 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 	var mcpManager *mcpclient.Manager
 	mcpAttached := false
 	mcpLine := ""
-	if servers, perr := parseMCPServers(f.mcpStdio, f.mcpHTTP); perr != nil {
-		return perr // fatal: bad flag config / explicit duplicate alias
-	} else if len(servers) > 0 {
-		mgr, mcpWarns, cerr := mcpclient.Connect(ctx, mcpClientImpl(), servers)
+	if len(mcpServers) > 0 {
+		mgr, mcpWarns, cerr := mcpclient.Connect(ctx, mcpClientImpl(), mcpServers)
 		if cerr != nil {
 			return cerr // fatal: invalid / duplicate alias
 		}
@@ -1169,7 +1305,7 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 		// Positive confirmation so a silently-failed server attach is visible:
 		// attached-tool count against the configured-server count (failures and
 		// skipped tools appear as the "mcp: ..." warnings above).
-		mcpLine = fmt.Sprintf("mcp: attached %d tool(s) from %d configured server(s)", len(mcpTools), len(servers))
+		mcpLine = fmt.Sprintf("mcp: attached %d tool(s) from %d configured server(s)", len(mcpTools), len(mcpServers))
 	}
 	defer func() {
 		if mcpManager != nil {
@@ -1177,8 +1313,22 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 		}
 	}()
 
-	baseSystem := buildSystemPrompt(f.allowWrite, f.allowExec)
-	baseSystem += delegateSystemFragment(f.delegate, f.allowWrite)
+	var baseSystem string
+	if !allowTools.empty() {
+		// #352/F6: a selectively mounted run gets a prompt built from the
+		// EXACT mounted set; the group prompt would advertise tools that do
+		// not exist and an interactive approval flow that never happens.
+		baseSystem = golemruntime.SystemPromptHeadless(golemruntime.HeadlessToolCaps{
+			WriteFile:    allowTools.authorized("write_file"),
+			EditFile:     allowTools.authorized("edit_file"),
+			RunCommand:   allowTools.authorized("run_command"),
+			StartCommand: allowTools.authorized("start_command"),
+			StopCommand:  allowTools.authorized("stop_command"),
+		})
+	} else {
+		baseSystem = buildSystemPrompt(f.allowWrite, f.allowExec)
+	}
+	baseSystem += delegateSystemFragment(f.delegate, buildWrite)
 	baseSystem += dispatchSystemFragment(f.dispatch)
 	baseSystem += memorySystemFragment(memoryEnabled)
 	projectContextLine := ""
@@ -1248,6 +1398,7 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 		agentMemoryLine:    agentMemoryLine,
 		mcpLine:            mcpLine,
 		delegateLine:       delegateLine,
+		scratchLine:        scratchLine,
 		dispatchLine:       dispatchLine,
 	}) {
 		_, _ = fmt.Fprintln(stderr, line)
@@ -1332,6 +1483,8 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 		bgManager:           bgManager,
 		grants:              newApprovalGrants(),
 		destAdmission:       adm,
+		headlessApprover:    headlessApproverFor(allowTools),
+		machine:             newMachineWriter(stdout, outFormat),
 		allowWrite:          f.allowWrite,
 		allowExec:           f.allowExec,
 		mcpAttached:         mcpAttached,

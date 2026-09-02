@@ -301,6 +301,19 @@ func parseSelector(sel string) (provider.ModelKey, bool) {
 	return provider.ModelKey{Provider: pname, Model: model}, true
 }
 
+// preflightCapabilityError marks a deterministic configured capability gap.
+// Provider lookup and active-probe failures deliberately remain ordinary
+// errors so one-shot callers can distinguish bad config from backend failure.
+type preflightCapabilityError struct{ err error }
+
+func (e *preflightCapabilityError) Error() string { return e.err.Error() }
+func (e *preflightCapabilityError) Unwrap() error { return e.err }
+
+func isPreflightCapabilityError(err error) bool {
+	var target *preflightCapabilityError
+	return errors.As(err, &target)
+}
+
 // preflightToolCapable verifies the active chain can route a tool-capable model.
 // For each configured entry it classifies the outcome as capable,
 // not-tool-capable (resolved but lacks tool_call), or lookup-errored
@@ -308,8 +321,10 @@ func parseSelector(sel string) (provider.ModelKey, bool) {
 // non-capable entry, and an error only when NO entry — or, for an empty chain,
 // the recommend set — can satisfy chat|stream|tool_call. On that failure the
 // error INLINES every per-entry diagnostic, because the caller returns on the
-// error and would otherwise drop the warnings. Pure registry lookup unless a
-// resolver is supplied; never makes a live chat call. resolveEndpoint supplies
+// error and would otherwise drop the warnings. A failure made entirely of
+// resolved capability gaps is marked preflightCapabilityError; any lookup or
+// active-probe dependency keeps it an ordinary provider failure. Pure registry
+// lookup unless a resolver is supplied; never makes a live chat call. resolveEndpoint supplies
 // provider base_url + discovery path for connectivity diagnostics; a nil
 // resolver disables active capability probing (a nil endpointResolver yields
 // base_url-free messages).
@@ -324,19 +339,25 @@ func preflightToolCapable(ctx context.Context, reg capChecker, chain []string, u
 	}
 
 	capable := 0
+	providerDependent := false
 	for _, sel := range chain {
 		// Probe only until the first capable entry is proven; later unknowns
 		// are deferred to route time.
 		allowProbe := capable == 0
-		ok, warn := evalChainEntry(ctx, reg, sel, useCase, resolveEndpoint, resolver, allowProbe)
+		ok, warn, dynamic := evalChainEntry(ctx, reg, sel, useCase, resolveEndpoint, resolver, allowProbe)
 		if ok {
 			capable++
 			continue
 		}
+		providerDependent = providerDependent || dynamic
 		warnings = append(warnings, warn)
 	}
 	if capable == 0 {
-		return warnings, fmt.Errorf("golem: tool-capability preflight failed:\n%s", strings.Join(warnings, "\n"))
+		err := fmt.Errorf("golem: tool-capability preflight failed:\n%s", strings.Join(warnings, "\n"))
+		if !providerDependent {
+			err = &preflightCapabilityError{err: err}
+		}
+		return warnings, err
 	}
 	return warnings, nil
 }
@@ -354,7 +375,7 @@ func preflightRecommendToolCapable(ctx context.Context, reg capChecker, resolver
 			return nil, fmt.Errorf("golem: tool-capability preflight (recommend): %w", rerr)
 		}
 		if len(profs) == 0 {
-			return nil, fmt.Errorf("golem: no tool-capable model available (require chat|stream|tool_call)")
+			return nil, &preflightCapabilityError{err: fmt.Errorf("golem: no tool-capable model available (require chat|stream|tool_call)")}
 		}
 		return nil, nil
 	}
@@ -385,15 +406,15 @@ func preflightRecommendToolCapable(ctx context.Context, reg capChecker, resolver
 // errored, or a capability message (possibly a probe outcome) when the model
 // resolved without a declared tool_call. allowProbe gates active probing per the
 // bounded-eager policy.
-func evalChainEntry(ctx context.Context, reg capChecker, sel, useCase string, resolveEndpoint endpointResolver, resolver toolCallResolver, allowProbe bool) (capable bool, warning string) {
+func evalChainEntry(ctx context.Context, reg capChecker, sel, useCase string, resolveEndpoint endpointResolver, resolver toolCallResolver, allowProbe bool) (capable bool, warning string, providerDependent bool) {
 	if key, parsed := parseSelector(sel); parsed {
 		p, lerr := reg.Lookup(ctx, key)
 		if lerr != nil {
 			ep, epOK := resolvePreflightEndpoint(resolveEndpoint, key.Provider)
-			return false, preflightConnectivityWarn(useCase, sel, key.Provider, ep, epOK, lerr)
+			return false, preflightConnectivityWarn(useCase, sel, key.Provider, ep, epOK, lerr), true
 		}
 		if profileToolCapable(p) {
-			return true, ""
+			return true, "", false
 		}
 		return classifyToolCapability(ctx, sel, useCase, key, resolver, allowProbe)
 	}
@@ -403,31 +424,32 @@ func evalChainEntry(ctx context.Context, reg capChecker, sel, useCase string, re
 	// builder's no-endpoint branch (epOK=false) so the message has one source.
 	profs, lerr := reg.LookupAny(ctx, sel)
 	if lerr != nil {
-		return false, preflightConnectivityWarn(useCase, sel, "", preflightEndpoint{}, false, lerr)
+		return false, preflightConnectivityWarn(useCase, sel, "", preflightEndpoint{}, false, lerr), true
 	}
 	for _, p := range profs {
 		if profileToolCapable(p) {
-			return true, ""
+			return true, "", false
 		}
 	}
 	if len(profs) == 0 {
 		// No matching provider: nothing to probe, and no single provider to name.
-		return false, notToolCapableWarn(useCase, sel)
+		return false, notToolCapableWarn(useCase, sel), false
 	}
 	warning = notToolCapableWarn(useCase, sel)
 	for _, p := range profs {
 		if p == nil {
 			continue
 		}
-		capable, w := classifyToolCapability(ctx, sel, useCase, p.Key, resolver, allowProbe)
+		capable, w, dynamic := classifyToolCapability(ctx, sel, useCase, p.Key, resolver, allowProbe)
 		if capable {
-			return true, ""
+			return true, "", false
 		}
+		providerDependent = providerDependent || dynamic
 		if w != "" {
 			warning = w
 		}
 	}
-	return false, warning
+	return false, warning, providerDependent
 }
 
 // classifyToolCapability resolves a chain entry that looked up cleanly but does
@@ -435,24 +457,24 @@ func evalChainEntry(ctx context.Context, reg capChecker, sel, useCase string, re
 // this entry (bounded-eager: a capable entry already found), it reports a
 // non-fatal / capability-gap message rather than making a call. Otherwise it
 // probes and maps the tri-state verdict to a capable flag + diagnostic.
-func classifyToolCapability(ctx context.Context, sel, useCase string, key provider.ModelKey, resolver toolCallResolver, allowProbe bool) (bool, string) {
+func classifyToolCapability(ctx context.Context, sel, useCase string, key provider.ModelKey, resolver toolCallResolver, allowProbe bool) (bool, string, bool) {
 	if resolver == nil {
-		return false, notToolCapableWarn(useCase, sel)
+		return false, notToolCapableWarn(useCase, sel), false
 	}
 	if !allowProbe {
-		return false, fmt.Sprintf("%s %q: tool capability unknown; probed on first use", fallbackLabel(useCase), sel)
+		return false, fmt.Sprintf("%s %q: tool capability unknown; probed on first use", fallbackLabel(useCase), sel), false
 	}
 	state, err := resolver.ResolveToolCall(ctx, key)
 	switch {
 	case err != nil:
-		return false, fmt.Sprintf("%s %q: tool-capability probe failed: %v; %s", fallbackLabel(useCase), sel, err, remediationHint(sel))
+		return false, fmt.Sprintf("%s %q: tool-capability probe failed: %v; %s", fallbackLabel(useCase), sel, err, remediationHint(sel)), true
 	case state == fingerprint.CapProbeYes:
-		return true, ""
+		return true, "", true
 	case state == fingerprint.CapProbeNo:
-		return false, fmt.Sprintf("%s %q: model did not produce a tool call when probed; %s", fallbackLabel(useCase), sel, remediationHint(sel))
+		return false, fmt.Sprintf("%s %q: model did not produce a tool call when probed; %s", fallbackLabel(useCase), sel, remediationHint(sel)), true
 	case state == fingerprint.CapProbeInconclusive:
-		return false, fmt.Sprintf("%s %q: tool-capability probe was inconclusive; declare capabilities to override: %s", fallbackLabel(useCase), sel, remediationHint(sel))
+		return false, fmt.Sprintf("%s %q: tool-capability probe was inconclusive; declare capabilities to override: %s", fallbackLabel(useCase), sel, remediationHint(sel)), true
 	default: // "" unknown: resolution disabled for this provider (no prober/store)
-		return false, notToolCapableWarn(useCase, sel)
+		return false, notToolCapableWarn(useCase, sel), true
 	}
 }

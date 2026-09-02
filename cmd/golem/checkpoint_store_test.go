@@ -173,7 +173,7 @@ func TestCheckpointStoreRejectsDBInsideWorkspace(t *testing.T) {
 	}
 }
 
-func TestCheckpointStoreMigratesToV1(t *testing.T) {
+func TestCheckpointStoreMigratesToCurrent(t *testing.T) {
 	root := t.TempDir()
 	s := openTestStore(t, root)
 	ctx := context.Background()
@@ -181,8 +181,8 @@ func TestCheckpointStoreMigratesToV1(t *testing.T) {
 	if err := s.db.QueryRowContext(ctx, "PRAGMA user_version").Scan(&version); err != nil {
 		t.Fatalf("user_version: %v", err)
 	}
-	if version != 1 {
-		t.Fatalf("user_version = %d, want 1", version)
+	if version != checkpointSchemaVersion {
+		t.Fatalf("user_version = %d, want %d", version, checkpointSchemaVersion)
 	}
 	for _, table := range []string{"checkpoints", "checkpoint_files"} {
 		var n int
@@ -774,5 +774,148 @@ func TestCheckpointStoreLoadsAppliedRowsNewestFirst(t *testing.T) {
 	if string(f.priorContent) != "A0" || !f.existed || f.afterHash != "after-a.go" ||
 		f.priorHash != agenttools.ContentHash([]byte("A0")) || !f.applied || f.restored {
 		t.Fatalf("file = %+v", f)
+	}
+}
+
+// --- #443 Task 8: schema v2 (nullable after_mode) ---
+
+func TestCheckpointStoreSchemaV2TrackedModeRoundTrip(t *testing.T) {
+	s := openTestStore(t, t.TempDir())
+	ctx := context.Background()
+	var version int
+	if err := s.db.QueryRowContext(ctx, "PRAGMA user_version").Scan(&version); err != nil {
+		t.Fatal(err)
+	}
+	if version != 2 {
+		t.Fatalf("fresh store version = %d, want 2", version)
+	}
+	cpID, _, err := s.prepareIntent(ctx, "goal", time.Now(), agenttools.MutationRecord{
+		Path: "promoted.txt", AfterHash: "abc", TrackedMode: true, AfterMode: 0o640, At: time.Now(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := s.prepareIntent(ctx, "goal", time.Now(), agenttools.MutationRecord{
+		Path: "legacy.txt", AfterHash: "def", At: time.Now(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	files, err := s.loadFiles(ctx, cpID, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	byPath := map[string]checkpointFile{}
+	for _, f := range files {
+		byPath[f.path] = f
+	}
+	tracked := byPath["promoted.txt"]
+	if !tracked.trackedMode || tracked.afterMode != 0o640 {
+		t.Fatalf("tracked row lost its mode: %+v", tracked)
+	}
+	legacy := byPath["legacy.txt"]
+	if legacy.trackedMode || legacy.afterMode != 0 {
+		t.Fatalf("legacy row must stay untracked: %+v", legacy)
+	}
+}
+
+// buildV1CheckpointDB creates a version-1 database with one applied legacy
+// row, exactly as a pre-#443 binary would have left it.
+func buildV1CheckpointDB(t *testing.T, getenv func(string) string, root string) string {
+	t.Helper()
+	path, err := checkpointDBPath(getenv, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	db, err := memory.OpenHardenedDB(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stmts := []string{
+		`CREATE TABLE checkpoints (
+			id INTEGER PRIMARY KEY AUTOINCREMENT, created_at TEXT NOT NULL,
+			goal TEXT NOT NULL, state TEXT NOT NULL CHECK (state IN ('open','completed','undoing')))`,
+		`CREATE UNIQUE INDEX checkpoints_one_open ON checkpoints(state) WHERE state = 'open'`,
+		`CREATE INDEX checkpoints_state_id ON checkpoints(state, id DESC)`,
+		`CREATE TABLE checkpoint_files (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			checkpoint_id INTEGER NOT NULL REFERENCES checkpoints(id) ON DELETE CASCADE,
+			path TEXT NOT NULL, prior_content BLOB, prior_hash TEXT NOT NULL,
+			existed INTEGER NOT NULL CHECK (existed IN (0,1)), after_hash TEXT NOT NULL,
+			summary TEXT NOT NULL, at TEXT NOT NULL,
+			applied INTEGER NOT NULL DEFAULT 0 CHECK (applied IN (0,1)),
+			restored INTEGER NOT NULL DEFAULT 0 CHECK (restored IN (0,1)),
+			CHECK (restored = 0 OR applied = 1))`,
+		`CREATE INDEX checkpoint_files_checkpoint ON checkpoint_files(checkpoint_id, id DESC)`,
+		`INSERT INTO checkpoints (created_at, goal, state) VALUES ('2026-01-01T00:00:00Z', 'old goal', 'completed')`,
+		`INSERT INTO checkpoint_files
+			(checkpoint_id, path, prior_content, prior_hash, existed, after_hash, summary, at, applied)
+			VALUES (1, 'old.txt', X'6f6c64', 'ph', 1, 'ah', 's', '2026-01-01T00:00:00Z', 1)`,
+		`PRAGMA user_version = 1`,
+	}
+	for _, stmt := range stmts {
+		if _, err := db.ExecContext(ctx, stmt); err != nil {
+			t.Fatalf("v1 fixture %q: %v", stmt[:30], err)
+		}
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func TestCheckpointStoreV1MigratesTransactionally(t *testing.T) {
+	root := t.TempDir()
+	getenv := testGetenv(t.TempDir())
+	buildV1CheckpointDB(t, getenv, root)
+	s, err := openCheckpointStore(context.Background(), getenv, root)
+	if err != nil {
+		t.Fatalf("v1 -> v2 migration failed: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	ctx := context.Background()
+	var version int
+	if err := s.db.QueryRowContext(ctx, "PRAGMA user_version").Scan(&version); err != nil {
+		t.Fatal(err)
+	}
+	if version != 2 {
+		t.Fatalf("migrated version = %d, want 2", version)
+	}
+	files, err := s.loadFiles(ctx, 1, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(files) != 1 {
+		t.Fatalf("migration lost rows: %d", len(files))
+	}
+	f := files[0]
+	if f.path != "old.txt" || string(f.priorContent) != "old" || !f.existed || f.afterHash != "ah" {
+		t.Fatalf("migration mangled the legacy row: %+v", f)
+	}
+	if f.trackedMode || f.afterMode != 0 {
+		t.Fatalf("NULL after_mode must load untracked: %+v", f)
+	}
+}
+
+func TestCheckpointStoreNewerSchemaFailsClosed(t *testing.T) {
+	root := t.TempDir()
+	getenv := testGetenv(t.TempDir())
+	path := buildV1CheckpointDB(t, getenv, root)
+	ctx := context.Background()
+	db, err := memory.OpenHardenedDB(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, "PRAGMA user_version = 3"); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := openCheckpointStore(ctx, getenv, root); err == nil {
+		t.Fatal("a newer schema must fail closed")
 	}
 }

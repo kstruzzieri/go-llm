@@ -961,7 +961,7 @@ func newExecOnlyTestSession(t *testing.T, caller agent.ModelCaller, root string)
 	}
 	bg := tools.NewBackgroundManager()
 	t.Cleanup(bg.Shutdown)
-	execTools, err := buildExecTools(root, bg)
+	execTools, err := buildExecTools(root, bg, tools.ExecToolsOptions{})
 	if err != nil {
 		t.Fatalf("buildExecTools: %v", err)
 	}

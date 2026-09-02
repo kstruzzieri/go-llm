@@ -73,6 +73,53 @@ func NewExecToolsWithBackground(root string, manager *BackgroundManager) ([]agen
 	}, nil
 }
 
+// NewExecToolsWithBackgroundOptions builds the combined foreground plus
+// background exec tool set with the frozen per-factory policy in opts
+// (#443). Zero options delegate to NewExecToolsWithBackground and stay
+// byte-identical; an enabled scratch policy shares ONE runtime across
+// run_command, start_command, and scratch_changes. The manager's resolved
+// backend stays the sole sandbox source of truth; no scratch policy lives
+// on the manager.
+func NewExecToolsWithBackgroundOptions(root string, manager *BackgroundManager, opts ExecToolsOptions) ([]agent.Tool, error) {
+	if _, err := normalizeScratchConfig(opts.Scratch); err != nil {
+		return nil, err
+	}
+	if !opts.Scratch.Enabled {
+		if opts.PromotionJournal != nil {
+			return nil, fmt.Errorf("tools: promotion journal requires an enabled scratch config")
+		}
+		return NewExecToolsWithBackground(root, manager)
+	}
+	if manager == nil || manager.backend.execBackend == nil {
+		return nil, fmt.Errorf("tools: build exec tools: background manager must have a resolved backend")
+	}
+	ws, err := NewWorkspace(root)
+	if err != nil {
+		return nil, fmt.Errorf("tools: build exec tools: %w", err)
+	}
+	rt, err := newScratchRuntime(root, opts.Scratch, opts.PromotionJournal)
+	if err != nil {
+		return nil, err
+	}
+	rc := NewRunCommand(ws, manager.backend)
+	rc.sandbox = manager.backend.approval
+	rc.scratchRT = rt
+	sc := NewStartCommand(ws, manager)
+	sc.scratchRT = rt
+	tools := []agent.Tool{
+		rc,
+		sc,
+		NewCommandStatus(manager),
+		NewCommandTail(manager),
+		NewStopCommand(manager),
+		ScratchChanges{rt: rt},
+	}
+	if opts.PromotionJournal != nil {
+		tools = append(tools, NewPromoteArtifact(ws, rt))
+	}
+	return tools, nil
+}
+
 // bgCwdDisplay maps a workspace-relative dir label to the display string
 // stored on the job (and later rendered %q-quoted by command_status), matching
 // the preview convention and never disclosing the host's absolute root.
@@ -91,6 +138,9 @@ func bgCwdDisplay(label string) string {
 type StartCommand struct {
 	ws      *Workspace
 	manager *BackgroundManager
+	// scratchRT is the shared scratch engine (#443); nil = scratch disabled
+	// and behavior is byte-identical to pre-#443.
+	scratchRT *scratchRuntime
 	execPlanCache
 }
 
@@ -152,11 +202,24 @@ func (t *StartCommand) Plan(_ context.Context, raw json.RawMessage) (agent.ToolP
 	// The manager is the source of truth for sandbox identity on EVERY
 	// construction path, including direct NewStartCommand callers.
 	p.sandbox = t.manager.backend.approval
+	if t.scratchRT != nil {
+		p.scratch = t.scratchRT.approval
+	}
 	t.store(ContentHash(raw), p)
+	if t.scratchRT != nil {
+		// Outer budget: setup + admission/publication + capture allowance +
+		// grace (D6). A successful publication returns long before capture,
+		// which a spawned-but-unpublished reap may spend synchronously.
+		outer, err := scratchOuterTimeout(t.scratchRT.cfg, bgToolTimeout)
+		if err != nil {
+			return agent.ToolPlan{Effect: eff}, err
+		}
+		eff.Timeout = outer
+	}
 	return agent.ToolPlan{
 		Effect:      eff,
 		Preview:     renderStartPreview(p, args.Argv[0]),
-		ApprovalKey: bgExecApprovalKeyPrefix + p.sandbox.keyComponent + p.fingerprint,
+		ApprovalKey: bgExecApprovalKeyPrefix + p.scratch.keyComponent + p.sandbox.keyComponent + p.fingerprint,
 	}, nil
 }
 
@@ -172,6 +235,9 @@ func (t *StartCommand) Invoke(ctx context.Context, raw json.RawMessage) (agent.T
 	if err != nil {
 		return errResult(err.Error()), nil
 	}
+	if t.scratchRT != nil {
+		return t.invokeScratched(ctx, pp, spec)
+	}
 	st, err := t.manager.start(ctx, spec, bgCwdDisplay(pp.dirLabel))
 	if err != nil {
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
@@ -180,6 +246,38 @@ func (t *StartCommand) Invoke(ctx context.Context, raw json.RawMessage) (agent.T
 		return errResult(err.Error()), nil
 	}
 	return agent.ToolResult{Content: renderStartResult(st)}, nil
+}
+
+// invokeScratched starts one approved command inside a scratch session
+// (#443). StartCommand owns the session until manager start returns
+// success; on EVERY error path it discards — and when the manager's
+// abandoned-start reap already ran the wrapper's capture, discard deletes
+// that unreachable outcome. On success the scratchProcess Wait wrapper owns
+// capture and cleanup for the manager-owned lifetime.
+func (t *StartCommand) invokeScratched(ctx context.Context, pp execPending, spec execSpec) (agent.ToolResult, error) {
+	setupCtx, cancelSetup := context.WithTimeout(ctx, t.scratchRT.cfg.SnapshotTimeout)
+	session, rewritten, err := beginScratchSession(setupCtx, t.scratchRT, spec)
+	cancelSetup()
+	if err != nil {
+		return errResult("scratch snapshot failed; command not started: " + err.Error()), nil
+	}
+	// Admission/publication gets a fresh bgToolTimeout child so a slow
+	// snapshot cannot eat it (D6).
+	admitCtx, cancelAdmit := context.WithTimeout(ctx, bgToolTimeout)
+	st, err := t.manager.startWrapped(admitCtx, rewritten, bgCwdDisplay(pp.dirLabel), func(bp backgroundProcess) backgroundProcess {
+		return &scratchProcess{backgroundProcess: bp, session: session}
+	})
+	cancelAdmit()
+	if err != nil {
+		session.discard()
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return errResult("start canceled"), nil
+		}
+		return errResult(err.Error()), nil
+	}
+	return agent.ToolResult{
+		Content: renderScratchResultLine(t.scratchRT, session.id) + renderStartResult(st),
+	}, nil
 }
 
 // renderStartPreview is the human approval preview for start_command — kept
@@ -204,6 +302,9 @@ func renderStartPreview(p execPending, originalArgv0 string) string {
 	fmt.Fprintf(&b, "  env:      %s\n", strings.Join(parts, ", "))
 	if p.sandbox.preview != "" {
 		fmt.Fprintf(&b, "  sandbox:  %s\n", p.sandbox.preview)
+	}
+	if p.scratch.preview != "" {
+		fmt.Fprintf(&b, "  scratch:  %s\n", p.scratch.preview)
 	}
 	id := p.fingerprint
 	if len(id) > fingerprintLen {

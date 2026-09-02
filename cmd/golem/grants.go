@@ -15,7 +15,10 @@ const (
 // grantScope maps a tool name to its grant scope. Everything not listed is
 // ungrantable (""). start_command (#346) shares the exec scope safely: its
 // exec-bg:v2: key prefix partitions the grant space from run_command's
-// exec:v3:, so a foreground grant can never authorize a background start.
+// exec:v3: (#442 bound the workspace root; #443 inserts a scr: component
+// when scratch is enabled), so a foreground grant can never authorize a
+// background start. promote_artifact (#443) emits an empty key and stays
+// ungrantable by construction.
 // stop_command stays OFF the allowlist by frozen contract (every stop
 // prompts); command_status/command_tail never prompt, so they need no scope.
 func grantScope(toolName string) string {
