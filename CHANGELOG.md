@@ -23,9 +23,11 @@ tool-name set and the machine output shapes below are public contract.
   A protocol event carries `protocol` and never `schema`; the record carries
   `schema` and never `protocol`, and the record completes the stream. Diagnostics stay on
   stderr in every format, and `text` is byte-identical to before. Early flag,
-  prompt, and configuration-validation errors leave stdout empty and exit 2;
-  the record guarantees begin after those checks. Both shapes are frozen by
-  golden fixtures. Protocol v1 reports execution progress only —
+  argument, prompt, and configuration parse/validation errors leave stdout
+  empty and exit 2. Among pre-run failures, exactly `destination_denied`
+  (exit 2) and `provider_unavailable` (exit 1) emit a result record; all other
+  pre-run failures leave stdout empty. Both shapes are frozen by golden
+  fixtures. Protocol v1 reports execution progress only —
   a tool call rejected before invocation emits no event; denial observability
   is follow-up work.
 - `golem -allow-tool NAME` (repeatable) mounts and non-interactively approves

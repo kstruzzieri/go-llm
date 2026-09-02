@@ -199,8 +199,8 @@ func TestDelegateSystemFragment(t *testing.T) {
 		t.Fatal("fragment must be empty when delegation disabled, regardless of allowWrite")
 	}
 	withWrite := delegateSystemFragment(true, true)
-	if !strings.Contains(withWrite, "delegate_code") || !strings.Contains(withWrite, "write_file") {
-		t.Fatalf("write-enabled fragment should mention delegate_code and write_file: %q", withWrite)
+	if !strings.Contains(withWrite, "delegate_code") || !strings.Contains(withWrite, "write it") {
+		t.Fatalf("write-enabled fragment should describe applying delegated code: %q", withWrite)
 	}
 	noWrite := delegateSystemFragment(true, false)
 	if !strings.Contains(noWrite, "delegate_code") {

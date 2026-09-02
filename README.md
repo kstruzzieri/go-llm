@@ -367,10 +367,11 @@ git diff | golem -p - -output-format json
 ```
 
 **Machine-readable output.** `-output-format` selects what stdout carries. It
-requires `-p`; stderr is unchanged in every format. Early flag, prompt, and
-configuration-validation errors write a diagnostic to stderr, leave stdout
-empty, and exit 2; the result-record guarantees below apply once those checks
-succeed.
+requires `-p`; stderr is unchanged in every format. Early flag, argument,
+prompt, and configuration parse/validation errors write a diagnostic to stderr,
+leave stdout empty, and exit 2. Among pre-run failures, exactly
+`destination_denied` (exit 2) and `provider_unavailable` (exit 1) emit a
+`golem.result.v1` record; all other pre-run failures leave stdout empty.
 
 | value | stdout |
 |---|---|

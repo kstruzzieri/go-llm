@@ -69,15 +69,14 @@ func buildDelegateTool(router *provider.Router, role string, chain []string, str
 // delegateSystemFragment is appended to the system prompt only when delegation
 // is enabled. Empty otherwise so default runs are byte-for-byte unchanged. The
 // wording is write-aware: it only instructs the model to persist the result
-// with write_file/edit_file when those tools are actually registered
-// (-allow-write); otherwise it frames the output as review-and-present, so the
-// prompt never tells the model to call a tool that isn't available.
-func delegateSystemFragment(enabled, allowWrite bool) string {
+// when a file-mutation tool is registered. Exact tool names stay in the base
+// prompt so a selective headless run never advertises an unmounted sibling.
+func delegateSystemFragment(enabled, writeEnabled bool) string {
 	if !enabled {
 		return ""
 	}
-	if allowWrite {
-		return " For a well-scoped, self-contained code-generation sub-task you may call delegate_code with a precise prompt; it returns generated code from a specialist model. The result is a proposal: review it, then write it with write_file or edit_file. Use delegate_code for bulk generation, never for planning or decisions, and stay responsible for what you apply."
+	if writeEnabled {
+		return " For a well-scoped, self-contained code-generation sub-task you may call delegate_code with a precise prompt; it returns generated code from a specialist model. The result is a proposal: review it, then write it using the available file-mutation tool. Use delegate_code for bulk generation, never for planning or decisions, and stay responsible for what you apply."
 	}
 	return " For a well-scoped, self-contained code-generation sub-task you may call delegate_code with a precise prompt; it returns generated code from a specialist model for you to review and present to the user. Use delegate_code for bulk generation, never for planning or decisions."
 }

@@ -1114,7 +1114,11 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 			dwarns, perr := preflightToolCapable(ctx, bundle.Models, dchain, dispatchUseCase, resolveEndpoint, resolver)
 			warns = append(warns, dwarns...)
 			if perr != nil {
-				return maybeUsageError(perr, headlessExitApplies(f) && isPreflightCapabilityError(perr))
+				if isPreflightCapabilityError(perr) {
+					return maybeUsageError(perr, headlessExitApplies(f))
+				}
+				reportPreRunFailure(stdout, outFormat, resultCodeProviderPreRun, perr)
+				return perr
 			}
 			// Same constant the dispatch caller below routes with, so the
 			// child's ceiling and the child's route can never disagree.
@@ -1303,7 +1307,7 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 	} else {
 		baseSystem = buildSystemPrompt(f.allowWrite, f.allowExec)
 	}
-	baseSystem += delegateSystemFragment(f.delegate, f.allowWrite)
+	baseSystem += delegateSystemFragment(f.delegate, buildWrite)
 	baseSystem += dispatchSystemFragment(f.dispatch)
 	baseSystem += memorySystemFragment(memoryEnabled)
 	projectContextLine := ""

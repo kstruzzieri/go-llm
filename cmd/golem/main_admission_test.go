@@ -732,3 +732,30 @@ func TestRunAllowToolWiresHeadlessPromptAndApprover(t *testing.T) {
 		t.Fatalf("run = %v, want the harness stop sentinel", err)
 	}
 }
+
+func TestRunAllowToolWriteAlignsDelegatePrompt(t *testing.T) {
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	configPath, root, _ := admissionHarness(t, "https://opencode.invalid/zen/go")
+	stdin, stdout, stderr := runTestFiles(t)
+
+	errStop := errors.New("stop after startup")
+	args := append(admissionArgs(configPath, root),
+		"-delegate", "-delegate-role", "agent", "-allow-tool", "write_file")
+	err := run(args, stdin, stdout, stderr, runHooks{
+		afterSessionReady: func(sess *replSession) error {
+			if !strings.Contains(sess.baseSystem, "review it, then write it") {
+				t.Errorf("delegate prompt must instruct use of the mounted write tool:\n%s", sess.baseSystem)
+			}
+			if strings.Contains(sess.baseSystem, "present to the user") {
+				t.Errorf("delegate prompt must not claim the result can only be presented:\n%s", sess.baseSystem)
+			}
+			if !strings.Contains(sess.baseSystem, "write_file") || strings.Contains(sess.baseSystem, "edit_file") {
+				t.Errorf("delegate prompt must preserve the exact mounted write-tool set:\n%s", sess.baseSystem)
+			}
+			return errStop
+		},
+	})
+	if !errors.Is(err, errStop) {
+		t.Fatalf("run = %v, want the harness stop sentinel", err)
+	}
+}

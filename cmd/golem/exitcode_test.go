@@ -275,3 +275,54 @@ func TestExitOneWhenPreRunProviderProbeFails(t *testing.T) {
 		t.Errorf("record error = %s, want provider_unavailable", m["error"])
 	}
 }
+
+// An explicit dispatch route has its own capability preflight. A backend
+// failure there is still a provider failure, so machine mode must receive the
+// same single provider_unavailable result as a failure on the primary route.
+func TestDispatchPreflightProviderFailureWritesResultAndExitsOne(t *testing.T) {
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/models":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"data":[{"id":"agent-model"},{"id":"dispatch-model"}]}`))
+		case "/v1/chat/completions":
+			http.Error(w, "backend unavailable", http.StatusServiceUnavailable)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(server.Close)
+
+	root := t.TempDir()
+	configPath := filepath.Join(t.TempDir(), "models.json")
+	configJSON := `{
+  "providers": {"local": {"base_url": "` + server.URL + `", "api_format": "openai-compat", "timeout": "1s"}},
+  "models": {
+    "agent": {"name": "agent-model", "provider": "local", "type": "dense", "context_window": 32768,
+      "capabilities": ["chat", "generate", "stream", "tool_call"]},
+    "analysis": {"name": "dispatch-model", "provider": "local", "type": "dense", "context_window": 32768}
+  },
+  "defaults": {"agent": "agent", "analysis": "analysis"}
+}`
+	if err := os.WriteFile(configPath, []byte(configJSON), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	stdin, stdout, stderr := runTestFiles(t)
+	runErr := run([]string{"-config", configPath, "-root", root, "-p", "say done", "-output-format", "json",
+		"-dispatch", "-dispatch-role", "analysis", "-no-probe", "-no-rag", "-no-project-context", "-no-session", "-no-memory"},
+		stdin, stdout, stderr)
+	if got := exitCodeFor(runErr); got != 1 {
+		t.Fatalf("exit = %d (err %v), want 1", got, runErr)
+	}
+	out := readRunTestFile(t, stdout)
+	lines := strings.Split(strings.TrimSuffix(out, "\n"), "\n")
+	if len(lines) != 1 || strings.TrimSpace(lines[0]) == "" {
+		t.Fatalf("dispatch preflight failure must write exactly one result line:\n%s", out)
+	}
+	m := decodeResult(t, lines[0])
+	var recErr struct{ Code string }
+	if err := json.Unmarshal(m["error"], &recErr); err != nil || recErr.Code != "provider_unavailable" {
+		t.Errorf("record error = %s, want provider_unavailable", m["error"])
+	}
+}
