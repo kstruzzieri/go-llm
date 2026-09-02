@@ -185,3 +185,17 @@ func TestEd25519Redaction(t *testing.T) {
 	assertNoKeyMaterial(t, s, seed, priv)
 	assertNoKeyMaterial(t, s.Verifier(), seed, priv)
 }
+
+func TestEd25519SignerIsNotAVerifier(t *testing.T) {
+	// D6: signing authority must not imply verification authority. A future
+	// Verify method on Ed25519Signer would silently widen every caller that
+	// type-asserts Verifier; pin the absence in both directions.
+	var s any = goldenEd25519(t)
+	if _, ok := s.(Verifier); ok {
+		t.Fatal("Ed25519Signer satisfies Verifier; D6 requires callers to use Verifier() explicitly")
+	}
+	var v any = goldenEd25519(t).Verifier()
+	if _, ok := v.(Signer); ok {
+		t.Fatal("Ed25519Verifier satisfies Signer")
+	}
+}
