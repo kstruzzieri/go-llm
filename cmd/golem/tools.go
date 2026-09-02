@@ -214,12 +214,14 @@ func newDispatchTool(caller agent.ModelCaller, mixed bool, budget agent.Budget, 
 }
 
 // buildExecTools constructs the approval-gated exec tool set — the foreground
-// run_command plus the four background tools (#346) — bound to ONE Workspace
-// over root and one shared manager, so foreground and background preparation
-// see identical containment. Returned only when interactive -allow-exec is set
-// (one-shot drops the flag; -plan/-goal reject it at validation).
-func buildExecTools(root string, manager *agenttools.BackgroundManager) ([]agent.Tool, error) {
-	tools, err := agenttools.NewExecToolsWithBackground(root, manager)
+// run_command plus the four background tools (#346), extended by the scratch
+// tools when opts enables them (#443) — bound to ONE Workspace over root and
+// one shared manager, so foreground and background preparation see identical
+// containment. Zero options reproduce the legacy set byte-for-byte. Built for
+// interactive -allow-exec or when one-shot -allow-tool selects an exec tool;
+// scratch remains interactive-only because one-shot mode clears it.
+func buildExecTools(root string, manager *agenttools.BackgroundManager, opts agenttools.ExecToolsOptions) ([]agent.Tool, error) {
+	tools, err := agenttools.NewExecToolsWithBackgroundOptions(root, manager, opts)
 	if err != nil {
 		return nil, fmt.Errorf("golem: build exec tools: %w", err)
 	}
@@ -448,4 +450,23 @@ func effectClassName(c agent.EffectClass) string {
 		return "none"
 	}
 	return strings.Join(parts, "|")
+}
+
+// scratchExecOptions assembles the frozen scratch policy for buildExecTools
+// (#443) plus the startup notice line. The nil check on the CONCRETE journal
+// type happens here, before it becomes an interface value: a typed-nil
+// PreparingJournal would register a promotion tool whose every write
+// crashes, so promotion exists exactly when -allow-write built a journal.
+func scratchExecOptions(scratch bool, journal *checkpointJournal) (agenttools.ExecToolsOptions, string) {
+	var opts agenttools.ExecToolsOptions
+	if !scratch {
+		return opts, ""
+	}
+	opts.Scratch = agenttools.ScratchConfig{Enabled: true}
+	promote := "promote_artifact disabled (-allow-write off)"
+	if journal != nil {
+		opts.PromotionJournal = journal
+		promote = "promote_artifact prompts per artifact"
+	}
+	return opts, "scratch: commands run in a disposable snapshot with .git omitted (accident isolation on host; enforced under a sandbox runtime); " + promote
 }

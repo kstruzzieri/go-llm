@@ -45,7 +45,9 @@ func (j *mutationJournal) undo(out io.Writer) {
 	}
 	rec := j.recs[len(j.recs)-1] // peek
 
-	cur, err := j.ws.ReadFileForUndo(rec.Path)
+	// Bytes and mode come from ONE open handle so they cannot race apart;
+	// the mode participates only for tracked records (#443 promotion).
+	cur, curMode, err := j.ws.ReadFileWithModeForUndo(rec.Path)
 	curExists := err == nil
 	curHash := ""
 	if err != nil && !os.IsNotExist(err) {
@@ -54,6 +56,12 @@ func (j *mutationJournal) undo(out io.Writer) {
 	}
 	if curExists {
 		curHash = agenttools.ContentHash(cur)
+	}
+	if rec.TrackedMode && curExists && curMode != rec.AfterMode {
+		// A tracked created file whose complete mode drifted — rwx, special
+		// bits, or type — must not be deleted even with identical bytes.
+		_, _ = fmt.Fprintf(out, "cannot undo %s: file changed since golem wrote it\n", rec.Path)
+		return // leave the record on the stack
 	}
 	if !curExists {
 		if !rec.Existed {

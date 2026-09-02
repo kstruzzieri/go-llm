@@ -618,3 +618,23 @@ func (w *Workspace) readAll(p string) ([]byte, error) {
 func (w *Workspace) ReadFileForUndo(p string) ([]byte, error) {
 	return w.readAll(p)
 }
+
+// ReadFileWithModeForUndo is ReadFileForUndo plus the file's complete mode,
+// both taken from ONE open handle so bytes and mode cannot race apart. Undo
+// uses it to verify a tracked created file's mode (#443) before deleting it.
+func (w *Workspace) ReadFileWithModeForUndo(p string) ([]byte, fs.FileMode, error) {
+	f, err := w.openRegularFile(p)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer func() { _ = f.Close() }()
+	fi, err := f.Stat()
+	if err != nil {
+		return nil, 0, err
+	}
+	data, err := io.ReadAll(f)
+	if err != nil {
+		return nil, 0, err
+	}
+	return data, fi.Mode(), nil
+}

@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io/fs"
 	"strings"
 	"sync"
 	"time"
@@ -114,6 +115,35 @@ type MutationRecord struct {
 	AfterHash    string
 	Summary      string
 	At           time.Time
+	// AfterMode, meaningful only when TrackedMode is true, is the exact
+	// permission-bit mode (rwx only; regular-file type implied) the write
+	// left on Path. Scratch promotion (#443) records it so /undo refuses to
+	// delete a promoted create whose mode drifted even with identical bytes.
+	// Only creates may track a mode, and only permission bits;
+	// validateTrackedMode enforces this at the shared journal boundary.
+	// Zero-value records keep the legacy byte-hash-only semantics.
+	AfterMode   fs.FileMode
+	TrackedMode bool
+}
+
+// validateTrackedMode is the common pre-write validation for the optional
+// tracked after-mode. It runs inside runJournaledWrite, the single funnel
+// every journaled mutation (write_file, edit_file, promote_artifact) passes
+// through, so no journal implementation can receive an invalid tracked mode.
+func validateTrackedMode(rec MutationRecord) error {
+	if !rec.TrackedMode {
+		if rec.AfterMode != 0 {
+			return fmt.Errorf("tools: mutation record for %q sets AfterMode without TrackedMode", rec.Path)
+		}
+		return nil
+	}
+	if rec.Existed {
+		return fmt.Errorf("tools: mutation record for %q tracks a mode on a non-create", rec.Path)
+	}
+	if rec.AfterMode&^fs.FileMode(0o777) != 0 {
+		return fmt.Errorf("tools: mutation record for %q tracks mode %v with non-permission bits", rec.Path, rec.AfterMode)
+	}
+	return nil
 }
 
 // Journal receives a record after each successful mutation. Defined here at the
@@ -204,6 +234,9 @@ func record(j Journal, rec MutationRecord) {
 // summary is never reported for a write the journal failed to commit.
 func runJournaledWrite(ctx context.Context, j Journal, rec MutationRecord, write func() error) (toolErr, internalErr error) {
 	if err := ctx.Err(); err != nil {
+		return err, nil
+	}
+	if err := validateTrackedMode(rec); err != nil {
 		return err, nil
 	}
 	var prepared PreparedMutation

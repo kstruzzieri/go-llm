@@ -48,6 +48,7 @@ type flags struct {
 	sessionID           string
 	allowWrite          bool
 	allowExec           bool
+	scratch             bool
 	delegate            bool
 	delegateRole        string
 	dispatch            bool
@@ -117,6 +118,7 @@ func parseFlags(args []string) (flags, error) {
 	fs.BoolVar(&f.fresh, "fresh", false, "start a new persistent session instead of resuming this workspace")
 	fs.BoolVar(&f.allowWrite, "allow-write", false, "enable approval-gated write_file/edit_file tools")
 	fs.BoolVar(&f.allowExec, "allow-exec", false, "enable the approval-gated run_command and background command tools (start/status/tail/stop)")
+	fs.BoolVar(&f.scratch, "scratch", false, "run approved commands in a disposable snapshot of the workspace with .git omitted (requires -allow-exec): accident isolation on the host runtime, an enforced write boundary under a sandbox runtime; artifacts reach the real workspace only via approved promote_artifact (needs -allow-write)")
 	fs.BoolVar(&f.delegate, "delegate", false, "enable the delegate_code tool (route a scoped codegen sub-task to a specialist model)")
 	fs.StringVar(&f.delegateRole, "delegate-role", "coding", "model role the delegate_code tool routes to")
 	fs.BoolVar(&f.dispatch, "dispatch", false, "enable the dispatch tool (bounded read-only exploration tasks use backend-governed concurrency; ungoverned routing stays serial)")
@@ -220,6 +222,9 @@ func autoIndexEnabled(f flags, autoErr, embChainErr error) bool {
 
 // validateFlags rejects flag values flag.Parse cannot police.
 func validateFlags(f flags) error {
+	if f.scratch && !f.allowExec {
+		return fmt.Errorf("golem: -scratch requires -allow-exec")
+	}
 	if f.agentflowStatus && f.agentflowResume {
 		return fmt.Errorf("golem: -agentflow-status and -agentflow-resume are mutually exclusive")
 	}
@@ -470,6 +475,10 @@ func applyOneShotMode(f flags) (flags, []string) {
 		warns = append(warns, "one-shot: -allow-write/-allow-exec ignored (approval prompts need the REPL); write/exec tools unavailable")
 		f.allowWrite = false
 		f.allowExec = false
+		if f.scratch {
+			warns = append(warns, "one-shot: -scratch ignored (it requires interactive -allow-exec)")
+			f.scratch = false
+		}
 	}
 	return f, warns
 }
@@ -494,6 +503,7 @@ type startupInfo struct {
 	agentMemoryLine    string
 	mcpLine            string
 	delegateLine       string
+	scratchLine        string
 	dispatchLine       string
 }
 
@@ -521,6 +531,9 @@ func startupNotices(info startupInfo) []string {
 	}
 	if info.delegateLine != "" {
 		out = append(out, info.delegateLine)
+	}
+	if info.scratchLine != "" {
+		out = append(out, info.scratchLine)
 	}
 	if info.dispatchLine != "" {
 		out = append(out, info.dispatchLine)
@@ -1234,6 +1247,7 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 	// is registered immediately so no error path between here and that
 	// binding can leak a process; sync.Once makes it safe beside the
 	// AfterFunc path.
+	scratchLine := ""
 	var bgManager *agenttools.BackgroundManager
 	var bgExecTools []agent.Tool
 	if buildExec {
@@ -1244,7 +1258,14 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 				hooks.closed("background")
 			}
 		}()
-		et, eerr := buildExecTools(root, bgManager)
+		// Scratch policy (#443): frozen at construction. Scratch is interactive,
+		// so its checkpoint journal exists only when -allow-write built it;
+		// promotion is registered exactly when both consents exist. Without
+		// -allow-write, scratch still captures and queries but promote_artifact
+		// is absent.
+		execOpts, line := scratchExecOptions(f.scratch, journal)
+		scratchLine = line
+		et, eerr := buildExecTools(root, bgManager, execOpts)
 		if eerr != nil {
 			return eerr
 		}
@@ -1377,6 +1398,7 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 		agentMemoryLine:    agentMemoryLine,
 		mcpLine:            mcpLine,
 		delegateLine:       delegateLine,
+		scratchLine:        scratchLine,
 		dispatchLine:       dispatchLine,
 	}) {
 		_, _ = fmt.Fprintln(stderr, line)

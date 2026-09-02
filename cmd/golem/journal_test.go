@@ -150,3 +150,78 @@ func TestUndoCreatedFileRefusesNonRegularReplacement(t *testing.T) {
 		t.Fatalf("record should remain after refusal and later undo should delete file: %v", err)
 	}
 }
+
+// --- #443 Task 8: tracked-mode guard on RAM undo ---
+
+func TestRAMUndoTrackedModeGuard(t *testing.T) {
+	root := t.TempDir()
+	ws, err := agenttools.NewWorkspace(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	j := newMutationJournal(ws)
+	p := filepath.Join(root, "promoted.txt")
+	if err := os.WriteFile(p, []byte("artifact"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	j.Record(agenttools.MutationRecord{
+		Path:        "promoted.txt",
+		Existed:     false,
+		AfterHash:   agenttools.ContentHash([]byte("artifact")),
+		TrackedMode: true,
+		AfterMode:   0o640,
+	})
+
+	// Identical bytes, drifted mode: refuse and retain the record.
+	if err := os.Chmod(p, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	var out strings.Builder
+	j.undo(&out)
+	if !strings.Contains(out.String(), "cannot undo") {
+		t.Fatalf("mode drift with identical bytes must refuse: %q", out.String())
+	}
+	if _, err := os.Lstat(p); err != nil {
+		t.Fatal("refused undo must not delete the file")
+	}
+
+	// Exact bytes and mode: undo deletes the created file.
+	if err := os.Chmod(p, 0o640); err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
+	j.undo(&out)
+	if !strings.Contains(out.String(), "undid promoted.txt") {
+		t.Fatalf("exact mode must permit undo: %q", out.String())
+	}
+	if _, err := os.Lstat(p); !os.IsNotExist(err) {
+		t.Fatalf("undo must delete the created file, err=%v", err)
+	}
+}
+
+func TestRAMUndoLegacyRecordIgnoresMode(t *testing.T) {
+	root := t.TempDir()
+	ws, err := agenttools.NewWorkspace(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	j := newMutationJournal(ws)
+	p := filepath.Join(root, "legacy.txt")
+	if err := os.WriteFile(p, []byte("bytes"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	j.Record(agenttools.MutationRecord{
+		Path:      "legacy.txt",
+		Existed:   false,
+		AfterHash: agenttools.ContentHash([]byte("bytes")),
+	})
+	// Mode drift on a legacy record stays invisible: byte-hash-only.
+	if err := os.Chmod(p, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	var out strings.Builder
+	j.undo(&out)
+	if !strings.Contains(out.String(), "undid legacy.txt") {
+		t.Fatalf("legacy record must keep byte-hash-only semantics: %q", out.String())
+	}
+}
