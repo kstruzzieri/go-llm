@@ -80,6 +80,8 @@
 // Local backends honor an already-cancelled ctx before crypto; SSH-agent and
 // KMS backends land as separate tickets. Exported concrete zero values return
 // ErrUninitializedKey from cryptographic operations rather than panic.
+// Signer and Verifier values are immutable after construction and safe for
+// concurrent use; Keyring is not (populate it before sharing).
 //
 // Cryptographic validity is not authorization. A Keyring proves that one of
 // its members signed the bytes; callers use purpose-scoped rings to decide
