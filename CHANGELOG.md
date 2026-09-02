@@ -6,6 +6,58 @@ All notable changes to `go-llm` are documented here. Downstream consumers
 
 ## [Unreleased]
 
+### Added — golem headless integration surface (#352)
+
+One-shot mode (`-p`) gains a machine surface for scripting consumers. The
+tool-name set and the machine output shapes below are public contract.
+
+- `golem -p -` reads the one-shot prompt from stdin to EOF, bounded at 1 MiB
+  (the same ceiling the runtime already enforces on a turn message); a
+  terminal stdin fails fast with usage guidance.
+- `golem -output-format text|json|stream-json`. `json` emits one
+  `golem.result.v1` record; `stream-json` emits the protocol-v1 events one per
+  line followed by the same record as the final line. Protocol events are
+  never modified; the record is a separate versioned contract carrying the
+  exact `Result.Answer`, a bounded failure code, and the same `-grounding`
+  report object field for field, with no size cap and every key always present.
+  A protocol event carries `protocol` and never `schema`; the record carries
+  `schema` and never `protocol`, and the record completes the stream. Diagnostics stay on
+  stderr in every format, and `text` is byte-identical to before. Early flag,
+  argument, prompt, and configuration parse/validation errors leave stdout
+  empty and exit 2. Among pre-run failures, exactly `destination_denied`
+  (exit 2) and `provider_unavailable` (exit 1) emit a result record; all other
+  pre-run failures leave stdout empty. Both shapes are frozen by golden
+  fixtures. Protocol v1 reports execution progress only —
+  a tool call rejected before invocation emits no event; denial observability
+  is follow-up work.
+- `golem -allow-tool NAME` (repeatable) mounts and non-interactively approves
+  one exact built-in gated tool for a one-shot run: `write_file`, `edit_file`,
+  `run_command`, `start_command`, `stop_command`. Naming `start_command` also
+  mounts its ungated `command_status`/`command_tail` readers (a dependency
+  closure, not an authorization expansion). Authorization is by exact tool
+  name only — previews and approval keys are never parsed — no session grants
+  are created, and MCP tools and `submit_plan` are never eligible. The system
+  prompt for such a run is built from the exact mounted tool set instead of
+  the interactive group prompt, and never describes per-call approval.
+
+### Changed — one-shot exit codes (#352)
+
+- One-shot (`-p`) invocations now exit 2 for caller errors (flag, input,
+  configuration, and destination-admission failures) and 1 for run failures,
+  including a provider failure during startup probing; previously every
+  failure exited 1. Non-`-p` invocations are unchanged, including
+  `-agentflow-status`'s exit 2/3 semantics.
+
+### Amended — #348 grounding delivery mechanism (#352)
+
+- The #348 entry below states that #352 would buffer the terminal protocol
+  event at the CLI adapter and add the grounding object to its protocol-v1
+  payload. That mechanism is superseded: the 128 KiB protocol event cap cannot
+  carry an unbounded report, so the report object is serialized
+  inside the `golem.result.v1` record instead — which keeps the promise's
+  substance (the frozen report shape ships field for field, pinned against
+  the trace by test). `golem/runtime.go` remains unchanged either way.
+
 ### Added — ephemeral scratch workspaces for approved commands (#443, ZT-204)
 
 Approved build/test commands can run against a disposable copy-on-write
@@ -286,7 +338,7 @@ the grounding payload: they are absent from the run's usage footer, from
 `agent.Result`, and from telemetry.
 
 Frozen payload for #352. The report object is fixed by an exact-bytes golden
-test and #352 will serialize it verbatim:
+test and #352 will serialize the same fields:
 
 ```json
 {

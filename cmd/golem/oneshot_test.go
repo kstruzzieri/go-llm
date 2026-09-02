@@ -8,6 +8,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/kstruzzieri/go-llm/agent"
 	"github.com/kstruzzieri/go-llm/provider"
@@ -167,6 +168,139 @@ func TestOneShot_EmptyAnswerIsError(t *testing.T) {
 		if stdout.String() != "" {
 			t.Errorf("content %q: empty answer must write nothing to stdout, got %q", content, stdout.String())
 		}
+	}
+}
+
+// TestOneShot_AllowToolApprovesNamedToolWithoutGrants proves the #352 headless
+// approver end to end: the named tool is actually INVOKED (its output reaches
+// the progress stream), no approval prompt renders, and the session grant
+// store stays empty — headless authorization is per-process, never a grant.
+func TestOneShot_AllowToolApprovesNamedToolWithoutGrants(t *testing.T) {
+	root := t.TempDir()
+	execCall := provider.ChatResponse{
+		ToolCalls: []provider.ToolCall{{
+			ID: "e1", Type: "function",
+			Function: provider.ToolCallFunction{Name: "run_command", Arguments: json.RawMessage(`{"argv":["echo","headless-ran"]}`)},
+		}},
+	}
+	finalAns := provider.ChatResponse{Content: "done running"}
+	caller := &scriptCaller{responses: []agent.ModelResult{{Response: execCall}, {Response: finalAns}}}
+	sess := newExecOnlyTestSession(t, caller, root)
+	set, err := newAllowToolSet([]string{"run_command"})
+	if err != nil {
+		t.Fatalf("newAllowToolSet: %v", err)
+	}
+	sess.headlessApprover = headlessApproverFor(set)
+
+	var stdout, stderr strings.Builder
+	if err := runOneShot(context.Background(), &stdout, &stderr, nil, sess, "run something"); err != nil {
+		t.Fatalf("runOneShot: %v; stderr=%s", err, stderr.String())
+	}
+	if stdout.String() != "done running\n" {
+		t.Errorf("stdout = %q, want the final answer only", stdout.String())
+	}
+	if strings.Contains(stderr.String(), "denied") {
+		t.Errorf("the named tool must be approved, not denied:\n%s", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "headless-ran") {
+		t.Errorf("run_command must actually execute (its output reaches the progress stream):\n%s", stderr.String())
+	}
+	if strings.Contains(stderr.String(), "Run this command?") {
+		t.Error("headless approval must never render a prompt")
+	}
+	if got := sess.grants.count(); got != 0 {
+		t.Errorf("grants.count() = %d, want 0 — headless runs create no session grants", got)
+	}
+}
+
+// TestOneShot_AllowToolStillDeniesUnnamedGatedTool: acceptance criterion 2 —
+// a gated call not explicitly authorized is still denied, even while another
+// gated tool in the same group is authorized.
+func TestOneShot_AllowToolStillDeniesUnnamedGatedTool(t *testing.T) {
+	root := t.TempDir()
+	execCall := provider.ChatResponse{
+		ToolCalls: []provider.ToolCall{{
+			ID: "e1", Type: "function",
+			Function: provider.ToolCallFunction{Name: "run_command", Arguments: json.RawMessage(`{"argv":["echo","must-not-run"]}`)},
+		}},
+	}
+	finalAns := provider.ChatResponse{Content: "ok, skipped"}
+	caller := &scriptCaller{responses: []agent.ModelResult{{Response: execCall}, {Response: finalAns}}}
+	sess := newExecOnlyTestSession(t, caller, root)
+	set, err := newAllowToolSet([]string{"start_command"}) // run_command NOT named
+	if err != nil {
+		t.Fatalf("newAllowToolSet: %v", err)
+	}
+	sess.headlessApprover = headlessApproverFor(set)
+
+	var stdout, stderr strings.Builder
+	if err := runOneShot(context.Background(), &stdout, &stderr, nil, sess, "run something"); err != nil {
+		t.Fatalf("runOneShot: %v", err)
+	}
+	if stdout.String() != "ok, skipped\n" {
+		t.Errorf("stdout = %q, want the final answer only", stdout.String())
+	}
+	if strings.Contains(stderr.String(), "must-not-run") {
+		t.Errorf("the unnamed tool must not execute:\n%s", stderr.String())
+	}
+	if strings.Contains(stderr.String(), "Run this command?") {
+		t.Error("headless denial must never render a prompt")
+	}
+}
+
+// mcpFakeTool is a mutating-class tool with an MCP name: approval-gated by
+// effect, never authorizable by -allow-tool. invoked is the direct-observation
+// seam — a stderr substring cannot prove non-invocation, because the renderer
+// prints previews, not tool Content.
+type mcpFakeTool struct{ invoked *bool }
+
+func (m mcpFakeTool) Spec() agent.ToolSpec {
+	return agent.ToolSpec{Name: "mcp__fake__do", Parameters: json.RawMessage(`{"type":"object"}`)}
+}
+func (m mcpFakeTool) Effect() agent.Effect { return agent.Effect{Class: agent.Exec} }
+func (m mcpFakeTool) Invoke(context.Context, json.RawMessage) (agent.ToolResult, error) {
+	*m.invoked = true
+	return agent.ToolResult{Content: "mcp-tool-ran"}, nil
+}
+
+// TestOneShot_AllowToolStillDeniesMCPTool: the issue's explicit exclusion —
+// MCP tools can never be authorized headlessly, even alongside -allow-tool.
+func TestOneShot_AllowToolStillDeniesMCPTool(t *testing.T) {
+	root := t.TempDir()
+	mcpCall := provider.ChatResponse{
+		ToolCalls: []provider.ToolCall{{
+			ID: "m1", Type: "function",
+			Function: provider.ToolCallFunction{Name: "mcp__fake__do", Arguments: json.RawMessage(`{}`)},
+		}},
+	}
+	finalAns := provider.ChatResponse{Content: "ok, skipped"}
+	caller := &scriptCaller{responses: []agent.ModelResult{{Response: mcpCall}, {Response: finalAns}}}
+	system := buildSystemPrompt(false, false)
+	orch := agent.New(caller, agent.ContextManager{})
+	invoked := false
+	sess := &replSession{
+		orch:       orch,
+		runtime:    newTestRuntime(t, root, system, orch, []agent.Tool{mcpFakeTool{invoked: &invoked}}),
+		baseSystem: system,
+		maxSteps:   16,
+		clock:      func() time.Time { return time.Unix(0, 0) },
+		grants:     newApprovalGrants(),
+	}
+	set, err := newAllowToolSet([]string{"run_command"})
+	if err != nil {
+		t.Fatalf("newAllowToolSet: %v", err)
+	}
+	sess.headlessApprover = headlessApproverFor(set)
+
+	var stdout, stderr strings.Builder
+	if err := runOneShot(context.Background(), &stdout, &stderr, nil, sess, "use the mcp tool"); err != nil {
+		t.Fatalf("runOneShot: %v", err)
+	}
+	if invoked {
+		t.Error("the MCP tool must not be invoked under -allow-tool")
+	}
+	if stdout.String() != "ok, skipped\n" {
+		t.Errorf("stdout = %q, want the final answer only", stdout.String())
 	}
 }
 

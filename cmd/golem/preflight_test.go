@@ -208,6 +208,9 @@ func TestPreflight_LookupErrorIsConnectivity(t *testing.T) {
 	if err == nil {
 		t.Fatal("err = nil, want failure")
 	}
+	if isPreflightCapabilityError(err) {
+		t.Fatal("provider lookup failure must not be classified as caller config")
+	}
 	if len(warns) != 1 {
 		t.Fatalf("warnings = %v, want 1", warns)
 	}
@@ -582,6 +585,9 @@ func TestPreflight_ProbeErrorNonFatalButNotCapable(t *testing.T) {
 	warns, err := preflightToolCapable(context.Background(), reg, []string{"ollama/a"}, "agent", noEndpoints, res)
 	if err == nil {
 		t.Fatal("err = nil, want failure (only entry probed with error, not capable)")
+	}
+	if isPreflightCapabilityError(err) {
+		t.Fatal("active probe failure must not be classified as caller config")
 	}
 	if len(res.calls) != 1 || res.calls[0] != a {
 		t.Fatalf("resolver calls = %v, want probe of A", res.calls)
