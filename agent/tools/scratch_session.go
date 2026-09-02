@@ -399,29 +399,6 @@ func removeScratchContents(ctx context.Context, root *os.Root) error {
 	}
 }
 
-// forcedRemoveAll removes a session-private tree even when the snapshot
-// faithfully cloned read-only directories (os.RemoveAll cannot unlink their
-// children). The tree belongs to this session alone, so forcing directories
-// writable is safe; without it every run against a workspace containing a
-// 0555 directory would leak both scratch roots — with a workspace copy
-// inside — to the temp base.
-func forcedRemoveAll(path string) error {
-	err := os.RemoveAll(path)
-	if err == nil {
-		return nil
-	}
-	_ = filepath.WalkDir(path, func(p string, d fs.DirEntry, werr error) error {
-		if werr != nil {
-			return nil // keep walking what we can
-		}
-		if d.IsDir() {
-			_ = os.Chmod(p, 0o700)
-		}
-		return nil
-	})
-	return os.RemoveAll(path)
-}
-
 // scratchProcess decorates a background process so Wait owns the session's
 // capture and cleanup (the seatbeltProcess pattern): it runs before reap
 // publishes exit state and before job.done closes. A bounded cleanup failure
