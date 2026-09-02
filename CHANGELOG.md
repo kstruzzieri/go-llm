@@ -6,6 +6,33 @@ All notable changes to `go-llm` are documented here. Downstream consumers
 
 ## [Unreleased]
 
+### Added — `signing` package: AgentSigner interface and key management (#444)
+
+New top-level `signing/` package, the ZT-301 seam the Phase 4 ledgers build
+on (#445 receipts, #446 memory provenance, #447 `golem audit`, #450 delegate
+proposals). No new module dependency and no consumer wiring in this change.
+
+- Sibling least-authority `Signer`/`Verifier` interfaces over
+  `(ctx, domain, payload)`; every
+  backend signs a length-prefixed frame `"go-llm-signing-v1\0" ||
+  len(domain) || domain || payload`, so a signature over one record kind
+  never verifies as another. Empty domain is rejected.
+- `Canonicalize` / `MarshalCanonical`: canonical form v1 (sorted keys,
+  compact, verbatim numbers, HTML escaping off), rejecting invalid UTF-8,
+  unpaired surrogate escapes, duplicate keys, and trailing data, including
+  invalid Go strings before encoding replacement. Not RFC 8785; divergences
+  documented and golden-pinned.
+- Backends: `Ed25519Signer`/`Ed25519Verifier` and `HMACSigner`
+  (HMAC-SHA256, `hmac.Equal` only, pinned by a source-level gate). Signature
+  JSON shape `{"alg","kid","sig"}` is public contract. Concrete zero values
+  fail closed with `ErrUninitializedKey`.
+- Algorithm-bound key IDs and purpose-scoped `Keyring` verification support
+  rotation. `LoadOrCreateEd25519` (PKCS#8 PEM) and `LoadOrCreateHMAC`
+  (typed HMAC PEM) report identity creation, make the key-directory entry
+  durable before generation, and atomically publish synced 0600 keys below a
+  validated owner-only directory; loads refuse symlinks, swaps, loose unix
+  ownership/modes, and foreign key types.
+
 ### Added — golem headless integration surface (#352)
 
 One-shot mode (`-p`) gains a machine surface for scripting consumers. The
