@@ -1,0 +1,294 @@
+package signing
+
+import (
+	"bytes"
+	"crypto/ed25519"
+	"crypto/rand"
+	"crypto/x509"
+	"encoding/pem"
+	"errors"
+	"fmt"
+	"io"
+	"io/fs"
+	"os"
+	"path/filepath"
+	"strings"
+)
+
+const (
+	keyDirMode      = 0o700
+	keyFileMode     = 0o600
+	maxKeyFileBytes = 64 * 1024
+	hmacFileKeySize = 32
+	pemPrivateKey   = "PRIVATE KEY" // PKCS#8
+	pemHMACKey      = "HMAC-SHA256 KEY"
+)
+
+// syncKeyDirectory is injectable only for durability regression tests.
+// Production always points at the platform implementation.
+var syncKeyDirectory = syncDirectory
+
+// LoadOrCreateEd25519 loads the PKCS#8 PEM Ed25519 private key at path,
+// generating and atomically publishing one when the file does not exist.
+// created reports identity creation so callers cannot mistake key loss for
+// an ordinary load.
+func LoadOrCreateEd25519(path string) (*Ed25519Signer, bool, error) {
+	root, name, err := openKeyRoot(path)
+	if err != nil {
+		return nil, false, err
+	}
+	defer func() { _ = root.Close() }()
+	raw, created, err := loadOrCreateKeyFile(root, name, func() ([]byte, error) {
+		_, priv, err := ed25519.GenerateKey(nil)
+		if err != nil {
+			return nil, err
+		}
+		der, err := x509.MarshalPKCS8PrivateKey(priv)
+		if err != nil {
+			return nil, err
+		}
+		return pem.EncodeToMemory(&pem.Block{Type: pemPrivateKey, Bytes: der}), nil
+	})
+	if err != nil {
+		return nil, created, err
+	}
+	der, err := decodeKeyPEM(raw, path, pemPrivateKey)
+	if err != nil {
+		return nil, created, err
+	}
+	key, err := x509.ParsePKCS8PrivateKey(der)
+	if err != nil {
+		return nil, created, fmt.Errorf("signing: %s: parse PKCS#8: %w", path, err)
+	}
+	priv, ok := key.(ed25519.PrivateKey)
+	if !ok {
+		return nil, created, fmt.Errorf("signing: %s: key is %T, want ed25519.PrivateKey", path, key)
+	}
+	signer, err := NewEd25519Signer(priv)
+	return signer, created, err
+}
+
+// LoadOrCreateHMAC loads one HMAC-SHA256 KEY PEM block, generating a
+// 32-byte random key when the file does not exist. created reports identity
+// creation so callers cannot mistake key loss for an ordinary load.
+func LoadOrCreateHMAC(path string) (*HMACSigner, bool, error) {
+	root, name, err := openKeyRoot(path)
+	if err != nil {
+		return nil, false, err
+	}
+	defer func() { _ = root.Close() }()
+	raw, created, err := loadOrCreateKeyFile(root, name, func() ([]byte, error) {
+		key := make([]byte, hmacFileKeySize)
+		if _, err := io.ReadFull(rand.Reader, key); err != nil {
+			return nil, err
+		}
+		return pem.EncodeToMemory(&pem.Block{Type: pemHMACKey, Bytes: key}), nil
+	})
+	if err != nil {
+		return nil, created, err
+	}
+	key, err := decodeKeyPEM(raw, path, pemHMACKey)
+	if err != nil {
+		return nil, created, err
+	}
+	if len(key) != hmacFileKeySize {
+		return nil, created, fmt.Errorf("signing: %s: HMAC key is %d bytes, want 32", path, len(key))
+	}
+	signer, err := NewHMAC(key)
+	return signer, created, err
+}
+
+// openKeyRoot creates at most the dedicated owner-only leaf directory (its
+// parent must exist), anchors it with os.Root, and proves the opened root is
+// the directory Lstat saw.
+func openKeyRoot(path string) (*os.Root, string, error) {
+	if strings.TrimSpace(path) == "" {
+		return nil, "", errors.New("signing: key path is empty")
+	}
+	clean := filepath.Clean(path)
+	dir, name := filepath.Dir(clean), filepath.Base(clean)
+	if name == "." || name == string(filepath.Separator) {
+		return nil, "", fmt.Errorf("signing: key path %q does not name a file", path)
+	}
+	dirInfo, err := os.Lstat(dir)
+	if errors.Is(err, fs.ErrNotExist) {
+		switch mkdirErr := os.Mkdir(dir, keyDirMode); {
+		case mkdirErr == nil:
+			if chmodErr := os.Chmod(dir, keyDirMode); chmodErr != nil {
+				return nil, "", fmt.Errorf("signing: chmod new key directory %s: %w", dir, chmodErr)
+			}
+		case errors.Is(mkdirErr, fs.ErrExist): // a concurrent creator won
+		default:
+			return nil, "", fmt.Errorf("signing: create key directory %s: %w", dir, mkdirErr)
+		}
+		dirInfo, err = os.Lstat(dir)
+	}
+	if err != nil {
+		return nil, "", fmt.Errorf("signing: inspect key directory %s: %w", dir, err)
+	}
+	if dirInfo.Mode()&os.ModeSymlink != 0 || !dirInfo.IsDir() || !ownerAndModeOK(dirInfo) {
+		return nil, "", fmt.Errorf("%w: %s (mode %v)", ErrInsecureKeyDirectory, dir, dirInfo.Mode())
+	}
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		return nil, "", fmt.Errorf("signing: open key directory %s: %w", dir, err)
+	}
+	opened, err := root.Stat(".")
+	if err != nil || !os.SameFile(dirInfo, opened) {
+		_ = root.Close()
+		return nil, "", fmt.Errorf("%w: %s changed while opening", ErrInsecureKeyDirectory, dir)
+	}
+	return root, name, nil
+}
+
+// loadOrCreateKeyFile publishes only complete synced bytes. A hard link is
+// the atomic no-replace commit: a racing loser can read only the winner's
+// complete temp, never a partially written final file.
+func loadOrCreateKeyFile(root *os.Root, name string, generate func() ([]byte, error)) ([]byte, bool, error) {
+	raw, exists, err := readKeyFile(root, name, nil)
+	if err != nil {
+		return nil, false, err
+	}
+	if exists {
+		return raw, false, nil
+	}
+	parent := filepath.Dir(root.Name())
+	if err := syncKeyDirectory(parent); err != nil {
+		return nil, false, fmt.Errorf("%w: sync key directory parent %s: %w", ErrKeyFileDurability, parent, err)
+	}
+	material, err := generate()
+	if err != nil {
+		return nil, false, fmt.Errorf("signing: generate key: %w", err)
+	}
+	temp, err := writeKeyTemp(root, name, material)
+	if err != nil {
+		return nil, false, err
+	}
+	linkErr := root.Link(temp, name)
+	removeErr := root.Remove(temp)
+	if linkErr != nil {
+		wrapped := fmt.Errorf("signing: publish key file %s: %w", filepath.Join(root.Name(), name), linkErr)
+		if removeErr != nil && !errors.Is(removeErr, fs.ErrNotExist) {
+			wrapped = errors.Join(wrapped, fmt.Errorf("signing: remove key temp %s: %w", temp, removeErr))
+		}
+		if !errors.Is(linkErr, fs.ErrExist) || removeErr != nil {
+			return nil, false, wrapped
+		}
+		raw, exists, err := readKeyFile(root, name, nil)
+		if err != nil {
+			return nil, false, err
+		}
+		if !exists {
+			return nil, false, errors.New("signing: concurrently published key disappeared")
+		}
+		return raw, false, nil
+	}
+	var postPublish []error
+	if removeErr != nil {
+		postPublish = append(postPublish, fmt.Errorf("signing: remove published key temp %s: %w", temp, removeErr))
+	}
+	if err := syncKeyDirectory(root.Name()); err != nil {
+		postPublish = append(postPublish,
+			fmt.Errorf("%w: %s: %w", ErrKeyFileDurability, filepath.Join(root.Name(), name), err))
+	}
+	if len(postPublish) > 0 {
+		return material, true, errors.Join(postPublish...)
+	}
+	return material, true, nil
+}
+
+func writeKeyTemp(root *os.Root, name string, material []byte) (temp string, err error) {
+	temp = "." + name + ".tmp-" + rand.Text()
+	f, err := root.OpenFile(temp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, keyFileMode)
+	if err != nil {
+		return "", fmt.Errorf("signing: create key temp: %w", err)
+	}
+	closed := false
+	defer func() {
+		if err == nil {
+			return
+		}
+		var cleanup []error
+		if !closed {
+			if closeErr := f.Close(); closeErr != nil {
+				cleanup = append(cleanup, fmt.Errorf("close key temp: %w", closeErr))
+			}
+		}
+		if removeErr := root.Remove(temp); removeErr != nil && !errors.Is(removeErr, fs.ErrNotExist) {
+			cleanup = append(cleanup, fmt.Errorf("remove key temp: %w", removeErr))
+		}
+		if len(cleanup) > 0 {
+			err = errors.Join(append([]error{err}, cleanup...)...)
+		}
+	}()
+	if err = f.Chmod(keyFileMode); err != nil {
+		return temp, fmt.Errorf("signing: chmod key temp: %w", err)
+	}
+	if _, err = f.Write(material); err != nil {
+		return temp, fmt.Errorf("signing: write key temp: %w", err)
+	}
+	if err = f.Sync(); err != nil {
+		return temp, fmt.Errorf("signing: sync key temp: %w", err)
+	}
+	err = f.Close()
+	closed = true
+	if err != nil {
+		return temp, fmt.Errorf("signing: close key temp: %w", err)
+	}
+	return temp, nil
+}
+
+// readKeyFile distinguishes true first-use absence from disappearance after
+// Lstat. afterLstat is nil in production and deterministic in the swap tests.
+func readKeyFile(root *os.Root, name string, afterLstat func()) ([]byte, bool, error) {
+	path := filepath.Join(root.Name(), name)
+	before, err := root.Lstat(name)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, fmt.Errorf("signing: lstat key file %s: %w", path, err)
+	}
+	if !before.Mode().IsRegular() {
+		return nil, true, fmt.Errorf("%w: %s (mode %v)", ErrKeyFileNotRegular, path, before.Mode().Type())
+	}
+	if afterLstat != nil {
+		afterLstat()
+	}
+	f, err := root.Open(name)
+	if err != nil {
+		return nil, true, fmt.Errorf("signing: open existing key file %s: %w", path, err)
+	}
+	defer func() { _ = f.Close() }()
+	after, err := f.Stat()
+	if err != nil {
+		return nil, true, fmt.Errorf("signing: stat key file %s: %w", path, err)
+	}
+	if !after.Mode().IsRegular() || !os.SameFile(before, after) {
+		return nil, true, fmt.Errorf("%w: %s changed between lstat and open", ErrKeyFileNotRegular, path)
+	}
+	if !ownerAndModeOK(after) {
+		return nil, true, fmt.Errorf("%w: %s (mode %04o)", ErrInsecureKeyFile, path, after.Mode().Perm())
+	}
+	if after.Size() > maxKeyFileBytes {
+		return nil, true, fmt.Errorf("signing: key file %s is %d bytes, cap %d", path, after.Size(), maxKeyFileBytes)
+	}
+	raw, err := io.ReadAll(io.LimitReader(f, maxKeyFileBytes+1))
+	if err != nil {
+		return nil, true, fmt.Errorf("signing: read key file %s: %w", path, err)
+	}
+	if len(raw) > maxKeyFileBytes {
+		return nil, true, fmt.Errorf("signing: key file %s exceeds %d bytes", path, maxKeyFileBytes)
+	}
+	return raw, true, nil
+}
+
+func decodeKeyPEM(raw []byte, path string, wantType string) ([]byte, error) {
+	trimmed := bytes.TrimSpace(raw)
+	block, rest := pem.Decode(trimmed)
+	if !bytes.HasPrefix(trimmed, []byte("-----BEGIN "+wantType+"-----")) || block == nil ||
+		len(block.Headers) != 0 || len(bytes.TrimSpace(rest)) != 0 {
+		return nil, fmt.Errorf("signing: %s: want exactly one %q PEM block without headers", path, wantType)
+	}
+	return block.Bytes, nil
+}
