@@ -290,6 +290,12 @@ func (t *RunCommand) baseEffect() agent.Effect {
 
 func (t *RunCommand) Effect() agent.Effect { return t.baseEffect() }
 
+// Origin declares this tool's observations workspace-local (#436 spec D4):
+// detectors tag, never block, what it returns.
+// Output fetched from the network by the command is still classified
+// workspace; #439 reclassifies per invocation through ToolResult.Origin.
+func (*RunCommand) Origin() agent.Origin { return agent.OriginWorkspace }
+
 // Plan validates args, resolves cwd + executable + env + timeout, renders the preview,
 // and stashes a pending plan keyed by the raw-args hash. It never spawns. Any failure
 // returns an error so dispatch reports it without prompting for approval.

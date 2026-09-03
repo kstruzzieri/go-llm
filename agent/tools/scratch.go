@@ -570,6 +570,10 @@ func (ScratchChanges) Effect() agent.Effect {
 	return agent.Effect{Class: agent.Read, Approval: agent.ApprovalNever, OutputCap: scratchChangesOutputCap}
 }
 
+// Origin declares this tool's observations workspace-local (#436 spec D4):
+// detectors tag, never block, what it returns.
+func (ScratchChanges) Origin() agent.Origin { return agent.OriginWorkspace }
+
 // Invoke implements agent.Tool.
 func (t ScratchChanges) Invoke(ctx context.Context, raw json.RawMessage) (agent.ToolResult, error) {
 	var args scratchChangesArgs

@@ -52,6 +52,11 @@ func (MemorySearch) Effect() agent.Effect {
 	return agent.Effect{Class: agent.Read, Approval: agent.ApprovalNever}
 }
 
+// Origin declares this tool's observations workspace-local (#436 spec D4):
+// detectors tag, never block, what it returns.
+// Record-level provenance is #446.
+func (MemorySearch) Origin() agent.Origin { return agent.OriginWorkspace }
+
 func (t MemorySearch) Invoke(ctx context.Context, raw json.RawMessage) (agent.ToolResult, error) {
 	var args memorySearchArgs
 	if err := json.Unmarshal(raw, &args); err != nil {

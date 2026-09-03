@@ -77,6 +77,10 @@ func (t *PromoteArtifact) Effect() agent.Effect {
 	return agent.Effect{Class: agent.Write, Approval: agent.ApprovalAlways}
 }
 
+// Origin declares this tool's observations workspace-local (#436 spec D4):
+// detectors tag, never block, what it returns.
+func (*PromoteArtifact) Origin() agent.Origin { return agent.OriginWorkspace }
+
 // promoteOutcomeDigest fingerprints an outcome's approval-relevant shape so
 // Invoke can detect any store change after Plan.
 func promoteOutcomeDigest(out scratchOutcome) string {

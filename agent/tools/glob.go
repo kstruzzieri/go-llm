@@ -58,6 +58,10 @@ func (*Glob) Effect() agent.Effect {
 	return agent.Effect{Class: agent.Read, Approval: agent.ApprovalNever, OutputCap: listOutputCap}
 }
 
+// Origin declares this tool's observations workspace-local (#436 spec D4):
+// detectors tag, never block, what it returns.
+func (*Glob) Origin() agent.Origin { return agent.OriginWorkspace }
+
 // Invoke walks and matches relative paths against the pattern.
 func (t *Glob) Invoke(ctx context.Context, raw json.RawMessage) (agent.ToolResult, error) {
 	var args globArgs
@@ -145,6 +149,10 @@ func (*List) Spec() agent.ToolSpec {
 func (*List) Effect() agent.Effect {
 	return agent.Effect{Class: agent.Read, Approval: agent.ApprovalNever, OutputCap: listOutputCap}
 }
+
+// Origin declares this tool's observations workspace-local (#436 spec D4):
+// detectors tag, never block, what it returns.
+func (*List) Origin() agent.Origin { return agent.OriginWorkspace }
 
 // Invoke reads a single directory level. Expected failures return IsError.
 func (t *List) Invoke(ctx context.Context, raw json.RawMessage) (agent.ToolResult, error) {

@@ -180,6 +180,10 @@ func (d *Dispatch) Effect() agent.Effect {
 	}
 }
 
+// Origin declares the dispatch envelope model-authored (#436): child
+// summaries are model text over the same workspace.
+func (*Dispatch) Origin() agent.Origin { return agent.OriginModel }
+
 // Invoke runs the requested child tasks and returns an ordered JSON envelope.
 func (d *Dispatch) Invoke(ctx context.Context, raw json.RawMessage) (agent.ToolResult, error) {
 	if err := ctx.Err(); err != nil {

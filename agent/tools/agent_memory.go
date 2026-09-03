@@ -107,6 +107,11 @@ func (AgentMemorySearch) Effect() agent.Effect {
 	return agent.Effect{Class: agent.Read, Approval: agent.ApprovalNever}
 }
 
+// Origin declares this tool's observations workspace-local (#436 spec D4):
+// detectors tag, never block, what it returns.
+// Record-level provenance is #446.
+func (AgentMemorySearch) Origin() agent.Origin { return agent.OriginWorkspace }
+
 func (t AgentMemorySearch) Invoke(ctx context.Context, raw json.RawMessage) (agent.ToolResult, error) {
 	var args agentMemorySearchArgs
 	if len(raw) > 0 {
@@ -297,6 +302,11 @@ func (AgentMemoryCreate) Effect() agent.Effect {
 	return agent.Effect{Class: agent.Write, Approval: agent.ApprovalNever}
 }
 
+// Origin declares this tool's observations workspace-local (#436 spec D4):
+// detectors tag, never block, what it returns.
+// Record-level provenance is #446.
+func (AgentMemoryCreate) Origin() agent.Origin { return agent.OriginWorkspace }
+
 func (t AgentMemoryCreate) Invoke(ctx context.Context, raw json.RawMessage) (agent.ToolResult, error) {
 	var args agentMemoryCreateArgs
 	if err := json.Unmarshal(raw, &args); err != nil {
@@ -359,6 +369,11 @@ func (AgentMemoryPromote) Spec() agent.ToolSpec {
 func (AgentMemoryPromote) Effect() agent.Effect {
 	return agent.Effect{Class: agent.Write, Approval: agent.ApprovalNever}
 }
+
+// Origin declares this tool's observations workspace-local (#436 spec D4):
+// detectors tag, never block, what it returns.
+// Record-level provenance is #446.
+func (AgentMemoryPromote) Origin() agent.Origin { return agent.OriginWorkspace }
 
 func (t AgentMemoryPromote) Invoke(ctx context.Context, raw json.RawMessage) (agent.ToolResult, error) {
 	var args agentMemoryPromoteArgs
