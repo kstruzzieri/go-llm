@@ -12,6 +12,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/kstruzzieri/go-llm/provider"
 )
@@ -491,10 +492,11 @@ func TestRunHookSnapshotsAndEvents(t *testing.T) {
 	if _, _, err := r.runHook(context.Background(), rec, 0, inputScope(nil, false, false), inputInvoke(InputInspection{})); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := r.runHook(context.Background(), rec, 1, hookScope{hook: HookToolCall, toolCallID: "call-7"},
+	found, _, err := r.runHook(context.Background(), rec, 1, hookScope{hook: HookToolCall, toolCallID: "call-7"},
 		func(ic Interceptor) ([]Finding, error) {
 			return ic.InspectToolCall(context.Background(), ToolCallInspection{})
-		}); err != nil {
+		})
+	if err != nil {
 		t.Fatal(err)
 	}
 	e1 := rec.interceptions[1]
@@ -508,6 +510,9 @@ func TestRunHookSnapshotsAndEvents(t *testing.T) {
 	e1.Findings[0].Risk = 999
 	if r.risk.Findings[0].Risk != 30 {
 		t.Fatal("observer wrote through to the run's report: snapshot missing")
+	}
+	if found[0].Risk != 50 {
+		t.Fatal("the event's Findings alias the findings returned to the caller (and so BlockedError.Findings)")
 	}
 	snap := r.snapshot()
 	snap.Findings[1].Risk = 999
@@ -1803,5 +1808,310 @@ func TestOutputBlockCannotRetractStreamedTokens(t *testing.T) {
 	}
 	if res.Answer != "" || len(res.Messages) != 1 || res.Steps[0].Response.Content != "" {
 		t.Fatalf("blocked content adopted: answer %q, messages %d, step content %q", res.Answer, len(res.Messages), res.Steps[0].Response.Content)
+	}
+}
+
+// errOnInput errors on InspectInput when `when` matches, else allows everything.
+type errOnInput struct {
+	name string
+	when func(InputInspection) bool
+}
+
+func (e *errOnInput) Name() string { return e.name }
+func (e *errOnInput) InspectInput(_ context.Context, in InputInspection) ([]Finding, error) {
+	if e.when(in) {
+		return nil, errors.New("boom")
+	}
+	return nil, nil
+}
+func (e *errOnInput) InspectOutput(context.Context, OutputInspection) ([]Finding, error) {
+	return nil, nil
+}
+func (e *errOnInput) InspectToolCall(context.Context, ToolCallInspection) ([]Finding, error) {
+	return nil, nil
+}
+
+func isObservation(in InputInspection) bool {
+	return in.System == "" && len(in.Messages) == 1 && in.Messages[0].Role == "tool"
+}
+
+func TestToolResultInterceptorErrorAbortsBeforeStateAndObserver(t *testing.T) {
+	cases := []struct {
+		name         string
+		calls        ModelResult
+		wantEvents   string
+		wantObserved int
+	}{
+		{"serial", readCalls("evil"), "step,tool_call", 0},
+		{"parallel", readCalls("clean", "evil"), "step,tool_call,tool_call,tool_result", 1},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			clean := contentTool{name: "clean", content: "fine"}
+			evil := contentTool{name: "evil", content: "EVIL"}
+			mc := &scriptedCaller{responses: []ModelResult{tc.calls, finalAnswer("never")}}
+			rec := &interceptRecorder{}
+			bad := &errOnInput{name: "bad", when: func(in InputInspection) bool { return isObservation(in) && in.Messages[0].Content == "EVIL" }}
+			o := newTestOrchestrator(mc, WithInterceptors(bad))
+			res, err := o.Run(context.Background(), Request{Goal: "q", System: "sys", Tools: []Tool{clean, evil}}, rec)
+			if err == nil || err.Error() != "agent: interceptor bad input: boom" {
+				t.Fatalf("err = %v", err)
+			}
+			var blocked *BlockedError
+			if errors.As(err, &blocked) {
+				t.Fatal("an error without a verdict must not fabricate a BlockedError")
+			}
+			if len(rec.toolResults) != tc.wantObserved || res.Messages != nil || kinds(res.Events) != tc.wantEvents {
+				t.Fatalf("observed=%d messages=%v events=%s", len(rec.toolResults), res.Messages, kinds(res.Events))
+			}
+			if res.Risk != nil || mc.calls != 1 {
+				t.Fatalf("risk=%v calls=%d", res.Risk, mc.calls)
+			}
+		})
+	}
+}
+
+type errOnOutput struct{ name string }
+
+func (e *errOnOutput) Name() string { return e.name }
+func (e *errOnOutput) InspectInput(context.Context, InputInspection) ([]Finding, error) {
+	return nil, nil
+}
+func (e *errOnOutput) InspectOutput(context.Context, OutputInspection) ([]Finding, error) {
+	return nil, errors.New("boom")
+}
+func (e *errOnOutput) InspectToolCall(context.Context, ToolCallInspection) ([]Finding, error) {
+	return nil, nil
+}
+
+func TestOutputInterceptorErrorIsNeitherRecordedNorPublishedNorDispatched(t *testing.T) {
+	tool := &invokeCountingTool{echoTool: echoTool{name: "echo"}}
+	call := echoCall("1", `{}`)
+	call.Response.Usage = provider.Usage{TotalTokens: 7}
+	mc := &scriptedCaller{responses: []ModelResult{call, finalAnswer("never")}}
+	rec := &interceptRecorder{}
+	o := newTestOrchestrator(mc, WithInterceptors(&errOnOutput{name: "bad"}))
+	res, err := o.Run(context.Background(), Request{Goal: "q", Tools: []Tool{tool}}, rec)
+	if err == nil || err.Error() != "agent: interceptor bad output: boom" {
+		t.Fatalf("err = %v", err)
+	}
+	var blocked *BlockedError
+	if errors.As(err, &blocked) {
+		t.Fatal("no verdict, no BlockedError")
+	}
+	if tool.invoked != 0 || mc.calls != 1 || strings.Join(rec.kinds, ",") != "pressure" {
+		t.Fatalf("invoked=%d calls=%d kinds=%v: an uncleared response must not reach OnStep or dispatch", tool.invoked, mc.calls, rec.kinds)
+	}
+	if s := res.Steps; len(s) != 1 || s[0].Response.ToolCalls != nil || s[0].Response.Content != "" || s[0].Response.Usage.TotalTokens != 7 {
+		t.Fatalf("steps = %+v, want one redacted record", s)
+	}
+	if kinds(res.Events) != "step" || res.Risk != nil || res.Messages != nil {
+		t.Fatalf("events=%s risk=%v messages=%v", kinds(res.Events), res.Risk, res.Messages)
+	}
+}
+
+func TestVerifierAbortOrErrorNeverAppends(t *testing.T) {
+	writer := fakeTool{name: WriteFileToolName, effect: Effect{Class: Write, Approval: ApprovalNever}}
+	isVerify := func(in InputInspection) bool { return isObservation(in) && in.Messages[0].Content == "\nVERIFY OUT" }
+	abort := &stubInterceptor{name: "guard", input: func(in InputInspection) []Finding {
+		if isVerify(in) {
+			return []Finding{{Rule: "verify", Verdict: VerdictAbort, Risk: 100, Target: TargetMessage, StateIndex: in.Messages[0].StateIndex}}
+		}
+		return nil
+	}}
+	cases := []struct {
+		name, wantErr string
+		ic            Interceptor
+		wantBlocked   bool
+		wantEvents    string
+	}{
+		{"abort", "agent: input blocked by interceptor guard (verify)", abort, true, "step,tool_call,tool_result,blocked"},
+		{"error", "agent: interceptor bad input: boom", &errOnInput{name: "bad", when: isVerify}, false, "step,tool_call,tool_result"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			mc := &scriptedCaller{responses: []ModelResult{{Response: provider.ChatResponse{ToolCalls: []provider.ToolCall{{
+				ID: "w1", Type: "function", Function: provider.ToolCallFunction{Name: WriteFileToolName, Arguments: json.RawMessage(`{}`)},
+			}}}}, finalAnswer("never")}}
+			o := newTestOrchestrator(mc, WithInterceptors(tc.ic), WithVerifier(stubVerifier{out: "\nVERIFY OUT"}))
+			res, err := o.Run(context.Background(), Request{Goal: "q", Tools: []Tool{writer}}, nil)
+			if err == nil || err.Error() != tc.wantErr {
+				t.Fatalf("err = %v", err)
+			}
+			var blocked *BlockedError
+			if errors.As(err, &blocked) != tc.wantBlocked {
+				t.Fatalf("BlockedError present = %v", !tc.wantBlocked)
+			}
+			if tc.wantBlocked {
+				if got := res.Messages[2].Content; got != "ok" {
+					t.Fatalf("anchor = %q: verifier text reached State", got)
+				}
+			} else if res.Messages != nil {
+				t.Fatalf("messages = %+v, want nil on a plain error", res.Messages)
+			}
+			if kinds(res.Events) != tc.wantEvents || mc.calls != 1 {
+				t.Fatalf("events=%s calls=%d", kinds(res.Events), mc.calls)
+			}
+		})
+	}
+}
+
+func TestToolCallAbortOrErrorOnParallelPathLaunchesNoInvokes(t *testing.T) {
+	abort := &stubInterceptor{name: "canary", toolCall: func(c ToolCallInspection) []Finding {
+		if c.Call.Function.Name == "b" {
+			return []Finding{{Rule: "nonce", Verdict: VerdictAbort, Risk: 100}}
+		}
+		return nil
+	}}
+	cases := []struct {
+		name, wantErr string
+		ic            Interceptor
+		wantBlocked   bool
+		wantEvents    string
+	}{
+		{"abort", "agent: tool_call blocked by interceptor canary (nonce)", abort, true, "step,tool_call,tool_call,blocked"},
+		{"error", "agent: interceptor bad tool_call: boom", &errOnToolCall{name: "bad"}, false, "step,tool_call"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			a := &invokeCountingTool{echoTool: echoTool{name: "a"}}
+			b := &invokeCountingTool{echoTool: echoTool{name: "b"}}
+			mc := &scriptedCaller{responses: []ModelResult{readCalls("a", "b"), finalAnswer("never")}} // read-only pair: parallel path
+			rec := &interceptRecorder{}
+			o := newTestOrchestrator(mc, WithInterceptors(tc.ic))
+			res, err := o.Run(context.Background(), Request{Goal: "q", Tools: []Tool{a, b}}, rec)
+			if err == nil || err.Error() != tc.wantErr {
+				t.Fatalf("err = %v", err)
+			}
+			var blocked *BlockedError
+			if errors.As(err, &blocked) != tc.wantBlocked {
+				t.Fatalf("BlockedError present = %v", !tc.wantBlocked)
+			}
+			if a.invoked != 0 || b.invoked != 0 {
+				t.Fatalf("invoked a=%d b=%d: a phase-1 abort must launch nothing", a.invoked, b.invoked)
+			}
+			if kinds(res.Events) != tc.wantEvents || len(rec.toolResults) != 0 || len(res.ToolCalls) != 0 {
+				t.Fatalf("events=%s observed=%d records=%d", kinds(res.Events), len(rec.toolResults), len(res.ToolCalls))
+			}
+		})
+	}
+}
+
+type failingScoped struct{ scopedStub }
+
+func (f *failingScoped) ForRun(context.Context, RunScope) (Interceptor, string, error) {
+	return nil, "", errors.New("no nonce")
+}
+
+func TestRunScopedForRunErrorFailsTheRun(t *testing.T) {
+	mc := &scriptedCaller{responses: []ModelResult{finalAnswer("x")}}
+	o := newTestOrchestrator(mc, WithInterceptors(&failingScoped{scopedStub{name: "sc"}}))
+	_, err := o.Run(context.Background(), Request{Goal: "q"}, nil)
+	if err == nil || err.Error() != "agent: interceptor sc for run: no nonce" || mc.calls != 0 {
+		t.Fatalf("err = %v, calls = %d", err, mc.calls)
+	}
+}
+
+func TestRunScopedInterceptorsSeeOnlyTheCallerSystemAndAppendInChainOrder(t *testing.T) {
+	a := &scopedStub{name: "a"}
+	b := &scopedStub{name: "b", forRuns: 1} // pre-bumped so b's addendum is "xx": order becomes observable
+	mc := &capturingScriptedCaller{scriptedCaller: scriptedCaller{responses: []ModelResult{finalAnswer("x")}}}
+	o := newTestOrchestrator(mc, WithInterceptors(a, b))
+	if _, err := o.Run(context.Background(), Request{Goal: "q", System: "sys"}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if a.scopes[0] != (RunScope{System: "sys"}) || b.scopes[0] != (RunScope{System: "sys"}) {
+		t.Fatalf("scopes = %+v / %+v: ForRun must not see another interceptor's addendum", a.scopes, b.scopes)
+	}
+	if got := mc.reqs[0].Messages[0].Content; got != "sys [canary:x] [canary:xx]" {
+		t.Fatalf("system = %q, want chain-order addenda", got)
+	}
+}
+
+type invokeErroringTool struct{ declaredContentTool }
+
+func (invokeErroringTool) Invoke(context.Context, json.RawMessage) (ToolResult, error) {
+	return ToolResult{}, errors.New("disk on fire")
+}
+
+func TestToolResultOriginEdges(t *testing.T) {
+	ic := &stubInterceptor{name: "rec"}
+	tools := []Tool{
+		declaredContentTool{contentTool{name: "static-garbage", content: "sg", static: Origin(99)}},
+		invokeErroringTool{declaredContentTool{contentTool{name: "erring", static: OriginWorkspace}}},
+	}
+	mc := &scriptedCaller{responses: []ModelResult{readCalls("static-garbage", "erring"), finalAnswer("done")}}
+	o := newTestOrchestrator(mc, WithInterceptors(ic))
+	if _, err := o.Run(context.Background(), Request{Goal: "q", Tools: tools}, nil); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if got := ic.inputs[1].Messages[0]; got.Origin != OriginUnknown {
+		t.Fatalf("a static Origin(99) must normalize to unknown, got %s", got.Origin)
+	}
+	if got := ic.inputs[2].Messages[0]; got.Origin != OriginWorkspace || got.Content != "disk on fire" {
+		t.Fatalf("an erroring tool keeps its static origin: %+v", got)
+	}
+}
+
+func TestBlockedResultKeepsTheDeclaredOrigin(t *testing.T) {
+	evil := declaredContentTool{contentTool{name: "evil", content: "EVIL", static: OriginWorkspace}}
+	mc := &scriptedCaller{responses: []ModelResult{readCalls("evil"), finalAnswer("done")}}
+	rec := &interceptRecorder{}
+	o := newTestOrchestrator(mc, WithInterceptors(poisonGuard()))
+	res, err := o.Run(context.Background(), Request{Goal: "q", Tools: []Tool{evil}}, rec)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if rec.toolResults[0].Result.Origin != OriginWorkspace || res.Risk.Findings[0].Origin != OriginWorkspace {
+		t.Fatalf("origin dropped on the replaced result: event %s, finding %s", rec.toolResults[0].Result.Origin, res.Risk.Findings[0].Origin)
+	}
+}
+
+func TestNormalizeFindingSummaryAndAbsentSystem(t *testing.T) {
+	base := Finding{Interceptor: "ic", Rule: "r", Hook: HookInput, Step: 2}
+	got := normalizeFinding(Finding{Rule: "r", Target: TargetSummary, StateIndex: 3, ToolCallID: "x", Origin: OriginForeign}, "ic", 2, inputScope(nil, false, true))
+	want := base
+	want.Target, want.Origin, want.StateIndex, want.Group, want.Alternative = TargetSummary, OriginModel, -1, -1, -1
+	if got != want {
+		t.Fatalf("summary present: got %+v want %+v", got, want)
+	}
+	got = normalizeFinding(Finding{Rule: "r", Target: TargetSystem, Origin: OriginForeign}, "ic", 2, inputScope(nil, false, false))
+	want = base
+	want.Target, want.Origin, want.StateIndex, want.Group, want.Alternative = TargetNone, OriginForeign, -1, -1, -1
+	if got != want {
+		t.Fatalf("system absent: got %+v want %+v", got, want)
+	}
+	got = normalizeFinding(Finding{Rule: "r", Detail: strings.Repeat("x", 255) + "é"}, "ic", 2, inputScope(nil, false, false))
+	if got.Detail != strings.Repeat("x", 255) || !utf8.ValidString(got.Detail) {
+		t.Fatalf("detail cut mid-rune: %q", got.Detail)
+	}
+}
+
+func TestMixedNilSetWidensOnce(t *testing.T) {
+	tool := declaredContentTool{contentTool{name: "no-set", content: "fallback", static: OriginWorkspace}}
+	o := New(nil, ContextManager{Mixed: true}, WithInterceptors(tagAll()))
+	state := recordOne(t, o, o.newInterceptorRun(), normalizeObserver(nil), tool, 1000)
+	msg := state.Messages[0]
+	if msg.Context != nil || msg.Content != "fallback"+twoTrailers || msg.OutputCap != 1000+len(twoTrailers) {
+		t.Fatalf("nil set: context %v content %q cap %d", msg.Context, msg.Content, msg.OutputCap)
+	}
+}
+
+func TestProviderErrorThinkingOnlyPartialIsInspected(t *testing.T) {
+	ic := &stubInterceptor{name: "guard", output: func(out OutputInspection) []Finding {
+		if out.Content == "" && out.Thinking == "secret nonce" {
+			return []Finding{{Rule: "leak", Verdict: VerdictAbort, Risk: 100, Target: TargetOutputContent}}
+		}
+		return nil
+	}}
+	o := newTestOrchestrator(failingCaller{content: "", thinking: "secret nonce"}, WithInterceptors(ic))
+	res, err := o.Run(context.Background(), Request{Goal: "q"}, nil)
+	var blocked *BlockedError
+	if !errors.As(err, &blocked) || !strings.Contains(err.Error(), "provider: stream reset") || len(ic.outputs) != 1 {
+		t.Fatalf("err = %v, outputs = %d", err, len(ic.outputs))
+	}
+	// A thinking-only chunk emits no token event (those need content).
+	if len(res.Messages) != 1 || kinds(res.Events) != "blocked" {
+		t.Fatalf("messages = %d, events = %s", len(res.Messages), kinds(res.Events))
 	}
 }

@@ -34,16 +34,18 @@ var _ agent.Interceptor = Encoding{}
 // Name returns "encoding".
 func (Encoding) Name() string { return "encoding" }
 
-// unfold removes newlines (CRLF or LF) together with any spaces or tabs that
-// follow them, and nothing else: MIME folds and base64(1)'s 76-column wraps
-// rejoin, while words separated by ordinary spaces stay apart.
+// unfold removes line breaks (CRLF, LF or a lone CR) together with any spaces
+// or tabs that follow them, and nothing else: MIME folds and base64(1)'s
+// 76-column wraps rejoin, while words separated by ordinary spaces stay apart.
 func unfold(s string) string {
 	var b strings.Builder
 	b.Grow(len(s))
 	for i := 0; i < len(s); i++ {
 		c := s[i]
-		if c == '\r' && i+1 < len(s) && s[i+1] == '\n' {
-			i++
+		if c == '\r' {
+			if i+1 < len(s) && s[i+1] == '\n' {
+				i++
+			}
 			c = '\n'
 		}
 		if c != '\n' {

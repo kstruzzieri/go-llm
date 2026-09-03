@@ -26,6 +26,11 @@ func TestZeroWidthTagsTrustedAndBlocksForeign(t *testing.T) {
 			msgFinding("zero_width", agent.VerdictBlock, 20, agent.OriginUnknown, "1 zero-width code point(s), first U+180E")},
 		{"escaped text", agent.OriginWorkspace, `{"p":"a\u200bb"}`,
 			msgFinding("zero_width", agent.VerdictTag, 20, agent.OriginWorkspace, "1 zero-width code point(s), first U+200B (escaped)")},
+		{"escapes that are not zero-width are clean", agent.OriginForeign, `{"p":"\u0041\u00e9\uZZZZ\u"}`, nil},
+		{"range edge U+200F", agent.OriginForeign, "\u200f",
+			msgFinding("zero_width", agent.VerdictBlock, 20, agent.OriginForeign, "1 zero-width code point(s), first U+200F")},
+		{"raw wins over escaped and only raw is counted", agent.OriginWorkspace, "a\u200fb\\u200b\\u200b",
+			msgFinding("zero_width", agent.VerdictTag, 20, agent.OriginWorkspace, "1 zero-width code point(s), first U+200F")},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
