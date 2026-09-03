@@ -332,14 +332,14 @@ type BlockedError struct {
 // cause returns the first finding whose verdict equals the maximum verdict
 // among findings; a zero Finding when there are none.
 func cause(findings []Finding) Finding {
-	max := VerdictAllow
+	top := VerdictAllow
 	for _, f := range findings {
-		if f.Verdict > max {
-			max = f.Verdict
+		if f.Verdict > top {
+			top = f.Verdict
 		}
 	}
 	for _, f := range findings {
-		if f.Verdict == max {
+		if f.Verdict == top {
 			return f
 		}
 	}
