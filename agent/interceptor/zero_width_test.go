@@ -50,7 +50,7 @@ func TestZeroWidthInspectsSystemSummaryAlternativesAndArguments(t *testing.T) {
 	want := []agent.Finding{
 		{Rule: "zero_width", Verdict: agent.VerdictTag, Risk: 20, Origin: agent.OriginSystem, Target: agent.TargetSystem, StateIndex: -1, Group: -1, Alternative: -1, Detail: "1 zero-width code point(s), first U+200C"},
 		{Rule: "zero_width", Verdict: agent.VerdictTag, Risk: 20, Origin: agent.OriginModel, Target: agent.TargetSummary, StateIndex: -1, Group: -1, Alternative: -1, Detail: "1 zero-width code point(s), first U+200D"},
-		{Rule: "zero_width", Verdict: agent.VerdictTag, Risk: 20, Origin: agent.OriginWorkspace, Target: agent.TargetMessage, StateIndex: 4, Group: 0, Alternative: 1, Detail: "1 zero-width code point(s), first U+2064"},
+		{Rule: "zero_width", Verdict: agent.VerdictTag, Risk: 20, Origin: agent.OriginWorkspace, Target: agent.TargetAlternative, StateIndex: 4, Group: 0, Alternative: 1, Detail: "1 zero-width code point(s), first U+2064"},
 	}
 	assertFindings(t, got, want)
 	call := agent.ToolCallInspection{Call: provider.ToolCall{ID: "c9", Function: provider.ToolCallFunction{Arguments: json.RawMessage(`{"p":"a\u200bb"}`)}}}

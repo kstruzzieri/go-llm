@@ -110,7 +110,7 @@ func (o *Orchestrator) recordResult(ctx context.Context, res *Result, state *Sta
 			out = ToolResult{IsError: true, Content: blockedResultContent(*block), Origin: out.Origin, RouteOutcome: out.RouteOutcome}
 			rec.IsError, rec.Blocked = true, true
 		} else if len(tags) > 0 {
-			outputCap = addSaturating(outputCap, annotateResult(&out, tags))
+			outputCap = addSaturating(outputCap, annotateResult(&out, tags, o.ctxMgr.Mixed))
 		}
 	}
 
@@ -263,10 +263,16 @@ func (o *Orchestrator) invokeCall(ctx context.Context, tool Tool, effect Effect,
 	out = capOutput(out, effect.OutputCap)
 	// #436 spec D4: an unset per-invocation origin defers to the static
 	// declaration; a set but invalid one is unknown provenance, never the
-	// declaration (a tool emitting garbage earns no trust).
-	if out.Origin == OriginUnknown {
-		out.Origin = staticOrigin(tool)
-	} else {
+	// declaration (a tool emitting garbage earns no trust). A per-invocation
+	// value may only move toward LESS trust: a tool declared foreign or
+	// undeclared cannot promote its own output into the tagged class.
+	static := staticOrigin(tool)
+	switch {
+	case out.Origin == OriginUnknown:
+		out.Origin = static
+	case !trusted(static) && trusted(normalizeOrigin(out.Origin)):
+		out.Origin = static
+	default:
 		out.Origin = normalizeOrigin(out.Origin)
 	}
 	return out

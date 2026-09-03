@@ -180,7 +180,7 @@ func eachText(in agent.InputInspection, visit func(t target, text string)) {
 	for _, m := range in.Messages {
 		visit(target{kind: agent.TargetMessage, origin: m.Origin, stateIndex: m.StateIndex, group: -1, alt: -1}, m.Content)
 		for _, a := range m.Alternatives {
-			visit(target{kind: agent.TargetMessage, origin: m.Origin, stateIndex: m.StateIndex, group: a.Group, alt: a.Alternative}, a.Content)
+			visit(target{kind: agent.TargetAlternative, origin: m.Origin, stateIndex: m.StateIndex, group: a.Group, alt: a.Alternative}, a.Content)
 		}
 	}
 }

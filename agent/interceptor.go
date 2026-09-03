@@ -21,7 +21,9 @@ const (
 	HookInput Hook = iota + 1
 	// HookOutput inspects the collected model response (content, thinking,
 	// tool calls) before it is recorded, on the success and the
-	// provider-error path.
+	// provider-error path. Streaming precedes it: OnToken and OnThinking
+	// deltas have already reached the observer, so a consumer that must
+	// suppress blocked output has to buffer them until OnStep.
 	HookOutput
 	// HookToolCall inspects one tool call before Plan and approval.
 	HookToolCall
@@ -127,6 +129,10 @@ const (
 	TargetOutputContent
 	TargetOutputToolCall
 	TargetToolCall
+	// TargetAlternative is one ContextSet alternative (Group, Alternative) of
+	// the message at StateIndex. TargetMessage ignores those two fields, so
+	// their zero values never select an alternative by accident.
+	TargetAlternative
 )
 
 func (k TargetKind) String() string {
@@ -145,6 +151,8 @@ func (k TargetKind) String() string {
 		return "output_tool_call"
 	case TargetToolCall:
 		return "tool_call"
+	case TargetAlternative:
+		return "alternative"
 	default:
 		return "unknown"
 	}
@@ -206,10 +214,11 @@ type ToolCallInspection struct {
 // finding: Interceptor, Hook and Step are stamped; a blank Rule becomes
 // "unspecified"; an unknown Verdict clamps to Abort; Risk is clamped to
 // [0, 100]; Detail is flattened to one line, capped at 256 bytes, and is
-// telemetry only; Target is validated for the hook (see TargetKind) and an
+// telemetry only; Target is validated for the hook (see TargetKind): an
 // invalid target becomes TargetNone with StateIndex/Group/Alternative -1 and
-// an empty ToolCallID; Origin comes from the target when there is one and is
-// otherwise the interceptor's value normalized.
+// an empty ToolCallID, and a TargetAlternative whose indices name no
+// alternative degrades to TargetMessage; Origin comes from the target when
+// there is one and is otherwise the interceptor's value normalized.
 type Finding struct {
 	Interceptor string
 	Rule        string
@@ -280,6 +289,9 @@ func validateInterceptors(ic []Interceptor) error {
 		name := it.Name()
 		if name == "" {
 			return fmt.Errorf("agent: interceptor at index %d has an empty name", i)
+		}
+		if !validName(name) {
+			return fmt.Errorf("agent: interceptor at index %d has an invalid name %q (want [A-Za-z0-9_.:-], at most %d bytes)", i, name, maxNameBytes)
 		}
 		if _, dup := seen[name]; dup {
 			return fmt.Errorf("agent: duplicate interceptor name %q", name)
@@ -383,8 +395,43 @@ type InterceptionObserver interface {
 	OnInterception(ctx context.Context, e InterceptionEvent) error
 }
 
-// maxFindingDetailBytes bounds telemetry detail text.
-const maxFindingDetailBytes = 256
+// maxFindingDetailBytes bounds telemetry detail text; maxRuleBytes and
+// maxNameBytes bound the two strings that reach model-visible framing.
+const (
+	maxFindingDetailBytes = 256
+	maxRuleBytes          = 64
+	maxNameBytes          = 64
+)
+
+// capBytes truncates s to at most n bytes on a rune boundary.
+func capBytes(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	end := n
+	for end > 0 && !utf8.RuneStart(s[end]) {
+		end--
+	}
+	return s[:end]
+}
+
+// validName reports whether an interceptor name is a bounded identifier
+// ([A-Za-z0-9_.:-], 1..64 bytes). Names reach model-visible framing, so they
+// can carry neither whitespace nor the bracket characters the trailer uses.
+func validName(name string) bool {
+	if name == "" || len(name) > maxNameBytes {
+		return false
+	}
+	for i := 0; i < len(name); i++ {
+		c := name[i]
+		switch {
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9', c == '_', c == '.', c == ':', c == '-':
+		default:
+			return false
+		}
+	}
+	return true
+}
 
 // interceptorRun is the per-run pipeline state. Run creates it, run resolves
 // its chain, and dispatch/verify receive it, so both dispatch paths and the
@@ -392,10 +439,6 @@ const maxFindingDetailBytes = 256
 type interceptorRun struct {
 	chain []Interceptor
 	risk  RiskReport
-}
-
-func (o *Orchestrator) newInterceptorRun() *interceptorRun {
-	return &interceptorRun{chain: o.interceptors}
 }
 
 // snapshot copies the cumulative report so an approver or observer cannot
@@ -521,6 +564,7 @@ func noTarget(f Finding) Finding {
 // validates the target for the hook in scope.
 func normalizeFinding(f Finding, name string, step int, scope hookScope) Finding {
 	f.Interceptor, f.Hook, f.Step = name, scope.hook, step
+	f.Rule = capBytes(promptfence.FlattenLine(f.Rule), maxRuleBytes)
 	if f.Rule == "" {
 		f.Rule = "unspecified"
 	}
@@ -532,14 +576,7 @@ func normalizeFinding(f Finding, name string, step int, scope hookScope) Finding
 	} else if f.Risk > 100 {
 		f.Risk = 100
 	}
-	f.Detail = promptfence.FlattenLine(f.Detail)
-	if len(f.Detail) > maxFindingDetailBytes {
-		end := maxFindingDetailBytes
-		for end > 0 && !utf8.RuneStart(f.Detail[end]) {
-			end--
-		}
-		f.Detail = f.Detail[:end]
-	}
+	f.Detail = capBytes(promptfence.FlattenLine(f.Detail), maxFindingDetailBytes)
 	switch scope.hook {
 	case HookInput:
 		switch f.Target {
@@ -555,12 +592,13 @@ func normalizeFinding(f Finding, name string, step int, scope hookScope) Finding
 				f.Target, f.Origin = TargetSummary, OriginModel
 				return f
 			}
-		case TargetMessage:
+		case TargetMessage, TargetAlternative:
 			if m := findTarget(scope.messages, f.StateIndex); m != nil {
 				f.Origin, f.ToolCallID = m.Origin, m.ToolCallID
-				if !validAlternative(m, f.Group, f.Alternative) {
-					f.Group, f.Alternative = -1, -1
+				if f.Target == TargetAlternative && validAlternative(m, f.Group, f.Alternative) {
+					return f
 				}
+				f.Target, f.Group, f.Alternative = TargetMessage, -1, -1
 				return f
 			}
 		}
@@ -590,6 +628,17 @@ func normalizeFinding(f Finding, name string, step int, scope hookScope) Finding
 	return f
 }
 
+// cloneInput gives one interceptor its own copy of an input inspection, so a
+// misbehaving interceptor cannot rewrite what later ones (or target
+// validation) see. Strings are immutable and shared.
+func cloneInput(in InputInspection) InputInspection {
+	in.Messages = slices.Clone(in.Messages)
+	for i := range in.Messages {
+		in.Messages[i].Alternatives = slices.Clone(in.Messages[i].Alternatives)
+	}
+	return in
+}
+
 func originOfRole(role string) Origin {
 	switch role {
 	case "user":
@@ -614,19 +663,23 @@ func (r *interceptorRun) inspectInitial(ctx context.Context, obs Observer, state
 	}
 	scope := hookScope{hook: HookInput, messages: in.Messages, hasSystem: in.System != "", hasSummary: in.Summary != ""}
 	findings, verdict, err := r.runHook(ctx, obs, 0, scope,
-		func(ic Interceptor) ([]Finding, error) { return ic.InspectInput(ctx, in) })
+		func(ic Interceptor) ([]Finding, error) { return ic.InspectInput(ctx, cloneInput(in)) })
 	return terminalAt(VerdictBlock, HookInput, 0, findings, verdict, err)
 }
 
-// finishWithError finalizes a Result for an error return after State exists:
-// when the error carries a BlockedError it appends the "blocked" event; it
-// always publishes the messages produced so far.
+// finishWithError finalizes a Result for an error return after State exists.
+// When the error carries a BlockedError it appends the "blocked" event and
+// publishes the messages produced so far (the block is a decision consumers
+// want to see in context). Any other hard abort keeps the pre-#436 contract:
+// no partial transcript, so a consumer that salvages the last message from
+// Result.Messages (dispatch does) never presents a tool observation as a
+// summary of an aborted run.
 func finishWithError(res *Result, state State, historyLen int, err error) (Result, error) {
 	var blocked *BlockedError
 	if errors.As(err, &blocked) {
 		res.Events = append(res.Events, EventRecord{Step: blocked.Step, Kind: "blocked"})
+		res.Messages = resultMessages(state, historyLen)
 	}
-	res.Messages = resultMessages(state, historyLen)
 	return *res, err
 }
 
@@ -637,13 +690,15 @@ func (r *interceptorRun) inspectOutput(ctx context.Context, obs Observer, step i
 	if len(r.chain) == 0 {
 		return nil
 	}
-	out := OutputInspection{Step: step, Content: resp.Content, Thinking: resp.Thinking, ToolCalls: cloneToolCalls(resp.ToolCalls)}
 	ids := make([]string, 0, len(resp.ToolCalls))
 	for _, c := range resp.ToolCalls {
 		ids = append(ids, c.ID)
 	}
 	findings, verdict, err := r.runHook(ctx, obs, step, hookScope{hook: HookOutput, callIDs: ids},
-		func(ic Interceptor) ([]Finding, error) { return ic.InspectOutput(ctx, out) })
+		func(ic Interceptor) ([]Finding, error) {
+			// Each interceptor gets its own copy of the tool calls.
+			return ic.InspectOutput(ctx, OutputInspection{Step: step, Content: resp.Content, Thinking: resp.Thinking, ToolCalls: cloneToolCalls(resp.ToolCalls)})
+		})
 	return terminalAt(VerdictBlock, HookOutput, step, findings, verdict, err)
 }
 
@@ -664,9 +719,11 @@ func (r *interceptorRun) inspectToolCall(ctx context.Context, obs Observer, step
 	if len(r.chain) == 0 {
 		return nil, nil
 	}
-	in := ToolCallInspection{Step: step, Call: cloneToolCall(call), Effect: effect}
 	findings, verdict, err := r.runHook(ctx, obs, step, hookScope{hook: HookToolCall, toolCallID: call.ID},
-		func(ic Interceptor) ([]Finding, error) { return ic.InspectToolCall(ctx, in) })
+		func(ic Interceptor) ([]Finding, error) {
+			// Each interceptor gets its own copy of the canonical call.
+			return ic.InspectToolCall(ctx, ToolCallInspection{Step: step, Call: cloneToolCall(call), Effect: effect})
+		})
 	if err != nil || verdict == VerdictAbort {
 		return nil, terminalAt(VerdictAbort, HookToolCall, step, findings, verdict, err)
 	}
@@ -698,7 +755,7 @@ func (r *interceptorRun) inspectObservation(ctx context.Context, obs Observer, s
 	in := InputInspection{Step: step, Messages: []InspectedMessage{msg}}
 	scope := hookScope{hook: HookInput, messages: in.Messages, toolCallID: msg.ToolCallID}
 	findings, verdict, err := r.runHook(ctx, obs, step, scope,
-		func(ic Interceptor) ([]Finding, error) { return ic.InspectInput(ctx, in) })
+		func(ic Interceptor) ([]Finding, error) { return ic.InspectInput(ctx, cloneInput(in)) })
 	if err != nil || verdict == VerdictAbort {
 		return nil, nil, terminalAt(VerdictAbort, HookInput, step, findings, verdict, err)
 	}
@@ -728,35 +785,62 @@ func alternativesOf(set *ContextSet) []InspectedAlternative {
 	return out
 }
 
-// annotateResult appends one trailer per tag finding to the canonical
-// result's fallback Content and, when it carries a ContextSet, to every
-// alternative (they replace Content under mixed assembly, #331 spec 3.2). It
-// returns the bytes to add to OutputCap: the allocator caps the JOIN of one
-// chosen alternative per group, so the widening is trailer bytes times the
-// number of groups (at least one for the fallback), saturating.
-func annotateResult(out *ToolResult, tags []Finding) int {
-	var trailers string
+// distinctTrailers renders one trailer per distinct (interceptor, rule) pair
+// in finding order, so a detector that tags every alternative under one rule
+// contributes one trailer, not one per alternative.
+func distinctTrailers(findings []Finding) string {
+	type key struct{ ic, rule string }
+	seen := make(map[key]bool, len(findings))
+	var s string
+	for _, f := range findings {
+		k := key{f.Interceptor, f.Rule}
+		if seen[k] {
+			continue
+		}
+		seen[k] = true
+		s += tagTrailer(f)
+	}
+	return s
+}
+
+// annotateResult appends tag trailers to the canonical result. Message-level
+// findings annotate the fallback Content and, under mixed assembly, every
+// alternative (they replace Content there, #331 spec 3.2); a finding that
+// targets one alternative annotates that alternative only. Trailers are
+// deduplicated per target by (interceptor, rule), which bounds the growth to
+// the chain's rule count rather than the alternative count. In legacy mode
+// the set is the tool's own memory and is never read, so it is not touched.
+// The return value is the bytes to add to OutputCap: the allocator caps the
+// join of one chosen alternative per group, so it is the sum over groups of
+// the largest growth in that group (saturating), or the fallback's growth
+// when there are no groups to join.
+func annotateResult(out *ToolResult, tags []Finding, mixed bool) int {
+	var message []Finding
+	perAlt := map[[2]int][]Finding{}
 	for _, f := range tags {
-		trailers += tagTrailer(f)
-	}
-	if trailers == "" {
-		return 0
-	}
-	out.Content += trailers
-	groups := 1
-	if out.Context != nil {
-		if len(out.Context.Groups) > groups {
-			groups = len(out.Context.Groups)
+		if !mixed || f.Target != TargetAlternative {
+			message = append(message, f)
+			continue
 		}
-		for gi := range out.Context.Groups {
-			for ai := range out.Context.Groups[gi].Alternatives {
-				out.Context.Groups[gi].Alternatives[ai].Content += trailers
-			}
-		}
+		k := [2]int{f.Group, f.Alternative}
+		perAlt[k] = append(perAlt[k], f)
+	}
+	base := distinctTrailers(message)
+	out.Content += base
+	if !mixed || out.Context == nil || len(out.Context.Groups) == 0 {
+		return len(base)
 	}
 	widen := 0
-	for i := 0; i < groups; i++ {
-		widen = addSaturating(widen, len(trailers))
+	for gi := range out.Context.Groups {
+		groupMax := 0
+		for ai := range out.Context.Groups[gi].Alternatives {
+			t := distinctTrailers(append(slices.Clone(message), perAlt[[2]int{gi, ai}]...))
+			out.Context.Groups[gi].Alternatives[ai].Content += t
+			if len(t) > groupMax {
+				groupMax = len(t)
+			}
+		}
+		widen = addSaturating(widen, groupMax)
 	}
 	return widen
 }
@@ -766,6 +850,18 @@ func cloneAttrib(a *RetrievalAttribution) *RetrievalAttribution {
 		return nil
 	}
 	return &RetrievalAttribution{Sources: slices.Clone(a.Sources)}
+}
+
+// trusted reports whether an origin is in the tagged class (user, system,
+// model, workspace) as opposed to the blocked class (foreign, unknown,
+// invalid); the detectors apply the same split.
+func trusted(o Origin) bool {
+	switch o {
+	case OriginUser, OriginSystem, OriginModel, OriginWorkspace:
+		return true
+	default:
+		return false
+	}
 }
 
 func staticOrigin(tool Tool) Origin {

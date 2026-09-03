@@ -23,7 +23,9 @@ and #452.
   alternative).
 - Inspection at ingress on frozen values: the initial input before assembly;
   the collected model response (content, thinking, tool calls) before it is
-  recorded or published, including the partial output of a failed stream;
+  recorded or reaches `OnStep` (streamed `OnToken`/`OnThinking` deltas
+  precede inspection and cannot be retracted), including the partial output
+  of a failed stream;
   each tool call before `Plan` and approval on both dispatch paths, with
   `Plan`, the approver, `OnToolCall` and `OnStep` receiving their own copies;
   each tool result before the observer, State and the governor, with
@@ -43,9 +45,10 @@ and #452.
   instance and a system-prompt addendum (a canary nonce's seam).
 - Provenance: `ToolResult.Origin` per invocation, else the tool's
   `OriginTool`, else unknown; invalid values normalize to unknown, which
-  detectors treat as foreign. Every built-in declares: workspace for file,
-  search, exec, background, scratch, retrieve and memory tools; model for
-  `delegate_code` and `dispatch`; MCP observations are foreign.
+  detectors treat as foreign. Every built-in in `agent/tools` declares:
+  workspace for file, search, exec, background, scratch, retrieve and memory
+  tools; model for `delegate_code` and `dispatch`; MCP observations are
+  foreign. Golem's own tool wrappers follow in the wiring follow-up.
 - `tools.NewDispatch(..., interceptors ...agent.Interceptor)` installs them
   on every child; child envelopes report `risk_score` when non-zero.
 - New `agent/interceptor` package: `ZeroWidth`, `Encoding`, `Typoglycemia`

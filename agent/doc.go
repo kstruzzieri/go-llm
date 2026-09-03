@@ -13,7 +13,9 @@
 //     the partial output of a failed stream), each tool call before Plan and
 //     approval, each tool result before the observer and State, and verifier
 //     output; verdicts allow/tag/block/abort; per-run RiskReport on
-//     Result.Risk; opt-in, off unless WithInterceptors is used
+//     Result.Risk; opt-in, off unless WithInterceptors is used. Streamed
+//     OnToken/OnThinking deltas precede output inspection and cannot be
+//     retracted; consumers that must suppress blocked output buffer them
 //   - Compactor    — RecencyCompactor fits the transcript to the token budget
 //   - token estimator — conversation.TokenEstimator (len/4 default)
 //

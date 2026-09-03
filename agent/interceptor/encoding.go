@@ -34,8 +34,9 @@ var _ agent.Interceptor = Encoding{}
 // Name returns "encoding".
 func (Encoding) Name() string { return "encoding" }
 
-// unfold removes MIME-style line folds (a newline followed by any spaces or
-// tabs) and nothing else, so words separated by ordinary spaces stay apart.
+// unfold removes newlines (CRLF or LF) together with any spaces or tabs that
+// follow them, and nothing else: MIME folds and base64(1)'s 76-column wraps
+// rejoin, while words separated by ordinary spaces stay apart.
 func unfold(s string) string {
 	var b strings.Builder
 	b.Grow(len(s))
@@ -65,10 +66,28 @@ func isHexChar(r rune) bool {
 	return (r >= '0' && r <= '9') || (r >= 'a' && r <= 'f') || (r >= 'A' && r <= 'F')
 }
 
-// runsOf returns maximal runs of characters satisfying pred with at least
-// minLen bytes.
+// runsOf returns maximal runs of characters satisfying pred, split after any
+// base64 padding ("=" followed by a non-padding character ends a run, since
+// padding can only close a payload), keeping pieces of at least minLen bytes.
+// Without the split, one alphabet byte appended after "==" makes the whole
+// run undecodable and the payload evades detection.
 func runsOf(s string, pred func(rune) bool, minLen int) []string {
 	var runs []string
+	emit := func(run string) {
+		for len(run) > 0 {
+			cut := len(run)
+			for i := 0; i+1 < len(run); i++ {
+				if run[i] == '=' && run[i+1] != '=' {
+					cut = i + 1
+					break
+				}
+			}
+			if cut >= minLen {
+				runs = append(runs, run[:cut])
+			}
+			run = run[cut:]
+		}
+	}
 	start := -1
 	for i, r := range s {
 		if pred(r) {
@@ -77,13 +96,13 @@ func runsOf(s string, pred func(rune) bool, minLen int) []string {
 			}
 			continue
 		}
-		if start >= 0 && i-start >= minLen {
-			runs = append(runs, s[start:i])
+		if start >= 0 {
+			emit(s[start:i])
 		}
 		start = -1
 	}
-	if start >= 0 && len(s)-start >= minLen {
-		runs = append(runs, s[start:])
+	if start >= 0 {
+		emit(s[start:])
 	}
 	return runs
 }
