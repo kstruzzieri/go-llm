@@ -481,10 +481,10 @@ func (r *interceptorRun) runHook(ctx context.Context, obs Observer, step int, sc
 // still finds the structured block (spec D1). Below min, only the errors
 // propagate (nil when there are none).
 func terminalAt(min Verdict, hook Hook, step int, findings []Finding, verdict Verdict, err error) error {
-	if verdict < min && (err == nil || verdict < VerdictBlock) {
-		return err
-	}
-	if verdict < VerdictBlock {
+	// Nothing to block below Block. Between Block and min the block is
+	// recoverable, so it becomes a BlockedError only when an error forces the
+	// run to end anyway; otherwise the caller handles it as a synthetic result.
+	if verdict < VerdictBlock || (verdict < min && err == nil) {
 		return err
 	}
 	blocked := &BlockedError{Hook: hook, Step: step, Findings: findings}
