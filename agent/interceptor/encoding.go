@@ -120,10 +120,8 @@ func decodeBase64(run string) (string, bool) {
 	return "", false
 }
 
+// decodeHex relies on hex.DecodeString to reject odd-length runs.
 func decodeHex(run string) (string, bool) {
-	if len(run)%2 != 0 {
-		return "", false
-	}
 	b, err := hex.DecodeString(run)
 	if err != nil || !utf8.Valid(b) {
 		return "", false
