@@ -527,7 +527,11 @@ func TestInitialInputBlockPreventsTheModelCall(t *testing.T) {
 		t.Run(v.String(), func(t *testing.T) {
 			mc := &scriptedCaller{responses: []ModelResult{finalAnswer("never")}}
 			rec := &interceptRecorder{}
-			o := newTestOrchestrator(mc, WithInterceptors(verdictAll("guard", v)))
+			// Assembly estimates every message; a block BEFORE assembly leaves
+			// only the single tool-schema estimate that precedes the loop.
+			estimates := 0
+			counting := func(s string) int { estimates++; return len([]rune(s)) }
+			o := New(mc, ContextManager{Compactor: RecencyCompactor{Estimate: counting}, Estimate: counting}, WithInterceptors(verdictAll("guard", v)))
 			res, err := o.Run(context.Background(), Request{Goal: "q", System: "sys"}, rec)
 			var blocked *BlockedError
 			if !errors.As(err, &blocked) || blocked.Hook != HookInput || blocked.Step != 0 {
@@ -535,6 +539,9 @@ func TestInitialInputBlockPreventsTheModelCall(t *testing.T) {
 			}
 			if mc.calls != 0 {
 				t.Fatalf("model called %d times after an input block", mc.calls)
+			}
+			if estimates != 1 {
+				t.Fatalf("estimator called %d times; a blocked run must not assemble (only the tool-schema estimate runs before the gate)", estimates)
 			}
 			if kinds(res.Events) != "blocked" {
 				t.Fatalf("events = %+v, want [blocked]", res.Events)
