@@ -25,9 +25,9 @@ func (o *Orchestrator) runToolCalls(ctx context.Context, res *Result, state *Sta
 	b := newBatch()
 	var err error
 	if len(calls) >= 2 && canRunParallel(reg, calls) && gov.parallelUncapped(calls) {
-		err = o.runToolCallsParallel(ctx, res, state, reg, calls, approver, obs, step, gov, &b)
+		err = o.runToolCallsParallel(ctx, res, state, reg, calls, approver, obs, step, gov, &b, ic)
 	} else {
-		err = o.runToolCallsSerial(ctx, res, state, reg, calls, approver, obs, step, gov, &b)
+		err = o.runToolCallsSerial(ctx, res, state, reg, calls, approver, obs, step, gov, &b, ic)
 	}
 	if err != nil {
 		return err
@@ -37,20 +37,20 @@ func (o *Orchestrator) runToolCalls(ctx context.Context, res *Result, state *Sta
 		// gets no further turn, so the observation would never be read.
 		return nil
 	}
-	return o.verifyBatch(ctx, state, approver, &b)
+	return o.verifyBatch(ctx, state, approver, &b, obs, step, ic)
 }
 
 func (o *Orchestrator) runToolCallsSerial(ctx context.Context, res *Result, state *State,
 	reg *toolRegistry, calls []provider.ToolCall, approver Approver, obs Observer, step int,
-	gov *restraintGovernor, b *batch) error {
+	gov *restraintGovernor, b *batch, ic *interceptorRun) error {
 
 	for _, call := range calls {
 		res.Events = append(res.Events, EventRecord{Step: step, Kind: "tool_call"})
-		out, effect, rec, err := o.dispatch(ctx, reg, call, approver, obs, step, gov)
+		out, effect, rec, err := o.dispatch(ctx, reg, call, approver, obs, step, gov, ic)
 		if err != nil {
-			return err // hard abort (ctx cancel / approver error): no ToolResult, no OnToolResult
+			return err // hard abort (ctx cancel / approver error / interceptor abort): no ToolResult, no OnToolResult
 		}
-		stop, err := o.recordResult(ctx, res, state, obs, gov, step, call, effect, rec, out, b)
+		stop, err := o.recordResult(ctx, res, state, obs, gov, step, call, effect, rec, out, b, ic)
 		if err != nil {
 			return err
 		}
@@ -75,7 +75,7 @@ func (o *Orchestrator) runToolCallsSerial(ctx context.Context, res *Result, stat
 // not in either runner.
 func (o *Orchestrator) recordResult(ctx context.Context, res *Result, state *State, obs Observer,
 	gov *restraintGovernor, step int, call provider.ToolCall, effect Effect, rec ToolCallRecord,
-	out ToolResult, b *batch) (stop bool, err error) {
+	out ToolResult, b *batch, ic *interceptorRun) (stop bool, err error) {
 
 	rec.RouteOutcome = out.RouteOutcome
 	res.ToolCalls = append(res.ToolCalls, rec)
@@ -84,7 +84,7 @@ func (o *Orchestrator) recordResult(ctx context.Context, res *Result, state *Sta
 		if err := tro.OnToolResult(ctx, ToolResultEvent{
 			Step: step, Call: call, Effect: effect, Result: out,
 			Denied: rec.Denied, Invoked: rec.Invoked, Latency: rec.Latency,
-			AutoApproved: rec.AutoApproved,
+			AutoApproved: rec.AutoApproved, Blocked: rec.Blocked,
 		}); err != nil {
 			return false, err
 		}
@@ -114,9 +114,9 @@ func (o *Orchestrator) recordResult(ctx context.Context, res *Result, state *Sta
 
 // preparedCall is the outcome of the serial, observer/approval phase of one tool
 // call. When prepareCall returns a nil error, exactly one of two states holds:
-//   - result != nil: a synthetic outcome (unknown tool / bad JSON / plan failure /
-//     approval denied / invocation budget exhausted). The caller must NOT Invoke;
-//     use result directly.
+//   - result != nil: a synthetic outcome (unknown tool / bad JSON / interceptor
+//     block / plan failure / approval denied / invocation budget exhausted). The
+//     caller must NOT Invoke; use result directly.
 //   - result == nil: tool and effect are populated; the caller runs invokeCall.
 type preparedCall struct {
 	call   provider.ToolCall
@@ -127,13 +127,18 @@ type preparedCall struct {
 }
 
 // prepareCall runs everything that must stay on the main goroutine and in loop
-// order: lookup, JSON validation, per-call effect/Plan, approval, and OnToolCall.
-// It NEVER appends EventRecords (callers own event ordering) and NEVER Invokes.
-// A non-nil error is a hard abort (ctx cancel / approver failure / observer error);
-// p.rec is still returned so the caller can record it.
+// order: lookup, JSON validation, the interceptor gate, per-call effect/Plan,
+// approval, and OnToolCall. It NEVER appends EventRecords (callers own event
+// ordering) and NEVER Invokes. A non-nil error is a hard abort (ctx cancel /
+// approver failure / observer error / interceptor abort); p.rec is still
+// returned so the caller can record it.
 func (o *Orchestrator) prepareCall(ctx context.Context, reg *toolRegistry, call provider.ToolCall,
-	approver Approver, obs Observer, step int, gov *restraintGovernor) (preparedCall, error) {
+	approver Approver, obs Observer, step int, gov *restraintGovernor, ic *interceptorRun) (preparedCall, error) {
 
+	// #436 spec D6: one canonical copy for inspection and invocation. Every
+	// callback below (Plan, approver, OnToolCall) receives its own clone, so
+	// nothing can change the bytes between inspection and Invoke.
+	call = cloneToolCall(call)
 	name := call.Function.Name
 	p := preparedCall{call: call, rec: ToolCallRecord{Step: step, Name: name}}
 
@@ -149,10 +154,26 @@ func (o *Orchestrator) prepareCall(ctx context.Context, reg *toolRegistry, call 
 		return p, nil
 	}
 
+	// #436: capture the static effect BEFORE the gate so a blocked call still
+	// records the effect it was dispatched under, as a denial does, then
+	// inspect in this single serial prepare phase shared by both dispatch
+	// paths, BEFORE Plan and approval: a blocked call never plans, never
+	// prompts, and never invokes.
+	p.effect = normalizeEffect(tool.Effect())
+	blockedCall, err := ic.inspectToolCall(ctx, obs, step, call, p.effect)
+	if err != nil {
+		return p, err
+	}
+	if blockedCall != nil {
+		p.rec.IsError, p.rec.Blocked = true, true
+		p.result = blockedCall
+		return p, nil
+	}
+
 	effect := tool.Effect()
 	var preview, approvalKey string
 	if pt, ok := tool.(PlanningTool); ok {
-		plan, err := pt.Plan(ctx, call.Function.Arguments)
+		plan, err := pt.Plan(ctx, cloneToolCall(call).Function.Arguments)
 		if err != nil {
 			p.rec.IsError = true
 			p.result = &ToolResult{IsError: true, Content: "plan failed: " + err.Error()}
@@ -164,7 +185,7 @@ func (o *Orchestrator) prepareCall(ctx context.Context, reg *toolRegistry, call 
 	p.effect = effect // capture now so a denial (which returns before invoke) still carries the effect
 
 	if needsApproval(effect.Approval, effect.Class) {
-		d, err := approve(ctx, approver, call, preview, approvalKey)
+		d, err := approve(ctx, approver, cloneToolCall(call), preview, approvalKey, ic.snapshot())
 		if err != nil {
 			return p, err // ctx cancel / approver failure propagates
 		}
@@ -181,7 +202,7 @@ func (o *Orchestrator) prepareCall(ctx context.Context, reg *toolRegistry, call 
 		return p, nil
 	}
 
-	if err := obs.OnToolCall(ctx, ToolCallEvent{Step: step, Call: call, Effect: effect, Preview: preview}); err != nil {
+	if err := obs.OnToolCall(ctx, ToolCallEvent{Step: step, Call: cloneToolCall(call), Effect: effect, Preview: preview}); err != nil {
 		return p, err
 	}
 
@@ -207,9 +228,9 @@ func (o *Orchestrator) invokeCall(ctx context.Context, tool Tool, effect Effect,
 // A cancelled PARENT context after invoke is a hard abort (distinct from a tool's
 // own per-call timeout, which stays a model-visible IsError observation).
 func (o *Orchestrator) dispatch(ctx context.Context, reg *toolRegistry, call provider.ToolCall,
-	approver Approver, obs Observer, step int, gov *restraintGovernor) (ToolResult, Effect, ToolCallRecord, error) {
+	approver Approver, obs Observer, step int, gov *restraintGovernor, ic *interceptorRun) (ToolResult, Effect, ToolCallRecord, error) {
 
-	p, err := o.prepareCall(ctx, reg, call, approver, obs, step, gov)
+	p, err := o.prepareCall(ctx, reg, call, approver, obs, step, gov, ic)
 	if err != nil {
 		return ToolResult{}, p.effect, p.rec, err
 	}
@@ -217,7 +238,7 @@ func (o *Orchestrator) dispatch(ctx context.Context, reg *toolRegistry, call pro
 		return *p.result, p.effect, p.rec, nil
 	}
 	start := o.now()
-	out := o.invokeCall(ctx, p.tool, p.effect, call.Function.Arguments)
+	out := o.invokeCall(ctx, p.tool, p.effect, p.call.Function.Arguments) // the canonical, inspected bytes
 	p.rec.Invoked = true
 	p.rec.Latency = o.now().Sub(start)
 	if ctx.Err() != nil {
@@ -229,12 +250,16 @@ func (o *Orchestrator) dispatch(ctx context.Context, reg *toolRegistry, call pro
 
 // approve applies the fail-safe: a nil approver denies any call that reaches it
 // (read-only tools never reach it because needsApproval is false for them).
-// A KeyedApprover receives the plan's structural ApprovalKey and returns the
-// full decision; a plain Approver keeps its existing signature, its bare bool
+// A RiskApprover receives the run's cumulative RiskReport snapshot (#436); a
+// KeyedApprover receives the plan's structural ApprovalKey and returns the full
+// decision; a plain Approver keeps its existing signature, its bare bool
 // lifted into a decision with no grant provenance.
-func approve(ctx context.Context, approver Approver, call provider.ToolCall, preview, approvalKey string) (ApprovalDecision, error) {
+func approve(ctx context.Context, approver Approver, call provider.ToolCall, preview, approvalKey string, risk RiskReport) (ApprovalDecision, error) {
 	if approver == nil {
 		return ApprovalDecision{}, nil
+	}
+	if ra, ok := approver.(RiskApprover); ok {
+		return ra.ApproveWithRisk(ctx, call, preview, approvalKey, risk)
 	}
 	if ka, ok := approver.(KeyedApprover); ok {
 		return ka.ApproveKeyed(ctx, call, preview, approvalKey)

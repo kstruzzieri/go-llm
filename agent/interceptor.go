@@ -646,3 +646,32 @@ func (r *interceptorRun) inspectOutput(ctx context.Context, obs Observer, step i
 		func(ic Interceptor) ([]Finding, error) { return ic.InspectOutput(ctx, out) })
 	return terminalAt(VerdictBlock, HookOutput, step, findings, verdict, err)
 }
+
+// blockedCallContent is the exact model-visible observation for a blocked call.
+func blockedCallContent(f Finding) string {
+	return "tool call blocked by interceptor " + f.Interceptor + " (" + f.Rule + ")"
+}
+
+func cloneToolCall(call provider.ToolCall) provider.ToolCall {
+	return cloneToolCalls([]provider.ToolCall{call})[0]
+}
+
+// inspectToolCall runs HookToolCall before Plan and approval on a private
+// clone of the canonical call. It returns the synthetic result to record on
+// Block, and the error to propagate: a BlockedError on Abort (joined with any
+// hook errors), or the hook errors alone.
+func (r *interceptorRun) inspectToolCall(ctx context.Context, obs Observer, step int, call provider.ToolCall, effect Effect) (*ToolResult, error) {
+	if len(r.chain) == 0 {
+		return nil, nil
+	}
+	in := ToolCallInspection{Step: step, Call: cloneToolCall(call), Effect: effect}
+	findings, verdict, err := r.runHook(ctx, obs, step, hookScope{hook: HookToolCall, toolCallID: call.ID},
+		func(ic Interceptor) ([]Finding, error) { return ic.InspectToolCall(ctx, in) })
+	if err != nil || verdict == VerdictAbort {
+		return nil, terminalAt(VerdictAbort, HookToolCall, step, findings, verdict, err)
+	}
+	if verdict == VerdictBlock {
+		return &ToolResult{IsError: true, Content: blockedCallContent(cause(findings))}, nil
+	}
+	return nil, nil
+}

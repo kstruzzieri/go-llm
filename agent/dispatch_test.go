@@ -73,7 +73,7 @@ func TestRecordResult_CopiesRouteOutcome(t *testing.T) {
 
 	o := New(nil, ContextManager{})
 	b := newBatch()
-	stop, err := o.recordResult(context.Background(), &res, &state, nil, &restraintGovernor{}, 0, call, Effect{Class: Read | Network}, ToolCallRecord{Step: 0, Name: "delegate_code"}, out, &b)
+	stop, err := o.recordResult(context.Background(), &res, &state, nil, &restraintGovernor{}, 0, call, Effect{Class: Read | Network}, ToolCallRecord{Step: 0, Name: "delegate_code"}, out, &b, o.newInterceptorRun())
 	if err != nil || stop {
 		t.Fatalf("recordResult: stop=%v err=%v", stop, err)
 	}
@@ -260,7 +260,7 @@ func TestRecordResultRejectsOversizedContextBeforeCloning(t *testing.T) {
 			b := newBatch()
 			_, err := o.recordResult(context.Background(), &res, &state, obs, &restraintGovernor{}, 0,
 				provider.ToolCall{ID: "call-1", Function: provider.ToolCallFunction{Name: "ctx"}},
-				Effect{}, ToolCallRecord{}, ToolResult{Content: "result", Context: tt.set}, &b)
+				Effect{}, ToolCallRecord{}, ToolResult{Content: "result", Context: tt.set}, &b, o.newInterceptorRun())
 			if err == nil || !strings.Contains(err.Error(), tt.want) {
 				t.Fatalf("recordResult error = %v, want %q", err, tt.want)
 			}
@@ -349,7 +349,7 @@ func TestRecordResultCopiesOutputCap(t *testing.T) {
 		b := newBatch()
 		if _, err := o.recordResult(context.Background(), &res, &state, nil, &restraintGovernor{}, 0,
 			provider.ToolCall{Function: provider.ToolCallFunction{Name: "nope"}},
-			Effect{}, ToolCallRecord{}, ToolResult{IsError: true, Content: "unknown tool: nope"}, &b); err != nil {
+			Effect{}, ToolCallRecord{}, ToolResult{IsError: true, Content: "unknown tool: nope"}, &b, o.newInterceptorRun()); err != nil {
 			t.Fatalf("recordResult: %v", err)
 		}
 		if got := state.Messages[0].OutputCap; got != 0 {

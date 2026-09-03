@@ -364,7 +364,7 @@ func TestVerifyBatchNeverAppendsWhenTheVerifierErrors(t *testing.T) {
 	b := batch{verifyAnchor: 0}
 	o := New(nil, ContextManager{}, WithVerifier(&fakeVerifier{out: verifyObs, err: sentinel}))
 
-	if err := o.verifyBatch(context.Background(), &st, nil, &b); !errors.Is(err, sentinel) {
+	if err := o.verifyBatch(context.Background(), &st, nil, &b, nil, 0, o.newInterceptorRun()); !errors.Is(err, sentinel) {
 		t.Fatalf("verifyBatch err = %v, want %v", err, sentinel)
 	}
 	if st.Messages[0].Content != "wrote" {
@@ -378,7 +378,7 @@ func TestVerifyBatchNeverAppendsAfterCancellation(t *testing.T) {
 	b := batch{verifyAnchor: 0}
 	o := New(nil, ContextManager{}, WithVerifier(&fakeVerifier{out: verifyObs, hook: cancel}))
 
-	if err := o.verifyBatch(ctx, &st, nil, &b); !errors.Is(err, context.Canceled) {
+	if err := o.verifyBatch(ctx, &st, nil, &b, nil, 0, o.newInterceptorRun()); !errors.Is(err, context.Canceled) {
 		t.Fatalf("verifyBatch err = %v, want context.Canceled", err)
 	}
 	if st.Messages[0].Content != "wrote" {
@@ -391,7 +391,7 @@ func TestVerifyBatchAppendsToTheAnchorOnSuccess(t *testing.T) {
 	b := batch{verifyAnchor: 0}
 	o := New(nil, ContextManager{}, WithVerifier(&fakeVerifier{out: verifyObs}))
 
-	if err := o.verifyBatch(context.Background(), &st, nil, &b); err != nil {
+	if err := o.verifyBatch(context.Background(), &st, nil, &b, nil, 0, o.newInterceptorRun()); err != nil {
 		t.Fatalf("verifyBatch: %v", err)
 	}
 	if want := "wrote" + verifyObs; st.Messages[0].Content != want {

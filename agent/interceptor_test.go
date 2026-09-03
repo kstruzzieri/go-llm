@@ -5,10 +5,12 @@ import (
 	"encoding/json"
 	"errors"
 	"math"
+	"reflect"
 	"slices"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/kstruzzieri/go-llm/provider"
 )
@@ -873,5 +875,267 @@ func TestProviderErrorWithBlankPartialIsNotInspected(t *testing.T) {
 	_, err := o.Run(context.Background(), Request{Goal: "q"}, nil)
 	if err == nil || len(ic.outputs) != 0 {
 		t.Fatalf("err = %v, outputs = %d; want the provider error alone and no inspection", err, len(ic.outputs))
+	}
+}
+
+// countingWriteTool is writeTool plus Plan and Invoke counters; mutatePlan
+// makes Plan scribble on its argument bytes (it must not affect Invoke).
+type countingWriteTool struct {
+	writeTool
+	planned, invoked int
+	mutatePlan       bool
+	gotArgs          string
+}
+
+func (c *countingWriteTool) Plan(ctx context.Context, args json.RawMessage) (ToolPlan, error) {
+	c.planned++
+	if c.mutatePlan && len(args) > 1 {
+		args[1] = 'X'
+	}
+	return c.writeTool.Plan(ctx, args)
+}
+func (c *countingWriteTool) Invoke(ctx context.Context, args json.RawMessage) (ToolResult, error) {
+	c.invoked++
+	c.gotArgs = string(args)
+	return c.writeTool.Invoke(ctx, args)
+}
+
+// riskCapturingApprover implements all three approver contracts, records
+// which one dispatch chose, and optionally scribbles on the call it receives.
+type riskCapturingApprover struct {
+	keyedCapturingApprover
+	riskCalls int
+	gotRisk   RiskReport
+	mutate    bool
+}
+
+func (r *riskCapturingApprover) ApproveWithRisk(_ context.Context, call provider.ToolCall, preview, key string, risk RiskReport) (ApprovalDecision, error) {
+	r.riskCalls++
+	r.gotPreview, r.gotKey, r.gotRisk = preview, key, risk
+	if r.mutate && len(call.Function.Arguments) > 1 {
+		call.Function.Arguments[1] = 'Y'
+	}
+	return r.decision, nil
+}
+
+// mutatingObserver scribbles on the call OnToolCall receives.
+type mutatingObserver struct{ interceptRecorder }
+
+func (m *mutatingObserver) OnToolCall(ctx context.Context, e ToolCallEvent) error {
+	if len(e.Call.Function.Arguments) > 1 {
+		e.Call.Function.Arguments[1] = 'Z'
+	}
+	return m.interceptRecorder.OnToolCall(ctx, e)
+}
+
+func writerCall(id string) ModelResult {
+	return ModelResult{Response: provider.ChatResponse{ToolCalls: []provider.ToolCall{{
+		ID: id, Type: "function",
+		Function: provider.ToolCallFunction{Name: "writer", Arguments: json.RawMessage(`{"path":"x"}`)},
+	}}}}
+}
+
+// errOnToolCall errors only on the tool-call hook.
+type errOnToolCall struct{ name string }
+
+func (e *errOnToolCall) Name() string { return e.name }
+func (e *errOnToolCall) InspectInput(context.Context, InputInspection) ([]Finding, error) {
+	return nil, nil
+}
+func (e *errOnToolCall) InspectOutput(context.Context, OutputInspection) ([]Finding, error) {
+	return nil, nil
+}
+func (e *errOnToolCall) InspectToolCall(context.Context, ToolCallInspection) ([]Finding, error) {
+	return nil, errors.New("boom")
+}
+
+var writerStaticEffect = Effect{Class: Write, Approval: ApprovalOnWrite, Timeout: 30 * time.Second, OutputCap: 64 * 1024}
+
+func TestToolCallBlockSerialNeverPlansInvokesOrPrompts(t *testing.T) {
+	tool := &countingWriteTool{writeTool: writeTool{planPreview: "P", planKey: "k"}}
+	ap := &keyedCapturingApprover{decision: ApprovalDecision{Approved: true}}
+	ic := &stubInterceptor{name: "guard", toolCall: func(ToolCallInspection) []Finding {
+		return []Finding{{Rule: "canary", Verdict: VerdictBlock, Risk: 100, Detail: "nonce seen"}}
+	}}
+	mc := &scriptedCaller{responses: []ModelResult{writerCall("1"), writerCall("2"), writerCall("3"), finalAnswer("never")}}
+	rec := &interceptRecorder{}
+	o := newTestOrchestrator(mc, WithInterceptors(ic))
+	res, err := o.Run(context.Background(), Request{Goal: "q", Tools: []Tool{tool}, Approver: ap}, rec)
+	if err != nil {
+		t.Fatalf("Run: %v (a tool-call block is a model-visible observation, not a run error)", err)
+	}
+	if tool.planned != 0 || tool.invoked != 0 {
+		t.Fatalf("planned=%d invoked=%d, want 0/0", tool.planned, tool.invoked)
+	}
+	if ap.keyedCalls != 0 || ap.plainCalls != 0 {
+		t.Fatalf("approver prompted %d/%d times for a blocked call", ap.keyedCalls, ap.plainCalls)
+	}
+	want := ToolCallRecord{Step: 0, Name: "writer", IsError: true, Blocked: true}
+	if res.ToolCalls[0] != want {
+		t.Fatalf("record = %+v, want %+v", res.ToolCalls[0], want)
+	}
+	const content = "tool call blocked by interceptor guard (canary)"
+	if got := res.Messages[2].Content; got != content {
+		t.Fatalf("observation = %q, want %q (Detail is telemetry only)", got, content)
+	}
+	e := rec.toolResults[0]
+	if !e.Blocked || e.Invoked || e.Denied || e.Result.Content != content || !reflect.DeepEqual(e.Effect, writerStaticEffect) {
+		t.Fatalf("tool result event = %+v", e)
+	}
+	if res.StopReason != ToolErrorCapReached {
+		t.Fatalf("stop = %s, want tool_error_cap_reached (blocked calls count as tool errors)", res.StopReason)
+	}
+	if i := rec.interceptions[0]; i.ToolCallID != "1" || i.Hook != HookToolCall || i.Findings[0].Detail != "nonce seen" || i.Findings[0].Target != TargetToolCall {
+		t.Fatalf("interception = %+v", i)
+	}
+}
+
+func TestToolCallBlockParallelPathBlocksOnlyTheNamedCall(t *testing.T) {
+	a := &invokeCountingTool{echoTool: echoTool{name: "a"}}
+	b := &invokeCountingTool{echoTool: echoTool{name: "b"}}
+	ic := &stubInterceptor{name: "guard", toolCall: func(c ToolCallInspection) []Finding {
+		if c.Call.Function.Name == "b" {
+			return []Finding{{Rule: "deny", Verdict: VerdictBlock, Risk: 50}}
+		}
+		return nil
+	}}
+	both := ModelResult{Response: provider.ChatResponse{ToolCalls: []provider.ToolCall{
+		{ID: "1", Type: "function", Function: provider.ToolCallFunction{Name: "a", Arguments: json.RawMessage(`{}`)}},
+		{ID: "2", Type: "function", Function: provider.ToolCallFunction{Name: "b", Arguments: json.RawMessage(`{}`)}},
+	}}}
+	mc := &scriptedCaller{responses: []ModelResult{both, finalAnswer("done")}}
+	o := newTestOrchestrator(mc, WithInterceptors(ic))
+	res, err := o.Run(context.Background(), Request{Goal: "q", Tools: []Tool{a, b}}, nil)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if a.invoked != 1 || b.invoked != 0 {
+		t.Fatalf("invoked a=%d b=%d, want 1/0", a.invoked, b.invoked)
+	}
+	// The final answer streams one token, hence "token" before the last step.
+	if kinds(res.Events) != "step,tool_call,tool_call,tool_result,tool_result,token,step,stop" {
+		t.Fatalf("events = %s (parallel path emits both calls before both results)", kinds(res.Events))
+	}
+	wantB := ToolCallRecord{Step: 0, Name: "b", IsError: true, Blocked: true}
+	if res.ToolCalls[1] != wantB || res.ToolCalls[0].Blocked || !res.ToolCalls[0].Invoked {
+		t.Fatalf("records = %+v", res.ToolCalls)
+	}
+	if res.Messages[3].Content != "tool call blocked by interceptor guard (deny)" {
+		t.Fatalf("blocked observation = %q", res.Messages[3].Content)
+	}
+}
+
+func TestToolCallArgumentsAreFrozenAgainstCallbacks(t *testing.T) {
+	tool := &countingWriteTool{writeTool: writeTool{planPreview: "P", planKey: "k"}, mutatePlan: true}
+	ap := &riskCapturingApprover{keyedCapturingApprover: keyedCapturingApprover{decision: ApprovalDecision{Approved: true}}, mutate: true}
+	ic := &stubInterceptor{name: "rec", toolCall: func(c ToolCallInspection) []Finding {
+		c.Call.Function.Arguments[1] = 'W' // the inspection copy is private too
+		return nil
+	}}
+	mc := &scriptedCaller{responses: []ModelResult{writerCall("1"), finalAnswer("done")}}
+	obs := &mutatingObserver{}
+	o := newTestOrchestrator(mc, WithInterceptors(ic))
+	res, err := o.Run(context.Background(), Request{Goal: "q", Tools: []Tool{tool}, Approver: ap}, obs)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if tool.gotArgs != `{"path":"x"}` {
+		t.Fatalf("Invoke received %q: a callback changed the inspected arguments", tool.gotArgs)
+	}
+	if got := string(res.Messages[1].ToolCalls[0].Function.Arguments); got != `{"path":"x"}` {
+		t.Fatalf("State assistant turn carries %q", got)
+	}
+	if got := string(ic.calls[0].Call.Function.Arguments); got != `{Wpath":"x"}` {
+		t.Fatalf("the interceptor's own copy should show its scribble: %q", got)
+	}
+}
+
+func TestToolCallInspectionCarriesTheStaticEffect(t *testing.T) {
+	ic := &stubInterceptor{name: "rec"}
+	tool := &countingWriteTool{writeTool: writeTool{planPreview: "P"}}
+	ap := &keyedCapturingApprover{decision: ApprovalDecision{Approved: true}}
+	mc := &scriptedCaller{responses: []ModelResult{writerCall("1"), finalAnswer("done")}}
+	o := newTestOrchestrator(mc, WithInterceptors(ic))
+	if _, err := o.Run(context.Background(), Request{Goal: "q", Tools: []Tool{tool}, Approver: ap}, nil); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(ic.calls) != 1 {
+		t.Fatalf("calls = %d, want 1", len(ic.calls))
+	}
+	got := ic.calls[0]
+	if got.Step != 0 || got.Call.ID != "1" || string(got.Call.Function.Arguments) != `{"path":"x"}` || !reflect.DeepEqual(got.Effect, writerStaticEffect) {
+		t.Fatalf("inspection = %+v", got)
+	}
+	if tool.planned != 1 || tool.invoked != 1 {
+		t.Fatalf("allowed call planned=%d invoked=%d, want 1/1", tool.planned, tool.invoked)
+	}
+}
+
+func TestToolCallAbortHaltsTheRunEvenWithAnInterceptorError(t *testing.T) {
+	tool := &countingWriteTool{writeTool: writeTool{planPreview: "P"}}
+	ap := &keyedCapturingApprover{decision: ApprovalDecision{Approved: true}}
+	mc := &scriptedCaller{responses: []ModelResult{writerCall("1"), finalAnswer("never")}}
+	// Scoped to the tool-call hook: verdictAll would abort the initial input.
+	ic := &stubInterceptor{name: "canary", toolCall: func(ToolCallInspection) []Finding {
+		return []Finding{{Rule: "nonce_in_args", Verdict: VerdictAbort, Risk: 100}}
+	}}
+	o := newTestOrchestrator(mc, WithInterceptors(ic, &errOnToolCall{name: "bad"}))
+	res, err := o.Run(context.Background(), Request{Goal: "q", Tools: []Tool{tool}, Approver: ap}, nil)
+	var blocked *BlockedError
+	if !errors.As(err, &blocked) || blocked.Hook != HookToolCall ||
+		err.Error() != "agent: tool_call blocked by interceptor canary (nonce_in_args)\nagent: interceptor bad tool_call: boom" {
+		t.Fatalf("err = %q", err)
+	}
+	if tool.planned != 0 || tool.invoked != 0 || ap.keyedCalls != 0 || mc.calls != 1 {
+		t.Fatalf("planned=%d invoked=%d prompts=%d calls=%d, want 0/0/0/1", tool.planned, tool.invoked, ap.keyedCalls, mc.calls)
+	}
+	if kinds(res.Events) != "step,tool_call,blocked" {
+		t.Fatalf("events = %s", kinds(res.Events))
+	}
+}
+
+func TestRiskApproverReceivesTheCumulativeSnapshot(t *testing.T) {
+	ic := &stubInterceptor{name: "det",
+		input: func(in InputInspection) []Finding {
+			if in.Step == 0 && in.System != "" {
+				return []Finding{{Rule: "phrase", Verdict: VerdictTag, Risk: 30, Target: TargetSystem}}
+			}
+			return nil
+		},
+		toolCall: func(ToolCallInspection) []Finding { return []Finding{{Rule: "path", Verdict: VerdictTag, Risk: 20}} },
+	}
+	ap := &riskCapturingApprover{keyedCapturingApprover: keyedCapturingApprover{decision: ApprovalDecision{Approved: true}}}
+	mc := &scriptedCaller{responses: []ModelResult{writerCall("1"), finalAnswer("done")}}
+	o := newTestOrchestrator(mc, WithInterceptors(ic))
+	res, err := o.Run(context.Background(), Request{Goal: "q", System: "sys", Tools: []Tool{writeTool{planPreview: "P", planKey: "k"}}, Approver: ap}, nil)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if ap.riskCalls != 1 || ap.keyedCalls != 0 || ap.plainCalls != 0 {
+		t.Fatalf("approver calls risk=%d keyed=%d plain=%d, want 1/0/0", ap.riskCalls, ap.keyedCalls, ap.plainCalls)
+	}
+	if ap.gotPreview != "P" || ap.gotKey != "k" {
+		t.Fatalf("preview/key = %q/%q", ap.gotPreview, ap.gotKey)
+	}
+	if ap.gotRisk.Score != 50 || len(ap.gotRisk.Findings) != 2 || ap.gotRisk.Findings[1].Rule != "path" || ap.gotRisk.Findings[0].Target != TargetSystem || ap.gotRisk.Findings[0].Origin != OriginSystem {
+		t.Fatalf("risk = %+v, want score 50 with two findings", ap.gotRisk)
+	}
+	ap.gotRisk.Findings[0].Risk = 999
+	if res.Risk.Score != 50 || res.Risk.Findings[0].Risk != 30 {
+		t.Fatalf("res.Risk = %+v: approver wrote through the snapshot", res.Risk)
+	}
+}
+
+func TestToolCallInterceptorErrorAbortsTheRun(t *testing.T) {
+	tool := &invokeCountingTool{echoTool: echoTool{name: "echo"}}
+	mc := &scriptedCaller{responses: []ModelResult{echoCall("1", `{}`), finalAnswer("never")}}
+	o := newTestOrchestrator(mc, WithInterceptors(&errOnToolCall{name: "bad"}))
+	_, err := o.Run(context.Background(), Request{Goal: "q", Tools: []Tool{tool}}, nil)
+	if err == nil || err.Error() != "agent: interceptor bad tool_call: boom" || tool.invoked != 0 {
+		t.Fatalf("err = %v, invoked = %d", err, tool.invoked)
+	}
+	var blocked *BlockedError
+	if errors.As(err, &blocked) {
+		t.Fatal("an error without a block must not fabricate a BlockedError")
 	}
 }

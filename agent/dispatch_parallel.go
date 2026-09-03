@@ -62,25 +62,34 @@ func canRunParallel(reg *toolRegistry, calls []provider.ToolCall) bool {
 //	  order, with the same short-circuit-and-discard semantics as the serial path.
 func (o *Orchestrator) runToolCallsParallel(ctx context.Context, res *Result, state *State,
 	reg *toolRegistry, calls []provider.ToolCall, approver Approver, obs Observer, step int,
-	gov *restraintGovernor, b *batch) error {
+	gov *restraintGovernor, b *batch, ic *interceptorRun) error {
 
 	// Phase 1: prepare serially, in model order.
 	prepared := make([]preparedCall, len(calls))
 	for i, call := range calls {
 		res.Events = append(res.Events, EventRecord{Step: step, Kind: "tool_call"})
-		p, err := o.prepareCall(ctx, reg, call, approver, obs, step, gov)
+		p, err := o.prepareCall(ctx, reg, call, approver, obs, step, gov, ic)
 		if err != nil {
 			return err // hard abort: no invokes launched, nothing to cancel
 		}
 		prepared[i] = p
 	}
 
-	// Phase 2: invoke concurrently, bounded; time each invoke in isolation.
+	// Phase 2: invoke concurrently, bounded; time each invoke in isolation. A
+	// prepared call carrying a synthetic result (#436 interceptor block) is
+	// never invoked: its result is copied through. Invocation uses the
+	// canonical prepared call, never the model's slice.
 	results := make([]ToolResult, len(prepared))
 	latencies := make([]time.Duration, len(prepared))
+	invoked := make([]bool, len(prepared))
 	g, gctx := errgroup.WithContext(ctx)
 	g.SetLimit(parallelToolCallLimit)
 	for i := range prepared {
+		if prepared[i].result != nil {
+			results[i] = *prepared[i].result
+			continue
+		}
+		invoked[i] = true
 		g.Go(func() error {
 			start := o.now()
 			results[i] = o.invokeCall(gctx, prepared[i].tool, prepared[i].effect, prepared[i].call.Function.Arguments)
@@ -98,9 +107,11 @@ func (o *Orchestrator) runToolCallsParallel(ctx context.Context, res *Result, st
 	for i := range prepared {
 		rec := prepared[i].rec
 		rec.IsError = results[i].IsError
-		rec.Invoked = true
-		rec.Latency = latencies[i]
-		stop, err := o.recordResult(ctx, res, state, obs, gov, step, prepared[i].call, prepared[i].effect, rec, results[i], b)
+		if invoked[i] {
+			rec.Invoked = true
+			rec.Latency = latencies[i]
+		}
+		stop, err := o.recordResult(ctx, res, state, obs, gov, step, prepared[i].call, prepared[i].effect, rec, results[i], b, ic)
 		if err != nil {
 			return err
 		}

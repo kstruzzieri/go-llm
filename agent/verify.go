@@ -89,7 +89,7 @@ func (b *batch) note(state *State, call provider.ToolCall, rec ToolCallRecord, o
 // ctx.Err() check is nonetheless kept: the error covers what the context does
 // not know, the context check covers a cancellation that landed while the
 // check was running, before State is mutated.
-func (o *Orchestrator) verifyBatch(ctx context.Context, state *State, approver Approver, b *batch) error {
+func (o *Orchestrator) verifyBatch(ctx context.Context, state *State, approver Approver, b *batch, obs Observer, step int, ic *interceptorRun) error {
 	if o.verifier == nil || b.verifyAnchor < 0 {
 		return nil
 	}
