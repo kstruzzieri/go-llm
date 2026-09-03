@@ -6,6 +6,24 @@ All notable changes to `go-llm` are documented here. Downstream consumers
 
 ## [Unreleased]
 
+### Added — golem mid-session write/exec tools and the runtime replacement seam (#372)
+
+- `/allow-write` and `/allow-exec` enable the approval-gated write and exec
+  tools in a running REPL session when stdin is a terminal; scripted input
+  must opt in with the startup flags. They mount exactly what those flags mount
+  (same guards, approver, undo journal, post-write verification, tool order),
+  recompose the system prompt in the same operation, are one-way for the
+  session, are idempotent, and never grant approval by themselves.
+  With `-scratch`, promotion stays as it was at startup and the command says so.
+  Disabled-state messages (`/undo`, `/checkpoints`, `/auto-edits`, `/jobs`)
+  now name the command as well as the flag.
+- Library: `(*golem.Runtime).Replace(system, tools)` atomically replaces the
+  runtime's `{System, Tools}`. A turn's pair is fixed when the run is
+  reserved; turns reserved after `Replace` returns see the new pair until a
+  later `Replace` supersedes it. Validation matches `New`, a rejected
+  replacement changes nothing, and `ErrClosed` dominates even when `Close`
+  completes during validation.
+
 ### Added — `signing` package: Signer/Verifier interfaces and key management (#444)
 
 New top-level `signing/` package, the ZT-301 seam the Phase 4 ledgers build
