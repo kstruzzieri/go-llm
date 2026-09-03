@@ -684,3 +684,183 @@ func TestResultRiskIsNilWithoutFindings(t *testing.T) {
 		t.Fatalf("res.Risk = %+v, err = %v; want nil, nil", res.Risk, err)
 	}
 }
+
+// invokeCountingTool counts Invoke calls on top of echoTool.
+type invokeCountingTool struct {
+	echoTool
+	invoked int
+}
+
+func (c *invokeCountingTool) Invoke(ctx context.Context, args json.RawMessage) (ToolResult, error) {
+	c.invoked++
+	return c.echoTool.Invoke(ctx, args)
+}
+
+func echoCall(id, args string) ModelResult {
+	return ModelResult{Response: provider.ChatResponse{ToolCalls: []provider.ToolCall{{
+		ID: id, Type: "function",
+		Function: provider.ToolCallFunction{Name: "echo", Arguments: json.RawMessage(args)},
+	}}}}
+}
+
+// failingCaller streams partial content and thinking, then fails.
+type failingCaller struct {
+	content, thinking string
+}
+
+func (f failingCaller) Chat(_ context.Context, _ provider.ChatRequest, onToken func(provider.ChatResponse) error) (ModelResult, error) {
+	if onToken != nil {
+		_ = onToken(provider.ChatResponse{Content: f.content, Thinking: f.thinking})
+	}
+	return ModelResult{Response: provider.ChatResponse{Content: f.content, Thinking: f.thinking}}, errors.New("provider: stream reset")
+}
+
+func TestOutputBlockIsNeitherRecordedNorPublished(t *testing.T) {
+	for _, v := range []Verdict{VerdictBlock, VerdictAbort} {
+		t.Run(v.String(), func(t *testing.T) {
+			ic := &stubInterceptor{name: "guard", output: func(out OutputInspection) []Finding {
+				if len(out.ToolCalls) > 0 {
+					return []Finding{{Rule: "leak", Verdict: v, Risk: 90, Target: TargetOutputToolCall, ToolCallID: out.ToolCalls[0].ID}}
+				}
+				return nil
+			}}
+			tool := &invokeCountingTool{echoTool: echoTool{name: "echo"}}
+			call := echoCall("1", `{}`)
+			call.Response.Usage = provider.Usage{TotalTokens: 7}
+			call.RouteOutcome = &provider.RouteOutcome{}
+			mc := &scriptedCaller{responses: []ModelResult{call, finalAnswer("never")}}
+			rec := &interceptRecorder{}
+			o := newTestOrchestrator(mc, WithInterceptors(ic))
+			res, err := o.Run(context.Background(), Request{Goal: "q", Tools: []Tool{tool}}, rec)
+			var blocked *BlockedError
+			if !errors.As(err, &blocked) || blocked.Hook != HookOutput || blocked.Step != 0 {
+				t.Fatalf("err = %v, want *BlockedError{HookOutput, step 0}", err)
+			}
+			if tool.invoked != 0 || mc.calls != 1 {
+				t.Fatalf("invoked=%d calls=%d, want 0/1", tool.invoked, mc.calls)
+			}
+			if strings.Join(rec.kinds, ",") != "pressure,interception" {
+				t.Fatalf("observer kinds = %v: a blocked response must not reach OnStep", rec.kinds)
+			}
+			if len(res.Steps) != 1 || res.Steps[0].Response.Content != "" || res.Steps[0].Response.ToolCalls != nil ||
+				res.Steps[0].Response.Usage.TotalTokens != 7 || res.Steps[0].RouteOutcome == nil {
+				t.Fatalf("steps = %+v, want one redacted record keeping usage and route", res.Steps)
+			}
+			if res.Usage.TotalTokens != 7 {
+				t.Fatalf("usage = %+v, want the spent tokens counted", res.Usage)
+			}
+			if kinds(res.Events) != "step,blocked" {
+				t.Fatalf("events = %s, want step,blocked", kinds(res.Events))
+			}
+			if len(res.Messages) != 1 || res.Messages[0].Role != "user" {
+				t.Fatalf("res.Messages = %+v, want only the goal", res.Messages)
+			}
+			if f := blocked.Findings[0]; f.Target != TargetOutputToolCall || f.ToolCallID != "1" {
+				t.Fatalf("finding = %+v, want a validated output tool-call target", f)
+			}
+		})
+	}
+}
+
+func TestOutputInspectionCarriesClonedContentThinkingAndToolCalls(t *testing.T) {
+	ic := &stubInterceptor{name: "rec"}
+	call := echoCall("7", `{"k":"v"}`)
+	call.Response.Thinking = "let me think"
+	mc := &scriptedCaller{responses: []ModelResult{call, finalAnswer("done")}}
+	o := newTestOrchestrator(mc, WithInterceptors(ic))
+	res, err := o.Run(context.Background(), Request{Goal: "q", Tools: []Tool{echoTool{name: "echo"}}}, nil)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(ic.outputs) != 2 {
+		t.Fatalf("outputs = %d, want 2", len(ic.outputs))
+	}
+	o0 := ic.outputs[0]
+	if o0.Step != 0 || o0.Content != "" || o0.Thinking != "let me think" || len(o0.ToolCalls) != 1 || o0.ToolCalls[0].ID != "7" || string(o0.ToolCalls[0].Function.Arguments) != `{"k":"v"}` {
+		t.Fatalf("output 0 = %+v", o0)
+	}
+	if o1 := ic.outputs[1]; o1.Step != 1 || o1.Content != "done" || len(o1.ToolCalls) != 0 {
+		t.Fatalf("output 1 = %+v", o1)
+	}
+	o0.ToolCalls[0].Function.Arguments[1] = 'X'
+	if got := string(res.Messages[1].ToolCalls[0].Function.Arguments); got != `{"k":"v"}` {
+		t.Fatalf("State aliased the inspection: %q", got)
+	}
+}
+
+func TestOutputTagIsTelemetryOnly(t *testing.T) {
+	ic := &stubInterceptor{name: "det", output: func(OutputInspection) []Finding {
+		return []Finding{{Rule: "phrase", Verdict: VerdictTag, Risk: 15, Target: TargetOutputContent}}
+	}}
+	mc := &scriptedCaller{responses: []ModelResult{finalAnswer("done")}}
+	rec := &interceptRecorder{}
+	o := newTestOrchestrator(mc, WithInterceptors(ic))
+	res, err := o.Run(context.Background(), Request{Goal: "q"}, rec)
+	if err != nil || res.Answer != "done" {
+		t.Fatalf("res.Answer = %q, err = %v", res.Answer, err)
+	}
+	if len(rec.interceptions) != 1 || rec.interceptions[0].Hook != HookOutput || rec.interceptions[0].Findings[0].Origin != OriginModel || rec.interceptions[0].Findings[0].Target != TargetOutputContent {
+		t.Fatalf("interceptions = %+v", rec.interceptions)
+	}
+	if strings.Join(rec.kinds, ",") != "pressure,token,interception,step" {
+		t.Fatalf("observer kinds = %v, want the interception before OnStep", rec.kinds)
+	}
+	if res.Risk == nil || res.Risk.Score != 15 {
+		t.Fatalf("res.Risk = %+v, want 15", res.Risk)
+	}
+}
+
+func TestProviderErrorPartialOutputIsInspectedBeforeAppend(t *testing.T) {
+	cases := []struct {
+		name         string
+		verdict      Verdict
+		wantMessages int
+		wantEvents   string
+	}{
+		// The failing caller streams one token before it fails, so the
+		// pre-existing "token" event always precedes the outcome.
+		{"tag appends", VerdictTag, 2, "token"},
+		{"block drops", VerdictBlock, 1, "token,blocked"},
+		{"abort drops", VerdictAbort, 1, "token,blocked"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ic := &stubInterceptor{name: "guard", output: func(out OutputInspection) []Finding {
+				if out.Thinking == "secret nonce" && out.Content == "partial" && out.ToolCalls == nil {
+					return []Finding{{Rule: "leak", Verdict: tc.verdict, Risk: 60, Target: TargetOutputContent}}
+				}
+				return nil
+			}}
+			o := newTestOrchestrator(failingCaller{content: "partial", thinking: "secret nonce"}, WithInterceptors(ic))
+			res, err := o.Run(context.Background(), Request{Goal: "q"}, nil)
+			if err == nil || !strings.Contains(err.Error(), "provider: stream reset") {
+				t.Fatalf("err = %v, want the provider error preserved", err)
+			}
+			var blocked *BlockedError
+			if got := errors.As(err, &blocked); got != (tc.verdict >= VerdictBlock) {
+				t.Fatalf("errors.As BlockedError = %v for verdict %s", got, tc.verdict)
+			}
+			if tc.verdict >= VerdictBlock && err.Error() != "agent: output blocked by interceptor guard (leak)\nprovider: stream reset" {
+				t.Fatalf("err = %q", err)
+			}
+			if len(res.Messages) != tc.wantMessages || kinds(res.Events) != tc.wantEvents {
+				t.Fatalf("messages = %d, events = %q; want %d, %q", len(res.Messages), kinds(res.Events), tc.wantMessages, tc.wantEvents)
+			}
+			if len(ic.outputs) != 1 || ic.outputs[0].Step != 0 {
+				t.Fatalf("outputs = %+v, want one inspection of the partial response", ic.outputs)
+			}
+			if res.Risk == nil || res.Risk.Score != 60 {
+				t.Fatalf("res.Risk = %+v", res.Risk)
+			}
+		})
+	}
+}
+
+func TestProviderErrorWithBlankPartialIsNotInspected(t *testing.T) {
+	ic := &stubInterceptor{name: "rec"}
+	o := newTestOrchestrator(failingCaller{content: "  ", thinking: ""}, WithInterceptors(ic))
+	_, err := o.Run(context.Background(), Request{Goal: "q"}, nil)
+	if err == nil || len(ic.outputs) != 0 {
+		t.Fatalf("err = %v, outputs = %d; want the provider error alone and no inspection", err, len(ic.outputs))
+	}
+}

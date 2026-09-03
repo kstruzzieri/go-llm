@@ -629,3 +629,20 @@ func finishWithError(res *Result, state State, historyLen int, err error) (Resul
 	res.Messages = resultMessages(state, historyLen)
 	return *res, err
 }
+
+// inspectOutput runs HookOutput on a collected response (content, thinking,
+// and a clone of the tool calls). It returns the error to propagate: a
+// BlockedError at Block or above, joined with any hook errors.
+func (r *interceptorRun) inspectOutput(ctx context.Context, obs Observer, step int, resp provider.ChatResponse) error {
+	if len(r.chain) == 0 {
+		return nil
+	}
+	out := OutputInspection{Step: step, Content: resp.Content, Thinking: resp.Thinking, ToolCalls: cloneToolCalls(resp.ToolCalls)}
+	ids := make([]string, 0, len(resp.ToolCalls))
+	for _, c := range resp.ToolCalls {
+		ids = append(ids, c.ID)
+	}
+	findings, verdict, err := r.runHook(ctx, obs, step, hookScope{hook: HookOutput, callIDs: ids},
+		func(ic Interceptor) ([]Finding, error) { return ic.InspectOutput(ctx, out) })
+	return terminalAt(VerdictBlock, HookOutput, step, findings, verdict, err)
+}

@@ -203,10 +203,19 @@ func (o *Orchestrator) run(ctx context.Context, req Request, obs Observer, ic *i
 		modelLatency := o.now().Sub(modelStart)
 		if err != nil {
 			// A failed stream may still return collected text. Preserve only that
-			// text; any tool-call fragments may be incomplete.
-			if strings.TrimSpace(modelResult.Response.Content) != "" {
+			// text; any tool-call fragments may be incomplete. #436: the partial
+			// content and thinking are inspected before they are appended or
+			// returned; a block is joined with the provider error.
+			partial := modelResult.Response
+			if strings.TrimSpace(partial.Content) != "" || strings.TrimSpace(partial.Thinking) != "" {
+				partial.ToolCalls = nil
+				if ierr := ic.inspectOutput(ctx, obs, step, partial); ierr != nil {
+					return finishWithError(&res, state, historyLen, errors.Join(ierr, err))
+				}
+			}
+			if strings.TrimSpace(partial.Content) != "" {
 				state.Messages = append(state.Messages, Message{
-					ChatMessage: provider.ChatMessage{Role: "assistant", Content: modelResult.Response.Content},
+					ChatMessage: provider.ChatMessage{Role: "assistant", Content: partial.Content},
 					Segment:     Elastic,
 				})
 			}
@@ -214,12 +223,25 @@ func (o *Orchestrator) run(ctx context.Context, req Request, obs Observer, ic *i
 			return res, err
 		}
 		resp := modelResult.Response
+		res.Usage = addUsage(res.Usage, resp.Usage)
+
+		// #436: inspect before the turn is recorded or published. A blocked
+		// response leaves a redacted StepRecord (usage and route only), never
+		// reaches OnStep, and dispatches nothing. An interceptor error without
+		// a block takes the same path: the response was never cleared.
+		if oerr := ic.inspectOutput(ctx, obs, step, resp); oerr != nil {
+			res.Steps = append(res.Steps, StepRecord{
+				Index: step, Response: provider.ChatResponse{Usage: resp.Usage, Done: resp.Done},
+				RouteOutcome: modelResult.RouteOutcome, Pressure: pressure, Latency: modelLatency,
+			})
+			res.Events = append(res.Events, EventRecord{Step: step, Kind: "step"})
+			return finishWithError(&res, state, historyLen, oerr)
+		}
 
 		res.Steps = append(res.Steps, StepRecord{
 			Index: step, Response: resp, RouteOutcome: modelResult.RouteOutcome, Pressure: pressure, Latency: modelLatency,
 		})
 		res.Events = append(res.Events, EventRecord{Step: step, Kind: "step"})
-		res.Usage = addUsage(res.Usage, resp.Usage)
 		if err := obs.OnStep(ctx, StepEvent{
 			Index: step, Response: resp, RouteOutcome: modelResult.RouteOutcome, Pressure: pressure, Latency: modelLatency,
 		}); err != nil {
