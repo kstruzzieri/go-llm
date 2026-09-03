@@ -24,9 +24,12 @@ const (
 	pemHMACKey      = "HMAC-SHA256 KEY"
 )
 
-// syncKeyDirectory is injectable only for durability regression tests.
-// Production always points at the platform implementation.
-var syncKeyDirectory = syncDirectory
+// syncKeyDirectory and syncKeyFile are injectable only for durability
+// regression tests. Production always points at the platform implementation.
+var (
+	syncKeyDirectory = syncDirectory
+	syncKeyFile      = func(f *os.File) error { return f.Sync() }
+)
 
 // LoadOrCreateEd25519 loads the PKCS#8 PEM Ed25519 private key at path,
 // generating and atomically publishing one when the file does not exist.
@@ -92,7 +95,7 @@ func LoadOrCreateHMAC(path string) (*HMACSigner, bool, error) {
 		return nil, created, err
 	}
 	if len(key) != hmacFileKeySize {
-		return nil, created, fmt.Errorf("signing: %s: HMAC key is %d bytes, want 32", path, len(key))
+		return nil, created, fmt.Errorf("signing: %s: HMAC key is %d bytes, want %d", path, len(key), hmacFileKeySize)
 	}
 	signer, err := NewHMAC(key)
 	return signer, created, err
@@ -112,12 +115,13 @@ func openKeyRoot(path string) (*os.Root, string, error) {
 	}
 	dirInfo, err := os.Lstat(dir)
 	if errors.Is(err, fs.ErrNotExist) {
+		// No os.Chmod(dir) afterwards: a path-based chmod follows a symlink an
+		// ancestor-writer can swap in between Mkdir and Chmod, which would be an
+		// arbitrary-path chmod as this UID. Mkdir's mode already yields an
+		// owner-only directory; a umask that strips owner bits leaves it unusable
+		// and creation fails closed at the temp write instead.
 		switch mkdirErr := os.Mkdir(dir, keyDirMode); {
-		case mkdirErr == nil:
-			if chmodErr := os.Chmod(dir, keyDirMode); chmodErr != nil {
-				return nil, "", fmt.Errorf("signing: chmod new key directory %s: %w", dir, chmodErr)
-			}
-		case errors.Is(mkdirErr, fs.ErrExist): // a concurrent creator won
+		case mkdirErr == nil, errors.Is(mkdirErr, fs.ErrExist): // created, or a concurrent creator won
 		default:
 			return nil, "", fmt.Errorf("signing: create key directory %s: %w", dir, mkdirErr)
 		}
@@ -243,7 +247,7 @@ func writeKeyTemp(root *os.Root, name string, material []byte) (temp string, err
 	if _, err = f.Write(material); err != nil {
 		return temp, fmt.Errorf("signing: write key temp: %w", err)
 	}
-	if err = f.Sync(); err != nil {
+	if err = syncKeyFile(f); err != nil {
 		return temp, fmt.Errorf("signing: sync key temp: %w", err)
 	}
 	err = f.Close()
@@ -299,12 +303,19 @@ func readKeyFile(root *os.Root, name string, afterLstat func()) ([]byte, bool, e
 	return raw, true, nil
 }
 
+// decodeKeyPEM accepts exactly one canonical PEM block of wantType and nothing
+// else. pem.Decode skips a BEGIN line it cannot parse and returns the next
+// block of any type, so the first line, the decoded block's type, and the
+// count of BEGIN markers are all checked; otherwise a file starting with the
+// right BEGIN line could carry a foreign block or unvalidated text.
 func decodeKeyPEM(raw []byte, path string, wantType string) ([]byte, error) {
 	trimmed := bytes.TrimSpace(raw)
 	block, rest := pem.Decode(trimmed)
-	if !bytes.HasPrefix(trimmed, []byte("-----BEGIN "+wantType+"-----")) || block == nil ||
+	if bytes.Count(trimmed, []byte("-----BEGIN ")) != 1 ||
+		!bytes.HasPrefix(trimmed, []byte("-----BEGIN "+wantType+"-----")) ||
+		block == nil || block.Type != wantType ||
 		len(block.Headers) != 0 || len(bytes.TrimSpace(rest)) != 0 {
-		return nil, fmt.Errorf("signing: %s: want exactly one %q PEM block without headers", path, wantType)
+		return nil, fmt.Errorf("signing: %s: want exactly one %q PEM block without headers or surrounding data", path, wantType)
 	}
 	return block.Bytes, nil
 }

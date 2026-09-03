@@ -92,3 +92,62 @@ func TestOwnerAndModeOKRejectsForeignOwner(t *testing.T) {
 		t.Fatal("foreign-owned 0600 file accepted")
 	}
 }
+
+func TestReadKeyFileDoesNotTreatNonENOENTLstatErrorAsAbsence(t *testing.T) {
+	dir := secureKeyDir(t)
+	if err := os.WriteFile(filepath.Join(dir, "plain"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	root, _, err := openKeyRoot(filepath.Join(dir, "unused.pem"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = root.Close() }()
+	// "plain" is a regular file, so lstat of a child path fails with ENOTDIR,
+	// not ENOENT. Only ENOENT may be read as first-use absence; anything else
+	// must surface, or a transient error would mint a replacement identity.
+	raw, existed, err := readKeyFile(root, "plain/hmac.pem", nil)
+	if err == nil || errors.Is(err, fs.ErrNotExist) || existed || raw != nil {
+		t.Fatalf("ENOTDIR lstat = raw %v, existed %v, err %v; want a surfaced non-absence error", raw, existed, err)
+	}
+}
+
+func TestKeyFileTempChmodRestoresOwnerBitsUnderStrictUmask(t *testing.T) {
+	dir := secureKeyDir(t) // created before the umask change
+	oldMask := syscall.Umask(0o277)
+	t.Cleanup(func() { syscall.Umask(oldMask) })
+	path := filepath.Join(dir, "hmac.pem")
+	if _, _, err := LoadOrCreateHMAC(path); err != nil {
+		t.Fatal(err)
+	}
+	fi, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := fi.Mode().Perm(); got != 0o600 {
+		t.Fatalf("key file mode under umask 0277 = %04o, want 0600 (fchmod on the temp must restore owner write)", got)
+	}
+}
+
+func TestKeyDirectoryCreationNeverChmodsThroughThePath(t *testing.T) {
+	// os.Chmod(dir) after os.Mkdir follows a symlink an ancestor-writer can
+	// swap in between the two calls, which is an arbitrary-path chmod as this
+	// UID. The package therefore relies on Mkdir's mode alone; under a umask
+	// that strips owner bits the directory is unusable and creation fails
+	// closed rather than being "repaired" through the path.
+	base := t.TempDir()
+	oldMask := syscall.Umask(0o277)
+	t.Cleanup(func() { syscall.Umask(oldMask) })
+	keyDir := filepath.Join(base, "keys")
+	_, created, err := LoadOrCreateHMAC(filepath.Join(keyDir, "hmac.pem"))
+	if err == nil || created {
+		t.Fatalf("owner-stripping umask = created %v, err %v; want fail-closed error", created, err)
+	}
+	fi, err := os.Stat(keyDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := fi.Mode().Perm(); got != 0o500 {
+		t.Fatalf("key directory mode = %04o, want 0500 (Mkdir 0700 under umask 0277, no path chmod)", got)
+	}
+}

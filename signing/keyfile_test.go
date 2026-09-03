@@ -148,7 +148,10 @@ func TestLoadOrCreateReportsPostPublishDurabilityFailure(t *testing.T) {
 	}
 }
 
-func TestLoadOrCreateRetriesKeyDirectoryDurabilityBeforeGeneration(t *testing.T) {
+func TestLoadOrCreateWritesNothingBeforeParentSync(t *testing.T) {
+	// Generation itself happens in memory and is unobservable; the durability
+	// property that matters is that no temp or final file exists in the key
+	// directory until its parent entry has been synced.
 	base := t.TempDir()
 	path := filepath.Join(base, "keys", "hmac.pem")
 	original := syncKeyDirectory
@@ -165,8 +168,8 @@ func TestLoadOrCreateRetriesKeyDirectoryDurabilityBeforeGeneration(t *testing.T)
 	if _, created, err := LoadOrCreateHMAC(path); created || !errors.Is(err, ErrKeyFileDurability) {
 		t.Fatalf("first call = created %v, err %v; want not-created + ErrKeyFileDurability", created, err)
 	}
-	if _, err := os.Stat(path); !os.IsNotExist(err) {
-		t.Fatalf("key generated before parent sync: stat err = %v", err)
+	if entries, err := os.ReadDir(filepath.Dir(path)); err != nil || len(entries) != 0 {
+		t.Fatalf("key directory written before parent sync: entries %v, err %v", entries, err)
 	}
 	syncKeyDirectory = original
 	if _, created, err := LoadOrCreateHMAC(path); err != nil || !created {
@@ -329,8 +332,9 @@ func TestKeyFileRejectsWrongContent(t *testing.T) {
 	if _, _, err := LoadOrCreateHMAC(write("raw.key", make([]byte, 32))); err == nil {
 		t.Error("untyped raw HMAC key accepted")
 	}
-	// Literal on purpose: a test that derives the boundary from maxKeyFileBytes
-	// moves with any mutation of it (measured: the 1 GiB mutation survived).
+	// Literal on purpose: the boundary must not move with the constant under
+	// test. Three guards overlap (stat size, LimitReader, length check), so only
+	// the constant itself is individually killable; that redundancy is intended.
 	oversized := append(bytes.Clone(validHMAC), bytes.Repeat([]byte(" "), 64*1024+1-len(validHMAC))...)
 	if _, _, err := LoadOrCreateHMAC(write("big.key", oversized)); err == nil {
 		t.Error("oversized key file accepted")
@@ -417,5 +421,101 @@ func TestLoadOrCreateConcurrentLoserSyncsKeyDirectory(t *testing.T) {
 	}
 	if len(entries) != 1 {
 		t.Fatalf("key directory has %d entries after loser cleanup, want 1", len(entries))
+	}
+}
+
+func TestKeyFileRejectsForeignBlockBehindMatchingBeginLine(t *testing.T) {
+	dir := secureKeyDir(t)
+	write := func(name string, data []byte) string {
+		t.Helper()
+		p := filepath.Join(dir, name)
+		if err := os.WriteFile(p, data, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	_, edPriv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	edDER, err := x509.MarshalPKCS8PrivateKey(edPriv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	edBlock := pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: edDER})
+	hmacBlock := pem.EncodeToMemory(&pem.Block{Type: "HMAC-SHA256 KEY", Bytes: make([]byte, 32)})
+
+	// pem.Decode skips a BEGIN line it cannot parse and returns the next block
+	// of any type; the file's first line alone must not decide the type.
+	typeSwapHMAC := append([]byte("-----BEGIN HMAC-SHA256 KEY-----\n"), pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: make([]byte, 32)})...)
+	if _, _, err := LoadOrCreateHMAC(write("type-swap.pem", typeSwapHMAC)); err == nil {
+		t.Error("PRIVATE KEY block accepted behind an HMAC-SHA256 KEY BEGIN line")
+	}
+	typeSwapEd := append([]byte("-----BEGIN PRIVATE KEY-----\n"), pem.EncodeToMemory(&pem.Block{Type: "HMAC-SHA256 KEY", Bytes: edDER})...)
+	if _, _, err := LoadOrCreateEd25519(write("type-swap-ed.pem", typeSwapEd)); err == nil {
+		t.Error("HMAC-SHA256 KEY block accepted behind a PRIVATE KEY BEGIN line")
+	}
+	junkThenReal := append([]byte("-----BEGIN PRIVATE KEY-----\nATTACKER NOTE: never validated\n"), edBlock...)
+	if _, _, err := LoadOrCreateEd25519(write("junk-then-real.pem", junkThenReal)); err == nil {
+		t.Error("unvalidated text between a BEGIN line and the real block accepted")
+	}
+	if _, _, err := LoadOrCreateHMAC(write("real-hmac.pem", hmacBlock)); err != nil {
+		t.Fatalf("genuine HMAC PEM rejected: %v", err)
+	}
+	if _, _, err := LoadOrCreateEd25519(write("real-ed.pem", edBlock)); err != nil {
+		t.Fatalf("genuine Ed25519 PEM rejected: %v", err)
+	}
+}
+
+func TestKeyFileRejectsOverlongHMACKey(t *testing.T) {
+	dir := secureKeyDir(t)
+	p := filepath.Join(dir, "long.pem")
+	long := pem.EncodeToMemory(&pem.Block{Type: "HMAC-SHA256 KEY", Bytes: make([]byte, 64)})
+	if err := os.WriteFile(p, long, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// NewHMAC would accept 64 bytes; only the file format's exact-length rule
+	// (D9) can reject this.
+	_, _, err := LoadOrCreateHMAC(p)
+	if err == nil || !strings.Contains(err.Error(), "HMAC key is 64 bytes, want 32") {
+		t.Fatalf("64-byte HMAC PEM: err = %v, want the exact-length rejection", err)
+	}
+}
+
+func TestKeyDirectoryRejectsRegularFile(t *testing.T) {
+	notDir := filepath.Join(t.TempDir(), "notadir")
+	if err := os.WriteFile(notDir, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := LoadOrCreateHMAC(filepath.Join(notDir, "hmac.pem")); !errors.Is(err, ErrInsecureKeyDirectory) {
+		t.Fatalf("regular file at the key directory position: err = %v, want ErrInsecureKeyDirectory", err)
+	}
+}
+
+func TestLoadOrCreateFailedTempSyncPublishesNothingAndIsRetryable(t *testing.T) {
+	dir := secureKeyDir(t)
+	path := filepath.Join(dir, "hmac.pem")
+	original := syncKeyFile
+	syncKeyFile = func(*os.File) error { return errors.New("injected temp sync failure") }
+	t.Cleanup(func() { syncKeyFile = original })
+
+	_, created, err := LoadOrCreateHMAC(path)
+	if err == nil || created || !strings.Contains(err.Error(), "sync key temp") {
+		t.Fatalf("failed temp sync = created %v, err %v; want not-created + temp sync error", created, err)
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		names := make([]string, 0, len(entries))
+		for _, e := range entries {
+			names = append(names, e.Name())
+		}
+		t.Fatalf("failed publication left %v behind; want an empty key directory", names)
+	}
+	syncKeyFile = original
+	if _, created, err := LoadOrCreateHMAC(path); err != nil || !created {
+		t.Fatalf("retry = created %v, err %v; want a newly created key", created, err)
 	}
 }
