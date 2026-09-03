@@ -136,13 +136,10 @@ func handleAllowWrite(ctx context.Context, out io.Writer, sess *replSession, fie
 	sess.writeToolCount = len(writeTools)
 	sess.journal, sess.lateStore, sess.allowWrite = journal, store, true
 	// #347: .golem.json is read only once writes are enabled, as at startup;
-	// the runner lands in the slot the REPL orchestrator was built with. A
-	// session without a slot cannot verify, and must say so rather than
-	// silently mounting writes with the workspace's verification dropped.
+	// the runner lands in the slot the REPL orchestrator was built with. The
+	// slot is always present here: a REPL session without one started with
+	// -allow-write, and that session returned "already enabled" above.
 	verifier, vwarn := buildVerifier(sess.root)
-	if verifier != nil && sess.verifier == nil {
-		vwarn = "verification disabled: this session has no post-write verifier slot"
-	}
 	sess.verifier.set(verifier)
 	_, _ = fmt.Fprintln(out, "writes enabled (approval per change; /auto-edits, /undo, /checkpoints available)")
 	if undoing > 0 {
@@ -159,17 +156,28 @@ func handleAllowWrite(ctx context.Context, out io.Writer, sess *replSession, fie
 	}
 }
 
-// closeLateMounts releases exactly what /allow-write and /allow-exec opened
-// after startup: the late manager (its REPL-context binding is stopped
-// first, so ownership of the shutdown is unambiguous; Shutdown is Once-
-// guarded, so a binding that already fired is simply joined) and the late
-// checkpoint store. Startup-owned resources keep main.go's own defers and
-// are never touched here. Safe to call more than once.
-func (s *replSession) closeLateMounts() error {
-	if s.lateStop != nil {
-		s.lateStop()
-		s.lateStop = nil
+// disarmLateExec stops the late manager's REPL-context binding. main.go's
+// interactive branch defers it AFTER cancelREPL, so it runs BEFORE the
+// context is canceled and the late manager is then shut down synchronously
+// by closeLateMounts in its ordered LIFO slot, exactly as the startup
+// manager's deferred stopAfter arranges. Nil-safe and idempotent.
+func (s *replSession) disarmLateExec() {
+	if s == nil || s.lateStop == nil {
+		return
 	}
+	s.lateStop()
+	s.lateStop = nil
+}
+
+// closeLateMounts releases exactly what /allow-write and /allow-exec opened
+// after startup: the late manager and the late checkpoint store. On the
+// normal exit path disarmLateExec has already run, so the shutdown here is
+// the one that stops the jobs; if the binding fired first (an idle Ctrl-C
+// quit, or a caller that never disarmed), Shutdown's sync.Once simply joins
+// it. Startup-owned resources keep main.go's own defers and are never
+// touched here. Safe to call more than once.
+func (s *replSession) closeLateMounts() error {
+	s.disarmLateExec()
 	if s.lateManager != nil {
 		s.lateManager.Shutdown()
 		s.lateManager = nil
@@ -214,8 +222,9 @@ func handleAllowExec(ctx context.Context, out io.Writer, sess *replSession, fiel
 	sess.bgManager, sess.lateManager, sess.allowExec = manager, manager, true
 	// #346 host-lifetime parity: ctx is replCtx in production, so an idle
 	// Ctrl-C quit tears the jobs down like a startup manager's. The stop
-	// function is kept so closeLateMounts owns the ordered shutdown on the
-	// normal exit path, exactly as the startup manager's deferred stopAfter.
+	// function is kept so main.go's deferred disarmLateExec can retire the
+	// binding before cancelREPL, leaving closeLateMounts the ordered
+	// shutdown on the normal exit path.
 	sess.lateStop = context.AfterFunc(ctx, manager.Shutdown)
 	_, _ = fmt.Fprintln(out, "exec enabled (approval per command; /jobs available)")
 }

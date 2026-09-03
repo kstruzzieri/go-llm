@@ -113,6 +113,7 @@ func TestReplaceFixesSnapshotAtReservation(t *testing.T) {
 	select {
 	case <-entered:
 	case <-time.After(10 * time.Second):
+		close(release) // unpark run a so the cleanup Close can drain it
 		t.Fatal("run.started gate never fired; the event name or sink ordering changed")
 	}
 	if err := rt.Replace("NEW SYSTEM", []agent.Tool{namedTool("new_tool")}); err != nil {

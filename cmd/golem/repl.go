@@ -50,8 +50,10 @@ type replSession struct {
 	// when -allow-exec owned the manager at startup.
 	lateManager *tools.BackgroundManager
 	lateStop    func() bool
-	// verifier is the REPL-mode post-write verification slot (#372); nil
-	// outside the REPL and in narrow tests (set is nil-safe).
+	// verifier is the REPL-mode post-write verification slot (#372). nil
+	// outside the REPL, for a REPL session started with -allow-write (its
+	// verifier is bound directly, and /allow-write is idempotent there), and
+	// in narrow tests (set is nil-safe).
 	verifier        *lateVerifier
 	maxSteps        int
 	budget          agent.Budget

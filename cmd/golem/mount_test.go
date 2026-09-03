@@ -559,23 +559,6 @@ func TestAllowWriteReportsRecoveryEvenWhenTheMountFails(t *testing.T) {
 	}
 }
 
-// A workspace verifier that cannot be installed (no slot in this session
-// mode) is reported, never silently dropped.
-func TestAllowWriteReportsMissingVerifierSlot(t *testing.T) {
-	if _, err := os.Stat("/bin/sh"); err != nil {
-		t.Skip("needs /bin/sh")
-	}
-	root := t.TempDir()
-	writeGolemJSON(t, root, `{"verify":{"argv":["/bin/sh","-c","true"]}}`)
-	sess := newMountSession(t, &captureCaller{answer: "ok"}, root)
-	sess.verifier = nil
-	var out strings.Builder
-	_, _ = dispatchSlash(context.Background(), &out, sess, "/allow-write")
-	if !strings.HasPrefix(out.String(), "writes enabled") || !strings.Contains(out.String(), "verification disabled: this session has no post-write verifier slot") {
-		t.Fatalf("out = %q", out.String())
-	}
-}
-
 func TestNonNilVerifierNormalizesTypedNils(t *testing.T) {
 	if got := nonNilVerifier((*verifyRunner)(nil)); got != nil {
 		t.Fatalf("typed-nil *verifyRunner leaked as %#v", got)
