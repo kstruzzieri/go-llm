@@ -763,7 +763,15 @@ func TestOutputBlockIsNeitherRecordedNorPublished(t *testing.T) {
 }
 
 func TestOutputInspectionCarriesClonedContentThinkingAndToolCalls(t *testing.T) {
-	ic := &stubInterceptor{name: "rec"}
+	// The interceptor scribbles on its copy DURING the run: if the inspection
+	// aliased the response, the echo tool would receive the scribble and the
+	// recorded assistant turn would carry it.
+	ic := &stubInterceptor{name: "rec", output: func(out OutputInspection) []Finding {
+		if len(out.ToolCalls) > 0 {
+			out.ToolCalls[0].Function.Arguments[1] = 'X'
+		}
+		return nil
+	}}
 	call := echoCall("7", `{"k":"v"}`)
 	call.Response.Thinking = "let me think"
 	mc := &scriptedCaller{responses: []ModelResult{call, finalAnswer("done")}}
@@ -776,15 +784,18 @@ func TestOutputInspectionCarriesClonedContentThinkingAndToolCalls(t *testing.T) 
 		t.Fatalf("outputs = %d, want 2", len(ic.outputs))
 	}
 	o0 := ic.outputs[0]
-	if o0.Step != 0 || o0.Content != "" || o0.Thinking != "let me think" || len(o0.ToolCalls) != 1 || o0.ToolCalls[0].ID != "7" || string(o0.ToolCalls[0].Function.Arguments) != `{"k":"v"}` {
+	// The recorded copy is the interceptor's own, so it shows the scribble.
+	if o0.Step != 0 || o0.Content != "" || o0.Thinking != "let me think" || len(o0.ToolCalls) != 1 || o0.ToolCalls[0].ID != "7" || string(o0.ToolCalls[0].Function.Arguments) != `{Xk":"v"}` {
 		t.Fatalf("output 0 = %+v", o0)
 	}
 	if o1 := ic.outputs[1]; o1.Step != 1 || o1.Content != "done" || len(o1.ToolCalls) != 0 {
 		t.Fatalf("output 1 = %+v", o1)
 	}
-	o0.ToolCalls[0].Function.Arguments[1] = 'X'
 	if got := string(res.Messages[1].ToolCalls[0].Function.Arguments); got != `{"k":"v"}` {
-		t.Fatalf("State aliased the inspection: %q", got)
+		t.Fatalf("recorded assistant turn carries the interceptor's scribble: %q", got)
+	}
+	if got := res.Messages[2].Content; got != `tool-said:{"k":"v"}` {
+		t.Fatalf("the tool received the interceptor's scribble: %q", got)
 	}
 }
 
