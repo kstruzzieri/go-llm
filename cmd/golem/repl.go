@@ -697,6 +697,8 @@ func dispatchSlash(ctx context.Context, out io.Writer, sess *replSession, line s
 			// Non-empty text is the forced goal; empty aborts to the prompt.
 			return strings.TrimSpace(text), false
 		}
+	case "/allow-write":
+		handleAllowWrite(ctx, out, sess, fields)
 	default:
 		_, _ = fmt.Fprintf(out, "unknown command: %s (try /help)\n", cmd)
 	}

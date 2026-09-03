@@ -1193,6 +1193,15 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 	buildExec := f.allowExec || allowTools.authorized("run_command") ||
 		allowTools.authorized("start_command") || allowTools.authorized("stop_command")
 
+	// #372: resources /allow-write and /allow-exec open after startup are
+	// released here, in the same LIFO slot as their startup twins (after
+	// runtime.Close). sess is assigned once the session is built below.
+	var sess *replSession
+	defer func() {
+		if sess != nil {
+			runErr = errors.Join(runErr, sess.closeLateMounts())
+		}
+	}()
 	// #372: the gated write/exec tools are inserted here at startup and by
 	// /allow-write and /allow-exec, so a mid-session mount reproduces the
 	// startup order (and toolSchemaHash) exactly.
@@ -1500,7 +1509,7 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 	if f.promptSet {
 		renderOut = stderr
 	}
-	sess := &replSession{
+	sess = &replSession{
 		orch:             orch,
 		runtime:          runtime,
 		newOrchestrator:  newOrchestrator,

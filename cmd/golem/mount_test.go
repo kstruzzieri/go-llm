@@ -1,10 +1,18 @@
 package main
 
 import (
+	"context"
+	"errors"
+	"os"
+	"path/filepath"
+	"runtime/debug"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/kstruzzieri/go-llm/agent"
 	golemruntime "github.com/kstruzzieri/go-llm/golem"
+	"github.com/kstruzzieri/go-llm/provider"
 )
 
 // Pins fragment ORDER and separators against the real fragment functions.
@@ -79,5 +87,227 @@ func TestComposeSystemFlipChangesOnlyThatFragment(t *testing.T) {
 	}
 	if tailBefore != tailAfter {
 		t.Fatalf("flipping allowWrite changed more than the write fragment:\n before=%q\n after=%q", tailBefore, tailAfter)
+	}
+}
+
+// newMountSession mirrors main.go's REPL session: file tools first, then
+// any host tools the test injects (the runtime receives the same extras),
+// the #372 bookkeeping fields, a lateVerifier wired into the orchestrator,
+// and checkpoint/trace data isolated under a temp XDG_DATA_HOME. Tool order
+// is read with the existing order-preserving names() helper.
+func newMountSession(t *testing.T, caller agent.ModelCaller, root string, host ...agent.Tool) *replSession {
+	t.Helper()
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	fileTools, err := buildTools(root, nil)
+	if err != nil {
+		t.Fatalf("buildTools: %v", err)
+	}
+	var in systemInputs
+	system := composeSystem(in)
+	slot := &lateVerifier{}
+	orch := agent.New(caller, agent.ContextManager{}, agent.WithVerifier(slot))
+	sess := &replSession{
+		orch:          orch,
+		runtime:       newTestRuntime(t, root, system, orch, host),
+		tools:         append(append([]agent.Tool(nil), fileTools...), host...),
+		baseSystem:    system,
+		sysInputs:     in,
+		root:          root,
+		readToolCount: len(fileTools),
+		mountAt:       len(fileTools),
+		maxSteps:      16,
+		clock:         func() time.Time { return time.Unix(0, 0) },
+		grants:        newApprovalGrants(),
+		verifier:      slot,
+	}
+	t.Cleanup(func() { _ = sess.closeLateMounts() })
+	return sess
+}
+
+func TestAllowWriteMountsWriteToolsAndPrompt(t *testing.T) {
+	root := t.TempDir()
+	caller := &captureCaller{answer: "ok"}
+	sess := newMountSession(t, caller, root)
+	var out strings.Builder
+	_, _ = dispatchSlash(context.Background(), &out, sess, "/allow-write")
+	if !strings.HasPrefix(out.String(), "writes enabled") {
+		t.Fatalf("out = %q", out.String())
+	}
+	want := append(names(sess.tools[:sess.readToolCount]), "write_file", "edit_file")
+	if got := names(sess.tools); strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("tools = %v, want %v", got, want)
+	}
+	if !sess.allowWrite || sess.journal == nil || sess.lateStore == nil || sess.writeToolCount != 2 {
+		t.Fatalf("session not committed: allowWrite=%v journal=%v store=%v count=%d", sess.allowWrite, sess.journal != nil, sess.lateStore != nil, sess.writeToolCount)
+	}
+	if sess.baseSystem != composeSystem(sess.sysInputs) || !strings.HasPrefix(sess.baseSystem, buildSystemPrompt(true, false)) {
+		t.Fatalf("baseSystem not recomposed for writes: %q", sess.baseSystem)
+	}
+	if _, err := runOnce(context.Background(), &out, nil, sess, "hello", nil); err != nil {
+		t.Fatalf("runOnce: %v", err)
+	}
+	if caller.system != sess.baseSystem {
+		t.Fatalf("runtime sent %q, session holds %q", caller.system, sess.baseSystem)
+	}
+}
+
+func TestAllowWriteIsIdempotent(t *testing.T) {
+	root := t.TempDir()
+	sess := newMountSession(t, &captureCaller{answer: "ok"}, root)
+	var out strings.Builder
+	_, _ = dispatchSlash(context.Background(), &out, sess, "/allow-write")
+	store, journal, n, system := sess.lateStore, sess.journal, len(sess.tools), sess.baseSystem
+	out.Reset()
+	_, _ = dispatchSlash(context.Background(), &out, sess, "/allow-write")
+	if out.String() != "writes already enabled\n" {
+		t.Fatalf("second = %q", out.String())
+	}
+	if sess.lateStore != store || sess.journal != journal || len(sess.tools) != n || sess.baseSystem != system {
+		t.Fatal("a repeated /allow-write changed session state")
+	}
+	out.Reset()
+	_, _ = dispatchSlash(context.Background(), &out, sess, "/allow-write now")
+	if out.String() != "usage: /allow-write\n" {
+		t.Fatalf("usage = %q", out.String())
+	}
+}
+
+// Mounting never grants: the write-class grant stays absent and the first
+// write prompts, so a scripted "n" denies it.
+func TestAllowWriteDoesNotGrantApproval(t *testing.T) {
+	root := t.TempDir()
+	caller := &scriptCaller{responses: []agent.ModelResult{
+		writeToolCallResponse("w1", "w.txt", "W\n"),
+		{Response: provider.ChatResponse{Content: "done"}},
+	}}
+	sess := newMountSession(t, caller, root)
+	var out strings.Builder
+	_, _ = dispatchSlash(context.Background(), &out, sess, "/allow-write")
+	if sess.grants.count() != 0 || autoEditState(sess) != "off" {
+		t.Fatalf("mount granted approval: grants=%d auto-edits=%s", sess.grants.count(), autoEditState(sess))
+	}
+	src := &stubAnswerSource{line: "n", ok: true}
+	_, _ = runOnce(context.Background(), &out, nil, sess, "write w", src)
+	if _, err := os.Stat(filepath.Join(root, "w.txt")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("a denied write landed (stat err=%v); output:\n%s", err, out.String())
+	}
+}
+
+// A mid-session write goes through the same journal as a startup one, so
+// /undo restores the pre-turn content.
+func TestAllowWriteMidSessionWritesAreUndoable(t *testing.T) {
+	root := t.TempDir()
+	target := filepath.Join(root, "w.txt")
+	if err := os.WriteFile(target, []byte("OLD\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	caller := &scriptCaller{responses: []agent.ModelResult{
+		writeToolCallResponse("w1", "w.txt", "NEW\n"),
+		{Response: provider.ChatResponse{Content: "done"}},
+	}}
+	sess := newMountSession(t, caller, root)
+	var out strings.Builder
+	_, _ = dispatchSlash(context.Background(), &out, sess, "/allow-write")
+	src := &stubAnswerSource{line: "y", ok: true}
+	if _, err := runOnce(context.Background(), &out, nil, sess, "write w", src); err != nil {
+		t.Fatalf("runOnce: %v\n%s", err, out.String())
+	}
+	if got, _ := os.ReadFile(target); string(got) != "NEW\n" {
+		t.Fatalf("write did not land: %q", got)
+	}
+	out.Reset()
+	_, _ = dispatchSlash(context.Background(), &out, sess, "/undo")
+	if got, _ := os.ReadFile(target); string(got) != "OLD\n" {
+		t.Fatalf("/undo left %q (out=%q)", got, out.String())
+	}
+}
+
+// The checkpoint lease is exclusive per workspace; holding it first makes
+// the mount fail closed before anything is built, with the session,
+// runtime snapshot, and approval state untouched.
+func TestAllowWriteFailsClosedBeforeConstruction(t *testing.T) {
+	root := t.TempDir()
+	caller := &captureCaller{answer: "ok"}
+	sess := newMountSession(t, caller, root)
+	held, err := openCheckpointStore(context.Background(), os.Getenv, root)
+	if err != nil {
+		t.Fatalf("hold lease: %v", err)
+	}
+	defer func() { _ = held.Close() }()
+	before, system := strings.Join(names(sess.tools), ","), sess.baseSystem
+	var out strings.Builder
+	_, _ = dispatchSlash(context.Background(), &out, sess, "/allow-write")
+	if !strings.HasPrefix(out.String(), "writes not enabled: checkpoint store:") {
+		t.Fatalf("out = %q", out.String())
+	}
+	if sess.allowWrite || sess.journal != nil || sess.lateStore != nil || sess.baseSystem != system || strings.Join(names(sess.tools), ",") != before {
+		t.Fatal("a failed mount changed the session")
+	}
+	if _, err := runOnce(context.Background(), &out, nil, sess, "hello", nil); err != nil {
+		t.Fatalf("runOnce: %v", err)
+	}
+	if caller.system != system {
+		t.Fatalf("runtime snapshot changed on a failed mount: %q", caller.system)
+	}
+}
+
+// Store, journal and write tools are all built, then Replace rejects the
+// mount because a host tool already owns the name edit_file. Every session
+// field, the verifier slot, the approval state, and the runtime snapshot
+// stay unchanged, and the checkpoint lease is released.
+func TestAllowWriteFailsClosedAfterConstruction(t *testing.T) {
+	// A leaked store is unreachable once the handler returns, and the
+	// os.File finalizer would release its flock at the next GC, making a
+	// leak look like a release. No GC, no finalizer: the lease check below
+	// observes the handler's own Close, or its absence.
+	defer debug.SetGCPercent(debug.SetGCPercent(-1))
+	root := t.TempDir()
+	caller := &captureCaller{answer: "ok"}
+	sess := newMountSession(t, caller, root, fakeNamedTool{name: "edit_file"})
+	before, system := strings.Join(names(sess.tools), ","), sess.baseSystem
+	var out strings.Builder
+	_, _ = dispatchSlash(context.Background(), &out, sess, "/allow-write")
+	if !strings.HasPrefix(out.String(), "writes not enabled: runtime:") || !strings.Contains(out.String(), "edit_file") {
+		t.Fatalf("out = %q", out.String())
+	}
+	if sess.allowWrite || sess.journal != nil || sess.lateStore != nil || sess.writeToolCount != 0 ||
+		sess.baseSystem != system || strings.Join(names(sess.tools), ",") != before ||
+		sess.verifier.runner != nil || sess.grants.count() != 0 {
+		t.Fatal("a rejected replacement changed the session")
+	}
+	store, err := openCheckpointStore(context.Background(), os.Getenv, root)
+	if err != nil {
+		t.Fatalf("checkpoint lease not released after the failed mount: %v", err)
+	}
+	_ = store.Close()
+	if _, err := runOnce(context.Background(), &out, nil, sess, "hello", nil); err != nil {
+		t.Fatalf("runOnce: %v", err)
+	}
+	if caller.system != system {
+		t.Fatalf("runtime snapshot changed on a rejected replacement: %q", caller.system)
+	}
+}
+
+func TestCloseLateMountsReleasesTheCheckpointLease(t *testing.T) {
+	root := t.TempDir()
+	sess := newMountSession(t, &captureCaller{answer: "ok"}, root)
+	var out strings.Builder
+	_, _ = dispatchSlash(context.Background(), &out, sess, "/allow-write")
+	if _, err := openCheckpointStore(context.Background(), os.Getenv, root); err == nil {
+		t.Fatal("lease must be held while the mount is live")
+	}
+	if err := sess.closeLateMounts(); err != nil {
+		t.Fatalf("closeLateMounts: %v", err)
+	}
+	if sess.lateStore != nil {
+		t.Fatal("lateStore not cleared")
+	}
+	store, err := openCheckpointStore(context.Background(), os.Getenv, root)
+	if err != nil {
+		t.Fatalf("lease still held after closeLateMounts: %v", err)
+	}
+	_ = store.Close()
+	if err := sess.closeLateMounts(); err != nil {
+		t.Fatalf("second closeLateMounts: %v", err)
 	}
 }
