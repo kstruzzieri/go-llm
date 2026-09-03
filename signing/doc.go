@@ -31,26 +31,32 @@
 // sibling. Canonicalize the whole body; do not maintain a mirror struct or
 // merely zero a signature field that is still serialized. This makes added
 // body fields signed by default and lets audit code canonicalize a raw body
-// without knowing its schema. Normalize time.Time to UTC before marshaling:
-// encoding/json preserves the zone offset, so the same instant can marshal
-// differently. json.RawMessage fields are normalized. Keep one domain
-// constant beside each body schema and bump its version when signed meaning
-// changes.
+// without knowing its schema. Two encoding/json rules silently unsign data: an
+// ambiguous embedded field (two embedded structs exporting the same name) is
+// dropped entirely, and json:"-" or unexported fields are never serialized.
+// Nothing is signed unless it appears in the marshaled JSON. Keep bodies
+// small: canonicalization allocates roughly one hundred times the input
+// transiently, so cap untrusted records at tens of kilobytes, not megabytes.
+// Normalize time.Time to UTC before marshaling: encoding/json preserves the
+// zone offset, so the same instant can marshal differently. json.RawMessage
+// fields are normalized. Keep one domain constant beside each body schema and
+// bump its version when signed meaning changes.
 //
 // # Canonical form v1
 //
 // Canonicalize and MarshalCanonical produce: object keys sorted by Go string
-// order (UTF-8 byte order) at every depth; no insignificant whitespace;
-// number literals verbatim (9007199254740993 survives exactly; "1.0" and
-// "1" are distinct literals, though json.Marshal never emits "1.0" for a Go
-// float); minimal string escaping with HTML escaping off, except U+2028 and
-// U+2029 which encoding/json always escapes. Rejected: invalid UTF-8
+// order (UTF-8 byte order) at every depth; no insignificant whitespace; number
+// literals verbatim (9007199254740993 survives exactly; "1.0" and "1" are
+// distinct literals, though json.Marshal never emits "1.0" for a Go float);
+// minimal string escaping with HTML escaping off, except U+2028 and U+2029
+// which encoding/json always escapes. Rejected: invalid UTF-8
 // (ErrInvalidUTF8), unpaired UTF-16 surrogate escapes
 // (ErrInvalidUnicodeEscape), duplicate object keys at any depth
-// (ErrDuplicateKey), data after the value (ErrTrailingData), empty input. MarshalCanonical also
-// rejects invalid reachable strings and string map keys before encoding/json
-// can replace them with U+FFFD. This conservative walk includes fields JSON
-// may omit. Unicode is not normalized: NFC and NFD remain distinct.
+// (ErrDuplicateKey), data after the value (ErrTrailingData), empty input.
+// MarshalCanonical also rejects invalid reachable strings and string map keys
+// before encoding/json can replace them with U+FFFD. This conservative walk
+// includes fields JSON may omit. Unicode is not normalized: NFC and NFD remain
+// distinct.
 //
 // This is NOT RFC 8785 (JCS). Divergences: key order is UTF-8 not UTF-16
 // (differs only when keys mix U+E000..U+FFFF with supplementary-plane
@@ -60,28 +66,33 @@
 // v1 forever; a future incompatible form gets a new function and consumer
 // record/domain version.
 //
-// Custom json.Marshaler and encoding.TextMarshaler implementations own their
-// determinism and pre-coercion UTF-8 behavior. Avoid them in signed bodies
-// unless their output has separate collision and determinism tests.
+// Custom marshalers are not walked internally. A json.Marshaler's output is
+// validated by Canonicalize; an encoding.TextMarshaler's output (values and
+// non-string map keys) is checked for valid UTF-8 before encoding/json can
+// coerce it, closing the same U+FFFD collision by a third route. Determinism
+// of custom output remains the implementer's responsibility.
 //
 // # Backends
 //
-// Ed25519 (pure, RFC 8032) for provenance across processes: publish the
-// public key, verify anywhere. HMAC-SHA256 for same-process integrity:
-// verification is symmetric, so anyone who can verify can also sign. Both
-// sign frame(domain, payload), never bare bytes, so a signature over one
-// record kind never verifies as another. Verifiers reject a signature naming
-// a different key id or algorithm (ErrKeyMismatch) before any crypto, which
-// blocks algorithm confusion. HMAC tags are compared with hmac.Equal only;
-// constant_time_test.go pins the call site.
+// Ed25519 (pure, RFC 8032) for provenance across processes: publish the public
+// key, verify anywhere. HMAC-SHA256 for same-process integrity: verification
+// is symmetric, so anyone who can verify can also sign. Both sign
+// frame(domain, payload), never bare bytes, so a signature over one record
+// kind never verifies as another. Verifiers reject a signature naming a
+// different key id or algorithm (ErrKeyMismatch) before any crypto, which
+// blocks algorithm confusion. Signature decodes its JSON "sig" with strict
+// base64, so a stored record has exactly one spelling of its signature. HMAC
+// tags are compared with hmac.Equal only; constant_time_test.go pins the call
+// site.
 //
 // Signer and Verifier are sibling capabilities: an Ed25519 signer exposes its
 // public-only Verifier explicitly, while HMAC necessarily implements both.
-// Local backends honor an already-cancelled ctx before crypto; SSH-agent and
-// KMS backends land as separate tickets. Exported concrete zero values return
-// ErrUninitializedKey from cryptographic operations rather than panic.
-// Signer and Verifier values are immutable after construction and safe for
-// concurrent use; Keyring is not (populate it before sharing).
+// Local backends honor an already-cancelled ctx before crypto and return an
+// error for a nil ctx; SSH-agent and KMS backends land as separate tickets.
+// Exported concrete zero values return ErrUninitializedKey from cryptographic
+// operations rather than panic. Signer and Verifier values are immutable after
+// construction and safe for concurrent use; Keyring is not (populate it before
+// sharing).
 //
 // Cryptographic validity is not authorization. A Keyring proves that one of
 // its members signed the bytes; callers use purpose-scoped rings to decide
@@ -101,13 +112,21 @@
 // process that publishes a new identity. They validate and anchor an
 // owner-only key directory with os.Root, make its parent entry durable before
 // generation, publish a synced 0600 sibling temp through an atomic no-replace
-// hard link, fsync the directory, and strictly decode typed PEM. Loads of an
-// existing key fsync the directory again before trusting it, so a publish
-// whose final sync failed keeps reporting ErrKeyFileDurability on retry until
-// the entry is known to be durable. Loads refuse symlinks, swaps, loose unix
-// ownership/modes, foreign key types, and oversized files. The key directory must sit below a caller-trusted ancestor; only its
-// immediate directory is validated here. Windows relies on profile ACLs.
-// Signer values implement fmt.Formatter and never print key material.
+// hard link, fsync the directory, and strictly decode typed PEM (block type,
+// one block, no headers, no surrounding data). A crash between the temp write
+// and the hard link leaves an unpublished owner-only .<name>.tmp-* file that
+// is never collected; the next run then publishes a new identity and reports
+// created=true. Loads of an existing key fsync the directory again before
+// trusting it, so a publish whose final sync failed keeps reporting
+// ErrKeyFileDurability on retry until the entry is known to be durable. Loads
+// refuse symlinks, swaps, loose unix ownership/modes, foreign key types, and
+// oversized files. The key directory must sit below a caller-trusted ancestor;
+// only its immediate directory is validated here. Windows relies on profile
+// ACLs. Signer and verifier types implement fmt.Formatter on value and pointer
+// receivers, so values held in structs, slices, maps, and interfaces print
+// only their key id under every verb. Residual: a signer stored by value in an
+// unexported field of another struct is formatted by reflection, which fmt
+// cannot route through Format; hold signers by pointer there.
 //
 // Per-record signatures do not detect replay, deletion, reordering, rollback,
 // or key loss. Ledgers put sequence/previous-hash fields inside the signed

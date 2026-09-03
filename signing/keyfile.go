@@ -308,6 +308,8 @@ func readKeyFile(root *os.Root, name string, afterLstat func()) ([]byte, bool, e
 // block of any type, so the first line, the decoded block's type, and the
 // count of BEGIN markers are all checked; otherwise a file starting with the
 // right BEGIN line could carry a foreign block or unvalidated text.
+// The block-type comparison is implied by the first two conditions and is
+// kept as the direct statement of intent (a mutation deleting it is equivalent).
 func decodeKeyPEM(raw []byte, path string, wantType string) ([]byte, error) {
 	trimmed := bytes.TrimSpace(raw)
 	block, rest := pem.Decode(trimmed)

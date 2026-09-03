@@ -33,6 +33,12 @@ proposals). No new module dependency and no consumer wiring in this change.
   validated owner-only directory; loads of an existing key re-sync that
   directory before trusting it, and refuse symlinks, swaps, loose unix
   ownership/modes, and foreign key types.
+- Review hardening before merge: the PEM block type is checked, not only the
+  first line; no path-based chmod after key-directory creation;
+  `fmt.Formatter` on value receivers so signers held by value never print
+  key material; `encoding.TextMarshaler` output is UTF-8 validated;
+  `Signature` JSON decodes with strict base64; a nil context or nil
+  `*Keyring` fails closed.
 
 ### Added — golem headless integration surface (#352)
 
