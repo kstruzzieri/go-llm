@@ -28,6 +28,7 @@ go-llm/
 ├── conversation/    # Persistent conversation storage with SQLite
 ├── memory/          # Explicit user-controlled local memories + agent-memory records (SQLite, scope-filtered FTS5/bm25 search); shared hardened-open primitives (open.go); separate from conversation + RAG; backs Golem /remember + memory_search AND MCP agent_memory_* tools
 ├── projectcontext/  # AGENTS.md-style project-context loader (discovery, safe read, ordering; consumed by cmd/golem)
+├── signing/         # Detached signatures over canonical JSON (ZT-301): Signer/Verifier seam, canonical form v1, Ed25519 + HMAC-SHA256 backends, Keyring rotation, hardened key files. Consumed by #445/#446/#447/#450; knows no record schema.
 ├── feedback/        # Implicit user behavioral signal collection
 ├── fingerprint/     # Model profiling (latency benchmarks, capability detection)
 ├── prefetch/        # Predictive cache-warming engine for RAG retrieval
