@@ -138,12 +138,17 @@ func TestSignatureJSONRejectsNonCanonicalBase64(t *testing.T) {
 	if len(ok.Bytes) != 32 {
 		t.Fatalf("decoded %d bytes, want 32", len(ok.Bytes))
 	}
+	// Raw strings: a backslash sequence here is a JSON escape, so the decoded
+	// string carries a real CR or LF into the base64 decoder, which Go's
+	// decoder skips even in Strict mode.
 	for _, sig := range []string{
-		"jJUeuIWQOgViqoFhkgQOfvPEChP0plbkf6HFrrpMd0p=",
-		"jJUeuIWQOgViqoFhkgQOfvPEChP0plbkf6HFrrpMd0q=",
-		"jJUeuIWQOgViqoFhkgQOfvPEChP0plbkf6HFrrpMd0r=",
-		"AQI",    // missing padding
-		"AQID\n", // trailing newline
+		`jJUeuIWQOgViqoFhkgQOfvPEChP0plbkf6HFrrpMd0p=`,
+		`jJUeuIWQOgViqoFhkgQOfvPEChP0plbkf6HFrrpMd0q=`,
+		`jJUeuIWQOgViqoFhkgQOfvPEChP0plbkf6HFrrpMd0r=`,
+		`AQI`, // missing padding
+		`jJUeuIWQOgViqoFhkgQOfvPEChP0\nplbkf6HFrrpMd0o=`,   // embedded LF
+		`jJUeuIWQOgViqoFhkgQOfvPEChP0\r\nplbkf6HFrrpMd0o=`, // embedded CR LF
+		`\njJUeuIWQOgViqoFhkgQOfvPEChP0plbkf6HFrrpMd0o=\n`, // surrounding LF
 	} {
 		var s Signature
 		if err := json.Unmarshal([]byte(`{"alg":"ed25519","kid":"k","sig":"`+sig+`"}`), &s); err == nil {

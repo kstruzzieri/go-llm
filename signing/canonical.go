@@ -183,8 +183,8 @@ func rejectInvalidUTF8Value(v reflect.Value, visiting map[utf8Visit]bool) error 
 				if !utf8.ValidString(key.String()) {
 					return ErrInvalidUTF8
 				}
-			} else if _, err := customMarshalerOutput(key); err != nil {
-				return err // encoding/json formats non-string keys through MarshalText
+			} else if err := textMarshalerKeyOutput(key); err != nil {
+				return err
 			}
 			if err := rejectInvalidUTF8Value(iter.Value(), visiting); err != nil {
 				return err
@@ -206,38 +206,78 @@ func rejectInvalidUTF8Value(v reflect.Value, visiting map[utf8Visit]bool) error 
 	return nil
 }
 
-// customMarshalerOutput reports whether v is encoded by its own marshaler and,
-// for encoding.TextMarshaler, whether that output is valid UTF-8. A
-// json.Marshaler's bytes are validated later by Canonicalize, but a
-// TextMarshaler's bytes pass through encoding/json's string encoder, which
-// replaces invalid UTF-8 with U+FFFD before Canonicalize can see it. Internal
-// fields of either kind are not walked: they may legitimately hold binary and
-// are never serialized. Pointer-receiver marshalers are honored when v is
-// addressable, matching encoding/json.
+// customMarshalerOutput mirrors encoding/json's value dispatch (newTypeEncoder
+// order): a json.Marshaler reachable through the address when v is
+// addressable, then on v itself; then an encoding.TextMarshaler the same way.
+// A json.Marshaler's bytes are validated later by Canonicalize, so it is only
+// skipped here. A TextMarshaler's bytes pass through encoding/json's string
+// encoder, which replaces invalid UTF-8 with U+FFFD before Canonicalize can
+// see it, so its output is validated now. Internal fields of either kind are
+// not walked: they may legitimately hold binary and are never serialized.
 func customMarshalerOutput(v reflect.Value) (handled bool, err error) {
-	candidates := []reflect.Value{v}
-	if v.CanAddr() {
-		candidates = append(candidates, v.Addr())
+	if _, ok := asJSONMarshaler(v); ok {
+		return true, nil
 	}
-	for _, c := range candidates {
-		if !c.CanInterface() {
-			continue
-		}
-		if _, ok := c.Interface().(json.Marshaler); ok {
-			return true, nil
-		}
-		if tm, ok := c.Interface().(encoding.TextMarshaler); ok {
-			text, err := tm.MarshalText()
-			if err != nil {
-				return true, nil // json.Marshal reports the marshaler's error itself
-			}
-			if !utf8.Valid(text) {
-				return true, ErrInvalidUTF8
-			}
-			return true, nil
-		}
+	if tm, ok := asTextMarshaler(v); ok {
+		return true, validTextOutput(tm)
 	}
 	return false, nil
+}
+
+// textMarshalerKeyOutput mirrors encoding/json's map-key dispatch, which
+// ignores json.Marshaler and formats non-string keys through MarshalText on
+// the key value. Review finding: a key type implementing both marshalers was
+// skipped as a json.Marshaler while encoding/json used its MarshalText.
+func textMarshalerKeyOutput(key reflect.Value) error {
+	if !key.CanInterface() {
+		return nil
+	}
+	tm, ok := key.Interface().(encoding.TextMarshaler)
+	if !ok {
+		return nil
+	}
+	return validTextOutput(tm)
+}
+
+// asJSONMarshaler prefers the addressable receiver, as encoding/json does, so
+// a pointer-receiver MarshalJSON is honored exactly when json would use it.
+func asJSONMarshaler(v reflect.Value) (json.Marshaler, bool) {
+	if v.CanAddr() && v.Addr().CanInterface() {
+		if m, ok := v.Addr().Interface().(json.Marshaler); ok {
+			return m, true
+		}
+	}
+	if v.CanInterface() {
+		if m, ok := v.Interface().(json.Marshaler); ok {
+			return m, true
+		}
+	}
+	return nil, false
+}
+
+func asTextMarshaler(v reflect.Value) (encoding.TextMarshaler, bool) {
+	if v.CanAddr() && v.Addr().CanInterface() {
+		if m, ok := v.Addr().Interface().(encoding.TextMarshaler); ok {
+			return m, true
+		}
+	}
+	if v.CanInterface() {
+		if m, ok := v.Interface().(encoding.TextMarshaler); ok {
+			return m, true
+		}
+	}
+	return nil, false
+}
+
+func validTextOutput(tm encoding.TextMarshaler) error {
+	text, err := tm.MarshalText()
+	if err != nil {
+		return nil // json.Marshal reports the marshaler's error itself
+	}
+	if !utf8.Valid(text) {
+		return ErrInvalidUTF8
+	}
+	return nil
 }
 
 // rejectDuplicateKeys walks the token stream and fails on the first object

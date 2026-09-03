@@ -30,9 +30,9 @@ type Signature struct {
 	Bytes []byte    `json:"sig"`
 }
 
-// UnmarshalJSON decodes the wire form with strict base64: padding required
-// and no non-zero trailing bits, so every signature has exactly one
-// serialized spelling. A lenient decoder would let a stored record's "sig"
+// UnmarshalJSON decodes the wire form and requires the canonical base64
+// spelling (re-encoding must reproduce the input), so every signature has
+// exactly one serialized form. A lenient decoder would let a stored record's "sig"
 // field be rewritten without breaking Verify, which defeats any consumer that
 // hashes whole serialized records into a chain.
 func (s *Signature) UnmarshalJSON(b []byte) error {
@@ -49,6 +49,12 @@ func (s *Signature) UnmarshalJSON(b []byte) error {
 		decoded, err := base64.StdEncoding.Strict().DecodeString(*wire.Bytes)
 		if err != nil {
 			return fmt.Errorf("signing: signature bytes are not canonical base64: %w", err)
+		}
+		// Strict rejects non-zero trailing bits but, like every Go base64
+		// decoder, still skips CR and LF. Re-encoding equality is the actual
+		// canonicality check: exactly one spelling decodes to these bytes.
+		if base64.StdEncoding.EncodeToString(decoded) != *wire.Bytes {
+			return errors.New("signing: signature bytes are not canonical base64")
 		}
 		raw = decoded
 	}

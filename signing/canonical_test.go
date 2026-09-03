@@ -286,3 +286,59 @@ func TestMarshalCanonicalJSONMarshalerOwnsItsInternals(t *testing.T) {
 		t.Fatalf("json.Marshaler with binary internals = %s, %v; want its own output accepted", got, err)
 	}
 }
+
+// dualBoth implements both marshalers with value receivers. encoding/json uses
+// MarshalJSON for values and MarshalText for map keys.
+type dualBoth struct{ raw string }
+
+func (d dualBoth) MarshalJSON() ([]byte, error) { return []byte(`"json"`), nil }
+func (d dualBoth) MarshalText() ([]byte, error) { return []byte(d.raw), nil }
+
+// dualPtrJSON has a pointer-receiver MarshalJSON and a value-receiver
+// MarshalText. encoding/json uses MarshalJSON only when the value is
+// addressable and falls back to MarshalText otherwise.
+type dualPtrJSON struct{ raw string }
+
+func (d *dualPtrJSON) MarshalJSON() ([]byte, error) { return []byte(`"ptrjson"`), nil }
+func (d dualPtrJSON) MarshalText() ([]byte, error)  { return []byte(d.raw), nil }
+
+func TestMarshalCanonicalDispatchMatchesEncodingJSON(t *testing.T) {
+	bad := "k\xff"
+	// Map keys: MarshalJSON is ignored, MarshalText output is the key.
+	for _, raw := range []string{"k\xff", "k\xfe"} {
+		if _, err := MarshalCanonical(map[dualBoth]int{{raw: raw}: 1}); !errors.Is(err, ErrInvalidUTF8) {
+			t.Errorf("dual-interface map key %q: err = %v, want ErrInvalidUTF8", raw, err)
+		}
+	}
+	if got, err := MarshalCanonical(map[dualBoth]int{{raw: "k"}: 1}); err != nil || string(got) != `{"k":1}` {
+		t.Fatalf("valid dual-interface map key = %s, %v", got, err)
+	}
+	// Values and struct fields: MarshalJSON wins; MarshalText output is irrelevant.
+	if got, err := MarshalCanonical(map[string]any{"v": dualBoth{raw: bad}}); err != nil || string(got) != `{"v":"json"}` {
+		t.Fatalf("dual-interface value = %s, %v; want MarshalJSON output", got, err)
+	}
+	if got, err := MarshalCanonical(struct {
+		F dualBoth `json:"f"`
+	}{dualBoth{raw: bad}}); err != nil || string(got) != `{"f":"json"}` {
+		t.Fatalf("dual-interface field = %s, %v; want MarshalJSON output", got, err)
+	}
+	// Pointer-receiver MarshalJSON: used when addressable, so an invalid
+	// MarshalText output must not cause a false rejection there...
+	addressable := &struct {
+		F dualPtrJSON `json:"f"`
+	}{dualPtrJSON{raw: bad}}
+	if got, err := MarshalCanonical(addressable); err != nil || string(got) != `{"f":"ptrjson"}` {
+		t.Fatalf("addressable pointer-receiver MarshalJSON field = %s, %v; want MarshalJSON output", got, err)
+	}
+	// ...and skipped when not addressable, where json falls back to MarshalText.
+	if _, err := MarshalCanonical(struct {
+		F dualPtrJSON `json:"f"`
+	}{dualPtrJSON{raw: bad}}); !errors.Is(err, ErrInvalidUTF8) {
+		t.Errorf("non-addressable field falls back to MarshalText: err = %v, want ErrInvalidUTF8", err)
+	}
+	if got, err := MarshalCanonical(struct {
+		F dualPtrJSON `json:"f"`
+	}{dualPtrJSON{raw: "ok"}}); err != nil || string(got) != `{"f":"ok"}` {
+		t.Fatalf("non-addressable valid MarshalText field = %s, %v", got, err)
+	}
+}
