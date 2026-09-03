@@ -39,6 +39,7 @@ type replSession struct {
 	// lateStore is the checkpoint store /allow-write opened (nil when
 	// -allow-write owned it at startup, whose store main.go closes itself).
 	root           string
+	stdinTerminal  bool // real stdin is a TTY; required for live privilege expansion
 	sysInputs      systemInputs
 	readToolCount  int
 	mountAt        int

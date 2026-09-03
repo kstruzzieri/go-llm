@@ -86,6 +86,10 @@ func handleAllowWrite(ctx context.Context, out io.Writer, sess *replSession, fie
 		_, _ = fmt.Fprintln(out, "writes already enabled")
 		return
 	}
+	if !sess.stdinTerminal {
+		_, _ = fmt.Fprintln(out, "/allow-write requires an interactive terminal; for scripted input, start with -allow-write")
+		return
+	}
 	// fail reports the cause and releases the store when one was opened. A
 	// close failure is joined, never dropped: the startup twin joins it into
 	// run's error, and a damaged store must be visible here too.
@@ -205,6 +209,10 @@ func handleAllowExec(ctx context.Context, out io.Writer, sess *replSession, fiel
 	}
 	if sess.allowExec {
 		_, _ = fmt.Fprintln(out, "exec already enabled")
+		return
+	}
+	if !sess.stdinTerminal {
+		_, _ = fmt.Fprintln(out, "/allow-exec requires an interactive terminal; for scripted input, start with -allow-exec")
 		return
 	}
 	manager, execTools, err := buildExecMount(sess.root, agenttools.ExecToolsOptions{})

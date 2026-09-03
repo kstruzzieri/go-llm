@@ -114,6 +114,7 @@ func newMountSession(t *testing.T, caller agent.ModelCaller, root string, host .
 		runtime:       newTestRuntime(t, root, system, orch, host),
 		tools:         append(append([]agent.Tool(nil), fileTools...), host...),
 		baseSystem:    system,
+		stdinTerminal: true,
 		sysInputs:     in,
 		root:          root,
 		readToolCount: len(fileTools),

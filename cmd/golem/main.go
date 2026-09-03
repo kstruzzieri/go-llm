@@ -890,7 +890,8 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 	}
 
 	gate := provider.NewDestinationGate()
-	interactive := destinationAdmissionInteractive(f, realTermOps{}.IsTerminal(int(stdin.Fd())))
+	stdinTerminal := realTermOps{}.IsTerminal(int(stdin.Fd()))
+	interactive := destinationAdmissionInteractive(f, stdinTerminal)
 	adm, err := newDestinationAdmission(destinationAdmissionConfig{
 		Gate:        gate,
 		Edges:       netPlan.Edges,
@@ -1549,6 +1550,7 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 		tools:            tools,
 		baseSystem:       baseSystem,
 		root:             root,
+		stdinTerminal:    stdinTerminal,
 		sysInputs:        sysIn,
 		readToolCount:    readToolCount,
 		mountAt:          mountAt,

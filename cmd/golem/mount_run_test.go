@@ -45,6 +45,9 @@ func captureStartup(t *testing.T, extra []string, commands ...string) (startupSh
 	err := run(args, stdin, stdout, stderr, runHooks{
 		startAutoIndex: func() func() { return func() {} },
 		afterSessionReady: func(sess *replSession) error {
+			// The hook stands in for a command typed at a real terminal; the
+			// test files themselves are deliberately plain descriptors.
+			sess.stdinTerminal = true
 			var out strings.Builder
 			for _, c := range commands {
 				_, _ = dispatchSlash(context.Background(), &out, sess, c)
@@ -97,6 +100,37 @@ func TestAllowCommandsMatchStartupFlags(t *testing.T) {
 			last := startup.names[len(startup.names)-1]
 			if last == "stop_command" || last == "edit_file" {
 				t.Fatalf("no tool after the gated slot (last=%s); the order pin is vacuous", last)
+			}
+		})
+	}
+}
+
+func TestRunRejectsAllowCommandsFromPipedInput(t *testing.T) {
+	for _, command := range []string{"/allow-write", "/allow-exec"} {
+		t.Run(command, func(t *testing.T) {
+			configPath, root := writeRunLifecycleConfig(t)
+			stdin, stdout, stderr := stdinFileWith(t, command+"\n")
+			var sess *replSession
+			err := run([]string{"-config", configPath, "-root", root, "-no-probe", "-no-cap-probe",
+				"-no-session", "-no-memory", "-no-rag", "-no-project-context", "-no-auto-index"},
+				stdin, stdout, stderr, runHooks{
+					afterSessionReady: func(ready *replSession) error {
+						sess = ready
+						return nil
+					},
+				})
+			if err != nil {
+				t.Fatalf("run = %v (stderr: %s)", err, readRunTestFile(t, stderr))
+			}
+			if sess == nil {
+				t.Fatal("session was not captured")
+			}
+			if sess.allowWrite || sess.allowExec {
+				t.Fatalf("%s from piped input enabled capabilities: write=%t exec=%t",
+					command, sess.allowWrite, sess.allowExec)
+			}
+			if got := readRunTestFile(t, stdout); !strings.Contains(got, command+" requires an interactive terminal") {
+				t.Fatalf("stdout = %q, want interactive-terminal denial", got)
 			}
 		})
 	}
@@ -176,6 +210,7 @@ func TestRunReleasesLateMountsAfterRuntimeClose(t *testing.T) {
 		"-no-memory", "-no-project-context", "-no-auto-index"}, stdin, stdout, stderr, runHooks{
 		startAutoIndex: func() func() { return func() {} },
 		afterSessionReady: func(sess *replSession) error {
+			sess.stdinTerminal = true // this hook simulates a live REPL command
 			var out strings.Builder
 			_, _ = dispatchSlash(context.Background(), &out, sess, "/allow-write")
 			if !strings.HasPrefix(out.String(), "writes enabled") {
