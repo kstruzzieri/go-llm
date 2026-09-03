@@ -145,7 +145,7 @@ func openKeyRoot(path string) (*os.Root, string, error) {
 // the atomic no-replace commit: a racing loser can read only the winner's
 // complete temp, never a partially written final file.
 func loadOrCreateKeyFile(root *os.Root, name string, generate func() ([]byte, error)) ([]byte, bool, error) {
-	raw, exists, err := readKeyFile(root, name, nil)
+	raw, exists, err := loadExistingKeyFile(root, name)
 	if err != nil {
 		return nil, false, err
 	}
@@ -174,7 +174,7 @@ func loadOrCreateKeyFile(root *os.Root, name string, generate func() ([]byte, er
 		if !errors.Is(linkErr, fs.ErrExist) || removeErr != nil {
 			return nil, false, wrapped
 		}
-		raw, exists, err := readKeyFile(root, name, nil)
+		raw, exists, err := loadExistingKeyFile(root, name)
 		if err != nil {
 			return nil, false, err
 		}
@@ -195,6 +195,22 @@ func loadOrCreateKeyFile(root *os.Root, name string, generate func() ([]byte, er
 		return material, true, errors.Join(postPublish...)
 	}
 	return material, true, nil
+}
+
+// loadExistingKeyFile reads a published key and syncs the key directory
+// before trusting it. The creator that published the file may have failed
+// its own directory sync (ErrKeyFileDurability), in which case the entry is
+// not yet known to be durable; without this sync a plain retry would report
+// success while a crash could still drop the file and rotate the identity.
+func loadExistingKeyFile(root *os.Root, name string) ([]byte, bool, error) {
+	raw, exists, err := readKeyFile(root, name, nil)
+	if err != nil || !exists {
+		return nil, exists, err
+	}
+	if err := syncKeyDirectory(root.Name()); err != nil {
+		return nil, true, fmt.Errorf("%w: %s: %w", ErrKeyFileDurability, filepath.Join(root.Name(), name), err)
+	}
+	return raw, true, nil
 }
 
 func writeKeyTemp(root *os.Root, name string, material []byte) (temp string, err error) {

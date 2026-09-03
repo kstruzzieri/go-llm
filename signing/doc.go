@@ -101,9 +101,11 @@
 // process that publishes a new identity. They validate and anchor an
 // owner-only key directory with os.Root, make its parent entry durable before
 // generation, publish a synced 0600 sibling temp through an atomic no-replace
-// hard link, fsync the directory, and strictly decode typed PEM. Loads refuse
-// symlinks, swaps, loose unix ownership/modes, foreign key types, and oversized
-// files. The key directory must sit below a caller-trusted ancestor; only its
+// hard link, fsync the directory, and strictly decode typed PEM. Loads of an
+// existing key fsync the directory again before trusting it, so a publish
+// whose final sync failed keeps reporting ErrKeyFileDurability on retry until
+// the entry is known to be durable. Loads refuse symlinks, swaps, loose unix
+// ownership/modes, foreign key types, and oversized files. The key directory must sit below a caller-trusted ancestor; only its
 // immediate directory is validated here. Windows relies on profile ACLs.
 // Signer values implement fmt.Formatter and never print key material.
 //

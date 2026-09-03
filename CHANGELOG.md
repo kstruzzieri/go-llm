@@ -30,7 +30,8 @@ proposals). No new module dependency and no consumer wiring in this change.
   rotation. `LoadOrCreateEd25519` (PKCS#8 PEM) and `LoadOrCreateHMAC`
   (typed HMAC PEM) report identity creation, make the key-directory entry
   durable before generation, and atomically publish synced 0600 keys below a
-  validated owner-only directory; loads refuse symlinks, swaps, loose unix
+  validated owner-only directory; loads of an existing key re-sync that
+  directory before trusting it, and refuse symlinks, swaps, loose unix
   ownership/modes, and foreign key types.
 
 ### Added — golem headless integration surface (#352)

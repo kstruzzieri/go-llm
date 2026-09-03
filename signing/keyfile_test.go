@@ -336,3 +336,86 @@ func TestKeyFileRejectsWrongContent(t *testing.T) {
 		t.Error("oversized key file accepted")
 	}
 }
+
+// A publish whose directory sync failed leaves the final key file in place.
+// The next load must not accept that file as durable until a directory sync
+// succeeds; otherwise a plain retry clears ErrKeyFileDurability while a crash
+// could still drop the entry and silently rotate the identity.
+func TestLoadOrCreateExistingKeyRetriesDirectorySync(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "keys", "hmac.pem")
+	keyDir := filepath.Dir(path)
+	original := syncKeyDirectory
+	failing := true
+	syncKeyDirectory = func(dir string) error {
+		if dir == keyDir && failing {
+			return errors.New("injected sync failure")
+		}
+		return original(dir)
+	}
+	t.Cleanup(func() { syncKeyDirectory = original })
+
+	if _, created, err := LoadOrCreateHMAC(path); !created || !errors.Is(err, ErrKeyFileDurability) {
+		t.Fatalf("first call = created %v, err %v; want created + ErrKeyFileDurability", created, err)
+	}
+	published, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, created, err := LoadOrCreateHMAC(path); created || !errors.Is(err, ErrKeyFileDurability) {
+		t.Fatalf("retry while sync still fails = created %v, err %v; want not-created + ErrKeyFileDurability", created, err)
+	}
+	failing = false
+	signer, created, err := LoadOrCreateHMAC(path)
+	if err != nil || created {
+		t.Fatalf("retry after sync recovers = created %v, err %v; want existing key", created, err)
+	}
+	if got, err := os.ReadFile(path); err != nil || !bytes.Equal(got, published) {
+		t.Fatalf("key file changed across retries: err %v", err)
+	}
+	if signer == nil {
+		t.Fatal("recovered load returned nil signer")
+	}
+}
+
+// The loser of a publish race reads the winner's complete file, but the
+// winner's own directory sync may have failed. The loser must sync the key
+// directory before reporting the key as durably stored.
+func TestLoadOrCreateConcurrentLoserSyncsKeyDirectory(t *testing.T) {
+	keyDir := secureKeyDir(t)
+	const name = "hmac.pem"
+	winner := []byte("-----BEGIN HMAC-SHA256 KEY-----\nAAAA\n-----END HMAC-SHA256 KEY-----\n")
+	original := syncKeyDirectory
+	syncKeyDirectory = func(dir string) error {
+		if dir == keyDir {
+			return errors.New("injected sync failure")
+		}
+		return original(dir)
+	}
+	t.Cleanup(func() { syncKeyDirectory = original })
+	root, err := os.OpenRoot(keyDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = root.Close() }()
+
+	raw, created, err := loadOrCreateKeyFile(root, name, func() ([]byte, error) {
+		// The winner publishes between this creator's absence check and its link.
+		if err := os.WriteFile(filepath.Join(keyDir, name), winner, 0o600); err != nil {
+			return nil, err
+		}
+		return []byte("loser material"), nil
+	})
+	if created || !errors.Is(err, ErrKeyFileDurability) {
+		t.Fatalf("loser = created %v, raw %q, err %v; want not-created + ErrKeyFileDurability", created, raw, err)
+	}
+	if got, err := os.ReadFile(filepath.Join(keyDir, name)); err != nil || !bytes.Equal(got, winner) {
+		t.Fatalf("winner's key file disturbed: %q, err %v", got, err)
+	}
+	entries, err := os.ReadDir(keyDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("key directory has %d entries after loser cleanup, want 1", len(entries))
+	}
+}
