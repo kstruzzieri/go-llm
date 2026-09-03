@@ -59,6 +59,10 @@ type ToolResultEvent struct {
 	// budget blocks a grant-approved call. False for prompted approvals and
 	// denials.
 	AutoApproved bool
+	// Blocked mirrors ToolCallRecord.Blocked (#436). Result is the final
+	// observation the model will see (replaced or annotated), as a private
+	// clone: writing to it does not change State.
+	Blocked bool
 }
 
 // ToolResultObserver is an OPTIONAL extension of Observer. When an Observer also

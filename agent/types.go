@@ -198,7 +198,7 @@ type StepRecord struct {
 // EventRecord is a lightweight ordered log entry for replay/eval.
 type EventRecord struct {
 	Step int
-	Kind string // "token" | "step" | "tool_call" | "tool_result" | "compaction" | "stop"
+	Kind string // "token" | "step" | "tool_call" | "tool_result" | "compaction" | "blocked" | "stop"
 }
 
 // ToolCallRecord captures one dispatched tool call and its outcome.
@@ -215,6 +215,11 @@ type ToolCallRecord struct {
 	// invocation budget blocks a grant-approved call. omitempty keeps
 	// pre-#341 run traces byte-identical.
 	AutoApproved bool `json:"AutoApproved,omitempty"`
+	// Blocked is true when an interceptor refused this call (#436): with
+	// Invoked=false the call was blocked before Plan and approval and never
+	// ran; with Invoked=true the tool ran and its observation was replaced
+	// at ingress. omitempty keeps pre-#436 run traces byte-identical.
+	Blocked bool `json:"Blocked,omitempty"`
 	// RouteOutcome names the model a delegating tool routed to; nil for ordinary
 	// tools. Omitted from marshaled records when nil, so non-delegated run
 	// traces are byte-identical to before.
@@ -230,4 +235,7 @@ type Result struct {
 	Usage      provider.Usage
 	ToolCalls  []ToolCallRecord
 	StopReason StopReason
+	// Risk is the run's cumulative interceptor report (#436): nil when no
+	// interceptor produced a finding, so pre-#436 traces stay byte-identical.
+	Risk *RiskReport `json:"Risk,omitempty"`
 }

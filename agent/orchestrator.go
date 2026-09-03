@@ -20,6 +20,9 @@ type Orchestrator struct {
 	// verifier is the optional post-write verification hook (#347). nil is the
 	// default and leaves every batch byte-for-byte unchanged.
 	verifier Verifier
+	// interceptors is the deterministic middleware chain (#436), in
+	// registration order. Empty leaves every hook a no-op.
+	interceptors []Interceptor
 }
 
 // Option configures an Orchestrator at construction. New stays source-compatible
@@ -87,8 +90,17 @@ func buildChatRequest(st State, specs []provider.Tool, outputReserve int, opts p
 	return req
 }
 
-// Run executes the loop until the model produces a final answer or a cap is hit.
+// Run executes the loop until the model produces a final answer or a cap is
+// hit. Result.Risk is published on every return path, including blocks and
+// errors.
 func (o *Orchestrator) Run(ctx context.Context, req Request, obs Observer) (Result, error) {
+	ic := &interceptorRun{}
+	res, err := o.run(ctx, req, obs, ic)
+	res.Risk = ic.result()
+	return res, err
+}
+
+func (o *Orchestrator) run(ctx context.Context, req Request, obs Observer, ic *interceptorRun) (Result, error) {
 	obs = normalizeObserver(obs)
 	if req.Goal == "" {
 		return Result{}, fmt.Errorf("agent: empty goal")
@@ -112,6 +124,14 @@ func (o *Orchestrator) Run(ctx context.Context, req Request, obs Observer) (Resu
 	if err != nil {
 		return Result{}, err
 	}
+	// #436: resolve per-run interceptors before initState so a system-prompt
+	// addendum lands in the state the model sees.
+	chain, addenda, err := resolveInterceptors(ctx, o.interceptors, RunScope{System: req.System})
+	if err != nil {
+		return Result{}, err
+	}
+	ic.chain = chain
+	req.System += addenda
 	state := initState(req)
 	historyLen := len(req.History)
 	var res Result
