@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/kstruzzieri/go-llm/agent"
 	golemruntime "github.com/kstruzzieri/go-llm/golem"
+	"github.com/kstruzzieri/go-llm/internal/agenttrace"
 	"github.com/kstruzzieri/go-llm/provider"
 )
 
@@ -415,5 +417,75 @@ func TestAllowCommandsKeepStartupOrderInEitherSequence(t *testing.T) {
 				t.Fatalf("prompt = %q", sess.baseSystem)
 			}
 		})
+	}
+}
+
+// Runtime System and trace metadata are byte-identical after a replacement:
+// what the provider received is what the trace file records.
+func TestAllowWriteRuntimeSystemMatchesTrace(t *testing.T) {
+	root := t.TempDir()
+	caller := &captureCaller{answer: "ok"}
+	sess := newMountSession(t, caller, root)
+	obs, err := newObserv(os.Getenv, root, true, false, time.Now)
+	if err != nil {
+		t.Fatalf("newObserv: %v", err)
+	}
+	sess.obs = obs
+	before := sess.baseSystem
+	var out strings.Builder
+	_, _ = dispatchSlash(context.Background(), &out, sess, "/allow-write")
+	if _, err := runOnce(context.Background(), &out, nil, sess, "hello", nil); err != nil {
+		t.Fatalf("runOnce: %v", err)
+	}
+	sent := caller.system
+	if sent == before {
+		t.Fatal("the runtime prompt did not change after /allow-write")
+	}
+	files, _ := filepath.Glob(filepath.Join(obs.traceDir, "*.json"))
+	if len(files) == 0 {
+		t.Fatalf("no trace written under %s", obs.traceDir)
+	}
+	for _, f := range files {
+		raw, err := os.ReadFile(f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var rec agenttrace.TraceRecord
+		if err := json.Unmarshal(raw, &rec); err != nil {
+			t.Fatalf("%s: %v", f, err)
+		}
+		if rec.Request.System != sent {
+			t.Fatalf("%s records a different System than the runtime sent:\n trace=%q\n sent=%q", f, rec.Request.System, sent)
+		}
+		if rec.Request.ToolSchemaHash != toolSchemaHash(sess.tools) {
+			t.Fatalf("%s tool hash %q != mounted set %q", f, rec.Request.ToolSchemaHash, toolSchemaHash(sess.tools))
+		}
+	}
+}
+
+// After a mid-session mount, #347 verification runs: the .golem.json command
+// leaves a marker file, which only a wired verifier can produce.
+func TestAllowWriteInstallsPostWriteVerifier(t *testing.T) {
+	if _, err := os.Stat("/bin/sh"); err != nil {
+		t.Skip("needs /bin/sh")
+	}
+	root := t.TempDir()
+	writeGolemJSON(t, root, `{"verify":{"argv":["/bin/sh","-c","echo ran > verified.txt"]}}`)
+	caller := &scriptCaller{responses: []agent.ModelResult{
+		writeToolCallResponse("w1", "w.txt", "W\n"),
+		{Response: provider.ChatResponse{Content: "done"}},
+	}}
+	sess := newMountSession(t, caller, root)
+	var out strings.Builder
+	_, _ = dispatchSlash(context.Background(), &out, sess, "/allow-write")
+	if strings.Contains(out.String(), "verification disabled") {
+		t.Fatalf("verifier not built: %q", out.String())
+	}
+	src := &stubAnswerSource{line: "y", ok: true} // approves the write and the verify prompt
+	if _, err := runOnce(context.Background(), &out, nil, sess, "write w", src); err != nil {
+		t.Fatalf("runOnce: %v\n%s", err, out.String())
+	}
+	if _, err := os.Stat(filepath.Join(root, "verified.txt")); err != nil {
+		t.Fatalf("post-write verification did not run after the mid-session mount: %v\n%s", err, out.String())
 	}
 }
