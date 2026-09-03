@@ -21,6 +21,7 @@ const (
 	maxKeyFileBytes = 64 * 1024
 	hmacFileKeySize = 32
 	pemPrivateKey   = "PRIVATE KEY" // PKCS#8
+	pemPublicKey    = "PUBLIC KEY"  // PKIX/RFC 8410
 	pemHMACKey      = "HMAC-SHA256 KEY"
 )
 
@@ -36,12 +37,12 @@ var (
 // created reports identity creation so callers cannot mistake key loss for
 // an ordinary load.
 func LoadOrCreateEd25519(path string) (*Ed25519Signer, bool, error) {
-	root, name, err := openKeyRoot(path)
+	state, err := openKeyRootState(path, true)
 	if err != nil {
 		return nil, false, err
 	}
-	defer func() { _ = root.Close() }()
-	raw, created, err := loadOrCreateKeyFile(root, name, func() ([]byte, error) {
+	defer func() { _ = state.root.Close() }()
+	raw, created, err := loadOrCreateKeyFile(state.root, state.name, state.syncParent, func() ([]byte, error) {
 		_, priv, err := ed25519.GenerateKey(nil)
 		if err != nil {
 			return nil, err
@@ -55,19 +56,7 @@ func LoadOrCreateEd25519(path string) (*Ed25519Signer, bool, error) {
 	if err != nil {
 		return nil, created, err
 	}
-	der, err := decodeKeyPEM(raw, path, pemPrivateKey)
-	if err != nil {
-		return nil, created, err
-	}
-	key, err := x509.ParsePKCS8PrivateKey(der)
-	if err != nil {
-		return nil, created, fmt.Errorf("signing: %s: parse PKCS#8: %w", path, err)
-	}
-	priv, ok := key.(ed25519.PrivateKey)
-	if !ok {
-		return nil, created, fmt.Errorf("signing: %s: key is %T, want ed25519.PrivateKey", path, key)
-	}
-	signer, err := NewEd25519Signer(priv)
+	signer, err := parseEd25519Signer(raw, path)
 	return signer, created, err
 }
 
@@ -75,12 +64,12 @@ func LoadOrCreateEd25519(path string) (*Ed25519Signer, bool, error) {
 // 32-byte random key when the file does not exist. created reports identity
 // creation so callers cannot mistake key loss for an ordinary load.
 func LoadOrCreateHMAC(path string) (*HMACSigner, bool, error) {
-	root, name, err := openKeyRoot(path)
+	state, err := openKeyRootState(path, true)
 	if err != nil {
 		return nil, false, err
 	}
-	defer func() { _ = root.Close() }()
-	raw, created, err := loadOrCreateKeyFile(root, name, func() ([]byte, error) {
+	defer func() { _ = state.root.Close() }()
+	raw, created, err := loadOrCreateKeyFile(state.root, state.name, state.syncParent, func() ([]byte, error) {
 		key := make([]byte, hmacFileKeySize)
 		if _, err := io.ReadFull(rand.Reader, key); err != nil {
 			return nil, err
@@ -90,31 +79,135 @@ func LoadOrCreateHMAC(path string) (*HMACSigner, bool, error) {
 	if err != nil {
 		return nil, created, err
 	}
+	signer, err := parseHMACSigner(raw, path)
+	return signer, created, err
+}
+
+// LoadEd25519 loads an existing PKCS#8 PEM Ed25519 private key without
+// creating anything or syncing its directory.
+func LoadEd25519(path string) (*Ed25519Signer, error) {
+	raw, err := loadKeyFile(path)
+	if err != nil {
+		return nil, err
+	}
+	return parseEd25519Signer(raw, path)
+}
+
+// LoadHMAC loads an existing HMAC-SHA256 KEY PEM block without creating
+// anything or syncing its directory.
+func LoadHMAC(path string) (*HMACSigner, error) {
+	raw, err := loadKeyFile(path)
+	if err != nil {
+		return nil, err
+	}
+	return parseHMACSigner(raw, path)
+}
+
+// LoadEd25519Verifier loads an existing PKIX/RFC 8410 Ed25519 public key PEM
+// without creating anything or syncing its directory.
+func LoadEd25519Verifier(path string) (*Ed25519Verifier, error) {
+	raw, err := loadKeyFile(path)
+	if err != nil {
+		return nil, err
+	}
+	return parseEd25519Verifier(raw, path)
+}
+
+func parseEd25519Signer(raw []byte, path string) (*Ed25519Signer, error) {
+	der, err := decodeKeyPEM(raw, path, pemPrivateKey)
+	if err != nil {
+		return nil, err
+	}
+	key, err := x509.ParsePKCS8PrivateKey(der)
+	if err != nil {
+		return nil, fmt.Errorf("signing: %s: parse PKCS#8: %w", path, err)
+	}
+	priv, ok := key.(ed25519.PrivateKey)
+	if !ok {
+		return nil, fmt.Errorf("signing: %s: key is %T, want ed25519.PrivateKey", path, key)
+	}
+	return NewEd25519Signer(priv)
+}
+
+func parseHMACSigner(raw []byte, path string) (*HMACSigner, error) {
 	key, err := decodeKeyPEM(raw, path, pemHMACKey)
 	if err != nil {
-		return nil, created, err
+		return nil, err
 	}
 	if len(key) != hmacFileKeySize {
-		return nil, created, fmt.Errorf("signing: %s: HMAC key is %d bytes, want %d", path, len(key), hmacFileKeySize)
+		return nil, fmt.Errorf("signing: %s: HMAC key is %d bytes, want %d", path, len(key), hmacFileKeySize)
 	}
-	signer, err := NewHMAC(key)
-	return signer, created, err
+	return NewHMAC(key)
+}
+
+func parseEd25519Verifier(raw []byte, path string) (*Ed25519Verifier, error) {
+	der, err := decodeKeyPEM(raw, path, pemPublicKey)
+	if err != nil {
+		return nil, err
+	}
+	key, err := x509.ParsePKIXPublicKey(der)
+	if err != nil {
+		return nil, fmt.Errorf("signing: %s: parse PKIX public key: %w", path, err)
+	}
+	pub, ok := key.(ed25519.PublicKey)
+	if !ok {
+		return nil, fmt.Errorf("signing: %s: key is %T, want ed25519.PublicKey", path, key)
+	}
+	return NewEd25519Verifier(pub)
+}
+
+func loadKeyFile(path string) ([]byte, error) {
+	state, err := openKeyRootState(path, false)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = state.root.Close() }()
+	raw, exists, err := readKeyFile(state.root, state.name, nil)
+	if err != nil {
+		return nil, err
+	}
+	if !exists {
+		return nil, fmt.Errorf("signing: key file %s: %w", path, fs.ErrNotExist)
+	}
+	return raw, nil
 }
 
 // openKeyRoot creates at most the dedicated owner-only leaf directory (its
 // parent must exist), anchors it with os.Root, and proves the opened root is
 // the directory Lstat saw.
 func openKeyRoot(path string) (*os.Root, string, error) {
+	state, err := openKeyRootState(path, true)
+	if err != nil {
+		return nil, "", err
+	}
+	return state.root, state.name, nil
+}
+
+type keyRootState struct {
+	root       *os.Root
+	name       string
+	syncParent bool
+}
+
+func openKeyRootState(path string, create bool) (keyRootState, error) {
 	if strings.TrimSpace(path) == "" {
-		return nil, "", errors.New("signing: key path is empty")
+		return keyRootState{}, errors.New("signing: key path is empty")
 	}
 	clean := filepath.Clean(path)
 	dir, name := filepath.Dir(clean), filepath.Base(clean)
+	if filepath.Base(path) == ".." || name == ".." {
+		return keyRootState{}, fmt.Errorf("signing: key path %q must not name parent directory", path)
+	}
 	if name == "." || name == string(filepath.Separator) {
-		return nil, "", fmt.Errorf("signing: key path %q does not name a file", path)
+		return keyRootState{}, fmt.Errorf("signing: key path %q does not name a file", path)
 	}
 	dirInfo, err := os.Lstat(dir)
+	syncParent := false
 	if errors.Is(err, fs.ErrNotExist) {
+		if !create {
+			return keyRootState{}, fmt.Errorf("signing: inspect key directory %s: %w", dir, err)
+		}
+		syncParent = true
 		// No os.Chmod(dir) afterwards: a path-based chmod follows a symlink an
 		// ancestor-writer can swap in between Mkdir and Chmod, which would be an
 		// arbitrary-path chmod as this UID. Mkdir's mode already yields an
@@ -123,32 +216,37 @@ func openKeyRoot(path string) (*os.Root, string, error) {
 		switch mkdirErr := os.Mkdir(dir, keyDirMode); {
 		case mkdirErr == nil, errors.Is(mkdirErr, fs.ErrExist): // created, or a concurrent creator won
 		default:
-			return nil, "", fmt.Errorf("signing: create key directory %s: %w", dir, mkdirErr)
+			return keyRootState{}, fmt.Errorf("signing: create key directory %s: %w", dir, mkdirErr)
 		}
 		dirInfo, err = os.Lstat(dir)
 	}
 	if err != nil {
-		return nil, "", fmt.Errorf("signing: inspect key directory %s: %w", dir, err)
+		return keyRootState{}, fmt.Errorf("signing: inspect key directory %s: %w", dir, err)
 	}
 	if dirInfo.Mode()&os.ModeSymlink != 0 || !dirInfo.IsDir() || !ownerAndModeOK(dirInfo) {
-		return nil, "", fmt.Errorf("%w: %s (mode %v)", ErrInsecureKeyDirectory, dir, dirInfo.Mode())
+		return keyRootState{}, fmt.Errorf("%w: %s (mode %v)", ErrInsecureKeyDirectory, dir, dirInfo.Mode())
 	}
 	root, err := os.OpenRoot(dir)
 	if err != nil {
-		return nil, "", fmt.Errorf("signing: open key directory %s: %w", dir, err)
+		return keyRootState{}, fmt.Errorf("signing: open key directory %s: %w", dir, err)
 	}
 	opened, err := root.Stat(".")
 	if err != nil || !os.SameFile(dirInfo, opened) {
 		_ = root.Close()
-		return nil, "", fmt.Errorf("%w: %s changed while opening", ErrInsecureKeyDirectory, dir)
+		return keyRootState{}, fmt.Errorf("%w: %s changed while opening", ErrInsecureKeyDirectory, dir)
 	}
-	return root, name, nil
+	return keyRootState{root: root, name: name, syncParent: syncParent}, nil
 }
 
 // loadOrCreateKeyFile publishes only complete synced bytes. A hard link is
 // the atomic no-replace commit: a racing loser can read only the winner's
 // complete temp, never a partially written final file.
-func loadOrCreateKeyFile(root *os.Root, name string, generate func() ([]byte, error)) ([]byte, bool, error) {
+func loadOrCreateKeyFile(root *os.Root, name string, syncParent bool, generate func() ([]byte, error)) ([]byte, bool, error) {
+	if syncParent {
+		if err := syncKeyDirectoryParent(root); err != nil {
+			return nil, false, err
+		}
+	}
 	raw, exists, err := loadExistingKeyFile(root, name)
 	if err != nil {
 		return nil, false, err
@@ -156,9 +254,10 @@ func loadOrCreateKeyFile(root *os.Root, name string, generate func() ([]byte, er
 	if exists {
 		return raw, false, nil
 	}
-	parent := filepath.Dir(root.Name())
-	if err := syncKeyDirectory(parent); err != nil {
-		return nil, false, fmt.Errorf("%w: sync key directory parent %s: %w", ErrKeyFileDurability, parent, err)
+	if !syncParent {
+		if err := syncKeyDirectoryParent(root); err != nil {
+			return nil, false, err
+		}
 	}
 	material, err := generate()
 	if err != nil {
@@ -199,6 +298,14 @@ func loadOrCreateKeyFile(root *os.Root, name string, generate func() ([]byte, er
 		return material, true, errors.Join(postPublish...)
 	}
 	return material, true, nil
+}
+
+func syncKeyDirectoryParent(root *os.Root) error {
+	parent := filepath.Dir(root.Name())
+	if err := syncKeyDirectory(parent); err != nil {
+		return fmt.Errorf("%w: sync key directory parent %s: %w", ErrKeyFileDurability, parent, err)
+	}
+	return nil
 }
 
 // loadExistingKeyFile reads a published key and syncs the key directory

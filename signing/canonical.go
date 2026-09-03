@@ -137,8 +137,9 @@ type utf8Visit struct {
 }
 
 // rejectInvalidUTF8Value closes encoding/json's invalid-string replacement
-// behavior for ordinary Go values. It deliberately walks all reachable
-// fields instead of duplicating encoding/json's field-selection rules.
+// behavior for ordinary Go values. It skips fields encoding/json definitely
+// omits, but conservatively walks anonymous fields whose exported members may
+// be promoted.
 // Custom json.Marshaler and encoding.TextMarshaler implementations own their
 // pre-coercion semantics; Canonicalize still validates their final JSON.
 func rejectInvalidUTF8Value(v reflect.Value, visiting map[utf8Visit]bool) error {
@@ -216,6 +217,10 @@ func rejectInvalidUTF8Value(v reflect.Value, visiting map[utf8Visit]bool) error 
 		}
 	case reflect.Struct:
 		for i := 0; i < v.NumField(); i++ {
+			field := v.Type().Field(i)
+			if field.Tag.Get("json") == "-" || (!field.Anonymous && !field.IsExported()) {
+				continue
+			}
 			if err := rejectInvalidUTF8Value(v.Field(i), visiting); err != nil {
 				return err
 			}

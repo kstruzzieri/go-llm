@@ -33,8 +33,10 @@
 // body fields signed by default and lets audit code canonicalize a raw body
 // without knowing its schema. Two encoding/json rules silently unsign data: an
 // ambiguous embedded field (two embedded structs exporting the same name) is
-// dropped entirely, and json:"-" or unexported fields are never serialized.
-// Nothing is signed unless it appears in the marshaled JSON. Keep bodies
+// dropped entirely. An exact json:"-" tag and a non-anonymous unexported field
+// are skipped by encoding/json; MarshalCanonical still walks reachable fields
+// conservatively where embedding may make them serializable. Nothing is signed
+// unless it appears in the marshaled JSON. Keep bodies
 // small: canonicalization allocates roughly one hundred times the input
 // transiently, so cap untrusted records at tens of kilobytes, not megabytes.
 // Normalize time.Time to UTC before marshaling: encoding/json preserves the
@@ -119,20 +121,28 @@
 // has no mutex.
 //
 // LoadOrCreateEd25519 / LoadOrCreateHMAC return created=true only to the
-// process that publishes a new identity. They validate and anchor an
-// owner-only key directory with os.Root, make its parent entry durable before
-// generation, publish a synced 0600 sibling temp through an atomic no-replace
-// hard link, fsync the directory, and strictly decode typed PEM (block type,
-// one block, no headers, no surrounding data). A crash between the temp write
-// and the hard link leaves an unpublished owner-only .<name>.tmp-* file that
-// is never collected; the next run then publishes a new identity and reports
-// created=true. Loads of an existing key fsync the directory again before
-// trusting it, so a publish whose final sync failed keeps reporting
-// ErrKeyFileDurability on retry until the entry is known to be durable. Loads
-// refuse symlinks, swaps, loose unix ownership/modes, foreign key types, and
-// oversized files. The key directory must sit below a caller-trusted ancestor;
-// only its immediate directory is validated here. Windows relies on profile
-// ACLs. Signer and verifier types implement fmt.Formatter on value and pointer
+// process that publishes a new identity. Callers that require a pre-existing
+// identity must use LoadEd25519 or LoadHMAC, or treat unexpected creation as a
+// fail-closed bootstrap event. Creation requires a writable filesystem with
+// same-directory hard links and directory-sync support; unsupported
+// environments fail closed without a fallback. The directory parent is synced
+// when the dedicated key directory was initially missing or a key must be
+// published, including on retries after a failed parent sync. Publication uses
+// a synced 0600 sibling temp, an atomic no-replace hard link, and a final
+// directory sync. The ordinary LoadOrCreate existing-key path re-syncs only
+// that key directory before trusting it. A crash between the temp write and
+// the hard link leaves an unpublished owner-only .<name>.tmp-* file that is
+// never collected; the next run then publishes a new identity and reports
+// created=true. LoadEd25519 and LoadHMAC are pure must-exist loaders: they
+// never create or fsync, so they work with preprovisioned keys and read-only
+// storage. LoadEd25519Verifier is a pure verifier loader that reads one
+// canonical PKIX/RFC 8410 PUBLIC KEY PEM block and returns a public-only
+// verifier. All file loaders strictly decode typed PEM (block type, one
+// block, no headers, no surrounding data) and refuse symlinks, swaps, loose
+// unix ownership/modes, foreign key types, and oversized files. The key
+// directory must sit below a caller-trusted ancestor; only its immediate
+// directory is validated here. Windows relies on profile ACLs. Signer and
+// verifier types implement fmt.Formatter on value and pointer
 // receivers, so values held in structs, slices, maps, and interfaces print
 // only their key id under every verb. Residual: a signer stored by value in an
 // unexported field of another struct is formatted by reflection, which fmt

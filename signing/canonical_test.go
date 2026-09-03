@@ -176,14 +176,12 @@ func TestMarshalCanonicalErrors(t *testing.T) {
 
 func TestMarshalCanonicalRejectsInvalidUTF8BeforeReplacement(t *testing.T) {
 	bad := string([]byte{0xff, 0xfe})
-	type hidden struct{ S string }
 	values := []any{
 		struct {
 			S string `json:"s"`
 		}{S: bad},
 		map[string]string{bad: "map key"},
 		[]string{"nested", bad},
-		struct{ hidden }{hidden{S: bad}},
 	}
 	for _, value := range values {
 		if _, err := MarshalCanonical(value); !errors.Is(err, ErrInvalidUTF8) {
@@ -192,6 +190,60 @@ func TestMarshalCanonicalRejectsInvalidUTF8BeforeReplacement(t *testing.T) {
 	}
 	if got, err := MarshalCanonical([]byte{0xff}); err != nil || string(got) != `"/w=="` {
 		t.Fatalf("byte slice = %s, %v; want base64 JSON string", got, err)
+	}
+}
+
+func TestMarshalCanonicalRejectsInvalidUTF8InPromotedExportedField(t *testing.T) {
+	type embedded struct {
+		Promoted string `json:"promoted"`
+	}
+	bad := string([]byte{0xff})
+
+	if _, err := MarshalCanonical(struct{ embedded }{embedded{Promoted: bad}}); !errors.Is(err, ErrInvalidUTF8) {
+		t.Fatalf("MarshalCanonical err = %v, want ErrInvalidUTF8", err)
+	}
+}
+
+func TestMarshalCanonicalSkipsInvalidUTF8InJSONIgnoredField(t *testing.T) {
+	bad := string([]byte{0xff})
+	value := struct {
+		Ignored string `json:"-"`
+		Kept    string `json:"kept"`
+	}{Ignored: bad, Kept: "ok"}
+
+	got, err := MarshalCanonical(value)
+	if err != nil {
+		t.Fatalf("MarshalCanonical: %v", err)
+	}
+	if string(got) != `{"kept":"ok"}` {
+		t.Fatalf("got %s, want ignored field omitted", got)
+	}
+}
+
+func TestMarshalCanonicalWalksNonIgnoredDashTag(t *testing.T) {
+	bad := string([]byte{0xff})
+	value := struct {
+		NamedDash string `json:"-x,omitempty"`
+	}{NamedDash: bad}
+
+	if _, err := MarshalCanonical(value); !errors.Is(err, ErrInvalidUTF8) {
+		t.Fatalf("MarshalCanonical err = %v, want ErrInvalidUTF8", err)
+	}
+}
+
+func TestMarshalCanonicalSkipsInvalidUTF8InUnexportedField(t *testing.T) {
+	bad := string([]byte{0xff})
+	value := struct {
+		hidden string
+		Kept   string `json:"kept"`
+	}{hidden: bad, Kept: "ok"}
+
+	got, err := MarshalCanonical(value)
+	if err != nil {
+		t.Fatalf("MarshalCanonical: %v", err)
+	}
+	if string(got) != `{"kept":"ok"}` {
+		t.Fatalf("got %s, want unexported field omitted", got)
 	}
 }
 

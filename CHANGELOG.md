@@ -6,7 +6,7 @@ All notable changes to `go-llm` are documented here. Downstream consumers
 
 ## [Unreleased]
 
-### Added — `signing` package: AgentSigner interface and key management (#444)
+### Added — `signing` package: Signer/Verifier interfaces and key management (#444)
 
 New top-level `signing/` package, the ZT-301 seam the Phase 4 ledgers build
 on (#445 receipts, #446 memory provenance, #447 `golem audit`, #450 delegate
@@ -20,19 +20,27 @@ proposals). No new module dependency and no consumer wiring in this change.
 - `Canonicalize` / `MarshalCanonical`: canonical form v1 (sorted keys,
   compact, verbatim numbers, HTML escaping off), rejecting invalid UTF-8,
   unpaired surrogate escapes, duplicate keys, and trailing data, including
-  invalid Go strings before encoding replacement. Not RFC 8785; divergences
-  documented and golden-pinned.
+  invalid Go strings before encoding replacement. Exact `json:"-"` and
+  non-anonymous unexported fields remain omitted by `encoding/json`, while the
+  defensive prewalk conservatively visits fields that may serialize through
+  embedding. Not RFC 8785; divergences documented and golden-pinned.
 - Backends: `Ed25519Signer`/`Ed25519Verifier` and `HMACSigner`
   (HMAC-SHA256, `hmac.Equal` only, pinned by a source-level gate). Signature
   JSON shape `{"alg","kid","sig"}` is public contract. Concrete zero values
   fail closed with `ErrUninitializedKey`.
 - Algorithm-bound key IDs and purpose-scoped `Keyring` verification support
   rotation. `LoadOrCreateEd25519` (PKCS#8 PEM) and `LoadOrCreateHMAC`
-  (typed HMAC PEM) report identity creation, make the key-directory entry
-  durable before generation, and atomically publish synced 0600 keys below a
-  validated owner-only directory; loads of an existing key re-sync that
-  directory before trusting it, and refuse symlinks, swaps, loose unix
-  ownership/modes, and foreign key types.
+  (typed HMAC PEM) report identity creation, require writable storage with
+  same-directory hard links and directory-sync support, and atomically publish
+  synced 0600 keys below a validated owner-only directory; unsupported
+  environments fail closed. The parent is synced when the dedicated key
+  directory was initially missing or a key must be published, including after
+  a failed creation retry; the ordinary existing-key path re-syncs only the key
+  directory before trusting it. The file loaders refuse symlinks, swaps, loose
+  unix ownership/modes, and foreign key types. Pure must-exist
+  `LoadEd25519` and `LoadHMAC` loaders never create or fsync and support
+  preprovisioned/read-only storage. Pure `LoadEd25519Verifier` reads canonical
+  PKIX/RFC 8410 `PUBLIC KEY` PEM.
 - Review hardening before merge: the PEM block type is checked, not only the
   first line; no path-based chmod after key-directory creation;
   `fmt.Formatter` on value receivers so signers held by value never print

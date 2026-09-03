@@ -2,6 +2,7 @@ package signing
 
 import (
 	"bytes"
+	"context"
 	"crypto/ecdsa"
 	"crypto/ed25519"
 	"crypto/elliptic"
@@ -9,6 +10,7 @@ import (
 	"crypto/x509"
 	"encoding/pem"
 	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -80,6 +82,192 @@ func TestLoadOrCreateHMACRoundTrip(t *testing.T) {
 	}
 	if m1.KeyID() != m2.KeyID() {
 		t.Fatal("second load produced a different key")
+	}
+}
+
+func TestLoadKeyFilesArePureAndDoNotSync(t *testing.T) {
+	base := t.TempDir()
+	edPath := filepath.Join(base, "ed", "agent.pem")
+	hmacPath := filepath.Join(base, "hmac", "hmac.pem")
+	if _, _, err := LoadOrCreateEd25519(edPath); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := LoadOrCreateHMAC(hmacPath); err != nil {
+		t.Fatal(err)
+	}
+	original := syncKeyDirectory
+	syncKeyDirectory = func(string) error { return errors.New("unexpected directory sync") }
+	t.Cleanup(func() { syncKeyDirectory = original })
+	if signer, err := LoadEd25519(edPath); err != nil || signer == nil {
+		t.Fatalf("LoadEd25519 = %v, %v; want existing signer without sync", signer, err)
+	}
+	if signer, err := LoadHMAC(hmacPath); err != nil || signer == nil {
+		t.Fatalf("LoadHMAC = %v, %v; want existing signer without sync", signer, err)
+	}
+	missingEd := filepath.Join(base, "missing-ed", "agent.pem")
+	missingHMAC := filepath.Join(base, "missing-hmac", "hmac.pem")
+	if _, err := LoadEd25519(missingEd); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("LoadEd25519 missing err = %v, want fs.ErrNotExist", err)
+	}
+	if _, err := LoadHMAC(missingHMAC); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("LoadHMAC missing err = %v, want fs.ErrNotExist", err)
+	}
+	for _, dir := range []string{filepath.Dir(missingEd), filepath.Dir(missingHMAC)} {
+		if _, err := os.Stat(dir); !errors.Is(err, fs.ErrNotExist) {
+			t.Fatalf("pure load created %s: stat err = %v", dir, err)
+		}
+	}
+}
+
+func TestLoadEd25519VerifierReadsCanonicalPublicKey(t *testing.T) {
+	dir := secureKeyDir(t)
+	_, private, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	der, err := x509.MarshalPKIXPublicKey(private.Public())
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "agent.pub.pem")
+	if err := os.WriteFile(path, pem.EncodeToMemory(&pem.Block{Type: pemPublicKey, Bytes: der}), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	original := syncKeyDirectory
+	syncKeyDirectory = func(string) error { return errors.New("unexpected directory sync") }
+	t.Cleanup(func() { syncKeyDirectory = original })
+	verifier, err := LoadEd25519Verifier(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, err := NewEd25519Verifier(private.Public().(ed25519.PublicKey))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if verifier.KeyID() != want.KeyID() {
+		t.Fatalf("verifier key id = %q, want %q", verifier.KeyID(), want.KeyID())
+	}
+	signer, err := NewEd25519Signer(private)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sig, err := signer.Sign(context.Background(), "test", []byte("payload"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := verifier.Verify(context.Background(), "test", []byte("payload"), sig); err != nil {
+		t.Fatalf("loaded verifier rejected signer signature: %v", err)
+	}
+}
+
+func TestLoadEd25519VerifierRejectsNonPublicPEM(t *testing.T) {
+	dir := secureKeyDir(t)
+	_, private, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	privateDER, err := x509.MarshalPKCS8PrivateKey(private)
+	if err != nil {
+		t.Fatal(err)
+	}
+	publicDER, err := x509.MarshalPKIXPublicKey(private.Public())
+	if err != nil {
+		t.Fatal(err)
+	}
+	wrongType, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wrongDER, err := x509.MarshalPKIXPublicKey(&wrongType.PublicKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cases := []struct {
+		name string
+		data []byte
+	}{
+		{"private", pem.EncodeToMemory(&pem.Block{Type: pemPrivateKey, Bytes: privateDER})},
+		{"hmac", pem.EncodeToMemory(&pem.Block{Type: pemHMACKey, Bytes: make([]byte, hmacFileKeySize)})},
+		{"wrong-type", pem.EncodeToMemory(&pem.Block{Type: pemPublicKey, Bytes: wrongDER})},
+		{"malformed", pem.EncodeToMemory(&pem.Block{Type: pemPublicKey, Bytes: publicDER[:len(publicDER)-1]})},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(dir, tc.name+".pem")
+			if err := os.WriteFile(path, tc.data, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := LoadEd25519Verifier(path); err == nil {
+				t.Fatal("accepted non-canonical public key PEM")
+			}
+		})
+	}
+}
+
+func TestLoadOrCreateExistingKeySkipsParentSync(t *testing.T) {
+	dir := secureKeyDir(t)
+	path := filepath.Join(dir, "hmac.pem")
+	if _, created, err := LoadOrCreateHMAC(path); err != nil || !created {
+		t.Fatalf("initial create = created %v, err %v", created, err)
+	}
+	parent := filepath.Dir(dir)
+	original := syncKeyDirectory
+	called := false
+	syncKeyDirectory = func(path string) error {
+		if path == parent {
+			called = true
+			return errors.New("unexpected parent sync")
+		}
+		return original(path)
+	}
+	t.Cleanup(func() { syncKeyDirectory = original })
+	if _, created, err := LoadOrCreateHMAC(path); err != nil || created {
+		t.Fatalf("existing load = created %v, err %v", created, err)
+	}
+	if called {
+		t.Fatal("existing key triggered parent sync")
+	}
+}
+
+func TestLoadOrCreateInitialMissingDirectorySyncsParentBeforeExistingKey(t *testing.T) {
+	dir := secureKeyDir(t)
+	parent := filepath.Dir(dir)
+	name := "hmac.pem"
+	if err := os.WriteFile(filepath.Join(dir, name), []byte("existing"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	original := syncKeyDirectory
+	var synced []string
+	syncKeyDirectory = func(path string) error {
+		synced = append(synced, path)
+		return errors.New("injected sync failure")
+	}
+	t.Cleanup(func() { syncKeyDirectory = original })
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = root.Close() }()
+	if _, created, err := loadOrCreateKeyFile(root, name, true, func() ([]byte, error) {
+		t.Fatal("generated a replacement for an existing key")
+		return nil, nil
+	}); created || !errors.Is(err, ErrKeyFileDurability) {
+		t.Fatalf("existing key with initial-missing state = created %v, err %v; want durability error before load", created, err)
+	}
+	if len(synced) == 0 || synced[0] != parent {
+		t.Fatalf("first directory sync = %v, want parent %s", synced, parent)
+	}
+}
+
+func TestKeyPathRejectsParentDirectoryBasename(t *testing.T) {
+	dir := secureKeyDir(t)
+	for _, path := range []string{
+		filepath.Join(dir, "nested") + string(os.PathSeparator) + "..",
+		"nested" + string(os.PathSeparator) + ".." + string(os.PathSeparator) + ".." + string(os.PathSeparator) + ".",
+	} {
+		if _, _, err := LoadOrCreateHMAC(path); err == nil || !strings.Contains(err.Error(), "must not name parent directory") {
+			t.Fatalf("parent-directory basename %q err = %v, want explicit rejection", path, err)
+		}
 	}
 }
 
@@ -155,10 +343,8 @@ func TestLoadOrCreateWritesNothingBeforeParentSync(t *testing.T) {
 	base := t.TempDir()
 	path := filepath.Join(base, "keys", "hmac.pem")
 	original := syncKeyDirectory
-	failed := false
 	syncKeyDirectory = func(dir string) error {
-		if dir == base && !failed {
-			failed = true
+		if dir == base {
 			return errors.New("injected parent sync failure")
 		}
 		return original(dir)
@@ -171,9 +357,12 @@ func TestLoadOrCreateWritesNothingBeforeParentSync(t *testing.T) {
 	if entries, err := os.ReadDir(filepath.Dir(path)); err != nil || len(entries) != 0 {
 		t.Fatalf("key directory written before parent sync: entries %v, err %v", entries, err)
 	}
+	if _, created, err := LoadOrCreateHMAC(path); created || !errors.Is(err, ErrKeyFileDurability) {
+		t.Fatalf("retry = created %v, err %v; want repeated parent durability failure", created, err)
+	}
 	syncKeyDirectory = original
 	if _, created, err := LoadOrCreateHMAC(path); err != nil || !created {
-		t.Fatalf("retry = created %v, err %v; want newly created key", created, err)
+		t.Fatalf("retry after parent sync recovery = created %v, err %v; want newly created key", created, err)
 	}
 }
 
@@ -402,7 +591,7 @@ func TestLoadOrCreateConcurrentLoserSyncsKeyDirectory(t *testing.T) {
 	}
 	defer func() { _ = root.Close() }()
 
-	raw, created, err := loadOrCreateKeyFile(root, name, func() ([]byte, error) {
+	raw, created, err := loadOrCreateKeyFile(root, name, false, func() ([]byte, error) {
 		// The winner publishes between this creator's absence check and its link.
 		if err := os.WriteFile(filepath.Join(keyDir, name), winner, 0o600); err != nil {
 			return nil, err
