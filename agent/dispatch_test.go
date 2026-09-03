@@ -240,10 +240,12 @@ func TestToolObservationDeepCopiesContext(t *testing.T) {
 	}
 }
 
-// TestRecordResultRejectsOversizedContextBeforeCloning pins the admission
-// boundary: the completed result is recorded and observed first, but its
-// oversized carrier never reaches State for cloning.
-func TestRecordResultRejectsOversizedContextBeforeCloning(t *testing.T) {
+// TestRecordResultRejectsOversizedContextBeforeAnyConsumer pins the admission
+// boundary (#436 spec D7): an oversized carrier from an untrusted tool is
+// rejected before the result is recorded, before the observer sees it, and
+// before it reaches State for cloning. Until #436 the result was recorded and
+// observed first; a malformed set must not reach any consumer.
+func TestRecordResultRejectsOversizedContextBeforeAnyConsumer(t *testing.T) {
 	for _, tt := range []struct {
 		name string
 		set  *ContextSet
@@ -264,14 +266,11 @@ func TestRecordResultRejectsOversizedContextBeforeCloning(t *testing.T) {
 			if err == nil || !strings.Contains(err.Error(), tt.want) {
 				t.Fatalf("recordResult error = %v, want %q", err, tt.want)
 			}
-			if len(res.ToolCalls) != 1 {
-				t.Fatalf("completed result was not recorded: %+v", res.ToolCalls)
+			if len(res.ToolCalls) != 0 || len(res.Events) != 0 {
+				t.Fatalf("malformed result was recorded: calls %+v, events %+v", res.ToolCalls, res.Events)
 			}
-			if len(res.Events) != 1 || res.Events[0].Kind != "tool_result" {
-				t.Fatalf("result event = %+v, want one tool_result", res.Events)
-			}
-			if len(obs.results) != 1 || obs.results[0].Result.Context != tt.set {
-				t.Fatalf("ToolResultObserver did not receive the completed result: %+v", obs.results)
+			if len(obs.results) != 0 {
+				t.Fatalf("ToolResultObserver received a malformed result: %+v", obs.results)
 			}
 			if len(state.Messages) != 0 {
 				t.Fatalf("oversized ContextSet reached State: %+v", state.Messages)

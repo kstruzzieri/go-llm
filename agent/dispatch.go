@@ -77,30 +77,59 @@ func (o *Orchestrator) recordResult(ctx context.Context, res *Result, state *Sta
 	gov *restraintGovernor, step int, call provider.ToolCall, effect Effect, rec ToolCallRecord,
 	out ToolResult, b *batch, ic *interceptorRun) (stop bool, err error) {
 
+	if o.ctxMgr.Mixed {
+		if err := validateContextSetCardinality(call.ID, out.Context); err != nil {
+			return false, err
+		}
+		// #436 spec D6: freeze the set into the canonical copy State will own.
+		// The structured payload is deep-copied only when mixed assembly is on:
+		// with Mixed off nothing reads it, so cloning would make State retain a
+		// guaranteed-dead copy of every alternative for the rest of the run.
+		out.Context = out.Context.clone() // clone is nil-safe
+	}
+	out.Attrib = cloneAttrib(out.Attrib)
+	outputCap := effect.OutputCap
+	// #436 spec D7: inspect an invoked observation at ingress, BEFORE the
+	// observer, State, the batch policy and the governor. Synthetic outcomes
+	// (unknown tool, bad JSON, denial, blocked call) are orchestrator-authored
+	// and carry no tool content to inspect. Alternatives are model-visible
+	// only under mixed assembly, so legacy runs inspect the fallback alone.
+	if rec.Invoked {
+		msg := InspectedMessage{
+			StateIndex: len(state.Messages), Role: "tool", Origin: out.Origin,
+			ToolName: call.Function.Name, ToolCallID: call.ID, Content: out.Content,
+		}
+		if o.ctxMgr.Mixed {
+			msg.Alternatives = alternativesOf(out.Context)
+		}
+		tags, block, err := ic.inspectObservation(ctx, obs, step, msg)
+		if err != nil {
+			return false, err
+		}
+		if block != nil {
+			out = ToolResult{IsError: true, Content: blockedResultContent(*block), Origin: out.Origin, RouteOutcome: out.RouteOutcome}
+			rec.IsError, rec.Blocked = true, true
+		} else if len(tags) > 0 {
+			outputCap = addSaturating(outputCap, annotateResult(&out, tags))
+		}
+	}
+
 	rec.RouteOutcome = out.RouteOutcome
 	res.ToolCalls = append(res.ToolCalls, rec)
 	res.Events = append(res.Events, EventRecord{Step: step, Kind: "tool_result"})
 	if tro, ok := obs.(ToolResultObserver); ok {
 		if err := tro.OnToolResult(ctx, ToolResultEvent{
-			Step: step, Call: call, Effect: effect, Result: out,
+			Step: step, Call: call, Effect: effect, Result: cloneResult(out),
 			Denied: rec.Denied, Invoked: rec.Invoked, Latency: rec.Latency,
 			AutoApproved: rec.AutoApproved, Blocked: rec.Blocked,
 		}); err != nil {
 			return false, err
 		}
 	}
-	if o.ctxMgr.Mixed {
-		if err := validateContextSetCardinality(call.ID, out.Context); err != nil {
-			return false, err
-		}
-	}
 	msg := toolObservation(call, out)
-	msg.OutputCap = effect.OutputCap
-	// The structured payload is deep-copied only when mixed assembly is on:
-	// with Mixed off nothing reads it, so cloning would make State retain a
-	// guaranteed-dead copy of every alternative for the rest of the run.
+	msg.OutputCap = outputCap
 	if o.ctxMgr.Mixed {
-		msg.Context = out.Context.clone() // clone is nil-safe
+		msg.Context = out.Context // the canonical clone; State owns it now
 	}
 	state.Messages = append(state.Messages, msg)
 	b.note(state, call, rec, out)
@@ -219,9 +248,18 @@ func (o *Orchestrator) invokeCall(ctx context.Context, tool Tool, effect Effect,
 	defer cancel()
 	out, err := tool.Invoke(cctx, args)
 	if err != nil {
-		return ToolResult{IsError: true, Content: err.Error()}
+		return ToolResult{IsError: true, Content: err.Error(), Origin: staticOrigin(tool)}
 	}
-	return capOutput(out, effect.OutputCap)
+	out = capOutput(out, effect.OutputCap)
+	// #436 spec D4: an unset per-invocation origin defers to the static
+	// declaration; a set but invalid one is unknown provenance, never the
+	// declaration (a tool emitting garbage earns no trust).
+	if out.Origin == OriginUnknown {
+		out.Origin = staticOrigin(tool)
+	} else {
+		out.Origin = normalizeOrigin(out.Origin)
+	}
+	return out
 }
 
 // dispatch is the serial composition: prepare on the main goroutine, then invoke.

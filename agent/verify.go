@@ -103,6 +103,23 @@ func (o *Orchestrator) verifyBatch(ctx context.Context, state *State, approver A
 	if out == "" {
 		return nil
 	}
-	state.Messages[b.verifyAnchor].Content += out
+	anchor := &state.Messages[b.verifyAnchor]
+	// #436 spec D7: verifier output is tool-authored workspace text entering
+	// State; inspect it before the append like any other observation.
+	tags, block, err := ic.inspectObservation(ctx, obs, step, InspectedMessage{
+		StateIndex: b.verifyAnchor, Role: "tool", Origin: OriginWorkspace,
+		ToolName: anchor.ToolName, ToolCallID: anchor.ToolCallID, Content: out,
+	})
+	if err != nil {
+		return err
+	}
+	if block != nil {
+		anchor.Content += blockedResultContent(*block)
+		return nil
+	}
+	anchor.Content += out
+	for _, f := range tags {
+		anchor.Content += tagTrailer(f)
+	}
 	return nil
 }
