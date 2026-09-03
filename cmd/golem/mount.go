@@ -157,10 +157,12 @@ func handleAllowWrite(ctx context.Context, out io.Writer, sess *replSession, fie
 }
 
 // disarmLateExec stops the late manager's REPL-context binding. main.go's
-// interactive branch defers it AFTER cancelREPL, so it runs BEFORE the
-// context is canceled and the late manager is then shut down synchronously
-// by closeLateMounts in its ordered LIFO slot, exactly as the startup
-// manager's deferred stopAfter arranges. Nil-safe and idempotent.
+// interactive branch defers it AFTER cancelREPL, so on the normal exit path
+// it runs BEFORE the context is canceled and the late manager is then shut
+// down synchronously by closeLateMounts in its ordered LIFO slot, exactly
+// as the startup manager's deferred stopAfter arranges. When cancelREPL was
+// invoked directly (an idle Ctrl-C quit) the binding has already fired and
+// this is a no-op. Nil-safe and idempotent.
 func (s *replSession) disarmLateExec() {
 	if s == nil || s.lateStop == nil {
 		return

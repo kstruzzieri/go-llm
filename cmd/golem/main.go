@@ -1611,10 +1611,12 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 		var cancelREPL context.CancelFunc
 		replCtx, cancelREPL = context.WithCancel(ctx)
 		defer cancelREPL()
-		// #372: registered after cancelREPL so it runs first (LIFO): a late
-		// manager's replCtx binding is retired before the context is
-		// canceled, and closeLateMounts then shuts it down in its ordered
-		// slot, exactly as stopAfter below arranges for a startup manager.
+		// #372: registered after cancelREPL so it runs first (LIFO): on the
+		// normal exit path a late manager's replCtx binding is retired
+		// before the context is canceled, and closeLateMounts then shuts it
+		// down in its ordered slot, exactly as stopAfter below arranges for a
+		// startup manager. An idle Ctrl-C quit calls cancelREPL directly,
+		// so there the binding fires first and closeLateMounts joins it.
 		defer sess.disarmLateExec()
 		ctrl := newReplControl(stdout, stderr, interrupts, cancelREPL)
 		sess.control = ctrl
