@@ -126,6 +126,11 @@ func MarshalCanonical(v any) ([]byte, error) {
 	return Canonicalize(b)
 }
 
+var (
+	jsonMarshalerType = reflect.TypeFor[json.Marshaler]()
+	textMarshalerType = reflect.TypeFor[encoding.TextMarshaler]()
+)
+
 type utf8Visit struct {
 	typ reflect.Type
 	ptr uintptr
@@ -142,7 +147,20 @@ func rejectInvalidUTF8Value(v reflect.Value, visiting map[utf8Visit]bool) error 
 	}
 	if v.Kind() == reflect.Interface {
 		if v.IsNil() {
+			return nil // encoding/json emits null
+		}
+		// encoding/json selects the marshaler from the STATIC interface type
+		// before looking at the dynamic value: an interface type embedding
+		// json.Marshaler routes to MarshalJSON, one embedding only
+		// encoding.TextMarshaler routes to MarshalText (whose output is then
+		// string-coerced), and any other interface type dispatches on the
+		// dynamic value as a non-addressable operand. Review finding: unwrapping
+		// first let a dynamic json.Marshaler mask a static MarshalText route.
+		if v.Type().Implements(jsonMarshalerType) {
 			return nil
+		}
+		if v.Type().Implements(textMarshalerType) && v.CanInterface() {
+			return validTextOutput(v.Interface().(encoding.TextMarshaler))
 		}
 		return rejectInvalidUTF8Value(v.Elem(), visiting)
 	}
