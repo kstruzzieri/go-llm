@@ -20,7 +20,7 @@ import (
 // capability are separate concepts.
 func (o *Orchestrator) runToolCalls(ctx context.Context, res *Result, state *State,
 	reg *toolRegistry, calls []provider.ToolCall, approver Approver, obs Observer, step int,
-	gov *restraintGovernor) error {
+	gov *restraintGovernor, ic *interceptorRun) error {
 
 	b := newBatch()
 	var err error

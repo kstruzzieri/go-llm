@@ -589,3 +589,43 @@ func normalizeFinding(f Finding, name string, step int, scope hookScope) Finding
 	f.Origin = normalizeOrigin(f.Origin)
 	return f
 }
+
+func originOfRole(role string) Origin {
+	switch role {
+	case "user":
+		return OriginUser
+	case "assistant":
+		return OriginModel
+	default:
+		return OriginUnknown
+	}
+}
+
+// inspectInitial runs HookInput once over the initial state (spec D7): system,
+// summary, history and goal. Tags are telemetry only; Block and Abort are
+// terminal because there is no observation to replace.
+func (r *interceptorRun) inspectInitial(ctx context.Context, obs Observer, state *State) error {
+	if len(r.chain) == 0 {
+		return nil
+	}
+	in := InputInspection{Step: 0, System: state.System, Summary: state.DurableSummary}
+	for i, m := range state.Messages {
+		in.Messages = append(in.Messages, InspectedMessage{StateIndex: i, Role: m.Role, Origin: originOfRole(m.Role), Content: m.Content})
+	}
+	scope := hookScope{hook: HookInput, messages: in.Messages, hasSystem: in.System != "", hasSummary: in.Summary != ""}
+	findings, verdict, err := r.runHook(ctx, obs, 0, scope,
+		func(ic Interceptor) ([]Finding, error) { return ic.InspectInput(ctx, in) })
+	return terminalAt(VerdictBlock, HookInput, 0, findings, verdict, err)
+}
+
+// finishWithError finalizes a Result for an error return after State exists:
+// when the error carries a BlockedError it appends the "blocked" event; it
+// always publishes the messages produced so far.
+func finishWithError(res *Result, state State, historyLen int, err error) (Result, error) {
+	var blocked *BlockedError
+	if errors.As(err, &blocked) {
+		res.Events = append(res.Events, EventRecord{Step: blocked.Step, Kind: "blocked"})
+	}
+	res.Messages = resultMessages(state, historyLen)
+	return *res, err
+}

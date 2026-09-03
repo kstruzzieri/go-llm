@@ -136,6 +136,12 @@ func (o *Orchestrator) run(ctx context.Context, req Request, obs Observer, ic *i
 	historyLen := len(req.History)
 	var res Result
 
+	// #436: the initial input is inspected once, before any assembly, so a
+	// block never reaches the model and no pressure event is emitted for it.
+	if err := ic.inspectInitial(ctx, obs, &state); err != nil {
+		return finishWithError(&res, state, historyLen, err)
+	}
+
 	for step := 0; step < maxSteps; step++ {
 		assembled, pressure, atrace, err := o.ctxMgr.AssembleWithTrace(ctx, state, toolSchemaTokens, budget)
 		// Emit pressure before the model call on the success path and on the
@@ -234,8 +240,8 @@ func (o *Orchestrator) run(ctx context.Context, req Request, obs Observer, ic *i
 		}
 
 		state.Messages = append(state.Messages, assistantMessage(resp))
-		if err := o.runToolCalls(ctx, &res, &state, reg, resp.ToolCalls, req.Approver, obs, step, gov); err != nil {
-			return res, err
+		if err := o.runToolCalls(ctx, &res, &state, reg, resp.ToolCalls, req.Approver, obs, step, gov, ic); err != nil {
+			return finishWithError(&res, state, historyLen, err)
 		}
 		if res.StopReason != Completed {
 			res.Messages = resultMessages(state, historyLen)
