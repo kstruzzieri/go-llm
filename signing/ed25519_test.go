@@ -187,9 +187,11 @@ func TestEd25519Redaction(t *testing.T) {
 }
 
 func TestEd25519SignerIsNotAVerifier(t *testing.T) {
-	// D6: signing authority must not imply verification authority. A future
-	// Verify method on Ed25519Signer would silently widen every caller that
-	// type-asserts Verifier; pin the absence in both directions.
+	// D6: an Ed25519 signer must not satisfy Verifier; callers hand out the
+	// public-only half explicitly. This is an API exposure boundary, not a
+	// universal cryptographic one (HMAC necessarily implements both). A future
+	// Verify method here would silently widen every caller that type-asserts
+	// Verifier; pin the absence in both directions.
 	var s any = goldenEd25519(t)
 	if _, ok := s.(Verifier); ok {
 		t.Fatal("Ed25519Signer satisfies Verifier; D6 requires callers to use Verifier() explicitly")

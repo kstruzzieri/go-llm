@@ -44,33 +44,39 @@
 //
 // # Canonical form v1
 //
-// Canonicalize and MarshalCanonical produce: object keys sorted by Go string
-// order (UTF-8 byte order) at every depth; no insignificant whitespace; number
-// literals verbatim (9007199254740993 survives exactly; "1.0" and "1" are
-// distinct literals, though json.Marshal never emits "1.0" for a Go float);
-// minimal string escaping with HTML escaping off, except U+2028 and U+2029
-// which encoding/json always escapes. Rejected: invalid UTF-8
-// (ErrInvalidUTF8), unpaired UTF-16 surrogate escapes
-// (ErrInvalidUnicodeEscape), duplicate object keys at any depth
-// (ErrDuplicateKey), data after the value (ErrTrailingData), empty input.
-// MarshalCanonical also rejects invalid reachable strings and string map keys
-// before encoding/json can replace them with U+FFFD. This conservative walk
-// includes fields JSON may omit. Unicode is not normalized: NFC and NFD remain
-// distinct.
+// Canonical form v1 is a canonical form over lexical JSON, not semantic JSON.
+// Canonicalize accepts exactly one JSON value, with optional surrounding JSON
+// whitespace, and emits compact UTF-8 JSON without a final newline. Decoded
+// object names are rejected when duplicated and sorted by UTF-8 byte order at
+// every depth; Unicode is not normalized, so NFC and NFD spellings are
+// distinct names. Number lexemes are preserved verbatim, so 1, 1.0, and 1e0
+// are distinct v1 identities; json.Number, json.RawMessage, raw input, and
+// custom marshalers can each produce any spelling, and only the spelling that
+// was signed verifies. Strings follow encoding/json escaping with HTML
+// escaping disabled; U+2028 and U+2029 remain escaped. Rejected: invalid
+// UTF-8 (ErrInvalidUTF8), unpaired UTF-16 surrogate escapes
+// (ErrInvalidUnicodeEscape), malformed JSON, duplicate decoded names
+// (ErrDuplicateKey), non-whitespace trailing data (ErrTrailingData), and
+// empty input.
 //
-// This is NOT RFC 8785 (JCS). Divergences: key order is UTF-8 not UTF-16
-// (differs only when keys mix U+E000..U+FFFF with supplementary-plane
-// characters); U+2028/2029 are escaped; numbers are verbatim rather than
-// ES6-normalized. Golden vectors in canonical_test.go pin the exact bytes;
-// if a Go toolchain changes encoding/json output they go red. This API stays
-// v1 forever; a future incompatible form gets a new function and consumer
-// record/domain version.
+// MarshalCanonical additionally rejects invalid reachable Go strings and
+// invalid encoding.TextMarshaler output before encoding/json can replace
+// them with U+FFFD, mirroring encoding/json's marshaler dispatch: the static
+// type of a field or element decides first (an interface type embedding
+// json.Marshaler routes to MarshalJSON, one embedding only TextMarshaler
+// routes to MarshalText), then the addressable receiver, then the value; map
+// keys use MarshalText only. Intentional []byte base64 encoding is
+// unaffected. Custom marshaler internals are not walked; determinism of
+// custom output remains the implementer's responsibility.
 //
-// Custom marshalers are not walked internally. A json.Marshaler's output is
-// validated by Canonicalize; an encoding.TextMarshaler's output (values and
-// non-string map keys) is checked for valid UTF-8 before encoding/json can
-// coerce it, closing the same U+FFFD collision by a third route. Determinism
-// of custom output remains the implementer's responsibility.
+// This is not RFC 8785 (JCS). JCS orders names by UTF-16 code units and uses
+// the I-JSON/IEEE-754 number model, under which large or high-precision
+// values are expected to travel as strings; v1 keeps the lexeme instead. JCS
+// also leaves U+2028 and U+2029 unescaped. Positive and negative golden
+// vectors in canonical_test.go pin the bytes; if a Go toolchain changes
+// encoding/json output they go red. Canonicalize is frozen at v1: an
+// incompatible change gets a new function and a new consumer record/domain
+// version, never a change to the bytes this function emits.
 //
 // # Backends
 //
@@ -85,14 +91,18 @@
 // tags are compared with hmac.Equal only; constant_time_test.go pins the call
 // site.
 //
-// Signer and Verifier are sibling capabilities: an Ed25519 signer exposes its
-// public-only Verifier explicitly, while HMAC necessarily implements both.
-// Local backends honor an already-cancelled ctx before crypto and return an
-// error for a nil ctx; SSH-agent and KMS backends land as separate tickets.
-// Exported concrete zero values return ErrUninitializedKey from cryptographic
-// operations rather than panic. Signer and Verifier values are immutable after
-// construction and safe for concurrent use; Keyring is not (populate it before
-// sharing).
+// Signer and Verifier are sibling capabilities: an API exposure boundary, not
+// a claim that cryptographic authority is always separable. An Ed25519 signer
+// exposes its public-only Verifier explicitly; HMAC verification uses the
+// signing secret, so HMACSigner intentionally implements both. Local backends
+// honor an already-cancelled ctx before crypto and return an error for a nil
+// ctx. Context, KeyID, and Algorithm are the common minimum contract;
+// SSH-agent and KMS adapters (tracked separately) must document their own
+// cancellation, key-id mapping, algorithm, and failure semantics and pass the
+// shared conformance suite. Exported concrete zero values return
+// ErrUninitializedKey from cryptographic operations rather than panic. Signer
+// and Verifier values are immutable after construction and safe for concurrent
+// use; Keyring is not (populate it before sharing).
 //
 // Cryptographic validity is not authorization. A Keyring proves that one of
 // its members signed the bytes; callers use purpose-scoped rings to decide
