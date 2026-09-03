@@ -768,15 +768,6 @@ func cloneAttrib(a *RetrievalAttribution) *RetrievalAttribution {
 	return &RetrievalAttribution{Sources: slices.Clone(a.Sources)}
 }
 
-// cloneResult gives a callback its own copy of a result: strings are shared
-// (immutable), the set and attribution are deep-copied, RouteOutcome is
-// telemetry and stays shared.
-func cloneResult(out ToolResult) ToolResult {
-	out.Context = out.Context.clone()
-	out.Attrib = cloneAttrib(out.Attrib)
-	return out
-}
-
 func staticOrigin(tool Tool) Origin {
 	if ot, ok := tool.(OriginTool); ok {
 		return normalizeOrigin(ot.Origin())

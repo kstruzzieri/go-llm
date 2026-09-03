@@ -66,8 +66,8 @@ func isHexChar(r rune) bool {
 }
 
 // runsOf returns maximal runs of characters satisfying pred with at least
-// min bytes.
-func runsOf(s string, pred func(rune) bool, min int) []string {
+// minLen bytes.
+func runsOf(s string, pred func(rune) bool, minLen int) []string {
 	var runs []string
 	start := -1
 	for i, r := range s {
@@ -77,12 +77,12 @@ func runsOf(s string, pred func(rune) bool, min int) []string {
 			}
 			continue
 		}
-		if start >= 0 && i-start >= min {
+		if start >= 0 && i-start >= minLen {
 			runs = append(runs, s[start:i])
 		}
 		start = -1
 	}
-	if start >= 0 && len(s)-start >= min {
+	if start >= 0 && len(s)-start >= minLen {
 		runs = append(runs, s[start:])
 	}
 	return runs

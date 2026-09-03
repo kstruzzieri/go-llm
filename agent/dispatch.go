@@ -118,8 +118,18 @@ func (o *Orchestrator) recordResult(ctx context.Context, res *Result, state *Sta
 	res.ToolCalls = append(res.ToolCalls, rec)
 	res.Events = append(res.Events, EventRecord{Step: step, Kind: "tool_result"})
 	if tro, ok := obs.(ToolResultObserver); ok {
+		// The observer gets its own copy of the final result. The set is cloned
+		// only under mixed assembly, where State owns the canonical clone; in
+		// legacy mode nothing reads the set, the cardinality guard did not run,
+		// and a deep copy would let an untrusted tool make this path
+		// arbitrarily expensive.
+		published := out
+		published.Attrib = cloneAttrib(out.Attrib)
+		if o.ctxMgr.Mixed {
+			published.Context = out.Context.clone()
+		}
 		if err := tro.OnToolResult(ctx, ToolResultEvent{
-			Step: step, Call: call, Effect: effect, Result: cloneResult(out),
+			Step: step, Call: call, Effect: effect, Result: published,
 			Denied: rec.Denied, Invoked: rec.Invoked, Latency: rec.Latency,
 			AutoApproved: rec.AutoApproved, Blocked: rec.Blocked,
 		}); err != nil {

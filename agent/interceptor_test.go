@@ -1534,3 +1534,30 @@ func TestVerifierOutputIsInspectedBeforeAppend(t *testing.T) {
 		})
 	}
 }
+
+// Under legacy assembly nothing reads a result's ContextSet and the
+// cardinality guard does not run, so the observer must receive the tool's
+// own pointer (as before #436) rather than a fresh deep copy an untrusted
+// tool could make arbitrarily expensive; under mixed assembly it receives a
+// clone of the canonical set.
+func TestObserverContextIsClonedOnlyUnderMixedAssembly(t *testing.T) {
+	for _, mixed := range []bool{true, false} {
+		t.Run(map[bool]string{true: "mixed", false: "legacy"}[mixed], func(t *testing.T) {
+			set := validSet()
+			tool := contentTool{name: "with-set", content: "fallback", set: set, origin: OriginWorkspace}
+			rec := &interceptRecorder{}
+			o := New(nil, ContextManager{Mixed: mixed}, WithInterceptors(&stubInterceptor{name: "quiet"}))
+			recordOne(t, o, o.newInterceptorRun(), rec, tool, 0)
+			got := rec.toolResults[0].Result.Context
+			if mixed && (got == nil || got == set) {
+				t.Fatalf("mixed: observer context = %p, want a clone distinct from the tool's set %p", got, set)
+			}
+			if !mixed && got != set {
+				t.Fatalf("legacy: observer context = %p, want the tool's own set %p (no clone)", got, set)
+			}
+			if rec.toolResults[0].Result.Attrib == nil || rec.toolResults[0].Result.Attrib.Sources[0].Source != "s" {
+				t.Fatalf("attribution not delivered: %+v", rec.toolResults[0].Result.Attrib)
+			}
+		})
+	}
+}
