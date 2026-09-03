@@ -582,12 +582,12 @@ func startupNotices(info startupInfo) []string {
 //
 // With -dispatch it also installs the per-run dispatch invocation cap, and
 // with a workspace-declared verifier (#347) the post-write verification hook.
-// verifier must be a true nil interface when absent: a typed-nil pointer
-// would satisfy the interface and panic on first use (#347). Callers assign
-// the interface only from a non-nil pointer.
+// A typed-nil verifier would satisfy the interface and panic on first use
+// (#347); the factory normalizes the two concrete types it can receive so
+// that guarantee does not rest on every call site.
 func newOrchestratorFactory(caller agent.ModelCaller, f flags, verifier agent.Verifier) func() *agent.Orchestrator {
 	var opts []agent.Option
-	if verifier != nil {
+	if verifier = nonNilVerifier(verifier); verifier != nil {
 		opts = append(opts, agent.WithVerifier(verifier))
 	}
 	if f.dispatch {
@@ -617,6 +617,23 @@ func isREPLMode(f flags) bool {
 }
 
 func shouldShowAgentflowHint(f flags) bool { return isREPLMode(f) }
+
+// nonNilVerifier maps a typed-nil *verifyRunner or *lateVerifier to a true
+// nil interface, so agent.WithVerifier is never handed a value that would
+// panic on first use (#347).
+func nonNilVerifier(v agent.Verifier) agent.Verifier {
+	switch c := v.(type) {
+	case *verifyRunner:
+		if c == nil {
+			return nil
+		}
+	case *lateVerifier:
+		if c == nil {
+			return nil
+		}
+	}
+	return v
+}
 
 func main() {
 	if err := run(os.Args[1:], os.Stdin, os.Stdout, os.Stderr); err != nil {
@@ -1198,8 +1215,15 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 	// runtime.Close). sess is assigned once the session is built below.
 	var sess *replSession
 	defer func() {
-		if sess != nil {
-			runErr = errors.Join(runErr, sess.closeLateMounts())
+		if sess == nil {
+			return
+		}
+		// The ledger event fires only when a late resource actually existed,
+		// so sessions that never mounted keep their exact shutdown sequence.
+		hadLate := sess.lateStore != nil || sess.lateManager != nil
+		runErr = errors.Join(runErr, sess.closeLateMounts())
+		if hadLate && hooks.closed != nil {
+			hooks.closed("late-mounts")
 		}
 	}()
 	// #372: the gated write/exec tools are inserted here at startup and by
@@ -1248,9 +1272,11 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 		writeToolCount = len(mounted)
 		journal = j
 
-		// #347: read only here, so no other mode ever touches .golem.json.
-		// applyOneShotMode has already cleared allowWrite for -p, and task,
-		// planning and Agentflow modes reject it at validation. Deliberately
+		// #347: read only here under f.allowWrite and by the REPL's
+		// /allow-write (#372); both are REPL-only, so no other mode ever
+		// touches .golem.json. applyOneShotMode has already cleared allowWrite
+		// for -p, and task, planning and Agentflow modes reject it at
+		// validation. Deliberately
 		// gated on f.allowWrite, NOT buildWrite: a headless -allow-tool run
 		// must not read .golem.json or mount post-write verification —
 		// verify_command is not an -allow-tool name.
@@ -1266,9 +1292,11 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 	// survives to this point (one-shot already forced allowExec false;
 	// -plan/-goal reject it at flag validation) or when #352's -allow-tool
 	// named an exec tool — one manager per invocation either way, so every
-	// manager gets the replCtx lifetime binding below. The deferred Shutdown
-	// is registered immediately so no error path between here and that
-	// binding can leak a process; sync.Once makes it safe beside the
+	// manager gets the replCtx lifetime binding below. buildExecMount shuts
+	// the manager down itself when the tool set fails to build (the
+	// closed("background") hook still fires for that reaped manager), and the
+	// deferred Shutdown is registered as soon as a manager is published, so
+	// no error path leaks a process; sync.Once makes it safe beside the
 	// AfterFunc path.
 	scratchLine := ""
 	var bgManager *agenttools.BackgroundManager
@@ -1285,6 +1313,9 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 		// shut the unpublished manager down.
 		mgr, et, eerr := buildExecMount(root, execOpts)
 		if eerr != nil {
+			if hooks.closed != nil {
+				hooks.closed("background") // the manager existed and was reaped
+			}
 			return eerr
 		}
 		bgManager = mgr
@@ -1444,18 +1475,20 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 		sourceSummarizer = routerSourceSummaryGenerator(bundle.Router, summarizeChain)
 	}
 
-	// #372: the REPL may enable writes later, so its orchestrator carries a
-	// late-bound verifier slot (pre-filled when -allow-write built one). Every
-	// other mode keeps a real verifier or none; the interface is assigned
-	// only from a non-nil pointer so a typed nil never reaches the factory.
+	// #372: a REPL session that started WITHOUT -allow-write may enable writes
+	// later, so its orchestrator carries an empty late-bound verifier slot.
+	// A session that already has writes keeps the real verifier (or none)
+	// bound directly: /allow-write is idempotent there and never needs the
+	// slot, and the orchestrator stays byte-identical to before #372. The
+	// interface is assigned only from a non-nil pointer so a typed nil never
+	// reaches the factory.
 	var orchVerifier agent.Verifier
 	if verifier != nil {
 		orchVerifier = verifier
 	}
 	var verifySlot *lateVerifier
-	if isREPLMode(f) {
+	if isREPLMode(f) && !f.allowWrite {
 		verifySlot = &lateVerifier{}
-		verifySlot.set(verifier)
 		orchVerifier = verifySlot
 	}
 	newOrchestrator := newOrchestratorFactory(newActiveChainCaller(bundle.Router, plan), f, orchVerifier)

@@ -585,6 +585,7 @@ func TestREPL_CtrlCCancelsRunKeepsREPL(t *testing.T) {
 type captureCaller struct {
 	messages []provider.ChatMessage
 	system   string
+	tools    []string // provider-received tool names, first request
 	options  provider.ModelOptions
 	answer   string
 }
@@ -593,6 +594,9 @@ func (c *captureCaller) Chat(_ context.Context, req provider.ChatRequest, onToke
 	if c.messages == nil {
 		c.messages = append([]provider.ChatMessage(nil), req.Messages...)
 		c.options = req.Options
+		for _, tool := range req.Tools {
+			c.tools = append(c.tools, tool.Function.Name)
+		}
 		for _, m := range req.Messages {
 			if m.Role == "system" {
 				c.system = m.Content

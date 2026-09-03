@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/kstruzzieri/go-llm/agent"
+	agenttools "github.com/kstruzzieri/go-llm/agent/tools"
 	golemruntime "github.com/kstruzzieri/go-llm/golem"
 	"github.com/kstruzzieri/go-llm/internal/agenttrace"
 	"github.com/kstruzzieri/go-llm/provider"
@@ -151,6 +152,21 @@ func TestAllowWriteMountsWriteToolsAndPrompt(t *testing.T) {
 	if caller.system != sess.baseSystem {
 		t.Fatalf("runtime sent %q, session holds %q", caller.system, sess.baseSystem)
 	}
+	if got := strings.Join(caller.tools, ","); got != strings.Join(names(sess.tools), ",") {
+		t.Fatalf("provider received tools %s, session holds %s", got, strings.Join(names(sess.tools), ","))
+	}
+	// The REPL surfaces follow the mount: /tools lists the new tools and the
+	// auto-edits line, /checkpoints is live instead of the disabled message.
+	out.Reset()
+	_, _ = dispatchSlash(context.Background(), &out, sess, "/tools")
+	if !strings.Contains(out.String(), "write_file (write)") || !strings.Contains(out.String(), "edit_file (write)") || !strings.Contains(out.String(), "auto-edits: off") {
+		t.Fatalf("/tools after mount = %q", out.String())
+	}
+	out.Reset()
+	_, _ = dispatchSlash(context.Background(), &out, sess, "/checkpoints")
+	if strings.Contains(out.String(), "writes disabled") {
+		t.Fatalf("/checkpoints still disabled after mount: %q", out.String())
+	}
 }
 
 func TestAllowWriteIsIdempotent(t *testing.T) {
@@ -263,7 +279,13 @@ func TestAllowWriteFailsClosedAfterConstruction(t *testing.T) {
 	// leak look like a release. No GC, no finalizer: the lease check below
 	// observes the handler's own Close, or its absence.
 	defer debug.SetGCPercent(debug.SetGCPercent(-1))
+	if _, err := os.Stat("/bin/sh"); err != nil {
+		t.Skip("needs /bin/sh")
+	}
 	root := t.TempDir()
+	// A real verifier config makes the slot assertion live: a stray set()
+	// before the failed mount would install a runner here.
+	writeGolemJSON(t, root, `{"verify":{"argv":["/bin/sh","-c","true"]}}`)
 	caller := &captureCaller{answer: "ok"}
 	sess := newMountSession(t, caller, root, fakeNamedTool{name: "edit_file"})
 	before, system := strings.Join(names(sess.tools), ","), sess.baseSystem
@@ -351,6 +373,9 @@ func TestAllowExecMountsExecToolsAndPrompt(t *testing.T) {
 	}
 	if caller.system != sess.baseSystem {
 		t.Fatalf("runtime sent %q, session holds %q", caller.system, sess.baseSystem)
+	}
+	if got := strings.Join(caller.tools, ","); got != strings.Join(names(sess.tools), ",") {
+		t.Fatalf("provider received tools %s, session holds %s", got, strings.Join(names(sess.tools), ","))
 	}
 }
 
@@ -441,6 +466,11 @@ func TestAllowWriteRuntimeSystemMatchesTrace(t *testing.T) {
 	if sent == before {
 		t.Fatal("the runtime prompt did not change after /allow-write")
 	}
+	// The hash below is computed from sess.tools on both sides, so the
+	// provider-received names are what actually pin the mounted set.
+	if got := strings.Join(caller.tools, ","); got != strings.Join(names(sess.tools), ",") {
+		t.Fatalf("provider received tools %s, session holds %s", got, strings.Join(names(sess.tools), ","))
+	}
 	files, _ := filepath.Glob(filepath.Join(obs.traceDir, "*.json"))
 	if len(files) == 0 {
 		t.Fatalf("no trace written under %s", obs.traceDir)
@@ -487,5 +517,188 @@ func TestAllowWriteInstallsPostWriteVerifier(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(root, "verified.txt")); err != nil {
 		t.Fatalf("post-write verification did not run after the mid-session mount: %v\n%s", err, out.String())
+	}
+}
+
+// Recovery is durable and one-shot: the interrupted turn is sealed into a
+// checkpoint by recoverStartup itself. Its notice must therefore reach the
+// user even when a later step of the mount fails, or the recovered work
+// becomes invisible (a retry finds nothing left to recover).
+func TestAllowWriteReportsRecoveryEvenWhenTheMountFails(t *testing.T) {
+	root := t.TempDir()
+	sess := newMountSession(t, &captureCaller{answer: "ok"}, root, fakeNamedTool{name: "edit_file"})
+	ctx := context.Background()
+	staged, err := openCheckpointStore(ctx, os.Getenv, root)
+	if err != nil {
+		t.Fatalf("stage store: %v", err)
+	}
+	target := filepath.Join(root, "c.txt")
+	if err := os.WriteFile(target, []byte("C0"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, fc, err := staged.prepareIntent(ctx, "crashed", testNow, testRec("c.txt", "C0", true))
+	if err != nil {
+		t.Fatalf("prepare: %v", err)
+	}
+	if err := os.WriteFile(target, []byte("C1"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := staged.commitIntent(ctx, fc); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+	if err := staged.Close(); err != nil {
+		t.Fatalf("release staged lease: %v", err)
+	}
+	var out strings.Builder
+	_, _ = dispatchSlash(ctx, &out, sess, "/allow-write")
+	if !strings.Contains(out.String(), "recovered an interrupted turn") {
+		t.Fatalf("recovery notice lost behind the failed mount:\n%s", out.String())
+	}
+	if !strings.Contains(out.String(), "writes not enabled: runtime:") {
+		t.Fatalf("mount must still fail on the collision:\n%s", out.String())
+	}
+}
+
+// A workspace verifier that cannot be installed (no slot in this session
+// mode) is reported, never silently dropped.
+func TestAllowWriteReportsMissingVerifierSlot(t *testing.T) {
+	root := t.TempDir()
+	writeGolemJSON(t, root, `{"verify":{"argv":["/bin/sh","-c","true"]}}`)
+	sess := newMountSession(t, &captureCaller{answer: "ok"}, root)
+	sess.verifier = nil
+	var out strings.Builder
+	_, _ = dispatchSlash(context.Background(), &out, sess, "/allow-write")
+	if !strings.HasPrefix(out.String(), "writes enabled") || !strings.Contains(out.String(), "verification disabled: this session has no post-write verifier slot") {
+		t.Fatalf("out = %q", out.String())
+	}
+}
+
+func TestNonNilVerifierNormalizesTypedNils(t *testing.T) {
+	if got := nonNilVerifier((*verifyRunner)(nil)); got != nil {
+		t.Fatalf("typed-nil *verifyRunner leaked as %#v", got)
+	}
+	if got := nonNilVerifier((*lateVerifier)(nil)); got != nil {
+		t.Fatalf("typed-nil *lateVerifier leaked as %#v", got)
+	}
+	slot := &lateVerifier{}
+	if got := nonNilVerifier(slot); got != agent.Verifier(slot) {
+		t.Fatal("a real verifier must pass through unchanged")
+	}
+	if got := nonNilVerifier(nil); got != nil {
+		t.Fatal("nil must stay nil")
+	}
+}
+
+// Reachable D9 state: startup was -allow-exec -scratch without -allow-write,
+// so the exec set carries scratch tools and no promotion. A later
+// /allow-write keeps that set and its manager exactly, inserts the write
+// tools before it, and says promotion stays startup-bound.
+func TestAllowWriteKeepsStartupScratchExecSet(t *testing.T) {
+	root := t.TempDir()
+	caller := &captureCaller{answer: "ok"}
+	opts, _ := scratchExecOptions(true, nil)
+	mgr, execTools, err := buildExecMount(root, opts)
+	if err != nil {
+		t.Fatalf("scratch exec set: %v", err)
+	}
+	t.Cleanup(mgr.Shutdown)
+	sess := newMountSession(t, caller, root, execTools...)
+	sess.allowExec, sess.bgManager, sess.scratch = true, mgr, true
+	sess.sysInputs.allowExec = true
+	sess.baseSystem = composeSystem(sess.sysInputs)
+	before := strings.Join(names(execTools), ",")
+	if !strings.Contains(before, "scratch_changes") || strings.Contains(before, "promote_artifact") {
+		t.Fatalf("precondition: scratch set without promotion expected, got %s", before)
+	}
+	var out strings.Builder
+	_, _ = dispatchSlash(context.Background(), &out, sess, "/allow-write")
+	if !strings.HasPrefix(out.String(), "writes enabled") || !strings.Contains(out.String(), "scratch: promote_artifact stays unavailable") {
+		t.Fatalf("out = %q", out.String())
+	}
+	if sess.bgManager != mgr {
+		t.Fatal("/allow-write replaced the startup background manager")
+	}
+	got := strings.Join(names(sess.tools[sess.readToolCount:]), ",")
+	if got != "write_file,edit_file,"+before {
+		t.Fatalf("gated tools = %s, want write tools inserted before the untouched scratch exec set", got)
+	}
+	if !strings.HasPrefix(sess.baseSystem, buildSystemPrompt(true, true)) {
+		t.Fatalf("prompt = %q", sess.baseSystem)
+	}
+}
+
+// An interrupted undo left by a previous process is reported by /allow-write
+// exactly as startup -allow-write reports it.
+func TestAllowWriteReportsInterruptedUndo(t *testing.T) {
+	root := t.TempDir()
+	sess := newMountSession(t, &captureCaller{answer: "ok"}, root)
+	ctx := context.Background()
+	staged, err := openCheckpointStore(ctx, os.Getenv, root)
+	if err != nil {
+		t.Fatalf("stage store: %v", err)
+	}
+	target := filepath.Join(root, "u.txt")
+	if err := os.WriteFile(target, []byte("U0"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, fc, err := staged.prepareIntent(ctx, "crashed", testNow, testRec("u.txt", "U0", true))
+	if err != nil {
+		t.Fatalf("prepare: %v", err)
+	}
+	if err := staged.commitIntent(ctx, fc); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+	_, journal, err := buildWriteTools(root, staged)
+	if err != nil {
+		t.Fatalf("buildWriteTools: %v", err)
+	}
+	if _, err := journal.recoverStartup(ctx); err != nil {
+		t.Fatalf("recover: %v", err)
+	}
+	groups, err := staged.newestCompleted(ctx, 1)
+	if err != nil || len(groups) != 1 {
+		t.Fatalf("newestCompleted: %v (%d groups)", err, len(groups))
+	}
+	if err := staged.markUndoing(ctx, []int64{groups[0].id}); err != nil {
+		t.Fatalf("markUndoing: %v", err)
+	}
+	if err := staged.Close(); err != nil {
+		t.Fatalf("release staged lease: %v", err)
+	}
+	var out strings.Builder
+	_, _ = dispatchSlash(ctx, &out, sess, "/allow-write")
+	if !strings.Contains(out.String(), "an interrupted undo exists (1 checkpoint(s)); /undo resumes it") {
+		t.Fatalf("interrupted undo not reported:\n%s", out.String())
+	}
+}
+
+// A workspace verifier that cannot be armed is reported, and the slot stays
+// empty, so the user never believes verification is active when it is not.
+func TestAllowWriteReportsVerifierWarning(t *testing.T) {
+	root := t.TempDir()
+	writeGolemJSON(t, root, `{"verify":{"argv":[]}}`)
+	sess := newMountSession(t, &captureCaller{answer: "ok"}, root)
+	var out strings.Builder
+	_, _ = dispatchSlash(context.Background(), &out, sess, "/allow-write")
+	if !strings.HasPrefix(out.String(), "writes enabled") || !strings.Contains(out.String(), "verification disabled") {
+		t.Fatalf("out = %q", out.String())
+	}
+	if sess.verifier.runner != nil {
+		t.Fatal("a verifier that could not be armed must not be installed")
+	}
+}
+
+func TestBuildExecMountFailsClosedOnBadRoot(t *testing.T) {
+	mgr, tools, err := buildExecMount(filepath.Join(t.TempDir(), "missing"), agenttools.ExecToolsOptions{})
+	if err == nil || mgr != nil || tools != nil {
+		t.Fatalf("buildExecMount on a missing root = %v, %v, %v; want nil, nil, error", mgr, tools, err)
+	}
+}
+
+func TestHelpListsAllowCommands(t *testing.T) {
+	for _, want := range []string{"/allow-write", "/allow-exec"} {
+		if !strings.Contains(golemHelp, want) {
+			t.Fatalf("help must document %s:\n%s", want, golemHelp)
+		}
 	}
 }

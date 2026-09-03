@@ -635,9 +635,6 @@ func (r *Runtime) Cancel(runID string) bool {
 	return true
 }
 
-// reserve registers the run and fixes its {System, Tools} snapshot in the
-// same critical section that makes it visible to Cancel and Close, so
-// Replace and reservation are linearizable (#372).
 // Replace atomically installs system and tools for every turn reserved
 // after it returns. A turn reserved before Replace keeps the System and
 // Tools it was reserved with, to completion — reservation is the critical
@@ -686,6 +683,9 @@ func (r *Runtime) Replace(system string, tools []agent.Tool) error {
 	return nil
 }
 
+// reserve registers the run and fixes its {System, Tools} snapshot in the
+// same critical section that makes it visible to Cancel and Close, so
+// Replace and reservation are linearizable (#372).
 func (r *Runtime) reserve(turn Turn, cancel context.CancelFunc) (*activeRun, *turnSnapshot, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()

@@ -218,10 +218,11 @@ func sanitizeVerifyLine(s string) string {
 // cannot be armed, so a malformed or uninstalled verifier costs a startup line
 // rather than the session.
 //
-// Callers must invoke it only while -allow-write is still true, which is AFTER
-// mode normalization: applyOneShotMode clears the flag, and task, planning and
-// Agentflow modes reject it outright, so that one condition is what keeps every
-// non-interactive mode from reading the file at all.
+// It has exactly two call sites, both REPL-only: startup under f.allowWrite
+// (AFTER mode normalization: applyOneShotMode clears the flag, and task,
+// planning and Agentflow modes reject it outright) and the REPL's
+// /allow-write (#372). Together those keep every non-interactive mode from
+// reading the file at all; do not add a third site outside the REPL.
 func buildVerifier(root string) (*verifyRunner, string) {
 	disabled := func(err error) (*verifyRunner, string) {
 		return nil, "verification disabled: " + err.Error()
@@ -246,16 +247,19 @@ func buildVerifier(root string) (*verifyRunner, string) {
 
 // lateVerifier is the REPL's post-write verification slot (#372). The
 // orchestrator is built once at startup with agent.WithVerifier, but
-// /allow-write may build the verifier later. It is installed for the
-// interactive REPL only; every other mode keeps a real verifier or none, so
-// their orchestrators are byte-identical.
+// /allow-write may build the verifier later. It is installed only for a
+// REPL session that started WITHOUT -allow-write; every other session keeps
+// a real verifier or none bound directly, so its orchestrator is
+// byte-identical to before #372.
 //
 // Unset, it performs no verification (agent.verifyBatch treats "" as append
 // nothing). That is not byte-identical to a nil verifier — verifyBatch still
-// runs its post-Verify ctx.Err() check — but the path is unreachable while
-// the slot is unset: Verify is called only after a successful
-// write_file/edit_file, and no write tool is mounted until /allow-write
-// fills the slot (or -allow-write pre-filled it at startup).
+// runs its post-Verify ctx.Err() check. Before /allow-write the difference
+// is unreachable (no write tool is mounted, so Verify is never called). The
+// one residual case is a session whose /allow-write found no .golem.json:
+// writes are mounted and the slot stays unset, so a cancellation that lands
+// during a write batch surfaces from verifyBatch instead of from the next
+// model call — both end the run as canceled.
 //
 // A plain pointer suffices: slash commands and turns are serialized on the
 // REPL goroutine, and Verify runs on the orchestrator's (caller's)

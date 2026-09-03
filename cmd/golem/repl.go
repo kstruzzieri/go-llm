@@ -45,6 +45,11 @@ type replSession struct {
 	writeToolCount int
 	scratch        bool
 	lateStore      *checkpointStore
+	// lateManager is the background manager /allow-exec created (bgManager
+	// aliases it for /jobs); lateStop is its REPL-context binding. Both nil
+	// when -allow-exec owned the manager at startup.
+	lateManager *tools.BackgroundManager
+	lateStop    func() bool
 	// verifier is the REPL-mode post-write verification slot (#372); nil
 	// outside the REPL and in narrow tests (set is nil-safe).
 	verifier        *lateVerifier

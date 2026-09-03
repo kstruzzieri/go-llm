@@ -244,8 +244,9 @@ func buildExecMount(root string, opts agenttools.ExecToolsOptions) (*agenttools.
 
 // buildWriteTools constructs the workspace-mutating tool set plus the durable
 // checkpoint journal that backs /undo and /checkpoints (#355), both bound to
-// one Workspace over root and the workspace's leased store. Returned only
-// when -allow-write is set.
+// one Workspace over root and the workspace's leased store. Built for
+// startup -allow-write, one-shot -allow-tool write_file/edit_file, and the
+// REPL's /allow-write (#372).
 func buildWriteTools(root string, store *checkpointStore) ([]agent.Tool, *checkpointJournal, error) {
 	ws, err := agenttools.NewWorkspace(root)
 	if err != nil {

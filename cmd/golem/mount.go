@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -85,30 +86,43 @@ func handleAllowWrite(ctx context.Context, out io.Writer, sess *replSession, fie
 		_, _ = fmt.Fprintln(out, "writes already enabled")
 		return
 	}
-	fail := func(err error) { _, _ = fmt.Fprintf(out, "writes not enabled: %v\n", err) }
+	// fail reports the cause and releases the store when one was opened. A
+	// close failure is joined, never dropped: the startup twin joins it into
+	// run's error, and a damaged store must be visible here too.
+	fail := func(err error, store *checkpointStore) {
+		if store != nil {
+			if cerr := store.Close(); cerr != nil {
+				err = errors.Join(err, fmt.Errorf("close checkpoint store: %w", cerr))
+			}
+		}
+		_, _ = fmt.Fprintf(out, "writes not enabled: %v\n", err)
+	}
 	// D6 parity: -allow-write fails closed on ANY checkpoint lifecycle
 	// failure; here that means nothing mounts and the session is unchanged.
 	store, err := openCheckpointStore(ctx, os.Getenv, sess.root)
 	if err != nil {
-		fail(fmt.Errorf("checkpoint store: %w", err))
+		fail(fmt.Errorf("checkpoint store: %w", err), nil)
 		return
 	}
 	writeTools, journal, err := buildWriteTools(sess.root, store)
 	if err != nil {
-		_ = store.Close()
-		fail(err)
+		fail(err, store)
 		return
 	}
 	notice, err := journal.recoverStartup(ctx)
 	if err != nil {
-		_ = store.Close()
-		fail(fmt.Errorf("checkpoint recovery: %w", err))
+		fail(fmt.Errorf("checkpoint recovery: %w", err), store)
 		return
+	}
+	// Recovery is durable and one-shot (the interrupted turn is sealed into
+	// a checkpoint right there), so it is reported NOW: a later failure must
+	// not hide work a retry can never rediscover.
+	if notice != "" {
+		_, _ = fmt.Fprintln(out, notice)
 	}
 	undoing, err := store.countState(ctx, checkpointUndoing)
 	if err != nil {
-		_ = store.Close()
-		fail(fmt.Errorf("checkpoint state: %w", err))
+		fail(fmt.Errorf("checkpoint state: %w", err), store)
 		return
 	}
 	// Derived from the LIVE inputs: a fresh struct would erase the other
@@ -116,20 +130,21 @@ func handleAllowWrite(ctx context.Context, out io.Writer, sess *replSession, fie
 	next := sess.sysInputs
 	next.allowWrite = true
 	if err := sess.mount(sess.mountAt, writeTools, next); err != nil {
-		_ = store.Close()
-		fail(fmt.Errorf("runtime: %w", err))
+		fail(fmt.Errorf("runtime: %w", err), store)
 		return
 	}
 	sess.writeToolCount = len(writeTools)
 	sess.journal, sess.lateStore, sess.allowWrite = journal, store, true
 	// #347: .golem.json is read only once writes are enabled, as at startup;
-	// the runner lands in the slot the REPL orchestrator was built with.
+	// the runner lands in the slot the REPL orchestrator was built with. A
+	// session without a slot cannot verify, and must say so rather than
+	// silently mounting writes with the workspace's verification dropped.
 	verifier, vwarn := buildVerifier(sess.root)
+	if verifier != nil && sess.verifier == nil {
+		vwarn = "verification disabled: this session has no post-write verifier slot"
+	}
 	sess.verifier.set(verifier)
 	_, _ = fmt.Fprintln(out, "writes enabled (approval per change; /auto-edits, /undo, /checkpoints available)")
-	if notice != "" {
-		_, _ = fmt.Fprintln(out, notice)
-	}
 	if undoing > 0 {
 		_, _ = fmt.Fprintf(out, "an interrupted undo exists (%d checkpoint(s)); /undo resumes it\n", undoing)
 	}
@@ -144,13 +159,20 @@ func handleAllowWrite(ctx context.Context, out io.Writer, sess *replSession, fie
 	}
 }
 
-// closeLateMounts releases what /allow-write and /allow-exec opened after
-// startup. Shutdown is idempotent, so a startup-owned manager (already shut
-// down by its own defer) is harmless; a startup checkpoint store is never in
-// lateStore and keeps main.go's own defer. Safe to call more than once.
+// closeLateMounts releases exactly what /allow-write and /allow-exec opened
+// after startup: the late manager (its REPL-context binding is stopped
+// first, so ownership of the shutdown is unambiguous; Shutdown is Once-
+// guarded, so a binding that already fired is simply joined) and the late
+// checkpoint store. Startup-owned resources keep main.go's own defers and
+// are never touched here. Safe to call more than once.
 func (s *replSession) closeLateMounts() error {
-	if s.bgManager != nil {
-		s.bgManager.Shutdown()
+	if s.lateStop != nil {
+		s.lateStop()
+		s.lateStop = nil
+	}
+	if s.lateManager != nil {
+		s.lateManager.Shutdown()
+		s.lateManager = nil
 	}
 	if s.lateStore == nil {
 		return nil
@@ -189,11 +211,11 @@ func handleAllowExec(ctx context.Context, out io.Writer, sess *replSession, fiel
 		_, _ = fmt.Fprintf(out, "exec not enabled: runtime: %v\n", err)
 		return
 	}
-	sess.bgManager, sess.allowExec = manager, true
+	sess.bgManager, sess.lateManager, sess.allowExec = manager, manager, true
 	// #346 host-lifetime parity: ctx is replCtx in production, so an idle
 	// Ctrl-C quit tears the jobs down like a startup manager's. The stop
-	// function is discarded on purpose: closeLateMounts covers the normal
-	// exit and Shutdown is idempotent.
-	context.AfterFunc(ctx, manager.Shutdown)
+	// function is kept so closeLateMounts owns the ordered shutdown on the
+	// normal exit path, exactly as the startup manager's deferred stopAfter.
+	sess.lateStop = context.AfterFunc(ctx, manager.Shutdown)
 	_, _ = fmt.Fprintln(out, "exec enabled (approval per command; /jobs available)")
 }

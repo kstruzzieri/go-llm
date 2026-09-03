@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/kstruzzieri/go-llm/agent"
 	"github.com/kstruzzieri/go-llm/golem"
@@ -109,7 +110,11 @@ func TestReplaceFixesSnapshotAtReservation(t *testing.T) {
 		_, err := rt.Run(context.Background(), golem.Turn{RunID: "a", Message: "go"}, gate)
 		runErr <- err
 	}()
-	<-entered
+	select {
+	case <-entered:
+	case <-time.After(10 * time.Second):
+		t.Fatal("run.started gate never fired; the event name or sink ordering changed")
+	}
 	if err := rt.Replace("NEW SYSTEM", []agent.Tool{namedTool("new_tool")}); err != nil {
 		t.Fatalf("Replace: %v", err)
 	}
@@ -188,15 +193,24 @@ func TestReplaceErrClosedWhenCloseCompletesDuringValidation(t *testing.T) {
 	}
 }
 
+// Replace("", nil) after a richer replacement leaves the New default prompt
+// and exactly the runtime's own file tools: a replacement can shrink.
 func TestReplaceDefaultsEmptySystemLikeNew(t *testing.T) {
 	caller := &captureCaller{answer: "ok"}
 	rt := newReplaceRuntime(t, caller, "OLD SYSTEM")
+	if err := rt.Replace("RICH", []agent.Tool{namedTool("extra")}); err != nil {
+		t.Fatalf("Replace rich: %v", err)
+	}
 	if err := rt.Replace("", nil); err != nil {
 		t.Fatalf("Replace: %v", err)
 	}
 	runTurn(t, rt, "r")
-	if got := shapeOf(caller.requests[0]).system; got != golem.SystemPrompt(false, false) {
-		t.Fatalf("system = %q, want the New default", got)
+	got := shapeOf(caller.requests[0])
+	if got.system != golem.SystemPrompt(false, false) {
+		t.Fatalf("system = %q, want the New default", got.system)
+	}
+	if hasTool(got, "extra") || !hasTool(got, "read_file") {
+		t.Fatalf("tools = %v, want the file tools only", got.tools)
 	}
 }
 

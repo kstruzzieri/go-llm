@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	agenttools "github.com/kstruzzieri/go-llm/agent/tools"
 )
 
 // The observable guarantee is that the process is gone, not that a callback
@@ -52,40 +54,21 @@ func TestCloseLateMountsShutsDownJobs(t *testing.T) {
 	}
 }
 
-// Reachable D9 state: startup was -allow-exec -scratch without -allow-write,
-// so the exec set carries scratch tools and no promotion. A later
-// /allow-write keeps that set and its manager exactly, inserts the write
-// tools before it, and says promotion stays startup-bound.
-func TestAllowWriteKeepsStartupScratchExecSet(t *testing.T) {
+// closeLateMounts owns only what the commands opened: a startup-owned
+// manager keeps serving after it runs.
+func TestCloseLateMountsLeavesStartupManagerAlone(t *testing.T) {
+	requireBinary(t, "true")
 	root := t.TempDir()
-	caller := &captureCaller{answer: "ok"}
-	opts, _ := scratchExecOptions(true, nil)
-	mgr, execTools, err := buildExecMount(root, opts)
+	mgr, execTools, err := buildExecMount(root, agenttools.ExecToolsOptions{})
 	if err != nil {
-		t.Fatalf("scratch exec set: %v", err)
+		t.Fatalf("exec set: %v", err)
 	}
 	t.Cleanup(mgr.Shutdown)
-	sess := newMountSession(t, caller, root, execTools...)
-	sess.allowExec, sess.bgManager, sess.scratch = true, mgr, true
-	sess.sysInputs.allowExec = true
-	sess.baseSystem = composeSystem(sess.sysInputs)
-	before := strings.Join(names(execTools), ",")
-	if !strings.Contains(before, "scratch_changes") || strings.Contains(before, "promote_artifact") {
-		t.Fatalf("precondition: scratch set without promotion expected, got %s", before)
+	sess := newMountSession(t, &captureCaller{answer: "ok"}, root, execTools...)
+	sess.allowExec, sess.bgManager = true, mgr
+	if err := sess.closeLateMounts(); err != nil {
+		t.Fatalf("closeLateMounts: %v", err)
 	}
-	var out strings.Builder
-	_, _ = dispatchSlash(context.Background(), &out, sess, "/allow-write")
-	if !strings.HasPrefix(out.String(), "writes enabled") || !strings.Contains(out.String(), "scratch: promote_artifact stays unavailable") {
-		t.Fatalf("out = %q", out.String())
-	}
-	if sess.bgManager != mgr {
-		t.Fatal("/allow-write replaced the startup background manager")
-	}
-	got := strings.Join(names(sess.tools[sess.readToolCount:]), ",")
-	if got != "write_file,edit_file,"+before {
-		t.Fatalf("gated tools = %s, want write tools inserted before the untouched scratch exec set", got)
-	}
-	if !strings.HasPrefix(sess.baseSystem, buildSystemPrompt(true, true)) {
-		t.Fatalf("prompt = %q", sess.baseSystem)
-	}
+	st := startBackgroundJob(t, mgr, execTools, "true")
+	waitJobFinished(t, mgr, st.Handle)
 }
