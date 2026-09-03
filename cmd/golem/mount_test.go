@@ -311,3 +311,109 @@ func TestCloseLateMountsReleasesTheCheckpointLease(t *testing.T) {
 		t.Fatalf("second closeLateMounts: %v", err)
 	}
 }
+
+func TestAllowExecMountsExecToolsAndPrompt(t *testing.T) {
+	root := t.TempDir()
+	caller := &captureCaller{answer: "ok"}
+	sess := newMountSession(t, caller, root)
+	var out strings.Builder
+	_, _ = dispatchSlash(context.Background(), &out, sess, "/jobs")
+	if !strings.Contains(out.String(), "exec disabled") {
+		t.Fatalf("precondition: %q", out.String())
+	}
+	out.Reset()
+	_, _ = dispatchSlash(context.Background(), &out, sess, "/allow-exec")
+	if !strings.HasPrefix(out.String(), "exec enabled") {
+		t.Fatalf("out = %q", out.String())
+	}
+	want := append(names(sess.tools[:sess.readToolCount]), "run_command", "start_command", "command_status", "command_tail", "stop_command")
+	if got := strings.Join(names(sess.tools), ","); got != strings.Join(want, ",") {
+		t.Fatalf("tools = %s, want %s", got, strings.Join(want, ","))
+	}
+	if !sess.allowExec || sess.bgManager == nil {
+		t.Fatal("session not committed")
+	}
+	if sess.grants.count() != 0 {
+		t.Fatalf("mount granted approval: grants=%d", sess.grants.count())
+	}
+	if sess.baseSystem != composeSystem(sess.sysInputs) || !strings.HasPrefix(sess.baseSystem, buildSystemPrompt(false, true)) {
+		t.Fatalf("baseSystem not recomposed for exec: %q", sess.baseSystem)
+	}
+	out.Reset()
+	_, _ = dispatchSlash(context.Background(), &out, sess, "/jobs")
+	if out.String() != "no background jobs\n" {
+		t.Fatalf("/jobs after mount = %q", out.String())
+	}
+	if _, err := runOnce(context.Background(), &out, nil, sess, "hello", nil); err != nil {
+		t.Fatalf("runOnce: %v", err)
+	}
+	if caller.system != sess.baseSystem {
+		t.Fatalf("runtime sent %q, session holds %q", caller.system, sess.baseSystem)
+	}
+}
+
+func TestAllowExecIsIdempotent(t *testing.T) {
+	root := t.TempDir()
+	sess := newMountSession(t, &captureCaller{answer: "ok"}, root)
+	var out strings.Builder
+	_, _ = dispatchSlash(context.Background(), &out, sess, "/allow-exec")
+	mgr, n, system := sess.bgManager, len(sess.tools), sess.baseSystem
+	out.Reset()
+	_, _ = dispatchSlash(context.Background(), &out, sess, "/allow-exec")
+	if out.String() != "exec already enabled\n" || sess.bgManager != mgr || len(sess.tools) != n || sess.baseSystem != system {
+		t.Fatalf("repeat changed state: %q", out.String())
+	}
+	out.Reset()
+	_, _ = dispatchSlash(context.Background(), &out, sess, "/allow-exec x")
+	if out.String() != "usage: /allow-exec\n" {
+		t.Fatalf("usage = %q", out.String())
+	}
+}
+
+// The manager and exec set are built, then Replace rejects the mount because
+// a host tool already owns the name run_command. Session, approval state,
+// and the runtime snapshot stay unchanged; the unpublished manager is shut
+// down by the handler (not observed here: no test-only manager factory).
+func TestAllowExecFailsClosedAfterConstruction(t *testing.T) {
+	root := t.TempDir()
+	caller := &captureCaller{answer: "ok"}
+	sess := newMountSession(t, caller, root, fakeNamedTool{name: "run_command"})
+	before, system := strings.Join(names(sess.tools), ","), sess.baseSystem
+	var out strings.Builder
+	_, _ = dispatchSlash(context.Background(), &out, sess, "/allow-exec")
+	if !strings.HasPrefix(out.String(), "exec not enabled: runtime:") || !strings.Contains(out.String(), "run_command") {
+		t.Fatalf("out = %q", out.String())
+	}
+	if sess.allowExec || sess.bgManager != nil || sess.baseSystem != system || strings.Join(names(sess.tools), ",") != before ||
+		sess.grants.count() != 0 || sess.lateStore != nil || sess.journal != nil || sess.allowWrite {
+		t.Fatal("a rejected replacement changed the session")
+	}
+	if _, err := runOnce(context.Background(), &out, nil, sess, "hello", nil); err != nil {
+		t.Fatalf("runOnce: %v", err)
+	}
+	if caller.system != system {
+		t.Fatalf("runtime snapshot changed on a rejected replacement: %q", caller.system)
+	}
+}
+
+// Exec after write and write after exec both end in the startup order:
+// [file tools][write_file edit_file][run_command ... stop_command].
+func TestAllowCommandsKeepStartupOrderInEitherSequence(t *testing.T) {
+	want := "write_file,edit_file,run_command,start_command,command_status,command_tail,stop_command"
+	for _, order := range [][]string{{"/allow-write", "/allow-exec"}, {"/allow-exec", "/allow-write"}} {
+		t.Run(strings.Join(order, " then "), func(t *testing.T) {
+			sess := newMountSession(t, &captureCaller{answer: "ok"}, t.TempDir())
+			var out strings.Builder
+			for _, c := range order {
+				_, _ = dispatchSlash(context.Background(), &out, sess, c)
+			}
+			got := strings.Join(names(sess.tools[sess.readToolCount:]), ",")
+			if got != want {
+				t.Fatalf("gated order = %s, want %s (out=%q)", got, want, out.String())
+			}
+			if !strings.HasPrefix(sess.baseSystem, buildSystemPrompt(true, true)) {
+				t.Fatalf("prompt = %q", sess.baseSystem)
+			}
+		})
+	}
+}

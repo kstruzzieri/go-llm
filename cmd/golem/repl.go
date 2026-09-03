@@ -699,6 +699,8 @@ func dispatchSlash(ctx context.Context, out io.Writer, sess *replSession, line s
 		}
 	case "/allow-write":
 		handleAllowWrite(ctx, out, sess, fields)
+	case "/allow-exec":
+		handleAllowExec(ctx, out, sess, fields)
 	default:
 		_, _ = fmt.Fprintf(out, "unknown command: %s (try /help)\n", cmd)
 	}

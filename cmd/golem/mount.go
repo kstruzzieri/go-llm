@@ -8,6 +8,7 @@ import (
 	"slices"
 
 	"github.com/kstruzzieri/go-llm/agent"
+	agenttools "github.com/kstruzzieri/go-llm/agent/tools"
 	golemruntime "github.com/kstruzzieri/go-llm/golem"
 )
 
@@ -157,4 +158,42 @@ func (s *replSession) closeLateMounts() error {
 	store := s.lateStore
 	s.lateStore = nil
 	return store.Close()
+}
+
+// handleAllowExec implements /allow-exec (#372): the startup -allow-exec set
+// (foreground run_command plus the #346 background tools over one manager)
+// mounted live, atomically with the recomposed system prompt. Scratch is
+// startup-only (-scratch requires -allow-exec), so the set is always the
+// zero-option legacy one. A rejected replacement shuts the unpublished
+// manager down and leaves the session unchanged.
+func handleAllowExec(ctx context.Context, out io.Writer, sess *replSession, fields []string) {
+	if len(fields) != 1 {
+		_, _ = fmt.Fprintln(out, "usage: /allow-exec")
+		return
+	}
+	if sess.allowExec {
+		_, _ = fmt.Fprintln(out, "exec already enabled")
+		return
+	}
+	manager, execTools, err := buildExecMount(sess.root, agenttools.ExecToolsOptions{})
+	if err != nil {
+		_, _ = fmt.Fprintf(out, "exec not enabled: %v\n", err)
+		return
+	}
+	// Derived from the LIVE inputs, inserted after any mounted write tools so
+	// either enable order ends in the startup order.
+	next := sess.sysInputs
+	next.allowExec = true
+	if err := sess.mount(sess.mountAt+sess.writeToolCount, execTools, next); err != nil {
+		manager.Shutdown()
+		_, _ = fmt.Fprintf(out, "exec not enabled: runtime: %v\n", err)
+		return
+	}
+	sess.bgManager, sess.allowExec = manager, true
+	// #346 host-lifetime parity: ctx is replCtx in production, so an idle
+	// Ctrl-C quit tears the jobs down like a startup manager's. The stop
+	// function is discarded on purpose: closeLateMounts covers the normal
+	// exit and Shutdown is idempotent.
+	context.AfterFunc(ctx, manager.Shutdown)
+	_, _ = fmt.Fprintln(out, "exec enabled (approval per command; /jobs available)")
 }
