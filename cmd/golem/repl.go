@@ -23,17 +23,33 @@ import (
 
 // replSession holds the per-process state the REPL needs.
 type replSession struct {
-	orch                *agent.Orchestrator
-	runtime             *golemruntime.Runtime
-	newOrchestrator     func() *agent.Orchestrator
-	tools               []agent.Tool
-	baseSystem          string
-	projectContextBlock string // raw fenced project-context block; reused by the planner (-goal)
-	maxSteps            int
-	budget              agent.Budget
-	color               bool
-	clock               func() time.Time
-	retrieveOmitted     bool // when true, /tools appends the omission note
+	orch            *agent.Orchestrator
+	runtime         *golemruntime.Runtime
+	newOrchestrator func() *agent.Orchestrator
+	tools           []agent.Tool
+	baseSystem      string
+	// Mid-session mounting (#372). root is the canonical workspace root the
+	// gated tools are built over; sysInputs are the composition inputs behind
+	// baseSystem (invariant: baseSystem == composeSystem(sysInputs); the
+	// -goal planner reads sysInputs.projectContext); tools[:readToolCount] are
+	// the file tools the runtime rebuilds itself; mountAt is where the gated
+	// write/exec tools sit (startup order parity); writeToolCount is how many
+	// write tools are mounted (exec inserts after them); scratch records
+	// -scratch so /allow-write can say promotion stays startup-bound;
+	// lateStore is the checkpoint store /allow-write opened (nil when
+	// -allow-write owned it at startup, whose store main.go closes itself).
+	root            string
+	sysInputs       systemInputs
+	readToolCount   int
+	mountAt         int
+	writeToolCount  int
+	scratch         bool
+	lateStore       *checkpointStore
+	maxSteps        int
+	budget          agent.Budget
+	color           bool
+	clock           func() time.Time
+	retrieveOmitted bool // when true, /tools appends the omission note
 
 	session *session // nil => --no-session (no history, no persistence)
 
