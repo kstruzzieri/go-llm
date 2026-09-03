@@ -8,8 +8,9 @@ import (
 	"github.com/kstruzzieri/go-llm/agent"
 )
 
-// ZeroWidth flags invisible code points that hide text from a human reader
-// while a model still tokenizes it, raw or as JSON \uXXXX escape text.
+// ZeroWidth flags selected invisible or easily overlooked code points that hide
+// text from a human reader while a model still tokenizes it, raw or as JSON
+// \uXXXX escape text.
 type ZeroWidth struct{}
 
 var _ agent.Interceptor = ZeroWidth{}
@@ -18,7 +19,12 @@ var _ agent.Interceptor = ZeroWidth{}
 func (ZeroWidth) Name() string { return "zero_width" }
 
 func isZeroWidth(r rune) bool {
-	return (r >= 0x200B && r <= 0x200F) || (r >= 0x2060 && r <= 0x2064) || r == 0xFEFF || r == 0x180E
+	switch r {
+	case 0x00AD, 0x034F, 0x180E, 0x200A, 0xFEFF:
+		return true
+	default:
+		return (r >= 0x200B && r <= 0x200F) || (r >= 0x2060 && r <= 0x2064)
+	}
 }
 
 // scanZeroWidth counts raw zero-width runes; when there are none it counts
@@ -80,10 +86,14 @@ func (ZeroWidth) InspectOutput(context.Context, agent.OutputInspection) ([]agent
 	return nil, nil
 }
 
-// InspectToolCall checks the call's raw JSON arguments, escapes included.
+// InspectToolCall checks the raw JSON arguments, escapes included, and their
+// decoded object keys and string values.
 func (ZeroWidth) InspectToolCall(_ context.Context, call agent.ToolCallInspection) ([]agent.Finding, error) {
-	if first, n, escaped := scanZeroWidth(string(call.Call.Function.Arguments)); n > 0 {
-		return []agent.Finding{zeroWidthFinding(toolCallTarget(call.Call.ID), "zero_width", first, n, escaped)}, nil
+	tg := toolCallTarget(call.Call.ID)
+	for _, text := range toolCallTexts(call.Call.Function.Arguments) {
+		if first, n, escaped := scanZeroWidth(text); n > 0 {
+			return []agent.Finding{zeroWidthFinding(tg, "zero_width", first, n, escaped)}, nil
+		}
 	}
 	return nil, nil
 }

@@ -59,7 +59,8 @@ func canRunParallel(reg *toolRegistry, calls []provider.ToolCall) bool {
 //	Phase 2 (parallel): invokeCall per call via a bounded errgroup. Workers never
 //	  fail the group, so the group ctx cancels only when the PARENT ctx cancels.
 //	Phase 3 (serial): record, OnToolResult, append observation, governor, in model
-//	  order, with the same short-circuit-and-discard semantics as the serial path.
+//	  order. A short-circuit discards trailing content while retaining audit
+//	  metadata for every synthetic or invoked outcome already completed.
 func (o *Orchestrator) runToolCallsParallel(ctx context.Context, res *Result, state *State,
 	reg *toolRegistry, calls []provider.ToolCall, approver Approver, obs Observer, step int,
 	gov *restraintGovernor, b *batch, ic *interceptorRun) error {
@@ -70,6 +71,11 @@ func (o *Orchestrator) runToolCallsParallel(ctx context.Context, res *Result, st
 		res.Events = append(res.Events, EventRecord{Step: step, Kind: "tool_call"})
 		p, err := o.prepareCall(ctx, reg, call, approver, obs, step, gov, ic)
 		if err != nil {
+			for _, earlier := range prepared[:i] {
+				if earlier.result != nil {
+					appendToolCallRecord(res, step, earlier.rec, earlier.result.RouteOutcome)
+				}
+			}
 			return err // hard abort: no invokes launched, nothing to cancel
 		}
 		prepared[i] = p
@@ -99,6 +105,7 @@ func (o *Orchestrator) runToolCallsParallel(ctx context.Context, res *Result, st
 	}
 	_ = g.Wait() // joins every worker -> no goroutine leak
 	if err := ctx.Err(); err != nil {
+		appendTrailingToolCallRecords(res, step, prepared, results, latencies, invoked, 0)
 		return err // parent cancelled -> hard abort
 	}
 
@@ -111,13 +118,32 @@ func (o *Orchestrator) runToolCallsParallel(ctx context.Context, res *Result, st
 			rec.Invoked = true
 			rec.Latency = latencies[i]
 		}
-		stop, err := o.recordResult(ctx, res, state, obs, gov, step, prepared[i].call, prepared[i].effect, rec, results[i], b, ic)
+		stop, err := o.recordResult(ctx, res, state, obs, gov, step, prepared[i].call, prepared[i].effect, rec, results[i], prepared[i].inspectResult, b, ic)
 		if err != nil {
+			appendTrailingToolCallRecords(res, step, prepared, results, latencies, invoked, i+1)
 			return err
 		}
 		if stop {
+			appendTrailingToolCallRecords(res, step, prepared, results, latencies, invoked, i+1)
 			return nil // governor tripped: discard later already-computed read-only results
 		}
 	}
 	return nil
+}
+
+func appendTrailingToolCallRecords(res *Result, step int, prepared []preparedCall, results []ToolResult,
+	latencies []time.Duration, invoked []bool, start int) {
+
+	for i := start; i < len(prepared); i++ {
+		if !invoked[i] && prepared[i].result == nil {
+			continue
+		}
+		rec := prepared[i].rec
+		rec.IsError = results[i].IsError
+		if invoked[i] {
+			rec.Invoked = true
+			rec.Latency = latencies[i]
+		}
+		appendToolCallRecord(res, step, rec, results[i].RouteOutcome)
+	}
 }

@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"unicode/utf8"
 
@@ -46,11 +47,12 @@ func (o *Orchestrator) runToolCallsSerial(ctx context.Context, res *Result, stat
 
 	for _, call := range calls {
 		res.Events = append(res.Events, EventRecord{Step: step, Kind: "tool_call"})
-		out, effect, rec, err := o.dispatch(ctx, reg, call, approver, obs, step, gov, ic)
+		out, effect, rec, inspectResult, err := o.dispatch(ctx, reg, call, approver, obs, step, gov, ic)
 		if err != nil {
-			return err // hard abort (ctx cancel / approver error / interceptor abort): no ToolResult, no OnToolResult
+			appendInvokedToolCallRecord(res, step, rec, out.RouteOutcome)
+			return err // hard abort: preserve post-Invoke metadata, but publish no observation or OnToolResult
 		}
-		stop, err := o.recordResult(ctx, res, state, obs, gov, step, call, effect, rec, out, b, ic)
+		stop, err := o.recordResult(ctx, res, state, obs, gov, step, call, effect, rec, out, inspectResult, b, ic)
 		if err != nil {
 			return err
 		}
@@ -75,10 +77,11 @@ func (o *Orchestrator) runToolCallsSerial(ctx context.Context, res *Result, stat
 // not in either runner.
 func (o *Orchestrator) recordResult(ctx context.Context, res *Result, state *State, obs Observer,
 	gov *restraintGovernor, step int, call provider.ToolCall, effect Effect, rec ToolCallRecord,
-	out ToolResult, b *batch, ic *interceptorRun) (stop bool, err error) {
+	out ToolResult, inspectResult bool, b *batch, ic *interceptorRun) (stop bool, err error) {
 
 	if o.ctxMgr.Mixed {
 		if err := validateContextSetCardinality(call.ID, out.Context); err != nil {
+			appendToolCallRecord(res, step, rec, out.RouteOutcome)
 			return false, err
 		}
 		// #436 spec D6: freeze the set into the canonical copy State will own.
@@ -89,12 +92,12 @@ func (o *Orchestrator) recordResult(ctx context.Context, res *Result, state *Sta
 	}
 	out.Attrib = cloneAttrib(out.Attrib)
 	outputCap := effect.OutputCap
-	// #436 spec D7: inspect an invoked observation at ingress, BEFORE the
-	// observer, State, the batch policy and the governor. Synthetic outcomes
-	// (unknown tool, bad JSON, denial, blocked call) are orchestrator-authored
-	// and carry no tool content to inspect. Alternatives are model-visible
+	// #436 spec D7: inspect tool-authored and model-derived observations at
+	// ingress, BEFORE the observer, State, the batch policy and the governor.
+	// Fixed orchestrator-authored outcomes (bad JSON, denial, blocked call) carry
+	// no uncontrolled content and skip the hook. Alternatives are model-visible
 	// only under mixed assembly, so legacy runs inspect the fallback alone.
-	if rec.Invoked {
+	if rec.Invoked || inspectResult {
 		msg := InspectedMessage{
 			StateIndex: len(state.Messages), Role: "tool", Origin: out.Origin,
 			ToolName: call.Function.Name, ToolCallID: call.ID, Content: out.Content,
@@ -104,6 +107,11 @@ func (o *Orchestrator) recordResult(ctx context.Context, res *Result, state *Sta
 		}
 		tags, block, err := ic.inspectObservation(ctx, obs, step, msg)
 		if err != nil {
+			var blocked *BlockedError
+			if errors.As(err, &blocked) {
+				rec.IsError, rec.Blocked = true, true
+			}
+			appendToolCallRecord(res, step, rec, out.RouteOutcome)
 			return false, err
 		}
 		if block != nil {
@@ -114,9 +122,7 @@ func (o *Orchestrator) recordResult(ctx context.Context, res *Result, state *Sta
 		}
 	}
 
-	rec.RouteOutcome = out.RouteOutcome
-	res.ToolCalls = append(res.ToolCalls, rec)
-	res.Events = append(res.Events, EventRecord{Step: step, Kind: "tool_result"})
+	appendToolCallRecord(res, step, rec, out.RouteOutcome)
 	if tro, ok := obs.(ToolResultObserver); ok {
 		// The observer gets its own copy of the final result. The set is cloned
 		// only under mixed assembly, where State owns the canonical clone; in
@@ -125,11 +131,12 @@ func (o *Orchestrator) recordResult(ctx context.Context, res *Result, state *Sta
 		// arbitrarily expensive.
 		published := out
 		published.Attrib = cloneAttrib(out.Attrib)
+		published.RouteOutcome = cloneRouteOutcome(out.RouteOutcome)
 		if o.ctxMgr.Mixed {
 			published.Context = out.Context.clone()
 		}
 		if err := tro.OnToolResult(ctx, ToolResultEvent{
-			Step: step, Call: call, Effect: effect, Result: published,
+			Step: step, Call: cloneToolCall(call), Effect: cloneEffect(effect), Result: published,
 			Denied: rec.Denied, Invoked: rec.Invoked, Latency: rec.Latency,
 			AutoApproved: rec.AutoApproved, Blocked: rec.Blocked,
 		}); err != nil {
@@ -151,6 +158,18 @@ func (o *Orchestrator) recordResult(ctx context.Context, res *Result, state *Sta
 	return false, nil
 }
 
+func appendToolCallRecord(res *Result, step int, rec ToolCallRecord, routeOutcome *provider.RouteOutcome) {
+	rec.RouteOutcome = routeOutcome
+	res.ToolCalls = append(res.ToolCalls, rec)
+	res.Events = append(res.Events, EventRecord{Step: step, Kind: "tool_result"})
+}
+
+func appendInvokedToolCallRecord(res *Result, step int, rec ToolCallRecord, routeOutcome *provider.RouteOutcome) {
+	if rec.Invoked {
+		appendToolCallRecord(res, step, rec, routeOutcome)
+	}
+}
+
 // preparedCall is the outcome of the serial, observer/approval phase of one tool
 // call. When prepareCall returns a nil error, exactly one of two states holds:
 //   - result != nil: a synthetic outcome (unknown tool / bad JSON / interceptor
@@ -163,6 +182,9 @@ type preparedCall struct {
 	effect Effect
 	rec    ToolCallRecord
 	result *ToolResult
+	// inspectResult marks a non-invoked diagnostic that includes model- or
+	// tool-derived text rather than a fixed orchestrator message.
+	inspectResult bool
 }
 
 // prepareCall runs everything that must stay on the main goroutine and in loop
@@ -184,7 +206,8 @@ func (o *Orchestrator) prepareCall(ctx context.Context, reg *toolRegistry, call 
 	tool, ok := reg.lookup(name)
 	if !ok {
 		p.rec.IsError = true
-		p.result = &ToolResult{IsError: true, Content: "unknown tool: " + name}
+		p.result = &ToolResult{IsError: true, Content: "unknown tool: " + name, Origin: OriginModel}
+		p.inspectResult = true
 		return p, nil
 	}
 	if !json.Valid(call.Function.Arguments) {
@@ -215,7 +238,8 @@ func (o *Orchestrator) prepareCall(ctx context.Context, reg *toolRegistry, call 
 		plan, err := pt.Plan(ctx, cloneToolCall(call).Function.Arguments)
 		if err != nil {
 			p.rec.IsError = true
-			p.result = &ToolResult{IsError: true, Content: "plan failed: " + err.Error()}
+			p.result = &ToolResult{IsError: true, Content: "plan failed: " + err.Error(), Origin: staticOrigin(tool)}
+			p.inspectResult = true
 			return p, nil
 		}
 		effect, preview, approvalKey = plan.Effect, plan.Preview, plan.ApprovalKey
@@ -241,7 +265,7 @@ func (o *Orchestrator) prepareCall(ctx context.Context, reg *toolRegistry, call 
 		return p, nil
 	}
 
-	if err := obs.OnToolCall(ctx, ToolCallEvent{Step: step, Call: cloneToolCall(call), Effect: effect, Preview: preview}); err != nil {
+	if err := obs.OnToolCall(ctx, ToolCallEvent{Step: step, Call: cloneToolCall(call), Effect: cloneEffect(effect), Preview: preview}); err != nil {
 		return p, err
 	}
 
@@ -282,24 +306,24 @@ func (o *Orchestrator) invokeCall(ctx context.Context, tool Tool, effect Effect,
 // A cancelled PARENT context after invoke is a hard abort (distinct from a tool's
 // own per-call timeout, which stays a model-visible IsError observation).
 func (o *Orchestrator) dispatch(ctx context.Context, reg *toolRegistry, call provider.ToolCall,
-	approver Approver, obs Observer, step int, gov *restraintGovernor, ic *interceptorRun) (ToolResult, Effect, ToolCallRecord, error) {
+	approver Approver, obs Observer, step int, gov *restraintGovernor, ic *interceptorRun) (ToolResult, Effect, ToolCallRecord, bool, error) {
 
 	p, err := o.prepareCall(ctx, reg, call, approver, obs, step, gov, ic)
 	if err != nil {
-		return ToolResult{}, p.effect, p.rec, err
+		return ToolResult{}, p.effect, p.rec, p.inspectResult, err
 	}
 	if p.result != nil {
-		return *p.result, p.effect, p.rec, nil
+		return *p.result, p.effect, p.rec, p.inspectResult, nil
 	}
 	start := o.now()
 	out := o.invokeCall(ctx, p.tool, p.effect, p.call.Function.Arguments) // the canonical, inspected bytes
 	p.rec.Invoked = true
 	p.rec.Latency = o.now().Sub(start)
-	if ctx.Err() != nil {
-		return ToolResult{}, p.effect, p.rec, ctx.Err() // parent cancelled -> hard abort
-	}
 	p.rec.IsError = out.IsError
-	return out, p.effect, p.rec, nil
+	if ctx.Err() != nil {
+		return out, p.effect, p.rec, false, ctx.Err() // parent cancelled -> hard abort
+	}
+	return out, p.effect, p.rec, false, nil
 }
 
 // approve applies the fail-safe: a nil approver denies any call that reaches it

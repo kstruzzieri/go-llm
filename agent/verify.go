@@ -114,7 +114,7 @@ func (o *Orchestrator) verifyBatch(ctx context.Context, state *State, approver A
 		return err
 	}
 	if block != nil {
-		anchor.Content += blockedResultContent(*block)
+		anchor.Content += "\n" + blockedResultContent(*block)
 		return nil
 	}
 	anchor.Content += out

@@ -26,7 +26,9 @@ type StepEvent struct {
 	Latency      time.Duration
 }
 
-// ToolCallEvent reports a tool about to be invoked (post-approval).
+// ToolCallEvent reports a tool about to be invoked (post-approval). Call and
+// Effect are private copies; mutating them does not change the pending call or
+// the effect retained by the run.
 type ToolCallEvent struct {
 	Step    int
 	Call    provider.ToolCall
@@ -44,7 +46,10 @@ type TokenEvent struct {
 // as unknown tool / malformed args / planning failure / approval denial). For
 // invoked tools it is the capped canonical fallback immediately after execution,
 // before Context is cloned onto State or mixed assembly. Under mixed assembly
-// Result is not necessarily byte-identical to the model's later input.
+// Result is not necessarily byte-identical to the model's later input. Call,
+// Effect, Result.Attrib and Result.RouteOutcome are private copies; under mixed
+// assembly Result.Context is too. With mixed assembly off Context is ignored by
+// the run and may still alias the tool-owned value.
 type ToolResultEvent struct {
 	Step    int
 	Call    provider.ToolCall
@@ -67,11 +72,12 @@ type ToolResultEvent struct {
 
 // ToolResultObserver is an OPTIONAL extension of Observer. When an Observer also
 // implements it, the Orchestrator calls OnToolResult for every ToolResult
-// produced by dispatch — including synthetic failures — but NOT for hard
-// dispatch aborts (context cancellation, approver error) that return before a
-// ToolResult exists. It observes the canonical fallback, not a promise about
-// the final model input. Callbacks run serially in loop order in the calling
-// goroutine; a returned error aborts Run, like the other observer callbacks.
+// admitted to State — including synthetic failures — but NOT for hard dispatch
+// aborts or results discarded after the governor stops a parallel batch. Those
+// completed outcomes retain metadata in Result.ToolCalls but emit no callback or
+// observation. It observes the canonical fallback, not a promise about the final
+// model input. Callbacks run serially in loop order in the calling goroutine; a
+// returned error aborts Run, like the other observer callbacks.
 type ToolResultObserver interface {
 	OnToolResult(ctx context.Context, e ToolResultEvent) error
 }

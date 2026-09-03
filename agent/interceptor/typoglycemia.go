@@ -45,10 +45,24 @@ func (Typoglycemia) InspectOutput(context.Context, agent.OutputInspection) ([]ag
 	return nil, nil
 }
 
-// InspectToolCall checks the call's raw JSON arguments.
+// InspectToolCall checks both the raw JSON arguments and their decoded object
+// keys and string values.
 func (t Typoglycemia) InspectToolCall(_ context.Context, call agent.ToolCallInspection) ([]agent.Finding, error) {
-	if f, ok := t.scan(toolCallTarget(call.Call.ID), string(call.Call.Function.Arguments)); ok {
-		return []agent.Finding{f}, nil
+	tg := toolCallTarget(call.Call.ID)
+	var best agent.Finding
+	found, bestStrong := false, false
+	for _, text := range toolCallTexts(call.Call.Function.Arguments) {
+		f, ok := t.scan(tg, text)
+		if !ok {
+			continue
+		}
+		strong := f.Rule != "weak_phrase"
+		if !found || strong && !bestStrong {
+			best, found, bestStrong = f, true, strong
+		}
+	}
+	if found {
+		return []agent.Finding{best}, nil
 	}
 	return nil, nil
 }

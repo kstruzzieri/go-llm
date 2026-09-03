@@ -5,7 +5,6 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"strconv"
-	"strings"
 	"unicode/utf8"
 
 	"github.com/kstruzzieri/go-llm/agent"
@@ -35,11 +34,10 @@ var _ agent.Interceptor = Encoding{}
 func (Encoding) Name() string { return "encoding" }
 
 // unfold removes line breaks (CRLF, LF or a lone CR) together with any spaces
-// or tabs that follow them, and nothing else: MIME folds and base64(1)'s
-// 76-column wraps rejoin, while words separated by ordinary spaces stay apart.
+// or tabs immediately before or after them, and nothing else: MIME folds and
+// base64(1)'s 76-column wraps rejoin, while ordinary spaces stay apart.
 func unfold(s string) string {
-	var b strings.Builder
-	b.Grow(len(s))
+	b := make([]byte, 0, len(s))
 	for i := 0; i < len(s); i++ {
 		c := s[i]
 		if c == '\r' {
@@ -49,14 +47,17 @@ func unfold(s string) string {
 			c = '\n'
 		}
 		if c != '\n' {
-			b.WriteByte(c)
+			b = append(b, c)
 			continue
+		}
+		for len(b) > 0 && (b[len(b)-1] == ' ' || b[len(b)-1] == '\t') {
+			b = b[:len(b)-1]
 		}
 		for i+1 < len(s) && (s[i+1] == ' ' || s[i+1] == '\t') {
 			i++
 		}
 	}
-	return b.String()
+	return string(b)
 }
 
 func isBase64Char(r rune) bool {
@@ -198,10 +199,19 @@ func (Encoding) InspectOutput(context.Context, agent.OutputInspection) ([]agent.
 	return nil, nil
 }
 
-// InspectToolCall checks the call's raw JSON arguments.
+// InspectToolCall checks both the raw JSON arguments and their decoded object
+// keys and string values.
 func (e Encoding) InspectToolCall(_ context.Context, call agent.ToolCallInspection) ([]agent.Finding, error) {
-	if f, ok := e.scan(toolCallTarget(call.Call.ID), string(call.Call.Function.Arguments)); ok {
-		return []agent.Finding{f}, nil
+	tg := toolCallTarget(call.Call.ID)
+	var best agent.Finding
+	found := false
+	for _, text := range toolCallTexts(call.Call.Function.Arguments) {
+		if f, ok := e.scan(tg, text); ok && (!found || f.Risk > best.Risk) {
+			best, found = f, true
+		}
+	}
+	if found {
+		return []agent.Finding{best}, nil
 	}
 	return nil, nil
 }

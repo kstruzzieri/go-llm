@@ -49,7 +49,10 @@ type Verdict uint8
 const (
 	// VerdictAllow is the zero value: nothing to report.
 	VerdictAllow Verdict = iota
-	// VerdictTag annotates context and telemetry without stopping anything.
+	// VerdictTag always contributes risk and telemetry without stopping
+	// anything. A tag becomes a model-visible trailer only when HookInput is
+	// inspecting an accepted tool or verifier observation; tags on the initial
+	// input, model output, and tool calls are telemetry-only.
 	VerdictTag
 	// VerdictBlock prevents the guarded action. Recoverable where a synthetic
 	// observation makes sense (tool call, tool result); terminal for the
@@ -202,8 +205,8 @@ type OutputInspection struct {
 	ToolCalls []provider.ToolCall
 }
 
-// ToolCallInspection carries one tool call before Plan and approval. Call is
-// a clone; Effect is the tool's static, normalized effect.
+// ToolCallInspection carries one tool call before Plan and approval. Call and
+// Effect are private copies; Effect is the tool's static, normalized effect.
 type ToolCallInspection struct {
 	Step   int
 	Call   provider.ToolCall
@@ -256,6 +259,16 @@ type Interceptor interface {
 	InspectToolCall(ctx context.Context, call ToolCallInspection) ([]Finding, error)
 }
 
+// namedInterceptor freezes the validated installation name for one run.
+// Interceptors are otherwise free to compute Name, but model-visible framing
+// and telemetry must use the value that passed validation.
+type namedInterceptor struct {
+	Interceptor
+	name string
+}
+
+func (n namedInterceptor) Name() string { return n.name }
+
 // RunScope is the immutable projection of a run that ForRun sees. System is
 // the caller's system prompt as given to Run, without any addendum another
 // RunScopedInterceptor contributed; addenda are appended in chain order after
@@ -280,32 +293,40 @@ func WithInterceptors(ic ...Interceptor) Option {
 	return func(o *Orchestrator) { o.interceptors = append(o.interceptors, ic...) }
 }
 
-func validateInterceptors(ic []Interceptor) error {
+func validatedInterceptorNames(ic []Interceptor) ([]string, error) {
 	seen := make(map[string]struct{}, len(ic))
+	names := make([]string, len(ic))
 	for i, it := range ic {
 		if it == nil {
-			return fmt.Errorf("agent: nil interceptor at index %d", i)
+			return nil, fmt.Errorf("agent: nil interceptor at index %d", i)
 		}
 		name := it.Name()
 		if name == "" {
-			return fmt.Errorf("agent: interceptor at index %d has an empty name", i)
+			return nil, fmt.Errorf("agent: interceptor at index %d has an empty name", i)
 		}
 		if !validName(name) {
-			return fmt.Errorf("agent: interceptor at index %d has an invalid name %q (want [A-Za-z0-9_.:-], at most %d bytes)", i, name, maxNameBytes)
+			return nil, fmt.Errorf("agent: interceptor at index %d has an invalid name %q (want [A-Za-z0-9_.:-], at most %d bytes)", i, name, maxNameBytes)
 		}
 		if _, dup := seen[name]; dup {
-			return fmt.Errorf("agent: duplicate interceptor name %q", name)
+			return nil, fmt.Errorf("agent: duplicate interceptor name %q", name)
 		}
 		seen[name] = struct{}{}
+		names[i] = name
 	}
-	return nil
+	return names, nil
+}
+
+func validateInterceptors(ic []Interceptor) error {
+	_, err := validatedInterceptorNames(ic)
+	return err
 }
 
 // resolveInterceptors validates the installed chain and replaces every
 // RunScopedInterceptor with its per-run instance, returning the concatenated
 // system addenda in chain order.
 func resolveInterceptors(ctx context.Context, chain []Interceptor, scope RunScope) ([]Interceptor, string, error) {
-	if err := validateInterceptors(chain); err != nil {
+	names, err := validatedInterceptorNames(chain)
+	if err != nil {
 		return nil, "", err
 	}
 	if len(chain) == 0 {
@@ -314,23 +335,24 @@ func resolveInterceptors(ctx context.Context, chain []Interceptor, scope RunScop
 	out := make([]Interceptor, len(chain))
 	addenda := ""
 	for i, ic := range chain {
-		out[i] = ic
+		resolved := ic
 		rs, ok := ic.(RunScopedInterceptor)
-		if !ok {
-			continue
+		if ok {
+			scoped, addendum, err := rs.ForRun(ctx, scope)
+			if err != nil {
+				return nil, "", fmt.Errorf("agent: interceptor %s for run: %w", names[i], err)
+			}
+			if scoped == nil {
+				return nil, "", fmt.Errorf("agent: interceptor %s returned a nil run instance", names[i])
+			}
+			scopedName := scoped.Name()
+			if scopedName != names[i] {
+				return nil, "", fmt.Errorf("agent: interceptor %s returned a run instance named %q", names[i], scopedName)
+			}
+			resolved = scoped
+			addenda += addendum
 		}
-		scoped, addendum, err := rs.ForRun(ctx, scope)
-		if err != nil {
-			return nil, "", fmt.Errorf("agent: interceptor %s for run: %w", ic.Name(), err)
-		}
-		if scoped == nil {
-			return nil, "", fmt.Errorf("agent: interceptor %s returned a nil run instance", ic.Name())
-		}
-		if scoped.Name() != ic.Name() {
-			return nil, "", fmt.Errorf("agent: interceptor %s returned a run instance named %q", ic.Name(), scoped.Name())
-		}
-		out[i] = scoped
-		addenda += addendum
+		out[i] = namedInterceptor{Interceptor: resolved, name: names[i]}
 	}
 	return out, addenda, nil
 }
@@ -538,6 +560,12 @@ func terminalAt(min Verdict, hook Hook, step int, findings []Finding, verdict Ve
 }
 
 func findTarget(targets []InspectedMessage, stateIndex int) *InspectedMessage {
+	// Initial-input messages retain their State index as their slice position,
+	// so unbounded History resolves in constant time. A one-message ingress
+	// inspection has a later State index and uses the small fallback below.
+	if stateIndex >= 0 && stateIndex < len(targets) && targets[stateIndex].StateIndex == stateIndex {
+		return &targets[stateIndex]
+	}
 	for i := range targets {
 		if targets[i].StateIndex == stateIndex {
 			return &targets[i]
@@ -721,8 +749,8 @@ func (r *interceptorRun) inspectToolCall(ctx context.Context, obs Observer, step
 	}
 	findings, verdict, err := r.runHook(ctx, obs, step, hookScope{hook: HookToolCall, toolCallID: call.ID},
 		func(ic Interceptor) ([]Finding, error) {
-			// Each interceptor gets its own copy of the canonical call.
-			return ic.InspectToolCall(ctx, ToolCallInspection{Step: step, Call: cloneToolCall(call), Effect: effect})
+			// Each interceptor gets its own copy of the canonical call and effect.
+			return ic.InspectToolCall(ctx, ToolCallInspection{Step: step, Call: cloneToolCall(call), Effect: cloneEffect(effect)})
 		})
 	if err != nil || verdict == VerdictAbort {
 		return nil, terminalAt(VerdictAbort, HookToolCall, step, findings, verdict, err)

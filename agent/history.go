@@ -2,6 +2,7 @@ package agent
 
 import (
 	"fmt"
+	"slices"
 
 	"github.com/kstruzzieri/go-llm/provider"
 )
@@ -52,4 +53,26 @@ func cloneToolCalls(in []provider.ToolCall) []provider.ToolCall {
 		}
 	}
 	return out
+}
+
+func cloneEffect(e Effect) Effect {
+	e.Scope.Paths = slices.Clone(e.Scope.Paths)
+	return e
+}
+
+func cloneRouteOutcome(in *provider.RouteOutcome) *provider.RouteOutcome {
+	if in == nil {
+		return nil
+	}
+	out := *in
+	out.Attempts = slices.Clone(in.Attempts)
+	if in.ScoreBreakdown != nil {
+		breakdown := *in.ScoreBreakdown
+		if in.ScoreBreakdown.FeedbackUpdatedAt != nil {
+			updatedAt := *in.ScoreBreakdown.FeedbackUpdatedAt
+			breakdown.FeedbackUpdatedAt = &updatedAt
+		}
+		out.ScoreBreakdown = &breakdown
+	}
+	return &out
 }
