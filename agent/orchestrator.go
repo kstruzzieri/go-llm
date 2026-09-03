@@ -242,8 +242,12 @@ func (o *Orchestrator) run(ctx context.Context, req Request, obs Observer, ic *i
 			Index: step, Response: resp, RouteOutcome: modelResult.RouteOutcome, Pressure: pressure, Latency: modelLatency,
 		})
 		res.Events = append(res.Events, EventRecord{Step: step, Kind: "step"})
+		// #436 spec D6: the observer gets its own copy of the tool calls, so a
+		// scribble there cannot change what the tool-call gate and Invoke see.
+		published := resp
+		published.ToolCalls = cloneToolCalls(resp.ToolCalls)
 		if err := obs.OnStep(ctx, StepEvent{
-			Index: step, Response: resp, RouteOutcome: modelResult.RouteOutcome, Pressure: pressure, Latency: modelLatency,
+			Index: step, Response: published, RouteOutcome: modelResult.RouteOutcome, Pressure: pressure, Latency: modelLatency,
 		}); err != nil {
 			return res, err
 		}

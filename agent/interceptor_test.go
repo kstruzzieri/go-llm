@@ -1139,3 +1139,30 @@ func TestToolCallInterceptorErrorAbortsTheRun(t *testing.T) {
 		t.Fatal("an error without a block must not fabricate a BlockedError")
 	}
 }
+
+// stepScribbler scribbles on the tool-call arguments OnStep receives.
+type stepScribbler struct{ interceptRecorder }
+
+func (s *stepScribbler) OnStep(ctx context.Context, e StepEvent) error {
+	if len(e.Response.ToolCalls) > 0 && len(e.Response.ToolCalls[0].Function.Arguments) > 1 {
+		e.Response.ToolCalls[0].Function.Arguments[1] = 'S'
+	}
+	return s.interceptRecorder.OnStep(ctx, e)
+}
+
+func TestOnStepReceivesAClonedResponse(t *testing.T) {
+	tool := &countingWriteTool{writeTool: writeTool{planPreview: "P"}}
+	ap := &keyedCapturingApprover{decision: ApprovalDecision{Approved: true}}
+	mc := &scriptedCaller{responses: []ModelResult{writerCall("1"), finalAnswer("done")}}
+	o := newTestOrchestrator(mc, WithInterceptors(&stubInterceptor{name: "rec"}))
+	res, err := o.Run(context.Background(), Request{Goal: "q", Tools: []Tool{tool}, Approver: ap}, &stepScribbler{})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if tool.gotArgs != `{"path":"x"}` {
+		t.Fatalf("Invoke received %q: OnStep's copy aliased the response", tool.gotArgs)
+	}
+	if got := string(res.Messages[1].ToolCalls[0].Function.Arguments); got != `{"path":"x"}` {
+		t.Fatalf("recorded assistant turn carries %q", got)
+	}
+}
