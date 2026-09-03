@@ -140,14 +140,23 @@ func TestKeyDirectoryCreationNeverChmodsThroughThePath(t *testing.T) {
 	t.Cleanup(func() { syscall.Umask(oldMask) })
 	keyDir := filepath.Join(base, "keys")
 	_, created, err := LoadOrCreateHMAC(filepath.Join(keyDir, "hmac.pem"))
-	if err == nil || created {
-		t.Fatalf("owner-stripping umask = created %v, err %v; want fail-closed error", created, err)
+	fi, statErr := os.Stat(keyDir)
+	if statErr != nil {
+		t.Fatal(statErr)
 	}
-	fi, err := os.Stat(keyDir)
-	if err != nil {
-		t.Fatal(err)
-	}
+	// The mode is the direct evidence: a path chmod would have made it 0700.
 	if got := fi.Mode().Perm(); got != 0o500 {
 		t.Fatalf("key directory mode = %04o, want 0500 (Mkdir 0700 under umask 0277, no path chmod)", got)
+	}
+	if os.Geteuid() == 0 {
+		// root bypasses directory permission bits, so creation succeeds there;
+		// the no-chmod property above is what matters.
+		if err != nil || !created {
+			t.Fatalf("as root = created %v, err %v; want a created key in the 0500 directory", created, err)
+		}
+		return
+	}
+	if err == nil || created {
+		t.Fatalf("owner-stripping umask = created %v, err %v; want fail-closed error", created, err)
 	}
 }
