@@ -242,7 +242,10 @@ type Interceptor interface {
 	InspectToolCall(ctx context.Context, call ToolCallInspection) ([]Finding, error)
 }
 
-// RunScope is the immutable projection of a run that ForRun sees.
+// RunScope is the immutable projection of a run that ForRun sees. System is
+// the caller's system prompt as given to Run, without any addendum another
+// RunScopedInterceptor contributed; addenda are appended in chain order after
+// every ForRun has returned.
 type RunScope struct {
 	System string
 }
