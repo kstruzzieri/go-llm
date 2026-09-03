@@ -155,6 +155,14 @@ type Turn struct {
 	Observer     agent.Observer
 }
 
+// turnSnapshot is the immutable {System, Tools} pair a reserved turn holds
+// (#372). It is never mutated after publication; Replace installs a new
+// pointer.
+type turnSnapshot struct {
+	system string
+	tools  []agent.Tool
+}
+
 // Event is the versioned consumer event envelope. A run that stops early
 // (cancellation, sink failure, or the orchestrator's tool-error cap ending a
 // parallel batch) may leave tool.started events without a matching
@@ -181,10 +189,13 @@ type activeRun struct {
 
 // Runtime is a concrete facade over agent.Orchestrator.
 type Runtime struct {
-	orchestrator    *agent.Orchestrator
-	root            string
-	system          string
-	tools           []agent.Tool
+	orchestrator *agent.Orchestrator
+	root         string
+	// fileTools is the runtime-owned prefix, immutable after New. snap is
+	// the current {System, Tools} pair, guarded by mu: reserve reads it,
+	// Replace swaps it (#372).
+	fileTools       []agent.Tool
+	snap            *turnSnapshot
 	maxSteps        int
 	budget          agent.Budget
 	maxMessageBytes int
@@ -261,8 +272,8 @@ func New(ctx context.Context, opts Options) (*Runtime, error) {
 	return &Runtime{
 		orchestrator:    orchestrator,
 		root:            root,
-		system:          opts.System,
-		tools:           tools,
+		fileTools:       fileTools,
+		snap:            &turnSnapshot{system: opts.System, tools: tools},
 		maxSteps:        opts.MaxSteps,
 		budget:          opts.Budget,
 		maxMessageBytes: maxMessage,
@@ -344,7 +355,7 @@ func (r *Runtime) Run(ctx context.Context, turn Turn, sink EventSink) (agent.Res
 		}
 		return err
 	}
-	active, err := r.reserve(turn, cancel)
+	active, snap, err := r.reserve(turn, cancel)
 	if err != nil {
 		if errors.Is(err, errDuplicateRunID) {
 			return agent.Result{}, err
@@ -429,8 +440,8 @@ func (r *Runtime) Run(ctx context.Context, turn Turn, sink EventSink) (agent.Res
 	}
 	request := agent.Request{
 		Goal:     goal,
-		System:   turnSystem(r.system, turn.Instructions),
-		Tools:    r.tools,
+		System:   turnSystem(snap.system, turn.Instructions),
+		Tools:    snap.tools,
 		MaxSteps: r.maxSteps,
 		Budget:   r.budget,
 		Approver: turn.Approver,
@@ -624,18 +635,69 @@ func (r *Runtime) Cancel(runID string) bool {
 	return true
 }
 
-func (r *Runtime) reserve(turn Turn, cancel context.CancelFunc) (*activeRun, error) {
+// reserve registers the run and fixes its {System, Tools} snapshot in the
+// same critical section that makes it visible to Cancel and Close, so
+// Replace and reservation are linearizable (#372).
+// Replace atomically installs system and tools for every turn reserved
+// after it returns. A turn reserved before Replace keeps the System and
+// Tools it was reserved with, to completion — reservation is the critical
+// section that makes a run visible to Cancel and Close, so the two are
+// linearizable. A successful Replace governs every reservation after it
+// returns until superseded by another successfully linearized Replace.
+//
+// system and tools have the meaning of Options.System and Options.Tools:
+// an empty system selects SystemPrompt(false, false), and the runtime's own
+// file tools (over its ScopeGuard-bound workspace) always precede tools.
+// Validation matches New (nil tool, empty name, duplicate name — including
+// against the runtime's own file tools) and installs nothing on failure;
+// ErrClosed takes precedence over validation errors, including when Close
+// completes while validation is running. tools is copied. Tool.Spec is
+// never called while the runtime lock is held. Safe for concurrent use with
+// Run, Cancel, Close, and other Replace calls.
+//
+// Replace never touches the orchestrator: an orchestrator option that names
+// a tool (agent.WithToolInvocationLimit) still requires that tool in every
+// replacement.
+func (r *Runtime) Replace(system string, tools []agent.Tool) error {
+	r.mu.Lock()
+	closed := r.closed
+	r.mu.Unlock()
+	if closed {
+		return ErrClosed
+	}
+	if system == "" {
+		system = SystemPrompt(false, false)
+	}
+	// Validation calls external Tool.Spec implementations, so it runs
+	// unlocked; its error is retained until the closed state is rechecked.
+	combined := make([]agent.Tool, 0, len(r.fileTools)+len(tools))
+	combined = append(combined, r.fileTools...)
+	combined = append(combined, tools...)
+	validationErr := validateTools(combined)
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.closed {
+		return ErrClosed
+	}
+	if validationErr != nil {
+		return validationErr
+	}
+	r.snap = &turnSnapshot{system: system, tools: combined}
+	return nil
+}
+
+func (r *Runtime) reserve(turn Turn, cancel context.CancelFunc) (*activeRun, *turnSnapshot, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if _, ok := r.active[turn.RunID]; ok {
-		return nil, fmt.Errorf("%w: %w %q", ErrRunConflict, errDuplicateRunID, turn.RunID)
+		return nil, nil, fmt.Errorf("%w: %w %q", ErrRunConflict, errDuplicateRunID, turn.RunID)
 	}
 	if r.closed {
-		return nil, ErrClosed
+		return nil, nil, ErrClosed
 	}
 	if turn.ThreadID != "" {
 		if _, ok := r.activeThreads[turn.ThreadID]; ok {
-			return nil, fmt.Errorf("%w: thread %q is active", ErrRunConflict, turn.ThreadID)
+			return nil, nil, fmt.Errorf("%w: thread %q is active", ErrRunConflict, turn.ThreadID)
 		}
 	}
 	active := &activeRun{cancel: cancel}
@@ -644,7 +706,7 @@ func (r *Runtime) reserve(turn Turn, cancel context.CancelFunc) (*activeRun, err
 		r.activeThreads[turn.ThreadID] = active
 	}
 	r.wg.Add(1)
-	return active, nil
+	return active, r.snap, nil
 }
 
 func (r *Runtime) commitTerminal(active *activeRun, ctx context.Context, eventType string) string {
