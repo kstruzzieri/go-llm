@@ -2,8 +2,13 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"math"
+	"slices"
+	"unicode/utf8"
 
+	"github.com/kstruzzieri/go-llm/internal/promptfence"
 	"github.com/kstruzzieri/go-llm/provider"
 )
 
@@ -378,16 +383,209 @@ type InterceptionObserver interface {
 	OnInterception(ctx context.Context, e InterceptionEvent) error
 }
 
-// interceptorRun is the per-run pipeline state (filled in by Task 2).
+// maxFindingDetailBytes bounds telemetry detail text.
+const maxFindingDetailBytes = 256
+
+// interceptorRun is the per-run pipeline state. Run creates it, run resolves
+// its chain, and dispatch/verify receive it, so both dispatch paths and the
+// verifier share one instance.
 type interceptorRun struct {
 	chain []Interceptor
 	risk  RiskReport
 }
 
+func (o *Orchestrator) newInterceptorRun() *interceptorRun {
+	return &interceptorRun{chain: o.interceptors}
+}
+
+// snapshot copies the cumulative report so an approver or observer cannot
+// write through to the run's findings.
+func (r *interceptorRun) snapshot() RiskReport {
+	return RiskReport{Score: r.risk.Score, Findings: append([]Finding(nil), r.risk.Findings...)}
+}
+
+// result is what Run publishes on Result.Risk: nil when nothing was found.
 func (r *interceptorRun) result() *RiskReport {
 	if len(r.risk.Findings) == 0 {
 		return nil
 	}
-	s := RiskReport{Score: r.risk.Score, Findings: append([]Finding(nil), r.risk.Findings...)}
+	s := r.snapshot()
 	return &s
+}
+
+func addSaturating(a, b int) int {
+	if b > math.MaxInt-a {
+		return math.MaxInt
+	}
+	return a + b
+}
+
+// hookScope is what normalizeFinding validates targets against: the inspected
+// messages and the presence of system/summary text for HookInput, the
+// response's tool-call IDs for HookOutput, and the call ID for HookToolCall
+// (also used for a tool observation's telemetry).
+type hookScope struct {
+	hook       Hook
+	messages   []InspectedMessage
+	hasSystem  bool
+	hasSummary bool
+	callIDs    []string
+	toolCallID string
+}
+
+// runHook runs every interceptor in registration order (spec D1), continuing
+// past blocks and errors so telemetry and the risk score see the whole
+// picture, normalizes findings against scope, accumulates risk, emits
+// telemetry, and returns the findings, the maximum verdict, and the joined
+// interceptor/observer errors. Callers combine the verdict and the error
+// through terminalAt.
+func (r *interceptorRun) runHook(ctx context.Context, obs Observer, step int, scope hookScope,
+	invoke func(Interceptor) ([]Finding, error)) ([]Finding, Verdict, error) {
+
+	var all []Finding
+	var errs []error
+	verdict := VerdictAllow
+	for _, ic := range r.chain {
+		found, err := invoke(ic)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("agent: interceptor %s %s: %w", ic.Name(), scope.hook, err))
+		}
+		for _, f := range found {
+			f = normalizeFinding(f, ic.Name(), step, scope)
+			all = append(all, f)
+			if f.Verdict > verdict {
+				verdict = f.Verdict
+			}
+		}
+	}
+	if len(all) > 0 {
+		r.risk.Findings = append(r.risk.Findings, all...)
+		for _, f := range all {
+			r.risk.Score = addSaturating(r.risk.Score, f.Risk)
+		}
+		if io, ok := obs.(InterceptionObserver); ok {
+			if err := io.OnInterception(ctx, InterceptionEvent{
+				Step: step, Hook: scope.hook, Verdict: verdict,
+				Findings: append([]Finding(nil), all...), Risk: r.snapshot(), ToolCallID: scope.toolCallID,
+			}); err != nil {
+				errs = append(errs, err)
+			}
+		}
+	}
+	return all, verdict, errors.Join(errs...)
+}
+
+// terminalAt converts a hook outcome into the error to propagate. A verdict
+// at or above min produces a BlockedError; when interceptors or the observer
+// also errored, the BlockedError is joined with those errors so errors.As
+// still finds the structured block (spec D1). Below min, only the errors
+// propagate (nil when there are none).
+func terminalAt(min Verdict, hook Hook, step int, findings []Finding, verdict Verdict, err error) error {
+	if verdict < min && (err == nil || verdict < VerdictBlock) {
+		return err
+	}
+	if verdict < VerdictBlock {
+		return err
+	}
+	blocked := &BlockedError{Hook: hook, Step: step, Findings: findings}
+	if err != nil {
+		return errors.Join(blocked, err)
+	}
+	return blocked
+}
+
+func findTarget(targets []InspectedMessage, stateIndex int) *InspectedMessage {
+	for i := range targets {
+		if targets[i].StateIndex == stateIndex {
+			return &targets[i]
+		}
+	}
+	return nil
+}
+
+func validAlternative(m *InspectedMessage, group, alternative int) bool {
+	for _, a := range m.Alternatives {
+		if a.Group == group && a.Alternative == alternative {
+			return true
+		}
+	}
+	return false
+}
+
+func noTarget(f Finding) Finding {
+	f.Target, f.StateIndex, f.Group, f.Alternative, f.ToolCallID = TargetNone, -1, -1, -1, ""
+	return f
+}
+
+// normalizeFinding applies the Finding contract (see the type's doc) and
+// validates the target for the hook in scope.
+func normalizeFinding(f Finding, name string, step int, scope hookScope) Finding {
+	f.Interceptor, f.Hook, f.Step = name, scope.hook, step
+	if f.Rule == "" {
+		f.Rule = "unspecified"
+	}
+	if f.Verdict > VerdictAbort {
+		f.Verdict = VerdictAbort
+	}
+	if f.Risk < 0 {
+		f.Risk = 0
+	} else if f.Risk > 100 {
+		f.Risk = 100
+	}
+	f.Detail = promptfence.FlattenLine(f.Detail)
+	if len(f.Detail) > maxFindingDetailBytes {
+		end := maxFindingDetailBytes
+		for end > 0 && !utf8.RuneStart(f.Detail[end]) {
+			end--
+		}
+		f.Detail = f.Detail[:end]
+	}
+	switch scope.hook {
+	case HookInput:
+		switch f.Target {
+		case TargetSystem:
+			if scope.hasSystem {
+				f = noTarget(f)
+				f.Target, f.Origin = TargetSystem, OriginSystem
+				return f
+			}
+		case TargetSummary:
+			if scope.hasSummary {
+				f = noTarget(f)
+				f.Target, f.Origin = TargetSummary, OriginModel
+				return f
+			}
+		case TargetMessage:
+			if m := findTarget(scope.messages, f.StateIndex); m != nil {
+				f.Origin, f.ToolCallID = m.Origin, m.ToolCallID
+				if !validAlternative(m, f.Group, f.Alternative) {
+					f.Group, f.Alternative = -1, -1
+				}
+				return f
+			}
+		}
+	case HookOutput:
+		f.Origin = OriginModel
+		switch f.Target {
+		case TargetOutputContent:
+			f = noTarget(f)
+			f.Target = TargetOutputContent
+			return f
+		case TargetOutputToolCall:
+			if slices.Contains(scope.callIDs, f.ToolCallID) {
+				id := f.ToolCallID
+				f = noTarget(f)
+				f.Target, f.ToolCallID = TargetOutputToolCall, id
+				return f
+			}
+		}
+		return noTarget(f)
+	case HookToolCall:
+		f = noTarget(f)
+		f.Target, f.ToolCallID, f.Origin = TargetToolCall, scope.toolCallID, OriginModel
+		return f
+	}
+	f = noTarget(f)
+	f.Origin = normalizeOrigin(f.Origin)
+	return f
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"math"
 	"strings"
 	"sync"
 	"testing"
@@ -279,5 +280,243 @@ func TestEnumStrings(t *testing.T) {
 	}
 	if normalizeOrigin(Origin(99)) != OriginUnknown || normalizeOrigin(OriginForeign) != OriginForeign {
 		t.Fatal("normalizeOrigin must map unknown values to OriginUnknown and keep known ones")
+	}
+}
+
+func newRun(ics ...Interceptor) *interceptorRun { return &interceptorRun{chain: ics} }
+
+func inputScope(msgs []InspectedMessage, hasSystem, hasSummary bool) hookScope {
+	return hookScope{hook: HookInput, messages: msgs, hasSystem: hasSystem, hasSummary: hasSummary}
+}
+
+func inputInvoke(in InputInspection) func(Interceptor) ([]Finding, error) {
+	return func(ic Interceptor) ([]Finding, error) { return ic.InspectInput(context.Background(), in) }
+}
+
+func TestRunHookRunsEveryInterceptorAfterBlockAndError(t *testing.T) {
+	bad := &stubInterceptor{name: "bad", err: errors.New("boom")}
+	blocker := blockAll("blocker")
+	tail := &stubInterceptor{name: "tail", input: func(InputInspection) []Finding {
+		return []Finding{{Rule: "seen", Verdict: VerdictTag, Risk: 5}}
+	}}
+	rec := &interceptRecorder{}
+	r := newRun(bad, blocker, tail)
+	findings, verdict, err := r.runHook(context.Background(), rec, 3, inputScope(nil, false, false), inputInvoke(InputInspection{Step: 3}))
+	if err == nil || err.Error() != "agent: interceptor bad input: boom" {
+		t.Fatalf("err = %v", err)
+	}
+	if len(tail.inputs) != 1 {
+		t.Fatalf("tail ran %d times after an error and a block, want 1 (spec D1)", len(tail.inputs))
+	}
+	if verdict != VerdictBlock {
+		t.Fatalf("verdict = %s, want block", verdict)
+	}
+	want := []Finding{
+		{Interceptor: "blocker", Rule: "deny", Verdict: VerdictBlock, Risk: 100, Hook: HookInput, Step: 3, StateIndex: -1, Group: -1, Alternative: -1},
+		{Interceptor: "tail", Rule: "seen", Verdict: VerdictTag, Risk: 5, Hook: HookInput, Step: 3, StateIndex: -1, Group: -1, Alternative: -1},
+	}
+	if len(findings) != 2 || findings[0] != want[0] || findings[1] != want[1] {
+		t.Fatalf("findings = %+v, want %+v", findings, want)
+	}
+	if r.risk.Score != 105 || len(rec.interceptions) != 1 || rec.interceptions[0].Risk.Score != 105 {
+		t.Fatalf("score = %d, events = %+v; findings and telemetry must survive the error", r.risk.Score, rec.interceptions)
+	}
+}
+
+func TestRunHookJoinsEveryError(t *testing.T) {
+	r := newRun(&stubInterceptor{name: "a", err: errors.New("boom")}, &stubInterceptor{name: "b", err: errors.New("bang")})
+	_, _, err := r.runHook(context.Background(), normalizeObserver(nil), 0, hookScope{hook: HookOutput},
+		func(ic Interceptor) ([]Finding, error) {
+			return ic.InspectOutput(context.Background(), OutputInspection{})
+		})
+	if err == nil || err.Error() != "agent: interceptor a output: boom\nagent: interceptor b output: bang" {
+		t.Fatalf("err = %q", err)
+	}
+}
+
+func TestTerminalAtJoinsBlockedErrorWithHookErrors(t *testing.T) {
+	block := []Finding{{Interceptor: "b", Rule: "deny", Verdict: VerdictBlock}}
+	err := terminalAt(VerdictBlock, HookInput, 4, block, VerdictBlock, errors.New("boom"))
+	var blocked *BlockedError
+	if !errors.As(err, &blocked) || blocked.Step != 4 || err.Error() != "agent: input blocked by interceptor b (deny)\nboom" {
+		t.Fatalf("err = %v (%T)", err, err)
+	}
+	if err := terminalAt(VerdictBlock, HookInput, 0, nil, VerdictTag, errors.New("boom")); errors.As(err, &blocked) || err.Error() != "boom" {
+		t.Fatalf("tag plus error must be the error alone, got %v", err)
+	}
+	if err := terminalAt(VerdictBlock, HookOutput, 1, block, VerdictBlock, nil); !errors.As(err, &blocked) || blocked.Hook != HookOutput {
+		t.Fatalf("block without error must be the BlockedError alone, got %v", err)
+	}
+	if err := terminalAt(VerdictAbort, HookToolCall, 1, block, VerdictBlock, nil); err != nil {
+		t.Fatalf("a recoverable block below the threshold must return nil, got %v", err)
+	}
+	if err := terminalAt(VerdictAbort, HookToolCall, 1, block, VerdictBlock, errors.New("boom")); !errors.As(err, &blocked) {
+		t.Fatalf("a recoverable block WITH an error must still carry the BlockedError, got %v", err)
+	}
+}
+
+func TestNormalizeFindingValidatesTargetsPerHook(t *testing.T) {
+	msgs := []InspectedMessage{
+		{StateIndex: 4, Role: "user", Origin: OriginUser},
+		{StateIndex: 7, Role: "tool", Origin: OriginWorkspace, ToolCallID: "c7", Alternatives: []InspectedAlternative{{Group: 0, Alternative: 0}, {Group: 0, Alternative: 1}}},
+	}
+	in := inputScope(msgs, true, false)
+	out := hookScope{hook: HookOutput, callIDs: []string{"o1"}}
+	tc := hookScope{hook: HookToolCall, toolCallID: "t9"}
+	none := func(f Finding) Finding {
+		f.Target, f.StateIndex, f.Group, f.Alternative, f.ToolCallID = TargetNone, -1, -1, -1, ""
+		return f
+	}
+	base := Finding{Interceptor: "ic", Rule: "r", Hook: HookInput, Step: 2}
+	cases := []struct {
+		name  string
+		scope hookScope
+		in    Finding
+		want  Finding
+	}{
+		{"system present", in, Finding{Target: TargetSystem, StateIndex: 3, ToolCallID: "x", Origin: OriginForeign},
+			func() Finding { f := none(base); f.Target, f.Origin = TargetSystem, OriginSystem; return f }()},
+		{"summary absent", in, Finding{Target: TargetSummary, Origin: OriginForeign},
+			func() Finding { f := none(base); f.Origin = OriginForeign; return f }()},
+		{"message valid alternative", in, Finding{Target: TargetMessage, StateIndex: 7, Group: 0, Alternative: 1, Origin: OriginForeign},
+			func() Finding {
+				f := base
+				f.Target, f.StateIndex, f.Group, f.Alternative, f.ToolCallID, f.Origin = TargetMessage, 7, 0, 1, "c7", OriginWorkspace
+				return f
+			}()},
+		{"message invalid alternative", in, Finding{Target: TargetMessage, StateIndex: 7, Group: 3, Alternative: 0},
+			func() Finding {
+				f := base
+				f.Target, f.StateIndex, f.Group, f.Alternative, f.ToolCallID, f.Origin = TargetMessage, 7, -1, -1, "c7", OriginWorkspace
+				return f
+			}()},
+		{"message unknown index", in, Finding{Target: TargetMessage, StateIndex: 9, Origin: OriginForeign},
+			func() Finding { f := none(base); f.Origin = OriginForeign; return f }()},
+		{"output kind in input hook", in, Finding{Target: TargetOutputContent, Origin: Origin(99)},
+			func() Finding { f := none(base); f.Origin = OriginUnknown; return f }()},
+		{"output content", out, Finding{Target: TargetOutputContent, Origin: OriginForeign, StateIndex: 5},
+			func() Finding {
+				f := none(base)
+				f.Hook, f.Target, f.Origin = HookOutput, TargetOutputContent, OriginModel
+				return f
+			}()},
+		{"output tool call valid", out, Finding{Target: TargetOutputToolCall, ToolCallID: "o1"},
+			func() Finding {
+				f := none(base)
+				f.Hook, f.Target, f.ToolCallID, f.Origin = HookOutput, TargetOutputToolCall, "o1", OriginModel
+				return f
+			}()},
+		{"output tool call unknown id", out, Finding{Target: TargetOutputToolCall, ToolCallID: "zz"},
+			func() Finding { f := none(base); f.Hook, f.Origin = HookOutput, OriginModel; return f }()},
+		{"tool call hook forces kind", tc, Finding{Target: TargetMessage, StateIndex: 1, ToolCallID: "spoof", Origin: OriginForeign},
+			func() Finding {
+				f := none(base)
+				f.Hook, f.Target, f.ToolCallID, f.Origin = HookToolCall, TargetToolCall, "t9", OriginModel
+				return f
+			}()},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			c.in.Rule = "r"
+			got := normalizeFinding(c.in, "ic", 2, c.scope)
+			if got != c.want {
+				t.Fatalf("got  %+v\nwant %+v", got, c.want)
+			}
+		})
+	}
+}
+
+func TestRunHookNormalizesValues(t *testing.T) {
+	long := strings.Repeat("x", 300)
+	ic := &stubInterceptor{name: "real", input: func(InputInspection) []Finding {
+		return []Finding{
+			{Interceptor: "spoofed", Verdict: Verdict(9), Risk: 500, Detail: "line one\nline two"},
+			{Rule: "neg", Risk: -5, Detail: long},
+		}
+	}}
+	r := newRun(ic)
+	got, verdict, err := r.runHook(context.Background(), normalizeObserver(nil), 2, inputScope(nil, false, false), inputInvoke(InputInspection{}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want0 := Finding{Interceptor: "real", Rule: "unspecified", Verdict: VerdictAbort, Risk: 100, Detail: "line one line two",
+		Hook: HookInput, Step: 2, StateIndex: -1, Group: -1, Alternative: -1}
+	if got[0] != want0 {
+		t.Fatalf("finding 0 = %+v, want %+v", got[0], want0)
+	}
+	if len(got[1].Detail) != 256 || got[1].Risk != 0 || verdict != VerdictAbort {
+		t.Fatalf("finding 1 = %+v, verdict %s", got[1], verdict)
+	}
+	if r.risk.Score != 100 {
+		t.Fatalf("score = %d, want 100", r.risk.Score)
+	}
+}
+
+func TestRunHookScoreSaturates(t *testing.T) {
+	r := newRun(&stubInterceptor{name: "ic", input: func(InputInspection) []Finding {
+		return []Finding{{Rule: "r", Risk: 100}}
+	}})
+	r.risk.Score = math.MaxInt - 10
+	if _, _, err := r.runHook(context.Background(), normalizeObserver(nil), 0, inputScope(nil, false, false), inputInvoke(InputInspection{})); err != nil {
+		t.Fatal(err)
+	}
+	if r.risk.Score != math.MaxInt {
+		t.Fatalf("score = %d, want MaxInt", r.risk.Score)
+	}
+}
+
+func TestRunHookSnapshotsAndEvents(t *testing.T) {
+	ic := &stubInterceptor{name: "ic",
+		input:    func(InputInspection) []Finding { return []Finding{{Rule: "a", Verdict: VerdictTag, Risk: 30}} },
+		toolCall: func(ToolCallInspection) []Finding { return []Finding{{Rule: "b", Verdict: VerdictTag, Risk: 50}} },
+	}
+	rec := &interceptRecorder{}
+	r := newRun(ic)
+	if _, _, err := r.runHook(context.Background(), rec, 0, inputScope(nil, false, false), inputInvoke(InputInspection{})); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := r.runHook(context.Background(), rec, 1, hookScope{hook: HookToolCall, toolCallID: "call-7"},
+		func(ic Interceptor) ([]Finding, error) {
+			return ic.InspectToolCall(context.Background(), ToolCallInspection{})
+		}); err != nil {
+		t.Fatal(err)
+	}
+	e1 := rec.interceptions[1]
+	if e1.Hook != HookToolCall || e1.ToolCallID != "call-7" || e1.Risk.Score != 80 || len(e1.Risk.Findings) != 2 {
+		t.Fatalf("event 1 = %+v", e1)
+	}
+	if f := e1.Findings[0]; f.Target != TargetToolCall || f.ToolCallID != "call-7" || f.Origin != OriginModel {
+		t.Fatalf("tool-call finding = %+v", f)
+	}
+	e1.Risk.Findings[0].Risk = 999
+	e1.Findings[0].Risk = 999
+	if r.risk.Findings[0].Risk != 30 {
+		t.Fatal("observer wrote through to the run's report: snapshot missing")
+	}
+	snap := r.snapshot()
+	snap.Findings[1].Risk = 999
+	if r.risk.Findings[1].Risk != 50 {
+		t.Fatal("snapshot aliases the run's findings")
+	}
+}
+
+func TestRunHookNoFindingsNoEventAndObserverErrorJoined(t *testing.T) {
+	rec := &interceptRecorder{}
+	r := newRun(&stubInterceptor{name: "quiet"})
+	findings, verdict, err := r.runHook(context.Background(), rec, 0, hookScope{hook: HookOutput},
+		func(ic Interceptor) ([]Finding, error) {
+			return ic.InspectOutput(context.Background(), OutputInspection{})
+		})
+	if err != nil || findings != nil || verdict != VerdictAllow || len(rec.interceptions) != 0 {
+		t.Fatalf("got findings=%v verdict=%s events=%d err=%v; want none", findings, verdict, len(rec.interceptions), err)
+	}
+	rec = &interceptRecorder{err: errors.New("sink down")}
+	r = newRun(blockAll("b"))
+	_, _, err = r.runHook(context.Background(), rec, 0, inputScope(nil, false, false), inputInvoke(InputInspection{}))
+	if err == nil || err.Error() != "sink down" {
+		t.Fatalf("err = %v, want the observer's error", err)
+	}
+	if r.result() == nil || r.result().Score != 100 {
+		t.Fatalf("result = %+v, want the finding retained", r.result())
 	}
 }
