@@ -582,10 +582,11 @@ func startupNotices(info startupInfo) []string {
 //
 // With -dispatch it also installs the per-run dispatch invocation cap, and
 // with a workspace-declared verifier (#347) the post-write verification hook.
-func newOrchestratorFactory(caller agent.ModelCaller, f flags, verifier *verifyRunner) func() *agent.Orchestrator {
+// verifier must be a true nil interface when absent: a typed-nil pointer
+// would satisfy the interface and panic on first use (#347). Callers assign
+// the interface only from a non-nil pointer.
+func newOrchestratorFactory(caller agent.ModelCaller, f flags, verifier agent.Verifier) func() *agent.Orchestrator {
 	var opts []agent.Option
-	// #347: a typed-nil would satisfy the interface and panic on first use, so
-	// the option is installed only for a real verifier.
 	if verifier != nil {
 		opts = append(opts, agent.WithVerifier(verifier))
 	}
@@ -607,9 +608,15 @@ func newOrchestratorFactory(caller agent.ModelCaller, f flags, verifier *verifyR
 	}
 }
 
-func shouldShowAgentflowHint(f flags) bool {
+// isREPLMode reports the plain interactive REPL: not one-shot, not task or
+// planning mode, not an Agentflow status/resume query. It is the only mode
+// that dispatches slash commands, so it is the only mode whose orchestrator
+// carries the #372 late verifier slot.
+func isREPLMode(f flags) bool {
 	return !f.promptSet && f.planPath == "" && !f.goalSet && !f.agentflowStatus && !f.agentflowResume
 }
+
+func shouldShowAgentflowHint(f flags) bool { return isREPLMode(f) }
 
 func main() {
 	if err := run(os.Args[1:], os.Stdin, os.Stdout, os.Stderr); err != nil {
@@ -1428,7 +1435,21 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 		sourceSummarizer = routerSourceSummaryGenerator(bundle.Router, summarizeChain)
 	}
 
-	newOrchestrator := newOrchestratorFactory(newActiveChainCaller(bundle.Router, plan), f, verifier)
+	// #372: the REPL may enable writes later, so its orchestrator carries a
+	// late-bound verifier slot (pre-filled when -allow-write built one). Every
+	// other mode keeps a real verifier or none; the interface is assigned
+	// only from a non-nil pointer so a typed nil never reaches the factory.
+	var orchVerifier agent.Verifier
+	if verifier != nil {
+		orchVerifier = verifier
+	}
+	var verifySlot *lateVerifier
+	if isREPLMode(f) {
+		verifySlot = &lateVerifier{}
+		verifySlot.set(verifier)
+		orchVerifier = verifySlot
+	}
+	newOrchestrator := newOrchestratorFactory(newActiveChainCaller(bundle.Router, plan), f, orchVerifier)
 	orch := newOrchestrator()
 
 	obsv, err := newObserv(os.Getenv, root, f.trace, f.telemetry, time.Now)
@@ -1491,6 +1512,7 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 		mountAt:          mountAt,
 		writeToolCount:   writeToolCount,
 		scratch:          f.scratch,
+		verifier:         verifySlot,
 		maxSteps:         f.maxSteps,
 		budget:           budget,
 		color:            colorEnabled(renderOut, f.noColor),

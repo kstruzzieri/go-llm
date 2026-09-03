@@ -38,13 +38,16 @@ type replSession struct {
 	// -scratch so /allow-write can say promotion stays startup-bound;
 	// lateStore is the checkpoint store /allow-write opened (nil when
 	// -allow-write owned it at startup, whose store main.go closes itself).
-	root            string
-	sysInputs       systemInputs
-	readToolCount   int
-	mountAt         int
-	writeToolCount  int
-	scratch         bool
-	lateStore       *checkpointStore
+	root           string
+	sysInputs      systemInputs
+	readToolCount  int
+	mountAt        int
+	writeToolCount int
+	scratch        bool
+	lateStore      *checkpointStore
+	// verifier is the REPL-mode post-write verification slot (#372); nil
+	// outside the REPL and in narrow tests (set is nil-safe).
+	verifier        *lateVerifier
 	maxSteps        int
 	budget          agent.Budget
 	color           bool

@@ -243,3 +243,43 @@ func buildVerifier(root string) (*verifyRunner, string) {
 	}
 	return newVerifyRunner(cmd), ""
 }
+
+// lateVerifier is the REPL's post-write verification slot (#372). The
+// orchestrator is built once at startup with agent.WithVerifier, but
+// /allow-write may build the verifier later. It is installed for the
+// interactive REPL only; every other mode keeps a real verifier or none, so
+// their orchestrators are byte-identical.
+//
+// Unset, it performs no verification (agent.verifyBatch treats "" as append
+// nothing). That is not byte-identical to a nil verifier — verifyBatch still
+// runs its post-Verify ctx.Err() check — but the path is unreachable while
+// the slot is unset: Verify is called only after a successful
+// write_file/edit_file, and no write tool is mounted until /allow-write
+// fills the slot (or -allow-write pre-filled it at startup).
+//
+// A plain pointer suffices: slash commands and turns are serialized on the
+// REPL goroutine, and Verify runs on the orchestrator's (caller's)
+// goroutine. Add synchronization only if a command can ever mutate mounts
+// during a running turn.
+type lateVerifier struct {
+	runner *verifyRunner
+}
+
+// set installs v. A nil v (no .golem.json, or a disabled config) leaves the
+// slot unset; a nil receiver (sessions outside the REPL) is a no-op.
+func (l *lateVerifier) set(v *verifyRunner) {
+	if l == nil || v == nil {
+		return
+	}
+	l.runner = v
+}
+
+// Verify implements agent.Verifier by delegating to the installed runner.
+func (l *lateVerifier) Verify(ctx context.Context, approver agent.Approver) (string, error) {
+	if l.runner != nil {
+		return l.runner.Verify(ctx, approver)
+	}
+	return "", nil
+}
+
+var _ agent.Verifier = (*lateVerifier)(nil)
