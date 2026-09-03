@@ -2,6 +2,7 @@ package signing
 
 import (
 	"bytes"
+	"encoding"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -148,10 +149,8 @@ func rejectInvalidUTF8Value(v reflect.Value, visiting map[utf8Visit]bool) error 
 	if v.Kind() == reflect.Pointer && v.IsNil() {
 		return nil
 	}
-	if v.CanInterface() {
-		if _, custom := v.Interface().(json.Marshaler); custom {
-			return nil
-		}
+	if handled, err := customMarshalerOutput(v); handled {
+		return err
 	}
 	if v.Kind() == reflect.String {
 		if !utf8.ValidString(v.String()) {
@@ -180,8 +179,12 @@ func rejectInvalidUTF8Value(v reflect.Value, visiting map[utf8Visit]bool) error 
 		iter := v.MapRange()
 		for iter.Next() {
 			key := iter.Key()
-			if key.Kind() == reflect.String && !utf8.ValidString(key.String()) {
-				return ErrInvalidUTF8
+			if key.Kind() == reflect.String {
+				if !utf8.ValidString(key.String()) {
+					return ErrInvalidUTF8
+				}
+			} else if _, err := customMarshalerOutput(key); err != nil {
+				return err // encoding/json formats non-string keys through MarshalText
 			}
 			if err := rejectInvalidUTF8Value(iter.Value(), visiting); err != nil {
 				return err
@@ -201,6 +204,40 @@ func rejectInvalidUTF8Value(v reflect.Value, visiting map[utf8Visit]bool) error 
 		}
 	}
 	return nil
+}
+
+// customMarshalerOutput reports whether v is encoded by its own marshaler and,
+// for encoding.TextMarshaler, whether that output is valid UTF-8. A
+// json.Marshaler's bytes are validated later by Canonicalize, but a
+// TextMarshaler's bytes pass through encoding/json's string encoder, which
+// replaces invalid UTF-8 with U+FFFD before Canonicalize can see it. Internal
+// fields of either kind are not walked: they may legitimately hold binary and
+// are never serialized. Pointer-receiver marshalers are honored when v is
+// addressable, matching encoding/json.
+func customMarshalerOutput(v reflect.Value) (handled bool, err error) {
+	candidates := []reflect.Value{v}
+	if v.CanAddr() {
+		candidates = append(candidates, v.Addr())
+	}
+	for _, c := range candidates {
+		if !c.CanInterface() {
+			continue
+		}
+		if _, ok := c.Interface().(json.Marshaler); ok {
+			return true, nil
+		}
+		if tm, ok := c.Interface().(encoding.TextMarshaler); ok {
+			text, err := tm.MarshalText()
+			if err != nil {
+				return true, nil // json.Marshal reports the marshaler's error itself
+			}
+			if !utf8.Valid(text) {
+				return true, ErrInvalidUTF8
+			}
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // rejectDuplicateKeys walks the token stream and fails on the first object

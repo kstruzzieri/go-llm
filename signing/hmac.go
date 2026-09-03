@@ -110,7 +110,8 @@ func (m *HMACSigner) Verify(ctx context.Context, domain string, payload []byte, 
 	return nil
 }
 
-// Format names the key without exposing it under any fmt verb.
-func (m *HMACSigner) Format(state fmt.State, _ rune) {
+// Format names the key without exposing it under any fmt verb; value
+// receiver so values and pointers both implement fmt.Formatter.
+func (m HMACSigner) Format(state fmt.State, _ rune) {
 	_, _ = fmt.Fprintf(state, "signing.HMACSigner(kid=%s)", m.KeyID())
 }

@@ -218,3 +218,71 @@ func FuzzCanonicalize(f *testing.F) {
 		}
 	})
 }
+
+func TestCanonicalizeRejectsSurrogateBoundaryEscapes(t *testing.T) {
+	// A valid escaped pair followed by an unpaired unit, and a high unit
+	// followed by U+E000 (the first code point past the low-surrogate range):
+	// each collides to U+FFFD under a scanner that mis-strides after a pair or
+	// accepts one code unit past the low-surrogate upper bound.
+	for _, in := range []string{
+		`{"s":"\ud83d\ude00\ud800"}`,
+		`{"s":"\ud83d\ude00\udc00"}`,
+		`{"s":"\ud800\ue000"}`,
+		`{"s":"\udbff\ue000"}`,
+	} {
+		if _, err := Canonicalize([]byte(in)); !errors.Is(err, ErrInvalidUnicodeEscape) {
+			t.Errorf("Canonicalize(%s) err = %v, want ErrInvalidUnicodeEscape", in, err)
+		}
+	}
+}
+
+func TestCanonicalizeEmptyInputMessage(t *testing.T) {
+	for _, in := range []string{"", "  \n"} {
+		_, err := Canonicalize([]byte(in))
+		if err == nil || err.Error() != "signing: canonicalize: empty input" {
+			t.Errorf("Canonicalize(%q) err = %v, want the empty-input diagnostic", in, err)
+		}
+	}
+}
+
+type textValue struct {
+	hidden string // may hold binary; never serialized
+	out    string
+}
+
+func (v textValue) MarshalText() ([]byte, error) { return []byte(v.out), nil }
+
+type textKey struct{ out string }
+
+func (k textKey) MarshalText() ([]byte, error) { return []byte(k.out), nil }
+
+type jsonValueWithBinary struct{ hidden string }
+
+func (jsonValueWithBinary) MarshalJSON() ([]byte, error) { return []byte(`"fixed"`), nil }
+
+func TestMarshalCanonicalValidatesTextMarshalerOutput(t *testing.T) {
+	bad := string([]byte{0xff})
+	got, err := MarshalCanonical(map[string]any{"v": textValue{hidden: bad, out: "ok"}})
+	if err != nil || string(got) != `{"v":"ok"}` {
+		t.Fatalf("TextMarshaler with binary internals and valid output = %s, %v; want accepted", got, err)
+	}
+	for _, out := range []string{"ok\xff", "ok\xfe"} {
+		if _, err := MarshalCanonical(map[string]any{"v": textValue{out: out}}); !errors.Is(err, ErrInvalidUTF8) {
+			t.Errorf("TextMarshaler output %q: err = %v, want ErrInvalidUTF8", out, err)
+		}
+		if _, err := MarshalCanonical(map[textKey]int{{out: out}: 1}); !errors.Is(err, ErrInvalidUTF8) {
+			t.Errorf("TextMarshaler map key %q: err = %v, want ErrInvalidUTF8", out, err)
+		}
+	}
+	got, err = MarshalCanonical(map[textKey]int{{out: "k"}: 1})
+	if err != nil || string(got) != `{"k":1}` {
+		t.Fatalf("valid TextMarshaler key = %s, %v", got, err)
+	}
+}
+
+func TestMarshalCanonicalJSONMarshalerOwnsItsInternals(t *testing.T) {
+	got, err := MarshalCanonical(jsonValueWithBinary{hidden: string([]byte{0xff})})
+	if err != nil || string(got) != `"fixed"` {
+		t.Fatalf("json.Marshaler with binary internals = %s, %v; want its own output accepted", got, err)
+	}
+}

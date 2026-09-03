@@ -1,6 +1,7 @@
 package signing
 
 import (
+	"bytes"
 	"context"
 	"encoding/hex"
 	"errors"
@@ -101,5 +102,45 @@ func TestHMACZeroValueFailsClosed(t *testing.T) {
 	}
 	if err := m.Verify(ctx, goldenDomain, goldenPayload, Signature{}); !errors.Is(err, ErrUninitializedKey) {
 		t.Fatalf("zero-value verify err = %v, want ErrUninitializedKey", err)
+	}
+}
+
+func TestHMACRedactionOfValueShapes(t *testing.T) {
+	m, err := NewHMAC(goldenHMACKey())
+	if err != nil {
+		t.Fatal(err)
+	}
+	shapes := []any{
+		*m, struct{ H HMACSigner }{*m}, &struct{ H HMACSigner }{*m},
+		[]HMACSigner{*m}, [1]HMACSigner{*m}, map[string]HMACSigner{"k": *m}, any(*m),
+	}
+	assertNoKeyMaterialShapes(t, m.KeyID(), shapes, goldenHMACKey())
+}
+
+func TestGenerateHMACUsesSuppliedReader(t *testing.T) {
+	key := goldenHMACKey()
+	got, err := GenerateHMAC(bytes.NewReader(key))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.KeyID() != goldenHMACKID {
+		t.Fatalf("GenerateHMAC ignored the supplied reader: kid %s, want %s", got.KeyID(), goldenHMACKID)
+	}
+	if _, err := GenerateHMAC(bytes.NewReader(key[:10])); err == nil {
+		t.Fatal("short reader accepted")
+	}
+}
+
+func TestHMACNilContextFailsClosed(t *testing.T) {
+	var nilCtx context.Context
+	m, err := NewHMAC(goldenHMACKey())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Sign(nilCtx, goldenDomain, goldenPayload); err == nil {
+		t.Fatal("nil context accepted by Sign")
+	}
+	if err := m.Verify(nilCtx, goldenDomain, goldenPayload, Signature{}); err == nil {
+		t.Fatal("nil context accepted by Verify")
 	}
 }

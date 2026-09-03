@@ -3,9 +3,12 @@ package signing
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/binary"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
+	"fmt"
 )
 
 // Algorithm names one signature algorithm.
@@ -25,6 +28,32 @@ type Signature struct {
 	Alg   Algorithm `json:"alg"`
 	KeyID string    `json:"kid"`
 	Bytes []byte    `json:"sig"`
+}
+
+// UnmarshalJSON decodes the wire form with strict base64: padding required
+// and no non-zero trailing bits, so every signature has exactly one
+// serialized spelling. A lenient decoder would let a stored record's "sig"
+// field be rewritten without breaking Verify, which defeats any consumer that
+// hashes whole serialized records into a chain.
+func (s *Signature) UnmarshalJSON(b []byte) error {
+	var wire struct {
+		Alg   Algorithm `json:"alg"`
+		KeyID string    `json:"kid"`
+		Bytes *string   `json:"sig"`
+	}
+	if err := json.Unmarshal(b, &wire); err != nil {
+		return err
+	}
+	var raw []byte
+	if wire.Bytes != nil {
+		decoded, err := base64.StdEncoding.Strict().DecodeString(*wire.Bytes)
+		if err != nil {
+			return fmt.Errorf("signing: signature bytes are not canonical base64: %w", err)
+		}
+		raw = decoded
+	}
+	*s = Signature{Alg: wire.Alg, KeyID: wire.KeyID, Bytes: raw}
+	return nil
 }
 
 // Sentinel errors. Callers verifying records fail closed on ANY non-nil error
@@ -107,8 +136,15 @@ func deriveKeyID(alg Algorithm, material []byte) string {
 }
 
 // checkContext gives every backend the same already-cancelled behavior. Local
-// primitives are not interruptible once their small operation has started.
-func checkContext(ctx context.Context) error { return ctx.Err() }
+// primitives are not interruptible once their small operation has started. A
+// nil context is a caller bug; it fails closed instead of panicking inside a
+// verification path.
+func checkContext(ctx context.Context) error {
+	if ctx == nil {
+		return errors.New("signing: nil context")
+	}
+	return ctx.Err()
+}
 
 // checkBinding rejects a signature that names a different key or algorithm
 // than v before any cryptographic work. Key IDs and algorithm names are

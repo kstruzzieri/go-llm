@@ -125,3 +125,33 @@ func TestDeriveKeyIDGoldenAndAlgorithmBinding(t *testing.T) {
 		t.Fatal("key id does not bind the algorithm")
 	}
 }
+
+func TestSignatureJSONRejectsNonCanonicalBase64(t *testing.T) {
+	// All four decode to the same 32 bytes under a lenient decoder because the
+	// final quantum's unused bits differ. A signature must have exactly one
+	// serialized form so a chained record hash cannot be perturbed for free.
+	const canonical = `{"alg":"ed25519","kid":"k","sig":"jJUeuIWQOgViqoFhkgQOfvPEChP0plbkf6HFrrpMd0o="}`
+	var ok Signature
+	if err := json.Unmarshal([]byte(canonical), &ok); err != nil {
+		t.Fatalf("canonical encoding rejected: %v", err)
+	}
+	if len(ok.Bytes) != 32 {
+		t.Fatalf("decoded %d bytes, want 32", len(ok.Bytes))
+	}
+	for _, sig := range []string{
+		"jJUeuIWQOgViqoFhkgQOfvPEChP0plbkf6HFrrpMd0p=",
+		"jJUeuIWQOgViqoFhkgQOfvPEChP0plbkf6HFrrpMd0q=",
+		"jJUeuIWQOgViqoFhkgQOfvPEChP0plbkf6HFrrpMd0r=",
+		"AQI",    // missing padding
+		"AQID\n", // trailing newline
+	} {
+		var s Signature
+		if err := json.Unmarshal([]byte(`{"alg":"ed25519","kid":"k","sig":"`+sig+`"}`), &s); err == nil {
+			t.Errorf("non-canonical base64 %q accepted", sig)
+		}
+	}
+	var null Signature
+	if err := json.Unmarshal([]byte(`{"alg":"ed25519","kid":"k","sig":null}`), &null); err != nil || null.Bytes != nil {
+		t.Fatalf("null sig = %v, %v; want nil bytes, nil error", null.Bytes, err)
+	}
+}

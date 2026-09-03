@@ -34,6 +34,9 @@ func NewKeyring(vs ...Verifier) (*Keyring, error) {
 // Add registers v. A nil verifier, an empty key id, or a key id already
 // present is an error.
 func (k *Keyring) Add(v Verifier) error {
+	if k == nil {
+		return errors.New("signing: keyring: nil keyring")
+	}
 	if isNilVerifier(v) {
 		return errors.New("signing: keyring: nil verifier")
 	}
@@ -60,6 +63,9 @@ func (k *Keyring) Verify(ctx context.Context, domain string, payload []byte, sig
 	if err := checkContext(ctx); err != nil {
 		return err
 	}
+	if k == nil {
+		return ErrUninitializedKey
+	}
 	v, ok := k.byID[sig.KeyID]
 	if !ok {
 		return ErrUnknownKey
@@ -69,6 +75,9 @@ func (k *Keyring) Verify(ctx context.Context, domain string, payload []byte, sig
 
 // KeyIDs returns the registered key ids in sorted order.
 func (k *Keyring) KeyIDs() []string {
+	if k == nil {
+		return nil
+	}
 	return slices.Sorted(maps.Keys(k.byID))
 }
 

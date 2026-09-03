@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -172,4 +173,39 @@ func TestConformanceCrossBackendConfusion(t *testing.T) {
 	mustFail(t, h, domain, payload, g, ErrKeyMismatch, "ed25519 sig to hmac, alg honest")
 	g.Alg = AlgHMACSHA256
 	mustFail(t, h, domain, payload, g, ErrInvalidSignature, "ed25519 sig to hmac, alg forged")
+}
+
+func TestConformanceConcurrentUse(t *testing.T) {
+	// doc.go: signers and verifiers are immutable after construction and safe
+	// for concurrent use. Run under the package's -race gate.
+	const domain = "go-llm/conformance/v1"
+	for _, b := range backends {
+		t.Run(b.name, func(t *testing.T) {
+			s, v := b.new(t)
+			var wg sync.WaitGroup
+			errs := make(chan error, 8*100)
+			for g := 0; g < 8; g++ {
+				wg.Add(1)
+				go func(g int) {
+					defer wg.Done()
+					payload := []byte{byte(g)}
+					for i := 0; i < 100; i++ {
+						sig, err := s.Sign(context.Background(), domain, payload)
+						if err == nil {
+							err = v.Verify(context.Background(), domain, payload, sig)
+						}
+						if err != nil {
+							errs <- err
+							return
+						}
+					}
+				}(g)
+			}
+			wg.Wait()
+			close(errs)
+			for err := range errs {
+				t.Fatal(err)
+			}
+		})
+	}
 }

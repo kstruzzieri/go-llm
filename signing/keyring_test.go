@@ -145,3 +145,39 @@ func TestKeyringKeyIDsSorted(t *testing.T) {
 		}
 	}
 }
+
+func TestKeyringNilReceiverFailsClosed(t *testing.T) {
+	var kr *Keyring
+	e, err := GenerateEd25519(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := kr.Add(e.Verifier()); err == nil {
+		t.Fatal("nil *Keyring accepted Add")
+	}
+	if err := kr.Verify(context.Background(), "d", []byte("p"), Signature{KeyID: e.KeyID(), Alg: AlgEd25519}); !errors.Is(err, ErrUninitializedKey) {
+		t.Fatalf("nil *Keyring Verify = %v, want ErrUninitializedKey", err)
+	}
+	if ids := kr.KeyIDs(); len(ids) != 0 {
+		t.Fatalf("nil *Keyring KeyIDs = %v, want empty", ids)
+	}
+}
+
+func TestKeyringChecksContextBeforeDispatch(t *testing.T) {
+	// fakeVerifier ignores ctx, so only the ring's own check can produce the
+	// cancellation error.
+	kr, err := NewKeyring(fakeVerifier{kid: "k", alg: AlgEd25519})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	sig := Signature{KeyID: "k", Alg: AlgEd25519, Bytes: []byte{1}}
+	if err := kr.Verify(cancelled, "d", []byte("p"), sig); !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancelled ctx = %v, want context.Canceled", err)
+	}
+	var nilCtx context.Context
+	if err := kr.Verify(nilCtx, "d", []byte("p"), sig); err == nil {
+		t.Fatal("nil context accepted")
+	}
+}

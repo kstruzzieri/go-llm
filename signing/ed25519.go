@@ -63,8 +63,10 @@ func (v *Ed25519Verifier) Verify(ctx context.Context, domain string, payload []b
 	return ed25519Verify(v, v.k, domain, payload, sig)
 }
 
-// Format names the key without exposing it under any fmt verb.
-func (v *Ed25519Verifier) Format(state fmt.State, _ rune) {
+// Format names the key without exposing it under any fmt verb. The value
+// receiver makes values as well as pointers implement fmt.Formatter, so fmt's
+// bad-verb path never re-prints the struct and dereferences the key pointer.
+func (v Ed25519Verifier) Format(state fmt.State, _ rune) {
 	_, _ = fmt.Fprintf(state, "signing.Ed25519Verifier(kid=%s)", v.KeyID())
 }
 
@@ -155,7 +157,8 @@ func (s *Ed25519Signer) Sign(ctx context.Context, domain string, payload []byte)
 	return Signature{Alg: AlgEd25519, KeyID: s.k.kid, Bytes: ed25519.Sign(s.k.priv, msg)}, nil
 }
 
-// Format names the key without exposing it under any fmt verb.
-func (s *Ed25519Signer) Format(state fmt.State, _ rune) {
+// Format names the key without exposing it under any fmt verb; value
+// receiver for the same reason as Ed25519Verifier.Format.
+func (s Ed25519Signer) Format(state fmt.State, _ rune) {
 	_, _ = fmt.Fprintf(state, "signing.Ed25519Signer(kid=%s)", s.KeyID())
 }

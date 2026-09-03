@@ -199,3 +199,60 @@ func TestEd25519SignerIsNotAVerifier(t *testing.T) {
 		t.Fatal("Ed25519Verifier satisfies Signer")
 	}
 }
+
+func TestEd25519RedactionOfValueShapes(t *testing.T) {
+	seed, _ := hex.DecodeString(rfc8032Seed)
+	s := goldenEd25519(t)
+	v := s.Verifier()
+	priv := ed25519.NewKeyFromSeed(seed)
+	shapes := []any{
+		*s, *v,
+		struct{ S Ed25519Signer }{*s}, &struct{ S Ed25519Signer }{*s},
+		[]Ed25519Signer{*s}, [1]Ed25519Verifier{*v}, map[string]Ed25519Signer{"k": *s},
+		any(*s), []any{*v},
+	}
+	assertNoKeyMaterialShapes(t, s.KeyID(), shapes, seed, priv)
+}
+
+func TestEd25519VerifierCarriesNoPrivateKey(t *testing.T) {
+	s := goldenEd25519(t)
+	if s.Verifier().k.priv != nil {
+		t.Fatal("Verifier() shares the private key; it must hold the public half only")
+	}
+}
+
+func TestGenerateEd25519UsesSuppliedReader(t *testing.T) {
+	seed := make([]byte, ed25519.SeedSize)
+	for i := range seed {
+		seed[i] = byte(i + 1)
+	}
+	got, err := GenerateEd25519(bytes.NewReader(seed))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, err := NewEd25519Signer(ed25519.NewKeyFromSeed(seed))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.KeyID() != want.KeyID() {
+		t.Fatalf("GenerateEd25519 ignored the supplied reader: kid %s, want %s", got.KeyID(), want.KeyID())
+	}
+	if _, err := GenerateEd25519(bytes.NewReader(seed[:10])); err == nil {
+		t.Fatal("short reader accepted")
+	}
+}
+
+func TestEd25519NilContextFailsClosed(t *testing.T) {
+	var nilCtx context.Context
+	s := goldenEd25519(t)
+	if _, err := s.Sign(nilCtx, goldenDomain, goldenPayload); err == nil {
+		t.Fatal("nil context accepted by Sign")
+	}
+	sig, err := s.Sign(context.Background(), goldenDomain, goldenPayload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Verifier().Verify(nilCtx, goldenDomain, goldenPayload, sig); err == nil {
+		t.Fatal("nil context accepted by Verify")
+	}
+}
