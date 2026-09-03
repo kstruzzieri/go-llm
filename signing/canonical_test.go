@@ -1,0 +1,447 @@
+package signing
+
+import (
+	"bytes"
+	"encoding"
+	"encoding/json"
+	"errors"
+	"math"
+	"testing"
+)
+
+func TestCanonicalizeGolden(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"struct-order to sorted", `{"z":"z","a":9007199254740993,"f":1e+21,"p":null,"b":"AQI=","t":null}`,
+			`{"a":9007199254740993,"b":"AQI=","f":1e+21,"p":null,"t":null,"z":"z"}`},
+		{"numbers verbatim", `{"n":9007199254740993,"x":1.0,"y":1e2,"z":-0.0,"w":1E+2}`,
+			`{"n":9007199254740993,"w":1E+2,"x":1.0,"y":1e2,"z":-0.0}`},
+		{"number outside float64 range", `{"n":1e1000}`, `{"n":1e1000}`},
+		{"unicode and html chars", "{\"s\":\"<a>&é😀\u2028\"}",
+			`{"s":"<a>&é😀\u2028"}`},
+		{"escaped html decodes to literal", `{"s":"\u003ca\u003e\u0026"}`, `{"s":"<a>&"}`},
+		{"whitespace stripped", " {\"a\" : 1 ,\n \"b\": [ 1 , 2 ] } \n", `{"a":1,"b":[1,2]}`},
+		{"nested sort", `[1,[2,{"b":{"d":1,"c":2},"a":[]}]]`, `[1,[2,{"a":[],"b":{"c":2,"d":1}}]]`},
+		{"key order is utf-8 byte order", `{"｡":1,"𐀀":2,"b":3,"B":4,"aa":5,"a":6}`,
+			`{"B":4,"a":6,"aa":5,"b":3,"｡":1,"𐀀":2}`},
+		{"null", `null`, `null`},
+		{"empty string", `""`, `""`},
+		{"empty array", `[]`, `[]`},
+		{"empty object", `{}`, `{}`},
+		{"bools", `{"t":true,"f":false}`, `{"f":false,"t":true}`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := Canonicalize([]byte(tc.in))
+			if err != nil {
+				t.Fatalf("Canonicalize: %v", err)
+			}
+			if string(got) != tc.want {
+				t.Fatalf("got  %s\nwant %s", got, tc.want)
+			}
+			again, err := Canonicalize(got)
+			if err != nil {
+				t.Fatalf("re-canonicalize: %v", err)
+			}
+			if string(again) != tc.want {
+				t.Fatalf("not idempotent: %s", again)
+			}
+		})
+	}
+}
+
+func TestCanonicalizeRejectsInvalidUTF8(t *testing.T) {
+	a := []byte("{\"s\":\"\xff\xfe\"}")
+	b := []byte("{\"s\":\"\xfe\xff\"}")
+	for _, in := range [][]byte{a, b} {
+		if _, err := Canonicalize(in); !errors.Is(err, ErrInvalidUTF8) {
+			t.Fatalf("Canonicalize(%q) err = %v, want ErrInvalidUTF8", in, err)
+		}
+	}
+}
+
+func TestCanonicalizeRejectsUnpairedSurrogateEscapes(t *testing.T) {
+	for _, in := range []string{
+		`{"s":"\ud800"}`,
+		`{"s":"\udbff\u0061"}`,
+		`{"s":"\udc00"}`,
+		`{"s":"\udfff"}`,
+	} {
+		if _, err := Canonicalize([]byte(in)); !errors.Is(err, ErrInvalidUnicodeEscape) {
+			t.Errorf("Canonicalize(%s) err = %v, want ErrInvalidUnicodeEscape", in, err)
+		}
+	}
+}
+
+func TestCanonicalizeAcceptsPairedSurrogatesAndEscapedLiteral(t *testing.T) {
+	got, err := Canonicalize([]byte(`{"s":"\ud83d\ude00","literal":"\\ud800"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	const want = `{"literal":"\\ud800","s":"😀"}`
+	if string(got) != want {
+		t.Fatalf("got  %s\nwant %s", got, want)
+	}
+}
+
+func TestCanonicalizeRejectsDuplicateKeys(t *testing.T) {
+	cases := []string{
+		`{"a":1,"a":2}`,
+		`{"o":{"a":1,"a":2}}`,
+		`[{"a":1,"a":2}]`,
+		`{"a":{"x":1},"a":2}`,
+		`{"a":[1,2],"b":3,"a":4}`,
+		`{"a":1,"\u0061":2}`,
+	}
+	for _, in := range cases {
+		if _, err := Canonicalize([]byte(in)); !errors.Is(err, ErrDuplicateKey) {
+			t.Errorf("Canonicalize(%s) err = %v, want ErrDuplicateKey", in, err)
+		}
+	}
+	if _, err := Canonicalize([]byte(`{"a":{"a":1},"b":{"a":2}}`)); err != nil {
+		t.Fatalf("same key in sibling objects must be allowed: %v", err)
+	}
+}
+
+func TestCanonicalizeRejectsTrailingData(t *testing.T) {
+	if _, err := Canonicalize([]byte(`{"a":1} {"b":2}`)); !errors.Is(err, ErrTrailingData) {
+		t.Fatalf("err = %v, want ErrTrailingData", err)
+	}
+	if _, err := Canonicalize([]byte(`{"a":1} x`)); err == nil {
+		t.Fatal("trailing garbage accepted")
+	}
+	if _, err := Canonicalize([]byte(`{"a":1}]`)); err == nil {
+		t.Fatal("trailing bracket accepted")
+	}
+}
+
+func TestCanonicalizeRejectsMalformed(t *testing.T) {
+	for _, in := range []string{``, `   `, "\n", `{"a":`, `nul`, `{"a" 1}`, `{1:2}`} {
+		if _, err := Canonicalize([]byte(in)); err == nil {
+			t.Errorf("Canonicalize(%q) accepted malformed input", in)
+		}
+	}
+}
+
+func TestMarshalCanonicalGolden(t *testing.T) {
+	type rec struct {
+		Z string         `json:"z"`
+		A int64          `json:"a"`
+		F float64        `json:"f"`
+		M map[string]int `json:"m"`
+		P *string        `json:"p"`
+		B []byte         `json:"b"`
+		T []string       `json:"t"`
+	}
+	got, err := MarshalCanonical(rec{Z: "z", A: 9007199254740993, F: 1e21, M: map[string]int{"y": 2, "x": 1}, B: []byte{1, 2}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	const want = `{"a":9007199254740993,"b":"AQI=","f":1e+21,"m":{"x":1,"y":2},"p":null,"t":null,"z":"z"}`
+	if string(got) != want {
+		t.Fatalf("got  %s\nwant %s", got, want)
+	}
+	got, err = MarshalCanonical(map[string]string{"s": "<a>&"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != `{"s":"<a>&"}` {
+		t.Fatalf("html escaping leaked through: %s", got)
+	}
+	got, err = MarshalCanonical(json.RawMessage(`{"b":1,"a":2}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != `{"a":2,"b":1}` {
+		t.Fatalf("raw message not sorted: %s", got)
+	}
+}
+
+func TestMarshalCanonicalErrors(t *testing.T) {
+	if _, err := MarshalCanonical(math.NaN()); err == nil {
+		t.Fatal("NaN accepted")
+	}
+	if _, err := MarshalCanonical(func() {}); err == nil {
+		t.Fatal("func accepted")
+	}
+	cycle := map[string]any{}
+	cycle["self"] = cycle
+	if _, err := MarshalCanonical(cycle); err == nil {
+		t.Fatal("cyclic value accepted")
+	}
+}
+
+func TestMarshalCanonicalRejectsInvalidUTF8BeforeReplacement(t *testing.T) {
+	bad := string([]byte{0xff, 0xfe})
+	values := []any{
+		struct {
+			S string `json:"s"`
+		}{S: bad},
+		map[string]string{bad: "map key"},
+		[]string{"nested", bad},
+	}
+	for _, value := range values {
+		if _, err := MarshalCanonical(value); !errors.Is(err, ErrInvalidUTF8) {
+			t.Errorf("MarshalCanonical(%T) err = %v, want ErrInvalidUTF8", value, err)
+		}
+	}
+	if got, err := MarshalCanonical([]byte{0xff}); err != nil || string(got) != `"/w=="` {
+		t.Fatalf("byte slice = %s, %v; want base64 JSON string", got, err)
+	}
+}
+
+func TestMarshalCanonicalRejectsInvalidUTF8InPromotedExportedField(t *testing.T) {
+	type embedded struct {
+		Promoted string `json:"promoted"`
+	}
+	bad := string([]byte{0xff})
+
+	if _, err := MarshalCanonical(struct{ embedded }{embedded{Promoted: bad}}); !errors.Is(err, ErrInvalidUTF8) {
+		t.Fatalf("MarshalCanonical err = %v, want ErrInvalidUTF8", err)
+	}
+}
+
+func TestMarshalCanonicalSkipsInvalidUTF8InJSONIgnoredField(t *testing.T) {
+	bad := string([]byte{0xff})
+	value := struct {
+		Ignored string `json:"-"`
+		Kept    string `json:"kept"`
+	}{Ignored: bad, Kept: "ok"}
+
+	got, err := MarshalCanonical(value)
+	if err != nil {
+		t.Fatalf("MarshalCanonical: %v", err)
+	}
+	if string(got) != `{"kept":"ok"}` {
+		t.Fatalf("got %s, want ignored field omitted", got)
+	}
+}
+
+func TestMarshalCanonicalWalksNonIgnoredDashTag(t *testing.T) {
+	bad := string([]byte{0xff})
+	value := struct {
+		NamedDash string `json:"-x,omitempty"`
+	}{NamedDash: bad}
+
+	if _, err := MarshalCanonical(value); !errors.Is(err, ErrInvalidUTF8) {
+		t.Fatalf("MarshalCanonical err = %v, want ErrInvalidUTF8", err)
+	}
+}
+
+func TestMarshalCanonicalSkipsInvalidUTF8InUnexportedField(t *testing.T) {
+	bad := string([]byte{0xff})
+	value := struct {
+		hidden string
+		Kept   string `json:"kept"`
+	}{hidden: bad, Kept: "ok"}
+
+	got, err := MarshalCanonical(value)
+	if err != nil {
+		t.Fatalf("MarshalCanonical: %v", err)
+	}
+	if string(got) != `{"kept":"ok"}` {
+		t.Fatalf("got %s, want unexported field omitted", got)
+	}
+}
+
+func FuzzCanonicalize(f *testing.F) {
+	for _, seed := range [][]byte{
+		[]byte(`null`),
+		[]byte(`{"b":1,"a":[true,{"x":"é"}]}`),
+		[]byte(`{"a":1,"a":2}`),
+		[]byte(`{"s":"\ud800"}`),
+		{'"', 0xff, '"'},
+	} {
+		f.Add(seed)
+	}
+	f.Fuzz(func(t *testing.T, raw []byte) {
+		got, err := Canonicalize(raw)
+		if err != nil {
+			return
+		}
+		again, err := Canonicalize(got)
+		if err != nil {
+			t.Fatalf("canonical output rejected: %v\n%s", err, got)
+		}
+		if !bytes.Equal(again, got) {
+			t.Fatalf("not idempotent:\nfirst  %s\nsecond %s", got, again)
+		}
+	})
+}
+
+func TestCanonicalizeRejectsSurrogateBoundaryEscapes(t *testing.T) {
+	// A valid escaped pair followed by an unpaired unit, and a high unit
+	// followed by U+E000 (the first code point past the low-surrogate range):
+	// each collides to U+FFFD under a scanner that mis-strides after a pair or
+	// accepts one code unit past the low-surrogate upper bound.
+	for _, in := range []string{
+		`{"s":"\ud83d\ude00\ud800"}`,
+		`{"s":"\ud83d\ude00\udc00"}`,
+		`{"s":"\ud800\ue000"}`,
+		`{"s":"\udbff\ue000"}`,
+	} {
+		if _, err := Canonicalize([]byte(in)); !errors.Is(err, ErrInvalidUnicodeEscape) {
+			t.Errorf("Canonicalize(%s) err = %v, want ErrInvalidUnicodeEscape", in, err)
+		}
+	}
+}
+
+func TestCanonicalizeEmptyInputMessage(t *testing.T) {
+	for _, in := range []string{"", "  \n"} {
+		_, err := Canonicalize([]byte(in))
+		if err == nil || err.Error() != "signing: canonicalize: empty input" {
+			t.Errorf("Canonicalize(%q) err = %v, want the empty-input diagnostic", in, err)
+		}
+	}
+}
+
+type textValue struct {
+	hidden string // may hold binary; never serialized
+	out    string
+}
+
+func (v textValue) MarshalText() ([]byte, error) { return []byte(v.out), nil }
+
+type textKey struct{ out string }
+
+func (k textKey) MarshalText() ([]byte, error) { return []byte(k.out), nil }
+
+type jsonValueWithBinary struct{ hidden string }
+
+func (jsonValueWithBinary) MarshalJSON() ([]byte, error) { return []byte(`"fixed"`), nil }
+
+func TestMarshalCanonicalValidatesTextMarshalerOutput(t *testing.T) {
+	bad := string([]byte{0xff})
+	got, err := MarshalCanonical(map[string]any{"v": textValue{hidden: bad, out: "ok"}})
+	if err != nil || string(got) != `{"v":"ok"}` {
+		t.Fatalf("TextMarshaler with binary internals and valid output = %s, %v; want accepted", got, err)
+	}
+	for _, out := range []string{"ok\xff", "ok\xfe"} {
+		if _, err := MarshalCanonical(map[string]any{"v": textValue{out: out}}); !errors.Is(err, ErrInvalidUTF8) {
+			t.Errorf("TextMarshaler output %q: err = %v, want ErrInvalidUTF8", out, err)
+		}
+		if _, err := MarshalCanonical(map[textKey]int{{out: out}: 1}); !errors.Is(err, ErrInvalidUTF8) {
+			t.Errorf("TextMarshaler map key %q: err = %v, want ErrInvalidUTF8", out, err)
+		}
+	}
+	got, err = MarshalCanonical(map[textKey]int{{out: "k"}: 1})
+	if err != nil || string(got) != `{"k":1}` {
+		t.Fatalf("valid TextMarshaler key = %s, %v", got, err)
+	}
+}
+
+func TestMarshalCanonicalJSONMarshalerOwnsItsInternals(t *testing.T) {
+	got, err := MarshalCanonical(jsonValueWithBinary{hidden: string([]byte{0xff})})
+	if err != nil || string(got) != `"fixed"` {
+		t.Fatalf("json.Marshaler with binary internals = %s, %v; want its own output accepted", got, err)
+	}
+}
+
+// dualBoth implements both marshalers with value receivers. encoding/json uses
+// MarshalJSON for values and MarshalText for map keys.
+type dualBoth struct{ raw string }
+
+func (d dualBoth) MarshalJSON() ([]byte, error) { return []byte(`"json"`), nil }
+func (d dualBoth) MarshalText() ([]byte, error) { return []byte(d.raw), nil }
+
+// dualPtrJSON has a pointer-receiver MarshalJSON and a value-receiver
+// MarshalText. encoding/json uses MarshalJSON only when the value is
+// addressable and falls back to MarshalText otherwise.
+type dualPtrJSON struct{ raw string }
+
+func (d *dualPtrJSON) MarshalJSON() ([]byte, error) { return []byte(`"ptrjson"`), nil }
+func (d dualPtrJSON) MarshalText() ([]byte, error)  { return []byte(d.raw), nil }
+
+func TestMarshalCanonicalDispatchMatchesEncodingJSON(t *testing.T) {
+	bad := "k\xff"
+	// Map keys: MarshalJSON is ignored, MarshalText output is the key.
+	for _, raw := range []string{"k\xff", "k\xfe"} {
+		if _, err := MarshalCanonical(map[dualBoth]int{{raw: raw}: 1}); !errors.Is(err, ErrInvalidUTF8) {
+			t.Errorf("dual-interface map key %q: err = %v, want ErrInvalidUTF8", raw, err)
+		}
+	}
+	if got, err := MarshalCanonical(map[dualBoth]int{{raw: "k"}: 1}); err != nil || string(got) != `{"k":1}` {
+		t.Fatalf("valid dual-interface map key = %s, %v", got, err)
+	}
+	// Values and struct fields: MarshalJSON wins; MarshalText output is irrelevant.
+	if got, err := MarshalCanonical(map[string]any{"v": dualBoth{raw: bad}}); err != nil || string(got) != `{"v":"json"}` {
+		t.Fatalf("dual-interface value = %s, %v; want MarshalJSON output", got, err)
+	}
+	if got, err := MarshalCanonical(struct {
+		F dualBoth `json:"f"`
+	}{dualBoth{raw: bad}}); err != nil || string(got) != `{"f":"json"}` {
+		t.Fatalf("dual-interface field = %s, %v; want MarshalJSON output", got, err)
+	}
+	// Pointer-receiver MarshalJSON: used when addressable, so an invalid
+	// MarshalText output must not cause a false rejection there...
+	addressable := &struct {
+		F dualPtrJSON `json:"f"`
+	}{dualPtrJSON{raw: bad}}
+	if got, err := MarshalCanonical(addressable); err != nil || string(got) != `{"f":"ptrjson"}` {
+		t.Fatalf("addressable pointer-receiver MarshalJSON field = %s, %v; want MarshalJSON output", got, err)
+	}
+	// ...and skipped when not addressable, where json falls back to MarshalText.
+	if _, err := MarshalCanonical(struct {
+		F dualPtrJSON `json:"f"`
+	}{dualPtrJSON{raw: bad}}); !errors.Is(err, ErrInvalidUTF8) {
+		t.Errorf("non-addressable field falls back to MarshalText: err = %v, want ErrInvalidUTF8", err)
+	}
+	if got, err := MarshalCanonical(struct {
+		F dualPtrJSON `json:"f"`
+	}{dualPtrJSON{raw: "ok"}}); err != nil || string(got) != `{"f":"ok"}` {
+		t.Fatalf("non-addressable valid MarshalText field = %s, %v", got, err)
+	}
+}
+
+// textOnlyIface and jsonOnlyIface are static field types. encoding/json picks
+// the marshaler from the static type of a field: an interface type embedding
+// only TextMarshaler routes to MarshalText even when the dynamic value also
+// implements json.Marshaler.
+type textOnlyIface interface{ encoding.TextMarshaler }
+
+type jsonOnlyIface interface{ json.Marshaler }
+
+func TestMarshalCanonicalStaticInterfaceDispatch(t *testing.T) {
+	outputs := map[string]bool{}
+	for _, raw := range []string{"k\xff", "k\xfe"} {
+		got, err := MarshalCanonical(struct {
+			F textOnlyIface `json:"f"`
+		}{dualBoth{raw: raw}})
+		if !errors.Is(err, ErrInvalidUTF8) {
+			t.Errorf("static TextMarshaler field with invalid output %q: got %s, err %v; want ErrInvalidUTF8", raw, got, err)
+			outputs[string(got)] = true
+		}
+		if _, err := MarshalCanonical([]textOnlyIface{dualBoth{raw: raw}}); !errors.Is(err, ErrInvalidUTF8) {
+			t.Errorf("static TextMarshaler slice element %q: err = %v, want ErrInvalidUTF8", raw, err)
+		}
+		if _, err := MarshalCanonical(map[string]textOnlyIface{"v": dualBoth{raw: raw}}); !errors.Is(err, ErrInvalidUTF8) {
+			t.Errorf("static TextMarshaler map value %q: err = %v, want ErrInvalidUTF8", raw, err)
+		}
+	}
+	if len(outputs) == 1 {
+		t.Error("two distinct invalid MarshalText outputs canonicalized to one value")
+	}
+	if got, err := MarshalCanonical(struct {
+		F textOnlyIface `json:"f"`
+	}{dualBoth{raw: "ok"}}); err != nil || string(got) != `{"f":"ok"}` {
+		t.Fatalf("static TextMarshaler field with valid output = %s, %v", got, err)
+	}
+	if got, err := MarshalCanonical(struct {
+		F jsonOnlyIface `json:"f"`
+	}{dualBoth{raw: "k\xff"}}); err != nil || string(got) != `{"f":"json"}` {
+		t.Fatalf("static json.Marshaler field = %s, %v; want MarshalJSON output", got, err)
+	}
+	if got, err := MarshalCanonical(struct {
+		F any `json:"f"`
+	}{dualBoth{raw: "k\xff"}}); err != nil || string(got) != `{"f":"json"}` {
+		t.Fatalf("static any field = %s, %v; want dynamic MarshalJSON output", got, err)
+	}
+	if got, err := MarshalCanonical(struct {
+		F textOnlyIface `json:"f"`
+	}{}); err != nil || string(got) != `{"f":null}` {
+		t.Fatalf("nil static interface field = %s, %v; want null", got, err)
+	}
+}

@@ -228,10 +228,25 @@ func buildExecTools(root string, manager *agenttools.BackgroundManager, opts age
 	return tools, nil
 }
 
+// buildExecMount is the ONE exec-mount seam (#372 D11): the background
+// manager and the exec tool set built over it, for startup -allow-exec and
+// for /allow-exec alike, so a future sandbox selector lands here once. On
+// failure the manager is shut down and nothing is returned.
+func buildExecMount(root string, opts agenttools.ExecToolsOptions) (*agenttools.BackgroundManager, []agent.Tool, error) {
+	manager := agenttools.NewBackgroundManager()
+	tools, err := buildExecTools(root, manager, opts)
+	if err != nil {
+		manager.Shutdown()
+		return nil, nil, err
+	}
+	return manager, tools, nil
+}
+
 // buildWriteTools constructs the workspace-mutating tool set plus the durable
 // checkpoint journal that backs /undo and /checkpoints (#355), both bound to
-// one Workspace over root and the workspace's leased store. Returned only
-// when -allow-write is set.
+// one Workspace over root and the workspace's leased store. Built for
+// startup -allow-write, one-shot -allow-tool write_file/edit_file, and the
+// REPL's /allow-write (#372).
 func buildWriteTools(root string, store *checkpointStore) ([]agent.Tool, *checkpointJournal, error) {
 	ws, err := agenttools.NewWorkspace(root)
 	if err != nil {

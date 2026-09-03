@@ -23,17 +23,44 @@ import (
 
 // replSession holds the per-process state the REPL needs.
 type replSession struct {
-	orch                *agent.Orchestrator
-	runtime             *golemruntime.Runtime
-	newOrchestrator     func() *agent.Orchestrator
-	tools               []agent.Tool
-	baseSystem          string
-	projectContextBlock string // raw fenced project-context block; reused by the planner (-goal)
-	maxSteps            int
-	budget              agent.Budget
-	color               bool
-	clock               func() time.Time
-	retrieveOmitted     bool // when true, /tools appends the omission note
+	orch            *agent.Orchestrator
+	runtime         *golemruntime.Runtime
+	newOrchestrator func() *agent.Orchestrator
+	tools           []agent.Tool
+	baseSystem      string
+	// Mid-session mounting (#372). root is the canonical workspace root the
+	// gated tools are built over; sysInputs are the composition inputs behind
+	// baseSystem (invariant: baseSystem == composeSystem(sysInputs); the
+	// -goal planner reads sysInputs.projectContext); tools[:readToolCount] are
+	// the file tools the runtime rebuilds itself; mountAt is where the gated
+	// write/exec tools sit (startup order parity); writeToolCount is how many
+	// write tools are mounted (exec inserts after them); scratch records
+	// -scratch so /allow-write can say promotion stays startup-bound;
+	// lateStore is the checkpoint store /allow-write opened (nil when
+	// -allow-write owned it at startup, whose store main.go closes itself).
+	root           string
+	stdinTerminal  bool // real stdin is a TTY; required for live privilege expansion
+	sysInputs      systemInputs
+	readToolCount  int
+	mountAt        int
+	writeToolCount int
+	scratch        bool
+	lateStore      *checkpointStore
+	// lateManager is the background manager /allow-exec created (bgManager
+	// aliases it for /jobs); lateStop is its REPL-context binding. Both nil
+	// when -allow-exec owned the manager at startup.
+	lateManager *tools.BackgroundManager
+	lateStop    func() bool
+	// verifier is the REPL-mode post-write verification slot (#372). nil
+	// outside the REPL, for a REPL session started with -allow-write (its
+	// verifier is bound directly, and /allow-write is idempotent there), and
+	// in narrow tests (set is nil-safe).
+	verifier        *lateVerifier
+	maxSteps        int
+	budget          agent.Budget
+	color           bool
+	clock           func() time.Time
+	retrieveOmitted bool // when true, /tools appends the omission note
 
 	session *session // nil => --no-session (no history, no persistence)
 
@@ -562,7 +589,7 @@ func dispatchSlash(ctx context.Context, out io.Writer, sess *replSession, line s
 		}
 	case "/undo":
 		if sess.journal == nil {
-			_, _ = fmt.Fprintln(out, "writes disabled (run with -allow-write)")
+			_, _ = fmt.Fprintln(out, "writes disabled; run /allow-write or start with -allow-write")
 			return "", false
 		}
 		n := 1
@@ -582,7 +609,7 @@ func dispatchSlash(ctx context.Context, out io.Writer, sess *replSession, line s
 		sess.journal.undo(ctx, out, n)
 	case "/checkpoints":
 		if sess.journal == nil {
-			_, _ = fmt.Fprintln(out, "writes disabled (run with -allow-write)")
+			_, _ = fmt.Fprintln(out, "writes disabled; run /allow-write or start with -allow-write")
 		} else if len(fields) == 1 || (len(fields) == 2 && fields[1] == "list") {
 			sess.journal.listCheckpoints(ctx, out)
 		} else {
@@ -610,7 +637,7 @@ func dispatchSlash(ctx context.Context, out io.Writer, sess *replSession, line s
 		}
 	case "/auto-edits":
 		if !sess.allowWrite {
-			_, _ = fmt.Fprintln(out, "writes disabled (run with -allow-write)")
+			_, _ = fmt.Fprintln(out, "writes disabled; run /allow-write or start with -allow-write")
 			return "", false
 		}
 		if sess.grants == nil {
@@ -678,6 +705,10 @@ func dispatchSlash(ctx context.Context, out io.Writer, sess *replSession, line s
 			// Non-empty text is the forced goal; empty aborts to the prompt.
 			return strings.TrimSpace(text), false
 		}
+	case "/allow-write":
+		handleAllowWrite(ctx, out, sess, fields)
+	case "/allow-exec":
+		handleAllowExec(ctx, out, sess, fields)
 	default:
 		_, _ = fmt.Fprintf(out, "unknown command: %s (try /help)\n", cmd)
 	}
@@ -692,7 +723,7 @@ func dispatchSlash(ctx context.Context, out io.Writer, sess *replSession, line s
 // requested rather than printing a raw context error.
 func handleJobs(ctx context.Context, out io.Writer, sess *replSession, fields []string) {
 	if sess.bgManager == nil {
-		_, _ = fmt.Fprintln(out, "background exec disabled (run with -allow-exec)")
+		_, _ = fmt.Fprintln(out, "exec disabled; run /allow-exec or start with -allow-exec")
 		return
 	}
 	switch {
@@ -801,14 +832,16 @@ const golemHelp = `commands:
                  search saved sessions
   /resume <id>   switch to a saved session
   /edit [seed]   compose a goal in $VISUAL/$EDITOR (quoting unsupported)
-  /undo [n]      revert the last n completed turns' writes (when -allow-write)
-  /checkpoints   list undoable turn checkpoints, newest first (when -allow-write)
+  /undo [n]      revert the last n completed turns' writes (when writes are enabled)
+  /checkpoints   list undoable turn checkpoints, newest first (when writes are enabled)
   /jobs [stop <handle>]
-                 list background jobs, or stop one (with -allow-exec)
+                 list background jobs, or stop one (when exec is enabled)
   /auto-edits [on|off]
                  show or set session auto-approval for write/edit tools
   /grants [clear]
                  count active session approval grants, or revoke them all
+  /allow-write   enable the approval-gated write_file/edit_file tools for the rest of this session
+  /allow-exec    enable the approval-gated command tools for the rest of this session
   /remember [--global] <text>
                  save a memory (workspace scope unless --global)
   /forget <id>   delete a saved memory

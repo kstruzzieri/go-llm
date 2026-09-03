@@ -585,6 +585,7 @@ func TestREPL_CtrlCCancelsRunKeepsREPL(t *testing.T) {
 type captureCaller struct {
 	messages []provider.ChatMessage
 	system   string
+	tools    []string // provider-received tool names, first request
 	options  provider.ModelOptions
 	answer   string
 }
@@ -593,6 +594,9 @@ func (c *captureCaller) Chat(_ context.Context, req provider.ChatRequest, onToke
 	if c.messages == nil {
 		c.messages = append([]provider.ChatMessage(nil), req.Messages...)
 		c.options = req.Options
+		for _, tool := range req.Tools {
+			c.tools = append(c.tools, tool.Function.Name)
+		}
 		for _, m := range req.Messages {
 			if m.Role == "system" {
 				c.system = m.Content
@@ -1584,7 +1588,7 @@ func TestAutoEditsRequiresAllowWrite(t *testing.T) {
 	sess := &replSession{allowWrite: false, grants: newApprovalGrants()}
 	var out strings.Builder
 	_, _ = dispatchSlash(context.Background(), &out, sess, "/auto-edits on")
-	if !strings.Contains(out.String(), "writes disabled (run with -allow-write)") {
+	if !strings.Contains(out.String(), "writes disabled; run /allow-write or start with -allow-write") {
 		t.Fatalf("must mirror /undo's gate:\n%s", out.String())
 	}
 	if sess.grants.granted(grantScopeFiles, tools.WriteClassApprovalKey) {
@@ -1655,7 +1659,7 @@ func TestJobsDisabledWithoutManager(t *testing.T) {
 	if _, exit := dispatchSlash(context.Background(), &out, sess, "/jobs"); exit {
 		t.Fatal("/jobs must not exit")
 	}
-	if !strings.Contains(out.String(), "background exec disabled (run with -allow-exec)") {
+	if !strings.Contains(out.String(), "exec disabled; run /allow-exec or start with -allow-exec") {
 		t.Fatalf("nil manager must report background exec disabled:\n%s", out.String())
 	}
 }
@@ -1772,7 +1776,7 @@ func TestDispatchUndoAndCheckpoints(t *testing.T) {
 		for _, line := range []string{"/undo", "/undo 3", "/checkpoints", "/checkpoints list"} {
 			var out strings.Builder
 			_, _ = dispatchSlash(context.Background(), &out, sess, line)
-			if !strings.Contains(out.String(), "writes disabled (run with -allow-write)") {
+			if !strings.Contains(out.String(), "writes disabled; run /allow-write or start with -allow-write") {
 				t.Errorf("%s -> %q, want capability message", line, out.String())
 			}
 		}

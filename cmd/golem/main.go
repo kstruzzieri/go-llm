@@ -582,11 +582,12 @@ func startupNotices(info startupInfo) []string {
 //
 // With -dispatch it also installs the per-run dispatch invocation cap, and
 // with a workspace-declared verifier (#347) the post-write verification hook.
-func newOrchestratorFactory(caller agent.ModelCaller, f flags, verifier *verifyRunner) func() *agent.Orchestrator {
+// A typed-nil verifier would satisfy the interface and panic on first use
+// (#347); the factory normalizes the two concrete types it can receive so
+// that guarantee does not rest on every call site.
+func newOrchestratorFactory(caller agent.ModelCaller, f flags, verifier agent.Verifier) func() *agent.Orchestrator {
 	var opts []agent.Option
-	// #347: a typed-nil would satisfy the interface and panic on first use, so
-	// the option is installed only for a real verifier.
-	if verifier != nil {
+	if verifier = nonNilVerifier(verifier); verifier != nil {
 		opts = append(opts, agent.WithVerifier(verifier))
 	}
 	if f.dispatch {
@@ -607,8 +608,31 @@ func newOrchestratorFactory(caller agent.ModelCaller, f flags, verifier *verifyR
 	}
 }
 
-func shouldShowAgentflowHint(f flags) bool {
+// isREPLMode reports the plain interactive REPL: not one-shot, not task or
+// planning mode, not an Agentflow status/resume query. It is the only mode
+// that dispatches slash commands, so it is the only mode whose orchestrator
+// carries the #372 late verifier slot.
+func isREPLMode(f flags) bool {
 	return !f.promptSet && f.planPath == "" && !f.goalSet && !f.agentflowStatus && !f.agentflowResume
+}
+
+func shouldShowAgentflowHint(f flags) bool { return isREPLMode(f) }
+
+// nonNilVerifier maps a typed-nil *verifyRunner or *lateVerifier to a true
+// nil interface, so agent.WithVerifier is never handed a value that would
+// panic on first use (#347).
+func nonNilVerifier(v agent.Verifier) agent.Verifier {
+	switch c := v.(type) {
+	case *verifyRunner:
+		if c == nil {
+			return nil
+		}
+	case *lateVerifier:
+		if c == nil {
+			return nil
+		}
+	}
+	return v
 }
 
 func main() {
@@ -866,7 +890,8 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 	}
 
 	gate := provider.NewDestinationGate()
-	interactive := destinationAdmissionInteractive(f, realTermOps{}.IsTerminal(int(stdin.Fd())))
+	stdinTerminal := realTermOps{}.IsTerminal(int(stdin.Fd()))
+	interactive := destinationAdmissionInteractive(f, stdinTerminal)
 	adm, err := newDestinationAdmission(destinationAdmissionConfig{
 		Gate:        gate,
 		Edges:       netPlan.Edges,
@@ -1186,6 +1211,28 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 	buildExec := f.allowExec || allowTools.authorized("run_command") ||
 		allowTools.authorized("start_command") || allowTools.authorized("stop_command")
 
+	// #372: resources /allow-write and /allow-exec open after startup are
+	// released here, in the same LIFO slot as their startup twins (after
+	// runtime.Close). sess is assigned once the session is built below.
+	var sess *replSession
+	defer func() {
+		if sess == nil {
+			return
+		}
+		// The ledger event fires only when a late resource actually existed,
+		// so sessions that never mounted keep their exact shutdown sequence.
+		hadLate := sess.lateStore != nil || sess.lateManager != nil
+		runErr = errors.Join(runErr, sess.closeLateMounts())
+		if hadLate && hooks.closed != nil {
+			hooks.closed("late-mounts")
+		}
+	}()
+	// #372: the gated write/exec tools are inserted here at startup and by
+	// /allow-write and /allow-exec, so a mid-session mount reproduces the
+	// startup order (and toolSchemaHash) exactly.
+	mountAt := len(tools)
+	writeToolCount := 0
+
 	var journal *checkpointJournal
 	var verifier *verifyRunner
 	if buildWrite {
@@ -1218,16 +1265,19 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 		} else if n > 0 {
 			warns = append(warns, fmt.Sprintf("an interrupted undo exists (%d checkpoint(s)); /undo resumes it", n))
 		}
-		if f.allowWrite {
-			tools = append(tools, wt...)
-		} else {
-			tools = append(tools, filterAllowedTools(wt, allowTools)...)
+		mounted := wt
+		if !f.allowWrite {
+			mounted = filterAllowedTools(wt, allowTools)
 		}
+		tools = append(tools, mounted...)
+		writeToolCount = len(mounted)
 		journal = j
 
-		// #347: read only here, so no other mode ever touches .golem.json.
-		// applyOneShotMode has already cleared allowWrite for -p, and task,
-		// planning and Agentflow modes reject it at validation. Deliberately
+		// #347: read only here under f.allowWrite and by the REPL's
+		// /allow-write (#372); both are REPL-only, so no other mode ever
+		// touches .golem.json. applyOneShotMode has already cleared allowWrite
+		// for -p, and task, planning and Agentflow modes reject it at
+		// validation. Deliberately
 		// gated on f.allowWrite, NOT buildWrite: a headless -allow-tool run
 		// must not read .golem.json or mount post-write verification —
 		// verify_command is not an -allow-tool name.
@@ -1243,21 +1293,16 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 	// survives to this point (one-shot already forced allowExec false;
 	// -plan/-goal reject it at flag validation) or when #352's -allow-tool
 	// named an exec tool — one manager per invocation either way, so every
-	// manager gets the replCtx lifetime binding below. The deferred Shutdown
-	// is registered immediately so no error path between here and that
-	// binding can leak a process; sync.Once makes it safe beside the
+	// manager gets the replCtx lifetime binding below. buildExecMount shuts
+	// the manager down itself when the tool set fails to build (the
+	// closed("background") hook still fires for that reaped manager), and the
+	// deferred Shutdown is registered as soon as a manager is published, so
+	// no error path leaks a process; sync.Once makes it safe beside the
 	// AfterFunc path.
 	scratchLine := ""
 	var bgManager *agenttools.BackgroundManager
 	var bgExecTools []agent.Tool
 	if buildExec {
-		bgManager = agenttools.NewBackgroundManager()
-		defer func() {
-			bgManager.Shutdown()
-			if hooks.closed != nil {
-				hooks.closed("background")
-			}
-		}()
 		// Scratch policy (#443): frozen at construction. Scratch is interactive,
 		// so its checkpoint journal exists only when -allow-write built it;
 		// promotion is registered exactly when both consents exist. Without
@@ -1265,10 +1310,22 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 		// is absent.
 		execOpts, line := scratchExecOptions(f.scratch, journal)
 		scratchLine = line
-		et, eerr := buildExecTools(root, bgManager, execOpts)
+		// #372: the same seam /allow-exec uses; a build failure has already
+		// shut the unpublished manager down.
+		mgr, et, eerr := buildExecMount(root, execOpts)
 		if eerr != nil {
+			if hooks.closed != nil {
+				hooks.closed("background") // the manager existed and was reaped
+			}
 			return eerr
 		}
+		bgManager = mgr
+		defer func() {
+			bgManager.Shutdown()
+			if hooks.closed != nil {
+				hooks.closed("background")
+			}
+		}()
 		bgExecTools = et
 		if f.allowExec {
 			tools = append(tools, et...)
@@ -1313,32 +1370,34 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 		}
 	}()
 
-	var baseSystem string
+	// #372: replSession owns composition. These are the same inputs the
+	// inline sequence used; composeSystem renders them once here and again
+	// on every mid-session mount, with exactly one input changed.
+	sysIn := systemInputs{
+		allowWrite: f.allowWrite,
+		allowExec:  f.allowExec,
+		delegate:   f.delegate,
+		dispatch:   f.dispatch,
+		memory:     memoryEnabled,
+	}
 	if !allowTools.empty() {
 		// #352/F6: a selectively mounted run gets a prompt built from the
 		// EXACT mounted set; the group prompt would advertise tools that do
 		// not exist and an interactive approval flow that never happens.
-		baseSystem = golemruntime.SystemPromptHeadless(golemruntime.HeadlessToolCaps{
+		sysIn.headless = &golemruntime.HeadlessToolCaps{
 			WriteFile:    allowTools.authorized("write_file"),
 			EditFile:     allowTools.authorized("edit_file"),
 			RunCommand:   allowTools.authorized("run_command"),
 			StartCommand: allowTools.authorized("start_command"),
 			StopCommand:  allowTools.authorized("stop_command"),
-		})
-	} else {
-		baseSystem = buildSystemPrompt(f.allowWrite, f.allowExec)
+		}
 	}
-	baseSystem += delegateSystemFragment(f.delegate, buildWrite)
-	baseSystem += dispatchSystemFragment(f.dispatch)
-	baseSystem += memorySystemFragment(memoryEnabled)
 	projectContextLine := ""
-	projectContextBlock := ""
 	if !f.noProjectContext {
 		if block, n, perr := loadProjectContext(ctx, root, os.Getenv); perr != nil {
 			warns = append(warns, "project context disabled: "+perr.Error())
 		} else if block != "" {
-			baseSystem = baseSystem + "\n\n" + block
-			projectContextBlock = block
+			sysIn.projectContext = block
 			projectContextLine = fmt.Sprintf("project context: loaded %d file(s)", n)
 		}
 	}
@@ -1362,12 +1421,13 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 	}
 	defer func() { _ = sessn.Close() }() // nil-safe
 
-	// Appended after the session block (not beside memorySystemFragment) so the
+	// Composed after the session block (not beside memory) so the agent-memory
 	// framing can reflect whether the session actually opened: without one,
 	// create/promote deterministically error, so the model must not be told to
-	// use them. baseSystem is consumed only at replSession construction below;
-	// this fragment now trails the project-context block in the composed prompt.
-	baseSystem += agentMemorySystemFragment(agentMemoryEnabled, sessn != nil)
+	// use them. baseSystem is consumed only at replSession construction below
+	// and is the exact string the runtime receives.
+	sysIn.agentMemory, sysIn.sessionUp = agentMemoryEnabled, sessn != nil
+	baseSystem := composeSystem(sysIn)
 
 	if agentMemoryEnabled {
 		tools = appendAgentMemoryTools(tools, mrt.records, mrt.dbPath, workspaceID(root), sessn)
@@ -1416,7 +1476,23 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 		sourceSummarizer = routerSourceSummaryGenerator(bundle.Router, summarizeChain)
 	}
 
-	newOrchestrator := newOrchestratorFactory(newActiveChainCaller(bundle.Router, plan), f, verifier)
+	// #372: a REPL session that started WITHOUT -allow-write may enable writes
+	// later, so its orchestrator carries an empty late-bound verifier slot.
+	// A session that already has writes keeps the real verifier (or none)
+	// bound directly: /allow-write is idempotent there and never needs the
+	// slot, and the orchestrator stays byte-identical to before #372. The
+	// interface is assigned only from a non-nil pointer so a typed nil never
+	// reaches the factory.
+	var orchVerifier agent.Verifier
+	if verifier != nil {
+		orchVerifier = verifier
+	}
+	var verifySlot *lateVerifier
+	if isREPLMode(f) && !f.allowWrite {
+		verifySlot = &lateVerifier{}
+		orchVerifier = verifySlot
+	}
+	newOrchestrator := newOrchestratorFactory(newActiveChainCaller(bundle.Router, plan), f, orchVerifier)
 	orch := newOrchestrator()
 
 	obsv, err := newObserv(os.Getenv, root, f.trace, f.telemetry, time.Now)
@@ -1467,37 +1543,44 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 	if f.promptSet {
 		renderOut = stderr
 	}
-	sess := &replSession{
-		orch:                orch,
-		runtime:             runtime,
-		newOrchestrator:     newOrchestrator,
-		tools:               tools,
-		baseSystem:          baseSystem,
-		projectContextBlock: projectContextBlock,
-		maxSteps:            f.maxSteps,
-		budget:              budget,
-		color:               colorEnabled(renderOut, f.noColor),
-		retrieveOmitted:     retrieveOmitted,
-		session:             sessn,
-		journal:             journal,
-		bgManager:           bgManager,
-		grants:              newApprovalGrants(),
-		destAdmission:       adm,
-		headlessApprover:    headlessApproverFor(allowTools),
-		machine:             newMachineWriter(stdout, outFormat),
-		allowWrite:          f.allowWrite,
-		allowExec:           f.allowExec,
-		mcpAttached:         mcpAttached,
-		memory:              mrt.user,
-		memoryDBPath:        mrt.dbPath,
-		records:             mrt.records,
-		workspaceID:         workspaceID(root),
-		obs:                 obsv,
-		feedback:            feedbackSvc,
-		pressureWarn:        f.pressureWarn > 0,
-		mixed:               f.progressive,
-		grounding:           groundingSvc,
-		modelOptions:        thinkOpts,
+	sess = &replSession{
+		orch:             orch,
+		runtime:          runtime,
+		newOrchestrator:  newOrchestrator,
+		tools:            tools,
+		baseSystem:       baseSystem,
+		root:             root,
+		stdinTerminal:    stdinTerminal,
+		sysInputs:        sysIn,
+		readToolCount:    readToolCount,
+		mountAt:          mountAt,
+		writeToolCount:   writeToolCount,
+		scratch:          f.scratch,
+		verifier:         verifySlot,
+		maxSteps:         f.maxSteps,
+		budget:           budget,
+		color:            colorEnabled(renderOut, f.noColor),
+		retrieveOmitted:  retrieveOmitted,
+		session:          sessn,
+		journal:          journal,
+		bgManager:        bgManager,
+		grants:           newApprovalGrants(),
+		destAdmission:    adm,
+		headlessApprover: headlessApproverFor(allowTools),
+		machine:          newMachineWriter(stdout, outFormat),
+		allowWrite:       f.allowWrite,
+		allowExec:        f.allowExec,
+		mcpAttached:      mcpAttached,
+		memory:           mrt.user,
+		memoryDBPath:     mrt.dbPath,
+		records:          mrt.records,
+		workspaceID:      workspaceID(root),
+		obs:              obsv,
+		feedback:         feedbackSvc,
+		pressureWarn:     f.pressureWarn > 0,
+		mixed:            f.progressive,
+		grounding:        groundingSvc,
+		modelOptions:     thinkOpts,
 	}
 	if sess.maxSteps == 0 {
 		sess.maxSteps = 16 // mirror agent defaultMaxSteps so the footer's k/max is accurate
@@ -1530,6 +1613,13 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 		var cancelREPL context.CancelFunc
 		replCtx, cancelREPL = context.WithCancel(ctx)
 		defer cancelREPL()
+		// #372: registered after cancelREPL so it runs first (LIFO): on the
+		// normal exit path a late manager's replCtx binding is retired
+		// before the context is canceled, and closeLateMounts then shuts it
+		// down in its ordered slot, exactly as stopAfter below arranges for a
+		// startup manager. An idle Ctrl-C quit calls cancelREPL directly,
+		// so there the binding fires first and closeLateMounts joins it.
+		defer sess.disarmLateExec()
 		ctrl := newReplControl(stdout, stderr, interrupts, cancelREPL)
 		sess.control = ctrl
 		if feedbackSvc != nil {

@@ -1,7 +1,7 @@
 package golem
 
 // These tests live in package golem (not golem_test) on purpose: the focused
-// ScopeGuard contract inspects the private rt.tools slice, and keeping the
+// ScopeGuard contract inspects the private rt.fileTools slice, and keeping the
 // integration variant here avoids an agent/tools -> golem -> agent/tools test
 // import cycle.
 
@@ -45,8 +45,8 @@ func TestScopeGuardCoversEveryBuiltinFileTool(t *testing.T) {
 	}
 	t.Cleanup(func() { closeTestRuntime(t, rt) })
 
-	tools := make(map[string]agent.Tool, len(rt.tools))
-	for _, tool := range rt.tools {
+	tools := make(map[string]agent.Tool, len(rt.fileTools))
+	for _, tool := range rt.fileTools {
 		tools[tool.Spec().Name] = tool
 	}
 	for _, name := range []string{"read_file", "search", "glob", "list"} {
@@ -98,7 +98,7 @@ func TestNilScopeGuardPreservesBuiltinReads(t *testing.T) {
 	t.Cleanup(func() { closeTestRuntime(t, rt) })
 
 	var read agent.Tool
-	for _, tool := range rt.tools {
+	for _, tool := range rt.fileTools {
 		if tool.Spec().Name == "read_file" {
 			read = tool
 			break

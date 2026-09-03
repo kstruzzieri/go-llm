@@ -26,8 +26,8 @@
 // immutable index generation; the active index is never modified in place.
 //
 // A workspace may declare a post-write verification command in .golem.json at
-// its root, read only under -allow-write and only from that exact path (no
-// ancestor search):
+// its root, read only when writes are enabled (at startup with -allow-write or
+// later with /allow-write) and only from that exact path (no ancestor search):
 //
 //	{"verify": {"argv": ["go", "build", "./..."], "dir": ".", "timeout_seconds": 60}}
 //
@@ -45,9 +45,9 @@
 // resolved command and cwd are approved once per session at first use, under
 // their own grant namespace: a verification grant can never authorize
 // run_command or start_command, or the reverse. The command is resolved and
-// frozen at startup, so editing .golem.json mid-session changes nothing until
-// the next run; a malformed file warns and disables verification rather than
-// failing the session.
+// frozen when writes are enabled, so editing .golem.json after that point
+// changes nothing until the next run; a malformed file warns and disables
+// verification rather than failing the session.
 //
 // Verification runs on the host with no isolation, so a verifier that writes
 // (a formatter, a codegen step) produces changes the checkpoint journal did

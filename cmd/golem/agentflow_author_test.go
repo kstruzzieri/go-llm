@@ -1133,7 +1133,7 @@ func TestRunAgentflowAuthor_UsesPlannerPromptAndProjectContext(t *testing.T) {
 	root := t.TempDir()
 	caller := &captureCaller{answer: "no submission"}
 	sess := newTestSession(t, caller, root)
-	sess.projectContextBlock = "<<<PROJECT_CONTEXT>>>\nrepo rule\n<<<END_PROJECT_CONTEXT>>>"
+	sess.sysInputs.projectContext = "<<<PROJECT_CONTEXT>>>\nrepo rule\n<<<END_PROJECT_CONTEXT>>>"
 	var out, errb bytes.Buffer
 	err := runAgentflowAuthorWithClient(context.Background(), &out, &errb, nil, sess, flags{goal: "x", goalSet: true}, root, &stubLocker{}, nil)
 	if !errors.Is(err, errPlannerNoSubmission) {

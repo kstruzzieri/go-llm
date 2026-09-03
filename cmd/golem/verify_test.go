@@ -400,3 +400,34 @@ func TestVerifyRunnerWithoutAnApproverFailsClosedVisibly(t *testing.T) {
 		t.Fatalf("a skip must never read as a pass: %q", out)
 	}
 }
+
+// Unset, the slot performs no verification: agent.verifyBatch treats "" as
+// "append nothing". A nil receiver and a nil runner are both no-ops, so a
+// session outside the REPL (nil slot) and a mount without .golem.json are
+// safe.
+func TestLateVerifierUnsetReturnsNoObservation(t *testing.T) {
+	var slot lateVerifier
+	if out, err := slot.Verify(context.Background(), nil); out != "" || err != nil {
+		t.Fatalf("unset Verify = %q, %v; want \"\", nil", out, err)
+	}
+	var nilSlot *lateVerifier
+	nilSlot.set(newVerifyRunner(&stubVerifyExec{})) // must not panic
+	slot.set(nil)
+	if out, err := slot.Verify(context.Background(), nil); out != "" || err != nil {
+		t.Fatalf("set(nil) changed the slot: %q, %v", out, err)
+	}
+}
+
+func TestLateVerifierDelegatesOnceSet(t *testing.T) {
+	exec := &stubVerifyExec{res: agenttools.VerifyResult{ExitCode: 0}}
+	var slot lateVerifier
+	slot.set(newVerifyRunner(exec))
+	ap := approved()
+	out, err := slot.Verify(context.Background(), ap)
+	if err != nil {
+		t.Fatalf("Verify: %v", err)
+	}
+	if exec.runs != 1 || ap.calls != 1 || !strings.Contains(out, verifyHeader) {
+		t.Fatalf("delegation broken: runs=%d approvals=%d out=%q", exec.runs, ap.calls, out)
+	}
+}

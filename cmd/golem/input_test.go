@@ -46,6 +46,7 @@ func TestDestinationAdmissionInteractive(t *testing.T) {
 		want bool
 	}{
 		{"REPL terminal", flags{}, true, true},
+		{"REPL terminal with -no-editor", flags{noEditor: true}, true, true},
 		{"goal approval terminal", flags{goalSet: true}, true, true},
 		{"one-shot terminal", flags{promptSet: true}, true, false},
 		{"task terminal", flags{planPath: "plan.json"}, true, false},

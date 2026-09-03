@@ -1464,8 +1464,8 @@ func runAgentflowAuthorWithClient(ctx context.Context, stdout, stderr io.Writer,
 	planTools := append(agenttools.NewFileToolsForWorkspace(ws), newSubmitPlanTool(as))
 
 	system := plannerBasePrompt
-	if sess.projectContextBlock != "" {
-		system = system + "\n\n" + sess.projectContextBlock
+	if sess.sysInputs.projectContext != "" {
+		system = system + "\n\n" + sess.sysInputs.projectContext
 	}
 
 	plannerOpts := plannerModelOptions(sess.modelOptions)
