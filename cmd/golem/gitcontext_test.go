@@ -350,3 +350,218 @@ func TestLoadGitContextMissingRootIsAnError(t *testing.T) {
 		t.Fatalf("err=%v, want the underlying not-exist cause preserved", err)
 	}
 }
+
+// --- Task 4: correct repository, exact counts ---
+
+func TestLoadGitContextSubdirReportsPrefix(t *testing.T) {
+	root := gitContextTestRepo(t)
+	gitContextTestCommit(t, root, "top.go", "package x\n", "base")
+	sub := filepath.Join(root, "sub")
+	if err := os.MkdirAll(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sub, "inner.go"), []byte("package sub\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "top.go"), []byte("package y\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	snap, err := loadGitContext(context.Background(), "git", sub)
+	if err != nil {
+		t.Fatal(err)
+	}
+	st := snap.State
+	if st.Toplevel != root || st.Prefix != "sub/" {
+		t.Fatalf("toplevel=%q prefix=%q, want %q and sub/", st.Toplevel, st.Prefix, root)
+	}
+	// Status stays repository-wide and repository-root-relative; the prefix
+	// line tells the model how tool-root paths map.
+	if got := strings.Join(st.Entries, "|"); got != " M top.go|?? sub/" {
+		t.Fatalf("entries=%q, want repository-root-relative paths", got)
+	}
+	if !strings.Contains(snap.Block, "prefix: sub/ (workspace root; strip this prefix for file-tool paths)\n") {
+		t.Fatalf("block lacks the prefix line:\n%s", snap.Block)
+	}
+}
+
+func TestLoadGitContextLinkedWorktreeReportsItself(t *testing.T) {
+	main := gitContextTestRepo(t)
+	gitContextTestCommit(t, main, "tracked.go", "package x\n", "base")
+	parent, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	wt := filepath.Join(parent, "wt")
+	gitContextTestRun(t, main, "worktree", "add", "-q", "-b", "feature", wt)
+	t.Cleanup(func() { _ = exec.Command("git", "-C", main, "worktree", "remove", "--force", wt).Run() })
+	if err := os.WriteFile(filepath.Join(wt, "tracked.go"), []byte("package y\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := loadGitContext(context.Background(), "git", wt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.State.Toplevel != wt || got.State.Branch != "feature" || strings.Join(got.State.Entries, "|") != " M tracked.go" {
+		t.Fatalf("linked worktree reported %+v, want its own toplevel %q, branch feature, and its own dirty file", got.State, wt)
+	}
+	base, err := loadGitContext(context.Background(), "git", main)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if base.State.Toplevel != main || base.State.Branch != "main" || base.State.TotalEntries != 0 {
+		t.Fatalf("main checkout reported %+v, want %q on main and clean", base.State, main)
+	}
+}
+
+func TestLoadGitContextSubmoduleReportsItself(t *testing.T) {
+	module := gitContextTestRepo(t)
+	gitContextTestCommit(t, module, "tracked.go", "package m\n", "module base")
+	super := gitContextTestRepo(t)
+	gitContextTestCommit(t, super, "README", "super\n", "super base")
+	gitContextTestRun(t, super, "-c", "protocol.file.allow=always", "submodule", "add", "-q", module, "mod")
+	gitContextTestRun(t, super, "commit", "-q", "-m", "add submodule")
+	modRoot := filepath.Join(super, "mod")
+	if err := os.WriteFile(filepath.Join(modRoot, "tracked.go"), []byte("package changed\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	inner, err := loadGitContext(context.Background(), "git", modRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if inner.State.Toplevel != modRoot || inner.State.Prefix != "" || strings.Join(inner.State.Entries, "|") != " M tracked.go" {
+		t.Fatalf("submodule root reported %+v, want its own toplevel %q and its own dirty file", inner.State, modRoot)
+	}
+	outer, err := loadGitContext(context.Background(), "git", super)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if outer.State.Toplevel != super || strings.Join(outer.State.Entries, "|") != " M mod" || outer.State.TotalEntries != 1 {
+		t.Fatalf("superproject reported %+v, want exactly one changed-submodule entry", outer.State)
+	}
+}
+
+func TestLoadGitContextIgnoresInheritedLocationOverrides(t *testing.T) {
+	a := gitContextTestRepo(t)
+	gitContextTestCommit(t, a, "a.go", "package a\n", "a base")
+	sub := filepath.Join(a, "sub")
+	if err := os.MkdirAll(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	other, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	gitContextTestRun(t, other, "-c", "init.defaultBranch=elsewhere", "init", "-q")
+	gitContextTestCommit(t, other, "b.go", "package b\n", "b base")
+
+	// Every inherited location override points at the OTHER repository, and
+	// the ceiling forbids discovery from a/sub up into a. Capture must still
+	// report the opened workspace.
+	t.Setenv("GIT_DIR", filepath.Join(other, ".git"))
+	t.Setenv("GIT_WORK_TREE", other)
+	t.Setenv("GIT_INDEX_FILE", filepath.Join(other, ".git", "index"))
+	t.Setenv("GIT_COMMON_DIR", filepath.Join(other, ".git"))
+	t.Setenv("GIT_CEILING_DIRECTORIES", a)
+	t.Setenv("GIT_DISCOVERY_ACROSS_FILESYSTEM", "0")
+
+	snap, err := loadGitContext(context.Background(), "git", sub)
+	if err != nil {
+		t.Fatalf("capture under inherited overrides: %v", err)
+	}
+	if snap.Absence != gitContextPresent || snap.State.Toplevel != a || snap.State.Branch != "main" || snap.State.Prefix != "sub/" {
+		t.Fatalf("reported %+v (absence %v), want repository %q on main with prefix sub/", snap.State, snap.Absence, a)
+	}
+}
+
+func TestLoadGitContextDetachedHead(t *testing.T) {
+	root := gitContextTestRepo(t)
+	for i := 1; i <= 6; i++ {
+		gitContextTestCommit(t, root, "f.go", "package x // "+strconv.Itoa(i)+"\n", "commit "+strconv.Itoa(i))
+	}
+	gitContextTestRun(t, root, "checkout", "-q", "--detach")
+	snap, err := loadGitContext(context.Background(), "git", root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snap.State.Branch != "HEAD (no branch)" {
+		t.Fatalf("branch=%q, want Git's stable detached header", snap.State.Branch)
+	}
+	if len(snap.State.Commits) != 5 || snap.State.TotalCommits != 5 || !strings.HasSuffix(snap.State.Commits[0], "commit 6") {
+		t.Fatalf("commits=%q total=%d, want the five newest", snap.State.Commits, snap.State.TotalCommits)
+	}
+}
+
+func TestLoadGitContextBareRepoWarns(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not installed")
+	}
+	parent, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	bare := filepath.Join(parent, "bare.git")
+	gitContextTestRun(t, parent, "init", "-q", "--bare", bare)
+	snap, err := loadGitContext(context.Background(), "git", bare)
+	if err == nil {
+		t.Fatalf("bare repository classified as absence %v; want an error the startup path warns about", snap.Absence)
+	}
+	var exit *gitExitError
+	if !errors.As(err, &exit) || !strings.Contains(err.Error(), "work tree") {
+		t.Fatalf("err=%v, want Git's bare-repository refusal surfaced", err)
+	}
+}
+
+// The raw cap bounds retained bytes, never the counts: hundreds of entries past
+// a small cap still report their exact total, only complete lines are kept,
+// and a commit subject longer than the whole cap is dropped and counted as an
+// omitted commit rather than shown as a complete one.
+func TestLoadGitContextRawCapKeepsExactCounts(t *testing.T) {
+	root := gitContextTestRepo(t)
+	gitContextTestCommit(t, root, "base.go", "package x\n", strings.Repeat("s", 3000))
+	const untracked = 300
+	for i := 0; i < untracked; i++ {
+		if err := os.WriteFile(filepath.Join(root, "u-"+strconv.Itoa(1000+i)+".txt"), []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	saved := gitContextRawCap
+	gitContextRawCap = 2048
+	t.Cleanup(func() { gitContextRawCap = saved })
+
+	snap, err := loadGitContext(context.Background(), "git", root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	st := snap.State
+	if st.TotalEntries != untracked {
+		t.Fatalf("TotalEntries=%d, want %d exactly despite the raw cap", st.TotalEntries, untracked)
+	}
+	if len(st.Entries) == 0 || len(st.Entries) >= untracked {
+		t.Fatalf("retained %d entries; the fixture must actually exceed the raw cap", len(st.Entries))
+	}
+	for _, e := range st.Entries {
+		if !strings.HasPrefix(e, "?? u-") || !strings.HasSuffix(e, ".txt") {
+			t.Fatalf("retained a cut or foreign line %q", e)
+		}
+	}
+	if st.TotalCommits != 1 || len(st.Commits) != 0 {
+		t.Fatalf("commits=%q total=%d, want the oversized subject dropped and counted", st.Commits, st.TotalCommits)
+	}
+	if !strings.Contains(snap.Block, "recent commits (newest first):\n[... 1 more commit omitted]\n") {
+		t.Fatalf("block does not report the dropped commit:\n%s", snap.Block[:300])
+	}
+	rendered, omitted := 0, -1
+	for _, l := range strings.Split(snap.Block, "\n") {
+		switch {
+		case strings.HasPrefix(l, "?? u-"):
+			rendered++
+		case strings.HasPrefix(l, "[... ") && strings.HasSuffix(l, " more status entries omitted]"):
+			omitted, _ = strconv.Atoi(strings.TrimSuffix(strings.TrimPrefix(l, "[... "), " more status entries omitted]"))
+		}
+	}
+	if omitted < 0 || rendered+omitted != untracked {
+		t.Fatalf("rendered %d + omitted %d != %d", rendered, omitted, untracked)
+	}
+}
