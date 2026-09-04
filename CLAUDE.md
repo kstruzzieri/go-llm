@@ -119,6 +119,10 @@ Response: `{"embeddings": [[0.1, 0.2, ...]]}`
 ### Streaming
 When `stream: true`, response is newline-delimited JSON. Each chunk has `done: false` until the final one which has `done: true` and includes timing stats.
 
+## Changelog
+
+Outside the fold-and-stamp release PR, never edit `CHANGELOG.md`; concurrent PRs conflict at the shared insertion point under `## [Unreleased]`. Add `changelog.d/<issue>-<slug>.md` holding the full `### <Category> — <title> (#<issue>)` section instead (see `changelog.d/README.md`). CI rejects direct edits; `scripts/changelog-fold` folds fragments at release.
+
 ## Testing
 
 ```bash
