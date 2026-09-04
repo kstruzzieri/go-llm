@@ -1,0 +1,107 @@
+#!/usr/bin/env bash
+# Fold changelog fragments (changelog.d/<issue>-<slug>.md) into CHANGELOG.md
+# under "## [Unreleased]", newest issue first, then git rm the fragments.
+# --dry-run validates every fragment and prints the fold order without
+# writing anything; CI runs that on every pull request.
+set -euo pipefail
+
+dry_run=0
+case "${1:-}" in
+  "") ;;
+  --dry-run) dry_run=1 ;;
+  *) printf 'Usage: scripts/changelog-fold [--dry-run]\n' >&2; exit 2 ;;
+esac
+
+script_dir="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+root="$(CDPATH= cd -- "$script_dir/.." && pwd -P)"
+changelog="$root/CHANGELOG.md"
+fragments_dir="$root/changelog.d"
+
+if [ ! -f "$changelog" ] || [ ! -d "$fragments_dir" ]; then
+  printf 'invalid layout: expected CHANGELOG.md and changelog.d/ in %s\n' "$root" >&2
+  exit 1
+fi
+if ! grep -qx '## \[Unreleased\]' "$changelog"; then
+  printf 'CHANGELOG.md has no "## [Unreleased]" heading\n' >&2
+  exit 1
+fi
+
+# Every heading a fragment may open with; the trailing "(#N)" is the issue or,
+# for issue-less work, the pull request.
+heading='^### (Added|Changed|Fixed|Removed|Deprecated|Security|Amended) — .+ \(#[0-9]+\)$'
+
+fragments=()
+failed=0
+shopt -s nullglob
+for f in "$fragments_dir"/*; do
+  name="$(basename -- "$f")"
+  [ "$name" = "README.md" ] && continue
+  if ! printf '%s\n' "$name" | grep -Eq '^[0-9]+-[a-z0-9][a-z0-9-]*\.md$'; then
+    printf 'changelog.d/%s: name must be <issue>-<slug>.md (digits, dash, lower-case slug)\n' "$name" >&2
+    failed=1
+    continue
+  fi
+  if ! head -n 1 -- "$f" | grep -Eq "$heading"; then
+    printf 'changelog.d/%s: first line must be "### <Category> — <title> (#<issue>)" with Category in Added|Changed|Fixed|Removed|Deprecated|Security|Amended\n' "$name" >&2
+    failed=1
+    continue
+  fi
+  if [ "$(tail -c 1 -- "$f" | od -An -c | tr -d ' ')" != '\n' ]; then
+    printf 'changelog.d/%s: must end with a newline\n' "$name" >&2
+    failed=1
+    continue
+  fi
+  # Checked before any write so the git rm after the fold cannot fail and
+  # leave CHANGELOG.md rewritten with the fragment still on disk.
+  if ! git -C "$root" ls-files --error-unmatch -- "changelog.d/$name" >/dev/null 2>&1; then
+    printf 'changelog.d/%s: not tracked by git; git add it first\n' "$name" >&2
+    failed=1
+    continue
+  fi
+  fragments+=("$name")
+done
+if [ "$failed" -ne 0 ]; then
+  exit 1
+fi
+if [ "${#fragments[@]}" -eq 0 ]; then
+  printf 'nothing to fold: changelog.d/ has no fragments\n'
+  exit 0
+fi
+
+# Newest issue first, matching the prepend order the file has always used.
+ordered=()
+while IFS= read -r name; do
+  ordered+=("$name")
+done < <(printf '%s\n' "${fragments[@]}" | sort -rn)
+
+if [ "$dry_run" -eq 1 ]; then
+  printf 'would fold under "## [Unreleased]" in this order:\n'
+  printf '  changelog.d/%s\n' "${ordered[@]}"
+  exit 0
+fi
+
+tmp="$(mktemp "$root/CHANGELOG.md.XXXXXX")"
+trap 'rm -f "$tmp"' EXIT
+
+# Emit the file up to and including the Unreleased heading, one blank line,
+# every fragment followed by one blank line, then the rest of the file with
+# the blank line that already followed the heading dropped.
+{
+  sed -n '1,/^## \[Unreleased\]$/p' "$changelog"
+  printf '\n'
+  for name in "${ordered[@]}"; do
+    # Trim trailing blank lines so each fragment contributes exactly one.
+    awk '{ if ($0 == "") { held = held "\n" } else { printf "%s%s\n", held, $0; held = "" } }' "$fragments_dir/$name"
+    printf '\n'
+  done
+  sed -n '/^## \[Unreleased\]$/,$p' "$changelog" | sed '1d' | sed '1{/^$/d;}'
+} >"$tmp"
+mv -- "$tmp" "$changelog"
+trap - EXIT
+
+for name in "${ordered[@]}"; do
+  # -f: the folded text came from the working tree, so an unstaged edit to
+  # the fragment is already in CHANGELOG.md and nothing is lost.
+  git -C "$root" rm -qf -- "changelog.d/$name"
+done
+printf 'folded %d fragment(s) into CHANGELOG.md\n' "${#fragments[@]}"

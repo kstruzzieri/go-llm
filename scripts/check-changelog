@@ -1,0 +1,72 @@
+#!/usr/bin/env bash
+# Pull request guard: CHANGELOG.md is written only by scripts/changelog-fold.
+# Any other edit reintroduces the shared insertion point under
+# "## [Unreleased]" that every concurrent PR conflicts on.
+#
+# Invariant checked: CHANGELOG.md at HEAD equals the merge-base's CHANGELOG.md
+# with (a) the fragments this PR deletes folded in by scripts/changelog-fold
+# and (b) at most "## [x.y.z] - YYYY-MM-DD" stamp headings and blank lines
+# added. Anything else is a direct edit. The fragments in the tree are also
+# validated so a malformed one fails here, not at release time.
+set -euo pipefail
+
+if [ "$#" -ne 1 ]; then
+  printf 'Usage: scripts/check-changelog <base-ref>\n' >&2
+  exit 2
+fi
+base="$1"
+script_dir="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+root="$(CDPATH= cd -- "$script_dir/.." && pwd -P)"
+
+mb="$(git -C "$root" merge-base "$base" HEAD)"
+changed="$(git -C "$root" diff --name-status "$mb" HEAD --)"
+
+if ! printf '%s\n' "$changed" | grep -Eq '^[A-Z][0-9]*[[:space:]]+CHANGELOG\.md$'; then
+  exec "$script_dir/changelog-fold" --dry-run
+fi
+
+tmp="$(cd "$(mktemp -d)" && pwd -P)"
+trap 'rm -rf "$tmp"' EXIT
+
+# Rebuild what the fold of the deleted fragments produces from the
+# merge-base, in a scratch repository, with the same script.
+scratch="$tmp/scratch"
+mkdir -p "$scratch/scripts" "$scratch/changelog.d"
+cp "$script_dir/changelog-fold" "$scratch/scripts/changelog-fold"
+git -C "$root" show "$mb:CHANGELOG.md" >"$scratch/CHANGELOG.md"
+deleted="$(printf '%s\n' "$changed" | grep -E '^D[[:space:]]+changelog\.d/[0-9]+-[a-z0-9-]+\.md$' | cut -f2 || true)"
+for path in $deleted; do
+  git -C "$root" show "$mb:$path" >"$scratch/$path"
+done
+git -C "$scratch" init -q
+git -C "$scratch" -c user.name=check-changelog -c user.email=check-changelog@localhost add -A
+git -C "$scratch" -c user.name=check-changelog -c user.email=check-changelog@localhost commit -qm base
+"$scratch/scripts/changelog-fold" >/dev/null
+
+git -C "$root" show "HEAD:CHANGELOG.md" >"$tmp/head"
+# git diff --no-index exits 1 when the files differ, which is the expected
+# case here, so its status is taken explicitly rather than through a pipeline
+# where pipefail would turn "files differ" into a pass.
+set +e
+git -C "$root" diff --no-index -- "$scratch/CHANGELOG.md" "$tmp/head" >"$tmp/diff"
+status=$?
+set -e
+if [ "$status" -gt 1 ]; then
+  printf 'git diff --no-index failed with status %d\n' "$status" >&2
+  exit 1
+fi
+# Only hunk lines count: content after the first "@@", so a changelog line
+# that itself starts with "--- " or "+++ " is not mistaken for the diff
+# header. No -q on the grep: an early exit would SIGPIPE the awk and, under
+# pipefail, turn a found direct edit into a pass.
+if awk '/^@@/ { body = 1; next } body && /^[-+]/' "$tmp/diff" \
+  | grep -Ev '^\+$|^\+## \[[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?\] - [0-9]{4}-[0-9]{2}-[0-9]{2}$' >/dev/null; then
+  cat >&2 <<'MSG'
+CHANGELOG.md is edited directly. It is written only by scripts/changelog-fold
+at release time; add changelog.d/<issue>-<slug>.md holding the full
+"### <Category> — <title> (#<issue>)" section instead. See changelog.d/README.md.
+MSG
+  exit 1
+fi
+
+"$script_dir/changelog-fold" --dry-run

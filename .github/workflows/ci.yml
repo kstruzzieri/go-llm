@@ -23,6 +23,9 @@ jobs:
       - name: CI script self-test
         run: ./scripts/test-ci-local
 
+      - name: Changelog script self-test
+        run: ./scripts/test-changelog-fold
+
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
           go-version-file: go.mod
@@ -56,6 +59,23 @@ jobs:
           # Keep in exact lockstep with .github/workflows/release.yml.
           version: 2.17.0
           args: check
+
+  # CHANGELOG.md is written only by scripts/changelog-fold; a PR that edits it
+  # directly reintroduces the insertion-point conflict every concurrent PR hit.
+  # Full history so the three-dot diff against the base branch resolves.
+  changelog:
+    name: Changelog fragments
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+
+      - name: Reject direct CHANGELOG.md edits and validate fragments
+        env:
+          BASE: ${{ github.base_ref }}
+        run: ./scripts/check-changelog "origin/$BASE"
 
   # Real bwrap confinement (#441) on a full VM: Docker-based local CI cannot
   # create user namespaces, so this pinned runner is the behavioral gate.
