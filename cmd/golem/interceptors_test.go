@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"slices"
@@ -63,13 +65,13 @@ func TestStartupNotices_Interceptors(t *testing.T) {
 	}
 }
 
-// TestRunWiresInterceptorsStartupNotice drives the real startup path to its
-// post-construction hook, with and without the flag. It pins both the
-// run-local line calculation and the startupInfo literal assignment; the
-// formatter-only test above cannot, and a line computed unconditionally in
-// run would pass the formatter test's off case.
-func TestRunWiresInterceptorsStartupNotice(t *testing.T) {
+// TestRunWiresInterceptors drives the real startup path with and without the
+// flag. Dropping f at either production builder must fail even if the startup
+// notice still says enabled. A benign mention of "system prompt" is enough to
+// exercise scoring without requiring tool calls from the test backend.
+func TestRunWiresInterceptors(t *testing.T) {
 	const want = "interceptors: enabled (zero_width, encoding, typoglycemia)"
+	const goal = "Explain the term system prompt."
 	for _, tc := range []struct {
 		name string
 		flag []string
@@ -80,15 +82,73 @@ func TestRunWiresInterceptorsStartupNotice(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			configPath, root := writeRunLifecycleConfig(t)
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				serveCompat(w, r, "agent-model", nil)
+			}))
+			t.Cleanup(server.Close)
 			stdin, stdout, stderr := runTestFiles(t)
-			errStop := errors.New("stop after startup")
+			errStop := errors.New("stop after wiring checks")
 			args := append([]string{
-				"-config", configPath, "-root", root,
+				"-config", configPath, "-root", root, "-base-url", server.URL,
+				"-dispatch", "-dispatch-role", "agent", "-no-compress",
 				"-no-probe", "-no-cap-probe", "-no-session", "-no-memory",
 				"-no-rag", "-no-project-context", "-no-auto-index",
 			}, tc.flag...)
 			err := run(args, stdin, stdout, stderr, runHooks{
-				afterSessionReady: func(*replSession) error { return errStop },
+				afterSessionReady: func(sess *replSession) error {
+					t.Run("parent", func(t *testing.T) {
+						res, err := sess.runtime.Run(t.Context(), golemruntime.Turn{RunID: "wiring-test", Message: goal}, sess.machine.sink())
+						if err != nil {
+							t.Fatalf("parent Run(%q): %v", goal, err)
+						}
+						if res.Answer != "noop" {
+							t.Errorf("parent Run(%q) answer = %q, want noop", goal, res.Answer)
+						}
+						if tc.on {
+							if res.Risk == nil || res.Risk.Score != 10 {
+								t.Errorf("parent Run(%q) risk = %+v, want score 10", goal, res.Risk)
+							}
+						} else if res.Risk != nil {
+							t.Errorf("parent Run(%q) risk = %+v, want nil", goal, res.Risk)
+						}
+					})
+					t.Run("dispatch", func(t *testing.T) {
+						i := slices.IndexFunc(sess.tools, func(tool agent.Tool) bool { return tool.Spec().Name == "dispatch" })
+						if i < 0 {
+							t.Fatal("run(-dispatch) mounted no dispatch tool")
+						}
+						args, err := json.Marshal(map[string][]string{"tasks": {goal}})
+						if err != nil {
+							t.Fatal(err)
+						}
+						out, err := sess.tools[i].Invoke(t.Context(), args)
+						if err != nil || out.IsError {
+							t.Fatalf("dispatch Invoke(%q) = %+v, %v; want success", goal, out, err)
+						}
+						var envelope dispatchTestEnvelope
+						if err := json.Unmarshal([]byte(out.Content), &envelope); err != nil {
+							t.Fatalf("decode dispatch result: %v", err)
+						}
+						if len(envelope.Results) != 1 {
+							t.Fatalf("dispatch Invoke(%q) results = %+v, want one", goal, envelope.Results)
+						}
+						child := envelope.Results[0]
+						if child.Error != "" || child.Summary != "noop" {
+							t.Errorf("dispatch Invoke(%q) child = %+v, want successful noop answer", goal, child)
+						}
+						wantScore := 0
+						if tc.on {
+							wantScore = 10
+						}
+						if child.RiskScore != wantScore {
+							t.Errorf("dispatch Invoke(%q) risk_score = %d, want %d", goal, child.RiskScore, wantScore)
+						}
+						if !tc.on && strings.Contains(out.Content, "risk_score") {
+							t.Errorf("dispatch Invoke(%q) = %s, want risk_score omitted", goal, out.Content)
+						}
+					})
+					return errStop
+				},
 			})
 			if !errors.Is(err, errStop) {
 				t.Fatalf("run = %v, want test stop; stderr:\n%s", err, readRunTestFile(t, stderr))
