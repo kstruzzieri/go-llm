@@ -1335,3 +1335,118 @@ func TestRunAgentflowAuthor_FastApproverInterruptIsInterrupted(t *testing.T) {
 		t.Fatalf("fast approval interrupt misclassified: %v", err)
 	}
 }
+
+// recordingRiskApprover captures what the planning approver forwards.
+type recordingRiskApprover struct {
+	approve bool
+	risk    agent.RiskReport
+	key     string
+	calls   int
+}
+
+func (r *recordingRiskApprover) Approve(context.Context, provider.ToolCall, string) (bool, error) {
+	r.calls++
+	return r.approve, nil
+}
+
+func (r *recordingRiskApprover) ApproveWithRisk(_ context.Context, _ provider.ToolCall, _, key string, risk agent.RiskReport) (agent.ApprovalDecision, error) {
+	r.calls++
+	r.risk, r.key = risk, key
+	return agent.ApprovalDecision{Approved: r.approve}, nil
+}
+
+func submitPlanToolCall() provider.ToolCall {
+	return provider.ToolCall{ID: "p1", Type: "function", Function: provider.ToolCallFunction{Name: submitPlanToolName, Arguments: json.RawMessage(`{}`)}}
+}
+
+// TestAuthorPlanApproverForwardsRiskAndRecordsDenial: the report and key
+// reach a RiskApprover delegate, and a denied lock is recorded exactly as on
+// the plain path (approvalDenied, cancel, best-effort save).
+func TestAuthorPlanApproverForwardsRiskAndRecordsDenial(t *testing.T) {
+	t.Setenv("TMPDIR", t.TempDir())
+	canceled := false
+	sess := &authorSession{cancel: func() { canceled = true }}
+	rec := &recordingRiskApprover{}
+	a := &authorPlanApprover{delegate: rec, sess: sess}
+	risk := agent.RiskReport{Score: 10, Findings: []agent.Finding{{Interceptor: "typoglycemia", Rule: "weak_phrase", Risk: 10}}}
+	d, err := a.ApproveWithRisk(context.Background(), submitPlanToolCall(), "plan preview", "k", risk)
+	if err != nil || d.Approved {
+		t.Fatalf("d=%+v err=%v", d, err)
+	}
+	if rec.calls != 1 || rec.key != "k" || !reflect.DeepEqual(rec.risk, risk) {
+		t.Fatalf("delegate saw calls=%d key=%q risk=%+v", rec.calls, rec.key, rec.risk)
+	}
+	if !sess.approvalDenied || !canceled {
+		t.Fatalf("denied lock not recorded: denied=%v canceled=%v", sess.approvalDenied, canceled)
+	}
+}
+
+// TestAuthorPlanApproverApprovedLockRecordsNothing: an approved lock through
+// the risk path leaves the denial fields untouched.
+func TestAuthorPlanApproverApprovedLockRecordsNothing(t *testing.T) {
+	sess := &authorSession{cancel: func() { t.Fatal("approval must not cancel") }}
+	a := &authorPlanApprover{delegate: &recordingRiskApprover{approve: true}, sess: sess}
+	d, err := a.ApproveWithRisk(context.Background(), submitPlanToolCall(), "plan preview", "k", agent.RiskReport{})
+	if err != nil || !d.Approved || sess.approvalDenied {
+		t.Fatalf("d=%+v err=%v denied=%v", d, err, sess.approvalDenied)
+	}
+}
+
+// TestAuthorPlanApproverPlainDelegateFallsBack: a delegate that is only an
+// Approver (the -approve-plan-lock path) still decides, with no report.
+func TestAuthorPlanApproverPlainDelegateFallsBack(t *testing.T) {
+	var out strings.Builder
+	sess := &authorSession{cancel: func() { t.Fatal("approval must not cancel") }}
+	a := &authorPlanApprover{delegate: &autoPlanApprover{out: &out}, sess: sess}
+	d, err := a.ApproveWithRisk(context.Background(), submitPlanToolCall(), "plan preview\n", "k", agent.RiskReport{Score: 10})
+	if err != nil || !d.Approved {
+		t.Fatalf("d=%+v err=%v", d, err)
+	}
+	if want := "plan preview\nplan lock auto-approved via -approve-plan-lock\n"; out.String() != want {
+		t.Fatalf("auto approver output = %q, want %q", out.String(), want)
+	}
+}
+
+// erroringApprover fails every decision; when it also implements
+// RiskApprover the risk path is taken, otherwise the plain fallback.
+type erroringApprover struct {
+	err  error
+	risk bool
+}
+
+func (e *erroringApprover) Approve(context.Context, provider.ToolCall, string) (bool, error) {
+	return false, e.err
+}
+
+// erroringRiskApprover adds the RiskApprover method on top of erroringApprover.
+type erroringRiskApprover struct{ erroringApprover }
+
+func (e *erroringRiskApprover) ApproveWithRisk(context.Context, provider.ToolCall, string, string, agent.RiskReport) (agent.ApprovalDecision, error) {
+	return agent.ApprovalDecision{}, e.err
+}
+
+// TestAuthorPlanApproverPropagatesDelegateErrorWithoutRecordingDenial: on
+// both branches a delegate error comes back unchanged and is not mistaken
+// for a denial (no approvalDenied, no cancel, no denied-plan save).
+func TestAuthorPlanApproverPropagatesDelegateErrorWithoutRecordingDenial(t *testing.T) {
+	sentinel := errors.New("approver failed")
+	for _, tc := range []struct {
+		name     string
+		delegate agent.Approver
+	}{
+		{"risk-aware delegate", &erroringRiskApprover{erroringApprover{err: sentinel}}},
+		{"plain delegate", &erroringApprover{err: sentinel}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sess := &authorSession{cancel: func() { t.Fatal("an error must not cancel the session") }}
+			a := &authorPlanApprover{delegate: tc.delegate, sess: sess}
+			d, err := a.ApproveWithRisk(context.Background(), submitPlanToolCall(), "plan preview", "k", agent.RiskReport{Score: 10})
+			if !errors.Is(err, sentinel) || d.Approved {
+				t.Fatalf("d=%+v err=%v, want the sentinel error and no approval", d, err)
+			}
+			if sess.approvalDenied || sess.deniedPlanPath != "" || sess.deniedPlanSaveErr != nil {
+				t.Fatalf("error recorded as a denial: %+v", sess)
+			}
+		})
+	}
+}

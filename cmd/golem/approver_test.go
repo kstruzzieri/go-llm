@@ -710,3 +710,97 @@ func TestVerifyGrantsAreClearedWithTheSession(t *testing.T) {
 		t.Fatal("verify grants must not survive a session clear")
 	}
 }
+
+func TestRiskLine(t *testing.T) {
+	cases := []struct {
+		name string
+		risk agent.RiskReport
+		want string
+	}{
+		{"empty", agent.RiskReport{}, ""},
+		{"finding", agent.RiskReport{Score: 10, Findings: []agent.Finding{{Interceptor: "typoglycemia", Rule: "weak_phrase", Risk: 10}}}, "interceptor risk 10"},
+		{"zero-risk finding still shows", agent.RiskReport{Score: 0, Findings: []agent.Finding{{Interceptor: "x", Rule: "r"}}}, "interceptor risk 0"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := riskLine(tc.risk); got != tc.want {
+				t.Fatalf("riskLine = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func weakPhraseReport() agent.RiskReport {
+	return agent.RiskReport{Score: 10, Findings: []agent.Finding{{Interceptor: "typoglycemia", Rule: "weak_phrase", Risk: 10}}}
+}
+
+// TestApproverRiskLineBetweenPreviewAndQuestion pins the exact prompt bytes
+// with a report: preview, risk line, question.
+func TestApproverRiskLineBetweenPreviewAndQuestion(t *testing.T) {
+	var out strings.Builder
+	a := newReplApprover(newScannerSource(strings.NewReader("y\n"), &out), &out, false)
+	d, err := a.ApproveWithRisk(context.Background(), execCall(), "run command:\n  argv: go test\n", "exec:abc", weakPhraseReport())
+	if err != nil || !d.Approved {
+		t.Fatalf("d=%+v err=%v", d, err)
+	}
+	want := "run command:\n  argv: go test\ninterceptor risk 10\nRun this command? [y/N] "
+	if out.String() != want {
+		t.Fatalf("prompt = %q, want %q", out.String(), want)
+	}
+}
+
+// TestApproverEmptyReportKeepsPromptBytes: without findings the prompt is
+// byte-identical to the pre-#514 prompt, through both entry points.
+func TestApproverEmptyReportKeepsPromptBytes(t *testing.T) {
+	const want = "run command:\n  argv: go test\nRun this command? [y/N] "
+	var keyed strings.Builder
+	a := newReplApprover(newScannerSource(strings.NewReader("y\n"), &keyed), &keyed, false)
+	if _, err := a.ApproveKeyed(context.Background(), execCall(), "run command:\n  argv: go test\n", "exec:abc"); err != nil {
+		t.Fatal(err)
+	}
+	if keyed.String() != want {
+		t.Fatalf("ApproveKeyed prompt = %q, want %q", keyed.String(), want)
+	}
+	var risk strings.Builder
+	b := newReplApprover(newScannerSource(strings.NewReader("y\n"), &risk), &risk, false)
+	if _, err := b.ApproveWithRisk(context.Background(), execCall(), "run command:\n  argv: go test\n", "exec:abc", agent.RiskReport{}); err != nil {
+		t.Fatal(err)
+	}
+	if risk.String() != want {
+		t.Fatalf("ApproveWithRisk prompt = %q, want %q", risk.String(), want)
+	}
+}
+
+// TestApproverGrantHitShowsRiskLine: a grant-covered call still shows the
+// score, before the auto-approval line (#439's badge takes the same slot).
+func TestApproverGrantHitShowsRiskLine(t *testing.T) {
+	var out strings.Builder
+	g := newApprovalGrants()
+	g.grant(grantScopeExec, "exec:abc")
+	ap := newReplApprover(&promptFatalSource{t: t}, &out, false)
+	ap.grants = g
+	d, err := ap.ApproveWithRisk(context.Background(), execCall(), "run command:\n  argv: go test\n", "exec:abc", weakPhraseReport())
+	if err != nil || !d.Approved || !d.ViaGrant {
+		t.Fatalf("granted key must auto-approve: d=%+v err=%v", d, err)
+	}
+	want := "run command:\n  argv: go test\ninterceptor risk 10\nauto-approved (session grant)\n"
+	if out.String() != want {
+		t.Fatalf("grant-hit output = %q, want %q", out.String(), want)
+	}
+}
+
+// TestApproverZeroScoreFindingStillPrintsThroughPrompt drives the call-site
+// guard, not just riskLine: a report whose only finding carries no risk must
+// still surface at the prompt, so a guard on the score would go red here.
+func TestApproverZeroScoreFindingStillPrintsThroughPrompt(t *testing.T) {
+	var out strings.Builder
+	a := newReplApprover(newScannerSource(strings.NewReader("y\n"), &out), &out, false)
+	risk := agent.RiskReport{Score: 0, Findings: []agent.Finding{{Interceptor: "x", Rule: "r"}}}
+	if _, err := a.ApproveWithRisk(context.Background(), execCall(), "run command:\n  argv: go test\n", "exec:abc", risk); err != nil {
+		t.Fatal(err)
+	}
+	want := "run command:\n  argv: go test\ninterceptor risk 0\nRun this command? [y/N] "
+	if out.String() != want {
+		t.Fatalf("prompt = %q, want %q", out.String(), want)
+	}
+}

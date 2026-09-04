@@ -152,6 +152,13 @@ func (t *submitPlanTool) Effect() agent.Effect {
 	return agent.Effect{Class: agent.Write | agent.Exec, Approval: agent.ApprovalAlways, Scope: agent.Scope{CWD: t.sess.root}}
 }
 
+// Origin declares plan diagnostics workspace-local (#514 D6): the output of
+// the fixed local agentflow CLI over workspace proof state, the same class
+// as run_command. Tagged, never blocked.
+func (t *submitPlanTool) Origin() agent.Origin { return agent.OriginWorkspace }
+
+var _ agent.OriginTool = (*submitPlanTool)(nil)
+
 func (t *submitPlanTool) Plan(ctx context.Context, args json.RawMessage) (agent.ToolPlan, error) {
 	effect := t.Effect()
 	t.sess.previewArgs = nil
@@ -1525,19 +1532,42 @@ type authorPlanApprover struct {
 	sess     *authorSession
 }
 
+// recordDenial is the one place a denied lock is recorded (#514 D4), so the
+// plain and the risk-aware approval paths cannot diverge.
+func (a *authorPlanApprover) recordDenial(approved bool, err error, call provider.ToolCall) {
+	if err == nil && !approved && call.Function.Name == submitPlanToolName {
+		a.sess.approvalDenied = true
+		a.sess.deniedPlanPath, a.sess.deniedPlanSaveErr = saveDeniedPlan(call.Function.Arguments)
+		a.sess.cancel()
+	}
+}
+
 func (a *authorPlanApprover) Approve(ctx context.Context, call provider.ToolCall, preview string) (bool, error) {
 	approved := false
 	var err error
 	if a.delegate != nil {
 		approved, err = a.delegate.Approve(ctx, call, preview)
 	}
-	if err == nil && !approved && call.Function.Name == submitPlanToolName {
-		a.sess.approvalDenied = true
-		a.sess.deniedPlanPath, a.sess.deniedPlanSaveErr = saveDeniedPlan(call.Function.Arguments)
-		a.sess.cancel()
-	}
+	a.recordDenial(approved, err, call)
 	return approved, err
 }
+
+// ApproveWithRisk forwards the run's report to a delegate that can render it
+// (#514 D4); any other delegate keeps the plain path. The library prefers
+// this method, so the lock prompt shows the score when the delegate is the
+// interactive approver.
+func (a *authorPlanApprover) ApproveWithRisk(ctx context.Context, call provider.ToolCall, preview, key string, risk agent.RiskReport) (agent.ApprovalDecision, error) {
+	ra, ok := a.delegate.(agent.RiskApprover)
+	if !ok {
+		approved, err := a.Approve(ctx, call, preview)
+		return agent.ApprovalDecision{Approved: approved}, err
+	}
+	d, err := ra.ApproveWithRisk(ctx, call, preview, key, risk)
+	a.recordDenial(d.Approved, err, call)
+	return d, err
+}
+
+var _ agent.RiskApprover = (*authorPlanApprover)(nil)
 
 // autoPlanApprover implements -approve-plan-lock: the non-interactive -goal
 // path. It prints the same preview an operator would see, then approves the

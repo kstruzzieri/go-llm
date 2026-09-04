@@ -13,6 +13,23 @@
 // serve the active model route, startup scans 127.0.0.1:8080-8090 for it
 // (-no-probe disables the scan).
 //
+// -interceptors installs the #436 detector chain (zero-width characters,
+// base64/hex-encoded instructions, exact and scrambled instruction phrases)
+// on the agent and on every dispatch child. Content is classified by
+// provenance: workspace files, command output, memory records, plan
+// diagnostics and model-origin tool results are tagged (a fixed trailer tells
+// the model the content is data, and the run's risk score grows), while an
+// injection in a foreign result (an MCP tool) is replaced by a fixed blocked
+// marker before the model sees it. Interactive tool-call and plan-lock prompts
+// show "interceptor risk 30"; the verifier approval prompt cannot show it.
+// Successful REPL and -p stderr footers append " · risk 30". The
+// non-interactive -approve-plan-lock path is unchanged. A dispatch child's
+// score stays in that child's existing risk_score envelope field rather than
+// aggregating into the parent report. The -trace record carries every parent
+// finding. The default detectors return no output findings; streamed model
+// tokens therefore remain unchanged. Off by default until the trailers'
+// effect on answer quality is measured.
+//
 // The source subcommand manages ad-hoc documents in the workspace index over
 // the managed-document registry:
 //

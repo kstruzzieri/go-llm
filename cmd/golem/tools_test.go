@@ -307,7 +307,7 @@ func TestDispatchSystemFragment(t *testing.T) {
 
 func TestNewDispatchTool_MissingFileToolsError(t *testing.T) {
 	// Valid caller and budget: the ONLY invalid input is the empty available set.
-	_, err := newDispatchTool(&specRecordingCaller{}, false, agent.Budget{}, dispatchFanout{maxConcurrent: 1}, nil, nil)
+	_, err := newDispatchTool(&specRecordingCaller{}, flags{}, agent.Budget{}, dispatchFanout{maxConcurrent: 1}, nil, nil)
 	if err == nil {
 		t.Fatal("empty available set must error: children need the file readers")
 	}

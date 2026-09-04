@@ -96,6 +96,15 @@ func (r *readyRetrieve) Spec() agent.ToolSpec { return agenttools.Retrieve{}.Spe
 
 func (r *readyRetrieve) Effect() agent.Effect { return agenttools.Retrieve{}.Effect() }
 
+// Origin mirrors Spec and Effect (#514 D6): the only delegate this wrapper
+// ever installs is the library retrieve tool, and its warming and failure
+// messages are Golem-authored text, so it declares what that tool declares.
+// A per-invocation ToolResult.Origin from the delegate passes through Invoke
+// untouched and may only lower trust (#439).
+func (r *readyRetrieve) Origin() agent.Origin { return agenttools.Retrieve{}.Origin() }
+
+var _ agent.OriginTool = (*readyRetrieve)(nil)
+
 // Invoke serves the state message while warming/failed and delegates once
 // ready. Warming/failed results are non-error so the model falls back to the
 // file tools instead of abandoning tool use.
