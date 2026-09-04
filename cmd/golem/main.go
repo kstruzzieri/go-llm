@@ -1202,7 +1202,7 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 		})
 		fan := resolveDispatchFanout(bundle.Router.SlotCapacity, dchain)
 		caller := newRouterChainCallerFor(bundle.Router, dchain, dispatchUseCase)
-		dpt, derr := newDispatchTool(caller, f.progressive, agent.Budget{InputCeiling: childCeiling, OutputReserve: f.outputReserve}, fan, dispatchNotice.notify, tools)
+		dpt, derr := newDispatchTool(caller, f, agent.Budget{InputCeiling: childCeiling, OutputReserve: f.outputReserve}, fan, dispatchNotice.notify, tools)
 		if derr != nil {
 			return derr
 		}

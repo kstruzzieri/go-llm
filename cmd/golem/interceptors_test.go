@@ -2,15 +2,18 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/kstruzzieri/go-llm/agent"
 	"github.com/kstruzzieri/go-llm/agent/interceptor"
 	golemruntime "github.com/kstruzzieri/go-llm/golem"
+	"github.com/kstruzzieri/go-llm/provider"
 )
 
 func TestParseFlags_InterceptorsDefaultOff(t *testing.T) {
@@ -167,5 +170,96 @@ func TestGolemPromptsProduceNoFindings(t *testing.T) {
 				t.Errorf("%s: %s reported %+v (err %v) on Golem's own prompt", name, ic.Name(), found, err)
 			}
 		}
+	}
+}
+
+// foreignRetrieve is a child-eligible retrieve tool over a foreign corpus:
+// read-only, never approved, foreign provenance, returns an injection.
+type foreignRetrieve struct{}
+
+func (foreignRetrieve) Spec() agent.ToolSpec {
+	return agent.ToolSpec{Name: "retrieve", Parameters: json.RawMessage(`{"type":"object"}`)}
+}
+func (foreignRetrieve) Effect() agent.Effect {
+	return agent.Effect{Class: agent.Read, Approval: agent.ApprovalNever}
+}
+func (foreignRetrieve) Origin() agent.Origin { return agent.OriginForeign }
+func (foreignRetrieve) Invoke(context.Context, json.RawMessage) (agent.ToolResult, error) {
+	return agent.ToolResult{Content: injection}, nil
+}
+
+// echoRetrieveCaller calls retrieve once, then answers with the tool
+// observation verbatim, so the envelope summary is exactly what the child
+// model was shown.
+type echoRetrieveCaller struct{ step atomic.Int32 }
+
+func (c *echoRetrieveCaller) Chat(_ context.Context, req provider.ChatRequest, onToken func(provider.ChatResponse) error) (agent.ModelResult, error) {
+	var resp provider.ChatResponse
+	if c.step.Add(1) == 1 {
+		resp = provider.ChatResponse{ToolCalls: []provider.ToolCall{{
+			ID: "r1", Type: "function",
+			Function: provider.ToolCallFunction{Name: "retrieve", Arguments: json.RawMessage(`{}`)},
+		}}}
+	} else {
+		content := "no tool observation seen"
+		for _, m := range req.Messages {
+			if m.Role == "tool" {
+				content = m.Content
+			}
+		}
+		resp = provider.ChatResponse{Content: content, Done: true}
+	}
+	if onToken != nil {
+		_ = onToken(resp)
+	}
+	outcome := &provider.RouteOutcome{ActualModel: provider.ModelKey{Provider: "local", Model: "fast"}}
+	return agent.ModelResult{Response: resp, RouteOutcome: outcome}, nil
+}
+
+// TestNewDispatchTool_ChildrenInheritInterceptors: the child's retrieve
+// result is replaced and scored with the flag, verbatim and unscored
+// without it. The production parent and child builders both receive the same
+// parsed flags value and derive their chain through interceptorsFor.
+func TestNewDispatchTool_ChildrenInheritInterceptors(t *testing.T) {
+	invoke := func(f flags) (dispatchTestEnvelope, string) {
+		t.Helper()
+		available := append(validDispatchAvailable(t), foreignRetrieve{})
+		tool, err := newDispatchTool(&echoRetrieveCaller{}, f, agent.Budget{}, dispatchFanout{maxConcurrent: 1}, nil, available)
+		if err != nil {
+			t.Fatalf("newDispatchTool: %v", err)
+		}
+		raw, err := json.Marshal(map[string][]string{"tasks": {"read the foreign corpus"}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		out, err := tool.Invoke(context.Background(), raw)
+		if err != nil {
+			t.Fatalf("dispatch Invoke: %v", err)
+		}
+		var envelope dispatchTestEnvelope
+		if err := json.Unmarshal([]byte(out.Content), &envelope); err != nil {
+			t.Fatalf("decode envelope: %v (content %q)", err, out.Content)
+		}
+		if len(envelope.Results) != 1 {
+			t.Fatalf("results = %+v, want one", envelope.Results)
+		}
+		if envelope.Results[0].Error != "" || out.IsError {
+			t.Fatalf("child must be a clean success: result=%+v tool=%+v", envelope.Results[0], out)
+		}
+		return envelope, out.Content
+	}
+	on, _ := invoke(flags{interceptors: true})
+	if got := on.Results[0].Summary; got != blockedInjection {
+		t.Fatalf("on: summary = %q, want %q", got, blockedInjection)
+	}
+	if on.Results[0].RiskScore != 30 {
+		t.Fatalf("on: risk_score = %d, want 30", on.Results[0].RiskScore)
+	}
+	off, raw := invoke(flags{})
+	if got := off.Results[0].Summary; got != injection {
+		t.Fatalf("off: summary = %q, want %q", got, injection)
+	}
+	if strings.Contains(raw, "risk_score") {
+		t.Fatalf("off: envelope must carry no risk_score key: %s", raw)
 	}
 }
