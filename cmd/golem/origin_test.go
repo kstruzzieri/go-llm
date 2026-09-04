@@ -26,8 +26,12 @@ const (
 )
 
 // undeclaredTool has no Origin declaration: what a future wrapped tool that
-// forgot to declare looks like to the pipeline.
-type undeclaredTool struct{ content string }
+// forgot to declare looks like to the pipeline. A non-zero origin is stamped
+// on the result, the per-invocation reclassification path (#439).
+type undeclaredTool struct {
+	content string
+	origin  agent.Origin
+}
 
 func (undeclaredTool) Spec() agent.ToolSpec {
 	return agent.ToolSpec{Name: "undeclared", Parameters: json.RawMessage(`{"type":"object"}`)}
@@ -36,7 +40,7 @@ func (undeclaredTool) Effect() agent.Effect {
 	return agent.Effect{Class: agent.Read, Approval: agent.ApprovalNever}
 }
 func (u undeclaredTool) Invoke(context.Context, json.RawMessage) (agent.ToolResult, error) {
-	return agent.ToolResult{Content: u.content}, nil
+	return agent.ToolResult{Content: u.content, Origin: u.origin}, nil
 }
 
 // declaredTool declares workspace provenance, like every library built-in.
@@ -111,6 +115,7 @@ func TestGolemLocalToolsDeclareOrigin(t *testing.T) {
 		{"agent_memory_create sidecar", sidecarSecuringTool{Tool: agenttools.AgentMemoryCreate{}}, agent.OriginWorkspace},
 		{"agent_memory_promote sidecar", sidecarSecuringTool{Tool: agenttools.AgentMemoryPromote{}}, agent.OriginWorkspace},
 		{"sidecar around an undeclared tool", sidecarSecuringTool{Tool: undeclaredTool{}}, agent.OriginUnknown},
+		{"sidecar around a nil tool", sidecarSecuringTool{}, agent.OriginUnknown},
 		{"submit_plan", newSubmitPlanTool(&authorSession{}), agent.OriginWorkspace},
 	}
 	for _, tc := range cases {
@@ -227,5 +232,37 @@ func TestSidecarAroundUndeclaredToolStaysBlocked(t *testing.T) {
 	}
 	if res.Risk == nil || res.Risk.Score != 30 || !res.ToolCalls[0].Blocked {
 		t.Fatalf("risk = %+v record = %+v", res.Risk, res.ToolCalls[0])
+	}
+}
+
+// TestWrappersPropagatePerInvocationOrigin: a result that reclassifies itself
+// foreign (#439's path, ToolResult.Origin) must reach the pipeline through
+// both wrappers unchanged. A wrapper that rebuilt the result would silently
+// restore the static workspace claim and upgrade trust.
+func TestWrappersPropagatePerInvocationOrigin(t *testing.T) {
+	ready := newReadyRetrieve(warmingRetrieveMessage)
+	if !ready.install(newRetrievalReader(undeclaredTool{content: injection, origin: agent.OriginForeign}, nil), "ready") {
+		t.Fatal("install rejected a fresh reader")
+	}
+	t.Cleanup(func() { _ = ready.close() })
+	for _, tc := range []struct {
+		name string
+		tool agent.Tool
+	}{
+		{"retrieve", ready},
+		{"sidecar", sidecarSecuringTool{Tool: declaredTool{undeclaredTool{content: injection, origin: agent.OriginForeign}}, dbPath: filepath.Join(t.TempDir(), "absent.db")}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			res := runOneTool(t, tc.tool)
+			if got := res.Messages[2].Content; got != blockedInjection {
+				t.Fatalf("observation = %q, want %q", got, blockedInjection)
+			}
+			if res.Risk == nil || res.Risk.Score != 30 || len(res.Risk.Findings) != 1 || !res.ToolCalls[0].Blocked {
+				t.Fatalf("risk = %+v record = %+v", res.Risk, res.ToolCalls[0])
+			}
+			if got := res.Risk.Findings[0].Origin; got != agent.OriginForeign {
+				t.Fatalf("finding origin = %s, want foreign", got)
+			}
+		})
 	}
 }
