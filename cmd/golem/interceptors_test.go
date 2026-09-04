@@ -58,26 +58,40 @@ func TestStartupNotices_Interceptors(t *testing.T) {
 }
 
 // TestRunWiresInterceptorsStartupNotice drives the real startup path to its
-// post-construction hook. It pins both the run-local line calculation and the
-// startupInfo literal assignment; the formatter-only test above cannot.
+// post-construction hook, with and without the flag. It pins both the
+// run-local line calculation and the startupInfo literal assignment; the
+// formatter-only test above cannot, and a line computed unconditionally in
+// run would pass the formatter test's off case.
 func TestRunWiresInterceptorsStartupNotice(t *testing.T) {
-	configPath, root := writeRunLifecycleConfig(t)
-	stdin, stdout, stderr := runTestFiles(t)
-	errStop := errors.New("stop after startup")
-	err := run([]string{
-		"-config", configPath, "-root", root, "-interceptors",
-		"-no-probe", "-no-cap-probe", "-no-session", "-no-memory",
-		"-no-rag", "-no-project-context", "-no-auto-index",
-	}, stdin, stdout, stderr, runHooks{
-		afterSessionReady: func(*replSession) error { return errStop },
-	})
-	if !errors.Is(err, errStop) {
-		t.Fatalf("run = %v, want test stop; stderr:\n%s", err, readRunTestFile(t, stderr))
-	}
-	lines := strings.Split(strings.TrimSpace(readRunTestFile(t, stderr)), "\n")
 	const want = "interceptors: enabled (zero_width, encoding, typoglycemia)"
-	if !slices.Contains(lines, want) {
-		t.Fatalf("startup lines = %q, want exact line %q", lines, want)
+	for _, tc := range []struct {
+		name string
+		flag []string
+		on   bool
+	}{
+		{"on", []string{"-interceptors"}, true},
+		{"off", nil, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			configPath, root := writeRunLifecycleConfig(t)
+			stdin, stdout, stderr := runTestFiles(t)
+			errStop := errors.New("stop after startup")
+			args := append([]string{
+				"-config", configPath, "-root", root,
+				"-no-probe", "-no-cap-probe", "-no-session", "-no-memory",
+				"-no-rag", "-no-project-context", "-no-auto-index",
+			}, tc.flag...)
+			err := run(args, stdin, stdout, stderr, runHooks{
+				afterSessionReady: func(*replSession) error { return errStop },
+			})
+			if !errors.Is(err, errStop) {
+				t.Fatalf("run = %v, want test stop; stderr:\n%s", err, readRunTestFile(t, stderr))
+			}
+			lines := strings.Split(strings.TrimSpace(readRunTestFile(t, stderr)), "\n")
+			if got := slices.Contains(lines, want); got != tc.on {
+				t.Fatalf("startup lines = %q, exact line %q present = %v, want %v", lines, want, got, tc.on)
+			}
+		})
 	}
 }
 
