@@ -152,6 +152,13 @@ func (t *submitPlanTool) Effect() agent.Effect {
 	return agent.Effect{Class: agent.Write | agent.Exec, Approval: agent.ApprovalAlways, Scope: agent.Scope{CWD: t.sess.root}}
 }
 
+// Origin declares plan diagnostics workspace-local (#514 D6): the output of
+// the fixed local agentflow CLI over workspace proof state, the same class
+// as run_command. Tagged, never blocked.
+func (t *submitPlanTool) Origin() agent.Origin { return agent.OriginWorkspace }
+
+var _ agent.OriginTool = (*submitPlanTool)(nil)
+
 func (t *submitPlanTool) Plan(ctx context.Context, args json.RawMessage) (agent.ToolPlan, error) {
 	effect := t.Effect()
 	t.sess.previewArgs = nil

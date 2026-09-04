@@ -96,6 +96,12 @@ func (r *readyRetrieve) Spec() agent.ToolSpec { return agenttools.Retrieve{}.Spe
 
 func (r *readyRetrieve) Effect() agent.Effect { return agenttools.Retrieve{}.Effect() }
 
+// Origin mirrors Spec and Effect (#514 D6): the wrapper serves the library's
+// retrieve tool in every state, so it declares what that tool declares.
+func (r *readyRetrieve) Origin() agent.Origin { return agenttools.Retrieve{}.Origin() }
+
+var _ agent.OriginTool = (*readyRetrieve)(nil)
+
 // Invoke serves the state message while warming/failed and delegates once
 // ready. Warming/failed results are non-error so the model falls back to the
 // file tools instead of abandoning tool use.
