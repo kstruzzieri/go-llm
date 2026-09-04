@@ -12,11 +12,13 @@ import (
 )
 
 // fenceSentinel matches a triple-angle-bracket fence lead (<<< or >>>) immediately
-// followed by the PROJECT_CONTEXT sentinel, case-insensitively. neutralizeFence
-// inserts a space at the match so untrusted content cannot reproduce EITHER the
-// real open or close marker — including a forged, partial, or case-varied open
-// marker that does not match the full open constant verbatim.
-var fenceSentinel = regexp.MustCompile(`(?i)(<<<|>>>)(PROJECT_CONTEXT)`)
+// followed by either injected-context sentinel, PROJECT_CONTEXT or GIT_CONTEXT
+// (#354), case-insensitively. neutralizeFence inserts a space at the match so
+// untrusted content cannot reproduce EITHER block's real open or close marker —
+// including a forged, partial, or case-varied open marker that does not match
+// the full open constant verbatim. One regex serves both blocks so a project
+// file cannot forge a Git boundary and a branch name cannot forge a project one.
+var fenceSentinel = regexp.MustCompile(`(?i)(<<<|>>>)(PROJECT_CONTEXT|GIT_CONTEXT)`)
 
 // projectContextOpen / projectContextClose fence the advisory project-context
 // block inside the system prompt. The content between them is untrusted (it comes
@@ -55,10 +57,11 @@ func configDirBase(getenv func(string) string) (string, error) {
 }
 
 // neutralizeFence defangs any fence sentinel inside untrusted content so a project
-// file cannot close the advisory block early or forge a new boundary. It matches on
-// the lead sentinel (<<<PROJECT_CONTEXT / >>>PROJECT_CONTEXT, case-insensitive) and
-// inserts a space, breaking the literal marker the model keys on. A space-inserted
-// replacement is sufficient: the model never needs to reconstruct the original bytes.
+// file or repository string cannot close an injected block early or forge a new
+// boundary. It matches on the lead sentinel (<<<PROJECT_CONTEXT / >>>PROJECT_CONTEXT
+// and <<<GIT_CONTEXT / >>>GIT_CONTEXT, case-insensitive) and inserts a space,
+// breaking the literal marker the model keys on. A space-inserted replacement is
+// sufficient: the model never needs to reconstruct the original bytes.
 func neutralizeFence(s string) string {
 	return fenceSentinel.ReplaceAllString(s, "$1 $2")
 }
