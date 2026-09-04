@@ -5,10 +5,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/kstruzzieri/go-llm/agent"
 	"github.com/kstruzzieri/go-llm/agent/interceptor"
@@ -261,5 +264,66 @@ func TestNewDispatchTool_ChildrenInheritInterceptors(t *testing.T) {
 	}
 	if strings.Contains(raw, "risk_score") {
 		t.Fatalf("off: envelope must carry no risk_score key: %s", raw)
+	}
+}
+
+// TestRunOnce_ApprovalPromptShowsInterceptorRisk: a write-enabled session
+// reads a file that mentions a weak phrase (tagged, risk 10), then asks to
+// write; the real prompt shows the line between the diff and the question
+// and the approved write lands.
+func TestRunOnce_ApprovalPromptShowsInterceptorRisk(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "NOTES.md"), []byte("The system prompt is documented here.\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	read := provider.ChatResponse{ToolCalls: []provider.ToolCall{{
+		ID: "r1", Type: "function",
+		Function: provider.ToolCallFunction{Name: "read_file", Arguments: json.RawMessage(`{"path":"NOTES.md"}`)},
+	}}}
+	write := provider.ChatResponse{ToolCalls: []provider.ToolCall{{
+		ID: "w1", Type: "function",
+		Function: provider.ToolCallFunction{Name: "write_file", Arguments: json.RawMessage(`{"path":"out.txt","content":"hello\n"}`)},
+	}}}
+	caller := &scriptCaller{responses: []agent.ModelResult{{Response: read}, {Response: write}, {Response: provider.ChatResponse{Content: "wrote it"}}}}
+	readTools, err := buildTools(root, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeTools, journal, err := buildWriteTools(root, openTestStore(t, root))
+	if err != nil {
+		t.Fatal(err)
+	}
+	system := buildSystemPrompt(true, false)
+	orch := newOrchestratorFactory(caller, flags{interceptors: true}, nil)()
+	sess := &replSession{
+		orch: orch, runtime: newTestRuntime(t, root, system, orch, writeTools),
+		tools: append(readTools, writeTools...), baseSystem: system, maxSteps: 16,
+		clock: func() time.Time { return time.Unix(0, 0) }, journal: journal, allowWrite: true,
+	}
+	var out strings.Builder
+	res, err := runOnce(context.Background(), &out, nil, sess, "write out.txt", newScannerSource(strings.NewReader("y\n"), &out))
+	if err != nil {
+		t.Fatalf("runOnce: %v\n%s", err, out.String())
+	}
+	got := out.String()
+	position := 0
+	for _, want := range []string{
+		"new file: out.txt\n+hello\n",
+		"interceptor risk 10\n",
+		"Apply this change? [y/N] ",
+		"done · 3 steps · 0.0s · 0 tok · risk 10\n",
+	} {
+		i := strings.Index(got[position:], want)
+		if i < 0 {
+			t.Fatalf("missing %q after byte %d in:\n%s", want, position, got)
+		}
+		position += i + len(want)
+	}
+	if res.Risk == nil || res.Risk.Score != 10 || len(res.Risk.Findings) != 1 {
+		t.Fatalf("risk = %+v", res.Risk)
+	}
+	b, err := os.ReadFile(filepath.Join(root, "out.txt"))
+	if err != nil || string(b) != "hello\n" {
+		t.Fatalf("approved write not applied: %q %v", b, err)
 	}
 }

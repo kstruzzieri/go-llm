@@ -93,6 +93,10 @@ func (r *renderer) finalFooter(res agent.Result, elapsed time.Duration) {
 	_ = r.markdown.Finish()
 	line := fmt.Sprintf("done · %s · %.1fs · %d tok",
 		plural(len(res.Steps), "step", "steps"), elapsed.Seconds(), res.Usage.TotalTokens)
+	if res.Risk != nil {
+		// #514 D7: successful REPL and -p turns expose their cumulative score.
+		line += fmt.Sprintf(" · risk %d", res.Risk.Score)
+	}
 	if res.StopReason != agent.Completed {
 		// Double space (not " · ") deliberately sets the stop reason apart from
 		// the metric fields above it — it is a status suffix, not another metric.

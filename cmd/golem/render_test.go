@@ -365,3 +365,32 @@ func TestResultSummaryTruncatedUnderMixed(t *testing.T) {
 		})
 	}
 }
+
+func TestRenderer_FinalFooter_Risk(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		stop agent.StopReason
+		risk *agent.RiskReport
+		want string
+	}{
+		{"completed", agent.Completed, &agent.RiskReport{Score: 30}, "done · 2 steps · 3.0s · 128 tok · risk 30\n"},
+		{"non-nil zero score", agent.Completed, &agent.RiskReport{Score: 0}, "done · 2 steps · 3.0s · 128 tok · risk 0\n"},
+		{"stopped", agent.StepCapReached, &agent.RiskReport{Score: 30}, "done · 2 steps · 3.0s · 128 tok · risk 30  stopped: step_cap_reached\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			clock := time.Unix(0, 0)
+			r := newRenderer(&buf, false, 16, func() time.Time { return clock }, false)
+			clock = clock.Add(3 * time.Second)
+			r.finalFooter(agent.Result{
+				Steps:      make([]agent.StepRecord, 2),
+				Usage:      provider.Usage{TotalTokens: 128},
+				StopReason: tc.stop,
+				Risk:       tc.risk,
+			}, 3*time.Second)
+			if buf.String() != tc.want {
+				t.Fatalf("footer = %q, want %q", buf.String(), tc.want)
+			}
+		})
+	}
+}
