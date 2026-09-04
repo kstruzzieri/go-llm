@@ -58,6 +58,12 @@ type ToolResult struct {
 	// Nil for ordinary tools. Display-only fields (Preview) and the model-facing
 	// observation (Content) are unaffected by it.
 	RouteOutcome *provider.RouteOutcome
+	// Origin declares this result's provenance per invocation (#436 spec D4).
+	// Zero (OriginUnknown) defers to the tool's static OriginTool declaration;
+	// a tool that declares neither is inspected as unknown provenance, and any
+	// value outside the enum normalizes to unknown. omitempty keeps pre-#436
+	// encodings byte-identical.
+	Origin Origin `json:"Origin,omitempty"`
 }
 
 // Effect is the static, conservative upper bound for a tool.

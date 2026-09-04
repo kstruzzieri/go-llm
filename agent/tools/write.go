@@ -49,6 +49,10 @@ func (*WriteFile) Effect() agent.Effect {
 	return agent.Effect{Class: agent.Write, Approval: agent.ApprovalOnWrite}
 }
 
+// Origin declares this tool's observations workspace-local (#436 spec D4):
+// detectors tag, never block, what it returns.
+func (*WriteFile) Origin() agent.Origin { return agent.OriginWorkspace }
+
 // Plan computes the preview and stashes the pending plan. It never mutates. On any
 // validation failure it returns an error so dispatch reports the failure without
 // asking the user to approve an empty diff.

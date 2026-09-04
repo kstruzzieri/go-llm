@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/kstruzzieri/go-llm/provider"
 )
@@ -15,6 +16,42 @@ type resultRec struct {
 	results []ToolResultEvent
 	failAt  int
 	n       int
+}
+
+type resultIsolationObserver struct {
+	resultEffectPath string
+}
+
+func (*resultIsolationObserver) OnStep(context.Context, StepEvent) error { return nil }
+func (*resultIsolationObserver) OnToolCall(_ context.Context, e ToolCallEvent) error {
+	e.Effect.Scope.Paths[0] = "tool-call-observer-path"
+	return nil
+}
+func (*resultIsolationObserver) OnToken(context.Context, TokenEvent) error { return nil }
+func (o *resultIsolationObserver) OnToolResult(_ context.Context, e ToolResultEvent) error {
+	o.resultEffectPath = e.Effect.Scope.Paths[0]
+	e.Call.Function.Arguments[1] = 'X'
+	e.Effect.Scope.Paths[0] = "observer-path"
+	e.Result.RouteOutcome.Reason = "observer-reason"
+	e.Result.RouteOutcome.Attempts[0].ErrorClass = "observer-error"
+	e.Result.RouteOutcome.ScoreBreakdown.FeedbackMode = "observer-mode"
+	*e.Result.RouteOutcome.ScoreBreakdown.FeedbackUpdatedAt = time.Time{}
+	return nil
+}
+
+type resultIsolationTool struct {
+	paths []string
+	route *provider.RouteOutcome
+}
+
+func (resultIsolationTool) Spec() ToolSpec {
+	return ToolSpec{Name: "isolated", Parameters: json.RawMessage(`{"type":"object"}`)}
+}
+func (t *resultIsolationTool) Effect() Effect {
+	return Effect{Class: Read, Approval: ApprovalNever, Scope: Scope{Paths: t.paths}}
+}
+func (t *resultIsolationTool) Invoke(context.Context, json.RawMessage) (ToolResult, error) {
+	return ToolResult{Content: "done", RouteOutcome: t.route}, nil
 }
 
 func (r *resultRec) OnStep(context.Context, StepEvent) error         { return nil }
@@ -99,6 +136,56 @@ func TestOnToolResult_NormalInvoke(t *testing.T) {
 	got := rec.results[0]
 	if got.Call.Function.Name != "echo" || got.Result.IsError || got.Result.Content != `tool-said:{"x":1}` {
 		t.Fatalf("unexpected result event: %+v", got)
+	}
+}
+
+func TestOnToolResultReceivesDeeplyIsolatedPayload(t *testing.T) {
+	updatedAt := time.Date(2026, 9, 3, 12, 0, 0, 0, time.UTC)
+	tool := &resultIsolationTool{
+		paths: []string{"workspace/file.go"},
+		route: &provider.RouteOutcome{
+			Reason:   "original-reason",
+			Attempts: []provider.RouteAttempt{{ErrorClass: "original-error"}},
+			ScoreBreakdown: &provider.ScoreBreakdown{
+				FeedbackMode:      "original-mode",
+				FeedbackUpdatedAt: &updatedAt,
+			},
+		},
+	}
+	first := &stubInterceptor{name: "first", toolCall: func(in ToolCallInspection) []Finding {
+		in.Effect.Scope.Paths[0] = "interceptor-path"
+		return nil
+	}}
+	var secondInterceptorPath string
+	second := &stubInterceptor{name: "second", toolCall: func(in ToolCallInspection) []Finding {
+		secondInterceptorPath = in.Effect.Scope.Paths[0]
+		return nil
+	}}
+	observer := &resultIsolationObserver{}
+	o := newTestOrchestrator(toolCallThenFinal("isolated", `{"x":1}`), WithInterceptors(first, second))
+	res, err := o.Run(context.Background(), Request{Goal: "q", Tools: []Tool{tool}}, observer)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if got := string(res.Steps[0].Response.ToolCalls[0].Function.Arguments); got != `{"x":1}` {
+		t.Fatalf("observer mutated StepRecord call arguments: %s", got)
+	}
+	if got := string(res.Messages[1].ToolCalls[0].Function.Arguments); got != `{"x":1}` {
+		t.Fatalf("observer mutated State call arguments: %s", got)
+	}
+	if tool.paths[0] != "workspace/file.go" {
+		t.Fatalf("callback mutated tool-owned effect scope: %q", tool.paths[0])
+	}
+	if secondInterceptorPath != "workspace/file.go" {
+		t.Fatalf("one interceptor mutated the next interceptor's effect: %q", secondInterceptorPath)
+	}
+	if observer.resultEffectPath != "workspace/file.go" {
+		t.Fatalf("OnToolCall mutated the effect later published by the run: %q", observer.resultEffectPath)
+	}
+	got := res.ToolCalls[0].RouteOutcome
+	if got.Reason != "original-reason" || got.Attempts[0].ErrorClass != "original-error" ||
+		got.ScoreBreakdown.FeedbackMode != "original-mode" || !got.ScoreBreakdown.FeedbackUpdatedAt.Equal(updatedAt) {
+		t.Fatalf("observer mutated canonical route outcome: %+v", got)
 	}
 }
 

@@ -55,6 +55,10 @@ func (*ReadFile) Effect() agent.Effect {
 	}
 }
 
+// Origin declares this tool's observations workspace-local (#436 spec D4):
+// detectors tag, never block, what it returns.
+func (*ReadFile) Origin() agent.Origin { return agent.OriginWorkspace }
+
 // Invoke reads the file. All expected failures return (ToolResult{IsError:true}, nil).
 func (t *ReadFile) Invoke(ctx context.Context, raw json.RawMessage) (agent.ToolResult, error) {
 	var args readFileArgs

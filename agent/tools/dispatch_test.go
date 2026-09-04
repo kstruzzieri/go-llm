@@ -1304,3 +1304,116 @@ func TestDispatchCompletionCallbackRunsAfterPermitsRelease(t *testing.T) {
 		t.Fatalf("completion events = %+v, %+v", firstEvent, secondEvent)
 	}
 }
+
+// answerCaller answers every child with a fixed final message and a model
+// identity, as the production caller does (runChild reports the identity).
+type answerCaller struct{ answer string }
+
+func (a answerCaller) Chat(_ context.Context, _ provider.ChatRequest, _ func(provider.ChatResponse) error) (agent.ModelResult, error) {
+	return agent.ModelResult{
+		Response:     provider.ChatResponse{Content: a.answer, Done: true},
+		RouteOutcome: &provider.RouteOutcome{ActualModel: provider.ModelKey{Provider: "local", Model: "fast"}},
+	}, nil
+}
+
+// childProbe tags step 0 of every run with a fixed risk and counts runs. The
+// mutex is the concurrency contract: one instance serves parallel children.
+type childProbe struct {
+	mu    sync.Mutex
+	block bool
+	runs  int
+}
+
+func (c *childProbe) Name() string { return "child-probe" }
+func (c *childProbe) InspectInput(_ context.Context, in agent.InputInspection) ([]agent.Finding, error) {
+	if in.Step != 0 || in.System == "" {
+		return nil, nil
+	}
+	c.mu.Lock()
+	c.runs++
+	c.mu.Unlock()
+	if c.block {
+		return []agent.Finding{{Rule: "deny", Verdict: agent.VerdictBlock, Risk: 100, Target: agent.TargetSystem}}, nil
+	}
+	return []agent.Finding{{Rule: "probe", Verdict: agent.VerdictTag, Risk: 7, Target: agent.TargetSystem}}, nil
+}
+func (c *childProbe) InspectOutput(context.Context, agent.OutputInspection) ([]agent.Finding, error) {
+	return nil, nil
+}
+func (c *childProbe) InspectToolCall(context.Context, agent.ToolCallInspection) ([]agent.Finding, error) {
+	return nil, nil
+}
+
+func childTools() []agent.Tool {
+	read := agent.Effect{Class: agent.Read, Approval: agent.ApprovalNever}
+	return []agent.Tool{
+		dispatchNamedTool{name: "read_file", effect: read},
+		dispatchNamedTool{name: "search", effect: read},
+		dispatchNamedTool{name: "glob", effect: read},
+		dispatchNamedTool{name: "list", effect: read},
+	}
+}
+
+func TestDispatchChildrenInheritInterceptorsConcurrently(t *testing.T) {
+	probe := &childProbe{}
+	tool, err := NewDispatch(answerCaller{answer: "found it"}, agent.ContextManager{}, childTools(),
+		DispatchLimits{MaxTasks: 4, MaxConcurrent: 2}, probe)
+	if err != nil {
+		t.Fatalf("NewDispatch: %v", err)
+	}
+	out, err := tool.Invoke(context.Background(), json.RawMessage(`{"tasks":["one","two","three","four"]}`))
+	if err != nil {
+		t.Fatalf("Invoke: %v", err)
+	}
+	if probe.runs != 4 {
+		t.Fatalf("interceptor ran in %d children, want 4", probe.runs)
+	}
+	var envelope dispatchEnvelope
+	if err := json.Unmarshal([]byte(out.Content), &envelope); err != nil {
+		t.Fatal(err)
+	}
+	for i, r := range envelope.Results {
+		if r.RiskScore != 7 || r.Summary != "found it" || r.StopReason != "completed" || r.Model != "local/fast" || r.Error != "" {
+			t.Fatalf("result %d = %+v, want risk_score 7 and no error", i, r)
+		}
+	}
+	if !strings.Contains(out.Content, `"risk_score":7`) {
+		t.Fatalf("envelope lacks risk_score: %s", out.Content)
+	}
+}
+
+func TestDispatchChildBlockedByInterceptorSurfacesAsChildError(t *testing.T) {
+	tool, err := NewDispatch(answerCaller{answer: "never"}, agent.ContextManager{}, childTools(), DispatchLimits{MaxTasks: 1}, &childProbe{block: true})
+	if err != nil {
+		t.Fatalf("NewDispatch: %v", err)
+	}
+	out, err := tool.Invoke(context.Background(), json.RawMessage(`{"tasks":["one"]}`))
+	if err != nil {
+		t.Fatalf("Invoke: %v", err)
+	}
+	var envelope dispatchEnvelope
+	if err := json.Unmarshal([]byte(out.Content), &envelope); err != nil {
+		t.Fatal(err)
+	}
+	r := envelope.Results[0]
+	if r.StopReason != "error" || r.RiskScore != 100 || !strings.HasPrefix(r.Error, "agent: input blocked by interceptor child-probe (deny)") {
+		t.Fatalf("result = %+v", r)
+	}
+	if !out.IsError {
+		t.Fatal("a blocked child must mark the envelope IsError")
+	}
+}
+
+func TestDispatchWithoutInterceptorsHasNoRiskScore(t *testing.T) {
+	tool, err := NewDispatch(answerCaller{answer: "x"}, agent.ContextManager{}, childTools(), DispatchLimits{MaxTasks: 1})
+	if err != nil {
+		t.Fatalf("NewDispatch: %v", err)
+	}
+	out, err := tool.Invoke(context.Background(), json.RawMessage(`{"tasks":["one"]}`))
+	if err != nil {
+		t.Fatalf("Invoke: %v", err)
+	}
+	if strings.Contains(out.Content, "risk_score") {
+		t.Fatalf("risk_score must be omitted when zero: %s", out.Content)
+	}
+}

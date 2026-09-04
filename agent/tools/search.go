@@ -53,6 +53,10 @@ func (*Search) Effect() agent.Effect {
 	}
 }
 
+// Origin declares this tool's observations workspace-local (#436 spec D4):
+// detectors tag, never block, what it returns.
+func (*Search) Origin() agent.Origin { return agent.OriginWorkspace }
+
 // Invoke walks and matches. Expected failures return (ToolResult{IsError:true}, nil).
 func (t *Search) Invoke(ctx context.Context, raw json.RawMessage) (agent.ToolResult, error) {
 	var args searchArgs

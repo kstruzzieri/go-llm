@@ -180,6 +180,12 @@ func (t *StartCommand) Effect() agent.Effect {
 	}
 }
 
+// Origin declares this tool's observations workspace-local (#436 spec D4):
+// detectors tag, never block, what it returns.
+// Output fetched from the network by the command is still classified
+// workspace; #439 reclassifies per invocation through ToolResult.Origin.
+func (*StartCommand) Origin() agent.Origin { return agent.OriginWorkspace }
+
 // Plan validates args through the shared exec preparation helper with zero
 // effective and requested timeouts (manager-owned lifetime), stashes the
 // pending plan keyed by the raw-args hash, and renders the approval preview.
@@ -346,6 +352,10 @@ func (t *CommandStatus) Effect() agent.Effect {
 	return agent.Effect{Class: agent.Read, Approval: agent.ApprovalNever, OutputCap: bgSmallOutputCap}
 }
 
+// Origin declares this tool's observations workspace-local (#436 spec D4):
+// detectors tag, never block, what it returns.
+func (*CommandStatus) Origin() agent.Origin { return agent.OriginWorkspace }
+
 // Invoke snapshots the job. Unknown or evicted handles are a model-visible
 // error with no fabricated state block.
 func (t *CommandStatus) Invoke(_ context.Context, raw json.RawMessage) (agent.ToolResult, error) {
@@ -400,6 +410,10 @@ func (t *CommandTail) Spec() agent.ToolSpec {
 func (t *CommandTail) Effect() agent.Effect {
 	return agent.Effect{Class: agent.Read, Approval: agent.ApprovalNever, OutputCap: bgTailOutputCap}
 }
+
+// Origin declares this tool's observations workspace-local (#436 spec D4):
+// detectors tag, never block, what it returns.
+func (*CommandTail) Origin() agent.Origin { return agent.OriginWorkspace }
 
 // Invoke validates max_bytes (the ring's >= 1 contract lives here), applies
 // the stdout default, and reads through the manager.
@@ -471,6 +485,10 @@ func (t *StopCommand) Effect() agent.Effect {
 		OutputCap: bgSmallOutputCap,
 	}
 }
+
+// Origin declares this tool's observations workspace-local (#436 spec D4):
+// detectors tag, never block, what it returns.
+func (*StopCommand) Origin() agent.Origin { return agent.OriginWorkspace }
 
 // Plan resolves the handle to a live snapshot for the approval preview. An
 // unknown handle is a Plan error so dispatch reports it and the user is never

@@ -85,6 +85,10 @@ func (*DelegateCode) Effect() agent.Effect {
 	}
 }
 
+// Origin declares delegate output model-authored (#436): another model's
+// text, tagged like an assistant turn rather than blocked like foreign data.
+func (*DelegateCode) Origin() agent.Origin { return agent.OriginModel }
+
 func (t *DelegateCode) Invoke(ctx context.Context, raw json.RawMessage) (agent.ToolResult, error) {
 	var args delegateArgs
 	if err := json.Unmarshal(raw, &args); err != nil {

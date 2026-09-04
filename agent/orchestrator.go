@@ -20,6 +20,9 @@ type Orchestrator struct {
 	// verifier is the optional post-write verification hook (#347). nil is the
 	// default and leaves every batch byte-for-byte unchanged.
 	verifier Verifier
+	// interceptors is the deterministic middleware chain (#436), in
+	// registration order. Empty leaves every hook a no-op.
+	interceptors []Interceptor
 }
 
 // Option configures an Orchestrator at construction. New stays source-compatible
@@ -87,8 +90,17 @@ func buildChatRequest(st State, specs []provider.Tool, outputReserve int, opts p
 	return req
 }
 
-// Run executes the loop until the model produces a final answer or a cap is hit.
+// Run executes the loop until the model produces a final answer or a cap is
+// hit. Result.Risk is published on every return path, including blocks and
+// errors.
 func (o *Orchestrator) Run(ctx context.Context, req Request, obs Observer) (Result, error) {
+	ic := &interceptorRun{}
+	res, err := o.run(ctx, req, obs, ic)
+	res.Risk = ic.result()
+	return res, err
+}
+
+func (o *Orchestrator) run(ctx context.Context, req Request, obs Observer, ic *interceptorRun) (Result, error) {
 	obs = normalizeObserver(obs)
 	if req.Goal == "" {
 		return Result{}, fmt.Errorf("agent: empty goal")
@@ -112,9 +124,23 @@ func (o *Orchestrator) Run(ctx context.Context, req Request, obs Observer) (Resu
 	if err != nil {
 		return Result{}, err
 	}
+	// #436: resolve per-run interceptors before initState so a system-prompt
+	// addendum lands in the state the model sees.
+	chain, addenda, err := resolveInterceptors(ctx, o.interceptors, RunScope{System: req.System})
+	if err != nil {
+		return Result{}, err
+	}
+	ic.chain = chain
+	req.System += addenda
 	state := initState(req)
 	historyLen := len(req.History)
 	var res Result
+
+	// #436: the initial input is inspected once, before any assembly, so a
+	// block never reaches the model and no pressure event is emitted for it.
+	if err := ic.inspectInitial(ctx, obs, &state); err != nil {
+		return finishWithError(&res, state, historyLen, err)
+	}
 
 	for step := 0; step < maxSteps; step++ {
 		assembled, pressure, atrace, err := o.ctxMgr.AssembleWithTrace(ctx, state, toolSchemaTokens, budget)
@@ -177,10 +203,19 @@ func (o *Orchestrator) Run(ctx context.Context, req Request, obs Observer) (Resu
 		modelLatency := o.now().Sub(modelStart)
 		if err != nil {
 			// A failed stream may still return collected text. Preserve only that
-			// text; any tool-call fragments may be incomplete.
-			if strings.TrimSpace(modelResult.Response.Content) != "" {
+			// text; any tool-call fragments may be incomplete. #436: the partial
+			// content and thinking are inspected before they are appended or
+			// returned; a block is joined with the provider error.
+			partial := modelResult.Response
+			if strings.TrimSpace(partial.Content) != "" || strings.TrimSpace(partial.Thinking) != "" {
+				partial.ToolCalls = nil
+				if ierr := ic.inspectOutput(ctx, obs, step, partial); ierr != nil {
+					return finishWithError(&res, state, historyLen, errors.Join(ierr, err))
+				}
+			}
+			if strings.TrimSpace(partial.Content) != "" {
 				state.Messages = append(state.Messages, Message{
-					ChatMessage: provider.ChatMessage{Role: "assistant", Content: modelResult.Response.Content},
+					ChatMessage: provider.ChatMessage{Role: "assistant", Content: partial.Content},
 					Segment:     Elastic,
 				})
 			}
@@ -188,14 +223,31 @@ func (o *Orchestrator) Run(ctx context.Context, req Request, obs Observer) (Resu
 			return res, err
 		}
 		resp := modelResult.Response
+		res.Usage = addUsage(res.Usage, resp.Usage)
+
+		// #436: inspect before the turn is recorded or published. A blocked
+		// response leaves a redacted StepRecord (usage and route only), never
+		// reaches OnStep, and dispatches nothing. An interceptor error without
+		// a block takes the same path: the response was never cleared.
+		if oerr := ic.inspectOutput(ctx, obs, step, resp); oerr != nil {
+			res.Steps = append(res.Steps, StepRecord{
+				Index: step, Response: provider.ChatResponse{Usage: resp.Usage, Done: resp.Done},
+				RouteOutcome: modelResult.RouteOutcome, Pressure: pressure, Latency: modelLatency,
+			})
+			res.Events = append(res.Events, EventRecord{Step: step, Kind: "step"})
+			return finishWithError(&res, state, historyLen, oerr)
+		}
 
 		res.Steps = append(res.Steps, StepRecord{
 			Index: step, Response: resp, RouteOutcome: modelResult.RouteOutcome, Pressure: pressure, Latency: modelLatency,
 		})
 		res.Events = append(res.Events, EventRecord{Step: step, Kind: "step"})
-		res.Usage = addUsage(res.Usage, resp.Usage)
+		// #436 spec D6: the observer gets its own copy of the tool calls, so a
+		// scribble there cannot change what the tool-call gate and Invoke see.
+		published := resp
+		published.ToolCalls = cloneToolCalls(resp.ToolCalls)
 		if err := obs.OnStep(ctx, StepEvent{
-			Index: step, Response: resp, RouteOutcome: modelResult.RouteOutcome, Pressure: pressure, Latency: modelLatency,
+			Index: step, Response: published, RouteOutcome: modelResult.RouteOutcome, Pressure: pressure, Latency: modelLatency,
 		}); err != nil {
 			return res, err
 		}
@@ -214,8 +266,8 @@ func (o *Orchestrator) Run(ctx context.Context, req Request, obs Observer) (Resu
 		}
 
 		state.Messages = append(state.Messages, assistantMessage(resp))
-		if err := o.runToolCalls(ctx, &res, &state, reg, resp.ToolCalls, req.Approver, obs, step, gov); err != nil {
-			return res, err
+		if err := o.runToolCalls(ctx, &res, &state, reg, resp.ToolCalls, req.Approver, obs, step, gov, ic); err != nil {
+			return finishWithError(&res, state, historyLen, err)
 		}
 		if res.StopReason != Completed {
 			res.Messages = resultMessages(state, historyLen)
