@@ -14,6 +14,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/kstruzzieri/go-llm/agent"
+	"github.com/kstruzzieri/go-llm/agent/interceptor"
 	agenttools "github.com/kstruzzieri/go-llm/agent/tools"
 	"github.com/kstruzzieri/go-llm/config"
 	"github.com/kstruzzieri/go-llm/conversation"
@@ -53,6 +54,7 @@ type flags struct {
 	delegateRole        string
 	dispatch            bool
 	dispatchRole        string
+	interceptors        bool // -interceptors: default detector chain on every orchestrator and dispatch child (#514)
 	mcpStdio            stringSliceFlag
 	mcpHTTP             stringSliceFlag
 	allowDestinations   stringSliceFlag
@@ -123,6 +125,7 @@ func parseFlags(args []string) (flags, error) {
 	fs.StringVar(&f.delegateRole, "delegate-role", "coding", "model role the delegate_code tool routes to")
 	fs.BoolVar(&f.dispatch, "dispatch", false, "enable the dispatch tool (bounded read-only exploration tasks use backend-governed concurrency; ungoverned routing stays serial)")
 	fs.StringVar(&f.dispatchRole, "dispatch-role", "", "model role dispatch child agents route to (default: the primary agent chain, so children never force a model swap)")
+	fs.BoolVar(&f.interceptors, "interceptors", false, "enable the interceptor pipeline (#436): zero-width, encoding, and typoglycemia detectors inspect initial input, model-authored tool calls, invoked tool results, and verifier observations on the agent and dispatch children; strong instruction and zero-width findings in foreign (including MCP) or unknown results are blocked, while trusted content and weak phrases are tagged; risk appears at interactive tool-call and plan-lock prompts and successful REPL/-p stderr footers, but not verifier approval prompts; default off")
 	fs.Var(&f.mcpStdio, "mcp-stdio", "attach an MCP server over stdio: \"[alias=]command args...\" (repeatable; use `env KEY=val cmd` for env vars)")
 	fs.Var(&f.mcpHTTP, "mcp-http", "attach an MCP server over streamable HTTP: \"[alias=]https://endpoint\" (repeatable)")
 	fs.Var(&f.allowDestinations, "allow-destination", "admit a remote model destination without prompting: \"<provider>/<canonical base URL>\" (repeatable; the deprecated \"<provider>=<base URL>\" form is still accepted; required for remote destinations in noninteractive runs)")
@@ -505,6 +508,7 @@ type startupInfo struct {
 	delegateLine       string
 	scratchLine        string
 	dispatchLine       string
+	interceptorLine    string
 }
 
 // startupNotices renders the human-facing startup lines (written to stderr).
@@ -537,6 +541,9 @@ func startupNotices(info startupInfo) []string {
 	}
 	if info.dispatchLine != "" {
 		out = append(out, info.dispatchLine)
+	}
+	if info.interceptorLine != "" {
+		out = append(out, info.interceptorLine)
 	}
 	if info.projectContextLine != "" {
 		out = append(out, info.projectContextLine)
@@ -571,6 +578,27 @@ func startupNotices(info startupInfo) []string {
 	return out
 }
 
+// interceptorsFor is the ONE place the flag becomes a chain (#514 D2): the
+// startup orchestrator, every factory-built orchestrator, and every dispatch
+// child derive exactly this list from the production flags value. nil when
+// -interceptors is off.
+func interceptorsFor(f flags) []agent.Interceptor {
+	if !f.interceptors {
+		return nil
+	}
+	return interceptor.Defaults()
+}
+
+// interceptorsNotice names the installed chain in the startup notice, from
+// the instances themselves, so the line cannot drift from what runs.
+func interceptorsNotice(ics []agent.Interceptor) string {
+	names := make([]string, len(ics))
+	for i, ic := range ics {
+		names[i] = ic.Name()
+	}
+	return "interceptors: enabled (" + strings.Join(names, ", ") + ")"
+}
+
 // newOrchestratorFactory returns the session's orchestrator constructor. The
 // session builds one per agentflow parallel worker on top of the startup
 // orchestrator, and every one must see the same context policy: -progressive
@@ -582,6 +610,7 @@ func startupNotices(info startupInfo) []string {
 //
 // With -dispatch it also installs the per-run dispatch invocation cap, and
 // with a workspace-declared verifier (#347) the post-write verification hook.
+// With -interceptors it also installs the default detector chain (#514).
 // A typed-nil verifier would satisfy the interface and panic on first use
 // (#347); the factory normalizes the two concrete types it can receive so
 // that guarantee does not rest on every call site.
@@ -602,6 +631,12 @@ func newOrchestratorFactory(caller agent.ModelCaller, f flags, verifier agent.Ve
 			Tool: agenttools.DispatchToolName,
 			Max:  agenttools.DefaultDispatchCallsPerRun,
 		}))
+	}
+	if ics := interceptorsFor(f); len(ics) > 0 {
+		// #514 D2: the same chain on every orchestrator this factory builds;
+		// dispatch children receive it through newDispatchTool from the same
+		// flags value.
+		opts = append(opts, agent.WithInterceptors(ics...))
 	}
 	return func() *agent.Orchestrator {
 		return agent.New(caller, agent.ContextManager{Mixed: f.progressive}, opts...)
@@ -1178,6 +1213,10 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 		}
 		dispatchLine = fmt.Sprintf("dispatch: enabled -> %s", head)
 	}
+	interceptorLine := ""
+	if ics := interceptorsFor(f); len(ics) > 0 {
+		interceptorLine = interceptorsNotice(ics)
+	}
 
 	wantAgentMemory, agentMemoryWarn := agentMemoryRequest(f.agentMemory, f.noSession)
 	if agentMemoryWarn != "" {
@@ -1460,6 +1499,7 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 		delegateLine:       delegateLine,
 		scratchLine:        scratchLine,
 		dispatchLine:       dispatchLine,
+		interceptorLine:    interceptorLine,
 	}) {
 		_, _ = fmt.Fprintln(stderr, line)
 	}
