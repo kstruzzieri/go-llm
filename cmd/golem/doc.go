@@ -24,11 +24,11 @@
 // show "interceptor risk 30"; the verifier approval prompt cannot show it.
 // Successful REPL and -p stderr footers append " · risk 30". The
 // non-interactive -approve-plan-lock path is unchanged. A dispatch child's
-// score stays in that child's existing
-// risk_score envelope field rather than aggregating into the parent report.
-// The -trace record carries every parent finding. The default detectors return
-// no output findings; streamed model tokens therefore remain unchanged.
-// Off by default until the trailers' effect on answer quality is measured.
+// score stays in that child's existing risk_score envelope field rather than
+// aggregating into the parent report. The -trace record carries every parent
+// finding. The default detectors return no output findings; streamed model
+// tokens therefore remain unchanged. Off by default until the trailers'
+// effect on answer quality is measured.
 //
 // The source subcommand manages ad-hoc documents in the workspace index over
 // the managed-document registry:
