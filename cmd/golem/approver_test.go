@@ -788,3 +788,19 @@ func TestApproverGrantHitShowsRiskLine(t *testing.T) {
 		t.Fatalf("grant-hit output = %q, want %q", out.String(), want)
 	}
 }
+
+// TestApproverZeroScoreFindingStillPrintsThroughPrompt drives the call-site
+// guard, not just riskLine: a report whose only finding carries no risk must
+// still surface at the prompt, so a guard on the score would go red here.
+func TestApproverZeroScoreFindingStillPrintsThroughPrompt(t *testing.T) {
+	var out strings.Builder
+	a := newReplApprover(newScannerSource(strings.NewReader("y\n"), &out), &out, false)
+	risk := agent.RiskReport{Score: 0, Findings: []agent.Finding{{Interceptor: "x", Rule: "r"}}}
+	if _, err := a.ApproveWithRisk(context.Background(), execCall(), "run command:\n  argv: go test\n", "exec:abc", risk); err != nil {
+		t.Fatal(err)
+	}
+	want := "run command:\n  argv: go test\ninterceptor risk 0\nRun this command? [y/N] "
+	if out.String() != want {
+		t.Fatalf("prompt = %q, want %q", out.String(), want)
+	}
+}
