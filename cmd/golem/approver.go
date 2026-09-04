@@ -27,9 +27,10 @@ type replApprover struct {
 	grants *approvalGrants
 }
 
-// Compile-time assertions: replApprover must satisfy both approver contracts.
+// Compile-time assertions: replApprover must satisfy all three approver contracts.
 var _ agent.Approver = (*replApprover)(nil)
 var _ agent.KeyedApprover = (*replApprover)(nil)
+var _ agent.RiskApprover = (*replApprover)(nil)
 
 func newReplApprover(src lineSource, out io.Writer, color bool) *replApprover {
 	return &replApprover{src: src, out: out, color: color}
@@ -41,9 +42,17 @@ func (a *replApprover) Approve(ctx context.Context, call provider.ToolCall, prev
 	return d.Approved, err
 }
 
-// ApproveKeyed shows the preview and reads one line. "y"/"yes" (case-insensitive)
-// approves. "n", empty, and EOF deny with a nil error. A canceled context (Ctrl-C)
-// denies and returns the context error so the run aborts.
+// ApproveKeyed is the KeyedApprover entry point: the same prompt with no
+// interceptor report (the library prefers ApproveWithRisk, so this is reached
+// by the verifier's approveVerify and by tests).
+func (a *replApprover) ApproveKeyed(ctx context.Context, call provider.ToolCall, preview, key string) (agent.ApprovalDecision, error) {
+	return a.ApproveWithRisk(ctx, call, preview, key, agent.RiskReport{})
+}
+
+// ApproveWithRisk is the one prompt body (#514 D3). It shows the preview and
+// reads one line. "y"/"yes" (case-insensitive) approves. "n", empty, and EOF
+// deny with a nil error. A canceled context (Ctrl-C) denies and returns the
+// context error so the run aborts.
 // The prompt and rendering are action-neutral: run_command and MCP calls get a
 // plain preview and run prompt; all other calls get the diff rendering and "Apply
 // this change?" prompt.
@@ -57,7 +66,7 @@ func (a *replApprover) Approve(ctx context.Context, call provider.ToolCall, prev
 // this session): approve now and store the grant. MCP tools and submit_plan
 // are never on the allowlist. The key is opaque: never parsed, never derived
 // from the preview.
-func (a *replApprover) ApproveKeyed(ctx context.Context, call provider.ToolCall, preview, key string) (agent.ApprovalDecision, error) {
+func (a *replApprover) ApproveWithRisk(ctx context.Context, call provider.ToolCall, preview, key string, risk agent.RiskReport) (agent.ApprovalDecision, error) {
 	if a.beforeWrite != nil {
 		if err := a.beforeWrite(); err != nil {
 			return agent.ApprovalDecision{}, err
@@ -107,6 +116,12 @@ func (a *replApprover) ApproveKeyed(ctx context.Context, call provider.ToolCall,
 		// command, but a write/edit grant covers the whole class — "a" here is
 		// /auto-edits on for the session, not "always this file".
 		question = grantQuestion("Apply this change?", grantable, "a=all edits this session")
+	}
+	// #514 D3: the run's cumulative report, between the preview and the
+	// decision, on the prompted and the grant-covered path alike. The line
+	// contains only fixed text plus the integer score.
+	if line := riskLine(risk); line != "" {
+		_, _ = fmt.Fprintln(a.out, line)
 	}
 	if grantable && a.grants.granted(scope, key) {
 		_, _ = fmt.Fprintln(a.out, "auto-approved (session grant)")
@@ -167,6 +182,16 @@ func grantQuestion(q string, grantable bool, legend string) string {
 		return q + " [y/N/" + legend + "] "
 	}
 	return q + " [y/N] "
+}
+
+// riskLine renders the run's cumulative interceptor score for a prompt (#514
+// D3). Findings, not the score, gate the line: a zero-risk finding is still
+// something the human should see.
+func riskLine(risk agent.RiskReport) string {
+	if len(risk.Findings) == 0 {
+		return ""
+	}
+	return fmt.Sprintf("interceptor risk %d", risk.Score)
 }
 
 // renderPlain prints a non-diff preview verbatim (no +/- coloring).
