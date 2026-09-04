@@ -1,8 +1,8 @@
 # Changelog fragments
 
-Do not edit `CHANGELOG.md` in a pull request. Every PR that prepends its
-entry under `## [Unreleased]` shares one insertion point, so concurrent PRs
-conflict there on every merge. Instead add one file here:
+Outside the fold-and-stamp release PR, do not edit `CHANGELOG.md`. Every PR
+that prepends its entry under `## [Unreleased]` shares one insertion point,
+so concurrent PRs conflict there on every merge. Instead add one file here:
 
     changelog.d/<issue>-<slug>.md
 
@@ -12,7 +12,8 @@ conflict there on every merge. Instead add one file here:
   `CHANGELOG.md`: first line `### <Category> — <title> (#<issue>)` with
   Category one of Added, Changed, Fixed, Removed, Deprecated, Security,
   Amended, then the body. Consumers read the folded result, so write it for
-  them.
+  them. Use `####` or deeper headings in the body; higher-level ATX or Setext
+  headings would escape the entry's section and are rejected.
 - Not every PR needs one. Tooling, CI, and test-only changes carry no
   fragment and are not rejected.
 
