@@ -1,9 +1,15 @@
 package main
 
 import (
+	"bytes"
+	"context"
+	"errors"
 	"fmt"
+	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 	"unicode"
 )
 
@@ -218,4 +224,214 @@ func gitContextNotice(st gitState) string {
 		tree = fmt.Sprintf("%d %s", st.TotalEntries, pluralNoun(st.TotalEntries, "status entry", "status entries"))
 	}
 	return fmt.Sprintf("%s, %s, %d %s", gitContextText(st.Branch), tree, st.TotalCommits, pluralNoun(st.TotalCommits, "commit", "commits"))
+}
+
+// Capture bounds (#354 D4, D6). gitContextRawCap is a variable so tests can
+// lower it and prove the exact-count contract; production never changes it.
+// Every stdout writer keeps at most the cap while counting every newline it
+// receives, so Git writes to completion (never a broken pipe) and totals stay
+// exact without retaining the tail. gitContextTimeout is the one execution
+// deadline shared by all three calls; gitContextWaitDelay closes inherited
+// pipes after cancellation so a grandchild cannot hold the capture open.
+var gitContextRawCap = 256 * 1024
+
+const (
+	gitContextStderrCap = 4 * 1024
+	gitContextTimeout   = 2 * time.Second
+	gitContextWaitDelay = 100 * time.Millisecond
+)
+
+// capWriter retains the first max bytes written to it, counts every newline in
+// every Write (including discarded bytes), and always reports the full length
+// so the producer never sees a short write.
+type capWriter struct {
+	max       int
+	buf       []byte
+	Lines     int
+	Truncated bool
+}
+
+func (w *capWriter) Write(p []byte) (int, error) {
+	w.Lines += bytes.Count(p, []byte{'\n'})
+	if room := w.max - len(w.buf); room >= len(p) {
+		w.buf = append(w.buf, p...)
+	} else {
+		if room > 0 {
+			w.buf = append(w.buf, p[:room]...)
+		}
+		if len(p) > 0 {
+			w.Truncated = true
+		}
+	}
+	return len(p), nil
+}
+
+func (w *capWriter) String() string { return string(w.buf) }
+
+// gitContextAbsence says why a capture produced no block. Startup silences both
+// absence cases; refresh clears the old block and reports which one it was.
+type gitContextAbsence uint8
+
+const (
+	gitContextPresent gitContextAbsence = iota
+	gitContextNotRepository
+	gitContextGitUnavailable
+)
+
+// gitContextSnapshot is one capture result: the rendered block and its body
+// byte count for the shared budget, the parsed state behind them, and the
+// absence reason when Block is empty.
+type gitContextSnapshot struct {
+	Block        string
+	PayloadBytes int
+	State        gitState
+	Absence      gitContextAbsence
+}
+
+// gitExitError is a Git command that ran and exited nonzero. Stderr is capped
+// and control-safe, so the error can be shown to the user as-is.
+type gitExitError struct {
+	args   []string
+	code   int
+	stderr string
+}
+
+func (e *gitExitError) Error() string {
+	return fmt.Sprintf("git %s: exit status %d: %s", strings.Join(e.args, " "), e.code, e.stderr)
+}
+
+// runGit runs one read-only Git command with argv only: no shell, no stdin,
+// cmd.Dir=root, the capture environment, capped stdout/stderr, and a pipe
+// grace of gitContextWaitDelay after ctx ends. Context errors are surfaced
+// through errors.Is; a start failure wraps exec's error (so exec.ErrNotFound
+// stays visible); a nonzero exit becomes *gitExitError.
+func runGit(ctx context.Context, gitPath, root string, args ...string) (*capWriter, error) {
+	cmd := exec.CommandContext(ctx, gitPath, args...)
+	cmd.Dir = root
+	cmd.Env = gitContextEnv()
+	stdout := &capWriter{max: gitContextRawCap}
+	stderr := &capWriter{max: gitContextStderrCap}
+	cmd.Stdout, cmd.Stderr = stdout, stderr
+	cmd.WaitDelay = gitContextWaitDelay
+	err := cmd.Run()
+	if err == nil {
+		return stdout, nil
+	}
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return nil, fmt.Errorf("git %s: %w", strings.Join(args, " "), ctxErr)
+	}
+	var exit *exec.ExitError
+	if errors.As(err, &exit) {
+		return nil, &gitExitError{args: args, code: exit.ExitCode(), stderr: gitContextText(strings.TrimSpace(stderr.String()))}
+	}
+	return nil, fmt.Errorf("git %s: %w", strings.Join(args, " "), err)
+}
+
+// completeLines returns the complete, newline-terminated lines retained by w.
+// A cut trailing fragment is dropped: it is counted by w.Lines only if its
+// newline was seen, which by definition it was not.
+func completeLines(w *capWriter) []string {
+	s := w.String()
+	i := strings.LastIndexByte(s, '\n')
+	if i < 0 {
+		return nil
+	}
+	return strings.Split(s[:i], "\n")
+}
+
+// gitNotRepository classifies the one silent capture failure: Git's stable
+// LC_ALL=C refusal outside a work tree. Bare repositories, dubious ownership,
+// and corruption exit 128 with different text and stay errors.
+func gitNotRepository(err error) bool {
+	var exit *gitExitError
+	return errors.As(err, &exit) && exit.code == 128 && strings.Contains(exit.stderr, "not a git repository")
+}
+
+// workspacePrefix computes the slash-terminated path of root below toplevel,
+// or "" at the repository root. It rejects a non-absolute toplevel and a root
+// outside it; a valid child named "..foo" is not outside.
+func workspacePrefix(toplevel, root string) (string, error) {
+	if !filepath.IsAbs(toplevel) || filepath.Clean(toplevel) != toplevel {
+		return "", fmt.Errorf("git rev-parse: toplevel %q is not an absolute clean path", gitContextText(toplevel))
+	}
+	rel, err := filepath.Rel(toplevel, root)
+	if err != nil {
+		return "", fmt.Errorf("git rev-parse: workspace is not under toplevel: %w", err)
+	}
+	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return "", fmt.Errorf("git rev-parse: toplevel %q does not contain the workspace", gitContextText(toplevel))
+	}
+	if rel == "." {
+		return "", nil
+	}
+	return filepath.ToSlash(rel) + "/", nil
+}
+
+// loadGitContext captures the repository snapshot for the workspace at root
+// with three bounded Git calls under one shared deadline. A workspace outside
+// any work tree and a missing Git executable are absences, not errors; every
+// other failure (deadline, dubious ownership, bare or corrupt repository,
+// malformed output, other nonzero exit) is returned as an error and the caller
+// decides whether to warn or retain a previous block.
+func loadGitContext(ctx context.Context, gitPath, root string) (gitContextSnapshot, error) {
+	// Executable availability is decided here, before any process starts: a
+	// start failure after this point is a genuine error. (A vanished
+	// workspace also fails at start with fs.ErrNotExist, and Go reports the
+	// child's chdir failure against the binary's path, so the two cannot be
+	// told apart after the fact.)
+	if _, err := exec.LookPath(gitPath); err != nil {
+		return gitContextSnapshot{Absence: gitContextGitUnavailable}, nil
+	}
+	ctx, cancel := context.WithTimeout(ctx, gitContextTimeout)
+	defer cancel()
+
+	out, err := runGit(ctx, gitPath, root, "--no-pager", "rev-parse", "--show-toplevel")
+	switch {
+	case err == nil:
+	case gitNotRepository(err):
+		return gitContextSnapshot{Absence: gitContextNotRepository}, nil
+	default:
+		return gitContextSnapshot{}, err
+	}
+	// Repository identity is never inferred from a partial path: the value
+	// must be complete and newline-terminated. An embedded newline is a legal
+	// path byte, so only the final terminator is removed.
+	raw := out.String()
+	if out.Truncated || !strings.HasSuffix(raw, "\n") {
+		return gitContextSnapshot{}, errors.New("git rev-parse: malformed toplevel output")
+	}
+	var st gitState
+	st.Toplevel = strings.TrimSuffix(raw, "\n")
+	if st.Prefix, err = workspacePrefix(st.Toplevel, root); err != nil {
+		return gitContextSnapshot{}, err
+	}
+
+	out, err = runGit(ctx, gitPath, root, "--no-pager", "-c", "core.fsmonitor=false", "--no-optional-locks",
+		"status", "--porcelain=v1", "--branch", "--no-renames", "--untracked-files=normal", "--ignore-submodules=none")
+	if err != nil {
+		return gitContextSnapshot{}, err
+	}
+	lines := completeLines(out)
+	if len(lines) == 0 || !strings.HasPrefix(lines[0], "## ") {
+		return gitContextSnapshot{}, errors.New("git status: missing branch header")
+	}
+	st.Branch = strings.TrimPrefix(lines[0], "## ")
+	st.Unborn = strings.HasPrefix(st.Branch, "No commits yet on ") || strings.HasPrefix(st.Branch, "Initial commit on ")
+	st.Entries = lines[1:]
+	// The header is the one line that is always retained, so the exact
+	// entry total is the full line count minus it, even past the raw cap.
+	st.TotalEntries = out.Lines - 1
+
+	if !st.Unborn {
+		out, err = runGit(ctx, gitPath, root, "--no-pager", "log", "--no-color", "--no-show-signature", "--no-decorate",
+			"-n", strconv.Itoa(gitContextCommits), "--format=%h %cs %s")
+		if err != nil {
+			return gitContextSnapshot{}, err
+		}
+		st.Commits = completeLines(out)
+		st.TotalCommits = out.Lines
+	}
+
+	block, payload := gitContextBlock(st, gitContextMaxBytes)
+	return gitContextSnapshot{Block: block, PayloadBytes: payload, State: st}, nil
 }
