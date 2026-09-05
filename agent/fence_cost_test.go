@@ -169,6 +169,16 @@ func TestFramedToolBudgetFit(t *testing.T) {
 			t.Errorf("legacy one below: messages=%d InputTokens=%d Evicted=%d Compactions=%d, want 1/2/1/1", len(out.Messages), p.InputTokens, p.Evicted, p.Compactions)
 		}
 	})
+	t.Run("legacy pointer compactor is stamped too", func(t *testing.T) {
+		ptr := ContextManager{Compactor: &RecencyCompactor{Estimate: runeEstimator}, Estimate: runeEstimator, frameToolResults: true}
+		out, p, err := ptr.Assemble(context.Background(), framedFitState(framedFitChain("RESULT", nil, Elastic)), 0, TokenBudget{Input: 114})
+		if err != nil {
+			t.Fatalf("Assemble: %v (an unstamped pointer compactor fits raw and fails validation)", err)
+		}
+		if len(out.Messages) != 1 || p.InputTokens != 2 || p.Evicted != 1 {
+			t.Errorf("pointer compactor: messages=%d InputTokens=%d Evicted=%d, want 1/2/1", len(out.Messages), p.InputTokens, p.Evicted)
+		}
+	})
 	t.Run("legacy pinned tool counts its envelope toward exhaustion", func(t *testing.T) {
 		_, p, err := legacy.Assemble(context.Background(), framedFitState(framedFitChain("RESULT", nil, Pinned)), 0, TokenBudget{Input: 114})
 		if !errors.Is(err, ErrContextExhausted) {

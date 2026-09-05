@@ -110,7 +110,16 @@ func normalizeContextManager(m ContextManager) ContextManager {
 		// manager's final validation does, frame envelope included.
 		c.frameToolResults = m.frameToolResults
 		m.Compactor = c
+	case *RecencyCompactor:
+		// Value-receiver methods make the pointer form a Compactor too; stamp
+		// a copy rather than writing through the caller's pointer.
+		cp := *c
+		cp.frameToolResults = m.frameToolResults
+		m.Compactor = cp
 	}
+	// Any other Compactor prices its own fit; final validation still charges
+	// the envelope, so an unaware compactor's oversized result is rejected
+	// (ErrContextExhausted), never shipped.
 	return m
 }
 
