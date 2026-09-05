@@ -76,7 +76,10 @@ type ToolInvocationLimit struct {
 
 // Request is the unit of work handed to Run.
 type Request struct {
-	Goal           string
+	Goal string
+	// System is the caller's application prompt. Run appends
+	// ToolTrustContract and any interceptor addenda after it (#430), so the
+	// effective system prompt the model receives is longer than this text.
 	System         string
 	HistorySummary string
 	History        []provider.ChatMessage // prior non-system turns; runtime marks every entry Elastic

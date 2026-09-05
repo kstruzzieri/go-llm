@@ -60,7 +60,10 @@ type SessionStore interface {
 
 // Options configures a Runtime.
 type Options struct {
-	Root   string
+	Root string
+	// System is the application prompt; empty selects SystemPrompt(false,
+	// false). agent.Run appends agent.ToolTrustContract after it on every
+	// turn (#430), so a host never composes the base contract itself.
 	System string
 	Tools  []agent.Tool
 	// ScopeGuard is installed on the runtime-owned Workspace backing every
