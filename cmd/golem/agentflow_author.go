@@ -1470,10 +1470,9 @@ func runAgentflowAuthorWithClient(ctx context.Context, stdout, stderr io.Writer,
 
 	planTools := append(agenttools.NewFileToolsForWorkspace(ws), newSubmitPlanTool(as))
 
-	system := plannerBasePrompt
-	if sess.sysInputs.projectContext != "" {
-		system = system + "\n\n" + sess.sysInputs.projectContext
-	}
+	// The same current fragments the runtime prompt carries, in the same
+	// order (#354 D10); refresh updates sysInputs, so a later -goal sees it.
+	system := plannerBasePrompt + injectedContext(sess.sysInputs)
 
 	plannerOpts := plannerModelOptions(sess.modelOptions)
 	req := agent.Request{
