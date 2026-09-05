@@ -125,6 +125,36 @@ func TestNewInvariantsOwnsPatternData(t *testing.T) {
 	expectOne(t, inspectWith(t, iv, "write_file", `{"path":"sub/.git/config"}`), "protected_path", `path "sub/.git/config" matches protected pattern`)
 }
 
+// TestInvariantsSeveralRowsPerTool: every row declared for a tool is
+// evaluated, findings come back in table order, and a row whose field is
+// absent contributes nothing while its siblings still fire.
+func TestInvariantsSeveralRowsPerTool(t *testing.T) {
+	iv, err := NewInvariants([]Invariant{
+		{Tool: "t", Name: "first", Field: "a", Check: PathDeny{Pattern: regexp.MustCompile(`^x$`)}},
+		{Tool: "t", Name: "second", Field: "b", Check: PathDeny{Pattern: regexp.MustCompile(`^y$`)}},
+		{Tool: "t", Name: "third", Field: "c", Check: PathDeny{Pattern: regexp.MustCompile(`^z$`)}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := inspectWith(t, iv, "t", `{"c":"z","b":"nope","a":"x"}`)
+	var rules []string
+	for _, f := range found {
+		rules = append(rules, f.Rule)
+	}
+	if want := []string{"first", "third"}; !reflect.DeepEqual(rules, want) {
+		t.Fatalf("rules = %v, want %v (table order, absent or clean rows skipped)", rules, want)
+	}
+	found = inspectWith(t, iv, "t", `{"A":"x","a":"x","b":"y"}`)
+	rules = rules[:0]
+	for _, f := range found {
+		rules = append(rules, f.Rule)
+	}
+	if want := []string{"ambiguous_argument", "second"}; !reflect.DeepEqual(rules, want) {
+		t.Fatalf("rules = %v, want %v", rules, want)
+	}
+}
+
 // inspectWith runs one call through a specific guard.
 func inspectWith(t *testing.T, iv Invariants, tool, args string) []agent.Finding {
 	t.Helper()
