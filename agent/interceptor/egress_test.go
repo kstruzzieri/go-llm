@@ -33,16 +33,19 @@ func argvJSON(t *testing.T, argv ...string) string {
 }
 
 // classifyArgv runs the classifier through InspectToolCall on an exec-class
-// call and checks the input slice is untouched.
+// call. It also runs the internal classify on the caller's own slice and
+// checks that slice is untouched: InspectToolCall decodes a fresh slice, so
+// only the direct call can prove the peel never writes to its input.
 func classifyArgv(t *testing.T, argv ...string) []agent.Finding {
 	t.Helper()
 	before := slices.Clone(argv)
+	classify(argv)
+	if !slices.Equal(argv, before) {
+		t.Fatalf("classify modified its input: %q -> %q", before, argv)
+	}
 	found, err := Egress{}.InspectToolCall(context.Background(), egressCall(execEffect, argvJSON(t, argv...)))
 	if err != nil {
 		t.Fatal(err)
-	}
-	if !slices.Equal(argv, before) {
-		t.Fatalf("classifier modified its input: %q -> %q", before, argv)
 	}
 	return found
 }
