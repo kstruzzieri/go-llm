@@ -21,8 +21,9 @@ func TestPathDenyWindowsSeparators(t *testing.T) {
 		{"mixed separators and case", "edit_file", `{"path":"sub/.Git\\config","old_string":"a","new_string":"b"}`, `path "sub/.git/config" matches protected pattern`},
 		{"dot-dot with backslashes", "write_file", `{"path":"foo\\..\\.kube\\config","content":"x"}`, `path ".kube/config" matches protected pattern`},
 		{"read env with backslash parent", "read_file", `{"path":"sub\\.env"}`, `path "sub/.env" matches protected pattern`},
-		// Win32 opens ".git." and ".ssh " as ".git" and ".ssh": the trailing
-		// period and space are trimmed per component before matching.
+		// Win32 drops a single trailing period from an intermediate segment
+		// and all trailing periods and spaces from the final one; the guard
+		// trims both from every component, which can only over-block.
 		{"trailing period alias", "write_file", `{"path":".git.\\hooks\\pre-commit","content":"x"}`, `path ".git/hooks/pre-commit" matches protected pattern`},
 		{"trailing space alias", "read_file", `{"path":"sub\\.ssh \\id_rsa"}`, `path "sub/.ssh/id_rsa" matches protected pattern`},
 		{"final component trailing periods", "read_file", `{"path":".env.."}`, `path ".env" matches protected pattern`},

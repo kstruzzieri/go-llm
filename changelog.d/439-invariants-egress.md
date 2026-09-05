@@ -27,8 +27,9 @@ included. Guards inspect tool calls only and add no model-visible trailer.
   `network`, `package-manager`, `interpreter` or `unknown` after peeling
   the supported `env`/`nohup`/`nice`/`time`/`timeout`/`stdbuf` forms, with
   explicit `git` and `go` subcommand tables and a literal-word scan of a
-  recognized inline shell script. Anything it cannot parse, and anything
-  outside an explicit quiet set, stays visible as `unknown`. One tag
+  recognized inline shell script. Anything it cannot parse, an inline
+  script it cannot read literally included, and anything outside an
+  explicit quiet set, stays visible as `unknown`. One tag
   finding per call: `Rule` is the class, `Detail` a bounded label. Weights:
   network 20, privileged 20, package-manager 10, unknown 10, interpreter 0.
 - `agent.RiskReport.CurrentToolCallFindings`: set only on the report handed

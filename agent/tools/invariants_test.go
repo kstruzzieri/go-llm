@@ -97,9 +97,11 @@ func TestDefaultInvariantsMatchToolSchemas(t *testing.T) {
 	}
 }
 
-// protectedByOracle is an independent second opinion for the parity test:
-// split the path the way the host would open it and look for a protected
-// component, or the exact .env basename for reads.
+// protectedByOracle is an independent second opinion for the parity test on
+// the decoder axis: split the path the way the host would open it and look
+// for a protected component, or the exact .env basename for reads. It
+// shares the host normalization with the guard on purpose; normalization
+// itself is pinned by literal expectations in the interceptor package.
 func protectedByOracle(p string, forRead bool) bool {
 	clean := strings.ToLower(filepath.ToSlash(filepath.Clean(p)))
 	parts := strings.Split(clean, "/")

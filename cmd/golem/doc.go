@@ -42,8 +42,9 @@
 // invariants (<name>)". The egress classifier tags every run_command and
 // start_command by what its argv visibly reaches (privileged, network,
 // package-manager, interpreter, unknown) after peeling env, nohup, nice,
-// time, timeout and stdbuf; anything it cannot parse, and any command
-// outside its quiet set, stays visible as unknown. The approval prompt
+// time, timeout and stdbuf; anything it cannot parse, including an inline
+// script it cannot read literally, and any command outside its quiet set,
+// stays visible as unknown. The approval prompt
 // appends the current call's class and label to the risk line,
 // "interceptor risk 20 · egress: network (git push)", on grant-covered
 // auto-approvals too. These are finite checks over the argv, not a sandbox:

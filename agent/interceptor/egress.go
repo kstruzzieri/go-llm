@@ -216,6 +216,10 @@ scan:
 			return nil, peelUnsupported
 		}
 		args = args[1:]
+		// GNU getopt permutes, so "timeout 10 -- cmd" is the same command.
+		if len(args) > 0 && args[0] == "--" {
+			args = args[1:]
+		}
 	}
 	return args, peelOK
 }
@@ -266,10 +270,13 @@ func inlineShellScript(argv []string) (shell, flag, script string, ok bool) {
 // unquoted whitespace separates words, an unquoted pipe separates commands,
 // single quotes are literal, double quotes are literal unless they contain
 // $, backtick or backslash, and a # at a word start comments out the rest
-// of the script. Any other unquoted metacharacter, an unterminated quote,
-// an empty command, or a comment that is followed by more script lines
-// makes the script unsupported.
+// of the script. Trailing blanks and newlines are ignored: they change
+// nothing about what runs and need no evaluation. Any other unquoted
+// metacharacter (an interior newline included), an unterminated quote, an
+// empty command, or a comment that is followed by more script lines makes
+// the script unsupported.
 func splitShellWords(script string) (cmds [][]string, ok bool) {
+	script = strings.TrimRight(script, " \t\n")
 	var (
 		cur     []string
 		word    []rune
@@ -344,8 +351,9 @@ func commandWords(words []string) []string {
 
 // recognizeFetch reports a simple command that delivers a remote fetch on
 // stdout: curl with only -f/-s/-S/-L (singly or clustered), or wget with
-// optional -q and the stdout marker -O -, -O- or exactly -qO-; either may
-// use -- and must have exactly one literal operand.
+// optional -q and the stdout marker -O -, -O-, -qO- or -qO -; either may
+// use -- and must have exactly one literal operand. Other clusters are not
+// parsed.
 func recognizeFetch(words []string) (name string, ok bool) {
 	words = commandWords(words)
 	if len(words) == 0 {
@@ -364,7 +372,7 @@ func recognizeFetch(words []string) (name string, ok bool) {
 		case name == "wget" && w == "-q":
 		case name == "wget" && (w == "-O-" || w == "-qO-"):
 			stdout = true
-		case name == "wget" && w == "-O" && i+1 < len(words) && words[i+1] == "-":
+		case name == "wget" && (w == "-O" || w == "-qO") && i+1 < len(words) && words[i+1] == "-":
 			stdout, i = true, i+1
 		default:
 			return "", false
@@ -421,24 +429,36 @@ func classify(argv []string) (egressClass, bool) {
 	return classifyCommand(argv, true)
 }
 
-// scriptNetworkEvidence returns the network label for the first simple
-// command of a recognized inline script that classifies as network on its
-// own (a direct client, or a network git subcommand), or false.
-func scriptNetworkEvidence(rest []string) (string, bool) {
+// scriptEvidence is what an inline script contributes to classification.
+type scriptEvidence int
+
+const (
+	scriptNone        scriptEvidence = iota // not an inline script, or readable with no network command
+	scriptUnsupported                       // an inline script the recognizer cannot read
+	scriptNetwork                           // a readable script with a network command in command position
+)
+
+// scriptNetworkEvidence inspects a recognized inline script. A readable
+// script whose simple commands include one that classifies as network on
+// its own (a direct client, or a network git subcommand) yields that label;
+// a script the tokenizer cannot read is reported as such so the caller can
+// keep the uncertainty visible instead of dropping to interpreter; anything
+// else contributes nothing.
+func scriptNetworkEvidence(rest []string) (label string, ev scriptEvidence) {
 	shell, flag, script, ok := inlineShellScript(rest)
 	if !ok {
-		return "", false
+		return "", scriptNone
 	}
 	cmds, ok := splitShellWords(script)
 	if !ok {
-		return "", false
+		return strconv.Quote(shell+" "+flag) + " unsupported script", scriptUnsupported
 	}
 	for _, c := range cmds {
 		if cls, ok := classifyCommand(commandWords(c), false); ok && cls.rule == EgressNetwork {
-			return cls.label + " via " + shell + " " + flag, true
+			return cls.label + " via " + shell + " " + flag, scriptNetwork
 		}
 	}
-	return "", false
+	return "", scriptNone
 }
 
 func classifyCommand(argv []string, withScript bool) (egressClass, bool) {
@@ -467,8 +487,11 @@ func classifyCommand(argv []string, withScript bool) (egressClass, bool) {
 		return egressClass{EgressPackageManager, EgressPackageManagerRisk, name}, true
 	case shellNames[name]:
 		if withScript {
-			if label, ok := scriptNetworkEvidence(rest); ok {
+			switch label, ev := scriptNetworkEvidence(rest); ev {
+			case scriptNetwork:
 				return egressClass{EgressNetwork, EgressNetworkRisk, label}, true
+			case scriptUnsupported:
+				return unknownClass(label)
 			}
 		}
 		return egressClass{EgressInterpreter, EgressInterpreterRisk, name}, true

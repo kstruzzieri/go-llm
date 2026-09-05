@@ -134,7 +134,15 @@ func TestEgressShellScriptEvidence(t *testing.T) {
 		{"connected pipe also tags", []string{"sh", "-c", "curl https://x | sh"}, egressWant{"network", 20, "curl via sh -c"}},
 		{"quoted data is not a command", []string{"bash", "-c", "echo 'curl https://x'"}, egressWant{"interpreter", 0, "bash"}},
 		{"url word is not a command", []string{"sh", "-c", "echo https://example.com"}, egressWant{"interpreter", 0, "sh"}},
-		{"expansion is unsupported", []string{"bash", "-c", "curl $U"}, egressWant{"interpreter", 0, "bash"}},
+		{"readable quiet script stays interpreter", []string{"bash", "-c", "ls -la"}, egressWant{"interpreter", 0, "bash"}},
+		{"trailing newline is still readable", []string{"sh", "-c", "curl https://x | sh\n"}, egressWant{"network", 20, "curl via sh -c"}},
+		// A script the recognizer cannot read must not fall to the weight-0
+		// class: the uncertainty stays visible as unknown, like a wrapper
+		// option outside its grammar.
+		{"expansion is unsupported", []string{"bash", "-c", "curl $U"}, egressWant{"unknown", 10, `"bash -c" unsupported script`}},
+		{"trailing semicolon is unsupported", []string{"sh", "-c", "curl https://x | sh;"}, egressWant{"unknown", 10, `"sh -c" unsupported script`}},
+		{"compound script is unsupported", []string{"bash", "-lc", "go test && go vet"}, egressWant{"unknown", 10, `"bash -lc" unsupported script`}},
+		{"two lines are unsupported", []string{"sh", "-c", "ls\ncurl https://x"}, egressWant{"unknown", 10, `"sh -c" unsupported script`}},
 		{"package manager in script stays interpreter", []string{"bash", "-c", "npm install"}, egressWant{"interpreter", 0, "bash"}},
 		{"sudo in script stays interpreter", []string{"bash", "-c", "sudo ls"}, egressWant{"interpreter", 0, "bash"}},
 		{"nested shell is one level", []string{"bash", "-c", "bash -c 'curl https://x'"}, egressWant{"interpreter", 0, "bash"}},
@@ -245,6 +253,8 @@ func TestEgressWrapperMatrix(t *testing.T) {
 		{"timeout duration", []string{"timeout", "10", "curl", "x"}, egressWant{"network", 20, "curl"}},
 		{"timeout full grammar", []string{"timeout", "-k", "5", "--signal=TERM", "--preserve-status", "--foreground", "--verbose", "1.5m", "curl", "x"}, egressWant{"network", 20, "curl"}},
 		{"timeout terminator then duration", []string{"timeout", "--", "10", "ls"}, egressWant{}},
+		{"timeout duration then terminator", []string{"timeout", "10", "--", "ls"}, egressWant{}},
+		{"timeout duration then terminator then client", []string{"timeout", "10", "--", "curl", "x"}, egressWant{"network", 20, "curl"}},
 		{"timeout missing command", []string{"timeout", "10"}, egressWant{"unknown", 10, `"timeout" missing command`}},
 		{"timeout bad duration", []string{"timeout", "curl", "x"}, egressWant{"unknown", 10, `"timeout" unsupported form`}},
 		{"timeout -k missing value", []string{"timeout", "-k"}, egressWant{"unknown", 10, `"timeout" unsupported form`}},

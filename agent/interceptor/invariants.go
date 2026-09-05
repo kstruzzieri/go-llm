@@ -40,7 +40,9 @@ type Check interface {
 // host's own normalization (see normalizePath). Native cleaning is
 // authoritative, so on POSIX a backslash stays a filename character exactly
 // as the workspace treats it. A non-string value is not a violation; the
-// tool rejects it. NewInvariants keeps its own compiled copy of Pattern.
+// tool rejects it. NewInvariants keeps only the pattern's source, recompiled
+// with regexp.Compile: a POSIX-compiled pattern loses leftmost-longest
+// matching, which cannot change a MatchString answer.
 type PathDeny struct{ Pattern *regexp.Regexp }
 
 func (d PathDeny) check(raw json.RawMessage) (string, bool) {
@@ -56,13 +58,17 @@ func (d PathDeny) check(raw json.RawMessage) (string, bool) {
 }
 
 // normalizePath renders a path the way the host will open it, as far as a
-// lexical check can: filepath.Clean, filepath.ToSlash, on Windows the Win32
-// trim of trailing periods and spaces from each component (the OS opens
-// ".git." as ".git"; a component made only of periods is a valid name and is
-// kept), then a lower-casing of every component. Lower-casing is deliberate:
-// on APFS and NTFS ".Git" is ".git", and on a case-sensitive filesystem it
-// only over-blocks a distinct spelling. Short (8.3) names and other OS
-// aliases are outside a lexical check; the workspace layer is the boundary.
+// lexical check can: filepath.Clean, filepath.ToSlash, on Windows a trim of
+// trailing periods and spaces from every component, then a lower-casing of
+// every component. The Windows trim is deliberately broader than Win32
+// itself, which drops a single trailing period from an intermediate
+// segment and all trailing periods and spaces from the final one; trimming
+// every component can only over-block, the right direction for a deny
+// list (a component made only of periods is a valid name and is kept).
+// Lower-casing is deliberate too: on APFS and NTFS ".Git" is ".git", and on
+// a case-sensitive filesystem it only over-blocks a distinct spelling. Short
+// (8.3) names and other OS aliases are outside a lexical check; the
+// workspace layer is the boundary.
 func normalizePath(s string) string {
 	clean := filepath.ToSlash(filepath.Clean(s))
 	if runtime.GOOS == "windows" {
