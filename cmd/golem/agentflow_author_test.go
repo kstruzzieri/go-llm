@@ -1454,3 +1454,52 @@ func TestAuthorPlanApproverPropagatesDelegateErrorWithoutRecordingDenial(t *test
 		})
 	}
 }
+
+// plannerWireCaller issues one read_file call, then declines to submit,
+// recording every request.
+type plannerWireCaller struct{ requests []provider.ChatRequest }
+
+func (c *plannerWireCaller) Chat(_ context.Context, req provider.ChatRequest, _ func(provider.ChatResponse) error) (agent.ModelResult, error) {
+	c.requests = append(c.requests, req)
+	if len(c.requests) == 1 {
+		return agent.ModelResult{Response: provider.ChatResponse{ToolCalls: []provider.ToolCall{{
+			ID: "p1", Type: "function",
+			Function: provider.ToolCallFunction{Name: "read_file", Arguments: json.RawMessage(`{"path":"note.txt"}`)},
+		}}}}, nil
+	}
+	return agent.ModelResult{Response: provider.ChatResponse{Content: "no submission"}}, nil
+}
+
+// TestRunAgentflowAuthor_PlannerPromptCarriesBaseContract (#430): the planner
+// runs its own prompt through the Orchestrator, so its effective system
+// prompt carries the base contract and its observations are framed.
+func TestRunAgentflowAuthor_PlannerPromptCarriesBaseContract(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "note.txt"), []byte("planner note\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	caller := &plannerWireCaller{}
+	sess := newTestSession(t, caller, root)
+	err := runAgentflowAuthorWithClient(context.Background(), io.Discard, io.Discard, nil, sess, flags{goal: "x", goalSet: true}, root, &stubLocker{}, nil)
+	if !errors.Is(err, errPlannerNoSubmission) {
+		t.Fatalf("err = %v, want no submission", err)
+	}
+	if len(caller.requests) != 2 {
+		t.Fatalf("planner requests = %d, want 2", len(caller.requests))
+	}
+	if got := caller.requests[0].Messages[0].Content; got != plannerBasePrompt+"\n\n"+agent.ToolTrustContract {
+		t.Errorf("planner system = %q, want the planner prompt plus the base contract", got)
+	}
+	var tool *provider.ChatMessage
+	for i := range caller.requests[1].Messages {
+		if caller.requests[1].Messages[i].Role == "tool" {
+			tool = &caller.requests[1].Messages[i]
+		}
+	}
+	if tool == nil {
+		t.Fatalf("planner follow-up has no tool message: %+v", caller.requests[1].Messages)
+	}
+	if k := toolFrameKey(t, tool.Content); tool.Content != framedToolResult(k, "planner note\n") {
+		t.Errorf("planner observation = %q, want %q", tool.Content, framedToolResult(k, "planner note\n"))
+	}
+}
