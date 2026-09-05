@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -184,6 +185,9 @@ func TestRunOneShot_FencesObservationsOnTheWire(t *testing.T) {
 	})
 
 	t.Run("command output", func(t *testing.T) {
+		if runtime.GOOS == "windows" {
+			t.Skip("command execution requires Unix")
+		}
 		configPath, root, requests := fenceWireHarness(t, func(req wireRequest) []string {
 			if req.hasToolMessage() {
 				return sseAnswer("final answer")
