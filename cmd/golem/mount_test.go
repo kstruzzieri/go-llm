@@ -23,13 +23,14 @@ import (
 // vacuous.
 func TestComposeSystemFragmentOrder(t *testing.T) {
 	in := systemInputs{allowWrite: true, allowExec: true, delegate: true, dispatch: true, memory: true,
-		projectContext: "<<<PROJECT>>>", agentMemory: true, sessionUp: true}
+		projectContext: "<<<PROJECT>>>", gitContext: "<<<GIT>>>", agentMemory: true, sessionUp: true}
 	want := []string{
 		buildSystemPrompt(true, true),
 		delegateSystemFragment(true, true),
 		dispatchSystemFragment(true),
 		memorySystemFragment(true),
 		"\n\n<<<PROJECT>>>",
+		"\n\n<<<GIT>>>",
 		agentMemorySystemFragment(true, true),
 	}
 	for i, w := range want {
@@ -78,7 +79,7 @@ func TestComposeSystemHeadlessDerivesWriteAwareness(t *testing.T) {
 // Flipping one input changes exactly that fragment: everything after the
 // base+delegate pair is byte-identical before and after.
 func TestComposeSystemFlipChangesOnlyThatFragment(t *testing.T) {
-	base := systemInputs{delegate: true, dispatch: true, memory: true, projectContext: "P", agentMemory: true, sessionUp: true}
+	base := systemInputs{delegate: true, dispatch: true, memory: true, projectContext: "P", gitContext: "G", agentMemory: true, sessionUp: true}
 	before := composeSystem(base)
 	flipped := base
 	flipped.allowWrite = true
@@ -90,6 +91,37 @@ func TestComposeSystemFlipChangesOnlyThatFragment(t *testing.T) {
 	}
 	if tailBefore != tailAfter {
 		t.Fatalf("flipping allowWrite changed more than the write fragment:\n before=%q\n after=%q", tailBefore, tailAfter)
+	}
+}
+
+// injectedContext is the one owner of the untrusted-data suffix: project
+// context then Git context (#354 D10), each behind the blank-line separator,
+// and nothing at all when both are absent.
+func TestInjectedContextOrderAndSeparators(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		in   systemInputs
+		want string
+	}{
+		{"none", systemInputs{}, ""},
+		{"project only", systemInputs{projectContext: "P"}, "\n\nP"},
+		{"git only", systemInputs{gitContext: "G"}, "\n\nG"},
+		{"both, project first", systemInputs{projectContext: "P", gitContext: "G"}, "\n\nP\n\nG"},
+	} {
+		if got := injectedContext(tc.in); got != tc.want {
+			t.Fatalf("%s: injectedContext = %q, want %q", tc.name, got, tc.want)
+		}
+	}
+}
+
+// Headless -allow-tool prompts take the exact-set base prompt and still carry
+// the Git block: selective-tool runs are a request surface like any other
+// (D10), with no extra branch in production.
+func TestComposeSystemHeadlessCarriesGitContext(t *testing.T) {
+	caps := golemruntime.HeadlessToolCaps{WriteFile: true}
+	got := composeSystem(systemInputs{headless: &caps, projectContext: "P", gitContext: "<<<GIT>>>"})
+	if !strings.HasPrefix(got, golemruntime.SystemPromptHeadless(caps)) || !strings.HasSuffix(got, "\n\nP\n\n<<<GIT>>>") {
+		t.Fatalf("headless composition lost the injected context: %q", got)
 	}
 }
 

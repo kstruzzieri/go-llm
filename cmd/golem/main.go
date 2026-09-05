@@ -22,6 +22,7 @@ import (
 	golemruntime "github.com/kstruzzieri/go-llm/golem"
 	"github.com/kstruzzieri/go-llm/internal/providerbootstrap"
 	"github.com/kstruzzieri/go-llm/mcpclient"
+	"github.com/kstruzzieri/go-llm/projectcontext"
 	"github.com/kstruzzieri/go-llm/provider"
 	"github.com/kstruzzieri/go-llm/provider/openaicompat"
 	"github.com/kstruzzieri/go-llm/rag"
@@ -63,6 +64,7 @@ type flags struct {
 	progressive         bool
 	grounding           bool
 	noProjectContext    bool
+	noGitContext        bool
 	noCompress          bool
 	noMemory            bool
 	agentMemory         bool
@@ -134,6 +136,7 @@ func parseFlags(args []string) (flags, error) {
 	fs.BoolVar(&f.progressive, "progressive", false, "generate and retrieve opt-in L0/L1 progressive source summaries; enable mixed context assembly")
 	fs.BoolVar(&f.grounding, "grounding", false, "verify the final answer's claims against the retrieval evidence in the final prompt; prints one supported/partial/unsupported line (full report under -trace)")
 	fs.BoolVar(&f.noProjectContext, "no-project-context", false, "do not load AGENTS.md project-context files into the system prompt")
+	fs.BoolVar(&f.noGitContext, "no-git-context", false, "do not inject the repository snapshot (branch, status, recent commits) into the system prompt")
 	fs.BoolVar(&f.noCompress, "no-compress", false, "disable post-turn conversation compression into a durable summary")
 	fs.BoolVar(&f.noMemory, "no-memory", false, "disable explicit local memories (/remember, /memories, memory_search)")
 	fs.BoolVar(&f.agentMemory, "agent-memory", false, "enable agent-authored memory records (agent_memory_* tools, /records; requires sessions)")
@@ -502,6 +505,7 @@ type startupInfo struct {
 	inputCeilingLine   string
 	sessionLine        string
 	projectContextLine string
+	gitContextLine     string
 	memoryLine         string
 	agentMemoryLine    string
 	mcpLine            string
@@ -547,6 +551,9 @@ func startupNotices(info startupInfo) []string {
 	}
 	if info.projectContextLine != "" {
 		out = append(out, info.projectContextLine)
+	}
+	if info.gitContextLine != "" {
+		out = append(out, info.gitContextLine)
 	}
 	if info.retrieveLine != "" {
 		out = append(out, info.retrieveLine)
@@ -1431,13 +1438,32 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 			StopCommand:  allowTools.authorized("stop_command"),
 		}
 	}
+	// #354: Git context is captured first because its rendered payload is
+	// reserved out of the shared 16 KiB injected-context budget and project
+	// context renders into the remainder (D3). Both absences (not a
+	// repository, no git) are silent; a genuine capture failure warns once
+	// and injects nothing (D8). The composed order is project then Git
+	// regardless of capture order (injectedContext).
+	var gitSnap gitContextSnapshot
+	gitContextLine := ""
+	if !f.noGitContext {
+		if snap, gerr := loadGitContext(ctx, "git", root); gerr != nil {
+			warns = append(warns, "git context disabled: "+gerr.Error())
+		} else if snap.Absence == gitContextPresent {
+			gitSnap = snap
+			sysIn.gitContext = snap.Block
+			gitContextLine = "git context: " + gitContextNotice(snap.State)
+		}
+	}
+	var projectDocs []projectcontext.Document
 	projectContextLine := ""
 	if !f.noProjectContext {
-		if block, n, perr := loadProjectContext(ctx, root, os.Getenv); perr != nil {
+		if docs, perr := loadProjectContextDocs(ctx, root, os.Getenv); perr != nil {
 			warns = append(warns, "project context disabled: "+perr.Error())
-		} else if block != "" {
-			sysIn.projectContext = block
-			projectContextLine = fmt.Sprintf("project context: loaded %d file(s)", n)
+		} else if len(docs) > 0 {
+			projectDocs = docs
+			sysIn.projectContext = projectContextBlock(docs, projectContextBudget(gitSnap.PayloadBytes))
+			projectContextLine = fmt.Sprintf("project context: loaded %d file(s)", len(docs))
 		}
 	}
 
@@ -1493,6 +1519,7 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 		inputCeilingLine:   inputCeiling.line(),
 		sessionLine:        sessionLine,
 		projectContextLine: projectContextLine,
+		gitContextLine:     gitContextLine,
 		memoryLine:         memoryLine,
 		agentMemoryLine:    agentMemoryLine,
 		mcpLine:            mcpLine,
@@ -1592,6 +1619,9 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 		root:             root,
 		stdinTerminal:    stdinTerminal,
 		sysInputs:        sysIn,
+		projectDocs:      projectDocs,
+		gitSnapshot:      gitSnap,
+		noGitContext:     f.noGitContext,
 		readToolCount:    readToolCount,
 		mountAt:          mountAt,
 		writeToolCount:   writeToolCount,

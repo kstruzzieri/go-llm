@@ -18,6 +18,7 @@ import (
 	golemruntime "github.com/kstruzzieri/go-llm/golem"
 	"github.com/kstruzzieri/go-llm/internal/agenttrace"
 	"github.com/kstruzzieri/go-llm/memory"
+	"github.com/kstruzzieri/go-llm/projectcontext"
 	"github.com/kstruzzieri/go-llm/provider"
 )
 
@@ -31,16 +32,25 @@ type replSession struct {
 	// Mid-session mounting (#372). root is the canonical workspace root the
 	// gated tools are built over; sysInputs are the composition inputs behind
 	// baseSystem (invariant: baseSystem == composeSystem(sysInputs); the
-	// -goal planner reads sysInputs.projectContext); tools[:readToolCount] are
+	// -goal planner reads the same inputs through injectedContext); tools[:readToolCount] are
 	// the file tools the runtime rebuilds itself; mountAt is where the gated
 	// write/exec tools sit (startup order parity); writeToolCount is how many
 	// write tools are mounted (exec inserts after them); scratch records
 	// -scratch so /allow-write can say promotion stays startup-bound;
 	// lateStore is the checkpoint store /allow-write opened (nil when
 	// -allow-write owned it at startup, whose store main.go closes itself).
-	root           string
-	stdinTerminal  bool // real stdin is a TTY; required for live privilege expansion
-	sysInputs      systemInputs
+	root          string
+	stdinTerminal bool // real stdin is a TTY; required for live privilege expansion
+	sysInputs     systemInputs
+	// Git context (#354). projectDocs are the bounded project documents read
+	// at startup, retained so /git-context refresh can re-render them under
+	// the shared budget without rereading AGENTS.md; gitSnapshot is the
+	// current capture (zero value when absent) for unchanged detection and
+	// retain-on-error; noGitContext mirrors -no-git-context and disables
+	// refresh as well as startup capture.
+	projectDocs    []projectcontext.Document
+	gitSnapshot    gitContextSnapshot
+	noGitContext   bool
 	readToolCount  int
 	mountAt        int
 	writeToolCount int

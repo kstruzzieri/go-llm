@@ -1807,3 +1807,35 @@ func TestScratchFlagDroppedInOneShotMode(t *testing.T) {
 		t.Fatal("dropping -scratch in one-shot mode must warn about -scratch specifically")
 	}
 }
+
+func TestParseFlagsGitContextOptOut(t *testing.T) {
+	f, err := parseFlags([]string{"-no-git-context"})
+	if err != nil {
+		t.Fatalf("parseFlags: %v", err)
+	}
+	if !f.noGitContext {
+		t.Fatal("-no-git-context should set noGitContext")
+	}
+	f2, _ := parseFlags(nil)
+	if f2.noGitContext {
+		t.Fatal("noGitContext must default to false")
+	}
+}
+
+// The Git line is informational and follows the project-context line; when
+// there is no repository (or the flag is set) no line appears at all.
+func TestStartupNoticesGitContextAfterProjectContext(t *testing.T) {
+	got := startupNotices(startupInfo{
+		workspace:          "/r",
+		projectContextLine: "project context: loaded 1 file(s)",
+		gitContextLine:     "git context: main, clean, 5 commits",
+	})
+	joined := strings.Join(got, "\n")
+	p, g := strings.Index(joined, "project context: loaded"), strings.Index(joined, "git context: main, clean, 5 commits")
+	if p < 0 || g < 0 || g < p {
+		t.Fatalf("want project context then git context, got:\n%s", joined)
+	}
+	if joined := strings.Join(startupNotices(startupInfo{workspace: "/r"}), "\n"); strings.Contains(joined, "git context") {
+		t.Fatalf("absent Git context must print nothing, got:\n%s", joined)
+	}
+}

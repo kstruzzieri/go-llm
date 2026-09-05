@@ -18,10 +18,11 @@ import (
 // exactly one input changed. replSession keeps the invariant
 // baseSystem == composeSystem(sysInputs) at all times; a mount MUST derive
 // its inputs from the live session (next := sess.sysInputs; next.allowWrite
-// = true), never from a fresh struct carrying only the changed flag. #354
-// adds its Git fragment here. There is no fragment registry in
-// golem.Runtime by design — composition is a CLI concern and this is its
-// one path.
+// = true), never from a fresh struct carrying only the changed flag. The Git
+// snapshot (#354) is the gitContext fragment; /git-context refresh recomposes
+// through the same mount path with the tool list unchanged. There is no
+// fragment registry in golem.Runtime by design — composition is a CLI concern
+// and this is its one path.
 type systemInputs struct {
 	// headless is non-nil only for a -allow-tool one-shot (#352): the prompt
 	// is built from the exact mounted set. Never recomposed (no REPL there).
@@ -32,6 +33,7 @@ type systemInputs struct {
 	dispatch       bool
 	memory         bool
 	projectContext string // raw fenced project-context block; "" when none
+	gitContext     string // raw fenced Git snapshot block (#354); "" when none
 	agentMemory    bool
 	sessionUp      bool
 }
@@ -50,10 +52,24 @@ func composeSystem(in systemInputs) string {
 	system += delegateSystemFragment(in.delegate, in.allowWrite || headlessWrite)
 	system += dispatchSystemFragment(in.dispatch)
 	system += memorySystemFragment(in.memory)
-	if in.projectContext != "" {
-		system += "\n\n" + in.projectContext
-	}
+	system += injectedContext(in)
 	return system + agentMemorySystemFragment(in.agentMemory, in.sessionUp)
+}
+
+// injectedContext is the untrusted-data suffix every model-facing prompt
+// carries (#354 D10): project context, then Git context, each behind the
+// blank-line separator startup always used; "" when both are absent. It owns
+// order and separators only — loading and the shared 16 KiB budget belong to
+// the callers that produce the two blocks.
+func injectedContext(in systemInputs) string {
+	var s string
+	if in.projectContext != "" {
+		s += "\n\n" + in.projectContext
+	}
+	if in.gitContext != "" {
+		s += "\n\n" + in.gitContext
+	}
+	return s
 }
 
 // mount installs add at index at of the tool list together with the system

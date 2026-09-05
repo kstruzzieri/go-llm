@@ -180,10 +180,11 @@ func TestLoadProjectContextAppendsWorkspaceDoc(t *testing.T) {
 		}
 		return ""
 	}
-	block, n, err := loadProjectContext(context.Background(), root, getenv)
+	docs, err := loadProjectContextDocs(context.Background(), root, getenv)
 	if err != nil {
-		t.Fatalf("loadProjectContext: %v", err)
+		t.Fatalf("loadProjectContextDocs: %v", err)
 	}
+	n, block := len(docs), projectContextBlock(docs, projectContextMaxBytes)
 	if n != 1 {
 		t.Fatalf("want 1 doc, got %d", n)
 	}
@@ -192,7 +193,7 @@ func TestLoadProjectContextAppendsWorkspaceDoc(t *testing.T) {
 	}
 }
 
-// loadProjectContext must discover the global file under <config>/golem and label
+// loadProjectContextDocs must discover the global file under <config>/golem and label
 // it "global" — this exercises the golem-specific config-base + "golem" namespace
 // join that the library layer does not own.
 func TestLoadProjectContextDiscoversGlobalDoc(t *testing.T) {
@@ -211,10 +212,11 @@ func TestLoadProjectContextDiscoversGlobalDoc(t *testing.T) {
 		}
 		return ""
 	}
-	block, n, err := loadProjectContext(context.Background(), root, getenv)
+	docs, err := loadProjectContextDocs(context.Background(), root, getenv)
 	if err != nil {
-		t.Fatalf("loadProjectContext: %v", err)
+		t.Fatalf("loadProjectContextDocs: %v", err)
 	}
+	n, block := len(docs), projectContextBlock(docs, projectContextMaxBytes)
 	if n != 1 {
 		t.Fatalf("want 1 global doc, got %d", n)
 	}
@@ -232,10 +234,11 @@ func TestLoadProjectContextEmptyWhenNoFiles(t *testing.T) {
 		}
 		return ""
 	}
-	block, n, err := loadProjectContext(context.Background(), root, getenv)
+	docs, err := loadProjectContextDocs(context.Background(), root, getenv)
 	if err != nil {
-		t.Fatalf("loadProjectContext: %v", err)
+		t.Fatalf("loadProjectContextDocs: %v", err)
 	}
+	n, block := len(docs), projectContextBlock(docs, projectContextMaxBytes)
 	if n != 0 || block != "" {
 		t.Fatalf("want empty block/0 docs, got n=%d block=%q", n, block)
 	}
@@ -267,5 +270,23 @@ func TestProjectContextBlockNeutralizesGitSentinel(t *testing.T) {
 	// The project block's own genuine markers are untouched.
 	if strings.Count(got, projectContextOpen) != 1 || strings.Count(got, projectContextClose) != 1 {
 		t.Fatalf("genuine project fences disturbed: %q", got)
+	}
+}
+
+// The aggregate injected-context budget is shared: Git's rendered payload is
+// reserved first and project context receives the remainder, and an exhausted
+// remainder must never reach projectContextBlock as 0 (which means unlimited
+// there). With no Git payload the project budget is exactly the old cap.
+func TestProjectContextBudgetNeverZero(t *testing.T) {
+	for _, tc := range []struct{ git, want int }{
+		{0, projectContextMaxBytes},
+		{gitContextMaxBytes, projectContextMaxBytes - gitContextMaxBytes},
+		{projectContextMaxBytes, 1},
+		{projectContextMaxBytes + 1, 1},
+		{1 << 20, 1},
+	} {
+		if got := projectContextBudget(tc.git); got != tc.want {
+			t.Fatalf("projectContextBudget(%d) = %d, want %d", tc.git, got, tc.want)
+		}
 	}
 }

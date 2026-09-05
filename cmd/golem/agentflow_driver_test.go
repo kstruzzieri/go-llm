@@ -1547,3 +1547,29 @@ func equalSeq(a, b []string) bool {
 	}
 	return true
 }
+
+// The Agentflow task driver sends the session's composed prompt, so the
+// current Git block reaches direct task requests; captured on the wire rather
+// than inferred from sess.baseSystem.
+func TestAgentflowDriverUsesCurrentGitFragment(t *testing.T) {
+	root := t.TempDir()
+	plan := &agentflow.Plan{AllowedFiles: []string{"out.txt"}, Steps: []agentflow.Step{{ID: "P1", Files: []string{"out.txt"}}}}
+	caller := &captureCaller{answer: "done"}
+	orch := agent.New(caller, agent.ContextManager{})
+	in := systemInputs{projectContext: "<<<PROJECT_CONTEXT (advisory)\nrepo rule\n>>>PROJECT_CONTEXT",
+		gitContext: gitContextOpen + "\nbranch: main\nrecent commits (newest first): (none)\nworking tree: clean\n" + gitContextClose}
+	sess := &replSession{maxSteps: 4, sysInputs: in, baseSystem: composeSystem(in)}
+	runCtx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	runStep, err := newTaskStepRunner(root, plan, &fakeAF{}, orch, sess, true, io.Discard, nil, cancel)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := &driver{af: &fakeAF{}, plan: plan, runStep: runStep}
+	if err := d.runOneStep(runCtx, "P1"); err != nil {
+		t.Fatal(err)
+	}
+	if caller.system != sess.baseSystem || strings.Count(caller.system, gitContextOpen) != 1 || strings.Index(caller.system, "repo rule") > strings.Index(caller.system, gitContextOpen) {
+		t.Fatalf("driver request System differs from the composed prompt or misorders the fragments:\n got=%q\nwant=%q", caller.system, sess.baseSystem)
+	}
+}

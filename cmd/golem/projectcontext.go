@@ -147,13 +147,25 @@ func projectContextBlock(docs []projectcontext.Document, maxBytes int) string {
 	return b.String()
 }
 
-// loadProjectContext discovers project-context documents for the workspace at
-// root plus the per-user global config dir, and renders them as a fenced advisory
-// block. It returns the block ("" when none), the document count, and any error.
-// A config-dir resolution failure is non-fatal for discovery: it just skips the
-// global document (the global dir is left empty), because project context is
-// best-effort advisory input, not a hard dependency.
-func loadProjectContext(ctx context.Context, root string, getenv func(string) string) (string, int, error) {
+// projectContextBudget is the project-context share of the aggregate
+// injected-context budget once the Git block's rendered payload (body bytes,
+// framing excluded — projectContextBlock's own convention) is reserved first
+// (#354 D3). It never returns 0: projectContextBlock treats a non-positive cap
+// as unlimited, so an exhausted remainder collapses to 1 byte of body instead.
+// The 4 KiB Git component cap keeps the real remainder at 12 KiB or more; the
+// clamp is defensive. With no Git payload the budget is exactly the prior cap.
+func projectContextBudget(gitPayloadBytes int) int {
+	return max(1, projectContextMaxBytes-gitPayloadBytes)
+}
+
+// loadProjectContextDocs discovers the bounded project-context documents for
+// the workspace at root plus the per-user global config dir. The caller renders
+// them with projectContextBlock under the budget it has left, and the REPL
+// retains them so /git-context refresh can re-render under a changed budget
+// without rereading files. A config-dir resolution failure is non-fatal for
+// discovery: it just skips the global document (the global dir is left empty),
+// because project context is best-effort advisory input, not a hard dependency.
+func loadProjectContextDocs(ctx context.Context, root string, getenv func(string) string) ([]projectcontext.Document, error) {
 	var globalDir string
 	if base, err := configDirBase(getenv); err == nil {
 		globalDir = filepath.Join(base, "golem")
@@ -163,12 +175,8 @@ func loadProjectContext(ctx context.Context, root string, getenv func(string) st
 		GlobalDir:     globalDir,
 		// Bound each file read to the same ceiling as the aggregate block so a
 		// single huge AGENTS.md is not read in full only to be discarded; the
-		// aggregate cap below is the real per-turn injection limit.
+		// aggregate cap is the real per-turn injection limit.
 		MaxBytes: projectContextMaxBytes,
 	}
-	docs, err := loader.Load(ctx)
-	if err != nil {
-		return "", 0, err
-	}
-	return projectContextBlock(docs, projectContextMaxBytes), len(docs), nil
+	return loader.Load(ctx)
 }
