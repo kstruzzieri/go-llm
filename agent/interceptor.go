@@ -240,9 +240,18 @@ type Finding struct {
 
 // RiskReport is the cumulative per-run score (saturating sum of Finding.Risk)
 // and every finding that contributed, in pipeline order.
+//
+// CurrentToolCallFindings is set only on the report handed to an approver
+// (#439 D6): the normalized findings of the tool call being approved, taken
+// from the inspection that just ran for that call and replaced for every
+// call, a clean one included. Association is by position in the pipeline,
+// never by provider tool-call ID, which may be empty or reused. The field is
+// excluded from JSON and absent from Result.Risk and observer events, whose
+// contract stays cumulative only.
 type RiskReport struct {
-	Score    int
-	Findings []Finding
+	Score                   int
+	Findings                []Finding
+	CurrentToolCallFindings []Finding `json:"-"`
 }
 
 // Interceptor is the deterministic middleware seam (#436). Hooks run on the
@@ -399,7 +408,9 @@ func (e *BlockedError) Error() string {
 
 // RiskApprover is optionally implemented by an Approver that wants the run's
 // cumulative RiskReport with each approval (spec D2). Dispatch prefers it
-// over KeyedApprover and Approver. The report is a snapshot.
+// over KeyedApprover and Approver. The report is a snapshot that also
+// carries the approved call's own findings in CurrentToolCallFindings
+// (#439 D6).
 type RiskApprover interface {
 	ApproveWithRisk(ctx context.Context, call provider.ToolCall, preview, approvalKey string, risk RiskReport) (ApprovalDecision, error)
 }
@@ -465,11 +476,25 @@ func validName(name string) bool {
 type interceptorRun struct {
 	chain []Interceptor
 	risk  RiskReport
+	// current holds the normalized findings of the most recent
+	// inspectToolCall, replaced on every call (#439 D6). Dispatch inspects a
+	// call and, in the same serial prepare phase, asks for its approval, so
+	// the value is the approved call's own.
+	current []Finding
 }
 
-// snapshot copies the cumulative report so an approver or observer cannot
-// write through to the run's findings.
+// snapshot is the approval view (#436 D2, #439 D6): the cumulative report
+// plus the current call's findings, every slice an owned copy so an
+// approver cannot write through to the run's state or to a later approval.
 func (r *interceptorRun) snapshot() RiskReport {
+	s := r.cumulative()
+	s.CurrentToolCallFindings = append([]Finding(nil), r.current...)
+	return s
+}
+
+// cumulative copies the cumulative report alone: what Result.Risk and
+// observer telemetry publish.
+func (r *interceptorRun) cumulative() RiskReport {
 	return RiskReport{Score: r.risk.Score, Findings: append([]Finding(nil), r.risk.Findings...)}
 }
 
@@ -478,7 +503,7 @@ func (r *interceptorRun) result() *RiskReport {
 	if len(r.risk.Findings) == 0 {
 		return nil
 	}
-	s := r.snapshot()
+	s := r.cumulative()
 	return &s
 }
 
@@ -535,7 +560,7 @@ func (r *interceptorRun) runHook(ctx context.Context, obs Observer, step int, sc
 		if io, ok := obs.(InterceptionObserver); ok {
 			if err := io.OnInterception(ctx, InterceptionEvent{
 				Step: step, Hook: scope.hook, Verdict: verdict,
-				Findings: append([]Finding(nil), all...), Risk: r.snapshot(), ToolCallID: scope.toolCallID,
+				Findings: append([]Finding(nil), all...), Risk: r.cumulative(), ToolCallID: scope.toolCallID,
 			}); err != nil {
 				errs = append(errs, err)
 			}
@@ -746,7 +771,10 @@ func cloneToolCall(call provider.ToolCall) provider.ToolCall {
 // inspectToolCall runs HookToolCall before Plan and approval on a private
 // clone of the canonical call. It returns the synthetic result to record on
 // Block, and the error to propagate: a BlockedError on Abort (joined with any
-// hook errors), or the hook errors alone.
+// hook errors), or the hook errors alone. Whatever the outcome, the call's
+// own normalized findings replace the current-call carrier the approval
+// snapshot carries (#439 D6); a clean call leaves it empty. With no chain
+// nothing is ever recorded, so the carrier stays nil.
 func (r *interceptorRun) inspectToolCall(ctx context.Context, obs Observer, step int, call provider.ToolCall, effect Effect) (*ToolResult, error) {
 	if len(r.chain) == 0 {
 		return nil, nil
@@ -756,6 +784,7 @@ func (r *interceptorRun) inspectToolCall(ctx context.Context, obs Observer, step
 			// Each interceptor gets its own copy of the canonical call and effect.
 			return ic.InspectToolCall(ctx, ToolCallInspection{Step: step, Call: cloneToolCall(call), Effect: cloneEffect(effect)})
 		})
+	r.current = append([]Finding(nil), findings...)
 	if err != nil || verdict == VerdictAbort {
 		return nil, terminalAt(VerdictAbort, HookToolCall, step, findings, verdict, err)
 	}

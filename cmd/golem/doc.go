@@ -30,6 +30,28 @@
 // tokens therefore remain unchanged. Off by default until the trailers'
 // effect on answer quality is measured.
 //
+// The same chain carries the #439 guards, so they are opt-in with it.
+// Argument invariants block a tool call before it is planned or prompted:
+// write_file, edit_file and promote_artifact under a .git, .ssh, .gnupg,
+// .aws or .kube component, read_file under the credential components or
+// the exact basename .env, and an inline sh/bash/dash/ksh/zsh -c script that
+// pipes a curl or wget stdout fetch into a bare shell (optionally under
+// sudo). The guard reads the argument the tool's own decoder would use, so
+// a case-variant field name is guarded and two equivalent spellings are
+// blocked as ambiguous. The model sees "tool call blocked by interceptor
+// invariants (<name>)". The egress classifier tags every run_command and
+// start_command by what its argv visibly reaches (privileged, network,
+// package-manager, interpreter, unknown) after peeling env, nohup, nice,
+// time, timeout and stdbuf; anything it cannot parse, including an inline
+// script it cannot read literally, and any command outside its quiet set,
+// stays visible as unknown. The approval prompt
+// appends the current call's class and label to the risk line,
+// "interceptor risk 20 · egress: network (git push)", on grant-covered
+// auto-approvals too. These are finite checks over the argv, not a sandbox:
+// go build may still download modules and make runs whatever the Makefile
+// says. No score or badge revokes a grant. The hard line-count limit the
+// issue mentioned is deferred; the existing 256 KiB write bounds remain.
+//
 // Independently of -interceptors, every tool result reaches the model inside
 // a keyed <<<TOOL_RESULT / >>>TOOL_RESULT frame minted per request, and every
 // effective system prompt carries agent.ToolTrustContract (framed content is

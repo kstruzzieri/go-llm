@@ -55,7 +55,7 @@ type flags struct {
 	delegateRole        string
 	dispatch            bool
 	dispatchRole        string
-	interceptors        bool // -interceptors: default detector chain on every orchestrator and dispatch child (#514)
+	interceptors        bool // -interceptors: default interceptor chain on every orchestrator and dispatch child (#514/#439)
 	mcpStdio            stringSliceFlag
 	mcpHTTP             stringSliceFlag
 	allowDestinations   stringSliceFlag
@@ -127,7 +127,7 @@ func parseFlags(args []string) (flags, error) {
 	fs.StringVar(&f.delegateRole, "delegate-role", "coding", "model role the delegate_code tool routes to")
 	fs.BoolVar(&f.dispatch, "dispatch", false, "enable the dispatch tool (bounded read-only exploration tasks use backend-governed concurrency; ungoverned routing stays serial)")
 	fs.StringVar(&f.dispatchRole, "dispatch-role", "", "model role dispatch child agents route to (default: the primary agent chain, so children never force a model swap)")
-	fs.BoolVar(&f.interceptors, "interceptors", false, "enable the interceptor pipeline (#436): zero-width, encoding, and typoglycemia detectors inspect initial input, model-authored tool calls, invoked tool results, and verifier observations on the agent and dispatch children; strong instruction and zero-width findings in foreign (including MCP) or unknown results are blocked, while trusted content and weak phrases are tagged; risk appears at interactive tool-call and plan-lock prompts and successful REPL/-p stderr footers, but not verifier approval prompts; default off")
+	fs.BoolVar(&f.interceptors, "interceptors", false, "enable the interceptor pipeline (#436/#439): zero-width, encoding, and typoglycemia detectors inspect initial input, model-authored tool calls, invoked tool results, and verifier observations on the agent and dispatch children; strong instruction and zero-width findings in foreign (including MCP) or unknown results are blocked, while trusted content and weak phrases are tagged; argument guards block protected-path, credential-path, and recognized remote-script calls before planning or approval; egress classes label command approvals; risk appears at interactive tool-call and plan-lock prompts and successful REPL/-p stderr footers, but not verifier approval prompts; default off")
 	fs.Var(&f.mcpStdio, "mcp-stdio", "attach an MCP server over stdio: \"[alias=]command args...\" (repeatable; use `env KEY=val cmd` for env vars)")
 	fs.Var(&f.mcpHTTP, "mcp-http", "attach an MCP server over streamable HTTP: \"[alias=]https://endpoint\" (repeatable)")
 	fs.Var(&f.allowDestinations, "allow-destination", "admit a remote model destination without prompting: \"<provider>/<canonical base URL>\" (repeatable; the deprecated \"<provider>=<base URL>\" form is still accepted; required for remote destinations in noninteractive runs)")
@@ -617,7 +617,7 @@ func interceptorsNotice(ics []agent.Interceptor) string {
 //
 // With -dispatch it also installs the per-run dispatch invocation cap, and
 // with a workspace-declared verifier (#347) the post-write verification hook.
-// With -interceptors it also installs the default detector chain (#514).
+// With -interceptors it also installs the default interceptor chain (#514/#439).
 // A typed-nil verifier would satisfy the interface and panic on first use
 // (#347); the factory normalizes the two concrete types it can receive so
 // that guarantee does not rest on every call site.

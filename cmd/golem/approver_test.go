@@ -711,7 +711,20 @@ func TestVerifyGrantsAreClearedWithTheSession(t *testing.T) {
 	}
 }
 
+// egressFinding is a normalized egress finding as the pipeline stamps it.
+func egressFinding(rule string, risk int, label string) agent.Finding {
+	return agent.Finding{Interceptor: "egress", Rule: rule, Verdict: agent.VerdictTag, Risk: risk,
+		Hook: agent.HookToolCall, Target: agent.TargetToolCall, Detail: label}
+}
+
+// currentReport is a report whose cumulative history is exactly the current
+// call's findings, at the classifier's configured weight for that class.
+func currentReport(f agent.Finding) agent.RiskReport {
+	return agent.RiskReport{Score: f.Risk, Findings: []agent.Finding{f}, CurrentToolCallFindings: []agent.Finding{f}}
+}
+
 func TestRiskLine(t *testing.T) {
+	network := egressFinding("network", 20, "curl")
 	cases := []struct {
 		name string
 		risk agent.RiskReport
@@ -720,11 +733,123 @@ func TestRiskLine(t *testing.T) {
 		{"empty", agent.RiskReport{}, ""},
 		{"finding", agent.RiskReport{Score: 10, Findings: []agent.Finding{{Interceptor: "typoglycemia", Rule: "weak_phrase", Risk: 10}}}, "interceptor risk 10"},
 		{"zero-risk finding still shows", agent.RiskReport{Score: 0, Findings: []agent.Finding{{Interceptor: "x", Rule: "r"}}}, "interceptor risk 0"},
+		{"current network", currentReport(network), "interceptor risk 20 · egress: network (curl)"},
+		{"current privileged", currentReport(egressFinding("privileged", 20, "sudo")), "interceptor risk 20 · egress: privileged (sudo)"},
+		{"current package-manager", currentReport(egressFinding("package-manager", 10, "go get")), "interceptor risk 10 · egress: package-manager (go get)"},
+		{"current interpreter at zero", currentReport(egressFinding("interpreter", 0, "python3")), "interceptor risk 0 · egress: interpreter (python3)"},
+		{"current unknown quoted label", currentReport(egressFinding("unknown", 10, `"frob"`)), `interceptor risk 10 · egress: unknown ("frob")`},
+		{"history only, current clean", agent.RiskReport{Score: 20, Findings: []agent.Finding{network}}, "interceptor risk 20"},
+		{"history only, current clean but empty slice", agent.RiskReport{Score: 20, Findings: []agent.Finding{network}, CurrentToolCallFindings: []agent.Finding{}}, "interceptor risk 20"},
+		{"current has a non-egress finding only", agent.RiskReport{Score: 30, Findings: []agent.Finding{{Interceptor: "invariants", Rule: "protected_path", Risk: 30}},
+			CurrentToolCallFindings: []agent.Finding{{Interceptor: "invariants", Rule: "protected_path", Risk: 30, Hook: agent.HookToolCall, Target: agent.TargetToolCall}}}, "interceptor risk 30"},
+		{"current egress on the wrong hook", currentReport(agent.Finding{Interceptor: "egress", Rule: "network", Risk: 20, Hook: agent.HookInput, Target: agent.TargetToolCall, Detail: "curl"}), "interceptor risk 20"},
+		{"current egress on the wrong target", currentReport(agent.Finding{Interceptor: "egress", Rule: "network", Risk: 20, Hook: agent.HookToolCall, Target: agent.TargetMessage, Detail: "curl"}), "interceptor risk 20"},
+		{"current egress with an unknown class", currentReport(egressFinding("exfiltration", 20, "curl")), "interceptor risk 20"},
+		{"current egress after a non-egress finding", agent.RiskReport{Score: 50, Findings: []agent.Finding{{Interceptor: "x", Rule: "r", Risk: 30}, network},
+			CurrentToolCallFindings: []agent.Finding{{Interceptor: "x", Rule: "r", Risk: 30, Hook: agent.HookToolCall, Target: agent.TargetToolCall}, network}}, "interceptor risk 50 · egress: network (curl)"},
+		{"label newline is flattened", currentReport(egressFinding("unknown", 10, "a\nb")), "interceptor risk 10 · egress: unknown (a b)"},
+		{"label carriage return is flattened", currentReport(egressFinding("unknown", 10, "a\rb")), "interceptor risk 10 · egress: unknown (a b)"},
+		{"label escape is neutralized", currentReport(egressFinding("unknown", 10, "\x1b[2Jfrob")), `interceptor risk 10 · egress: unknown (\x1b[2Jfrob)`},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := riskLine(tc.risk); got != tc.want {
 				t.Fatalf("riskLine = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestApproverEgressBadgeBetweenPreviewAndQuestion pins the exact prompt
+// bytes with a badge: preview, score plus badge on one line, question.
+func TestApproverEgressBadgeBetweenPreviewAndQuestion(t *testing.T) {
+	var out strings.Builder
+	a := newReplApprover(newScannerSource(strings.NewReader("y\n"), &out), &out, false)
+	d, err := a.ApproveWithRisk(context.Background(), execCall(), "run command:\n  argv: curl https://x\n", "exec:abc", currentReport(egressFinding("network", 20, "curl")))
+	if err != nil || !d.Approved {
+		t.Fatalf("d=%+v err=%v", d, err)
+	}
+	want := "run command:\n  argv: curl https://x\ninterceptor risk 20 · egress: network (curl)\nRun this command? [y/N] "
+	if out.String() != want {
+		t.Fatalf("prompt = %q, want %q", out.String(), want)
+	}
+}
+
+// TestApproverGrantHitShowsEgressBadge: a grant-covered exec call still shows
+// the badge, before the auto-approval line (the #420 tripwire shape).
+func TestApproverGrantHitShowsEgressBadge(t *testing.T) {
+	var out strings.Builder
+	g := newApprovalGrants()
+	g.grant(grantScopeExec, "exec:abc")
+	ap := newReplApprover(&promptFatalSource{t: t}, &out, false)
+	ap.grants = g
+	d, err := ap.ApproveWithRisk(context.Background(), execCall(), "run command:\n  argv: git push\n", "exec:abc", currentReport(egressFinding("network", 20, "git push")))
+	if err != nil || !d.Approved || !d.ViaGrant {
+		t.Fatalf("granted key must auto-approve: d=%+v err=%v", d, err)
+	}
+	want := "run command:\n  argv: git push\ninterceptor risk 20 · egress: network (git push)\nauto-approved (session grant)\n"
+	if out.String() != want {
+		t.Fatalf("grant-hit output = %q, want %q", out.String(), want)
+	}
+}
+
+// TestApproverStartPromptShowsEgressBadge: start_command keeps its own
+// question; the badge comes from the current-call carrier, whatever the
+// call ID.
+func TestApproverStartPromptShowsEgressBadge(t *testing.T) {
+	var out strings.Builder
+	a := newReplApprover(newScannerSource(strings.NewReader("y\n"), &out), &out, false)
+	call := startCall()
+	call.ID = ""
+	if _, err := a.ApproveWithRisk(context.Background(), call, "start background command:\n  argv: npm run dev\n", "exec-bg:v2:abc", currentReport(egressFinding("package-manager", 10, "npm"))); err != nil {
+		t.Fatal(err)
+	}
+	want := "start background command:\n  argv: npm run dev\ninterceptor risk 10 · egress: package-manager (npm)\nStart this background command? [y/N] "
+	if out.String() != want {
+		t.Fatalf("prompt = %q, want %q", out.String(), want)
+	}
+}
+
+// TestApproverCurrentCleanKeepsHistoryLineOnly: an earlier call's egress
+// finding in the cumulative history renders the #514 score line only.
+func TestApproverCurrentCleanKeepsHistoryLineOnly(t *testing.T) {
+	var out strings.Builder
+	a := newReplApprover(newScannerSource(strings.NewReader("y\n"), &out), &out, false)
+	history := agent.RiskReport{Score: 20, Findings: []agent.Finding{egressFinding("network", 20, "curl")}}
+	if _, err := a.ApproveWithRisk(context.Background(), execCall(), "run command:\n  argv: go test\n", "exec:abc", history); err != nil {
+		t.Fatal(err)
+	}
+	want := "run command:\n  argv: go test\ninterceptor risk 20\nRun this command? [y/N] "
+	if out.String() != want {
+		t.Fatalf("prompt = %q, want %q", out.String(), want)
+	}
+}
+
+// TestApproverBadgePerClassDenied pins every class through a denied prompt,
+// where the trailing newline after the question is part of the bytes.
+func TestApproverBadgePerClassDenied(t *testing.T) {
+	for _, tc := range []struct {
+		rule  string
+		risk  int
+		label string
+		want  string
+	}{
+		{"privileged", 20, "sudo", "interceptor risk 20 · egress: privileged (sudo)"},
+		{"network", 20, "curl via bash -c", "interceptor risk 20 · egress: network (curl via bash -c)"},
+		{"package-manager", 10, "python3 -m pip", "interceptor risk 10 · egress: package-manager (python3 -m pip)"},
+		{"interpreter", 0, "bash", "interceptor risk 0 · egress: interpreter (bash)"},
+		{"unknown", 10, `"env" unsupported form`, `interceptor risk 10 · egress: unknown ("env" unsupported form)`},
+	} {
+		t.Run(tc.rule, func(t *testing.T) {
+			var out strings.Builder
+			a := newReplApprover(newScannerSource(strings.NewReader("n\n"), &out), &out, false)
+			d, err := a.ApproveWithRisk(context.Background(), execCall(), "run command:\n  argv: x\n", "exec:abc", currentReport(egressFinding(tc.rule, tc.risk, tc.label)))
+			if err != nil || d.Approved {
+				t.Fatalf("d=%+v err=%v", d, err)
+			}
+			want := "run command:\n  argv: x\n" + tc.want + "\nRun this command? [y/N] \n"
+			if out.String() != want {
+				t.Fatalf("prompt = %q, want %q", out.String(), want)
 			}
 		})
 	}
