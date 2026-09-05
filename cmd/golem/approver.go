@@ -10,6 +10,8 @@ import (
 	"unicode"
 
 	"github.com/kstruzzieri/go-llm/agent"
+	"github.com/kstruzzieri/go-llm/agent/interceptor"
+	"github.com/kstruzzieri/go-llm/internal/promptfence"
 	"github.com/kstruzzieri/go-llm/provider"
 )
 
@@ -118,8 +120,9 @@ func (a *replApprover) ApproveWithRisk(ctx context.Context, call provider.ToolCa
 		question = grantQuestion("Apply this change?", grantable, "a=all edits this session")
 	}
 	// #514 D3: the run's cumulative report, between the preview and the
-	// decision, on the prompted and the grant-covered path alike. The line
-	// contains only fixed text plus the integer score.
+	// decision, on the prompted and the grant-covered path alike. #439 D6:
+	// the same line carries this call's egress badge when the report's
+	// current-call findings hold one.
 	if line := riskLine(risk); line != "" {
 		_, _ = fmt.Fprintln(a.out, line)
 	}
@@ -185,13 +188,49 @@ func grantQuestion(q string, grantable bool, legend string) string {
 }
 
 // riskLine renders the run's cumulative interceptor score for a prompt (#514
-// D3). Findings, not the score, gate the line: a zero-risk finding is still
-// something the human should see.
+// D3) and, when the report carries the approved call's own egress
+// classification, the #439 badge on the same line. Findings, not the score,
+// gate the line: a zero-risk finding is still something the human should
+// see. The badge label is the one place a finding detail reaches a prompt,
+// so the suffix is flattened to one line first (the preview sanitizer keeps
+// newlines on purpose) and then neutralized like a preview.
 func riskLine(risk agent.RiskReport) string {
 	if len(risk.Findings) == 0 {
 		return ""
 	}
-	return fmt.Sprintf("interceptor risk %d", risk.Score)
+	line := fmt.Sprintf("interceptor risk %d", risk.Score)
+	if f, ok := currentEgress(risk); ok {
+		line += sanitizeApprovalPreview(promptfence.FlattenLine(" · egress: " + f.Rule + " (" + f.Detail + ")"))
+	}
+	return line
+}
+
+// egressName and egressClasses come from the classifier itself, so the badge
+// accepts exactly the classes it emits.
+var (
+	egressName    = interceptor.Egress{}.Name()
+	egressClasses = map[string]bool{
+		interceptor.EgressPrivileged:     true,
+		interceptor.EgressNetwork:        true,
+		interceptor.EgressPackageManager: true,
+		interceptor.EgressInterpreter:    true,
+		interceptor.EgressUnknown:        true,
+	}
+)
+
+// currentEgress returns the first egress classification among the approved
+// call's own findings (#439 D6). Only CurrentToolCallFindings is consulted:
+// cumulative history may hold an earlier call's badge, and provider IDs may
+// be empty or reused, so neither identifies this call. A finding is accepted
+// only when it came from the egress interceptor on the tool-call hook with a
+// tool-call target and names a known class.
+func currentEgress(risk agent.RiskReport) (agent.Finding, bool) {
+	for _, f := range risk.CurrentToolCallFindings {
+		if f.Interceptor == egressName && f.Hook == agent.HookToolCall && f.Target == agent.TargetToolCall && egressClasses[f.Rule] {
+			return f, true
+		}
+	}
+	return agent.Finding{}, false
 }
 
 // renderPlain prints a non-diff preview verbatim (no +/- coloring).
