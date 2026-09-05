@@ -32,6 +32,9 @@ type Compactor interface {
 // never calls a model.
 type RecencyCompactor struct {
 	Estimate func(string) int // conversation.TokenEstimator; len/4 default when nil
+	// frameToolResults charges the #430 frame envelope per tool message; set
+	// only through ContextManager (see its field of the same name).
+	frameToolResults bool
 }
 
 func (rc RecencyCompactor) estimate(s string) int {
@@ -63,6 +66,16 @@ func (rc RecencyCompactor) checkedMessageCost(m Message) (int, bool) {
 		}
 	}
 	if !add(rc.estimate(m.ToolName)) || !add(rc.estimate(m.ToolCallID)) {
+		return n, false
+	}
+	// #430 (spec D5): when this compactor prices for the Orchestrator, whose
+	// request builder frames every tool observation, a tool message costs its
+	// raw content and metadata PLUS one frame envelope, priced by the same
+	// estimator. The envelope is an additive estimate of the framing bytes,
+	// not E(framed content): a non-additive estimator prices content and
+	// frame separately by design, and byte caps (OutputCap, the anchor cap,
+	// trace Bytes) stay about raw content.
+	if rc.frameToolResults && m.Role == "tool" && !add(rc.estimate(toolFrameEnvelope)) {
 		return n, false
 	}
 	return n, true

@@ -58,6 +58,9 @@ func WithToolInvocationLimit(limit ToolInvocationLimit) Option {
 // point.
 func New(model ModelCaller, ctxMgr ContextManager, opts ...Option) *Orchestrator {
 	o := &Orchestrator{model: model, ctxMgr: ctxMgr, now: time.Now}
+	// #430: this orchestrator's request builder frames every tool
+	// observation, so its assembly charges the frame envelope (spec D5).
+	o.ctxMgr.frameToolResults = true
 	for _, opt := range opts {
 		opt(o)
 	}

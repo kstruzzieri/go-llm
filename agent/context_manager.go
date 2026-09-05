@@ -47,6 +47,13 @@ type ContextManager struct {
 	// accounting is an exact identity rather than an approximation. The legacy
 	// path is unchanged.
 	Estimate func(string) int
+	// frameToolResults charges one #430 frame envelope per role "tool" message
+	// during fitting. Only the Orchestrator sets it (agent.New), because only
+	// its request builder frames observations on the wire; a standalone
+	// manager (llm-bench's corpus builder, prefilled replay) sends what it
+	// assembles unframed and prices raw content. Unexported on purpose: the
+	// charge follows the transport, and callers do not choose the transport.
+	frameToolResults bool
 	// Mixed opts into structured mixed-budget assembly. It requires the DEFAULT
 	// compactor: Mixed together with a non-nil Compactor is a configuration
 	// error (ErrMixedCompactor) whatever any one request carries, because the
@@ -95,18 +102,31 @@ func (m ContextManager) estimate(s string) int {
 }
 
 func normalizeContextManager(m ContextManager) ContextManager {
-	if m.Compactor == nil {
-		m.Compactor = RecencyCompactor{Estimate: m.Estimate}
+	switch c := m.Compactor.(type) {
+	case nil:
+		m.Compactor = m.costCompactor()
+	case RecencyCompactor:
+		// A caller-supplied built-in compactor prices messages the way this
+		// manager's final validation does, frame envelope included.
+		c.frameToolResults = m.frameToolResults
+		m.Compactor = c
 	}
 	return m
 }
 
+// costCompactor is the one place a ContextManager turns itself into the
+// message-cost seam, so every path (pinned, total, mixed envelopes, the
+// default compactor) prices a message identically.
+func (m ContextManager) costCompactor() RecencyCompactor {
+	return RecencyCompactor{Estimate: m.Estimate, frameToolResults: m.frameToolResults}
+}
+
 func (m ContextManager) messageCost(msg Message) int {
-	return RecencyCompactor{Estimate: m.Estimate}.messageCost(msg)
+	return m.costCompactor().messageCost(msg)
 }
 
 func (m ContextManager) checkedMessageCost(msg Message) (int, bool) {
-	return RecencyCompactor{Estimate: m.Estimate}.checkedMessageCost(msg)
+	return m.costCompactor().checkedMessageCost(msg)
 }
 
 // turnBudget resolves the per-turn input ceiling from the run Budget, applying
