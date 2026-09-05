@@ -8,12 +8,12 @@ import (
 	"github.com/kstruzzieri/go-llm/agent"
 )
 
-func TestDefaultsAreThreeUniqueInterceptors(t *testing.T) {
-	names := make([]string, 0, 3)
+func TestDefaultsAreFiveUniqueInterceptors(t *testing.T) {
+	names := make([]string, 0, 5)
 	for _, ic := range Defaults() {
 		names = append(names, ic.Name())
 	}
-	if got := strings.Join(names, ","); got != "zero_width,encoding,typoglycemia" {
+	if got := strings.Join(names, ","); got != "zero_width,encoding,typoglycemia,invariants,egress" {
 		t.Fatalf("names = %s", got)
 	}
 }

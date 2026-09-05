@@ -70,7 +70,7 @@ func TestStartupNotices_Interceptors(t *testing.T) {
 // notice still says enabled. A benign mention of "system prompt" is enough to
 // exercise scoring without requiring tool calls from the test backend.
 func TestRunWiresInterceptors(t *testing.T) {
-	const want = "interceptors: enabled (zero_width, encoding, typoglycemia)"
+	const want = "interceptors: enabled (zero_width, encoding, typoglycemia, invariants, egress)"
 	const goal = "Explain the term system prompt."
 	for _, tc := range []struct {
 		name string
