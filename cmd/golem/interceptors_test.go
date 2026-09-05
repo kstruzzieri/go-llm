@@ -46,7 +46,7 @@ func TestInterceptorsFor(t *testing.T) {
 	for _, ic := range interceptorsFor(flags{interceptors: true}) {
 		names = append(names, ic.Name())
 	}
-	if want := []string{"zero_width", "encoding", "typoglycemia"}; !slices.Equal(names, want) {
+	if want := []string{"zero_width", "encoding", "typoglycemia", "invariants", "egress"}; !slices.Equal(names, want) {
 		t.Fatalf("on: chain = %v, want %v", names, want)
 	}
 }
@@ -56,7 +56,7 @@ func TestStartupNotices_Interceptors(t *testing.T) {
 		workspace:       "/w",
 		interceptorLine: interceptorsNotice(interceptorsFor(flags{interceptors: true})),
 	}), "\n")
-	if want := "workspace: /w\ninterceptors: enabled (zero_width, encoding, typoglycemia)"; on != want {
+	if want := "workspace: /w\ninterceptors: enabled (zero_width, encoding, typoglycemia, invariants, egress)"; on != want {
 		t.Fatalf("notices with the flag = %q, want %q", on, want)
 	}
 	off := strings.Join(startupNotices(startupInfo{workspace: "/w"}), "\n")
