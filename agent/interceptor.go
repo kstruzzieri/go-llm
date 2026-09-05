@@ -404,7 +404,9 @@ func (e *BlockedError) Error() string {
 
 // RiskApprover is optionally implemented by an Approver that wants the run's
 // cumulative RiskReport with each approval (spec D2). Dispatch prefers it
-// over KeyedApprover and Approver. The report is a snapshot.
+// over KeyedApprover and Approver. The report is a snapshot that also
+// carries the approved call's own findings in CurrentToolCallFindings
+// (#439 D6).
 type RiskApprover interface {
 	ApproveWithRisk(ctx context.Context, call provider.ToolCall, preview, approvalKey string, risk RiskReport) (ApprovalDecision, error)
 }
