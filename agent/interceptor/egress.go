@@ -202,15 +202,19 @@ scan:
 			default:
 				return nil, peelUnsupported // clusters, attached values, unknown short options
 			}
-		case g.assignments && strings.Contains(a, "="):
-			if !envAssignment.MatchString(a) {
-				return nil, peelUnsupported
-			}
 		default:
 			break scan
 		}
 	}
 	args = args[i:]
+	// env assignments are operands: they follow options (including --),
+	// and the first assignment ends option parsing.
+	for g.assignments && len(args) > 0 && strings.Contains(args[0], "=") {
+		if !envAssignment.MatchString(args[0]) {
+			return nil, peelUnsupported
+		}
+		args = args[1:]
+	}
 	if g.duration {
 		if len(args) == 0 || !timeoutDuration.MatchString(args[0]) {
 			return nil, peelUnsupported

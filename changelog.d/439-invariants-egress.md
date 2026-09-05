@@ -12,7 +12,9 @@ included. Guards inspect tool calls only and add no model-visible trailer.
   (`tool call blocked by interceptor invariants (protected_path)`). The
   guard reads the argument the tool's own decoder would use: field names
   match case-insensitively, and two equivalent spellings block as
-  `ambiguous_argument`. Paths are normalized natively (`filepath.Clean`,
+  `ambiguous_argument`. Custom path patterns retain their compiled matching
+  semantics, including POSIX anchors and character classes, in owned storage.
+  Paths are normalized natively (`filepath.Clean`,
   `ToSlash`, the Win32 trailing period and space trim) and component
   case-folded. Defaults: `protected_path` (`.git`, `.ssh`, `.gnupg`,
   `.aws`, `.kube` components) on `write_file`, `edit_file`,
@@ -27,7 +29,9 @@ included. Guards inspect tool calls only and add no model-visible trailer.
   `network`, `package-manager`, `interpreter` or `unknown` after peeling
   the supported `env`/`nohup`/`nice`/`time`/`timeout`/`stdbuf` forms, with
   explicit `git` and `go` subcommand tables and a literal-word scan of a
-  recognized inline shell script. Anything it cannot parse, an inline
+  recognized inline shell script. `env` options and assignment operands are
+  parsed separately, with assignments still recognized after `--`.
+  Anything it cannot parse, an inline
   script it cannot read literally included, and anything outside an
   explicit quiet set, stays visible as `unknown`. One tag
   finding per call: `Rule` is the class, `Detail` a bounded label. Weights:
@@ -40,7 +44,8 @@ included. Guards inspect tool calls only and add no model-visible trailer.
   badge, `interceptor risk 20 · egress: network (git push)`, on prompted
   and grant-covered approvals alike; prompts without a current egress
   finding are byte-identical to before. The startup notice lists five
-  interceptors. Windows-native path cases are compiled by the existing CI
+  interceptors, and `-interceptors` help describes the guards and command
+  classifications. Windows-native path cases are compiled by the existing CI
   Windows step; a native run needs a Windows host.
 
 The hard line-count limit the issue mentioned is deferred: the existing

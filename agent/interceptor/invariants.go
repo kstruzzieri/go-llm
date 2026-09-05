@@ -40,9 +40,8 @@ type Check interface {
 // host's own normalization (see normalizePath). Native cleaning is
 // authoritative, so on POSIX a backslash stays a filename character exactly
 // as the workspace treats it. A non-string value is not a violation; the
-// tool rejects it. NewInvariants keeps only the pattern's source, recompiled
-// with regexp.Compile: a POSIX-compiled pattern loses leftmost-longest
-// matching, which cannot change a MatchString answer.
+// tool rejects it. NewInvariants owns the pattern's mutable state while
+// preserving its compiled semantics, including POSIX matching rules.
 type PathDeny struct{ Pattern *regexp.Regexp }
 
 func (d PathDeny) check(raw json.RawMessage) (string, bool) {
@@ -204,13 +203,13 @@ func ownedCheck(inv Invariant) (Check, error) {
 		if c.Pattern == nil {
 			return nil, fmt.Errorf("interceptor: invariant %s/%s has a PathDeny with no pattern", inv.Tool, inv.Name)
 		}
-		// A compiled Regexp still carries settable state (Longest); an owned
-		// recompile of its source keeps the caller's handle out of the guard.
-		re, err := regexp.Compile(c.Pattern.String())
-		if err != nil {
-			return nil, fmt.Errorf("interceptor: invariant %s/%s pattern: %w", inv.Tool, inv.Name, err)
+		// Copy compiled state to preserve POSIX semantics and isolate Longest.
+		// Keep normalizing a zero-value Regexp to the valid empty pattern.
+		re := *c.Pattern
+		if re.String() == "" {
+			re = *regexp.MustCompile("")
 		}
-		return PathDeny{Pattern: re}, nil
+		return PathDeny{Pattern: &re}, nil
 	case RemoteScript:
 		return c, nil
 	default:

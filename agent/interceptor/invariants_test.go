@@ -96,6 +96,32 @@ func TestNewInvariantsOwnsItsTable(t *testing.T) {
 	expectOne(t, found, "protected_path", `path ".git/config" matches protected pattern`)
 }
 
+func TestNewInvariantsPreservesPatternSemantics(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name    string
+		pattern *regexp.Regexp
+		text    string
+		want    bool
+	}{
+		{"POSIX line anchors", regexp.MustCompilePOSIX(`^beta$`), "alpha\nbeta\ngamma", true},
+		{"POSIX newline class", regexp.MustCompilePOSIX(`^[^x]$`), "\n", false},
+		{"empty pattern", regexp.MustCompile(""), "notes", true},
+		{"zero regexp", new(regexp.Regexp), "notes", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			iv, err := NewInvariants([]Invariant{{Tool: "t", Name: "custom", Field: "text", Check: PathDeny{Pattern: tc.pattern}}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			found := inspectWith(t, iv, "t", sprintfJSON(`{"text":%s}`, tc.text))
+			if got := len(found) != 0; got != tc.want {
+				t.Errorf("installed pattern %q matching %q = %v, want %v", tc.pattern, tc.text, got, tc.want)
+			}
+		})
+	}
+}
+
 // TestNewInvariantsOwnsPatternData: the guard holds its own compiled
 // pattern, so the caller flipping Longest on its handle while inspections
 // run neither races (the race detector would flag a shared Regexp) nor
