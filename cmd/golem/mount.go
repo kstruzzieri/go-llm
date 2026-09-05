@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"slices"
+	"strings"
 
 	"github.com/kstruzzieri/go-llm/agent"
 	agenttools "github.com/kstruzzieri/go-llm/agent/tools"
@@ -52,8 +53,12 @@ func composeSystem(in systemInputs) string {
 	system += delegateSystemFragment(in.delegate, in.allowWrite || headlessWrite)
 	system += dispatchSystemFragment(in.dispatch)
 	system += memorySystemFragment(in.memory)
-	system += injectedContext(in)
-	return system + agentMemorySystemFragment(in.agentMemory, in.sessionUp)
+	injected := injectedContext(in)
+	agentMemory := agentMemorySystemFragment(in.agentMemory, in.sessionUp)
+	if injected != "" && agentMemory != "" {
+		agentMemory = "\n\n" + strings.TrimPrefix(agentMemory, " ")
+	}
+	return system + injected + agentMemory
 }
 
 // injectedContext is the untrusted-data suffix every model-facing prompt

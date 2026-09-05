@@ -45,8 +45,8 @@ type replSession struct {
 	// Git context (#354). projectDocs are the bounded project documents read
 	// at startup, retained so /git-context refresh can re-render them under
 	// the shared budget without rereading AGENTS.md; gitSnapshot is the
-	// current capture (zero value when absent) for unchanged detection and
-	// retain-on-error; noGitContext mirrors -no-git-context and disables
+	// most recent successful capture, including its absence reason;
+	// noGitContext mirrors -no-git-context and disables
 	// refresh as well as startup capture.
 	projectDocs    []projectcontext.Document
 	gitSnapshot    gitContextSnapshot

@@ -31,17 +31,18 @@ var (
 	gitContextBlockedKeys = []string{
 		"GIT_CONFIG", "GIT_CONFIG_PARAMETERS", "GIT_CONFIG_COUNT",
 		"GIT_CEILING_DIRECTORIES", "GIT_DISCOVERY_ACROSS_FILESYSTEM",
-		"LC_ALL",
+		"LC_ALL", "GIT_NO_LAZY_FETCH",
 	}
 	gitContextBlockedPrefixes = []string{"GIT_CONFIG_KEY_", "GIT_CONFIG_VALUE_"}
 )
 
 // gitContextEnv is the environment for the read-only Git snapshot capture: the
-// shared host filter plus the capture-specific scrub above, with LC_ALL=C
-// appended exactly once. It is not used by Agentflow's Git calls, whose
-// behavior hostGitEnv preserves unchanged.
+// shared host filter plus the capture-specific scrub above, with LC_ALL=C and
+// GIT_NO_LAZY_FETCH=1 appended exactly once. Missing objects must fail capture
+// without fetching from repository-configured remotes. Agentflow's Git calls
+// retain the behavior of hostGitEnv.
 func gitContextEnv() []string {
-	return append(dropEnvKeys(hostGitEnv(), gitContextBlockedKeys, gitContextBlockedPrefixes), "LC_ALL=C")
+	return append(dropEnvKeys(hostGitEnv(), gitContextBlockedKeys, gitContextBlockedPrefixes), "LC_ALL=C", "GIT_NO_LAZY_FETCH=1")
 }
 
 // Git context render contract (#354 D3, D7). gitContextMaxBytes caps the
@@ -176,7 +177,7 @@ func gitContextBlock(st gitState, maxBytes int) (block string, payloadBytes int)
 	branchReserve := min(len(branch), len("branch:")+len(gitContextTruncatedMark)) + 1
 
 	if st.Prefix != "" {
-		emit(fit("prefix: "+gitContextText(st.Prefix)+" (workspace root; strip this prefix for file-tool paths)", metadataLimit-branchReserve))
+		emit(fit("prefix: "+gitContextText(st.Prefix)+" (workspace root; file tools can only access paths under this prefix; strip it for file-tool paths)", metadataLimit-branchReserve))
 	}
 	emit(fit(branch, metadataLimit))
 	emit(commitHeader)
@@ -226,7 +227,7 @@ func gitContextBlock(st gitState, maxBytes int) (block string, payloadBytes int)
 }
 
 // gitContextNotice is the human summary shared by the startup notice and the
-// refresh report: branch, entry count or "clean", commit count. Counts are the
+// refresh report: branch, entry count or "clean", recent commit count. Counts are the
 // exact observed totals, not the retained record counts, and the branch text
 // is control-safe.
 func gitContextNotice(st gitState) string {
@@ -234,7 +235,7 @@ func gitContextNotice(st gitState) string {
 	if st.TotalEntries > 0 {
 		tree = fmt.Sprintf("%d %s", st.TotalEntries, pluralNoun(st.TotalEntries, "status entry", "status entries"))
 	}
-	return fmt.Sprintf("%s, %s, %d %s", gitContextText(st.Branch), tree, st.TotalCommits, pluralNoun(st.TotalCommits, "commit", "commits"))
+	return fmt.Sprintf("%s, %s, %d recent %s", gitContextText(st.Branch), tree, st.TotalCommits, pluralNoun(st.TotalCommits, "commit", "commits"))
 }
 
 // Capture bounds (#354 D4, D6). gitContextRawCap is a variable so tests can
@@ -242,7 +243,7 @@ func gitContextNotice(st gitState) string {
 // Every stdout writer keeps at most the cap while counting every newline it
 // receives, so Git writes to completion (never a broken pipe) and totals stay
 // exact without retaining the tail. gitContextTimeout is the one execution
-// deadline shared by all three calls; gitContextWaitDelay closes inherited
+// deadline shared by all four calls; gitContextWaitDelay closes inherited
 // pipes after cancellation so a grandchild cannot hold the capture open.
 var gitContextRawCap = 256 * 1024
 
@@ -317,6 +318,9 @@ func (e *gitExitError) Error() string {
 // through errors.Is; a start failure wraps exec's error (so exec.ErrNotFound
 // stays visible); a nonzero exit becomes *gitExitError.
 func runGit(ctx context.Context, gitPath, root string, args ...string) (*capWriter, error) {
+	// Older Git may ignore the environment guard; an unsupported option
+	// instead rejects capture before any repository command runs.
+	args = append([]string{"--no-lazy-fetch"}, args...)
 	cmd := exec.CommandContext(ctx, gitPath, args...)
 	cmd.Dir = root
 	cmd.Env = gitContextEnv()
@@ -437,7 +441,7 @@ func gitLocalFilterDriver(ctx context.Context, gitPath, root string) (string, er
 }
 
 // loadGitContext captures the repository snapshot for the workspace at root
-// with three bounded Git calls under one shared deadline. A workspace outside
+// with up to four bounded Git calls under one shared deadline. A workspace outside
 // any work tree and a missing Git executable are absences, not errors; every
 // other failure (deadline, dubious ownership, bare or corrupt repository,
 // malformed output, other nonzero exit) is returned as an error and the caller

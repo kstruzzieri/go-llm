@@ -32,7 +32,7 @@ func TestGitContextBlockRendersLabeledSnapshot(t *testing.T) {
 		TotalEntries: 2,
 	}
 	want := gitContextOpen + "\n" +
-		"prefix: sub/dir/ (workspace root; strip this prefix for file-tool paths)\n" +
+		"prefix: sub/dir/ (workspace root; file tools can only access paths under this prefix; strip it for file-tool paths)\n" +
 		"branch: develop...origin/develop [ahead 1]\n" +
 		"recent commits (newest first):\n" +
 		"4a7adec 2026-09-01 feat(golem): headless integration surface\n" +
@@ -295,10 +295,10 @@ func TestGitContextNotice(t *testing.T) {
 		st   gitState
 		want string
 	}{
-		{"clean", gitState{Branch: "main", TotalCommits: 5}, "main, clean, 5 commits"},
-		{"singular", gitState{Branch: "main...origin/main", TotalEntries: 1, TotalCommits: 1}, "main...origin/main, 1 status entry, 1 commit"},
-		{"plural beyond retained", gitState{Branch: "main", Entries: []string{" M a"}, TotalEntries: 412, TotalCommits: 0}, "main, 412 status entries, 0 commits"},
-		{"escaped", gitState{Branch: "ma\x1bin\n", TotalCommits: 2}, `ma\x1bin\n, clean, 2 commits`},
+		{"clean", gitState{Branch: "main", TotalCommits: 5}, "main, clean, 5 recent commits"},
+		{"singular", gitState{Branch: "main...origin/main", TotalEntries: 1, TotalCommits: 1}, "main...origin/main, 1 status entry, 1 recent commit"},
+		{"plural beyond retained", gitState{Branch: "main", Entries: []string{" M a"}, TotalEntries: 412, TotalCommits: 0}, "main, 412 status entries, 0 recent commits"},
+		{"escaped", gitState{Branch: "ma\x1bin\n", TotalCommits: 2}, `ma\x1bin\n, clean, 2 recent commits`},
 	} {
 		got := gitContextNotice(tc.st)
 		if got != tc.want {

@@ -44,6 +44,34 @@ func fakeGitRoot(t *testing.T) string {
 	return root
 }
 
+func TestRunGitDisablesLazyFetch(t *testing.T) {
+	t.Setenv("GIT_NO_LAZY_FETCH", "0")
+	fake := fakeGit(t, "printf '%s\\n' \"$1\" \"$GIT_NO_LAZY_FETCH\"\n")
+	out, err := runGit(t.Context(), fake, t.TempDir(), "--version")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := out.String(); got != "--no-lazy-fetch\n1\n" {
+		t.Errorf("runGit lazy-fetch option and environment = %q, want %q", got, "--no-lazy-fetch\n1\n")
+	}
+	if got := envValues(hostGitEnv(), "GIT_NO_LAZY_FETCH"); len(got) != 1 || got[0] != "0" {
+		t.Errorf("hostGitEnv lazy-fetch setting = %q, want unchanged [0]", got)
+	}
+}
+
+func TestLoadGitContextRequiresLazyFetchControl(t *testing.T) {
+	fake := fakeGit(t, `if [ "$1" = "--no-lazy-fetch" ]; then
+  printf 'unknown option: --no-lazy-fetch\n' >&2
+  exit 129
+fi
+`)
+	snap, err := loadGitContext(t.Context(), fake, t.TempDir())
+	var exit *gitExitError
+	if !errors.As(err, &exit) || exit.code != 129 || snap.Block != "" {
+		t.Errorf("loadGitContext(unsupported Git) = %+v, %v, want no block and exit 129", snap, err)
+	}
+}
+
 // Exercise the precheck alone with inert records; no status or filter driver
 // is invoked. A successful process must still provide complete scoped keys.
 func TestGitLocalFilterDriverRequiresCompleteRecords(t *testing.T) {
@@ -123,7 +151,7 @@ func TestLoadGitContextHostileRepositoryContent(t *testing.T) {
 	if strings.Contains(block, "\u202e") {
 		t.Fatalf("raw bidi override reached the prompt:\n%s", block)
 	}
-	if notice := gitContextNotice(snap.State); strings.ContainsRune(notice, 0x1b) || !strings.Contains(notice, ">>> GIT_CONTEXT, 2 status entries, 2 commits") {
+	if notice := gitContextNotice(snap.State); strings.ContainsRune(notice, 0x1b) || !strings.Contains(notice, ">>> GIT_CONTEXT, 2 status entries, 2 recent commits") {
 		t.Fatalf("notice=%q", notice)
 	}
 }
@@ -194,7 +222,7 @@ func TestLoadGitContextDeadlineWithPipeHoldingGrandchild(t *testing.T) {
 	}
 }
 
-// The 2 s deadline is shared by all three calls, not granted per call: two
+// The 2 s deadline is shared by all four calls, not granted per call: two
 // slow-but-under-2s commands together must still time out.
 func TestLoadGitContextSharedDeadlineAcrossCalls(t *testing.T) {
 	fake := fakeGit(t, `case "$*" in
@@ -281,7 +309,7 @@ func TestGitContextRefreshRetainsOnFailure(t *testing.T) {
 	in, system, snap := sess.sysInputs, sess.baseSystem, sess.gitSnapshot
 	fakeGitOnPath(t, "printf 'fatal: \\033[31mboom\\n' >&2\nexit 128\n")
 	got := refresh(t, sess)
-	if got != `git context refresh failed: git --no-pager rev-parse --show-toplevel: exit status 128: fatal: \x1b[31mboom`+"\n" {
+	if got != `git context refresh failed: git --no-lazy-fetch --no-pager rev-parse --show-toplevel: exit status 128: fatal: \x1b[31mboom`+"\n" {
 		t.Fatalf("refresh output = %q", got)
 	}
 	if strings.ContainsRune(got, 0x1b) {

@@ -31,7 +31,7 @@ func TestComposeSystemFragmentOrder(t *testing.T) {
 		memorySystemFragment(true),
 		"\n\n<<<PROJECT>>>",
 		"\n\n<<<GIT>>>",
-		agentMemorySystemFragment(true, true),
+		"\n\n" + strings.TrimPrefix(agentMemorySystemFragment(true, true), " "),
 	}
 	for i, w := range want {
 		if w == "" {
@@ -46,6 +46,41 @@ func TestComposeSystemFragmentOrder(t *testing.T) {
 func TestComposeSystemDisabledInputsAreByteIdenticalToBasePrompt(t *testing.T) {
 	if got := composeSystem(systemInputs{}); got != buildSystemPrompt(false, false) {
 		t.Fatalf("zero inputs = %q, want the bare read-only prompt", got)
+	}
+}
+
+func TestComposeSystemAgentMemorySeparation(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		in        systemInputs
+		separator string
+	}{
+		{"none", systemInputs{}, " "},
+		{"project", systemInputs{projectContext: projectContextClose}, "\n\n"},
+		{"git", systemInputs{gitContext: gitContextClose}, "\n\n"},
+		{"both", systemInputs{projectContext: projectContextClose, gitContext: gitContextClose}, "\n\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			for _, mode := range []struct {
+				name               string
+				enabled, sessionUp bool
+			}{
+				{"disabled", false, false},
+				{"full", true, true},
+				{"degraded", true, false},
+			} {
+				in := tc.in
+				in.agentMemory, in.sessionUp = mode.enabled, mode.sessionUp
+				want := buildSystemPrompt(false, false) + injectedContext(tc.in)
+				if mode.enabled {
+					want += tc.separator + strings.TrimPrefix(agentMemorySystemFragment(true, mode.sessionUp), " ")
+				}
+				if got := composeSystem(in); got != want {
+					t.Errorf("composeSystem(%s, %s) = %q, want %q", tc.name, mode.name, got, want)
+				}
+			}
+		})
 	}
 }
 

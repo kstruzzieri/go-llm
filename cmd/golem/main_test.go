@@ -1828,10 +1828,10 @@ func TestStartupNoticesGitContextAfterProjectContext(t *testing.T) {
 	got := startupNotices(startupInfo{
 		workspace:          "/r",
 		projectContextLine: "project context: loaded 1 file(s)",
-		gitContextLine:     "git context: main, clean, 5 commits",
+		gitContextLine:     "git context: main, clean, 5 recent commits",
 	})
 	joined := strings.Join(got, "\n")
-	p, g := strings.Index(joined, "project context: loaded"), strings.Index(joined, "git context: main, clean, 5 commits")
+	p, g := strings.Index(joined, "project context: loaded"), strings.Index(joined, "git context: main, clean, 5 recent commits")
 	if p < 0 || g < 0 || g < p {
 		t.Fatalf("want project context then git context, got:\n%s", joined)
 	}

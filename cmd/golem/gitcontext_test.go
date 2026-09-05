@@ -74,11 +74,12 @@ func TestGitContextEnvStripsConfigAndDiscoveryOverrides(t *testing.T) {
 		"GIT_CONFIG", "GIT_CONFIG_PARAMETERS", "GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0",
 		"GIT_CONFIG_KEY_17", "GIT_CONFIG_VALUE_17",
 		"GIT_CEILING_DIRECTORIES", "GIT_DISCOVERY_ACROSS_FILESYSTEM", "LC_ALL",
+		"GIT_NO_LAZY_FETCH",
 	}
 	seedEnv(t, append(append([]string(nil), hostGitLocationKeys...), extra...))
 	env := gitContextEnv()
 	for _, k := range append(append([]string(nil), hostGitLocationKeys...), extra...) {
-		if k == "GIT_TERMINAL_PROMPT" || k == "LC_ALL" {
+		if k == "GIT_TERMINAL_PROMPT" || k == "LC_ALL" || k == "GIT_NO_LAZY_FETCH" {
 			continue
 		}
 		if got := envValues(env, k); len(got) != 0 {
@@ -90,6 +91,9 @@ func TestGitContextEnvStripsConfigAndDiscoveryOverrides(t *testing.T) {
 	}
 	if got := envValues(env, "LC_ALL"); len(got) != 1 || got[0] != "C" {
 		t.Fatalf("LC_ALL = %q, want exactly [C]", got)
+	}
+	if got := envValues(env, "GIT_NO_LAZY_FETCH"); len(got) != 1 || got[0] != "1" {
+		t.Fatalf("GIT_NO_LAZY_FETCH = %q, want exactly [1]", got)
 	}
 	if got := envValues(env, "GOLEM_UNRELATED_KEEP"); len(got) != 1 || got[0] != "kept" {
 		t.Fatalf("unrelated variable did not survive: %q", got)
@@ -399,7 +403,7 @@ func TestLoadGitContextSubdirReportsPrefix(t *testing.T) {
 	if got := strings.Join(st.Entries, "|"); got != " M top.go|?? sub/" {
 		t.Fatalf("entries=%q, want repository-root-relative paths", got)
 	}
-	if !strings.Contains(snap.Block, "prefix: sub/ (workspace root; strip this prefix for file-tool paths)\n") {
+	if !strings.Contains(snap.Block, "prefix: sub/ (workspace root; file tools can only access paths under this prefix; strip it for file-tool paths)\n") {
 		t.Fatalf("block lacks the prefix line:\n%s", snap.Block)
 	}
 }

@@ -59,7 +59,7 @@ func TestGitContextRefreshReplacesOnce(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(root, "tracked.go"), []byte("package y\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if got := refresh(t, sess); got != "git context refreshed: feature, 1 status entry, 1 commit\n" {
+	if got := refresh(t, sess); got != "git context refreshed: feature, 1 status entry, 1 recent commit\n" {
 		t.Fatalf("refresh output = %q", got)
 	}
 	// Runtime request: the next turn carries the new block, exactly once.

@@ -83,11 +83,11 @@ func TestStartupComposesGitContextIntoSystem(t *testing.T) {
 	if len(sess.projectDocs) != 1 || !strings.Contains(sess.projectDocs[0].Content, "repo rule") {
 		t.Fatalf("project documents not retained for refresh: %+v", sess.projectDocs)
 	}
-	if !strings.Contains(stderr, "git context: main, 1 status entry, 1 commit") {
+	if !strings.Contains(stderr, "git context: main, 1 status entry, 1 recent commit") {
 		t.Fatalf("startup notice missing on stderr:\n%s", stderr)
 	}
 
-	// Opt-out and non-repository: identical prompt bytes, no snapshot, no notice.
+	// Opt-out and non-repository: identical prompt bytes, no Git block or notice.
 	noRepo, err := filepath.EvalSymlinks(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
@@ -99,6 +99,9 @@ func TestStartupComposesGitContextIntoSystem(t *testing.T) {
 	}
 	if optOutSess.gitSnapshot.Block != "" || plainSess.gitSnapshot.Block != "" || !optOutSess.noGitContext || plainSess.noGitContext {
 		t.Fatalf("snapshot/flag state: opt-out=%+v plain=%+v", optOutSess.gitSnapshot, plainSess.gitSnapshot)
+	}
+	if plainSess.gitSnapshot.Absence != gitContextNotRepository {
+		t.Errorf("startupSession(non-repository).gitSnapshot.Absence = %v, want %v", plainSess.gitSnapshot.Absence, gitContextNotRepository)
 	}
 	if strings.Contains(optOutErr, "git context") || strings.Contains(plainErr, "git context") {
 		t.Fatalf("absent Git context must print no notice:\n%s\n%s", optOutErr, plainErr)
