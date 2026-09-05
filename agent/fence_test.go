@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"fmt"
 	"reflect"
 	"regexp"
 	"strings"
@@ -198,6 +199,11 @@ type wireCaller struct {
 
 func (w *wireCaller) Chat(_ context.Context, req provider.ChatRequest, onToken func(provider.ChatResponse) error) (ModelResult, error) {
 	w.requests = append(w.requests, req)
+	if len(w.requests) > len(w.responses) {
+		// An unscripted request is a test failure to report, never a panic
+		// that hides which assertion the run was about to violate.
+		return ModelResult{}, fmt.Errorf("wireCaller: unscripted request %d", len(w.requests))
+	}
 	r := w.responses[len(w.requests)-1]
 	if onToken != nil && r.Response.Content != "" {
 		if err := onToken(provider.ChatResponse{Content: r.Response.Content}); err != nil {
