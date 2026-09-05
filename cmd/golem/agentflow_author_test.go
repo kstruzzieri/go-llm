@@ -1221,7 +1221,11 @@ func TestRunAgentflowAuthor_UsesPlannerModelOptionsWithoutMutatingSession(t *tes
 	}{
 		{name: "default budget", wantOutput: minPlannerOutput},
 		{name: "lower budget and explicit thinking", options: provider.ModelOptions{NumPredict: 1024, Think: &on, ThinkEffort: "high"}, wantOutput: minPlannerOutput},
-		{name: "larger caller budget", options: provider.ModelOptions{NumPredict: 8192, Think: &on, ThinkEffort: "high"}, wantOutput: 8192},
+		// InputCeiling is explicit: this row measures NumPredict precedence, and
+		// the planner's effective prompt (base prompt plus the #430 base
+		// contract, plus tool schemas) no longer fits the default ceiling less
+		// an 8192 reserve.
+		{name: "larger caller budget", options: provider.ModelOptions{NumPredict: 8192, Think: &on, ThinkEffort: "high"}, budget: agent.Budget{InputCeiling: 32768}, wantOutput: 8192},
 		// Budget.OutputReserve overrides Options.NumPredict inside the agent
 		// layer, so the floor must survive it too (Codex review on PR #295).
 		{name: "small output reserve floored", budget: agent.Budget{OutputReserve: 1024}, wantOutput: minPlannerOutput},
@@ -1448,6 +1452,55 @@ func TestAuthorPlanApproverPropagatesDelegateErrorWithoutRecordingDenial(t *test
 				t.Fatalf("error recorded as a denial: %+v", sess)
 			}
 		})
+	}
+}
+
+// plannerWireCaller issues one read_file call, then declines to submit,
+// recording every request.
+type plannerWireCaller struct{ requests []provider.ChatRequest }
+
+func (c *plannerWireCaller) Chat(_ context.Context, req provider.ChatRequest, _ func(provider.ChatResponse) error) (agent.ModelResult, error) {
+	c.requests = append(c.requests, req)
+	if len(c.requests) == 1 {
+		return agent.ModelResult{Response: provider.ChatResponse{ToolCalls: []provider.ToolCall{{
+			ID: "p1", Type: "function",
+			Function: provider.ToolCallFunction{Name: "read_file", Arguments: json.RawMessage(`{"path":"note.txt"}`)},
+		}}}}, nil
+	}
+	return agent.ModelResult{Response: provider.ChatResponse{Content: "no submission"}}, nil
+}
+
+// TestRunAgentflowAuthor_PlannerPromptCarriesBaseContract (#430): the planner
+// runs its own prompt through the Orchestrator, so its effective system
+// prompt carries the base contract and its observations are framed.
+func TestRunAgentflowAuthor_PlannerPromptCarriesBaseContract(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "note.txt"), []byte("planner note\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	caller := &plannerWireCaller{}
+	sess := newTestSession(t, caller, root)
+	err := runAgentflowAuthorWithClient(context.Background(), io.Discard, io.Discard, nil, sess, flags{goal: "x", goalSet: true}, root, &stubLocker{}, nil)
+	if !errors.Is(err, errPlannerNoSubmission) {
+		t.Fatalf("err = %v, want no submission", err)
+	}
+	if len(caller.requests) != 2 {
+		t.Fatalf("planner requests = %d, want 2", len(caller.requests))
+	}
+	if got := caller.requests[0].Messages[0].Content; got != plannerBasePrompt+"\n\n"+agent.ToolTrustContract {
+		t.Errorf("planner system = %q, want the planner prompt plus the base contract", got)
+	}
+	var tool *provider.ChatMessage
+	for i := range caller.requests[1].Messages {
+		if caller.requests[1].Messages[i].Role == "tool" {
+			tool = &caller.requests[1].Messages[i]
+		}
+	}
+	if tool == nil {
+		t.Fatalf("planner follow-up has no tool message: %+v", caller.requests[1].Messages)
+	}
+	if k := toolFrameKey(t, tool.Content); tool.Content != framedToolResult(k, "planner note\n") {
+		t.Errorf("planner observation = %q, want %q", tool.Content, framedToolResult(k, "planner note\n"))
 	}
 }
 

@@ -280,7 +280,9 @@ type RunScope struct {
 // RunScopedInterceptor is optionally implemented by an installed interceptor
 // that needs per-run state (spec D11; #438's per-turn nonce). ForRun returns
 // the instance used for this run (non-nil, same Name) and a system-prompt
-// addendum the pipeline appends to the run's System ("" appends nothing).
+// addendum the pipeline appends to the run's System. Each nonempty addendum
+// is prefixed with two newlines and otherwise preserved verbatim; "" appends
+// nothing.
 type RunScopedInterceptor interface {
 	ForRun(ctx context.Context, scope RunScope) (Interceptor, string, error)
 }
@@ -323,7 +325,7 @@ func validateInterceptors(ic []Interceptor) error {
 
 // resolveInterceptors validates the installed chain and replaces every
 // RunScopedInterceptor with its per-run instance, returning the concatenated
-// system addenda in chain order.
+// system addenda in chain order, each nonempty addendum prefixed by two newlines.
 func resolveInterceptors(ctx context.Context, chain []Interceptor, scope RunScope) ([]Interceptor, string, error) {
 	names, err := validatedInterceptorNames(chain)
 	if err != nil {
@@ -350,7 +352,9 @@ func resolveInterceptors(ctx context.Context, chain []Interceptor, scope RunScop
 				return nil, "", fmt.Errorf("agent: interceptor %s returned a run instance named %q", names[i], scopedName)
 			}
 			resolved = scoped
-			addenda += addendum
+			if addendum != "" {
+				addenda += "\n\n" + addendum
+			}
 		}
 		out[i] = namedInterceptor{Interceptor: resolved, name: names[i]}
 	}

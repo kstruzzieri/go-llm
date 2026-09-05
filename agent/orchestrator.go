@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/kstruzzieri/go-llm/internal/promptfence"
 	"github.com/kstruzzieri/go-llm/provider"
 )
 
@@ -57,6 +58,9 @@ func WithToolInvocationLimit(limit ToolInvocationLimit) Option {
 // point.
 func New(model ModelCaller, ctxMgr ContextManager, opts ...Option) *Orchestrator {
 	o := &Orchestrator{model: model, ctxMgr: ctxMgr, now: time.Now}
+	// #430: this orchestrator's request builder frames every tool
+	// observation, so its assembly charges the frame envelope (spec D5).
+	o.ctxMgr.frameToolResults = true
 	for _, opt := range opts {
 		opt(o)
 	}
@@ -80,8 +84,21 @@ func buildChatRequest(st State, specs []provider.Tool, outputReserve int, opts p
 	if st.System != "" {
 		msgs = append(msgs, provider.ChatMessage{Role: "system", Content: st.System})
 	}
+	// #430: every tool observation is framed here, on the value copy, after
+	// assembly, under one key minted for this render. State keeps the raw
+	// bytes, and the next render mints its own key (promptfence.New's
+	// contract: one id per rendered prompt).
+	var fence promptfence.Fence
+	minted := false
 	for _, m := range st.Messages {
-		msgs = append(msgs, m.ChatMessage)
+		cm := m.ChatMessage
+		if cm.Role == "tool" {
+			if !minted {
+				fence, minted = promptfence.New(), true
+			}
+			cm.Content = frameToolResult(fence, cm.Content)
+		}
+		msgs = append(msgs, cm)
 	}
 	req := provider.ChatRequest{Messages: msgs, Tools: specs, Stream: true, Options: opts}
 	if outputReserve > 0 {
@@ -131,7 +148,11 @@ func (o *Orchestrator) run(ctx context.Context, req Request, obs Observer, ic *i
 		return Result{}, err
 	}
 	ic.chain = chain
-	req.System += addenda
+	// #430 spec D3: the effective system prompt is caller text, then the base
+	// trust contract, then interceptor addenda in chain order. Composed once
+	// per run, before initState, so initial inspection and fitting both see
+	// it; RunScope above carried the caller's text alone.
+	req.System = withToolTrustContract(req.System) + addenda
 	state := initState(req)
 	historyLen := len(req.History)
 	var res Result

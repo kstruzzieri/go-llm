@@ -233,8 +233,9 @@ func TestScopeGuardSanitizedToolFailuresThroughRealRun(t *testing.T) {
 					}
 				}
 			}
-			if observed != "path not found" {
-				t.Fatalf("tool observation = %q, want %q", observed, "path not found")
+			// #430: the sanitized message reaches the model inside its frame.
+			if k := ToolFrameKey(t, observed); observed != FramedToolResult(k, "path not found") {
+				t.Fatalf("tool observation = %q, want %q", observed, FramedToolResult(k, "path not found"))
 			}
 		})
 	}

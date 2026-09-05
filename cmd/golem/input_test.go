@@ -228,11 +228,11 @@ func TestScannerSourceNoticeBetweenEnterPromptAndReadPrintsOnePrompt(t *testing.
 // regenerate it from the code under test without looking.
 func TestRunREPLOutputIsByteIdenticalToPreSeam(t *testing.T) {
 	const want = "golem> ok one\n" +
-		"? · 0.0s · ctx 7% · step 1/16\n" +
+		"? · 0.0s · ctx 9% · step 1/16\n" + // 9%: the #430 base contract is pinned system cost
 		"done · 1 step · 0.0s · 0 tok\n" +
 		"golem> golem> golem> unknown command: /bogus (try /help)\n" +
 		"golem> ok two\n" +
-		"? · 0.0s · ctx 7% · step 1/16\n" +
+		"? · 0.0s · ctx 9% · step 1/16\n" + // 9%: the #430 base contract is pinned system cost
 		"done · 1 step · 0.0s · 0 tok\n" +
 		"golem> \n"
 
