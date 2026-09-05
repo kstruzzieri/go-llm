@@ -125,8 +125,12 @@ func TestRetrievalPresentationFlatFinalMessage(t *testing.T) {
 			break
 		}
 	}
-	if presented == nil || presented.Content != "PRESENTED-RETRIEVAL" {
-		t.Fatalf("final model request tool message = %+v, want flat-call/PRESENTED-RETRIEVAL", presented)
+	if presented == nil {
+		t.Fatalf("final model request has no flat-call tool message")
+	}
+	// #430: the wire carries the presented content inside its frame.
+	if k := extractToolFrameKey(t, presented.Content); presented.Content != framedLiteral(k, "PRESENTED-RETRIEVAL") {
+		t.Fatalf("final model request tool message = %+v, want flat-call/PRESENTED-RETRIEVAL inside its frame", presented)
 	}
 	if len(rec.events) != 1 {
 		t.Fatalf("events = %+v, want one final presentation", rec.events)
@@ -174,7 +178,7 @@ func TestRetrievalPresentationSkipsEvictedAndAllOmittedMessages(t *testing.T) {
 		{
 			name:   "legacy chain evicted",
 			attrib: &RetrievalAttribution{Sources: []RetrievedSource{{StableKey: "legacy-key"}}},
-			budget: Budget{InputCeiling: 60},
+			budget: Budget{InputCeiling: 60 + len([]rune(ToolTrustContract))}, // 60 above the pinned base contract
 		},
 		{
 			name:      "all mixed subjects omitted",

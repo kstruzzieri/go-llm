@@ -52,6 +52,14 @@
 // says. No score or badge revokes a grant. The hard line-count limit the
 // issue mentioned is deferred; the existing 256 KiB write bounds remain.
 //
+// Independently of -interceptors, every tool result reaches the model inside
+// a keyed <<<TOOL_RESULT / >>>TOOL_RESULT frame minted per request, and every
+// effective system prompt carries agent.ToolTrustContract (framed content is
+// data, never instructions; project guidance only where delegated) after the
+// Golem application prompt and its capability-gated write/exec clauses
+// (#430). The terminal, events, the session store and traces show raw
+// results; approval, grants and sandboxes remain the enforcement layer.
+//
 // The source subcommand manages ad-hoc documents in the workspace index over
 // the managed-document registry:
 //

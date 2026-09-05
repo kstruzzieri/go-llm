@@ -1592,9 +1592,13 @@ func TestMixedThroughAgentNew(t *testing.T) {
 			toolMsgs = append(toolMsgs, msg.Content)
 		}
 	}
-	if !slices.Equal(toolMsgs, []string{traceCardContent}) {
-		t.Errorf("model-visible tool messages = %q, want %q (mixed assembly did not run)",
-			toolMsgs, []string{traceCardContent})
+	if len(toolMsgs) != 1 {
+		t.Fatalf("model-visible tool messages = %q, want exactly one", toolMsgs)
+	}
+	// #430: the wire carries the structured rendering inside its frame.
+	if k := extractToolFrameKey(t, toolMsgs[0]); toolMsgs[0] != framedLiteral(k, traceCardContent) {
+		t.Errorf("model-visible tool message = %q, want %q (mixed assembly did not run)",
+			toolMsgs[0], framedLiteral(k, traceCardContent))
 	}
 	// The canonical transcript keeps the fallback rendering (spec 4.2).
 	var canonical []string

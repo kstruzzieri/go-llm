@@ -79,7 +79,9 @@ type ContextSubjectTrace struct {
 	// Bytes is model-visible Content bytes — the quantity the anchor byte cap
 	// bounds. It is NOT a byte rendering of EstimatedTokens: the token figure
 	// also covers the envelope fields messageCost charges (tool-call id/type/
-	// name/arguments, ToolName, ToolCallID), which carry no Content bytes. A
+	// name/arguments, ToolName, ToolCallID) and, for a tool message priced
+	// for the Orchestrator, the #430 frame envelope, which is transport
+	// framing and not Content either. A
 	// chain span whose only text lives in its anchors is the visible case:
 	// EstimatedTokens 30, Bytes 0.
 	Bytes          int

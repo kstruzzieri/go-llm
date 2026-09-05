@@ -1438,7 +1438,7 @@ func TestInjectedSessionStorePreservesNativeHistoryAndThreadIsolationAcrossRunti
 		t.Fatalf("other thread Run: %v", err)
 	}
 	isolated := []provider.ChatMessage{
-		{Role: "system", Content: golem.SystemPrompt(false, false)},
+		{Role: "system", Content: golem.SystemPrompt(false, false) + "\n\n" + agent.ToolTrustContract},
 		{Role: "user", Content: "unrelated question"},
 	}
 	if got := secondCaller.requests[0].Messages; !reflect.DeepEqual(got, isolated) {
@@ -1454,7 +1454,7 @@ func TestInjectedSessionStorePreservesNativeHistoryAndThreadIsolationAcrossRunti
 	}
 
 	want := []provider.ChatMessage{
-		{Role: "system", Content: golem.SystemPrompt(false, false)},
+		{Role: "system", Content: golem.SystemPrompt(false, false) + "\n\n" + agent.ToolTrustContract},
 		{Role: "user", Content: "first question"},
 		{Role: "assistant", Content: "first answer"},
 		{Role: "user", Content: "second question"},
@@ -1756,7 +1756,7 @@ func TestStatefulThreadPersistsAcrossRuntimeInstances(t *testing.T) {
 	}
 	got := secondCaller.requests[0].Messages
 	want := []provider.ChatMessage{
-		{Role: "system", Content: golem.SystemPrompt(false, false)},
+		{Role: "system", Content: golem.SystemPrompt(false, false) + "\n\n" + agent.ToolTrustContract},
 		{Role: "user", Content: "first question"},
 		{Role: "assistant", Content: "first answer"},
 		{Role: "user", Content: "second question"},
@@ -1826,7 +1826,7 @@ func TestCanceledRunDoesNotPersistPartialTurn(t *testing.T) {
 	}
 	got := caller.requests[0].Messages
 	if len(got) != 2 ||
-		got[0].Role != "system" || got[0].Content != golem.SystemPrompt(false, false) ||
+		got[0].Role != "system" || got[0].Content != golem.SystemPrompt(false, false)+"\n\n"+agent.ToolTrustContract ||
 		got[1].Role != "user" || got[1].Content != "next" {
 		t.Fatalf("next request messages = %#v, canceled turn leaked into history", got)
 	}
@@ -2462,7 +2462,8 @@ func TestRunAppliesHostInstructionsContextAndRequestOptions(t *testing.T) {
 		t.Fatalf("model requests = %d, want 1", len(caller.requests))
 	}
 	request := caller.requests[0]
-	wantSystem := "base system\n\n--- GOLEM TURN INSTRUCTIONS ---\nproduce only JSON"
+	// Host text, turn instructions, then the #430 base contract agent.Run appends.
+	wantSystem := "base system\n\n--- GOLEM TURN INSTRUCTIONS ---\nproduce only JSON\n\n" + agent.ToolTrustContract
 	if request.Messages[0].Role != "system" || request.Messages[0].Content != wantSystem {
 		t.Fatalf("system message = %#v, want %q", request.Messages[0], wantSystem)
 	}
@@ -2500,8 +2501,8 @@ func TestRunUsesDefaultGolemSystemPrompt(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	if got := caller.requests[0].Messages[0].Content; got != golem.SystemPrompt(false, false) {
-		t.Fatalf("system message = %q, want default Golem prompt", got)
+	if got := caller.requests[0].Messages[0].Content; got != golem.SystemPrompt(false, false)+"\n\n"+agent.ToolTrustContract {
+		t.Fatalf("system message = %q, want default Golem prompt plus the base contract", got)
 	}
 }
 
@@ -2778,4 +2779,98 @@ func eventTypes(events []golem.Event) []string {
 		types[i] = events[i].Type
 	}
 	return types
+}
+
+// toolWireCaller issues one lookup call per turn, then answers, recording
+// every request.
+type toolWireCaller struct {
+	requests []provider.ChatRequest
+}
+
+func (c *toolWireCaller) Chat(_ context.Context, req provider.ChatRequest, onToken func(provider.ChatResponse) error) (agent.ModelResult, error) {
+	c.requests = append(c.requests, req)
+	if len(c.requests)%2 == 1 {
+		return agent.ModelResult{Response: provider.ChatResponse{ToolCalls: []provider.ToolCall{{
+			ID: "call-1", Type: "function",
+			Function: provider.ToolCallFunction{Name: "lookup", Arguments: json.RawMessage(`{"path":"file.txt"}`)},
+		}}}}, nil
+	}
+	if err := onToken(provider.ChatResponse{Content: "done"}); err != nil {
+		return agent.ModelResult{}, err
+	}
+	return agent.ModelResult{Response: provider.ChatResponse{Content: "done", Done: true}}, nil
+}
+
+// TestRuntimeFramesObservationsPerRenderAcrossThreads (#430): one Runtime
+// serving two threads frames each render under its own key, the host's
+// custom System gets the base contract, and the stored observation is raw.
+func TestRuntimeFramesObservationsPerRenderAcrossThreads(t *testing.T) {
+	caller := &toolWireCaller{}
+	store := &mapSessionStore{conversations: map[string]conversation.Conversation{}}
+	runtime, err := golem.New(context.Background(), golem.Options{
+		Root:         t.TempDir(),
+		System:       "HOST PROMPT",
+		Tools:        []agent.Tool{previewTool{}},
+		Orchestrator: agent.New(caller, agent.ContextManager{}),
+		SessionStore: store,
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := runtime.Close(); err != nil {
+			t.Fatalf("Close: %v", err)
+		}
+	})
+	for _, thread := range []string{"thread-a", "thread-b"} {
+		if _, err := runtime.Run(context.Background(), golem.Turn{ThreadID: thread, RunID: "run-" + thread, Message: "q"}, func(golem.Event) error { return nil }); err != nil {
+			t.Fatalf("%s: %v", thread, err)
+		}
+	}
+	if len(caller.requests) != 4 {
+		t.Fatalf("requests = %d, want 2 per turn", len(caller.requests))
+	}
+	if got := caller.requests[0].Messages[0].Content; got != "HOST PROMPT\n\n"+agent.ToolTrustContract {
+		t.Errorf("custom System = %q, want the host prompt plus the base contract", got)
+	}
+	var keys []string
+	for _, i := range []int{1, 3} {
+		var tool *provider.ChatMessage
+		for j := range caller.requests[i].Messages {
+			if caller.requests[i].Messages[j].Role == "tool" {
+				tool = &caller.requests[i].Messages[j]
+			}
+		}
+		if tool == nil {
+			t.Fatalf("request %d has no tool message", i)
+		}
+		k := golem.ToolFrameKey(t, tool.Content)
+		if tool.Content != golem.FramedToolResult(k, "contents") {
+			t.Errorf("request %d tool message = %q, want %q", i, tool.Content, golem.FramedToolResult(k, "contents"))
+		}
+		keys = append(keys, k)
+	}
+	if keys[0] == keys[1] {
+		t.Errorf("two renders share key %q", keys[0])
+	}
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	for _, thread := range []string{"thread-a", "thread-b"} {
+		conv, ok := store.conversations[thread]
+		if !ok {
+			t.Fatalf("%s not saved", thread)
+		}
+		found := false
+		for _, m := range conv.Messages {
+			if m.Role == "tool" {
+				found = true
+				if m.Content != "contents" {
+					t.Errorf("%s stored tool observation = %q, want raw %q", thread, m.Content, "contents")
+				}
+			}
+		}
+		if !found {
+			t.Errorf("%s: no tool observation stored", thread)
+		}
+	}
 }

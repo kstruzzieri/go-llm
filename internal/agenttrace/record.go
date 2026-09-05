@@ -16,6 +16,10 @@ const SchemaVersion = 2
 // TraceMeta is the replay-relevant request context the caller supplies (the
 // agent.Request is not embedded in agent.Result, and history is excluded from
 // Result.Messages, so a trace needs it to reconstruct the model input).
+// System is the caller's application prompt: agent.Run appends
+// agent.ToolTrustContract and interceptor addenda, and frames every tool
+// observation under a per-render key (#430), so replaying through Run
+// reproduces the effective prompt and framing rather than reading them here.
 type TraceMeta struct {
 	Goal           string
 	System         string

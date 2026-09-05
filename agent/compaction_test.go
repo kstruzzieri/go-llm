@@ -105,7 +105,8 @@ func TestRunEmitsCompactionEvent(t *testing.T) {
 	}}
 	o := newTestOrchestrator(mc)
 	res, err := o.Run(context.Background(), Request{
-		Goal: "q", Budget: Budget{InputCeiling: 80}, Tools: []Tool{bulkyTool{}},
+		// 80 on top of the #430 base contract, which is pinned system cost.
+		Goal: "q", Budget: Budget{InputCeiling: 80 + len([]rune(ToolTrustContract))}, Tools: []Tool{bulkyTool{}},
 	}, nil)
 	if err != nil {
 		t.Fatalf("Run: %v", err)

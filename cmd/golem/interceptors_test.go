@@ -311,16 +311,18 @@ func TestNewDispatchTool_ChildrenInheritInterceptors(t *testing.T) {
 		}
 		return envelope, out.Content
 	}
+	// The echo caller answers with the child's last tool message verbatim, so
+	// the summary carries the child's #430 frame around the library marker.
 	on, _ := invoke(flags{interceptors: true})
-	if got := on.Results[0].Summary; got != blockedInjection {
-		t.Fatalf("on: summary = %q, want %q", got, blockedInjection)
+	if got := on.Results[0].Summary; got != framedToolResult(toolFrameKey(t, got), blockedInjection) {
+		t.Fatalf("on: summary = %q, want %q inside its frame", got, blockedInjection)
 	}
 	if on.Results[0].RiskScore != 30 {
 		t.Fatalf("on: risk_score = %d, want 30", on.Results[0].RiskScore)
 	}
 	off, raw := invoke(flags{})
-	if got := off.Results[0].Summary; got != injection {
-		t.Fatalf("off: summary = %q, want %q", got, injection)
+	if got := off.Results[0].Summary; got != framedToolResult(toolFrameKey(t, got), injection) {
+		t.Fatalf("off: summary = %q, want %q inside its frame", got, injection)
 	}
 	if strings.Contains(raw, "risk_score") {
 		t.Fatalf("off: envelope must carry no risk_score key: %s", raw)
