@@ -1438,7 +1438,7 @@ func TestInjectedSessionStorePreservesNativeHistoryAndThreadIsolationAcrossRunti
 		t.Fatalf("other thread Run: %v", err)
 	}
 	isolated := []provider.ChatMessage{
-		{Role: "system", Content: golem.SystemPrompt(false, false)},
+		{Role: "system", Content: golem.SystemPrompt(false, false) + "\n\n" + agent.ToolTrustContract},
 		{Role: "user", Content: "unrelated question"},
 	}
 	if got := secondCaller.requests[0].Messages; !reflect.DeepEqual(got, isolated) {
@@ -1454,7 +1454,7 @@ func TestInjectedSessionStorePreservesNativeHistoryAndThreadIsolationAcrossRunti
 	}
 
 	want := []provider.ChatMessage{
-		{Role: "system", Content: golem.SystemPrompt(false, false)},
+		{Role: "system", Content: golem.SystemPrompt(false, false) + "\n\n" + agent.ToolTrustContract},
 		{Role: "user", Content: "first question"},
 		{Role: "assistant", Content: "first answer"},
 		{Role: "user", Content: "second question"},
@@ -1756,7 +1756,7 @@ func TestStatefulThreadPersistsAcrossRuntimeInstances(t *testing.T) {
 	}
 	got := secondCaller.requests[0].Messages
 	want := []provider.ChatMessage{
-		{Role: "system", Content: golem.SystemPrompt(false, false)},
+		{Role: "system", Content: golem.SystemPrompt(false, false) + "\n\n" + agent.ToolTrustContract},
 		{Role: "user", Content: "first question"},
 		{Role: "assistant", Content: "first answer"},
 		{Role: "user", Content: "second question"},
@@ -1826,7 +1826,7 @@ func TestCanceledRunDoesNotPersistPartialTurn(t *testing.T) {
 	}
 	got := caller.requests[0].Messages
 	if len(got) != 2 ||
-		got[0].Role != "system" || got[0].Content != golem.SystemPrompt(false, false) ||
+		got[0].Role != "system" || got[0].Content != golem.SystemPrompt(false, false)+"\n\n"+agent.ToolTrustContract ||
 		got[1].Role != "user" || got[1].Content != "next" {
 		t.Fatalf("next request messages = %#v, canceled turn leaked into history", got)
 	}
@@ -2462,7 +2462,8 @@ func TestRunAppliesHostInstructionsContextAndRequestOptions(t *testing.T) {
 		t.Fatalf("model requests = %d, want 1", len(caller.requests))
 	}
 	request := caller.requests[0]
-	wantSystem := "base system\n\n--- GOLEM TURN INSTRUCTIONS ---\nproduce only JSON"
+	// Host text, turn instructions, then the #430 base contract agent.Run appends.
+	wantSystem := "base system\n\n--- GOLEM TURN INSTRUCTIONS ---\nproduce only JSON\n\n" + agent.ToolTrustContract
 	if request.Messages[0].Role != "system" || request.Messages[0].Content != wantSystem {
 		t.Fatalf("system message = %#v, want %q", request.Messages[0], wantSystem)
 	}
@@ -2500,8 +2501,8 @@ func TestRunUsesDefaultGolemSystemPrompt(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	if got := caller.requests[0].Messages[0].Content; got != golem.SystemPrompt(false, false) {
-		t.Fatalf("system message = %q, want default Golem prompt", got)
+	if got := caller.requests[0].Messages[0].Content; got != golem.SystemPrompt(false, false)+"\n\n"+agent.ToolTrustContract {
+		t.Fatalf("system message = %q, want default Golem prompt plus the base contract", got)
 	}
 }
 

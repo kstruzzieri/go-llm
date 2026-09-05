@@ -1221,7 +1221,11 @@ func TestRunAgentflowAuthor_UsesPlannerModelOptionsWithoutMutatingSession(t *tes
 	}{
 		{name: "default budget", wantOutput: minPlannerOutput},
 		{name: "lower budget and explicit thinking", options: provider.ModelOptions{NumPredict: 1024, Think: &on, ThinkEffort: "high"}, wantOutput: minPlannerOutput},
-		{name: "larger caller budget", options: provider.ModelOptions{NumPredict: 8192, Think: &on, ThinkEffort: "high"}, wantOutput: 8192},
+		// InputCeiling is explicit: this row measures NumPredict precedence, and
+		// the planner's effective prompt (base prompt plus the #430 base
+		// contract, plus tool schemas) no longer fits the default ceiling less
+		// an 8192 reserve.
+		{name: "larger caller budget", options: provider.ModelOptions{NumPredict: 8192, Think: &on, ThinkEffort: "high"}, budget: agent.Budget{InputCeiling: 32768}, wantOutput: 8192},
 		// Budget.OutputReserve overrides Options.NumPredict inside the agent
 		// layer, so the floor must survive it too (Codex review on PR #295).
 		{name: "small output reserve floored", budget: agent.Budget{OutputReserve: 1024}, wantOutput: minPlannerOutput},

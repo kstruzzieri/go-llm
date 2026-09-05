@@ -148,7 +148,11 @@ func (o *Orchestrator) run(ctx context.Context, req Request, obs Observer, ic *i
 		return Result{}, err
 	}
 	ic.chain = chain
-	req.System += addenda
+	// #430 spec D3: the effective system prompt is caller text, then the base
+	// trust contract, then interceptor addenda in chain order. Composed once
+	// per run, before initState, so initial inspection and fitting both see
+	// it; RunScope above carried the caller's text alone.
+	req.System = withToolTrustContract(req.System) + addenda
 	state := initState(req)
 	historyLen := len(req.History)
 	var res Result

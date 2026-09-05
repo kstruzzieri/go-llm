@@ -25,7 +25,11 @@ type requestShape struct {
 func shapeOf(req provider.ChatRequest) requestShape {
 	var s requestShape
 	if len(req.Messages) > 0 && req.Messages[0].Role == "system" {
-		s.system = req.Messages[0].Content
+		// agent.Run appends the #430 base contract to every effective prompt;
+		// these tests are about the APPLICATION prompt Replace installs, so
+		// the constant suffix is stripped here and asserted once explicitly
+		// in TestReplaceDefaultsEmptySystemLikeNew.
+		s.system = strings.TrimSuffix(req.Messages[0].Content, "\n\n"+agent.ToolTrustContract)
 	}
 	for _, t := range req.Tools {
 		s.tools = append(s.tools, t.Function.Name)
@@ -206,6 +210,9 @@ func TestReplaceDefaultsEmptySystemLikeNew(t *testing.T) {
 		t.Fatalf("Replace: %v", err)
 	}
 	runTurn(t, rt, "r")
+	if raw := caller.requests[0].Messages[0].Content; !strings.HasSuffix(raw, "\n\n"+agent.ToolTrustContract) {
+		t.Fatalf("effective system = %q, want the #430 base contract appended by agent.Run", raw)
+	}
 	got := shapeOf(caller.requests[0])
 	if got.system != golem.SystemPrompt(false, false) {
 		t.Fatalf("system = %q, want the New default", got.system)

@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"context"
 	"reflect"
 	"regexp"
 	"strings"
@@ -186,4 +187,30 @@ func TestRepeatedRenderRotatesNonceWithoutAccumulatingFrames(t *testing.T) {
 	if renderKeys[0] == renderKeys[1] {
 		t.Errorf("nonce reused across renders: %q", renderKeys[0])
 	}
+}
+
+// wireCaller records every request and answers from a script; a nil onToken
+// is tolerated and an empty response content emits no token.
+type wireCaller struct {
+	responses []ModelResult
+	requests  []provider.ChatRequest
+}
+
+func (w *wireCaller) Chat(_ context.Context, req provider.ChatRequest, onToken func(provider.ChatResponse) error) (ModelResult, error) {
+	w.requests = append(w.requests, req)
+	r := w.responses[len(w.requests)-1]
+	if onToken != nil && r.Response.Content != "" {
+		if err := onToken(provider.ChatResponse{Content: r.Response.Content}); err != nil {
+			return ModelResult{}, err
+		}
+	}
+	return r, nil
+}
+
+func toolCallResponse(calls ...provider.ToolCall) ModelResult {
+	return ModelResult{Response: provider.ChatResponse{ToolCalls: calls}}
+}
+
+func call(id, name, args string) provider.ToolCall {
+	return provider.ToolCall{ID: id, Type: "function", Function: provider.ToolCallFunction{Name: name, Arguments: []byte(args)}}
 }

@@ -599,7 +599,11 @@ func (c *captureCaller) Chat(_ context.Context, req provider.ChatRequest, onToke
 		}
 		for _, m := range req.Messages {
 			if m.Role == "system" {
-				c.system = m.Content
+				// system is the APPLICATION prompt the session composed: agent.Run
+				// appends the #430 base contract to every effective prompt, and
+				// that constant suffix is asserted raw through c.messages (see
+				// TestREPL_HistoryReachesModelAsRealRoles), not here.
+				c.system = strings.TrimSuffix(m.Content, "\n\n"+agent.ToolTrustContract)
 				break
 			}
 		}
@@ -661,7 +665,7 @@ func TestREPL_HistoryReachesModelAsRealRoles(t *testing.T) {
 	// Prior turn reaches the model as real user/assistant messages, ahead of the
 	// current goal: system, user(prior), assistant(prior), user(goal).
 	wantRoles := []string{"system", "user", "assistant", "user"}
-	wantContent := []string{buildSystemPrompt(false, false), "earlier question", "earlier answer", "new question"}
+	wantContent := []string{buildSystemPrompt(false, false) + "\n\n" + agent.ToolTrustContract, "earlier question", "earlier answer", "new question"}
 	if len(caller.messages) != len(wantRoles) {
 		t.Fatalf("messages = %+v, want %d entries", caller.messages, len(wantRoles))
 	}
@@ -1096,7 +1100,7 @@ func TestREPL_ResumeSwitchesActiveSession(t *testing.T) {
 		t.Fatalf("resume output missing in:\n%s", out.String())
 	}
 	wantRoles := []string{"system", "user", "assistant", "user"}
-	wantContent := []string{buildSystemPrompt(false, false), "other question", "other answer", "follow up"}
+	wantContent := []string{buildSystemPrompt(false, false) + "\n\n" + agent.ToolTrustContract, "other question", "other answer", "follow up"}
 	if len(caller.messages) != len(wantRoles) {
 		t.Fatalf("messages = %+v, want %d entries", caller.messages, len(wantRoles))
 	}

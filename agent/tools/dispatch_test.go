@@ -192,7 +192,7 @@ func TestDispatchRunsBoundedReadOnlyChildren(t *testing.T) {
 		if req.Options.NumPredict != 123 {
 			t.Fatalf("child %d NumPredict = %d, want 123", i, req.Options.NumPredict)
 		}
-		if req.Messages[0].Role != "system" || req.Messages[0].Content != dispatchSystemPrompt || req.Messages[len(req.Messages)-1].Role != "user" {
+		if req.Messages[0].Role != "system" || req.Messages[0].Content != dispatchSystemPrompt+"\n\n"+agent.ToolTrustContract || req.Messages[len(req.Messages)-1].Role != "user" {
 			t.Fatalf("child %d messages = %+v", i, req.Messages)
 		}
 	}

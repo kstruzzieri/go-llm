@@ -178,7 +178,7 @@ func TestRetrievalPresentationSkipsEvictedAndAllOmittedMessages(t *testing.T) {
 		{
 			name:   "legacy chain evicted",
 			attrib: &RetrievalAttribution{Sources: []RetrievedSource{{StableKey: "legacy-key"}}},
-			budget: Budget{InputCeiling: 60},
+			budget: Budget{InputCeiling: 60 + len([]rune(ToolTrustContract))}, // 60 above the pinned base contract
 		},
 		{
 			name:      "all mixed subjects omitted",

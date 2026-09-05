@@ -252,7 +252,9 @@ func TestFramedToolBudgetFit(t *testing.T) {
 
 // TestOrchestratorChargesToolFrames proves agent.New turns the charge on:
 // the same run at the same budget evicts its tool chain only when the frame
-// envelope is counted. Rune estimator; system prompt empty.
+// envelope is counted. Rune estimator; the application prompt is empty, so
+// the effective system prompt is the base contract alone, a fixed pinned
+// cost (base) on top of every number below.
 //
 // Step 1 State: goal "q" (1) + assistant call (id "1" 1, "function" 8,
 // "echo" 4, args "{}" 2 = 15) + tool "tool-said:{}" (12 + name 4 + id 1 = 17,
@@ -260,6 +262,7 @@ func TestFramedToolBudgetFit(t *testing.T) {
 // Framed: 1 + 15 + 110 + 21 = 147 > 100, so the chain is evicted and the
 // request carries goal + schema = 22. Unframed: 1 + 15 + 17 + 21 = 54 fits.
 func TestOrchestratorChargesToolFrames(t *testing.T) {
+	base := len([]rune(ToolTrustContract)) // prose length, not logic under test
 	script := func() *scriptedCaller {
 		return &scriptedCaller{responses: []ModelResult{
 			{Response: provider.ChatResponse{ToolCalls: []provider.ToolCall{{
@@ -269,7 +272,7 @@ func TestOrchestratorChargesToolFrames(t *testing.T) {
 			{Response: provider.ChatResponse{Content: "done", Done: true}},
 		}}
 	}
-	req := Request{Goal: "q", Tools: []Tool{echoTool{name: "echo"}}, Budget: Budget{InputCeiling: 100}}
+	req := Request{Goal: "q", Tools: []Tool{echoTool{name: "echo"}}, Budget: Budget{InputCeiling: 100 + base}}
 
 	framed := New(script(), ContextManager{Estimate: runeEstimator})
 	if !framed.ctxMgr.frameToolResults {
@@ -279,8 +282,8 @@ func TestOrchestratorChargesToolFrames(t *testing.T) {
 	if err != nil {
 		t.Fatalf("framed Run: %v", err)
 	}
-	if len(res.Steps) != 2 || res.Steps[1].Pressure.Evicted != 1 || res.Steps[1].Pressure.InputTokens != 22 {
-		t.Errorf("framed step 1 pressure = %+v, want the chain evicted (Evicted 1, InputTokens 22)", res.Steps)
+	if len(res.Steps) != 2 || res.Steps[1].Pressure.Evicted != 1 || res.Steps[1].Pressure.InputTokens != 22+base {
+		t.Errorf("framed step 1 pressure = %+v, want the chain evicted (Evicted 1, InputTokens %d)", res.Steps, 22+base)
 	}
 
 	control := New(script(), ContextManager{Estimate: runeEstimator})
@@ -289,7 +292,7 @@ func TestOrchestratorChargesToolFrames(t *testing.T) {
 	if err != nil {
 		t.Fatalf("control Run: %v", err)
 	}
-	if len(res.Steps) != 2 || res.Steps[1].Pressure.Evicted != 0 || res.Steps[1].Pressure.InputTokens != 54 {
-		t.Errorf("control step 1 pressure = %+v, want the chain retained (Evicted 0, InputTokens 54)", res.Steps)
+	if len(res.Steps) != 2 || res.Steps[1].Pressure.Evicted != 0 || res.Steps[1].Pressure.InputTokens != 54+base {
+		t.Errorf("control step 1 pressure = %+v, want the chain retained (Evicted 0, InputTokens %d)", res.Steps, 54+base)
 	}
 }
