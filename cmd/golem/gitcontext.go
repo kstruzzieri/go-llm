@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
@@ -368,6 +369,50 @@ func workspacePrefix(toplevel, root string) (string, error) {
 	return filepath.ToSlash(rel) + "/", nil
 }
 
+// nearestGitEntry returns the closest directory at or above root that holds a
+// .git entry (a directory, or the gitfile of a linked worktree or submodule),
+// or "" when none exists up to the filesystem root. It is the repository Git
+// itself would discover from root.
+func nearestGitEntry(root string) string {
+	for dir := root; ; {
+		if _, err := os.Lstat(filepath.Join(dir, ".git")); err == nil {
+			return dir
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return ""
+		}
+		dir = parent
+	}
+}
+
+// gitLocalFilterDriver reports the first content filter driver
+// (filter.<name>.clean or .process) defined in the repository's local or
+// worktree config scope, or "" when there is none. Global and system
+// definitions (git-lfs installs there) are the user's own trust roots and are
+// not reported. `git config --get-regexp` exits 1 when nothing matches.
+func gitLocalFilterDriver(ctx context.Context, gitPath, root string) (string, error) {
+	out, err := runGit(ctx, gitPath, root, "--no-pager", "config", "--show-scope", "--get-regexp", `^filter\..*\.(clean|process)$`)
+	if err != nil {
+		var exit *gitExitError
+		if errors.As(err, &exit) && exit.code == 1 {
+			return "", nil
+		}
+		return "", err
+	}
+	for _, line := range completeLines(out) {
+		scope, rest, ok := strings.Cut(line, "\t")
+		if !ok {
+			continue
+		}
+		if scope == "local" || scope == "worktree" {
+			key, _, _ := strings.Cut(rest, " ")
+			return gitContextText(key), nil
+		}
+	}
+	return "", nil
+}
+
 // loadGitContext captures the repository snapshot for the workspace at root
 // with three bounded Git calls under one shared deadline. A workspace outside
 // any work tree and a missing Git executable are absences, not errors; every
@@ -406,9 +451,27 @@ func loadGitContext(ctx context.Context, gitPath, root string) (gitContextSnapsh
 	if st.Prefix, err = workspacePrefix(st.Toplevel, root); err != nil {
 		return gitContextSnapshot{}, err
 	}
+	// The toplevel must be the repository discovered from root. A
+	// repository-local core.worktree can relocate Git's work tree to an
+	// ancestor that still contains root; containment alone would then render
+	// the intermediate path in the prefix line and let status enumerate the
+	// ancestor's entries into the prompt.
+	if discovered := nearestGitEntry(root); discovered != st.Toplevel {
+		return gitContextSnapshot{}, fmt.Errorf("git rev-parse: toplevel %q is not the repository discovered from the workspace (%q)", gitContextText(st.Toplevel), gitContextText(discovered))
+	}
+	// A content filter driver defined in the repository's own config would be
+	// executed by the index refresh status performs on a stale-stat tracked
+	// file, and that config is attacker-influenced in the archive threat model.
+	// Such a repository is refused as a genuine error: startup warns once and
+	// injects nothing, refresh retains the previous block.
+	if key, err := gitLocalFilterDriver(ctx, gitPath, root); err != nil {
+		return gitContextSnapshot{}, err
+	} else if key != "" {
+		return gitContextSnapshot{}, fmt.Errorf("git status skipped: repository-local config defines content filter driver %s", key)
+	}
 
 	out, err = runGit(ctx, gitPath, root, "--no-pager", "-c", "core.fsmonitor=false", "--no-optional-locks",
-		"status", "--porcelain=v1", "--branch", "--no-renames", "--untracked-files=normal", "--ignore-submodules=none")
+		"status", "--porcelain=v1", "--branch", "--no-renames", "--untracked-files=normal", "--ignore-submodules=dirty")
 	if err != nil {
 		return gitContextSnapshot{}, err
 	}

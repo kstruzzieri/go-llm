@@ -18,9 +18,15 @@ atomically for the next turn.
   control, bidi, and format characters visibly escaped; omitted entry and commit
   counts are exact; the absolute checkout path is never rendered.
 - Read-only, helper-resistant capture: argv-only `git`, `--no-optional-locks`,
-  `core.fsmonitor=false`, no shell, no stdin, a scrubbed repository-location,
-  config-injection, and discovery environment, `LC_ALL=C`, and one shared 2 s
-  deadline with a 100 ms pipe grace.
+  `core.fsmonitor=false`, `--ignore-submodules=dirty` (no status is spawned
+  inside a submodule; a changed submodule HEAD is still reported), no shell, no
+  stdin, a scrubbed repository-location, config-injection, and discovery
+  environment, `LC_ALL=C`, and one shared 2 s deadline with a 100 ms pipe grace.
+  A repository whose own config defines a content filter driver
+  (`filter.<name>.clean`/`.process` in local or worktree scope; global git-lfs
+  definitions pass) or relocates its work tree with `core.worktree` is refused
+  as a capture error, since `git status` would otherwise run that driver or
+  enumerate the relocated tree.
 - Linked worktrees, submodules, and subdirectory roots report the workspace
   actually opened; below the repository root a `prefix:` line maps tool-root
   paths to the repository-root-relative status paths.

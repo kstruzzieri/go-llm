@@ -433,12 +433,25 @@ func TestLoadGitContextSubmoduleReportsItself(t *testing.T) {
 	if inner.State.Toplevel != modRoot || inner.State.Prefix != "" || strings.Join(inner.State.Entries, "|") != " M tracked.go" {
 		t.Fatalf("submodule root reported %+v, want its own toplevel %q and its own dirty file", inner.State, modRoot)
 	}
+	// --ignore-submodules=dirty: the superproject never spawns a status inside
+	// the submodule (whose config is as untrusted as its own), so modified
+	// content there is not reported; a changed submodule HEAD is, because the
+	// gitlink comparison needs no child process.
 	outer, err := loadGitContext(context.Background(), "git", super)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if outer.State.Toplevel != super || strings.Join(outer.State.Entries, "|") != " M mod" || outer.State.TotalEntries != 1 {
-		t.Fatalf("superproject reported %+v, want exactly one changed-submodule entry", outer.State)
+	if outer.State.Toplevel != super || outer.State.TotalEntries != 0 {
+		t.Fatalf("superproject reported %+v, want no entry for dirty submodule content", outer.State)
+	}
+	gitContextTestRun(t, modRoot, "add", "--", "tracked.go")
+	gitContextTestRun(t, modRoot, "commit", "-q", "-m", "module change")
+	outer, err = loadGitContext(context.Background(), "git", super)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(outer.State.Entries, "|") != " M mod" || outer.State.TotalEntries != 1 {
+		t.Fatalf("superproject reported %+v, want exactly one changed-submodule (HEAD) entry", outer.State)
 	}
 }
 
@@ -563,5 +576,64 @@ func TestLoadGitContextRawCapKeepsExactCounts(t *testing.T) {
 	}
 	if omitted < 0 || rendered+omitted != untracked {
 		t.Fatalf("rendered %d + omitted %d != %d", rendered, omitted, untracked)
+	}
+}
+
+// core.worktree in the repository's own config relocates the work tree Git
+// reports; an ancestor of root still "contains" root, so the containment check
+// alone would render the intermediate path in the prefix line and let status
+// enumerate the ancestor. The toplevel must be the repository discovered from
+// root, nothing else.
+func TestLoadGitContextRejectsRedirectedWorktree(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not installed")
+	}
+	parent, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(parent, "sibling-secret.txt"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	root := filepath.Join(parent, "evil")
+	if err := os.Mkdir(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	gitContextTestRun(t, root, "-c", "init.defaultBranch=main", "init", "-q")
+	gitContextTestCommit(t, root, "tracked.go", "package x\n", "base")
+	gitContextTestRun(t, root, "config", "core.worktree", "../..") // relative to the .git directory
+	if got := strings.TrimSpace(gitContextTestRun(t, root, "rev-parse", "--show-toplevel")); got != parent {
+		t.Fatalf("fixture: Git did not relocate the work tree (toplevel=%q, want %q)", got, parent)
+	}
+
+	snap, err := loadGitContext(context.Background(), "git", root)
+	if err == nil {
+		t.Fatalf("redirected work tree accepted: prefix=%q block=\n%s", snap.State.Prefix, snap.Block)
+	}
+	if !strings.Contains(err.Error(), "discovered") {
+		t.Fatalf("err=%v, want a toplevel/discovery mismatch", err)
+	}
+	if strings.Contains(snap.Block, "sibling-secret") {
+		t.Fatalf("ancestor content reached the block:\n%s", snap.Block)
+	}
+}
+
+// With no filter driver anywhere (isolated HOME, no system config),
+// `git config --get-regexp` exits 1; that is "none", not a capture error.
+// Every other real-Git test here inherits the developer's global config, which
+// may define git-lfs filters, so this is the only case that reaches that exit.
+func TestLoadGitContextWithoutAnyFilterDrivers(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+	root := gitContextTestRepo(t)
+	gitContextTestCommit(t, root, "tracked.go", "package x\n", "base")
+	if out, err := exec.Command("git", "-C", root, "config", "--show-scope", "--get-regexp", `^filter\.`).CombinedOutput(); err == nil {
+		t.Fatalf("fixture: a filter driver is still visible: %s", out)
+	}
+	snap, err := loadGitContext(context.Background(), "git", root)
+	if err != nil || snap.Absence != gitContextPresent || snap.State.Branch != "main" {
+		t.Fatalf("no filter drivers must be a plain success: err=%v snapshot=%+v", err, snap.State)
 	}
 }

@@ -352,10 +352,15 @@ escaped. It is capped at 4 KiB inside the shared 16 KiB injected-context budget
 it splits with `AGENTS.md` project context, which renders into the remainder
 (and keeps its full 16 KiB when there is no Git block). Capture is read-only
 and helper-resistant: argv-only `git` with `--no-optional-locks` and
-`core.fsmonitor=false`, no shell, a scrubbed environment, and one 2 s deadline.
+`core.fsmonitor=false`, no shell, a scrubbed environment, one 2 s deadline, no
+status inside submodules (a changed submodule HEAD is reported, modified
+submodule content is not), and a refusal when the repository's own `.git/config`
+defines a content filter driver (`filter.<name>.clean`/`.process`; git-lfs's
+global definitions are fine) or relocates the work tree with `core.worktree`.
 Linked worktrees, submodules, and subdirectory roots report the workspace
 actually opened. A non-repository or a missing `git` is silent; any other
-capture failure prints one stderr warning and injects nothing.
+capture failure, including those refusals, prints one stderr warning and injects
+nothing.
 `-no-git-context` disables capture and refresh and leaves the prompt
 byte-identical to a non-repository run. Inside the REPL, `/git-context refresh`
 re-captures and replaces the block atomically for the next turn, reporting

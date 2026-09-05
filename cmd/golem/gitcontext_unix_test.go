@@ -29,6 +29,21 @@ func fakeGit(t *testing.T, body string) string {
 	return path
 }
 
+// fakeGitRoot is a canonical workspace holding an empty .git entry, so the
+// discovery check accepts a fake git that reports the workspace itself as the
+// toplevel. The fake never reads it.
+func fakeGitRoot(t *testing.T) string {
+	t.Helper()
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(root, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return root
+}
+
 // A branch, a path, and a subject that carry both fence sentinels, a terminal
 // escape, and a bidi override reach the model only in neutralized, escaped
 // form; exactly the two genuine sentinels survive.
@@ -154,10 +169,7 @@ func TestLoadGitContextSharedDeadlineAcrossCalls(t *testing.T) {
   *log*) sleep 1.5; printf 'abc1234 2026-09-01 x\n' ;;
 esac
 `)
-	root, err := filepath.EvalSymlinks(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
+	root := fakeGitRoot(t)
 	start := time.Now()
 	snap, err := loadGitContext(context.Background(), fake, root)
 	elapsed := time.Since(start)
@@ -173,10 +185,7 @@ esac
 // unterminated is rejected before status runs. No line-count check: embedded
 // newlines are legal path bytes and are validated as part of the path.
 func TestLoadGitContextRejectsMalformedToplevelShapes(t *testing.T) {
-	root, err := filepath.EvalSymlinks(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
+	root := fakeGitRoot(t)
 	for _, tc := range []struct{ name, printf string }{
 		{"relative", `printf 'relative/path\n'`},
 		{"outside root", `printf '/definitely/elsewhere\n'`},
@@ -262,5 +271,64 @@ func TestGitContextRefreshDisabledByFlag(t *testing.T) {
 	}
 	if sess.baseSystem != before {
 		t.Fatal("disabled refresh changed the prompt")
+	}
+}
+
+// A content filter driver defined in the repository's OWN config is
+// attacker-influenced in the archive threat model and would be executed by the
+// index refresh `git status` performs on a stale-stat tracked file. Capture
+// must refuse before status runs; the control run proves the trigger is real.
+func TestLoadGitContextRefusesRepositoryLocalFilterDrivers(t *testing.T) {
+	root := gitContextTestRepo(t)
+	if err := os.WriteFile(filepath.Join(root, ".gitattributes"), []byte("* filter=x\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gitContextTestRun(t, root, "add", "--", ".gitattributes")
+	gitContextTestRun(t, root, "commit", "-q", "-m", "attrs")
+	gitContextTestCommit(t, root, "tracked.go", "package x\n", "base")
+	sentinel := filepath.Join(t.TempDir(), "clean-ran")
+	gitContextTestRun(t, root, "config", "filter.x.clean", "touch '"+sentinel+"'; cat")
+	future := time.Now().Add(2 * time.Hour)
+	if err := os.Chtimes(filepath.Join(root, "tracked.go"), future, future); err != nil {
+		t.Fatal(err)
+	}
+	// Control: an ordinary status runs the driver on this Git.
+	gitContextTestRun(t, root, "status", "--porcelain")
+	if _, err := os.Stat(sentinel); err != nil {
+		t.Skipf("this Git does not run clean filters from git status (%v); the refusal cannot be observed here", err)
+	}
+	if err := os.Remove(sentinel); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(filepath.Join(root, "tracked.go"), future.Add(time.Hour), future.Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+
+	snap, err := loadGitContext(context.Background(), "git", root)
+	if _, serr := os.Stat(sentinel); serr == nil {
+		t.Fatal("capture executed the repository-local filter.x.clean driver")
+	}
+	if err == nil || !strings.Contains(err.Error(), "filter.x.clean") {
+		t.Fatalf("err=%v snapshot=%+v, want a refusal naming the local filter driver", err, snap.State)
+	}
+}
+
+// Drivers defined in the user's global config (git-lfs installs there) are the
+// user's own trust roots and must not disable the snapshot.
+func TestLoadGitContextAllowsGlobalFilterDrivers(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	if err := os.WriteFile(filepath.Join(home, ".gitconfig"), []byte("[filter \"lfs\"]\n\tclean = cat\n\tprocess = cat\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	root := gitContextTestRepo(t)
+	gitContextTestCommit(t, root, "tracked.go", "package x\n", "base")
+	if got := gitContextTestRun(t, root, "config", "--show-scope", "--get-regexp", `^filter\.`); !strings.Contains(got, "global") {
+		t.Fatalf("fixture: global filter driver not visible: %q", got)
+	}
+	snap, err := loadGitContext(context.Background(), "git", root)
+	if err != nil || snap.Absence != gitContextPresent || snap.State.Branch != "main" {
+		t.Fatalf("global filter drivers must not disable capture: err=%v snapshot=%+v", err, snap.State)
 	}
 }
