@@ -238,20 +238,15 @@ func (iv Invariants) InspectToolCall(_ context.Context, call agent.ToolCallInspe
 	tg := toolCallTarget(call.Call.ID)
 	var out []agent.Finding
 	for _, inv := range table {
-		var matched []json.RawMessage
-		for _, m := range members {
-			if strings.EqualFold(m.key, inv.Field) {
-				matched = append(matched, m.value)
-			}
-		}
-		switch len(matched) {
+		raw, n := findMember(members, inv.Field)
+		switch n {
 		case 0:
 		case 1:
-			if detail, violated := inv.Check.check(matched[0]); violated {
+			if detail, violated := inv.Check.check(raw); violated {
 				out = append(out, tg.finding(inv.Name, agent.VerdictBlock, InvariantRisk, detail))
 			}
 		default:
-			detail := fmt.Sprintf("argument %q appears %d times under equivalent spellings", inv.Field, len(matched))
+			detail := fmt.Sprintf("argument %q appears %d times under equivalent spellings", inv.Field, n)
 			out = append(out, tg.finding(ambiguousRule, agent.VerdictBlock, InvariantRisk, detail))
 		}
 	}
@@ -262,6 +257,21 @@ func (iv Invariants) InspectToolCall(_ context.Context, call agent.ToolCallInspe
 type member struct {
 	key   string
 	value json.RawMessage
+}
+
+// findMember returns the value of the member whose name folds to field and
+// how many members fold to it: 0 when absent, more than 1 when the tool's
+// decoder would see equivalent spellings (last wins there; ambiguous here).
+func findMember(members []member, field string) (json.RawMessage, int) {
+	var value json.RawMessage
+	n := 0
+	for _, m := range members {
+		if strings.EqualFold(m.key, field) {
+			value = m.value
+			n++
+		}
+	}
+	return value, n
 }
 
 // topLevelMembers lists an argument object's members in source order; false
