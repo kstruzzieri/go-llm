@@ -225,7 +225,9 @@ scan:
 // without expansion and reports everything else as unsupported, so the
 // invariant never hard-blocks on text it did not actually understand.
 var (
-	// inlineShells run an inline script under the exact options below.
+	// inlineShells are the shells recognized both as an outer command running
+	// an inline script under the exact options below and as a bare stdin
+	// sink; the spec lists the same five for both roles.
 	inlineShells = set("sh", "bash", "dash", "ksh", "zsh")
 	inlineFlags  = set("-c", "-lc", "-ec", "-euc")
 	bashPreamble = set("--norc", "--noprofile")
