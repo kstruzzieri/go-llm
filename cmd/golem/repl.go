@@ -719,6 +719,8 @@ func dispatchSlash(ctx context.Context, out io.Writer, sess *replSession, line s
 		handleAllowWrite(ctx, out, sess, fields)
 	case "/allow-exec":
 		handleAllowExec(ctx, out, sess, fields)
+	case "/git-context":
+		handleGitContext(ctx, out, sess, fields)
 	default:
 		_, _ = fmt.Fprintf(out, "unknown command: %s (try /help)\n", cmd)
 	}
@@ -852,6 +854,8 @@ const golemHelp = `commands:
                  count active session approval grants, or revoke them all
   /allow-write   enable the approval-gated write_file/edit_file tools for the rest of this session
   /allow-exec    enable the approval-gated command tools for the rest of this session
+  /git-context refresh
+                 re-capture the repository snapshot (branch, status, recent commits) in the system prompt
   /remember [--global] <text>
                  save a memory (workspace scope unless --global)
   /forget <id>   delete a saved memory

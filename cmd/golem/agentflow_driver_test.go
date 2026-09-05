@@ -1573,3 +1573,28 @@ func TestAgentflowDriverUsesCurrentGitFragment(t *testing.T) {
 		t.Fatalf("driver request System differs from the composed prompt or misorders the fragments:\n got=%q\nwant=%q", caller.system, sess.baseSystem)
 	}
 }
+
+// A direct Agentflow task request after /git-context refresh carries the
+// refreshed block, captured on the wire.
+func TestAgentflowDriverSeesRefreshedGitFragment(t *testing.T) {
+	caller := &captureCaller{answer: "done"}
+	sess, root := newRefreshSession(t, caller)
+	gitContextTestRun(t, root, "checkout", "-q", "-b", "feature")
+	if got := refresh(t, sess); !strings.HasPrefix(got, "git context refreshed: feature,") {
+		t.Fatalf("refresh: %q", got)
+	}
+	plan := &agentflow.Plan{AllowedFiles: []string{"out.txt"}, Steps: []agentflow.Step{{ID: "P1", Files: []string{"out.txt"}}}}
+	runCtx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	runStep, err := newTaskStepRunner(root, plan, &fakeAF{}, sess.orch, sess, true, io.Discard, nil, cancel)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := &driver{af: &fakeAF{}, plan: plan, runStep: runStep}
+	if err := d.runOneStep(runCtx, "P1"); err != nil {
+		t.Fatal(err)
+	}
+	if caller.system != sess.baseSystem || !strings.Contains(caller.system, "branch: feature\n") || strings.Count(caller.system, gitContextOpen) != 1 {
+		t.Fatalf("driver request after refresh:\n%s", caller.system)
+	}
+}

@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os/exec"
 	"path/filepath"
 	"strconv"
@@ -434,4 +435,61 @@ func loadGitContext(ctx context.Context, gitPath, root string) (gitContextSnapsh
 
 	block, payload := gitContextBlock(st, gitContextMaxBytes)
 	return gitContextSnapshot{Block: block, PayloadBytes: payload, State: st}, nil
+}
+
+// handleGitContext implements /git-context refresh (#354 D9): recapture the
+// repository under the same limits as startup and replace the Git fragment
+// exactly once through the mount seam, with the tool list unchanged, so the
+// next turn (and only the next turn: a running turn keeps its reserved
+// snapshot) observes it. The retained startup project documents are
+// re-rendered under the shared budget so the aggregate cap holds after the
+// Git payload changes; nothing is reread from disk. State machine (D8):
+// present and changed replaces; present and identical skips the runtime write;
+// the two absences clear the fragment and say which one; a genuine capture
+// error retains the previous fragment and reports one control-safe line;
+// -no-git-context refuses before any process runs. Not TTY-gated: this is
+// read-only host Git with no privilege expansion.
+func handleGitContext(ctx context.Context, out io.Writer, sess *replSession, fields []string) {
+	if len(fields) != 2 || fields[1] != "refresh" {
+		_, _ = fmt.Fprintln(out, "usage: /git-context refresh")
+		return
+	}
+	if sess.noGitContext {
+		_, _ = fmt.Fprintln(out, "git context disabled (-no-git-context)")
+		return
+	}
+	snap, err := loadGitContext(ctx, "git", sess.root)
+	if err != nil {
+		_, _ = fmt.Fprintln(out, "git context refresh failed: "+gitContextText(err.Error()))
+		return
+	}
+	var report string
+	switch snap.Absence {
+	case gitContextNotRepository:
+		report = "git context cleared: not a repository"
+	case gitContextGitUnavailable:
+		report = "git context cleared: git unavailable"
+	default:
+		report = "git context refreshed: " + gitContextNotice(snap.State)
+	}
+	// Derived from the LIVE inputs, exactly as the capability mounts do.
+	next := sess.sysInputs
+	next.gitContext = snap.Block
+	if len(sess.projectDocs) > 0 {
+		next.projectContext = projectContextBlock(sess.projectDocs, projectContextBudget(snap.PayloadBytes))
+	}
+	if next == sess.sysInputs {
+		sess.gitSnapshot = snap
+		if snap.Absence == gitContextPresent {
+			report = "git context unchanged"
+		}
+		_, _ = fmt.Fprintln(out, report)
+		return
+	}
+	if err := sess.mount(sess.mountAt, nil, next); err != nil {
+		_, _ = fmt.Fprintf(out, "git context refresh failed: runtime: %v\n", err)
+		return
+	}
+	sess.gitSnapshot = snap
+	_, _ = fmt.Fprintln(out, report)
 }

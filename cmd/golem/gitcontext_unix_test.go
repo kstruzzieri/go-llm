@@ -213,3 +213,54 @@ esac
 		t.Fatal("control run never reached status; the malformed cases above prove nothing")
 	}
 }
+
+// fakeGitOnPath puts an executable named git first on PATH. The REPL handler
+// resolves "git" through exec.LookPath exactly as startup does, so this is the
+// production lookup path, not a test seam.
+func fakeGitOnPath(t *testing.T, body string) {
+	t.Helper()
+	if _, err := os.Stat("/bin/sh"); err != nil {
+		t.Skip("/bin/sh not available")
+	}
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "git"), []byte("#!/bin/sh\n"+body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
+// A genuine capture error retains the previous block and reports one
+// control-safe failure line.
+func TestGitContextRefreshRetainsOnFailure(t *testing.T) {
+	sess, _ := newRefreshSession(t, &captureCaller{answer: "ok"})
+	in, system, snap := sess.sysInputs, sess.baseSystem, sess.gitSnapshot
+	fakeGitOnPath(t, "printf 'fatal: \\033[31mboom\\n' >&2\nexit 128\n")
+	got := refresh(t, sess)
+	if got != `git context refresh failed: git --no-pager rev-parse --show-toplevel: exit status 128: fatal: \x1b[31mboom`+"\n" {
+		t.Fatalf("refresh output = %q", got)
+	}
+	if strings.ContainsRune(got, 0x1b) {
+		t.Fatal("raw terminal escape reached the REPL output")
+	}
+	if sess.sysInputs != in || sess.baseSystem != system || !strings.Contains(sess.baseSystem, "branch: main\n") || sess.gitSnapshot.Block != snap.Block {
+		t.Fatal("a failed capture changed session state")
+	}
+}
+
+// -no-git-context disables refresh before any process runs.
+func TestGitContextRefreshDisabledByFlag(t *testing.T) {
+	sess := newMountSession(t, &captureCaller{answer: "ok"}, t.TempDir())
+	sess.noGitContext = true
+	sentinel := filepath.Join(t.TempDir(), "git-ran")
+	fakeGitOnPath(t, "touch '"+sentinel+"'\nprintf '/'\n")
+	before := sess.baseSystem
+	if got := refresh(t, sess); got != "git context disabled (-no-git-context)\n" {
+		t.Fatalf("refresh output = %q", got)
+	}
+	if _, err := os.Stat(sentinel); err == nil {
+		t.Fatal("refresh ran git while disabled")
+	}
+	if sess.baseSystem != before {
+		t.Fatal("disabled refresh changed the prompt")
+	}
+}
