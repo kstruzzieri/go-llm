@@ -249,6 +249,46 @@ func TestGitContextBlockHandlesLongCommitLine(t *testing.T) {
 	}
 }
 
+func TestGitContextBlockLongMetadataPreservesCounts(t *testing.T) {
+	// Ordinary path components below 255 bytes and a 200-byte branch. These
+	// relative prefixes can fit below Linux's 4096-byte absolute path limit.
+	for _, prefix := range []string{
+		strings.Repeat(strings.Repeat("d", 243)+"/", 15) + strings.Repeat("e", 239) + "/",
+		strings.Repeat(strings.Repeat("d", 249)+"/", 16) + strings.Repeat("e", 49) + "/",
+	} {
+		t.Run(strconv.Itoa(len(prefix)), func(t *testing.T) {
+			st := gitState{
+				Prefix:       prefix,
+				Branch:       strings.Repeat("b", 200),
+				Commits:      []string{"abc1234 2026-09-01 routine change"},
+				TotalCommits: 1,
+				Entries:      []string{" M a.go"},
+				TotalEntries: 1,
+			}
+			got, payload := gitContextBlock(st, gitContextMaxBytes)
+			body := gitBlockBody(t, got)
+			if payload > gitContextMaxBytes || payload != len(body) {
+				t.Fatalf("payload=%d body=%d cap=%d", payload, len(body), gitContextMaxBytes)
+			}
+			tail := body[max(0, len(body)-200):]
+			if !strings.Contains(body, " M a.go\n") && !strings.Contains(body, "[... 1 more status entry omitted]\n") {
+				t.Errorf("status entry neither rendered nor counted: tail=%q", tail)
+			}
+			if !strings.Contains(body, st.Commits[0]+"\n") && !strings.Contains(body, "[... 1 more commit omitted]\n") {
+				t.Errorf("commit neither rendered nor counted: tail=%q", tail)
+			}
+			for _, header := range []string{"prefix: ", "\nbranch: ", "\nrecent commits (newest first):\n", "\nworking tree:\n"} {
+				if !strings.Contains(body, header) {
+					t.Errorf("missing metadata or section header %q: tail=%q", header, tail)
+				}
+			}
+			if !strings.HasSuffix(body, "\n") {
+				t.Errorf("closing fence does not start on its own line: tail=%q", tail)
+			}
+		})
+	}
+}
+
 func TestGitContextNotice(t *testing.T) {
 	for _, tc := range []struct {
 		name string

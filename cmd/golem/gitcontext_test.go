@@ -71,7 +71,7 @@ func TestHostGitEnvStripsLocationOverridesCaseInsensitively(t *testing.T) {
 // locale so the non-repository exit is classified from stable text.
 func TestGitContextEnvStripsConfigAndDiscoveryOverrides(t *testing.T) {
 	extra := []string{
-		"GIT_CONFIG_PARAMETERS", "GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0",
+		"GIT_CONFIG", "GIT_CONFIG_PARAMETERS", "GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0",
 		"GIT_CONFIG_KEY_17", "GIT_CONFIG_VALUE_17",
 		"GIT_CEILING_DIRECTORIES", "GIT_DISCOVERY_ACROSS_FILESYSTEM", "LC_ALL",
 	}
@@ -157,6 +157,26 @@ func gitContextTestCommit(t *testing.T, root, file, content, subject string) {
 	}
 	gitContextTestRun(t, root, "add", "--", file)
 	gitContextTestRun(t, root, "commit", "-q", "-m", subject)
+}
+
+func TestGitLocalFilterDriverUsesRepositoryConfig(t *testing.T) {
+	global := filepath.Join(t.TempDir(), "config")
+	if err := os.WriteFile(global, []byte("[filter \"trusted\"]\nclean = unused\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GIT_CONFIG_GLOBAL", global)
+	t.Setenv("GIT_CONFIG_SYSTEM", os.DevNull)
+	root := gitContextTestRepo(t)
+	if key, err := gitLocalFilterDriver(context.Background(), "git", root); err != nil || key != "" {
+		t.Fatalf("trusted global definition: key=%q err=%v", key, err)
+	}
+	// Only the config precheck runs; no file is assigned a filter and no
+	// status or driver is executed. GIT_CONFIG must not redirect this query.
+	gitContextTestRun(t, root, "config", "--local", "filter.sample name.clean", "unused")
+	t.Setenv("GIT_CONFIG", os.DevNull)
+	if key, err := gitLocalFilterDriver(context.Background(), "git", root); err != nil || key != "filter.sample name.clean" {
+		t.Fatalf("repository definition: key=%q err=%v", key, err)
+	}
 }
 
 func TestCapWriterRetainsPrefixAndCountsAllLines(t *testing.T) {

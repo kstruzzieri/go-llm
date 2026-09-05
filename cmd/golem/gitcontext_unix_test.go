@@ -44,6 +44,40 @@ func fakeGitRoot(t *testing.T) string {
 	return root
 }
 
+// Exercise the precheck alone with inert records; no status or filter driver
+// is invoked. A successful process must still provide complete scoped keys.
+func TestGitLocalFilterDriverRequiresCompleteRecords(t *testing.T) {
+	for _, tc := range []struct {
+		name, output, wantKey string
+		cap                   int
+		wantErr               bool
+	}{
+		{name: "trusted scopes", output: `system\000filter.one.clean\000global\000filter.two.process\000`},
+		{name: "local", output: `local\000filter.sample.clean\000`, wantKey: "filter.sample.clean"},
+		{name: "worktree whitespace", output: `worktree\000filter.sample name\tpart.process\000`, wantKey: `filter.sample name\tpart.process`},
+		{name: "unterminated", output: `global\000filter.sample.clean`, wantErr: true},
+		{name: "missing key", output: `global\000`, wantErr: true},
+		{name: "empty key", output: `global\000\000`, wantErr: true},
+		{name: "empty success", wantErr: true},
+		{name: "unknown scope", output: `other\000filter.sample.clean\000`, wantErr: true},
+		{name: "truncated record", output: `global\000filter.sample.clean\000`, cap: 12, wantErr: true},
+		{name: "truncated after record", output: `global\000filter.one.clean\000global\000filter.two.clean\000`, cap: len("global\x00filter.one.clean\x00"), wantErr: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.cap > 0 {
+				saved := gitContextRawCap
+				gitContextRawCap = tc.cap
+				t.Cleanup(func() { gitContextRawCap = saved })
+			}
+			fake := fakeGit(t, "printf '"+tc.output+"'\n")
+			key, err := gitLocalFilterDriver(context.Background(), fake, t.TempDir())
+			if (err != nil) != tc.wantErr || key != tc.wantKey {
+				t.Fatalf("gitLocalFilterDriver(%q) = %q, %v; want key %q, error %v", tc.name, key, err, tc.wantKey, tc.wantErr)
+			}
+		})
+	}
+}
+
 // A branch, a path, and a subject that carry both fence sentinels, a terminal
 // escape, and a bidi override reach the model only in neutralized, escaped
 // form; exactly the two genuine sentinels survive.
@@ -165,6 +199,7 @@ func TestLoadGitContextDeadlineWithPipeHoldingGrandchild(t *testing.T) {
 func TestLoadGitContextSharedDeadlineAcrossCalls(t *testing.T) {
 	fake := fakeGit(t, `case "$*" in
   *rev-parse*) printf '%s\n' "$PWD" ;;
+  *config*) exit 1 ;;
   *status*) sleep 1.5; printf '## main\n' ;;
   *log*) sleep 1.5; printf 'abc1234 2026-09-01 x\n' ;;
 esac
@@ -212,6 +247,7 @@ esac
 	sentinel := filepath.Join(t.TempDir(), "status-ran")
 	fake := fakeGit(t, `case "$*" in
   *rev-parse*) printf '%s\n' "$PWD" ;;
+  *config*) exit 1 ;;
   *) touch '`+sentinel+`'; printf '## main\n' ;;
 esac
 `)

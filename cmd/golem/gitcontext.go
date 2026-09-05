@@ -17,7 +17,8 @@ import (
 
 // gitContextBlockedKeys and gitContextBlockedPrefixes are the additional
 // environment entries the read-only Git capture (#354 D5) drops on top of
-// hostGitEnv: config injection (GIT_CONFIG_PARAMETERS, the GIT_CONFIG_COUNT /
+// hostGitEnv: config source overrides (GIT_CONFIG), config injection
+// (GIT_CONFIG_PARAMETERS, the GIT_CONFIG_COUNT /
 // GIT_CONFIG_KEY_n / GIT_CONFIG_VALUE_n family) and repository-discovery
 // overrides. LC_ALL is dropped so the appended C locale is the only one, which
 // makes the "not a git repository" exit classifiable from stable text (gettext
@@ -28,7 +29,7 @@ import (
 // Trusted user configuration and dubious-ownership protection keep working.
 var (
 	gitContextBlockedKeys = []string{
-		"GIT_CONFIG_PARAMETERS", "GIT_CONFIG_COUNT",
+		"GIT_CONFIG", "GIT_CONFIG_PARAMETERS", "GIT_CONFIG_COUNT",
 		"GIT_CEILING_DIRECTORIES", "GIT_DISCOVERY_ACROSS_FILESYSTEM",
 		"LC_ALL",
 	}
@@ -163,16 +164,24 @@ func gitContextBlock(st gitState, maxBytes int) (block string, payloadBytes int)
 		treeHeader = "working tree: clean"
 	}
 	commitsLimit := maxBytes - (len(treeHeader) + 1 + gitOmissionCost(st.TotalEntries, "status entry", "status entries"))
+	commitHeader := "recent commits (newest first):"
+	if st.TotalCommits == 0 {
+		commitHeader += " (none)"
+	}
+	// Metadata must also leave the commit header and its worst-case omission
+	// line intact. A long prefix leaves at least a labeled, visibly truncated
+	// branch; neither metadata value may consume a later mandatory line.
+	metadataLimit := commitsLimit - (len(commitHeader) + 1 + gitOmissionCost(st.TotalCommits, "commit", "commits"))
+	branch := "branch: " + gitContextText(st.Branch)
+	branchReserve := min(len(branch), len("branch:")+len(gitContextTruncatedMark)) + 1
 
 	if st.Prefix != "" {
-		emit(fit("prefix: "+gitContextText(st.Prefix)+" (workspace root; strip this prefix for file-tool paths)", commitsLimit))
+		emit(fit("prefix: "+gitContextText(st.Prefix)+" (workspace root; strip this prefix for file-tool paths)", metadataLimit-branchReserve))
 	}
-	emit(fit("branch: "+gitContextText(st.Branch), commitsLimit))
+	emit(fit(branch, metadataLimit))
+	emit(commitHeader)
 
-	if st.TotalCommits == 0 {
-		emit(fit("recent commits (newest first): (none)", commitsLimit))
-	} else {
-		emit(fit("recent commits (newest first):", commitsLimit))
+	if st.TotalCommits > 0 {
 		rendered := 0
 		for i, c := range st.Commits {
 			line := gitContextText(c)
@@ -392,7 +401,7 @@ func nearestGitEntry(root string) string {
 // definitions (git-lfs installs there) are the user's own trust roots and are
 // not reported. `git config --get-regexp` exits 1 when nothing matches.
 func gitLocalFilterDriver(ctx context.Context, gitPath, root string) (string, error) {
-	out, err := runGit(ctx, gitPath, root, "--no-pager", "config", "--show-scope", "--get-regexp", `^filter\..*\.(clean|process)$`)
+	out, err := runGit(ctx, gitPath, root, "--no-pager", "config", "--null", "--show-scope", "--name-only", "--get-regexp", `^filter\..*\.(clean|process)$`)
 	if err != nil {
 		var exit *gitExitError
 		if errors.As(err, &exit) && exit.code == 1 {
@@ -400,14 +409,28 @@ func gitLocalFilterDriver(ctx context.Context, gitPath, root string) (string, er
 		}
 		return "", err
 	}
-	for _, line := range completeLines(out) {
-		scope, rest, ok := strings.Cut(line, "\t")
-		if !ok {
-			continue
+	// This is a safety precheck: a retained prefix cannot establish that no
+	// local driver exists. NUL-delimited scope/key pairs avoid interpreting
+	// whitespace in subsection names or newlines in values as record bounds.
+	raw := out.String()
+	if out.Truncated || !strings.HasSuffix(raw, "\x00") {
+		return "", errors.New("git config: incomplete filter-driver precheck")
+	}
+	fields := strings.Split(strings.TrimSuffix(raw, "\x00"), "\x00")
+	if len(fields)%2 != 0 {
+		return "", errors.New("git config: malformed filter-driver precheck")
+	}
+	for i := 0; i < len(fields); i += 2 {
+		scope, key := fields[i], fields[i+1]
+		if key == "" {
+			return "", errors.New("git config: missing filter-driver key")
 		}
-		if scope == "local" || scope == "worktree" {
-			key, _, _ := strings.Cut(rest, " ")
+		switch scope {
+		case "local", "worktree":
 			return gitContextText(key), nil
+		case "system", "global", "command":
+		default:
+			return "", errors.New("git config: unknown filter-driver scope")
 		}
 	}
 	return "", nil
@@ -447,7 +470,9 @@ func loadGitContext(ctx context.Context, gitPath, root string) (gitContextSnapsh
 		return gitContextSnapshot{}, errors.New("git rev-parse: malformed toplevel output")
 	}
 	var st gitState
-	st.Toplevel = strings.TrimSuffix(raw, "\n")
+	// Git for Windows emits slashes; both path validation and discovery
+	// comparison below use native separators without cleaning away bad input.
+	st.Toplevel = filepath.FromSlash(strings.TrimSuffix(raw, "\n"))
 	if st.Prefix, err = workspacePrefix(st.Toplevel, root); err != nil {
 		return gitContextSnapshot{}, err
 	}
