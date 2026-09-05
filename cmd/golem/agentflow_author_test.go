@@ -1503,3 +1503,25 @@ func TestRunAgentflowAuthor_PlannerPromptCarriesBaseContract(t *testing.T) {
 		t.Errorf("planner observation = %q, want %q", tool.Content, framedToolResult(k, "planner note\n"))
 	}
 }
+
+// The -goal planner reads the same current fragments the runtime prompt
+// carries: project context then Git context, in that order, after the
+// planner base prompt (#354 D10).
+func TestRunAgentflowAuthorUsesCurrentGitFragment(t *testing.T) {
+	root := t.TempDir()
+	caller := &captureCaller{answer: "no submission"}
+	sess := newTestSession(t, caller, root)
+	sess.sysInputs.projectContext = "<<<PROJECT_CONTEXT (advisory)\nrepo rule\n>>>PROJECT_CONTEXT"
+	sess.sysInputs.gitContext = gitContextOpen + "\nbranch: main\nrecent commits (newest first): (none)\nworking tree: clean\n" + gitContextClose
+	err := runAgentflowAuthorWithClient(context.Background(), io.Discard, io.Discard, nil, sess, flags{goal: "x", goalSet: true}, root, &stubLocker{}, nil)
+	if !errors.Is(err, errPlannerNoSubmission) {
+		t.Fatalf("err = %v, want no submission", err)
+	}
+	base, project, git := strings.Index(caller.system, "Golem's planner"), strings.Index(caller.system, "repo rule"), strings.Index(caller.system, gitContextOpen)
+	if base < 0 || project < 0 || git < 0 || base >= project || project >= git {
+		t.Fatalf("planner system must carry base prompt, project context, then Git context: base=%d project=%d git=%d\n%s", base, project, git, caller.system)
+	}
+	if strings.Count(caller.system, gitContextOpen) != 1 || !strings.HasSuffix(caller.system, gitContextClose) {
+		t.Fatalf("Git block duplicated or not last: %q", caller.system)
+	}
+}
