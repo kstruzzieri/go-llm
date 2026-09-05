@@ -69,6 +69,48 @@ func TestRunAddsToolTrustContractOnce(t *testing.T) {
 	}
 }
 
+type addendumStub struct {
+	*stubInterceptor
+	text string
+}
+
+func (s addendumStub) ForRun(context.Context, RunScope) (Interceptor, string, error) {
+	return s.stubInterceptor, s.text, nil
+}
+
+func TestRunSeparatesInterceptorAddenda(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		addenda []string
+		want    string
+	}{
+		{"plain text", []string{"Use compact output.", "Preserve units."}, "\n\nUse compact output.\n\nPreserve units."},
+		{"empty addenda", []string{"", ""}, ""},
+		{"verbatim whitespace", []string{"", "  Use compact output.\n", "", "\tPreserve units.  ", ""}, "\n\n  Use compact output.\n\n\n\tPreserve units.  "},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, system := range []string{"", "Caller instructions.\n\n"} {
+				chain := make([]Interceptor, len(tc.addenda))
+				for i, text := range tc.addenda {
+					chain[i] = addendumStub{&stubInterceptor{name: strings.Repeat("x", i+1)}, text}
+				}
+				mc := &wireCaller{responses: []ModelResult{finalAnswer("done")}}
+				o := newTestOrchestrator(mc, WithInterceptors(chain...))
+				if _, err := o.Run(context.Background(), Request{Goal: "q", System: system}, nil); err != nil {
+					t.Fatal(err)
+				}
+				want := ToolTrustContract + tc.want
+				if system != "" {
+					want = "Caller instructions.\n\n\n\n" + want
+				}
+				if got := mc.requests[0].Messages[0].Content; got != want {
+					t.Fatalf("caller=%q: system = %q, want %q", system, got, want)
+				}
+			}
+		})
+	}
+}
+
 // TestToolTrustContractPrecedesInspectionAndFitting: the step-0 initial
 // inspection sees the contract, scoped interceptors still see only the
 // caller's text, and the contract's cost is pinned, so a budget that fit
@@ -84,7 +126,7 @@ func TestToolTrustContractPrecedesInspectionAndFitting(t *testing.T) {
 	if len(ic.inputs) == 0 || !strings.Contains(ic.inputs[0].System, ToolTrustContract) {
 		t.Errorf("inspection missed base contract: step-0 System = %q", ic.inputs)
 	}
-	if want := "sys\n\n" + ToolTrustContract + " [canary:x]"; len(ic.inputs) == 0 || ic.inputs[0].System != want {
+	if want := "sys\n\n" + ToolTrustContract + "\n\n [canary:x]"; len(ic.inputs) == 0 || ic.inputs[0].System != want {
 		t.Errorf("inspected System = %q, want %q (caller text, contract, addenda)", ic.inputs[0].System, want)
 	}
 	if len(sc.scopes) != 1 || sc.scopes[0] != (RunScope{System: "sys"}) {

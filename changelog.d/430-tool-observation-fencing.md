@@ -27,6 +27,12 @@ prices raw content, so the committed evaluation corpora are unchanged.
   compaction and pressure now account for the envelope, so token-budget
   fixtures shift while byte caps (`OutputCap`, anchor caps, trace bytes)
   stay about raw content.
+- Custom compactors receive the transport charge through
+  `TokenBudget.ToolResultOverhead` and must include it in fitting and reports.
+  Wrappers forwarding the complete budget to `RecencyCompactor` inherit the
+  charge automatically; standalone compaction keeps its zero-overhead default.
+- Each nonempty run-scoped interceptor addendum is separated by two newlines;
+  the addendum's own bytes are preserved.
 - Interceptor trailers and the blocked marker render inside the frame.
 - This is a model-facing convention, not an enforcement layer: approvals,
   grants, interceptors and sandboxes remain the controls.

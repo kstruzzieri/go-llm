@@ -102,24 +102,9 @@ func (m ContextManager) estimate(s string) int {
 }
 
 func normalizeContextManager(m ContextManager) ContextManager {
-	switch c := m.Compactor.(type) {
-	case nil:
+	if m.Compactor == nil {
 		m.Compactor = m.costCompactor()
-	case RecencyCompactor:
-		// A caller-supplied built-in compactor prices messages the way this
-		// manager's final validation does, frame envelope included.
-		c.frameToolResults = m.frameToolResults
-		m.Compactor = c
-	case *RecencyCompactor:
-		// Value-receiver methods make the pointer form a Compactor too; stamp
-		// a copy rather than writing through the caller's pointer.
-		cp := *c
-		cp.frameToolResults = m.frameToolResults
-		m.Compactor = cp
 	}
-	// Any other Compactor prices its own fit; final validation still charges
-	// the envelope, so an unaware compactor's oversized result is rejected
-	// (ErrContextExhausted), never shipped.
 	return m
 }
 
@@ -127,7 +112,11 @@ func normalizeContextManager(m ContextManager) ContextManager {
 // message-cost seam, so every path (pinned, total, mixed envelopes, the
 // default compactor) prices a message identically.
 func (m ContextManager) costCompactor() RecencyCompactor {
-	return RecencyCompactor{Estimate: m.Estimate, frameToolResults: m.frameToolResults}
+	var overhead int
+	if m.frameToolResults {
+		overhead = m.estimate(toolFrameEnvelope)
+	}
+	return RecencyCompactor{Estimate: m.Estimate, toolResultOverhead: overhead}
 }
 
 func (m ContextManager) messageCost(msg Message) int {
@@ -262,7 +251,7 @@ func (m ContextManager) assembleLegacy(ctx context.Context, st State, toolSchema
 			Level: LevelCritical, Cause: CauseToolSchema, Mitigation: MitigationHalt,
 		}, ErrContextExhausted
 	}
-	stateBudget := TokenBudget{Input: stateInput}
+	stateBudget := TokenBudget{Input: stateInput, ToolResultOverhead: m.costCompactor().toolResultOverhead}
 	out, report, err := m.Compactor.Compact(ctx, st, stateBudget)
 	if err != nil {
 		if errors.Is(err, ErrContextExhausted) {

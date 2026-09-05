@@ -69,7 +69,7 @@ func TestToolFrameEnvelopeCost(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got, ok := (RecencyCompactor{Estimate: tc.est, frameToolResults: true}).checkedMessageCost(tc.msg)
+			got, ok := (ContextManager{Estimate: tc.est, frameToolResults: true}).checkedMessageCost(tc.msg)
 			if !ok {
 				t.Fatalf("checkedMessageCost overflowed on %+v", tc.msg)
 			}
@@ -102,7 +102,7 @@ func TestToolFrameEnvelopeCost(t *testing.T) {
 		}
 		return math.MaxInt
 	}
-	if got, ok := (RecencyCompactor{Estimate: saturating, frameToolResults: true}).checkedMessageCost(toolMsg("x", "", "")); ok || got != math.MaxInt {
+	if got, ok := (ContextManager{Estimate: saturating, frameToolResults: true}).checkedMessageCost(toolMsg("x", "", "")); ok || got != math.MaxInt {
 		t.Errorf("expected context exhaustion (checked overflow) charging the frame envelope, got %d/%v", got, ok)
 	}
 }
@@ -294,5 +294,49 @@ func TestOrchestratorChargesToolFrames(t *testing.T) {
 	}
 	if len(res.Steps) != 2 || res.Steps[1].Pressure.Evicted != 0 || res.Steps[1].Pressure.InputTokens != 54+base {
 		t.Errorf("control step 1 pressure = %+v, want the chain retained (Evicted 0, InputTokens %d)", res.Steps, 54+base)
+	}
+}
+
+type decoratedRecencyCompactor struct{ RecencyCompactor }
+
+type forwardingRecencyCompactor struct{ inner RecencyCompactor }
+
+func (c forwardingRecencyCompactor) Compact(ctx context.Context, st State, budget TokenBudget) (State, CompactionReport, error) {
+	return c.inner.Compact(ctx, st, budget)
+}
+
+// Decorating the built-in compactor must not change its fit or cause an
+// otherwise recoverable run to halt at the manager's final validation.
+func TestRunChargesToolFramesThroughCompactorWrappers(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		compactor Compactor
+	}{
+		{"value", decoratedRecencyCompactor{RecencyCompactor{Estimate: runeEstimator}}},
+		{"pointer", &decoratedRecencyCompactor{RecencyCompactor{Estimate: runeEstimator}}},
+		{"forwarding", forwardingRecencyCompactor{RecencyCompactor{Estimate: runeEstimator}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			mc := &wireCaller{responses: []ModelResult{
+				toolCallResponse(call("1", "echo", `{}`)),
+				{Response: provider.ChatResponse{Content: "done", Done: true}},
+			}}
+			o := New(mc, ContextManager{Compactor: tc.compactor, Estimate: runeEstimator})
+			base := len(ToolTrustContract)
+			res, err := o.Run(context.Background(), Request{
+				Goal: "q", Tools: []Tool{echoTool{name: "echo"}}, Budget: Budget{InputCeiling: base + 100},
+			}, nil)
+			if err != nil {
+				t.Fatalf("wrapped compactor must evict the completed chain and continue: %v", err)
+			}
+			if len(mc.requests) != 2 || len(res.Steps) != 2 || res.Steps[1].Pressure.Evicted != 1 || res.Steps[1].Pressure.InputTokens != base+22 {
+				t.Fatalf("want a second request with one chain evicted: requests=%d steps=%+v", len(mc.requests), res.Steps)
+			}
+			// Reusing the wrapper outside an orchestrator still prices raw data.
+			_, report, err := tc.compactor.Compact(context.Background(), framedFitState(framedFitChain("RESULT", nil, Elastic)), TokenBudget{Input: 114})
+			if err != nil || report.DroppedCount != 0 || report.TokensAfter != 22 {
+				t.Fatalf("standalone compactor retained a transport charge: report=%+v err=%v", report, err)
+			}
+		})
 	}
 }

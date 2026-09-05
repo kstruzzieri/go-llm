@@ -219,10 +219,10 @@ func TestRunScopedInterceptorResolvedPerRunWithAddendum(t *testing.T) {
 	if sc.forRuns != 2 || len(sc.runs) != 2 || sc.scopes[0] != (RunScope{System: "sys"}) {
 		t.Fatalf("ForRun calls = %d, instances = %d, scopes = %+v", sc.forRuns, len(sc.runs), sc.scopes)
 	}
-	if got := mc.reqs[0].Messages[0].Content; got != "sys\n\n"+ToolTrustContract+" [canary:x]" {
+	if got := mc.reqs[0].Messages[0].Content; got != "sys\n\n"+ToolTrustContract+"\n\n [canary:x]" {
 		t.Fatalf("run 0 system = %q", got)
 	}
-	if got := mc.reqs[1].Messages[0].Content; got != "sys\n\n"+ToolTrustContract+" [canary:xx]" {
+	if got := mc.reqs[1].Messages[0].Content; got != "sys\n\n"+ToolTrustContract+"\n\n [canary:xx]" {
 		t.Fatalf("run 1 system = %q, want its own addendum only", got)
 	}
 }
@@ -689,7 +689,7 @@ func TestRunScopedInterceptorIsolatesConcurrentRuns(t *testing.T) {
 	}
 	systems := []string{reqs[0].Messages[0].Content, reqs[1].Messages[0].Content}
 	slices.Sort(systems)
-	if systems[0] != "sys\n\n"+ToolTrustContract+" [canary:x]" || systems[1] != "sys\n\n"+ToolTrustContract+" [canary:xx]" {
+	if systems[0] != "sys\n\n"+ToolTrustContract+"\n\n [canary:x]" || systems[1] != "sys\n\n"+ToolTrustContract+"\n\n [canary:xx]" {
 		t.Fatalf("systems = %v, want each run to carry only its own addendum", systems)
 	}
 	if len(sc.runs) != 2 || sc.runs[0] == sc.runs[1] || len(sc.runs[0].inputs) != 1 || len(sc.runs[1].inputs) != 1 {
@@ -2213,7 +2213,7 @@ func TestRunScopedInterceptorsSeeOnlyTheCallerSystemAndAppendInChainOrder(t *tes
 	if a.scopes[0] != (RunScope{System: "sys"}) || b.scopes[0] != (RunScope{System: "sys"}) {
 		t.Fatalf("scopes = %+v / %+v: ForRun must not see another interceptor's addendum", a.scopes, b.scopes)
 	}
-	if got := mc.reqs[0].Messages[0].Content; got != "sys\n\n"+ToolTrustContract+" [canary:x] [canary:xx]" {
+	if got := mc.reqs[0].Messages[0].Content; got != "sys\n\n"+ToolTrustContract+"\n\n [canary:x]\n\n [canary:xx]" {
 		t.Fatalf("system = %q, want chain-order addenda", got)
 	}
 }
