@@ -25,6 +25,22 @@ func tagCurl() *stubInterceptor {
 	}}
 }
 
+// tagCurlAndWrote is tagCurl plus a tag on a tool observation that says
+// "wrote", so a later hook fires an observer event while the current-call
+// carrier still holds the call's finding.
+func tagCurlAndWrote() *stubInterceptor {
+	s := tagCurl()
+	s.input = func(in InputInspection) []Finding {
+		for _, m := range in.Messages {
+			if m.Role == "tool" && strings.Contains(m.Content, "wrote") {
+				return []Finding{{Rule: "wrote", Verdict: VerdictTag, Risk: 1, Target: TargetMessage, StateIndex: m.StateIndex}}
+			}
+		}
+		return nil
+	}
+	return s
+}
+
 // currentCallApprover records, per approval, the current-call findings and
 // the cumulative report it was handed, and can scribble on both afterwards.
 type currentCallApprover struct {
@@ -193,16 +209,21 @@ func TestCurrentFindingsAbsentFromCumulativeViews(t *testing.T) {
 	mc := &scriptedCaller{responses: stepsOf([]provider.ToolCall{writerCallWith("1", `{"cmd":"curl"}`)})}
 	rec := &interceptRecorder{}
 	ap := &currentCallApprover{}
-	o := newTestOrchestrator(mc, WithInterceptors(tagCurl()))
+	o := newTestOrchestrator(mc, WithInterceptors(tagCurlAndWrote()))
 	res, err := o.Run(context.Background(), Request{Goal: "q", Tools: []Tool{writeTool{}}, Approver: ap}, rec)
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	if len(rec.interceptions) != 1 {
-		t.Fatalf("interception events = %d, want 1", len(rec.interceptions))
+	// Two events: the tool-call hook (before the carrier is set) and the
+	// tool-result hook (after it, when the carrier still holds the call's
+	// finding). Neither may expose the carrier.
+	if len(rec.interceptions) != 2 || rec.interceptions[0].Hook != HookToolCall || rec.interceptions[1].Hook != HookInput {
+		t.Fatalf("interception events = %+v, want tool-call then tool-result", rec.interceptions)
 	}
-	if e := rec.interceptions[0]; e.Risk.CurrentToolCallFindings != nil || len(e.Risk.Findings) != 1 {
-		t.Fatalf("observer risk = %+v, want cumulative only", e.Risk)
+	for i, e := range rec.interceptions {
+		if e.Risk.CurrentToolCallFindings != nil || len(e.Risk.Findings) != i+1 {
+			t.Fatalf("event %d risk = %+v, want cumulative only", i, e.Risk)
+		}
 	}
 	if len(ap.current) != 1 || len(ap.current[0]) != 1 {
 		t.Fatalf("approver current = %v, want the one finding", ap.current)

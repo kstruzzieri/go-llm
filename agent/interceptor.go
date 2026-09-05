@@ -769,9 +769,9 @@ func cloneToolCall(call provider.ToolCall) provider.ToolCall {
 // Block, and the error to propagate: a BlockedError on Abort (joined with any
 // hook errors), or the hook errors alone. Whatever the outcome, the call's
 // own normalized findings replace the current-call carrier the approval
-// snapshot carries (#439 D6).
+// snapshot carries (#439 D6); a clean call leaves it empty. With no chain
+// nothing is ever recorded, so the carrier stays nil.
 func (r *interceptorRun) inspectToolCall(ctx context.Context, obs Observer, step int, call provider.ToolCall, effect Effect) (*ToolResult, error) {
-	r.current = nil
 	if len(r.chain) == 0 {
 		return nil, nil
 	}
