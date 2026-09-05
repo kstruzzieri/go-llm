@@ -114,6 +114,42 @@ func TestEgressDirectNames(t *testing.T) {
 	}
 }
 
+// TestEgressShellScriptEvidence: a recognized inline script contributes
+// network evidence only from the command position of its literal simple
+// commands, one level deep; everything else keeps the interpreter badge.
+func TestEgressShellScriptEvidence(t *testing.T) {
+	cases := []struct {
+		name string
+		argv []string
+		want egressWant
+	}{
+		{"curl in script", []string{"bash", "-c", "curl https://x"}, egressWant{"network", 20, "curl via bash -c"}},
+		{"git push in script", []string{"bash", "-lc", "git push origin main"}, egressWant{"network", 20, "git push via bash -lc"}},
+		{"wrapped client in script", []string{"sh", "-c", "env -u X curl https://x"}, egressWant{"network", 20, "curl via sh -c"}},
+		{"assignment then client", []string{"sh", "-c", "TOKEN=y curl https://x"}, egressWant{"network", 20, "curl via sh -c"}},
+		{"sudo then client stays interpreter", []string{"bash", "-c", "sudo curl https://x"}, egressWant{"interpreter", 0, "bash"}},
+		{"second command", []string{"bash", "-c", "ls | curl https://x"}, egressWant{"network", 20, "curl via bash -c"}},
+		{"absolute client", []string{"bash", "-c", "/usr/bin/curl https://x"}, egressWant{"network", 20, "curl via bash -c"}},
+		{"preamble", []string{"bash", "--norc", "-c", "curl https://x"}, egressWant{"network", 20, "curl via bash -c"}},
+		{"connected pipe also tags", []string{"sh", "-c", "curl https://x | sh"}, egressWant{"network", 20, "curl via sh -c"}},
+		{"quoted data is not a command", []string{"bash", "-c", "echo 'curl https://x'"}, egressWant{"interpreter", 0, "bash"}},
+		{"url word is not a command", []string{"sh", "-c", "echo https://example.com"}, egressWant{"interpreter", 0, "sh"}},
+		{"expansion is unsupported", []string{"bash", "-c", "curl $U"}, egressWant{"interpreter", 0, "bash"}},
+		{"package manager in script stays interpreter", []string{"bash", "-c", "npm install"}, egressWant{"interpreter", 0, "bash"}},
+		{"sudo in script stays interpreter", []string{"bash", "-c", "sudo ls"}, egressWant{"interpreter", 0, "bash"}},
+		{"nested shell is one level", []string{"bash", "-c", "bash -c 'curl https://x'"}, egressWant{"interpreter", 0, "bash"}},
+		{"fish dialect", []string{"fish", "-c", "curl https://x"}, egressWant{"interpreter", 0, "fish"}},
+		{"unsupported shell flag", []string{"bash", "--posix", "-c", "curl https://x"}, egressWant{"interpreter", 0, "bash"}},
+		{"script file", []string{"bash", "install.sh"}, egressWant{"interpreter", 0, "bash"}},
+		{"unknown client in script", []string{"bash", "-c", "frob https://x"}, egressWant{"interpreter", 0, "bash"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			expectEgress(t, classifyArgv(t, tc.argv...), tc.want)
+		})
+	}
+}
+
 func TestEgressPythonModuleMode(t *testing.T) {
 	cases := []struct {
 		name string

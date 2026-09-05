@@ -77,6 +77,44 @@ func normalizePath(s string) string {
 	return strings.ToLower(clean)
 }
 
+// RemoteScript blocks an argv that runs an inline shell script piping a
+// recognized remote fetch into a recognized shell (#439 D5): after the same
+// wrapper peel the classifier applies, the outer command must be a supported
+// shell in command-execution mode, the script must tokenize into exactly two
+// literal simple commands joined by one unquoted pipe, the first a stdout
+// fetch (curl/wget forms in the matrix) and the second a stdin shell sink.
+// Anything the recognizer cannot interpret is not blocked; it stays a badge.
+// Substitution, eval and source forms are deliberately outside this set.
+type RemoteScript struct{}
+
+func (RemoteScript) check(raw json.RawMessage) (string, bool) {
+	var argv []string
+	if err := json.Unmarshal(raw, &argv); err != nil {
+		return "", false
+	}
+	rest, _, status := peelWrappers(argv)
+	if status != peelOK {
+		return "", false
+	}
+	_, _, script, ok := inlineShellScript(rest)
+	if !ok {
+		return "", false
+	}
+	cmds, ok := splitShellWords(script)
+	if !ok || len(cmds) != 2 {
+		return "", false
+	}
+	fetch, ok := recognizeFetch(cmds[0])
+	if !ok {
+		return "", false
+	}
+	sink, ok := recognizeSink(cmds[1])
+	if !ok {
+		return "", false
+	}
+	return "inline shell script pipes " + fetch + " into " + sink, true
+}
+
 // Default path patterns (#439 D7): repository internals and credential
 // directories as a component at any depth for writes; credential directories
 // plus the exact basename .env for direct reads.
@@ -96,6 +134,8 @@ func DefaultInvariants() []Invariant {
 		{Tool: "edit_file", Name: "protected_path", Field: "path", Check: protected},
 		{Tool: "promote_artifact", Name: "protected_path", Field: "path", Check: protected},
 		{Tool: "read_file", Name: "credential_path", Field: "path", Check: credential},
+		{Tool: "run_command", Name: "remote_script_execution", Field: "argv", Check: RemoteScript{}},
+		{Tool: "start_command", Name: "remote_script_execution", Field: "argv", Check: RemoteScript{}},
 	}
 }
 
@@ -165,6 +205,8 @@ func ownedCheck(inv Invariant) (Check, error) {
 			return nil, fmt.Errorf("interceptor: invariant %s/%s pattern: %w", inv.Tool, inv.Name, err)
 		}
 		return PathDeny{Pattern: re}, nil
+	case RemoteScript:
+		return c, nil
 	default:
 		return nil, fmt.Errorf("interceptor: invariant %s/%s has unsupported check kind %T", inv.Tool, inv.Name, inv.Check)
 	}

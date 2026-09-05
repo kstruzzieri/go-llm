@@ -335,6 +335,8 @@ func TestDefaultTableRows(t *testing.T) {
 		"edit_file/protected_path/path",
 		"promote_artifact/protected_path/path",
 		"read_file/credential_path/path",
+		"run_command/remote_script_execution/argv",
+		"start_command/remote_script_execution/argv",
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("rows = %v, want %v", got, want)

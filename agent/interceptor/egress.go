@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"unicode/utf8"
@@ -219,6 +220,186 @@ scan:
 	return args, peelOK
 }
 
+// Shell recognition (spec matrix). This is a finite recognizer over literal
+// words, not shell evaluation: it accepts only the forms it can interpret
+// without expansion and reports everything else as unsupported, so the
+// invariant never hard-blocks on text it did not actually understand.
+var (
+	// inlineShells run an inline script under the exact options below.
+	inlineShells = set("sh", "bash", "dash", "ksh", "zsh")
+	inlineFlags  = set("-c", "-lc", "-ec", "-euc")
+	bashPreamble = set("--norc", "--noprofile")
+	// curlFetchFlags are the only curl options a recognized stdout fetch may
+	// carry, singly or clustered.
+	curlFetchFlags = regexp.MustCompile(`^-[fsSL]+$`)
+	// shellUnsupported lists the unquoted characters whose meaning needs
+	// evaluation or a second command: control operators, redirections,
+	// expansions, globs, braces and tilde.
+	shellUnsupported = ";&()<>\n$`\\*?[]{}~"
+)
+
+// inlineShellScript recognizes an outer shell in command-execution mode:
+// sh/bash/dash/ksh/zsh, for bash optionally --norc/--noprofile first, then
+// exactly one of -c, -lc, -ec, -euc and the script operand. Arguments after
+// the script are the script's own and are not interpreted.
+func inlineShellScript(argv []string) (shell, flag, script string, ok bool) {
+	if len(argv) == 0 {
+		return "", "", "", false
+	}
+	shell = commandName(argv[0])
+	if !inlineShells[shell] {
+		return "", "", "", false
+	}
+	i := 1
+	for shell == "bash" && i < len(argv) && bashPreamble[argv[i]] {
+		i++
+	}
+	if i+1 >= len(argv) || !inlineFlags[argv[i]] {
+		return "", "", "", false
+	}
+	return shell, argv[i], argv[i+1], true
+}
+
+// splitShellWords tokenizes a script into simple commands of literal words:
+// unquoted whitespace separates words, an unquoted pipe separates commands,
+// single quotes are literal, double quotes are literal unless they contain
+// $, backtick or backslash, and a # at a word start comments out the rest
+// of the script. Any other unquoted metacharacter, an unterminated quote,
+// an empty command, or a comment that is followed by more script lines
+// makes the script unsupported.
+func splitShellWords(script string) (cmds [][]string, ok bool) {
+	var (
+		cur     []string
+		word    []rune
+		inWord  bool
+		quote   rune // 0, '\'' or '"'
+		endWord = func() {
+			if inWord {
+				cur = append(cur, string(word))
+				word, inWord = word[:0], false
+			}
+		}
+	)
+	rs := []rune(script)
+	for i := 0; i < len(rs); i++ {
+		r := rs[i]
+		switch {
+		case quote == '\'':
+			if r == '\'' {
+				quote = 0
+			} else {
+				word = append(word, r)
+			}
+		case quote == '"':
+			switch r {
+			case '"':
+				quote = 0
+			case '$', '`', '\\':
+				return nil, false
+			default:
+				word = append(word, r)
+			}
+		case r == '\'' || r == '"':
+			quote, inWord = r, true
+		case r == ' ' || r == '\t':
+			endWord()
+		case r == '|':
+			endWord()
+			if len(cur) == 0 {
+				return nil, false
+			}
+			cmds, cur = append(cmds, cur), nil
+		case r == '#' && !inWord:
+			if slices.Contains(rs[i:], '\n') {
+				return nil, false
+			}
+			i = len(rs)
+		case strings.ContainsRune(shellUnsupported, r):
+			return nil, false
+		default:
+			word, inWord = append(word, r), true
+		}
+	}
+	if quote != 0 {
+		return nil, false
+	}
+	endWord()
+	if len(cur) == 0 {
+		return nil, false
+	}
+	return append(cmds, cur), true
+}
+
+// commandWords drops the leading NAME=VALUE assignment words of a simple
+// command: in shell grammar they set the command's environment and the
+// first remaining word is what runs.
+func commandWords(words []string) []string {
+	for len(words) > 0 && envAssignment.MatchString(words[0]) {
+		words = words[1:]
+	}
+	return words
+}
+
+// recognizeFetch reports a simple command that delivers a remote fetch on
+// stdout: curl with only -f/-s/-S/-L (singly or clustered), or wget with
+// optional -q and the stdout marker -O -, -O- or exactly -qO-; either may
+// use -- and must have exactly one literal operand.
+func recognizeFetch(words []string) (name string, ok bool) {
+	words = commandWords(words)
+	if len(words) == 0 {
+		return "", false
+	}
+	name = commandName(words[0])
+	operands, stdout, dashdash := 0, false, false
+	for i := 1; i < len(words); i++ {
+		w := words[i]
+		switch {
+		case dashdash, w == "-", !strings.HasPrefix(w, "-"):
+			operands++
+		case w == "--":
+			dashdash = true
+		case name == "curl" && curlFetchFlags.MatchString(w):
+		case name == "wget" && w == "-q":
+		case name == "wget" && (w == "-O-" || w == "-qO-"):
+			stdout = true
+		case name == "wget" && w == "-O" && i+1 < len(words) && words[i+1] == "-":
+			stdout, i = true, i+1
+		default:
+			return "", false
+		}
+	}
+	switch name {
+	case "curl":
+		return name, operands == 1
+	case "wget":
+		return name, stdout && operands == 1
+	}
+	return "", false
+}
+
+// recognizeSink reports a simple command that executes its stdin: a bare
+// sh/bash/dash/ksh/zsh, optionally with -s, optionally preceded by a bare
+// sudo. The label names what would run.
+func recognizeSink(words []string) (label string, ok bool) {
+	words = commandWords(words)
+	i := 0
+	if len(words) > 0 && commandName(words[0]) == "sudo" {
+		label, i = "sudo ", 1
+	}
+	if i >= len(words) {
+		return "", false
+	}
+	shell := commandName(words[i])
+	if !inlineShells[shell] {
+		return "", false
+	}
+	rest := words[i+1:]
+	if len(rest) > 1 || (len(rest) == 1 && rest[0] != "-s") {
+		return "", false
+	}
+	return label + shell, true
+}
+
 // egressClass is one classification: the rule, its risk, and the badge label.
 type egressClass struct {
 	rule  string
@@ -232,8 +413,33 @@ func unknownClass(label string) (egressClass, bool) {
 
 // classify returns the class of an argv, or false for an explicitly quiet
 // command. Priority: privileged, network, package-manager, interpreter,
-// unknown.
+// unknown. A recognized inline shell script contributes network evidence
+// from the command position of its literal simple commands, one level deep.
 func classify(argv []string) (egressClass, bool) {
+	return classifyCommand(argv, true)
+}
+
+// scriptNetworkEvidence returns the network label for the first simple
+// command of a recognized inline script that classifies as network on its
+// own (a direct client, or a network git subcommand), or false.
+func scriptNetworkEvidence(rest []string) (string, bool) {
+	shell, flag, script, ok := inlineShellScript(rest)
+	if !ok {
+		return "", false
+	}
+	cmds, ok := splitShellWords(script)
+	if !ok {
+		return "", false
+	}
+	for _, c := range cmds {
+		if cls, ok := classifyCommand(commandWords(c), false); ok && cls.rule == EgressNetwork {
+			return cls.label + " via " + shell + " " + flag, true
+		}
+	}
+	return "", false
+}
+
+func classifyCommand(argv []string, withScript bool) (egressClass, bool) {
 	rest, wrapper, status := peelWrappers(argv)
 	switch status {
 	case peelUnsupported:
@@ -258,6 +464,11 @@ func classify(argv []string) (egressClass, bool) {
 	case packageBins[name]:
 		return egressClass{EgressPackageManager, EgressPackageManagerRisk, name}, true
 	case shellNames[name]:
+		if withScript {
+			if label, ok := scriptNetworkEvidence(rest); ok {
+				return egressClass{EgressNetwork, EgressNetworkRisk, label}, true
+			}
+		}
 		return egressClass{EgressInterpreter, EgressInterpreterRisk, name}, true
 	case interpreterNames[name]:
 		if strings.HasPrefix(name, "python") && len(args) >= 2 && args[0] == "-m" && args[1] == "pip" {
