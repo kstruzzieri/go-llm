@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -104,6 +105,138 @@ func TestSecretTraceAndDiagnosticsSuppressJoinedProviderError(t *testing.T) {
 			if !strings.Contains(out.String(), "error: run blocked: sensitive content detected\n") ||
 				!strings.Contains(out.String(), "warning: trace not written: sensitive content detected\n") {
 				t.Error("blocked run did not emit the fixed error and trace warning")
+			}
+		})
+	}
+}
+
+type secretDeltaFailureCaller struct{}
+
+func (secretDeltaFailureCaller) Chat(_ context.Context, _ provider.ChatRequest, onToken func(provider.ChatResponse) error) (agent.ModelResult, error) {
+	// Only harmless text is streamed. The collected response still needs
+	// inspection after the sink rejects that earlier delta.
+	err := onToken(provider.ChatResponse{Content: "ordinary partial output"})
+	return agent.ModelResult{Response: provider.ChatResponse{Content: secretTestValue()}}, err
+}
+
+type secretEventFailureWriter struct {
+	events   []golemruntime.Event
+	failType string
+	err      error
+}
+
+func (w *secretEventFailureWriter) Write(p []byte) (int, error) {
+	var event golemruntime.Event
+	if json.Unmarshal(p, &event) != nil {
+		return 0, errors.New("test received invalid runtime event")
+	}
+	w.events = append(w.events, event)
+	if event.Type == w.failType {
+		return 0, w.err
+	}
+	return len(p), nil
+}
+
+func TestSecretRuntimeSideErrorsPreserveClassification(t *testing.T) {
+	sinkErr := errors.New("sink diagnostic: " + secretTestValue())
+	for _, tc := range []struct {
+		name       string
+		goal       string
+		caller     agent.ModelCaller
+		cancel     bool
+		failType   string
+		wantErr    error
+		wantHook   agent.Hook
+		wantEvents []string
+	}{
+		{
+			name: "cancellation after detection", goal: secretTestValue(), caller: &scriptCaller{},
+			cancel: true, wantErr: context.Canceled, wantHook: agent.HookInput,
+			wantEvents: []string{"run.started", "run.canceled"},
+		},
+		{
+			name: "terminal sink failure", goal: secretTestValue(), caller: &scriptCaller{},
+			failType: "run.failed", wantErr: sinkErr, wantHook: agent.HookInput,
+			wantEvents: []string{"run.started", "run.failed"},
+		},
+		{
+			name: "delta sink failure before collected output block", goal: "review output", caller: secretDeltaFailureCaller{},
+			failType: "message.delta", wantErr: sinkErr, wantHook: agent.HookOutput,
+			wantEvents: []string{"run.started", "message.delta"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, repl := range []bool{false, true} {
+				name := "runOnce"
+				if repl {
+					name = "runREPL"
+				}
+				t.Run(name, func(t *testing.T) {
+					ctx, cancel := context.WithCancel(context.Background())
+					defer cancel()
+					sess, traceDir := newTracingSession(t, tc.caller)
+					sess.orch = newOrchestratorFactory(tc.caller, flags{interceptors: true}, nil)()
+					runtime, err := golemruntime.New(ctx, golemruntime.Options{
+						Root: t.TempDir(), System: sess.baseSystem, Orchestrator: sess.orch,
+						FailureMessage: func(code string, cause error) string {
+							if tc.cancel && secretsBlocked(cause) {
+								cancel() // Cancel the real runtime context after detection.
+							}
+							return runFailureMessage(code, cause)
+						},
+					})
+					if err != nil {
+						t.Fatal("cannot create runtime")
+					}
+					t.Cleanup(func() { _ = runtime.Close() })
+					sess.runtime = runtime
+					writer := &secretEventFailureWriter{failType: tc.failType, err: sinkErr}
+					sess.machine = newMachineWriter(writer, outputStreamJSON)
+					var out strings.Builder
+					if repl {
+						src := &recordingSource{scannerSource: newScannerSource(strings.NewReader(tc.goal+"\n"), &out)}
+						if err := runREPL(ctx, src, &out, nil, sess); err != nil {
+							t.Error("runREPL unexpectedly failed")
+						}
+						if len(src.recorded) != 0 {
+							t.Error("runREPL recorded a classified blocked goal")
+						}
+					} else {
+						res, err := runOnce(ctx, &out, nil, sess, tc.goal, nil)
+						var blocked *agent.BlockedError
+						if !errors.As(err, &blocked) || blocked.Hook != tc.wantHook || !secretsBlocked(err) {
+							t.Error("runOnce lost the typed secrets block")
+						}
+						if !errors.Is(err, tc.wantErr) {
+							t.Error("runOnce lost the cancellation or sink cause")
+						}
+						if res.Risk == nil || len(res.Risk.Findings) == 0 {
+							t.Error("runOnce lost the detected risk findings")
+						}
+					}
+					entries, readErr := os.ReadDir(traceDir)
+					if readErr != nil || len(entries) != 0 {
+						t.Error("blocked run did not leave the full-trace directory empty")
+					}
+					if strings.Contains(out.String(), secretTestValue()) ||
+						!strings.Contains(out.String(), "error: "+secretsBlockedMessage+"\n") ||
+						!strings.Contains(out.String(), "warning: trace not written: sensitive content detected\n") {
+						t.Error("blocked run did not use only safe fixed diagnostics")
+					}
+					var eventTypes []string
+					for _, event := range writer.events {
+						eventTypes = append(eventTypes, event.Type)
+						if strings.Contains(string(event.Payload), secretTestValue()) {
+							t.Error("runtime event leaked sensitive content")
+						}
+						if event.Type == "run.canceled" && string(event.Payload) != "{}" {
+							t.Error("run.canceled changed its empty payload")
+						}
+					}
+					if !slices.Equal(eventTypes, tc.wantEvents) {
+						t.Error("runtime events did not match the expected cancellation or sink boundary")
+					}
+				})
 			}
 		})
 	}
