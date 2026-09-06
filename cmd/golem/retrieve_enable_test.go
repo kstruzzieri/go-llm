@@ -3,6 +3,8 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -141,4 +143,167 @@ func TestEnableRetrieve_ExplicitLegacyEmbeddingFormatRefusesWithoutMutation(t *t
 		t.Fatal("explicit legacy -rag-db was mutated")
 	}
 	assertNoSQLiteSidecars(t, dbPath)
+}
+
+func TestEnableRetrieve_ManagedPointerAdmission(t *testing.T) {
+	for _, mode := range []string{"repoint", "retire", "missing", "malformed", "directory", "workspace", "schema", "legacy", "legacy symlink", "explicit", "cancel"} {
+		t.Run(mode, func(t *testing.T) {
+			dbPath := filepath.Join(t.TempDir(), "k.db")
+			gen := publishTestGeneration(t, dbPath, "workspace:k", strings.Repeat("a", 32))
+			opts := retrieveOpts{autoDBPath: dbPath, workspaceID: "workspace:k"}
+			if strings.HasPrefix(mode, "legacy") {
+				if err := os.Remove(activePointerPath(dbPath)); err != nil {
+					t.Fatal(err)
+				}
+				seedIndex(t, dbPath, "workspace:k", "ollama/nomic")
+				removeSQLiteSidecars(t, dbPath)
+			}
+			if mode == "explicit" {
+				opts.ragDB = gen.dbPath
+			}
+			got := enableRetrieve(context.Background(), embedCfg(), &provider.Router{}, opts)
+			if got.reader == nil {
+				t.Fatal("reader not discovered")
+			}
+			delegate := &countingTool{content: "chunks"}
+			got.reader.tool = delegate
+			ready := newReadyRetrieve(warmingRetrieveMessage)
+			ready.install(got.reader, got.line)
+			t.Cleanup(func() { _ = ready.close() })
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			if result, err := ready.Invoke(ctx, nil); err != nil || result.Content != "chunks" {
+				t.Fatal("valid reader not admitted")
+			}
+			switch mode {
+			case "repoint":
+				// No SQLite generation exists for this pointer: admission reads only JSON.
+				err := publishActiveGeneration(ctx, dbPath, activeGenerationPointer{SchemaVersion: 1, WorkspaceID: "workspace:k", Generation: strings.Repeat("b", 32)}, nil)
+				if err != nil {
+					t.Fatal(err)
+				}
+			case "retire", "explicit":
+				if err := retireActiveGeneration(ctx, dbPath, "workspace:k"); err != nil {
+					t.Fatal(err)
+				}
+			case "missing":
+				if err := os.Remove(activePointerPath(dbPath)); err != nil {
+					t.Fatal(err)
+				}
+			case "directory":
+				if err := os.Remove(activePointerPath(dbPath)); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Mkdir(activePointerPath(dbPath), 0o700); err != nil {
+					t.Fatal(err)
+				}
+			case "legacy symlink":
+				if err := os.Symlink(filepath.Join(t.TempDir(), "missing"), activePointerPath(dbPath)); err != nil {
+					t.Fatal(err)
+				}
+			case "workspace", "schema":
+				p := activeGenerationPointer{SchemaVersion: 1, WorkspaceID: "workspace:k", Generation: gen.id}
+				if mode == "workspace" {
+					p.WorkspaceID = "other"
+				} else {
+					p.SchemaVersion = 2
+				}
+				data, err := json.Marshal(p)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(activePointerPath(dbPath), data, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			case "cancel":
+				cancel()
+			default:
+				if err := os.WriteFile(activePointerPath(dbPath), []byte("bad JSON"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			result, err := ready.Invoke(ctx, nil)
+			if err != nil {
+				t.Fatal("admission returned an error instead of an observation")
+			}
+			if mode == "explicit" || mode == "cancel" {
+				if result.Content != "chunks" || !ready.hasReader() {
+					t.Error("unaffected reader was detached")
+				}
+			} else {
+				if delegate.calls.Load() != 1 || ready.hasReader() {
+					t.Error("stale managed reader admitted a call")
+				}
+				assertNamesFileTools(t, result.Content)
+			}
+		})
+	}
+}
+
+func TestRun_ManagedReaderAdmissionWithNoAutoIndex(t *testing.T) {
+	for _, mode := range []string{"startup", "no-auto-index", "explicit"} {
+		t.Run(mode, func(t *testing.T) {
+			configPath, root := writeGroundingRunConfig(t, false)
+			root, err := filepath.EvalSymlinks(root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			dbPath, workspaceID, err := indexDBPathForWorkspace(os.Getenv, root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			seedIndex(t, dbPath, workspaceID, "test/qwen3-embedding:8b")
+			removeSQLiteSidecars(t, dbPath)
+			args := []string{"-config", configPath, "-root", root, "-no-probe", "-no-cap-probe", "-no-session", "-no-memory", "-no-project-context"}
+			if mode == "no-auto-index" {
+				args = append(args, "-no-auto-index")
+			}
+			if mode == "explicit" {
+				args = append(args, "-rag-db", dbPath)
+			}
+			stdin, stdout, stderr := runTestFiles(t)
+			stop := errors.New("startup admission checked")
+			err = run(args, stdin, stdout, stderr, runHooks{
+				startAutoIndex: func() func() { return func() {} },
+				afterSessionReady: func(sess *replSession) error {
+					for _, tool := range sess.tools {
+						ready, ok := tool.(*readyRetrieve)
+						if !ok {
+							continue
+						}
+						delegate := &countingTool{content: "chunks"}
+						ready.mu.Lock()
+						if ready.reader == nil {
+							ready.mu.Unlock()
+							t.Error("startup reader missing")
+							return stop
+						}
+						ready.reader.tool = delegate
+						ready.mu.Unlock()
+						if err := retireActiveGeneration(context.Background(), dbPath, workspaceID); err != nil {
+							t.Error("retirement setup failed")
+							return stop
+						}
+						result, invokeErr := ready.Invoke(context.Background(), nil)
+						if invokeErr != nil {
+							t.Error("admission did not return an observation")
+						}
+						if mode == "explicit" {
+							if result.Content != "chunks" {
+								t.Error("explicit database was bound to managed pointer")
+							}
+						} else if delegate.calls.Load() != 0 || result.Content != unavailableRetrieveMessage {
+							t.Error("managed startup reader ignored pointer retirement")
+						}
+						return stop
+					}
+					t.Error("startup did not register reader wrapper")
+					return stop
+				},
+			})
+			if !errors.Is(err, stop) {
+				t.Error("run did not reach startup admission check")
+			}
+		})
+	}
 }

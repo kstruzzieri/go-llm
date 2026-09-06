@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -180,10 +181,125 @@ func installActiveTestReader(t *testing.T, ready *readyRetrieve, dbPath string) 
 	if err != nil {
 		t.Fatal(err)
 	}
+	reader.bindGeneration(dbPath, "workspace:k", gen)
 	if !ready.install(reader, "active") {
 		t.Fatal("install active reader")
 	}
 	return gen
+}
+
+func TestRunAutoIndex_PolicyFailuresDetach(t *testing.T) {
+	for _, mode := range []string{"empty", "open", "gate", "cancel", "publication"} {
+		t.Run(mode, func(t *testing.T) {
+			root, dbPath := t.TempDir(), filepath.Join(t.TempDir(), "k.db")
+			writeWorkspaceFile(t, root, "secret.md", "previous content")
+			if mode != "empty" {
+				writeWorkspaceFile(t, root, "safe.md", "safe content")
+			}
+			var notices []string
+			job := newAutoIndexTestJob(root, dbPath, autoIndexTestEmbedder("ollama/nomic", ""), &notices)
+			runAutoIndex(context.Background(), job)
+			defer func() { _ = job.ready.close() }()
+			if !job.ready.hasReader() {
+				t.Fatal("seed did not install")
+			}
+			writeWorkspaceFile(t, root, "secret.md", "credential: "+indexPolicyCandidate())
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			cause := errors.New("open failed " + indexPolicyCandidate())
+			if mode != "empty" {
+				job.openRetriever = func(c context.Context, path string) (*retrievalReader, vsDecision, rag.StoreStats, error) {
+					switch mode {
+					case "open":
+						return nil, vsDecision{}, rag.StoreStats{}, cause
+					case "gate":
+						return nil, vsDecision{stored: "other"}, rag.StoreStats{}, nil
+					case "publication":
+						// The builder's stale-temp cleanup has finished. Keep the old pointer intact.
+						if err := os.Mkdir(activePointerPath(dbPath)+".tmp", 0o700); err != nil {
+							return nil, vsDecision{}, rag.StoreStats{}, err
+						}
+					}
+					reader, dec, stats, err := realReadOnlyOpen(dbPath)(c, path)
+					if mode == "cancel" {
+						cancel()
+					}
+					return reader, dec, stats, err
+				}
+			}
+			notices = nil
+			runErr := executeAutoIndex(ctx, job)
+			var policy *rag.IndexPolicyError
+			if !errors.As(runErr, &policy) {
+				t.Error("auto failure lost typed policy cause")
+			}
+			if mode == "open" && !errors.Is(runErr, cause) {
+				t.Error("auto failure lost original cause")
+			}
+			if mode == "cancel" && !errors.Is(runErr, context.Canceled) {
+				t.Error("auto failure lost cancellation")
+			}
+			if mode == "publication" {
+				var pathErr *os.PathError
+				if !errors.As(runErr, &pathErr) {
+					t.Error("auto retirement lost I/O cause")
+				}
+			}
+			if job.ready.hasReader() {
+				t.Error("affected failure retained local reader")
+			}
+			result, _ := job.ready.Invoke(context.Background(), nil)
+			assertNamesFileTools(t, result.Content)
+			if strings.Contains(strings.Join(notices, "\n"), indexPolicyCandidate()) {
+				t.Error("notice exposed candidate")
+			}
+			pointer, err := readActivePointer(context.Background(), dbPath)
+			if mode == "publication" {
+				if err != nil || pointer.Retired {
+					t.Error("failed pointer write incorrectly claimed durable retirement")
+				}
+				if !strings.Contains(strings.Join(notices, "\n"), "retirement could not be persisted") {
+					t.Error("retirement durability failure not surfaced")
+				}
+			} else if err != nil || !pointer.Retired {
+				t.Error("affected failure retained active pointer")
+			}
+			if !job.ready.install(newRetrievalReader(&countingTool{content: "replacement"}, nil), "replacement") {
+				t.Error("affected failure permanently disabled replacement")
+			}
+		})
+	}
+}
+
+func TestAutoIndex_ManagedIdentityOnBuildAndAdoption(t *testing.T) {
+	for _, adopt := range []bool{false, true} {
+		t.Run(fmt.Sprint(adopt), func(t *testing.T) {
+			root, dbPath := t.TempDir(), filepath.Join(t.TempDir(), "k.db")
+			writeWorkspaceFile(t, root, "safe.md", "safe content")
+			var notices []string
+			job := newAutoIndexTestJob(root, dbPath, autoIndexTestEmbedder("ollama/nomic", ""), &notices)
+			if adopt {
+				publishTestGeneration(t, dbPath, "workspace:k", strings.Repeat("a", 32))
+				if !adoptActiveGeneration(context.Background(), job) {
+					t.Fatal("adoption failed")
+				}
+			} else {
+				runAutoIndex(context.Background(), job)
+			}
+			t.Cleanup(func() { _ = job.ready.close() })
+			if !job.ready.hasReader() {
+				t.Fatal("reader missing")
+			}
+			if err := retireActiveGeneration(context.Background(), dbPath, "workspace:k"); err != nil {
+				t.Fatal(err)
+			}
+			result, _ := job.ready.Invoke(context.Background(), nil)
+			if job.ready.hasReader() {
+				t.Error("installed managed reader ignored pointer retirement")
+			}
+			assertNamesFileTools(t, result.Content)
+		})
+	}
 }
 
 func TestRunAutoIndex_FirstRunBuildsAndMarksReady(t *testing.T) {

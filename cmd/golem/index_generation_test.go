@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -10,6 +11,145 @@ import (
 
 	"github.com/kstruzzieri/go-llm/rag"
 )
+
+func policyBuildOptions(root, dbPath string, out io.Writer) generationBuildOptions {
+	return generationBuildOptions{root: root, dbPath: dbPath, workspaceID: "workspace:k",
+		requestedModel: "ollama/nomic", actualVectorSpace: "ollama/nomic",
+		embedder: autoIndexTestEmbedder("ollama/nomic", ""), out: out}
+}
+
+func TestGeneration_PolicyRetirement(t *testing.T) {
+	for _, mode := range []string{"sole skip", "mixed skip", "unsafe", "finalize", "cancel", "retirement failure"} {
+		t.Run(mode, func(t *testing.T) {
+			root, dbPath := t.TempDir(), filepath.Join(t.TempDir(), "k.db")
+			lease, err := acquireIndexWriterLease(dbPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = lease.Close() })
+			writeWorkspaceFile(t, root, "secret.md", "previous source")
+			if mode != "sole skip" {
+				writeWorkspaceFile(t, root, "safe.md", "safe source")
+			}
+			opts := policyBuildOptions(root, dbPath, io.Discard)
+			seed, err := buildIndexGeneration(context.Background(), opts)
+			if err != nil {
+				t.Fatal("seed build failed")
+			}
+			publishBuilt(t, dbPath, "workspace:k", seed)
+			if mode == "unsafe" {
+				store, err := rag.NewSQLiteStore(seed.generation.dbPath)
+				if err != nil {
+					t.Fatal(err)
+				}
+				_, err = store.DB().Exec(`CREATE TRIGGER deny_clear BEFORE DELETE ON chunks BEGIN SELECT RAISE(FAIL, 'clear denied'); END`)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := checkpointGeneration(context.Background(), store); err != nil {
+					t.Fatal(err)
+				}
+				if err := store.Close(); err != nil {
+					t.Fatal(err)
+				}
+			}
+			writeWorkspaceFile(t, root, "secret.md", "credential: "+indexPolicyCandidate())
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			stop := errors.New("finalization failed")
+			if mode == "finalize" || mode == "retirement failure" {
+				opts.finalizationHook = func(finalizationBoundary) error {
+					if mode == "retirement failure" {
+						if err := os.Mkdir(activePointerPath(dbPath)+".tmp", 0o700); err != nil {
+							return err
+						}
+					}
+					return stop
+				}
+			}
+			if mode == "cancel" {
+				opts.out = &indexOutputHook{hook: func(text string) {
+					if strings.HasPrefix(text, "index policy:") {
+						cancel()
+					}
+				}}
+			}
+			built, err := buildIndexGeneration(ctx, opts)
+			if mode == "mixed skip" {
+				if err != nil || built.sidecar.Status != "partial" || built.sidecar.ErrorCount != 1 {
+					t.Fatal("safe partial generation rejected")
+				}
+				publishBuilt(t, dbPath, "workspace:k", built)
+				if built.stats.TotalSources != 1 {
+					t.Fatal("skipped source retained")
+				}
+				return
+			}
+			if err == nil {
+				t.Fatal("affected failed build was publishable")
+			}
+			var policy *rag.IndexPolicyError
+			if !errors.As(err, &policy) {
+				t.Error("build lost typed policy cause")
+			}
+			if (mode == "finalize" || mode == "retirement failure") && !errors.Is(err, stop) {
+				t.Error("finalization cause lost")
+			}
+			if mode == "cancel" && !errors.Is(err, context.Canceled) {
+				t.Error("cancellation cause lost")
+			}
+			pointer, readErr := readActivePointer(context.Background(), dbPath)
+			if mode == "retirement failure" {
+				var pathErr *os.PathError
+				if !errors.As(err, &pathErr) || built.retirementErr == nil {
+					t.Error("joined retirement failure lost I/O cause")
+				}
+				if readErr != nil || pointer.Retired {
+					t.Error("failed retirement changed durable pointer")
+				}
+				return
+			}
+			if readErr != nil || !pointer.Retired {
+				t.Error("affected build left active pointer available")
+			}
+		})
+	}
+}
+
+func TestGeneration_PolicyPublicationBoundaries(t *testing.T) {
+	for _, boundary := range []publicationBoundary{publicationBeforePointerTemp, publicationAfterPointerTempSync, publicationAfterPointerRename, publicationAfterPointerDirSync} {
+		t.Run(string(boundary), func(t *testing.T) {
+			root, dbPath := t.TempDir(), filepath.Join(t.TempDir(), "k.db")
+			lease, err := acquireIndexWriterLease(dbPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = lease.Close() }()
+			writeWorkspaceFile(t, root, "safe.md", "safe content")
+			writeWorkspaceFile(t, root, "secret.md", "credential: "+indexPolicyCandidate())
+			publishTestGeneration(t, dbPath, "workspace:k", strings.Repeat("a", 32))
+			built, err := buildIndexGeneration(context.Background(), policyBuildOptions(root, dbPath, io.Discard))
+			if err != nil {
+				t.Fatal("partial build failed")
+			}
+			stop := errors.New("publication interrupted")
+			err = built.publish(context.Background(), dbPath, "workspace:k", func(got publicationBoundary) error {
+				if got == boundary {
+					return stop
+				}
+				return nil
+			})
+			var policy *rag.IndexPolicyError
+			if !errors.Is(err, stop) || !errors.As(err, &policy) {
+				t.Error("publication lost original or typed policy cause")
+			}
+			pointer, readErr := readActivePointer(context.Background(), dbPath)
+			if readErr != nil || !pointer.Retired {
+				t.Error("affected interrupted publication retained active pointer")
+			}
+		})
+	}
+}
 
 func seedPublishedGeneration(t *testing.T, baseDB, generation, workspaceID, vsid string) indexGeneration {
 	t.Helper()

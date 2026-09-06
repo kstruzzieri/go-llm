@@ -5,14 +5,15 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"sync"
 
 	"github.com/kstruzzieri/go-llm/agent"
 	agenttools "github.com/kstruzzieri/go-llm/agent/tools"
 )
 
-// retrieveReadyState is the readyRetrieve lifecycle: warming until the
-// background auto-index job flips it to exactly one terminal state.
+// retrieveReadyState tracks startup and replacement. Only pre-ready failure
+// is terminal; a detached ready wrapper can accept a verified replacement.
 type retrieveReadyState int
 
 const (
@@ -26,6 +27,9 @@ const (
 // a normal observation, not a malformed call.
 const warmingRetrieveMessage = "retrieve: the workspace index is warming in the background; " +
 	"use read_file, search, glob, and list for now and retry retrieve later in this session."
+
+const unavailableRetrieveMessage = "retrieve: the workspace index is unavailable; " +
+	"use read_file, search, glob, and list instead; reopen retrieval after indexing completes."
 
 // readyRetrieve is the late-binding retrieve tool registered in default auto
 // mode. Spec/Effect mirror agenttools.Retrieve (both are static on the empty
@@ -49,6 +53,7 @@ type readyRetrieve struct {
 // concurrent with a new Add for the retired reader.
 type retrievalReader struct {
 	tool      agent.Tool
+	valid     func(context.Context) bool // immutable managed generation admission check; nil for explicit DBs
 	inflight  sync.WaitGroup
 	closeOnce sync.Once
 	closeFn   func() error
@@ -111,15 +116,65 @@ var _ agent.OriginTool = (*readyRetrieve)(nil)
 func (r *readyRetrieve) Invoke(ctx context.Context, args json.RawMessage) (agent.ToolResult, error) {
 	r.mu.RLock()
 	state, reader, message := r.state, r.reader, r.message
-	if state == retrieveReady && reader != nil {
-		reader.inflight.Add(1)
-	}
 	r.mu.RUnlock()
-	if state == retrieveReady && reader != nil {
-		defer reader.inflight.Done()
-		return reader.tool.Invoke(ctx, args)
+	if state != retrieveReady || reader == nil {
+		return agent.ToolResult{Content: message}, nil
 	}
-	return agent.ToolResult{Content: message}, nil
+	// Pointer I/O never holds the wrapper mutex. A canceled caller must not
+	// invalidate a healthy generation; retrieval itself keeps the caller's ctx.
+	if reader.valid != nil && !reader.valid(context.WithoutCancel(ctx)) {
+		r.detach(reader)
+		return agent.ToolResult{Content: unavailableRetrieveMessage}, nil
+	}
+	r.mu.RLock()
+	if r.closed || r.reader != reader {
+		r.mu.RUnlock()
+		return agent.ToolResult{Content: unavailableRetrieveMessage}, nil
+	}
+	reader.inflight.Add(1)
+	r.mu.RUnlock()
+	defer reader.inflight.Done()
+	return reader.tool.Invoke(ctx, args)
+}
+
+// bindGeneration captures immutable identity at each managed construction site.
+// Admission validates only the active pointer, never the generation's SQLite DB.
+func (r *retrievalReader) bindGeneration(dbPath, workspaceID string, gen indexGeneration) {
+	r.valid = func(ctx context.Context) bool {
+		pointer, err := readActivePointer(ctx, dbPath)
+		if gen.legacy {
+			return errors.Is(err, os.ErrNotExist)
+		}
+		return err == nil && validatePointer(pointer, workspaceID) == nil && !pointer.Retired && pointer.Generation == gen.id
+	}
+}
+
+// detach retires only the checked reader. An older validation cannot remove a
+// newer installation, and pointer invalidation leaves the wrapper replaceable.
+func (r *readyRetrieve) detach(reader *retrievalReader) {
+	r.mu.Lock()
+	if r.closed || r.state == retrieveFailed || r.reader != reader {
+		r.mu.Unlock()
+		return
+	}
+	r.reader = nil
+	r.state = retrieveReady
+	r.message = unavailableRetrieveMessage
+	if reader != nil {
+		r.retiring.Add(1)
+	}
+	r.mu.Unlock()
+	r.drainRetired(reader)
+}
+
+func (r *readyRetrieve) drainRetired(reader *retrievalReader) {
+	if reader == nil {
+		return
+	}
+	go func() {
+		defer r.retiring.Done()
+		r.recordCloseError(reader.closeAfterDrain())
+	}()
 }
 
 // install publishes reader for new calls and retires the previous generation
@@ -146,12 +201,7 @@ func (r *readyRetrieve) install(reader *retrievalReader, message string) bool {
 		r.retiring.Add(1)
 	}
 	r.mu.Unlock()
-	if old != nil {
-		go func() {
-			defer r.retiring.Done()
-			r.recordCloseError(old.closeAfterDrain())
-		}()
-	}
+	r.drainRetired(old)
 	return true
 }
 
