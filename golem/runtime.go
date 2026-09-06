@@ -379,13 +379,13 @@ func (r *Runtime) Run(ctx context.Context, turn Turn, sink EventSink) (agent.Res
 			payload = struct{}{}
 		}
 		if err := emit(eventType, payload); err != nil {
-			return err
+			return errors.Join(cause, err)
 		}
 		if eventType != "run.canceled" {
 			return cause
 		}
 		if err := runCtx.Err(); err != nil {
-			return err
+			return errors.Join(cause, err)
 		}
 		if isCancellation(cause) {
 			return cause
@@ -459,7 +459,7 @@ func (r *Runtime) Run(ctx context.Context, turn Turn, sink EventSink) (agent.Res
 		scrubReasoning(&result)
 	}
 	if sinkErr != nil {
-		return result, sinkErr
+		return result, errors.Join(err, sinkErr)
 	}
 	if err == nil {
 		err = runCtx.Err()

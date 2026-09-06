@@ -127,12 +127,12 @@ func parseFlags(args []string) (flags, error) {
 	fs.StringVar(&f.delegateRole, "delegate-role", "coding", "model role the delegate_code tool routes to")
 	fs.BoolVar(&f.dispatch, "dispatch", false, "enable the dispatch tool (bounded read-only exploration tasks use backend-governed concurrency; ungoverned routing stays serial)")
 	fs.StringVar(&f.dispatchRole, "dispatch-role", "", "model role dispatch child agents route to (default: the primary agent chain, so children never force a model swap)")
-	fs.BoolVar(&f.interceptors, "interceptors", false, "enable the interceptor pipeline (#436/#439): zero-width, encoding, and typoglycemia detectors inspect initial input, model-authored tool calls, invoked tool results, and verifier observations on the agent and dispatch children; strong instruction and zero-width findings in foreign (including MCP) or unknown results are blocked, while trusted content and weak phrases are tagged; argument guards block protected-path, credential-path, and recognized remote-script calls before planning or approval; egress classes label command approvals; risk appears at interactive tool-call and plan-lock prompts and successful REPL/-p stderr footers, but not verifier approval prompts; default off")
+	fs.BoolVar(&f.interceptors, "interceptors", false, "enable the interceptor pipeline (#436/#437/#439): origin-sensitive injection detectors, all-origin supported secret/payment-card blocking across completed turns, argument guards, and command egress labels on the agent and dispatch children; streaming output is not intercepted; risk appears at interactive tool-call and plan-lock prompts and successful REPL/-p stderr footers, but not verifier approval prompts; default off")
 	fs.Var(&f.mcpStdio, "mcp-stdio", "attach an MCP server over stdio: \"[alias=]command args...\" (repeatable; use `env KEY=val cmd` for env vars)")
 	fs.Var(&f.mcpHTTP, "mcp-http", "attach an MCP server over streamable HTTP: \"[alias=]https://endpoint\" (repeatable)")
 	fs.Var(&f.allowDestinations, "allow-destination", "admit a remote model destination without prompting: \"<provider>/<canonical base URL>\" (repeatable; the deprecated \"<provider>=<base URL>\" form is still accepted; required for remote destinations in noninteractive runs)")
 	fs.BoolVar(&f.noRag, "no-rag", false, "disable the retrieve tool entirely (ignore any auto index)")
-	fs.BoolVar(&f.noAutoIndex, "no-auto-index", false, "disable startup auto-index refresh; existing auto indexes may still be used")
+	fs.BoolVar(&f.noAutoIndex, "no-auto-index", false, "disable startup auto-index refresh, which otherwise skips detected secret/payment-card files by default; existing auto indexes may still be used")
 	fs.BoolVar(&f.progressive, "progressive", false, "generate and retrieve opt-in L0/L1 progressive source summaries; enable mixed context assembly")
 	fs.BoolVar(&f.grounding, "grounding", false, "verify the final answer's claims against the retrieval evidence in the final prompt; prints one supported/partial/unsupported line (full report under -trace)")
 	fs.BoolVar(&f.noProjectContext, "no-project-context", false, "do not load AGENTS.md project-context files into the system prompt")
@@ -141,8 +141,10 @@ func parseFlags(args []string) (flags, error) {
 	fs.BoolVar(&f.noMemory, "no-memory", false, "disable explicit local memories (/remember, /memories, memory_search)")
 	fs.BoolVar(&f.agentMemory, "agent-memory", false, "enable agent-authored memory records (agent_memory_* tools, /records; requires sessions)")
 	fs.StringVar(&f.sessionID, "session", "", "explicit session id to resume or create (default: per-workspace)")
-	// -trace persists a full per-run trace (may contain workspace/user content; for replay/eval).
-	// -telemetry appends content-light run metrics only (timings, route, usage; no prompt or output).
+	// -trace persists a full per-run trace (may contain workspace/user content; for replay/eval),
+	// except that a classified secret block suppresses the whole trace.
+	// -telemetry appends content-light run metrics only (timings, route, usage,
+	// and an optional secret-finding count; no prompt, output, or finding data).
 	fs.BoolVar(&f.trace, "trace", false, "persist a content-full run trace per turn (outside the workspace; may contain workspace/user/memory content)")
 	fs.BoolVar(&f.telemetry, "telemetry", false, "append content-light run telemetry (timings, route, usage; no prompt/output)")
 	fs.IntVar(&f.pressureWarn, "pressure-warn", 75, "context-pressure warn threshold percent 1-100 (0 disables the warning line)")
@@ -692,7 +694,7 @@ func main() {
 		if errors.Is(err, errIndexFailed) || errors.Is(err, errOneShotFailed) || errors.Is(err, errAgentflowTaskFailed) || errors.Is(err, errSourceFailed) {
 			os.Exit(exitCodeFor(err))
 		}
-		_, _ = fmt.Fprintf(os.Stderr, "golem: %v\n", err)
+		_, _ = fmt.Fprintf(os.Stderr, "golem: %s\n", runFailureMessage("", err))
 		os.Exit(exitCodeFor(err))
 	}
 }
@@ -1588,6 +1590,7 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 		// The REPL line reader accepts lines up to 1 MiB; keep the runtime's
 		// message bound in lockstep so a pasted log or diff is not rejected.
 		MaxMessageBytes: maxGoalBytes,
+		FailureMessage:  runFailureMessage,
 		ModelOptions:    thinkOpts,
 		Summarizer:      summarizer,
 		// The CLI is the trusted host: -trace records include model reasoning.

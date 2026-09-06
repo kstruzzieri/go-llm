@@ -38,6 +38,40 @@ func TestParseFlags_InterceptorsDefaultOff(t *testing.T) {
 	}
 }
 
+func TestSecretMachineStartupWiresFailurePresenter(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		format outputFormat
+	}{
+		{"json", outputJSON},
+		{"stream-json", outputStreamJSON},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			configPath, root := writeRunLifecycleConfig(t)
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				serveCompat(w, r, "agent-model", nil)
+			}))
+			t.Cleanup(server.Close)
+			stdin, stdout, stderr := runTestFiles(t)
+			value := secretTestValue()
+			err := run([]string{
+				"-config", configPath, "-root", root, "-base-url", server.URL,
+				"-p", value, "-output-format", tc.name, "-interceptors",
+				"-no-compress", "-no-probe", "-no-cap-probe", "-no-session", "-no-memory",
+				"-no-rag", "-no-project-context", "-no-auto-index",
+			}, stdin, stdout, stderr)
+			if !errors.Is(err, errOneShotFailed) {
+				t.Fatal("production startup did not return the one-shot failure")
+			}
+			out, diagnostic := readRunTestFile(t, stdout), readRunTestFile(t, stderr)
+			if strings.Contains(out, value) || strings.Contains(diagnostic, value) {
+				t.Fatal("production machine output published the blocked transcript")
+			}
+			assertSecretMachineFailure(t, out, tc.format)
+		})
+	}
+}
+
 func TestInterceptorsFor(t *testing.T) {
 	if got := interceptorsFor(flags{}); got != nil {
 		t.Fatalf("off: chain = %v, want nil", got)
@@ -46,7 +80,7 @@ func TestInterceptorsFor(t *testing.T) {
 	for _, ic := range interceptorsFor(flags{interceptors: true}) {
 		names = append(names, ic.Name())
 	}
-	if want := []string{"zero_width", "encoding", "typoglycemia", "invariants", "egress"}; !slices.Equal(names, want) {
+	if want := []string{"zero_width", "encoding", "typoglycemia", "invariants", "egress", "secrets"}; !slices.Equal(names, want) {
 		t.Fatalf("on: chain = %v, want %v", names, want)
 	}
 }
@@ -56,7 +90,7 @@ func TestStartupNotices_Interceptors(t *testing.T) {
 		workspace:       "/w",
 		interceptorLine: interceptorsNotice(interceptorsFor(flags{interceptors: true})),
 	}), "\n")
-	if want := "workspace: /w\ninterceptors: enabled (zero_width, encoding, typoglycemia, invariants, egress)"; on != want {
+	if want := "workspace: /w\ninterceptors: enabled (zero_width, encoding, typoglycemia, invariants, egress, secrets)"; on != want {
 		t.Fatalf("notices with the flag = %q, want %q", on, want)
 	}
 	off := strings.Join(startupNotices(startupInfo{workspace: "/w"}), "\n")
@@ -70,7 +104,7 @@ func TestStartupNotices_Interceptors(t *testing.T) {
 // notice still says enabled. A benign mention of "system prompt" is enough to
 // exercise scoring without requiring tool calls from the test backend.
 func TestRunWiresInterceptors(t *testing.T) {
-	const want = "interceptors: enabled (zero_width, encoding, typoglycemia, invariants, egress)"
+	const want = "interceptors: enabled (zero_width, encoding, typoglycemia, invariants, egress, secrets)"
 	const goal = "Explain the term system prompt."
 	for _, tc := range []struct {
 		name string

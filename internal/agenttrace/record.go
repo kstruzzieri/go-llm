@@ -101,6 +101,8 @@ type runSpan struct {
 	StopReason       string  `json:"stop_reason,omitempty"`
 	MaxUsedPct       float64 `json:"max_used_pct"`
 	MaxPressureLevel string  `json:"max_pressure_level"`
+	// SecretFindings counts recognized findings without storing their contents.
+	SecretFindings int `json:"secret_findings,omitempty"`
 }
 
 type modelStepSpan struct {

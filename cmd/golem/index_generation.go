@@ -77,16 +77,45 @@ type generationBuildOptions struct {
 }
 
 type generationBuildResult struct {
-	generation indexGeneration
-	sidecar    indexSidecar
-	stats      rag.StoreStats
-	index      indexResult
-	activeErr  error
-	gcWarn     string // non-fatal superseded-generation removal failure
-	summaryErr error  // non-fatal optional summary generation failures
+	generation    indexGeneration
+	sidecar       indexSidecar
+	stats         rag.StoreStats
+	index         indexResult
+	activeErr     error
+	gcWarn        string // non-fatal superseded-generation removal failure
+	summaryErr    error  // non-fatal optional summary generation failures
+	retirementErr error  // required policy retirement failed; pointer durability is unknown
+}
+
+// publish keeps manual and background publication on the same policy boundary.
+// The caller still owns the workspace writer lease and any opened reader.
+func (built *generationBuildResult) publish(ctx context.Context, dbPath, workspaceID string, hook publicationHook) error {
+	pointer := activeGenerationPointer{SchemaVersion: activePointerSchemaVersion, WorkspaceID: workspaceID, Generation: built.generation.id}
+	err := publishActiveGeneration(ctx, dbPath, pointer, hook)
+	if err == nil {
+		return nil
+	}
+	if built.index.policyAffected {
+		built.retirementErr = retirePolicyGeneration(ctx, dbPath, workspaceID)
+		err = errors.Join(built.index.exitErr, err, built.retirementErr)
+	}
+	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), generationCleanupTimeout)
+	defer cancel()
+	if shouldRemoveUnpublished(cleanupCtx, dbPath, built.generation.id) {
+		err = errors.Join(err, removeGenerationPath(cleanupCtx, filepath.Dir(built.generation.dbPath)))
+	}
+	return err
 }
 
 func buildIndexGeneration(ctx context.Context, opts generationBuildOptions) (result generationBuildResult, err error) {
+	// Callers hold the workspace writer lease through this cleanup. Register
+	// first so close/staging cleanup failures also trigger policy retirement.
+	defer func() {
+		if err != nil && result.index.policyAffected {
+			result.retirementErr = retirePolicyGeneration(ctx, opts.dbPath, opts.workspaceID)
+			err = errors.Join(result.index.exitErr, err, result.retirementErr)
+		}
+	}()
 	if err := ctx.Err(); err != nil {
 		return result, err
 	}
@@ -201,6 +230,9 @@ func buildIndexGeneration(ctx context.Context, opts generationBuildOptions) (res
 			sidecarPath: staging.metadataPath, workspaceID: opts.workspaceID,
 			requestedModel: opts.requestedModel, out: opts.out, pruneDeleted: opts.pruneDeleted,
 		})
+		if result.index.policyUnsafe || result.index.exitErr != nil && !fileExists(staging.metadataPath) {
+			return result, result.index.exitErr
+		}
 	}
 	sc, sidecarErr := readSidecar(staging.metadataPath)
 	if sidecarErr != nil {
@@ -802,6 +834,12 @@ func retireActiveGeneration(ctx context.Context, dbPath, workspaceID string) err
 		return err
 	}
 	return writeAtomicJSON(ctx, activePointerPath(dbPath), pointer, nil)
+}
+
+func retirePolicyGeneration(ctx context.Context, dbPath, workspaceID string) error {
+	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), generationCleanupTimeout)
+	defer cancel()
+	return retireActiveGeneration(cleanupCtx, dbPath, workspaceID)
 }
 
 func writeAtomicJSON(ctx context.Context, path string, value any, hook publicationHook) (err error) {
