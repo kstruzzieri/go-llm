@@ -15,6 +15,8 @@
   `<dataDirBase>/golem/signing/agent-ed25519.pem`. Retained current-workspace
   history requires its matching key; missing/mismatched keys disable writes with
   public-ID/path recovery diagnostics, without replacement or unsigned fallback.
+  First-time creation explains secure backup and the consequences of losing the
+  shared key across workspaces.
 - Add `/checkpoints` evidence labels (`unsigned`, `unconfirmed`, `receipts
   verified`, `invalid receipts`) without claiming to verify live files. Any
   unauthenticatable retained history makes labels unavailable for the command.
@@ -26,6 +28,9 @@
   automatic expiry. The 50-checkpoint / 64 MiB limits bound undo snapshots, not
   total database size. Completed inverse evidence prevents replay while earlier
   uncertain attempts remain unconfirmed.
+- Reduce receipt-scan overhead by decoding each database read once and batching
+  inverse lookups, preserving full-history authentication for write-enabled
+  startup and checkpoint commands.
 - Keep AgentFlow task/RAM undo and parallel promotion/rollback, direct embedders,
   arbitrary subprocess/external-editor writes, scratch copies/cleanup, and Golem
   metadata outside this scope. AgentFlow proof receipts are separate. No audit

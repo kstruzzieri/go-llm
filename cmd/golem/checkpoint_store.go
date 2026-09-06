@@ -758,6 +758,10 @@ type checkpointReceipt struct {
 	mutationID  string
 	intentJSON  []byte
 	appliedJSON []byte
+	// Decoded once by the SQL read helper, then consumed read-only. These are
+	// structural checks of this read's bytes, never cached signature authority.
+	intent  agenttools.MutationReceipt
+	applied *agenttools.MutationReceipt
 }
 
 func decodeStoredMutationReceipt(raw []byte) (agenttools.MutationReceipt, error) {
@@ -790,7 +794,7 @@ func matchingAppliedReceipt(intent, applied agenttools.MutationReceipt) error {
 	return nil
 }
 
-func validateCheckpointReceipt(entry checkpointReceipt) error {
+func decodeCheckpointReceipt(entry *checkpointReceipt) error {
 	intent, err := decodeStoredMutationReceipt(entry.intentJSON)
 	if err != nil {
 		return err
@@ -803,17 +807,21 @@ func validateCheckpointReceipt(entry checkpointReceipt) error {
 		if err != nil {
 			return err
 		}
-		return matchingAppliedReceipt(intent, applied)
+		if err := matchingAppliedReceipt(intent, applied); err != nil {
+			return err
+		}
+		entry.applied = &applied
 	}
+	entry.intent = intent
 	return nil
 }
 
-func scanCheckpointReceipt(row *sql.Row) (checkpointReceipt, error) {
+func scanCheckpointReceipt(row interface{ Scan(...any) error }) (checkpointReceipt, error) {
 	var entry checkpointReceipt
 	if err := row.Scan(&entry.sequence, &entry.mutationID, &entry.intentJSON, &entry.appliedJSON); err != nil {
 		return checkpointReceipt{}, err
 	}
-	if err := validateCheckpointReceipt(entry); err != nil {
+	if err := decodeCheckpointReceipt(&entry); err != nil {
 		return checkpointReceipt{}, err
 	}
 	return entry, nil
@@ -821,6 +829,37 @@ func scanCheckpointReceipt(row *sql.Row) (checkpointReceipt, error) {
 
 func (s *checkpointStore) loadReceipt(ctx context.Context, mutationID string) (checkpointReceipt, error) {
 	return scanCheckpointReceipt(s.db.QueryRowContext(ctx, `SELECT sequence, mutation_id, intent_json, applied_json FROM mutation_receipts WHERE mutation_id = ?`, mutationID))
+}
+
+// loadReceipts fetches a bounded page's referenced originals in one query.
+// Missing IDs are omitted; callers must still authenticate and bind each result.
+func (s *checkpointStore) loadReceipts(ctx context.Context, ids []string) ([]checkpointReceipt, error) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	if len(ids) > 1000 {
+		return nil, errors.New("golem: receipt lookup requires at most 1000 IDs")
+	}
+	args := make([]any, len(ids))
+	for i, id := range ids {
+		args[i] = id
+	}
+	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(ids)), ",")
+	rows, err := s.db.QueryContext(ctx, `SELECT sequence, mutation_id, intent_json, applied_json
+	 FROM mutation_receipts WHERE mutation_id IN (`+placeholders+`)`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	var entries []checkpointReceipt
+	for rows.Next() {
+		entry, err := scanCheckpointReceipt(rows)
+		if err != nil {
+			return nil, err
+		}
+		entries = append(entries, entry)
+	}
+	return entries, rows.Err()
 }
 
 func loadReceiptTx(ctx context.Context, tx *sql.Tx, mutationID string) (checkpointReceipt, error) {
@@ -841,11 +880,8 @@ func (s *checkpointStore) scanReceipts(ctx context.Context, afterSequence int64,
 	defer func() { _ = rows.Close() }()
 	var entries []checkpointReceipt
 	for rows.Next() {
-		var entry checkpointReceipt
-		if err := rows.Scan(&entry.sequence, &entry.mutationID, &entry.intentJSON, &entry.appliedJSON); err != nil {
-			return nil, err
-		}
-		if err := validateCheckpointReceipt(entry); err != nil {
+		entry, err := scanCheckpointReceipt(rows)
+		if err != nil {
 			return nil, err
 		}
 		entries = append(entries, entry)

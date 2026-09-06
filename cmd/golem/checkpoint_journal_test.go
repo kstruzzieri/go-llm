@@ -1817,6 +1817,49 @@ func TestCheckpointUndoRetainedCompletedInversePreventsReplay(t *testing.T) {
 	}
 }
 
+func TestCheckpointEvidenceReauthenticatesPrunedHistory(t *testing.T) {
+	for _, column := range []string{"intent_json", "applied_json"} {
+		t.Run(column, func(t *testing.T) {
+			j, tools, _ := newJournalFixture(t)
+			ctx := context.Background()
+			beginTestTurn(t, j, "retained history")
+			for _, path := range []string{"a.txt", "b.txt"} {
+				applyTool(t, tools, "write_file", map[string]any{"path": path, "content": "x"})
+			}
+			mustSealTurn(t, j)
+			entries, err := j.store.scanReceipts(ctx, 0, 2)
+			if err != nil || len(entries) != 2 {
+				t.Fatalf("forward receipts: %d, %v", len(entries), err)
+			}
+			// Put the two inverses on a later page than their originals, then
+			// remove the snapshots through ordinary undo. Listing still needs
+			// to authenticate and bind the retained originals in a batch.
+			addUnreferencedReceiptPage(t, j, mustDecodeCrashReceipt(t, entries[0].intentJSON).Body)
+			runUndo(t, j, 1)
+			if len(listIDs(t, j.store)) != 0 {
+				t.Fatal("undo did not remove snapshots")
+			}
+			if _, err := j.checkpointEvidenceFor(ctx, nil); err != nil {
+				t.Fatalf("valid retained history: %v", err)
+			}
+			raw := entries[0].intentJSON
+			if column == "applied_json" {
+				raw = entries[0].appliedJSON
+			}
+			receipt := mustDecodeCrashReceipt(t, raw)
+			receipt.Signature.Bytes[0] ^= 1
+			changed, err := signing.MarshalCanonical(receipt)
+			if err != nil {
+				t.Fatal(err)
+			}
+			checkpointSQL(t, j.store.db, `UPDATE mutation_receipts SET `+column+`=? WHERE mutation_id=?`, string(changed), entries[0].mutationID)
+			if _, err := j.checkpointEvidenceFor(ctx, nil); err == nil {
+				t.Fatal("a later command reused authentication of changed retained history")
+			}
+		})
+	}
+}
+
 func TestCheckpointUndoInverseLineagePreflight(t *testing.T) {
 	for _, fault := range []string{"missing-original", "wrong-original", "inverse-original", "workspace", "path", "hashes", "other-row"} {
 		for _, resume := range []bool{false, true} {

@@ -31,7 +31,7 @@ func loadMutationSigning(ctx context.Context, getenv func(string) string, root s
 	if len(entries) > 0 {
 		signer, err = signing.LoadEd25519(keyPath)
 		if errors.Is(err, os.ErrNotExist) {
-			intent, _ := decodeStoredMutationReceipt(entries[0].intentJSON) // scan validated structure, not the claim
+			intent := entries[0].intent // scan validated structure, not the claim
 			return nil, nil, "", fmt.Errorf("golem: signing key missing: key file %s is required by receipt %s claiming kid %s; restore the matching key from backup; writes disabled to preserve receipt integrity", checkpointDisplayText(keyPath), intent.Body.MutationID, intent.Body.AgentID)
 		}
 	} else {
@@ -51,7 +51,7 @@ func loadMutationSigning(ctx context.Context, getenv func(string) string, root s
 			break
 		}
 		for _, entry := range entries {
-			intent, _ := decodeStoredMutationReceipt(entry.intentJSON)
+			intent := entry.intent
 			if intent.Body.AgentID != signer.KeyID() {
 				return nil, nil, "", fmt.Errorf("golem: signing key mismatch: receipt %s names kid %s, but key file %s has kid %s; writes disabled to preserve receipt integrity", intent.Body.MutationID, intent.Body.AgentID, checkpointDisplayText(keyPath), signer.KeyID())
 			}
@@ -66,30 +66,22 @@ func loadMutationSigning(ctx context.Context, getenv func(string) string, root s
 	}
 	notice := ""
 	if created {
-		notice = fmt.Sprintf("new signing identity: kid %s (key file %s)", signer.KeyID(), checkpointDisplayText(keyPath))
+		notice = fmt.Sprintf("new signing identity: kid %s (key file %s)\nBack up this shared key securely; losing it disables writes and authenticated undo for existing workspace receipt history.", signer.KeyID(), checkpointDisplayText(keyPath))
 	}
 	return signer, verifier, notice, nil
 }
 
 // authenticateCheckpointReceipt authenticates both phases before callers rely
-// on any claimed transition. Store reads already enforce canonical bytes/pairing.
+// on any claimed transition. Every store read strictly decodes its own bytes
+// and enforces pairing; reusing that read's parsed values avoids repeated JSON
+// canonicalization. Signature verification is never cached between operations.
 func authenticateCheckpointReceipt(ctx context.Context, verifier signing.Verifier, entry checkpointReceipt) (agenttools.MutationReceipt, error) {
-	if err := validateCheckpointReceipt(entry); err != nil {
-		return agenttools.MutationReceipt{}, err
-	}
-	intent, err := decodeStoredMutationReceipt(entry.intentJSON)
-	if err != nil {
-		return agenttools.MutationReceipt{}, err
-	}
+	intent := entry.intent
 	if err := agenttools.VerifyMutationReceipt(ctx, verifier, intent); err != nil {
 		return agenttools.MutationReceipt{}, err
 	}
-	if entry.appliedJSON != nil {
-		applied, err := decodeStoredMutationReceipt(entry.appliedJSON)
-		if err != nil {
-			return agenttools.MutationReceipt{}, err
-		}
-		if err := agenttools.VerifyMutationReceipt(ctx, verifier, applied); err != nil {
+	if entry.applied != nil {
+		if err := agenttools.VerifyMutationReceipt(ctx, verifier, *entry.applied); err != nil {
 			return agenttools.MutationReceipt{}, err
 		}
 	}

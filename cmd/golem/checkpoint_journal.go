@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"crypto/rand"
+	"database/sql"
 	"errors"
 	"fmt"
 	"io"
@@ -535,7 +536,8 @@ func (j *checkpointJournal) checkpointEvidenceFor(ctx context.Context, groups []
 			}
 		}
 	}
-	// ponytail: O(retained history) scan; add a validated index if undo latency is measured.
+	// ponytail: full-history authentication remains O(retained history); a trusted
+	// index needs a separate integrity design if bounded-page batching falls short.
 	for cursor := int64(0); ; {
 		entries, err := j.store.scanReceipts(ctx, cursor, 100)
 		if err != nil {
@@ -544,27 +546,24 @@ func (j *checkpointJournal) checkpointEvidenceFor(ctx context.Context, groups []
 		if len(entries) == 0 {
 			break
 		}
+		intents, err := j.authenticateReceiptPage(ctx, entries)
+		if err != nil {
+			return nil, err
+		}
 		for _, entry := range entries {
-			intent, err := authenticateCheckpointReceipt(ctx, j.verifier, entry)
-			if err != nil {
-				return nil, err
-			}
+			intent := intents[entry.mutationID]
 			cursor = entry.sequence
 			if intent.Body.UndoOf == "" {
 				continue
 			}
 			e := selected[intent.Body.UndoOf]
-			originalEntry, err := j.store.loadReceipt(ctx, intent.Body.UndoOf)
-			if err != nil {
+			original, ok := intents[intent.Body.UndoOf]
+			if !ok {
 				if e != nil {
 					e.invalid = true
 					continue
 				}
-				return nil, err
-			}
-			original, err := authenticateCheckpointReceipt(ctx, j.verifier, originalEntry)
-			if err != nil {
-				return nil, err
+				return nil, sql.ErrNoRows
 			}
 			if err := bindInverseReceipt(original, intent); err != nil {
 				if e != nil {
@@ -591,6 +590,41 @@ func (j *checkpointJournal) checkpointEvidenceFor(ctx context.Context, groups []
 		}
 	}
 	return result, nil
+}
+
+// authenticateReceiptPage verifies every row before using UndoOf to batch-load
+// originals. Its map lives for one bounded page only: later commands re-read
+// and authenticate all history, including originals whose snapshots were pruned.
+func (j *checkpointJournal) authenticateReceiptPage(ctx context.Context, entries []checkpointReceipt) (map[string]agenttools.MutationReceipt, error) {
+	intents := make(map[string]agenttools.MutationReceipt, len(entries))
+	for _, entry := range entries {
+		intent, err := authenticateCheckpointReceipt(ctx, j.verifier, entry)
+		if err != nil {
+			return nil, err
+		}
+		intents[entry.mutationID] = intent
+	}
+	var ids []string
+	needed := make(map[string]bool)
+	for _, entry := range entries {
+		id := intents[entry.mutationID].Body.UndoOf
+		if _, present := intents[id]; id != "" && !present && !needed[id] {
+			ids = append(ids, id)
+			needed[id] = true
+		}
+	}
+	originals, err := j.store.loadReceipts(ctx, ids)
+	if err != nil {
+		return nil, err
+	}
+	for _, entry := range originals {
+		intent, err := authenticateCheckpointReceipt(ctx, j.verifier, entry)
+		if err != nil {
+			return nil, err
+		}
+		intents[entry.mutationID] = intent
+	}
+	return intents, nil
 }
 
 // restoreGroups shares all-file authentication and chain simulation between

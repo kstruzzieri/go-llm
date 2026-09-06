@@ -357,7 +357,10 @@ edits; a successful retry does not erase earlier uncertain attempts.
 The per-user Ed25519 identity lives outside the workspace at
 `<dataDirBase>/golem/signing/agent-ed25519.pem`, in an owner-only directory/file
 with symlink checks. It is loaded once per write-enabled runtime; read-only
-sessions do not touch the key. A first creation prints a new-identity notice.
+sessions do not touch the key. A first creation prints a new-identity notice and
+backup guidance. **Back up this shared key securely:** losing it disables writes
+and authenticated undo for existing receipt history in every workspace using
+that identity. Keep backups private; the key authorizes receipt signing.
 `agent_id` is the key ID, not a model or session identity. Retained receipt history
 for the current workspace requires the existing matching key: a missing-key
 diagnostic names the escaped path and historical claimed key ID and asks you to
@@ -375,6 +378,8 @@ unsigned checkpoints remain visible, but authenticated `/undo` cannot restore
 them. Downgrading requires a pre-upgrade backup. Receipt metadata survives
 completed undo and checkpoint pruning, with no automatic expiry: the 50-checkpoint
 and 64 MiB prior-content limits bound undo snapshots, not total database size.
+Write-enabled startup, `/checkpoints`, and `/undo` authenticate retained history
+in bounded pages; their total verification cost still grows with that history.
 
 `/checkpoints` keeps its numbering and lifecycle markers and appends one evidence
 label (most restrictive first):

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -2090,7 +2091,7 @@ func TestCheckpointCommandEvidenceLabels(t *testing.T) {
 				t.Fatalf("listing = %q; want %s %s", text, marker, want)
 			}
 			after, err := j.store.scanReceipts(context.Background(), 0, 100)
-			if err != nil || fmt.Sprint(before) != fmt.Sprint(after) {
+			if err != nil || !reflect.DeepEqual(before, after) {
 				t.Fatal("listing rewrote evidence")
 			}
 			if fault == "live-drift" {

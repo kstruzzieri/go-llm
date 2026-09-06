@@ -40,7 +40,7 @@ func TestMutationSigningIdentityLifecycle(t *testing.T) {
 		t.Fatal(err)
 	}
 	assertNoPrivateKeyDiagnostic(t, notice, private)
-	if want := "new signing identity: kid " + signer.KeyID() + " (key file " + escapedPath + ")"; notice != want {
+	if want := "new signing identity: kid " + signer.KeyID() + " (key file " + escapedPath + ")\nBack up this shared key securely; losing it disables writes and authenticated undo for existing workspace receipt history."; notice != want {
 		t.Fatalf("new identity notice = %q, want %q", notice, want)
 	}
 	for _, p := range []string{filepath.Dir(path), path} {
