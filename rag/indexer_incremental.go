@@ -34,8 +34,11 @@ func (idx *Indexer) canDoIncremental(chunks []Chunk) bool {
 }
 
 // IndexFileIncremental indexes a file using incremental diff-aware logic.
-// It re-chunks the entire file, compares against stored chunks via StableKey,
-// and only embeds chunks whose content actually changed.
+// It scans before the hash fast path. Clean files are re-chunked and compared
+// with stored chunks via StableKey so only changed chunks are embedded. A
+// redacted file whose sanitized hash is unchanged is a successful no-op;
+// changed redaction clears the old source and performs a full rebuild from one
+// sanitized snapshot.
 //
 // Falls back to full IndexFile behavior when the incremental preconditions are
 // missing or the incremental path returns ErrIncrementalRebuildRequired. Stale

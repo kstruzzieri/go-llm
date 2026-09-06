@@ -46,7 +46,7 @@ func (a queryContextArgs) empty() bool {
 func (s *Server) registerRAGTools() {
 	s.mcpServer.AddTool(&gomcp.Tool{
 		Name:        "rag_index_file",
-		Description: "Index a single file into the RAG vector store.",
+		Description: "Index a single file into the RAG vector store; detected secret/payment-card content is skipped by default, and policy results report safe action, kind, and count metadata.",
 		InputSchema: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
@@ -58,7 +58,7 @@ func (s *Server) registerRAGTools() {
 
 	s.mcpServer.AddTool(&gomcp.Tool{
 		Name:        "rag_index_directory",
-		Description: "Index all supported files in a directory tree into the RAG vector store.",
+		Description: "Index supported files in a directory tree; detected secret/payment-card content is skipped by default, and policy results report safe action, kind, and count metadata.",
 		InputSchema: map[string]any{
 			"type": "object",
 			"properties": map[string]any{

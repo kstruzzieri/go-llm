@@ -45,8 +45,10 @@ const (
 )
 
 // IndexPolicyOutcome describes a file affected by sensitive-content policy.
-// Path is the caller's original identifier and may itself contain sensitive
-// content. Unsafe means clearing the previous indexed source failed.
+// Path is the caller's raw identifier and may itself contain sensitive content;
+// sanitize it before display. Kinds is the sorted, deduplicated set of
+// canonical original finding kinds. Unsafe means clearing the previous indexed
+// source failed, so known-sensitive prior content may remain available.
 type IndexPolicyOutcome struct {
 	Path   string
 	Action IndexPolicyAction
@@ -74,7 +76,8 @@ func safeIndexPath(path string) string {
 }
 
 // IsSafeIndexSkip reports whether every branch of a non-nil error tree is a
-// successfully cleared policy skip. Ordinary errors and unsafe outcomes fail.
+// successfully cleared policy skip. It walks both single- and multi-error
+// unwrap trees. Ordinary errors, unsafe outcomes, and nil return false.
 func IsSafeIndexSkip(err error) bool {
 	if err == nil {
 		return false

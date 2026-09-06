@@ -16,9 +16,10 @@ import (
 )
 
 // Indexer coordinates chunking, embedding, and storing documents.
-// Store writes are serialized internally via mutex, so multiple goroutines
-// may call IndexFile concurrently provided the injected Chunker and
-// VectorStore implementations are themselves safe for concurrent use.
+// Store writes are serialized internally, so goroutines may index distinct
+// sources concurrently when the injected Chunker and VectorStore are safe for
+// concurrent use. Callers must provide one logical writer per source, including
+// across Indexer instances; direct indexing cannot revoke existing readers.
 type Indexer struct {
 	embedder      Embedder
 	model         string
@@ -77,6 +78,10 @@ type IndexerOption func(*Indexer)
 
 // WithSensitiveRedaction changes selected recognized kinds from Skip to Redact.
 // Options own their input and compose across calls. Unknown kinds remain skipped.
+// Strictly overlapping findings use their full union and one canonical kind;
+// any independent finding left at Skip skips the whole file. Complete redaction
+// removes findings exposed by replacement until clean, which may remove
+// additional surrounding text.
 func WithSensitiveRedaction(kinds ...SensitiveKind) IndexerOption {
 	kinds = slices.Clone(kinds)
 	return func(idx *Indexer) {
@@ -275,8 +280,9 @@ func (idx *Indexer) IndexFile(ctx context.Context, path string) error {
 }
 
 // IndexFileWithStatus indexes one filesystem file and reports policy outcomes,
-// including successful redaction. A safely cleared skip returns a typed error
-// but is absent from Errors and does not count as indexed or cancelled.
+// including successful redaction with a nil error. A safely cleared skip returns
+// a typed error for which IsSafeIndexSkip reports true, but is absent from
+// Errors and does not count as indexed or cancelled.
 func (idx *Indexer) IndexFileWithStatus(ctx context.Context, path string) (IndexStatus, error) {
 	status := IndexStatus{TotalFiles: 1}
 	outcome, err := idx.indexFile(ctx, path)
@@ -514,8 +520,9 @@ type IndexStatus struct {
 	TotalFiles   int
 	IndexedFiles int
 	SkippedFiles int
-	Errors       []string
-	InProgress   bool
+	// Errors may contain caller-owned paths; sanitize entries before display.
+	Errors     []string
+	InProgress bool
 	// PolicyOutcomes contains detected files, sorted by path, action, and kinds.
 	// Paths are caller-owned identifiers; sanitize them before diagnostic output.
 	PolicyOutcomes []IndexPolicyOutcome
