@@ -12,7 +12,7 @@ func TestOpenRecordStoreCreatesHardenedDB(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "sub", "memories.db")
 
-	rt, err := OpenRecordStore(context.Background(), path)
+	rt, err := OpenRecordStore(context.Background(), path, RecordStoreConfig{})
 	if err != nil {
 		t.Fatalf("OpenRecordStore() error = %v", err)
 	}
@@ -58,7 +58,7 @@ func TestRecordRuntimeSecureRechmodsSidecars(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "memories.db")
 
-	rt, err := OpenRecordStore(context.Background(), path)
+	rt, err := OpenRecordStore(context.Background(), path, RecordStoreConfig{})
 	if err != nil {
 		t.Fatalf("OpenRecordStore() error = %v", err)
 	}
@@ -129,7 +129,7 @@ func TestOpenRecordStoreFailurePaths(t *testing.T) {
 	if err := os.WriteFile(blocker, []byte("x"), 0o600); err != nil {
 		t.Fatalf("write blocker: %v", err)
 	}
-	_, err := OpenRecordStore(context.Background(), filepath.Join(blocker, "memories.db"))
+	_, err := OpenRecordStore(context.Background(), filepath.Join(blocker, "memories.db"), RecordStoreConfig{})
 	if err == nil {
 		t.Fatal("OpenRecordStore() error = nil, want error for uncreatable dir")
 	}
@@ -145,5 +145,28 @@ func TestOpenHardenedDBFailsWithCancelledContext(t *testing.T) {
 	}
 	if !errors.Is(err, context.Canceled) {
 		t.Logf("error is %v (not context.Canceled wrapped); acceptable if pragma exec surfaced differently", err)
+	}
+}
+
+func TestRecordFailedOpenSecuresExistingSidecars(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "records.db")
+	for _, suffix := range []string{"-wal", "-shm"} {
+		if err := os.WriteFile(path+suffix, nil, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := OpenRecordStore(ctx, path, RecordStoreConfig{}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("open: %v", err)
+	}
+	for _, suffix := range []string{"-wal", "-shm"} {
+		info, err := os.Stat(path + suffix)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if info.Mode().Perm() != 0o600 {
+			t.Errorf("failed open left sidecar %s at %o", suffix, info.Mode().Perm())
+		}
 	}
 }

@@ -35,17 +35,8 @@ func validateRecordContent(content string) error {
 // canonicalRecordBody never repairs metadata. Callers normalize metadata only
 // at creation, explicit replacement, or authorized legacy import.
 func canonicalRecordBody(body MemoryRecordBody) ([]byte, error) {
-	total := len(body.Metadata)
-	for _, value := range []string{
-		body.ID, string(body.Kind), body.Content, body.Namespace, body.WorkspaceID, body.SessionID,
-		body.Provenance.SourceKind, body.Provenance.SourceID, body.Provenance.Hash,
-		body.Provenance.OriginTool, body.Provenance.OriginSessionID, string(body.Provenance.TrustClass),
-	} {
-		// Subtract before adding so even pathological inputs cannot overflow total.
-		if total > 32*1024 || len(value) > 32*1024-total {
-			return nil, ErrRecordTooLarge
-		}
-		total += len(value)
+	if err := validateRecordSize(body); err != nil {
+		return nil, err
 	}
 	switch body.Provenance.TrustClass {
 	case TrustAgentWritten, TrustLegacyUnreviewed:
@@ -68,6 +59,22 @@ func canonicalRecordBody(body MemoryRecordBody) ([]byte, error) {
 		return nil, errInvalidRecordBody
 	}
 	return canonical, nil
+}
+
+func validateRecordSize(body MemoryRecordBody) error {
+	total := len(body.Metadata)
+	for _, value := range []string{
+		body.ID, string(body.Kind), body.Content, body.Namespace, body.WorkspaceID, body.SessionID,
+		body.Provenance.SourceKind, body.Provenance.SourceID, body.Provenance.Hash,
+		body.Provenance.OriginTool, body.Provenance.OriginSessionID, string(body.Provenance.TrustClass),
+	} {
+		// Subtract before adding so even pathological inputs cannot overflow total.
+		if total > 32*1024 || len(value) > 32*1024-total {
+			return ErrRecordTooLarge
+		}
+		total += len(value)
+	}
+	return nil
 }
 
 func signRecord(ctx context.Context, signer signing.Signer, record *MemoryRecord) error {

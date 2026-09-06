@@ -119,6 +119,7 @@ func openMemoryRuntime(ctx context.Context, getenv func(string) string, root str
 		warnBoth(err.Error())
 		return rt
 	}
+	defer func() { _ = chmodDBFiles(dbPath) }()
 	if wantUser {
 		store, serr := memory.NewStore(ctx, db)
 		if serr != nil {
@@ -131,7 +132,7 @@ func openMemoryRuntime(ctx context.Context, getenv func(string) string, root str
 		rt.user = store
 	}
 	if wantRecords {
-		rs, rerr := memory.NewMemoryRecordStore(ctx, db)
+		rs, rerr := memory.NewMemoryRecordStore(ctx, db, memory.RecordStoreConfig{KeyDir: dbPath + ".keys", Writer: memory.WriterGolem})
 		if rerr != nil {
 			rt.warns = append(rt.warns, "agent memory disabled: "+rerr.Error())
 		} else {
@@ -205,19 +206,19 @@ func handleRecords(ctx context.Context, out io.Writer, sess *replSession, fields
 	}
 	switch {
 	case len(fields) == 3 && fields[1] == "--forget":
+		defer secureMemoryDBFiles(sess)
 		if err := sess.records.SoftDelete(ctx, fields[2], recordAccess(sess)); err != nil {
 			_, _ = fmt.Fprintf(out, "forget failed: %v\n", err)
 			return
 		}
-		secureMemoryDBFiles(sess)
 		_, _ = fmt.Fprintf(out, "forgot record %s\n", fields[2])
 	case len(fields) == 4 && fields[1] == "--promote":
+		defer secureMemoryDBFiles(sess)
 		rec, err := sess.records.Promote(ctx, fields[2], recordAccess(sess), memory.MemoryKind(strings.ToLower(fields[3])))
 		if err != nil {
 			_, _ = fmt.Fprintf(out, "promote failed: %v\n", err)
 			return
 		}
-		secureMemoryDBFiles(sess)
 		_, _ = fmt.Fprintf(out, "promoted %s to %s\n", rec.ID, rec.Kind)
 	case len(fields) == 1:
 		listRecords(ctx, out, sess)

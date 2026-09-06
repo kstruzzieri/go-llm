@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -145,7 +146,78 @@ func TestOpenMemoryRuntimeUserOnlyNoAgentWarn(t *testing.T) {
 	if len(rt.warns) != 0 || rt.user == nil || rt.records != nil {
 		t.Fatalf("user-only open wrong: %+v", rt)
 	}
+	if _, err := os.Stat(rt.dbPath + ".keys"); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("user-only runtime created signing identity: %v", err)
+	}
 	_ = rt.db.Close()
+}
+
+func TestRecordSigningFailurePreservesUserMemory(t *testing.T) {
+	home := t.TempDir()
+	getenv := func(k string) string {
+		if k == "HOME" {
+			return home
+		}
+		return ""
+	}
+	ctx := context.Background()
+	rt := openMemoryRuntime(ctx, getenv, "/workspace", true, true)
+	if rt.records == nil || rt.user == nil || len(rt.warns) != 0 {
+		t.Fatalf("initial runtime: %+v", rt)
+	}
+	if len(rt.records.CreatedKeyID()) != 64 {
+		t.Fatal("first identity not reported")
+	}
+	m, err := rt.records.Create(ctx, memory.CreateRecordParams{Kind: memory.KindSemantic, Content: "fact"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m.Provenance.OriginTool != "golem.agent_memory_create" || m.Provenance.TrustClass != "agent-written" {
+		t.Fatalf("wrong runtime stamp: %+v", m.Provenance)
+	}
+	path := rt.dbPath
+	if err := rt.db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(path + ".keys/current.pem"); err != nil {
+		t.Fatal(err)
+	}
+	rt = openMemoryRuntime(ctx, getenv, "/workspace", true, true)
+	if rt.user == nil || rt.records != nil || rt.db == nil || len(rt.warns) != 1 || !strings.HasPrefix(rt.warns[0], "agent memory disabled:") {
+		t.Fatalf("key loss disabled wrong feature: %+v", rt)
+	}
+	defer rt.db.Close()
+	if _, err := rt.user.Add(ctx, memory.AddParams{Text: "healthy user memory", Scope: memory.ScopeGlobal}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(path + ".keys/current.pem"); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("lost identity recreated: %v", err)
+	}
+}
+
+func TestRecordsFailedSlashWriteSecuresSidecars(t *testing.T) {
+	for _, fields := range [][]string{{"/records", "--forget", "missing"}, {"/records", "--promote", "missing", "semantic"}} {
+		sess, path := newTestReplWithRecords(t)
+		for _, suffix := range []string{"-wal", "-shm"} {
+			if err := os.Chmod(path+suffix, 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+		var out bytes.Buffer
+		handleRecords(context.Background(), &out, sess, fields)
+		if !strings.Contains(out.String(), "failed:") {
+			t.Fatalf("unexpected slash result: %q", out.String())
+		}
+		for _, suffix := range []string{"-wal", "-shm"} {
+			info, err := os.Stat(path + suffix)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if info.Mode().Perm() != 0o600 {
+				t.Fatalf("failed write sidecar %s at %o", suffix, info.Mode().Perm())
+			}
+		}
+	}
 }
 
 func newTestReplWithRecords(t *testing.T) (*replSession, string) {
@@ -157,7 +229,7 @@ func newTestReplWithRecords(t *testing.T) (*replSession, string) {
 		t.Fatalf("open db: %v", err)
 	}
 	t.Cleanup(func() { _ = db.Close() })
-	rs, err := memory.NewMemoryRecordStore(ctx, db)
+	rs, err := memory.NewMemoryRecordStore(ctx, db, memory.RecordStoreConfig{KeyDir: dbPath + ".keys", Writer: memory.WriterGolem})
 	if err != nil {
 		t.Fatalf("record store: %v", err)
 	}

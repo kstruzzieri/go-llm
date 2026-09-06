@@ -1507,6 +1507,9 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 		memoryLine = "memory: enabled"
 	}
 	agentMemoryLine := agentMemoryNotice(agentMemoryEnabled, sessn != nil)
+	if agentMemoryEnabled && mrt.records.CreatedKeyID() != "" {
+		agentMemoryLine += "; created signing identity " + mrt.records.CreatedKeyID()
+	}
 	for _, line := range startupNotices(startupInfo{
 		workspace:          root,
 		agentflowState:     shouldShowAgentflowHint(f) && agentflowStateDetected(root),

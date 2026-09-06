@@ -3,6 +3,7 @@ package mcp
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -56,6 +57,38 @@ func TestWithAgentMemoryPathOpenFailureIsFatal(t *testing.T) {
 	)
 	if err == nil {
 		t.Fatal("NewServer() error = nil, want fatal error for unopenable agent-memory path")
+	}
+}
+
+func TestAgentMemorySigningKeyLossIsFatal(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "records.db")
+	s, err := NewServer(ctx, WithRAGDisabled(), WithAgentMemoryPath(path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := s.agentMemorySnapshot().Store()
+	if len(store.CreatedKeyID()) != 64 {
+		t.Fatal("first identity not reported")
+	}
+	m, err := store.Create(ctx, memory.CreateRecordParams{Kind: memory.KindSemantic, Content: "fact"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m.Provenance.OriginTool != "mcp.agent_memory_create" || m.Provenance.TrustClass != "agent-written" {
+		t.Fatalf("wrong MCP stamp: %+v", m.Provenance)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(path + ".keys/current.pem"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := NewServer(ctx, WithRAGDisabled(), WithAgentMemoryPath(path)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("MCP accepted lost signing identity: %v", err)
+	}
+	if _, err := os.Stat(path + ".keys/current.pem"); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("lost identity recreated: %v", err)
 	}
 }
 
