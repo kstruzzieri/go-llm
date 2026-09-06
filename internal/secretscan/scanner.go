@@ -311,7 +311,7 @@ func exempt(value string) bool {
 		return false
 	}
 	for i := range len(name) {
-		if !(name[i] >= 'A' && name[i] <= 'Z' || name[i] >= '0' && name[i] <= '9' || name[i] == '_') {
+		if (name[i] < 'A' || name[i] > 'Z') && (name[i] < '0' || name[i] > '9') && name[i] != '_' {
 			return false
 		}
 	}
@@ -392,13 +392,12 @@ func scanAssignments(text string, findings []Finding) []Finding {
 		if start == len(text) {
 			break
 		}
-		end := start
 		if text[start] == '\'' || text[start] == '"' {
 			// Another scalar's unescaped opening quote closes this value,
 			// so ranges using the same quote delimiter do not overlap.
 			quote := text[start]
 			start++
-			end = start
+			end := start
 			for end < len(text) && text[end] != quote {
 				if text[end] == '\\' && end+1 < len(text) {
 					end++
@@ -424,7 +423,7 @@ func scanAssignments(text string, findings []Finding) []Finding {
 			counts[text[runStart]]--
 			runStart++
 		}
-		end = runEnd
+		end := runEnd
 		// Closing template/marker delimiters belong to the complete
 		// placeholder, even where they normally delimit an unquoted scalar.
 		placeholder := false
