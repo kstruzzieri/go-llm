@@ -1,7 +1,10 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -14,6 +17,7 @@ import (
 
 	agenttools "github.com/kstruzzieri/go-llm/agent/tools"
 	"github.com/kstruzzieri/go-llm/memory"
+	"github.com/kstruzzieri/go-llm/signing"
 )
 
 // testGetenv fakes the environment so the data dir lands in a test temp dir.
@@ -52,6 +56,9 @@ func TestCheckpointStoreOpenCreatesHardenedPerWorkspaceDB(t *testing.T) {
 	canonicalA, err := agenttools.CanonicalWorkspaceRoot(rootA)
 	if err != nil {
 		t.Fatalf("canonical root A: %v", err)
+	}
+	if sa.workspaceHash != agenttools.ContentHash([]byte(canonicalA)) {
+		t.Fatalf("workspace receipt hash = %q, want full canonical-root hash", sa.workspaceHash)
 	}
 	hashA := strings.TrimPrefix(workspaceID(canonicalA), "workspace:")
 	wantPath := filepath.Join(dataDir, "golem", "checkpoints", hashA+".db")
@@ -786,8 +793,8 @@ func TestCheckpointStoreSchemaV2TrackedModeRoundTrip(t *testing.T) {
 	if err := s.db.QueryRowContext(ctx, "PRAGMA user_version").Scan(&version); err != nil {
 		t.Fatal(err)
 	}
-	if version != 2 {
-		t.Fatalf("fresh store version = %d, want 2", version)
+	if version != 3 {
+		t.Fatalf("fresh store version = %d, want 3", version)
 	}
 	cpID, _, err := s.prepareIntent(ctx, "goal", time.Now(), agenttools.MutationRecord{
 		Path: "promoted.txt", AfterHash: "abc", TrackedMode: true, AfterMode: 0o640, At: time.Now(),
@@ -873,7 +880,7 @@ func TestCheckpointStoreV1MigratesTransactionally(t *testing.T) {
 	buildV1CheckpointDB(t, getenv, root)
 	s, err := openCheckpointStore(context.Background(), getenv, root)
 	if err != nil {
-		t.Fatalf("v1 -> v2 migration failed: %v", err)
+		t.Fatalf("v1 -> v3 migration failed: %v", err)
 	}
 	t.Cleanup(func() { _ = s.Close() })
 	ctx := context.Background()
@@ -881,8 +888,8 @@ func TestCheckpointStoreV1MigratesTransactionally(t *testing.T) {
 	if err := s.db.QueryRowContext(ctx, "PRAGMA user_version").Scan(&version); err != nil {
 		t.Fatal(err)
 	}
-	if version != 2 {
-		t.Fatalf("migrated version = %d, want 2", version)
+	if version != 3 {
+		t.Fatalf("migrated version = %d, want 3", version)
 	}
 	files, err := s.loadFiles(ctx, 1, true)
 	if err != nil {
@@ -909,7 +916,7 @@ func TestCheckpointStoreNewerSchemaFailsClosed(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.ExecContext(ctx, "PRAGMA user_version = 3"); err != nil {
+	if _, err := db.ExecContext(ctx, "PRAGMA user_version = 4"); err != nil {
 		t.Fatal(err)
 	}
 	if err := db.Close(); err != nil {
@@ -917,5 +924,783 @@ func TestCheckpointStoreNewerSchemaFailsClosed(t *testing.T) {
 	}
 	if _, err := openCheckpointStore(ctx, getenv, root); err == nil {
 		t.Fatal("a newer schema must fail closed")
+	}
+}
+
+func checkpointSQL(t *testing.T, db *sql.DB, query string, args ...any) {
+	t.Helper()
+	if _, err := db.ExecContext(context.Background(), query, args...); err != nil {
+		t.Fatalf("fixture SQL: %v", err)
+	}
+}
+
+func TestCheckpointStoreV3MigrationPreservesLegacy(t *testing.T) {
+	for _, version := range []int{1, 2} {
+		t.Run(fmt.Sprint(version), func(t *testing.T) {
+			root, getenv := t.TempDir(), testGetenv(t.TempDir())
+			path := buildV1CheckpointDB(t, getenv, root)
+			db, err := memory.OpenHardenedDB(context.Background(), path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			checkpointSQL(t, db, `INSERT INTO checkpoint_files (id, checkpoint_id, path, prior_content, prior_hash, existed, after_hash, summary, at, applied, restored) VALUES (17, 1, 'second', X'0001ff', 'before', 1, 'after', 's2', '2026-01-01T00:00:00Z', 1, 1)`)
+			if version == 2 {
+				checkpointSQL(t, db, `ALTER TABLE checkpoint_files ADD COLUMN after_mode INTEGER`)
+				checkpointSQL(t, db, `UPDATE checkpoint_files SET after_mode = 0 WHERE id = 17`)
+				checkpointSQL(t, db, `PRAGMA user_version = 2`)
+			}
+			var oldRoot int
+			if err := db.QueryRow(`SELECT rootpage FROM sqlite_master WHERE name = 'checkpoint_files'`).Scan(&oldRoot); err != nil {
+				t.Fatal(err)
+			}
+			if err := db.Close(); err != nil {
+				t.Fatal(err)
+			}
+			s, err := openCheckpointStore(context.Background(), getenv, root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = s.Close() })
+			var newRoot, gotVersion int
+			if err := s.db.QueryRow(`SELECT rootpage FROM sqlite_master WHERE name = 'checkpoint_files'`).Scan(&newRoot); err != nil {
+				t.Fatal(err)
+			}
+			if err := s.db.QueryRow(`PRAGMA user_version`).Scan(&gotVersion); err != nil {
+				t.Fatal(err)
+			}
+			if oldRoot != newRoot || gotVersion != 3 {
+				t.Fatalf("migration rebuilt table or wrong version: roots %d/%d version %d", oldRoot, newRoot, gotVersion)
+			}
+			files, err := s.loadFiles(context.Background(), 1, false)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(files) != 2 || files[0].id != 17 || files[0].path != "second" || string(files[0].priorContent) != "\x00\x01\xff" || files[0].priorHash != "before" || files[0].afterHash != "after" || !files[0].existed || !files[0].applied || !files[0].restored || files[0].trackedMode != (version == 2) || files[0].afterMode != 0 || files[1].id != 1 || string(files[1].priorContent) != "old" {
+				t.Fatalf("migration changed legacy rows: %+v", files)
+			}
+			var nullRefs int
+			if err := s.db.QueryRow(`SELECT COUNT(*) FROM checkpoint_files WHERE forward_mutation_id IS NULL AND inverse_mutation_id IS NULL`).Scan(&nullRefs); err != nil {
+				t.Fatal(err)
+			}
+			if nullRefs != 2 {
+				t.Fatalf("legacy NULL refs = %d, want 2", nullRefs)
+			}
+			infos, err := s.list(context.Background())
+			if err != nil || len(infos) != 1 || infos[0].id != 1 || infos[0].state != checkpointCompleted || infos[0].goal != "old goal" || infos[0].bytes != 6 {
+				t.Fatalf("legacy listing = %+v, %v", infos, err)
+			}
+			for _, column := range []string{"forward_mutation_id", "inverse_mutation_id"} {
+				if _, err := s.db.Exec(`UPDATE checkpoint_files SET ` + column + ` = 'missing' WHERE id = 1`); err == nil {
+					t.Fatalf("%s accepted dangling reference", column)
+				}
+				checkpointSQL(t, s.db, `INSERT INTO mutation_receipts (mutation_id, intent_json) VALUES (?, '{}')`, column)
+				checkpointSQL(t, s.db, `UPDATE checkpoint_files SET `+column+` = ? WHERE id = 1`, column)
+				if _, err := s.db.Exec(`UPDATE checkpoint_files SET `+column+` = ? WHERE id = 17`, column); err == nil {
+					t.Fatalf("%s accepted duplicate reference", column)
+				}
+			}
+		})
+	}
+}
+
+func TestCheckpointStoreV3MigrationRefusesInterruptedLegacy(t *testing.T) {
+	for _, version := range []int{1, 2} {
+		for _, state := range []string{"open", "undoing"} {
+			t.Run(fmt.Sprintf("v%d/%s", version, state), func(t *testing.T) {
+				root, getenv := t.TempDir(), testGetenv(t.TempDir())
+				path := buildV1CheckpointDB(t, getenv, root)
+				db, err := memory.OpenHardenedDB(context.Background(), path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				checkpointSQL(t, db, `UPDATE checkpoints SET state = ?`, state)
+				if version == 2 {
+					checkpointSQL(t, db, `ALTER TABLE checkpoint_files ADD COLUMN after_mode INTEGER`)
+					checkpointSQL(t, db, `PRAGMA user_version = 2`)
+				}
+				if err := db.Close(); err != nil {
+					t.Fatal(err)
+				}
+				s, err := openCheckpointStore(context.Background(), getenv, root)
+				if s != nil {
+					_ = s.Close()
+				}
+				if err == nil || !strings.Contains(err.Error(), "old binary") {
+					t.Fatalf("interrupted upgrade = %v, want old-binary recovery guidance", err)
+				}
+				db, err = memory.OpenHardenedDB(context.Background(), path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer func() { _ = db.Close() }()
+				var gotVersion, ledger int
+				if err := db.QueryRow(`PRAGMA user_version`).Scan(&gotVersion); err != nil {
+					t.Fatal(err)
+				}
+				if err := db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE name = 'mutation_receipts'`).Scan(&ledger); err != nil {
+					t.Fatal(err)
+				}
+				var gotState, content string
+				if err := db.QueryRow(`SELECT c.state, f.prior_content FROM checkpoints c JOIN checkpoint_files f ON f.checkpoint_id = c.id`).Scan(&gotState, &content); err != nil {
+					t.Fatal(err)
+				}
+				if gotVersion != version || ledger != 0 || gotState != state || content != "old" {
+					t.Fatalf("refused migration changed DB: %d, %d, %q, %q", gotVersion, ledger, gotState, content)
+				}
+			})
+		}
+	}
+}
+
+// This literal whole envelope uses Task 1's independently calculated RFC 8032
+// test vector. Expectations never call the canonical encoder under test.
+const storedReceiptGolden = `{"body":{"after_hash":"ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad","after_mode":420,"agent_id":"b0f0e4099cd739f05a2defb07e1940a08ffabcfc8ce64a4e6deeaa9365b4bf00","before_hash":"absent","kind":"intent","mutation_id":"AAAAAAAAAAAAAAAAAAAAAAAAAA","path":"src/main.go","timestamp":"2026-09-05T12:34:56.123456789Z","undo_of":"","workspace_hash":"c52ddf65534b7b46035084358ab7902be4bfef220bdb503ac7039cc861905b05"},"signature":{"alg":"ed25519","kid":"b0f0e4099cd739f05a2defb07e1940a08ffabcfc8ce64a4e6deeaa9365b4bf00","sig":"8nl//cjzEis32LmLH+TK+Vej5oIf+So670gRzhG/13K2/QtUcXxka/Zysbg/m/I5iACtIU7HWHxrHlysOYgkAg=="}}`
+
+func storeReceiptJSON(t *testing.T, body agenttools.MutationReceiptBody) []byte {
+	t.Helper()
+	signer, err := signing.NewHMAC(bytes.Repeat([]byte{0x42}, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	body.AgentID = signer.KeyID()
+	receipt, err := agenttools.SignMutationReceipt(context.Background(), signer, body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := signing.MarshalCanonical(receipt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return raw
+}
+
+func storeForward(t *testing.T, s *checkpointStore, id string, prior string) (agenttools.MutationRecord, agenttools.MutationReceiptBody, []byte) {
+	t.Helper()
+	rec := agenttools.MutationRecord{Path: "a.txt", PriorContent: []byte(prior), Existed: true, AfterHash: agenttools.ContentHash([]byte("new")), At: testNow}
+	body := agenttools.MutationReceiptBody{Kind: "intent", MutationID: id, WorkspaceHash: s.workspaceHash, Path: "a.txt", BeforeHash: agenttools.ContentHash([]byte(prior)), AfterHash: rec.AfterHash, Timestamp: "2026-08-25T21:00:00Z"}
+	return rec, body, storeReceiptJSON(t, body)
+}
+
+func storeApplied(t *testing.T, body agenttools.MutationReceiptBody) []byte {
+	t.Helper()
+	body.Kind = "applied"
+	body.Timestamp = "2026-08-25T20:00:00Z" // Backward clocks do not order the ledger.
+	return storeReceiptJSON(t, body)
+}
+
+func storeInverse(body agenttools.MutationReceiptBody, id string) agenttools.MutationReceiptBody {
+	body.MutationID, body.UndoOf = id, body.MutationID
+	body.BeforeHash, body.AfterHash = body.AfterHash, body.BeforeHash
+	body.AfterMode = nil
+	return body
+}
+
+func TestCheckpointStoreSignedForwardAtomic(t *testing.T) {
+	s := openTestStore(t, t.TempDir())
+	ctx := context.Background()
+	rec, body, intent := storeForward(t, s, strings.Repeat("A", 26), "old")
+	cp, f, err := s.prepareSignedIntent(ctx, "signed", testNow, rec, intent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	files, err := s.loadFileMetadata(ctx, cp, false)
+	if err != nil || len(files) != 1 || files[0].forwardMutationID != (sql.NullString{String: body.MutationID, Valid: true}) || files[0].inverseMutationID.Valid || files[0].priorContent != nil || files[0].applied {
+		t.Fatalf("prepared metadata = %+v, %v", files, err)
+	}
+	entry, err := s.loadReceipt(ctx, body.MutationID)
+	if err != nil || !bytes.Equal(entry.intentJSON, intent) || entry.appliedJSON != nil || entry.sequence != 1 {
+		t.Fatalf("prepared evidence = %+v, %v", entry, err)
+	}
+	if err := s.commitIntent(ctx, f); err == nil {
+		t.Fatal("unsigned commit accepted a signed row")
+	}
+	applied := storeApplied(t, body)
+	checkpointSQL(t, s.db, `CREATE TRIGGER fail_forward BEFORE UPDATE OF applied ON checkpoint_files BEGIN SELECT RAISE(ABORT, 'test rollback'); END`)
+	if err := s.commitSignedIntent(ctx, f, applied); err == nil {
+		t.Fatal("commit ignored flag write failure")
+	}
+	entry, err = s.loadReceipt(ctx, body.MutationID)
+	if err != nil || entry.appliedJSON != nil {
+		t.Fatalf("failed flag update leaked evidence: %+v, %v", entry, err)
+	}
+	checkpointSQL(t, s.db, `DROP TRIGGER fail_forward`)
+	checkpointSQL(t, s.db, `CREATE TRIGGER fail_receipt BEFORE UPDATE OF applied_json ON mutation_receipts BEGIN SELECT RAISE(ABORT, 'test rollback'); END`)
+	if err := s.commitSignedIntent(ctx, f, applied); err == nil {
+		t.Fatal("commit ignored receipt write failure")
+	}
+	files, err = s.loadFiles(ctx, cp, false)
+	if err != nil || files[0].applied {
+		t.Fatalf("failed evidence update leaked flag: %+v, %v", files, err)
+	}
+	checkpointSQL(t, s.db, `DROP TRIGGER fail_receipt`)
+	if err := s.commitSignedIntent(ctx, f, applied); err != nil {
+		t.Fatal(err)
+	}
+	entry, err = s.loadReceipt(ctx, body.MutationID)
+	files, ferr := s.loadFiles(ctx, cp, false)
+	if err != nil || ferr != nil || !bytes.Equal(entry.appliedJSON, applied) || !files[0].applied || string(files[0].priorContent) != "old" {
+		t.Fatalf("committed evidence/flag = %+v, %+v, %v, %v", entry, files, err, ferr)
+	}
+	if err := s.commitSignedIntent(ctx, f, applied); err == nil {
+		t.Fatal("duplicate commit changed immutable evidence")
+	}
+	if err := s.abortIntent(ctx, f); err == nil {
+		t.Fatal("abort removed applied evidence")
+	}
+	if _, _, err := s.prepareSignedIntent(ctx, "duplicate", testNow, rec, intent); err == nil {
+		t.Fatal("duplicate mutation identity accepted")
+	}
+}
+
+func TestCheckpointStoreSignedPrepareRollsBackAndAbortRetainsNoUnusedIntent(t *testing.T) {
+	s := openTestStore(t, t.TempDir())
+	ctx := context.Background()
+	rec, body, intent := storeForward(t, s, strings.Repeat("A", 26), "old")
+	checkpointSQL(t, s.db, `CREATE TRIGGER fail_file BEFORE INSERT ON checkpoint_files BEGIN SELECT RAISE(ABORT, 'test rollback'); END`)
+	if _, _, err := s.prepareSignedIntent(ctx, "g", testNow, rec, intent); err == nil {
+		t.Fatal("prepare ignored snapshot failure")
+	}
+	entries, err := s.scanReceipts(ctx, 0, 10)
+	if err != nil || len(entries) != 0 || len(listIDs(t, s)) != 0 {
+		t.Fatalf("prepare leaked ledger/checkpoint rows: %+v, %v", entries, err)
+	}
+	checkpointSQL(t, s.db, `DROP TRIGGER fail_file`)
+	_, f, err := s.prepareSignedIntent(ctx, "g", testNow, rec, intent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkpointSQL(t, s.db, `CREATE TRIGGER fail_abort BEFORE DELETE ON mutation_receipts BEGIN SELECT RAISE(ABORT, 'test rollback'); END`)
+	if err := s.abortIntent(ctx, f); err == nil {
+		t.Fatal("abort ignored ledger deletion failure")
+	}
+	var refs int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM checkpoint_files WHERE forward_mutation_id = ?`, body.MutationID).Scan(&refs); err != nil || refs != 1 {
+		t.Fatalf("failed abort leaked reference deletion: %d, %v", refs, err)
+	}
+	checkpointSQL(t, s.db, `DROP TRIGGER fail_abort`)
+	if err := s.abortIntent(ctx, f); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.loadReceipt(ctx, body.MutationID); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("definite abort retained intent: %v", err)
+	}
+}
+
+func TestCheckpointStoreSignedBindingRefusals(t *testing.T) {
+	for _, field := range []string{"kind", "id", "workspace", "path", "before", "after", "mode", "undo"} {
+		t.Run(field, func(t *testing.T) {
+			s := openTestStore(t, t.TempDir())
+			ctx := context.Background()
+			rec, body, intent := storeForward(t, s, strings.Repeat("A", 26), "old")
+			_, f, err := s.prepareSignedIntent(ctx, "g", testNow, rec, intent)
+			if err != nil {
+				t.Fatal(err)
+			}
+			bad := body
+			switch field {
+			case "kind":
+				bad.Kind = "applied"
+			case "id":
+				bad.MutationID = strings.Repeat("B", 26)
+			case "workspace":
+				bad.WorkspaceHash = strings.Repeat("0", 64)
+			case "path":
+				bad.Path = "other.txt"
+			case "before":
+				bad.BeforeHash = "absent"
+			case "after":
+				bad.AfterHash = strings.Repeat("0", 64)
+			case "mode":
+				rec.Existed = false
+				rec.PriorContent = nil
+				bad.BeforeHash = "absent"
+				mode := uint32(0)
+				bad.AfterMode = &mode
+			case "undo":
+				bad.UndoOf = strings.Repeat("B", 26)
+			}
+			if field != "id" { // A distinct valid identity has no checkpoint binding until prepare.
+				prepareBad := bad
+				prepareBad.MutationID = strings.Repeat("C", 26)
+				if _, _, err := s.prepareSignedIntent(ctx, "bad", testNow, rec, storeReceiptJSON(t, prepareBad)); err == nil {
+					t.Fatal("prepare accepted mismatching signed metadata")
+				}
+			}
+			bad.Kind = "applied"
+			if field == "kind" {
+				bad.Kind = "intent"
+			}
+			if err := s.commitSignedIntent(ctx, f, storeReceiptJSON(t, bad)); err == nil {
+				t.Fatal("commit accepted mismatching evidence")
+			}
+			entry, err := s.loadReceipt(ctx, body.MutationID)
+			if err != nil || entry.appliedJSON != nil {
+				t.Fatalf("refusal changed evidence: %+v, %v", entry, err)
+			}
+		})
+	}
+}
+
+func TestCheckpointStoreStoredEnvelopeCanonicalBoundary(t *testing.T) {
+	s := openTestStore(t, t.TempDir())
+	ctx := context.Background()
+	const id = "AAAAAAAAAAAAAAAAAAAAAAAAAA"
+	checkpointSQL(t, s.db, `INSERT INTO mutation_receipts (mutation_id, intent_json) VALUES (?, ?)`, id, storedReceiptGolden)
+	entry, err := s.loadReceipt(ctx, id)
+	if err != nil || string(entry.intentJSON) != storedReceiptGolden {
+		t.Fatalf("whole envelope changed: %s, %v", entry.intentJSON, err)
+	}
+	var envelope agenttools.MutationReceipt
+	if err := json.Unmarshal([]byte(storedReceiptGolden), &envelope); err != nil {
+		t.Fatal(err)
+	}
+	ordered, err := json.Marshal(envelope) // struct order differs from canonical key order
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, raw := range [][]byte{append([]byte(storedReceiptGolden), '\n'), ordered, []byte(strings.Repeat(" ", agenttools.MaxMutationReceiptBytes+1))} {
+		if len(raw) <= agenttools.MaxMutationReceiptBytes {
+			if _, err := agenttools.DecodeMutationReceipt(raw); err != nil {
+				t.Fatalf("portable equivalent form refused: %v", err)
+			}
+		}
+		checkpointSQL(t, s.db, `UPDATE mutation_receipts SET intent_json = ?`, string(raw))
+		if _, err := s.loadReceipt(ctx, id); err == nil {
+			t.Fatal("lookup repaired noncanonical stored envelope")
+		}
+		if _, err := s.scanReceipts(ctx, 0, 10); err == nil {
+			t.Fatal("scan repaired noncanonical stored envelope")
+		}
+	}
+	checkpointSQL(t, s.db, `UPDATE mutation_receipts SET intent_json = ?, mutation_id = ?`, storedReceiptGolden, strings.Repeat("B", 26))
+	if _, err := s.scanReceipts(ctx, 0, 10); err == nil {
+		t.Fatal("ledger ID mismatch accepted")
+	}
+	rec, _, intent := storeForward(t, s, strings.Repeat("C", 26), "old")
+	if _, _, err := s.prepareSignedIntent(ctx, "g", testNow, rec, append(intent, '\n')); err == nil {
+		t.Fatal("prepare repaired noncanonical envelope")
+	}
+}
+
+func TestCheckpointStoreSignedInverseAtomicAndRecovery(t *testing.T) {
+	s := openTestStore(t, t.TempDir())
+	ctx := context.Background()
+	rec, body, intent := storeForward(t, s, strings.Repeat("A", 26), "old")
+	cp, f, err := s.prepareSignedIntent(ctx, "g", testNow, rec, intent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.commitSignedIntent(ctx, f, storeApplied(t, body)); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.seal(ctx, cp); err != nil {
+		t.Fatal(err)
+	}
+	inverse := storeInverse(body, strings.Repeat("B", 26))
+	inverseRaw := storeReceiptJSON(t, inverse)
+	if err := s.prepareInverseIntent(ctx, f, inverseRaw); err == nil {
+		t.Fatal("inverse prepared outside undoing state")
+	}
+	if err := s.markUndoing(ctx, []int64{cp}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.markRestored(ctx, f); err == nil {
+		t.Fatal("unsigned restore accepted signed row")
+	}
+	checkpointSQL(t, s.db, `CREATE TRIGGER fail_inverse_ref BEFORE UPDATE OF inverse_mutation_id ON checkpoint_files BEGIN SELECT RAISE(ABORT, 'test rollback'); END`)
+	if err := s.prepareInverseIntent(ctx, f, inverseRaw); err == nil {
+		t.Fatal("inverse ignored reference failure")
+	}
+	if _, err := s.loadReceipt(ctx, inverse.MutationID); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("inverse leaked orphan intent: %v", err)
+	}
+	checkpointSQL(t, s.db, `DROP TRIGGER fail_inverse_ref`)
+	if err := s.prepareInverseIntent(ctx, f, inverseRaw); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.prepareInverseIntent(ctx, f, inverseRaw); err == nil {
+		t.Fatal("duplicate inverse identity accepted")
+	}
+	checkpointSQL(t, s.db, `CREATE TRIGGER fail_restored BEFORE UPDATE OF restored ON checkpoint_files BEGIN SELECT RAISE(ABORT, 'test rollback'); END`)
+	if err := s.commitInverseIntent(ctx, f, storeApplied(t, inverse)); err == nil {
+		t.Fatal("inverse ignored flag failure")
+	}
+	entry, err := s.loadReceipt(ctx, inverse.MutationID)
+	if err != nil || entry.appliedJSON != nil {
+		t.Fatalf("failed inverse leaked applied evidence: %+v, %v", entry, err)
+	}
+	checkpointSQL(t, s.db, `DROP TRIGGER fail_restored`)
+	if err := s.commitInverseIntent(ctx, f, storeApplied(t, inverse)); err != nil {
+		t.Fatal(err)
+	}
+	files, err := s.loadFileMetadata(ctx, cp, true)
+	if err != nil || !files[0].restored || files[0].inverseMutationID != (sql.NullString{String: inverse.MutationID, Valid: true}) {
+		t.Fatalf("inverse progress = %+v, %v", files, err)
+	}
+	if err := s.commitInverseIntent(ctx, f, storeApplied(t, inverse)); err == nil {
+		t.Fatal("duplicate inverse commit accepted")
+	}
+	if err := s.deleteRestored(ctx, cp); err != nil {
+		t.Fatal(err)
+	}
+	entries, err := s.scanReceipts(ctx, 0, 10)
+	if err != nil || len(entries) != 2 || !bytes.Equal(entries[1].intentJSON, inverseRaw) || !bytes.Equal(entries[1].appliedJSON, storeApplied(t, inverse)) {
+		t.Fatalf("completed undo lost ledger: %+v, %v", entries, err)
+	}
+}
+
+func TestCheckpointStoreRecoveryPreservesUncertainty(t *testing.T) {
+	for _, action := range []string{"drop", "keep", "already_target", "inverse_target", "completed_inverse"} {
+		t.Run(action, func(t *testing.T) {
+			s := openTestStore(t, t.TempDir())
+			ctx := context.Background()
+			rec, body, intent := storeForward(t, s, strings.Repeat("A", 26), "old")
+			cp, f, err := s.prepareSignedIntent(ctx, "g", testNow, rec, intent)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if action == "drop" {
+				if err := s.recoverDropIntent(ctx, f); err != nil {
+					t.Fatal(err)
+				}
+				if err := s.seal(ctx, cp); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				if err := s.recoverCommitIntent(ctx, f); err != nil {
+					t.Fatal(err)
+				}
+				if err := s.seal(ctx, cp); err != nil {
+					t.Fatal(err)
+				}
+				if action != "keep" {
+					if err := s.markUndoing(ctx, []int64{cp}); err != nil {
+						t.Fatal(err)
+					}
+					if action == "inverse_target" || action == "completed_inverse" {
+						inverse := storeInverse(body, strings.Repeat("B", 26))
+						if err := s.prepareInverseIntent(ctx, f, storeReceiptJSON(t, inverse)); err != nil {
+							t.Fatal(err)
+						}
+						if action == "completed_inverse" {
+							completed := storeInverse(body, strings.Repeat("C", 26))
+							checkpointSQL(t, s.db, `INSERT INTO mutation_receipts (mutation_id, intent_json, applied_json) VALUES (?, ?, ?)`, completed.MutationID, string(storeReceiptJSON(t, completed)), string(storeApplied(t, completed)))
+							if err := s.reconcileInverseIntent(ctx, f, completed.MutationID); err != nil {
+								t.Fatal(err)
+							}
+						}
+					}
+					if action != "completed_inverse" {
+						if err := s.recoverRestored(ctx, f); err != nil {
+							t.Fatal(err)
+						}
+					}
+					if err := s.deleteRestored(ctx, cp); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+			entries, err := s.scanReceipts(ctx, 0, 10)
+			want := 1
+			if action == "inverse_target" {
+				want = 2
+			}
+			if action == "completed_inverse" {
+				want = 3
+			}
+			if err != nil || len(entries) != want || !bytes.Equal(entries[0].intentJSON, intent) || entries[0].appliedJSON != nil {
+				t.Fatalf("recovery fabricated/lost evidence: %+v, %v", entries, err)
+			}
+			if want > 1 && entries[1].appliedJSON != nil {
+				t.Fatal("recovery fabricated inverse evidence")
+			}
+		})
+	}
+}
+
+func TestCheckpointStoreReceiptScanSurvivesPruningAndSequenceGaps(t *testing.T) {
+	s := openTestStore(t, t.TempDir())
+	s.maxCheckpoints, s.maxPriorBytes = 1, 3
+	ctx := context.Background()
+	for i, id := range []string{strings.Repeat("A", 26), strings.Repeat("B", 26), strings.Repeat("C", 26)} {
+		rec, body, intent := storeForward(t, s, id, "old")
+		if i == 1 { // Committed sequence gap from a definite abort.
+			_, f, err := s.prepareSignedIntent(ctx, "g", testNow, rec, intent)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := s.abortIntent(ctx, f); err != nil {
+				t.Fatal(err)
+			}
+			continue
+		}
+		cp, f, err := s.prepareSignedIntent(ctx, "g", testNow, rec, intent)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if i == 0 {
+			if err := s.recoverCommitIntent(ctx, f); err != nil {
+				t.Fatal(err)
+			}
+		} else if err := s.commitSignedIntent(ctx, f, storeApplied(t, body)); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.seal(ctx, cp); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := listIDs(t, s); len(got) != 1 {
+		t.Fatalf("snapshot pruning failed: %v", got)
+	}
+	page, err := s.scanReceipts(ctx, 0, 1)
+	if err != nil || len(page) != 1 || page[0].sequence != 1 || page[0].mutationID != strings.Repeat("A", 26) || page[0].appliedJSON != nil {
+		t.Fatalf("first retained unresolved page = %+v, %v", page, err)
+	}
+	page, err = s.scanReceipts(ctx, page[0].sequence, 1)
+	if err != nil || len(page) != 1 || page[0].sequence != 3 || page[0].mutationID != strings.Repeat("C", 26) || page[0].appliedJSON == nil {
+		t.Fatalf("gapped second page = %+v, %v", page, err)
+	}
+	page, err = s.scanReceipts(ctx, 3, 1)
+	if err != nil || len(page) != 0 {
+		t.Fatalf("scan beyond end = %+v, %v", page, err)
+	}
+	for _, limit := range []int{-1, 0, 1001} {
+		if _, err := s.scanReceipts(ctx, 0, limit); err == nil {
+			t.Fatalf("scan accepted unbounded limit %d", limit)
+		}
+	}
+}
+
+func TestCheckpointStoreSignedHardeningErrorAfterCommit(t *testing.T) {
+	s := openTestStore(t, t.TempDir())
+	ctx := context.Background()
+	rec, body, intent := storeForward(t, s, strings.Repeat("A", 26), "old")
+	cp, f, err := s.prepareSignedIntent(ctx, "g", testNow, rec, intent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	originalPath := s.dbPath
+	s.dbPath = t.TempDir()
+	if err := s.commitSignedIntent(ctx, f, storeApplied(t, body)); err == nil {
+		t.Fatal("hardening failure hidden")
+	}
+	s.dbPath = originalPath
+	entry, err := s.loadReceipt(ctx, body.MutationID)
+	files, ferr := s.loadFiles(ctx, cp, false)
+	if err != nil || ferr != nil || entry.appliedJSON == nil || !files[0].applied {
+		t.Fatalf("hardening failure lost committed facts: %+v, %+v, %v, %v", entry, files, err, ferr)
+	}
+}
+
+func TestCheckpointStoreSignedInverseBindingRefusals(t *testing.T) {
+	for _, field := range []string{"kind", "forward", "undo", "workspace", "path", "before", "after"} {
+		t.Run(field, func(t *testing.T) {
+			s := openTestStore(t, t.TempDir())
+			ctx := context.Background()
+			rec, body, intent := storeForward(t, s, strings.Repeat("A", 26), "old")
+			cp, f, err := s.prepareSignedIntent(ctx, "g", testNow, rec, intent)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := s.recoverCommitIntent(ctx, f); err != nil {
+				t.Fatal(err)
+			}
+			if err := s.seal(ctx, cp); err != nil {
+				t.Fatal(err)
+			}
+			if err := s.markUndoing(ctx, []int64{cp}); err != nil {
+				t.Fatal(err)
+			}
+			bad := storeInverse(body, strings.Repeat("B", 26))
+			switch field {
+			case "kind":
+				bad.Kind = "applied"
+			case "forward":
+				bad.UndoOf = ""
+			case "undo":
+				bad.UndoOf = strings.Repeat("C", 26)
+			case "workspace":
+				bad.WorkspaceHash = strings.Repeat("0", 64)
+			case "path":
+				bad.Path = "other"
+			case "before":
+				bad.BeforeHash = strings.Repeat("0", 64)
+			case "after":
+				bad.AfterHash = strings.Repeat("0", 64)
+			}
+			if err := s.prepareInverseIntent(ctx, f, storeReceiptJSON(t, bad)); err == nil {
+				t.Fatal("inverse accepted wrong lineage/transition")
+			}
+			entries, err := s.scanReceipts(ctx, 0, 10)
+			if err != nil || len(entries) != 1 {
+				t.Fatalf("invalid inverse leaked ledger: %+v, %v", entries, err)
+			}
+		})
+	}
+}
+
+func TestCheckpointStoreSignedCreatesBindExactModeAndAbsence(t *testing.T) {
+	for _, tracked := range []bool{false, true} {
+		t.Run(fmt.Sprint(tracked), func(t *testing.T) {
+			s := openTestStore(t, t.TempDir())
+			ctx := context.Background()
+			rec, body, _ := storeForward(t, s, strings.Repeat("A", 26), "")
+			rec.Existed, rec.PriorContent, rec.TrackedMode = false, nil, tracked
+			body.BeforeHash = "absent"
+			mode := uint32(0)
+			if tracked {
+				body.AfterMode = &mode
+			}
+			cp, f, err := s.prepareSignedIntent(ctx, "g", testNow, rec, storeReceiptJSON(t, body))
+			if err != nil {
+				t.Fatal(err)
+			}
+			bad := body
+			bad.MutationID = strings.Repeat("B", 26)
+			if tracked {
+				bad.AfterMode = nil
+			} else {
+				bad.AfterMode = &mode
+			}
+			if _, _, err := s.prepareSignedIntent(ctx, "g", testNow, rec, storeReceiptJSON(t, bad)); err == nil {
+				t.Fatal("prepare ignored null/0000 mode distinction")
+			}
+			bad = body
+			if tracked {
+				nonzero := uint32(0o600)
+				bad.AfterMode = &nonzero
+			} else {
+				bad.AfterMode = &mode
+			}
+			if err := s.commitSignedIntent(ctx, f, storeApplied(t, bad)); err == nil {
+				t.Fatal("commit ignored exact mode mismatch")
+			}
+			if err := s.commitSignedIntent(ctx, f, storeApplied(t, body)); err != nil {
+				t.Fatal(err)
+			}
+			files, err := s.loadFiles(ctx, cp, true)
+			if err != nil || len(files) != 1 || files[0].existed || files[0].priorHash != "" || files[0].trackedMode != tracked || files[0].afterMode != 0 {
+				t.Fatalf("create round trip = %+v, %v", files, err)
+			}
+		})
+	}
+}
+
+func TestCheckpointStoreReceiptCountPruningAndInvalidPresentEvidence(t *testing.T) {
+	s := openTestStore(t, t.TempDir())
+	s.maxCheckpoints = 1
+	ctx := context.Background()
+	var firstIntent, firstApplied []byte
+	for _, id := range []string{strings.Repeat("A", 26), strings.Repeat("B", 26)} {
+		rec, body, intent := storeForward(t, s, id, "old")
+		cp, f, err := s.prepareSignedIntent(ctx, "g", testNow, rec, intent)
+		if err != nil {
+			t.Fatal(err)
+		}
+		applied := storeApplied(t, body)
+		if err := s.commitSignedIntent(ctx, f, applied); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.seal(ctx, cp); err != nil {
+			t.Fatal(err)
+		}
+		if firstIntent == nil {
+			firstIntent, firstApplied = intent, applied
+		}
+	}
+	entries, err := s.scanReceipts(ctx, 0, 10)
+	if err != nil || len(entries) != 2 || len(listIDs(t, s)) != 1 || !bytes.Equal(entries[0].intentJSON, firstIntent) || !bytes.Equal(entries[0].appliedJSON, firstApplied) {
+		t.Fatalf("count pruning lost envelope: %+v, %v", entries, err)
+	}
+	for _, raw := range []string{"", string(firstApplied) + "\n", string(firstIntent)} {
+		checkpointSQL(t, s.db, `UPDATE mutation_receipts SET applied_json = ? WHERE mutation_id = ?`, raw, strings.Repeat("A", 26))
+		if _, err := s.loadReceipt(ctx, strings.Repeat("A", 26)); err == nil {
+			t.Fatal("invalid present applied evidence accepted")
+		}
+		if _, err := s.scanReceipts(ctx, 0, 10); err == nil {
+			t.Fatal("scan accepted invalid present applied evidence")
+		}
+	}
+}
+
+func TestCheckpointStoreSignedRecoveryRefusesMissingEvidence(t *testing.T) {
+	s := openTestStore(t, t.TempDir())
+	ctx := context.Background()
+	_, f := mustPrepare(t, s, "legacy", testRec("a", "old", true))
+	for _, op := range []func(context.Context, int64) error{s.recoverCommitIntent, s.recoverDropIntent, s.recoverRestored} {
+		if err := op(ctx, f); err == nil {
+			t.Fatal("signed recovery inferred permission from legacy NULL reference")
+		}
+	}
+}
+
+func TestCheckpointStoreRecoveryRejectsPresentEmptyInverseReference(t *testing.T) {
+	s := openTestStore(t, t.TempDir())
+	ctx := context.Background()
+	rec, _, intent := storeForward(t, s, strings.Repeat("A", 26), "old")
+	cp, f, err := s.prepareSignedIntent(ctx, "g", testNow, rec, intent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.recoverCommitIntent(ctx, f); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.seal(ctx, cp); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.markUndoing(ctx, []int64{cp}); err != nil {
+		t.Fatal(err)
+	}
+	checkpointSQL(t, s.db, `INSERT INTO mutation_receipts (mutation_id, intent_json) VALUES ('', '{}')`)
+	checkpointSQL(t, s.db, `UPDATE checkpoint_files SET inverse_mutation_id = '' WHERE id = ?`, f)
+	if err := s.recoverRestored(ctx, f); err == nil {
+		t.Fatal("present invalid inverse treated as absent")
+	}
+}
+
+func TestCheckpointStoreMetadataPreservesReferenceNullness(t *testing.T) {
+	s := openTestStore(t, t.TempDir())
+	ctx := context.Background()
+	cp, f := mustPrepare(t, s, "legacy", testRec("a", "old", true))
+	files, err := s.loadFileMetadata(ctx, cp, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if files[0].forwardMutationID != (sql.NullString{}) || files[0].inverseMutationID != (sql.NullString{}) {
+		t.Fatalf("NULL references lost nullness: %+v", files[0])
+	}
+	checkpointSQL(t, s.db, `INSERT INTO mutation_receipts (mutation_id, intent_json) VALUES ('', '{}')`)
+	checkpointSQL(t, s.db, `UPDATE checkpoint_files SET forward_mutation_id = '', inverse_mutation_id = '' WHERE id = ?`, f)
+	files, err = s.loadFileMetadata(ctx, cp, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if files[0].forwardMutationID != (sql.NullString{Valid: true}) || files[0].inverseMutationID != (sql.NullString{Valid: true}) {
+		t.Fatalf("present empty references became NULL: %+v", files[0])
+	}
+}
+
+func TestCheckpointStoreRejectsInvalidStoredModesBeforeConversion(t *testing.T) {
+	for _, mode := range []int64{-1, 0o1000, 1 << 32} {
+		t.Run(fmt.Sprint(mode), func(t *testing.T) {
+			s := openTestStore(t, t.TempDir())
+			ctx := context.Background()
+			rec, body, _ := storeForward(t, s, strings.Repeat("A", 26), "")
+			rec.Existed, rec.PriorContent, rec.TrackedMode = false, nil, true
+			body.BeforeHash = "absent"
+			zero := uint32(0)
+			body.AfterMode = &zero
+			cp, f, err := s.prepareSignedIntent(ctx, "g", testNow, rec, storeReceiptJSON(t, body))
+			if err != nil {
+				t.Fatal(err)
+			}
+			checkpointSQL(t, s.db, `UPDATE checkpoint_files SET after_mode = ? WHERE id = ?`, mode, f)
+			if _, err := s.loadFileMetadata(ctx, cp, false); err == nil {
+				t.Error("metadata silently converted invalid mode")
+			}
+			if err := s.commitSignedIntent(ctx, f, storeApplied(t, body)); err == nil {
+				t.Error("invalid mode wrapped into matching signed bits")
+			}
+		})
 	}
 }

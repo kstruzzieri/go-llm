@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"errors"
@@ -14,6 +15,7 @@ import (
 
 	agenttools "github.com/kstruzzieri/go-llm/agent/tools"
 	"github.com/kstruzzieri/go-llm/memory"
+	"github.com/kstruzzieri/go-llm/signing"
 )
 
 // checkpointState is the lifecycle of one persisted checkpoint (#355).
@@ -29,7 +31,9 @@ const (
 	checkpointUndoing   checkpointState = "undoing"
 )
 
-// Retention defaults (issue #355): strict per-workspace caps.
+// Retention defaults (issue #355): strict per-workspace undo snapshot caps.
+// Receipt metadata survives pruning and grows indefinitely; retention requires
+// an explicit future policy rather than silently discarding audit evidence.
 const (
 	defaultMaxCheckpoints = 50
 	defaultMaxPriorBytes  = 64 << 20 // 64 MiB of prior content
@@ -41,7 +45,8 @@ const (
 // v2 (#443) adds the nullable checkpoint_files.after_mode column: the exact
 // tracked permission bits of a promoted create, NULL for every legacy and
 // write/edit row.
-const checkpointSchemaVersion = 2
+// v3 (#445) adds an independent receipt ledger and nullable unique references.
+const checkpointSchemaVersion = 3
 
 // errCheckpointLeaseHeld reports that another live golem process owns this
 // workspace's checkpoint store. Checkpoints fail closed on contention (D10):
@@ -52,12 +57,13 @@ var errCheckpointLeaseHeld = errors.New("golem: another golem process holds this
 // per-workspace SQLite DB under the per-user data dir, owned exclusively via
 // an OS file lease for the store's lifetime. It knows nothing about the
 // Workspace; restoring files is checkpointJournal's job. Deleted rows never
-// shrink the DB file (no vacuum): the disk high-water mark is bounded by the
-// retention caps plus SQLite overhead.
+// shrink the DB file (no vacuum). Retention bounds prior-content snapshots;
+// receipt metadata and its SQLite overhead are not bounded by those caps.
 type checkpointStore struct {
-	db     *sql.DB
-	dbPath string
-	lease  *flockLease
+	db            *sql.DB
+	dbPath        string
+	lease         *flockLease
+	workspaceHash string
 
 	maxCheckpoints int
 	maxPriorBytes  int64
@@ -80,7 +86,7 @@ func checkpointDBPath(getenv func(string) string, root string) (string, error) {
 }
 
 // openCheckpointStore acquires this workspace's exclusive checkpoint lease,
-// opens (creating if missing) the hardened DB, migrates to the v1 schema, and
+// opens (creating if missing) the hardened DB, migrates to the current schema, and
 // re-secures every on-disk file. Any failure releases whatever was acquired
 // and returns the error: -allow-write startup fails closed on it (D6).
 func openCheckpointStore(ctx context.Context, getenv func(string) string, root string) (*checkpointStore, error) {
@@ -89,6 +95,10 @@ func openCheckpointStore(ctx context.Context, getenv func(string) string, root s
 		return nil, err
 	}
 	if err := validatePathOutsideWorkspace(path, root); err != nil {
+		return nil, err
+	}
+	canonicalRoot, err := agenttools.CanonicalWorkspaceRoot(root)
+	if err != nil {
 		return nil, err
 	}
 	// Create and re-chmod the leaf directory only; existing parents may be
@@ -115,6 +125,7 @@ func openCheckpointStore(ctx context.Context, getenv func(string) string, root s
 		db:             db,
 		dbPath:         path,
 		lease:          lease,
+		workspaceHash:  agenttools.ContentHash([]byte(canonicalRoot)),
 		maxCheckpoints: defaultMaxCheckpoints,
 		maxPriorBytes:  defaultMaxPriorBytes,
 	}
@@ -136,8 +147,8 @@ func openCheckpointStore(ctx context.Context, getenv func(string) string, root s
 
 // migrate steps the schema to the current version in one transaction per
 // starting version, so a crash mid-migration leaves the old version intact
-// and a clean retry. v0 creates the full v2 schema; v1 gains the nullable
-// after_mode column additively — existing rows are never copied or replaced
+// and a clean retry. v0 creates the schema; v1/v2 gain nullable columns and
+// the independent ledger additively — existing rows are never copied or replaced
 // (a destructive table rebuild would risk undo history). A database from a
 // newer binary is rejected rather than guessed at.
 func (s *checkpointStore) migrate(ctx context.Context) error {
@@ -189,13 +200,37 @@ func (s *checkpointStore) migrate(ctx context.Context) error {
 		stmts = []string{
 			`ALTER TABLE checkpoint_files ADD COLUMN after_mode INTEGER`,
 		}
+	case 2:
 	default:
 		return fmt.Errorf("golem: checkpoint db %s has unexpected schema v%d", s.dbPath, version)
 	}
+	stmts = append(stmts,
+		`CREATE TABLE mutation_receipts (
+			sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+			mutation_id TEXT NOT NULL UNIQUE,
+			intent_json TEXT NOT NULL,
+			applied_json TEXT
+		)`,
+		`ALTER TABLE checkpoint_files ADD COLUMN forward_mutation_id TEXT
+			REFERENCES mutation_receipts(mutation_id) DEFAULT NULL`,
+		`ALTER TABLE checkpoint_files ADD COLUMN inverse_mutation_id TEXT
+			REFERENCES mutation_receipts(mutation_id) DEFAULT NULL`,
+		`CREATE UNIQUE INDEX checkpoint_files_forward_mutation ON checkpoint_files(forward_mutation_id)`,
+		`CREATE UNIQUE INDEX checkpoint_files_inverse_mutation ON checkpoint_files(inverse_mutation_id)`,
+	)
 	stmts = append(stmts, fmt.Sprintf("PRAGMA user_version = %d", checkpointSchemaVersion))
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("golem: checkpoint migrate begin: %w", err)
+	}
+	if version == 1 || version == 2 {
+		var interrupted int
+		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM checkpoints WHERE state IN ('open', 'undoing')`).Scan(&interrupted); err != nil {
+			return errors.Join(fmt.Errorf("golem: checkpoint migration recovery check: %w", err), tx.Rollback())
+		}
+		if interrupted != 0 {
+			return errors.Join(errors.New("golem: finish checkpoint recovery/undo with the old binary before upgrading"), tx.Rollback())
+		}
 	}
 	for _, stmt := range stmts {
 		if _, err := tx.ExecContext(ctx, stmt); err != nil {
@@ -245,8 +280,10 @@ type checkpointFile struct {
 	restored     bool
 	// afterMode/trackedMode mirror MutationRecord (#443): the exact tracked
 	// permission bits of a promoted create. A NULL column loads untracked.
-	afterMode   fs.FileMode
-	trackedMode bool
+	afterMode         fs.FileMode
+	trackedMode       bool
+	forwardMutationID sql.NullString
+	inverseMutationID sql.NullString
 }
 
 // checkpointGroup is one checkpoint with its file rows in reverse mutation
@@ -346,7 +383,22 @@ func deleteCheckpointTx(ctx context.Context, tx *sql.Tx, cpID int64, wantState c
 // insufficient capacity the intent is refused with errCheckpointQuota before
 // any workspace write happens. A refused admission rolls back, so pruning
 // only commits together with the accepted intent.
-func (s *checkpointStore) prepareIntent(ctx context.Context, goal string, at time.Time, rec agenttools.MutationRecord) (cpID, fileID int64, err error) {
+// Temporary compatibility entrypoint for Task 3's unsigned callers. Remove
+// with journal integration; new journal-managed records use prepareSignedIntent.
+func (s *checkpointStore) prepareIntent(ctx context.Context, goal string, at time.Time, rec agenttools.MutationRecord) (int64, int64, error) {
+	return s.prepareCheckpointIntent(ctx, goal, at, rec, nil)
+}
+
+// prepareSignedIntent requires canonical signed evidence. The caller authenticates
+// its signature; storage validates canonical bytes and checkpoint metadata binding.
+func (s *checkpointStore) prepareSignedIntent(ctx context.Context, goal string, at time.Time, rec agenttools.MutationRecord, intentJSON []byte) (int64, int64, error) {
+	if len(intentJSON) == 0 {
+		return 0, 0, errors.New("golem: forward intent evidence required")
+	}
+	return s.prepareCheckpointIntent(ctx, goal, at, rec, intentJSON)
+}
+
+func (s *checkpointStore) prepareCheckpointIntent(ctx context.Context, goal string, at time.Time, rec agenttools.MutationRecord, intentJSON []byte) (cpID, fileID int64, err error) {
 	path := canonicalCheckpointPath(rec.Path)
 	priorHash := ""
 	existed := 0
@@ -354,7 +406,24 @@ func (s *checkpointStore) prepareIntent(ctx context.Context, goal string, at tim
 		priorHash = agenttools.ContentHash(rec.PriorContent)
 		existed = 1
 	}
+	var mutationID any // NULL only through the temporary legacy wrapper.
+	if intentJSON != nil {
+		intent, err := decodeStoredMutationReceipt(intentJSON)
+		if err != nil {
+			return 0, 0, err
+		}
+		f := checkpointFile{path: path, priorHash: priorHash, existed: rec.Existed, afterHash: rec.AfterHash, afterMode: rec.AfterMode, trackedMode: rec.TrackedMode}
+		if err := s.bindForwardReceipt(f, intent); err != nil {
+			return 0, 0, err
+		}
+		mutationID = intent.Body.MutationID
+	}
 	err = s.execTx(ctx, func(tx *sql.Tx) error {
+		if mutationID != nil {
+			if _, err := tx.ExecContext(ctx, `INSERT INTO mutation_receipts (mutation_id, intent_json) VALUES (?, ?)`, mutationID, string(intentJSON)); err != nil {
+				return fmt.Errorf("golem: insert forward intent: %w", err)
+			}
+		}
 		newBytes := int64(len(rec.PriorContent))
 		for {
 			var total int64
@@ -401,10 +470,10 @@ func (s *checkpointStore) prepareIntent(ctx context.Context, goal string, at tim
 		}
 		res, ierr := tx.ExecContext(ctx,
 			`INSERT INTO checkpoint_files
-			 (checkpoint_id, path, prior_content, prior_hash, existed, after_hash, summary, at, after_mode)
-			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			 (checkpoint_id, path, prior_content, prior_hash, existed, after_hash, summary, at, after_mode, forward_mutation_id)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			cpID, path, rec.PriorContent, priorHash, existed, rec.AfterHash,
-			rec.Summary, formatCheckpointTime(rec.At), afterMode)
+			rec.Summary, formatCheckpointTime(rec.At), afterMode, mutationID)
 		if ierr != nil {
 			return fmt.Errorf("golem: checkpoint intent %s: %w", path, ierr)
 		}
@@ -419,12 +488,13 @@ func (s *checkpointStore) prepareIntent(ctx context.Context, goal string, at tim
 	return cpID, fileID, nil
 }
 
-// commitIntent marks a prepared row applied after the workspace rename landed.
+// commitIntent is a temporary Task 3 compatibility wrapper for unsigned rows.
+// Signed rows require commitSignedIntent or explicit conservative recovery.
 func (s *checkpointStore) commitIntent(ctx context.Context, fileID int64) error {
 	return s.execTx(ctx, func(tx *sql.Tx) error {
 		res, err := tx.ExecContext(ctx,
 			`UPDATE checkpoint_files SET applied = 1
-			 WHERE id = ? AND applied = 0
+			 WHERE id = ? AND applied = 0 AND forward_mutation_id IS NULL
 			   AND checkpoint_id IN (SELECT id FROM checkpoints WHERE state = ?)`,
 			fileID, checkpointOpen)
 		if err != nil {
@@ -437,15 +507,39 @@ func (s *checkpointStore) commitIntent(ctx context.Context, fileID int64) error 
 // abortIntent discards a prepared row whose workspace write failed.
 func (s *checkpointStore) abortIntent(ctx context.Context, fileID int64) error {
 	return s.execTx(ctx, func(tx *sql.Tx) error {
-		res, err := tx.ExecContext(ctx,
-			`DELETE FROM checkpoint_files
-			 WHERE id = ? AND applied = 0
-			   AND checkpoint_id IN (SELECT id FROM checkpoints WHERE state = ?)`,
-			fileID, checkpointOpen)
-		if err != nil {
-			return fmt.Errorf("golem: checkpoint abort intent %d: %w", fileID, err)
+		var mutationID sql.NullString
+		if err := tx.QueryRowContext(ctx, `SELECT forward_mutation_id FROM checkpoint_files WHERE id = ?`, fileID).Scan(&mutationID); err != nil {
+			return err
 		}
-		return requireOneRow(res, fmt.Sprintf("abort intent %d", fileID))
+		if mutationID.Valid {
+			_, forward, err := s.boundForwardTx(ctx, tx, fileID)
+			if err != nil {
+				return err
+			}
+			if forward.appliedJSON != nil {
+				return errors.New("golem: cannot abort completed evidence")
+			}
+		}
+		// Remove the reference first, then its definitely unused intent. Recovery
+		// instead uses recoverDropIntent and preserves unresolved evidence.
+		res, err := tx.ExecContext(ctx,
+			`DELETE FROM checkpoint_files WHERE id = ? AND applied = 0 AND inverse_mutation_id IS NULL
+			 AND checkpoint_id IN (SELECT id FROM checkpoints WHERE state = ?)`, fileID, checkpointOpen)
+		if err != nil {
+			return fmt.Errorf("golem: abort intent: %w", err)
+		}
+		if err := requireOneRow(res, "abort intent"); err != nil {
+			return err
+		}
+		if mutationID.Valid {
+			res, err := tx.ExecContext(ctx, `DELETE FROM mutation_receipts WHERE mutation_id = ? AND applied_json IS NULL
+			 AND NOT EXISTS (SELECT 1 FROM checkpoint_files WHERE forward_mutation_id = ? OR inverse_mutation_id = ?)`, mutationID.String, mutationID.String, mutationID.String)
+			if err != nil {
+				return fmt.Errorf("golem: abort evidence: %w", err)
+			}
+			return requireOneRow(res, "abort evidence")
+		}
+		return nil
 	})
 }
 
@@ -527,14 +621,13 @@ func (s *checkpointStore) markUndoing(ctx context.Context, ids []int64) error {
 	})
 }
 
-// markRestored persists per-file undo progress. Only an applied, unrestored
-// row of an undoing checkpoint can transition: an invalid state cannot record
-// a file as restored.
+// markRestored is a temporary compatibility wrapper for unsigned undo progress.
+// Only an applied, unrestored row of an undoing checkpoint can transition.
 func (s *checkpointStore) markRestored(ctx context.Context, fileID int64) error {
 	return s.execTx(ctx, func(tx *sql.Tx) error {
 		res, err := tx.ExecContext(ctx,
 			`UPDATE checkpoint_files SET restored = 1
-			 WHERE id = ? AND applied = 1 AND restored = 0
+			 WHERE id = ? AND applied = 1 AND restored = 0 AND forward_mutation_id IS NULL
 			   AND checkpoint_id IN (SELECT id FROM checkpoints WHERE state = ?)`,
 			fileID, checkpointUndoing)
 		if err != nil {
@@ -633,7 +726,20 @@ func (s *checkpointStore) loadGroups(ctx context.Context, state checkpointState,
 }
 
 func (s *checkpointStore) loadFiles(ctx context.Context, cpID int64, appliedOnly bool) ([]checkpointFile, error) {
-	q := `SELECT id, path, prior_content, prior_hash, existed, after_hash, applied, restored, after_mode
+	return s.queryFiles(ctx, cpID, appliedOnly, true)
+}
+
+// loadFileMetadata omits prior-content blobs for checkpoint listings.
+func (s *checkpointStore) loadFileMetadata(ctx context.Context, cpID int64, appliedOnly bool) ([]checkpointFile, error) {
+	return s.queryFiles(ctx, cpID, appliedOnly, false)
+}
+
+func (s *checkpointStore) queryFiles(ctx context.Context, cpID int64, appliedOnly, withContent bool) ([]checkpointFile, error) {
+	content := "NULL"
+	if withContent {
+		content = "prior_content"
+	}
+	q := `SELECT id, path, ` + content + `, prior_hash, existed, after_hash, applied, restored, after_mode, forward_mutation_id, inverse_mutation_id
 	      FROM checkpoint_files WHERE checkpoint_id = ?`
 	if appliedOnly {
 		q += ` AND applied = 1`
@@ -649,12 +755,17 @@ func (s *checkpointStore) loadFiles(ctx context.Context, cpID int64, appliedOnly
 		var f checkpointFile
 		var existed, applied, restored int
 		var afterMode sql.NullInt64
+		var forward, inverse sql.NullString
 		if err := rows.Scan(&f.id, &f.path, &f.priorContent, &f.priorHash,
-			&existed, &f.afterHash, &applied, &restored, &afterMode); err != nil {
+			&existed, &f.afterHash, &applied, &restored, &afterMode, &forward, &inverse); err != nil {
 			return nil, fmt.Errorf("golem: checkpoint files scan: %w", err)
 		}
+		f.forwardMutationID, f.inverseMutationID = forward, inverse
 		f.existed, f.applied, f.restored = existed != 0, applied != 0, restored != 0
 		if afterMode.Valid {
+			if afterMode.Int64 < 0 || afterMode.Int64 > 0o777 {
+				return nil, errors.New("golem: invalid stored checkpoint mode")
+			}
 			f.trackedMode = true
 			f.afterMode = fs.FileMode(afterMode.Int64)
 		}
@@ -685,4 +796,363 @@ func (s *checkpointStore) countState(ctx context.Context, state checkpointState)
 		return 0, fmt.Errorf("golem: checkpoint count %s: %w", state, err)
 	}
 	return n, nil
+}
+
+// checkpointReceipt is the sole stored whole-envelope representation. Sequence
+// orders a bounded scan, not timestamps; gaps do not prove ledger completeness.
+type checkpointReceipt struct {
+	sequence    int64
+	mutationID  string
+	intentJSON  []byte
+	appliedJSON []byte
+}
+
+func decodeStoredMutationReceipt(raw []byte) (agenttools.MutationReceipt, error) {
+	receipt, err := agenttools.DecodeMutationReceipt(raw)
+	if err != nil {
+		return agenttools.MutationReceipt{}, err
+	}
+	canonical, err := signing.MarshalCanonical(receipt)
+	if err != nil {
+		return agenttools.MutationReceipt{}, err
+	}
+	if !bytes.Equal(raw, canonical) {
+		return agenttools.MutationReceipt{}, errors.New("golem: noncanonical stored mutation receipt")
+	}
+	return receipt, nil
+}
+
+func matchingAppliedReceipt(intent, applied agenttools.MutationReceipt) error {
+	a, b := intent.Body, applied.Body
+	if a.Kind != "intent" || b.Kind != "applied" || intent.Signature.Alg != applied.Signature.Alg || intent.Signature.KeyID != applied.Signature.KeyID {
+		return errors.New("golem: applied receipt does not match intent")
+	}
+	if (a.AfterMode == nil) != (b.AfterMode == nil) || a.AfterMode != nil && *a.AfterMode != *b.AfterMode {
+		return errors.New("golem: applied receipt mode differs from intent")
+	}
+	b.Kind, b.Timestamp, b.AfterMode = a.Kind, a.Timestamp, a.AfterMode
+	if a != b {
+		return errors.New("golem: applied receipt body differs from intent")
+	}
+	return nil
+}
+
+func validateCheckpointReceipt(entry checkpointReceipt) error {
+	intent, err := decodeStoredMutationReceipt(entry.intentJSON)
+	if err != nil {
+		return err
+	}
+	if intent.Body.Kind != "intent" || intent.Body.MutationID != entry.mutationID {
+		return errors.New("golem: ledger intent identity mismatch")
+	}
+	if entry.appliedJSON != nil {
+		applied, err := decodeStoredMutationReceipt(entry.appliedJSON)
+		if err != nil {
+			return err
+		}
+		return matchingAppliedReceipt(intent, applied)
+	}
+	return nil
+}
+
+func scanCheckpointReceipt(row *sql.Row) (checkpointReceipt, error) {
+	var entry checkpointReceipt
+	if err := row.Scan(&entry.sequence, &entry.mutationID, &entry.intentJSON, &entry.appliedJSON); err != nil {
+		return checkpointReceipt{}, err
+	}
+	if err := validateCheckpointReceipt(entry); err != nil {
+		return checkpointReceipt{}, err
+	}
+	return entry, nil
+}
+
+func (s *checkpointStore) loadReceipt(ctx context.Context, mutationID string) (checkpointReceipt, error) {
+	return scanCheckpointReceipt(s.db.QueryRowContext(ctx, `SELECT sequence, mutation_id, intent_json, applied_json FROM mutation_receipts WHERE mutation_id = ?`, mutationID))
+}
+
+func loadReceiptTx(ctx context.Context, tx *sql.Tx, mutationID string) (checkpointReceipt, error) {
+	return scanCheckpointReceipt(tx.QueryRowContext(ctx, `SELECT sequence, mutation_id, intent_json, applied_json FROM mutation_receipts WHERE mutation_id = ?`, mutationID))
+}
+
+// scanReceipts is metadata-only and starts at the independent ledger, so pruning
+// or completed undo never hides evidence. Authentication belongs to the caller.
+func (s *checkpointStore) scanReceipts(ctx context.Context, afterSequence int64, limit int) ([]checkpointReceipt, error) {
+	if afterSequence < 0 || limit < 1 || limit > 1000 {
+		return nil, errors.New("golem: receipt scan requires nonnegative cursor and limit 1..1000")
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT sequence, mutation_id, intent_json, applied_json
+	 FROM mutation_receipts WHERE sequence > ? ORDER BY sequence ASC LIMIT ?`, afterSequence, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	var entries []checkpointReceipt
+	for rows.Next() {
+		var entry checkpointReceipt
+		if err := rows.Scan(&entry.sequence, &entry.mutationID, &entry.intentJSON, &entry.appliedJSON); err != nil {
+			return nil, err
+		}
+		if err := validateCheckpointReceipt(entry); err != nil {
+			return nil, err
+		}
+		entries = append(entries, entry)
+	}
+	return entries, rows.Err()
+}
+
+func (s *checkpointStore) bindForwardReceipt(f checkpointFile, intent agenttools.MutationReceipt) error {
+	body := intent.Body
+	beforeHash := "absent"
+	if f.existed {
+		beforeHash = f.priorHash
+	}
+	if body.Kind != "intent" || body.UndoOf != "" || body.WorkspaceHash != s.workspaceHash || body.Path != f.path || body.BeforeHash != beforeHash || body.AfterHash != f.afterHash || (body.AfterMode != nil) != f.trackedMode || body.AfterMode != nil && fs.FileMode(*body.AfterMode) != f.afterMode {
+		return errors.New("golem: forward intent does not bind checkpoint metadata")
+	}
+	return nil
+}
+
+func (s *checkpointStore) boundForwardTx(ctx context.Context, tx *sql.Tx, fileID int64) (checkpointFile, checkpointReceipt, error) {
+	var f checkpointFile
+	var mode sql.NullInt64
+	var forward, inverse sql.NullString
+	err := tx.QueryRowContext(ctx, `SELECT id, path, prior_hash, existed, after_hash, after_mode, forward_mutation_id, inverse_mutation_id
+	 FROM checkpoint_files WHERE id = ?`, fileID).Scan(&f.id, &f.path, &f.priorHash, &f.existed, &f.afterHash, &mode, &forward, &inverse)
+	if err != nil {
+		return f, checkpointReceipt{}, err
+	}
+	if mode.Valid && (mode.Int64 < 0 || mode.Int64 > 0o777) {
+		return f, checkpointReceipt{}, errors.New("golem: invalid stored checkpoint mode")
+	}
+	f.afterMode, f.trackedMode = fs.FileMode(mode.Int64), mode.Valid
+	f.forwardMutationID, f.inverseMutationID = forward, inverse
+	if !forward.Valid || forward.String == "" {
+		return f, checkpointReceipt{}, errors.New("golem: checkpoint has no verifiable forward intent")
+	}
+	if inverse.Valid && inverse.String == "" {
+		return f, checkpointReceipt{}, errors.New("golem: checkpoint has an invalid inverse reference")
+	}
+	entry, err := loadReceiptTx(ctx, tx, forward.String)
+	if err != nil {
+		return f, entry, err
+	}
+	intent, err := decodeStoredMutationReceipt(entry.intentJSON)
+	if err != nil {
+		return f, entry, err
+	}
+	return f, entry, s.bindForwardReceipt(f, intent)
+}
+
+func boundInverseTx(ctx context.Context, tx *sql.Tx, forward checkpointReceipt, inverseID string) (checkpointReceipt, error) {
+	entry, err := loadReceiptTx(ctx, tx, inverseID)
+	if err != nil {
+		return entry, err
+	}
+	original, err := decodeStoredMutationReceipt(forward.intentJSON)
+	if err != nil {
+		return entry, err
+	}
+	inverse, err := decodeStoredMutationReceipt(entry.intentJSON)
+	if err != nil {
+		return entry, err
+	}
+	if err := bindInverseReceipt(original, inverse); err != nil {
+		return entry, err
+	}
+	return entry, nil
+}
+
+func bindInverseReceipt(forward, inverse agenttools.MutationReceipt) error {
+	f, i := forward.Body, inverse.Body
+	if f.Kind != "intent" || f.UndoOf != "" || i.Kind != "intent" || i.UndoOf != f.MutationID || i.WorkspaceHash != f.WorkspaceHash || i.Path != f.Path || i.BeforeHash != f.AfterHash || i.AfterHash != f.BeforeHash || i.AfterMode != nil {
+		return errors.New("golem: inverse intent does not reverse forward intent")
+	}
+	return nil
+}
+
+func commitReceiptTx(ctx context.Context, tx *sql.Tx, entry checkpointReceipt, appliedJSON []byte) error {
+	intent, err := decodeStoredMutationReceipt(entry.intentJSON)
+	if err != nil {
+		return err
+	}
+	applied, err := decodeStoredMutationReceipt(appliedJSON)
+	if err != nil {
+		return err
+	}
+	if err := matchingAppliedReceipt(intent, applied); err != nil {
+		return err
+	}
+	res, err := tx.ExecContext(ctx, `UPDATE mutation_receipts SET applied_json = ? WHERE mutation_id = ? AND applied_json IS NULL`, string(appliedJSON), entry.mutationID)
+	if err != nil {
+		return fmt.Errorf("golem: commit receipt: %w", err)
+	}
+	return requireOneRow(res, "commit receipt")
+}
+
+// commitSignedIntent atomically records observed evidence and snapshot progress.
+func (s *checkpointStore) commitSignedIntent(ctx context.Context, fileID int64, appliedJSON []byte) error {
+	return s.execTx(ctx, func(tx *sql.Tx) error {
+		_, entry, err := s.boundForwardTx(ctx, tx, fileID)
+		if err != nil {
+			return err
+		}
+		if err := commitReceiptTx(ctx, tx, entry, appliedJSON); err != nil {
+			return err
+		}
+		res, err := tx.ExecContext(ctx, `UPDATE checkpoint_files SET applied = 1 WHERE id = ? AND applied = 0
+		 AND inverse_mutation_id IS NULL AND checkpoint_id IN (SELECT id FROM checkpoints WHERE state = ?)`, fileID, checkpointOpen)
+		if err != nil {
+			return err
+		}
+		return requireOneRow(res, "commit signed intent")
+	})
+}
+
+// recoverCommitIntent preserves an uncertain forward as undoable bookkeeping;
+// it never fabricates an observed applied receipt.
+func (s *checkpointStore) recoverCommitIntent(ctx context.Context, fileID int64) error {
+	return s.recoverForwardIntent(ctx, fileID, true)
+}
+
+// recoverDropIntent removes a snapshot whose target was already reached while
+// retaining the unresolved intent. It is not a definite Abort.
+func (s *checkpointStore) recoverDropIntent(ctx context.Context, fileID int64) error {
+	return s.recoverForwardIntent(ctx, fileID, false)
+}
+
+func (s *checkpointStore) recoverForwardIntent(ctx context.Context, fileID int64, keep bool) error {
+	return s.execTx(ctx, func(tx *sql.Tx) error {
+		_, entry, err := s.boundForwardTx(ctx, tx, fileID)
+		if err != nil {
+			return err
+		}
+		if entry.appliedJSON != nil {
+			return errors.New("golem: recovery requires unconfirmed forward intent")
+		}
+		query := `DELETE FROM checkpoint_files`
+		if keep {
+			query = `UPDATE checkpoint_files SET applied = 1`
+		}
+		res, err := tx.ExecContext(ctx, query+` WHERE id = ? AND applied = 0 AND inverse_mutation_id IS NULL
+		 AND checkpoint_id IN (SELECT id FROM checkpoints WHERE state = ?)`, fileID, checkpointOpen)
+		if err != nil {
+			return err
+		}
+		return requireOneRow(res, "recover forward intent")
+	})
+}
+
+// prepareInverseIntent preserves previous unresolved attempts if a retry needs
+// a new identity. Completed inverse evidence must be reconciled, never replaced.
+func (s *checkpointStore) prepareInverseIntent(ctx context.Context, fileID int64, intentJSON []byte) error {
+	inverse, err := decodeStoredMutationReceipt(intentJSON)
+	if err != nil {
+		return err
+	}
+	return s.execTx(ctx, func(tx *sql.Tx) error {
+		f, forward, err := s.boundForwardTx(ctx, tx, fileID)
+		if err != nil {
+			return err
+		}
+		original, err := decodeStoredMutationReceipt(forward.intentJSON)
+		if err != nil {
+			return err
+		}
+		if err := bindInverseReceipt(original, inverse); err != nil {
+			return err
+		}
+		if f.inverseMutationID.Valid {
+			previous, err := boundInverseTx(ctx, tx, forward, f.inverseMutationID.String)
+			if err != nil {
+				return err
+			}
+			if previous.appliedJSON != nil {
+				return errors.New("golem: completed inverse requires reconciliation")
+			}
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO mutation_receipts (mutation_id, intent_json) VALUES (?, ?)`, inverse.Body.MutationID, string(intentJSON)); err != nil {
+			return err
+		}
+		res, err := tx.ExecContext(ctx, `UPDATE checkpoint_files SET inverse_mutation_id = ? WHERE id = ? AND applied = 1 AND restored = 0
+		 AND checkpoint_id IN (SELECT id FROM checkpoints WHERE state = ?)`, inverse.Body.MutationID, fileID, checkpointUndoing)
+		if err != nil {
+			return err
+		}
+		return requireOneRow(res, "prepare inverse intent")
+	})
+}
+
+func (s *checkpointStore) commitInverseIntent(ctx context.Context, fileID int64, appliedJSON []byte) error {
+	return s.execTx(ctx, func(tx *sql.Tx) error {
+		f, forward, err := s.boundForwardTx(ctx, tx, fileID)
+		if err != nil {
+			return err
+		}
+		inverse, err := boundInverseTx(ctx, tx, forward, f.inverseMutationID.String)
+		if err != nil {
+			return err
+		}
+		if err := commitReceiptTx(ctx, tx, inverse, appliedJSON); err != nil {
+			return err
+		}
+		return markSignedRestoredTx(ctx, tx, fileID)
+	})
+}
+
+func markSignedRestoredTx(ctx context.Context, tx *sql.Tx, fileID int64) error {
+	res, err := tx.ExecContext(ctx, `UPDATE checkpoint_files SET restored = 1 WHERE id = ? AND applied = 1 AND restored = 0
+	 AND checkpoint_id IN (SELECT id FROM checkpoints WHERE state = ?)`, fileID, checkpointUndoing)
+	if err != nil {
+		return err
+	}
+	return requireOneRow(res, "restore signed intent")
+}
+
+// recoverRestored records an already-reached target, after caller authentication
+// and filesystem guards. Missing/incomplete inverse evidence stays unconfirmed.
+func (s *checkpointStore) recoverRestored(ctx context.Context, fileID int64) error {
+	return s.execTx(ctx, func(tx *sql.Tx) error {
+		f, forward, err := s.boundForwardTx(ctx, tx, fileID)
+		if err != nil {
+			return err
+		}
+		if f.inverseMutationID.Valid {
+			if _, err := boundInverseTx(ctx, tx, forward, f.inverseMutationID.String); err != nil {
+				return err
+			}
+		}
+		return markSignedRestoredTx(ctx, tx, fileID)
+	})
+}
+
+// reconcileInverseIntent binds retained completed inverse evidence to the row
+// and records progress without filesystem mutation or new evidence. A different
+// unresolved inverse remains in the ledger after its reference is replaced.
+func (s *checkpointStore) reconcileInverseIntent(ctx context.Context, fileID int64, inverseID string) error {
+	return s.execTx(ctx, func(tx *sql.Tx) error {
+		f, forward, err := s.boundForwardTx(ctx, tx, fileID)
+		if err != nil {
+			return err
+		}
+		if f.inverseMutationID.Valid {
+			if _, err := boundInverseTx(ctx, tx, forward, f.inverseMutationID.String); err != nil {
+				return err
+			}
+		}
+		inverse, err := boundInverseTx(ctx, tx, forward, inverseID)
+		if err != nil {
+			return err
+		}
+		if inverse.appliedJSON == nil {
+			return errors.New("golem: inverse receipt is unconfirmed")
+		}
+		res, err := tx.ExecContext(ctx, `UPDATE checkpoint_files SET inverse_mutation_id = ? WHERE id = ?`, inverseID, fileID)
+		if err != nil {
+			return err
+		}
+		if err := requireOneRow(res, "reconcile inverse reference"); err != nil {
+			return err
+		}
+		return markSignedRestoredTx(ctx, tx, fileID)
+	})
 }
