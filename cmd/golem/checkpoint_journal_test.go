@@ -364,9 +364,11 @@ func TestCheckpointMarkRestoredHardeningFailureLatches(t *testing.T) {
 	}
 
 	dbPath := j.store.dbPath
-	j.store.dbPath = t.TempDir()
+	badDBPath := t.TempDir()
+	j.crashAfterRestore = func(string) { j.store.dbPath = badDBPath }
+	group.state = checkpointUndoing
 	var out bytes.Buffer
-	if j.restoreFile(ctx, &out, group.files[0]) {
+	if j.restoreGroups(ctx, &out, []checkpointGroup{group}) {
 		t.Fatal("restoreFile reported success despite hardening failure")
 	}
 	if got, ok := readWorkspace(t, root, "a.txt"); !ok || string(got) != "A0\n" {
@@ -399,7 +401,7 @@ func TestCheckpointDeleteRestoredHardeningFailureLatches(t *testing.T) {
 		t.Fatalf("markUndoing: %v", err)
 	}
 	for _, f := range groups[0].files {
-		if err := j.store.markRestored(ctx, f.id); err != nil {
+		if err := j.store.testCommitInverse(ctx, f.id); err != nil {
 			t.Fatalf("markRestored: %v", err)
 		}
 	}
@@ -957,7 +959,7 @@ func TestCheckpointUndoResumeSkipsRestoredEvenAfterUserEdit(t *testing.T) {
 	if err := os.Remove(filepath.Join(root, "b.txt")); err != nil {
 		t.Fatal(err)
 	}
-	if err := j.store.markRestored(ctx, b.id); err != nil {
+	if err := j.store.testCommitInverse(ctx, b.id); err != nil {
 		t.Fatalf("markRestored: %v", err)
 	}
 	// The user recreates b.txt after the crash: a restored row must be
@@ -1572,5 +1574,481 @@ func TestCheckpointJournalAbortFailureLatches(t *testing.T) {
 	}
 	if err := j.beginTurn(context.Background(), "next", func() {}); err == nil {
 		t.Fatal("failed Abort did not latch")
+	}
+}
+
+// Literal hashes are independent of the encoder and ContentHash under test.
+func TestCheckpointUndoSignedInverseTransitions(t *testing.T) {
+	for _, create := range []bool{false, true} {
+		t.Run(fmt.Sprint(create), func(t *testing.T) {
+			j, tools, root := newJournalFixture(t)
+			if !create {
+				if err := os.WriteFile(filepath.Join(root, "a.txt"), []byte("abc"), 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			beginTestTurn(t, j, "inverse")
+			applyTool(t, tools, "write_file", map[string]any{"path": "a.txt", "content": "x"})
+			mustSealTurn(t, j)
+			before, _ := j.store.scanReceipts(context.Background(), 0, 10)
+			out := runUndo(t, j, 1)
+			entries, err := j.store.scanReceipts(context.Background(), 0, 10)
+			if err != nil || len(entries) != 2 {
+				t.Fatalf("inverse evidence = %d,%v; output %s", len(entries), err, out)
+			}
+			inverse, err := authenticateCheckpointReceipt(context.Background(), j.verifier, entries[1])
+			if err != nil {
+				t.Fatal(err)
+			}
+			target := "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+			if create {
+				target = "absent"
+			}
+			b := inverse.Body
+			if b.MutationID == before[0].mutationID || b.UndoOf != before[0].mutationID || b.Path != "a.txt" || b.WorkspaceHash != j.store.workspaceHash || b.BeforeHash != "2d711642b726b04401627ca9fbac32f5c8530fb1903cc4db02258717921a4881" || b.AfterHash != target || b.AfterMode != nil || entries[1].appliedJSON == nil {
+				t.Fatalf("inverse = %+v", b)
+			}
+			if len(listIDs(t, j.store)) != 0 {
+				t.Fatal("inverse did not complete checkpoint")
+			}
+		})
+	}
+}
+
+func TestCheckpointUndoAuthenticatesWholeBatch(t *testing.T) {
+	for _, resume := range []bool{false, true} {
+		for _, fault := range []string{"signature", "applied-signature", "signed-field", "path", "hash", "mode", "prior-blob", "unsigned", "unsigned-create", "dangling"} {
+			t.Run(fmt.Sprintf("resume-%v/%s", resume, fault), func(t *testing.T) {
+				j, tools, root := newJournalFixture(t)
+				for _, path := range []string{"a.txt", "b.txt"} {
+					if fault == "unsigned-create" {
+						continue
+					}
+					if err := os.WriteFile(filepath.Join(root, path), []byte("abc"), 0600); err != nil {
+						t.Fatal(err)
+					}
+				}
+				beginTestTurn(t, j, "batch")
+				for _, path := range []string{"a.txt", "b.txt"} {
+					applyTool(t, tools, "write_file", map[string]any{"path": path, "content": "x"})
+				}
+				mustSealTurn(t, j)
+				groups, _ := j.store.newestCompleted(context.Background(), 1)
+				f := groups[0].files[1] // Bad later restore must stop the good first restore.
+				if resume {
+					if err := j.store.markUndoing(context.Background(), []int64{groups[0].id}); err != nil {
+						t.Fatal(err)
+					}
+				}
+				switch fault {
+				case "signature", "applied-signature", "signed-field":
+					entry, err := j.store.loadReceipt(context.Background(), f.forwardMutationID.String)
+					if err != nil {
+						t.Fatal(err)
+					}
+					rawReceipt, column := entry.intentJSON, "intent_json"
+					if fault == "applied-signature" {
+						rawReceipt, column = entry.appliedJSON, "applied_json"
+					}
+					receipt := mustDecodeCrashReceipt(t, rawReceipt)
+					if fault == "signed-field" {
+						receipt.Body.Timestamp = "2026-01-02T00:00:00Z"
+					} else {
+						receipt.Signature.Bytes[0] ^= 1
+					}
+					raw, err := signing.MarshalCanonical(receipt)
+					if err != nil {
+						t.Fatal(err)
+					}
+					checkpointSQL(t, j.store.db, `UPDATE mutation_receipts SET `+column+`=? WHERE mutation_id=?`, string(raw), entry.mutationID)
+				case "path":
+					checkpointSQL(t, j.store.db, `UPDATE checkpoint_files SET path='forged.txt' WHERE id=?`, f.id)
+				case "hash":
+					checkpointSQL(t, j.store.db, `UPDATE checkpoint_files SET prior_hash=after_hash WHERE id=?`, f.id)
+				case "mode":
+					checkpointSQL(t, j.store.db, `UPDATE checkpoint_files SET after_mode=0 WHERE id=?`, f.id)
+				case "prior-blob":
+					checkpointSQL(t, j.store.db, `UPDATE checkpoint_files SET prior_content=? WHERE id=?`, []byte("forged"), f.id)
+				case "unsigned", "unsigned-create":
+					checkpointSQL(t, j.store.db, `UPDATE checkpoint_files SET forward_mutation_id=NULL WHERE id=?`, f.id)
+				case "dangling":
+					checkpointSQL(t, j.store.db, `PRAGMA foreign_keys=OFF`)
+					checkpointSQL(t, j.store.db, `UPDATE checkpoint_files SET forward_mutation_id='missing' WHERE id=?`, f.id)
+				}
+				out := runUndo(t, j, 1)
+				for _, path := range []string{"a.txt", "b.txt"} {
+					got, _ := readWorkspace(t, root, path)
+					if string(got) != "x" {
+						t.Fatalf("untrusted batch mutated %s to %q: %s", path, got, out)
+					}
+				}
+				if !strings.Contains(out, "undo failed") {
+					t.Fatalf("missing authenticity refusal: %s", out)
+				}
+			})
+		}
+	}
+}
+
+func TestCheckpointUndoAlreadyTargetDoesNotSign(t *testing.T) {
+	for _, state := range []string{"absent", "same-byte", "interrupted", "restored", "restored-without-inverse"} {
+		t.Run(state, func(t *testing.T) {
+			j, tools, root := newJournalFixture(t)
+			if state != "absent" {
+				if err := os.WriteFile(filepath.Join(root, "a.txt"), []byte("abc"), 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			beginTestTurn(t, j, "target")
+			content := "x"
+			if state == "same-byte" {
+				content = "abc"
+			}
+			applyTool(t, tools, "write_file", map[string]any{"path": "a.txt", "content": content})
+			mustSealTurn(t, j)
+			groups, _ := j.store.newestCompleted(context.Background(), 1)
+			f := groups[0].files[0]
+			if state == "absent" {
+				if err := os.Remove(filepath.Join(root, "a.txt")); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if state == "interrupted" || strings.HasPrefix(state, "restored") {
+				if err := j.store.markUndoing(context.Background(), []int64{groups[0].id}); err != nil {
+					t.Fatal(err)
+				}
+				if state != "restored-without-inverse" {
+					forward, err := j.store.loadReceipt(context.Background(), f.forwardMutationID.String)
+					if err != nil {
+						t.Fatal(err)
+					}
+					inv := storeInverse(mustDecodeCrashReceipt(t, forward.intentJSON).Body, strings.Repeat("Z", 26))
+					if err := j.store.prepareInverseIntent(context.Background(), f.id, storeReceiptJSON(t, inv)); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if err := os.WriteFile(filepath.Join(root, "a.txt"), []byte("abc"), 0600); err != nil {
+					t.Fatal(err)
+				}
+				if strings.HasPrefix(state, "restored") {
+					if err := j.store.recoverRestored(context.Background(), f.id); err != nil {
+						t.Fatal(err)
+					}
+					if err := os.WriteFile(filepath.Join(root, "a.txt"), []byte("user"), 0600); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+			before, _ := j.store.scanReceipts(context.Background(), 0, 10)
+			j.signer = journalTestSigner{Signer: j.signer, sign: func(context.Context, agenttools.MutationReceiptBody) error {
+				t.Fatal("already-target operation signed")
+				return nil
+			}}
+			out := runUndo(t, j, 1)
+			after, err := j.store.scanReceipts(context.Background(), 0, 10)
+			if err != nil || len(after) != len(before) {
+				t.Fatalf("fabricated evidence: %v", err)
+			}
+			for i := range before {
+				if !bytes.Equal(before[i].intentJSON, after[i].intentJSON) || !bytes.Equal(before[i].appliedJSON, after[i].appliedJSON) {
+					t.Fatal("changed historical receipt")
+				}
+			}
+			if !strings.Contains(out, "[unconfirmed]") {
+				t.Fatalf("unconfirmed completion missing: %s", out)
+			}
+			if state == "interrupted" && !strings.Contains(out, "undo target reached; interrupted attempt has no applied receipt") {
+				t.Fatalf("notice missing: %s", out)
+			}
+			if len(listIDs(t, j.store)) != 0 {
+				t.Fatal("target recovery retained checkpoint")
+			}
+			if strings.HasPrefix(state, "restored") {
+				got, _ := readWorkspace(t, root, "a.txt")
+				if string(got) != "user" {
+					t.Fatal("restored row overwrote user edit")
+				}
+			}
+		})
+	}
+}
+
+func TestCheckpointUndoRetainedCompletedInversePreventsReplay(t *testing.T) {
+	for _, live := range []string{"x", "user"} {
+		t.Run(live, func(t *testing.T) {
+			j, tools, root := newJournalFixture(t)
+			if err := os.WriteFile(filepath.Join(root, "a.txt"), []byte("abc"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			beginTestTurn(t, j, "original")
+			applyTool(t, tools, "write_file", map[string]any{"path": "a.txt", "content": "x"})
+			mustSealTurn(t, j)
+			groups, _ := j.store.newestCompleted(context.Background(), 1)
+			f := groups[0].files[0]
+			entry, err := j.store.loadReceipt(context.Background(), f.forwardMutationID.String)
+			if err != nil {
+				t.Fatal(err)
+			}
+			addUnreferencedReceiptPage(t, j, mustDecodeCrashReceipt(t, entry.intentJSON).Body)
+			runUndo(t, j, 1)
+			entries, err := j.store.scanReceipts(context.Background(), 0, 200)
+			if err != nil || len(entries) != 102 || entries[101].appliedJSON == nil {
+				t.Fatalf("completed inverse missing: %d,%v", len(entries), err)
+			}
+			checkpointSQL(t, j.store.db, `INSERT INTO checkpoints(id,created_at,goal,state) VALUES(?,?,?,'completed')`, groups[0].id, formatCheckpointTime(testNow), "recreated")
+			checkpointSQL(t, j.store.db, `INSERT INTO checkpoint_files(checkpoint_id,path,prior_content,prior_hash,existed,after_hash,summary,at,applied,restored,forward_mutation_id) VALUES(?,?,?,?,1,?,'','2026-01-01T00:00:00Z',1,0,?)`, groups[0].id, f.path, f.priorContent, f.priorHash, f.afterHash, f.forwardMutationID.String)
+			if err := os.WriteFile(filepath.Join(root, "a.txt"), []byte(live), 0600); err != nil {
+				t.Fatal(err)
+			}
+			j.signer = journalTestSigner{Signer: j.signer, sign: func(context.Context, agenttools.MutationReceiptBody) error {
+				t.Fatal("replay signed again")
+				return nil
+			}}
+			out := runUndo(t, j, 1)
+			got, _ := readWorkspace(t, root, "a.txt")
+			if string(got) != live || len(listIDs(t, j.store)) != 0 {
+				t.Fatalf("completed inverse replayed or not reconciled: %q; %s", got, out)
+			}
+			after, _ := j.store.scanReceipts(context.Background(), 0, 200)
+			if len(after) != 102 || !bytes.Equal(after[101].appliedJSON, entries[101].appliedJSON) {
+				t.Fatal("completed receipt replaced")
+			}
+		})
+	}
+}
+
+func TestCheckpointUndoInverseLineagePreflight(t *testing.T) {
+	for _, fault := range []string{"missing-original", "wrong-original", "inverse-original", "workspace", "path", "hashes", "other-row"} {
+		for _, resume := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/resume-%v", fault, resume), func(t *testing.T) {
+				j, tools, root := newJournalFixture(t)
+				beginTestTurn(t, j, "lineage")
+				for _, path := range []string{"a.txt", "b.txt"} {
+					applyTool(t, tools, "write_file", map[string]any{"path": path, "content": "x"})
+				}
+				mustSealTurn(t, j)
+				groups, _ := j.store.newestCompleted(context.Background(), 1)
+				f := groups[0].files[1]
+				entry, _ := j.store.loadReceipt(context.Background(), f.forwardMutationID.String)
+				inverse := storeInverse(mustDecodeCrashReceipt(t, entry.intentJSON).Body, strings.Repeat("Q", 26))
+				switch fault {
+				case "missing-original":
+					inverse.UndoOf = ""
+				case "wrong-original":
+					inverse.UndoOf = strings.Repeat("Z", 26)
+				case "inverse-original":
+					previous := inverse
+					previous.MutationID = strings.Repeat("P", 26)
+					checkpointSQL(t, j.store.db, `INSERT INTO mutation_receipts(mutation_id,intent_json) VALUES(?,?)`, previous.MutationID, string(storeReceiptJSON(t, previous)))
+					inverse.UndoOf = previous.MutationID
+				case "workspace":
+					inverse.WorkspaceHash = strings.Repeat("0", 64)
+				case "path":
+					inverse.Path = "other.txt"
+				case "hashes":
+					inverse.BeforeHash = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+				case "other-row":
+					other, _ := j.store.loadReceipt(context.Background(), groups[0].files[0].forwardMutationID.String)
+					inverse = storeInverse(mustDecodeCrashReceipt(t, other.intentJSON).Body, inverse.MutationID)
+				}
+				// Empty undo_of with an absence target violates portable shape; use a valid
+				// forward create to test an inverse reference that does not name an original.
+				if fault == "missing-original" {
+					inverse.BeforeHash, inverse.AfterHash = "absent", inverse.BeforeHash
+				}
+				checkpointSQL(t, j.store.db, `INSERT INTO mutation_receipts(mutation_id,intent_json) VALUES(?,?)`, inverse.MutationID, string(storeReceiptJSON(t, inverse)))
+				checkpointSQL(t, j.store.db, `UPDATE checkpoint_files SET inverse_mutation_id=? WHERE id=?`, inverse.MutationID, f.id)
+				if resume {
+					if err := j.store.markUndoing(context.Background(), []int64{groups[0].id}); err != nil {
+						t.Fatal(err)
+					}
+				}
+				out := runUndo(t, j, 1)
+				for _, path := range []string{"a.txt", "b.txt"} {
+					got, _ := readWorkspace(t, root, path)
+					if string(got) != "x" {
+						t.Fatalf("bad lineage modified %s: %s", path, out)
+					}
+				}
+				if !strings.Contains(out, "undo failed") {
+					t.Fatalf("lineage accepted: %s", out)
+				}
+			})
+		}
+	}
+}
+
+func TestCheckpointUndoRetryUsesFreshIdentity(t *testing.T) {
+	j, tools, root := newJournalFixture(t)
+	beginTestTurn(t, j, "retry")
+	applyTool(t, tools, "write_file", map[string]any{"path": "a.txt", "content": "x"})
+	mustSealTurn(t, j)
+	groups, _ := j.store.newestCompleted(context.Background(), 1)
+	f := groups[0].files[0]
+	if err := j.store.markUndoing(context.Background(), []int64{groups[0].id}); err != nil {
+		t.Fatal(err)
+	}
+	entry, _ := j.store.loadReceipt(context.Background(), f.forwardMutationID.String)
+	inverse := storeInverse(mustDecodeCrashReceipt(t, entry.intentJSON).Body, strings.Repeat("R", 26))
+	raw := storeReceiptJSON(t, inverse)
+	if err := j.store.prepareInverseIntent(context.Background(), f.id, raw); err != nil {
+		t.Fatal(err)
+	}
+	out := runUndo(t, j, 1)
+	entries, err := j.store.scanReceipts(context.Background(), 0, 10)
+	if err != nil || len(entries) != 3 {
+		t.Fatalf("retry evidence = %d,%v; %s", len(entries), err, out)
+	}
+	if entries[1].appliedJSON != nil || !bytes.Equal(entries[1].intentJSON, raw) || entries[2].appliedJSON == nil || entries[2].mutationID == inverse.MutationID {
+		t.Fatal("retry reused or resolved uncertain identity")
+	}
+	if _, ok := readWorkspace(t, root, "a.txt"); ok {
+		t.Fatal("retry did not delete")
+	}
+	if !strings.Contains(out, "[unconfirmed]") {
+		t.Fatalf("retry erased earlier uncertainty: %s", out)
+	}
+}
+
+func TestCheckpointUndoCompletedRowDoesNotSimulateTarget(t *testing.T) {
+	j, tools, root := newJournalFixture(t)
+	if err := os.WriteFile(filepath.Join(root, "a.txt"), []byte("abc"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	for _, content := range []string{"x", "y"} {
+		beginTestTurn(t, j, "chain")
+		applyTool(t, tools, "write_file", map[string]any{"path": "a.txt", "content": content})
+		mustSealTurn(t, j)
+	}
+	groups, _ := j.store.newestCompleted(context.Background(), 1)
+	f := groups[0].files[0]
+	if err := j.store.markUndoing(context.Background(), []int64{groups[0].id}); err != nil {
+		t.Fatal(err)
+	}
+	if err := j.store.testCommitInverse(context.Background(), f.id); err != nil {
+		t.Fatal(err)
+	}
+	// Recreate pending bookkeeping for the completed inverse while both selected
+	// groups are completed. Live y is drift for the older x -> abc operation.
+	checkpointSQL(t, j.store.db, `UPDATE checkpoint_files SET restored=0 WHERE id=?`, f.id)
+	checkpointSQL(t, j.store.db, `UPDATE checkpoints SET state='completed' WHERE id=?`, groups[0].id)
+	out := runUndo(t, j, 2)
+	got, _ := readWorkspace(t, root, "a.txt")
+	if string(got) != "y" || !strings.Contains(out, "cannot undo") {
+		t.Fatalf("completed row fabricated simulated x: %q; %s", got, out)
+	}
+	var restored int
+	if err := j.store.db.QueryRow(`SELECT restored FROM checkpoint_files WHERE id=?`, f.id).Scan(&restored); err != nil || restored != 0 {
+		t.Fatal("progress changed before pending preflight")
+	}
+}
+
+func TestCheckpointUndoDistinctForwardIdentities(t *testing.T) {
+	j, tools, root := newJournalFixture(t)
+	for range 2 {
+		beginTestTurn(t, j, "same transition")
+		applyTool(t, tools, "write_file", map[string]any{"path": "a.txt", "content": "x"})
+		mustSealTurn(t, j)
+		out := runUndo(t, j, 1)
+		if _, ok := readWorkspace(t, root, "a.txt"); ok {
+			t.Fatalf("distinct forward refused: %s", out)
+		}
+	}
+	entries, err := j.store.scanReceipts(context.Background(), 0, 10)
+	if err != nil || len(entries) != 4 || entries[0].mutationID == entries[2].mutationID {
+		t.Fatal("distinct transitions conflated")
+	}
+}
+
+func TestCheckpointUndoSigningFailureAndRetry(t *testing.T) {
+	for _, fault := range []string{"intent-signing", "applied-signing", "after-state", "prepare-drift", "nil-signer"} {
+		t.Run(fault, func(t *testing.T) {
+			j, tools, root := newJournalFixture(t)
+			beginTestTurn(t, j, "inverse failure")
+			applyTool(t, tools, "write_file", map[string]any{"path": "a.txt", "content": "x"})
+			mustSealTurn(t, j)
+			signer := j.signer
+			calls := 0
+			j.signer = journalTestSigner{Signer: signer, sign: func(ctx context.Context, body agenttools.MutationReceiptBody) error {
+				calls++
+				if ctx.Err() != nil {
+					t.Fatal("inverse used canceled signing context")
+				}
+				if body.Kind == "intent" && fault == "intent-signing" || body.Kind == "applied" && fault == "applied-signing" {
+					return errors.New("test inverse signer failure")
+				}
+				if body.Kind == "intent" && fault == "prepare-drift" {
+					if err := os.WriteFile(filepath.Join(root, "a.txt"), []byte("user"), 0600); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if body.Kind == "applied" {
+					entries, _ := j.store.scanReceipts(context.Background(), 0, 10)
+					if len(entries) != 2 || entries[1].appliedJSON != nil {
+						t.Fatal("applied signed without durable inverse intent")
+					}
+					if _, ok := readWorkspace(t, root, "a.txt"); ok {
+						t.Fatal("applied signed before inverse")
+					}
+				}
+				return nil
+			}}
+			if fault == "nil-signer" {
+				j.signer = nil
+			}
+			if fault == "after-state" {
+				j.crashAfterRestore = func(string) {
+					if err := os.WriteFile(filepath.Join(root, "a.txt"), []byte("user"), 0600); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+			out := runUndo(t, j, 1)
+			if !strings.Contains(out, "undo failed") && !strings.Contains(out, "cannot undo") {
+				t.Fatalf("failure claimed success: %s", out)
+			}
+			entries, err := j.store.scanReceipts(context.Background(), 0, 10)
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := 2
+			if fault == "intent-signing" || fault == "nil-signer" {
+				want = 1
+			}
+			if len(entries) != want || want == 2 && entries[1].appliedJSON != nil {
+				t.Fatalf("failure fabricated evidence: %d", len(entries))
+			}
+			if fault == "prepare-drift" {
+				got, _ := readWorkspace(t, root, "a.txt")
+				if string(got) != "user" {
+					t.Fatal("inverse ignored drift during preparation")
+				}
+			}
+			// Restart against the original after-state after an uncertain failure.
+			if err := os.WriteFile(filepath.Join(root, "a.txt"), []byte("x"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			restarted := newTestCheckpointJournal(t, j.ws, j.store)
+			out = runUndo(t, restarted, 1)
+			after, err := j.store.scanReceipts(context.Background(), 0, 10)
+			if err != nil || len(after) != want+1 || after[len(after)-1].appliedJSON == nil {
+				t.Fatalf("fresh retry failed: %s", out)
+			}
+			if want == 2 && (after[2].mutationID == entries[1].mutationID || !bytes.Equal(entries[1].intentJSON, after[1].intentJSON) || after[1].appliedJSON != nil) {
+				t.Fatal("retry rewrote failed attempt")
+			}
+			if _, ok := readWorkspace(t, root, "a.txt"); ok {
+				t.Fatal("retry did not restore")
+			}
+		})
+	}
+}
+
+// A full unrelated page ensures history consumers cannot stop at the first page.
+func addUnreferencedReceiptPage(t *testing.T, j *checkpointJournal, body agenttools.MutationReceiptBody) {
+	t.Helper()
+	for i := range 100 {
+		body.MutationID = fmt.Sprintf("%s%c%c", strings.Repeat("J", 24), 'A'+i/26, 'A'+i%26)
+		checkpointSQL(t, j.store.db, `INSERT INTO mutation_receipts(mutation_id,intent_json)VALUES(?,?)`, body.MutationID, string(storeReceiptJSON(t, body)))
 	}
 }

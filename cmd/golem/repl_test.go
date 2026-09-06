@@ -20,6 +20,7 @@ import (
 	feedbackpkg "github.com/kstruzzieri/go-llm/feedback"
 	golemruntime "github.com/kstruzzieri/go-llm/golem"
 	"github.com/kstruzzieri/go-llm/provider"
+	"github.com/kstruzzieri/go-llm/signing"
 )
 
 type tokenThenErrorCaller struct{}
@@ -1983,5 +1984,166 @@ func TestCheckpointInterruptedUndoBlocksRunOnce(t *testing.T) {
 	out.Reset()
 	if _, err := runOnce(context.Background(), &out, nil, sess, "write w again", src); err != nil {
 		t.Fatalf("runOnce after resume: %v", err)
+	}
+}
+
+func TestCheckpointCommandEvidenceLabels(t *testing.T) {
+	for _, fault := range []string{"verified", "live-drift", "prior-blob", "unsigned", "unconfirmed", "invalid-path", "invalid-mode", "dangling", "empty-reference", "uncertain-inverse", "completed-retry", "invalid-inverse", "mixed-unsigned", "mixed-invalid", "open", "undoing", "restored-without-inverse"} {
+		t.Run(fault, func(t *testing.T) {
+			j, mutators, root := newJournalFixture(t)
+			beginTestTurn(t, j, "hostile\ngoal\x1b[31m")
+			for _, path := range []string{"a.txt", "b.txt"} {
+				applyTool(t, mutators, "write_file", map[string]any{"path": path, "content": "x"})
+			}
+			mustSealTurn(t, j)
+			groups, _ := j.store.newestCompleted(context.Background(), 1)
+			f := groups[0].files[0]
+			older := groups[0].files[1]
+			want := "[receipts verified]"
+			marker := ""
+			switch fault {
+			case "live-drift":
+				if err := os.WriteFile(filepath.Join(root, "b.txt"), []byte("user"), 0600); err != nil {
+					t.Fatal(err)
+				}
+			case "prior-blob":
+				checkpointSQL(t, j.store.db, `UPDATE checkpoint_files SET prior_content=? WHERE id=?`, []byte("not read by listing"), f.id)
+			case "unsigned":
+				checkpointSQL(t, j.store.db, `UPDATE checkpoint_files SET forward_mutation_id=NULL WHERE id=?`, f.id)
+				want = "[unsigned]"
+			case "unconfirmed":
+				checkpointSQL(t, j.store.db, `UPDATE mutation_receipts SET applied_json=NULL WHERE mutation_id=?`, f.forwardMutationID.String)
+				want = "[unconfirmed]"
+			case "invalid-path":
+				checkpointSQL(t, j.store.db, `UPDATE checkpoint_files SET path='forged.txt' WHERE id=?`, f.id)
+				want = "[invalid receipts]"
+			case "invalid-mode":
+				checkpointSQL(t, j.store.db, `UPDATE checkpoint_files SET after_mode=4294967296 WHERE id=?`, f.id)
+				want = "[invalid receipts]"
+			case "dangling", "empty-reference":
+				id := "missing"
+				if fault == "empty-reference" {
+					id = ""
+				}
+				checkpointSQL(t, j.store.db, `PRAGMA foreign_keys=OFF`)
+				checkpointSQL(t, j.store.db, `UPDATE checkpoint_files SET forward_mutation_id=? WHERE id=?`, id, f.id)
+				want = "[invalid receipts]"
+			case "mixed-unsigned", "mixed-invalid":
+				checkpointSQL(t, j.store.db, `UPDATE mutation_receipts SET applied_json=NULL WHERE mutation_id=?`, f.forwardMutationID.String)
+				checkpointSQL(t, j.store.db, `UPDATE checkpoint_files SET forward_mutation_id=NULL WHERE id=?`, older.id)
+				want = "[unsigned]"
+				if fault == "mixed-invalid" {
+					checkpointSQL(t, j.store.db, `UPDATE checkpoint_files SET path='forged.txt' WHERE id=?`, f.id)
+					want = "[invalid receipts]"
+				}
+			case "uncertain-inverse", "completed-retry", "invalid-inverse":
+				if err := j.store.markUndoing(context.Background(), []int64{groups[0].id}); err != nil {
+					t.Fatal(err)
+				}
+				entry, _ := j.store.loadReceipt(context.Background(), f.forwardMutationID.String)
+				body := storeInverse(mustDecodeCrashReceipt(t, entry.intentJSON).Body, strings.Repeat("U", 26))
+				if err := j.store.prepareInverseIntent(context.Background(), f.id, storeReceiptJSON(t, body)); err != nil {
+					t.Fatal(err)
+				}
+				if fault == "completed-retry" {
+					if err := j.store.testCommitInverse(context.Background(), f.id); err != nil {
+						t.Fatal(err)
+					}
+				}
+				want = "[unconfirmed]"
+				marker = "[interrupted undo]"
+				if fault == "invalid-inverse" {
+					body.Path = "forged.txt"
+					checkpointSQL(t, j.store.db, `UPDATE mutation_receipts SET intent_json=? WHERE mutation_id=?`, string(storeReceiptJSON(t, body)), body.MutationID)
+					want = "[invalid receipts]"
+				}
+			case "open":
+				checkpointSQL(t, j.store.db, `UPDATE checkpoints SET state='open'`)
+				marker = "[in progress]"
+			case "undoing":
+				if err := j.store.markUndoing(context.Background(), []int64{groups[0].id}); err != nil {
+					t.Fatal(err)
+				}
+				marker = "[interrupted undo]"
+			case "restored-without-inverse":
+				if err := j.store.markUndoing(context.Background(), []int64{groups[0].id}); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Remove(filepath.Join(root, f.path)); err != nil {
+					t.Fatal(err)
+				}
+				if err := j.store.recoverRestored(context.Background(), f.id); err != nil {
+					t.Fatal(err)
+				}
+				marker = "[interrupted undo]"
+				want = "[unconfirmed]"
+			}
+			before, err := j.store.scanReceipts(context.Background(), 0, 100)
+			if err != nil {
+				t.Fatal(err)
+			}
+			j.signer = journalTestSigner{Signer: j.signer, sign: func(context.Context, tools.MutationReceiptBody) error { t.Fatal("listing signed"); return nil }}
+			var out strings.Builder
+			_, _ = dispatchSlash(context.Background(), &out, &replSession{journal: j}, "/checkpoints")
+			text := out.String()
+			if !strings.Contains(text, want) || !strings.Contains(text, marker) || !strings.HasPrefix(text, "  1  ") || !strings.Contains(text, "hostile goal[31m") || strings.Count(text, "\n") != 1 {
+				t.Fatalf("listing = %q; want %s %s", text, marker, want)
+			}
+			after, err := j.store.scanReceipts(context.Background(), 0, 100)
+			if err != nil || fmt.Sprint(before) != fmt.Sprint(after) {
+				t.Fatal("listing rewrote evidence")
+			}
+			if fault == "live-drift" {
+				out := runUndo(t, j, 1)
+				if !strings.Contains(out, "cannot undo") {
+					t.Fatalf("verified receipts bypassed live drift: %s", out)
+				}
+			}
+		})
+	}
+}
+
+func TestCheckpointCommandUnverifiableHistory(t *testing.T) {
+	for _, outside := range []bool{false, true} {
+		t.Run(fmt.Sprint(outside), func(t *testing.T) {
+			j, mutators, _ := newJournalFixture(t)
+			beginTestTurn(t, j, "hidden on failure")
+			applyTool(t, mutators, "write_file", map[string]any{"path": "a.txt", "content": "x"})
+			mustSealTurn(t, j)
+			entries, _ := j.store.scanReceipts(context.Background(), 0, 10)
+			receipt := mustDecodeCrashReceipt(t, entries[0].intentJSON)
+			if outside {
+				addUnreferencedReceiptPage(t, j, receipt.Body)
+				receipt.Body.MutationID = strings.Repeat("H", 26)
+			}
+			receipt.Signature.Bytes[0] ^= 1
+			raw, err := signing.MarshalCanonical(receipt)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if outside {
+				checkpointSQL(t, j.store.db, `INSERT INTO mutation_receipts(mutation_id,intent_json)VALUES(?,?)`, receipt.Body.MutationID, string(raw))
+			} else {
+				checkpointSQL(t, j.store.db, `UPDATE mutation_receipts SET intent_json=?,applied_json=NULL`, string(raw))
+			}
+			var out strings.Builder
+			_, _ = dispatchSlash(context.Background(), &out, &replSession{journal: j}, "/checkpoints")
+			if out.String() != "receipt history unverifiable; evidence labels unavailable\n" {
+				t.Fatalf("unverifiable history labeled: %q", out.String())
+			}
+		})
+	}
+}
+
+func TestCheckpointHelpEvidenceLegend(t *testing.T) {
+	var out strings.Builder
+	_, _ = dispatchSlash(context.Background(), &out, &replSession{}, "/help")
+	for _, want := range []string{"list turn checkpoints", "receipts verified: authentic receipts, not live files", "unconfirmed: missing applied evidence", "unsigned: undo unavailable", "invalid receipts: invalid evidence or metadata"} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("help missing %q", want)
+		}
+	}
+	if strings.Contains(out.String(), "list undoable turn checkpoints") {
+		t.Fatal("help calls unsigned history undoable")
 	}
 }

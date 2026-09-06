@@ -581,22 +581,6 @@ func (s *checkpointStore) markUndoing(ctx context.Context, ids []int64) error {
 	})
 }
 
-// markRestored is a temporary compatibility wrapper for unsigned undo progress.
-// Only an applied, unrestored row of an undoing checkpoint can transition.
-func (s *checkpointStore) markRestored(ctx context.Context, fileID int64) error {
-	return s.execTx(ctx, func(tx *sql.Tx) error {
-		res, err := tx.ExecContext(ctx,
-			`UPDATE checkpoint_files SET restored = 1
-			 WHERE id = ? AND applied = 1 AND restored = 0 AND forward_mutation_id IS NULL
-			   AND checkpoint_id IN (SELECT id FROM checkpoints WHERE state = ?)`,
-			fileID, checkpointUndoing)
-		if err != nil {
-			return fmt.Errorf("golem: checkpoint mark restored %d: %w", fileID, err)
-		}
-		return requireOneRow(res, fmt.Sprintf("mark restored %d", fileID))
-	})
-}
-
 // deleteRestored deletes an undoing checkpoint only when a guard query proves
 // zero applied rows remain unrestored — the guard, not the caller's belief,
 // decides (a crash between a restore and its flag must never orphan work).
@@ -689,7 +673,11 @@ func (s *checkpointStore) loadFiles(ctx context.Context, cpID int64, appliedOnly
 	return s.queryFiles(ctx, cpID, appliedOnly, true)
 }
 
-// loadFileMetadata omits prior-content blobs for checkpoint listings.
+var errCheckpointMetadata = errors.New("golem: invalid stored checkpoint metadata")
+
+// loadFileMetadata omits prior-content blobs for checkpoint listings. Invalid
+// modes return the rows plus errCheckpointMetadata so the listing can still
+// authenticate their references and attribute the metadata fault to this group.
 func (s *checkpointStore) loadFileMetadata(ctx context.Context, cpID int64, appliedOnly bool) ([]checkpointFile, error) {
 	return s.queryFiles(ctx, cpID, appliedOnly, false)
 }
@@ -711,6 +699,7 @@ func (s *checkpointStore) queryFiles(ctx context.Context, cpID int64, appliedOnl
 	}
 	defer func() { _ = rows.Close() }()
 	var out []checkpointFile
+	var metadataErr error
 	for rows.Next() {
 		var f checkpointFile
 		var existed, applied, restored int
@@ -724,17 +713,21 @@ func (s *checkpointStore) queryFiles(ctx context.Context, cpID int64, appliedOnl
 		f.existed, f.applied, f.restored = existed != 0, applied != 0, restored != 0
 		if afterMode.Valid {
 			if afterMode.Int64 < 0 || afterMode.Int64 > 0o777 {
-				return nil, errors.New("golem: invalid stored checkpoint mode")
+				metadataErr = fmt.Errorf("%w: mode", errCheckpointMetadata)
+				if withContent {
+					return nil, metadataErr
+				}
+			} else {
+				f.trackedMode = true
+				f.afterMode = fs.FileMode(afterMode.Int64)
 			}
-			f.trackedMode = true
-			f.afterMode = fs.FileMode(afterMode.Int64)
 		}
 		out = append(out, f)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("golem: checkpoint files rows: %w", err)
 	}
-	return out, nil
+	return out, metadataErr
 }
 
 // newestCompleted loads the n newest completed checkpoints (applied rows only)

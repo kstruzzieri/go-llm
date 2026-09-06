@@ -491,16 +491,16 @@ func TestCheckpointStoreMarkRestoredRequiresUndoing(t *testing.T) {
 	if err := s.seal(ctx, cp); err != nil {
 		t.Fatalf("seal: %v", err)
 	}
-	if err := s.markRestored(ctx, f1); err == nil {
+	if err := s.testCommitInverse(ctx, f1); err == nil {
 		t.Fatal("markRestored while completed must fail; only an undoing checkpoint restores files")
 	}
 	if err := s.markUndoing(ctx, []int64{cp}); err != nil {
 		t.Fatalf("markUndoing: %v", err)
 	}
-	if err := s.markRestored(ctx, f1); err != nil {
+	if err := s.testCommitInverse(ctx, f1); err != nil {
 		t.Fatalf("markRestored: %v", err)
 	}
-	if err := s.markRestored(ctx, f1); err == nil {
+	if err := s.testCommitInverse(ctx, f1); err == nil {
 		t.Fatal("markRestored twice must fail")
 	}
 }
@@ -527,7 +527,7 @@ func TestCheckpointStoreDeleteRestoredGuards(t *testing.T) {
 	if ids := listIDs(t, s); len(ids) != 1 {
 		t.Fatalf("refused delete removed the checkpoint: %v", ids)
 	}
-	if err := s.markRestored(ctx, f1); err != nil {
+	if err := s.testCommitInverse(ctx, f1); err != nil {
 		t.Fatalf("markRestored: %v", err)
 	}
 	if err := s.deleteRestored(ctx, cp); err != nil {
@@ -681,7 +681,7 @@ func TestCheckpointFilesStayPrivateAfterEveryMutation(t *testing.T) {
 	}
 	assertPrivate("markUndoing")
 	loosen()
-	if err := s.markRestored(ctx, f1); err != nil {
+	if err := s.testCommitInverse(ctx, f1); err != nil {
 		t.Fatalf("markRestored: %v", err)
 	}
 	assertPrivate("markRestored")
@@ -1301,9 +1301,11 @@ func TestCheckpointStoreSignedInverseAtomicAndRecovery(t *testing.T) {
 	if err := s.markUndoing(ctx, []int64{cp}); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.markRestored(ctx, f); err == nil {
-		t.Fatal("unsigned restore accepted signed row")
+	checkpointSQL(t, s.db, `UPDATE checkpoint_files SET forward_mutation_id = NULL WHERE id = ?`, f)
+	if err := s.recoverRestored(ctx, f); err == nil {
+		t.Fatal("unsigned restore accepted")
 	}
+	checkpointSQL(t, s.db, `UPDATE checkpoint_files SET forward_mutation_id = ? WHERE id = ?`, body.MutationID, f)
 	checkpointSQL(t, s.db, `CREATE TRIGGER fail_inverse_ref BEFORE UPDATE OF inverse_mutation_id ON checkpoint_files BEGIN SELECT RAISE(ABORT, 'test rollback'); END`)
 	if err := s.prepareInverseIntent(ctx, f, inverseRaw); err == nil {
 		t.Fatal("inverse ignored reference failure")
@@ -1762,4 +1764,63 @@ func (s *checkpointStore) testCommitIntent(ctx context.Context, fileID int64) er
 
 func testStoreGetenv(s *checkpointStore) func(string) string {
 	return testGetenv(filepath.Dir(filepath.Dir(filepath.Dir(s.dbPath))))
+}
+
+// testCommitInverse models committed inverse evidence without a workspace; store
+// tests exercise transactional progress, while journal tests drive real files.
+func (s *checkpointStore) testCommitInverse(ctx context.Context, fileID int64) error {
+	var id string
+	if err := s.db.QueryRowContext(ctx, `SELECT forward_mutation_id FROM checkpoint_files WHERE id=?`, fileID).Scan(&id); err != nil {
+		return err
+	}
+	entry, err := s.loadReceipt(ctx, id)
+	if err != nil {
+		return err
+	}
+	original, err := decodeStoredMutationReceipt(entry.intentJSON)
+	if err != nil {
+		return err
+	}
+	body := storeInverse(original.Body, rand.Text())
+	signer, err := signing.NewHMAC(bytes.Repeat([]byte{0x42}, 32))
+	if err != nil {
+		return err
+	}
+	intent, err := agenttools.SignMutationReceipt(ctx, signer, body)
+	if err != nil {
+		return err
+	}
+	raw, err := signing.MarshalCanonical(intent)
+	if err != nil {
+		return err
+	}
+	if err := s.prepareInverseIntent(ctx, fileID, raw); err != nil {
+		return err
+	}
+	body.Kind = "applied"
+	applied, err := agenttools.SignMutationReceipt(ctx, signer, body)
+	if err != nil {
+		return err
+	}
+	raw, err = signing.MarshalCanonical(applied)
+	if err != nil {
+		return err
+	}
+	return s.commitInverseIntent(ctx, fileID, raw)
+}
+
+func TestCheckpointStoreMetadataProjectionDoesNotReadPriorBlob(t *testing.T) {
+	s := openTestStore(t, t.TempDir())
+	cp, f := mustPrepare(t, s, "metadata", testRec("a", "abc", true))
+	// A poison view proves the metadata query never evaluates the content column;
+	// loading actual restore content still fails, so NULL result alone cannot pass.
+	checkpointSQL(t, s.db, `ALTER TABLE checkpoint_files RENAME TO snapshot_files`)
+	checkpointSQL(t, s.db, `CREATE VIEW checkpoint_files AS SELECT id,checkpoint_id,path,json_extract('invalid-json','$') AS prior_content,prior_hash,existed,after_hash,summary,at,applied,restored,after_mode,forward_mutation_id,inverse_mutation_id FROM snapshot_files`)
+	files, err := s.loadFileMetadata(context.Background(), cp, false)
+	if err != nil || len(files) != 1 || files[0].id != f || files[0].priorContent != nil {
+		t.Fatalf("metadata read blob: %+v,%v", files, err)
+	}
+	if _, err := s.loadFiles(context.Background(), cp, false); err == nil {
+		t.Fatal("poison content projection did not fail")
+	}
 }

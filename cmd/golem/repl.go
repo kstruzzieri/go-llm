@@ -845,7 +845,9 @@ const golemHelp = `commands:
   /resume <id>   switch to a saved session
   /edit [seed]   compose a goal in $VISUAL/$EDITOR (quoting unsupported)
   /undo [n]      revert the last n completed turns' writes (when writes are enabled)
-  /checkpoints   list undoable turn checkpoints, newest first (when writes are enabled)
+  /checkpoints   list turn checkpoints, newest first (when writes are enabled)
+                 receipts verified: authentic receipts, not live files; unconfirmed: missing applied evidence;
+                 unsigned: undo unavailable; invalid receipts: invalid evidence or metadata
   /jobs [stop <handle>]
                  list background jobs, or stop one (when exec is enabled)
   /auto-edits [on|off]

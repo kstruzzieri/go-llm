@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/rand"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -12,6 +13,7 @@ import (
 	"time"
 
 	agenttools "github.com/kstruzzieri/go-llm/agent/tools"
+	"github.com/kstruzzieri/go-llm/signing"
 )
 
 // TestCheckpointCrashHelper is the subprocess body for the process-kill
@@ -44,6 +46,47 @@ func TestCheckpointCrashHelper(t *testing.T) {
 	ready := func() {
 		_, _ = os.Stdout.WriteString("READY\n")
 		select {} // block until killed
+	}
+
+	if mode == "undo-prepared" {
+		groups, err := s.newestCompleted(ctx, 1)
+		if err != nil || len(groups) != 1 {
+			t.Fatal("missing undo group")
+		}
+		if err := s.markUndoing(ctx, []int64{groups[0].id}); err != nil {
+			t.Fatal(err)
+		}
+		f := groups[0].files[0]
+		entry, err := s.loadReceipt(ctx, f.forwardMutationID.String)
+		if err != nil {
+			t.Fatal(err)
+		}
+		forward, err := authenticateCheckpointReceipt(ctx, verifier, entry)
+		if err != nil {
+			t.Fatal(err)
+		}
+		intent, err := agenttools.SignMutationReceipt(ctx, signer, storeInverse(forward.Body, rand.Text()))
+		if err != nil {
+			t.Fatal(err)
+		}
+		raw, err := signing.MarshalCanonical(intent)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := s.prepareInverseIntent(ctx, f.id, raw); err != nil {
+			t.Fatal(err)
+		}
+		ready()
+	}
+	if mode == "undo-committed" {
+		checkpointSQL(t, s.db, `CREATE TRIGGER pause_checkpoint_delete BEFORE DELETE ON checkpoints BEGIN SELECT RAISE(ABORT,'test pause after inverse commit'); END`)
+		var out strings.Builder
+		j.undo(ctx, &out, 1)
+		groups, err := s.undoingGroups(ctx)
+		if err != nil || len(groups) != 1 || !groups[0].files[0].restored {
+			t.Fatalf("not committed: %s", out.String())
+		}
+		ready()
 	}
 
 	if mode == "undo" {
@@ -328,6 +371,19 @@ func TestCheckpointUndoCrashResume(t *testing.T) {
 	if !strings.Contains(out.String(), "resumed interrupted undo") {
 		t.Fatalf("resume output = %q", out.String())
 	}
+	if !strings.Contains(out.String(), "undo target reached; interrupted attempt has no applied receipt") || !strings.Contains(out.String(), "[unconfirmed]") {
+		t.Fatalf("crash evidence gap hidden: %s", out.String())
+	}
+	entries, err := s2.scanReceipts(ctx, 0, 100)
+	if err != nil || len(entries) != 4 || entries[2].appliedJSON != nil || entries[3].appliedJSON == nil {
+		t.Fatalf("resume fabricated or lost inverse: %d,%v", len(entries), err)
+	}
+	for _, entry := range entries {
+		if _, err := authenticateCheckpointReceipt(ctx, verifier2, entry); err != nil {
+			t.Fatal(err)
+		}
+	}
+
 	if got, err := os.ReadFile(filepath.Join(root, "a.txt")); err != nil || string(got) != "A0\n" {
 		t.Fatalf("a.txt = %q,%v, want A0 after resume", got, err)
 	}
@@ -419,6 +475,88 @@ func TestCheckpointCrashRecoveryConservativeStates(t *testing.T) {
 			}
 			if len(infos) != 1 || infos[0].state != want || infos[0].files != 1 && state != "unreadable" {
 				t.Fatalf("classification = %+v", infos)
+			}
+		})
+	}
+}
+
+func TestCheckpointUndoCrashBeforeMutationAndAfterCommit(t *testing.T) {
+	for _, mode := range []string{"undo-prepared", "undo-committed"} {
+		t.Run(mode, func(t *testing.T) {
+			root, data := t.TempDir(), t.TempDir()
+			ctx := context.Background()
+			s, err := openCheckpointStore(ctx, testGetenv(data), root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			mutators, j, _, err := buildWriteTools(root, s, testGetenv(data))
+			if err != nil {
+				t.Fatal(err)
+			}
+			beginTestTurn(t, j, "crash inverse")
+			applyTool(t, mutators, "write_file", map[string]any{"path": "a.txt", "content": "x"})
+			mustSealTurn(t, j)
+			if err := s.Close(); err != nil {
+				t.Fatal(err)
+			}
+			spawnCrashHelper(t, mode, root, data)
+			s, err = openCheckpointStore(ctx, testGetenv(data), root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer s.Close()
+			_, j, _, err = buildWriteTools(root, s, testGetenv(data))
+			if err != nil {
+				t.Fatal(err)
+			}
+			before, err := s.scanReceipts(ctx, 0, 100)
+			if err != nil || len(before) != 2 {
+				t.Fatalf("crash ledger = %d,%v", len(before), err)
+			}
+			if mode == "undo-committed" {
+				if before[1].appliedJSON == nil {
+					t.Fatal("commit missing applied evidence")
+				}
+				checkpointSQL(t, s.db, `DROP TRIGGER pause_checkpoint_delete`)
+				if err := os.WriteFile(filepath.Join(root, "a.txt"), []byte("user"), 0600); err != nil {
+					t.Fatal(err)
+				}
+				j.signer = journalTestSigner{Signer: j.signer, sign: func(context.Context, agenttools.MutationReceiptBody) error {
+					t.Fatal("committed inverse signed again")
+					return nil
+				}}
+			} else {
+				if before[1].appliedJSON != nil {
+					t.Fatal("prepared inverse claims applied")
+				}
+				got, _ := readWorkspace(t, root, "a.txt")
+				if string(got) != "x" {
+					t.Fatal("prepared attempt changed file")
+				}
+			}
+			out := runUndo(t, j, 1)
+			after, err := s.scanReceipts(ctx, 0, 100)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(before[1].intentJSON, after[1].intentJSON) || !bytes.Equal(before[1].appliedJSON, after[1].appliedJSON) {
+				t.Fatal("restart changed original attempt")
+			}
+			if mode == "undo-prepared" {
+				if len(after) != 3 || after[2].appliedJSON == nil || after[2].mutationID == before[1].mutationID || !strings.Contains(out, "[unconfirmed]") {
+					t.Fatalf("restart reused identity or hid uncertainty: %s", out)
+				}
+				if _, ok := readWorkspace(t, root, "a.txt"); ok {
+					t.Fatal("retry did not delete")
+				}
+			} else {
+				got, _ := readWorkspace(t, root, "a.txt")
+				if string(got) != "user" || len(after) != 2 {
+					t.Fatal("committed resume changed user edit or evidence")
+				}
+			}
+			if len(listIDs(t, s)) != 0 {
+				t.Fatalf("resume incomplete: %s", out)
 			}
 		})
 	}
