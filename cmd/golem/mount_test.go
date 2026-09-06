@@ -751,3 +751,61 @@ func TestHelpListsAllowCommands(t *testing.T) {
 		}
 	}
 }
+
+// Signing fails after the checkpoint lease is acquired. The live mount and
+// grants must remain usable, and the handler itself must release that lease.
+func TestAllowWriteSigningFailurePreservesRuntime(t *testing.T) {
+	defer debug.SetGCPercent(debug.SetGCPercent(-1))
+	root := t.TempDir()
+	writeGolemJSON(t, root, `{"verify":{"argv":["/bin/sh","-c","true"]}}`)
+	caller := &captureCaller{answer: "still read-only"}
+	sess := newMountSession(t, caller, root)
+	store, err := openCheckpointStore(context.Background(), os.Getenv, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tools, journal, _, err := buildWriteTools(root, store, os.Getenv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	beginTestTurn(t, journal, "retained history")
+	if result := applyTool(t, tools, "write_file", map[string]any{"path": "a.txt", "content": "abc"}); result.IsError {
+		t.Fatal(result.Content)
+	}
+	mustSealTurn(t, journal)
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	keyPath := filepath.Join(os.Getenv("XDG_DATA_HOME"), "golem", "signing", "agent-ed25519.pem")
+	if err := os.Remove(keyPath); err != nil {
+		t.Fatal(err)
+	}
+	before, system, runtime := strings.Join(names(sess.tools), ","), sess.baseSystem, sess.runtime
+	sess.grants.grant(grantScopeFiles, agenttools.WriteClassApprovalKey)
+	var out strings.Builder
+	_, _ = dispatchSlash(context.Background(), &out, sess, "/allow-write")
+	if !strings.HasPrefix(out.String(), "writes not enabled: golem: signing key missing:") || strings.Contains(out.String(), "new signing identity") {
+		t.Fatalf("missing-key mount output = %q", out.String())
+	}
+	if sess.allowWrite || sess.journal != nil || sess.lateStore != nil || sess.writeToolCount != 0 ||
+		sess.runtime != runtime || sess.baseSystem != system || strings.Join(names(sess.tools), ",") != before ||
+		sess.verifier.runner != nil || sess.grants.count() != 1 || !sess.grants.granted(grantScopeFiles, agenttools.WriteClassApprovalKey) {
+		t.Fatal("signing failure changed the active runtime, verifier or approval state")
+	}
+	if _, err := os.Lstat(keyPath); !os.IsNotExist(err) {
+		t.Fatalf("failed mount created a replacement key: %v", err)
+	}
+	store, err = openCheckpointStore(context.Background(), os.Getenv, root)
+	if err != nil {
+		t.Fatalf("signing failure leaked checkpoint lease: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runOnce(context.Background(), &out, nil, sess, "hello", nil); err != nil {
+		t.Fatalf("unchanged runtime after signing failure: %v", err)
+	}
+	if caller.system != system || strings.Join(caller.tools, ",") != before {
+		t.Fatal("signing failure changed the runtime's provider request")
+	}
+}

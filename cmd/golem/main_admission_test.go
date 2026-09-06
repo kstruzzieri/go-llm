@@ -759,3 +759,102 @@ func TestRunAllowToolWriteAlignsDelegatePrompt(t *testing.T) {
 		t.Fatalf("run = %v, want the harness stop sentinel", err)
 	}
 }
+
+// Each selective headless write capability must persist evidence through run(),
+// provider tool dispatch, approval and shutdown, even when its sibling is absent.
+func TestRunAllowToolPersistsMutationReceipt(t *testing.T) {
+	for _, tc := range []struct {
+		tool, args, prior, after, beforeHash, afterHash string
+	}{
+		{"write_file", `{"path":"./a.txt","content":"abc"}`, "", "abc", "absent", "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"},
+		{"edit_file", `{"path":"./a.txt","old_string":"abc","new_string":"x"}`, "abc", "x", "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad", "2d711642b726b04401627ca9fbac32f5c8530fb1903cc4db02258717921a4881"},
+	} {
+		t.Run(tc.tool, func(t *testing.T) {
+			configPath, root, _ := fenceWireHarness(t, func(req wireRequest) []string {
+				if !req.hasToolMessage() {
+					return sseToolCall("mutation", tc.tool, tc.args)
+				}
+				return sseAnswer("done")
+			})
+			if tc.prior != "" {
+				if err := os.WriteFile(filepath.Join(root, "a.txt"), []byte(tc.prior), 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			stdin, stdout, stderr := runTestFiles(t)
+			err := run(append(admissionArgs(configPath, root), "-allow-tool", tc.tool), stdin, stdout, stderr)
+			if err != nil {
+				t.Fatalf("headless %s: %v; stderr: %s", tc.tool, err, readRunTestFile(t, stderr))
+			}
+			if got, err := os.ReadFile(filepath.Join(root, "a.txt")); err != nil || string(got) != tc.after {
+				t.Fatalf("headless %s file = %q, %v; want %q", tc.tool, got, err, tc.after)
+			}
+			if out := readRunTestFile(t, stderr); strings.Count(out, "new signing identity: kid ") != 1 || strings.Contains(out, "Apply this change?") {
+				t.Fatalf("headless identity notice/approval output = %q", out)
+			}
+			receipts := readHostMutationReceipts(t, os.Getenv("XDG_DATA_HOME"), root)
+			if len(receipts) != 1 {
+				t.Fatalf("headless %s persisted %d receipts, want 1", tc.tool, len(receipts))
+			}
+			body := receipts[0].Body
+			if body.Path != "a.txt" || body.BeforeHash != tc.beforeHash || body.AfterHash != tc.afterHash || body.AfterMode != nil || body.UndoOf != "" {
+				t.Fatalf("headless %s receipt = %+v", tc.tool, body)
+			}
+		})
+	}
+}
+
+func TestRunMutationSigningRefusesMissingKey(t *testing.T) {
+	for _, mode := range []string{"startup", "headless"} {
+		t.Run(mode, func(t *testing.T) {
+			configPath, root, _ := fenceWireHarness(t, func(req wireRequest) []string {
+				if !req.hasToolMessage() {
+					return sseToolCall("write", "write_file", `{"path":"a.txt","content":"abc"}`)
+				}
+				return sseAnswer("done")
+			})
+			stdin, stdout, stderr := runTestFiles(t)
+			args := append(admissionArgs(configPath, root), "-allow-tool", "write_file")
+			if err := run(args, stdin, stdout, stderr); err != nil {
+				t.Fatal(err)
+			}
+			data := os.Getenv("XDG_DATA_HOME")
+			receipts := readHostMutationReceipts(t, data, root)
+			if len(receipts) != 1 {
+				t.Fatalf("setup persisted %d receipts, want 1", len(receipts))
+			}
+			keyPath := filepath.Join(data, "golem", "signing", "agent-ed25519.pem")
+			if err := os.Remove(keyPath); err != nil {
+				t.Fatal(err)
+			}
+			if mode == "startup" {
+				args = []string{"-config", configPath, "-root", root, "-allow-write", "-no-probe", "-no-cap-probe",
+					"-no-rag", "-no-session", "-no-memory", "-no-project-context", "-no-auto-index"}
+			}
+			stdin, stdout, stderr = runTestFiles(t)
+			reached := false
+			err := run(args, stdin, stdout, stderr, runHooks{afterSessionReady: func(*replSession) error {
+				reached = true
+				return errors.New("session must not be constructed without the historical key")
+			}})
+			want := "golem: signing key missing: key file " + keyPath + " is required by receipt " + receipts[0].Body.MutationID + " claiming kid " + receipts[0].Body.AgentID + "; restore the matching key from backup; writes disabled to preserve receipt integrity"
+			if err == nil || err.Error() != want || reached {
+				t.Fatalf("%s missing-key startup = %v, reached session=%t; want %q", mode, err, reached, want)
+			}
+			if _, err := os.Lstat(keyPath); !os.IsNotExist(err) {
+				t.Fatalf("%s startup created a replacement key: %v", mode, err)
+			}
+			canonical, err := filepath.EvalSymlinks(root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			store, err := openCheckpointStore(context.Background(), testGetenv(data), canonical)
+			if err != nil {
+				t.Fatalf("%s failed startup leaked checkpoint lease: %v", mode, err)
+			}
+			if err := store.Close(); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
