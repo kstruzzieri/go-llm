@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"math"
 	"net/http"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -1151,6 +1153,166 @@ func TestRAGIndexFileToolDisabled(t *testing.T) {
 	}
 	if !result.IsError {
 		t.Fatal("expected isError = true when RAG disabled")
+	}
+}
+
+func ragPolicyTestSecret() string { return "sk-" + "aB3_dE7-fG9_hJ2-kL4" }
+
+func newRAGPolicyTestServer(t *testing.T, kinds ...rag.SensitiveKind) (*Server, *rag.SQLiteStore) {
+	t.Helper()
+	store, err := rag.NewSQLiteStore(":memory:")
+	if err != nil {
+		t.Fatal("open policy test store")
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	embedder := rag.EmbedderFunc(func(_ context.Context, _ string, inputs []string) (rag.EmbedResult, error) {
+		vectors := make([][]float64, len(inputs))
+		for i, input := range inputs {
+			if strings.Contains(input, "ordinary failure") {
+				return rag.EmbedResult{}, errors.New("ordinary embed failure")
+			}
+			vectors[i] = []float64{1, 0, 0}
+		}
+		return rag.EmbedResult{Embeddings: vectors, VectorSpaceID: "p/m"}, nil
+	})
+	indexer, err := rag.NewIndexerWithEmbedder(embedder, store, rag.WithSensitiveRedaction(kinds...))
+	if err != nil {
+		t.Fatal("construct policy test indexer")
+	}
+	return &Server{indexer: indexer}, store
+}
+
+func writeRAGPolicyFile(t *testing.T, path, content string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal("create policy test directory")
+	}
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal("write policy test file")
+	}
+}
+
+func ragPolicyRequest(t *testing.T, path string) *gomcp.CallToolRequest {
+	t.Helper()
+	data, err := json.Marshal(map[string]any{"path": path, "concurrency": 1})
+	if err != nil {
+		t.Fatal("encode policy test request")
+	}
+	return rawArgs(t, string(data))
+}
+
+func TestHandleRAGIndexFilePolicyText(t *testing.T) {
+	for _, redact := range []bool{false, true} {
+		t.Run(fmt.Sprint(redact), func(t *testing.T) {
+			var kinds []rag.SensitiveKind
+			if redact {
+				kinds = []rag.SensitiveKind{rag.SensitiveOpenAIToken}
+			}
+			s, _ := newRAGPolicyTestServer(t, kinds...)
+			path := filepath.Join(t.TempDir(), ragPolicyTestSecret()+".md")
+			writeRAGPolicyFile(t, path, ragPolicyTestSecret())
+			result, err := s.handleRAGIndexFile(context.Background(), ragPolicyRequest(t, path))
+			if err != nil || result == nil || result.IsError || result.StructuredContent != nil {
+				t.Fatal("expected policy outcome must use successful existing text response")
+			}
+			text := extractText(result)
+			want := "policy skip: 1"
+			if redact {
+				want = "policy redact: 1"
+			}
+			if !strings.Contains(text, want) || !strings.Contains(text, "openai_token") || strings.Contains(text, ragPolicyTestSecret()) {
+				t.Fatal("file policy response omitted safe metadata or disclosed path content")
+			}
+		})
+	}
+}
+
+func TestHandleRAGIndexFileCleanTextCompatibility(t *testing.T) {
+	s, _ := newRAGPolicyTestServer(t)
+	for _, name := range []string{"plain.md", ragPolicyTestSecret() + ".md"} {
+		path := filepath.Join(t.TempDir(), name)
+		writeRAGPolicyFile(t, path, "ordinary safe content")
+		result, err := s.handleRAGIndexFile(context.Background(), ragPolicyRequest(t, path))
+		want := "indexed " + strings.ReplaceAll(path, ragPolicyTestSecret(), "[REDACTED_SECRET]")
+		if err != nil || result == nil || result.IsError || extractText(result) != want || result.StructuredContent != nil {
+			t.Fatal("clean file response changed shape or displayed sensitive path bytes")
+		}
+	}
+}
+
+func TestHandleRAGIndexDirectoryPolicyText(t *testing.T) {
+	s, _ := newRAGPolicyTestServer(t, rag.SensitiveOpenAIToken)
+	dir := filepath.Join(t.TempDir(), ragPolicyTestSecret())
+	writeRAGPolicyFile(t, filepath.Join(dir, "a.md"), ragPolicyTestSecret())
+	writeRAGPolicyFile(t, filepath.Join(dir, "b.md"), "45320198"+"7654321"+"5")
+	writeRAGPolicyFile(t, filepath.Join(dir, "c.md"), "safe content")
+	result, err := s.handleRAGIndexDirectory(context.Background(), ragPolicyRequest(t, dir))
+	if err != nil || result == nil || result.IsError || result.StructuredContent != nil {
+		t.Fatal("mixed safe/redacted/skipped directory should return expected policy text")
+	}
+	text := extractText(result)
+	for _, want := range []string{"indexed files: 2", "policy skip: 1", "policy redact: 1", "openai_token", "payment_card"} {
+		if !strings.Contains(text, want) {
+			t.Fatal("directory policy response omitted action/kind/count metadata")
+		}
+	}
+	if strings.Contains(text, ragPolicyTestSecret()) {
+		t.Fatal("directory policy text disclosed source path content")
+	}
+}
+
+type ragPolicyFailureStore struct {
+	*rag.SQLiteStore
+	failPath string
+}
+
+func (s *ragPolicyFailureStore) ReplaceSourceWithHashAndVectorSpaceID(ctx context.Context, path string, chunks []rag.Chunk, vectors [][]float64, hash, vsid string) error {
+	if path == s.failPath && len(chunks) == 0 {
+		return errors.New("store cause " + ragPolicyTestSecret())
+	}
+	return s.SQLiteStore.ReplaceSourceWithHashAndVectorSpaceID(ctx, path, chunks, vectors, hash, vsid)
+}
+
+func TestHandleRAGIndexPolicyMixedFailures(t *testing.T) {
+	for _, unsafe := range []bool{false, true} {
+		for _, first := range []bool{false, true} {
+			t.Run(fmt.Sprintf("unsafe=%t/first=%t", unsafe, first), func(t *testing.T) {
+				s, store := newRAGPolicyTestServer(t)
+				dir := t.TempDir()
+				skipPath, failedPath := filepath.Join(dir, "a.md"), filepath.Join(dir, "z.md")
+				if first {
+					skipPath, failedPath = failedPath, skipPath
+				}
+				writeRAGPolicyFile(t, skipPath, ragPolicyTestSecret())
+				if unsafe {
+					writeRAGPolicyFile(t, failedPath, ragPolicyTestSecret())
+					idx, err := rag.NewIndexerWithEmbedder(rag.EmbedderFunc(func(context.Context, string, []string) (rag.EmbedResult, error) {
+						return rag.EmbedResult{}, errors.New("unexpected embedding")
+					}), &ragPolicyFailureStore{SQLiteStore: store, failPath: failedPath})
+					if err != nil {
+						t.Fatal("construct failure indexer")
+					}
+					s.indexer = idx
+				} else {
+					writeRAGPolicyFile(t, failedPath, "ordinary failure")
+				}
+				for _, directory := range []bool{false, true} {
+					var result *gomcp.CallToolResult
+					var err error
+					if directory {
+						result, err = s.handleRAGIndexDirectory(context.Background(), ragPolicyRequest(t, dir))
+					} else {
+						result, err = s.handleRAGIndexFile(context.Background(), ragPolicyRequest(t, failedPath))
+					}
+					if err != nil || result == nil || !result.IsError || result.StructuredContent != nil {
+						t.Fatal("ordinary or unsafe indexing failure became an expected policy success")
+					}
+					if strings.Contains(extractText(result), ragPolicyTestSecret()) {
+						t.Fatal("policy failure response disclosed underlying cause")
+					}
+				}
+			})
+		}
 	}
 }
 

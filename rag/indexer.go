@@ -2,12 +2,15 @@ package rag
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 
+	"github.com/kstruzzieri/go-llm/internal/secretscan"
 	"github.com/kstruzzieri/go-llm/ollama"
 	"golang.org/x/sync/errgroup"
 )
@@ -23,6 +26,7 @@ type Indexer struct {
 	chunker       Chunker
 	storeMu       sync.Mutex
 	workspaceRoot string // canonicalized absolute path; used for StableKey computation
+	redactKinds   map[SensitiveKind]bool
 }
 
 // atomicSourceReplacer is an optional store capability for transactional
@@ -70,6 +74,25 @@ type atomicSourceReplacerWithExpectedHashAndVectorSpaceID interface {
 
 // IndexerOption configures an Indexer.
 type IndexerOption func(*Indexer)
+
+// WithSensitiveRedaction changes selected recognized kinds from Skip to Redact.
+// Options own their input and compose across calls. Unknown kinds remain skipped.
+func WithSensitiveRedaction(kinds ...SensitiveKind) IndexerOption {
+	kinds = slices.Clone(kinds)
+	return func(idx *Indexer) {
+		if idx.redactKinds == nil {
+			idx.redactKinds = make(map[SensitiveKind]bool)
+		}
+		for _, kind := range kinds {
+			switch kind {
+			case SensitiveOpenAIToken, SensitiveGitHubToken, SensitiveGitLabToken,
+				SensitiveSlackToken, SensitiveNPMToken, SensitiveBearerToken,
+				SensitiveSecretAssignment, SensitivePrivateKey, SensitivePaymentCard:
+				idx.redactKinds[kind] = true
+			}
+		}
+	}
+}
 
 // WithEmbeddingModel sets the embedding model name (default: "nomic-embed-text").
 //
@@ -242,18 +265,81 @@ type preparedSource struct {
 }
 
 // IndexFile indexes a single file: reads, chunks, embeds, and stores it.
-// Existing data is preserved if chunking or embedding fails.
-// If the underlying store supports atomic source replacement (SQLiteStore does),
-// re-indexing is transactional across delete + store.
+// Sensitive content is skipped by default, clearing previous indexed data.
+// Existing clean data is preserved if chunking or embedding fails.
+// Each replacement is atomic when the store supports it (SQLiteStore does).
+// Redaction clears previous data before preparing the sanitized replacement.
 func (idx *Indexer) IndexFile(ctx context.Context, path string) error {
+	_, err := idx.IndexFileWithStatus(ctx, path)
+	return err
+}
+
+// IndexFileWithStatus indexes one filesystem file and reports policy outcomes,
+// including successful redaction. A safely cleared skip returns a typed error
+// but is absent from Errors and does not count as indexed or cancelled.
+func (idx *Indexer) IndexFileWithStatus(ctx context.Context, path string) (IndexStatus, error) {
+	status := IndexStatus{TotalFiles: 1}
+	outcome, err := idx.indexFile(ctx, path)
+	if outcome != nil {
+		status.PolicyOutcomes = []IndexPolicyOutcome{*outcome}
+	}
+	if err == nil {
+		status.IndexedFiles = 1
+	} else if !IsSafeIndexSkip(err) {
+		status.Errors = []string{err.Error()}
+	}
+	return status, err
+}
+
+func (idx *Indexer) indexFile(ctx context.Context, path string) (*IndexPolicyOutcome, error) {
 	if err := idx.rejectManagedDocumentSource(ctx, path); err != nil {
-		return err
+		return nil, err
 	}
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return fmt.Errorf("rag: read file %q: %w", path, err)
+		return nil, fmt.Errorf("rag: read file %q: %w", path, err)
 	}
-	return idx.indexText(ctx, path, string(data))
+	content, outcome := idx.sanitizeFile(path, string(data))
+	if outcome != nil {
+		return idx.indexPolicyText(ctx, path, content, outcome)
+	}
+	return nil, idx.indexText(ctx, path, content)
+}
+
+func (idx *Indexer) sanitizeFile(path, content string) (string, *IndexPolicyOutcome) {
+	findings := secretscan.Scan(content)
+	if len(findings) == 0 {
+		return content, nil
+	}
+	outcome := &IndexPolicyOutcome{Path: path, Action: IndexPolicyRedact}
+	for _, finding := range findings {
+		kind := SensitiveKind(finding.Kind)
+		outcome.Kinds = append(outcome.Kinds, kind)
+		if !idx.redactKinds[kind] {
+			outcome.Action = IndexPolicySkip
+		}
+	}
+	slices.Sort(outcome.Kinds)
+	outcome.Kinds = slices.Compact(outcome.Kinds)
+	if outcome.Action == IndexPolicySkip {
+		return "", outcome
+	}
+	return secretscan.Redact(content, findings), outcome
+}
+
+func (idx *Indexer) indexPolicyText(ctx context.Context, path, content string, outcome *IndexPolicyOutcome) (*IndexPolicyOutcome, error) {
+	// Clearing first revokes known sensitive prior content even if preparing or
+	// publishing its sanitized replacement fails. This assumes one logical
+	// writer per source, like the surrounding filesystem indexing contract.
+	err := idx.replaceSource(ctx, path, nil, nil)
+	outcome.Unsafe = err != nil
+	if err != nil || outcome.Action == IndexPolicySkip {
+		return outcome, &IndexPolicyError{Outcome: *outcome, Err: err}
+	}
+	if err := idx.indexText(ctx, path, content); err != nil {
+		return outcome, &IndexPolicyError{Outcome: *outcome, Err: err}
+	}
+	return outcome, nil
 }
 
 // indexText indexes content under source using the same chunk/embed/replace
@@ -430,6 +516,9 @@ type IndexStatus struct {
 	SkippedFiles int
 	Errors       []string
 	InProgress   bool
+	// PolicyOutcomes contains detected files, sorted by path, action, and kinds.
+	// Paths are caller-owned identifiers; sanitize them before diagnostic output.
+	PolicyOutcomes []IndexPolicyOutcome
 }
 
 // IndexDirectory indexes all supported files in a directory tree, returning
@@ -453,7 +542,10 @@ func (idx *Indexer) IndexDirectory(ctx context.Context, dir string, opts ...Inde
 //   - SkippedFiles: eligible files not attempted because ctx was already
 //     cancelled before they could be queued/started.
 //   - Errors:       per-file indexing errors, non-fatal walk/.gitignore read
-//     errors, and prune errors when WithPruneDeleted is enabled.
+//     errors, and prune errors when WithPruneDeleted is enabled; safely cleared
+//     policy skips are omitted, but remain in the returned error tree.
+//   - PolicyOutcomes: detected files, including successful redaction, sorted by
+//     path, action, and kinds. A policy skip does not count as indexed.
 //   - InProgress:   always false in the returned final snapshot.
 func (idx *Indexer) IndexDirectoryWithStatus(ctx context.Context, dir string, opts ...IndexDirOption) (IndexStatus, error) {
 	var status IndexStatus
@@ -484,9 +576,9 @@ func (idx *Indexer) IndexDirectoryWithStatus(ctx context.Context, dir string, op
 	// Read errors are collected as walk errors (best-effort), matching the
 	// behavior for nested .gitignore files.
 	ignore := newGitignoreMatcher()
-	var walkErrors []string
+	var walkErrors []error
 	if err := ignore.addFromFile(filepath.Join(dir, ".gitignore"), "."); err != nil {
-		walkErrors = append(walkErrors, fmt.Sprintf("read root .gitignore in %q: %v", dir, err))
+		walkErrors = append(walkErrors, fmt.Errorf("read root .gitignore in %q: %w", dir, err))
 	}
 
 	// Phase 1: Walk and collect eligible file paths.
@@ -499,7 +591,7 @@ func (idx *Indexer) IndexDirectoryWithStatus(ctx context.Context, dir string, op
 
 	walkErr := filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
-			walkErrors = append(walkErrors, fmt.Sprintf("cannot access %q: %v", path, err))
+			walkErrors = append(walkErrors, fmt.Errorf("cannot access %q: %w", path, err))
 			walkIncomplete = true
 			return nil
 		}
@@ -529,7 +621,7 @@ func (idx *Indexer) IndexDirectoryWithStatus(ctx context.Context, dir string, op
 			if relDir != "." {
 				nestedGitignore := filepath.Join(path, ".gitignore")
 				if err := ignore.addFromFile(nestedGitignore, relDir); err != nil {
-					walkErrors = append(walkErrors, fmt.Sprintf("read .gitignore in %q: %v", path, err))
+					walkErrors = append(walkErrors, fmt.Errorf("read .gitignore in %q: %w", path, err))
 				}
 			}
 			return nil
@@ -561,7 +653,7 @@ func (idx *Indexer) IndexDirectoryWithStatus(ctx context.Context, dir string, op
 	// Phase 2: Index files concurrently.
 	var (
 		mu          sync.Mutex
-		indexErrors = append([]string{}, walkErrors...)
+		indexCauses = walkErrors
 		indexed     int
 		skipped     int
 	)
@@ -571,19 +663,32 @@ func (idx *Indexer) IndexDirectoryWithStatus(ctx context.Context, dir string, op
 
 	for _, path := range files {
 		if ctx.Err() != nil {
+			mu.Lock()
 			skipped++
+			mu.Unlock()
 			continue
 		}
 		g.Go(func() error {
+			if ctx.Err() != nil {
+				mu.Lock()
+				skipped++
+				mu.Unlock()
+				return nil
+			}
+			var outcome *IndexPolicyOutcome
 			var indexErr error
 			if cfg.incremental {
-				indexErr = idx.IndexFileIncremental(ctx, path)
+				outcome, indexErr = idx.indexFileIncremental(ctx, path)
 			} else {
-				indexErr = idx.IndexFile(ctx, path)
+				outcome, indexErr = idx.indexFile(ctx, path)
 			}
 			mu.Lock()
+			if outcome != nil {
+				status.PolicyOutcomes = append(status.PolicyOutcomes, *outcome)
+			}
 			if indexErr != nil {
-				indexErrors = append(indexErrors, fmt.Sprintf("index %q: %v", path, indexErr))
+				wrapped := fmt.Errorf("index %q: %w", safeIndexPath(path), indexErr)
+				indexCauses = append(indexCauses, wrapped)
 			} else {
 				indexed++
 			}
@@ -600,22 +705,37 @@ func (idx *Indexer) IndexDirectoryWithStatus(ctx context.Context, dir string, op
 	// errors are fine: eligible-but-failed files stay in the keep set.
 	if cfg.pruneDeleted && ctx.Err() == nil {
 		if walkIncomplete {
-			indexErrors = append(indexErrors, "prune skipped: directory walk was incomplete")
+			indexCauses = append(indexCauses, errors.New("prune skipped: directory walk was incomplete"))
 		} else {
-			indexErrors = append(indexErrors, idx.pruneDeletedSources(ctx, files)...)
+			indexCauses = append(indexCauses, idx.pruneDeletedSources(ctx, files)...)
 		}
 	}
 
+	slices.SortFunc(status.PolicyOutcomes, func(a, b IndexPolicyOutcome) int {
+		if order := strings.Compare(a.Path, b.Path); order != 0 {
+			return order
+		}
+		if order := strings.Compare(string(a.Action), string(b.Action)); order != 0 {
+			return order
+		}
+		return slices.Compare(a.Kinds, b.Kinds)
+	})
 	status.IndexedFiles = indexed
 	status.SkippedFiles = skipped
-	status.Errors = indexErrors
+	status.Errors = []string{}
+	for _, cause := range indexCauses {
+		if !IsSafeIndexSkip(cause) {
+			status.Errors = append(status.Errors, cause.Error())
+		}
+	}
+	slices.Sort(status.Errors)
 
 	if ctx.Err() != nil {
-		return status, fmt.Errorf("rag: index directory %q: %w", dir, ctx.Err())
+		indexCauses = append(indexCauses, ctx.Err())
 	}
-	if len(indexErrors) > 0 {
-		return status, fmt.Errorf("rag: index directory %q completed with %d errors: %s",
-			dir, len(indexErrors), strings.Join(indexErrors, "; "))
+	if len(indexCauses) > 0 {
+		return status, fmt.Errorf("rag: index directory %q completed with %d errors: %w",
+			safeIndexPath(dir), len(indexCauses), errors.Join(indexCauses...))
 	}
 	return status, nil
 }
@@ -629,10 +749,9 @@ type sourceLister interface {
 // pruneDeletedSources deletes stored sources under the workspace root that
 // are not in the eligible file set from the current walk. Sources outside
 // the workspace root (or that fail to resolve to an absolute path) are
-// ignored defensively. Failures are returned as error strings in the same
-// per-item format IndexDirectoryWithStatus collects; a ListSources failure
-// yields a single entry and skips pruning entirely.
-func (idx *Indexer) pruneDeletedSources(ctx context.Context, files []string) []string {
+// ignored defensively. Failures retain their causes for directory aggregation;
+// a ListSources failure yields a single entry and skips pruning entirely.
+func (idx *Indexer) pruneDeletedSources(ctx context.Context, files []string) []error {
 	lister, ok := idx.store.(sourceLister)
 	if !ok {
 		return nil
@@ -647,17 +766,17 @@ func (idx *Indexer) pruneDeletedSources(ctx context.Context, files []string) []s
 
 	sources, err := lister.ListSources(ctx)
 	if err != nil {
-		return []string{fmt.Sprintf("list sources for prune: %v", err)}
+		return []error{fmt.Errorf("list sources for prune: %w", err)}
 	}
 
 	rootPrefix := idx.workspaceRoot + string(filepath.Separator)
-	var errs []string
+	var errs []error
 	for _, src := range sources {
 		if strings.HasPrefix(src, managedSourcePrefix) {
 			if store, ok := idx.store.(*SQLiteStore); ok {
 				managed, err := store.hasManagedDocumentSource(ctx, src)
 				if err != nil {
-					errs = append(errs, fmt.Sprintf("check managed source %q for prune: %v", src, err))
+					errs = append(errs, fmt.Errorf("check managed source %q for prune: %w", src, err))
 					continue
 				}
 				if managed {
@@ -673,7 +792,7 @@ func (idx *Indexer) pruneDeletedSources(ctx context.Context, files []string) []s
 			continue
 		}
 		if err := idx.store.DeleteBySource(ctx, src); err != nil {
-			errs = append(errs, fmt.Sprintf("prune %q: %v", src, err))
+			errs = append(errs, fmt.Errorf("prune %q: %w", src, err))
 		}
 	}
 	return errs

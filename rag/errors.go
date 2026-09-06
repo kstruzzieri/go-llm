@@ -11,7 +11,94 @@
 //     coexist with known ones). The only safe recovery is a full re-index.
 package rag
 
-import "errors"
+import (
+	"errors"
+	"fmt"
+
+	"github.com/kstruzzieri/go-llm/internal/secretscan"
+)
+
+// SensitiveKind identifies content covered by filesystem indexing policy.
+type SensitiveKind string
+
+// Supported filesystem sensitive-content kinds; all default to skipping the file.
+const (
+	SensitiveOpenAIToken      SensitiveKind = SensitiveKind(secretscan.OpenAIToken)
+	SensitiveGitHubToken      SensitiveKind = SensitiveKind(secretscan.GitHubToken)
+	SensitiveGitLabToken      SensitiveKind = SensitiveKind(secretscan.GitLabToken)
+	SensitiveSlackToken       SensitiveKind = SensitiveKind(secretscan.SlackToken)
+	SensitiveNPMToken         SensitiveKind = SensitiveKind(secretscan.NPMToken)
+	SensitiveBearerToken      SensitiveKind = SensitiveKind(secretscan.BearerToken)
+	SensitiveSecretAssignment SensitiveKind = SensitiveKind(secretscan.SecretAssignment)
+	SensitivePrivateKey       SensitiveKind = SensitiveKind(secretscan.PrivateKey)
+	SensitivePaymentCard      SensitiveKind = SensitiveKind(secretscan.PaymentCard)
+)
+
+// IndexPolicyAction is the filesystem indexing action for detected content.
+type IndexPolicyAction string
+
+const (
+	// IndexPolicySkip removes the source instead of indexing detected content.
+	IndexPolicySkip IndexPolicyAction = "skip"
+	// IndexPolicyRedact indexes sanitized content after removing detected spans.
+	IndexPolicyRedact IndexPolicyAction = "redact"
+)
+
+// IndexPolicyOutcome describes a file affected by sensitive-content policy.
+// Path is the caller's original identifier and may itself contain sensitive
+// content. Unsafe means clearing the previous indexed source failed.
+type IndexPolicyOutcome struct {
+	Path   string
+	Action IndexPolicyAction
+	Kinds  []SensitiveKind
+	Unsafe bool
+}
+
+// IndexPolicyError reports a skipped file or a failure after policy detection.
+// Err preserves the cause for inspection; its contents are never rendered.
+type IndexPolicyError struct {
+	Outcome IndexPolicyOutcome
+	Err     error
+}
+
+func (e *IndexPolicyError) Error() string {
+	return fmt.Sprintf("rag: index policy %s for %q (kinds=%v, unsafe=%t)",
+		e.Outcome.Action, safeIndexPath(e.Outcome.Path), e.Outcome.Kinds, e.Outcome.Unsafe)
+}
+
+// Unwrap returns the underlying indexing or cleanup failure, if any.
+func (e *IndexPolicyError) Unwrap() error { return e.Err }
+
+func safeIndexPath(path string) string {
+	return secretscan.Redact(path, secretscan.Scan(path))
+}
+
+// IsSafeIndexSkip reports whether every branch of a non-nil error tree is a
+// successfully cleared policy skip. Ordinary errors and unsafe outcomes fail.
+func IsSafeIndexSkip(err error) bool {
+	if err == nil {
+		return false
+	}
+	if policy, ok := err.(*IndexPolicyError); ok {
+		return policy != nil && policy.Outcome.Action == IndexPolicySkip && !policy.Outcome.Unsafe && policy.Err == nil
+	}
+	if joined, ok := err.(interface{ Unwrap() []error }); ok {
+		children := joined.Unwrap()
+		if len(children) == 0 {
+			return false
+		}
+		for _, child := range children {
+			if !IsSafeIndexSkip(child) {
+				return false
+			}
+		}
+		return true
+	}
+	if child := errors.Unwrap(err); child != nil {
+		return IsSafeIndexSkip(child)
+	}
+	return false
+}
 
 var (
 	// ErrPolicyDenied indicates that retrieval policy denied a request.

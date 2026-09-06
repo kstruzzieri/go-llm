@@ -3,11 +3,14 @@ package mcp
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"slices"
 	"strings"
 	"time"
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"github.com/kstruzzieri/go-llm/internal/secretscan"
 	"github.com/kstruzzieri/go-llm/rag"
 )
 
@@ -158,11 +161,15 @@ func (s *Server) handleRAGIndexFile(ctx context.Context, req *gomcp.CallToolRequ
 		return toolError("rag", "indexer unavailable; embedding model may not be resolved"), nil
 	}
 
-	if err := indexer.IndexFile(ctx, args.Path); err != nil {
+	status, err := indexer.IndexFileWithStatus(ctx, args.Path)
+	if err != nil && !rag.IsSafeIndexSkip(err) {
 		return toolError("rag", "index file: %v", err), nil
 	}
+	if len(status.PolicyOutcomes) > 0 {
+		return ragIndexPolicyResult(status), nil
+	}
 
-	return toolResult("indexed " + args.Path), nil
+	return toolResult("indexed " + secretscan.Redact(args.Path, secretscan.Scan(args.Path))), nil
 }
 
 func (s *Server) handleRAGIndexDirectory(ctx context.Context, req *gomcp.CallToolRequest) (*gomcp.CallToolResult, error) {
@@ -198,11 +205,37 @@ func (s *Server) handleRAGIndexDirectory(ctx context.Context, req *gomcp.CallToo
 		opts = append(opts, rag.WithConcurrency(args.Concurrency))
 	}
 
-	if err := indexer.IndexDirectory(ctx, args.Path, opts...); err != nil {
+	status, err := indexer.IndexDirectoryWithStatus(ctx, args.Path, opts...)
+	if err != nil && !rag.IsSafeIndexSkip(err) {
 		return toolError("rag", "index directory: %v", err), nil
 	}
+	if len(status.PolicyOutcomes) > 0 {
+		return ragIndexPolicyResult(status), nil
+	}
 
-	return toolResult("indexed directory " + args.Path), nil
+	return toolResult("indexed directory " + secretscan.Redact(args.Path, secretscan.Scan(args.Path))), nil
+}
+
+func ragIndexPolicyResult(status rag.IndexStatus) *gomcp.CallToolResult {
+	var skipped, redacted int
+	var kinds []string
+	for _, outcome := range status.PolicyOutcomes {
+		switch outcome.Action {
+		case rag.IndexPolicySkip:
+			skipped++
+		case rag.IndexPolicyRedact:
+			redacted++
+		}
+		for _, kind := range outcome.Kinds {
+			kinds = append(kinds, string(kind))
+		}
+	}
+	slices.Sort(kinds)
+	kinds = slices.Compact(kinds)
+	// Outcomes retain raw caller-owned paths. Only fixed metadata reaches this
+	// response; do not serialize the status as a public wire representation.
+	return toolResult(fmt.Sprintf("indexed files: %d; policy skip: %d; policy redact: %d; kinds: %s",
+		status.IndexedFiles, skipped, redacted, strings.Join(kinds, ", ")))
 }
 
 func (s *Server) handleRAGSearch(ctx context.Context, req *gomcp.CallToolRequest) (*gomcp.CallToolResult, error) {
