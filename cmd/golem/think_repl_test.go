@@ -4,13 +4,20 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
+	"os"
+	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/kstruzzieri/go-llm/agent"
+	"github.com/kstruzzieri/go-llm/conversation"
+	"github.com/kstruzzieri/go-llm/internal/agenttrace"
 	"github.com/kstruzzieri/go-llm/provider"
 )
 
@@ -477,5 +484,375 @@ func TestStartupWiresThinkMetadata(t *testing.T) {
 		})
 	if !errors.Is(err, errStop) {
 		t.Fatalf("run = %v (stderr: %s)", err, readRunTestFile(t, stderr))
+	}
+}
+
+// thinkTurnCaller retains every request; the hook synchronizes assertions with
+// the actual model boundary, after slash dispatch and before the next answer.
+type thinkTurnCaller struct {
+	captureCaller
+	requests []provider.ChatRequest
+	before   func(context.Context)
+}
+
+func (c *thinkTurnCaller) Chat(ctx context.Context, req provider.ChatRequest, onToken func(provider.ChatResponse) error) (agent.ModelResult, error) {
+	c.requests = append(c.requests, req)
+	if c.before != nil {
+		c.before(ctx)
+	}
+	return c.captureCaller.Chat(ctx, req, onToken)
+}
+
+func TestThinkStartupFullChainChangesWireRequest(t *testing.T) {
+	configPath, root, bodies := dispatchOneShotHarness(t)
+	raw, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := strings.Replace(string(raw), `"capabilities": ["chat", "generate", "stream", "tool_call"]`, `"think_mode": "toggle", "fallbacks": ["weak"], "capabilities": ["chat", "generate", "stream", "tool_call"]`, 1)
+	text = strings.Replace(text, `"capabilities": ["chat", "generate", "stream"]`, `"think_mode": "none", "capabilities": ["chat", "generate", "stream", "tool_call"]`, 1)
+	if err := os.WriteFile(configPath, []byte(text), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	stdin, stdout, stderr := runTestFiles(t)
+	if _, err := stdin.WriteString("first goal\n/think high\nsecond goal\n"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := stdin.Seek(0, io.SeekStart); err != nil {
+		t.Fatal(err)
+	}
+	err = run([]string{"-config", configPath, "-root", root, "-no-probe", "-no-cap-probe", "-no-session", "-no-memory", "-no-rag", "-no-project-context", "-no-git-context", "-no-auto-index", "-no-editor"}, stdin, stdout, stderr, runHooks{
+		startAutoIndex: func() func() { return func() {} },
+		afterSessionReady: func(sess *replSession) error {
+			if !reflect.DeepEqual(sess.thinkChain, []string{"test/agent-model", "test/weak-model"}) {
+				t.Fatalf("startup think chain = %v, want full configured chain", sess.thinkChain)
+			}
+			if sess.thinkModels == nil {
+				t.Fatal("startup registry missing")
+			}
+			for _, tc := range []struct {
+				model string
+				mode  provider.ThinkMode
+			}{{"agent-model", provider.ThinkToggle}, {"weak-model", provider.ThinkNone}} {
+				profile, err := sess.thinkModels.Lookup(context.Background(), provider.ModelKey{Provider: "test", Model: tc.model})
+				if err != nil || profile == nil || profile.ThinkMode != tc.mode {
+					t.Fatalf("startup registry profile(%q) = %+v, %v; want mode %v", tc.model, profile, err, tc.mode)
+				}
+			}
+			return nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("run: %v; stderr=%s", err, readRunTestFile(t, stderr))
+	}
+	requests := bodies()
+	if len(requests) != 2 {
+		t.Fatalf("wire requests = %d, want 2; stdout=%s", len(requests), readRunTestFile(t, stdout))
+	}
+	for i, body := range requests {
+		var req struct {
+			ReasoningEffort string          `json:"reasoning_effort"`
+			Kwargs          map[string]bool `json:"chat_template_kwargs"`
+		}
+		if err := json.Unmarshal([]byte(body), &req); err != nil {
+			t.Fatal(err)
+		}
+		if i == 0 && (req.ReasoningEffort != "" || len(req.Kwargs) != 0) {
+			t.Errorf("first request thinking = %+v, want no wire override", req)
+		}
+		if i == 1 && (req.ReasoningEffort != "high" || !req.Kwargs["enable_thinking"]) {
+			t.Errorf("next request thinking = %+v, want high/enabled", req)
+		}
+	}
+	if !strings.Contains(readRunTestFile(t, stdout), "think: high\n") {
+		t.Fatal("startup REPL did not acknowledge the setting")
+	}
+}
+
+func TestThinkREPLPreservesBufferedGoalsHistoryAndWrites(t *testing.T) {
+	caller := &thinkTurnCaller{captureCaller: captureCaller{answer: "answer"}}
+	sess := newSessionedTestSession(t, caller, t.TempDir(), "workspace:think-history")
+	sess.readToolCount = len(sess.tools)
+	key := provider.ModelKey{Provider: "test", Model: "thinking"}
+	reg := &thinkFakeReg{byKey: map[provider.ModelKey]provider.ThinkMode{key: provider.ThinkToggle}}
+	reg.onLookup = func() {
+		if len(reg.lookupCalls) == 3 {
+			reg.byKey[key] = provider.ThinkNone
+		}
+	}
+	sess.thinkModels = reg
+	sess.thinkChain = []string{"test/thinking"}
+	sess.session.summary = &conversation.DurableSummary{Content: "prior summary", MessageCount: 2}
+	if err := sess.session.store.Save(context.Background(), conversation.Conversation{ID: sess.session.id, DurableSummary: sess.session.summary}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sess.session.db.Exec(`CREATE TABLE think_writes(n INTEGER);
+CREATE TRIGGER think_insert AFTER INSERT ON conversations BEGIN INSERT INTO think_writes VALUES(1); END;
+CREATE TRIGGER think_update AFTER UPDATE ON conversations BEGIN INSERT INTO think_writes VALUES(1); END;`); err != nil {
+		t.Fatal(err)
+	}
+	caller.before = func(context.Context) {
+		var writes int
+		if err := sess.session.db.QueryRow(`SELECT COUNT(*) FROM think_writes`).Scan(&writes); err != nil {
+			t.Fatal(err)
+		}
+		want := 0
+		if len(caller.requests) == 2 {
+			want = 1
+		}
+		if writes != want {
+			t.Errorf("writes before model turn %d = %d, want %d goal writes only", len(caller.requests), writes, want)
+		}
+	}
+	var out strings.Builder
+	src := &recordingSource{scannerSource: newScannerSource(strings.NewReader("first goal\n/think high\n/think\n/think high\n/think off\n/think bogus\n  second goal  \n"), &out)}
+	if err := runREPL(context.Background(), src, &out, nil, sess); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(src.recorded, []string{"first goal", "second goal"}) {
+		t.Errorf("recorded goals = %q, want only first/second goals", src.recorded)
+	}
+	if len(caller.requests) != 2 {
+		t.Fatalf("model calls = %d, want 2", len(caller.requests))
+	}
+	var history []provider.ChatMessage
+	for _, m := range caller.requests[1].Messages {
+		if m.Role != "system" {
+			history = append(history, m)
+		}
+	}
+	wantHistory := []provider.ChatMessage{{Role: "user", Content: "first goal"}, {Role: "assistant", Content: "answer"}, {Role: "user", Content: "second goal"}}
+	if !reflect.DeepEqual(history, wantHistory) {
+		t.Errorf("second request history = %+v, want %+v", history, wantHistory)
+	}
+	if sess.session.id != "workspace:think-history" || sess.session.historySummary() != "prior summary" {
+		t.Errorf("session identity/summary = %q/%q, want original", sess.session.id, sess.session.historySummary())
+	}
+	stored, err := sess.session.store.Load(context.Background(), "workspace:think-history")
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantStored := []conversation.Message{{Role: "user", Content: "first goal"}, {Role: "assistant", Content: "answer"}, {Role: "user", Content: "second goal"}, {Role: "assistant", Content: "answer"}}
+	if !reflect.DeepEqual(stored.Messages, wantStored) || stored.DurableSummary == nil || stored.DurableSummary.Content != "prior summary" {
+		t.Errorf("stored conversation = %+v, want two goal/answer pairs and prior summary", stored)
+	}
+	var writes int
+	if err := sess.session.db.QueryRow(`SELECT COUNT(*) FROM think_writes`).Scan(&writes); err != nil {
+		t.Fatal(err)
+	}
+	if writes != 2 {
+		t.Errorf("persistence writes = %d, want exactly 2 goals", writes)
+	}
+	if strings.Count(out.String(), "think: high\n") != 3 || strings.Count(out.String(), "think: model test/thinking does not support thinking; -think ignored\n") != 1 || strings.Count(out.String(), "usage: /think [off|on|low|medium|high|default]\n") != 1 {
+		t.Errorf("command outputs = %q", out.String())
+	}
+	assertThinkOptions(t, caller.requests[1].Options, provider.Ptr(true), "high")
+}
+
+func TestThinkEditTextRemainsForcedGoal(t *testing.T) {
+	caller := &thinkTurnCaller{captureCaller: captureCaller{answer: "answer"}}
+	sess, _ := newThinkSession(t, caller, provider.ModelOptions{}, nil)
+	sess.goalEditor = &fakeGoalEditor{available: true, text: "/think high"}
+	var out strings.Builder
+	src := &recordingSource{scannerSource: newScannerSource(strings.NewReader("/edit\n"), &out)}
+	if err := runREPL(context.Background(), src, &out, nil, sess); err != nil {
+		t.Fatal(err)
+	}
+	if len(caller.requests) != 1 {
+		t.Fatalf("model calls = %d, want edited goal once", len(caller.requests))
+	}
+	messages := caller.requests[0].Messages
+	if messages[len(messages)-1].Content != "/think high" || !reflect.DeepEqual(src.recorded, []string{"/think high"}) {
+		t.Errorf("edited goal = %+v, recorded=%q", messages, src.recorded)
+	}
+	assertThinkOptions(t, caller.requests[0].Options, nil, "")
+	assertThinkOptions(t, sess.runtime.ModelOptions(), nil, "")
+}
+
+func TestThinkAfterIdleCtrlCAndStaleInterrupt(t *testing.T) {
+	for _, stale := range []bool{false, true} {
+		name := "idle Ctrl-C"
+		if stale {
+			name = "stale run interrupt"
+		}
+		t.Run(name, func(t *testing.T) {
+			check := func(t *testing.T) {
+				caller := &thinkTurnCaller{captureCaller: captureCaller{answer: "answer"}}
+				caller.before = func(ctx context.Context) {
+					if stale {
+						synctest.Wait()
+					}
+					if err := ctx.Err(); err != nil {
+						t.Errorf("next model context = %v, want live", err)
+					}
+				}
+				sess, _ := newThinkSession(t, caller, provider.ModelOptions{}, nil)
+				out, errOut := &lockedBuffer{}, &lockedBuffer{}
+				replCtx, cancel := context.WithCancel(context.Background())
+				defer cancel()
+				interrupts := make(chan struct{}, 1)
+				ctrl := newReplControl(out, errOut, interrupts, cancel)
+				sess.control = ctrl
+				var src lineSource
+				if stale {
+					interrupts <- struct{}{}
+					src = newScannerSource(strings.NewReader("/think high\nnext goal\n"), out)
+				} else {
+					stdin, stdout := tempDescriptors(t)
+					ops := &fakeTermOps{ttys: map[int]bool{int(stdin.Fd()): true, int(stdout.Fd()): true}, sizes: [][2]int{{80, 24}}}
+					chunks := [][]byte{[]byte("\x03"), []byte("/think high\r"), []byte("next goal\r")}
+					src = newInput(inputConfig{Stdin: stdin, Stdout: stdout, Stderr: errOut, In: &chunkReader{chunks: chunks}, Out: out, UseHistory: false, Getenv: func(string) string { return "" }, Root: sess.root, Ops: ops, OnInterrupt: ctrl.interrupt})
+					if _, ok := src.(*editorSource); !ok {
+						t.Fatalf("input = %T, want editor", src)
+					}
+				}
+				ctrl.setIdleDisplay(src.IdleDisplay)
+				if err := withLineSource(src, func(s lineSource) error { return runREPL(replCtx, s, out, interrupts, sess) }); err != nil {
+					t.Fatal(err)
+				}
+				if err := replCtx.Err(); err != nil {
+					t.Errorf("REPL context = %v, want live", err)
+				}
+				if len(caller.requests) != 1 {
+					t.Fatalf("model calls = %d, want next goal once; output=%q", len(caller.requests), out.String())
+				}
+				messages := caller.requests[0].Messages
+				if got := messages[len(messages)-1].Content; got != "next goal" {
+					t.Errorf("next model goal = %q, want next goal", got)
+				}
+				assertThinkOptions(t, caller.requests[0].Options, provider.Ptr(true), "high")
+				assertThinkOptions(t, sess.runtime.ModelOptions(), provider.Ptr(true), "high")
+				if !strings.Contains(out.String(), "think: high\n") || strings.Contains(out.String(), "canceled") || !strings.Contains(out.String(), "done ·") {
+					t.Errorf("command/goal completion = %q", out.String())
+				}
+				if !stale && strings.Count(out.String(), ctrlCHint) != 1 {
+					t.Errorf("idle Ctrl-C hint count = %d, want 1", strings.Count(out.String(), ctrlCHint))
+				}
+			}
+			// Real signal registration stays outside a synthetic-time bubble; the
+			// stale-channel case needs only the scanner and deterministic run watcher.
+			if stale {
+				synctest.Test(t, check)
+			} else {
+				check(t)
+			}
+		})
+	}
+}
+
+func TestThinkSurvivesMountsAndRefresh(t *testing.T) {
+	for _, before := range []bool{true, false} {
+		name := "high before mounts"
+		if !before {
+			name = "off after mounts"
+		}
+		t.Run(name, func(t *testing.T) {
+			caller := &captureCaller{answer: "answer"}
+			sess, root := newRefreshSession(t, caller)
+			sess.thinkModels = &thinkFakeReg{byKey: map[provider.ModelKey]provider.ThinkMode{{Provider: "test", Model: "thinking"}: provider.ThinkToggle}}
+			sess.thinkChain = []string{"test/thinking"}
+			obs, err := newObserv(os.Getenv, root, true, false, time.Now)
+			if err != nil {
+				t.Fatal(err)
+			}
+			sess.obs = obs
+			gitContextTestRun(t, root, "checkout", "-q", "-b", "feature")
+			var out strings.Builder
+			wantTools := []string{
+				"read_file,search,glob,list,write_file,edit_file",
+				"read_file,search,glob,list,write_file,edit_file,run_command,start_command,command_status,command_tail,stop_command",
+				"read_file,search,glob,list,write_file,edit_file,run_command,start_command,command_status,command_tail,stop_command",
+			}
+			for i, command := range []string{"/allow-write", "/allow-exec", "/git-context refresh"} {
+				_, _ = dispatchSlash(context.Background(), &out, sess, "/think high")
+				_, _ = dispatchSlash(context.Background(), &out, sess, command)
+				if !before {
+					_, _ = dispatchSlash(context.Background(), &out, sess, "/think off")
+				}
+				caller.messages = nil
+				caller.tools = nil
+				if _, err := runOnce(context.Background(), &out, nil, sess, "goal", nil); err != nil {
+					t.Fatal(err)
+				}
+				effort := ""
+				if before {
+					effort = "high"
+				}
+				assertThinkOptions(t, caller.options, &before, effort)
+				if got := strings.Join(caller.tools, ","); got != wantTools[i] {
+					t.Errorf("%s tool order = %q, want %q", command, got, wantTools[i])
+				}
+				if caller.system != sess.baseSystem {
+					t.Errorf("%s runtime system differs from session system", command)
+				}
+			}
+			if caller.system != sess.baseSystem || !strings.Contains(caller.system, "branch: feature\n") || !strings.Contains(caller.system, "write_file") || !strings.Contains(caller.system, "run_command") {
+				t.Errorf("composed runtime system = %q", caller.system)
+			}
+			files, err := filepath.Glob(filepath.Join(obs.traceDir, "*.json"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(files) != 3 {
+				t.Fatalf("trace files = %d, want one per goal", len(files))
+			}
+			var latest agenttrace.TraceRecord
+			found := false
+			for _, file := range files {
+				raw, err := os.ReadFile(file)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := json.Unmarshal(raw, &latest); err != nil {
+					t.Fatal(err)
+				}
+				if latest.Request.System == caller.system {
+					found = true
+					if latest.Request.ToolSchemaHash != toolSchemaHash(sess.tools) {
+						t.Errorf("trace tool schema hash = %q, want current mounted set", latest.Request.ToolSchemaHash)
+					}
+				}
+			}
+			if !found {
+				t.Error("no trace records the final runtime system")
+			}
+		})
+	}
+}
+
+func TestThinkSurvivesSessionResetCommands(t *testing.T) {
+	for _, command := range []string{"/new", "/clear", "/resume user:other"} {
+		t.Run(command, func(t *testing.T) {
+			caller := &captureCaller{answer: "answer"}
+			sess := newSessionedTestSession(t, caller, t.TempDir(), "workspace:reset-think")
+			sess.readToolCount = len(sess.tools)
+			sess.thinkModels = &thinkFakeReg{byKey: map[provider.ModelKey]provider.ThinkMode{{Provider: "test", Model: "thinking"}: provider.ThinkToggle}}
+			sess.thinkChain = []string{"test/thinking"}
+			sess.grants = newApprovalGrants()
+			sess.grants.grant(grantScopeExec, "exec:test")
+			if err := sess.session.record(context.Background(), "old question", "old answer"); err != nil {
+				t.Fatal(err)
+			}
+			if err := sess.session.store.Save(context.Background(), conversation.Conversation{ID: "user:other", Messages: []conversation.Message{{Role: "user", Content: "resumed question"}, {Role: "assistant", Content: "resumed answer"}}}); err != nil {
+				t.Fatal(err)
+			}
+			var out strings.Builder
+			_, _ = dispatchSlash(context.Background(), &out, sess, "/think high")
+			_, _ = dispatchSlash(context.Background(), &out, sess, command)
+			if sess.grants.count() != 0 {
+				t.Errorf("%s grants = %d, want 0", command, sess.grants.count())
+			}
+			if command == "/resume user:other" {
+				if sess.session.id != "user:other" || len(sess.session.msgs) != 2 {
+					t.Errorf("resume session = %q/%+v", sess.session.id, sess.session.msgs)
+				}
+			} else if len(sess.session.msgs) != 0 {
+				t.Errorf("%s history = %+v, want cleared", command, sess.session.msgs)
+			}
+			if _, err := runOnce(context.Background(), &out, nil, sess, "next goal", nil); err != nil {
+				t.Fatal(err)
+			}
+			assertThinkOptions(t, caller.options, provider.Ptr(true), "high")
+		})
 	}
 }
