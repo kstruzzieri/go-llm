@@ -436,7 +436,7 @@ func TestCheckpointCrashRecoveryConservativeStates(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			defer s.Close()
+			defer func() { _ = s.Close() }()
 			_, j, _, err := buildWriteTools(root, s, testGetenv(data))
 			if err != nil {
 				t.Fatal(err)
@@ -504,7 +504,7 @@ func TestCheckpointUndoCrashBeforeMutationAndAfterCommit(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			defer s.Close()
+			defer func() { _ = s.Close() }()
 			_, j, _, err = buildWriteTools(root, s, testGetenv(data))
 			if err != nil {
 				t.Fatal(err)

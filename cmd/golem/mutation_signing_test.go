@@ -25,7 +25,7 @@ func TestMutationSigningIdentityLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 	signer, verifier, notice, err := loadMutationSigning(ctx, testGetenv(data), root, s)
 	if err != nil {
 		t.Fatal(err)
@@ -124,7 +124,7 @@ func TestMutationSigningRefusesInvalidHistoryBeforeCreatingKey(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 	checkpointSQL(t, s.db, `INSERT INTO mutation_receipts (mutation_id,intent_json) VALUES (?, '{}')`, "unchecked\ncontrol\x1b")
 	_, _, _, err = loadMutationSigning(context.Background(), testGetenv(data), root, s)
 	if err == nil || err.Error() != "golem: mutation receipt history invalid or unavailable; writes disabled" {
@@ -143,7 +143,7 @@ func TestMutationSigningRefusesUnsafePaths(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			defer s.Close()
+			defer func() { _ = s.Close() }()
 			key := filepath.Join(data, "golem", "signing", "agent-ed25519.pem")
 			if kind == "inside" {
 				data = root
@@ -179,7 +179,7 @@ func TestMutationSigningPreservesCancellation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	_, _, _, err = loadMutationSigning(ctx, testGetenv(data), root, s)
@@ -198,7 +198,7 @@ func TestMutationSigningRejectsCorruptRetainedEvidence(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 	signer, _, _, err := loadMutationSigning(ctx, testGetenv(data), root, s)
 	if err != nil {
 		t.Fatal(err)
@@ -246,7 +246,7 @@ func readHostMutationReceipts(t *testing.T, data, root string) []agenttools.Muta
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 	signer, err := signing.LoadEd25519(filepath.Join(data, "golem", "signing", "agent-ed25519.pem"))
 	if err != nil {
 		t.Fatal(err)
