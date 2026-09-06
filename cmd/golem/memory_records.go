@@ -4,12 +4,14 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"strings"
 
 	"github.com/kstruzzieri/go-llm/agent"
 	agenttools "github.com/kstruzzieri/go-llm/agent/tools"
+	"github.com/kstruzzieri/go-llm/internal/promptfence"
 	"github.com/kstruzzieri/go-llm/memory"
 )
 
@@ -208,18 +210,18 @@ func handleRecords(ctx context.Context, out io.Writer, sess *replSession, fields
 	case len(fields) == 3 && fields[1] == "--forget":
 		defer secureMemoryDBFiles(sess)
 		if err := sess.records.SoftDelete(ctx, fields[2], recordAccess(sess)); err != nil {
-			_, _ = fmt.Fprintf(out, "forget failed: %v\n", err)
+			_, _ = fmt.Fprintf(out, "forget failed: %s\n", recordTerminalError(err))
 			return
 		}
-		_, _ = fmt.Fprintf(out, "forgot record %s\n", fields[2])
+		_, _ = fmt.Fprintf(out, "forgot record %s\n", agenttools.FlattenRecordContent(fields[2]))
 	case len(fields) == 4 && fields[1] == "--promote":
 		defer secureMemoryDBFiles(sess)
 		rec, err := sess.records.Promote(ctx, fields[2], recordAccess(sess), memory.MemoryKind(strings.ToLower(fields[3])))
 		if err != nil {
-			_, _ = fmt.Fprintf(out, "promote failed: %v\n", err)
+			_, _ = fmt.Fprintf(out, "promote failed: %s\n", recordTerminalError(err))
 			return
 		}
-		_, _ = fmt.Fprintf(out, "promoted %s to %s\n", rec.ID, rec.Kind)
+		_, _ = fmt.Fprintf(out, "promoted %s to %s (durable; unreviewed)\n", agenttools.FlattenRecordContent(rec.ID), agenttools.FlattenRecordContent(string(rec.Kind)))
 	case len(fields) == 1:
 		listRecords(ctx, out, sess)
 	default:
@@ -239,13 +241,21 @@ func listRecords(ctx context.Context, out io.Writer, sess *replSession) {
 		Limit:       recordsListLimit,
 	})
 	if err != nil {
-		_, _ = fmt.Fprintf(out, "records failed: %v\n", err)
+		_, _ = fmt.Fprintf(out, "records failed: %s\n", recordTerminalError(err))
 		return
 	}
 	if len(rs) == 0 {
 		_, _ = fmt.Fprintln(out, "no records")
 		return
 	}
+	fence := promptfence.New()
+	renderRecords(out, rs, fence.Open("TOOL_RESULT"), fence.Close("TOOL_RESULT"))
+}
+
+// renderRecords accepts boundary strings solely to keep exact-byte terminal
+// tests deterministic; listRecords always creates a fresh prompt fence.
+func renderRecords(out io.Writer, rs []memory.MemoryRecord, open, close string) {
+	_, _ = fmt.Fprintln(out, open)
 	for _, r := range rs {
 		expires := "-"
 		if !r.ExpiresAt.IsZero() {
@@ -254,7 +264,15 @@ func listRecords(ctx context.Context, out io.Writer, sess *replSession) {
 		// Model-authored content is untrusted for terminal display: flatten to
 		// one line and strip control chars so a record cannot forge extra rows
 		// or emit ANSI escapes in the table users act on (--forget/--promote).
-		_, _ = fmt.Fprintf(out, "%s  %s  %s  %s  %s\n",
-			r.ID, r.Kind, r.CreatedAt.Format("2006-01-02"), expires, agenttools.FlattenRecordContent(r.Content))
+		_, _ = fmt.Fprintf(out, "%s · %s  %s  %s  %s  %s\n",
+			agenttools.RecordRecallLabel(r), agenttools.FlattenRecordContent(r.ID), agenttools.FlattenRecordContent(string(r.Kind)), r.CreatedAt.Format("2006-01-02"), expires, agenttools.FlattenRecordContent(r.Content))
 	}
+	_, _ = fmt.Fprintln(out, close)
+}
+
+func recordTerminalError(err error) string {
+	if errors.Is(err, memory.ErrRecordIntegrity) {
+		return "record integrity verification failed"
+	}
+	return agenttools.FlattenRecordContent(err.Error())
 }

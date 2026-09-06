@@ -50,6 +50,9 @@ func TestMemorySearchInvoke(t *testing.T) {
 	if res.IsError {
 		t.Fatalf("unexpected error: %s", res.Content)
 	}
+	if res.Content != "user-authored; integrity=unverified · id1 · global · 0001-01-01 · prefer small diffs" {
+		t.Errorf("labeled result = %q", res.Content)
+	}
 	for _, want := range []string{"id1", "global", "prefer small diffs"} {
 		if !strings.Contains(res.Content, want) {
 			t.Errorf("content missing %q: %q", want, res.Content)
@@ -67,5 +70,13 @@ func TestMemorySearchInvoke(t *testing.T) {
 	r, _ := tool.Invoke(context.Background(), json.RawMessage(`{"query":"x"}`))
 	if r.IsError || !strings.Contains(r.Content, "no matching memories") {
 		t.Errorf("empty result = %q (err=%v)", r.Content, r.IsError)
+	}
+}
+
+func TestMemorySearchFlattensAttribution(t *testing.T) {
+	f := &fakeSearcher{result: []memory.Memory{{ID: "id\nforged\x1b", Scope: "global\nclaim\x1b", Text: "note\noriginal"}}}
+	res, err := (MemorySearch{S: f}).Invoke(context.Background(), json.RawMessage(`{"query":"note"}`))
+	if err != nil || res.IsError || res.Content != "user-authored; integrity=unverified · id forged · global claim · 0001-01-01 · note\noriginal" {
+		t.Fatalf("result = %+v, %v", res, err)
 	}
 }

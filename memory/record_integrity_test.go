@@ -75,7 +75,7 @@ func TestRecordFilesystemIdentityCreated(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer rt.Close()
+	defer func(runtime *RecordRuntime) { _ = runtime.Close() }(rt)
 	if _, err := os.Stat(path + ".keys/current.pem"); err != nil {
 		t.Fatalf("identity missing: %v", err)
 	}
@@ -257,7 +257,7 @@ func TestRecordMutationAtomicityAndReopen(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer rt.Close()
+	defer func(runtime *RecordRuntime) { _ = runtime.Close() }(rt)
 	got, err := rt.Store().Get(ctx, m.ID, RecordAccess{WorkspaceID: "ws"})
 	if err != nil || !reflect.DeepEqual(got, m) {
 		t.Fatalf("reopen changed record: err=%v", err)
@@ -272,7 +272,7 @@ func TestRecordMutationAtomicityAndReopen(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer rt.Close()
+	defer func(runtime *RecordRuntime) { _ = runtime.Close() }(rt)
 	tombstone, err := scanRecord(rt.db.QueryRow(`SELECT `+recordColumns+` FROM memory_records WHERE id = ?`, m.ID))
 	if err != nil {
 		t.Fatal(err)
@@ -313,12 +313,14 @@ func TestRecordMissingSignatureNotRepairedOnReopen(t *testing.T) {
 	if _, err := rt.db.Exec(`UPDATE memory_records SET signature = X'' WHERE id = ?`, m.ID); err != nil {
 		t.Fatal(err)
 	}
-	rt.Close()
+	if err := rt.Close(); err != nil {
+		t.Fatal(err)
+	}
 	rt, err = OpenRecordStore(ctx, path, RecordStoreConfig{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer rt.Close()
+	defer func(runtime *RecordRuntime) { _ = runtime.Close() }(rt)
 	if _, err := rt.Store().Get(ctx, m.ID, RecordAccess{}); !errors.Is(err, ErrRecordIntegrity) || !errors.Is(err, errMissingRecordSignature) {
 		t.Fatalf("reopen repaired signature: %v", err)
 	}

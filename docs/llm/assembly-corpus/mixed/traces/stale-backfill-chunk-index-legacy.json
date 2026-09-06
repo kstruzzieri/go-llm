@@ -46,7 +46,7 @@
       "rec-merge-planner"
     ],
     "estimated_prompt_tokens": 751,
-    "state_digest": "6fd3e5d59b8b3d7d8650ffe77c634066d0e3cf5c63ece8549786290648330fe6",
+    "state_digest": "315eb636b94d095c24a77919d1c1c9d2d2bbd94bf29a62e7df52c5da18c35218",
     "subjects": [
       "(c1|memory|rec-index-chunk)",
       "(c1|memory|rec-merge-alerts)",
@@ -59,10 +59,10 @@
     "stratum": "stale_vs_fresh",
     "answer_home": "memory",
     "scenario_family": "backfill-chunk-staleness",
-    "budget": 791,
-    "raw_state_tokens": 1318,
+    "budget": 838,
+    "raw_state_tokens": 1396,
     "pressure_level": "critical",
     "shed_messages": 8,
-    "shed_bytes": 1910
+    "shed_bytes": 2223
   }
 }

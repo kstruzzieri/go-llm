@@ -129,7 +129,7 @@ type searchPayload struct {
 func decodeSearch(t *testing.T, text string) searchPayload {
 	t.Helper()
 	var p searchPayload
-	if err := json.Unmarshal([]byte(text), &p); err != nil {
+	if err := decodeAgentMemoryFrame(text, false, "records", &p); err != nil {
 		t.Fatalf("decode search payload: %v\npayload: %s", err, text)
 	}
 	return p
@@ -296,7 +296,7 @@ type recordPayload struct {
 func decodeRecord(t *testing.T, text string) map[string]any {
 	t.Helper()
 	var p recordPayload
-	if err := json.Unmarshal([]byte(text), &p); err != nil {
+	if err := decodeAgentMemoryFrame(text, false, "record", &p); err != nil {
 		t.Fatalf("decode record payload: %v\npayload: %s", err, text)
 	}
 	if p.Record == nil {

@@ -19,7 +19,7 @@
     },
     {
       "role": "tool",
-      "content": "rec-cursor-note · working · 2025-07-27 · the replay checkpoint cursor lives under the data directory; delete it only with the daemon stopped\nrec-drill-cadence · semantic · 2025-07-27 · replay drills run monthly; the drill lead rotates with the oncall schedule\nrec-drill-wideopen · semantic · 2025-07-27 · the March replay drill ran wide open at 24 MB/s and starved live ingest; the retro says never run an uncapped drill on a production-shaped node again",
+      "content": "trust=agent-written; unreviewed; origin=memory.create; session=caller-claim · rec-cursor-note · working · 2025-07-27 · the replay checkpoint cursor lives under the data directory; delete it only with the daemon stopped\ntrust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-drill-cadence · semantic · 2025-07-27 · replay drills run monthly; the drill lead rotates with the oncall schedule\ntrust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-drill-wideopen · semantic · 2025-07-27 · the March replay drill ran wide open at 24 MB/s and starved live ingest; the retro says never run an uncapped drill on a production-shaped node again",
       "tool_call_id": "c2",
       "name": "agent_memory_search"
     },
@@ -43,8 +43,8 @@
       "rec-drill-cadence",
       "rec-drill-wideopen"
     ],
-    "estimated_prompt_tokens": 178,
-    "state_digest": "e6859b0616a19c254d3d0581929089d228ba6ae22e32211162de2c82eaa71a1b",
+    "estimated_prompt_tokens": 237,
+    "state_digest": "76d2a5cb79bfcc80d5a209b1f263a4863d2b99679473aeae3ff7b01eceeba2cd",
     "subjects": [
       "(c1|rag|internal/replay/replay.go)",
       "(c1|rag|internal/replay/cursor.go)",
@@ -56,8 +56,8 @@
     "stratum": "conversation_only",
     "answer_home": "conversation",
     "scenario_family": "replay-throttle-conv",
-    "budget": 1153,
-    "raw_state_tokens": 1922,
+    "budget": 1189,
+    "raw_state_tokens": 1981,
     "pressure_level": "ok",
     "shed_messages": 14,
     "shed_bytes": 6413

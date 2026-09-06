@@ -51,7 +51,7 @@
     },
     {
       "role": "tool",
-      "content": "rec-crash-rotation · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:\nrec-lease-alarm · working · created:2025-07-27 · updated:2025-07-27 · scope:session · ns: · src:\nrec-review-notes · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src: · collector sizing reviews post their decisions to the fleet channel the same day",
+      "content": "trust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-crash-rotation · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src-claim:\ntrust=agent-written; unreviewed; origin=memory.create; session=caller-claim · rec-lease-alarm · working · created:2025-07-27 · updated:2025-07-27 · scope:session · ns: · src-claim:\ntrust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-review-notes · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src-claim: · collector sizing reviews post their decisions to the fleet channel the same day",
       "tool_call_id": "c1",
       "name": "agent_memory_search"
     },
@@ -70,7 +70,7 @@
     },
     {
       "role": "tool",
-      "content": "### source: \"internal/collector/checkpoint.go\"\npurpose: Collector checkpoint cadence: code default flush interval bounding crash replay.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n--- source: \"internal/collector/checkpoint.go\" (lines 1-33, similarity: 1.00) ---\n1| package collector\n2| \n3| import (\n4| \t\"context\"\n5| \t\"time\"\n6| )\n7| \n8| // checkpointEvery is the code default cadence for flushing the\n9| // collector's in-memory cursor state to disk. Checkpoints bound crash\n10| // replay: on restart the collector replays segments from the last\n11| // checkpoint forward, so the cadence trades steady-state write cost\n12| // against worst-case recovery work.\n13| // Early builds checkpointed every 30 seconds; the write-cost work\n14| // landed the cadence below.\n15| const checkpointEvery = 4 * time.Minute\n16| \n17| // loop flushes cursor state on the cadence until ctx ends. A flush\n18| // that fails leaves the previous checkpoint in place; replay is\n19| // correct from any older checkpoint, merely slower.\n20| func (c *Collector) loop(ctx context.Context) {\n21| \tt := time.NewTicker(checkpointEvery)\n22| \tdefer t.Stop()\n23| \tfor {\n24| \t\tselect {\n25| \t\tcase \u003c-ctx.Done():\n26| \t\t\treturn\n27| \t\tcase \u003c-t.C:\n28| \t\t\tif err := c.flush(); err != nil {\n29| \t\t\t\tc.metrics.flushFailures.Inc()\n30| \t\t\t}\n31| \t\t}\n32| \t}\n33| }\n\n### source: \"internal/collector/replay.go\"\npurpose: Crash replay: segment walk from the last checkpoint, idempotent by dedupe.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n\n### source: \"docs/collector.md\"\npurpose: Collector guide: cursor checkpoints, crash replay, fleet leases.\nlanguage: markdown\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n",
+      "content": "### source: \"internal/collector/checkpoint.go\"\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nnote: metadata overview (summary omitted: budget)\n--- source: \"internal/collector/checkpoint.go\" (lines 1-33, similarity: 1.00) ---\n1| package collector\n2| \n3| import (\n4| \t\"context\"\n5| \t\"time\"\n6| )\n7| \n8| // checkpointEvery is the code default cadence for flushing the\n9| // collector's in-memory cursor state to disk. Checkpoints bound crash\n10| // replay: on restart the collector replays segments from the last\n11| // checkpoint forward, so the cadence trades steady-state write cost\n12| // against worst-case recovery work.\n13| // Early builds checkpointed every 30 seconds; the write-cost work\n14| // landed the cadence below.\n15| const checkpointEvery = 4 * time.Minute\n16| \n17| // loop flushes cursor state on the cadence until ctx ends. A flush\n18| // that fails leaves the previous checkpoint in place; replay is\n19| // correct from any older checkpoint, merely slower.\n20| func (c *Collector) loop(ctx context.Context) {\n21| \tt := time.NewTicker(checkpointEvery)\n22| \tdefer t.Stop()\n23| \tfor {\n24| \t\tselect {\n25| \t\tcase \u003c-ctx.Done():\n26| \t\t\treturn\n27| \t\tcase \u003c-t.C:\n28| \t\t\tif err := c.flush(); err != nil {\n29| \t\t\t\tc.metrics.flushFailures.Inc()\n30| \t\t\t}\n31| \t\t}\n32| \t}\n33| }\n\n### source: \"internal/collector/replay.go\"\npurpose: Crash replay: segment walk from the last checkpoint, idempotent by dedupe.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n\n### source: \"docs/collector.md\"\npurpose: Collector guide: cursor checkpoints, crash replay, fleet leases.\nlanguage: markdown\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n",
       "tool_call_id": "c2",
       "name": "retrieve"
     },
@@ -94,8 +94,8 @@
       "rec-lease-alarm",
       "rec-review-notes"
     ],
-    "estimated_prompt_tokens": 1085,
-    "state_digest": "7dfb5dd40ed2207e6fa277ad8d19ca25f63a985fba26407ead2d006cca4ab0b6",
+    "estimated_prompt_tokens": 1126,
+    "state_digest": "3100c4ed09cb4cc90618ac9f8c3a25566aef01a28f037977f7b04c25b8c184f6",
     "subjects": [
       "(c1|memory|rec-crash-rotation)",
       "(c1|memory|rec-lease-alarm)",
@@ -107,11 +107,11 @@
     "stratum": "cross_domain_join",
     "answer_home": "join",
     "scenario_family": "checkpoint-cycle-join",
-    "budget": 1130,
-    "raw_state_tokens": 1883,
+    "budget": 1165,
+    "raw_state_tokens": 1942,
     "pressure_level": "critical",
     "shed_messages": 2,
-    "shed_bytes": 2709,
+    "shed_bytes": 2780,
     "omitted_subjects": 1
   }
 }

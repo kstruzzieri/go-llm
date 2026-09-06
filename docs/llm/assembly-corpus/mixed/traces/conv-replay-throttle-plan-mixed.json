@@ -7,14 +7,6 @@
   "turns": [
     {
       "role": "user",
-      "content": "Post-outage cleanup first: the export backlog drained overnight but the drill calendar still shows last month's replay drill as pending. Close it out and put the retro link on the entry so the calendar reflects reality."
-    },
-    {
-      "role": "assistant",
-      "content": "Closed the drill entry and attached the retro link; the calendar now shows the next drill in five weeks with the lead already assigned."
-    },
-    {
-      "role": "user",
       "content": "The replay section of the runbook still tells operators to eyeball disk contention from the node graphs. That advice predates the pacer work entirely and reads as folklore now. Tighten it up around the pacer flow?"
     },
     {
@@ -68,7 +60,7 @@
     },
     {
       "role": "tool",
-      "content": "### source: \"internal/replay/replay.go\"\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nnote: metadata overview (summary omitted: budget)\n--- source: \"internal/replay/replay.go\" (lines 1-44, similarity: 1.00) ---\n1| package replay\n2| \n3| import (\n4| \t\"context\"\n5| \t\"time\"\n6| )\n7| \n8| // Replayer walks rolled segments from the checkpoint cursor and feeds\n9| // batches back through the export pipeline. The walk rate is supplied\n10| // by deployment config; the March drill's wide-open 24 MB/s run\n11| // predates the pacer and lives nowhere in this file.\n12| type Replayer struct {\n13| \tdir    string\n14| \tcursor *Cursor\n15| \tpace   Pace\n16| }\n17| \n18| // Run replays segments until caught up or cancelled. Batches are\n19| // released through the pacer so catch-up traffic and live ingest share\n20| // the disk on the operator's terms rather than racing for it.\n21| func (r *Replayer) Run(ctx context.Context) error {\n22| \tfor {\n23| \t\tseg, err := r.next()\n24| \t\tif err == errCaughtUp {\n25| \t\t\treturn nil\n26| \t\t}\n27| \t\tif err != nil {\n28| \t\t\treturn err\n29| \t\t}\n30| \t\tif err := r.replaySegment(ctx, seg); err != nil {\n31| \t\t\treturn err\n32| \t\t}\n33| \t\tr.cursor.advance(seg)\n34| \t}\n35| }\n36| \n37| // replaySegment streams one segment through the pacer. The pacer's\n38| // release schedule is the only throttle; the segment reader itself\n39| // runs as fast as the pacer lets it.\n40| func (r *Replayer) replaySegment(ctx context.Context, seg segmentRef) error {\n41| \treturn r.pace.Release(ctx, func(batch []byte) error {\n42| \t\treturn r.export(batch)\n43| \t})\n44| }\n\n### source: \"internal/replay/cursor.go\"\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nnote: metadata overview (summary omitted: budget)\n\n### source: \"docs/replay.md\"\nlanguage: markdown\nindexed: 2025-07-27T00:00:00Z\nnote: metadata overview (summary omitted: budget)\n",
+      "content": "### source: \"internal/replay/replay.go\"\npurpose: Segment replay from the checkpoint cursor; pace supplied by config.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n--- source: \"internal/replay/replay.go\" (lines 1-44, similarity: 1.00) ---\n1| package replay\n2| \n3| import (\n4| \t\"context\"\n5| \t\"time\"\n6| )\n7| \n8| // Replayer walks rolled segments from the checkpoint cursor and feeds\n9| // batches back through the export pipeline. The walk rate is supplied\n10| // by deployment config; the March drill's wide-open 24 MB/s run\n11| // predates the pacer and lives nowhere in this file.\n12| type Replayer struct {\n13| \tdir    string\n14| \tcursor *Cursor\n15| \tpace   Pace\n16| }\n17| \n18| // Run replays segments until caught up or cancelled. Batches are\n19| // released through the pacer so catch-up traffic and live ingest share\n20| // the disk on the operator's terms rather than racing for it.\n21| func (r *Replayer) Run(ctx context.Context) error {\n22| \tfor {\n23| \t\tseg, err := r.next()\n24| \t\tif err == errCaughtUp {\n25| \t\t\treturn nil\n26| \t\t}\n27| \t\tif err != nil {\n28| \t\t\treturn err\n29| \t\t}\n30| \t\tif err := r.replaySegment(ctx, seg); err != nil {\n31| \t\t\treturn err\n32| \t\t}\n33| \t\tr.cursor.advance(seg)\n34| \t}\n35| }\n36| \n37| // replaySegment streams one segment through the pacer. The pacer's\n38| // release schedule is the only throttle; the segment reader itself\n39| // runs as fast as the pacer lets it.\n40| func (r *Replayer) replaySegment(ctx context.Context, seg segmentRef) error {\n41| \treturn r.pace.Release(ctx, func(batch []byte) error {\n42| \t\treturn r.export(batch)\n43| \t})\n44| }\n\n### source: \"internal/replay/cursor.go\"\npurpose: Durable replay checkpoint cursor with atomic advance.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n\n### source: \"docs/replay.md\"\npurpose: Replay guide: cursor walk, pacer profiles, drill practice.\nlanguage: markdown\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n",
       "tool_call_id": "c1",
       "name": "retrieve"
     },
@@ -86,7 +78,7 @@
     },
     {
       "role": "tool",
-      "content": "rec-cursor-note · working · created:2025-07-27 · updated:2025-07-27 · scope:session · ns: · src:\nrec-drill-cadence · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:\nrec-drill-wideopen · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:",
+      "content": "trust=agent-written; unreviewed; origin=memory.create; session=caller-claim · rec-cursor-note · working · created:2025-07-27 · updated:2025-07-27 · scope:session · ns: · src-claim:\ntrust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-drill-cadence · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src-claim: · replay drills run monthly; the drill lead rotates with the oncall schedule\ntrust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-drill-wideopen · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src-claim:",
       "tool_call_id": "c2",
       "name": "agent_memory_search"
     },
@@ -110,8 +102,8 @@
       "rec-drill-cadence",
       "rec-drill-wideopen"
     ],
-    "estimated_prompt_tokens": 1102,
-    "state_digest": "e6859b0616a19c254d3d0581929089d228ba6ae22e32211162de2c82eaa71a1b",
+    "estimated_prompt_tokens": 1146,
+    "state_digest": "76d2a5cb79bfcc80d5a209b1f263a4863d2b99679473aeae3ff7b01eceeba2cd",
     "subjects": [
       "(c1|rag|internal/replay/replay.go)",
       "(c1|rag|internal/replay/cursor.go)",
@@ -123,9 +115,11 @@
     "stratum": "conversation_only",
     "answer_home": "conversation",
     "scenario_family": "replay-throttle-conv",
-    "budget": 1153,
-    "raw_state_tokens": 1922,
+    "budget": 1189,
+    "raw_state_tokens": 1981,
     "pressure_level": "critical",
-    "shed_bytes": 2739
+    "shed_messages": 2,
+    "shed_bytes": 2792,
+    "omitted_subjects": 1
   }
 }

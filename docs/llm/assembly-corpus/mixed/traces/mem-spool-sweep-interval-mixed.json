@@ -52,7 +52,7 @@
     },
     {
       "role": "tool",
-      "content": "### source: \"docs/spool.md\"\npurpose: Spool guide: local-disk placement and retention sweep behaviour.\nlanguage: markdown\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n--- source: \"docs/spool.md\" (lines 1-11, similarity: 1.00) ---\n1| # driftwatch spool\n2| \n3| The spool absorbs ingest bursts and survives restarts. Keep it on\n4| local disk; network volumes turn every exporter hiccup into a stall.\n5| \n6| ## Retention sweeps\n7| \n8| The retention sweeper trims rolled segments past their horizon. The\n9| sample config ships a 3h sweep interval for evaluation installs;\n10| production fleets override it in deployment config to match their\n11| churn. The sweeper never touches the active segment.\n\n### source: \"internal/spool/sweep.go\"\npurpose: Retention sweeper waking on the config-supplied interval.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n--- source: \"internal/spool/sweep.go\" (lines 1-27, similarity: 1.00) ---\n1| package spool\n2| \n3| import \"time\"\n4| \n5| // sweeper trims rolled segments that have aged past the retention\n6| // horizon. It wakes on the interval from deployment config, walks the\n7| // segment directory in index order, and stops at the first segment\n8| // still inside the horizon - segments age in index order, so nothing\n9| // past the stop point can be eligible. The active segment is never a\n10| // candidate, whatever its age.\n11| type sweeper struct {\n12| \tinterval time.Duration\n13| \thorizon  time.Duration\n14| }\n15| \n16| func (s *sweeper) run(stop \u003c-chan struct{}) {\n17| \tt := time.NewTicker(s.interval)\n18| \tdefer t.Stop()\n19| \tfor {\n20| \t\tselect {\n21| \t\tcase \u003c-t.C:\n22| \t\t\ts.sweepOnce()\n23| \t\tcase \u003c-stop:\n24| \t\t\treturn\n25| \t\t}\n26| \t}\n27| }\n\n### source: \"internal/spool/segment.go\"\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nnote: metadata overview (summary omitted: budget)\n",
+      "content": "### source: \"docs/spool.md\"\nlanguage: markdown\nindexed: 2025-07-27T00:00:00Z\nnote: metadata overview (summary omitted: budget)\n--- source: \"docs/spool.md\" (lines 1-11, similarity: 1.00) ---\n1| # driftwatch spool\n2| \n3| The spool absorbs ingest bursts and survives restarts. Keep it on\n4| local disk; network volumes turn every exporter hiccup into a stall.\n5| \n6| ## Retention sweeps\n7| \n8| The retention sweeper trims rolled segments past their horizon. The\n9| sample config ships a 3h sweep interval for evaluation installs;\n10| production fleets override it in deployment config to match their\n11| churn. The sweeper never touches the active segment.\n\n### source: \"internal/spool/sweep.go\"\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nnote: metadata overview (summary omitted: budget)\n--- source: \"internal/spool/sweep.go\" (lines 1-27, similarity: 1.00) ---\n1| package spool\n2| \n3| import \"time\"\n4| \n5| // sweeper trims rolled segments that have aged past the retention\n6| // horizon. It wakes on the interval from deployment config, walks the\n7| // segment directory in index order, and stops at the first segment\n8| // still inside the horizon - segments age in index order, so nothing\n9| // past the stop point can be eligible. The active segment is never a\n10| // candidate, whatever its age.\n11| type sweeper struct {\n12| \tinterval time.Duration\n13| \thorizon  time.Duration\n14| }\n15| \n16| func (s *sweeper) run(stop \u003c-chan struct{}) {\n17| \tt := time.NewTicker(s.interval)\n18| \tdefer t.Stop()\n19| \tfor {\n20| \t\tselect {\n21| \t\tcase \u003c-t.C:\n22| \t\t\ts.sweepOnce()\n23| \t\tcase \u003c-stop:\n24| \t\t\treturn\n25| \t\t}\n26| \t}\n27| }\n\n### source: \"internal/spool/segment.go\"\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nnote: metadata overview (summary omitted: budget)\n",
       "tool_call_id": "c1",
       "name": "retrieve"
     },
@@ -70,7 +70,7 @@
     },
     {
       "role": "tool",
-      "content": "rec-onboard-notes · working · created:2025-07-27 · updated:2025-07-27 · scope:session · ns: · src:\nrec-sweep-eval · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:\nrec-sweep-interval · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:",
+      "content": "trust=agent-written; unreviewed; origin=memory.create; session=caller-claim · rec-onboard-notes · working · created:2025-07-27 · updated:2025-07-27 · scope:session · ns: · src-claim:\ntrust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-sweep-eval · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src-claim:\ntrust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-sweep-interval · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src-claim:",
       "tool_call_id": "c2",
       "name": "agent_memory_search"
     },
@@ -94,8 +94,8 @@
       "rec-sweep-eval",
       "rec-sweep-interval"
     ],
-    "estimated_prompt_tokens": 899,
-    "state_digest": "9744c252eaef71b1b7831dd1640cc96eefc1fe19b3ae2050a2adc89e04a31f9c",
+    "estimated_prompt_tokens": 928,
+    "state_digest": "e32767fcecfa553813333be82dd1528a57dfd5b75b121900395e586a14d92f6b",
     "subjects": [
       "(c1|rag|docs/spool.md)",
       "(c1|rag|internal/spool/sweep.go)",
@@ -107,9 +107,9 @@
     "stratum": "memory_only",
     "answer_home": "memory",
     "scenario_family": "spool-sweep-mem",
-    "budget": 948,
-    "raw_state_tokens": 1580,
+    "budget": 983,
+    "raw_state_tokens": 1639,
     "pressure_level": "critical",
-    "shed_bytes": 2306
+    "shed_bytes": 2427
   }
 }

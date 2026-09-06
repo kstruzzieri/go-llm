@@ -364,7 +364,9 @@ func TestRecordKeyLifecycle(t *testing.T) {
 	if rt.Store().CreatedKeyID() != "" {
 		t.Fatal("identity recreated")
 	}
-	rt.Close()
+	if err := rt.Close(); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.Rename(currentPath, currentPath+".retired"); err != nil {
 		t.Fatal(err)
 	}
@@ -393,7 +395,9 @@ func TestRecordKeyLifecycle(t *testing.T) {
 	if _, err := rt.Store().Get(ctx, oldRecord.ID, RecordAccess{}); err != nil {
 		t.Fatal(err)
 	}
-	rt.Close()
+	if err := rt.Close(); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.Remove(filepath.Join(trusted, oldID+".pem")); err != nil {
 		t.Fatal(err)
 	}
@@ -401,7 +405,7 @@ func TestRecordKeyLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer rt.Close()
+	defer func(runtime *RecordRuntime) { _ = runtime.Close() }(rt)
 	if _, err := rt.Store().Get(ctx, newRecord.ID, RecordAccess{}); err != nil {
 		t.Fatal(err)
 	}
@@ -421,7 +425,9 @@ func TestRecordRetainedVerifierValidation(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			rt.Close()
+			if err := rt.Close(); err != nil {
+				t.Fatal(err)
+			}
 			key, err := signing.LoadEd25519(path + ".keys/current.pem")
 			if err != nil {
 				t.Fatal(err)
