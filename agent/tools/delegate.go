@@ -3,13 +3,16 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/kstruzzieri/go-llm/agent"
 	"github.com/kstruzzieri/go-llm/internal/modeltext"
 	"github.com/kstruzzieri/go-llm/provider"
+	"github.com/kstruzzieri/go-llm/signing"
 )
 
 // delegateTimeout bounds a single delegated code-generation sub-call. It is
@@ -28,8 +31,25 @@ const delegateSystemPrompt = "You are a code-generation specialist invoked for o
 // generated text as a NON-MUTATING tool result. It never touches disk: the
 // orchestrator integrates the result through the approval-gated write tools.
 type DelegateCode struct {
-	caller  agent.ModelCaller
-	onToken func(string)
+	caller             agent.ModelCaller
+	onToken            func(string)
+	proposalSigner     signing.Signer
+	proposalVerifier   signing.Verifier
+	proposalInitErr    error
+	proposalConfigured bool
+}
+
+// ProposalVerifier returns the verifier for proposals emitted by this tool, or
+// nil when proposal signing could not be initialized.
+// This capability is for the trusted tool owner. It returns the configured
+// verifier unchanged; the default HMAC identity also implements signing.Signer.
+// Do not pass it to a component that must lack signing authority. Retaining it
+// keeps the in-memory key alive, but does not persist that key for later audit.
+func (t *DelegateCode) ProposalVerifier() signing.Verifier {
+	if t == nil || t.proposalInitErr != nil {
+		return nil
+	}
+	return t.proposalVerifier
 }
 
 // DelegateOption configures optional DelegateCode behavior.
@@ -43,13 +63,53 @@ func WithStream(sink func(string)) DelegateOption {
 	return func(d *DelegateCode) { d.onToken = sink }
 }
 
+// WithProposalSigning configures the matching signer and verifier used for
+// delegate proposals. Supplying either an incomplete or mismatched pair makes
+// the tool unusable rather than falling back to a generated identity.
+func WithProposalSigning(signer signing.Signer, verifier signing.Verifier) DelegateOption {
+	return func(d *DelegateCode) {
+		d.proposalConfigured = true
+		if d.proposalInitErr != nil {
+			return
+		}
+		if signer == nil || verifier == nil {
+			d.proposalInitErr = errors.New("delegate proposal signing requires both signer and verifier")
+			return
+		}
+		signerKeyID, verifierKeyID := signer.KeyID(), verifier.KeyID()
+		signerAlgorithm, verifierAlgorithm := signer.Algorithm(), verifier.Algorithm()
+		if signerKeyID == "" || verifierKeyID == "" || signerAlgorithm == "" || verifierAlgorithm == "" {
+			d.proposalInitErr = errors.New("delegate proposal signing key is uninitialized")
+			return
+		}
+		if signerKeyID != verifierKeyID || signerAlgorithm != verifierAlgorithm {
+			d.proposalInitErr = errors.New("delegate proposal signer and verifier do not match")
+			return
+		}
+		d.proposalSigner = signer
+		d.proposalVerifier = verifier
+	}
+}
+
 // NewDelegateCode builds the delegate_code tool over a caller pinned to the
 // delegate role chain. Pass WithStream to surface generation progress.
+// Signing initialization errors leave ProposalVerifier nil and make Invoke
+// return an error result before any model call; construction does not panic.
 func NewDelegateCode(caller agent.ModelCaller, opts ...DelegateOption) *DelegateCode {
 	d := &DelegateCode{caller: caller}
 	for _, o := range opts {
 		o(d)
 	}
+	if d.proposalConfigured {
+		return d
+	}
+	identity, err := signing.GenerateHMAC(nil)
+	if err != nil {
+		d.proposalInitErr = err
+		return d
+	}
+	d.proposalSigner = identity
+	d.proposalVerifier = identity
 	return d
 }
 
@@ -90,6 +150,9 @@ func (*DelegateCode) Effect() agent.Effect {
 func (*DelegateCode) Origin() agent.Origin { return agent.OriginModel }
 
 func (t *DelegateCode) Invoke(ctx context.Context, raw json.RawMessage) (agent.ToolResult, error) {
+	if t.proposalInitErr != nil {
+		return agent.ToolResult{IsError: true, Content: "delegate failed: " + t.proposalInitErr.Error()}, nil
+	}
 	var args delegateArgs
 	if err := json.Unmarshal(raw, &args); err != nil {
 		return agent.ToolResult{IsError: true, Content: "invalid arguments: " + err.Error()}, nil
@@ -121,10 +184,26 @@ func (t *DelegateCode) Invoke(ctx context.Context, raw json.RawMessage) (agent.T
 	if strings.TrimSpace(content) == "" {
 		return agent.ToolResult{IsError: true, Content: "delegate returned no content"}, nil
 	}
+	if result.RouteOutcome == nil || strings.TrimSpace(result.RouteOutcome.ActualModel.Provider) == "" || strings.TrimSpace(result.RouteOutcome.ActualModel.Model) == "" {
+		return agent.ToolResult{IsError: true, Content: "delegate failed: missing model routing identity"}, nil
+	}
+	model := result.RouteOutcome.ActualModel
+	if !utf8.ValidString(model.Provider) || !utf8.ValidString(model.Model) || len(model.Provider)+len(model.Model) > delegateProposalModelMaxBytes {
+		return agent.ToolResult{IsError: true, Content: "delegate failed: invalid model routing identity"}, nil
+	}
+	proposal, err := newDelegateProposal(ctx, t.proposalSigner, t.proposalVerifier, content, args.Prompt, model, time.Now())
+	if err != nil {
+		return agent.ToolResult{IsError: true, Content: "delegate failed: " + err.Error()}, nil
+	}
+	provenance, err := json.Marshal(proposal)
+	if err != nil {
+		return agent.ToolResult{IsError: true, Content: "delegate failed: " + err.Error()}, nil
+	}
 	return agent.ToolResult{
 		Content:      content,
 		Preview:      delegatePreview(result.RouteOutcome, content),
 		RouteOutcome: result.RouteOutcome,
+		Provenance:   provenance,
 	}, nil
 }
 
