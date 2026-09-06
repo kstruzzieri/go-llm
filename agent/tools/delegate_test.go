@@ -50,6 +50,8 @@ func (f *fakeCaller) Chat(ctx context.Context, req provider.ChatRequest, onToken
 	return agent.ModelResult{Response: f.resp, RouteOutcome: f.outcome}, nil
 }
 
+// decodeDelegateProposal reads trusted envelopes emitted by these tests; it is
+// not an example reader for arbitrary untrusted JSON.
 func decodeDelegateProposal(t *testing.T, raw json.RawMessage) DelegateProposal {
 	t.Helper()
 	var proposal DelegateProposal
@@ -204,6 +206,40 @@ func TestDelegateCode_SubRequestMessages(t *testing.T) {
 	}
 	if len(fc.gotReq.Tools) != 0 {
 		t.Errorf("Chat request Tools length = %d, want 0", len(fc.gotReq.Tools))
+	}
+}
+
+func TestDelegateCode_ProposalBindsDecodedPrompt(t *testing.T) {
+	const first = "first request"
+	const want = " second request \n"
+	for _, tt := range []struct {
+		name string
+		args string
+	}{
+		{"duplicate", `{"prompt":"first request","prompt":" second request \n"}`},
+		{"case insensitive", `{"prompt":"first request","PROMPT":" second request \n"}`},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			fc := &fakeCaller{
+				resp:    provider.ChatResponse{Content: "abc"},
+				outcome: &provider.RouteOutcome{ActualModel: provider.ModelKey{Provider: "local", Model: "coder"}},
+			}
+			tool := NewDelegateCode(fc)
+			out, err := tool.Invoke(context.Background(), json.RawMessage(tt.args))
+			if err != nil || out.IsError {
+				t.Fatalf("Invoke: result=%+v, err=%v", out, err)
+			}
+			if len(fc.gotReq.Messages) != 2 || fc.gotReq.Messages[1].Content != want {
+				t.Fatalf("Chat messages = %+v, want exact decoded prompt %q", fc.gotReq.Messages, want)
+			}
+			proposal := decodeDelegateProposal(t, out.Provenance)
+			if err := VerifyDelegateProposal(context.Background(), tool.ProposalVerifier(), &proposal, want); err != nil {
+				t.Fatalf("verify actual decoded prompt: %v", err)
+			}
+			if err := VerifyDelegateProposal(context.Background(), tool.ProposalVerifier(), &proposal, first); err == nil {
+				t.Fatal("verified a prompt that was not sent to Chat")
+			}
+		})
 	}
 }
 

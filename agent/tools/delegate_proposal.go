@@ -76,16 +76,14 @@ func newDelegateProposal(
 	if err := validateDelegateProposalFields(content, prompt, model, timestamp); err != nil {
 		return nil, err
 	}
-	contentDigest := sha256.Sum256([]byte(content))
-	promptDigest := sha256.Sum256([]byte(prompt))
 	proposal := &DelegateProposal{
 		Domain:  DelegateProposalDomain,
 		Content: content,
 		Body: DelegateProposalBody{
 			ContentForm:   DelegateProposalContentForm,
-			ContentSHA256: hex.EncodeToString(contentDigest[:]),
+			ContentSHA256: delegateProposalDigest(content),
 			Model:         model,
-			PromptSHA256:  hex.EncodeToString(promptDigest[:]),
+			PromptSHA256:  delegateProposalDigest(prompt),
 			Timestamp:     timestamp,
 		},
 	}
@@ -104,6 +102,8 @@ func newDelegateProposal(
 }
 
 // VerifyDelegateProposal verifies the complete typed delegate proposal contract.
+// It does not establish freshness, prevent replay, or authorize filesystem
+// writes. Timestamp is signed evidence, not an expiry or current-time check.
 //
 // To recover expectedPrompt from a content-full agent trace, locate the
 // StepRecord whose Index equals the proposal ToolCallRecord.Step. Use the
@@ -113,10 +113,10 @@ func newDelegateProposal(
 // accepted records forming a prefix. Use the record's position among every
 // recorded call in that step, including earlier synthetic or denied calls, to
 // select the same position from StepRecord.Response.ToolCalls. Confirm that
-// selected call is delegate_code,
-// decode its Function.Arguments prompt with delegate_code semantics, and pass
-// the exact decoded string here. Matching only by tool name or proposal digest
-// is ambiguous when a step contains multiple delegate calls. Missing,
+// selected call is delegate_code, decode its Function.Arguments prompt with
+// delegate_code semantics, and pass the exact decoded string here. Matching
+// only by tool name or proposal digest is ambiguous when a step contains
+// multiple delegate calls. Missing,
 // malformed, or ambiguous step/order/argument evidence means full prompt-bound
 // verification is unavailable. The enclosing trace must itself come from a
 // trusted evidence source; a proposal signature does not authenticate it.
@@ -165,15 +165,25 @@ func validateDelegateProposalValue(proposal *DelegateProposal, expectedPrompt st
 	if err := validateDelegateProposalFields(proposal.Content, expectedPrompt, proposal.Body.Model, proposal.Body.Timestamp); err != nil {
 		return err
 	}
-	contentDigest := sha256.Sum256([]byte(proposal.Content))
-	if proposal.Body.ContentSHA256 != hex.EncodeToString(contentDigest[:]) {
+	if proposal.Body.ContentSHA256 != delegateProposalDigest(proposal.Content) {
 		return errors.New("delegate proposal: content digest mismatch")
 	}
-	promptDigest := sha256.Sum256([]byte(expectedPrompt))
-	if proposal.Body.PromptSHA256 != hex.EncodeToString(promptDigest[:]) {
+	if proposal.Body.PromptSHA256 != delegateProposalDigest(expectedPrompt) {
 		return errors.New("delegate proposal: prompt digest mismatch")
 	}
 	return nil
+}
+
+// delegateProposalDigest hashes exact string bytes without a full-size byte copy.
+func delegateProposalDigest(value string) string {
+	h := sha256.New()
+	var buffer [4096]byte
+	for len(value) > 0 {
+		n := copy(buffer[:], value)
+		_, _ = h.Write(buffer[:n]) // SHA-256 Write never returns an error.
+		value = value[n:]
+	}
+	return hex.EncodeToString(h.Sum(nil))
 }
 
 func validateDelegateProposalFields(content, prompt string, model provider.ModelKey, timestamp time.Time) error {

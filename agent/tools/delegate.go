@@ -41,6 +41,10 @@ type DelegateCode struct {
 
 // ProposalVerifier returns the verifier for proposals emitted by this tool, or
 // nil when proposal signing could not be initialized.
+// This capability is for the trusted tool owner. It returns the configured
+// verifier unchanged; the default HMAC identity also implements signing.Signer.
+// Do not pass it to a component that must lack signing authority. Retaining it
+// keeps the in-memory key alive, but does not persist that key for later audit.
 func (t *DelegateCode) ProposalVerifier() signing.Verifier {
 	if t == nil || t.proposalInitErr != nil {
 		return nil
@@ -89,6 +93,8 @@ func WithProposalSigning(signer signing.Signer, verifier signing.Verifier) Deleg
 
 // NewDelegateCode builds the delegate_code tool over a caller pinned to the
 // delegate role chain. Pass WithStream to surface generation progress.
+// Signing initialization errors leave ProposalVerifier nil and make Invoke
+// return an error result before any model call; construction does not panic.
 func NewDelegateCode(caller agent.ModelCaller, opts ...DelegateOption) *DelegateCode {
 	d := &DelegateCode{caller: caller}
 	for _, o := range opts {

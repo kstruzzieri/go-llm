@@ -164,3 +164,19 @@ During execution, exactly three existing comparisons in `agent/interceptor_test.
 ## Completion criteria
 
 Every successful delegate result passes the shared typed verifier, whose checks bind the exact retained proposal, expected prompt, actual model, and whole-second UTC timestamp under the fixed v1 schema. Failed calls never emit signed-success metadata. Accepted evidence survives observer mutation attempts, tagging, fencing, and result/trace serialization. Existing content, streaming, tool-effect, approval, and no-tools subrequest behavior is preserved except for the explicit provenance/size failures above. The TDD plan's mutation checks, lint, full CI, review cycles, and changelog gate pass before a PR is prepared.
+
+## Post-implementation Gemini review disposition
+
+| Finding | Verified disposition |
+|---|---|
+| CR-1 — Struct comparability | The `json.RawMessage` compatibility break is already documented above and in the public changelog. Retain the approved carrier and field/deep-comparison guidance. |
+| CR-2 — Configuration errors | Retaining initialization errors and making no model call is the approved constructor contract. Invalid-pair diagnostics are fixed messages containing no key material. Do not introduce a panic or another constructor. |
+| CR-3 — Prompt hashing memory | Direct string-to-byte conversion can allocate a prompt-sized copy. Use one shared SHA-256 helper with a fixed 4,096-byte buffer for content and prompt hashing in both creation and verification. This bounds extra hashing memory while preserving signed bytes and accepted prompt sizes; it does not bound the caller's input allocation or add a prompt quota. |
+| SR-1 — Ephemeral identity | Key loss prevents later verification, as already documented. Caller-managed persistent HMAC or Ed25519 identities remain the supported durable-key seam. |
+| SR-2 — No apply gate | Evidence emission and retention do not authorize or enforce filesystem writes. Apply-time policy remains outside this change. |
+| SR-3 — Audit indexing | The current real delegate's combined read and network effects force serial dispatch. Existing tests cover the ordered prefix with an earlier synthetic call and multiple delegates, including rejection of swapped prompt associations. No extra record identifier is required for this path. |
+| AR-1 — Verifier method set | The default HMAC verifier also implements signing; this is the approved trusted-owner capability, not an untrusted privilege boundary. Put that warning directly on `ProposalVerifier` as well as the verifier interface. |
+| AR-2 — Replay | Same-prompt replay is a stated limitation. A nonce alone cannot prevent it; no session state or replay policy is introduced. |
+| AR-3 — JSON ingestion | The tests decode trusted emission round-trips, not arbitrary untrusted envelopes. Label that boundary at the test decoding sites; a raw JSON reader remains separate work. |
+| AR-4 — Argument decoding | The signature binds the exact decoded prompt sent to the specialist. A different audit interpretation fails that binding. Pin existing duplicate/case-insensitive prompt-field semantics with a benign regression; do not change argument decoding. |
+| AR-5 — Timestamp freshness | Timestamp validation enforces the signed schema, not freshness. State the freshness, replay, and write-authorization limits directly on `VerifyDelegateProposal`. |

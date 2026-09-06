@@ -5,3 +5,5 @@ Successful `delegate_code` results now carry signed, structured evidence binding
 Each delegate tool creates a fresh in-memory HMAC identity by default. Retaining its verifier retains symmetric signing capability; persisted traces require that matching key and become unverifiable if it is lost. Callers can instead supply matching persistent HMAC or Ed25519 identities. This change adds evidence only; it does not add an apply-time gate.
 
 `ToolResult` and `ToolCallRecord` now contain a `json.RawMessage` and therefore cannot be compared with `==` or `!=`; compare fields or use an appropriate deep comparison. Ordinary results and records still omit provenance from JSON.
+
+Proposal hashing uses bounded extra memory without changing accepted prompt sizes or signed bytes. API documentation clarifies trusted verifier ownership, typed-value verification, and the absence of freshness, replay, or write-authorization guarantees.

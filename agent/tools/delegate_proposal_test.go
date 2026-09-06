@@ -131,6 +131,68 @@ func TestDelegateProposalGolden(t *testing.T) {
 	}
 }
 
+func TestDelegateProposalHashingMemoryDoesNotScaleWithPrompt(t *testing.T) {
+	signer := delegateProposalTestHMAC(t)
+	model := provider.ModelKey{Provider: "local", Model: "coder"}
+	at := time.Date(2026, 9, 5, 12, 0, 0, 0, time.UTC)
+	for _, mode := range []string{"create", "verify"} {
+		t.Run(mode, func(t *testing.T) {
+			measure := func(prompt string) int64 {
+				proposal, err := newDelegateProposal(context.Background(), signer, signer, "abc", prompt, model, at)
+				if err != nil {
+					t.Fatal(err)
+				}
+				run := func() error {
+					_, err := newDelegateProposal(context.Background(), signer, signer, "abc", prompt, model, at)
+					return err
+				}
+				if mode == "verify" {
+					run = func() error {
+						return VerifyDelegateProposal(context.Background(), signer, proposal, prompt)
+					}
+				}
+				result := testing.Benchmark(func(b *testing.B) {
+					for i := 0; i < b.N; i++ {
+						if err = run(); err != nil {
+							break
+						}
+					}
+				})
+				if err != nil {
+					t.Fatal(err)
+				}
+				return result.AllocedBytesPerOp()
+			}
+			// Inputs are allocated before measurement. Allow fixed runtime
+			// overhead, but reject an extra copy of the 64 KiB prompt.
+			small := measure(strings.Repeat("x", 1024))
+			large := measure(strings.Repeat("x", 65536))
+			t.Logf("allocated bytes/op: 1 KiB prompt=%d, 64 KiB prompt=%d", small, large)
+			if large-small > 8192 {
+				t.Fatalf("hashing allocation grew by %d bytes; want at most 8192", large-small)
+			}
+		})
+	}
+}
+
+func TestDelegateProposalDigestPreservesChunkBoundaries(t *testing.T) {
+	// SHA-256 literals were obtained independently with Python hashlib.
+	for _, tt := range []struct {
+		name, input, want string
+	}{
+		{"exact chunk", strings.Repeat("a", 4096), "c93eee2d0db02f10acc7460d9576e122dcf8cd53c4bf8dfcae1b3e74ebcfff5a"},
+		{"tail", strings.Repeat("a", 4097), "4e369b5618643c3abddd027b650bfa54810be3b418028a7c9d82299a59d008e8"},
+		{"split UTF-8", strings.Repeat("a", 4095) + "界z", "891dd8c36c91409028fb6e3bdb027e8f9e7ac5f99058f037bef4ca32f4340ac9"},
+		{"multiple chunks", strings.Repeat(" x\n", 3000), "c12e972968b55c5456aa47563d5b612a032e3e83d815debe04414395d870cb27"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := delegateProposalDigest(tt.input); got != tt.want {
+				t.Fatalf("digest = %s, want %s", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestDelegateProposalCreationRejectsInvalidInputsAndDependencyErrors(t *testing.T) {
 	t.Parallel()
 

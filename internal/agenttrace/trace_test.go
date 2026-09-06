@@ -173,6 +173,8 @@ func TestWriteTraceRetainsOrderedDelegateProposalEvidence(t *testing.T) {
 		if err := json.Unmarshal(call.Function.Arguments, &args); err != nil {
 			t.Fatalf("decode call %d arguments: %v", position, err)
 		}
+		// This temporary trace came from trusted runtime output. Arbitrary input
+		// needs the strict reader described by VerifyDelegateProposal.
 		var proposal agenttools.DelegateProposal
 		if err := json.Unmarshal(record.Provenance, &proposal); err != nil {
 			t.Fatalf("decode proposal %d: %v", position, err)
