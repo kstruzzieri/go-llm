@@ -130,7 +130,7 @@ func (s *MemoryRecordStore) Create(ctx context.Context, in CreateRecordParams) (
 	}
 
 	now := time.Now().UnixMilli()
-	m := MemoryRecord{
+	m := MemoryRecord{MemoryRecordBody: MemoryRecordBody{
 		ID:          newID(),
 		Kind:        in.Kind,
 		Content:     content,
@@ -142,7 +142,7 @@ func (s *MemoryRecordStore) Create(ctx context.Context, in CreateRecordParams) (
 		CreatedAt:   time.UnixMilli(now),
 		UpdatedAt:   time.UnixMilli(now),
 		ExpiresAt:   in.ExpiresAt,
-	}
+	}}
 
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
