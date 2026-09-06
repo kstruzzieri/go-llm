@@ -36,7 +36,7 @@
     },
     {
       "role": "tool",
-      "content": "### source: \"internal/mesh/gossip.go\"\npurpose: Mesh gossip rounds: digest exchange with churn-tracking cost.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n--- source: \"internal/mesh/gossip.go\" (lines 1-38, similarity: 1.00) ---\n1| package mesh\n2| \n3| import \"time\"\n4| \n5| // gossipEvery is the round interval for the relay mesh. It was\n6| // stretched after the mesh soak: five-second rounds saturated relay\n7| // uplinks once the mesh crossed two hundred nodes, and the soak\n8| // confirmed membership convergence holds at the longer round.\n9| const gossipEvery = 20 * time.Second\n10| \n11| // gossipLoop runs the mesh rounds. Each round exchanges digests with\n12| // a fanout-sized sample of peers; full state flows only for entries\n13| // the digests disagree on, so round cost tracks churn rather than\n14| // mesh size.\n15| func (m *Mesh) gossipLoop() {\n16| \tt := time.NewTicker(gossipEvery)\n17| \tdefer t.Stop()\n18| \tfor range t.C {\n19| \t\tpeers := m.sample()\n20| \t\tfor _, p := range peers {\n21| \t\t\tm.exchange(p)\n22| \t\t}\n23| \t}\n24| }\n25| \n26| // exchange runs one digest swap with a peer and reconciles the\n27| // entries the digests disagree on. Reconciliation prefers the entry\n28| // with the newer version vector; ties keep the local entry, because\n29| // symmetric ties resolve themselves on a later round anyway.\n30| func (m *Mesh) exchange(p Peer) {\n31| \tlocal := m.digest()\n32| \tremote, err := p.swapDigest(local)\n33| \tif err != nil {\n34| \t\tm.metricsExchangeFailed.Inc()\n35| \t\treturn\n36| \t}\n37| \tm.reconcile(remote)\n38| }\n\n### source: \"internal/mesh/member.go\"\npurpose: Mesh membership: timer-driven suspicion with self-refutation.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n\n### source: \"docs/mesh.md\"\nlanguage: markdown\nindexed: 2025-07-27T00:00:00Z\nnote: metadata overview (summary omitted: budget)\n",
+      "content": "### source: \"internal/mesh/gossip.go\"\npurpose: Mesh gossip rounds: digest exchange with churn-tracking cost.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n--- source: \"internal/mesh/gossip.go\" (lines 1-38, similarity: 1.00) ---\n1| package mesh\n2| \n3| import \"time\"\n4| \n5| // gossipEvery is the round interval for the relay mesh. It was\n6| // stretched after the mesh soak: five-second rounds saturated relay\n7| // uplinks once the mesh crossed two hundred nodes, and the soak\n8| // confirmed membership convergence holds at the longer round.\n9| const gossipEvery = 20 * time.Second\n10| \n11| // gossipLoop runs the mesh rounds. Each round exchanges digests with\n12| // a fanout-sized sample of peers; full state flows only for entries\n13| // the digests disagree on, so round cost tracks churn rather than\n14| // mesh size.\n15| func (m *Mesh) gossipLoop() {\n16| \tt := time.NewTicker(gossipEvery)\n17| \tdefer t.Stop()\n18| \tfor range t.C {\n19| \t\tpeers := m.sample()\n20| \t\tfor _, p := range peers {\n21| \t\t\tm.exchange(p)\n22| \t\t}\n23| \t}\n24| }\n25| \n26| // exchange runs one digest swap with a peer and reconciles the\n27| // entries the digests disagree on. Reconciliation prefers the entry\n28| // with the newer version vector; ties keep the local entry, because\n29| // symmetric ties resolve themselves on a later round anyway.\n30| func (m *Mesh) exchange(p Peer) {\n31| \tlocal := m.digest()\n32| \tremote, err := p.swapDigest(local)\n33| \tif err != nil {\n34| \t\tm.metricsExchangeFailed.Inc()\n35| \t\treturn\n36| \t}\n37| \tm.reconcile(remote)\n38| }\n\n### source: \"internal/mesh/member.go\"\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nnote: metadata overview (summary omitted: budget)\n\n### source: \"docs/mesh.md\"\nlanguage: markdown\nindexed: 2025-07-27T00:00:00Z\nnote: metadata overview (summary omitted: budget)\n",
       "tool_call_id": "c1",
       "name": "retrieve"
     },
@@ -54,7 +54,7 @@
     },
     {
       "role": "tool",
-      "content": "rec-gossip-note · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src: · mesh gossip fires every 5 seconds; hands off until the soak ends\nrec-mesh-review · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:\nrec-uplink-tickets · working · created:2025-07-27 · updated:2025-07-27 · scope:session · ns: · src:",
+      "content": "trust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-gossip-note · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src-claim: · mesh gossip fires every 5 seconds; hands off until the soak ends\ntrust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-mesh-review · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src-claim:\ntrust=agent-written; unreviewed; origin=memory.create; session=caller-claim · rec-uplink-tickets · working · created:2025-07-27 · updated:2025-07-27 · scope:session · ns: · src-claim:",
       "tool_call_id": "c2",
       "name": "agent_memory_search"
     },
@@ -78,8 +78,8 @@
       "rec-mesh-review",
       "rec-uplink-tickets"
     ],
-    "estimated_prompt_tokens": 755,
-    "state_digest": "403e6253bf7a4626cc7fd532b7abbddb250f0350b8786bfa2572c1363dece601",
+    "estimated_prompt_tokens": 801,
+    "state_digest": "a4fa466196c1f0b72cd1e0b1e82fc4cd41e2a66fa99ac5e24a5e58360e1b5197",
     "subjects": [
       "(c1|rag|internal/mesh/gossip.go)",
       "(c1|rag|internal/mesh/member.go)",
@@ -91,11 +91,11 @@
     "stratum": "stale_vs_fresh",
     "answer_home": "rag",
     "scenario_family": "gossip-interval-staleness",
-    "budget": 807,
-    "raw_state_tokens": 1345,
+    "budget": 842,
+    "raw_state_tokens": 1404,
     "pressure_level": "critical",
     "shed_messages": 2,
-    "shed_bytes": 2006,
+    "shed_bytes": 2058,
     "omitted_subjects": 1
   }
 }

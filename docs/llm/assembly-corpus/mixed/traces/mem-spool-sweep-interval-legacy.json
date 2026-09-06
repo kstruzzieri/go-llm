@@ -19,7 +19,7 @@
     },
     {
       "role": "tool",
-      "content": "rec-onboard-notes · working · 2025-07-27 · onboarding starters stay doc-only until the checklist closes; first fleet change comes paired\nrec-sweep-eval · semantic · 2025-07-27 · evaluation installs keep the sample 3h sweep; that scope never applied to prod\nrec-sweep-interval · semantic · 2025-07-27 · the spool retention sweeper runs every 45m on the prod fleet; the fleet override predates the sample config cleanup, so the override, not the shipped file, is the operative setting - confirmed against the scheduler dump during the layout migration",
+      "content": "trust=agent-written; unreviewed; origin=memory.create; session=caller-claim · rec-onboard-notes · working · 2025-07-27 · onboarding starters stay doc-only until the checklist closes; first fleet change comes paired\ntrust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-sweep-eval · semantic · 2025-07-27 · evaluation installs keep the sample 3h sweep; that scope never applied to prod\ntrust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-sweep-interval · semantic · 2025-07-27 · the spool retention sweeper runs every 45m on the prod fleet; the fleet override predates the sample config cleanup, so the override, not the shipped file, is the operative setting - confirmed against the scheduler dump during the layout migration",
       "tool_call_id": "c2",
       "name": "agent_memory_search"
     },
@@ -43,8 +43,8 @@
       "rec-sweep-eval",
       "rec-sweep-interval"
     ],
-    "estimated_prompt_tokens": 203,
-    "state_digest": "9744c252eaef71b1b7831dd1640cc96eefc1fe19b3ae2050a2adc89e04a31f9c",
+    "estimated_prompt_tokens": 262,
+    "state_digest": "e32767fcecfa553813333be82dd1528a57dfd5b75b121900395e586a14d92f6b",
     "subjects": [
       "(c1|rag|docs/spool.md)",
       "(c1|rag|internal/spool/sweep.go)",
@@ -56,8 +56,8 @@
     "stratum": "memory_only",
     "answer_home": "memory",
     "scenario_family": "spool-sweep-mem",
-    "budget": 948,
-    "raw_state_tokens": 1580,
+    "budget": 983,
+    "raw_state_tokens": 1639,
     "pressure_level": "ok",
     "shed_messages": 10,
     "shed_bytes": 5081

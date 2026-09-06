@@ -3,6 +3,7 @@ package mcp
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -59,6 +60,38 @@ func TestWithAgentMemoryPathOpenFailureIsFatal(t *testing.T) {
 	}
 }
 
+func TestAgentMemorySigningKeyLossIsFatal(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "records.db")
+	s, err := NewServer(ctx, WithRAGDisabled(), WithAgentMemoryPath(path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := s.agentMemorySnapshot().Store()
+	if len(store.CreatedKeyID()) != 64 {
+		t.Fatal("first identity not reported")
+	}
+	m, err := store.Create(ctx, memory.CreateRecordParams{Kind: memory.KindSemantic, Content: "fact"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m.Provenance.OriginTool != "mcp.agent_memory_create" || m.Provenance.TrustClass != "agent-written" {
+		t.Fatalf("wrong MCP stamp: %+v", m.Provenance)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(path + ".keys/current.pem"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := NewServer(ctx, WithRAGDisabled(), WithAgentMemoryPath(path)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("MCP accepted lost signing identity: %v", err)
+	}
+	if _, err := os.Stat(path + ".keys/current.pem"); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("lost identity recreated: %v", err)
+	}
+}
+
 // callTool invokes an MCP tool and returns (textPayload, isError).
 func callTool(t *testing.T, session *gomcp.ClientSession, name string, args map[string]any) (string, bool) {
 	t.Helper()
@@ -96,7 +129,7 @@ type searchPayload struct {
 func decodeSearch(t *testing.T, text string) searchPayload {
 	t.Helper()
 	var p searchPayload
-	if err := json.Unmarshal([]byte(text), &p); err != nil {
+	if err := decodeAgentMemoryFrame(text, false, "records", &p); err != nil {
 		t.Fatalf("decode search payload: %v\npayload: %s", err, text)
 	}
 	return p
@@ -263,7 +296,7 @@ type recordPayload struct {
 func decodeRecord(t *testing.T, text string) map[string]any {
 	t.Helper()
 	var p recordPayload
-	if err := json.Unmarshal([]byte(text), &p); err != nil {
+	if err := decodeAgentMemoryFrame(text, false, "record", &p); err != nil {
 		t.Fatalf("decode record payload: %v\npayload: %s", err, text)
 	}
 	if p.Record == nil {

@@ -7,14 +7,6 @@
   "turns": [
     {
       "role": "user",
-      "content": "The edge config linter also needs to learn the new listener stanza before the rollout; right now it flags every migrated edge as malformed and the rollout script refuses to proceed past the lint gate, which is going to block the canary the moment we touch it. The stanza work should also cover the rollback direction: an edge that reverts to the old listener config must lint clean as well, because a rollback that trips the lint gate during an incident would be the worst possible time to discover it."
-    },
-    {
-      "role": "assistant",
-      "content": "Taught the linter the new listener stanza and added both stanza forms to its fixture corpus; migrated edges lint clean and the rollout script proceeds normally. Covered the rollback direction in the fixture corpus too, so both migration directions lint clean; the rollout script's dry-run mode now exercises revert configs as part of its preflight."
-    },
-    {
-      "role": "user",
       "content": "Also the packet capture volume on the canary host filled up during last week's debugging session and nobody released it. Clear the captures, and put a size cap on that volume so a debugging session cannot brick the canary again the night before a rollout. Rotate the existing captures into the archive tier before you cap the volume, since two of them are still referenced from open tickets and deleting them out from under the investigations would just generate new captures next week."
     },
     {
@@ -68,7 +60,7 @@
     },
     {
       "role": "tool",
-      "content": "### source: \"internal/ingest/batchkey.go\"\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nnote: metadata overview (summary omitted: budget)\n--- source: \"internal/ingest/batchkey.go\" (lines 1-37, similarity: 1.00) ---\n1| package ingest\n2| \n3| import (\n4| \t\"crypto/sha256\"\n5| \t\"encoding/binary\"\n6| \t\"encoding/hex\"\n7| )\n8| \n9| // batchKey fingerprints one accepted batch for duplicate detection.\n10| // The key covers tenant, producer, and the content digest, but\n11| // deliberately NOT the receive timestamp: a producer that retries the\n12| // same batch after a network error must collide with its earlier\n13| // self, and timestamps would make every retry unique.\n14| func batchKey(tenant, producer string, payload []byte) string {\n15| \th := sha256.New()\n16| \th.Write([]byte(tenant))\n17| \th.Write([]byte{0})\n18| \th.Write([]byte(producer))\n19| \th.Write([]byte{0})\n20| \tvar n [8]byte\n21| \tbinary.BigEndian.PutUint64(n[:], uint64(len(payload)))\n22| \th.Write(n[:])\n23| \th.Write(payload)\n24| \treturn hex.EncodeToString(h.Sum(nil)[:16])\n25| }\n26| \n27| // shardFor buckets a key into one of the dedupe shards. Sharding is\n28| // stable across restarts so a key seen before a crash lands in the\n29| // same shard's window after recovery, and a fleet of edges spreads\n30| // keys identically for the same shard count.\n31| func shardFor(key string, shards int) int {\n32| \tvar v uint32\n33| \tfor i := 0; i \u003c 4 \u0026\u0026 i \u003c len(key); i++ {\n34| \t\tv = v\u003c\u003c8 | uint32(key[i])\n35| \t}\n36| \treturn int(v % uint32(shards))\n37| }\n\n### source: \"internal/ingest/dedupe.go\"\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nnote: metadata overview (summary omitted: budget)\n\n### source: \"docs/dedupe.md\"\nlanguage: markdown\nindexed: 2025-07-27T00:00:00Z\nnote: metadata overview (summary omitted: budget)\n",
+      "content": "### source: \"internal/ingest/batchkey.go\"\npurpose: Batch fingerprinting for duplicate detection: retry-stable keys, stable shard placement.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n--- source: \"internal/ingest/batchkey.go\" (lines 1-37, similarity: 1.00) ---\n1| package ingest\n2| \n3| import (\n4| \t\"crypto/sha256\"\n5| \t\"encoding/binary\"\n6| \t\"encoding/hex\"\n7| )\n8| \n9| // batchKey fingerprints one accepted batch for duplicate detection.\n10| // The key covers tenant, producer, and the content digest, but\n11| // deliberately NOT the receive timestamp: a producer that retries the\n12| // same batch after a network error must collide with its earlier\n13| // self, and timestamps would make every retry unique.\n14| func batchKey(tenant, producer string, payload []byte) string {\n15| \th := sha256.New()\n16| \th.Write([]byte(tenant))\n17| \th.Write([]byte{0})\n18| \th.Write([]byte(producer))\n19| \th.Write([]byte{0})\n20| \tvar n [8]byte\n21| \tbinary.BigEndian.PutUint64(n[:], uint64(len(payload)))\n22| \th.Write(n[:])\n23| \th.Write(payload)\n24| \treturn hex.EncodeToString(h.Sum(nil)[:16])\n25| }\n26| \n27| // shardFor buckets a key into one of the dedupe shards. Sharding is\n28| // stable across restarts so a key seen before a crash lands in the\n29| // same shard's window after recovery, and a fleet of edges spreads\n30| // keys identically for the same shard count.\n31| func shardFor(key string, shards int) int {\n32| \tvar v uint32\n33| \tfor i := 0; i \u003c 4 \u0026\u0026 i \u003c len(key); i++ {\n34| \t\tv = v\u003c\u003c8 | uint32(key[i])\n35| \t}\n36| \treturn int(v % uint32(shards))\n37| }\n\n### source: \"internal/ingest/dedupe.go\"\npurpose: Duplicate rejection window: shipped default horizon, per-edge pin via config.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n\n### source: \"docs/dedupe.md\"\npurpose: Dedupe guide: key derivation, memory horizon, rollout pins.\noverview: dedupe.md explains duplicate rejection behind admission: retry-stable keys, the remembered-window horizon, and config-pinned windows during rollouts with review dates.\nlanguage: markdown\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n",
       "tool_call_id": "c1",
       "name": "retrieve"
     },
@@ -86,7 +78,7 @@
     },
     {
       "role": "tool",
-      "content": "rec-canary-panel · working · created:2025-07-27 · updated:2025-07-27 · scope:session · ns: · src:\nrec-capture-cap · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:\nrec-rollout-review · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:",
+      "content": "trust=agent-written; unreviewed; origin=memory.create; session=caller-claim · rec-canary-panel · working · created:2025-07-27 · updated:2025-07-27 · scope:session · ns: · src-claim: · canary dedupe counters have their own panel for the rollout period; the fleet rollup stays on the main board\ntrust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-capture-cap · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src-claim: · canary host capture volume is capped; captures rotate oldest-first at the cap\ntrust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-rollout-review · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src-claim: · edge rollout reviews happen twice weekly during burn-in; decisions land in the rollout thread",
       "tool_call_id": "c2",
       "name": "agent_memory_search"
     },
@@ -110,8 +102,8 @@
       "rec-capture-cap",
       "rec-rollout-review"
     ],
-    "estimated_prompt_tokens": 1666,
-    "state_digest": "7fc94ee4aa946cbaf38463f6cce971bcf1c6db19b658a2eecedd35133d076398",
+    "estimated_prompt_tokens": 1696,
+    "state_digest": "5375d9bae401224f36ec23a0dfa9c4b9295adf06530fce3fe406c95f955cda73",
     "subjects": [
       "(c1|rag|internal/ingest/batchkey.go)",
       "(c1|rag|internal/ingest/dedupe.go)",
@@ -123,11 +115,11 @@
     "stratum": "cross_domain_join",
     "answer_home": "join",
     "scenario_family": "dedupe-window-join",
-    "budget": 1707,
-    "raw_state_tokens": 2845,
+    "budget": 1742,
+    "raw_state_tokens": 2904,
     "pressure_level": "critical",
-    "shed_messages": 2,
-    "shed_bytes": 4105,
-    "omitted_subjects": 1
+    "shed_messages": 4,
+    "shed_bytes": 4218,
+    "omitted_subjects": 2
   }
 }

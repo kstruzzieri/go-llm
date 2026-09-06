@@ -52,7 +52,7 @@
     },
     {
       "role": "tool",
-      "content": "### source: \"internal/replay/replay.go\"\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nnote: metadata overview (summary omitted: budget)\n--- source: \"internal/replay/replay.go\" (lines 1-19, similarity: 1.00) ---\n1| package replay\n2| \n3| import \"context\"\n4| \n5| // Replayer re-reads rolled spool segments and feeds them to the\n6| // exporter. Progress is checkpointed through the cursor file named by\n7| // deployment config so a restart resumes instead of starting over.\n8| type Replayer struct {\n9| \tcursor cursorFile\n10| \tsegs   segmentWalker\n11| }\n12| \n13| func (r *Replayer) Run(ctx context.Context) error {\n14| \tstart, err := r.cursor.load()\n15| \tif err != nil {\n16| \t\treturn err\n17| \t}\n18| \treturn r.walk(ctx, start)\n19| }\n\n### source: \"internal/replay/window.go\"\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nnote: metadata overview (summary omitted: budget)\n\n### source: \"docs/replay.md\"\nlanguage: markdown\nindexed: 2025-07-27T00:00:00Z\nnote: metadata overview (summary omitted: budget)\n--- source: \"docs/replay.md\" (lines 1-20, similarity: 1.00) ---\n1| # driftwatch replay\n2| \n3| Replay re-reads rolled spool segments and hands them to the exporter.\n4| It exists for exporter outages and for backfills after a schema\n5| change; it never touches the active segment, so ingest keeps running\n6| while a replay is in flight.\n7| \n8| ## Running a replay\n9| \n10| Start the daemon with the replay subcommand and a segment range, or\n11| omit the range to resume from the checkpoint. Progress is\n12| checkpointed continuously, so an interrupted replay resumes where it\n13| left off rather than re-reading from the start.\n14| \n15| ## Drills\n16| \n17| Run the monthly drill against staging with a bounded range first.\n18| Watch the exporter lag panel during the drill; replay deliberately\n19| yields to live ingest when the exporter falls behind, so a slow drill\n20| is usually a sign of exporter pressure, not replay trouble.\n",
+      "content": "### source: \"internal/replay/replay.go\"\npurpose: Segment replay with checkpointed progress through a config-named cursor file.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n--- source: \"internal/replay/replay.go\" (lines 1-19, similarity: 1.00) ---\n1| package replay\n2| \n3| import \"context\"\n4| \n5| // Replayer re-reads rolled spool segments and feeds them to the\n6| // exporter. Progress is checkpointed through the cursor file named by\n7| // deployment config so a restart resumes instead of starting over.\n8| type Replayer struct {\n9| \tcursor cursorFile\n10| \tsegs   segmentWalker\n11| }\n12| \n13| func (r *Replayer) Run(ctx context.Context) error {\n14| \tstart, err := r.cursor.load()\n15| \tif err != nil {\n16| \t\treturn err\n17| \t}\n18| \treturn r.walk(ctx, start)\n19| }\n\n### source: \"internal/replay/window.go\"\npurpose: Manifest-free segment enumeration and replay window bounding.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n\n### source: \"docs/replay.md\"\npurpose: Replay guide: purpose, resume semantics, drill practice.\noverview: replay.md explains what replay is for, how checkpointed progress makes interrupted replays resume, and how monthly drills should be run and observed against staging.\nlanguage: markdown\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n",
       "tool_call_id": "c1",
       "name": "retrieve"
     },
@@ -70,7 +70,7 @@
     },
     {
       "role": "tool",
-      "content": "rec-drill-cadence · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:\nrec-lab-scratch · working · created:2025-07-27 · updated:2025-07-27 · scope:session · ns: · src:\nrec-replay-cursor · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:",
+      "content": "trust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-drill-cadence · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src-claim: · replay drills run monthly; the drill lead rotates with the oncall schedule\ntrust=agent-written; unreviewed; origin=memory.create; session=caller-claim · rec-lab-scratch · working · created:2025-07-27 · updated:2025-07-27 · scope:session · ns: · src-claim: · lab box scratch volume is shared with the benchmark rig; clear it before any drill or soak\ntrust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-replay-cursor · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src-claim: · replay checkpoint cursor lives at spool/replay.cursor under the data directory; delete it only with the daemon stopped or replay restarts from the oldest segment",
       "tool_call_id": "c2",
       "name": "agent_memory_search"
     },
@@ -94,8 +94,8 @@
       "rec-lab-scratch",
       "rec-replay-cursor"
     ],
-    "estimated_prompt_tokens": 921,
-    "state_digest": "09a96fbeae2888c66f03f4724db92b97b05408501726767232b6dd1909ab54d3",
+    "estimated_prompt_tokens": 937,
+    "state_digest": "4e1eeb7fa595af1ed17707c93ecf5ad8ec78bfe031e78a82b5a0e609ce05d1dc",
     "subjects": [
       "(c1|rag|internal/replay/replay.go)",
       "(c1|rag|internal/replay/window.go)",
@@ -107,9 +107,9 @@
     "stratum": "memory_only",
     "answer_home": "memory",
     "scenario_family": "replay-cursor-note",
-    "budget": 971,
-    "raw_state_tokens": 1619,
+    "budget": 1006,
+    "raw_state_tokens": 1677,
     "pressure_level": "critical",
-    "shed_bytes": 2371
+    "shed_bytes": 2547
   }
 }

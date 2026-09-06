@@ -6,14 +6,6 @@
   "tools": null,
   "turns": [
     {
-      "role": "user",
-      "content": "Last: finance flagged the perf host rental overage from the load tests; add the explanation note before the month closes."
-    },
-    {
-      "role": "assistant",
-      "content": "Added the note tying the overage to the two extra load test weeks, with the rework schedule attached for context."
-    },
-    {
       "role": "assistant",
       "tool_calls": [
         {
@@ -46,7 +38,7 @@
     },
     {
       "role": "tool",
-      "content": "rec-drill-doc · working · 2025-07-27 · disaster-recovery drill doc reflects the post-rework layout; one staging restore verified the steps\nrec-perf-hosts · semantic · 2025-07-27 · perf host rentals for load tests get an overage note before month close\nrec-wal-roll · semantic · 2025-07-27 · ingest WAL segments roll at 32 MiB; the backup glob assumes it\nrec-walship-glob · semantic · 2025-07-27 · backup team's WAL shipping script parses segment paths; layout changes need their glob reviewed",
+      "content": "trust=agent-written; unreviewed; origin=memory.create; session=caller-claim · rec-drill-doc · working · 2025-07-27 · disaster-recovery drill doc reflects the post-rework layout; one staging restore verified the steps\ntrust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-perf-hosts · semantic · 2025-07-27 · perf host rentals for load tests get an overage note before month close\ntrust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-wal-roll · semantic · 2025-07-27 · ingest WAL segments roll at 32 MiB; the backup glob assumes it\ntrust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-walship-glob · semantic · 2025-07-27 · backup team's WAL shipping script parses segment paths; layout changes need their glob reviewed",
       "tool_call_id": "c2",
       "name": "agent_memory_search"
     },
@@ -71,8 +63,8 @@
       "rec-wal-roll",
       "rec-walship-glob"
     ],
-    "estimated_prompt_tokens": 1099,
-    "state_digest": "659a0cabb6af8b71482e07fa3167c0635c99dae1d611c74631054128829baaac",
+    "estimated_prompt_tokens": 1118,
+    "state_digest": "9a3472137c5c95b9b184c2d43ea7aa6058fc5c55410aec85df648330e8e06c44",
     "subjects": [
       "(c1|rag|internal/wal/checkpoint.go)",
       "(c1|rag|internal/wal/segment.go)",
@@ -85,10 +77,10 @@
     "stratum": "stale_vs_fresh",
     "answer_home": "rag",
     "scenario_family": "wal-segment-staleness",
-    "budget": 1152,
-    "raw_state_tokens": 1920,
+    "budget": 1199,
+    "raw_state_tokens": 1999,
     "pressure_level": "critical",
-    "shed_messages": 18,
-    "shed_bytes": 2462
+    "shed_messages": 20,
+    "shed_bytes": 2696
   }
 }

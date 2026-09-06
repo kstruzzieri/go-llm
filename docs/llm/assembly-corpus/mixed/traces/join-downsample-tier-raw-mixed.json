@@ -68,7 +68,7 @@
     },
     {
       "role": "tool",
-      "content": "### source: \"internal/store/downsample.go\"\npurpose: Downsample pass: oldest-first shard sweep, lease-aware skips, durable folds.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n--- source: \"internal/store/downsample.go\" (lines 1-33, similarity: 1.00) ---\n1| package store\n2| \n3| // pass runs one downsample sweep over the shard set, oldest shard\n4| // first. A shard holding an active export lease is skipped rather\n5| // than raced: the exporter is reading raw resolution, and\n6| // downsampling under it would hand the warehouse a mid-copy\n7| // resolution change. Skips are recorded in the ledger the storage\n8| // rotation reviews.\n9| func (s *Store) pass() error {\n10| \tfor _, shard := range s.shardsOldestFirst() {\n11| \t\tif s.leases.active(shard) {\n12| \t\t\ts.ledger.recordSkip(shard)\n13| \t\t\tcontinue\n14| \t\t}\n15| \t\tif err := s.downsampleShard(shard); err != nil {\n16| \t\t\treturn err\n17| \t\t}\n18| \t}\n19| \treturn nil\n20| }\n21| \n22| // downsampleShard folds one shard's samples into the next tier and\n23| // releases the raw segments it consumed once the fold is durable.\n24| func (s *Store) downsampleShard(shard shardID) error {\n25| \tfold, err := s.fold(shard)\n26| \tif err != nil {\n27| \t\treturn err\n28| \t}\n29| \tif err := s.commit(fold); err != nil {\n30| \t\treturn err\n31| \t}\n32| \treturn s.releaseRaw(shard)\n33| }\n\n### source: \"internal/store/tiers.go\"\npurpose: Rollup tier ladder: manifest-driven rungs, coarsest-tier query resolution.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n\n### source: \"docs/downsample.md\"\npurpose: Downsampling guide: tier folding, lease-aware passes, ops-recorded raw hold.\nlanguage: markdown\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n",
+      "content": "### source: \"internal/store/downsample.go\"\npurpose: Downsample pass: oldest-first shard sweep, lease-aware skips, durable folds.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n--- source: \"internal/store/downsample.go\" (lines 1-33, similarity: 1.00) ---\n1| package store\n2| \n3| // pass runs one downsample sweep over the shard set, oldest shard\n4| // first. A shard holding an active export lease is skipped rather\n5| // than raced: the exporter is reading raw resolution, and\n6| // downsampling under it would hand the warehouse a mid-copy\n7| // resolution change. Skips are recorded in the ledger the storage\n8| // rotation reviews.\n9| func (s *Store) pass() error {\n10| \tfor _, shard := range s.shardsOldestFirst() {\n11| \t\tif s.leases.active(shard) {\n12| \t\t\ts.ledger.recordSkip(shard)\n13| \t\t\tcontinue\n14| \t\t}\n15| \t\tif err := s.downsampleShard(shard); err != nil {\n16| \t\t\treturn err\n17| \t\t}\n18| \t}\n19| \treturn nil\n20| }\n21| \n22| // downsampleShard folds one shard's samples into the next tier and\n23| // releases the raw segments it consumed once the fold is durable.\n24| func (s *Store) downsampleShard(shard shardID) error {\n25| \tfold, err := s.fold(shard)\n26| \tif err != nil {\n27| \t\treturn err\n28| \t}\n29| \tif err := s.commit(fold); err != nil {\n30| \t\treturn err\n31| \t}\n32| \treturn s.releaseRaw(shard)\n33| }\n\n### source: \"internal/store/tiers.go\"\npurpose: Rollup tier ladder: manifest-driven rungs, coarsest-tier query resolution.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n\n### source: \"docs/downsample.md\"\nlanguage: markdown\nindexed: 2025-07-27T00:00:00Z\nnote: metadata overview (summary omitted: budget)\n",
       "tool_call_id": "c1",
       "name": "retrieve"
     },
@@ -86,7 +86,7 @@
     },
     {
       "role": "tool",
-      "content": "rec-board-owners · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:\nrec-raw-hold · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:\nrec-tier-ladder · working · created:2025-07-27 · updated:2025-07-27 · scope:session · ns: · src: · tier ladder panels live on the storage board; per-tier bytes split by region",
+      "content": "trust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-board-owners · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src-claim:\ntrust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-raw-hold · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src-claim:\ntrust=agent-written; unreviewed; origin=memory.create; session=caller-claim · rec-tier-ladder · working · created:2025-07-27 · updated:2025-07-27 · scope:session · ns: · src-claim: · tier ladder panels live on the storage board; per-tier bytes split by region",
       "tool_call_id": "c2",
       "name": "agent_memory_search"
     },
@@ -110,8 +110,8 @@
       "rec-raw-hold",
       "rec-tier-ladder"
     ],
-    "estimated_prompt_tokens": 1536,
-    "state_digest": "811aed8102e7b36588b948b4606e82ccc8eaf8171b9543e7fbf7aff8113a151e",
+    "estimated_prompt_tokens": 1578,
+    "state_digest": "72275a862c513987cb6eaa4ead602c59806434626218a1fb137b56bfce248347",
     "subjects": [
       "(c1|rag|internal/store/downsample.go)",
       "(c1|rag|internal/store/tiers.go)",
@@ -123,11 +123,11 @@
     "stratum": "cross_domain_join",
     "answer_home": "join",
     "scenario_family": "downsample-tier-join",
-    "budget": 1589,
-    "raw_state_tokens": 2648,
+    "budget": 1624,
+    "raw_state_tokens": 2706,
     "pressure_level": "critical",
     "shed_messages": 2,
-    "shed_bytes": 3836,
+    "shed_bytes": 3903,
     "omitted_subjects": 1
   }
 }

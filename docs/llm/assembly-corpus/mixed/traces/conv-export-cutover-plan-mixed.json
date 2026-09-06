@@ -68,7 +68,7 @@
     },
     {
       "role": "tool",
-      "content": "### source: \"internal/export/exporter.go\"\npurpose: Warehouse exporter; endpoint and batch shape from deployment config.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n--- source: \"internal/export/exporter.go\" (lines 1-44, similarity: 1.00) ---\n1| package export\n2| \n3| import (\n4| \t\"context\"\n5| \t\"time\"\n6| )\n7| \n8| // Exporter ships rolled segments to the warehouse endpoint. The\n9| // endpoint, credentials, and batch shape all come from deployment\n10| // config; cutting over to a new warehouse is a config change, not a\n11| // rebuild.\n12| type Exporter struct {\n13| \tendpoint string\n14| \tbatch    BatchShape\n15| \tbackoff  time.Duration\n16| }\n17| \n18| // Run ships batches until cancelled. A failed ship retries with\n19| // backoff against the same endpoint; the exporter never fails over\n20| // between endpoints on its own, because a half-cutover discovered by\n21| // accident is worse than a loud stall. The warehouse maintenance\n22| // window closing at 01:45 UTC is their constraint, not one read here.\n23| func (e *Exporter) Run(ctx context.Context) error {\n24| \tfor {\n25| \t\tb, err := e.nextBatch(ctx)\n26| \t\tif err != nil {\n27| \t\t\treturn err\n28| \t\t}\n29| \t\tif err := e.ship(ctx, b); err != nil {\n30| \t\t\te.retry(ctx, b)\n31| \t\t}\n32| \t}\n33| }\n34| \n35| // ship posts one batch and records the acknowledgement offset the\n36| // backlog accounting reads.\n37| func (e *Exporter) ship(ctx context.Context, b Batch) error {\n38| \tack, err := e.post(ctx, b)\n39| \tif err != nil {\n40| \t\treturn err\n41| \t}\n42| \te.recordAck(ack)\n43| \treturn nil\n44| }\n\n### source: \"internal/export/backlog.go\"\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nnote: metadata overview (summary omitted: budget)\n\n### source: \"docs/export.md\"\nlanguage: markdown\nindexed: 2025-07-27T00:00:00Z\nnote: metadata overview (summary omitted: budget)\n",
+      "content": "### source: \"internal/export/exporter.go\"\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nnote: metadata overview (summary omitted: budget)\n--- source: \"internal/export/exporter.go\" (lines 1-44, similarity: 1.00) ---\n1| package export\n2| \n3| import (\n4| \t\"context\"\n5| \t\"time\"\n6| )\n7| \n8| // Exporter ships rolled segments to the warehouse endpoint. The\n9| // endpoint, credentials, and batch shape all come from deployment\n10| // config; cutting over to a new warehouse is a config change, not a\n11| // rebuild.\n12| type Exporter struct {\n13| \tendpoint string\n14| \tbatch    BatchShape\n15| \tbackoff  time.Duration\n16| }\n17| \n18| // Run ships batches until cancelled. A failed ship retries with\n19| // backoff against the same endpoint; the exporter never fails over\n20| // between endpoints on its own, because a half-cutover discovered by\n21| // accident is worse than a loud stall. The warehouse maintenance\n22| // window closing at 01:45 UTC is their constraint, not one read here.\n23| func (e *Exporter) Run(ctx context.Context) error {\n24| \tfor {\n25| \t\tb, err := e.nextBatch(ctx)\n26| \t\tif err != nil {\n27| \t\t\treturn err\n28| \t\t}\n29| \t\tif err := e.ship(ctx, b); err != nil {\n30| \t\t\te.retry(ctx, b)\n31| \t\t}\n32| \t}\n33| }\n34| \n35| // ship posts one batch and records the acknowledgement offset the\n36| // backlog accounting reads.\n37| func (e *Exporter) ship(ctx context.Context, b Batch) error {\n38| \tack, err := e.post(ctx, b)\n39| \tif err != nil {\n40| \t\treturn err\n41| \t}\n42| \te.recordAck(ack)\n43| \treturn nil\n44| }\n\n### source: \"internal/export/backlog.go\"\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nnote: metadata overview (summary omitted: budget)\n\n### source: \"docs/export.md\"\nlanguage: markdown\nindexed: 2025-07-27T00:00:00Z\nnote: metadata overview (summary omitted: budget)\n",
       "tool_call_id": "c1",
       "name": "retrieve"
     },
@@ -86,7 +86,7 @@
     },
     {
       "role": "tool",
-      "content": "rec-cutover-checklist · working · created:2025-07-27 · updated:2025-07-27 · scope:session · ns: · src:\nrec-loader-contact · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:\nrec-warehouse-window · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:",
+      "content": "trust=agent-written; unreviewed; origin=memory.create; session=caller-claim · rec-cutover-checklist · working · created:2025-07-27 · updated:2025-07-27 · scope:session · ns: · src-claim:\ntrust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-loader-contact · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src-claim:\ntrust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-warehouse-window · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src-claim:",
       "tool_call_id": "c2",
       "name": "agent_memory_search"
     },
@@ -110,8 +110,8 @@
       "rec-loader-contact",
       "rec-warehouse-window"
     ],
-    "estimated_prompt_tokens": 1124,
-    "state_digest": "f90ba019d304232791bef5f004689551ef2e51be53fbeb001855064cc22bb100",
+    "estimated_prompt_tokens": 1167,
+    "state_digest": "6daef6ba72194a7a17216490fd653911e94ab1cc46b6ca824399dfe49552ae12",
     "subjects": [
       "(c1|rag|internal/export/exporter.go)",
       "(c1|rag|internal/export/backlog.go)",
@@ -123,9 +123,9 @@
     "stratum": "conversation_only",
     "answer_home": "conversation",
     "scenario_family": "export-cutover-conv",
-    "budget": 1180,
-    "raw_state_tokens": 1967,
+    "budget": 1216,
+    "raw_state_tokens": 2026,
     "pressure_level": "critical",
-    "shed_bytes": 2832
+    "shed_bytes": 2891
   }
 }

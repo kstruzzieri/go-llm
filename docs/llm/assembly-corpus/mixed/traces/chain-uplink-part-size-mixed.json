@@ -28,7 +28,7 @@
     },
     {
       "role": "tool",
-      "content": "### source: \"internal/archive/uploader.go\"\npurpose: Fixed multipart size constant and the checkpointing push loop.\noverview: uploader.go pins the multipart size as a code constant because the archive store rejects mixed part sizes within an object, and checkpoints failed parts for resume.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n--- source: \"internal/archive/uploader.go\" (lines 1-16, similarity: 1.00) ---\n1| package archive\n2| \n3| // uploadPartMB is the fixed multipart size for archive pushes. It\n4| // is a code constant: the archive store rejects mixed part sizes\n5| // within one object, so a per-deploy knob would break resumability\n6| // the first time two deploys disagreed mid-object.\n7| const uploadPartMB = 48\n8| \n9| func (u *Uploader) push(obj object) error {\n10| \tfor _, part := range obj.split(uploadPartMB \u003c\u003c 20) {\n11| \t\tif err := u.send(part); err != nil {\n12| \t\t\treturn u.checkpoint(obj, part, err)\n13| \t\t}\n14| \t}\n15| \treturn u.finalize(obj)\n16| }\n\n### source: \"internal/archive/resume.go\"\npurpose: Checkpoint-based resume: sizing refusal, per-part checkpoints, verified reopen.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n\n### source: \"docs/archive-upload.md\"\npurpose: Upload guide: fixed parts, checkpoints, throughput planning, overnight window.\noverview: archive-upload.md covers fixed-size checkpointed pushes, resume-from-checkpoint behavior, the transfer sheet's part-size-times-rate arithmetic, and the export-defined overnight window with its emergency sign-off rule.\nlanguage: markdown\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n--- source: \"docs/archive-upload.md\" (lines 1-19, similarity: 1.00) ---\n1| # archive uploads\n2| \n3| Rolled segments push to the archive store in fixed-size parts with\n4| a checkpoint after every acknowledged part. Interrupted pushes\n5| resume from the checkpoint rather than restarting the object, which\n6| is why the sizing is uniform per object and owned by code.\n7| \n8| Throughput planning multiplies the part size by the acknowledged\n9| parts-per-minute rate from the uplink dashboard; both factors sit in\n10| the transfer-budget sheet, and the sheet cites this page next to the\n11| throughput row so reviewers can check the arithmetic against the\n12| mechanics instead of taking the row on faith.\n13| \n14| ## Overnight window\n15| \n16| Pushes run in the overnight window the export schedule defines.\n17| Daytime pushes are possible in an emergency but contend with the\n18| exports for uplink, so the runbook requires a storage sign-off\n19| before anyone starts one.\n",
+      "content": "### source: \"internal/archive/uploader.go\"\npurpose: Fixed multipart size constant and the checkpointing push loop.\noverview: uploader.go pins the multipart size as a code constant because the archive store rejects mixed part sizes within an object, and checkpoints failed parts for resume.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n--- source: \"internal/archive/uploader.go\" (lines 1-16, similarity: 1.00) ---\n1| package archive\n2| \n3| // uploadPartMB is the fixed multipart size for archive pushes. It\n4| // is a code constant: the archive store rejects mixed part sizes\n5| // within one object, so a per-deploy knob would break resumability\n6| // the first time two deploys disagreed mid-object.\n7| const uploadPartMB = 48\n8| \n9| func (u *Uploader) push(obj object) error {\n10| \tfor _, part := range obj.split(uploadPartMB \u003c\u003c 20) {\n11| \t\tif err := u.send(part); err != nil {\n12| \t\t\treturn u.checkpoint(obj, part, err)\n13| \t\t}\n14| \t}\n15| \treturn u.finalize(obj)\n16| }\n\n### source: \"internal/archive/resume.go\"\npurpose: Checkpoint-based resume: sizing refusal, per-part checkpoints, verified reopen.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n\n### source: \"docs/archive-upload.md\"\npurpose: Upload guide: fixed parts, checkpoints, throughput planning, overnight window.\nlanguage: markdown\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n--- source: \"docs/archive-upload.md\" (lines 1-19, similarity: 1.00) ---\n1| # archive uploads\n2| \n3| Rolled segments push to the archive store in fixed-size parts with\n4| a checkpoint after every acknowledged part. Interrupted pushes\n5| resume from the checkpoint rather than restarting the object, which\n6| is why the sizing is uniform per object and owned by code.\n7| \n8| Throughput planning multiplies the part size by the acknowledged\n9| parts-per-minute rate from the uplink dashboard; both factors sit in\n10| the transfer-budget sheet, and the sheet cites this page next to the\n11| throughput row so reviewers can check the arithmetic against the\n12| mechanics instead of taking the row on faith.\n13| \n14| ## Overnight window\n15| \n16| Pushes run in the overnight window the export schedule defines.\n17| Daytime pushes are possible in an emergency but contend with the\n18| exports for uplink, so the runbook requires a storage sign-off\n19| before anyone starts one.\n",
       "tool_call_id": "c1",
       "name": "retrieve"
     },
@@ -46,7 +46,7 @@
     },
     {
       "role": "tool",
-      "content": "rec-budget-sheet · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:\nrec-part-history · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src: · the 16 MB part sizing came from the pre-GA uploader; superseded at GA\nrec-resume-drill · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:\nrec-sheet-review · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:\nrec-uplink-owner · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:\nrec-upload-window · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:",
+      "content": "trust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-budget-sheet · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src-claim:\ntrust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-part-history · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src-claim: · the 16 MB part sizing came from the pre-GA uploader; superseded at GA\ntrust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-resume-drill · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src-claim:\ntrust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-sheet-review · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src-claim:\ntrust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-uplink-owner · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src-claim:\ntrust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-upload-window · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src-claim:",
       "tool_call_id": "c2",
       "name": "agent_memory_search"
     },
@@ -73,8 +73,8 @@
       "rec-uplink-owner",
       "rec-upload-window"
     ],
-    "estimated_prompt_tokens": 979,
-    "state_digest": "34c02075157112a6d0205d26f8c7ca0de84f23ea1026a03456e2a1c5e88a0982",
+    "estimated_prompt_tokens": 1048,
+    "state_digest": "70abc785e786d377dfa86730181fc7149704bda49f0708e1f32ce423e8dfc238",
     "subjects": [
       "(c1|rag|internal/archive/uploader.go)",
       "(c1|rag|internal/archive/resume.go)",
@@ -89,9 +89,9 @@
     "stratum": "chain_retention",
     "answer_home": "rag",
     "scenario_family": "uplink-part-chain",
-    "budget": 1018,
-    "raw_state_tokens": 1697,
+    "budget": 1088,
+    "raw_state_tokens": 1814,
     "pressure_level": "critical",
-    "shed_bytes": 2645
+    "shed_bytes": 2837
   }
 }
