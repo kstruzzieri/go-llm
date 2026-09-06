@@ -107,12 +107,15 @@ func TestTelemetrySink_SpansAndContentLight(t *testing.T) {
 		Pressure: agent.Pressure{UsedPct: 0.5},
 		Latency:  2 * time.Second,
 	})
-	// A tool result that carries SECRET args + output.
+	// A tool result that carries SECRET args + output + raw proposal evidence.
 	_ = sink.OnToolResult(ctx, agent.ToolResultEvent{
-		Step:    0,
-		Call:    provider.ToolCall{Function: provider.ToolCallFunction{Name: "read_file", Arguments: json.RawMessage(`{"path":"SECRET-arg"}`)}},
-		Effect:  agent.Effect{Class: agent.Read},
-		Result:  agent.ToolResult{Content: "SECRET-output", Truncated: true},
+		Step:   0,
+		Call:   provider.ToolCall{Function: provider.ToolCallFunction{Name: "read_file", Arguments: json.RawMessage(`{"path":"SECRET-arg"}`)}},
+		Effect: agent.Effect{Class: agent.Read},
+		Result: agent.ToolResult{
+			Content: "SECRET-output", Truncated: true,
+			Provenance: json.RawMessage(`{"content":"SECRET-proposal"}`),
+		},
 		Invoked: true,
 		Latency: 4 * time.Millisecond,
 	})
@@ -134,7 +137,7 @@ func TestTelemetrySink_SpansAndContentLight(t *testing.T) {
 	}
 
 	raw, _ := os.ReadFile(path)
-	for _, secret := range []string{"SECRET-assistant", "SECRET-arg", "SECRET-output"} {
+	for _, secret := range []string{"SECRET-assistant", "SECRET-arg", "SECRET-output", "SECRET-proposal"} {
 		if strings.Contains(string(raw), secret) {
 			t.Fatalf("telemetry leaked %q:\n%s", secret, raw)
 		}

@@ -40,7 +40,13 @@ type DelegateProposalBody struct {
 	Timestamp     time.Time         `json:"timestamp"`
 }
 
-// DelegateProposalVerifier verifies a delegate proposal signature.
+// DelegateProposalVerifier verifies a delegate proposal signature. Callers must
+// obtain the verifier from a trusted source independent of the proposal. The
+// default DelegateCode verifier is a per-tool, in-memory HMAC identity, and
+// retaining ProposalVerifier retains that symmetric signing capability.
+// Persisted traces require the matching key and become unverifiable when it is
+// lost. Durable offline verification requires caller-managed identity and
+// separately retained trusted verification material.
 type DelegateProposalVerifier interface {
 	Verify(context.Context, string, []byte, signing.Signature) error
 }
@@ -98,6 +104,23 @@ func newDelegateProposal(
 }
 
 // VerifyDelegateProposal verifies the complete typed delegate proposal contract.
+//
+// To recover expectedPrompt from a content-full agent trace, locate the
+// StepRecord whose Index equals the proposal ToolCallRecord.Step. Use the
+// StepRecord rather than compactable Result.Messages; it is retained
+// independently as the durable model response. A real delegate_code is
+// Read|Network, which forces its containing batch to dispatch serially, with
+// accepted records forming a prefix. Use the record's position among every
+// recorded call in that step, including earlier synthetic or denied calls, to
+// select the same position from StepRecord.Response.ToolCalls. Confirm that
+// selected call is delegate_code,
+// decode its Function.Arguments prompt with delegate_code semantics, and pass
+// the exact decoded string here. Matching only by tool name or proposal digest
+// is ambiguous when a step contains multiple delegate calls. Missing,
+// malformed, or ambiguous step/order/argument evidence means full prompt-bound
+// verification is unavailable. The enclosing trace must itself come from a
+// trusted evidence source; a proposal signature does not authenticate it.
+//
 // It does not decode or authenticate arbitrary JSON bytes. A future untrusted
 // reader must enforce exact schema and member spelling; reject duplicate and
 // unknown fields, invalid Unicode, and trailing data; retain the compact raw

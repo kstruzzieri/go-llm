@@ -1,6 +1,7 @@
 package agenttrace
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"io/fs"
@@ -11,8 +12,19 @@ import (
 	"time"
 
 	"github.com/kstruzzieri/go-llm/agent"
+	agenttools "github.com/kstruzzieri/go-llm/agent/tools"
 	"github.com/kstruzzieri/go-llm/provider"
 )
+
+type traceModelCaller struct {
+	responses []agent.ModelResult
+}
+
+func (c *traceModelCaller) Chat(context.Context, provider.ChatRequest, func(provider.ChatResponse) error) (agent.ModelResult, error) {
+	result := c.responses[0]
+	c.responses = c.responses[1:]
+	return result, nil
+}
 
 func sampleResult() agent.Result {
 	return agent.Result{
@@ -71,6 +83,133 @@ func TestWriteTrace_ExclusiveAndSecured(t *testing.T) {
 	// Exclusive: a second write to the same path must fail, not clobber/append.
 	if err := WriteTrace(path, rec); err == nil || !strings.Contains(err.Error(), "exist") {
 		t.Fatalf("second WriteTrace err = %v, want exists error", err)
+	}
+}
+
+func TestWriteTraceRetainsOrderedDelegateProposalEvidence(t *testing.T) {
+	const (
+		promptA = " first prompt "
+		promptB = "second prompt"
+	)
+	delegate := agenttools.NewDelegateCode(&traceModelCaller{responses: []agent.ModelResult{
+		{Response: provider.ChatResponse{Content: "proposal A"}, RouteOutcome: &provider.RouteOutcome{ActualModel: provider.ModelKey{Provider: "local", Model: "coder"}}},
+		{Response: provider.ChatResponse{Content: "proposal B"}, RouteOutcome: &provider.RouteOutcome{ActualModel: provider.ModelKey{Provider: "local", Model: "coder"}}},
+	}})
+	parent := &traceModelCaller{responses: []agent.ModelResult{
+		{Response: provider.ChatResponse{ToolCalls: []provider.ToolCall{
+			{ID: "unknown", Type: "function", Function: provider.ToolCallFunction{Name: "missing", Arguments: json.RawMessage(`{"ignored":true}`)}},
+			{ID: "delegate-a", Type: "function", Function: provider.ToolCallFunction{Name: "delegate_code", Arguments: json.RawMessage(`{"prompt":" first prompt "}`)}},
+			{ID: "delegate-b", Type: "function", Function: provider.ToolCallFunction{Name: "delegate_code", Arguments: json.RawMessage(`{"prompt":"second prompt"}`)}},
+		}}},
+		{Response: provider.ChatResponse{Content: "done", Done: true}},
+	}}
+	result, err := agent.New(parent, agent.ContextManager{}).Run(context.Background(), agent.Request{
+		Goal: "audit delegates", Tools: []agent.Tool{delegate},
+	}, nil)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(result.ToolCalls) != 3 || result.ToolCalls[0].Name != "missing" || result.ToolCalls[0].Provenance != nil {
+		t.Fatalf("ordered runtime records = %+v", result.ToolCalls)
+	}
+
+	resultJSON, err := json.Marshal(result)
+	if err != nil {
+		t.Fatalf("Marshal(Result): %v", err)
+	}
+	var resultRoundTrip agent.Result
+	if err := json.Unmarshal(resultJSON, &resultRoundTrip); err != nil {
+		t.Fatalf("Unmarshal(Result): %v", err)
+	}
+	if len(resultRoundTrip.ToolCalls) != 3 || resultRoundTrip.ToolCalls[1].Provenance == nil || resultRoundTrip.ToolCalls[2].Provenance == nil {
+		t.Fatalf("Result round trip lost provenance: %+v", resultRoundTrip.ToolCalls)
+	}
+
+	path := filepath.Join(t.TempDir(), "delegate-trace.json")
+	if err := WriteTrace(path, BuildTrace(TraceMeta{Goal: "audit delegates"}, result, "completed", false, nil)); err != nil {
+		t.Fatalf("WriteTrace: %v", err)
+	}
+	rawTrace, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile(trace): %v", err)
+	}
+	var trace TraceRecord
+	if err := json.Unmarshal(rawTrace, &trace); err != nil {
+		t.Fatalf("Unmarshal(trace): %v", err)
+	}
+
+	var proposals []agenttools.DelegateProposal
+	var prompts []string
+	for recordIndex, record := range trace.Result.ToolCalls {
+		if record.Name != "delegate_code" {
+			continue
+		}
+		var step *agent.StepRecord
+		for i := range trace.Result.Steps {
+			if trace.Result.Steps[i].Index == record.Step {
+				step = &trace.Result.Steps[i]
+				break
+			}
+		}
+		if step == nil {
+			t.Fatalf("missing StepRecord for tool record %d step %d", recordIndex, record.Step)
+		}
+		position := 0
+		for i := 0; i < recordIndex; i++ {
+			if trace.Result.ToolCalls[i].Step == record.Step {
+				position++
+			}
+		}
+		if position >= len(step.Response.ToolCalls) {
+			t.Fatalf("record %d position %d exceeds %d original calls", recordIndex, position, len(step.Response.ToolCalls))
+		}
+		call := step.Response.ToolCalls[position]
+		if call.Function.Name != "delegate_code" {
+			t.Fatalf("record %d selected original call %q at position %d", recordIndex, call.Function.Name, position)
+		}
+		var args struct {
+			Prompt string `json:"prompt"`
+		}
+		if err := json.Unmarshal(call.Function.Arguments, &args); err != nil {
+			t.Fatalf("decode call %d arguments: %v", position, err)
+		}
+		var proposal agenttools.DelegateProposal
+		if err := json.Unmarshal(record.Provenance, &proposal); err != nil {
+			t.Fatalf("decode proposal %d: %v", position, err)
+		}
+		if err := agenttools.VerifyDelegateProposal(context.Background(), delegate.ProposalVerifier(), &proposal, args.Prompt); err != nil {
+			t.Fatalf("verify proposal %d with recovered prompt %q: %v", position, args.Prompt, err)
+		}
+		proposals = append(proposals, proposal)
+		prompts = append(prompts, args.Prompt)
+	}
+	if len(proposals) != 2 || prompts[0] != promptA || prompts[1] != promptB {
+		t.Fatalf("recovered prompts = %q, want [%q %q]", prompts, promptA, promptB)
+	}
+	if err := agenttools.VerifyDelegateProposal(context.Background(), delegate.ProposalVerifier(), &proposals[0], promptB); err == nil {
+		t.Fatal("first proposal verified against the second call's prompt")
+	}
+	if err := agenttools.VerifyDelegateProposal(context.Background(), delegate.ProposalVerifier(), &proposals[1], promptA); err == nil {
+		t.Fatal("second proposal verified against the first call's prompt")
+	}
+
+	step := trace.Result.Steps[0]
+	wantCalls := []struct{ name, arguments string }{
+		{"missing", `{"ignored":true}`},
+		{"delegate_code", `{"prompt":" first prompt "}`},
+		{"delegate_code", `{"prompt":"second prompt"}`},
+	}
+	if len(step.Response.ToolCalls) != len(wantCalls) {
+		t.Fatalf("trace calls = %d, want %d", len(step.Response.ToolCalls), len(wantCalls))
+	}
+	for i, want := range wantCalls {
+		var compact bytes.Buffer
+		if err := json.Compact(&compact, step.Response.ToolCalls[i].Function.Arguments); err != nil {
+			t.Fatalf("compact call %d arguments: %v", i, err)
+		}
+		if step.Response.ToolCalls[i].Function.Name != want.name || compact.String() != want.arguments {
+			t.Fatalf("trace call %d = %s %s, want %s %s", i, step.Response.ToolCalls[i].Function.Name, compact.String(), want.name, want.arguments)
+		}
 	}
 }
 

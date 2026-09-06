@@ -1009,7 +1009,7 @@ func TestToolCallBlockSerialNeverPlansInvokesOrPrompts(t *testing.T) {
 		t.Fatalf("approver prompted %d/%d times for a blocked call", ap.keyedCalls, ap.plainCalls)
 	}
 	want := ToolCallRecord{Step: 0, Name: "writer", IsError: true, Blocked: true}
-	if res.ToolCalls[0] != want {
+	if !reflect.DeepEqual(res.ToolCalls[0], want) {
 		t.Fatalf("record = %+v, want %+v", res.ToolCalls[0], want)
 	}
 	const content = "tool call blocked by interceptor guard (canary)"
@@ -1055,7 +1055,7 @@ func TestToolCallBlockParallelPathBlocksOnlyTheNamedCall(t *testing.T) {
 		t.Fatalf("events = %s (parallel path emits both calls before both results)", kinds(res.Events))
 	}
 	wantB := ToolCallRecord{Step: 0, Name: "b", IsError: true, Blocked: true}
-	if res.ToolCalls[1] != wantB || res.ToolCalls[0].Blocked || !res.ToolCalls[0].Invoked {
+	if !reflect.DeepEqual(res.ToolCalls[1], wantB) || res.ToolCalls[0].Blocked || !res.ToolCalls[0].Invoked {
 		t.Fatalf("records = %+v", res.ToolCalls)
 	}
 	if res.Messages[3].Content != "tool call blocked by interceptor guard (deny)" {
@@ -1278,7 +1278,7 @@ func TestToolResultBlockReplacesTheObservationBeforeTheObserver(t *testing.T) {
 			}
 			recIdx := len(res.ToolCalls) - 1
 			want := ToolCallRecord{Step: 0, Name: "evil", IsError: true, Invoked: true, Blocked: true, Latency: res.ToolCalls[recIdx].Latency}
-			if res.ToolCalls[recIdx] != want {
+			if !reflect.DeepEqual(res.ToolCalls[recIdx], want) {
 				t.Fatalf("record = %+v, want %+v", res.ToolCalls[recIdx], want)
 			}
 			if path.parallel && kinds(res.Events) != "step,tool_call,tool_call,tool_result,tool_result,token,step,stop" {

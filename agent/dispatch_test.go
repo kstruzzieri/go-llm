@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -20,6 +21,28 @@ func (e echoTool) Spec() ToolSpec {
 func (echoTool) Effect() Effect { return Effect{Class: Read, Approval: ApprovalNever} }
 func (echoTool) Invoke(_ context.Context, args json.RawMessage) (ToolResult, error) {
 	return ToolResult{Content: "tool-said:" + string(args)}, nil
+}
+
+type provenanceTool struct {
+	name       string
+	content    string
+	provenance json.RawMessage
+	isError    bool
+	cancel     context.CancelFunc
+	outputCap  int
+}
+
+func (t provenanceTool) Spec() ToolSpec {
+	return ToolSpec{Name: t.name, Parameters: json.RawMessage(`{"type":"object"}`)}
+}
+func (t provenanceTool) Effect() Effect {
+	return Effect{Class: Read, Approval: ApprovalNever, OutputCap: t.outputCap}
+}
+func (t provenanceTool) Invoke(context.Context, json.RawMessage) (ToolResult, error) {
+	if t.cancel != nil {
+		t.cancel()
+	}
+	return ToolResult{Content: t.content, IsError: t.isError, Provenance: t.provenance}, nil
 }
 
 func TestRunDispatchesToolThenAnswers(t *testing.T) {
@@ -80,6 +103,76 @@ func TestRecordResult_CopiesRouteOutcome(t *testing.T) {
 	if len(res.ToolCalls) != 1 || res.ToolCalls[0].RouteOutcome != ro {
 		t.Fatalf("RouteOutcome not copied into ToolCallRecord: %+v", res.ToolCalls)
 	}
+}
+
+func TestRecordResultKeepsProvenanceWhenContentIsCapped(t *testing.T) {
+	const content = "content longer than its cap"
+	want := json.RawMessage(`{"evidence":"original"}`)
+	tool := provenanceTool{name: "evidence", content: content, provenance: want, outputCap: 4}
+	o := New(nil, ContextManager{})
+	effect := normalizeEffect(tool.Effect())
+	out := o.invokeCall(context.Background(), tool, effect, nil)
+	if !out.Truncated || out.Content == content {
+		t.Fatalf("forced cap did not change presentation: %+v", out)
+	}
+	var res Result
+	var state State
+	b := newBatch()
+	if _, err := o.recordResult(context.Background(), &res, &state, nil, &restraintGovernor{}, 0,
+		provider.ToolCall{ID: "call-1", Function: provider.ToolCallFunction{Name: tool.name}}, effect,
+		ToolCallRecord{Step: 0, Name: tool.name, Invoked: true}, out, false, &b, o.newInterceptorRun()); err != nil {
+		t.Fatalf("recordResult: %v", err)
+	}
+	if string(res.ToolCalls[0].Provenance) != string(want) {
+		t.Fatalf("retained provenance = %s, want %s", res.ToolCalls[0].Provenance, want)
+	}
+}
+
+func TestProvenanceSuppressedBeforeRecordingAndForDiscardedParallelResults(t *testing.T) {
+	t.Run("parent cancellation before recording", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		tool := provenanceTool{
+			name: "cancel", content: "completed", provenance: json.RawMessage(`{"call":"cancel"}`), cancel: cancel,
+		}
+		o := newTestOrchestrator(toolCallThenFinal(tool.name, `{}`))
+		result, err := o.Run(ctx, Request{Goal: "q", Tools: []Tool{tool}}, nil)
+		if err == nil || !errors.Is(err, context.Canceled) {
+			t.Fatalf("Run error = %v, want context.Canceled", err)
+		}
+		if len(result.ToolCalls) != 1 || !result.ToolCalls[0].Invoked || result.ToolCalls[0].Provenance != nil {
+			t.Fatalf("canceled record retained rejected provenance: %+v", result.ToolCalls)
+		}
+	})
+
+	t.Run("discarded trailing parallel results", func(t *testing.T) {
+		const n = 5
+		tools := make([]Tool, n)
+		calls := make([]provider.ToolCall, n)
+		for i := range n {
+			name := "evidence" + strconv.Itoa(i)
+			tools[i] = provenanceTool{
+				name: name, content: "failed", isError: true,
+				provenance: json.RawMessage(fmt.Sprintf(`{"call":%d}`, i)),
+			}
+			calls[i] = provider.ToolCall{ID: strconv.Itoa(i), Type: "function", Function: provider.ToolCallFunction{Name: name, Arguments: json.RawMessage(`{}`)}}
+		}
+		o := newTestOrchestrator(&scriptedCaller{responses: []ModelResult{{Response: provider.ChatResponse{ToolCalls: calls}}}})
+		result, err := o.Run(context.Background(), Request{Goal: "q", Tools: tools}, nil)
+		if err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+		if result.StopReason != ToolErrorCapReached || len(result.ToolCalls) != n {
+			t.Fatalf("stop=%v records=%d, want ToolErrorCapReached and %d", result.StopReason, len(result.ToolCalls), n)
+		}
+		for i, record := range result.ToolCalls {
+			if i < defaultToolErrorCap && record.Provenance == nil {
+				t.Fatalf("accepted record %d lost provenance", i)
+			}
+			if i >= defaultToolErrorCap && record.Provenance != nil {
+				t.Fatalf("discarded record %d retained provenance: %s", i, record.Provenance)
+			}
+		}
+	})
 }
 
 // ctxTool returns a caller-owned ContextSet so a test can mutate it AFTER
@@ -452,7 +545,8 @@ func TestToolCallRecord_NilRouteOutcome_OmittedFromJSON(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
-	if strings.Contains(string(b), "RouteOutcome") {
-		t.Fatalf("nil RouteOutcome should be omitted, got %s", b)
+	const want = `{"Step":1,"Name":"read_file","IsError":false,"Denied":false,"Invoked":false,"Latency":0}`
+	if string(b) != want {
+		t.Fatalf("ordinary ToolCallRecord JSON changed:\n got %s\nwant %s", b, want)
 	}
 }
