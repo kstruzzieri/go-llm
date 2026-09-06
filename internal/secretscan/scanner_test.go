@@ -128,6 +128,47 @@ func TestEntropyThreshold(t *testing.T) {
 	}
 }
 
+func TestNestedAssignments(t *testing.T) {
+	t.Parallel()
+	body := "aB3dE7fG9hJ2" + "kL4mN6pQ8rS0"
+	for _, tt := range []struct{ name, before, after string }{
+		{"quoted outer unquoted inner", "token=\"" + strings.Repeat("x", 256) + " password=", " " + strings.Repeat("x", 256) + "\""},
+		{"quoted outer quoted inner", "token=\"" + strings.Repeat("x", 256) + " password='", "' " + strings.Repeat("x", 256) + "\""},
+		{"incomplete outer", "token=\"" + strings.Repeat("x", 256) + " password=", " "},
+		{"nested unquoted run", strings.Repeat("token="+strings.Repeat("x", 256)+":", 64) + "password=", ""},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			checkScan(t, tt.before+body+tt.after, []Finding{{Kind: SecretAssignment, Start: len(tt.before), End: len(tt.before) + len(body)}})
+		})
+	}
+}
+
+func TestRedactExposedBoundaries(t *testing.T) {
+	t.Parallel()
+	body := "aB3dE7fG9hJ2" + "kL4mN6pQ8rS0"
+	begin, end := envelopeMarkers("PRIVATE KEY")
+	envelope := begin + "\nplaceholder\n" + end
+	for _, tt := range []struct{ suffix, want string }{
+		{"sk-" + body, "[REDACTED_SECRET]\n\n[REDACTED_SECRET]"},
+		{"Bearer " + body, "[REDACTED_SECRET]\n\nBearer [REDACTED_SECRET]"},
+	} {
+		input := envelope + tt.suffix
+		checkScan(t, input, []Finding{{Kind: PrivateKey, Start: 0, End: len(envelope)}})
+		if got := Redact(input, Scan(input)); got != tt.want {
+			t.Error("Redact did not remove newly exposed provider/Bearer boundary")
+		}
+		checkScan(t, Redact(input, Scan(input)), nil)
+	}
+	card := "45320198" + "7654321" + "5"
+	provider := "sk-" + strings.Repeat("0", 17)
+	input := provider + " " + card
+	checkScan(t, input, []Finding{{Kind: OpenAIToken, Start: 0, End: len(provider)}})
+	if got := Redact(input, Scan(input)); got != "[REDACTED_SECRET] [REDACTED_PAYMENT_CARD]" {
+		t.Error("Redact did not remove card exposed from an overlength digit run")
+	}
+}
+
 func TestScanHasNoPrefixCutoff(t *testing.T) {
 	t.Parallel()
 	prefix := strings.Repeat("ordinary source\n", 1<<17)
@@ -305,6 +346,8 @@ func BenchmarkScan(b *testing.B) {
 		{"many_candidates", "token=\"" + body + "\"\nBearer " + body + "\nsk-" + body + "\n"},
 		{"incomplete_envelopes", begin + "\nplaceholder\n"},
 		{"digit_separator_run", "1234567890 --  -- "},
+		{"nested_unquoted_keys", "token=" + strings.Repeat("x", 256) + ":"},
+		{"dense_nested_keys", "token=api_key:password="},
 	} {
 		for _, size := range []int{64 << 10, 1 << 20, 8 << 20} {
 			b.Run(fmt.Sprintf("%s/%dKiB", sample.name, size>>10), func(b *testing.B) {

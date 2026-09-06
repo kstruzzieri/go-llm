@@ -173,15 +173,14 @@ func validCard(digits []byte) bool {
 }
 
 // Redact consumes the complete findings returned by Scan and preserves every
-// removed CR and LF byte. Marker insertion can raise an enclosing assignment's
-// entropy, so redaction also removes any newly detected scalar until clean.
+// removed CR and LF byte. Replacement can change entropy or token boundaries,
+// so redaction also removes any newly exposed finding until clean.
 // It does not accept arbitrary spans or partial findings.
 func Redact(text string, findings []Finding) string {
 	for len(findings) != 0 {
 		text = replaceSpans(text, findings)
-		// Markers cannot form new provider, Bearer, key-envelope, or card
-		// candidates. Any newly detected assignment loses its complete value
-		// on the next pass, leaving an exempt marker and its outer delimiters.
+		// Scan every kind: replacement can expose a previously blocked token
+		// boundary or shorten an overlength card run, as well as change entropy.
 		findings = Scan(text)
 	}
 	return text
@@ -258,12 +257,19 @@ func assignmentKey(key string) bool {
 }
 
 func credential(value string) bool {
-	if len(value) < 20 || exempt(value) {
+	if len(value) < 20 {
 		return false
 	}
 	var counts [256]int
 	for i := range len(value) {
 		counts[value[i]]++
+	}
+	return credentialCounts(value, &counts)
+}
+
+func credentialCounts(value string, counts *[256]int) bool {
+	if len(value) < 20 {
+		return false
 	}
 	var entropy float64
 	for _, count := range counts {
@@ -273,7 +279,7 @@ func credential(value string) bool {
 		p := float64(count) / float64(len(value))
 		entropy -= p * math.Log2(p)
 	}
-	return entropy >= 3.5
+	return entropy >= 3.5 && !exempt(value)
 }
 
 func exempt(value string) bool {
@@ -281,9 +287,11 @@ func exempt(value string) bool {
 	if len(value) >= 2 && (value[0] == '\'' || value[0] == '"') && value[0] == value[len(value)-1] {
 		value = value[1 : len(value)-1]
 	}
-	switch strings.ToLower(value) {
-	case "[redacted]", "[redacted_secret]", "[redacted_payment_card]", "<redacted>", "example", "placeholder", "changeme", "dummy", "sample", "test", "todo":
-		return true
+	if len(value) <= len("[redacted_payment_card]") {
+		switch strings.ToLower(value) {
+		case "[redacted]", "[redacted_secret]", "[redacted_payment_card]", "<redacted>", "example", "placeholder", "changeme", "dummy", "sample", "test", "todo":
+			return true
+		}
 	}
 	if mask(value) {
 		return true
@@ -345,6 +353,8 @@ func scanBearer(text string, findings []Finding) []Finding {
 }
 
 func scanAssignments(text string, findings []Finding) []Finding {
+	var runStart, runEnd int
+	var counts [256]int
 	for i := 0; i < len(text); {
 		if !alphabet(text[i], "_-") {
 			i++
@@ -357,32 +367,36 @@ func scanAssignments(text string, findings []Finding) []Finding {
 		if !assignmentKey(text[keyStart:i]) {
 			continue
 		}
-		keyEnd := i
+		// Keep the key cursor independent of scalar lookahead: a rejected
+		// enclosing value must not hide bounded keys within it.
+		start := i
 		if keyStart > 0 && (text[keyStart-1] == '\'' || text[keyStart-1] == '"') {
-			if i == len(text) || text[i] != text[keyStart-1] {
+			if start == len(text) || text[start] != text[keyStart-1] {
 				continue
 			}
-			i++
+			start++
 			if keyStart > 1 && alphabet(text[keyStart-2], "_-") {
 				continue
 			}
 		}
-		for i < len(text) && horizontalSpace(text[i]) {
-			i++
+		for start < len(text) && horizontalSpace(text[start]) {
+			start++
 		}
-		if i == len(text) || text[i] != '=' && text[i] != ':' {
+		if start == len(text) || text[start] != '=' && text[start] != ':' {
 			continue
 		}
-		i++
-		for i < len(text) && horizontalSpace(text[i]) {
-			i++
+		start++
+		for start < len(text) && horizontalSpace(text[start]) {
+			start++
 		}
-		if i == len(text) {
+		if start == len(text) {
 			break
 		}
-		start, end := i, i
-		if text[i] == '\'' || text[i] == '"' {
-			quote := text[i]
+		end := start
+		if text[start] == '\'' || text[start] == '"' {
+			// Another scalar's unescaped opening quote closes this value,
+			// so ranges using the same quote delimiter do not overlap.
+			quote := text[start]
 			start++
 			end = start
 			for end < len(text) && text[end] != quote {
@@ -391,25 +405,36 @@ func scanAssignments(text string, findings []Finding) []Finding {
 				}
 				end++
 			}
-			i = min(end+1, len(text))
-			if end == len(text) {
-				continue
+			if end < len(text) && credential(text[start:end]) {
+				findings = append(findings, Finding{Kind: SecretAssignment, Start: start, End: end})
 			}
-		} else {
-			for end < len(text) && !scalarBoundary(text[end]) {
-				end++
-			}
-			// Closing template/marker delimiters belong to the complete
-			// placeholder, even where they normally delimit an unquoted scalar.
-			for n := 1; n <= 2 && end+n <= len(text); n++ {
-				if exempt(text[start:end+n]) && (end+n == len(text) || scalarBoundary(text[end+n])) {
-					end += n
-					break
-				}
-			}
-			i = max(end, start+1)
+			continue
 		}
-		if ScanAssignment(text[keyStart:keyEnd], text[start:end]) {
+		// Nested unquoted starts share an end. Count each run once, then
+		// subtract each consumed prefix once instead of recounting suffixes.
+		if start >= runEnd {
+			runStart, runEnd = start, start
+			counts = [256]int{}
+			for runEnd < len(text) && !scalarBoundary(text[runEnd]) {
+				counts[text[runEnd]]++
+				runEnd++
+			}
+		}
+		for runStart < start {
+			counts[text[runStart]]--
+			runStart++
+		}
+		end = runEnd
+		// Closing template/marker delimiters belong to the complete
+		// placeholder, even where they normally delimit an unquoted scalar.
+		placeholder := false
+		for n := 1; n <= 2 && end+n <= len(text); n++ {
+			if exempt(text[start:end+n]) && (end+n == len(text) || scalarBoundary(text[end+n])) {
+				placeholder = true
+				break
+			}
+		}
+		if !placeholder && credentialCounts(text[start:end], &counts) {
 			findings = append(findings, Finding{Kind: SecretAssignment, Start: start, End: end})
 		}
 	}
