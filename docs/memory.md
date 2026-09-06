@@ -140,6 +140,8 @@ Promotion makes a record durable; it does not review it. Golem `/records --promo
 
 The signed search took 8.85 times the baseline, an increase of 13.158426 ms/op. Both benchmark commands completed successfully, and local test workers were paused for the signed measurement. This measures store search and per-selected-record verification under that fixture; it is not a latency guarantee and does not include recall rendering, model calls, or network work. The benchmark has no timing threshold, and the store adds no verification cache.
 
+Repeated searches verify the freshly read body again. An unchanged record ID, `updated_at`, and signature do not establish that the rest of the stored body is unchanged; a cache keyed only by those values cannot safely replace verification.
+
 ## Initialization and recovery
 
 Schema migration and record-signing initialization are separate. Constructing the user-memory `SQLiteStore` may run shared migrations but does not create a signing key or initialize agent-memory records. A Golem run using only user memory stays key-free.
@@ -159,20 +161,33 @@ The singleton `memory_record_signing(id = 1, initialized_at)` row is the authori
 
 Initial import includes live, expired, and soft-deleted rows. It preserves IDs, content, scope, timestamps, and historical source claims, normalizes legacy metadata, and works in bounded batches inside one transaction. Any validation, size, signing, cancellation, cursor, or SQL failure rolls back all rows and the marker. Enabling a new filesystem-backed store authorizes this import as one operation; there is no per-record approval.
 
-If the first attempt creates `current.pem` but fails before commit, later filesystem opens return `ErrIncompleteInitialization`. Inspect the database and key backups. Restore the matching initialized database and keys, or deliberately use injected credentials with `Initialize: true` only after confirming that this is the intended uninitialized snapshot and the complete verifier ring is trusted. Golem and MCP expose no bypass flag. Do not delete the witness or silently re-baseline a reset database.
+The 128-row batch size bounds the record buffer, not transaction duration or WAL disk growth. The import occupies the store's single database connection and serializes other writers. Before upgrading a large store, stop writers, take a consistent backup, and rehearse initialization on a copy to provision disk space and a sufficient startup deadline. Committing individual batches would lose the all-or-nothing snapshot and marker guarantee.
+
+If the first attempt creates `current.pem` but fails before commit, later filesystem opens return `ErrIncompleteInitialization`. A failed import and a removed initialization marker cannot be safely distinguished from those two files alone. Recovery requires an operator:
+
+1. Stop writers and preserve a consistent database snapshot and the complete key directory before changing either.
+2. Restore matching initialized database and key backups when available.
+3. Otherwise, use injected credentials with `Initialize: true` only after independently confirming the intended uninitialized snapshot, the absence of any signed rows, and the trusted signer and complete verifier ring. Load the preserved, trusted `current.pem` with `signing.LoadEd25519`; include its verifier and all trusted retained verifiers in the injected ring. An inconsistent snapshot containing signature material is rejected even with this authorization. If these facts cannot be established, leave agent memory disabled and preserve the evidence.
+4. After successful restoration or initialization, reopen normally without `Initialize` and verify expected reads before resuming writers.
+
+Golem and MCP expose no bypass flag. Do not delete the witness or silently re-baseline a reset database.
 
 ## Keys and rotation
 
-The default layout is:
+The default layout is (Unix modes shown):
 
 ```text
-<database path>.keys/                 0700 on Unix
+<database path>.keys/                 0700
   current.pem                         current Ed25519 private key, 0600
   trusted/
     <key-id>.pem                      retained Ed25519 public verifier, 0600
 ```
 
-`current.pem` contains one PKCS#8 `PRIVATE KEY`; retained keys contain one PKIX/RFC 8410 `PUBLIC KEY` and use the verifier's derived key ID as the filename. Loaders enforce typed PEM, ownership, modes, regular files, and no symlinks. Back up the database and key directory together.
+`current.pem` contains one PKCS#8 `PRIVATE KEY`; retained keys contain one PKIX/RFC 8410 `PUBLIC KEY` and use the verifier's derived key ID as the filename. Loaders enforce typed PEM, regular key files, and rejection of symlinked key files and leaf key directories. On Unix, they also enforce current-user ownership and no group/other permission bits.
+
+On Windows and other non-Unix hosts, the loaders do not validate ownership or ACLs. The deployment must restrict the database, sidecars, key directory, and retained-verifier directory to trusted principals through OS ACLs. Use a private user-profile location or explicitly provision equivalent ACLs before enabling agent memory; a shared workspace location is not made private by the Unix modes above.
+
+Back up the database and key directory together. The default adjacent key directory protects against database-only changes while the key material stays trusted; it does not isolate keys from a process with unrestricted access as the same OS user. Hosts can select a separately protected `KeyDir` or inject credentials, but a different path alone does not create an access boundary.
 
 Rotation is an offline procedure:
 
@@ -192,6 +207,8 @@ MCP agent memory is explicitly enabled with `WithAgentMemoryPath` or `--agent-me
 ## Recall and MCP compatibility
 
 Agent-memory recall places server origin and unreviewed trust information before content; durable and promoted records remain unreviewed and fenced. User-memory recall remains separate and identifies user authorship with integrity unverified. Source claims and metadata remain untrusted data even when their stored bytes verify.
+
+Fences mark data boundaries; they do not guarantee that a model will disregard instructions embedded in the data. Legacy signing authenticates the imported snapshot, including any already unsafe content, without establishing historical authorship or safety.
 
 Successful MCP `agent_memory_search`, `agent_memory_create`, and `agent_memory_promote` responses change from bare JSON text to one fenced `TextContent` value. The fence covers the complete JSON result, including metadata and source claims. There is no unfenced `StructuredContent` duplicate:
 
@@ -215,7 +232,7 @@ Matching fences establish structure, not cryptographic authenticity. There is no
 
 ## Integrity boundary
 
-`Get` verifies its selected in-scope record. `Search` verifies every selected FTS or recency result, including `IncludeExpired`, before returning anything. One invalid selected record returns `ErrRecordIntegrity` and no partial batch. Mutations reject a corrupt preimage, and no open, read, or write path repairs an invalid signature after initialization.
+`Get` verifies its selected in-scope record. `Search` verifies every selected FTS or recency result, including `IncludeExpired`, before returning anything. One invalid selected record returns `ErrRecordIntegrity` and no partial batch. This deliberately makes the affected query unavailable until the integrity problem is resolved; queries that do not select that record can still succeed. Mutations reject a corrupt preimage, and no open, read, or write path repairs an invalid signature after initialization.
 
 Callers can classify every integrity failure with `errors.Is(err, memory.ErrRecordIntegrity)`. Unknown-key and invalid-signature failures also preserve `signing.ErrUnknownKey` and `signing.ErrInvalidSignature` respectively. Tool adapters return fixed, content-free errors instead of exposing the wrapped diagnostic chain.
 
@@ -223,7 +240,7 @@ This is per-selected-record verification, not a full-database audit. While the t
 
 - rollback of the whole initialized database;
 - deletion of a record or replay of an older valid signed version;
-- FTS-only changes that alter ranking or hide a record;
+- FTS-only changes that alter matching or ranking, or hide a record (returned base-table bodies still verify);
 - compromise or replacement of the signing identity or trusted-key directory.
 
 A missing current key is detected at startup. The key witness rejects a missing marker beside an existing filesystem key, but is not a checkpoint against replay of an otherwise valid initialized database. Broader audit verification is tracked in #447.
