@@ -158,12 +158,12 @@ type Turn struct {
 	Observer     agent.Observer
 }
 
-// turnSnapshot is the immutable {System, Tools} pair a reserved turn holds
-// (#372). It is never mutated after publication; Replace installs a new
-// pointer.
+// turnSnapshot is the immutable {System, Tools, ModelOptions} value a
+// reserved turn holds (#372). Replace publishes a new pointer.
 type turnSnapshot struct {
-	system string
-	tools  []agent.Tool
+	system       string
+	tools        []agent.Tool
+	modelOptions provider.ModelOptions
 }
 
 // Event is the versioned consumer event envelope. A run that stops early
@@ -195,14 +195,13 @@ type Runtime struct {
 	orchestrator *agent.Orchestrator
 	root         string
 	// fileTools is the runtime-owned prefix, immutable after New. snap is
-	// the current {System, Tools} pair, guarded by mu: reserve reads it,
-	// Replace swaps it (#372).
+	// the current {System, Tools, ModelOptions} value, guarded by mu:
+	// reserve reads it, Replace swaps it (#372).
 	fileTools       []agent.Tool
 	snap            *turnSnapshot
 	maxSteps        int
 	budget          agent.Budget
 	maxMessageBytes int
-	modelOptions    provider.ModelOptions
 	summarizer      conversation.Summarizer
 	compress        bool
 	retainReasoning bool
@@ -276,11 +275,10 @@ func New(ctx context.Context, opts Options) (*Runtime, error) {
 		orchestrator:    orchestrator,
 		root:            root,
 		fileTools:       fileTools,
-		snap:            &turnSnapshot{system: opts.System, tools: tools},
+		snap:            &turnSnapshot{system: opts.System, tools: tools, modelOptions: opts.ModelOptions.Clone()},
 		maxSteps:        opts.MaxSteps,
 		budget:          opts.Budget,
 		maxMessageBytes: maxMessage,
-		modelOptions:    opts.ModelOptions,
 		summarizer:      summarizer,
 		compress:        !opts.DisableCompression && summarizer != nil,
 		retainReasoning: opts.RetainReasoning,
@@ -448,7 +446,7 @@ func (r *Runtime) Run(ctx context.Context, turn Turn, sink EventSink) (agent.Res
 		MaxSteps: r.maxSteps,
 		Budget:   r.budget,
 		Approver: turn.Approver,
-		Options:  r.modelOptions,
+		Options:  snap.modelOptions.Clone(),
 	}
 	if thread != nil {
 		request.History = thread.history()
@@ -638,10 +636,10 @@ func (r *Runtime) Cancel(runID string) bool {
 	return true
 }
 
-// Replace atomically installs system and tools for every turn reserved
-// after it returns. A turn reserved before Replace keeps the System and
-// Tools it was reserved with, to completion — reservation is the critical
-// section that makes a run visible to Cancel and Close, so the two are
+// Replace atomically installs system, tools, and optional model options for
+// every turn reserved after it returns. A turn reserved before Replace keeps
+// its System, Tools, and ModelOptions to completion. Reservation is the
+// critical section that makes a run visible to Cancel and Close, so the two are
 // linearizable. A successful Replace governs every reservation after it
 // returns until superseded by another successfully linearized Replace.
 //
@@ -655,10 +653,17 @@ func (r *Runtime) Cancel(runID string) bool {
 // never called while the runtime lock is held. Safe for concurrent use with
 // Run, Cancel, Close, and other Replace calls.
 //
+// Omitting modelOptions preserves the options current at publication, after
+// tool validation. One value replaces all options; an explicit zero clears them.
+// More than one value returns ErrInvalidRequest. Supplied options are copied;
+// callers must not mutate arguments concurrently with New or Replace reading them.
+// The variadic signature preserves direct two-argument calls, but interfaces and
+// explicitly typed functions using the old signature must be updated.
+//
 // Replace never touches the orchestrator: an orchestrator option that names
 // a tool (agent.WithToolInvocationLimit) still requires that tool in every
 // replacement.
-func (r *Runtime) Replace(system string, tools []agent.Tool) error {
+func (r *Runtime) Replace(system string, tools []agent.Tool, modelOptions ...provider.ModelOptions) error {
 	r.mu.Lock()
 	closed := r.closed
 	r.mu.Unlock()
@@ -673,7 +678,12 @@ func (r *Runtime) Replace(system string, tools []agent.Tool) error {
 	combined := make([]agent.Tool, 0, len(r.fileTools)+len(tools))
 	combined = append(combined, r.fileTools...)
 	combined = append(combined, tools...)
-	validationErr := validateTools(combined)
+	var validationErr error
+	if len(modelOptions) > 1 {
+		validationErr = fmt.Errorf("%w: Replace accepts at most one model options value", ErrInvalidRequest)
+	} else {
+		validationErr = validateTools(combined)
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.closed {
@@ -682,13 +692,25 @@ func (r *Runtime) Replace(system string, tools []agent.Tool) error {
 	if validationErr != nil {
 		return validationErr
 	}
-	r.snap = &turnSnapshot{system: system, tools: combined}
+	options := r.snap.modelOptions
+	if len(modelOptions) == 1 {
+		options = modelOptions[0].Clone()
+	}
+	r.snap = &turnSnapshot{system: system, tools: combined, modelOptions: options}
 	return nil
 }
 
-// reserve registers the run and fixes its {System, Tools} snapshot in the
-// same critical section that makes it visible to Cancel and Close, so
-// Replace and reservation are linearizable (#372).
+// ModelOptions returns an independent copy of the current options, including
+// after Close. It is safe for concurrent use with Run and Replace.
+func (r *Runtime) ModelOptions() provider.ModelOptions {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.snap.modelOptions.Clone()
+}
+
+// reserve registers the run and fixes its {System, Tools, ModelOptions}
+// snapshot in the same critical section that makes it visible to Cancel
+// and Close, so Replace and reservation are linearizable (#372).
 func (r *Runtime) reserve(turn Turn, cancel context.CancelFunc) (*activeRun, *turnSnapshot, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
