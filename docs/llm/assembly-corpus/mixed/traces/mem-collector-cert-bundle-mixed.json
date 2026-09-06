@@ -36,7 +36,7 @@
     },
     {
       "role": "tool",
-      "content": "### source: \"internal/collector/trust.go\"\npurpose: Pinned CA bundle loading from deployment config.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n--- source: \"internal/collector/trust.go\" (lines 1-8, similarity: 1.00) ---\n1| package collector\n2| \n3| // trust loads the pinned CA bundle named by deployment config.\n4| // dw-root-2025 finished its trust drain; nothing on the fleet should\n5| // still present it, and the loader logs any peer that does.\n6| func (c *Collector) trust() (*bundle, error) {\n7| \treturn loadBundle(c.cfg.PinnedBundle)\n8| }\n\n### source: \"internal/collector/register.go\"\npurpose: Collector registration surfacing cloned-profile conflicts.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n\n### source: \"docs/collector-fleet.md\"\npurpose: Fleet intake: profile-based bootstrap, DNS, canary-first racks.\nlanguage: markdown\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n",
+      "content": "### source: \"internal/collector/trust.go\"\npurpose: Pinned CA bundle loading from deployment config.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n--- source: \"internal/collector/trust.go\" (lines 1-8, similarity: 1.00) ---\n1| package collector\n2| \n3| // trust loads the pinned CA bundle named by deployment config.\n4| // dw-root-2025 finished its trust drain; nothing on the fleet should\n5| // still present it, and the loader logs any peer that does.\n6| func (c *Collector) trust() (*bundle, error) {\n7| \treturn loadBundle(c.cfg.PinnedBundle)\n8| }\n\n### source: \"internal/collector/register.go\"\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nnote: metadata overview (summary omitted: budget)\n\n### source: \"docs/collector-fleet.md\"\nlanguage: markdown\nindexed: 2025-07-27T00:00:00Z\nnote: metadata overview (summary omitted: budget)\n",
       "tool_call_id": "c1",
       "name": "retrieve"
     },
@@ -54,7 +54,7 @@
     },
     {
       "role": "tool",
-      "content": "rec-bundle-drain · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:\nrec-cert-bundle · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src: · collectors pin the dw-root-2027 bundle after the trust rotation\nrec-provisioning · working · created:2025-07-27 · updated:2025-07-27 · scope:session · ns: · src:\nrec-rack-intake · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:",
+      "content": "trust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-bundle-drain · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src-claim:\ntrust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-cert-bundle · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src-claim:\ntrust=agent-written; unreviewed; origin=memory.create; session=caller-claim · rec-provisioning · working · created:2025-07-27 · updated:2025-07-27 · scope:session · ns: · src-claim:\ntrust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-rack-intake · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src-claim:",
       "tool_call_id": "c2",
       "name": "agent_memory_search"
     },
@@ -79,8 +79,8 @@
       "rec-provisioning",
       "rec-rack-intake"
     ],
-    "estimated_prompt_tokens": 631,
-    "state_digest": "c1efc21a9b284b2fa2a943491ad16533c3f7797cfcfb2a130e783a4f18235fd7",
+    "estimated_prompt_tokens": 664,
+    "state_digest": "acf85589d0791a4d63b80b5e5d602f42f7c3a5cd6c428acd0b289e21d9a027ee",
     "subjects": [
       "(c1|rag|internal/collector/trust.go)",
       "(c1|rag|internal/collector/register.go)",
@@ -93,9 +93,9 @@
     "stratum": "memory_only",
     "answer_home": "memory",
     "scenario_family": "collector-cert-mem",
-    "budget": 672,
-    "raw_state_tokens": 1120,
+    "budget": 719,
+    "raw_state_tokens": 1199,
     "pressure_level": "critical",
-    "shed_bytes": 1668
+    "shed_bytes": 1850
   }
 }

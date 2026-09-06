@@ -27,7 +27,7 @@
     },
     {
       "role": "tool",
-      "content": "rec-baseline-freeze · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:\nrec-baseline-path · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src: · drift baseline snapshots land under dw-baselines/gold/ on each pass\nrec-gold-retention · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:\nrec-incident-window · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:\nrec-review-rows · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:\nrec-rollup-rebuild · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:\nrec-scheduler-move · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:\nrec-storage-rows · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:",
+      "content": "trust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-baseline-freeze · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src-claim:\ntrust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-baseline-path · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src-claim: · drift baseline snapshots land under dw-baselines/gold/ on each pass\ntrust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-gold-retention · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src-claim:\ntrust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-incident-window · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src-claim:\ntrust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-review-rows · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src-claim:\ntrust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-rollup-rebuild · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src-claim:\ntrust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-scheduler-move · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src-claim:\ntrust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-storage-rows · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src-claim:",
       "tool_call_id": "c1",
       "name": "agent_memory_search"
     },
@@ -70,7 +70,7 @@
     },
     {
       "role": "tool",
-      "content": "### source: \"internal/drift/baseline.go\"\npurpose: Scheduler-fired baseline writer with atomic snapshot swaps.\noverview: baseline.go notes the dropped nightly pilot cadence, takes its firing from the shared scheduler's job config, and swaps whole snapshots atomically for scorers.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n--- source: \"internal/drift/baseline.go\" (lines 1-15, similarity: 1.00) ---\n1| package drift\n2| \n3| // writeBaseline persists one baseline snapshot pass. The pilot's\n4| // nightly recompute was dropped before GA; the cadence now ships\n5| // from the shared scheduler's job config, not from this file, and\n6| // the writer only runs when the scheduler fires it. Snapshots are\n7| // written whole and swapped atomically so scorers never read a\n8| // half-written baseline.\n9| func (b *Baseliner) writeBaseline(pass int64) error {\n10| \tsnap, err := b.compute(pass)\n11| \tif err != nil {\n12| \t\treturn err\n13| \t}\n14| \treturn b.store.SwapAtomic(snap)\n15| }\n\n### source: \"internal/drift/rollup.go\"\npurpose: Rebuildable rollups structurally isolated from baseline reads.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n\n### source: \"docs/drift-baselines.md\"\npurpose: Baselines vs rollups: stores, cadence ownership, review sourcing.\nlanguage: markdown\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n--- source: \"docs/drift-baselines.md\" (lines 1-19, similarity: 1.00) ---\n1| # drift baselines\n2| \n3| Baselines are the reference points scoring compares against;\n4| rollups are derived aggregates for dashboards. They live in\n5| different stores with different retention because one is a\n6| reference and the other is rebuildable.\n7| \n8| The baseline location and generation count are stored decisions;\n9| the recompute cadence belongs to the shared scheduler's job config.\n10| During incident windows baselines freeze until the commander\n11| clears the window, and the thaw rides the clearing checklist so a\n12| freeze cannot outlive its incident unnoticed.\n13| \n14| ## Review sourcing\n15| \n16| Baseline rows in review tables cite stored decisions or source\n17| files. The cadence row cites the scheduler job config's change\n18| history, the location and retention rows cite the stored decisions,\n19| and none of them cite dashboards.\n",
+      "content": "### source: \"internal/drift/baseline.go\"\npurpose: Scheduler-fired baseline writer with atomic snapshot swaps.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n--- source: \"internal/drift/baseline.go\" (lines 1-15, similarity: 1.00) ---\n1| package drift\n2| \n3| // writeBaseline persists one baseline snapshot pass. The pilot's\n4| // nightly recompute was dropped before GA; the cadence now ships\n5| // from the shared scheduler's job config, not from this file, and\n6| // the writer only runs when the scheduler fires it. Snapshots are\n7| // written whole and swapped atomically so scorers never read a\n8| // half-written baseline.\n9| func (b *Baseliner) writeBaseline(pass int64) error {\n10| \tsnap, err := b.compute(pass)\n11| \tif err != nil {\n12| \t\treturn err\n13| \t}\n14| \treturn b.store.SwapAtomic(snap)\n15| }\n\n### source: \"internal/drift/rollup.go\"\npurpose: Rebuildable rollups structurally isolated from baseline reads.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n\n### source: \"docs/drift-baselines.md\"\npurpose: Baselines vs rollups: stores, cadence ownership, review sourcing.\nlanguage: markdown\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n--- source: \"docs/drift-baselines.md\" (lines 1-19, similarity: 1.00) ---\n1| # drift baselines\n2| \n3| Baselines are the reference points scoring compares against;\n4| rollups are derived aggregates for dashboards. They live in\n5| different stores with different retention because one is a\n6| reference and the other is rebuildable.\n7| \n8| The baseline location and generation count are stored decisions;\n9| the recompute cadence belongs to the shared scheduler's job config.\n10| During incident windows baselines freeze until the commander\n11| clears the window, and the thaw rides the clearing checklist so a\n12| freeze cannot outlive its incident unnoticed.\n13| \n14| ## Review sourcing\n15| \n16| Baseline rows in review tables cite stored decisions or source\n17| files. The cadence row cites the scheduler job config's change\n18| history, the location and retention rows cite the stored decisions,\n19| and none of them cite dashboards.\n",
       "tool_call_id": "c2",
       "name": "retrieve"
     },
@@ -99,8 +99,8 @@
       "rec-scheduler-move",
       "rec-storage-rows"
     ],
-    "estimated_prompt_tokens": 1219,
-    "state_digest": "b1b135c04a9e7413a6b0c2ee6d1942b3f347bfb5e1f7dcd0a00b068daabce636",
+    "estimated_prompt_tokens": 1344,
+    "state_digest": "6b7b244b5fa365e9e303e5fb221562941bfb43f6592f7921c89b0cc0421cd7d8",
     "subjects": [
       "(c1|memory|rec-baseline-freeze)",
       "(c1|memory|rec-baseline-path)",
@@ -117,9 +117,9 @@
     "stratum": "chain_retention",
     "answer_home": "join",
     "scenario_family": "drift-window-chain",
-    "budget": 1292,
-    "raw_state_tokens": 2154,
+    "budget": 1386,
+    "raw_state_tokens": 2310,
     "pressure_level": "critical",
-    "shed_bytes": 3326
+    "shed_bytes": 3448
   }
 }

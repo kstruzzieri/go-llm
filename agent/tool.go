@@ -47,7 +47,9 @@ type ToolResult struct {
 	IsError   bool
 	Preview   string
 	Truncated bool
-	Attrib    *RetrievalAttribution // set by retrieval-style tools; copied to Message.Attrib
+	// Provenance is optional opaque structured evidence emitted by a tool.
+	Provenance json.RawMessage       `json:"Provenance,omitempty"`
+	Attrib     *RetrievalAttribution // set by retrieval-style tools; copied to Message.Attrib
 	// Context is the optional structured payload for mixed assembly (#331).
 	// Content remains the canonical fallback for legacy mode and persisted
 	// transcripts; in mixed mode the set's groups replace it in the

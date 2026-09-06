@@ -94,7 +94,7 @@
     },
     {
       "role": "tool",
-      "content": "rec-flip-checklist · working · created:2025-07-27 · updated:2025-07-27 · scope:session · ns: · src: · flip-day checklist lives in the deploy repo; tick items in order, the edge steps assume the producer steps finished\nrec-observer-invite · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src: · platform observer joins the flip call fifteen minutes before the window opens\nrec-revoke-sweep · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:",
+      "content": "trust=agent-written; unreviewed; origin=memory.create; session=caller-claim · rec-flip-checklist · working · created:2025-07-27 · updated:2025-07-27 · scope:session · ns: · src-claim:\ntrust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-observer-invite · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src-claim:\ntrust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-revoke-sweep · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src-claim:",
       "tool_call_id": "c2",
       "name": "agent_memory_search"
     },
@@ -118,8 +118,8 @@
       "rec-observer-invite",
       "rec-revoke-sweep"
     ],
-    "estimated_prompt_tokens": 1380,
-    "state_digest": "c82ed6891593ff18d9c7a571903463b56deab43864c87adbde6c96212757cc22",
+    "estimated_prompt_tokens": 1394,
+    "state_digest": "d1d0c06bd7115b5e0ea3bba97d4118c1c19586c9edde8b12d7b964510496b0f2",
     "subjects": [
       "(c1|rag|internal/ingest/verifycache.go)",
       "(c1|rag|internal/ingest/revokelog.go)",
@@ -132,10 +132,10 @@
     "answer_home": "join",
     "scenario_family": "ingest-token-join",
     "budget": 1445,
-    "raw_state_tokens": 2408,
+    "raw_state_tokens": 2409,
     "pressure_level": "critical",
     "shed_messages": 2,
-    "shed_bytes": 3438,
+    "shed_bytes": 3389,
     "omitted_subjects": 1
   }
 }

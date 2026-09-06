@@ -54,7 +54,7 @@
     },
     {
       "role": "tool",
-      "content": "rec-board-owners · semantic · 2025-07-27 · storage board changes go through the observability rotation; screenshots go in the change thread\nrec-raw-hold · semantic · 2025-07-27 · downsample operations note: raw 1s samples are held 48 hours before the first downsample pass; the pass runs per shard, oldest shard first, and skips any shard with an active export lease so a slow warehouse copy never loses raw resolution mid-transfer. shards that skip twice in a row page the storage rotation, because a lease surviving two passes usually means a wedged exporter rather than a slow one. the hold clock starts at segment roll rather than at ingest, which keeps partially filled segments from aging out early, and the storage rotation reviews the skip ledger weekly so lease bugs surface before they cost raw data.\nrec-tier-ladder · working · 2025-07-27 · tier ladder panels live on the storage board; per-tier bytes split by region",
+      "content": "trust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-board-owners · semantic · 2025-07-27 · storage board changes go through the observability rotation; screenshots go in the change thread\ntrust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-raw-hold · semantic · 2025-07-27 · downsample operations note: raw 1s samples are held 48 hours before the first downsample pass; the pass runs per shard, oldest shard first, and skips any shard with an active export lease so a slow warehouse copy never loses raw resolution mid-transfer. shards that skip twice in a row page the storage rotation, because a lease surviving two passes usually means a wedged exporter rather than a slow one. the hold clock starts at segment roll rather than at ingest, which keeps partially filled segments from aging out early, and the storage rotation reviews the skip ledger weekly so lease bugs surface before they cost raw data.\ntrust=agent-written; unreviewed; origin=memory.create; session=caller-claim · rec-tier-ladder · working · 2025-07-27 · tier ladder panels live on the storage board; per-tier bytes split by region",
       "tool_call_id": "c2",
       "name": "agent_memory_search"
     },
@@ -78,8 +78,8 @@
       "rec-raw-hold",
       "rec-tier-ladder"
     ],
-    "estimated_prompt_tokens": 1480,
-    "state_digest": "811aed8102e7b36588b948b4606e82ccc8eaf8171b9543e7fbf7aff8113a151e",
+    "estimated_prompt_tokens": 1538,
+    "state_digest": "72275a862c513987cb6eaa4ead602c59806434626218a1fb137b56bfce248347",
     "subjects": [
       "(c1|rag|internal/store/downsample.go)",
       "(c1|rag|internal/store/tiers.go)",
@@ -91,8 +91,8 @@
     "stratum": "cross_domain_join",
     "answer_home": "join",
     "scenario_family": "downsample-tier-join",
-    "budget": 1589,
-    "raw_state_tokens": 2648,
+    "budget": 1624,
+    "raw_state_tokens": 2706,
     "pressure_level": "critical",
     "shed_messages": 10,
     "shed_bytes": 4050

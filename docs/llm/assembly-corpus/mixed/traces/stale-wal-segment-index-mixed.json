@@ -92,7 +92,7 @@
     },
     {
       "role": "tool",
-      "content": "### source: \"internal/index/wal.go\"\npurpose: Index WAL sizing: segments roll at 24 MiB, sealed before mutations apply.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n--- source: \"internal/index/wal.go\" (lines 1-12, similarity: 1.00) ---\n1| package index\n2| \n3| // appendWAL lands one index mutation batch in the tier's write-ahead\n4| // log before the mutation applies. Rollover sizing is owned by the\n5| // tier profile; this path enforces only append ordering and the\n6| // seal-before-apply rule that makes crashed mutations replayable.\n7| func (ix *Index) appendWAL(batch MutationBatch) error {\n8| \tif err := ix.wal.append(batch); err != nil {\n9| \t\treturn err\n10| \t}\n11| \treturn ix.apply(batch)\n12| }\n\n### source: \"internal/index/compact.go\"\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nnote: metadata overview (summary omitted: budget)\n\n### source: \"docs/index-tier.md\"\nlanguage: markdown\nindexed: 2025-07-27T00:00:00Z\nnote: metadata overview (summary omitted: budget)\n",
+      "content": "### source: \"internal/index/wal.go\"\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nnote: metadata overview (summary omitted: budget)\n--- source: \"internal/index/wal.go\" (lines 1-12, similarity: 1.00) ---\n1| package index\n2| \n3| // appendWAL lands one index mutation batch in the tier's write-ahead\n4| // log before the mutation applies. Rollover sizing is owned by the\n5| // tier profile; this path enforces only append ordering and the\n6| // seal-before-apply rule that makes crashed mutations replayable.\n7| func (ix *Index) appendWAL(batch MutationBatch) error {\n8| \tif err := ix.wal.append(batch); err != nil {\n9| \t\treturn err\n10| \t}\n11| \treturn ix.apply(batch)\n12| }\n\n### source: \"internal/index/compact.go\"\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nnote: metadata overview (summary omitted: budget)\n\n### source: \"docs/index-tier.md\"\nlanguage: markdown\nindexed: 2025-07-27T00:00:00Z\nnote: metadata overview (summary omitted: budget)\n",
       "tool_call_id": "c1",
       "name": "retrieve"
     },
@@ -110,7 +110,7 @@
     },
     {
       "role": "tool",
-      "content": "rec-archive-scope · working · created:2025-07-27 · updated:2025-07-27 · scope:session · ns: · src: · archive tier skips the compaction rework; the assessment records the reasoning\nrec-canary-trace · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:\nrec-index-wal · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src: · index WAL segments roll at 128 MiB, raised during the index compaction rework\nrec-restore-scratch · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:",
+      "content": "trust=agent-written; unreviewed; origin=memory.create; session=caller-claim · rec-archive-scope · working · created:2025-07-27 · updated:2025-07-27 · scope:session · ns: · src-claim: · archive tier skips the compaction rework; the assessment records the reasoning\ntrust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-canary-trace · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src-claim:\ntrust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-index-wal · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src-claim: · index WAL segments roll at 128 MiB, raised during the index compaction rework\ntrust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-restore-scratch · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src-claim:",
       "tool_call_id": "c2",
       "name": "agent_memory_search"
     },
@@ -135,8 +135,8 @@
       "rec-index-wal",
       "rec-restore-scratch"
     ],
-    "estimated_prompt_tokens": 1034,
-    "state_digest": "51d488d6798fd272e8d15b80d5be919e7c5c6443985636fbd5651e8dfa1fe7e9",
+    "estimated_prompt_tokens": 1097,
+    "state_digest": "7149832bbe914f86b3c4cc2d76c77db118cac810cef61bd054439eceaa02a792",
     "subjects": [
       "(c1|rag|internal/index/wal.go)",
       "(c1|rag|internal/index/compact.go)",
@@ -149,9 +149,9 @@
     "stratum": "stale_vs_fresh",
     "answer_home": "memory",
     "scenario_family": "wal-segment-staleness",
-    "budget": 1089,
-    "raw_state_tokens": 1815,
+    "budget": 1136,
+    "raw_state_tokens": 1894,
     "pressure_level": "critical",
-    "shed_bytes": 2391
+    "shed_bytes": 2449
   }
 }

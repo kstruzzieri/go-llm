@@ -46,7 +46,7 @@
       "rec-triage-rotation"
     ],
     "estimated_prompt_tokens": 840,
-    "state_digest": "98dfd2971846670a7a585c9baf7d28baf6ea07d45df15d301bc3604ae56e22a8",
+    "state_digest": "283df435fe77f0d01a37c2c0b6aed6b736ef847577fe0300051f4e85bd118022",
     "subjects": [
       "(c1|memory|rec-account-log)",
       "(c1|memory|rec-refusal-style)",
@@ -59,10 +59,10 @@
     "stratum": "memory_only",
     "answer_home": "memory",
     "scenario_family": "retention-floor-mem",
-    "budget": 928,
-    "raw_state_tokens": 1546,
+    "budget": 921,
+    "raw_state_tokens": 1535,
     "pressure_level": "critical",
     "shed_messages": 10,
-    "shed_bytes": 2393
+    "shed_bytes": 2347
   }
 }

@@ -19,7 +19,7 @@
     },
     {
       "role": "tool",
-      "content": "rec-cutover-checklist · working · 2025-07-27 · endpoint cutovers follow the staged checklist in the deploy repo; both endpoints run in parallel until the flip is signed off\nrec-loader-contact · semantic · 2025-07-27 · warehouse loader questions go to the data platform channel; they watch it during business hours\nrec-warehouse-window · semantic · 2025-07-27 · the warehouse maintenance window closes at 01:45 UTC; loads that start earlier contend with their vacuum jobs",
+      "content": "trust=agent-written; unreviewed; origin=memory.create; session=caller-claim · rec-cutover-checklist · working · 2025-07-27 · endpoint cutovers follow the staged checklist in the deploy repo; both endpoints run in parallel until the flip is signed off\ntrust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-loader-contact · semantic · 2025-07-27 · warehouse loader questions go to the data platform channel; they watch it during business hours\ntrust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-warehouse-window · semantic · 2025-07-27 · the warehouse maintenance window closes at 01:45 UTC; loads that start earlier contend with their vacuum jobs",
       "tool_call_id": "c2",
       "name": "agent_memory_search"
     },
@@ -43,8 +43,8 @@
       "rec-loader-contact",
       "rec-warehouse-window"
     ],
-    "estimated_prompt_tokens": 179,
-    "state_digest": "f90ba019d304232791bef5f004689551ef2e51be53fbeb001855064cc22bb100",
+    "estimated_prompt_tokens": 238,
+    "state_digest": "6daef6ba72194a7a17216490fd653911e94ab1cc46b6ca824399dfe49552ae12",
     "subjects": [
       "(c1|rag|internal/export/exporter.go)",
       "(c1|rag|internal/export/backlog.go)",
@@ -56,8 +56,8 @@
     "stratum": "conversation_only",
     "answer_home": "conversation",
     "scenario_family": "export-cutover-conv",
-    "budget": 1180,
-    "raw_state_tokens": 1967,
+    "budget": 1216,
+    "raw_state_tokens": 2026,
     "pressure_level": "ok",
     "shed_messages": 14,
     "shed_bytes": 6591

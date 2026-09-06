@@ -19,7 +19,7 @@
     },
     {
       "role": "tool",
-      "content": "rec-array-refresh · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:\nrec-capacity-note · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:\nrec-deferral-split · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:\nrec-iocap-cold · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src: · cold-tier sweep io cap raised to 120 MB/s after the array refresh\nrec-lab-window · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:\nrec-pager-storage · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:\nrec-retro-appendix · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:\nrec-review-scope · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:",
+      "content": "trust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-array-refresh · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src-claim:\ntrust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-capacity-note · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src-claim:\ntrust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-deferral-split · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src-claim:\ntrust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-iocap-cold · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src-claim: · cold-tier sweep io cap raised to 120 MB/s after the array refresh\ntrust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-lab-window · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src-claim:\ntrust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-pager-storage · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src-claim:",
       "tool_call_id": "c1",
       "name": "agent_memory_search"
     },
@@ -63,8 +63,8 @@
       "rec-retro-appendix",
       "rec-review-scope"
     ],
-    "estimated_prompt_tokens": 399,
-    "state_digest": "564676ddfc880b4b0b4fce80b2c0c9a01d0d78facd2cd7853e4d453e90422f5f",
+    "estimated_prompt_tokens": 473,
+    "state_digest": "76ffb7a3fb48e2c93fb7ec8f2edf6a15228bd8db2d180139e57419582a5116be",
     "subjects": [
       "(c1|memory|rec-array-refresh)",
       "(c1|memory|rec-capacity-note)",
@@ -78,11 +78,11 @@
     "stratum": "chain_retention",
     "answer_home": "memory",
     "scenario_family": "retention-sweep-chain",
-    "budget": 550,
-    "raw_state_tokens": 917,
+    "budget": 644,
+    "raw_state_tokens": 1073,
     "pressure_level": "critical",
     "shed_messages": 2,
-    "shed_bytes": 1842,
-    "omitted_subjects": 1
+    "shed_bytes": 2172,
+    "omitted_subjects": 3
   }
 }

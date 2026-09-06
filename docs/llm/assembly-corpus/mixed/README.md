@@ -11,12 +11,22 @@ traces, both models' capture artifacts and run manifests (with committed
 digests), the absolute labels, the blind block map, the duplicate-block
 audit, the sealed forced-choice sidemap (digest committed before labeling)
 with `pair-preferences.jsonl`, and `report.json` are all committed — the
-"Committed artifacts" and "Commit policy" lists below now describe the
-current tree. No adjudication artifact exists because zero blocks were
+"Committed artifacts" and "Commit policy" lists below describe the
+historical run, subject to the fixture revision below. No adjudication artifact exists because zero blocks were
 flagged (see the verdict section). In CI, the regeneration gate
 (`TestMixedCorpusRegeneration`) rebuilds the corpus from the fixture and
 byte-compares every trace, and the balance gate (`TestMixedCorpusBalance`)
 re-checks the registered corpus shape.
+
+**Regression fixture revision (#446):** `mixed-cases.json` and `traces/`
+now include memory provenance labels and shorter answer-irrelevant prose in
+five cases so the existing evidence and pressure gates remain meaningful.
+The pre-#446 fixture and traces remain in Git at `b97613b`. Historical
+capture artifacts, manifests, labels, reports, and registered rules are
+unchanged; their scores apply only to their original captured prompts.
+The current traces are unlabeled regression inputs, and no model performance
+claim is made for this revision. Measuring it requires a new capture and
+labeling run.
 
 Every case is one frozen `agent.State` assembled twice — a `legacy` arm
 (`ContextManager.Assemble`, default compactor) and a `mixed` arm
@@ -26,7 +36,8 @@ multi-turn chat (system / user / assistant / tool roles, tool-call IDs
 preserved), and the candidate model produces exactly one generation. A human
 label on each arm's answer yields a paired quality delta per case.
 
-Committed artifacts of the registered run (see "Commit policy" below):
+Committed fixtures and historical run artifacts (see the revision note above
+and "Commit policy" below):
 
 - `mixed-cases.json` — the case fixture (source of truth, hand-authored)
 - `traces/` — built traces plus their manifest, two per case
@@ -278,8 +289,8 @@ outcome, not a failure of the corpus.
 
 ## Evidence scope
 
-The verdict sentence is explicitly scoped to **this balanced synthetic
-stress corpus at the registered pressure fraction f=0.6**, under greedy
+The verdict sentence is explicitly scoped to **the original captured revision
+of this balanced synthetic stress corpus at the registered pressure fraction f=0.6**, under greedy
 decoding, for the named candidate model. The cases are an authored stress
 set, not a sample from any population of real transcripts; the corpus
 author also authored both assembly paths, and pre-registration is the
@@ -471,9 +482,13 @@ llm-bench -assembly-build docs/llm/assembly-corpus/mixed/mixed-cases.json \
   -assembly-out-mixed docs/llm/assembly-corpus/mixed/traces
 ```
 
-Capture (basis of the registered run; only qwen3-coder-next is labeled
+Historical capture procedure (basis of the registered run; only qwen3-coder-next is labeled
 first — the gemma4:31b artifacts are captured and committed, and their
 LABELING waits for a follow-up session):
+
+Reproducing that run requires its original inputs and manifests. Capturing
+the current regression fixtures starts a new run; the historical labels and
+scores do not apply to those prompts.
 
 ```
 llm-bench -calibrate-capture -traces 'docs/llm/assembly-corpus/mixed/traces/*.json' ...

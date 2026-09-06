@@ -54,7 +54,7 @@
     },
     {
       "role": "tool",
-      "content": "rec-parser-fuzz · semantic · 2025-07-27 · parser fuzz corpus refreshes from quarantine samples weekly; crashes file automatically\nrec-quarantine-board · working · 2025-07-27 · quarantine depth and age panels sit on the admission board; the per-tenant split is the left column\nrec-redrive-policy · semantic · 2025-07-27 · quarantine operations note: held batches go back through the parser 6 hours after intake, oldest first, one tenant at a time so a single bad integration cannot monopolize the re-drive lane. batches that fail the second parse are parked for manual review with the tenant tag and the rejection code attached, and the parked set is walked in the weekly admission review. the re-drive clock starts at intake rather than at lane admission, so a batch that sat in the ingest queue does not collect extra hold time, and the admission review tracks the intake-to-redrive spread to catch queue delays hiding inside the hold.",
+      "content": "trust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-parser-fuzz · semantic · 2025-07-27 · parser fuzz corpus refreshes from quarantine samples weekly; crashes file automatically\ntrust=agent-written; unreviewed; origin=memory.create; session=caller-claim · rec-quarantine-board · working · 2025-07-27 · quarantine depth and age panels sit on the admission board; the per-tenant split is the left column\ntrust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-redrive-policy · semantic · 2025-07-27 · quarantine operations note: held batches go back through the parser 6 hours after intake, oldest first, one tenant at a time so a single bad integration cannot monopolize the re-drive lane. batches that fail the second parse are parked for manual review with the tenant tag and the rejection code attached, and the parked set is walked in the weekly admission review. the re-drive clock starts at intake rather than at lane admission, so a batch that sat in the ingest queue does not collect extra hold time, and the admission review tracks the intake-to-redrive spread to catch queue delays hiding inside the hold.",
       "tool_call_id": "c2",
       "name": "agent_memory_search"
     },
@@ -78,8 +78,8 @@
       "rec-quarantine-board",
       "rec-redrive-policy"
     ],
-    "estimated_prompt_tokens": 1502,
-    "state_digest": "d42de86c6fe7c19b890c0a3f9453ebc409de102971ce587a5a00b2841e791fec",
+    "estimated_prompt_tokens": 1560,
+    "state_digest": "19c0f6308c8c1423b8919bec9dd1252adc298d3e8aee6bb4df1aa74621e7862a",
     "subjects": [
       "(c1|rag|internal/ingest/quarantine.go)",
       "(c1|rag|internal/ingest/parser.go)",
@@ -91,8 +91,8 @@
     "stratum": "cross_domain_join",
     "answer_home": "join",
     "scenario_family": "quarantine-policy-join",
-    "budget": 1614,
-    "raw_state_tokens": 2690,
+    "budget": 1649,
+    "raw_state_tokens": 2748,
     "pressure_level": "critical",
     "shed_messages": 10,
     "shed_bytes": 4129

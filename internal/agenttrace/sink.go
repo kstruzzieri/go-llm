@@ -226,6 +226,22 @@ func (s *TelemetrySink) Finish(res agent.Result, status string) error {
 	if status == "completed" {
 		stopReason = res.StopReason.String()
 	}
+	var secretFindings int
+	if res.Risk != nil {
+		for _, finding := range res.Risk.Findings {
+			if finding.Interceptor != "secrets" {
+				continue
+			}
+			// Keep this content-light: count only the fixed rules emitted by
+			// Secrets, without serializing any finding metadata or detail.
+			switch finding.Rule {
+			case "sensitive_openai_token", "sensitive_github_token", "sensitive_gitlab_token",
+				"sensitive_slack_token", "sensitive_npm_token", "sensitive_bearer_token",
+				"sensitive_secret_assignment", "sensitive_private_key", "sensitive_payment_card":
+				secretFindings++
+			}
+		}
+	}
 	s.record(runSpan{
 		SchemaVersion:    SchemaVersion,
 		RunID:            s.runID,
@@ -238,6 +254,7 @@ func (s *TelemetrySink) Finish(res agent.Result, status string) error {
 		StopReason:       stopReason,
 		MaxUsedPct:       s.maxUsedPct,
 		MaxPressureLevel: s.maxLevel.String(),
+		SecretFindings:   secretFindings,
 	})
 	return s.lastErr
 }

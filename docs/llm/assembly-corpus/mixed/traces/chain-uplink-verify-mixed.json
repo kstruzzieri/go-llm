@@ -27,7 +27,7 @@
     },
     {
       "role": "tool",
-      "content": "rec-audit-window · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:\nrec-dashboard-action · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:\nrec-integrity-scope · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:\nrec-mechanics-column · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:\nrec-retry-shipped · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:\nrec-runbook-owner · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:\nrec-sheet-cadence · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:\nrec-verify-sampling · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src: · archive upload verify sampling set to 1 in 20 parts after the integrity review",
+      "content": "trust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-audit-window · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src-claim:\ntrust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-dashboard-action · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src-claim:\ntrust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-integrity-scope · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src-claim:\ntrust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-mechanics-column · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src-claim:\ntrust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-retry-shipped · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src-claim:\ntrust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-runbook-owner · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src-claim:\ntrust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-sheet-cadence · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src-claim:\ntrust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-verify-sampling · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src-claim: · archive upload verify sampling set to 1 in 20 parts after the integrity review",
       "tool_call_id": "c1",
       "name": "agent_memory_search"
     },
@@ -70,7 +70,7 @@
     },
     {
       "role": "tool",
-      "content": "### source: \"internal/archive/verify.go\"\npurpose: Read-back sampling gate driven by the config fraction.\noverview: verify.go gates read-back checks on the config-supplied sampling fraction, noting the pre-GA pilot sampling that never shipped, so audits can tighten fleets without rebuilds.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n--- source: \"internal/archive/verify.go\" (lines 1-10, similarity: 1.00) ---\n1| package archive\n2| \n3| // verifySample decides whether one acknowledged part gets a\n4| // read-back check. The pre-GA build verified 1 in 5 parts; that\n5| // sampling never shipped past the pilot, and the shipped fraction\n6| // comes from deployment config so fleets can tighten it during\n7| // audits without a rebuild.\n8| func (v *Verifier) verifySample(idx int) bool {\n9| \treturn idx%v.cfg.SampleEvery == 0\n10| }\n\n### source: \"internal/archive/readback.go\"\npurpose: Cold-path read-back compare, quarantine-and-page on mismatch.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n\n### source: \"docs/archive-verify.md\"\npurpose: Verification guide: sampled read-backs, audit tightening, cost row.\noverview: archive-verify.md explains sampled cold-path read-backs, audit-driven temporary tightening of the config fraction, quarantine-and-page mismatches, and the verify cost row the transfer sheet carries.\nlanguage: markdown\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n--- source: \"docs/archive-verify.md\" (lines 1-12, similarity: 1.00) ---\n1| # upload verification\n2| \n3| A sampled fraction of acknowledged parts gets a cold-path read-back\n4| and digest compare. Sampling is deployment config: audits tighten\n5| it temporarily, and the setting reverts with the audit's close.\n6| Mismatches quarantine the object and page storage immediately.\n7| \n8| Verification cost scales with the sampled fraction times the part\n9| rate, so the transfer sheet carries a verify row next to the push\n10| row whenever the fraction changes, and the sheet's footnote points\n11| at the quarantine behavior so reviewers know what a failure does\n12| before they ask.\n",
+      "content": "### source: \"internal/archive/verify.go\"\npurpose: Read-back sampling gate driven by the config fraction.\noverview: verify.go gates read-back checks on the config-supplied sampling fraction, noting the pre-GA pilot sampling that never shipped, so audits can tighten fleets without rebuilds.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n--- source: \"internal/archive/verify.go\" (lines 1-10, similarity: 1.00) ---\n1| package archive\n2| \n3| // verifySample decides whether one acknowledged part gets a\n4| // read-back check. The pre-GA build verified 1 in 5 parts; that\n5| // sampling never shipped past the pilot, and the shipped fraction\n6| // comes from deployment config so fleets can tighten it during\n7| // audits without a rebuild.\n8| func (v *Verifier) verifySample(idx int) bool {\n9| \treturn idx%v.cfg.SampleEvery == 0\n10| }\n\n### source: \"internal/archive/readback.go\"\npurpose: Cold-path read-back compare, quarantine-and-page on mismatch.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n\n### source: \"docs/archive-verify.md\"\npurpose: Verification guide: sampled read-backs, audit tightening, cost row.\nlanguage: markdown\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n--- source: \"docs/archive-verify.md\" (lines 1-12, similarity: 1.00) ---\n1| # upload verification\n2| \n3| A sampled fraction of acknowledged parts gets a cold-path read-back\n4| and digest compare. Sampling is deployment config: audits tighten\n5| it temporarily, and the setting reverts with the audit's close.\n6| Mismatches quarantine the object and page storage immediately.\n7| \n8| Verification cost scales with the sampled fraction times the part\n9| rate, so the transfer sheet carries a verify row next to the push\n10| row whenever the fraction changes, and the sheet's footnote points\n11| at the quarantine behavior so reviewers know what a failure does\n12| before they ask.\n",
       "tool_call_id": "c2",
       "name": "retrieve"
     },
@@ -99,8 +99,8 @@
       "rec-sheet-cadence",
       "rec-verify-sampling"
     ],
-    "estimated_prompt_tokens": 1115,
-    "state_digest": "191ff0d5abcfde298fe955fdd21fb7fe035e3e0c0858652479f19e9867fa5166",
+    "estimated_prompt_tokens": 1231,
+    "state_digest": "0333f00a1681780b12efbfd3b5366a05d380bf637329019abb74d19cd58f3ddc",
     "subjects": [
       "(c1|memory|rec-audit-window)",
       "(c1|memory|rec-dashboard-action)",
@@ -117,9 +117,9 @@
     "stratum": "chain_retention",
     "answer_home": "memory",
     "scenario_family": "uplink-part-chain",
-    "budget": 1191,
-    "raw_state_tokens": 1985,
+    "budget": 1285,
+    "raw_state_tokens": 2141,
     "pressure_level": "critical",
-    "shed_bytes": 3064
+    "shed_bytes": 3225
   }
 }

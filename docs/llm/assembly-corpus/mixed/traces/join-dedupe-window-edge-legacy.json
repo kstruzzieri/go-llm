@@ -54,7 +54,7 @@
     },
     {
       "role": "tool",
-      "content": "rec-canary-panel · working · 2025-07-27 · canary dedupe counters have their own panel for the rollout period; the fleet rollup stays on the main board\nrec-capture-cap · semantic · 2025-07-27 · canary host capture volume is capped; captures rotate oldest-first at the cap\nrec-rollout-review · semantic · 2025-07-27 · edge rollout reviews happen twice weekly during burn-in; decisions land in the rollout thread",
+      "content": "trust=agent-written; unreviewed; origin=memory.create; session=caller-claim · rec-canary-panel · working · 2025-07-27 · canary dedupe counters have their own panel for the rollout period; the fleet rollup stays on the main board\ntrust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-capture-cap · semantic · 2025-07-27 · canary host capture volume is capped; captures rotate oldest-first at the cap\ntrust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-rollout-review · semantic · 2025-07-27 · edge rollout reviews happen twice weekly during burn-in; decisions land in the rollout thread",
       "tool_call_id": "c2",
       "name": "agent_memory_search"
     },
@@ -78,8 +78,8 @@
       "rec-capture-cap",
       "rec-rollout-review"
     ],
-    "estimated_prompt_tokens": 1582,
-    "state_digest": "7fc94ee4aa946cbaf38463f6cce971bcf1c6db19b658a2eecedd35133d076398",
+    "estimated_prompt_tokens": 1641,
+    "state_digest": "5375d9bae401224f36ec23a0dfa9c4b9295adf06530fce3fe406c95f955cda73",
     "subjects": [
       "(c1|rag|internal/ingest/batchkey.go)",
       "(c1|rag|internal/ingest/dedupe.go)",
@@ -91,8 +91,8 @@
     "stratum": "cross_domain_join",
     "answer_home": "join",
     "scenario_family": "dedupe-window-join",
-    "budget": 1707,
-    "raw_state_tokens": 2845,
+    "budget": 1742,
+    "raw_state_tokens": 2904,
     "pressure_level": "critical",
     "shed_messages": 10,
     "shed_bytes": 4427

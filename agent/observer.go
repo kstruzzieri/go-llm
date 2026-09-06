@@ -47,9 +47,9 @@ type TokenEvent struct {
 // invoked tools it is the capped canonical fallback immediately after execution,
 // before Context is cloned onto State or mixed assembly. Under mixed assembly
 // Result is not necessarily byte-identical to the model's later input. Call,
-// Effect, Result.Attrib and Result.RouteOutcome are private copies; under mixed
-// assembly Result.Context is too. With mixed assembly off Context is ignored by
-// the run and may still alias the tool-owned value.
+// Effect, Result.Provenance, Result.Attrib and Result.RouteOutcome are private
+// copies; under mixed assembly Result.Context is too. With mixed assembly off
+// Context is ignored by the run and may still alias the tool-owned value.
 type ToolResultEvent struct {
 	Step    int
 	Call    provider.ToolCall

@@ -24,6 +24,73 @@ func ev(seq uint64, typ, payload string) golemruntime.Event {
 	}
 }
 
+func TestSecretMachineRuntimeUsesFixedFailureBeforeEmission(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		format outputFormat
+	}{{"json", outputJSON}, {"stream-json", outputStreamJSON}} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			value := secretTestValue()
+			caller := secretPartialCaller{content: value, err: errors.New("provider diagnostic: " + value)}
+			sess := newTestSession(t, caller, root)
+			sess.orch = newOrchestratorFactory(caller, flags{interceptors: true}, nil)()
+			sess.runtime = newTestRuntime(t, root, sess.baseSystem, sess.orch, nil)
+			var stdout, stderr strings.Builder
+			sess.machine = newMachineWriter(&stdout, tc.format)
+			if err := runOneShot(context.Background(), &stdout, &stderr, nil, sess, "review output"); !errors.Is(err, errOneShotFailed) {
+				t.Fatal("runOneShot did not report the blocked run as failed")
+			}
+			if strings.Contains(stdout.String(), value) || strings.Contains(stderr.String(), value) {
+				t.Fatal("machine runtime leaked sensitive diagnostic content")
+			}
+			assertSecretMachineFailure(t, stdout.String(), tc.format)
+		})
+	}
+}
+
+func assertSecretMachineFailure(t *testing.T, stdout string, format outputFormat) {
+	t.Helper()
+	events, results := splitMachineLines(t, stdout)
+	if len(results) != 1 {
+		t.Fatalf("machine result count = %d, want 1", len(results))
+	}
+	result := results[0]
+	var failure headlessResultError
+	if err := json.Unmarshal(result["error"], &failure); err != nil {
+		t.Fatal("machine failure is not valid JSON")
+	}
+	if failure.Message != secretsBlockedMessage || string(result["status"]) != `"error"` || string(result["answer"]) != "null" {
+		t.Error("machine result did not carry the fixed failure without an answer")
+	}
+	if len(result) != 7 {
+		t.Errorf("machine result field count = %d, want 7 without a transcript", len(result))
+	}
+	if format == outputJSON {
+		if len(events) != 0 {
+			t.Error("JSON output unexpectedly contains events")
+		}
+		return
+	}
+	if len(events) != 2 || events[1].Type != "run.failed" {
+		t.Fatal("stream output did not contain only run.started and run.failed")
+	}
+	var terminal headlessResultError
+	if err := json.Unmarshal(events[1].Payload, &terminal); err != nil || terminal != failure {
+		t.Error("run.failed and the final result disagree on failure presentation")
+	}
+}
+
+func TestSecretMachineNoTerminalUsesFixedFailure(t *testing.T) {
+	value := secretTestValue()
+	blocked := &agent.BlockedError{Findings: []agent.Finding{{Interceptor: "secrets", Verdict: agent.VerdictBlock}}}
+	w := newMachineWriter(&bytes.Buffer{}, outputJSON)
+	rec := w.buildResult(agent.Result{}, errors.Join(errors.New(value), blocked))
+	if rec.Error == nil || rec.Error.Code != resultCodeInvalidRequest || rec.Error.Message != secretsBlockedMessage {
+		t.Fatal("eventless failure did not use the fixed diagnostic and existing code")
+	}
+}
+
 func TestStreamJSONWritesEveryEventImmediatelyOnePerLine(t *testing.T) {
 	var out bytes.Buffer
 	w := newMachineWriter(&out, outputStreamJSON)

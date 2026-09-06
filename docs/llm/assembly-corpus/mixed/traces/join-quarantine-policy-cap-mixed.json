@@ -68,7 +68,7 @@
     },
     {
       "role": "tool",
-      "content": "### source: \"internal/ingest/quarantine.go\"\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nnote: metadata overview (summary omitted: budget)\n--- source: \"internal/ingest/quarantine.go\" (lines 1-28, similarity: 1.00) ---\n1| package ingest\n2| \n3| // quarantine routes batches that fail strict parsing into the\n4| // quarantine lane instead of dropping them: malformed telemetry is\n5| // usually a producer bug, and the payload is the evidence. The lane\n6| // is accounted per tenant, and the per-tenant cap comes from\n7| // deployment config so capacity reviews can move it without a\n8| // rebuild.\n9| func (g *Gateway) quarantine(tenant string, batch []byte, code rejectCode) error {\n10| \tif !g.lanes.admit(tenant) {\n11| \t\tg.metrics.quarantineOverflow.Inc()\n12| \t\treturn g.overflow(tenant, batch, code)\n13| \t}\n14| \treturn g.lanes.hold(tenant, batch, code)\n15| }\n16| \n17| // overflow applies the configured overflow policy when a tenant's\n18| // lane is at cap. The shipped policy parks the oldest held batch to\n19| // make room, on the theory that the newest failure carries the\n20| // freshest evidence about the producer bug.\n21| func (g *Gateway) overflow(tenant string, batch []byte, code rejectCode) error {\n22| \toldest, err := g.lanes.evictOldest(tenant)\n23| \tif err != nil {\n24| \t\treturn err\n25| \t}\n26| \tg.park(oldest)\n27| \treturn g.lanes.hold(tenant, batch, code)\n28| }\n\n### source: \"internal/ingest/parser.go\"\npurpose: Strict batch parsing with stable rejection codes from the taxonomy enum.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n\n### source: \"docs/quarantine.md\"\npurpose: Quarantine guide: hold-not-drop, config-owned caps, ops-owned re-drive policy.\nlanguage: markdown\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n",
+      "content": "### source: \"internal/ingest/quarantine.go\"\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nnote: metadata overview (summary omitted: budget)\n--- source: \"internal/ingest/quarantine.go\" (lines 1-28, similarity: 1.00) ---\n1| package ingest\n2| \n3| // quarantine routes batches that fail strict parsing into the\n4| // quarantine lane instead of dropping them: malformed telemetry is\n5| // usually a producer bug, and the payload is the evidence. The lane\n6| // is accounted per tenant, and the per-tenant cap comes from\n7| // deployment config so capacity reviews can move it without a\n8| // rebuild.\n9| func (g *Gateway) quarantine(tenant string, batch []byte, code rejectCode) error {\n10| \tif !g.lanes.admit(tenant) {\n11| \t\tg.metrics.quarantineOverflow.Inc()\n12| \t\treturn g.overflow(tenant, batch, code)\n13| \t}\n14| \treturn g.lanes.hold(tenant, batch, code)\n15| }\n16| \n17| // overflow applies the configured overflow policy when a tenant's\n18| // lane is at cap. The shipped policy parks the oldest held batch to\n19| // make room, on the theory that the newest failure carries the\n20| // freshest evidence about the producer bug.\n21| func (g *Gateway) overflow(tenant string, batch []byte, code rejectCode) error {\n22| \toldest, err := g.lanes.evictOldest(tenant)\n23| \tif err != nil {\n24| \t\treturn err\n25| \t}\n26| \tg.park(oldest)\n27| \treturn g.lanes.hold(tenant, batch, code)\n28| }\n\n### source: \"internal/ingest/parser.go\"\npurpose: Strict batch parsing with stable rejection codes from the taxonomy enum.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n\n### source: \"docs/quarantine.md\"\nlanguage: markdown\nindexed: 2025-07-27T00:00:00Z\nnote: metadata overview (summary omitted: budget)\n",
       "tool_call_id": "c1",
       "name": "retrieve"
     },
@@ -86,7 +86,7 @@
     },
     {
       "role": "tool",
-      "content": "rec-parser-fuzz · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:\nrec-quarantine-board · working · created:2025-07-27 · updated:2025-07-27 · scope:session · ns: · src:\nrec-redrive-policy · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:",
+      "content": "trust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-parser-fuzz · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src-claim:\ntrust=agent-written; unreviewed; origin=memory.create; session=caller-claim · rec-quarantine-board · working · created:2025-07-27 · updated:2025-07-27 · scope:session · ns: · src-claim:\ntrust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-redrive-policy · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src-claim:",
       "tool_call_id": "c2",
       "name": "agent_memory_search"
     },
@@ -110,8 +110,8 @@
       "rec-quarantine-board",
       "rec-redrive-policy"
     ],
-    "estimated_prompt_tokens": 1563,
-    "state_digest": "d42de86c6fe7c19b890c0a3f9453ebc409de102971ce587a5a00b2841e791fec",
+    "estimated_prompt_tokens": 1606,
+    "state_digest": "19c0f6308c8c1423b8919bec9dd1252adc298d3e8aee6bb4df1aa74621e7862a",
     "subjects": [
       "(c1|rag|internal/ingest/quarantine.go)",
       "(c1|rag|internal/ingest/parser.go)",
@@ -123,11 +123,11 @@
     "stratum": "cross_domain_join",
     "answer_home": "join",
     "scenario_family": "quarantine-policy-join",
-    "budget": 1614,
-    "raw_state_tokens": 2690,
+    "budget": 1649,
+    "raw_state_tokens": 2748,
     "pressure_level": "critical",
     "shed_messages": 2,
-    "shed_bytes": 3892,
+    "shed_bytes": 3961,
     "omitted_subjects": 1
   }
 }

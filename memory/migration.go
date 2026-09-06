@@ -17,6 +17,24 @@ type migration struct {
 var migrations = []migration{
 	{version: 1, description: "baseline memories table + FTS5", fn: migrateV1},
 	{version: 2, description: "agent memory records + FTS5", fn: migrateV2},
+	{version: 3, description: "signed agent memory records", fn: migrateV3},
+}
+
+func migrateV3(tx *sql.Tx) error {
+	for _, statement := range []string{
+		`ALTER TABLE memory_records ADD COLUMN origin_tool TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE memory_records ADD COLUMN origin_session_id TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE memory_records ADD COLUMN trust_class TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE memory_records ADD COLUMN signature_alg TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE memory_records ADD COLUMN signature_key_id TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE memory_records ADD COLUMN signature BLOB NOT NULL DEFAULT X''`,
+		`CREATE TABLE memory_record_signing (id INTEGER PRIMARY KEY CHECK (id = 1), initialized_at INTEGER NOT NULL)`,
+	} {
+		if _, err := tx.Exec(statement); err != nil {
+			return fmt.Errorf("memory: migrate v3: %w", err)
+		}
+	}
+	return nil
 }
 
 func migrateV1(tx *sql.Tx) error {

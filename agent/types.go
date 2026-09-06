@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"encoding/json"
 	"errors"
 	"time"
 
@@ -212,6 +213,9 @@ type ToolCallRecord struct {
 	Denied  bool
 	Invoked bool          // false for synthetic pre-invoke outcomes (no Invoke ran)
 	Latency time.Duration // wall time of Invoke only; zero when !Invoked
+	// Provenance is optional opaque structured evidence retained from an
+	// accepted tool result. It is omitted for rejected observations.
+	Provenance json.RawMessage `json:"Provenance,omitempty"`
 	// AutoApproved is true when the approval decision came from a session
 	// grant (KeyedApprover ViaGrant) rather than an explicit per-call answer.
 	// Decision provenance only: it can be true with Invoked=false when the

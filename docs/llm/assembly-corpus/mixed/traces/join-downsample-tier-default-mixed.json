@@ -60,7 +60,7 @@
     },
     {
       "role": "tool",
-      "content": "### source: \"internal/store/query.go\"\npurpose: Query tier routing: caller pins honored, ladder resolution otherwise.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n--- source: \"internal/store/query.go\" (lines 1-13, similarity: 1.00) ---\n1| package store\n2| \n3| // route picks the tier a query reads. Callers may pin a tier through\n4| // their query config; unpinned queries resolve through the ladder to\n5| // the coarsest tier meeting the window's resolution floor. Pins exist\n6| // for callers whose cost must stay flat across window sizes, and the\n7| // pin is honored even when the ladder would choose coarser.\n8| func (s *Store) route(q query) tier {\n9| \tif q.pinnedTier != \"\" {\n10| \t\treturn s.ladder.byName(q.pinnedTier)\n11| \t}\n12| \treturn s.ladder.resolve(q.window)\n13| }\n\n### source: \"internal/store/compact.go\"\npurpose: Rollup compaction: small-file merges on an operations-owned schedule.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n\n### source: \"docs/tiers.md\"\npurpose: Tier guide: ladder routing, flat-cost pins, ops-scheduled compaction.\noverview: tiers.md explains ladder-based query routing with caller pins for flat-cost paths, and compaction as an operations-scheduled maintenance task balanced against the export window.\nlanguage: markdown\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n",
+      "content": "### source: \"internal/store/query.go\"\npurpose: Query tier routing: caller pins honored, ladder resolution otherwise.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n--- source: \"internal/store/query.go\" (lines 1-13, similarity: 1.00) ---\n1| package store\n2| \n3| // route picks the tier a query reads. Callers may pin a tier through\n4| // their query config; unpinned queries resolve through the ladder to\n5| // the coarsest tier meeting the window's resolution floor. Pins exist\n6| // for callers whose cost must stay flat across window sizes, and the\n7| // pin is honored even when the ladder would choose coarser.\n8| func (s *Store) route(q query) tier {\n9| \tif q.pinnedTier != \"\" {\n10| \t\treturn s.ladder.byName(q.pinnedTier)\n11| \t}\n12| \treturn s.ladder.resolve(q.window)\n13| }\n\n### source: \"internal/store/compact.go\"\npurpose: Rollup compaction: small-file merges on an operations-owned schedule.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n\n### source: \"docs/tiers.md\"\npurpose: Tier guide: ladder routing, flat-cost pins, ops-scheduled compaction.\nlanguage: markdown\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n",
       "tool_call_id": "c1",
       "name": "retrieve"
     },
@@ -78,7 +78,7 @@
     },
     {
       "role": "tool",
-      "content": "rec-board-panels · working · created:2025-07-27 · updated:2025-07-27 · scope:session · ns: · src: · storage board owns the compaction panels; alerts fire on overrun only\nrec-compact-slot · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src: · rollup compaction runs Sundays at 03:40, after the export window clears\nrec-sheet-slot · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src: · the sizing sheet's Saturday compaction slot was scrapped before rollout",
+      "content": "trust=agent-written; unreviewed; origin=memory.create; session=caller-claim · rec-board-panels · working · created:2025-07-27 · updated:2025-07-27 · scope:session · ns: · src-claim: · storage board owns the compaction panels; alerts fire on overrun only\ntrust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-compact-slot · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src-claim: · rollup compaction runs Sundays at 03:40, after the export window clears\ntrust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-sheet-slot · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src-claim: · the sizing sheet's Saturday compaction slot was scrapped before rollout",
       "tool_call_id": "c2",
       "name": "agent_memory_search"
     },
@@ -102,8 +102,8 @@
       "rec-compact-slot",
       "rec-sheet-slot"
     ],
-    "estimated_prompt_tokens": 1361,
-    "state_digest": "00190f6ed5910b52b2cc4b244d7e8e1b28d3c9d2660e7e7a7d265ded2c12ce1e",
+    "estimated_prompt_tokens": 1378,
+    "state_digest": "334bc47980926960c0d54b96896771685f86ca6aa38c98e15de006db2730b9b5",
     "subjects": [
       "(c1|rag|internal/store/query.go)",
       "(c1|rag|internal/store/compact.go)",
@@ -115,11 +115,11 @@
     "stratum": "cross_domain_join",
     "answer_home": "join",
     "scenario_family": "downsample-tier-join",
-    "budget": 1410,
-    "raw_state_tokens": 2350,
+    "budget": 1445,
+    "raw_state_tokens": 2409,
     "pressure_level": "critical",
     "shed_messages": 2,
-    "shed_bytes": 3407,
+    "shed_bytes": 3577,
     "omitted_subjects": 1
   }
 }

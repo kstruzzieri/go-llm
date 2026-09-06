@@ -68,7 +68,7 @@
     },
     {
       "role": "tool",
-      "content": "### source: \"internal/ingest/auth.go\"\npurpose: Ingest token authentication; accepted prefixes come from config.\noverview: auth.go checks presented ingest tokens against the accepted prefixes supplied by deployment config, so rotations are staged through config rather than rebuilds.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n--- source: \"internal/ingest/auth.go\" (lines 1-15, similarity: 1.00) ---\n1| package ingest\n2| \n3| import \"strings\"\n4| \n5| // authenticate checks the presented ingest token. Accepted prefixes\n6| // are supplied by deployment config so a rotation can be staged\n7| // without a rebuild; this file does not hard-code any prefix.\n8| func (g *Gateway) authenticate(token string) bool {\n9| \tfor _, p := range g.cfg.AcceptedPrefixes {\n10| \t\tif strings.HasPrefix(token, p) {\n11| \t\t\treturn g.verify(token)\n12| \t\t}\n13| \t}\n14| \treturn false\n15| }\n\n### source: \"internal/ingest/limits.go\"\npurpose: Per-tenant token-bucket rate limiting with hot-reloaded rates.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n\n### source: \"docs/operations.md\"\npurpose: Operations guide: process supervision, restart drain, staged credential rotation.\nlanguage: markdown\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n",
+      "content": "### source: \"internal/ingest/auth.go\"\npurpose: Ingest token authentication; accepted prefixes come from config.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n--- source: \"internal/ingest/auth.go\" (lines 1-15, similarity: 1.00) ---\n1| package ingest\n2| \n3| import \"strings\"\n4| \n5| // authenticate checks the presented ingest token. Accepted prefixes\n6| // are supplied by deployment config so a rotation can be staged\n7| // without a rebuild; this file does not hard-code any prefix.\n8| func (g *Gateway) authenticate(token string) bool {\n9| \tfor _, p := range g.cfg.AcceptedPrefixes {\n10| \t\tif strings.HasPrefix(token, p) {\n11| \t\t\treturn g.verify(token)\n12| \t\t}\n13| \t}\n14| \treturn false\n15| }\n\n### source: \"internal/ingest/limits.go\"\npurpose: Per-tenant token-bucket rate limiting with hot-reloaded rates.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n\n### source: \"docs/operations.md\"\npurpose: Operations guide: process supervision, restart drain, staged credential rotation.\nlanguage: markdown\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n",
       "tool_call_id": "c1",
       "name": "retrieve"
     },
@@ -86,7 +86,7 @@
     },
     {
       "role": "tool",
-      "content": "rec-dash-refresh · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src: · ingest overview dashboard auto-refreshes on the short interval; leave it be, the load is negligible\nrec-oncall-handoff · working · created:2025-07-27 · updated:2025-07-27 · scope:session · ns: · src: · oncall handoff happens Friday afternoon; the summary template lives in the shared doc\nrec-token-rotation · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src: · token rotation window opens Monday; producers migrate before the edge flips preference",
+      "content": "trust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-dash-refresh · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src-claim: · ingest overview dashboard auto-refreshes on the short interval; leave it be, the load is negligible\ntrust=agent-written; unreviewed; origin=memory.create; session=caller-claim · rec-oncall-handoff · working · created:2025-07-27 · updated:2025-07-27 · scope:session · ns: · src-claim: · oncall handoff happens Friday afternoon; the summary template lives in the shared doc\ntrust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-token-rotation · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src-claim: · token rotation window opens Monday; producers migrate before the edge flips preference",
       "tool_call_id": "c2",
       "name": "agent_memory_search"
     },
@@ -110,8 +110,8 @@
       "rec-oncall-handoff",
       "rec-token-rotation"
     ],
-    "estimated_prompt_tokens": 1073,
-    "state_digest": "24c51573441b6a12b9c990ab2dc8af51adb4d5c54f1940b0d842636593ec8b12",
+    "estimated_prompt_tokens": 1093,
+    "state_digest": "cacc447b62f65280cb54c6fcb0e9f0a93a131b4a53381da15986166d2e7b882e",
     "subjects": [
       "(c1|rag|internal/ingest/auth.go)",
       "(c1|rag|internal/ingest/limits.go)",
@@ -124,9 +124,9 @@
     "answer_home": "conversation",
     "scenario_family": "ingest-token-conv",
     "twin_group": "tw-ingest-token",
-    "budget": 1130,
-    "raw_state_tokens": 1883,
+    "budget": 1165,
+    "raw_state_tokens": 1941,
     "pressure_level": "critical",
-    "shed_bytes": 2697
+    "shed_bytes": 2850
   }
 }

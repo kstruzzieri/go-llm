@@ -19,7 +19,7 @@
     },
     {
       "role": "tool",
-      "content": "rec-cost-model · semantic · 2025-07-27 · the storage cost model lives with the capacity review deck and gets re-based every pricing change; finance reads the footnotes first\nrec-export-bucket · semantic · 2025-07-27 · archive exports write to the dw-archive-eu bucket; nothing else is approved\nrec-legacy-bucket · semantic · 2025-07-27 · dw-archive-us holds legacy objects for old pulls only; it was never re-approved for writes after the residency review\nrec-verbose-tenants · working · 2025-07-27 · two tenants run verbose payloads since the spring enablement; their growth is expected and budgeted, not drift",
+      "content": "trust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-cost-model · semantic · 2025-07-27 · the storage cost model lives with the capacity review deck and gets re-based every pricing change; finance reads the footnotes first\ntrust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-export-bucket · semantic · 2025-07-27 · archive exports write to the dw-archive-eu bucket; nothing else is approved\ntrust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-legacy-bucket · semantic · 2025-07-27 · dw-archive-us holds legacy objects for old pulls only; it was never re-approved for writes after the residency review\ntrust=agent-written; unreviewed; origin=memory.create; session=caller-claim · rec-verbose-tenants · working · 2025-07-27 · two tenants run verbose payloads since the spring enablement; their growth is expected and budgeted, not drift",
       "tool_call_id": "c2",
       "name": "agent_memory_search"
     },
@@ -44,8 +44,8 @@
       "rec-legacy-bucket",
       "rec-verbose-tenants"
     ],
-    "estimated_prompt_tokens": 223,
-    "state_digest": "d55dcf2d7b2f709916cf43a7bac547cf87082b9096feeeb5d48d9a40a1a8825b",
+    "estimated_prompt_tokens": 301,
+    "state_digest": "6ad14ac4ee65a52528dfe3372e72b299ab9065e5f348dc69fd22636859c2c373",
     "subjects": [
       "(c1|rag|internal/export/target.go)",
       "(c1|rag|internal/export/retry.go)",
@@ -58,8 +58,8 @@
     "stratum": "memory_only",
     "answer_home": "memory",
     "scenario_family": "export-bucket-mem",
-    "budget": 673,
-    "raw_state_tokens": 1121,
+    "budget": 719,
+    "raw_state_tokens": 1199,
     "pressure_level": "ok",
     "shed_messages": 6,
     "shed_bytes": 3296

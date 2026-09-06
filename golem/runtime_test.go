@@ -296,9 +296,12 @@ func (s malformedSessionStore) Load(context.Context, string) (*conversation.Conv
 
 func (malformedSessionStore) Save(context.Context, conversation.Conversation) error { return nil }
 
-type thinkingCaller struct{}
+type thinkingCaller struct {
+	requests []provider.ChatRequest
+}
 
-func (thinkingCaller) Chat(_ context.Context, _ provider.ChatRequest, onToken func(provider.ChatResponse) error) (agent.ModelResult, error) {
+func (c *thinkingCaller) Chat(_ context.Context, req provider.ChatRequest, onToken func(provider.ChatResponse) error) (agent.ModelResult, error) {
+	c.requests = append(c.requests, req)
 	if err := onToken(provider.ChatResponse{Thinking: "secret chain", Content: "answer"}); err != nil {
 		return agent.ModelResult{}, err
 	}
@@ -2507,9 +2510,12 @@ func TestRunUsesDefaultGolemSystemPrompt(t *testing.T) {
 }
 
 func TestRunDoesNotExposeRawReasoning(t *testing.T) {
+	caller := &thinkingCaller{}
+	store := &mapSessionStore{}
 	runtime, err := golem.New(context.Background(), golem.Options{
 		Root:         t.TempDir(),
-		Orchestrator: agent.New(thinkingCaller{}, agent.ContextManager{}),
+		SessionStore: store,
+		Orchestrator: agent.New(caller, agent.ContextManager{}),
 	})
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -2520,35 +2526,62 @@ func TestRunDoesNotExposeRawReasoning(t *testing.T) {
 		}
 	})
 
-	var events []golem.Event
-	result, err := runtime.Run(context.Background(), golem.Turn{
-		RunID:   "run-thinking",
-		Message: "think",
-	}, func(event golem.Event) error {
-		events = append(events, event)
-		return nil
-	})
-	if err != nil {
-		t.Fatalf("Run: %v", err)
-	}
-	raw, err := json.Marshal(events)
-	if err != nil {
-		t.Fatalf("marshal events: %v", err)
-	}
-	if strings.Contains(string(raw), "secret chain") {
-		t.Fatalf("events exposed reasoning: %s", raw)
-	}
-	for i, step := range result.Steps {
-		if step.Response.Thinking != "" {
-			t.Fatalf("result step %d exposed reasoning %q", i, step.Response.Thinking)
+	for i, goal := range []string{"first question", "second question"} {
+		if i == 1 {
+			enabled := true
+			if err := runtime.Replace("", nil, provider.ModelOptions{Think: &enabled, ThinkEffort: "high"}); err != nil {
+				t.Fatalf("Replace(high): %v", err)
+			}
 		}
+		var events []golem.Event
+		result, err := runtime.Run(context.Background(), golem.Turn{
+			ThreadID: "thread-thinking",
+			RunID:    fmt.Sprintf("run-thinking-%d", i),
+			Message:  goal,
+		}, func(event golem.Event) error {
+			events = append(events, event)
+			return nil
+		})
+		if err != nil {
+			t.Fatalf("Run(%q): %v", goal, err)
+		}
+		raw, err := json.Marshal(events)
+		if err != nil {
+			t.Fatalf("marshal events: %v", err)
+		}
+		if strings.Contains(string(raw), "secret chain") {
+			t.Errorf("Run(%q) events exposed reasoning: %s", goal, raw)
+		}
+		if len(result.Steps) != 1 || result.Steps[0].Response.Thinking != "" {
+			t.Errorf("Run(%q) steps = %+v, want one step with scrubbed reasoning", goal, result.Steps)
+		}
+	}
+	if len(caller.requests) != 2 {
+		t.Fatalf("model requests = %d, want 2", len(caller.requests))
+	}
+	if opts := caller.requests[0].Options; opts.Think != nil || opts.ThinkEffort != "" {
+		t.Errorf("first request thinking = %+v, want unset", opts)
+	}
+	if opts := caller.requests[1].Options; opts.Think == nil || !*opts.Think || opts.ThinkEffort != "high" {
+		t.Errorf("second request thinking = %+v, want enabled/high", opts)
+	}
+	stored, err := store.Load(context.Background(), "thread-thinking")
+	if err != nil {
+		t.Fatalf("load stored thread: %v", err)
+	}
+	want := []conversation.Message{
+		{Role: "user", Content: "first question"}, {Role: "assistant", Content: "answer"},
+		{Role: "user", Content: "second question"}, {Role: "assistant", Content: "answer"},
+	}
+	if !reflect.DeepEqual(stored.Messages, want) {
+		t.Errorf("stored messages = %+v, want only the two user/answer pairs %+v", stored.Messages, want)
 	}
 }
 
 func TestRunForwardsReasoningOnlyToTrustedObserver(t *testing.T) {
 	runtime, err := golem.New(context.Background(), golem.Options{
 		Root:         t.TempDir(),
-		Orchestrator: agent.New(thinkingCaller{}, agent.ContextManager{}),
+		Orchestrator: agent.New(&thinkingCaller{}, agent.ContextManager{}),
 	})
 	if err != nil {
 		t.Fatalf("New: %v", err)

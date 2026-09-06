@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -78,6 +79,7 @@ func (o *Orchestrator) runToolCallsSerial(ctx context.Context, res *Result, stat
 func (o *Orchestrator) recordResult(ctx context.Context, res *Result, state *State, obs Observer,
 	gov *restraintGovernor, step int, call provider.ToolCall, effect Effect, rec ToolCallRecord,
 	out ToolResult, inspectResult bool, b *batch, ic *interceptorRun) (stop bool, err error) {
+	provenance := bytes.Clone(out.Provenance)
 
 	if o.ctxMgr.Mixed {
 		if err := validateContextSetCardinality(call.ID, out.Context); err != nil {
@@ -122,6 +124,9 @@ func (o *Orchestrator) recordResult(ctx context.Context, res *Result, state *Sta
 		}
 	}
 
+	if !rec.Blocked {
+		rec.Provenance = provenance
+	}
 	appendToolCallRecord(res, step, rec, out.RouteOutcome)
 	if tro, ok := obs.(ToolResultObserver); ok {
 		// The observer gets its own copy of the final result. The set is cloned
@@ -130,6 +135,7 @@ func (o *Orchestrator) recordResult(ctx context.Context, res *Result, state *Sta
 		// and a deep copy would let an untrusted tool make this path
 		// arbitrarily expensive.
 		published := out
+		published.Provenance = bytes.Clone(rec.Provenance)
 		published.Attrib = cloneAttrib(out.Attrib)
 		published.RouteOutcome = cloneRouteOutcome(out.RouteOutcome)
 		if o.ctxMgr.Mixed {

@@ -83,18 +83,20 @@ func TestMixedEvalSchemaAndShape(t *testing.T) {
 	// Budget formula, one hand-computed row where the minViable floor WINS.
 	// memory_only: System is 122 bytes => est (122+3)/4 = 31; the final goal
 	// message is 489 bytes => est (489+3)/4 = 123; slack 64.
-	// minViable = 31 + 123 + 64 = 218. RawTokens = 327 (pinned below), so
-	// round(0.4*327) = 131 < 218: the floor wins the f=0.4 budget.
+	// minViable = 31 + 123 + 64 = 218. The labeled recall is 641 bytes =>
+	// est 161; the other message estimates are 16, 15, 0, and 123. Including
+	// System and five 8-token envelopes gives 31+16+15+0+161+123+40 = 386.
+	// round(0.4*386) = 154 < 218: the floor wins the f=0.4 budget.
 	mem := report.Cases[1]
-	if mem.RawTokens != 327 {
-		t.Fatalf("memory_only raw_tokens = %d, want 327", mem.RawTokens)
+	if mem.RawTokens != 386 {
+		t.Fatalf("memory_only raw_tokens = %d, want 386", mem.RawTokens)
 	}
 	if got := mem.Fractions[0].Budget; got != 218 {
 		t.Fatalf("memory_only f=0.4 budget = %d, want floor 218 (31+123+64)", got)
 	}
-	// And one row where the fraction term wins: round(0.8*327) = 262 > 218.
-	if got := mem.Fractions[2].Budget; got != 262 {
-		t.Fatalf("memory_only f=0.8 budget = %d, want round(0.8*327) = 262", got)
+	// And one row where the fraction term wins: round(0.8*386) = 309 > 218.
+	if got := mem.Fractions[2].Budget; got != 309 {
+		t.Fatalf("memory_only f=0.8 budget = %d, want round(0.8*386) = 309", got)
 	}
 }
 
@@ -126,7 +128,9 @@ func TestMixedEvalShedsUnderSweep(t *testing.T) {
 	for _, c := range report.Cases {
 		byName[c.Name] = c
 	}
-	// At f=0.4 every fixture case sheds messages in BOTH arms.
+	// At f=0.4 every legacy arm sheds messages. The mixed memory-only arm
+	// keeps its chain but replaces all three labeled records with the 26-byte
+	// omission marker; the other mixed cases also shed whole messages.
 	for _, name := range []string{"conversation_only", "memory_only", "cross_domain", "stale_fresh", "chain_retention"} {
 		c, ok := byName[name]
 		if !ok {
@@ -139,7 +143,14 @@ func TestMixedEvalShedsUnderSweep(t *testing.T) {
 		if row.Legacy.ShedMessages <= 0 {
 			t.Fatalf("%s f=0.4: legacy shed_messages = %d, want > 0", name, row.Legacy.ShedMessages)
 		}
-		if row.Mixed.ShedMessages <= 0 {
+		if name == "memory_only" {
+			// Recall shrinks from 641 bytes to 26: 615 bytes shed, all three
+			// anchor subjects omitted, and all five messages retained.
+			if row.Mixed.Messages != 5 || row.Mixed.ShedMessages != 0 || row.Mixed.ShedBytes != 615 ||
+				row.Mixed.OmittedSubjects != 3 || row.Mixed.AnchorOmissions != 3 {
+				t.Fatalf("memory_only f=0.4: mixed = %+v, want 5 messages, 0 shed messages, 615 shed bytes, 3 omitted subjects/anchors", row.Mixed)
+			}
+		} else if row.Mixed.ShedMessages <= 0 {
 			t.Fatalf("%s f=0.4: mixed shed_messages = %d, want > 0", name, row.Mixed.ShedMessages)
 		}
 	}
@@ -237,9 +248,10 @@ func TestMixedEvalDecisionHistogram(t *testing.T) {
 	if hist == nil {
 		t.Fatal("cross_domain f=0.6: decision histogram is nil")
 	}
-	// Baseline read: 11 subjects — 6 base admissions, 4 upgrades, and 1
-	// omission (the older history exchange yields to the anchors).
-	want := map[string]int{"base": 6, "upgrade": 4, "omitted": 1}
+	// Eleven subjects: 6 base admissions, the invoice source at its verbatim
+	// floor, 3 upgrades, and 1 omitted older history exchange. Labeled memory
+	// cards cost 187 bytes each, leaving the invoice's generated overview out.
+	want := map[string]int{"base": 6, "floor": 1, "upgrade": 3, "omitted": 1}
 	if len(hist) != len(want) {
 		t.Fatalf("cross_domain f=0.6: histogram = %v, want %v", hist, want)
 	}

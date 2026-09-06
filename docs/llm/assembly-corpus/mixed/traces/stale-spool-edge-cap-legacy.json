@@ -46,7 +46,7 @@
     },
     {
       "role": "tool",
-      "content": "rec-edge-cap · semantic · 2025-07-27 · edge relay spool stays capped at 96 MiB\nrec-edge-runbook · semantic · 2025-07-27 · edge oncall runbook covers relay restarts including the drain wait\nrec-freeze-window · working · 2025-07-27 · change-freeze exceptions for relay batches go through the freeze board with the rollout schedule attached\nrec-relay-tracker · semantic · 2025-07-27 · edge relay rollout tracker is reconciled against the fleet dashboard before each weekly sync",
+      "content": "trust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-edge-cap · semantic · 2025-07-27 · edge relay spool stays capped at 96 MiB\ntrust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-edge-runbook · semantic · 2025-07-27 · edge oncall runbook covers relay restarts including the drain wait\ntrust=agent-written; unreviewed; origin=memory.create; session=caller-claim · rec-freeze-window · working · 2025-07-27 · change-freeze exceptions for relay batches go through the freeze board with the rollout schedule attached\ntrust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-relay-tracker · semantic · 2025-07-27 · edge relay rollout tracker is reconciled against the fleet dashboard before each weekly sync",
       "tool_call_id": "c2",
       "name": "agent_memory_search"
     },
@@ -71,8 +71,8 @@
       "rec-freeze-window",
       "rec-relay-tracker"
     ],
-    "estimated_prompt_tokens": 1128,
-    "state_digest": "9ac72817696e059c45384733aea97ed20d5ae4c070c902d2d6f01b12e89fdbbc",
+    "estimated_prompt_tokens": 1206,
+    "state_digest": "7657b3866bf5d0d5967e7547992ed6bcb625f5ba87b05d82df8f258197cdbdf7",
     "subjects": [
       "(c1|rag|internal/edge/relaydrain.go)",
       "(c1|rag|internal/edge/spoolcap.go)",
@@ -85,8 +85,8 @@
     "stratum": "stale_vs_fresh",
     "answer_home": "rag",
     "scenario_family": "spool-cap-staleness",
-    "budget": 1205,
-    "raw_state_tokens": 2008,
+    "budget": 1252,
+    "raw_state_tokens": 2086,
     "pressure_level": "critical",
     "shed_messages": 18,
     "shed_bytes": 2697

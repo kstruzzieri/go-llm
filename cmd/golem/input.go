@@ -28,9 +28,8 @@ type lineSource interface {
 	ReadAnswer(ctx context.Context, prompt string) (string, bool, error)
 
 	// RecordGoal appends an accepted goal to history. runREPL calls it after
-	// trimming and classifying the line as neither empty nor a slash command,
-	// immediately before running the turn, so a rejected or non-goal line can
-	// never be recorded.
+	// the turn, excluding secrets-blocked goals as well as empty, invalid, or
+	// slash-command lines. Unrelated run failures still enter history.
 	RecordGoal(goal string)
 
 	// IdleDisplay renders an asynchronous message while the user is at the

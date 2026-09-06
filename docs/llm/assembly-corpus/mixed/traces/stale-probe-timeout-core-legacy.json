@@ -9,25 +9,6 @@
       "role": "assistant",
       "tool_calls": [
         {
-          "id": "c1",
-          "name": "retrieve",
-          "arguments": {
-            "query": "core collector probe loop",
-            "k": 3
-          }
-        }
-      ]
-    },
-    {
-      "role": "tool",
-      "content": "### source: \"internal/core/prober.go\"\npurpose: Core probe loop: per-round collector walk with maintenance skips.\noverview: prober.go iterates the collector set each round and issues liveness probes under profile-supplied deadlines, counting maintenance skips instead of hiding them.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n--- source: \"internal/core/prober.go\" (lines 1-17, similarity: 1.00) ---\n1| package core\n2| \n3| // probeLoop walks the collector set on the fixed cadence and issues\n4| // one liveness probe per collector per round. Deadlines and the\n5| // cadence come from the deployment profile; the loop only owns\n6| // ordering and skip accounting for collectors in maintenance.\n7| func (p *Prober) probeLoop() {\n8| \tfor range p.ticker.C {\n9| \t\tfor _, c := range p.collectors() {\n10| \t\t\tif c.inMaintenance() {\n11| \t\t\t\tp.metricsSkipped.Inc()\n12| \t\t\t\tcontinue\n13| \t\t\t}\n14| \t\t\tp.probe(c)\n15| \t\t}\n16| \t}\n17| }\n\n### source: \"internal/core/registry.go\"\npurpose: Core collector registry: consistent snapshots, whole-set provisioning updates.\noverview: registry.go holds the authoritative collector membership, hands out name-ordered snapshots for stable row alignment, and applies provisioning updates as epoch-bumped whole-set replacements.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n--- source: \"internal/core/registry.go\" (lines 1-46, similarity: 1.00) ---\n1| package core\n2| \n3| import (\n4| \t\"sort\"\n5| \t\"sync\"\n6| )\n7| \n8| // registry is the authoritative set of core collectors. Membership\n9| // changes arrive from the provisioning pipeline and take effect on\n10| // the next probe round; the registry never mutates mid-round, so a\n11| // round sees one consistent snapshot.\n12| type registry struct {\n13| \tmu      sync.RWMutex\n14| \tentries map[string]collectorEntry\n15| \tepoch   uint64\n16| }\n17| \n18| // snapshot returns the current membership in stable name order. The\n19| // sort is deliberate: probe rounds, reports, and the fleet dashboard\n20| // all walk the same order, which keeps their row alignment stable\n21| // across refreshes.\n22| func (r *registry) snapshot() []collectorEntry {\n23| \tr.mu.RLock()\n24| \tdefer r.mu.RUnlock()\n25| \tout := make([]collectorEntry, 0, len(r.entries))\n26| \tfor _, e := range r.entries {\n27| \t\tout = append(out, e)\n28| \t}\n29| \tsort.Slice(out, func(i, j int) bool { return out[i].name \u003c out[j].name })\n30| \treturn out\n31| }\n32| \n33| // apply installs a provisioning update and bumps the epoch. Updates\n34| // are whole-set replacements: partial merges once produced ghosts\n35| // when a rename raced a removal, and the epoch lets probe rounds\n36| // detect that membership moved under them.\n37| func (r *registry) apply(update []collectorEntry) {\n38| \tr.mu.Lock()\n39| \tdefer r.mu.Unlock()\n40| \tnext := make(map[string]collectorEntry, len(update))\n41| \tfor _, e := range update {\n42| \t\tnext[e.name] = e\n43| \t}\n44| \tr.entries = next\n45| \tr.epoch++\n46| }\n\n### source: \"docs/core-collectors.md\"\npurpose: Core collector guide: aggregation role, registry membership, maintenance flags.\noverview: core-collectors.md covers the aggregation tier's role, registry-driven membership, and why the maintenance flag is mandatory before planned restarts.\nlanguage: markdown\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n--- source: \"docs/core-collectors.md\" (lines 1-12, similarity: 1.00) ---\n1| # driftwatch core collectors\n2| \n3| Core collectors aggregate site traffic before it reaches ingest.\n4| Membership comes from the provisioning pipeline; probing walks the\n5| registry snapshot every round.\n6| \n7| ## Maintenance\n8| \n9| Mark a collector in maintenance before touching it: probes skip it,\n10| the dashboard grays the row, and alerts hold. Forgetting the flag\n11| pages oncall for every planned restart, which is how the flag ended\n12| up mandatory in the restart runbook.\n",
-      "tool_call_id": "c1",
-      "name": "retrieve"
-    },
-    {
-      "role": "assistant",
-      "tool_calls": [
-        {
           "id": "c2",
           "name": "agent_memory_search",
           "arguments": {
@@ -38,7 +19,7 @@
     },
     {
       "role": "tool",
-      "content": "rec-burnin-channel · working · 2025-07-27 · collector burn-in raw notes live in the burn-in channel; summaries go to the platform review\nrec-core-probe · semantic · 2025-07-27 · core probe timeout is 4 seconds; hold it there through the collector burn-in\nrec-core-rotation · semantic · 2025-07-27 · core cert renewals rotate in two waves recorded in the rotation sheet",
+      "content": "trust=agent-written; unreviewed; origin=memory.create; session=caller-claim · rec-burnin-channel · working · 2025-07-27 · collector burn-in raw notes live in the burn-in channel; summaries go to the platform review\ntrust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-core-probe · semantic · 2025-07-27 · core probe timeout is 4 seconds; hold it there through the collector burn-in\ntrust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-core-rotation · semantic · 2025-07-27 · core cert renewals rotate in two waves recorded in the rotation sheet",
       "tool_call_id": "c2",
       "name": "agent_memory_search"
     },
@@ -62,8 +43,8 @@
       "rec-core-probe",
       "rec-core-rotation"
     ],
-    "estimated_prompt_tokens": 1140,
-    "state_digest": "1eb23089de517c3dca91af98fd1b9f55ca84962c5d351728784089e16ada6370",
+    "estimated_prompt_tokens": 211,
+    "state_digest": "bee8f433a685487d0503c82f9d9f878bcc90282ed821e8b6428360b97b6f2a25",
     "subjects": [
       "(c1|rag|internal/core/prober.go)",
       "(c1|rag|internal/core/registry.go)",
@@ -75,10 +56,10 @@
     "stratum": "stale_vs_fresh",
     "answer_home": "conversation",
     "scenario_family": "probe-timeout-staleness",
-    "budget": 1194,
-    "raw_state_tokens": 1990,
-    "pressure_level": "critical",
-    "shed_messages": 20,
-    "shed_bytes": 2559
+    "budget": 1229,
+    "raw_state_tokens": 2048,
+    "pressure_level": "ok",
+    "shed_messages": 22,
+    "shed_bytes": 6505
   }
 }

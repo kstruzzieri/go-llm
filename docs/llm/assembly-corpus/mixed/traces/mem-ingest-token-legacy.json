@@ -19,7 +19,7 @@
     },
     {
       "role": "tool",
-      "content": "rec-dash-refresh · semantic · 2025-07-27 · ingest overview dashboard auto-refreshes on the short interval; leave it be, the load is negligible\nrec-oncall-handoff · working · 2025-07-27 · oncall handoff happens Friday afternoon; the summary template lives in the shared doc\nrec-token-rotation · semantic · 2025-07-27 · rotated ingest tokens carry the dwk2- prefix; producers migrate first and legacy tokens drain until the edge narrows the accepted set",
+      "content": "trust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-dash-refresh · semantic · 2025-07-27 · ingest overview dashboard auto-refreshes on the short interval; leave it be, the load is negligible\ntrust=agent-written; unreviewed; origin=memory.create; session=caller-claim · rec-oncall-handoff · working · 2025-07-27 · oncall handoff happens Friday afternoon; the summary template lives in the shared doc\ntrust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-token-rotation · semantic · 2025-07-27 · rotated ingest tokens carry the dwk2- prefix; producers migrate first and legacy tokens drain until the edge narrows the accepted set",
       "tool_call_id": "c2",
       "name": "agent_memory_search"
     },
@@ -43,8 +43,8 @@
       "rec-oncall-handoff",
       "rec-token-rotation"
     ],
-    "estimated_prompt_tokens": 172,
-    "state_digest": "71de272dec4e10aeaa79b098c35318110ee1b12dbcb96df1662cc2fe252fe53d",
+    "estimated_prompt_tokens": 231,
+    "state_digest": "5ac2095b7d2ffeedf14e62f7e3f06d71d9d7470bccae79fcf87bc8246a00bc44",
     "subjects": [
       "(c1|rag|internal/ingest/auth.go)",
       "(c1|rag|internal/ingest/limits.go)",
@@ -57,8 +57,8 @@
     "answer_home": "memory",
     "scenario_family": "ingest-token-mem",
     "twin_group": "tw-ingest-token",
-    "budget": 982,
-    "raw_state_tokens": 1637,
+    "budget": 1018,
+    "raw_state_tokens": 1696,
     "pressure_level": "ok",
     "shed_messages": 10,
     "shed_bytes": 5430

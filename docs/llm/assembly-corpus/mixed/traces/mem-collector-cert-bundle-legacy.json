@@ -19,7 +19,7 @@
     },
     {
       "role": "tool",
-      "content": "rec-bundle-drain · semantic · 2025-07-27 · dw-root-2025 finished its drain in spring; kept only to verify old archive signatures\nrec-cert-bundle · semantic · 2025-07-27 · collectors pin the dw-root-2027 bundle after the trust rotation\nrec-provisioning · working · 2025-07-27 · bootstrap profiles stage in the provisioning share keyed by rack serial; installers never edit a profile by hand\nrec-rack-intake · semantic · 2025-07-27 · new racks join the canary ring for their first week before entering general waves; intake notes archive with the rollout log",
+      "content": "trust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-bundle-drain · semantic · 2025-07-27 · dw-root-2025 finished its drain in spring; kept only to verify old archive signatures\ntrust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-cert-bundle · semantic · 2025-07-27 · collectors pin the dw-root-2027 bundle after the trust rotation\ntrust=agent-written; unreviewed; origin=memory.create; session=caller-claim · rec-provisioning · working · 2025-07-27 · bootstrap profiles stage in the provisioning share keyed by rack serial; installers never edit a profile by hand\ntrust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-rack-intake · semantic · 2025-07-27 · new racks join the canary ring for their first week before entering general waves; intake notes archive with the rollout log",
       "tool_call_id": "c2",
       "name": "agent_memory_search"
     },
@@ -44,8 +44,8 @@
       "rec-provisioning",
       "rec-rack-intake"
     ],
-    "estimated_prompt_tokens": 199,
-    "state_digest": "c1efc21a9b284b2fa2a943491ad16533c3f7797cfcfb2a130e783a4f18235fd7",
+    "estimated_prompt_tokens": 278,
+    "state_digest": "acf85589d0791a4d63b80b5e5d602f42f7c3a5cd6c428acd0b289e21d9a027ee",
     "subjects": [
       "(c1|rag|internal/collector/trust.go)",
       "(c1|rag|internal/collector/register.go)",
@@ -58,8 +58,8 @@
     "stratum": "memory_only",
     "answer_home": "memory",
     "scenario_family": "collector-cert-mem",
-    "budget": 672,
-    "raw_state_tokens": 1120,
+    "budget": 719,
+    "raw_state_tokens": 1199,
     "pressure_level": "ok",
     "shed_messages": 6,
     "shed_bytes": 3387

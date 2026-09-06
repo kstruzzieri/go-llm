@@ -3,6 +3,7 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -130,7 +131,7 @@ func (t AgentMemorySearch) Invoke(ctx context.Context, raw json.RawMessage) (age
 		Now:         nowOr(t.Now),
 	})
 	if err != nil {
-		return agent.ToolResult{IsError: true, Content: "agent memory search failed: " + err.Error()}, nil
+		return agent.ToolResult{IsError: true, Content: "agent memory search failed: " + recordErrorText(err)}, nil
 	}
 	if len(records) == 0 {
 		return agent.ToolResult{Content: "no records found"}, nil
@@ -141,11 +142,9 @@ func (t AgentMemorySearch) Invoke(ctx context.Context, raw json.RawMessage) (age
 	// transient projection that nothing reads. MinVerbatim stays 0 — memory
 	// records have no verbatim component to floor.
 	//
-	// Every group built below satisfies agent's validateContextSet, but that
-	// coupling is verified BY INSPECTION ONLY: agent cannot import agent/tools
-	// without an import cycle, so no test spans producer and validator. That is
-	// precisely why the group ceiling matters — a violation surfaces as a
-	// run-aborting assembly error, never as a failing test here.
+	// The projection's carrier ceiling is tested through exported assembly;
+	// agent's external-package recall regression also exercises the real tool
+	// through dispatch and request-time rendering.
 	var (
 		b   strings.Builder
 		set *agent.ContextSet
@@ -180,7 +179,7 @@ func (t AgentMemorySearch) Invoke(ctx context.Context, raw json.RawMessage) (age
 			return agent.ToolResult{IsError: true, Content: fmt.Sprintf("agent memory search: record %d has blank ID", i)}, nil
 		}
 		if prev, dup := seen[r.ID]; dup {
-			return agent.ToolResult{IsError: true, Content: fmt.Sprintf("agent memory search: record %d has duplicate ID %q (also record %d)", i, r.ID, prev)}, nil
+			return agent.ToolResult{IsError: true, Content: fmt.Sprintf("agent memory search: record %d has duplicate ID %q (also record %d)", i, FlattenRecordContent(r.ID), prev)}, nil
 		}
 		seen[r.ID] = i
 		card := recordCard(r)
@@ -215,20 +214,11 @@ func recordScopeClass(r memory.MemoryRecord) string {
 	}
 }
 
-// recordLine is the flat per-record rendering — also the basis of the L1
-// compact alternative. It is the fallback Content every non-mixed consumer
-// sees, so its bytes are frozen for records that render legitimately.
-//
-// EVERY field is flattened, ID and kind included. Leaving those two raw was a
-// knowingly-open fake-row injection on exactly the path with the widest
-// audience: a newline in either forges an extra one-record-per-line row, which
-// is what FlattenRecordContent exists to prevent for the content field. The
-// frozen-bytes argument survives, now scoped: flattening is the identity on
-// every ID and kind a legitimate record carries, so only a record that was
-// already forging rows renders differently.
+// recordLine puts provenance before content so even a byte-capped prefix
+// cannot expose content without its preceding unreviewed label.
 func recordLine(r memory.MemoryRecord) string {
-	return fmt.Sprintf("%s · %s · %s · %s",
-		FlattenRecordContent(r.ID), FlattenRecordContent(string(r.Kind)),
+	return fmt.Sprintf("%s · %s · %s · %s · %s",
+		RecordRecallLabel(r), FlattenRecordContent(r.ID), FlattenRecordContent(string(r.Kind)),
 		r.CreatedAt.Format("2006-01-02"), FlattenRecordContent(r.Content))
 }
 
@@ -240,11 +230,44 @@ func recordLine(r memory.MemoryRecord) string {
 // recordLine now flattens the same two, so the two renderings agree; the dates
 // and scope class are closed vocabularies that cannot carry one.
 func recordCard(r memory.MemoryRecord) string {
-	return fmt.Sprintf("%s · %s · created:%s · updated:%s · scope:%s · ns:%s · src:%s",
-		FlattenRecordContent(r.ID), FlattenRecordContent(string(r.Kind)),
+	return fmt.Sprintf("%s · %s · %s · created:%s · updated:%s · scope:%s · ns:%s · src-claim:%s",
+		RecordRecallLabel(r), FlattenRecordContent(r.ID), FlattenRecordContent(string(r.Kind)),
 		r.CreatedAt.Format("2006-01-02"), r.UpdatedAt.Format("2006-01-02"),
 		recordScopeClass(r), FlattenRecordContent(r.Namespace),
 		FlattenRecordContent(r.Provenance.SourceKind))
+}
+
+// RecordRecallLabel describes store-stamped provenance without disclosing
+// session identifiers. A signed record remains unreviewed data. Unknown values
+// from alternative store implementations cannot acquire a recognized label.
+func RecordRecallLabel(r memory.MemoryRecord) string {
+	trust := "unknown"
+	switch r.Provenance.TrustClass {
+	case memory.TrustAgentWritten, memory.TrustLegacyUnreviewed:
+		trust = string(r.Provenance.TrustClass)
+	}
+	origin, session := "unknown", "unavailable"
+	switch r.Provenance.OriginTool {
+	case "golem.agent_memory_create":
+		origin, session = r.Provenance.OriginTool, "host-session"
+	case "mcp.agent_memory_create":
+		origin, session = r.Provenance.OriginTool, "client-claim"
+	case "memory.create":
+		origin, session = r.Provenance.OriginTool, "caller-claim"
+	case "legacy-migration":
+		origin, session = r.Provenance.OriginTool, "historical-claim"
+	}
+	if r.Provenance.OriginSessionID == "" {
+		session = "unavailable"
+	}
+	return "trust=" + trust + "; unreviewed; origin=" + origin + "; session=" + session
+}
+
+func recordErrorText(err error) string {
+	if errors.Is(err, memory.ErrRecordIntegrity) {
+		return "record integrity verification failed"
+	}
+	return err.Error()
 }
 
 // FlattenRecordContent is the shared display-sanitizer for record content: one
@@ -332,9 +355,9 @@ func (t AgentMemoryCreate) Invoke(ctx context.Context, raw json.RawMessage) (age
 		ExpiresAt:   nowOr(t.Now).Add(WorkingRecordTTL),
 	})
 	if err != nil {
-		return agent.ToolResult{IsError: true, Content: "agent memory create failed: " + err.Error()}, nil
+		return agent.ToolResult{IsError: true, Content: "agent memory create failed: " + recordErrorText(err)}, nil
 	}
-	return agent.ToolResult{Content: fmt.Sprintf("recorded %s (working, expires %s)", rec.ID, rec.ExpiresAt.Format("2006-01-02"))}, nil
+	return agent.ToolResult{Content: fmt.Sprintf("recorded %s (working; unreviewed, expires %s)", FlattenRecordContent(rec.ID), rec.ExpiresAt.Format("2006-01-02"))}, nil
 }
 
 // AgentMemoryPromote converts a working record to durable memory (semantic or
@@ -387,7 +410,7 @@ func (t AgentMemoryPromote) Invoke(ctx context.Context, raw json.RawMessage) (ag
 	acc := memory.RecordAccess{WorkspaceID: t.WorkspaceID, SessionID: resolveSessionID(t.SessionID)}
 	rec, err := t.S.Promote(ctx, id, acc, memory.MemoryKind(strings.ToLower(strings.TrimSpace(args.Kind))))
 	if err != nil {
-		return agent.ToolResult{IsError: true, Content: "agent memory promote failed: " + err.Error()}, nil
+		return agent.ToolResult{IsError: true, Content: "agent memory promote failed: " + recordErrorText(err)}, nil
 	}
-	return agent.ToolResult{Content: fmt.Sprintf("promoted %s to %s", rec.ID, rec.Kind)}, nil
+	return agent.ToolResult{Content: fmt.Sprintf("promoted %s to %s (durable; unreviewed)", FlattenRecordContent(rec.ID), FlattenRecordContent(string(rec.Kind)))}, nil
 }

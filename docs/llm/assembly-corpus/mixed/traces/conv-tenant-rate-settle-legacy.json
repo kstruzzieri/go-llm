@@ -78,7 +78,7 @@
     },
     {
       "role": "tool",
-      "content": "rec-handoff-notes · working · 2025-07-27 · ingest pager handoff notes live in the shared doc; refresh before each monthly rotation\nrec-surge-sheet · semantic · 2025-07-27 · the surge-review sheet still floats a 300 batches/min default for the heavy producers; the proposal was never closed\nrec-tenant-tags · semantic · 2025-07-27 · tenant stanzas carry team and cost-center tags; the capacity summary groups by team tag",
+      "content": "trust=agent-written; unreviewed; origin=memory.create; session=caller-claim · rec-handoff-notes · working · 2025-07-27 · ingest pager handoff notes live in the shared doc; refresh before each monthly rotation\ntrust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-surge-sheet · semantic · 2025-07-27 · the surge-review sheet still floats a 300 batches/min default for the heavy producers; the proposal was never closed\ntrust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-tenant-tags · semantic · 2025-07-27 · tenant stanzas carry team and cost-center tags; the capacity summary groups by team tag",
       "tool_call_id": "c2",
       "name": "agent_memory_search"
     },
@@ -102,8 +102,8 @@
       "rec-surge-sheet",
       "rec-tenant-tags"
     ],
-    "estimated_prompt_tokens": 1123,
-    "state_digest": "a2a0a1e126b8f77e49fbb15706185f171caa3e02dce03ba7d741b4f644a0da08",
+    "estimated_prompt_tokens": 1182,
+    "state_digest": "80b4716848be6da3ab07a31c7dc9a60ac033be53a9c8ed3da66831341010ff3d",
     "subjects": [
       "(c1|rag|internal/ingest/limits.go)",
       "(c1|rag|internal/ingest/tenants.go)",
@@ -115,8 +115,8 @@
     "stratum": "conversation_only",
     "answer_home": "conversation",
     "scenario_family": "tenant-default-rate-conv",
-    "budget": 1204,
-    "raw_state_tokens": 2007,
+    "budget": 1240,
+    "raw_state_tokens": 2066,
     "pressure_level": "critical",
     "shed_messages": 10,
     "shed_bytes": 2723

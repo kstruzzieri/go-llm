@@ -43,7 +43,7 @@
     },
     {
       "role": "tool",
-      "content": "rec-capacity-series · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src: · capacity dashboards use the rename-aware join; raw counters remain the source of truth if a graph ever looks off\nrec-migration-tally · working · created:2025-07-27 · updated:2025-07-27 · scope:session · ns: · src:\nrec-rollback-scope · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:\nrec-sweep-batch · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src: · one sweep pass retires at most 12 segments before yielding the lock",
+      "content": "trust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-capacity-series · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src-claim:\ntrust=agent-written; unreviewed; origin=memory.create; session=caller-claim · rec-migration-tally · working · created:2025-07-27 · updated:2025-07-27 · scope:session · ns: · src-claim:\ntrust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-rollback-scope · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src-claim:\ntrust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-sweep-batch · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src-claim: · one sweep pass retires at most 12 segments before yielding the lock",
       "tool_call_id": "c1",
       "name": "agent_memory_search"
     },
@@ -87,8 +87,8 @@
       "rec-rollback-scope",
       "rec-sweep-batch"
     ],
-    "estimated_prompt_tokens": 887,
-    "state_digest": "183d919b257dd1e3d76f54c41eb4a7f9b6d711791100fc43cec18f2b7fd7565b",
+    "estimated_prompt_tokens": 942,
+    "state_digest": "98b20324060aa4f45d587e605098adf215abb40ddb14043956458517e17072de",
     "subjects": [
       "(c1|memory|rec-capacity-series)",
       "(c1|memory|rec-migration-tally)",
@@ -101,11 +101,11 @@
     "stratum": "memory_only",
     "answer_home": "memory",
     "scenario_family": "spool-sweep-mem",
-    "budget": 937,
-    "raw_state_tokens": 1562,
+    "budget": 984,
+    "raw_state_tokens": 1640,
     "pressure_level": "critical",
     "shed_messages": 2,
-    "shed_bytes": 2286,
+    "shed_bytes": 2378,
     "omitted_subjects": 1
   }
 }

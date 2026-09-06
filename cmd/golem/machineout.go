@@ -145,7 +145,7 @@ func (w *machineWriter) buildResult(res agent.Result, runErr error) headlessResu
 	if terminal == nil {
 		msg := "run produced no terminal event"
 		if runErr != nil {
-			msg = runErr.Error()
+			msg = runFailureMessage("", runErr)
 		}
 		rec.Error = &headlessResultError{Code: resultCodeInvalidRequest, Message: msg}
 		rec.Grounding = nil

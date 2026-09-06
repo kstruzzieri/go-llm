@@ -19,7 +19,7 @@
     },
     {
       "role": "tool",
-      "content": "rec-debounce-override · semantic · 2025-07-27 · after the flap storm ops set the disk-pressure rule debounce override to 150 seconds; revisit once the noisy rack is drained\nrec-rule-review · semantic · 2025-07-27 · alert rule review happens in the fortnightly ops sync; proposals go in the shared sheet first\nrec-silence-window · working · 2025-07-27 · maintenance silences are pre-declared in the ops calendar so paging stays quiet during planned work",
+      "content": "trust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-debounce-override · semantic · 2025-07-27 · after the flap storm ops set the disk-pressure rule debounce override to 150 seconds; revisit once the noisy rack is drained\ntrust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-rule-review · semantic · 2025-07-27 · alert rule review happens in the fortnightly ops sync; proposals go in the shared sheet first\ntrust=agent-written; unreviewed; origin=memory.create; session=caller-claim · rec-silence-window · working · 2025-07-27 · maintenance silences are pre-declared in the ops calendar so paging stays quiet during planned work",
       "tool_call_id": "c2",
       "name": "agent_memory_search"
     },
@@ -43,8 +43,8 @@
       "rec-rule-review",
       "rec-silence-window"
     ],
-    "estimated_prompt_tokens": 188,
-    "state_digest": "9df56cc8b10da676807e6139a6077e74805073a25445c7bdcf37e162e7afd895",
+    "estimated_prompt_tokens": 246,
+    "state_digest": "ba87768ddfe39018c657512aca8e7d87b6469a21543323ba5b279a8268306331",
     "subjects": [
       "(c1|rag|internal/alert/rules.go)",
       "(c1|rag|internal/alert/notify.go)",
@@ -56,8 +56,8 @@
     "stratum": "cross_domain_join",
     "answer_home": "join",
     "scenario_family": "alert-debounce-override",
-    "budget": 1048,
-    "raw_state_tokens": 1747,
+    "budget": 1083,
+    "raw_state_tokens": 1805,
     "pressure_level": "ok",
     "shed_messages": 12,
     "shed_bytes": 5742

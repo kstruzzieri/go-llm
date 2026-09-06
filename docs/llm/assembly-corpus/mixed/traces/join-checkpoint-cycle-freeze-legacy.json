@@ -46,7 +46,7 @@
     },
     {
       "role": "tool",
-      "content": "rec-baseline-snap · working · 2025-07-27 · freeze baseline dashboard snapshot lives in the freeze folder with per-board exports\nrec-cert-sweep · semantic · 2025-07-27 · collector certificates that would expire mid-freeze were rotated ahead of the window\nrec-freeze-window · semantic · 2025-07-27 · freeze window is on the shared engineering calendar; the exception process is linked from the entry",
+      "content": "trust=agent-written; unreviewed; origin=memory.create; session=caller-claim · rec-baseline-snap · working · 2025-07-27 · freeze baseline dashboard snapshot lives in the freeze folder with per-board exports\ntrust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-cert-sweep · semantic · 2025-07-27 · collector certificates that would expire mid-freeze were rotated ahead of the window\ntrust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-freeze-window · semantic · 2025-07-27 · freeze window is on the shared engineering calendar; the exception process is linked from the entry",
       "tool_call_id": "c2",
       "name": "agent_memory_search"
     },
@@ -70,8 +70,8 @@
       "rec-cert-sweep",
       "rec-freeze-window"
     ],
-    "estimated_prompt_tokens": 1203,
-    "state_digest": "3b8e414f5058341fd9d7cefb052fcded1ca8c5058e7d07be00341859f8d078a9",
+    "estimated_prompt_tokens": 1262,
+    "state_digest": "53317c3666ece0a50a86c3052a18ad08abebad305f9a692ea967aebf8cd31b66",
     "subjects": [
       "(c1|rag|internal/collector/checkpoint.go)",
       "(c1|rag|internal/collector/archive.go)",
@@ -83,8 +83,8 @@
     "stratum": "cross_domain_join",
     "answer_home": "join",
     "scenario_family": "checkpoint-cycle-join",
-    "budget": 1360,
-    "raw_state_tokens": 2266,
+    "budget": 1395,
+    "raw_state_tokens": 2325,
     "pressure_level": "critical",
     "shed_messages": 10,
     "shed_bytes": 3692

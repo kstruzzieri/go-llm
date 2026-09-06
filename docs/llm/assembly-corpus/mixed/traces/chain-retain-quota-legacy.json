@@ -6,6 +6,25 @@
   "tools": null,
   "turns": [
     {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "id": "c2",
+          "name": "retrieve",
+          "arguments": {
+            "query": "tenant ingest rate limits",
+            "k": 3
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "content": "### source: \"internal/ingest/limiter.go\"\npurpose: Per-tenant rate lookup backed by the tenants file, with a conservative default.\noverview: limiter.go resolves each tenant's ingest rate from the hot-reloaded tenants file and falls back to the conservative built-in default for unnamed tenants.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n--- source: \"internal/ingest/limiter.go\" (lines 1-11, similarity: 1.00) ---\n1| package ingest\n2| \n3| // Per-tenant rates come exclusively from the tenants file; the code\n4| // carries only the conservative default for tenants the file does not\n5| // name. Rate changes are config deploys, never rebuilds.\n6| func (l *tenantLimiter) rateFor(tenant string) float64 {\n7| \tif r, ok := l.rates[tenant]; ok {\n8| \t\treturn r\n9| \t}\n10| \treturn l.defaultRate\n11| }\n\n### source: \"internal/ingest/admission.go\"\npurpose: Ingest admission gate: auth, per-tenant quota, then spool backpressure.\noverview: admission.go orders the admission checks so unauthenticated batches reject cheapest, over-quota tenants next, and spool backpressure last, with per-cause rejection counters.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n--- source: \"internal/ingest/admission.go\" (lines 1-32, similarity: 1.00) ---\n1| package ingest\n2| \n3| import (\n4| \t\"context\"\n5| \t\"fmt\"\n6| )\n7| \n8| // admit is the single admission gate every accepted batch passes:\n9| // authentication, then the per-tenant limiter, then spool room. The\n10| // ordering is deliberate: reject the unauthenticated cheaply, then\n11| // the over-quota, and only then consult the spool, so backpressure\n12| // from a full spool is the last resort rather than the first signal.\n13| func (g *Gateway) admit(ctx context.Context, b Batch) error {\n14| \tif !g.authenticate(b.Token) {\n15| \t\tg.metrics.authRejects.Inc()\n16| \t\treturn errUnauthenticated\n17| \t}\n18| \tif !g.limiter.allow(b.Tenant, g.clock.Now()) {\n19| \t\tg.metrics.quotaRejects.Inc()\n20| \t\treturn fmt.Errorf(\"ingest: tenant %s over quota\", b.Tenant)\n21| \t}\n22| \tif !g.spool.hasRoom(b.Size()) {\n23| \t\tg.metrics.backpressure.Inc()\n24| \t\treturn errSpoolFull\n25| \t}\n26| \treturn g.spool.accept(ctx, b)\n27| }\n28| \n29| // Rejections are counted per cause. The quota counter is per-tenant\n30| // labelled so a single noisy tenant is visible without log diving,\n31| // and the backpressure counter is global because a full spool is a\n32| // node condition, not a tenant one.\n\n### source: \"docs/tenants.md\"\npurpose: Tenants guide: stanza layout, config-deploy rate changes, default policy.\noverview: tenants.md maps producers to tenant stanzas with rates, bursts, and reporting tags, explains hot-reloaded config-deploy rate changes, and restricts the built-in default to evaluation traffic.\nlanguage: markdown\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n--- source: \"docs/tenants.md\" (lines 1-19, similarity: 1.00) ---\n1| # driftwatch tenants\n2| \n3| Every producer maps to a tenant, and every tenant maps to a stanza in\n4| the tenants file: an ingest rate, a burst allowance, and the team and\n5| cost-center tags the capacity reports group by.\n6| \n7| ## Changing a rate\n8| \n9| Rate changes are config deploys. Edit the stanza, let the lint pass,\n10| and the hot reload applies it without a restart; the limiter picks up\n11| the new rate on its next refill tick. Keep the change and its\n12| rationale in the commit message, because the capacity summary links\n13| stanza history when quotas are questioned.\n14| \n15| ## Defaults\n16| \n17| Tenants the file does not name get the conservative built-in default.\n18| That default is for evaluation traffic only; production tenants get\n19| explicit stanzas, reviewed with the team tag owner.\n",
+      "tool_call_id": "c2",
+      "name": "retrieve"
+    },
+    {
       "role": "user",
       "content": "What ingest rate is the atlas tenant allowed now?"
     }
@@ -30,8 +49,8 @@
       "rec-tenant-tags",
       "rec-warehouse-sync"
     ],
-    "estimated_prompt_tokens": 59,
-    "state_digest": "9a646a24f6593025016995834d247e2ec49ebcb6675a0ae0fd263e9f82a70db2",
+    "estimated_prompt_tokens": 1005,
+    "state_digest": "e3aa8a9c952ed54b4a7f182f46e417393082f5d7b0202ce934d434a34724a3f2",
     "subjects": [
       "(c1|memory|rec-atlas-quota)",
       "(c1|memory|rec-burst-review)",
@@ -48,10 +67,10 @@
     "stratum": "chain_retention",
     "answer_home": "memory",
     "scenario_family": "tenant-quota-chain",
-    "budget": 983,
-    "raw_state_tokens": 1638,
-    "pressure_level": "ok",
-    "shed_messages": 10,
-    "shed_bytes": 5953
+    "budget": 1076,
+    "raw_state_tokens": 1794,
+    "pressure_level": "critical",
+    "shed_messages": 8,
+    "shed_bytes": 2795
   }
 }

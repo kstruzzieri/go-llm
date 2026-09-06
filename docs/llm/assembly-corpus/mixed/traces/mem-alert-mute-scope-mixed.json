@@ -35,7 +35,7 @@
     },
     {
       "role": "assistant",
-      "content": "Re-derived the disk-pressure threshold against the corrected accounting so the effective headroom matches what the review originally signed off on; the change is staged with the threshold history linked for the next alerting review."
+      "content": "Re-derived the disk-pressure threshold against corrected accounting; staged it for review with the threshold history linked."
     },
     {
       "role": "assistant",
@@ -51,7 +51,7 @@
     },
     {
       "role": "tool",
-      "content": "rec-digest-notes · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:\nrec-lab-kernel · working · created:2025-07-27 · updated:2025-07-27 · scope:session · ns: · src:\nrec-mute-scope · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src: · a maintenance mute suppresses the dashboard destination only; digest and pager keep flowing\nrec-threshold-history · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:",
+      "content": "trust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-digest-notes · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src-claim:\ntrust=agent-written; unreviewed; origin=memory.create; session=caller-claim · rec-lab-kernel · working · created:2025-07-27 · updated:2025-07-27 · scope:session · ns: · src-claim:\ntrust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-mute-scope · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src-claim: · a maintenance mute suppresses the dashboard destination only; digest and pager keep flowing\ntrust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-threshold-history · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src-claim:",
       "tool_call_id": "c1",
       "name": "agent_memory_search"
     },
@@ -95,8 +95,8 @@
       "rec-mute-scope",
       "rec-threshold-history"
     ],
-    "estimated_prompt_tokens": 956,
-    "state_digest": "7c3cc068ff6f451872174fd6109de17b5c74f71a4d3217bf160a31b45163f90c",
+    "estimated_prompt_tokens": 1013,
+    "state_digest": "59707c93d68ae08d16aea26337adca3ba9c8043fa21b5ac37978ce4e21deef78",
     "subjects": [
       "(c1|memory|rec-digest-notes)",
       "(c1|memory|rec-lab-kernel)",
@@ -109,9 +109,9 @@
     "stratum": "memory_only",
     "answer_home": "memory",
     "scenario_family": "alert-mute-mem",
-    "budget": 1023,
-    "raw_state_tokens": 1705,
+    "budget": 1054,
+    "raw_state_tokens": 1756,
     "pressure_level": "critical",
-    "shed_bytes": 2578
+    "shed_bytes": 2554
   }
 }

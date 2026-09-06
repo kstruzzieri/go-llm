@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"slices"
 	"strings"
 	"testing"
 
@@ -25,6 +26,8 @@ func FuzzDetectorsNeverPanic(f *testing.F) {
 		`{"argv":["git","-C"]}`, `{"argv":["bash","--norc","-c","# only\n"]}`, `{"argv":"curl"}`,
 		`{"path":"../.git"}`, `{"path":3}`, `{"Path":".ssh/id_rsa","path":"x"}`, `{"path":".env"}`,
 		`[".git"]`, `null`, `{"argv":["sh","-c",null]}`,
+		"sk-" + strings.Repeat("a", 17),
+		`{"\u0074oken":"` + "aB3dE7fG9hJ2" + "kL4mN6pQ8" + `"}`,
 	} {
 		f.Add(s)
 	}
@@ -39,26 +42,24 @@ func FuzzDetectorsNeverPanic(f *testing.F) {
 		exec := agent.ToolCallInspection{Effect: agent.Effect{Class: agent.Read | agent.Write | agent.Exec | agent.Network},
 			Call: provider.ToolCall{ID: "c", Function: provider.ToolCallFunction{Name: "run_command", Arguments: json.RawMessage(s)}}}
 		for _, ic := range Defaults() {
-			a, err := ic.InspectInput(ctx, in)
-			if err != nil {
-				t.Fatalf("%s input: %v", ic.Name(), err)
-			}
-			var b []agent.Finding
-			for _, call := range []agent.ToolCallInspection{read, exec} {
-				found, err := ic.InspectToolCall(ctx, call)
-				if err != nil {
-					t.Fatalf("%s tool call: %v", ic.Name(), err)
+			out := agent.OutputInspection{Content: s, Thinking: s, ToolCalls: []provider.ToolCall{read.Call, exec.Call}}
+			for _, hook := range []struct {
+				name    string
+				inspect func() ([]agent.Finding, error)
+			}{
+				{"input", func() ([]agent.Finding, error) { return ic.InspectInput(ctx, in) }},
+				{"output", func() ([]agent.Finding, error) { return ic.InspectOutput(ctx, out) }},
+				{"read call", func() ([]agent.Finding, error) { return ic.InspectToolCall(ctx, read) }},
+				{"exec call", func() ([]agent.Finding, error) { return ic.InspectToolCall(ctx, exec) }},
+			} {
+				found, err := hook.inspect()
+				again, againErr := hook.inspect()
+				if err != nil || againErr != nil || !slices.Equal(found, again) {
+					t.Fatalf("%s %s returned an error or nondeterministic findings", ic.Name(), hook.name)
 				}
-				b = append(b, found...)
-			}
-			c, err := ic.InspectOutput(ctx, agent.OutputInspection{Content: s, Thinking: s})
-			if err != nil || c != nil {
-				t.Fatalf("%s output: %+v, %v", ic.Name(), c, err)
-			}
-			for _, found := range [][]agent.Finding{a, b} {
 				for _, fd := range found {
-					if fd.Rule == "" || fd.Verdict > agent.VerdictAbort || fd.Risk < 0 || fd.Risk > 100 || fd.Target == agent.TargetNone {
-						t.Fatalf("%s produced a malformed finding: %+v", ic.Name(), fd)
+					if fd.Rule == "" || fd.Verdict > agent.VerdictAbort || fd.Risk < 0 || fd.Risk > 100 || fd.Target == agent.TargetNone || fd.Target > agent.TargetAlternative {
+						t.Fatalf("%s %s produced a malformed finding", ic.Name(), hook.name)
 					}
 				}
 			}

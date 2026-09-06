@@ -46,7 +46,7 @@
     },
     {
       "role": "tool",
-      "content": "rec-edge-cadence · semantic · 2025-07-27 · edge gossip holds at 10 seconds; the relay soak needs the short round\nrec-install-image · working · 2025-07-27 · relay install image bakes the post-soak mesh settings; fresh relays join converged\nrec-soak-archive · semantic · 2025-07-27 · soak gossip trace archive keeps the two convergence incidents with context hours",
+      "content": "trust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-edge-cadence · semantic · 2025-07-27 · edge gossip holds at 10 seconds; the relay soak needs the short round\ntrust=agent-written; unreviewed; origin=memory.create; session=caller-claim · rec-install-image · working · 2025-07-27 · relay install image bakes the post-soak mesh settings; fresh relays join converged\ntrust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-soak-archive · semantic · 2025-07-27 · soak gossip trace archive keeps the two convergence incidents with context hours",
       "tool_call_id": "c2",
       "name": "agent_memory_search"
     },
@@ -70,8 +70,8 @@
       "rec-install-image",
       "rec-soak-archive"
     ],
-    "estimated_prompt_tokens": 1119,
-    "state_digest": "701d4681778081be7c9c0bfa1582eccbd58340cadc72660546c5f79ff7c02295",
+    "estimated_prompt_tokens": 1178,
+    "state_digest": "7fc170da4fd95e48eb4845a7c3382840a1bcba04fba1d80e927216bee0ffbfe6",
     "subjects": [
       "(c1|rag|internal/mesh/profile.go)",
       "(c1|rag|internal/mesh/converge.go)",
@@ -83,8 +83,8 @@
     "stratum": "stale_vs_fresh",
     "answer_home": "conversation",
     "scenario_family": "gossip-interval-staleness",
-    "budget": 1204,
-    "raw_state_tokens": 2007,
+    "budget": 1240,
+    "raw_state_tokens": 2066,
     "pressure_level": "critical",
     "shed_messages": 16,
     "shed_bytes": 2795

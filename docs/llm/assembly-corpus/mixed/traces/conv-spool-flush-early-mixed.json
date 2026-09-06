@@ -52,7 +52,7 @@
     },
     {
       "role": "tool",
-      "content": "### source: \"internal/spool/spool.go\"\npurpose: Shipped spool flush pacing and the buffered batch drain path.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n--- source: \"internal/spool/spool.go\" (lines 1-14, similarity: 1.00) ---\n1| package spool\n2| \n3| import \"time\"\n4| \n5| // flushEvery is the shipped flush cadence. Deployments override it per\n6| // profile; profile overrides are applied by the config layer, not here.\n7| const flushEvery = 30 * time.Second\n8| \n9| // Flush drains buffered batches into the active segment.\n10| func (s *Spool) Flush() error {\n11| \ts.mu.Lock()\n12| \tdefer s.mu.Unlock()\n13| \treturn s.seg.write(s.buf.drain())\n14| }\n\n### source: \"internal/spool/segment.go\"\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nnote: metadata overview (summary omitted: budget)\n\n### source: \"docs/spool.md\"\nlanguage: markdown\nindexed: 2025-07-27T00:00:00Z\nnote: metadata overview (summary omitted: budget)\n--- source: \"docs/spool.md\" (lines 1-24, similarity: 1.00) ---\n1| # driftwatch spool\n2| \n3| The spool is the durable buffer between ingest and the exporter. Every\n4| accepted batch lands in the spool before the ingest response is sent,\n5| so an accepted write survives a crash or an exporter outage.\n6| \n7| ## Layout\n8| \n9| Spool data lives under the data directory as numbered segment files.\n10| Segments are append-only; a segment that has rolled is immutable and\n11| is eligible for retention sweeps once exported.\n12| \n13| ## Pacing\n14| \n15| Buffered batches drain to the active segment on a fixed cadence. The\n16| shipped default flushes twice a minute; deployments tune this per\n17| profile through the config layer. Lowering the cadence smooths disk\n18| pressure at the cost of a slightly larger replay window after a crash.\n19| \n20| ## Sizing\n21| \n22| Keep the spool on local disk, not network storage. Size it for at\n23| least a day of peak ingest so an exporter outage over a weekend does\n24| not force retention sweeps to run early.\n",
+      "content": "### source: \"internal/spool/spool.go\"\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nnote: metadata overview (summary omitted: budget)\n--- source: \"internal/spool/spool.go\" (lines 1-14, similarity: 1.00) ---\n1| package spool\n2| \n3| import \"time\"\n4| \n5| // flushEvery is the shipped flush cadence. Deployments override it per\n6| // profile; profile overrides are applied by the config layer, not here.\n7| const flushEvery = 30 * time.Second\n8| \n9| // Flush drains buffered batches into the active segment.\n10| func (s *Spool) Flush() error {\n11| \ts.mu.Lock()\n12| \tdefer s.mu.Unlock()\n13| \treturn s.seg.write(s.buf.drain())\n14| }\n\n### source: \"internal/spool/segment.go\"\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nnote: metadata overview (summary omitted: budget)\n\n### source: \"docs/spool.md\"\nlanguage: markdown\nindexed: 2025-07-27T00:00:00Z\nnote: metadata overview (summary omitted: budget)\n--- source: \"docs/spool.md\" (lines 1-24, similarity: 1.00) ---\n1| # driftwatch spool\n2| \n3| The spool is the durable buffer between ingest and the exporter. Every\n4| accepted batch lands in the spool before the ingest response is sent,\n5| so an accepted write survives a crash or an exporter outage.\n6| \n7| ## Layout\n8| \n9| Spool data lives under the data directory as numbered segment files.\n10| Segments are append-only; a segment that has rolled is immutable and\n11| is eligible for retention sweeps once exported.\n12| \n13| ## Pacing\n14| \n15| Buffered batches drain to the active segment on a fixed cadence. The\n16| shipped default flushes twice a minute; deployments tune this per\n17| profile through the config layer. Lowering the cadence smooths disk\n18| pressure at the cost of a slightly larger replay window after a crash.\n19| \n20| ## Sizing\n21| \n22| Keep the spool on local disk, not network storage. Size it for at\n23| least a day of peak ingest so an exporter outage over a weekend does\n24| not force retention sweeps to run early.\n",
       "tool_call_id": "c1",
       "name": "retrieve"
     },
@@ -70,7 +70,7 @@
     },
     {
       "role": "tool",
-      "content": "rec-canary-dash · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:\nrec-export-lag · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:\nrec-oncall-week · working · created:2025-07-27 · updated:2025-07-27 · scope:session · ns: · src:",
+      "content": "trust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-canary-dash · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src-claim:\ntrust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-export-lag · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src-claim:\ntrust=agent-written; unreviewed; origin=memory.create; session=caller-claim · rec-oncall-week · working · created:2025-07-27 · updated:2025-07-27 · scope:session · ns: · src-claim:",
       "tool_call_id": "c2",
       "name": "agent_memory_search"
     },
@@ -94,8 +94,8 @@
       "rec-export-lag",
       "rec-oncall-week"
     ],
-    "estimated_prompt_tokens": 1031,
-    "state_digest": "bc36b741c179e2868aa3100b830dc2aba32f7a4526d6ba48ae219d4d9e198a1c",
+    "estimated_prompt_tokens": 1077,
+    "state_digest": "377b65675c9684cf90be921eed0b66ccc993ea2cf25f248ae33a1a239c46572d",
     "subjects": [
       "(c1|rag|internal/spool/spool.go)",
       "(c1|rag|internal/spool/segment.go)",
@@ -107,9 +107,9 @@
     "stratum": "conversation_only",
     "answer_home": "conversation",
     "scenario_family": "spool-flush-window",
-    "budget": 1084,
-    "raw_state_tokens": 1806,
+    "budget": 1119,
+    "raw_state_tokens": 1865,
     "pressure_level": "critical",
-    "shed_bytes": 2682
+    "shed_bytes": 2734
   }
 }

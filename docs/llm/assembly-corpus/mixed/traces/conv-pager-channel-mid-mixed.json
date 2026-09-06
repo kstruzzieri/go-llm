@@ -78,7 +78,7 @@
     },
     {
       "role": "tool",
-      "content": "rec-notify-token · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src: · notifier webhook token is rotated quarterly by the platform team; we only consume it from the secret store\nrec-rule-review · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src: · alert rule review happens in the fortnightly ops sync; proposals go in the shared sheet first\nrec-silence-window · working · created:2025-07-27 · updated:2025-07-27 · scope:session · ns: · src: · maintenance silences are pre-declared in the ops calendar so paging stays quiet during planned work",
+      "content": "trust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-notify-token · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src-claim: · notifier webhook token is rotated quarterly by the platform team; we only consume it from the secret store\ntrust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-rule-review · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src-claim: · alert rule review happens in the fortnightly ops sync; proposals go in the shared sheet first\ntrust=agent-written; unreviewed; origin=memory.create; session=caller-claim · rec-silence-window · working · created:2025-07-27 · updated:2025-07-27 · scope:session · ns: · src-claim: · maintenance silences are pre-declared in the ops calendar so paging stays quiet during planned work",
       "tool_call_id": "c2",
       "name": "agent_memory_search"
     },
@@ -102,8 +102,8 @@
       "rec-rule-review",
       "rec-silence-window"
     ],
-    "estimated_prompt_tokens": 1019,
-    "state_digest": "710b14c0cfd5c80244b02cc2fad22ef81057f451ce958be5701ddfb04a043fb8",
+    "estimated_prompt_tokens": 1082,
+    "state_digest": "fbf4d88e9dd573a10b1d1a682bdaa08e5302f2e03157983a4ad6cfe839ebc676",
     "subjects": [
       "(c1|rag|internal/alert/notify.go)",
       "(c1|rag|internal/alert/rules.go)",
@@ -115,9 +115,9 @@
     "stratum": "conversation_only",
     "answer_home": "conversation",
     "scenario_family": "pager-escalation-channel",
-    "budget": 1086,
-    "raw_state_tokens": 1810,
+    "budget": 1121,
+    "raw_state_tokens": 1869,
     "pressure_level": "critical",
-    "shed_bytes": 2684
+    "shed_bytes": 2666
   }
 }

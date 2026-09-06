@@ -47,7 +47,7 @@
       "rec-suppression-log"
     ],
     "estimated_prompt_tokens": 199,
-    "state_digest": "24dc3db36b677a4e900eed0a379eefaf318d1cbfe5ad78d3212b009300824cc8",
+    "state_digest": "11474487e46c0807d2a1684886b0d8fc6673b4823e0bebcf2fa561b36c718d4d",
     "subjects": [
       "(c1|memory|rec-drift-gate)",
       "(c1|memory|rec-eval-replays)",
@@ -62,10 +62,10 @@
     "stratum": "chain_retention",
     "answer_home": "join",
     "scenario_family": "drift-window-chain",
-    "budget": 1125,
-    "raw_state_tokens": 1875,
+    "budget": 1195,
+    "raw_state_tokens": 1992,
     "pressure_level": "ok",
     "shed_messages": 8,
-    "shed_bytes": 6345
+    "shed_bytes": 6813
   }
 }

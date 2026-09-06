@@ -46,7 +46,7 @@
     },
     {
       "role": "tool",
-      "content": "rec-consol-log · semantic · 2025-07-27 · receiver consolidation log links the soak report; capacity sheet entries point at it\nrec-synthetic-label · working · 2025-07-27 · the delivery-path synthetic stays labeled synthetic in the alert body so responders cannot mistake it\nrec-webhook-pool · semantic · 2025-07-27 · webhook fanout still runs 6 delivery workers",
+      "content": "trust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-consol-log · semantic · 2025-07-27 · receiver consolidation log links the soak report; capacity sheet entries point at it\ntrust=agent-written; unreviewed; origin=memory.create; session=caller-claim · rec-synthetic-label · working · 2025-07-27 · the delivery-path synthetic stays labeled synthetic in the alert body so responders cannot mistake it\ntrust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-webhook-pool · semantic · 2025-07-27 · webhook fanout still runs 6 delivery workers",
       "tool_call_id": "c2",
       "name": "agent_memory_search"
     },
@@ -70,8 +70,8 @@
       "rec-synthetic-label",
       "rec-webhook-pool"
     ],
-    "estimated_prompt_tokens": 976,
-    "state_digest": "82e90cf5119182aef9cb0d8ebc9dc1782cc5cbae0cb681a8bc93153b1231137a",
+    "estimated_prompt_tokens": 1034,
+    "state_digest": "f876d806e825324ba25b0284d998f0785a0e82f05c78e76230f03d914f8aebaf",
     "subjects": [
       "(c1|rag|internal/notify/webhookpool.go)",
       "(c1|rag|internal/notify/webhooksign.go)",
@@ -83,8 +83,8 @@
     "stratum": "stale_vs_fresh",
     "answer_home": "conversation",
     "scenario_family": "fanout-worker-staleness",
-    "budget": 1051,
-    "raw_state_tokens": 1752,
+    "budget": 1086,
+    "raw_state_tokens": 1810,
     "pressure_level": "critical",
     "shed_messages": 14,
     "shed_bytes": 2411

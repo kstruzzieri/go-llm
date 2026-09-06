@@ -7,11 +7,11 @@
   "turns": [
     {
       "role": "user",
-      "content": "A few things before we look at the export sizing. The warehouse loader complained about mixed-case column names after the last schema tweak; can you normalize the header casing in the writer so the loader stops special-casing us?"
+      "content": "Before export sizing: normalize writer headers to fix the warehouse loader's mixed-case column errors."
     },
     {
       "role": "assistant",
-      "content": "Normalized the column header casing in the writer and ran the loader's validation suite against a sample shard; it passes clean now."
+      "content": "Normalized writer headers; the loader validation passes on a sample shard."
     },
     {
       "role": "user",
@@ -78,7 +78,7 @@
     },
     {
       "role": "tool",
-      "content": "rec-export-window · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src: · nightly export kicks off at 02:15 UTC, after the warehouse maintenance window closes; do not move it earlier\nrec-loader-contact · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src: · warehouse loader questions go to the data platform channel; they watch it during business hours\nrec-shard-review · working · created:2025-07-27 · updated:2025-07-27 · scope:session · ns: · src: · shard sizing changes need a heads-up to the warehouse team; their pipeline tunes parallelism to our layout",
+      "content": "trust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-export-window · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src-claim: · nightly export kicks off at 02:15 UTC, after the warehouse maintenance window closes; do not move it earlier\ntrust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-loader-contact · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src-claim: · warehouse loader questions go to the data platform channel; they watch it during business hours\ntrust=agent-written; unreviewed; origin=memory.create; session=caller-claim · rec-shard-review · working · created:2025-07-27 · updated:2025-07-27 · scope:session · ns: · src-claim: · shard sizing changes need a heads-up to the warehouse team; their pipeline tunes parallelism to our layout",
       "tool_call_id": "c2",
       "name": "agent_memory_search"
     },
@@ -102,8 +102,8 @@
       "rec-loader-contact",
       "rec-shard-review"
     ],
-    "estimated_prompt_tokens": 966,
-    "state_digest": "5337eb913fee0bb7f57461650068e1852aa8990d534fc49595bb5ece7a93aef3",
+    "estimated_prompt_tokens": 983,
+    "state_digest": "504ea56633a44172b5164b22cbc19ea19fbba3a6d16cc400c4345401c4f03551",
     "subjects": [
       "(c1|rag|internal/export/parquet.go)",
       "(c1|rag|internal/export/schedule.go)",
@@ -115,9 +115,9 @@
     "stratum": "cross_domain_join",
     "answer_home": "join",
     "scenario_family": "export-shard-schedule",
-    "budget": 1015,
-    "raw_state_tokens": 1691,
+    "budget": 1022,
+    "raw_state_tokens": 1704,
     "pressure_level": "critical",
-    "shed_bytes": 2423
+    "shed_bytes": 2405
   }
 }

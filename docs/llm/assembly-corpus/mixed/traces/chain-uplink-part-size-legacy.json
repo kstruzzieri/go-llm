@@ -19,7 +19,7 @@
     },
     {
       "role": "tool",
-      "content": "rec-budget-sheet · semantic · 2025-07-27 · the transfer-budget sheet ships with the capacity note; warehouse loaders read its throughput row before planning their own parallelism for the quarter, and a late sheet has twice pushed their planning meeting, so the sheet deadline is treated as hard\nrec-part-history · semantic · 2025-07-27 · the 16 MB part sizing came from the pre-GA uploader; superseded at GA\nrec-resume-drill · semantic · 2025-07-27 · the resume-after-cut drill passed last month; keep the drill notes linked from the runbook so the next audit finds the evidence without asking around, because the last audit spent two days reconstructing exactly this and filed a finding about it\nrec-sheet-review · semantic · 2025-07-27 · the warehouse team reviews the transfer sheet before it circulates; leave them a full business day or the review lands after the note ships, which happened once and produced a correction cycle nobody enjoyed and the platform lead still brings up\nrec-uplink-owner · semantic · 2025-07-27 · uplink capacity questions go to the storage team; the archive store contract renews in the fall and the renewal thread tracks open capacity asks, so new asks should land there rather than in direct messages that the renewal owner never sees\nrec-upload-window · semantic · 2025-07-27 · archive pushes run in the overnight window so daytime exports keep the uplink to themselves; the window boundaries follow the export schedule rather than the clock, and the scheduler shifts them automatically when the export calendar changes",
+      "content": "trust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-budget-sheet · semantic · 2025-07-27 · the transfer-budget sheet ships with the capacity note; warehouse loaders read its throughput row before planning their own parallelism for the quarter, and a late sheet has twice pushed their planning meeting, so the sheet deadline is treated as hard\ntrust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-part-history · semantic · 2025-07-27 · the 16 MB part sizing came from the pre-GA uploader; superseded at GA\ntrust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-resume-drill · semantic · 2025-07-27 · the resume-after-cut drill passed last month; keep the drill notes linked from the runbook so the next audit finds the evidence without asking around, because the last audit spent two days reconstructing exactly this and filed a finding about it\ntrust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-sheet-review · semantic · 2025-07-27 · the warehouse team reviews the transfer sheet before it circulates; leave them a full business day or the review lands after the note ships, which happened once and produced a correction cycle nobody enjoyed and the platform lead still brings up\ntrust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-uplink-owner · semantic · 2025-07-27 · uplink capacity questions go to the storage team; the archive store contract renews in the fall and the renewal thread tracks open capacity asks, so new asks should land there rather than in direct messages that the renewal owner never sees\ntrust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-upload-window · semantic · 2025-07-27 · archive pushes run in the overnight window so daytime exports keep the uplink to themselves; the window boundaries follow the export schedule rather than the clock, and the scheduler shifts them automatically when the export calendar changes",
       "tool_call_id": "c2",
       "name": "agent_memory_search"
     },
@@ -46,8 +46,8 @@
       "rec-uplink-owner",
       "rec-upload-window"
     ],
-    "estimated_prompt_tokens": 453,
-    "state_digest": "34c02075157112a6d0205d26f8c7ca0de84f23ea1026a03456e2a1c5e88a0982",
+    "estimated_prompt_tokens": 570,
+    "state_digest": "70abc785e786d377dfa86730181fc7149704bda49f0708e1f32ce423e8dfc238",
     "subjects": [
       "(c1|rag|internal/archive/uploader.go)",
       "(c1|rag|internal/archive/resume.go)",
@@ -62,8 +62,8 @@
     "stratum": "chain_retention",
     "answer_home": "rag",
     "scenario_family": "uplink-part-chain",
-    "budget": 1018,
-    "raw_state_tokens": 1697,
+    "budget": 1088,
+    "raw_state_tokens": 1814,
     "pressure_level": "ok",
     "shed_messages": 4,
     "shed_bytes": 4747

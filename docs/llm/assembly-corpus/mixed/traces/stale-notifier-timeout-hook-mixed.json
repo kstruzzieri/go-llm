@@ -92,7 +92,7 @@
     },
     {
       "role": "tool",
-      "content": "### source: \"internal/notify/hookdeliver.go\"\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nnote: metadata overview (summary omitted: budget)\n--- source: \"internal/notify/hookdeliver.go\" (lines 1-15, similarity: 1.00) ---\n1| package notify\n2| \n3| // deliverHook posts one webhook delivery and classifies the outcome.\n4| // The attempt runs under the delivery deadline from the profile;\n5| // classification stays coarse on purpose: retryable or terminal,\n6| // nothing in between, so the retry loop cannot misread a status.\n7| func (n *Notifier) deliverHook(d Delivery) outcome {\n8| \tctx, cancel := n.deadlineContext()\n9| \tdefer cancel()\n10| \tresp, err := n.post(ctx, d)\n11| \tif err != nil {\n12| \t\treturn retryable(err)\n13| \t}\n14| \treturn classify(resp)\n15| }\n\n### source: \"internal/notify/retryplan.go\"\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nnote: metadata overview (summary omitted: budget)\n\n### source: \"docs/notifier-delivery.md\"\npurpose: Notifier delivery guide: per-path profiles and dead-letter monitoring.\nlanguage: markdown\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n",
+      "content": "### source: \"internal/notify/hookdeliver.go\"\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nnote: metadata overview (summary omitted: budget)\n--- source: \"internal/notify/hookdeliver.go\" (lines 1-15, similarity: 1.00) ---\n1| package notify\n2| \n3| // deliverHook posts one webhook delivery and classifies the outcome.\n4| // The attempt runs under the delivery deadline from the profile;\n5| // classification stays coarse on purpose: retryable or terminal,\n6| // nothing in between, so the retry loop cannot misread a status.\n7| func (n *Notifier) deliverHook(d Delivery) outcome {\n8| \tctx, cancel := n.deadlineContext()\n9| \tdefer cancel()\n10| \tresp, err := n.post(ctx, d)\n11| \tif err != nil {\n12| \t\treturn retryable(err)\n13| \t}\n14| \treturn classify(resp)\n15| }\n\n### source: \"internal/notify/retryplan.go\"\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nnote: metadata overview (summary omitted: budget)\n\n### source: \"docs/notifier-delivery.md\"\nlanguage: markdown\nindexed: 2025-07-27T00:00:00Z\nnote: metadata overview (summary omitted: budget)\n",
       "tool_call_id": "c1",
       "name": "retrieve"
     },
@@ -110,7 +110,7 @@
     },
     {
       "role": "tool",
-      "content": "rec-hook-window · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src: · webhook notifier timeout stands at 8 seconds\nrec-secret-loc · working · created:2025-07-27 · updated:2025-07-27 · scope:session · ns: · src:\nrec-strict-order · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:",
+      "content": "trust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-hook-window · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src-claim:\ntrust=agent-written; unreviewed; origin=memory.create; session=caller-claim · rec-secret-loc · working · created:2025-07-27 · updated:2025-07-27 · scope:session · ns: · src-claim:\ntrust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-strict-order · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src-claim:",
       "tool_call_id": "c2",
       "name": "agent_memory_search"
     },
@@ -134,8 +134,8 @@
       "rec-secret-loc",
       "rec-strict-order"
     ],
-    "estimated_prompt_tokens": 1046,
-    "state_digest": "6d280ee90f84e49e55b9bb1fcc3efc648b03ebbe48e3b894f00c0f4c11a4fb3e",
+    "estimated_prompt_tokens": 1079,
+    "state_digest": "b68788e468cc6fc0e8ce24331beac868c396120abc32badaa3cbe7055d336d5d",
     "subjects": [
       "(c1|rag|internal/notify/hookdeliver.go)",
       "(c1|rag|internal/notify/retryplan.go)",
@@ -147,9 +147,9 @@
     "stratum": "stale_vs_fresh",
     "answer_home": "conversation",
     "scenario_family": "notifier-timeout-staleness",
-    "budget": 1091,
-    "raw_state_tokens": 1819,
+    "budget": 1127,
+    "raw_state_tokens": 1878,
     "pressure_level": "critical",
-    "shed_bytes": 2353
+    "shed_bytes": 2462
   }
 }

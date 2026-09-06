@@ -19,7 +19,7 @@
     },
     {
       "role": "tool",
-      "content": "rec-capacity-cycle · working · 2025-07-27 · the capacity summary goes out monthly to whoever holds the ingest pager next\nrec-eval-default · semantic · 2025-07-27 · evaluation builds have shipped a 40 batches/min built-in default since the first release; production tenants are expected to get explicit stanzas\nrec-tenant-tags · semantic · 2025-07-27 · tenant stanzas carry team and cost-center tags; the capacity summary groups by team tag",
+      "content": "trust=agent-written; unreviewed; origin=memory.create; session=caller-claim · rec-capacity-cycle · working · 2025-07-27 · the capacity summary goes out monthly to whoever holds the ingest pager next\ntrust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-eval-default · semantic · 2025-07-27 · evaluation builds have shipped a 40 batches/min built-in default since the first release; production tenants are expected to get explicit stanzas\ntrust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-tenant-tags · semantic · 2025-07-27 · tenant stanzas carry team and cost-center tags; the capacity summary groups by team tag",
       "tool_call_id": "c2",
       "name": "agent_memory_search"
     },
@@ -43,8 +43,8 @@
       "rec-eval-default",
       "rec-tenant-tags"
     ],
-    "estimated_prompt_tokens": 178,
-    "state_digest": "f2fea8f3968c68ec3dadb3f22c9c4d810b8a3773aadef7d480e81bc49bd16e59",
+    "estimated_prompt_tokens": 237,
+    "state_digest": "931cd3080d2acbe76ed3bae1bb42bbec91dc92f8ca21d4ebeac1d375dbd38d59",
     "subjects": [
       "(c1|rag|internal/ingest/limits.go)",
       "(c1|rag|internal/ingest/tenants.go)",
@@ -56,8 +56,8 @@
     "stratum": "conversation_only",
     "answer_home": "conversation",
     "scenario_family": "tenant-default-rate-conv",
-    "budget": 1207,
-    "raw_state_tokens": 2012,
+    "budget": 1243,
+    "raw_state_tokens": 2071,
     "pressure_level": "ok",
     "shed_messages": 14,
     "shed_bytes": 6778

@@ -1474,7 +1474,7 @@ func runAgentflowAuthorWithClient(ctx context.Context, stdout, stderr io.Writer,
 	// order (#354 D10); refresh updates sysInputs, so a later -goal sees it.
 	system := plannerBasePrompt + injectedContext(sess.sysInputs)
 
-	plannerOpts := plannerModelOptions(sess.modelOptions)
+	plannerOpts := plannerModelOptions(sess.startupModelOptions)
 	req := agent.Request{
 		Goal:     f.goal,
 		System:   system,

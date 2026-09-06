@@ -60,7 +60,7 @@
     },
     {
       "role": "tool",
-      "content": "### source: \"internal/export/upload.go\"\npurpose: Shard upload pool: code default parallelism, invocation override for catch-up runs.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n--- source: \"internal/export/upload.go\" (lines 1-19, similarity: 1.00) ---\n1| package export\n2| \n3| // uploaderParallelism is the code default for concurrent shard\n4| // uploads in one export run. The pool is sized against steady-state\n5| // warehouse ingestion; catch-up runs override it from the run\n6| // invocation when the loader side is provisioned for more.\n7| const uploaderParallelism = 4\n8| \n9| // upload drains the shard queue with the configured worker count.\n10| // Workers share one retry ledger, so a shard that fails on one worker\n11| // is retried by whichever worker frees first rather than\n12| // head-blocking its original lane.\n13| func (u *Uploader) upload(shards \u003c-chan string) error {\n14| \tworkers := u.parallelism\n15| \tif workers \u003c= 0 {\n16| \t\tworkers = uploaderParallelism\n17| \t}\n18| \treturn u.pool.run(workers, shards)\n19| }\n\n### source: \"internal/export/manifest.go\"\npurpose: Shard manifests: the loader contract with ranges and checksums, written atomically.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n\n### source: \"docs/export-recovery.md\"\npurpose: Export recovery guide: shard-level resume, catch-up ordering, loader-bounded pools.\nlanguage: markdown\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n",
+      "content": "### source: \"internal/export/upload.go\"\npurpose: Shard upload pool: code default parallelism, invocation override for catch-up runs.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n--- source: \"internal/export/upload.go\" (lines 1-19, similarity: 1.00) ---\n1| package export\n2| \n3| // uploaderParallelism is the code default for concurrent shard\n4| // uploads in one export run. The pool is sized against steady-state\n5| // warehouse ingestion; catch-up runs override it from the run\n6| // invocation when the loader side is provisioned for more.\n7| const uploaderParallelism = 4\n8| \n9| // upload drains the shard queue with the configured worker count.\n10| // Workers share one retry ledger, so a shard that fails on one worker\n11| // is retried by whichever worker frees first rather than\n12| // head-blocking its original lane.\n13| func (u *Uploader) upload(shards \u003c-chan string) error {\n14| \tworkers := u.parallelism\n15| \tif workers \u003c= 0 {\n16| \t\tworkers = uploaderParallelism\n17| \t}\n18| \treturn u.pool.run(workers, shards)\n19| }\n\n### source: \"internal/export/manifest.go\"\npurpose: Shard manifests: the loader contract with ranges and checksums, written atomically.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n\n### source: \"docs/export-recovery.md\"\nlanguage: markdown\nindexed: 2025-07-27T00:00:00Z\nnote: metadata overview (summary omitted: budget)\n",
       "tool_call_id": "c1",
       "name": "retrieve"
     },
@@ -78,7 +78,7 @@
     },
     {
       "role": "tool",
-      "content": "rec-loader-window · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:\nrec-manifest-note · working · created:2025-07-27 · updated:2025-07-27 · scope:session · ns: · src:\nrec-outage-retro · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:",
+      "content": "trust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-loader-window · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src-claim:\ntrust=agent-written; unreviewed; origin=memory.create; session=caller-claim · rec-manifest-note · working · created:2025-07-27 · updated:2025-07-27 · scope:session · ns: · src-claim:\ntrust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-outage-retro · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src-claim:",
       "tool_call_id": "c2",
       "name": "agent_memory_search"
     },
@@ -102,8 +102,8 @@
       "rec-manifest-note",
       "rec-outage-retro"
     ],
-    "estimated_prompt_tokens": 1289,
-    "state_digest": "42d42e6d3d6da46862acc97533d663c674d44123095bf221acdb03442941bd52",
+    "estimated_prompt_tokens": 1329,
+    "state_digest": "c6eeb4490b755e1613373a276a843f6785e2b044208cd0e788f3ddd67930edd0",
     "subjects": [
       "(c1|rag|internal/export/upload.go)",
       "(c1|rag|internal/export/manifest.go)",
@@ -115,11 +115,11 @@
     "stratum": "cross_domain_join",
     "answer_home": "join",
     "scenario_family": "export-shard-schedule",
-    "budget": 1339,
-    "raw_state_tokens": 2231,
+    "budget": 1374,
+    "raw_state_tokens": 2290,
     "pressure_level": "critical",
     "shed_messages": 2,
-    "shed_bytes": 3225,
+    "shed_bytes": 3299,
     "omitted_subjects": 1
   }
 }

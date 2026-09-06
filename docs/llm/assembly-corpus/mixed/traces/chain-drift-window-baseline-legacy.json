@@ -50,7 +50,7 @@
       "rec-storage-rows"
     ],
     "estimated_prompt_tokens": 1170,
-    "state_digest": "b1b135c04a9e7413a6b0c2ee6d1942b3f347bfb5e1f7dcd0a00b068daabce636",
+    "state_digest": "6b7b244b5fa365e9e303e5fb221562941bfb43f6592f7921c89b0cc0421cd7d8",
     "subjects": [
       "(c1|memory|rec-baseline-freeze)",
       "(c1|memory|rec-baseline-path)",
@@ -67,10 +67,10 @@
     "stratum": "chain_retention",
     "answer_home": "join",
     "scenario_family": "drift-window-chain",
-    "budget": 1292,
-    "raw_state_tokens": 2154,
-    "pressure_level": "critical",
+    "budget": 1386,
+    "raw_state_tokens": 2310,
+    "pressure_level": "warn",
     "shed_messages": 10,
-    "shed_bytes": 3509
+    "shed_bytes": 4133
   }
 }

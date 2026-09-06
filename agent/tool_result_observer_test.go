@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -136,6 +137,83 @@ func TestOnToolResult_NormalInvoke(t *testing.T) {
 	got := rec.results[0]
 	if got.Call.Function.Name != "echo" || got.Result.IsError || got.Result.Content != `tool-said:{"x":1}` {
 		t.Fatalf("unexpected result event: %+v", got)
+	}
+}
+
+func TestRecordResultProvenanceDisposition(t *testing.T) {
+	want := json.RawMessage(`{"proposal":"accepted"}`)
+	tests := []struct {
+		name           string
+		verdict        Verdict
+		observerError  bool
+		wantErr        bool
+		wantBlocked    bool
+		wantEvent      bool
+		wantProvenance bool
+	}{
+		{name: "allow", wantEvent: true, wantProvenance: true},
+		{name: "tag", verdict: VerdictTag, wantEvent: true, wantProvenance: true},
+		{name: "block", verdict: VerdictBlock, wantBlocked: true, wantEvent: true},
+		{name: "abort", verdict: VerdictAbort, wantErr: true, wantBlocked: true},
+		{name: "observer error after acceptance", observerError: true, wantErr: true, wantEvent: true, wantProvenance: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var opts []Option
+			if tt.verdict != VerdictAllow {
+				guard := &stubInterceptor{name: "guard", input: func(in InputInspection) []Finding {
+					message := in.Messages[0]
+					return []Finding{{
+						Rule: "evidence", Verdict: tt.verdict,
+						Target: TargetMessage, StateIndex: message.StateIndex,
+					}}
+				}}
+				opts = append(opts, WithInterceptors(guard))
+			}
+			o := New(nil, ContextManager{}, opts...)
+			observer := &resultRec{}
+			if tt.observerError {
+				observer.failAt = 1
+			}
+			route := &provider.RouteOutcome{ActualModel: provider.ModelKey{Provider: "local", Model: "coder"}}
+			var result Result
+			var state State
+			batch := newBatch()
+			_, err := o.recordResult(context.Background(), &result, &state, observer, &restraintGovernor{}, 0,
+				provider.ToolCall{ID: "call-1", Function: provider.ToolCallFunction{Name: "delegate_code"}},
+				Effect{Class: Read | Network}, ToolCallRecord{Step: 0, Name: "delegate_code", Invoked: true},
+				ToolResult{Content: "proposal", Provenance: want, RouteOutcome: route, Origin: OriginModel}, false,
+				&batch, o.newInterceptorRun())
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("recordResult error = %v, wantErr %v", err, tt.wantErr)
+			}
+			if len(result.ToolCalls) != 1 {
+				t.Fatalf("ToolCalls = %d, want 1", len(result.ToolCalls))
+			}
+			record := result.ToolCalls[0]
+			if record.Blocked != tt.wantBlocked || record.IsError != tt.wantBlocked || record.RouteOutcome != route {
+				t.Fatalf("route/error bookkeeping = %+v", record)
+			}
+			if got := record.Provenance; (got != nil) != tt.wantProvenance || tt.wantProvenance && !bytes.Equal(got, want) {
+				t.Fatalf("record provenance = %s, want retained %v", got, tt.wantProvenance)
+			}
+			wantEvents := 0
+			if tt.wantEvent {
+				wantEvents = 1
+			}
+			if len(observer.results) != wantEvents {
+				t.Fatalf("observer events = %d, want %d", len(observer.results), wantEvents)
+			}
+			if tt.wantEvent {
+				event := observer.results[0]
+				if event.Blocked != tt.wantBlocked || event.Result.RouteOutcome == nil {
+					t.Fatalf("observer route/error bookkeeping = %+v", event)
+				}
+				if got := event.Result.Provenance; (got != nil) != tt.wantProvenance || tt.wantProvenance && !bytes.Equal(got, want) {
+					t.Fatalf("observer provenance = %s, want retained %v", got, tt.wantProvenance)
+				}
+			}
+		})
 	}
 }
 

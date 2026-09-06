@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -17,8 +18,9 @@ func newRecordStore(t *testing.T) *MemoryRecordStore {
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
+	db.SetMaxOpenConns(1)
 	t.Cleanup(func() { _ = db.Close() })
-	s, err := NewMemoryRecordStore(context.Background(), db)
+	s, err := NewMemoryRecordStore(context.Background(), db, RecordStoreConfig{KeyDir: filepath.Join(t.TempDir(), "keys")})
 	if err != nil {
 		t.Fatalf("NewMemoryRecordStore: %v", err)
 	}
@@ -99,6 +101,7 @@ func TestCreateProvenanceRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}
+	prov.OriginTool, prov.TrustClass = "memory.create", "agent-written"
 	if got.Provenance != prov {
 		t.Fatalf("provenance mismatch: got %+v want %+v", got.Provenance, prov)
 	}
@@ -437,6 +440,7 @@ func TestMemoryRecordsMigrationKeepsMemoriesWorking(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
+	db.SetMaxOpenConns(1)
 	t.Cleanup(func() { _ = db.Close() })
 
 	// Open BOTH stores on the same DB (shared migration chain, v1 + v2).
@@ -444,7 +448,7 @@ func TestMemoryRecordsMigrationKeepsMemoriesWorking(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewStore: %v", err)
 	}
-	if _, err := NewMemoryRecordStore(ctx, db); err != nil {
+	if _, err := NewMemoryRecordStore(ctx, db, RecordStoreConfig{KeyDir: filepath.Join(t.TempDir(), "keys")}); err != nil {
 		t.Fatalf("NewMemoryRecordStore: %v", err)
 	}
 

@@ -1,6 +1,7 @@
 package provider
 
 import (
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -380,6 +381,51 @@ func TestFIMConfigValidate(t *testing.T) {
 			err := tt.cfg.Validate()
 			if (err != nil) != tt.wantErr {
 				t.Errorf("Validate() error = %v, wantErr %v", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestModelOptionsClone(t *testing.T) {
+	literal := func() ModelOptions {
+		return ModelOptions{
+			Temperature: Ptr(0.25), TopP: Ptr(0.75), TopK: Ptr(17), NumPredict: 123,
+			NumCtx: 4567, Stop: []string{"STOP"}, RepeatPenalty: Ptr(1.2), Think: Ptr(true), ThinkEffort: "high",
+		}
+	}
+	for _, direction := range []string{"source", "clone"} {
+		t.Run(direction, func(t *testing.T) {
+			source := literal()
+			cloned := source.Clone()
+			if !reflect.DeepEqual(cloned, literal()) {
+				t.Fatalf("clone = %#v, want all literal fields", cloned)
+			}
+			target, untouched := &source, &cloned
+			if direction == "clone" {
+				target, untouched = &cloned, &source
+			}
+			*target.Temperature = 9
+			*target.TopP = 8
+			*target.TopK = 7
+			*target.RepeatPenalty = 6
+			*target.Think = false
+			target.Stop[0] = "changed"
+			if !reflect.DeepEqual(*untouched, literal()) {
+				t.Fatalf("%s mutation changed other side: %#v", direction, *untouched)
+			}
+		})
+	}
+	for _, tc := range []struct {
+		name    string
+		options ModelOptions
+	}{
+		{"nil", ModelOptions{}},
+		{"explicit zero", ModelOptions{Temperature: Ptr(0.0), TopP: Ptr(0.0), TopK: Ptr(0), RepeatPenalty: Ptr(0.0), Think: Ptr(false)}},
+		{"empty stop", ModelOptions{Stop: []string{}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.options.Clone(); !reflect.DeepEqual(got, tc.options) {
+				t.Fatalf("Clone = %#v, want %#v", got, tc.options)
 			}
 		})
 	}

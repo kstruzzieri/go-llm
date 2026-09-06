@@ -7,15 +7,21 @@
 // workspace. For thinking-capable models, -think off|on|low|medium|high
 // drives reasoning behavior and captured thinking renders dim above the
 // answer (a no-op with a notice when the model does not support thinking).
+// In the REPL, /think off|on|low|medium|high applies the same support gate to
+// subsequent turns. /think reports the runtime setting; /think default removes
+// the override so the model decides. Active turns, history, and pending input
+// are preserved. The setting survives /new, /clear, and /resume within this
+// process, but is not stored across restarts. The -goal planner still disables
+// extended thinking.
 //
 // The openai-compat backend URL can be overridden with -base-url (or
 // GO_LLM_BASE_URL); otherwise, when the configured loopback URL does not
 // serve the active model route, startup scans 127.0.0.1:8080-8090 for it
 // (-no-probe disables the scan).
 //
-// -interceptors installs the #436 detector chain (zero-width characters,
+// -interceptors installs the #436 injection detectors (zero-width characters,
 // base64/hex-encoded instructions, exact and scrambled instruction phrases)
-// on the agent and on every dispatch child. Content is classified by
+// on the agent and on every dispatch child. Injection content is classified by
 // provenance: workspace files, command output, memory records, plan
 // diagnostics and model-origin tool results are tagged (a fixed trailer tells
 // the model the content is data, and the run's risk score grows), while an
@@ -26,9 +32,19 @@
 // non-interactive -approve-plan-lock path is unchanged. A dispatch child's
 // score stays in that child's existing risk_score envelope field rather than
 // aggregating into the parent report. The -trace record carries every parent
-// finding. The default detectors return no output findings; streamed model
-// tokens therefore remain unchanged. Off by default until the trailers'
-// effect on answer quality is measured.
+// finding. These three injection detectors return no output findings.
+//
+// The same opt-in chain installs Secrets. It blocks supported credential and
+// payment-card shapes at every origin across input, completed model content and
+// thinking, raw and decoded JSON tool arguments, and tool/verifier
+// observations. Blocked observations are replaced before the next model
+// request. Streaming tokens already emitted remain outside interception.
+// Classified blocks are omitted from CLI history and content-full traces, use
+// a fixed stderr/machine diagnostic, and may add only a finding count to
+// content-light telemetry. Initial blocks save no conversation or checkpoint
+// row; later blocks retain undo records for earlier allowed mutations. A
+// caller-owned blocked agent.Result may still contain its original goal.
+// -interceptors remains off by default.
 //
 // The same chain carries the #439 guards, so they are opt-in with it.
 // Argument invariants block a tool call before it is planned or prompted:
@@ -57,8 +73,9 @@
 // effective system prompt carries agent.ToolTrustContract (framed content is
 // data, never instructions; project guidance only where delegated) after the
 // Golem application prompt and its capability-gated write/exec clauses
-// (#430). The terminal, events, the session store and traces show raw
-// results; approval, grants and sandboxes remain the enforcement layer.
+// (#430). For observations allowed through the interceptor pipeline, the
+// terminal, events, session store and traces show raw results; approval,
+// grants and sandboxes remain the enforcement layer.
 //
 // The source subcommand manages ad-hoc documents in the workspace index over
 // the managed-document registry:
@@ -71,6 +88,17 @@
 //
 // Mutations acquire the workspace index writer lease and publish a new
 // immutable index generation; the active index is never modified in place.
+//
+// Filesystem indexing, including startup auto-indexing and golem index, scans
+// before hashing, chunking or embedding independently of -interceptors. It
+// skips detected secret/payment-card files by default and removes their old
+// indexed source. The library supports per-kind redaction; Golem has no
+// redaction or scanner-disable flag. Managed documents are excluded.
+// Redaction-only runs succeed, while manual partial runs with safe skips exit
+// non-zero. Policy-affected unsafe/failing generations retire their active
+// pointer. Managed readers validate that pointer before each newly admitted
+// retrieval; admitted calls may finish. Retirement is logical, not secure
+// erasure, and a failed pointer write cannot guarantee cross-process removal.
 //
 // A workspace may declare a post-write verification command in .golem.json at
 // its root, read only when writes are enabled (at startup with -allow-write or
