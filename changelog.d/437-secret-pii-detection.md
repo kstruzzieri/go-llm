@@ -6,3 +6,5 @@
   library redaction and typed policy outcomes.
 - Retire affected managed indexes and reject stale readers after policy
   failures. Retirement is logical and does not securely erase stored bytes.
+- Document numeric-identifier false positives, detector coverage, and the
+  completed-response inspection boundary for streaming output.

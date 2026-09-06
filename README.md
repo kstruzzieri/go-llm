@@ -451,14 +451,24 @@ and heuristics, not whether a credential is active or a card account exists.
 | `private_key` | A complete matching PKCS#8, encrypted PKCS#8, RSA, EC, DSA, or OpenSSH private-key PEM envelope. |
 | `payment_card` | A maximal run containing 13–19 digits, with optional ASCII spaces/hyphens, that passes Luhn and is not one repeated digit; an overlength run is rejected whole. |
 
-Provider prefixes are case-sensitive and candidates require token boundaries.
+Payment-card detection does not check the issuer or require a nearby card label.
+Unrelated 13–19 digit identifiers or timestamps can also pass Luhn and trigger
+the same file skip/redaction or inference block. The frequency depends on the
+input; the checksum alone does not establish that a number is a payment card.
+
+Provider prefixes are case-sensitive; token boundaries use the corresponding
+row's body alphabet.
 Assignment keys are case-insensitive, treat `_` and `-` as equivalent, and are
 limited to `api_key`, `apikey`, `auth_token`, `access_token`, `refresh_token`,
 `id_token`, `token`, `secret`, `password`, `passwd`, `private_key`, and
-`authorization`. Raw scanning does not evaluate source expressions or arbitrary
-encodings. Short or low-entropy generic values and incomplete private-key
-envelopes are outside coverage, as are other PII families such as names,
-addresses, phone numbers, email addresses, and government identifiers.
+`authorization`. Raw assignments permit only ASCII space/tab around the
+separator. Raw scanning does not parse YAML block scalars, evaluate source
+expressions, or decode arbitrary encodings. Short or low-entropy generic values
+and incomplete private-key envelopes are outside coverage, as are other PII
+families such as names, addresses, phone numbers, email addresses, and government
+identifiers.
+Other provider-specific formats and PGP private-key blocks have no dedicated
+detector; the listed generic rules may still match their contents.
 
 Exemptions apply only to a complete value after trimming ASCII whitespace and
 one matching outer quote pair: the case-insensitive markers `[redacted]`,

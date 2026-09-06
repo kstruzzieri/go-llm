@@ -26,8 +26,10 @@ func (Secrets) InspectInput(_ context.Context, in agent.InputInspection) ([]agen
 	return findings, nil
 }
 
-// InspectOutput checks content and thinking separately, then every tool call's
-// raw and decoded arguments before the response is recorded or published.
+// InspectOutput checks collected content and thinking separately, deduplicating
+// their kinds under TargetOutputContent. It also checks each tool call's raw and
+// decoded arguments before recording or OnStep publication.
+// Streaming deltas precede this check.
 func (Secrets) InspectOutput(_ context.Context, out agent.OutputInspection) ([]agent.Finding, error) {
 	t := toolCallTarget("")
 	t.kind = agent.TargetOutputContent
