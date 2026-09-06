@@ -1240,6 +1240,37 @@ func TestHandleRAGIndexFileCleanTextCompatibility(t *testing.T) {
 	}
 }
 
+func TestHandleRAGIndexFailureRedactsDisplayedPaths(t *testing.T) {
+	for _, directory := range []bool{false, true} {
+		for _, phase := range []string{"read", "embed"} {
+			t.Run(fmt.Sprintf("directory=%t/%s", directory, phase), func(t *testing.T) {
+				s, _ := newRAGPolicyTestServer(t)
+				path := filepath.Join(t.TempDir(), ragPolicyTestSecret()+".md")
+				if phase == "embed" {
+					writeRAGPolicyFile(t, path, "ordinary failure")
+					if directory {
+						path = filepath.Dir(path)
+					}
+				}
+				var result *gomcp.CallToolResult
+				var err error
+				if directory {
+					result, err = s.handleRAGIndexDirectory(context.Background(), ragPolicyRequest(t, path))
+				} else {
+					result, err = s.handleRAGIndexFile(context.Background(), ragPolicyRequest(t, path))
+				}
+				if err != nil || result == nil || !result.IsError || result.StructuredContent != nil {
+					t.Fatal("ordinary indexing failure must retain the existing tool-error shape")
+				}
+				text := extractText(result)
+				if strings.Contains(text, ragPolicyTestSecret()) || !strings.Contains(text, "[REDACTED_SECRET]") {
+					t.Fatal("ordinary indexing failure disclosed a detected filename")
+				}
+			})
+		}
+	}
+}
+
 func TestHandleRAGIndexDirectoryPolicyText(t *testing.T) {
 	s, _ := newRAGPolicyTestServer(t, rag.SensitiveOpenAIToken)
 	dir := filepath.Join(t.TempDir(), ragPolicyTestSecret())

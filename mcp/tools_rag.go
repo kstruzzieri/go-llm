@@ -163,7 +163,8 @@ func (s *Server) handleRAGIndexFile(ctx context.Context, req *gomcp.CallToolRequ
 
 	status, err := indexer.IndexFileWithStatus(ctx, args.Path)
 	if err != nil && !rag.IsSafeIndexSkip(err) {
-		return toolError("rag", "index file: %v", err), nil
+		detail := err.Error()
+		return toolError("rag", "index file: %s", secretscan.Redact(detail, secretscan.Scan(detail))), nil
 	}
 	if len(status.PolicyOutcomes) > 0 {
 		return ragIndexPolicyResult(status), nil
@@ -207,7 +208,8 @@ func (s *Server) handleRAGIndexDirectory(ctx context.Context, req *gomcp.CallToo
 
 	status, err := indexer.IndexDirectoryWithStatus(ctx, args.Path, opts...)
 	if err != nil && !rag.IsSafeIndexSkip(err) {
-		return toolError("rag", "index directory: %v", err), nil
+		detail := err.Error()
+		return toolError("rag", "index directory: %s", secretscan.Redact(detail, secretscan.Scan(detail))), nil
 	}
 	if len(status.PolicyOutcomes) > 0 {
 		return ragIndexPolicyResult(status), nil
