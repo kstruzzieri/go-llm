@@ -70,16 +70,17 @@ func legacyRecordDB(t *testing.T, path string, count int) *sql.DB {
 }
 
 func TestRecordLegacyBatchesAndUserOnlyMigration(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
 	path := filepath.Join(t.TempDir(), "memories.db")
 	db := legacyRecordDB(t, path, 257)
-	if _, err := NewStore(ctx, db); err != nil {
+	if _, err := NewStore(t.Context(), db); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(path + ".keys"); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("user-only open created keys: %v", err)
 	}
+	// Bound deadlocks, not fixture disk I/O or race-instrumented CI throughput.
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	defer cancel()
 	store, err := NewMemoryRecordStore(ctx, db, RecordStoreConfig{KeyDir: path + ".keys"})
 	if err != nil {
 		t.Fatal(err)
@@ -165,7 +166,7 @@ func TestRecordLegacyRollback(t *testing.T) {
 		t.Run(failure, func(t *testing.T) {
 			db := legacyRecordDB(t, filepath.Join(t.TempDir(), "records.db"), 257)
 			config := recordTestConfig(t)
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 			defer cancel()
 			signer := &countingRecordSigner{Signer: config.Signer}
 			config.Signer = signer
@@ -207,6 +208,12 @@ func TestRecordLegacyRollback(t *testing.T) {
 			_, err := NewMemoryRecordStore(ctx, db, config)
 			if err == nil {
 				t.Fatal("import succeeded")
+			}
+			if errors.Is(err, context.DeadlineExceeded) {
+				t.Fatalf("import hit the deadlock watchdog before the intended %q failure: %v", failure, err)
+			}
+			if (failure == "later signer" || failure == "cancel") && signer.calls != 130 {
+				t.Fatalf("signer calls = %d, want 130 to reach the second batch", signer.calls)
 			}
 			if strings.Contains(err.Error(), "private-payload") {
 				t.Fatalf("payload diagnostic: %v", err)
