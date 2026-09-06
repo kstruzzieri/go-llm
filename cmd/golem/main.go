@@ -1652,6 +1652,8 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 		pressureWarn:     f.pressureWarn > 0,
 		mixed:            f.progressive,
 		grounding:        groundingSvc,
+		thinkModels:      bundle.Models,
+		thinkChain:       append([]string(nil), plan.chain...),
 		modelOptions:     thinkOpts,
 	}
 	if sess.maxSteps == 0 {

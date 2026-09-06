@@ -124,7 +124,10 @@ type replSession struct {
 	// resolved at startup.
 	grounding *groundingService
 
-	modelOptions provider.ModelOptions // per-run model options (-think)
+	thinkModels capChecker
+	thinkChain  []string
+	// modelOptions is frozen at startup for AgentFlow/planner consumers; do not read or write it for REPL turns (use runtime.ModelOptions() instead).
+	modelOptions provider.ModelOptions
 
 	// control coordinates the prompt, async notices, and Ctrl-C. nil in tests
 	// and non-interactive callers, where runREPL falls back to a plain prompt
@@ -721,6 +724,8 @@ func dispatchSlash(ctx context.Context, out io.Writer, sess *replSession, line s
 		handleAllowExec(ctx, out, sess, fields)
 	case "/git-context":
 		handleGitContext(ctx, out, sess, fields)
+	case "/think":
+		handleThink(ctx, out, sess, fields)
 	default:
 		_, _ = fmt.Fprintf(out, "unknown command: %s (try /help)\n", cmd)
 	}
@@ -856,6 +861,8 @@ const golemHelp = `commands:
   /allow-exec    enable the approval-gated command tools for the rest of this session
   /git-context refresh
                  re-capture the repository snapshot (branch, status, recent commits) in the system prompt
+  /think [off|on|low|medium|high|default]
+                 show or set reasoning control for the rest of this process
   /remember [--global] <text>
                  save a memory (workspace scope unless --global)
   /forget <id>   delete a saved memory
