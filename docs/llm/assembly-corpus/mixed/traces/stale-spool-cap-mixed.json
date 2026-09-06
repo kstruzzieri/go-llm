@@ -100,7 +100,7 @@
     },
     {
       "role": "tool",
-      "content": "### source: \"internal/spool/spool.go\"\npurpose: Spool sizing: the on-disk spool is capped at 128 MiB per node, with backpressure at the ceiling.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n--- source: \"internal/spool/spool.go\" (lines 1-13, similarity: 1.00) ---\n1| package spool\n2| \n3| // spoolMaxBytes is the per-node ceiling on total spool size. When the\n4| // ceiling is reached, ingest applies backpressure rather than letting\n5| // the spool eat the volume; the ceiling was raised during the ingest\n6| // surge work so weekend exporter outages no longer force early\n7| // retention sweeps.\n8| const spoolMaxBytes = 512 \u003c\u003c 20\n9| \n10| // hasRoom reports whether one more batch fits under the ceiling.\n11| func (s *Spool) hasRoom(batch int64) bool {\n12| \treturn s.size+batch \u003c= spoolMaxBytes\n13| }\n\n### source: \"internal/spool/segment.go\"\npurpose: Append-only spool segments: sequential naming, locked writes, fsync on rollover.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n\n### source: \"docs/spool.md\"\npurpose: Spool guide: durable buffer role, segment layout, ceiling and backpressure.\nlanguage: markdown\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n",
+      "content": "### source: \"internal/spool/spool.go\"\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nnote: metadata overview (summary omitted: budget)\n--- source: \"internal/spool/spool.go\" (lines 1-13, similarity: 1.00) ---\n1| package spool\n2| \n3| // spoolMaxBytes is the per-node ceiling on total spool size. When the\n4| // ceiling is reached, ingest applies backpressure rather than letting\n5| // the spool eat the volume; the ceiling was raised during the ingest\n6| // surge work so weekend exporter outages no longer force early\n7| // retention sweeps.\n8| const spoolMaxBytes = 512 \u003c\u003c 20\n9| \n10| // hasRoom reports whether one more batch fits under the ceiling.\n11| func (s *Spool) hasRoom(batch int64) bool {\n12| \treturn s.size+batch \u003c= spoolMaxBytes\n13| }\n\n### source: \"internal/spool/segment.go\"\npurpose: Append-only spool segments: sequential naming, locked writes, fsync on rollover.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n\n### source: \"docs/spool.md\"\npurpose: Spool guide: durable buffer role, segment layout, ceiling and backpressure.\nlanguage: markdown\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n",
       "tool_call_id": "c1",
       "name": "retrieve"
     },
@@ -118,7 +118,7 @@
     },
     {
       "role": "tool",
-      "content": "rec-capture-quota · working · created:2025-07-27 · updated:2025-07-27 · scope:session · ns: · src:\nrec-retro-scribe · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src: · surge retro scribe is from the platform side; notes go in the shared retro folder\nrec-surge-review · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:",
+      "content": "trust=agent-written; unreviewed; origin=memory.create; session=caller-claim · rec-capture-quota · working · created:2025-07-27 · updated:2025-07-27 · scope:session · ns: · src-claim:\ntrust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-retro-scribe · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src-claim: · surge retro scribe is from the platform side; notes go in the shared retro folder\ntrust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-surge-review · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src-claim:",
       "tool_call_id": "c2",
       "name": "agent_memory_search"
     },
@@ -142,8 +142,8 @@
       "rec-retro-scribe",
       "rec-surge-review"
     ],
-    "estimated_prompt_tokens": 1267,
-    "state_digest": "5169ba38e5646a4b854ce3c21ac9c50c18431813a9bbcb6184347082170fcfd5",
+    "estimated_prompt_tokens": 1304,
+    "state_digest": "686fa081ea2fcc021b6b6d054bcb2a2a1f9532ebc822d3e6cd6732fb94f93bf0",
     "subjects": [
       "(c1|rag|internal/spool/spool.go)",
       "(c1|rag|internal/spool/segment.go)",
@@ -155,9 +155,9 @@
     "stratum": "stale_vs_fresh",
     "answer_home": "rag",
     "scenario_family": "spool-cap-staleness",
-    "budget": 1318,
-    "raw_state_tokens": 2197,
+    "budget": 1353,
+    "raw_state_tokens": 2255,
     "pressure_level": "critical",
-    "shed_bytes": 2922
+    "shed_bytes": 3009
   }
 }

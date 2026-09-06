@@ -19,7 +19,7 @@
     },
     {
       "role": "tool",
-      "content": "rec-drill-cadence · semantic · 2025-07-27 · replay drills run monthly; the drill lead rotates with the oncall schedule\nrec-lab-scratch · working · 2025-07-27 · lab box scratch volume is shared with the benchmark rig; clear it before any drill or soak\nrec-replay-cursor · semantic · 2025-07-27 · replay checkpoint cursor lives at spool/replay.cursor under the data directory; delete it only with the daemon stopped or replay restarts from the oldest segment",
+      "content": "trust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-drill-cadence · semantic · 2025-07-27 · replay drills run monthly; the drill lead rotates with the oncall schedule\ntrust=agent-written; unreviewed; origin=memory.create; session=caller-claim · rec-lab-scratch · working · 2025-07-27 · lab box scratch volume is shared with the benchmark rig; clear it before any drill or soak\ntrust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-replay-cursor · semantic · 2025-07-27 · replay checkpoint cursor lives at spool/replay.cursor under the data directory; delete it only with the daemon stopped or replay restarts from the oldest segment",
       "tool_call_id": "c2",
       "name": "agent_memory_search"
     },
@@ -43,8 +43,8 @@
       "rec-lab-scratch",
       "rec-replay-cursor"
     ],
-    "estimated_prompt_tokens": 177,
-    "state_digest": "09a96fbeae2888c66f03f4724db92b97b05408501726767232b6dd1909ab54d3",
+    "estimated_prompt_tokens": 235,
+    "state_digest": "4e1eeb7fa595af1ed17707c93ecf5ad8ec78bfe031e78a82b5a0e609ce05d1dc",
     "subjects": [
       "(c1|rag|internal/replay/replay.go)",
       "(c1|rag|internal/replay/window.go)",
@@ -56,8 +56,8 @@
     "stratum": "memory_only",
     "answer_home": "memory",
     "scenario_family": "replay-cursor-note",
-    "budget": 971,
-    "raw_state_tokens": 1619,
+    "budget": 1006,
+    "raw_state_tokens": 1677,
     "pressure_level": "ok",
     "shed_messages": 10,
     "shed_bytes": 5340

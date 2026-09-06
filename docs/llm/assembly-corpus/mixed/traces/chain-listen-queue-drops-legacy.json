@@ -46,7 +46,7 @@
       "rec-review-template"
     ],
     "estimated_prompt_tokens": 180,
-    "state_digest": "d38f972396d8d95ca4c7ec5b36c90fc29186e7e616e56134533d94418c2bbd02",
+    "state_digest": "c66db04bf4412dbdca7875b234a90ab99e2d738f5043c814a4aac466b53d756c",
     "subjects": [
       "(c1|memory|rec-alarm-review)",
       "(c1|memory|rec-canary-feed)",
@@ -60,10 +60,10 @@
     "stratum": "chain_retention",
     "answer_home": "memory",
     "scenario_family": "listen-queue-chain",
-    "budget": 602,
-    "raw_state_tokens": 1004,
+    "budget": 696,
+    "raw_state_tokens": 1160,
     "pressure_level": "ok",
     "shed_messages": 4,
-    "shed_bytes": 3070
+    "shed_bytes": 3694
   }
 }

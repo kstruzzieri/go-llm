@@ -94,7 +94,7 @@
     },
     {
       "role": "tool",
-      "content": "rec-freeze-history · semantic · 2025-07-27 · exporter maintenance freezes used to lift at 04:00 UTC before the warehouse rework; the old runbook still says so\nrec-override-log · semantic · 2025-07-27 · emergency config overrides during freezes are logged in the deploy channel with the oncall lead tagged\nrec-retro-slot · working · 2025-07-27 · the migration retro slot is Monday morning; the outline lives in the migration folder",
+      "content": "trust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-freeze-history · semantic · 2025-07-27 · exporter maintenance freezes used to lift at 04:00 UTC before the warehouse rework; the old runbook still says so\ntrust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-override-log · semantic · 2025-07-27 · emergency config overrides during freezes are logged in the deploy channel with the oncall lead tagged\ntrust=agent-written; unreviewed; origin=memory.create; session=caller-claim · rec-retro-slot · working · 2025-07-27 · the migration retro slot is Monday morning; the outline lives in the migration folder",
       "tool_call_id": "c2",
       "name": "agent_memory_search"
     },
@@ -118,8 +118,8 @@
       "rec-override-log",
       "rec-retro-slot"
     ],
-    "estimated_prompt_tokens": 1177,
-    "state_digest": "73b79cb1500c4ad06f6dab731f7a12ea175353c0597533b88da7f0c8f4fecdda",
+    "estimated_prompt_tokens": 1236,
+    "state_digest": "8437f7da5c6fbfd8dd243e8d5a8cd8c1cfdd85437e196ce13255d83d03461075",
     "subjects": [
       "(c1|rag|internal/export/exporter.go)",
       "(c1|rag|internal/export/backlog.go)",
@@ -131,8 +131,8 @@
     "stratum": "conversation_only",
     "answer_home": "conversation",
     "scenario_family": "export-cutover-conv",
-    "budget": 1240,
-    "raw_state_tokens": 2066,
+    "budget": 1275,
+    "raw_state_tokens": 2125,
     "pressure_level": "critical",
     "shed_messages": 6,
     "shed_bytes": 2748

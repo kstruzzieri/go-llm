@@ -46,7 +46,7 @@
       "rec-threshold-history"
     ],
     "estimated_prompt_tokens": 949,
-    "state_digest": "7c3cc068ff6f451872174fd6109de17b5c74f71a4d3217bf160a31b45163f90c",
+    "state_digest": "59707c93d68ae08d16aea26337adca3ba9c8043fa21b5ac37978ce4e21deef78",
     "subjects": [
       "(c1|memory|rec-digest-notes)",
       "(c1|memory|rec-lab-kernel)",
@@ -59,10 +59,10 @@
     "stratum": "memory_only",
     "answer_home": "memory",
     "scenario_family": "alert-mute-mem",
-    "budget": 1023,
-    "raw_state_tokens": 1705,
+    "budget": 1054,
+    "raw_state_tokens": 1756,
     "pressure_level": "critical",
     "shed_messages": 10,
-    "shed_bytes": 2595
+    "shed_bytes": 2800
   }
 }

@@ -46,7 +46,7 @@
     },
     {
       "role": "tool",
-      "content": "rec-rack-watch · working · 2025-07-27 · the two slow racks carry the oldest disks in the fleet; watch their pressure panels during any cadence change\nrec-rollout-thread · semantic · 2025-07-27 · rollout decisions get posted to the deploy thread with a checklist link; ops mirrors them to the runbook\nrec-soak-archive · semantic · 2025-07-27 · weekend soak captures are archived to the fixture bucket Monday; prune after the retro signs off",
+      "content": "trust=agent-written; unreviewed; origin=memory.create; session=caller-claim · rec-rack-watch · working · 2025-07-27 · the two slow racks carry the oldest disks in the fleet; watch their pressure panels during any cadence change\ntrust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-rollout-thread · semantic · 2025-07-27 · rollout decisions get posted to the deploy thread with a checklist link; ops mirrors them to the runbook\ntrust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-soak-archive · semantic · 2025-07-27 · weekend soak captures are archived to the fixture bucket Monday; prune after the retro signs off",
       "tool_call_id": "c2",
       "name": "agent_memory_search"
     },
@@ -70,8 +70,8 @@
       "rec-rollout-thread",
       "rec-soak-archive"
     ],
-    "estimated_prompt_tokens": 1423,
-    "state_digest": "bd35b50d045c44bad80f97d22769c2a3973c4d13e355351611c9ac9bdc507868",
+    "estimated_prompt_tokens": 1482,
+    "state_digest": "da30da51ad736c5bc605f7efe7d3440c5406a40fcb9e4e17dfccad6db79ea6ca",
     "subjects": [
       "(c1|rag|internal/spool/spool.go)",
       "(c1|rag|internal/spool/segment.go)",
@@ -83,8 +83,8 @@
     "stratum": "conversation_only",
     "answer_home": "conversation",
     "scenario_family": "spool-flush-window",
-    "budget": 1498,
-    "raw_state_tokens": 2497,
+    "budget": 1534,
+    "raw_state_tokens": 2556,
     "pressure_level": "critical",
     "shed_messages": 14,
     "shed_bytes": 3600

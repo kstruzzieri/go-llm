@@ -92,7 +92,7 @@
     },
     {
       "role": "tool",
-      "content": "### source: \"internal/notify/pager.go\"\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nnote: metadata overview (summary omitted: budget)\n--- source: \"internal/notify/pager.go\" (lines 1-13, similarity: 1.00) ---\n1| package notify\n2| \n3| // deliverPage sends one page to the provider and waits for the\n4| // delivery verdict. The wait ceiling comes from the delivery profile;\n5| // the poll loop below owns the asynchronous acknowledgement flow the\n6| // provider introduced.\n7| func (n *Notifier) deliverPage(p Page) error {\n8| \treceipt, err := n.provider.Send(p)\n9| \tif err != nil {\n10| \t\treturn err\n11| \t}\n12| \treturn n.awaitAck(receipt)\n13| }\n\n### source: \"internal/notify/ackpoll.go\"\npurpose: Acknowledgement polling with geometric backoff and fail-safe receipt handling.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n\n### source: \"docs/paging-delivery.md\"\nlanguage: markdown\nindexed: 2025-07-27T00:00:00Z\nnote: metadata overview (summary omitted: budget)\n",
+      "content": "### source: \"internal/notify/pager.go\"\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nnote: metadata overview (summary omitted: budget)\n--- source: \"internal/notify/pager.go\" (lines 1-13, similarity: 1.00) ---\n1| package notify\n2| \n3| // deliverPage sends one page to the provider and waits for the\n4| // delivery verdict. The wait ceiling comes from the delivery profile;\n5| // the poll loop below owns the asynchronous acknowledgement flow the\n6| // provider introduced.\n7| func (n *Notifier) deliverPage(p Page) error {\n8| \treceipt, err := n.provider.Send(p)\n9| \tif err != nil {\n10| \t\treturn err\n11| \t}\n12| \treturn n.awaitAck(receipt)\n13| }\n\n### source: \"internal/notify/ackpoll.go\"\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nnote: metadata overview (summary omitted: budget)\n\n### source: \"docs/paging-delivery.md\"\nlanguage: markdown\nindexed: 2025-07-27T00:00:00Z\nnote: metadata overview (summary omitted: budget)\n",
       "tool_call_id": "c1",
       "name": "retrieve"
     },
@@ -110,7 +110,7 @@
     },
     {
       "role": "tool",
-      "content": "rec-migration-log · working · created:2025-07-27 · updated:2025-07-27 · scope:session · ns: · src:\nrec-pager-timeout · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:\nrec-pager-window · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src: · pager notifier gives up a delivery at 10 seconds",
+      "content": "trust=agent-written; unreviewed; origin=memory.create; session=caller-claim · rec-migration-log · working · created:2025-07-27 · updated:2025-07-27 · scope:session · ns: · src-claim:\ntrust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-pager-timeout · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src-claim:\ntrust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-pager-window · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src-claim: · pager notifier gives up a delivery at 10 seconds",
       "tool_call_id": "c2",
       "name": "agent_memory_search"
     },
@@ -134,8 +134,8 @@
       "rec-pager-timeout",
       "rec-pager-window"
     ],
-    "estimated_prompt_tokens": 1057,
-    "state_digest": "87bc1cd3928f625b3aae929db6888b2381b037e79f099a4a8a2ed8cd0f973b64",
+    "estimated_prompt_tokens": 1099,
+    "state_digest": "0aca63d0c77daa34d5f905cbd70188754f2d4cda03acb442f4499cbbb0077c8b",
     "subjects": [
       "(c1|rag|internal/notify/pager.go)",
       "(c1|rag|internal/notify/ackpoll.go)",
@@ -147,9 +147,9 @@
     "stratum": "stale_vs_fresh",
     "answer_home": "memory",
     "scenario_family": "notifier-timeout-staleness",
-    "budget": 1109,
-    "raw_state_tokens": 1849,
+    "budget": 1145,
+    "raw_state_tokens": 1908,
     "pressure_level": "critical",
-    "shed_bytes": 2435
+    "shed_bytes": 2504
   }
 }

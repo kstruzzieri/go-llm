@@ -19,7 +19,7 @@
     },
     {
       "role": "tool",
-      "content": "rec-alarm-review · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:\nrec-canary-feed · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:\nrec-cert-renewal · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:\nrec-drill-linkage · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:\nrec-drop-alarm · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src: · listener drop alarm moved to 200 drops/min after the tuning session\nrec-incident-retro · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:\nrec-parse-errors · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:\nrec-review-template · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:",
+      "content": "trust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-alarm-review · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src-claim:\ntrust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-canary-feed · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src-claim:\ntrust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-cert-renewal · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src-claim:\ntrust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-drill-linkage · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src-claim:\ntrust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-drop-alarm · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src-claim: · listener drop alarm moved to 200 drops/min after the tuning session\ntrust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-incident-retro · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src-claim:\ntrust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-parse-errors · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src-claim:",
       "tool_call_id": "c1",
       "name": "agent_memory_search"
     },
@@ -63,8 +63,8 @@
       "rec-parse-errors",
       "rec-review-template"
     ],
-    "estimated_prompt_tokens": 407,
-    "state_digest": "d38f972396d8d95ca4c7ec5b36c90fc29186e7e616e56134533d94418c2bbd02",
+    "estimated_prompt_tokens": 527,
+    "state_digest": "c66db04bf4412dbdca7875b234a90ab99e2d738f5043c814a4aac466b53d756c",
     "subjects": [
       "(c1|memory|rec-alarm-review)",
       "(c1|memory|rec-canary-feed)",
@@ -78,11 +78,11 @@
     "stratum": "chain_retention",
     "answer_home": "memory",
     "scenario_family": "listen-queue-chain",
-    "budget": 602,
-    "raw_state_tokens": 1004,
+    "budget": 696,
+    "raw_state_tokens": 1160,
     "pressure_level": "critical",
     "shed_messages": 2,
-    "shed_bytes": 2165,
-    "omitted_subjects": 1
+    "shed_bytes": 2308,
+    "omitted_subjects": 2
   }
 }
