@@ -18,3 +18,5 @@
   Runtime construction, replacement, status reads, and request construction use
   it to isolate published options from caller mutations. Active turns retain
   their original options through every model step.
+- Name the CLI's startup-only options explicitly, keeping AgentFlow inputs
+  distinct from the runtime's current REPL settings.

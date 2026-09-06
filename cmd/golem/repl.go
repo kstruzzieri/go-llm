@@ -126,8 +126,9 @@ type replSession struct {
 
 	thinkModels capChecker
 	thinkChain  []string
-	// modelOptions is frozen at startup for AgentFlow/planner consumers; do not read or write it for REPL turns (use runtime.ModelOptions() instead).
-	modelOptions provider.ModelOptions
+	// startupModelOptions is frozen for AgentFlow task/planner consumers.
+	// REPL turns and status use runtime.ModelOptions() instead.
+	startupModelOptions provider.ModelOptions
 
 	// control coordinates the prompt, async notices, and Ctrl-C. nil in tests
 	// and non-interactive callers, where runREPL falls back to a plain prompt

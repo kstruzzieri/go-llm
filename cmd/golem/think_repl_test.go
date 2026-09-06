@@ -104,7 +104,7 @@ func assertUnrelatedThinkOptions(t *testing.T, got provider.ModelOptions) {
 
 func TestThinkStatusUsesRuntimeOptions(t *testing.T) {
 	sess := newMountSession(t, &captureCaller{answer: "ok"}, t.TempDir())
-	sess.modelOptions = provider.ModelOptions{Think: provider.Ptr(true), ThinkEffort: "high"}
+	sess.startupModelOptions = provider.ModelOptions{Think: provider.Ptr(true), ThinkEffort: "high"}
 
 	var out strings.Builder
 	_, _ = dispatchSlash(context.Background(), &out, sess, "/think")
@@ -162,7 +162,7 @@ func TestThinkCommandModes(t *testing.T) {
 			initial.Stop = []string{"END"}
 			tool := &thinkSpecTool{name: "host_tool"}
 			sess, reg := newThinkSession(t, &captureCaller{answer: "ok"}, initial, tool)
-			sess.modelOptions = provider.ModelOptions{Think: &falseValue}
+			sess.startupModelOptions = provider.ModelOptions{Think: &falseValue}
 
 			var out strings.Builder
 			_, _ = dispatchSlash(context.Background(), &out, sess, tt.command)
