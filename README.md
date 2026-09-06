@@ -379,11 +379,26 @@ golem -root /path/to/project -allow-write
 golem -root /path/to/project -allow-write -allow-exec
 ```
 
-Inside the REPL, `/help` lists every command: sessions (`/new`, `/clear`, `/resume`, `/sessions`, `/search-sessions`, `/checkpoints`, `/undo`), memory (`/remember`, `/memories`, `/records`, `/forget`), approvals (`/grants`, `/auto-edits`, and `/allow-write` / `/allow-exec` to enable the guarded tools mid-session without restarting), background jobs (`/jobs`), the repository snapshot (`/git-context refresh`), plus `/model`, `/tools`, `/edit`, and `/exit`. Any other line is sent to the agent as the current goal.
+Inside the REPL, `/help` lists every command: sessions (`/new`, `/clear`, `/resume`, `/sessions`, `/search-sessions`, `/checkpoints`, `/undo`), memory (`/remember`, `/memories`, `/records`, `/forget`), approvals (`/grants`, `/auto-edits`, and `/allow-write` / `/allow-exec` to enable the guarded tools mid-session without restarting), background jobs (`/jobs`), the repository snapshot (`/git-context refresh`), plus `/think`, `/model`, `/tools`, `/edit`, and `/exit`. Any other line is sent to the agent as the current goal.
 
 Approval prompts that offer an `a` answer also accept "always this session", and the prompt names the grant's scope because the two classes are deliberately asymmetric: `a` on a command prompt (`a=always this command`) covers only that exact command, while `a` on an edit prompt (`a=all edits this session`) enables auto-approval for **every** write/edit in the workspace — it is `/auto-edits on`, not "always this file". `/auto-edits on|off` toggles the write/edit grant explicitly, `/grants` counts the active session grants, and `/grants clear` revokes them all without touching history. Grants are in-memory only and die with `/new`, `/clear`, a successful `/resume`, or process exit.
 
 `/allow-write` and `/allow-exec` mount exactly the tools the startup flags would, with the same approval prompts, undo journal, and post-write verification; they are one-way for the session and never grant approval by themselves. With `-scratch`, promotion stays as it was at startup and `/allow-write` says so.
+
+`/think off|on|low|medium|high` changes thinking for subsequent turns using the
+same active-chain support checks and notices as startup `-think`. An unsupported
+request leaves the previous setting in place. `/think` reports the runtime's
+current setting; `/think default` restores `default (model decides)`, which is
+different from explicit `off`. The default reset is a REPL command; startup
+`-think` still accepts only off, on, low, medium, or high.
+
+A turn reserved before the change keeps its original setting through every model
+step. Changed settings synchronously revalidate the mounted tools. Changing the
+setting preserves conversation history and pending input, and it survives `/new`,
+`/clear`, and `/resume` within the process; restarting uses startup configuration.
+Status describes the configured request: a non-thinking fallback may ignore the
+controls, and each provider maps effort to its supported behavior. Planning with
+`-goal` still disables extended thinking.
 
 When `-root` is inside a Git work tree, Golem injects one bounded repository
 snapshot into the system prompt at startup: the branch line from

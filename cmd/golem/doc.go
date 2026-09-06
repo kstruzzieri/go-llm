@@ -7,6 +7,12 @@
 // workspace. For thinking-capable models, -think off|on|low|medium|high
 // drives reasoning behavior and captured thinking renders dim above the
 // answer (a no-op with a notice when the model does not support thinking).
+// In the REPL, /think off|on|low|medium|high applies the same support gate to
+// subsequent turns. /think reports the runtime setting; /think default removes
+// the override so the model decides. Active turns, history, and pending input
+// are preserved. The setting survives /new, /clear, and /resume within this
+// process, but is not stored across restarts. The -goal planner still disables
+// extended thinking.
 //
 // The openai-compat backend URL can be overridden with -base-url (or
 // GO_LLM_BASE_URL); otherwise, when the configured loopback URL does not

@@ -457,7 +457,7 @@ func TestRunOnceFlushesMarkdownBeforeProviderError(t *testing.T) {
 	}
 }
 
-// runOnce deliberately does not put sess.modelOptions on an agent.Request of
+// runOnce deliberately does not put sess.startupModelOptions on an agent.Request of
 // its own: golem.Runtime owns model options (golem.Options.ModelOptions) and
 // stamps them onto every turn's request. This pins that the -think options
 // still reach the model through that path, so the REPL-side field is
@@ -479,15 +479,15 @@ func TestRunOnceAppliesRuntimeModelOptions(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = runtime.Close() })
 
-	// main.go sets both golem.Options.ModelOptions and replSession.modelOptions
+	// main.go sets both golem.Options.ModelOptions and replSession.startupModelOptions
 	// from the same -think value; mirror that so the test proves which one
 	// actually carries the options to the model.
 	sess := &replSession{
-		runtime:      runtime,
-		baseSystem:   system,
-		maxSteps:     16,
-		clock:        func() time.Time { return time.Unix(0, 0) },
-		modelOptions: thinkOpts,
+		runtime:             runtime,
+		baseSystem:          system,
+		maxSteps:            16,
+		clock:               func() time.Time { return time.Unix(0, 0) },
+		startupModelOptions: thinkOpts,
 	}
 	var out strings.Builder
 	if _, err := runOnce(context.Background(), &out, nil, sess, "think hard about this", nil); err != nil {

@@ -1235,9 +1235,9 @@ func TestRunAgentflowAuthor_UsesPlannerModelOptionsWithoutMutatingSession(t *tes
 			root := t.TempDir()
 			caller := &optionsCaptureCaller{}
 			sess := newTestSession(t, caller, root)
-			sess.modelOptions = tt.options
+			sess.startupModelOptions = tt.options
 			sess.budget = tt.budget
-			before, err := json.Marshal(sess.modelOptions)
+			before, err := json.Marshal(sess.startupModelOptions)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -1249,7 +1249,7 @@ func TestRunAgentflowAuthor_UsesPlannerModelOptionsWithoutMutatingSession(t *tes
 			if caller.options.NumPredict != tt.wantOutput || caller.options.Think == nil || *caller.options.Think || caller.options.ThinkEffort != "" {
 				t.Errorf("planner options = %+v, want output %d with thinking disabled", caller.options, tt.wantOutput)
 			}
-			after, err := json.Marshal(sess.modelOptions)
+			after, err := json.Marshal(sess.startupModelOptions)
 			if err != nil {
 				t.Fatal(err)
 			}
