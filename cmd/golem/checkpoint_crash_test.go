@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"os"
 	"os/exec"
@@ -34,7 +35,11 @@ func TestCheckpointCrashHelper(t *testing.T) {
 	if err != nil {
 		t.Fatalf("helper open: %v", err)
 	}
-	j := newCheckpointJournal(ws, s)
+	signer, verifier, _, err := loadMutationSigning(ctx, testGetenv(dataDir), root, s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	j := newCheckpointJournal(ws, s, signer, verifier)
 
 	ready := func() {
 		_, _ = os.Stdout.WriteString("READY\n")
@@ -58,6 +63,9 @@ func TestCheckpointCrashHelper(t *testing.T) {
 		t.Fatalf("helper prior: %v", err)
 	}
 	after := []byte("A1\n")
+	if mode == "same-byte" {
+		after = prior
+	}
 	rec := agenttools.MutationRecord{
 		Path: "a.txt", PriorContent: prior, Existed: true,
 		AfterHash: agenttools.ContentHash(after), Summary: "write a.txt", At: time.Now(),
@@ -72,7 +80,7 @@ func TestCheckpointCrashHelper(t *testing.T) {
 	if err := ws.WriteFileAtomic("a.txt", after); err != nil {
 		t.Fatalf("helper write: %v", err)
 	}
-	if mode == "renamed" {
+	if mode == "renamed" || mode == "same-byte" {
 		ready()
 	}
 	if err := p.Commit(); err != nil {
@@ -134,12 +142,13 @@ func spawnCrashHelper(t *testing.T, mode, root, dataDir string) {
 
 func TestCheckpointForwardCrashWindows(t *testing.T) {
 	cases := []struct {
-		mode        string
-		wantContent string
-		wantApplied bool
-		wantNotice  bool // recovery keeps the row and reports a checkpoint
+		mode           string
+		wantContent    string
+		wantApplied    bool
+		wantCheckpoint bool // recovery keeps the row for undo
 	}{
 		{"prepared", "A0\n", false, false},
+		{"same-byte", "A0\n", false, false},
 		{"renamed", "A1\n", false, true},
 		{"committed", "A1\n", true, true},
 	}
@@ -176,19 +185,42 @@ func TestCheckpointForwardCrashWindows(t *testing.T) {
 			if err != nil {
 				t.Fatalf("workspace: %v", err)
 			}
-			j := newCheckpointJournal(ws, s)
+			signer, verifier, _, err := loadMutationSigning(ctx, testGetenv(dataDir), root, s)
+			if err != nil {
+				t.Fatal(err)
+			}
+			j := newCheckpointJournal(ws, s, signer, verifier)
 			notice, err := j.recoverStartup(ctx)
 			if err != nil {
 				t.Fatalf("recoverStartup: %v", err)
 			}
-			if (notice != "") != c.wantNotice {
-				t.Fatalf("notice = %q, wantNotice=%v", notice, c.wantNotice)
+			if notice == "" || strings.Contains(notice, "unconfirmed") == c.wantApplied {
+				t.Fatalf("recovery evidence notice = %q", notice)
+			}
+			entries, err := s.scanReceipts(ctx, 0, 100)
+			if err != nil || len(entries) != 1 || (entries[0].appliedJSON != nil) != c.wantApplied {
+				t.Fatalf("crash evidence = %d,%v", len(entries), err)
+			}
+			rawIntent, rawApplied := append([]byte(nil), entries[0].intentJSON...), append([]byte(nil), entries[0].appliedJSON...)
+			if err := agenttools.VerifyMutationReceipt(ctx, verifier, mustDecodeCrashReceipt(t, rawIntent)); err != nil {
+				t.Fatal(err)
+			}
+			j.signer = journalTestSigner{Signer: j.signer, sign: func(context.Context, agenttools.MutationReceiptBody) error {
+				t.Fatal("recovery signed historical success")
+				return nil
+			}}
+			if next, err := j.recoverStartup(ctx); next != "" || err != nil {
+				t.Fatalf("repeated recovery = %q,%v", next, err)
+			}
+			entries, err = s.scanReceipts(ctx, 0, 100)
+			if err != nil || len(entries) != 1 || !bytes.Equal(entries[0].intentJSON, rawIntent) || !bytes.Equal(entries[0].appliedJSON, rawApplied) {
+				t.Fatal("recovery changed/duplicated evidence")
 			}
 			infos, err := s.list(ctx)
 			if err != nil {
 				t.Fatalf("list: %v", err)
 			}
-			if !c.wantNotice {
+			if !c.wantCheckpoint {
 				if len(infos) != 0 {
 					t.Fatalf("infos = %+v, want the never-landed intent dropped", infos)
 				}
@@ -197,6 +229,7 @@ func TestCheckpointForwardCrashWindows(t *testing.T) {
 			if len(infos) != 1 || infos[0].state != checkpointCompleted || infos[0].files != 1 {
 				t.Fatalf("infos = %+v, want one completed recovered checkpoint", infos)
 			}
+			j.signer = signer
 			// The recovered checkpoint is undoable: revert A1 back to A0.
 			var undoOut strings.Builder
 			j.undo(ctx, &undoOut, 1)
@@ -224,7 +257,11 @@ func TestCheckpointUndoCrashResume(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
-	j := newCheckpointJournal(ws, s)
+	signer, verifier, _, err := loadMutationSigning(ctx, testGetenv(dataDir), root, s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	j := newCheckpointJournal(ws, s, signer, verifier)
 	if err := j.beginTurn(ctx, "crash turn", func() {}); err != nil {
 		t.Fatalf("beginTurn: %v", err)
 	}
@@ -281,7 +318,11 @@ func TestCheckpointUndoCrashResume(t *testing.T) {
 		}
 	}
 
-	j2 := newCheckpointJournal(ws, s2)
+	signer2, verifier2, _, err := loadMutationSigning(ctx, testGetenv(dataDir), root, s2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	j2 := newCheckpointJournal(ws, s2, signer2, verifier2)
 	var out strings.Builder
 	j2.undo(ctx, &out, 1)
 	if !strings.Contains(out.String(), "resumed interrupted undo") {
@@ -296,5 +337,89 @@ func TestCheckpointUndoCrashResume(t *testing.T) {
 	infos, err := s2.list(ctx)
 	if err != nil || len(infos) != 0 {
 		t.Fatalf("infos = %+v, %v — checkpoint deleted only after full restore", infos, err)
+	}
+}
+
+func mustDecodeCrashReceipt(t *testing.T, raw []byte) agenttools.MutationReceipt {
+	t.Helper()
+	receipt, err := agenttools.DecodeMutationReceipt(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return receipt
+}
+
+func TestCheckpointCrashRecoveryConservativeStates(t *testing.T) {
+	for _, state := range []string{"prior", "expected", "divergent", "unreadable"} {
+		t.Run(state, func(t *testing.T) {
+			root, data := t.TempDir(), t.TempDir()
+			target := filepath.Join(root, "a.txt")
+			if err := os.WriteFile(target, []byte("A0\n"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			spawnCrashHelper(t, "prepared", root, data)
+			switch state {
+			case "expected":
+				if err := os.WriteFile(target, []byte("A1\n"), 0600); err != nil {
+					t.Fatal(err)
+				}
+			case "divergent":
+				if err := os.WriteFile(target, []byte("external"), 0600); err != nil {
+					t.Fatal(err)
+				}
+			case "unreadable":
+				if err := os.Remove(target); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Mkdir(target, 0700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			ctx := context.Background()
+			s, err := openCheckpointStore(ctx, testGetenv(data), root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer s.Close()
+			_, j, _, err := buildWriteTools(root, s, testGetenv(data))
+			if err != nil {
+				t.Fatal(err)
+			}
+			j.signer = journalTestSigner{Signer: j.signer, sign: func(context.Context, agenttools.MutationReceiptBody) error {
+				t.Fatal("recovery signed historical success")
+				return nil
+			}}
+			before, err := s.scanReceipts(ctx, 0, 10)
+			if err != nil || len(before) != 1 {
+				t.Fatal("missing crash intent")
+			}
+			for range 2 {
+				notice, err := j.recoverStartup(ctx)
+				if (err != nil) != (state == "unreadable") {
+					t.Fatalf("classify %s: %q,%v", state, notice, err)
+				}
+			}
+			after, err := s.scanReceipts(ctx, 0, 10)
+			if err != nil || len(after) != 1 || after[0].appliedJSON != nil || !bytes.Equal(before[0].intentJSON, after[0].intentJSON) {
+				t.Fatal("recovery fabricated/replaced evidence")
+			}
+			infos, err := s.list(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if state == "prior" {
+				if len(infos) != 0 {
+					t.Fatal("prior checkpoint retained")
+				}
+				return
+			}
+			want := checkpointCompleted
+			if state == "unreadable" {
+				want = checkpointOpen
+			}
+			if len(infos) != 1 || infos[0].state != want || infos[0].files != 1 && state != "unreadable" {
+				t.Fatalf("classification = %+v", infos)
+			}
+		})
 	}
 }

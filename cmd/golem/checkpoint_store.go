@@ -376,29 +376,10 @@ func deleteCheckpointTx(ctx context.Context, tx *sql.Tx, cpID int64, wantState c
 	return nil
 }
 
-// prepareIntent persists one write-ahead mutation intent (applied = 0) for the
-// current turn, lazily creating the turn's open checkpoint, all in one
-// transaction with strict size admission (D8): oldest completed checkpoints
-// are pruned until the intent fits, and if protected open/undoing rows leave
-// insufficient capacity the intent is refused with errCheckpointQuota before
-// any workspace write happens. A refused admission rolls back, so pruning
-// only commits together with the accepted intent.
-// Temporary compatibility entrypoint for Task 3's unsigned callers. Remove
-// with journal integration; new journal-managed records use prepareSignedIntent.
-func (s *checkpointStore) prepareIntent(ctx context.Context, goal string, at time.Time, rec agenttools.MutationRecord) (int64, int64, error) {
-	return s.prepareCheckpointIntent(ctx, goal, at, rec, nil)
-}
-
-// prepareSignedIntent requires canonical signed evidence. The caller authenticates
-// its signature; storage validates canonical bytes and checkpoint metadata binding.
-func (s *checkpointStore) prepareSignedIntent(ctx context.Context, goal string, at time.Time, rec agenttools.MutationRecord, intentJSON []byte) (int64, int64, error) {
-	if len(intentJSON) == 0 {
-		return 0, 0, errors.New("golem: forward intent evidence required")
-	}
-	return s.prepareCheckpointIntent(ctx, goal, at, rec, intentJSON)
-}
-
-func (s *checkpointStore) prepareCheckpointIntent(ctx context.Context, goal string, at time.Time, rec agenttools.MutationRecord, intentJSON []byte) (cpID, fileID int64, err error) {
+// prepareSignedIntent persists canonical signed evidence and its snapshot in one
+// transaction with strict size admission. Pruning commits only with accepted
+// evidence. The caller authenticates the signature; storage binds its metadata.
+func (s *checkpointStore) prepareSignedIntent(ctx context.Context, goal string, at time.Time, rec agenttools.MutationRecord, intentJSON []byte) (cpID, fileID int64, err error) {
 	path := canonicalCheckpointPath(rec.Path)
 	priorHash := ""
 	existed := 0
@@ -406,23 +387,18 @@ func (s *checkpointStore) prepareCheckpointIntent(ctx context.Context, goal stri
 		priorHash = agenttools.ContentHash(rec.PriorContent)
 		existed = 1
 	}
-	var mutationID any // NULL only through the temporary legacy wrapper.
-	if intentJSON != nil {
-		intent, err := decodeStoredMutationReceipt(intentJSON)
-		if err != nil {
-			return 0, 0, err
-		}
-		f := checkpointFile{path: path, priorHash: priorHash, existed: rec.Existed, afterHash: rec.AfterHash, afterMode: rec.AfterMode, trackedMode: rec.TrackedMode}
-		if err := s.bindForwardReceipt(f, intent); err != nil {
-			return 0, 0, err
-		}
-		mutationID = intent.Body.MutationID
+	intent, err := decodeStoredMutationReceipt(intentJSON)
+	if err != nil {
+		return 0, 0, err
 	}
+	f := checkpointFile{path: path, priorHash: priorHash, existed: rec.Existed, afterHash: rec.AfterHash, afterMode: rec.AfterMode, trackedMode: rec.TrackedMode}
+	if err := s.bindForwardReceipt(f, intent); err != nil {
+		return 0, 0, err
+	}
+	mutationID := intent.Body.MutationID
 	err = s.execTx(ctx, func(tx *sql.Tx) error {
-		if mutationID != nil {
-			if _, err := tx.ExecContext(ctx, `INSERT INTO mutation_receipts (mutation_id, intent_json) VALUES (?, ?)`, mutationID, string(intentJSON)); err != nil {
-				return fmt.Errorf("golem: insert forward intent: %w", err)
-			}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO mutation_receipts (mutation_id, intent_json) VALUES (?, ?)`, mutationID, string(intentJSON)); err != nil {
+			return fmt.Errorf("golem: insert forward intent: %w", err)
 		}
 		newBytes := int64(len(rec.PriorContent))
 		for {
@@ -486,22 +462,6 @@ func (s *checkpointStore) prepareCheckpointIntent(ctx context.Context, goal stri
 		return 0, 0, err
 	}
 	return cpID, fileID, nil
-}
-
-// commitIntent is a temporary Task 3 compatibility wrapper for unsigned rows.
-// Signed rows require commitSignedIntent or explicit conservative recovery.
-func (s *checkpointStore) commitIntent(ctx context.Context, fileID int64) error {
-	return s.execTx(ctx, func(tx *sql.Tx) error {
-		res, err := tx.ExecContext(ctx,
-			`UPDATE checkpoint_files SET applied = 1
-			 WHERE id = ? AND applied = 0 AND forward_mutation_id IS NULL
-			   AND checkpoint_id IN (SELECT id FROM checkpoints WHERE state = ?)`,
-			fileID, checkpointOpen)
-		if err != nil {
-			return fmt.Errorf("golem: checkpoint commit intent %d: %w", fileID, err)
-		}
-		return requireOneRow(res, fmt.Sprintf("commit intent %d", fileID))
-	})
 }
 
 // abortIntent discards a prepared row whose workspace write failed.

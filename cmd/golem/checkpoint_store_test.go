@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -305,8 +306,7 @@ func TestCheckpointLeaseContendsAcrossProcesses(t *testing.T) {
 
 var testNow = time.Date(2026, 8, 25, 21, 0, 0, 0, time.UTC)
 
-// testRec builds a MutationRecord for store tests. AfterHash is synthetic:
-// the store persists, it never validates hashes.
+// testRec builds a valid synthetic transition for signed store fixtures.
 func testRec(path, prior string, existed bool) agenttools.MutationRecord {
 	var pc []byte
 	if existed {
@@ -314,14 +314,14 @@ func testRec(path, prior string, existed bool) agenttools.MutationRecord {
 	}
 	return agenttools.MutationRecord{
 		Path: path, PriorContent: pc, Existed: existed,
-		AfterHash: "after-" + path, Summary: "write " + path, At: testNow,
+		AfterHash: agenttools.ContentHash([]byte("after-" + path)), Summary: "write " + path, At: testNow,
 	}
 }
 
 // mustPrepare inserts one intent, failing the test on error.
 func mustPrepare(t *testing.T, s *checkpointStore, goal string, rec agenttools.MutationRecord) (int64, int64) {
 	t.Helper()
-	cpID, fileID, err := s.prepareIntent(context.Background(), goal, testNow, rec)
+	cpID, fileID, err := s.testPrepareIntent(context.Background(), goal, testNow, rec)
 	if err != nil {
 		t.Fatalf("prepareIntent(%s): %v", rec.Path, err)
 	}
@@ -334,11 +334,11 @@ func sealAppliedCheckpoint(t *testing.T, s *checkpointStore, goal string, priorB
 	t.Helper()
 	ctx := context.Background()
 	rec := testRec("f.txt", strings.Repeat("x", priorBytes), true)
-	cpID, fileID, err := s.prepareIntent(ctx, goal, testNow, rec)
+	cpID, fileID, err := s.testPrepareIntent(ctx, goal, testNow, rec)
 	if err != nil {
 		t.Fatalf("prepareIntent: %v", err)
 	}
-	if err := s.commitIntent(ctx, fileID); err != nil {
+	if err := s.testCommitIntent(ctx, fileID); err != nil {
 		t.Fatalf("commitIntent: %v", err)
 	}
 	if err := s.seal(ctx, cpID); err != nil {
@@ -406,10 +406,10 @@ func TestCheckpointStoreCommitAbortOnlyUnapplied(t *testing.T) {
 	s := openTestStore(t, t.TempDir())
 	ctx := context.Background()
 	_, f1 := mustPrepare(t, s, "g", testRec("a.go", "A0", true))
-	if err := s.commitIntent(ctx, f1); err != nil {
+	if err := s.testCommitIntent(ctx, f1); err != nil {
 		t.Fatalf("commit: %v", err)
 	}
-	if err := s.commitIntent(ctx, f1); err == nil {
+	if err := s.testCommitIntent(ctx, f1); err == nil {
 		t.Fatal("second commit of an applied row must fail")
 	}
 	if err := s.abortIntent(ctx, f1); err == nil {
@@ -422,7 +422,7 @@ func TestCheckpointStoreCommitAbortOnlyUnapplied(t *testing.T) {
 	if err := s.abortIntent(ctx, f2); err == nil {
 		t.Fatal("second abort of a deleted row must fail")
 	}
-	if err := s.commitIntent(ctx, f2); err == nil {
+	if err := s.testCommitIntent(ctx, f2); err == nil {
 		t.Fatal("commit of an aborted row must fail")
 	}
 }
@@ -434,7 +434,7 @@ func TestCheckpointStoreSealRequiresZeroUnapplied(t *testing.T) {
 	if err := s.seal(ctx, cp); err == nil {
 		t.Fatal("seal with an unapplied intent must fail")
 	}
-	if err := s.commitIntent(ctx, f1); err != nil {
+	if err := s.testCommitIntent(ctx, f1); err != nil {
 		t.Fatalf("commit: %v", err)
 	}
 	if err := s.seal(ctx, cp); err != nil {
@@ -467,7 +467,7 @@ func TestCheckpointStoreMarkUndoingOnlyCompleted(t *testing.T) {
 	if err := s.markUndoing(ctx, []int64{cp}); err == nil {
 		t.Fatal("markUndoing on an open checkpoint must fail")
 	}
-	if err := s.commitIntent(ctx, f1); err != nil {
+	if err := s.testCommitIntent(ctx, f1); err != nil {
 		t.Fatalf("commit: %v", err)
 	}
 	if err := s.seal(ctx, cp); err != nil {
@@ -485,7 +485,7 @@ func TestCheckpointStoreMarkRestoredRequiresUndoing(t *testing.T) {
 	s := openTestStore(t, t.TempDir())
 	ctx := context.Background()
 	cp, f1 := mustPrepare(t, s, "g", testRec("a.go", "A0", true))
-	if err := s.commitIntent(ctx, f1); err != nil {
+	if err := s.testCommitIntent(ctx, f1); err != nil {
 		t.Fatalf("commit: %v", err)
 	}
 	if err := s.seal(ctx, cp); err != nil {
@@ -509,7 +509,7 @@ func TestCheckpointStoreDeleteRestoredGuards(t *testing.T) {
 	s := openTestStore(t, t.TempDir())
 	ctx := context.Background()
 	cp, f1 := mustPrepare(t, s, "g", testRec("a.go", "A0", true))
-	if err := s.commitIntent(ctx, f1); err != nil {
+	if err := s.testCommitIntent(ctx, f1); err != nil {
 		t.Fatalf("commit: %v", err)
 	}
 	if err := s.seal(ctx, cp); err != nil {
@@ -570,7 +570,7 @@ func TestCheckpointRetentionSizeBoundaryAndRefusal(t *testing.T) {
 
 	// Admission of a third 100-byte intent must prune the oldest completed
 	// checkpoint (200+100 > 250 -> drop first -> 200 <= 250).
-	cp3, f3, err := s.prepareIntent(ctx, "three", testNow, testRec("c.txt", strings.Repeat("x", 100), true))
+	cp3, f3, err := s.testPrepareIntent(ctx, "three", testNow, testRec("c.txt", strings.Repeat("x", 100), true))
 	if err != nil {
 		t.Fatalf("prepareIntent: %v", err)
 	}
@@ -579,7 +579,7 @@ func TestCheckpointRetentionSizeBoundaryAndRefusal(t *testing.T) {
 	if !slices.Equal(got, want) {
 		t.Fatalf("ids = %v, want %v (oldest completed pruned at admission)", got, want)
 	}
-	if err := s.commitIntent(ctx, f3); err != nil {
+	if err := s.testCommitIntent(ctx, f3); err != nil {
 		t.Fatalf("commit: %v", err)
 	}
 	if err := s.seal(ctx, cp3); err != nil {
@@ -588,7 +588,7 @@ func TestCheckpointRetentionSizeBoundaryAndRefusal(t *testing.T) {
 
 	// An intent that cannot fit even after pruning every completed checkpoint
 	// is refused, and the rollback keeps existing history intact.
-	_, _, err = s.prepareIntent(ctx, "huge", testNow, testRec("d.txt", strings.Repeat("x", 300), true))
+	_, _, err = s.testPrepareIntent(ctx, "huge", testNow, testRec("d.txt", strings.Repeat("x", 300), true))
 	if !errors.Is(err, errCheckpointQuota) {
 		t.Fatalf("err = %v, want errCheckpointQuota", err)
 	}
@@ -603,7 +603,7 @@ func TestCheckpointRetentionSizeBoundaryAndRefusal(t *testing.T) {
 	s2 := openTestStore(t, t.TempDir())
 	s2.maxPriorBytes = 250
 	only := sealAppliedCheckpoint(t, s2, "only", 200)
-	cpN, _, err := s2.prepareIntent(ctx, "new", testNow, testRec("n.txt", strings.Repeat("x", 100), true))
+	cpN, _, err := s2.testPrepareIntent(ctx, "new", testNow, testRec("n.txt", strings.Repeat("x", 100), true))
 	if err != nil {
 		t.Fatalf("admission must prune the newest completed too (no D8 exemption): %v", err)
 	}
@@ -626,7 +626,7 @@ func TestCheckpointRetentionProtectsActiveStates(t *testing.T) {
 
 	// Size pressure: 200 held by protected states + 100 new > 250, and no
 	// completed victim exists -> refusal, both protected rows survive.
-	_, _, err := s.prepareIntent(ctx, "pressure", testNow, testRec("p.txt", strings.Repeat("z", 100), true))
+	_, _, err := s.testPrepareIntent(ctx, "pressure", testNow, testRec("p.txt", strings.Repeat("z", 100), true))
 	if !errors.Is(err, errCheckpointQuota) {
 		t.Fatalf("err = %v, want errCheckpointQuota (open/undoing are never pruned)", err)
 	}
@@ -660,13 +660,13 @@ func TestCheckpointFilesStayPrivateAfterEveryMutation(t *testing.T) {
 	}
 
 	loosen()
-	cp, f1, err := s.prepareIntent(ctx, "g", testNow, testRec("a.go", "A0", true))
+	cp, f1, err := s.testPrepareIntent(ctx, "g", testNow, testRec("a.go", "A0", true))
 	if err != nil {
 		t.Fatalf("prepare: %v", err)
 	}
 	assertPrivate("prepareIntent")
 	loosen()
-	if err := s.commitIntent(ctx, f1); err != nil {
+	if err := s.testCommitIntent(ctx, f1); err != nil {
 		t.Fatalf("commit: %v", err)
 	}
 	assertPrivate("commitIntent")
@@ -700,11 +700,11 @@ func TestCheckpointStoreSanitizesGoal(t *testing.T) {
 		{strings.Repeat("é", 200), strings.Repeat("é", 160)}, // rune-safe truncation
 	}
 	for i, c := range cases {
-		cp, f, err := s.prepareIntent(context.Background(), c.in, testNow, testRec(fmt.Sprintf("f%d.txt", i), "p", true))
+		cp, f, err := s.testPrepareIntent(context.Background(), c.in, testNow, testRec(fmt.Sprintf("f%d.txt", i), "p", true))
 		if err != nil {
 			t.Fatalf("prepare: %v", err)
 		}
-		if err := s.commitIntent(context.Background(), f); err != nil {
+		if err := s.testCommitIntent(context.Background(), f); err != nil {
 			t.Fatalf("commit: %v", err)
 		}
 		if err := s.seal(context.Background(), cp); err != nil {
@@ -723,11 +723,11 @@ func TestCheckpointStoreSanitizesGoal(t *testing.T) {
 func TestCheckpointStoreCanonicalizesStoredPath(t *testing.T) {
 	s := openTestStore(t, t.TempDir())
 	ctx := context.Background()
-	cp, f, err := s.prepareIntent(ctx, "g", testNow, testRec("./x/../a.go", "A0", true))
+	cp, f, err := s.testPrepareIntent(ctx, "g", testNow, testRec("./x/../a.go", "A0", true))
 	if err != nil {
 		t.Fatalf("prepare: %v", err)
 	}
-	if err := s.commitIntent(ctx, f); err != nil {
+	if err := s.testCommitIntent(ctx, f); err != nil {
 		t.Fatalf("commit: %v", err)
 	}
 	if err := s.seal(ctx, cp); err != nil {
@@ -752,7 +752,7 @@ func TestCheckpointStoreLoadsAppliedRowsNewestFirst(t *testing.T) {
 	_, f2 := mustPrepare(t, s, "g", testRec("b.go", "B0", true))
 	_, f3 := mustPrepare(t, s, "g", testRec("c.go", "", false))
 	for _, f := range []int64{f1, f2} {
-		if err := s.commitIntent(ctx, f); err != nil {
+		if err := s.testCommitIntent(ctx, f); err != nil {
 			t.Fatalf("commit: %v", err)
 		}
 	}
@@ -778,7 +778,7 @@ func TestCheckpointStoreLoadsAppliedRowsNewestFirst(t *testing.T) {
 		t.Fatalf("order = %s, %s want b.go, a.go", g.files[0].path, g.files[1].path)
 	}
 	f := g.files[1]
-	if string(f.priorContent) != "A0" || !f.existed || f.afterHash != "after-a.go" ||
+	if string(f.priorContent) != "A0" || !f.existed || f.afterHash != agenttools.ContentHash([]byte("after-a.go")) ||
 		f.priorHash != agenttools.ContentHash([]byte("A0")) || !f.applied || f.restored {
 		t.Fatalf("file = %+v", f)
 	}
@@ -796,14 +796,14 @@ func TestCheckpointStoreSchemaV2TrackedModeRoundTrip(t *testing.T) {
 	if version != 3 {
 		t.Fatalf("fresh store version = %d, want 3", version)
 	}
-	cpID, _, err := s.prepareIntent(ctx, "goal", time.Now(), agenttools.MutationRecord{
-		Path: "promoted.txt", AfterHash: "abc", TrackedMode: true, AfterMode: 0o640, At: time.Now(),
+	cpID, _, err := s.testPrepareIntent(ctx, "goal", time.Now(), agenttools.MutationRecord{
+		Path: "promoted.txt", AfterHash: agenttools.ContentHash([]byte("abc")), TrackedMode: true, AfterMode: 0o640, At: time.Now(),
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := s.prepareIntent(ctx, "goal", time.Now(), agenttools.MutationRecord{
-		Path: "legacy.txt", AfterHash: "def", At: time.Now(),
+	if _, _, err := s.testPrepareIntent(ctx, "goal", time.Now(), agenttools.MutationRecord{
+		Path: "legacy.txt", AfterHash: agenttools.ContentHash([]byte("def")), At: time.Now(),
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -1110,9 +1110,6 @@ func TestCheckpointStoreSignedForwardAtomic(t *testing.T) {
 	entry, err := s.loadReceipt(ctx, body.MutationID)
 	if err != nil || !bytes.Equal(entry.intentJSON, intent) || entry.appliedJSON != nil || entry.sequence != 1 {
 		t.Fatalf("prepared evidence = %+v, %v", entry, err)
-	}
-	if err := s.commitIntent(ctx, f); err == nil {
-		t.Fatal("unsigned commit accepted a signed row")
 	}
 	applied := storeApplied(t, body)
 	checkpointSQL(t, s.db, `CREATE TRIGGER fail_forward BEFORE UPDATE OF applied ON checkpoint_files BEGIN SELECT RAISE(ABORT, 'test rollback'); END`)
@@ -1627,6 +1624,7 @@ func TestCheckpointStoreSignedRecoveryRefusesMissingEvidence(t *testing.T) {
 	s := openTestStore(t, t.TempDir())
 	ctx := context.Background()
 	_, f := mustPrepare(t, s, "legacy", testRec("a", "old", true))
+	checkpointSQL(t, s.db, `UPDATE checkpoint_files SET forward_mutation_id = NULL WHERE id = ?`, f)
 	for _, op := range []func(context.Context, int64) error{s.recoverCommitIntent, s.recoverDropIntent, s.recoverRestored} {
 		if err := op(ctx, f); err == nil {
 			t.Fatal("signed recovery inferred permission from legacy NULL reference")
@@ -1662,6 +1660,7 @@ func TestCheckpointStoreMetadataPreservesReferenceNullness(t *testing.T) {
 	s := openTestStore(t, t.TempDir())
 	ctx := context.Background()
 	cp, f := mustPrepare(t, s, "legacy", testRec("a", "old", true))
+	checkpointSQL(t, s.db, `UPDATE checkpoint_files SET forward_mutation_id = NULL WHERE id = ?`, f)
 	files, err := s.loadFileMetadata(ctx, cp, false)
 	if err != nil {
 		t.Fatal(err)
@@ -1703,4 +1702,64 @@ func TestCheckpointStoreRejectsInvalidStoredModesBeforeConversion(t *testing.T) 
 			}
 		})
 	}
+}
+
+// testPrepareIntent/testCommitIntent are signed fixture builders, not production
+// compatibility paths. Explicit migration fixtures above remain unsigned SQL.
+func (s *checkpointStore) testPrepareIntent(ctx context.Context, goal string, at time.Time, rec agenttools.MutationRecord) (int64, int64, error) {
+	signer, err := signing.NewHMAC(bytes.Repeat([]byte{0x42}, 32))
+	if err != nil {
+		return 0, 0, err
+	}
+	before := "absent"
+	if rec.Existed {
+		before = agenttools.ContentHash(rec.PriorContent)
+	}
+	body := agenttools.MutationReceiptBody{Kind: "intent", MutationID: rand.Text(), WorkspaceHash: s.workspaceHash, Path: canonicalCheckpointPath(rec.Path), BeforeHash: before, AfterHash: rec.AfterHash, AgentID: signer.KeyID(), Timestamp: at.UTC().Format(time.RFC3339Nano)}
+	if rec.TrackedMode {
+		mode := uint32(rec.AfterMode)
+		body.AfterMode = &mode
+	}
+	receipt, err := agenttools.SignMutationReceipt(ctx, signer, body)
+	if err != nil {
+		return 0, 0, err
+	}
+	raw, err := signing.MarshalCanonical(receipt)
+	if err != nil {
+		return 0, 0, err
+	}
+	return s.prepareSignedIntent(ctx, goal, at, rec, raw)
+}
+func (s *checkpointStore) testCommitIntent(ctx context.Context, fileID int64) error {
+	var id string
+	if err := s.db.QueryRowContext(ctx, `SELECT forward_mutation_id FROM checkpoint_files WHERE id = ?`, fileID).Scan(&id); err != nil {
+		return err
+	}
+	entry, err := s.loadReceipt(ctx, id)
+	if err != nil {
+		return err
+	}
+	intent, err := decodeStoredMutationReceipt(entry.intentJSON)
+	if err != nil {
+		return err
+	}
+	signer, err := signing.NewHMAC(bytes.Repeat([]byte{0x42}, 32))
+	if err != nil {
+		return err
+	}
+	body := intent.Body
+	body.Kind = "applied"
+	receipt, err := agenttools.SignMutationReceipt(ctx, signer, body)
+	if err != nil {
+		return err
+	}
+	raw, err := signing.MarshalCanonical(receipt)
+	if err != nil {
+		return err
+	}
+	return s.commitSignedIntent(ctx, fileID, raw)
+}
+
+func testStoreGetenv(s *checkpointStore) func(string) string {
+	return testGetenv(filepath.Dir(filepath.Dir(filepath.Dir(s.dbPath))))
 }

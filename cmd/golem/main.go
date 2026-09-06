@@ -1295,9 +1295,12 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 				return err
 			}
 		}
-		wt, j, werr := buildWriteTools(root, cpStore)
+		wt, j, identityNotice, werr := buildWriteTools(root, cpStore, os.Getenv)
 		if werr != nil {
 			return werr
+		}
+		if identityNotice != "" {
+			warns = append(warns, identityNotice)
 		}
 		notice, rerr := j.recoverStartup(ctx)
 		if rerr != nil {

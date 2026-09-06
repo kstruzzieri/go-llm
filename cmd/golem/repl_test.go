@@ -943,7 +943,8 @@ func newWriteEnabledTestSession(t *testing.T, caller agent.ModelCaller, root str
 	if err != nil {
 		t.Fatalf("buildTools: %v", err)
 	}
-	writeTools, journal, err := buildWriteTools(root, openTestStore(t, root))
+	store := openTestStore(t, root)
+	writeTools, journal, _, err := buildWriteTools(root, store, testStoreGetenv(store))
 	if err != nil {
 		t.Fatalf("buildWriteTools: %v", err)
 	}
@@ -1864,7 +1865,8 @@ func (c *errAfterCaller) Chat(ctx context.Context, req provider.ChatRequest, onT
 // scripted writes auto-approve.
 func newCheckpointWriteSession(t *testing.T, caller agent.ModelCaller, root string) (*replSession, *checkpointJournal) {
 	t.Helper()
-	writeTools, journal, err := buildWriteTools(root, openTestStore(t, root))
+	store := openTestStore(t, root)
+	writeTools, journal, _, err := buildWriteTools(root, store, testStoreGetenv(store))
 	if err != nil {
 		t.Fatalf("buildWriteTools: %v", err)
 	}

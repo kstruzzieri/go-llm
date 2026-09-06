@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/kstruzzieri/go-llm/agent"
 	agenttools "github.com/kstruzzieri/go-llm/agent/tools"
+	"github.com/kstruzzieri/go-llm/signing"
 )
 
 // newJournalFixture builds a checkpointJournal over a real Workspace and a
@@ -26,7 +28,7 @@ func newJournalFixture(t *testing.T) (*checkpointJournal, []agent.Tool, string) 
 		t.Fatalf("NewWorkspace: %v", err)
 	}
 	s := openTestStore(t, root)
-	j := newCheckpointJournal(ws, s)
+	j := newTestCheckpointJournal(t, ws, s)
 	return j, agenttools.NewMutatingTools(ws, j), root
 }
 
@@ -184,15 +186,21 @@ func TestCheckpointJournalCanonicalAliasSharesChain(t *testing.T) {
 	}
 }
 
-func TestCheckpointJournalRecordCompatibilityStillJournals(t *testing.T) {
-	j, _, _ := newJournalFixture(t)
-	_, _ = beginTestTurn(t, j, "compat")
-	j.Record(testRec("a.txt", "A0", true))
-	mustSealTurn(t, j)
-	groups, err := j.store.newestCompleted(context.Background(), 1)
-	if err != nil || len(groups) != 1 || len(groups[0].files) != 1 || !groups[0].files[0].applied {
-		t.Fatalf("Record bypassed the write-ahead store: %v %+v", err, groups)
+func TestCheckpointJournalRecordCompatibilityRefuses(t *testing.T) {
+	j, _, root := newJournalFixture(t)
+	if err := os.WriteFile(filepath.Join(root, "a.txt"), []byte("after-a.txt"), 0600); err != nil {
+		t.Fatal(err)
 	}
+	ctx, _ := beginTestTurn(t, j, "compat")
+	j.Record(testRec("a.txt", "A0", true))
+	if ctx.Err() == nil || j.sealTurn(context.Background()) == nil {
+		t.Fatal("Record must latch and cancel: it did not observe a mutation")
+	}
+	entries, err := j.store.scanReceipts(context.Background(), 0, 100)
+	if err != nil || len(entries) != 0 {
+		t.Fatalf("Record manufactured evidence: %d, %v", len(entries), err)
+	}
+
 }
 
 func TestCheckpointPrepareSerializesThroughResolution(t *testing.T) {
@@ -209,6 +217,10 @@ func TestCheckpointPrepareSerializesThroughResolution(t *testing.T) {
 		close(entered) // handshake: the goroutine is about to call Prepare
 		p2, err := j.Prepare(testRec("b.txt", "B0", true))
 		if err != nil {
+			done <- -1
+			return
+		}
+		if err := j.ws.WriteFileAtomic("b.txt", []byte("after-b.txt")); err != nil {
 			done <- -1
 			return
 		}
@@ -230,6 +242,9 @@ func TestCheckpointPrepareSerializesThroughResolution(t *testing.T) {
 		case <-time.After(time.Millisecond):
 		}
 	}
+	if err := j.ws.WriteFileAtomic("a.txt", []byte("after-a.txt")); err != nil {
+		t.Fatal(err)
+	}
 	if err := p1.Commit(); err != nil {
 		t.Fatalf("commit p1: %v", err)
 	}
@@ -248,7 +263,7 @@ func TestCheckpointPrepareSerializesThroughResolution(t *testing.T) {
 }
 
 func TestCheckpointJournalPrepareFailureLatchesAndCancels(t *testing.T) {
-	j, tools, _ := newJournalFixture(t)
+	j, tools, root := newJournalFixture(t)
 	ctx, _ := beginTestTurn(t, j, "doomed")
 	if err := j.store.db.Close(); err != nil {
 		t.Fatalf("close db: %v", err)
@@ -256,6 +271,9 @@ func TestCheckpointJournalPrepareFailureLatchesAndCancels(t *testing.T) {
 	res := applyTool(t, tools, "write_file", map[string]any{"path": "a.txt", "content": "A1\n"})
 	if !res.IsError {
 		t.Fatal("want tool error when prepare fails")
+	}
+	if _, err := os.Stat(filepath.Join(root, "a.txt")); !os.IsNotExist(err) {
+		t.Fatal("prepare failure changed workspace")
 	}
 	if ctx.Err() == nil {
 		t.Fatal("prepare failure must cancel the run context (D7)")
@@ -274,6 +292,9 @@ func TestCheckpointJournalCommitFailureLatchesAndCancels(t *testing.T) {
 	p, err := j.Prepare(testRec("a.txt", "A0", true))
 	if err != nil {
 		t.Fatalf("Prepare: %v", err)
+	}
+	if err := j.ws.WriteFileAtomic("a.txt", []byte("after-a.txt")); err != nil {
+		t.Fatal(err)
 	}
 	if err := j.store.db.Close(); err != nil {
 		t.Fatalf("close db: %v", err)
@@ -510,27 +531,27 @@ func TestCheckpointRecoveryForwardWindows(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(root, "a.txt"), []byte("A0"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := s.prepareIntent(ctx, "crashed", testNow, testRec("a.txt", "A0", true)); err != nil {
+	if _, _, err := s.testPrepareIntent(ctx, "crashed", testNow, testRec("a.txt", "A0", true)); err != nil {
 		t.Fatalf("prepare a: %v", err)
 	}
-	if _, _, err := s.prepareIntent(ctx, "crashed", testNow, testRec("b.txt", "", false)); err != nil {
+	if _, _, err := s.testPrepareIntent(ctx, "crashed", testNow, testRec("b.txt", "", false)); err != nil {
 		t.Fatalf("prepare b: %v", err)
 	}
 	if err := os.WriteFile(filepath.Join(root, "b.txt"), []byte("B1"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	_, fc, err := s.prepareIntent(ctx, "crashed", testNow, testRec("c.txt", "", false))
+	_, fc, err := s.testPrepareIntent(ctx, "crashed", testNow, testRec("c.txt", "", false))
 	if err != nil {
 		t.Fatalf("prepare c: %v", err)
 	}
 	if err := os.WriteFile(filepath.Join(root, "c.txt"), []byte("C1"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.commitIntent(ctx, fc); err != nil {
+	if err := s.testCommitIntent(ctx, fc); err != nil {
 		t.Fatalf("commit c: %v", err)
 	}
 
-	j := newCheckpointJournal(ws, s)
+	j := newTestCheckpointJournal(t, ws, s)
 	notice, err := j.recoverStartup(ctx)
 	if err != nil {
 		t.Fatalf("recoverStartup: %v", err)
@@ -566,16 +587,16 @@ func TestCheckpointRecoveryDropsAllNeverLandedIntents(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(root, "a.txt"), []byte("A0"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := s.prepareIntent(ctx, "crashed", testNow, testRec("a.txt", "A0", true)); err != nil {
+	if _, _, err := s.testPrepareIntent(ctx, "crashed", testNow, testRec("a.txt", "A0", true)); err != nil {
 		t.Fatalf("prepare: %v", err)
 	}
-	j := newCheckpointJournal(ws, s)
+	j := newTestCheckpointJournal(t, ws, s)
 	notice, err := j.recoverStartup(ctx)
 	if err != nil {
 		t.Fatalf("recoverStartup: %v", err)
 	}
-	if notice != "" {
-		t.Fatalf("notice = %q, want none when the recovered checkpoint is empty", notice)
+	if !strings.Contains(notice, "1 unconfirmed mutation attempt(s)") {
+		t.Fatalf("missing unresolved evidence notice: %q", notice)
 	}
 	if ids := listIDs(t, s); len(ids) != 0 {
 		t.Fatalf("ids = %v, want the empty recovered checkpoint deleted", ids)
@@ -593,7 +614,7 @@ func TestCheckpointRecoveryReadErrorFailsStartup(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(root, "a.txt"), []byte("A0"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := s.prepareIntent(ctx, "crashed", testNow, testRec("a.txt", "A0", true)); err != nil {
+	if _, _, err := s.testPrepareIntent(ctx, "crashed", testNow, testRec("a.txt", "A0", true)); err != nil {
 		t.Fatalf("prepare: %v", err)
 	}
 	// Replace the file with a symlink: classification must refuse to guess.
@@ -603,7 +624,7 @@ func TestCheckpointRecoveryReadErrorFailsStartup(t *testing.T) {
 	if err := os.Symlink("/etc/hosts", filepath.Join(root, "a.txt")); err != nil {
 		t.Fatal(err)
 	}
-	j := newCheckpointJournal(ws, s)
+	j := newTestCheckpointJournal(t, ws, s)
 	if _, err := j.recoverStartup(ctx); err == nil {
 		t.Fatal("recoverStartup must fail on an unclassifiable path")
 	}
@@ -618,7 +639,7 @@ func TestCheckpointRecoveryPathErrorIsControlSafe(t *testing.T) {
 	j, _, _ := newJournalFixture(t)
 	path := "safe.txt\nforged: recovery succeeded\x1b[31m"
 	ctx := context.Background()
-	if _, _, err := j.store.prepareIntent(ctx, "crashed", testNow, testRec(path, "A0", true)); err != nil {
+	if _, _, err := j.store.testPrepareIntent(ctx, "crashed", testNow, testRec(path, "A0", true)); err != nil {
 		t.Fatalf("prepareIntent: %v", err)
 	}
 	j.ws.SetScopeGuard(func(rel string, _ bool) error {
@@ -1167,5 +1188,389 @@ func TestCheckpointUndoLegacyRecordsIgnoreMode(t *testing.T) {
 	j.undo(context.Background(), &out, 1)
 	if strings.Contains(out.String(), "cannot undo") {
 		t.Fatalf("legacy records must keep byte-hash-only semantics: %q", out.String())
+	}
+}
+
+// Removing intent/applied recording, or attributing equal bytes to no operation,
+// must fail this real write/edit sequence.
+func TestCheckpointJournalSignedRealTransitions(t *testing.T) {
+	j, tools, root := newJournalFixture(t)
+	beginTestTurn(t, j, "signed transitions")
+	operations := []struct {
+		tool          string
+		args          map[string]any
+		before, after string
+	}{
+		{"write_file", map[string]any{"path": "./a.txt", "content": "abc"}, "absent", "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"},
+		{"write_file", map[string]any{"path": "a.txt", "content": "abc"}, "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad", "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"},
+		{"edit_file", map[string]any{"path": "a.txt", "old_string": "abc", "new_string": "x"}, "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad", "2d711642b726b04401627ca9fbac32f5c8530fb1903cc4db02258717921a4881"},
+		{"write_file", map[string]any{"path": "a.txt", "content": ""}, "2d711642b726b04401627ca9fbac32f5c8530fb1903cc4db02258717921a4881", "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},
+	}
+	for _, op := range operations {
+		if res := applyTool(t, tools, op.tool, op.args); res.IsError {
+			t.Fatal(res.Content)
+		}
+	}
+	mustSealTurn(t, j)
+	entries, err := j.store.scanReceipts(context.Background(), 0, 100)
+	if err != nil || len(entries) != len(operations) {
+		t.Fatalf("receipts = %d, %v; want four signed operations", len(entries), err)
+	}
+	seen := map[string]bool{}
+	for i, entry := range entries {
+		intent, err := agenttools.DecodeMutationReceipt(entry.intentJSON)
+		if err != nil {
+			t.Fatal(err)
+		}
+		applied, err := agenttools.DecodeMutationReceipt(entry.appliedJSON)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if intent.Body.Kind != "intent" || applied.Body.Kind != "applied" || intent.Body.Path != "a.txt" || intent.Body.BeforeHash != operations[i].before || intent.Body.AfterHash != operations[i].after || intent.Body.AfterMode != nil || intent.Body.UndoOf != "" || len(intent.Body.WorkspaceHash) != 64 || seen[intent.Body.MutationID] {
+			t.Fatalf("wrong transition: %+v", intent.Body)
+		}
+		seen[intent.Body.MutationID] = true
+		if err := matchingAppliedReceipt(intent, applied); err != nil {
+			t.Fatal(err)
+		}
+		if err := agenttools.VerifyMutationReceipt(context.Background(), j.verifier, intent); err != nil {
+			t.Fatal(err)
+		}
+		if err := agenttools.VerifyMutationReceipt(context.Background(), j.verifier, applied); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got, ok := readWorkspace(t, root, "a.txt"); !ok || len(got) != 0 {
+		t.Fatalf("truncate = %q,%v", got, ok)
+	}
+}
+
+func newTestCheckpointJournal(t *testing.T, ws *agenttools.Workspace, store *checkpointStore) *checkpointJournal {
+	t.Helper()
+	signer, err := signing.NewHMAC(bytes.Repeat([]byte{0x42}, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return newCheckpointJournal(ws, store, signer, signer)
+}
+
+// Wrap only the cryptographic dependency to observe order or force a hardware/key
+// failure. Filesystem mutation and SQLite persistence remain real.
+type journalTestSigner struct {
+	signing.Signer
+	sign func(context.Context, agenttools.MutationReceiptBody) error
+}
+
+func (s journalTestSigner) Sign(ctx context.Context, domain string, payload []byte) (signing.Signature, error) {
+	var body agenttools.MutationReceiptBody
+	if err := json.Unmarshal(payload, &body); err != nil {
+		return signing.Signature{}, err
+	}
+	if err := s.sign(ctx, body); err != nil {
+		return signing.Signature{}, err
+	}
+	return s.Signer.Sign(ctx, domain, payload)
+}
+
+func TestCheckpointJournalSigningOrderAndFailure(t *testing.T) {
+	for _, failure := range []string{"", "intent", "applied"} {
+		t.Run("fail-"+failure, func(t *testing.T) {
+			j, tools, root := newJournalFixture(t)
+			if err := os.WriteFile(filepath.Join(root, "a.txt"), []byte("old"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			runCtx, _ := beginTestTurn(t, j, "sign order")
+			calls := []string{}
+			j.signer = journalTestSigner{Signer: j.signer, sign: func(ctx context.Context, body agenttools.MutationReceiptBody) error {
+				if ctx.Err() != nil {
+					t.Fatal("signer received canceled bookkeeping context")
+				}
+				calls = append(calls, body.Kind)
+				got, err := os.ReadFile(filepath.Join(root, "a.txt"))
+				if err != nil {
+					t.Fatal(err)
+				}
+				want := "old"
+				if body.Kind == "applied" {
+					want = "abc"
+				}
+				if string(got) != want {
+					t.Fatalf("%s signed with file = %q, want %q", body.Kind, got, want)
+				}
+				rows, err := j.store.scanReceipts(context.Background(), 0, 100)
+				if err != nil {
+					t.Fatal(err)
+				}
+				wantRows := 0
+				if body.Kind == "applied" {
+					wantRows = 1
+				}
+				if len(rows) != wantRows || len(rows) > 0 && rows[0].appliedJSON != nil {
+					t.Fatal("sign/persist order violated")
+				}
+				if body.Kind == failure {
+					return errors.New("test signer failure")
+				}
+				return nil
+			}}
+			tool := toolByName(t, tools, "write_file")
+			raw := json.RawMessage(`{"path":"a.txt","content":"abc"}`)
+			if _, err := tool.(agent.PlanningTool).Plan(runCtx, raw); err != nil {
+				t.Fatal(err)
+			}
+			res, invokeErr := tool.Invoke(runCtx, raw)
+			entries, err := j.store.scanReceipts(context.Background(), 0, 100)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if failure == "" {
+				if res.IsError || invokeErr != nil || strings.Join(calls, ",") != "intent,applied" || len(entries) != 1 || entries[0].appliedJSON == nil {
+					t.Fatalf("successful write evidence = %d, %v", len(entries), invokeErr)
+				}
+				return
+			}
+			if !res.IsError && invokeErr == nil || runCtx.Err() == nil || j.beginTurn(context.Background(), "next", func() {}) == nil {
+				t.Fatalf("sign failure did not halt/latch: %v", invokeErr)
+			}
+			got, _ := os.ReadFile(filepath.Join(root, "a.txt"))
+			if failure == "intent" {
+				if string(got) != "old" || len(entries) != 0 || strings.Join(calls, ",") != "intent" {
+					t.Fatal("failed intent signing allowed write/evidence")
+				}
+			} else if string(got) != "abc" || len(entries) != 1 || entries[0].appliedJSON != nil || invokeErr == nil {
+				t.Fatal("landed signer failure lost uncertainty")
+			}
+		})
+	}
+}
+
+func TestCheckpointJournalCommitRequiresObservedAfterState(t *testing.T) {
+	for _, state := range []string{"missing-create", "different-bytes", "mode-drift", "directory"} {
+		t.Run(state, func(t *testing.T) {
+			j, _, root := newJournalFixture(t)
+			ctx, _ := beginTestTurn(t, j, "after-state")
+			rec := agenttools.MutationRecord{Path: "a.txt", AfterHash: agenttools.ContentHash([]byte("abc")), TrackedMode: true, AfterMode: 0600}
+			p, err := j.Prepare(rec)
+			if err != nil {
+				t.Fatal(err)
+			}
+			switch state {
+			case "different-bytes":
+				err = os.WriteFile(filepath.Join(root, "a.txt"), []byte("external"), 0600)
+			case "mode-drift":
+				err = os.WriteFile(filepath.Join(root, "a.txt"), []byte("abc"), 0644)
+			case "directory":
+				err = os.Mkdir(filepath.Join(root, "a.txt"), 0700)
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := p.Commit(); err == nil || ctx.Err() == nil {
+				t.Fatal("unobserved after-state accepted")
+			}
+			entries, err := j.store.scanReceipts(context.Background(), 0, 10)
+			if err != nil || len(entries) != 1 || entries[0].appliedJSON != nil {
+				t.Fatalf("mismatch manufactured success: %d,%v", len(entries), err)
+			}
+			if err := j.beginTurn(context.Background(), "next", func() {}); err == nil {
+				t.Fatal("after-state mismatch did not latch")
+			}
+		})
+	}
+}
+
+func TestCheckpointJournalLandedCommitCancellationAndFailures(t *testing.T) {
+	for _, fault := range []string{"canceled", "transaction", "hardening"} {
+		t.Run(fault, func(t *testing.T) {
+			j, _, _ := newJournalFixture(t)
+			ctx, cancel := beginTestTurn(t, j, "landed")
+			p, err := j.Prepare(agenttools.MutationRecord{Path: "a.txt", AfterHash: agenttools.ContentHash([]byte("abc"))})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := j.ws.WriteFileAtomic("a.txt", []byte("abc")); err != nil {
+				t.Fatal(err)
+			}
+			switch fault {
+			case "canceled":
+				cancel()
+			case "transaction":
+				checkpointSQL(t, j.store.db, `CREATE TRIGGER fail_commit BEFORE UPDATE OF applied ON checkpoint_files BEGIN SELECT RAISE(ABORT,'receipt commit failed'); END`)
+			case "hardening":
+				j.store.dbPath = t.TempDir()
+			}
+			err = p.Commit()
+			if (err == nil) != (fault == "canceled") {
+				t.Fatalf("commit %s = %v", fault, err)
+			}
+			if ctx.Err() == nil {
+				t.Fatal("failure must cancel run")
+			}
+			entries, err := j.store.scanReceipts(context.Background(), 0, 10)
+			if err != nil || len(entries) != 1 || (entries[0].appliedJSON != nil) != (fault != "transaction") {
+				t.Fatalf("persisted receipt outcome = %d,%v", len(entries), err)
+			}
+			prior := append([]byte(nil), entries[0].appliedJSON...)
+			if err := p.Commit(); err == nil {
+				t.Fatal("resolved handle committed twice")
+			}
+			entries, err = j.store.scanReceipts(context.Background(), 0, 10)
+			if err != nil || len(entries) != 1 || !bytes.Equal(prior, entries[0].appliedJSON) {
+				t.Fatal("repeated commit changed evidence")
+			}
+			if fault != "canceled" && j.beginTurn(context.Background(), "next", func() {}) == nil {
+				t.Fatal("commit failure did not latch")
+			}
+		})
+	}
+}
+
+func TestCheckpointJournalFailedWriteDiscardsUnusedIntent(t *testing.T) {
+	j, tools, root := newJournalFixture(t)
+	beginTestTurn(t, j, "failed write")
+	j.signer = journalTestSigner{Signer: j.signer, sign: func(_ context.Context, body agenttools.MutationReceiptBody) error {
+		if body.Kind == "intent" {
+			j.ws.SetScopeGuard(func(_ string, write bool) error {
+				if write {
+					return os.ErrPermission
+				}
+				return nil
+			})
+		}
+		return nil
+	}}
+	res := applyTool(t, tools, "write_file", map[string]any{"path": "a.txt", "content": "abc"})
+	if !res.IsError {
+		t.Fatal("write unexpectedly succeeded")
+	}
+	if _, err := os.Stat(filepath.Join(root, "a.txt")); !os.IsNotExist(err) {
+		t.Fatal("failed write changed workspace")
+	}
+	entries, err := j.store.scanReceipts(context.Background(), 0, 10)
+	if err != nil || len(entries) != 0 {
+		t.Fatal("definite failed write retained unused evidence")
+	}
+	mustSealTurn(t, j)
+}
+
+func TestCheckpointJournalRealPromotionReceipt(t *testing.T) {
+	for _, postVerifyFailure := range []bool{false, true} {
+		t.Run(fmt.Sprint(postVerifyFailure), func(t *testing.T) {
+			j, _, root := newJournalFixture(t)
+			tools, err := agenttools.NewExecToolsWithOptions(root, agenttools.ExecToolsOptions{Scratch: agenttools.ScratchConfig{Enabled: true}, PromotionJournal: j})
+			if err != nil {
+				t.Fatal(err)
+			}
+			run := applyTool(t, tools, "run_command", map[string]any{"argv": []string{"/bin/sh", "-c", "printf abc > artifact.txt; chmod 640 artifact.txt"}})
+			if run.IsError {
+				t.Fatal(run.Content)
+			}
+			fields := strings.Fields(run.Content)
+			if len(fields) < 2 || !strings.HasPrefix(fields[1], "id=scr-") {
+				t.Fatalf("missing captured scratch id: %q", run.Content)
+			}
+			id := strings.TrimPrefix(fields[1], "id=")
+			ctx, _ := beginTestTurn(t, j, "promote")
+			// This deterministic external edit happens after Commit's live observation,
+			// preserving the tool's own post-commit verification/error responsibility.
+			if postVerifyFailure {
+				j.signer = journalTestSigner{Signer: j.signer, sign: func(_ context.Context, body agenttools.MutationReceiptBody) error {
+					if body.Kind == "applied" {
+						return os.Chmod(filepath.Join(root, "artifact.txt"), 0600)
+					}
+					return nil
+				}}
+			}
+			res := applyTool(t, tools, "promote_artifact", map[string]any{"id": id, "path": "artifact.txt"})
+			if res.IsError != postVerifyFailure || postVerifyFailure && !strings.Contains(res.Content, "indeterminate: post-commit verification failed") {
+				t.Fatalf("promotion result = %+v", res)
+			}
+			if ctx.Err() != nil {
+				t.Fatal("successful receipt changed the promotion verification policy")
+			}
+			entries, err := j.store.scanReceipts(context.Background(), 0, 10)
+			if err != nil || len(entries) != 1 || entries[0].appliedJSON == nil {
+				t.Fatalf("landed promotion receipt = %d,%v", len(entries), err)
+			}
+			receipt, err := agenttools.DecodeMutationReceipt(entries[0].appliedJSON)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if receipt.Body.BeforeHash != "absent" || receipt.Body.AfterHash != "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad" || receipt.Body.AfterMode == nil || *receipt.Body.AfterMode != 0640 {
+				t.Fatalf("tracked promotion receipt = %+v", receipt.Body)
+			}
+			if err := agenttools.VerifyMutationReceipt(context.Background(), j.verifier, receipt); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+func TestCheckpointRecoveryAuthenticatesBeforeProgress(t *testing.T) {
+	for _, fault := range []string{"intent-signature", "applied-signature", "path", "missing-reference"} {
+		t.Run(fault, func(t *testing.T) {
+			j, tools, _ := newJournalFixture(t)
+			beginTestTurn(t, j, "crash before seal")
+			if res := applyTool(t, tools, "write_file", map[string]any{"path": "a.txt", "content": "abc"}); res.IsError {
+				t.Fatal(res.Content)
+			}
+			entries, err := j.store.scanReceipts(context.Background(), 0, 10)
+			if err != nil || len(entries) != 1 {
+				t.Fatal("missing receipt")
+			}
+			switch fault {
+			case "intent-signature", "applied-signature":
+				raw := entries[0].intentJSON
+				column := "intent_json"
+				if fault == "applied-signature" {
+					raw = entries[0].appliedJSON
+					column = "applied_json"
+				}
+				receipt, err := agenttools.DecodeMutationReceipt(raw)
+				if err != nil {
+					t.Fatal(err)
+				}
+				receipt.Signature.Bytes[0] ^= 1
+				raw, err = signing.MarshalCanonical(receipt)
+				if err != nil {
+					t.Fatal(err)
+				}
+				checkpointSQL(t, j.store.db, `UPDATE mutation_receipts SET `+column+` = ?`, string(raw))
+			case "path":
+				checkpointSQL(t, j.store.db, `UPDATE checkpoint_files SET path = 'other.txt'`)
+			case "missing-reference":
+				checkpointSQL(t, j.store.db, `UPDATE checkpoint_files SET forward_mutation_id = NULL`)
+			}
+			if _, err := j.recoverStartup(context.Background()); err == nil {
+				t.Fatal("untrusted checkpoint recovered")
+			}
+			groups, err := j.store.loadGroups(context.Background(), checkpointOpen, 0, false)
+			if err != nil || len(groups) != 1 || len(groups[0].files) != 1 {
+				t.Fatal("invalid recovery changed progress")
+			}
+		})
+	}
+}
+
+func TestCheckpointJournalAbortFailureLatches(t *testing.T) {
+	j, _, root := newJournalFixture(t)
+	ctx, _ := beginTestTurn(t, j, "abort fails")
+	p, err := j.Prepare(testRec("a.txt", "", false))
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkpointSQL(t, j.store.db, `CREATE TRIGGER fail_abort BEFORE DELETE ON mutation_receipts BEGIN SELECT RAISE(ABORT,'abort failed'); END`)
+	if err := p.Abort(); err == nil || ctx.Err() == nil {
+		t.Fatal("failed Abort did not cancel")
+	}
+	entries, err := j.store.scanReceipts(context.Background(), 0, 10)
+	if err != nil || len(entries) != 1 || entries[0].appliedJSON != nil {
+		t.Fatal("failed Abort lost uncertainty")
+	}
+	if _, err := os.Stat(filepath.Join(root, "a.txt")); !os.IsNotExist(err) {
+		t.Fatal("Abort mutated workspace")
+	}
+	if err := j.beginTurn(context.Background(), "next", func() {}); err == nil {
+		t.Fatal("failed Abort did not latch")
 	}
 }

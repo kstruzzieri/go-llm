@@ -129,10 +129,13 @@ func handleAllowWrite(ctx context.Context, out io.Writer, sess *replSession, fie
 		fail(fmt.Errorf("checkpoint store: %w", err), nil)
 		return
 	}
-	writeTools, journal, err := buildWriteTools(sess.root, store)
+	writeTools, journal, identityNotice, err := buildWriteTools(sess.root, store, os.Getenv)
 	if err != nil {
 		fail(err, store)
 		return
+	}
+	if identityNotice != "" {
+		_, _ = fmt.Fprintln(out, identityNotice)
 	}
 	notice, err := journal.recoverStartup(ctx)
 	if err != nil {

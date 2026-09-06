@@ -429,7 +429,7 @@ func TestBuildExecToolsScratchMatrix(t *testing.T) {
 		t.Fatal(err)
 	}
 	store := openTestStore(t, root)
-	journal := newCheckpointJournal(ws, store)
+	journal := newTestCheckpointJournal(t, ws, store)
 	promoMgr := agenttools.NewBackgroundManager()
 	defer promoMgr.Shutdown()
 	tools, err = buildExecTools(root, promoMgr, agenttools.ExecToolsOptions{
@@ -466,7 +466,7 @@ func TestScratchExecOptionsJournalGate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	j := newCheckpointJournal(ws, openTestStore(t, t.TempDir()))
+	j := newTestCheckpointJournal(t, ws, openTestStore(t, t.TempDir()))
 	opts, line = scratchExecOptions(true, j)
 	if opts.PromotionJournal == nil || !strings.Contains(line, "prompts per artifact") {
 		t.Fatalf("a real journal must enable promotion: %+v %q", opts, line)

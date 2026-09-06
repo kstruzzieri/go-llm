@@ -213,7 +213,7 @@ func TestRunReleasesLateMountsAfterRuntimeClose(t *testing.T) {
 			sess.stdinTerminal = true // this hook simulates a live REPL command
 			var out strings.Builder
 			_, _ = dispatchSlash(context.Background(), &out, sess, "/allow-write")
-			if !strings.HasPrefix(out.String(), "writes enabled") {
+			if !strings.Contains(out.String(), "writes enabled") {
 				return fmt.Errorf("mount failed: %s", out.String())
 			}
 			return errStop

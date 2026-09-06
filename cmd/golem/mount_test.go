@@ -201,7 +201,7 @@ func TestAllowWriteMountsWriteToolsAndPrompt(t *testing.T) {
 	sess := newMountSession(t, caller, root)
 	var out strings.Builder
 	_, _ = dispatchSlash(context.Background(), &out, sess, "/allow-write")
-	if !strings.HasPrefix(out.String(), "writes enabled") {
+	if !strings.Contains(out.String(), "writes enabled") {
 		t.Fatalf("out = %q", out.String())
 	}
 	want := append(names(sess.tools[:sess.readToolCount]), "write_file", "edit_file")
@@ -359,7 +359,7 @@ func TestAllowWriteFailsClosedAfterConstruction(t *testing.T) {
 	before, system := strings.Join(names(sess.tools), ","), sess.baseSystem
 	var out strings.Builder
 	_, _ = dispatchSlash(context.Background(), &out, sess, "/allow-write")
-	if !strings.HasPrefix(out.String(), "writes not enabled: runtime:") || !strings.Contains(out.String(), "edit_file") {
+	if !strings.Contains(out.String(), "writes not enabled: runtime:") || !strings.Contains(out.String(), "edit_file") {
 		t.Fatalf("out = %q", out.String())
 	}
 	if sess.allowWrite || sess.journal != nil || sess.lateStore != nil || sess.writeToolCount != 0 ||
@@ -604,15 +604,13 @@ func TestAllowWriteReportsRecoveryEvenWhenTheMountFails(t *testing.T) {
 	if err := os.WriteFile(target, []byte("C0"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	_, fc, err := staged.prepareIntent(ctx, "crashed", testNow, testRec("c.txt", "C0", true))
+	wt, journal, _, err := buildWriteTools(root, staged, os.Getenv)
 	if err != nil {
-		t.Fatalf("prepare: %v", err)
-	}
-	if err := os.WriteFile(target, []byte("C1"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := staged.commitIntent(ctx, fc); err != nil {
-		t.Fatalf("commit: %v", err)
+	beginTestTurn(t, journal, "crashed")
+	if res := applyTool(t, wt, "write_file", map[string]any{"path": "c.txt", "content": "C1"}); res.IsError {
+		t.Fatal(res.Content)
 	}
 	if err := staged.Close(); err != nil {
 		t.Fatalf("release staged lease: %v", err)
@@ -666,7 +664,7 @@ func TestAllowWriteKeepsStartupScratchExecSet(t *testing.T) {
 	}
 	var out strings.Builder
 	_, _ = dispatchSlash(context.Background(), &out, sess, "/allow-write")
-	if !strings.HasPrefix(out.String(), "writes enabled") || !strings.Contains(out.String(), "scratch: promote_artifact stays unavailable") {
+	if !strings.Contains(out.String(), "writes enabled") || !strings.Contains(out.String(), "scratch: promote_artifact stays unavailable") {
 		t.Fatalf("out = %q", out.String())
 	}
 	if sess.bgManager != mgr {
@@ -695,16 +693,13 @@ func TestAllowWriteReportsInterruptedUndo(t *testing.T) {
 	if err := os.WriteFile(target, []byte("U0"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	_, fc, err := staged.prepareIntent(ctx, "crashed", testNow, testRec("u.txt", "U0", true))
+	wt, journal, _, err := buildWriteTools(root, staged, os.Getenv)
 	if err != nil {
-		t.Fatalf("prepare: %v", err)
+		t.Fatal(err)
 	}
-	if err := staged.commitIntent(ctx, fc); err != nil {
-		t.Fatalf("commit: %v", err)
-	}
-	_, journal, err := buildWriteTools(root, staged)
-	if err != nil {
-		t.Fatalf("buildWriteTools: %v", err)
+	beginTestTurn(t, journal, "crashed")
+	if res := applyTool(t, wt, "write_file", map[string]any{"path": "u.txt", "content": "U1"}); res.IsError {
+		t.Fatal(res.Content)
 	}
 	if _, err := journal.recoverStartup(ctx); err != nil {
 		t.Fatalf("recover: %v", err)
@@ -734,7 +729,7 @@ func TestAllowWriteReportsVerifierWarning(t *testing.T) {
 	sess := newMountSession(t, &captureCaller{answer: "ok"}, root)
 	var out strings.Builder
 	_, _ = dispatchSlash(context.Background(), &out, sess, "/allow-write")
-	if !strings.HasPrefix(out.String(), "writes enabled") || !strings.Contains(out.String(), "verification disabled") {
+	if !strings.Contains(out.String(), "writes enabled") || !strings.Contains(out.String(), "verification disabled") {
 		t.Fatalf("out = %q", out.String())
 	}
 	if sess.verifier.runner != nil {
