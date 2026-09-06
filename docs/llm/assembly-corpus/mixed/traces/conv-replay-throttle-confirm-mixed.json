@@ -7,14 +7,6 @@
   "turns": [
     {
       "role": "user",
-      "content": "Item one, and it is embarrassing: the runbook's drain-time promise was written against the old exporter and nobody re-derived it after the parquet writer upgrade, so oncall spent the night comparing reality against a number from two hardware generations ago. Re-derive the expected drain time from current throughput, put the formula in the runbook next to the number, and date it so the next upgrade does not leave another fossil behind. Put the derivation in the appendix too, with last night's numbers worked through as the example, so the formula is verifiable rather than another number to trust."
-    },
-    {
-      "role": "assistant",
-      "content": "Re-derived the drain estimate from the current exporter throughput and last night's segment sizes, put the formula and its inputs beside the number in the runbook, and dated the section. I also added a checklist line to the upgrade template so the estimate gets re-derived whenever the export path changes."
-    },
-    {
-      "role": "user",
       "content": "Item two: the compaction scheduler and the drill calendar disagree about what a maintenance window is, which is how last night's compaction landed inside a drain in the first place. Reconcile the two so a declared window means the same thing to both systems, and make whichever one is wrong defer to the ops calendar as the single source of truth going forward. Document the merged definition in the ops calendar header while you are at it, so the next scheduler someone bolts on inherits the rule instead of rediscovering the collision."
     },
     {
@@ -92,7 +84,7 @@
     },
     {
       "role": "tool",
-      "content": "### source: \"internal/replay/replay.go\"\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nnote: metadata overview (summary omitted: budget)\n--- source: \"internal/replay/replay.go\" (lines 1-17, similarity: 1.00) ---\n1| package replay\n2| \n3| import \"context\"\n4| \n5| // Replayer walks rolled segments from the checkpoint cursor and feeds\n6| // batches back through the export pipeline. The walk rate comes from\n7| // the configured pacer profile; the drills that ran wide open at\n8| // 24 MB/s predate the pacer entirely.\n9| type Replayer struct {\n10| \tdir    string\n11| \tcursor *Cursor\n12| \tpace   Pace\n13| }\n14| \n15| func (r *Replayer) Run(ctx context.Context) error {\n16| \treturn r.walk(ctx, r.pace)\n17| }\n\n### source: \"internal/replay/cursor.go\"\npurpose: Durable replay checkpoint cursor with atomic advance.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n\n### source: \"docs/replay.md\"\nlanguage: markdown\nindexed: 2025-07-27T00:00:00Z\nnote: metadata overview (summary omitted: budget)\n",
+      "content": "### source: \"internal/replay/replay.go\"\npurpose: Segment replay driven by the configured pacer profile.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n--- source: \"internal/replay/replay.go\" (lines 1-17, similarity: 1.00) ---\n1| package replay\n2| \n3| import \"context\"\n4| \n5| // Replayer walks rolled segments from the checkpoint cursor and feeds\n6| // batches back through the export pipeline. The walk rate comes from\n7| // the configured pacer profile; the drills that ran wide open at\n8| // 24 MB/s predate the pacer entirely.\n9| type Replayer struct {\n10| \tdir    string\n11| \tcursor *Cursor\n12| \tpace   Pace\n13| }\n14| \n15| func (r *Replayer) Run(ctx context.Context) error {\n16| \treturn r.walk(ctx, r.pace)\n17| }\n\n### source: \"internal/replay/cursor.go\"\npurpose: Durable replay checkpoint cursor with atomic advance.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n\n### source: \"docs/replay.md\"\npurpose: Replay guide: pacer profiles chosen per window by operators.\nlanguage: markdown\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n--- source: \"docs/replay.md\" (lines 1-7, similarity: 1.00) ---\n1| # driftwatch replay\n2| \n3| Replay feeds rolled segments back through the export pipeline after an\n4| outage. Catch-up traffic shares disk with live ingest, so the release\n5| rate comes from the configured pacer profile: operators choose a pace\n6| per window, and business hours and maintenance windows may run\n7| different profiles.\n",
       "tool_call_id": "c1",
       "name": "retrieve"
     },
@@ -110,7 +102,7 @@
     },
     {
       "role": "tool",
-      "content": "rec-compaction-note · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:\nrec-drain-watch · working · created:2025-07-27 · updated:2025-07-27 · scope:session · ns: · src:\nrec-drill-wideopen · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:",
+      "content": "trust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-compaction-note · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src-claim: · nightly compaction is IO-heavy on the slow volume; it defers to declared windows since the reconciliation\ntrust=agent-written; unreviewed; origin=memory.create; session=caller-claim · rec-drain-watch · working · created:2025-07-27 · updated:2025-07-27 · scope:session · ns: · src-claim: · watch the export backlog panel during any drain; starvation shows there before the node graphs move\ntrust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-drill-wideopen · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src-claim:",
       "tool_call_id": "c2",
       "name": "agent_memory_search"
     },
@@ -134,8 +126,8 @@
       "rec-drain-watch",
       "rec-drill-wideopen"
     ],
-    "estimated_prompt_tokens": 1236,
-    "state_digest": "c1c1dc80910eac564620f0c791eccd5f23bdaf00a456427babb64932b67e2cbb",
+    "estimated_prompt_tokens": 1257,
+    "state_digest": "0a1fa74bc41208c603780dd98e534dad16ff50c2e76c8eb576e1c60542024b1a",
     "subjects": [
       "(c1|rag|internal/replay/replay.go)",
       "(c1|rag|internal/replay/cursor.go)",
@@ -147,11 +139,11 @@
     "stratum": "conversation_only",
     "answer_home": "conversation",
     "scenario_family": "replay-throttle-conv",
-    "budget": 1277,
-    "raw_state_tokens": 2129,
+    "budget": 1313,
+    "raw_state_tokens": 2188,
     "pressure_level": "critical",
-    "shed_messages": 2,
-    "shed_bytes": 2768,
-    "omitted_subjects": 1
+    "shed_messages": 4,
+    "shed_bytes": 2914,
+    "omitted_subjects": 2
   }
 }

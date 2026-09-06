@@ -11,6 +11,8 @@ import (
 	"encoding/json"
 	"errors"
 	"time"
+
+	"github.com/kstruzzieri/go-llm/signing"
 )
 
 // MemoryKind is the record's memory semantics, orthogonal to visibility.
@@ -25,32 +27,55 @@ const (
 	KindEpisodic MemoryKind = "episodic"
 )
 
-// Provenance links a record back to what produced it. All fields are opaque to
-// this package. The range is half-open [Start, End); 0 means unset.
+// MemoryRecordDomain separates canonical record bodies from other signed data.
+const MemoryRecordDomain = "go-llm/memory-record/v1"
+
+// RecordTrustClass describes a record's origin, never instruction authority.
+type RecordTrustClass string
+
+const (
+	// TrustAgentWritten marks records accepted through an ordinary writer surface.
+	TrustAgentWritten RecordTrustClass = "agent-written"
+	// TrustLegacyUnreviewed marks an imported snapshot with unverified authorship.
+	TrustLegacyUnreviewed RecordTrustClass = "legacy-unreviewed"
+)
+
+// Provenance records server-stamped origin and descriptive source claims.
+// Source fields are opaque claims, never authorization evidence. The range is
+// half-open [Start, End); 0 means unset.
 type Provenance struct {
-	SourceKind string // e.g. "conversation" | "tool" | "user"
-	SourceID   string // conversation/session id, tool name, ...
-	Start      int
-	End        int
-	Hash       string // optional content fingerprint
+	SourceKind      string           `json:"source_kind"`
+	SourceID        string           `json:"source_id"`
+	Start           int              `json:"source_start"`
+	End             int              `json:"source_end"`
+	Hash            string           `json:"source_hash"`
+	OriginTool      string           `json:"origin_tool"`
+	OriginSessionID string           `json:"origin_session_id"`
+	TrustClass      RecordTrustClass `json:"trust_class"`
 }
 
-// MemoryRecord is one agent-memory row. Visibility is derived: WorkspaceID=="" is
-// global; WorkspaceID set is workspace-private; SessionID set is session-private
-// (and requires WorkspaceID).
+// MemoryRecordBody owns every signed field of an agent-memory record.
+// Visibility is derived: WorkspaceID=="" is global; WorkspaceID set is
+// workspace-private; SessionID set is session-private (and requires WorkspaceID).
+type MemoryRecordBody struct {
+	ID          string          `json:"id"`
+	Kind        MemoryKind      `json:"kind"`
+	Content     string          `json:"content"`
+	Namespace   string          `json:"namespace"`
+	WorkspaceID string          `json:"workspace_id"`
+	SessionID   string          `json:"session_id"`
+	Provenance  Provenance      `json:"provenance"`
+	Metadata    json.RawMessage `json:"metadata"` // opaque valid JSON value; "{}" when empty on write
+	CreatedAt   time.Time       `json:"created_at"`
+	UpdatedAt   time.Time       `json:"updated_at"`
+	ExpiresAt   time.Time       `json:"expires_at"` // zero = never expires
+	DeletedAt   time.Time       `json:"deleted_at"` // zero = live
+}
+
+// MemoryRecord is one agent-memory body and its detached signature.
 type MemoryRecord struct {
-	ID          string
-	Kind        MemoryKind
-	Content     string
-	Namespace   string
-	WorkspaceID string
-	SessionID   string
-	Provenance  Provenance
-	Metadata    json.RawMessage // opaque valid JSON value; "{}" when empty
-	CreatedAt   time.Time
-	UpdatedAt   time.Time
-	ExpiresAt   time.Time // zero = never expires
-	DeletedAt   time.Time // zero = live
+	MemoryRecordBody `json:"body"`
+	Signature        signing.Signature `json:"signature"`
 }
 
 // CreateRecordParams are the inputs to Create.
@@ -96,6 +121,9 @@ type RecordSearchOptions struct {
 
 // Sentinel errors for the agent-memory record surface.
 var (
+	ErrRecordIntegrity       = errors.New("memory: record integrity check failed")
+	ErrContentTooLong        = errors.New("memory: content exceeds 4096 bytes")
+	ErrRecordTooLarge        = errors.New("memory: record exceeds 32 KiB")
 	ErrRecordNotFound        = errors.New("memory: record not found")
 	ErrEmptyContent          = errors.New("memory: content must not be empty")
 	ErrBadKind               = errors.New("memory: invalid kind")

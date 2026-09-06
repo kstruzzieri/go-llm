@@ -6,14 +6,6 @@
   "tools": null,
   "turns": [
     {
-      "role": "user",
-      "content": "Rollout call is made then. For the record, the 600-second window from the incident retro draft never shipped and that draft is closed; it was written against the old lazy-expiry cost model. The fleet keeps the code default at steady state, and rollout waves run pinned to a 240-second window until their wave report clears."
-    },
-    {
-      "role": "assistant",
-      "content": "Locked: waves run at the 240-second window until each wave report clears, then drop back to the code default; the pin and its exit condition are both in the wave runbook."
-    },
-    {
       "role": "assistant",
       "tool_calls": [
         {
@@ -46,7 +38,7 @@
     },
     {
       "role": "tool",
-      "content": "rec-rollback-drill · semantic · 2025-07-27 · rollback rehearsals run on one edge before every fleet rollout; restores must come back byte-identical\nrec-shadow-report · semantic · 2025-07-27 · shadow replay reports go to the capacity folks with outlier edges annotated\nrec-wave-plan · working · 2025-07-27 · wave plans attach to the rollout thread; one edge per region per wave since the London lesson",
+      "content": "trust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-rollback-drill · semantic · 2025-07-27 · rollback rehearsals run on one edge before every fleet rollout; restores must come back byte-identical\ntrust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-shadow-report · semantic · 2025-07-27 · shadow replay reports go to the capacity folks with outlier edges annotated\ntrust=agent-written; unreviewed; origin=memory.create; session=caller-claim · rec-wave-plan · working · 2025-07-27 · wave plans attach to the rollout thread; one edge per region per wave since the London lesson",
       "tool_call_id": "c2",
       "name": "agent_memory_search"
     },
@@ -70,8 +62,8 @@
       "rec-shadow-report",
       "rec-wave-plan"
     ],
-    "estimated_prompt_tokens": 1321,
-    "state_digest": "d3df7c0e43ad5fcbd3ea3373a5ed8d7b935ac81b69126c8a29cd93403ba33069",
+    "estimated_prompt_tokens": 1255,
+    "state_digest": "9dc520551418c16e9b728b3e3b99b692a20b354f111634a801682d38b189867c",
     "subjects": [
       "(c1|rag|internal/ingest/dedupe.go)",
       "(c1|rag|internal/ingest/rolloutpin.go)",
@@ -83,10 +75,10 @@
     "stratum": "cross_domain_join",
     "answer_home": "join",
     "scenario_family": "dedupe-window-join",
-    "budget": 1383,
-    "raw_state_tokens": 2305,
+    "budget": 1418,
+    "raw_state_tokens": 2363,
     "pressure_level": "critical",
-    "shed_messages": 10,
-    "shed_bytes": 3376
+    "shed_messages": 12,
+    "shed_bytes": 3869
   }
 }

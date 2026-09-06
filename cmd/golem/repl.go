@@ -124,7 +124,11 @@ type replSession struct {
 	// resolved at startup.
 	grounding *groundingService
 
-	modelOptions provider.ModelOptions // per-run model options (-think)
+	thinkModels capChecker
+	thinkChain  []string
+	// startupModelOptions is frozen for AgentFlow task/planner consumers.
+	// REPL turns and status use runtime.ModelOptions() instead.
+	startupModelOptions provider.ModelOptions
 
 	// control coordinates the prompt, async notices, and Ctrl-C. nil in tests
 	// and non-interactive callers, where runREPL falls back to a plain prompt
@@ -198,11 +202,12 @@ func runREPL(ctx context.Context, src lineSource, out io.Writer, interrupts <-ch
 				continue
 			}
 		}
-		// Recorded only here: after trimming, after the empty and slash checks,
-		// and after validation, so a blank line, a command, or malformed bytes
-		// can never reach history.
-		src.RecordGoal(line)
-		_, _ = runOnce(ctx, out, interrupts, sess, line, src)
+		// Record accepted goals after inspection has had a chance to block
+		// secrets. Unrelated failures retain the existing history behavior.
+		_, runErr := runOnce(ctx, out, interrupts, sess, line, src)
+		if !secretsBlocked(runErr) {
+			src.RecordGoal(line)
+		}
 	}
 }
 
@@ -314,7 +319,7 @@ func runOnce(ctx context.Context, out io.Writer, interrupts <-chan struct{}, ses
 	// slash commands remain usable.
 	if sess.journal != nil {
 		if jerr := sess.journal.beginTurn(runCtx, line, cancel); jerr != nil {
-			writeRunLine("checkpoint: %v", jerr)
+			writeRunLine("checkpoint: %s", runFailureMessage("", jerr))
 			if ferr := rend.finish(); ferr != nil {
 				writeRunLine("warning: render flush incomplete: %v", ferr)
 			}
@@ -397,17 +402,23 @@ func runOnce(ctx context.Context, out io.Writer, interrupts <-chan struct{}, ses
 	if errors.Is(runErr, context.Canceled) {
 		cancel()
 	}
+	// Inspect both trees before demoting session errors or presenting a seal
+	// failure: either can carry a secrets block with a sensitive side-error.
+	secretBlock := secretsBlocked(runErr) || secretsBlocked(sealErr)
 	var sessionSaveErr error
 	if res.Answer != "" &&
 		errors.Is(runErr, golemruntime.ErrSessionPersistence) &&
+		!secretBlock &&
 		!errors.Is(runErr, context.Canceled) &&
 		!errors.Is(runErr, context.DeadlineExceeded) {
 		sessionSaveErr = runErr
 		runErr = nil
 	}
 	if sealErr != nil {
-		writeRunLine("checkpoint: %v", sealErr)
 		runErr = errors.Join(runErr, sealErr)
+		if !secretBlock {
+			writeRunLine("checkpoint: %v", sealErr)
+		}
 	}
 	// A failed tail flush loses only buffered display bytes on the progress
 	// stream; the run itself completed. Demoting it to a warning keeps a good
@@ -473,7 +484,10 @@ func runOnce(ctx context.Context, out io.Writer, interrupts <-chan struct{}, ses
 		}
 	}
 
-	if sess.obs != nil && sess.obs.trace {
+	if sess.obs != nil && sess.obs.trace && secretBlock {
+		writeRunLine("warning: trace not written: sensitive content detected")
+	}
+	if sess.obs != nil && sess.obs.trace && !secretBlock {
 		meta := agenttrace.TraceMeta{
 			Goal:           req.Goal,
 			System:         req.System,
@@ -491,11 +505,11 @@ func runOnce(ctx context.Context, out io.Writer, interrupts <-chan struct{}, ses
 	}
 
 	if runErr != nil {
-		if runCtx.Err() != nil {
+		if runCtx.Err() != nil && !secretBlock {
 			writeRunLine("canceled")
 			return res, runErr
 		}
-		writeRunLine("error: %v", runErr)
+		writeRunLine("error: %s", runFailureMessage("", runErr))
 		return res, runErr
 	}
 	if m := lastRoutedModel(res); m != "" {
@@ -721,6 +735,8 @@ func dispatchSlash(ctx context.Context, out io.Writer, sess *replSession, line s
 		handleAllowExec(ctx, out, sess, fields)
 	case "/git-context":
 		handleGitContext(ctx, out, sess, fields)
+	case "/think":
+		handleThink(ctx, out, sess, fields)
 	default:
 		_, _ = fmt.Fprintf(out, "unknown command: %s (try /help)\n", cmd)
 	}
@@ -856,6 +872,8 @@ const golemHelp = `commands:
   /allow-exec    enable the approval-gated command tools for the rest of this session
   /git-context refresh
                  re-capture the repository snapshot (branch, status, recent commits) in the system prompt
+  /think [off|on|low|medium|high|default]
+                 show or set reasoning control for the rest of this process
   /remember [--global] <text>
                  save a memory (workspace scope unless --global)
   /forget <id>   delete a saved memory

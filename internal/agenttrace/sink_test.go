@@ -38,6 +38,67 @@ func readSpans(t *testing.T, path string) []map[string]any {
 	return spans
 }
 
+func TestTelemetrySecretFindingsCountsOnlyRecognizedRules(t *testing.T) {
+	value := "sk-" + strings.Repeat("a8Bc7De9", 3)
+	var recognized []agent.Finding
+	for _, rule := range []string{
+		"sensitive_openai_token", "sensitive_github_token", "sensitive_gitlab_token",
+		"sensitive_slack_token", "sensitive_npm_token", "sensitive_bearer_token",
+		"sensitive_secret_assignment", "sensitive_private_key", "sensitive_payment_card",
+	} {
+		recognized = append(recognized, agent.Finding{
+			Interceptor: "secrets", Rule: rule, Verdict: agent.VerdictBlock,
+			Detail: value, ToolCallID: value,
+		})
+	}
+	// Repeated kinds are separate findings, not a distinct-credential count.
+	recognized = append(recognized, recognized[0])
+	unrecognized := []agent.Finding{
+		{Interceptor: "other", Rule: "sensitive_openai_token", Verdict: agent.VerdictBlock},
+		{Interceptor: "secrets", Rule: "sensitive_" + value, Verdict: agent.VerdictBlock},
+	}
+	for _, tc := range []struct {
+		name string
+		risk *agent.RiskReport
+		want int
+	}{
+		{name: "nil risk"},
+		{name: "empty risk", risk: &agent.RiskReport{}},
+		{name: "unrecognized", risk: &agent.RiskReport{Findings: unrecognized}},
+		{name: "recognized and repeated", risk: &agent.RiskReport{Findings: append(recognized, unrecognized...)}, want: 10},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "telemetry.jsonl")
+			sink, err := NewTelemetrySink(path, "run1", time.Unix(0, 0), func() time.Time { return time.Unix(0, 0) })
+			if err != nil {
+				t.Fatal("cannot create telemetry sink")
+			}
+			if err := sink.Finish(agent.Result{Risk: tc.risk}, "completed"); err != nil {
+				t.Fatal("cannot finish telemetry")
+			}
+			if err := sink.Close(); err != nil {
+				t.Fatal("cannot close telemetry")
+			}
+			raw, err := os.ReadFile(path)
+			if err != nil || strings.Contains(string(raw), value) {
+				t.Fatal("telemetry unreadable or leaked finding content")
+			}
+			spans := readSpans(t, path)
+			if len(spans) != 1 || spans[0]["kind"] != "run" {
+				t.Fatal("Finish did not emit exactly one run span")
+			}
+			count, exists := spans[0]["secret_findings"]
+			if tc.want == 0 {
+				if exists {
+					t.Error("zero secret findings changed the existing JSON shape")
+				}
+			} else if count != float64(tc.want) {
+				t.Errorf("secret_findings = %v, want %d", count, tc.want)
+			}
+		})
+	}
+}
+
 func TestOnToolResult_RecordsDelegatedModel(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "trace.jsonl")

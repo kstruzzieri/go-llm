@@ -7,7 +7,7 @@
   "turns": [
     {
       "role": "user",
-      "content": "Customer request triage. The bakery chain wants their dashboards to open on the outage view by default because that is all their ops person ever looks at. Reasonable? And if so can you just set it for them?"
+      "content": "The bakery chain wants dashboards to open on the outage view by default. Can you set that?"
     },
     {
       "role": "assistant",
@@ -31,11 +31,11 @@
     },
     {
       "role": "user",
-      "content": "Last one: the workshop tenant asks for their old April data back. Their plan file says their window ended long ago, so I assume the answer is no, but can you confirm what actually remains before I write the refusal?"
+      "content": "The workshop tenant wants April data restored. Their configured retention window has ended; confirm what remains."
     },
     {
       "role": "assistant",
-      "content": "Confirmed: April is fully outside their retained window and the segments were retired by retention sweeps at the time, so nothing remains to restore; I drafted the refusal with the retirement dates cited so the answer is factual rather than policy-flavored."
+      "content": "April segments were retired by retention sweeps. Nothing remains to restore; the refusal cites the retirement dates."
     },
     {
       "role": "assistant",
@@ -51,7 +51,7 @@
     },
     {
       "role": "tool",
-      "content": "rec-account-log · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:\nrec-refusal-style · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:\nrec-retention-clamp · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src: · tenant retention clamps to a 14-day floor whatever the plan file says\nrec-triage-rotation · working · created:2025-07-27 · updated:2025-07-27 · scope:session · ns: · src:",
+      "content": "trust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-account-log · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src-claim:\ntrust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-refusal-style · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src-claim:\ntrust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-retention-clamp · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src-claim: · tenant retention clamps to a 14-day floor whatever the plan file says\ntrust=agent-written; unreviewed; origin=memory.create; session=caller-claim · rec-triage-rotation · working · created:2025-07-27 · updated:2025-07-27 · scope:session · ns: · src-claim:",
       "tool_call_id": "c1",
       "name": "agent_memory_search"
     },
@@ -95,8 +95,8 @@
       "rec-retention-clamp",
       "rec-triage-rotation"
     ],
-    "estimated_prompt_tokens": 887,
-    "state_digest": "98dfd2971846670a7a585c9baf7d28baf6ea07d45df15d301bc3604ae56e22a8",
+    "estimated_prompt_tokens": 881,
+    "state_digest": "283df435fe77f0d01a37c2c0b6aed6b736ef847577fe0300051f4e85bd118022",
     "subjects": [
       "(c1|memory|rec-account-log)",
       "(c1|memory|rec-refusal-style)",
@@ -109,9 +109,9 @@
     "stratum": "memory_only",
     "answer_home": "memory",
     "scenario_family": "retention-floor-mem",
-    "budget": 928,
-    "raw_state_tokens": 1546,
+    "budget": 921,
+    "raw_state_tokens": 1535,
     "pressure_level": "critical",
-    "shed_bytes": 2225
+    "shed_bytes": 2201
   }
 }

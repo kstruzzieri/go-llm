@@ -37,7 +37,7 @@
     },
     {
       "role": "tool",
-      "content": "rec-cold-tier · semantic · 2025-07-27 · cold tier lives on the slow volume; sweeps there are io-capped so live ingest never contends\nrec-lab-logs · working · 2025-07-27 · overnight lab logs rotate weekly; pull them before Friday or they are gone\nrec-tier-review · semantic · 2025-07-27 · retention tier review is scheduled with the platform team; capacity note goes out beforehand",
+      "content": "trust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-cold-tier · semantic · 2025-07-27 · cold tier lives on the slow volume; sweeps there are io-capped so live ingest never contends\ntrust=agent-written; unreviewed; origin=memory.create; session=caller-claim · rec-lab-logs · working · 2025-07-27 · overnight lab logs rotate weekly; pull them before Friday or they are gone\ntrust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-tier-review · semantic · 2025-07-27 · retention tier review is scheduled with the platform team; capacity note goes out beforehand",
       "tool_call_id": "c3",
       "name": "agent_memory_search"
     },
@@ -61,8 +61,8 @@
       "rec-lab-logs",
       "rec-tier-review"
     ],
-    "estimated_prompt_tokens": 330,
-    "state_digest": "f37d1b39e85612e659ce061a19a1afae791570fcb8af71dfd1baf5ab83c76d02",
+    "estimated_prompt_tokens": 388,
+    "state_digest": "efabde750f11f2df78b9cb37fe858d5064ac93b6d41e7e2481b4ba01b5351c82",
     "subjects": [
       "(c1|rag|internal/retain/sweeper.go)",
       "(c1|rag|internal/retain/tiers.go)",
@@ -74,9 +74,9 @@
     "stratum": "chain_retention",
     "answer_home": "rag",
     "scenario_family": "retention-sweep-chain",
-    "budget": 919,
-    "raw_state_tokens": 1531,
-    "pressure_level": "ok",
+    "budget": 953,
+    "raw_state_tokens": 1589,
+    "pressure_level": "watch",
     "shed_messages": 4,
     "shed_bytes": 4510
   }

@@ -38,7 +38,7 @@
     },
     {
       "role": "tool",
-      "content": "rec-migration-log · working · 2025-07-27 · paging migration log records the cutover trail; the retro agenda seeds from its delivery items\nrec-pager-timeout · semantic · 2025-07-27 · pager notifier timeout at 45 seconds, raised during the paging-provider migration; the new provider acknowledges asynchronously, a delivery only counts failed after the acknowledgement poll drains, and short timeouts double-page during provider brownouts, which the migration doc calls out beside the sweep that settled the value\nrec-pager-window · semantic · 2025-07-27 · pager notifier gives up a delivery at 10 seconds",
+      "content": "trust=agent-written; unreviewed; origin=memory.create; session=caller-claim · rec-migration-log · working · 2025-07-27 · paging migration log records the cutover trail; the retro agenda seeds from its delivery items\ntrust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-pager-timeout · semantic · 2025-07-27 · pager notifier timeout at 45 seconds, raised during the paging-provider migration; the new provider acknowledges asynchronously, a delivery only counts failed after the acknowledgement poll drains, and short timeouts double-page during provider brownouts, which the migration doc calls out beside the sweep that settled the value\ntrust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-pager-window · semantic · 2025-07-27 · pager notifier gives up a delivery at 10 seconds",
       "tool_call_id": "c2",
       "name": "agent_memory_search"
     },
@@ -62,8 +62,8 @@
       "rec-pager-timeout",
       "rec-pager-window"
     ],
-    "estimated_prompt_tokens": 1014,
-    "state_digest": "87bc1cd3928f625b3aae929db6888b2381b037e79f099a4a8a2ed8cd0f973b64",
+    "estimated_prompt_tokens": 1073,
+    "state_digest": "0aca63d0c77daa34d5f905cbd70188754f2d4cda03acb442f4499cbbb0077c8b",
     "subjects": [
       "(c1|rag|internal/notify/pager.go)",
       "(c1|rag|internal/notify/ackpoll.go)",
@@ -75,8 +75,8 @@
     "stratum": "stale_vs_fresh",
     "answer_home": "memory",
     "scenario_family": "notifier-timeout-staleness",
-    "budget": 1109,
-    "raw_state_tokens": 1849,
+    "budget": 1145,
+    "raw_state_tokens": 1908,
     "pressure_level": "critical",
     "shed_messages": 18,
     "shed_bytes": 2578

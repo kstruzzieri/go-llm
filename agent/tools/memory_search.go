@@ -81,7 +81,7 @@ func (t MemorySearch) Invoke(ctx context.Context, raw json.RawMessage) (agent.To
 		if i > 0 {
 			b.WriteByte('\n')
 		}
-		fmt.Fprintf(&b, "%s · %s · %s · %s", m.ID, m.Scope, m.CreatedAt.Format("2006-01-02"), m.Text)
+		fmt.Fprintf(&b, "user-authored; integrity=unverified · %s · %s · %s · %s", FlattenRecordContent(m.ID), FlattenRecordContent(string(m.Scope)), m.CreatedAt.Format("2006-01-02"), m.Text)
 	}
 	return agent.ToolResult{Content: b.String()}, nil
 }

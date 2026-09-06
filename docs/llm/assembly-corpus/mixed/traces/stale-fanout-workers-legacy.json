@@ -19,7 +19,7 @@
     },
     {
       "role": "tool",
-      "content": "rec-fanout-note · semantic · 2025-07-27 · alert fanout still runs 4 delivery workers; hold at four until the pager consolidation soak finishes\nrec-pager-consol · semantic · 2025-07-27 · pager consolidation is wrapping up; the retro doc collects the sizing discussions\nrec-shadow-rota · working · 2025-07-27 · oncall shadow schedule is refreshed after every team rotation; two shadows moved during the consolidation",
+      "content": "trust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-fanout-note · semantic · 2025-07-27 · alert fanout still runs 4 delivery workers; hold at four until the pager consolidation soak finishes\ntrust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-pager-consol · semantic · 2025-07-27 · pager consolidation is wrapping up; the retro doc collects the sizing discussions\ntrust=agent-written; unreviewed; origin=memory.create; session=caller-claim · rec-shadow-rota · working · 2025-07-27 · oncall shadow schedule is refreshed after every team rotation; two shadows moved during the consolidation",
       "tool_call_id": "c2",
       "name": "agent_memory_search"
     },
@@ -43,8 +43,8 @@
       "rec-pager-consol",
       "rec-shadow-rota"
     ],
-    "estimated_prompt_tokens": 168,
-    "state_digest": "ee942cc3c8ad14e28530e6fc681d58d1ac23df06b4b1d6315be773245fc71663",
+    "estimated_prompt_tokens": 227,
+    "state_digest": "d6d9a857537116b7f73d59b37614483d5c8f2ae7adbae5af2f6e18bbd78d20fb",
     "subjects": [
       "(c1|rag|internal/alert/fanout.go)",
       "(c1|rag|internal/alert/queue.go)",
@@ -56,8 +56,8 @@
     "stratum": "stale_vs_fresh",
     "answer_home": "rag",
     "scenario_family": "fanout-worker-staleness",
-    "budget": 1172,
-    "raw_state_tokens": 1954,
+    "budget": 1208,
+    "raw_state_tokens": 2013,
     "pressure_level": "ok",
     "shed_messages": 18,
     "shed_bytes": 6450

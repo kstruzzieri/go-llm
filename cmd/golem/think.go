@@ -3,9 +3,94 @@ package main
 import (
 	"context"
 	"fmt"
+	"io"
+	"strings"
 
 	"github.com/kstruzzieri/go-llm/provider"
 )
+
+func handleThink(ctx context.Context, out io.Writer, sess *replSession, fields []string) {
+	if len(fields) == 1 {
+		if sess.runtime == nil {
+			_, _ = fmt.Fprintln(out, "think: runtime unavailable")
+			return
+		}
+		_, _ = fmt.Fprintln(out, formatThinkOptions(sess.runtime.ModelOptions()))
+		return
+	}
+	if len(fields) != 2 {
+		_, _ = fmt.Fprintln(out, "usage: /think [off|on|low|medium|high|default]")
+		return
+	}
+	value := strings.ToLower(fields[1])
+	switch value {
+	case "off", "on", "low", "medium", "high", "default":
+	default:
+		_, _ = fmt.Fprintln(out, "usage: /think [off|on|low|medium|high|default]")
+		return
+	}
+	if sess.runtime == nil {
+		_, _ = fmt.Fprintln(out, "think: runtime unavailable")
+		return
+	}
+	if err := ctx.Err(); err != nil {
+		_, _ = fmt.Fprintf(out, "think: %v\n", err)
+		return
+	}
+	resolveValue := value
+	if value == "default" {
+		resolveValue = ""
+	} else if sess.thinkModels == nil {
+		_, _ = fmt.Fprintln(out, "think: model configuration unavailable")
+		return
+	}
+	resolved, notice := resolveThinkOptions(ctx, sess.thinkModels, sess.thinkChain, resolveValue)
+	if err := ctx.Err(); err != nil {
+		_, _ = fmt.Fprintf(out, "think: %v\n", err)
+		return
+	}
+	if notice != "" {
+		_, _ = fmt.Fprintln(out, notice)
+		return
+	}
+	current := sess.runtime.ModelOptions()
+	candidate := current
+	candidate.Think = resolved.Think
+	candidate.ThinkEffort = resolved.ThinkEffort
+	if sameThinkOptions(current, candidate) {
+		_, _ = fmt.Fprintln(out, formatThinkOptions(candidate))
+		return
+	}
+	if err := ctx.Err(); err != nil {
+		_, _ = fmt.Fprintf(out, "think: %v\n", err)
+		return
+	}
+	if err := sess.runtime.Replace(sess.baseSystem, sess.tools[sess.readToolCount:], candidate); err != nil {
+		_, _ = fmt.Fprintf(out, "think: %v\n", err)
+		return
+	}
+	_, _ = fmt.Fprintln(out, formatThinkOptions(candidate))
+}
+
+func sameThinkOptions(a, b provider.ModelOptions) bool {
+	if a.ThinkEffort != b.ThinkEffort || (a.Think == nil) != (b.Think == nil) {
+		return false
+	}
+	return a.Think == nil || *a.Think == *b.Think
+}
+
+func formatThinkOptions(opts provider.ModelOptions) string {
+	if opts.Think != nil && !*opts.Think {
+		return "think: off"
+	}
+	if opts.ThinkEffort != "" {
+		return "think: " + opts.ThinkEffort
+	}
+	if opts.Think != nil {
+		return "think: on"
+	}
+	return "think: default (model decides)"
+}
 
 // thinkModelOptions maps the validated -think value to per-run model options.
 // Empty input returns zero options (model decides; no wire fields sent).

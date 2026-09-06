@@ -52,7 +52,7 @@
     },
     {
       "role": "tool",
-      "content": "### source: \"internal/collector/checkpoint.go\"\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nnote: metadata overview (summary omitted: budget)\n--- source: \"internal/collector/checkpoint.go\" (lines 1-31, similarity: 1.00) ---\n1| package collector\n2| \n3| import (\n4| \t\"context\"\n5| \t\"time\"\n6| )\n7| \n8| // checkpointEvery is the code default cadence for flushing collector\n9| // cursor state to disk. The cadence bounds crash replay from the last\n10| // checkpoint forward; freezes deliberately leave it alone, because a\n11| // cadence change mid-freeze would invalidate the recovery numbers the\n12| // freeze baseline was captured under.\n13| const checkpointEvery = 10 * time.Minute\n14| \n15| // loop flushes on the cadence until ctx ends. A failed flush keeps\n16| // the previous checkpoint; recovery from an older checkpoint is\n17| // correct, merely slower.\n18| func (c *Collector) loop(ctx context.Context) {\n19| \tt := time.NewTicker(checkpointEvery)\n20| \tdefer t.Stop()\n21| \tfor {\n22| \t\tselect {\n23| \t\tcase \u003c-ctx.Done():\n24| \t\t\treturn\n25| \t\tcase \u003c-t.C:\n26| \t\t\tif err := c.flush(); err != nil {\n27| \t\t\t\tc.metrics.flushFailures.Inc()\n28| \t\t\t}\n29| \t\t}\n30| \t}\n31| }\n\n### source: \"internal/collector/archive.go\"\npurpose: Checkpoint archiving: config-driven compression recorded per object.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n--- source: \"internal/collector/archive.go\" (lines 1-15, similarity: 1.00) ---\n1| package collector\n2| \n3| // archive ships completed checkpoint files to the durable archive.\n4| // Compression is applied at upload time from deployment config, so\n5| // operational windows can trade cpu for archive quota without a\n6| // rebuild; the archiver records the level used in the object\n7| // metadata for the restore path.\n8| func (a *Archiver) archive(path string) error {\n9| \tlevel := a.cfg.CompressionLevel\n10| \tobj, err := a.compress(path, level)\n11| \tif err != nil {\n12| \t\treturn err\n13| \t}\n14| \treturn a.put(obj)\n15| }\n\n### source: \"docs/freeze.md\"\nlanguage: markdown\nindexed: 2025-07-27T00:00:00Z\nnote: metadata overview (summary omitted: budget)\n",
+      "content": "### source: \"internal/collector/checkpoint.go\"\npurpose: Collector checkpoint cadence: code default flush interval, left untouched by freezes.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n--- source: \"internal/collector/checkpoint.go\" (lines 1-31, similarity: 1.00) ---\n1| package collector\n2| \n3| import (\n4| \t\"context\"\n5| \t\"time\"\n6| )\n7| \n8| // checkpointEvery is the code default cadence for flushing collector\n9| // cursor state to disk. The cadence bounds crash replay from the last\n10| // checkpoint forward; freezes deliberately leave it alone, because a\n11| // cadence change mid-freeze would invalidate the recovery numbers the\n12| // freeze baseline was captured under.\n13| const checkpointEvery = 10 * time.Minute\n14| \n15| // loop flushes on the cadence until ctx ends. A failed flush keeps\n16| // the previous checkpoint; recovery from an older checkpoint is\n17| // correct, merely slower.\n18| func (c *Collector) loop(ctx context.Context) {\n19| \tt := time.NewTicker(checkpointEvery)\n20| \tdefer t.Stop()\n21| \tfor {\n22| \t\tselect {\n23| \t\tcase \u003c-ctx.Done():\n24| \t\t\treturn\n25| \t\tcase \u003c-t.C:\n26| \t\t\tif err := c.flush(); err != nil {\n27| \t\t\t\tc.metrics.flushFailures.Inc()\n28| \t\t\t}\n29| \t\t}\n30| \t}\n31| }\n\n### source: \"internal/collector/archive.go\"\npurpose: Checkpoint archiving: config-driven compression recorded per object.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n\n### source: \"docs/freeze.md\"\npurpose: Freeze guide: exception process, standing prep items, code defaults left in place.\nlanguage: markdown\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n",
       "tool_call_id": "c1",
       "name": "retrieve"
     },
@@ -70,7 +70,7 @@
     },
     {
       "role": "tool",
-      "content": "rec-baseline-snap · working · created:2025-07-27 · updated:2025-07-27 · scope:session · ns: · src:\nrec-cert-sweep · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:\nrec-freeze-window · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:",
+      "content": "trust=agent-written; unreviewed; origin=memory.create; session=caller-claim · rec-baseline-snap · working · created:2025-07-27 · updated:2025-07-27 · scope:session · ns: · src-claim: · freeze baseline dashboard snapshot lives in the freeze folder with per-board exports\ntrust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-cert-sweep · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src-claim: · collector certificates that would expire mid-freeze were rotated ahead of the window\ntrust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-freeze-window · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src-claim: · freeze window is on the shared engineering calendar; the exception process is linked from the entry",
       "tool_call_id": "c2",
       "name": "agent_memory_search"
     },
@@ -94,8 +94,8 @@
       "rec-cert-sweep",
       "rec-freeze-window"
     ],
-    "estimated_prompt_tokens": 1320,
-    "state_digest": "3b8e414f5058341fd9d7cefb052fcded1ca8c5058e7d07be00341859f8d078a9",
+    "estimated_prompt_tokens": 1345,
+    "state_digest": "53317c3666ece0a50a86c3052a18ad08abebad305f9a692ea967aebf8cd31b66",
     "subjects": [
       "(c1|rag|internal/collector/checkpoint.go)",
       "(c1|rag|internal/collector/archive.go)",
@@ -107,11 +107,11 @@
     "stratum": "cross_domain_join",
     "answer_home": "join",
     "scenario_family": "checkpoint-cycle-join",
-    "budget": 1360,
-    "raw_state_tokens": 2266,
+    "budget": 1395,
+    "raw_state_tokens": 2325,
     "pressure_level": "critical",
     "shed_messages": 4,
-    "shed_bytes": 3234,
+    "shed_bytes": 3370,
     "omitted_subjects": 2
   }
 }

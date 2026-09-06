@@ -50,7 +50,7 @@
       "rec-verify-sampling"
     ],
     "estimated_prompt_tokens": 1046,
-    "state_digest": "191ff0d5abcfde298fe955fdd21fb7fe035e3e0c0858652479f19e9867fa5166",
+    "state_digest": "0333f00a1681780b12efbfd3b5366a05d380bf637329019abb74d19cd58f3ddc",
     "subjects": [
       "(c1|memory|rec-audit-window)",
       "(c1|memory|rec-dashboard-action)",
@@ -67,10 +67,10 @@
     "stratum": "chain_retention",
     "answer_home": "memory",
     "scenario_family": "uplink-part-chain",
-    "budget": 1191,
-    "raw_state_tokens": 1985,
+    "budget": 1285,
+    "raw_state_tokens": 2141,
     "pressure_level": "warn",
     "shed_messages": 10,
-    "shed_bytes": 3333
+    "shed_bytes": 3957
   }
 }

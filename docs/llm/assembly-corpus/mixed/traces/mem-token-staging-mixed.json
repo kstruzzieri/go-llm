@@ -51,7 +51,7 @@
     },
     {
       "role": "tool",
-      "content": "rec-eval-refresh · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:\nrec-pilot-notes · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:\nrec-soak-window · working · created:2025-07-27 · updated:2025-07-27 · scope:session · ns: · src: · soak tests get the staging fleet to themselves Thursday nights; anything else scheduled there moves to another slot\nrec-staging-token · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src: · staging ingest tokens carry the dwst5- prefix; the eval gateway accepts nothing else",
+      "content": "trust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-eval-refresh · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src-claim:\ntrust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-pilot-notes · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src-claim:\ntrust=agent-written; unreviewed; origin=memory.create; session=caller-claim · rec-soak-window · working · created:2025-07-27 · updated:2025-07-27 · scope:session · ns: · src-claim:\ntrust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-staging-token · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src-claim: · staging ingest tokens carry the dwst5- prefix; the eval gateway accepts nothing else",
       "tool_call_id": "c1",
       "name": "agent_memory_search"
     },
@@ -95,8 +95,8 @@
       "rec-soak-window",
       "rec-staging-token"
     ],
-    "estimated_prompt_tokens": 923,
-    "state_digest": "793fd925b2f6fe6b0e0e9ed997430db1ba716cedcda6cd19414f34c2311c0672",
+    "estimated_prompt_tokens": 977,
+    "state_digest": "51ad376b6ee79af59e9c3d57908954e4af6d83bf45dd260b9a8d39dc8edb2857",
     "subjects": [
       "(c1|memory|rec-eval-refresh)",
       "(c1|memory|rec-pilot-notes)",
@@ -109,9 +109,9 @@
     "stratum": "memory_only",
     "answer_home": "memory",
     "scenario_family": "ingest-token-mem",
-    "budget": 997,
-    "raw_state_tokens": 1662,
+    "budget": 1044,
+    "raw_state_tokens": 1740,
     "pressure_level": "critical",
-    "shed_bytes": 2541
+    "shed_bytes": 2636
   }
 }

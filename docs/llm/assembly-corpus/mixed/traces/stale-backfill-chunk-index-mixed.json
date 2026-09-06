@@ -43,7 +43,7 @@
     },
     {
       "role": "tool",
-      "content": "rec-index-chunk · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src: · index backfill chunk at 20000 rows, raised when the segment merge rework landed\nrec-merge-alerts · working · created:2025-07-27 · updated:2025-07-27 · scope:session · ns: · src:\nrec-merge-drills · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:\nrec-merge-planner · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:",
+      "content": "trust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-index-chunk · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src-claim: · index backfill chunk at 20000 rows, raised when the segment merge rework landed\ntrust=agent-written; unreviewed; origin=memory.create; session=caller-claim · rec-merge-alerts · working · created:2025-07-27 · updated:2025-07-27 · scope:session · ns: · src-claim:\ntrust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-merge-drills · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src-claim:\ntrust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-merge-planner · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src-claim:",
       "tool_call_id": "c1",
       "name": "agent_memory_search"
     },
@@ -62,7 +62,7 @@
     },
     {
       "role": "tool",
-      "content": "### source: \"internal/index/backfill.go\"\npurpose: Index backfill staging: the build path ingests history in 2000-row chunks.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n--- source: \"internal/index/backfill.go\" (lines 1-17, similarity: 1.00) ---\n1| package index\n2| \n3| // stageBackfill feeds historical rows into the index build path in\n4| // planner-sized chunks. Chunk sizing comes from the merge planner's\n5| // backfill profile; staging enforces only that chunks land whole and\n6| // in order, so a crashed backfill resumes at a chunk boundary.\n7| func (ix *Index) stageBackfill(src RowSource) error {\n8| \tfor {\n9| \t\tchunk, ok := src.Next()\n10| \t\tif !ok {\n11| \t\t\treturn nil\n12| \t\t}\n13| \t\tif err := ix.stage(chunk); err != nil {\n14| \t\t\treturn err\n15| \t\t}\n16| \t}\n17| }\n\n### source: \"internal/index/merge.go\"\npurpose: Merge scheduling: planner queue with backfill yield.\noverview: merge.go schedules segment merges from the planner queue and defers while a backfill holds staging, counting deferrals.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n\n### source: \"docs/index-maintenance.md\"\npurpose: Index maintenance guide: merge and backfill windows, stuck-work triage.\nlanguage: markdown\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n",
+      "content": "### source: \"internal/index/backfill.go\"\npurpose: Index backfill staging: the build path ingests history in 2000-row chunks.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n--- source: \"internal/index/backfill.go\" (lines 1-17, similarity: 1.00) ---\n1| package index\n2| \n3| // stageBackfill feeds historical rows into the index build path in\n4| // planner-sized chunks. Chunk sizing comes from the merge planner's\n5| // backfill profile; staging enforces only that chunks land whole and\n6| // in order, so a crashed backfill resumes at a chunk boundary.\n7| func (ix *Index) stageBackfill(src RowSource) error {\n8| \tfor {\n9| \t\tchunk, ok := src.Next()\n10| \t\tif !ok {\n11| \t\t\treturn nil\n12| \t\t}\n13| \t\tif err := ix.stage(chunk); err != nil {\n14| \t\t\treturn err\n15| \t\t}\n16| \t}\n17| }\n\n### source: \"internal/index/merge.go\"\npurpose: Merge scheduling: planner queue with backfill yield.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n\n### source: \"docs/index-maintenance.md\"\npurpose: Index maintenance guide: merge and backfill windows, stuck-work triage.\nlanguage: markdown\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n",
       "tool_call_id": "c2",
       "name": "retrieve"
     },
@@ -87,8 +87,8 @@
       "rec-merge-drills",
       "rec-merge-planner"
     ],
-    "estimated_prompt_tokens": 745,
-    "state_digest": "6fd3e5d59b8b3d7d8650ffe77c634066d0e3cf5c63ece8549786290648330fe6",
+    "estimated_prompt_tokens": 796,
+    "state_digest": "315eb636b94d095c24a77919d1c1c9d2d2bbd94bf29a62e7df52c5da18c35218",
     "subjects": [
       "(c1|memory|rec-index-chunk)",
       "(c1|memory|rec-merge-alerts)",
@@ -101,9 +101,9 @@
     "stratum": "stale_vs_fresh",
     "answer_home": "memory",
     "scenario_family": "backfill-chunk-staleness",
-    "budget": 791,
-    "raw_state_tokens": 1318,
+    "budget": 838,
+    "raw_state_tokens": 1396,
     "pressure_level": "critical",
-    "shed_bytes": 1939
+    "shed_bytes": 2045
   }
 }

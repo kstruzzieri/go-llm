@@ -8,6 +8,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 )
@@ -294,6 +295,7 @@ type EmbedResponse struct {
 
 // ModelOptions controls generation parameters. Pointer fields are optional;
 // nil means "use the provider's default". Use the Ptr helper to set values.
+// New reference-bearing fields require updates to Clone and its isolation tests.
 type ModelOptions struct {
 	Temperature   *float64 `json:"temperature,omitempty"`
 	TopP          *float64 `json:"top_p,omitempty"`
@@ -309,6 +311,27 @@ type ModelOptions struct {
 	// false. Values are not validated here; the CLI boundary validates and
 	// openai-compat servers reject unknown efforts themselves.
 	ThinkEffort string `json:"think_effort,omitempty"`
+}
+
+// Clone returns an independent copy of the options.
+func (o ModelOptions) Clone() ModelOptions {
+	if o.Temperature != nil {
+		o.Temperature = Ptr(*o.Temperature)
+	}
+	if o.TopP != nil {
+		o.TopP = Ptr(*o.TopP)
+	}
+	if o.TopK != nil {
+		o.TopK = Ptr(*o.TopK)
+	}
+	if o.RepeatPenalty != nil {
+		o.RepeatPenalty = Ptr(*o.RepeatPenalty)
+	}
+	if o.Think != nil {
+		o.Think = Ptr(*o.Think)
+	}
+	o.Stop = slices.Clone(o.Stop)
+	return o
 }
 
 // SamplingDefaults contains the generation values that may be filled when a
