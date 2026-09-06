@@ -13,7 +13,7 @@ Issue: [#450 / ZT-403](https://github.com/kstruzzieri/go-llm/issues/450). Its ac
 3. Sign the content digest, exact prompt digest, actual model identity, whole-second UTC completion timestamp, and a declaration of the content form. Use the fixed domain `go-llm/delegate-proposal/v1`.
 4. Export one pure `VerifyDelegateProposal` helper for the complete typed proposal contract; use it during emission and in consumer tests. Retain accepted envelopes in `Result.ToolCalls` and therefore existing content-full traces. Leave conversation persistence and enforcement before applying a proposal to subsequent work.
 
-The default HMAC proves that this runtime's key attested to the proposal and route identity. It does not prove that the external model possesses a signing key. HMAC verification is symmetric authority. Ephemeral keys stop being available when their tool instance is lost; later offline auditing needs a caller-supplied persistent identity and separately retained trusted verification material.
+The default HMAC proves that this runtime's key attested to the proposal and route identity. It does not prove that the external model possesses a signing key. HMAC verification is symmetric authority. The default identity is memory-only; retaining `ProposalVerifier` retains its symmetric key capability. Persisted traces become unverifiable when the matching key is lost. Durable offline auditing needs a caller-supplied persistent identity and separately retained trusted verification material.
 
 ## Why this approach
 
@@ -138,7 +138,13 @@ This PR emits evidence and supplies its typed verification helper. It does not p
 | `internal/agenttrace` tests | Verify existing trace serialization carries accepted provenance; no production writer change expected. |
 | `changelog.d/450-delegate-proposals.md` | Feature fragment with key lifetime and apply-time scope stated accurately. |
 
-`signing/`, `cmd/golem`, `agent/orchestrator.go`, `agent/interceptor*`, provider wire types, conversation persistence, and parallel dispatch production code stay outside the proposed implementation scope. The dispatch addition is an explicit exception to the handoff's isolated lane boundary and was approved together with this spec.
+`signing/`, `cmd/golem`, `agent/orchestrator.go`, interceptor production code, provider wire types, conversation persistence, and parallel dispatch production code stay outside the implementation scope. The dispatch addition is an explicit exception to the handoff's isolated lane boundary and was approved together with this spec.
+
+## Execution compatibility correction
+
+The approved `json.RawMessage` additions make both `ToolResult` and `ToolCallRecord` non-comparable in Go. Callers using whole-struct `==` or `!=` must compare fields or use an appropriate deep comparison. JSON with nil/empty provenance retains its old shape.
+
+During execution, exactly three existing comparisons in `agent/interceptor_test.go` failed to compile for this reason. The controller permitted mechanical replacements with the already-imported `reflect.DeepEqual`, preserving their assertions. This corrects an overlooked test dependency in the original file scope; interceptor production code and behavior are unchanged.
 
 ## Gemini feedback disposition
 
