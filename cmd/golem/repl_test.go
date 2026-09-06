@@ -139,11 +139,12 @@ func newTestSession(t *testing.T, caller agent.ModelCaller, root string) *replSe
 func newTestRuntime(t *testing.T, root, system string, orch *agent.Orchestrator, tools []agent.Tool) *golemruntime.Runtime {
 	t.Helper()
 	runtime, err := golemruntime.New(context.Background(), golemruntime.Options{
-		Root:         root,
-		System:       system,
-		Tools:        tools,
-		MaxSteps:     16,
-		Orchestrator: orch,
+		Root:           root,
+		System:         system,
+		Tools:          tools,
+		MaxSteps:       16,
+		Orchestrator:   orch,
+		FailureMessage: runFailureMessage,
 	})
 	if err != nil {
 		t.Fatalf("new runtime: %v", err)

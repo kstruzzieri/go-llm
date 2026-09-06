@@ -38,6 +38,40 @@ func TestParseFlags_InterceptorsDefaultOff(t *testing.T) {
 	}
 }
 
+func TestSecretMachineStartupWiresFailurePresenter(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		format outputFormat
+	}{
+		{"json", outputJSON},
+		{"stream-json", outputStreamJSON},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			configPath, root := writeRunLifecycleConfig(t)
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				serveCompat(w, r, "agent-model", nil)
+			}))
+			t.Cleanup(server.Close)
+			stdin, stdout, stderr := runTestFiles(t)
+			value := secretTestValue()
+			err := run([]string{
+				"-config", configPath, "-root", root, "-base-url", server.URL,
+				"-p", value, "-output-format", tc.name, "-interceptors",
+				"-no-compress", "-no-probe", "-no-cap-probe", "-no-session", "-no-memory",
+				"-no-rag", "-no-project-context", "-no-auto-index",
+			}, stdin, stdout, stderr)
+			if !errors.Is(err, errOneShotFailed) {
+				t.Fatal("production startup did not return the one-shot failure")
+			}
+			out, diagnostic := readRunTestFile(t, stdout), readRunTestFile(t, stderr)
+			if strings.Contains(out, value) || strings.Contains(diagnostic, value) {
+				t.Fatal("production machine output published the blocked transcript")
+			}
+			assertSecretMachineFailure(t, out, tc.format)
+		})
+	}
+}
+
 func TestInterceptorsFor(t *testing.T) {
 	if got := interceptorsFor(flags{}); got != nil {
 		t.Fatalf("off: chain = %v, want nil", got)

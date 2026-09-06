@@ -692,7 +692,7 @@ func main() {
 		if errors.Is(err, errIndexFailed) || errors.Is(err, errOneShotFailed) || errors.Is(err, errAgentflowTaskFailed) || errors.Is(err, errSourceFailed) {
 			os.Exit(exitCodeFor(err))
 		}
-		_, _ = fmt.Fprintf(os.Stderr, "golem: %v\n", err)
+		_, _ = fmt.Fprintf(os.Stderr, "golem: %s\n", runFailureMessage("", err))
 		os.Exit(exitCodeFor(err))
 	}
 }
@@ -1588,6 +1588,7 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 		// The REPL line reader accepts lines up to 1 MiB; keep the runtime's
 		// message bound in lockstep so a pasted log or diff is not rejected.
 		MaxMessageBytes: maxGoalBytes,
+		FailureMessage:  runFailureMessage,
 		ModelOptions:    thinkOpts,
 		Summarizer:      summarizer,
 		// The CLI is the trusted host: -trace records include model reasoning.
