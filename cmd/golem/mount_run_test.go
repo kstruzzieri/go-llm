@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -10,6 +11,8 @@ import (
 	"runtime/debug"
 	"strings"
 	"testing"
+
+	"github.com/kstruzzieri/go-llm/agent"
 )
 
 // startupShape is everything a mount must reproduce from the equivalent
@@ -213,7 +216,7 @@ func TestRunReleasesLateMountsAfterRuntimeClose(t *testing.T) {
 			sess.stdinTerminal = true // this hook simulates a live REPL command
 			var out strings.Builder
 			_, _ = dispatchSlash(context.Background(), &out, sess, "/allow-write")
-			if !strings.HasPrefix(out.String(), "writes enabled") {
+			if !strings.Contains(out.String(), "writes enabled") {
 				return fmt.Errorf("mount failed: %s", out.String())
 			}
 			return errStop
@@ -245,4 +248,156 @@ func TestRunReleasesLateMountsAfterRuntimeClose(t *testing.T) {
 		t.Fatalf("late checkpoint lease still held after run returned: %v", err)
 	}
 	_ = store.Close()
+}
+
+// A read-only invocation must not even create the signing directory. Startup
+// writes and late writes must both use the persistent identity and surface it.
+func TestRunMutationSigningLifecycle(t *testing.T) {
+	for _, mode := range []string{"read-only", "startup", "late"} {
+		t.Run(mode, func(t *testing.T) {
+			configPath, root, _ := fenceWireHarness(t, func(req wireRequest) []string {
+				if !req.hasToolMessage() {
+					return sseToolCall("write", "write_file", `{"path":"a.txt","content":"abc"}`)
+				}
+				return sseAnswer("done")
+			})
+			data := os.Getenv("XDG_DATA_HOME")
+			args := []string{"-config", configPath, "-root", root, "-no-probe", "-no-cap-probe",
+				"-no-rag", "-no-session", "-no-memory", "-no-project-context", "-no-auto-index"}
+			if mode == "startup" {
+				args = append(args, "-allow-write")
+			}
+			var mountOut strings.Builder
+			stdin, stdout, stderr := runTestFiles(t)
+			err := run(args, stdin, stdout, stderr, runHooks{
+				afterSessionReady: func(sess *replSession) error {
+					if mode == "read-only" {
+						if sess.journal != nil || sess.allowWrite {
+							t.Error("read-only startup enabled writes")
+						}
+						return nil
+					}
+					if mode == "late" {
+						sess.stdinTerminal = true
+						_, _ = dispatchSlash(context.Background(), &mountOut, sess, "/allow-write")
+						if !sess.allowWrite {
+							t.Fatalf("late writes did not mount: %s", mountOut.String())
+						}
+					}
+					_, err := runOnce(context.Background(), &mountOut, nil, sess, "write abc", &stubAnswerSource{line: "y", ok: true})
+					return err
+				},
+			})
+			if err != nil {
+				t.Fatalf("%s startup = %v; stderr: %s", mode, err, readRunTestFile(t, stderr))
+			}
+			output := mountOut.String() + readRunTestFile(t, stdout) + readRunTestFile(t, stderr)
+			if mode == "read-only" {
+				if _, err := os.Lstat(filepath.Join(data, "golem", "signing")); !os.IsNotExist(err) || strings.Contains(output, "new signing identity") {
+					t.Fatalf("read-only startup touched signing: %v; output: %s", err, output)
+				}
+				return
+			}
+			receipts := readHostMutationReceipts(t, data, root)
+			if len(receipts) != 1 || receipts[0].Body.Path != "a.txt" || receipts[0].Body.BeforeHash != "absent" || receipts[0].Body.AfterHash != "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad" {
+				t.Fatalf("%s persisted receipts = %+v, want one abc create", mode, receipts)
+			}
+			wantNotice := "new signing identity: kid " + receipts[0].Body.AgentID + " (key file " + filepath.Join(data, "golem", "signing", "agent-ed25519.pem") + ")"
+			if strings.Count(output, wantNotice) != 1 {
+				t.Fatalf("%s output lacks one identity notice %q: %s", mode, wantNotice, output)
+			}
+			if got, err := os.ReadFile(filepath.Join(root, "a.txt")); err != nil || string(got) != "abc" {
+				t.Fatalf("%s write = %q, %v; want abc", mode, got, err)
+			}
+		})
+	}
+}
+
+func TestRunMutationSigningScratchPromotion(t *testing.T) {
+	configPath, root := writeRunLifecycleConfig(t)
+	data := os.Getenv("XDG_DATA_HOME")
+	stdin, stdout, stderr := runTestFiles(t)
+	err := run([]string{"-config", configPath, "-root", root, "-no-probe", "-no-cap-probe", "-no-rag",
+		"-no-session", "-no-memory", "-no-project-context", "-no-auto-index", "-allow-exec", "-scratch", "-allow-write"},
+		stdin, stdout, stderr, runHooks{afterSessionReady: func(sess *replSession) error {
+			result := applyTool(t, sess.tools, "run_command", map[string]any{"argv": []string{"/bin/sh", "-c", "printf abc > artifact.txt; chmod 640 artifact.txt"}})
+			fields := strings.Fields(result.Content)
+			if result.IsError || len(fields) < 2 || !strings.HasPrefix(fields[1], "id=scr-") {
+				t.Fatalf("startup scratch capture = %+v", result)
+			}
+			if _, err := os.Lstat(filepath.Join(root, "artifact.txt")); !os.IsNotExist(err) {
+				t.Fatalf("scratch command changed workspace before promotion: %v", err)
+			}
+			beginTestTurn(t, sess.journal, "promote")
+			result = applyTool(t, sess.tools, "promote_artifact", map[string]any{"id": strings.TrimPrefix(fields[1], "id="), "path": "artifact.txt"})
+			if result.IsError {
+				t.Fatalf("startup promotion = %+v", result)
+			}
+			mustSealTurn(t, sess.journal)
+			return nil
+		}})
+	if err != nil {
+		t.Fatalf("scratch startup = %v; stderr: %s", err, readRunTestFile(t, stderr))
+	}
+	receipts := readHostMutationReceipts(t, data, root)
+	if len(receipts) != 1 {
+		t.Fatalf("scratch promotion persisted %d receipts, want 1", len(receipts))
+	}
+	body := receipts[0].Body
+	if body.Path != "artifact.txt" || body.BeforeHash != "absent" || body.AfterHash != "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad" || body.AfterMode == nil || *body.AfterMode != 0640 || body.UndoOf != "" {
+		t.Fatalf("startup promotion receipt = %+v", body)
+	}
+}
+
+func TestRunAllowWritePreservesScratchIdentity(t *testing.T) {
+	configPath, root := writeRunLifecycleConfig(t)
+	stdin, stdout, stderr := runTestFiles(t)
+	err := run([]string{"-config", configPath, "-root", root, "-no-probe", "-no-cap-probe", "-no-rag",
+		"-no-session", "-no-memory", "-no-project-context", "-no-auto-index", "-allow-exec", "-scratch"},
+		stdin, stdout, stderr, runHooks{afterSessionReady: func(sess *replSession) error {
+			sess.stdinTerminal = true
+			runtime, manager := sess.runtime, sess.bgManager
+			exec := toolByName(t, sess.tools, "run_command").(agent.PlanningTool)
+			args := json.RawMessage(`{"argv":["/bin/sh","-c","printf abc > retained.txt"]}`)
+			before, err := exec.Plan(context.Background(), args)
+			if err != nil || !strings.Contains(before.ApprovalKey, "scr:") {
+				t.Fatalf("scratch plan lacks approval identity: %v", err)
+			}
+			result := applyTool(t, sess.tools, "run_command", map[string]any{"argv": []string{"/bin/sh", "-c", "printf abc > retained.txt"}})
+			fields := strings.Fields(result.Content)
+			if result.IsError || len(fields) < 2 || !strings.HasPrefix(fields[1], "id=scr-") {
+				t.Fatalf("scratch capture = %+v", result)
+			}
+			var out strings.Builder
+			_, _ = dispatchSlash(context.Background(), &out, sess, "/allow-write")
+			if !sess.allowWrite || !strings.Contains(out.String(), "scratch: promote_artifact stays unavailable") {
+				t.Fatalf("late scratch mount = %q", out.String())
+			}
+			if sess.runtime != runtime || sess.bgManager != manager || strings.Contains(strings.Join(names(sess.tools), ","), "promote_artifact") {
+				t.Fatal("late writes rebuilt scratch runtime/manager or enabled promotion")
+			}
+			after, err := toolByName(t, sess.tools, "run_command").(agent.PlanningTool).Plan(context.Background(), args)
+			if err != nil || after.ApprovalKey != before.ApprovalKey {
+				t.Fatalf("late writes changed scratch approval identity: %v", err)
+			}
+			// A command-only rebuild can keep the same approval key while
+			// disconnecting new captures from the existing query tool.
+			fresh := applyTool(t, sess.tools, "run_command", map[string]any{"argv": []string{"/bin/sh", "-c", "printf abc > retained.txt"}})
+			freshFields := strings.Fields(fresh.Content)
+			if fresh.IsError || len(freshFields) < 2 || !strings.HasPrefix(freshFields[1], "id=scr-") {
+				t.Fatalf("post-mount scratch capture = %+v", fresh)
+			}
+			query := toolByName(t, sess.tools, "scratch_changes")
+			for _, capture := range []string{fields[1], freshFields[1]} {
+				raw, _ := json.Marshal(map[string]string{"id": strings.TrimPrefix(capture, "id=")})
+				changes, err := query.Invoke(context.Background(), raw)
+				if err != nil || changes.IsError || !strings.Contains(changes.Content, "retained.txt") {
+					t.Fatalf("late writes lost scratch capture %s: %+v, %v", capture, changes, err)
+				}
+			}
+			return nil
+		}})
+	if err != nil {
+		t.Fatalf("late scratch startup = %v; stderr: %s", err, readRunTestFile(t, stderr))
+	}
 }

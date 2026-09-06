@@ -147,7 +147,7 @@ func validateTrackedMode(rec MutationRecord) error {
 }
 
 // Journal receives a record after each successful mutation. Defined here at the
-// point of use; cmd/golem supplies the concrete in-memory implementation. A nil
+// point of use; cmd/golem supplies the concrete implementation. A nil
 // Journal is tolerated by the tools (Record is simply skipped).
 type Journal interface {
 	Record(MutationRecord)

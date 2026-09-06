@@ -2,16 +2,20 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
 	"errors"
 	"fmt"
 	"io"
 	"io/fs"
 	"os"
+	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
 	agenttools "github.com/kstruzzieri/go-llm/agent/tools"
+	"github.com/kstruzzieri/go-llm/signing"
 )
 
 // errInterruptedUndoPending blocks new model turns while an interrupted undo
@@ -22,13 +26,15 @@ var errInterruptedUndoPending = errors.New("golem: an interrupted undo exists; r
 // checkpointJournal is the interactive REPL's durable undo journal (#355). It
 // implements agenttools.PreparingJournal: every mutation persists a
 // write-ahead intent BEFORE the workspace rename and marks it applied after,
-// so no applied change can exist that the journal never saw. Intents group
-// into one checkpoint per runOnce turn. Any storage or hardening failure
+// so every attempted change has signed write-ahead evidence. Intents group
+// into one checkpoint per runOnce turn. Any signing, observation, or storage failure
 // latches the journal and cancels the captured run context (D7); an expected
 // quota refusal cancels only the current turn.
 type checkpointJournal struct {
-	ws    *agenttools.Workspace
-	store *checkpointStore
+	ws       *agenttools.Workspace
+	store    *checkpointStore
+	signer   signing.Signer
+	verifier signing.Verifier
 
 	// prepSem serializes each mutation from Prepare through its Commit/Abort
 	// so DB intent order always equals filesystem write order.
@@ -49,8 +55,8 @@ type checkpointJournal struct {
 	crashAfterRestore func(path string)
 }
 
-func newCheckpointJournal(ws *agenttools.Workspace, store *checkpointStore) *checkpointJournal {
-	return &checkpointJournal{ws: ws, store: store, prepSem: make(chan struct{}, 1)}
+func newCheckpointJournal(ws *agenttools.Workspace, store *checkpointStore, signer signing.Signer, verifier signing.Verifier) *checkpointJournal {
+	return &checkpointJournal{ws: ws, store: store, signer: signer, verifier: verifier, prepSem: make(chan struct{}, 1)}
 }
 
 // fileState is a live or simulated file state: a content hash, or absent.
@@ -160,9 +166,20 @@ func (j *checkpointJournal) Prepare(rec agenttools.MutationRecord) (agenttools.P
 		release()
 		return nil, fmt.Errorf("golem: canonicalize checkpoint path: %w", err)
 	}
-	rec.Path = path
-
-	cpID, fileID, err := j.store.prepareIntent(context.Background(), goal, at, rec)
+	rec.Path = filepath.ToSlash(path)
+	intent, err := j.signIntent(rec)
+	if err != nil {
+		j.latch(err)
+		release()
+		return nil, err
+	}
+	raw, err := signing.MarshalCanonical(intent)
+	if err != nil {
+		j.latch(err)
+		release()
+		return nil, err
+	}
+	cpID, fileID, err := j.store.prepareSignedIntent(context.Background(), goal, at, rec, raw)
 	if err != nil {
 		if checkpointQuotaOnly(err) {
 			// Expected policy refusal (D7/D8): cancel this turn, keep the
@@ -182,7 +199,7 @@ func (j *checkpointJournal) Prepare(rec agenttools.MutationRecord) (agenttools.P
 	j.mu.Lock()
 	j.cpID = cpID
 	j.mu.Unlock()
-	return &checkpointPrepared{j: j, fileID: fileID, release: release}, nil
+	return &checkpointPrepared{j: j, fileID: fileID, intent: intent, release: release}, nil
 }
 
 func checkpointQuotaOnly(err error) bool {
@@ -207,15 +224,41 @@ func checkpointQuotaOnly(err error) bool {
 	return err == errCheckpointQuota
 }
 
-// Record satisfies agenttools.Journal for compatibility; production tools use
-// the preparing path automatically. A direct call still routes through
-// prepare+commit so no mutation can bypass the write-ahead store.
-func (j *checkpointJournal) Record(rec agenttools.MutationRecord) {
-	p, err := j.Prepare(rec)
-	if err != nil {
-		return
+// Record cannot witness a write: only the prepared protocol observes landing.
+// Keep this method solely to satisfy Journal and fail closed for direct callers.
+func (j *checkpointJournal) Record(agenttools.MutationRecord) {
+	j.latch(errors.New("golem: Record cannot attest a mutation; use Prepare before writing"))
+}
+
+func (j *checkpointJournal) signIntent(rec agenttools.MutationRecord) (agenttools.MutationReceipt, error) {
+	if j.signer == nil || j.verifier == nil {
+		return agenttools.MutationReceipt{}, signing.ErrUninitializedKey
 	}
-	_ = p.Commit()
+	before := "absent"
+	if rec.Existed {
+		before = agenttools.ContentHash(rec.PriorContent)
+	}
+	body := agenttools.MutationReceiptBody{
+		Kind: "intent", MutationID: rand.Text(),
+		WorkspaceHash: j.store.workspaceHash, Path: rec.Path,
+		BeforeHash: before, AfterHash: rec.AfterHash,
+		Timestamp: time.Now().UTC().Format(time.RFC3339Nano), AgentID: j.signer.KeyID(),
+	}
+	if rec.TrackedMode {
+		if rec.AfterMode > 0o777 {
+			return agenttools.MutationReceipt{}, errors.New("golem: invalid tracked mutation mode")
+		}
+		mode := uint32(rec.AfterMode)
+		body.AfterMode = &mode
+	}
+	intent, err := agenttools.SignMutationReceipt(context.Background(), j.signer, body)
+	if err != nil {
+		return agenttools.MutationReceipt{}, err
+	}
+	if err := agenttools.VerifyMutationReceipt(context.Background(), j.verifier, intent); err != nil {
+		return agenttools.MutationReceipt{}, err
+	}
+	return intent, nil
 }
 
 // checkpointPrepared is the open intent handle for one mutation. Exactly one
@@ -223,6 +266,7 @@ func (j *checkpointJournal) Record(rec agenttools.MutationRecord) {
 type checkpointPrepared struct {
 	j       *checkpointJournal
 	fileID  int64
+	intent  agenttools.MutationReceipt
 	release func()
 	once    sync.Once
 }
@@ -235,7 +279,7 @@ func (p *checkpointPrepared) resolve(commit bool) error {
 	p.once.Do(func() {
 		defer p.release()
 		if commit {
-			err = p.j.store.commitIntent(context.Background(), p.fileID)
+			err = p.commit()
 		} else {
 			err = p.j.store.abortIntent(context.Background(), p.fileID)
 		}
@@ -244,6 +288,32 @@ func (p *checkpointPrepared) resolve(commit bool) error {
 		}
 	})
 	return err
+}
+
+// commit signs only the observed expected after-state. Unlike undo's
+// matchesAfter, a vanished create is a mismatch here, never an applied write.
+func (p *checkpointPrepared) commit() error {
+	body := p.intent.Body
+	live, err := p.j.liveState(body.Path)
+	if err != nil {
+		return fmt.Errorf("golem: mutation after-state: %w", checkpointDisplayError{cause: err})
+	}
+	if live.absent || live.hash != body.AfterHash || body.AfterMode != nil && (!live.modeKnown || live.mode != fs.FileMode(*body.AfterMode)) {
+		return fmt.Errorf("golem: mutation after-state mismatch for %s", checkpointDisplayText(body.Path))
+	}
+	body.Kind, body.Timestamp = "applied", time.Now().UTC().Format(time.RFC3339Nano)
+	applied, err := agenttools.SignMutationReceipt(context.Background(), p.j.signer, body)
+	if err != nil {
+		return err
+	}
+	if err := agenttools.VerifyMutationReceipt(context.Background(), p.j.verifier, applied); err != nil {
+		return err
+	}
+	raw, err := signing.MarshalCanonical(applied)
+	if err != nil {
+		return err
+	}
+	return p.j.store.commitSignedIntent(context.Background(), p.fileID, raw)
 }
 
 // sealTurn completes the turn's checkpoint on every runOnce exit path
@@ -277,55 +347,69 @@ func (j *checkpointJournal) sealTurn(ctx context.Context) error {
 	return errors.Join(errs...)
 }
 
-// recoverStartup reconciles a stale open checkpoint left by a crashed process
-// (spec section 1.5). With the workspace lease held this is safe: for each
-// write-ahead intent that never committed, the live file decides — back at
-// (or never left) the recorded prior/absent target means the write never
-// landed and the intent is dropped; any other observable state keeps the
-// record by marking it applied, so a later /undo refuses on hash mismatch
-// rather than overwriting unseen work. A non-absence read error fails startup
-// and leaves the row open: recovery must not guess. The recovered checkpoint
-// seals to completed (or is deleted when empty) and one notice is returned.
+// recoverStartup classifies interrupted forward writes conservatively for
+// undo bookkeeping. It authenticates evidence but never signs historical success:
+// even live == prior could hide a same-byte write, so unresolved intents survive.
 func (j *checkpointJournal) recoverStartup(ctx context.Context) (string, error) {
 	groups, err := j.store.loadGroups(ctx, checkpointOpen, 0, false)
 	if err != nil {
 		return "", err
 	}
-	if len(groups) == 0 {
-		return "", nil
-	}
-	notice := ""
-	for _, g := range groups { // the partial unique index allows at most one
+	notices := []string{}
+	for _, g := range groups {
+		// Authenticate the whole group before changing any recovery progress.
+		unconfirmed := 0
+		for _, f := range g.files {
+			if !f.forwardMutationID.Valid || f.forwardMutationID.String == "" {
+				return "", errors.New("golem: checkpoint has no verifiable forward intent")
+			}
+			entry, err := j.store.loadReceipt(ctx, f.forwardMutationID.String)
+			if err != nil {
+				return "", mutationHistoryError{cause: err}
+			}
+			intent, err := authenticateCheckpointReceipt(ctx, j.verifier, entry)
+			if err != nil {
+				return "", mutationHistoryError{cause: err}
+			}
+			if err := j.store.bindForwardReceipt(f, intent); err != nil {
+				return "", err
+			}
+			if entry.appliedJSON == nil {
+				unconfirmed++
+			}
+		}
 		kept := 0
 		for _, f := range g.files {
 			if f.applied {
 				kept++
 				continue
 			}
-			live, lerr := j.liveState(f.path)
-			if lerr != nil {
-				return "", fmt.Errorf("golem: checkpoint recovery cannot classify %s: %w",
-					checkpointDisplayText(f.path), checkpointDisplayError{cause: lerr})
+			live, err := j.liveState(f.path)
+			if err != nil {
+				return "", fmt.Errorf("golem: checkpoint recovery cannot classify %s: %w", checkpointDisplayText(f.path), checkpointDisplayError{cause: err})
 			}
 			if live.equal(undoTargetFrom(live, f)) {
-				if aerr := j.store.abortIntent(ctx, f.id); aerr != nil {
-					return "", aerr
+				if err := j.store.recoverDropIntent(ctx, f.id); err != nil {
+					return "", err
 				}
 				continue
 			}
-			if cerr := j.store.commitIntent(ctx, f.id); cerr != nil {
-				return "", cerr
+			if err := j.store.recoverCommitIntent(ctx, f.id); err != nil {
+				return "", err
 			}
 			kept++
 		}
-		if serr := j.store.seal(ctx, g.id); serr != nil {
-			return "", serr
+		if err := j.store.seal(ctx, g.id); err != nil {
+			return "", err
 		}
 		if kept > 0 {
-			notice = fmt.Sprintf("recovered an interrupted turn as a checkpoint (%d file(s)); /undo can revert it", kept)
+			notices = append(notices, fmt.Sprintf("recovered an interrupted turn as a checkpoint (%d file(s)); /undo can revert it", kept))
+		}
+		if unconfirmed > 0 {
+			notices = append(notices, fmt.Sprintf("recovered %d unconfirmed mutation attempt(s); no applied receipt", unconfirmed))
 		}
 	}
-	return notice, nil
+	return strings.Join(notices, "\n"), nil
 }
 
 // checkpointUndoRefusal is the exact refusal text shared with the RAM
@@ -398,106 +482,299 @@ func (j *checkpointJournal) undo(ctx context.Context, out io.Writer, n int) {
 		return
 	}
 
-	// Preflight every file across every checkpoint being undone, simulating
-	// the chain so a path written in several turns validates end to end. Any
-	// mismatch or unclassifiable read: change nothing, retain every record.
+	j.restoreGroups(ctx, out, groups)
+}
 
-	expected := map[string]fileState{}
+// checkpointEvidence separates authenticated facts from mutable progress.
+type checkpointEvidence struct {
+	forward          agenttools.MutationReceipt
+	completedInverse string
+	unconfirmed      bool
+	unsigned         bool
+	invalid          bool
+}
+
+// checkpointEvidenceFor authenticates the retained ledger before returning any
+// labels or restore authority. Only evidence relevant to these rows is retained.
+func (j *checkpointJournal) checkpointEvidenceFor(ctx context.Context, groups []checkpointGroup) (map[int64]*checkpointEvidence, error) {
+	result := make(map[int64]*checkpointEvidence)
+	selected := make(map[string]*checkpointEvidence)
 	for _, g := range groups {
 		for _, f := range g.files {
+			e := &checkpointEvidence{unsigned: !f.forwardMutationID.Valid}
+			result[f.id] = e
+			if e.unsigned {
+				e.invalid = f.inverseMutationID.Valid
+				continue
+			}
+			entry, err := j.store.loadReceipt(ctx, f.forwardMutationID.String)
+			if err != nil {
+				e.invalid = true
+				continue
+			}
+			e.forward, err = authenticateCheckpointReceipt(ctx, j.verifier, entry)
+			if err != nil {
+				return nil, err
+			}
+			e.invalid = j.store.bindForwardReceipt(f, e.forward) != nil
+			e.unconfirmed = entry.appliedJSON == nil
+			selected[f.forwardMutationID.String] = e
+			if f.inverseMutationID.Valid {
+				inverse, err := j.store.loadReceipt(ctx, f.inverseMutationID.String)
+				if err != nil {
+					e.invalid = true
+					continue
+				}
+				intent, err := authenticateCheckpointReceipt(ctx, j.verifier, inverse)
+				if err != nil {
+					return nil, err
+				}
+				if bindInverseReceipt(e.forward, intent) != nil {
+					e.invalid = true
+				}
+			}
+		}
+	}
+	// ponytail: O(retained history) scan; add a validated index if undo latency is measured.
+	for cursor := int64(0); ; {
+		entries, err := j.store.scanReceipts(ctx, cursor, 100)
+		if err != nil {
+			return nil, err
+		}
+		if len(entries) == 0 {
+			break
+		}
+		for _, entry := range entries {
+			intent, err := authenticateCheckpointReceipt(ctx, j.verifier, entry)
+			if err != nil {
+				return nil, err
+			}
+			cursor = entry.sequence
+			if intent.Body.UndoOf == "" {
+				continue
+			}
+			e := selected[intent.Body.UndoOf]
+			originalEntry, err := j.store.loadReceipt(ctx, intent.Body.UndoOf)
+			if err != nil {
+				if e != nil {
+					e.invalid = true
+					continue
+				}
+				return nil, err
+			}
+			original, err := authenticateCheckpointReceipt(ctx, j.verifier, originalEntry)
+			if err != nil {
+				return nil, err
+			}
+			if err := bindInverseReceipt(original, intent); err != nil {
+				if e != nil {
+					e.invalid = true
+					continue
+				}
+				return nil, err
+			}
+			if e == nil {
+				continue
+			}
+			if entry.appliedJSON == nil {
+				e.unconfirmed = true
+			} else {
+				e.completedInverse = entry.mutationID
+			}
+		}
+	}
+	for _, g := range groups {
+		for _, f := range g.files {
+			if f.restored && result[f.id].completedInverse == "" {
+				result[f.id].unconfirmed = true
+			}
+		}
+	}
+	return result, nil
+}
+
+// restoreGroups shares all-file authentication and chain simulation between
+// ordinary undo and resume. Completed inverses and restored rows only reconcile
+// bookkeeping: they never change the simulated or live state.
+func (j *checkpointJournal) restoreGroups(ctx context.Context, out io.Writer, groups []checkpointGroup) bool {
+	evidence, err := j.checkpointEvidenceFor(ctx, groups)
+	if err != nil {
+		_, _ = fmt.Fprintf(out, "undo failed: receipt history unverifiable: %s\n", checkpointDisplayText(err.Error()))
+		return false
+	}
+	for _, g := range groups {
+		for _, f := range g.files {
+			e := evidence[f.id]
+			if e.invalid || e.unsigned {
+				_, _ = fmt.Fprintln(out, "undo failed: checkpoint has no valid authenticated receipts")
+				return false
+			}
+			if !f.restored && e.completedInverse == "" && f.existed && agenttools.ContentHash(f.priorContent) != e.forward.Body.BeforeHash {
+				_, _ = fmt.Fprintln(out, "undo failed: checkpoint prior content does not match signed hash")
+				return false
+			}
+		}
+	}
+	expected := make(map[string]fileState)
+	for _, g := range groups {
+		for _, f := range g.files {
+			if f.restored || evidence[f.id].completedInverse != "" {
+				continue
+			}
 			cur, seen := expected[f.path]
 			if !seen {
-				live, lerr := j.liveState(f.path)
-				if lerr != nil {
+				cur, err = j.liveState(f.path)
+				if err != nil {
 					_, _ = fmt.Fprintf(out, checkpointUndoRefusal, checkpointDisplayText(f.path))
-					return
+					return false
 				}
-				cur = live
 			}
-			if !matchesAfter(cur, f) {
+			alreadyTarget := g.state == checkpointUndoing && cur.equal(undoTargetFrom(cur, f))
+			if !alreadyTarget && !matchesAfter(cur, f) {
 				_, _ = fmt.Fprintf(out, checkpointUndoRefusal, checkpointDisplayText(f.path))
-				return
+				return false
 			}
 			expected[f.path] = undoTargetFrom(cur, f)
 		}
 	}
-
-	// Commit intent, then restore. From here a crash or failure resumes via
-	// the next /undo.
-	ids := make([]int64, len(groups))
-	for i, g := range groups {
-		ids[i] = g.id
-	}
-	if err := j.store.markUndoing(ctx, ids); err != nil {
-		_, _ = fmt.Fprintf(out, "undo failed: %v\n", err)
-		return
-	}
-	j.restoreGroups(ctx, out, groups)
-}
-
-// restoreGroups applies checkpoint groups newest first, files in reverse
-// mutation order, skipping rows whose progress flag is already set. Restore
-// and resume are one loop: every file is classified by its live state, so
-// replaying after a crash is idempotent. Returns true when every group
-// completed and was deleted.
-func (j *checkpointJournal) restoreGroups(ctx context.Context, out io.Writer, groups []checkpointGroup) bool {
+	ids := []int64{}
 	for _, g := range groups {
+		if g.state == checkpointCompleted {
+			ids = append(ids, g.id)
+		}
+	}
+	if len(ids) > 0 {
+		if err := j.store.markUndoing(ctx, ids); err != nil {
+			_, _ = fmt.Fprintf(out, "undo failed: %s\n", checkpointDisplayText(err.Error()))
+			return false
+		}
+	}
+	for _, g := range groups {
+		unconfirmed := false
 		for _, f := range g.files {
-			if f.restored {
-				continue
-			}
-			if !j.restoreFile(ctx, out, f) {
+			e := evidence[f.id]
+			if !f.restored && !j.restoreFile(out, f, e) {
 				_, _ = fmt.Fprintln(out, "undo interrupted; run /undo to resume")
 				return false
 			}
+			unconfirmed = unconfirmed || e.unconfirmed
 		}
-		if err := j.store.deleteRestored(ctx, g.id); err != nil {
+		if err := j.store.deleteRestored(context.Background(), g.id); err != nil {
 			j.latch(err)
-			_, _ = fmt.Fprintf(out, "undo failed: %v\n", err)
+			_, _ = fmt.Fprintf(out, "undo failed: %s\n", checkpointDisplayText(err.Error()))
 			return false
 		}
-		_, _ = fmt.Fprintf(out, "undid checkpoint: %s\n", g.goal)
+		label := "[receipts verified]"
+		if unconfirmed {
+			label = "[unconfirmed]"
+		}
+		_, _ = fmt.Fprintf(out, "undid checkpoint: %s %s\n", g.goal, label)
 	}
 	return true
 }
 
-// restoreFile restores one recorded mutation. Live-state classification makes
-// it idempotent: target already reached (a crash after the restore but before
-// its flag, or an already-absent created file) marks progress without
-// writing; the recorded after state applies the restore; anything else is a
-// divergence — refuse with the exact shared message and stop, leaving the
-// checkpoint in undoing for a later resume.
-func (j *checkpointJournal) restoreFile(ctx context.Context, out io.Writer, f checkpointFile) bool {
+// restoreFile is called only after whole-batch authentication. It preserves the
+// immediate live guard, signs one new attempt before touching the filesystem,
+// and atomically commits observed applied evidence with restored progress.
+func (j *checkpointJournal) restoreFile(out io.Writer, f checkpointFile, e *checkpointEvidence) bool {
+	ctx := context.Background()
+	fail := func(err error) bool {
+		j.latch(err)
+		_, _ = fmt.Fprintf(out, "undo failed for %s: %s\n", checkpointDisplayText(f.path), checkpointDisplayText(err.Error()))
+		return false
+	}
+	if e.completedInverse != "" {
+		if err := j.store.reconcileInverseIntent(ctx, f.id, e.completedInverse); err != nil {
+			return fail(err)
+		}
+		_, _ = fmt.Fprintf(out, "undid %s (reconciled applied receipt)\n", checkpointDisplayText(f.path))
+		return true
+	}
 	cur, err := j.liveState(f.path)
 	if err != nil {
 		_, _ = fmt.Fprintf(out, checkpointUndoRefusal, checkpointDisplayText(f.path))
 		return false
 	}
-	if !cur.equal(undoTargetFrom(cur, f)) {
-		if !matchesAfter(cur, f) {
-			_, _ = fmt.Fprintf(out, checkpointUndoRefusal, checkpointDisplayText(f.path))
-			return false
+	target := undoTargetFrom(cur, f)
+	if cur.equal(target) {
+		if err := j.store.recoverRestored(ctx, f.id); err != nil {
+			return fail(err)
 		}
-		if f.existed {
-			if werr := j.ws.WriteFileAtomic(f.path, f.priorContent); werr != nil {
-				_, _ = fmt.Fprintf(out, "undo failed for %s: %s\n",
-					checkpointDisplayText(f.path), checkpointDisplayText(werr.Error()))
-				return false
-			}
-		} else if rerr := j.ws.RemoveFile(f.path); rerr != nil {
-			_, _ = fmt.Fprintf(out, "undo failed for %s: %s\n",
-				checkpointDisplayText(f.path), checkpointDisplayText(rerr.Error()))
-			return false
+		e.unconfirmed = true
+		if f.inverseMutationID.Valid {
+			_, _ = fmt.Fprintln(out, "undo target reached; interrupted attempt has no applied receipt")
+		} else {
+			_, _ = fmt.Fprintln(out, "undo target reached; no applied receipt")
 		}
+		_, _ = fmt.Fprintf(out, "undid %s\n", checkpointDisplayText(f.path))
+		return true
+	}
+	if !matchesAfter(cur, f) {
+		_, _ = fmt.Fprintf(out, checkpointUndoRefusal, checkpointDisplayText(f.path))
+		return false
+	}
+	if j.signer == nil || j.verifier == nil {
+		return fail(signing.ErrUninitializedKey)
+	}
+	body := e.forward.Body
+	body.MutationID, body.UndoOf = rand.Text(), body.MutationID
+	body.BeforeHash, body.AfterHash = body.AfterHash, body.BeforeHash
+	body.AfterMode = nil
+	body.Timestamp, body.AgentID = time.Now().UTC().Format(time.RFC3339Nano), j.signer.KeyID()
+	intent, err := agenttools.SignMutationReceipt(ctx, j.signer, body)
+	if err != nil {
+		return fail(err)
+	}
+	if err := agenttools.VerifyMutationReceipt(ctx, j.verifier, intent); err != nil {
+		return fail(err)
+	}
+	raw, err := signing.MarshalCanonical(intent)
+	if err != nil {
+		return fail(err)
+	}
+	if err := j.store.prepareInverseIntent(ctx, f.id, raw); err != nil {
+		return fail(err)
+	}
+	// Signing/persistence may take time; recheck immediately before the operation.
+	liveBefore, err := j.liveState(f.path)
+	if err != nil {
+		return fail(err)
+	}
+	if !liveBefore.equal(cur) || !matchesAfter(liveBefore, f) {
+		return fail(errors.New("golem: file changed during inverse preparation"))
+	}
+	if f.existed {
+		err = j.ws.WriteFileAtomic(f.path, f.priorContent)
+	} else {
+		err = j.ws.RemoveFile(f.path)
+	}
+	if err != nil {
+		return fail(err)
 	}
 	if j.crashAfterRestore != nil {
 		j.crashAfterRestore(f.path)
 	}
-	if err := j.store.markRestored(ctx, f.id); err != nil {
-		j.latch(err)
-		_, _ = fmt.Fprintf(out, "undo failed for %s: %s\n",
-			checkpointDisplayText(f.path), checkpointDisplayText(err.Error()))
-		return false
+	live, err := j.liveState(f.path)
+	if err != nil {
+		return fail(err)
+	}
+	if !live.equal(target) {
+		return fail(errors.New("golem: inverse after-state mismatch"))
+	}
+	body.Kind, body.Timestamp = "applied", time.Now().UTC().Format(time.RFC3339Nano)
+	applied, err := agenttools.SignMutationReceipt(ctx, j.signer, body)
+	if err != nil {
+		return fail(err)
+	}
+	if err := agenttools.VerifyMutationReceipt(ctx, j.verifier, applied); err != nil {
+		return fail(err)
+	}
+	raw, err = signing.MarshalCanonical(applied)
+	if err != nil {
+		return fail(err)
+	}
+	if err := j.store.commitInverseIntent(ctx, f.id, raw); err != nil {
+		return fail(err)
 	}
 	_, _ = fmt.Fprintf(out, "undid %s\n", checkpointDisplayText(f.path))
 	return true
@@ -524,11 +801,42 @@ func (j *checkpointJournal) listCheckpoints(ctx context.Context, out io.Writer) 
 		_, _ = fmt.Fprintf(out, "checkpoints failed: %v\n", err)
 		return
 	}
+	groups := make([]checkpointGroup, len(infos))
+	ranks := make([]int, len(infos))
+	for i, info := range infos {
+		files, err := j.store.loadFileMetadata(ctx, info.id, false)
+		if errors.Is(err, errCheckpointMetadata) {
+			ranks[i] = 3
+		} else if err != nil {
+			_, _ = fmt.Fprintf(out, "checkpoints failed: %s\n", checkpointDisplayText(err.Error()))
+			return
+		}
+		groups[i] = checkpointGroup{id: info.id, files: files}
+	}
+	evidence, err := j.checkpointEvidenceFor(ctx, groups)
+	if err != nil {
+		_, _ = fmt.Fprintln(out, "receipt history unverifiable; evidence labels unavailable")
+		return
+	}
 	if len(infos) == 0 {
 		_, _ = fmt.Fprintln(out, "no checkpoints")
 		return
 	}
+	labels := [...]string{"[receipts verified]", "[unconfirmed]", "[unsigned]", "[invalid receipts]"}
 	for i, in := range infos {
+		for _, f := range groups[i].files {
+			e := evidence[f.id]
+			rank := 0
+			switch {
+			case e.invalid:
+				rank = 3
+			case e.unsigned:
+				rank = 2
+			case e.unconfirmed:
+				rank = 1
+			}
+			ranks[i] = max(ranks[i], rank)
+		}
 		marker := ""
 		switch in.state {
 		case checkpointUndoing:
@@ -541,8 +849,8 @@ func (j *checkpointJournal) listCheckpoints(ctx context.Context, out io.Writer) 
 		if in.files == 1 {
 			fileWord = "file"
 		}
-		_, _ = fmt.Fprintf(out, "%3d  %s  %d %s  %s  %s%s\n",
+		_, _ = fmt.Fprintf(out, "%3d  %s  %d %s  %s  %s%s %s\n",
 			i+1, in.createdAt.Local().Format("2006-01-02 15:04:05"),
-			in.files, fileWord, formatCheckpointBytes(in.bytes), marker, in.goal)
+			in.files, fileWord, formatCheckpointBytes(in.bytes), marker, in.goal, labels[ranks[i]])
 	}
 }

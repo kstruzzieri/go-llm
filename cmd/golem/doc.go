@@ -122,6 +122,61 @@
 // (a formatter, a codegen step) produces changes the checkpoint journal did
 // not capture and /undo will not restore. Prefer a read-only check.
 //
+// Durable checkpoint writes also produce signed MutationReceipts: interactive
+// write_file/edit_file, headless -allow-tool, late /allow-write, startup-enabled
+// scratch promotion, and actual /undo restores/deletions. Scratch promotion
+// availability stays frozen at startup. Existing approvals are unchanged.
+// A signed intent precedes filesystem work; observed success requires a durable
+// applied receipt. Post-write signing, database, or hardening failure can leave
+// an uncertain change and halts further writes. Recovery never invents applied
+// evidence, and reports target-state recovery without it as unconfirmed.
+// Completed inverse evidence is reconciled without replaying the operation or
+// overwriting later edits; earlier uncertain attempts survive completed retries.
+//
+// The per-user Ed25519 key is <dataDirBase>/golem/signing/agent-ed25519.pem,
+// outside the workspace, with owner-only storage and symlink checks. It loads
+// once per write-enabled runtime; read-only sessions do not touch it. First
+// creation announces a new identity. AgentID is the key ID, not a model/session.
+// Retained current-workspace history requires the existing matching key.
+// Missing-key diagnostics name the escaped path and historical claimed key ID
+// and request restoration from backup; mismatches name the receipt, claimed
+// and loaded key IDs, and path. Writes stay disabled without key replacement.
+// Invalid history diagnostics never echo unchecked record bytes. There is no
+// unsigned fallback, algorithm flag, automatic rotation, repair, or backfill.
+// An empty workspace history cannot detect prior global identity loss.
+//
+// Schema v3 is additive and refused by older binaries. Finish interrupted v1/v2
+// recovery/undo with the previous binary before upgrading; migration refuses
+// those states before changing the schema. Completed unsigned history remains
+// listed but authenticated /undo refuses it. Downgrade needs a pre-upgrade
+// backup. Receipts survive completed undo and snapshot pruning without automatic
+// expiry; 50 checkpoints / 64 MiB bounds undo snapshots, not total DB growth.
+//
+// /checkpoints appends [invalid receipts] for bad linkage/metadata, [unsigned]
+// for null forward references, [unconfirmed] for missing applied evidence, or
+// [receipts verified] for complete authentic evidence bound to row metadata,
+// in that precedence order. Non-null missing references are invalid. Any
+// unauthenticatable retained history fails the command with
+// "receipt history unverifiable; evidence labels unavailable". Listing is
+// read-only and checks neither live files nor full prior-content blobs;
+// pending undo still hashes restore blobs and guards live content/type/mode.
+//
+// AgentFlow task/RAM undo, parallel promotion/rollback, direct embedders,
+// arbitrary subprocess/external-editor writes, scratch copies/cleanup, and
+// Golem metadata are excluded. AgentFlow proof receipts are a separate feature.
+// MutationReceipts attest a host key's transition/observation, not approval,
+// complete process attribution, trusted time, or power-loss durability. External
+// writer race windows and best-effort file fsync remain. There is no audit chain,
+// completeness, whole-ledger deletion/reordering/rollback/truncation detection,
+// external anchor, or standalone public-key retention/export. Intent-only
+// evidence must not become a clean successful audit in #447.
+//
+// The portable agent/tools helpers sign the complete Body, including Kind, with
+// the existing Ed25519 or HMAC signer; Golem always uses Ed25519. V1 envelopes
+// are limited to 32 KiB. Mutation IDs use crypto/rand.Text's uppercase base32
+// spelling (at least 26 characters, permitting future growth). See
+// docs/plans/2026-09-05-mutation-receipts-445-spec-plan.md for the full contract.
+//
 // -grounding is a SEPARATE, unrelated check: it verifies the ANSWER, not the
 // workspace. The .golem.json "verify" command above runs a workspace command
 // after a write; -grounding asks a model whether the final answer's claims are

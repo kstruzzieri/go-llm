@@ -385,7 +385,8 @@ func TestRunOnce_ApprovalPromptShowsInterceptorRisk(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	writeTools, journal, err := buildWriteTools(root, openTestStore(t, root))
+	store := openTestStore(t, root)
+	writeTools, journal, _, err := buildWriteTools(root, store, testStoreGetenv(store))
 	if err != nil {
 		t.Fatal(err)
 	}

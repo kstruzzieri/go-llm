@@ -385,6 +385,70 @@ Approval prompts that offer an `a` answer also accept "always this session", and
 
 `/allow-write` and `/allow-exec` mount exactly the tools the startup flags would, with the same approval prompts, undo journal, and post-write verification; they are one-way for the session and never grant approval by themselves. With `-scratch`, promotion stays as it was at startup and `/allow-write` says so.
 
+Durable Golem checkpoints automatically record signed **MutationReceipts** for
+`write_file`/`edit_file` (interactive, headless `-allow-tool`, and late
+`/allow-write`), startup-enabled scratch promotion, and actual `/undo` file
+restores/deletions. Approval behavior is unchanged. A signed **intent** is
+persisted before filesystem work; an **applied receipt** records that this runtime
+observed the expected result and persisted that evidence. Successful observed
+mutations require the applied receipt. Post-write signing, database, or hardening
+failures can leave a changed file and halt further writes with an uncertainty
+error. Recovery never signs a historical applied receipt: reaching the target
+state with missing applied evidence is reported as unconfirmed. Completed inverse
+evidence is reconciled without replaying the file operation, preserving later
+edits; a successful retry does not erase earlier uncertain attempts.
+
+The per-user Ed25519 identity lives outside the workspace at
+`<dataDirBase>/golem/signing/agent-ed25519.pem`, in an owner-only directory/file
+with symlink checks. It is loaded once per write-enabled runtime; read-only
+sessions do not touch the key. A first creation prints a new-identity notice.
+`agent_id` is the key ID, not a model or session identity. Retained receipt history
+for the current workspace requires the existing matching key: a missing-key
+diagnostic names the escaped path and historical claimed key ID and asks you to
+restore the matching key from backup; a mismatch names the receipt, its claimed
+key ID, the loaded key ID, and path. Both disable writes without replacing the
+key. Malformed history produces a fixed invalid/unavailable-history diagnostic
+without echoing unchecked record bytes. There is no unsigned fallback, algorithm
+flag, automatic rotation, key repair, or historical signing. A new workspace
+cannot detect loss of an earlier global identity from its empty history.
+
+**Upgrade:** checkpoint schema v3 is additive, but older binaries refuse it.
+Before upgrading, finish any interrupted v1/v2 recovery or undo with the previous
+binary; otherwise migration refuses before changing the schema. Completed
+unsigned checkpoints remain visible, but authenticated `/undo` cannot restore
+them. Downgrading requires a pre-upgrade backup. Receipt metadata survives
+completed undo and checkpoint pruning, with no automatic expiry: the 50-checkpoint
+and 64 MiB prior-content limits bound undo snapshots, not total database size.
+
+`/checkpoints` keeps its numbering and lifecycle markers and appends one evidence
+label (most restrictive first):
+
+| Label | Meaning |
+|---|---|
+| `[invalid receipts]` | Authenticated evidence has an invalid checkpoint linkage or metadata binding. |
+| `[unsigned]` | At least one forward reference is null; authenticated undo is unavailable. Missing metadata does not prove legacy origin. |
+| `[unconfirmed]` | Present evidence authenticates, but a forward or retained inverse attempt lacks applied evidence. |
+| `[receipts verified]` | All required evidence authenticates and matches checkpoint metadata. |
+
+A non-null reference to missing evidence is invalid. If any retained history
+cannot be authenticated, the command fails with
+`receipt history unverifiable; evidence labels unavailable` instead of displaying
+inferred labels. Listing never signs or repairs evidence, fetches full prior
+blobs, or verifies current files. `/undo` still hashes the restore blobs and checks
+live content, type, and tracked mode before pending filesystem work.
+
+Coverage excludes AgentFlow task tools/RAM undo and parallel promotion/rollback,
+direct embedders, arbitrary subprocess or external-editor writes, scratch
+copies/cleanup, and Golem metadata. AgentFlow's existing **proof receipts** are a
+separate feature. MutationReceipts authenticate a host key's signed transition or
+observation; they do not prove user approval, complete process attribution,
+trusted time, or power-loss durability. Existing external-writer race windows and
+best-effort file fsync remain. There is no audit chain, completeness guarantee,
+whole-ledger deletion/reordering/rollback/truncation detection, external anchor,
+or standalone public-key retention/export. An intent-only entry is not a clean
+successful audit for #447. The [approved design](docs/plans/2026-09-05-mutation-receipts-445-spec-plan.md)
+records the full portable wire and recovery contract.
+
 When `-root` is inside a Git work tree, Golem injects one bounded repository
 snapshot into the system prompt at startup: the branch line from
 `git status --branch`, the porcelain status entries, and the five newest
