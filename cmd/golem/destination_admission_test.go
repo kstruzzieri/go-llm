@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/kstruzzieri/go-llm/provider"
 )
@@ -62,6 +63,107 @@ func newTestAdmission(t *testing.T, edges []provider.DestinationEdge, allow []st
 		t.Fatal(err)
 	}
 	return adm, &out
+}
+
+func TestLineSourcePromptYN(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		want bool
+	}{
+		{name: "yes", in: " YeS \r", want: true},
+		{name: "no", in: " n \r", want: false},
+		{name: "EOF", want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f := newEditorFixture(t, editorOpts{in: strings.NewReader(tt.in)})
+			got, err := lineSourcePromptYN(f.src)(context.Background(), "allow? ")
+			if err != nil {
+				t.Fatalf("lineSourcePromptYN(%q) error = %v, want nil", tt.in, err)
+			}
+			if got != tt.want {
+				t.Errorf("lineSourcePromptYN(%q) = %v, want %v", tt.in, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestLineSourcePromptYNRejectedAnswerDeniesWithoutConsumingTypeahead(t *testing.T) {
+	f := newEditorFixture(t, editorOpts{in: strings.NewReader("bad\xb2\ry\r")})
+	got, err := lineSourcePromptYN(f.src)(context.Background(), "allow? ")
+	if err != nil {
+		t.Fatalf("lineSourcePromptYN(invalid UTF-8) error = %v, want nil", err)
+	}
+	if got {
+		t.Error("lineSourcePromptYN(invalid UTF-8) = true, want false")
+	}
+
+	line, ok, err := f.readGoal(t)
+	if err != nil || !ok || line != "y" {
+		t.Fatalf("ReadGoal after rejected answer = %q ok=%v err=%v, want preserved typeahead \"y\" true nil", line, ok, err)
+	}
+}
+
+func TestLineSourcePromptYNCtrlCReturnsCanceledWithoutFurtherInput(t *testing.T) {
+	g := newGatedReader()
+	g.entered = make(chan struct{}, 2)
+	f := newEditorFixture(t, editorOpts{in: g})
+
+	type result struct {
+		approved bool
+		err      error
+	}
+	done := make(chan result, 1)
+	go func() {
+		approved, err := lineSourcePromptYN(f.src)(context.Background(), "allow? ")
+		done <- result{approved: approved, err: err}
+	}()
+	inputClosed := false
+	closeInput := func() {
+		if !inputClosed {
+			close(g.chunks)
+			inputClosed = true
+		}
+	}
+	defer closeInput()
+	waitForStop := func() bool {
+		select {
+		case <-done:
+			return true
+		case <-time.After(5 * time.Second):
+			return false
+		}
+	}
+
+	select {
+	case <-g.entered:
+	case <-time.After(5 * time.Second):
+		closeInput()
+		if !waitForStop() {
+			t.Fatal("lineSourcePromptYN did not stop after its input was closed")
+		}
+		t.Fatal("lineSourcePromptYN did not start an input read")
+	}
+	g.chunks <- []byte{'\x03'}
+	select {
+	case res := <-done:
+		if res.approved || !errors.Is(res.err, context.Canceled) {
+			t.Fatalf("lineSourcePromptYN(Ctrl-C) = %v, %v, want false, context.Canceled", res.approved, res.err)
+		}
+	case <-g.entered:
+		closeInput()
+		if !waitForStop() {
+			t.Fatal("lineSourcePromptYN did not stop after its second input read was closed")
+		}
+		t.Fatal("lineSourcePromptYN(Ctrl-C) started another input read, want an immediate cancellation")
+	case <-time.After(5 * time.Second):
+		closeInput()
+		if !waitForStop() {
+			t.Fatal("lineSourcePromptYN did not stop after its input was closed")
+		}
+		t.Fatal("lineSourcePromptYN(Ctrl-C) did not return")
+	}
 }
 
 // I11/I4: the manifest renders before any decision, grouped by deduplicated

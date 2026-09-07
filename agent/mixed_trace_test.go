@@ -561,7 +561,7 @@ func traceFixtures() []traceFixture {
 		{name: "end to end", st: mixedTraceState(),
 			sentinels: []string{traceCardContent, traceEvidenceContent, traceFallback}, maxBudget: 110},
 		{name: "durable summary and history lane", st: summarized,
-			sentinels: []string{traceCardContent, traceEvidenceContent, traceFallback}, maxBudget: 130},
+			sentinels: []string{traceCardContent, traceEvidenceContent, traceFallback}, maxBudget: 110 + len([]rune(DurableSummaryPrompt(summarized.DurableSummary)))},
 		{name: "omission by token budget", st: mixedOmitState(4096),
 			sentinels: []string{bigX, traceFallback}, maxBudget: 130},
 		{name: "omission by byte cap", st: mixedOmitState(30),

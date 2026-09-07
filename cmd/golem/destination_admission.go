@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -293,7 +294,10 @@ func startupPromptYN(in io.Reader, out io.Writer) func(context.Context, string) 
 // EOF declines rather than admits.
 func lineSourcePromptYN(src lineSource) func(context.Context, string) (bool, error) {
 	return func(ctx context.Context, prompt string) (bool, error) {
-		line, ok, err := src.ReadGoal(ctx, prompt)
+		line, ok, err := src.ReadAnswer(ctx, prompt)
+		if errors.Is(err, errInterrupted) {
+			return false, context.Canceled
+		}
 		if err != nil {
 			return false, err
 		}
