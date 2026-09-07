@@ -1,6 +1,6 @@
 # #374 — Compact the active session: spec and TDD plan
 
-**Status:** Approved by Keith after the Gemini-feedback revision. No implementation or test files, branch changes, or commits have been made by this task. Model/reasoning and subagent execution recommendations are being discussed separately; the spec approval is recorded and does not need repeating.
+**Status:** Approved by Keith after the Gemini-feedback revision and implemented on `feat/374-compact`. All implementation slices and the whole branch passed independent review. Integrated race tests, complete lint, and the required full Docker CI gate passed. PR preparation is complete; merge remains outside the approved scope.
 
 **Goal:** Add `/compact` to compress the active persistent conversation on demand, report before/after stored-history token estimates and whether it changed, and preserve prior state on cancellation or failure before commit.
 
@@ -123,10 +123,10 @@ Every behavior task follows test-first red/green: write the specified failing ch
 
 ### 1. Establish the feature worktree and approved artifact
 
-- [ ] Refresh `origin/develop`, verify #373 is present, and create linked worktree `.worktrees/374-compact` on `feat/374-compact` from that remote branch. Use the worktree skill and verify ignore rules first; never implement or commit on develop.
-- [ ] Copy this approved document to the destination above and point the worktree task checklist to it.
-- [ ] Confirm lane ordering: #374 follows #373 and precedes #375/#521. Lane 4 owns runtime.go/repl.go; Lane 2 canary and Lane 5 trust hunks must route through this owner or rebase after this merge.
-- [ ] Route the single `main.go` initializer hunk for `noCompress` through Lane 3, which owns its audit subcommand hunk, or apply it only after that lane merges and this branch rebases. Do not edit that shared file concurrently.
+- [x] Refresh `origin/develop`, verify #373 is present, and create linked worktree `.worktrees/374-compact` on `feat/374-compact` from that remote branch. Use the worktree skill and verify ignore rules first; never implement or commit on develop.
+- [x] Copy this approved document to the destination above and point the worktree task checklist to it.
+- [x] Confirm lane ordering: #374 follows #373 and precedes #375/#521. Lane 4 owns runtime.go/repl.go; Lane 2 canary and Lane 5 trust hunks must route through this owner or rebase after this merge.
+- [x] Route the single `main.go` initializer hunk for `noCompress` through Lane 3, which owns its audit subcommand hunk, or apply it only after that lane merges and this branch rebases. Do not edit that shared file concurrently.
 
 Dependency: approval. This is workspace setup only; no source changes.
 
@@ -134,9 +134,9 @@ Dependency: approval. This is workspace setup only; no source changes.
 
 Files: modify `golem/session.go`; extend `golem/session_test.go`.
 
-- [ ] Write failing tests for the helper's forced-below-threshold behavior, normal-trigger boundaries, summary-inclusive estimates, retention floor, progressive replacement/counts, and no-ops.
-- [ ] Factor `estimateStoredHistory`, add the force argument, retain existing `CompressMessages`, and make `saveThread` explicitly use automatic mode.
-- [ ] Verify the existing `conversation/compress_test.go` and `golem/runtime_test.go` automatic-compression cases still pass. No production changes are planned in `conversation/` or `agent/`.
+- [x] Write failing tests for the helper's forced-below-threshold behavior, normal-trigger boundaries, summary-inclusive estimates, retention floor, progressive replacement/counts, and no-ops.
+- [x] Factor `estimateStoredHistory`, add the force argument, retain existing `CompressMessages`, and make `saveThread` explicitly use automatic mode.
+- [x] Verify the existing `conversation/compress_test.go` and `golem/runtime_test.go` automatic-compression cases still pass. No production changes are planned in `conversation/` or `agent/`.
 
 Produces: the shared private compression helper and history estimates consumed by Task 3.
 
@@ -144,10 +144,10 @@ Produces: the shared private compression helper and history estimates consumed b
 
 Files: modify `golem/runtime.go` (API contracts/reservation lifecycle) and `golem/session.go` (CompactThread orchestration); add `golem/compact_test.go` in the existing external test package.
 
-- [ ] Write failing public-API tests for persistence, cancellation and failure preservation, unavailable/invalid cases, conflicts in both directions, independent threads, shutdown, and next-turn visibility.
-- [ ] Implement CompactThread, CompactionReport, and ErrCompressionUnavailable; reserve through the existing thread map/mutex/wait group, and make Close cancel both active maps before unlocking and waiting. Do not introduce a RunID for compaction or double-count a stateful turn in the wait group.
-- [ ] Reuse the existing store and hardening paths, return success only after Save, and document injected-store atomicity and the method's context/report semantics.
-- [ ] Add a real SQLite close/reopen integration check and run targeted race tests with barrier-controlled concurrency. Reuse `mapSessionStore`, `cloneConversation`, and `captureCaller` from `golem/runtime_test.go` where suitable.
+- [x] Write failing public-API tests for persistence, cancellation and failure preservation, unavailable/invalid cases, conflicts in both directions, independent threads, shutdown, and next-turn visibility.
+- [x] Implement CompactThread, CompactionReport, and ErrCompressionUnavailable; reserve through the existing thread map/mutex/wait group, and make Close cancel both active maps before unlocking and waiting. Do not introduce a RunID for compaction or double-count a stateful turn in the wait group.
+- [x] Reuse the existing store and hardening paths, return success only after Save, and document injected-store atomicity and the method's context/report semantics.
+- [x] Add a real SQLite close/reopen integration check and run targeted race tests with barrier-controlled concurrency. Reuse `mapSessionStore`, `cloneConversation`, and `captureCaller` from `golem/runtime_test.go` where suitable.
 
 Depends on Task 2. Produces the public method and report consumed by the command.
 
@@ -155,20 +155,20 @@ Depends on Task 2. Produces the public method and report consumed by the command
 
 Files: add `cmd/golem/compact.go` and `cmd/golem/compact_repl_test.go`; modify `cmd/golem/repl.go`, `cmd/golem/destination_admission.go`, `cmd/golem/destination_admission_test.go`, the coordinated one-line field initializer in `cmd/golem/main.go`, `README.md`, and add `changelog.d/374-compact.md`.
 
-- [ ] Write failing command tests for every literal output, help/argument validation, disabled startup wiring, cancellation, consent, cache refresh, and goal/history boundaries listed below.
-- [ ] Add `handleCompact`, register `/compact`, add its help entry, and initialize the private session interrupt channel at `runREPL` entry. Keep `dispatchSlash` and all existing caller signatures unchanged.
-- [ ] Extract/reuse `interruptContext` in `repl.go` using the child context as stop signal and one exit acknowledgement; prove returned cleanup remains safe when called repeatedly/concurrently and joins before the next prompt. Retain normal-turn and checkpoint cancellation semantics.
-- [ ] Add the private disabled flag and coordinated startup initializer, gate destination consent before compaction, switch its shared prompt adapter to `ReadAnswer` with synchronous interruption mapping, and reload the CLI cache only after a saved change.
-- [ ] Document the command, four-exchange retention, history-estimate scope, progressive-summary behavior (including repeated commands that make a model request yet report unchanged), disabled modes, and cancellation/commit behavior in the existing README section and the changelog fragment. Never edit CHANGELOG.md.
+- [x] Write failing command tests for every literal output, help/argument validation, disabled startup wiring, cancellation, consent, cache refresh, and goal/history boundaries listed below.
+- [x] Add `handleCompact`, register `/compact`, add its help entry, and initialize the private session interrupt channel at `runREPL` entry. Keep `dispatchSlash` and all existing caller signatures unchanged.
+- [x] Extract/reuse `interruptContext` in `repl.go` using the child context as stop signal and one exit acknowledgement; prove returned cleanup remains safe when called repeatedly/concurrently and joins before the next prompt. Retain normal-turn and checkpoint cancellation semantics.
+- [x] Add the private disabled flag and coordinated startup initializer, gate destination consent before compaction, switch its shared prompt adapter to `ReadAnswer` with synchronous interruption mapping, and reload the CLI cache only after a saved change.
+- [x] Document the command, four-exchange retention, history-estimate scope, progressive-summary behavior (including repeated commands that make a model request yet report unchanged), disabled modes, and cancellation/commit behavior in the existing README section and the changelog fragment. Never edit CHANGELOG.md.
 
 Depends on Task 3 and coordination of the main.go hunk. This is the complete user-visible deliverable.
 
 ### 5. Final verification and review-ready branch
 
-- [ ] Complete code-review/fix cycles until clean and criticize-review after each implementation task. Review the final diff against every decision and test below.
-- [ ] Run the focused race command, complete lint, then required full container gate; capture each actual exit code directly.
-- [ ] Check only intended files changed, all targeted mutations were reverted, and shared lane hunks remain owned and reviewed.
-- [ ] Prepare the PR with `Closes #374`, validation evidence, and no emojis. Apply the repository's ordinary integration workflow after implementation; do not merge as part of this planning approval.
+- [x] Complete code-review/fix cycles until clean and criticize-review after each implementation task. Review the final diff against every decision and test below.
+- [x] Run the focused race command, complete lint, then required full container gate; capture each actual exit code directly.
+- [x] Check only intended files changed, all targeted mutations were reverted, and shared lane hunks remain owned and reviewed.
+- [x] Prepare the PR with `Closes #374`, validation evidence, and no emojis. Apply the repository's ordinary integration workflow after implementation; do not merge as part of this planning approval.
 
 Depends on Tasks 2–4 and clean review.
 
@@ -231,3 +231,22 @@ The estimator correction and consent-reader fix were already in the draft and re
 Compaction intentionally replaces older raw history with a lossy summary. It has no new undo/archive mechanism; this is the existing durable-compression behavior made explicit. There is no database migration or infrastructure operation to roll back. Cancellation/failure before commit retains the old snapshot; success does not promise recoverability of evicted raw text.
 
 **Approved scope:** D1–D5 and Tasks 1–5, including immediate busy-thread refusal, the four-exchange forced target, summary-only rewrites, honoring -no-compress, history-only estimates with the small trigger correction, commit-based cancellation semantics, and using the existing answer reader to make consent cancellation reliable. Implementation is authorized; merge remains outside this approval.
+
+## Execution results
+
+Source and tests were verified at `d1fb71f`; the subsequent plan update changes documentation only.
+
+- Integrated host race command: `env -u GOROOT go test -race ./golem ./cmd/golem`, exit 0 (golem 20.153s; cmd/golem 237.578s).
+- Complete host lint: `env -u GOROOT golangci-lint run --max-same-issues 0 --max-issues-per-linter 0 ./...`, exit 0, zero issues.
+- Required full gate: `docker compose -f docker-compose.ci.yml run --rm ci ./scripts/ci-local --mode full`, exit 0. Formatting, lint, repository-wide race tests, and compile smoke checks passed.
+- All 49 targeted mutations were detected and restored: 13 shared-policy, 18 Runtime, 4 consent-reader, and 14 CLI mutations.
+- Independent scoped reviews and final Astra XHigh whole-branch review passed with no outstanding findings. The consent test review added bounded waits before its clean re-review.
+
+Mutation limits: the immediate pre-Save cancellation guard overlaps the post-summary guard and was source-reviewed rather than independently mutated. The missing-watcher-join check uses 64 bounded scheduling attempts; correct cleanup cannot consume the next interrupt, while detection of the broken select path is probabilistic (the mutation failed at attempt 2).
+
+Execution decisions, in order:
+
+1. Run the user-approved disjoint consent/docs workers alongside core work despite the skill's generic serial-implementation guidance. Exclusive file ownership controlled the risk of overlapping edits.
+2. Keep staging, commits, and mutation-window coordination with the orchestrator because workers share one checkout. A coordination mistake could let tests observe intentionally broken source or stage another worker's changes.
+3. Extract briefs directly because the bundled brief script invoked a non-executable sibling. Binding spec content was retained; the risk was omitting a requirement, checked by independent reviews.
+4. Add one internal compaction resource-lifetime test in `golem/session_test.go` using the existing private `closeOwned` seam. Public tests cannot directly observe resource closure; the cost is one extra test hunk, with no production hook or API.
