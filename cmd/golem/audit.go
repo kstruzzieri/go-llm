@@ -130,10 +130,11 @@ func runAuditWith(ctx context.Context, args []string, out, errOut io.Writer, sca
 		_, _ = io.WriteString(errOut, line)
 		return newAuditExitError(2)
 	}
-	var runner agentflow.Runner = agentflow.NewExecRunner(root)
+	runner := agentflow.NewExecRunner(root)
 	if source != "" {
 		runner = agentflow.NewSrcExecRunner(root, source)
 	}
+	runner.DisablePythonBytecodeWrites()
 
 	results := make([]auditResult, 0, 3)
 	if f.scope == "all" || f.scope == "workspace" {

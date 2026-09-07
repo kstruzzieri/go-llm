@@ -52,6 +52,13 @@ func NewSrcExecRunner(dir, checkout string) *ExecRunner {
 	}
 }
 
+// DisablePythonBytecodeWrites keeps Python-backed verification from writing import
+// caches into a read-only caller's workspace. It changes only this runner's
+// child environment.
+func (r *ExecRunner) DisablePythonBytecodeWrites() {
+	r.env = append(r.env, "PYTHONDONTWRITEBYTECODE=1")
+}
+
 // commandFor returns the concrete (bin, argv, extraEnv) for a subcommand call.
 // Split out for testability.
 func (r *ExecRunner) commandFor(args []string) (bin string, argv []string, env []string) {

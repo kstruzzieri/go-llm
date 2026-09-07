@@ -3,13 +3,17 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"errors"
 	"flag"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
+	"sort"
 	"strings"
 	"testing"
 
@@ -218,6 +222,175 @@ func TestRunAuditBoundsDiagnostics(t *testing.T) {
 	if got := strings.Count(out.String(), "  diagnostic code="); got != 10 || !strings.Contains(out.String(), "  (+2 more diagnostics)\n") {
 		t.Fatalf("bounded report has %d diagnostics:\n%s", got, out.String())
 	}
+}
+
+func TestAuditProofRunnerDoesNotWritePythonBytecode(t *testing.T) {
+	if _, err := exec.LookPath("python3"); err != nil {
+		t.Skip("python3 unavailable; child environment is covered by agentflow runner tests")
+	}
+	for _, tc := range []struct {
+		name  string
+		setup func(*testing.T, string) []string
+	}{
+		{
+			name: "source checkout under audited root",
+			setup: func(t *testing.T, root string) []string {
+				writeAuditPythonPackage(t, filepath.Join(root, "src", "agentflow"), true)
+				return []string{"-agentflow-src", root}
+			},
+		},
+		{
+			name: "installed command imports editable package under audited root",
+			setup: func(t *testing.T, root string) []string {
+				writeAuditPythonPackage(t, filepath.Join(root, "src", "audit_cache_probe"), false)
+				bin := filepath.Join(root, "bin")
+				if err := os.MkdirAll(bin, 0o700); err != nil {
+					t.Fatal(err)
+				}
+				script := "#!/usr/bin/env python3\nfrom audit_cache_probe import finish\nfinish()\n"
+				if err := os.WriteFile(filepath.Join(bin, "agentflow"), []byte(script), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+				t.Setenv("PYTHONPATH", filepath.Join(root, "src"))
+				return nil
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root, data := t.TempDir(), t.TempDir()
+			root, err := filepath.EvalSymlinks(root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Mkdir(filepath.Join(root, ".agent"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			extraArgs := tc.setup(t, root)
+			t.Setenv("GOLEM_AUDIT_EXPECT_ROOT", root)
+			t.Setenv("PYTHONDONTWRITEBYTECODE", "")
+			t.Setenv("XDG_DATA_HOME", data)
+			rootBefore := snapshotAuditFixtureTree(t, root)
+			dataBefore := snapshotAuditFixtureTree(t, data)
+
+			args := append([]string{"-root", root, "-scope", "proofs"}, extraArgs...)
+			var out, errOut bytes.Buffer
+			err = runAudit(t.Context(), args, &out, &errOut)
+			var exit *auditExitError
+			if !errors.As(err, &exit) || exit.ExitCode() != 2 {
+				t.Fatalf("runAudit error = %v, want unavailable-provider exit 2", err)
+			}
+			want := "proofs: outcome=incomplete assurance=\"structural/checksum; unsigned\" checked=0 sources=0\n" +
+				"  diagnostic code=agentflow_unavailable target=\"\" message=\"agentflow proof verification unavailable: requires agentflow with --integrity-only support\"\n" +
+				"overall: outcome=incomplete\n"
+			if out.String() != want || errOut.Len() != 0 {
+				t.Errorf("stdout/stderr = %q / %q, want %q / empty", out.String(), errOut.String(), want)
+			}
+			assertAuditFixtureTreeUnchanged(t, root, rootBefore)
+			assertAuditFixtureTreeUnchanged(t, data, dataBefore)
+		})
+	}
+}
+
+func writeAuditPythonPackage(t *testing.T, packageDir string, module bool) {
+	t.Helper()
+	if err := os.MkdirAll(packageDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	probe := `import os
+import sys
+
+def finish():
+    if os.getcwd() != os.environ.get("GOLEM_AUDIT_EXPECT_ROOT"):
+        raise SystemExit(97)
+    if sys.argv[1:] != ["verify-proof", "--integrity-only", "--json"]:
+        raise SystemExit(96)
+    if os.environ.get("PYTHONDONTWRITEBYTECODE") != "1":
+        raise SystemExit(95)
+    if sys.stdin.buffer.read() != b"":
+        raise SystemExit(94)
+    raise SystemExit(2)
+`
+	if err := os.WriteFile(filepath.Join(packageDir, "probe.py"), []byte(probe), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	init := "from .probe import finish\n"
+	if err := os.WriteFile(filepath.Join(packageDir, "__init__.py"), []byte(init), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if module {
+		if err := os.WriteFile(filepath.Join(packageDir, "__main__.py"), []byte("from .probe import finish\nfinish()\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+type auditFixtureEntry struct {
+	mode       fs.FileMode
+	mtimeNanos int64
+	size       int64
+	digest     [sha256.Size]byte
+}
+
+func snapshotAuditFixtureTree(t *testing.T, root string) map[string]auditFixtureEntry {
+	t.Helper()
+	snapshot := map[string]auditFixtureEntry{}
+	err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(root, path)
+		if err != nil {
+			return err
+		}
+		state := auditFixtureEntry{mode: info.Mode(), mtimeNanos: info.ModTime().UnixNano(), size: info.Size()}
+		if info.Mode().IsRegular() {
+			contents, err := os.ReadFile(path)
+			if err != nil {
+				return err
+			}
+			state.digest = sha256.Sum256(contents)
+		}
+		snapshot[filepath.ToSlash(rel)] = state
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return snapshot
+}
+
+func assertAuditFixtureTreeUnchanged(t *testing.T, root string, before map[string]auditFixtureEntry) {
+	t.Helper()
+	after := snapshotAuditFixtureTree(t, root)
+	if reflect.DeepEqual(after, before) {
+		return
+	}
+	paths := make([]string, 0, len(before)+len(after))
+	seen := map[string]bool{}
+	for path := range before {
+		paths = append(paths, path)
+		seen[path] = true
+	}
+	for path := range after {
+		if !seen[path] {
+			paths = append(paths, path)
+		}
+	}
+	sort.Strings(paths)
+	var changes strings.Builder
+	for _, path := range paths {
+		old, oldOK := before[path]
+		current, currentOK := after[path]
+		if !oldOK || !currentOK || old != current {
+			fmt.Fprintf(&changes, "\n%s: before=%+v present=%v after=%+v present=%v", path, old, oldOK, current, currentOK)
+		}
+	}
+	t.Fatalf("audit changed fixture tree %q (entries expose name, byte digest/size, mode, and mtime):%s", root, changes.String())
 }
 
 func TestAuditExitContractHelper(t *testing.T) {

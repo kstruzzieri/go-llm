@@ -2,6 +2,7 @@ package agentflow
 
 import (
 	"context"
+	"os"
 	"reflect"
 	"testing"
 	"time"
@@ -18,6 +19,19 @@ func TestExecRunnerArgv_BinaryMode(t *testing.T) {
 	}
 	if len(env) != 0 {
 		t.Fatalf("env = %v, want none", env)
+	}
+}
+
+func TestExecRunnerDisablePythonBytecodeWritesIsChildOnly(t *testing.T) {
+	t.Setenv("PYTHONDONTWRITEBYTECODE", "")
+	r := &ExecRunner{bin: "sh", dir: t.TempDir()}
+	r.DisablePythonBytecodeWrites()
+	out, errOut, exit, err := r.Run(context.Background(), []string{"-c", `printf %s "$PYTHONDONTWRITEBYTECODE"`}, nil)
+	if err != nil || exit != 0 || string(out) != "1" || len(errOut) != 0 {
+		t.Fatalf("child env: stdout=%q stderr=%q exit=%d err=%v", out, errOut, exit, err)
+	}
+	if got := os.Getenv("PYTHONDONTWRITEBYTECODE"); got != "" {
+		t.Fatalf("parent PYTHONDONTWRITEBYTECODE = %q, want inherited empty value", got)
 	}
 }
 
