@@ -1,4 +1,4 @@
-package interceptor
+package interceptor_test
 
 import (
 	"context"
@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/kstruzzieri/go-llm/agent"
+	"github.com/kstruzzieri/go-llm/agent/interceptor"
 	"github.com/kstruzzieri/go-llm/provider"
 )
 
@@ -42,9 +43,9 @@ var (
 	}
 )
 
-func newTestCanary(t *testing.T) Canary {
+func newTestCanary(t *testing.T) interceptor.Canary {
 	t.Helper()
-	c, err := NewCanary(canaryNonce)
+	c, err := interceptor.NewCanary(canaryNonce)
 	if err != nil {
 		t.Fatalf("NewCanary(valid nonce) error = %v, want nil", err)
 	}
@@ -54,7 +55,14 @@ func newTestCanary(t *testing.T) Canary {
 func assertCanaryFindings(t *testing.T, got, want []agent.Finding) {
 	t.Helper()
 	if !slices.Equal(got, want) {
-		t.Error("Canary findings differ from the literal expected fields")
+		t.Errorf("Canary findings = %+v, want %+v", got, want)
+	}
+}
+
+func toolCall(id, name, args string) provider.ToolCall {
+	return provider.ToolCall{
+		ID: id, Type: "function",
+		Function: provider.ToolCallFunction{Name: name, Arguments: json.RawMessage(args)},
 	}
 }
 
@@ -72,7 +80,7 @@ func TestCanaryConstructor(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			_, err := NewCanary(tc.nonce)
+			_, err := interceptor.NewCanary(tc.nonce)
 			if err == nil || err.Error() != wantErr {
 				t.Errorf("NewCanary(%s nonce) error matched static validation message = %v, want true", tc.name, err != nil && err.Error() == wantErr)
 			}
@@ -92,12 +100,14 @@ func TestCanaryZeroValueFailsClosed(t *testing.T) {
 		name string
 		run  func() ([]agent.Finding, error)
 	}{
-		{name: "input", run: func() ([]agent.Finding, error) { return (Canary{}).InspectInput(t.Context(), agent.InputInspection{}) }},
+		{name: "input", run: func() ([]agent.Finding, error) {
+			return (interceptor.Canary{}).InspectInput(t.Context(), agent.InputInspection{})
+		}},
 		{name: "output", run: func() ([]agent.Finding, error) {
-			return (Canary{}).InspectOutput(t.Context(), agent.OutputInspection{})
+			return (interceptor.Canary{}).InspectOutput(t.Context(), agent.OutputInspection{})
 		}},
 		{name: "tool call", run: func() ([]agent.Finding, error) {
-			return (Canary{}).InspectToolCall(t.Context(), agent.ToolCallInspection{})
+			return (interceptor.Canary{}).InspectToolCall(t.Context(), agent.ToolCallInspection{})
 		}},
 	}
 	for _, check := range checks {
@@ -278,6 +288,32 @@ type canaryReadTool struct {
 	invokes atomic.Int32
 }
 
+type canaryPlanningTool struct {
+	name    string
+	plans   atomic.Int32
+	invokes atomic.Int32
+}
+
+func (t *canaryPlanningTool) Spec() agent.ToolSpec {
+	return agent.ToolSpec{Name: t.name, Parameters: json.RawMessage(`{"type":"object"}`)}
+}
+func (*canaryPlanningTool) Effect() agent.Effect { return agent.Effect{Class: agent.Write} }
+func (t *canaryPlanningTool) Plan(context.Context, json.RawMessage) (agent.ToolPlan, error) {
+	t.plans.Add(1)
+	return agent.ToolPlan{Effect: agent.Effect{Class: agent.Write}, Preview: "preview"}, nil
+}
+func (t *canaryPlanningTool) Invoke(context.Context, json.RawMessage) (agent.ToolResult, error) {
+	t.invokes.Add(1)
+	return agent.ToolResult{Content: "applied"}, nil
+}
+
+type canaryApprover struct{ calls atomic.Int32 }
+
+func (a *canaryApprover) Approve(context.Context, provider.ToolCall, string) (bool, error) {
+	a.calls.Add(1)
+	return true, nil
+}
+
 func (t *canaryReadTool) Spec() agent.ToolSpec {
 	return agent.ToolSpec{Name: t.name, Parameters: json.RawMessage(`{"type":"object"}`)}
 }
@@ -360,9 +396,9 @@ func TestCanaryLoopAbortsTaintedToolBatchesBeforeDispatch(t *testing.T) {
 	t.Parallel()
 	t.Run("serial", func(t *testing.T) {
 		t.Parallel()
-		clean := &guardedPlanTool{name: "write_a", class: agent.Write}
-		tainted := &guardedPlanTool{name: "write_b", class: agent.Write}
-		approver := &countingApprover{}
+		clean := &canaryPlanningTool{name: "write_a"}
+		tainted := &canaryPlanningTool{name: "write_b"}
+		approver := &canaryApprover{}
 		caller := &canaryCaller{response: provider.ChatResponse{ToolCalls: []provider.ToolCall{
 			toolCall("safe-a", clean.name, `{"value":"safe"}`),
 			toolCall("safe-b", tainted.name, `{"value":"`+canaryNonce+`"}`),
@@ -379,7 +415,7 @@ func TestCanaryLoopAbortsTaintedToolBatchesBeforeDispatch(t *testing.T) {
 		t.Parallel()
 		clean := &canaryReadTool{name: "read_a", result: "safe"}
 		tainted := &canaryReadTool{name: "read_b", result: "safe"}
-		approver := &countingApprover{}
+		approver := &canaryApprover{}
 		caller := &canaryCaller{response: provider.ChatResponse{ToolCalls: []provider.ToolCall{
 			toolCall("safe-a", clean.name, `{"value":"safe"}`),
 			toolCall("safe-b", tainted.name, `{"value":"`+canaryUpperNonce+`"}`),
