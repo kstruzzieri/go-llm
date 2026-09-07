@@ -99,7 +99,8 @@ func (s *threadState) summary() string {
 // success, even if cancellation races afterward. On an error after loading,
 // the report retains the before estimate with Changed false; before loading it
 // is zero. An unchanged result may still incur a model request to consolidate
-// an existing summary. Missing conversations are not inserted.
+// an existing summary. With compression enabled, a well-formed missing thread ID
+// returns a zero, unchanged report and nil error without inserting a conversation.
 func (r *Runtime) CompactThread(ctx context.Context, threadID string) (CompactionReport, error) {
 	var report CompactionReport
 	if threadID == "" || len(threadID) > maxCorrelationIDBytes {

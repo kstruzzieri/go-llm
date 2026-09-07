@@ -5,7 +5,10 @@
   tool-call tails, and folds older history into the existing progressive
   summary. Repeated compactions may invoke the summarizer even when the result
   is unchanged; a changed result can have an equal or greater stored-history
-  token estimate.
+  token estimate. Each repeat with an existing summary can incur another model
+  request, including its latency and provider charges. For small histories, the
+  summary's trust-boundary wrapper can cost more tokens than the messages removed
+  (the five-exchange test fixture reports `100 -> 121`, then `121 -> 121`).
 - Report stored-history estimates for non-system message contents, tool
   metadata, and the rendered summary. These estimates exclude the live prompt,
   tool schemas, transport framing, and current turn. `/compact` respects

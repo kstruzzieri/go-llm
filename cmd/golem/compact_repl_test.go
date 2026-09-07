@@ -304,7 +304,7 @@ func TestCompactFailureAndRefreshWarning(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
-			sess, _ := newCompactSession(t, 5, func(context.Context, string, []conversation.Message) (string, error) {
+			sess, caller := newCompactSession(t, 5, func(context.Context, string, []conversation.Message) (string, error) {
 				if !tc.refresh {
 					return "", tc.err
 				}
@@ -336,6 +336,24 @@ func TestCompactFailureAndRefreshWarning(t *testing.T) {
 			}
 			if !reflect.DeepEqual(saved.Messages, want) || !reflect.DeepEqual(sess.session.msgs, before) {
 				t.Errorf("failure snapshot/cache wrong: saved=%+v cache=%+v", saved, sess.session.msgs)
+			}
+			if tc.name == "refresh failure" {
+				// Leave the CLI reload broken: the model must still receive the
+				// committed history through Runtime's independent store load.
+				if _, err := runOnce(ctx, &out, nil, sess, "next goal", nil); err != nil {
+					t.Fatalf("next turn after refresh failure: %v", err)
+				}
+				wantRequest := []provider.ChatMessage{
+					{Role: "system", Content: sess.baseSystem + "\n\n" + agent.ToolTrustContract},
+					{Role: "system", Content: agent.DurableSummaryPrompt("SUM")},
+				}
+				for _, message := range saved.Messages {
+					wantRequest = append(wantRequest, provider.ChatMessage{Role: message.Role, Content: message.Content})
+				}
+				wantRequest = append(wantRequest, provider.ChatMessage{Role: "user", Content: "next goal"})
+				if len(caller.requests) != 1 || !reflect.DeepEqual(caller.requests[0].Messages, wantRequest) {
+					t.Fatalf("next requests after refresh failure = %+v, want committed history %+v", caller.requests, wantRequest)
+				}
 			}
 		})
 	}
