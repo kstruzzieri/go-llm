@@ -13,3 +13,6 @@
 - Add an adapter for the proposed AgentFlow integrity-only JSON verifier.
   Existing providers report incomplete; real-provider compatibility remains a
   release prerequisite. Proof assurance is structural/checksum and unsigned.
+- Exclude the workspace from Python module search when using an AgentFlow source
+  checkout (Python 3.11+), and reject checkout paths that would expand into
+  multiple import locations.

@@ -492,6 +492,10 @@ consistency check, not an atomic snapshot of a running system.
   not by themselves mean evidence corruption, and checksums do not authenticate
   who produced a proof. There is no fallback to ordinary text-only verification.
 
+`-agentflow-src` requires Python 3.11+ and excludes the audited directory from
+implicit module search. Checkout paths containing the platform's path-list
+separator (`:` on Unix, `;` on Windows) are rejected.
+
 | Exit | Meaning |
 |---|---|
 | `0` | All present, configured selected components passed. |
