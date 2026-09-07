@@ -78,6 +78,23 @@ func TestGrantScopeAllowlist(t *testing.T) {
 	}
 }
 
+func TestProjectContextGrantScopeIsSeparateFromTools(t *testing.T) {
+	t.Parallel()
+	g := newApprovalGrants()
+	g.grant(grantScopeProjectContext, "snapshot")
+	if !g.granted(grantScopeProjectContext, "snapshot") {
+		t.Fatal("approvalGrants project-context grant was not stored")
+	}
+	for _, scope := range []string{grantScopeExec, grantScopeFiles, grantScopeVerify} {
+		if g.granted(scope, "snapshot") {
+			t.Errorf("approvalGrants project-context key crossed into %q scope", scope)
+		}
+	}
+	if got := grantScope("project-context"); got != "" {
+		t.Errorf("grantScope(%q) = %q, want empty", "project-context", got)
+	}
+}
+
 func TestGrantScopeBackgroundAllowlist(t *testing.T) {
 	// #346: only start_command joins the exec scope. Status/tail never prompt,
 	// so they need no scope; stop_command stays structurally ungrantable. The

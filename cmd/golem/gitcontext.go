@@ -143,12 +143,23 @@ func gitTruncateVisible(line string, maxBytes int) string {
 // worth it and otherwise counted as omitted; status entries are only ever
 // omitted, never cut, so every rendered path is a complete Git record.
 func gitContextBlock(st gitState, maxBytes int) (block string, payloadBytes int) {
+	payload, payloadBytes := gitContextBody(st, maxBytes, "")
+	return gitContextOpen + "\n" + payload + gitContextClose, payloadBytes
+}
+
+// gitContextBody renders the bounded body shared by the legacy wrapper above
+// and the keyed project/Git snapshot renderer. lead, when present, is trusted
+// provenance and counts against maxBytes.
+func gitContextBody(st gitState, maxBytes int, lead string) (bodyText string, payloadBytes int) {
 	var body strings.Builder
 	used := 0
 	emit := func(line string) {
 		body.WriteString(line)
 		body.WriteByte('\n')
 		used += len(line) + 1
+	}
+	if lead != "" {
+		emit(lead)
 	}
 	fit := func(line string, limit int) string {
 		if used+len(line)+1 <= limit {
@@ -223,7 +234,7 @@ func gitContextBlock(st gitState, maxBytes int) (block string, payloadBytes int)
 	if len(payload) > maxBytes {
 		payload = truncateProjectContextPrefix(payload, maxBytes)
 	}
-	return gitContextOpen + "\n" + payload + gitContextClose, len(payload)
+	return payload, len(payload)
 }
 
 // gitContextNotice is the human summary shared by the startup notice and the

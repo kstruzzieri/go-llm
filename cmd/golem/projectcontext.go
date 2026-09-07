@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"github.com/kstruzzieri/go-llm/projectcontext"
@@ -87,6 +88,8 @@ func truncateProjectContextPrefix(s string, maxBytes int) string {
 // oversized AGENTS.md must not crowd out history, retrieval, and tool observations.
 const projectContextMaxBytes = 16 * 1024
 
+const projectContextLoadTimeout = 2 * time.Second
+
 // projectContextBlock renders discovered documents as a single fenced advisory
 // block for appending to the system prompt. Returns "" when there are no docs.
 // maxBytes (when > 0) caps the AGGREGATE document body (labels + neutralized
@@ -162,21 +165,23 @@ func projectContextBudget(gitPayloadBytes int) int {
 // the workspace at root plus the per-user global config dir. The caller renders
 // them with projectContextBlock under the budget it has left, and the REPL
 // retains them so /git-context refresh can re-render under a changed budget
-// without rereading files. A config-dir resolution failure is non-fatal for
-// discovery: it just skips the global document (the global dir is left empty),
-// because project context is best-effort advisory input, not a hard dependency.
+// without rereading files. Golem needs the complete global/workspace candidate
+// set for exact consent, so config discovery and selected-file reads are strict.
 func loadProjectContextDocs(ctx context.Context, root string, getenv func(string) string) ([]projectcontext.Document, error) {
-	var globalDir string
-	if base, err := configDirBase(getenv); err == nil {
-		globalDir = filepath.Join(base, "golem")
+	base, err := configDirBase(getenv)
+	if err != nil {
+		return nil, err
 	}
+	ctx, cancel := context.WithTimeout(ctx, projectContextLoadTimeout)
+	defer cancel()
 	loader := &projectcontext.Loader{
 		WorkspaceRoot: root,
-		GlobalDir:     globalDir,
+		GlobalDir:     filepath.Join(base, "golem"),
 		// Bound each file read to the same ceiling as the aggregate block so a
 		// single huge AGENTS.md is not read in full only to be discarded; the
 		// aggregate cap is the real per-turn injection limit.
 		MaxBytes: projectContextMaxBytes,
+		Strict:   true,
 	}
 	return loader.Load(ctx)
 }

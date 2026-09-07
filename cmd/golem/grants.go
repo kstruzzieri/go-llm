@@ -7,9 +7,10 @@ import "sync"
 // key, so a future tool that emits (or reuses) another tool's key cannot
 // inherit its grant. #346's background exec consults grantScopeExec.
 const (
-	grantScopeExec   = "exec"
-	grantScopeFiles  = "files"
-	grantScopeVerify = "verify"
+	grantScopeExec           = "exec"
+	grantScopeFiles          = "files"
+	grantScopeVerify         = "verify"
+	grantScopeProjectContext = "project-context"
 )
 
 // grantScope maps a tool name to its grant scope. Everything not listed is

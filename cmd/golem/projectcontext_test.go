@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/kstruzzieri/go-llm/projectcontext"
 )
@@ -164,6 +165,37 @@ func TestConfigDirBaseHomeFallback(t *testing.T) {
 	}
 	if base != "/home/keith/.config" {
 		t.Fatalf("base=%q, want /home/keith/.config", base)
+	}
+}
+
+func TestLoadProjectContextRequiresConfigLocation(t *testing.T) {
+	t.Parallel()
+	_, err := loadProjectContextDocs(context.Background(), t.TempDir(), func(string) string { return "" })
+	if err == nil || !strings.Contains(err.Error(), "cannot locate config dir") {
+		t.Fatalf("loadProjectContextDocs(no config location) error = %v, want explicit config-dir error", err)
+	}
+}
+
+func TestLoadProjectContextPropagatesCanceledContext(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	home := t.TempDir()
+	_, err := loadProjectContextDocs(ctx, t.TempDir(), func(key string) string {
+		if key == "HOME" {
+			return home
+		}
+		return ""
+	})
+	if err == nil || !strings.Contains(err.Error(), context.Canceled.Error()) {
+		t.Fatalf("loadProjectContextDocs(canceled) error = %v, want context canceled", err)
+	}
+}
+
+func TestProjectContextLoadTimeout(t *testing.T) {
+	t.Parallel()
+	if projectContextLoadTimeout != 2*time.Second {
+		t.Fatalf("projectContextLoadTimeout = %v, want %v", projectContextLoadTimeout, 2*time.Second)
 	}
 }
 
