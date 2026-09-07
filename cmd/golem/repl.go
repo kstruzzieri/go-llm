@@ -24,6 +24,7 @@ import (
 
 // replSession holds the per-process state the REPL needs.
 type replSession struct {
+	canary          *canaryBinding
 	orch            *agent.Orchestrator
 	runtime         *golemruntime.Runtime
 	newOrchestrator func() *agent.Orchestrator
@@ -316,6 +317,13 @@ func runOnce(ctx context.Context, out io.Writer, interrupts <-chan struct{}, ses
 		approver = ap
 	}
 
+	if sess.canary.needsRenewal() {
+		if err := sess.renewCanary(); err != nil {
+			writeRunLine("%s", errCanaryUnavailable)
+			return agent.Result{}, errCanaryUnavailable
+		}
+	}
+
 	// Arm the durable checkpoint journal for this turn (#355). A refusal
 	// (interrupted undo pending, or the journal latched by an earlier
 	// failure) blocks the model turn before the provider is called and
@@ -577,8 +585,14 @@ func dispatchSlash(ctx context.Context, out io.Writer, sess *replSession, line s
 		if sess.session == nil {
 			_, _ = fmt.Fprintln(out, "session disabled (--no-session)")
 		} else {
-			sess.session.renew()
-			_, _ = fmt.Fprintf(out, "session: %s (new)\n", sess.session.id)
+			candidate := *sess.session
+			candidate.renew()
+			if err := sess.renewCanary(); err != nil {
+				_, _ = fmt.Fprintf(out, "new failed: %v\n", err)
+			} else {
+				*sess.session = candidate
+				_, _ = fmt.Fprintf(out, "session: %s (new)\n", sess.session.id)
+			}
 		}
 	case "/sessions":
 		if sess.session == nil {
@@ -601,7 +615,7 @@ func dispatchSlash(ctx context.Context, out io.Writer, sess *replSession, line s
 			_, _ = fmt.Fprintln(out, "usage: /resume <session-id>")
 		} else if id, err := resolveSessionID(sessionIDOpts{explicit: fields[1]}); err != nil {
 			_, _ = fmt.Fprintln(out, err)
-		} else if info, err := sess.session.switchTo(ctx, id); err != nil {
+		} else if info, err := sess.resumeSession(ctx, id); err != nil {
 			_, _ = fmt.Fprintf(out, "resume failed: %v\n", err)
 		} else {
 			// Success only (#341 D8): a failed /resume leaves the active

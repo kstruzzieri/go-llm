@@ -90,7 +90,7 @@ func TestBreakingEditSurfacesInTheSameTurn(t *testing.T) {
 		{Response: provider.ChatResponse{ToolCalls: []provider.ToolCall{edit("e2", "BROKEN", "healthy")}}},
 		{Response: provider.ChatResponse{Content: "fixed", Done: true}},
 	}}
-	orch := newOrchestratorFactory(caller, flags{}, verifier)()
+	orch := newOrchestratorFactory(caller, flags{}, verifier, nil)()
 	res, err := orch.Run(context.Background(), agent.Request{
 		Goal:     "break then fix",
 		Tools:    agenttools.NewMutatingTools(ws, nil),
