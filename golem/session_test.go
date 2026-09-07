@@ -8,14 +8,93 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/kstruzzieri/go-llm/agent"
 	agenttools "github.com/kstruzzieri/go-llm/agent/tools"
 	"github.com/kstruzzieri/go-llm/conversation"
+	"github.com/kstruzzieri/go-llm/memory"
 	"github.com/kstruzzieri/go-llm/provider"
 )
+
+func TestCompactThreadCloseWaitsBeforeClosingResources(t *testing.T) {
+	t.Parallel()
+	db, err := memory.OpenHardenedDB(context.Background(), filepath.Join(t.TempDir(), "sessions.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	store, err := conversation.NewStore(context.Background(), db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Save(context.Background(), conversation.Conversation{ID: "thread", Messages: compactExchanges(5)}); err != nil {
+		t.Fatal(err)
+	}
+	started, canceled, release, resourcesClosed := make(chan struct{}), make(chan struct{}), make(chan struct{}), make(chan struct{})
+	unblock := sync.OnceFunc(func() { close(release) })
+	defer unblock()
+	runtime := &Runtime{
+		active: make(map[string]*activeRun), activeThreads: make(map[string]*activeRun),
+		closeDone: make(chan struct{}), compress: true, sessions: &threadStore{store: store},
+		summarizer: func(ctx context.Context, _ string, _ []conversation.Message) (string, error) {
+			close(started)
+			<-ctx.Done()
+			close(canceled)
+			<-release
+			return "", ctx.Err()
+		},
+		closeOwned: func() error { close(resourcesClosed); return db.Close() },
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { _, err := runtime.CompactThread(ctx, "thread"); done <- err }()
+	select {
+	case <-started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("compaction did not start")
+	}
+	closeDone := make(chan error, 1)
+	go func() { closeDone <- runtime.Close() }()
+	select {
+	case <-canceled:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Close did not cancel compaction")
+	}
+	select {
+	case <-resourcesClosed:
+		t.Error("Close released resources while the canceled summarizer was still running")
+	case <-time.After(50 * time.Millisecond):
+	}
+	if err := db.Ping(); err != nil {
+		t.Errorf("database closed before summarizer exit: %v", err)
+	}
+	unblock()
+	select {
+	case err := <-closeDone:
+		if err != nil {
+			t.Errorf("Close = %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Close did not finish")
+	}
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Errorf("CompactThread = %v, want canceled", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("compaction did not finish")
+	}
+	select {
+	case <-resourcesClosed:
+	default:
+		t.Error("Close did not release owned resources")
+	}
+}
 
 func TestCompressConversationAutomaticThreshold(t *testing.T) {
 	t.Parallel()

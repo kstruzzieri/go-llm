@@ -92,6 +92,81 @@ func (s *threadState) summary() string {
 	return s.conversation.DurableSummary.Content
 }
 
+// CompactThread summarizes stored history to the existing retention floor and
+// atomically saves an actual change. An active turn or compaction on threadID
+// returns ErrRunConflict; disabled compression returns ErrCompressionUnavailable.
+// The caller context and Close cancel work. Save returning nil determines
+// success, even if cancellation races afterward. On an error after loading,
+// the report retains the before estimate with Changed false; before loading it
+// is zero. An unchanged result may still incur a model request to consolidate
+// an existing summary. Missing conversations are not inserted.
+func (r *Runtime) CompactThread(ctx context.Context, threadID string) (CompactionReport, error) {
+	var report CompactionReport
+	if threadID == "" || len(threadID) > maxCorrelationIDBytes {
+		return report, fmt.Errorf("%w: thread ID must contain 1 to %d bytes", ErrInvalidRequest, maxCorrelationIDBytes)
+	}
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	r.mu.Lock()
+	if r.closed {
+		r.mu.Unlock()
+		return report, ErrClosed
+	}
+	if !r.compress || r.summarizer == nil {
+		r.mu.Unlock()
+		return report, ErrCompressionUnavailable
+	}
+	if _, busy := r.activeThreads[threadID]; busy {
+		r.mu.Unlock()
+		return report, fmt.Errorf("%w: thread %q is active", ErrRunConflict, threadID)
+	}
+	r.activeThreads[threadID] = &activeRun{cancel: cancel}
+	r.wg.Add(1)
+	r.mu.Unlock()
+	defer func() {
+		r.mu.Lock()
+		delete(r.activeThreads, threadID)
+		r.mu.Unlock()
+		r.wg.Done()
+	}()
+	if err := ctx.Err(); err != nil {
+		return report, fmt.Errorf("golem: compact thread %q: %w", threadID, err)
+	}
+	state, err := r.loadThread(ctx, threadID)
+	if err != nil {
+		return report, err
+	}
+	report.TokensBefore = estimateStoredHistory(state.conversation)
+	report.TokensAfter = report.TokensBefore
+	if err := ctx.Err(); err != nil {
+		return report, fmt.Errorf("golem: compact thread %q: %w", threadID, err)
+	}
+	candidate, changed, err := r.compressConversation(ctx, state.conversation, true)
+	if err != nil {
+		return report, fmt.Errorf("golem: compact thread %q: %w", threadID, err)
+	}
+	if err := ctx.Err(); err != nil {
+		return report, fmt.Errorf("golem: compact thread %q: %w", threadID, err)
+	}
+	if !changed {
+		return report, nil
+	}
+	store, err := r.threadStore(ctx)
+	if err != nil {
+		return report, err
+	}
+	if err := ctx.Err(); err != nil {
+		return report, fmt.Errorf("golem: compact thread %q: %w", threadID, err)
+	}
+	if err := store.store.Save(ctx, candidate); err != nil {
+		return report, fmt.Errorf("%w: compact thread %q: %w", ErrSessionPersistence, threadID, err)
+	}
+	r.secureThreadStore(store)
+	report.TokensAfter = estimateStoredHistory(candidate)
+	report.Changed = true
+	return report, nil
+}
+
 func (r *Runtime) saveThread(ctx context.Context, active *activeRun, state *threadState, userMessage string, result agent.Result) error {
 	messages, err := resultMessages(userMessage, result)
 	if err != nil {
