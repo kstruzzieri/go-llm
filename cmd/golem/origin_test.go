@@ -145,7 +145,7 @@ func TestGolemStandardLocalAssemblyDeclaresTaggedClass(t *testing.T) {
 		t.Fatal(err)
 	}
 	tools = appendAgentMemoryTools(tools, &memory.MemoryRecordStore{}, filepath.Join(root, "memories.db"), "ws", &session{id: "s"})
-	writeTools, journal, err := buildWriteTools(root, store)
+	writeTools, journal, _, err := buildWriteTools(root, store, testStoreGetenv(store))
 	if err != nil {
 		t.Fatal(err)
 	}

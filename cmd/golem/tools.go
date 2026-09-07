@@ -249,13 +249,17 @@ func buildExecMount(root string, opts agenttools.ExecToolsOptions) (*agenttools.
 // one Workspace over root and the workspace's leased store. Built for
 // startup -allow-write, one-shot -allow-tool write_file/edit_file, and the
 // REPL's /allow-write (#372).
-func buildWriteTools(root string, store *checkpointStore) ([]agent.Tool, *checkpointJournal, error) {
+func buildWriteTools(root string, store *checkpointStore, getenv func(string) string) ([]agent.Tool, *checkpointJournal, string, error) {
 	ws, err := agenttools.NewWorkspace(root)
 	if err != nil {
-		return nil, nil, fmt.Errorf("golem: build write tools: %w", err)
+		return nil, nil, "", fmt.Errorf("golem: build write tools: %w", err)
 	}
-	journal := newCheckpointJournal(ws, store)
-	return agenttools.NewMutatingTools(ws, journal), journal, nil
+	signer, verifier, notice, err := loadMutationSigning(context.Background(), getenv, root, store)
+	if err != nil {
+		return nil, nil, "", err
+	}
+	journal := newCheckpointJournal(ws, store, signer, verifier)
+	return agenttools.NewMutatingTools(ws, journal), journal, notice, nil
 }
 
 // buildTools returns golem's read-only tool set: the file tools
