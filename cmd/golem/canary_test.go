@@ -622,3 +622,85 @@ type canaryReadCounter struct {
 }
 
 func (r *canaryReadCounter) Read(p []byte) (int, error) { r.reads++; return r.Reader.Read(p) }
+
+// Canonical hex entropy containing the scanner's existing synthetic Luhn fixture.
+const canaryIncompatibleEntropy = "\xaa\xaa\xaa\xaa\xaa\xaa\xaa\xaa\xaa\xaa\xaa\xaa\x45\x32\x01\x98\x76\x54\x32\x15\xbb\xbb\xbb\xbb\xbb\xbb\xbb\xbb\xbb\xbb\xbb\xbb"
+
+func TestCanarySecretsCompatibleActivation(t *testing.T) {
+	for _, mode := range []string{"startup", "renewal"} {
+		for _, rejected := range []int{1, 15} {
+			t.Run(fmt.Sprintf("%s/rejected%d", mode, rejected), func(t *testing.T) {
+				caller := &captureCaller{answer: "ordinary answer"}
+				sess := newCanarySession(t, caller)
+				entropy := io.MultiReader(strings.NewReader(strings.Repeat(canaryIncompatibleEntropy, rejected)), canaryEntropy(32, 64))
+				if mode == "startup" {
+					binding, err := newCanaryBinding(true, entropy)
+					if err != nil || binding == nil {
+						t.Fatalf("compatible startup = %v, %v; want activation", binding, err)
+					}
+					sess.canary = binding
+					sess.sysInputs.canary = binding.active.fragment
+					sess.baseSystem = composeSystem(sess.sysInputs)
+				} else {
+					sess.canary.entropy = entropy
+					sess.canary.burn()
+				}
+				sess.orch = newOrchestratorFactory(caller, flags{interceptors: true}, nil, sess.canary)()
+				installCompactRuntime(t, sess, golemruntime.Options{})
+				_, err := runOnce(t.Context(), io.Discard, nil, sess, "hello", nil)
+				if err != nil {
+					t.Errorf("ordinary goal after compatible activation = %v; want nil", err)
+				}
+				_, fragment, planted := strings.Cut(caller.system, "\n\nInternal canary: ")
+				if !planted || "Internal canary: "+fragment != canaryFragmentB || strings.Count(caller.system, "Internal canary:") != 1 {
+					t.Errorf("provider system = %q; want exactly the accepted literal fragment B", caller.system)
+				}
+				remaining, readErr := io.ReadAll(entropy)
+				if readErr != nil || len(remaining) != 32 {
+					t.Errorf("entropy remaining = %d, %v; want one unused 32-byte candidate", len(remaining), readErr)
+				}
+			})
+		}
+	}
+}
+
+func TestCanarySecretsCandidateFailure(t *testing.T) {
+	for _, tc := range []struct {
+		name, entropy, diagnostic string
+		remaining                 int
+	}{
+		{"exhausted", strings.Repeat(canaryIncompatibleEntropy, 16) + strings.Repeat("\x20", 32), "canary unavailable: generation failed", 32},
+		{"entropy_after_rejection", canaryIncompatibleEntropy + strings.Repeat("\x20", 31), "canary unavailable: entropy failed", 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			entropy := strings.NewReader(tc.entropy)
+			binding, err := newCanaryBinding(true, entropy)
+			if binding != nil || err == nil || err.Error() != tc.diagnostic || entropy.Len() != tc.remaining {
+				t.Errorf("failed startup = %v, %v, remaining %d; want nil, %q, remaining %d", binding, err, entropy.Len(), tc.diagnostic, tc.remaining)
+			}
+			caller := &captureCaller{answer: "ordinary answer"}
+			sess := newCanarySession(t, caller)
+			system := sess.baseSystem
+			sess.canary.burn()
+			entropy = strings.NewReader(tc.entropy)
+			sess.canary.entropy = entropy
+			err = sess.renewCanary()
+			if err == nil || err.Error() != tc.diagnostic || entropy.Len() != tc.remaining {
+				t.Errorf("failed renewal = %v, remaining %d; want %q, remaining %d", err, entropy.Len(), tc.diagnostic, tc.remaining)
+			}
+			if sess.canary.active.fragment != canaryFragmentA || sess.sysInputs.canary != canaryFragmentA || sess.baseSystem != system || !sess.canary.needsRenewal() {
+				t.Error("failed candidate generation changed the prior prompt/activation or revived the burned binding")
+			}
+			detector, extra, runErr := sess.canary.ForRun(t.Context(), agent.RunScope{})
+			if detector != nil || extra != "" || runErr == nil || runErr.Error() != "canary unavailable: renewal required" {
+				t.Errorf("failed renewal ForRun = %v, %q, %v; want no detector and renewal required", detector, extra, runErr)
+			}
+			// A later turn must still refuse when renewal cannot obtain a candidate.
+			sess.canary.entropy = errorCanaryReader{}
+			_, err = runOnce(t.Context(), io.Discard, nil, sess, "hello", nil)
+			if err == nil || err.Error() != "canary unavailable: renewal required" || caller.messages != nil {
+				t.Errorf("turn after failed renewal = %v, calls %v; want renewal required without a provider call", err, caller.messages)
+			}
+		})
+	}
+}
