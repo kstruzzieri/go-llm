@@ -227,6 +227,7 @@ func runHardeningFrameOracle(t *testing.T) {
 		{"valid", template, actual, true},
 		{"malformed_template_open", "x" + template, actual, false},
 		{"malformed_template_close", template + "x", actual, false},
+		{"shared_newline_overlap", strings.Replace(template, "\nhello\n", "\n", 1), actual, false},
 		{"missing_slot", strings.Replace(template, hardeningNonceSlot, "ABCDEFGHIJKL", 1), actual, false},
 		{"extra_slot", strings.Replace(template, "hello", hardeningNonceSlot, 1), actual, false},
 		{"misplaced_slot", strings.Replace(template, "{{TOOL_FRAME_NONCE}} (", "( {{TOOL_FRAME_NONCE}}", 1), actual, false},
