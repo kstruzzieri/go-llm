@@ -122,7 +122,7 @@ func (r *Runtime) saveThread(ctx context.Context, active *activeRun, state *thre
 	if !r.compress {
 		return nil
 	}
-	compacted, changed, err := r.compressConversation(ctx, candidate)
+	compacted, changed, err := r.compressConversation(ctx, candidate, false)
 	if err != nil {
 		r.reportCompressionWarning(candidate.ID, err)
 		return nil
@@ -158,20 +158,18 @@ func (r *Runtime) reportCompressionWarning(threadID string, err error) {
 	r.reportWarning(fmt.Errorf("golem: compress thread %q: %w", threadID, err))
 }
 
-func (r *Runtime) compressConversation(ctx context.Context, current conversation.Conversation) (conversation.Conversation, bool, error) {
+func (r *Runtime) compressConversation(ctx context.Context, current conversation.Conversation, force bool) (conversation.Conversation, bool, error) {
 	estimate := conversation.CharRatioEstimator(4.0)
 	maxHistoryTokens := r.budget.InputCeiling
 	if maxHistoryTokens <= 0 {
 		maxHistoryTokens = agent.DefaultInputCeiling
 	}
 	maxHistoryTokens /= 2
-	historyCost := estimate(agent.DurableSummaryPrompt(currentSummary(current))) +
-		conversation.EstimateMessagesTokens(current.Messages, estimate)
-	if historyCost <= maxHistoryTokens {
+	if !force && estimateStoredHistory(current) <= maxHistoryTokens {
 		return current, false, nil
 	}
 	maxRawTokens := maxHistoryTokens - agent.DefaultSummaryOutputReserve
-	if maxRawTokens < 0 {
+	if force || maxRawTokens < 0 {
 		maxRawTokens = 0
 	}
 	compacted, err := conversation.CompressMessages(ctx, current, maxRawTokens, 4, estimate, r.summarizer)
@@ -182,6 +180,15 @@ func (r *Runtime) compressConversation(ctx context.Context, current conversation
 		currentSummary(compacted) != currentSummary(current) ||
 		summaryMessageCount(compacted) != summaryMessageCount(current)
 	return compacted, changed, nil
+}
+
+func estimateStoredHistory(current conversation.Conversation) int {
+	estimate := conversation.CharRatioEstimator(4)
+	tokens := conversation.EstimateMessagesTokens(current.Messages, estimate)
+	if summary := strings.TrimSpace(currentSummary(current)); summary != "" {
+		tokens += estimate(agent.DurableSummaryPrompt(summary))
+	}
+	return tokens
 }
 
 func currentSummary(current conversation.Conversation) string {

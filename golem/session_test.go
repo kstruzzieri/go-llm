@@ -1,17 +1,295 @@
 package golem
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/kstruzzieri/go-llm/agent"
 	agenttools "github.com/kstruzzieri/go-llm/agent/tools"
+	"github.com/kstruzzieri/go-llm/conversation"
 	"github.com/kstruzzieri/go-llm/provider"
 )
+
+func TestCompressConversationAutomaticThreshold(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name    string
+		tokens  int
+		summary string
+		changed bool
+	}{
+		{name: "raw exact threshold", tokens: 4096},
+		{name: "raw above threshold", tokens: 4097, changed: true},
+		{name: "summary exact threshold", tokens: 4087, summary: "SUM"},
+		{name: "summary above threshold", tokens: 4088, summary: "SUM", changed: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			current := conversation.Conversation{Messages: []conversation.Message{
+				{Role: "user", Content: strings.Repeat("x", (tc.tokens-9)*4)},
+				{Role: "assistant", Content: "a"},
+			}}
+			for range 4 {
+				current.Messages = append(current.Messages,
+					conversation.Message{Role: "user", Content: "q"},
+					conversation.Message{Role: "assistant", Content: "a"})
+			}
+			if tc.summary != "" {
+				current.DurableSummary = &conversation.DurableSummary{Content: tc.summary}
+			}
+			calls := 0
+			r := &Runtime{
+				budget: agent.Budget{InputCeiling: 8192},
+				summarizer: func(context.Context, string, []conversation.Message) (string, error) {
+					calls++
+					return "SUM", nil
+				},
+			}
+			_, changed, err := r.compressConversation(context.Background(), current, false)
+			wantCalls := 0
+			if tc.changed {
+				wantCalls = 1
+			}
+			if err != nil || changed != tc.changed || calls != wantCalls {
+				t.Errorf("compressConversation(%s) = changed %v, calls %d, error %v; want changed %v and %d calls", tc.name, changed, calls, err, tc.changed, wantCalls)
+			}
+		})
+	}
+}
+
+func compactExchanges(count int) []conversation.Message {
+	var messages []conversation.Message
+	for i := range count {
+		messages = append(messages,
+			conversation.Message{Role: "user", Content: strings.Repeat(string(rune('a'+i)), 40)},
+			conversation.Message{Role: "assistant", Content: strings.Repeat(string(rune('A'+i)), 40)})
+	}
+	return messages
+}
+
+func TestCompressConversationForcedBelowThreshold(t *testing.T) {
+	t.Parallel()
+	current := conversation.Conversation{ID: "thread", Title: "keep title", Messages: compactExchanges(5),
+		CreatedAt: time.Unix(10, 0), UpdatedAt: time.Unix(20, 0)}
+	calls := 0
+	r := &Runtime{
+		budget: agent.Budget{InputCeiling: 8192},
+		summarizer: func(_ context.Context, prior string, messages []conversation.Message) (string, error) {
+			calls++
+			if prior != "" || !reflect.DeepEqual(messages, current.Messages[:2]) {
+				t.Errorf("summarizer input = %q, %+v; want empty prior and oldest exchange %+v", prior, messages, current.Messages[:2])
+			}
+			return "SUM", nil
+		},
+	}
+	automatic, changed, err := r.compressConversation(context.Background(), current, false)
+	if err != nil || changed || calls != 0 || !reflect.DeepEqual(automatic, current) {
+		t.Fatalf("automatic compression = %+v, changed %v, calls %d, error %v; want unchanged input and no call", automatic, changed, calls, err)
+	}
+	compacted, changed, err := r.compressConversation(context.Background(), current, true)
+	want := current
+	want.Messages = current.Messages[2:]
+	want.DurableSummary = &conversation.DurableSummary{Content: "SUM", MessageCount: 2}
+	if err != nil || !changed || calls != 1 || !reflect.DeepEqual(compacted, want) {
+		t.Fatalf("forced compression = %+v, changed %v, calls %d, error %v; want %+v, changed true, one call", compacted, changed, calls, err, want)
+	}
+	if before, after := estimateStoredHistory(current), estimateStoredHistory(compacted); before != 100 || after != 89 {
+		t.Errorf("stored history estimates = %d -> %d, want 100 -> 89", before, after)
+	}
+	if current.DurableSummary != nil || len(current.Messages) != 10 {
+		t.Errorf("input mutated: %+v", current)
+	}
+}
+
+func TestEstimateStoredHistory(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name    string
+		current conversation.Conversation
+		want    int
+	}{
+		{name: "empty", want: 0},
+		{name: "four exchanges", current: conversation.Conversation{Messages: compactExchanges(4)}, want: 80},
+		{name: "summary", current: conversation.Conversation{Messages: compactExchanges(4), DurableSummary: &conversation.DurableSummary{Content: "SUM"}}, want: 89},
+		{name: "trim summary", current: conversation.Conversation{DurableSummary: &conversation.DurableSummary{Content: " \n SUM \t"}}, want: 9},
+		{name: "blank summary", current: conversation.Conversation{DurableSummary: &conversation.DurableSummary{Content: " \n\t "}}, want: 0},
+		{name: "multibyte", current: conversation.Conversation{Messages: []conversation.Message{{Role: "user", Content: "雪雪雪雪雪"}}}, want: 2},
+		{name: "tool metadata excludes system", current: conversation.Conversation{Messages: []conversation.Message{
+			{Role: "system", Content: "ignored", ToolCalls: json.RawMessage(`{"x":123}`), ToolName: "skip", ToolCallID: "skip"},
+			{Role: "assistant", ToolCalls: json.RawMessage(`{"x":123}`)},
+			{Role: "tool", Content: "雪雪雪雪雪", ToolName: "read_file", ToolCallID: "call1"},
+		}}, want: 10},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := estimateStoredHistory(tc.current); got != tc.want {
+				t.Errorf("estimateStoredHistory(%s) = %d, want %d", tc.name, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestCompressConversationAutomaticSummaryReserve(t *testing.T) {
+	t.Parallel()
+	var messages []conversation.Message
+	for range 7 {
+		messages = append(messages,
+			conversation.Message{Role: "user", Content: strings.Repeat("q", 1200)},
+			conversation.Message{Role: "assistant", Content: strings.Repeat("a", 1200)})
+	}
+	calls := 0
+	r := &Runtime{budget: agent.Budget{InputCeiling: 8192}, summarizer: func(_ context.Context, prior string, old []conversation.Message) (string, error) {
+		calls++
+		if prior != "" || !reflect.DeepEqual(old, messages[:4]) {
+			t.Errorf("automatic summary inputs = %q, %d messages; want empty prior and oldest four messages", prior, len(old))
+		}
+		return "SUM", nil
+	}}
+	got, changed, err := r.compressConversation(context.Background(), conversation.Conversation{Messages: messages}, false)
+	if err != nil || !changed || calls != 1 || !reflect.DeepEqual(got.Messages, messages[4:]) || summaryMessageCount(got) != 4 {
+		t.Errorf("automatic compression = %d retained, summary %+v, changed %v, calls %d, error %v; want newest ten messages, count 4, changed true, one call", len(got.Messages), got.DurableSummary, changed, calls, err)
+	}
+}
+
+func TestCompressConversationRetainsToolExchangesAndUnresolvedTail(t *testing.T) {
+	t.Parallel()
+	old := []conversation.Message{
+		{Role: "user", Content: "old question\n"},
+		{Role: "assistant", ToolCalls: json.RawMessage(`[{"id":"old","function":{"name":"read_file","arguments":{"path":"old.txt"}}}]`)},
+		{Role: "tool", ToolName: "read_file", ToolCallID: "old", Content: "old bytes\n"},
+		{Role: "assistant", Content: "old answer\n"},
+	}
+	retained := []conversation.Message{{Role: "system", Content: " preserve this\n"}}
+	retained = append(retained, compactExchanges(3)...)
+	retained = append(retained,
+		conversation.Message{Role: "user", Content: "new question\n"},
+		conversation.Message{Role: "assistant", ToolCalls: json.RawMessage(`[{"id":"new","function":{"name":"read_file","arguments":{"path":"new.txt"}}}]`)},
+		conversation.Message{Role: "tool", ToolName: "read_file", ToolCallID: "new", Content: "new bytes\n"},
+		conversation.Message{Role: "assistant", Content: "new answer\n"},
+		conversation.Message{Role: "user", Content: "pending question\n"},
+		conversation.Message{Role: "assistant", ToolCalls: json.RawMessage(`[{"id":"pending","function":{"name":"read_file","arguments":{"path":"pending.txt"}}}]`)},
+		conversation.Message{Role: "tool", ToolName: "read_file", ToolCallID: "pending", Content: "pending result\n"})
+	current := conversation.Conversation{ID: "thread", Title: "original", Messages: append(append([]conversation.Message(nil), old...), retained...), CreatedAt: time.Unix(10, 0), UpdatedAt: time.Unix(20, 0)}
+	calls := 0
+	r := &Runtime{summarizer: func(_ context.Context, prior string, messages []conversation.Message) (string, error) {
+		calls++
+		if prior != "" || !reflect.DeepEqual(messages, old) {
+			t.Errorf("summarizer input = %q, %+v; want empty prior and complete old tool exchange %+v", prior, messages, old)
+		}
+		return "SUM", nil
+	}}
+	want := current
+	want.Messages = retained
+	want.DurableSummary = &conversation.DurableSummary{Content: "SUM", MessageCount: 4}
+	got, changed, err := r.compressConversation(context.Background(), current, true)
+	if err != nil || !changed || calls != 1 || !reflect.DeepEqual(got, want) {
+		t.Errorf("forced tool compression = %+v, changed %v, calls %d, error %v; want %+v, changed true, one call", got, changed, calls, err, want)
+	}
+}
+
+func TestCompressConversationProgressiveSummary(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name        string
+		exchanges   int
+		replacement string
+		wantCount   int
+		changed     bool
+	}{
+		{name: "fold oldest pair", exchanges: 5, replacement: "REPLACEMENT", wantCount: 14, changed: true},
+		{name: "summary only equal cost", exchanges: 4, replacement: "REVISED", wantCount: 12, changed: true},
+		{name: "summary without raw history", replacement: "REPLACEMENT", wantCount: 12, changed: true},
+		{name: "identical rewrite", exchanges: 4, replacement: "EARLIER", wantCount: 12},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			current := conversation.Conversation{Messages: compactExchanges(tc.exchanges), DurableSummary: &conversation.DurableSummary{Content: "EARLIER", MessageCount: 12}}
+			calls := 0
+			r := &Runtime{summarizer: func(_ context.Context, prior string, old []conversation.Message) (string, error) {
+				calls++
+				if prior != "EARLIER" {
+					t.Errorf("summarizer prior = %q, want EARLIER", prior)
+				}
+				if tc.exchanges == 5 {
+					if !reflect.DeepEqual(old, current.Messages[:2]) {
+						t.Errorf("summarizer messages = %+v, want oldest pair %+v", old, current.Messages[:2])
+					}
+				} else if len(old) != 0 {
+					t.Errorf("summarizer messages = %+v, want no newly evicted messages", old)
+				}
+				return tc.replacement, nil
+			}}
+			got, changed, err := r.compressConversation(context.Background(), current, true)
+			if err != nil || changed != tc.changed || calls != 1 {
+				t.Fatalf("compressConversation(%s) = changed %v, calls %d, error %v; want changed %v, one call", tc.name, changed, calls, err, tc.changed)
+			}
+			wantMessages := current.Messages
+			if tc.exchanges == 5 {
+				wantMessages = current.Messages[2:]
+			}
+			if !reflect.DeepEqual(got.DurableSummary, &conversation.DurableSummary{Content: tc.replacement, MessageCount: tc.wantCount}) || len(got.Messages) != len(wantMessages) || (len(wantMessages) > 0 && !reflect.DeepEqual(got.Messages, wantMessages)) {
+				t.Errorf("compressConversation(%s) = %+v; want retained messages %+v, summary %q, count %d", tc.name, got, wantMessages, tc.replacement, tc.wantCount)
+			}
+			if current.DurableSummary.Content != "EARLIER" || current.DurableSummary.MessageCount != 12 {
+				t.Errorf("input summary mutated: %+v", current.DurableSummary)
+			}
+		})
+	}
+}
+
+func TestCompressConversationForcedNoOpAtFloor(t *testing.T) {
+	t.Parallel()
+	for count := 0; count <= 4; count++ {
+		current := conversation.Conversation{Messages: compactExchanges(count)}
+		r := &Runtime{summarizer: func(context.Context, string, []conversation.Message) (string, error) {
+			t.Errorf("forced compression with %d exchanges called summarizer; want no call", count)
+			return "SUM", nil
+		}}
+		got, changed, err := r.compressConversation(context.Background(), current, true)
+		if err != nil || changed || !reflect.DeepEqual(got, current) {
+			t.Errorf("forced compression with %d exchanges = %+v, changed %v, error %v; want unchanged %+v", count, got, changed, err, current)
+		}
+	}
+}
+
+func TestCompressConversationSummaryFailure(t *testing.T) {
+	t.Parallel()
+	modelErr := errors.New("model unavailable")
+	for _, tc := range []struct {
+		name    string
+		output  string
+		err     error
+		wantErr error
+	}{
+		{name: "model failure", err: modelErr, wantErr: modelErr},
+		{name: "blank output", output: " \t\n ", wantErr: conversation.ErrEmptySummary},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			current := conversation.Conversation{Messages: compactExchanges(5), DurableSummary: &conversation.DurableSummary{Content: "EARLIER", MessageCount: 12}}
+			before, err := json.Marshal(current)
+			if err != nil {
+				t.Fatal(err)
+			}
+			r := &Runtime{summarizer: func(context.Context, string, []conversation.Message) (string, error) { return tc.output, tc.err }}
+			_, changed, err := r.compressConversation(context.Background(), current, true)
+			if !errors.Is(err, tc.wantErr) || changed {
+				t.Errorf("compressConversation(%s) = changed %v, error %v; want unchanged and %v", tc.name, changed, err, tc.wantErr)
+			}
+			after, err := json.Marshal(current)
+			if err != nil || string(after) != string(before) {
+				t.Errorf("input after failed compression = %s, error %v; want %s", after, err, before)
+			}
+		})
+	}
+}
 
 func TestResultMessagesRedactsMemoryData(t *testing.T) {
 	const secret = "do not persist this"
