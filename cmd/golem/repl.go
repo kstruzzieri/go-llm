@@ -51,6 +51,7 @@ type replSession struct {
 	projectDocs    []projectcontext.Document
 	gitSnapshot    gitContextSnapshot
 	noGitContext   bool
+	noCompress     bool
 	readToolCount  int
 	mountAt        int
 	writeToolCount int
@@ -133,7 +134,8 @@ type replSession struct {
 	// control coordinates the prompt, async notices, and Ctrl-C. nil in tests
 	// and non-interactive callers, where runREPL falls back to a plain prompt
 	// and the caller's interrupt wiring.
-	control *replControl
+	control    *replControl
+	interrupts <-chan struct{}
 
 	// goalEditor backs /edit. nil outside the default REPL and in narrow
 	// tests that never dispatch it; nil renders the unavailable message.
@@ -144,6 +146,7 @@ type replSession struct {
 // other line as an agent goal. A value on interrupts cancels the in-flight Run
 // without ending the loop. EOF (Ctrl-D) returns nil.
 func runREPL(ctx context.Context, src lineSource, out io.Writer, interrupts <-chan struct{}, sess *replSession) error {
+	sess.interrupts = interrupts
 	for {
 		if sess.control != nil {
 			sess.control.enterPrompt()
@@ -257,34 +260,35 @@ func runOneShot(ctx context.Context, stdout, stderr io.Writer, interrupts <-chan
 	return nil
 }
 
+// interruptContext scopes Ctrl-C to one operation and joins its watcher before
+// returning to the prompt. Cleanup may also be called by approval/checkpoint code.
+func interruptContext(ctx context.Context, interrupts <-chan struct{}) (context.Context, context.CancelFunc) {
+	childCtx, cancel := context.WithCancel(ctx)
+	if interrupts == nil {
+		return childCtx, cancel
+	}
+	select {
+	case <-interrupts:
+	default:
+	}
+	stopped := make(chan struct{})
+	go func() {
+		defer close(stopped)
+		select {
+		case <-interrupts:
+			cancel()
+		case <-childCtx.Done():
+		}
+	}()
+	return childCtx, func() { cancel(); <-stopped }
+}
+
 // runOnce runs a single agent turn, rendering all progress and errors to out.
 // It returns the run result so runOneShot can extract the final answer; the
 // REPL ignores it.
 func runOnce(ctx context.Context, out io.Writer, interrupts <-chan struct{}, sess *replSession, line string, src lineSource) (agent.Result, error) {
-	runCtx, cancel := context.WithCancel(ctx)
+	runCtx, cancel := interruptContext(ctx, interrupts)
 	defer cancel()
-
-	// Drain a stale interrupt that arrived while the REPL was idle at the
-	// prompt, so a Ctrl-C the user typed before this prompt does not cancel it.
-	if interrupts != nil {
-		select {
-		case <-interrupts:
-		default:
-		}
-	}
-
-	// Watch for an interrupt for the duration of this run.
-	done := make(chan struct{})
-	defer close(done)
-	if interrupts != nil {
-		go func() {
-			select {
-			case <-interrupts:
-				cancel()
-			case <-done:
-			}
-		}()
-	}
 
 	rend := newRenderer(out, sess.color, sess.maxSteps, sess.clock, sess.mixed)
 	rend.warnPressure = sess.pressureWarn
@@ -735,6 +739,8 @@ func dispatchSlash(ctx context.Context, out io.Writer, sess *replSession, line s
 		handleAllowExec(ctx, out, sess, fields)
 	case "/git-context":
 		handleGitContext(ctx, out, sess, fields)
+	case "/compact":
+		handleCompact(ctx, out, sess, fields)
 	case "/think":
 		handleThink(ctx, out, sess, fields)
 	default:
@@ -853,6 +859,7 @@ const golemHelp = `commands:
   /help          show this help
   /tools         list registered tools and their effect class
   /model         show the last routed model
+  /compact       compact the active session's history
   /clear         delete the active session's history
   /new           start a new session (keeps history of the old one)
   /sessions      list saved sessions

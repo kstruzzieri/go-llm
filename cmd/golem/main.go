@@ -1633,6 +1633,7 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 		projectDocs:         projectDocs,
 		gitSnapshot:         gitSnap,
 		noGitContext:        f.noGitContext,
+		noCompress:          f.noCompress,
 		readToolCount:       readToolCount,
 		mountAt:             mountAt,
 		writeToolCount:      writeToolCount,
