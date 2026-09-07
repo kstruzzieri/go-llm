@@ -16,10 +16,12 @@ const defaultFilename = "AGENTS.md"
 
 // Document is one discovered project-context file.
 type Document struct {
-	Source    string // provenance label: "global" or "workspace"
-	Path      string // absolute path it was read from
-	Content   string // file bytes, possibly truncated to the loader's cap
-	Truncated bool   // true if Content was capped
+	Source    string   // provenance label: "global" or "workspace"
+	Path      string   // absolute path it was read from
+	Content   string   // file bytes, possibly truncated to the loader's cap
+	Hash      [32]byte // SHA-256 of the complete raw file
+	Size      int64    // complete raw file size in bytes
+	Truncated bool     // true if Content was capped
 }
 
 // Loader discovers and reads project-context files in deterministic order.
@@ -39,13 +41,19 @@ type Loader struct {
 	Filenames []string
 	// MaxBytes caps a single file. <= 0 defaults to 64 KiB.
 	MaxBytes int
+	// Strict makes global discovery and read errors fatal. The default preserves
+	// the historical behavior of treating global context as optional.
+	Strict bool
 }
 
 // Load returns documents in low→high precedence order (global first, workspace
-// last). Missing files are skipped (not an error). GlobalDir read errors are
-// also skipped because user-level context is optional; WorkspaceRoot errors
-// remain fatal. Returns nil, nil when nothing is found or nothing is configured.
+// last). Missing files are skipped (not an error). GlobalDir errors are skipped
+// unless Strict is set; WorkspaceRoot errors remain fatal. Returns nil, nil when
+// nothing is found or nothing is configured.
 func (l *Loader) Load(ctx context.Context) ([]Document, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	maxBytes := l.MaxBytes
 	if maxBytes <= 0 {
 		maxBytes = defaultMaxBytes
@@ -71,9 +79,12 @@ func (l *Loader) Load(ctx context.Context) ([]Document, error) {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		doc, found, err := loadOne(loc.source, loc.dir, names, maxBytes)
+		doc, found, err := loadOne(ctx, loc.source, loc.dir, names, maxBytes)
 		if err != nil {
-			if loc.source == "global" {
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return nil, ctxErr
+			}
+			if loc.source == "global" && !l.Strict {
 				continue
 			}
 			return nil, err
@@ -81,6 +92,9 @@ func (l *Loader) Load(ctx context.Context) ([]Document, error) {
 		if found {
 			docs = append(docs, doc)
 		}
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
 	return docs, nil
 }
@@ -127,14 +141,14 @@ func canonicalDir(dir string) (string, bool, error) {
 
 // loadOne reads the first existing candidate filename in dir, returning that
 // Document. found=false means no candidate existed (or all were unsafe/absent).
-func loadOne(source, dir string, names []string, maxBytes int) (Document, bool, error) {
+func loadOne(ctx context.Context, source, dir string, names []string, maxBytes int) (Document, bool, error) {
 	root, ok, err := canonicalDir(dir)
 	if err != nil || !ok {
 		return Document{}, false, err
 	}
 	for _, name := range names {
 		path := filepath.Join(root, name)
-		content, truncated, found, err := readCapped(path, maxBytes)
+		content, hash, size, truncated, found, err := readCapped(ctx, path, maxBytes)
 		if err != nil {
 			return Document{}, false, err
 		}
@@ -143,6 +157,8 @@ func loadOne(source, dir string, names []string, maxBytes int) (Document, bool, 
 				Source:    source,
 				Path:      path,
 				Content:   content,
+				Hash:      hash,
+				Size:      size,
 				Truncated: truncated,
 			}, true, nil
 		}
