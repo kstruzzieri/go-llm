@@ -128,3 +128,13 @@ func (s *replSession) resumeSession(ctx context.Context, id string) (sessionInfo
 	*s.session = candidate
 	return info, nil
 }
+
+func canaryAborted(err error) bool {
+	return interceptorBlocked(err, "canary", agent.VerdictAbort)
+}
+
+// traceSystem omits only the CLI-owned canary fragment from trace metadata.
+func traceSystem(in systemInputs) string {
+	in.canary = ""
+	return composeSystem(in)
+}
