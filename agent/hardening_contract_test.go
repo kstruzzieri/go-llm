@@ -15,6 +15,7 @@ import (
 	"github.com/kstruzzieri/go-llm/agent"
 	"github.com/kstruzzieri/go-llm/agent/agenttest"
 	"github.com/kstruzzieri/go-llm/agent/interceptor"
+	"github.com/kstruzzieri/go-llm/contextdepth"
 	"github.com/kstruzzieri/go-llm/provider"
 )
 
@@ -327,7 +328,10 @@ func runInvariantContracts(t *testing.T) {
 			t.Errorf("DefaultInvariants() = %v, want %v", got, want)
 		}
 	})
-	ic := interceptor.Defaults()[3]
+	ic, err := interceptor.NewInvariants(interceptor.DefaultInvariants())
+	if err != nil || ic.Name() != "invariants" {
+		t.Fatal("NewInvariants(DefaultInvariants()) did not return the named default invariant interceptor")
+	}
 	for _, tc := range []struct {
 		name, tool, args, rule, detail string
 		blocked                        bool
@@ -472,6 +476,16 @@ type contractVerifier string
 
 func (v contractVerifier) Verify(context.Context, agent.Approver) (string, error) {
 	return string(v), nil
+}
+
+func contractContext(content string) *agent.ContextSet {
+	return &agent.ContextSet{Groups: []agent.ContextGroup{{
+		Desc: contextdepth.GroupDesc{Subject: contextdepth.SubjectRef{Domain: contextdepth.DomainRAG, ID: "synthetic"}},
+		Alternatives: []agent.ContextAlternative{{
+			Desc:    contextdepth.AlternativeDesc{Representations: []contextdepth.RepresentationDesc{{Depth: contextdepth.DepthL0, Kind: contextdepth.RepresentationMetadata}}},
+			Content: content,
+		}},
+	}}}
 }
 
 type contractResultObserver struct {
@@ -649,6 +663,10 @@ func runDefaultPipelineContracts(t *testing.T) {
 		current := -1
 		if len(approver.risks) == 1 {
 			current = len(approver.risks[0].CurrentToolCallFindings)
+			if approver.risks[0].Score != 150 {
+				t.Errorf("Run(mixed then clean) clean approval cumulative score = %d, want 150", approver.risks[0].Score)
+			}
+			contractFindingsEqual(t, "mixed clean approval cumulative", approver.risks[0].Findings, want, false)
 		}
 		if tool.plans != 1 || tool.invokes != 1 || approver.plain != 0 || len(approver.risks) != 1 || current != 0 {
 			t.Errorf("Run(mixed then clean) Plan/Invoke/approval/current = %d/%d/%d/%d/%d, want 1/1/0/1/0", tool.plans, tool.invokes, approver.plain, len(approver.risks), current)
@@ -708,36 +726,43 @@ func runSecretPipelineContracts(t *testing.T) {
 	})
 
 	t.Run("Secrets/tool_observation_replaced", func(t *testing.T) {
-		mc := &contractCaller{responses: []agent.ModelResult{contractToolStep(contractCall("read-id", "remote", `{}`)), contractFinal()}}
 		secret := contractFixture(t, "secrets/openai.input")
-		tool := &contractTool{name: "remote", effect: agent.Effect{Class: agent.Read, Approval: agent.ApprovalNever}, result: agent.ToolResult{Content: secret, Context: &agent.ContextSet{Groups: []agent.ContextGroup{{Alternatives: []agent.ContextAlternative{{Content: secret}}}}}, Attrib: &agent.RetrievalAttribution{}}}
-		observer := &contractResultObserver{RecorderObserver: &agenttest.RecorderObserver{}}
-		res, err := agent.New(mc, agent.ContextManager{Mixed: true}, agent.WithInterceptors(interceptor.Defaults()...)).Run(context.Background(), agent.Request{Goal: "q", Tools: []agent.Tool{tool}}, observer)
-		if err != nil {
-			t.Fatal("Run(secret observation) returned an error")
+		for _, tc := range []struct{ name, fallback, alternative string }{
+			{"secret_fallback", secret, "safe alternative"},
+			{"secret_alternative_only", "safe fallback", secret},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				mc := &contractCaller{responses: []agent.ModelResult{contractToolStep(contractCall("read-id", "remote", `{}`)), contractFinal()}}
+				tool := &contractTool{name: "remote", effect: agent.Effect{Class: agent.Read, Approval: agent.ApprovalNever}, result: agent.ToolResult{Content: tc.fallback, Context: contractContext(tc.alternative), Attrib: &agent.RetrievalAttribution{}}}
+				observer := &contractResultObserver{RecorderObserver: &agenttest.RecorderObserver{}}
+				res, err := agent.New(mc, agent.ContextManager{Mixed: true}, agent.WithInterceptors(interceptor.Defaults()...)).Run(context.Background(), agent.Request{Goal: "q", Tools: []agent.Tool{tool}}, observer)
+				if err != nil {
+					t.Fatal("Run(secret observation) returned an error")
+				}
+				const want = "tool result blocked by interceptor secrets (sensitive_openai_token)"
+				if tool.plans != 1 || tool.invokes != 1 || len(res.Messages) != 4 || len(res.ToolCalls) != 1 {
+					t.Fatalf("Run(secret observation) Plan/Invoke/messages/records = %d/%d/%d/%d, want 1/1/4/1", tool.plans, tool.invokes, len(res.Messages), len(res.ToolCalls))
+				}
+				if res.Messages[2].Content != want || res.Messages[2].Content == secret || !res.ToolCalls[0].Blocked || !res.ToolCalls[0].Invoked {
+					t.Error("Run(secret observation) did not preserve invoked/blocked metadata with exact replacement")
+				}
+				if len(observer.results) != 1 {
+					t.Fatalf("Run(secret observation) ToolResult events = %d, want 1", len(observer.results))
+				}
+				event := observer.results[0]
+				if event.Result.Content != want || event.Result.Context != nil || event.Result.Attrib != nil || !event.Result.IsError || !event.Blocked || !event.Invoked {
+					t.Error("Run(secret observation) observer did not receive the exact cleared replacement")
+				}
+				if len(mc.requests) < 2 {
+					t.Fatalf("Run(secret observation) request count = %d, want at least 2", len(mc.requests))
+				}
+				wire, ok := toolMessage(mc.requests[1])
+				if !ok {
+					t.Fatal("Run(secret observation) second request has no tool message")
+				}
+				contractFrameEqual(t, "secret observation", wire, contractFixture(t, "secrets/observation-block.want"))
+			})
 		}
-		const want = "tool result blocked by interceptor secrets (sensitive_openai_token)"
-		if tool.plans != 1 || tool.invokes != 1 || len(res.Messages) != 4 || len(res.ToolCalls) != 1 {
-			t.Fatalf("Run(secret observation) Plan/Invoke/messages/records = %d/%d/%d/%d, want 1/1/4/1", tool.plans, tool.invokes, len(res.Messages), len(res.ToolCalls))
-		}
-		if res.Messages[2].Content != want || res.Messages[2].Content == secret || !res.ToolCalls[0].Blocked || !res.ToolCalls[0].Invoked {
-			t.Errorf("Run(secret observation) did not preserve invoked/blocked metadata with exact replacement")
-		}
-		if len(observer.results) != 1 {
-			t.Fatalf("Run(secret observation) ToolResult events = %d, want 1", len(observer.results))
-		}
-		event := observer.results[0]
-		if event.Result.Content != want || event.Result.Context != nil || event.Result.Attrib != nil || !event.Result.IsError || !event.Blocked || !event.Invoked {
-			t.Error("Run(secret observation) observer did not receive the exact cleared replacement")
-		}
-		if len(mc.requests) < 2 {
-			t.Fatalf("Run(secret observation) request count = %d, want at least 2", len(mc.requests))
-		}
-		wire, ok := toolMessage(mc.requests[1])
-		if !ok {
-			t.Fatal("Run(secret observation) second request has no tool message")
-		}
-		contractFrameEqual(t, "secret observation", wire, contractFixture(t, "secrets/observation-block.want"))
 	})
 
 	t.Run("Secrets/verifier_observation_replaced", func(t *testing.T) {
