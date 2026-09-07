@@ -24,6 +24,7 @@ literal. The local attributes disable Git newline conversion for both suffixes.
 | Injection detectors | literal zero-width and folded CR/LF forms; representative strong, weak, encoded and clean inputs | detector-specific rule, risk, detail, origin split, and output no-op fail independently |
 | Secrets | nine synthetic categories, targets, output/tool arguments, observation and verifier replacement | changed kind, target, deduplication, replacement, or clearing fails without printing fixture bytes |
 | Argument invariants | ordered protected-path, credential-read, ambiguous-field, and remote-script cases | changed block rule/detail or dispatch-before-policy fails |
+| Workspace | real read invocation, write planning, decoder/range errors, lexical/absolute/symlink confinement, and three dispatch tiers | changed public error, escaped path, mutation, or hook/Plan/approval/Invoke count fails |
 | Egress | representative privileged, network, package-manager, interpreter, unknown, wrapper, git/go, and quiet argv | changed effect gate, label, risk, or approval evidence fails |
 | Default pipeline | six names in order, explicit opt-in, composed order, and reused-ID current-risk reset | reordered/default-installed/stale-current behavior fails |
 
