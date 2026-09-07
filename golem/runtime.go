@@ -22,11 +22,14 @@ var ErrRunConflict = errors.New("golem: run conflict")
 // ErrClosed reports use of a closed Runtime.
 var ErrClosed = errors.New("golem: runtime is closed")
 
-// ErrInvalidRequest reports a malformed or oversized turn.
+// ErrInvalidRequest reports a malformed or oversized request.
 var ErrInvalidRequest = errors.New("golem: invalid request")
 
-// ErrSessionPersistence reports a failure while persisting a completed answer.
+// ErrSessionPersistence reports a failure while persisting a turn or compaction.
 var ErrSessionPersistence = errors.New("golem: session persistence failed")
+
+// ErrCompressionUnavailable reports disabled or unconfigured history compression.
+var ErrCompressionUnavailable = errors.New("golem: compression unavailable")
 
 var errDuplicateRunID = errors.New("golem: duplicate active run ID")
 
@@ -44,7 +47,9 @@ const (
 // SessionStore loads and saves complete stateful-thread snapshots. Load must
 // return an error matching conversation.ErrNotFound for a missing ID, and a
 // successful Load must return a non-nil Conversation with that ID. Save must
-// replace or upsert the complete snapshot.
+// atomically replace or upsert the complete snapshot. A Save error must leave
+// the old snapshot intact; a successful commit must return nil even if context
+// cancellation races afterward. Load results and summarizer inputs are read-only.
 //
 // Calls for different thread IDs may overlap, so implementations must be safe
 // for concurrent use. Same-thread serialization applies only within one
@@ -156,6 +161,15 @@ type Turn struct {
 	Context      []ContextItem
 	Approver     agent.Approver
 	Observer     agent.Observer
+}
+
+// CompactionReport estimates persisted non-system history and its rendered
+// durable summary. It excludes the live system prompt, tool schemas, and current turn.
+// Changed reports content replacement, not guaranteed token savings.
+type CompactionReport struct {
+	TokensBefore int
+	TokensAfter  int
+	Changed      bool
 }
 
 // turnSnapshot is the immutable {System, Tools, ModelOptions} value a
@@ -759,8 +773,8 @@ func (r *Runtime) release(turn Turn, active *activeRun) {
 	r.wg.Done()
 }
 
-// Close cancels active runs, waits for them, and releases owned resources.
-// It must not be called synchronously by code executing within an active Run.
+// Close cancels active runs and compactions, waits for them, and releases owned resources.
+// It must not be called synchronously by code executing within Run or CompactThread.
 func (r *Runtime) Close() error {
 	r.mu.Lock()
 	if r.closeDone == nil {
@@ -780,6 +794,11 @@ func (r *Runtime) Close() error {
 	// compression can still be running (the durable save is uncancelable), and
 	// Close must not wait out a summarizer model call it could abort.
 	for _, active := range r.active {
+		active.cancel()
+	}
+	// Compactions only enter activeThreads. Stateful turns appear in both
+	// maps; canceling their contexts twice is safe.
+	for _, active := range r.activeThreads {
 		active.cancel()
 	}
 	r.mu.Unlock()
