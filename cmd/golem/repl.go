@@ -234,13 +234,11 @@ var errOneShotFailed = errors.New("one-shot run failed")
 func runOneShot(ctx context.Context, stdout, stderr io.Writer, interrupts <-chan struct{}, sess *replSession, prompt string) error {
 	res, runErr := runOnce(ctx, stderr, interrupts, sess, prompt, nil)
 	if sess.machine != nil {
-		// The record mirrors the protocol STREAM, the exit code mirrors the
-		// INVOCATION, and the two can legitimately diverge: a post-run local
-		// failure (e.g. a checkpoint seal error joined into runErr after
-		// run.finished was already emitted) leaves the record "completed"
-		// while the process exits 1 with the cause on stderr. Rewriting the
-		// record would make it disagree with the terminal event a stream-json
-		// consumer already read.
+		// Ordinary post-run local errors preserve the captured terminal result
+		// while failing the invocation. A detected canary is the exception:
+		// the final result fails without an answer even if Runtime already
+		// emitted run.finished or a different run.failed. The earlier events
+		// remain intact, and Runtime cancellation keeps its precedence.
 		rec := sess.machine.buildResult(res, runErr)
 		if werr := writeJSONLine(stdout, rec); werr != nil {
 			_, _ = fmt.Fprintf(stderr, "golem: machine output incomplete: %v\n", werr)

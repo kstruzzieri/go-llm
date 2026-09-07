@@ -380,3 +380,73 @@ func TestCanaryRenewalFailureMachineFallback(t *testing.T) {
 		}
 	}
 }
+
+func TestCanarySealAbortMachineResult(t *testing.T) {
+	for _, mode := range []string{"json", "stream-json"} {
+		for _, outcome := range []string{"finished", "failed", "canceled"} {
+			t.Run(mode+outcome, func(t *testing.T) {
+				trip := &agent.BlockedError{Findings: []agent.Finding{{Interceptor: "canary", Verdict: agent.VerdictAbort}}}
+				side := errors.New("sensitive seal side error")
+				var journal *checkpointJournal
+				caller := secretPartialCaller{content: "ordinary answer", before: func() { journal.mu.Lock(); journal.fatal = errors.Join(side, trip); journal.mu.Unlock() }}
+				if outcome == "canceled" {
+					caller.err = context.Canceled
+				}
+				if outcome == "failed" {
+					caller.err = errors.New("ordinary provider failure")
+				}
+				sess, j := newCheckpointWriteSession(t, caller, t.TempDir())
+				journal = j
+				sess.canary = testCanaryBinding(t)
+				var stdout, stderr strings.Builder
+				format := outputJSON
+				if mode == "stream-json" {
+					format = outputStreamJSON
+				}
+				sess.machine = newMachineWriter(&stdout, format)
+				err := runOneShot(t.Context(), &stdout, &stderr, nil, sess, "ordinary goal")
+				if !errors.Is(err, errOneShotFailed) {
+					t.Errorf("seal one-shot invocation = %v, want failure", err)
+				}
+				events, results := splitMachineLines(t, stdout.String())
+				if len(results) != 1 {
+					t.Fatalf("seal machine result count = %d, want 1", len(results))
+				}
+				status, failure := `"error"`, `{"code":"internal","message":"run aborted: canary detected outside system instructions"}`
+				if outcome == "canceled" {
+					status, failure = `"canceled"`, `null`
+				}
+				if string(results[0]["status"]) != status || string(results[0]["error"]) != failure || string(results[0]["answer"]) != "null" || string(results[0]["grounding"]) != "null" {
+					t.Errorf("seal machine result = %s / %s / %s / %s, want %s / %s / null / null", results[0]["status"], results[0]["error"], results[0]["answer"], results[0]["grounding"], status, failure)
+				}
+				if mode == "stream-json" {
+					terminal, payload := "run.finished", `{"stopReason":"completed","model":""}`
+					if outcome == "canceled" {
+						terminal, payload = "run.canceled", "{}"
+					}
+					if outcome == "failed" {
+						terminal, payload = "run.failed", `{"code":"internal","message":"ordinary provider failure"}`
+					}
+					if len(events) < 2 || events[len(events)-1].Type != terminal || string(events[len(events)-1].Payload) != payload {
+						t.Errorf("seal emitted events = %+v, want original %s with %s", events, terminal, payload)
+					}
+				}
+			})
+		}
+	}
+}
+
+func TestMachineGenericPostRunErrorRetainsTerminalResult(t *testing.T) {
+	for _, tc := range []struct{ terminal, payload, want string }{
+		{"run.finished", `{"stopReason":"completed","model":"m"}`, `{"schema":"golem.result.v1","status":"completed","answer":"ordinary answer","stopReason":"completed","model":"m","error":null,"grounding":null}`},
+		{"run.failed", `{"code":"internal","message":"ordinary provider failure"}`, `{"schema":"golem.result.v1","status":"error","answer":null,"stopReason":null,"model":null,"error":{"code":"internal","message":"ordinary provider failure"},"grounding":null}`},
+	} {
+		w := newMachineWriter(io.Discard, outputJSON)
+		_ = w.emit(ev(1, tc.terminal, tc.payload))
+		rec := w.buildResult(agent.Result{Answer: "ordinary answer"}, errors.New("ordinary seal failure"))
+		raw, _ := json.Marshal(rec)
+		if string(raw) != tc.want {
+			t.Errorf("generic post-run %s result = %s, want %s", tc.terminal, raw, tc.want)
+		}
+	}
+}
