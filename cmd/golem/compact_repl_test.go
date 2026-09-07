@@ -88,7 +88,7 @@ func TestCompactReportAndRefresh(t *testing.T) {
 		want      string
 		calls     int
 	}{
-		{"changed", 5, "compact: history token estimate 100 -> 89 (changed)\n", 1},
+		{"changed", 5, "compact: history token estimate 100 -> 121 (changed)\n", 1},
 		{"floor", 4, "compact: history token estimate 80 -> 80 (unchanged)\n", 0},
 		{"empty", 0, "compact: history token estimate 0 -> 0 (unchanged)\n", 0},
 	} {
@@ -252,7 +252,7 @@ func TestCompactConsentAfterGrantsClear(t *testing.T) {
 		want   string
 		calls  int
 	}{
-		{"yes", true, nil, "compact: history token estimate 100 -> 89 (changed)\n", 1},
+		{"yes", true, nil, "compact: history token estimate 100 -> 121 (changed)\n", 1},
 		{"no", false, nil, "compact failed: provider: destination opencode/https://opencode.ai/zen/go not admitted for agent\n", 0},
 		{"canceled", false, context.Canceled, "compact: canceled; session unchanged\n", 0},
 	} {
@@ -298,8 +298,8 @@ func TestCompactFailureAndRefreshWarning(t *testing.T) {
 		want    string
 	}{
 		{"summary failure", false, blocked, "compact failed: run blocked: sensitive content detected\n"},
-		{"refresh failure", true, blocked, "compact: history token estimate 100 -> 89 (changed)\nwarning: session state not refreshed: run blocked: sensitive content detected\n"},
-		{"parent canceled after commit", true, context.Canceled, "compact: history token estimate 100 -> 89 (changed)\nwarning: session state not refreshed: context canceled\n"},
+		{"refresh failure", true, blocked, "compact: history token estimate 100 -> 121 (changed)\nwarning: session state not refreshed: run blocked: sensitive content detected\n"},
+		{"parent canceled after commit", true, context.Canceled, "compact: history token estimate 100 -> 121 (changed)\nwarning: session state not refreshed: context canceled\n"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx, cancel := context.WithCancel(context.Background())
@@ -426,7 +426,7 @@ func TestCompactREPLCancellationAfterCommit(t *testing.T) {
 	if ctx.Err() != nil {
 		t.Fatalf("parent canceled: %v", ctx.Err())
 	}
-	if !strings.Contains(out.String(), "compact: history token estimate 100 -> 89 (changed)\n") || strings.Contains(out.String(), "canceled") || strings.Contains(out.String(), "failed") || strings.Contains(out.String(), "not refreshed") {
+	if !strings.Contains(out.String(), "compact: history token estimate 100 -> 121 (changed)\n") || strings.Contains(out.String(), "canceled") || strings.Contains(out.String(), "failed") || strings.Contains(out.String(), "not refreshed") {
 		t.Fatalf("post-commit output = %q", out.String())
 	}
 	if len(caller.requests) != 1 || !reflect.DeepEqual(src.recorded, []string{"next goal"}) || sess.session.id != "user:compact" {
@@ -457,10 +457,10 @@ func TestCompactREPLHistoryResumeAndSettings(t *testing.T) {
 	if calls != 2 || len(caller.requests) != 1 || !reflect.DeepEqual(src.recorded, []string{"next goal"}) {
 		t.Fatalf("calls = summary %d model %d history %q", calls, len(caller.requests), src.recorded)
 	}
-	if !strings.Contains(out.String(), "compact: history token estimate 100 -> 89 (changed)\n") || !strings.Contains(out.String(), "compact: history token estimate 89 -> 89 (unchanged)\n") {
+	if !strings.Contains(out.String(), "compact: history token estimate 100 -> 121 (changed)\n") || !strings.Contains(out.String(), "compact: history token estimate 121 -> 121 (unchanged)\n") {
 		t.Fatalf("reports = %q", out.String())
 	}
-	want := []provider.ChatMessage{{Role: "system", Content: sess.baseSystem + "\n\n" + agent.ToolTrustContract}, {Role: "system", Content: "Previous conversation summary:\nSUM"}}
+	want := []provider.ChatMessage{{Role: "system", Content: sess.baseSystem + "\n\n" + agent.ToolTrustContract}, {Role: "system", Content: agent.DurableSummaryPrompt("SUM")}}
 	for _, m := range original[2:] {
 		want = append(want, provider.ChatMessage{Role: m.Role, Content: m.Content})
 	}
@@ -549,7 +549,7 @@ func TestCompactStaleInterruptAndREPLEntryReset(t *testing.T) {
 		if err := runREPL(context.Background(), newScannerSource(strings.NewReader("/compact\n"), &out), &out, interrupts, sess); err != nil {
 			t.Fatal(err)
 		}
-		if calls != 1 || !strings.Contains(out.String(), "100 -> 89 (changed)\n") {
+		if calls != 1 || !strings.Contains(out.String(), "100 -> 121 (changed)\n") {
 			t.Fatalf("stale interrupt compact = %q, calls=%d", out.String(), calls)
 		}
 		if sess.interrupts != interrupts {

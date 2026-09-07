@@ -106,8 +106,8 @@ func TestCompressConversationAutomaticThreshold(t *testing.T) {
 	}{
 		{name: "raw exact threshold", tokens: 4096},
 		{name: "raw above threshold", tokens: 4097, changed: true},
-		{name: "summary exact threshold", tokens: 4087, summary: "SUM"},
-		{name: "summary above threshold", tokens: 4088, summary: "SUM", changed: true},
+		{name: "summary exact threshold", tokens: 4055, summary: "SUM"},
+		{name: "summary above threshold", tokens: 4056, summary: "SUM", changed: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -179,8 +179,8 @@ func TestCompressConversationForcedBelowThreshold(t *testing.T) {
 	if err != nil || !changed || calls != 1 || !reflect.DeepEqual(compacted, want) {
 		t.Fatalf("forced compression = %+v, changed %v, calls %d, error %v; want %+v, changed true, one call", compacted, changed, calls, err, want)
 	}
-	if before, after := estimateStoredHistory(current), estimateStoredHistory(compacted); before != 100 || after != 89 {
-		t.Errorf("stored history estimates = %d -> %d, want 100 -> 89", before, after)
+	if before, after := estimateStoredHistory(current), estimateStoredHistory(compacted); before != 100 || after != 121 {
+		t.Errorf("stored history estimates = %d -> %d, want 100 -> 121", before, after)
 	}
 	if current.DurableSummary != nil || len(current.Messages) != 10 {
 		t.Errorf("input mutated: %+v", current)
@@ -196,8 +196,8 @@ func TestEstimateStoredHistory(t *testing.T) {
 	}{
 		{name: "empty", want: 0},
 		{name: "four exchanges", current: conversation.Conversation{Messages: compactExchanges(4)}, want: 80},
-		{name: "summary", current: conversation.Conversation{Messages: compactExchanges(4), DurableSummary: &conversation.DurableSummary{Content: "SUM"}}, want: 89},
-		{name: "trim summary", current: conversation.Conversation{DurableSummary: &conversation.DurableSummary{Content: " \n SUM \t"}}, want: 9},
+		{name: "summary", current: conversation.Conversation{Messages: compactExchanges(4), DurableSummary: &conversation.DurableSummary{Content: "SUM"}}, want: 121},
+		{name: "trim summary", current: conversation.Conversation{DurableSummary: &conversation.DurableSummary{Content: " \n SUM \t"}}, want: 41},
 		{name: "blank summary", current: conversation.Conversation{DurableSummary: &conversation.DurableSummary{Content: " \n\t "}}, want: 0},
 		{name: "multibyte", current: conversation.Conversation{Messages: []conversation.Message{{Role: "user", Content: "雪雪雪雪雪"}}}, want: 2},
 		{name: "tool metadata excludes system", current: conversation.Conversation{Messages: []conversation.Message{

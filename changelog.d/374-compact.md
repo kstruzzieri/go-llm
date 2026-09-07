@@ -11,3 +11,6 @@
   tool schemas, transport framing, and current turn. `/compact` respects
   `--no-session` and `--no-compress`; cancellation or failure before a
   successful save leaves the prior session snapshot intact.
+- Preserve the historical-data trust boundary during manual and automatic
+  summarization: frame all summarizer input and quote generated summaries
+  under an explicit data-only instruction when restoring agent context.

@@ -1011,13 +1011,13 @@ func TestAssembleWithTraceHistoryLane(t *testing.T) {
 	if len(out.Messages) == 0 || out.Messages[0].Content != summaryPrompt || out.Messages[0].Segment != Pinned {
 		t.Fatalf("assembled head = %+v, want the pinned durable summary", out.Messages)
 	}
-	// The summary reservation is charged once: system(3) + prompt(36) + goal(4)
+	// The summary reservation is charged once: system(3) + summary prompt + goal(4)
 	// + chain envelope(30) + anchor content(21) + two history spans(4+6).
 	if want := 3 + len([]rune(summaryPrompt)); mixedSysTokens(st) != want {
 		t.Errorf("fixture sysTokens = %d, want %d", mixedSysTokens(st), want)
 	}
-	if tr.EstimatedTokensUsed != 104 {
-		t.Errorf("EstimatedTokensUsed = %d, want 104", tr.EstimatedTokensUsed)
+	if want := 68 + len([]rune(summaryPrompt)); tr.EstimatedTokensUsed != want {
+		t.Errorf("EstimatedTokensUsed = %d, want %d", tr.EstimatedTokensUsed, want)
 	}
 	assertMixedLedger(t, st, out, tr)
 }

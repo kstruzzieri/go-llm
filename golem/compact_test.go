@@ -27,7 +27,7 @@ func assertCompactedNextRequest(t *testing.T, caller *captureCaller, original co
 	}
 	want := []provider.ChatMessage{
 		{Role: "system", Content: "test system\n\n" + agent.ToolTrustContract},
-		{Role: "system", Content: "Previous conversation summary:\nSUM"},
+		{Role: "system", Content: agent.DurableSummaryPrompt("SUM")},
 	}
 	for _, message := range original.Messages[2:] {
 		want = append(want, provider.ChatMessage{Role: message.Role, Content: message.Content})
@@ -62,8 +62,8 @@ func TestCompactThreadInjectedStoreReuseAndNextRun(t *testing.T) {
 	current.ID = strings.Repeat("x", 256) // exact supported ID boundary
 	store := &mapSessionStore{conversations: map[string]conversation.Conversation{current.ID: cloneConversation(current)}}
 	first := newCompactionRuntime(t, golem.Options{SessionStore: store, Summarizer: func(context.Context, string, []conversation.Message) (string, error) { return "SUM", nil }})
-	if got, err := first.CompactThread(context.Background(), current.ID); err != nil || got != (golem.CompactionReport{TokensBefore: 100, TokensAfter: 89, Changed: true}) {
-		t.Fatalf("CompactThread at 256-byte ID = %+v, %v; want 100 -> 89 changed", got, err)
+	if got, err := first.CompactThread(context.Background(), current.ID); err != nil || got != (golem.CompactionReport{TokensBefore: 100, TokensAfter: 121, Changed: true}) {
+		t.Fatalf("CompactThread at 256-byte ID = %+v, %v; want 100 -> 121 changed", got, err)
 	}
 	if err := first.Close(); err != nil {
 		t.Fatal(err)
@@ -115,8 +115,8 @@ func TestCompactThreadSQLiteReopenAndSearch(t *testing.T) {
 		}
 		return "SUM", nil
 	}})
-	if got, err := first.CompactThread(ctx, current.ID); err != nil || got != (golem.CompactionReport{TokensBefore: 100, TokensAfter: 89, Changed: true}) {
-		t.Fatalf("SQLite CompactThread = %+v, %v; want 100 -> 89 changed", got, err)
+	if got, err := first.CompactThread(ctx, current.ID); err != nil || got != (golem.CompactionReport{TokensBefore: 100, TokensAfter: 121, Changed: true}) {
+		t.Fatalf("SQLite CompactThread = %+v, %v; want 100 -> 121 changed", got, err)
 	}
 	if err := first.Close(); err != nil {
 		t.Fatal(err)
@@ -458,9 +458,9 @@ func TestCompactThreadProgressiveSummary(t *testing.T) {
 		exchanges, before, after, count int
 		replacement                     string
 	}{
-		{name: "fold pair", exchanges: 5, before: 110, after: 90, count: 14, replacement: "REVISED"},
-		{name: "equal cost rewrite", exchanges: 4, before: 90, after: 90, count: 12, replacement: "REVISED"},
-		{name: "larger rewrite", exchanges: 4, before: 90, after: 91, count: 12, replacement: "REPLACEMENT"},
+		{name: "fold pair", exchanges: 5, before: 142, after: 122, count: 14, replacement: "REVISED"},
+		{name: "equal cost rewrite", exchanges: 4, before: 122, after: 122, count: 12, replacement: "REVISED"},
+		{name: "larger rewrite", exchanges: 4, before: 122, after: 123, count: 12, replacement: "REPLACEMENT"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -497,9 +497,9 @@ func TestCompactThreadFailurePreservesSnapshot(t *testing.T) {
 		{name: "load", wantErr: failure},
 		{name: "nil load"},
 		{name: "wrong ID"},
-		{name: "summary", before: 110, calls: 1, wantErr: failure},
-		{name: "blank summary", before: 110, calls: 1, wantErr: conversation.ErrEmptySummary},
-		{name: "save", before: 110, calls: 1, saves: 1, wantErr: failure},
+		{name: "summary", before: 142, calls: 1, wantErr: failure},
+		{name: "blank summary", before: 142, calls: 1, wantErr: conversation.ErrEmptySummary},
+		{name: "save", before: 142, calls: 1, saves: 1, wantErr: failure},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -592,7 +592,7 @@ func TestCompactThreadCancellationBoundaries(t *testing.T) {
 			}
 			got, err := runtime.CompactThread(ctx, current.ID)
 			if phase == "committed save" {
-				if err != nil || got != (golem.CompactionReport{TokensBefore: 100, TokensAfter: 89, Changed: true}) || loads != 1 || calls != 1 || saves != 1 || base.saves != 1 {
+				if err != nil || got != (golem.CompactionReport{TokensBefore: 100, TokensAfter: 121, Changed: true}) || loads != 1 || calls != 1 || saves != 1 || base.saves != 1 {
 					t.Errorf("committed CompactThread = %+v, %v, loads %d, calls %d, saves %d, commits %d; want changed success with one of each", got, err, loads, calls, saves, base.saves)
 				}
 				return
@@ -628,8 +628,8 @@ func TestCompactThreadCanceledIdenticalRewrite(t *testing.T) {
 		return "SUM", nil
 	}})
 	got, err := runtime.CompactThread(ctx, current.ID)
-	if !errors.Is(err, context.Canceled) || got != (golem.CompactionReport{TokensBefore: 89, TokensAfter: 89}) || calls != 1 || store.saves != 0 || !reflect.DeepEqual(store.conversations[current.ID], current) {
-		t.Errorf("canceled identical rewrite = %+v, %v, calls %d, saves %d; want 89 unchanged, canceled, one call and no save", got, err, calls, store.saves)
+	if !errors.Is(err, context.Canceled) || got != (golem.CompactionReport{TokensBefore: 121, TokensAfter: 121}) || calls != 1 || store.saves != 0 || !reflect.DeepEqual(store.conversations[current.ID], current) {
+		t.Errorf("canceled identical rewrite = %+v, %v, calls %d, saves %d; want 121 unchanged, canceled, one call and no save", got, err, calls, store.saves)
 	}
 }
 
@@ -719,8 +719,8 @@ func TestCompactThreadPersistsAndRepeats(t *testing.T) {
 		return "SUM", nil
 	}})
 	got, err := runtime.CompactThread(context.Background(), current.ID)
-	if err != nil || got != (golem.CompactionReport{TokensBefore: 100, TokensAfter: 89, Changed: true}) {
-		t.Fatalf("CompactThread = %+v, %v; want 100 -> 89 changed", got, err)
+	if err != nil || got != (golem.CompactionReport{TokensBefore: 100, TokensAfter: 121, Changed: true}) {
+		t.Fatalf("CompactThread = %+v, %v; want 100 -> 121 changed", got, err)
 	}
 	want := cloneConversation(current)
 	want.Messages = want.Messages[2:]
@@ -729,7 +729,7 @@ func TestCompactThreadPersistsAndRepeats(t *testing.T) {
 		t.Fatalf("stored compaction = %+v, saves %d; want %+v, one save", saved, store.saves, want)
 	}
 	got, err = runtime.CompactThread(context.Background(), current.ID)
-	if err != nil || got != (golem.CompactionReport{TokensBefore: 89, TokensAfter: 89}) || calls != 2 || store.saves != 1 {
-		t.Errorf("second CompactThread = %+v, %v, calls %d, saves %d; want 89 -> 89 unchanged, two calls, one save", got, err, calls, store.saves)
+	if err != nil || got != (golem.CompactionReport{TokensBefore: 121, TokensAfter: 121}) || calls != 2 || store.saves != 1 {
+		t.Errorf("second CompactThread = %+v, %v, calls %d, saves %d; want 121 -> 121 unchanged, two calls, one save", got, err, calls, store.saves)
 	}
 }
