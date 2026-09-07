@@ -179,8 +179,12 @@ func TestLoadContinuesPastGlobalErrors(t *testing.T) {
 
 func TestLoadStrictReturnsGlobalErrors(t *testing.T) {
 	l := &Loader{GlobalDir: "bad\x00global", Strict: true}
-	if _, err := l.Load(context.Background()); err == nil {
+	docs, err := l.Load(context.Background())
+	if err == nil {
 		t.Fatal("Load: strict global error = nil, want non-nil")
+	}
+	if docs != nil {
+		t.Errorf("Load: strict global documents = %+v, want nil", docs)
 	}
 }
 
@@ -200,18 +204,29 @@ func TestLoadReturnsCanceledGlobalOnlyContext(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, err := (&Loader{GlobalDir: t.TempDir()}).Load(tt.ctx)
+			docs, err := (&Loader{GlobalDir: t.TempDir()}).Load(tt.ctx)
 			if !errors.Is(err, tt.want) {
 				t.Fatalf("Load: error = %v, want %v", err, tt.want)
+			}
+			if docs != nil {
+				t.Errorf("Load: documents = %+v, want nil on %v", docs, tt.want)
 			}
 		})
 	}
 }
 
 func TestLoadReturnsWorkspaceErrors(t *testing.T) {
-	l := &Loader{WorkspaceRoot: "bad\x00workspace"}
-	if _, err := l.Load(context.Background()); err == nil {
+	global := t.TempDir()
+	if err := os.WriteFile(filepath.Join(global, "AGENTS.md"), []byte("global"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	l := &Loader{GlobalDir: global, WorkspaceRoot: "bad\x00workspace"}
+	docs, err := l.Load(context.Background())
+	if err == nil {
 		t.Fatal("Load: want workspace errors to remain fatal")
+	}
+	if docs != nil {
+		t.Errorf("Load: documents = %+v, want nil after workspace error", docs)
 	}
 }
 
