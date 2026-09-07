@@ -237,6 +237,91 @@ func TestCompressConversationAutomaticSummaryReserve(t *testing.T) {
 	}
 }
 
+func TestCompressConversationReservesRenderedSummary(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name, summary string
+		wantCalls     int
+	}{
+		{"plain", strings.Repeat("s", 2048), 1},
+		{"escaped", strings.Repeat("\\", 2048), 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var messages []conversation.Message
+			for range 9 {
+				messages = append(messages,
+					conversation.Message{Role: "user", Content: strings.Repeat("q", 1024)},
+					conversation.Message{Role: "assistant", Content: strings.Repeat("a", 1024)})
+			}
+			calls, summarized := 0, 0
+			r := &Runtime{budget: agent.Budget{InputCeiling: 8192}, summarizer: func(_ context.Context, prior string, old []conversation.Message) (string, error) {
+				calls++
+				if !reflect.DeepEqual(old, messages[summarized:summarized+len(old)]) || (calls > 1 && prior != tc.summary) {
+					t.Errorf("summary pass %d = %q, %+v; want prior summary and next oldest messages", calls, prior, old)
+				}
+				summarized += len(old)
+				return tc.summary, nil
+			}}
+			current := conversation.Conversation{Messages: messages}
+			got, changed, err := r.compressConversation(context.Background(), current, false)
+			if err != nil || !changed || calls != tc.wantCalls || estimateStoredHistory(got) > 4096 {
+				t.Fatalf("compression = changed %v, %v, calls %d, tokens %d; want changed, %d calls and <=4096", changed, err, calls, estimateStoredHistory(got), tc.wantCalls)
+			}
+			if len(got.Messages) < 8 || !reflect.DeepEqual(got.Messages, messages[summarized:]) || summaryMessageCount(got) != summarized {
+				t.Fatalf("compressed history = %+v; want retained suffix and summary count %d", got, summarized)
+			}
+			again, changed, err := r.compressConversation(context.Background(), got, false)
+			if err != nil || changed || calls != tc.wantCalls || !reflect.DeepEqual(again, got) {
+				t.Errorf("immediate repeat = changed %v, %v, calls %d; want unchanged with no further summary", changed, err, calls)
+			}
+		})
+	}
+}
+
+func TestCompressConversationRenderedReserveStopsAtFloor(t *testing.T) {
+	t.Parallel()
+	current := conversation.Conversation{DurableSummary: &conversation.DurableSummary{Content: "SUM"}}
+	for range 4 {
+		current.Messages = append(current.Messages,
+			conversation.Message{Role: "user", Content: strings.Repeat("q", 2048)},
+			conversation.Message{Role: "assistant", Content: strings.Repeat("a", 2048)})
+	}
+	calls := 0
+	r := &Runtime{summarizer: func(context.Context, string, []conversation.Message) (string, error) {
+		calls++
+		return "SUM", nil
+	}}
+	got, changed, err := r.compressConversation(context.Background(), current, false)
+	if err != nil || changed || calls != 1 || !reflect.DeepEqual(got, current) {
+		t.Fatalf("floor compression = %+v, changed %v, %v, calls %d; want unchanged floor and one call", got, changed, err, calls)
+	}
+}
+
+func TestCompressConversationRenderedReserveRetryFailure(t *testing.T) {
+	t.Parallel()
+	var current conversation.Conversation
+	for range 9 {
+		current.Messages = append(current.Messages,
+			conversation.Message{Role: "user", Content: strings.Repeat("q", 1024)},
+			conversation.Message{Role: "assistant", Content: strings.Repeat("a", 1024)})
+	}
+	before := append([]conversation.Message(nil), current.Messages...)
+	failure := errors.New("second summary failed")
+	calls := 0
+	r := &Runtime{summarizer: func(context.Context, string, []conversation.Message) (string, error) {
+		calls++
+		if calls == 1 {
+			return strings.Repeat("\\", 2048), nil
+		}
+		return "", failure
+	}}
+	_, changed, err := r.compressConversation(context.Background(), current, false)
+	if !errors.Is(err, failure) || changed || calls != 2 || current.DurableSummary != nil || !reflect.DeepEqual(current.Messages, before) {
+		t.Fatalf("retry failure = changed %v, %v, calls %d; want failure with original history intact", changed, err, calls)
+	}
+}
+
 func TestCompressConversationRetainsToolExchangesAndUnresolvedTail(t *testing.T) {
 	t.Parallel()
 	old := []conversation.Message{

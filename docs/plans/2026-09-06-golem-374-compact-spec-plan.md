@@ -50,7 +50,7 @@ Immediate refusal matches existing Run behavior and avoids a queue, queue cancel
 
 Extend the existing private `compressConversation` helper with an explicit force input. Automatic callers pass false; CompactThread passes true.
 
-Automatic compression keeps its current half-input-ceiling trigger, 512-token summary reserve, and four-exchange floor. Forced compression bypasses the outer threshold **and** passes a raw-history target of zero to `CompressMessages`. Changing only the outer threshold would still no-op for small histories.
+Automatic compression keeps its half-input-ceiling trigger, 512-token summary-content allowance, and four-exchange floor. The reserve also includes the rendered summary envelope and any larger known summary cost. If actual generated output, including quoting, still exceeds the history budget, fold additional evictable history into that summary before saving. Each additional pass must remove more raw messages; stop at the retention floor, which may itself exceed the budget. Failure during any pass preserves the original snapshot. Forced compression bypasses the outer threshold **and** passes a raw-history target of zero to `CompressMessages`. Changing only the outer threshold would still no-op for small histories.
 
 The existing compressor remains responsible for retention and summarization:
 

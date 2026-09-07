@@ -244,13 +244,37 @@ func (r *Runtime) compressConversation(ctx context.Context, current conversation
 	if !force && estimateStoredHistory(current) <= maxHistoryTokens {
 		return current, false, nil
 	}
-	maxRawTokens := maxHistoryTokens - agent.DefaultSummaryOutputReserve
-	if force || maxRawTokens < 0 {
-		maxRawTokens = 0
-	}
-	compacted, err := conversation.CompressMessages(ctx, current, maxRawTokens, 4, estimate, r.summarizer)
-	if err != nil {
-		return conversation.Conversation{}, false, err
+	// The model's output allowance excludes the rendered envelope and quoting.
+	// Reserve the envelope up front and account for actual output below, since
+	// escaping (or a custom summarizer) can exceed the anticipated content cost.
+	reserve := max(agent.DefaultSummaryOutputReserve+estimate(agent.DurableSummaryPrompt("")),
+		estimate(agent.DurableSummaryPrompt(strings.TrimSpace(currentSummary(current)))))
+	input, summarize := current, r.summarizer
+	var compacted conversation.Conversation
+	for {
+		maxRawTokens := max(0, maxHistoryTokens-reserve)
+		if force {
+			maxRawTokens = 0
+		}
+		var err error
+		compacted, err = conversation.CompressMessages(ctx, input, maxRawTokens, 4, estimate, summarize)
+		if err != nil {
+			return conversation.Conversation{}, false, err
+		}
+		if force || maxRawTokens == 0 || estimateStoredHistory(compacted) <= maxHistoryTokens || len(compacted.Messages) >= len(input.Messages) {
+			break
+		}
+		// Each retry must evict more history; the retention floor can still
+		// exceed the budget. Fold additional messages into the new summary,
+		// but do not pay for another rewrite when the floor keeps everything.
+		input = compacted
+		reserve = max(reserve, estimate(agent.DurableSummaryPrompt(currentSummary(compacted))))
+		summarize = func(ctx context.Context, prior string, old []conversation.Message) (string, error) {
+			if len(old) == 0 {
+				return prior, nil
+			}
+			return r.summarizer(ctx, prior, old)
+		}
 	}
 	changed := len(compacted.Messages) != len(current.Messages) ||
 		currentSummary(compacted) != currentSummary(current) ||

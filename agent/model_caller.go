@@ -103,8 +103,9 @@ type routerSummarizer struct {
 }
 
 // DefaultSummaryOutputReserve bounds the rolling durable summary. It is the
-// summarizer's NumPredict AND the token headroom Golem reserves for the summary
-// when deciding how much raw history to keep — one constant, no drift.
+// summarizer's NumPredict AND Golem's initial summary-content allowance when
+// deciding how much raw history to keep. Golem also accounts for the rendered
+// envelope and actual output cost, including quoting expansion.
 const DefaultSummaryOutputReserve = 512
 
 const summarySystemPrompt = `You maintain a single rolling summary of an ongoing coding session. Rewrite the summary so it stays concise and within budget, folding in the new messages.

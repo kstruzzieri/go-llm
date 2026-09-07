@@ -17,3 +17,7 @@
 - Preserve the historical-data trust boundary during manual and automatic
   summarization: frame all summarizer input and quote generated summaries
   under an explicit data-only instruction when restoring agent context.
+- Include the rendered summary envelope in automatic compression's reserve and
+  fold additional history when actual summary quoting exceeds that allowance.
+  Retention floors still take priority; a failed additional pass preserves the
+  original snapshot.
