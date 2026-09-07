@@ -96,6 +96,18 @@ func RunHardeningBoundaryContracts(t *testing.T) {
 		{"Accounting/independent_envelope_costs", TestToolFrameEnvelopeCost},
 		{"Accounting/exact_fit_and_one_below", TestFramedToolBudgetFit},
 		{"Accounting/wrapped_compactor", runHardeningWrappedCompactor},
+		{"Pipeline/runs_after_block_and_error", TestRunHookRunsEveryInterceptorAfterBlockAndError},
+		{"Pipeline/joins_errors", TestRunHookJoinsEveryError},
+		{"Pipeline/joins_terminal_block_and_errors", TestTerminalAtJoinsBlockedErrorWithHookErrors},
+		{"Pipeline/owns_risk_snapshots", TestRunHookSnapshotsAndEvents},
+		{"Pipeline/owns_callback_inputs", TestEachInterceptorReceivesItsOwnInspectionCopy},
+		{"Pipeline/current_findings_follow_position", TestCurrentFindingsFollowTheCallNotTheID},
+		{"Pipeline/current_findings_reused_id", TestCurrentFindingsReusedIDWithinOneStep},
+		{"Pipeline/current_findings_owned", TestCurrentFindingsAreOwnedCopies},
+		{"Pipeline/current_findings_cumulative_views", TestCurrentFindingsAbsentFromCumulativeViews},
+		{"Pipeline/tool_call_block_precedes_dispatch", TestToolCallBlockSerialNeverPlansInvokesOrPrompts},
+		{"Pipeline/tool_result_block_precedes_observation", TestToolResultBlockReplacesTheObservationBeforeTheObserver},
+		{"Pipeline/parallel_preparation_is_atomic", TestParallelPreparationErrorRetainsEarlierSyntheticAuditRecord},
 	} {
 		t.Run(group.name, group.run)
 	}
