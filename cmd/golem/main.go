@@ -690,6 +690,9 @@ func main() {
 		if errors.As(err, &statusErr) {
 			os.Exit(statusErr.ExitCode())
 		}
+		if code, ok := auditExitCode(err); ok {
+			os.Exit(code)
+		}
 		// runIndex/runOneShot already rendered their own output; just exit non-zero.
 		if errors.Is(err, errIndexFailed) || errors.Is(err, errOneShotFailed) || errors.Is(err, errAgentflowTaskFailed) || errors.Is(err, errSourceFailed) {
 			os.Exit(exitCodeFor(err))
@@ -759,6 +762,8 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 	}
 	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
 		switch args[0] {
+		case "audit":
+			return runAudit(context.Background(), args[1:], stdout, stderr)
 		case "index":
 			return runIndex(context.Background(), args[1:], stdout, stderr)
 		case "models":
@@ -766,7 +771,7 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 		case "source":
 			return runSource(context.Background(), args[1:], stdin, stdout, stderr)
 		default:
-			return fmt.Errorf("unknown command %q (did you mean \"index\", \"models\", or \"source\"?)", args[0])
+			return fmt.Errorf("unknown command %q (did you mean \"audit\", \"index\", \"models\", or \"source\"?)", args[0])
 		}
 	}
 

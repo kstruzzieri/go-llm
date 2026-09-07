@@ -454,6 +454,69 @@ or standalone public-key retention/export. An intent-only entry is not a clean
 successful audit for #447. The [approved design](docs/plans/2026-09-05-mutation-receipts-445-spec-plan.md)
 records the full portable wire and recovery contract.
 
+**Offline integrity audit:** close Golem, MCP, and other database writers cleanly
+before running:
+
+```bash
+golem audit -root /path/to/project
+golem audit -root /path/to/project -scope workspace
+golem audit -scope memory
+golem audit -root /path/to/project -scope proofs -agentflow-src /path/to/agentflow
+```
+
+`-scope` accepts one of `all` (the default), `workspace`, `memory`, or `proofs`.
+Audit runs without a model, session, or network service. It reads existing state
+without creating storage, signing records, migrating schemas, repairing evidence,
+or changing file permissions. Databases must already be checkpointed: a nonempty
+WAL or rollback journal makes the scan incomplete. Audit does not checkpoint them.
+Detected source changes also make that component incomplete; this is an offline
+consistency check, not an atomic snapshot of a running system.
+
+- `workspace` authenticates all retained mutation receipts, including completed
+  undo and pruned checkpoint history, validates retained before-images, and checks
+  each determinate path against its latest applied transition. Tracked permissions
+  are checked where the evidence establishes them. Unsigned or intent-only history
+  remains incomplete even when current bytes happen to match.
+- `memory` verifies every extant agent-memory record in Golem's shared memory
+  database: all workspaces and sessions, expired rows, and tombstones. `-root`
+  does not restrict this scan to one workspace. The report preserves partial
+  progress, such as 42 verified out of 50 extant records before failure, and
+  distinguishes an unavailable total from zero. Signed `legacy-unreviewed` records
+  can verify without gaining a higher trust level. User `/remember` entries and
+  FTS indexes are outside the signed-record claim.
+- `proofs` covers `.agent/proof-pack.json` and its referenced evidence through
+  AgentFlow's proposed versioned `verify-proof --integrity-only --json` interface.
+  This upstream interface is not yet available; existing providers report
+  incomplete coverage. Real-provider compatibility remains a release prerequisite.
+  The assurance is **structural/checksum; unsigned**: workflow policy failures do
+  not by themselves mean evidence corruption, and checksums do not authenticate
+  who produced a proof. There is no fallback to ordinary text-only verification.
+
+| Exit | Meaning |
+|---|---|
+| `0` | All present, configured selected components passed. |
+| `1` | A stable source established an integrity violation; other coverage may still be incomplete. |
+| `2` | Coverage could not be completed, arguments were invalid, nothing was auditable, or output could not be delivered. |
+
+With `all`, absent components are labeled `not-present`; an explicitly selected
+missing component is incomplete. A user-memory-only database is `not-configured`.
+The text report identifies scope, assurance, checked counts, and bounded reasons;
+it never includes record bodies, proof command output, signatures, or key bytes.
+There is no audit JSON mode. A component may stop at its first invalid record,
+with an early-stop label and partial counts.
+
+Audit requires existing trusted verifiers. The current producers publish their
+active identities only as private PEM files, so audit loads those files through
+the hardened loaders solely to derive public verifiers; it never signs or creates
+replacement keys. Memory also uses retained trusted public verifiers. Missing,
+insecure, or unknown keys mean incomplete coverage. Public-key-only deployment
+requires a separate producer change to publish trusted verifiers.
+
+These checks detect alteration of retained evidence and current file drift where
+a signed baseline exists. They do not establish complete history, detect deleted
+or rolled-back ledgers, distinguish same-byte edits, or withstand signing-key
+compromise or recomputation of an entirely controlled unsigned proof bundle.
+
 `/think off|on|low|medium|high` changes thinking for subsequent turns using the
 same active-chain support checks and notices as startup `-think`. An unsupported
 request leaves the previous setting in place. `/think` reports the runtime's
