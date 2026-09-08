@@ -33,7 +33,28 @@ standard and URL alphabets and padded and raw forms; tests never encode a source
 string to obtain an expectation. `interceptors/encoding-folded-*.input` retains
 its LF, CRLF, or CR bytes under `.gitattributes`. Secret inputs are harmless
 synthetic shapes assembled for this suite. Failure messages for those cases
-report only case IDs, counts, lengths, offsets, and fixed policy metadata.
+report only case IDs, finding indexes and field names, counts, lengths, offsets,
+and fixed policy metadata. Actual values stay hidden even if a regression puts
+sensitive content into a finding field.
+
+This pins shipped policy behavior, not exhaustive attack detection. Secrets
+inspection happens after a completed response: content and thinking already
+sent through streaming callbacks cannot be withdrawn. The output-block cases
+cover completed-response recording and publication, not stream filtering.
+Encoding inspects one decoded layer; the one-layer control records that limit,
+not a guarantee against nested or other encodings. RemoteScript recognizes
+specific argument patterns, not arbitrary shell or interpreter semantics.
+Egress adds risk labels for approval and does not block network traffic;
+execution confinement depends on the host's actual sandbox and approval policy.
+
+Workspace cases exercise real ReadFile invocation and WriteFile planning.
+Other tools and broader platform/path cases stay in their focused tool suites
+and the #452 corpus. The aggregate deliberately reuses focused tests so they
+also run under its single budget; invoking helpers instead of Test functions
+would not remove that duplicate execution. The 500 ms wall-clock assertion
+includes cleanup and can fail under scheduling contention; it is a regression
+budget, not a hard timeout. Exact byte fixtures and named deferred skips are
+intentional parts of this contract.
 
 Deferred coverage: ZT-602/#431 project trust, ZT-603/#432 MCP description/catalog
 trust, ZT-604/#433 terminal output, ZT-605/#434 quarantine, and ZT-606/#435
