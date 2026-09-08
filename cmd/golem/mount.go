@@ -25,6 +25,7 @@ import (
 // fragment registry in golem.Runtime by design — composition is a CLI concern
 // and this is its one path.
 type systemInputs struct {
+	canary string
 	// headless is non-nil only for a -allow-tool one-shot (#352): the prompt
 	// is built from the exact mounted set. Never recomposed (no REPL there).
 	headless       *golemruntime.HeadlessToolCaps
@@ -58,7 +59,11 @@ func composeSystem(in systemInputs) string {
 	if injected != "" && agentMemory != "" {
 		agentMemory = "\n\n" + strings.TrimPrefix(agentMemory, " ")
 	}
-	return system + injected + agentMemory
+	system += injected + agentMemory
+	if in.canary != "" {
+		system += "\n\n" + in.canary
+	}
+	return system
 }
 
 // injectedContext is the untrusted-data suffix every model-facing prompt

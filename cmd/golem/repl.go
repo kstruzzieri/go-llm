@@ -24,6 +24,7 @@ import (
 
 // replSession holds the per-process state the REPL needs.
 type replSession struct {
+	canary          *canaryBinding
 	orch            *agent.Orchestrator
 	runtime         *golemruntime.Runtime
 	newOrchestrator func() *agent.Orchestrator
@@ -206,9 +207,9 @@ func runREPL(ctx context.Context, src lineSource, out io.Writer, interrupts <-ch
 			}
 		}
 		// Record accepted goals after inspection has had a chance to block
-		// secrets. Unrelated failures retain the existing history behavior.
+		// secrets or abort on a canary. Unrelated failures retain existing history.
 		_, runErr := runOnce(ctx, out, interrupts, sess, line, src)
-		if !secretsBlocked(runErr) {
+		if !secretsBlocked(runErr) && !canaryAborted(runErr) {
 			src.RecordGoal(line)
 		}
 	}
@@ -233,13 +234,11 @@ var errOneShotFailed = errors.New("one-shot run failed")
 func runOneShot(ctx context.Context, stdout, stderr io.Writer, interrupts <-chan struct{}, sess *replSession, prompt string) error {
 	res, runErr := runOnce(ctx, stderr, interrupts, sess, prompt, nil)
 	if sess.machine != nil {
-		// The record mirrors the protocol STREAM, the exit code mirrors the
-		// INVOCATION, and the two can legitimately diverge: a post-run local
-		// failure (e.g. a checkpoint seal error joined into runErr after
-		// run.finished was already emitted) leaves the record "completed"
-		// while the process exits 1 with the cause on stderr. Rewriting the
-		// record would make it disagree with the terminal event a stream-json
-		// consumer already read.
+		// Ordinary post-run local errors preserve the captured terminal result
+		// while failing the invocation. A detected canary is the exception:
+		// the final result fails without an answer even if Runtime already
+		// emitted run.finished or a different run.failed. The earlier events
+		// remain intact, and Runtime cancellation keeps its precedence.
 		rec := sess.machine.buildResult(res, runErr)
 		if werr := writeJSONLine(stdout, rec); werr != nil {
 			_, _ = fmt.Fprintf(stderr, "golem: machine output incomplete: %v\n", werr)
@@ -316,6 +315,13 @@ func runOnce(ctx context.Context, out io.Writer, interrupts <-chan struct{}, ses
 		approver = ap
 	}
 
+	if sess.canary.needsRenewal() {
+		if err := sess.renewCanary(); err != nil {
+			writeRunLine("%s", errCanaryUnavailable)
+			return agent.Result{}, errCanaryUnavailable
+		}
+	}
+
 	// Arm the durable checkpoint journal for this turn (#355). A refusal
 	// (interrupted undo pending, or the journal latched by an earlier
 	// failure) blocks the model turn before the provider is called and
@@ -323,6 +329,9 @@ func runOnce(ctx context.Context, out io.Writer, interrupts <-chan struct{}, ses
 	// slash commands remain usable.
 	if sess.journal != nil {
 		if jerr := sess.journal.beginTurn(runCtx, line, cancel); jerr != nil {
+			if canaryAborted(jerr) {
+				sess.canary.burn()
+			}
 			writeRunLine("checkpoint: %s", runFailureMessage("", jerr))
 			if ferr := rend.finish(); ferr != nil {
 				writeRunLine("warning: render flush incomplete: %v", ferr)
@@ -372,7 +381,7 @@ func runOnce(ctx context.Context, out io.Writer, interrupts <-chan struct{}, ses
 	// travels on the Turn below.
 	req := agent.Request{
 		Goal:           line,
-		System:         sess.baseSystem,
+		System:         traceSystem(sess.sysInputs),
 		HistorySummary: sess.session.historySummary(), // nil-safe: nil session => empty
 		History:        sess.session.history(),        // nil-safe: nil session => nil
 		MaxSteps:       sess.maxSteps,
@@ -407,12 +416,17 @@ func runOnce(ctx context.Context, out io.Writer, interrupts <-chan struct{}, ses
 		cancel()
 	}
 	// Inspect both trees before demoting session errors or presenting a seal
-	// failure: either can carry a secrets block with a sensitive side-error.
+	// failure: either can carry a canary abort or secrets block with a
+	// sensitive side-error.
 	secretBlock := secretsBlocked(runErr) || secretsBlocked(sealErr)
+	canaryBlock := canaryAborted(runErr) || canaryAborted(sealErr)
+	if canaryBlock {
+		sess.canary.burn()
+	}
 	var sessionSaveErr error
 	if res.Answer != "" &&
 		errors.Is(runErr, golemruntime.ErrSessionPersistence) &&
-		!secretBlock &&
+		!secretBlock && !canaryBlock &&
 		!errors.Is(runErr, context.Canceled) &&
 		!errors.Is(runErr, context.DeadlineExceeded) {
 		sessionSaveErr = runErr
@@ -420,7 +434,7 @@ func runOnce(ctx context.Context, out io.Writer, interrupts <-chan struct{}, ses
 	}
 	if sealErr != nil {
 		runErr = errors.Join(runErr, sealErr)
-		if !secretBlock {
+		if !secretBlock && !canaryBlock {
 			writeRunLine("checkpoint: %v", sealErr)
 		}
 	}
@@ -488,10 +502,13 @@ func runOnce(ctx context.Context, out io.Writer, interrupts <-chan struct{}, ses
 		}
 	}
 
-	if sess.obs != nil && sess.obs.trace && secretBlock {
+	if sess.obs != nil && sess.obs.trace && canaryBlock {
+		writeRunLine("warning: trace not written: canary detected")
+	}
+	if sess.obs != nil && sess.obs.trace && secretBlock && !canaryBlock {
 		writeRunLine("warning: trace not written: sensitive content detected")
 	}
-	if sess.obs != nil && sess.obs.trace && !secretBlock {
+	if sess.obs != nil && sess.obs.trace && !secretBlock && !canaryBlock {
 		meta := agenttrace.TraceMeta{
 			Goal:           req.Goal,
 			System:         req.System,
@@ -509,7 +526,7 @@ func runOnce(ctx context.Context, out io.Writer, interrupts <-chan struct{}, ses
 	}
 
 	if runErr != nil {
-		if runCtx.Err() != nil && !secretBlock {
+		if runCtx.Err() != nil && !secretBlock && !canaryBlock {
 			writeRunLine("canceled")
 			return res, runErr
 		}
@@ -577,8 +594,14 @@ func dispatchSlash(ctx context.Context, out io.Writer, sess *replSession, line s
 		if sess.session == nil {
 			_, _ = fmt.Fprintln(out, "session disabled (--no-session)")
 		} else {
-			sess.session.renew()
-			_, _ = fmt.Fprintf(out, "session: %s (new)\n", sess.session.id)
+			candidate := *sess.session
+			candidate.renew()
+			if err := sess.renewCanary(); err != nil {
+				_, _ = fmt.Fprintf(out, "new failed: %v\n", err)
+			} else {
+				*sess.session = candidate
+				_, _ = fmt.Fprintf(out, "session: %s (new)\n", sess.session.id)
+			}
 		}
 	case "/sessions":
 		if sess.session == nil {
@@ -601,7 +624,7 @@ func dispatchSlash(ctx context.Context, out io.Writer, sess *replSession, line s
 			_, _ = fmt.Fprintln(out, "usage: /resume <session-id>")
 		} else if id, err := resolveSessionID(sessionIDOpts{explicit: fields[1]}); err != nil {
 			_, _ = fmt.Fprintln(out, err)
-		} else if info, err := sess.session.switchTo(ctx, id); err != nil {
+		} else if info, err := sess.resumeSession(ctx, id); err != nil {
 			_, _ = fmt.Fprintf(out, "resume failed: %v\n", err)
 		} else {
 			// Success only (#341 D8): a failed /resume leaves the active

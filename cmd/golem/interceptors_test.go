@@ -73,14 +73,14 @@ func TestSecretMachineStartupWiresFailurePresenter(t *testing.T) {
 }
 
 func TestInterceptorsFor(t *testing.T) {
-	if got := interceptorsFor(flags{}); got != nil {
+	if got := interceptorsFor(flags{}, nil); got != nil {
 		t.Fatalf("off: chain = %v, want nil", got)
 	}
 	var names []string
-	for _, ic := range interceptorsFor(flags{interceptors: true}) {
+	for _, ic := range interceptorsFor(flags{interceptors: true}, testCanaryBinding(t)) {
 		names = append(names, ic.Name())
 	}
-	if want := []string{"zero_width", "encoding", "typoglycemia", "invariants", "egress", "secrets"}; !slices.Equal(names, want) {
+	if want := []string{"zero_width", "encoding", "typoglycemia", "invariants", "egress", "secrets", "canary"}; !slices.Equal(names, want) {
 		t.Fatalf("on: chain = %v, want %v", names, want)
 	}
 }
@@ -88,9 +88,9 @@ func TestInterceptorsFor(t *testing.T) {
 func TestStartupNotices_Interceptors(t *testing.T) {
 	on := strings.Join(startupNotices(startupInfo{
 		workspace:       "/w",
-		interceptorLine: interceptorsNotice(interceptorsFor(flags{interceptors: true})),
+		interceptorLine: interceptorsNotice(interceptorsFor(flags{interceptors: true}, testCanaryBinding(t))),
 	}), "\n")
-	if want := "workspace: /w\ninterceptors: enabled (zero_width, encoding, typoglycemia, invariants, egress, secrets)"; on != want {
+	if want := "workspace: /w\ninterceptors: enabled (zero_width, encoding, typoglycemia, invariants, egress, secrets, canary)"; on != want {
 		t.Fatalf("notices with the flag = %q, want %q", on, want)
 	}
 	off := strings.Join(startupNotices(startupInfo{workspace: "/w"}), "\n")
@@ -104,7 +104,7 @@ func TestStartupNotices_Interceptors(t *testing.T) {
 // notice still says enabled. A benign mention of "system prompt" is enough to
 // exercise scoring without requiring tool calls from the test backend.
 func TestRunWiresInterceptors(t *testing.T) {
-	const want = "interceptors: enabled (zero_width, encoding, typoglycemia, invariants, egress, secrets)"
+	const want = "interceptors: enabled (zero_width, encoding, typoglycemia, invariants, egress, secrets, canary)"
 	const goal = "Explain the term system prompt."
 	for _, tc := range []struct {
 		name string
@@ -201,7 +201,7 @@ func TestRunWiresInterceptors(t *testing.T) {
 func TestOrchestratorFactoryInstallsInterceptorsBehindFlag(t *testing.T) {
 	run := func(f flags) agent.Result {
 		t.Helper()
-		o := newOrchestratorFactory(&oneCallCaller{name: "remote"}, f, nil)()
+		o := newOrchestratorFactory(&oneCallCaller{name: "remote"}, f, nil, testCanaryBinding(t))()
 		res, err := o.Run(context.Background(), agent.Request{Goal: "q", Tools: []agent.Tool{foreignTool{content: injection}}}, nil)
 		if err != nil {
 			t.Fatalf("Run: %v", err)
@@ -321,7 +321,7 @@ func TestNewDispatchTool_ChildrenInheritInterceptors(t *testing.T) {
 	invoke := func(f flags) (dispatchTestEnvelope, string) {
 		t.Helper()
 		available := append(validDispatchAvailable(t), foreignRetrieve{})
-		tool, err := newDispatchTool(&echoRetrieveCaller{}, f, agent.Budget{}, dispatchFanout{maxConcurrent: 1}, nil, available)
+		tool, err := newDispatchTool(&echoRetrieveCaller{}, f, agent.Budget{}, dispatchFanout{maxConcurrent: 1}, nil, available, testCanaryBinding(t))
 		if err != nil {
 			t.Fatalf("newDispatchTool: %v", err)
 		}
@@ -391,7 +391,7 @@ func TestRunOnce_ApprovalPromptShowsInterceptorRisk(t *testing.T) {
 		t.Fatal(err)
 	}
 	system := buildSystemPrompt(true, false)
-	orch := newOrchestratorFactory(caller, flags{interceptors: true}, nil)()
+	orch := newOrchestratorFactory(caller, flags{interceptors: true}, nil, testCanaryBinding(t))()
 	sess := &replSession{
 		orch: orch, runtime: newTestRuntime(t, root, system, orch, writeTools),
 		tools: append(readTools, writeTools...), baseSystem: system, maxSteps: 16,
