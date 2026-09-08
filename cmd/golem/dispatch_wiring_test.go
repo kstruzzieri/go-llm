@@ -346,7 +346,7 @@ func TestOrchestratorFactory_DispatchPerRunInvocationCap(t *testing.T) {
 			responses = append(responses, agent.ModelResult{Response: provider.ChatResponse{Content: "done", Done: true}})
 			stub := &countingDispatchStub{}
 			caller := &scriptCaller{responses: responses}
-			orch := newOrchestratorFactory(caller, flags{dispatch: tc.dispatch}, nil)()
+			orch := newOrchestratorFactory(caller, flags{dispatch: tc.dispatch}, nil, nil)()
 			res, err := orch.Run(context.Background(), agent.Request{
 				Goal:  "explore",
 				Tools: []agent.Tool{stub},
@@ -448,7 +448,7 @@ func invokeDispatch(t *testing.T, tool agent.Tool, tasks []string) dispatchTestE
 // behind task 1 (single model calls ran 76-347s). Golem therefore budgets the
 // library's per-task ceiling times the 4-task maximum.
 func TestNewDispatchTool_TimeoutCoversAllSequentialTasks(t *testing.T) {
-	tool, err := newDispatchTool(&specRecordingCaller{}, flags{}, agent.Budget{}, dispatchFanout{maxConcurrent: 1}, nil, validDispatchAvailable(t))
+	tool, err := newDispatchTool(&specRecordingCaller{}, flags{}, agent.Budget{}, dispatchFanout{maxConcurrent: 1}, nil, validDispatchAvailable(t), nil)
 	if err != nil {
 		t.Fatalf("newDispatchTool: %v", err)
 	}
@@ -464,7 +464,7 @@ func TestNewDispatchTool_TimeoutCoversAllSequentialTasks(t *testing.T) {
 // child fail at invocation time. A mutation that stops threading the budget
 // also flips this test (the library default ceiling would pass validation).
 func TestNewDispatchTool_TinyCeilingFailsLoudly(t *testing.T) {
-	_, err := newDispatchTool(&specRecordingCaller{}, flags{}, agent.Budget{InputCeiling: 500}, dispatchFanout{maxConcurrent: 1}, nil, validDispatchAvailable(t))
+	_, err := newDispatchTool(&specRecordingCaller{}, flags{}, agent.Budget{InputCeiling: 500}, dispatchFanout{maxConcurrent: 1}, nil, validDispatchAvailable(t), nil)
 	if err == nil {
 		t.Fatal("a 500-token ceiling cannot hold the default child output reserve; construction must fail loudly")
 	}
@@ -480,7 +480,7 @@ func TestNewDispatchTool_TinyCeilingFailsLoudly(t *testing.T) {
 // reserve and fails this test.
 func TestNewDispatchTool_ChildBudgetThreadsThroughRuns(t *testing.T) {
 	caller := &specRecordingCaller{}
-	tool, err := newDispatchTool(caller, flags{}, agent.Budget{InputCeiling: 9000, OutputReserve: 777}, dispatchFanout{maxConcurrent: 1}, nil, validDispatchAvailable(t))
+	tool, err := newDispatchTool(caller, flags{}, agent.Budget{InputCeiling: 9000, OutputReserve: 777}, dispatchFanout{maxConcurrent: 1}, nil, validDispatchAvailable(t), nil)
 	if err != nil {
 		t.Fatalf("newDispatchTool: %v", err)
 	}
@@ -505,7 +505,7 @@ func TestNewDispatchTool_ChildrenSeeExactlyTheReadToolset(t *testing.T) {
 				available = append(available, &sentinelRetrieve{})
 			}
 			caller := &specRecordingCaller{}
-			tool, err := newDispatchTool(caller, flags{}, agent.Budget{}, dispatchFanout{maxConcurrent: 1}, nil, available)
+			tool, err := newDispatchTool(caller, flags{}, agent.Budget{}, dispatchFanout{maxConcurrent: 1}, nil, available, nil)
 			if err != nil {
 				t.Fatalf("newDispatchTool: %v", err)
 			}
@@ -548,7 +548,7 @@ func (c *retrieveCallingCaller) Chat(_ context.Context, req provider.ChatRequest
 
 func TestNewDispatchTool_ChildInvokesTheSharedRetrieveInstance(t *testing.T) {
 	sentinel := &sentinelRetrieve{}
-	tool, err := newDispatchTool(&retrieveCallingCaller{}, flags{}, agent.Budget{}, dispatchFanout{maxConcurrent: 1}, nil, append(validDispatchAvailable(t), sentinel))
+	tool, err := newDispatchTool(&retrieveCallingCaller{}, flags{}, agent.Budget{}, dispatchFanout{maxConcurrent: 1}, nil, append(validDispatchAvailable(t), sentinel), nil)
 	if err != nil {
 		t.Fatalf("newDispatchTool: %v", err)
 	}
@@ -610,7 +610,7 @@ func TestNewDispatchTool_ChildrenRunSequentially(t *testing.T) {
 	for _, task := range tasks {
 		caller.gates[task] = make(chan struct{})
 	}
-	tool, err := newDispatchTool(caller, flags{}, agent.Budget{}, dispatchFanout{maxConcurrent: 1}, nil, validDispatchAvailable(t))
+	tool, err := newDispatchTool(caller, flags{}, agent.Budget{}, dispatchFanout{maxConcurrent: 1}, nil, validDispatchAvailable(t), nil)
 	if err != nil {
 		t.Fatalf("newDispatchTool: %v", err)
 	}
@@ -686,6 +686,7 @@ func TestNewDispatchTool_ChildrenUseGovernedFanout(t *testing.T) {
 			},
 		}, nil,
 		validDispatchAvailable(t),
+		nil,
 	)
 	if err != nil {
 		t.Fatalf("newDispatchTool: %v", err)
@@ -777,6 +778,7 @@ func TestNewDispatchTool_OutOfOrderCompletionNoticeNamesTask(t *testing.T) {
 	tool, err := newDispatchTool(
 		caller, flags{}, agent.Budget{}, dispatchFanout{maxConcurrent: 2},
 		func(line string) { notices <- line }, validDispatchAvailable(t),
+		nil,
 	)
 	if err != nil {
 		t.Fatalf("newDispatchTool: %v", err)
@@ -827,6 +829,7 @@ func TestNewDispatchTool_CompletionNoticeUsesReboundSink(t *testing.T) {
 		&specRecordingCaller{}, flags{}, agent.Budget{},
 		dispatchFanout{maxConcurrent: 1}, notifier.notify,
 		validDispatchAvailable(t),
+		nil,
 	)
 	if err != nil {
 		t.Fatalf("newDispatchTool: %v", err)
