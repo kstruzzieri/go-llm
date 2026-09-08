@@ -83,10 +83,16 @@ func scanAuditWorkspace(ctx context.Context, root string, store *checkpointStore
 			return auditStoreReadFailure(store.dbPath, err)
 		}
 	}
+	// Pagination and reference lookups require unique identities even when the
+	// stored schema no longer enforces the producer's primary/unique constraints.
 	var invalid bool
-	err := store.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM mutation_receipts WHERE sequence<=0 OR mutation_id IS NULL OR intent_json IS NULL)
- OR EXISTS(SELECT 1 FROM checkpoints WHERE state IS NULL OR state NOT IN ('open','completed','undoing'))
- OR EXISTS(SELECT 1 FROM checkpoint_files f LEFT JOIN checkpoints c ON c.id=f.checkpoint_id WHERE f.id<=0 OR c.id IS NULL OR f.existed IS NULL OR f.existed NOT IN (0,1) OR f.applied IS NULL OR f.applied NOT IN (0,1) OR f.restored IS NULL OR f.restored NOT IN (0,1) OR (f.restored=1 AND f.applied=0) OR (f.after_mode IS NOT NULL AND (typeof(f.after_mode)!='integer' OR f.after_mode<0 OR f.after_mode>511)))`).Scan(&invalid)
+	err := store.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM mutation_receipts WHERE typeof(sequence)!='integer' OR sequence<=0 OR typeof(mutation_id)!='text' OR intent_json IS NULL)
+ OR EXISTS(SELECT 1 FROM mutation_receipts GROUP BY sequence HAVING COUNT(*)>1)
+ OR EXISTS(SELECT 1 FROM mutation_receipts GROUP BY mutation_id HAVING COUNT(*)>1)
+ OR EXISTS(SELECT 1 FROM checkpoints WHERE typeof(id)!='integer' OR id<=0 OR state IS NULL OR state NOT IN ('open','completed','undoing'))
+ OR EXISTS(SELECT 1 FROM checkpoints GROUP BY id HAVING COUNT(*)>1)
+ OR EXISTS(SELECT 1 FROM checkpoint_files GROUP BY id HAVING COUNT(*)>1)
+ OR EXISTS(SELECT 1 FROM checkpoint_files f LEFT JOIN checkpoints c ON c.id=f.checkpoint_id WHERE typeof(f.id)!='integer' OR f.id<=0 OR c.id IS NULL OR f.existed IS NULL OR f.existed NOT IN (0,1) OR f.applied IS NULL OR f.applied NOT IN (0,1) OR f.restored IS NULL OR f.restored NOT IN (0,1) OR (f.restored=1 AND f.applied=0) OR (f.after_mode IS NOT NULL AND (typeof(f.after_mode)!='integer' OR f.after_mode<0 OR f.after_mode>511)))`).Scan(&invalid)
 	if err != nil {
 		return auditStoreReadFailure(store.dbPath, err)
 	}

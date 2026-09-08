@@ -18,3 +18,5 @@
   multiple import locations.
 - Stream live workspace hashes with bounded memory while preserving both stable
   observations, complete file modes, and existing path protections.
+- Validate workspace pagination and lookup identities before scanning, rejecting
+  duplicate or invalid keys even when database constraints are missing.

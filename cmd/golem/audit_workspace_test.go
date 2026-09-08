@@ -265,6 +265,61 @@ func TestAuditWorkspaceSchema(t *testing.T) {
 	}
 }
 
+func TestAuditWorkspaceIdentityKeys(t *testing.T) {
+	for _, key := range []struct{ table, column string }{
+		{"mutation_receipts", "sequence"},
+		{"checkpoint_files", "id"},
+		{"checkpoints", "id"},
+		{"mutation_receipts", "mutation_id"},
+	} {
+		for _, kind := range []string{"valid", "duplicate", "null", "wrong type"} {
+			t.Run(key.table+"/"+key.column+"/"+kind, func(t *testing.T) {
+				f := newAuditWorkspaceFixture(t)
+				for i := 0; i < 2; i++ {
+					b := f.body("a.txt", auditHashEmpty, auditHashABC)
+					f.add(b, true)
+					f.checkpoint(b, nil, false, nil)
+				}
+				f.write("a.txt", "abc")
+				checkpointSQL(t, f.store.db, `INSERT INTO checkpoints(id,created_at,goal,state) VALUES(2,'2026-09-06T12:00:00Z','','completed')`)
+				// Exercise value validation independently of producer constraints.
+				checkpointSQL(t, f.store.db, `PRAGMA foreign_keys=OFF`)
+				checkpointSQL(t, f.store.db, "CREATE TABLE audit_key_rows AS SELECT * FROM "+key.table)
+				checkpointSQL(t, f.store.db, "DROP TABLE "+key.table)
+				checkpointSQL(t, f.store.db, "ALTER TABLE audit_key_rows RENAME TO "+key.table)
+				var value any
+				switch kind {
+				case "valid":
+					value = int64(1000) // Sparse integer identities remain valid.
+					if key.column == "mutation_id" {
+						assertAuditWorkspace(t, f.audit(), "valid", 2, 1, "")
+						return
+					}
+				case "duplicate":
+					if err := f.store.db.QueryRow("SELECT " + key.column + " FROM " + key.table + " WHERE rowid=1").Scan(&value); err != nil {
+						t.Fatal(err)
+					}
+				case "wrong type":
+					value = 1.5
+					if key.column == "mutation_id" {
+						value = []byte("invalid-id")
+					}
+				}
+				checkpointSQL(t, f.store.db, "UPDATE "+key.table+" SET "+key.column+"=? WHERE rowid=2", value)
+				if kind == "valid" {
+					assertAuditWorkspace(t, f.audit(), "valid", 2, 1, "")
+					return
+				}
+				got := f.audit()
+				assertAuditWorkspace(t, got, "violation", 0, 0, "workspace-schema")
+				if !got.earlyStop {
+					t.Fatal("invalid identity did not stop the scan")
+				}
+			})
+		}
+	}
+}
+
 func TestAuditWorkspaceAuthentication(t *testing.T) {
 	for _, tc := range []struct {
 		name, want string
