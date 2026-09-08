@@ -92,6 +92,82 @@ func (s *threadState) summary() string {
 	return s.conversation.DurableSummary.Content
 }
 
+// CompactThread summarizes stored history to the existing retention floor and
+// atomically saves an actual change. An active turn or compaction on threadID
+// returns ErrRunConflict; disabled compression returns ErrCompressionUnavailable.
+// The caller context and Close cancel work. Save returning nil determines
+// success, even if cancellation races afterward. On an error after loading,
+// the report retains the before estimate with Changed false; before loading it
+// is zero. An unchanged result may still incur a model request to consolidate
+// an existing summary. With compression enabled, a well-formed missing thread ID
+// returns a zero, unchanged report and nil error without inserting a conversation.
+func (r *Runtime) CompactThread(ctx context.Context, threadID string) (CompactionReport, error) {
+	var report CompactionReport
+	if threadID == "" || len(threadID) > maxCorrelationIDBytes {
+		return report, fmt.Errorf("%w: thread ID must contain 1 to %d bytes", ErrInvalidRequest, maxCorrelationIDBytes)
+	}
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	r.mu.Lock()
+	if r.closed {
+		r.mu.Unlock()
+		return report, ErrClosed
+	}
+	if !r.compress || r.summarizer == nil {
+		r.mu.Unlock()
+		return report, ErrCompressionUnavailable
+	}
+	if _, busy := r.activeThreads[threadID]; busy {
+		r.mu.Unlock()
+		return report, fmt.Errorf("%w: thread %q is active", ErrRunConflict, threadID)
+	}
+	r.activeThreads[threadID] = &activeRun{cancel: cancel}
+	r.wg.Add(1)
+	r.mu.Unlock()
+	defer func() {
+		r.mu.Lock()
+		delete(r.activeThreads, threadID)
+		r.mu.Unlock()
+		r.wg.Done()
+	}()
+	if err := ctx.Err(); err != nil {
+		return report, fmt.Errorf("golem: compact thread %q: %w", threadID, err)
+	}
+	state, err := r.loadThread(ctx, threadID)
+	if err != nil {
+		return report, err
+	}
+	report.TokensBefore = estimateStoredHistory(state.conversation)
+	report.TokensAfter = report.TokensBefore
+	if err := ctx.Err(); err != nil {
+		return report, fmt.Errorf("golem: compact thread %q: %w", threadID, err)
+	}
+	candidate, changed, err := r.compressConversation(ctx, state.conversation, true)
+	if err != nil {
+		return report, fmt.Errorf("golem: compact thread %q: %w", threadID, err)
+	}
+	if err := ctx.Err(); err != nil {
+		return report, fmt.Errorf("golem: compact thread %q: %w", threadID, err)
+	}
+	if !changed {
+		return report, nil
+	}
+	store, err := r.threadStore(ctx)
+	if err != nil {
+		return report, err
+	}
+	if err := ctx.Err(); err != nil {
+		return report, fmt.Errorf("golem: compact thread %q: %w", threadID, err)
+	}
+	if err := store.store.Save(ctx, candidate); err != nil {
+		return report, fmt.Errorf("%w: compact thread %q: %w", ErrSessionPersistence, threadID, err)
+	}
+	r.secureThreadStore(store)
+	report.TokensAfter = estimateStoredHistory(candidate)
+	report.Changed = true
+	return report, nil
+}
+
 func (r *Runtime) saveThread(ctx context.Context, active *activeRun, state *threadState, userMessage string, result agent.Result) error {
 	messages, err := resultMessages(userMessage, result)
 	if err != nil {
@@ -122,7 +198,7 @@ func (r *Runtime) saveThread(ctx context.Context, active *activeRun, state *thre
 	if !r.compress {
 		return nil
 	}
-	compacted, changed, err := r.compressConversation(ctx, candidate)
+	compacted, changed, err := r.compressConversation(ctx, candidate, false)
 	if err != nil {
 		r.reportCompressionWarning(candidate.ID, err)
 		return nil
@@ -158,30 +234,61 @@ func (r *Runtime) reportCompressionWarning(threadID string, err error) {
 	r.reportWarning(fmt.Errorf("golem: compress thread %q: %w", threadID, err))
 }
 
-func (r *Runtime) compressConversation(ctx context.Context, current conversation.Conversation) (conversation.Conversation, bool, error) {
+func (r *Runtime) compressConversation(ctx context.Context, current conversation.Conversation, force bool) (conversation.Conversation, bool, error) {
 	estimate := conversation.CharRatioEstimator(4.0)
 	maxHistoryTokens := r.budget.InputCeiling
 	if maxHistoryTokens <= 0 {
 		maxHistoryTokens = agent.DefaultInputCeiling
 	}
 	maxHistoryTokens /= 2
-	historyCost := estimate(agent.DurableSummaryPrompt(currentSummary(current))) +
-		conversation.EstimateMessagesTokens(current.Messages, estimate)
-	if historyCost <= maxHistoryTokens {
+	if !force && estimateStoredHistory(current) <= maxHistoryTokens {
 		return current, false, nil
 	}
-	maxRawTokens := maxHistoryTokens - agent.DefaultSummaryOutputReserve
-	if maxRawTokens < 0 {
-		maxRawTokens = 0
-	}
-	compacted, err := conversation.CompressMessages(ctx, current, maxRawTokens, 4, estimate, r.summarizer)
-	if err != nil {
-		return conversation.Conversation{}, false, err
+	// The model's output allowance excludes the rendered envelope and quoting.
+	// Reserve the envelope up front and account for actual output below, since
+	// escaping (or a custom summarizer) can exceed the anticipated content cost.
+	reserve := max(agent.DefaultSummaryOutputReserve+estimate(agent.DurableSummaryPrompt("")),
+		estimate(agent.DurableSummaryPrompt(strings.TrimSpace(currentSummary(current)))))
+	input, summarize := current, r.summarizer
+	var compacted conversation.Conversation
+	for {
+		maxRawTokens := max(0, maxHistoryTokens-reserve)
+		if force {
+			maxRawTokens = 0
+		}
+		var err error
+		compacted, err = conversation.CompressMessages(ctx, input, maxRawTokens, 4, estimate, summarize)
+		if err != nil {
+			return conversation.Conversation{}, false, err
+		}
+		if force || maxRawTokens == 0 || estimateStoredHistory(compacted) <= maxHistoryTokens || len(compacted.Messages) >= len(input.Messages) {
+			break
+		}
+		// Each retry must evict more history; the retention floor can still
+		// exceed the budget. Fold additional messages into the new summary,
+		// but do not pay for another rewrite when the floor keeps everything.
+		input = compacted
+		reserve = max(reserve, estimate(agent.DurableSummaryPrompt(currentSummary(compacted))))
+		summarize = func(ctx context.Context, prior string, old []conversation.Message) (string, error) {
+			if len(old) == 0 {
+				return prior, nil
+			}
+			return r.summarizer(ctx, prior, old)
+		}
 	}
 	changed := len(compacted.Messages) != len(current.Messages) ||
 		currentSummary(compacted) != currentSummary(current) ||
 		summaryMessageCount(compacted) != summaryMessageCount(current)
 	return compacted, changed, nil
+}
+
+func estimateStoredHistory(current conversation.Conversation) int {
+	estimate := conversation.CharRatioEstimator(4)
+	tokens := conversation.EstimateMessagesTokens(current.Messages, estimate)
+	if summary := strings.TrimSpace(currentSummary(current)); summary != "" {
+		tokens += estimate(agent.DurableSummaryPrompt(summary))
+	}
+	return tokens
 }
 
 func currentSummary(current conversation.Conversation) string {
