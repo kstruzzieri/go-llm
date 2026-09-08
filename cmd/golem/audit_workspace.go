@@ -319,7 +319,7 @@ func readWorkspaceFileStable(root, path string, afterObservation func()) (fileSt
 		if afterObservation != nil {
 			defer afterObservation()
 		}
-		content, mode, err := ws.ReadFileWithModeForUndo(path)
+		hash, mode, err := ws.HashFileWithMode(path)
 		if errors.Is(err, os.ErrNotExist) {
 			return fileState{absent: true}, nil
 		}
@@ -345,7 +345,7 @@ func readWorkspaceFileStable(root, path string, afterObservation func()) (fileSt
 			}
 			return fileState{}, err
 		}
-		return fileState{hash: agenttools.ContentHash(content), mode: mode, modeKnown: true}, nil
+		return fileState{hash: hash, mode: mode, modeKnown: true}, nil
 	}
 	first, err := observe()
 	if err != nil {

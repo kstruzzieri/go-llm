@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	agenttools "github.com/kstruzzieri/go-llm/agent/tools"
@@ -17,6 +18,28 @@ import (
 const auditHashABC = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
 const auditHashEmpty = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
 const auditHashNew = "11507a0e2f5e69d5dfa40a62a1bd7b6ee57e6bcd85c67c9b8431b36fff21c437"
+
+func BenchmarkReadWorkspaceFileStable(b *testing.B) {
+	for _, size := range []int{64 << 10, 1 << 20} {
+		b.Run(fmt.Sprintf("bytes-%d", size), func(b *testing.B) {
+			root := b.TempDir()
+			content := strings.Repeat("x", size)
+			if err := os.WriteFile(filepath.Join(root, "file"), []byte(content), 0o600); err != nil {
+				b.Fatal(err)
+			}
+			want := agenttools.ContentHash([]byte(content))
+			b.ReportAllocs()
+			b.SetBytes(int64(2 * size)) // Two independent content observations.
+			b.ResetTimer()
+			for b.Loop() {
+				state, err := readWorkspaceFileStable(root, "file", nil)
+				if err != nil || state.hash != want {
+					b.Fatalf("state=%+v err=%v", state, err)
+				}
+			}
+		})
+	}
+}
 
 type auditWorkspaceFixture struct {
 	t         *testing.T

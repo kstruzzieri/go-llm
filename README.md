@@ -506,6 +506,10 @@ separator (`:` on Unix, `;` on Windows) are rejected.
 
 With `all`, absent components are labeled `not-present`; an explicitly selected
 missing component is incomplete. A user-memory-only database is `not-configured`.
+A present, initialized empty ledger can pass with zero checks; this does not
+prove that historical evidence was never deleted. Missing or unknown trusted
+verifiers and unconfirmed mutations remain incomplete, so automation requiring
+verified coverage must require exit 0.
 The text report identifies scope, assurance, checked counts, and bounded reasons;
 it never includes record bodies, proof command output, signatures, or key bytes.
 There is no audit JSON mode. A component may stop at its first invalid record,

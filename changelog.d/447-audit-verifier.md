@@ -16,3 +16,5 @@
 - Exclude the workspace from Python module search when using an AgentFlow source
   checkout (Python 3.11+), and reject checkout paths that would expand into
   multiple import locations.
+- Stream live workspace hashes with bounded memory while preserving both stable
+  observations, complete file modes, and existing path protections.
