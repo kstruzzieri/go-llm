@@ -11,15 +11,22 @@ import (
 
 var errInvalidCanaryNonce = errors.New("interceptor: canary nonce must be 64 lowercase hexadecimal characters")
 
-// Canary aborts a run when its immutable session nonce appears outside the
-// authorized system instructions.
+// Canary is an immutable detector that emits abort findings when its nonce
+// appears in inspected text. The caller owns nonce minting, planting in the
+// system instructions, and rotation.
+//
+// It matches complete nonce substrings, including ASCII hexadecimal case
+// variants. Only tool arguments additionally receive JSON decoding of keys and
+// string values. Collected-output checks do not suppress streaming content that
+// has already been emitted.
 type Canary struct {
 	nonce string
 }
 
 var _ agent.Interceptor = Canary{}
 
-// NewCanary validates and freezes a 32-byte lowercase hexadecimal nonce.
+// NewCanary validates and freezes a nonce of exactly 64 lowercase ASCII
+// hexadecimal characters, representing 32 bytes.
 func NewCanary(nonce string) (Canary, error) {
 	if len(nonce) != 64 {
 		return Canary{}, errInvalidCanaryNonce
@@ -36,8 +43,8 @@ func NewCanary(nonce string) (Canary, error) {
 // Name returns "canary".
 func (Canary) Name() string { return "canary" }
 
-// InspectInput checks the summary, messages, and alternatives. System is the
-// nonce's authorized location and is deliberately skipped.
+// InspectInput checks the summary, message content, and alternative content.
+// System is the nonce's authorized location and is deliberately skipped.
 func (c Canary) InspectInput(_ context.Context, in agent.InputInspection) ([]agent.Finding, error) {
 	if c.nonce == "" {
 		return nil, errInvalidCanaryNonce
@@ -59,7 +66,8 @@ func (c Canary) InspectInput(_ context.Context, in agent.InputInspection) ([]age
 }
 
 // InspectOutput checks collected content, thinking, tool arguments, and tool
-// metadata before the response is recorded or dispatched.
+// call IDs, types, and function names before the response is recorded or
+// dispatched.
 func (c Canary) InspectOutput(_ context.Context, out agent.OutputInspection) ([]agent.Finding, error) {
 	if c.nonce == "" {
 		return nil, errInvalidCanaryNonce
@@ -86,7 +94,8 @@ func (c Canary) InspectOutput(_ context.Context, out agent.OutputInspection) ([]
 	return findings, nil
 }
 
-// InspectToolCall repeats raw and decoded argument checks before dispatch.
+// InspectToolCall repeats raw and JSON-decoded argument checks before dispatch.
+// It checks arguments only; InspectOutput checks tool call metadata.
 func (c Canary) InspectToolCall(_ context.Context, call agent.ToolCallInspection) ([]agent.Finding, error) {
 	if c.nonce == "" {
 		return nil, errInvalidCanaryNonce
