@@ -622,13 +622,14 @@ func (r *Router) SlotAdmissionSnapshot() []SlotAdmissionInfo {
 // Chat routes and executes a non-streaming chat request.
 func (r *Router) Chat(ctx context.Context, req ChatRequest) (*ChatResponse, error) {
 	rr := RoutingRequest{
-		Model:    req.Model,
-		Provider: req.Provider,
-		UseCase:  "chat",
-		Messages: req.Messages,
-		Options:  req.Options,
-		Tools:    req.Tools,
-		Priority: r.defaultOpts.defaultPriority,
+		Model:     req.Model,
+		Provider:  req.Provider,
+		UseCase:   "chat",
+		Messages:  req.Messages,
+		Options:   req.Options,
+		Tools:     req.Tools,
+		Priority:  r.defaultOpts.defaultPriority,
+		SessionID: req.SessionID,
 	}
 	if len(req.Tools) > 0 {
 		rr.RequiredCaps = CapChat | CapToolCall
@@ -646,13 +647,14 @@ func (r *Router) Chat(ctx context.Context, req ChatRequest) (*ChatResponse, erro
 // ChatStream routes and executes a streaming chat request.
 func (r *Router) ChatStream(ctx context.Context, req ChatRequest, fn func(ChatResponse) error) error {
 	rr := RoutingRequest{
-		Model:    req.Model,
-		Provider: req.Provider,
-		UseCase:  "chat",
-		Messages: req.Messages,
-		Options:  req.Options,
-		Tools:    req.Tools,
-		Priority: r.defaultOpts.defaultPriority,
+		Model:     req.Model,
+		Provider:  req.Provider,
+		UseCase:   "chat",
+		Messages:  req.Messages,
+		Options:   req.Options,
+		Tools:     req.Tools,
+		Priority:  r.defaultOpts.defaultPriority,
+		SessionID: req.SessionID,
 	}
 	if len(req.Tools) > 0 {
 		rr.RequiredCaps = CapChat | CapStream | CapToolCall

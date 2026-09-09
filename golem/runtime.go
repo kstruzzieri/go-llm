@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"strings"
 	"sync"
 
 	"github.com/kstruzzieri/go-llm/agent"
@@ -461,6 +462,10 @@ func (r *Runtime) Run(ctx context.Context, turn Turn, sink EventSink) (agent.Res
 		Budget:   r.budget,
 		Approver: turn.Approver,
 		Options:  snap.modelOptions.Clone(),
+		// The thread id is the conversation's stable identity, so every turn
+		// of one thread reaches the provider under one session id (#533).
+		// Stateless turns carry no thread id and so send no session header.
+		SessionID: turn.ThreadID,
 	}
 	if thread != nil {
 		request.History = thread.history()
@@ -599,6 +604,24 @@ func turnGoal(turn Turn) (string, error) {
 	return turn.Message + contextDelimiter + string(raw), nil
 }
 
+// indexControlByte returns the index of the first byte that may not appear in
+// an HTTP header field value — an ASCII control character other than
+// horizontal tab, or DEL (RFC 9110 §5.5) — or -1 when there is none.
+//
+// The thread id travels to providers as a header (x-opencode-session, #533).
+// Go's Transport refuses to send such a value, so without this check a bad id
+// would fail every turn of the thread with an opaque transport error rather
+// than a clear request-validation one. It is a validation rule, not a
+// security boundary: net/http already prevents header injection.
+func indexControlByte(s string) int {
+	for i := 0; i < len(s); i++ {
+		if c := s[i]; (c < 0x20 && c != '\t') || c == 0x7f {
+			return i
+		}
+	}
+	return -1
+}
+
 func (r *Runtime) validateTurn(turn Turn) error {
 	if turn.RunID == "" {
 		return fmt.Errorf("%w: run ID is required", ErrInvalidRequest)
@@ -608,6 +631,12 @@ func (r *Runtime) validateTurn(turn Turn) error {
 	}
 	if len(turn.ThreadID) > maxCorrelationIDBytes {
 		return fmt.Errorf("%w: thread ID exceeds %d bytes", ErrInvalidRequest, maxCorrelationIDBytes)
+	}
+	if i := indexControlByte(turn.ThreadID); i >= 0 {
+		return fmt.Errorf("%w: thread ID contains a control character at byte %d", ErrInvalidRequest, i)
+	}
+	if strings.Trim(turn.ThreadID, " \t") != turn.ThreadID {
+		return fmt.Errorf("%w: thread ID must not start or end with a space or tab", ErrInvalidRequest)
 	}
 	if turn.Message == "" {
 		return fmt.Errorf("%w: message is required", ErrInvalidRequest)

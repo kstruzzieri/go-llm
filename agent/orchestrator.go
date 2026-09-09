@@ -204,7 +204,10 @@ func (o *Orchestrator) run(ctx context.Context, req Request, obs Observer, ic *i
 
 		tokenLogged := false
 		modelStart := o.now()
-		modelResult, err := o.model.Chat(ctx, buildChatRequest(assembled, specs, req.Budget.OutputReserve, req.Options), func(c provider.ChatResponse) error {
+		chatReq := buildChatRequest(assembled, specs, req.Budget.OutputReserve, req.Options)
+		// Session identity belongs to the run, independent of transcript rebuilding.
+		chatReq.SessionID = req.SessionID
+		modelResult, err := o.model.Chat(ctx, chatReq, func(c provider.ChatResponse) error {
 			if c.Thinking != "" {
 				if to, ok := obs.(ThinkingObserver); ok {
 					if terr := to.OnThinking(ctx, ThinkingEvent{Step: step, Content: c.Thinking}); terr != nil {

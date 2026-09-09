@@ -70,6 +70,7 @@ func (m *routerModelCaller) Chat(ctx context.Context, req provider.ChatRequest,
 		Options:        req.Options,
 		ExpectedOutput: req.Options.NumPredict,
 		RequiredCaps:   ModelCallCapabilities(len(req.Tools) > 0),
+		SessionID:      req.SessionID,
 	}
 	if len(m.chain) > 0 {
 		rr.PreferredChain = append([]string(nil), m.chain...)
