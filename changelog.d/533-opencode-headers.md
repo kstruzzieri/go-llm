@@ -39,7 +39,20 @@ rather than in `cmd/golem` and `cmd/llm-bench` separately.
 
 #### Notes
 
-Sending the session header only when the field is non-empty leaves existing
-callers and non-opencode endpoints byte-identical on the wire. The
-`User-Agent` default changes for every openai-compat request, which is the
-intended fix: identifying as `Go-http-client/1.1` was the reported problem.
+Both headers change what every openai-compat request looks like, not only
+requests to opencode.
+
+`User-Agent` is the intended case: identifying as `Go-http-client/1.1` to any
+provider was the reported problem.
+
+`x-opencode-session` is emitted whenever `SessionID` is set, and the provider
+has no way to tell an opencode endpoint from llama.cpp, vLLM or LM Studio. A
+direct caller that leaves `SessionID` empty is unaffected, but golem always
+supplies a thread id, so golem runs now send this header to whichever
+openai-compat provider they route to. The value is a session id, not content:
+by default `workspace:<sha256 prefix>` (a hash, not a path), or `golem:<uuid>`
+for a fresh session. `-session <name>` makes it a user-chosen string, which
+then reaches any configured endpoint including remote ones. Servers ignore
+unknown headers, so this is a disclosure question rather than a compatibility
+one; gating emission per provider would need the provider identity plumbed
+into the client, which this change does not do.

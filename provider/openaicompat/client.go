@@ -74,17 +74,27 @@ const unknownVersion = "dev"
 func defaultUserAgent() string {
 	info, ok := debug.ReadBuildInfo()
 	if !ok {
-		return "go-llm/" + unknownVersion
+		return userAgentFromBuildInfo(nil)
 	}
+	return userAgentFromBuildInfo(info)
+}
+
+// userAgentFromBuildInfo holds the version-resolution decision as a pure
+// function so it can be tested against constructed build info; the real
+// debug.ReadBuildInfo describes the test binary and cannot exercise the
+// go-llm-as-dependency case. A nil info means the build carried none.
+func userAgentFromBuildInfo(info *debug.BuildInfo) string {
 	version := ""
-	for _, dep := range info.Deps {
-		if dep.Path == modulePath {
-			version = dep.Version
-			break
+	if info != nil {
+		for _, dep := range info.Deps {
+			if dep.Path == modulePath {
+				version = dep.Version
+				break
+			}
 		}
-	}
-	if version == "" && info.Main.Path == modulePath {
-		version = info.Main.Version
+		if version == "" && info.Main.Path == modulePath {
+			version = info.Main.Version
+		}
 	}
 	if version == "" || version == "(devel)" {
 		version = unknownVersion
