@@ -34,7 +34,7 @@ func TestSecretMachineRuntimeUsesFixedFailureBeforeEmission(t *testing.T) {
 			value := secretTestValue()
 			caller := secretPartialCaller{content: value, err: errors.New("provider diagnostic: " + value)}
 			sess := newTestSession(t, caller, root)
-			sess.orch = newOrchestratorFactory(caller, flags{interceptors: true}, nil)()
+			sess.orch = newOrchestratorFactory(caller, flags{interceptors: true}, nil, testCanaryBinding(t))()
 			sess.runtime = newTestRuntime(t, root, sess.baseSystem, sess.orch, nil)
 			var stdout, stderr strings.Builder
 			sess.machine = newMachineWriter(&stdout, tc.format)

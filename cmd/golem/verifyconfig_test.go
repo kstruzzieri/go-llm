@@ -346,7 +346,7 @@ func TestOrchestratorFactoryWithoutVerifierDoesNotArmATypedNil(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	orch := newOrchestratorFactory(caller, flags{}, nil)()
+	orch := newOrchestratorFactory(caller, flags{}, nil, nil)()
 	res, err := orch.Run(context.Background(), agent.Request{
 		Goal:     "write",
 		Tools:    agenttools.NewMutatingTools(ws, nil),

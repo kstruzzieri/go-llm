@@ -2,6 +2,8 @@ package tools
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -637,4 +639,24 @@ func (w *Workspace) ReadFileWithModeForUndo(p string) ([]byte, fs.FileMode, erro
 		return nil, 0, err
 	}
 	return data, fi.Mode(), nil
+}
+
+// HashFileWithMode returns the ContentHash and complete mode of a regular file
+// from one protected open handle. It streams content with bounded memory and
+// applies the same containment and symlink checks as ReadFileWithModeForUndo.
+func (w *Workspace) HashFileWithMode(p string) (string, fs.FileMode, error) {
+	f, err := w.openRegularFile(p)
+	if err != nil {
+		return "", 0, err
+	}
+	defer func() { _ = f.Close() }()
+	fi, err := f.Stat()
+	if err != nil {
+		return "", 0, err
+	}
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", 0, err
+	}
+	return hex.EncodeToString(h.Sum(nil)), fi.Mode(), nil
 }

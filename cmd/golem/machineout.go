@@ -23,9 +23,9 @@ var terminalEventTypes = map[string]struct{}{
 // stream-json writes every event to stdout the moment it arrives — no
 // buffering, so a consumer sees live progress and a broken pipe cancels the
 // run immediately instead of after grounding. json writes no events at all.
-// Both modes CAPTURE the terminal event: the golem.result.v1 record (spec 7.2)
-// reads its status, stopReason/model, and failure code/message from that
-// capture, so the record and the stream can never disagree.
+// Both modes capture the terminal event for the golem.result.v1 record. A
+// later canary abort can override the final result, as buildResult describes;
+// the already-emitted event stream remains unchanged.
 //
 // Protocol events are never modified: the 128 KiB envelope cap
 // (golem/event.go) makes a decorated terminal event invalid protocol-v1, so
@@ -132,9 +132,10 @@ type headlessResult struct {
 }
 
 // buildResult assembles the record from the run outcome plus the captured
-// terminal event. The terminal event is the single source of truth for
-// status, stopReason, model, and the failure code/message, so the record can
-// never disagree with the protocol stream a stream-json consumer just read.
+// terminal event. A canary abort discovered after that event overrides the
+// final invocation result, without rewriting the event stream. Runtime
+// cancellation still takes precedence; other post-run errors retain the
+// captured terminal result.
 func (w *machineWriter) buildResult(res agent.Result, runErr error) headlessResult {
 	rec := headlessResult{Schema: resultSchema, Status: "error"}
 	if w == nil {
@@ -148,6 +149,11 @@ func (w *machineWriter) buildResult(res agent.Result, runErr error) headlessResu
 			msg = runFailureMessage("", runErr)
 		}
 		rec.Error = &headlessResultError{Code: resultCodeInvalidRequest, Message: msg}
+		rec.Grounding = nil
+		return rec
+	}
+	if terminal.Type != "run.canceled" && canaryAborted(runErr) {
+		rec.Error = &headlessResultError{Code: "internal", Message: runFailureMessage("", runErr)}
 		rec.Grounding = nil
 		return rec
 	}

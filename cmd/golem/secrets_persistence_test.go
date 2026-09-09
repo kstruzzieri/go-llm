@@ -81,7 +81,7 @@ func TestSecretTraceAndDiagnosticsSuppressJoinedProviderError(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			caller := secretPartialCaller{content: content, err: errors.Join(providerErr, cancelErr)}
 			sess, traceDir := newTracingSession(t, caller)
-			sess.orch = newOrchestratorFactory(caller, flags{interceptors: true}, nil)()
+			sess.orch = newOrchestratorFactory(caller, flags{interceptors: true}, nil, testCanaryBinding(t))()
 			sess.runtime = newTestRuntime(t, t.TempDir(), sess.baseSystem, sess.orch, nil)
 			var out strings.Builder
 			res, err := runOnce(context.Background(), &out, nil, sess, "review the output", nil)
@@ -175,7 +175,7 @@ func TestSecretRuntimeSideErrorsPreserveClassification(t *testing.T) {
 					ctx, cancel := context.WithCancel(context.Background())
 					defer cancel()
 					sess, traceDir := newTracingSession(t, tc.caller)
-					sess.orch = newOrchestratorFactory(tc.caller, flags{interceptors: true}, nil)()
+					sess.orch = newOrchestratorFactory(tc.caller, flags{interceptors: true}, nil, testCanaryBinding(t))()
 					runtime, err := golemruntime.New(ctx, golemruntime.Options{
 						Root: t.TempDir(), System: sess.baseSystem, Orchestrator: sess.orch,
 						FailureMessage: func(code string, cause error) string {
@@ -294,7 +294,7 @@ func TestSecretCheckpointSealDiagnosticUsesCompleteErrorTree(t *testing.T) {
 	root := t.TempDir()
 	sess, j := newCheckpointWriteSession(t, caller, root)
 	journal = j
-	sess.orch = newOrchestratorFactory(caller, flags{interceptors: true}, nil)()
+	sess.orch = newOrchestratorFactory(caller, flags{interceptors: true}, nil, testCanaryBinding(t))()
 	sess.runtime = newTestRuntime(t, root, sess.baseSystem, sess.orch, sess.tools)
 	var out strings.Builder
 	_, err := runOnce(context.Background(), &out, nil, sess, "review output", nil)
@@ -329,7 +329,7 @@ func TestSecretInitialBlockLeavesSessionAndCheckpointEmpty(t *testing.T) {
 	sess := newSessionedTestSession(t, caller, root, "workspace:initial-block")
 	writeSess, journal := newCheckpointWriteSession(t, caller, root)
 	sess.journal, sess.tools = journal, writeSess.tools
-	sess.orch = newOrchestratorFactory(caller, flags{interceptors: true}, nil)()
+	sess.orch = newOrchestratorFactory(caller, flags{interceptors: true}, nil, testCanaryBinding(t))()
 	sess.runtime = newTestRuntime(t, root, sess.baseSystem, sess.orch, sess.tools)
 	goal := secretTestValue()
 	var out strings.Builder
@@ -364,7 +364,7 @@ func TestSecretLateOutputBlockSealsEarlierCheckpointForUndo(t *testing.T) {
 		{Response: provider.ChatResponse{Content: secretTestValue()}},
 	}}
 	sess, journal := newCheckpointWriteSession(t, caller, root)
-	sess.orch = newOrchestratorFactory(caller, flags{interceptors: true}, nil)()
+	sess.orch = newOrchestratorFactory(caller, flags{interceptors: true}, nil, testCanaryBinding(t))()
 	sess.runtime = newTestRuntime(t, root, sess.baseSystem, sess.orch, sess.tools)
 	var out strings.Builder
 	_, err := runOnce(context.Background(), &out, nil, sess, "write allowed.txt", &stubAnswerSource{line: "y", ok: true})
@@ -389,7 +389,7 @@ func TestSecretLateOutputBlockSealsEarlierCheckpointForUndo(t *testing.T) {
 func TestSecretPreInspectionFailureRetainsHistoryAndTrace(t *testing.T) {
 	caller := &scriptCaller{}
 	sess, traceDir := newTracingSession(t, caller)
-	sess.orch = newOrchestratorFactory(caller, flags{interceptors: true}, nil)()
+	sess.orch = newOrchestratorFactory(caller, flags{interceptors: true}, nil, testCanaryBinding(t))()
 	sess.runtime = newTestRuntime(t, t.TempDir(), sess.baseSystem, sess.orch, nil)
 	// The test runtime's 64 KiB message limit rejects this before inspection.
 	// Such unclassified failures deliberately retain their previous behavior.
@@ -429,7 +429,7 @@ func TestSecretTelemetryCountsRuntimeFindings(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			root, data := t.TempDir(), t.TempDir()
 			sess := newTestSession(t, tc.caller, root)
-			sess.orch = newOrchestratorFactory(tc.caller, flags{interceptors: true}, nil)()
+			sess.orch = newOrchestratorFactory(tc.caller, flags{interceptors: true}, nil, testCanaryBinding(t))()
 			sess.runtime = newTestRuntime(t, root, sess.baseSystem, sess.orch, []agent.Tool{foreignTool{content: value}})
 			obs, err := newObserv(func(key string) string {
 				if key == "XDG_DATA_HOME" {

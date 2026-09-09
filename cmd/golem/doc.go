@@ -46,6 +46,38 @@
 // caller-owned blocked agent.Result may still contain its original goal.
 // -interceptors remains off by default.
 //
+// With -interceptors, Golem also plants an unpredictable canary in its system
+// instructions for each live conversation activation. The canary survives
+// ordinary turns, /clear, compaction and prompt recomposition, and is replaced
+// at startup and after each successful /new or /resume. A complete canary match,
+// with ASCII A-F case ignored, aborts the turn when found in collected content,
+// thinking, tool-call metadata or arguments, or the non-system input projection.
+// A tainted model response aborts before any tool in that response is dispatched;
+// actions completed earlier in the turn are not rolled back. A tool-result match
+// is detected after that tool ran but before its result is accepted into model
+// context. Because inspection follows stream emission, tokens or thinking already
+// displayed, including stream-JSON deltas, cannot be retracted; this is detection,
+// not prevention of live disclosure. A canary discovered only while sealing can
+// override the final invocation result without rewriting an already emitted
+// Runtime terminal event.
+//
+// When a canary abort reaches the managed top-level turn, Golem burns that
+// activation and must mint and publish a replacement before another goal can
+// reach Runtime. Renewal failure stays fail-closed with "canary unavailable:
+// renewal required"; /clear and ordinary refreshes cannot revive the burned
+// value. Content-full traces are skipped for detected canary aborts. Other
+// canary-enabled traces omit only the planted fragment from their application-
+// prompt system metadata. This projection does not redact arbitrary provider
+// errors, unrelated interceptor metadata or other external logging.
+//
+// Dispatch children inherit the active detector, but their independent system
+// prompts are not planted. Delegate, AgentFlow planner, summarizer and grounding
+// prompts are likewise outside the planting guarantee, and a nested run's error
+// gains no new parent-abort or parent-renewal semantics. Matching covers only the
+// complete marker, including its ASCII case variants and JSON escape decoding
+// in tool arguments; other transformations or encodings, split values, Unicode
+// normalization and cross-message reconstruction are outside this detector.
+//
 // The same chain carries the #439 guards, so they are opt-in with it.
 // Argument invariants block a tool call before it is planned or prompted:
 // write_file, edit_file and promote_artifact under a .git, .ssh, .gnupg,

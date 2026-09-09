@@ -14,8 +14,10 @@ package agentflow
 import (
 	"bytes"
 	"context"
+	"errors"
 	"os"
 	"os/exec"
+	"strings"
 	"time"
 )
 
@@ -27,14 +29,15 @@ type Runner interface {
 }
 
 // ExecRunner runs the real agentflow CLI. Two modes: the installed `agentflow`
-// binary, or `python3 -m agentflow` with PYTHONPATH pointed at a checkout (for
+// binary, or `python3 -P -m agentflow` with PYTHONPATH pointed at a checkout (for
 // environments where the console script is not installed). argv is always built
 // explicitly; no shell string is ever parsed.
 type ExecRunner struct {
-	bin    string
-	prefix []string // e.g. {"-m","agentflow"} for src mode
-	dir    string   // Cmd.Dir = workspace root
-	env    []string // extra environment, e.g. PYTHONPATH=<checkout>/src
+	bin     string
+	prefix  []string // e.g. {"-P","-m","agentflow"} for src mode
+	dir     string   // Cmd.Dir = workspace root
+	env     []string // extra environment, e.g. PYTHONPATH=<checkout>/src
+	initErr error
 }
 
 // NewExecRunner runs the installed `agentflow` binary with Cmd.Dir = dir.
@@ -42,14 +45,27 @@ func NewExecRunner(dir string) *ExecRunner {
 	return &ExecRunner{bin: "agentflow", dir: dir}
 }
 
-// NewSrcExecRunner runs `python3 -m agentflow` with PYTHONPATH=<checkout>/src.
+// NewSrcExecRunner runs `python3 -P -m agentflow` with PYTHONPATH=<checkout>/src.
+// It requires Python 3.11+ and excludes the workspace from implicit module search.
+// Run rejects checkout paths containing a path-list separator before launching.
 func NewSrcExecRunner(dir, checkout string) *ExecRunner {
-	return &ExecRunner{
+	r := &ExecRunner{
 		bin:    "python3",
-		prefix: []string{"-m", "agentflow"},
+		prefix: []string{"-P", "-m", "agentflow"},
 		dir:    dir,
 		env:    []string{"PYTHONPATH=" + checkout + "/src"},
 	}
+	if strings.ContainsRune(checkout, os.PathListSeparator) {
+		r.initErr = errors.New("agentflow source checkout contains a path-list separator")
+	}
+	return r
+}
+
+// DisablePythonBytecodeWrites keeps Python-backed verification from writing import
+// caches into a read-only caller's workspace. It changes only this runner's
+// child environment.
+func (r *ExecRunner) DisablePythonBytecodeWrites() {
+	r.env = append(r.env, "PYTHONDONTWRITEBYTECODE=1")
 }
 
 // commandFor returns the concrete (bin, argv, extraEnv) for a subcommand call.
@@ -60,6 +76,9 @@ func (r *ExecRunner) commandFor(args []string) (bin string, argv []string, env [
 }
 
 func (r *ExecRunner) Run(ctx context.Context, args []string, stdin []byte) ([]byte, []byte, int, error) {
+	if r.initErr != nil {
+		return nil, nil, 0, r.initErr
+	}
 	bin, argv, extraEnv := r.commandFor(args)
 	cmd := exec.CommandContext(ctx, bin, argv...)
 	configureProcessCancellation(cmd)
