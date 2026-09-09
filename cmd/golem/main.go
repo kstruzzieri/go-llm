@@ -156,7 +156,7 @@ func parseFlags(args []string) (flags, error) {
 	fs.IntVar(&f.planWorkers, "plan-workers", 1, "AgentFlow task mode: maximum workers for the initial parallel plan cohort (positive; requires -plan)")
 	fs.BoolVar(&f.approveEdits, "approve-plan-edits", false, "required in task mode: auto-approve step-scoped write/edit (still bounded by the step-scope and .agent guards)")
 	fs.BoolVar(&f.approveGates, "approve-plan-gates", false, "required in task mode: auto-run plan-declared validation gates")
-	fs.StringVar(&f.agentflowSrc, "agentflow-src", "", "run 'python3 -m agentflow' with PYTHONPATH=<checkout>/src instead of the agentflow binary")
+	fs.StringVar(&f.agentflowSrc, "agentflow-src", "", "run 'python3 -P -m agentflow' with PYTHONPATH=<checkout>/src instead of the agentflow binary (Python 3.11+)")
 	fs.BoolVar(&f.agentflowStatus, "agentflow-status", false, "inspect the current Agentflow next action without mutation")
 	fs.BoolVar(&f.agentflowResume, "agentflow-resume", false, "resume an existing Agentflow run serially; requires -plan and both plan approvals")
 	fs.BoolVar(&f.jsonOutput, "json", false, "with -agentflow-status, relay Agentflow next-action JSON verbatim")
@@ -695,6 +695,9 @@ func main() {
 		if errors.As(err, &statusErr) {
 			os.Exit(statusErr.ExitCode())
 		}
+		if code, ok := auditExitCode(err); ok {
+			os.Exit(code)
+		}
 		// runIndex/runOneShot already rendered their own output; just exit non-zero.
 		if errors.Is(err, errIndexFailed) || errors.Is(err, errOneShotFailed) || errors.Is(err, errAgentflowTaskFailed) || errors.Is(err, errSourceFailed) {
 			os.Exit(exitCodeFor(err))
@@ -765,6 +768,8 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 	}
 	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
 		switch args[0] {
+		case "audit":
+			return runAudit(context.Background(), args[1:], stdout, stderr)
 		case "index":
 			return runIndex(context.Background(), args[1:], stdout, stderr)
 		case "models":
@@ -772,7 +777,7 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 		case "source":
 			return runSource(context.Background(), args[1:], stdin, stdout, stderr)
 		default:
-			return fmt.Errorf("unknown command %q (did you mean \"index\", \"models\", or \"source\"?)", args[0])
+			return fmt.Errorf("unknown command %q (did you mean \"audit\", \"index\", \"models\", or \"source\"?)", args[0])
 		}
 	}
 
