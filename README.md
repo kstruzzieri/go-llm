@@ -264,7 +264,7 @@ Run Golem against a workspace:
 golem -root /path/to/project
 ```
 
-Golem starts in a read-only mode by default. It can inspect files, search the workspace, route through the configured `agent` model chain, load project instructions from `AGENTS.md`, and keep a persistent per-workspace session.
+Golem starts in a read-only mode by default. It can inspect files, search the workspace, route through the configured `agent` model chain, and keep a persistent per-workspace session. Project guidance found in `AGENTS.md`-style files is excluded until you approve its current snapshot; see [Project-context trust](#project-context-trust).
 
 Golem builds and refreshes the workspace RAG index automatically in the background on startup; `retrieve` reports that it is warming until the index is ready. Manual control is still available:
 
@@ -379,7 +379,7 @@ golem -root /path/to/project -allow-write
 golem -root /path/to/project -allow-write -allow-exec
 ```
 
-Inside the REPL, `/help` lists every command: sessions (`/new`, `/clear`, `/resume`, `/sessions`, `/search-sessions`, `/checkpoints`, `/undo`, `/compact`), memory (`/remember`, `/memories`, `/records`, `/forget`), approvals (`/grants`, `/auto-edits`, and `/allow-write` / `/allow-exec` to enable the guarded tools mid-session without restarting), background jobs (`/jobs`), the repository snapshot (`/git-context refresh`), plus `/think`, `/model`, `/tools`, `/edit`, and `/exit`. Any other line is sent to the agent as the current goal.
+Inside the REPL, `/help` lists every command: sessions (`/new`, `/clear`, `/resume`, `/sessions`, `/search-sessions`, `/checkpoints`, `/undo`, `/compact`), memory (`/remember`, `/memories`, `/records`, `/forget`), approvals (`/trust`, `/grants`, `/auto-edits`, and `/allow-write` / `/allow-exec` to enable the guarded tools mid-session without restarting), background jobs (`/jobs`), the repository snapshot (`/git-context refresh`), plus `/think`, `/model`, `/tools`, `/edit`, and `/exit`. Any other line is sent to the agent as the current goal.
 
 `/compact` accepts no arguments and compacts the current session's persisted history. It keeps the newest four completed user/assistant exchanges, including their tool chains, along with system messages and any unresolved tool-call tail, and folds older messages into the existing progressive summary. The command reports stored-history token estimates for non-system messages, tool metadata, and the rendered summary; these estimates exclude the live prompt, tool schemas, and current turn. Every repeat with an existing summary can invoke the summarizer again, with model latency and provider charges even when the result is `(unchanged)`. A `(changed)` result can have a larger estimate, especially for short histories where the summary's trust-boundary wrapper outweighs the removed messages. The command is unavailable with `--no-session` or `--no-compress`. Cancellation or another failure before a successful save preserves the previous session snapshot; only a successful save replaces it.
 
@@ -575,9 +575,10 @@ re-captures and replaces the block atomically for the next turn, reporting
 `git context unchanged`; if the workspace stopped being a repository or `git`
 disappeared, the block is cleared and the reason reported (`git context
 cleared: not a repository` / `git unavailable`); a genuine capture error keeps
-the previous block (`git context refresh failed: ...`). Refresh adjusts the
-project-context budget using the startup `AGENTS.md` documents; restart Golem to
-reload edits to those documents. Git notices go to stderr, never to machine stdout.
+the previous Git block (`git context refresh failed: ...`). Project guidance is
+always rediscovered and revalidated during refresh: an unapproved, changed, or
+unavailable project snapshot is removed even when the prior Git snapshot is retained.
+Git notices go to stderr, never to machine stdout.
 
 Two security properties to keep in mind before granting. First, an exec grant pins the command's identity (argv, cwd, sanitized environment values, timeout, resolved executable path) but not the contents of files that command reads or runs: `a` on `go test ./...` or `bash build.sh` keeps auto-approving after the test files or the script change. Second, the two grants compose: with auto-edits on and a test/build command granted, the model can modify workspace files and run them without any further prompt. That is the intended edit-test loop for trusted work — when processing untrusted content (web pages, third-party repos, external MCP output), leave auto-edits off and prefer `y` over `a`, or `/grants clear` before continuing.
 
@@ -649,6 +650,24 @@ library callers must not persist it verbatim.
 
 With `-interceptors` on, two guards also run on every tool call. Argument invariants refuse a call before it is planned or prompted: `write_file`/`edit_file`/`promote_artifact` under a `.git`, `.ssh`, `.gnupg`, `.aws` or `.kube` component (a hook under `.git/hooks` is code execution at the next commit), `read_file` under the credential components or the exact basename `.env` (a direct-read tripwire, not confinement: `search`, `retrieve` and command output can still expose the same bytes), and a `sh -c`/`bash -c` script that pipes a `curl`/`wget` stdout fetch into a bare shell. Paths are matched after the host's own normalization plus a case fold, and the guard reads arguments the way the tool's decoder does, so `Path` is guarded like `path` and two equivalent spellings are blocked as ambiguous. The egress classifier labels every `run_command`/`start_command` by what its argv reaches and the approval prompt shows it on the risk line, including grant-covered auto-approvals: `interceptor risk 20 · egress: network (git push)`. Classes and weights are `privileged` 20 (sudo, doas, su), `network` 20 (curl, wget, ssh, rsync, git push/fetch/pull/clone, docker, kubectl, gh, cloud CLIs, or an inline script naming one), `package-manager` 10 (npm, pip, cargo, brew, go get/install/mod, python -m pip, ...), `interpreter` 0 (a shell or python/node/perl/ruby running a script), and `unknown` 10 for anything off the explicit quiet set (coreutils, make, go test, git status, formatters and linters), including any wrapper option or git/go subcommand the classifier does not model and any inline shell script it cannot read literally (expansions, `;`, `&&`, extra lines). These are shape checks on the argv, not a sandbox: `go build` may still download modules and `make` runs whatever the Makefile says; the badge exists so you can prefer `y` over `a` when a command reaches out. No score or badge revokes a grant. A hard line-count limit on edits is deferred; the existing 256 KiB write bounds remain.
 
+### Project-context trust
+
+Golem discovers selected global and workspace `AGENTS.md`-style documents but does not inject them until the operator approves their exact current set. Run `/trust` to inspect the manifest. It shows each source, canonical path, full byte size, full-file SHA-256, prompt retention state, and aggregate digest; it never prints document bodies. Approve only the displayed value:
+
+```text
+/trust sha256:<64 lowercase hex digits>
+```
+
+The aggregate digest covers the complete logical document set: source (`global` or `workspace`), selected source-relative filename, and each document's full content hash in discovery order. It is portable: identical selected guidance has the same displayed digest in another worktree or runner. The in-memory grant also binds the canonical workspace root and canonical source paths, so it cannot transfer to a different workspace or relocated global configuration file. A portable digest is consent for the current local snapshot, not shared or persistent approval. CI and other automated runners must control global Golem configuration as well as workspace files.
+
+A trust grant never enables tools, edits, commands, destinations, plan actions, or restored sessions. It is cleared by `/new`, `/clear`, successful `/resume`, `/grants clear`, and process exit. Changed content, source, path, order, document presence, a read/discovery failure, or an empty set also removes the grant and project block. Golem checks this before each operator goal and each AgentFlow authoring or task invocation; internal provider calls and workflow steps reuse that captured snapshot. `/git-context refresh` also validates project guidance. Use `-no-project-context` to disable discovery, hashing, approval, and injection; then `/trust` reports that project context is disabled.
+
+For a script, supply exact consent with `-trust-project-context sha256:<64 lowercase hex digits>`. The flag is optional: without it, an unapproved snapshot is skipped and the run continues without project guidance. In `-p`, `-goal`, and `-plan`, a supplied digest is a required precondition. A mismatch, no documents, unavailable snapshot, or loss of the approved local snapshot before invocation writes a diagnostic to stderr and exits 1 before provider, planner, or task execution. This is distinct from malformed flag syntax and combining the flag with `-no-project-context`, which remain usage errors. The startup flag is consumed once and does not reapprove a snapshot after a reset or later change.
+
+At REPL startup, a supplied digest mismatch skips project context and permits recovery with `/trust`; scripted `-p`, `-goal`, and `-plan` mismatches instead exit 1.
+
+Project and Git context are separate labeled frames rendered from one immutable shared snapshot key. A Git refresh can change the remaining project-context budget, and an unchanged combined snapshot is not republished. Tool results use separate per-request keyed frames. These fences label data for the model; approval admits the snapshot but does not make its text operator instructions, grant permission, sanitize prior conversation content, or erase earlier model influence.
+
 ### Scripting / one-shot mode
 
 `-p` runs a single agent turn without the REPL. In the default `text` format it
@@ -678,8 +697,10 @@ git diff | golem -p - -output-format json
 requires `-p`; stderr is unchanged in every format. Early flag, argument,
 prompt, and configuration parse/validation errors write a diagnostic to stderr,
 leave stdout empty, and exit 2. Among pre-run failures, exactly
-`destination_denied` (exit 2) and `provider_unavailable` (exit 1) emit a
-`golem.result.v1` record; all other pre-run failures leave stdout empty.
+`destination_denied` (exit 2), `provider_unavailable` (exit 1), and an
+unsatisfied explicit project-context requirement
+(`project_context_untrusted`, exit 1) emit one `golem.result.v1` record; all
+other pre-run failures leave stdout empty.
 
 | value | stdout |
 |---|---|
@@ -707,6 +728,7 @@ Every key is always present (`null` over absent). `status` is `completed`,
 `budget_reached`, `tool_error_cap_reached`, or `repeat_limit_reached`; `error`
 carries a bounded `code` plus a diagnostic `message` (runtime codes come from
 the run's `run.failed` event; the CLI adds `empty_answer`,
+`project_context_untrusted`,
 `provider_unavailable`, and `destination_denied`); `grounding` is the same
 `-grounding` report object, field for field, when verification ran. The record
 has **no size cap** — a large answer is one large line, so do not read the
@@ -737,7 +759,7 @@ exit 0/1 as before.
 | code | meaning |
 |---|---|
 | `0` | the run completed (a tool call the agent handled and recovered from does not change this) |
-| `1` | the run failed: provider or runtime error — including a provider failure during startup probing — cancellation, or no final answer |
+| `1` | the run failed: provider or runtime error — including a provider failure during startup probing — cancellation, no final answer, or an unsatisfied explicit `-trust-project-context` requirement |
 | `2` | caller error: bad flag or input, unknown `-allow-tool` name, unreadable or oversized stdin, missing or malformed configuration, or a destination admission denial |
 
 ### MCP server
