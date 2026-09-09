@@ -151,7 +151,9 @@ func TestProjectTrustResetAndFailedApproval(t *testing.T) {
 	}
 	t.Run("failed approval", func(t *testing.T) {
 		sess, _ := newTrustSession(t, "reject-guidance")
-		sess.runtime.Close()
+		if err := sess.runtime.Close(); err != nil {
+			t.Fatal(err)
+		}
 		trustSlash(t, sess, "/trust "+trustFixtureDigest(t, sess.root))
 		if sess.projectContext.trusted(sess.grants) {
 			t.Fatal("failed Replace granted trust")
@@ -254,7 +256,9 @@ func TestProjectTrustInitialScriptedMatrix(t *testing.T) {
 					if err := file.Truncate(1 << 36); err != nil {
 						t.Fatal(err)
 					}
-					file.Close()
+					if err := file.Close(); err != nil {
+						t.Fatal(err)
+					}
 				}
 				args := []string{"-root", root, "-config", filepath.Join(root, "missing-config"), "-trust-project-context", "sha256:" + strings.Repeat("0", 64)}
 				switch mode {
@@ -289,7 +293,9 @@ func TestProjectTrustReplaceFailureRetriesRemoval(t *testing.T) {
 	sess, caller := newTrustSession(t, "stale-guidance")
 	trustSlash(t, sess, "/trust "+trustFixtureDigest(t, sess.root))
 	stale := sess.baseSystem
-	sess.runtime.Close()
+	if err := sess.runtime.Close(); err != nil {
+		t.Fatal(err)
+	}
 	writeTrustDocument(t, sess.root, "fresh-guidance")
 	for range 2 {
 		if _, err := runOnce(t.Context(), io.Discard, nil, sess, "blocked", nil); err == nil {
@@ -316,7 +322,9 @@ func TestProjectTrustPersistentLifecycle(t *testing.T) {
 			}
 			trustSlash(t, sess, "/trust "+trustFixtureDigest(t, sess.root))
 			if line == "failed-clear" {
-				sess.session.Close()
+				if err := sess.session.Close(); err != nil {
+					t.Fatal(err)
+				}
 				trustSlash(t, sess, "/clear")
 				if sess.projectContext.trusted(sess.grants) {
 					t.Fatal("failed clear retained grant")

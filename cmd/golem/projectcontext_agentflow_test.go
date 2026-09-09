@@ -32,8 +32,12 @@ func TestProjectTrustAgentflowProcess(t *testing.T) {
 	if err != nil {
 		os.Exit(2)
 	}
-	fmt.Fprintln(log, strings.Join(args, " "))
-	log.Close()
+	if _, err := fmt.Fprintln(log, strings.Join(args, " ")); err != nil {
+		os.Exit(2)
+	}
+	if err := log.Close(); err != nil {
+		os.Exit(2)
+	}
 	reply := "{}"
 	switch {
 	case args[0] == "--version":

@@ -21,70 +21,108 @@ import (
 func TestProjectTrustLaterScriptedMatrix(t *testing.T) {
 	for _, mode := range []string{"prompt", "goal", "plan"} {
 		for _, kind := range []string{"edit", "remove", "unavailable", "deadline", "global-relocation", "grant-reset"} {
-			t.Run(mode+"/"+kind, func(t *testing.T) {
-				config, root, bodies := dispatchOneShotHarness(t)
-				t.Setenv("XDG_CONFIG_HOME", t.TempDir())
-				afState := installTrustAgentflow(t)
-				writeTrustDocument(t, root, "late-original")
-				if kind == "global-relocation" {
-					global := filepath.Join(os.Getenv("XDG_CONFIG_HOME"), "golem")
-					if err := os.MkdirAll(global, 0700); err != nil {
-						t.Fatal(err)
-					}
-					writeTrustDocument(t, global, "global-identical")
-				}
-				digest := trustFixtureDigest(t, root)
-				args := []string{"-config", config, "-root", root, "-no-probe", "-no-cap-probe", "-no-rag", "-no-git-context", "-trust-project-context", digest}
-				switch mode {
-				case "prompt":
-					args = append(args, "-p", "hi")
-				case "goal":
-					args = append(args, "-goal", "hi", "-approve-plan-lock")
-				case "plan":
-					args = append(args, "-plan", filepath.Join(root, "missing-plan"), "-approve-plan-edits", "-approve-plan-gates")
-				}
-				in, out, diag := runTestFiles(t)
-				err := run(args, in, out, diag, runHooks{afterSessionReady: func(s *replSession) error {
-					switch kind {
-					case "edit":
-						writeTrustDocument(t, root, "late-modified")
-					case "remove":
-						if err := os.Remove(filepath.Join(root, "AGENTS.md")); err != nil {
-							t.Fatal(err)
-						}
-					case "unavailable":
-						t.Setenv("XDG_CONFIG_HOME", filepath.Join(root, "AGENTS.md"))
-					case "deadline":
-						file, err := os.OpenFile(filepath.Join(root, "AGENTS.md"), os.O_WRONLY, 0600)
-						if err != nil {
-							t.Fatal(err)
-						}
-						if err := file.Truncate(1 << 36); err != nil {
-							t.Fatal(err)
-						}
-						file.Close()
-					case "global-relocation":
-						t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+			formats := []string{"text"}
+			if mode == "prompt" && (kind == "global-relocation" || kind == "grant-reset") {
+				formats = append(formats, "json", "stream-json")
+			}
+			for _, format := range formats {
+				t.Run(mode+"/"+kind+"/"+format, func(t *testing.T) {
+					config, root, bodies := dispatchOneShotHarness(t)
+					t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+					afState := installTrustAgentflow(t)
+					writeTrustDocument(t, root, "late-original")
+					if kind == "global-relocation" {
 						global := filepath.Join(os.Getenv("XDG_CONFIG_HOME"), "golem")
 						if err := os.MkdirAll(global, 0700); err != nil {
 							t.Fatal(err)
 						}
 						writeTrustDocument(t, global, "global-identical")
-						if got := trustFixtureDigest(t, root); got != digest {
-							t.Fatalf("portable digest changed: %s", got)
-						}
-					case "grant-reset":
-						s.grants.clear()
 					}
-					return nil
-				}})
-				if err == nil || exitCodeFor(err) != 1 || !strings.Contains(err.Error()+readRunTestFile(t, diag), "project context") || len(bodies()) != 0 {
-					t.Fatalf("%s/%s=%v exit=%d requests=%d", mode, kind, err, exitCodeFor(err), len(bodies()))
-				}
-				if calls, _ := os.ReadFile(filepath.Join(afState, "calls")); len(calls) != 0 {
-					t.Fatalf("AgentFlow invoked after failed requirement: %s", calls)
-				}
-			})
+					digest := trustFixtureDigest(t, root)
+					args := []string{"-config", config, "-root", root, "-no-probe", "-no-cap-probe", "-no-rag", "-no-git-context", "-trust-project-context", digest}
+					switch mode {
+					case "prompt":
+						args = append(args, "-p", "hi", "-output-format", format)
+					case "goal":
+						args = append(args, "-goal", "hi", "-approve-plan-lock")
+					case "plan":
+						args = append(args, "-plan", filepath.Join(root, "missing-plan"), "-approve-plan-edits", "-approve-plan-gates")
+					}
+					in, out, diag := runTestFiles(t)
+					err := run(args, in, out, diag, runHooks{afterSessionReady: func(s *replSession) error {
+						switch kind {
+						case "edit":
+							writeTrustDocument(t, root, "late-modified")
+						case "remove":
+							if err := os.Remove(filepath.Join(root, "AGENTS.md")); err != nil {
+								t.Fatal(err)
+							}
+						case "unavailable":
+							t.Setenv("XDG_CONFIG_HOME", filepath.Join(root, "AGENTS.md"))
+						case "deadline":
+							file, err := os.OpenFile(filepath.Join(root, "AGENTS.md"), os.O_WRONLY, 0600)
+							if err != nil {
+								t.Fatal(err)
+							}
+							if err := file.Truncate(1 << 36); err != nil {
+								t.Fatal(err)
+							}
+							if err := file.Close(); err != nil {
+								t.Fatal(err)
+							}
+						case "global-relocation":
+							t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+							global := filepath.Join(os.Getenv("XDG_CONFIG_HOME"), "golem")
+							if err := os.MkdirAll(global, 0700); err != nil {
+								t.Fatal(err)
+							}
+							writeTrustDocument(t, global, "global-identical")
+							if got := trustFixtureDigest(t, root); got != digest {
+								t.Fatalf("portable digest changed: %s", got)
+							}
+						case "grant-reset":
+							s.grants.clear()
+						}
+						return nil
+					}})
+					if err == nil || exitCodeFor(err) != 1 || !strings.Contains(err.Error()+readRunTestFile(t, diag), "project context") || len(bodies()) != 0 {
+						t.Fatalf("%s/%s=%v exit=%d requests=%d", mode, kind, err, exitCodeFor(err), len(bodies()))
+					}
+					if kind == "global-relocation" || kind == "grant-reset" {
+						reason := "local approval required"
+						if kind == "global-relocation" {
+							reason = "source identity changed; " + reason
+						}
+						want := "project context untrusted: expected " + digest + "; actual " + digest + " (" + reason + ")"
+						if mode != "prompt" && err.Error() != want {
+							t.Fatalf("trust diagnostic=%q, want %q", err, want)
+						}
+						if mode == "prompt" {
+							if stderr := readRunTestFile(t, diag); !strings.Contains(stderr, want) {
+								t.Fatalf("stderr=%q, want diagnostic %q", stderr, want)
+							}
+							stdout := readRunTestFile(t, out)
+							assertTrustFailureOutput(t, format, stdout)
+							if format != "text" {
+								var result struct {
+									Error struct {
+										Message string `json:"message"`
+									} `json:"error"`
+								}
+								if err := json.Unmarshal([]byte(stdout), &result); err != nil {
+									t.Fatal(err)
+								}
+								if result.Error.Message != want {
+									t.Fatalf("machine diagnostic=%q, want %q", result.Error.Message, want)
+								}
+							}
+						}
+					}
+					if calls, _ := os.ReadFile(filepath.Join(afState, "calls")); len(calls) != 0 {
+						t.Fatalf("AgentFlow invoked after failed requirement: %s", calls)
+					}
+				})
+			}
 		}
 	}
 }
@@ -133,7 +171,9 @@ func TestProjectTrustPromptAndOutputsCannotConsent(t *testing.T) {
 		t.Fatal(err)
 	}
 	scripted := &scriptCaller{responses: []agent.ModelResult{{Response: provider.ChatResponse{ToolCalls: []provider.ToolCall{{ID: "read1", Type: "function", Function: provider.ToolCallFunction{Name: "read_file", Arguments: json.RawMessage(`{"path":"tool-output.txt"}`)}}}}}, {Response: provider.ChatResponse{Content: "done"}}}}
-	sess.runtime.Close()
+	if err := sess.runtime.Close(); err != nil {
+		t.Fatal(err)
+	}
 	sess.orch = agent.New(scripted, agent.ContextManager{})
 	sess.runtime = newTestRuntime(t, sess.root, sess.baseSystem, sess.orch, nil)
 	if _, err := runOnce(t.Context(), io.Discard, nil, sess, "/trust "+digest, nil); err != nil {
@@ -371,7 +411,9 @@ func TestProjectTrustTurnAndPlannerFreeze(t *testing.T) {
 			trustSlash(t, sess, "/trust "+trustFixtureDigest(t, sess.root))
 			caller := &trustEditingCaller{path: filepath.Join(sess.root, "AGENTS.md")}
 			sess.orch = agent.New(caller, agent.ContextManager{})
-			sess.runtime.Close()
+			if err := sess.runtime.Close(); err != nil {
+				t.Fatal(err)
+			}
 			sess.runtime = newTestRuntime(t, sess.root, sess.baseSystem, sess.orch, nil)
 			invoke := func() error {
 				if planner {
@@ -380,7 +422,7 @@ func TestProjectTrustTurnAndPlannerFreeze(t *testing.T) {
 				_, err := runOnce(t.Context(), io.Discard, nil, sess, "inspect", nil)
 				return err
 			}
-			if err := invoke(); err != nil && !(planner && errors.Is(err, errPlannerNoSubmission)) {
+			if err := invoke(); err != nil && (!planner || !errors.Is(err, errPlannerNoSubmission)) {
 				t.Fatal(err)
 			}
 			if len(caller.systems) != 2 {
@@ -394,7 +436,7 @@ func TestProjectTrustTurnAndPlannerFreeze(t *testing.T) {
 			if err := refreshProjectContext(t.Context(), io.Discard, sess); err != nil {
 				t.Fatal(err)
 			}
-			if err := invoke(); err != nil && !(planner && errors.Is(err, errPlannerNoSubmission)) {
+			if err := invoke(); err != nil && (!planner || !errors.Is(err, errPlannerNoSubmission)) {
 				t.Fatal(err)
 			}
 			if len(caller.systems) != 3 || strings.Contains(caller.systems[2], "<<<PROJECT_CONTEXT ") {

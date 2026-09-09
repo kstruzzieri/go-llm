@@ -56,7 +56,11 @@ func (s projectContextState) requirementError(expected [32]byte, cause error) er
 	if cause != nil {
 		actual = "unavailable: " + gitContextText(cause.Error())
 	} else if len(s.docs) > 0 {
-		actual = formatProjectContextDigest(s.digest) + " (local approval required)"
+		reason := "local approval required"
+		if s.digest == expected && s.lastApprovedGrantKey != "" && s.grantKey != s.lastApprovedGrantKey {
+			reason = "source identity changed; " + reason
+		}
+		actual = formatProjectContextDigest(s.digest) + " (" + reason + ")"
 	}
 	return &projectContextTrustError{message: fmt.Sprintf("project context untrusted: expected %s; actual %s", formatProjectContextDigest(expected), actual)}
 }
@@ -232,6 +236,8 @@ type projectContextState struct {
 	grantKey       string
 	disabled       bool
 	requiredDigest *[32]byte
+	// Diagnostic history only; live authority always comes from approvalGrants.
+	lastApprovedGrantKey string
 }
 
 func newProjectContextState(root string, docs []projectcontext.Document, disabled bool, requiredDigest *[32]byte) projectContextState {
@@ -252,11 +258,12 @@ func (s projectContextState) trusted(grants *approvalGrants) bool {
 	return !s.disabled && len(s.docs) > 0 && grants.granted(grantScopeProjectContext, s.grantKey)
 }
 
-func (s projectContextState) approve(grants *approvalGrants, digest [32]byte) bool {
+func (s *projectContextState) approve(grants *approvalGrants, digest [32]byte) bool {
 	if s.disabled || len(s.docs) == 0 || digest != s.digest || grants == nil {
 		return false
 	}
 	grants.grant(grantScopeProjectContext, s.grantKey)
+	s.lastApprovedGrantKey = s.grantKey
 	return true
 }
 
@@ -266,6 +273,7 @@ func (s *projectContextState) replace(root string, docs []projectcontext.Documen
 		return false
 	}
 	grants.revoke(grantScopeProjectContext, s.grantKey)
+	next.lastApprovedGrantKey = s.lastApprovedGrantKey
 	*s = next
 	return true
 }
@@ -278,7 +286,7 @@ func parseProjectContextDigest(value string) ([32]byte, error) {
 	}
 	encoded := value[len(prefix):]
 	for _, c := range encoded {
-		if !('0' <= c && c <= '9') && !('a' <= c && c <= 'f') {
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
 			return digest, fmt.Errorf("project context digest must be sha256: followed by 64 lowercase hexadecimal digits")
 		}
 	}
@@ -382,7 +390,6 @@ func selectProjectContextChunks(docs []projectcontext.Document, headers, content
 		content := truncateProjectContextPrefix(contents[i], remaining-fixed)
 		chunks[i] = headers[i] + content + truncatedNotice
 		statuses[i] = projectContextTruncated
-		remaining -= len(chunks[i])
 		omitted += i
 		break
 	}
