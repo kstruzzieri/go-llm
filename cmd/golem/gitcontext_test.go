@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io/fs"
 	"os"
@@ -141,6 +142,8 @@ func gitContextTestRepo(t *testing.T) string {
 
 func gitContextTestRun(t *testing.T, dir string, args ...string) string {
 	t.Helper()
+	// Automatic maintenance can detach and outlive the temporary repository.
+	args = append([]string{"-c", "maintenance.auto=false"}, args...)
 	cmd := exec.Command("git", args...)
 	cmd.Dir = dir
 	cmd.Env = append(hostGitEnv(),
@@ -161,6 +164,41 @@ func gitContextTestCommit(t *testing.T, root, file, content, subject string) {
 	}
 	gitContextTestRun(t, root, "add", "--", file)
 	gitContextTestRun(t, root, "commit", "-q", "-m", subject)
+}
+
+// Fixture commits must finish all repository work before TempDir cleanup.
+// Git can otherwise detach automatic maintenance despite CombinedOutput waiting
+// for the commit process, leaving a worker accessing a repository being removed.
+func TestGitContextFixtureDoesNotStartAutomaticMaintenance(t *testing.T) {
+	root := gitContextTestRepo(t)
+	gitContextTestRun(t, root, "config", "maintenance.auto", "true")
+	trace := filepath.Join(t.TempDir(), "git-trace.json")
+	t.Setenv("GIT_TRACE2_EVENT", trace)
+	gitContextTestCommit(t, root, "tracked.go", "package fixture\n", "fixture commit")
+	data, err := os.ReadFile(trace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sawCommit := false
+	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+		var event struct {
+			Event string   `json:"event"`
+			Name  string   `json:"name"`
+			Argv  []string `json:"argv"`
+		}
+		if err := json.Unmarshal([]byte(line), &event); err != nil {
+			t.Fatalf("decode Git trace event: %v", err)
+		}
+		if event.Event == "cmd_name" && event.Name == "commit" {
+			sawCommit = true
+		}
+		if event.Event == "child_start" && len(event.Argv) > 1 && (event.Argv[1] == "maintenance" || event.Argv[1] == "gc") {
+			t.Fatalf("fixture spawned automatic repository maintenance: %v", event.Argv)
+		}
+	}
+	if !sawCommit {
+		t.Fatal("Git trace did not record the fixture commit")
+	}
 }
 
 func TestGitLocalFilterDriverUsesRepositoryConfig(t *testing.T) {
