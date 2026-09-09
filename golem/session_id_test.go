@@ -79,13 +79,9 @@ func TestSessionIDIsStablePerThread(t *testing.T) {
 	}
 }
 
-// TestThreadIDWithControlCharactersIsRejected guards a regression #533 could
-// introduce: the thread id now becomes an HTTP header value, and Go's
-// Transport refuses a request whose header value holds a control character.
-// Without this check an embedder-supplied id containing one would fail every
-// turn of that thread with an opaque transport error instead of a clear
-// request-validation error.
-func TestThreadIDWithControlCharactersIsRejected(t *testing.T) {
+// TestThreadIDWithUnsafeHeaderValueIsRejected covers IDs HTTP would reject or
+// trim, which would make distinct runtime threads share an upstream session.
+func TestThreadIDWithUnsafeHeaderValueIsRejected(t *testing.T) {
 	runtime, err := golem.New(context.Background(), golem.Options{
 		Root:         t.TempDir(),
 		Orchestrator: agent.New(&sessionRecorder{}, agent.ContextManager{}),
@@ -104,6 +100,11 @@ func TestThreadIDWithControlCharactersIsRejected(t *testing.T) {
 		{name: "bare newline", threadID: "abc\ndef", wantErr: true},
 		{name: "null byte", threadID: "abc\x00def", wantErr: true},
 		{name: "del", threadID: "abc\x7fdef", wantErr: true},
+		{name: "leading space", threadID: " thread-abc", wantErr: true},
+		{name: "trailing space", threadID: "thread-abc ", wantErr: true},
+		{name: "leading tab", threadID: "\tthread-abc", wantErr: true},
+		{name: "trailing tab", threadID: "thread-abc\t", wantErr: true},
+		{name: "whitespace only", threadID: " \t", wantErr: true},
 		{name: "ordinary id", threadID: "thread-abc_123.4"},
 		{name: "empty is allowed (stateless turn)"},
 	}

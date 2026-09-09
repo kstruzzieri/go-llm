@@ -2,6 +2,7 @@ package openaicompat
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -139,14 +140,34 @@ func TestOpencodeSessionHeader(t *testing.T) {
 		name        string
 		sessionID   string
 		wantPresent bool
+		wantErr     bool
 	}{
 		{name: "sent when SessionID is set", sessionID: "thread-abc", wantPresent: true},
 		{name: "omitted entirely when SessionID is empty"},
+		{name: "leading space is rejected", sessionID: " thread-abc", wantErr: true},
+		{name: "trailing space is rejected", sessionID: "thread-abc ", wantErr: true},
+		{name: "leading tab is rejected", sessionID: "\tthread-abc", wantErr: true},
+		{name: "trailing tab is rejected", sessionID: "thread-abc\t", wantErr: true},
+		{name: "whitespace only is rejected", sessionID: " \t", wantErr: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			h := newHeaderCapture(t)
-			chatOnce(t, NewProvider(NewClient(h.srv.URL)), provider.ChatRequest{SessionID: tt.sessionID})
+			_, err := NewProvider(NewClient(h.srv.URL)).Chat(context.Background(), provider.ChatRequest{
+				Model: "m", Messages: []provider.ChatMessage{{Role: "user", Content: "hi"}}, SessionID: tt.sessionID,
+			})
+			if tt.wantErr {
+				if err == nil || !strings.Contains(err.Error(), "session ID") {
+					t.Errorf("Chat error = %v, want session ID validation error", err)
+				}
+				if h.requestBody() != "" {
+					t.Error("invalid session ID reached the server")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Chat: %v", err)
+			}
 
 			if got := h.present(sessionHeader); got != tt.wantPresent {
 				t.Fatalf("%s present = %v, want %v (value %q)", sessionHeader, got, tt.wantPresent, h.get(sessionHeader))
@@ -164,8 +185,16 @@ func TestOpencodeSessionHeader(t *testing.T) {
 // metadata, and leaking it into the JSON body would change the payload every
 // existing caller sends.
 func TestSessionIDStaysOffTheWireBody(t *testing.T) {
+	req := provider.ChatRequest{SessionID: "thread-abc"}
+	raw, err := json.Marshal(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), "thread-abc") {
+		t.Errorf("marshaled ChatRequest contains SessionID: %s", raw)
+	}
 	h := newHeaderCapture(t)
-	chatOnce(t, NewProvider(NewClient(h.srv.URL)), provider.ChatRequest{SessionID: "thread-abc"})
+	chatOnce(t, NewProvider(NewClient(h.srv.URL)), req)
 
 	body := h.requestBody()
 	if body == "" {

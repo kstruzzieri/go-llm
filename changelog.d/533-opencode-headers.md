@@ -15,7 +15,8 @@ rather than in `cmd/golem` and `cmd/llm-bench` separately.
   shared module. The version is read from the build info the toolchain
   stamps in. Only this module's own version is reported: when go-llm is
   imported, `info.Main` describes the consumer, so the dependency entry is
-  authoritative.
+  authoritative. Module replacements use the replacement's version; local
+  replacements report `dev`.
 - `provider.ChatRequest.SessionID`, tagged `json:"-"`, is emitted as the
   `x-opencode-session` header when non-empty.
 - `provider.RoutingRequest.SessionID` carries the id across routing, so it
@@ -27,15 +28,19 @@ rather than in `cmd/golem` and `cmd/llm-bench` separately.
   through both `agent.NewRouterModelCaller` and golem's chain caller. The
   golem runtime fills it from the turn's thread id, so all turns of one
   conversation share a session id and multi-turn prompt caching can hit.
+  The orchestrator reads it directly from the run request, so recency
+  compaction, mixed assembly, and custom compactors cannot discard it.
 
 #### Changed
 
 - `golem.Turn.ThreadID` is now rejected with `ErrInvalidRequest` when it
-  contains an ASCII control character. The thread id becomes a header value,
-  and Go's Transport refuses to send one containing a control character —
+  contains an ASCII control character other than horizontal tab. The thread
+  id becomes a header value, and Go's Transport refuses these controls —
   without this check a bad id would fail every turn of the thread with an
   opaque transport error instead of a clear validation error. Length limits
   are unchanged, and `net/http` already prevented header injection.
+- Thread IDs and openai-compat session IDs reject leading or trailing spaces
+  and tabs, which HTTP would otherwise trim and collapse into another ID.
 
 #### Notes
 

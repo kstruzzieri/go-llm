@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"strings"
 	"sync"
 
 	"github.com/kstruzzieri/go-llm/agent"
@@ -633,6 +634,9 @@ func (r *Runtime) validateTurn(turn Turn) error {
 	}
 	if i := indexControlByte(turn.ThreadID); i >= 0 {
 		return fmt.Errorf("%w: thread ID contains a control character at byte %d", ErrInvalidRequest, i)
+	}
+	if strings.Trim(turn.ThreadID, " \t") != turn.ThreadID {
+		return fmt.Errorf("%w: thread ID must not start or end with a space or tab", ErrInvalidRequest)
 	}
 	if turn.Message == "" {
 		return fmt.Errorf("%w: message is required", ErrInvalidRequest)

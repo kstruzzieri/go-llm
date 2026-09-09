@@ -221,7 +221,8 @@ type ChatRequest struct {
 	// SessionID is a stable per-conversation identifier. The openai-compat
 	// provider emits it as the x-opencode-session header, which opencode
 	// uses for request routing and prompt caching; empty omits the header,
-	// leaving non-opencode endpoints byte-identical on the wire.
+	// leaving the request without session metadata. Leading or trailing spaces
+	// and tabs are rejected because HTTP would trim them and change the ID.
 	SessionID string `json:"-"`
 }
 

@@ -76,7 +76,7 @@ func initState(req Request) State {
 		ChatMessage: provider.ChatMessage{Role: "user", Content: req.Goal},
 		Segment:     Pinned,
 	})
-	return State{System: req.System, DurableSummary: req.HistorySummary, Messages: msgs, SessionID: req.SessionID}
+	return State{System: req.System, DurableSummary: req.HistorySummary, Messages: msgs}
 }
 
 func buildChatRequest(st State, specs []provider.Tool, outputReserve int, opts provider.ModelOptions) provider.ChatRequest {
@@ -100,7 +100,7 @@ func buildChatRequest(st State, specs []provider.Tool, outputReserve int, opts p
 		}
 		msgs = append(msgs, cm)
 	}
-	req := provider.ChatRequest{Messages: msgs, Tools: specs, Stream: true, Options: opts, SessionID: st.SessionID}
+	req := provider.ChatRequest{Messages: msgs, Tools: specs, Stream: true, Options: opts}
 	if outputReserve > 0 {
 		req.Options.NumPredict = outputReserve
 	}
@@ -204,7 +204,10 @@ func (o *Orchestrator) run(ctx context.Context, req Request, obs Observer, ic *i
 
 		tokenLogged := false
 		modelStart := o.now()
-		modelResult, err := o.model.Chat(ctx, buildChatRequest(assembled, specs, req.Budget.OutputReserve, req.Options), func(c provider.ChatResponse) error {
+		chatReq := buildChatRequest(assembled, specs, req.Budget.OutputReserve, req.Options)
+		// Session identity belongs to the run, independent of transcript rebuilding.
+		chatReq.SessionID = req.SessionID
+		modelResult, err := o.model.Chat(ctx, chatReq, func(c provider.ChatResponse) error {
 			if c.Thinking != "" {
 				if to, ok := obs.(ThinkingObserver); ok {
 					if terr := to.OnThinking(ctx, ThinkingEvent{Step: step, Content: c.Thinking}); terr != nil {

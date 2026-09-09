@@ -89,6 +89,9 @@ func userAgentFromBuildInfo(info *debug.BuildInfo) string {
 		for _, dep := range info.Deps {
 			if dep.Path == modulePath {
 				version = dep.Version
+				if dep.Replace != nil {
+					version = dep.Replace.Version
+				}
 				break
 			}
 		}
@@ -213,6 +216,10 @@ func (c *Client) getJSON(ctx context.Context, path string, out any) error {
 // to JSON, sets headers including auth, and returns the raw response for
 // the caller to consume.
 func (c *Client) post(ctx context.Context, path string, body any, contentType string) (*http.Response, error) {
+	// HTTP trims surrounding SP/HTAB, which would collapse distinct session IDs.
+	if id := sessionIDFrom(ctx); strings.Trim(id, " \t") != id {
+		return nil, fmt.Errorf("openaicompat: session ID must not start or end with a space or tab")
+	}
 	buf, err := json.Marshal(body)
 	if err != nil {
 		return nil, fmt.Errorf("openaicompat: marshal %s body: %w", path, err)

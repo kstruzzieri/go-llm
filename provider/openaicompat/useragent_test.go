@@ -35,6 +35,30 @@ func TestUserAgentFromBuildInfo(t *testing.T) {
 			want: "go-llm/v0.2.0",
 		},
 		{
+			name: "versioned replacement reports the compiled version",
+			info: &debug.BuildInfo{Deps: []*debug.Module{{
+				Path: modulePath, Version: "v0.2.0",
+				Replace: &debug.Module{Path: modulePath, Version: "v0.3.0"},
+			}}},
+			want: "go-llm/v0.3.0",
+		},
+		{
+			name: "local replacement with empty version reports dev",
+			info: &debug.BuildInfo{Deps: []*debug.Module{{
+				Path: modulePath, Version: "v0.2.0",
+				Replace: &debug.Module{Path: "../go-llm"},
+			}}},
+			want: "go-llm/dev",
+		},
+		{
+			name: "local replacement with devel version reports dev",
+			info: &debug.BuildInfo{Deps: []*debug.Module{{
+				Path: modulePath, Version: "v0.2.0",
+				Replace: &debug.Module{Path: "../go-llm", Version: "(devel)"},
+			}}},
+			want: "go-llm/dev",
+		},
+		{
 			name: "go-llm imported but absent from Deps: never report the consumer's version",
 			info: &debug.BuildInfo{
 				Main: debug.Module{Path: "github.com/kstruzzieri/firn-ide", Version: "v9.9.9"},

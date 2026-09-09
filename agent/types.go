@@ -131,9 +131,6 @@ type State struct {
 	System         string
 	DurableSummary string
 	Messages       []Message
-	// SessionID rides along from the Request so every model call built from
-	// this state carries the same conversation identity.
-	SessionID string
 }
 
 // RetrievalAttribution credits the sources a retrieval-style tool returned.
