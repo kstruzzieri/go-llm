@@ -1125,6 +1125,7 @@ func (rp *RoutePlan) buildChatRequest(stream bool) ChatRequest {
 		Stream:         stream,
 		ParseThinkMode: parseMode,
 		ParseThinkTags: parseTags,
+		SessionID:      rp.Request.SessionID,
 	}
 }
 

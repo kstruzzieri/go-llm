@@ -76,7 +76,7 @@ func initState(req Request) State {
 		ChatMessage: provider.ChatMessage{Role: "user", Content: req.Goal},
 		Segment:     Pinned,
 	})
-	return State{System: req.System, DurableSummary: req.HistorySummary, Messages: msgs}
+	return State{System: req.System, DurableSummary: req.HistorySummary, Messages: msgs, SessionID: req.SessionID}
 }
 
 func buildChatRequest(st State, specs []provider.Tool, outputReserve int, opts provider.ModelOptions) provider.ChatRequest {
@@ -100,7 +100,7 @@ func buildChatRequest(st State, specs []provider.Tool, outputReserve int, opts p
 		}
 		msgs = append(msgs, cm)
 	}
-	req := provider.ChatRequest{Messages: msgs, Tools: specs, Stream: true, Options: opts}
+	req := provider.ChatRequest{Messages: msgs, Tools: specs, Stream: true, Options: opts, SessionID: st.SessionID}
 	if outputReserve > 0 {
 		req.Options.NumPredict = outputReserve
 	}

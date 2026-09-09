@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"runtime/debug"
 	"strings"
 	"time"
 )
@@ -20,13 +21,79 @@ import (
 // Client is safe for concurrent use; the underlying http.Client and
 // configuration are read-only after construction.
 type Client struct {
-	baseURL string
-	apiKey  string
-	hc      *http.Client
+	baseURL   string
+	apiKey    string
+	userAgent string
+	hc        *http.Client
 }
 
 // ClientOption configures a Client.
 type ClientOption func(*Client)
+
+// sessionIDKey types the context value carrying a per-request session id.
+// The id has to vary per request while the Client is built once, so it
+// travels on the request context rather than in Client state.
+type sessionIDKey struct{}
+
+// withSessionID returns ctx carrying id for the request about to be sent.
+// An empty id returns ctx unchanged, so no header is emitted.
+func withSessionID(ctx context.Context, id string) context.Context {
+	if id == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, sessionIDKey{}, id)
+}
+
+// sessionIDFrom returns the session id carried by ctx, or "" when unset.
+func sessionIDFrom(ctx context.Context) string {
+	id, _ := ctx.Value(sessionIDKey{}).(string)
+	return id
+}
+
+// modulePath is this module's import path, used to find our own version in
+// the build info whether go-llm is the program being run or a dependency of
+// one.
+const modulePath = "github.com/kstruzzieri/go-llm"
+
+// unknownVersion stands in when the build carries no version for this module
+// — a plain `go build` or `go test`, where the toolchain stamps "(devel)".
+// That literal is not emitted as-is: parentheses open a comment in an HTTP
+// field value (RFC 9110 §5.6.5), which would make the agent ambiguous to
+// parse.
+const unknownVersion = "dev"
+
+// defaultUserAgent identifies this module rather than net/http's generic
+// Go-http-client/1.1, which opencode's docs single out as the thing not to
+// send.
+//
+// Only this module's own version is reported. The dependency entry is
+// authoritative when go-llm is imported, because info.Main there describes
+// the *consumer* (Firn IDE, say) — reporting its version as go-llm's would
+// misidentify the client. info.Main is consulted only when it is go-llm
+// itself, i.e. one of go-llm's own commands is the program running.
+func defaultUserAgent() string {
+	info, ok := debug.ReadBuildInfo()
+	if !ok {
+		return "go-llm/" + unknownVersion
+	}
+	version := ""
+	for _, dep := range info.Deps {
+		if dep.Path == modulePath {
+			version = dep.Version
+			break
+		}
+	}
+	if version == "" && info.Main.Path == modulePath {
+		version = info.Main.Version
+	}
+	if version == "" || version == "(devel)" {
+		version = unknownVersion
+	}
+	return "go-llm/" + version
+}
+
+// defaultUA is resolved once; build info does not change at runtime.
+var defaultUA = defaultUserAgent()
 
 // WithHTTPClient overrides the default http.Client (default: a 5-minute-timeout
 // client). Pass a pre-configured client to share connection pools, attach
@@ -48,6 +115,17 @@ func WithAPIKey(key string) ClientOption {
 	}
 }
 
+// WithUserAgent overrides the default go-llm/<version> User-Agent, letting an
+// embedder identify as itself (Firn IDE, say) instead of as the shared module.
+// Empty is ignored so the default is never replaced by a blank header.
+func WithUserAgent(ua string) ClientOption {
+	return func(c *Client) {
+		if ua != "" {
+			c.userAgent = ua
+		}
+	}
+}
+
 // NewClient builds a Client targeting baseURL. The URL should be the server
 // root WITHOUT the /v1 suffix; per-endpoint paths are appended internally
 // so callers don't have to remember which endpoints live under /v1. Any
@@ -58,8 +136,9 @@ func WithAPIKey(key string) ClientOption {
 // (low-latency local) or longer (large-batch embedding) requests.
 func NewClient(baseURL string, opts ...ClientOption) *Client {
 	c := &Client{
-		baseURL: strings.TrimRight(baseURL, "/"),
-		hc:      &http.Client{Timeout: 5 * time.Minute},
+		baseURL:   strings.TrimRight(baseURL, "/"),
+		userAgent: defaultUA,
+		hc:        &http.Client{Timeout: 5 * time.Minute},
 	}
 	for _, opt := range opts {
 		opt(c)
@@ -140,13 +219,18 @@ func (c *Client) post(ctx context.Context, path string, body any, contentType st
 	return resp, nil
 }
 
-// setHeaders applies Authorization (when APIKey is set), Accept, and
-// optional Content-Type to req.
+// setHeaders applies Authorization (when APIKey is set), Accept, User-Agent,
+// the opencode session id carried by the request context, and optional
+// Content-Type to req.
 func (c *Client) setHeaders(req *http.Request, contentType string) {
 	if c.apiKey != "" {
 		req.Header.Set("Authorization", "Bearer "+c.apiKey)
 	}
 	req.Header.Set("Accept", "application/json, text/event-stream")
+	req.Header.Set("User-Agent", c.userAgent)
+	if id := sessionIDFrom(req.Context()); id != "" {
+		req.Header.Set("x-opencode-session", id)
+	}
 	if contentType != "" {
 		req.Header.Set("Content-Type", contentType)
 	}

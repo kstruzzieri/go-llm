@@ -218,6 +218,11 @@ type ChatRequest struct {
 	// ParseThinkTags optionally overrides the provider instance's parser tags
 	// for this request. nil uses the provider default tags.
 	ParseThinkTags *ThinkTags `json:"-"`
+	// SessionID is a stable per-conversation identifier. The openai-compat
+	// provider emits it as the x-opencode-session header, which opencode
+	// uses for request routing and prompt caching; empty omits the header,
+	// leaving non-opencode endpoints byte-identical on the wire.
+	SessionID string `json:"-"`
 }
 
 // ChatResponse is the provider-agnostic response from a chat completion.

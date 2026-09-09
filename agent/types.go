@@ -94,6 +94,11 @@ type Request struct {
 	// when OutputReserve is zero, a directly-set NumPredict also seeds the
 	// router's ExpectedOutput hint.
 	Options provider.ModelOptions
+	// SessionID is a stable per-conversation identifier forwarded to every
+	// model call in the run as provider.ChatRequest.SessionID. Callers that
+	// keep threads (the golem runtime passes its thread id) get consistent
+	// upstream routing and prompt caching; empty preserves prior behavior.
+	SessionID string
 }
 
 // Segment tags a message as always-present (Pinned) or compactable (Elastic).
@@ -126,6 +131,9 @@ type State struct {
 	System         string
 	DurableSummary string
 	Messages       []Message
+	// SessionID rides along from the Request so every model call built from
+	// this state carries the same conversation identity.
+	SessionID string
 }
 
 // RetrievalAttribution credits the sources a retrieval-style tool returned.

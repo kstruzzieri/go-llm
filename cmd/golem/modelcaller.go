@@ -72,6 +72,7 @@ func (m *chainModelCaller) Chat(ctx context.Context, req provider.ChatRequest, o
 		Options:        req.Options,
 		ExpectedOutput: req.Options.NumPredict,
 		RequiredCaps:   agent.ModelCallCapabilities(len(req.Tools) > 0),
+		SessionID:      req.SessionID,
 	}
 	if len(m.chain) > 0 {
 		rr.PreferredChain = m.chain

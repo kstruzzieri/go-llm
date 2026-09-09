@@ -174,6 +174,7 @@ func (p *Provider) Models(ctx context.Context) ([]provider.ModelInfo, error) {
 // processed through ExtractThinking to separate inline reasoning from
 // the final answer, matching the OllamaProvider contract.
 func (p *Provider) Chat(ctx context.Context, req provider.ChatRequest) (*provider.ChatResponse, error) {
+	ctx = withSessionID(ctx, req.SessionID)
 	body := toChatRequest(req, false)
 	var resp chatResponse
 	if err := p.client.postJSON(ctx, "/v1/chat/completions", body, &resp); err != nil {
@@ -247,6 +248,7 @@ func (p *Provider) ChatStream(ctx context.Context, req provider.ChatRequest, fn 
 		return fmt.Errorf("provider: openaicompat: chat stream: callback function is required")
 	}
 
+	ctx = withSessionID(ctx, req.SessionID)
 	body := toChatRequest(req, true)
 	reader, err := p.client.postSSE(ctx, "/v1/chat/completions", body)
 	if err != nil {
