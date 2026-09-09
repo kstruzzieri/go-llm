@@ -14,7 +14,6 @@ import (
 
 	"github.com/kstruzzieri/go-llm/agent"
 	"github.com/kstruzzieri/go-llm/internal/agenttrace"
-	"github.com/kstruzzieri/go-llm/projectcontext"
 )
 
 // newRefreshSession is a mount session over a real repository whose startup
@@ -29,11 +28,11 @@ func newRefreshSession(t *testing.T, caller agent.ModelCaller) (*replSession, st
 	if err != nil {
 		t.Fatal(err)
 	}
-	in := sess.sysInputs
-	in.gitContext = snap.Block
+	in := projectContextInputs(sess.sysInputs, nil, snap, false)
 	if err := sess.mount(sess.mountAt, nil, in); err != nil {
 		t.Fatal(err)
 	}
+	snap.Block = in.gitContext
 	sess.gitSnapshot = snap
 	if !strings.Contains(sess.baseSystem, "branch: main\n") {
 		t.Fatalf("startup state not installed: %q", sess.baseSystem)
@@ -117,16 +116,16 @@ func TestGitContextRefreshRepeated(t *testing.T) {
 // at the full budget; nothing is reread from disk.
 func TestGitContextRefreshClearsOnNonRepo(t *testing.T) {
 	sess, root := newRefreshSession(t, &captureCaller{answer: "ok"})
-	docs := []projectcontext.Document{{Source: "workspace", Path: filepath.Join(root, "AGENTS.md"), Content: strings.Repeat("rule line\n", 3000)}}
-	sess.projectDocs = docs
-	in := sess.sysInputs
-	in.projectContext = projectContextBlock(docs, projectContextBudget(sess.gitSnapshot.PayloadBytes))
-	if err := sess.mount(sess.mountAt, nil, in); err != nil {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	writeTrustDocument(t, root, strings.Repeat("rule line\n", 3000))
+	docs, err := loadProjectContextDocs(t.Context(), root, os.Getenv)
+	if err != nil {
 		t.Fatal(err)
 	}
-	if in.projectContext == projectContextBlock(docs, projectContextMaxBytes) {
-		t.Fatal("fixture: the Git payload must actually reduce the project budget")
-	}
+	state := newProjectContextState(root, docs, false, nil)
+	sess.projectContext = &state
+	trustSlash(t, sess, "/trust "+trustFixtureDigest(t, root))
+	before := sess.sysInputs.projectContext
 	if err := os.RemoveAll(filepath.Join(root, ".git")); err != nil {
 		t.Fatal(err)
 	}
@@ -136,7 +135,7 @@ func TestGitContextRefreshClearsOnNonRepo(t *testing.T) {
 	if sess.sysInputs.gitContext != "" || gitFences(sess.baseSystem) != 0 || sess.gitSnapshot.Block != "" || sess.gitSnapshot.Absence != gitContextNotRepository {
 		t.Fatalf("stale Git state after clearing: inputs=%q snapshot=%+v", sess.sysInputs.gitContext, sess.gitSnapshot)
 	}
-	if sess.sysInputs.projectContext != projectContextBlock(docs, projectContextMaxBytes) || !strings.Contains(sess.baseSystem, "rule line") {
+	if sess.sysInputs.projectContext == before || !strings.Contains(sess.baseSystem, "rule line") {
 		t.Fatal("project context was not re-rendered at the full budget after the Git block cleared")
 	}
 	if sess.baseSystem != composeSystem(sess.sysInputs) {
@@ -216,7 +215,7 @@ func TestGitContextRefreshAfterCapabilityMounts(t *testing.T) {
 func TestGitContextRefreshFailedReplaceLeavesSessionUnchanged(t *testing.T) {
 	sess, root := newRefreshSession(t, &captureCaller{answer: "ok"})
 	gitContextTestRun(t, root, "checkout", "-q", "-b", "feature") // a change is pending
-	in, system, snap, docs := sess.sysInputs, sess.baseSystem, sess.gitSnapshot, sess.projectDocs
+	in, system, snap, docs := sess.sysInputs, sess.baseSystem, sess.gitSnapshot, sess.projectContext
 	if err := sess.runtime.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -224,7 +223,7 @@ func TestGitContextRefreshFailedReplaceLeavesSessionUnchanged(t *testing.T) {
 	if !strings.HasPrefix(got, "git context refresh failed: runtime: ") || !strings.Contains(got, "closed") {
 		t.Fatalf("refresh output = %q", got)
 	}
-	if sess.sysInputs != in || sess.baseSystem != system || !reflect.DeepEqual(sess.gitSnapshot, snap) || !reflect.DeepEqual(sess.projectDocs, docs) {
+	if sess.sysInputs != in || sess.baseSystem != system || !reflect.DeepEqual(sess.gitSnapshot, snap) || !reflect.DeepEqual(sess.projectContext, docs) {
 		t.Fatal("a failed replacement changed session state")
 	}
 }

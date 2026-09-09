@@ -23,7 +23,6 @@ import (
 	golemruntime "github.com/kstruzzieri/go-llm/golem"
 	"github.com/kstruzzieri/go-llm/internal/providerbootstrap"
 	"github.com/kstruzzieri/go-llm/mcpclient"
-	"github.com/kstruzzieri/go-llm/projectcontext"
 	"github.com/kstruzzieri/go-llm/provider"
 	"github.com/kstruzzieri/go-llm/provider/openaicompat"
 	"github.com/kstruzzieri/go-llm/rag"
@@ -100,6 +99,9 @@ type flags struct {
 	outputFormat        string          // -output-format: text|json|stream-json (#352)
 	outputFormatSet     bool            // -output-format was passed (distinguishes an explicit empty value)
 	allowTools          stringSliceFlag // -allow-tool: exact gated tool names for headless runs (#352)
+
+	trustProjectContext    string
+	trustProjectContextSet bool
 }
 
 func parseFlags(args []string) (flags, error) {
@@ -136,6 +138,7 @@ func parseFlags(args []string) (flags, error) {
 	fs.BoolVar(&f.noAutoIndex, "no-auto-index", false, "disable startup auto-index refresh, which otherwise skips detected secret/payment-card files by default; existing auto indexes may still be used")
 	fs.BoolVar(&f.progressive, "progressive", false, "generate and retrieve opt-in L0/L1 progressive source summaries; enable mixed context assembly")
 	fs.BoolVar(&f.grounding, "grounding", false, "verify the final answer's claims against the retrieval evidence in the final prompt; prints one supported/partial/unsupported line (full report under -trace)")
+	fs.StringVar(&f.trustProjectContext, "trust-project-context", "", "approve the exact project document snapshot (sha256: plus 64 lowercase hex digits)")
 	fs.BoolVar(&f.noProjectContext, "no-project-context", false, "do not load AGENTS.md project-context files into the system prompt")
 	fs.BoolVar(&f.noGitContext, "no-git-context", false, "do not inject the repository snapshot (branch, status, recent commits) into the system prompt")
 	fs.BoolVar(&f.noCompress, "no-compress", false, "disable post-turn conversation compression into a durable summary")
@@ -184,6 +187,8 @@ func parseFlags(args []string) (flags, error) {
 	}
 	fs.Visit(func(fl *flag.Flag) {
 		switch fl.Name {
+		case "trust-project-context":
+			f.trustProjectContextSet = true
 		case "p":
 			f.promptSet = true
 		case "plan-workers":
@@ -231,6 +236,14 @@ func autoIndexEnabled(f flags, autoErr, embChainErr error) bool {
 
 // validateFlags rejects flag values flag.Parse cannot police.
 func validateFlags(f flags) error {
+	if f.trustProjectContextSet {
+		if f.noProjectContext {
+			return fmt.Errorf("-trust-project-context conflicts with -no-project-context")
+		}
+		if _, err := parseProjectContextDigest(f.trustProjectContext); err != nil {
+			return err
+		}
+	}
 	if f.scratch && !f.allowExec {
 		return fmt.Errorf("golem: -scratch requires -allow-exec")
 	}
@@ -844,6 +857,13 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 	if f.agentflowStatus {
 		return runAgentflowStatus(ctx, stdout, root, f.agentflowSrc, f.jsonOutput)
 	}
+
+	projectState, pendingTrust, err := preflightProjectContext(ctx, stderr, root, f)
+	if err != nil {
+		reportPreRunFailure(stdout, outFormat, "project_context_untrusted", err)
+		return err
+	}
+	grants := newApprovalGrants()
 
 	// #352: config load/resolution failures are caller errors (exit 2) on the
 	// headless surface; the classification stops at these pure-config sites —
@@ -1481,17 +1501,8 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 			}
 		}
 	}
-	var projectDocs []projectcontext.Document
-	projectContextLine := ""
-	if !f.noProjectContext {
-		if docs, perr := loadProjectContextDocs(ctx, root, os.Getenv); perr != nil {
-			warns = append(warns, "project context disabled: "+perr.Error())
-		} else if len(docs) > 0 {
-			projectDocs = docs
-			sysIn.projectContext = projectContextBlock(docs, projectContextBudget(gitSnap.PayloadBytes))
-			projectContextLine = fmt.Sprintf("project context: loaded %d file(s)", len(docs))
-		}
-	}
+	sysIn = projectContextInputs(sysIn, projectState.docs, gitSnap, pendingTrust)
+	gitSnap.Block = sysIn.gitContext
 
 	var sessn *session
 	var sessionLine string
@@ -1533,29 +1544,28 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 		agentMemoryLine += "; created signing identity " + mrt.records.CreatedKeyID()
 	}
 	for _, line := range startupNotices(startupInfo{
-		workspace:          root,
-		agentflowState:     shouldShowAgentflowHint(f) && agentflowStateDetected(root),
-		backendLine:        backendRes.notice,
-		useRecommend:       plan.useRecommend,
-		activeUseCase:      plan.useCase,
-		suppliedByUseCase:  plan.suppliedByUseCase,
-		bootstrapWarns:     bundle.Warnings,
-		preflightWarns:     warns,
-		retrieveLine:       retrieveLine,
-		retrieveOmitted:    retrieveOmitted,
-		retrieveRequested:  retrieveRequested,
-		thinkLine:          thinkLine,
-		inputCeilingLine:   inputCeiling.line(),
-		sessionLine:        sessionLine,
-		projectContextLine: projectContextLine,
-		gitContextLine:     gitContextLine,
-		memoryLine:         memoryLine,
-		agentMemoryLine:    agentMemoryLine,
-		mcpLine:            mcpLine,
-		delegateLine:       delegateLine,
-		scratchLine:        scratchLine,
-		dispatchLine:       dispatchLine,
-		interceptorLine:    interceptorLine,
+		workspace:         root,
+		agentflowState:    shouldShowAgentflowHint(f) && agentflowStateDetected(root),
+		backendLine:       backendRes.notice,
+		useRecommend:      plan.useRecommend,
+		activeUseCase:     plan.useCase,
+		suppliedByUseCase: plan.suppliedByUseCase,
+		bootstrapWarns:    bundle.Warnings,
+		preflightWarns:    warns,
+		retrieveLine:      retrieveLine,
+		retrieveOmitted:   retrieveOmitted,
+		retrieveRequested: retrieveRequested,
+		thinkLine:         thinkLine,
+		inputCeilingLine:  inputCeiling.line(),
+		sessionLine:       sessionLine,
+		gitContextLine:    gitContextLine,
+		memoryLine:        memoryLine,
+		agentMemoryLine:   agentMemoryLine,
+		mcpLine:           mcpLine,
+		delegateLine:      delegateLine,
+		scratchLine:       scratchLine,
+		dispatchLine:      dispatchLine,
+		interceptorLine:   interceptorLine,
 	}) {
 		_, _ = fmt.Fprintln(stderr, line)
 	}
@@ -1650,7 +1660,6 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 		root:                root,
 		stdinTerminal:       stdinTerminal,
 		sysInputs:           sysIn,
-		projectDocs:         projectDocs,
 		gitSnapshot:         gitSnap,
 		noGitContext:        f.noGitContext,
 		noCompress:          f.noCompress,
@@ -1666,7 +1675,7 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 		session:             sessn,
 		journal:             journal,
 		bgManager:           bgManager,
-		grants:              newApprovalGrants(),
+		grants:              grants,
 		destAdmission:       adm,
 		headlessApprover:    headlessApproverFor(allowTools),
 		machine:             newMachineWriter(stdout, outFormat),
@@ -1685,7 +1694,16 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 		thinkModels:         bundle.Models,
 		thinkChain:          append([]string(nil), plan.chain...),
 		startupModelOptions: thinkOpts,
+
+		projectContext:         &projectState,
+		projectContextScripted: scriptedProjectContext(f),
 	}
+	if pendingTrust {
+		projectState.approve(grants, projectState.digest)
+		sess.publishedProjectKey = projectState.grantKey
+		showPublishedProjectContext(stderr, sess, nil)
+	}
+
 	if sess.maxSteps == 0 {
 		sess.maxSteps = 16 // mirror agent defaultMaxSteps so the footer's k/max is accurate
 	}
@@ -1796,6 +1814,20 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 		startAutoIndex = hooks.startAutoIndex
 	}
 
+	// One boundary for both AgentFlow routes, after setup hooks and immediately
+	// before invocation. Internal planner/task steps keep this captured snapshot.
+	invokeAgentflow := func(src lineSource) error {
+		runCtx, cancel := interruptContext(ctx, interrupts)
+		defer cancel()
+		if err := refreshProjectContext(runCtx, stderr, sess); err != nil {
+			return err
+		}
+		if f.goalSet {
+			return runAgentflowAuthor(runCtx, src, stdout, stderr, interrupts, sess, f, root)
+		}
+		return runAgentflowTask(runCtx, stdout, stderr, interrupts, sess, f, root)
+	}
+
 	// Final dispatch. A line source is created only where an interactive read
 	// can actually happen, so the modes that never read stdin open no reader.
 	//
@@ -1829,7 +1861,7 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 			Root:        root,
 			OnInterrupt: onInterrupt,
 		}), func(src lineSource) error {
-			return runAgentflowAuthor(ctx, src, stdout, stderr, interrupts, sess, f, root)
+			return invokeAgentflow(src)
 		})
 	case sourceNone:
 		if startAutoIndex != nil {
@@ -1842,10 +1874,10 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 			}
 		}
 		if f.goalSet {
-			return runAgentflowAuthor(ctx, nil, stdout, stderr, interrupts, sess, f, root)
+			return invokeAgentflow(nil)
 		}
 		if f.planPath != "" {
-			return runAgentflowTask(ctx, stdout, stderr, interrupts, sess, f, root)
+			return invokeAgentflow(nil)
 		}
 		return runOneShot(ctx, stdout, stderr, interrupts, sess, f.prompt)
 	}

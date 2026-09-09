@@ -124,7 +124,7 @@ func TestLoadGitContextHostileRepositoryContent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	block := snap.Block
+	block := projectContextInputs(systemInputs{}, nil, snap, false).gitContext
 	if n := strings.Count(block, "<<<GIT_CONTEXT"); n != 1 {
 		t.Fatalf("open sentinel count=%d, want only the genuine opener:\n%s", n, block)
 	}

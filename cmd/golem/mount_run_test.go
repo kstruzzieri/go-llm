@@ -181,7 +181,7 @@ func TestStartupComposesProjectContextIntoSystem(t *testing.T) {
 	errStop := errors.New("stop after startup")
 	var system, block string
 	err := run([]string{"-config", configPath, "-root", root, "-no-probe", "-no-cap-probe", "-no-session",
-		"-no-memory", "-no-auto-index"}, stdin, stdout, stderr, runHooks{
+		"-no-memory", "-no-auto-index", "-trust-project-context", trustFixtureDigest(t, root)}, stdin, stdout, stderr, runHooks{
 		startAutoIndex: func() func() { return func() {} },
 		afterSessionReady: func(sess *replSession) error {
 			system, block = sess.baseSystem, sess.sysInputs.projectContext

@@ -2,12 +2,15 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
 	"fmt"
 	"io"
+	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strconv"
 	"strings"
@@ -15,6 +18,198 @@ import (
 	"github.com/kstruzzieri/go-llm/internal/promptfence"
 	"github.com/kstruzzieri/go-llm/projectcontext"
 )
+
+type projectContextTrustError struct{ message string }
+
+func (e *projectContextTrustError) Error() string { return e.message }
+
+func scriptedProjectContext(f flags) bool { return f.promptSet || f.goalSet || f.planPath != "" }
+
+func preflightProjectContext(ctx context.Context, out io.Writer, root string, f flags) (projectContextState, bool, error) {
+	if f.noProjectContext {
+		return projectContextState{disabled: true}, false, nil
+	}
+	docs, loadErr := loadProjectContextDocs(ctx, root, os.Getenv)
+	state := newProjectContextState(root, docs, false, nil)
+	if f.trustProjectContextSet && scriptedProjectContext(f) {
+		digest, _ := parseProjectContextDigest(f.trustProjectContext)
+		state.requiredDigest = &digest
+	}
+	showProjectContext(out, state, loadErr, scriptedProjectContext(f))
+	pending := false
+	if f.trustProjectContextSet {
+		digest, _ := parseProjectContextDigest(f.trustProjectContext)
+		pending = loadErr == nil && len(docs) > 0 && digest == state.digest
+		if !pending {
+			err := state.requirementError(digest, loadErr)
+			_, _ = fmt.Fprintln(out, err)
+			if scriptedProjectContext(f) {
+				return state, false, err
+			}
+		}
+	}
+	return state, pending, ctx.Err()
+}
+
+func (s projectContextState) requirementError(expected [32]byte, cause error) error {
+	actual := "no documents"
+	if cause != nil {
+		actual = "unavailable: " + gitContextText(cause.Error())
+	} else if len(s.docs) > 0 {
+		actual = formatProjectContextDigest(s.digest) + " (local approval required)"
+	}
+	return &projectContextTrustError{message: fmt.Sprintf("project context untrusted: expected %s; actual %s", formatProjectContextDigest(expected), actual)}
+}
+
+func showProjectContext(out io.Writer, state projectContextState, cause error, scripted bool) {
+	if cause != nil {
+		_, _ = fmt.Fprintln(out, "project context unavailable: "+gitContextText(cause.Error()))
+		return
+	}
+	manifest := projectContextManifest(state.docs, state.digest, nil)
+	if scripted {
+		manifest = strings.ReplaceAll(manifest, "approve with: /trust ", "approve with: -trust-project-context ")
+	}
+	_, _ = io.WriteString(out, manifest)
+}
+
+// observeProjectContext revokes authority immediately; publication may still fail
+// and must be retried against the last successfully installed inputs.
+func observeProjectContext(ctx context.Context, out io.Writer, sess *replSession) error {
+	s := sess.projectContext
+	if s == nil || s.disabled {
+		return ctx.Err()
+	}
+	docs, err := loadProjectContextDocs(ctx, sess.root, os.Getenv)
+	if err != nil {
+		docs = nil
+	}
+	s.replace(sess.root, docs, sess.grants)
+	if err != nil || !s.trusted(sess.grants) {
+		showProjectContext(out, *s, err, sess.projectContextScripted)
+	}
+	return err
+}
+
+func publishProjectContext(sess *replSession, snap gitContextSnapshot, trusted bool) error {
+	var docs []projectcontext.Document
+	key := ""
+	if sess.projectContext != nil {
+		docs = sess.projectContext.docs
+		if trusted {
+			key = sess.projectContext.grantKey
+		}
+	}
+	sameGit := (snap.Block != "") == (sess.gitSnapshot.Block != "") && reflect.DeepEqual(snap.State, sess.gitSnapshot.State)
+	if sameGit && (sess.sysInputs.gitContext != "") == (snap.Block != "") && key == sess.publishedProjectKey && (sess.sysInputs.projectContext != "") == (key != "") {
+		sess.gitSnapshot.Absence = snap.Absence
+		return nil
+	}
+	next := projectContextInputs(sess.sysInputs, docs, snap, trusted)
+	if err := sess.mount(sess.mountAt, nil, next); err != nil {
+		return fmt.Errorf("runtime: %w", err)
+	}
+	snap.Block = next.gitContext
+	sess.gitSnapshot = snap
+	sess.publishedProjectKey = key
+	return nil
+}
+
+func refreshProjectContext(ctx context.Context, out io.Writer, sess *replSession) error {
+	cause := observeProjectContext(ctx, out, sess)
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	s := sess.projectContext
+	if s == nil {
+		return nil
+	}
+	if err := publishProjectContext(sess, sess.gitSnapshot, s.trusted(sess.grants)); err != nil {
+		return err
+	}
+	if s.requiredDigest != nil && (cause != nil || !s.trusted(sess.grants) || s.digest != *s.requiredDigest) {
+		return s.requirementError(*s.requiredDigest, cause)
+	}
+	return nil
+}
+
+func handleTrust(ctx context.Context, out io.Writer, sess *replSession, fields []string) {
+	s := sess.projectContext
+	if s == nil || s.disabled {
+		_, _ = fmt.Fprintln(out, "project context disabled (-no-project-context)")
+		return
+	}
+	cause := observeProjectContext(ctx, io.Discard, sess)
+	if err := ctx.Err(); err != nil {
+		_, _ = fmt.Fprintln(out, gitContextText(err.Error()))
+		return
+	}
+	// Parse only after rediscovery has revoked any changed local identity.
+	var consent bool
+	var consentErr error
+	var digest [32]byte
+	switch len(fields) {
+	case 1:
+	case 2:
+		digest, consentErr = parseProjectContextDigest(fields[1])
+		if consentErr == nil {
+			consent = cause == nil && len(s.docs) > 0 && digest == s.digest
+			if !consent {
+				consentErr = s.requirementError(digest, cause)
+			}
+		}
+	default:
+		consentErr = fmt.Errorf("usage: /trust [sha256:<64 lowercase hex digits>]")
+	}
+	if err := publishProjectContext(sess, sess.gitSnapshot, consent || s.trusted(sess.grants)); err != nil {
+		_, _ = fmt.Fprintln(out, "project context refresh failed: "+gitContextText(err.Error()))
+		return
+	}
+	if consent {
+		if sess.grants == nil {
+			sess.grants = newApprovalGrants()
+		}
+		s.approve(sess.grants, digest)
+	}
+	showPublishedProjectContext(out, sess, cause)
+	if consentErr != nil {
+		_, _ = fmt.Fprintln(out, consentErr)
+	}
+}
+
+// Read retention from the actual published frame. The keyed headers cannot be
+// reproduced by captured file bytes, and full content comparison avoids treating
+// a document-authored truncation notice as a renderer decision.
+func showPublishedProjectContext(out io.Writer, sess *replSession, cause error) {
+	s := sess.projectContext
+	if cause != nil || !s.trusted(sess.grants) {
+		showProjectContext(out, *s, cause, sess.projectContextScripted)
+		return
+	}
+	frame := sess.sysInputs.projectContext
+	opener := strings.Index(frame, "<<<PROJECT_CONTEXT ")
+	key := strings.Fields(frame[opener:])[1]
+	statuses := make([]projectContextRetention, len(s.docs))
+	for i, doc := range s.docs {
+		statuses[i] = projectContextOmitted
+		header := strings.Index(sess.sysInputs.projectContext, fmt.Sprintf("\n[%s P%d] source=", key, i+1))
+		if header < 0 {
+			continue
+		}
+		start := header + strings.IndexByte(frame[header+1:], '\n') + 2
+		statuses[i] = projectContextTruncated
+		content := neutralizeFence(strings.ToValidUTF8(doc.Content, "�")) + "\n"
+		if !doc.Truncated && strings.HasPrefix(sess.sysInputs.projectContext[start:], content) {
+			statuses[i] = projectContextRetained
+		}
+	}
+	manifest := projectContextManifest(s.docs, s.digest, statuses)
+	if sess.projectContextScripted {
+		manifest = strings.ReplaceAll(manifest, "approve with: /trust ", "approve with: -trust-project-context ")
+	}
+	_, _ = io.WriteString(out, manifest)
+	_, _ = fmt.Fprintln(out, "project context approved: "+formatProjectContextDigest(s.digest))
+}
 
 const (
 	projectContextContentDomain = "golem-project-context-content-v1\x00"
