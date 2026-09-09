@@ -195,7 +195,7 @@ func resolveDispatchFanout(capacity func(provider.ModelKey) (int, bool), chain [
 // gemma4:31b measured task 2 starving behind task 1 (single model calls ran
 // 76-347s), so golem budgets that per-task ceiling times the 4-task maximum;
 // governed fan-out only shrinks wall clock below that worst case.
-func newDispatchTool(caller agent.ModelCaller, f flags, budget agent.Budget, fan dispatchFanout, notify func(string), available []agent.Tool) (agent.Tool, error) {
+func newDispatchTool(caller agent.ModelCaller, f flags, budget agent.Budget, fan dispatchFanout, notify func(string), available []agent.Tool, canary *canaryBinding) (agent.Tool, error) {
 	var onChildComplete func(int, int)
 	if notify != nil {
 		onChildComplete = func(index, total int) {
@@ -208,7 +208,7 @@ func newDispatchTool(caller agent.ModelCaller, f flags, budget agent.Budget, fan
 		Concurrency:     fan.governor,
 		OnChildComplete: onChildComplete,
 		Timeout:         20 * time.Minute, // 5m per task x 4 max tasks
-	}, interceptorsFor(f)...)
+	}, interceptorsFor(f, canary)...)
 	if err != nil {
 		return nil, fmt.Errorf("golem: build dispatch tool: %w", err)
 	}

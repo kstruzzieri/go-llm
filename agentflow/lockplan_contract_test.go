@@ -37,7 +37,7 @@ func TestAgentflowRunnerForTest_PrefersSourceOverride(t *testing.T) {
 		t.Fatalf("runner = %T, want *ExecRunner", runner)
 	}
 	bin, argv, env := runner.commandFor([]string{"--version"})
-	if bin != "python3" || !reflect.DeepEqual(argv, []string{"-m", "agentflow", "--version"}) ||
+	if bin != "python3" || !reflect.DeepEqual(argv, []string{"-P", "-m", "agentflow", "--version"}) ||
 		!reflect.DeepEqual(env, []string{"PYTHONPATH=/preferred-checkout/src"}) {
 		t.Fatalf("command = (%q, %v, %v), want explicit source checkout", bin, argv, env)
 	}

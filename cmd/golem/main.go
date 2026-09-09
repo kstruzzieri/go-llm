@@ -5,6 +5,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -155,7 +156,7 @@ func parseFlags(args []string) (flags, error) {
 	fs.IntVar(&f.planWorkers, "plan-workers", 1, "AgentFlow task mode: maximum workers for the initial parallel plan cohort (positive; requires -plan)")
 	fs.BoolVar(&f.approveEdits, "approve-plan-edits", false, "required in task mode: auto-approve step-scoped write/edit (still bounded by the step-scope and .agent guards)")
 	fs.BoolVar(&f.approveGates, "approve-plan-gates", false, "required in task mode: auto-run plan-declared validation gates")
-	fs.StringVar(&f.agentflowSrc, "agentflow-src", "", "run 'python3 -m agentflow' with PYTHONPATH=<checkout>/src instead of the agentflow binary")
+	fs.StringVar(&f.agentflowSrc, "agentflow-src", "", "run 'python3 -P -m agentflow' with PYTHONPATH=<checkout>/src instead of the agentflow binary (Python 3.11+)")
 	fs.BoolVar(&f.agentflowStatus, "agentflow-status", false, "inspect the current Agentflow next action without mutation")
 	fs.BoolVar(&f.agentflowResume, "agentflow-resume", false, "resume an existing Agentflow run serially; requires -plan and both plan approvals")
 	fs.BoolVar(&f.jsonOutput, "json", false, "with -agentflow-status, relay Agentflow next-action JSON verbatim")
@@ -591,11 +592,15 @@ func startupNotices(info startupInfo) []string {
 // startup orchestrator, every factory-built orchestrator, and every dispatch
 // child derive exactly this list from the production flags value. nil when
 // -interceptors is off.
-func interceptorsFor(f flags) []agent.Interceptor {
+func interceptorsFor(f flags, canary *canaryBinding) []agent.Interceptor {
 	if !f.interceptors {
 		return nil
 	}
-	return interceptor.Defaults()
+	if canary == nil {
+		// An omitted binding fails at ForRun instead of silently losing policy.
+		canary = &canaryBinding{}
+	}
+	return append(interceptor.Defaults(), canary)
 }
 
 // interceptorsNotice names the installed chain in the startup notice, from
@@ -623,7 +628,7 @@ func interceptorsNotice(ics []agent.Interceptor) string {
 // A typed-nil verifier would satisfy the interface and panic on first use
 // (#347); the factory normalizes the two concrete types it can receive so
 // that guarantee does not rest on every call site.
-func newOrchestratorFactory(caller agent.ModelCaller, f flags, verifier agent.Verifier) func() *agent.Orchestrator {
+func newOrchestratorFactory(caller agent.ModelCaller, f flags, verifier agent.Verifier, canary *canaryBinding) func() *agent.Orchestrator {
 	var opts []agent.Option
 	if verifier = nonNilVerifier(verifier); verifier != nil {
 		opts = append(opts, agent.WithVerifier(verifier))
@@ -641,7 +646,7 @@ func newOrchestratorFactory(caller agent.ModelCaller, f flags, verifier agent.Ve
 			Max:  agenttools.DefaultDispatchCallsPerRun,
 		}))
 	}
-	if ics := interceptorsFor(f); len(ics) > 0 {
+	if ics := interceptorsFor(f, canary); len(ics) > 0 {
 		// #514 D2: the same chain on every orchestrator this factory builds;
 		// dispatch children receive it through newDispatchTool from the same
 		// flags value.
@@ -690,6 +695,9 @@ func main() {
 		if errors.As(err, &statusErr) {
 			os.Exit(statusErr.ExitCode())
 		}
+		if code, ok := auditExitCode(err); ok {
+			os.Exit(code)
+		}
 		// runIndex/runOneShot already rendered their own output; just exit non-zero.
 		if errors.Is(err, errIndexFailed) || errors.Is(err, errOneShotFailed) || errors.Is(err, errAgentflowTaskFailed) || errors.Is(err, errSourceFailed) {
 			os.Exit(exitCodeFor(err))
@@ -713,6 +721,7 @@ func colorPermitted(noColor bool) bool {
 // must control or observe deterministically. A zero value is the production
 // path; it neither replaces composition nor coordinates shutdown.
 type runHooks struct {
+	canaryEntropy       io.Reader
 	openFeedback        func(context.Context, string, string, func(string)) (*feedbackService, error)
 	startAutoIndex      func() func()
 	afterAutoIndexStart func(lineSourceMode, agent.Tool, *feedbackService) error
@@ -759,6 +768,8 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 	}
 	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
 		switch args[0] {
+		case "audit":
+			return runAudit(context.Background(), args[1:], stdout, stderr)
 		case "index":
 			return runIndex(context.Background(), args[1:], stdout, stderr)
 		case "models":
@@ -766,7 +777,7 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 		case "source":
 			return runSource(context.Background(), args[1:], stdin, stdout, stderr)
 		default:
-			return fmt.Errorf("unknown command %q (did you mean \"index\", \"models\", or \"source\"?)", args[0])
+			return fmt.Errorf("unknown command %q (did you mean \"audit\", \"index\", \"models\", or \"source\"?)", args[0])
 		}
 	}
 
@@ -1182,6 +1193,11 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 	// interactive branch rebinds it to replControl.notice before any turn can
 	// invoke dispatch, mirroring feedbackSvc.warn.
 	var dispatchNotice *feedbackNotifier
+	canary, err := newCanaryBinding(f.interceptors, hooks.canaryEntropy)
+	if err != nil {
+		return err
+	}
+
 	dispatchLine := ""
 	if f.dispatch {
 		// #477 D8: dchain was resolved at plan time and its reachability
@@ -1211,7 +1227,7 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 		})
 		fan := resolveDispatchFanout(bundle.Router.SlotCapacity, dchain)
 		caller := newRouterChainCallerFor(bundle.Router, dchain, dispatchUseCase)
-		dpt, derr := newDispatchTool(caller, f, agent.Budget{InputCeiling: childCeiling, OutputReserve: f.outputReserve}, fan, dispatchNotice.notify, tools)
+		dpt, derr := newDispatchTool(caller, f, agent.Budget{InputCeiling: childCeiling, OutputReserve: f.outputReserve}, fan, dispatchNotice.notify, tools, canary)
 		if derr != nil {
 			return derr
 		}
@@ -1223,7 +1239,7 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 		dispatchLine = fmt.Sprintf("dispatch: enabled -> %s", head)
 	}
 	interceptorLine := ""
-	if ics := interceptorsFor(f); len(ics) > 0 {
+	if ics := interceptorsFor(f, canary); len(ics) > 0 {
 		interceptorLine = interceptorsNotice(ics)
 	}
 
@@ -1431,6 +1447,9 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 		dispatch:   f.dispatch,
 		memory:     memoryEnabled,
 	}
+	if canary != nil {
+		sysIn.canary = canary.active.fragment
+	}
 	if !allowTools.empty() {
 		// #352/F6: a selectively mounted run gets a prompt built from the
 		// EXACT mounted set; the group prompt would advertise tools that do
@@ -1569,7 +1588,7 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 		verifySlot = &lateVerifier{}
 		orchVerifier = verifySlot
 	}
-	newOrchestrator := newOrchestratorFactory(newActiveChainCaller(bundle.Router, plan), f, orchVerifier)
+	newOrchestrator := newOrchestratorFactory(newActiveChainCaller(bundle.Router, plan), f, orchVerifier, canary)
 	orch := newOrchestrator()
 
 	obsv, err := newObserv(os.Getenv, root, f.trace, f.telemetry, time.Now)
@@ -1622,6 +1641,7 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 		renderOut = stderr
 	}
 	sess = &replSession{
+		canary:              canary,
 		orch:                orch,
 		runtime:             runtime,
 		newOrchestrator:     newOrchestrator,
