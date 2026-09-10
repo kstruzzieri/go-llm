@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Local tests retain platform and permission skips; native CI workflows enforce
+# bwrap and Seatbelt confinement.
+
 mode="pre-push"
 
 usage() {
@@ -20,6 +23,7 @@ section() {
 require_cmd() {
   if ! command -v "$1" >/dev/null 2>&1; then
     printf 'missing required command: %s\n' "$1" >&2
+    printf 'hint: install the missing command for host runs; for Docker CI, rebuild with: docker compose -f docker-compose.ci.yml build ci\n' >&2
     exit 127
   fi
 }
@@ -79,8 +83,18 @@ if ! grep -q '^module github.com/kstruzzieri/go-llm$' "$repo_root/go.mod"; then
 fi
 cd "$repo_root"
 
-require_cmd golangci-lint
 require_cmd go
+require_cmd golangci-lint
+require_cmd python3
+
+section "security contracts"
+printf 'note: local tests retain platform/permission skips; native bwrap/Seatbelt confinement runs in CI workflows\n'
+security_tests="$(env -u GOROOT go test -list '^TestHardeningContracts$' ./agent)"
+if ! grep -Fxq 'TestHardeningContracts' <<<"$security_tests"; then
+  printf 'missing required security test: TestHardeningContracts\n' >&2
+  exit 1
+fi
+env -u GOROOT go test -count=1 -v -run '^TestHardeningContracts$' ./agent
 
 section "format"
 golangci-lint fmt --diff
@@ -89,9 +103,9 @@ section "lint"
 golangci-lint run
 
 section "race tests"
-go test -race ./...
+env -u GOROOT go test -race ./...
 
 if [ "$mode" = "full" ]; then
   section "compile smoke"
-  go test -run '^$' ./...
+  env -u GOROOT go test -run '^$' ./...
 fi

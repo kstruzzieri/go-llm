@@ -2,10 +2,14 @@
 set -euo pipefail
 
 script_dir="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
-if ! grep -Fq 'run: golangci-lint fmt --diff' "$script_dir/../.github/workflows/ci.yml"; then
+repo_root="$(cd "$script_dir/.." && pwd -P)"
+if ! grep -Fq 'run: golangci-lint fmt --diff' "$repo_root/.github/workflows/ci.yml"; then
   printf 'GitHub CI is missing the all-file formatting gate\n' >&2
   exit 1
 fi
+grep -Fq 'CMD ["./scripts/ci-local", "--mode", "pre-push"]' "$repo_root/Dockerfile.ci"
+grep -Fq 'command: ["./scripts/ci-local", "--mode", "pre-push"]' "$repo_root/docker-compose.ci.yml"
+
 tmp="$(cd "$(mktemp -d)" && pwd -P)"
 trap 'rm -rf "$tmp"' EXIT
 
@@ -20,38 +24,237 @@ cat >"$tmp/bin/golangci-lint" <<'STUB'
 #!/usr/bin/env sh
 printf '%s|%s\n' "$PWD" "$*" >>"$CI_LOCAL_TEST_LOG"
 STUB
-chmod +x "$tmp/bin/golangci-lint"
-ln -s golangci-lint "$tmp/bin/go"
 
-if ! (cd "$tmp/outside" && PATH="$tmp/bin:$PATH" CI_LOCAL_TEST_LOG="$tmp/actual-full" "$module/scripts/ci-local" --mode full); then
-  printf 'absolute-path invocation failed\n' >&2
-  exit 1
+cat >"$tmp/bin/go" <<'STUB'
+#!/usr/bin/env sh
+if [ "${GOROOT+x}" = x ]; then
+  printf 'go stub received poisoned GOROOT: %s\n' "$GOROOT" >&2
+  exit 39
 fi
+printf '%s|%s\n' "$PWD" "$*" >>"$CI_LOCAL_TEST_LOG"
+case "$*" in
+  'test -list ^TestHardeningContracts$ ./agent')
+    printf 'stub: security discovery\n' >&2
+    printf '%s\n' "$CI_LOCAL_DISCOVERY_OUTPUT"
+    if [ "$CI_LOCAL_DISCOVERY_STATUS" -ne 0 ]; then
+      printf '%s\n' "$CI_LOCAL_DISCOVERY_ERROR" >&2
+      exit "$CI_LOCAL_DISCOVERY_STATUS"
+    fi
+    ;;
+  'test -count=1 -v -run ^TestHardeningContracts$ ./agent')
+    printf 'stub: security execution\n' >&2
+    exit "$CI_LOCAL_SECURITY_STATUS"
+    ;;
+  'test -race ./...')
+    exit "$CI_LOCAL_RACE_STATUS"
+    ;;
+esac
+STUB
 
-cat >"$tmp/expected-full" <<EOF
+cat >"$tmp/bin/python3" <<'STUB'
+#!/usr/bin/env sh
+exit 0
+STUB
+
+cat >"$tmp/bin/docker" <<'STUB'
+#!/usr/bin/env sh
+printf '%s\n' "$*" >>"$CI_LOCAL_TEST_LOG"
+exit "${CI_LOCAL_DOCKER_STATUS:-0}"
+STUB
+chmod +x "$tmp/bin/golangci-lint" "$tmp/bin/go" "$tmp/bin/python3" "$tmp/bin/docker"
+
+discovery_output=TestHardeningContracts
+discovery_status=0
+discovery_error='discovery failed'
+security_status=0
+race_status=0
+caller_goroot=''
+ci_status=0
+
+run_ci() {
+  name="$1"
+  shift
+  : >"$tmp/$name.log"
+  set +e
+  (
+    cd "$tmp/outside"
+    if [ -n "$caller_goroot" ]; then
+      export GOROOT="$caller_goroot"
+    else
+      unset GOROOT
+    fi
+    PATH="$tmp/bin:$PATH" \
+      CI_LOCAL_TEST_LOG="$tmp/$name.log" \
+      CI_LOCAL_DISCOVERY_OUTPUT="$discovery_output" \
+      CI_LOCAL_DISCOVERY_STATUS="$discovery_status" \
+      CI_LOCAL_DISCOVERY_ERROR="$discovery_error" \
+      CI_LOCAL_SECURITY_STATUS="$security_status" \
+      CI_LOCAL_RACE_STATUS="$race_status" \
+      "$module/scripts/ci-local" "$@"
+  ) >"$tmp/$name.out" 2>&1
+  ci_status=$?
+  set -e
+}
+
+assert_status() {
+  if [ "$ci_status" -ne "$2" ]; then
+    printf '%s: got exit %s, want %s\n' "$1" "$ci_status" "$2" >&2
+    cat "$tmp/$1.out" >&2
+    exit 1
+  fi
+}
+
+assert_scope_notice() {
+  awk '
+    $0 == "note: local tests retain platform/permission skips; native bwrap/Seatbelt confinement runs in CI workflows" { count++; note = NR }
+    $0 == "stub: security discovery" && !discovery { discovery = NR }
+    END { exit !(count == 1 && note < discovery) }
+  ' "$tmp/$1.out"
+}
+
+write_expected() {
+  cat >"$tmp/$1" <<EOF
+$module|test -list ^TestHardeningContracts$ ./agent
+$module|test -count=1 -v -run ^TestHardeningContracts$ ./agent
 $module|fmt --diff
 $module|run
 $module|test -race ./...
-$module|test -run ^$ ./...
 EOF
-diff -u "$tmp/expected-full" "$tmp/actual-full"
+  if [ "$2" = full ]; then
+    printf '%s|test -run ^$ ./...\n' "$module" >>"$tmp/$1"
+  fi
+}
 
-# Relative invocation with a hostile CDPATH: the decoy is a valid layout, so an
-# unhardened `cd` inside ci-local would run the gate against the wrong checkout.
+write_expected expected-pre-push pre-push
+write_expected expected-full full
+
+run_ci default
+assert_status default 0
+diff -u "$tmp/expected-pre-push" "$tmp/default.log"
+assert_scope_notice default
+
+run_ci explicit-pre-push --mode pre-push
+assert_status explicit-pre-push 0
+diff -u "$tmp/expected-pre-push" "$tmp/explicit-pre-push.log"
+
+# A hostile CDPATH must not redirect the script into a valid decoy checkout.
 mkdir -p "$tmp/decoy/scripts"
 printf 'module github.com/kstruzzieri/go-llm\n' >"$tmp/decoy/go.mod"
 touch "$tmp/decoy/docker-compose.ci.yml"
-if ! (cd "$module" && CDPATH="$tmp/decoy" PATH="$tmp/bin:$PATH" CI_LOCAL_TEST_LOG="$tmp/actual-pre-push" scripts/ci-local --mode pre-push); then
-  printf 'relative pre-push invocation failed\n' >&2
-  exit 1
-fi
+: >"$tmp/hostile-cdpath.log"
+set +e
+(
+  cd "$module"
+  CDPATH="$tmp/decoy" PATH="$tmp/bin:$PATH" \
+    CI_LOCAL_TEST_LOG="$tmp/hostile-cdpath.log" \
+    CI_LOCAL_DISCOVERY_OUTPUT=TestHardeningContracts \
+    CI_LOCAL_DISCOVERY_STATUS=0 \
+    CI_LOCAL_DISCOVERY_ERROR='discovery failed' \
+    CI_LOCAL_SECURITY_STATUS=0 \
+    CI_LOCAL_RACE_STATUS=0 \
+    scripts/ci-local --mode pre-push
+) >"$tmp/hostile-cdpath.out" 2>&1
+ci_status=$?
+set -e
+assert_status hostile-cdpath 0
+diff -u "$tmp/expected-pre-push" "$tmp/hostile-cdpath.log"
 
-cat >"$tmp/expected-pre-push" <<EOF
-$module|fmt --diff
-$module|run
-$module|test -race ./...
+run_ci full --mode full
+assert_status full 0
+diff -u "$tmp/expected-full" "$tmp/full.log"
+
+caller_goroot=/poisoned
+run_ci poisoned-goroot --mode full
+assert_status poisoned-goroot 0
+diff -u "$tmp/expected-full" "$tmp/poisoned-goroot.log"
+caller_goroot=''
+
+discovery_output='? github.com/kstruzzieri/go-llm/other [no test files]
+TestHardeningContracts
+ok github.com/kstruzzieri/go-llm/agent 0.001s'
+run_ci package-summary --mode pre-push
+assert_status package-summary 0
+diff -u "$tmp/expected-pre-push" "$tmp/package-summary.log"
+
+discovery_output=''
+head -n 1 "$tmp/expected-pre-push" >"$tmp/expected-discovery-only"
+for mode in pre-push full; do
+  run_ci "missing-empty-$mode" --mode "$mode"
+  assert_status "missing-empty-$mode" 1
+  grep -Fxq 'missing required security test: TestHardeningContracts' "$tmp/missing-empty-$mode.out"
+  diff -u "$tmp/expected-discovery-only" "$tmp/missing-empty-$mode.log"
+done
+
+discovery_output=TestHardeningContractsRenamed
+for mode in pre-push full; do
+  run_ci "missing-renamed-$mode" --mode "$mode"
+  assert_status "missing-renamed-$mode" 1
+  grep -Fxq 'missing required security test: TestHardeningContracts' "$tmp/missing-renamed-$mode.out"
+  diff -u "$tmp/expected-discovery-only" "$tmp/missing-renamed-$mode.log"
+done
+
+discovery_output=TestHardeningContracts
+discovery_status=38
+discovery_error='discovery status 38 preserved'
+run_ci discovery-failure --mode pre-push
+assert_status discovery-failure 38
+grep -Fxq 'discovery status 38 preserved' "$tmp/discovery-failure.out"
+diff -u "$tmp/expected-discovery-only" "$tmp/discovery-failure.log"
+
+discovery_status=0
+for mode in pre-push full; do
+  security_status=37
+  run_ci "security-failure-$mode" --mode "$mode"
+  assert_status "security-failure-$mode" 37
+  head -n 2 "$tmp/expected-pre-push" >"$tmp/expected-security-only"
+  diff -u "$tmp/expected-security-only" "$tmp/security-failure-$mode.log"
+done
+
+security_status=0
+for mode in pre-push full; do
+  race_status=36
+  run_ci "race-failure-$mode" --mode "$mode"
+  assert_status "race-failure-$mode" 36
+  diff -u "$tmp/expected-pre-push" "$tmp/race-failure-$mode.log"
+done
+race_status=0
+
+mkdir -p "$tmp/no-python"
+ln -s "$tmp/bin/go" "$tmp/no-python/go"
+ln -s "$tmp/bin/golangci-lint" "$tmp/no-python/golangci-lint"
+ln -s "$(command -v dirname)" "$tmp/no-python/dirname"
+ln -s "$(command -v grep)" "$tmp/no-python/grep"
+: >"$tmp/missing-python.log"
+set +e
+(
+  cd "$tmp/outside"
+  PATH="$tmp/no-python" CI_LOCAL_TEST_LOG="$tmp/missing-python.log" \
+    /bin/bash "$module/scripts/ci-local" --mode pre-push
+) >"$tmp/missing-python.out" 2>&1
+ci_status=$?
+set -e
+assert_status missing-python 127
+cat >"$tmp/expected-missing-python" <<'EOF'
+missing required command: python3
+hint: install the missing command for host runs; for Docker CI, rebuild with: docker compose -f docker-compose.ci.yml build ci
 EOF
-diff -u "$tmp/expected-pre-push" "$tmp/actual-pre-push"
+diff -u "$tmp/expected-missing-python" "$tmp/missing-python.out"
+test ! -s "$tmp/missing-python.log"
+
+for docker_status in 0 35; do
+  : >"$tmp/hook-$docker_status.log"
+  set +e
+  (
+    cd "$repo_root"
+    PATH="$tmp/bin:$PATH" CI_LOCAL_TEST_LOG="$tmp/hook-$docker_status.log" \
+      CI_LOCAL_DOCKER_STATUS="$docker_status" .githooks/pre-push
+  )
+  ci_status=$?
+  set -e
+  assert_status "hook-$docker_status" "$docker_status"
+  printf '%s\n' 'compose -f docker-compose.ci.yml run --rm ci ./scripts/ci-local --mode full' >"$tmp/expected-hook"
+  diff -u "$tmp/expected-hook" "$tmp/hook-$docker_status.log"
+done
 
 mkdir -p "$tmp/misplaced/scripts"
 cp "$script_dir/ci-local" "$tmp/misplaced/scripts/ci-local"
@@ -69,4 +272,6 @@ if PATH="$tmp/bin:$PATH" CI_LOCAL_TEST_LOG="$tmp/wrong-module-log" "$tmp/wrong-m
   printf 'wrong-module script unexpectedly succeeded\n' >&2
   exit 1
 fi
-grep -F "go.mod does not declare module github.com/kstruzzieri/go-llm" "$tmp/wrong-module-error" >/dev/null
+grep -F 'go.mod does not declare module github.com/kstruzzieri/go-llm' "$tmp/wrong-module-error" >/dev/null
+
+grep -Fq '      python3' "$repo_root/Dockerfile.ci"
