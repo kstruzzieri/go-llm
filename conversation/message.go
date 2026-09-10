@@ -60,6 +60,7 @@ type Conversation struct {
 	Title          string
 	Messages       []Message
 	DurableSummary *DurableSummary
+	Revision       int64
 	CreatedAt      time.Time
 	UpdatedAt      time.Time
 }

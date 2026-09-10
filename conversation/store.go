@@ -94,9 +94,9 @@ func (s *SQLiteStore) Load(ctx context.Context, id string) (*Conversation, error
 	var createdMs, updatedMs int64
 
 	err := s.db.QueryRowContext(ctx,
-		`SELECT id, title, messages, summary_content, summary_message_count, created_at, updated_at FROM conversations WHERE id = ?`,
+		`SELECT id, title, messages, summary_content, summary_message_count, revision, created_at, updated_at FROM conversations WHERE id = ?`,
 		id,
-	).Scan(&conv.ID, &conv.Title, &messagesJSON, &summaryContent, &summaryMessageCount, &createdMs, &updatedMs)
+	).Scan(&conv.ID, &conv.Title, &messagesJSON, &summaryContent, &summaryMessageCount, &conv.Revision, &createdMs, &updatedMs)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			return nil, fmt.Errorf("conversation: load %q: %w", id, ErrNotFound)
