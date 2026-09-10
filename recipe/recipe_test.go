@@ -3,7 +3,9 @@ package recipe
 import (
 	"encoding/json"
 	"errors"
+	"io/fs"
 	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -83,6 +85,270 @@ func TestParseCompleteRecipe(t *testing.T) {
 	}
 	if got.ModelHint == nil || got.ModelHint.Role != "" || got.ModelHint.UseCase != "code-review" {
 		t.Errorf("Parse(complete).ModelHint = %#v, want use_case %q", got.ModelHint, "code-review")
+	}
+}
+
+func TestLoadRegularFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "load-review.recipe.json")
+	data := []byte(`{"version":1,"name":"load-review","description":"Review a loaded change.","goal":"Review {{inputs.target}} for {{inputs.focus}}.","context":"Report concrete findings with file references.","inputs":[{"name":"target","description":"Change or path to review"},{"name":"focus","description":"Review emphasis","default":"security"}],"model_hint":{"role":"Reviewer"}}`)
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatalf("WriteFile(%q) error = %v, want nil", path, err)
+	}
+
+	got, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load(%q) error = %v, want nil", path, err)
+	}
+	defaultValue := "security"
+	want := Recipe{
+		Version:     1,
+		Name:        "load-review",
+		Description: "Review a loaded change.",
+		Goal:        "Review {{inputs.target}} for {{inputs.focus}}.",
+		Context:     "Report concrete findings with file references.",
+		Inputs: []Input{
+			{Name: "target", Description: "Change or path to review"},
+			{Name: "focus", Description: "Review emphasis", Default: &defaultValue},
+		},
+		ModelHint: &ModelHint{Role: "Reviewer"},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("Load(%q) = %#v, want %#v", path, got, want)
+	}
+}
+
+func TestLoadFailures(t *testing.T) {
+	dir := t.TempDir()
+
+	missing := filepath.Join(dir, "missing.recipe.json")
+	err := requireLoadError(t, missing, "load", "stat")
+	if !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("errors.Is(Load(%q), fs.ErrNotExist) = false, want true; error = %v", missing, err)
+	}
+
+	_ = requireLoadError(t, dir, "regular file")
+
+	malformed := filepath.Join(dir, "malformed.recipe.json")
+	if err := os.WriteFile(malformed, []byte(`{"version":`), 0o600); err != nil {
+		t.Fatalf("WriteFile(%q) error = %v, want nil", malformed, err)
+	}
+	_ = requireLoadError(t, malformed, "decode")
+}
+
+func TestLoadSizeBoundary(t *testing.T) {
+	dir := t.TempDir()
+	prefix := []byte(`{"version":1,"name":"review","description":"Review code.","goal":"Review it.","context":"`)
+	suffix := []byte(`"}`)
+	padding := 65536 - len(prefix) - len(suffix)
+	atLimit := append(append(append([]byte{}, prefix...), strings.Repeat("x", padding)...), suffix...)
+	if len(atLimit) != 65536 {
+		t.Fatalf("literal test document length = %d, want 65536", len(atLimit))
+	}
+
+	atLimitPath := filepath.Join(dir, "at-limit.recipe.json")
+	if err := os.WriteFile(atLimitPath, atLimit, 0o600); err != nil {
+		t.Fatalf("WriteFile(%q) error = %v, want nil", atLimitPath, err)
+	}
+	got, err := Load(atLimitPath)
+	if err != nil {
+		t.Fatalf("Load(65536-byte file) error = %v, want nil", err)
+	}
+	if len(got.Context) != padding {
+		t.Errorf("Load(65536-byte file).Context length = %d, want %d", len(got.Context), padding)
+	}
+
+	overLimit := append(append([]byte{}, atLimit...), ' ')
+	if len(overLimit) != 65537 {
+		t.Fatalf("literal oversized test document length = %d, want 65537", len(overLimit))
+	}
+	overLimitPath := filepath.Join(dir, "over-limit.recipe.json")
+	if err := os.WriteFile(overLimitPath, overLimit, 0o600); err != nil {
+		t.Fatalf("WriteFile(%q) error = %v, want nil", overLimitPath, err)
+	}
+	_ = requireLoadError(t, overLimitPath, "size", "65536")
+}
+
+func TestLoadSymlinks(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "target.recipe.json")
+	data := []byte(`{"version":1,"name":"linked","description":"Linked recipe.","goal":"Follow the target."}`)
+	if err := os.WriteFile(target, data, 0o600); err != nil {
+		t.Fatalf("WriteFile(%q) error = %v, want nil", target, err)
+	}
+
+	link := filepath.Join(dir, "linked.recipe.json")
+	if err := os.Symlink(filepath.Base(target), link); err != nil {
+		if errors.Is(err, fs.ErrPermission) || errors.Is(err, errors.ErrUnsupported) {
+			t.Skipf("Symlink(%q) is unavailable: %v", link, err)
+		}
+		t.Fatalf("Symlink(%q) error = %v, want nil", link, err)
+	}
+	got, err := Load(link)
+	if err != nil {
+		t.Fatalf("Load(symlink %q) error = %v, want nil", link, err)
+	}
+	want := Recipe{Version: 1, Name: "linked", Description: "Linked recipe.", Goal: "Follow the target."}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("Load(symlink %q) = %#v, want %#v", link, got, want)
+	}
+
+	broken := filepath.Join(dir, "broken.recipe.json")
+	if err := os.Symlink("absent.recipe.json", broken); err != nil {
+		t.Fatalf("Symlink(%q) error = %v, want nil", broken, err)
+	}
+	err = requireLoadError(t, broken, "load", "stat")
+	if !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("errors.Is(Load(%q), fs.ErrNotExist) = false, want true; error = %v", broken, err)
+	}
+
+	directoryLink := filepath.Join(dir, "directory.recipe.json")
+	if err := os.Symlink(".", directoryLink); err != nil {
+		t.Fatalf("Symlink(%q) error = %v, want nil", directoryLink, err)
+	}
+	_ = requireLoadError(t, directoryLink, "regular file")
+}
+
+func TestLoadOpenedRejectsChangedIdentity(t *testing.T) {
+	dir := t.TempDir()
+	firstPath := filepath.Join(dir, "first.recipe.json")
+	secondPath := filepath.Join(dir, "second.recipe.json")
+	data := []byte(`{"version":1,"name":"review","description":"Review code.","goal":"Review it."}`)
+	for _, path := range []string{firstPath, secondPath} {
+		if err := os.WriteFile(path, data, 0o600); err != nil {
+			t.Fatalf("WriteFile(%q) error = %v, want nil", path, err)
+		}
+	}
+
+	before, err := os.Stat(firstPath)
+	if err != nil {
+		t.Fatalf("Stat(%q) error = %v, want nil", firstPath, err)
+	}
+	opened, err := os.Open(secondPath)
+	if err != nil {
+		t.Fatalf("Open(%q) error = %v, want nil", secondPath, err)
+	}
+	t.Cleanup(func() { _ = opened.Close() })
+
+	got, err := loadOpened(opened, before)
+	if err == nil || !strings.Contains(err.Error(), "identity") {
+		t.Errorf("loadOpened(file from %q, Stat(%q)) error = %v, want identity diagnostic", secondPath, firstPath, err)
+	}
+	if !reflect.DeepEqual(got, Recipe{}) {
+		t.Errorf("loadOpened(file from %q, Stat(%q)) = %#v, want zero Recipe", secondPath, firstPath, got)
+	}
+}
+
+func TestLoadOpenedRejectsDirectory(t *testing.T) {
+	dir := t.TempDir()
+	opened, err := os.Open(dir)
+	if err != nil {
+		if errors.Is(err, fs.ErrPermission) || errors.Is(err, errors.ErrUnsupported) {
+			t.Skipf("Open(directory %q) is unavailable: %v", dir, err)
+		}
+		t.Fatalf("Open(directory %q) error = %v, want nil", dir, err)
+	}
+	t.Cleanup(func() { _ = opened.Close() })
+	before, err := opened.Stat()
+	if err != nil {
+		t.Fatalf("Stat(open directory %q) error = %v, want nil", dir, err)
+	}
+
+	got, err := loadOpened(opened, before)
+	if err == nil || !strings.Contains(err.Error(), "regular file") {
+		t.Errorf("loadOpened(directory %q) error = %v, want regular-file diagnostic", dir, err)
+	}
+	if !reflect.DeepEqual(got, Recipe{}) {
+		t.Errorf("loadOpened(directory %q) = %#v, want zero Recipe", dir, got)
+	}
+}
+
+func TestReadCappedStopsAfterLimitProbe(t *testing.T) {
+	reader := &limitProbeReader{remaining: 65537}
+	data, err := readCapped(reader)
+	if err == nil || !strings.Contains(err.Error(), "size") || !strings.Contains(err.Error(), "65536") {
+		t.Errorf("readCapped(65537-byte reader) error = %v, want size diagnostic containing 65536", err)
+	}
+	if data != nil {
+		t.Errorf("readCapped(65537-byte reader) data length = %d, want nil", len(data))
+	}
+	if reader.read != 65537 {
+		t.Errorf("readCapped(65537-byte reader) consumed = %d, want 65537", reader.read)
+	}
+	if errors.Is(err, errReadPastLimit) {
+		t.Errorf("readCapped(65537-byte reader) error = %v, want no read past byte 65537", err)
+	}
+}
+
+func TestLoadMatchesParse(t *testing.T) {
+	dir := t.TempDir()
+	defaultValue := "carefully"
+	validWant := Recipe{
+		Version:     1,
+		Name:        "compare",
+		Description: "Compare loaders.",
+		Goal:        "Review {{inputs.target}}.",
+		Inputs:      []Input{{Name: "target", Default: &defaultValue}},
+		ModelHint:   &ModelHint{Role: "Reviewer"},
+	}
+	valid := []byte(`{"version":1,"name":"compare","description":"Compare loaders.","goal":"Review {{inputs.target}}.","inputs":[{"name":"target","default":"carefully"}],"model_hint":{"role":"Reviewer"}}`)
+	prefix := []byte(`{"version":1,"name":"large","description":"Large recipe.","goal":"Load it.","context":"`)
+	suffix := []byte(`"}`)
+	oversized := append(append(append([]byte{}, prefix...), strings.Repeat("x", 65537-len(prefix)-len(suffix))...), suffix...)
+	if len(oversized) != 65537 {
+		t.Fatalf("literal equivalence document length = %d, want 65537", len(oversized))
+	}
+
+	tests := []struct {
+		name       string
+		data       []byte
+		want       Recipe
+		diagnostic string
+	}{
+		{name: "valid", data: valid, want: validWant},
+		{name: "malformed", data: []byte(`{"version":`), diagnostic: "decode"},
+		{name: "duplicate key", data: []byte(`{"version":1,"name":"compare","description":"Compare loaders.","goal":"First.","goal":"Second."}`), diagnostic: "duplicate key"},
+		{name: "invalid hint", data: []byte(`{"version":1,"name":"compare","description":"Compare loaders.","goal":"Review it.","model_hint":{"role":"Reviewer","use_case":"code-review"}}`), diagnostic: "exactly one"},
+		{name: "oversized", data: oversized, diagnostic: "size"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path := filepath.Join(dir, strings.ReplaceAll(tt.name, " ", "-")+".recipe.json")
+			if err := os.WriteFile(path, tt.data, 0o600); err != nil {
+				t.Fatalf("WriteFile(%q) error = %v, want nil", path, err)
+			}
+			onDisk, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatalf("ReadFile(%q) error = %v, want nil", path, err)
+			}
+
+			parsed, parseErr := Parse(onDisk)
+			loaded, loadErr := Load(path)
+			if (parseErr == nil) != (loadErr == nil) {
+				t.Errorf("Parse/Load(%q) error presence = (%v, %v), want equal", path, parseErr, loadErr)
+			}
+			if !reflect.DeepEqual(loaded, parsed) {
+				t.Errorf("Load(%q) = %#v, Parse(independent ReadFile) = %#v, want equal", path, loaded, parsed)
+			}
+			if tt.diagnostic == "" {
+				if parseErr != nil || loadErr != nil {
+					t.Fatalf("Parse/Load(%q) errors = (%v, %v), want nil", path, parseErr, loadErr)
+				}
+				if !reflect.DeepEqual(loaded, tt.want) {
+					t.Errorf("Load(%q) = %#v, want literal %#v", path, loaded, tt.want)
+				}
+				return
+			}
+			if parseErr == nil || !strings.Contains(parseErr.Error(), tt.diagnostic) {
+				t.Errorf("Parse(independent ReadFile %q) error = %v, want diagnostic containing %q", path, parseErr, tt.diagnostic)
+			}
+			if loadErr == nil || !strings.Contains(loadErr.Error(), tt.diagnostic) {
+				t.Errorf("Load(%q) error = %v, want diagnostic containing %q", path, loadErr, tt.diagnostic)
+			}
+			if !reflect.DeepEqual(loaded, Recipe{}) {
+				t.Errorf("Load(%q) = %#v on error, want zero Recipe", path, loaded)
+			}
+		})
 	}
 }
 
@@ -543,6 +809,49 @@ func recipeWithHint(hint string) []byte {
 
 func stringPointer(value string) *string {
 	return &value
+}
+
+var errReadPastLimit = errors.New("read past limit")
+
+type limitProbeReader struct {
+	remaining int
+	read      int
+}
+
+func (r *limitProbeReader) Read(p []byte) (int, error) {
+	if r.remaining == 0 {
+		return 0, errReadPastLimit
+	}
+	if len(p) > r.remaining {
+		p = p[:r.remaining]
+	}
+	for i := range p {
+		p[i] = 'x'
+	}
+	r.remaining -= len(p)
+	r.read += len(p)
+	return len(p), nil
+}
+
+func requireLoadError(t *testing.T, path string, wantDiagnostics ...string) error {
+	t.Helper()
+
+	got, err := Load(path)
+	if err == nil {
+		t.Fatalf("Load(%q) error = nil, want diagnostics containing %q", path, wantDiagnostics)
+	}
+	if !reflect.DeepEqual(got, Recipe{}) {
+		t.Errorf("Load(%q) result = %#v, want zero Recipe", path, got)
+	}
+	if !strings.HasPrefix(err.Error(), "recipe:") {
+		t.Errorf("Load(%q) error = %q, want recipe: prefix", path, err)
+	}
+	for _, wantDiagnostic := range wantDiagnostics {
+		if !strings.Contains(err.Error(), wantDiagnostic) {
+			t.Errorf("Load(%q) error = %q, want diagnostic containing %q", path, err, wantDiagnostic)
+		}
+	}
+	return err
 }
 
 func requireParseError(t *testing.T, data []byte, wantDiagnostics ...string) {

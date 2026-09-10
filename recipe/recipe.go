@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
+	"os"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -77,6 +79,60 @@ func Parse(data []byte) (Recipe, error) {
 		return Recipe{}, err
 	}
 	return recipe, nil
+}
+
+// Load reads and parses the regular file at path. Symlinks are followed to
+// their targets. It returns a zero Recipe on error.
+func Load(path string) (Recipe, error) {
+	before, err := os.Stat(path)
+	if err != nil {
+		return Recipe{}, fmt.Errorf("recipe: load %q: stat: %w", path, err)
+	}
+	if !before.Mode().IsRegular() {
+		return Recipe{}, fmt.Errorf("recipe: load %q: target is not a regular file", path)
+	}
+
+	f, err := os.Open(path)
+	if err != nil {
+		return Recipe{}, fmt.Errorf("recipe: load %q: open: %w", path, err)
+	}
+	defer func() { _ = f.Close() }()
+
+	recipe, err := loadOpened(f, before)
+	if err != nil {
+		return Recipe{}, fmt.Errorf("recipe: load %q: %w", path, err)
+	}
+	return recipe, nil
+}
+
+func loadOpened(f *os.File, before fs.FileInfo) (Recipe, error) {
+	after, err := f.Stat()
+	if err != nil {
+		return Recipe{}, fmt.Errorf("stat opened file: %w", err)
+	}
+	if !after.Mode().IsRegular() {
+		return Recipe{}, fmt.Errorf("opened target is not a regular file")
+	}
+	if !os.SameFile(before, after) {
+		return Recipe{}, fmt.Errorf("file identity changed while opening")
+	}
+
+	data, err := readCapped(f)
+	if err != nil {
+		return Recipe{}, err
+	}
+	return Parse(data)
+}
+
+func readCapped(r io.Reader) ([]byte, error) {
+	data, err := io.ReadAll(io.LimitReader(r, MaxBytes+1))
+	if err != nil {
+		return nil, fmt.Errorf("read: %w", err)
+	}
+	if len(data) > MaxBytes {
+		return nil, fmt.Errorf("size: exceeds %d bytes", MaxBytes)
+	}
+	return data, nil
 }
 
 func isEmptyDocument(data []byte) bool {
