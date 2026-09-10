@@ -3,6 +3,7 @@ package conversation
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -301,4 +302,32 @@ func TestNewStore_MigratesSchemaV3Fixture(t *testing.T) {
 		t.Fatalf("NewStore(reopen) error: %v", err)
 	}
 	assertState("reopen", db, store)
+
+	loaded, err := store.Load(context.Background(), id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Save(context.Background(), *loaded); err != nil {
+		t.Fatalf("Save(v3 loaded snapshot): %v", err)
+	}
+	saved, err := store.Load(context.Background(), id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	messages, err := json.Marshal(saved.Messages)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if saved.Revision != 2 || saved.Title != wantTitle || string(messages) != wantMessages || saved.DurableSummary == nil || saved.DurableSummary.Content != wantSummary || saved.DurableSummary.MessageCount != wantSummaryCount || saved.CreatedAt.UnixMilli() != wantCreatedMillis {
+		t.Errorf("Save/Load(v3 fixture) = %+v, messages=%s, want revision 2 and pinned fixture content", saved, messages)
+	}
+	for _, term := range []string{"calibrationtoken", "fixture.go", "Earlier"} {
+		hits, err := store.Search(context.Background(), term, SearchOptions{})
+		if err != nil || len(hits) != 1 {
+			t.Fatalf("Search(%q) after save = %+v, %v, want fixture hit", term, hits, err)
+		}
+		if hits[0].ID != id || hits[0].Title != wantTitle || hits[0].MessageCount != wantMessageCount || hits[0].CreatedAt.UnixMilli() != wantCreatedMillis || !hits[0].UpdatedAt.Equal(saved.UpdatedAt) {
+			t.Errorf("Search(%q) after save = %+v, want pinned fixture projection", term, hits[0])
+		}
+	}
 }

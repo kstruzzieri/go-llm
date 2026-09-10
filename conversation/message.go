@@ -15,6 +15,23 @@ import (
 // ErrNotFound is returned by Load when the conversation ID does not exist.
 var ErrNotFound = errors.New("conversation: not found")
 
+// ErrConflict is returned when Save cannot persist the submitted revision.
+var ErrConflict = errors.New("conversation: revision conflict")
+
+// ConflictError identifies a snapshot that Save refused to overwrite or insert.
+type ConflictError struct {
+	ID               string
+	ExpectedRevision int64
+}
+
+// Error identifies the rejected snapshot without including its contents.
+func (e *ConflictError) Error() string {
+	return fmt.Sprintf("conversation: save %q: revision %d conflict; snapshot not saved", e.ID, e.ExpectedRevision)
+}
+
+// Unwrap allows errors.Is to match ErrConflict.
+func (e *ConflictError) Unwrap() error { return ErrConflict }
+
 // TokenEstimator computes an approximate token count for a string.
 type TokenEstimator func(text string) int
 
