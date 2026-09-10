@@ -645,3 +645,47 @@ func TestConcurrentCloseWaitsForResourceShutdown(t *testing.T) {
 		t.Fatalf("second Close: %v", err)
 	}
 }
+
+func TestSaveThreadRetainsCommittedRevision(t *testing.T) {
+	t.Parallel()
+	for _, compress := range []bool{false, true} {
+		t.Run(map[bool]string{false: "raw", true: "compressed"}[compress], func(t *testing.T) {
+			t.Parallel()
+			ctx := context.Background()
+			db, err := memory.OpenHardenedDB(ctx, filepath.Join(t.TempDir(), "sessions.db"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = db.Close() }()
+			store, err := conversation.NewStore(ctx, db)
+			if err != nil {
+				t.Fatal(err)
+			}
+			current := conversation.Conversation{ID: "retained"}
+			for range 5 {
+				current.Messages = append(current.Messages, conversation.Message{Role: "user", Content: "old question"}, conversation.Message{Role: "assistant", Content: "old answer"})
+			}
+			if err := store.Save(ctx, current); err != nil {
+				t.Fatal(err)
+			}
+			current.Revision = 1
+			state := &threadState{conversation: current}
+			runtime := &Runtime{sessions: &threadStore{store: store}, compress: compress, budget: agent.Budget{InputCeiling: 2}, summarizer: func(context.Context, string, []conversation.Message) (string, error) { return "summary", nil }}
+			if err := runtime.saveThread(ctx, &activeRun{}, state, "new question", agent.Result{Answer: "new answer"}); err != nil {
+				t.Fatal(err)
+			}
+			want := int64(2)
+			if compress {
+				want = 3
+			}
+			saved, err := store.Load(ctx, current.ID)
+			if err != nil || state.conversation.Revision != want || saved.Revision != want || !reflect.DeepEqual(state.conversation.Messages, saved.Messages) || !reflect.DeepEqual(state.conversation.DurableSummary, saved.DurableSummary) {
+				t.Fatalf("retained = %+v, persisted %+v, %v; want revision %d", state.conversation, saved, err, want)
+			}
+			// Reusing the retained value must be safe; fetching a new token onto stale content is forbidden.
+			if err := runtime.saveThread(ctx, &activeRun{}, state, "later question", agent.Result{Answer: "later answer"}); err != nil {
+				t.Fatalf("save retained snapshot: %v", err)
+			}
+		})
+	}
+}

@@ -237,3 +237,12 @@ func TestCompressMessages_RollingConsolidationPassesPrior(t *testing.T) {
 		t.Fatalf("MessageCount = %d, want 6", out.DurableSummary.MessageCount)
 	}
 }
+
+func TestCompressMessagesPreservesRevision(t *testing.T) {
+	t.Parallel()
+	current := Conversation{ID: "revision", Revision: 17, DurableSummary: &DurableSummary{Content: "old", MessageCount: 2}}
+	compacted, err := CompressMessages(context.Background(), current, 0, 4, CharRatioEstimator(4), func(context.Context, string, []Message) (string, error) { return "new", nil })
+	if err != nil || compacted.Revision != 17 || current.Revision != 17 || compacted.DurableSummary.Content != "new" || current.DurableSummary.Content != "old" {
+		t.Fatalf("compression = %+v, %v; input %+v; want revision 17 and independent changed summary", compacted, err, current)
+	}
+}

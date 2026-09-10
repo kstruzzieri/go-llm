@@ -75,6 +75,7 @@ func TestCompactThreadInjectedStoreReuseAndNextRun(t *testing.T) {
 	}
 	assertCompactedNextRequest(t, caller, current)
 	want := cloneConversation(current)
+	want.Revision = 3
 	want.Messages = append(want.Messages[2:], conversation.Message{Role: "user", Content: "next goal"}, conversation.Message{Role: "assistant", Content: "next answer"})
 	want.Title = current.Messages[2].Content // ordinary turns apply the existing title policy
 	want.DurableSummary = &conversation.DurableSummary{Content: "SUM", MessageCount: 2}
@@ -97,6 +98,7 @@ func TestCompactThreadSQLiteReopenAndSearch(t *testing.T) {
 		t.Fatal(err)
 	}
 	current := compactionConversation(5)
+	current.Revision = 0
 	if err := store.Save(ctx, current); err != nil {
 		t.Fatal(err)
 	}
@@ -135,6 +137,7 @@ func TestCompactThreadSQLiteReopenAndSearch(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := cloneConversation(current)
+	want.Revision = 2
 	want.Messages = want.Messages[2:]
 	want.DurableSummary = &conversation.DurableSummary{Content: "SUM", MessageCount: 2}
 	want.UpdatedAt = saved.UpdatedAt
@@ -477,6 +480,7 @@ func TestCompactThreadProgressiveSummary(t *testing.T) {
 			}})
 			got, err := runtime.CompactThread(context.Background(), current.ID)
 			want := cloneConversation(current)
+			want.Revision = 2
 			want.Messages = want.Messages[max(0, tc.exchanges-4)*2:]
 			want.DurableSummary = &conversation.DurableSummary{Content: tc.replacement, MessageCount: tc.count}
 			if err != nil || got != (golem.CompactionReport{TokensBefore: tc.before, TokensAfter: tc.after, Changed: true}) || calls != 1 || store.saves != 1 || !reflect.DeepEqual(store.conversations[current.ID], want) {
@@ -634,7 +638,7 @@ func TestCompactThreadCanceledIdenticalRewrite(t *testing.T) {
 }
 
 func compactionConversation(exchanges int) conversation.Conversation {
-	current := conversation.Conversation{ID: "compact-thread", Title: "Original title", CreatedAt: time.Unix(10, 0), UpdatedAt: time.Unix(20, 0)}
+	current := conversation.Conversation{ID: "compact-thread", Revision: 1, Title: "Original title", CreatedAt: time.Unix(10, 0), UpdatedAt: time.Unix(20, 0)}
 	for i := range exchanges {
 		current.Messages = append(current.Messages,
 			conversation.Message{Role: "user", Content: strings.Repeat(string(rune('a'+i)), 40)},
@@ -723,6 +727,7 @@ func TestCompactThreadPersistsAndRepeats(t *testing.T) {
 		t.Fatalf("CompactThread = %+v, %v; want 100 -> 121 changed", got, err)
 	}
 	want := cloneConversation(current)
+	want.Revision = 2
 	want.Messages = want.Messages[2:]
 	want.DurableSummary = &conversation.DurableSummary{Content: "SUM", MessageCount: 2}
 	if saved := store.conversations[current.ID]; !reflect.DeepEqual(saved, want) || store.saves != 1 {
@@ -731,5 +736,128 @@ func TestCompactThreadPersistsAndRepeats(t *testing.T) {
 	got, err = runtime.CompactThread(context.Background(), current.ID)
 	if err != nil || got != (golem.CompactionReport{TokensBefore: 121, TokensAfter: 121}) || calls != 2 || store.saves != 1 {
 		t.Errorf("second CompactThread = %+v, %v, calls %d, saves %d; want 121 -> 121 unchanged, two calls, one save", got, err, calls, store.saves)
+	}
+}
+
+func TestCompactionSessionConflictPreservesWinnerAndSearch(t *testing.T) {
+	for _, automatic := range []bool{false, true} {
+		t.Run(fmt.Sprintf("automatic_%v", automatic), func(t *testing.T) {
+			t.Parallel()
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			path := filepath.Join(t.TempDir(), "sessions.db")
+			db, err := memory.OpenHardenedDB(ctx, path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = db.Close() }()
+			store, err := conversation.NewStore(ctx, db)
+			if err != nil {
+				t.Fatal(err)
+			}
+			current := compactionConversation(5)
+			current.Revision = 0
+			if err := store.Save(ctx, current); err != nil {
+				t.Fatal(err)
+			}
+			otherDB, err := memory.OpenHardenedDB(ctx, path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = otherDB.Close() }()
+			other, err := conversation.NewStore(ctx, otherDB)
+			if err != nil {
+				t.Fatal(err)
+			}
+			started, release := make(chan struct{}), make(chan struct{})
+			unblock := sync.OnceFunc(func() { close(release) })
+			defer unblock()
+			var warnings []error
+			runtime := newCompactionRuntime(t, golem.Options{SessionStore: store, Budget: agent.Budget{InputCeiling: 4096}, Orchestrator: agent.New(&captureCaller{answer: strings.Repeat("a", 10000)}, agent.ContextManager{}), OnWarning: func(err error) { warnings = append(warnings, err) }, Summarizer: func(ctx context.Context, _ string, _ []conversation.Message) (string, error) {
+				close(started)
+				select {
+				case <-release:
+					return "losingsummary", nil
+				case <-ctx.Done():
+					return "", ctx.Err()
+				}
+			}})
+			type outcome struct {
+				report golem.CompactionReport
+				result agent.Result
+				err    error
+				events []string
+			}
+			done := make(chan outcome, 1)
+			go func() {
+				var got outcome
+				if automatic {
+					got.result, got.err = runtime.Run(ctx, golem.Turn{ThreadID: current.ID, RunID: "raw", Message: "raw question"}, func(e golem.Event) error { got.events = append(got.events, e.Type); return nil })
+				} else {
+					got.report, got.err = runtime.CompactThread(ctx, current.ID)
+				}
+				done <- got
+			}()
+			// Release and drain even when a coordinator assertion aborts.
+			drained := false
+			defer func() {
+				unblock()
+				if !drained {
+					receiveCompaction(t, done)
+				}
+			}()
+			receiveCompaction(t, started)
+			winning, err := other.Load(ctx, current.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			wantRevision := int64(1)
+			if automatic {
+				wantRevision = 2
+				if len(winning.Messages) != 12 || winning.Messages[10].Content != "raw question" {
+					t.Fatalf("raw commit missing before summary: %+v", winning)
+				}
+			}
+			if winning.Revision != wantRevision {
+				t.Fatalf("before race revision = %d; want %d", winning.Revision, wantRevision)
+			}
+			winning.Title = "winner"
+			winning.DurableSummary = &conversation.DurableSummary{Content: "winningsummary", MessageCount: 22}
+			if err := other.Save(ctx, *winning); err != nil {
+				t.Fatal(err)
+			}
+			want, err := other.Load(ctx, current.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			unblock()
+			got := receiveCompaction(t, done)
+			drained = true
+			var conflict *conversation.ConflictError
+			if automatic {
+				if got.err != nil || got.result.Answer != strings.Repeat("a", 10000) || len(warnings) != 1 || !errors.Is(warnings[0], conversation.ErrConflict) || !errors.As(warnings[0], &conflict) || !reflect.DeepEqual(got.events, []string{"run.started", "message.delta", "run.finished"}) {
+					t.Fatalf("automatic = %+v, warnings %v; want successful durable turn and typed warning", got, warnings)
+				}
+			} else {
+				if !errors.Is(got.err, golem.ErrSessionPersistence) || !errors.Is(got.err, conversation.ErrConflict) || !errors.As(got.err, &conflict) || got.report != (golem.CompactionReport{TokensBefore: 100, TokensAfter: 100}) {
+					t.Fatalf("manual = %+v; want typed persistence conflict and unchanged report", got)
+				}
+			}
+			if conflict.ID != current.ID || conflict.ExpectedRevision != wantRevision {
+				t.Errorf("conflict = %+v; want ID %s, revision %d", conflict, current.ID, wantRevision)
+			}
+			after, err := other.Load(ctx, current.ID)
+			if err != nil || !reflect.DeepEqual(after, want) {
+				t.Fatalf("winner = %+v, %v; want %+v", after, err, want)
+			}
+			found, err := other.Search(ctx, "winningsummary", conversation.SearchOptions{})
+			if err != nil || len(found) != 1 || found[0].ID != current.ID {
+				t.Fatalf("winner search = %+v, %v", found, err)
+			}
+			found, err = other.Search(ctx, "losingsummary", conversation.SearchOptions{})
+			if err != nil || len(found) != 0 {
+				t.Fatalf("loser search = %+v, %v; want no hits", found, err)
+			}
+		})
 	}
 }

@@ -48,14 +48,18 @@ const (
 // SessionStore loads and saves complete stateful-thread snapshots. Load must
 // return an error matching conversation.ErrNotFound for a missing ID, and a
 // successful Load must return a non-nil Conversation with that ID. Save must
-// atomically replace or upsert the complete snapshot. A Save error must leave
-// the old snapshot intact; a successful commit must return nil even if context
+// atomically create revision 1 for a revision-zero snapshot only if the ID is
+// absent, or replace a positive revision r only when the stored revision is r,
+// committing r+1. Reject negative and maximum int64 revisions. A failed CAS
+// must return a *conversation.ConflictError; every Save error must leave the
+// old snapshot intact. Save takes a value: retained callers advance their local
+// revision only after success; a successful commit must return nil even if context
 // cancellation races afterward. Load results and summarizer inputs are read-only.
 //
 // Calls for different thread IDs may overlap, so implementations must be safe
 // for concurrent use. Same-thread serialization applies only within one
-// Runtime; callers sharing a store across runtimes must not run the same thread
-// concurrently. Compression may save a completed turn twice: first the raw
+// Runtime; competing writers across runtimes are refused by Save revisions.
+// Compression may save a completed turn twice: first the raw
 // snapshot, then a best-effort compressed snapshot. The caller owns the store
 // and must keep it alive until Runtime.Close returns; Runtime never closes,
 // migrates, or hardens it.
@@ -557,6 +561,8 @@ func failureCode(err error) string {
 	switch {
 	case errors.As(err, &observerErr):
 		return "observer_failed"
+	case errors.Is(err, conversation.ErrConflict):
+		return "session_conflict"
 	case errors.Is(err, ErrClosed):
 		return "runtime_closed"
 	case errors.Is(err, ErrInvalidRequest),

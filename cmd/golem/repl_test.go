@@ -2149,3 +2149,53 @@ func TestCheckpointHelpEvidenceLegend(t *testing.T) {
 		t.Fatal("help calls unsigned history undoable")
 	}
 }
+
+func newConflictTestSession(t *testing.T) *replSession {
+	t.Helper()
+	root := t.TempDir()
+	sess := newSessionedTestSession(t, &captureCaller{answer: "completed answer"}, root, "user:conflict")
+	sess.root = root
+	store := &compactTestStore{Store: sess.session.store, save: func(_ context.Context, c conversation.Conversation) error {
+		return &conversation.ConflictError{ID: c.ID, ExpectedRevision: c.Revision}
+	}}
+	installCompactRuntime(t, sess, golemruntime.Options{SessionStore: store})
+	return sess
+}
+
+func TestRunOnceSessionConflictIsError(t *testing.T) {
+	sess := newConflictTestSession(t)
+	var out strings.Builder
+	result, err := runOnce(context.Background(), &out, nil, sess, "question", nil)
+	var conflict *conversation.ConflictError
+	if result.Answer != "completed answer" || !errors.Is(err, conversation.ErrConflict) || !errors.Is(err, golemruntime.ErrSessionPersistence) || !errors.As(err, &conflict) {
+		t.Fatalf("runOnce = %+v, %v; want completed answer and typed persistence conflict", result, err)
+	}
+	if got := out.String(); !strings.Contains(got, "snapshot not saved") || strings.Contains(got, "warning: session not saved:") || strings.Contains(got, "done ·") {
+		t.Fatalf("conflict output = %q; want error notice", got)
+	}
+	if len(sess.session.msgs) != 0 {
+		t.Fatalf("conflict updated cache: %+v", sess.session.msgs)
+	}
+}
+
+func TestREPLSessionConflictContinuesPrompt(t *testing.T) {
+	sess := newConflictTestSession(t)
+	var out strings.Builder
+	if err := runREPL(context.Background(), newScannerSource(strings.NewReader("question\n/help\n"), &out), &out, nil, sess); err != nil {
+		t.Fatal(err)
+	}
+	if got := out.String(); !strings.Contains(got, "snapshot not saved") || !strings.Contains(got, golemHelp) {
+		t.Fatalf("interactive conflict = %q; want notice then help at next prompt", got)
+	}
+}
+
+func TestOneShotTextSessionConflictIsError(t *testing.T) {
+	sess := newConflictTestSession(t)
+	var stdout, stderr strings.Builder
+	if err := runOneShot(context.Background(), &stdout, &stderr, nil, sess, "question"); !errors.Is(err, errOneShotFailed) {
+		t.Fatalf("one shot = %v; want failure", err)
+	}
+	if got := stdout.String() + stderr.String(); !strings.Contains(got, "snapshot not saved") || strings.Contains(got, "done ·") {
+		t.Fatalf("one shot output = %q; want conflict notice", got)
+	}
+}

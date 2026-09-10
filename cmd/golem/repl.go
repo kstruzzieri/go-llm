@@ -428,6 +428,7 @@ func runOnce(ctx context.Context, out io.Writer, interrupts <-chan struct{}, ses
 	var sessionSaveErr error
 	if res.Answer != "" &&
 		errors.Is(runErr, golemruntime.ErrSessionPersistence) &&
+		!errors.Is(runErr, conversation.ErrConflict) &&
 		!secretBlock && !canaryBlock &&
 		!errors.Is(runErr, context.Canceled) &&
 		!errors.Is(runErr, context.DeadlineExceeded) {

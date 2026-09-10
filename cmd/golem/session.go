@@ -101,15 +101,16 @@ const (
 
 // session is golem's per-process view of one persistent conversation. The store
 // is the source of truth; the in-memory buffer is loaded once at startup and
-// re-saved after each successful turn. Single-writer: B3 does not merge
-// concurrent writers — two golem processes on the same id are last-save-wins.
+// re-saved after each successful turn. Revisions refuse stale snapshots from
+// concurrent writers; failed saves leave the cached snapshot intact.
 type session struct {
-	db      *sql.DB
-	dbPath  string // retained so record/clear can re-secure sidecars after each write
-	store   conversation.Store
-	id      string
-	msgs    []conversation.Message
-	summary *conversation.DurableSummary
+	db       *sql.DB
+	dbPath   string // retained so record/clear can re-secure sidecars after each write
+	store    conversation.Store
+	id       string
+	revision int64
+	msgs     []conversation.Message
+	summary  *conversation.DurableSummary
 }
 
 // sessionInfo is the startup disclosure for one resolved session.
@@ -164,6 +165,7 @@ func openSession(ctx context.Context, dbPath, id string) (*session, sessionInfo,
 	conv, lerr := store.Load(ctx, id)
 	switch {
 	case lerr == nil:
+		s.revision = conv.Revision
 		s.msgs = conv.Messages
 		s.summary = cloneDurableSummary(conv.DurableSummary)
 		info.resumed = len(conv.Messages) > 0
@@ -192,12 +194,14 @@ func (s *session) recordMessages(ctx context.Context, msgs []conversation.Messag
 	next := append(append([]conversation.Message{}, s.msgs...), msgs...)
 	if err := s.store.Save(ctx, conversation.Conversation{
 		ID:             s.id,
+		Revision:       s.revision,
 		Title:          sessionTitle(next),
 		Messages:       next,
 		DurableSummary: cloneDurableSummary(s.summary),
 	}); err != nil {
 		return err
 	}
+	s.revision++
 	s.msgs = next
 	// SQLite may have (re)created the -wal/-shm sidecars honoring the umask on
 	// this write; re-secure them (the WAL can hold un-checkpointed message text).
@@ -262,6 +266,7 @@ func (s *session) clear(ctx context.Context) error {
 	if err := s.store.Delete(ctx, s.id); err != nil {
 		return err
 	}
+	s.revision = 0
 	s.msgs = nil
 	s.summary = nil
 	_ = chmodDBFiles(s.dbPath)
@@ -271,6 +276,7 @@ func (s *session) clear(ctx context.Context) error {
 // renew switches to a fresh persistent session id and clears the buffer.
 func (s *session) renew() {
 	s.id = "golem:" + conversation.NewID()
+	s.revision = 0
 	s.msgs = nil
 	s.summary = nil
 }
@@ -281,6 +287,7 @@ func (s *session) switchTo(ctx context.Context, id string) (sessionInfo, error) 
 		return sessionInfo{}, err
 	}
 	s.id = id
+	s.revision = conv.Revision
 	s.msgs = conv.Messages
 	s.summary = cloneDurableSummary(conv.DurableSummary)
 	return sessionInfo{
