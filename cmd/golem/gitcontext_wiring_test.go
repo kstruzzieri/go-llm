@@ -67,7 +67,7 @@ func TestStartupComposesGitContextIntoSystem(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(repo, "AGENTS.md"), []byte("repo rule: keep it short\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	system, sess, stderr := startupSession(t, repo)
+	system, sess, stderr := startupSession(t, repo, "-trust-project-context", trustFixtureDigest(t, repo))
 	if sess.sysInputs.gitContext == "" || !strings.Contains(system, gitContextOpen) || !strings.Contains(system, "branch: main\n") {
 		t.Fatalf("Git context missing from the composed prompt:\n%s", system)
 	}
@@ -80,8 +80,8 @@ func TestStartupComposesGitContextIntoSystem(t *testing.T) {
 	if sess.gitSnapshot.Block != sess.sysInputs.gitContext || sess.gitSnapshot.State.Toplevel != sess.root {
 		t.Fatalf("snapshot not retained on the session: block match=%v toplevel=%q root=%q", sess.gitSnapshot.Block == sess.sysInputs.gitContext, sess.gitSnapshot.State.Toplevel, sess.root)
 	}
-	if len(sess.projectDocs) != 1 || !strings.Contains(sess.projectDocs[0].Content, "repo rule") {
-		t.Fatalf("project documents not retained for refresh: %+v", sess.projectDocs)
+	if len(sess.projectContext.docs) != 1 || !strings.Contains(sess.projectContext.docs[0].Content, "repo rule") {
+		t.Fatalf("project documents not retained for refresh: %+v", sess.projectContext.docs)
 	}
 	if !strings.Contains(stderr, "git context: main, 1 status entry, 1 recent commit") {
 		t.Fatalf("startup notice missing on stderr:\n%s", stderr)
@@ -119,23 +119,12 @@ func TestInjectedContextBudgetReachesTheModel(t *testing.T) {
 		st.Entries = append(st.Entries, " M dir/some/longer/path/file-"+strings.Repeat("y", i%9)+".go")
 	}
 	st.TotalEntries = 5000
-	block, payload := gitContextBlock(st, gitContextMaxBytes)
+	block, payload := gitContextBody(st, gitContextMaxBytes, "")
 	if payload > gitContextMaxBytes || payload < gitContextMaxBytes-96 {
 		t.Fatalf("fixture Git payload %d must sit at the %d component cap", payload, gitContextMaxBytes)
 	}
 	docs := []projectcontext.Document{{Source: "workspace", Path: "/ws/AGENTS.md", Content: strings.Repeat("rule line\n", 3000)}}
-	project := projectContextBlock(docs, projectContextBudget(payload))
-	body := strings.TrimPrefix(project, projectContextOpen+"\n")
-	if i := strings.Index(body, "\n[project context truncated"); i >= 0 {
-		body = body[:i]
-	}
-	if len(body)+payload > projectContextMaxBytes {
-		t.Fatalf("project body %d + Git payload %d exceeds the shared %d budget", len(body), payload, projectContextMaxBytes)
-	}
-	if full := projectContextBlock(docs, projectContextBudget(0)); full != projectContextBlock(docs, projectContextMaxBytes) {
-		t.Fatal("with no Git payload, project context must keep its prior 16 KiB cap byte-for-byte")
-	}
-	in := systemInputs{projectContext: project, gitContext: block}
+	in := projectContextInputs(systemInputs{}, docs, gitContextSnapshot{Block: block, State: st}, true)
 	composed := composeSystem(in)
 	if strings.Count(composed, projectContextOpen) != 1 || strings.Count(composed, gitContextOpen) != 1 || strings.Index(composed, projectContextOpen) > strings.Index(composed, gitContextOpen) {
 		t.Fatalf("composed prompt must carry each block once, project first:\n%s", composed[:300])
@@ -233,15 +222,13 @@ func TestStartupSharesInjectedContextBudget(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(repo, "AGENTS.md"), []byte(strings.Repeat("repo rule line\n", 1500)), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	system, sess, _ := startupSession(t, repo)
+	system, sess, _ := startupSession(t, repo, "-trust-project-context", trustFixtureDigest(t, repo))
 	payload := sess.gitSnapshot.PayloadBytes
 	if payload > gitContextMaxBytes || payload < gitContextMaxBytes-128 {
 		t.Fatalf("fixture Git payload %d must fill the %d component cap", payload, gitContextMaxBytes)
 	}
-	body := strings.TrimPrefix(sess.sysInputs.projectContext, projectContextOpen+"\n")
-	if i := strings.Index(body, "\n[project context truncated"); i >= 0 {
-		body = body[:i]
-	}
+	body := keyedContextBody(t, sess.sysInputs.projectContext, "PROJECT_CONTEXT")
+	payload = len(keyedContextBody(t, sess.sysInputs.gitContext, "GIT_CONTEXT"))
 	if len(body)+payload > projectContextMaxBytes {
 		t.Fatalf("startup rendered project body %d + Git payload %d > shared %d budget", len(body), payload, projectContextMaxBytes)
 	}

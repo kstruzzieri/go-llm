@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"strings"
@@ -148,7 +149,12 @@ func (w *machineWriter) buildResult(res agent.Result, runErr error) headlessResu
 		if runErr != nil {
 			msg = runFailureMessage("", runErr)
 		}
-		rec.Error = &headlessResultError{Code: resultCodeInvalidRequest, Message: msg}
+		code := resultCodeInvalidRequest
+		var trustErr *projectContextTrustError
+		if errors.As(runErr, &trustErr) {
+			code = "project_context_untrusted"
+		}
+		rec.Error = &headlessResultError{Code: code, Message: msg}
 		rec.Grounding = nil
 		return rec
 	}

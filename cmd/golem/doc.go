@@ -109,6 +109,40 @@
 // terminal, events, session store and traces show raw results; approval,
 // grants and sandboxes remain the enforcement layer.
 //
+// Project guidance is discovered from selected global and workspace
+// AGENTS.md-style files but is not injected until the operator approves the
+// complete current document set with /trust sha256:<64 lowercase hex digits>.
+// /trust alone shows source, canonical path, full size, per-file full-content
+// hash, retention state, aggregate digest, and the exact approval command; it
+// never prints document bodies. The displayed content digest is portable across
+// worktrees and runners for identical selected guidance. The private in-memory
+// grant additionally binds canonical workspace and source paths, so it cannot
+// transfer between workspaces or a relocated global configuration. Automated
+// environments must control global configuration as well as workspace files.
+//
+// Trust is session-only and is cleared by /new, /clear, successful /resume,
+// /grants clear, and process exit. It is also revoked when the observed
+// document set, content, source, canonical path, or order changes, becomes
+// unavailable, or becomes empty. Golem validates before each operator goal and
+// each AgentFlow authoring or task invocation; internal provider calls and
+// workflow steps reuse that captured snapshot, and the next invocation observes
+// later edits.
+// -no-project-context disables all project-context discovery, hashing,
+// approval, and injection. In -p, -goal, and -plan,
+// -trust-project-context sha256:<64 lowercase hex digits> requires that exact
+// live snapshot through invocation entry. An omitted flag only skips
+// unapproved guidance. A valid but unsatisfied requirement fails with exit 1
+// before execution; malformed syntax and combining it with
+// -no-project-context are usage errors. In machine formats, the failure emits
+// exactly one golem.result.v1 error record with code
+// project_context_untrusted; human diagnostics remain on stderr.
+//
+// Project and Git context are separate labeled frames using one
+// snapshot-scoped shared key; a Git refresh revalidates project guidance and
+// can change its budget. Tool results retain independently keyed per-request
+// frames. Approval neither grants capabilities nor sanitizes prior conversation
+// or model influence.
+//
 // The source subcommand manages ad-hoc documents in the workspace index over
 // the managed-document registry:
 //

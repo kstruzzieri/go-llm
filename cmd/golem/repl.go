@@ -18,7 +18,6 @@ import (
 	golemruntime "github.com/kstruzzieri/go-llm/golem"
 	"github.com/kstruzzieri/go-llm/internal/agenttrace"
 	"github.com/kstruzzieri/go-llm/memory"
-	"github.com/kstruzzieri/go-llm/projectcontext"
 	"github.com/kstruzzieri/go-llm/provider"
 )
 
@@ -43,13 +42,12 @@ type replSession struct {
 	root          string
 	stdinTerminal bool // real stdin is a TTY; required for live privilege expansion
 	sysInputs     systemInputs
-	// Git context (#354). projectDocs are the bounded project documents read
-	// at startup, retained so /git-context refresh can re-render them under
-	// the shared budget without rereading AGENTS.md; gitSnapshot is the
-	// most recent successful capture, including its absence reason;
-	// noGitContext mirrors -no-git-context and disables
-	// refresh as well as startup capture.
-	projectDocs    []projectcontext.Document
+	// Observed evidence is separate from the last successful publication so a
+	// failed removal remains pending even after the new evidence is observed.
+	projectContext         *projectContextState
+	publishedProjectKey    string
+	projectContextScripted bool
+
 	gitSnapshot    gitContextSnapshot
 	noGitContext   bool
 	noCompress     bool
@@ -288,6 +286,10 @@ func interruptContext(ctx context.Context, interrupts <-chan struct{}) (context.
 func runOnce(ctx context.Context, out io.Writer, interrupts <-chan struct{}, sess *replSession, line string, src lineSource) (agent.Result, error) {
 	runCtx, cancel := interruptContext(ctx, interrupts)
 	defer cancel()
+	if err := refreshProjectContext(runCtx, out, sess); err != nil {
+		_, _ = fmt.Fprintln(out, gitContextText(err.Error()))
+		return agent.Result{}, err
+	}
 
 	rend := newRenderer(out, sess.color, sess.maxSteps, sess.clock, sess.mixed)
 	rend.warnPressure = sess.pressureWarn
@@ -568,6 +570,8 @@ func dispatchSlash(ctx context.Context, out io.Writer, sess *replSession, line s
 	switch cmd {
 	case "/exit", "/quit":
 		return "", true
+	case "/trust":
+		handleTrust(ctx, out, sess, fields)
 	case "/help":
 		_, _ = fmt.Fprint(out, golemHelp)
 	case "/clear":
@@ -898,6 +902,8 @@ const golemHelp = `commands:
                  list background jobs, or stop one (when exec is enabled)
   /auto-edits [on|off]
                  show or set session auto-approval for write/edit tools
+  /trust [sha256:<digest>]
+                 inspect project documents or approve their exact snapshot
   /grants [clear]
                  count active session approval grants, or revoke them all
   /allow-write   enable the approval-gated write_file/edit_file tools for the rest of this session

@@ -9,8 +9,7 @@
 // instructions.
 //
 // There are two ways to stop that, and they are not equally good. A renderer can
-// defang the marker inside the value (see neutralizeFence in cmd/golem, which must
-// do this because its fence is a compile-time constant), which means enumerating
+// defang the marker inside the value, which means enumerating
 // every marker the prompt uses, keeping that list in step with the prompt, and
 // accepting that the pattern also rewrites legitimate text that happens to look
 // like a marker. Or the marker can simply be unguessable, which is what this
