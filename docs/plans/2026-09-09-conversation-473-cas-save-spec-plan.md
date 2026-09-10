@@ -140,11 +140,11 @@ Each behavior task below includes its own red/green cycle. No tests have been ru
 
 **Files:** conversation/message.go, conversation/migration.go, conversation/migration_test.go, conversation/store.go, conversation/store_test.go; create conversation/testdata/schema-v3.sql. After approval, copy this document into docs/plans/2026-09-09-conversation-473-cas-save-spec-plan.md in the isolated worktree.
 
-- [ ] Write a literal prior-v3 SQL fixture independently of migrateV1/migrateV2/migrateV3: version table, conversations, search metadata and FTS, fixed timestamps, a tool-call message, and a durable summary with known text/count.
-- [ ] Add migration tests that build a temporary file from that fixture, open NewStore, assert schema version 4 and loaded revision 1, and compare raw stored fields and search results to literal expectations. Close/reopen and assert no data/version changes. Update existing fresh/idempotent/v2-upgrade version assertions without weakening their old-content checks.
-- [ ] Run the focused migration/load cases and record the expected failure; a missing Revision field may initially produce a compile failure. Then add the field, v4 migration, and Load projection so the cases pass.
-- [ ] Keep the fixture immutable; in Step 2 extend its round trip through a real CAS update from revision 1 to 2.
-- [ ] Review the diff and mutation-check the migration default, loaded revision scan, and exact preserved fixture fields before committing the task.
+- [x] Write a literal prior-v3 SQL fixture independently of migrateV1/migrateV2/migrateV3: version table, conversations, search metadata and FTS, fixed timestamps, a tool-call message, and a durable summary with known text/count.
+- [x] Add migration tests that build a temporary file from that fixture, open NewStore, assert schema version 4 and loaded revision 1, and compare raw stored fields and search results to literal expectations. Close/reopen and assert no data/version changes. Update existing fresh/idempotent/v2-upgrade version assertions without weakening their old-content checks.
+- [x] Run the focused migration/load cases and record the expected failure; a missing Revision field may initially produce a compile failure. Then add the field, v4 migration, and Load projection so the cases pass.
+- [x] Keep the fixture immutable; in Step 2 extend its round trip through a real CAS update from revision 1 to 2.
+- [x] Review the diff and mutation-check the migration default, loaded revision scan, and exact preserved fixture fields before committing the task.
 
 **Risk:** Data/schema change; fixture must not be produced by the migrations being tested. Migration is additive but no down-migration is proposed. Requires approval of S1/S2/S5 before execution.
 
@@ -152,15 +152,15 @@ Each behavior task below includes its own red/green cycle. No tests have been ru
 
 **Files:** conversation/message.go, conversation/store.go, conversation/store_test.go, conversation/migration_test.go.
 
-- [ ] Add the conflict type/sentinel contract tests and behavioral cases listed below; run them red against the old unconditional Save.
-- [ ] Implement separate insert-only and revision-guarded update paths inside the current transaction, validation, RowsAffected classification, and gated search projection writes. The CAS must be the first data statement after BeginTx; no preliminary revision, existence, or timestamp SELECT. Verify that constraint during source review. Update the Store/Save API comments.
-- [ ] Adapt existing update tests to use loaded snapshots or explicitly advance the successfully submitted revision, then rerun all conversation tests.
-- [ ] Prove: create 0→1; loaded updates 1→2→3; identical-content update advances; input value remains unchanged; both stored main-row and search-row CreatedAt stay fixed even if the submitted CreatedAt is zero or modified. Duplicate create, stale positive revision, positive revision for an absent row, and save-after-delete-before-recreate all conflict.
-- [ ] Prove errors.Is and errors.As through a wrapping conflict error, including exact ID/ExpectedRevision and a literal error string. For negative/max revisions require a non-nil validation error that does not match ErrConflict, with no writes; do not parse validation text. Permit max-minus-one→max and refuse the subsequent save.
-- [ ] Race two independent handles: each worker finishes loading revision 1, reports readiness, then waits on a shared release channel. The coordinator verifies both ready outcomes before release; use bounded waits and release/drain cleanup, with no sleep synchronization. Require exactly one success and one typed conflict, persisted revision exactly 2, and one of two literal complete expected winner transcripts. Assert the losing message, summary, title, and search terms did not replace the winner. Repeat for two creates after both workers observe ErrNotFound. These cases prove the stale-save outcome regardless of which writer acquires the lock first; do not claim the barrier forces overlapping lock acquisition.
-- [ ] Force a search metadata write failure after a valid main-row CAS using a test-only trigger in the temporary DB. Assert revision, transcript, timestamps, search metadata, and FTS all roll back. Keep cancellation/busy/SQL failures distinguishable from ErrConflict.
-- [ ] Finish the v3 fixture round trip with loaded revision 1→save→reload revision 2, pinned content/summary/tool-call values, preserved creation timestamp, and correct search results.
-- [ ] Run focused tests under the race detector; mutate the SQL revision predicate, duplicate-create handling, revision increment, zero-row return, and index transaction ordering/rollback one at a time. Each relevant assertion must detect its broken implementation; restore before review/commit.
+- [x] Add the conflict type/sentinel contract tests and behavioral cases listed below; run them red against the old unconditional Save.
+- [x] Implement separate insert-only and revision-guarded update paths inside the current transaction, validation, RowsAffected classification, and gated search projection writes. The CAS must be the first data statement after BeginTx; no preliminary revision, existence, or timestamp SELECT. Verify that constraint during source review. Update the Store/Save API comments.
+- [x] Adapt existing update tests to use loaded snapshots or explicitly advance the successfully submitted revision, then rerun all conversation tests.
+- [x] Prove: create 0→1; loaded updates 1→2→3; identical-content update advances; input value remains unchanged; both stored main-row and search-row CreatedAt stay fixed even if the submitted CreatedAt is zero or modified. Duplicate create, stale positive revision, positive revision for an absent row, and save-after-delete-before-recreate all conflict.
+- [x] Prove errors.Is and errors.As through a wrapping conflict error, including exact ID/ExpectedRevision and a literal error string. For negative/max revisions require a non-nil validation error that does not match ErrConflict, with no writes; do not parse validation text. Permit max-minus-one→max and refuse the subsequent save.
+- [x] Race two independent handles: each worker finishes loading revision 1, reports readiness, then waits on a shared release channel. The coordinator verifies both ready outcomes before release; use bounded waits and release/drain cleanup, with no sleep synchronization. Require exactly one success and one typed conflict, persisted revision exactly 2, and one of two literal complete expected winner transcripts. Assert the losing message, summary, title, and search terms did not replace the winner. Repeat for two creates after both workers observe ErrNotFound. These cases prove the stale-save outcome regardless of which writer acquires the lock first; do not claim the barrier forces overlapping lock acquisition.
+- [x] Force a search metadata write failure after a valid main-row CAS using a test-only trigger in the temporary DB. Assert revision, transcript, timestamps, search metadata, and FTS all roll back. Keep cancellation/busy/SQL failures distinguishable from ErrConflict.
+- [x] Finish the v3 fixture round trip with loaded revision 1→save→reload revision 2, pinned content/summary/tool-call values, preserved creation timestamp, and correct search results.
+- [x] Run focused tests under the race detector; mutate the SQL revision predicate, duplicate-create handling, revision increment, zero-row return, and index transaction ordering/rollback one at a time. Each relevant assertion must detect its broken implementation; restore before review/commit.
 
 **Dependency:** Step 1. **Risk:** Shared Save behavior changes; stale inputs that previously overwrote data now fail. Tests must contend on separate handles, not merely goroutines serialized by a single sql.DB.
 
@@ -168,14 +168,15 @@ Each behavior task below includes its own red/green cycle. No tests have been ru
 
 **Files:** golem/session.go, golem/runtime.go, golem/runtime_test.go, golem/session_test.go, golem/compact_test.go, conversation/compress_test.go, cmd/golem/session.go, cmd/golem/session_test.go, cmd/golem/repl.go, cmd/golem/repl_test.go, cmd/golem/compact_repl_test.go, cmd/golem/machineout_test.go. Modify only the relevant existing tests; no parallel event or persistence framework.
 
-- [ ] Update mapSessionStore to enforce the proposed contract under its existing mutex and adjust preseeded persisted fixtures to revision 1. Run existing sequential-turn/compression tests red to expose missing caller advancement.
-- [ ] Add runtime regression cases before changing production callers: consecutive turns; a raw save immediately followed by compression; two independent runtime instances losing/winning a shared revision; and underlying typed conflict retained with the completed answer and one terminal run.failed payload using `session_conflict`.
-- [ ] Add explicit compaction and post-raw automatic compaction races. Block the existing summarizer seam while a second handle commits, then release it. Require exact winner content/index preservation. Manual compaction reports unchanged plus typed error; automatic compaction remains a successful durable turn with a typed warning.
-- [ ] Add a compression value-preservation assertion with a fixed nonzero revision, including a real changed-summary result. Add CLI session load/switch/save/reset/failure cases with fixed expected revisions.
-- [ ] Add CLI conflict cases: interactive error and prompt continuation; one-shot error; machine result/event conflict code; /compact failure without cache refresh. Preserve the existing test proving ordinary persistence failures still use their established warning behavior.
-- [ ] Run the new tests red, then add post-success revision advancement, CLI cached revision handling, SessionStore contract documentation, the runtime conflict classifier, and the single ErrConflict exclusion in CLI persistence-error demotion. Use existing returned errors and renderers.
-- [ ] Run conversation, golem, and cmd/golem tests with the race detector. Mutate omission/premature placement of revision advancement, loss of error wrapping, terminal code, CLI demotion exclusion, and manual/automatic compaction conflict branches; assert each required behavior detects the defect.
-- [ ] Review runtime and CLI changes together and integrate Lane 4's shared-file hunks under its ownership rule before committing the combined behavior.
+- [x] Update mapSessionStore to enforce the proposed contract under its existing mutex and adjust preseeded persisted fixtures to revision 1. Run existing sequential-turn/compression tests red to expose missing caller advancement.
+- [x] Add runtime regression cases before changing production callers: consecutive turns; a raw save immediately followed by compression; two independent runtime instances losing/winning a shared revision; and underlying typed conflict retained with the completed answer and one terminal run.failed payload using `session_conflict`.
+- [x] Add explicit compaction and post-raw automatic compaction races. Block the existing summarizer seam while a second handle commits, then release it. Require exact winner content/index preservation. Manual compaction reports unchanged plus typed error; automatic compaction remains a successful durable turn with a typed warning.
+- [x] Add a compression value-preservation assertion with a fixed nonzero revision, including a real changed-summary result. Add CLI session load/switch/save/reset/failure cases with fixed expected revisions.
+- [x] Add CLI conflict cases: interactive error and prompt continuation; one-shot error; machine result/event conflict code; /compact failure without cache refresh. Preserve the existing test proving ordinary persistence failures still use their established warning behavior.
+- [x] Run the new tests red, then add post-success revision advancement, CLI cached revision handling, SessionStore contract documentation, the runtime conflict classifier, and the single ErrConflict exclusion in CLI persistence-error demotion. Use existing returned errors and renderers.
+- [x] Run conversation, golem, and cmd/golem tests with the race detector. Mutate omission/premature placement of revision advancement, loss of error wrapping, terminal code, CLI demotion exclusion, and manual/automatic compaction conflict branches; assert each required behavior detects the defect.
+- [x] Review runtime and CLI changes together in the isolated branch.
+- [ ] Integrate/rebase Lane 4 before landing; see the execution ruling below.
 
 **Dependency:** Step 2; shared-file integration depends on Lane 4. **Risk:** Public injected-store contract and event classification; raw-turn and post-commit compression failures must retain their different outcomes. Preserve secret/canary error rendering precedence. No changes to tool authority or redaction policy are required.
 
@@ -183,11 +184,11 @@ Each behavior task below includes its own red/green cycle. No tests have been ru
 
 **Files:** docs/library.md, changelog.d/473-cas-save.md, approved plan document; any specific fixes identified by review remain within the approved behavior.
 
-- [ ] Document the expected-revision Save contract, success advancement, typed conflicts, machine code, compaction behavior, synchronized binary upgrade requirement, injected-store migration requirement, and explicit deletion/recreation limit.
+- [x] Document the expected-revision Save contract, success advancement, typed conflicts, machine code, compaction behavior, synchronized binary upgrade requirement, injected-store migration requirement, and explicit deletion/recreation limit.
 - [ ] Add the changelog fragment. Read the complete diff; perform code-review cycles and a separate challenge of each review until findings are resolved. Use the available review skills; locate the handoff's named code-review/criticize-review workflows before claiming those exact workflows ran.
-- [ ] In the worktree, run `rtk proxy env -u GOROOT go test -race ./conversation ./golem ./cmd/golem` after integrated changes, unless the same unchanged revision already passed this focused check.
-- [ ] Run `rtk proxy env -u GOROOT golangci-lint run --max-same-issues 0 --max-issues-per-linter 0 ./...`.
-- [ ] Run `rtk proxy docker compose -f docker-compose.ci.yml run --rm ci ./scripts/ci-local --mode full` and capture its direct exit code without piping through tail.
+- [x] In the worktree, run `rtk proxy env -u GOROOT go test -race ./conversation ./golem ./cmd/golem` after integrated changes, unless the same unchanged revision already passed this focused check.
+- [x] Run `rtk proxy env -u GOROOT golangci-lint run --max-same-issues 0 --max-issues-per-linter 0 ./...`.
+- [x] Run `rtk proxy docker compose -f docker-compose.ci.yml run --rm ci ./scripts/ci-local --mode full` and capture its direct exit code without piping through tail.
 - [ ] Record actual test, mutation, review, and gate results in the approved plan. Rebase after Lane 4 if needed and rerun checks justified by changed integration code.
 - [ ] Prepare a reviewable PR containing `Closes #473`, the behavioral contract, compatibility limits, and actual validation evidence. Follow repository authorization rules for PR publication; do not merge as part of this approval.
 
@@ -198,3 +199,17 @@ Each behavior task below includes its own red/green cycle. No tests have been ru
 Approve S1–S5 and Steps 1–4 together before code. Approval specifically covers the schema/Save contract, refuse-and-notice UX with error status for a lost raw save, warning-only automatic compaction after a durable turn, and the stated boundaries for delete/recreate, older writers, external injected stores, and migration startup.
 
 If deletion/recreation or legacy-writer protection must be guaranteed in #473, revise this spec and plan before implementation; the present numeric revision design must not be described as covering those cases.
+
+## Execution evidence — 2026-09-10
+
+Execution uses `feat/473-cas-save` in `.worktrees/473-cas-save`, based on refreshed `origin/develop` at `14af019`. The main checkout and its pre-existing untracked files were left intact.
+
+- Baseline: `rtk proxy env -u GOROOT go test ./conversation ./golem ./cmd/golem` passed, exit 0.
+- Task 1 (`dabead0`): additive v4 migration and loaded revision. Focused migration/load tests and full conversation tests passed. Mutations to the migration default, loaded scan, fixture title, and message bytes each failed as intended and were restored. Independent review and separate challenge: PASS / APPROVE, no findings.
+- Task 2 (`7926999`): atomic CAS Save. Behavioral RED showed stale revisions accepted and both competing writers succeeding. Final `rtk proxy env -u GOROOT go test -race ./conversation -count=1` passed (2.435s); focused race tests also passed at count=10 (5.982s). All 25 targeted mutations failed behavior assertions and were restored, covering CAS predicates/create handling/increments/zero-row classification, transaction ordering/rollback, timestamps, revision bounds, typed error data/wrapping, real error categories, transcript/summary/title/search preservation. Independent review and separate challenge: PASS / APPROVE, no findings.
+- Task 3 (`4d6ed19`): focused behavioral RED/GREEN and 20 distinct targeted mutations passed their intended checks; all mutations restored. Full `rtk proxy env -u GOROOT go test -race ./conversation ./golem ./cmd/golem` passed, exit 0 (conversation 2.400s, golem 14.325s, CLI 407.686s). Targeted race coverage after final test refinements also passed. Independent review/challenge PASS / APPROVE. Host lint found four unchecked test cleanup calls; those were fixed, focused affected tests passed, and scoped re-review was clean.
+- Unlimited-issue host lint: `rtk proxy env -u GOROOT golangci-lint run --max-same-issues 0 --max-issues-per-linter 0 ./...` passed, exit 0, zero issues.
+- Full Docker gate: passed at `4d6ed19`, exit 0. Format, lint with zero issues, all-package race tests, and compile smoke all passed (CLI 251.914s, conversation 2.624s, golem 6.263s).
+- Whole-branch review: pending.
+
+Execution rulings: literal fixtures and protocol constants follow the approved spec; stdlib tests add no dependencies; the CLI compaction test filename is `compact_repl_test.go`; staged immutable diffs receive independent review before commits. Task 3 changes are prepared in isolation; Lane 4 integration and rebase remain required before landing because #375/#376 are still open. No merge is authorized.
