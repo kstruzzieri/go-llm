@@ -1,6 +1,6 @@
 # Conversation CAS Save (#473) — Spec and Implementation Plan
 
-**Status:** Approved by Keith on 2026-09-10 ("begin execution"). S1–S5, including the documented compatibility limits, are authorized; implementation is in progress.
+**Status:** Approved by Keith on 2026-09-10 ("begin execution"). S1–S5, including the documented compatibility limits, are implemented and validated. Draft PR #539 is open; Lane 4 integration/rebase remains required before landing.
 
 **Review update (2026-09-10):** Gemini's feedback has been checked against the pinned source and the SQLite documentation. Accepted clarifications and item-by-item dispositions appear below. The reviewer's recommendation to execute is not Keith's implementation approval.
 
@@ -185,12 +185,13 @@ Each behavior task below includes its own red/green cycle. No tests have been ru
 **Files:** docs/library.md, changelog.d/473-cas-save.md, approved plan document; any specific fixes identified by review remain within the approved behavior.
 
 - [x] Document the expected-revision Save contract, success advancement, typed conflicts, machine code, compaction behavior, synchronized binary upgrade requirement, injected-store migration requirement, and explicit deletion/recreation limit.
-- [ ] Add the changelog fragment. Read the complete diff; perform code-review cycles and a separate challenge of each review until findings are resolved. Use the available review skills; locate the handoff's named code-review/criticize-review workflows before claiming those exact workflows ran.
+- [x] Add the changelog fragment. Read the complete diff; perform code-review cycles and a separate challenge of each review until findings are resolved. Use the available review skills; locate the handoff's named code-review/criticize-review workflows before claiming those exact workflows ran.
 - [x] In the worktree, run `rtk proxy env -u GOROOT go test -race ./conversation ./golem ./cmd/golem` after integrated changes, unless the same unchanged revision already passed this focused check.
 - [x] Run `rtk proxy env -u GOROOT golangci-lint run --max-same-issues 0 --max-issues-per-linter 0 ./...`.
 - [x] Run `rtk proxy docker compose -f docker-compose.ci.yml run --rm ci ./scripts/ci-local --mode full` and capture its direct exit code without piping through tail.
-- [ ] Record actual test, mutation, review, and gate results in the approved plan. Rebase after Lane 4 if needed and rerun checks justified by changed integration code.
-- [ ] Prepare a reviewable PR containing `Closes #473`, the behavioral contract, compatibility limits, and actual validation evidence. Follow repository authorization rules for PR publication; do not merge as part of this approval.
+- [x] Record actual test, mutation, review, and gate results in the approved plan.
+- [ ] Rebase after Lane 4 and rerun checks justified by changed integration code before landing.
+- [x] Prepare a reviewable PR containing `Closes #473`, the behavioral contract, compatibility limits, and actual validation evidence. Follow repository authorization rules for PR publication; do not merge as part of this approval.
 
 **Dependency:** Steps 1–3. **Risk:** Full gate availability and integration drift; report a failed/unavailable gate rather than representing it as passed. #474 remains blocked until #473 lands.
 
@@ -210,6 +211,10 @@ Execution uses `feat/473-cas-save` in `.worktrees/473-cas-save`, based on refres
 - Task 3 (`4d6ed19`): focused behavioral RED/GREEN and 20 distinct targeted mutations passed their intended checks; all mutations restored. Full `rtk proxy env -u GOROOT go test -race ./conversation ./golem ./cmd/golem` passed, exit 0 (conversation 2.400s, golem 14.325s, CLI 407.686s). Targeted race coverage after final test refinements also passed. Independent review/challenge PASS / APPROVE. Host lint found four unchecked test cleanup calls; those were fixed, focused affected tests passed, and scoped re-review was clean.
 - Unlimited-issue host lint: `rtk proxy env -u GOROOT golangci-lint run --max-same-issues 0 --max-issues-per-linter 0 ./...` passed, exit 0, zero issues.
 - Full Docker gate: passed at `4d6ed19`, exit 0. Format, lint with zero issues, all-package race tests, and compile smoke all passed (CLI 251.914s, conversation 2.624s, golem 6.263s).
-- Whole-branch review: pending.
+- Whole-branch review: PASS / APPROVE at `6c33294`, with no actionable findings; the independent skeptical challenge also passed.
 
 Execution rulings: literal fixtures and protocol constants follow the approved spec; stdlib tests add no dependencies; the CLI compaction test filename is `compact_repl_test.go`; staged immutable diffs receive independent review before commits. Task 3 changes are prepared in isolation; Lane 4 integration and rebase remain required before landing because #375/#376 are still open. No merge is authorized.
+
+Final result: independent XHigh whole-branch review of `14af019..6c33294` passed spec compliance and code quality; a separate skeptical challenge found no actionable issue. The native pre-push full gate also passed. [Draft PR #539](https://github.com/kstruzzieri/go-llm/pull/539) targets develop and contains `Closes #473`. No merge was performed. The feature worktree is retained for review and Lane 4 integration.
+
+Execution decisions: tests use authorized literal fixtures and protocol constants, with stdlib rather than added testing dependencies. Task headings were normalized for the plan tooling and the existing CLI compaction test filename was corrected. Immutable staged patches were independently reviewed before commits. Sandbox-only cache failures were retried with approved access. The substantive ordering decision was to prepare isolated runtime/CLI commits now and require Lane 4 integration/rebase before landing; if that ordering is wrong, the commits must be replayed through the lane owner. None of these decisions changes the accepted S1–S5 behavior or authorizes merging.
