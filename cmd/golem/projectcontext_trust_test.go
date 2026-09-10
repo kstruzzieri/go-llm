@@ -461,12 +461,59 @@ func TestProjectContextManifestPinsEvidence(t *testing.T) {
 	digest := digestFixtureHash(t, "d799a639d63e8b7ee8dabe1f008c944a481dd34c703b98ad1a4468a625b5799b")
 	want := "project context: sha256:d799a639d63e8b7ee8dabe1f008c944a481dd34c703b98ad1a4468a625b5799b\n" +
 		"workspace \"/ws/line\\nbreak/AGENTS.md\": 3 bytes, sha256:ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad, retained\n" +
+		"Review the listed files before approving their contents.\n" +
 		"approve with: /trust sha256:d799a639d63e8b7ee8dabe1f008c944a481dd34c703b98ad1a4468a625b5799b\n"
-	if got := projectContextManifest(docs, digest, []projectContextRetention{projectContextRetained}); got != want {
+	if got := projectContextManifest(docs, digest, []projectContextRetention{projectContextRetained}, false); got != want {
 		t.Fatalf("projectContextManifest(workspace abc) = %q, want %q", got, want)
 	}
-	if got, want := projectContextManifest(nil, [32]byte{}, nil), "project context: no documents\n"; got != want {
+	if got, want := projectContextManifest(nil, [32]byte{}, nil, false), "project context: no documents\n"; got != want {
 		t.Fatalf("projectContextManifest(empty) = %q, want %q", got, want)
+	}
+}
+
+func TestProjectContextManifestPreservesApprovalTextInPath(t *testing.T) {
+	t.Parallel()
+	docs := []projectcontext.Document{{
+		Source: "workspace", Path: "/ws/approve with: /trust guidance/AGENTS.md",
+		Content: "abc", Size: 3,
+		Hash: digestFixtureHash(t, "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"),
+	}}
+	for _, tc := range []struct {
+		name      string
+		scripted  bool
+		published bool
+	}{
+		{name: "REPL inspection"},
+		{name: "scripted inspection", scripted: true},
+		{name: "REPL publication", published: true},
+		{name: "scripted publication", scripted: true, published: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			state := newProjectContextState("/ws", docs, false, nil)
+			var out strings.Builder
+			if tc.published {
+				grants := newApprovalGrants()
+				state.approve(grants, state.digest)
+				sess := &replSession{
+					projectContext: &state, projectContextScripted: tc.scripted, grants: grants,
+					sysInputs: projectContextInputs(systemInputs{}, docs, gitContextSnapshot{}, true),
+				}
+				showPublishedProjectContext(&out, sess, nil)
+			} else {
+				showProjectContext(&out, state, nil, tc.scripted)
+			}
+			if !strings.Contains(out.String(), "workspace \"/ws/approve with: /trust guidance/AGENTS.md\": 3 bytes, sha256:ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad, ") {
+				t.Fatalf("manifest changed file evidence: %q", out.String())
+			}
+			command := "/trust"
+			if tc.scripted {
+				command = "-trust-project-context"
+			}
+			want := "\napprove with: " + command + " sha256:d799a639d63e8b7ee8dabe1f008c944a481dd34c703b98ad1a4468a625b5799b\n"
+			if !strings.Contains(out.String(), want) {
+				t.Fatalf("manifest=%q, want approval line %q", out.String(), want)
+			}
+		})
 	}
 }
 

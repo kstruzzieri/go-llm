@@ -70,10 +70,7 @@ func showProjectContext(out io.Writer, state projectContextState, cause error, s
 		_, _ = fmt.Fprintln(out, "project context unavailable: "+gitContextText(cause.Error()))
 		return
 	}
-	manifest := projectContextManifest(state.docs, state.digest, nil)
-	if scripted {
-		manifest = strings.ReplaceAll(manifest, "approve with: /trust ", "approve with: -trust-project-context ")
-	}
+	manifest := projectContextManifest(state.docs, state.digest, nil, scripted)
 	_, _ = io.WriteString(out, manifest)
 }
 
@@ -207,10 +204,7 @@ func showPublishedProjectContext(out io.Writer, sess *replSession, cause error) 
 			statuses[i] = projectContextRetained
 		}
 	}
-	manifest := projectContextManifest(s.docs, s.digest, statuses)
-	if sess.projectContextScripted {
-		manifest = strings.ReplaceAll(manifest, "approve with: /trust ", "approve with: -trust-project-context ")
-	}
+	manifest := projectContextManifest(s.docs, s.digest, statuses, sess.projectContextScripted)
 	_, _ = io.WriteString(out, manifest)
 	_, _ = fmt.Fprintln(out, "project context approved: "+formatProjectContextDigest(s.digest))
 }
@@ -410,7 +404,7 @@ func projectContextOmissionCost(n int) int {
 	return len(projectContextOmissionLine(n))
 }
 
-func projectContextManifest(docs []projectcontext.Document, digest [32]byte, statuses []projectContextRetention) string {
+func projectContextManifest(docs []projectcontext.Document, digest [32]byte, statuses []projectContextRetention, scripted bool) string {
 	if len(docs) == 0 {
 		return "project context: no documents\n"
 	}
@@ -425,7 +419,12 @@ func projectContextManifest(docs []projectcontext.Document, digest [32]byte, sta
 		_, _ = fmt.Fprintf(&b, "%s %s: %d bytes, sha256:%x, %s\n",
 			gitContextText(doc.Source), strconv.QuoteToGraphic(strings.ToValidUTF8(doc.Path, "�")), doc.Size, doc.Hash, status)
 	}
-	_, _ = fmt.Fprintf(&b, "approve with: /trust %s\n", displayDigest)
+	command := "/trust"
+	if scripted {
+		command = "-trust-project-context"
+	}
+	b.WriteString("Review the listed files before approving their contents.\n")
+	_, _ = fmt.Fprintf(&b, "approve with: %s %s\n", command, displayDigest)
 	return b.String()
 }
 
