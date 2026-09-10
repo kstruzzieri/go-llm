@@ -275,3 +275,19 @@ fi
 grep -F 'go.mod does not declare module github.com/kstruzzieri/go-llm' "$tmp/wrong-module-error" >/dev/null
 
 grep -Fq '      python3' "$repo_root/Dockerfile.ci"
+
+awk '
+  /^      - / { step = ""; env = 0 }
+  $0 == "      - name: Seatbelt confinement (non-race)" { step = "non-race"; next }
+  $0 == "      - name: Seatbelt confinement (race)" { step = "race"; next }
+  step && $0 == "          GO_LLM_REQUIRE_SEATBELT: \"1\"" { env = 1; next }
+  step == "non-race" && $0 == "        run: go test -count=1 -run '\''^(TestSeatbelt|TestSBPL|TestProbeSeatbelt|TestScratchSeatbelt|TestNewExecBackendSeatbelt)'\'' ./agent/tools" {
+    nonrace = env
+    step = ""
+  }
+  step == "race" && $0 == "        run: go test -race -count=1 -run '\''^(TestSeatbelt|TestSBPL|TestProbeSeatbelt|TestScratchSeatbelt|TestNewExecBackendSeatbelt)'\'' ./agent/tools" {
+    race = env
+    step = ""
+  }
+  END { exit !(nonrace && race) }
+' "$repo_root/.github/workflows/darwin-smoke.yml"

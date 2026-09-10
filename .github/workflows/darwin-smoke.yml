@@ -45,9 +45,9 @@ jobs:
       - name: Seatbelt confinement (non-race)
         env:
           GO_LLM_REQUIRE_SEATBELT: "1"
-        run: go test -run '^(TestSeatbelt|TestSBPL|TestProbeSeatbelt)' ./agent/tools
+        run: go test -count=1 -run '^(TestSeatbelt|TestSBPL|TestProbeSeatbelt|TestScratchSeatbelt|TestNewExecBackendSeatbelt)' ./agent/tools
 
       - name: Seatbelt confinement (race)
         env:
           GO_LLM_REQUIRE_SEATBELT: "1"
-        run: go test -race -run '^(TestSeatbelt|TestSBPL|TestProbeSeatbelt)' ./agent/tools
+        run: go test -race -count=1 -run '^(TestSeatbelt|TestSBPL|TestProbeSeatbelt|TestScratchSeatbelt|TestNewExecBackendSeatbelt)' ./agent/tools
