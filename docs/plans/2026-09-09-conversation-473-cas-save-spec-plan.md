@@ -1,6 +1,6 @@
 # Conversation CAS Save (#473) — Spec and Implementation Plan
 
-**Status:** Approved by Keith on 2026-09-10 ("begin execution"). S1–S5, including the documented compatibility limits, are implemented and validated. Draft PR #539 is open; Lane 4 integration/rebase remains required before landing.
+**Status:** Approved by Keith on 2026-09-10 ("begin execution"). S1–S5, including the documented compatibility limits, are implemented and validated. PR #539 is open; Lane 4 integration/rebase remains required before landing.
 
 **Review update (2026-09-10):** Gemini's feedback has been checked against the pinned source and the SQLite documentation. Accepted clarifications and item-by-item dispositions appear below. The reviewer's recommendation to execute is not Keith's implementation approval.
 
@@ -88,7 +88,7 @@ Use refuse-and-notice. No automatic reload-and-save, merge, retry, or model/tool
 - Exclude ErrConflict from the CLI branch that demotes ordinary persistence failures to success. Reuse the existing error rendering/redaction and the conflict error's explicit unsaved-snapshot message.
 - Interactive use returns to the prompt after showing the error. The losing snapshot is not persisted. An explicit next turn follows the existing fresh-load behavior; it does not replay the rejected turn.
 - One-shot and machine output retain the error outcome; machine output carries the runtime's `session_conflict` code. Returned/previously streamed answer content is not represented as a successfully saved transcript. Keep existing output-format rules for error results.
-- Ordinary non-conflict disk failures retain their current CLI behavior; this change does not redesign every persistence error.
+- Ordinary non-conflict disk failures retain their current CLI behavior, except SQLite busy/lock-timeout errors, which remain errors under the 2026-09-11 Gemini follow-up below. This change does not redesign every persistence error.
 - /compact already renders returned errors and refreshes its cached state only after a successful change. Verify its conflict notice without adding a second recovery mechanism.
 - Add cached revision to the CLI session: load it in openSession/switchTo; submit and increment it in recordMessages; reset it after successful clear and on renew. Failed saves, loads, and deletes leave the prior cached state intact.
 
@@ -218,3 +218,19 @@ Execution rulings: literal fixtures and protocol constants follow the approved s
 Final result: independent XHigh whole-branch review of `14af019..6c33294` passed spec compliance and code quality; a separate skeptical challenge found no actionable issue. The native pre-push full gate also passed. [Draft PR #539](https://github.com/kstruzzieri/go-llm/pull/539) targets develop and contains `Closes #473`. No merge was performed. The feature worktree is retained for review and Lane 4 integration.
 
 Execution decisions: tests use authorized literal fixtures and protocol constants, with stdlib rather than added testing dependencies. Task headings were normalized for the plan tooling and the existing CLI compaction test filename was corrected. Immutable staged patches were independently reviewed before commits. Sandbox-only cache failures were retried with approved access. The substantive ordering decision was to prepare isolated runtime/CLI commits now and require Lane 4 integration/rebase before landing; if that ordering is wrong, the commits must be replayed through the lane owner. None of these decisions changes the accepted S1–S5 behavior or authorizes merging.
+
+## Gemini review disposition — 2026-09-11
+
+Keith requested review and remediation of Gemini's PR #539 findings. The narrow behavior update is to keep SQLite busy/lock-timeout persistence failures as CLI errors, including text one-shot exit failure, while preserving their original SQLite error and the existing warning behavior for other ordinary disk failures. This is an explicit exception to the earlier S4 compatibility choice; it does not classify contention as a CAS conflict or add retries.
+
+| Finding | Disposition |
+| --- | --- |
+| Busy timeout becomes one-shot success | Confirmed and fixed in the shared CLI demotion condition. A real two-handle SQLite lock regression proves retained typed error, text one-shot failure, and unchanged saved/cached history. Existing machine terminal failures already report an error; no new machine error code is introduced. The former behavior displayed a warning, so calling the loss silent was inaccurate. |
+| Interactive follow-up loses the rejected turn | Clarified with one interactive-only notice: the next turn uses latest saved history without the unsaved turn, and `/new` starts a separate session. No automatic fork, replay, merge, or recovery prompt. |
+| Delete/recreate ABA | Real, already explicitly deferred in S5. No new incarnation/token/schema redesign in this follow-up. Random UUID IDs are not immune: `/clear` retains the existing ID and recreation resets its revision. |
+| Legacy writer bypass | Real, already explicitly deferred in S5; all writers must upgrade together. No trigger added without a separate mixed-version compatibility design. |
+| Caller revision guessing / value mutation | Not a contract defect. Save guarantees exactly r+1 and does not mutate its argument; the caller advances its own retained copy after success. A custom store advancing by two violates that contract. Returning a token would change the public API and still require a compliant store. |
+| CLI cache after conflict | Intentional failure-state preservation. Runtime turns and explicit compaction load durable history afresh; successful cache refresh uses switchTo. No stale snapshot is automatically re-saved. |
+| Gemini's test claims | The detailed report lists focused successful commands; the pasted activity log alone does not prove every broad suite completed. Verification below comes from this execution, independently. |
+
+Regression RED: both the real-busy error/one-shot cases and the added interactive-notice assertion failed before production changes. Focused race GREEN passed after the fixes. Both targeted mutations (removing the busy exclusion and removing the interactive notice) failed their behavioral assertions and were restored. Unlimited-issue host lint passed with zero issues. The required full Docker gate passed formatting, lint, all-package race tests (CLI 245.516s), and compile smoke, exit 0. Independent code review and a separate adversarial/skeptical challenge returned PASS / APPROVE with no actionable findings.

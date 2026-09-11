@@ -141,8 +141,11 @@ transaction; a conflict leaves the winning snapshot and index intact.
 Golem returns a completed answer alongside `golem.ErrSessionPersistence` and the
 underlying conflict if the raw turn could not be saved. Its terminal event is
 `run.failed` with code `session_conflict`. The CLI reports an error and one-shot
-execution fails; it does not automatically retry or replay tools. A subsequent
-explicit turn loads current durable history. Explicit `CompactThread` conflicts
+execution fails; it does not automatically retry or replay tools. SQLite busy
+errors, including lock timeouts, also remain errors in the CLI; they retain their
+original database error rather than becoming CAS conflicts. A subsequent explicit
+turn loads current durable history. The interactive conflict notice explains that
+this history excludes the unsaved turn and that `/new` starts a separate session. Explicit `CompactThread` conflicts
 return an unchanged report and the typed error. Automatic compression runs after
 the raw turn has committed, so its conflict is an `OnWarning` notification and
 the turn remains successful. Hosts that omit `OnWarning` retain quiet best-effort

@@ -22,6 +22,8 @@ import (
 	golemruntime "github.com/kstruzzieri/go-llm/golem"
 	"github.com/kstruzzieri/go-llm/provider"
 	"github.com/kstruzzieri/go-llm/signing"
+	"modernc.org/sqlite"
+	sqlite3 "modernc.org/sqlite/lib"
 )
 
 type tokenThenErrorCaller struct{}
@@ -2184,7 +2186,7 @@ func TestREPLSessionConflictContinuesPrompt(t *testing.T) {
 	if err := runREPL(context.Background(), newScannerSource(strings.NewReader("question\n/help\n"), &out), &out, nil, sess); err != nil {
 		t.Fatal(err)
 	}
-	if got := out.String(); !strings.Contains(got, "snapshot not saved") || !strings.Contains(got, golemHelp) {
+	if got := out.String(); !strings.Contains(got, "snapshot not saved") || !strings.Contains(got, "The next turn uses the latest saved history, without this unsaved turn. Use /new for a separate session.") || !strings.Contains(got, golemHelp) {
 		t.Fatalf("interactive conflict = %q; want notice then help at next prompt", got)
 	}
 }
@@ -2197,5 +2199,60 @@ func TestOneShotTextSessionConflictIsError(t *testing.T) {
 	}
 	if got := stdout.String() + stderr.String(); !strings.Contains(got, "snapshot not saved") || strings.Contains(got, "done ·") {
 		t.Fatalf("one shot output = %q; want conflict notice", got)
+	}
+}
+
+func TestSessionBusyRemainsAnError(t *testing.T) {
+	for _, mode := range []string{"run", "one-shot"} {
+		t.Run(mode, func(t *testing.T) {
+			ctx := context.Background()
+			root := t.TempDir()
+			sess := newSessionedTestSession(t, &captureCaller{answer: "completed answer"}, root, "user:busy")
+			sess.root = root
+			if err := sess.session.record(ctx, "saved question", "saved answer"); err != nil {
+				t.Fatal(err)
+			}
+			before, err := sess.session.store.Load(ctx, sess.session.id)
+			if err != nil {
+				t.Fatal(err)
+			}
+			writer, _, err := openSession(ctx, sess.session.dbPath, sess.session.id)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = writer.Close() })
+			if _, err := writer.db.ExecContext(ctx, "PRAGMA busy_timeout=1"); err != nil {
+				t.Fatal(err)
+			}
+			installCompactRuntime(t, sess, golemruntime.Options{SessionStore: writer.store})
+			tx, err := sess.session.db.BeginTx(ctx, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = tx.Rollback() }()
+			if _, err := tx.ExecContext(ctx, "UPDATE conversations SET title = 'held lock' WHERE id = ?", sess.session.id); err != nil {
+				t.Fatal(err)
+			}
+			var stdout, stderr strings.Builder
+			if mode == "run" {
+				result, err := runOnce(ctx, &stderr, nil, sess, "new question", nil)
+				var busy *sqlite.Error
+				if result.Answer != "completed answer" || !errors.Is(err, golemruntime.ErrSessionPersistence) || !errors.As(err, &busy) || busy.Code()&0xff != sqlite3.SQLITE_BUSY || errors.Is(err, conversation.ErrConflict) {
+					t.Fatalf("runOnce = %+v, %v; want answer and original SQLITE_BUSY persistence error", result, err)
+				}
+			} else if err := runOneShot(ctx, &stdout, &stderr, nil, sess, "new question"); !errors.Is(err, errOneShotFailed) || stdout.Len() != 0 {
+				t.Fatalf("one-shot = %v, stdout %q; want error and no success answer", err, stdout.String())
+			}
+			if !strings.Contains(stderr.String(), "error:") || strings.Contains(stderr.String(), "warning: session not saved:") {
+				t.Fatalf("busy output = %q; want error notice", stderr.String())
+			}
+			if err := tx.Rollback(); err != nil {
+				t.Fatal(err)
+			}
+			after, err := sess.session.store.Load(ctx, sess.session.id)
+			if err != nil || !reflect.DeepEqual(after, before) || sess.session.revision != 1 || !reflect.DeepEqual(sess.session.msgs, before.Messages) {
+				t.Fatalf("failed busy save changed storage/cache: after=%+v, err=%v, cache=%+v", after, err, sess.session)
+			}
+		})
 	}
 }

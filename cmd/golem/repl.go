@@ -19,6 +19,8 @@ import (
 	"github.com/kstruzzieri/go-llm/internal/agenttrace"
 	"github.com/kstruzzieri/go-llm/memory"
 	"github.com/kstruzzieri/go-llm/provider"
+	"modernc.org/sqlite"
+	sqlite3 "modernc.org/sqlite/lib"
 )
 
 // replSession holds the per-process state the REPL needs.
@@ -209,6 +211,9 @@ func runREPL(ctx context.Context, src lineSource, out io.Writer, interrupts <-ch
 		_, runErr := runOnce(ctx, out, interrupts, sess, line, src)
 		if !secretsBlocked(runErr) && !canaryAborted(runErr) {
 			src.RecordGoal(line)
+			if errors.Is(runErr, conversation.ErrConflict) {
+				_, _ = fmt.Fprintln(out, "The next turn uses the latest saved history, without this unsaved turn. Use /new for a separate session.")
+			}
 		}
 	}
 }
@@ -426,9 +431,12 @@ func runOnce(ctx context.Context, out io.Writer, interrupts <-chan struct{}, ses
 		sess.canary.burn()
 	}
 	var sessionSaveErr error
+	var sqliteErr *sqlite.Error
+	// Lock timeouts are refused writes, just like a lost CAS; preserve the SQL error.
+	sessionBusy := errors.As(runErr, &sqliteErr) && sqliteErr.Code()&0xff == sqlite3.SQLITE_BUSY
 	if res.Answer != "" &&
 		errors.Is(runErr, golemruntime.ErrSessionPersistence) &&
-		!errors.Is(runErr, conversation.ErrConflict) &&
+		!errors.Is(runErr, conversation.ErrConflict) && !sessionBusy &&
 		!secretBlock && !canaryBlock &&
 		!errors.Is(runErr, context.Canceled) &&
 		!errors.Is(runErr, context.DeadlineExceeded) {
