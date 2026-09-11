@@ -1,8 +1,7 @@
 # Pre-push security regression gate (#453) — Spec and Implementation Plan
 
-> **Status: implemented and verified on 2026-09-10 after Keith's approval;
-> independent final review approved. Branch remains local.**
-> **Revision: 2026-09-10 — corrected Gemini #453 review addressed.**
+> **Status: PR #540 published; Gemini follow-up fixes implemented, verified and reviewed on 2026-09-11.**
+> **Revision: 2026-09-11 — Gemini PR #540 review addressed.**
 > For agentic workers: after approval, use `superpowers:subagent-driven-development`
 > or `superpowers:executing-plans`, with an independent review after each task.
 
@@ -129,6 +128,11 @@ Do not add `/.dockerenv` probing or automatic rebuilding. The unchanged hook doe
 not request `--build`; an existing image without Python must fail visibly until
 the developer rebuilds it. Put this one-time upgrade command in the local CI docs.
 
+Before running phases, unset inherited `GOROOT` for both Go and lint and set
+`GOFLAGS` to a single space. Unlike an unset or empty value, nonempty whitespace
+overrides flags saved with `go env -w` while supplying no flags to Go. All phases
+inherit this environment; other Go environment settings remain unchanged.
+
 Both modes run these phases, sequentially:
 
 1. **security contracts:**
@@ -144,6 +148,12 @@ Both modes run these phases, sequentially:
 4. **race tests:** existing `env -u GOROOT go test -race ./...`.
 5. **compile smoke**, `full` only:
    `env -u GOROOT go test -run '^$' ./...`.
+
+Capture and replay the targeted execution's stdout even when it fails, preserve
+its nonzero exit status, and require its exact top-level verbose `PASS` result
+before formatting. A generic package `PASS`, zero-test success, top-level `SKIP`,
+or child/renamed test pass is insufficient. Declared deferred subtests remain
+allowed. This guards execution of the aggregate, not the contents of its body.
 
 The discovery invocation runs no tests and checks the compiled test list rather
 than source spelling or filename. It replaces the proposed source-declaration
@@ -372,8 +382,8 @@ unavailable, report the exact unverified check rather than substituting a skip.
 
 Historical approval boundary: this plan originally made no source changes or
 validation runs and requested approval for revised D1–D3 and Tasks 1–2 together.
-Keith granted that approval before implementation began. Push and PR publication
-remain separately unauthorized.
+Keith granted that approval before implementation began, then separately
+authorized publication of PR #540 and these review fixes. Merge is not authorized.
 
 Sources: [#453](https://github.com/kstruzzieri/go-llm/issues/453),
 [#451](https://github.com/kstruzzieri/go-llm/issues/451),
@@ -414,4 +424,48 @@ helper skips remain documented exclusions; #481 and #512 remain separate work.
 
 Detailed reports and command logs are retained in the ignored worktree directory
 `.superpowers/sdd/2026-09-09-security-gate-453-spec-plan/`, including the local PR
-description with `Closes #453`. No push, PR publication or merge was performed.
+description with `Closes #453`. PR #540 was subsequently published at the user's
+request; no merge was performed.
+
+
+## Gemini PR review disposition — 2026-09-11
+
+The user requested review and correction of the supplied findings against PR
+#540 at `03b953f`. This follow-up retains the previously approved scope decisions.
+
+| Finding or recommendation | Disposition |
+|---|---|
+| `GOFLAGS=-skip=TestHardeningContracts` silently suppresses the aggregate | Confirmed. Actual Go discovery listed the aggregate, but execution exited 0 with no tests. The gate now overrides environment and persisted flags for all phases. Merely unsetting/emptying `GOFLAGS` leaves `go env -w` defaults active. |
+| High-severity attacker push bypass | Narrowed. The reproduced path is a direct host run or a deliberately configured container; the shipped Compose service does not forward the host variable. A user controlling their own hook can already bypass it. The silent configuration failure is still fixed. |
+| Top-level `t.Skip()` yields success | Confirmed and fixed with a positive, exact top-level pass requirement. A real temporary skip was rejected with exit 1 before formatting; restored execution passed. Gemini's negative-only SKIP/FAIL grep would still accept a generic zero-test PASS, so it was not used. |
+| Deleted or skipped internal subcontracts | A named aggregate pass does not prove its implementation is intact. Preserve the five declared deferred groups and code review; do not duplicate the aggregate's internal test registry in Bash. The limitation is explicit in local CI docs. |
+| Stale `GOROOT` still reaches lint | Confirmed: the real linter exited 3 for `/poisoned`. Clear it once for the shared Go/lint phase environment. |
+| Literal YAML/Docker assertions are formatting-sensitive | Retain the approved literal configuration contract. Valid formatting changes can update the corresponding expectations; no new YAML dependency or generalized parser is warranted. Assertions remain fail-closed and step-bound. |
+| Aggregate runs in both targeted and broad race passes | Intentional: one fresh, non-race aggregate plus the existing broad race selection. The first phase runs only the aggregate, not every test in `agent`. |
+| Root Docker hides permission assertions; local hooks are bypassable | Existing, documented limits. Native non-root Linux and native confinement jobs retain responsibility. This change does not promise an unbypassable local security boundary or claim branch-protection settings were verified. |
+| Remove the host Python prerequisite | Retain D2: running the full local gate requires the interpreter so the existing audit regression cannot silently skip. A new environment policy switch and Go test change would add scope and weaken the agreed host gate. |
+| Add #481 background observer selectors | Retain the explicit #481 deferral; this review establishes no new dependency on that unrelated runtime work. |
+| Relax the 500 ms aggregate assertion | Retain the existing contract: the review reports a possible timing risk, not a reproduced regression. No product/test-harness timing change in this scripts/CI fix. |
+| Dedicated phase implies exhaustive security coverage | Docs continue to state that the dedicated phase covers one aggregate; remaining platform-eligible security tests belong to the broad race pass, with explicit native/root/deferred limits. |
+
+Follow-up TDD evidence: the expanded shell harness first rejected inherited
+flags (exit 39), then rejected a generic zero-test PASS (expected exit 1, got 0).
+After the fixes it passes in both modes, including exact output replay, original
+failure statuses, renamed/child/skipped outcomes, and allowed deferred subtests.
+Seven disposable mutations each fail: leaked lint GOROOT, missing GOFLAGS
+override, empty GOFLAGS fallback, removed or overly broad pass check, swallowed
+execution status, and lost verbose output. No Go fixture/source mutation remains.
+
+Final follow-up validation: macOS and Alpine shell harnesses, shell syntax,
+changelog validation and diff checks passed. Full host lint reported zero issues.
+The full Docker gate exited 0 with poisoned GOROOT plus caller and persisted
+GOFLAGS configured to skip tests, exercising security, formatting, lint, race
+tests and compile smoke under the corrected environment. Independent review of
+all five changed files approved with no actionable findings. Root critique
+confirmed that declared subtest skips remain allowed, saved flags cannot defeat
+the override, and a failed process takes precedence over printed PASS output.
+
+Detailed follow-up logs are retained under the ignored
+`.superpowers/sdd/2026-09-09-security-gate-453-spec-plan/gemini-followup/` directory.
+The earlier Daybreak approval applies to `03b953f`; it is not represented as a
+review of these later changes.

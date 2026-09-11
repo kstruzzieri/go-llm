@@ -94,7 +94,14 @@ The additional security-contract phase discovers and runs only
 Both host and Docker runs require `python3` so the existing audit regression
 cannot silently skip for a missing interpreter.
 
-The aggregate phase uses these exact commands:
+The gate clears inherited `GOROOT` for both Go and lint and overrides `GOFLAGS`,
+including values saved with `go env -w`, so local defaults cannot silently filter
+out tests. It also requires the exact top-level aggregate to report `PASS`;
+a zero-test success or top-level `SKIP` fails before formatting. Declared deferred
+subtests remain allowed. This confirms execution of the named aggregate, not the
+completeness of its implementation; changes inside the test still need review.
+
+The aggregate phase uses these exact commands (in that sanitized environment):
 
 ```bash
 env -u GOROOT go test -list '^TestHardeningContracts$' ./agent

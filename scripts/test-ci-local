@@ -22,13 +22,17 @@ printf 'gitdir: /unmounted/main/.git/worktrees/test\n' >"$module/.git"
 
 cat >"$tmp/bin/golangci-lint" <<'STUB'
 #!/usr/bin/env sh
+if [ "${GOROOT+x}" = x ] || [ "${GOFLAGS-}" != ' ' ]; then
+  printf 'lint received caller toolchain overrides\n' >&2
+  exit 39
+fi
 printf '%s|%s\n' "$PWD" "$*" >>"$CI_LOCAL_TEST_LOG"
 STUB
 
 cat >"$tmp/bin/go" <<'STUB'
 #!/usr/bin/env sh
-if [ "${GOROOT+x}" = x ]; then
-  printf 'go stub received poisoned GOROOT: %s\n' "$GOROOT" >&2
+if [ "${GOROOT+x}" = x ] || [ "${GOFLAGS-}" != ' ' ]; then
+  printf 'go received caller toolchain overrides\n' >&2
   exit 39
 fi
 printf '%s|%s\n' "$PWD" "$*" >>"$CI_LOCAL_TEST_LOG"
@@ -43,6 +47,7 @@ case "$*" in
     ;;
   'test -count=1 -v -run ^TestHardeningContracts$ ./agent')
     printf 'stub: security execution\n' >&2
+    printf '%s\n' "$CI_LOCAL_SECURITY_OUTPUT"
     exit "$CI_LOCAL_SECURITY_STATUS"
     ;;
   'test -race ./...')
@@ -67,8 +72,10 @@ discovery_output=TestHardeningContracts
 discovery_status=0
 discovery_error='discovery failed'
 security_status=0
+security_output='--- PASS: TestHardeningContracts (0.01s)'
 race_status=0
 caller_goroot=''
+caller_goflags='-skip=Test'
 ci_status=0
 
 run_ci() {
@@ -83,12 +90,13 @@ run_ci() {
     else
       unset GOROOT
     fi
-    PATH="$tmp/bin:$PATH" \
+    GOFLAGS="$caller_goflags" PATH="$tmp/bin:$PATH" \
       CI_LOCAL_TEST_LOG="$tmp/$name.log" \
       CI_LOCAL_DISCOVERY_OUTPUT="$discovery_output" \
       CI_LOCAL_DISCOVERY_STATUS="$discovery_status" \
       CI_LOCAL_DISCOVERY_ERROR="$discovery_error" \
       CI_LOCAL_SECURITY_STATUS="$security_status" \
+      CI_LOCAL_SECURITY_OUTPUT="$security_output" \
       CI_LOCAL_RACE_STATUS="$race_status" \
       "$module/scripts/ci-local" "$@"
   ) >"$tmp/$name.out" 2>&1
@@ -151,6 +159,7 @@ set +e
     CI_LOCAL_DISCOVERY_STATUS=0 \
     CI_LOCAL_DISCOVERY_ERROR='discovery failed' \
     CI_LOCAL_SECURITY_STATUS=0 \
+    CI_LOCAL_SECURITY_OUTPUT="--- PASS: TestHardeningContracts (0.01s)" \
     CI_LOCAL_RACE_STATUS=0 \
     scripts/ci-local --mode pre-push
 ) >"$tmp/hostile-cdpath.out" 2>&1
@@ -168,6 +177,31 @@ run_ci poisoned-goroot --mode full
 assert_status poisoned-goroot 0
 diff -u "$tmp/expected-full" "$tmp/poisoned-goroot.log"
 caller_goroot=''
+
+# A successful process must also report the exact top-level test passing.
+head -n 2 "$tmp/expected-pre-push" >"$tmp/expected-security-only"
+for mode in pre-push full; do
+  for outcome in empty skipped fail renamed child; do
+    case "$outcome" in
+      empty) security_output='PASS' ;;
+      skipped) security_output='--- SKIP: TestHardeningContracts (0.00s)' ;;
+      fail) security_output='--- FAIL: TestHardeningContracts (0.00s)' ;;
+      renamed) security_output='--- PASS: TestHardeningContractsRenamed (0.00s)' ;;
+      child) security_output='    --- PASS: TestHardeningContracts/Active (0.00s)' ;;
+    esac
+    run_ci "aggregate-$outcome-$mode" --mode "$mode"
+    assert_status "aggregate-$outcome-$mode" 1
+    grep -Fxq 'required security test did not pass: TestHardeningContracts' "$tmp/aggregate-$outcome-$mode.out"
+    grep -Fxq -- "$security_output" "$tmp/aggregate-$outcome-$mode.out"
+    diff -u "$tmp/expected-security-only" "$tmp/aggregate-$outcome-$mode.log"
+  done
+  security_output='    --- SKIP: TestHardeningContracts/deferred (0.00s)
+--- PASS: TestHardeningContracts (0.01s)'
+  run_ci "deferred-$mode" --mode "$mode"
+  assert_status "deferred-$mode" 0
+  diff -u "$tmp/expected-$mode" "$tmp/deferred-$mode.log"
+done
+security_output='--- PASS: TestHardeningContracts (0.01s)'
 
 discovery_output='? github.com/kstruzzieri/go-llm/other [no test files]
 TestHardeningContracts
@@ -206,6 +240,7 @@ for mode in pre-push full; do
   security_status=37
   run_ci "security-failure-$mode" --mode "$mode"
   assert_status "security-failure-$mode" 37
+  grep -Fxq -- "$security_output" "$tmp/security-failure-$mode.out"
   head -n 2 "$tmp/expected-pre-push" >"$tmp/expected-security-only"
   diff -u "$tmp/expected-security-only" "$tmp/security-failure-$mode.log"
 done

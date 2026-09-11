@@ -87,6 +87,11 @@ require_cmd go
 require_cmd golangci-lint
 require_cmd python3
 
+# Apply the same toolchain environment to Go and lint. Nonempty whitespace
+# overrides even GOFLAGS saved by `go env -w`, while supplying no flags.
+unset GOROOT
+export GOFLAGS=' '
+
 section "security contracts"
 printf 'note: local tests retain platform/permission skips; native bwrap/Seatbelt confinement runs in CI workflows\n'
 security_tests="$(env -u GOROOT go test -list '^TestHardeningContracts$' ./agent)"
@@ -94,7 +99,16 @@ if ! grep -Fxq 'TestHardeningContracts' <<<"$security_tests"; then
   printf 'missing required security test: TestHardeningContracts\n' >&2
   exit 1
 fi
-env -u GOROOT go test -count=1 -v -run '^TestHardeningContracts$' ./agent
+security_status=0
+security_output="$(env -u GOROOT go test -count=1 -v -run '^TestHardeningContracts$' ./agent)" || security_status=$?
+printf '%s\n' "$security_output"
+if [ "$security_status" -ne 0 ]; then
+  exit "$security_status"
+fi
+if ! grep -Eq '^--- PASS: TestHardeningContracts \([0-9.]+s\)$' <<<"$security_output"; then
+  printf 'required security test did not pass: TestHardeningContracts\n' >&2
+  exit 1
+fi
 
 section "format"
 golangci-lint fmt --diff
