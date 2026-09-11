@@ -73,9 +73,12 @@ Missing or `null` optional string fields decode to an empty string. Missing or
 fails its indexed input-name validation.
 
 A present `model_hint` contains exactly one nonblank `role` or `use_case`.
-Control characters are rejected, but exact spelling and case are preserved and
-the vocabulary is open. The hint is advisory: a caller may ignore it. A role is
-only a configured role key and a use case is only a configured use-case key;
+Unicode control (`Cc`) and format (`Cf`) characters, including bidi overrides
+and zero-width joiners, are rejected in hints. Other spelling, case, and
+whitespace are preserved exactly, and the vocabulary is open. This restriction
+applies only to routing hints; authored prose is preserved. The hint is advisory:
+a caller may ignore it. A role is only a configured role key and a use case is
+only a configured use-case key;
 neither selects a provider, endpoint, or model directly.
 
 Version 1 has a closed schema. `$schema`, `provider`, `model`, `endpoint`,
@@ -99,8 +102,9 @@ unpaired surrogate with U+FFFD; accepted decoded strings are otherwise
 preserved exactly. Trimming is used only to decide whether required text and
 hints are blank. `Parse` and `Load` return a zero `Recipe` on every error. I/O and JSON
 errors are wrapped, so callers can use `errors.Is` and `errors.As`; diagnostics
-do not include goal, context, or default values. Object and array values in
-these string fields are rejected before their contents are inspected.
+do not include goal, context, or default values. Containers in any scalar field
+are rejected before their contents are inspected. Only `inputs` arrays, their object entries, and `model_hint` objects
+are supported containers.
 
 ## Placeholder contract for issue #353
 

@@ -48,14 +48,22 @@ type ModelHint struct {
 // Parse validates and decodes a recipe document up to MaxBytes. It returns a
 // zero Recipe on error.
 func Parse(data []byte) (Recipe, error) {
+	recipe, err := parse(data)
+	if err != nil {
+		return Recipe{}, fmt.Errorf("recipe: %w", err)
+	}
+	return recipe, nil
+}
+
+func parse(data []byte) (Recipe, error) {
 	if len(data) > MaxBytes {
-		return Recipe{}, fmt.Errorf("recipe: size: exceeds %d bytes", MaxBytes)
+		return Recipe{}, fmt.Errorf("size: exceeds %d bytes", MaxBytes)
 	}
 	if !utf8.Valid(data) {
-		return Recipe{}, fmt.Errorf("recipe: UTF-8: invalid encoding")
+		return Recipe{}, fmt.Errorf("UTF-8: invalid encoding")
 	}
 	if isEmptyDocument(data) {
-		return Recipe{}, fmt.Errorf("recipe: empty document")
+		return Recipe{}, fmt.Errorf("empty document")
 	}
 	if err := checkJSONKeys(data); err != nil {
 		return Recipe{}, err
@@ -65,15 +73,15 @@ func Parse(data []byte) (Recipe, error) {
 	dec := json.NewDecoder(bytes.NewReader(data))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&recipe); err != nil {
-		return Recipe{}, fmt.Errorf("recipe: decode: %w", err)
+		return Recipe{}, fmt.Errorf("decode: %w", err)
 	}
 	var trailing any
 	err := dec.Decode(&trailing)
 	if err == nil {
-		return Recipe{}, fmt.Errorf("recipe: decode: extra value")
+		return Recipe{}, fmt.Errorf("decode: extra value")
 	}
 	if !errors.Is(err, io.EOF) {
-		return Recipe{}, fmt.Errorf("recipe: decode trailing data: %w", err)
+		return Recipe{}, fmt.Errorf("decode trailing data: %w", err)
 	}
 	if err := validate(recipe); err != nil {
 		return Recipe{}, err
@@ -121,7 +129,7 @@ func loadOpened(f *os.File, before fs.FileInfo) (Recipe, error) {
 	if err != nil {
 		return Recipe{}, err
 	}
-	return Parse(data)
+	return parse(data)
 }
 
 func readCapped(r io.Reader) ([]byte, error) {
@@ -155,30 +163,41 @@ func checkJSONKeys(data []byte) error {
 	dec.UseNumber()
 	tok, err := dec.Token()
 	if err != nil {
-		return fmt.Errorf("recipe: decode: %w", err)
+		return fmt.Errorf("decode: %w", err)
 	}
 	if tok != json.Delim('{') {
-		return fmt.Errorf("recipe: root: must be an object")
+		return fmt.Errorf("root: must be an object")
 	}
 
 	stack := []*objectState{{keys: map[string]struct{}{}, expectKey: true}}
 	for len(stack) > 0 {
 		tok, err = dec.Token()
 		if err != nil {
-			return fmt.Errorf("recipe: decode: %w", err)
+			return fmt.Errorf("decode: %w", err)
 		}
 		if delimiter, ok := tok.(json.Delim); ok {
 			if top := stack[len(stack)-1]; top != nil && !top.expectKey && (delimiter == '{' || delimiter == '[') {
 				switch top.key {
-				case "goal", "context", "default":
-					// Reject containers before their member names can reach diagnostics.
-					return fmt.Errorf("recipe: %s: must be a string", top.key)
+				case "inputs":
+					if delimiter != '[' {
+						return fmt.Errorf("inputs: must be an array")
+					}
+				case "model_hint":
+					if delimiter != '{' {
+						return fmt.Errorf("model_hint: must be an object")
+					}
+				default:
+					// Scalar fields must fail before nested contents reach diagnostics.
+					return fmt.Errorf("%s: must be a scalar value", top.key)
 				}
 			}
 			switch delimiter {
 			case '{':
 				stack = append(stack, &objectState{keys: map[string]struct{}{}, expectKey: true})
 			case '[':
+				if stack[len(stack)-1] == nil {
+					return fmt.Errorf("inputs: entries must be objects")
+				}
 				stack = append(stack, nil)
 			default:
 				stack = stack[:len(stack)-1]
@@ -199,13 +218,13 @@ func checkJSONKeys(data []byte) error {
 		}
 		key, ok := tok.(string)
 		if !ok {
-			return fmt.Errorf("recipe: decode: object key is not a string")
+			return fmt.Errorf("decode: object key is not a string")
 		}
 		if !knownJSONKey(key) {
-			return fmt.Errorf("recipe: key %q: unknown field", key)
+			return fmt.Errorf("decode: json: unknown field %q", key)
 		}
 		if _, duplicate := top.keys[key]; duplicate {
-			return fmt.Errorf("recipe: duplicate key %q", key)
+			return fmt.Errorf("duplicate key %q", key)
 		}
 		top.keys[key] = struct{}{}
 		top.key = key
@@ -226,24 +245,24 @@ func knownJSONKey(key string) bool {
 
 func validate(recipe Recipe) error {
 	if recipe.Version != CurrentVersion {
-		return fmt.Errorf("recipe: version: must be %d", CurrentVersion)
+		return fmt.Errorf("version: must be %d", CurrentVersion)
 	}
 	if !validName(recipe.Name, true) {
-		return fmt.Errorf("recipe: name: must match [a-z][a-z0-9_-]*")
+		return fmt.Errorf("name: must match [a-z][a-z0-9_-]*")
 	}
 	if strings.TrimSpace(recipe.Description) == "" {
-		return fmt.Errorf("recipe: description: must be nonblank")
+		return fmt.Errorf("description: must be nonblank")
 	}
 	if strings.TrimSpace(recipe.Goal) == "" {
-		return fmt.Errorf("recipe: goal: must be nonblank")
+		return fmt.Errorf("goal: must be nonblank")
 	}
 	inputNames := make(map[string]struct{}, len(recipe.Inputs))
 	for i, input := range recipe.Inputs {
 		if !validName(input.Name, false) {
-			return fmt.Errorf("recipe: inputs[%d].name: must match [a-z][a-z0-9_]*", i)
+			return fmt.Errorf("inputs[%d].name: must match [a-z][a-z0-9_]*", i)
 		}
 		if _, exists := inputNames[input.Name]; exists {
-			return fmt.Errorf("recipe: inputs[%d].name: duplicate %q", i, input.Name)
+			return fmt.Errorf("inputs[%d].name: duplicate %q", i, input.Name)
 		}
 		inputNames[input.Name] = struct{}{}
 	}
@@ -269,20 +288,22 @@ func validateModelHint(hint *ModelHint) error {
 		return nil
 	}
 	if (hint.Role == "") == (hint.UseCase == "") {
-		return fmt.Errorf("recipe: model_hint: exactly one of role or use_case is required")
+		return fmt.Errorf("model_hint: exactly one of role or use_case is required")
 	}
 	if hint.Role != "" {
-		if strings.TrimSpace(hint.Role) == "" || containsControl(hint.Role) {
-			return fmt.Errorf("recipe: model_hint.role: must be nonblank and contain no control characters")
+		if strings.TrimSpace(hint.Role) == "" || containsHintControl(hint.Role) {
+			return fmt.Errorf("model_hint.role: must be nonblank and contain no control or format characters")
 		}
 		return nil
 	}
-	if strings.TrimSpace(hint.UseCase) == "" || containsControl(hint.UseCase) {
-		return fmt.Errorf("recipe: model_hint.use_case: must be nonblank and contain no control characters")
+	if strings.TrimSpace(hint.UseCase) == "" || containsHintControl(hint.UseCase) {
+		return fmt.Errorf("model_hint.use_case: must be nonblank and contain no control or format characters")
 	}
 	return nil
 }
 
-func containsControl(value string) bool {
-	return strings.IndexFunc(value, unicode.IsControl) >= 0
+func containsHintControl(value string) bool {
+	return strings.IndexFunc(value, func(r rune) bool {
+		return unicode.IsControl(r) || unicode.Is(unicode.Cf, r)
+	}) >= 0
 }

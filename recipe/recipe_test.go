@@ -3,6 +3,7 @@ package recipe
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -809,6 +810,84 @@ func TestParseErrorsOmitMalformedPromptContents(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+func TestParseErrorsOmitMalformedScalarContents(t *testing.T) {
+	for _, tt := range []struct {
+		field    string
+		document string
+	}{
+		{"version", `{"version":%s}`},
+		{"name", `{"name":%s}`},
+		{"description", `{"description":%s}`},
+		{"name", `{"inputs":[{"name":%s}]}`},
+		{"description", `{"inputs":[{"description":%s}]}`},
+		{"role", `{"model_hint":{"role":%s}}`},
+		{"use_case", `{"model_hint":{"use_case":%s}}`},
+		{"inputs", `{"inputs":%s}`},
+	} {
+		for _, value := range []string{`{"SYNTHETIC_SECRET_MARKER":"x"}`, `[{"SYNTHETIC_SECRET_MARKER":"x"}]`} {
+			// An inputs array is a schema container; only the object shape is invalid here.
+			if tt.field == "inputs" && value[0] == '[' {
+				continue
+			}
+			t.Run(tt.document+value, func(t *testing.T) {
+				got, err := Parse([]byte(fmt.Sprintf(tt.document, value)))
+				if err == nil || !strings.Contains(err.Error(), tt.field) {
+					t.Fatalf("error = %v, want field %q rejection", err, tt.field)
+				}
+				if strings.Contains(err.Error(), "SYNTHETIC_SECRET_MARKER") {
+					t.Errorf("error reflects nested content: %v", err)
+				}
+				if !reflect.DeepEqual(got, Recipe{}) {
+					t.Errorf("nonzero Recipe on error: %#v", got)
+				}
+			})
+		}
+	}
+}
+
+func TestParseRejectsMalformedContainerShapesBeforeContents(t *testing.T) {
+	for _, document := range []string{
+		`{"model_hint":[{"SYNTHETIC_SECRET_MARKER":"x"}]}`,
+		`{"inputs":[[{"SYNTHETIC_SECRET_MARKER":"x"}]]}`,
+	} {
+		_, err := Parse([]byte(document))
+		if err == nil || strings.Contains(err.Error(), "SYNTHETIC_SECRET_MARKER") {
+			t.Errorf("wrong container shape error = %v, want rejection without contents", err)
+		}
+	}
+}
+
+func TestParseRejectsFormatCharactersInHints(t *testing.T) {
+	for _, field := range []string{"role", "use_case"} {
+		for _, escape := range []string{`\u202e`, `\u202d`, `\u2067`, `\u2066`, `\u2069`, `\u202c`, `\u200b`, `\u200c`, `\u200d`, `\u2060`, `\ufeff`} {
+			t.Run(field+escape, func(t *testing.T) {
+				requireParseError(t, recipeWithHint(`{"`+field+`":"code`+escape+`review"}`), field)
+			})
+		}
+	}
+}
+
+func TestLoadParseErrorsHaveOnePackagePrefix(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "invalid.json")
+	if err := os.WriteFile(path, []byte(`{"version":]`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	err := requireLoadError(t, path, "decode")
+	if strings.Count(err.Error(), "recipe:") != 1 {
+		t.Errorf("error repeats package prefix: %v", err)
+	}
+	var syntaxError *json.SyntaxError
+	if !errors.As(err, &syntaxError) {
+		t.Errorf("Load must preserve json.SyntaxError: %v", err)
+	}
+}
+
+func TestParseUnknownFieldsUseConsistentDiagnostics(t *testing.T) {
+	for _, field := range []string{"unknown", "name"} {
+		requireParseError(t, recipeWithHint(`{"role":"reviewer","`+field+`":"x"}`), `decode: json: unknown field "`+field+`"`)
 	}
 }
 
