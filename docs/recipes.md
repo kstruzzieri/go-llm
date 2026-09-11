@@ -99,7 +99,8 @@ unpaired surrogate with U+FFFD; accepted decoded strings are otherwise
 preserved exactly. Trimming is used only to decide whether required text and
 hints are blank. `Parse` and `Load` return a zero `Recipe` on every error. I/O and JSON
 errors are wrapped, so callers can use `errors.Is` and `errors.As`; diagnostics
-do not include goal, context, or default values.
+do not include goal, context, or default values. Object and array values in
+these string fields are rejected before their contents are inspected.
 
 ## Placeholder contract for issue #353
 
@@ -158,9 +159,12 @@ Missing files and broken symlinks preserve `fs.ErrNotExist` through wrapping.
 This explicit-path behavior does not confine a path to a workspace or allowed
 root. #353 must define containment and symlink policy for discovery. The file
 checks also do not make loading race-proof: a path can change before `Open`,
-in-place edits can retain identity, and a path swapped to a FIFO can block the
-open. `os.SameFile` establishes identity, not immutable content. The byte limit
-bounds reads and retained data, not elapsed time or concurrent edits.
+and in-place edits can retain identity. On Unix, a nonblocking open prevents a
+path swapped to a FIFO from waiting for a writer; the opened-file check rejects
+the FIFO. Other platforms use their ordinary file-open behavior.
+`os.SameFile` establishes identity, not immutable content. The byte limit bounds
+reads and retained data, not elapsed time or concurrent edits; slow filesystems
+can still stall I/O.
 
 Loading or parsing grants no consent, instruction authority, tools, or
 permissions. Goal and context text can contain prompt injection; parsing does

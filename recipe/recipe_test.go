@@ -774,6 +774,44 @@ func TestParseErrors(t *testing.T) {
 	}
 }
 
+// Traversing malformed prompt values used to echo their nested member names.
+func TestParseErrorsOmitMalformedPromptContents(t *testing.T) {
+	for _, field := range []string{"goal", "context", "default"} {
+		for _, value := range []string{
+			`{"SYNTHETIC_SECRET_MARKER":"x"}`,
+			`[{"SYNTHETIC_SECRET_MARKER":"x"}]`,
+			`{"role":"x","role":"y"}`,
+		} {
+			t.Run(field+"/"+value, func(t *testing.T) {
+				document := `{"version":1,"name":"review","description":"Review code.",`
+				switch field {
+				case "default":
+					document += `"goal":"Review it.","inputs":[{"name":"target","default":` + value + `}]}`
+				case "context":
+					document += `"goal":"Review it.","context":` + value + `}`
+				default:
+					document += `"goal":` + value + `}`
+				}
+				got, err := Parse([]byte(document))
+				if err == nil {
+					t.Fatal("Parse(malformed prompt field) succeeded")
+				}
+				if !reflect.DeepEqual(got, Recipe{}) {
+					t.Errorf("Parse returned nonzero Recipe on error: %#v", got)
+				}
+				if !strings.Contains(err.Error(), field) {
+					t.Errorf("error %q does not identify field %q", err, field)
+				}
+				for _, secret := range []string{"SYNTHETIC_SECRET_MARKER", "role"} {
+					if strings.Contains(err.Error(), secret) {
+						t.Errorf("error %q contains malformed prompt content %q", err, secret)
+					}
+				}
+			})
+		}
+	}
+}
+
 func FuzzParse(f *testing.F) {
 	invalidUTF8 := append([]byte(`{"version":1,"name":"review","description":"Review code.","goal":"x`), 0xff)
 	invalidUTF8 = append(invalidUTF8, []byte(`y"}`)...)

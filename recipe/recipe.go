@@ -92,7 +92,7 @@ func Load(path string) (Recipe, error) {
 		return Recipe{}, fmt.Errorf("recipe: load %q: target is not a regular file", path)
 	}
 
-	f, err := os.Open(path)
+	f, err := openRecipeFile(path)
 	if err != nil {
 		return Recipe{}, fmt.Errorf("recipe: load %q: open: %w", path, err)
 	}
@@ -147,6 +147,7 @@ func isEmptyDocument(data []byte) bool {
 func checkJSONKeys(data []byte) error {
 	type objectState struct {
 		keys      map[string]struct{}
+		key       string
 		expectKey bool
 	}
 
@@ -167,6 +168,13 @@ func checkJSONKeys(data []byte) error {
 			return fmt.Errorf("recipe: decode: %w", err)
 		}
 		if delimiter, ok := tok.(json.Delim); ok {
+			if top := stack[len(stack)-1]; top != nil && !top.expectKey && (delimiter == '{' || delimiter == '[') {
+				switch top.key {
+				case "goal", "context", "default":
+					// Reject containers before their member names can reach diagnostics.
+					return fmt.Errorf("recipe: %s: must be a string", top.key)
+				}
+			}
 			switch delimiter {
 			case '{':
 				stack = append(stack, &objectState{keys: map[string]struct{}{}, expectKey: true})
@@ -200,6 +208,7 @@ func checkJSONKeys(data []byte) error {
 			return fmt.Errorf("recipe: duplicate key %q", key)
 		}
 		top.keys[key] = struct{}{}
+		top.key = key
 		top.expectKey = false
 	}
 	return nil
