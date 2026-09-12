@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "name": "review-change",
+  "description": "Review a change for actionable defects.",
+  "goal": "Review {{inputs.target}}. Focus on {{inputs.focus}}.",
+  "context": "Report defects with file references and explain their impact.",
+  "inputs": [
+    {"name": "target", "description": "Change or path to review"},
+    {"name": "focus", "description": "Review emphasis", "default": "correctness"}
+  ],
+  "model_hint": {"use_case": "code-review"}
+}
