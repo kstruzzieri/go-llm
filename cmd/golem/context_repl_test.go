@@ -20,7 +20,7 @@ func contextFixture() agent.PressureEvent {
 }
 
 func TestContextCaptureAndLiteralOutput(t *testing.T) {
-	capture := &pressureCapture{runID: "run-1", threadID: "user:one"}
+	capture := &pressureCapture{runID: "run-1"}
 	if event, seen := capture.snapshot(); seen || event != (agent.PressureEvent{}) {
 		t.Fatalf("empty snapshot = %+v, %v", event, seen)
 	}
@@ -113,7 +113,7 @@ func TestContextRunOnceFailuresAndStateless(t *testing.T) {
 				t.Fatalf("runOnce(%s) error = %v", mode, err)
 			}
 			event, seen := sess.pressure.snapshot()
-			if sess.pressure.runID == "old" || sess.pressure.runID == "" || sess.pressure.threadID != "" || seen != (mode != "before assembly") {
+			if sess.pressure.runID == "old" || sess.pressure.runID == "" || seen != (mode != "before assembly") {
 				t.Fatalf("runOnce(%s) capture = %+v, seen %v", mode, sess.pressure, seen)
 			}
 			if mode == "normal" && (event.Pressure.Level != agent.LevelOK || !event.Pressure.Buckets.Available) {
@@ -207,7 +207,7 @@ func TestContextConcurrentRequestCaptures(t *testing.T) {
 	}
 	for i := range cases {
 		tc := &cases[i]
-		tc.capture = &pressureCapture{runID: tc.runID, threadID: tc.thread}
+		tc.capture = &pressureCapture{runID: tc.runID}
 		go func() {
 			_, err := rt.Run(ctx, golemruntime.Turn{ThreadID: tc.thread, RunID: tc.runID, Message: tc.goal, Observer: tc.capture}, sess.machine.sink())
 			done <- err

@@ -12,10 +12,10 @@ import (
 // pressureCapture retains the last assembly of one attempted Runtime turn.
 // Identity is immutable; the event and seen flag are copied under the mutex.
 type pressureCapture struct {
-	runID, threadID string
-	mu              sync.Mutex
-	latest          agent.PressureEvent
-	seen            bool
+	runID  string
+	mu     sync.Mutex
+	latest agent.PressureEvent
+	seen   bool
 }
 
 func (*pressureCapture) OnStep(context.Context, agent.StepEvent) error         { return nil }
@@ -47,10 +47,11 @@ func handleContext(out io.Writer, sess *replSession, fields []string) {
 		_, _ = fmt.Fprintln(out, "context: runtime unavailable")
 		return
 	}
-	event, seen := sess.pressure.snapshot()
+	capture := sess.pressure
+	event, seen := capture.snapshot()
 	if seen {
 		p := event.Pressure
-		_, _ = fmt.Fprintf(out, "context: last assembled request %s, step %d\n", sess.pressure.runID, event.Step+1)
+		_, _ = fmt.Fprintf(out, "context: last assembled request %s, step %d\n", capture.runID, event.Step+1)
 		_, _ = fmt.Fprintf(out, "pressure: %s; cause: %s; mitigation: %s\n", p.Level, p.Cause, p.Mitigation)
 		_, _ = fmt.Fprintf(out, "input estimate: %d / %d tokens (%.1f%%)\n", p.InputTokens, p.InputBudget, p.UsedPct*100)
 		b := p.Buckets

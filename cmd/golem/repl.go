@@ -116,7 +116,7 @@ type replSession struct {
 	obs          *observ // nil unless -trace/-telemetry enabled
 	feedback     *feedbackService
 	pressureWarn bool             // enable the one-per-run context-pressure warning line
-	pressure     *pressureCapture // latest attempted Runtime turn
+	pressure     *pressureCapture // latest attempted Runtime turn; owned by the REPL loop
 	// mixed mirrors what newOrchestratorFactory puts in ContextManager.Mixed, so
 	// the renderer can tell whether a tool result's flat Content is what the
 	// model actually read. Same -progressive flag, one source.
@@ -399,7 +399,7 @@ func runOnce(ctx context.Context, out io.Writer, interrupts <-chan struct{}, ses
 	if sess.session != nil {
 		threadID = sess.session.id
 	}
-	sess.pressure = &pressureCapture{runID: runID, threadID: threadID}
+	sess.pressure = &pressureCapture{runID: runID}
 	observer = composeObserver(sess.pressure, nil, observer)
 	res, runErr := sess.runtime.Run(runCtx, golemruntime.Turn{
 		ThreadID: threadID,
