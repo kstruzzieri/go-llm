@@ -399,6 +399,11 @@ func runOnce(ctx context.Context, out io.Writer, interrupts <-chan struct{}, ses
 	if sess.session != nil {
 		threadID = sess.session.id
 	}
+	// The capture is composed FIRST, ahead of the renderer/sink/feedback/
+	// grounding fanout above: that fanout stops at the first observer error,
+	// and the /context sample must already be recorded when the renderer's
+	// pressure warning fails to write. Nesting keeps the existing
+	// renderer-then-sink order intact.
 	sess.pressure = &pressureCapture{runID: runID}
 	observer = composeObserver(sess.pressure, nil, observer)
 	res, runErr := sess.runtime.Run(runCtx, golemruntime.Turn{

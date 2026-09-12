@@ -18,6 +18,11 @@ type pressureCapture struct {
 	seen   bool
 }
 
+var (
+	_ agent.Observer         = (*pressureCapture)(nil)
+	_ agent.PressureObserver = (*pressureCapture)(nil)
+)
+
 func (*pressureCapture) OnStep(context.Context, agent.StepEvent) error         { return nil }
 func (*pressureCapture) OnToolCall(context.Context, agent.ToolCallEvent) error { return nil }
 func (*pressureCapture) OnToken(context.Context, agent.TokenEvent) error       { return nil }

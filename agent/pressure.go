@@ -96,10 +96,11 @@ type PressureBuckets struct {
 
 // pressureBuckets attributes a turn's input tokens to their buckets.
 // It reuses ContextManager.estimate / messageCost so the attribution can never
-// drift from the token accounting Assemble performs. Per-message precedence:
-// pinned > retrieval (Attrib set) > tool_output (role "tool") > history. Ties
-// resolve to the earliest bucket in {pinned, tool_schema, history, tool_output,
-// retrieval}; an all-zero state yields CauseUnknown.
+// drift from the token accounting Assemble performs: with a non-negative
+// estimator, whenever checkedTotalTokens succeeds on the same state the five
+// totals sum to exactly that count.
+// Per-message precedence: pinned > retrieval (Attrib set) > tool_output (role
+// "tool") > history.
 func (m ContextManager) pressureBuckets(st State, toolSchemaTokens int) PressureBuckets {
 	b := PressureBuckets{Available: true, Pinned: m.estimate(st.System), ToolSchema: toolSchemaTokens}
 	for _, msg := range st.Messages {
@@ -118,10 +119,16 @@ func (m ContextManager) pressureBuckets(st State, toolSchemaTokens int) Pressure
 	return b
 }
 
+// dominantCause attributes a state's input tokens to the single largest bucket.
+// The early exhaustion paths use it directly; normal assembly derives the cause
+// from the PressureBuckets it retains so the two can never disagree.
 func (m ContextManager) dominantCause(st State, toolSchemaTokens int) PressureCause {
 	return m.pressureBuckets(st, toolSchemaTokens).dominantCause()
 }
 
+// dominantCause names the largest bucket. Ties resolve to the earliest bucket in
+// {pinned, tool_schema, history, tool_output, retrieval}; an all-zero value
+// yields CauseUnknown.
 func (b PressureBuckets) dominantCause() PressureCause {
 	buckets := []struct {
 		cause  PressureCause
@@ -134,9 +141,9 @@ func (b PressureBuckets) dominantCause() PressureCause {
 		{CauseRetrieval, b.Retrieval},
 	}
 	best, bestTokens := CauseUnknown, 0
-	for _, b := range buckets {
-		if b.tokens > bestTokens {
-			best, bestTokens = b.cause, b.tokens
+	for _, candidate := range buckets {
+		if candidate.tokens > bestTokens {
+			best, bestTokens = candidate.cause, candidate.tokens
 		}
 	}
 	return best
