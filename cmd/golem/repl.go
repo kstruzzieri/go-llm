@@ -211,7 +211,7 @@ func runREPL(ctx context.Context, src lineSource, out io.Writer, interrupts <-ch
 		_, runErr := runOnce(ctx, out, interrupts, sess, line, src)
 		if !secretsBlocked(runErr) && !canaryAborted(runErr) {
 			src.RecordGoal(line)
-			if errors.Is(runErr, conversation.ErrConflict) {
+			if sessionSaveRefused(runErr) {
 				_, _ = fmt.Fprintln(out, "The next turn uses the latest saved history, without this unsaved turn. Use /new for a separate session.")
 			}
 		}
@@ -431,12 +431,9 @@ func runOnce(ctx context.Context, out io.Writer, interrupts <-chan struct{}, ses
 		sess.canary.burn()
 	}
 	var sessionSaveErr error
-	var sqliteErr *sqlite.Error
-	// Lock timeouts are refused writes, just like a lost CAS; preserve the SQL error.
-	sessionBusy := errors.As(runErr, &sqliteErr) && sqliteErr.Code()&0xff == sqlite3.SQLITE_BUSY
 	if res.Answer != "" &&
 		errors.Is(runErr, golemruntime.ErrSessionPersistence) &&
-		!errors.Is(runErr, conversation.ErrConflict) && !sessionBusy &&
+		!sessionSaveRefused(runErr) &&
 		!secretBlock && !canaryBlock &&
 		!errors.Is(runErr, context.Canceled) &&
 		!errors.Is(runErr, context.DeadlineExceeded) {
@@ -556,6 +553,20 @@ func runOnce(ctx context.Context, out io.Writer, interrupts <-chan struct{}, ses
 	}
 	rend.finalFooter(res, runDuration)
 	return res, nil
+}
+
+// sessionSaveRefused reports a session-persistence failure that refused the
+// write outright: a lost revision CAS, or a SQLite lock timeout, which is a
+// refused write just like a lost CAS and keeps its original SQL error. These
+// stay run errors instead of demoting to "session not saved" warnings, and the
+// REPL explains that the next turn continues without the unsaved turn.
+func sessionSaveRefused(err error) bool {
+	if !errors.Is(err, golemruntime.ErrSessionPersistence) {
+		return false
+	}
+	var sqliteErr *sqlite.Error
+	return errors.Is(err, conversation.ErrConflict) ||
+		(errors.As(err, &sqliteErr) && sqliteErr.Code()&0xff == sqlite3.SQLITE_BUSY)
 }
 
 // lastRoutedModel returns the ActualModel of the last step that carried a
