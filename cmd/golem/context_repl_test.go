@@ -85,7 +85,7 @@ func TestContextRunOnceFailuresAndStateless(t *testing.T) {
 			caller := &captureCaller{answer: "done"}
 			sess := newTestSession(t, caller, t.TempDir())
 			sess.pressure = &pressureCapture{runID: "old", seen: true, latest: contextFixture()}
-			var out io.Writer = io.Discard
+			out := io.Discard
 			switch mode {
 			case "model error":
 				sess.orch = agent.New(tokenThenErrorCaller{}, agent.ContextManager{})
