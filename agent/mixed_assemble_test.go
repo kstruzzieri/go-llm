@@ -1079,6 +1079,9 @@ func TestAssembleWithTraceMustFitPressure(t *testing.T) {
 			if !reflect.DeepEqual(tr, ContextAssemblyTrace{}) {
 				t.Errorf("error path must return a zero trace, got %+v", tr)
 			}
+			if pressure.Buckets != (PressureBuckets{}) {
+				t.Errorf("AssembleWithTrace exhaustion buckets = %+v, want unavailable", pressure.Buckets)
+			}
 			if pressure.InputTokens != tc.wantTokens {
 				t.Errorf("InputTokens = %d, want %d (pinned + unresolved chain + schemas, not the pinned subset %d)",
 					pressure.InputTokens, tc.wantTokens, tc.pinnedOnly)
@@ -1112,6 +1115,9 @@ func TestAssembleWithTracePinnedOverflow(t *testing.T) {
 	}
 	if !reflect.DeepEqual(tr, ContextAssemblyTrace{}) {
 		t.Errorf("error path must return a zero trace, got %+v", tr)
+	}
+	if pressure.Buckets != (PressureBuckets{}) {
+		t.Errorf("AssembleWithTrace exhaustion buckets = %+v, want unavailable", pressure.Buckets)
 	}
 	if want := m.pinnedTokens(materializeDurableSummary(st), 0); pressure.InputTokens != want {
 		t.Errorf("InputTokens = %d, want the pinned cost %d", pressure.InputTokens, want)
@@ -1154,6 +1160,9 @@ func TestAssembleWithTraceEstimatorArithmeticOverflowFailsClosed(t *testing.T) {
 			if pressure.Level != LevelCritical || pressure.Mitigation != MitigationHalt {
 				t.Errorf("pressure = %v/%v, want critical/halt", pressure.Level, pressure.Mitigation)
 			}
+			if pressure.Buckets != (PressureBuckets{}) {
+				t.Errorf("AssembleWithTrace exhaustion buckets = %+v, want unavailable", pressure.Buckets)
+			}
 			if pressure.InputTokens != maxInt || pressure.Cause != CausePinned {
 				t.Errorf("pressure tokens/cause = %d/%v, want saturated %d/pinned", pressure.InputTokens, pressure.Cause, maxInt)
 			}
@@ -1176,6 +1185,9 @@ func TestAssembleWithTraceEstimatorArithmeticOverflowFailsClosed(t *testing.T) {
 				context.Background(), chain, 0, TokenBudget{Input: 200})
 			if !errors.Is(err, ErrContextExhausted) || !reflect.DeepEqual(tr, ContextAssemblyTrace{}) {
 				t.Fatalf("mixed=%v: AssembleWithTrace = trace %+v, error %v; want zero trace and exhaustion", mixed, tr, err)
+			}
+			if pressure.Buckets != (PressureBuckets{}) {
+				t.Errorf("AssembleWithTrace exhaustion buckets = %+v, want unavailable", pressure.Buckets)
 			}
 			if pressure.InputTokens != maxInt || pressure.InputBudget != 200 ||
 				pressure.Level != LevelCritical || pressure.Mitigation != MitigationHalt || pressure.Cause != CauseHistory {
@@ -1207,6 +1219,9 @@ func TestAssembleWithTraceEstimatorArithmeticOverflowFailsClosed(t *testing.T) {
 		if !errors.Is(err, ErrContextExhausted) || !reflect.DeepEqual(tr, ContextAssemblyTrace{}) {
 			t.Fatalf("AssembleWithTrace = trace %+v, error %v; want zero trace and exhaustion", tr, err)
 		}
+		if pressure.Buckets != (PressureBuckets{}) {
+			t.Errorf("AssembleWithTrace exhaustion buckets = %+v, want unavailable", pressure.Buckets)
+		}
 		if pressure.InputTokens != maxInt || pressure.Level != LevelCritical || pressure.Mitigation != MitigationHalt {
 			t.Errorf("pressure = tokens %d level %v mitigation %v, want saturated critical halt",
 				pressure.InputTokens, pressure.Level, pressure.Mitigation)
@@ -1228,6 +1243,9 @@ func TestAssembleWithTraceEstimatorArithmeticOverflowFailsClosed(t *testing.T) {
 			context.Background(), state, 0, TokenBudget{Input: 200})
 		if !errors.Is(err, ErrContextExhausted) || !reflect.DeepEqual(tr, ContextAssemblyTrace{}) {
 			t.Fatalf("AssembleWithTrace = trace %+v, error %v; want zero trace and exhaustion", tr, err)
+		}
+		if pressure.Buckets != (PressureBuckets{}) {
+			t.Errorf("AssembleWithTrace exhaustion buckets = %+v, want unavailable", pressure.Buckets)
 		}
 		if pressure.InputTokens != maxInt || pressure.InputBudget != 200 ||
 			pressure.Level != LevelCritical || pressure.Mitigation != MitigationHalt || pressure.Cause != CauseToolOutput {
@@ -1267,6 +1285,9 @@ func TestAssembleWithTraceEstimatorArithmeticOverflowFailsClosed(t *testing.T) {
 		if !errors.Is(err, ErrContextExhausted) || !reflect.DeepEqual(tr, ContextAssemblyTrace{}) {
 			t.Fatalf("AssembleWithTrace = trace %+v, error %v; want zero trace and exhaustion", tr, err)
 		}
+		if pressure.Buckets != (PressureBuckets{}) {
+			t.Errorf("AssembleWithTrace exhaustion buckets = %+v, want unavailable", pressure.Buckets)
+		}
 		if pressure.InputTokens != maxInt || pressure.InputBudget != maxInt ||
 			pressure.Level != LevelCritical || pressure.Mitigation != MitigationHalt {
 			t.Errorf("pressure = %+v, want sticky saturated MaxInt critical/halt diagnostic", pressure)
@@ -1292,6 +1313,9 @@ func TestAssembleWithTraceEstimatorArithmeticOverflowFailsClosed(t *testing.T) {
 			context.Background(), state, 0, TokenBudget{Input: 200})
 		if !errors.Is(err, ErrContextExhausted) || !reflect.DeepEqual(tr, ContextAssemblyTrace{}) {
 			t.Fatalf("AssembleWithTrace = trace %+v, error %v; want zero trace and exhaustion", tr, err)
+		}
+		if pressure.Buckets != (PressureBuckets{}) {
+			t.Errorf("AssembleWithTrace exhaustion buckets = %+v, want unavailable", pressure.Buckets)
 		}
 		if pressure.InputTokens != maxInt || pressure.InputBudget != 200 ||
 			pressure.Level != LevelCritical || pressure.Mitigation != MitigationHalt {
@@ -1849,6 +1873,7 @@ func TestLegacyPressureUnaffectedByAnchorOmissions(t *testing.T) {
 			Level:       LevelOK,
 			Cause:       CauseToolOutput,
 			Mitigation:  MitigationNone,
+			Buckets:     PressureBuckets{Available: true, History: 20, ToolOutput: 23},
 		}
 		if pressure != want {
 			t.Errorf("legacy Pressure = %+v, want %+v", pressure, want)
@@ -1875,6 +1900,7 @@ func TestLegacyPressureUnaffectedByAnchorOmissions(t *testing.T) {
 			Level:       LevelCritical,
 			Cause:       CauseHistory,
 			Mitigation:  MitigationEvict,
+			Buckets:     PressureBuckets{Available: true, Pinned: 2, History: 3},
 		}
 		if pressure != want {
 			t.Errorf("legacy Pressure = %+v, want %+v", pressure, want)

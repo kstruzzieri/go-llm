@@ -82,37 +82,56 @@ func (m PressureMitigation) String() string {
 	}
 }
 
-// dominantCause attributes a turn's input tokens to the single largest bucket.
+// PressureBuckets retains estimated input tokens by their attribution. Available
+// distinguishes a valid all-zero estimate from an unavailable breakdown.
+// The value contains no references, so Pressure snapshots remain comparable.
+type PressureBuckets struct {
+	Available  bool
+	Pinned     int
+	ToolSchema int
+	History    int
+	ToolOutput int
+	Retrieval  int
+}
+
+// pressureBuckets attributes a turn's input tokens to their buckets.
 // It reuses ContextManager.estimate / messageCost so the attribution can never
 // drift from the token accounting Assemble performs. Per-message precedence:
 // pinned > retrieval (Attrib set) > tool_output (role "tool") > history. Ties
 // resolve to the earliest bucket in {pinned, tool_schema, history, tool_output,
 // retrieval}; an all-zero state yields CauseUnknown.
-func (m ContextManager) dominantCause(st State, toolSchemaTokens int) PressureCause {
-	var pinned, toolOutput, retrieval, history int
-	pinned = m.estimate(st.System)
+func (m ContextManager) pressureBuckets(st State, toolSchemaTokens int) PressureBuckets {
+	b := PressureBuckets{Available: true, Pinned: m.estimate(st.System), ToolSchema: toolSchemaTokens}
 	for _, msg := range st.Messages {
 		cost := m.messageCost(msg)
 		switch {
 		case msg.Segment == Pinned:
-			pinned = saturatedTokenAdd(pinned, cost)
+			b.Pinned = saturatedTokenAdd(b.Pinned, cost)
 		case msg.Attrib != nil:
-			retrieval = saturatedTokenAdd(retrieval, cost)
+			b.Retrieval = saturatedTokenAdd(b.Retrieval, cost)
 		case msg.Role == "tool":
-			toolOutput = saturatedTokenAdd(toolOutput, cost)
+			b.ToolOutput = saturatedTokenAdd(b.ToolOutput, cost)
 		default:
-			history = saturatedTokenAdd(history, cost)
+			b.History = saturatedTokenAdd(b.History, cost)
 		}
 	}
+	return b
+}
+
+func (m ContextManager) dominantCause(st State, toolSchemaTokens int) PressureCause {
+	return m.pressureBuckets(st, toolSchemaTokens).dominantCause()
+}
+
+func (b PressureBuckets) dominantCause() PressureCause {
 	buckets := []struct {
 		cause  PressureCause
 		tokens int
 	}{
-		{CausePinned, pinned},
-		{CauseToolSchema, toolSchemaTokens},
-		{CauseHistory, history},
-		{CauseToolOutput, toolOutput},
-		{CauseRetrieval, retrieval},
+		{CausePinned, b.Pinned},
+		{CauseToolSchema, b.ToolSchema},
+		{CauseHistory, b.History},
+		{CauseToolOutput, b.ToolOutput},
+		{CauseRetrieval, b.Retrieval},
 	}
 	best, bestTokens := CauseUnknown, 0
 	for _, b := range buckets {

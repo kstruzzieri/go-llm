@@ -192,6 +192,10 @@ type Pressure struct {
 	// histograms within one arm; do not diff them between arms.
 	Cause      PressureCause
 	Mitigation PressureMitigation
+	// Buckets describes the complete assembled input when accounting is valid.
+	// Early exhaustion and arithmetic failures leave it unavailable. It is
+	// excluded from JSON to preserve existing telemetry and result encodings.
+	Buckets PressureBuckets `json:"-"`
 }
 
 // StepRecord is the durable per-turn truth. RouteOutcome is captured
