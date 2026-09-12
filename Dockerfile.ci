@@ -14,7 +14,8 @@ RUN apk add --no-cache \
       bash \
       build-base \
       ca-certificates \
-      git
+      git \
+      python3
 
 RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \

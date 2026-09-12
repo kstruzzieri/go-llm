@@ -31,10 +31,11 @@ jobs:
         run: go test -run '^$' ./...
 
       # Native darwin runtime coverage for background command execution
-      # (#346): process-group lifecycle, manager suites, and the REPL
-      # shutdown paths that kill and reap real process groups.
+      # (#346): process-group lifecycle, manager suites, the REPL shutdown
+      # paths that kill and reap real process groups, and the #481 exit
+      # observer regressions (a child that exits before registration).
       - name: Background exec runtime
-        run: go test -race -run 'TestBackground(Process|Manager)|TestRunBackground|TestJobs' ./agent/tools ./cmd/golem
+        run: go test -race -run 'TestBackground(Process|Manager)|TestRunBackground|TestJobs|TestProcessExitObserver' ./agent/tools ./cmd/golem
 
       # Real Seatbelt confinement (#442). GO_LLM_REQUIRE_SEATBELT=1 turns a
       # skip into a hard failure, so a runner that cannot apply Seatbelt (a
@@ -45,9 +46,9 @@ jobs:
       - name: Seatbelt confinement (non-race)
         env:
           GO_LLM_REQUIRE_SEATBELT: "1"
-        run: go test -run '^(TestSeatbelt|TestSBPL|TestProbeSeatbelt)' ./agent/tools
+        run: go test -count=1 -run '^(TestSeatbelt|TestSBPL|TestProbeSeatbelt|TestScratchSeatbelt|TestNewExecBackendSeatbelt)' ./agent/tools
 
       - name: Seatbelt confinement (race)
         env:
           GO_LLM_REQUIRE_SEATBELT: "1"
-        run: go test -race -run '^(TestSeatbelt|TestSBPL|TestProbeSeatbelt)' ./agent/tools
+        run: go test -race -count=1 -run '^(TestSeatbelt|TestSBPL|TestProbeSeatbelt|TestScratchSeatbelt|TestNewExecBackendSeatbelt)' ./agent/tools

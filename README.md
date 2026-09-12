@@ -914,7 +914,7 @@ Run the same full suite manually:
 docker compose -f docker-compose.ci.yml run --rm ci ./scripts/ci-local --mode full
 ```
 
-`full` includes `golangci-lint fmt --diff`, `golangci-lint run`, `go test -race ./...`, and `go test -run '^$' ./...`. The pre-push hook runs that full suite automatically before pushes. GitHub runs the required `Lint & Test` and `macOS Compile Smoke` workflows on PRs; ordinary push-triggered Actions remain disabled, and either workflow can also be dispatched manually. See [`docs/local-ci.md`](docs/local-ci.md) for the full local CI workflow.
+`full` first discovers and freshly runs the `TestHardeningContracts` aggregate (requiring its top-level and `Active` group to `PASS`, with only the declared deferred boundaries allowed to skip), then runs `golangci-lint fmt --diff`, `golangci-lint run`, `go test -race ./...`, and `go test -run '^$' ./...`. The broad race pass discovers the remaining platform-eligible unit tests; native CI separately enforces bwrap, Seatbelt, and non-root permission coverage. The pre-push hook runs that full suite automatically before pushes. Rebuild the CI image once after updating so it includes the required Python interpreter. See [`docs/local-ci.md`](docs/local-ci.md) for the commands and coverage limits.
 
 ## License
 

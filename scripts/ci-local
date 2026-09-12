@@ -1,13 +1,17 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Local tests retain platform and permission skips; native CI workflows enforce
+# bwrap and Seatbelt confinement.
+
 mode="pre-push"
 
 usage() {
   cat <<'USAGE'
-Usage: scripts/ci-local [--mode pre-push|full]
+Usage: scripts/ci-local [--mode security|pre-push|full]
 
 Modes:
+  security  Run only the hardening-contract phase (used by the GitHub CI job).
   pre-push  Run fast deterministic checks intended for every push.
   full      Run pre-push checks plus slower compile smoke checks.
 USAGE
@@ -20,6 +24,7 @@ section() {
 require_cmd() {
   if ! command -v "$1" >/dev/null 2>&1; then
     printf 'missing required command: %s\n' "$1" >&2
+    printf 'hint: install the missing command for host runs; for Docker CI, rebuild with: docker compose -f docker-compose.ci.yml build ci\n' >&2
     exit 127
   fi
 }
@@ -52,7 +57,7 @@ while [ "$#" -gt 0 ]; do
 done
 
 case "$mode" in
-  pre-push|full)
+  security|pre-push|full)
     ;;
   *)
     printf 'unknown mode: %s\n' "$mode" >&2
@@ -79,8 +84,50 @@ if ! grep -q '^module github.com/kstruzzieri/go-llm$' "$repo_root/go.mod"; then
 fi
 cd "$repo_root"
 
-require_cmd golangci-lint
 require_cmd go
+require_cmd golangci-lint
+require_cmd python3
+
+# Apply the same toolchain environment to Go and lint. `unset` covers every
+# later command in this script. Nonempty whitespace overrides even GOFLAGS
+# saved by `go env -w`, while supplying no flags.
+unset GOROOT
+export GOFLAGS=' '
+
+section "security contracts"
+printf 'note: local tests retain platform/permission skips; native bwrap/Seatbelt confinement runs in CI workflows\n'
+security_tests="$(go test -list '^TestHardeningContracts$' ./agent)"
+if ! grep -Fxq 'TestHardeningContracts' <<<"$security_tests"; then
+  printf 'missing required security test: TestHardeningContracts\n' >&2
+  exit 1
+fi
+security_status=0
+# The aggregate asserts its own <500ms budget; the timeout bounds a hang at
+# well under Go's 10-minute default so a stuck pre-push fails quickly.
+security_output="$(go test -count=1 -timeout 60s -v -run '^TestHardeningContracts$' ./agent)" || security_status=$?
+printf '%s\n' "$security_output"
+if [ "$security_status" -ne 0 ]; then
+  exit "$security_status"
+fi
+# Require the exact top-level PASS and the Active group PASS: every real
+# contract lives under Active, so a skipped Active is a zero-contract success.
+if ! grep -Eq '^--- PASS: TestHardeningContracts \([0-9.]+s\)$' <<<"$security_output" \
+  || ! grep -Eq '^    --- PASS: TestHardeningContracts/Active \([0-9.]+s\)$' <<<"$security_output"; then
+  printf 'required security test did not pass: TestHardeningContracts (top-level and Active group must PASS)\n' >&2
+  exit 1
+fi
+# Only the declared deferred boundary groups may skip. Captured into a
+# variable rather than piped into `grep -q`: an early-exiting downstream grep
+# would SIGPIPE the upstream one and invert the condition under pipefail.
+unexpected_skips="$(grep -E '^ +--- SKIP: ' <<<"$security_output" \
+  | grep -Ev '^    --- SKIP: TestHardeningContracts/ZT-60[2-6]_#43[1-5]_' || true)"
+if [ -n "$unexpected_skips" ]; then
+  printf 'unexpected skip inside TestHardeningContracts:\n%s\n' "$unexpected_skips" >&2
+  exit 1
+fi
+if [ "$mode" = security ]; then
+  exit 0
+fi
 
 section "format"
 golangci-lint fmt --diff
