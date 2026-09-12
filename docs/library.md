@@ -121,6 +121,57 @@ resp, _ := client.Chat(ctx, ollama.ChatRequest{
 })
 ```
 
+## Conversation persistence
+
+`conversation.SQLiteStore` saves complete conversation snapshots. `Load` returns
+the stored `Conversation.Revision`; pass that revision back to `Save` with the
+edited snapshot. Revision zero means create-only. A successful create stores
+revision 1, and each successful update stores the submitted revision plus one.
+`Save` takes a value and does not mutate it: if you retain the submitted snapshot,
+increment its revision only after `Save` returns nil. Do not load a newer revision
+and attach it to old messages; load and reconcile the complete snapshot instead.
+
+An existing ID on create, a stale revision, or a missing ID on update returns an
+error matching `conversation.ErrConflict`. Use `errors.As` with
+`*conversation.ConflictError` to inspect its `ID` and `ExpectedRevision`.
+Negative revisions and the maximum int64 revision are rejected without writing.
+The transcript, durable summary, revision, and search projection commit in one
+transaction; a conflict leaves the winning snapshot and index intact.
+
+Golem returns a completed answer alongside `golem.ErrSessionPersistence` and the
+underlying conflict if the raw turn could not be saved. Its terminal event is
+`run.failed` with code `session_conflict`; it does not automatically retry or
+replay tools. The CLI REPL reports such a turn as an error rather than a
+"session not saved" warning. SQLite busy errors, including lock timeouts, are
+treated the same way and retain their original database error rather than
+becoming CAS conflicts: both mean another writer holds or advanced the session,
+unlike an environmental disk failure, which stays a warning. Only the REPL
+persists sessions; one-shot `-p` runs imply `-no-session` and never reach this
+path. A subsequent explicit turn loads current durable history. The interactive
+notice after a refused save (conflict or busy) explains that this history
+excludes the unsaved turn and that `/new` starts a separate session. Explicit
+`CompactThread` conflicts return an unchanged report and the typed error.
+Automatic compression runs after the raw turn has committed, so its conflict is
+an `OnWarning` notification and the turn remains successful. Hosts that omit
+`OnWarning` retain quiet best-effort compression behavior.
+
+Implementations supplied through `golem.Options.SessionStore` must implement
+the same atomic revision check and exact revision-plus-one success contract,
+even though the Go method signatures are unchanged. The runtime advances its
+retained revision between the raw save and an automatic compression save.
+
+Opening an existing database applies migration v4 through
+`conversation_schema_version`, preserving its data and giving existing rows
+revision 1. Upgrade and restart all processes writing a shared sessions database
+together: older binaries can still perform unconditional writes and bypass CAS.
+The guarantee applies while a row continuously exists. `Delete` and `/clear`
+remove it, and recreating the same ID restarts at revision 1; an old snapshot may
+then match that reused revision. This release does not add incarnation tokens,
+tombstones, or protection against that deletion/recreation race (#542).
+Concurrent initialization of an unmigrated database can still fail visibly
+under the existing migration runner (#543); the save guarantee applies after
+initialization.
+
 ## RAG Details
 
 ### Chunking

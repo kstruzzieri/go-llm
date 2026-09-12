@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -242,6 +243,14 @@ func (s *mapSessionStore) Save(ctx context.Context, conv conversation.Conversati
 	if s.conversations == nil {
 		s.conversations = make(map[string]conversation.Conversation)
 	}
+	if conv.Revision < 0 || conv.Revision == math.MaxInt64 {
+		return fmt.Errorf("invalid revision %d", conv.Revision)
+	}
+	stored, exists := s.conversations[conv.ID]
+	if (conv.Revision == 0 && exists) || (conv.Revision > 0 && (!exists || stored.Revision != conv.Revision)) {
+		return &conversation.ConflictError{ID: conv.ID, ExpectedRevision: conv.Revision}
+	}
+	conv.Revision++
 	s.conversations[conv.ID] = cloneConversation(conv)
 	return nil
 }
@@ -2905,5 +2914,44 @@ func TestRuntimeFramesObservationsPerRenderAcrossThreads(t *testing.T) {
 		if !found {
 			t.Errorf("%s: no tool observation stored", thread)
 		}
+	}
+}
+
+func TestRuntimeSessionConflictPreservesWinner(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	base := &mapSessionStore{conversations: map[string]conversation.Conversation{"shared": {ID: "shared", Revision: 1}}}
+	winner := newCompactionRuntime(t, golem.Options{SessionStore: base, DisableCompression: true})
+	// The losing runtime has completed its Load before the other runtime commits.
+	store := compactionStoreHooks{SessionStore: base, load: func(ctx context.Context, id string) (*conversation.Conversation, error) {
+		current, err := base.Load(ctx, id)
+		if _, winErr := winner.Run(ctx, golem.Turn{ThreadID: id, RunID: "winner", Message: "winning question"}, func(golem.Event) error { return nil }); winErr != nil {
+			return nil, winErr
+		}
+		return current, err
+	}}
+	loser := newCompactionRuntime(t, golem.Options{SessionStore: store, DisableCompression: true, Orchestrator: agent.New(&captureCaller{answer: "losing answer"}, agent.ContextManager{})})
+	var events []golem.Event
+	result, err := loser.Run(ctx, golem.Turn{ThreadID: "shared", RunID: "loser", Message: "losing question"}, func(e golem.Event) error { events = append(events, e); return nil })
+	var conflict *conversation.ConflictError
+	if result.Answer != "losing answer" || !errors.Is(err, golem.ErrSessionPersistence) || !errors.Is(err, conversation.ErrConflict) || !errors.As(err, &conflict) || conflict.ID != "shared" || conflict.ExpectedRevision != 1 {
+		t.Fatalf("losing Run = %+v, %v; want completed answer and typed revision-one persistence conflict", result, err)
+	}
+	if got := eventTypes(events); !slices.Equal(got, []string{"run.started", "message.delta", "run.failed"}) {
+		t.Fatalf("events = %v; want one failed terminal", got)
+	}
+	var payload struct {
+		Code    string `json:"code"`
+		Message string `json:"message"`
+	}
+	if err := json.Unmarshal(events[2].Payload, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload.Code != "session_conflict" || !strings.Contains(payload.Message, "snapshot not saved") {
+		t.Errorf("failure payload = %+v; want session_conflict and unsaved notice", payload)
+	}
+	saved, err := base.Load(ctx, "shared")
+	if err != nil || saved.Revision != 2 || len(saved.Messages) != 2 || saved.Messages[0].Content != "winning question" || saved.Messages[1].Content != "next answer" {
+		t.Fatalf("winner = %+v, %v; want only winning turn at revision 2", saved, err)
 	}
 }

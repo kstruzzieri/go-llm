@@ -28,6 +28,11 @@ var migrations = []migration{
 		description: "durable conversation summaries",
 		fn:          migrateV3,
 	},
+	{
+		version:     4,
+		description: "conversation revisions",
+		fn:          migrateV4,
+	},
 }
 
 func migrateV1(tx *sql.Tx) error {
@@ -89,6 +94,13 @@ func migrateV3(tx *sql.Tx) error {
 		if _, err := tx.Exec(stmt); err != nil {
 			return fmt.Errorf("conversation: migrate v3: %w", err)
 		}
+	}
+	return nil
+}
+
+func migrateV4(tx *sql.Tx) error {
+	if _, err := tx.Exec(`ALTER TABLE conversations ADD COLUMN revision INTEGER NOT NULL DEFAULT 1`); err != nil {
+		return fmt.Errorf("conversation: migrate v4: %w", err)
 	}
 	return nil
 }

@@ -601,3 +601,38 @@ func TestPreRunFailureResult(t *testing.T) {
 		t.Errorf("error = %s, want the pre-run code/message", m["error"])
 	}
 }
+
+func TestOneShotMachineSessionConflict(t *testing.T) {
+	for _, format := range []outputFormat{outputJSON, outputStreamJSON} {
+		t.Run(map[outputFormat]string{outputJSON: "json", outputStreamJSON: "stream-json"}[format], func(t *testing.T) {
+			sess := newConflictTestSession(t)
+			var stdout, stderr strings.Builder
+			sess.machine = newMachineWriter(&stdout, format)
+			if err := runOneShot(context.Background(), &stdout, &stderr, nil, sess, "question"); !errors.Is(err, errOneShotFailed) {
+				t.Fatalf("one shot = %v; want failure", err)
+			}
+			events, results := splitMachineLines(t, stdout.String())
+			if len(results) != 1 {
+				t.Fatalf("results = %v; want one", results)
+			}
+			var failure headlessResultError
+			if err := json.Unmarshal(results[0]["error"], &failure); err != nil {
+				t.Fatal(err)
+			}
+			if failure.Code != "session_conflict" || !strings.Contains(failure.Message, "snapshot not saved") || string(results[0]["status"]) != `"error"` || string(results[0]["answer"]) != "null" {
+				t.Fatalf("conflict result = %s, %+v; want error without saved answer", results[0], failure)
+			}
+			if format == outputStreamJSON {
+				if len(events) != 3 || events[2].Type != "run.failed" {
+					t.Fatalf("events = %+v; want started/delta/failed", events)
+				}
+				var terminal headlessResultError
+				if err := json.Unmarshal(events[2].Payload, &terminal); err != nil || terminal != failure {
+					t.Fatalf("terminal = %+v, %v; want %+v", terminal, err, failure)
+				}
+			} else if len(events) != 0 {
+				t.Fatalf("JSON events = %+v; want none", events)
+			}
+		})
+	}
+}

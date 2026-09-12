@@ -638,3 +638,28 @@ func TestCompactNoopDoesNotReload(t *testing.T) {
 		t.Fatalf("no-op output = %q", out.String())
 	}
 }
+
+func TestCompactSessionConflictDoesNotRefreshCache(t *testing.T) {
+	summarize := func(context.Context, string, []conversation.Message) (string, error) { return "SUM", nil }
+	sess, _ := newCompactSession(t, 5, summarize)
+	before := *sess.session
+	store := &compactTestStore{Store: sess.session.store, save: func(_ context.Context, c conversation.Conversation) error {
+		return &conversation.ConflictError{ID: c.ID, ExpectedRevision: c.Revision}
+	}}
+	installCompactRuntime(t, sess, golemruntime.Options{SessionStore: store, Summarizer: summarize})
+	loads := 0
+	sess.session.store.(*compactTestStore).load = func(context.Context, string) (*conversation.Conversation, error) {
+		loads++
+		return nil, errors.New("unexpected cache refresh")
+	}
+	// Runtime uses the underlying real store for its initial snapshot.
+	store.Store = sess.session.store.(*compactTestStore).Store
+	var out strings.Builder
+	_, _ = dispatchSlash(context.Background(), &out, sess, "/compact")
+	if got := out.String(); !strings.Contains(got, "compact failed:") || !strings.Contains(got, "snapshot not saved") || strings.Contains(got, "unexpected cache refresh") {
+		t.Fatalf("compact conflict = %q", got)
+	}
+	if !reflect.DeepEqual(*sess.session, before) || loads != 0 || store.saves != 1 {
+		t.Fatalf("conflict cache = %+v, loads %d, saves %d; want unchanged with no refresh", sess.session, loads, store.saves)
+	}
+}

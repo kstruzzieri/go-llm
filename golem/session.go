@@ -190,6 +190,7 @@ func (r *Runtime) saveThread(ctx context.Context, active *activeRun, state *thre
 	if err := store.store.Save(persistCtx, candidate); err != nil {
 		return fmt.Errorf("golem: save thread %q: %w", candidate.ID, err)
 	}
+	candidate.Revision++
 	state.conversation = candidate
 	// The turn is durable from here. Hardening and compression failures are
 	// warnings, not run failures: reporting a failure for a committed turn
@@ -210,6 +211,7 @@ func (r *Runtime) saveThread(ctx context.Context, active *activeRun, state *thre
 		r.reportCompressionWarning(candidate.ID, fmt.Errorf("save compressed conversation: %w", err))
 		return nil
 	}
+	compacted.Revision++
 	state.conversation = compacted
 	r.secureThreadStore(store)
 	return nil

@@ -5,12 +5,18 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"math"
 	"strings"
 	"time"
 	"unicode"
 )
 
-// Store defines conversation persistence operations.
+// Store defines conversation persistence operations. Save creates revision 1 only
+// when revision 0 names an absent ID; a positive revision replaces only that exact
+// stored revision and advances it by one. Conflicts leave storage unchanged.
+// After success, callers retaining the submitted value must increment its revision;
+// negative and maximum int64 revisions are invalid. List and Search projections
+// are not save tokens.
 type Store interface {
 	Save(ctx context.Context, conv Conversation) error
 	Load(ctx context.Context, id string) (*Conversation, error)
@@ -33,10 +39,17 @@ func NewStore(ctx context.Context, db *sql.DB) (*SQLiteStore, error) {
 	return &SQLiteStore{db: db}, nil
 }
 
-// Save persists a conversation using upsert semantics.
+// Save atomically persists a snapshot and its search projection using its revision.
+// Revision 0 creates; positive revisions update only a matching stored revision.
+// A successful save commits revision r+1 without modifying conv. Negative and
+// maximum int64 revisions are invalid. Conflicts return *ConflictError.
 func (s *SQLiteStore) Save(ctx context.Context, conv Conversation) error {
 	if conv.ID == "" {
 		return fmt.Errorf("conversation: save: id is required")
+	}
+
+	if conv.Revision < 0 || conv.Revision == math.MaxInt64 {
+		return fmt.Errorf("conversation: save %q: invalid revision %d", conv.ID, conv.Revision)
 	}
 
 	msgs := conv.Messages
@@ -62,19 +75,31 @@ func (s *SQLiteStore) Save(ctx context.Context, conv Conversation) error {
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	_, err = tx.ExecContext(ctx,
-		`INSERT INTO conversations (id, title, messages, summary_content, summary_message_count, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?)
-		 ON CONFLICT(id) DO UPDATE SET
-			title                 = excluded.title,
-			messages              = excluded.messages,
-			summary_content       = excluded.summary_content,
-			summary_message_count = excluded.summary_message_count,
-			updated_at            = excluded.updated_at`,
-		conv.ID, conv.Title, string(messagesJSON), summaryContent, summaryMessageCount, now, now,
-	)
+	var result sql.Result
+	if conv.Revision == 0 {
+		result, err = tx.ExecContext(ctx,
+			`INSERT INTO conversations (id, title, messages, summary_content, summary_message_count, revision, created_at, updated_at)
+			 VALUES (?, ?, ?, ?, ?, 1, ?, ?)
+			 ON CONFLICT(id) DO NOTHING`,
+			conv.ID, conv.Title, string(messagesJSON), summaryContent, summaryMessageCount, now, now,
+		)
+	} else {
+		result, err = tx.ExecContext(ctx,
+			`UPDATE conversations SET title = ?, messages = ?, summary_content = ?, summary_message_count = ?,
+			 revision = revision + 1, updated_at = ?
+			 WHERE id = ? AND revision = ?`,
+			conv.Title, string(messagesJSON), summaryContent, summaryMessageCount, now, conv.ID, conv.Revision,
+		)
+	}
 	if err != nil {
 		return fmt.Errorf("conversation: save %q: %w", conv.ID, err)
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("conversation: save %q: rows affected: %w", conv.ID, err)
+	}
+	if affected == 0 {
+		return &ConflictError{ID: conv.ID, ExpectedRevision: conv.Revision}
 	}
 	if err := s.saveSearchIndex(ctx, tx, conv.ID, conv.Title, searchBody, len(msgs), now, now); err != nil {
 		return err
@@ -94,9 +119,9 @@ func (s *SQLiteStore) Load(ctx context.Context, id string) (*Conversation, error
 	var createdMs, updatedMs int64
 
 	err := s.db.QueryRowContext(ctx,
-		`SELECT id, title, messages, summary_content, summary_message_count, created_at, updated_at FROM conversations WHERE id = ?`,
+		`SELECT id, title, messages, summary_content, summary_message_count, revision, created_at, updated_at FROM conversations WHERE id = ?`,
 		id,
-	).Scan(&conv.ID, &conv.Title, &messagesJSON, &summaryContent, &summaryMessageCount, &createdMs, &updatedMs)
+	).Scan(&conv.ID, &conv.Title, &messagesJSON, &summaryContent, &summaryMessageCount, &conv.Revision, &createdMs, &updatedMs)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			return nil, fmt.Errorf("conversation: load %q: %w", id, ErrNotFound)
