@@ -276,6 +276,11 @@ func (m ContextManager) assembleLegacy(ctx context.Context, st State, toolSchema
 	}
 	exhausted := !afterOK || after > budget.Input
 	level, mitigation := thresholds.Classify(used, exhausted, evicted)
+	buckets := m.pressureBuckets(out, toolSchemaTokens)
+	cause := buckets.dominantCause()
+	if !afterOK {
+		buckets = PressureBuckets{}
+	}
 	pressure := Pressure{
 		UsedPct:     used,
 		Evicted:     report.DroppedCount,
@@ -283,8 +288,9 @@ func (m ContextManager) assembleLegacy(ctx context.Context, st State, toolSchema
 		InputTokens: after,
 		InputBudget: budget.Input,
 		Level:       level,
-		Cause:       m.dominantCause(out, toolSchemaTokens),
+		Cause:       cause,
 		Mitigation:  mitigation,
+		Buckets:     buckets,
 	}
 	if exhausted {
 		return out, pressure, ErrContextExhausted

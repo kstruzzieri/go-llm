@@ -115,7 +115,8 @@ type replSession struct {
 	mcpAttached  bool    // true when external MCP tools are attached (force approver)
 	obs          *observ // nil unless -trace/-telemetry enabled
 	feedback     *feedbackService
-	pressureWarn bool // enable the one-per-run context-pressure warning line
+	pressureWarn bool             // enable the one-per-run context-pressure warning line
+	pressure     *pressureCapture // latest attempted Runtime turn; owned by the REPL loop
 	// mixed mirrors what newOrchestratorFactory puts in ContextManager.Mixed, so
 	// the renderer can tell whether a tool result's flat Content is what the
 	// model actually read. Same -progressive flag, one source.
@@ -398,6 +399,13 @@ func runOnce(ctx context.Context, out io.Writer, interrupts <-chan struct{}, ses
 	if sess.session != nil {
 		threadID = sess.session.id
 	}
+	// The capture is composed FIRST, ahead of the renderer/sink/feedback/
+	// grounding fanout above: that fanout stops at the first observer error,
+	// and the /context sample must already be recorded when the renderer's
+	// pressure warning fails to write. Nesting keeps the existing
+	// renderer-then-sink order intact.
+	sess.pressure = &pressureCapture{runID: runID}
+	observer = composeObserver(sess.pressure, nil, observer)
 	res, runErr := sess.runtime.Run(runCtx, golemruntime.Turn{
 		ThreadID: threadID,
 		RunID:    runID,
@@ -594,6 +602,8 @@ func dispatchSlash(ctx context.Context, out io.Writer, sess *replSession, line s
 		handleTrust(ctx, out, sess, fields)
 	case "/help":
 		_, _ = fmt.Fprint(out, golemHelp)
+	case "/context":
+		handleContext(out, sess, fields)
 	case "/clear":
 		// Reset semantics (#341 D8): approval grants drop unconditionally,
 		// before the session branch — under --no-session a live approver can
@@ -604,6 +614,7 @@ func dispatchSlash(ctx context.Context, out io.Writer, sess *replSession, line s
 		} else if err := sess.session.clear(ctx); err != nil {
 			_, _ = fmt.Fprintf(out, "clear failed: %v\n", err)
 		} else {
+			sess.pressure = nil
 			_, _ = fmt.Fprintln(out, "session cleared")
 			// Conversation deletion deliberately does not cascade into agent
 			// memory (separate storage concepts); say so to avoid surprise.
@@ -624,6 +635,7 @@ func dispatchSlash(ctx context.Context, out io.Writer, sess *replSession, line s
 				_, _ = fmt.Fprintf(out, "new failed: %v\n", err)
 			} else {
 				*sess.session = candidate
+				sess.pressure = nil
 				_, _ = fmt.Fprintf(out, "session: %s (new)\n", sess.session.id)
 			}
 		}
@@ -654,6 +666,7 @@ func dispatchSlash(ctx context.Context, out io.Writer, sess *replSession, line s
 			// Success only (#341 D8): a failed /resume leaves the active
 			// session — and therefore its grants — untouched.
 			sess.grants.clear()
+			sess.pressure = nil
 			_, _ = fmt.Fprintln(out, info.line())
 		}
 	case "/model":
@@ -906,6 +919,7 @@ const golemHelp = `commands:
   /help          show this help
   /tools         list registered tools and their effect class
   /model         show the last routed model
+  /context       inspect the last assembled request
   /compact       compact the active session's history
   /clear         delete the active session's history
   /new           start a new session (keeps history of the old one)

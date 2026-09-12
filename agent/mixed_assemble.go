@@ -241,6 +241,11 @@ func (m ContextManager) assembleMixed(ctx context.Context, st State, toolSchemaT
 	exhausted := !usedOK || !afterOK || after > budget.Input
 	usedPct := usedFraction(after, budget.Input)
 	level, mitigation := thresholds.Classify(usedPct, exhausted, shed)
+	buckets := m.pressureBuckets(out, toolSchemaTokens)
+	cause := buckets.dominantCause()
+	if !usedOK || !afterOK {
+		buckets = PressureBuckets{}
+	}
 	pressure := Pressure{
 		UsedPct:         usedPct,
 		Evicted:         alloc.evictedGroups,
@@ -249,8 +254,9 @@ func (m ContextManager) assembleMixed(ctx context.Context, st State, toolSchemaT
 		InputTokens:     after,
 		InputBudget:     budget.Input,
 		Level:           level,
-		Cause:           m.dominantCause(out, toolSchemaTokens),
+		Cause:           cause,
 		Mitigation:      mitigation,
+		Buckets:         buckets,
 	}
 	if exhausted {
 		// Unreachable for a pure estimator: exact-delta accounting makes this
