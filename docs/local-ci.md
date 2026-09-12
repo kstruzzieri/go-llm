@@ -62,6 +62,14 @@ Run the full suite directly on the host. This includes all `pre-push` checks plu
 scripts/ci-local --mode full
 ```
 
+Run only the security-contract phase (about two seconds warm). The GitHub
+`Lint & Test` job runs this same mode, so the gate is enforced server-side even
+when the local hook is bypassed:
+
+```bash
+scripts/ci-local --mode security
+```
+
 Run the faster pre-push subset inside Docker:
 
 ```bash
@@ -96,16 +104,22 @@ cannot silently skip for a missing interpreter.
 
 The gate clears inherited `GOROOT` for both Go and lint and overrides `GOFLAGS`,
 including values saved with `go env -w`, so local defaults cannot silently filter
-out tests. It also requires the exact top-level aggregate to report `PASS`;
-a zero-test success or top-level `SKIP` fails before formatting. Declared deferred
-subtests remain allowed. This confirms execution of the named aggregate, not the
-completeness of its implementation; changes inside the test still need review.
+out tests. It requires both the exact top-level aggregate and its `Active` group
+to report `PASS`: every real contract lives under `Active`, so a zero-test
+success, a top-level `SKIP`, or a skipped `Active` group fails before formatting.
+Only the five declared deferred boundary groups (`ZT-602` through `ZT-606`) may
+skip; any other `SKIP` line inside the aggregate fails. Removing a contract call
+outright emits no skip, so that remains a review responsibility; the gate proves
+the named groups executed, not that their contents are complete.
 
-The aggregate phase uses these exact commands (in that sanitized environment):
+The aggregate phase uses these exact commands (with `GOROOT` unset and
+`GOFLAGS=' '` exported for the rest of the script). The 60-second timeout bounds a
+hung contract well under Go's ten-minute default; the aggregate itself asserts a
+500 ms budget.
 
 ```bash
-env -u GOROOT go test -list '^TestHardeningContracts$' ./agent
-env -u GOROOT go test -count=1 -v -run '^TestHardeningContracts$' ./agent
+go test -list '^TestHardeningContracts$' ./agent
+go test -count=1 -timeout 60s -v -run '^TestHardeningContracts$' ./agent
 ```
 
 Local tests retain platform and permission skips. Native CI workflows separately
@@ -133,14 +147,14 @@ git config core.hooksPath .githooks
 
 ## GitHub Actions
 
-The `CI` workflow runs on `pull_request` so protected branches receive the required `Lint & Test` status. It does not run on ordinary pushes.
+The `CI` workflow runs on `pull_request` so protected branches receive the required `Lint & Test` status. It does not run on ordinary pushes. Its `Security contracts` step runs `scripts/ci-local --mode security`, the same discovery, exact-`PASS`, and skip-allowlist gate the pre-push hook runs, so a renamed, skipped, or hollowed-out aggregate cannot pass the required check by bypassing the local hook.
 
 The macOS compile-smoke workflow also runs on pull requests to `develop` and `main`, providing the required native-Darwin status and real Seatbelt confinement coverage. It remains available as a manual fallback through `workflow_dispatch`. Local Docker CI is the blocking path before pushes during normal development.
 
-Remaining work for #481: the Darwin background-exec selector still does not
-match `TestProcessExitObserverAlreadyExitedChildRecovers` or
-`TestProcessExitObserverRegistrationFailsClosed`. A follow-up should add
-`|TestProcessExitObserver` to that existing selector.
+The Darwin background-exec selector also runs the #481 exit-observer
+regressions (`TestProcessExitObserverAlreadyExitedChildRecovers` and
+`TestProcessExitObserverRegistrationFailsClosed`); `scripts/test-ci-local` pins
+that selector alongside the Seatbelt ones.
 
 ### Linux sandbox confinement (#441)
 

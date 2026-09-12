@@ -46,6 +46,12 @@ jobs:
       - name: Format all Go files
         run: golangci-lint fmt --diff
 
+      # Same discovery + exact-PASS + skip-allowlist gate the pre-push hook
+      # runs, so a renamed, skipped, or hollowed-out aggregate cannot pass the
+      # required check by bypassing the local hook.
+      - name: Security contracts
+        run: ./scripts/ci-local --mode security
+
       - name: Test
         run: go test -race ./...
 

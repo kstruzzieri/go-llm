@@ -469,3 +469,28 @@ Detailed follow-up logs are retained under the ignored
 `.superpowers/sdd/2026-09-09-security-gate-453-spec-plan/gemini-followup/` directory.
 The earlier Daybreak approval applies to `03b953f`; it is not represented as a
 review of these later changes.
+
+
+## Criticize-review disposition — 2026-09-12
+
+A skeptical review of PR #540 at `2340354` (the branch rebased onto `812250d`;
+the eight PR files were byte-identical to the reviewed `3ca2e44`) mutated the
+gate's real target instead of the stubs. Two prior dispositions are revised.
+
+| Finding | Disposition |
+|---|---|
+| A `t.Skip` as the first line of the `Active` group passed the gate with exit 0 (`--- PASS: TestHardeningContracts (0.00s)` over `    --- SKIP: .../Active`); skipping one inner group (`runSecretsContracts`) also passed | Fixed. The earlier "no blanket skip rejection" disposition conflated a registry with the one stable group name. The gate now requires the top-level and `Active` `PASS` lines and allows only the five declared deferred `ZT-602`–`ZT-606` skips. Real-toolchain mutations (Active skip, inner skip, top-level skip) each exit 1; the unmutated aggregate passes with persisted `GOFLAGS=-skip=Test` and `GOROOT=/poisoned`. Deleting a contract call emits no skip and remains review-owned, as before. |
+| Skip allowlist implemented as `grep ... \| grep -Evq` under `pipefail` | Rejected during verification: the early-exiting downstream `grep -q` raised SIGPIPE in the upstream one, status 141 inverted the condition, and the inner-skip mutation "passed". The shipped form captures the pipeline into a variable and tests for non-empty output; the script comment records the hazard. |
+| The rename/skip guard existed only in the bypassable pre-push hook; GitHub `Lint & Test` ran bare `go test -race ./...` | Added `--mode security` to `scripts/ci-local` (aggregate phase only) and a `Security contracts` step in `ci.yml` that runs it after formatting. The harness pins the step line with an anchored match. |
+| `TestProcessExitObserver*` deferral pointed at closed #481 with no tracking issue | Added `\|TestProcessExitObserver` to the existing Darwin background selector; both tests pass locally under `-race`. The harness pins the selector line. Docs no longer carry a remaining-work note. |
+| No `-timeout` on the aggregate run; a hung contract would take Go's ten-minute default in a pre-push | Added `-timeout 60s` to the execution command (120x the aggregate's own 500 ms budget). Harness stub and docs updated to the exact command. |
+| Discovery via `-list` is redundant with the `PASS` grep (`-list` ignores `-skip`, and a renamed aggregate already yields no `PASS` line) | Retained as approved: it costs about 0.3 s and produces the specific "missing required security test" message. |
+| Harness pins `grep -Fq '      python3'`, `CMD [...]`, `command: [...]` accepted commented-out lines (measured: python3 commented out, harness exit 0) | Anchored all three with `-Fxq`. |
+| `env -u GOROOT` on every `go` call after `unset GOROOT` at the top, while lint relied on the `unset` alone | Removed the per-call prefix; the single `unset` covers Go and lint, and the stubs still assert `GOROOT` is unset for both. |
+| PR body cites `03b953f`/`3ca2e44`, unreachable after the rebase | Addendum added to the PR body; the earlier reviews still describe identical file content. |
+| Wall-clock 500 ms assertion in a required gate | Measured on this host: 42 ms non-race, 110–130 ms under `-race`, about 125 ms under `-race` with eight busy CPU spinners. Retained; not reproduced as a regression, and the new `-timeout` bounds the hang case only. |
+
+Harness falsification after the changes: six disposable mutations each fail
+(dropped Active requirement, dropped skip allowlist, dropped `-timeout`, removed
+`ci.yml` security step, commented-out `python3`, reverted Darwin selector); the
+restored tree passes.

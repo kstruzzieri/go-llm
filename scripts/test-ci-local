@@ -7,8 +7,13 @@ if ! grep -Fq 'run: golangci-lint fmt --diff' "$repo_root/.github/workflows/ci.y
   printf 'GitHub CI is missing the all-file formatting gate\n' >&2
   exit 1
 fi
-grep -Fq 'CMD ["./scripts/ci-local", "--mode", "pre-push"]' "$repo_root/Dockerfile.ci"
-grep -Fq 'command: ["./scripts/ci-local", "--mode", "pre-push"]' "$repo_root/docker-compose.ci.yml"
+if ! grep -Fxq '        run: ./scripts/ci-local --mode security' "$repo_root/.github/workflows/ci.yml"; then
+  printf 'GitHub CI is missing the server-side security-contract gate\n' >&2
+  exit 1
+fi
+# Anchored (-x) so a commented-out line cannot satisfy the pin.
+grep -Fxq 'CMD ["./scripts/ci-local", "--mode", "pre-push"]' "$repo_root/Dockerfile.ci"
+grep -Fxq '    command: ["./scripts/ci-local", "--mode", "pre-push"]' "$repo_root/docker-compose.ci.yml"
 
 tmp="$(cd "$(mktemp -d)" && pwd -P)"
 trap 'rm -rf "$tmp"' EXIT
@@ -45,7 +50,7 @@ case "$*" in
       exit "$CI_LOCAL_DISCOVERY_STATUS"
     fi
     ;;
-  'test -count=1 -v -run ^TestHardeningContracts$ ./agent')
+  'test -count=1 -timeout 60s -v -run ^TestHardeningContracts$ ./agent')
     printf 'stub: security execution\n' >&2
     printf '%s\n' "$CI_LOCAL_SECURITY_OUTPUT"
     exit "$CI_LOCAL_SECURITY_STATUS"
@@ -72,7 +77,10 @@ discovery_output=TestHardeningContracts
 discovery_status=0
 discovery_error='discovery failed'
 security_status=0
-security_output='--- PASS: TestHardeningContracts (0.01s)'
+passing_output='--- PASS: TestHardeningContracts (0.01s)
+    --- PASS: TestHardeningContracts/Active (0.01s)
+    --- SKIP: TestHardeningContracts/ZT-602_#431_project_trust (0.00s)'
+security_output="$passing_output"
 race_status=0
 caller_goroot=''
 caller_goflags='-skip=Test'
@@ -123,7 +131,12 @@ assert_scope_notice() {
 write_expected() {
   cat >"$tmp/$1" <<EOF
 $module|test -list ^TestHardeningContracts$ ./agent
-$module|test -count=1 -v -run ^TestHardeningContracts$ ./agent
+$module|test -count=1 -timeout 60s -v -run ^TestHardeningContracts$ ./agent
+EOF
+  if [ "$2" = security ]; then
+    return
+  fi
+  cat >>"$tmp/$1" <<EOF
 $module|fmt --diff
 $module|run
 $module|test -race ./...
@@ -133,6 +146,7 @@ EOF
   fi
 }
 
+write_expected expected-security security
 write_expected expected-pre-push pre-push
 write_expected expected-full full
 
@@ -159,7 +173,7 @@ set +e
     CI_LOCAL_DISCOVERY_STATUS=0 \
     CI_LOCAL_DISCOVERY_ERROR='discovery failed' \
     CI_LOCAL_SECURITY_STATUS=0 \
-    CI_LOCAL_SECURITY_OUTPUT="--- PASS: TestHardeningContracts (0.01s)" \
+    CI_LOCAL_SECURITY_OUTPUT="$passing_output" \
     CI_LOCAL_RACE_STATUS=0 \
     scripts/ci-local --mode pre-push
 ) >"$tmp/hostile-cdpath.out" 2>&1
@@ -172,36 +186,66 @@ run_ci full --mode full
 assert_status full 0
 diff -u "$tmp/expected-full" "$tmp/full.log"
 
+run_ci security --mode security
+assert_status security 0
+diff -u "$tmp/expected-security" "$tmp/security.log"
+assert_scope_notice security
+
 caller_goroot=/poisoned
 run_ci poisoned-goroot --mode full
 assert_status poisoned-goroot 0
 diff -u "$tmp/expected-full" "$tmp/poisoned-goroot.log"
 caller_goroot=''
 
-# A successful process must also report the exact top-level test passing.
-head -n 2 "$tmp/expected-pre-push" >"$tmp/expected-security-only"
-for mode in pre-push full; do
-  for outcome in empty skipped fail renamed child; do
+# A successful process must also report the exact top-level test and its
+# Active group passing; only the declared deferred boundaries may skip.
+pass_message='required security test did not pass: TestHardeningContracts (top-level and Active group must PASS)'
+skip_message='unexpected skip inside TestHardeningContracts:'
+for mode in security pre-push full; do
+  for outcome in empty skipped fail renamed child active-missing active-skipped; do
     case "$outcome" in
       empty) security_output='PASS' ;;
       skipped) security_output='--- SKIP: TestHardeningContracts (0.00s)' ;;
       fail) security_output='--- FAIL: TestHardeningContracts (0.00s)' ;;
       renamed) security_output='--- PASS: TestHardeningContractsRenamed (0.00s)' ;;
       child) security_output='    --- PASS: TestHardeningContracts/Active (0.00s)' ;;
+      active-missing) security_output='--- PASS: TestHardeningContracts (0.00s)' ;;
+      active-skipped) security_output='--- PASS: TestHardeningContracts (0.00s)
+    --- SKIP: TestHardeningContracts/Active (0.00s)' ;;
     esac
     run_ci "aggregate-$outcome-$mode" --mode "$mode"
     assert_status "aggregate-$outcome-$mode" 1
-    grep -Fxq 'required security test did not pass: TestHardeningContracts' "$tmp/aggregate-$outcome-$mode.out"
-    grep -Fxq -- "$security_output" "$tmp/aggregate-$outcome-$mode.out"
-    diff -u "$tmp/expected-security-only" "$tmp/aggregate-$outcome-$mode.log"
+    grep -Fxq "$pass_message" "$tmp/aggregate-$outcome-$mode.out"
+    grep -Fxq -- "$(printf '%s\n' "$security_output" | tail -n 1)" "$tmp/aggregate-$outcome-$mode.out"
+    diff -u "$tmp/expected-security" "$tmp/aggregate-$outcome-$mode.log"
   done
-  security_output='    --- SKIP: TestHardeningContracts/deferred (0.00s)
---- PASS: TestHardeningContracts (0.01s)'
+  # A skip anywhere under Active, or an undeclared boundary skip, fails even
+  # though both required PASS lines are present.
+  for outcome in inner-skip undeclared-boundary; do
+    case "$outcome" in
+      inner-skip) skip_line='        --- SKIP: TestHardeningContracts/Active/Secrets (0.00s)' ;;
+      undeclared-boundary) skip_line='    --- SKIP: TestHardeningContracts/ZT-999_#999_new (0.00s)' ;;
+    esac
+    security_output="$passing_output
+$skip_line"
+    run_ci "aggregate-$outcome-$mode" --mode "$mode"
+    assert_status "aggregate-$outcome-$mode" 1
+    grep -Fxq "$skip_message" "$tmp/aggregate-$outcome-$mode.out"
+    grep -Fxq -- "$skip_line" "$tmp/aggregate-$outcome-$mode.out"
+    diff -u "$tmp/expected-security" "$tmp/aggregate-$outcome-$mode.log"
+  done
+  security_output='--- PASS: TestHardeningContracts (0.01s)
+    --- PASS: TestHardeningContracts/Active (0.01s)
+    --- SKIP: TestHardeningContracts/ZT-602_#431_project_trust (0.00s)
+    --- SKIP: TestHardeningContracts/ZT-603_#432_MCP_description_catalog_trust (0.00s)
+    --- SKIP: TestHardeningContracts/ZT-604_#433_terminal_output (0.00s)
+    --- SKIP: TestHardeningContracts/ZT-605_#434_quarantine (0.00s)
+    --- SKIP: TestHardeningContracts/ZT-606_#435_retrieval_screening (0.00s)'
   run_ci "deferred-$mode" --mode "$mode"
   assert_status "deferred-$mode" 0
   diff -u "$tmp/expected-$mode" "$tmp/deferred-$mode.log"
 done
-security_output='--- PASS: TestHardeningContracts (0.01s)'
+security_output="$passing_output"
 
 discovery_output='? github.com/kstruzzieri/go-llm/other [no test files]
 TestHardeningContracts
@@ -211,8 +255,8 @@ assert_status package-summary 0
 diff -u "$tmp/expected-pre-push" "$tmp/package-summary.log"
 
 discovery_output=''
-head -n 1 "$tmp/expected-pre-push" >"$tmp/expected-discovery-only"
-for mode in pre-push full; do
+head -n 1 "$tmp/expected-security" >"$tmp/expected-discovery-only"
+for mode in security pre-push full; do
   run_ci "missing-empty-$mode" --mode "$mode"
   assert_status "missing-empty-$mode" 1
   grep -Fxq 'missing required security test: TestHardeningContracts' "$tmp/missing-empty-$mode.out"
@@ -220,7 +264,7 @@ for mode in pre-push full; do
 done
 
 discovery_output=TestHardeningContractsRenamed
-for mode in pre-push full; do
+for mode in security pre-push full; do
   run_ci "missing-renamed-$mode" --mode "$mode"
   assert_status "missing-renamed-$mode" 1
   grep -Fxq 'missing required security test: TestHardeningContracts' "$tmp/missing-renamed-$mode.out"
@@ -236,13 +280,12 @@ grep -Fxq 'discovery status 38 preserved' "$tmp/discovery-failure.out"
 diff -u "$tmp/expected-discovery-only" "$tmp/discovery-failure.log"
 
 discovery_status=0
-for mode in pre-push full; do
+for mode in security pre-push full; do
   security_status=37
   run_ci "security-failure-$mode" --mode "$mode"
   assert_status "security-failure-$mode" 37
-  grep -Fxq -- "$security_output" "$tmp/security-failure-$mode.out"
-  head -n 2 "$tmp/expected-pre-push" >"$tmp/expected-security-only"
-  diff -u "$tmp/expected-security-only" "$tmp/security-failure-$mode.log"
+  grep -Fxq -- "$(printf '%s\n' "$security_output" | head -n 1)" "$tmp/security-failure-$mode.out"
+  diff -u "$tmp/expected-security" "$tmp/security-failure-$mode.log"
 done
 
 security_status=0
@@ -309,7 +352,9 @@ if PATH="$tmp/bin:$PATH" CI_LOCAL_TEST_LOG="$tmp/wrong-module-log" "$tmp/wrong-m
 fi
 grep -F 'go.mod does not declare module github.com/kstruzzieri/go-llm' "$tmp/wrong-module-error" >/dev/null
 
-grep -Fq '      python3' "$repo_root/Dockerfile.ci"
+grep -Fxq '      python3' "$repo_root/Dockerfile.ci"
+
+grep -Fxq "        run: go test -race -run 'TestBackground(Process|Manager)|TestRunBackground|TestJobs|TestProcessExitObserver' ./agent/tools ./cmd/golem" "$repo_root/.github/workflows/darwin-smoke.yml"
 
 awk '
   /^      - / { step = ""; env = 0 }
