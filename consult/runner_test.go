@@ -103,19 +103,33 @@ func TestNewEnvelopeIsPrivateAndSelfCleaning(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// A subdirectory that cannot be created must take the whole root with it.
+	// These cases override the package-level envelopeDirs, so no test in this
+	// package may call t.Parallel while they run.
 	restore := envelopeDirs
-	envelopeDirs = []string{"cwd", "no-such-parent/child"}
 	defer func() { envelopeDirs = restore }()
-	if _, err := newEnvelopeIn(base); err == nil {
-		t.Fatal("newEnvelopeIn accepted an uncreatable subdirectory")
-	}
-	left, err := os.ReadDir(base)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(left) != 0 {
-		t.Fatalf("failed envelope stranded %d entries under %s: %v", len(left), base, left)
+	for _, tc := range []struct {
+		name string
+		dirs []string
+	}{
+		// A subdirectory that cannot be created must take the whole root with it.
+		{"uncreatable", []string{"cwd", "no-such-parent/child"}},
+		// A list that creates fine but leaves an envelope field unset must also
+		// fail: a half-built envelope would send the child's XDG dirs to "".
+		{"incomplete", []string{"cwd"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			envelopeDirs = tc.dirs
+			if _, err := newEnvelopeIn(base); err == nil {
+				t.Fatalf("newEnvelopeIn accepted %v", tc.dirs)
+			}
+			left, err := os.ReadDir(base)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(left) != 0 {
+				t.Fatalf("failed envelope stranded %d entries under %s: %v", len(left), base, left)
+			}
+		})
 	}
 }
 

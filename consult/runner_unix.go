@@ -81,6 +81,13 @@ func newEnvelopeIn(base string) (_ *envelope, err error) {
 			*dst = p
 		}
 	}
+	// envelopeDirs and field are two lists; a divergence would hand the child an
+	// empty path for a directory it is told it owns. Fail closed instead.
+	for _, p := range []string{e.cwd, e.tmp, e.config, e.cache, e.state} {
+		if p == "" {
+			return nil, errors.New("consult: envelope is missing a required directory")
+		}
+	}
 	return e, nil
 }
 
@@ -244,9 +251,10 @@ func run(ctx context.Context, spec runSpec) (out runOutcome, err error) {
 
 	// Verify immediately before exec, so the TOCTOU window is only the
 	// microseconds between this read and execve; an updater replaces by rename,
-	// which this catches. The digest read is uncancellable and happens before
-	// the clock starts, so it does not count against spec.timeout — a very large
-	// target therefore delays the run rather than timing it out.
+	// which this catches. The read is uncancellable, and runCtx's deadline is
+	// already ticking: a target large enough to out-read spec.timeout makes
+	// cmd.Start fail with the deadline error. Only Duration excludes it, because
+	// the clock below starts after the digest is checked.
 	if verifyErr := verifyExecTarget(spec.command, spec.sha256); verifyErr != nil {
 		return out, verifyErr
 	}
@@ -261,8 +269,9 @@ func run(ctx context.Context, spec runSpec) (out runOutcome, err error) {
 	out.WaitStatus = waitStatus(cmd.ProcessState)
 
 	// Same-group descendants can outlive a normally exiting leader; setsid
-	// escapes remain outside this trust boundary.
-	_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+	// escapes remain outside this trust boundary. Nothing left to kill is the
+	// expected case here, so the result is ignored.
+	_ = killGroup(cmd.Process.Pid)
 	deadline := time.Now().Add(time.Second)
 	for {
 		if syscall.Kill(-cmd.Process.Pid, 0) == syscall.ESRCH {
@@ -346,6 +355,11 @@ func waitStatus(ps *os.ProcessState) string {
 // waitErrorKind maps cmd.Wait's error to a fixed literal. Only "none" and
 // "exit" mean the pipes were drained to EOF; "wait-delay" means WaitDelay
 // abandoned the copy and "other" is any unexpected error. Both fail closed.
+//
+// "other" also catches the context error Go injects when a child exits 0 while
+// being cancelled. That is deliberate: the drain cannot be trusted in that
+// window either, and a caller that needs to tell the cases apart reads the
+// Canceled, TimedOut and CapExceeded flags, which carry the truth.
 func waitErrorKind(err error) string {
 	var exitErr *exec.ExitError
 	switch {
