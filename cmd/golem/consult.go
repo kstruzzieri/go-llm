@@ -31,17 +31,9 @@ func loadConsultants(explicit string) (map[string]consult.Consultant, error) {
 // Every failure is reported as a fixed code, never as vendor bytes.
 func handleConsult(ctx context.Context, out io.Writer, sess *replSession, line string) {
 	rest := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(line), "/consult"))
-	if rest == "" {
-		if sess.advisory == nil {
-			_, _ = fmt.Fprintln(out, "usage: /consult <name> <prompt>; staged: none")
-		} else {
-			_, _ = fmt.Fprintf(out, "usage: /consult <name> <prompt>; staged: %s (sha256:%s)\n",
-				sess.advisory.Source, sess.advisory.Digest[:12])
-		}
-		return
-	}
-	name, prompt, _ := strings.Cut(rest, " ")
-	prompt = strings.TrimSpace(prompt)
+	// The refusals come first, ahead of the bare-command status line: a status
+	// line reads as "this command works, here is its state", which is exactly
+	// wrong when /consult is disabled or ungated.
 	switch {
 	case sess.consultants == nil:
 		_, _ = fmt.Fprintln(out, "consult disabled: no consultants.json (see -consultants-config)")
@@ -49,7 +41,16 @@ func handleConsult(ctx context.Context, out io.Writer, sess *replSession, line s
 	case !sess.interceptorsOn:
 		_, _ = fmt.Fprintln(out, "consult requires -interceptors")
 		return
-	case prompt == "":
+	case rest == "" && sess.advisory == nil:
+		_, _ = fmt.Fprintln(out, "usage: /consult <name> <prompt>; staged: none")
+		return
+	case rest == "":
+		_, _ = fmt.Fprintf(out, "usage: /consult <name> <prompt>; staged: %s (sha256:%s)\n",
+			sess.advisory.Source, sess.advisory.Digest[:12])
+		return
+	}
+	name, prompt, _ := strings.Cut(rest, " ")
+	if prompt = strings.TrimSpace(prompt); prompt == "" {
 		_, _ = fmt.Fprintln(out, "usage: /consult <name> <prompt>")
 		return
 	}
@@ -99,8 +100,10 @@ func handleConsult(ctx context.Context, out io.Writer, sess *replSession, line s
 		_, _ = fmt.Fprintf(out, "replaced staged advice from %s\n", sess.advisory.Source)
 	}
 	sess.advisory = &adv
-	_, _ = fmt.Fprintf(out, "%s (%s %s, model %s, exit %d, %s):\n%s\n",
-		r.Consultant, r.Adapter, r.Version, r.Model, r.ExitCode,
+	// adv.Tool, not r.Adapter+r.Version: the terminal shows the operator the
+	// same attribution line the model is given, from the same value.
+	_, _ = fmt.Fprintf(out, "%s (%s, model %s, exit %d, %s):\n%s\n",
+		r.Consultant, adv.Tool, r.Model, r.ExitCode,
 		r.Duration.Round(100*time.Millisecond), adv.Content)
 	// The interceptor trailer is host-authored and sits outside the frozen
 	// answer, so it is shown on its own line rather than folded into it.

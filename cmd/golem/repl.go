@@ -85,9 +85,15 @@ type replSession struct {
 
 	lastModel string // last routed ActualModel for /model
 	// consultants is the loaded consultants.json, nil when /consult is
-	// disabled; interceptorsOn mirrors whether the interceptor chain is
-	// non-empty (/consult requires it); advisory is the single staged consult
-	// receipt for the next goal only (#382).
+	// disabled; advisory is the single staged consult receipt for the next
+	// goal only (#382).
+	//
+	// interceptorsOn is a DENORMALIZED security gate and must stay honest:
+	// InspectAdvisory runs whatever chain sess.orch was built with, so a true
+	// mirror over an orchestrator with no chain would admit unscanned
+	// consultant bytes under a flag the operator never set. main.go derives it
+	// from the same interceptorsFor(f, canary) call that builds sess.orch, and
+	// any future writer must keep the two on one source.
 	consultants    map[string]consult.Consultant
 	interceptorsOn bool
 	advisory       *agent.Advisory

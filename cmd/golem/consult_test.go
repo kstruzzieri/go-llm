@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/kstruzzieri/go-llm/agent"
 	"github.com/kstruzzieri/go-llm/consult"
@@ -44,7 +45,7 @@ func consultTranscript(text string) string {
 // path that traverses one, and macOS temp roots live under /var -> /private/var.
 func fakeConsultants(t *testing.T, name, stdout string) map[string]consult.Consultant {
 	t.Helper()
-	loaded, err := consult.Load(fakeConsultantsFile(t, name, stdout))
+	loaded, err := consult.Load(fakeConsultantsFile(t, name, stdout, 0))
 	if err != nil {
 		t.Fatalf("consult.Load: %v", err)
 	}
@@ -52,8 +53,9 @@ func fakeConsultants(t *testing.T, name, stdout string) map[string]consult.Consu
 }
 
 // fakeConsultantsFile writes the config and its fake command and returns the
-// config path.
-func fakeConsultantsFile(t *testing.T, name, stdout string) string {
+// config path. A non-zero delay makes the fake sleep before it answers, so a
+// test can interrupt a consultation in flight.
+func fakeConsultantsFile(t *testing.T, name, stdout string, delay time.Duration) string {
 	t.Helper()
 	dir, err := filepath.EvalSymlinks(t.TempDir())
 	if err != nil {
@@ -67,8 +69,12 @@ func fakeConsultantsFile(t *testing.T, name, stdout string) string {
 	}
 	// stdin is captured rather than discarded so a test can pin the exact
 	// bytes handed to the consultant (see consultStdin).
-	body := "#!/bin/sh\ncat >" + filepath.Join(dir, "stdin") +
-		"; sed \"s|/private/synthetic|$PWD|g\" " + data + "\n"
+	sleep := ""
+	if delay > 0 {
+		sleep = "sleep " + strconv.FormatFloat(delay.Seconds(), 'f', 3, 64) + "; "
+	}
+	body := "#!/bin/sh\ncat >" + filepath.Join(dir, "stdin") + "; " + sleep +
+		"sed \"s|/private/synthetic|$PWD|g\" " + data + "\n"
 	if err := os.WriteFile(cmd, []byte(body), 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -290,6 +296,20 @@ func sha256Hex(s string) string {
 func TestConsultStatusLineWhenEmptyPrompt(t *testing.T) {
 	sess := newTestSession(t, &scriptCaller{}, t.TempDir())
 	var out bytes.Buffer
+	// A disabled or ungated /consult reports that, not a state line that
+	// implies the command would work.
+	dispatchSlash(context.Background(), &out, sess, "/consult")
+	if !strings.Contains(out.String(), "consult disabled") || strings.Contains(out.String(), "staged:") {
+		t.Fatalf("disabled /consult reported a status line: %s", out.String())
+	}
+	sess.consultants = fakeConsultants(t, "claude", consultTranscript("OK"))
+	out.Reset()
+	dispatchSlash(context.Background(), &out, sess, "/consult")
+	if !strings.Contains(out.String(), "requires -interceptors") || strings.Contains(out.String(), "staged:") {
+		t.Fatalf("ungated /consult reported a status line: %s", out.String())
+	}
+	sess.interceptorsOn = true
+	out.Reset()
 	dispatchSlash(context.Background(), &out, sess, "/consult")
 	if !strings.Contains(out.String(), "staged: none") {
 		t.Fatalf("empty slot not reported: %s", out.String())
@@ -301,6 +321,31 @@ func TestConsultStatusLineWhenEmptyPrompt(t *testing.T) {
 	dispatchSlash(context.Background(), &out, sess, "/consult")
 	if !strings.Contains(out.String(), "staged: claude (sha256:"+strings.Repeat("a", 12)+")") {
 		t.Fatalf("staged slot not reported: %s", out.String())
+	}
+}
+
+func TestConsultInterruptCancelsTheConsultation(t *testing.T) {
+	sess := newTestSession(t, &scriptCaller{}, t.TempDir())
+	sess.interceptorsOn = true
+	loaded, err := consult.Load(fakeConsultantsFile(t, "claude", consultTranscript("OK"), 3*time.Second))
+	if err != nil {
+		t.Fatalf("consult.Load: %v", err)
+	}
+	sess.consultants = loaded
+	interrupts := make(chan struct{}, 1)
+	sess.interrupts = interrupts
+	go func() {
+		time.Sleep(300 * time.Millisecond)
+		interrupts <- struct{}{}
+	}()
+	var out bytes.Buffer
+	start := time.Now()
+	dispatchSlash(context.Background(), &out, sess, "/consult claude q")
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Fatalf("Ctrl-C did not cut the consultation short: took %s", elapsed)
+	}
+	if !strings.Contains(out.String(), "consult failed: canceled") || sess.advisory != nil {
+		t.Fatalf("interrupted consult = %q, adv=%v", out.String(), sess.advisory)
 	}
 }
 
@@ -423,17 +468,9 @@ func TestConsultAdvisoryClearedWhenAnUnpersistedAnswerIsDemoted(t *testing.T) {
 	sess := newSessionedTestSession(t, caller, root, "workspace:consult-save-failure")
 	sess.interceptorsOn = true
 	sess.consultants = fakeConsultants(t, "claude", consultTranscript("OK"))
-	// The same forced-save-failure trigger TestRunOnceKeepsAnswerWhenSessionSaveFails
-	// uses: neither a lost CAS nor a lock timeout, so the answered turn is
-	// demoted to a success with a warning.
-	if _, err := sess.session.db.ExecContext(context.Background(), `
-		CREATE TRIGGER fail_conversation_save
-		BEFORE INSERT ON conversations
-		BEGIN
-			SELECT RAISE(FAIL, 'forced save failure');
-		END`); err != nil {
-		t.Fatalf("create failure trigger: %v", err)
-	}
+	// Neither a lost CAS nor a lock timeout, so the answered turn is demoted
+	// to a success with a warning.
+	failConversationSave(t, sess.session.db)
 	var out bytes.Buffer
 	dispatchSlash(context.Background(), &out, sess, "/consult claude q")
 	if sess.advisory == nil {
@@ -506,7 +543,7 @@ func TestRunLoadsConsultantsAndReportsConfigFailures(t *testing.T) {
 		"-no-probe", "-no-cap-probe", "-no-rag"}
 
 	// A valid file is loaded and announced on stderr.
-	path := fakeConsultantsFile(t, "claude", "")
+	path := fakeConsultantsFile(t, "claude", "", 0)
 	in, out, diag := runTestFiles(t)
 	if err := run(append(append([]string{}, base...), "-consultants-config", path, "-p", "hi"), in, out, diag); err != nil {
 		t.Fatalf("run with a valid consultants file: %v", err)
