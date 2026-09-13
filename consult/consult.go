@@ -127,15 +127,21 @@ func Run(ctx context.Context, c Consultant, prompt string) (Receipt, error) {
 	if err != nil {
 		return Receipt{}, classifyRunError(err)
 	}
-	// Precedence is deliberate and fails closed. The three abort conditions
-	// come first, most specific first: a cap abort and a caller cancellation
-	// both cancel the run context, so testing the deadline before them would
-	// report every one of them as a timeout. Incomplete cleanup and an
-	// abandoned pipe drain then outrank a zero exit status, because both mean
-	// the retained transcript may be a prefix of what the consultant wrote and
-	// a truncated transcript must never be admitted. A cancellation observed
-	// after Wait discards a completed answer on purpose: the caller withdrew
-	// the request, so no receipt is issued for it.
+	// Precedence is deliberate and fails closed. The runner already makes the
+	// deadline disjoint from the other two aborts: a cap abort and a caller
+	// cancellation both leave the run context Canceled rather than
+	// DeadlineExceeded, and TimedOut additionally excludes CapExceeded. Only
+	// two overlaps are real, and the order resolves them. Cap and cancel can
+	// both be set when a caller cancels a run that had already blown the cap;
+	// the cap wins, because it is the reason the output is unusable. Deadline
+	// and cancel can both be set when the deadline fired and the caller
+	// cancelled before Canceled was read from the parent context after Wait;
+	// cancel wins, because the caller withdrew the request. Incomplete cleanup
+	// and an abandoned pipe drain then outrank a zero exit status, because
+	// both mean the retained transcript may be a prefix of what the consultant
+	// wrote and a truncated transcript must never be admitted. A cancellation
+	// observed after Wait discards a completed answer on purpose: the caller
+	// withdrew the request, so no receipt is issued for it.
 	switch {
 	case out.CapExceeded:
 		return Receipt{}, &Error{Code: "output-limit", Reason: "cap"}

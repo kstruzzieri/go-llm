@@ -178,7 +178,9 @@ func TestRunFailsClosedOnIncompleteDrain(t *testing.T) {
 }
 
 func TestRunCapDeadlineAndCancelKillGroup(t *testing.T) {
-	out, _ := run(context.Background(), runSpec{command: script(t, `head -c 8192 /dev/zero | tr '\0' x; sleep 30`), timeout: 5 * time.Second, outputCap: 1024})
+	out, _ := run(context.Background(), runSpec{command: script(t, `head -c 8192 /dev/zero | tr '\0' x; sleep 30`), timeout: 5 * time.Second, outputCap: 1024, waitDelay: 200 * time.Millisecond})
+	// waitDelay is short so the Duration bound below measures the kill, not the
+	// default 5s grace a still-open pipe would spend before Wait gives up.
 	// len(Stdout) is load-bearing: the cap must clamp what is retained, not just
 	// count it, or an 8 KiB flood under a 1 KiB cap still reaches the caller.
 	if !out.CapExceeded || out.WaitStatus != "signaled(SIGKILL)" || out.Duration > 4500*time.Millisecond || len(out.Stdout) > 1024 {
@@ -261,7 +263,8 @@ func TestRunErrorsAreClassifiable(t *testing.T) {
 // TestRunStderrOverflowAbortsTheRun proves the cap is enforced on stderr too:
 // a child that only floods stderr is still killed.
 func TestRunStderrOverflowAbortsTheRun(t *testing.T) {
-	out, _ := run(context.Background(), runSpec{command: script(t, `head -c 8192 /dev/zero | tr '\0' x 1>&2; sleep 30`), timeout: 5 * time.Second, outputCap: 1024})
+	out, _ := run(context.Background(), runSpec{command: script(t, `head -c 8192 /dev/zero | tr '\0' x 1>&2; sleep 30`), timeout: 5 * time.Second, outputCap: 1024, waitDelay: 200 * time.Millisecond})
+	// Short waitDelay for the same reason as the stdout cap test above.
 	if !out.CapExceeded || out.WaitStatus != "signaled(SIGKILL)" || out.Duration > 4500*time.Millisecond {
 		t.Fatalf("stderr flood did not abort the run: %+v", out)
 	}
