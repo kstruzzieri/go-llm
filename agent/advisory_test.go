@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"errors"
+	"slices"
 	"strings"
 	"testing"
 
@@ -85,16 +86,29 @@ func TestAdvisoryCostIsChargedInBothArmsAndExhaustsBeforeCall(t *testing.T) {
 	mixed := ContextManager{Mixed: true}
 	rendered := renderAdvisoryLines(advisoryPlaceholderOpen, advisoryPlaceholderClose, "goal", *adv)
 	if legacy.messageCost(msg) != legacy.estimate(rendered) || mixed.messageCost(msg) != mixed.estimate(rendered) {
-		t.Fatalf("cost drift: legacy=%d mixed=%d want=%d", legacy.messageCost(msg), mixed.messageCost(msg), legacy.estimate(rendered))
+		t.Errorf("cost drift: legacy=%d mixed=%d want=%d", legacy.messageCost(msg), mixed.messageCost(msg), legacy.estimate(rendered))
 	}
 	if legacy.messageCost(msg) <= legacy.messageCost(Message{ChatMessage: msg.ChatMessage, Segment: Pinned}) {
-		t.Fatal("projection not charged")
+		t.Error("projection not charged")
 	}
+	// A ceiling sized to the advisory-free pinned segment exactly: the plain
+	// request must fit, and the advisory's projection must be what pushes it
+	// over. Priced through the orchestrator's own manager and the same pinned
+	// accounting assembleLegacy uses, with no tool schemas.
 	caller := &advisoryCaller{}
 	o := New(caller, ContextManager{})
-	_, err := o.Run(context.Background(), Request{Goal: "goal", Advisory: adv, Budget: Budget{InputCeiling: 8}}, nil)
+	plain := Request{Goal: "goal", System: withToolTrustContract("")}
+	base := o.ctxMgr.pinnedTokens(initState(plain), 0)
+	if _, err := o.Run(context.Background(), Request{Goal: "goal", Budget: Budget{InputCeiling: base}}, nil); err != nil {
+		t.Fatalf("advisory-free request must fit a ceiling of its own pinned cost %d: %v", base, err)
+	}
+	if len(caller.reqs) != 1 {
+		t.Fatalf("advisory-free model calls = %d, want 1", len(caller.reqs))
+	}
+	caller.reqs = nil
+	_, err := o.Run(context.Background(), Request{Goal: "goal", Advisory: adv, Budget: Budget{InputCeiling: base}}, nil)
 	if !errors.Is(err, ErrContextExhausted) || len(caller.reqs) != 0 {
-		t.Fatalf("expected exhaustion before any model call, got err=%v calls=%d", err, len(caller.reqs))
+		t.Errorf("advisory must exhaust the same ceiling before any model call, got err=%v calls=%d", err, len(caller.reqs))
 	}
 }
 
@@ -142,9 +156,27 @@ func TestAdvisoryIsReinspectedAtStepZero(t *testing.T) {
 	if res.Risk == nil || res.Risk.Score != 10 {
 		t.Fatalf("risk report not published on the block: %+v", res.Risk)
 	}
-	if _, err := o.InspectAdvisory(context.Background(), *testAdvisory()); !errors.Is(err, ErrAdvisoryBlocked) {
-		t.Fatalf("consult-time inspection did not block: %v", err)
+	if !slices.ContainsFunc(res.Events, func(e EventRecord) bool { return e.Kind == "blocked" }) {
+		t.Errorf("no blocked event published: %+v", res.Events)
 	}
+	// The refusal names its rule, like every other interceptor block.
+	blockedRule := func(t *testing.T, what string, err error) {
+		t.Helper()
+		var be *BlockedError
+		if !errors.As(err, &be) {
+			t.Errorf("%s: refusal carries no *BlockedError: %v", what, err)
+			return
+		}
+		if len(be.Findings) != 1 || be.Findings[0].Rule != "advice" {
+			t.Errorf("%s: want the refusing rule %q, got %+v", what, "advice", be.Findings)
+		}
+	}
+	blockedRule(t, "run path", err)
+	_, ierr := o.InspectAdvisory(context.Background(), *testAdvisory())
+	if !errors.Is(ierr, ErrAdvisoryBlocked) {
+		t.Errorf("consult-time inspection did not block: %v", ierr)
+	}
+	blockedRule(t, "InspectAdvisory", ierr)
 	o = New(caller, ContextManager{}, WithInterceptors(blockingInterceptor{}))
 	out, err := o.InspectAdvisory(context.Background(), *testAdvisory())
 	if err != nil || out.Content == testAdvisory().Content || !strings.HasPrefix(out.Content, testAdvisory().Content) {

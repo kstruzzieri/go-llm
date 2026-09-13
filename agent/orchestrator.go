@@ -344,7 +344,8 @@ func (o *Orchestrator) run(ctx context.Context, req Request, obs Observer, ic *i
 }
 
 // prepareAdvisory runs the observation hook over the advisory as a
-// model-origin observation. A block refuses the advisory; tags append the
+// model-origin observation. A block refuses the advisory with
+// ErrAdvisoryBlocked joined to the *BlockedError naming the rule; tags append the
 // standard trailers after the content, so the model sees the annotation below
 // the text it qualifies. With no interceptors installed the receipt is
 // returned unchanged.
@@ -357,7 +358,12 @@ func (o *Orchestrator) prepareAdvisory(ctx context.Context, ic *interceptorRun, 
 		return Advisory{}, err
 	}
 	if block != nil {
-		return Advisory{}, ErrAdvisoryBlocked
+		// Both facets travel: errors.Is finds the advisory sentinel a consult
+		// consumer switches on, errors.As finds the structured block every
+		// other interceptor refusal in this package carries, so the refusing
+		// rule is nameable without re-running the chain.
+		return Advisory{}, errors.Join(ErrAdvisoryBlocked,
+			&BlockedError{Hook: HookInput, Step: 0, Findings: []Finding{*block}})
 	}
 	a.Content += distinctTrailers(tags)
 	return a, nil
@@ -366,7 +372,8 @@ func (o *Orchestrator) prepareAdvisory(ctx context.Context, ic *interceptorRun, 
 // InspectAdvisory applies this Orchestrator's interceptor chain to a consult
 // receipt before it is displayed or staged, so a refusal reaches the user at
 // consult time rather than at the next Run. It returns the annotated receipt,
-// or ErrAdvisoryBlocked when the policy refuses it.
+// or a refusal satisfying both errors.Is(err, ErrAdvisoryBlocked) and
+// errors.As(err, **BlockedError).
 func (o *Orchestrator) InspectAdvisory(ctx context.Context, a Advisory) (Advisory, error) {
 	if err := ValidateAdvisory(&a); err != nil {
 		return Advisory{}, err
