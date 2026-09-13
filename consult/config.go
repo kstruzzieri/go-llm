@@ -119,15 +119,25 @@ func Load(explicit string) (map[string]Consultant, error) {
 	return out, nil
 }
 
+// afterConfigLstat runs between readConfigFile's Lstat and its open. It is nil
+// in production and exists only so a test can swap the path in that window; it
+// is package-level state, so no test that sets it may t.Parallel.
+var afterConfigLstat func(path string)
+
 // readConfigFile reads the consultants file under the same discipline Load
 // applies to the command it declares. The path must be a regular file and not
 // a symlink, the opened descriptor must still be that same file, and the
 // content is bounded, so neither a redirected path, a file swapped during the
-// open, a FIFO nor an unbounded stream can steer or stall startup.
+// open, a FIFO nor an unbounded stream can steer or stall startup. The
+// identity check is what closes the Lstat-to-open window: without it a
+// validated file and an obeyed file can be two different inodes.
 func readConfigFile(path string) ([]byte, error) {
 	before, err := os.Lstat(path)
 	if err != nil {
 		return nil, err
+	}
+	if afterConfigLstat != nil {
+		afterConfigLstat(path)
 	}
 	if before.Mode()&os.ModeSymlink != 0 {
 		return nil, errors.New("config path must not be a symlink")

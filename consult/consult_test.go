@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/user"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -225,6 +226,103 @@ func TestRunReportsHostFailuresAsInternal(t *testing.T) {
 			if strings.Contains(ce.Error(), "wrapped") {
 				t.Errorf("classifier leaked the wrapped text: %v", ce)
 			}
+		}
+	})
+}
+
+// stubLookupUID installs a uid-lookup stub and clears the memoized identity,
+// before and after. It touches package-level state, so no test in this package
+// may call t.Parallel.
+func stubLookupUID(t *testing.T, stub func(string) (*user.User, error)) {
+	t.Helper()
+	restore := lookupUID
+	t.Cleanup(func() { lookupUID = restore; resetHostIdentityForTest() })
+	lookupUID = stub
+	resetHostIdentityForTest()
+}
+
+// realUID is the uid entry this host actually has, captured before any stub is
+// installed so a stub can succeed with a usable identity.
+func realUID(t *testing.T) *user.User {
+	t.Helper()
+	u, err := user.LookupId(strconv.Itoa(os.Getuid()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return u
+}
+
+// TestHostIdentityMemoizesOnlySuccess pins both halves of the caching rule: a
+// resolved identity is looked up once for the whole process, and a failure is
+// not cached, so one directory-service hiccup cannot disable /consult until
+// the program is restarted.
+func TestHostIdentityMemoizesOnlySuccess(t *testing.T) {
+	valid := strings.Join([]string{validInit, assistantOK, goodResult}, "\n")
+
+	t.Run("success_is_looked_up_once", func(t *testing.T) {
+		real := realUID(t)
+		calls := 0
+		stubLookupUID(t, func(string) (*user.User, error) { calls++; return real, nil })
+		c := fakeClaude(t, valid, 0)
+		for i := 0; i < 2; i++ {
+			if _, err := Run(context.Background(), c, "hi\n"); err != nil {
+				t.Fatalf("run %d: %v", i, err)
+			}
+		}
+		if calls != 1 {
+			t.Fatalf("uid lookup ran %d times across two consults, want 1", calls)
+		}
+	})
+
+	t.Run("failure_is_not_cached", func(t *testing.T) {
+		real := realUID(t)
+		calls := 0
+		stubLookupUID(t, func(string) (*user.User, error) {
+			calls++
+			if calls == 1 {
+				return nil, errors.New("directory service unavailable")
+			}
+			return real, nil
+		})
+		c := fakeClaude(t, valid, 0)
+		if ce := mustFail(t, context.Background(), c, "hi\n"); ce.Code != "internal" || ce.Reason != "identity" {
+			t.Fatalf("err %v, want internal (identity)", ce)
+		}
+		if _, err := Run(context.Background(), c, "hi\n"); err != nil {
+			t.Fatalf("a transient lookup failure disabled consulting: %v", err)
+		}
+		// "No error" is not enough: a cache that admits the failed attempt
+		// would hand every later consult a zero identity, and the child would
+		// be launched with an empty HOME and USER rather than refused.
+		got, err := hostIdentity()
+		if err != nil || got.name != real.Username || got.home != real.HomeDir {
+			t.Fatalf("recovered identity is %+v (%v), want %s at %s", got, err, real.Username, real.HomeDir)
+		}
+	})
+
+	// An entry that resolves but is unusable is a rejection, not a cacheable
+	// result: the same recovery must hold as for a failed lookup, so the
+	// second half of this case is what makes the name true.
+	t.Run("unusable_entry_is_not_cached", func(t *testing.T) {
+		real := realUID(t)
+		calls := 0
+		stubLookupUID(t, func(string) (*user.User, error) {
+			calls++
+			if calls == 1 {
+				return &user.User{Username: "x", HomeDir: "relative/home"}, nil
+			}
+			return real, nil
+		})
+		c := fakeClaude(t, valid, 0)
+		if ce := mustFail(t, context.Background(), c, "hi\n"); ce.Code != "internal" || ce.Reason != "identity" {
+			t.Fatalf("err %v, want internal (identity)", ce)
+		}
+		if _, err := Run(context.Background(), c, "hi\n"); err != nil {
+			t.Fatalf("an unusable entry disabled consulting: %v", err)
+		}
+		got, err := hostIdentity()
+		if err != nil || got.name != real.Username || got.home != real.HomeDir {
+			t.Fatalf("recovered identity is %+v (%v), want %s at %s", got, err, real.Username, real.HomeDir)
 		}
 	})
 }

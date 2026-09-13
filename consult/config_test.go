@@ -166,6 +166,27 @@ func TestLoadRejectsWritableCommand(t *testing.T) {
 	}
 }
 
+// TestLoadRejectsAConfigSwappedDuringOpen closes the Lstat-to-open window: a
+// file renamed over the path between the two is a different inode, and reading
+// it would mean validating one file and obeying another. The swap is a
+// write-sibling-then-rename, never a remove-and-recreate: inode reuse would let
+// a broken identity check pass on APFS.
+func TestLoadRejectsAConfigSwappedDuringOpen(t *testing.T) {
+	path, _ := writeConfig(t, goodConfig)
+	other, _ := writeConfig(t, goodConfig)
+	restore := afterConfigLstat
+	t.Cleanup(func() { afterConfigLstat = restore })
+	afterConfigLstat = func(string) {
+		afterConfigLstat = nil // swap once, so the retry inside Load cannot loop
+		if err := os.Rename(other, path); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := Load(path); err == nil || !strings.Contains(err.Error(), "identity changed") {
+		t.Fatalf("a config swapped during open must be rejected, got %v", err)
+	}
+}
+
 func TestLoadHardensTheConfigRead(t *testing.T) {
 	real, _ := writeConfig(t, goodConfig)
 	link := filepath.Join(realTempDir(t), "linked.json")

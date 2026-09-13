@@ -94,23 +94,58 @@ func newEnvelopeIn(base string) (_ *envelope, err error) {
 // hostUser is this process's own OS identity, resolved from the uid.
 type hostUser struct{ name, home string }
 
-// hostIdentity resolves the uid's username and home directory exactly once per
-// process. user.LookupId can reach a directory service (LDAP, NIS) and takes no
-// context, so it cannot be interrupted and it runs before the run deadline is
-// armed; resolving it once means a hung directory service can stall only the
-// first consult of a session, not every one of them. The result is a pure
-// function of the uid, which cannot change under a running process.
-var hostIdentity = sync.OnceValues(func() (hostUser, error) {
+// lookupUID is the uid lookup, a package variable only so tests can steer it.
+// It touches package-level state, so no test in this package may t.Parallel.
+var lookupUID = func(uid string) (*user.User, error) { return user.LookupId(uid) }
+
+// hostIdentityCache memoizes a successfully resolved identity, and only a
+// successful one.
+var hostIdentityCache struct {
+	mu    sync.Mutex
+	value hostUser
+	ok    bool
+}
+
+// hostIdentity resolves the uid's username and home directory, caching the
+// first success for the life of the process. user.LookupId can reach a
+// directory service (LDAP, NIS) and takes no context, so it cannot be
+// interrupted and it runs before the run deadline is armed; caching keeps that
+// cost off every consult after the first. The result is a pure function of the
+// uid, which cannot change under a running process, so a cached success cannot
+// go stale.
+//
+// A failure is deliberately not cached. The tradeoff is that a persistently
+// broken directory service costs one lookup per consult rather than one per
+// process, which is the right way round: the alternative lets a single
+// transient hiccup disable consulting until the program is restarted.
+func hostIdentity() (hostUser, error) {
+	hostIdentityCache.mu.Lock()
+	defer hostIdentityCache.mu.Unlock()
+	if hostIdentityCache.ok {
+		return hostIdentityCache.value, nil
+	}
 	// The Claude CLI uses USER as its macOS Keychain account lookup key and
 	// HOME to find the subscription credentials. Both come from the uid, never
 	// from $USER or $HOME: os.UserHomeDir reads the parent environment, so a
 	// caller could otherwise redirect which credentials the consultant reads.
-	identity, err := user.LookupId(strconv.Itoa(os.Getuid()))
+	identity, err := lookupUID(strconv.Itoa(os.Getuid()))
 	if err != nil {
 		return hostUser{}, fmt.Errorf("%w: uid lookup: %w", errIdentity, err)
 	}
-	return checkIdentity(identity.Username, identity.HomeDir)
-})
+	value, err := checkIdentity(identity.Username, identity.HomeDir)
+	if err != nil {
+		return hostUser{}, err
+	}
+	hostIdentityCache.value, hostIdentityCache.ok = value, true
+	return value, nil
+}
+
+// resetHostIdentityForTest drops the memoized identity. Test-only.
+func resetHostIdentityForTest() {
+	hostIdentityCache.mu.Lock()
+	defer hostIdentityCache.mu.Unlock()
+	hostIdentityCache.value, hostIdentityCache.ok = hostUser{}, false
+}
 
 // checkIdentity is the validation half of hostIdentity, split out because the
 // lookup half cannot be steered: a host whose passwd entry is blank or carries
