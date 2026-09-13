@@ -40,23 +40,46 @@ func (e *envelope) cwds() []string {
 	return out
 }
 
-func newEnvelope() (*envelope, error) {
-	root, err := os.MkdirTemp("", "golem-consult-")
+// envelopeDirs names the subdirectories of every envelope root, in creation
+// order. It is a variable only so tests can inject a creation failure.
+var envelopeDirs = []string{"cwd", "tmp", "config", "cache", "state"}
+
+// newEnvelope builds an envelope under the system temp directory. $TMPDIR is
+// the one value this package takes from the inherited environment, and it is
+// safe to: the root gets a random name and mode 0700 before anything is written
+// into it, so a hostile $TMPDIR can relocate the scratch space but cannot read
+// it or predict its path. A hostile $TMPDIR pointing somewhere unwritable makes
+// the run fail, not leak.
+func newEnvelope() (*envelope, error) { return newEnvelopeIn("") }
+
+// newEnvelopeIn builds an envelope under base ("" means the system temp
+// directory). On any failure after the root exists it removes the root, so a
+// partial envelope never outlives the call that created it.
+func newEnvelopeIn(base string) (_ *envelope, err error) {
+	root, err := os.MkdirTemp(base, "golem-consult-")
 	if err != nil {
 		return nil, fmt.Errorf("consult: envelope root: %w", err)
 	}
-	if err := os.Chmod(root, 0o700); err != nil {
+	defer func() {
+		if err != nil {
+			_ = os.RemoveAll(root)
+		}
+	}()
+	if err = os.Chmod(root, 0o700); err != nil {
 		return nil, fmt.Errorf("consult: envelope chmod: %w", err)
 	}
 	e := &envelope{root: root}
-	for name, dst := range map[string]*string{
+	field := map[string]*string{
 		"cwd": &e.cwd, "tmp": &e.tmp, "config": &e.config, "cache": &e.cache, "state": &e.state,
-	} {
+	}
+	for _, name := range envelopeDirs {
 		p := filepath.Join(root, name)
-		if err := os.Mkdir(p, 0o700); err != nil {
+		if err = os.Mkdir(p, 0o700); err != nil {
 			return nil, fmt.Errorf("consult: envelope %s: %w", name, err)
 		}
-		*dst = p
+		if dst := field[name]; dst != nil {
+			*dst = p
+		}
 	}
 	return e, nil
 }
@@ -90,6 +113,27 @@ func buildEnv(e *envelope) ([]string, error) {
 		"CLAUDE_CODE_DISABLE_AUTO_MEMORY=1",
 		"ENABLE_CLAUDEAI_MCP_SERVERS=false",
 	}, nil
+}
+
+// killGroup SIGKILLs the whole process group led by pid (negative PID). A
+// descendant that deliberately starts a new session escapes it.
+//
+// The return value follows exec.Cmd.Cancel's contract: nil means the group was
+// interrupted, os.ErrProcessDone means there was nothing left to interrupt.
+// Mapping ESRCH to os.ErrProcessDone matters — a group that raced us to exit is
+// benign, but any other error makes Go wrap the failure into an "exec:
+// canceling Cmd" error that waitErrorKind classifies "other", which the caller
+// reads as an incomplete drain and fails closed on.
+func killGroup(pid int) error {
+	err := syscall.Kill(-pid, syscall.SIGKILL)
+	switch {
+	case err == nil:
+		return nil
+	case errors.Is(err, syscall.ESRCH):
+		return os.ErrProcessDone
+	default:
+		return err
+	}
 }
 
 // cappedWriter counts every byte, retains at most cap of them when retain is
@@ -195,15 +239,14 @@ func run(ctx context.Context, spec runSpec) (out runOutcome, err error) {
 		if cmd.Process == nil {
 			return os.ErrProcessDone
 		}
-		// Negative PID: SIGKILL the whole process group. A descendant that
-		// deliberately starts a new session escapes this.
-		return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		return killGroup(cmd.Process.Pid)
 	}
 
-	// Verify the resolved regular file immediately before exec, never a
-	// launcher symlink the kernel would re-resolve. The residual window is the
-	// microseconds between this read and execve; an updater replaces by
-	// rename, which this catches.
+	// Verify immediately before exec, so the TOCTOU window is only the
+	// microseconds between this read and execve; an updater replaces by rename,
+	// which this catches. The digest read is uncancellable and happens before
+	// the clock starts, so it does not count against spec.timeout — a very large
+	// target therefore delays the run rather than timing it out.
 	if verifyErr := verifyExecTarget(spec.command, spec.sha256); verifyErr != nil {
 		return out, verifyErr
 	}
@@ -246,7 +289,11 @@ func run(ctx context.Context, spec runSpec) (out runOutcome, err error) {
 }
 
 // verifyExecTarget refuses symlinks and non-regular files and, when a digest is
-// expected, requires the file bytes to match it.
+// expected, requires the whole file's bytes to match it.
+//
+// The symlink check is leaf-only (Lstat): integrity of the parent directories
+// is config.validate's job, which rejects any command path that traverses a
+// symlink at load time. Together they cover the path; neither does alone.
 func verifyExecTarget(path, expected string) error {
 	if !filepath.IsAbs(path) {
 		return fmt.Errorf("%w: command must be an absolute path", errTargetInvalid)

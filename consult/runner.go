@@ -40,13 +40,16 @@ type runSpec struct {
 // runOutcome is the redacted result of one run. Stderr content is counted but
 // never retained, so no field can carry it across this boundary.
 type runOutcome struct {
-	Stdout         []byte // capped at runSpec.outputCap
-	StderrBytes    int
-	ExitCode       int
-	WaitStatus     string // exited(N) | signaled(SIGKILL|SIGTERM|SIGINT|other)
-	WaitErrorKind  string // none | exit | wait-delay | other
-	TimedOut       bool
-	Canceled       bool // the caller's context was cancelled
+	Stdout        []byte // capped at runSpec.outputCap
+	StderrBytes   int
+	ExitCode      int
+	WaitStatus    string // exited(N) | signaled(SIGKILL|SIGTERM|SIGINT|other)
+	WaitErrorKind string // none | exit | wait-delay | other
+	TimedOut      bool
+	// Canceled is set only for context.Canceled on the caller's context. A
+	// deadline the caller imposed lands in TimedOut instead, by design: both are
+	// "the caller stopped waiting", but only Canceled is an explicit abort.
+	Canceled       bool
 	CapExceeded    bool
 	GroupCleanupOK bool
 	CleanupOK      bool

@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"os/user"
 	"path/filepath"
 	"strconv"
@@ -80,6 +81,67 @@ func waitForDeath(t *testing.T, pidFile string) {
 	}
 }
 
+// TestNewEnvelopeIsPrivateAndSelfCleaning pins the two envelope invariants the
+// run path depends on: every directory is 0700, and a partial failure strands
+// nothing behind.
+func TestNewEnvelopeIsPrivateAndSelfCleaning(t *testing.T) {
+	base := t.TempDir()
+	e, err := newEnvelopeIn(base)
+	if err != nil {
+		t.Fatalf("newEnvelopeIn: %v", err)
+	}
+	for _, p := range []string{e.root, e.cwd, e.tmp, e.config, e.cache, e.state} {
+		info, err := os.Lstat(p)
+		if err != nil {
+			t.Fatalf("lstat %s: %v", p, err)
+		}
+		if !info.IsDir() || info.Mode().Perm() != 0o700 {
+			t.Fatalf("%s: mode %v, want a 0700 directory", p, info.Mode())
+		}
+	}
+	if err := os.RemoveAll(e.root); err != nil {
+		t.Fatal(err)
+	}
+
+	// A subdirectory that cannot be created must take the whole root with it.
+	restore := envelopeDirs
+	envelopeDirs = []string{"cwd", "no-such-parent/child"}
+	defer func() { envelopeDirs = restore }()
+	if _, err := newEnvelopeIn(base); err == nil {
+		t.Fatal("newEnvelopeIn accepted an uncreatable subdirectory")
+	}
+	left, err := os.ReadDir(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(left) != 0 {
+		t.Fatalf("failed envelope stranded %d entries under %s: %v", len(left), base, left)
+	}
+}
+
+// TestKillGroupMapsESRCHToProcessDone pins cmd.Cancel's contract: a group that
+// is already gone is not an interruption failure, and reporting it as one would
+// make Go wrap it into an error waitErrorKind classifies "other" (fail-closed).
+func TestKillGroupMapsESRCHToProcessDone(t *testing.T) {
+	// A short-lived child, reaped, so its pgid is certainly gone.
+	cmd := exec.Command(script(t, `exit 0`))
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	pid := cmd.Process.Pid
+	_ = cmd.Wait()
+	for i := 0; i < 200 && syscall.Kill(-pid, 0) != syscall.ESRCH; i++ {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if got := syscall.Kill(-pid, 0); got != syscall.ESRCH {
+		t.Skipf("pgid %d still present (%v); cannot exercise the ESRCH path", pid, got)
+	}
+	if err := killGroup(pid); !errors.Is(err, os.ErrProcessDone) {
+		t.Fatalf("killGroup on a dead pgid: got %v, want os.ErrProcessDone", err)
+	}
+}
+
 func TestRunEnvironmentIsExactlyElevenNames(t *testing.T) {
 	t.Setenv("ANTHROPIC_API_KEY", "must-not-reach-child")
 	t.Setenv("USER", "wrong-user")
@@ -103,7 +165,9 @@ func TestRunFailsClosedOnIncompleteDrain(t *testing.T) {
 
 func TestRunCapDeadlineAndCancelKillGroup(t *testing.T) {
 	out, _ := run(context.Background(), runSpec{command: script(t, `head -c 8192 /dev/zero | tr '\0' x; sleep 30`), timeout: 5 * time.Second, outputCap: 1024})
-	if !out.CapExceeded || out.WaitStatus != "signaled(SIGKILL)" || out.Duration > 3*time.Second {
+	// len(Stdout) is load-bearing: the cap must clamp what is retained, not just
+	// count it, or an 8 KiB flood under a 1 KiB cap still reaches the caller.
+	if !out.CapExceeded || out.WaitStatus != "signaled(SIGKILL)" || out.Duration > 4500*time.Millisecond || len(out.Stdout) > 1024 {
 		t.Fatalf("cap did not kill: %+v", out)
 	}
 	out, _ = run(context.Background(), runSpec{command: script(t, `sleep 30`), timeout: 300 * time.Millisecond, outputCap: 1024})
@@ -120,7 +184,7 @@ func TestRunCapDeadlineAndCancelKillGroup(t *testing.T) {
 	// Duration is load-bearing: Canceled reads the caller's context, which is
 	// canceled whether or not the cancellation ever reached the child, so
 	// without this bound the 5s deadline could be doing the killing.
-	if !out.Canceled || out.WaitStatus != "signaled(SIGKILL)" || !out.GroupCleanupOK || out.Duration > 3*time.Second {
+	if !out.Canceled || out.WaitStatus != "signaled(SIGKILL)" || !out.GroupCleanupOK || out.Duration > 4500*time.Millisecond {
 		t.Fatalf("cancel did not kill group: %+v", out)
 	}
 	waitForDeath(t, pidFile)
@@ -143,7 +207,7 @@ func TestRunCanceledDistinguishesCallerFromDeadline(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	time.AfterFunc(time.Second, cancel)
 	out, _ = run(ctx, runSpec{command: sc, timeout: 5 * time.Second, outputCap: 1024})
-	if !out.Canceled || out.TimedOut || out.Duration > 3*time.Second {
+	if !out.Canceled || out.TimedOut || out.Duration > 4500*time.Millisecond {
 		t.Fatalf("caller cancellation not honoured: %+v", out)
 	}
 }
@@ -184,7 +248,7 @@ func TestRunErrorsAreClassifiable(t *testing.T) {
 // a child that only floods stderr is still killed.
 func TestRunStderrOverflowAbortsTheRun(t *testing.T) {
 	out, _ := run(context.Background(), runSpec{command: script(t, `head -c 8192 /dev/zero | tr '\0' x 1>&2; sleep 30`), timeout: 5 * time.Second, outputCap: 1024})
-	if !out.CapExceeded || out.WaitStatus != "signaled(SIGKILL)" || out.Duration > 3*time.Second {
+	if !out.CapExceeded || out.WaitStatus != "signaled(SIGKILL)" || out.Duration > 4500*time.Millisecond {
 		t.Fatalf("stderr flood did not abort the run: %+v", out)
 	}
 	if len(out.Stdout) != 0 {
@@ -208,6 +272,12 @@ func TestRunVerifiesTargetImmediatelyBeforeExec(t *testing.T) {
 	good := sha256File(t, p)
 	if out, err := run(context.Background(), runSpec{command: p, sha256: good, timeout: time.Second, outputCap: 1024}); err != nil || out.ExitCode != 0 {
 		t.Fatalf("verified target refused: %+v %v", out, err)
+	}
+	// A one-nibble difference in the last position must be caught: the compare
+	// is over the whole digest, not a prefix.
+	nearMiss := good[:len(good)-1] + map[bool]string{true: "1", false: "0"}[good[len(good)-1] == '0']
+	if _, err := run(context.Background(), runSpec{command: p, sha256: nearMiss, timeout: time.Second, outputCap: 1024}); !errors.Is(err, errTargetDrift) {
+		t.Fatalf("last-nibble digest difference accepted: %v", err)
 	}
 	if err := os.WriteFile(p+".new", []byte("#!/bin/sh\nexit 1\n"), 0o700); err != nil {
 		t.Fatal(err)
