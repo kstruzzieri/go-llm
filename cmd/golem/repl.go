@@ -677,7 +677,7 @@ func dispatchSlash(ctx context.Context, out io.Writer, sess *replSession, line s
 			_, _ = fmt.Fprintln(out, info.line())
 		}
 	case "/model":
-		handleModel(out, sess, fields)
+		handleModel(ctx, out, sess, fields)
 	case "/undo":
 		if sess.journal == nil {
 			_, _ = fmt.Fprintln(out, "writes disabled; run /allow-write or start with -allow-write")
@@ -921,7 +921,8 @@ func autoEditState(sess *replSession) string {
 const golemHelp = `commands:
   /help          show this help
   /tools         list registered tools and their effect class
-  /model         show the selected model chain, input ceiling, thinking, and last routed model
+  /model [set <role|name>]
+                 show the selected model chain, ceiling, thinking, and last routed model; set switches the model for the rest of this process
   /context       inspect the last assembled request
   /compact       compact the active session's history
   /clear         delete the active session's history

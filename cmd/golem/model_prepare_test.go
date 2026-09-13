@@ -687,3 +687,31 @@ func TestStartupModelPreparationFoldsPreflightWarningsIntoTheNotices(t *testing.
 		t.Errorf("selection chain = %v, want %v", sess.selection.chain, wantChain)
 	}
 }
+
+// TestPrepareModelOwnsTheChainItWasGiven pins the ownership rule the caller
+// depends on: newActiveChainCaller RETAINS the slice it is handed, so
+// prepareModel must copy it. Without the copy, a caller that reuses its chain
+// array -- or a session that keeps the same slice on sess.selection and later
+// rewrites it -- would silently re-point a live caller at a different model.
+func TestPrepareModelOwnsTheChainItWasGiven(t *testing.T) {
+	chain := []string{"test/large", "test/small"}
+	prep, err := prepareModel(context.Background(), modelPreparation{
+		models: prepRegistry(prepProfile("large", 65_536), prepProfile("small", 32_768)),
+		plan:   chainPlan{chain: chain, useCase: modelSetUseCase},
+	})
+	if err != nil {
+		t.Fatalf("prepareModel: %v", err)
+	}
+	caller, ok := prep.caller.(*chainModelCaller)
+	if !ok {
+		t.Fatalf("caller = %T, want *chainModelCaller", prep.caller)
+	}
+	chain[0], chain[1] = "test/hijacked", "test/hijacked"
+	want := []string{"test/large", "test/small"}
+	if !reflect.DeepEqual(prep.plan.chain, want) {
+		t.Errorf("prepared plan chain = %v, want %v", prep.plan.chain, want)
+	}
+	if !reflect.DeepEqual(caller.chain, want) {
+		t.Errorf("caller chain = %v, want %v", caller.chain, want)
+	}
+}

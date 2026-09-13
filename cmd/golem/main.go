@@ -958,9 +958,11 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 	if err != nil {
 		return maybeUsageError(err, headlessExitApplies(f))
 	}
-	netPlan, err := providerbootstrap.BuildNetworkPlan(eff, routes, providerbootstrap.PlanOptions{
-		CapabilityProbes: !f.noCapProbe,
-	})
+	// Retained on sess.selection: a mid-session /model set plans its
+	// candidate under the SAME options, so the two plans cannot disagree
+	// about which metadata edges exist.
+	planOpts := providerbootstrap.PlanOptions{CapabilityProbes: !f.noCapProbe}
+	netPlan, err := providerbootstrap.BuildNetworkPlan(eff, routes, planOpts)
 	if err != nil {
 		return maybeUsageError(err, headlessExitApplies(f))
 	}
@@ -1709,6 +1711,17 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 			useCase:       plan.useCase,
 			useRecommend:  plan.useRecommend,
 			ceilingSource: inputCeiling.source,
+			// The frozen inputs a later /model set re-prepares from: exactly
+			// the values used above, never re-resolved (#376 M2).
+			effective:       bundle.Effective,
+			models:          bundle.Models,
+			router:          bundle.Router,
+			resolveEndpoint: resolveEndpoint,
+			resolver:        resolver,
+			planOpts:        planOpts,
+			flags:           f,
+			orchVerifier:    orchVerifier,
+			dispatchNotify:  dispatchNotifySink(dispatchNotice),
 		},
 		startupModelOptions: thinkOpts,
 

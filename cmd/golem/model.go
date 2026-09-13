@@ -2,13 +2,17 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
+	"slices"
 	"sort"
 	"strings"
 
 	"github.com/kstruzzieri/go-llm/agent"
+	agenttools "github.com/kstruzzieri/go-llm/agent/tools"
 	"github.com/kstruzzieri/go-llm/config"
+	golemruntime "github.com/kstruzzieri/go-llm/golem"
 	"github.com/kstruzzieri/go-llm/internal/providerbootstrap"
 	"github.com/kstruzzieri/go-llm/provider"
 )
@@ -145,6 +149,11 @@ type preparedModel struct {
 // failure path too, because the caller folds them into its own warning list
 // before returning.
 func prepareModel(ctx context.Context, in modelPreparation) (preparedModel, error) {
+	// newActiveChainCaller RETAINS the slice it is handed, so the caller this
+	// function builds must never share backing storage with a chain its
+	// caller still owns: a later switch that reused that array would reach
+	// into a live caller. Every output below carries this owned copy.
+	in.plan.chain = slices.Clone(in.plan.chain)
 	warnings, err := preflightToolCapable(ctx, in.models, in.plan.chain, in.plan.useCase, in.resolveEndpoint, in.resolver)
 	if err != nil {
 		return preparedModel{plan: in.plan, warnings: warnings}, err
@@ -182,6 +191,29 @@ type modelSelection struct {
 	useCase       string             // the routing use case the chain is served under
 	useRecommend  bool               // startup recommendation mode; the first successful set clears it for good
 	ceilingSource inputCeilingSource // which rule produced the live input ceiling
+
+	// Frozen preparation inputs: the exact bundle and flag values startup
+	// passed to BuildNetworkPlan, prepareModel, newDispatchTool, and
+	// newOrchestratorFactory. A switch reuses them verbatim -- there is one
+	// registry, one router, and one effective config for the process, and
+	// re-resolving any of them could make the consumed route and the admitted
+	// route disagree (#376 M2).
+	effective       *providerbootstrap.Effective
+	models          capChecker
+	router          *provider.Router
+	resolveEndpoint endpointResolver
+	resolver        toolCallResolver // nil under -no-cap-probe: no active probing
+	planOpts        providerbootstrap.PlanOptions
+	flags           flags
+	orchVerifier    agent.Verifier // the startup verifier, or the REPL's late-verifier slot
+	dispatchNotify  func(string)   // newDispatchTool's completion-notice sink; nil when dispatch is off
+}
+
+// followsParentDispatch reports whether the default parent-following dispatch
+// tool must be rebuilt for a new selection. An explicit -dispatch-role keeps
+// its own independent startup route (#376 M5), so it is excluded.
+func (s modelSelection) followsParentDispatch() bool {
+	return s.flags.dispatch && s.flags.dispatchRole == ""
 }
 
 // startupSelector is the selector text the /model status echoes before any
@@ -205,20 +237,245 @@ func (s modelSelection) chainLine() string {
 	return fmt.Sprintf("%s (strict; use case: %s)", strings.Join(s.chain, " -> "), s.useCase)
 }
 
-// modelStatusUsage is the single line every malformed /model form prints. It
-// performs no provider I/O, by construction: it is reached before anything is
-// resolved.
+// modelStatusUsage is the single line every malformed /model form prints.
+// Reaching it resolves nothing, so a malformed command performs no provider
+// I/O (#376 M1).
 const modelStatusUsage = "usage: /model [set <role|name>]"
 
-// handleModel implements /model (#376 M6). The bare form is entirely
-// read-only -- no lookup, probe, or model call -- and every other form stops
-// at the usage line before anything is resolved.
-func handleModel(out io.Writer, sess *replSession, fields []string) {
-	if len(fields) != 1 {
+// dispatchNotifySink adapts the late-bound dispatch notice sink for
+// sess.selection. It is nil-safe because the notifier only exists when
+// -dispatch is on, and a method value on a nil notifier would panic the first
+// time a child finished.
+func dispatchNotifySink(n *feedbackNotifier) func(string) {
+	if n == nil {
+		return nil
+	}
+	return n.notify
+}
+
+// destinationGrantRetainedNotice is appended to a /model set failure ONLY
+// when the admission wrapper actually admitted new or renewed remote consent
+// before that failure (#376 M6). Reusing an existing grant, a local
+// destination, or an exact -allow-destination flag must not produce it:
+// saying "a grant was retained" when none was taken teaches the user to run
+// /grants clear for nothing.
+const destinationGrantRetainedNotice = "destination grant retained for this session; use /grants clear to revoke"
+
+// handleModel implements /model and /model set (#376 M6). The bare form is
+// entirely read-only -- no lookup, probe, or model call -- and every
+// malformed form stops at the usage line before anything is resolved.
+func handleModel(ctx context.Context, out io.Writer, sess *replSession, fields []string) {
+	switch {
+	case len(fields) == 1:
+		writeModelStatus(out, sess)
+	case len(fields) == 3 && fields[1] == "set":
+		handleModelSet(ctx, out, sess, fields[2])
+	default:
 		_, _ = fmt.Fprintln(out, modelStatusUsage)
+	}
+}
+
+// modelSwitch is the fully prepared candidate one /model set publishes. Every
+// field is allocated and validated BEFORE ReplaceConfiguration is called, so
+// a failure anywhere above installs nothing and the bookkeeping that follows
+// a successful publication is infallible (#376 M4 steps 7-8).
+type modelSwitch struct {
+	selection   modelSelection
+	tools       []agent.Tool
+	orch        *agent.Orchestrator
+	newOrch     func() *agent.Orchestrator
+	options     provider.ModelOptions
+	budget      agent.Budget
+	warnings    []string
+	thinkNotice string
+}
+
+// handleModelSet runs the whole switch synchronously inside slash dispatch
+// (#376 M6): the next goal is read only after this returns, under whichever
+// configuration won. Ctrl-C scopes to this operation through interruptContext,
+// whose deferred cancel joins the watcher before the prompt comes back.
+//
+// Publication decides success. A cancellation observed before
+// ReplaceConfiguration preserves the old tuple; one arriving afterwards must
+// not misreport a committed switch as a rollback, so nothing below the
+// publication can fail.
+func handleModelSet(ctx context.Context, out io.Writer, sess *replSession, arg string) {
+	ctx, cancel := interruptContext(ctx, sess.interrupts)
+	defer cancel()
+
+	sw, newGrantAdmitted, err := prepareModelSwitch(ctx, sess, arg)
+	if err == nil {
+		// Last look before authority changes hands. ReplaceConfiguration
+		// rechecks under its own publication lock; this check keeps a
+		// cancellation raised during preparation from reaching it at all.
+		if err = ctx.Err(); err == nil {
+			err = sess.runtime.ReplaceConfiguration(ctx, golemruntime.Configuration{
+				System:       sess.baseSystem,
+				Tools:        sw.tools[sess.readToolCount:],
+				ModelOptions: sw.options,
+				Orchestrator: sw.orch,
+				Budget:       sw.budget,
+			})
+		}
+	}
+	if err != nil {
+		_, _ = fmt.Fprintf(out, "model unchanged: %s\n", runFailureMessage("", err))
+		if newGrantAdmitted {
+			_, _ = fmt.Fprintln(out, destinationGrantRetainedNotice)
+		}
 		return
 	}
+	// Infallible CLI bookkeeping, in the synchronous handler, before the next
+	// prompt (#376 M4 step 8).
+	sess.selection = sw.selection
+	sess.tools = sw.tools
+	sess.orch = sw.orch
+	sess.newOrchestrator = sw.newOrch
+	sess.pressure = nil // the old sample described a request the old model assembled
+	sess.lastModel = "" // nothing has routed on the new selection yet
+	if sw.thinkNotice != "" {
+		_, _ = fmt.Fprintln(out, sw.thinkNotice)
+	}
+	for _, w := range sw.warnings {
+		_, _ = fmt.Fprintln(out, w)
+	}
 	writeModelStatus(out, sess)
+}
+
+// prepareModelSwitch resolves, admits, and builds a complete candidate
+// without touching the session. The returned boolean is the admission
+// wrapper's newGrantAdmitted: it is retained through every later step so a
+// failure can say whether a remote grant is now standing.
+func prepareModelSwitch(ctx context.Context, sess *replSession, arg string) (modelSwitch, bool, error) {
+	sel := sess.selection
+	if sess.runtime == nil {
+		return modelSwitch{}, false, errors.New("golem: /model set: runtime unavailable")
+	}
+
+	// 1. Selector -> the ONE planned route everything downstream consumes.
+	route, err := resolveModelSelection(sel.effective, arg)
+	if err != nil {
+		return modelSwitch{}, false, err
+	}
+
+	// 2. Candidate reachability, then ONE additive admission decision for the
+	// complete proposal -- before any candidate metadata I/O.
+	routes := []providerbootstrap.PlannedRoute{route}
+	if sel.followsParentDispatch() {
+		// Children follow the parent, so the dispatch purpose must be
+		// admitted in the SAME decision; asking about it later would split
+		// one consent question in two.
+		routes = append(routes, providerbootstrap.PlannedRoute{UseCase: dispatchUseCase, Chain: route.Chain})
+	}
+	netPlan, err := providerbootstrap.BuildNetworkPlan(sel.effective, routes, sel.planOpts)
+	if err != nil {
+		return modelSwitch{}, false, err
+	}
+	newGrantAdmitted := false
+	if sess.destAdmission != nil {
+		if newGrantAdmitted, err = sess.destAdmission.extend(ctx, netPlan.Edges); err != nil {
+			return modelSwitch{}, newGrantAdmitted, err
+		}
+	}
+
+	// 3. The shared post-admission sequence. The thinking input is the
+	// ACCEPTED current state, never the startup flag, so a value the session
+	// rejected cannot come back with a new chain.
+	prep, err := prepareModel(ctx, modelPreparation{
+		models:          sel.models,
+		router:          sel.router,
+		plan:            chainPlanFor(route),
+		resolveEndpoint: sel.resolveEndpoint,
+		resolver:        sel.resolver,
+		think:           thinkFlagValue(sess.runtime.ModelOptions()),
+		inputCeiling:    sel.flags.inputCeiling,
+		outputReserve:   sel.flags.outputReserve,
+		pressureWarn:    sel.flags.pressureWarn,
+	})
+	if err != nil {
+		return modelSwitch{}, newGrantAdmitted, err
+	}
+
+	// 4. Parent-following dispatch, replaced IN PLACE so every other tool
+	// keeps its index and readToolCount/mountAt/writeToolCount still describe
+	// the slice.
+	newTools := sess.tools
+	if sel.followsParentDispatch() {
+		if newTools, err = rebuildDispatchTool(ctx, sess, prep.plan.chain); err != nil {
+			return modelSwitch{}, newGrantAdmitted, err
+		}
+	}
+
+	// 5. The orchestrator factory, rebound so no later rebuild can revive the
+	// startup caller.
+	newOrch := newOrchestratorFactory(prep.caller, sel.flags, sel.orchVerifier, sess.canary)
+
+	next := sel
+	next.requested = arg
+	next.chain = prep.plan.chain // prepareModel already owns this copy
+	next.useCase = prep.plan.useCase
+	next.useRecommend = false // the first successful set is strict for the process lifetime
+	next.ceilingSource = prep.ceiling.source
+	return modelSwitch{
+		selection:   next,
+		tools:       newTools,
+		orch:        newOrch(),
+		newOrch:     newOrch,
+		options:     applyThinkOptions(sess.runtime.ModelOptions(), prep.thinkOpts),
+		budget:      prep.budget,
+		warnings:    prep.warnings,
+		thinkNotice: prep.thinkNotice,
+	}, newGrantAdmitted, nil
+}
+
+// dispatchToolIndex locates the single registered dispatch tool. Exactly one
+// must exist when the feature is enabled: zero means the candidate would
+// publish a tool set the orchestrator's invocation limit names but cannot
+// find, and two means an earlier rebuild appended instead of replacing.
+func dispatchToolIndex(tools []agent.Tool) (int, error) {
+	idx, found := -1, 0
+	for i, t := range tools {
+		if t != nil && t.Spec().Name == agenttools.DispatchToolName {
+			found++
+			if idx < 0 {
+				idx = i
+			}
+		}
+	}
+	if found != 1 {
+		return 0, fmt.Errorf("golem: /model set: dispatch is enabled but %d dispatch tools are registered; expected exactly one", found)
+	}
+	return idx, nil
+}
+
+// rebuildDispatchTool returns a CLONE of the session tools with the dispatch
+// entry replaced at its own index by one built for the new chain: new caller,
+// new child ceiling under the dispatch use case, and fan-out re-derived from
+// the router's cached slot capacity. The child-visible tool set is the exact
+// prefix that preceded dispatch at startup -- the read-only tools, before
+// memory, write, exec, delegate, and MCP were appended -- so children keep
+// seeing what they saw and nothing else.
+func rebuildDispatchTool(ctx context.Context, sess *replSession, chain []string) ([]agent.Tool, error) {
+	idx, err := dispatchToolIndex(sess.tools)
+	if err != nil {
+		return nil, err
+	}
+	sel := sess.selection
+	// Same constant the dispatch caller routes with, so the child's ceiling
+	// and the child's route can never disagree.
+	childCeiling := resolveInputCeiling(ctx, sel.models, chain, dispatchUseCase,
+		sel.flags.inputCeiling, sel.flags.outputReserve, sel.resolver != nil).ceiling
+	fan := resolveDispatchFanout(sel.router.SlotCapacity, chain)
+	caller := newRouterChainCallerFor(sel.router, chain, dispatchUseCase)
+	dpt, err := newDispatchTool(caller, sel.flags,
+		agent.Budget{InputCeiling: childCeiling, OutputReserve: sel.flags.outputReserve},
+		fan, sel.dispatchNotify, sess.tools[:idx], sess.canary)
+	if err != nil {
+		return nil, err
+	}
+	next := slices.Clone(sess.tools)
+	next[idx] = dpt
+	return next, nil
 }
 
 // writeModelStatus renders the M6 status block. Each line comes from the
@@ -229,6 +486,12 @@ func handleModel(out io.Writer, sess *replSession, fields []string) {
 // rather than from a remembered resolution is what keeps the display honest
 // after a switch.
 func writeModelStatus(out io.Writer, sess *replSession) {
+	if sess.runtime == nil {
+		// Same shape as /think and /context in a runtime-less session: one
+		// line, no half-rendered block.
+		_, _ = fmt.Fprintln(out, "model: runtime unavailable")
+		return
+	}
 	sel := sess.selection
 	requested := sel.requested
 	if requested == "" {
@@ -238,10 +501,6 @@ func writeModelStatus(out io.Writer, sess *replSession) {
 	}
 	_, _ = fmt.Fprintf(out, "model: %s\n", requested)
 	_, _ = fmt.Fprintf(out, "chain: %s\n", sel.chainLine())
-	if sess.runtime == nil {
-		_, _ = fmt.Fprintln(out, "model: runtime unavailable")
-		return
-	}
 	_, _ = fmt.Fprintln(out, inputCeilingResolution{
 		ceiling: sess.runtime.Budget().InputCeiling,
 		source:  sel.ceilingSource,
