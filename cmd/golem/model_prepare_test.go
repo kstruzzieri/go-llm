@@ -73,6 +73,20 @@ func runStartupPrep(t *testing.T, configPath, root string, extra ...string) (*re
 	return captured, readRunTestFile(t, stderr)
 }
 
+// assertStartupBudget pins the budget startup PUBLISHED (the live runtime
+// snapshot every REPL reader consults) and the frozen copy the AgentFlow
+// consumers keep. The two agree at startup and diverge only after a /model
+// set, so asserting both here keeps the 5b parity statement exact.
+func assertStartupBudget(t *testing.T, sess *replSession, want agent.Budget) {
+	t.Helper()
+	if got := sess.runtime.Budget(); got != want {
+		t.Errorf("runtime budget = %+v, want %+v", got, want)
+	}
+	if sess.startupBudget != want {
+		t.Errorf("frozen startup budget = %+v, want %+v", sess.startupBudget, want)
+	}
+}
+
 // defaultPressureBand is the band -pressure-warn 75 (the flag default)
 // derives. Spelled literally so dropping the derivation is visible.
 var defaultPressureBand = agent.PressureThresholds{Watch: 0.60, Warn: 0.75, Critical: 0.90}
@@ -91,14 +105,12 @@ func TestStartupModelPreparationDerivesCeilingBudgetAndThinkDefaults(t *testing.
 		t.Errorf("a tool-capable chain produced a preflight warning:\n%s", stderrText)
 	}
 	want := agent.Budget{InputCeiling: 30_720, OutputReserve: 0, Pressure: defaultPressureBand}
-	if sess.budget != want {
-		t.Errorf("session budget = %+v, want %+v", sess.budget, want)
-	}
+	assertStartupBudget(t, sess, want)
 	if opts := sess.startupModelOptions; opts.Think != nil || opts.ThinkEffort != "" {
 		t.Errorf("startup thinking controls = %+v, want them unset", opts)
 	}
-	if wantChain := []string{"test/agent-model"}; !reflect.DeepEqual(sess.thinkChain, wantChain) {
-		t.Errorf("think chain = %v, want %v", sess.thinkChain, wantChain)
+	if wantChain := []string{"test/agent-model"}; !reflect.DeepEqual(sess.selection.chain, wantChain) {
+		t.Errorf("selection chain = %v, want %v", sess.selection.chain, wantChain)
 	}
 }
 
@@ -123,9 +135,7 @@ func TestStartupModelPreparationHonorsExplicitCeilingReserveAndPressure(t *testi
 		OutputReserve: 512,
 		Pressure:      agent.PressureThresholds{Watch: 0.60, Warn: 0.60, Critical: 0.90},
 	}
-	if sess.budget != want {
-		t.Errorf("session budget = %+v, want %+v", sess.budget, want)
-	}
+	assertStartupBudget(t, sess, want)
 	if opts := sess.startupModelOptions; opts.Think != nil || opts.ThinkEffort != "" {
 		t.Errorf("suppressed thinking left controls %+v, want them unset", opts)
 	}
@@ -165,11 +175,9 @@ func TestStartupModelPreparationUsesThePlanningUseCaseInGoalMode(t *testing.T) {
 		t.Errorf("stderr missing the derived ceiling line:\n%s", stderrText)
 	}
 	want := agent.Budget{InputCeiling: 30_720, Pressure: defaultPressureBand}
-	if sess.budget != want {
-		t.Errorf("session budget = %+v, want %+v", sess.budget, want)
-	}
-	if wantChain := []string{"test/agent-model"}; !reflect.DeepEqual(sess.thinkChain, wantChain) {
-		t.Errorf("think chain = %v, want %v", sess.thinkChain, wantChain)
+	assertStartupBudget(t, sess, want)
+	if wantChain := []string{"test/agent-model"}; !reflect.DeepEqual(sess.selection.chain, wantChain) {
+		t.Errorf("selection chain = %v, want %v", sess.selection.chain, wantChain)
 	}
 }
 
@@ -675,7 +683,7 @@ func TestStartupModelPreparationFoldsPreflightWarningsIntoTheNotices(t *testing.
 	if !strings.Contains(stderrText, "input ceiling: 30720 tokens (chain minimum)") {
 		t.Errorf("stderr missing the derived ceiling line:\n%s", stderrText)
 	}
-	if wantChain := []string{"test/agent-model", "test/weak-model"}; !reflect.DeepEqual(sess.thinkChain, wantChain) {
-		t.Errorf("think chain = %v, want %v", sess.thinkChain, wantChain)
+	if wantChain := []string{"test/agent-model", "test/weak-model"}; !reflect.DeepEqual(sess.selection.chain, wantChain) {
+		t.Errorf("selection chain = %v, want %v", sess.selection.chain, wantChain)
 	}
 }

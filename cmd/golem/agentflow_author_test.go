@@ -1236,7 +1236,7 @@ func TestRunAgentflowAuthor_UsesPlannerModelOptionsWithoutMutatingSession(t *tes
 			caller := &optionsCaptureCaller{}
 			sess := newTestSession(t, caller, root)
 			sess.startupModelOptions = tt.options
-			sess.budget = tt.budget
+			sess.startupBudget = tt.budget
 			before, err := json.Marshal(sess.startupModelOptions)
 			if err != nil {
 				t.Fatal(err)
@@ -1256,8 +1256,8 @@ func TestRunAgentflowAuthor_UsesPlannerModelOptionsWithoutMutatingSession(t *tes
 			if !bytes.Equal(after, before) {
 				t.Errorf("session options mutated: before=%s after=%s", before, after)
 			}
-			if sess.budget != tt.budget {
-				t.Errorf("session budget mutated: before=%+v after=%+v", tt.budget, sess.budget)
+			if sess.startupBudget != tt.budget {
+				t.Errorf("session budget mutated: before=%+v after=%+v", tt.budget, sess.startupBudget)
 			}
 		})
 	}

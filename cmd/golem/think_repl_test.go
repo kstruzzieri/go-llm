@@ -77,7 +77,7 @@ func newThinkSession(t *testing.T, caller agent.ModelCaller, initial provider.Mo
 	key := provider.ModelKey{Provider: "test", Model: "thinking"}
 	reg := &thinkFakeReg{byKey: map[provider.ModelKey]provider.ThinkMode{key: provider.ThinkToggle}}
 	sess.thinkModels = reg
-	sess.thinkChain = []string{"test/thinking"}
+	sess.selection = modelSelection{chain: []string{"test/thinking"}, useCase: "agent"}
 	return sess, reg
 }
 
@@ -476,8 +476,8 @@ func TestStartupWiresThinkMetadata(t *testing.T) {
 				if sess.thinkModels == nil {
 					t.Fatal("startup did not retain the model registry")
 				}
-				if len(sess.thinkChain) != 1 || sess.thinkChain[0] != "test/agent-model" {
-					t.Fatalf("think chain = %v, want [test/agent-model]", sess.thinkChain)
+				if len(sess.selection.chain) != 1 || sess.selection.chain[0] != "test/agent-model" {
+					t.Fatalf("think chain = %v, want [test/agent-model]", sess.selection.chain)
 				}
 				return errStop
 			},
@@ -524,8 +524,8 @@ func TestThinkStartupFullChainChangesWireRequest(t *testing.T) {
 	err = run([]string{"-config", configPath, "-root", root, "-no-probe", "-no-cap-probe", "-no-session", "-no-memory", "-no-rag", "-no-project-context", "-no-git-context", "-no-auto-index", "-no-editor"}, stdin, stdout, stderr, runHooks{
 		startAutoIndex: func() func() { return func() {} },
 		afterSessionReady: func(sess *replSession) error {
-			if !reflect.DeepEqual(sess.thinkChain, []string{"test/agent-model", "test/weak-model"}) {
-				t.Fatalf("startup think chain = %v, want full configured chain", sess.thinkChain)
+			if !reflect.DeepEqual(sess.selection.chain, []string{"test/agent-model", "test/weak-model"}) {
+				t.Fatalf("startup think chain = %v, want full configured chain", sess.selection.chain)
 			}
 			if sess.thinkModels == nil {
 				t.Fatal("startup registry missing")
@@ -581,7 +581,7 @@ func TestThinkREPLPreservesBufferedGoalsHistoryAndWrites(t *testing.T) {
 		}
 	}
 	sess.thinkModels = reg
-	sess.thinkChain = []string{"test/thinking"}
+	sess.selection = modelSelection{chain: []string{"test/thinking"}, useCase: "agent"}
 	sess.session.summary = &conversation.DurableSummary{Content: "prior summary", MessageCount: 2}
 	if err := sess.session.store.Save(context.Background(), conversation.Conversation{ID: sess.session.id, DurableSummary: sess.session.summary}); err != nil {
 		t.Fatal(err)
@@ -750,7 +750,7 @@ func TestThinkSurvivesMountsAndRefresh(t *testing.T) {
 			caller := &captureCaller{answer: "answer"}
 			sess, root := newRefreshSession(t, caller)
 			sess.thinkModels = &thinkFakeReg{byKey: map[provider.ModelKey]provider.ThinkMode{{Provider: "test", Model: "thinking"}: provider.ThinkToggle}}
-			sess.thinkChain = []string{"test/thinking"}
+			sess.selection = modelSelection{chain: []string{"test/thinking"}, useCase: "agent"}
 			obs, err := newObserv(os.Getenv, root, true, false, time.Now)
 			if err != nil {
 				t.Fatal(err)
@@ -827,7 +827,7 @@ func TestThinkSurvivesSessionResetCommands(t *testing.T) {
 			sess := newSessionedTestSession(t, caller, t.TempDir(), "workspace:reset-think")
 			sess.readToolCount = len(sess.tools)
 			sess.thinkModels = &thinkFakeReg{byKey: map[provider.ModelKey]provider.ThinkMode{{Provider: "test", Model: "thinking"}: provider.ThinkToggle}}
-			sess.thinkChain = []string{"test/thinking"}
+			sess.selection = modelSelection{chain: []string{"test/thinking"}, useCase: "agent"}
 			sess.grants = newApprovalGrants()
 			sess.grants.grant(grantScopeExec, "exec:test")
 			if err := sess.session.record(context.Background(), "old question", "old answer"); err != nil {

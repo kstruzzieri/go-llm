@@ -3,10 +3,12 @@ package main
 import (
 	"context"
 	"fmt"
+	"io"
 	"sort"
 	"strings"
 
 	"github.com/kstruzzieri/go-llm/agent"
+	"github.com/kstruzzieri/go-llm/config"
 	"github.com/kstruzzieri/go-llm/internal/providerbootstrap"
 	"github.com/kstruzzieri/go-llm/provider"
 )
@@ -165,4 +167,89 @@ func prepareModel(ctx context.Context, in modelPreparation) (preparedModel, erro
 		budget:      budget,
 		caller:      newActiveChainCaller(in.router, in.plan),
 	}, nil
+}
+
+// modelSelection is the CLI's private record of WHICH model this session runs
+// on (#376 M4 step 8). It is initialized at startup from exactly the values
+// startup itself used and replaced wholesale after a successful publication.
+//
+// chain is OWNED. newActiveChainCaller keeps the slice it is handed, so a
+// selection that aliased a caller's slice would let a later switch reach into
+// a live caller.
+type modelSelection struct {
+	requested     string             // the selector text: the configured role at startup, the /model set argument after a switch
+	chain         []string           // canonical chain, owned copy; empty under useRecommend
+	useCase       string             // the routing use case the chain is served under
+	useRecommend  bool               // startup recommendation mode; the first successful set clears it for good
+	ceilingSource inputCeilingSource // which rule produced the live input ceiling
+}
+
+// startupSelector is the selector text the /model status echoes before any
+// switch: the ROLE the active route resolved from, which is exactly what a
+// user would type at /model set to reproduce it. Recommendation mode and a
+// config-less run have no such role, so they report the empty string.
+func startupSelector(cfg *config.Config, route providerbootstrap.PlannedRoute) string {
+	if cfg == nil || route.Recommend || route.SuppliedByUseCase == "" {
+		return ""
+	}
+	return cfg.Defaults[route.SuppliedByUseCase]
+}
+
+// chainLine renders the /model "chain:" line. Recommendation mode names the
+// strategy rather than a head selector: calling a chain head the serving
+// model is exactly the confusion M6 forbids.
+func (s modelSelection) chainLine() string {
+	if s.useRecommend || len(s.chain) == 0 {
+		return fmt.Sprintf("model recommendation (use case: %s)", s.useCase)
+	}
+	return fmt.Sprintf("%s (strict; use case: %s)", strings.Join(s.chain, " -> "), s.useCase)
+}
+
+// modelStatusUsage is the single line every malformed /model form prints. It
+// performs no provider I/O, by construction: it is reached before anything is
+// resolved.
+const modelStatusUsage = "usage: /model [set <role|name>]"
+
+// handleModel implements /model (#376 M6). The bare form is entirely
+// read-only -- no lookup, probe, or model call -- and every other form stops
+// at the usage line before anything is resolved.
+func handleModel(out io.Writer, sess *replSession, fields []string) {
+	if len(fields) != 1 {
+		_, _ = fmt.Fprintln(out, modelStatusUsage)
+		return
+	}
+	writeModelStatus(out, sess)
+}
+
+// writeModelStatus renders the M6 status block. Each line comes from the
+// authority that owns it: the selection for the requested selector, canonical
+// chain, use case, strictness, and ceiling SOURCE; the runtime's current
+// snapshot for the ceiling VALUE and the thinking mode; and the session for
+// the last model actually routed. Reading the ceiling value from the runtime
+// rather than from a remembered resolution is what keeps the display honest
+// after a switch.
+func writeModelStatus(out io.Writer, sess *replSession) {
+	sel := sess.selection
+	requested := sel.requested
+	if requested == "" {
+		// Startup recommendation mode: no role was configured, so there is no
+		// selector text to echo.
+		requested = "none configured"
+	}
+	_, _ = fmt.Fprintf(out, "model: %s\n", requested)
+	_, _ = fmt.Fprintf(out, "chain: %s\n", sel.chainLine())
+	if sess.runtime == nil {
+		_, _ = fmt.Fprintln(out, "model: runtime unavailable")
+		return
+	}
+	_, _ = fmt.Fprintln(out, inputCeilingResolution{
+		ceiling: sess.runtime.Budget().InputCeiling,
+		source:  sel.ceilingSource,
+	}.line())
+	_, _ = fmt.Fprintln(out, formatThinkOptions(sess.runtime.ModelOptions()))
+	last := sess.lastModel
+	if last == "" {
+		last = "not yet routed"
+	}
+	_, _ = fmt.Fprintf(out, "last routed: %s\n", last)
 }

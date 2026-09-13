@@ -68,5 +68,5 @@ func handleContext(out io.Writer, sess *replSession, fields []string) {
 	} else {
 		_, _ = fmt.Fprintln(out, "context: no pressure sample for the current session")
 	}
-	_, _ = fmt.Fprintf(out, "configured input ceiling: %d tokens; explicit output reserve: %d tokens\n", sess.budget.InputCeiling, sess.budget.OutputReserve)
+	_, _ = fmt.Fprintf(out, "configured input ceiling: %d tokens; explicit output reserve: %d tokens\n", sess.runtime.Budget().InputCeiling, sess.runtime.Budget().OutputReserve)
 }

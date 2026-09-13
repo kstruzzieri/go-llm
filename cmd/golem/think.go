@@ -44,7 +44,7 @@ func handleThink(ctx context.Context, out io.Writer, sess *replSession, fields [
 		_, _ = fmt.Fprintln(out, "think: model configuration unavailable")
 		return
 	}
-	resolved, notice := resolveThinkOptions(ctx, sess.thinkModels, sess.thinkChain, resolveValue)
+	resolved, notice := resolveThinkOptions(ctx, sess.thinkModels, sess.selection.chain, resolveValue)
 	if err := ctx.Err(); err != nil {
 		_, _ = fmt.Fprintf(out, "think: %v\n", err)
 		return

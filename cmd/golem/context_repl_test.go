@@ -24,7 +24,9 @@ func TestContextCaptureAndLiteralOutput(t *testing.T) {
 	if event, seen := capture.snapshot(); seen || event != (agent.PressureEvent{}) {
 		t.Fatalf("empty snapshot = %+v, %v", event, seen)
 	}
-	sess := &replSession{runtime: &golemruntime.Runtime{}, pressure: capture, budget: agent.Budget{InputCeiling: 11024, OutputReserve: 1024}}
+	// The configured limits now come from the RUNTIME snapshot, not a REPL
+	// copy: /model set republishes the budget and the display must follow it.
+	sess := &replSession{runtime: newModelStatusRuntime(t, agent.Budget{InputCeiling: 11024, OutputReserve: 1024}, provider.ModelOptions{}), pressure: capture}
 	for _, tc := range []struct {
 		name  string
 		event agent.PressureEvent
@@ -73,7 +75,7 @@ func TestContextStepMatchesRenderer(t *testing.T) {
 		t.Fatalf("renderer = %q; want %q", got, want)
 	}
 	out.Reset()
-	dispatchSlash(t.Context(), &out, &replSession{runtime: &golemruntime.Runtime{}, pressure: capture}, "/context")
+	dispatchSlash(t.Context(), &out, &replSession{runtime: newModelStatusRuntime(t, agent.Budget{}, provider.ModelOptions{}), pressure: capture}, "/context")
 	if !strings.HasPrefix(out.String(), "context: last assembled request run-1, step 1\n") {
 		t.Fatalf("context step = %q", out.String())
 	}
@@ -304,16 +306,18 @@ func TestContextFailureBeforeRuntimePreservesSample(t *testing.T) {
 func TestContextValidation(t *testing.T) {
 	for _, tc := range []struct {
 		name, command string
-		sess          *replSession
+		sess          func(*testing.T) *replSession
 		want          string
 	}{
-		{"arguments", "/context extra", &replSession{}, "usage: /context\n"},
-		{"runtime absent", "/context", &replSession{}, "context: runtime unavailable\n"},
-		{"empty", "/context", &replSession{runtime: &golemruntime.Runtime{}, budget: agent.Budget{InputCeiling: 11024, OutputReserve: 1024}}, "context: no pressure sample for the current session\nconfigured input ceiling: 11024 tokens; explicit output reserve: 1024 tokens\n"},
+		{"arguments", "/context extra", func(*testing.T) *replSession { return &replSession{} }, "usage: /context\n"},
+		{"runtime absent", "/context", func(*testing.T) *replSession { return &replSession{} }, "context: runtime unavailable\n"},
+		{"empty", "/context", func(t *testing.T) *replSession {
+			return &replSession{runtime: newModelStatusRuntime(t, agent.Budget{InputCeiling: 11024, OutputReserve: 1024}, provider.ModelOptions{})}
+		}, "context: no pressure sample for the current session\nconfigured input ceiling: 11024 tokens; explicit output reserve: 1024 tokens\n"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var out strings.Builder
-			forced, exit := dispatchSlash(context.Background(), &out, tc.sess, tc.command)
+			forced, exit := dispatchSlash(context.Background(), &out, tc.sess(t), tc.command)
 			if out.String() != tc.want || forced != "" || exit {
 				t.Fatalf("dispatchSlash(%q) = %q, %q, %v; want %q, empty, false", tc.command, out.String(), forced, exit, tc.want)
 			}
@@ -367,7 +371,6 @@ func TestContextCompactionKeepsHistoricalSample(t *testing.T) {
 			if !automatic {
 				budget.InputCeiling = 10000
 			}
-			sess.budget = budget
 			installCompactRuntime(t, sess, golemruntime.Options{Budget: budget, Summarizer: func(context.Context, string, []conversation.Message) (string, error) { calls++; return "SUM", nil }})
 			if _, err := runOnce(t.Context(), io.Discard, nil, sess, "goal", nil); err != nil {
 				t.Fatal(err)

@@ -1480,7 +1480,7 @@ func runAgentflowAuthorWithClient(ctx context.Context, stdout, stderr io.Writer,
 		System:   system,
 		Tools:    planTools,
 		MaxSteps: sess.maxSteps,
-		Budget:   plannerBudget(sess.budget, plannerOpts, config.UseCasePlanning),
+		Budget:   plannerBudget(sess.startupBudget, plannerOpts, config.UseCasePlanning),
 		Options:  plannerOpts,
 		Approver: &authorPlanApprover{delegate: approver, sess: as},
 	}
