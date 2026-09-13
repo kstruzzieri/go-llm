@@ -25,7 +25,11 @@ the runtime seam; `golem.Turn.Advisory` carries one staged receipt.
   interceptor chain refuses a staged advisory at step 0
   (`agent.ErrAdvisoryBlocked`). The arm matches that sentinel alone: every
   other interceptor refusal (canary, secrets) still reports `internal`, and
-  reclassifying those is deferred.
+  reclassifying those is deferred. A step-0 refusal also **drops** the staged
+  advisory rather than retaining it, with a notice naming the consultant: the
+  refusal is deterministic in the staged bytes, so keeping the slot would fail
+  every later goal identically. Every other failure, and a clean turn that
+  produced no answer, still retains it.
 - Consultant traffic is the vendor process's own and bypasses
   `-allow-destination`; the config field `trusted_process_egress: true` is an
   explicit acknowledgement, not a filter.
@@ -34,7 +38,8 @@ the runtime seam; `golem.Turn.Advisory` carries one staged receipt.
   fails before any prompt is sent.
 - The consultant `command` must be an absolute path to a regular file whose
   path traverses no symlink (Homebrew shims and `/usr/local/bin` links must be
-  given as their resolved target). An optional `sha256` is re-verified
-  immediately before exec.
+  given as their resolved target) and that is not group- or world-writable —
+  a digest pin over a file the group can replace pins nothing. An optional
+  `sha256` is re-verified immediately before exec.
 - Unix only: the runner depends on `Setpgid` and negative-PID process-group
   signalling, so a consult on Windows fails with `unsupported-platform`.

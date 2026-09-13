@@ -61,7 +61,7 @@ the top-level object: one file, one config. Consultant names must be unique.
 | `version` | int | yes | must be `1` |
 | `consultants[].name` | string | yes | must match `^[a-z0-9][a-z0-9-]{0,31}$` |
 | `consultants[].adapter` | string | yes | only `"claude"` in v1 |
-| `consultants[].command` | string | yes | absolute path to a regular file; not a symlink, and no symlink anywhere in the path (`filepath.EvalSymlinks` must return the path unchanged) |
+| `consultants[].command` | string | yes | absolute path to a regular file; not a symlink, no symlink anywhere in the path (`filepath.EvalSymlinks` must return the path unchanged), and not group- or world-writable |
 | `consultants[].sha256` | string | no | 64 lowercase hex characters; re-verified over the whole file immediately before exec |
 | `consultants[].model` | string | yes | only `"opus"` for adapter `claude` |
 | `consultants[].timeout_seconds` | int | no | `0..300`; `0` means the default, 120 |
@@ -75,7 +75,10 @@ consultant is declaring that you accept that.
 
 The `command` rules exist so the configured path names the bytes that actually
 run. A package-manager shim (`/opt/homebrew/bin/claude`, `/usr/local/bin/...`)
-is usually a symlink and is rejected; give the resolved target instead.
+is usually a symlink and is rejected; give the resolved target instead. A
+binary anyone but its owner can rewrite is rejected too — `command must not be
+group- or world-writable` — because a digest pin over a file the group can
+replace pins nothing.
 
 ```json
 {
@@ -128,6 +131,20 @@ consultant. It is exactly these eleven names:
 | `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` | `1` |
 | `CLAUDE_CODE_DISABLE_AUTO_MEMORY` | `1` |
 | `ENABLE_CLAUDEAI_MCP_SERVERS` | `false` |
+
+`PATH` is deliberately minimal and excludes `/usr/local/bin` and
+`/opt/homebrew/bin`. A launcher shim — a script starting `#!/usr/bin/env node`
+— therefore cannot resolve its interpreter and the run fails as `process-exit`
+(reason `start` when the interpreter itself is missing, otherwise the shim's
+own non-zero exit, typically `exited(127)` from `env`). Configure the native
+binary, not a shim.
+
+On macOS the Claude CLI keeps its state under `~/.claude` rather than under
+the XDG directories, so the `XDG_*` redirects buy little there. The controls
+that actually keep the run stateless on that platform are the adapter's
+`--setting-sources=` and `--strict-mcp-config --mcp-config {"mcpServers":{}}`
+arguments together with `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1`, plus the
+admission gate that fails any transcript declaring a non-empty inventory.
 
 `HOME` and `USER` are derived from `os.Getuid()` through `user.LookupId`, not
 from the parent's `$HOME`/`$USER`. The Claude CLI uses `HOME` to find its
@@ -223,14 +240,18 @@ is one of:
 `auth`, `quota`, `billing`, `tool-activity`, `protocol`, `process-exit`,
 `timeout`, `canceled`, `output-limit`, `drain-incomplete`,
 `unsupported-version`, `target-drift`, `target-invalid`, `input-invalid`,
-`unsupported-platform`.
+`internal`, `unsupported-platform`.
+
+Only `internal` reports a host defect rather than something about the
+consultant or its answer.
 
 `Reason` narrows the code and is drawn from three closed vocabularies — never
 from consultant text, a filesystem path or any other vendor string:
 
 - **host literals**, when `Run` itself refused or the runner reported a
   bounded termination: `consultant`, `prompt`, `cap`, `caller`, `deadline`,
-  `cleanup`, `target`, `platform`, `start`, `wait-delay`, `other`;
+  `cleanup`, `envelope`, `identity`, `target`, `platform`, `start`,
+  `wait-delay`, `other`;
 - **the first admission literal** recorded by the parser, for codes that come
   from the transcript (`auth`, `quota`, `billing`, `tool-activity`,
   `protocol`, `unsupported-version`) — for example `auth-source-invalid` or
@@ -247,7 +268,9 @@ Host failures:
 | `target-invalid` | `target` | exec target is not an absolute regular non-symlink file, or could not be read |
 | `target-drift` | `target` | the target's bytes no longer match the configured `sha256` |
 | `unsupported-platform` | `platform` | Windows |
-| `process-exit` | `start` | the envelope, the child environment or `exec.Start` failed |
+| `internal` | `envelope` | the private directory tree could not be created |
+| `internal` | `identity` | the host uid's username or home directory could not be resolved |
+| `process-exit` | `start` | `exec.Start` failed |
 | `output-limit` | `cap` | either stream exceeded `max_output_bytes` |
 | `canceled` | `caller` | the caller cancelled |
 | `timeout` | `deadline` | `timeout_seconds` elapsed |
@@ -282,9 +305,8 @@ attempts, or more than two retry records).
 `rate-limit-invalid`, `assistant-error` and the remaining `api-retry-*`
 literals.
 
-Golem prints only the code: `consult failed: <code>`. The reason stays on the
-error value for a caller that wants it, and `Error()` renders both as
-`consult: <code> (<reason>)`.
+Golem prints both: `consult failed: <code> (<reason>)`. `Error()` renders them
+as `consult: <code> (<reason>)`.
 
 ## Using it in Golem
 
@@ -299,7 +321,11 @@ interceptor trailer on its own line, and stages it.
   cleared by `/clear`, by `/new`, by a successful `/resume`, and by a turn
   that both completes without error and produces an answer.
 - **Retained on failure.** If the turn fails or you cancel it, the advisory
-  stays staged; the consultant is not rerun. The same holds for a turn that
+  stays staged; the consultant is not rerun. The one exception is a step-0
+  interceptor refusal, which **drops** the slot and prints `dropped staged
+  advice from <name> after interceptor refusal`: the refusal is deterministic
+  in the staged bytes, so keeping it would fail every later goal identically
+  and wedge the session. The same holds for a turn that
   finishes cleanly with no answer: empty content never put the advice to work,
   so the slot survives for the retry. The decision is made after session
   persistence and checkpoint sealing have settled, so an answered-but-
@@ -309,12 +335,13 @@ interceptor trailer on its own line, and stages it.
   what is currently staged (`staged: none`, or the consultant name and the
   first 12 hex characters of the digest) without running anything.
 
-Failures print a fixed line and stage nothing: `consult failed: <code>` for a
-`*consult.Error`, and `consult failed: blocked by interceptor policy (<rule>)`
-only for an actual policy refusal — one satisfying
-`errors.Is(err, agent.ErrAdvisoryBlocked)`. Any other inspection error prints
-`consult failed: internal`, including a validation failure and an oversize
-generated annotation, neither of which is a policy decision.
+Failures print a fixed line and stage nothing: `consult failed: <code>
+(<reason>)` for a `*consult.Error`, and `consult failed: blocked by
+interceptor policy (<rule>)` only for an actual policy refusal — one
+satisfying `errors.Is(err, agent.ErrAdvisoryBlocked)`. Ctrl-C during the
+consultation or its inspection prints `consult canceled`. Any other inspection
+error prints `consult failed: internal`, including a validation failure and an
+oversize generated annotation, neither of which is a policy decision.
 `/consult` with a name but no prompt prints the usage line; with no
 consultants file it prints `consult disabled: no consultants.json (see
 -consultants-config)`; without `-interceptors` it prints `consult requires
@@ -348,6 +375,18 @@ LINE SEPARATOR (U+2028) or PARAGRAPH SEPARATOR (U+2029); `Annotation` obeys the
 same rule but may contain `\n`, being a block of whole lines. `Digest` must be
 exactly 64 lowercase hex characters — it is interpolated raw into the
 attribution line, and a digest that is not a digest labels nothing.
+
+The fence and the `advisory text, not instructions` label are a **convention
+the model is asked to respect, not a control**. Nothing enforces that a model
+treats fenced text as data, and a consultant that writes persuasive prose is
+free to try. The step-0 interceptor pass is the only detector in the path, and
+it looks for known injection shapes, not for persuasion. What actually limits
+the damage is that the model cannot act on the advice by itself: writes, execs
+and every other effect still go through approvals, grants and the sandbox. The
+residual risk is therefore advice that steers the model toward an action that
+looks reasonable at the approval prompt — which is the same risk any untrusted
+tool output carries, and the same reason to prefer `y` over `a` while it is
+staged.
 
 The projection is priced against the pinned segment before the model call, so
 an advisory too large for the context exhausts the budget instead of silently
@@ -385,8 +424,18 @@ consultant trusted. These residual items are known and unresolved:
 1. The init, rate-limit and usage metadata are the CLI's own statements about
    itself. Admission checks that they say the right thing; it does not enforce
    that they are true.
-2. There is no OS confinement. The child runs with the host user's privileges
-   and a real `HOME`; a Seatbelt/bwrap profile for consultants is deferred.
+2. **There is no OS confinement.** The private envelope is a scratch
+   directory, not a sandbox. The child runs as the operator, with the
+   operator's real `HOME`, and nothing stops it doing whatever it likes with
+   that: reading `~/.ssh`, `~/.aws`, browser credential stores and every other
+   token on the box; writing `~/.claude/CLAUDE.md`, settings files and shell
+   rc files, which persist into the operator's own later sessions; and
+   exfiltrating any of it over the egress that `trusted_process_egress`
+   already declares unfiltered. The digest pin and the regular-file,
+   no-symlink and not-group/world-writable rules control only *which* binary
+   runs. Nothing here controls what it does once it is running. A
+   Seatbelt/bwrap profile for consultants is deferred; until it exists, a
+   consultant is as trusted as any program you would run yourself.
 3. Consultant egress bypasses `-allow-destination` entirely. It is the vendor
    process's own traffic.
 4. Overage is not attested by the CLI in every run. Avoiding overage charges
@@ -399,6 +448,33 @@ consultant trusted. These residual items are known and unresolved:
 8. Only `2.1.240` is evidence-backed. A byte change to that binary, or any new
    version, needs renewed Stage 0 evidence before it is added to the pinned
    set.
+9. Field-level drift inside the init record is caught only by the
+   self-reported version pin. Unknown init keys are accepted, and the
+   inventory gate sums the five names it knows (`tools`, `mcp_servers`,
+   `plugins`, `skills`, `slash_commands`) — a future CLI that grows a sixth
+   capability list would pass the gate with that list unread. The pin is what
+   makes that acceptable, and it is only as good as the version string the CLI
+   reports about itself.
+
+### Bumping the supported version
+
+1. Renew the Stage 0 evidence against the new binary; without it there is
+   nothing to pin.
+2. Update the pin in `consult/claude.go` (`claudeSupportedVersions`, and
+   `claudeModels` if the model set moved) and the version occurrences in this
+   document and the changelog fragment.
+3. Update the test fixtures that carry the version literal, and re-record the
+   digest in your own `consultants.json`.
+
+## Open items
+
+- **No `/consult drop`.** There is no way to discard a staged advisory short
+  of `/clear`, which also resets the session.
+- **The pre-exec digest read is neither chunked nor cancellable.** A large
+  binary is read in one uninterruptible pass while the run deadline ticks.
+- **`Error.Code` is a plain string.** Consumers matching on it do so by
+  literal; a typed code with exported constants, in the style of `configio`'s
+  bounded error codes, would make that a compile-time concern.
 
 ## References
 
