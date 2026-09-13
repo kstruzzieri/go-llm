@@ -177,12 +177,15 @@ type CompactionReport struct {
 	Changed      bool
 }
 
-// turnSnapshot is the immutable {System, Tools, ModelOptions} value a
-// reserved turn holds (#372). Replace publishes a new pointer.
+// turnSnapshot is the immutable {System, Tools, ModelOptions, Orchestrator,
+// Budget} value a reserved turn holds (#372, #376). Replace and
+// ReplaceConfiguration publish a new pointer; a reserved turn never rereads it.
 type turnSnapshot struct {
 	system       string
 	tools        []agent.Tool
 	modelOptions provider.ModelOptions
+	orchestrator *agent.Orchestrator
+	budget       agent.Budget
 }
 
 // Event is the versioned consumer event envelope. A run that stops early
@@ -211,15 +214,14 @@ type activeRun struct {
 
 // Runtime is a concrete facade over agent.Orchestrator.
 type Runtime struct {
-	orchestrator *agent.Orchestrator
-	root         string
+	root string
 	// fileTools is the runtime-owned prefix, immutable after New. snap is
-	// the current {System, Tools, ModelOptions} value, guarded by mu:
-	// reserve reads it, Replace swaps it (#372).
+	// the current {System, Tools, ModelOptions, Orchestrator, Budget} value,
+	// guarded by mu: reserve reads it, Replace and ReplaceConfiguration swap
+	// it (#372, #376).
 	fileTools       []agent.Tool
 	snap            *turnSnapshot
 	maxSteps        int
-	budget          agent.Budget
 	maxMessageBytes int
 	summarizer      conversation.Summarizer
 	compress        bool
@@ -291,12 +293,10 @@ func New(ctx context.Context, opts Options) (*Runtime, error) {
 		sessions = &threadStore{store: opts.SessionStore}
 	}
 	return &Runtime{
-		orchestrator:    orchestrator,
 		root:            root,
 		fileTools:       fileTools,
-		snap:            &turnSnapshot{system: opts.System, tools: tools, modelOptions: opts.ModelOptions.Clone()},
+		snap:            &turnSnapshot{system: opts.System, tools: tools, modelOptions: opts.ModelOptions.Clone(), orchestrator: orchestrator, budget: opts.Budget},
 		maxSteps:        opts.MaxSteps,
-		budget:          opts.Budget,
 		maxMessageBytes: maxMessage,
 		summarizer:      summarizer,
 		compress:        !opts.DisableCompression && summarizer != nil,
@@ -463,7 +463,7 @@ func (r *Runtime) Run(ctx context.Context, turn Turn, sink EventSink) (agent.Res
 		System:   turnSystem(snap.system, turn.Instructions),
 		Tools:    snap.tools,
 		MaxSteps: r.maxSteps,
-		Budget:   r.budget,
+		Budget:   snap.budget,
 		Approver: turn.Approver,
 		Options:  snap.modelOptions.Clone(),
 		// The thread id is the conversation's stable identity, so every turn
@@ -475,7 +475,7 @@ func (r *Runtime) Run(ctx context.Context, turn Turn, sink EventSink) (agent.Res
 		request.History = thread.history()
 		request.HistorySummary = thread.summary()
 	}
-	result, err := r.orchestrator.Run(runCtx, request, observer)
+	result, err := snap.orchestrator.Run(runCtx, request, observer)
 	if !r.retainReasoning {
 		scrubReasoning(&result)
 	}
@@ -490,7 +490,7 @@ func (r *Runtime) Run(ctx context.Context, turn Turn, sink EventSink) (agent.Res
 		return result, finish(eventType, payload, err)
 	}
 	if thread != nil && result.Answer != "" {
-		if err := r.saveThread(runCtx, active, thread, turn.Message, result); err != nil {
+		if err := r.saveThread(runCtx, active, snap.budget, thread, turn.Message, result); err != nil {
 			err = fmt.Errorf("%w: %w", ErrSessionPersistence, err)
 			eventType, payload := r.terminalFailure(err)
 			return result, finish(eventType, payload, err)
@@ -709,9 +709,12 @@ func (r *Runtime) Cancel(runID string) bool {
 // The variadic signature preserves direct two-argument calls, but interfaces and
 // explicitly typed functions using the old signature must be updated.
 //
-// Replace never touches the orchestrator: an orchestrator option that names
-// a tool (agent.WithToolInvocationLimit) still requires that tool in every
-// replacement.
+// Replace changes no orchestrator and no budget: it preserves whichever pair
+// is current at publication, after tool validation, exactly as it preserves
+// omitted options — including when another replacement lands while this call
+// is validating. An orchestrator option that names a tool
+// (agent.WithToolInvocationLimit) therefore still requires that tool in every
+// replacement. Use ReplaceConfiguration to change the whole tuple at once.
 func (r *Runtime) Replace(system string, tools []agent.Tool, modelOptions ...provider.ModelOptions) error {
 	r.mu.Lock()
 	closed := r.closed
@@ -741,12 +744,114 @@ func (r *Runtime) Replace(system string, tools []agent.Tool, modelOptions ...pro
 	if validationErr != nil {
 		return validationErr
 	}
-	options := r.snap.modelOptions
+	current := r.snap
+	options := current.modelOptions
 	if len(modelOptions) == 1 {
 		options = modelOptions[0].Clone()
 	}
-	r.snap = &turnSnapshot{system: system, tools: combined, modelOptions: options}
+	r.snap = &turnSnapshot{
+		system:       system,
+		tools:        combined,
+		modelOptions: options,
+		orchestrator: current.orchestrator,
+		budget:       current.budget,
+	}
 	return nil
+}
+
+// Configuration is the complete execution tuple a Runtime publishes as one
+// snapshot. Every field is replaced together: ReplaceConfiguration is not a
+// field merge, so a zero field installs that zero value.
+type Configuration struct {
+	// System is the application prompt, with Options.System's meaning: empty
+	// selects SystemPrompt(false, false).
+	System string
+	// Tools are the EXTRA tools, with Options.Tools' meaning. The runtime's own
+	// file tools (over its ScopeGuard-bound workspace) always precede them and
+	// are never replaced.
+	Tools        []agent.Tool
+	ModelOptions provider.ModelOptions
+	// Orchestrator is required and stays caller-owned: publishing a new one
+	// neither closes the previous one nor its providers, which runs already
+	// reserved keep using to completion.
+	Orchestrator *agent.Orchestrator
+	// Budget governs assembly for every turn reserved after publication, and
+	// the automatic history compression those turns perform.
+	Budget agent.Budget
+}
+
+// ReplaceConfiguration atomically installs one complete Configuration for every
+// turn reserved after it returns. A turn reserved before it keeps its whole
+// tuple — system, tools, options, orchestrator, and budget — for all of its
+// steps, so no run ever observes a mixed configuration. Reservation is the
+// linearization point, exactly as for Replace.
+//
+// Validation matches New and Replace (nil tool, empty name, duplicate name —
+// including against the runtime's own file tools) and additionally rejects a
+// nil Orchestrator with ErrInvalidRequest. Nothing is installed on failure.
+// ErrClosed takes precedence over every other error, including when Close
+// completes while validation is running. ctx is checked at entry and again
+// under the publication lock after validation, so a cancellation raised while
+// Tool.Spec runs installs nothing either. Tool.Spec is never called while the
+// runtime lock is held, and this method performs no provider I/O.
+//
+// The tool and option values are copied; callers must not mutate the supplied
+// slices concurrently with this call reading them. Safe for concurrent use with
+// Run, Cancel, Close, Replace, and other ReplaceConfiguration calls.
+func (r *Runtime) ReplaceConfiguration(ctx context.Context, cfg Configuration) error {
+	r.mu.Lock()
+	closed := r.closed
+	r.mu.Unlock()
+	if closed {
+		return ErrClosed
+	}
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("golem: replace configuration: %w", err)
+	}
+	system := cfg.System
+	if system == "" {
+		system = SystemPrompt(false, false)
+	}
+	// Validation calls external Tool.Spec implementations, so it runs
+	// unlocked; its error is retained until the closed state is rechecked.
+	combined := make([]agent.Tool, 0, len(r.fileTools)+len(cfg.Tools))
+	combined = append(combined, r.fileTools...)
+	combined = append(combined, cfg.Tools...)
+	var validationErr error
+	if cfg.Orchestrator == nil {
+		validationErr = fmt.Errorf("%w: orchestrator is required", ErrInvalidRequest)
+	} else {
+		validationErr = validateTools(combined)
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.closed {
+		return ErrClosed
+	}
+	if validationErr != nil {
+		return validationErr
+	}
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("golem: replace configuration: %w", err)
+	}
+	r.snap = &turnSnapshot{
+		system:       system,
+		tools:        combined,
+		modelOptions: cfg.ModelOptions.Clone(),
+		orchestrator: cfg.Orchestrator,
+		budget:       cfg.Budget,
+	}
+	return nil
+}
+
+// Budget returns the current run budget, including after Close — the same
+// access convention as ModelOptions. agent.Budget is a plain value, so the
+// result is independent of the runtime. Safe for concurrent use with Run,
+// Replace, and ReplaceConfiguration.
+func (r *Runtime) Budget() agent.Budget {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.snap.budget
 }
 
 // ModelOptions returns an independent copy of the current options, including
@@ -757,9 +862,10 @@ func (r *Runtime) ModelOptions() provider.ModelOptions {
 	return r.snap.modelOptions.Clone()
 }
 
-// reserve registers the run and fixes its {System, Tools, ModelOptions}
-// snapshot in the same critical section that makes it visible to Cancel
-// and Close, so Replace and reservation are linearizable (#372).
+// reserve registers the run and fixes its complete {System, Tools,
+// ModelOptions, Orchestrator, Budget} snapshot in the same critical section
+// that makes it visible to Cancel and Close, so publication and reservation
+// are linearizable (#372, #376).
 func (r *Runtime) reserve(turn Turn, cancel context.CancelFunc) (*activeRun, *turnSnapshot, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()

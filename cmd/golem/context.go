@@ -68,5 +68,8 @@ func handleContext(out io.Writer, sess *replSession, fields []string) {
 	} else {
 		_, _ = fmt.Fprintln(out, "context: no pressure sample for the current session")
 	}
-	_, _ = fmt.Fprintf(out, "configured input ceiling: %d tokens; explicit output reserve: %d tokens\n", sess.budget.InputCeiling, sess.budget.OutputReserve)
+	// One read of the live snapshot: the configured limits shown are the ones
+	// the next turn will actually reserve, and /model set republishes them.
+	budget := sess.runtime.Budget()
+	_, _ = fmt.Fprintf(out, "configured input ceiling: %d tokens; explicit output reserve: %d tokens\n", budget.InputCeiling, budget.OutputReserve)
 }

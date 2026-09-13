@@ -124,23 +124,38 @@ func (m *DestinationManifest) lookup(purpose, provider string) (Destination, boo
 	return e.Destination, ok
 }
 
-// destinationSnapshot is one immutable admission generation: the manifest
-// plus the policy that admitted every edge in it. Install validates the pair,
-// so holding a snapshot IS the proof that each edge was granted — Bind never
-// re-checks the policy.
+// destRevocationToken is the private identity of one REVOCATION generation.
+// Pointer identity of a token is what authorization compares, so a token must
+// never be forgeable or accidentally shared: it is allocated fresh per
+// revoking publication and never handed outside this package. It is one byte
+// rather than an empty struct because distinct zero-size allocations may
+// share an address, which would make two generations indistinguishable.
+type destRevocationToken byte
+
+// destinationSnapshot is one immutable admission generation: the manifest,
+// the policy that admitted every edge in it, and the revocation token that
+// capabilities issued from it carry. Install validates the pair, so holding a
+// snapshot IS the proof that each edge was granted — Bind never re-checks the
+// policy.
+//
+// Install and Narrow mint a fresh token, which revokes every outstanding
+// capability. Extend keeps the current token, because it only adds edges: the
+// preserved ones are still exactly as admitted.
 type destinationSnapshot struct {
 	manifest *DestinationManifest
 	policy   DestinationPolicy
+	token    *destRevocationToken
 }
 
 // destinationCapability is the opaque value Bind writes into a context. It
 // is unexported and keyed by an unexported type, so no other package can
 // forge one — a capability exists only because the snapshot that issued it
-// verified the edge. Pointer identity of snap is the generation check: after
-// Clear or a re-Install the gate holds a different snapshot pointer, and
-// every capability issued before it stops authorizing.
+// verified the edge. The token is the generation check: after Clear, a
+// re-Install, or a Narrow the gate holds a different token, and every
+// capability issued before it stops authorizing; after an additive Extend the
+// token is unchanged, so those capabilities keep working.
 type destinationCapability struct {
-	snap     *destinationSnapshot
+	token    *destRevocationToken
 	purpose  string
 	provider string
 	dest     Destination
@@ -157,10 +172,15 @@ func capabilityFromContext(ctx context.Context) *destinationCapability {
 
 // DestinationGate is the stable object every guarded transport holds. It
 // starts deny-all and swaps immutable snapshots atomically: Install puts a
-// validated generation in place, Clear revokes by installing nothing, and
-// outstanding capabilities die with the snapshot that issued them. The gate
-// is the ONE mutable cell in the admission design; everything it points to
-// is immutable.
+// validated generation in place, Narrow derives a subset, Clear revokes by
+// installing nothing, and outstanding capabilities die with the revocation
+// token those three replace. Extend is the one additive publication — it
+// keeps the token, so adding edges never revokes. The gate is the ONE mutable
+// cell in the admission design; everything it points to is immutable.
+//
+// A gate must not be copied after first use: it owns atomic state, and a copy
+// would carry a duplicate of the current snapshot pointer rather than share
+// the cell every guarded transport reads.
 type DestinationGate struct {
 	snap atomic.Pointer[destinationSnapshot]
 }
@@ -176,6 +196,10 @@ func NewDestinationGate() *DestinationGate {
 // ungranted edge it returns a DestinationDeniedError naming the first denied
 // edge in deterministic order — the destination plus the purpose that reached
 // it, which is what a user needs to fix an -allow-destination invocation.
+//
+// A successful Install mints a fresh revocation token, so capabilities from
+// the previous generation stop authorizing even when the new manifest repeats
+// their edges. Re-admitting the same edges is still a new consent decision.
 func (g *DestinationGate) Install(policy DestinationPolicy, manifest *DestinationManifest) error {
 	g.snap.Store(nil)
 	if manifest == nil {
@@ -186,13 +210,14 @@ func (g *DestinationGate) Install(policy DestinationPolicy, manifest *Destinatio
 			return &DestinationDeniedError{Destination: e.Destination, Purpose: e.Purpose}
 		}
 	}
-	g.snap.Store(&destinationSnapshot{manifest: manifest, policy: policy})
+	g.snap.Store(&destinationSnapshot{manifest: manifest, policy: policy, token: new(destRevocationToken)})
 	return nil
 }
 
-// Clear atomically revokes the current generation. Every outstanding
-// capability was issued by the removed snapshot and stops authorizing at
-// once; requests already inside a provider call are not cancelled.
+// Clear atomically revokes the current generation. The removed snapshot took
+// its revocation token with it, so every outstanding capability stops
+// authorizing at once; requests already inside a provider call are not
+// cancelled.
 func (g *DestinationGate) Clear() {
 	g.snap.Store(nil)
 }
@@ -203,8 +228,9 @@ func (g *DestinationGate) Clear() {
 // candidate envelope to the selected backend). The policy carries over
 // unchanged. Narrowing an uninstalled gate is an error, not a silent deny-all.
 //
-// Like any generation change, Narrow invalidates capabilities issued by the
-// previous snapshot — including ones for edges that were KEPT. A request that
+// Like any revoking generation change, Narrow mints a fresh token and so
+// invalidates capabilities issued by the previous snapshot — including ones
+// for edges that were KEPT (unlike Extend, which preserves them). A request that
 // bound before the narrow and authorizes after it denies transiently; that is
 // the fail-closed direction, and in the required ordering Narrow runs in the
 // quiet window between discovery and the first refresh, where no route
@@ -229,8 +255,60 @@ func (g *DestinationGate) Narrow(keep func(DestinationEdge) bool) error {
 	// the newer generation with data derived from the older one — after a
 	// Clear that is resurrected authority the user just revoked. On loss the
 	// gate is left exactly as the concurrent writer set it.
-	if !g.snap.CompareAndSwap(cur, &destinationSnapshot{manifest: m, policy: cur.policy}) {
+	if !g.snap.CompareAndSwap(cur, &destinationSnapshot{manifest: m, policy: cur.policy, token: new(destRevocationToken)}) {
 		return fmt.Errorf("%w: narrow lost to a concurrent generation change", ErrDestinationInvalid)
+	}
+	return nil
+}
+
+// Extend publishes an ADDITIVE generation: manifest must contain every
+// current edge with its destination unchanged, and policy must grant every
+// edge in it. Removals and retargeting are rejected, because this is the
+// consent primitive for "the session also needs these destinations" (#376
+// model switching), not a way to re-point an existing grant.
+//
+// Unlike Install and Narrow, Extend is not a revocation: it keeps the current
+// generation's revocation token, so capabilities already issued for the
+// preserved edges keep authorizing and an in-flight request is not killed by
+// a model switch. Failed validation publishes nothing and leaves the current
+// generation untouched.
+func (g *DestinationGate) Extend(policy DestinationPolicy, manifest *DestinationManifest) error {
+	return g.extendFrom(g.snap.Load(), policy, manifest)
+}
+
+// extendFrom validates and publishes an extension of one specific base
+// generation: the snapshot it checks the superset property against is the
+// snapshot it compare-and-swaps, so consent is never applied to a generation
+// it was not derived from. Naming that base explicitly also lets a white-box
+// test drive the load/CAS interleaving without a timing race.
+func (g *DestinationGate) extendFrom(cur *destinationSnapshot, policy DestinationPolicy, manifest *DestinationManifest) error {
+	if manifest == nil {
+		return fmt.Errorf("%w: nil manifest", ErrDestinationInvalid)
+	}
+	if cur == nil {
+		return fmt.Errorf("%w: extend on a gate with no installed generation", ErrDestinationInvalid)
+	}
+	for _, e := range cur.manifest.sorted {
+		next, ok := manifest.edges[destEdgeKey{purpose: e.Purpose, provider: e.Destination.Provider()}]
+		if !ok {
+			return fmt.Errorf("%w: extension drops edge %q -> %s", ErrDestinationInvalid, e.Purpose, e.Destination)
+		}
+		if next.Destination != e.Destination {
+			return fmt.Errorf("%w: extension retargets edge %q from %s to %s", ErrDestinationInvalid, e.Purpose, e.Destination, next.Destination)
+		}
+	}
+	for _, e := range manifest.sorted {
+		if !policy.Permits(e.Destination) {
+			return &DestinationDeniedError{Destination: e.Destination, Purpose: e.Purpose}
+		}
+	}
+	// Compare-and-swap for the same reason Narrow uses one: a Clear, Install,
+	// Narrow, or competing Extend that landed since the load above must win.
+	// Storing would overwrite it with a generation derived from stale consent
+	// — after a Clear, that is resurrected authority. There is no retry: the
+	// caller must re-read and re-consent.
+	if !g.snap.CompareAndSwap(cur, &destinationSnapshot{manifest: manifest, policy: policy, token: cur.token}) {
+		return fmt.Errorf("%w: extend lost to a concurrent generation change", ErrDestinationInvalid)
 	}
 	return nil
 }
@@ -253,7 +331,7 @@ func (g *DestinationGate) Bind(ctx context.Context, purpose, provider string) (c
 		return nil, &DestinationDeniedError{Provider: provider, Purpose: purpose}
 	}
 	return context.WithValue(ctx, destCapabilityCtxKey{}, &destinationCapability{
-		snap:     snap,
+		token:    snap.token,
 		purpose:  purpose,
 		provider: provider,
 		dest:     dest,
@@ -261,16 +339,20 @@ func (g *DestinationGate) Bind(ctx context.Context, purpose, provider string) (c
 }
 
 // authorize is the transport-side check: the context must carry a capability
-// issued by THIS gate's current snapshot, bound to exactly this provider and
-// destination. String equality is never enough — a capability from another
-// gate, or from a generation since cleared, names the same strings and still
-// denies, because authority is the snapshot's, not the values'.
+// carrying THIS gate's current revocation token, bound to exactly this
+// provider and destination. String equality is never enough — a capability
+// from another gate, or from a revoked generation, names the same strings and
+// still denies, because authority is the token's, not the values'. A token is
+// private to one gate's generation, so it needs no gate back-pointer; a
+// capability with no token (a zero value that never came from Bind) fails
+// closed here rather than matching anything.
 func (g *DestinationGate) authorize(ctx context.Context, provider string, dest Destination) error {
 	cap := capabilityFromContext(ctx)
 	if cap == nil {
 		return &DestinationDeniedError{Provider: provider, Destination: dest}
 	}
-	if cap.snap != g.snap.Load() {
+	snap := g.snap.Load()
+	if snap == nil || cap.token == nil || cap.token != snap.token {
 		return &DestinationDeniedError{Provider: provider, Destination: dest, Purpose: cap.purpose}
 	}
 	if cap.provider != provider || cap.dest != dest {

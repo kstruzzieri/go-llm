@@ -44,7 +44,7 @@ func handleThink(ctx context.Context, out io.Writer, sess *replSession, fields [
 		_, _ = fmt.Fprintln(out, "think: model configuration unavailable")
 		return
 	}
-	resolved, notice := resolveThinkOptions(ctx, sess.thinkModels, sess.thinkChain, resolveValue)
+	resolved, notice := resolveThinkOptions(ctx, sess.thinkModels, sess.selection.chain, resolveValue)
 	if err := ctx.Err(); err != nil {
 		_, _ = fmt.Fprintf(out, "think: %v\n", err)
 		return
@@ -54,9 +54,7 @@ func handleThink(ctx context.Context, out io.Writer, sess *replSession, fields [
 		return
 	}
 	current := sess.runtime.ModelOptions()
-	candidate := current
-	candidate.Think = resolved.Think
-	candidate.ThinkEffort = resolved.ThinkEffort
+	candidate := applyThinkOptions(current, resolved)
 	if sameThinkOptions(current, candidate) {
 		_, _ = fmt.Fprintln(out, formatThinkOptions(candidate))
 		return
@@ -108,6 +106,40 @@ func thinkModelOptions(v string) provider.ModelOptions {
 		on := true
 		return provider.ModelOptions{Think: &on, ThinkEffort: v}
 	}
+}
+
+// thinkFlagValue is the inverse of thinkModelOptions: it maps ACCEPTED model
+// options back to the resolver input that would produce them, so a chain
+// change can re-gate the thinking state the session actually runs with
+// instead of the startup -think flag (#376 M4 step 4). A value the user asked
+// for but that was never accepted -- suppressed by an all-ThinkNone chain, or
+// simply never set -- leaves no trace in the options, so it can never be
+// resurrected here.
+//
+// The branch order is formatThinkOptions': explicit false outranks an effort
+// hint. The two are kept in step by construction rather than by parsing that
+// function's display string.
+func thinkFlagValue(opts provider.ModelOptions) string {
+	if opts.Think != nil && !*opts.Think {
+		return "off"
+	}
+	if opts.ThinkEffort != "" {
+		return opts.ThinkEffort // an accepted effort: low, medium, or high
+	}
+	if opts.Think != nil {
+		return "on"
+	}
+	return ""
+}
+
+// applyThinkOptions returns current with ONLY the resolved thinking controls
+// replaced. Everything else the options carry -- temperature, num_ctx, stop
+// sequences -- belongs to the session, not to the thinking gate, so a
+// re-resolution must never overwrite it with the gate's zero value.
+func applyThinkOptions(current, resolved provider.ModelOptions) provider.ModelOptions {
+	current.Think = resolved.Think
+	current.ThinkEffort = resolved.ThinkEffort
+	return current
 }
 
 // resolveThinkOptions gates -think on the configured agent chain's effective

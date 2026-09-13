@@ -67,9 +67,14 @@ type replSession struct {
 	// outside the REPL, for a REPL session started with -allow-write (its
 	// verifier is bound directly, and /allow-write is idempotent there), and
 	// in narrow tests (set is nil-safe).
-	verifier        *lateVerifier
-	maxSteps        int
-	budget          agent.Budget
+	verifier *lateVerifier
+	maxSteps int
+	// startupBudget is the budget resolved at startup. It is IMMUTABLE and
+	// exists only for the AgentFlow planner/driver, which freeze their own
+	// request metadata; every REPL reader (status, /context, trace metadata)
+	// asks runtime.Budget() instead, because /model set republishes the
+	// runtime's budget without touching this field (#376 M4).
+	startupBudget   agent.Budget
 	color           bool
 	clock           func() time.Time
 	retrieveOmitted bool // when true, /tools appends the omission note
@@ -128,7 +133,9 @@ type replSession struct {
 	grounding *groundingService
 
 	thinkModels capChecker
-	thinkChain  []string
+	// selection is the model this session runs on (#376). /think gating and
+	// the /model status block read it; a successful /model set replaces it.
+	selection modelSelection
 	// startupModelOptions is frozen for AgentFlow task/planner consumers.
 	// REPL turns and status use runtime.ModelOptions() instead.
 	startupModelOptions provider.ModelOptions
@@ -393,7 +400,7 @@ func runOnce(ctx context.Context, out io.Writer, interrupts <-chan struct{}, ses
 		HistorySummary: sess.session.historySummary(), // nil-safe: nil session => empty
 		History:        sess.session.history(),        // nil-safe: nil session => nil
 		MaxSteps:       sess.maxSteps,
-		Budget:         sess.budget,
+		Budget:         sess.runtime.Budget(),
 	}
 	threadID := ""
 	if sess.session != nil {
@@ -670,11 +677,7 @@ func dispatchSlash(ctx context.Context, out io.Writer, sess *replSession, line s
 			_, _ = fmt.Fprintln(out, info.line())
 		}
 	case "/model":
-		if sess.lastModel == "" {
-			_, _ = fmt.Fprintln(out, "not yet routed")
-		} else {
-			_, _ = fmt.Fprintln(out, sess.lastModel)
-		}
+		handleModel(ctx, out, sess, fields)
 	case "/undo":
 		if sess.journal == nil {
 			_, _ = fmt.Fprintln(out, "writes disabled; run /allow-write or start with -allow-write")
@@ -918,7 +921,8 @@ func autoEditState(sess *replSession) string {
 const golemHelp = `commands:
   /help          show this help
   /tools         list registered tools and their effect class
-  /model         show the last routed model
+  /model [set <role|name>]
+                 show the selected model chain, ceiling, thinking, and last routed model; set switches the model for the rest of this process
   /context       inspect the last assembled request
   /compact       compact the active session's history
   /clear         delete the active session's history

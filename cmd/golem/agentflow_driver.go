@@ -451,7 +451,7 @@ func newTaskStepRunner(root string, plan *agentflow.Plan, af afClient, orch *age
 			System:   sess.baseSystem,
 			Tools:    tools,
 			MaxSteps: sess.maxSteps,
-			Budget:   sess.budget,
+			Budget:   sess.startupBudget,
 			Approver: taskApprover(approveEdits),
 			Options:  sess.startupModelOptions,
 		}

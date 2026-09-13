@@ -38,6 +38,9 @@ func TestCompactThreadCloseWaitsBeforeClosingResources(t *testing.T) {
 	defer unblock()
 	runtime := &Runtime{
 		active: make(map[string]*activeRun), activeThreads: make(map[string]*activeRun),
+		// New always publishes a snapshot; a hand-built Runtime must too, since
+		// CompactThread now reserves the budget alongside the thread (#376).
+		snap:      &turnSnapshot{},
 		closeDone: make(chan struct{}), compress: true, sessions: &threadStore{store: store},
 		summarizer: func(ctx context.Context, _ string, _ []conversation.Message) (string, error) {
 			close(started)
@@ -125,13 +128,12 @@ func TestCompressConversationAutomaticThreshold(t *testing.T) {
 			}
 			calls := 0
 			r := &Runtime{
-				budget: agent.Budget{InputCeiling: 8192},
 				summarizer: func(context.Context, string, []conversation.Message) (string, error) {
 					calls++
 					return "SUM", nil
 				},
 			}
-			_, changed, err := r.compressConversation(context.Background(), current, false)
+			_, changed, err := r.compressConversation(context.Background(), agent.Budget{InputCeiling: 8192}, current, false)
 			wantCalls := 0
 			if tc.changed {
 				wantCalls = 1
@@ -159,7 +161,6 @@ func TestCompressConversationForcedBelowThreshold(t *testing.T) {
 		CreatedAt: time.Unix(10, 0), UpdatedAt: time.Unix(20, 0)}
 	calls := 0
 	r := &Runtime{
-		budget: agent.Budget{InputCeiling: 8192},
 		summarizer: func(_ context.Context, prior string, messages []conversation.Message) (string, error) {
 			calls++
 			if prior != "" || !reflect.DeepEqual(messages, current.Messages[:2]) {
@@ -168,11 +169,11 @@ func TestCompressConversationForcedBelowThreshold(t *testing.T) {
 			return "SUM", nil
 		},
 	}
-	automatic, changed, err := r.compressConversation(context.Background(), current, false)
+	automatic, changed, err := r.compressConversation(context.Background(), agent.Budget{InputCeiling: 8192}, current, false)
 	if err != nil || changed || calls != 0 || !reflect.DeepEqual(automatic, current) {
 		t.Fatalf("automatic compression = %+v, changed %v, calls %d, error %v; want unchanged input and no call", automatic, changed, calls, err)
 	}
-	compacted, changed, err := r.compressConversation(context.Background(), current, true)
+	compacted, changed, err := r.compressConversation(context.Background(), agent.Budget{InputCeiling: 8192}, current, true)
 	want := current
 	want.Messages = current.Messages[2:]
 	want.DurableSummary = &conversation.DurableSummary{Content: "SUM", MessageCount: 2}
@@ -224,14 +225,14 @@ func TestCompressConversationAutomaticSummaryReserve(t *testing.T) {
 			conversation.Message{Role: "assistant", Content: strings.Repeat("a", 1200)})
 	}
 	calls := 0
-	r := &Runtime{budget: agent.Budget{InputCeiling: 8192}, summarizer: func(_ context.Context, prior string, old []conversation.Message) (string, error) {
+	r := &Runtime{summarizer: func(_ context.Context, prior string, old []conversation.Message) (string, error) {
 		calls++
 		if prior != "" || !reflect.DeepEqual(old, messages[:4]) {
 			t.Errorf("automatic summary inputs = %q, %d messages; want empty prior and oldest four messages", prior, len(old))
 		}
 		return "SUM", nil
 	}}
-	got, changed, err := r.compressConversation(context.Background(), conversation.Conversation{Messages: messages}, false)
+	got, changed, err := r.compressConversation(context.Background(), agent.Budget{InputCeiling: 8192}, conversation.Conversation{Messages: messages}, false)
 	if err != nil || !changed || calls != 1 || !reflect.DeepEqual(got.Messages, messages[4:]) || summaryMessageCount(got) != 4 {
 		t.Errorf("automatic compression = %d retained, summary %+v, changed %v, calls %d, error %v; want newest ten messages, count 4, changed true, one call", len(got.Messages), got.DurableSummary, changed, calls, err)
 	}
@@ -255,7 +256,7 @@ func TestCompressConversationReservesRenderedSummary(t *testing.T) {
 					conversation.Message{Role: "assistant", Content: strings.Repeat("a", 1024)})
 			}
 			calls, summarized := 0, 0
-			r := &Runtime{budget: agent.Budget{InputCeiling: 8192}, summarizer: func(_ context.Context, prior string, old []conversation.Message) (string, error) {
+			r := &Runtime{summarizer: func(_ context.Context, prior string, old []conversation.Message) (string, error) {
 				calls++
 				if !reflect.DeepEqual(old, messages[summarized:summarized+len(old)]) || (calls > 1 && prior != tc.summary) {
 					t.Errorf("summary pass %d = %q, %+v; want prior summary and next oldest messages", calls, prior, old)
@@ -264,14 +265,14 @@ func TestCompressConversationReservesRenderedSummary(t *testing.T) {
 				return tc.summary, nil
 			}}
 			current := conversation.Conversation{Messages: messages}
-			got, changed, err := r.compressConversation(context.Background(), current, false)
+			got, changed, err := r.compressConversation(context.Background(), agent.Budget{InputCeiling: 8192}, current, false)
 			if err != nil || !changed || calls != tc.wantCalls || estimateStoredHistory(got) > 4096 {
 				t.Fatalf("compression = changed %v, %v, calls %d, tokens %d; want changed, %d calls and <=4096", changed, err, calls, estimateStoredHistory(got), tc.wantCalls)
 			}
 			if len(got.Messages) < 8 || !reflect.DeepEqual(got.Messages, messages[summarized:]) || summaryMessageCount(got) != summarized {
 				t.Fatalf("compressed history = %+v; want retained suffix and summary count %d", got, summarized)
 			}
-			again, changed, err := r.compressConversation(context.Background(), got, false)
+			again, changed, err := r.compressConversation(context.Background(), agent.Budget{InputCeiling: 8192}, got, false)
 			if err != nil || changed || calls != tc.wantCalls || !reflect.DeepEqual(again, got) {
 				t.Errorf("immediate repeat = changed %v, %v, calls %d; want unchanged with no further summary", changed, err, calls)
 			}
@@ -292,7 +293,7 @@ func TestCompressConversationRenderedReserveStopsAtFloor(t *testing.T) {
 		calls++
 		return "SUM", nil
 	}}
-	got, changed, err := r.compressConversation(context.Background(), current, false)
+	got, changed, err := r.compressConversation(context.Background(), agent.Budget{}, current, false)
 	if err != nil || changed || calls != 1 || !reflect.DeepEqual(got, current) {
 		t.Fatalf("floor compression = %+v, changed %v, %v, calls %d; want unchanged floor and one call", got, changed, err, calls)
 	}
@@ -316,7 +317,7 @@ func TestCompressConversationRenderedReserveRetryFailure(t *testing.T) {
 		}
 		return "", failure
 	}}
-	_, changed, err := r.compressConversation(context.Background(), current, false)
+	_, changed, err := r.compressConversation(context.Background(), agent.Budget{}, current, false)
 	if !errors.Is(err, failure) || changed || calls != 2 || current.DurableSummary != nil || !reflect.DeepEqual(current.Messages, before) {
 		t.Fatalf("retry failure = changed %v, %v, calls %d; want failure with original history intact", changed, err, calls)
 	}
@@ -352,7 +353,7 @@ func TestCompressConversationRetainsToolExchangesAndUnresolvedTail(t *testing.T)
 	want := current
 	want.Messages = retained
 	want.DurableSummary = &conversation.DurableSummary{Content: "SUM", MessageCount: 4}
-	got, changed, err := r.compressConversation(context.Background(), current, true)
+	got, changed, err := r.compressConversation(context.Background(), agent.Budget{}, current, true)
 	if err != nil || !changed || calls != 1 || !reflect.DeepEqual(got, want) {
 		t.Errorf("forced tool compression = %+v, changed %v, calls %d, error %v; want %+v, changed true, one call", got, changed, calls, err, want)
 	}
@@ -390,7 +391,7 @@ func TestCompressConversationProgressiveSummary(t *testing.T) {
 				}
 				return tc.replacement, nil
 			}}
-			got, changed, err := r.compressConversation(context.Background(), current, true)
+			got, changed, err := r.compressConversation(context.Background(), agent.Budget{}, current, true)
 			if err != nil || changed != tc.changed || calls != 1 {
 				t.Fatalf("compressConversation(%s) = changed %v, calls %d, error %v; want changed %v, one call", tc.name, changed, calls, err, tc.changed)
 			}
@@ -416,7 +417,7 @@ func TestCompressConversationForcedNoOpAtFloor(t *testing.T) {
 			t.Errorf("forced compression with %d exchanges called summarizer; want no call", count)
 			return "SUM", nil
 		}}
-		got, changed, err := r.compressConversation(context.Background(), current, true)
+		got, changed, err := r.compressConversation(context.Background(), agent.Budget{}, current, true)
 		if err != nil || changed || !reflect.DeepEqual(got, current) {
 			t.Errorf("forced compression with %d exchanges = %+v, changed %v, error %v; want unchanged %+v", count, got, changed, err, current)
 		}
@@ -443,7 +444,7 @@ func TestCompressConversationSummaryFailure(t *testing.T) {
 				t.Fatal(err)
 			}
 			r := &Runtime{summarizer: func(context.Context, string, []conversation.Message) (string, error) { return tc.output, tc.err }}
-			_, changed, err := r.compressConversation(context.Background(), current, true)
+			_, changed, err := r.compressConversation(context.Background(), agent.Budget{}, current, true)
 			if !errors.Is(err, tc.wantErr) || changed {
 				t.Errorf("compressConversation(%s) = changed %v, error %v; want unchanged and %v", tc.name, changed, err, tc.wantErr)
 			}
@@ -670,8 +671,8 @@ func TestSaveThreadRetainsCommittedRevision(t *testing.T) {
 			}
 			current.Revision = 1
 			state := &threadState{conversation: current}
-			runtime := &Runtime{sessions: &threadStore{store: store}, compress: compress, budget: agent.Budget{InputCeiling: 2}, summarizer: func(context.Context, string, []conversation.Message) (string, error) { return "summary", nil }}
-			if err := runtime.saveThread(ctx, &activeRun{}, state, "new question", agent.Result{Answer: "new answer"}); err != nil {
+			runtime := &Runtime{sessions: &threadStore{store: store}, compress: compress, summarizer: func(context.Context, string, []conversation.Message) (string, error) { return "summary", nil }}
+			if err := runtime.saveThread(ctx, &activeRun{}, agent.Budget{InputCeiling: 2}, state, "new question", agent.Result{Answer: "new answer"}); err != nil {
 				t.Fatal(err)
 			}
 			want := int64(2)
@@ -683,7 +684,7 @@ func TestSaveThreadRetainsCommittedRevision(t *testing.T) {
 				t.Fatalf("retained = %+v, persisted %+v, %v; want revision %d", state.conversation, saved, err, want)
 			}
 			// Reusing the retained value must be safe; fetching a new token onto stale content is forbidden.
-			if err := runtime.saveThread(ctx, &activeRun{}, state, "later question", agent.Result{Answer: "later answer"}); err != nil {
+			if err := runtime.saveThread(ctx, &activeRun{}, agent.Budget{InputCeiling: 2}, state, "later question", agent.Result{Answer: "later answer"}); err != nil {
 				t.Fatalf("save retained snapshot: %v", err)
 			}
 		})
