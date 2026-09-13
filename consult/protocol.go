@@ -78,7 +78,7 @@ type inspection struct {
 	NonOpusInputTokens         int64    `json:"non_opus_input_tokens"`
 	NonOpusOutputTokens        int64    `json:"non_opus_output_tokens"`
 	NonOpusCacheTokens         int64    `json:"non_opus_cache_tokens"`
-	DecodeErrorIndex           int      `json:"decode_error_index"` // -1 when the whole input decoded
+	DecodeErrorIndex           int      `json:"decode_error_index"` // -1 unless a record failed to decode
 	Answer                     string   `json:"answer"`             // the admitted reply, empty unless admission passed
 }
 
@@ -95,6 +95,11 @@ var versionRE = regexp.MustCompile(`^[0-9]+\.[0-9]+\.[0-9]+$`)
 
 // maxVersionLen bounds the retained version before it is matched.
 const maxVersionLen = 32
+
+// maxAnswerBytes is the largest sanitized answer this package will retain. It
+// matches the agent.Advisory limit the answer is handed to downstream, so an
+// answer that could not be carried is refused here rather than truncated.
+const maxAnswerBytes = 65536
 
 // documentedBuiltinAgents is the pinned built-in subagent name list, taken
 // from https://code.claude.com/docs/en/sub-agents ("Built-in subagents"),
@@ -304,17 +309,25 @@ func inspectStream(data []byte, stdin string, cwds []string) (inspection, []stri
 		want := strings.TrimRight(x.resultText, " \t\r\n")
 		all := strings.TrimRight(strings.Join(x.allText, ""), " \t\r\n")
 		last := strings.TrimRight(strings.Join(x.lastText, ""), " \t\r\n")
-		if want != all && want != last {
+		answer := sanitize(x.resultText)
+		switch {
+		case want != all && want != last:
 			x.fail("answer-inconsistent")
-		} else {
-			in.Answer = sanitize(x.resultText)
+		case len(answer) > maxAnswerBytes:
+			x.fail("answer-too-large")
+		default:
+			in.Answer = answer
 		}
 	}
 	return in, x.reasons
 }
 
-// sanitize replaces C0 control bytes other than \n and \t, and DEL, with
-// U+FFFD so a consultant cannot drive the terminal or the fence renderer.
+// sanitize replaces every C0 control byte (U+0000-U+001F) except \n and \t,
+// and DEL (U+007F), with U+FFFD so a consultant cannot drive the terminal or
+// the fence renderer. \r is replaced by design: a CRLF answer renders U+FFFD
+// before each \n rather than letting a carriage return overwrite the line.
+// C1 controls, bidi overrides and zero-width characters are left alone here;
+// they carry no terminal authority and belong to the interceptor pipeline.
 func sanitize(s string) string {
 	var b strings.Builder
 	for _, r := range s {

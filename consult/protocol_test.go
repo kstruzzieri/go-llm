@@ -704,3 +704,57 @@ func TestClaudeEmptyEvidenceListsSerializeAsArrays(t *testing.T) {
 		}
 	}
 }
+
+func TestInspectStreamBoundsTheAnswer(t *testing.T) {
+	// The answer crosses into agent.Advisory, which caps at maxAnswerBytes.
+	body := func(n int) string {
+		text := strings.Repeat("x", n)
+		return stream(validInit,
+			strings.Replace(assistantOK, `"text":"OK"`, `"text":"`+text+`"`, 1),
+			strings.Replace(goodResult, `"result":"OK"`, `"result":"`+text+`"`, 1))
+	}
+	in, reasons := inspectStream([]byte(body(65537)), "", nil)
+	if !contains(reasons, "answer-too-large") || in.Answer != "" {
+		t.Fatalf("oversize answer retained: %d bytes, reasons %v", len(in.Answer), reasons)
+	}
+	in, reasons = inspectStream([]byte(body(65536)), "", nil)
+	if !ok(reasons) || len(in.Answer) != 65536 {
+		t.Fatalf("answer at the cap rejected: %d bytes, reasons %v", len(in.Answer), reasons)
+	}
+}
+
+func TestClaudeTerminalRejectsEachFailureFlagAlone(t *testing.T) {
+	// Each of these is the only thing wrong with an otherwise clean terminal.
+	for _, tc := range []struct{ name, result string }{
+		{"is_error_alone", strings.Replace(goodResult, `"is_error":false`, `"is_error":true`, 1)},
+		{"error_subtype_alone", strings.Replace(goodResult, `"subtype":"success"`, `"subtype":"error_during_execution"`, 1)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, reasons := inspectStream([]byte(stream(validInit, assistantOK, tc.result)), "", nil); !contains(reasons, "terminal-invalid") {
+				t.Fatalf("terminal admitted: %v", reasons)
+			}
+		})
+	}
+}
+
+func TestClaudeBoundsRecordCountAndNestingDepth(t *testing.T) {
+	// Record cap: the 4097th record is refused, 4096 decode.
+	record := `{"a":1}` + "\n"
+	if _, reasons := inspectStream([]byte(strings.Repeat(record, 4097)), "", nil); !contains(reasons, "malformed") {
+		t.Fatalf("record cap not enforced: %v", reasons)
+	}
+	if _, reasons := inspectStream([]byte(strings.Repeat(record, 4096)), "", nil); contains(reasons, "malformed") {
+		t.Fatalf("4096 records must decode: %v", reasons)
+	}
+	// Depth bound inside a record object, where the top-level object check
+	// cannot stand in for it.
+	nested := func(depth int) string {
+		return stream(validInit, `{"type":"assistant","x":`+strings.Repeat("[", depth)+"0"+strings.Repeat("]", depth)+`}`, goodResult)
+	}
+	if _, reasons := inspectStream([]byte(nested(70)), "", nil); !contains(reasons, "malformed") {
+		t.Fatalf("depth bound not enforced inside a record: %v", reasons)
+	}
+	if _, reasons := inspectStream([]byte(nested(60)), "", nil); contains(reasons, "malformed") {
+		t.Fatalf("60-deep nesting must decode: %v", reasons)
+	}
+}
