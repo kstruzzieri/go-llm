@@ -61,9 +61,10 @@ func (c *interleavedCancelCaller) Chat(ctx context.Context, _ provider.ChatReque
 
 // scriptCaller returns queued responses in order; each Chat call pops one.
 type scriptCaller struct {
-	responses []agent.ModelResult
-	i         int
-	block     chan struct{} // when non-nil, Chat waits on ctx or this before responding
+	responses   []agent.ModelResult
+	i           int
+	block       chan struct{}        // when non-nil, Chat waits on ctx or this before responding
+	lastRequest provider.ChatRequest // the most recent request, for wire assertions
 }
 
 type attributedRetrieve struct{}
@@ -103,6 +104,7 @@ func (c *retrieveThenStopCaller) Chat(ctx context.Context, _ provider.ChatReques
 }
 
 func (s *scriptCaller) Chat(ctx context.Context, req provider.ChatRequest, onToken func(provider.ChatResponse) error) (agent.ModelResult, error) {
+	s.lastRequest = req
 	if s.block != nil {
 		select {
 		case <-ctx.Done():

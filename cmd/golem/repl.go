@@ -14,6 +14,7 @@ import (
 
 	"github.com/kstruzzieri/go-llm/agent"
 	"github.com/kstruzzieri/go-llm/agent/tools"
+	"github.com/kstruzzieri/go-llm/consult"
 	"github.com/kstruzzieri/go-llm/conversation"
 	golemruntime "github.com/kstruzzieri/go-llm/golem"
 	"github.com/kstruzzieri/go-llm/internal/agenttrace"
@@ -82,8 +83,15 @@ type replSession struct {
 
 	records *memory.MemoryRecordStore // nil => agent memory disabled (-agent-memory absent or open failed)
 
-	lastModel string             // last routed ActualModel for /model
-	journal   *checkpointJournal // nil unless -allow-write enabled writes
+	lastModel string // last routed ActualModel for /model
+	// consultants is the loaded consultants.json, nil when /consult is
+	// disabled; interceptorsOn mirrors whether the interceptor chain is
+	// non-empty (/consult requires it); advisory is the single staged consult
+	// receipt for the next goal only (#382).
+	consultants    map[string]consult.Consultant
+	interceptorsOn bool
+	advisory       *agent.Advisory
+	journal        *checkpointJournal // nil unless -allow-write enabled writes
 	// bgManager owns every background command (#346). nil => background exec
 	// disabled (-allow-exec absent or non-interactive mode). Process-scoped by
 	// the interactive-process-scope policy: /new, /clear, and successful
@@ -412,7 +420,13 @@ func runOnce(ctx context.Context, out io.Writer, interrupts <-chan struct{}, ses
 		Message:  line,
 		Approver: approver, // nil when read-only => runtime fail-safe denies Write/Exec
 		Observer: observer,
+		Advisory: sess.advisory, // staged by /consult; consumed by this turn only (#382)
 	}, sess.machine.sink())
+	// One goal is all a staged advisory buys: a turn that produced an answer
+	// consumes it, and a failed or interrupted turn keeps it for the retry.
+	if runErr == nil && res.Answer != "" {
+		sess.advisory = nil
+	}
 	// Seal immediately after Run on every path: writes applied before an
 	// interrupt or provider error must stay undoable. The error is joined
 	// with the run error below, after the session-persistence demotion, so
@@ -609,6 +623,7 @@ func dispatchSlash(ctx context.Context, out io.Writer, sess *replSession, line s
 		// before the session branch — under --no-session a live approver can
 		// still hold grants.
 		sess.grants.clear()
+		sess.advisory = nil
 		if sess.session == nil {
 			_, _ = fmt.Fprintln(out, "session disabled (--no-session)")
 		} else if err := sess.session.clear(ctx); err != nil {
@@ -626,6 +641,7 @@ func dispatchSlash(ctx context.Context, out io.Writer, sess *replSession, line s
 		// Session switch (#341 D8): grants never outlive the session they
 		// were given in, with or without conversation persistence.
 		sess.grants.clear()
+		sess.advisory = nil
 		if sess.session == nil {
 			_, _ = fmt.Fprintln(out, "session disabled (--no-session)")
 		} else {
@@ -667,8 +683,11 @@ func dispatchSlash(ctx context.Context, out io.Writer, sess *replSession, line s
 			// session — and therefore its grants — untouched.
 			sess.grants.clear()
 			sess.pressure = nil
+			sess.advisory = nil
 			_, _ = fmt.Fprintln(out, info.line())
 		}
+	case "/consult":
+		handleConsult(ctx, out, sess, line)
 	case "/model":
 		if sess.lastModel == "" {
 			_, _ = fmt.Fprintln(out, "not yet routed")
@@ -919,6 +938,8 @@ const golemHelp = `commands:
   /help          show this help
   /tools         list registered tools and their effect class
   /model         show the last routed model
+  /consult <name> <prompt>
+                 ask a configured external consultant; the admitted answer is shown and staged as fenced advice for the next goal only
   /context       inspect the last assembled request
   /compact       compact the active session's history
   /clear         delete the active session's history
