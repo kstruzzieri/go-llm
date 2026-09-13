@@ -100,8 +100,9 @@ replace pins nothing.
 
 Set `sha256` to your own binary's digest (`shasum -a 256 <command>`); the
 `8917e01c…` prefix above is the Stage 0 evidence binary's and will not match
-yours. Omitting the field skips the digest check but keeps every other target
-check.
+yours. Omitting the field skips the configured digest pin. Each consultation
+still hashes the executable before its version probe and requires the same
+digest immediately before sending the prompt.
 
 ## Process envelope
 
@@ -113,6 +114,14 @@ Each run gets a fresh private directory tree under the system temp directory,
 mode `0700`, with a random name: `cwd`, `tmp`, `config`, `cache` and `state`.
 The child's working directory is the private `cwd`. The whole root is removed
 after the run, and a removal that does not take effect fails the run.
+
+Before sending any prompt, the adapter runs `--version` with empty stdin in
+its own envelope. It requires `2.1.240 (Claude Code)` and a clean exit and
+cleanup. The probe caps each stream at 4 KiB (or `max_output_bytes` if
+smaller); stdout is retained and stderr is only counted. Both invocations
+share one `timeout_seconds` deadline. Their executable digests must match, including
+when no `sha256` was configured, so an update during the probe fails with
+`target-drift` before the replacement receives the prompt.
 
 The child environment is built from scratch — nothing is inherited, so no API
 key, proxy or telemetry variable in the caller's environment can reach the
@@ -159,7 +168,9 @@ Lifetime and limits:
   output-cap abort all SIGKILL the whole group (a descendant that calls
   `setsid` escapes it, and is outside this trust boundary);
 - after `Wait`, the group is signalled again and polled for up to one second
-  until it is empty; an incomplete cleanup fails the run;
+  until no member can still run; an incomplete cleanup fails the run. On
+  Linux, unreaped zombies count as exited. Unreadable or malformed process
+  information cannot establish that a group contains only zombies;
 - `WaitDelay` is 5 s: if cancellation leaves a pipe held open longer than
   that, `Wait` abandons the copy and the run fails as `drain-incomplete`
   rather than admitting a possibly truncated transcript;
@@ -167,11 +178,12 @@ Lifetime and limits:
   same cap and **never retained**, so consultant diagnostics do not cross the
   boundary. Exceeding the cap on either stream aborts the run;
 - the prompt on stdin must be 1..65536 bytes of valid UTF-8;
-- the exec target is re-checked (regular file, not a symlink, digest if
-  configured) immediately before `execve`, so the TOCTOU window is only the
-  microseconds between that read and the exec. That read is uncancellable and
-  the run deadline is already ticking during it: a binary large enough to
-  out-read `timeout_seconds` makes the start fail with the deadline error.
+- the exec target is re-checked before both launches: absolute regular file,
+  no symlink anywhere in the path, not group- or world-writable, opened-file
+  identity unchanged, and matching digest when expected. Path-based exec
+  still leaves a check-to-exec race with local writers. The hash read is
+  uncancellable and the run deadline is already ticking during it: a binary
+  large enough to out-read `timeout_seconds` makes the start fail with the deadline error.
   `Receipt.Duration` is measured around the whole call and so includes the
   digest read, unlike the runner's internal duration, whose clock starts after
   it.
@@ -208,8 +220,10 @@ An admitted transcript must satisfy all of:
   present as arrays and all empty;
 - any declared `agents` are all documented built-in subagents;
 - its `model` is an opus model, and its `cwd` is the private envelope cwd;
+- at least one assistant record, with an opus `message.model` on every
+  assistant record; missing models and non-Opus model switches are rejected;
 - one `session_id`, consistent across every record;
-- exactly one `user` record, before the first assistant record, whose text is
+- at most one `user` record, before the first assistant record, whose text is
   byte-identical to the prompt that was written to stdin;
 - no tool, task, subagent, hook or plugin-install, memory-recall,
   elicitation, permission-denial, web-search, compaction or model-refusal

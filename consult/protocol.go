@@ -309,6 +309,12 @@ func inspectStream(data []byte, stdin string, cwds []string) (inspection, []stri
 		x.fail("session-inconsistent")
 	}
 	in.OverageAttested = in.RateLimitEvents > 0 && x.overageAll
+	if in.ResponseModels == 0 || in.ResponseModels != in.ResponseOpusModels {
+		x.fail("response-model-invalid")
+	}
+	if in.ModelPresent && !in.ModelIsOpus {
+		x.fail("usage-model-invalid")
+	}
 	// The reply is retained only when nothing else objected and the terminal
 	// text is the text the assistant actually emitted.
 	if x.haveResult && len(x.reasons) == 0 {

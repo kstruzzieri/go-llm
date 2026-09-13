@@ -22,7 +22,7 @@ import (
 
 func script(t *testing.T, body string) string {
 	t.Helper()
-	p := filepath.Join(t.TempDir(), "fake")
+	p := filepath.Join(realTempDir(t), "fake")
 	if err := os.WriteFile(p, []byte("#!/bin/sh\n"+body+"\n"), 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -71,7 +71,12 @@ func waitForDeath(t *testing.T, pidFile string) {
 	}
 	deadline := time.Now().Add(2 * time.Second)
 	for {
+		// On Linux an unreaped zombie still exists but cannot execute. Check
+		// its group as well so another live descendant cannot satisfy this.
 		if syscall.Kill(pid, 0) == syscall.ESRCH {
+			return
+		}
+		if pgid, err := syscall.Getpgid(pid); err == nil && groupExited(pgid) {
 			return
 		}
 		if time.Now().After(deadline) {

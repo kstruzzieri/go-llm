@@ -191,30 +191,8 @@ func validate(c *Consultant) error {
 	case !c.TrustedProcessEgress:
 		return errors.New("trusted_process_egress must be true: consultant traffic is not filtered by go-llm")
 	}
-	info, err := os.Lstat(c.Command)
-	if err != nil {
-		return fmt.Errorf("command: %w", err)
-	}
-	if info.Mode()&os.ModeSymlink != 0 {
-		return errors.New("command must not be a symlink")
-	}
-	if !info.Mode().IsRegular() {
-		return errors.New("command must be a regular file")
-	}
-	// Anyone who can rewrite the file can replace the consultant, and a digest
-	// recorded once does not survive that; the pre-exec re-verification would
-	// only turn it into a run-time failure.
-	if info.Mode().Perm()&0o022 != 0 {
-		return errors.New("command must not be group- or world-writable")
-	}
-	// Lstat only inspects the leaf: reject a command reached through a
-	// symlinked parent directory too, so the path cannot be redirected.
-	resolved, err := filepath.EvalSymlinks(c.Command)
-	if err != nil {
-		return fmt.Errorf("command: %w", err)
-	}
-	if resolved != c.Command {
-		return errors.New("command path must not traverse symlinks")
+	if _, err := validateCommand(c.Command); err != nil {
+		return err
 	}
 	if c.TimeoutSeconds == 0 {
 		c.TimeoutSeconds = defaultTimeoutSeconds
@@ -223,4 +201,37 @@ func validate(c *Consultant) error {
 		c.MaxOutputBytes = maxOutputBytes
 	}
 	return nil
+}
+
+// validateCommand is shared by config loading and every executable launch.
+func validateCommand(path string) (os.FileInfo, error) {
+	if !filepath.IsAbs(path) {
+		return nil, errors.New("command must be an absolute path")
+	}
+	info, err := os.Lstat(path)
+	if err != nil {
+		return nil, fmt.Errorf("command: %w", err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return nil, errors.New("command must not be a symlink")
+	}
+	if !info.Mode().IsRegular() {
+		return nil, errors.New("command must be a regular file")
+	}
+	// Anyone who can rewrite the file can replace the consultant, and a digest
+	// recorded once does not survive that; the pre-exec re-verification would
+	// only turn it into a run-time failure.
+	if info.Mode().Perm()&0o022 != 0 {
+		return nil, errors.New("command must not be group- or world-writable")
+	}
+	// Lstat only inspects the leaf: reject a command reached through a
+	// symlinked parent directory too, so the path cannot be redirected.
+	resolved, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		return nil, fmt.Errorf("command: %w", err)
+	}
+	if resolved != path {
+		return nil, errors.New("command path must not traverse symlinks")
+	}
+	return info, nil
 }

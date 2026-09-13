@@ -109,10 +109,9 @@ var hostIdentityCache struct {
 // hostIdentity resolves the uid's username and home directory, caching the
 // first success for the life of the process. user.LookupId can reach a
 // directory service (LDAP, NIS) and takes no context, so it cannot be
-// interrupted and it runs before the run deadline is armed; caching keeps that
-// cost off every consult after the first. The result is a pure function of the
-// uid, which cannot change under a running process, so a cached success cannot
-// go stale.
+// interrupted; caching keeps that cost off every consult after the first.
+// The result is a pure function of the uid, which cannot change under a
+// running process, so a cached success cannot go stale.
 //
 // A failure is deliberately not cached. The tradeoff is that a persistently
 // broken directory service costs one lookup per consult rather than one per
@@ -312,14 +311,14 @@ func run(ctx context.Context, spec runSpec) (out runOutcome, err error) {
 		return killGroup(cmd.Process.Pid)
 	}
 
-	// Verify immediately before exec, so the TOCTOU window is only the
-	// microseconds between this read and execve; an updater replaces by rename,
-	// which this catches. The read is uncancellable, and runCtx's deadline is
+	// Verify immediately before exec. Path-based exec still leaves a race
+	// between this check and Start. The read is uncancellable, and the deadline is
 	// already ticking: a target large enough to out-read spec.timeout makes
 	// cmd.Start fail with the deadline error. Only Duration excludes it, because
 	// the clock below starts after the digest is checked.
-	if verifyErr := verifyExecTarget(spec.command, spec.sha256); verifyErr != nil {
-		return out, verifyErr
+	out.TargetSHA256, err = verifyExecTarget(spec.command, spec.sha256)
+	if err != nil {
+		return out, err
 	}
 
 	start := time.Now()
@@ -337,7 +336,7 @@ func run(ctx context.Context, spec runSpec) (out runOutcome, err error) {
 	_ = killGroup(cmd.Process.Pid)
 	deadline := time.Now().Add(time.Second)
 	for {
-		if syscall.Kill(-cmd.Process.Pid, 0) == syscall.ESRCH {
+		if groupExited(cmd.Process.Pid) {
 			out.GroupCleanupOK = true
 			break
 		}
@@ -360,39 +359,32 @@ func run(ctx context.Context, spec runSpec) (out runOutcome, err error) {
 	return out, nil
 }
 
-// verifyExecTarget refuses symlinks and non-regular files and, when a digest is
-// expected, requires the whole file's bytes to match it.
-//
-// The symlink check is leaf-only (Lstat): integrity of the parent directories
-// is config.validate's job, which rejects any command path that traverses a
-// symlink at load time. Together they cover the path; neither does alone.
-func verifyExecTarget(path, expected string) error {
-	if !filepath.IsAbs(path) {
-		return fmt.Errorf("%w: command must be an absolute path", errTargetInvalid)
-	}
-	info, err := os.Lstat(path)
+// verifyExecTarget rechecks every command path and permission invariant and
+// hashes the opened file. The hash binds a version probe to the prompt launch.
+func verifyExecTarget(path, expected string) (string, error) {
+	before, err := validateCommand(path)
 	if err != nil {
-		return fmt.Errorf("%w: lstat failed", errTargetInvalid)
+		return "", fmt.Errorf("%w: %w", errTargetInvalid, err)
 	}
-	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
-		return fmt.Errorf("%w: must be a regular file, not a symlink", errTargetInvalid)
-	}
-	if expected == "" {
-		return nil
-	}
-	f, err := os.Open(path)
+	// Reuse the nonblocking regular-file open: a swapped FIFO must not stall.
+	f, err := openConfigFile(path)
 	if err != nil {
-		return fmt.Errorf("%w: open failed", errTargetInvalid)
+		return "", fmt.Errorf("%w: open failed", errTargetInvalid)
 	}
 	defer func() { _ = f.Close() }()
+	after, err := f.Stat()
+	if err != nil || !after.Mode().IsRegular() || after.Mode().Perm()&0o022 != 0 || !os.SameFile(before, after) {
+		return "", fmt.Errorf("%w: target changed while opening", errTargetInvalid)
+	}
 	h := sha256.New()
 	if _, err := io.Copy(h, f); err != nil {
-		return fmt.Errorf("%w: read failed", errTargetInvalid)
+		return "", fmt.Errorf("%w: read failed", errTargetInvalid)
 	}
-	if got := hex.EncodeToString(h.Sum(nil)); got != expected {
-		return fmt.Errorf("%w: digest drift immediately before exec", errTargetDrift)
+	got := hex.EncodeToString(h.Sum(nil))
+	if expected != "" && got != expected {
+		return "", fmt.Errorf("%w: digest drift immediately before exec", errTargetDrift)
 	}
-	return nil
+	return got, nil
 }
 
 // waitStatus renders the leader's wait status as a fixed literal.

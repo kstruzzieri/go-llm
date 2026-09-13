@@ -412,7 +412,7 @@ func TestClaudeItem2TerminalAndUsageMetadata(t *testing.T) {
 	}
 	mixed := `{"claude-opus-4-8":{"inputTokens":10,"outputTokens":5,"cacheReadInputTokens":0,"cacheCreationInputTokens":0,"webSearchRequests":0,"provider":"firstParty"},"claude-haiku-4-5":{"inputTokens":7,"outputTokens":3,"cacheReadInputTokens":0,"cacheCreationInputTokens":0,"webSearchRequests":0}}`
 	in, reasons := inspectStream([]byte(stream(validInit, assistantOK, withUsage(mixed))), "", nil)
-	if !ok(reasons) || in.NonOpusInputTokens != 7 || in.NonOpusOutputTokens != 3 || in.UsageProvider != "mixed" || in.UsageOpusModels != 1 || in.UsageModels != 2 {
+	if !contains(reasons, "usage-model-invalid") || in.Answer != "" || in.NonOpusInputTokens != 7 || in.NonOpusOutputTokens != 3 || in.UsageProvider != "mixed" || in.UsageOpusModels != 1 || in.UsageModels != 2 {
 		t.Fatalf("mixed usage facts wrong: %+v %v", in, reasons)
 	}
 	in, _ = inspectStream([]byte(stream(validInit, assistantOK, withUsage(`{"claude-opus-4-8":{}}`))), "", nil)
@@ -461,7 +461,7 @@ func TestClaudeItem11DecisionBooleans(t *testing.T) {
 func TestClaudePreservesIndependentFailures(t *testing.T) {
 	input := strings.Replace(validInit, `"plugins":[]`, `"plugins":[{"name":"SENSITIVE"}]`, 1) + `{"type":"SENSITIVE","session_id":"synthetic-session"}` + goodResult
 	in, reasons := inspectStream([]byte(input), "", nil)
-	if strings.Join(reasons, ",") != "inventory-invalid,unknown-event" || in.UnknownEvents != 1 || strings.Join(in.UnknownKinds, ",") != "top:other" {
+	if strings.Join(reasons, ",") != "inventory-invalid,unknown-event,response-model-invalid" || in.UnknownEvents != 1 || strings.Join(in.UnknownKinds, ",") != "top:other" {
 		t.Fatalf("lost independent evidence: %+v %v", in, reasons)
 	}
 	mustNotLeak(t, in, reasons)

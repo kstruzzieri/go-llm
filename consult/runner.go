@@ -15,11 +15,11 @@ const maxStdinBytes = 65536
 var (
 	// errStdinInvalid reports a prompt that is too large or not valid UTF-8.
 	errStdinInvalid = errors.New("consult: invalid input")
-	// errTargetInvalid reports an exec target that is not a regular file, is a
-	// symlink, or could not be read immediately before exec.
+	// errTargetInvalid reports an exec target that fails path, permission or
+	// opened-file identity checks, or cannot be read immediately before exec.
 	errTargetInvalid = errors.New("consult: invalid exec target")
 	// errTargetDrift reports that the exec target's bytes no longer match the
-	// configured digest.
+	// configured digest or the digest used for the version probe.
 	errTargetDrift = errors.New("consult: exec target digest drift")
 	// errEnvelope reports that the private filesystem envelope could not be
 	// built. It is a host failure, never the consultant's.
@@ -46,6 +46,7 @@ type runSpec struct {
 // runOutcome is the redacted result of one run. Stderr content is counted but
 // never retained, so no field can carry it across this boundary.
 type runOutcome struct {
+	TargetSHA256  string // bytes verified immediately before this launch
 	Stdout        []byte // capped at runSpec.outputCap
 	StderrBytes   int
 	ExitCode      int

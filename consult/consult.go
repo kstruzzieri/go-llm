@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"strings"
 	"time"
 	"unicode/utf8"
 )
@@ -26,9 +27,9 @@ type Receipt struct {
 	// ExitCode is always 0 here: a non-zero exit is a process-exit error and
 	// never yields a receipt. It is retained so a caller need not assume that.
 	ExitCode int
-	// Duration is end-to-end wall clock measured in Run: envelope creation,
-	// pre-exec target verification, the child, the process-group cleanup poll
-	// and the transcript parse. It is not the consultant's own service time.
+	// Duration is end-to-end wall clock measured in Run: the version probe,
+	// both envelopes and target checks, the prompt invocation, process-group
+	// cleanup and transcript parsing. It is not the consultant's service time.
 	Duration      time.Duration
 	ContentForm   string // ContentForm
 	ContentSHA256 string // sha256 of Answer at freeze, before any annotation or framing
@@ -84,10 +85,9 @@ type Evidence struct {
 //     reported a bounded termination: consultant, prompt, cap, caller,
 //     deadline, cleanup, envelope, identity, target, platform, start,
 //     wait-delay, other;
-//   - the first admission literal recorded by protocol.go, for the codes that
-//     come from the transcript (auth, quota, billing, tool-activity, protocol
-//     and unsupported-version) — for example auth-source-invalid or
-//     quota-rejected;
+//   - the first admission literal from the version probe or protocol.go
+//     (auth, quota, billing, tool-activity, protocol and unsupported-version)
+//     — for example auth-source-invalid, version-mismatch or quota-rejected;
 //   - for a non-zero exit, the runner's own termination literal, exited(N) or
 //     signaled(SIGKILL|SIGTERM|SIGINT|other).
 type Error struct{ Code, Reason string }
@@ -119,59 +119,35 @@ func Run(ctx context.Context, c Consultant, prompt string) (Receipt, error) {
 	if !nameRE.MatchString(c.Name) || c.Adapter != claudeAdapter || !claudeModels[c.Model] ||
 		c.TimeoutSeconds <= 0 || c.TimeoutSeconds > maxTimeoutSeconds ||
 		c.MaxOutputBytes <= 0 || c.MaxOutputBytes > maxOutputBytes ||
-		!c.TrustedProcessEgress {
+		!c.TrustedProcessEgress || (c.SHA256 != "" && !shaRE.MatchString(c.SHA256)) {
 		return Receipt{}, &Error{Code: "input-invalid", Reason: "consultant"}
 	}
 	if prompt == "" || len(prompt) > maxStdinBytes || !utf8.ValidString(prompt) {
 		return Receipt{}, &Error{Code: "input-invalid", Reason: "prompt"}
 	}
 	start := time.Now()
-	out, err := run(ctx, runSpec{
-		command: c.Command, sha256: c.SHA256, args: claudeArgs(c.Model), stdin: prompt,
-		timeout: time.Duration(c.TimeoutSeconds) * time.Second, outputCap: c.MaxOutputBytes,
+	ctx, cancel := context.WithTimeout(ctx, time.Duration(c.TimeoutSeconds)*time.Second)
+	defer cancel()
+	spec := runSpec{
+		command: c.Command, sha256: c.SHA256, args: []string{"--version"},
+		timeout: time.Duration(c.TimeoutSeconds) * time.Second, outputCap: min(c.MaxOutputBytes, 4096),
 		waitDelay: runWaitDelay,
-	})
-	if err != nil {
-		// A caller cancellation that lands before exec comes back as a start
-		// failure, because CommandContext refuses to start on a dead context.
-		// Report the caller's own withdrawal, not a process error: the switch
-		// below gives cancellation the same precedence after Wait.
-		switch {
-		case errors.Is(ctx.Err(), context.Canceled):
-			return Receipt{}, &Error{Code: "canceled", Reason: "caller"}
-		case errors.Is(ctx.Err(), context.DeadlineExceeded):
-			return Receipt{}, &Error{Code: "timeout", Reason: "deadline"}
-		}
-		return Receipt{}, classifyRunError(err)
 	}
-	// Precedence is deliberate and fails closed. The runner already makes the
-	// deadline disjoint from the other two aborts: a cap abort and a caller
-	// cancellation both leave the run context Canceled rather than
-	// DeadlineExceeded, and TimedOut additionally excludes CapExceeded. Only
-	// two overlaps are real, and the order resolves them. Cap and cancel can
-	// both be set when a caller cancels a run that had already blown the cap;
-	// the cap wins, because it is the reason the output is unusable. Deadline
-	// and cancel can both be set when the deadline fired and the caller
-	// cancelled before Canceled was read from the parent context after Wait;
-	// cancel wins, because the caller withdrew the request. Incomplete cleanup
-	// and an abandoned pipe drain then outrank a zero exit status, because
-	// both mean the retained transcript may be a prefix of what the consultant
-	// wrote and a truncated transcript must never be admitted. A cancellation
-	// observed after Wait discards a completed answer on purpose: the caller
-	// withdrew the request, so no receipt is issued for it.
-	switch {
-	case out.CapExceeded:
-		return Receipt{}, &Error{Code: "output-limit", Reason: "cap"}
-	case out.Canceled:
-		return Receipt{}, &Error{Code: "canceled", Reason: "caller"}
-	case out.TimedOut:
-		return Receipt{}, &Error{Code: "timeout", Reason: "deadline"}
-	case !out.GroupCleanupOK || !out.CleanupOK:
-		return Receipt{}, &Error{Code: "process-exit", Reason: "cleanup"}
-	case out.WaitErrorKind == "wait-delay" || out.WaitErrorKind == "other":
-		return Receipt{}, &Error{Code: "drain-incomplete", Reason: out.WaitErrorKind}
-	case out.ExitCode != 0:
-		return Receipt{}, &Error{Code: "process-exit", Reason: out.WaitStatus}
+	// The version probe gets no prompt and uses the same bounded runner. Bind
+	// its answer to the bytes verified for that launch even without a config pin.
+	out, err := checkedRun(ctx, spec)
+	if err != nil {
+		return Receipt{}, err
+	}
+	version, versionOK := strings.CutSuffix(strings.TrimSpace(string(out.Stdout)), " (Claude Code)")
+	if !versionOK || !claudeSupportedVersions[version] {
+		return Receipt{}, &Error{Code: "unsupported-version", Reason: "version-mismatch"}
+	}
+	spec.sha256, spec.args, spec.stdin = out.TargetSHA256, claudeArgs(c.Model), prompt
+	spec.outputCap = c.MaxOutputBytes
+	out, err = checkedRun(ctx, spec)
+	if err != nil {
+		return Receipt{}, err
 	}
 	in, reasons := inspectStream(out.Stdout, prompt, out.Cwds)
 	// inspectStream fails an unpinned init itself; this is the same gate held
@@ -196,6 +172,55 @@ func Run(ctx context.Context, c Consultant, prompt string) (Receipt, error) {
 			OpusOutputTokens: in.OpusOutputTokens,
 		},
 	}, nil
+}
+
+// checkedRun applies the same failure precedence to the version probe and
+// prompt invocation. No output from a failed process is admitted by either.
+func checkedRun(ctx context.Context, spec runSpec) (runOutcome, error) {
+	out, err := run(ctx, spec)
+	if err != nil {
+		// A caller cancellation that lands before exec comes back as a start
+		// failure, because CommandContext refuses to start on a dead context.
+		// Report the caller's own withdrawal, not a process error: the switch
+		// below gives cancellation the same precedence after Wait.
+		switch {
+		case errors.Is(ctx.Err(), context.Canceled):
+			return runOutcome{}, &Error{Code: "canceled", Reason: "caller"}
+		case errors.Is(ctx.Err(), context.DeadlineExceeded):
+			return runOutcome{}, &Error{Code: "timeout", Reason: "deadline"}
+		}
+		return runOutcome{}, classifyRunError(err)
+	}
+	// Precedence is deliberate and fails closed. The runner already makes the
+	// deadline disjoint from the other two aborts: a cap abort and a caller
+	// cancellation both leave the run context Canceled rather than
+	// DeadlineExceeded, and TimedOut additionally excludes CapExceeded. Only
+	// two overlaps are real, and the order resolves them. Cap and cancel can
+	// both be set when a caller cancels a run that had already blown the cap;
+	// the cap wins, because it is the reason the output is unusable. Deadline
+	// and cancel can both be set when the deadline fired and the caller
+	// cancelled before Canceled was read from the parent context after Wait;
+	// cancel wins, because the caller withdrew the request. Incomplete cleanup
+	// and an abandoned pipe drain then outrank a zero exit status, because
+	// both mean the retained transcript may be a prefix of what the consultant
+	// wrote and a truncated transcript must never be admitted. A cancellation
+	// observed after Wait discards a completed answer on purpose: the caller
+	// withdrew the request, so no receipt is issued for it.
+	switch {
+	case out.CapExceeded:
+		return runOutcome{}, &Error{Code: "output-limit", Reason: "cap"}
+	case out.Canceled:
+		return runOutcome{}, &Error{Code: "canceled", Reason: "caller"}
+	case out.TimedOut:
+		return runOutcome{}, &Error{Code: "timeout", Reason: "deadline"}
+	case !out.GroupCleanupOK || !out.CleanupOK:
+		return runOutcome{}, &Error{Code: "process-exit", Reason: "cleanup"}
+	case out.WaitErrorKind == "wait-delay" || out.WaitErrorKind == "other":
+		return runOutcome{}, &Error{Code: "drain-incomplete", Reason: out.WaitErrorKind}
+	case out.ExitCode != 0:
+		return runOutcome{}, &Error{Code: "process-exit", Reason: out.WaitStatus}
+	}
+	return out, nil
 }
 
 // dropReason removes one literal so a prepended reason cannot appear twice.

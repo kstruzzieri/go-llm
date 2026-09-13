@@ -33,13 +33,18 @@ the runtime seam; `golem.Turn.Advisory` carries one staged receipt.
 - Consultant traffic is the vendor process's own and bypasses
   `-allow-destination`; the config field `trusted_process_egress: true` is an
   explicit acknowledgement, not a filter.
-- Only `model: "opus"` and CLI version `2.1.240` are accepted; an unpinned
-  version fails admission after the process runs, and an unsupported model
-  fails before any prompt is sent.
+- Only `model: "opus"` and CLI version `2.1.240` are accepted. A bounded
+  `--version` probe with empty stdin rejects an unpinned version before the
+  prompt is sent. Both launches share one deadline and must use the same
+  executable digest, even without a configured pin. Admission also rejects
+  non-Opus or missing assistant models and non-Opus usage models.
 - The consultant `command` must be an absolute path to a regular file whose
   path traverses no symlink (Homebrew shims and `/usr/local/bin` links must be
   given as their resolved target) and that is not group- or world-writable —
   a digest pin over a file the group can replace pins nothing. An optional
-  `sha256` is re-verified immediately before exec.
+  `sha256` is re-verified immediately before exec. Path and permission checks
+  are repeated before both launches, including for hand-built consultants.
+- Linux cleanup treats an unreaped zombie-only process group as exited;
+  live members or unreadable process information still fail cleanup.
 - Unix only: the runner depends on `Setpgid` and negative-PID process-group
   signalling, so a consult on Windows fails with `unsupported-platform`.

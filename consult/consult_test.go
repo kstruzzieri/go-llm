@@ -45,10 +45,13 @@ func fixtureBody(t *testing.T, stdoutLines string, exit int) string {
 	return `cat >/dev/null; sed "s|/private/synthetic|$PWD|g" ` + path + `; exit ` + strconv.Itoa(exit)
 }
 
+const versionFixture = `if [ "$1" = --version ]; then printf '2.1.240 (Claude Code)\n'; exit 0; fi
+`
+
 // fakeClaude emits the given stream-json lines on stdout and exits with exit.
 func fakeClaude(t *testing.T, stdoutLines string, exit int) Consultant {
 	t.Helper()
-	return consultantFor(t, fixtureBody(t, stdoutLines, exit))
+	return consultantFor(t, versionFixture+fixtureBody(t, stdoutLines, exit))
 }
 
 // mustFail requires a fixed-code failure and, with it, a zero receipt: no
@@ -134,6 +137,7 @@ func TestRunRejectsUnsupportedModelBeforeExec(t *testing.T) {
 		{"output_over", func(c *Consultant) { c.MaxOutputBytes = maxOutputBytes + 1 }},
 		{"name", func(c *Consultant) { c.Name = "Not A Name" }},
 		{"untrusted_egress", func(c *Consultant) { c.TrustedProcessEgress = false }},
+		{"sha256", func(c *Consultant) { c.SHA256 = "malformed" }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			c := fakeClaude(t, "", 0)
@@ -163,7 +167,7 @@ func TestRunClassifiesRunnerErrors(t *testing.T) {
 	missing.Command = filepath.Join(t.TempDir(), "absent")
 
 	notExec := fakeClaude(t, valid, 0)
-	notExec.Command = filepath.Join(t.TempDir(), "plain")
+	notExec.Command = filepath.Join(realTempDir(t), "plain")
 	if err := os.WriteFile(notExec.Command, []byte("#!/bin/sh\nexit 0\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -386,7 +390,7 @@ func TestRunReportsIncompleteDrain(t *testing.T) {
 	// The background sleep inherits stdout and outlives the leader. Shortening
 	// the runner's grace period is the only way to reach this branch from Run:
 	// waitDelay is not part of the Consultant contract.
-	c.Command = script(t, "sleep 8 & "+fixtureBody(t, valid, 0))
+	c.Command = script(t, versionFixture+"sleep 8 & "+fixtureBody(t, valid, 0))
 	restore := runWaitDelay
 	defer func() { runWaitDelay = restore }()
 	runWaitDelay = 200 * time.Millisecond
@@ -419,5 +423,146 @@ func TestRunReceiptEvidenceIsFixedFieldsOnly(t *testing.T) {
 		e.OpusInputTokens != 10, e.OpusOutputTokens != 5,
 		e.WaitStatus != "exited(0)", e.WaitErrorKind != "none":
 		t.Fatalf("evidence: %+v", e)
+	}
+}
+
+func TestRunRejectsNonOpusAnswers(t *testing.T) {
+	for _, tc := range []struct{ name, assistant, result, reason string }{
+		{"sonnet_answer", strings.ReplaceAll(assistantOK, "claude-opus-4-8", "claude-sonnet-5"), goodResult, "response-model-invalid"},
+		{"missing_answer_model", strings.ReplaceAll(assistantOK, "claude-opus-4-8", ""), goodResult, "response-model-invalid"},
+		{"absent_answer_model", strings.ReplaceAll(assistantOK, `"model":"claude-opus-4-8",`, ""), goodResult, "response-model-invalid"},
+		{"model_switch", stream(strings.ReplaceAll(assistantOK, "claude-opus-4-8", "claude-sonnet-5"), assistantOK), goodResult, "response-model-invalid"},
+		{"sonnet_usage", assistantOK, withUsage(`{"claude-sonnet-5":{"inputTokens":10,"outputTokens":5,"webSearchRequests":0,"provider":"firstParty"}}`), "usage-model-invalid"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := fakeClaude(t, stream(validInit, tc.assistant, tc.result), 0)
+			if ce := mustFail(t, context.Background(), c, "synthetic review prompt\n"); ce.Code != "protocol" || ce.Reason != tc.reason {
+				t.Fatalf("model rejection: %v, want protocol (%s)", ce, tc.reason)
+			}
+		})
+	}
+}
+
+func TestRunRevalidatesExecutable(t *testing.T) {
+	for _, change := range []string{"group_writable", "world_writable", "parent_symlink"} {
+		t.Run(change, func(t *testing.T) {
+			c := fakeClaude(t, stream(validInit, assistantOK, goodResult), 0)
+			var err error
+			c.Command, err = filepath.EvalSymlinks(c.Command)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := validate(&c); err != nil {
+				t.Fatal(err)
+			}
+			if change != "parent_symlink" {
+				mode := os.FileMode(0o770)
+				if change == "world_writable" {
+					mode = 0o707
+				}
+				if err := os.Chmod(c.Command, mode); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				dir := filepath.Dir(c.Command)
+				moved := dir + "-moved"
+				if err := os.Rename(dir, moved); err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { _ = os.RemoveAll(moved) })
+				if err := os.Symlink(moved, dir); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := validate(&c); err == nil {
+				t.Fatal("fixture must now fail config validation")
+			}
+			if ce := mustFail(t, context.Background(), c, "synthetic review prompt\n"); ce.Code != "target-invalid" {
+				t.Fatalf("changed target: %v, want target-invalid", ce)
+			}
+		})
+	}
+}
+
+func TestRunRejectsVersionBeforeSendingPrompt(t *testing.T) {
+	for name, output := range map[string]string{
+		"unsupported":  "2.1.241 (Claude Code)\n",
+		"missing":      "",
+		"malformed":    "2.1.240\n",
+		"extra_output": "2.1.240 (Claude Code)\nunexpected\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			dir := realTempDir(t)
+			marker, probeStdin := filepath.Join(dir, "prompt"), filepath.Join(dir, "probe-stdin")
+			versionFile := filepath.Join(dir, "version")
+			if err := os.WriteFile(versionFile, []byte(output), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			transcript := stream(strings.ReplaceAll(validInit, "2.1.240", "2.1.241"), assistantOK, goodResult)
+			body := "if [ \"$1\" = --version ]; then test \"$#\" -eq 1 || exit 9; cat > '" + probeStdin + "'; cat '" + versionFile + "'; exit 0; fi\ncat > '" + marker + "'\n" + fixtureBody(t, transcript, 0)
+			c := consultantFor(t, body)
+			if ce := mustFail(t, context.Background(), c, "synthetic review prompt\n"); ce.Code != "unsupported-version" {
+				t.Fatalf("expected unsupported-version, got %v", ce)
+			}
+			if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("unsupported version received a prompt: %v", err)
+			}
+			if raw, err := os.ReadFile(probeStdin); err != nil || len(raw) != 0 {
+				t.Fatalf("version probe stdin: %q, %v", raw, err)
+			}
+		})
+	}
+}
+
+// A successful version check must not authorize bytes installed while it ran.
+func TestRunBindsVersionToExecutable(t *testing.T) {
+	for _, pinned := range []bool{false, true} {
+		t.Run(strconv.FormatBool(pinned), func(t *testing.T) {
+			marker := filepath.Join(t.TempDir(), "prompt-received")
+			valid := stream(validInit, assistantOK, goodResult)
+			replacement := script(t, "cat > '"+marker+"'\n"+fixtureBody(t, valid, 0))
+			body := "if [ \"$1\" = --version ]; then mv '" + replacement + "' \"$0\"; printf '2.1.240 (Claude Code)\\n'; exit 0; fi\n" + fixtureBody(t, valid, 0)
+			c := consultantFor(t, body)
+			if pinned {
+				c.SHA256 = sha256File(t, c.Command)
+			}
+			if ce := mustFail(t, context.Background(), c, "private prompt\n"); ce.Code != "target-drift" {
+				t.Fatalf("replacement after version check: %v", ce)
+			}
+			if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("replacement received the prompt: %v", err)
+			}
+		})
+	}
+}
+
+func TestRunBoundsVersionPreflight(t *testing.T) {
+	for _, tc := range []struct{ name, probe, code string }{
+		{"output", "head -c 8192 /dev/zero; sleep 30", "output-limit"},
+		{"timeout", "sleep 30", "timeout"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			marker := filepath.Join(t.TempDir(), "prompt")
+			body := "if [ \"$1\" = --version ]; then " + tc.probe + "; exit 0; fi\ncat > '" + marker + "'\n" + fixtureBody(t, stream(validInit, assistantOK, goodResult), 0)
+			c := consultantFor(t, body)
+			if tc.code == "timeout" {
+				c.TimeoutSeconds = 1
+			}
+			if ce := mustFail(t, context.Background(), c, "private prompt\n"); ce.Code != tc.code {
+				t.Fatalf("preflight: %v, want %s", ce, tc.code)
+			}
+			if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("prompt sent after failed preflight: %v", err)
+			}
+		})
+	}
+}
+
+func TestRunSharesDeadlineWithVersionPreflight(t *testing.T) {
+	body := "if [ \"$1\" = --version ]; then sleep 0.9; printf '2.1.240 (Claude Code)\\n'; exit 0; fi\nsleep 1.2\n" + fixtureBody(t, stream(validInit, assistantOK, goodResult), 0)
+	c := consultantFor(t, body)
+	c.TimeoutSeconds = 2
+	if ce := mustFail(t, context.Background(), c, "hi\n"); ce.Code != "timeout" {
+		t.Fatalf("shared deadline: %v", ce)
 	}
 }

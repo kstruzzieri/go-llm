@@ -74,7 +74,7 @@ func fakeConsultantsFile(t *testing.T, name, stdout string, delay time.Duration)
 	if delay > 0 {
 		sleep = "sleep " + strconv.FormatFloat(delay.Seconds(), 'f', 3, 64) + "; "
 	}
-	body := "#!/bin/sh\ncat >" + filepath.Join(dir, "stdin") + "; " + sleep +
+	body := "#!/bin/sh\nif [ \"$1\" = --version ]; then printf '2.1.240 (Claude Code)\\n'; exit 0; fi\ncat >" + filepath.Join(dir, "stdin") + "; " + sleep +
 		"sed \"s|/private/synthetic|$PWD|g\" " + data + "\n"
 	if err := os.WriteFile(cmd, []byte(body), 0o700); err != nil {
 		t.Fatal(err)
