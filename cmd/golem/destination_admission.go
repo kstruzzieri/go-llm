@@ -93,6 +93,11 @@ func newDestinationAdmission(cfg destinationAdmissionConfig) (*destinationAdmiss
 	}, nil
 }
 
+// destinationConsentPrompt is the one batch consent question. ensure and
+// extend ask it verbatim, because both consent to the complete manifest
+// rendered immediately above it.
+const destinationConsentPrompt = "Allow this session to send data to the remote destinations listed above? [y/N] "
+
 // ensure admits the manifest if it is not already admitted this generation:
 // render the manifest, auto-admit when every destination is local or covered
 // by the exact allowlist, otherwise collect the one interactive batch
@@ -117,18 +122,18 @@ func (a *destinationAdmission) ensure(ctx context.Context) error {
 		if !a.interactive || a.promptYN == nil {
 			denial := &provider.DestinationDeniedError{
 				Destination: *uncovered,
-				Purpose:     a.purposeReaching(*uncovered),
+				Purpose:     purposeReaching(a.manifest, *uncovered),
 			}
 			return fmt.Errorf("%w; pass -allow-destination %q to permit it", denial, uncovered.String())
 		}
-		ok, err := a.promptYN(ctx, "Allow this session to send data to the remote destinations listed above? [y/N] ")
+		ok, err := a.promptYN(ctx, destinationConsentPrompt)
 		if err != nil {
 			return err
 		}
 		if !ok {
 			return &provider.DestinationDeniedError{
 				Destination: *uncovered,
-				Purpose:     a.purposeReaching(*uncovered),
+				Purpose:     purposeReaching(a.manifest, *uncovered),
 			}
 		}
 		// The approval grants exactly the manifest's destination set — not
@@ -152,6 +157,117 @@ func (a *destinationAdmission) revoke() {
 	defer a.mu.Unlock()
 	a.gate.Clear()
 	a.admitted = false
+}
+
+// extend admits a candidate model's destinations additively (#376). The
+// proposal is the union of the session's stored edges with the candidate
+// ones, validated, consented to, and published ONCE — never the old manifest
+// first and the candidate after. While a generation is installed the
+// publication is an Extend, which keeps the revocation token so a request
+// already in flight is not killed by a model switch; after /grants clear
+// there is no generation to extend, so the same complete proposal takes the
+// Install publication ensure uses.
+//
+// newGrantAdmitted reports whether publication needed a REMOTE destination
+// the prior baseline did not already permit. Everything here runs under the
+// same mutex ensure uses, so revoke cannot land between the publication and
+// the bookkeeping that records it.
+func (a *destinationAdmission) extend(ctx context.Context, edges []provider.DestinationEdge) (newGrantAdmitted bool, err error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	// The stored edges stay known after a revoke, so the proposal is the
+	// complete session reachability graph either way. Validate it BEFORE any
+	// publication: a malformed proposal changes nothing.
+	m, err := provider.NewDestinationManifest(append(append([]provider.DestinationEdge(nil), a.edges...), edges...)...)
+	if err != nil {
+		return false, err
+	}
+
+	if a.admitted && manifestCovers(a.manifest, m) {
+		// The installed generation already carries every proposed edge:
+		// re-rendering and re-publishing would be noise, not authority.
+		return false, nil
+	}
+
+	// The baseline both the prompt and the outcome are judged against. Once
+	// revoked, granted is authority the user WITHDREW: reusing it would
+	// silently re-admit a remote they cleared, so only the exact flags (and
+	// the normal loopback rule inside Permits) survive a revoke.
+	baseline := provider.NewDestinationPolicy(a.allowed...)
+	if a.admitted {
+		baseline = a.granted
+	}
+
+	// Rendered before the decision: the question refers to "the remote
+	// destinations listed above", and it asks about the PROPOSED manifest.
+	renderManifest(a.out, m)
+
+	dests := m.Destinations()
+	policy := baseline
+	uncovered := firstUncovered(dests, baseline)
+	if uncovered != nil {
+		if !a.interactive || a.promptYN == nil {
+			denial := &provider.DestinationDeniedError{
+				Destination: *uncovered,
+				Purpose:     purposeReaching(m, *uncovered),
+			}
+			return false, fmt.Errorf("%w; pass -allow-destination %q to permit it", denial, uncovered.String())
+		}
+		ok, err := a.promptYN(ctx, destinationConsentPrompt)
+		if err != nil {
+			return false, err
+		}
+		// A reader that answers yes on a cancelled context (Ctrl-C and a
+		// newline race) has not consented to anything.
+		if err := ctx.Err(); err != nil {
+			return false, err
+		}
+		if !ok {
+			return false, &provider.DestinationDeniedError{
+				Destination: *uncovered,
+				Purpose:     purposeReaching(m, *uncovered),
+			}
+		}
+		policy = provider.NewDestinationPolicy(append(dests, a.allowed...)...)
+	}
+
+	// Last look before authority changes hands. Cancellation arriving AFTER
+	// this point does not undo the grant — publication is what decides.
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	publish := a.gate.Extend
+	if !a.admitted {
+		publish = a.gate.Install
+	}
+	if err := publish(policy, m); err != nil {
+		return false, err
+	}
+	a.manifest = m
+	a.edges = m.Edges()
+	a.granted = policy
+	a.admitted = true
+	return uncovered != nil, nil
+}
+
+// manifestCovers reports whether every edge in proposed already appears in
+// cur with the same purpose and destination. The fallback marking is display
+// metadata, not authority (a reachable fallback is exactly as reachable as a
+// primary), so it alone never makes an edge new.
+func manifestCovers(cur, proposed *provider.DestinationManifest) bool {
+	have := make(map[provider.DestinationEdge]struct{})
+	for _, e := range cur.Edges() {
+		e.IsFallback = false
+		have[e] = struct{}{}
+	}
+	for _, e := range proposed.Edges() {
+		e.IsFallback = false
+		if _, ok := have[e]; !ok {
+			return false
+		}
+	}
+	return true
 }
 
 // setPrompt rebinds the interactive seam — the REPL installs its lineSource
@@ -205,11 +321,13 @@ func (a *destinationAdmission) pinLoopback(providerKey string, d provider.Destin
 	return nil
 }
 
-// purposeReaching returns one purpose whose edge reaches d — deterministic,
-// for diagnostics that must name the use case that made the destination
-// reachable.
-func (a *destinationAdmission) purposeReaching(d provider.Destination) string {
-	for _, e := range a.manifest.Edges() {
+// purposeReaching returns one purpose in m whose edge reaches d —
+// deterministic, for diagnostics that must name the use case that made the
+// destination reachable. It takes the manifest rather than reading the
+// admission's, because extend diagnoses a PROPOSED manifest the session has
+// not stored yet.
+func purposeReaching(m *provider.DestinationManifest, d provider.Destination) string {
+	for _, e := range m.Edges() {
 		if e.Destination == d {
 			return e.Purpose
 		}
@@ -234,11 +352,17 @@ func firstUncovered(dests []provider.Destination, policy provider.DestinationPol
 // primary/fallback marking. D14 fields only — provider key, canonical URL,
 // purpose, marker, locality. Deterministic order.
 func (a *destinationAdmission) render(w io.Writer) {
+	renderManifest(w, a.manifest)
+}
+
+// renderManifest is render over an arbitrary manifest — extend renders the
+// PROPOSED one, which is exactly what its consent question refers to.
+func renderManifest(w io.Writer, m *provider.DestinationManifest) {
 	byDest := make(map[provider.Destination][]provider.DestinationEdge)
-	for _, e := range a.manifest.Edges() {
+	for _, e := range m.Edges() {
 		byDest[e.Destination] = append(byDest[e.Destination], e)
 	}
-	dests := a.manifest.Destinations()
+	dests := m.Destinations()
 	sort.SliceStable(dests, func(i, j int) bool {
 		if dests[i].IsLocal() != dests[j].IsLocal() {
 			return dests[i].IsLocal()
