@@ -117,6 +117,37 @@ func TestClaudeInitRequiresPinnedVersionAuthSourcePermissionAndInventory(t *test
 	if in.SkillCount != 2 {
 		t.Fatalf("skill count not recorded: %+v", in)
 	}
+	// Version is surfaced to the caller, so only a plain bounded dotted-numeric
+	// literal is retained; anything else stays empty and still mismatches.
+	for _, tc := range []struct{ name, version string }{
+		{"control_char", `2.1.240\u0007`},
+		{"overlong", strings.Repeat("9", 25) + "." + strings.Repeat("8", 25) + "." + strings.Repeat("7", 25)},
+		{"not_dotted", "SENSITIVE"},
+		{"suffixed", "2.1.240-SENSITIVE"},
+	} {
+		t.Run("version_"+tc.name, func(t *testing.T) {
+			in, reasons := inspectStream([]byte(stream(strings.Replace(validInit, `"claude_code_version":"2.1.240"`, `"claude_code_version":"`+tc.version+`"`, 1), assistantOK, goodResult)), "", nil)
+			if in.Version != "" || !contains(reasons, "version-mismatch") {
+				t.Fatalf("hostile version surfaced: %q %v", in.Version, reasons)
+			}
+			mustNotLeak(t, in, reasons)
+		})
+	}
+	// The init model is evidence the caller cannot re-derive, so a model that is
+	// absent or not opus fails admission here.
+	for _, tc := range []struct{ name, init string }{
+		{"non_opus", strings.Replace(validInit, `"model":"claude-opus-4-8"`, `"model":"claude-sonnet-4-8"`, 1)},
+		{"missing", strings.Replace(validInit, `"model":"claude-opus-4-8",`, ``, 1)},
+		{"empty", strings.Replace(validInit, `"model":"claude-opus-4-8"`, `"model":""`, 1)},
+	} {
+		t.Run("init_model_"+tc.name, func(t *testing.T) {
+			in, reasons := inspectStream([]byte(stream(tc.init, assistantOK, goodResult)), "", nil)
+			if !contains(reasons, "init-model-invalid") || in.InitModelIsOpus {
+				t.Fatalf("non-opus init model admitted: %+v %v", in, reasons)
+			}
+			mustNotLeak(t, in, reasons)
+		})
+	}
 }
 
 func TestClaudeRule1UserEchoRequiresByteExactPrompt(t *testing.T) {
@@ -199,6 +230,8 @@ func TestClaudeRule2TransientAPIRetry(t *testing.T) {
 		{"attempt_string", stream(validInit, strings.Replace(retry("overloaded", 1), `"attempt":1`, `"attempt":"1"`, 1), assistantOK, goodResult), "api-retry-invalid", 1, 0},
 		{"missing_uuid", stream(validInit, strings.Replace(retry("overloaded", 1), `"uuid":"synthetic-uuid",`, ``, 1), assistantOK, goodResult), "api-retry-invalid", 1, 1},
 		{"delay_negative", stream(validInit, strings.Replace(retry("overloaded", 1), `"retry_delay_ms":500`, `"retry_delay_ms":-1`, 1), assistantOK, goodResult), "api-retry-invalid", 1, 1},
+		{"empty_uuid", stream(validInit, strings.Replace(retry("overloaded", 1), `"uuid":"synthetic-uuid"`, `"uuid":""`, 1), assistantOK, goodResult), "api-retry-invalid", 1, 1},
+		{"empty_session", stream(validInit, strings.Replace(retry("overloaded", 1), `"session_id":"synthetic-session"`, `"session_id":""`, 1), assistantOK, goodResult), "api-retry-invalid", 1, 1},
 		{"no_terminal", stream(validInit, retry("overloaded", 1), assistantOK), "terminal-invalid", 1, 1},
 		{"quota_rejected_same_run", stream(validInit, retry("rate_limit", 1), `{"type":"rate_limit_event","uuid":"u","session_id":"synthetic-session","rate_limit_info":{"status":"rejected"}}`, assistantOK, goodResult), "quota-rejected", 1, 1},
 	} {
@@ -405,6 +438,15 @@ func TestClaudeItem11DecisionBooleans(t *testing.T) {
 	if ok(reasons) || in.CwdMatches || !contains(reasons, "cwd-mismatch") {
 		t.Fatalf("missing cwd admitted: %+v %v", in, reasons)
 	}
+	// A child of an accepted root is not the root.
+	in, reasons = inspectStream([]byte(stream(strings.Replace(validInit, `"cwd":"/private/synthetic"`, `"cwd":"/private/synthetic/x"`, 1), assistantOK, goodResult)), "", []string{"/private/synthetic"})
+	if ok(reasons) || in.CwdMatches || !contains(reasons, "cwd-mismatch") {
+		t.Fatalf("cwd prefix admitted: %+v %v", in, reasons)
+	}
+	in, reasons = inspectStream([]byte(stream(validInit, assistantOK, goodResult)), "", []string{"/private/synthetic"})
+	if !ok(reasons) || !in.CwdMatches {
+		t.Fatalf("exact cwd rejected: %+v %v", in, reasons)
+	}
 	in, reasons = inspectStream([]byte(stream(validInit, strings.Replace(assistantOK, "synthetic-session", "SENSITIVE-other", 1), goodResult)), "", nil)
 	if ok(reasons) || in.SessionConsistent || !contains(reasons, "session-inconsistent") {
 		t.Fatalf("session drift admitted: %+v %v", in, reasons)
@@ -462,6 +504,10 @@ func TestClaudeClassifiesDocumentedRateLimitEnvelope(t *testing.T) {
 	if _, reasons := inspectStream([]byte(validInit+`{"type":"rate_limit_event","rate_limit_info":{"status":"allowed"}}`+assistantOK+goodResult), "", nil); ok(reasons) {
 		t.Fatal("missing envelope identity accepted")
 	}
+	// An explicitly empty identity is as absent as a missing one.
+	if _, reasons := inspectStream([]byte(validInit+`{"type":"rate_limit_event","uuid":"","session_id":"synthetic-session","rate_limit_info":{"status":"allowed"}}`+assistantOK+goodResult), "", nil); ok(reasons) {
+		t.Fatal("empty envelope identity accepted")
+	}
 }
 
 func TestClaudeResultChecksReplyAndResolvedModel(t *testing.T) {
@@ -510,18 +556,40 @@ func TestClaudeProtocolAcceptsOnlyExplicitSuccess(t *testing.T) {
 }
 
 func TestClaudeRejectsAmbiguousJSON(t *testing.T) {
+	// Input that cannot be decoded at all yields the malformed literal alone.
 	for _, input := range []string{
-		goodResult + goodResult, goodResult + "garbage", `[]`, `null`, `{"type":`,
+		"", goodResult + "garbage", `[]`, `null`, `{"type":`,
 		goodResult + `{"unfinished":`, goodResult + `[`,
 		strings.Replace(goodResult, "OK", "\xff", 1),
-		strings.Replace(goodResult, `{"type":"result",`, `{"type":"result","type":"result",`, 1),
-		strings.Replace(goodResult, `"result":"OK"`, `"result":"OK","usage":{"a":1,"a":2}`, 1),
-		strings.Replace(goodResult, `"result":"OK"`, `"result":"OK","usage":[{"a":1,"a":2}]`, 1),
-		"",
+		strings.Repeat("[", 66) + "0" + strings.Repeat("]", 66),
 	} {
-		if _, reasons := inspectStream([]byte(input), "", nil); ok(reasons) {
-			t.Errorf("ambiguous input accepted: %q", input)
+		if _, reasons := inspectStream([]byte(input), "", nil); strings.Join(reasons, ",") != "malformed" {
+			t.Errorf("ambiguous input %q: reasons %v", input, reasons)
 		}
+	}
+	// Duplicate keys inside an otherwise admissible stream: the ambiguity is
+	// the only thing standing between these and a clean verdict, including
+	// when the second spelling is escaped.
+	for _, tc := range []struct{ name, result string }{
+		{"top_level", strings.Replace(goodResult, `{"type":"result",`, `{"type":"result","type":"result",`, 1)},
+		{"nested_object", strings.Replace(goodResult, `"result":"OK"`, `"result":"OK","usage":{"a":1,"a":2}`, 1)},
+		{"escaped_in_array", strings.Replace(goodResult, `"result":"OK"`, `"result":"OK","usage":[{"a":1,"\u0061":2}]`, 1)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, reasons := inspectStream([]byte(stream(validInit, assistantOK, tc.result)), "", nil); strings.Join(reasons, ",") != "malformed" {
+				t.Fatalf("duplicate key admitted: reasons %v", reasons)
+			}
+			// The same stream without the duplicate is clean, so nothing but
+			// the duplicate can be producing the rejection above.
+			if _, reasons := inspectStream([]byte(stream(validInit, assistantOK, goodResult)), "", nil); !ok(reasons) {
+				t.Fatalf("control stream rejected: %v", reasons)
+			}
+		})
+	}
+	// Two terminals decode cleanly and are rejected on their merits, not as
+	// malformed input.
+	if _, reasons := inspectStream([]byte(stream(validInit, assistantOK, goodResult, goodResult)), "", nil); !contains(reasons, "tail-invalid") || contains(reasons, "malformed") {
+		t.Fatalf("second terminal misclassified: %v", reasons)
 	}
 	// Malformed input names the record that failed to decode, with no content.
 	in, reasons := inspectStream([]byte(validInit+"\n"+`{"type":`), "", nil)
@@ -535,8 +603,8 @@ func TestClaudeRejectsAmbiguousJSON(t *testing.T) {
 
 func TestClaudeBoundsInputAndReportsActivityWithoutPayload(t *testing.T) {
 	for _, input := range []string{strings.Repeat(" ", 1<<20) + goodResult, strings.Repeat("[", 66) + "0" + strings.Repeat("]", 66)} {
-		if _, reasons := inspectStream([]byte(input), "", nil); ok(reasons) {
-			t.Fatal("unbounded input accepted")
+		if _, reasons := inspectStream([]byte(input), "", nil); strings.Join(reasons, ",") != "malformed" {
+			t.Fatalf("unbounded input accepted: %v", reasons)
 		}
 	}
 	in, reasons := inspectStream([]byte(validInit+`{"type":"system","subtype":"hook_response","output":"SENSITIVE"}{"type":"assistant","message":{"content":[{"type":"tool_use","input":"SENSITIVE"}]}}`+goodResult), "", nil)
@@ -608,5 +676,31 @@ func TestInspectStreamAnswerSemantics(t *testing.T) {
 				t.Fatal("thinking or vendor text leaked into inspection")
 			}
 		})
+	}
+}
+
+func TestClaudeUnknownDiagnosticsUseFixedBuckets(t *testing.T) {
+	input := validInit + `{"type":"user","message":"SENSITIVE"}{"type":"system","subtype":"status","payload":"SENSITIVE"}{"type":"SENSITIVE"}{"type":"assistant","message":{"content":[{"type":"SENSITIVE"}]}}` + goodResult
+	in, reasons := inspectStream([]byte(input), "", nil)
+	if ok(reasons) || strings.Join(in.UnknownKinds, ",") != "system:status,top:other,assistant:envelope,assistant:content" || !contains(reasons, "user-event-invalid") {
+		t.Fatalf("missing fixed buckets: %+v %v", in, reasons)
+	}
+	mustNotLeak(t, in, reasons)
+}
+
+func TestClaudeEmptyEvidenceListsSerializeAsArrays(t *testing.T) {
+	// Downstream gates test emptiness; a clean verdict must serialize [] not null.
+	in, reasons := inspectStream([]byte(stream(validInit, assistantOK, goodResult)), "", nil)
+	if !ok(reasons) {
+		t.Fatalf("clean stream rejected: %v", reasons)
+	}
+	b, err := json.Marshal(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, field := range []string{`"unknown_kinds":[]`, `"api_retry_errors":[]`, `"rate_limit_types":[]`} {
+		if !strings.Contains(string(b), field) {
+			t.Fatalf("empty list serialized as null, want %s: %s", field, b)
+		}
 	}
 }

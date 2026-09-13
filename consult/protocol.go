@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -38,7 +39,7 @@ type inspection struct {
 	ModelIsOpus        bool     `json:"model_is_opus"`
 
 	InitVersionExact           bool     `json:"init_version_exact"`
-	Version                    string   `json:"version"`             // the init's declared claude_code_version, empty when not a string
+	Version                    string   `json:"version"`             // the init's claude_code_version, retained only as a bounded dotted-numeric literal
 	InitAPIKeySource           string   `json:"init_api_key_source"` // none, env, helper, managed, legacy, missing, other
 	InitPermissionMode         string   `json:"init_permission_mode"`
 	InitInventoryPresent       bool     `json:"init_inventory_present"`
@@ -85,6 +86,15 @@ type inspection struct {
 // recorded against; a different one is evidence, not a hard stop (the caller
 // applies its own supported set to inspection.Version).
 const pinnedCLIVersion = "2.1.240"
+
+// versionRE bounds what may be copied out of the init into inspection.Version.
+// The value reaches a caller that compares and reports it, so only a plain
+// dotted-numeric literal survives; anything else leaves Version empty and is
+// evidence solely through the pinned-version check.
+var versionRE = regexp.MustCompile(`^[0-9]+\.[0-9]+\.[0-9]+$`)
+
+// maxVersionLen bounds the retained version before it is matched.
+const maxVersionLen = 32
 
 // documentedBuiltinAgents is the pinned built-in subagent name list, taken
 // from https://code.claude.com/docs/en/sub-agents ("Built-in subagents"),
@@ -154,7 +164,9 @@ func isOpusModel(model string) bool {
 // and its symlink-resolved form); an empty list skips the cwd requirement.
 func initCheck(m map[string]any, expectedCwds ...string) initFacts {
 	var f initFacts
-	f.version, _ = m["claude_code_version"].(string)
+	if v, isString := m["claude_code_version"].(string); isString && len(v) <= maxVersionLen && versionRE.MatchString(v) {
+		f.version = v
+	}
 	f.versionExact = m["claude_code_version"] == pinnedCLIVersion
 	switch v, present := m["apiKeySource"]; {
 	case !present:
@@ -559,6 +571,9 @@ func (x *inspector) system(i int, m map[string]any, subtype string) {
 		}
 		if !f.versionExact {
 			x.fail("version-mismatch")
+		}
+		if !f.modelPresent || !f.modelIsOpus {
+			x.fail("init-model-invalid")
 		}
 		if f.apiKeySource != "none" {
 			x.fail("auth-source-invalid")
