@@ -45,6 +45,7 @@ func TestLoadRejectsInvalidConfigs(t *testing.T) {
 		"bad_sha":          strings.Replace(goodConfig, `"sha256":""`, `"sha256":"ABC"`, 1),
 		"version_2":        strings.Replace(goodConfig, `"version":1`, `"version":2`, 1),
 		"trailing_content": goodConfig + ` {"version":1,"consultants":[]}`,
+		"dir_command":      strings.Replace(goodConfig, "@CMD@", t.TempDir(), 1),
 		"duplicate_name":   strings.Replace(goodConfig, `]}`, `,{"name":"claude","adapter":"claude","command":"@CMD@","model":"opus","trusted_process_egress":true}]}`, 1),
 	} {
 		if _, err := Load(writeConfig(t, body)); err == nil {
@@ -65,8 +66,12 @@ func TestLoadDefaultsAndDisabled(t *testing.T) {
 	if _, err := Load(""); !errors.Is(err, ErrDisabled) {
 		t.Fatalf("missing default must disable, got %v", err)
 	}
-	if _, err := Load("relative/consultants.json"); err == nil {
-		t.Fatal("relative explicit path accepted")
+	// The guard must be what rejects a relative path, not a failing open: put
+	// a real, loadable config in the working directory so the only reason to
+	// fail is the IsAbs check.
+	t.Chdir(filepath.Dir(writeConfig(t, goodConfig)))
+	if _, err := Load("consultants.json"); err == nil || !strings.Contains(err.Error(), "absolute") {
+		t.Fatalf("relative explicit path must be rejected as non-absolute, got %v", err)
 	}
 	if _, err := Load(filepath.Join(t.TempDir(), "missing.json")); err == nil || errors.Is(err, ErrDisabled) {
 		t.Fatalf("missing explicit path must fail, not disable: %v", err)
@@ -80,7 +85,10 @@ func TestLoadRejectsSymlinkCommand(t *testing.T) {
 	if err := os.Symlink(cs["claude"].Command, link); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Load(writeConfig(t, strings.Replace(goodConfig, "@CMD@", link, 1))); err == nil {
-		t.Fatal("symlink command accepted")
+	// Pin the message: Lstat also reports a symlink as non-regular, so only the
+	// wording distinguishes the symlink arm from the regular-file arm.
+	_, err := Load(writeConfig(t, strings.Replace(goodConfig, "@CMD@", link, 1)))
+	if err == nil || !strings.Contains(err.Error(), "must not be a symlink") {
+		t.Fatalf("symlink command must be rejected as a symlink, got %v", err)
 	}
 }

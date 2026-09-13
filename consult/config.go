@@ -50,7 +50,8 @@ const (
 var nameRE = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,31}$`)
 var shaRE = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
-// DefaultPath is $XDG_CONFIG_HOME/go-llm/consultants.json (os.UserConfigDir).
+// DefaultPath is go-llm/consultants.json under os.UserConfigDir
+// ($XDG_CONFIG_HOME on Linux, ~/Library/Application Support on macOS).
 func DefaultPath() (string, error) {
 	dir, err := os.UserConfigDir()
 	if err != nil {
@@ -122,9 +123,9 @@ func validate(c *Consultant) error {
 	case !claudeModels[c.Model]:
 		return fmt.Errorf("unsupported model %q for adapter claude", c.Model)
 	case c.TimeoutSeconds < 0 || c.TimeoutSeconds > maxTimeoutSeconds:
-		return fmt.Errorf("timeout_seconds must be 1..%d", maxTimeoutSeconds)
+		return fmt.Errorf("timeout_seconds must be 0..%d", maxTimeoutSeconds)
 	case c.MaxOutputBytes < 0 || c.MaxOutputBytes > maxOutputBytes:
-		return fmt.Errorf("max_output_bytes must be 1..%d", maxOutputBytes)
+		return fmt.Errorf("max_output_bytes must be 0..%d", maxOutputBytes)
 	case !c.TrustedProcessEgress:
 		return errors.New("trusted_process_egress must be true: consultant traffic is not filtered by go-llm")
 	}
@@ -132,8 +133,11 @@ func validate(c *Consultant) error {
 	if err != nil {
 		return fmt.Errorf("command: %w", err)
 	}
-	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
-		return errors.New("command must be a regular file, not a symlink")
+	if info.Mode()&os.ModeSymlink != 0 {
+		return errors.New("command must not be a symlink")
+	}
+	if !info.Mode().IsRegular() {
+		return errors.New("command must be a regular file")
 	}
 	if c.TimeoutSeconds == 0 {
 		c.TimeoutSeconds = defaultTimeoutSeconds
