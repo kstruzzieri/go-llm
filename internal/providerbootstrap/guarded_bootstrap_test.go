@@ -129,11 +129,96 @@ func TestNewGatedRefreshesOnlyActiveProviders(t *testing.T) {
 	if got := b.total(); got != 0 {
 		t.Errorf("inactive provider received %d requests, want 0", got)
 	}
-	// The inactive slot-discovery backend leaves governance entirely:
-	// (0, false), never the governed fail-safe (1, true) — and therefore
-	// nothing to probe.
-	if n, ok := bundle.Router.SlotCapacity(provider.ModelKey{Provider: "b", Model: "m1"}); ok || n != 0 {
-		t.Errorf("inactive slot-discovery provider governed: (%d, %v), want (0, false)", n, ok)
+	// M3: the inactive slot-discovery backend stays GOVERNED — configured
+	// for lazy governance even though it is not active for startup I/O — so
+	// a later /model switch onto it is admission-counted by this same
+	// router. Unknown capacity keeps the conservative single slot, and
+	// reading it is a pure cache read: still zero requests.
+	if n, ok := bundle.Router.SlotCapacity(provider.ModelKey{Provider: "b", Model: "m1"}); !ok || n != 1 {
+		t.Errorf("inactive slot-discovery provider capacity = (%d, %v), want governed (1, true)", n, ok)
+	}
+	if got := b.total(); got != 0 {
+		t.Errorf("reading cached capacity sent %d requests to the inactive provider, want 0", got)
+	}
+}
+
+// M3 end to end: a provider on NO startup route is silent at bootstrap, yet
+// stays slot-governed, and its slot probe reaches the wire only once its
+// slot-probe edge is admitted additively (the #376 /model-switch shape).
+//
+// Denial before admission is asserted on the gate directly rather than by
+// racing a probe goroutine: Bind(slot-probe, "b") is the exact call the
+// source's probe binder makes, and unlike a launched probe its outcome is
+// ordered with respect to Extend.
+func TestNewGatedInactiveProviderProbesOnlyAfterAdmission(t *testing.T) {
+	a := newCountingOpenAIServer(t)
+	b := newCountingOpenAIServer(t)
+	cfg := twoProviderConfig(a.srv.URL, b.srv.URL)
+	pcB := cfg.Providers["b"]
+	pcB.SlotDiscovery = true
+	cfg.Providers["b"] = pcB
+	key := provider.ModelKey{Provider: "b", Model: "m1"}
+
+	route, err := PlanRoleRoute(cfg, "chatrole", "chat")
+	if err != nil {
+		t.Fatal(err)
+	}
+	gate, plan := gateFromPlan(t, cfg, []PlannedRoute{route}, PlanOptions{})
+
+	bundle, err := New(t.Context(), Options{
+		Config:          cfg,
+		DestinationGate: gate,
+		ActiveProviders: plan.ActiveProviders,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = bundle.Close() }()
+	if got := b.total(); got != 0 {
+		t.Fatalf("inactive provider received %d requests at startup, want 0", got)
+	}
+	if n, ok := bundle.Router.SlotCapacity(key); !ok || n != 1 {
+		t.Fatalf("inactive provider capacity = (%d, %v), want governed (1, true)", n, ok)
+	}
+	if _, err := gate.Bind(t.Context(), provider.DestinationPurposeSlotProbe, "b"); !errors.Is(err, provider.ErrDestinationDenied) {
+		t.Fatalf("pre-admission slot-probe bind = %v, want ErrDestinationDenied", err)
+	}
+
+	// Admit b's slot-probe edge additively — what a later CLI wrapper does
+	// when the session switches onto this provider. Effective supplies the
+	// SAME destination identity the bundle's guarded slot client is bound
+	// to; planning from anything else could admit a URL nothing dials.
+	extended := make([]provider.DestinationEdge, 0, len(plan.Edges)+1)
+	extended = append(extended, plan.Edges...)
+	extended = append(extended, provider.DestinationEdge{
+		Purpose:     provider.DestinationPurposeSlotProbe,
+		Destination: bundle.Effective.Destinations()["b"],
+	})
+	m, err := provider.NewDestinationManifest(extended...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := gate.Extend(provider.AllowAllDestinations(), m); err != nil {
+		t.Fatalf("Extend: %v", err)
+	}
+
+	bundle.Router.RecordSlotUse(key)
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if n, ok := bundle.Router.SlotCapacity(key); ok && n == 4 {
+			break
+		}
+		if time.Now().After(deadline) {
+			n, ok := bundle.Router.SlotCapacity(key)
+			t.Fatalf("admitted probe never landed; capacity = (%d, %v), /props hits = %d", n, ok, b.props.Load())
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if got := b.props.Load(); got != 1 {
+		t.Errorf("/props hit %d times, want exactly 1", got)
+	}
+	if got := b.total(); got != 1 {
+		t.Errorf("inactive provider received %d requests overall, want exactly 1 (the admitted probe)", got)
 	}
 }
 

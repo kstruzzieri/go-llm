@@ -2,7 +2,10 @@ package providerbootstrap
 
 import (
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/kstruzzieri/go-llm/config"
@@ -210,5 +213,94 @@ func TestNewBundleConfigReflectsOllamaOverride(t *testing.T) {
 	defer func() { _ = bundle.Close() }()
 	if got := bundle.Config.Providers["ollama"].BaseURL; got != "http://127.0.0.1:9999" {
 		t.Errorf("Bundle.Config base URL = %q, want the override the client dials", got)
+	}
+}
+
+// Bundle.Effective is the EXACT materialization New used — not a re-run of
+// Materialize over the caller's config. Pinned three ways: it carries the
+// same *config.Config Bundle.Config exposes; a network plan built from it
+// names the destinations the bundle's clients actually dial (both override
+// families at once); and the caller's config is still the caller's.
+//
+// Effective is shared, not owned: its copy-on-write rule (see Materialize)
+// applies to every consumer reached through this field.
+func TestNewBundleEffectiveIsTheMaterializedInput(t *testing.T) {
+	var tags atomic.Int64
+	ollamaSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/tags":
+			tags.Add(1)
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"models":[]}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer ollamaSrv.Close()
+	lc := newCountingOpenAIServer(t)
+
+	const configuredOllama = "http://configured.example:11434"
+	const configuredLC = "http://configured.example:8080"
+	cfg := &config.Config{
+		Providers: map[string]config.ProviderConfig{
+			"ollama": {BaseURL: configuredOllama, APIFormat: "ollama"},
+			"lc":     {BaseURL: configuredLC, APIFormat: "openai-compat"},
+		},
+		Models:   map[string]config.ModelConfig{"chatrole": {Provider: "lc", Name: "m1", Type: "dense", ContextWindow: 32768}},
+		Defaults: map[string]string{"chat": "chatrole"},
+	}
+	bundle, err := New(t.Context(), Options{
+		Config:                          cfg,
+		OllamaURLOverride:               ollamaSrv.URL,
+		OpenAICompatURLOverrideProvider: "lc",
+		OpenAICompatURLOverride:         lc.srv.URL,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = bundle.Close() }()
+
+	if bundle.Effective == nil {
+		t.Fatal("Bundle.Effective is nil")
+	}
+	if bundle.Effective.Config() != bundle.Config {
+		t.Errorf("Bundle.Effective.Config() is a different *config.Config than Bundle.Config")
+	}
+
+	// The clients New built dial the overridden URLs.
+	if got := tags.Load(); got != 1 {
+		t.Errorf("ollama client hit the override server %d times, want 1", got)
+	}
+	if got := lc.models.Load(); got != 1 {
+		t.Errorf("openai-compat client hit the override server %d times, want 1", got)
+	}
+
+	// A candidate plan built from Bundle.Effective names those same URLs.
+	plan, err := BuildNetworkPlan(bundle.Effective, []PlannedRoute{{UseCase: "agent", Recommend: true}}, PlanOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]string{"ollama": ollamaSrv.URL, "lc": lc.srv.URL}
+	seen := map[string]bool{}
+	for _, e := range plan.Edges {
+		if e.Purpose != "agent" {
+			continue
+		}
+		name := e.Destination.Provider()
+		if got := e.Destination.BaseURL(); got != want[name] {
+			t.Errorf("plan edge for %q names %q, want the dialed %q", name, got, want[name])
+		}
+		seen[name] = true
+	}
+	if len(seen) != 2 {
+		t.Errorf("agent edges covered %v, want both providers", seen)
+	}
+
+	// The caller's config is untouched by all of it.
+	if got := cfg.Providers["ollama"].BaseURL; got != configuredOllama {
+		t.Errorf("caller config ollama base URL mutated to %q", got)
+	}
+	if got := cfg.Providers["lc"].BaseURL; got != configuredLC {
+		t.Errorf("caller config lc base URL mutated to %q", got)
 	}
 }
