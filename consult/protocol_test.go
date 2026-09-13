@@ -707,19 +707,37 @@ func TestClaudeEmptyEvidenceListsSerializeAsArrays(t *testing.T) {
 
 func TestInspectStreamBoundsTheAnswer(t *testing.T) {
 	// The answer crosses into agent.Advisory, which caps at maxAnswerBytes.
-	body := func(n int) string {
-		text := strings.Repeat("x", n)
+	// unit is one JSON-escaped character repeated n times in both the
+	// assistant text and the terminal result.
+	body := func(unit string, n int) string {
+		text := strings.Repeat(unit, n)
 		return stream(validInit,
 			strings.Replace(assistantOK, `"text":"OK"`, `"text":"`+text+`"`, 1),
 			strings.Replace(goodResult, `"result":"OK"`, `"result":"`+text+`"`, 1))
 	}
-	in, reasons := inspectStream([]byte(body(65537)), "", nil)
-	if !contains(reasons, "answer-too-large") || in.Answer != "" {
-		t.Fatalf("oversize answer retained: %d bytes, reasons %v", len(in.Answer), reasons)
-	}
-	in, reasons = inspectStream([]byte(body(65536)), "", nil)
-	if !ok(reasons) || len(in.Answer) != 65536 {
-		t.Fatalf("answer at the cap rejected: %d bytes, reasons %v", len(in.Answer), reasons)
+	// Each DEL sanitizes to a three-byte U+FFFD, so the cap must be measured
+	// on the sanitized answer: 21846 DELs are 21846 raw bytes but 65538 sent.
+	for _, tc := range []struct {
+		name, unit string
+		n, want    int
+	}{
+		{"plain_over", "x", 65537, -1},
+		{"plain_at_cap", "x", 65536, 65536},
+		{"expanding_over", `\u007f`, 21846, -1},
+		{"expanding_under_cap", `\u007f`, 21845, 65535},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			in, reasons := inspectStream([]byte(body(tc.unit, tc.n)), "", nil)
+			if tc.want < 0 {
+				if !contains(reasons, "answer-too-large") || in.Answer != "" {
+					t.Fatalf("oversize answer retained: %d bytes, reasons %v", len(in.Answer), reasons)
+				}
+				return
+			}
+			if !ok(reasons) || len(in.Answer) != tc.want {
+				t.Fatalf("answer of %d bytes rejected, want %d: reasons %v", len(in.Answer), tc.want, reasons)
+			}
+		})
 	}
 }
 
