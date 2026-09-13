@@ -206,6 +206,25 @@ func TestRunTimeoutAndCancelCodes(t *testing.T) {
 			t.Fatalf("err %v, want canceled (caller)", ce)
 		}
 	})
+	// A context already dead on entry never reaches Wait: CommandContext
+	// refuses to start, so the outcome arrives as a start error and must not
+	// be reported to the user as a process failure of their own Ctrl-C.
+	t.Run("canceled_before_exec", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		c := fakeClaude(t, strings.Join([]string{validInit, assistantOK, goodResult}, "\n"), 0)
+		if ce := mustFail(t, ctx, c, "hi\n"); ce.Code != "canceled" || ce.Reason != "caller" {
+			t.Fatalf("err %v, want canceled (caller)", ce)
+		}
+	})
+	t.Run("expired_before_exec", func(t *testing.T) {
+		ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+		defer cancel()
+		c := fakeClaude(t, strings.Join([]string{validInit, assistantOK, goodResult}, "\n"), 0)
+		if ce := mustFail(t, ctx, c, "hi\n"); ce.Code != "timeout" || ce.Reason != "deadline" {
+			t.Fatalf("err %v, want timeout (deadline)", ce)
+		}
+	})
 }
 
 func TestRunOutputLimitCode(t *testing.T) {

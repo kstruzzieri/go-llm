@@ -125,6 +125,16 @@ func Run(ctx context.Context, c Consultant, prompt string) (Receipt, error) {
 		waitDelay: runWaitDelay,
 	})
 	if err != nil {
+		// A caller cancellation that lands before exec comes back as a start
+		// failure, because CommandContext refuses to start on a dead context.
+		// Report the caller's own withdrawal, not a process error: the switch
+		// below gives cancellation the same precedence after Wait.
+		switch {
+		case errors.Is(ctx.Err(), context.Canceled):
+			return Receipt{}, &Error{Code: "canceled", Reason: "caller"}
+		case errors.Is(ctx.Err(), context.DeadlineExceeded):
+			return Receipt{}, &Error{Code: "timeout", Reason: "deadline"}
+		}
 		return Receipt{}, classifyRunError(err)
 	}
 	// Precedence is deliberate and fails closed. The runner already makes the
