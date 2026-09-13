@@ -753,6 +753,9 @@ func orderedToolNames(tools []agent.Tool) []string {
 // and /allow-exec still insert where they always did, and the children now
 // route to the new backend while still seeing only the read-only prefix.
 func TestModelSetRebuildsParentFollowingDispatchInPlace(t *testing.T) {
+	if modelSetUseCase != dispatchUseCase {
+		t.Fatalf("modelSetUseCase %q must equal dispatchUseCase %q: the rebuilt child reuses the parent ceiling", modelSetUseCase, dispatchUseCase)
+	}
 	fx := newModelSwitchFixture(t, "")
 	fx.withSession(t, []string{"-dispatch"}, func(t *testing.T, sess *replSession) {
 		sess.stdinTerminal = true

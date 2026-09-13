@@ -604,9 +604,10 @@ holds for every REPL, terminal or piped: consent is read through the same
 line source as goals, so a script that switches to an uncovered remote must
 either pass `-allow-destination` or supply `y`/`yes` on the line after the
 command — any other line denies. Where no consent prompt is bound at all — the
-headless modes, which have no `/model`, and startup admission — an uncovered
-remote fails closed instead and names the exact `-allow-destination` value
-that would cover it. Neither `/model` nor `/model set` is recorded or sent as
+headless modes `-p`, `-plan`, and `-goal -approve-plan-lock`, which have no
+`/model`, and startup admission outside a terminal — an uncovered remote fails
+closed instead and names the exact `-allow-destination` value that would
+cover it. Neither `/model` nor `/model set` is recorded or sent as
 conversation content.
 
 Accepted thinking controls carry forward and are re-gated against the new
