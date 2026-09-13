@@ -124,6 +124,25 @@ func TestLoadDefaultsAndDisabled(t *testing.T) {
 	}
 }
 
+// TestLoadDisablesWhenConfigDirIsUnresolvable covers a host with no usable
+// config directory at all: a caller that starts with the default path must be
+// told /consult is unavailable, not that it is misconfigured, or the whole
+// program refuses to start in a stripped environment.
+func TestLoadDisablesWhenConfigDirIsUnresolvable(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", "")
+	t.Setenv("HOME", "")
+	if _, err := DefaultPath(); err == nil {
+		t.Skip("this platform resolves a config dir without HOME or XDG_CONFIG_HOME")
+	}
+	if _, err := Load(""); !errors.Is(err, ErrDisabled) {
+		t.Fatalf("unresolvable config dir must disable, got %v", err)
+	}
+	// An explicit path never consults the environment, so it still fails loud.
+	if _, err := Load(filepath.Join(t.TempDir(), "missing.json")); err == nil || errors.Is(err, ErrDisabled) {
+		t.Fatalf("explicit path must fail, not disable: %v", err)
+	}
+}
+
 func TestLoadRejectsSymlinkCommand(t *testing.T) {
 	p, cmd := writeConfig(t, goodConfig)
 	link := filepath.Join(filepath.Dir(p), "claude")

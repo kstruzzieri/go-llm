@@ -61,14 +61,20 @@ func DefaultPath() (string, error) {
 }
 
 // Load reads and validates the consultants file. An explicit path must be
-// absolute and must load; an empty path uses DefaultPath, where a missing
-// file yields ErrDisabled.
+// absolute and must load. An empty path uses DefaultPath, and /consult is
+// disabled rather than misconfigured whenever that default is unusable: both
+// a missing file and an unresolvable config directory (no HOME, as in a
+// stripped test or service environment) yield an error satisfying
+// errors.Is(err, ErrDisabled).
 func Load(explicit string) (map[string]Consultant, error) {
 	path := explicit
 	if path == "" {
 		var err error
 		if path, err = DefaultPath(); err != nil {
-			return nil, err
+			// No resolvable config directory is indistinguishable, for the
+			// caller, from no consultants file: neither is a misconfiguration
+			// and both simply mean /consult is unavailable.
+			return nil, fmt.Errorf("%w: %v", ErrDisabled, err)
 		}
 	} else if !filepath.IsAbs(path) {
 		return nil, errors.New("consult: config path must be absolute")
