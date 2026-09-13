@@ -56,14 +56,24 @@ type Error struct{ Code, Reason string }
 // so neither is ever formatted into this message.
 func (e *Error) Error() string { return "consult: " + e.Code + " (" + e.Reason + ")" }
 
+// runWaitDelay is a test seam: the grace period after cancellation before Wait
+// abandons pipe I/O. Zero, the only value in production, means the runner's
+// own default; the drain-incomplete test shortens it so a held pipe does not
+// cost five seconds.
+var runWaitDelay time.Duration
+
 // Run consults c once with prompt on stdin and returns the receipt. It is the
 // only entry point that executes a consultant: the adapter owns argv, the
 // runner owns the process envelope and the admission catalog owns the verdict.
 // On any failure the receipt is zero and the error is an *Error.
 func Run(ctx context.Context, c Consultant, prompt string) (Receipt, error) {
 	// Consultant is a plain exported struct, so a caller can hand Run a value
-	// that never passed Load's validation. Re-check what argv depends on.
-	if c.Adapter != claudeAdapter || !claudeModels[c.Model] {
+	// that never passed Load's validation and therefore carries neither its
+	// bounds nor its defaults. Re-check everything the run depends on: a zero
+	// timeout or output cap would otherwise surface as an opaque start failure.
+	if c.Adapter != claudeAdapter || !claudeModels[c.Model] ||
+		c.TimeoutSeconds <= 0 || c.TimeoutSeconds > maxTimeoutSeconds ||
+		c.MaxOutputBytes <= 0 || c.MaxOutputBytes > maxOutputBytes {
 		return Receipt{}, &Error{Code: "input-invalid", Reason: "consultant"}
 	}
 	if prompt == "" || len(prompt) > maxStdinBytes || !utf8.ValidString(prompt) {
@@ -73,6 +83,7 @@ func Run(ctx context.Context, c Consultant, prompt string) (Receipt, error) {
 	out, err := run(ctx, runSpec{
 		command: c.Command, sha256: c.SHA256, args: claudeArgs(c.Model), stdin: prompt,
 		timeout: time.Duration(c.TimeoutSeconds) * time.Second, outputCap: c.MaxOutputBytes,
+		waitDelay: runWaitDelay,
 	})
 	if err != nil {
 		return Receipt{}, classifyRunError(err)
