@@ -366,7 +366,16 @@ func (o *Orchestrator) prepareAdvisory(ctx context.Context, ic *interceptorRun, 
 	}
 	// distinctTrailers leads with a newline so it can be appended to a tool
 	// result; here it is a block of whole lines, so the lead is dropped.
-	a.Annotation = strings.TrimPrefix(distinctTrailers(tags), "\n")
+	annotation := strings.TrimPrefix(distinctTrailers(tags), "\n")
+	// The trailer block is generated, so it bypasses ValidateAdvisory. Its
+	// only unbounded input is the chain's distinct rule count, and a chain
+	// that produces more trailers than the receipt may carry has outgrown
+	// this seam: fail closed rather than ship a receipt whose own annotation
+	// crowds out the advice. Not a policy refusal, so not ErrAdvisoryBlocked.
+	if len(annotation) > maxAdvisoryAnnotation {
+		return Advisory{}, fmt.Errorf("agent: advisory annotation exceeds %d bytes", maxAdvisoryAnnotation)
+	}
+	a.Annotation = annotation
 	return a, nil
 }
 
