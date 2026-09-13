@@ -599,11 +599,15 @@ When the candidate's routes reach a remote destination the session has not
 already been permitted, the existing destination-consent surface renders the
 complete proposed manifest and asks once; the next input line answers that
 prompt exactly as it would for any other prompt, so a line typed after the
-command is consumed as the answer rather than kept as a future goal. A run
-without an interactive terminal — piped or scripted input, headless modes —
-never asks: an uncovered remote fails closed and names the exact
-`-allow-destination` value that would cover it. Neither `/model` nor
-`/model set` is recorded or sent as conversation content.
+command is consumed as the answer rather than kept as a future goal. That
+holds for every REPL, terminal or piped: consent is read through the same
+line source as goals, so a script that switches to an uncovered remote must
+either pass `-allow-destination` or supply `y`/`yes` on the line after the
+command — any other line denies. Where no consent prompt is bound at all — the
+headless modes, which have no `/model`, and startup admission — an uncovered
+remote fails closed instead and names the exact `-allow-destination` value
+that would cover it. Neither `/model` nor `/model set` is recorded or sent as
+conversation content.
 
 Accepted thinking controls carry forward and are re-gated against the new
 chain, and a chain with no thinking support clears them with the same notice

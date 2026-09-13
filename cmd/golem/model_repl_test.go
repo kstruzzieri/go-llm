@@ -639,6 +639,54 @@ func TestModelSetScriptedSequencesDeliverExactlyOneGoal(t *testing.T) {
 	}
 }
 
+// TestModelSetScriptedRemoteConsentConsumesExactlyOneLine completes the Task
+// 5c sequence matrix with the interactive consent script
+// `/model set <remote>\nyes\ntest prompt\n` driven through the real REPL loop.
+// Consent is read through the SAME line source as the goals, so the answer
+// costs exactly one ReadAnswer and one script line, and only `test prompt`
+// survives as a goal. This fixture's remote never resolves, so the grant is
+// taken and the switch then fails in preflight: the goal that follows runs
+// under the OLD configuration, with the retention notice standing.
+func TestModelSetScriptedRemoteConsentConsumesExactlyOneLine(t *testing.T) {
+	fx := newModelSwitchFixture(t, remoteModelURL)
+	fx.withSession(t, nil, func(t *testing.T, sess *replSession) {
+		src := newCountingSource(sess, "/model set cloudrole\nyes\ntest prompt\n")
+		altBefore, primaryBefore := fx.alt.chats.Load(), fx.primary.chats.Load()
+		var out strings.Builder
+		if err := runREPL(t.Context(), src, &out, nil, sess); err != nil {
+			t.Fatalf("runREPL: %v", err)
+		}
+		if n := src.answers.Load(); n != 1 {
+			t.Fatalf("ReadAnswer calls = %d, want exactly 1 (the consent line)", n)
+		}
+		if n := src.goalReads.Load(); n != 3 {
+			t.Fatalf("ReadGoal calls = %d, want 3 (command, goal, EOF)", n)
+		}
+		if got := src.goals(); !reflect.DeepEqual(got, []string{"test prompt"}) {
+			t.Fatalf("recorded goals = %v, want exactly [test prompt]", got)
+		}
+		// Approval, then an unresolvable candidate: the grant stands and the
+		// selection does not (Decision 3).
+		if !strings.Contains(out.String(), "model unchanged:") {
+			t.Fatalf("want the unresolvable remote to fail the switch:\n%s", out.String())
+		}
+		if !strings.Contains(out.String(), destinationGrantRetainedNotice) {
+			t.Fatalf("approved grant did not report as retained:\n%s", out.String())
+		}
+		// The goal therefore ran under the configuration that was already
+		// live, which only the primary backend can serve.
+		if !strings.Contains(out.String(), "primary answer") {
+			t.Fatalf("the goal after a failed switch did not use the old configuration:\n%s", out.String())
+		}
+		if got, want := fx.primary.chats.Load(), primaryBefore+1; got != want {
+			t.Errorf("primary chat requests = %d, want %d", got, want)
+		}
+		if got := fx.alt.chats.Load(); got != altBefore {
+			t.Errorf("alt served %d requests, want it untouched at %d", got, altBefore)
+		}
+	})
+}
+
 // TestModelSetParksTheLoopUntilResolutionFinishes holds a resolvable
 // candidate inside its metadata lookup and proves the REPL asks for no second
 // goal until the operation resolves -- and that a Ctrl-C there cancels the
@@ -761,6 +809,51 @@ func TestModelSetRebuildsParentFollowingDispatchInPlace(t *testing.T) {
 		res, err := runOnce(t.Context(), io.Discard, nil, sess, "who serves", nil)
 		if err != nil || res.Answer != "alt answer" {
 			t.Fatalf("turn after mounting = %q, %v; want the switched backend", res.Answer, err)
+		}
+	})
+}
+
+// TestModelSetAfterAllowWriteKeepsMountedWritesOutOfChildren pins the layout
+// invariant the in-place rebuild leans on: mountAt sits AFTER the dispatch
+// entry, so the prefix preceding dispatch -- the exact slice the rebuild hands
+// the children -- can never pick up tools a mid-session /allow-write inserted.
+// Mount first, switch second, the reverse of the order
+// TestModelSetRebuildsParentFollowingDispatchInPlace exercises.
+func TestModelSetAfterAllowWriteKeepsMountedWritesOutOfChildren(t *testing.T) {
+	fx := newModelSwitchFixture(t, "")
+	fx.withSession(t, []string{"-dispatch"}, func(t *testing.T, sess *replSession) {
+		sess.stdinTerminal = true
+		slash(t, sess, "/allow-write")
+		wantOrder := []string{"read_file", "search", "glob", "list", "dispatch", "write_file", "edit_file"}
+		if got := orderedToolNames(sess.tools); !reflect.DeepEqual(got, wantOrder) {
+			t.Fatalf("tools after /allow-write = %v, want %v", got, wantOrder)
+		}
+		beforeDispatch := sess.tools[4]
+
+		slash(t, sess, "/model set swap")
+
+		if got := orderedToolNames(sess.tools); !reflect.DeepEqual(got, wantOrder) {
+			t.Fatalf("tools after the switch = %v, want the same order %v", got, wantOrder)
+		}
+		if sess.tools[4] == beforeDispatch {
+			t.Fatal("dispatch entry was not rebuilt for the new chain")
+		}
+
+		invokeDispatch(t, sess.tools[4], []string{"look around"})
+		bodies := fx.alt.chatBodies()
+		if len(bodies) == 0 {
+			t.Fatal("alt served no child request")
+		}
+		child := bodies[len(bodies)-1]
+		for _, name := range []string{"write_file", "edit_file", "dispatch"} {
+			if strings.Contains(child, `"name":"`+name+`"`) {
+				t.Errorf("child request carries %q, which does not precede dispatch:\n%s", name, child)
+			}
+		}
+		for _, name := range []string{"read_file", "search", "glob", "list"} {
+			if !strings.Contains(child, `"name":"`+name+`"`) {
+				t.Errorf("child request missing read-only tool %q:\n%s", name, child)
+			}
 		}
 	})
 }

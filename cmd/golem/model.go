@@ -401,7 +401,7 @@ func prepareModelSwitch(ctx context.Context, sess *replSession, arg string) (mod
 	// the slice.
 	newTools := sess.tools
 	if sel.followsParentDispatch() {
-		if newTools, err = rebuildDispatchTool(ctx, sess, prep.plan.chain); err != nil {
+		if newTools, err = rebuildDispatchTool(sess, prep.plan.chain, prep.ceiling.ceiling); err != nil {
 			return modelSwitch{}, newGrantAdmitted, err
 		}
 	}
@@ -455,21 +455,24 @@ func dispatchToolIndex(tools []agent.Tool) (int, error) {
 
 // rebuildDispatchTool returns a CLONE of the session tools with the dispatch
 // entry replaced at its own index by one built for the new chain: new caller,
-// new child ceiling under the dispatch use case, and fan-out re-derived from
-// the router's cached slot capacity. The child-visible tool set is the exact
-// prefix that preceded dispatch at startup -- the read-only tools, before
-// memory, write, exec, delegate, and MCP were appended -- so children keep
-// seeing what they saw and nothing else.
-func rebuildDispatchTool(ctx context.Context, sess *replSession, chain []string) ([]agent.Tool, error) {
+// the parent's ceiling, and fan-out re-derived from the router's cached slot
+// capacity. The child-visible tool set is the exact prefix that preceded
+// dispatch at startup -- the read-only tools, before memory, write, exec,
+// delegate, and MCP were appended -- so children keep seeing what they saw
+// and nothing else.
+//
+// childCeiling is the PARENT's resolved ceiling, not a second resolution.
+// modelSetUseCase and dispatchUseCase are the same constant, so a recompute
+// over the same chain, models, and flags could only ever reproduce the value
+// prepareModel already derived; startup follows the same rule for the
+// parent-following case. Passing it keeps the child's ceiling and the child's
+// route (which uses dispatchUseCase below) one decision.
+func rebuildDispatchTool(sess *replSession, chain []string, childCeiling int) ([]agent.Tool, error) {
 	idx, err := dispatchToolIndex(sess.tools)
 	if err != nil {
 		return nil, err
 	}
 	sel := sess.selection
-	// Same constant the dispatch caller routes with, so the child's ceiling
-	// and the child's route can never disagree.
-	childCeiling := resolveInputCeiling(ctx, sel.models, chain, dispatchUseCase,
-		sel.flags.inputCeiling, sel.flags.outputReserve, sel.resolver != nil).ceiling
 	fan := resolveDispatchFanout(sel.router.SlotCapacity, chain)
 	caller := newRouterChainCallerFor(sel.router, chain, dispatchUseCase)
 	dpt, err := newDispatchTool(caller, sel.flags,
