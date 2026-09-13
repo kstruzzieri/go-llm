@@ -6,9 +6,11 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"os"
+	"os/user"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -26,13 +28,19 @@ func script(t *testing.T, body string) string {
 	return p
 }
 
-func mustHome(t *testing.T) string {
+// uidHome is the home directory the OS records for this uid. It deliberately
+// does not consult $HOME, so an assertion built on it can catch a runner that
+// lets the parent environment steer the child's HOME.
+func uidHome(t *testing.T) string {
 	t.Helper()
-	h, err := os.UserHomeDir()
+	identity, err := user.LookupId(strconv.Itoa(os.Getuid()))
 	if err != nil {
 		t.Fatal(err)
 	}
-	return h
+	if !filepath.IsAbs(identity.HomeDir) {
+		t.Fatalf("uid home %q is not absolute", identity.HomeDir)
+	}
+	return identity.HomeDir
 }
 
 func sha256File(t *testing.T, path string) string {
@@ -75,7 +83,11 @@ func waitForDeath(t *testing.T, pidFile string) {
 func TestRunEnvironmentIsExactlyElevenNames(t *testing.T) {
 	t.Setenv("ANTHROPIC_API_KEY", "must-not-reach-child")
 	t.Setenv("USER", "wrong-user")
-	check := `test "$USER" = "$(/usr/bin/id -un)" && test "$HOME" = "` + mustHome(t) + `" && test -d "$TMPDIR" && test -d "$XDG_CONFIG_HOME" && test -d "$XDG_CACHE_HOME" && test -d "$XDG_STATE_HOME" && test "${ANTHROPIC_API_KEY-unset}" = unset && test "$CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC" = 1 && test "$CLAUDE_CODE_DISABLE_AUTO_MEMORY" = 1 && test "$ENABLE_CLAUDEAI_MCP_SERVERS" = false && test "$(env | cut -d= -f1 | grep -cEv '^(PATH|LC_ALL|HOME|TMPDIR|USER|XDG_CONFIG_HOME|XDG_CACHE_HOME|XDG_STATE_HOME|CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC|CLAUDE_CODE_DISABLE_AUTO_MEMORY|ENABLE_CLAUDEAI_MCP_SERVERS|PWD|SHLVL|_)$')" = 0`
+	// HOME is poisoned too: like USER it must come from the uid, never from the
+	// parent environment, or a caller could redirect the subscription
+	// credentials the consultant reads.
+	t.Setenv("HOME", t.TempDir())
+	check := `test "$PATH" = /usr/bin:/bin:/usr/sbin:/sbin && test "$USER" = "$(/usr/bin/id -un)" && test "$HOME" = "` + uidHome(t) + `" && test -d "$TMPDIR" && test -d "$XDG_CONFIG_HOME" && test -d "$XDG_CACHE_HOME" && test -d "$XDG_STATE_HOME" && test "${ANTHROPIC_API_KEY-unset}" = unset && test "$CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC" = 1 && test "$CLAUDE_CODE_DISABLE_AUTO_MEMORY" = 1 && test "$ENABLE_CLAUDEAI_MCP_SERVERS" = false && test "$(env | cut -d= -f1 | grep -cEv '^(PATH|LC_ALL|HOME|TMPDIR|USER|XDG_CONFIG_HOME|XDG_CACHE_HOME|XDG_STATE_HOME|CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC|CLAUDE_CODE_DISABLE_AUTO_MEMORY|ENABLE_CLAUDEAI_MCP_SERVERS|PWD|SHLVL|_)$')" = 0`
 	out, err := run(context.Background(), runSpec{command: script(t, check), timeout: 5 * time.Second, outputCap: 4096})
 	if err != nil || out.ExitCode != 0 || !out.CleanupOK || !out.GroupCleanupOK {
 		t.Fatalf("env boundary: %+v %v", out, err)
@@ -105,7 +117,10 @@ func TestRunCapDeadlineAndCancelKillGroup(t *testing.T) {
 	time.AfterFunc(time.Second, cancel)
 	pidFile := filepath.Join(t.TempDir(), "pid")
 	out, _ = run(ctx, runSpec{command: script(t, `sleep 30 & echo $! > `+pidFile+`; sleep 30`), timeout: 5 * time.Second, outputCap: 1024})
-	if !out.Canceled || out.WaitStatus != "signaled(SIGKILL)" || !out.GroupCleanupOK {
+	// Duration is load-bearing: Canceled reads the caller's context, which is
+	// canceled whether or not the cancellation ever reached the child, so
+	// without this bound the 5s deadline could be doing the killing.
+	if !out.Canceled || out.WaitStatus != "signaled(SIGKILL)" || !out.GroupCleanupOK || out.Duration > 3*time.Second {
 		t.Fatalf("cancel did not kill group: %+v", out)
 	}
 	waitForDeath(t, pidFile)
@@ -121,6 +136,59 @@ func TestRunCanceledDistinguishesCallerFromDeadline(t *testing.T) {
 	out, _ = run(context.Background(), runSpec{command: script(t, `sleep 30`), timeout: 300 * time.Millisecond, outputCap: 1024})
 	if !out.TimedOut || out.Canceled {
 		t.Fatalf("timed-out run reported caller cancellation: %+v", out)
+	}
+	// Positive path: a genuinely cancelled caller sets Canceled and the run
+	// ends well inside its own 5s deadline.
+	sc := script(t, `sleep 30`)
+	ctx, cancel := context.WithCancel(context.Background())
+	time.AfterFunc(time.Second, cancel)
+	out, _ = run(ctx, runSpec{command: sc, timeout: 5 * time.Second, outputCap: 1024})
+	if !out.Canceled || out.TimedOut || out.Duration > 3*time.Second {
+		t.Fatalf("caller cancellation not honoured: %+v", out)
+	}
+}
+
+// TestRunErrorsAreClassifiable pins the sentinels Task 5 classifies on; message
+// text is not a contract, errors.Is is.
+func TestRunErrorsAreClassifiable(t *testing.T) {
+	ok := script(t, `exit 0`)
+	base := runSpec{command: ok, timeout: time.Second, outputCap: 1024}
+
+	oversized := base
+	oversized.stdin = strings.Repeat("x", 65537)
+	if _, err := run(context.Background(), oversized); !errors.Is(err, errStdinInvalid) {
+		t.Fatalf("oversized stdin: got %v, want errStdinInvalid", err)
+	}
+	badUTF8 := base
+	badUTF8.stdin = "bad\xff"
+	if _, err := run(context.Background(), badUTF8); !errors.Is(err, errStdinInvalid) {
+		t.Fatalf("invalid UTF-8 stdin: got %v, want errStdinInvalid", err)
+	}
+	link := ok + ".link"
+	if err := os.Symlink(ok, link); err != nil {
+		t.Fatal(err)
+	}
+	symlinked := base
+	symlinked.command = link
+	if _, err := run(context.Background(), symlinked); !errors.Is(err, errTargetInvalid) {
+		t.Fatalf("symlink leaf: got %v, want errTargetInvalid", err)
+	}
+	drifted := base
+	drifted.sha256 = strings.Repeat("0", 64)
+	if _, err := run(context.Background(), drifted); !errors.Is(err, errTargetDrift) {
+		t.Fatalf("digest mismatch: got %v, want errTargetDrift", err)
+	}
+}
+
+// TestRunStderrOverflowAbortsTheRun proves the cap is enforced on stderr too:
+// a child that only floods stderr is still killed.
+func TestRunStderrOverflowAbortsTheRun(t *testing.T) {
+	out, _ := run(context.Background(), runSpec{command: script(t, `head -c 8192 /dev/zero | tr '\0' x 1>&2; sleep 30`), timeout: 5 * time.Second, outputCap: 1024})
+	if !out.CapExceeded || out.WaitStatus != "signaled(SIGKILL)" || out.Duration > 3*time.Second {
+		t.Fatalf("stderr flood did not abort the run: %+v", out)
+	}
+	if len(out.Stdout) != 0 {
+		t.Fatalf("stderr content reached Stdout: %q", out.Stdout)
 	}
 }
 

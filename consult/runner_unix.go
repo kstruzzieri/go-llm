@@ -65,15 +65,17 @@ func newEnvelope() (*envelope, error) {
 // Nothing is inherited from the parent process, so no API key, proxy or
 // telemetry variable in the caller's environment can reach the consultant.
 func buildEnv(e *envelope) ([]string, error) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return nil, fmt.Errorf("consult: home directory: %w", err)
-	}
-	// The Claude CLI uses USER as its macOS Keychain account lookup key.
-	// Resolve it from the uid; never inherit a caller-selected identity.
+	// The Claude CLI uses USER as its macOS Keychain account lookup key and
+	// HOME to find the subscription credentials. Both come from the uid, never
+	// from $USER or $HOME: os.UserHomeDir reads the parent environment, so a
+	// caller could otherwise redirect which credentials the consultant reads.
 	identity, err := user.LookupId(strconv.Itoa(os.Getuid()))
 	if err != nil || identity.Username == "" {
 		return nil, errors.New("consult: OS username lookup failed")
+	}
+	home := identity.HomeDir
+	if !filepath.IsAbs(home) {
+		return nil, errors.New("consult: OS home directory lookup failed")
 	}
 	return []string{
 		"PATH=/usr/bin:/bin:/usr/sbin:/sbin",
