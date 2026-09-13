@@ -65,7 +65,10 @@ func fakeConsultantsFile(t *testing.T, name, stdout string) string {
 	if err := os.WriteFile(data, []byte(stdout+"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	body := "#!/bin/sh\ncat >/dev/null; sed \"s|/private/synthetic|$PWD|g\" " + data + "\n"
+	// stdin is captured rather than discarded so a test can pin the exact
+	// bytes handed to the consultant (see consultStdin).
+	body := "#!/bin/sh\ncat >" + filepath.Join(dir, "stdin") +
+		"; sed \"s|/private/synthetic|$PWD|g\" " + data + "\n"
 	if err := os.WriteFile(cmd, []byte(body), 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -76,6 +79,16 @@ func fakeConsultantsFile(t *testing.T, name, stdout string) string {
 		t.Fatal(err)
 	}
 	return p
+}
+
+// consultStdin returns the bytes the fake consultant read on stdin.
+func consultStdin(t *testing.T, c consult.Consultant) string {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join(filepath.Dir(c.Command), "stdin"))
+	if err != nil {
+		t.Fatalf("read captured stdin: %v", err)
+	}
+	return string(b)
 }
 
 func TestConsultStagesAdviceForNextGoalThenClears(t *testing.T) {
@@ -120,6 +133,11 @@ func TestConsultRetainsOnFailureClearsOnReset(t *testing.T) {
 	dispatchSlash(context.Background(), &out, sess, "/consult claude q")
 	if sess.advisory == nil {
 		t.Fatalf("consult did not stage: %s", out.String())
+	}
+	// Rule 1's byte-exact user echo depends on the prompt reaching the
+	// consultant terminated by exactly one newline, as in the E2.2 launch.
+	if got := consultStdin(t, sess.consultants["claude"]); got != "q\n" {
+		t.Fatalf("consultant stdin = %q, want %q", got, "q\n")
 	}
 	if _, err := runOnce(context.Background(), &out, nil, sess, "goal", nil); err == nil {
 		t.Fatal("failed turn reported success")
