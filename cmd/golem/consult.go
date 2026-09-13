@@ -22,6 +22,15 @@ func loadConsultants(explicit string) (map[string]consult.Consultant, error) {
 	if errors.Is(err, consult.ErrDisabled) {
 		return nil, nil
 	}
+	// A well-formed file declaring no consultants is the same state as no file:
+	// there is nothing /consult could reach. Returning the empty map instead
+	// would advertise the command, announce nothing at startup, and answer every
+	// name with "unknown consultant". (The refusal still says "no
+	// consultants.json", which is imprecise for this one case; the string is
+	// pinned by docs/consult.md.)
+	if len(m) == 0 {
+		return nil, err
+	}
 	return m, err
 }
 

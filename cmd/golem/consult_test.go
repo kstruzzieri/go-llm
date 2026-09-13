@@ -349,6 +349,46 @@ func TestConsultInterruptCancelsTheConsultation(t *testing.T) {
 	}
 }
 
+func TestConsultDisabledByAnEmptyConsultantList(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "consultants.json")
+	if err := os.WriteFile(path, []byte(`{"version":1,"consultants":[]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	m, err := loadConsultants(path)
+	if m != nil || err != nil {
+		t.Fatalf("loadConsultants = %v, %v; want a disabled /consult", m, err)
+	}
+	sess := newTestSession(t, &scriptCaller{}, t.TempDir())
+	sess.interceptorsOn = true
+	sess.consultants = m
+	var out bytes.Buffer
+	dispatchSlash(context.Background(), &out, sess, "/consult claude q")
+	if !strings.Contains(out.String(), "consult disabled") {
+		t.Fatalf("an empty consultant list read as enabled: %s", out.String())
+	}
+}
+
+func TestConsultAdvisoryRetainedWhenTheTurnProducesNoAnswer(t *testing.T) {
+	caller := &scriptCaller{responses: []agent.ModelResult{{
+		Response: provider.ChatResponse{Content: ""},
+	}}}
+	sess := newTestSession(t, caller, t.TempDir())
+	sess.interceptorsOn = true
+	sess.consultants = fakeConsultants(t, "claude", consultTranscript("OK"))
+	var out bytes.Buffer
+	dispatchSlash(context.Background(), &out, sess, "/consult claude q")
+	if sess.advisory == nil {
+		t.Fatalf("consult did not stage: %s", out.String())
+	}
+	res, err := runOnce(context.Background(), &out, nil, sess, "goal", nil)
+	if err != nil || res.Answer != "" {
+		t.Fatalf("want an answerless turn that did not fail, got %+v / %v", res, err)
+	}
+	if sess.advisory == nil {
+		t.Fatal("advisory consumed by a turn that produced no answer")
+	}
+}
+
 func TestConsultRefusals(t *testing.T) {
 	sess := newTestSession(t, &scriptCaller{}, t.TempDir())
 	var out bytes.Buffer

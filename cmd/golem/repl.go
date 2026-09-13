@@ -475,6 +475,10 @@ func runOnce(ctx context.Context, out io.Writer, interrupts <-chan struct{}, ses
 	// join had settled yet: an answered-but-unpersisted turn would keep an
 	// advisory it had already spent, and a turn that failed to seal would lose
 	// one it never got to use.
+	//
+	// res.Answer != "" is the plan's D6 carve-out, not an accident: a turn that
+	// finishes cleanly with no content never put the advice to work, so the
+	// slot survives for the retry exactly as a failed turn's does.
 	if runErr == nil && res.Answer != "" {
 		sess.advisory = nil
 	}
