@@ -32,12 +32,21 @@ Consultants are declared in a JSON file, found in one of two ways:
 
 - `-consultants-config <path>` — an explicit **absolute** path. It must load:
   a missing, unreadable or invalid file is a startup failure, never a silent
-  fallback to the default.
+  fallback to the default. An explicit path never consults the environment, so
+  it works even where no user config directory can be resolved.
 - no flag — `<os.UserConfigDir>/go-llm/consultants.json`. That is
   `~/Library/Application Support/go-llm/consultants.json` on macOS and
   `$XDG_CONFIG_HOME/go-llm/consultants.json` (`~/.config/...` when unset) on
   Linux. A **missing** default file disables `/consult` rather than failing
-  startup; a file that exists but does not validate fails startup.
+  startup, and so does an **unresolvable** user config directory — no `HOME`,
+  as in a stripped test or service environment, makes `os.UserConfigDir` fail,
+  which is reported as `ErrDisabled` for the same reason: neither is a
+  misconfiguration, both simply mean `/consult` is unavailable. A default file
+  that exists but does not validate does fail startup.
+
+When at least one consultant loads, the startup banner carries a
+`consult: 1 consultant` line (`consult: 3 consultants` for more than one).
+There is no line when `/consult` is disabled.
 
 ## `consultants.json`
 
@@ -282,8 +291,11 @@ interceptor trailer on its own line, and stages it.
   first 12 hex characters of the digest) without running anything.
 
 Failures print a fixed line and stage nothing: `consult failed: <code>` for a
-`*consult.Error`, `consult failed: blocked by interceptor policy (<rule>)`
-when the chain refuses the answer, and `consult failed: internal` otherwise.
+`*consult.Error`, and `consult failed: blocked by interceptor policy (<rule>)`
+only for an actual policy refusal — one satisfying
+`errors.Is(err, agent.ErrAdvisoryBlocked)`. Any other inspection error prints
+`consult failed: internal`, including a validation failure and an oversize
+generated annotation, neither of which is a policy decision.
 `/consult` with a name but no prompt prints the usage line; with no
 consultants file it prints `consult disabled: no consultants.json (see
 -consultants-config)`; without `-interceptors` it prints `consult requires
