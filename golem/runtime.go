@@ -563,6 +563,7 @@ func (r *Runtime) terminalFailure(err error) (eventType string, payload any) {
 
 func failureCode(err error) string {
 	var observerErr *hostObserverError
+	var blocked *agent.BlockedError
 	switch {
 	case errors.As(err, &observerErr):
 		return "observer_failed"
@@ -581,6 +582,12 @@ func failureCode(err error) string {
 		errors.Is(err, provider.ErrRouterClosed),
 		provider.IsInfrastructureError(err):
 		return "provider_unavailable"
+	// Every interceptor refusal carries a *BlockedError, so one arm classifies
+	// them all — a staged advisory the policy rejected (#382) included. It
+	// sits below observer_failed because a hook error joined with the block
+	// still describes the host's own sink, not the policy.
+	case errors.As(err, &blocked):
+		return "policy_blocked"
 	default:
 		return "internal"
 	}
