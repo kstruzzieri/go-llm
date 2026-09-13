@@ -71,7 +71,7 @@ func Load(explicit string) (map[string]Consultant, error) {
 			return nil, err
 		}
 	} else if !filepath.IsAbs(path) {
-		return nil, fmt.Errorf("consult: -consultants-config must be an absolute path")
+		return nil, errors.New("consult: config path must be absolute")
 	}
 	raw, err := os.ReadFile(path)
 	if err != nil {
@@ -138,6 +138,15 @@ func validate(c *Consultant) error {
 	}
 	if !info.Mode().IsRegular() {
 		return errors.New("command must be a regular file")
+	}
+	// Lstat only inspects the leaf: reject a command reached through a
+	// symlinked parent directory too, so the path cannot be redirected.
+	resolved, err := filepath.EvalSymlinks(c.Command)
+	if err != nil {
+		return fmt.Errorf("command: %w", err)
+	}
+	if resolved != c.Command {
+		return errors.New("command path must not traverse symlinks")
 	}
 	if c.TimeoutSeconds == 0 {
 		c.TimeoutSeconds = defaultTimeoutSeconds

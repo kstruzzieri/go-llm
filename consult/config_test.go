@@ -8,54 +8,99 @@ import (
 	"testing"
 )
 
-func writeConfig(t *testing.T, body string) string {
+// realTempDir is t.TempDir resolved through symlinks: on macOS temp paths live
+// under /var, itself a symlink to /private/var, so an unresolved temp path
+// would trip the command symlink-traversal check on its own.
+func realTempDir(t *testing.T) string {
 	t.Helper()
-	dir := t.TempDir()
-	cmd := filepath.Join(dir, "claude-2.1.240")
+	dir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
+// writeConfig writes body as a consultants file, substituting @CMD@ with a
+// real executable it creates, and returns the config and command paths.
+func writeConfig(t *testing.T, body string) (configPath, cmdPath string) {
+	t.Helper()
+	dir := realTempDir(t)
+	cmdPath = filepath.Join(dir, "claude-2.1.240")
+	if err := os.WriteFile(cmdPath, []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	configPath = filepath.Join(dir, "consultants.json")
+	if err := os.WriteFile(configPath, []byte(strings.ReplaceAll(body, "@CMD@", cmdPath)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return configPath, cmdPath
+}
+
+// symlinkedParentCmd returns a path to a real executable reached through a
+// symlinked parent directory; the leaf itself is not a symlink.
+func symlinkedParentCmd(t *testing.T) string {
+	t.Helper()
+	root := realTempDir(t)
+	realDir := filepath.Join(root, "real")
+	if err := os.Mkdir(realDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cmd := filepath.Join(realDir, "claude-2.1.240")
 	if err := os.WriteFile(cmd, []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	p := filepath.Join(dir, "consultants.json")
-	if err := os.WriteFile(p, []byte(strings.ReplaceAll(body, "@CMD@", cmd)), 0o600); err != nil {
+	if err := os.Symlink(realDir, filepath.Join(root, "link")); err != nil {
 		t.Fatal(err)
 	}
-	return p
+	return filepath.Join(root, "link", "claude-2.1.240")
 }
 
 const goodConfig = `{"version":1,"consultants":[{"name":"claude","adapter":"claude","command":"@CMD@","sha256":"","model":"opus","timeout_seconds":120,"max_output_bytes":1048576,"trusted_process_egress":true}]}`
 
 func TestLoadAcceptsMinimalValidConfig(t *testing.T) {
-	cs, err := Load(writeConfig(t, goodConfig))
+	p, _ := writeConfig(t, goodConfig)
+	cs, err := Load(p)
 	if err != nil || len(cs) != 1 || cs["claude"].Adapter != "claude" || cs["claude"].TimeoutSeconds != 120 {
 		t.Fatalf("load: %v %+v", err, cs)
 	}
 }
 
 func TestLoadRejectsInvalidConfigs(t *testing.T) {
-	for name, body := range map[string]string{
-		"unknown_field":    strings.Replace(goodConfig, `"model":"opus"`, `"model":"opus","args":["--evil"]`, 1),
-		"relative_command": strings.Replace(goodConfig, `"command":"@CMD@"`, `"command":"claude"`, 1),
-		"egress_false":     strings.Replace(goodConfig, `"trusted_process_egress":true`, `"trusted_process_egress":false`, 1),
-		"egress_missing":   strings.Replace(goodConfig, `,"trusted_process_egress":true`, ``, 1),
-		"bad_name":         strings.Replace(goodConfig, `"name":"claude"`, `"name":"Claude Max"`, 1),
-		"bad_adapter":      strings.Replace(goodConfig, `"adapter":"claude"`, `"adapter":"codex"`, 1),
-		"bad_model":        strings.Replace(goodConfig, `"model":"opus"`, `"model":"sonnet"`, 1),
-		"timeout_too_long": strings.Replace(goodConfig, `"timeout_seconds":120`, `"timeout_seconds":301`, 1),
-		"output_too_large": strings.Replace(goodConfig, `"max_output_bytes":1048576`, `"max_output_bytes":1048577`, 1),
-		"bad_sha":          strings.Replace(goodConfig, `"sha256":""`, `"sha256":"ABC"`, 1),
-		"version_2":        strings.Replace(goodConfig, `"version":1`, `"version":2`, 1),
-		"trailing_content": goodConfig + ` {"version":1,"consultants":[]}`,
-		"dir_command":      strings.Replace(goodConfig, "@CMD@", t.TempDir(), 1),
-		"duplicate_name":   strings.Replace(goodConfig, `]}`, `,{"name":"claude","adapter":"claude","command":"@CMD@","model":"opus","trusted_process_egress":true}]}`, 1),
+	sub := func(old, new string) string { return strings.Replace(goodConfig, old, new, 1) }
+	for name, tc := range map[string]struct{ body, want string }{
+		"unknown_field":    {sub(`"model":"opus"`, `"model":"opus","args":["--evil"]`), `unknown field "args"`},
+		"relative_command": {sub(`"command":"@CMD@"`, `"command":"claude"`), "command must be an absolute path"},
+		"dir_command":      {strings.Replace(goodConfig, "@CMD@", realTempDir(t), 1), "command must be a regular file"},
+		"symlink_parent":   {strings.Replace(goodConfig, "@CMD@", symlinkedParentCmd(t), 1), "command path must not traverse symlinks"},
+		"egress_false":     {sub(`"trusted_process_egress":true`, `"trusted_process_egress":false`), "trusted_process_egress must be true"},
+		"egress_missing":   {sub(`,"trusted_process_egress":true`, ``), "trusted_process_egress must be true"},
+		"bad_name":         {sub(`"name":"claude"`, `"name":"Claude Max"`), "name must match"},
+		"bad_adapter":      {sub(`"adapter":"claude"`, `"adapter":"codex"`), `unsupported adapter "codex"`},
+		"bad_model":        {sub(`"model":"opus"`, `"model":"sonnet"`), `unsupported model "sonnet"`},
+		"timeout_too_long": {sub(`"timeout_seconds":120`, `"timeout_seconds":301`), "timeout_seconds must be 0..300"},
+		"timeout_negative": {sub(`"timeout_seconds":120`, `"timeout_seconds":-1`), "timeout_seconds must be 0..300"},
+		"output_too_large": {sub(`"max_output_bytes":1048576`, `"max_output_bytes":1048577`), "max_output_bytes must be 0..1048576"},
+		"output_negative":  {sub(`"max_output_bytes":1048576`, `"max_output_bytes":-1`), "max_output_bytes must be 0..1048576"},
+		"bad_sha":          {sub(`"sha256":""`, `"sha256":"ABC"`), "sha256 must be 64 lowercase hex characters"},
+		"version_2":        {sub(`"version":1`, `"version":2`), "unsupported config version 2"},
+		"trailing_content": {goodConfig + ` {"version":1,"consultants":[]}`, "trailing content after JSON object"},
+		"duplicate_name":   {sub(`]}`, `,{"name":"claude","adapter":"claude","command":"@CMD@","model":"opus","trusted_process_egress":true}]}`), `duplicate consultant name "claude"`},
 	} {
-		if _, err := Load(writeConfig(t, body)); err == nil {
+		p, _ := writeConfig(t, tc.body)
+		_, err := Load(p)
+		if err == nil {
 			t.Errorf("%s: accepted", name)
+			continue
+		}
+		if !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("%s: rejected for the wrong reason:\n got  %v\n want substring %q", name, err, tc.want)
 		}
 	}
 }
 
 func TestLoadDefaultsAndDisabled(t *testing.T) {
-	cs, err := Load(writeConfig(t, strings.Replace(goodConfig, `"timeout_seconds":120,"max_output_bytes":1048576,`, ``, 1)))
+	p, _ := writeConfig(t, strings.Replace(goodConfig, `"timeout_seconds":120,"max_output_bytes":1048576,`, ``, 1))
+	cs, err := Load(p)
 	if err != nil || cs["claude"].TimeoutSeconds != 120 || cs["claude"].MaxOutputBytes != 1<<20 {
 		t.Fatalf("defaults: %v %+v", err, cs)
 	}
@@ -69,8 +114,9 @@ func TestLoadDefaultsAndDisabled(t *testing.T) {
 	// The guard must be what rejects a relative path, not a failing open: put
 	// a real, loadable config in the working directory so the only reason to
 	// fail is the IsAbs check.
-	t.Chdir(filepath.Dir(writeConfig(t, goodConfig)))
-	if _, err := Load("consultants.json"); err == nil || !strings.Contains(err.Error(), "absolute") {
+	rel, _ := writeConfig(t, goodConfig)
+	t.Chdir(filepath.Dir(rel))
+	if _, err := Load("consultants.json"); err == nil || !strings.Contains(err.Error(), "config path must be absolute") {
 		t.Fatalf("relative explicit path must be rejected as non-absolute, got %v", err)
 	}
 	if _, err := Load(filepath.Join(t.TempDir(), "missing.json")); err == nil || errors.Is(err, ErrDisabled) {
@@ -79,15 +125,15 @@ func TestLoadDefaultsAndDisabled(t *testing.T) {
 }
 
 func TestLoadRejectsSymlinkCommand(t *testing.T) {
-	p := writeConfig(t, goodConfig)
-	cs, _ := Load(p)
+	p, cmd := writeConfig(t, goodConfig)
 	link := filepath.Join(filepath.Dir(p), "claude")
-	if err := os.Symlink(cs["claude"].Command, link); err != nil {
+	if err := os.Symlink(cmd, link); err != nil {
 		t.Fatal(err)
 	}
 	// Pin the message: Lstat also reports a symlink as non-regular, so only the
 	// wording distinguishes the symlink arm from the regular-file arm.
-	_, err := Load(writeConfig(t, strings.Replace(goodConfig, "@CMD@", link, 1)))
+	lp, _ := writeConfig(t, strings.Replace(goodConfig, "@CMD@", link, 1))
+	_, err := Load(lp)
 	if err == nil || !strings.Contains(err.Error(), "must not be a symlink") {
 		t.Fatalf("symlink command must be rejected as a symlink, got %v", err)
 	}
