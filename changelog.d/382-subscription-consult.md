@@ -21,6 +21,11 @@ the runtime seam; `golem.Turn.Advisory` carries one staged receipt.
 - The staged advice is projected onto the wire copy of the next goal inside a
   `CONSULT_ADVICE` fence and charged to the pinned segment; it is never
   written to session history, `Result.Messages` or durable summaries.
+- `run.failed` gains one code, `policy_blocked`, emitted only when the
+  interceptor chain refuses a staged advisory at step 0
+  (`agent.ErrAdvisoryBlocked`). The arm matches that sentinel alone: every
+  other interceptor refusal (canary, secrets) still reports `internal`, and
+  reclassifying those is deferred.
 - Consultant traffic is the vendor process's own and bypasses
   `-allow-destination`; the config field `trusted_process_egress: true` is an
   explicit acknowledgement, not a filter.
