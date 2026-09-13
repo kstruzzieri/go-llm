@@ -508,6 +508,21 @@ func TestAdvisoryIsInspectedBeforeTheInitialInput(t *testing.T) {
 	if len(caller.reqs) != 0 {
 		t.Errorf("model calls = %d, want 0", len(caller.reqs))
 	}
+	// The premise: the goal arm blocks on its own. Without it, narrowing the
+	// stub to the advisory would leave the ordering assertion above vacuously
+	// green -- there would be no goal block for the advisory to beat.
+	caller = &advisoryCaller{}
+	o = New(caller, ContextManager{}, WithInterceptors(both))
+	_, err = o.Run(context.Background(), Request{Goal: "SENTINEL-GOAL"}, nil)
+	if errors.Is(err, ErrAdvisoryBlocked) {
+		t.Errorf("a run with no advisory cannot be refused for one: %v", err)
+	}
+	if !errors.As(err, &be) || len(be.Findings) != 1 || be.Findings[0].Rule != "goal" {
+		t.Fatalf("the goal alone must block, naming its own rule: %v", err)
+	}
+	if len(caller.reqs) != 0 {
+		t.Errorf("model calls after the goal block = %d, want 0", len(caller.reqs))
+	}
 }
 
 // chattyStub tags one observation under many distinct rules, which is the
