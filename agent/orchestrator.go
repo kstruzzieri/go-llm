@@ -72,17 +72,10 @@ func initState(req Request) State {
 	for _, h := range req.History {
 		msgs = append(msgs, Message{ChatMessage: cloneChatMessage(h), Segment: Elastic})
 	}
-	goal := Message{
+	msgs = append(msgs, Message{
 		ChatMessage: provider.ChatMessage{Role: "user", Content: req.Goal},
 		Segment:     Pinned,
-	}
-	// #382: a value copy, so the caller cannot mutate the staged receipt after
-	// the run has priced and inspected it.
-	if req.Advisory != nil {
-		adv := *req.Advisory
-		goal.Advisory = &adv
-	}
-	msgs = append(msgs, goal)
+	})
 	return State{System: req.System, DurableSummary: req.HistorySummary, Messages: msgs}
 }
 
@@ -345,10 +338,16 @@ func (o *Orchestrator) run(ctx context.Context, req Request, obs Observer, ic *i
 
 // prepareAdvisory runs the observation hook over the advisory as a
 // model-origin observation. A block refuses the advisory with
-// ErrAdvisoryBlocked joined to the *BlockedError naming the rule; tags append the
-// standard trailers after the content, so the model sees the annotation below
-// the text it qualifies. With no interceptors installed the receipt is
-// returned unchanged.
+// ErrAdvisoryBlocked joined to the *BlockedError naming the rule; tags are
+// SET on Annotation, never appended to Content, so Digest keeps labelling the
+// admitted answer and re-inspecting an already-annotated receipt replaces its
+// trailers instead of stacking a second copy. With no interceptors installed
+// the receipt is returned unchanged.
+//
+// Role "tool" is the observation hook's contract for tool-authored text, not
+// a wire role: nothing here ever becomes a role "tool" message. It is what
+// makes the origin-sensitive detectors judge the advice the way they judge a
+// tool result.
 func (o *Orchestrator) prepareAdvisory(ctx context.Context, ic *interceptorRun, obs Observer, a Advisory, index int) (Advisory, error) {
 	tags, block, err := ic.inspectObservation(ctx, normalizeObserver(obs), 0, InspectedMessage{
 		StateIndex: index, Role: "tool", Origin: a.Origin,
@@ -365,7 +364,9 @@ func (o *Orchestrator) prepareAdvisory(ctx context.Context, ic *interceptorRun, 
 		return Advisory{}, errors.Join(ErrAdvisoryBlocked,
 			&BlockedError{Hook: HookInput, Step: 0, Findings: []Finding{*block}})
 	}
-	a.Content += distinctTrailers(tags)
+	// distinctTrailers leads with a newline so it can be appended to a tool
+	// result; here it is a block of whole lines, so the lead is dropped.
+	a.Annotation = strings.TrimPrefix(distinctTrailers(tags), "\n")
 	return a, nil
 }
 
@@ -374,6 +375,13 @@ func (o *Orchestrator) prepareAdvisory(ctx context.Context, ic *interceptorRun, 
 // consult time rather than at the next Run. It returns the annotated receipt,
 // or a refusal satisfying both errors.Is(err, ErrAdvisoryBlocked) and
 // errors.As(err, **BlockedError).
+//
+// It is a preview, not the authoritative check. The chain is resolved against
+// an empty RunScope, so a RunScopedInterceptor sees no system prompt and any
+// addendum it offers is discarded, and the findings are not published on any
+// RiskReport. Run re-inspects the staged receipt at step 0 under the real
+// scope, and that inspection is the one that gates the model call and lands
+// on Result.Risk.
 func (o *Orchestrator) InspectAdvisory(ctx context.Context, a Advisory) (Advisory, error) {
 	if err := ValidateAdvisory(&a); err != nil {
 		return Advisory{}, err
