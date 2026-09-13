@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -186,6 +187,46 @@ func TestRunClassifiesRunnerErrors(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestRunReportsHostFailuresAsInternal covers the failures that are ours, not
+// the consultant's: reporting a broken envelope or an unresolvable OS identity
+// as process-exit would blame the child for a host defect.
+func TestRunReportsHostFailuresAsInternal(t *testing.T) {
+	t.Run("envelope", func(t *testing.T) {
+		// Overrides package-level envelopeDirs, so no test here may t.Parallel.
+		restore := envelopeDirs
+		defer func() { envelopeDirs = restore }()
+		envelopeDirs = []string{"cwd/unreachable"}
+		c := fakeClaude(t, strings.Join([]string{validInit, assistantOK, goodResult}, "\n"), 0)
+		if ce := mustFail(t, context.Background(), c, "hi\n"); ce.Code != "internal" || ce.Reason != "envelope" {
+			t.Fatalf("err %v, want internal (envelope)", ce)
+		}
+	})
+	// An identity failure needs a broken directory service, so the sentinel
+	// contract is pinned at the classifier instead.
+	t.Run("sentinels", func(t *testing.T) {
+		for _, tc := range []struct {
+			err          error
+			code, reason string
+		}{
+			{fmt.Errorf("wrapped: %w", errEnvelope), "internal", "envelope"},
+			{fmt.Errorf("wrapped: %w", errIdentity), "internal", "identity"},
+			{fmt.Errorf("wrapped: %w", errTargetDrift), "target-drift", "target"},
+			{fmt.Errorf("wrapped: %w", errTargetInvalid), "target-invalid", "target"},
+			{fmt.Errorf("wrapped: %w", errStdinInvalid), "input-invalid", "prompt"},
+			{fmt.Errorf("wrapped: %w", errors.ErrUnsupported), "unsupported-platform", "platform"},
+			{errors.New("some start failure"), "process-exit", "start"},
+		} {
+			ce := classifyRunError(tc.err)
+			if ce.Code != tc.code || ce.Reason != tc.reason {
+				t.Errorf("classify %v = %v, want %s (%s)", tc.err, ce, tc.code, tc.reason)
+			}
+			if strings.Contains(ce.Error(), "wrapped") {
+				t.Errorf("classifier leaked the wrapped text: %v", ce)
+			}
+		}
+	})
 }
 
 func TestRunTimeoutAndCancelCodes(t *testing.T) {

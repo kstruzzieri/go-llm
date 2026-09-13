@@ -58,7 +58,7 @@ func newEnvelope() (*envelope, error) { return newEnvelopeIn("") }
 func newEnvelopeIn(base string) (_ *envelope, err error) {
 	root, err := os.MkdirTemp(base, "golem-consult-")
 	if err != nil {
-		return nil, fmt.Errorf("consult: envelope root: %w", err)
+		return nil, fmt.Errorf("%w: root: %w", errEnvelope, err)
 	}
 	defer func() {
 		if err != nil {
@@ -66,7 +66,7 @@ func newEnvelopeIn(base string) (_ *envelope, err error) {
 		}
 	}()
 	if err = os.Chmod(root, 0o700); err != nil {
-		return nil, fmt.Errorf("consult: envelope chmod: %w", err)
+		return nil, fmt.Errorf("%w: chmod: %w", errEnvelope, err)
 	}
 	e := &envelope{root: root}
 	field := map[string]*string{
@@ -75,7 +75,7 @@ func newEnvelopeIn(base string) (_ *envelope, err error) {
 	for _, name := range envelopeDirs {
 		p := filepath.Join(root, name)
 		if err = os.Mkdir(p, 0o700); err != nil {
-			return nil, fmt.Errorf("consult: envelope %s: %w", name, err)
+			return nil, fmt.Errorf("%w: %s: %w", errEnvelope, name, err)
 		}
 		if dst := field[name]; dst != nil {
 			*dst = p
@@ -85,34 +85,62 @@ func newEnvelopeIn(base string) (_ *envelope, err error) {
 	// empty path for a directory it is told it owns. Fail closed instead.
 	for _, p := range []string{e.cwd, e.tmp, e.config, e.cache, e.state} {
 		if p == "" {
-			return nil, errors.New("consult: envelope is missing a required directory")
+			return nil, fmt.Errorf("%w: a required directory is missing", errEnvelope)
 		}
 	}
 	return e, nil
+}
+
+// hostUser is this process's own OS identity, resolved from the uid.
+type hostUser struct{ name, home string }
+
+// hostIdentity resolves the uid's username and home directory exactly once per
+// process. user.LookupId can reach a directory service (LDAP, NIS) and takes no
+// context, so it cannot be interrupted and it runs before the run deadline is
+// armed; resolving it once means a hung directory service can stall only the
+// first consult of a session, not every one of them. The result is a pure
+// function of the uid, which cannot change under a running process.
+var hostIdentity = sync.OnceValues(func() (hostUser, error) {
+	// The Claude CLI uses USER as its macOS Keychain account lookup key and
+	// HOME to find the subscription credentials. Both come from the uid, never
+	// from $USER or $HOME: os.UserHomeDir reads the parent environment, so a
+	// caller could otherwise redirect which credentials the consultant reads.
+	identity, err := user.LookupId(strconv.Itoa(os.Getuid()))
+	if err != nil {
+		return hostUser{}, fmt.Errorf("%w: uid lookup: %w", errIdentity, err)
+	}
+	return checkIdentity(identity.Username, identity.HomeDir)
+})
+
+// checkIdentity is the validation half of hostIdentity, split out because the
+// lookup half cannot be steered: a host whose passwd entry is blank or carries
+// a relative home is not reproducible in a test, but the rule that rejects one
+// is.
+func checkIdentity(username, home string) (hostUser, error) {
+	if username == "" {
+		return hostUser{}, fmt.Errorf("%w: the uid has no username", errIdentity)
+	}
+	if !filepath.IsAbs(home) {
+		return hostUser{}, fmt.Errorf("%w: the uid has no absolute home directory", errIdentity)
+	}
+	return hostUser{name: username, home: home}, nil
 }
 
 // buildEnv constructs the exact eleven-name child environment from scratch.
 // Nothing is inherited from the parent process, so no API key, proxy or
 // telemetry variable in the caller's environment can reach the consultant.
 func buildEnv(e *envelope) ([]string, error) {
-	// The Claude CLI uses USER as its macOS Keychain account lookup key and
-	// HOME to find the subscription credentials. Both come from the uid, never
-	// from $USER or $HOME: os.UserHomeDir reads the parent environment, so a
-	// caller could otherwise redirect which credentials the consultant reads.
-	identity, err := user.LookupId(strconv.Itoa(os.Getuid()))
-	if err != nil || identity.Username == "" {
-		return nil, errors.New("consult: OS username lookup failed")
+	identity, err := hostIdentity()
+	if err != nil {
+		return nil, err
 	}
-	home := identity.HomeDir
-	if !filepath.IsAbs(home) {
-		return nil, errors.New("consult: OS home directory lookup failed")
-	}
+	home, username := identity.home, identity.name
 	return []string{
 		"PATH=/usr/bin:/bin:/usr/sbin:/sbin",
 		"LC_ALL=C",
 		"HOME=" + home,
 		"TMPDIR=" + e.tmp,
-		"USER=" + identity.Username,
+		"USER=" + username,
 		"XDG_CONFIG_HOME=" + e.config,
 		"XDG_CACHE_HOME=" + e.cache,
 		"XDG_STATE_HOME=" + e.state,

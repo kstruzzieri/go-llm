@@ -191,6 +191,12 @@ func validate(c *Consultant) error {
 	if !info.Mode().IsRegular() {
 		return errors.New("command must be a regular file")
 	}
+	// Anyone who can rewrite the file can replace the consultant, and a digest
+	// recorded once does not survive that; the pre-exec re-verification would
+	// only turn it into a run-time failure.
+	if info.Mode().Perm()&0o022 != 0 {
+		return errors.New("command must not be group- or world-writable")
+	}
 	// Lstat only inspects the leaf: reject a command reached through a
 	// symlinked parent directory too, so the path cannot be redirected.
 	resolved, err := filepath.EvalSymlinks(c.Command)

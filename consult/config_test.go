@@ -146,6 +146,26 @@ func TestLoadDisablesWhenConfigDirIsUnresolvable(t *testing.T) {
 // TestLoadHardensTheConfigRead covers the file that names the executable: it
 // gets the same regular-file, identity and size discipline as the command it
 // declares, so a symlinked, swapped or unbounded config cannot be read.
+// TestLoadRejectsWritableCommand covers the path go-llm executes: a command
+// any group or world member can rewrite is not a trusted consultant, however
+// carefully its digest was recorded.
+func TestLoadRejectsWritableCommand(t *testing.T) {
+	for _, mode := range []os.FileMode{0o770, 0o707, 0o777} {
+		p, cmd := writeConfig(t, goodConfig)
+		if err := os.Chmod(cmd, mode); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := Load(p); err == nil || !strings.Contains(err.Error(), "group- or world-writable") {
+			t.Fatalf("command %o must be rejected, got %v", mode, err)
+		}
+	}
+	// The owner-only executable writeConfig writes is still accepted.
+	p, _ := writeConfig(t, goodConfig)
+	if _, err := Load(p); err != nil {
+		t.Fatalf("0700 command must load: %v", err)
+	}
+}
+
 func TestLoadHardensTheConfigRead(t *testing.T) {
 	real, _ := writeConfig(t, goodConfig)
 	link := filepath.Join(realTempDir(t), "linked.json")
@@ -162,6 +182,16 @@ func TestLoadHardensTheConfigRead(t *testing.T) {
 	}
 	if _, err := Load(big); err == nil || !strings.Contains(err.Error(), "too large") {
 		t.Fatalf("oversized config must be rejected, got %v", err)
+	}
+}
+
+func TestDefaultPathIsTheDocumentedLocation(t *testing.T) {
+	path, err := DefaultPath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := filepath.Join("go-llm", "consultants.json"); !strings.HasSuffix(path, want) {
+		t.Fatalf("DefaultPath %q does not end in %q", path, want)
 	}
 }
 

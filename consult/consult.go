@@ -73,14 +73,17 @@ type Evidence struct {
 // Error is a fixed-category consult failure. Code is one of auth, quota,
 // billing, tool-activity, protocol, process-exit, timeout, canceled,
 // output-limit, drain-incomplete, unsupported-version, target-drift,
-// target-invalid, input-invalid, unsupported-platform.
+// target-invalid, input-invalid, internal, unsupported-platform. Only internal
+// reports a host defect rather than something about the consultant or its
+// answer.
 //
 // Reason narrows the code and is drawn from three closed vocabularies, never
 // from consultant text, a filesystem path or any other vendor string:
 //
-//   - host literals, when Run itself refused or the runner reported a bounded
-//     termination: consultant, prompt, cap, caller, deadline, cleanup, target,
-//     platform, start, wait-delay, other;
+//   - host literals, when Run itself refused, the host failed, or the runner
+//     reported a bounded termination: consultant, prompt, cap, caller,
+//     deadline, cleanup, envelope, identity, target, platform, start,
+//     wait-delay, other;
 //   - the first admission literal recorded by protocol.go, for the codes that
 //     come from the transcript (auth, quota, billing, tool-activity, protocol
 //     and unsupported-version) — for example auth-source-invalid or
@@ -229,6 +232,10 @@ func codeFor(reason string) string {
 // deliberately dropped: it can carry the consultant's filesystem path.
 func classifyRunError(err error) *Error {
 	switch {
+	case errors.Is(err, errEnvelope):
+		return &Error{Code: "internal", Reason: "envelope"}
+	case errors.Is(err, errIdentity):
+		return &Error{Code: "internal", Reason: "identity"}
 	case errors.Is(err, errTargetDrift):
 		return &Error{Code: "target-drift", Reason: "target"}
 	case errors.Is(err, errTargetInvalid):

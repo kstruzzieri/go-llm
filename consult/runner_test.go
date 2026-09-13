@@ -156,6 +156,40 @@ func TestKillGroupMapsESRCHToProcessDone(t *testing.T) {
 	}
 }
 
+// TestHostIdentityIsResolvedOnce pins the structure that keeps an
+// uninterruptible directory-service lookup off the per-run path: every call
+// returns the one resolved identity, so a second consult never repeats it.
+func TestHostIdentityIsResolvedOnce(t *testing.T) {
+	first, err := hostIdentity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := hostIdentity()
+	if err != nil || first != second {
+		t.Fatalf("identity is not stable: %+v vs %+v (%v)", first, second, err)
+	}
+	if first.name == "" || !filepath.IsAbs(first.home) {
+		t.Fatalf("identity is not usable: %+v", first)
+	}
+}
+
+func TestCheckIdentityRejectsUnusableEntries(t *testing.T) {
+	for _, tc := range []struct{ name, user, home string }{
+		{"blank_user", "", "/home/x"},
+		{"relative_home", "x", "home/x"},
+		{"empty_home", "x", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := checkIdentity(tc.user, tc.home); !errors.Is(err, errIdentity) {
+				t.Fatalf("checkIdentity(%q, %q) = %v, want errIdentity", tc.user, tc.home, err)
+			}
+		})
+	}
+	if got, err := checkIdentity("x", "/home/x"); err != nil || got != (hostUser{name: "x", home: "/home/x"}) {
+		t.Fatalf("usable entry rejected: %+v %v", got, err)
+	}
+}
+
 func TestRunEnvironmentIsExactlyElevenNames(t *testing.T) {
 	t.Setenv("ANTHROPIC_API_KEY", "must-not-reach-child")
 	t.Setenv("USER", "wrong-user")

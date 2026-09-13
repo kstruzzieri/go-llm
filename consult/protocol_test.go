@@ -706,7 +706,7 @@ func TestClaudeEmptyEvidenceListsSerializeAsArrays(t *testing.T) {
 }
 
 func TestInspectStreamBoundsTheAnswer(t *testing.T) {
-	// The answer crosses into agent.Advisory, which caps at maxAnswerBytes.
+	// The answer crosses into agent.Advisory, which caps at MaxAnswerBytes.
 	// unit is one JSON-escaped character repeated n times in both the
 	// assistant text and the terminal result.
 	body := func(unit string, n int) string {

@@ -10,7 +10,7 @@ import (
 const maxStdinBytes = 65536
 
 // Sentinel errors returned by run so callers can classify a failure without
-// matching message text. Everything else (envelope creation, exec start) is an
+// matching message text. Everything else (notably a failing exec start) is an
 // internal failure of the run itself.
 var (
 	// errStdinInvalid reports a prompt that is too large or not valid UTF-8.
@@ -21,6 +21,12 @@ var (
 	// errTargetDrift reports that the exec target's bytes no longer match the
 	// configured digest.
 	errTargetDrift = errors.New("consult: exec target digest drift")
+	// errEnvelope reports that the private filesystem envelope could not be
+	// built. It is a host failure, never the consultant's.
+	errEnvelope = errors.New("consult: envelope unavailable")
+	// errIdentity reports that this process's own OS identity could not be
+	// resolved, so the child's HOME and USER cannot be derived from the uid.
+	errIdentity = errors.New("consult: OS identity unavailable")
 )
 
 // runSpec describes one bounded child invocation. Nothing here is inherited

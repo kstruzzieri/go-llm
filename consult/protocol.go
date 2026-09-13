@@ -95,10 +95,12 @@ var versionRE = regexp.MustCompile(`^[0-9]+\.[0-9]+\.[0-9]+$`)
 // maxVersionLen bounds the retained version before it is matched.
 const maxVersionLen = 32
 
-// maxAnswerBytes is the largest sanitized answer this package will retain. It
-// matches the agent.Advisory limit the answer is handed to downstream, so an
-// answer that could not be carried is refused here rather than truncated.
-const maxAnswerBytes = 65536
+// MaxAnswerBytes is the largest sanitized answer this package will retain. It
+// must equal agent.MaxAdvisoryContent, the limit the answer is handed to
+// downstream, so an answer that could not be carried is refused here rather
+// than truncated. go-llm's agent package is not imported here, so the equality
+// is pinned by a test in cmd/golem, where both are already in scope.
+const MaxAnswerBytes = 65536
 
 // documentedBuiltinAgents is the pinned built-in subagent name list, taken
 // from https://code.claude.com/docs/en/sub-agents ("Built-in subagents"),
@@ -265,6 +267,9 @@ func inspectStream(data []byte, stdin string, cwds []string) (inspection, []stri
 	// test emptiness without a null special case.
 	in := inspection{DecodeErrorIndex: -1, UnknownKinds: []string{}, APIRetryErrors: []string{}, RateLimitTypes: []string{}}
 	x := &inspector{in: &in, stdin: stdin, cwds: cwds, resultIndex: -1, firstAssistant: -1, overageAll: true}
+	// The 1 MiB arm is unreachable through Run, whose output cap is at most
+	// 1 MiB and aborts the run before this is called; it is kept so a direct
+	// caller of inspectStream is bounded too.
 	if len(data) == 0 || len(data) > 1<<20 || !utf8.Valid(data) {
 		x.fail("malformed")
 		return in, x.reasons
@@ -314,7 +319,7 @@ func inspectStream(data []byte, stdin string, cwds []string) (inspection, []stri
 		switch {
 		case want != all && want != last:
 			x.fail("answer-inconsistent")
-		case len(answer) > maxAnswerBytes:
+		case len(answer) > MaxAnswerBytes:
 			x.fail("answer-too-large")
 		default:
 			in.Answer = answer
