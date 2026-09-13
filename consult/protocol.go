@@ -82,10 +82,9 @@ type inspection struct {
 	Answer                     string   `json:"answer"`             // the admitted reply, empty unless admission passed
 }
 
-// pinnedCLIVersion is the claude_code_version the frozen protocol catalog was
-// recorded against; a different one is evidence, not a hard stop (the caller
-// applies its own supported set to inspection.Version).
-const pinnedCLIVersion = "2.1.240"
+// claudeSupportedVersions (claude.go) is the hard gate at admission: a
+// claude_code_version outside that evidence-approved set fails init with
+// version-mismatch, regardless of whether it is also surfaced in Version.
 
 // versionRE bounds what may be copied out of the init into inspection.Version.
 // The value reaches a caller that compares and reports it, so only a plain
@@ -172,7 +171,9 @@ func initCheck(m map[string]any, expectedCwds ...string) initFacts {
 	if v, isString := m["claude_code_version"].(string); isString && len(v) <= maxVersionLen && versionRE.MatchString(v) {
 		f.version = v
 	}
-	f.versionExact = m["claude_code_version"] == pinnedCLIVersion
+	if raw, isString := m["claude_code_version"].(string); isString {
+		f.versionExact = claudeSupportedVersions[raw]
+	}
 	switch v, present := m["apiKeySource"]; {
 	case !present:
 		f.apiKeySource = "missing"

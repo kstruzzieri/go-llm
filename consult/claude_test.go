@@ -1,6 +1,7 @@
 package consult
 
 import (
+	"slices"
 	"strings"
 	"testing"
 )
@@ -8,8 +9,8 @@ import (
 // TestClaudeArgsAreFixedAndVersionPinned locks the Claude adapter's argv to
 // the E2 fixed launch contract and guards the evidence-approved version set.
 func TestClaudeArgsAreFixedAndVersionPinned(t *testing.T) {
-	want := []string{"-p", "--safe-mode", "--tools", "", "--allowedTools", "", "--strict-mcp-config", "--mcp-config", `{"mcpServers":{}}`, "--no-session-persistence", "--disable-slash-commands", "--no-chrome", "--model", "opus", "--system-prompt", claudeSystemPrompt, "--setting-sources=", "--output-format", "stream-json", "--verbose"}
-	if got := claudeArgs("opus"); strings.Join(got, "\x00") != strings.Join(want, "\x00") {
+	want := []string{"-p", "--safe-mode", "--tools", "", "--allowedTools", "", "--strict-mcp-config", "--mcp-config", `{"mcpServers":{}}`, "--no-session-persistence", "--disable-slash-commands", "--no-chrome", "--model", "opus", "--system-prompt", "Give advisory text only. Do not use tools or access files or networks.", "--setting-sources=", "--output-format", "stream-json", "--verbose"}
+	if got := claudeArgs("opus"); !slices.Equal(got, want) {
 		t.Fatalf("argv drift:\n%q\n%q", got, want)
 	}
 	for _, a := range claudeArgs("opus") {
