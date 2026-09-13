@@ -166,6 +166,10 @@ type Turn struct {
 	Context      []ContextItem
 	Approver     agent.Approver
 	Observer     agent.Observer
+	// Advisory is an optional staged consult receipt for this turn (#382).
+	// It is projected onto the wire copy of the goal only and never
+	// persisted with the thread.
+	Advisory *agent.Advisory
 }
 
 // CompactionReport estimates persisted non-system history and its rendered
@@ -470,6 +474,7 @@ func (r *Runtime) Run(ctx context.Context, turn Turn, sink EventSink) (agent.Res
 		// of one thread reaches the provider under one session id (#533).
 		// Stateless turns carry no thread id and so send no session header.
 		SessionID: turn.ThreadID,
+		Advisory:  turn.Advisory,
 	}
 	if thread != nil {
 		request.History = thread.history()
@@ -649,6 +654,11 @@ func (r *Runtime) validateTurn(turn Turn) error {
 	}
 	if len(turn.Message) > r.maxMessageBytes {
 		return fmt.Errorf("%w: message exceeds %d bytes", ErrInvalidRequest, r.maxMessageBytes)
+	}
+	if turn.Advisory != nil {
+		if err := agent.ValidateAdvisory(turn.Advisory); err != nil {
+			return fmt.Errorf("%w: %v", ErrInvalidRequest, err)
+		}
 	}
 	contextBytes := 0
 	for i, item := range turn.Context {
