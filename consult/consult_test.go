@@ -29,15 +29,24 @@ func consultantFor(t *testing.T, body string) Consultant {
 		TimeoutSeconds: 5, MaxOutputBytes: 1 << 20, TrustedProcessEgress: true}
 }
 
+// fixtureBody is the shell body that replays one stream-json fixture. The
+// fixture is a file rather than an argument so no byte of it is parsed as a
+// format string or a shell word; sed substitutes the child's real private cwd
+// for the fixture placeholder, so the init's cwd check sees the envelope it
+// actually ran in.
+func fixtureBody(t *testing.T, stdoutLines string, exit int) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "stream.jsonl")
+	if err := os.WriteFile(path, []byte(stdoutLines+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return `cat >/dev/null; sed "s|/private/synthetic|$PWD|g" ` + path + `; exit ` + strconv.Itoa(exit)
+}
+
 // fakeClaude emits the given stream-json lines on stdout and exits with exit.
-// Every "/private/synthetic" in the fixture is substituted with the child's
-// real private cwd, so the init's cwd check sees the envelope it ran in.
 func fakeClaude(t *testing.T, stdoutLines string, exit int) Consultant {
 	t.Helper()
-	body := `cat >/dev/null; printf '%s\n' "$(printf '` +
-		strings.ReplaceAll(stdoutLines, "/private/synthetic", "%s") +
-		`' "$PWD")"; exit ` + strconv.Itoa(exit)
-	return consultantFor(t, body)
+	return consultantFor(t, fixtureBody(t, stdoutLines, exit))
 }
 
 // mustFail requires a fixed-code failure and, with it, a zero receipt: no
@@ -101,9 +110,8 @@ func TestRunRejectsBadPromptBeforeExec(t *testing.T) {
 	c := fakeClaude(t, "", 0)
 	c.Command = "/nonexistent/never-run"
 	for _, p := range []string{"", strings.Repeat("x", 65537), "bad\xff"} {
-		var ce *Error
-		if _, err := Run(context.Background(), c, p); !errors.As(err, &ce) || ce.Code != "input-invalid" {
-			t.Fatalf("prompt %d bytes: %v", len(p), err)
+		if ce := mustFail(t, context.Background(), c, p); ce.Code != "input-invalid" || ce.Reason != "prompt" {
+			t.Fatalf("prompt %d bytes: %v, want input-invalid (prompt)", len(p), ce)
 		}
 	}
 }
@@ -189,7 +197,10 @@ func TestRunTimeoutAndCancelCodes(t *testing.T) {
 	t.Run("canceled", func(t *testing.T) {
 		c := consultantFor(t, "sleep 30")
 		ctx, cancel := context.WithCancel(context.Background())
-		time.AfterFunc(300*time.Millisecond, cancel)
+		// 1s, not 300ms: a freshly written script costs ~200ms to exec on
+		// macOS, and cancelling inside that window would surface as
+		// process-exit/start and read as a regression.
+		time.AfterFunc(time.Second, cancel)
 		defer cancel()
 		if ce := mustFail(t, ctx, c, "hi\n"); ce.Code != "canceled" || ce.Reason != "caller" {
 			t.Fatalf("err %v, want canceled (caller)", ce)
@@ -215,10 +226,10 @@ func TestRunReportsIncompleteDrain(t *testing.T) {
 	// The background sleep inherits stdout and outlives the leader. Shortening
 	// the runner's grace period is the only way to reach this branch from Run:
 	// waitDelay is not part of the Consultant contract.
-	c.Command = script(t, `sleep 8 & cat >/dev/null; printf '%s\n' "$(printf '`+
-		strings.ReplaceAll(valid, "/private/synthetic", "%s")+`' "$PWD")"; exit 0`)
+	c.Command = script(t, "sleep 8 & "+fixtureBody(t, valid, 0))
+	restore := runWaitDelay
+	defer func() { runWaitDelay = restore }()
 	runWaitDelay = 200 * time.Millisecond
-	defer func() { runWaitDelay = 0 }()
 	if ce := mustFail(t, context.Background(), c, "hi\n"); ce.Code != "drain-incomplete" || ce.Reason != "wait-delay" {
 		t.Fatalf("err %v, want drain-incomplete (wait-delay)", ce)
 	}
