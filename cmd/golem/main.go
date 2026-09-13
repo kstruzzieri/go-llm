@@ -1052,8 +1052,25 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 	if !f.noCapProbe && capStore != nil {
 		resolver = bundle.Models // concrete *provider.ModelRegistry; always non-nil after bootstrap
 	}
-	warns, err := preflightToolCapable(ctx, bundle.Models, plan.chain, plan.useCase, resolveEndpoint, resolver)
-	warns = append(backendRes.warns, warns...)
+	// The ONE post-admission preparation sequence (#376 M4): preflight,
+	// thinking, ceiling, budget, caller — shared with /model set so the two
+	// paths cannot drift. It runs HERE, after admission installed the gate,
+	// because it reads model metadata and may probe.
+	//
+	// In goal mode f.think is always "" (applyGoalMode clears it with a
+	// warning), so thinking performs no chain lookups there by construction.
+	prep, err := prepareModel(ctx, modelPreparation{
+		models:          bundle.Models,
+		router:          bundle.Router,
+		plan:            plan,
+		resolveEndpoint: resolveEndpoint,
+		resolver:        resolver,
+		think:           f.think,
+		inputCeiling:    f.inputCeiling,
+		outputReserve:   f.outputReserve,
+		pressureWarn:    f.pressureWarn,
+	})
+	warns := append(backendRes.warns, prep.warnings...)
 	if err != nil {
 		if len(backendRes.warns) > 0 {
 			err = fmt.Errorf("%s\n%w", strings.Join(backendRes.warns, "\n"), err)
@@ -1071,10 +1088,8 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 		warns = append(warns, capStoreWarn)
 	}
 
-	// In goal mode f.think is always "" (applyGoalMode clears it with a
-	// warning), so this performs no chain lookups there by construction.
-	thinkOpts, thinkLine := resolveThinkOptions(ctx, bundle.Models, plan.chain, f.think)
-	inputCeiling := resolveInputCeiling(ctx, bundle.Models, plan.chain, plan.useCase, f.inputCeiling, f.outputReserve, resolver != nil)
+	thinkOpts, thinkLine := prep.thinkOpts, prep.thinkNotice
+	inputCeiling := prep.ceiling
 
 	if autoErr != nil && !f.noRag && f.ragDB == "" {
 		warns = append(warns, "retrieve auto-index disabled: "+autoErr.Error())
@@ -1598,7 +1613,7 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 		verifySlot = &lateVerifier{}
 		orchVerifier = verifySlot
 	}
-	newOrchestrator := newOrchestratorFactory(newActiveChainCaller(bundle.Router, plan), f, orchVerifier, canary)
+	newOrchestrator := newOrchestratorFactory(prep.caller, f, orchVerifier, canary)
 	orch := newOrchestrator()
 
 	obsv, err := newObserv(os.Getenv, root, f.trace, f.telemetry, time.Now)
@@ -1606,12 +1621,7 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 		return fmt.Errorf("golem: observability setup: %w", err)
 	}
 
-	budget := agent.Budget{InputCeiling: inputCeiling.ceiling, OutputReserve: f.outputReserve}
-	if f.pressureWarn > 0 {
-		// The agent package owns the band layout (single source of truth for the
-		// monotonic clamp + defaults); golem only supplies the warn fraction.
-		budget.Pressure = agent.PressureThresholdsForWarn(float64(f.pressureWarn) / 100)
-	}
+	budget := prep.budget
 	var summarizer conversation.Summarizer
 	if !f.noCompress {
 		summarizer = agent.NewRouterSummarizer(bundle.Router, summarizeChain)

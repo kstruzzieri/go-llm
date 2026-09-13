@@ -1,11 +1,14 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"sort"
 	"strings"
 
+	"github.com/kstruzzieri/go-llm/agent"
 	"github.com/kstruzzieri/go-llm/internal/providerbootstrap"
+	"github.com/kstruzzieri/go-llm/provider"
 )
 
 // modelSetUseCase is the routing use case every /model set selection is
@@ -86,4 +89,80 @@ func resolveModelSelection(eff *providerbootstrap.Effective, input string) (prov
 			sel, len(keys), strings.Join(keys, ", "))
 	}
 	return providerbootstrap.PlannedRoute{UseCase: modelSetUseCase, Chain: []string{keys[0] + "/" + sel}}, nil
+}
+
+// modelPreparation is the input to the ONE post-admission preparation
+// sequence startup and /model set share (#376 M4 steps 3-5). Every field is
+// process state that is already frozen by the time it is read: the bundle's
+// registry and router, the plan whose destinations admission just consented
+// to, and the flag-sourced settings. Nothing here is re-resolved, and nothing
+// here may run before the destination gate is installed -- preparation reads
+// model metadata and may probe, so calling it earlier would perform the very
+// I/O admission exists to gate.
+type modelPreparation struct {
+	models capChecker       // bundle.Models: the one registry
+	router *provider.Router // bundle.Router: the one router the caller routes through
+	plan   chainPlan        // the admitted chain AND the use case it routes as
+
+	resolveEndpoint endpointResolver // provider base_url/discovery path for diagnostics
+	resolver        toolCallResolver // nil under -no-cap-probe: no active probing
+
+	// think is the RESOLVER input, not a flag: startup passes -think, and a
+	// mid-session switch passes thinkFlagValue of the accepted current
+	// options so a rejected value is never resurrected.
+	think string
+
+	inputCeiling  int // -input-ceiling: explicit override, 0 => derive
+	outputReserve int // -output-reserve
+	pressureWarn  int // -pressure-warn percent, 0 disables the band
+}
+
+// preparedModel is everything the post-admission sequence resolves for one
+// route. It deliberately stops short of the orchestrator and the runtime: a
+// caller validates this whole value first and only then publishes, so a
+// failed preparation installs nothing.
+type preparedModel struct {
+	plan        chainPlan              // the plan these outputs were resolved for
+	warnings    []string               // per-entry preflight diagnostics, in chain order
+	thinkOpts   provider.ModelOptions  // ONLY Think/ThinkEffort are meaningful
+	thinkNotice string                 // one-line explanation when thinking was cleared
+	ceiling     inputCeilingResolution // value + source, for the startup/status line
+	budget      agent.Budget           // derived from the ceiling, reserve, and warn percent
+	caller      agent.ModelCaller      // strict chain caller for the orchestrator factory
+}
+
+// prepareModel runs the post-admission preparation for one already-admitted
+// route: tool-capability preflight, thinking resolution, input-ceiling
+// derivation, and the budget/caller the orchestrator factory consumes.
+//
+// The order matters. Preflight runs first so a chain that cannot route a
+// tool-capable model fails before any ceiling or thinking decision is derived
+// from it, and its error is returned UNWRAPPED so the caller's classification
+// (isPreflightCapabilityError => caller misuse, anything else => provider
+// pre-run failure) keeps working. Per-entry warnings are returned on the
+// failure path too, because the caller folds them into its own warning list
+// before returning.
+func prepareModel(ctx context.Context, in modelPreparation) (preparedModel, error) {
+	warnings, err := preflightToolCapable(ctx, in.models, in.plan.chain, in.plan.useCase, in.resolveEndpoint, in.resolver)
+	if err != nil {
+		return preparedModel{plan: in.plan, warnings: warnings}, err
+	}
+	thinkOpts, thinkNotice := resolveThinkOptions(ctx, in.models, in.plan.chain, in.think)
+	ceiling := resolveInputCeiling(ctx, in.models, in.plan.chain, in.plan.useCase,
+		in.inputCeiling, in.outputReserve, in.resolver != nil)
+	budget := agent.Budget{InputCeiling: ceiling.ceiling, OutputReserve: in.outputReserve}
+	if in.pressureWarn > 0 {
+		// The agent package owns the band layout (single source of truth for
+		// the monotonic clamp + defaults); golem only supplies the fraction.
+		budget.Pressure = agent.PressureThresholdsForWarn(float64(in.pressureWarn) / 100)
+	}
+	return preparedModel{
+		plan:        in.plan,
+		warnings:    warnings,
+		thinkOpts:   thinkOpts,
+		thinkNotice: thinkNotice,
+		ceiling:     ceiling,
+		budget:      budget,
+		caller:      newActiveChainCaller(in.router, in.plan),
+	}, nil
 }
