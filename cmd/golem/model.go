@@ -412,7 +412,12 @@ func prepareModelSwitch(ctx context.Context, sess *replSession, arg string) (mod
 
 	next := sel
 	next.requested = arg
-	next.chain = prep.plan.chain // prepareModel already owns this copy
+	// A THIRD copy, not prep.plan.chain: that array is already retained by the
+	// caller prepareModel built and, under default dispatch, by the child
+	// caller rebuildDispatchTool built from it. The selection is the one
+	// holder a later command can be tempted to rewrite in place, so it owns
+	// its own (#376 M4 step 8).
+	next.chain = slices.Clone(prep.plan.chain)
 	next.useCase = prep.plan.useCase
 	next.useRecommend = false // the first successful set is strict for the process lifetime
 	next.ceilingSource = prep.ceiling.source
