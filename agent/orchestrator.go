@@ -75,6 +75,9 @@ func initState(req Request) State {
 	msgs = append(msgs, Message{
 		ChatMessage: provider.ChatMessage{Role: "user", Content: req.Goal},
 		Segment:     Pinned,
+		// #382: the staged receipt belongs to the goal. run replaces this with
+		// the inspected value before anything prices or renders it.
+		Advisory: req.Advisory,
 	})
 	return State{System: req.System, DurableSummary: req.HistorySummary, Messages: msgs}
 }
@@ -174,6 +177,8 @@ func (o *Orchestrator) run(ctx context.Context, req Request, obs Observer, ic *i
 	// its own model-origin observation: a block refuses the run before any
 	// assembly, and tags annotate the projected copy only.
 	if req.Advisory != nil {
+		// initState appends the goal last, and it is the message it attached
+		// the receipt to.
 		last := len(state.Messages) - 1
 		annotated, aerr := o.prepareAdvisory(ctx, ic, obs, *req.Advisory, last)
 		if aerr != nil {
@@ -421,6 +426,7 @@ func resultMessages(st State, historyLen int) []provider.ChatMessage {
 	}
 	out := make([]provider.ChatMessage, 0, len(st.Messages)-historyLen)
 	for _, m := range st.Messages[historyLen:] {
+		// #382: ChatMessage only -- Message.Advisory must never leave the run.
 		out = append(out, cloneChatMessage(m.ChatMessage))
 	}
 	return out
