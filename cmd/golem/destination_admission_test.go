@@ -574,13 +574,14 @@ func TestAdmissionExtendAdmitsNewRemoteWithOneConsent(t *testing.T) {
 		{Purpose: provider.DestinationPurposeModelRefresh, Destination: base},
 	}
 	p := &fakePrompt{answer: true}
-	adm, _ := newTestAdmission(t, edges, nil, true, p)
+	adm, out := newTestAdmission(t, edges, nil, true, p)
 	if err := adm.ensure(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	if p.calls != 0 {
 		t.Fatalf("local-only startup prompted %d times, want 0", p.calls)
 	}
+	startupRender := out.Len()
 	inflight, err := adm.gate.Bind(context.Background(), "agent", "llamacpp")
 	if err != nil {
 		t.Fatal(err)
@@ -599,6 +600,16 @@ func TestAdmissionExtendAdmitsNewRemoteWithOneConsent(t *testing.T) {
 	}
 	if p.calls != 1 {
 		t.Errorf("extend consulted the prompt %d times, want exactly 1 (one decision for the complete proposal)", p.calls)
+	}
+
+	// The question says "the remote destinations listed above", so the
+	// surface extend wrote must be the PROPOSED manifest: approving a grant
+	// for a destination the user was never shown is consent to nothing.
+	proposed := out.String()[startupRender:]
+	for _, want := range []string{"cloud", "https://cloud.example.com", "remote", "agent (fallback)", "model-refresh"} {
+		if !strings.Contains(proposed, want) {
+			t.Errorf("consent surface written by extend missing %q:\n%s", want, proposed)
+		}
 	}
 
 	// Additive publication: the capability bound BEFORE the switch still
@@ -635,10 +646,19 @@ func TestAdmissionExtendWithoutNewRemoteConsent(t *testing.T) {
 		name  string
 		allow []string
 		cand  []provider.DestinationEdge
+		// cancelled proposals never reach a consent question, so the
+		// pre-publication recheck is the ONLY thing standing between a
+		// cancelled switch and a published generation.
+		cancelled bool
 	}{
 		{
 			name: "purpose-only addition to a granted destination",
 			cand: []provider.DestinationEdge{{Purpose: "chat", Destination: remote}},
+		},
+		{
+			name:      "cancelled before publication",
+			cand:      []provider.DestinationEdge{{Purpose: "chat", Destination: sidecar}},
+			cancelled: true,
 		},
 		{
 			name: "local candidate",
@@ -660,13 +680,33 @@ func TestAdmissionExtendWithoutNewRemoteConsent(t *testing.T) {
 			if p.calls != 1 {
 				t.Fatalf("startup admission prompted %d times, want 1", p.calls)
 			}
+			wantManifest := adm.manifest
 
-			got, err := adm.extend(context.Background(), tt.cand)
-			if err != nil {
-				t.Fatalf("extend = %v, want nil", err)
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			if tt.cancelled {
+				cancel()
 			}
+			got, err := adm.extend(ctx, tt.cand)
 			if got {
 				t.Error("extend reported a new grant for a proposal the baseline already permits")
+			}
+			if tt.cancelled {
+				if !errors.Is(err, context.Canceled) {
+					t.Fatalf("extend on a cancelled context = %v, want context.Canceled", err)
+				}
+				if adm.manifest != wantManifest {
+					t.Error("cancelled extend replaced the stored manifest")
+				}
+				for _, e := range tt.cand {
+					if _, err := adm.gate.Bind(context.Background(), e.Purpose, e.Destination.Provider()); !errors.Is(err, provider.ErrDestinationDenied) {
+						t.Errorf("cancelled extend admitted candidate edge %q -> %s: %v", e.Purpose, e.Destination, err)
+					}
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("extend = %v, want nil", err)
 			}
 			if p.calls != 1 {
 				t.Errorf("extend asked for consent again (%d prompts total), want the startup decision only", p.calls)
@@ -823,6 +863,31 @@ func TestAdmissionExtendAlreadyAdmittedIsSilent(t *testing.T) {
 	}
 	if adm.manifest != wantManifest {
 		t.Error("extend republished an unchanged manifest")
+	}
+}
+
+// The consent discipline is shared: a reader that answers yes on a cancelled
+// context has consented to nothing in ensure either, so the startup
+// admission installs nothing. Fail-closed, and the same rule extend applies.
+func TestAdmissionEnsureCancelledAfterYesInstallsNothing(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	p := &fakePrompt{answer: true, before: func(context.Context) { cancel() }}
+	adm, _ := newTestAdmission(t, admEdges(t), nil, true, p)
+
+	if err := adm.ensure(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("ensure cancelled while answering = %v, want context.Canceled", err)
+	}
+	if adm.admitted {
+		t.Error("cancelled ensure marked the session admitted")
+	}
+	if adm.granted.Permits(admDest(t, "opencode", "https://opencode.ai/zen/go")) {
+		t.Error("cancelled ensure recorded a grant it never published")
+	}
+	for _, e := range admEdges(t) {
+		if _, err := adm.gate.Bind(context.Background(), e.Purpose, e.Destination.Provider()); !errors.Is(err, provider.ErrDestinationDenied) {
+			t.Errorf("edge %q -> %s admitted by a cancelled ensure: %v", e.Purpose, e.Destination, err)
+		}
 	}
 }
 

@@ -93,9 +93,9 @@ func newDestinationAdmission(cfg destinationAdmissionConfig) (*destinationAdmiss
 	}, nil
 }
 
-// destinationConsentPrompt is the one batch consent question. ensure and
-// extend ask it verbatim, because both consent to the complete manifest
-// rendered immediately above it.
+// destinationConsentPrompt is the one batch consent question, asked from the
+// single consent path both ensure and extend go through, because both consent
+// to the complete manifest rendered immediately above it.
 const destinationConsentPrompt = "Allow this session to send data to the remote destinations listed above? [y/N] "
 
 // ensure admits the manifest if it is not already admitted this generation:
@@ -103,7 +103,8 @@ const destinationConsentPrompt = "Allow this session to send data to the remote 
 // by the exact allowlist, otherwise collect the one interactive batch
 // decision — or fail closed noninteractively, naming an uncovered
 // destination, a use case that reaches it, and the exact flag that would
-// cover it (I6). Idempotent after success; revoke re-arms it.
+// cover it (I6). A reader that answers on a cancelled context installs
+// nothing. Idempotent after success; revoke re-arms it.
 func (a *destinationAdmission) ensure(ctx context.Context) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -113,32 +114,11 @@ func (a *destinationAdmission) ensure(ctx context.Context) error {
 
 	a.render(a.out)
 
-	// No explicit local/remote split: DestinationPolicy.Permits auto-admits
-	// literal loopback, so firstUncovered can only ever surface a remote —
-	// a separate filter would be a second copy of that rule.
-	dests := a.manifest.Destinations()
-	policy := provider.NewDestinationPolicy(a.allowed...)
-	if uncovered := firstUncovered(dests, policy); uncovered != nil {
-		if !a.interactive || a.promptYN == nil {
-			denial := &provider.DestinationDeniedError{
-				Destination: *uncovered,
-				Purpose:     purposeReaching(a.manifest, *uncovered),
-			}
-			return fmt.Errorf("%w; pass -allow-destination %q to permit it", denial, uncovered.String())
-		}
-		ok, err := a.promptYN(ctx, destinationConsentPrompt)
-		if err != nil {
-			return err
-		}
-		if !ok {
-			return &provider.DestinationDeniedError{
-				Destination: *uncovered,
-				Purpose:     purposeReaching(a.manifest, *uncovered),
-			}
-		}
-		// The approval grants exactly the manifest's destination set — not
-		// allow-all — plus whatever the flags already named.
-		policy = provider.NewDestinationPolicy(append(dests, a.allowed...)...)
+	// At startup the baseline is only the exact allow flags (plus the
+	// loopback rule inside Permits): nothing has been granted yet.
+	policy, _, err := a.consent(ctx, a.manifest, provider.NewDestinationPolicy(a.allowed...))
+	if err != nil {
+		return err
 	}
 
 	if err := a.gate.Install(policy, a.manifest); err != nil {
@@ -157,6 +137,50 @@ func (a *destinationAdmission) revoke() {
 	defer a.mu.Unlock()
 	a.gate.Clear()
 	a.admitted = false
+}
+
+// consent is THE destination-consent decision, shared by ensure and extend so
+// the discipline cannot drift between the startup admission and a model
+// switch: at most one question for the complete manifest, judged against
+// baseline. It reports the policy to publish with and whether approval added
+// a remote the baseline did not already permit.
+//
+// Callers hold a.mu and render m before calling, because the question refers
+// to the manifest listed above it.
+func (a *destinationAdmission) consent(ctx context.Context, m *provider.DestinationManifest, baseline provider.DestinationPolicy) (provider.DestinationPolicy, bool, error) {
+	// No explicit local/remote split: DestinationPolicy.Permits auto-admits
+	// literal loopback, so firstUncovered can only ever surface a remote —
+	// a separate filter would be a second copy of that rule.
+	dests := m.Destinations()
+	uncovered := firstUncovered(dests, baseline)
+	if uncovered == nil {
+		return baseline, false, nil
+	}
+	denied := &provider.DestinationDeniedError{
+		Destination: *uncovered,
+		Purpose:     purposeReaching(m, *uncovered),
+	}
+	// Fail closed without reading anything: noninteractive modes do not ask
+	// for consent, they name the destination, a use case that reaches it,
+	// and the exact flag that would cover it (I6).
+	if !a.interactive || a.promptYN == nil {
+		return baseline, false, fmt.Errorf("%w; pass -allow-destination %q to permit it", denied, uncovered.String())
+	}
+	ok, err := a.promptYN(ctx, destinationConsentPrompt)
+	if err != nil {
+		return baseline, false, err
+	}
+	// A reader that answers yes on a cancelled context (Ctrl-C racing a
+	// newline) has consented to nothing.
+	if err := ctx.Err(); err != nil {
+		return baseline, false, err
+	}
+	if !ok {
+		return baseline, false, denied
+	}
+	// The approval grants exactly the manifest's destination set — not
+	// allow-all — plus whatever the flags already named.
+	return provider.NewDestinationPolicy(append(dests, a.allowed...)...), true, nil
 }
 
 // extend admits a candidate model's destinations additively (#376). The
@@ -203,37 +227,15 @@ func (a *destinationAdmission) extend(ctx context.Context, edges []provider.Dest
 	// destinations listed above", and it asks about the PROPOSED manifest.
 	renderManifest(a.out, m)
 
-	dests := m.Destinations()
-	policy := baseline
-	uncovered := firstUncovered(dests, baseline)
-	if uncovered != nil {
-		if !a.interactive || a.promptYN == nil {
-			denial := &provider.DestinationDeniedError{
-				Destination: *uncovered,
-				Purpose:     purposeReaching(m, *uncovered),
-			}
-			return false, fmt.Errorf("%w; pass -allow-destination %q to permit it", denial, uncovered.String())
-		}
-		ok, err := a.promptYN(ctx, destinationConsentPrompt)
-		if err != nil {
-			return false, err
-		}
-		// A reader that answers yes on a cancelled context (Ctrl-C and a
-		// newline race) has not consented to anything.
-		if err := ctx.Err(); err != nil {
-			return false, err
-		}
-		if !ok {
-			return false, &provider.DestinationDeniedError{
-				Destination: *uncovered,
-				Purpose:     purposeReaching(m, *uncovered),
-			}
-		}
-		policy = provider.NewDestinationPolicy(append(dests, a.allowed...)...)
+	policy, newGrant, err := a.consent(ctx, m, baseline)
+	if err != nil {
+		return false, err
 	}
 
-	// Last look before authority changes hands. Cancellation arriving AFTER
-	// this point does not undo the grant — publication is what decides.
+	// Last look before authority changes hands — and, on a proposal the
+	// baseline already covers, the only cancellation guard, because that
+	// path asks no question. Cancellation arriving AFTER this point does not
+	// undo the grant: publication is what decides.
 	if err := ctx.Err(); err != nil {
 		return false, err
 	}
@@ -248,7 +250,7 @@ func (a *destinationAdmission) extend(ctx context.Context, edges []provider.Dest
 	a.edges = m.Edges()
 	a.granted = policy
 	a.admitted = true
-	return uncovered != nil, nil
+	return newGrant, nil
 }
 
 // manifestCovers reports whether every edge in proposed already appears in
