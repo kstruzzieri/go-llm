@@ -20,6 +20,7 @@ import (
 	"github.com/kstruzzieri/go-llm/agent"
 	"github.com/kstruzzieri/go-llm/consult"
 	"github.com/kstruzzieri/go-llm/conversation"
+	golemruntime "github.com/kstruzzieri/go-llm/golem"
 	"github.com/kstruzzieri/go-llm/provider"
 )
 
@@ -419,6 +420,71 @@ func TestConsultAdvisoryDroppedWhenTheRunRefusesIt(t *testing.T) {
 	res, err := runOnce(context.Background(), &out, nil, sess, "goal", nil)
 	if err != nil || res.Answer == "" {
 		t.Fatalf("second turn = %+v / %v, want a normal turn", res, err)
+	}
+}
+
+func TestConsultAdvisoryDroppedAfterContextExhaustion(t *testing.T) {
+	caller := &scriptCaller{}
+	sess := newTestSession(t, caller, t.TempDir())
+	if err := sess.runtime.ReplaceConfiguration(context.Background(), golemruntime.Configuration{
+		System: sess.baseSystem, Orchestrator: sess.orch, Budget: agent.Budget{InputCeiling: 8000},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	sess.advisory = &agent.Advisory{
+		Source: "claude", Tool: "claude 2.1.240", Model: "opus",
+		Digest: strings.Repeat("a", 64), Content: strings.Repeat("x", consult.MaxAnswerBytes), Origin: agent.OriginModel,
+	}
+	var out bytes.Buffer
+	if _, err := runOnce(context.Background(), &out, nil, sess, "goal", nil); !errors.Is(err, agent.ErrContextExhausted) {
+		t.Fatalf("oversized advisory: %v, want context exhaustion", err)
+	}
+	if len(caller.lastRequest.Messages) != 0 {
+		t.Fatal("oversized advisory reached the model")
+	}
+	if sess.advisory != nil || !strings.Contains(out.String(), "dropped staged advice from claude after context exhaustion") {
+		t.Fatalf("context exhaustion kept the advisory or dropped it silently: %s", out.String())
+	}
+	if res, err := runOnce(context.Background(), &out, nil, sess, "goal", nil); err != nil || res.Answer == "" {
+		t.Fatalf("retry without the advisory: %+v, %v", res, err)
+	}
+}
+
+func TestConsultDropPreservesHistoryAndGrants(t *testing.T) {
+	caller := &scriptCaller{}
+	sess := newSessionedTestSession(t, caller, t.TempDir(), "user:drop-consult")
+	sess.grants = newApprovalGrants()
+	sess.grants.grant(grantScopeFiles, "keep-grant")
+	var out bytes.Buffer
+	if _, err := runOnce(context.Background(), &out, nil, sess, "remember this goal", nil); err != nil {
+		t.Fatal(err)
+	}
+	sess.advisory = &agent.Advisory{Source: "claude", Content: "discard this advice"}
+	// Dropping local state needs neither configured consultants nor interceptors.
+	dispatchSlash(context.Background(), &out, sess, "/consult drop")
+	if sess.advisory != nil || !strings.Contains(out.String(), "dropped staged advice from claude") {
+		t.Fatalf("drop failed: %s", out.String())
+	}
+	if !sess.grants.granted(grantScopeFiles, "keep-grant") {
+		t.Fatal("dropping advice revoked an unrelated grant")
+	}
+	if _, err := runOnce(context.Background(), &out, nil, sess, "next goal", nil); err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, m := range caller.lastRequest.Messages {
+		found = found || m.Content == "remember this goal"
+		if strings.Contains(m.Content, "discard this advice") {
+			t.Fatal("dropped advice reached the next goal")
+		}
+	}
+	if !found {
+		t.Fatal("dropping advice erased conversation history")
+	}
+	out.Reset()
+	dispatchSlash(context.Background(), &out, sess, "/consult drop")
+	if out.String() != "no staged advice\n" {
+		t.Fatalf("empty drop: %q", out.String())
 	}
 }
 

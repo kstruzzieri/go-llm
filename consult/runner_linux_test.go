@@ -50,6 +50,7 @@ func TestGroupExitedAcceptsZombiesButRejectsLiveProcesses(t *testing.T) {
 }
 
 func TestZombieGroupFailsClosed(t *testing.T) {
+	getpgid := func(int) (int, error) { return 42, nil }
 	// comm contains both spaces and a ')' so a whitespace split of the whole
 	// record would read the wrong process group and thread count.
 	const zombie = "123 (worker ) child) Z 1 42 0 0 0 0 0 0 0 0 0 0 0 0 0 0 1"
@@ -75,7 +76,7 @@ func TestZombieGroupFailsClosed(t *testing.T) {
 			if err := os.WriteFile(filepath.Join(pidDir, "stat"), []byte(tc.stat), 0o600); err != nil {
 				t.Fatal(err)
 			}
-			if got := zombieGroup(root, 42); got != tc.want {
+			if got := zombieGroup(root, 42, getpgid); got != tc.want {
 				t.Fatalf("zombieGroup = %v, want %v", got, tc.want)
 			}
 			if tc.want {
@@ -89,7 +90,7 @@ func TestZombieGroupFailsClosed(t *testing.T) {
 				if err := os.WriteFile(statPath, []byte(strings.Replace(zombie, " Z ", " S ", 1)), 0o600); err != nil {
 					t.Fatal(err)
 				}
-				if zombieGroup(root, 42) {
+				if zombieGroup(root, 42, getpgid) {
 					t.Fatal("live member ignored")
 				}
 				if err := os.Remove(statPath); err != nil {
@@ -98,13 +99,52 @@ func TestZombieGroupFailsClosed(t *testing.T) {
 				if err := os.Mkdir(statPath, 0o700); err != nil {
 					t.Fatal(err)
 				}
-				if zombieGroup(root, 42) {
+				if zombieGroup(root, 42, getpgid) {
 					t.Fatal("unreadable member ignored")
 				}
 			}
 		})
 	}
-	if zombieGroup(filepath.Join(t.TempDir(), "absent"), 42) {
+	if zombieGroup(filepath.Join(t.TempDir(), "absent"), 42, getpgid) {
 		t.Fatal("missing proc filesystem accepted")
+	}
+}
+
+func TestZombieGroupSkipsOnlyKnownUnrelatedOrReapedProcesses(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "123"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "123", "stat"),
+		[]byte("123 (worker) Z 1 42 0 0 0 0 0 0 0 0 0 0 0 0 0 0 1"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// A directory makes ReadFile fail even as root, so this also exercises the
+	// permission-failure boundary in CI without depending on chmod enforcement.
+	if err := os.MkdirAll(filepath.Join(root, "456", "stat"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name  string
+		group int
+		err   error
+		want  bool
+	}{
+		{"unrelated", 43, nil, true},
+		{"reaped", 0, syscall.ESRCH, true},
+		{"member", 42, nil, false},
+		{"unknown", 0, syscall.EPERM, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			getpgid := func(pid int) (int, error) {
+				if pid == 123 {
+					return 42, nil
+				}
+				return tc.group, tc.err
+			}
+			if got := zombieGroup(root, 42, getpgid); got != tc.want {
+				t.Fatalf("cleanup = %v, want %v", got, tc.want)
+			}
+		})
 	}
 }

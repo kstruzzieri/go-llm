@@ -233,5 +233,8 @@ func validateCommand(path string) (os.FileInfo, error) {
 	if resolved != path {
 		return nil, errors.New("command path must not traverse symlinks")
 	}
+	if err := validateCommandParents(path, info); err != nil {
+		return nil, err
+	}
 	return info, nil
 }

@@ -61,7 +61,7 @@ the top-level object: one file, one config. Consultant names must be unique.
 | `version` | int | yes | must be `1` |
 | `consultants[].name` | string | yes | must match `^[a-z0-9][a-z0-9-]{0,31}$` |
 | `consultants[].adapter` | string | yes | only `"claude"` in v1 |
-| `consultants[].command` | string | yes | absolute path to a regular file; not a symlink, no symlink anywhere in the path (`filepath.EvalSymlinks` must return the path unchanged), and not group- or world-writable |
+| `consultants[].command` | string | yes | absolute path to a regular file; no symlink anywhere in the path and no group/world write on the file; on Unix, the file and all ancestors must be owned by root or the current effective user, and writable ancestors must have the sticky bit |
 | `consultants[].sha256` | string | no | 64 lowercase hex characters; re-verified over the whole file immediately before exec |
 | `consultants[].model` | string | yes | only `"opus"` for adapter `claude` |
 | `consultants[].timeout_seconds` | int | no | `0..300`; `0` means the default, 120 |
@@ -79,6 +79,13 @@ is usually a symlink and is rejected; give the resolved target instead. A
 binary anyone but its owner can rewrite is rejected too — `command must not be
 group- or world-writable` — because a digest pin over a file the group can
 replace pins nothing.
+
+On Unix, the executable and every ancestor must be owned by root or the
+current effective user. Ancestors cannot be group- or world-writable unless
+they have the sticky bit. This permits a private directory below `/tmp`
+while rejecting a shared writable directory where another user can rename
+the executable or one of its parents. A sticky directory owned by another
+user is rejected too: its owner could still replace entries within it.
 
 ```json
 {
@@ -169,8 +176,11 @@ Lifetime and limits:
   `setsid` escapes it, and is outside this trust boundary);
 - after `Wait`, the group is signalled again and polled for up to one second
   until no member can still run; an incomplete cleanup fails the run. On
-  Linux, unreaped zombies count as exited. Unreadable or malformed process
-  information cannot establish that a group contains only zombies;
+  Linux, unreaped zombies count as exited. Membership is checked with
+  `getpgid` before reading `/proc/<pid>/stat`, so unrelated unreadable
+  processes do not block cleanup. Unknown membership or unreadable/malformed
+  member data cannot establish cleanup. Polls back off from 10 to 100 ms
+  within the one-second window;
 - `WaitDelay` is 5 s: if cancellation leaves a pipe held open longer than
   that, `Wait` abandons the copy and the run fails as `drain-incomplete`
   rather than admitting a possibly truncated transcript;
@@ -179,9 +189,11 @@ Lifetime and limits:
   boundary. Exceeding the cap on either stream aborts the run;
 - the prompt on stdin must be 1..65536 bytes of valid UTF-8;
 - the exec target is re-checked before both launches: absolute regular file,
-  no symlink anywhere in the path, not group- or world-writable, opened-file
-  identity unchanged, and matching digest when expected. Path-based exec
-  still leaves a check-to-exec race with local writers. The hash read is
+  no symlink anywhere in the path, not group- or world-writable, trusted
+  ownership and ancestor permissions, opened-file identity unchanged, and
+  matching digest when expected. Path-based exec still leaves a check-to-exec
+  race with the current user or root. These Unix mode checks do not inspect
+  platform-specific ACLs. The hash read is
   uncancellable and the run deadline is already ticking during it: a binary
   large enough to out-read `timeout_seconds` makes the start fail with the deadline error.
   `Receipt.Duration` is measured around the whole call and so includes the
@@ -239,9 +251,12 @@ An admitted transcript must satisfy all of:
   `status` and one `thinking_tokens` record may appear, each at most once.
 
 Thinking and redacted-thinking blocks are read for shape and discarded; only
-text blocks are retained. The retained answer has every C0 control byte except
-`\n`/`\t`, plus DEL, replaced with U+FFFD, and must be at most 64 KiB — an
-oversized answer is refused, never truncated.
+text blocks are retained. CRLF line endings are normalized to LF. Every
+remaining C0 control byte except `\n`/`\t`, plus DEL, is replaced with U+FFFD;
+standalone carriage returns remain visibly replaced so they cannot overwrite
+terminal lines. The resulting answer must be at most 64 KiB — an oversized
+answer is refused, never truncated. The receipt digest covers these normalized,
+sanitized bytes.
 
 Rate-limit and usage records are recorded as counts and booleans on the
 receipt's `Evidence`, never as vendor text.
@@ -334,14 +349,16 @@ interceptor trailer on its own line, and stages it.
 - **One slot.** A staged advisory is carried by the next goal only. It is
   cleared by `/clear`, by `/new`, by a successful `/resume`, and by a turn
   that both completes without error and produces an answer.
+- **Dropping.** `/consult drop` discards the slot without changing conversation
+  history or grants. It also works when consulting is disabled or interceptors
+  are off, and reports `no staged advice` when the slot is already empty.
 - **Retained on failure.** If the turn fails or you cancel it, the advisory
-  stays staged; the consultant is not rerun. The one exception is a step-0
-  interceptor refusal, which **drops** the slot and prints `dropped staged
-  advice from <name> after interceptor refusal`: the refusal is deterministic
-  in the staged bytes, so keeping it would fail every later goal identically
-  and wedge the session. The same holds for a turn that
-  finishes cleanly with no answer: empty content never put the advice to work,
-  so the slot survives for the retry. The decision is made after session
+  stays staged; the consultant is not rerun. A step-0 interceptor refusal or
+  `ErrContextExhausted` instead **drops** the slot and prints `dropped staged
+  advice from <name> after interceptor refusal` or `after context exhaustion`.
+  Keeping that advice could fail every later goal. Retrying still requires
+  submitting the goal again. A turn that finishes cleanly with no answer also
+  retains the slot. The decision is made after session
   persistence and checkpoint sealing have settled, so an answered-but-
   unpersisted turn does not silently spend the slot.
 - **Replacing.** A second `/consult` replaces the staged advisory and says so.
@@ -396,11 +413,13 @@ treats fenced text as data, and a consultant that writes persuasive prose is
 free to try. The step-0 interceptor pass is the only detector in the path, and
 it looks for known injection shapes, not for persuasion. What actually limits
 the damage is that the model cannot act on the advice by itself: writes, execs
-and every other effect still go through approvals, grants and the sandbox. The
-residual risk is therefore advice that steers the model toward an action that
-looks reasonable at the approval prompt — which is the same risk any untrusted
-tool output carries, and the same reason to prefer `y` over `a` while it is
-staged.
+and every other effect still go through approvals, grants and the sandbox.
+Existing `/auto-edits` and session grants remain effective on advisory turns:
+a matching action can run without another approval prompt. Consulting does not
+grant additional authority or suspend authority the operator already granted.
+Advice can steer actions within those permissions, just as untrusted tool
+output can. Use `/auto-edits off` or `/grants clear` before the goal when fresh
+approval is wanted.
 
 The projection is priced against the pinned segment before the model call, so
 an advisory too large for the context exhausts the budget instead of silently
@@ -429,6 +448,11 @@ block of counts and booleans. `ContentForm` is `consult-result/v1` and
 appended — the #450 convention, so a later verifier can reconstruct the same
 input. Interceptor trailers are added later and out of band, in
 `Advisory.Annotation`, so they never change the bytes the digest covers.
+
+This transient receipt supplies attribution for the current turn, not a
+durable audit trail. The session store and mutation receipts do not preserve a
+consultation-to-action link. Recording advisory hashes and metadata would
+require a separate persistence contract; it is outside this stage's scope.
 
 ## What this does and does not prove
 
@@ -482,8 +506,6 @@ consultant trusted. These residual items are known and unresolved:
 
 ## Open items
 
-- **No `/consult drop`.** There is no way to discard a staged advisory short
-  of `/clear`, which also resets the session.
 - **The pre-exec digest read is neither chunked nor cancellable.** A large
   binary is read in one uninterruptible pass while the run deadline ticks.
 - **`Error.Code` is a plain string.** Consumers matching on it do so by

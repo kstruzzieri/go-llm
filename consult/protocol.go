@@ -334,15 +334,15 @@ func inspectStream(data []byte, stdin string, cwds []string) (inspection, []stri
 	return in, x.reasons
 }
 
-// sanitize replaces every C0 control byte (U+0000-U+001F) except \n and \t,
-// and DEL (U+007F), with U+FFFD so a consultant cannot drive the terminal or
-// the fence renderer. \r is replaced by design: a CRLF answer renders U+FFFD
-// before each \n rather than letting a carriage return overwrite the line.
+// sanitize normalizes CRLF to LF, then replaces every other C0 control byte
+// (U+0000-U+001F) except \n and \t, and DEL (U+007F), with U+FFFD so a
+// consultant cannot drive the terminal or the fence renderer. Standalone \r
+// remains visible as U+FFFD rather than overwriting the line.
 // C1 controls, bidi overrides and zero-width characters are left alone here;
 // they carry no terminal authority and belong to the interceptor pipeline.
 func sanitize(s string) string {
 	var b strings.Builder
-	for _, r := range s {
+	for _, r := range strings.ReplaceAll(s, "\r\n", "\n") {
 		if (r < 0x20 && r != '\n' && r != '\t') || r == 0x7f {
 			b.WriteRune('�')
 			continue

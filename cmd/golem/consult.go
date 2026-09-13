@@ -60,6 +60,16 @@ func consultFailureLine(err error) string {
 // Every failure is reported as a fixed code, never as vendor bytes.
 func handleConsult(ctx context.Context, out io.Writer, sess *replSession, line string) {
 	rest := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(line), "/consult"))
+	// Dropping local advice needs no consultant launch or interceptor policy.
+	if rest == "drop" {
+		if sess.advisory == nil {
+			_, _ = fmt.Fprintln(out, "no staged advice")
+		} else {
+			_, _ = fmt.Fprintf(out, "dropped staged advice from %s\n", sess.advisory.Source)
+			sess.advisory = nil
+		}
+		return
+	}
 	// The refusals come first, ahead of the bare-command status line: a status
 	// line reads as "this command works, here is its state", which is exactly
 	// wrong when /consult is disabled or ungated.
@@ -71,16 +81,16 @@ func handleConsult(ctx context.Context, out io.Writer, sess *replSession, line s
 		_, _ = fmt.Fprintln(out, "consult requires -interceptors")
 		return
 	case rest == "" && sess.advisory == nil:
-		_, _ = fmt.Fprintln(out, "usage: /consult <name> <prompt>; staged: none")
+		_, _ = fmt.Fprintln(out, "usage: /consult <name> <prompt> | /consult drop; staged: none")
 		return
 	case rest == "":
-		_, _ = fmt.Fprintf(out, "usage: /consult <name> <prompt>; staged: %s (sha256:%s)\n",
+		_, _ = fmt.Fprintf(out, "usage: /consult <name> <prompt> | /consult drop; staged: %s (sha256:%s)\n",
 			sess.advisory.Source, sess.advisory.Digest[:12])
 		return
 	}
 	name, prompt, _ := strings.Cut(rest, " ")
 	if prompt = strings.TrimSpace(prompt); prompt == "" {
-		_, _ = fmt.Fprintln(out, "usage: /consult <name> <prompt>")
+		_, _ = fmt.Fprintln(out, "usage: /consult <name> <prompt> | /consult drop")
 		return
 	}
 	c, ok := sess.consultants[name]

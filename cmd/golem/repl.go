@@ -489,12 +489,17 @@ func runOnce(ctx context.Context, out io.Writer, interrupts <-chan struct{}, ses
 	if runErr == nil && res.Answer != "" {
 		sess.advisory = nil
 	}
-	// The one failure worth no retry. A step-0 policy refusal is deterministic
-	// in the staged bytes, so keeping the slot would fail every later goal
-	// identically and wedge the session. Drop it and say so: the goal was
-	// consumed by the refused turn, so the user has to retype it either way.
-	if errors.Is(runErr, agent.ErrAdvisoryBlocked) && sess.advisory != nil {
-		writeRunLine("dropped staged advice from %s after interceptor refusal", sess.advisory.Source)
+	// A policy refusal or context exhaustion can fail every subsequent goal
+	// with the same advice. Drop the optional input and let the user retry.
+	dropReason := ""
+	switch {
+	case errors.Is(runErr, agent.ErrAdvisoryBlocked):
+		dropReason = "interceptor refusal"
+	case errors.Is(runErr, agent.ErrContextExhausted):
+		dropReason = "context exhaustion"
+	}
+	if dropReason != "" && sess.advisory != nil {
+		writeRunLine("dropped staged advice from %s after %s", sess.advisory.Source, dropReason)
 		sess.advisory = nil
 	}
 	// A failed tail flush loses only buffered display bytes on the progress
@@ -966,6 +971,7 @@ const golemHelp = `commands:
                  show the selected model chain, ceiling, thinking, and last routed model; set switches the model for the rest of this process
   /consult <name> <prompt>
                  ask a configured external consultant; the admitted answer is shown and staged as fenced advice for the next goal only
+  /consult drop  discard staged advice without clearing history or grants
   /context       inspect the last assembled request
   /compact       compact the active session's history
   /clear         delete the active session's history

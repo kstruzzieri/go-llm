@@ -335,15 +335,18 @@ func run(ctx context.Context, spec runSpec) (out runOutcome, err error) {
 	// expected case here, so the result is ignored.
 	_ = killGroup(cmd.Process.Pid)
 	deadline := time.Now().Add(time.Second)
+	delay := 10 * time.Millisecond
 	for {
 		if groupExited(cmd.Process.Pid) {
 			out.GroupCleanupOK = true
 			break
 		}
-		if time.Now().After(deadline) {
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
 			break
 		}
-		time.Sleep(10 * time.Millisecond)
+		time.Sleep(min(delay, remaining))
+		delay = min(2*delay, 100*time.Millisecond)
 	}
 
 	out.Duration = time.Since(start)

@@ -725,6 +725,7 @@ func TestInspectStreamBoundsTheAnswer(t *testing.T) {
 		{"plain_at_cap", "x", 65536, 65536},
 		{"expanding_over", `\u007f`, 21846, -1},
 		{"expanding_under_cap", `\u007f`, 21845, 65535},
+		{"crlf_near_raw_cap", `x\r\n`, 21845, 43690},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			in, reasons := inspectStream([]byte(body(tc.unit, tc.n)), "", nil)
@@ -738,6 +739,12 @@ func TestInspectStreamBoundsTheAnswer(t *testing.T) {
 				t.Fatalf("answer of %d bytes rejected, want %d: reasons %v", len(in.Answer), tc.want, reasons)
 			}
 		})
+	}
+}
+
+func TestSanitizeNormalizesOnlyCRLF(t *testing.T) {
+	if got := sanitize("one\r\ntwo\rthree\r\r\nfour\r"); got != "one\ntwo�three�\nfour�" {
+		t.Fatalf("CRLF normalization or standalone CR safety changed: %q", got)
 	}
 }
 

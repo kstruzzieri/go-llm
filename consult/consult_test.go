@@ -444,7 +444,7 @@ func TestRunRejectsNonOpusAnswers(t *testing.T) {
 }
 
 func TestRunRevalidatesExecutable(t *testing.T) {
-	for _, change := range []string{"group_writable", "world_writable", "parent_symlink"} {
+	for _, change := range []string{"group_writable", "world_writable", "parent_writable", "ancestor_writable", "parent_symlink"} {
 		t.Run(change, func(t *testing.T) {
 			c := fakeClaude(t, stream(validInit, assistantOK, goodResult), 0)
 			var err error
@@ -457,10 +457,17 @@ func TestRunRevalidatesExecutable(t *testing.T) {
 			}
 			if change != "parent_symlink" {
 				mode := os.FileMode(0o770)
+				target := c.Command
 				if change == "world_writable" {
 					mode = 0o707
 				}
-				if err := os.Chmod(c.Command, mode); err != nil {
+				if change == "parent_writable" || change == "ancestor_writable" {
+					target = filepath.Dir(target)
+				}
+				if change == "ancestor_writable" {
+					target = filepath.Dir(target)
+				}
+				if err := os.Chmod(target, mode); err != nil {
 					t.Fatal(err)
 				}
 			} else {
@@ -479,6 +486,62 @@ func TestRunRevalidatesExecutable(t *testing.T) {
 			}
 			if ce := mustFail(t, context.Background(), c, "synthetic review prompt\n"); ce.Code != "target-invalid" {
 				t.Fatalf("changed target: %v, want target-invalid", ce)
+			}
+		})
+	}
+}
+
+func TestCommandTrustIncludesOwnersAndStickyParents(t *testing.T) {
+	for _, tc := range []struct {
+		name                  string
+		leaf, foreign, sticky bool
+	}{
+		{name: "trusted_sticky_parent", sticky: true},
+		{name: "foreign_leaf", leaf: true, foreign: true},
+		{name: "foreign_parent", foreign: true},
+		{name: "foreign_sticky_parent", foreign: true, sticky: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.foreign && os.Geteuid() != 0 {
+				t.Skip("changing file ownership requires root; covered by Linux CI")
+			}
+			c := fakeClaude(t, stream(validInit, assistantOK, goodResult), 0)
+			target := filepath.Dir(c.Command)
+			if tc.leaf {
+				target = c.Command
+			}
+			if tc.sticky {
+				if err := os.Chmod(target, os.ModeSticky|0o777); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tc.foreign {
+				if !tc.leaf && !tc.sticky {
+					if err := os.Chmod(target, 0o755); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if err := os.Chown(target, 12345, -1); err != nil {
+					if errors.Is(err, os.ErrPermission) {
+						t.Skip("changing file ownership is unavailable in this environment")
+					}
+					t.Fatal(err)
+				}
+				t.Cleanup(func() {
+					if err := os.Chown(target, os.Geteuid(), -1); err != nil {
+						t.Error(err)
+					}
+				})
+				if err := validate(&c); err == nil || !strings.Contains(err.Error(), "owned by root or the current user") {
+					t.Fatalf("foreign-owned executable path must fail ownership validation: %v", err)
+				}
+				if ce := mustFail(t, context.Background(), c, "hi\n"); ce.Code != "target-invalid" {
+					t.Fatalf("foreign-owned path: %v", ce)
+				}
+				return
+			}
+			if _, err := Run(context.Background(), c, "hi\n"); err != nil {
+				t.Fatalf("trusted sticky parent rejected: %v", err)
 			}
 		})
 	}

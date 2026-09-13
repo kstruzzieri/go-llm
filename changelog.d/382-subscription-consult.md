@@ -28,8 +28,10 @@ the runtime seam; `golem.Turn.Advisory` carries one staged receipt.
   reclassifying those is deferred. A step-0 refusal also **drops** the staged
   advisory rather than retaining it, with a notice naming the consultant: the
   refusal is deterministic in the staged bytes, so keeping the slot would fail
-  every later goal identically. Every other failure, and a clean turn that
-  produced no answer, still retains it.
+  every later goal identically. Context exhaustion also drops the slot with a
+  notice so an oversized answer cannot block later goals. Other failures and
+  clean turns that produced no answer still retain it. `/consult drop`
+  discards advice without clearing conversation history or grants.
 - Consultant traffic is the vendor process's own and bypasses
   `-allow-destination`; the config field `trusted_process_egress: true` is an
   explicit acknowledgement, not a filter.
@@ -44,7 +46,13 @@ the runtime seam; `golem.Turn.Advisory` carries one staged receipt.
   a digest pin over a file the group can replace pins nothing. An optional
   `sha256` is re-verified immediately before exec. Path and permission checks
   are repeated before both launches, including for hand-built consultants.
+  On Unix, the executable and every ancestor must be owned by root or the
+  effective user; writable ancestors require the sticky bit.
 - Linux cleanup treats an unreaped zombie-only process group as exited;
-  live members or unreadable process information still fail cleanup.
+  `getpgid` filters unrelated processes before reading their state, and
+  polling backs off to 100 ms within the one-second cleanup window. Live
+  members, unknown membership or unreadable member data still fail cleanup.
+- CRLF answers are normalized to LF before control sanitization and the
+  64 KiB answer cap. Standalone carriage returns still become U+FFFD.
 - Unix only: the runner depends on `Setpgid` and negative-PID process-group
   signalling, so a consult on Windows fails with `unsupported-platform`.
