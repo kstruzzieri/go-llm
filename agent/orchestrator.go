@@ -72,10 +72,17 @@ func initState(req Request) State {
 	for _, h := range req.History {
 		msgs = append(msgs, Message{ChatMessage: cloneChatMessage(h), Segment: Elastic})
 	}
-	msgs = append(msgs, Message{
+	goal := Message{
 		ChatMessage: provider.ChatMessage{Role: "user", Content: req.Goal},
 		Segment:     Pinned,
-	})
+	}
+	// #382: a value copy, so the caller cannot mutate the staged receipt after
+	// the run has priced and inspected it.
+	if req.Advisory != nil {
+		adv := *req.Advisory
+		goal.Advisory = &adv
+	}
+	msgs = append(msgs, goal)
 	return State{System: req.System, DurableSummary: req.HistorySummary, Messages: msgs}
 }
 
@@ -97,6 +104,14 @@ func buildChatRequest(st State, specs []provider.Tool, outputReserve int, opts p
 				fence, minted = promptfence.New(), true
 			}
 			cm.Content = frameToolResult(fence, cm.Content)
+		}
+		// #382: the staged advisory is projected here too, on the same value
+		// copy under the same per-render key. State keeps the raw goal.
+		if m.Advisory != nil {
+			if !minted {
+				fence, minted = promptfence.New(), true
+			}
+			cm.Content = renderAdvisory(fence, cm.Content, *m.Advisory)
 		}
 		msgs = append(msgs, cm)
 	}
@@ -124,6 +139,11 @@ func (o *Orchestrator) run(ctx context.Context, req Request, obs Observer, ic *i
 	}
 	if err := validateHistory(req.History); err != nil {
 		return Result{}, err
+	}
+	if req.Advisory != nil {
+		if err := ValidateAdvisory(req.Advisory); err != nil {
+			return Result{}, err
+		}
 	}
 	maxSteps := req.MaxSteps
 	if maxSteps <= 0 {
@@ -156,6 +176,18 @@ func (o *Orchestrator) run(ctx context.Context, req Request, obs Observer, ic *i
 	state := initState(req)
 	historyLen := len(req.History)
 	var res Result
+
+	// #382: the staged advisory is re-inspected before the initial input, as
+	// its own model-origin observation: a block refuses the run before any
+	// assembly, and tags annotate the projected copy only.
+	if req.Advisory != nil {
+		last := len(state.Messages) - 1
+		annotated, aerr := o.prepareAdvisory(ctx, ic, obs, *req.Advisory, last)
+		if aerr != nil {
+			return finishWithError(&res, state, historyLen, aerr)
+		}
+		state.Messages[last].Advisory = &annotated
+	}
 
 	// #436: the initial input is inspected once, before any assembly, so a
 	// block never reaches the model and no pressure event is emitted for it.
@@ -309,6 +341,41 @@ func (o *Orchestrator) run(ctx context.Context, req Request, obs Observer, ic *i
 	res.Messages = resultMessages(state, historyLen)
 	res.Events = append(res.Events, EventRecord{Step: maxSteps - 1, Kind: "stop"})
 	return res, nil
+}
+
+// prepareAdvisory runs the observation hook over the advisory as a
+// model-origin observation. A block refuses the advisory; tags append the
+// standard trailers after the content, so the model sees the annotation below
+// the text it qualifies. With no interceptors installed the receipt is
+// returned unchanged.
+func (o *Orchestrator) prepareAdvisory(ctx context.Context, ic *interceptorRun, obs Observer, a Advisory, index int) (Advisory, error) {
+	tags, block, err := ic.inspectObservation(ctx, normalizeObserver(obs), 0, InspectedMessage{
+		StateIndex: index, Role: "tool", Origin: a.Origin,
+		ToolName: "consult/" + a.Source, Content: a.Content,
+	})
+	if err != nil {
+		return Advisory{}, err
+	}
+	if block != nil {
+		return Advisory{}, ErrAdvisoryBlocked
+	}
+	a.Content += distinctTrailers(tags)
+	return a, nil
+}
+
+// InspectAdvisory applies this Orchestrator's interceptor chain to a consult
+// receipt before it is displayed or staged, so a refusal reaches the user at
+// consult time rather than at the next Run. It returns the annotated receipt,
+// or ErrAdvisoryBlocked when the policy refuses it.
+func (o *Orchestrator) InspectAdvisory(ctx context.Context, a Advisory) (Advisory, error) {
+	if err := ValidateAdvisory(&a); err != nil {
+		return Advisory{}, err
+	}
+	chain, _, err := resolveInterceptors(ctx, o.interceptors, RunScope{})
+	if err != nil {
+		return Advisory{}, err
+	}
+	return o.prepareAdvisory(ctx, &interceptorRun{chain: chain}, nil, a, 0)
 }
 
 func assistantMessage(resp provider.ChatResponse) Message {

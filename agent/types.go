@@ -99,6 +99,10 @@ type Request struct {
 	// keep threads (the golem runtime passes its thread id) get consistent
 	// upstream routing and prompt caching; empty preserves prior behavior.
 	SessionID string
+	// Advisory is an optional host-attributed external judgment for this goal
+	// (#382). It is projected onto the wire copy of the goal message only:
+	// State, Result.Messages, history and summaries never carry it.
+	Advisory *Advisory
 }
 
 // Segment tags a message as always-present (Pinned) or compactable (Elastic).
@@ -124,6 +128,10 @@ type Message struct {
 	// failure — all three return before prepareCall normalizes).
 	Context   *ContextSet `json:"-"`
 	OutputCap int         `json:"-"`
+	// Advisory is the staged consult receipt carried by the pinned goal
+	// message (#382); runtime-only, never persisted, and never copied into
+	// Result.Messages, which is built from ChatMessage alone.
+	Advisory *Advisory `json:"-"`
 }
 
 // State is the canonical transcript the Orchestrator owns.

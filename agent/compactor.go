@@ -60,7 +60,10 @@ func (rc RecencyCompactor) messageCost(m Message) int {
 }
 
 func (rc RecencyCompactor) checkedMessageCost(m Message) (int, bool) {
-	n := rc.estimate(m.Content)
+	// #382: a message carrying a staged advisory costs the projection
+	// buildChatRequest renders, not its raw content. This is the single seam
+	// ContextManager.messageCost and the compactor both price through.
+	n := rc.estimate(messageContent(m))
 	add := func(cost int) bool {
 		var ok bool
 		n, ok = checkedTokenAdd(n, cost)
