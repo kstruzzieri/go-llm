@@ -8,14 +8,17 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
 	"github.com/kstruzzieri/go-llm/agent"
 	"github.com/kstruzzieri/go-llm/consult"
 	"github.com/kstruzzieri/go-llm/conversation"
+	"github.com/kstruzzieri/go-llm/provider"
 )
 
 // The three transcript records below are duplicated from consult's own test
@@ -41,6 +44,17 @@ func consultTranscript(text string) string {
 // path that traverses one, and macOS temp roots live under /var -> /private/var.
 func fakeConsultants(t *testing.T, name, stdout string) map[string]consult.Consultant {
 	t.Helper()
+	loaded, err := consult.Load(fakeConsultantsFile(t, name, stdout))
+	if err != nil {
+		t.Fatalf("consult.Load: %v", err)
+	}
+	return loaded
+}
+
+// fakeConsultantsFile writes the config and its fake command and returns the
+// config path.
+func fakeConsultantsFile(t *testing.T, name, stdout string) string {
+	t.Helper()
 	dir, err := filepath.EvalSymlinks(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
@@ -61,11 +75,7 @@ func fakeConsultants(t *testing.T, name, stdout string) map[string]consult.Consu
 	if err := os.WriteFile(p, []byte(cfg), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	loaded, err := consult.Load(p)
-	if err != nil {
-		t.Fatalf("consult.Load: %v", err)
-	}
-	return loaded
+	return p
 }
 
 func TestConsultStagesAdviceForNextGoalThenClears(t *testing.T) {
@@ -180,17 +190,26 @@ func TestConsultReplacesStagedSlotWithNotice(t *testing.T) {
 type blockAdvice struct {
 	marker  string
 	verdict agent.Verdict
+	rules   int // >1 emits that many distinct rules, to grow the trailer block
 }
 
 func (blockAdvice) Name() string { return "blocker" }
 
 func (b blockAdvice) InspectInput(_ context.Context, in agent.InputInspection) ([]agent.Finding, error) {
 	for _, m := range in.Messages {
-		if strings.Contains(m.Content, b.marker) {
-			return []agent.Finding{{
-				Interceptor: "blocker", Rule: "advice-refused", Verdict: b.verdict,
-			}}, nil
+		if !strings.Contains(m.Content, b.marker) {
+			continue
 		}
+		n := max(b.rules, 1)
+		out := make([]agent.Finding, 0, n)
+		for i := 0; i < n; i++ {
+			rule := "advice-refused"
+			if b.rules > 1 {
+				rule += strconv.Itoa(i)
+			}
+			out = append(out, agent.Finding{Interceptor: "blocker", Rule: rule, Verdict: b.verdict})
+		}
+		return out, nil
 	}
 	return nil, nil
 }
@@ -334,5 +353,161 @@ func TestLoadConsultantsDisabledWithoutUserConfigDir(t *testing.T) {
 func TestConsultHelpDocumented(t *testing.T) {
 	if !strings.Contains(golemHelp, "  /consult <name> <prompt>\n") {
 		t.Fatalf("help must document /consult:\n%s", golemHelp)
+	}
+}
+
+// --- staged-slot lifetime against the post-Run error reconciliation (#382) ---
+
+// sealBreakingCaller answers normally but opens a checkpoint and then closes
+// the store's database while the model call is in flight, so beginTurn has
+// already succeeded and sealTurn's store.seal fails after Run returns.
+type sealBreakingCaller struct {
+	t *testing.T
+	j *checkpointJournal
+}
+
+func (c *sealBreakingCaller) Chat(_ context.Context, _ provider.ChatRequest, _ func(provider.ChatResponse) error) (agent.ModelResult, error) {
+	if _, err := c.j.Prepare(testRec("a.txt", "A0", true)); err != nil {
+		c.t.Errorf("Prepare: %v", err)
+	}
+	if err := c.j.store.db.Close(); err != nil {
+		c.t.Errorf("close store db: %v", err)
+	}
+	return agent.ModelResult{Response: provider.ChatResponse{Content: "completed answer"}}, nil
+}
+
+func TestConsultAdvisoryRetainedWhenTheTurnFailsToSeal(t *testing.T) {
+	j, _, _ := newJournalFixture(t)
+	caller := &sealBreakingCaller{t: t, j: j}
+	sess := newTestSession(t, caller, t.TempDir())
+	sess.journal = j
+	sess.interceptorsOn = true
+	sess.consultants = fakeConsultants(t, "claude", consultTranscript("OK"))
+	var out bytes.Buffer
+	dispatchSlash(context.Background(), &out, sess, "/consult claude q")
+	if sess.advisory == nil {
+		t.Fatalf("consult did not stage: %s", out.String())
+	}
+	res, err := runOnce(context.Background(), &out, nil, sess, "goal", nil)
+	if err == nil || res.Answer == "" {
+		t.Fatalf("want an answered turn that failed to seal, got %+v / %v", res, err)
+	}
+	if sess.advisory == nil {
+		t.Fatalf("advisory consumed by a turn that failed to seal: %s", out.String())
+	}
+}
+
+func TestConsultAdvisoryClearedWhenAnUnpersistedAnswerIsDemoted(t *testing.T) {
+	root := t.TempDir()
+	caller := &scriptCaller{responses: []agent.ModelResult{{
+		Response: provider.ChatResponse{Content: "completed answer"},
+	}}}
+	sess := newSessionedTestSession(t, caller, root, "workspace:consult-save-failure")
+	sess.interceptorsOn = true
+	sess.consultants = fakeConsultants(t, "claude", consultTranscript("OK"))
+	// The same forced-save-failure trigger TestRunOnceKeepsAnswerWhenSessionSaveFails
+	// uses: neither a lost CAS nor a lock timeout, so the answered turn is
+	// demoted to a success with a warning.
+	if _, err := sess.session.db.ExecContext(context.Background(), `
+		CREATE TRIGGER fail_conversation_save
+		BEFORE INSERT ON conversations
+		BEGIN
+			SELECT RAISE(FAIL, 'forced save failure');
+		END`); err != nil {
+		t.Fatalf("create failure trigger: %v", err)
+	}
+	var out bytes.Buffer
+	dispatchSlash(context.Background(), &out, sess, "/consult claude q")
+	if sess.advisory == nil {
+		t.Fatalf("consult did not stage: %s", out.String())
+	}
+	res, err := runOnce(context.Background(), &out, nil, sess, "goal", nil)
+	if err != nil || res.Answer != "completed answer" ||
+		!strings.Contains(out.String(), "warning: session not saved:") {
+		t.Fatalf("want a demoted-to-success answered turn, got %+v / %v:\n%s", res, err, out.String())
+	}
+	if sess.advisory != nil {
+		t.Fatalf("advisory survived a successful turn: %+v", sess.advisory)
+	}
+}
+
+func TestConsultNonPolicyInspectFailureIsInternal(t *testing.T) {
+	caller := &scriptCaller{}
+	sess := newTestSession(t, caller, t.TempDir())
+	// 200 distinct tag rules overrun the 4 KiB annotation cap: a fail-closed
+	// host error, not a policy refusal.
+	sess.orch = agent.New(caller, agent.ContextManager{},
+		agent.WithInterceptors(blockAdvice{marker: "OK", verdict: agent.VerdictTag, rules: 200}))
+	sess.interceptorsOn = true
+	sess.consultants = fakeConsultants(t, "claude", consultTranscript("OK"))
+	var out bytes.Buffer
+	dispatchSlash(context.Background(), &out, sess, "/consult claude q")
+	if !strings.Contains(out.String(), "consult failed: internal") ||
+		strings.Contains(out.String(), "blocked") || sess.advisory != nil {
+		t.Fatalf("cap overflow reported as a policy refusal: %s adv=%v", out.String(), sess.advisory)
+	}
+}
+
+// --- main wiring (#382) ---
+
+func TestStartupNoticesConsultLine(t *testing.T) {
+	for _, tc := range []struct {
+		line string
+		want string
+	}{
+		{"consult: 1 consultant", "consult: 1 consultant"},
+		{"consult: 2 consultants", "consult: 2 consultants"},
+	} {
+		joined := strings.Join(startupNotices(startupInfo{workspace: "/r", consultLine: tc.line}), "\n")
+		if !strings.Contains(joined, tc.want) {
+			t.Fatalf("notices missing %q in:\n%s", tc.want, joined)
+		}
+	}
+	if joined := strings.Join(startupNotices(startupInfo{workspace: "/r"}), "\n"); strings.Contains(joined, "consult:") {
+		t.Fatalf("disabled /consult still announced:\n%s", joined)
+	}
+}
+
+func TestConsultNoticeCountsMatchTheLoadedFile(t *testing.T) {
+	for n, want := range map[int]string{1: "consult: 1 consultant", 2: "consult: 2 consultants"} {
+		m := fakeConsultants(t, "claude", consultTranscript("OK"))
+		if n == 2 {
+			for name, c := range fakeConsultants(t, "second", consultTranscript("OK")) {
+				m[name] = c
+			}
+		}
+		if got := fmt.Sprintf("consult: %s", plural(len(m), "consultant", "consultants")); got != want {
+			t.Fatalf("notice for %d consultants = %q, want %q", n, got, want)
+		}
+	}
+}
+
+func TestRunLoadsConsultantsAndReportsConfigFailures(t *testing.T) {
+	config, root, _ := dispatchOneShotHarness(t)
+	base := []string{"-config", config, "-root", root, "-no-project-context", "-no-git-context",
+		"-no-probe", "-no-cap-probe", "-no-rag"}
+
+	// A valid file is loaded and announced on stderr.
+	path := fakeConsultantsFile(t, "claude", "")
+	in, out, diag := runTestFiles(t)
+	if err := run(append(append([]string{}, base...), "-consultants-config", path, "-p", "hi"), in, out, diag); err != nil {
+		t.Fatalf("run with a valid consultants file: %v", err)
+	}
+	if !strings.Contains(readRunTestFile(t, diag), "consult: 1 consultant") {
+		t.Fatalf("startup did not announce the loaded consultant:\n%s", readRunTestFile(t, diag))
+	}
+
+	// A malformed file is a misconfiguration, not a silent disable.
+	bad := filepath.Join(t.TempDir(), "consultants.json")
+	if err := os.WriteFile(bad, []byte("{"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	in, out, diag = runTestFiles(t)
+	err := run(append(append([]string{}, base...), "-consultants-config", bad, "-p", "hi"), in, out, diag)
+	if exitCodeFor(err) != 2 {
+		t.Fatalf("malformed consultants file exit=%d, want 2 (%v)", exitCodeFor(err), err)
+	}
+	if err == nil || !strings.Contains(err.Error(), "consult: parse config") {
+		t.Fatalf("error does not name the parse failure: %v", err)
 	}
 }

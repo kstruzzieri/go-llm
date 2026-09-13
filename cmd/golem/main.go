@@ -1274,7 +1274,7 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 
 	consultants, cerr := loadConsultants(f.consultantsConfig)
 	if cerr != nil {
-		return cerr
+		return maybeUsageError(cerr, headlessExitApplies(f))
 	}
 	consultLine := ""
 	if len(consultants) > 0 {

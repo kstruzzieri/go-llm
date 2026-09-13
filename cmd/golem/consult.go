@@ -62,6 +62,10 @@ func handleConsult(ctx context.Context, out io.Writer, sess *replSession, line s
 	runCtx, cancel := interruptContext(ctx, sess.interrupts)
 	defer cancel()
 	_, _ = fmt.Fprintf(out, "consulting %s...\n", name)
+	// The trailing newline matches the E2.2 launch stdin (harness-snapshot-e2-2:
+	// e2_2_probe.py writes the prompt terminated by exactly one "\n" and
+	// harness.go feeds those bytes verbatim), which is what rule 1's byte-exact
+	// user echo was validated against.
 	r, err := consult.Run(runCtx, c, prompt+"\n")
 	if err != nil {
 		var ce *consult.Error
@@ -77,10 +81,16 @@ func handleConsult(ctx context.Context, out io.Writer, sess *replSession, line s
 		Digest: r.ContentSHA256, Content: r.Answer, Origin: agent.OriginModel,
 	})
 	if err != nil {
+		// Only a policy refusal is reported as one: validation and the
+		// fail-closed annotation cap also come back from InspectAdvisory, and
+		// calling those "blocked by policy" would misattribute a host bug.
 		var be *agent.BlockedError
-		if errors.As(err, &be) && len(be.Findings) > 0 {
+		switch {
+		case !errors.Is(err, agent.ErrAdvisoryBlocked):
+			_, _ = fmt.Fprintln(out, "consult failed: internal")
+		case errors.As(err, &be) && len(be.Findings) > 0:
 			_, _ = fmt.Fprintf(out, "consult failed: blocked by interceptor policy (%s)\n", be.Findings[0].Rule)
-		} else {
+		default:
 			_, _ = fmt.Fprintln(out, "consult failed: blocked by interceptor policy")
 		}
 		return

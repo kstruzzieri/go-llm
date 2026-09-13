@@ -422,11 +422,6 @@ func runOnce(ctx context.Context, out io.Writer, interrupts <-chan struct{}, ses
 		Observer: observer,
 		Advisory: sess.advisory, // staged by /consult; consumed by this turn only (#382)
 	}, sess.machine.sink())
-	// One goal is all a staged advisory buys: a turn that produced an answer
-	// consumes it, and a failed or interrupted turn keeps it for the retry.
-	if runErr == nil && res.Answer != "" {
-		sess.advisory = nil
-	}
 	// Seal immediately after Run on every path: writes applied before an
 	// interrupt or provider error must stay undoable. The error is joined
 	// with the run error below, after the session-persistence demotion, so
@@ -467,6 +462,15 @@ func runOnce(ctx context.Context, out io.Writer, interrupts <-chan struct{}, ses
 		if !secretBlock && !canaryBlock {
 			writeRunLine("checkpoint: %v", sealErr)
 		}
+	}
+	// One goal is all a staged advisory buys, and only a turn that survives the
+	// whole reconciliation above consumes it. Deciding right after Run would
+	// read a runErr that neither the session-persistence demotion nor the seal
+	// join had settled yet: an answered-but-unpersisted turn would keep an
+	// advisory it had already spent, and a turn that failed to seal would lose
+	// one it never got to use.
+	if runErr == nil && res.Answer != "" {
+		sess.advisory = nil
 	}
 	// A failed tail flush loses only buffered display bytes on the progress
 	// stream; the run itself completed. Demoting it to a warning keeps a good
