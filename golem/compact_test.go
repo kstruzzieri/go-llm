@@ -861,3 +861,166 @@ func TestCompactionSessionConflictPreservesWinnerAndSearch(t *testing.T) {
 		})
 	}
 }
+
+// budgetBarrierCaller parks its first model step until released, so a test can
+// publish a new budget while a turn that already reserved the old one is
+// mid-flight — before its automatic compression reads the reserved value.
+type budgetBarrierCaller struct {
+	answer  string
+	entered chan struct{}
+	release chan struct{}
+	once    sync.Once
+	calls   atomic.Int32
+}
+
+func (c *budgetBarrierCaller) Chat(_ context.Context, _ provider.ChatRequest, onToken func(provider.ChatResponse) error) (agent.ModelResult, error) {
+	if c.calls.Add(1) == 1 {
+		c.once.Do(func() { close(c.entered) })
+		<-c.release
+	}
+	if err := onToken(provider.ChatResponse{Content: c.answer}); err != nil {
+		return agent.ModelResult{}, err
+	}
+	return agent.ModelResult{Response: provider.ChatResponse{Content: c.answer, Done: true}}, nil
+}
+
+// budgetConversation is ten 1200-character messages: 300 tokens each at the
+// four-characters-per-token ratio, so 3000 tokens of stored history.
+func budgetConversation() conversation.Conversation {
+	current := conversation.Conversation{ID: "budget-thread", Revision: 1, CreatedAt: time.Unix(10, 0), UpdatedAt: time.Unix(20, 0)}
+	for i := range 5 {
+		current.Messages = append(current.Messages,
+			conversation.Message{Role: "user", Content: strings.Repeat(string(rune('a'+i)), 1200)},
+			conversation.Message{Role: "assistant", Content: strings.Repeat(string(rune('A'+i)), 1200)})
+	}
+	return current
+}
+
+// A turn that reserved the old budget compresses against it even though a new
+// configuration lands before the compression runs; the next turn receives the
+// new budget. 32768/2 = 16384 tokens of headroom leaves the 3000-token history
+// untouched, while 4096/2 = 2048 forces it to the retention floor.
+func TestReplaceConfigurationAutomaticCompressionKeepsReservedBudget(t *testing.T) {
+	current := budgetConversation()
+	store := &mapSessionStore{conversations: map[string]conversation.Conversation{current.ID: cloneConversation(current)}}
+	var summaries atomic.Int32
+	caller := &budgetBarrierCaller{answer: strings.Repeat("p", 40), entered: make(chan struct{}), release: make(chan struct{})}
+	runtime := newCompactionRuntime(t, golem.Options{
+		SessionStore: store,
+		Budget:       agent.Budget{InputCeiling: 32768},
+		Orchestrator: agent.New(caller, agent.ContextManager{}),
+		Summarizer: func(context.Context, string, []conversation.Message) (string, error) {
+			summaries.Add(1)
+			return "SUM", nil
+		},
+	})
+	unblock := sync.OnceFunc(func() { close(caller.release) })
+	defer unblock()
+	done := make(chan error, 1)
+	go func() {
+		_, err := runtime.Run(context.Background(), golem.Turn{ThreadID: current.ID, RunID: "parked", Message: strings.Repeat("q", 40)}, func(golem.Event) error { return nil })
+		done <- err
+	}()
+	receiveCompaction(t, caller.entered)
+	if err := runtime.ReplaceConfiguration(context.Background(), golem.Configuration{
+		Orchestrator: agent.New(&captureCaller{answer: strings.Repeat("n", 40)}, agent.ContextManager{}),
+		Budget:       agent.Budget{InputCeiling: 4096},
+	}); err != nil {
+		t.Fatalf("ReplaceConfiguration: %v", err)
+	}
+	if got := runtime.Budget(); got != (agent.Budget{InputCeiling: 4096}) {
+		t.Fatalf("Budget() = %+v, want the published 4096 ceiling", got)
+	}
+	unblock()
+	if err := receiveCompaction(t, done); err != nil {
+		t.Fatalf("parked turn: %v", err)
+	}
+	saved := store.conversations[current.ID]
+	if summaries.Load() != 0 || len(saved.Messages) != 12 || saved.DurableSummary != nil {
+		t.Fatalf("parked turn = %d summaries, %d messages, summary %+v; want the reserved 32768 ceiling to compress nothing", summaries.Load(), len(saved.Messages), saved.DurableSummary)
+	}
+	if _, err := runtime.Run(context.Background(), golem.Turn{ThreadID: current.ID, RunID: "after", Message: strings.Repeat("r", 40)}, func(golem.Event) error { return nil }); err != nil {
+		t.Fatalf("next turn: %v", err)
+	}
+	saved = store.conversations[current.ID]
+	if summaries.Load() != 1 || len(saved.Messages) != 8 || saved.DurableSummary == nil {
+		t.Fatalf("next turn = %d summaries, %d messages, summary %+v; want one summary over the new 4096 ceiling", summaries.Load(), len(saved.Messages), saved.DurableSummary)
+	}
+	if *saved.DurableSummary != (conversation.DurableSummary{Content: "SUM", MessageCount: 6}) {
+		t.Errorf("summary = %+v, want SUM over the six oldest messages", *saved.DurableSummary)
+	}
+}
+
+// A manual compaction parked between its reservation and its compression keeps
+// the budget it reserved; publishing a new configuration mid-flight changes
+// neither its literal report nor the tuple the next operation receives.
+//
+// The barrier is the session load, not the summarizer: CompactThread reads its
+// budget before the first summary call, so a summarizer barrier could not
+// overlap a publication with that read at all. Forced compaction then evicts to
+// the retention floor regardless of the ceiling, so the reserved ceiling has no
+// separate observable effect here — what this pins is that a publication landing
+// between reservation and compression disturbs neither the parked operation's
+// literal report nor the tuple the next operation receives. The snapshot binding
+// itself is enforced by construction: Runtime owns no budget field, so
+// CompactThread can only obtain one from the snapshot it reserved.
+func TestReplaceConfigurationManualCompactionKeepsReservedBudget(t *testing.T) {
+	current := compactionConversation(5)
+	base := &mapSessionStore{conversations: map[string]conversation.Conversation{current.ID: cloneConversation(current)}}
+	started, release := make(chan struct{}), make(chan struct{})
+	unblock := sync.OnceFunc(func() { close(release) })
+	defer unblock()
+	var calls atomic.Int32
+	next := &captureCaller{answer: "next answer"}
+	var park sync.Once
+	store := compactionStoreHooks{SessionStore: base, load: func(ctx context.Context, id string) (*conversation.Conversation, error) {
+		park.Do(func() { close(started) })
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-release:
+		}
+		return base.Load(ctx, id)
+	}}
+	runtime := newCompactionRuntime(t, golem.Options{
+		SessionStore: store,
+		Budget:       agent.Budget{InputCeiling: 32768},
+		Summarizer: func(context.Context, string, []conversation.Message) (string, error) {
+			calls.Add(1)
+			return "SUM", nil
+		},
+	})
+	done := make(chan compactionResult, 1)
+	go func() {
+		report, err := runtime.CompactThread(context.Background(), current.ID)
+		done <- compactionResult{report, err}
+	}()
+	receiveCompaction(t, started)
+	if err := runtime.ReplaceConfiguration(context.Background(), golem.Configuration{
+		System:       "NEXT SYSTEM",
+		Orchestrator: agent.New(next, agent.ContextManager{}),
+		Budget:       agent.Budget{InputCeiling: 4096, OutputReserve: 654},
+	}); err != nil {
+		t.Fatalf("ReplaceConfiguration: %v", err)
+	}
+	unblock()
+	got := receiveCompaction(t, done)
+	if got.err != nil || got.report != (golem.CompactionReport{TokensBefore: 100, TokensAfter: 121, Changed: true}) {
+		t.Fatalf("parked compaction = %+v, %v; want 100 -> 121 changed", got.report, got.err)
+	}
+	if calls.Load() != 1 {
+		t.Errorf("summarizer calls = %d, want 1", calls.Load())
+	}
+	if _, err := runtime.Run(context.Background(), golem.Turn{RunID: "after", Message: "after question"}, func(golem.Event) error { return nil }); err != nil {
+		t.Fatalf("next turn: %v", err)
+	}
+	if len(next.requests) != 1 {
+		t.Fatalf("new orchestrator requests = %d, want 1", len(next.requests))
+	}
+	if got := next.requests[0].Options.NumPredict; got != 654 {
+		t.Errorf("next turn NumPredict = %d, want the published 654 output reserve", got)
+	}
+	if got := runtime.Budget(); got != (agent.Budget{InputCeiling: 4096, OutputReserve: 654}) {
+		t.Errorf("Budget() = %+v, want the published budget", got)
+	}
+}

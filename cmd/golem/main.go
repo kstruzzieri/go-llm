@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -964,9 +965,11 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 	if err != nil {
 		return maybeUsageError(err, headlessExitApplies(f))
 	}
-	netPlan, err := providerbootstrap.BuildNetworkPlan(eff, routes, providerbootstrap.PlanOptions{
-		CapabilityProbes: !f.noCapProbe,
-	})
+	// Retained on sess.selection: a mid-session /model set plans its
+	// candidate under the SAME options, so the two plans cannot disagree
+	// about which metadata edges exist.
+	planOpts := providerbootstrap.PlanOptions{CapabilityProbes: !f.noCapProbe}
+	netPlan, err := providerbootstrap.BuildNetworkPlan(eff, routes, planOpts)
 	if err != nil {
 		return maybeUsageError(err, headlessExitApplies(f))
 	}
@@ -1059,8 +1062,25 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 	if !f.noCapProbe && capStore != nil {
 		resolver = bundle.Models // concrete *provider.ModelRegistry; always non-nil after bootstrap
 	}
-	warns, err := preflightToolCapable(ctx, bundle.Models, plan.chain, plan.useCase, resolveEndpoint, resolver)
-	warns = append(backendRes.warns, warns...)
+	// The ONE post-admission preparation sequence (#376 M4): preflight,
+	// thinking, ceiling, budget, caller — shared with /model set so the two
+	// paths cannot drift. It runs HERE, after admission installed the gate,
+	// because it reads model metadata and may probe.
+	//
+	// In goal mode f.think is always "" (applyGoalMode clears it with a
+	// warning), so thinking performs no chain lookups there by construction.
+	prep, err := prepareModel(ctx, modelPreparation{
+		models:          bundle.Models,
+		router:          bundle.Router,
+		plan:            plan,
+		resolveEndpoint: resolveEndpoint,
+		resolver:        resolver,
+		think:           f.think,
+		inputCeiling:    f.inputCeiling,
+		outputReserve:   f.outputReserve,
+		pressureWarn:    f.pressureWarn,
+	})
+	warns := append(backendRes.warns, prep.warnings...)
 	if err != nil {
 		if len(backendRes.warns) > 0 {
 			err = fmt.Errorf("%s\n%w", strings.Join(backendRes.warns, "\n"), err)
@@ -1078,10 +1098,8 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 		warns = append(warns, capStoreWarn)
 	}
 
-	// In goal mode f.think is always "" (applyGoalMode clears it with a
-	// warning), so this performs no chain lookups there by construction.
-	thinkOpts, thinkLine := resolveThinkOptions(ctx, bundle.Models, plan.chain, f.think)
-	inputCeiling := resolveInputCeiling(ctx, bundle.Models, plan.chain, plan.useCase, f.inputCeiling, f.outputReserve, resolver != nil)
+	thinkOpts, thinkLine := prep.thinkOpts, prep.thinkNotice
+	inputCeiling := prep.ceiling
 
 	if autoErr != nil && !f.noRag && f.ragDB == "" {
 		warns = append(warns, "retrieve auto-index disabled: "+autoErr.Error())
@@ -1617,7 +1635,7 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 		verifySlot = &lateVerifier{}
 		orchVerifier = verifySlot
 	}
-	newOrchestrator := newOrchestratorFactory(newActiveChainCaller(bundle.Router, plan), f, orchVerifier, canary)
+	newOrchestrator := newOrchestratorFactory(prep.caller, f, orchVerifier, canary)
 	orch := newOrchestrator()
 
 	obsv, err := newObserv(os.Getenv, root, f.trace, f.telemetry, time.Now)
@@ -1625,12 +1643,7 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 		return fmt.Errorf("golem: observability setup: %w", err)
 	}
 
-	budget := agent.Budget{InputCeiling: inputCeiling.ceiling, OutputReserve: f.outputReserve}
-	if f.pressureWarn > 0 {
-		// The agent package owns the band layout (single source of truth for the
-		// monotonic clamp + defaults); golem only supplies the warn fraction.
-		budget.Pressure = agent.PressureThresholdsForWarn(float64(f.pressureWarn) / 100)
-	}
+	budget := prep.budget
 	var summarizer conversation.Summarizer
 	if !f.noCompress {
 		summarizer = agent.NewRouterSummarizer(bundle.Router, summarizeChain)
@@ -1670,50 +1683,67 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 		renderOut = stderr
 	}
 	sess = &replSession{
-		canary:              canary,
-		orch:                orch,
-		runtime:             runtime,
-		newOrchestrator:     newOrchestrator,
-		tools:               tools,
-		baseSystem:          baseSystem,
-		root:                root,
-		stdinTerminal:       stdinTerminal,
-		sysInputs:           sysIn,
-		gitSnapshot:         gitSnap,
-		noGitContext:        f.noGitContext,
-		noCompress:          f.noCompress,
-		readToolCount:       readToolCount,
-		mountAt:             mountAt,
-		writeToolCount:      writeToolCount,
-		scratch:             f.scratch,
-		verifier:            verifySlot,
-		maxSteps:            f.maxSteps,
-		budget:              budget,
-		color:               colorEnabled(renderOut, f.noColor),
-		retrieveOmitted:     retrieveOmitted,
-		session:             sessn,
-		journal:             journal,
-		bgManager:           bgManager,
-		grants:              grants,
-		destAdmission:       adm,
-		headlessApprover:    headlessApproverFor(allowTools),
-		machine:             newMachineWriter(stdout, outFormat),
-		allowWrite:          f.allowWrite,
-		allowExec:           f.allowExec,
-		mcpAttached:         mcpAttached,
-		consultants:         consultants,
-		interceptorsOn:      interceptorsOn,
-		memory:              mrt.user,
-		memoryDBPath:        mrt.dbPath,
-		records:             mrt.records,
-		workspaceID:         workspaceID(root),
-		obs:                 obsv,
-		feedback:            feedbackSvc,
-		pressureWarn:        f.pressureWarn > 0,
-		mixed:               f.progressive,
-		grounding:           groundingSvc,
-		thinkModels:         bundle.Models,
-		thinkChain:          append([]string(nil), plan.chain...),
+		canary:           canary,
+		orch:             orch,
+		runtime:          runtime,
+		newOrchestrator:  newOrchestrator,
+		tools:            tools,
+		baseSystem:       baseSystem,
+		root:             root,
+		stdinTerminal:    stdinTerminal,
+		sysInputs:        sysIn,
+		gitSnapshot:      gitSnap,
+		noGitContext:     f.noGitContext,
+		noCompress:       f.noCompress,
+		readToolCount:    readToolCount,
+		mountAt:          mountAt,
+		writeToolCount:   writeToolCount,
+		scratch:          f.scratch,
+		verifier:         verifySlot,
+		maxSteps:         f.maxSteps,
+		startupBudget:    budget,
+		color:            colorEnabled(renderOut, f.noColor),
+		retrieveOmitted:  retrieveOmitted,
+		session:          sessn,
+		journal:          journal,
+		bgManager:        bgManager,
+		grants:           grants,
+		destAdmission:    adm,
+		headlessApprover: headlessApproverFor(allowTools),
+		machine:          newMachineWriter(stdout, outFormat),
+		allowWrite:       f.allowWrite,
+		allowExec:        f.allowExec,
+		mcpAttached:      mcpAttached,
+		consultants:      consultants,
+		interceptorsOn:   interceptorsOn,
+		memory:           mrt.user,
+		memoryDBPath:     mrt.dbPath,
+		records:          mrt.records,
+		workspaceID:      workspaceID(root),
+		obs:              obsv,
+		feedback:         feedbackSvc,
+		pressureWarn:     f.pressureWarn > 0,
+		mixed:            f.progressive,
+		grounding:        groundingSvc,
+		thinkModels:      bundle.Models,
+		selection: modelSelection{
+			requested:     startupSelector(cfg, activeRoute),
+			chain:         slices.Clone(plan.chain),
+			useCase:       plan.useCase,
+			useRecommend:  plan.useRecommend,
+			ceilingSource: inputCeiling.source,
+			// The frozen inputs a later /model set re-prepares from: exactly
+			// the values used above, never re-resolved (#376 M2).
+			effective:       bundle.Effective,
+			models:          bundle.Models,
+			router:          bundle.Router,
+			resolveEndpoint: resolveEndpoint,
+			resolver:        resolver,
+			planOpts:        planOpts,
+			flags:           f,
+			orchVerifier:    orchVerifier,
+			dispatchNotify:  dispatchNotifySink(dispatchNotice),
+		},
 		startupModelOptions: thinkOpts,
 
 		projectContext:         &projectState,

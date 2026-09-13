@@ -122,6 +122,9 @@ func (r *Runtime) CompactThread(ctx context.Context, threadID string) (Compactio
 		return report, fmt.Errorf("%w: thread %q is active", ErrRunConflict, threadID)
 	}
 	r.activeThreads[threadID] = &activeRun{cancel: cancel}
+	// Reservation is the linearization point for compaction too: the budget
+	// this compaction runs under is fixed here, with the reservation (#376).
+	snap := r.snap
 	r.wg.Add(1)
 	r.mu.Unlock()
 	defer func() {
@@ -142,7 +145,7 @@ func (r *Runtime) CompactThread(ctx context.Context, threadID string) (Compactio
 	if err := ctx.Err(); err != nil {
 		return report, fmt.Errorf("golem: compact thread %q: %w", threadID, err)
 	}
-	candidate, changed, err := r.compressConversation(ctx, state.conversation, true)
+	candidate, changed, err := r.compressConversation(ctx, snap.budget, state.conversation, true)
 	if err != nil {
 		return report, fmt.Errorf("golem: compact thread %q: %w", threadID, err)
 	}
@@ -168,7 +171,9 @@ func (r *Runtime) CompactThread(ctx context.Context, threadID string) (Compactio
 	return report, nil
 }
 
-func (r *Runtime) saveThread(ctx context.Context, active *activeRun, state *threadState, userMessage string, result agent.Result) error {
+// saveThread persists one completed turn and then compresses it against
+// budget — the budget the turn reserved, never a later publication (#376).
+func (r *Runtime) saveThread(ctx context.Context, active *activeRun, budget agent.Budget, state *threadState, userMessage string, result agent.Result) error {
 	messages, err := resultMessages(userMessage, result)
 	if err != nil {
 		return err
@@ -199,7 +204,7 @@ func (r *Runtime) saveThread(ctx context.Context, active *activeRun, state *thre
 	if !r.compress {
 		return nil
 	}
-	compacted, changed, err := r.compressConversation(ctx, candidate, false)
+	compacted, changed, err := r.compressConversation(ctx, budget, candidate, false)
 	if err != nil {
 		r.reportCompressionWarning(candidate.ID, err)
 		return nil
@@ -236,9 +241,13 @@ func (r *Runtime) reportCompressionWarning(threadID string, err error) {
 	r.reportWarning(fmt.Errorf("golem: compress thread %q: %w", threadID, err))
 }
 
-func (r *Runtime) compressConversation(ctx context.Context, current conversation.Conversation, force bool) (conversation.Conversation, bool, error) {
+// compressConversation compresses current against budget, which the caller
+// captured when it reserved the thread. It must never reread runtime
+// configuration: a publication landing mid-compression would otherwise split
+// one operation across two budgets (#376).
+func (r *Runtime) compressConversation(ctx context.Context, budget agent.Budget, current conversation.Conversation, force bool) (conversation.Conversation, bool, error) {
 	estimate := conversation.CharRatioEstimator(4.0)
-	maxHistoryTokens := r.budget.InputCeiling
+	maxHistoryTokens := budget.InputCeiling
 	if maxHistoryTokens <= 0 {
 		maxHistoryTokens = agent.DefaultInputCeiling
 	}

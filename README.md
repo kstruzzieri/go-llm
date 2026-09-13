@@ -387,7 +387,7 @@ Inside the REPL, `/help` lists every command: sessions (`/new`, `/clear`, `/resu
 
 `/compact` accepts no arguments and compacts the current session's persisted history. It keeps the newest four completed user/assistant exchanges, including their tool chains, along with system messages and any unresolved tool-call tail, and folds older messages into the existing progressive summary. The command reports stored-history token estimates for non-system messages, tool metadata, and the rendered summary; these estimates exclude the live prompt, tool schemas, and current turn. Every repeat with an existing summary can invoke the summarizer again, with model latency and provider charges even when the result is `(unchanged)`. A `(changed)` result can have a larger estimate, especially for short histories where the summary's trust-boundary wrapper outweighs the removed messages. The command is unavailable with `--no-session` or `--no-compress`. Cancellation or another failure before a successful save preserves the previous session snapshot; only a successful save replaces it.
 
-Approval prompts that offer an `a` answer also accept "always this session", and the prompt names the grant's scope because the two classes are deliberately asymmetric: `a` on a command prompt (`a=always this command`) covers only that exact command, while `a` on an edit prompt (`a=all edits this session`) enables auto-approval for **every** write/edit in the workspace — it is `/auto-edits on`, not "always this file". `/auto-edits on|off` toggles the write/edit grant explicitly, `/grants` counts the active session grants, and `/grants clear` revokes them all without touching history. Grants are in-memory only and die with `/new`, `/clear`, a successful `/resume`, or process exit.
+Approval prompts that offer an `a` answer also accept "always this session", and the prompt names the grant's scope because the two classes are deliberately asymmetric: `a` on a command prompt (`a=always this command`) covers only that exact command, while `a` on an edit prompt (`a=all edits this session`) enables auto-approval for **every** write/edit in the workspace — it is `/auto-edits on`, not "always this file". `/auto-edits on|off` toggles the write/edit grant explicitly, `/grants` counts the active session grants, and `/grants clear` revokes them all without touching history. Grants are in-memory only and die with `/new`, `/clear`, a successful `/resume`, or process exit. Destination admission keeps its own lifetime: admitted destinations survive conversation resets and model switches, `/grants` lists them alongside the approval-grant count, and only `/grants clear` revokes them — after which the next goal re-runs the admission prompt.
 
 `/allow-write` and `/allow-exec` mount exactly the tools the startup flags would, with the same approval prompts, undo journal, and post-write verification; they are one-way for the session and never grant approval by themselves. With `-scratch`, promotion stays as it was at startup and `/allow-write` says so.
 
@@ -545,6 +545,93 @@ setting preserves conversation history and pending input, and it survives `/new`
 Status describes the configured request: a non-thinking fallback may ignore the
 controls, and each provider maps effort to its supported behavior. Planning with
 `-goal` still disables extended thinking.
+
+`/model` shows the model this session runs on and `/model set <role|name>`
+switches it for the rest of the process. Every other form prints
+`usage: /model [set <role|name>]` and resolves nothing. The bare status is
+read-only — no registry lookup, capability probe, or model call:
+
+```text
+model: coding
+chain: local/big -> local/small (strict; use case: agent)
+input ceiling: 28672 tokens (chain minimum)
+think: high
+last routed: not yet routed
+```
+
+`chain:` is the ordered fallback chain the session routes under, not the
+serving model; `last routed:` is the model that actually served a turn and
+reads `not yet routed` until one has. A successful `set` prints this same
+block, preceded by any thinking notice and per-entry preflight warnings.
+Resolution, admission, cancellation, and publication failures print
+`model unchanged:` with the reason and change nothing.
+
+`set` resolves its argument against the configuration the process started
+with, in three steps. An exact configured role — a key of `models` — wins and
+keeps its complete ordered fallback chain, including entries that are
+temporarily unavailable. Otherwise, when the text before the first slash names
+a configured provider, the entire remaining suffix is the model id, so
+`vllm/meta-llama/Llama-3.3-70B-Instruct` survives whole. Otherwise the whole
+input is a bare model id: it is qualified only when exactly one provider is
+configured, and with several it is ambiguous and requires `provider/model`.
+`models` keys are roles, not aliases, and nothing scans model names or
+provider inventories to infer a provider, so an unrecognized first segment is
+part of the id rather than an unknown-provider error. This is not a config
+reload: provider URLs, `-base-url`, and startup discovery results stay as they
+were, and a role selects the chain while the interactive agent keeps routing
+under the `agent` use case. Model metadata lookup and capability probing
+(under the usual `-no-cap-probe` rules) happen only after the candidate's
+destinations are admitted.
+
+The selection is process-local. `/new`, `/clear`, and `/resume` reset
+conversations, not the model; the command works with `--no-session`; and
+restarting uses startup configuration again. A switch preserves the stored
+conversation bytes, the history summary, and the session id — it neither calls
+the summarizer nor rewrites history — but it does republish the new chain's
+input ceiling, so existing history can need compaction on its next turn. It
+also clears the `/context` sample, which described a request the previous
+model assembled: `/context` reports no sample until the next real turn, while
+the configured limits it prints are already the new ones.
+
+The command runs synchronously in the REPL loop: the next goal is read only
+after it finishes, under the new configuration on success and the old one on
+failure. Ctrl-C cancels resolution and leaves the previous configuration live.
+When the candidate's routes reach a remote destination the session has not
+already been permitted, the existing destination-consent surface renders the
+complete proposed manifest and asks once; the next input line answers that
+prompt exactly as it would for any other prompt, so a line typed after the
+command is consumed as the answer rather than kept as a future goal. That
+holds for every REPL, terminal or piped: consent is read through the same
+line source as goals, so a script that switches to an uncovered remote must
+either pass `-allow-destination` or supply `y`/`yes` on the line after the
+command — any other line denies. Where no consent prompt is bound at all — the
+headless modes `-p`, `-plan`, and `-goal -approve-plan-lock`, which have no
+`/model`, and startup admission outside a terminal — an uncovered remote fails
+closed instead and names the exact `-allow-destination` value that would
+cover it. Neither `/model` nor `/model set` is recorded or sent as
+conversation content.
+
+Accepted thinking controls carry forward and are re-gated against the new
+chain, and a chain with no thinking support clears them with the same notice
+startup prints. The input to that re-gate is the setting the session actually
+runs with, not the startup `-think` flag, so a value that was already rejected
+never comes back; `/think` afterwards validates against the new chain. A
+session that starts without a configured agent role shows
+`chain: model recommendation (use case: agent)`; the first successful
+`/model set` makes it a strict configured chain for the rest of the process. A
+failed set leaves recommendation standing, there is no selector that returns
+to it, and a configured role literally named `recommend` is an ordinary role.
+
+Model state and destination authority roll back differently. A failed
+selection preserves the caller, options, budget, tools, conversation, and
+session identity, but a destination grant approved while preparing it remains
+a session grant, and the failure adds
+`destination grant retained for this session; use /grants clear to revoke`.
+Reusing an existing grant, a local destination, or an exact
+`-allow-destination` flag grants nothing new and prints no such notice.
+Switching away from a route is not revocation either: `/grants` lists the
+session's destination authority, including routes that are no longer active,
+and `/grants clear` revokes all of it.
 
 When `-root` is inside a Git work tree, Golem injects one bounded repository
 snapshot into the system prompt at startup: the branch line from

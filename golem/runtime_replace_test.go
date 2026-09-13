@@ -262,13 +262,15 @@ func TestReplaceCopiesTheToolSlice(t *testing.T) {
 	}
 }
 
-// Run under -race: Replace against concurrent Runs must never race or
-// deadlock. No ordering assertion — that is the barrier test's job.
+// Run under -race: Replace and ReplaceConfiguration against concurrent Runs
+// must never race or deadlock. No ordering assertion — that is the barrier
+// test's job.
 func TestReplaceConcurrentWithRuns(t *testing.T) {
-	rt := newReplaceRuntime(t, scriptedCaller{result: agent.ModelResult{Response: provider.ChatResponse{Content: "ok", Done: true}}}, "S")
+	answer := agent.ModelResult{Response: provider.ChatResponse{Content: "ok", Done: true}}
+	rt := newReplaceRuntime(t, scriptedCaller{result: answer}, "S")
 	var wg sync.WaitGroup
 	for i := 0; i < 8; i++ {
-		wg.Add(2)
+		wg.Add(3)
 		go func(i int) {
 			defer wg.Done()
 			if err := rt.Replace(fmt.Sprintf("S%d", i), []agent.Tool{namedTool(fmt.Sprintf("t%d", i))}, provider.ModelOptions{Think: provider.Ptr(i%2 == 0), Stop: []string{"STOP"}}); err != nil {
@@ -277,7 +279,20 @@ func TestReplaceConcurrentWithRuns(t *testing.T) {
 		}(i)
 		go func(i int) {
 			defer wg.Done()
+			if err := rt.ReplaceConfiguration(context.Background(), golem.Configuration{
+				System:       fmt.Sprintf("C%d", i),
+				Tools:        []agent.Tool{namedTool(fmt.Sprintf("c%d", i))},
+				ModelOptions: provider.ModelOptions{NumCtx: 1024 + i},
+				Orchestrator: agent.New(scriptedCaller{result: answer}, agent.ContextManager{}),
+				Budget:       agent.Budget{InputCeiling: 4096 + i},
+			}); err != nil {
+				t.Errorf("ReplaceConfiguration %d: %v", i, err)
+			}
+		}(i)
+		go func(i int) {
+			defer wg.Done()
 			_ = rt.ModelOptions()
+			_ = rt.Budget()
 			if _, err := rt.Run(context.Background(), golem.Turn{RunID: fmt.Sprintf("r%d", i), Message: "go"}, func(golem.Event) error { return nil }); err != nil {
 				t.Errorf("Run %d: %v", i, err)
 			}
