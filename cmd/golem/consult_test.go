@@ -9,6 +9,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -605,4 +606,51 @@ func TestRunLoadsConsultantsAndReportsConfigFailures(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "consult: parse config") {
 		t.Fatalf("error does not name the parse failure: %v", err)
 	}
+}
+
+// TestConsultAdvisorySurvivesAModelSwitch pins the #382/#376 seam. A staged
+// advisory is advice for the NEXT GOAL, not for a particular model, so
+// handleModelSet -- which clears pressure and lastModel because both describe
+// the old model's work -- must leave the slot alone. The turn that follows
+// runs on the republished orchestrator and caller, so the assertion that the
+// advice reaches the ALT backend's wire body proves it is projected by the new
+// configuration and not merely still present in the struct.
+func TestConsultAdvisorySurvivesAModelSwitch(t *testing.T) {
+	fx := newModelSwitchFixture(t, "")
+	cfg := fakeConsultantsFile(t, "claude", consultTranscript("prefer the alt path"), 0)
+	fx.withSession(t, []string{"-interceptors", "-consultants-config", cfg}, func(t *testing.T, sess *replSession) {
+		if got := slash(t, sess, "/consult claude how should I fix this?"); !strings.Contains(got, "staged for the next goal") {
+			t.Fatalf("consult did not stage: %s", got)
+		}
+		staged := sess.advisory
+		if staged == nil {
+			t.Fatal("consult did not stage an advisory")
+		}
+		beforeAlt := len(fx.alt.chatBodies())
+
+		slash(t, sess, "/model set swap")
+
+		if sess.advisory != staged {
+			t.Fatalf("advisory = %v after /model set, want the same staged slot %v", sess.advisory, staged)
+		}
+		res, err := runOnce(t.Context(), io.Discard, nil, sess, "fix it", nil)
+		if err != nil {
+			t.Fatalf("turn after switch: %v", err)
+		}
+		if res.Answer != "alt answer" {
+			t.Fatalf("answer = %q, want the alt backend's (the switch did not take)", res.Answer)
+		}
+		bodies := fx.alt.chatBodies()
+		if len(bodies) <= beforeAlt {
+			t.Fatalf("alt backend served no request after the switch")
+		}
+		body := bodies[len(bodies)-1]
+		if !strings.Contains(body, "CONSULT_ADVICE") || !strings.Contains(body, "prefer the alt path") {
+			t.Fatalf("advisory not projected onto the NEW caller's wire request: %s", body)
+		}
+		// Still one-shot across the switch.
+		if sess.advisory != nil {
+			t.Fatal("advisory not cleared after the successful post-switch turn")
+		}
+	})
 }
