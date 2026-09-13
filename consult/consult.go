@@ -108,11 +108,15 @@ var runWaitDelay time.Duration
 func Run(ctx context.Context, c Consultant, prompt string) (Receipt, error) {
 	// Consultant is a plain exported struct, so a caller can hand Run a value
 	// that never passed Load's validation and therefore carries neither its
-	// bounds nor its defaults. Re-check everything the run depends on: a zero
-	// timeout or output cap would otherwise surface as an opaque start failure.
-	if c.Adapter != claudeAdapter || !claudeModels[c.Model] ||
+	// bounds nor its defaults. Re-check every field Load validates, not only
+	// the ones argv reads: a zero timeout or output cap would otherwise
+	// surface as an opaque start failure, an unconstrained Name reaches the
+	// receipt, and TrustedProcessEgress is the explicit acknowledgement that
+	// this consultant's traffic is not filtered by go-llm.
+	if !nameRE.MatchString(c.Name) || c.Adapter != claudeAdapter || !claudeModels[c.Model] ||
 		c.TimeoutSeconds <= 0 || c.TimeoutSeconds > maxTimeoutSeconds ||
-		c.MaxOutputBytes <= 0 || c.MaxOutputBytes > maxOutputBytes {
+		c.MaxOutputBytes <= 0 || c.MaxOutputBytes > maxOutputBytes ||
+		!c.TrustedProcessEgress {
 		return Receipt{}, &Error{Code: "input-invalid", Reason: "consultant"}
 	}
 	if prompt == "" || len(prompt) > maxStdinBytes || !utf8.ValidString(prompt) {

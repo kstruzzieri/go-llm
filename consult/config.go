@@ -45,6 +45,11 @@ const (
 	defaultTimeoutSeconds = 120
 	maxTimeoutSeconds     = 300
 	maxOutputBytes        = 1 << 20
+	// maxConfigBytes bounds the consultants file itself. It names the
+	// executable to run, so it is read under the same discipline as that
+	// executable: bounded, regular, and the same file when opened as when
+	// inspected.
+	maxConfigBytes = 65536
 )
 
 var nameRE = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,31}$`)
@@ -79,7 +84,7 @@ func Load(explicit string) (map[string]Consultant, error) {
 	} else if !filepath.IsAbs(path) {
 		return nil, errors.New("consult: config path must be absolute")
 	}
-	raw, err := os.ReadFile(path)
+	raw, err := readConfigFile(path)
 	if err != nil {
 		if explicit == "" && errors.Is(err, os.ErrNotExist) {
 			return nil, ErrDisabled
@@ -112,6 +117,47 @@ func Load(explicit string) (map[string]Consultant, error) {
 		out[c.Name] = c
 	}
 	return out, nil
+}
+
+// readConfigFile reads the consultants file under the same discipline Load
+// applies to the command it declares. The path must be a regular file and not
+// a symlink, the opened descriptor must still be that same file, and the
+// content is bounded, so neither a redirected path, a file swapped during the
+// open, a FIFO nor an unbounded stream can steer or stall startup.
+func readConfigFile(path string) ([]byte, error) {
+	before, err := os.Lstat(path)
+	if err != nil {
+		return nil, err
+	}
+	if before.Mode()&os.ModeSymlink != 0 {
+		return nil, errors.New("config path must not be a symlink")
+	}
+	if !before.Mode().IsRegular() {
+		return nil, errors.New("config path must be a regular file")
+	}
+	f, err := openConfigFile(path)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = f.Close() }()
+	after, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if !after.Mode().IsRegular() {
+		return nil, errors.New("config path must be a regular file")
+	}
+	if !os.SameFile(before, after) {
+		return nil, errors.New("config file identity changed while opening")
+	}
+	raw, err := io.ReadAll(io.LimitReader(f, maxConfigBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(raw) > maxConfigBytes {
+		return nil, fmt.Errorf("config is too large: over %d bytes", maxConfigBytes)
+	}
+	return raw, nil
 }
 
 // validate checks one consultant declaration and applies the documented

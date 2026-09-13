@@ -130,6 +130,8 @@ func TestRunRejectsUnsupportedModelBeforeExec(t *testing.T) {
 		{"timeout_over", func(c *Consultant) { c.TimeoutSeconds = maxTimeoutSeconds + 1 }},
 		{"output_zero", func(c *Consultant) { c.MaxOutputBytes = 0 }},
 		{"output_over", func(c *Consultant) { c.MaxOutputBytes = maxOutputBytes + 1 }},
+		{"name", func(c *Consultant) { c.Name = "Not A Name" }},
+		{"untrusted_egress", func(c *Consultant) { c.TrustedProcessEgress = false }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			c := fakeClaude(t, "", 0)

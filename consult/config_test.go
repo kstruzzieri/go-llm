@@ -143,6 +143,28 @@ func TestLoadDisablesWhenConfigDirIsUnresolvable(t *testing.T) {
 	}
 }
 
+// TestLoadHardensTheConfigRead covers the file that names the executable: it
+// gets the same regular-file, identity and size discipline as the command it
+// declares, so a symlinked, swapped or unbounded config cannot be read.
+func TestLoadHardensTheConfigRead(t *testing.T) {
+	real, _ := writeConfig(t, goodConfig)
+	link := filepath.Join(realTempDir(t), "linked.json")
+	if err := os.Symlink(real, link); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(link); err == nil || !strings.Contains(err.Error(), "symlink") {
+		t.Fatalf("symlinked config must be rejected, got %v", err)
+	}
+
+	big := filepath.Join(realTempDir(t), "big.json")
+	if err := os.WriteFile(big, append([]byte(goodConfig), make([]byte, maxConfigBytes)...), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(big); err == nil || !strings.Contains(err.Error(), "too large") {
+		t.Fatalf("oversized config must be rejected, got %v", err)
+	}
+}
+
 func TestLoadRejectsSymlinkCommand(t *testing.T) {
 	p, cmd := writeConfig(t, goodConfig)
 	link := filepath.Join(filepath.Dir(p), "claude")
