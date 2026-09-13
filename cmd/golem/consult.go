@@ -34,6 +34,26 @@ func loadConsultants(explicit string) (map[string]consult.Consultant, error) {
 	return m, err
 }
 
+// consultFailureLine is the one operator line for an InspectAdvisory failure.
+// Only a policy refusal is reported as one: validation, the fail-closed
+// annotation cap and a cancelled inspection also come back from that call, and
+// calling those "blocked by policy" would misattribute a host bug or a Ctrl-C.
+// The refusal outranks a cancellation that travels with it, because the policy
+// verdict is the actionable fact and the advice is refused either way.
+func consultFailureLine(err error) string {
+	var be *agent.BlockedError
+	switch {
+	case errors.Is(err, agent.ErrAdvisoryBlocked):
+		if errors.As(err, &be) && len(be.Findings) > 0 {
+			return "consult failed: blocked by interceptor policy (" + be.Findings[0].Rule + ")"
+		}
+		return "consult failed: blocked by interceptor policy"
+	case errors.Is(err, context.Canceled):
+		return "consult canceled"
+	}
+	return "consult failed: internal"
+}
+
 // handleConsult runs one consultation and stages the admitted answer for the
 // next goal (#382). The consultant name and prompt come from the line; the
 // command, argv and environment come only from local config and the adapter.
@@ -80,7 +100,11 @@ func handleConsult(ctx context.Context, out io.Writer, sess *replSession, line s
 	if err != nil {
 		var ce *consult.Error
 		if errors.As(err, &ce) {
-			_, _ = fmt.Fprintf(out, "consult failed: %s\n", ce.Code)
+			// Code and Reason are both drawn from closed host-authored
+			// vocabularies -- never consultant text, a path, or a wrapped
+			// error -- so printing the reason narrows the failure for the
+			// operator without leaking anything.
+			_, _ = fmt.Fprintf(out, "consult failed: %s (%s)\n", ce.Code, ce.Reason)
 		} else {
 			_, _ = fmt.Fprintln(out, "consult failed: internal")
 		}
@@ -91,18 +115,7 @@ func handleConsult(ctx context.Context, out io.Writer, sess *replSession, line s
 		Digest: r.ContentSHA256, Content: r.Answer, Origin: agent.OriginModel,
 	})
 	if err != nil {
-		// Only a policy refusal is reported as one: validation and the
-		// fail-closed annotation cap also come back from InspectAdvisory, and
-		// calling those "blocked by policy" would misattribute a host bug.
-		var be *agent.BlockedError
-		switch {
-		case !errors.Is(err, agent.ErrAdvisoryBlocked):
-			_, _ = fmt.Fprintln(out, "consult failed: internal")
-		case errors.As(err, &be) && len(be.Findings) > 0:
-			_, _ = fmt.Fprintf(out, "consult failed: blocked by interceptor policy (%s)\n", be.Findings[0].Rule)
-		default:
-			_, _ = fmt.Fprintln(out, "consult failed: blocked by interceptor policy")
-		}
+		_, _ = fmt.Fprintln(out, consultFailureLine(err))
 		return
 	}
 	if sess.advisory != nil {

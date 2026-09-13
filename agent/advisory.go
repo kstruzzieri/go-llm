@@ -47,10 +47,13 @@ var ErrAdvisoryBlocked = errors.New("agent: staged advisory blocked by intercept
 // request share one unguessable id.
 const advisoryRegion = "CONSULT_ADVICE"
 
-// maxAdvisoryContent bounds the admitted consultant answer. A receipt is one
-// judgment about one goal; anything larger is a transcript, and pricing it
-// against the pinned goal would exhaust the turn rather than fit it.
-const maxAdvisoryContent = 64 * 1024
+// MaxAdvisoryContent bounds the admitted consultant answer. It must equal
+// consult.MaxAnswerBytes -- the two are the same 64 KiB seam seen from the two
+// sides of the /consult staging path, and the equality is pinned in cmd/golem
+// so neither side can move alone. A receipt is one judgment about one goal;
+// anything larger is a transcript, and pricing it against the pinned goal
+// would exhaust the turn rather than fit it.
+const MaxAdvisoryContent = 64 * 1024
 
 // maxAdvisoryField bounds each host-authored attribution field.
 const maxAdvisoryField = 128
@@ -100,8 +103,8 @@ func ValidateAdvisory(a *Advisory) error {
 	switch {
 	case a == nil:
 		return errors.New("agent: nil advisory")
-	case a.Content == "" || len(a.Content) > maxAdvisoryContent || !utf8.ValidString(a.Content):
-		return fmt.Errorf("agent: advisory content must be 1..%d bytes of UTF-8", maxAdvisoryContent)
+	case a.Content == "" || len(a.Content) > MaxAdvisoryContent || !utf8.ValidString(a.Content):
+		return fmt.Errorf("agent: advisory content must be 1..%d bytes of UTF-8", MaxAdvisoryContent)
 	case a.Origin != OriginModel:
 		return fmt.Errorf("agent: advisory origin %s not permitted", a.Origin)
 	case a.Source == "":

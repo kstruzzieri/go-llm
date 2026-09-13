@@ -120,7 +120,9 @@
 // inside a keyed <<<CONSULT_ADVICE frame and is then dropped, never entering
 // history, summaries or the session store. A turn that fails keeps the slot for
 // the retry, and so does a turn that finishes with no answer; /new, /clear and
-// a successful /resume drop it. What this proves is
+// a successful /resume drop it, as does a turn the interceptor chain refuses
+// at step 0, since that refusal is deterministic and would otherwise fail every
+// later goal identically. What this proves is
 // narrow: the transcript SAYS it came from a pinned adapter version launched
 // with a subscription credential and no tool activity, and admission checks
 // that it says so -- it does not prove the advice is correct, does not confine

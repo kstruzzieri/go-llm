@@ -390,6 +390,74 @@ func TestConsultAdvisoryRetainedWhenTheTurnProducesNoAnswer(t *testing.T) {
 	}
 }
 
+func TestConsultAdvisoryDroppedWhenTheRunRefusesIt(t *testing.T) {
+	const marker = "ADVICE-SENTINEL"
+	root := t.TempDir()
+	caller := &scriptCaller{}
+	orch := agent.New(caller, agent.ContextManager{},
+		agent.WithInterceptors(blockAdvice{marker: marker, verdict: agent.VerdictBlock}))
+	sess := newTestSession(t, caller, root)
+	sess.orch = orch
+	sess.runtime = newTestRuntime(t, root, sess.baseSystem, orch, nil)
+	sess.interceptorsOn = true
+	sess.advisory = &agent.Advisory{
+		Source: "claude", Tool: "claude 2.1.240", Model: "opus",
+		Digest: strings.Repeat("a", 64), Content: marker, Origin: agent.OriginModel,
+	}
+	var out bytes.Buffer
+	if _, err := runOnce(context.Background(), &out, nil, sess, "goal", nil); !errors.Is(err, agent.ErrAdvisoryBlocked) {
+		t.Fatalf("runOnce = %v, want the step-0 advisory refusal", err)
+	}
+	if sess.advisory != nil {
+		t.Fatalf("a deterministic refusal left the slot armed: %+v", sess.advisory)
+	}
+	if !strings.Contains(out.String(), "dropped staged advice from claude after interceptor refusal") {
+		t.Fatalf("drop was silent: %s", out.String())
+	}
+	// The same goal now runs: the session is not wedged behind the refusal.
+	out.Reset()
+	res, err := runOnce(context.Background(), &out, nil, sess, "goal", nil)
+	if err != nil || res.Answer == "" {
+		t.Fatalf("second turn = %+v / %v, want a normal turn", res, err)
+	}
+}
+
+func TestConsultFailureLineClassification(t *testing.T) {
+	blocked := errors.Join(agent.ErrAdvisoryBlocked,
+		&agent.BlockedError{Findings: []agent.Finding{{Interceptor: "blocker", Rule: "advice-refused"}}})
+	for name, tc := range map[string]struct {
+		err  error
+		want string
+	}{
+		"blocked_named":   {blocked, "consult failed: blocked by interceptor policy (advice-refused)"},
+		"blocked_unnamed": {agent.ErrAdvisoryBlocked, "consult failed: blocked by interceptor policy"},
+		"canceled":        {context.Canceled, "consult canceled"},
+		"canceled_joined": {errors.Join(context.Canceled, errors.New("x")), "consult canceled"},
+		"other":           {errors.New("advisory annotation exceeds 4096 bytes"), "consult failed: internal"},
+	} {
+		if got := consultFailureLine(tc.err); got != tc.want {
+			t.Errorf("%s: consultFailureLine = %q, want %q", name, got, tc.want)
+		}
+	}
+	// A refusal that also carries a cancellation is still reported as the
+	// refusal: the policy verdict is the actionable fact.
+	if got := consultFailureLine(errors.Join(blocked, context.Canceled)); !strings.Contains(got, "blocked by interceptor policy") {
+		t.Errorf("cancellation masked a policy refusal: %q", got)
+	}
+}
+
+// TestConsultAnswerBoundMatchesAdvisoryBound pins the 64 KiB seam from the one
+// place that sees both sides. consult trims the answer to its own bound and
+// agent rejects an advisory over its own; if they drift, every answer in the
+// gap is admitted by the runner and then refused at staging, which reads as a
+// consult failure rather than the bound change it is.
+func TestConsultAnswerBoundMatchesAdvisoryBound(t *testing.T) {
+	if consult.MaxAnswerBytes != agent.MaxAdvisoryContent {
+		t.Fatalf("consult.MaxAnswerBytes = %d, agent.MaxAdvisoryContent = %d; the staging seam must be one bound",
+			consult.MaxAnswerBytes, agent.MaxAdvisoryContent)
+	}
+}
+
 func TestConsultRefusals(t *testing.T) {
 	sess := newTestSession(t, &scriptCaller{}, t.TempDir())
 	var out bytes.Buffer
@@ -417,7 +485,9 @@ func TestConsultRefusals(t *testing.T) {
 	}
 	out.Reset()
 	dispatchSlash(context.Background(), &out, sess, "/consult claude q")
-	if !strings.Contains(out.String(), "consult failed: protocol") || sess.advisory != nil {
+	// The Reason vocabulary is host-authored and closed, so it is safe to show
+	// and it is what tells the operator which rule refused the transcript.
+	if !strings.Contains(out.String(), "consult failed: protocol (") || sess.advisory != nil {
 		t.Fatalf("failure not reported as a fixed code: %s adv=%v", out.String(), sess.advisory)
 	}
 }

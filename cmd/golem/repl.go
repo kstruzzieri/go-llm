@@ -489,6 +489,14 @@ func runOnce(ctx context.Context, out io.Writer, interrupts <-chan struct{}, ses
 	if runErr == nil && res.Answer != "" {
 		sess.advisory = nil
 	}
+	// The one failure worth no retry. A step-0 policy refusal is deterministic
+	// in the staged bytes, so keeping the slot would fail every later goal
+	// identically and wedge the session. Drop it and say so: the goal was
+	// consumed by the refused turn, so the user has to retype it either way.
+	if errors.Is(runErr, agent.ErrAdvisoryBlocked) && sess.advisory != nil {
+		writeRunLine("dropped staged advice from %s after interceptor refusal", sess.advisory.Source)
+		sess.advisory = nil
+	}
 	// A failed tail flush loses only buffered display bytes on the progress
 	// stream; the run itself completed. Demoting it to a warning keeps a good
 	// one-shot answer printable and records telemetry as the success it was.
