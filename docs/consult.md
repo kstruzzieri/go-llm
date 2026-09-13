@@ -44,6 +44,9 @@ Consultants are declared in a JSON file, found in one of two ways:
   misconfiguration, both simply mean `/consult` is unavailable. A default file
   that exists but does not validate does fail startup.
 
+A file that loads but declares no consultants also leaves `/consult`
+unavailable: an empty list is nothing to consult, not a usable configuration.
+
 When at least one consultant loads, the startup banner carries a
 `consult: 1 consultant` line (`consult: 3 consultants` for more than one).
 There is no line when `/consult` is disabled.
@@ -149,7 +152,12 @@ Lifetime and limits:
 - the prompt on stdin must be 1..65536 bytes of valid UTF-8;
 - the exec target is re-checked (regular file, not a symlink, digest if
   configured) immediately before `execve`, so the TOCTOU window is only the
-  microseconds between that read and the exec.
+  microseconds between that read and the exec. That read is uncancellable and
+  the run deadline is already ticking during it: a binary large enough to
+  out-read `timeout_seconds` makes the start fail with the deadline error.
+  `Receipt.Duration` is measured around the whole call and so includes the
+  digest read, unlike the runner's internal duration, whose clock starts after
+  it.
 
 The adapter, not the caller, owns argv. There is no template, no shell and no
 caller-supplied argument:
@@ -254,14 +262,21 @@ Admission literals map to codes as follows; anything not listed is
 |---|---|
 | `unsupported-version` | `version-mismatch` |
 | `auth` | `auth-source-invalid`, `api-retry-authentication_failed`, `api-retry-oauth_org_not_allowed`, `api-retry-account_on_hold` |
-| `quota` | `quota-rejected`, `api-retry-excess`, `api-retry-rate_limit` |
+| `quota` | `quota-rejected`, `api-retry-excess` |
 | `billing` | `overage-in-use`, `credits-required`, `overage-not-rejected`, `api-retry-billing_error`, `route-invalid` |
 | `tool-activity` | `tool-activity`, `startup-activity`, `task-activity`, `subagent-activity`, `memory-activity`, `elicitation-activity`, `denial-activity`, `web-search-activity`, `compaction-activity`, `fallback-activity` |
 
+The three transport-level retry errors — `overloaded`, `server_error` and
+`rate_limit` — are exempt and never fail admission at all, so the parser
+cannot emit `api-retry-rate_limit`; `codeFor` keeps an arm for it defensively.
+Repeated retries still fail through `api-retry-excess` (more than two
+attempts, or more than two retry records).
+
 `protocol` therefore covers everything structural: `malformed`,
-`terminal-invalid`, `inventory-invalid`, `session-inconsistent`,
-`unknown-event`, `tail-invalid`, `user-event-invalid`, `cwd-mismatch`,
-`init-model-invalid`, `permission-mode-invalid`, `permission-mode-changed`,
+`terminal-invalid`, `terminal-marker-present`, `inventory-invalid`,
+`session-inconsistent`, `session-state-invalid`, `unknown-event`,
+`tail-invalid`, `user-event-invalid`, `cwd-mismatch`, `init-model-invalid`,
+`permission-mode-invalid`, `permission-mode-changed`,
 `agent-inventory-invalid`, `stop-reason-invalid`, `answer-truncated`,
 `answer-inconsistent`, `answer-too-large`, `usage-invalid`,
 `rate-limit-invalid`, `assistant-error` and the remaining `api-retry-*`
@@ -281,10 +296,14 @@ The command runs the consultant, prints the admitted answer followed by any
 interceptor trailer on its own line, and stages it.
 
 - **One slot.** A staged advisory is carried by the next goal only. It is
-  cleared by a successful turn, by `/clear`, by `/new` and by a successful
-  `/resume`.
+  cleared by `/clear`, by `/new`, by a successful `/resume`, and by a turn
+  that both completes without error and produces an answer.
 - **Retained on failure.** If the turn fails or you cancel it, the advisory
-  stays staged; the consultant is not rerun.
+  stays staged; the consultant is not rerun. The same holds for a turn that
+  finishes cleanly with no answer: empty content never put the advice to work,
+  so the slot survives for the retry. The decision is made after session
+  persistence and checkpoint sealing have settled, so an answered-but-
+  unpersisted turn does not silently spend the slot.
 - **Replacing.** A second `/consult` replaces the staged advisory and says so.
 - **Status.** Bare `/consult`, with no arguments, prints the usage line plus
   what is currently staged (`staged: none`, or the consultant name and the
