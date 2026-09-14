@@ -61,9 +61,10 @@ func (c *interleavedCancelCaller) Chat(ctx context.Context, _ provider.ChatReque
 
 // scriptCaller returns queued responses in order; each Chat call pops one.
 type scriptCaller struct {
-	responses []agent.ModelResult
-	i         int
-	block     chan struct{} // when non-nil, Chat waits on ctx or this before responding
+	responses   []agent.ModelResult
+	i           int
+	block       chan struct{}        // when non-nil, Chat waits on ctx or this before responding
+	lastRequest provider.ChatRequest // the most recent request, for wire assertions
 }
 
 type attributedRetrieve struct{}
@@ -103,6 +104,7 @@ func (c *retrieveThenStopCaller) Chat(ctx context.Context, _ provider.ChatReques
 }
 
 func (s *scriptCaller) Chat(ctx context.Context, req provider.ChatRequest, onToken func(provider.ChatResponse) error) (agent.ModelResult, error) {
+	s.lastRequest = req
 	if s.block != nil {
 		select {
 		case <-ctx.Done():
@@ -757,12 +759,12 @@ func TestRunOnceUnansweredFreshSessionDoesNotRefreshMissingRow(t *testing.T) {
 	}
 }
 
-func TestRunOnceKeepsAnswerWhenSessionSaveFails(t *testing.T) {
-	root := t.TempDir()
-	sess := newSessionedTestSession(t, &scriptCaller{responses: []agent.ModelResult{{
-		Response: provider.ChatResponse{Content: "completed answer"},
-	}}}, root, "workspace:save-failure")
-	if _, err := sess.session.db.ExecContext(context.Background(), `
+// failConversationSave makes every conversation insert fail with a plain
+// SQLite error: neither a lost CAS nor a lock timeout, so runOnce demotes an
+// answered turn to a success carrying a "session not saved" warning.
+func failConversationSave(t *testing.T, db *sql.DB) {
+	t.Helper()
+	if _, err := db.ExecContext(context.Background(), `
 		CREATE TRIGGER fail_conversation_save
 		BEFORE INSERT ON conversations
 		BEGIN
@@ -770,6 +772,14 @@ func TestRunOnceKeepsAnswerWhenSessionSaveFails(t *testing.T) {
 		END`); err != nil {
 		t.Fatalf("create failure trigger: %v", err)
 	}
+}
+
+func TestRunOnceKeepsAnswerWhenSessionSaveFails(t *testing.T) {
+	root := t.TempDir()
+	sess := newSessionedTestSession(t, &scriptCaller{responses: []agent.ModelResult{{
+		Response: provider.ChatResponse{Content: "completed answer"},
+	}}}, root, "workspace:save-failure")
+	failConversationSave(t, sess.session.db)
 
 	var out strings.Builder
 	result, err := runOnce(context.Background(), &out, nil, sess, "question", nil)

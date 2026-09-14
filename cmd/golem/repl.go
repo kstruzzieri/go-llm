@@ -14,6 +14,7 @@ import (
 
 	"github.com/kstruzzieri/go-llm/agent"
 	"github.com/kstruzzieri/go-llm/agent/tools"
+	"github.com/kstruzzieri/go-llm/consult"
 	"github.com/kstruzzieri/go-llm/conversation"
 	golemruntime "github.com/kstruzzieri/go-llm/golem"
 	"github.com/kstruzzieri/go-llm/internal/agenttrace"
@@ -87,8 +88,21 @@ type replSession struct {
 
 	records *memory.MemoryRecordStore // nil => agent memory disabled (-agent-memory absent or open failed)
 
-	lastModel string             // last routed ActualModel for /model
-	journal   *checkpointJournal // nil unless -allow-write enabled writes
+	lastModel string // last routed ActualModel for /model
+	// consultants is the loaded consultants.json, nil when /consult is
+	// disabled; advisory is the single staged consult receipt for the next
+	// goal only (#382).
+	//
+	// interceptorsOn is a DENORMALIZED security gate and must stay honest:
+	// InspectAdvisory runs whatever chain sess.orch was built with, so a true
+	// mirror over an orchestrator with no chain would admit unscanned
+	// consultant bytes under a flag the operator never set. main.go derives it
+	// from the same interceptorsFor(f, canary) call that builds sess.orch, and
+	// any future writer must keep the two on one source.
+	consultants    map[string]consult.Consultant
+	interceptorsOn bool
+	advisory       *agent.Advisory
+	journal        *checkpointJournal // nil unless -allow-write enabled writes
 	// bgManager owns every background command (#346). nil => background exec
 	// disabled (-allow-exec absent or non-interactive mode). Process-scoped by
 	// the interactive-process-scope policy: /new, /clear, and successful
@@ -419,6 +433,7 @@ func runOnce(ctx context.Context, out io.Writer, interrupts <-chan struct{}, ses
 		Message:  line,
 		Approver: approver, // nil when read-only => runtime fail-safe denies Write/Exec
 		Observer: observer,
+		Advisory: sess.advisory, // staged by /consult; consumed by this turn only (#382)
 	}, sess.machine.sink())
 	// Seal immediately after Run on every path: writes applied before an
 	// interrupt or provider error must stay undoable. The error is joined
@@ -460,6 +475,32 @@ func runOnce(ctx context.Context, out io.Writer, interrupts <-chan struct{}, ses
 		if !secretBlock && !canaryBlock {
 			writeRunLine("checkpoint: %v", sealErr)
 		}
+	}
+	// One goal is all a staged advisory buys, and only a turn that survives the
+	// whole reconciliation above consumes it. Deciding right after Run would
+	// read a runErr that neither the session-persistence demotion nor the seal
+	// join had settled yet: an answered-but-unpersisted turn would keep an
+	// advisory it had already spent, and a turn that failed to seal would lose
+	// one it never got to use.
+	//
+	// res.Answer != "" is the plan's D6 carve-out, not an accident: a turn that
+	// finishes cleanly with no content never put the advice to work, so the
+	// slot survives for the retry exactly as a failed turn's does.
+	if runErr == nil && res.Answer != "" {
+		sess.advisory = nil
+	}
+	// A policy refusal or context exhaustion can fail every subsequent goal
+	// with the same advice. Drop the optional input and let the user retry.
+	dropReason := ""
+	switch {
+	case errors.Is(runErr, agent.ErrAdvisoryBlocked):
+		dropReason = "interceptor refusal"
+	case errors.Is(runErr, agent.ErrContextExhausted):
+		dropReason = "context exhaustion"
+	}
+	if dropReason != "" && sess.advisory != nil {
+		writeRunLine("dropped staged advice from %s after %s", sess.advisory.Source, dropReason)
+		sess.advisory = nil
 	}
 	// A failed tail flush loses only buffered display bytes on the progress
 	// stream; the run itself completed. Demoting it to a warning keeps a good
@@ -616,6 +657,7 @@ func dispatchSlash(ctx context.Context, out io.Writer, sess *replSession, line s
 		// before the session branch — under --no-session a live approver can
 		// still hold grants.
 		sess.grants.clear()
+		sess.advisory = nil
 		if sess.session == nil {
 			_, _ = fmt.Fprintln(out, "session disabled (--no-session)")
 		} else if err := sess.session.clear(ctx); err != nil {
@@ -633,6 +675,7 @@ func dispatchSlash(ctx context.Context, out io.Writer, sess *replSession, line s
 		// Session switch (#341 D8): grants never outlive the session they
 		// were given in, with or without conversation persistence.
 		sess.grants.clear()
+		sess.advisory = nil
 		if sess.session == nil {
 			_, _ = fmt.Fprintln(out, "session disabled (--no-session)")
 		} else {
@@ -674,8 +717,11 @@ func dispatchSlash(ctx context.Context, out io.Writer, sess *replSession, line s
 			// session — and therefore its grants — untouched.
 			sess.grants.clear()
 			sess.pressure = nil
+			sess.advisory = nil
 			_, _ = fmt.Fprintln(out, info.line())
 		}
+	case "/consult":
+		handleConsult(ctx, out, sess, line)
 	case "/model":
 		handleModel(ctx, out, sess, fields)
 	case "/undo":
@@ -923,6 +969,9 @@ const golemHelp = `commands:
   /tools         list registered tools and their effect class
   /model [set <role|name>]
                  show the selected model chain, ceiling, thinking, and last routed model; set switches the model for the rest of this process
+  /consult <name> <prompt>
+                 ask a configured external consultant; the admitted answer is shown and staged as fenced advice for the next goal only
+  /consult drop  discard staged advice without clearing history or grants
   /context       inspect the last assembled request
   /compact       compact the active session's history
   /clear         delete the active session's history

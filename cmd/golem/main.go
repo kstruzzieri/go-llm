@@ -103,6 +103,8 @@ type flags struct {
 
 	trustProjectContext    string
 	trustProjectContextSet bool
+
+	consultantsConfig string // -consultants-config: explicit consultants.json path (#382)
 }
 
 func parseFlags(args []string) (flags, error) {
@@ -140,6 +142,7 @@ func parseFlags(args []string) (flags, error) {
 	fs.BoolVar(&f.progressive, "progressive", false, "generate and retrieve opt-in L0/L1 progressive source summaries; enable mixed context assembly")
 	fs.BoolVar(&f.grounding, "grounding", false, "verify the final answer's claims against the retrieval evidence in the final prompt; prints one supported/partial/unsupported line (full report under -trace)")
 	fs.StringVar(&f.trustProjectContext, "trust-project-context", "", "approve the exact project document snapshot (sha256: plus 64 lowercase hex digits)")
+	fs.StringVar(&f.consultantsConfig, "consultants-config", "", "absolute path of consultants.json (default: <os.UserConfigDir>/go-llm/consultants.json; missing default disables /consult)")
 	fs.BoolVar(&f.noProjectContext, "no-project-context", false, "do not load AGENTS.md project-context files into the system prompt")
 	fs.BoolVar(&f.noGitContext, "no-git-context", false, "do not inject the repository snapshot (branch, status, recent commits) into the system prompt")
 	fs.BoolVar(&f.noCompress, "no-compress", false, "disable post-turn conversation compression into a durable summary")
@@ -530,6 +533,7 @@ type startupInfo struct {
 	scratchLine        string
 	dispatchLine       string
 	interceptorLine    string
+	consultLine        string
 }
 
 // startupNotices renders the human-facing startup lines (written to stderr).
@@ -565,6 +569,9 @@ func startupNotices(info startupInfo) []string {
 	}
 	if info.interceptorLine != "" {
 		out = append(out, info.interceptorLine)
+	}
+	if info.consultLine != "" {
+		out = append(out, info.consultLine)
 	}
 	if info.projectContextLine != "" {
 		out = append(out, info.projectContextLine)
@@ -1277,8 +1284,19 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 		dispatchLine = fmt.Sprintf("dispatch: enabled -> %s", head)
 	}
 	interceptorLine := ""
+	interceptorsOn := false
 	if ics := interceptorsFor(f, canary); len(ics) > 0 {
 		interceptorLine = interceptorsNotice(ics)
+		interceptorsOn = true
+	}
+
+	consultants, cerr := loadConsultants(f.consultantsConfig)
+	if cerr != nil {
+		return maybeUsageError(cerr, headlessExitApplies(f))
+	}
+	consultLine := ""
+	if len(consultants) > 0 {
+		consultLine = fmt.Sprintf("consult: %s", plural(len(consultants), "consultant", "consultants"))
 	}
 
 	wantAgentMemory, agentMemoryWarn := agentMemoryRequest(f.agentMemory, f.noSession)
@@ -1584,6 +1602,7 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 		scratchLine:       scratchLine,
 		dispatchLine:      dispatchLine,
 		interceptorLine:   interceptorLine,
+		consultLine:       consultLine,
 	}) {
 		_, _ = fmt.Fprintln(stderr, line)
 	}
@@ -1695,6 +1714,8 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 		allowWrite:       f.allowWrite,
 		allowExec:        f.allowExec,
 		mcpAttached:      mcpAttached,
+		consultants:      consultants,
+		interceptorsOn:   interceptorsOn,
 		memory:           mrt.user,
 		memoryDBPath:     mrt.dbPath,
 		records:          mrt.records,

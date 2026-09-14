@@ -109,6 +109,27 @@
 // terminal, events, session store and traces show raw results; approval,
 // grants and sandboxes remain the enforcement layer.
 //
+// /consult <name> <prompt> asks one external subscription CLI for a single
+// advisory judgment (#382). Consultants come only from a local
+// consultants.json -- <os.UserConfigDir>/go-llm/consultants.json, or
+// -consultants-config -- which owns the command path, model and bounds; the
+// operator supplies only the name and the prompt, and the adapter owns argv
+// and the process environment. It requires -interceptors, because the reply is
+// admitted through the same interceptor chain as any other untrusted ingress,
+// and it stages at most ONE receipt: the admitted answer rides the next goal
+// inside a keyed <<<CONSULT_ADVICE frame and is then dropped, never entering
+// history, summaries or the session store. Failed or answerless turns retain
+// the slot for retry, except interceptor refusal and context exhaustion, which
+// drop it with a notice. /new, /clear and a successful /resume also drop it;
+// /consult drop discards just the advice, preserving history and grants.
+// What this proves is
+// narrow: the transcript SAYS it came from a pinned adapter version launched
+// with a subscription credential and no tool activity, and admission checks
+// that it says so -- it does not prove the advice is correct, does not confine
+// the child (no sandbox; real HOME and host privileges), and does not filter
+// the vendor's own egress, which trusted_process_egress explicitly concedes.
+// See docs/consult.md.
+//
 // Project guidance is discovered from selected global and workspace
 // AGENTS.md-style files but is not injected until the operator approves the
 // complete current document set with /trust sha256:<64 lowercase hex digits>.

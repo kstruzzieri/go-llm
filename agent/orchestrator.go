@@ -79,7 +79,7 @@ func initState(req Request) State {
 	return State{System: req.System, DurableSummary: req.HistorySummary, Messages: msgs}
 }
 
-func buildChatRequest(st State, specs []provider.Tool, outputReserve int, opts provider.ModelOptions) provider.ChatRequest {
+func buildChatRequest(st State, specs []provider.Tool, outputReserve int, opts provider.ModelOptions, advisory *Advisory) provider.ChatRequest {
 	msgs := make([]provider.ChatMessage, 0, len(st.Messages)+1)
 	if st.System != "" {
 		msgs = append(msgs, provider.ChatMessage{Role: "system", Content: st.System})
@@ -97,6 +97,15 @@ func buildChatRequest(st State, specs []provider.Tool, outputReserve int, opts p
 				fence, minted = promptfence.New(), true
 			}
 			cm.Content = frameToolResult(fence, cm.Content)
+		}
+		// #382: the staged advisory is projected here too, on the same value
+		// copy under the same per-render key. State keeps the raw goal.
+		if advisory != nil && m.Segment == Pinned && cm.Role == "user" {
+			if !minted {
+				fence, minted = promptfence.New(), true
+			}
+			cm.Content = renderAdvisory(fence, cm.Content, *advisory)
+			advisory = nil
 		}
 		msgs = append(msgs, cm)
 	}
@@ -124,6 +133,11 @@ func (o *Orchestrator) run(ctx context.Context, req Request, obs Observer, ic *i
 	}
 	if err := validateHistory(req.History); err != nil {
 		return Result{}, err
+	}
+	if req.Advisory != nil {
+		if err := ValidateAdvisory(req.Advisory); err != nil {
+			return Result{}, err
+		}
 	}
 	maxSteps := req.MaxSteps
 	if maxSteps <= 0 {
@@ -157,14 +171,42 @@ func (o *Orchestrator) run(ctx context.Context, req Request, obs Observer, ic *i
 	historyLen := len(req.History)
 	var res Result
 
+	// #382: the staged advisory is re-inspected before the initial input, as
+	// its own model-origin observation: a block refuses the run before any
+	// assembly, and tags annotate the projected copy only.
+	var advisory *Advisory
+	if req.Advisory != nil {
+		last := len(state.Messages) - 1
+		annotated, aerr := o.prepareAdvisory(ctx, ic, obs, *req.Advisory, last)
+		if aerr != nil {
+			return finishWithError(&res, state, historyLen, aerr)
+		}
+		advisory = &annotated
+	}
+
 	// #436: the initial input is inspected once, before any assembly, so a
 	// block never reaches the model and no pressure event is emitted for it.
 	if err := ic.inspectInitial(ctx, obs, &state); err != nil {
 		return finishWithError(&res, state, historyLen, err)
 	}
+	goal := state.Messages[len(state.Messages)-1].Content
 
 	for step := 0; step < maxSteps; step++ {
-		assembled, pressure, atrace, err := o.ctxMgr.AssembleWithTrace(ctx, state, toolSchemaTokens, budget)
+		manager := o.ctxMgr
+		if advisory != nil {
+			estimate := manager.estimate
+			if manager.Mixed && hasStructuredAnchor(state) {
+				estimate = guardedEstimate(manager.Estimate)
+			}
+			projected := renderAdvisoryLines(advisoryPlaceholderOpen, advisoryPlaceholderClose, goal, *advisory)
+			extra, costOK := checkedTokenSub(estimate(projected), estimate(goal))
+			if !costOK {
+				return res, ErrContextExhausted
+			}
+			// Never create spare capacity from a non-monotonic estimator.
+			manager.advisoryTokens = max(0, extra)
+		}
+		assembled, pressure, atrace, err := manager.AssembleWithTrace(ctx, state, toolSchemaTokens, budget)
 		// Emit pressure before the model call on the success path and on the
 		// exhaustion path; skip only opaque compactor failures (pressure is zero).
 		if err == nil || errors.Is(err, ErrContextExhausted) {
@@ -176,6 +218,20 @@ func (o *Orchestrator) run(ctx context.Context, req Request, obs Observer, ic *i
 		}
 		if err != nil {
 			return res, err
+		}
+		if advisory != nil {
+			goals := 0
+			for _, m := range assembled.Messages {
+				if m.Segment == Pinned && m.Role == "user" {
+					if m.Content != goal {
+						return res, errors.New("agent: compactor changed the advisory's pinned goal")
+					}
+					goals++
+				}
+			}
+			if goals != 1 {
+				return res, errors.New("agent: compactor must preserve the advisory's pinned goal exactly once")
+			}
 		}
 		// Mixed assemblies only. The discriminator is nil Subjects, not Mixed and
 		// not a length: legacy, no-anchor and error paths return a zero trace,
@@ -204,7 +260,7 @@ func (o *Orchestrator) run(ctx context.Context, req Request, obs Observer, ic *i
 
 		tokenLogged := false
 		modelStart := o.now()
-		chatReq := buildChatRequest(assembled, specs, req.Budget.OutputReserve, req.Options)
+		chatReq := buildChatRequest(assembled, specs, req.Budget.OutputReserve, req.Options, advisory)
 		// Session identity belongs to the run, independent of transcript rebuilding.
 		chatReq.SessionID = req.SessionID
 		modelResult, err := o.model.Chat(ctx, chatReq, func(c provider.ChatResponse) error {
@@ -311,6 +367,72 @@ func (o *Orchestrator) run(ctx context.Context, req Request, obs Observer, ic *i
 	return res, nil
 }
 
+// prepareAdvisory runs the observation hook over the advisory as a
+// model-origin observation. A block refuses the advisory with
+// ErrAdvisoryBlocked joined to the *BlockedError naming the rule; tags are
+// SET on Annotation, never appended to Content, so Digest keeps labelling the
+// admitted answer and re-inspecting an already-annotated receipt replaces its
+// trailers instead of stacking a second copy. With no interceptors installed
+// the receipt is returned unchanged.
+//
+// Role "tool" is the observation hook's contract for tool-authored text, not
+// a wire role: nothing here ever becomes a role "tool" message. It is what
+// makes the origin-sensitive detectors judge the advice the way they judge a
+// tool result.
+func (o *Orchestrator) prepareAdvisory(ctx context.Context, ic *interceptorRun, obs Observer, a Advisory, index int) (Advisory, error) {
+	tags, block, err := ic.inspectObservation(ctx, normalizeObserver(obs), 0, InspectedMessage{
+		StateIndex: index, Role: "tool", Origin: a.Origin,
+		ToolName: "consult/" + a.Source, Content: a.Content,
+	})
+	if err != nil {
+		return Advisory{}, err
+	}
+	if block != nil {
+		// Both facets travel: errors.Is finds the advisory sentinel a consult
+		// consumer switches on, errors.As finds the structured block every
+		// other interceptor refusal in this package carries, so the refusing
+		// rule is nameable without re-running the chain.
+		return Advisory{}, errors.Join(ErrAdvisoryBlocked,
+			&BlockedError{Hook: HookInput, Step: 0, Findings: []Finding{*block}})
+	}
+	// distinctTrailers leads with a newline so it can be appended to a tool
+	// result; here it is a block of whole lines, so the lead is dropped.
+	annotation := strings.TrimPrefix(distinctTrailers(tags), "\n")
+	// The trailer block is generated, so it bypasses ValidateAdvisory. Its
+	// only unbounded input is the chain's distinct rule count, and a chain
+	// that produces more trailers than the receipt may carry has outgrown
+	// this seam: fail closed rather than ship a receipt whose own annotation
+	// crowds out the advice. Not a policy refusal, so not ErrAdvisoryBlocked.
+	if len(annotation) > maxAdvisoryAnnotation {
+		return Advisory{}, fmt.Errorf("agent: advisory annotation exceeds %d bytes", maxAdvisoryAnnotation)
+	}
+	a.Annotation = annotation
+	return a, nil
+}
+
+// InspectAdvisory applies this Orchestrator's interceptor chain to a consult
+// receipt before it is displayed or staged, so a refusal reaches the user at
+// consult time rather than at the next Run. It returns the annotated receipt,
+// or a refusal satisfying both errors.Is(err, ErrAdvisoryBlocked) and
+// errors.As(err, **BlockedError).
+//
+// It is a preview, not the authoritative check. The chain is resolved against
+// an empty RunScope, so a RunScopedInterceptor sees no system prompt and any
+// addendum it offers is discarded, and the findings are not published on any
+// RiskReport. Run re-inspects the staged receipt at step 0 under the real
+// scope, and that inspection is the one that gates the model call and lands
+// on Result.Risk.
+func (o *Orchestrator) InspectAdvisory(ctx context.Context, a Advisory) (Advisory, error) {
+	if err := ValidateAdvisory(&a); err != nil {
+		return Advisory{}, err
+	}
+	chain, _, err := resolveInterceptors(ctx, o.interceptors, RunScope{})
+	if err != nil {
+		return Advisory{}, err
+	}
+	return o.prepareAdvisory(ctx, &interceptorRun{chain: chain}, nil, a, 0)
+}
+
 func assistantMessage(resp provider.ChatResponse) Message {
 	return Message{ChatMessage: provider.ChatMessage{
 		Role: "assistant", Content: resp.Content, ToolCalls: resp.ToolCalls,
@@ -330,6 +452,7 @@ func resultMessages(st State, historyLen int) []provider.ChatMessage {
 	}
 	out := make([]provider.ChatMessage, 0, len(st.Messages)-historyLen)
 	for _, m := range st.Messages[historyLen:] {
+		// #382: ChatMessage only -- Message.Advisory must never leave the run.
 		out = append(out, cloneChatMessage(m.ChatMessage))
 	}
 	return out
