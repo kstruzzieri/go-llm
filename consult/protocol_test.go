@@ -425,6 +425,24 @@ func TestClaudeItem2TerminalAndUsageMetadata(t *testing.T) {
 	}
 }
 
+func TestClaudeModelUsageRequiresObject(t *testing.T) {
+	for _, usage := range []string{`null`, `[]`, `[{}]`, `42`, `true`, `"SENSITIVE"`} {
+		t.Run(usage, func(t *testing.T) {
+			in, reasons := inspectStream([]byte(stream(validInit, assistantOK, withUsage(usage))), "", nil)
+			if !contains(reasons, "usage-invalid") || in.Answer != "" {
+				t.Fatalf("malformed modelUsage admitted: reasons=%v answer=%q", reasons, in.Answer)
+			}
+			mustNotLeak(t, in, reasons)
+		})
+	}
+	for _, result := range []string{goodResult, withUsage(`{}`)} {
+		in, reasons := inspectStream([]byte(stream(validInit, assistantOK, result)), "", nil)
+		if !ok(reasons) || in.Answer != "OK" || in.UsageModels != 0 || in.UsageComplete || in.WebSearchZero || in.UsageProvider != "" {
+			t.Fatalf("absent/empty usage must remain unknown and admissible: %+v %v", in, reasons)
+		}
+	}
+}
+
 func TestClaudeItem11DecisionBooleans(t *testing.T) {
 	in, reasons := inspectStream([]byte(stream(validInit, assistantOK, goodResult)), "", []string{"/other", "/private/synthetic"})
 	if !ok(reasons) || !in.SessionConsistent || !in.CwdMatches {

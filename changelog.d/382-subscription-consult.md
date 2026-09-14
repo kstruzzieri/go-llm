@@ -41,8 +41,9 @@ the runtime seam; `golem.Turn.Advisory` carries one staged receipt.
   `--version` probe with empty stdin rejects an unpinned version before the
   prompt is sent. Both launches share one deadline and must use the same
   executable digest, even without a configured pin. Admission also rejects
-  non-Opus or missing assistant models, non-Opus usage models, overflowing token
-  totals and reported usage entries without `provider: "firstParty"`.
+  non-Opus or missing assistant models, non-object usage blocks, non-Opus usage
+  models, overflowing token totals and reported usage entries without
+  `provider: "firstParty"`.
 - The consultant `command` must be an absolute path to a regular file whose
   path traverses no symlink (Homebrew shims and `/usr/local/bin` links must be
   given as their resolved target) and, on Unix, is not group- or world-writable —

@@ -248,6 +248,8 @@ An admitted transcript must satisfy all of:
 - exactly one terminal `result` record, `subtype: "success"`, `is_error:
   false`, `stop_reason: "end_turn"`, no `permission_denials`, no
   `deferred_tool_use` and no terminal markers;
+- if present, `modelUsage` is an object; an absent field or empty object
+  leaves usage metadata unknown;
 - every reported model in `modelUsage` is an opus model, and every usage
   entry explicitly reports `provider: "firstParty"`; a missing provider is
   rejected. Token totals must fit in `int64` without overflow;

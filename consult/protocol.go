@@ -475,8 +475,12 @@ func (x *inspector) result(i int, m map[string]any, subtype string) {
 		in.DeferredToolUse = true
 		x.fail("tool-activity")
 	}
-	if models, ok := m["modelUsage"].(map[string]any); ok && len(models) != 0 {
-		x.usage(models)
+	if raw, present := m["modelUsage"]; present {
+		if models, ok := raw.(map[string]any); !ok {
+			x.fail("usage-invalid")
+		} else if len(models) != 0 {
+			x.usage(models)
+		}
 	}
 	if in.TerminalCount != 1 || subtype != "success" || !explicit || isError || !resultOK || strings.TrimSpace(result) == "" || !terminalOK {
 		x.fail("terminal-invalid")
