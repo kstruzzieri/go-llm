@@ -61,7 +61,7 @@ the top-level object: one file, one config. Consultant names must be unique.
 | `version` | int | yes | must be `1` |
 | `consultants[].name` | string | yes | must match `^[a-z0-9][a-z0-9-]{0,31}$` |
 | `consultants[].adapter` | string | yes | only `"claude"` in v1 |
-| `consultants[].command` | string | yes | absolute path to a regular file; no symlink anywhere in the path and no group/world write on the file; on Unix, the file and all ancestors must be owned by root or the current effective user, and writable ancestors must have the sticky bit |
+| `consultants[].command` | string | yes | absolute path to a regular file; no symlink anywhere in the path; on Unix, no group/world write on the file, the file and all ancestors must be owned by root or the current effective user, and writable ancestors must have the sticky bit |
 | `consultants[].sha256` | string | no | 64 lowercase hex characters; re-verified over the whole file immediately before exec |
 | `consultants[].model` | string | yes | only `"opus"` for adapter `claude` |
 | `consultants[].timeout_seconds` | int | no | `0..300`; `0` means the default, 120 |
