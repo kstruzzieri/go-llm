@@ -173,9 +173,13 @@ supplied arguments. Discovery performs no provider calls or capability probes,
 so missing model-hint bindings and offline providers do not remove otherwise
 valid commands from the catalog.
 
-Bindings resolve at invocation. A missing binding falls back to the current
-model with a notice. Once a hint resolves, consent, capability, or preflight
-failure refuses the invocation; a failure during execution fails the turn.
+Bindings resolve at invocation. A `use_case` hint resolves the way the router
+and `-goal` planning do: an explicit `defaults` entry wins, then the side-task
+fallback table (for example `planning` degrades to `reasoning`, `analysis`,
+then `agent`); only a use case that neither names is missing. A missing
+binding falls back to the current model with a notice. Once a hint resolves,
+consent, capability, or preflight failure refuses the invocation; a failure
+during execution fails the turn.
 These failures do not trigger a separate retry using the session's current
 selection. Configured fallbacks within the selected hint's model chain still
 apply. A command can therefore remain listed while its configured providers

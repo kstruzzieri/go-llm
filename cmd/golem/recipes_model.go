@@ -36,7 +36,11 @@ func applyRecipeModelHint(ctx context.Context, out io.Writer, sess *replSession,
 		cfg := sel.effective.Config()
 		if arm == "use_case" {
 			var ok bool
-			role, ok = cfg.Defaults[key]
+			// Same resolution the router and -goal planning use: an explicit
+			// default wins, then the side-task fallback table (planning ->
+			// reasoning -> analysis -> agent). Only a use case neither names
+			// is advisory.
+			role, ok = cfg.RoleForUseCase(key)
 			if !ok {
 				err = errors.New("use case has no configured default")
 			}

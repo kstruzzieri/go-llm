@@ -981,3 +981,32 @@ func TestRecipeModelActualFallbackRoute(t *testing.T) {
 		})
 	}
 }
+
+// TestRecipeModelUseCaseFallbackResolves pins that a use_case hint resolves
+// through the config's side-task fallback table exactly as the router and
+// -goal planning do: "planning" has no explicit default here, so it must reach
+// the "reasoning" default (swap -> alt backend) instead of degrading to the
+// current model with an advisory notice. A literal Defaults[key] lookup fails
+// this test.
+func TestRecipeModelUseCaseFallbackResolves(t *testing.T) {
+	fx := newModelSwitchFixture(t, "")
+	fx.withSession(t, nil, func(t *testing.T, sess *replSession) {
+		cfg := sess.selection.effective.Config()
+		cfg.Defaults["reasoning"] = "swap"
+		installModelRecipe(sess, &recipe.ModelHint{UseCase: "planning"})
+		src := newCountingSource(sess, "/review project\n")
+		var out strings.Builder
+		if err := runREPL(t.Context(), src, &out, nil, sess); err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(out.String(), "unavailable; using current model") {
+			t.Fatalf("fallback use case treated as unbound: %s", out.String())
+		}
+		if fx.alt.chats.Load() != 1 || fx.primary.chats.Load() != 0 || len(src.goals()) != 1 {
+			t.Fatalf("fallback route not used: primary %d alt %d recall %q: %s", fx.primary.chats.Load(), fx.alt.chats.Load(), src.goals(), out.String())
+		}
+		if status := slash(t, sess, "/model"); !strings.Contains(status, "chain: primary/agent-model (strict; use case: agent)\n") {
+			t.Fatalf("persistent selection not restored after fallback hint: %s", status)
+		}
+	})
+}

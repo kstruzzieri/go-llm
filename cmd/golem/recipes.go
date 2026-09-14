@@ -24,6 +24,10 @@ var recipeReservedCommands = []string{
 	"/git-context", "/compact", "/think",
 }
 
+// recipeContextSeparator joins an expanded goal and its nonempty context into
+// the ONE user message; the byte check in invokeRecipe counts it once.
+const recipeContextSeparator = "\n\n"
+
 // recipeInvocationHint carries only routing metadata across slash dispatch.
 // Copying the hint prevents a later catalog edit from changing an invocation.
 type recipeInvocationHint struct {
@@ -210,13 +214,13 @@ func invokeRecipe(out io.Writer, sess *replSession, r recipe.Recipe, line, comma
 	}
 	separatorBytes := 0
 	if expandedContext != "" {
-		separatorBytes = 2
+		separatorBytes = len(recipeContextSeparator)
 	}
 	if len(goal)+len(expandedContext)+separatorBytes > maxGoalBytes {
 		return fail(fmt.Errorf("recipe: expanded message exceeds %d bytes", maxGoalBytes))
 	}
 	if expandedContext != "" {
-		goal += "\n\n" + expandedContext
+		goal += recipeContextSeparator + expandedContext
 	}
 	if !utf8.ValidString(goal) {
 		return fail(errors.New("recipe: expanded message contains invalid UTF-8"))
