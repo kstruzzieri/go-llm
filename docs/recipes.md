@@ -169,13 +169,20 @@ template. An exact loaded `/recipe` is allowed; otherwise `/recipe` suggests
 At startup and explicit reload, Golem validates JSON, metadata, and active
 references in both templates before publishing the catalog. Errors identify
 filenames, fields, and keys without printing template bodies, defaults, or
-supplied arguments. Model hints are advisory: syntactically valid unconfigured
-roles/use cases and offline providers do not remove commands from the catalog.
-Discovery performs no provider calls or capability probes. Bindings resolve at
-invocation, and a missing binding falls back to the current model with a notice.
-A resolved hint selects the model for that invocation only, through ordinary
-model preparation and destination consent. It does not change the session's
-permanent `/model set` selection or grant new authority.
+supplied arguments. Discovery performs no provider calls or capability probes,
+so missing model-hint bindings and offline providers do not remove otherwise
+valid commands from the catalog.
+
+Bindings resolve at invocation. A missing binding falls back to the current
+model with a notice. Once a hint resolves, consent, capability, or preflight
+failure refuses the invocation; a failure during execution fails the turn.
+These failures do not trigger a separate retry using the session's current
+selection. Configured fallbacks within the selected hint's model chain still
+apply. A command can therefore remain listed while its configured providers
+are offline, yet refuse or fail when invoked if that chain cannot run.
+A resolved hint applies for that
+invocation only and does not change the permanent `/model set` selection or
+grant new authority.
 
 `/recipes` lists the directory and valid commands sorted by name, with positional
 usage and descriptions. `/help` appends those same command entries. Unknown
@@ -204,6 +211,10 @@ input. Quoted empty strings count as supplied. An optional input before a
 required input still occupies its slot; supply it to reach the later input.
 Extra arguments and unterminated quotes fail with metadata-derived usage and
 perform no model preparation, goal, or history write.
+
+For a recipe named `commit` with one free-form `message` input, quote the entire
+value: `/commit "fix: typo in readme"`. Unquoted words occupy separate input
+slots. Version 1 has no rest-of-line or variadic input binding.
 
 The argument grammar is Golem's existing MCP command parser:
 
