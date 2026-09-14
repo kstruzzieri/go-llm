@@ -14,9 +14,9 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"testing"
 
 	"github.com/kstruzzieri/go-llm/recipe"
-	"testing"
 )
 
 func TestRecipeUnknownPrefix(t *testing.T) {
@@ -668,7 +668,7 @@ func TestRecipeNonregularCandidate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer listener.Close()
+	defer func() { _ = listener.Close() }()
 	cat, diags, err := discoverRecipes(dir)
 	if err != nil || len(cat) != 0 || !reflect.DeepEqual(diags, []string{`recipes: "socket.recipe.json": candidate is not a regular file (symlinks are not allowed)`}) {
 		t.Fatalf("%v %v %v", cat, diags, err)

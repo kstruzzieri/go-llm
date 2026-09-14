@@ -198,8 +198,10 @@ func runREPL(ctx context.Context, src lineSource, out io.Writer, interrupts <-ch
 		if line == "" {
 			continue
 		}
+		var hint *recipeInvocationHint
 		if strings.HasPrefix(line, "/") {
 			forced, exit := dispatchSlash(ctx, out, sess, line)
+			hint, sess.recipeHint = sess.recipeHint, nil
 			if exit {
 				return nil
 			}
@@ -234,12 +236,16 @@ func runREPL(ctx context.Context, src lineSource, out io.Writer, interrupts <-ch
 		}
 		// Record accepted goals after inspection has had a chance to block
 		// secrets or abort on a canary. Unrelated failures retain existing history.
-		_, runErr := runOnce(ctx, out, interrupts, sess, line, src)
-		if !secretsBlocked(runErr) && !canaryAborted(runErr) {
+		_, runErr := runOnceWithRecipeHint(ctx, out, interrupts, sess, line, src, hint)
+		if !secretsBlocked(runErr) && !canaryAborted(runErr) && !errors.Is(runErr, errRecipeHintRefused) {
 			src.RecordGoal(line)
 			if sessionSaveRefused(runErr) {
 				_, _ = fmt.Fprintln(out, "The next turn uses the latest saved history, without this unsaved turn. Use /new for a separate session.")
 			}
+		}
+		if errors.Is(runErr, errModelRestoreFailed) {
+			_, _ = fmt.Fprintln(out, "recipes: model restoration failed; REPL stopped")
+			return runErr
 		}
 	}
 }
@@ -315,6 +321,10 @@ func interruptContext(ctx context.Context, interrupts <-chan struct{}) (context.
 // It returns the run result so runOneShot can extract the final answer; the
 // REPL ignores it.
 func runOnce(ctx context.Context, out io.Writer, interrupts <-chan struct{}, sess *replSession, line string, src lineSource) (agent.Result, error) {
+	return runOnceWithRecipeHint(ctx, out, interrupts, sess, line, src, nil)
+}
+
+func runOnceWithRecipeHint(ctx context.Context, out io.Writer, interrupts <-chan struct{}, sess *replSession, line string, src lineSource, hint *recipeInvocationHint) (_ agent.Result, retErr error) {
 	runCtx, cancel := interruptContext(ctx, interrupts)
 	defer cancel()
 	if err := refreshProjectContext(runCtx, out, sess); err != nil {
@@ -352,6 +362,21 @@ func runOnce(ctx context.Context, out io.Writer, interrupts <-chan struct{}, ses
 		if err := sess.renewCanary(); err != nil {
 			writeRunLine("%s", errCanaryUnavailable)
 			return agent.Result{}, errCanaryUnavailable
+		}
+	}
+
+	if hint != nil {
+		restore, err := applyRecipeModelHint(runCtx, renderOut, sess, *hint)
+		if err != nil {
+			writeRunLine("recipes: %s", runFailureMessage("", err))
+			return agent.Result{}, err
+		}
+		if restore != nil {
+			defer func() {
+				if restoreErr := restore(context.WithoutCancel(runCtx)); restoreErr != nil {
+					retErr = errors.Join(retErr, errModelRestoreFailed, restoreErr)
+				}
+			}()
 		}
 	}
 
