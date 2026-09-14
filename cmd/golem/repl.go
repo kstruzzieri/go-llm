@@ -20,12 +20,16 @@ import (
 	"github.com/kstruzzieri/go-llm/internal/agenttrace"
 	"github.com/kstruzzieri/go-llm/memory"
 	"github.com/kstruzzieri/go-llm/provider"
+	"github.com/kstruzzieri/go-llm/recipe"
 	"modernc.org/sqlite"
 	sqlite3 "modernc.org/sqlite/lib"
 )
 
 // replSession holds the per-process state the REPL needs.
 type replSession struct {
+	commandsDir     string
+	recipes         map[string]recipe.Recipe
+	recipeHint      *recipeInvocationHint
 	canary          *canaryBinding
 	orch            *agent.Orchestrator
 	runtime         *golemruntime.Runtime
@@ -641,6 +645,7 @@ func lastRoutedModel(res agent.Result) string {
 // goal the caller must run as a model goal -- /edit's result, which bypasses
 // slash dispatch exactly once even when it begins with "/".
 func dispatchSlash(ctx context.Context, out io.Writer, sess *replSession, line string) (forced string, exit bool) {
+	sess.recipeHint = nil
 	fields := strings.Fields(line)
 	cmd := fields[0]
 	switch cmd {
@@ -650,6 +655,12 @@ func dispatchSlash(ctx context.Context, out io.Writer, sess *replSession, line s
 		handleTrust(ctx, out, sess, fields)
 	case "/help":
 		_, _ = fmt.Fprint(out, golemHelp)
+		if len(sess.recipes) != 0 {
+			_, _ = fmt.Fprintln(out, "recipe commands:")
+			printRecipeEntries(out, sess.recipes)
+		}
+	case "/recipes":
+		handleRecipes(out, sess, fields)
 	case "/context":
 		handleContext(out, sess, fields)
 	case "/clear":
@@ -853,7 +864,10 @@ func dispatchSlash(ctx context.Context, out io.Writer, sess *replSession, line s
 	case "/think":
 		handleThink(ctx, out, sess, fields)
 	default:
-		_, _ = fmt.Fprintf(out, "unknown command: %s (try /help)\n", cmd)
+		if r, ok := sess.recipes[strings.TrimPrefix(cmd, "/")]; ok {
+			return invokeRecipe(out, sess, r, line, cmd), false
+		}
+		printUnknownCommand(out, sess, cmd)
 	}
 	return "", false
 }
@@ -966,6 +980,8 @@ func autoEditState(sess *replSession) string {
 
 const golemHelp = `commands:
   /help          show this help
+  /recipes [reload]
+                 list recipe commands or reload the user command directory
   /tools         list registered tools and their effect class
   /model [set <role|name>]
                  show the selected model chain, ceiling, thinking, and last routed model; set switches the model for the rest of this process

@@ -1758,6 +1758,11 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 	if sess.maxSteps == 0 {
 		sess.maxSteps = 16 // mirror agent defaultMaxSteps so the footer's k/max is accurate
 	}
+	if lineSourceModeFor(f) == sourceREPL {
+		if base, err := os.UserConfigDir(); err == nil {
+			sess.commandsDir = filepath.Join(base, "go-llm", "commands")
+		}
+	}
 	if hooks.afterSessionReady != nil {
 		if err := hooks.afterSessionReady(sess); err != nil {
 			return err
@@ -1932,6 +1937,8 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 		}
 		return runOneShot(ctx, stdout, stderr, interrupts, sess, f.prompt)
 	}
+
+	loadRecipes(stderr, sess)
 
 	// /edit is wired regardless of -no-editor: the flag disables the inline
 	// line editor, not external composition. Availability is still gated on

@@ -1,9 +1,9 @@
 # Reusable recipes
 
-The `recipe` package validates versioned JSON prompt bundles for use by go-llm
-consumers. It does not discover recipes, expand templates, choose a model, or
-run commands. Those runtime behaviors are planned in
-[#353](https://github.com/kstruzzieri/go-llm/issues/353).
+The `recipe` package validates and expands versioned JSON prompt bundles.
+Golem loads these bundles as user-defined slash commands in its interactive
+REPL. Recipe text becomes an ordinary user goal under the existing trust,
+ingress inspection, approval, persistence, and cancellation rules.
 
 Files conventionally use the name `<name>.recipe.json`. `Load` accepts any
 explicit path; it does not enforce the extension or require the filename to
@@ -106,12 +106,15 @@ do not include goal, context, or default values. Containers in any scalar field
 are rejected before their contents are inspected. Only `inputs` arrays, their object entries, and `model_hint` objects
 are supported containers.
 
-## Placeholder contract for issue #353
+## Template expansion
 
 Only `goal` and `context` are template-bearing. Descriptions and defaults are
-literal data. Version 1 reserves the following grammar for the scanner and
-renderer planned in #353; this package preserves the text but does not validate
-or expand it.
+literal data. `Parse` and `Load` validate the format; `ValidateTemplates`
+checks active references without requiring input values. `Expand` validates
+metadata, supplied input names and UTF-8, required/default binding, and both
+templates, returning `(goal, context, error)`. Both strings are empty on every
+error. Its positive `maxBytes` limit bounds their combined expanded bytes;
+checked appends reject overflow before allocating an oversized expansion.
 
 A reference is exactly `{{inputs.name}}`, where `name` is a declared,
 case-sensitive input name matching `[a-z][a-z0-9_]*`. It contains no whitespace.
@@ -123,7 +126,7 @@ closing braces, and scanning resumes after that marker. Backslashes elsewhere
 are unchanged. These counts apply after JSON decoding, so each backslash must
 be doubled again in a JSON string literal.
 
-With input `x` supplied as `VALUE`, the required #353 behavior is:
+With input `x` supplied as `VALUE`:
 
 | Decoded template text | Rendered result |
 |---|---|
@@ -142,14 +145,117 @@ supplied. Other brace text remains literal. The language has no expressions,
 conditions, loops, filters, positional tokens, recursive substitution, or
 environment and file access.
 
-#353 must validate active references during discovery or reload, before a
-recipe is listed as available or invoked. A successful `Parse` only establishes
-format validity; it does not establish invocability. #353 also owns argument
-binding, CLI quoting, one-turn model-hint precedence, capability and destination
-admission, and prompt dispatch. Recipe commands and discovery are not available
-yet. #353 will place pure template validation and substitution in `recipe` for
-reuse by Firn, Flux ML, and Quantum Trader; CLI binding, trust decisions,
-routing, and dispatch remain in consumers.
+## Golem recipe commands
+
+Place immediate `<name>.recipe.json` files in
+`filepath.Join(os.UserConfigDir(), "go-llm", "commands")`. On macOS this is
+`~/Library/Application Support/go-llm/commands/`; on Linux it follows the
+standard XDG config directory. The directory is independent of the workspace
+and `models.json` path. Golem does not create it automatically. There is no
+workspace recipe search, recursive discovery, path override, or file watcher.
+An absent or empty directory is silent and loads no commands. Unavailable or
+unreadable directories produce a startup diagnostic on stderr; built-ins stay
+usable. Recipes are not discovered for `-p`, `-goal`, or machine output modes.
+
+The JSON `name` is the command identity and need not match the filename.
+Only the exact `.recipe.json` suffix is selected. Directory symlinks are
+accepted, including a `go-llm` or `commands` directory in user-managed dotfiles.
+Individual candidate symlinks and nonregular files are rejected. All existing
+built-ins and aliases, including `/recipes`, are reserved. All files claiming
+a duplicate name are excluded, including a parsed claimant with an invalid
+template. An exact loaded `/recipe` is allowed; otherwise `/recipe` suggests
+`/recipes` without executing it.
+
+At startup and explicit reload, Golem validates JSON, metadata, and active
+references in both templates before publishing the catalog. Errors identify
+filenames, fields, and keys without printing template bodies, defaults, or
+supplied arguments. Model hints are advisory: syntactically valid unconfigured
+roles/use cases and offline providers do not remove commands from the catalog.
+Discovery performs no provider calls or capability probes. Bindings resolve at
+invocation, and a missing binding falls back to the current model with a notice.
+A resolved hint selects the model for that invocation only, through ordinary
+model preparation and destination consent. It does not change the session's
+permanent `/model set` selection or grant new authority.
+
+`/recipes` lists the directory and valid commands sorted by name, with positional
+usage and descriptions. `/help` appends those same command entries. Unknown
+commands list sorted prefix matches, or all available names and aliases if no
+prefix matches. Suggestions never execute automatically.
+
+```text
+recipes: /tmp/example-config/go-llm/commands
+  /review <target> [focus] - Review a change for actionable defects.
+  /summary <path> - Summarize a markdown file.
+```
+
+`/recipes reload` synchronously replaces the catalog. Edits and additions become
+available, deleted or newly invalid files disappear, and an absent directory
+clears the catalog. Candidate diagnostics precede the success line, such as
+`recipes: reloaded (1 command available)`. A directory-level failure retains
+the previous catalog and prints `recipes: reload failed; previous commands
+kept: <cause>`. Invocation uses this loaded snapshot without reopening files;
+changes require reload or restart. Other forms print `usage: /recipes [reload]`.
+
+### Positional arguments and quoting
+
+Inputs bind in declaration order. Omitted suffix inputs use their exact
+defaults. A nil/missing default requires a supplied value, even for an unused
+input. Quoted empty strings count as supplied. An optional input before a
+required input still occupies its slot; supply it to reach the later input.
+Extra arguments and unterminated quotes fail with metadata-derived usage and
+perform no model preparation, goal, or history write.
+
+The argument grammar is Golem's existing MCP command parser:
+
+- Unicode whitespace separates arguments. Single or double quotes group text,
+  and adjacent quoted/unquoted pieces form one argument. `''` and `""` each
+  supply an empty argument.
+- Single quotes preserve all content literally. Outside quotes, backslash
+  escapes whitespace or either quote. Within double quotes, it escapes only a
+  double quote. All other backslashes remain literal, including a final one.
+- The REPL and parser trim outer whitespace before parsing. Escaping a terminal
+  unquoted space does not preserve it; quote a value to retain trailing spaces.
+- `$HOME`, `$(...)`, backticks, `*`, `;`, and `@file` are literal text. Nothing
+  runs a shell or reads an argument file. `name=value` is a positional value.
+- Invalid UTF-8 is rejected before parsing or provider transport.
+
+For the version 1 example above saved as `review-change.recipe.json`:
+
+```text
+/review-change "Project A"
+```
+
+The expanded user message is exactly:
+
+```text
+Review Project A. Focus on correctness.
+
+Report defects with file references and explain their impact.
+```
+
+`/review-change '' security` supplies an empty target and `security` focus.
+Bare `/review-change` prints:
+
+```text
+recipe: missing required input "target"
+usage: /review-change <target> [focus]
+  target: Change or path to review (required)
+  focus: Review emphasis (optional)
+```
+
+Golem joins a nonempty expanded context to the goal with exactly two newlines;
+an empty expanded context adds no separator. Authored and substituted whitespace
+is preserved. The complete message, including any separator, is limited to
+1,048,576 bytes and must be valid UTF-8 and nonblank. A context template that
+expands to empty does not consume separator bytes.
+
+Expanded text beginning with `/allow-exec`, `/model`, `/quit`, or any other
+slash command is model-goal text, bypassing slash dispatch exactly once.
+Context is part of that user message and never a system instruction. Conversation
+persistence and line-editor recall store the expanded message under ordinary
+secret/canary rules. Raw invocation recall is deferred: unused arguments may
+contain bytes absent from the inspected expansion, so recording them would
+require separate inspection of those exact recall bytes.
 
 ## File and trust boundary
 
@@ -161,7 +267,9 @@ bytes and rejects an oversized document instead of parsing a truncated one.
 Missing files and broken symlinks preserve `fs.ErrNotExist` through wrapping.
 
 This explicit-path behavior does not confine a path to a workspace or allowed
-root. #353 must define containment and symlink policy for discovery. The file
+root. Golem discovery trusts the designated user config tree, including its
+directory-symlink targets; a future automatic workspace source requires the
+workspace trust gate tracked in #431. The file
 checks also do not make loading race-proof: a path can change before `Open`,
 and in-place edits can retain identity. On Unix, a nonblocking open prevents a
 path swapped to a FIFO from waiting for a writer; the opened-file check rejects
