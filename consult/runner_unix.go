@@ -44,18 +44,35 @@ func (e *envelope) cwds() []string {
 // order. It is a variable only so tests can inject a creation failure.
 var envelopeDirs = []string{"cwd", "tmp", "config", "cache", "state"}
 
-// newEnvelope builds an envelope under the system temp directory. $TMPDIR is
-// the one value this package takes from the inherited environment, and it is
-// safe to: the root gets a random name and mode 0700 before anything is written
-// into it, so a hostile $TMPDIR can relocate the scratch space but cannot read
-// it or predict its path. A hostile $TMPDIR pointing somewhere unwritable makes
-// the run fail, not leak.
+// newEnvelope uses the system temp directory after resolving its path and
+// validating its owner and every ancestor. A private leaf alone cannot prevent
+// a hostile parent owner from renaming and replacing the envelope.
 func newEnvelope() (*envelope, error) { return newEnvelopeIn("") }
 
 // newEnvelopeIn builds an envelope under base ("" means the system temp
 // directory). On any failure after the root exists it removes the root, so a
 // partial envelope never outlives the call that created it.
 func newEnvelopeIn(base string) (_ *envelope, err error) {
+	if base == "" {
+		base = os.TempDir()
+	}
+	base, err = filepath.Abs(base)
+	if err == nil {
+		base, err = filepath.EvalSymlinks(base)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("%w: temp parent: %w", errEnvelope, err)
+	}
+	info, err := os.Lstat(base)
+	if err != nil {
+		return nil, fmt.Errorf("%w: temp parent: %w", errEnvelope, err)
+	}
+	if !info.IsDir() {
+		return nil, fmt.Errorf("%w: temp parent must be a directory", errEnvelope)
+	}
+	if err := validatePathTrust(base, info); err != nil {
+		return nil, fmt.Errorf("%w: temp parent: %w", errEnvelope, err)
+	}
 	root, err := os.MkdirTemp(base, "golem-consult-")
 	if err != nil {
 		return nil, fmt.Errorf("%w: root: %w", errEnvelope, err)

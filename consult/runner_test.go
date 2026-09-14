@@ -138,6 +138,94 @@ func TestNewEnvelopeIsPrivateAndSelfCleaning(t *testing.T) {
 	}
 }
 
+// TestLoadRejectsWritableCommand covers the path go-llm executes: a command
+// any group or world member can rewrite is not a trusted consultant, however
+// carefully its digest was recorded.
+func TestLoadRejectsWritableCommand(t *testing.T) {
+	for _, mode := range []os.FileMode{0o770, 0o707, 0o777} {
+		p, cmd := writeConfig(t, goodConfig)
+		if err := os.Chmod(cmd, mode); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := Load(p); err == nil || !strings.Contains(err.Error(), "group- or world-writable") {
+			t.Fatalf("command %o must be rejected, got %v", mode, err)
+		}
+	}
+	// The owner-only executable writeConfig writes is still accepted.
+	p, _ := writeConfig(t, goodConfig)
+	if _, err := Load(p); err != nil {
+		t.Fatalf("0700 command must load: %v", err)
+	}
+}
+
+func TestEnvelopeRejectsUnsafeTempParent(t *testing.T) {
+	for _, tc := range []struct {
+		name                      string
+		ancestor, foreign, sticky bool
+	}{
+		{name: "writable_parent"},
+		{name: "writable_ancestor", ancestor: true},
+		{name: "foreign_owner", foreign: true},
+		{name: "foreign_sticky_owner", foreign: true, sticky: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.foreign && os.Geteuid() != 0 {
+				t.Skip("changing ownership requires root; covered by Linux CI")
+			}
+			base := realTempDir(t)
+			target := base
+			if tc.ancestor {
+				target = filepath.Dir(base)
+			}
+			mode := os.FileMode(0o777)
+			if tc.foreign {
+				mode = 0o755
+			}
+			if tc.sticky {
+				mode = os.ModeSticky | 0o777
+			}
+			if err := os.Chmod(target, mode); err != nil {
+				t.Fatal(err)
+			}
+			if tc.foreign {
+				if err := os.Chown(target, 12345, -1); err != nil {
+					if errors.Is(err, os.ErrPermission) {
+						t.Skip("changing ownership is unavailable")
+					}
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { _ = os.Chown(target, os.Geteuid(), -1) })
+			}
+			t.Setenv("TMPDIR", base)
+			if e, err := newEnvelope(); !errors.Is(err, errEnvelope) {
+				if e != nil {
+					_ = os.RemoveAll(e.root)
+				}
+				t.Fatalf("unsafe temp parent accepted: %v", err)
+			}
+			if entries, err := os.ReadDir(base); err != nil || len(entries) != 0 {
+				t.Fatalf("rejected parent was modified: %v, %v", entries, err)
+			}
+		})
+	}
+}
+
+func TestEnvelopeAnchorsResolvedTempParent(t *testing.T) {
+	base := realTempDir(t)
+	alias := filepath.Join(realTempDir(t), "alias")
+	if err := os.Symlink(base, alias); err != nil {
+		t.Fatal(err)
+	}
+	e, err := newEnvelopeIn(alias)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(e.root) })
+	if filepath.Dir(e.root) != base {
+		t.Fatalf("envelope still depends on temp-parent alias: %s", e.root)
+	}
+}
+
 // TestKillGroupMapsESRCHToProcessDone pins cmd.Cancel's contract: a group that
 // is already gone is not an interruption failure, and reporting it as one would
 // make Go wrap it into an error waitErrorKind classifies "other" (fail-closed).

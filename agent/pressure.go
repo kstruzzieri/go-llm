@@ -102,7 +102,7 @@ type PressureBuckets struct {
 // Per-message precedence: pinned > retrieval (Attrib set) > tool_output (role
 // "tool") > history.
 func (m ContextManager) pressureBuckets(st State, toolSchemaTokens int) PressureBuckets {
-	b := PressureBuckets{Available: true, Pinned: m.estimate(st.System), ToolSchema: toolSchemaTokens}
+	b := PressureBuckets{Available: true, Pinned: saturatedTokenAdd(m.estimate(st.System), m.advisoryTokens), ToolSchema: toolSchemaTokens}
 	for _, msg := range st.Messages {
 		cost := m.messageCost(msg)
 		switch {

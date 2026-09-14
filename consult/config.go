@@ -218,12 +218,6 @@ func validateCommand(path string) (os.FileInfo, error) {
 	if !info.Mode().IsRegular() {
 		return nil, errors.New("command must be a regular file")
 	}
-	// Anyone who can rewrite the file can replace the consultant, and a digest
-	// recorded once does not survive that; the pre-exec re-verification would
-	// only turn it into a run-time failure.
-	if info.Mode().Perm()&0o022 != 0 {
-		return nil, errors.New("command must not be group- or world-writable")
-	}
 	// Lstat only inspects the leaf: reject a command reached through a
 	// symlinked parent directory too, so the path cannot be redirected.
 	resolved, err := filepath.EvalSymlinks(path)
@@ -233,7 +227,7 @@ func validateCommand(path string) (os.FileInfo, error) {
 	if resolved != path {
 		return nil, errors.New("command path must not traverse symlinks")
 	}
-	if err := validateCommandParents(path, info); err != nil {
+	if err := validateCommandPermissions(path, info); err != nil {
 		return nil, err
 	}
 	return info, nil

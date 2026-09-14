@@ -269,7 +269,7 @@ func TestFramingCommutesWithAssembly(t *testing.T) {
 					if err != nil {
 						continue // must-fit overflow: no render to check
 					}
-					req := buildChatRequest(out, nil, 0, provider.ModelOptions{})
+					req := buildChatRequest(out, nil, 0, provider.ModelOptions{}, nil)
 					offset := 0
 					if out.System != "" {
 						offset = 1

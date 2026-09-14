@@ -346,7 +346,7 @@ func TestConsultInterruptCancelsTheConsultation(t *testing.T) {
 	if elapsed := time.Since(start); elapsed > 2*time.Second {
 		t.Fatalf("Ctrl-C did not cut the consultation short: took %s", elapsed)
 	}
-	if !strings.Contains(out.String(), "consult failed: canceled") || sess.advisory != nil {
+	if !strings.Contains(out.String(), "consult canceled\n") || strings.Contains(out.String(), "consult failed:") || sess.advisory != nil {
 		t.Fatalf("interrupted consult = %q, adv=%v", out.String(), sess.advisory)
 	}
 }

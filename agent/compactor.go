@@ -6,8 +6,9 @@ import (
 )
 
 // TokenBudget is the input-token budget available to the State messages
-// (system + transcript), already net of tool-schema tokens. Thresholds carries
-// the per-turn pressure bands (zero value => defaults) so Assemble stays a pure
+// (system + transcript), already net of tool schemas and wire-only advisory
+// tokens. Thresholds carries the per-turn pressure bands (zero value => defaults)
+// so Assemble stays a pure
 // function of its inputs. #63.
 type TokenBudget struct {
 	Input      int
@@ -60,10 +61,7 @@ func (rc RecencyCompactor) messageCost(m Message) int {
 }
 
 func (rc RecencyCompactor) checkedMessageCost(m Message) (int, bool) {
-	// #382: a message carrying a staged advisory costs the projection
-	// buildChatRequest renders, not its raw content. This is the single seam
-	// ContextManager.messageCost and the compactor both price through.
-	n := rc.estimate(messageContent(m))
+	n := rc.estimate(m.Content)
 	add := func(cost int) bool {
 		var ok bool
 		n, ok = checkedTokenAdd(n, cost)

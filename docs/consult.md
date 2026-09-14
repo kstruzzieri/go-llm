@@ -76,7 +76,7 @@ consultant is declaring that you accept that.
 The `command` rules exist so the configured path names the bytes that actually
 run. A package-manager shim (`/opt/homebrew/bin/claude`, `/usr/local/bin/...`)
 is usually a symlink and is rejected; give the resolved target instead. A
-binary anyone but its owner can rewrite is rejected too — `command must not be
+Unix binary anyone but its owner can rewrite is rejected too — `command must not be
 group- or world-writable` — because a digest pin over a file the group can
 replace pins nothing.
 
@@ -115,10 +115,15 @@ digest immediately before sending the prompt.
 
 Unix only. The runner uses `Setpgid` and negative-PID process-group
 signalling, which have no Windows equivalent; a consult there fails with
-`unsupported-platform` before anything is started.
+`unsupported-platform` before anything is started. Configuration loading on
+Windows does not apply Unix write-permission bits to ordinary Windows files.
 
 Each run gets a fresh private directory tree under the system temp directory,
 mode `0700`, with a random name: `cwd`, `tmp`, `config`, `cache` and `state`.
+The temp directory (including inherited `TMPDIR`) is resolved once to its
+canonical path and must pass the same ownership and ancestor checks as the
+executable. A private leaf cannot protect against a hostile parent owner
+renaming it. An unsafe temp path fails with `internal (envelope)` before launch.
 The child's working directory is the private `cwd`. The whole root is removed
 after the run, and a removal that does not take effect fails the run.
 
@@ -244,7 +249,8 @@ An admitted transcript must satisfy all of:
   false`, `stop_reason: "end_turn"`, no `permission_denials`, no
   `deferred_tool_use` and no terminal markers;
 - every reported model in `modelUsage` is an opus model, and every usage
-  entry's provider is first-party;
+  entry explicitly reports `provider: "firstParty"`; a missing provider is
+  rejected. Token totals must fit in `int64` without overflow;
 - the terminal `result` text equals what the assistant actually emitted
   (either the whole concatenated text or the last assistant record's);
 - after the terminal, only an idle `session_state_changed`, one bare-null
@@ -424,8 +430,10 @@ approval is wanted.
 The projection is priced against the pinned segment before the model call, so
 an advisory too large for the context exhausts the budget instead of silently
 displacing history. Nothing of it is written to session history,
-`Result.Messages` or durable summaries: the stored goal is the raw text you
-typed.
+`State`, `Result.Messages` or durable summaries: the stored goal is the raw
+text you typed. Custom compactors receive only that ordinary state and a
+budget reduced by the advisory's extra cost. A compactor that changes, drops
+or duplicates the pinned goal is rejected before the model call.
 
 The interceptor chain sees the advisory twice, as a model-origin observation
 named `consult/<name>`. `Orchestrator.InspectAdvisory` runs at consult time so

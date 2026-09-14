@@ -81,7 +81,7 @@ func frameTestState() State {
 func TestBuildChatRequestFramesOnlyToolMessages(t *testing.T) {
 	st := frameTestState()
 	untouched := frameTestState()
-	req := buildChatRequest(st, nil, 0, provider.ModelOptions{})
+	req := buildChatRequest(st, nil, 0, provider.ModelOptions{}, nil)
 
 	wantNonTool := map[int]provider.ChatMessage{
 		0: {Role: "system", Content: "sys"},
@@ -165,7 +165,7 @@ func TestRepeatedRenderRotatesNonceWithoutAccumulatingFrames(t *testing.T) {
 	raw := map[int]string{4: "A", 5: "unknown tool: nope", 6: ""}
 	var renderKeys []string
 	for render := 0; render < 2; render++ {
-		req := buildChatRequest(st, nil, 0, provider.ModelOptions{})
+		req := buildChatRequest(st, nil, 0, provider.ModelOptions{}, nil)
 		var keys []string
 		for i, c := range raw {
 			got := req.Messages[i].Content

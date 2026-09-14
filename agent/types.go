@@ -128,10 +128,6 @@ type Message struct {
 	// failure — all three return before prepareCall normalizes).
 	Context   *ContextSet `json:"-"`
 	OutputCap int         `json:"-"`
-	// Advisory is the staged consult receipt carried by the pinned goal
-	// message (#382); runtime-only, never persisted, and never copied into
-	// Result.Messages, which is built from ChatMessage alone.
-	Advisory *Advisory `json:"-"`
 }
 
 // State is the canonical transcript the Orchestrator owns.

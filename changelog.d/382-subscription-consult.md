@@ -20,7 +20,9 @@ the runtime seam; `golem.Turn.Advisory` carries one staged receipt.
 
 - The staged advice is projected onto the wire copy of the next goal inside a
   `CONSULT_ADVICE` fence and charged to the pinned segment; it is never
-  written to session history, `Result.Messages` or durable summaries.
+  written to `State`, session history, `Result.Messages` or durable summaries.
+  Custom compactors receive only ordinary state and a budget reduced by the
+  advisory cost; changing or losing its pinned goal fails before the model call.
 - `run.failed` gains one code, `policy_blocked`, emitted only when the
   interceptor chain refuses a staged advisory at step 0
   (`agent.ErrAdvisoryBlocked`). The arm matches that sentinel alone: every
@@ -39,15 +41,19 @@ the runtime seam; `golem.Turn.Advisory` carries one staged receipt.
   `--version` probe with empty stdin rejects an unpinned version before the
   prompt is sent. Both launches share one deadline and must use the same
   executable digest, even without a configured pin. Admission also rejects
-  non-Opus or missing assistant models and non-Opus usage models.
+  non-Opus or missing assistant models, non-Opus usage models, overflowing token
+  totals and reported usage entries without `provider: "firstParty"`.
 - The consultant `command` must be an absolute path to a regular file whose
   path traverses no symlink (Homebrew shims and `/usr/local/bin` links must be
-  given as their resolved target) and that is not group- or world-writable —
+  given as their resolved target) and, on Unix, is not group- or world-writable —
   a digest pin over a file the group can replace pins nothing. An optional
   `sha256` is re-verified immediately before exec. Path and permission checks
   are repeated before both launches, including for hand-built consultants.
   On Unix, the executable and every ancestor must be owned by root or the
   effective user; writable ancestors require the sticky bit.
+- Temp parents, including inherited `TMPDIR`, are resolved to a canonical
+  path and checked for trusted ownership and safe ancestor permissions before
+  any envelope is created. Cancellation prints `consult canceled`.
 - Linux cleanup treats an unreaped zombie-only process group as exited;
   `getpgid` filters unrelated processes before reading their state, and
   polling backs off to 100 ms within the one-second cleanup window. Live

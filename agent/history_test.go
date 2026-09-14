@@ -70,7 +70,7 @@ func TestBuildChatRequestOrdersSystemHistoryGoal(t *testing.T) {
 			{Role: "assistant", Content: "a1"},
 		},
 	})
-	req := buildChatRequest(st, nil, 0, provider.ModelOptions{})
+	req := buildChatRequest(st, nil, 0, provider.ModelOptions{}, nil)
 	gotRoles := make([]string, len(req.Messages))
 	gotContent := make([]string, len(req.Messages))
 	for i, m := range req.Messages {

@@ -55,6 +55,9 @@ type ContextManager struct {
 	// assembles unframed and prices raw content. Unexported on purpose: the
 	// charge follows the transport, and callers do not choose the transport.
 	frameToolResults bool
+	// advisoryTokens reserves the wire-only projection without exposing the
+	// receipt to State or custom compactors. Set on the per-step manager copy.
+	advisoryTokens int
 	// Mixed opts into structured mixed-budget assembly. It requires the DEFAULT
 	// compactor: Mixed together with a non-nil Compactor is a configuration
 	// error (ErrMixedCompactor) whatever any one request carries, because the
@@ -170,7 +173,7 @@ func (m ContextManager) checkedPinnedTokens(st State, toolSchemaTokens int) (int
 			}
 		}
 	}
-	return n, true
+	return checkedTokenAdd(n, m.advisoryTokens)
 }
 
 func (m ContextManager) totalTokens(st State, toolSchemaTokens int) int {
@@ -193,7 +196,7 @@ func (m ContextManager) checkedTotalTokens(st State, toolSchemaTokens int) (int,
 			return n, false
 		}
 	}
-	return n, true
+	return checkedTokenAdd(n, m.advisoryTokens)
 }
 
 func materializeDurableSummary(st State) State {
@@ -249,6 +252,9 @@ func (m ContextManager) assembleLegacy(ctx context.Context, st State, toolSchema
 	}
 
 	stateInput, stateBudgetOK := checkedTokenSub(budget.Input, toolSchemaTokens)
+	if stateBudgetOK {
+		stateInput, stateBudgetOK = checkedTokenSub(stateInput, m.advisoryTokens)
+	}
 	if !stateBudgetOK {
 		return st, Pressure{
 			UsedPct: 1, InputTokens: stateInput, InputBudget: budget.Input,
@@ -259,7 +265,7 @@ func (m ContextManager) assembleLegacy(ctx context.Context, st State, toolSchema
 	out, report, err := m.Compactor.Compact(ctx, st, stateBudget)
 	if err != nil {
 		if errors.Is(err, ErrContextExhausted) {
-			tokens := saturatedTokenAdd(report.TokensAfter, toolSchemaTokens)
+			tokens := saturatedTokenAdd(saturatedTokenAdd(report.TokensAfter, toolSchemaTokens), m.advisoryTokens)
 			return st, Pressure{
 				UsedPct: usedFraction(tokens, budget.Input), InputTokens: tokens, InputBudget: budget.Input,
 				Level: LevelCritical, Cause: m.dominantCause(st, toolSchemaTokens), Mitigation: MitigationHalt,
@@ -313,7 +319,7 @@ func usedFraction(tokens, budget int) float64 {
 // schemas or the pinned messages (system + goal). It deliberately ignores elastic
 // history, which is irrelevant to a pinned-segment overflow.
 func (m ContextManager) pinnedOverflowCause(st State, toolSchemaTokens int) PressureCause {
-	pinnedMsgs := m.estimate(st.System)
+	pinnedMsgs := saturatedTokenAdd(m.estimate(st.System), m.advisoryTokens)
 	for _, msg := range st.Messages {
 		if msg.Segment == Pinned {
 			pinnedMsgs = saturatedTokenAdd(pinnedMsgs, m.messageCost(msg))

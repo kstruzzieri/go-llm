@@ -183,7 +183,7 @@ func runHardeningFrameBytes(t *testing.T) {
 	original := append([]Message(nil), st.Messages...)
 	var previous string
 	for render := 0; render < 2; render++ {
-		req := buildChatRequest(st, nil, 0, provider.ModelOptions{})
+		req := buildChatRequest(st, nil, 0, provider.ModelOptions{}, nil)
 		if len(req.Messages) != len(names)+2 {
 			t.Fatalf("render %d: message count = %d, want %d", render, len(req.Messages), len(names)+2)
 		}

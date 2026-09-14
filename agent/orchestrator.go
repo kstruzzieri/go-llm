@@ -75,14 +75,11 @@ func initState(req Request) State {
 	msgs = append(msgs, Message{
 		ChatMessage: provider.ChatMessage{Role: "user", Content: req.Goal},
 		Segment:     Pinned,
-		// #382: the staged receipt belongs to the goal. run replaces this with
-		// the inspected value before anything prices or renders it.
-		Advisory: req.Advisory,
 	})
 	return State{System: req.System, DurableSummary: req.HistorySummary, Messages: msgs}
 }
 
-func buildChatRequest(st State, specs []provider.Tool, outputReserve int, opts provider.ModelOptions) provider.ChatRequest {
+func buildChatRequest(st State, specs []provider.Tool, outputReserve int, opts provider.ModelOptions, advisory *Advisory) provider.ChatRequest {
 	msgs := make([]provider.ChatMessage, 0, len(st.Messages)+1)
 	if st.System != "" {
 		msgs = append(msgs, provider.ChatMessage{Role: "system", Content: st.System})
@@ -103,11 +100,12 @@ func buildChatRequest(st State, specs []provider.Tool, outputReserve int, opts p
 		}
 		// #382: the staged advisory is projected here too, on the same value
 		// copy under the same per-render key. State keeps the raw goal.
-		if m.Advisory != nil {
+		if advisory != nil && m.Segment == Pinned && cm.Role == "user" {
 			if !minted {
 				fence, minted = promptfence.New(), true
 			}
-			cm.Content = renderAdvisory(fence, cm.Content, *m.Advisory)
+			cm.Content = renderAdvisory(fence, cm.Content, *advisory)
+			advisory = nil
 		}
 		msgs = append(msgs, cm)
 	}
@@ -176,15 +174,14 @@ func (o *Orchestrator) run(ctx context.Context, req Request, obs Observer, ic *i
 	// #382: the staged advisory is re-inspected before the initial input, as
 	// its own model-origin observation: a block refuses the run before any
 	// assembly, and tags annotate the projected copy only.
+	var advisory *Advisory
 	if req.Advisory != nil {
-		// initState appends the goal last, and it is the message it attached
-		// the receipt to.
 		last := len(state.Messages) - 1
 		annotated, aerr := o.prepareAdvisory(ctx, ic, obs, *req.Advisory, last)
 		if aerr != nil {
 			return finishWithError(&res, state, historyLen, aerr)
 		}
-		state.Messages[last].Advisory = &annotated
+		advisory = &annotated
 	}
 
 	// #436: the initial input is inspected once, before any assembly, so a
@@ -192,9 +189,24 @@ func (o *Orchestrator) run(ctx context.Context, req Request, obs Observer, ic *i
 	if err := ic.inspectInitial(ctx, obs, &state); err != nil {
 		return finishWithError(&res, state, historyLen, err)
 	}
+	goal := state.Messages[len(state.Messages)-1].Content
 
 	for step := 0; step < maxSteps; step++ {
-		assembled, pressure, atrace, err := o.ctxMgr.AssembleWithTrace(ctx, state, toolSchemaTokens, budget)
+		manager := o.ctxMgr
+		if advisory != nil {
+			estimate := manager.estimate
+			if manager.Mixed && hasStructuredAnchor(state) {
+				estimate = guardedEstimate(manager.Estimate)
+			}
+			projected := renderAdvisoryLines(advisoryPlaceholderOpen, advisoryPlaceholderClose, goal, *advisory)
+			extra, costOK := checkedTokenSub(estimate(projected), estimate(goal))
+			if !costOK {
+				return res, ErrContextExhausted
+			}
+			// Never create spare capacity from a non-monotonic estimator.
+			manager.advisoryTokens = max(0, extra)
+		}
+		assembled, pressure, atrace, err := manager.AssembleWithTrace(ctx, state, toolSchemaTokens, budget)
 		// Emit pressure before the model call on the success path and on the
 		// exhaustion path; skip only opaque compactor failures (pressure is zero).
 		if err == nil || errors.Is(err, ErrContextExhausted) {
@@ -206,6 +218,20 @@ func (o *Orchestrator) run(ctx context.Context, req Request, obs Observer, ic *i
 		}
 		if err != nil {
 			return res, err
+		}
+		if advisory != nil {
+			goals := 0
+			for _, m := range assembled.Messages {
+				if m.Segment == Pinned && m.Role == "user" {
+					if m.Content != goal {
+						return res, errors.New("agent: compactor changed the advisory's pinned goal")
+					}
+					goals++
+				}
+			}
+			if goals != 1 {
+				return res, errors.New("agent: compactor must preserve the advisory's pinned goal exactly once")
+			}
 		}
 		// Mixed assemblies only. The discriminator is nil Subjects, not Mixed and
 		// not a length: legacy, no-anchor and error paths return a zero trace,
@@ -234,7 +260,7 @@ func (o *Orchestrator) run(ctx context.Context, req Request, obs Observer, ic *i
 
 		tokenLogged := false
 		modelStart := o.now()
-		chatReq := buildChatRequest(assembled, specs, req.Budget.OutputReserve, req.Options)
+		chatReq := buildChatRequest(assembled, specs, req.Budget.OutputReserve, req.Options, advisory)
 		// Session identity belongs to the run, independent of transcript rebuilding.
 		chatReq.SessionID = req.SessionID
 		modelResult, err := o.model.Chat(ctx, chatReq, func(c provider.ChatResponse) error {

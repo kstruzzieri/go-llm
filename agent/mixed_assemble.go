@@ -175,11 +175,11 @@ func (m ContextManager) assembleMixed(ctx context.Context, st State, toolSchemaT
 		return stMat, Pressure{}, ContextAssemblyTrace{}, err
 	}
 
-	// sysTokens covers only what the units do NOT represent: the system prompt
-	// and the materialized durable summary. Pinned MESSAGES are unitPinned units
-	// charged in the allocator's must-fit step, so adding pinnedTokens here would
-	// double-charge the whole pinned span and manufacture an exhaustion.
-	sysTokens := m.estimate(stMat.System)
+	// sysTokens covers what the units do NOT represent: the system prompt,
+	// materialized durable summary and wire-only advisory. Pinned messages are
+	// unitPinned units charged in the allocator's must-fit step, so adding
+	// pinnedTokens here would double-charge the whole pinned span.
+	sysTokens := saturatedTokenAdd(m.estimate(stMat.System), m.advisoryTokens)
 	var summary *Message
 	if hadSummary {
 		// materializeDurableSummary prepends the summary under the same

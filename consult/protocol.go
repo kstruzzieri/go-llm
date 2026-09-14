@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"math"
 	"regexp"
 	"sort"
 	"strconv"
@@ -534,18 +535,22 @@ func (x *inspector) usage(models map[string]any) {
 			zero = false
 			x.fail("web-search-activity")
 		}
-		if opus {
-			in.OpusInputTokens += vals[0]
-			in.OpusOutputTokens += vals[1]
-			in.OpusCacheTokens += vals[2] + vals[3]
-		} else {
-			in.NonOpusInputTokens += vals[0]
-			in.NonOpusOutputTokens += vals[1]
-			in.NonOpusCacheTokens += vals[2] + vals[3]
+		totals := [4]*int64{&in.OpusInputTokens, &in.OpusOutputTokens, &in.OpusCacheTokens, &in.OpusCacheTokens}
+		if !opus {
+			totals = [4]*int64{&in.NonOpusInputTokens, &in.NonOpusOutputTokens, &in.NonOpusCacheTokens, &in.NonOpusCacheTokens}
+		}
+		for j, total := range totals {
+			if vals[j] > math.MaxInt64-*total {
+				x.fail("usage-invalid")
+				complete = false
+				continue
+			}
+			*total += vals[j]
 		}
 		switch p, present := entry["provider"]; {
 		case !present:
 			missing++
+			x.fail("route-invalid")
 		case p == "firstParty":
 			first++
 		default:

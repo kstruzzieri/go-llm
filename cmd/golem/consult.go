@@ -110,6 +110,10 @@ func handleConsult(ctx context.Context, out io.Writer, sess *replSession, line s
 	if err != nil {
 		var ce *consult.Error
 		if errors.As(err, &ce) {
+			if ce.Code == "canceled" {
+				_, _ = fmt.Fprintln(out, "consult canceled")
+				return
+			}
 			// Code and Reason are both drawn from closed host-authored
 			// vocabularies -- never consultant text, a path, or a wrapped
 			// error -- so printing the reason narrows the failure for the

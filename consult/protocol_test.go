@@ -391,11 +391,11 @@ func TestClaudeItem2TerminalAndUsageMetadata(t *testing.T) {
 		{"deferred", strings.Replace(goodResult, `"result":"OK"`, `"result":"OK","deferred_tool_use":{}`, 1), "tool-activity"},
 		{"web_search", withUsage(strings.Replace(opus, `"webSearchRequests":0`, `"webSearchRequests":1`, 1)), "web-search-activity"},
 		{"provider_other", withUsage(strings.Replace(opus, `"firstParty"`, `"bedrock"`, 1)), "route-invalid"},
-		{"provider_missing", withUsage(strings.Replace(opus, `,"provider":"firstParty"`, ``, 1)), ""},
+		{"provider_missing", withUsage(strings.Replace(opus, `,"provider":"firstParty"`, ``, 1)), "route-invalid"},
 		{"tokens_string", withUsage(strings.Replace(opus, `"inputTokens":10`, `"inputTokens":"10"`, 1)), "usage-invalid"},
 		{"tokens_negative", withUsage(strings.Replace(opus, `"outputTokens":5`, `"outputTokens":-5`, 1)), "usage-invalid"},
 		{"entry_not_object", withUsage(`{"claude-opus-4-8":7}`), "usage-invalid"},
-		{"empty_entry", withUsage(`{"claude-opus-4-8":{}}`), ""},
+		{"empty_entry", withUsage(`{"claude-opus-4-8":{}}`), "route-invalid"},
 		{"session_missing", strings.Replace(goodResult, `"session_id":"synthetic-session",`, ``, 1), "session-inconsistent"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -702,6 +702,45 @@ func TestClaudeEmptyEvidenceListsSerializeAsArrays(t *testing.T) {
 		if !strings.Contains(string(b), field) {
 			t.Fatalf("empty list serialized as null, want %s: %s", field, b)
 		}
+	}
+}
+
+func TestUsageTotalsRejectOverflow(t *testing.T) {
+	for _, fields := range [][]string{
+		{"inputTokens"}, {"outputTokens"}, {"cacheReadInputTokens"},
+		{"cacheCreationInputTokens"}, {"cacheReadInputTokens", "cacheCreationInputTokens"},
+	} {
+		t.Run(strings.Join(fields, "+"), func(t *testing.T) {
+			// 1024 * 2^53 overflows int64; both cache fields share one total.
+			entry := map[string]any{"provider": "firstParty"}
+			for _, field := range fields {
+				entry[field] = int64(1 << 53)
+			}
+			models := make(map[string]any)
+			for i := 0; i < 1024/len(fields); i++ {
+				models["claude-opus-4-8-"+strconv.Itoa(i)] = entry
+			}
+			raw, err := json.Marshal(models)
+			if err != nil {
+				t.Fatal(err)
+			}
+			input := []byte(stream(validInit, assistantOK, withUsage(string(raw))))
+			if len(input) >= maxOutputBytes {
+				t.Fatal("overflow fixture must fit the transcript limit")
+			}
+			in, reasons := inspectStream(input, "", nil)
+			if !contains(reasons, "usage-invalid") || in.Answer != "" {
+				t.Fatalf("overflow admitted: input=%d output=%d cache=%d reasons=%v", in.OpusInputTokens, in.OpusOutputTokens, in.OpusCacheTokens, reasons)
+			}
+			delete(models, "claude-opus-4-8-0")
+			raw, err = json.Marshal(models)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, reasons := inspectStream([]byte(stream(validInit, assistantOK, withUsage(string(raw)))), "", nil); len(reasons) != 0 {
+				t.Fatalf("representable totals rejected: %v", reasons)
+			}
+		})
 	}
 }
 
