@@ -17,6 +17,15 @@ import (
 	"modernc.org/sqlite"
 )
 
+func TestMigrations_StrictlyIncreasingVersions(t *testing.T) {
+	t.Parallel()
+	for i := 1; i < len(migrations); i++ {
+		if got, previous := migrations[i].version, migrations[i-1].version; got <= previous {
+			t.Errorf("migrations[%d].version = %d, want greater than migrations[%d].version (%d)", i, got, i-1, previous)
+		}
+	}
+}
+
 func openTestDB(t *testing.T) *sql.DB {
 	t.Helper()
 	db, err := sql.Open("sqlite", ":memory:")
