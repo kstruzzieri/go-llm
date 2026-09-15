@@ -39,14 +39,19 @@ func openTestDB(t *testing.T) *sql.DB {
 
 func openMigrationDB(t *testing.T, path string) *sql.DB {
 	t.Helper()
+	return openMigrationDBJournal(t, path, "WAL")
+}
+
+func openMigrationDBJournal(t *testing.T, path, journalMode string) *sql.DB {
+	t.Helper()
 	db, err := sql.Open("sqlite", path)
 	if err != nil {
 		t.Fatal(err)
 	}
 	db.SetMaxOpenConns(1)
 	t.Cleanup(func() { _ = db.Close() })
-	// Finish WAL setup before racing migration runners, not journal-mode changes.
-	for _, query := range []string{"PRAGMA busy_timeout=5000", "PRAGMA journal_mode=WAL"} {
+	// Finish journal setup before racing migration runners, not journal-mode changes.
+	for _, query := range []string{"PRAGMA busy_timeout=5000", "PRAGMA journal_mode=" + journalMode} {
 		if _, err := db.Exec(query); err != nil {
 			t.Fatal(err)
 		}
@@ -200,6 +205,69 @@ func TestApplyMigration_ClaimBeforeDDLAndStaleSelection(t *testing.T) {
 	assertMigrationSQL(t, b, "SELECT description FROM conversation_schema_version WHERE version=1", "first")
 	execMigrationSQL(t, competitor, "BEGIN IMMEDIATE")
 	execMigrationSQL(t, competitor, "ROLLBACK")
+}
+
+// The literal #543 criterion: a competing migrator submits its claim while the
+// winner still holds the write lock mid-step, waits on the busy handler, then
+// skips the committed step instead of failing or rerunning it. Both journal
+// modes, since the runner does not depend on WAL.
+func TestApplyMigration_WaitsForWriterThenSkips(t *testing.T) {
+	for _, journalMode := range []string{"WAL", "DELETE"} {
+		t.Run(journalMode, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "contended.db")
+			a, b := openMigrationDBJournal(t, path, journalMode), openMigrationDBJournal(t, path, journalMode)
+			execMigrationSQL(t, a, "CREATE TABLE conversation_schema_version (version INTEGER PRIMARY KEY, description TEXT NOT NULL, applied_at INTEGER NOT NULL)")
+			ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+			defer cancel()
+			claimed, release := make(chan struct{}), make(chan struct{})
+			unblock := sync.OnceFunc(func() { close(release) })
+			defer unblock()
+			winner, loser := make(chan error, 1), make(chan error, 1)
+			go func() {
+				winner <- applyMigration(ctx, a, migration{version: 1, description: "winner", fn: func(tx *sql.Tx) error {
+					close(claimed)
+					select {
+					case <-release:
+						_, err := tx.Exec("CREATE TABLE applied_once (value TEXT); INSERT INTO applied_once VALUES ('winner')")
+						return err
+					case <-ctx.Done():
+						return ctx.Err()
+					}
+				}})
+			}()
+			select {
+			case <-claimed:
+			case err := <-winner:
+				t.Fatalf("applyMigration before gate: %v", err)
+			case <-ctx.Done():
+				t.Fatal(ctx.Err())
+			}
+			reran := errors.New("competing step reran")
+			go func() {
+				loser <- applyMigration(ctx, b, migration{version: 1, description: "loser", fn: func(*sql.Tx) error { return reran }})
+			}()
+			// The competitor must be blocked behind the uncommitted claim, not decided.
+			select {
+			case err := <-loser:
+				t.Fatalf("competing applyMigration returned before the winner committed: %v", err)
+			case <-time.After(500 * time.Millisecond):
+			}
+			unblock()
+			for _, result := range []chan error{winner, loser} {
+				select {
+				case err := <-result:
+					if err != nil {
+						t.Fatal(err)
+					}
+				case <-ctx.Done():
+					t.Fatal(ctx.Err())
+				}
+			}
+			assertMigrationVersions(t, b, "1")
+			assertMigrationSQL(t, b, "SELECT value FROM applied_once", "winner")
+			assertMigrationSQL(t, b, "SELECT description FROM conversation_schema_version WHERE version=1", "winner")
+		})
+	}
 }
 
 func TestApplyMigration_ConcurrentSameVersion(t *testing.T) {
