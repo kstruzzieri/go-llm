@@ -347,16 +347,25 @@ func handleModelSet(ctx context.Context, out io.Writer, sess *replSession, arg s
 // wrapper's newGrantAdmitted: it is retained through every later step so a
 // failure can say whether a remote grant is now standing.
 func prepareModelSwitch(ctx context.Context, sess *replSession, arg string) (modelSwitch, bool, error) {
-	sel := sess.selection
 	if sess.runtime == nil {
 		return modelSwitch{}, false, errors.New("golem: /model set: runtime unavailable")
 	}
 
 	// 1. Selector -> the ONE planned route everything downstream consumes.
-	route, err := resolveModelSelection(sel.effective, arg)
+	route, err := resolveModelSelection(sess.selection.effective, arg)
 	if err != nil {
 		return modelSwitch{}, false, err
 	}
+
+	return prepareModelRoute(ctx, sess, route, arg)
+}
+
+// prepareModelRoute admits and prepares an already resolved interactive route.
+func prepareModelRoute(ctx context.Context, sess *replSession, route providerbootstrap.PlannedRoute, requested string) (modelSwitch, bool, error) {
+	if sess.runtime == nil {
+		return modelSwitch{}, false, errors.New("golem: /model set: runtime unavailable")
+	}
+	sel := sess.selection
 
 	// 2. Candidate reachability, then ONE additive admission decision for the
 	// complete proposal -- before any candidate metadata I/O.
@@ -411,7 +420,7 @@ func prepareModelSwitch(ctx context.Context, sess *replSession, arg string) (mod
 	newOrch := newOrchestratorFactory(prep.caller, sel.flags, sel.orchVerifier, sess.canary)
 
 	next := sel
-	next.requested = arg
+	next.requested = requested
 	// A THIRD copy, not prep.plan.chain: that array is already retained by the
 	// caller prepareModel built and, under default dispatch, by the child
 	// caller rebuildDispatchTool built from it. The selection is the one
