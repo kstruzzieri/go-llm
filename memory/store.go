@@ -18,9 +18,12 @@ type SQLiteStore struct {
 
 // NewStore runs migrations on db and returns a store. db must already be opened
 // and hardened by the caller (cmd/golem owns file path, mode, and PRAGMAs).
+// Concurrent migrations coordinate through SQLite's write lock. Callers must
+// configure busy_timeout on every connection that may migrate (for example with
+// the DSN _pragma=busy_timeout(5000)); a zero or expired timeout can return a busy
+// error. Opening a current schema requires only reads.
 func NewStore(ctx context.Context, db *sql.DB) (*SQLiteStore, error) {
-	_ = ctx
-	if err := runMigrations(db); err != nil {
+	if err := runMigrations(ctx, db); err != nil {
 		return nil, fmt.Errorf("memory: init store: %w", err)
 	}
 	return &SQLiteStore{db: db}, nil

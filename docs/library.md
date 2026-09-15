@@ -168,9 +168,17 @@ The guarantee applies while a row continuously exists. `Delete` and `/clear`
 remove it, and recreating the same ID restarts at revision 1; an old snapshot may
 then match that reused revision. This release does not add incarnation tokens,
 tombstones, or protection against that deletion/recreation race (#542).
-Concurrent initialization of an unmigrated database can still fail visibly
-under the existing migration runner (#543); the save guarantee applies after
-initialization.
+
+Conversation and memory migration runners coordinate concurrent openers through
+SQLite's write lock. Each step claims its version before running, then commits
+the version row and schema changes together. A competing opener skips a step
+already committed by another opener. Failed steps roll back while earlier
+committed steps remain. Callers must configure `busy_timeout` on every connection
+that may migrate (for example, with the DSN `_pragma=busy_timeout(5000)`); a zero
+or expired timeout can still return a busy error. Current-schema opens require
+only reads; memory record signing initialization is separate and may write.
+This coordination covers the migration runners. Caller setup, including the
+initial `journal_mode=WAL` switch, must complete before racing the runners.
 
 ## RAG Details
 
