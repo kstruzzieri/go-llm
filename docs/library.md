@@ -175,10 +175,13 @@ the version row and schema changes together. A competing opener skips a step
 already committed by another opener. Failed steps roll back while earlier
 committed steps remain. Callers must configure `busy_timeout` on every connection
 that may migrate (for example, with the DSN `_pragma=busy_timeout(5000)`); a zero
-or expired timeout can still return a busy error. Current-schema opens require
-only reads; memory record signing initialization is separate and may write.
-This coordination covers the migration runners. Caller setup, including the
-initial `journal_mode=WAL` switch, must complete before racing the runners.
+or expired timeout can still return a busy error. Cancellation takes effect
+between statements: a claim already waiting on the write lock keeps waiting, up
+to the busy timeout, before the canceled context is reported. Current-schema
+opens require only reads; memory record signing initialization is separate and
+may write. This coordination covers the migration runners. Caller setup,
+including the initial `journal_mode=WAL` switch, must complete before racing the
+runners.
 
 ## RAG Details
 
