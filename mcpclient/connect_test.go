@@ -7,86 +7,31 @@ import (
 	"testing"
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
+
+	"github.com/kstruzzieri/go-llm/agent"
 )
 
-func TestAdaptToolsSkipsAndCaps(t *testing.T) {
-	remote := []*gomcp.Tool{
-		{Name: "good", InputSchema: map[string]any{"type": "object"}},
-		{Name: "bad name", InputSchema: map[string]any{"type": "object"}},
-		{Name: "arr", InputSchema: []any{1}},
-		{Name: "nilschema"},
+func TestAdaptToolsRejectsWholeCatalog(t *testing.T) {
+	many := make([]*gomcp.Tool, 129)
+	for i := range many {
+		many[i] = tool("t" + itoa(i))
 	}
-	tools, warns := adaptTools(&fakeCaller{}, "fs", remote)
-	if len(tools) != 2 {
-		t.Fatalf("got %d tools, want 2", len(tools))
+	tests := map[string][]*gomcp.Tool{
+		"nil":              {tool("good"), nil},
+		"invalid-name":     {tool("good"), tool("bad name")},
+		"empty-name":       {tool("good"), tool("")},
+		"duplicate":        {tool("good"), tool("good")},
+		"schema":           {tool("good"), {Name: "bad", InputSchema: []any{1}}},
+		"oversized-schema": {tool("good"), {Name: "bad", InputSchema: map[string]any{"x": strings.Repeat("a", 32769)}}},
+		"over-cap":         many,
 	}
-	if len(warns) != 2 {
-		t.Fatalf("got %d warns, want 2", len(warns))
-	}
-}
-
-func TestAdaptToolsSkipsNilTool(t *testing.T) {
-	tools, warns := adaptTools(&fakeCaller{}, "fs", []*gomcp.Tool{
-		nil,
-		{Name: "good", InputSchema: map[string]any{"type": "object"}},
-	})
-	if len(tools) != 1 {
-		t.Fatalf("got %d tools, want 1", len(tools))
-	}
-	if tools[0].Spec().Name != "mcp__fs__good" {
-		t.Fatalf("kept the wrong tool: %s", tools[0].Spec().Name)
-	}
-	if len(warns) != 1 {
-		t.Fatalf("nil tool must warn; got %d warns", len(warns))
-	}
-}
-
-func TestAdaptToolsSkipsDuplicateNames(t *testing.T) {
-	tools, warns := adaptTools(&fakeCaller{}, "fs", []*gomcp.Tool{
-		{Name: "read", InputSchema: map[string]any{"type": "object"}},
-		{Name: "read", InputSchema: map[string]any{"type": "object"}},
-	})
-	if len(tools) != 1 {
-		t.Fatalf("got %d tools, want duplicate skipped", len(tools))
-	}
-	if tools[0].Spec().Name != "mcp__fs__read" {
-		t.Fatalf("kept the wrong tool: %s", tools[0].Spec().Name)
-	}
-	if len(warns) != 1 {
-		t.Fatalf("duplicate tool must warn; got %d warns", len(warns))
-	}
-}
-
-func TestAdaptToolsPerServerCap(t *testing.T) {
-	var remote []*gomcp.Tool
-	for i := 0; i < maxToolsPerServer+5; i++ {
-		remote = append(remote, &gomcp.Tool{Name: "t" + itoa(i), InputSchema: map[string]any{"type": "object"}})
-	}
-	tools, warns := adaptTools(&fakeCaller{}, "fs", remote)
-	if len(tools) != maxToolsPerServer {
-		t.Fatalf("got %d tools, want cap %d", len(tools), maxToolsPerServer)
-	}
-	if len(warns) != 1 {
-		t.Fatalf("cap truncation must warn; got %d warns", len(warns))
-	}
-}
-
-func TestAdaptToolsSchemaSizeCapSkips(t *testing.T) {
-	// A schema that marshals beyond maxSchemaBytes must be skipped+warned, not
-	// registered (it would bloat the prompt every turn).
-	big := map[string]any{"type": "object", "x": strings.Repeat("a", maxSchemaBytes+1)}
-	tools, warns := adaptTools(&fakeCaller{}, "fs", []*gomcp.Tool{
-		{Name: "ok", InputSchema: map[string]any{"type": "object"}},
-		{Name: "huge", InputSchema: big},
-	})
-	if len(tools) != 1 {
-		t.Fatalf("got %d tools, want 1 (huge skipped)", len(tools))
-	}
-	if tools[0].Spec().Name != "mcp__fs__ok" {
-		t.Fatalf("kept the wrong tool: %s", tools[0].Spec().Name)
-	}
-	if len(warns) != 1 {
-		t.Fatalf("oversized schema must warn; got %d warns", len(warns))
+	for name, remote := range tests {
+		t.Run(name, func(t *testing.T) {
+			tools, catalog, warns := adaptToolsAndCatalog(&fakeCaller{}, "fs", remote)
+			if len(tools) != 0 || catalog.digest() != "" || len(warns) != 1 {
+				t.Fatalf("partial catalog accepted: %d tools, digest %q, warnings %v", len(tools), catalog.digest(), warns)
+			}
+		})
 	}
 }
 
@@ -165,7 +110,7 @@ func TestAdaptToolsOwnsSchemaInputAndSpecResult(t *testing.T) {
 
 func TestConnectDuplicateAliasFatal(t *testing.T) {
 	_, _, err := Connect(context.Background(), Implementation{Name: "golem"},
-		[]Server{StdioServer("fs", []string{"x"}), StdioServer("fs", []string{"y"})})
+		[]Server{StdioServer("fs", []string{"x"}), StdioServer("fs", []string{"y"})}, ConnectOptions{Pins: testPins(t)})
 	if err == nil {
 		t.Fatal("duplicate alias must be a fatal error")
 	}
@@ -173,7 +118,7 @@ func TestConnectDuplicateAliasFatal(t *testing.T) {
 
 func TestConnectInvalidAliasFatal(t *testing.T) {
 	_, _, err := Connect(context.Background(), Implementation{Name: "golem"},
-		[]Server{StdioServer("bad alias", []string{"x"})})
+		[]Server{StdioServer("bad alias", []string{"x"})}, ConnectOptions{Pins: testPins(t)})
 	if err == nil {
 		t.Fatal("invalid alias must be a fatal error")
 	}
@@ -189,4 +134,24 @@ func itoa(i int) string {
 		i /= 10
 	}
 	return string(b)
+}
+
+func adaptToolsAndCatalog(caller toolCaller, alias string, remote []*gomcp.Tool) ([]agent.Tool, toolCatalog, []error) {
+	catalog, notices, err := validateCatalog(alias, remote)
+	if err != nil {
+		return nil, toolCatalog{}, []error{err}
+	}
+	return adapters(caller, alias, remote, catalog), catalog, notices
+}
+
+func TestValidateCatalogRejectsNilAndInvalidAlias(t *testing.T) {
+	for _, test := range []struct {
+		alias  string
+		remote []*gomcp.Tool
+	}{{"fs", []*gomcp.Tool{tool("good"), nil}}, {"", []*gomcp.Tool{tool("good")}}} {
+		catalog, notices, err := validateCatalog(test.alias, test.remote)
+		if err == nil || catalog.digest() != "" || len(notices) != 0 {
+			t.Fatalf("invalid catalog validated: digest %q, notices %v, err %v", catalog.digest(), notices, err)
+		}
+	}
 }

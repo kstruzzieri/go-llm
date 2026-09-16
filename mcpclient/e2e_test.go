@@ -113,12 +113,12 @@ func TestEndToEndInMemory(t *testing.T) {
 
 	// Drive the real mcpclient connect path: handshake + time-bounded setup +
 	// paginated list + adapt, over the in-memory transport.
-	session, tools, warns := connectVia(ctx, Implementation{Name: "golem", Version: "test"}, "fs", clientTr)
+	session, tools, warns := connectOne(ctx, Implementation{Name: "golem", Version: "test"}, Server{Alias: "fs", tr: clientTr}, ConnectOptions{Pins: testPins(t)})
 	if session == nil {
-		t.Fatalf("connectVia returned nil session; warns=%v", warns)
+		t.Fatalf("connectOne returned nil session; warns=%v", warns)
 	}
 	defer func() { _ = session.Close() }()
-	if len(tools) != 1 || len(warns) != 0 {
+	if len(tools) != 1 || len(warns) != 1 {
 		t.Fatalf("adapted %d tools, %d warns: %v", len(tools), len(warns), warns)
 	}
 
@@ -126,7 +126,7 @@ func TestEndToEndInMemory(t *testing.T) {
 	if tl.Spec().Name != "mcp__fs__echo" {
 		t.Fatalf("name %q", tl.Spec().Name)
 	}
-	// Invoke AFTER connectVia returned: its bounded setup context is now cancelled,
+	// Invoke AFTER connectOne returned: its bounded setup context is now cancelled,
 	// so a successful call proves the session outlives the connect timeout.
 	out, err := tl.Invoke(ctx, json.RawMessage(`{"text":"hi"}`))
 	if err != nil {

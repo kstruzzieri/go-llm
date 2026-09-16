@@ -30,7 +30,7 @@ type Server struct {
 	endpoint string   // http
 	// tr, when non-nil, overrides the built transport. Test-only: lets the
 	// concurrency tests drive Connect with gated in-memory transports, the same
-	// way the connectVia split lets them drive a single dial.
+	// way connectOne lets them drive a single dial.
 	tr gomcp.Transport
 }
 
