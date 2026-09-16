@@ -73,11 +73,11 @@ func (t *Glob) Invoke(ctx context.Context, raw json.RawMessage) (agent.ToolResul
 	}
 
 	if filepath.IsAbs(args.Pattern) || strings.ContainsRune(args.Pattern, 0) {
-		return errResult(errScopeDenied.Error()), nil
+		return errResult(t.ws.denyScope().Error()), nil
 	}
 	for _, component := range strings.Split(filepath.ToSlash(args.Pattern), "/") {
 		if component == ".." {
-			return errResult(errScopeDenied.Error()), nil
+			return errResult(t.ws.denyScope().Error()), nil
 		}
 	}
 

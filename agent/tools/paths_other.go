@@ -4,6 +4,7 @@ package tools
 
 import (
 	"context"
+	"errors"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -96,3 +97,7 @@ func (w *Workspace) openReadDir(p string) (*os.File, string, error) {
 	return f, rel, err
 }
 func readWorkspaceEntries(f *os.File) ([]fs.DirEntry, error) { return f.ReadDir(-1) }
+
+func (w *Workspace) pinScope(string) (*os.File, string, error) {
+	return nil, "", errors.New("scoped dispatch is unsupported on this platform")
+}

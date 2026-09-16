@@ -46,7 +46,18 @@ func workspaceOpenError(err error) error {
 
 // openRead pins each component before consulting policy on the final canonical
 // logical path. No subsequent access reopens an ambient absolute pathname.
-func (w *Workspace) openRead(p string, directory bool) (file *os.File, canonical string, resultErr error) {
+func (w *Workspace) openRead(p string, directory bool) (*os.File, string, error) {
+	return w.openReadMode(p, directory, false)
+}
+
+// pinScope retains a search-only handle; delegated known-file reads must not
+// require permission to enumerate the delegated directory.
+func (w *Workspace) pinScope(p string) (*os.File, string, error) {
+	return w.openReadMode(p, true, true)
+}
+
+func (w *Workspace) openReadMode(p string, directory, pin bool) (file *os.File, canonical string, resultErr error) {
+	defer func() { resultErr = w.scopedPathError(resultErr) }()
 	abs, err := w.cleanRel(p)
 	if err != nil {
 		return nil, "", err
@@ -126,6 +137,9 @@ func (w *Workspace) openRead(p string, directory bool) (file *os.File, canonical
 			}
 			parent = f
 			continue
+		}
+		if directory && pin {
+			return f, logical, nil
 		}
 		if directory {
 			readable, err := unix.Openat(fd, ".", unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
@@ -267,7 +281,8 @@ func readWorkspaceEntries(f *os.File) ([]fs.DirEntry, error) {
 	return entries, nil
 }
 
-func (w *Workspace) walk(ctx context.Context, fn func(string, fs.DirEntry) error) error {
+func (w *Workspace) walk(ctx context.Context, fn func(string, fs.DirEntry) error) (resultErr error) {
+	defer func() { resultErr = w.scopedPathError(resultErr) }()
 	root, release, err := w.workspaceRoot()
 	if err != nil {
 		return err

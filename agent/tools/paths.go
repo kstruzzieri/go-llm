@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 
 	"github.com/kstruzzieri/go-llm/agent"
 )
@@ -79,7 +80,8 @@ type Workspace struct {
 	root         string     // canonical absolute root; volume roots retain their separator
 	guard        ScopeGuard // nil => allow everything (default)
 	rootIdentity os.FileInfo
-	pinnedRoot   *os.File // invocation-owned capability; operations borrow it
+	pinnedRoot   *os.File      // invocation-owned capability; operations borrow it
+	scopeDenials *atomic.Int64 // scoped child policy evaluations, not unique paths
 	// beforeReadOpen is a per-workspace deterministic race-test seam.
 	beforeReadOpen func()
 }
@@ -217,6 +219,7 @@ func canonicalFuturePath(root, path string) (string, error) {
 }
 
 // SetScopeGuard installs (or clears with nil) the proof-mode scope guard.
+// Host setup must complete before workspace calls; installation is not concurrent-safe.
 func (w *Workspace) SetScopeGuard(g ScopeGuard) { w.guard = g }
 
 // checkScope consults the guard for a cleaned absolute path. A veto preserves
@@ -233,6 +236,26 @@ func (w *Workspace) checkScope(abs string, write bool) error {
 		return scopeDeniedError{cause: err}
 	}
 	return nil
+}
+
+// denyScope records one native policy rejection. Guard vetoes count in the
+// translated guard itself; wrapping/rendering an existing denial never counts.
+func (w *Workspace) denyScope() error {
+	if w.scopeDenials != nil {
+		w.scopeDenials.Add(1)
+	}
+	return errScopeDenied
+}
+
+func (w *Workspace) scopedPathError(err error) error {
+	if w.scopeDenials == nil || errors.Is(err, errScopeDenied) {
+		return err
+	}
+	if errors.Is(err, errEscape) || errors.Is(err, errAbsPath) || errors.Is(err, errNUL) || errors.Is(err, errSymlink) {
+		_ = w.denyScope()
+		return scopeDeniedError{cause: err}
+	}
+	return err
 }
 
 // underRoot reports whether a cleaned absolute candidate is the root or strictly
