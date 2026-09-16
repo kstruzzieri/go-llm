@@ -361,7 +361,7 @@ func TestDispatchRejectsOversizedTaskBeforeModelCall(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewDispatch: %v", err)
 	}
-	raw, _ := json.Marshal(dispatchArgs{Tasks: []string{strings.Repeat("x", maxDispatchTaskBytes+1)}})
+	raw, _ := json.Marshal(map[string]any{"tasks": []string{strings.Repeat("x", maxDispatchTaskBytes+1)}})
 	out, err := tool.Invoke(context.Background(), raw)
 	if err != nil {
 		t.Fatalf("Invoke: %v", err)
@@ -1101,7 +1101,7 @@ func TestDispatchBoundsConcurrencyAndPreservesResultOrder(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewDispatch: %v", err)
 	}
-	raw, _ := json.Marshal(dispatchArgs{Tasks: tasks})
+	raw, _ := json.Marshal(map[string]any{"tasks": tasks})
 	type invokeResult struct {
 		out agent.ToolResult
 		err error

@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"errors"
 	"fmt"
 	"path/filepath"
 	"sync/atomic"
@@ -70,6 +71,9 @@ func newScopedWorkspace(parent *Workspace, scope string) (*Workspace, *atomic.In
 	}
 	root, rel, err := snapshot.pinScope(scope)
 	if err != nil {
+		if errors.Is(err, errSymlink) {
+			return nil, nil, nil, errScopeDenied
+		}
 		return nil, nil, nil, err
 	}
 	cleanup := func() { _ = root.Close() }

@@ -386,9 +386,14 @@ func TestScopedSymlinkDenials(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if _, _, cleanup, err := newScopedWorkspace(parent, "scope-link"); err == nil {
-		cleanup()
-		t.Fatal("symlink scope admitted")
+	for _, scope := range []string{"scope-link", "scope-link/nested"} {
+		_, _, cleanup, err := newScopedWorkspace(parent, scope)
+		if cleanup != nil {
+			cleanup()
+		}
+		if !errors.Is(err, errScopeDenied) || err.Error() != "path denied by workspace policy" {
+			t.Errorf("symlink scope %q error = %v, want policy denial", scope, err)
+		}
 	}
 	ws, count, cleanup, err := newScopedWorkspace(parent, "a")
 	if err != nil {
