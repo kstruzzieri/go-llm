@@ -106,15 +106,13 @@ func parseMCPServers(stdioFlags, httpFlags []string) ([]mcpclient.Server, error)
 	for _, f := range httpFlags {
 		alias, spec := splitAlias(strings.TrimSpace(f))
 		spec = strings.TrimSpace(spec)
-		if spec == "" {
-			return nil, fmt.Errorf("-mcp-http %q: empty endpoint", f)
+		u, err := url.Parse(spec)
+		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Hostname() == "" {
+			return nil, fmt.Errorf("-mcp-http: expected an absolute http or https URL with a host")
 		}
 		if alias == "" {
-			host := spec
-			if u, err := url.Parse(spec); err == nil && u.Host != "" {
-				host = u.Host
-			}
-			alias = derive(host)
+			// Derive only from a parsed host, never credential-bearing URL text.
+			alias = derive(u.Host)
 		} else if err := claimExplicit("mcp-http", f, alias); err != nil {
 			return nil, err
 		}

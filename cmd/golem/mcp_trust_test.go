@@ -550,3 +550,21 @@ func TestMCPFirstPinNoticeSurvivesBootstrapFailure(t *testing.T) {
 		t.Fatal("session leaked after bootstrap failure")
 	}
 }
+
+func TestMCPTrustMalformedHTTPDoesNotLeak(t *testing.T) {
+	for _, endpoint := range []string{"https://?token=credential-value", "https://bad%zz/?token=credential-value"} {
+		for _, format := range []string{"text", "json", "stream-json"} {
+			config, root := writeRunLifecycleConfig(t)
+			in, out, diag := runTestFiles(t)
+			err := run([]string{"-config", config, "-root", root, "-p", "hi", "-output-format", format, "-mcp-http", endpoint, "-no-project-context", "-no-git-context", "-no-probe", "-no-cap-probe", "-no-rag"}, in, out, diag)
+			if err == nil {
+				t.Fatal("malformed HTTP endpoint accepted")
+			}
+			for _, got := range []string{err.Error(), readRunTestFile(t, out), readRunTestFile(t, diag)} {
+				if strings.Contains(got, "credential-value") {
+					t.Fatalf("transport credentials in CLI output: %q", got)
+				}
+			}
+		}
+	}
+}
