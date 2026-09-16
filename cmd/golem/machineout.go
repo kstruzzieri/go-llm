@@ -201,7 +201,8 @@ func (w *machineWriter) buildResult(res agent.Result, runErr error) headlessResu
 
 // preRunFailureResult is the record for a failure BEFORE Runtime.Run in a
 // machine mode: it is the only stdout line of that invocation (spec 7.2).
-// Exactly two codes reach it: provider_unavailable and destination_denied.
+// Codes include provider_unavailable, destination_denied,
+// project_context_untrusted, and mcp_untrusted.
 func preRunFailureResult(code, message string) headlessResult {
 	return headlessResult{
 		Schema: resultSchema,

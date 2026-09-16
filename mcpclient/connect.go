@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 	"unicode/utf8"
 
@@ -11,7 +12,25 @@ import (
 	"golang.org/x/sync/errgroup"
 
 	"github.com/kstruzzieri/go-llm/agent"
+	"github.com/kstruzzieri/go-llm/internal/promptfence"
 )
+
+const truncatedDescriptionSuffix = "...[truncated]"
+
+func normalizeDescription(description string) (string, bool) {
+	description = strings.ToValidUTF8(description, "\ufffd")
+	description = promptfence.FlattenLine(description)
+	description = strings.ReplaceAll(description, "<<<", " ")
+	description = strings.ReplaceAll(description, ">>>", " ")
+	if len(description) <= maxDescBytes {
+		return description, false
+	}
+	cut := maxDescBytes - len(truncatedDescriptionSuffix)
+	for !utf8.RuneStart(description[cut]) {
+		cut--
+	}
+	return description[:cut] + truncatedDescriptionSuffix, true
+}
 
 const (
 	maxToolsPerServer = 128
@@ -20,7 +39,7 @@ const (
 	// an untrusted server and is sent to the model in the tool list on EVERY turn
 	// (unlike tool results, which the runtime output-caps post-hoc), so an
 	// oversized schema is a persistent prompt-bloat / cost vector. A tool whose
-	// normalized schema exceeds this is skipped (a clipped JSON schema would be
+	// normalized schema exceeds this rejects its catalog (a clipped schema is
 	// invalid), so the cap is generous: any real tool schema is far smaller.
 	maxSchemaBytes = 32 * 1024
 	// maxDescBytes bounds a remote tool's description (also untrusted, also sent
@@ -44,36 +63,39 @@ type lister interface {
 	ListTools(ctx context.Context, params *gomcp.ListToolsParams) (*gomcp.ListToolsResult, error)
 }
 
-// listAllTools walks tools/list pagination, guarding against a runaway page
-// count and a cursor that makes no progress. Errors and truncation are returned
-// as warnings, never fatal.
+// listAllTools accepts only a complete, bounded listing.
 func listAllTools(ctx context.Context, l lister, alias string) ([]*gomcp.Tool, []error) {
-	var (
-		out    []*gomcp.Tool
-		warns  []error
-		cursor string
-	)
-	for page := 0; ; page++ {
-		if page >= maxListPages {
-			warns = append(warns, fmt.Errorf("server %q: tools/list exceeded %d pages, truncating", alias, maxListPages))
-			break
+	var out []*gomcp.Tool
+	cursor := ""
+	seen := make(map[string]bool)
+	reject := func(err error) ([]*gomcp.Tool, []error) {
+		return nil, []error{admissionFailure(alias, "incomplete_catalog", err)}
+	}
+	for page := 0; page < maxListPages; page++ {
+		if err := ctx.Err(); err != nil {
+			return reject(err)
 		}
 		res, err := l.ListTools(ctx, &gomcp.ListToolsParams{Cursor: cursor})
 		if err != nil {
-			warns = append(warns, fmt.Errorf("server %q: tools/list: %w", alias, err))
-			break
+			return reject(err)
+		}
+		if res == nil {
+			return reject(errors.New("nil tools/list result"))
+		}
+		if len(out)+len(res.Tools) > maxToolsPerServer {
+			return reject(errors.New("tool count exceeds limit"))
 		}
 		out = append(out, res.Tools...)
 		if res.NextCursor == "" {
-			break
+			return out, nil
 		}
-		if res.NextCursor == cursor {
-			warns = append(warns, fmt.Errorf("server %q: tools/list cursor made no progress, stopping", alias))
-			break
+		if seen[res.NextCursor] {
+			return reject(errors.New("repeated tools/list cursor"))
 		}
+		seen[res.NextCursor] = true
 		cursor = res.NextCursor
 	}
-	return out, warns
+	return reject(errors.New("tools/list exceeded page limit"))
 }
 
 // Manager holds live client sessions and the tools adapted from them.
@@ -102,15 +124,18 @@ func (m *Manager) Close() error {
 	return errors.Join(errs...)
 }
 
-// Connect dials each server (concurrently, bounded by maxConcurrentConnects),
-// lists its tools (paginated), and adapts them. Sessions, tools, and warnings
-// are aggregated in config order regardless of dial completion order.
-// Fatal error: invalid or duplicate alias (config error). Everything else -- a
-// server that fails to connect/list, a tool skipped for an invalid name/schema,
-// a per-server cap truncation -- is a non-fatal warning, so one bad server never
-// aborts startup.
-func Connect(ctx context.Context, impl Implementation, servers []Server) (*Manager, []error, error) {
-	return connectWithHooks(ctx, impl, servers, nil)
+// ConnectOptions selects the workspace trust store and first-contact policy.
+// Pins is required; RequirePinned forbids automatic first pin creation.
+type ConnectOptions struct {
+	Pins          *PinStore
+	RequirePinned bool
+}
+
+// Connect admits complete catalogs before publishing tools. Per-alias failures
+// are *AdmissionError values in warnings; configuration errors are fatal.
+// Sessions, tools and notices retain config order despite bounded parallel dials.
+func Connect(ctx context.Context, impl Implementation, servers []Server, opts ConnectOptions) (*Manager, []error, error) {
+	return connectWithHooks(ctx, impl, servers, opts, nil)
 }
 
 // connectHooks carries test-only observation callbacks; nil in production.
@@ -121,16 +146,9 @@ type connectHooks struct {
 	published func(i int)
 }
 
-func connectWithHooks(ctx context.Context, impl Implementation, servers []Server, h *connectHooks) (*Manager, []error, error) {
-	seen := make(map[string]bool, len(servers))
-	for _, s := range servers {
-		if !validAlias(s.Alias) {
-			return nil, nil, fmt.Errorf("mcpclient: invalid server alias %q", s.Alias)
-		}
-		if seen[s.Alias] {
-			return nil, nil, fmt.Errorf("mcpclient: duplicate server alias %q", s.Alias)
-		}
-		seen[s.Alias] = true
+func connectWithHooks(ctx context.Context, impl Implementation, servers []Server, opts ConnectOptions, h *connectHooks) (*Manager, []error, error) {
+	if err := validateTrustConfig(servers, opts.Pins); err != nil {
+		return nil, nil, err
 	}
 
 	// Dial concurrently (bounded), but keep aggregate state deterministic:
@@ -146,7 +164,7 @@ func connectWithHooks(ctx context.Context, impl Implementation, servers []Server
 			h.launched(i)
 		}
 		g.Go(func() error {
-			session, tools, warns := connectOne(ctx, impl, s)
+			session, tools, warns := connectOne(ctx, impl, s, opts)
 			results[i] = connectResult{session: session, tools: tools, warns: warns}
 			if h != nil && h.published != nil {
 				h.published(i)
@@ -158,7 +176,13 @@ func connectWithHooks(ctx context.Context, impl Implementation, servers []Server
 
 	m := &Manager{}
 	var warnings []error
-	for _, r := range results {
+	for i, r := range results {
+		if r.session != nil {
+			if err := ctx.Err(); err != nil {
+				warnings = append(warnings, admissionFailure(servers[i].Alias, "canceled", errors.Join(err, r.session.Close())))
+				continue
+			}
+		}
 		warnings = append(warnings, r.warns...)
 		if r.session == nil {
 			continue
@@ -176,93 +200,106 @@ type connectResult struct {
 	warns   []error
 }
 
-func connectOne(ctx context.Context, impl Implementation, s Server) (*gomcp.ClientSession, []agent.Tool, []error) {
-	tr, err := s.transport()
-	if err != nil {
-		return nil, nil, []error{fmt.Errorf("server %q: %w", s.Alias, err)}
-	}
-	return connectVia(ctx, impl, s.Alias, tr)
-}
-
-// connectVia performs the dial + handshake + tools/list + adapt for one server
-// over an already-built transport. Split from connectOne so tests can drive it
-// with an in-memory transport. Setup is time-bounded (see connectTimeout); the
-// returned session outlives the bounded context.
-func connectVia(ctx context.Context, impl Implementation, alias string, tr gomcp.Transport) (*gomcp.ClientSession, []agent.Tool, []error) {
+func connectOne(ctx context.Context, impl Implementation, s Server, opts ConnectOptions) (*gomcp.ClientSession, []agent.Tool, []error) {
 	ctx, cancel := context.WithTimeout(ctx, connectTimeout)
 	defer cancel()
-	client := gomcp.NewClient(
-		&gomcp.Implementation{Name: impl.Name, Version: impl.Version},
-		// Empty Capabilities disables the roots capability (SDK #607 behavior) and
-		// advertises no sampling/elicitation -- none are honored here.
-		&gomcp.ClientOptions{Capabilities: &gomcp.ClientCapabilities{}},
-	)
-	session, err := client.Connect(ctx, tr, nil)
+	session, remote, catalog, notices, err := discover(ctx, impl, s)
 	if err != nil {
-		return nil, nil, []error{fmt.Errorf("server %q: connect: %w", alias, err)}
+		return nil, nil, []error{err}
 	}
-	remote, listWarns := listAllTools(ctx, session, alias)
-	tools, adaptWarns := adaptTools(session, alias, remote)
-	return session, tools, append(listWarns, adaptWarns...)
+	prior, created, err := opts.Pins.admit(ctx, s.Alias, catalog, opts.RequirePinned)
+	if err == nil {
+		err = ctx.Err()
+	}
+	if err != nil {
+		closeErr := session.Close()
+		failure := admissionFailure(s.Alias, "pin_unavailable", errors.Join(err, closeErr))
+		failure.PinnedDigest, failure.CandidateDigest = prior.digest(), catalog.digest()
+		failure.Diff = diffCatalogs(prior, catalog)
+		return nil, nil, []error{failure}
+	}
+	if created {
+		notices = append(notices, fmt.Errorf("server %q: first pin %s; tools: %s; use explicit alias= values for stable pins", s.Alias, catalog.digest(), strings.Join(catalogNames(catalog), ", ")))
+	}
+	return session, adapters(session, s.Alias, remote, catalog), notices
 }
 
-// adaptTools builds adapters for a server's tools, skipping (with a warning) any
-// tool whose composed name is invalid or whose schema is not an object, and
-// capping per-server tool count to guard the provider tool-count limit.
-func adaptTools(caller toolCaller, alias string, remote []*gomcp.Tool) ([]agent.Tool, []error) {
-	var (
-		out   []agent.Tool
-		warns []error
-		seen  = make(map[string]bool)
-	)
+// discover owns the candidate session until a complete catalog is returned.
+// The caller closes successful candidates or transfers ownership to Manager.
+func discover(ctx context.Context, impl Implementation, s Server) (*gomcp.ClientSession, []*gomcp.Tool, toolCatalog, []error, error) {
+	tr, err := s.transport()
+	if err != nil {
+		return nil, nil, toolCatalog{}, nil, admissionFailure(s.Alias, "unavailable", err)
+	}
+	// Empty capabilities disables roots, sampling and elicitation.
+	client := gomcp.NewClient(&gomcp.Implementation{Name: impl.Name, Version: impl.Version}, &gomcp.ClientOptions{Capabilities: &gomcp.ClientCapabilities{}})
+	session, err := client.Connect(ctx, tr, nil)
+	if err != nil {
+		return nil, nil, toolCatalog{}, nil, admissionFailure(s.Alias, "unavailable", err)
+	}
+	remote, failures := listAllTools(ctx, session, s.Alias)
+	var catalog toolCatalog
+	var notices []error
+	if len(failures) > 0 {
+		err = failures[0]
+	} else {
+		catalog, notices, err = validateCatalog(s.Alias, remote)
+	}
+	if err == nil {
+		err = ctx.Err()
+	}
+	if err != nil {
+		return nil, nil, toolCatalog{}, nil, admissionFailure(s.Alias, "invalid_catalog", errors.Join(err, session.Close()))
+	}
+	return session, remote, catalog, notices, nil
+}
+
+func validateCatalog(alias string, remote []*gomcp.Tool) (toolCatalog, []error, error) {
+	reject := func() (toolCatalog, []error, error) {
+		return toolCatalog{}, nil, admissionFailure(alias, "invalid_catalog", nil)
+	}
+	if !validAlias(alias) || len(remote) > maxToolsPerServer {
+		return reject()
+	}
+	entries := make([]catalogEntry, 0, len(remote))
+	seen := make(map[string]bool, len(remote))
+	var notices []error
 	for _, rt := range remote {
 		if rt == nil {
-			warns = append(warns, fmt.Errorf("server %q: skipping nil tool", alias))
-			continue
-		}
-		if len(out) >= maxToolsPerServer {
-			warns = append(warns, fmt.Errorf("server %q: more than %d tools, truncating", alias, maxToolsPerServer))
-			break
+			return reject()
 		}
 		name, ok := composeName(alias, rt.Name)
-		if !ok {
-			warns = append(warns, fmt.Errorf("server %q: skipping tool %q (invalid or over-long composed name)", alias, rt.Name))
-			continue
-		}
-		if seen[name] {
-			warns = append(warns, fmt.Errorf("server %q: skipping duplicate tool %q", alias, rt.Name))
-			continue
+		if !ok || seen[name] {
+			return reject()
 		}
 		schema, err := normalizeSchema(rt.InputSchema)
-		if err != nil {
-			warns = append(warns, fmt.Errorf("server %q: skipping tool %q (%v)", alias, rt.Name, err))
-			continue
+		if err != nil || len(schema) > maxSchemaBytes {
+			return reject()
 		}
-		if len(schema) > maxSchemaBytes {
-			warns = append(warns, fmt.Errorf("server %q: skipping tool %q (schema %d bytes exceeds %d cap)", alias, rt.Name, len(schema), maxSchemaBytes))
-			continue
+		desc, truncated := normalizeDescription(rt.Description)
+		if truncated {
+			notices = append(notices, fmt.Errorf("server %q: tool %q description truncated to %d bytes", alias, rt.Name, len(desc)))
 		}
-		desc := rt.Description
-		if len(desc) > maxDescBytes {
-			// Back up to a UTF-8 rune boundary so truncation never splits a rune
-			// (mirrors the runtime's capOutput).
-			cut := maxDescBytes
-			for cut > 0 && !utf8.RuneStart(desc[cut]) {
-				cut--
-			}
-			desc = desc[:cut] + "...[truncated]"
-			warns = append(warns, fmt.Errorf("server %q: tool %q description truncated to %d bytes", alias, rt.Name, cut))
-		}
-		out = append(out, &toolAdapter{
-			caller:       caller,
-			remoteName:   rt.Name,
-			prefixedName: name,
-			description:  desc,
-			schema:       schema,
-			timeout:      defaultToolTimeout,
-			outputCap:    defaultToolOutputCap,
-		})
+		entries = append(entries, catalogEntry{Name: name, Description: desc, InputSchema: schema})
 		seen[name] = true
 	}
-	return out, warns
+	catalog, err := newToolCatalog(entries)
+	if err != nil {
+		return reject()
+	}
+	return catalog, notices, nil
+}
+
+func adapters(caller toolCaller, alias string, remote []*gomcp.Tool, catalog toolCatalog) []agent.Tool {
+	entries := make(map[string]catalogEntry, len(catalog.entries))
+	for _, entry := range catalog.entries {
+		entries[entry.Name] = entry
+	}
+	out := make([]agent.Tool, 0, len(remote))
+	for _, rt := range remote {
+		name, _ := composeName(alias, rt.Name)
+		entry := entries[name]
+		out = append(out, &toolAdapter{caller: caller, remoteName: rt.Name, prefixedName: name, description: entry.Description, schema: entry.InputSchema, timeout: defaultToolTimeout, outputCap: defaultToolOutputCap})
+	}
+	return out
 }

@@ -125,9 +125,10 @@ type connectDriver struct {
 func startConnectDriver(t *testing.T, ctx context.Context, servers []Server, h *connectHooks, gates []*gate) *connectDriver {
 	t.Helper()
 	d := &connectDriver{done: make(chan struct{})}
+	opts := ConnectOptions{Pins: testPins(t)}
 	go func() {
 		defer close(d.done)
-		d.m, d.warns, d.err = connectWithHooks(ctx, Implementation{Name: "golem", Version: "test"}, servers, h)
+		d.m, d.warns, d.err = connectWithHooks(ctx, Implementation{Name: "golem", Version: "test"}, servers, opts, h)
 	}()
 	t.Cleanup(func() {
 		for _, g := range gates {
@@ -224,10 +225,14 @@ func TestConnectOverlapsDialsBoundsAndOrders(t *testing.T) {
 			t.Fatalf("sessions[%d] = %q, want %q (config order violated)", i, sess.InitializeResult().ServerInfo.Name, want)
 		}
 	}
-	if len(d.warns) != n {
-		t.Fatalf("got %d warnings, want %d: %v", len(d.warns), n, d.warns)
+	if len(d.warns) != 2*n {
+		t.Fatalf("got %d warnings, want %d: %v", len(d.warns), 2*n, d.warns)
 	}
-	for i, w := range d.warns {
+	for i := range n {
+		w := d.warns[2*i]
+		if !strings.HasPrefix(d.warns[2*i+1].Error(), fmt.Sprintf("server %q: first pin ", fmt.Sprintf("s%d", i))) {
+			t.Fatalf("notice order: %v", d.warns)
+		}
 		want := fmt.Sprintf("server %q: tool %q description truncated to %d bytes",
 			fmt.Sprintf("s%d", i), fmt.Sprintf("pad_s%d", i), maxDescBytes)
 		if w.Error() != want {
@@ -255,7 +260,7 @@ func TestConnectPartialFailureExactOutputs(t *testing.T) {
 		fakes[1],
 	}
 
-	m, warns, err := Connect(context.Background(), Implementation{Name: "golem", Version: "test"}, servers)
+	m, warns, err := Connect(context.Background(), Implementation{Name: "golem", Version: "test"}, servers, ConnectOptions{Pins: testPins(t)})
 	if err != nil {
 		t.Fatalf("partial failure must not be fatal: %v", err)
 	}
@@ -263,13 +268,14 @@ func TestConnectPartialFailureExactOutputs(t *testing.T) {
 
 	wantWarns := []string{
 		fmt.Sprintf(`server "a": tool "pad_a" description truncated to %d bytes`, maxDescBytes),
-		`server "b": connect: boom`,
+		`server "b": unavailable`,
 		fmt.Sprintf(`server "c": tool "pad_c" description truncated to %d bytes`, maxDescBytes),
 	}
-	if len(warns) != len(wantWarns) {
-		t.Fatalf("got %d warnings, want %d: %v", len(warns), len(wantWarns), warns)
+	if len(warns) != 5 {
+		t.Fatalf("got %d warnings, want %d: %v", len(warns), 5, warns)
 	}
-	for i, w := range warns {
+	for i, idx := range []int{0, 2, 3} {
+		w := warns[idx]
 		if w.Error() != wantWarns[i] {
 			t.Fatalf("warns[%d] = %q, want %q", i, w.Error(), wantWarns[i])
 		}
@@ -333,12 +339,9 @@ func TestConnectParentCancelDrainsCleanly(t *testing.T) {
 		t.Fatalf("got %d warnings, want one per server (%d): %v", len(d.warns), n, d.warns)
 	}
 	for i, w := range d.warns {
-		prefix := fmt.Sprintf("server %q: connect: ", fmt.Sprintf("s%d", i))
-		if !strings.HasPrefix(w.Error(), prefix) {
-			t.Fatalf("warns[%d] = %q, want prefix %q (config order violated)", i, w.Error(), prefix)
-		}
-		if !strings.Contains(w.Error(), context.Canceled.Error()) {
-			t.Fatalf("warns[%d] = %q, want it to wrap %q", i, w.Error(), context.Canceled.Error())
+		var failure *AdmissionError
+		if !errors.As(w, &failure) || failure.Alias != fmt.Sprintf("s%d", i) || failure.Reason != "canceled" || !errors.Is(w, context.Canceled) {
+			t.Fatalf("unsafe/unordered cancellation: %v", w)
 		}
 	}
 }

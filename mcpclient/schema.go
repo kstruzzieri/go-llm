@@ -1,8 +1,11 @@
 package mcpclient
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
+
+	"github.com/kstruzzieri/go-llm/signing"
 )
 
 const emptyObjectSchema = `{"type":"object"}`
@@ -16,16 +19,15 @@ func normalizeSchema(in any) (json.RawMessage, error) {
 	if in == nil {
 		return json.RawMessage(emptyObjectSchema), nil
 	}
-	raw, err := json.Marshal(in)
+	raw, err := signing.MarshalCanonical(in)
 	if err != nil {
 		return nil, fmt.Errorf("marshal input schema: %w", err)
 	}
-	if string(raw) == "null" {
+	if bytes.Equal(raw, []byte("null")) {
 		return json.RawMessage(emptyObjectSchema), nil
 	}
-	var obj map[string]json.RawMessage
-	if err := json.Unmarshal(raw, &obj); err != nil {
-		return nil, fmt.Errorf("input schema is not a JSON object: %w", err)
+	if len(raw) == 0 || raw[0] != '{' {
+		return nil, fmt.Errorf("input schema is not a JSON object")
 	}
-	return raw, nil
+	return json.RawMessage(raw), nil
 }
