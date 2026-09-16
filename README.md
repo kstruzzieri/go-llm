@@ -857,6 +857,68 @@ exit 0/1 as before.
 | `1` | the run failed: provider or runtime error — including a provider failure during startup probing — cancellation, no final answer, or an unsatisfied explicit `-trust-project-context` requirement |
 | `2` | caller error: bad flag or input, unknown `-allow-tool` name, unreadable or oversized stdin, missing or malformed configuration, or a destination admission denial |
 
+### External MCP catalog trust
+
+Golem can attach external tools with `-mcp-stdio 'fs=command args'` or
+`-mcp-http 'fs=https://endpoint'`. Use explicit, stable aliases. Ordinary REPL
+startup pins the first complete valid catalog (including an empty catalog) in
+private user data outside the workspace and prints its digest and tool names on
+stderr. Later changes block the entire alias, close its session, and report a
+names-only diff. Other healthy aliases remain available; the startup summary
+counts blocked aliases separately from tools.
+
+Review and approve the exact current catalog without starting a model session
+or invoking a tool:
+
+```sh
+golem mcp inspect -root /path/to/workspace -mcp-stdio 'fs=command args'
+golem mcp approve -root /path/to/workspace -mcp-stdio 'fs=command args' -digest 'sha256:<64 lowercase hex digits from inspect>'
+# HTTP uses the same alias and endpoint as startup:
+golem mcp inspect -root /path/to/workspace -mcp-http 'fs=https://endpoint'
+golem mcp approve -root /path/to/workspace -mcp-http 'fs=https://endpoint' -digest 'sha256:<64 lowercase hex digits from inspect>'
+```
+
+Each command requires exactly one explicitly aliased server; `-root` defaults to
+`.` and an explicitly empty root is invalid. Inspection is text-only and prints
+the quoted pin path and safely quoted old/new definitions. Approval re-fetches,
+checks the supplied digest, and atomically replaces only the unchanged prior pin
+revision. Concurrent changes require a fresh inspection/approval. Success prints
+the accepted names-only diff and digest on stderr. A durability error is failure
+even if published bytes may already exist; inspect before retrying.
+
+`-p` requires an existing matching pin for every configured alias before model
+discovery, capability probes, or inference. Missing, changed, invalid, unavailable,
+or unreadable catalogs stop the invocation with exit 1 and no pin writes. JSON
+and stream-json emit one `golem.result.v1` error record with code `mcp_untrusted`
+and no runtime events; text prints diagnostics on stderr. Catalog approval does
+not authorize tool execution: MCP tools still require interactive approval and
+remain denied headlessly. `-goal` and `-plan` still reject MCP attachments.
+
+Pins bind the complete model-facing catalog to the canonical workspace and alias.
+A new linked or scratch worktree has a new trust namespace: REPL first contact
+pins there, while `-p` requires prior explicit approval. Derived aliases such as
+`env`/`env2` depend on configuration order; reordering can mismatch a pin or create
+a fresh first-contact boundary. To review the second server, explicitly use
+`env2=command args`. Changing aliases or deleting pins resets trust. Pins do not
+attest transport/process identity; approval hints omit endpoints and arguments
+because those may contain credentials.
+
+Top-level descriptions are flattened and bounded before registration. Every
+schema field, including nested descriptions, titles, extensions, and instance
+literals, is pinned without rewriting strings. Catalog order and object-key order
+do not affect the digest; schema-array order does. The SDK's decoded values are
+pinned, so equivalent numeric spellings and numbers rounded to the same decoded
+value share a digest; duplicate keys and malformed Unicode already discarded by
+the SDK cannot be recovered. A catalog over 128 tools, 100 pages, or 32 KiB per
+canonical schema is rejected as a whole, as are incomplete listings, repeated
+cursors, nil entries, duplicate names, and invalid names/schemas. Description
+truncation alone remains valid and produces a notice.
+
+TOFU detects definition drift after first contact. It cannot validate prose,
+protect against an initially malicious server, or detect behavior changes behind
+unchanged definitions. Live `tools/list_changed` handling remains out of scope.
+Existing foreign-result provenance and observation fencing still apply.
+
 ### MCP server
 
 Expose go-llm to Claude Desktop, IDE extensions, or any MCP client:
