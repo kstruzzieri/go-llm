@@ -55,11 +55,18 @@ func TestPinFilesystemRefusal(t *testing.T) {
 					if name != fsKey+".json" {
 						return
 					}
+					if kind == "replaced" {
+						// Keep both inodes alive before the swap: remove+write can
+						// recycle the original inode on Linux.
+						if err := os.WriteFile(path+".replacement", original, 0600); err != nil {
+							t.Fatal(err)
+						}
+					}
 					if err := os.Remove(path); err != nil {
 						t.Fatal(err)
 					}
 					if kind == "replaced" {
-						if err := os.WriteFile(path, original, 0600); err != nil {
+						if err := os.Rename(path+".replacement", path); err != nil {
 							t.Fatal(err)
 						}
 					}
@@ -124,10 +131,15 @@ func TestPinPublicationFaults(t *testing.T) {
 					if err != nil || len(paths) != 1 {
 						t.Fatalf("temp: %v %v", paths, err)
 					}
+					// Pre-create the replacement while the original inode is live.
+					replacement := filepath.Join(s.dir, "replacement")
+					if err = os.WriteFile(replacement, []byte("corrupt replacement"), 0600); err != nil {
+						t.Fatal(err)
+					}
 					if err = os.Remove(paths[0]); err != nil {
 						t.Fatal(err)
 					}
-					if err = os.WriteFile(paths[0], []byte("corrupt replacement"), 0600); err != nil {
+					if err = os.Rename(replacement, paths[0]); err != nil {
 						t.Fatal(err)
 					}
 				}
