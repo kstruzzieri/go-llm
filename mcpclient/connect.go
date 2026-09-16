@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 	"unicode/utf8"
 
@@ -11,7 +12,25 @@ import (
 	"golang.org/x/sync/errgroup"
 
 	"github.com/kstruzzieri/go-llm/agent"
+	"github.com/kstruzzieri/go-llm/internal/promptfence"
 )
+
+const truncatedDescriptionSuffix = "...[truncated]"
+
+func normalizeDescription(description string) (string, bool) {
+	description = strings.ToValidUTF8(description, "\ufffd")
+	description = promptfence.FlattenLine(description)
+	description = strings.ReplaceAll(description, "<<<", " ")
+	description = strings.ReplaceAll(description, ">>>", " ")
+	if len(description) <= maxDescBytes {
+		return description, false
+	}
+	cut := maxDescBytes - len(truncatedDescriptionSuffix)
+	for !utf8.RuneStart(description[cut]) {
+		cut--
+	}
+	return description[:cut] + truncatedDescriptionSuffix, true
+}
 
 const (
 	maxToolsPerServer = 128
@@ -210,10 +229,16 @@ func connectVia(ctx context.Context, impl Implementation, alias string, tr gomcp
 // tool whose composed name is invalid or whose schema is not an object, and
 // capping per-server tool count to guard the provider tool-count limit.
 func adaptTools(caller toolCaller, alias string, remote []*gomcp.Tool) ([]agent.Tool, []error) {
+	tools, _, warns := adaptToolsAndCatalog(caller, alias, remote)
+	return tools, warns
+}
+
+func adaptToolsAndCatalog(caller toolCaller, alias string, remote []*gomcp.Tool) ([]agent.Tool, toolCatalog, []error) {
 	var (
-		out   []agent.Tool
-		warns []error
-		seen  = make(map[string]bool)
+		out     []agent.Tool
+		entries []catalogEntry
+		warns   []error
+		seen    = make(map[string]bool)
 	)
 	for _, rt := range remote {
 		if rt == nil {
@@ -242,16 +267,9 @@ func adaptTools(caller toolCaller, alias string, remote []*gomcp.Tool) ([]agent.
 			warns = append(warns, fmt.Errorf("server %q: skipping tool %q (schema %d bytes exceeds %d cap)", alias, rt.Name, len(schema), maxSchemaBytes))
 			continue
 		}
-		desc := rt.Description
-		if len(desc) > maxDescBytes {
-			// Back up to a UTF-8 rune boundary so truncation never splits a rune
-			// (mirrors the runtime's capOutput).
-			cut := maxDescBytes
-			for cut > 0 && !utf8.RuneStart(desc[cut]) {
-				cut--
-			}
-			desc = desc[:cut] + "...[truncated]"
-			warns = append(warns, fmt.Errorf("server %q: tool %q description truncated to %d bytes", alias, rt.Name, cut))
+		desc, truncated := normalizeDescription(rt.Description)
+		if truncated {
+			warns = append(warns, fmt.Errorf("server %q: tool %q description truncated to %d bytes", alias, rt.Name, len(desc)))
 		}
 		out = append(out, &toolAdapter{
 			caller:       caller,
@@ -262,7 +280,13 @@ func adaptTools(caller toolCaller, alias string, remote []*gomcp.Tool) ([]agent.
 			timeout:      defaultToolTimeout,
 			outputCap:    defaultToolOutputCap,
 		})
+		entries = append(entries, catalogEntry{Name: name, Description: desc, InputSchema: schema})
 		seen[name] = true
 	}
-	return out, warns
+	catalog, err := newToolCatalog(entries)
+	if err != nil {
+		warns = append(warns, fmt.Errorf("server %q: build tool catalog: %w", alias, err))
+		return nil, toolCatalog{}, warns
+	}
+	return out, catalog, warns
 }

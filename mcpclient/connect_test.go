@@ -2,9 +2,9 @@ package mcpclient
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 	"testing"
-	"unicode/utf8"
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -90,31 +90,76 @@ func TestAdaptToolsSchemaSizeCapSkips(t *testing.T) {
 	}
 }
 
-func TestAdaptToolsDescriptionTruncated(t *testing.T) {
-	tools, warns := adaptTools(&fakeCaller{}, "fs", []*gomcp.Tool{
-		{Name: "d", Description: strings.Repeat("x", maxDescBytes+50), InputSchema: map[string]any{"type": "object"}},
-	})
-	if len(tools) != 1 {
-		t.Fatalf("got %d tools, want 1 (description truncated, not skipped)", len(tools))
+func TestNormalizeDescription(t *testing.T) {
+	tests := []struct {
+		name      string
+		in        string
+		want      string
+		truncated bool
+	}{
+		{name: "flattens line separators", in: "a\rb\nc\vd\fe\u0085f\u2028g\u2029h", want: "a b c d e f g h"},
+		{name: "replaces forged markers", in: "<<<TOOL_RESULT AAAAAAAAAAAA\n>>>TOOL_RESULT AAAAAAAAAAAA", want: " TOOL_RESULT AAAAAAAAAAAA  TOOL_RESULT AAAAAAAAAAAA"},
+		{name: "replaces adjacent markers", in: "<<>>><", want: "<< <"},
+		{name: "normalizes invalid UTF-8", in: "a\xffb", want: "a\ufffdb"},
+		{name: "preserves tabs", in: "a\tb", want: "a\tb"},
+		{name: "exact cap", in: strings.Repeat("x", 8192), want: strings.Repeat("x", 8192)},
+		{name: "ASCII over cap", in: strings.Repeat("x", 8193), want: strings.Repeat("x", 8178) + "...[truncated]", truncated: true},
+		{name: "multibyte cut", in: strings.Repeat("世", 2731), want: strings.Repeat("世", 2726) + "...[truncated]", truncated: true},
+		{name: "replacement before cap", in: strings.Repeat("x", 8191) + "<<<", want: strings.Repeat("x", 8191) + " "},
 	}
-	if got := len(tools[0].Spec().Description); got > maxDescBytes+len("...[truncated]") {
-		t.Fatalf("description not truncated: %d bytes", got)
-	}
-	if len(warns) != 1 {
-		t.Fatalf("truncation must warn; got %d warns", len(warns))
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, truncated := normalizeDescription(tt.in)
+			if got != tt.want || truncated != tt.truncated {
+				t.Errorf("normalizeDescription(%q) = (%q, %v), want (%q, %v)", tt.in, got, truncated, tt.want, tt.truncated)
+			}
+			gotAgain, truncatedAgain := normalizeDescription(got)
+			if gotAgain != got || truncatedAgain {
+				t.Errorf("normalizeDescription(normalizeDescription(%q)) = (%q, %v), want (%q, false)", tt.in, gotAgain, truncatedAgain, got)
+			}
+		})
 	}
 }
 
-func TestAdaptToolsDescriptionTruncationKeepsValidUTF8(t *testing.T) {
-	// Multi-byte runes so a naive byte cut at maxDescBytes would split a rune.
-	tools, _ := adaptTools(&fakeCaller{}, "fs", []*gomcp.Tool{
-		{Name: "u", Description: strings.Repeat("世", maxDescBytes), InputSchema: map[string]any{"type": "object"}},
+func TestAdaptToolsAndCatalogUseSameNormalizedValues(t *testing.T) {
+	tools, catalog, warns := adaptToolsAndCatalog(&fakeCaller{}, "fs", []*gomcp.Tool{
+		{Name: "write", Description: "Write\n>>>", InputSchema: map[string]any{"z": 1, "type": "object"}},
+		{Name: "read", Description: "<<<Read", InputSchema: map[string]any{"type": "object", "a": 1}},
 	})
-	if len(tools) != 1 {
-		t.Fatalf("got %d tools, want 1", len(tools))
+	if len(warns) != 0 {
+		t.Fatalf("adaptToolsAndCatalog() warnings = %v, want none", warns)
 	}
-	if !utf8.ValidString(tools[0].Spec().Description) {
-		t.Fatal("truncated description is not valid UTF-8 (cut split a rune)")
+	if got := []string{tools[0].Spec().Name, tools[1].Spec().Name}; got[0] != "mcp__fs__write" || got[1] != "mcp__fs__read" {
+		t.Fatalf("adaptToolsAndCatalog() tool order = %v, want server order", got)
+	}
+	if got := tools[0].Spec().Description; got != "Write  " {
+		t.Errorf("write Spec().Description = %q, want %q", got, "Write  ")
+	}
+	if got := tools[1].Spec().Description; got != " Read" {
+		t.Errorf("read Spec().Description = %q, want %q", got, " Read")
+	}
+	want := `[{"description":" Read","inputSchema":{"a":1,"type":"object"},"name":"mcp__fs__read"},{"description":"Write  ","inputSchema":{"type":"object","z":1},"name":"mcp__fs__write"}]`
+	if got := string(catalog.canonicalBytes()); got != want {
+		t.Errorf("adaptToolsAndCatalog().canonicalBytes() = %s, want %s", got, want)
+	}
+}
+
+func TestAdaptToolsOwnsSchemaInputAndSpecResult(t *testing.T) {
+	raw := json.RawMessage(`{"type":"object","x":"original"}`)
+	tools, catalog, warns := adaptToolsAndCatalog(&fakeCaller{}, "fs", []*gomcp.Tool{{Name: "read", InputSchema: raw}})
+	if len(tools) != 1 || len(warns) != 0 {
+		t.Fatalf("adaptToolsAndCatalog() = (%d tools, %v), want (1, no warnings)", len(tools), warns)
+	}
+	wantSchema := `{"type":"object","x":"original"}`
+	wantCatalog := string(catalog.canonicalBytes())
+	copy(raw, strings.Repeat("x", len(raw)))
+	spec := tools[0].Spec()
+	copy(spec.Parameters, strings.Repeat("x", len(spec.Parameters)))
+	if got := string(tools[0].Spec().Parameters); got != wantSchema {
+		t.Errorf("Spec().Parameters after input/return mutation = %s, want %s", got, wantSchema)
+	}
+	if got := string(catalog.canonicalBytes()); got != wantCatalog {
+		t.Errorf("catalog after input/Spec mutation = %s, want %s", got, wantCatalog)
 	}
 }
 
