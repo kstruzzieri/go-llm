@@ -1,7 +1,6 @@
 package tools
 
 import (
-	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -77,8 +76,12 @@ type ScopeGuard func(rel string, write bool) error
 // component is ever resolved through a symlink afterwards (symlink policy: never
 // follow).
 type Workspace struct {
-	root  string     // canonical absolute root; volume roots retain their separator
-	guard ScopeGuard // nil => allow everything (default)
+	root         string     // canonical absolute root; volume roots retain their separator
+	guard        ScopeGuard // nil => allow everything (default)
+	rootIdentity os.FileInfo
+	pinnedRoot   *os.File // invocation-owned capability; operations borrow it
+	// beforeReadOpen is a per-workspace deterministic race-test seam.
+	beforeReadOpen func()
 }
 
 // CanonicalWorkspaceRoot resolves a workspace root to its absolute, symlink-free
@@ -110,7 +113,11 @@ func NewWorkspace(root string) (*Workspace, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Workspace{root: canon}, nil
+	identity, err := os.Stat(canon)
+	if err != nil {
+		return nil, err
+	}
+	return &Workspace{root: canon, rootIdentity: identity}, nil
 }
 
 func canonicalExistingPath(path string) (string, error) {
@@ -296,45 +303,10 @@ func (w *Workspace) rejectSymlinkAncestors(abs string) error {
 	return nil
 }
 
-// walk drives filepath.WalkDir from the canonical root, skipping ignore-set
-// directories and never descending symlinks (WalkDir does not follow them).
-// fn receives slash-normalized relative paths. ctx cancellation aborts the walk.
-func (w *Workspace) walk(ctx context.Context, fn func(rel string, d fs.DirEntry) error) error {
-	return filepath.WalkDir(w.root, func(abs string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		if cerr := ctx.Err(); cerr != nil {
-			return cerr
-		}
-		if d.IsDir() && ignoreDirs[d.Name()] {
-			return fs.SkipDir
-		}
-		rel, rerr := filepath.Rel(w.root, abs)
-		if rerr != nil {
-			return rerr
-		}
-		if rel == "." {
-			return nil // skip the root entry itself
-		}
-		slash := filepath.ToSlash(rel)
-		if w.guard != nil {
-			if gerr := w.guard(slash, false); gerr != nil {
-				if d.IsDir() {
-					return fs.SkipDir
-				}
-				return nil
-			}
-		}
-		return fn(slash, d)
-	})
-}
-
 // resolveFile contains a path to a concrete file: cleanRel for containment,
 // Lstat checks for every parent component, then final Lstat to reject symlinks
-// (never follow) and require a regular file. The returned FileInfo is the
-// pre-open Lstat result; openRegularFile re-stats the open handle and compares
-// with os.SameFile to close the final-component symlink-swap TOCTOU window.
+// (never follow) and require a regular file. The returned native FileInfo supports stat-only exec metadata checks.
+// Secured content readers use the platform descriptor backend separately.
 func (w *Workspace) resolveFile(p string) (string, os.FileInfo, error) {
 	abs, err := w.cleanRel(p)
 	if err != nil {
@@ -361,9 +333,8 @@ func (w *Workspace) resolveFile(p string) (string, os.FileInfo, error) {
 
 // resolveDir contains a path to a concrete directory: cleanRel, Lstat checks for
 // every parent component, then final Lstat to reject a symlinked directory
-// target (never follow) and require a real dir. The returned FileInfo is the
-// pre-open Lstat result; openDir re-stats the open handle and compares with
-// os.SameFile to close the final-component symlink-swap TOCTOU window.
+// target (never follow) and require a real dir. The returned native FileInfo supports stat-only exec metadata checks.
+// Secured enumeration uses the platform descriptor backend separately.
 func (w *Workspace) resolveDir(p string) (string, os.FileInfo, error) {
 	abs, err := w.cleanRel(p)
 	if err != nil {
@@ -388,34 +359,6 @@ func (w *Workspace) resolveDir(p string) (string, os.FileInfo, error) {
 	return abs, fi, nil
 }
 
-// openDir is the single helper for directory listing. It resolves the path
-// through resolveDir (containment + Lstat + symlink/kind checks), opens the
-// directory, and verifies the open handle still refers to the same directory
-// Lstat saw — closing the final-component symlink-swap TOCTOU window that a bare
-// resolveDir+os.ReadDir would leave (os.ReadDir follows a final-component symlink).
-// It returns errFileChanged if the identity no longer matches. Callers own the
-// returned file and must close it; read entries via f.ReadDir.
-func (w *Workspace) openDir(p string) (*os.File, error) {
-	abs, lfi, err := w.resolveDir(p)
-	if err != nil {
-		return nil, err
-	}
-	f, err := os.Open(abs)
-	if err != nil {
-		return nil, err
-	}
-	sfi, err := f.Stat()
-	if err != nil {
-		_ = f.Close()
-		return nil, err
-	}
-	if !os.SameFile(lfi, sfi) {
-		_ = f.Close()
-		return nil, errFileChanged
-	}
-	return f, nil
-}
-
 // NewFileToolsForWorkspace builds read-only tools over an existing workspace.
 // Use this when a caller has installed a ScopeGuard that must apply to reads,
 // search, glob, and list.
@@ -437,33 +380,6 @@ func NewFileTools(root string) ([]agent.Tool, error) {
 		return nil, err
 	}
 	return NewFileToolsForWorkspace(ws), nil
-}
-
-// openRegularFile is the single helper for content reads. It first resolves the
-// path through resolveFile (containment + Lstat + symlink/kind checks), then opens
-// the file and verifies the open handle still refers to the same file Lstat saw.
-// Returns errFileChanged if the open handle no longer matches the file Lstat saw
-// (e.g. a regular-file swap between Lstat and Open). Callers own the returned file
-// and must close it.
-func (w *Workspace) openRegularFile(p string) (*os.File, error) {
-	abs, lfi, err := w.resolveFile(p)
-	if err != nil {
-		return nil, err
-	}
-	f, err := os.Open(abs)
-	if err != nil {
-		return nil, err
-	}
-	sfi, err := f.Stat()
-	if err != nil {
-		_ = f.Close()
-		return nil, err
-	}
-	if !os.SameFile(lfi, sfi) {
-		_ = f.Close()
-		return nil, errFileChanged
-	}
-	return f, nil
 }
 
 // resolveWriteTarget contains a path to a write destination: cleanRel containment,

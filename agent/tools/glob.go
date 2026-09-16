@@ -72,6 +72,15 @@ func (t *Glob) Invoke(ctx context.Context, raw json.RawMessage) (agent.ToolResul
 		return errResult("pattern is required"), nil
 	}
 
+	if filepath.IsAbs(args.Pattern) || strings.ContainsRune(args.Pattern, 0) {
+		return errResult(errScopeDenied.Error()), nil
+	}
+	for _, component := range strings.Split(filepath.ToSlash(args.Pattern), "/") {
+		if component == ".." {
+			return errResult(errScopeDenied.Error()), nil
+		}
+	}
+
 	var entries []string
 	truncated := false
 	walkErr := t.ws.walk(ctx, func(rel string, d fs.DirEntry) error {
@@ -164,21 +173,17 @@ func (t *List) Invoke(ctx context.Context, raw json.RawMessage) (agent.ToolResul
 	if p == "" {
 		p = "."
 	}
-	f, err := t.ws.openDir(p)
+	f, relBase, err := t.ws.openReadDir(p)
 	if err != nil {
 		return errResult(toolErrMessage(err)), nil
 	}
 	defer func() { _ = f.Close() }()
 
-	dirents, err := f.ReadDir(-1)
+	dirents, err := readWorkspaceEntries(f)
 	if err != nil {
 		return errResult(toolErrMessage(err)), nil
 	}
 
-	relBase, err := filepath.Rel(t.ws.root, f.Name())
-	if err != nil {
-		return errResult(toolErrMessage(err)), nil
-	}
 	base := filepath.ToSlash(relBase)
 	if base == "." {
 		base = ""
