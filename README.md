@@ -792,10 +792,11 @@ git diff | golem -p - -output-format json
 requires `-p`; stderr is unchanged in every format. Early flag, argument,
 prompt, and configuration parse/validation errors write a diagnostic to stderr,
 leave stdout empty, and exit 2. Among pre-run failures, exactly
-`destination_denied` (exit 2), `provider_unavailable` (exit 1), and an
+`destination_denied` (exit 2), `provider_unavailable` (exit 1), an
 unsatisfied explicit project-context requirement
-(`project_context_untrusted`, exit 1) emit one `golem.result.v1` record; all
-other pre-run failures leave stdout empty.
+(`project_context_untrusted`, exit 1), and a failed MCP catalog admission
+(`mcp_untrusted`, exit 1) emit one `golem.result.v1` record; all other pre-run
+failures leave stdout empty.
 
 | value | stdout |
 |---|---|
@@ -823,7 +824,7 @@ Every key is always present (`null` over absent). `status` is `completed`,
 `budget_reached`, `tool_error_cap_reached`, or `repeat_limit_reached`; `error`
 carries a bounded `code` plus a diagnostic `message` (runtime codes come from
 the run's `run.failed` event; the CLI adds `empty_answer`,
-`project_context_untrusted`,
+`project_context_untrusted`, `mcp_untrusted`,
 `provider_unavailable`, and `destination_denied`); `grounding` is the same
 `-grounding` report object, field for field, when verification ran. The record
 has **no size cap** — a large answer is one large line, so do not read the
@@ -899,9 +900,14 @@ A new linked or scratch worktree has a new trust namespace: REPL first contact
 pins there, while `-p` requires prior explicit approval. Derived aliases such as
 `env`/`env2` depend on configuration order; reordering can mismatch a pin or create
 a fresh first-contact boundary. To review the second server, explicitly use
-`env2=command args`. Changing aliases or deleting pins resets trust. Pins do not
-attest transport/process identity; approval hints omit endpoints and arguments
-because those may contain credentials.
+`env2=command args`. Changing aliases or deleting pins resets trust. Pins live
+under `$XDG_DATA_HOME/golem/mcp-pins/<sha256 hex of the symlink-resolved
+absolute workspace path>/<sha256 hex of the alias>.json` (default
+`$XDG_DATA_HOME` is `~/.local/share`); a successful `golem mcp inspect` prints
+the exact file. A pin that is unreadable, unsafe, or invalid blocks its alias
+as `pin_unavailable` and is never rewritten or treated as absent; delete it to
+start over. Pins do not attest transport/process identity; approval hints omit
+endpoints and arguments because those may contain credentials.
 
 Top-level descriptions are flattened and bounded before registration. Every
 schema field, including nested descriptions, titles, extensions, and instance

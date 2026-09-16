@@ -299,6 +299,47 @@ func TestPinMaximalEscapedCatalog(t *testing.T) {
 	}
 }
 
+func TestPinPublishesCanonicalBytesWithinBound(t *testing.T) {
+	s := pinStoreForTest(t)
+	// HTML-significant bytes stay literal on disk: the persisted tools value is
+	// exactly the canonical catalog, so the validated catalog bounds also bound
+	// the record (about 10 MiB at every limit, under maxPinBytes). encoding/json's
+	// default escaping would instead write six-byte escapes and let a bounded
+	// catalog exceed maxPinBytes at publication.
+	c, err := newToolCatalog([]catalogEntry{
+		{Name: "mcp__fs__read", Description: "<>&" + strings.Repeat("<>", 32), InputSchema: json.RawMessage(`{"properties":{"q":{"description":"<script>&amp;</script>","type":"string"}},"type":"object"}`)},
+		{Name: "mcp__fs__write", Description: "plain", InputSchema: json.RawMessage(`{"type":"object","x":"<>&"}`)},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, created, err := s.admit(context.Background(), "fs", c, false); err != nil || !created {
+		t.Fatalf("publish: created=%v err=%v", created, err)
+	}
+	raw := readPinBytes(t, s)
+	if bytes.Contains(raw, []byte(`\u003c`)) || bytes.Contains(raw, []byte(`\u0026`)) || !bytes.Contains(raw, c.canonicalBytes()) {
+		t.Fatalf("published tools are not the literal canonical bytes: %s", raw)
+	}
+	var record pinRecord
+	if err = json.Unmarshal(raw, &record); err != nil || !bytes.Equal(record.Tools, c.canonicalBytes()) {
+		t.Fatalf("persisted tools differ from canonical: %v", err)
+	}
+	// The record adds only its fixed identity header to the canonical bytes.
+	var header bytes.Buffer
+	enc := json.NewEncoder(&header)
+	enc.SetEscapeHTML(false)
+	if err = enc.Encode(pinRecord{Version: c.version(), Workspace: s.workspace, Alias: "fs", Digest: c.digest(), Tools: json.RawMessage("[]")}); err != nil {
+		t.Fatal(err)
+	}
+	if want := len(bytes.TrimSpace(header.Bytes())) - len("[]") + len(c.canonicalBytes()); len(raw) != want {
+		t.Fatalf("published size %d, want canonical %d plus header = %d", len(raw), len(c.canonicalBytes()), want)
+	}
+	got, rev, err := s.capturePin(context.Background(), "fs")
+	if err != nil || !rev.exists || got.digest() != c.digest() {
+		t.Fatalf("reopen: %v", err)
+	}
+}
+
 func TestPinPublicConstructor(t *testing.T) {
 	base := t.TempDir()
 	workspace := t.TempDir()

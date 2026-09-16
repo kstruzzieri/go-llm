@@ -19,7 +19,18 @@ import (
 	"github.com/kstruzzieri/go-llm/signing"
 )
 
-const maxPinBytes = 16 * 1024 * 1024
+const (
+	// maxPinBytes bounds one persisted pin record. A catalog at every limit
+	// (128 tools, 8 KiB descriptions of six-byte JSON escapes, 32 KiB canonical
+	// schemas) serializes to about 10 MiB; publication writes the canonical
+	// bytes verbatim, so nothing expands past that.
+	maxPinBytes = 16 * 1024 * 1024
+	// leaseAcquireBudget bounds waiting for a competing holder of the per-alias
+	// lease; the default poll interval is leaseRetryInterval. Filesystem I/O
+	// after acquisition is bounded only by the caller's context.
+	leaseAcquireBudget = 2 * time.Second
+	leaseRetryInterval = 10 * time.Millisecond
+)
 
 var (
 	errPinMissing          = errors.New("mcpclient: no trusted pin")
@@ -183,7 +194,9 @@ func (s *PinStore) withLease(ctx context.Context, alias string, run func(*os.Roo
 	defer func() { err = errors.Join(err, root.Close()) }()
 	name := pinKey(alias)
 	// This budget applies to acquisition only, not filesystem I/O after it.
-	budget, cancel := context.WithTimeout(ctx, 2*time.Second)
+	// Its own expiry is reported as contention: only the caller's context may
+	// classify a failure as cancellation.
+	budget, cancel := context.WithTimeout(ctx, leaseAcquireBudget)
 	defer cancel()
 	var lease *pinLease
 	for {
@@ -195,11 +208,14 @@ func (s *PinStore) withLease(ctx context.Context, alias string, run func(*os.Roo
 			return err
 		}
 		if err = s.ops.wait(budget); err != nil {
-			return errors.Join(errPinContention, err)
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return errors.Join(errPinContention, ctxErr)
+			}
+			return errPinContention
 		}
 	}
 	defer func() { err = errors.Join(err, lease.Close()) }()
-	if err = budget.Err(); err != nil {
+	if err = ctx.Err(); err != nil {
 		return err
 	}
 	return errors.Join(run(root, name+".json"), ctx.Err())

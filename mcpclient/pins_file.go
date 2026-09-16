@@ -1,6 +1,7 @@
 package mcpclient
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/json"
@@ -30,7 +31,7 @@ func defaultPinFileOps() pinFileOps {
 		write: (*os.File).Write, syncFile: (*os.File).Sync,
 		rename: (*os.Root).Rename, syncDir: syncPinDirectory,
 		wait: func(ctx context.Context) error {
-			timer := time.NewTimer(10 * time.Millisecond)
+			timer := time.NewTimer(leaseRetryInterval)
 			defer timer.Stop()
 			select {
 			case <-ctx.Done():
@@ -228,10 +229,17 @@ func (s *PinStore) acquireLease(root *os.Root, name string) (*pinLease, error) {
 }
 
 func (s *PinStore) publish(ctx context.Context, root *os.Root, name, alias string, c toolCatalog) (err error) {
-	raw, err := json.Marshal(pinRecord{Version: c.version(), Workspace: s.workspace, Alias: alias, Digest: c.digest(), Tools: c.canonicalBytes()})
+	// Write the canonical catalog bytes verbatim: encoding/json's default HTML
+	// escaping would expand every '<', '>' and '&' sixfold and let a catalog
+	// inside every validated bound exceed maxPinBytes on disk.
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	err = enc.Encode(pinRecord{Version: c.version(), Workspace: s.workspace, Alias: alias, Digest: c.digest(), Tools: c.canonicalBytes()})
 	if err != nil {
 		return err
 	}
+	raw := bytes.TrimSuffix(buf.Bytes(), []byte{'\n'})
 	if len(raw) > maxPinBytes {
 		return errors.New("mcpclient: serialized pin exceeds 16 MiB")
 	}

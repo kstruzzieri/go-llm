@@ -257,16 +257,71 @@ func TestPinLeaseCancellationAndContention(t *testing.T) {
 			if err == nil || created {
 				t.Fatalf("contention/cancellation wrote: %v %v", created, err)
 			}
-			if cancelAfterLock && !errors.Is(err, context.Canceled) {
-				t.Fatalf("cancel after acquisition: %v", err)
+			// The operator-visible classification must follow the cause: the
+			// acquisition budget's own expiry is contention, never cancellation.
+			reason := admissionFailure("fs", "pin_unavailable", err).Reason
+			if cancelAfterLock && (!errors.Is(err, context.Canceled) || reason != "canceled") {
+				t.Fatalf("cancel after acquisition: %v (%s)", err, reason)
 			}
-			if !cancelAfterLock && !errors.Is(err, errPinContention) {
-				t.Fatalf("not contention: %v", err)
+			if !cancelAfterLock && (!errors.Is(err, errPinContention) || errors.Is(err, context.DeadlineExceeded) || reason != "pin_contention") {
+				t.Fatalf("not contention: %v (%s)", err, reason)
 			}
 			if _, err = os.Stat(filepath.Join(s.dir, fsKey+".json")); !errors.Is(err, os.ErrNotExist) {
 				t.Fatalf("unexpected pin: %v", err)
 			}
 		})
+	}
+}
+
+func TestPinLeaseCallerCancellationDuringWait(t *testing.T) {
+	s := pinStoreForTest(t)
+	root, err := s.openRoot(false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = root.Close() }()
+	lease, err := s.acquireLease(root, fsKey+".lock")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = lease.Close() }()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	s.ops.wait = func(budget context.Context) error {
+		cancel()
+		return budget.Err()
+	}
+	_, created, err := s.admit(ctx, "fs", pinCatalog(t, "fs", "A"), false)
+	if err == nil || created {
+		t.Fatalf("cancelled wait wrote: %v %v", created, err)
+	}
+	if reason := admissionFailure("fs", "pin_unavailable", err).Reason; !errors.Is(err, errPinContention) || !errors.Is(err, context.Canceled) || reason != "canceled" {
+		t.Fatalf("caller cancellation during contention: %v (%s)", err, reason)
+	}
+}
+
+func TestPinLeaseAcquiredAfterBudgetLapseProceeds(t *testing.T) {
+	s := pinStoreForTest(t)
+	root, err := s.openRoot(false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = root.Close() }()
+	lease, err := s.acquireLease(root, fsKey+".lock")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = lease.Close() }()
+	// Release the competing lease only once the acquisition budget has lapsed
+	// (a real wait): the retry then acquires with an expired budget and a live
+	// caller context, and a held lease must not be reported as a failure.
+	s.ops.wait = func(budget context.Context) error {
+		<-budget.Done()
+		return lease.Close()
+	}
+	_, created, err := s.admit(context.Background(), "fs", pinCatalog(t, "fs", "A"), false)
+	if err != nil || !created {
+		t.Fatalf("held lease after budget lapse: created=%v err=%v", created, err)
 	}
 }
 
