@@ -156,8 +156,8 @@ func TestPinUnixLeaseClose(t *testing.T) {
 func TestPinUnixDirectoryModeSwap(t *testing.T) {
 	s := pinStoreForTest(t)
 	s.ops.afterLstat = func(path string) {
-		if path == s.dir {
-			if err := os.Chmod(path, 0755); err != nil {
+		if filepath.Base(path) == filepath.Base(s.dir) {
+			if err := os.Chmod(s.dir, 0755); err != nil {
 				t.Fatal(err)
 			}
 		}

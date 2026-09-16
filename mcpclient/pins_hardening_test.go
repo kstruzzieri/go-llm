@@ -415,10 +415,10 @@ func TestPinLeaseProcessExit(t *testing.T) {
 
 func TestPinDirectoryDurabilityRetry(t *testing.T) {
 	s := pinStoreForTest(t)
-	parent := filepath.Dir(s.dir)
+	parent := filepath.Base(filepath.Dir(s.dir))
 	fault := errors.New("parent sync failed")
 	s.ops.syncDir = func(root *os.Root) error {
-		if root.Name() == parent {
+		if filepath.Base(root.Name()) == parent {
 			return fault
 		}
 		return syncPinDirectory(root)
@@ -429,7 +429,7 @@ func TestPinDirectoryDurabilityRetry(t *testing.T) {
 	}
 	synced := false
 	s.ops.syncDir = func(root *os.Root) error {
-		if root.Name() == parent {
+		if filepath.Base(root.Name()) == parent {
 			synced = true
 		}
 		return syncPinDirectory(root)
