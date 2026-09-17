@@ -249,6 +249,36 @@ func workspaceCanonicalName(parent *os.File, part string, target *unix.Stat_t) (
 type workspaceEntry struct {
 	name string
 	stat unix.Stat_t
+	dir  *os.File // enumerated directory; valid while the enumerator holds it open
+}
+
+// openRegular opens the enumerated entry from its pinned directory descriptor.
+// Walkers use it instead of re-resolving the path by name, which would
+// re-enumerate every ancestor per file (quadratic in directory size). Policy
+// was consulted for this entry by the walk; identity is re-checked on the
+// opened descriptor exactly as openReadMode does.
+func (e workspaceEntry) openRegular() (*os.File, error) {
+	if e.stat.Mode&unix.S_IFMT != unix.S_IFREG {
+		return nil, errNotRegular
+	}
+	fd, err := unix.Openat(int(e.dir.Fd()), e.name, unix.O_RDONLY|unix.O_NONBLOCK|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return nil, workspaceOpenError(err)
+	}
+	var opened unix.Stat_t
+	if err := unix.Fstat(fd, &opened); err != nil {
+		_ = unix.Close(fd)
+		return nil, err
+	}
+	if opened.Dev != e.stat.Dev || opened.Ino != e.stat.Ino || opened.Mode&unix.S_IFMT != unix.S_IFREG {
+		_ = unix.Close(fd)
+		return nil, errFileChanged
+	}
+	if err := unix.SetNonblock(fd, false); err != nil {
+		_ = unix.Close(fd)
+		return nil, err
+	}
+	return os.NewFile(uintptr(fd), e.name), nil
 }
 
 func (e workspaceEntry) Name() string               { return e.name }
@@ -303,7 +333,7 @@ func readWorkspaceEntries(f *os.File) ([]fs.DirEntry, error) {
 			}
 			return nil, err
 		}
-		entries = append(entries, workspaceEntry{name: name, stat: st})
+		entries = append(entries, workspaceEntry{name: name, stat: st, dir: f})
 	}
 	return entries, nil
 }

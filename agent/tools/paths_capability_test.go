@@ -604,3 +604,91 @@ func TestWorkspaceEntriesSkipVanishedName(t *testing.T) {
 		t.Fatalf("snapshot after unlink: %v, %v; want only %s", entries, err, survivor)
 	}
 }
+
+// Search must open files from the walked directory descriptor. Re-resolving
+// each match by name re-enumerates every ancestor per file, which is quadratic
+// in directory size (measured 37x slower on a 3000-file directory).
+func TestSearchOpensFromWalkedDirectory(t *testing.T) {
+	root := t.TempDir()
+	if err := os.Mkdir(filepath.Join(root, "sub"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"a.txt", "b.txt", "sub/c.txt"} {
+		if err := os.WriteFile(filepath.Join(root, name), []byte("needle\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Symlink("a.txt", filepath.Join(root, "link.txt")); err != nil {
+		t.Fatal(err)
+	}
+	ws, err := NewWorkspace(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reopens := 0
+	ws.beforeReadOpen = func() { reopens++ }
+	out, err := NewSearch(ws).Invoke(t.Context(), json.RawMessage(`{"pattern":"needle"}`))
+	if err != nil || out.IsError {
+		t.Fatalf("search: %+v, %v", out, err)
+	}
+	if want := "a.txt:1: needle\nb.txt:1: needle\nsub/c.txt:1: needle"; out.Content != want {
+		t.Fatalf("content = %q, want %q", out.Content, want)
+	}
+	if reopens != 0 {
+		t.Fatalf("search re-resolved %d path components by name; want descriptor opens only", reopens)
+	}
+	// Control: the seam must fire for a by-name open, or the zero above is vacuous.
+	if _, err := ws.readAll("sub/c.txt"); err != nil {
+		t.Fatal(err)
+	}
+	if reopens != 2 {
+		t.Fatalf("by-name control fired the seam %d times, want 2 (one per component)", reopens)
+	}
+}
+
+func TestWorkspaceEntryOpenRegularRejectsReplacement(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "file"), []byte("ORIGINAL\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ws, err := NewWorkspace(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir, err := ws.openDir(".")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = dir.Close() }()
+	entries, err := readWorkspaceEntries(dir)
+	if err != nil || len(entries) != 1 {
+		t.Fatalf("entries = %v, %v", entries, err)
+	}
+	entry := entries[0].(workspaceEntry)
+	if err := os.Rename(filepath.Join(root, "file"), filepath.Join(root, "moved")); err != nil {
+		t.Fatal(err)
+	}
+	if err := unix.Mkfifo(filepath.Join(root, "file"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	f, err := entry.openRegular()
+	if f != nil {
+		_ = f.Close()
+	}
+	if !errors.Is(err, errFileChanged) {
+		t.Fatalf("replaced FIFO: %v", err)
+	}
+	if err := os.Remove(filepath.Join(root, "file")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("moved", filepath.Join(root, "file")); err != nil {
+		t.Fatal(err)
+	}
+	f, err = entry.openRegular()
+	if f != nil {
+		_ = f.Close()
+	}
+	if !errors.Is(err, errSymlink) {
+		t.Fatalf("replaced symlink: %v", err)
+	}
+}
