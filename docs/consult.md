@@ -17,7 +17,12 @@ It is not:
   `provider.Router` has no consultant in any of its fallback chains;
 - a tool — the agent cannot call it. Only you can, from the REPL;
 - a credential holder — the vendor CLI owns its own subscription login, and
-  go-llm never reads, stores or forwards a token;
+  go-llm never reads, stores or forwards a token. That boundary is what
+  Anthropic's [authentication and credential use][anthropic-auth] terms
+  require: consumer-plan OAuth is for the unmodified Claude Code binary and
+  other native Anthropic applications only, and third-party software may not
+  route requests through Free, Pro or Max credentials nor collect, store or
+  intermediate Claude.ai tokens;
 - signed — the receipt is in-process only (see [Receipt](#receipt)).
 
 The only adapter in v1 is `claude`. Codex and Antigravity are not implemented.
@@ -527,3 +532,7 @@ consultant trusted. These residual items are known and unresolved:
 - Stage 0 spec: `docs/superpowers/specs/2026-09-09-382-subscription-consult.md`
   (may be local/gitignored rather than committed).
 - Issue [#382](https://github.com/kstruzzieri/go-llm/issues/382).
+- Anthropic, [Legal and compliance — Authentication and credential use][anthropic-auth]
+  (the terms the credential boundary above is designed around).
+
+[anthropic-auth]: https://code.claude.com/docs/en/legal-and-compliance#authentication-and-credential-use
