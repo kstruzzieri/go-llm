@@ -23,7 +23,6 @@ import (
 	"github.com/kstruzzieri/go-llm/fingerprint"
 	golemruntime "github.com/kstruzzieri/go-llm/golem"
 	"github.com/kstruzzieri/go-llm/internal/providerbootstrap"
-	"github.com/kstruzzieri/go-llm/mcpclient"
 	"github.com/kstruzzieri/go-llm/provider"
 	"github.com/kstruzzieri/go-llm/provider/openaicompat"
 	"github.com/kstruzzieri/go-llm/rag"
@@ -789,6 +788,8 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 	}
 	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
 		switch args[0] {
+		case "mcp":
+			return runMCPTrust(context.Background(), args[1:], stdout, stderr)
 		case "audit":
 			return runAudit(context.Background(), args[1:], stdout, stderr)
 		case "index":
@@ -798,7 +799,7 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 		case "source":
 			return runSource(context.Background(), args[1:], stdin, stdout, stderr)
 		default:
-			return fmt.Errorf("unknown command %q (did you mean \"audit\", \"index\", \"models\", or \"source\"?)", args[0])
+			return fmt.Errorf("unknown command %q (did you mean \"audit\", \"index\", \"models\", \"source\", or \"mcp\"?)", args[0])
 		}
 	}
 
@@ -845,7 +846,7 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 	}
 	mcpServers, merr := parseMCPServers(f.mcpStdio, f.mcpHTTP)
 	if merr != nil {
-		return maybeUsageError(merr, headlessExitApplies(f))
+		return maybeUsageError(errors.New("golem: invalid MCP server specification"), headlessExitApplies(f))
 	}
 	f, taskWarns := applyTaskMode(f)
 	f, goalWarns := applyGoalMode(f)
@@ -994,6 +995,27 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 		// of the two pre-run failures that still writes a result record.
 		reportPreRunFailure(stdout, outFormat, resultCodeDestDenied, err)
 		return maybeUsageError(err, headlessExitApplies(f))
+	}
+
+	// Keep admitted sessions through tool assembly, and close them on every
+	// later startup failure as well as normal exit. No provider probe precedes this.
+	mcpManager, mcpWarns, mcpErr := connectMCP(ctx, root, mcpServers, f.promptSet)
+	defer func() {
+		if mcpManager != nil {
+			_ = mcpManager.Close()
+		}
+	}()
+	// Emit trust decisions now: a later provider failure must not hide a pin
+	// already created at first contact. Package diagnostics exclude raw errors.
+	for _, warning := range mcpWarns {
+		_, _ = fmt.Fprintln(stderr, "warning: mcp: "+warning.Error())
+	}
+	mcpBlocked := mcpBlockedAliases(mcpWarns)
+	if mcpErr != nil || (f.promptSet && len(mcpBlocked) > 0) {
+		err := errors.New("golem: MCP catalog admission failed")
+		_, _ = fmt.Fprintln(stderr, "mcp: catalog admission failed")
+		reportPreRunFailure(stdout, outFormat, "mcp_untrusted", err)
+		return err
 	}
 
 	// Guarded, loopback-only discovery runs strictly after admission: each
@@ -1467,31 +1489,21 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 		delegateLine = fmt.Sprintf("delegate: enabled -> %s", dchain[0])
 	}
 
-	var mcpManager *mcpclient.Manager
 	mcpAttached := false
 	mcpLine := ""
 	if len(mcpServers) > 0 {
-		mgr, mcpWarns, cerr := mcpclient.Connect(ctx, mcpClientImpl(), mcpServers)
-		if cerr != nil {
-			return cerr // fatal: invalid / duplicate alias
-		}
-		for _, w := range mcpWarns {
-			warns = append(warns, "mcp: "+w.Error())
-		}
-		mcpTools := mgr.Tools()
-		tools = append(tools, mcpTools...)
-		mcpManager = mgr
-		mcpAttached = len(mcpTools) > 0
-		// Positive confirmation so a silently-failed server attach is visible:
-		// attached-tool count against the configured-server count (failures and
-		// skipped tools appear as the "mcp: ..." warnings above).
-		mcpLine = fmt.Sprintf("mcp: attached %d tool(s) from %d configured server(s)", len(mcpTools), len(mcpServers))
-	}
-	defer func() {
+		count := 0
 		if mcpManager != nil {
-			_ = mcpManager.Close()
+			mcpTools := mcpManager.Tools()
+			tools = append(tools, mcpTools...)
+			count = len(mcpTools)
+			mcpAttached = count > 0
 		}
-	}()
+		mcpLine = fmt.Sprintf("mcp: attached %d tool(s) from %d configured server(s)", count, len(mcpServers))
+		if len(mcpBlocked) > 0 {
+			mcpLine += fmt.Sprintf("; blocked %d alias(es): %s", len(mcpBlocked), strings.Join(mcpBlocked, ", "))
+		}
+	}
 
 	// #372: replSession owns composition. These are the same inputs the
 	// inline sequence used; composeSystem renders them once here and again
@@ -1758,6 +1770,11 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 	if sess.maxSteps == 0 {
 		sess.maxSteps = 16 // mirror agent defaultMaxSteps so the footer's k/max is accurate
 	}
+	if lineSourceModeFor(f) == sourceREPL {
+		if base, err := os.UserConfigDir(); err == nil {
+			sess.commandsDir = filepath.Join(base, "go-llm", "commands")
+		}
+	}
 	if hooks.afterSessionReady != nil {
 		if err := hooks.afterSessionReady(sess); err != nil {
 			return err
@@ -1932,6 +1949,8 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 		}
 		return runOneShot(ctx, stdout, stderr, interrupts, sess, f.prompt)
 	}
+
+	loadRecipes(stderr, sess)
 
 	// /edit is wired regardless of -no-editor: the flag disables the inline
 	// line editor, not external composition. Availability is still gated on

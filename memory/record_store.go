@@ -26,6 +26,8 @@ type MemoryRecordStore struct {
 // NewMemoryRecordStore runs the shared migrations on db and returns a record
 // store with mandatory signing. db must already be opened and hardened by
 // the caller; config must select injected credentials or a dedicated KeyDir.
+// Migrations share NewStore's per-connection busy_timeout requirement. Signing
+// initialization is separate and may require writes even on a current schema.
 func NewMemoryRecordStore(ctx context.Context, db *sql.DB, config RecordStoreConfig) (*MemoryRecordStore, error) {
 	if ctx == nil {
 		return nil, errors.New("memory: nil record store context")
@@ -36,7 +38,7 @@ func NewMemoryRecordStore(ctx context.Context, db *sql.DB, config RecordStoreCon
 	if err := config.validate(); err != nil {
 		return nil, err
 	}
-	if err := runMigrations(db); err != nil {
+	if err := runMigrations(ctx, db); err != nil {
 		return nil, fmt.Errorf("memory: init record store: %w", err)
 	}
 	origin, _ := config.origin()

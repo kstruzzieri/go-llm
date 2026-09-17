@@ -31,9 +31,13 @@ type SQLiteStore struct {
 }
 
 // NewStore creates a conversation store on the given database, running
-// migrations if needed.
+// migrations if needed. Concurrent migrations coordinate through SQLite's write
+// lock. Callers must configure busy_timeout on every connection that may migrate
+// (for example with the DSN _pragma=busy_timeout(5000)); a zero or expired timeout
+// can return a busy error, and cancellation is observed between statements, not
+// during a lock wait. Opening a current schema requires only reads.
 func NewStore(ctx context.Context, db *sql.DB) (*SQLiteStore, error) {
-	if err := runMigrations(db); err != nil {
+	if err := runMigrations(ctx, db); err != nil {
 		return nil, fmt.Errorf("conversation: init store: %w", err)
 	}
 	return &SQLiteStore{db: db}, nil

@@ -1,11 +1,42 @@
 package mcpclient
 
 import (
+	"context"
+	"errors"
 	"fmt"
+	"net/http"
 	"os/exec"
+	"time"
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
 )
+
+const httpSessionCloseTimeout = 5 * time.Second
+
+var errHTTPSessionCloseTimeout = errors.New("mcpclient: HTTP session close timed out")
+
+type httpSessionTransport struct {
+	http.RoundTripper
+}
+
+func (t httpSessionTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	if req.Method != http.MethodDelete {
+		return t.RoundTripper.RoundTrip(req)
+	}
+	ctx, cancel := context.WithTimeoutCause(req.Context(), httpSessionCloseTimeout, errHTTPSessionCloseTimeout)
+	defer cancel()
+	resp, err := t.RoundTripper.RoundTrip(req.WithContext(ctx))
+	if resp != nil {
+		if resp.Body != nil {
+			_ = resp.Body.Close()
+		}
+		resp.Body = http.NoBody
+	}
+	if context.Cause(ctx) != errHTTPSessionCloseTimeout {
+		return resp, err
+	}
+	return nil, errHTTPSessionCloseTimeout
+}
 
 // Implementation identifies this client to the server. Local mirror of the SDK
 // type so cmd/golem never imports go-sdk.
@@ -30,7 +61,7 @@ type Server struct {
 	endpoint string   // http
 	// tr, when non-nil, overrides the built transport. Test-only: lets the
 	// concurrency tests drive Connect with gated in-memory transports, the same
-	// way the connectVia split lets them drive a single dial.
+	// way connectOne lets them drive a single dial.
 	tr gomcp.Transport
 }
 
@@ -61,9 +92,27 @@ func (s Server) transport() (gomcp.Transport, error) {
 		if s.endpoint == "" {
 			return nil, fmt.Errorf("mcpclient: http server %q has empty endpoint", s.Alias)
 		}
+		client := *http.DefaultClient
+		if client.Transport == nil {
+			client.Transport = http.DefaultTransport
+		}
+		client.Transport = httpSessionTransport{RoundTripper: client.Transport}
+		checkRedirect := client.CheckRedirect
+		client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+			if len(via) > 0 && via[0].Method == http.MethodDelete {
+				return http.ErrUseLastResponse
+			}
+			if checkRedirect != nil {
+				return checkRedirect(req, via)
+			}
+			if len(via) >= 10 {
+				return errors.New("stopped after 10 redirects")
+			}
+			return nil
+		}
 		// DisableStandaloneSSE: MVP only needs request/response; no server-initiated
 		// notifications, no standalone SSE stream, no auto-reconnect on that stream.
-		return &gomcp.StreamableClientTransport{Endpoint: s.endpoint, DisableStandaloneSSE: true}, nil
+		return &gomcp.StreamableClientTransport{Endpoint: s.endpoint, HTTPClient: &client, DisableStandaloneSSE: true}, nil
 	default:
 		return nil, fmt.Errorf("mcpclient: server %q has unknown transport", s.Alias)
 	}

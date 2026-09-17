@@ -36,9 +36,10 @@ func TestHardeningContracts(t *testing.T) {
 		runEgressContracts(t)
 		runDefaultPipelineContracts(t)
 		runWorkspaceContracts(t)
+		runMCPTrustContract(t)
 	})
 	for _, boundary := range []string{
-		"ZT-602_#431_project_trust", "ZT-603_#432_MCP_description_catalog_trust",
+		"ZT-602_#431_project_trust",
 		"ZT-604_#433_terminal_output", "ZT-605_#434_quarantine",
 		"ZT-606_#435_retrieval_screening",
 	} {

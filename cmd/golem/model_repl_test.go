@@ -151,10 +151,11 @@ func TestModelHelpListsTheSetForm(t *testing.T) {
 // modelBackend is one loopback openai-compat server that identifies itself in
 // every streamed answer, so WHICH backend served a turn is observable.
 type modelBackend struct {
-	url    string
-	label  string
-	chats  atomic.Int64
-	models atomic.Int64
+	chatResponse func(http.ResponseWriter, *http.Request, string) bool
+	url          string
+	label        string
+	chats        atomic.Int64
+	models       atomic.Int64
 	// While armed, every /v1/models request parks until barrier closes or the
 	// request context is canceled; entered closes on the first parked one.
 	// Arming is explicit so a test parks the switch it cares about rather
@@ -214,6 +215,9 @@ func newModelBackend(t *testing.T, label string, ids ...string) *modelBackend {
 			b.mu.Lock()
 			b.bodies = append(b.bodies, string(body))
 			b.mu.Unlock()
+			if b.chatResponse != nil && b.chatResponse(w, r, string(body)) {
+				return
+			}
 			answer := b.label + " answer"
 			if b.echoCanary.Load() {
 				if m := canaryNoncePattern.FindStringSubmatch(string(body)); len(m) == 2 {

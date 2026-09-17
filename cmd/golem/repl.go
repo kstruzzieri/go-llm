@@ -20,12 +20,16 @@ import (
 	"github.com/kstruzzieri/go-llm/internal/agenttrace"
 	"github.com/kstruzzieri/go-llm/memory"
 	"github.com/kstruzzieri/go-llm/provider"
+	"github.com/kstruzzieri/go-llm/recipe"
 	"modernc.org/sqlite"
 	sqlite3 "modernc.org/sqlite/lib"
 )
 
 // replSession holds the per-process state the REPL needs.
 type replSession struct {
+	commandsDir     string
+	recipes         map[string]recipe.Recipe
+	recipeHint      *recipeInvocationHint
 	canary          *canaryBinding
 	orch            *agent.Orchestrator
 	runtime         *golemruntime.Runtime
@@ -194,8 +198,10 @@ func runREPL(ctx context.Context, src lineSource, out io.Writer, interrupts <-ch
 		if line == "" {
 			continue
 		}
+		var hint *recipeInvocationHint
 		if strings.HasPrefix(line, "/") {
 			forced, exit := dispatchSlash(ctx, out, sess, line)
+			hint, sess.recipeHint = sess.recipeHint, nil
 			if exit {
 				return nil
 			}
@@ -230,12 +236,16 @@ func runREPL(ctx context.Context, src lineSource, out io.Writer, interrupts <-ch
 		}
 		// Record accepted goals after inspection has had a chance to block
 		// secrets or abort on a canary. Unrelated failures retain existing history.
-		_, runErr := runOnce(ctx, out, interrupts, sess, line, src)
-		if !secretsBlocked(runErr) && !canaryAborted(runErr) {
+		_, runErr := runOnceWithRecipeHint(ctx, out, interrupts, sess, line, src, hint)
+		if !secretsBlocked(runErr) && !canaryAborted(runErr) && !errors.Is(runErr, errRecipeHintRefused) {
 			src.RecordGoal(line)
 			if sessionSaveRefused(runErr) {
 				_, _ = fmt.Fprintln(out, "The next turn uses the latest saved history, without this unsaved turn. Use /new for a separate session.")
 			}
+		}
+		if errors.Is(runErr, errModelRestoreFailed) {
+			_, _ = fmt.Fprintln(out, "recipes: model restoration failed; REPL stopped")
+			return runErr
 		}
 	}
 }
@@ -311,6 +321,10 @@ func interruptContext(ctx context.Context, interrupts <-chan struct{}) (context.
 // It returns the run result so runOneShot can extract the final answer; the
 // REPL ignores it.
 func runOnce(ctx context.Context, out io.Writer, interrupts <-chan struct{}, sess *replSession, line string, src lineSource) (agent.Result, error) {
+	return runOnceWithRecipeHint(ctx, out, interrupts, sess, line, src, nil)
+}
+
+func runOnceWithRecipeHint(ctx context.Context, out io.Writer, interrupts <-chan struct{}, sess *replSession, line string, src lineSource, hint *recipeInvocationHint) (_ agent.Result, retErr error) {
 	runCtx, cancel := interruptContext(ctx, interrupts)
 	defer cancel()
 	if err := refreshProjectContext(runCtx, out, sess); err != nil {
@@ -348,6 +362,21 @@ func runOnce(ctx context.Context, out io.Writer, interrupts <-chan struct{}, ses
 		if err := sess.renewCanary(); err != nil {
 			writeRunLine("%s", errCanaryUnavailable)
 			return agent.Result{}, errCanaryUnavailable
+		}
+	}
+
+	if hint != nil {
+		restore, err := applyRecipeModelHint(runCtx, renderOut, sess, *hint)
+		if err != nil {
+			writeRunLine("recipes: %s", runFailureMessage("", err))
+			return agent.Result{}, err
+		}
+		if restore != nil {
+			defer func() {
+				if restoreErr := restore(context.WithoutCancel(runCtx)); restoreErr != nil {
+					retErr = errors.Join(retErr, errModelRestoreFailed, restoreErr)
+				}
+			}()
 		}
 	}
 
@@ -641,6 +670,7 @@ func lastRoutedModel(res agent.Result) string {
 // goal the caller must run as a model goal -- /edit's result, which bypasses
 // slash dispatch exactly once even when it begins with "/".
 func dispatchSlash(ctx context.Context, out io.Writer, sess *replSession, line string) (forced string, exit bool) {
+	sess.recipeHint = nil
 	fields := strings.Fields(line)
 	cmd := fields[0]
 	switch cmd {
@@ -650,6 +680,12 @@ func dispatchSlash(ctx context.Context, out io.Writer, sess *replSession, line s
 		handleTrust(ctx, out, sess, fields)
 	case "/help":
 		_, _ = fmt.Fprint(out, golemHelp)
+		if len(sess.recipes) != 0 {
+			_, _ = fmt.Fprintln(out, "recipe commands:")
+			printRecipeEntries(out, sess.recipes)
+		}
+	case "/recipes":
+		handleRecipes(out, sess, fields)
 	case "/context":
 		handleContext(out, sess, fields)
 	case "/clear":
@@ -853,7 +889,10 @@ func dispatchSlash(ctx context.Context, out io.Writer, sess *replSession, line s
 	case "/think":
 		handleThink(ctx, out, sess, fields)
 	default:
-		_, _ = fmt.Fprintf(out, "unknown command: %s (try /help)\n", cmd)
+		if r, ok := sess.recipes[strings.TrimPrefix(cmd, "/")]; ok {
+			return invokeRecipe(out, sess, r, line, cmd), false
+		}
+		printUnknownCommand(out, sess, cmd)
 	}
 	return "", false
 }
@@ -966,6 +1005,8 @@ func autoEditState(sess *replSession) string {
 
 const golemHelp = `commands:
   /help          show this help
+  /recipes [reload]
+                 list recipe commands or reload the user command directory
   /tools         list registered tools and their effect class
   /model [set <role|name>]
                  show the selected model chain, ceiling, thinking, and last routed model; set switches the model for the rest of this process

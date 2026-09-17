@@ -792,10 +792,11 @@ git diff | golem -p - -output-format json
 requires `-p`; stderr is unchanged in every format. Early flag, argument,
 prompt, and configuration parse/validation errors write a diagnostic to stderr,
 leave stdout empty, and exit 2. Among pre-run failures, exactly
-`destination_denied` (exit 2), `provider_unavailable` (exit 1), and an
+`destination_denied` (exit 2), `provider_unavailable` (exit 1), an
 unsatisfied explicit project-context requirement
-(`project_context_untrusted`, exit 1) emit one `golem.result.v1` record; all
-other pre-run failures leave stdout empty.
+(`project_context_untrusted`, exit 1), and a failed MCP catalog admission
+(`mcp_untrusted`, exit 1) emit one `golem.result.v1` record; all other pre-run
+failures leave stdout empty.
 
 | value | stdout |
 |---|---|
@@ -823,7 +824,7 @@ Every key is always present (`null` over absent). `status` is `completed`,
 `budget_reached`, `tool_error_cap_reached`, or `repeat_limit_reached`; `error`
 carries a bounded `code` plus a diagnostic `message` (runtime codes come from
 the run's `run.failed` event; the CLI adds `empty_answer`,
-`project_context_untrusted`,
+`project_context_untrusted`, `mcp_untrusted`,
 `provider_unavailable`, and `destination_denied`); `grounding` is the same
 `-grounding` report object, field for field, when verification ran. The record
 has **no size cap** — a large answer is one large line, so do not read the
@@ -856,6 +857,73 @@ exit 0/1 as before.
 | `0` | the run completed (a tool call the agent handled and recovered from does not change this) |
 | `1` | the run failed: provider or runtime error — including a provider failure during startup probing — cancellation, no final answer, or an unsatisfied explicit `-trust-project-context` requirement |
 | `2` | caller error: bad flag or input, unknown `-allow-tool` name, unreadable or oversized stdin, missing or malformed configuration, or a destination admission denial |
+
+### External MCP catalog trust
+
+Golem can attach external tools with `-mcp-stdio 'fs=command args'` or
+`-mcp-http 'fs=https://endpoint'`. Use explicit, stable aliases. Ordinary REPL
+startup pins the first complete valid catalog (including an empty catalog) in
+private user data outside the workspace and prints its digest and tool names on
+stderr. Later changes block the entire alias, close its session, and report a
+names-only diff. Other healthy aliases remain available; the startup summary
+counts blocked aliases separately from tools.
+
+Review and approve the exact current catalog without starting a model session
+or invoking a tool:
+
+```sh
+golem mcp inspect -root /path/to/workspace -mcp-stdio 'fs=command args'
+golem mcp approve -root /path/to/workspace -mcp-stdio 'fs=command args' -digest 'sha256:<64 lowercase hex digits from inspect>'
+# HTTP uses the same alias and endpoint as startup:
+golem mcp inspect -root /path/to/workspace -mcp-http 'fs=https://endpoint'
+golem mcp approve -root /path/to/workspace -mcp-http 'fs=https://endpoint' -digest 'sha256:<64 lowercase hex digits from inspect>'
+```
+
+Each command requires exactly one explicitly aliased server; `-root` defaults to
+`.` and an explicitly empty root is invalid. Inspection is text-only and prints
+the quoted pin path and safely quoted old/new definitions. Approval re-fetches,
+checks the supplied digest, and atomically replaces only the unchanged prior pin
+revision. Concurrent changes require a fresh inspection/approval. Success prints
+the accepted names-only diff and digest on stderr. A durability error is failure
+even if published bytes may already exist; inspect before retrying.
+
+`-p` requires an existing matching pin for every configured alias before model
+discovery, capability probes, or inference. Missing, changed, invalid, unavailable,
+or unreadable catalogs stop the invocation with exit 1 and no pin writes. JSON
+and stream-json emit one `golem.result.v1` error record with code `mcp_untrusted`
+and no runtime events; text prints diagnostics on stderr. Catalog approval does
+not authorize tool execution: MCP tools still require interactive approval and
+remain denied headlessly. `-goal` and `-plan` still reject MCP attachments.
+
+Pins bind the complete model-facing catalog to the canonical workspace and alias.
+A new linked or scratch worktree has a new trust namespace: REPL first contact
+pins there, while `-p` requires prior explicit approval. Derived aliases such as
+`env`/`env2` depend on configuration order; reordering can mismatch a pin or create
+a fresh first-contact boundary. To review the second server, explicitly use
+`env2=command args`. Changing aliases or deleting pins resets trust. Pins live
+under `$XDG_DATA_HOME/golem/mcp-pins/<sha256 hex of the symlink-resolved
+absolute workspace path>/<sha256 hex of the alias>.json` (default
+`$XDG_DATA_HOME` is `~/.local/share`); a successful `golem mcp inspect` prints
+the exact file. A pin that is unreadable, unsafe, or invalid blocks its alias
+as `pin_unavailable` and is never rewritten or treated as absent; delete it to
+start over. Pins do not attest transport/process identity; approval hints omit
+endpoints and arguments because those may contain credentials.
+
+Top-level descriptions are flattened and bounded before registration. Every
+schema field, including nested descriptions, titles, extensions, and instance
+literals, is pinned without rewriting strings. Catalog order and object-key order
+do not affect the digest; schema-array order does. The SDK's decoded values are
+pinned, so equivalent numeric spellings and numbers rounded to the same decoded
+value share a digest; duplicate keys and malformed Unicode already discarded by
+the SDK cannot be recovered. A catalog over 128 tools, 100 pages, or 32 KiB per
+canonical schema is rejected as a whole, as are incomplete listings, repeated
+cursors, nil entries, duplicate names, and invalid names/schemas. Description
+truncation alone remains valid and produces a notice.
+
+TOFU detects definition drift after first contact. It cannot validate prose,
+protect against an initially malicious server, or detect behavior changes behind
+unchanged definitions. Live `tools/list_changed` handling remains out of scope.
+Existing foreign-result provenance and observation fencing still apply.
 
 ### MCP server
 

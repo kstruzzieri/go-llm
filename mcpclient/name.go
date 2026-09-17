@@ -17,10 +17,10 @@ func validAlias(a string) bool { return aliasRE.MatchString(a) }
 // composeName builds the namespaced "mcp__<alias>__<remote>" name and reports
 // whether it is usable as a provider tool name. A remote name with characters
 // outside the provider set, or an over-long composed name, is rejected so the
-// caller can skip+warn rather than register an invalid tool.
+// caller can reject the catalog before registering tools.
 func composeName(alias, remote string) (string, bool) {
 	name := "mcp__" + alias + "__" + remote
-	if len(name) > maxComposedNameLen || !nameRE.MatchString(name) {
+	if !validAlias(alias) || remote == "" || len(name) > maxComposedNameLen || !nameRE.MatchString(name) {
 		return "", false
 	}
 	return name, true
