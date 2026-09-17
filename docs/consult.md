@@ -17,7 +17,17 @@ It is not:
   `provider.Router` has no consultant in any of its fallback chains;
 - a tool — the agent cannot call it. Only you can, from the REPL;
 - a credential holder — the vendor CLI owns its own subscription login, and
-  go-llm never reads, stores or forwards a token;
+  go-llm never reads, stores or forwards a token. That is the line Anthropic's
+  [authentication and credential use][anthropic-auth] policy draws:
+  subscription OAuth is for ordinary use of Claude Code and other native
+  Anthropic applications; third-party software may not route requests through
+  Free, Pro or Max plan credentials on behalf of its users, nor collect, store
+  or intermediate Claude.ai credentials or session tokens. Here the user
+  installs and signs in to the unmodified binary; go-llm only execs it. As of
+  the June 2026 [plan-usage notice][anthropic-plan] such `claude -p` use still
+  draws from the subscription's limits. Anthropic may change enforcement
+  without notice; a change surfaces as an `auth` code under
+  [Error codes](#error-codes), and nothing falls back to another credential;
 - signed — the receipt is in-process only (see [Receipt](#receipt)).
 
 The only adapter in v1 is `claude`. Codex and Antigravity are not implemented.
@@ -521,9 +531,23 @@ consultant trusted. These residual items are known and unresolved:
 - **`Error.Code` is a plain string.** Consumers matching on it do so by
   literal; a typed code with exported constants, in the style of `configio`'s
   bounded error codes, would make that a compile-time concern.
+- **The seam admits only the subscription login.** The child environment
+  carries no API key and admission rejects any `apiKeySource` other than
+  `none`. Anthropic's conditions for running Claude Code inside a product say
+  the unmodified binary must keep every built-in authentication method
+  available, including the user's own API key. Whether that clause reaches a
+  library that execs the user's own installed binary has not been assessed.
 
 ## References
 
 - Stage 0 spec: `docs/superpowers/specs/2026-09-09-382-subscription-consult.md`
   (may be local/gitignored rather than committed).
 - Issue [#382](https://github.com/kstruzzieri/go-llm/issues/382).
+- Anthropic, [Legal and compliance: authentication and credential
+  use][anthropic-auth] — the policy the credential boundary satisfies.
+- Anthropic, [Use the Claude Agent SDK with your Claude plan][anthropic-plan]
+  — the June 2026 notice that `claude -p` and Agent SDK use still draw from
+  subscription limits (the announced transition away from that was paused).
+
+[anthropic-auth]: https://code.claude.com/docs/en/legal-and-compliance#authentication-and-credential-use
+[anthropic-plan]: https://support.claude.com/en/articles/15036540-use-the-claude-agent-sdk-with-your-claude-plan
