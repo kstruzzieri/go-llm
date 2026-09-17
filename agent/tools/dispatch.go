@@ -229,16 +229,20 @@ func (d *Dispatch) invokeConcurrency() int {
 
 // Spec returns the model-facing dispatch contract.
 func (d *Dispatch) Spec() agent.ToolSpec {
+	items := `{"type":"string"}`
+	if supportsScopedDispatch {
+		items = `{"oneOf":[{"type":"string"},{"type":"object","properties":{"task":{"type":"string"},"scope":{"type":"string"}},"required":["task","scope"],"additionalProperties":false}]}`
+	}
 	return agent.ToolSpec{
 		Name:        DispatchToolName,
 		Description: "Run one or more bounded, read-only exploration tasks in child agents and return their summaries, stop reasons, and actual models.",
 		Parameters: json.RawMessage(fmt.Sprintf(`{
   "type":"object",
   "properties":{
-    "tasks":{"type":"array","items":{"oneOf":[{"type":"string"},{"type":"object","properties":{"task":{"type":"string"},"scope":{"type":"string"}},"required":["task","scope"],"additionalProperties":false}]},"minItems":1,"maxItems":%d,"description":"independent read-only investigation tasks"}
+    "tasks":{"type":"array","items":%s,"minItems":1,"maxItems":%d,"description":"independent read-only investigation tasks"}
   },
   "required":["tasks"]
-}`, d.limits.MaxTasks)),
+}`, items, d.limits.MaxTasks)),
 	}
 }
 

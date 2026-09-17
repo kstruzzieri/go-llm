@@ -10,6 +10,8 @@ import (
 	"path/filepath"
 )
 
+const supportsScopedDispatch = false
+
 func (w *Workspace) walk(ctx context.Context, fn func(rel string, d fs.DirEntry) error) error {
 	return filepath.WalkDir(w.root, func(abs string, d fs.DirEntry, err error) error {
 		if err != nil {

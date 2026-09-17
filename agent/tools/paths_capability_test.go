@@ -6,10 +6,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"golang.org/x/sys/unix"
@@ -483,5 +485,122 @@ func TestWorkspaceCanonicalAliasWithHardlink(t *testing.T) {
 	}
 	if len(seen) != 1 || seen[0] != "File" {
 		t.Fatalf("canonical guard: %v", seen)
+	}
+}
+
+func TestWorkspaceSearchOnlyCanonicalPolicy(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("permission assertions require non-root")
+	}
+	for _, scoped := range []bool{false, true} {
+		t.Run(fmt.Sprintf("scoped=%v", scoped), func(t *testing.T) {
+			root := t.TempDir()
+			dir := filepath.Join(root, "search")
+			if err := os.MkdirAll(filepath.Join(dir, "Secret"), 0700); err != nil {
+				t.Fatal(err)
+			}
+			for _, name := range []string{"Secret.txt", "Secret/file", "Allowed.txt", "Privé.txt", "Café.txt"} {
+				if err := os.WriteFile(filepath.Join(dir, name), []byte(name), 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if _, err := os.Stat(filepath.Join(dir, "secret.txt")); err != nil {
+				t.Skip("case-sensitive filesystem")
+			}
+			ws, err := NewWorkspace(root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var seen []string
+			ws.SetScopeGuard(func(rel string, _ bool) error {
+				seen = append(seen, rel)
+				if rel == "search/Secret.txt" || rel == "search/Privé.txt" || strings.HasPrefix(rel, "search/Secret/") {
+					return errors.New("private policy detail")
+				}
+				return nil
+			})
+			if err := os.Chmod(dir, 0111); err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = os.Chmod(dir, 0700) })
+			if _, err := os.ReadDir(dir); !errors.Is(err, fs.ErrPermission) {
+				t.Skip("filesystem does not enforce search-only directory permissions")
+			}
+			prefix := "search/"
+			if scoped {
+				var cleanup func()
+				ws, _, cleanup, err = newScopedWorkspace(ws, "search")
+				if err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(cleanup)
+				prefix = ""
+			}
+			for _, name := range []string{"Secret.txt", "secret.txt", "secret/file", "Prive\u0301.txt"} {
+				seen = nil
+				raw, _ := json.Marshal(map[string]string{"path": prefix + name})
+				out, err := NewReadFile(ws).Invoke(context.Background(), raw)
+				if err != nil || !out.IsError || out.Content != "path denied by workspace policy" {
+					t.Errorf("%s: got %+v, %v; want sanitized policy denial", name, out, err)
+				}
+				want := "search/Secret.txt"
+				switch name {
+				case "secret/file":
+					want = "search/Secret/file"
+				case "Prive\u0301.txt":
+					want = "search/Privé.txt"
+				}
+				if len(seen) != 1 || seen[0] != want {
+					t.Errorf("%s: policy paths %v, want only %s", name, seen, want)
+				}
+			}
+			if scoped && ws.scopeDenials.Load() != 4 {
+				t.Errorf("scope denials = %d, want 4", ws.scopeDenials.Load())
+			}
+			for name, want := range map[string]string{"Allowed.txt": "Allowed.txt", "allowed.txt": "Allowed.txt", "Cafe\u0301.txt": "Café.txt"} {
+				data, err := ws.readAll(prefix + name)
+				if err != nil || string(data) != want {
+					t.Fatalf("known-file control %s: %q, %v", name, data, err)
+				}
+			}
+		})
+	}
+}
+
+func TestWorkspaceEntriesSkipVanishedName(t *testing.T) {
+	root := t.TempDir()
+	for _, name := range []string{"a", "b", "c"} {
+		if err := os.WriteFile(filepath.Join(root, name), []byte(name), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	f, err := os.Open(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = f.Close() }()
+	// Prime os.File's directory buffer, then unlink a name already returned by
+	// the kernel. This exercises stale dirents without a concurrent timing race.
+	first, err := f.Readdirnames(1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var vanished, survivor string
+	for _, name := range []string{"a", "b", "c"} {
+		if name == first[0] {
+			continue
+		}
+		if vanished == "" {
+			vanished = name
+		} else {
+			survivor = name
+		}
+	}
+	if err := os.Remove(filepath.Join(root, vanished)); err != nil {
+		t.Fatal(err)
+	}
+	entries, err := readWorkspaceEntries(f)
+	if err != nil || len(entries) != 1 || entries[0].Name() != survivor {
+		t.Fatalf("snapshot after unlink: %v, %v; want only %s", entries, err, survivor)
 	}
 }

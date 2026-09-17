@@ -15,6 +15,8 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+const supportsScopedDispatch = true
+
 // workspaceRoot borrows an invocation capability or opens and validates a
 // temporary parent root. Identity metadata alone does not prevent inode reuse.
 func (w *Workspace) workspaceRoot() (*os.File, func(), error) {
@@ -96,10 +98,16 @@ func (w *Workspace) openReadMode(p string, directory, pin bool) (file *os.File, 
 		if err := unix.Fstatat(int(parent.Fd()), part, &st, unix.AT_SYMLINK_NOFOLLOW); err != nil {
 			return nil, "", err
 		}
-		name, err := workspaceCanonicalName(parent, part, &st)
-		if err != nil {
-			return nil, "", err
+		name, nameErr := workspaceCanonicalName(parent, part, &st)
+		if nameErr != nil {
+			if !errors.Is(nameErr, fs.ErrPermission) {
+				return nil, "", nameErr
+			}
+			// Search permission permits a known-file open, but the caller's
+			// spelling is not policy evidence on a case-insensitive filesystem.
+			name = part
 		}
+		parentLogical := logical
 		logical = filepath.Join(logical, name)
 		policyRel = filepath.Join(logical, filepath.Join(parts[i+1:]...))
 		if st.Mode&unix.S_IFMT == unix.S_IFLNK {
@@ -130,6 +138,22 @@ func (w *Workspace) openReadMode(p string, directory, pin bool) (file *os.File, 
 		if err != nil {
 			_ = f.Close()
 			return nil, "", err
+		}
+		if nameErr != nil {
+			name, err = workspaceDescriptorName(parent, f, part)
+			var named, requested unix.Stat_t
+			// Do not substitute an unrelated hardlink or a renamed component.
+			// The descriptor name must identify this spelling in this parent.
+			if err != nil || name == "" || name == "." || name == ".." || filepath.IsAbs(name) || filepath.Base(name) != name ||
+				unix.Fstatat(int(parent.Fd()), name, &named, unix.AT_SYMLINK_NOFOLLOW) != nil ||
+				named.Dev != opened.Dev || named.Ino != opened.Ino || named.Mode&unix.S_IFMT != opened.Mode&unix.S_IFMT ||
+				unix.Fstatat(int(parent.Fd()), part, &requested, unix.AT_SYMLINK_NOFOLLOW) != nil ||
+				requested.Dev != opened.Dev || requested.Ino != opened.Ino || requested.Mode&unix.S_IFMT != opened.Mode&unix.S_IFMT {
+				_ = f.Close()
+				return nil, "", w.denyScope()
+			}
+			logical = filepath.Join(parentLogical, name)
+			policyRel = filepath.Join(logical, filepath.Join(parts[i+1:]...))
 		}
 		if !last {
 			if parent != root {
@@ -173,9 +197,6 @@ func workspaceCanonicalName(parent *os.File, part string, target *unix.Stat_t) (
 		return part, nil
 	}
 	fd, err := unix.Openat(int(parent.Fd()), ".", unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
-	if errors.Is(err, fs.ErrPermission) {
-		return part, nil
-	}
 	if err != nil {
 		return "", err
 	}
@@ -205,6 +226,9 @@ func workspaceCanonicalName(parent *os.File, part string, target *unix.Stat_t) (
 	for _, name := range names {
 		var st unix.Stat_t
 		if err := unix.Fstatat(int(parent.Fd()), name, &st, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+			if errors.Is(err, fs.ErrNotExist) {
+				continue
+			}
 			return "", err
 		}
 		if st.Dev == target.Dev && st.Ino == target.Ino {
@@ -274,6 +298,9 @@ func readWorkspaceEntries(f *os.File) ([]fs.DirEntry, error) {
 	for _, name := range names {
 		var st unix.Stat_t
 		if err := unix.Fstatat(int(f.Fd()), name, &st, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+			if errors.Is(err, fs.ErrNotExist) {
+				continue
+			}
 			return nil, err
 		}
 		entries = append(entries, workspaceEntry{name: name, stat: st})
