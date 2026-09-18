@@ -30,7 +30,7 @@ docker compose -f docker-compose.ci.yml run --rm ci ./scripts/ci-local --mode pr
 ```
 
 The Docker runner builds from `Dockerfile.ci`, mounts the repository at `/workspace`, and keeps named cache volumes for Go modules, Go build output, and golangci-lint data. The compose file pins the project name to `go-llm`, so linked worktrees share the same image and cache volumes as the main checkout.
-The volumes carry a `-ci` suffix (`go-llm_go-build-cache-ci`, `go-llm_go-mod-cache-ci`, `go-llm_golangci-lint-cache-ci`) because the image runs unprivileged and the volumes must be created with that ownership; the root-owned volumes of the earlier image (`go-llm_go-build-cache`, `go-llm_go-mod-cache`, `go-llm_golangci-lint-cache`) are no longer used and can be removed with `docker volume rm`.
+On a Linux host the bind-mounted checkout must be readable by uid 1000; the gate never writes into it. The volumes carry a `-ci` suffix (`go-llm_go-build-cache-ci`, `go-llm_go-mod-cache-ci`, `go-llm_golangci-lint-cache-ci`) because the image runs unprivileged and the volumes must be created with that ownership; the root-owned volumes of the earlier image (`go-llm_go-build-cache`, `go-llm_go-mod-cache`, `go-llm_golangci-lint-cache`) are no longer used and can be removed with `docker volume rm`.
 
 ## Linked Worktrees
 
@@ -177,11 +177,11 @@ When Ubuntu's unprivileged-userns AppArmor restriction is active, the job
 loads the distro's narrow `bwrap-userns-restrict` profile for
 `/usr/bin/bwrap` instead of disabling the global sysctl.
 
-The root Docker service also cannot prove every permission-denial path:
-`TestWriteFilePreparingJournalAbortsOnWriteFailure` skips as root, while
-`TestSafeEtcPolicyPaths` silently omits its permission-denial branch. An empty
-skip log therefore does not establish complete permission coverage; the native
-non-root Linux job owns it.
+Because the Docker service runs unprivileged, tests that skip under root
+execute in the gate (`TestWriteFilePreparingJournalAbortsOnWriteFailure`, for
+example), and `scripts/ci-local` refuses to run the suite as root so a stale
+root image cannot report a hollow green. Tests that skip on a case-sensitive
+filesystem still skip in the container; the native Darwin job covers those.
 
 ## Notes
 
