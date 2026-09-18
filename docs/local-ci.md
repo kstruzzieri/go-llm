@@ -30,6 +30,7 @@ docker compose -f docker-compose.ci.yml run --rm ci ./scripts/ci-local --mode pr
 ```
 
 The Docker runner builds from `Dockerfile.ci`, mounts the repository at `/workspace`, and keeps named cache volumes for Go modules, Go build output, and golangci-lint data. The compose file pins the project name to `go-llm`, so linked worktrees share the same image and cache volumes as the main checkout.
+The volumes carry a `-ci` suffix (`go-llm_go-build-cache-ci`, `go-llm_go-mod-cache-ci`, `go-llm_golangci-lint-cache-ci`) because the image runs unprivileged and the volumes must be created with that ownership; the root-owned volumes of the earlier image (`go-llm_go-build-cache`, `go-llm_go-mod-cache`, `go-llm_golangci-lint-cache`) are no longer used and can be removed with `docker volume rm`.
 
 ## Linked Worktrees
 
@@ -122,11 +123,16 @@ go test -list '^TestHardeningContracts$' ./agent
 go test -count=1 -timeout 60s -v -run '^TestHardeningContracts$' ./agent
 ```
 
-Local tests retain platform and permission skips. Native CI workflows separately
-enforce real Linux bwrap confinement, real Darwin Seatbelt confinement, and the
-permission-denial cases that need a non-root Linux runner. The local Docker
-service remains unprivileged and runs as root, so it does not claim those checks.
-Generated fuzzing remains tracked by #512.
+The local Docker service runs as an unprivileged user (uid 1000), so the
+permission-denial tests that skip under root execute in the gate exactly as they
+do on the GitHub runner. Native CI workflows still separately enforce real Linux
+bwrap confinement and real Darwin Seatbelt confinement; the local image provides
+neither. Generated fuzzing remains tracked by #512.
+
+The process-reaping tests treat a zombie as gone. Orphans left by a killed
+process group are reparented to PID 1, and when the container's PID 1 is not an
+init (`sh -c '...; go test ...'` execs its final command) nothing reaps them;
+`kill(pid, 0)` alone would then report every dead orphan as alive.
 
 ## Git Hook
 
