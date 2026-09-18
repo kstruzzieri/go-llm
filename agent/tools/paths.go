@@ -57,6 +57,13 @@ var (
 	errScopeDenied = errors.New("path denied by workspace policy")
 )
 
+// ErrRootReplaced reports that the workspace root directory is no longer the
+// directory captured at construction (deleted and recreated, or swapped). Every
+// pinned read fails with it until the host builds a new Workspace; hosts that
+// keep a Workspace across project lifetimes should treat it as "rebuild", not
+// "retry". It wraps the identity-change error so tool output is unchanged.
+var ErrRootReplaced = fmt.Errorf("workspace root replaced: %w", errFileChanged)
+
 type scopeDeniedError struct{ cause error }
 
 func (e scopeDeniedError) Error() string        { return e.cause.Error() }

@@ -243,13 +243,18 @@ func TestScopedSearchOnlyRoot(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = os.Chmod(dir, 0700) }()
-	ws, _, cleanup, err := newScopedWorkspace(parent, "a")
+	ws, count, cleanup, err := newScopedWorkspace(parent, "a")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer cleanup()
-	if got, err := ws.readAll("visible.txt"); err != nil || string(got) != "A_ONLY\n" {
-		t.Fatalf("search-only read = %q, %v", got, err)
+	// The scope root pins, but a name inside an unenumerable directory cannot
+	// be verified, so the read is denied and counted (fail closed).
+	if got, err := ws.readAll("visible.txt"); !errors.Is(err, errScopeDenied) {
+		t.Fatalf("search-only read = %q, %v; want denial", got, err)
+	}
+	if count.Load() != 1 {
+		t.Fatalf("scope denials = %d, want 1", count.Load())
 	}
 }
 

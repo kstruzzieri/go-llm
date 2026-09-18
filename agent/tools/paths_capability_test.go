@@ -11,6 +11,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -35,11 +36,14 @@ func TestWorkspaceRootReplacement(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(root, "secret.txt"), []byte("FORBIDDEN\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if data, err := ws.readAll("secret.txt"); !errors.Is(err, errFileChanged) {
+	if data, err := ws.readAll("secret.txt"); !errors.Is(err, ErrRootReplaced) || !errors.Is(err, errFileChanged) {
 		t.Fatalf("replacement read: %q, %v", data, err)
 	}
-	if _, err := ws.openDir("."); !errors.Is(err, errFileChanged) {
+	if _, err := ws.openDir("."); !errors.Is(err, ErrRootReplaced) {
 		t.Fatalf("replacement directory: %v", err)
+	}
+	if got := toolErrMessage(fmt.Errorf("wrapped: %w", ErrRootReplaced)); got != "path changed during access" {
+		t.Fatalf("model-visible message = %q", got)
 	}
 }
 
@@ -228,9 +232,8 @@ func TestWorkspacePermissionCompatibility(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = os.Chmod(dir, 0700) }()
-	data, err := ws.readAll("search/file")
-	if err != nil || string(data) != "ORIGINAL\n" {
-		t.Fatalf("search-only read %q, %v", data, err)
+	if data, err := ws.readAll("search/file"); !errors.Is(err, errScopeDenied) {
+		t.Fatalf("search-only read %q, %v; want denial", data, err)
 	}
 	if err := os.Chmod(file, 0111); err != nil {
 		t.Fatal(err)
@@ -488,7 +491,7 @@ func TestWorkspaceCanonicalAliasWithHardlink(t *testing.T) {
 	}
 }
 
-func TestWorkspaceSearchOnlyCanonicalPolicy(t *testing.T) {
+func TestWorkspaceSearchOnlyDenied(t *testing.T) {
 	if os.Geteuid() == 0 {
 		t.Skip("permission assertions require non-root")
 	}
@@ -499,13 +502,10 @@ func TestWorkspaceSearchOnlyCanonicalPolicy(t *testing.T) {
 			if err := os.MkdirAll(filepath.Join(dir, "Secret"), 0700); err != nil {
 				t.Fatal(err)
 			}
-			for _, name := range []string{"Secret.txt", "Secret/file", "Allowed.txt", "Privé.txt", "Café.txt"} {
+			for _, name := range []string{"Secret.txt", "Secret/file", "Allowed.txt"} {
 				if err := os.WriteFile(filepath.Join(dir, name), []byte(name), 0600); err != nil {
 					t.Fatal(err)
 				}
-			}
-			if _, err := os.Stat(filepath.Join(dir, "secret.txt")); err != nil {
-				t.Skip("case-sensitive filesystem")
 			}
 			ws, err := NewWorkspace(root)
 			if err != nil {
@@ -514,7 +514,7 @@ func TestWorkspaceSearchOnlyCanonicalPolicy(t *testing.T) {
 			var seen []string
 			ws.SetScopeGuard(func(rel string, _ bool) error {
 				seen = append(seen, rel)
-				if rel == "search/Secret.txt" || rel == "search/Privé.txt" || strings.HasPrefix(rel, "search/Secret/") {
+				if rel == "search/Secret.txt" || strings.HasPrefix(rel, "search/Secret/") {
 					return errors.New("private policy detail")
 				}
 				return nil
@@ -536,32 +536,36 @@ func TestWorkspaceSearchOnlyCanonicalPolicy(t *testing.T) {
 				t.Cleanup(cleanup)
 				prefix = ""
 			}
-			for _, name := range []string{"Secret.txt", "secret.txt", "secret/file", "Prive\u0301.txt"} {
+			// Nothing inside an unenumerable directory can have its spelling
+			// proven, so every read is denied uniformly: guard-denied, guard-
+			// allowed, and case aliases alike. The guard never sees an
+			// unverified spelling.
+			names := []string{"Secret.txt", "secret.txt", "secret/file", "Allowed.txt", "allowed.txt"}
+			for _, name := range names {
 				seen = nil
 				raw, _ := json.Marshal(map[string]string{"path": prefix + name})
 				out, err := NewReadFile(ws).Invoke(context.Background(), raw)
 				if err != nil || !out.IsError || out.Content != "path denied by workspace policy" {
 					t.Errorf("%s: got %+v, %v; want sanitized policy denial", name, out, err)
 				}
-				want := "search/Secret.txt"
-				switch name {
-				case "secret/file":
-					want = "search/Secret/file"
-				case "Prive\u0301.txt":
-					want = "search/Privé.txt"
-				}
-				if len(seen) != 1 || seen[0] != want {
-					t.Errorf("%s: policy paths %v, want only %s", name, seen, want)
+				if len(seen) != 0 {
+					t.Errorf("%s: guard consulted with unverified spelling %v", name, seen)
 				}
 			}
-			if scoped && ws.scopeDenials.Load() != 4 {
-				t.Errorf("scope denials = %d, want 4", ws.scopeDenials.Load())
+			if scoped && ws.scopeDenials.Load() != int64(len(names)) {
+				t.Errorf("scope denials = %d, want %d", ws.scopeDenials.Load(), len(names))
 			}
-			for name, want := range map[string]string{"Allowed.txt": "Allowed.txt", "allowed.txt": "Allowed.txt", "Cafe\u0301.txt": "Café.txt"} {
-				data, err := ws.readAll(prefix + name)
-				if err != nil || string(data) != want {
-					t.Fatalf("known-file control %s: %q, %v", name, data, err)
-				}
+			// Enumeration restored: the same names resolve and policy sees
+			// canonical spellings again.
+			if err := os.Chmod(dir, 0700); err != nil {
+				t.Fatal(err)
+			}
+			seen = nil
+			if data, err := ws.readAll(prefix + "Allowed.txt"); err != nil || string(data) != "Allowed.txt" {
+				t.Fatalf("readable control: %q, %v", data, err)
+			}
+			if !slices.Equal(seen, []string{"search/Allowed.txt"}) {
+				t.Fatalf("readable control policy = %v", seen)
 			}
 		})
 	}

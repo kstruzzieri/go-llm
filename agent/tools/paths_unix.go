@@ -30,7 +30,7 @@ func (w *Workspace) workspaceRoot() (*os.File, func(), error) {
 	f := os.NewFile(uintptr(fd), w.root)
 	fi, err := f.Stat()
 	if err == nil && !os.SameFile(w.rootIdentity, fi) {
-		err = errFileChanged
+		err = ErrRootReplaced
 	}
 	if err != nil {
 		_ = f.Close()
@@ -52,8 +52,8 @@ func (w *Workspace) openRead(p string, directory bool) (*os.File, string, error)
 	return w.openReadMode(p, directory, false)
 }
 
-// pinScope retains a search-only handle; delegated known-file reads must not
-// require permission to enumerate the delegated directory.
+// pinScope retains a search-only handle for the scope root: the child borrows
+// the least-privileged descriptor that still anchors relative opens.
 func (w *Workspace) pinScope(p string) (*os.File, string, error) {
 	return w.openReadMode(p, true, true)
 }
@@ -71,8 +71,13 @@ func (w *Workspace) openReadMode(p string, directory, pin bool) (file *os.File, 
 	// Resolve policy spelling from pinned components as far as possible. On a
 	// filesystem failure, retain the cleaned suffix and still consult the guard
 	// exactly once, so denied names do not disclose existence/type/accessibility.
+	// A name already denied as unverifiable never reaches the guard: the caller's
+	// spelling is not policy evidence.
 	policyRel := rel
 	defer func() {
+		if errors.Is(resultErr, errScopeDenied) {
+			return
+		}
 		if err := w.checkScope(filepath.Join(w.root, policyRel), false); err != nil {
 			if file != nil {
 				_ = file.Close()
@@ -98,16 +103,16 @@ func (w *Workspace) openReadMode(p string, directory, pin bool) (file *os.File, 
 		if err := unix.Fstatat(int(parent.Fd()), part, &st, unix.AT_SYMLINK_NOFOLLOW); err != nil {
 			return nil, "", err
 		}
-		name, nameErr := workspaceCanonicalName(parent, part, &st)
-		if nameErr != nil {
-			if !errors.Is(nameErr, fs.ErrPermission) {
-				return nil, "", nameErr
+		name, err := workspaceCanonicalName(parent, part, &st)
+		if err != nil {
+			if errors.Is(err, fs.ErrPermission) {
+				// The parent cannot be enumerated, so the on-disk spelling cannot
+				// be proven. Fail closed on every platform rather than trust an
+				// alias; descriptor-name metadata is not canonical evidence.
+				return nil, "", w.denyScope()
 			}
-			// Search permission permits a known-file open, but the caller's
-			// spelling is not policy evidence on a case-insensitive filesystem.
-			name = part
+			return nil, "", err
 		}
-		parentLogical := logical
 		logical = filepath.Join(logical, name)
 		policyRel = filepath.Join(logical, filepath.Join(parts[i+1:]...))
 		if st.Mode&unix.S_IFMT == unix.S_IFLNK {
@@ -138,22 +143,6 @@ func (w *Workspace) openReadMode(p string, directory, pin bool) (file *os.File, 
 		if err != nil {
 			_ = f.Close()
 			return nil, "", err
-		}
-		if nameErr != nil {
-			name, err = workspaceDescriptorName(parent, f, part)
-			var named, requested unix.Stat_t
-			// Do not substitute an unrelated hardlink or a renamed component.
-			// The descriptor name must identify this spelling in this parent.
-			if err != nil || name == "" || name == "." || name == ".." || filepath.IsAbs(name) || filepath.Base(name) != name ||
-				unix.Fstatat(int(parent.Fd()), name, &named, unix.AT_SYMLINK_NOFOLLOW) != nil ||
-				named.Dev != opened.Dev || named.Ino != opened.Ino || named.Mode&unix.S_IFMT != opened.Mode&unix.S_IFMT ||
-				unix.Fstatat(int(parent.Fd()), part, &requested, unix.AT_SYMLINK_NOFOLLOW) != nil ||
-				requested.Dev != opened.Dev || requested.Ino != opened.Ino || requested.Mode&unix.S_IFMT != opened.Mode&unix.S_IFMT {
-				_ = f.Close()
-				return nil, "", w.denyScope()
-			}
-			logical = filepath.Join(parentLogical, name)
-			policyRel = filepath.Join(logical, filepath.Join(parts[i+1:]...))
 		}
 		if !last {
 			if parent != root {
