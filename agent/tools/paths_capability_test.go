@@ -526,6 +526,13 @@ func TestWorkspaceSearchOnlyDenied(t *testing.T) {
 			if _, err := os.ReadDir(dir); !errors.Is(err, fs.ErrPermission) {
 				t.Skip("filesystem does not enforce search-only directory permissions")
 			}
+			// Whether the filesystem resolves case aliases decides which names
+			// exist at all; on a case-sensitive filesystem an alias is simply
+			// absent and the OS reports that before any spelling check.
+			aliasResolves := true
+			if _, err := os.Lstat(filepath.Join(dir, "secret.txt")); err != nil {
+				aliasResolves = false
+			}
 			prefix := "search/"
 			if scoped {
 				var cleanup func()
@@ -536,24 +543,42 @@ func TestWorkspaceSearchOnlyDenied(t *testing.T) {
 				t.Cleanup(cleanup)
 				prefix = ""
 			}
-			// Nothing inside an unenumerable directory can have its spelling
-			// proven, so every read is denied uniformly: guard-denied, guard-
-			// allowed, and case aliases alike. The guard never sees an
-			// unverified spelling.
-			names := []string{"Secret.txt", "secret.txt", "secret/file", "Allowed.txt", "allowed.txt"}
-			for _, name := range names {
+			// Every existing entry inside an unenumerable directory is denied
+			// uniformly, guard-denied and guard-allowed alike, and the guard never
+			// sees the unverified spelling of an existing entry. A spelling that
+			// does not exist is reported as not found; the guard sees that
+			// spelling, which can be no alias of anything.
+			names := []struct {
+				name  string
+				exact bool
+			}{{"Secret.txt", true}, {"Secret/file", true}, {"Allowed.txt", true}, {"secret.txt", false}, {"secret/file", false}, {"allowed.txt", false}}
+			denied := 0
+			for _, tc := range names {
 				seen = nil
-				raw, _ := json.Marshal(map[string]string{"path": prefix + name})
+				raw, _ := json.Marshal(map[string]string{"path": prefix + tc.name})
 				out, err := NewReadFile(ws).Invoke(context.Background(), raw)
-				if err != nil || !out.IsError || out.Content != "path denied by workspace policy" {
-					t.Errorf("%s: got %+v, %v; want sanitized policy denial", name, out, err)
+				if err != nil || !out.IsError {
+					t.Fatalf("%s: got %+v, %v", tc.name, out, err)
 				}
-				if len(seen) != 0 {
-					t.Errorf("%s: guard consulted with unverified spelling %v", name, seen)
+				if tc.exact || aliasResolves {
+					denied++
+					if out.Content != "path denied by workspace policy" {
+						t.Errorf("%s: got %q; want sanitized policy denial", tc.name, out.Content)
+					}
+					if len(seen) != 0 {
+						t.Errorf("%s: guard consulted with unverified spelling %v", tc.name, seen)
+					}
+					continue
+				}
+				if out.Content != "path not found" {
+					t.Errorf("%s: got %q; want not found on a case-sensitive filesystem", tc.name, out.Content)
+				}
+				if !slices.Equal(seen, []string{"search/" + tc.name}) {
+					t.Errorf("%s: guard saw %v, want the absent spelling once", tc.name, seen)
 				}
 			}
-			if scoped && ws.scopeDenials.Load() != int64(len(names)) {
-				t.Errorf("scope denials = %d, want %d", ws.scopeDenials.Load(), len(names))
+			if scoped && ws.scopeDenials.Load() != int64(denied) {
+				t.Errorf("scope denials = %d, want %d", ws.scopeDenials.Load(), denied)
 			}
 			// Enumeration restored: the same names resolve and policy sees
 			// canonical spellings again.
