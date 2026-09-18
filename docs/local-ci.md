@@ -30,6 +30,7 @@ docker compose -f docker-compose.ci.yml run --rm ci ./scripts/ci-local --mode pr
 ```
 
 The Docker runner builds from `Dockerfile.ci`, mounts the repository at `/workspace`, and keeps named cache volumes for Go modules, Go build output, and golangci-lint data. The compose file pins the project name to `go-llm`, so linked worktrees share the same image and cache volumes as the main checkout.
+On a Linux host the bind-mounted checkout must be readable by uid 1000; the gate never writes into it. The volumes carry a `-ci` suffix (`go-llm_go-build-cache-ci`, `go-llm_go-mod-cache-ci`, `go-llm_golangci-lint-cache-ci`) because the image runs unprivileged and the volumes must be created with that ownership; the root-owned volumes of the earlier image (`go-llm_go-build-cache`, `go-llm_go-mod-cache`, `go-llm_golangci-lint-cache`) are no longer used and can be removed with `docker volume rm`.
 
 ## Linked Worktrees
 
@@ -122,11 +123,17 @@ go test -list '^TestHardeningContracts$' ./agent
 go test -count=1 -timeout 60s -v -run '^TestHardeningContracts$' ./agent
 ```
 
-Local tests retain platform and permission skips. Native CI workflows separately
-enforce real Linux bwrap confinement, real Darwin Seatbelt confinement, and the
-permission-denial cases that need a non-root Linux runner. The local Docker
-service remains unprivileged and runs as root, so it does not claim those checks.
-Generated fuzzing remains tracked by #512.
+The local Docker service runs as an unprivileged user (uid 1000), so the
+permission-denial tests that skip under root execute in the gate exactly as they
+do on the GitHub runner. Native CI workflows still separately enforce real Linux
+bwrap confinement and real Darwin Seatbelt confinement; the local image provides
+neither. Generated fuzzing remains tracked by #512.
+
+The compose service sets `init: true`, so tini runs as PID 1 and reaps the
+orphans a killed process group leaves behind. The process-reaping tests also
+treat a zombie as gone, because an invocation without an init (`sh -c '...; go
+test ...'` execs its final command, leaving `go` as PID 1) never reaps them and
+`kill(pid, 0)` alone would then report every dead orphan as alive.
 
 ## Git Hook
 
@@ -171,11 +178,11 @@ When Ubuntu's unprivileged-userns AppArmor restriction is active, the job
 loads the distro's narrow `bwrap-userns-restrict` profile for
 `/usr/bin/bwrap` instead of disabling the global sysctl.
 
-The root Docker service also cannot prove every permission-denial path:
-`TestWriteFilePreparingJournalAbortsOnWriteFailure` skips as root, while
-`TestSafeEtcPolicyPaths` silently omits its permission-denial branch. An empty
-skip log therefore does not establish complete permission coverage; the native
-non-root Linux job owns it.
+Because the Docker service runs unprivileged, tests that skip under root
+execute in the gate (`TestWriteFilePreparingJournalAbortsOnWriteFailure`, for
+example), and `scripts/ci-local` refuses to run the suite as root so a stale
+root image cannot report a hollow green. Tests that skip on a case-sensitive
+filesystem still skip in the container; the native Darwin job covers those.
 
 ## Notes
 
