@@ -129,9 +129,10 @@ do on the GitHub runner. Native CI workflows still separately enforce real Linux
 bwrap confinement and real Darwin Seatbelt confinement; the local image provides
 neither. Generated fuzzing remains tracked by #512.
 
-The process-reaping tests treat a zombie as gone. Orphans left by a killed
-process group are reparented to PID 1, and when the container's PID 1 is not an
-init (`sh -c '...; go test ...'` execs its final command) nothing reaps them;
+The compose service sets `init: true`, so tini runs as PID 1 and reaps the
+orphans a killed process group leaves behind. The process-reaping tests also
+treat a zombie as gone, because an invocation without an init (`sh -c '...; go
+test ...'` execs its final command, leaving `go` as PID 1) never reaps them and
 `kill(pid, 0)` alone would then report every dead orphan as alive.
 
 ## Git Hook

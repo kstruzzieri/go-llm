@@ -8,6 +8,9 @@ services:
       context: .
       dockerfile: Dockerfile.ci
     working_dir: /workspace
+    # tini as PID 1 reaps orphans left by killed process groups; without it
+    # they stay zombies for the container's lifetime.
+    init: true
     command: ["./scripts/ci-local", "--mode", "pre-push"]
     # The image runs as uid 1000 (see Dockerfile.ci). The volume names carry a
     # -ci suffix so they are created fresh with that ownership rather than

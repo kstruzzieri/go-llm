@@ -95,6 +95,16 @@ require_cmd id
 unset GOROOT
 export GOFLAGS=' '
 
+# The race tests are only meaningful unprivileged: root skips every
+# permission-denial path. A CI image built before the gate ran as uid 1000
+# still starts as root, so refuse before any phase runs rather than report a
+# hollow green. Security mode runs nothing permission-sensitive.
+if [ "$mode" != security ] && [ "$(id -u)" = 0 ]; then
+  printf 'ci-local: refusing to run the test suite as root; permission-denial tests would skip\n' >&2
+  printf 'hint: rebuild the CI image: docker compose -f docker-compose.ci.yml build ci\n' >&2
+  exit 2
+fi
+
 section "security contracts"
 printf 'note: local tests retain platform/permission skips; native bwrap/Seatbelt confinement runs in CI workflows\n'
 security_tests="$(go test -list '^TestHardeningContracts$' ./agent)"
@@ -128,15 +138,6 @@ if [ -n "$unexpected_skips" ]; then
 fi
 if [ "$mode" = security ]; then
   exit 0
-fi
-
-# The race tests are only meaningful unprivileged: root skips every
-# permission-denial path. A CI image built before the gate ran as uid 1000
-# still starts as root, so refuse rather than report a hollow green.
-if [ "$(id -u)" = 0 ]; then
-  printf 'ci-local: refusing to run the test suite as root; permission-denial tests would skip\n' >&2
-  printf 'hint: rebuild the CI image: docker compose -f docker-compose.ci.yml build ci\n' >&2
-  exit 2
 fi
 
 section "format"

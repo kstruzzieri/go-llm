@@ -4,9 +4,10 @@ FROM golang:1.25-alpine
 
 ARG GOLANGCI_LINT_VERSION=v2.11.4
 
+# GOCACHE here is the build-stage cache-mount target for the tool install
+# below; the runtime user gets its own caches further down.
 ENV CGO_ENABLED=1 \
-    GOCACHE=/root/.cache/go-build \
-    GOLANGCI_LINT_CACHE=/root/.cache/golangci-lint
+    GOCACHE=/root/.cache/go-build
 
 WORKDIR /workspace
 
