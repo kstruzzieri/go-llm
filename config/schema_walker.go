@@ -37,7 +37,7 @@ var jsonMarshalerType = reflect.TypeOf((*json.Marshaler)(nil)).Elem()
 // else — including custom-marshal types like Duration, whose JSON shape is
 // not their field set — is a leaf (nil).
 func schemaNodeFor(t reflect.Type) *schemaNode {
-	for t.Kind() == reflect.Ptr {
+	for t.Kind() == reflect.Pointer {
 		t = t.Elem()
 	}
 	switch {

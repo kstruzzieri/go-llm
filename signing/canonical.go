@@ -150,17 +150,32 @@ func rejectInvalidUTF8Value(v reflect.Value, visiting map[utf8Visit]bool) error 
 		if v.IsNil() {
 			return nil // encoding/json emits null
 		}
-		// encoding/json selects the marshaler from the STATIC interface type
-		// before looking at the dynamic value: an interface type embedding
-		// json.Marshaler routes to MarshalJSON, one embedding only
+		// encoding/json before Go 1.27 selects the marshaler from the STATIC
+		// interface type before looking at the dynamic value: an interface type
+		// embedding json.Marshaler routes to MarshalJSON, one embedding only
 		// encoding.TextMarshaler routes to MarshalText (whose output is then
 		// string-coerced), and any other interface type dispatches on the
-		// dynamic value as a non-addressable operand. Review finding: unwrapping
-		// first let a dynamic json.Marshaler mask a static MarshalText route.
-		if v.Type().Implements(jsonMarshalerType) {
+		// dynamic value as a non-addressable operand. The json-v2-backed
+		// implementation in Go 1.27 dispatches on the dynamic value instead.
+		// The two agree except for two shapes, both refused so canonical bytes
+		// never depend on the build toolchain (#562): a TextMarshaler-only
+		// static type holding a value that also implements json.Marshaler, and
+		// either marshaler interface holding a typed nil pointer, which the
+		// older encoder calls the method on and the newer one panics on.
+		// Review finding: unwrapping first let a dynamic json.Marshaler mask a
+		// static MarshalText route.
+		staticJSON := v.Type().Implements(jsonMarshalerType)
+		staticText := v.Type().Implements(textMarshalerType)
+		if (staticJSON || staticText) && v.Elem().Kind() == reflect.Pointer && v.Elem().IsNil() {
+			return ErrAmbiguousMarshaler
+		}
+		if staticJSON {
 			return nil
 		}
-		if v.Type().Implements(textMarshalerType) && v.CanInterface() {
+		if staticText && v.CanInterface() {
+			if _, ok := v.Interface().(json.Marshaler); ok {
+				return ErrAmbiguousMarshaler
+			}
 			return validTextOutput(v.Interface().(encoding.TextMarshaler))
 		}
 		return rejectInvalidUTF8Value(v.Elem(), visiting)

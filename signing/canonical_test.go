@@ -396,37 +396,108 @@ func TestMarshalCanonicalDispatchMatchesEncodingJSON(t *testing.T) {
 	}
 }
 
-// textOnlyIface and jsonOnlyIface are static field types. encoding/json picks
-// the marshaler from the static type of a field: an interface type embedding
-// only TextMarshaler routes to MarshalText even when the dynamic value also
-// implements json.Marshaler.
+// textOnlyIface and jsonOnlyIface are static field types. encoding/json before
+// Go 1.27 picks the marshaler from the static type of a field, so an interface
+// type embedding only TextMarshaler routes to MarshalText even when the dynamic
+// value also implements json.Marshaler; the json-v2-backed implementation in
+// Go 1.27 routes on the dynamic value and would use MarshalJSON. That shape is
+// refused (#562); a TextMarshaler-only dynamic value behind the same static
+// type is dispatched identically by both and stays accepted.
 type textOnlyIface interface{ encoding.TextMarshaler }
 
 type jsonOnlyIface interface{ json.Marshaler }
 
-func TestMarshalCanonicalStaticInterfaceDispatch(t *testing.T) {
-	outputs := map[string]bool{}
-	for _, raw := range []string{"k\xff", "k\xfe"} {
-		got, err := MarshalCanonical(struct {
+// textPtrOnly and jsonPtrOnly implement one marshaler on the pointer receiver
+// only; textMap implements MarshalText on a nil-able non-pointer kind.
+type textPtrOnly struct{}
+
+func (*textPtrOnly) MarshalText() ([]byte, error) { return []byte("ptrtext"), nil }
+
+type jsonPtrOnly struct{}
+
+func (*jsonPtrOnly) MarshalJSON() ([]byte, error) { return []byte(`"ptrjson"`), nil }
+
+type textMap map[string]int
+
+func (textMap) MarshalText() ([]byte, error) { return []byte("maptext"), nil }
+
+// A typed nil pointer behind a marshaler-only interface has no canonical form:
+// encoding/json before Go 1.27 calls the method on the nil pointer (a value
+// receiver panics), and the json-v2-backed implementation panics inside the
+// encoder. Both are refused before marshaling. Dispatch on the dynamic value
+// (an any field, a concrete nil pointer) is null on every toolchain, and a
+// nil map or slice with a value-receiver marshaler is not a nil pointer and
+// is marshaled identically by both, so those stay accepted.
+func TestMarshalCanonicalTypedNilBehindMarshalerInterface(t *testing.T) {
+	refused := map[string]any{
+		"text-only static, nil pointer receiver": struct {
 			F textOnlyIface `json:"f"`
-		}{dualBoth{raw: raw}})
-		if !errors.Is(err, ErrInvalidUTF8) {
-			t.Errorf("static TextMarshaler field with invalid output %q: got %s, err %v; want ErrInvalidUTF8", raw, got, err)
-			outputs[string(got)] = true
-		}
-		if _, err := MarshalCanonical([]textOnlyIface{dualBoth{raw: raw}}); !errors.Is(err, ErrInvalidUTF8) {
-			t.Errorf("static TextMarshaler slice element %q: err = %v, want ErrInvalidUTF8", raw, err)
-		}
-		if _, err := MarshalCanonical(map[string]textOnlyIface{"v": dualBoth{raw: raw}}); !errors.Is(err, ErrInvalidUTF8) {
-			t.Errorf("static TextMarshaler map value %q: err = %v, want ErrInvalidUTF8", raw, err)
+		}{(*textPtrOnly)(nil)},
+		"json-only static, nil pointer receiver": struct {
+			F jsonOnlyIface `json:"f"`
+		}{(*jsonPtrOnly)(nil)},
+		"text-only static, nil pointer to value receiver": struct {
+			F textOnlyIface `json:"f"`
+		}{(*textValue)(nil)},
+		"slice element": []textOnlyIface{(*textPtrOnly)(nil)},
+		"map value":     map[string]jsonOnlyIface{"v": (*jsonPtrOnly)(nil)},
+	}
+	for name, in := range refused {
+		if got, err := MarshalCanonical(in); !errors.Is(err, ErrAmbiguousMarshaler) {
+			t.Errorf("%s: got %s, err %v; want ErrAmbiguousMarshaler", name, got, err)
 		}
 	}
-	if len(outputs) == 1 {
-		t.Error("two distinct invalid MarshalText outputs canonicalized to one value")
+	accepted := map[string]struct {
+		in   any
+		want string
+	}{
+		"any holding typed nil": {struct {
+			F any `json:"f"`
+		}{(*textPtrOnly)(nil)}, `{"f":null}`},
+		"nil concrete pointer": {struct {
+			F *jsonPtrOnly `json:"f"`
+		}{}, `{"f":null}`},
+		"nil map value receiver": {struct {
+			F textOnlyIface `json:"f"`
+		}{textMap(nil)}, `{"f":"maptext"}`},
+		"non-nil pointer receiver": {struct {
+			F textOnlyIface `json:"f"`
+		}{&textPtrOnly{}}, `{"f":"ptrtext"}`},
+		"non-nil pointer to value receiver": {struct {
+			F textOnlyIface `json:"f"`
+		}{&textValue{out: "ok"}}, `{"f":"ok"}`},
+	}
+	for name, tc := range accepted {
+		if got, err := MarshalCanonical(tc.in); err != nil || string(got) != tc.want {
+			t.Errorf("%s = %s, %v; want %s", name, got, err, tc.want)
+		}
+	}
+}
+
+func TestMarshalCanonicalStaticInterfaceDispatch(t *testing.T) {
+	for _, raw := range []string{"k\xff", "k\xfe", "ok"} {
+		if got, err := MarshalCanonical(struct {
+			F textOnlyIface `json:"f"`
+		}{dualBoth{raw: raw}}); !errors.Is(err, ErrAmbiguousMarshaler) {
+			t.Errorf("static TextMarshaler field holding a json.Marshaler %q: got %s, err %v; want ErrAmbiguousMarshaler", raw, got, err)
+		}
+		if _, err := MarshalCanonical([]textOnlyIface{dualBoth{raw: raw}}); !errors.Is(err, ErrAmbiguousMarshaler) {
+			t.Errorf("static TextMarshaler slice element holding a json.Marshaler %q: err = %v, want ErrAmbiguousMarshaler", raw, err)
+		}
+		if _, err := MarshalCanonical(map[string]textOnlyIface{"v": dualBoth{raw: raw}}); !errors.Is(err, ErrAmbiguousMarshaler) {
+			t.Errorf("static TextMarshaler map value holding a json.Marshaler %q: err = %v, want ErrAmbiguousMarshaler", raw, err)
+		}
+	}
+	for _, raw := range []string{"k\xff", "k\xfe"} {
+		if got, err := MarshalCanonical(struct {
+			F textOnlyIface `json:"f"`
+		}{textValue{out: raw}}); !errors.Is(err, ErrInvalidUTF8) {
+			t.Errorf("static TextMarshaler field with invalid output %q: got %s, err %v; want ErrInvalidUTF8", raw, got, err)
+		}
 	}
 	if got, err := MarshalCanonical(struct {
 		F textOnlyIface `json:"f"`
-	}{dualBoth{raw: "ok"}}); err != nil || string(got) != `{"f":"ok"}` {
+	}{textValue{out: "ok"}}); err != nil || string(got) != `{"f":"ok"}` {
 		t.Fatalf("static TextMarshaler field with valid output = %s, %v", got, err)
 	}
 	if got, err := MarshalCanonical(struct {

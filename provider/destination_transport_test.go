@@ -101,7 +101,7 @@ func TestGuardHTTPClientRejectsLoopbackTLSDialHooks(t *testing.T) {
 		},
 		{
 			name: "DialTLS",
-			transport: &http.Transport{DialTLS: func(string, string) (net.Conn, error) {
+			transport: &http.Transport{DialTLS: func(string, string) (net.Conn, error) { //nolint:staticcheck // SA1019: the deprecated hook is the case under test.
 				return nil, errors.New("must not dial")
 			}},
 		},

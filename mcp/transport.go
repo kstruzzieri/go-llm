@@ -68,11 +68,12 @@ func (s *Server) ListenHTTP(ctx context.Context, addr string) error {
 func streamableHTTPHandler(s *Server) http.Handler {
 	handler := gomcp.NewStreamableHTTPHandler(
 		func(r *http.Request) *gomcp.Server { return s.mcpServer },
-		&gomcp.StreamableHTTPOptions{
-			CrossOriginProtection: http.NewCrossOriginProtection(),
-		},
+		&gomcp.StreamableHTTPOptions{},
 	)
-	return limitMCPHTTPBody(handler, maxMCPHTTPBodyBytes)
+	// The SDK's CrossOriginProtection option is deprecated in favour of
+	// wrapping the handler; the protection itself is unchanged.
+	protected := http.NewCrossOriginProtection().Handler(handler)
+	return limitMCPHTTPBody(protected, maxMCPHTTPBodyBytes)
 }
 
 func limitMCPH2CBody(next http.Handler, server *http2.Server, maxBytes int64) http.Handler {

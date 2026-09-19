@@ -2,6 +2,8 @@ module github.com/kstruzzieri/go-llm
 
 go 1.25.0
 
+toolchain go1.27.1
+
 require (
 	github.com/modelcontextprotocol/go-sdk v1.6.1
 	github.com/parquet-go/parquet-go v0.29.0

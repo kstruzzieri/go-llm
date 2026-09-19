@@ -71,6 +71,7 @@ var (
 	ErrUninitializedKey     = errors.New("signing: uninitialized signer or verifier")
 	ErrEmptyDomain          = errors.New("signing: empty domain")
 	ErrInvalidUTF8          = errors.New("signing: canonicalize: input is not valid UTF-8")
+	ErrAmbiguousMarshaler   = errors.New("signing: canonicalize: marshaler dispatch for this interface value differs between Go toolchains")
 	ErrInvalidUnicodeEscape = errors.New("signing: canonicalize: unpaired UTF-16 surrogate escape")
 	ErrDuplicateKey         = errors.New("signing: canonicalize: duplicate object key")
 	ErrTrailingData         = errors.New("signing: canonicalize: data after the JSON value")

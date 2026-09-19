@@ -186,4 +186,4 @@ filesystem still skip in the container; the native Darwin job covers those.
 
 ## Notes
 
-The CI image is based on `golang:1.25-alpine` to match `go.mod`. It installs `build-base` and sets `CGO_ENABLED=1` because Go's race detector requires cgo support even though the module itself avoids cgo-only dependencies.
+The CI image is based on `golang:1.27-alpine`, matching the `toolchain` line in `go.mod` (the module's minimum language version stays `go 1.25.0`). It installs `build-base` and sets `CGO_ENABLED=1` because Go's race detector requires cgo support even though the module itself avoids cgo-only dependencies.
