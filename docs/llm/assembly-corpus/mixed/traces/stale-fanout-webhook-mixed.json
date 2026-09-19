@@ -76,7 +76,7 @@
     },
     {
       "role": "tool",
-      "content": "### source: \"internal/notify/webhookpool.go\"\npurpose: Webhook fanout pool startup and worker lifecycle; size wired from the delivery profile.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n--- source: \"internal/notify/webhookpool.go\" (lines 1-23, similarity: 1.00) ---\n1| package notify\n2| \n3| import \"sync\"\n4| \n5| // pool drains queued webhook deliveries through a fixed set of\n6| // workers. The pool size is wired in from the delivery profile at\n7| // startup; Run panics on a non-positive size because a zero pool\n8| // silently strands every queued delivery.\n9| type pool struct {\n10| \tsize int\n11| \tq    chan Delivery\n12| \twg   sync.WaitGroup\n13| }\n14| \n15| func (p *pool) Run() {\n16| \tif p.size \u003c= 0 {\n17| \t\tpanic(\"notify: webhook pool size must be positive\")\n18| \t}\n19| \tfor i := 0; i \u003c p.size; i++ {\n20| \t\tp.wg.Add(1)\n21| \t\tgo p.worker()\n22| \t}\n23| }\n\n### source: \"internal/notify/webhooksign.go\"\npurpose: Webhook delivery signing with per-receiver secrets.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n\n### source: \"docs/webhooks.md\"\nlanguage: markdown\nindexed: 2025-07-27T00:00:00Z\nnote: metadata overview (summary omitted: budget)\n",
+      "content": "### source: \"internal/notify/webhookpool.go\"\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nnote: metadata overview (summary omitted: budget)\n--- source: \"internal/notify/webhookpool.go\" (lines 1-23, similarity: 1.00) ---\n1| package notify\n2| \n3| import \"sync\"\n4| \n5| // pool drains queued webhook deliveries through a fixed set of\n6| // workers. The pool size is wired in from the delivery profile at\n7| // startup; Run panics on a non-positive size because a zero pool\n8| // silently strands every queued delivery.\n9| type pool struct {\n10| \tsize int\n11| \tq    chan Delivery\n12| \twg   sync.WaitGroup\n13| }\n14| \n15| func (p *pool) Run() {\n16| \tif p.size \u003c= 0 {\n17| \t\tpanic(\"notify: webhook pool size must be positive\")\n18| \t}\n19| \tfor i := 0; i \u003c p.size; i++ {\n20| \t\tp.wg.Add(1)\n21| \t\tgo p.worker()\n22| \t}\n23| }\n\n### source: \"internal/notify/webhooksign.go\"\npurpose: Webhook delivery signing with per-receiver secrets.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n\n### source: \"docs/webhooks.md\"\nlanguage: markdown\nindexed: 2025-07-27T00:00:00Z\nnote: metadata overview (summary omitted: budget)\n",
       "tool_call_id": "c1",
       "name": "retrieve"
     },
@@ -94,7 +94,7 @@
     },
     {
       "role": "tool",
-      "content": "rec-consol-log · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src: · receiver consolidation log links the soak report; capacity sheet entries point at it\nrec-synthetic-label · working · created:2025-07-27 · updated:2025-07-27 · scope:session · ns: · src:\nrec-webhook-pool · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src: · webhook fanout still runs 6 delivery workers",
+      "content": "trust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-consol-log · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src-claim: · receiver consolidation log links the soak report; capacity sheet entries point at it\ntrust=agent-written; unreviewed; origin=memory.create; session=caller-claim · rec-synthetic-label · working · created:2025-07-27 · updated:2025-07-27 · scope:session · ns: · src-claim:\ntrust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-webhook-pool · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src-claim: · webhook fanout still runs 6 delivery workers",
       "tool_call_id": "c2",
       "name": "agent_memory_search"
     },
@@ -118,8 +118,8 @@
       "rec-synthetic-label",
       "rec-webhook-pool"
     ],
-    "estimated_prompt_tokens": 1007,
-    "state_digest": "82e90cf5119182aef9cb0d8ebc9dc1782cc5cbae0cb681a8bc93153b1231137a",
+    "estimated_prompt_tokens": 1047,
+    "state_digest": "f876d806e825324ba25b0284d998f0785a0e82f05c78e76230f03d914f8aebaf",
     "subjects": [
       "(c1|rag|internal/notify/webhookpool.go)",
       "(c1|rag|internal/notify/webhooksign.go)",
@@ -131,11 +131,11 @@
     "stratum": "stale_vs_fresh",
     "answer_home": "conversation",
     "scenario_family": "fanout-worker-staleness",
-    "budget": 1051,
-    "raw_state_tokens": 1752,
+    "budget": 1086,
+    "raw_state_tokens": 1810,
     "pressure_level": "critical",
     "shed_messages": 2,
-    "shed_bytes": 2302,
+    "shed_bytes": 2380,
     "omitted_subjects": 1
   }
 }

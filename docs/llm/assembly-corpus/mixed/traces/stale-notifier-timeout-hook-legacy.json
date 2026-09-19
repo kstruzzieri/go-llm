@@ -38,7 +38,7 @@
     },
     {
       "role": "tool",
-      "content": "rec-hook-window · semantic · 2025-07-27 · webhook notifier timeout stands at 8 seconds\nrec-secret-loc · working · 2025-07-27 · receiver signing secrets moved during the rework; the onboarding doc shows the new location\nrec-strict-order · semantic · 2025-07-27 · strict-order receivers drain through the ordered delivery lane; the lane listing lives on the rework ticket",
+      "content": "trust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-hook-window · semantic · 2025-07-27 · webhook notifier timeout stands at 8 seconds\ntrust=agent-written; unreviewed; origin=memory.create; session=caller-claim · rec-secret-loc · working · 2025-07-27 · receiver signing secrets moved during the rework; the onboarding doc shows the new location\ntrust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-strict-order · semantic · 2025-07-27 · strict-order receivers drain through the ordered delivery lane; the lane listing lives on the rework ticket",
       "tool_call_id": "c2",
       "name": "agent_memory_search"
     },
@@ -62,8 +62,8 @@
       "rec-secret-loc",
       "rec-strict-order"
     ],
-    "estimated_prompt_tokens": 1018,
-    "state_digest": "6d280ee90f84e49e55b9bb1fcc3efc648b03ebbe48e3b894f00c0f4c11a4fb3e",
+    "estimated_prompt_tokens": 1077,
+    "state_digest": "b68788e468cc6fc0e8ce24331beac868c396120abc32badaa3cbe7055d336d5d",
     "subjects": [
       "(c1|rag|internal/notify/hookdeliver.go)",
       "(c1|rag|internal/notify/retryplan.go)",
@@ -75,8 +75,8 @@
     "stratum": "stale_vs_fresh",
     "answer_home": "conversation",
     "scenario_family": "notifier-timeout-staleness",
-    "budget": 1091,
-    "raw_state_tokens": 1819,
+    "budget": 1127,
+    "raw_state_tokens": 1878,
     "pressure_level": "critical",
     "shed_messages": 18,
     "shed_bytes": 2444

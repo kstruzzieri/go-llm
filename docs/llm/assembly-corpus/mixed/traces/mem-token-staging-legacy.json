@@ -46,7 +46,7 @@
       "rec-staging-token"
     ],
     "estimated_prompt_tokens": 950,
-    "state_digest": "793fd925b2f6fe6b0e0e9ed997430db1ba716cedcda6cd19414f34c2311c0672",
+    "state_digest": "51ad376b6ee79af59e9c3d57908954e4af6d83bf45dd260b9a8d39dc8edb2857",
     "subjects": [
       "(c1|memory|rec-eval-refresh)",
       "(c1|memory|rec-pilot-notes)",
@@ -59,10 +59,10 @@
     "stratum": "memory_only",
     "answer_home": "memory",
     "scenario_family": "ingest-token-mem",
-    "budget": 997,
-    "raw_state_tokens": 1662,
+    "budget": 1044,
+    "raw_state_tokens": 1740,
     "pressure_level": "critical",
     "shed_messages": 10,
-    "shed_bytes": 2422
+    "shed_bytes": 2735
   }
 }

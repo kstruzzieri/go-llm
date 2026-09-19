@@ -451,9 +451,9 @@ func newTaskStepRunner(root string, plan *agentflow.Plan, af afClient, orch *age
 			System:   sess.baseSystem,
 			Tools:    tools,
 			MaxSteps: sess.maxSteps,
-			Budget:   sess.budget,
+			Budget:   sess.startupBudget,
 			Approver: taskApprover(approveEdits),
-			Options:  sess.modelOptions,
+			Options:  sess.startupModelOptions,
 		}
 		_, runErr := orch.Run(stepCtx, req, agent.Observer(newRenderer(out, false, sess.maxSteps, sess.clock, sess.mixed)))
 		if fatal := afJournal.fatalErr(); fatal != nil {

@@ -19,7 +19,7 @@
     },
     {
       "role": "tool",
-      "content": "rec-archive-scope · working · 2025-07-27 · archive tier skips the compaction rework; the assessment records the reasoning\nrec-canary-trace · semantic · 2025-07-27 · index canary tracing is off again after the rework; trace volume back at baseline\nrec-index-wal · semantic · 2025-07-27 · index WAL segments roll at 128 MiB, raised during the index compaction rework\nrec-restore-scratch · semantic · 2025-07-27 · index WAL segments roll at 24 MiB; the restore scratch volume is sized against that roll size",
+      "content": "trust=agent-written; unreviewed; origin=memory.create; session=caller-claim · rec-archive-scope · working · 2025-07-27 · archive tier skips the compaction rework; the assessment records the reasoning\ntrust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-canary-trace · semantic · 2025-07-27 · index canary tracing is off again after the rework; trace volume back at baseline\ntrust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-index-wal · semantic · 2025-07-27 · index WAL segments roll at 128 MiB, raised during the index compaction rework\ntrust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-restore-scratch · semantic · 2025-07-27 · index WAL segments roll at 24 MiB; the restore scratch volume is sized against that roll size",
       "tool_call_id": "c2",
       "name": "agent_memory_search"
     },
@@ -44,8 +44,8 @@
       "rec-index-wal",
       "rec-restore-scratch"
     ],
-    "estimated_prompt_tokens": 189,
-    "state_digest": "51d488d6798fd272e8d15b80d5be919e7c5c6443985636fbd5651e8dfa1fe7e9",
+    "estimated_prompt_tokens": 268,
+    "state_digest": "7149832bbe914f86b3c4cc2d76c77db118cac810cef61bd054439eceaa02a792",
     "subjects": [
       "(c1|rag|internal/index/wal.go)",
       "(c1|rag|internal/index/compact.go)",
@@ -58,8 +58,8 @@
     "stratum": "stale_vs_fresh",
     "answer_home": "memory",
     "scenario_family": "wal-segment-staleness",
-    "budget": 1089,
-    "raw_state_tokens": 1815,
+    "budget": 1136,
+    "raw_state_tokens": 1894,
     "pressure_level": "ok",
     "shed_messages": 20,
     "shed_bytes": 5736

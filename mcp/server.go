@@ -525,12 +525,15 @@ func NewServer(ctx context.Context, opts ...Option) (*Server, error) {
 	// WithAgentMemoryPath is set). Failure is fatal, matching the transcript
 	// store: the caller explicitly asked for agent memory here.
 	if s.agentMemoryPath != "" {
-		rt, err := memory.OpenRecordStore(ctx, s.agentMemoryPath)
+		rt, err := memory.OpenRecordStore(ctx, s.agentMemoryPath, memory.RecordStoreConfig{Writer: memory.WriterMCP})
 		if err != nil {
 			cleanupStartupFailure()
 			return nil, fmt.Errorf("mcp: open agent memory store: %w", err)
 		}
 		s.agentMemory = rt
+		if rt.Store().CreatedKeyID() != "" {
+			log.Printf("agent memory: created signing identity %s", rt.Store().CreatedKeyID())
+		}
 	}
 
 	// Step 5: Resolve models and rebuild derived clients (non-fatal).

@@ -100,7 +100,7 @@
     },
     {
       "role": "tool",
-      "content": "### source: \"internal/wal/checkpoint.go\"\npurpose: WAL checkpointing: atomic position replacement after segment ship.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n--- source: \"internal/wal/checkpoint.go\" (lines 1-13, similarity: 1.00) ---\n1| package wal\n2| \n3| // checkpoint records the durable replay position after a segment\n4| // ships. Checkpoints are ordered writes: the position file is\n5| // replaced atomically, so a crash between segment ship and\n6| // checkpoint replays one segment rather than losing one.\n7| func (w *WAL) checkpoint(seg segmentID) error {\n8| \tpos := w.positionAfter(seg)\n9| \tif err := w.writePositionTmp(pos); err != nil {\n10| \t\treturn err\n11| \t}\n12| \treturn w.renamePosition()\n13| }\n\n### source: \"internal/wal/segment.go\"\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nnote: metadata overview (summary omitted: budget)\n\n### source: \"docs/wal.md\"\nlanguage: markdown\nindexed: 2025-07-27T00:00:00Z\nnote: metadata overview (summary omitted: budget)\n",
+      "content": "### source: \"internal/wal/checkpoint.go\"\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nnote: metadata overview (summary omitted: budget)\n--- source: \"internal/wal/checkpoint.go\" (lines 1-13, similarity: 1.00) ---\n1| package wal\n2| \n3| // checkpoint records the durable replay position after a segment\n4| // ships. Checkpoints are ordered writes: the position file is\n5| // replaced atomically, so a crash between segment ship and\n6| // checkpoint replays one segment rather than losing one.\n7| func (w *WAL) checkpoint(seg segmentID) error {\n8| \tpos := w.positionAfter(seg)\n9| \tif err := w.writePositionTmp(pos); err != nil {\n10| \t\treturn err\n11| \t}\n12| \treturn w.renamePosition()\n13| }\n\n### source: \"internal/wal/segment.go\"\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nnote: metadata overview (summary omitted: budget)\n\n### source: \"docs/wal.md\"\nlanguage: markdown\nindexed: 2025-07-27T00:00:00Z\nnote: metadata overview (summary omitted: budget)\n",
       "tool_call_id": "c1",
       "name": "retrieve"
     },
@@ -118,7 +118,7 @@
     },
     {
       "role": "tool",
-      "content": "rec-drill-doc · working · created:2025-07-27 · updated:2025-07-27 · scope:session · ns: · src:\nrec-perf-hosts · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:\nrec-wal-roll · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src: · ingest WAL segments roll at 32 MiB; the backup glob assumes it\nrec-walship-glob · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:",
+      "content": "trust=agent-written; unreviewed; origin=memory.create; session=caller-claim · rec-drill-doc · working · created:2025-07-27 · updated:2025-07-27 · scope:session · ns: · src-claim:\ntrust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-perf-hosts · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src-claim:\ntrust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-wal-roll · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src-claim:\ntrust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-walship-glob · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src-claim:",
       "tool_call_id": "c2",
       "name": "agent_memory_search"
     },
@@ -143,8 +143,8 @@
       "rec-wal-roll",
       "rec-walship-glob"
     ],
-    "estimated_prompt_tokens": 1112,
-    "state_digest": "659a0cabb6af8b71482e07fa3167c0635c99dae1d611c74631054128829baaac",
+    "estimated_prompt_tokens": 1161,
+    "state_digest": "9a3472137c5c95b9b184c2d43ea7aa6058fc5c55410aec85df648330e8e06c44",
     "subjects": [
       "(c1|rag|internal/wal/checkpoint.go)",
       "(c1|rag|internal/wal/segment.go)",
@@ -157,9 +157,9 @@
     "stratum": "stale_vs_fresh",
     "answer_home": "rag",
     "scenario_family": "wal-segment-staleness",
-    "budget": 1152,
-    "raw_state_tokens": 1920,
+    "budget": 1199,
+    "raw_state_tokens": 1999,
     "pressure_level": "critical",
-    "shed_bytes": 2434
+    "shed_bytes": 2551
   }
 }

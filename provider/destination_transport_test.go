@@ -101,7 +101,7 @@ func TestGuardHTTPClientRejectsLoopbackTLSDialHooks(t *testing.T) {
 		},
 		{
 			name: "DialTLS",
-			transport: &http.Transport{DialTLS: func(string, string) (net.Conn, error) {
+			transport: &http.Transport{DialTLS: func(string, string) (net.Conn, error) { //nolint:staticcheck // SA1019: the deprecated hook is the case under test.
 				return nil, errors.New("must not dial")
 			}},
 		},
@@ -598,4 +598,82 @@ func TestGuardedTransportErrorsNeverEchoRequestURL(t *testing.T) {
 			t.Errorf("guard error leaked the off-target URL: %s", err)
 		}
 	})
+}
+
+// M2/#376: an additive Extend must not revoke capabilities already issued.
+// A request bound BEFORE the extension still reaches the delegate afterwards,
+// and the edge the extension added works — both observed at the delegate,
+// below the guard, not in the gate.
+func TestGuardedTransportExtendPreservesInFlightCapability(t *testing.T) {
+	oldDest := mustDest(t, "opencode", "https://opencode.ai/zen/go")
+	newDest := mustDest(t, "other", "https://other.example.com")
+	oldEdge := DestinationEdge{Purpose: "agent", Destination: oldDest}
+	newEdge := DestinationEdge{Purpose: "agent", Destination: newDest}
+
+	gate := installTestGate(t, oldEdge)
+	oldSpy := &spyDelegate{}
+	oldClient, err := GuardHTTPClient(gate, oldDest, &http.Client{Transport: oldSpy})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Bound before the extension: this stands in for the in-flight request.
+	inFlight, err := gate.Bind(context.Background(), "agent", "opencode")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	extended, err := NewDestinationManifest(oldEdge, newEdge)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := gate.Extend(NewDestinationPolicy(oldDest, newDest), extended); err != nil {
+		t.Fatalf("Extend with a valid superset: %v", err)
+	}
+
+	resp, err := oldClient.Transport.RoundTrip(mustReq(t, inFlight, "https://opencode.ai/zen/go/v1/chat/completions"))
+	if err != nil {
+		t.Fatalf("capability bound before Extend denied after it: %v", err)
+	}
+	_ = resp.Body.Close()
+	if got := oldSpy.calls.Load(); got != 1 {
+		t.Errorf("pre-Extend delegate called %d times, want 1", got)
+	}
+
+	newSpy := &spyDelegate{}
+	newClient, err := GuardHTTPClient(gate, newDest, &http.Client{Transport: newSpy})
+	if err != nil {
+		t.Fatal(err)
+	}
+	newCtx, err := gate.Bind(context.Background(), "agent", "other")
+	if err != nil {
+		t.Fatalf("Bind on the edge Extend added: %v", err)
+	}
+	resp, err = newClient.Transport.RoundTrip(mustReq(t, newCtx, "https://other.example.com/v1/chat/completions"))
+	if err != nil {
+		t.Fatalf("edge added by Extend denied: %v", err)
+	}
+	_ = resp.Body.Close()
+	if got := newSpy.calls.Load(); got != 1 {
+		t.Errorf("post-Extend delegate called %d times, want 1", got)
+	}
+}
+
+// A capability value that never came from Bind carries no revocation token.
+// The transport must fail closed on it: zero delegate invocations, whatever
+// strings the value names.
+func TestGuardedTransportDeniesCapabilityWithoutToken(t *testing.T) {
+	client, _, dest, spy := guardedForTest(t, "agent", "opencode", "https://opencode.ai/zen/go")
+	forged := context.WithValue(context.Background(), destCapabilityCtxKey{}, &destinationCapability{
+		purpose:  "agent",
+		provider: "opencode",
+		dest:     dest,
+	})
+
+	_, err := client.Transport.RoundTrip(mustReq(t, forged, "https://opencode.ai/zen/go/v1"))
+	if !errors.Is(err, ErrDestinationDenied) {
+		t.Fatalf("capability with a zero token = %v, want ErrDestinationDenied", err)
+	}
+	if got := spy.calls.Load(); got != 0 {
+		t.Errorf("delegate called %d times, want 0", got)
+	}
 }

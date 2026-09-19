@@ -5,21 +5,24 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"os/signal"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/kstruzzieri/go-llm/agent"
+	"github.com/kstruzzieri/go-llm/agent/interceptor"
 	agenttools "github.com/kstruzzieri/go-llm/agent/tools"
 	"github.com/kstruzzieri/go-llm/config"
 	"github.com/kstruzzieri/go-llm/conversation"
 	"github.com/kstruzzieri/go-llm/fingerprint"
 	golemruntime "github.com/kstruzzieri/go-llm/golem"
 	"github.com/kstruzzieri/go-llm/internal/providerbootstrap"
-	"github.com/kstruzzieri/go-llm/mcpclient"
 	"github.com/kstruzzieri/go-llm/provider"
 	"github.com/kstruzzieri/go-llm/provider/openaicompat"
 	"github.com/kstruzzieri/go-llm/rag"
@@ -47,10 +50,12 @@ type flags struct {
 	sessionID           string
 	allowWrite          bool
 	allowExec           bool
+	scratch             bool
 	delegate            bool
 	delegateRole        string
 	dispatch            bool
 	dispatchRole        string
+	interceptors        bool // -interceptors: default interceptor chain on every orchestrator and dispatch child (#514/#439)
 	mcpStdio            stringSliceFlag
 	mcpHTTP             stringSliceFlag
 	allowDestinations   stringSliceFlag
@@ -59,6 +64,7 @@ type flags struct {
 	progressive         bool
 	grounding           bool
 	noProjectContext    bool
+	noGitContext        bool
 	noCompress          bool
 	noMemory            bool
 	agentMemory         bool
@@ -87,9 +93,17 @@ type flags struct {
 	workflowReason      string // required rationale paired with workflowProfile
 	wfProfileSet        bool
 	wfReasonSet         bool
-	goal                string // AgentFlow planning mode goal (-goal)
-	goalSet             bool   // -goal was passed (distinguishes an explicit empty goal)
-	approvePlanLock     bool   // -approve-plan-lock: non-interactive planning-mode lock approval
+	goal                string          // AgentFlow planning mode goal (-goal)
+	goalSet             bool            // -goal was passed (distinguishes an explicit empty goal)
+	approvePlanLock     bool            // -approve-plan-lock: non-interactive planning-mode lock approval
+	outputFormat        string          // -output-format: text|json|stream-json (#352)
+	outputFormatSet     bool            // -output-format was passed (distinguishes an explicit empty value)
+	allowTools          stringSliceFlag // -allow-tool: exact gated tool names for headless runs (#352)
+
+	trustProjectContext    string
+	trustProjectContextSet bool
+
+	consultantsConfig string // -consultants-config: explicit consultants.json path (#382)
 }
 
 func parseFlags(args []string) (flags, error) {
@@ -99,7 +113,7 @@ func parseFlags(args []string) (flags, error) {
 	fs.StringVar(&f.configPath, "config", "", "path to models.json (default: auto-discover)")
 	fs.StringVar(&f.root, "root", ".", "workspace root the tools are scoped to")
 	fs.StringVar(&f.ollamaURL, "ollama-url", "", "override Ollama base URL")
-	fs.StringVar(&f.baseURL, "base-url", "", "override the openai-compat backend base URL for the primary agent model (server root, without /v1); used exactly as given, disables discovery")
+	fs.StringVar(&f.baseURL, "base-url", "", "override the openai-compat backend base URL for the active model route (server root, without /v1); used exactly as given, disables discovery")
 	fs.BoolVar(&f.noProbe, "no-probe", false, "disable openai-compat backend port discovery; explicit and configured URLs are still used as resolved")
 	fs.BoolVar(&f.noCapProbe, "no-cap-probe", false, "disable the active tool-capability probe for undeclared models (catalog and explicit capabilities still apply)")
 	fs.StringVar(&f.prompt, "p", "", "one-shot mode: run a single agent turn with this prompt and exit; only the final answer goes to stdout (implies -no-session -no-compress -no-memory; approval-gated tools are unavailable, so -allow-write/-allow-exec are ignored)")
@@ -113,24 +127,31 @@ func parseFlags(args []string) (flags, error) {
 	fs.BoolVar(&f.fresh, "fresh", false, "start a new persistent session instead of resuming this workspace")
 	fs.BoolVar(&f.allowWrite, "allow-write", false, "enable approval-gated write_file/edit_file tools")
 	fs.BoolVar(&f.allowExec, "allow-exec", false, "enable the approval-gated run_command and background command tools (start/status/tail/stop)")
+	fs.BoolVar(&f.scratch, "scratch", false, "run approved commands in a disposable snapshot of the workspace with .git omitted (requires -allow-exec): accident isolation on the host runtime, an enforced write boundary under a sandbox runtime; artifacts reach the real workspace only via approved promote_artifact (needs -allow-write)")
 	fs.BoolVar(&f.delegate, "delegate", false, "enable the delegate_code tool (route a scoped codegen sub-task to a specialist model)")
 	fs.StringVar(&f.delegateRole, "delegate-role", "coding", "model role the delegate_code tool routes to")
 	fs.BoolVar(&f.dispatch, "dispatch", false, "enable the dispatch tool (bounded read-only exploration tasks use backend-governed concurrency; ungoverned routing stays serial)")
 	fs.StringVar(&f.dispatchRole, "dispatch-role", "", "model role dispatch child agents route to (default: the primary agent chain, so children never force a model swap)")
+	fs.BoolVar(&f.interceptors, "interceptors", false, "enable the interceptor pipeline (#436/#437/#439): origin-sensitive injection detectors, all-origin supported secret/payment-card blocking across completed turns, argument guards, and command egress labels on the agent and dispatch children; streaming output is not intercepted; risk appears at interactive tool-call and plan-lock prompts and successful REPL/-p stderr footers, but not verifier approval prompts; default off")
 	fs.Var(&f.mcpStdio, "mcp-stdio", "attach an MCP server over stdio: \"[alias=]command args...\" (repeatable; use `env KEY=val cmd` for env vars)")
 	fs.Var(&f.mcpHTTP, "mcp-http", "attach an MCP server over streamable HTTP: \"[alias=]https://endpoint\" (repeatable)")
-	fs.Var(&f.allowDestinations, "allow-destination", "admit a remote model destination without prompting: \"<provider>/<canonical base URL>\" (repeatable; required for remote destinations in noninteractive runs)")
+	fs.Var(&f.allowDestinations, "allow-destination", "admit a remote model destination without prompting: \"<provider>/<canonical base URL>\" (repeatable; the deprecated \"<provider>=<base URL>\" form is still accepted; required for remote destinations in noninteractive runs)")
 	fs.BoolVar(&f.noRag, "no-rag", false, "disable the retrieve tool entirely (ignore any auto index)")
-	fs.BoolVar(&f.noAutoIndex, "no-auto-index", false, "disable startup auto-index refresh; existing auto indexes may still be used")
+	fs.BoolVar(&f.noAutoIndex, "no-auto-index", false, "disable startup auto-index refresh, which otherwise skips detected secret/payment-card files by default; existing auto indexes may still be used")
 	fs.BoolVar(&f.progressive, "progressive", false, "generate and retrieve opt-in L0/L1 progressive source summaries; enable mixed context assembly")
 	fs.BoolVar(&f.grounding, "grounding", false, "verify the final answer's claims against the retrieval evidence in the final prompt; prints one supported/partial/unsupported line (full report under -trace)")
+	fs.StringVar(&f.trustProjectContext, "trust-project-context", "", "approve the exact project document snapshot (sha256: plus 64 lowercase hex digits)")
+	fs.StringVar(&f.consultantsConfig, "consultants-config", "", "absolute path of consultants.json (default: <os.UserConfigDir>/go-llm/consultants.json; missing default disables /consult)")
 	fs.BoolVar(&f.noProjectContext, "no-project-context", false, "do not load AGENTS.md project-context files into the system prompt")
+	fs.BoolVar(&f.noGitContext, "no-git-context", false, "do not inject the repository snapshot (branch, status, recent commits) into the system prompt")
 	fs.BoolVar(&f.noCompress, "no-compress", false, "disable post-turn conversation compression into a durable summary")
 	fs.BoolVar(&f.noMemory, "no-memory", false, "disable explicit local memories (/remember, /memories, memory_search)")
 	fs.BoolVar(&f.agentMemory, "agent-memory", false, "enable agent-authored memory records (agent_memory_* tools, /records; requires sessions)")
 	fs.StringVar(&f.sessionID, "session", "", "explicit session id to resume or create (default: per-workspace)")
-	// -trace persists a full per-run trace (may contain workspace/user content; for replay/eval).
-	// -telemetry appends content-light run metrics only (timings, route, usage; no prompt or output).
+	// -trace persists a full per-run trace (may contain workspace/user content; for replay/eval),
+	// except that a classified secret block suppresses the whole trace.
+	// -telemetry appends content-light run metrics only (timings, route, usage,
+	// and an optional secret-finding count; no prompt, output, or finding data).
 	fs.BoolVar(&f.trace, "trace", false, "persist a content-full run trace per turn (outside the workspace; may contain workspace/user/memory content)")
 	fs.BoolVar(&f.telemetry, "telemetry", false, "append content-light run telemetry (timings, route, usage; no prompt/output)")
 	fs.IntVar(&f.pressureWarn, "pressure-warn", 75, "context-pressure warn threshold percent 1-100 (0 disables the warning line)")
@@ -141,7 +162,7 @@ func parseFlags(args []string) (flags, error) {
 	fs.IntVar(&f.planWorkers, "plan-workers", 1, "AgentFlow task mode: maximum workers for the initial parallel plan cohort (positive; requires -plan)")
 	fs.BoolVar(&f.approveEdits, "approve-plan-edits", false, "required in task mode: auto-approve step-scoped write/edit (still bounded by the step-scope and .agent guards)")
 	fs.BoolVar(&f.approveGates, "approve-plan-gates", false, "required in task mode: auto-run plan-declared validation gates")
-	fs.StringVar(&f.agentflowSrc, "agentflow-src", "", "run 'python3 -m agentflow' with PYTHONPATH=<checkout>/src instead of the agentflow binary")
+	fs.StringVar(&f.agentflowSrc, "agentflow-src", "", "run 'python3 -P -m agentflow' with PYTHONPATH=<checkout>/src instead of the agentflow binary (Python 3.11+)")
 	fs.BoolVar(&f.agentflowStatus, "agentflow-status", false, "inspect the current Agentflow next action without mutation")
 	fs.BoolVar(&f.agentflowResume, "agentflow-resume", false, "resume an existing Agentflow run serially; requires -plan and both plan approvals")
 	fs.BoolVar(&f.jsonOutput, "json", false, "with -agentflow-status, relay Agentflow next-action JSON verbatim")
@@ -153,6 +174,8 @@ func parseFlags(args []string) (flags, error) {
 	fs.StringVar(&f.workflowReason, "workflow-reason", "", "Agentflow modes: non-empty rationale paired with -workflow-profile")
 	fs.StringVar(&f.goal, "goal", "", "AgentFlow planning mode: author and preview a traceable plan, require approval to lock it, then stop")
 	fs.BoolVar(&f.approvePlanLock, "approve-plan-lock", false, "planning mode: print the plan preview and approve the lock without prompting (non-interactive -goal)")
+	fs.StringVar(&f.outputFormat, "output-format", "text", "one-shot mode: stdout format — text (the final answer), json (one golem.result.v1 record), or stream-json (one protocol-v1 event per line, then the same record); requires -p")
+	fs.Var(&f.allowTools, "allow-tool", "one-shot mode: mount and non-interactively approve one exact built-in gated tool by name (repeatable; write_file, edit_file, run_command, start_command, stop_command); creates no session grants; MCP tools and submit_plan are never eligible; requires -p")
 	if err := fs.Parse(args); err != nil {
 		return flags{}, err
 	}
@@ -167,12 +190,16 @@ func parseFlags(args []string) (flags, error) {
 	}
 	fs.Visit(func(fl *flag.Flag) {
 		switch fl.Name {
+		case "trust-project-context":
+			f.trustProjectContextSet = true
 		case "p":
 			f.promptSet = true
 		case "plan-workers":
 			f.planWorkersSet = true
 		case "base-url":
 			f.baseURLSet = true
+		case "output-format":
+			f.outputFormatSet = true
 		case "goal":
 			f.goalSet = true
 		case "task-brief":
@@ -212,6 +239,17 @@ func autoIndexEnabled(f flags, autoErr, embChainErr error) bool {
 
 // validateFlags rejects flag values flag.Parse cannot police.
 func validateFlags(f flags) error {
+	if f.trustProjectContextSet {
+		if f.noProjectContext {
+			return fmt.Errorf("-trust-project-context conflicts with -no-project-context")
+		}
+		if _, err := parseProjectContextDigest(f.trustProjectContext); err != nil {
+			return err
+		}
+	}
+	if f.scratch && !f.allowExec {
+		return fmt.Errorf("golem: -scratch requires -allow-exec")
+	}
 	if f.agentflowStatus && f.agentflowResume {
 		return fmt.Errorf("golem: -agentflow-status and -agentflow-resume are mutually exclusive")
 	}
@@ -241,6 +279,28 @@ func validateFlags(f flags) error {
 	}
 	if f.promptSet && strings.TrimSpace(f.prompt) == "" {
 		return fmt.Errorf("golem: -p requires a non-empty prompt")
+	}
+	// #352: the requires-p check comes FIRST, so a non-headless invocation gets
+	// a plain mode error (exit 1) and never reaches the headless-classified
+	// value check below.
+	if f.outputFormatSet && !f.promptSet {
+		return fmt.Errorf("golem: -output-format requires -p (one-shot mode)")
+	}
+	// A zero-value flags struct is used by tests and helpers; parseFlags always
+	// supplies the real default, "text". An explicitly empty value is invalid.
+	if f.outputFormat != "" || f.outputFormatSet {
+		if _, err := parseOutputFormat(f.outputFormat); err != nil {
+			return err
+		}
+	}
+	// #352: same ordering discipline as -output-format — the mode check first
+	// (plain error, exit 1), then the headless-only exact-name check (usage
+	// error, exit 2).
+	if len(f.allowTools) > 0 && !f.promptSet {
+		return fmt.Errorf("golem: -allow-tool requires -p (one-shot mode); the REPL approves interactively")
+	}
+	if _, err := newAllowToolSet(f.allowTools); err != nil {
+		return err
 	}
 	if f.promptSet && (f.fresh || f.sessionID != "") {
 		return fmt.Errorf("golem: -p (one-shot) is incompatible with -session and -fresh")
@@ -404,6 +464,14 @@ func applyGoalMode(f flags) (flags, []string) {
 		warns = append(warns, "planning mode: -grounding ignored (planning mode authors a plan, it runs no answer turn)")
 		f.grounding = false
 	}
+	if f.think != "" {
+		// The planner force-disables extended thinking on its request, and
+		// -think sets nothing else, so the flag cannot take effect. Clearing
+		// it here also skips the think chain lookup entirely -- registry
+		// metadata reads for a mode that authors one plan and exits (#476 D4).
+		warns = append(warns, "planning mode: -think ignored (the planner disables extended thinking)")
+		f.think = ""
+	}
 	f.noSession = true
 	f.noCompress = true
 	f.noMemory = true
@@ -432,6 +500,10 @@ func applyOneShotMode(f flags) (flags, []string) {
 		warns = append(warns, "one-shot: -allow-write/-allow-exec ignored (approval prompts need the REPL); write/exec tools unavailable")
 		f.allowWrite = false
 		f.allowExec = false
+		if f.scratch {
+			warns = append(warns, "one-shot: -scratch ignored (it requires interactive -allow-exec)")
+			f.scratch = false
+		}
 	}
 	return f, warns
 }
@@ -441,6 +513,8 @@ type startupInfo struct {
 	agentflowState     bool
 	backendLine        string
 	useRecommend       bool
+	activeUseCase      string // the mode's routing use case; names the recommend notice (#476 D5)
+	suppliedByUseCase  string // Defaults key that supplied the active role
 	bootstrapWarns     []error
 	preflightWarns     []string
 	retrieveLine       string
@@ -450,11 +524,15 @@ type startupInfo struct {
 	inputCeilingLine   string
 	sessionLine        string
 	projectContextLine string
+	gitContextLine     string
 	memoryLine         string
 	agentMemoryLine    string
 	mcpLine            string
 	delegateLine       string
+	scratchLine        string
 	dispatchLine       string
+	interceptorLine    string
+	consultLine        string
 }
 
 // startupNotices renders the human-facing startup lines (written to stderr).
@@ -482,17 +560,32 @@ func startupNotices(info startupInfo) []string {
 	if info.delegateLine != "" {
 		out = append(out, info.delegateLine)
 	}
+	if info.scratchLine != "" {
+		out = append(out, info.scratchLine)
+	}
 	if info.dispatchLine != "" {
 		out = append(out, info.dispatchLine)
+	}
+	if info.interceptorLine != "" {
+		out = append(out, info.interceptorLine)
+	}
+	if info.consultLine != "" {
+		out = append(out, info.consultLine)
 	}
 	if info.projectContextLine != "" {
 		out = append(out, info.projectContextLine)
 	}
+	if info.gitContextLine != "" {
+		out = append(out, info.gitContextLine)
+	}
 	if info.retrieveLine != "" {
 		out = append(out, info.retrieveLine)
 	}
+	if info.activeUseCase == config.UseCasePlanning && info.suppliedByUseCase != "" && info.suppliedByUseCase != info.activeUseCase {
+		out = append(out, "planning route: using defaults."+info.suppliedByUseCase)
+	}
 	if info.useRecommend {
-		out = append(out, "no defaults.agent configured; using model recommendation (run will route to the recommended model)")
+		out = append(out, recommendNotice(info.activeUseCase))
 	}
 	if info.thinkLine != "" {
 		out = append(out, info.thinkLine)
@@ -515,6 +608,31 @@ func startupNotices(info startupInfo) []string {
 	return out
 }
 
+// interceptorsFor is the ONE place the flag becomes a chain (#514 D2): the
+// startup orchestrator, every factory-built orchestrator, and every dispatch
+// child derive exactly this list from the production flags value. nil when
+// -interceptors is off.
+func interceptorsFor(f flags, canary *canaryBinding) []agent.Interceptor {
+	if !f.interceptors {
+		return nil
+	}
+	if canary == nil {
+		// An omitted binding fails at ForRun instead of silently losing policy.
+		canary = &canaryBinding{}
+	}
+	return append(interceptor.Defaults(), canary)
+}
+
+// interceptorsNotice names the installed chain in the startup notice, from
+// the instances themselves, so the line cannot drift from what runs.
+func interceptorsNotice(ics []agent.Interceptor) string {
+	names := make([]string, len(ics))
+	for i, ic := range ics {
+		names[i] = ic.Name()
+	}
+	return "interceptors: enabled (" + strings.Join(names, ", ") + ")"
+}
+
 // newOrchestratorFactory returns the session's orchestrator constructor. The
 // session builds one per agentflow parallel worker on top of the startup
 // orchestrator, and every one must see the same context policy: -progressive
@@ -526,11 +644,13 @@ func startupNotices(info startupInfo) []string {
 //
 // With -dispatch it also installs the per-run dispatch invocation cap, and
 // with a workspace-declared verifier (#347) the post-write verification hook.
-func newOrchestratorFactory(caller agent.ModelCaller, f flags, verifier *verifyRunner) func() *agent.Orchestrator {
+// With -interceptors it also installs the default interceptor chain (#514/#439).
+// A typed-nil verifier would satisfy the interface and panic on first use
+// (#347); the factory normalizes the two concrete types it can receive so
+// that guarantee does not rest on every call site.
+func newOrchestratorFactory(caller agent.ModelCaller, f flags, verifier agent.Verifier, canary *canaryBinding) func() *agent.Orchestrator {
 	var opts []agent.Option
-	// #347: a typed-nil would satisfy the interface and panic on first use, so
-	// the option is installed only for a real verifier.
-	if verifier != nil {
+	if verifier = nonNilVerifier(verifier); verifier != nil {
 		opts = append(opts, agent.WithVerifier(verifier))
 	}
 	if f.dispatch {
@@ -546,13 +666,42 @@ func newOrchestratorFactory(caller agent.ModelCaller, f flags, verifier *verifyR
 			Max:  agenttools.DefaultDispatchCallsPerRun,
 		}))
 	}
+	if ics := interceptorsFor(f, canary); len(ics) > 0 {
+		// #514 D2: the same chain on every orchestrator this factory builds;
+		// dispatch children receive it through newDispatchTool from the same
+		// flags value.
+		opts = append(opts, agent.WithInterceptors(ics...))
+	}
 	return func() *agent.Orchestrator {
 		return agent.New(caller, agent.ContextManager{Mixed: f.progressive}, opts...)
 	}
 }
 
-func shouldShowAgentflowHint(f flags) bool {
+// isREPLMode reports the plain interactive REPL: not one-shot, not task or
+// planning mode, not an Agentflow status/resume query. It is the only mode
+// that dispatches slash commands, so it is the only mode whose orchestrator
+// carries the #372 late verifier slot.
+func isREPLMode(f flags) bool {
 	return !f.promptSet && f.planPath == "" && !f.goalSet && !f.agentflowStatus && !f.agentflowResume
+}
+
+func shouldShowAgentflowHint(f flags) bool { return isREPLMode(f) }
+
+// nonNilVerifier maps a typed-nil *verifyRunner or *lateVerifier to a true
+// nil interface, so agent.WithVerifier is never handed a value that would
+// panic on first use (#347).
+func nonNilVerifier(v agent.Verifier) agent.Verifier {
+	switch c := v.(type) {
+	case *verifyRunner:
+		if c == nil {
+			return nil
+		}
+	case *lateVerifier:
+		if c == nil {
+			return nil
+		}
+	}
+	return v
 }
 
 func main() {
@@ -566,12 +715,15 @@ func main() {
 		if errors.As(err, &statusErr) {
 			os.Exit(statusErr.ExitCode())
 		}
+		if code, ok := auditExitCode(err); ok {
+			os.Exit(code)
+		}
 		// runIndex/runOneShot already rendered their own output; just exit non-zero.
 		if errors.Is(err, errIndexFailed) || errors.Is(err, errOneShotFailed) || errors.Is(err, errAgentflowTaskFailed) || errors.Is(err, errSourceFailed) {
-			os.Exit(1)
+			os.Exit(exitCodeFor(err))
 		}
-		_, _ = fmt.Fprintf(os.Stderr, "golem: %v\n", err)
-		os.Exit(1)
+		_, _ = fmt.Fprintf(os.Stderr, "golem: %s\n", runFailureMessage("", err))
+		os.Exit(exitCodeFor(err))
 	}
 }
 
@@ -589,6 +741,7 @@ func colorPermitted(noColor bool) bool {
 // must control or observe deterministically. A zero value is the production
 // path; it neither replaces composition nor coordinates shutdown.
 type runHooks struct {
+	canaryEntropy       io.Reader
 	openFeedback        func(context.Context, string, string, func(string)) (*feedbackService, error)
 	startAutoIndex      func() func()
 	afterAutoIndexStart func(lineSourceMode, agent.Tool, *feedbackService) error
@@ -635,6 +788,10 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 	}
 	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
 		switch args[0] {
+		case "mcp":
+			return runMCPTrust(context.Background(), args[1:], stdout, stderr)
+		case "audit":
+			return runAudit(context.Background(), args[1:], stdout, stderr)
 		case "index":
 			return runIndex(context.Background(), args[1:], stdout, stderr)
 		case "models":
@@ -642,20 +799,54 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 		case "source":
 			return runSource(context.Background(), args[1:], stdin, stdout, stderr)
 		default:
-			return fmt.Errorf("unknown command %q (did you mean \"index\", \"models\", or \"source\"?)", args[0])
+			return fmt.Errorf("unknown command %q (did you mean \"audit\", \"index\", \"models\", \"source\", or \"mcp\"?)", args[0])
 		}
 	}
 
 	f, err := parseFlags(args)
 	if err != nil {
-		return err
+		// #352: promptSet is unknowable on a parse failure, so headless intent
+		// comes from the raw argv. flag.ErrHelp survives the wrap for main()'s
+		// exit-0 check.
+		return maybeUsageError(err, argsRequestOneShot(args))
+	}
+	if f.version && (f.promptSet || f.outputFormatSet || len(f.allowTools) > 0) {
+		return maybeUsageError(fmt.Errorf("golem: -version cannot be combined with one-shot flags"), headlessExitApplies(f))
 	}
 	if f.version {
 		_, _ = fmt.Fprintln(stdout, versionString())
 		return nil
 	}
 	if err := validateFlags(f); err != nil {
-		return err
+		return maybeUsageError(err, headlessExitApplies(f))
+	}
+	// #352: resolve "-p -" immediately after validation and before anything
+	// else reads f.prompt. The TTY probe uses the run() stdin descriptor, so
+	// tests drive it with ordinary files.
+	if stdinPromptRequested(f) {
+		p, perr := resolveStdinPrompt(stdin, realTermOps{}.IsTerminal(int(stdin.Fd())))
+		if perr != nil {
+			return perr
+		}
+		f.prompt = p
+	}
+	if f.promptSet {
+		if len(f.prompt) > maxGoalBytes {
+			return newUsageError("golem: -p prompt exceeds %d bytes", maxGoalBytes)
+		}
+		if !utf8.ValidString(f.prompt) {
+			return newUsageError("golem: -p prompt must be valid UTF-8")
+		}
+	}
+	// #352: the value was validated above, so this cannot fail; the error is
+	// still checked rather than discarded.
+	outFormat, ferr := parseOutputFormat(f.outputFormat)
+	if ferr != nil {
+		return maybeUsageError(ferr, headlessExitApplies(f))
+	}
+	mcpServers, merr := parseMCPServers(f.mcpStdio, f.mcpHTTP)
+	if merr != nil {
+		return maybeUsageError(errors.New("golem: invalid MCP server specification"), headlessExitApplies(f))
 	}
 	f, taskWarns := applyTaskMode(f)
 	f, goalWarns := applyGoalMode(f)
@@ -665,10 +856,10 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 
 	root, err := filepath.Abs(f.root)
 	if err != nil {
-		return fmt.Errorf("resolve root: %w", err)
+		return maybeUsageError(fmt.Errorf("resolve root: %w", err), headlessExitApplies(f))
 	}
 	if root, err = filepath.EvalSymlinks(root); err != nil {
-		return fmt.Errorf("resolve root: %w", err)
+		return maybeUsageError(fmt.Errorf("resolve root: %w", err), headlessExitApplies(f))
 	}
 
 	ctx := context.Background()
@@ -676,30 +867,46 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 		return runAgentflowStatus(ctx, stdout, root, f.agentflowSrc, f.jsonOutput)
 	}
 
+	projectState, pendingTrust, err := preflightProjectContext(ctx, stderr, root, f)
+	if err != nil {
+		reportPreRunFailure(stdout, outFormat, "project_context_untrusted", err)
+		return err
+	}
+	grants := newApprovalGrants()
+
+	// #352: config load/resolution failures are caller errors (exit 2) on the
+	// headless surface; the classification stops at these pure-config sites —
+	// provider bootstrap, discovery, and probing below stay exit 1 (a provider
+	// failure is never caller misuse).
 	cfg, err := loadConfig(f.configPath)
 	if err != nil {
-		return err
+		return maybeUsageError(err, headlessExitApplies(f))
 	}
 	autoDBPath, autoWorkspaceID, autoErr := indexDBPathForWorkspace(os.Getenv, root)
 
 	// #477 required ordering: resolve every enabled route and build the
 	// frozen network plan BEFORE any outbound byte, admit the manifest,
 	// only then discover, bootstrap, refresh, probe, or infer.
-	agentRoute, err := providerbootstrap.PlanAgentRoute(cfg)
+	//
+	// The active route is mode-selected (#476 D3): plan authoring in -goal
+	// mode routes as "planning", everything else as "agent". One value feeds
+	// admission, discovery targeting, preflight, the input ceiling, and the
+	// caller, so no seam can quietly disagree about which route is live.
+	activeRoute, err := planActiveRoute(cfg, f.goalSet)
 	if err != nil {
-		return err
+		return maybeUsageError(err, headlessExitApplies(f))
 	}
-	plan := chainPlan{chain: agentRoute.Chain, useRecommend: agentRoute.Recommend}
+	plan := chainPlanFor(activeRoute)
 	// Embedding is feature-gated, not optional-recommend: an absent or
 	// unresolvable embedding default disables RAG later with the same
 	// warning it always has, and plans no route.
 	embChain, embChainErr := embeddingChain(cfg)
-	routes := []providerbootstrap.PlannedRoute{agentRoute}
+	routes := []providerbootstrap.PlannedRoute{activeRoute}
 	var summarizeRoute providerbootstrap.PlannedRoute
 	if shouldPlanSummarize(f, autoErr, embChainErr) {
 		summarizeRoute, err = providerbootstrap.PlanOptionalUseCaseRoute(cfg, config.UseCaseSummarize)
 		if err != nil {
-			return err
+			return maybeUsageError(err, headlessExitApplies(f))
 		}
 		routes = append(routes, summarizeRoute)
 	}
@@ -724,9 +931,12 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 	}
 	var dchain []string
 	if f.dispatch {
-		dchain, err = resolveDispatchChain(cfg, f.dispatchRole, agentRoute.Chain)
+		// -dispatch is rejected in goal mode at validation, so whenever this
+		// branch runs the active route IS the agent route the children
+		// default to.
+		dchain, err = resolveDispatchChain(cfg, f.dispatchRole, activeRoute.Chain)
 		if err != nil {
-			return err
+			return maybeUsageError(err, headlessExitApplies(f))
 		}
 		routes = append(routes, providerbootstrap.PlannedRoute{
 			UseCase: dispatchUseCase, Chain: dchain, Recommend: len(dchain) == 0,
@@ -736,16 +946,16 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 	if f.delegate {
 		delegateChain, err = resolveDelegateChain(cfg, f.delegateRole)
 		if err != nil {
-			return err
+			return maybeUsageError(err, headlessExitApplies(f))
 		}
 		routes = append(routes, providerbootstrap.PlannedRoute{UseCase: delegateUseCase, Chain: delegateChain})
 	}
 
 	explicitURL, _, err := explicitBaseURL(f.baseURL, f.baseURLSet, os.LookupEnv)
 	if err != nil {
-		return err // explicit-override validation error: fatal, matches validateFlags semantics
+		return maybeUsageError(err, headlessExitApplies(f))
 	}
-	targetKey, _, targetOK := openAICompatTargetFromRoute(cfg, agentRoute)
+	targetKey, _, targetOK := openAICompatTargetFromRoute(cfg, activeRoute)
 	ocProv, ocURL := "", ""
 	if explicitURL != "" && targetOK {
 		// The explicit override lands in the EFFECTIVE config before the
@@ -754,17 +964,20 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 	}
 	eff, err := providerbootstrap.Materialize(cfg, f.ollamaURL, ocProv, ocURL)
 	if err != nil {
-		return err
+		return maybeUsageError(err, headlessExitApplies(f))
 	}
-	netPlan, err := providerbootstrap.BuildNetworkPlan(eff, routes, providerbootstrap.PlanOptions{
-		CapabilityProbes: !f.noCapProbe,
-	})
+	// Retained on sess.selection: a mid-session /model set plans its
+	// candidate under the SAME options, so the two plans cannot disagree
+	// about which metadata edges exist.
+	planOpts := providerbootstrap.PlanOptions{CapabilityProbes: !f.noCapProbe}
+	netPlan, err := providerbootstrap.BuildNetworkPlan(eff, routes, planOpts)
 	if err != nil {
-		return err
+		return maybeUsageError(err, headlessExitApplies(f))
 	}
 
 	gate := provider.NewDestinationGate()
-	interactive := destinationAdmissionInteractive(f, realTermOps{}.IsTerminal(int(stdin.Fd())))
+	stdinTerminal := realTermOps{}.IsTerminal(int(stdin.Fd()))
+	interactive := destinationAdmissionInteractive(f, stdinTerminal)
 	adm, err := newDestinationAdmission(destinationAdmissionConfig{
 		Gate:        gate,
 		Edges:       netPlan.Edges,
@@ -774,9 +987,34 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 		Out:         stderr,
 	})
 	if err != nil {
-		return err
+		return maybeUsageError(err, headlessExitApplies(f))
 	}
 	if err := adm.ensure(ctx); err != nil {
+		// #352: a destination-admission denial is a typed local policy
+		// decision — a caller error (exit 2) on the headless surface, and one
+		// of the two pre-run failures that still writes a result record.
+		reportPreRunFailure(stdout, outFormat, resultCodeDestDenied, err)
+		return maybeUsageError(err, headlessExitApplies(f))
+	}
+
+	// Keep admitted sessions through tool assembly, and close them on every
+	// later startup failure as well as normal exit. No provider probe precedes this.
+	mcpManager, mcpWarns, mcpErr := connectMCP(ctx, root, mcpServers, f.promptSet)
+	defer func() {
+		if mcpManager != nil {
+			_ = mcpManager.Close()
+		}
+	}()
+	// Emit trust decisions now: a later provider failure must not hide a pin
+	// already created at first contact. Package diagnostics exclude raw errors.
+	for _, warning := range mcpWarns {
+		_, _ = fmt.Fprintln(stderr, "warning: mcp: "+warning.Error())
+	}
+	mcpBlocked := mcpBlockedAliases(mcpWarns)
+	if mcpErr != nil || (f.promptSet && len(mcpBlocked) > 0) {
+		err := errors.New("golem: MCP catalog admission failed")
+		_, _ = fmt.Fprintln(stderr, "mcp: catalog admission failed")
+		reportPreRunFailure(stdout, outFormat, "mcp_untrusted", err)
 		return err
 	}
 
@@ -790,7 +1028,7 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 		noProbe:        f.noProbe,
 		lookupEnv:      os.LookupEnv,
 		prober:         openaicompat.DiscoverBaseURL,
-		agentRoute:     &agentRoute,
+		activeRoute:    &activeRoute,
 		guardCandidate: discoveryCandidateGuard(ctx, targetKey),
 	})
 	if err != nil {
@@ -832,7 +1070,12 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 		ActiveProviders:                 netPlan.ActiveProviders,
 	})
 	if err != nil {
-		return fmt.Errorf("bootstrap providers: %w", err)
+		// #352: a provider failure during pre-run bootstrap is a provider
+		// failure (exit 1), never caller misuse; machine modes still get
+		// their result record.
+		err = fmt.Errorf("bootstrap providers: %w", err)
+		reportPreRunFailure(stdout, outFormat, resultCodeProviderPreRun, err)
+		return err
 	}
 	defer func() { _ = bundle.Close() }()
 
@@ -841,12 +1084,35 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 	if !f.noCapProbe && capStore != nil {
 		resolver = bundle.Models // concrete *provider.ModelRegistry; always non-nil after bootstrap
 	}
-	warns, err := preflightToolCapable(ctx, bundle.Models, plan.chain, resolveEndpoint, resolver)
-	warns = append(backendRes.warns, warns...)
+	// The ONE post-admission preparation sequence (#376 M4): preflight,
+	// thinking, ceiling, budget, caller — shared with /model set so the two
+	// paths cannot drift. It runs HERE, after admission installed the gate,
+	// because it reads model metadata and may probe.
+	//
+	// In goal mode f.think is always "" (applyGoalMode clears it with a
+	// warning), so thinking performs no chain lookups there by construction.
+	prep, err := prepareModel(ctx, modelPreparation{
+		models:          bundle.Models,
+		router:          bundle.Router,
+		plan:            plan,
+		resolveEndpoint: resolveEndpoint,
+		resolver:        resolver,
+		think:           f.think,
+		inputCeiling:    f.inputCeiling,
+		outputReserve:   f.outputReserve,
+		pressureWarn:    f.pressureWarn,
+	})
+	warns := append(backendRes.warns, prep.warnings...)
 	if err != nil {
 		if len(backendRes.warns) > 0 {
-			return fmt.Errorf("%s\n%w", strings.Join(backendRes.warns, "\n"), err)
+			err = fmt.Errorf("%s\n%w", strings.Join(backendRes.warns, "\n"), err)
 		}
+		if isPreflightCapabilityError(err) {
+			return maybeUsageError(err, headlessExitApplies(f))
+		}
+		// #352: remaining preflight failures depend on provider lookup/probing —
+		// the same class as bootstrap.
+		reportPreRunFailure(stdout, outFormat, resultCodeProviderPreRun, err)
 		return err
 	}
 	warns = append(warns, oneShotWarns...)
@@ -854,8 +1120,8 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 		warns = append(warns, capStoreWarn)
 	}
 
-	thinkOpts, thinkLine := resolveThinkOptions(ctx, bundle.Models, plan.chain, f.think)
-	inputCeiling := resolveInputCeiling(ctx, bundle.Models, plan.chain, f.inputCeiling, f.outputReserve, resolver != nil)
+	thinkOpts, thinkLine := prep.thinkOpts, prep.thinkNotice
+	inputCeiling := prep.ceiling
 
 	if autoErr != nil && !f.noRag && f.ragDB == "" {
 		warns = append(warns, "retrieve auto-index disabled: "+autoErr.Error())
@@ -994,6 +1260,11 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 	// interactive branch rebinds it to replControl.notice before any turn can
 	// invoke dispatch, mirroring feedbackSvc.warn.
 	var dispatchNotice *feedbackNotifier
+	canary, err := newCanaryBinding(f.interceptors, hooks.canaryEntropy)
+	if err != nil {
+		return err
+	}
+
 	dispatchLine := ""
 	if f.dispatch {
 		// #477 D8: dchain was resolved at plan time and its reachability
@@ -1005,19 +1276,25 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 			// gate (children always carry the file tools, so a chain without
 			// tool_call would otherwise fail only at invocation time) and its
 			// own context-derived ceiling.
-			dwarns, perr := preflightToolCapable(ctx, bundle.Models, dchain, resolveEndpoint, resolver)
+			dwarns, perr := preflightToolCapable(ctx, bundle.Models, dchain, dispatchUseCase, resolveEndpoint, resolver)
 			warns = append(warns, dwarns...)
 			if perr != nil {
+				if isPreflightCapabilityError(perr) {
+					return maybeUsageError(perr, headlessExitApplies(f))
+				}
+				reportPreRunFailure(stdout, outFormat, resultCodeProviderPreRun, perr)
 				return perr
 			}
-			childCeiling = resolveInputCeiling(ctx, bundle.Models, dchain, f.inputCeiling, f.outputReserve, resolver != nil).ceiling
+			// Same constant the dispatch caller below routes with, so the
+			// child's ceiling and the child's route can never disagree.
+			childCeiling = resolveInputCeiling(ctx, bundle.Models, dchain, dispatchUseCase, f.inputCeiling, f.outputReserve, resolver != nil).ceiling
 		}
 		dispatchNotice = newFeedbackNotifier(func(line string) {
 			_, _ = fmt.Fprintln(stderr, line)
 		})
 		fan := resolveDispatchFanout(bundle.Router.SlotCapacity, dchain)
 		caller := newRouterChainCallerFor(bundle.Router, dchain, dispatchUseCase)
-		dpt, derr := newDispatchTool(caller, f.progressive, agent.Budget{InputCeiling: childCeiling, OutputReserve: f.outputReserve}, fan, dispatchNotice.notify, tools)
+		dpt, derr := newDispatchTool(caller, f, agent.Budget{InputCeiling: childCeiling, OutputReserve: f.outputReserve}, fan, dispatchNotice.notify, tools, canary)
 		if derr != nil {
 			return derr
 		}
@@ -1027,6 +1304,21 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 			head = dchain[0]
 		}
 		dispatchLine = fmt.Sprintf("dispatch: enabled -> %s", head)
+	}
+	interceptorLine := ""
+	interceptorsOn := false
+	if ics := interceptorsFor(f, canary); len(ics) > 0 {
+		interceptorLine = interceptorsNotice(ics)
+		interceptorsOn = true
+	}
+
+	consultants, cerr := loadConsultants(f.consultantsConfig)
+	if cerr != nil {
+		return maybeUsageError(cerr, headlessExitApplies(f))
+	}
+	consultLine := ""
+	if len(consultants) > 0 {
+		consultLine = fmt.Sprintf("consult: %s", plural(len(consultants), "consultant", "consultants"))
 	}
 
 	wantAgentMemory, agentMemoryWarn := agentMemoryRequest(f.agentMemory, f.noSession)
@@ -1046,9 +1338,46 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 		}
 	}()
 
+	// #352: -allow-tool mounts gated tools for a headless run. The set was
+	// already validated in validateFlags, so this cannot fail here; the error
+	// is still checked rather than discarded. The write/exec construction
+	// below is shared: -allow-write/-allow-exec drive it interactively,
+	// -allow-tool drives it headlessly. Neither can be true at the same time
+	// as the other for a given kind, because applyOneShotMode clears both
+	// allow flags whenever -p is set.
+	allowTools, aterr := newAllowToolSet(f.allowTools)
+	if aterr != nil {
+		return aterr
+	}
+	buildWrite := f.allowWrite || allowTools.authorized("write_file") || allowTools.authorized("edit_file")
+	buildExec := f.allowExec || allowTools.authorized("run_command") ||
+		allowTools.authorized("start_command") || allowTools.authorized("stop_command")
+
+	// #372: resources /allow-write and /allow-exec open after startup are
+	// released here, in the same LIFO slot as their startup twins (after
+	// runtime.Close). sess is assigned once the session is built below.
+	var sess *replSession
+	defer func() {
+		if sess == nil {
+			return
+		}
+		// The ledger event fires only when a late resource actually existed,
+		// so sessions that never mounted keep their exact shutdown sequence.
+		hadLate := sess.lateStore != nil || sess.lateManager != nil
+		runErr = errors.Join(runErr, sess.closeLateMounts())
+		if hadLate && hooks.closed != nil {
+			hooks.closed("late-mounts")
+		}
+	}()
+	// #372: the gated write/exec tools are inserted here at startup and by
+	// /allow-write and /allow-exec, so a mid-session mount reproduces the
+	// startup order (and toolSchemaHash) exactly.
+	mountAt := len(tools)
+	writeToolCount := 0
+
 	var journal *checkpointJournal
 	var verifier *verifyRunner
-	if f.allowWrite {
+	if buildWrite {
 		// D6: -allow-write fails closed on ANY checkpoint lifecycle failure
 		// (store, lease, migration, recovery, state query, hardening) rather
 		// than silently dropping the #355 durability guarantee.
@@ -1062,9 +1391,12 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 				return err
 			}
 		}
-		wt, j, werr := buildWriteTools(root, cpStore)
+		wt, j, identityNotice, werr := buildWriteTools(root, cpStore, os.Getenv)
 		if werr != nil {
 			return werr
+		}
+		if identityNotice != "" {
+			warns = append(warns, identityNotice)
 		}
 		notice, rerr := j.recoverStartup(ctx)
 		if rerr != nil {
@@ -1078,40 +1410,73 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 		} else if n > 0 {
 			warns = append(warns, fmt.Sprintf("an interrupted undo exists (%d checkpoint(s)); /undo resumes it", n))
 		}
-		tools = append(tools, wt...)
+		mounted := wt
+		if !f.allowWrite {
+			mounted = filterAllowedTools(wt, allowTools)
+		}
+		tools = append(tools, mounted...)
+		writeToolCount = len(mounted)
 		journal = j
 
-		// #347: read only here, so no other mode ever touches .golem.json.
-		// applyOneShotMode has already cleared allowWrite for -p, and task,
-		// planning and Agentflow modes reject it at validation.
-		var vwarn string
-		if verifier, vwarn = buildVerifier(root); vwarn != "" {
-			warns = append(warns, vwarn)
+		// #347: read only here under f.allowWrite and by the REPL's
+		// /allow-write (#372); both are REPL-only, so no other mode ever
+		// touches .golem.json. applyOneShotMode has already cleared allowWrite
+		// for -p, and task, planning and Agentflow modes reject it at
+		// validation. Deliberately
+		// gated on f.allowWrite, NOT buildWrite: a headless -allow-tool run
+		// must not read .golem.json or mount post-write verification —
+		// verify_command is not an -allow-tool name.
+		if f.allowWrite {
+			var vwarn string
+			if verifier, vwarn = buildVerifier(root); vwarn != "" {
+				warns = append(warns, vwarn)
+			}
 		}
 	}
 
-	// Background manager (#346): constructed only when interactive -allow-exec
+	// Background manager (#346): constructed when interactive -allow-exec
 	// survives to this point (one-shot already forced allowExec false;
-	// -plan/-goal reject it at flag validation), so every manager gets the
-	// replCtx lifetime binding below. The deferred Shutdown is registered
-	// immediately so no error path between here and that binding can leak a
-	// process; sync.Once makes it safe beside the AfterFunc path.
+	// -plan/-goal reject it at flag validation) or when #352's -allow-tool
+	// named an exec tool — one manager per invocation either way, so every
+	// manager gets the replCtx lifetime binding below. buildExecMount shuts
+	// the manager down itself when the tool set fails to build (the
+	// closed("background") hook still fires for that reaped manager), and the
+	// deferred Shutdown is registered as soon as a manager is published, so
+	// no error path leaks a process; sync.Once makes it safe beside the
+	// AfterFunc path.
+	scratchLine := ""
 	var bgManager *agenttools.BackgroundManager
 	var bgExecTools []agent.Tool
-	if f.allowExec {
-		bgManager = agenttools.NewBackgroundManager()
+	if buildExec {
+		// Scratch policy (#443): frozen at construction. Scratch is interactive,
+		// so its checkpoint journal exists only when -allow-write built it;
+		// promotion is registered exactly when both consents exist. Without
+		// -allow-write, scratch still captures and queries but promote_artifact
+		// is absent.
+		execOpts, line := scratchExecOptions(f.scratch, journal)
+		scratchLine = line
+		// #372: the same seam /allow-exec uses; a build failure has already
+		// shut the unpublished manager down.
+		mgr, et, eerr := buildExecMount(root, execOpts)
+		if eerr != nil {
+			if hooks.closed != nil {
+				hooks.closed("background") // the manager existed and was reaped
+			}
+			return eerr
+		}
+		bgManager = mgr
 		defer func() {
 			bgManager.Shutdown()
 			if hooks.closed != nil {
 				hooks.closed("background")
 			}
 		}()
-		et, eerr := buildExecTools(root, bgManager)
-		if eerr != nil {
-			return eerr
-		}
 		bgExecTools = et
-		tools = append(tools, et...)
+		if f.allowExec {
+			tools = append(tools, et...)
+		} else {
+			tools = append(tools, filterAllowedTools(et, allowTools)...)
+		}
 	}
 
 	delegateLine := ""
@@ -1124,49 +1489,68 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 		delegateLine = fmt.Sprintf("delegate: enabled -> %s", dchain[0])
 	}
 
-	var mcpManager *mcpclient.Manager
 	mcpAttached := false
 	mcpLine := ""
-	if servers, perr := parseMCPServers(f.mcpStdio, f.mcpHTTP); perr != nil {
-		return perr // fatal: bad flag config / explicit duplicate alias
-	} else if len(servers) > 0 {
-		mgr, mcpWarns, cerr := mcpclient.Connect(ctx, mcpClientImpl(), servers)
-		if cerr != nil {
-			return cerr // fatal: invalid / duplicate alias
-		}
-		for _, w := range mcpWarns {
-			warns = append(warns, "mcp: "+w.Error())
-		}
-		mcpTools := mgr.Tools()
-		tools = append(tools, mcpTools...)
-		mcpManager = mgr
-		mcpAttached = len(mcpTools) > 0
-		// Positive confirmation so a silently-failed server attach is visible:
-		// attached-tool count against the configured-server count (failures and
-		// skipped tools appear as the "mcp: ..." warnings above).
-		mcpLine = fmt.Sprintf("mcp: attached %d tool(s) from %d configured server(s)", len(mcpTools), len(servers))
-	}
-	defer func() {
+	if len(mcpServers) > 0 {
+		count := 0
 		if mcpManager != nil {
-			_ = mcpManager.Close()
+			mcpTools := mcpManager.Tools()
+			tools = append(tools, mcpTools...)
+			count = len(mcpTools)
+			mcpAttached = count > 0
 		}
-	}()
-
-	baseSystem := buildSystemPrompt(f.allowWrite, f.allowExec)
-	baseSystem += delegateSystemFragment(f.delegate, f.allowWrite)
-	baseSystem += dispatchSystemFragment(f.dispatch)
-	baseSystem += memorySystemFragment(memoryEnabled)
-	projectContextLine := ""
-	projectContextBlock := ""
-	if !f.noProjectContext {
-		if block, n, perr := loadProjectContext(ctx, root, os.Getenv); perr != nil {
-			warns = append(warns, "project context disabled: "+perr.Error())
-		} else if block != "" {
-			baseSystem = baseSystem + "\n\n" + block
-			projectContextBlock = block
-			projectContextLine = fmt.Sprintf("project context: loaded %d file(s)", n)
+		mcpLine = fmt.Sprintf("mcp: attached %d tool(s) from %d configured server(s)", count, len(mcpServers))
+		if len(mcpBlocked) > 0 {
+			mcpLine += fmt.Sprintf("; blocked %d alias(es): %s", len(mcpBlocked), strings.Join(mcpBlocked, ", "))
 		}
 	}
+
+	// #372: replSession owns composition. These are the same inputs the
+	// inline sequence used; composeSystem renders them once here and again
+	// on every mid-session mount, with exactly one input changed.
+	sysIn := systemInputs{
+		allowWrite: f.allowWrite,
+		allowExec:  f.allowExec,
+		delegate:   f.delegate,
+		dispatch:   f.dispatch,
+		memory:     memoryEnabled,
+	}
+	if canary != nil {
+		sysIn.canary = canary.active.fragment
+	}
+	if !allowTools.empty() {
+		// #352/F6: a selectively mounted run gets a prompt built from the
+		// EXACT mounted set; the group prompt would advertise tools that do
+		// not exist and an interactive approval flow that never happens.
+		sysIn.headless = &golemruntime.HeadlessToolCaps{
+			WriteFile:    allowTools.authorized("write_file"),
+			EditFile:     allowTools.authorized("edit_file"),
+			RunCommand:   allowTools.authorized("run_command"),
+			StartCommand: allowTools.authorized("start_command"),
+			StopCommand:  allowTools.authorized("stop_command"),
+		}
+	}
+	// #354: Git context is captured first because its rendered payload is
+	// reserved out of the shared 16 KiB injected-context budget and project
+	// context renders into the remainder (D3). Both absences (not a
+	// repository, no git) are silent; a genuine capture failure warns once
+	// and injects nothing (D8). The composed order is project then Git
+	// regardless of capture order (injectedContext).
+	var gitSnap gitContextSnapshot
+	gitContextLine := ""
+	if !f.noGitContext {
+		if snap, gerr := loadGitContext(ctx, "git", root); gerr != nil {
+			warns = append(warns, "git context disabled: "+gerr.Error())
+		} else {
+			gitSnap = snap
+			if snap.Absence == gitContextPresent {
+				sysIn.gitContext = snap.Block
+				gitContextLine = "git context: " + gitContextNotice(snap.State)
+			}
+		}
+	}
+	sysIn = projectContextInputs(sysIn, projectState.docs, gitSnap, pendingTrust)
+	gitSnap.Block = sysIn.gitContext
 
 	var sessn *session
 	var sessionLine string
@@ -1187,12 +1571,13 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 	}
 	defer func() { _ = sessn.Close() }() // nil-safe
 
-	// Appended after the session block (not beside memorySystemFragment) so the
+	// Composed after the session block (not beside memory) so the agent-memory
 	// framing can reflect whether the session actually opened: without one,
 	// create/promote deterministically error, so the model must not be told to
-	// use them. baseSystem is consumed only at replSession construction below;
-	// this fragment now trails the project-context block in the composed prompt.
-	baseSystem += agentMemorySystemFragment(agentMemoryEnabled, sessn != nil)
+	// use them. baseSystem is consumed only at replSession construction below
+	// and is the exact string the runtime receives.
+	sysIn.agentMemory, sysIn.sessionUp = agentMemoryEnabled, sessn != nil
+	baseSystem := composeSystem(sysIn)
 
 	if agentMemoryEnabled {
 		tools = appendAgentMemoryTools(tools, mrt.records, mrt.dbPath, workspaceID(root), sessn)
@@ -1203,25 +1588,33 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 		memoryLine = "memory: enabled"
 	}
 	agentMemoryLine := agentMemoryNotice(agentMemoryEnabled, sessn != nil)
+	if agentMemoryEnabled && mrt.records.CreatedKeyID() != "" {
+		agentMemoryLine += "; created signing identity " + mrt.records.CreatedKeyID()
+	}
 	for _, line := range startupNotices(startupInfo{
-		workspace:          root,
-		agentflowState:     shouldShowAgentflowHint(f) && agentflowStateDetected(root),
-		backendLine:        backendRes.notice,
-		useRecommend:       plan.useRecommend,
-		bootstrapWarns:     bundle.Warnings,
-		preflightWarns:     warns,
-		retrieveLine:       retrieveLine,
-		retrieveOmitted:    retrieveOmitted,
-		retrieveRequested:  retrieveRequested,
-		thinkLine:          thinkLine,
-		inputCeilingLine:   inputCeiling.line(),
-		sessionLine:        sessionLine,
-		projectContextLine: projectContextLine,
-		memoryLine:         memoryLine,
-		agentMemoryLine:    agentMemoryLine,
-		mcpLine:            mcpLine,
-		delegateLine:       delegateLine,
-		dispatchLine:       dispatchLine,
+		workspace:         root,
+		agentflowState:    shouldShowAgentflowHint(f) && agentflowStateDetected(root),
+		backendLine:       backendRes.notice,
+		useRecommend:      plan.useRecommend,
+		activeUseCase:     plan.useCase,
+		suppliedByUseCase: plan.suppliedByUseCase,
+		bootstrapWarns:    bundle.Warnings,
+		preflightWarns:    warns,
+		retrieveLine:      retrieveLine,
+		retrieveOmitted:   retrieveOmitted,
+		retrieveRequested: retrieveRequested,
+		thinkLine:         thinkLine,
+		inputCeilingLine:  inputCeiling.line(),
+		sessionLine:       sessionLine,
+		gitContextLine:    gitContextLine,
+		memoryLine:        memoryLine,
+		agentMemoryLine:   agentMemoryLine,
+		mcpLine:           mcpLine,
+		delegateLine:      delegateLine,
+		scratchLine:       scratchLine,
+		dispatchLine:      dispatchLine,
+		interceptorLine:   interceptorLine,
+		consultLine:       consultLine,
 	}) {
 		_, _ = fmt.Fprintln(stderr, line)
 	}
@@ -1238,7 +1631,23 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 		sourceSummarizer = routerSourceSummaryGenerator(bundle.Router, summarizeChain)
 	}
 
-	newOrchestrator := newOrchestratorFactory(newRouterChainCaller(bundle.Router, plan.chain), f, verifier)
+	// #372: a REPL session that started WITHOUT -allow-write may enable writes
+	// later, so its orchestrator carries an empty late-bound verifier slot.
+	// A session that already has writes keeps the real verifier (or none)
+	// bound directly: /allow-write is idempotent there and never needs the
+	// slot, and the orchestrator stays byte-identical to before #372. The
+	// interface is assigned only from a non-nil pointer so a typed nil never
+	// reaches the factory.
+	var orchVerifier agent.Verifier
+	if verifier != nil {
+		orchVerifier = verifier
+	}
+	var verifySlot *lateVerifier
+	if isREPLMode(f) && !f.allowWrite {
+		verifySlot = &lateVerifier{}
+		orchVerifier = verifySlot
+	}
+	newOrchestrator := newOrchestratorFactory(prep.caller, f, orchVerifier, canary)
 	orch := newOrchestrator()
 
 	obsv, err := newObserv(os.Getenv, root, f.trace, f.telemetry, time.Now)
@@ -1246,12 +1655,7 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 		return fmt.Errorf("golem: observability setup: %w", err)
 	}
 
-	budget := agent.Budget{InputCeiling: inputCeiling.ceiling, OutputReserve: f.outputReserve}
-	if f.pressureWarn > 0 {
-		// The agent package owns the band layout (single source of truth for the
-		// monotonic clamp + defaults); golem only supplies the warn fraction.
-		budget.Pressure = agent.PressureThresholdsForWarn(float64(f.pressureWarn) / 100)
-	}
+	budget := prep.budget
 	var summarizer conversation.Summarizer
 	if !f.noCompress {
 		summarizer = agent.NewRouterSummarizer(bundle.Router, summarizeChain)
@@ -1265,6 +1669,7 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 		// The REPL line reader accepts lines up to 1 MiB; keep the runtime's
 		// message bound in lockstep so a pasted log or diff is not rejected.
 		MaxMessageBytes: maxGoalBytes,
+		FailureMessage:  runFailureMessage,
 		ModelOptions:    thinkOpts,
 		Summarizer:      summarizer,
 		// The CLI is the trusted host: -trace records include model reasoning.
@@ -1289,38 +1694,86 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 	if f.promptSet {
 		renderOut = stderr
 	}
-	sess := &replSession{
-		orch:                orch,
-		runtime:             runtime,
-		newOrchestrator:     newOrchestrator,
-		tools:               tools,
-		baseSystem:          baseSystem,
-		projectContextBlock: projectContextBlock,
-		maxSteps:            f.maxSteps,
-		budget:              budget,
-		color:               colorEnabled(renderOut, f.noColor),
-		retrieveOmitted:     retrieveOmitted,
-		session:             sessn,
-		journal:             journal,
-		bgManager:           bgManager,
-		grants:              newApprovalGrants(),
-		destAdmission:       adm,
-		allowWrite:          f.allowWrite,
-		allowExec:           f.allowExec,
-		mcpAttached:         mcpAttached,
-		memory:              mrt.user,
-		memoryDBPath:        mrt.dbPath,
-		records:             mrt.records,
-		workspaceID:         workspaceID(root),
-		obs:                 obsv,
-		feedback:            feedbackSvc,
-		pressureWarn:        f.pressureWarn > 0,
-		mixed:               f.progressive,
-		grounding:           groundingSvc,
-		modelOptions:        thinkOpts,
+	sess = &replSession{
+		canary:           canary,
+		orch:             orch,
+		runtime:          runtime,
+		newOrchestrator:  newOrchestrator,
+		tools:            tools,
+		baseSystem:       baseSystem,
+		root:             root,
+		stdinTerminal:    stdinTerminal,
+		sysInputs:        sysIn,
+		gitSnapshot:      gitSnap,
+		noGitContext:     f.noGitContext,
+		noCompress:       f.noCompress,
+		readToolCount:    readToolCount,
+		mountAt:          mountAt,
+		writeToolCount:   writeToolCount,
+		scratch:          f.scratch,
+		verifier:         verifySlot,
+		maxSteps:         f.maxSteps,
+		startupBudget:    budget,
+		color:            colorEnabled(renderOut, f.noColor),
+		retrieveOmitted:  retrieveOmitted,
+		session:          sessn,
+		journal:          journal,
+		bgManager:        bgManager,
+		grants:           grants,
+		destAdmission:    adm,
+		headlessApprover: headlessApproverFor(allowTools),
+		machine:          newMachineWriter(stdout, outFormat),
+		allowWrite:       f.allowWrite,
+		allowExec:        f.allowExec,
+		mcpAttached:      mcpAttached,
+		consultants:      consultants,
+		interceptorsOn:   interceptorsOn,
+		memory:           mrt.user,
+		memoryDBPath:     mrt.dbPath,
+		records:          mrt.records,
+		workspaceID:      workspaceID(root),
+		obs:              obsv,
+		feedback:         feedbackSvc,
+		pressureWarn:     f.pressureWarn > 0,
+		mixed:            f.progressive,
+		grounding:        groundingSvc,
+		thinkModels:      bundle.Models,
+		selection: modelSelection{
+			requested:     startupSelector(cfg, activeRoute),
+			chain:         slices.Clone(plan.chain),
+			useCase:       plan.useCase,
+			useRecommend:  plan.useRecommend,
+			ceilingSource: inputCeiling.source,
+			// The frozen inputs a later /model set re-prepares from: exactly
+			// the values used above, never re-resolved (#376 M2).
+			effective:       bundle.Effective,
+			models:          bundle.Models,
+			router:          bundle.Router,
+			resolveEndpoint: resolveEndpoint,
+			resolver:        resolver,
+			planOpts:        planOpts,
+			flags:           f,
+			orchVerifier:    orchVerifier,
+			dispatchNotify:  dispatchNotifySink(dispatchNotice),
+		},
+		startupModelOptions: thinkOpts,
+
+		projectContext:         &projectState,
+		projectContextScripted: scriptedProjectContext(f),
 	}
+	if pendingTrust {
+		projectState.approve(grants, projectState.digest)
+		sess.publishedProjectKey = projectState.grantKey
+		showPublishedProjectContext(stderr, sess, nil)
+	}
+
 	if sess.maxSteps == 0 {
 		sess.maxSteps = 16 // mirror agent defaultMaxSteps so the footer's k/max is accurate
+	}
+	if lineSourceModeFor(f) == sourceREPL {
+		if base, err := os.UserConfigDir(); err == nil {
+			sess.commandsDir = filepath.Join(base, "go-llm", "commands")
+		}
 	}
 	if hooks.afterSessionReady != nil {
 		if err := hooks.afterSessionReady(sess); err != nil {
@@ -1350,6 +1803,13 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 		var cancelREPL context.CancelFunc
 		replCtx, cancelREPL = context.WithCancel(ctx)
 		defer cancelREPL()
+		// #372: registered after cancelREPL so it runs first (LIFO): on the
+		// normal exit path a late manager's replCtx binding is retired
+		// before the context is canceled, and closeLateMounts then shuts it
+		// down in its ordered slot, exactly as stopAfter below arranges for a
+		// startup manager. An idle Ctrl-C quit calls cancelREPL directly,
+		// so there the binding fires first and closeLateMounts joins it.
+		defer sess.disarmLateExec()
 		ctrl := newReplControl(stdout, stderr, interrupts, cancelREPL)
 		sess.control = ctrl
 		if feedbackSvc != nil {
@@ -1422,6 +1882,20 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 		startAutoIndex = hooks.startAutoIndex
 	}
 
+	// One boundary for both AgentFlow routes, after setup hooks and immediately
+	// before invocation. Internal planner/task steps keep this captured snapshot.
+	invokeAgentflow := func(src lineSource) error {
+		runCtx, cancel := interruptContext(ctx, interrupts)
+		defer cancel()
+		if err := refreshProjectContext(runCtx, stderr, sess); err != nil {
+			return err
+		}
+		if f.goalSet {
+			return runAgentflowAuthor(runCtx, src, stdout, stderr, interrupts, sess, f, root)
+		}
+		return runAgentflowTask(runCtx, stdout, stderr, interrupts, sess, f, root)
+	}
+
 	// Final dispatch. A line source is created only where an interactive read
 	// can actually happen, so the modes that never read stdin open no reader.
 	//
@@ -1455,7 +1929,7 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 			Root:        root,
 			OnInterrupt: onInterrupt,
 		}), func(src lineSource) error {
-			return runAgentflowAuthor(ctx, src, stdout, stderr, interrupts, sess, f, root)
+			return invokeAgentflow(src)
 		})
 	case sourceNone:
 		if startAutoIndex != nil {
@@ -1468,13 +1942,15 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 			}
 		}
 		if f.goalSet {
-			return runAgentflowAuthor(ctx, nil, stdout, stderr, interrupts, sess, f, root)
+			return invokeAgentflow(nil)
 		}
 		if f.planPath != "" {
-			return runAgentflowTask(ctx, stdout, stderr, interrupts, sess, f, root)
+			return invokeAgentflow(nil)
 		}
 		return runOneShot(ctx, stdout, stderr, interrupts, sess, f.prompt)
 	}
+
+	loadRecipes(stderr, sess)
 
 	// /edit is wired regardless of -no-editor: the flag disables the inline
 	// line editor, not external composition. Availability is still gated on

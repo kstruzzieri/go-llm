@@ -38,7 +38,7 @@
     },
     {
       "role": "tool",
-      "content": "rec-flip-checklist · working · 2025-07-27 · flip-day checklist lives in the deploy repo; tick items in order, the edge steps assume the producer steps finished\nrec-observer-invite · semantic · 2025-07-27 · platform observer joins the flip call fifteen minutes before the window opens\nrec-revoke-sweep · semantic · 2025-07-27 · rotation cleanup: the revocation sweep lands 96 hours after the flip; it walks the token table generation by generation, revokes everything still carrying the retired prefix, and files one summary ticket per tenant that lost a live token. producers that page during the sweep get pointed at their own enrollment runbook first, because in the last two rotations every single sweep page turned out to be a producer that never finished migrating. keep the sweep window on the ops calendar until the summary tickets are all closed out, and hand the ticket list to the platform observer with the drain graphs attached so the rotation retro starts from evidence instead of memory.",
+      "content": "trust=agent-written; unreviewed; origin=memory.create; session=caller-claim · rec-flip-checklist · working · 2025-07-27 · flip-day checklist lives in the deploy repo; tick items in order, the edge steps assume the producer steps finished\ntrust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-observer-invite · semantic · 2025-07-27 · platform observer joins the flip call fifteen minutes before the window opens\ntrust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-revoke-sweep · semantic · 2025-07-27 · rotation cleanup: the revocation sweep lands 96 hours after the flip; it walks the token table generation by generation, revokes everything still carrying the retired prefix, and files one summary ticket per tenant that lost a live token. producers that page during the sweep get pointed at their own enrollment runbook first, because in the last two rotations every single sweep page turned out to be a producer that never finished migrating.",
       "tool_call_id": "c2",
       "name": "agent_memory_search"
     },
@@ -62,8 +62,8 @@
       "rec-observer-invite",
       "rec-revoke-sweep"
     ],
-    "estimated_prompt_tokens": 1393,
-    "state_digest": "c82ed6891593ff18d9c7a571903463b56deab43864c87adbde6c96212757cc22",
+    "estimated_prompt_tokens": 1394,
+    "state_digest": "d1d0c06bd7115b5e0ea3bba97d4118c1c19586c9edde8b12d7b964510496b0f2",
     "subjects": [
       "(c1|rag|internal/ingest/verifycache.go)",
       "(c1|rag|internal/ingest/revokelog.go)",
@@ -76,7 +76,7 @@
     "answer_home": "join",
     "scenario_family": "ingest-token-join",
     "budget": 1445,
-    "raw_state_tokens": 2408,
+    "raw_state_tokens": 2409,
     "pressure_level": "critical",
     "shed_messages": 16,
     "shed_bytes": 3361

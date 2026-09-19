@@ -94,7 +94,7 @@
     },
     {
       "role": "tool",
-      "content": "rec-compaction-note · semantic · 2025-07-27 · nightly compaction is IO-heavy on the slow volume; it defers to declared windows since the reconciliation\nrec-drain-watch · working · 2025-07-27 · watch the export backlog panel during any drain; starvation shows there before the node graphs move\nrec-drill-wideopen · semantic · 2025-07-27 · the March replay drill ran wide open at 24 MB/s and starved live ingest; the retro banned uncapped drills on production-shaped nodes",
+      "content": "trust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-compaction-note · semantic · 2025-07-27 · nightly compaction is IO-heavy on the slow volume; it defers to declared windows since the reconciliation\ntrust=agent-written; unreviewed; origin=memory.create; session=caller-claim · rec-drain-watch · working · 2025-07-27 · watch the export backlog panel during any drain; starvation shows there before the node graphs move\ntrust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-drill-wideopen · semantic · 2025-07-27 · the March replay drill ran wide open at 24 MB/s and starved live ingest; the retro banned uncapped drills on production-shaped nodes",
       "tool_call_id": "c2",
       "name": "agent_memory_search"
     },
@@ -118,8 +118,8 @@
       "rec-drain-watch",
       "rec-drill-wideopen"
     ],
-    "estimated_prompt_tokens": 1208,
-    "state_digest": "c1c1dc80910eac564620f0c791eccd5f23bdaf00a456427babb64932b67e2cbb",
+    "estimated_prompt_tokens": 1267,
+    "state_digest": "0a1fa74bc41208c603780dd98e534dad16ff50c2e76c8eb576e1c60542024b1a",
     "subjects": [
       "(c1|rag|internal/replay/replay.go)",
       "(c1|rag|internal/replay/cursor.go)",
@@ -131,8 +131,8 @@
     "stratum": "conversation_only",
     "answer_home": "conversation",
     "scenario_family": "replay-throttle-conv",
-    "budget": 1277,
-    "raw_state_tokens": 2129,
+    "budget": 1313,
+    "raw_state_tokens": 2188,
     "pressure_level": "critical",
     "shed_messages": 6,
     "shed_bytes": 2874

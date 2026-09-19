@@ -84,7 +84,7 @@
     },
     {
       "role": "tool",
-      "content": "### source: \"internal/mesh/profile.go\"\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nnote: metadata overview (summary omitted: budget)\n--- source: \"internal/mesh/profile.go\" (lines 1-18, similarity: 1.00) ---\n1| package mesh\n2| \n3| // applyProfile installs mesh settings from the provisioning profile.\n4| // The mesh never invents values: every knob resolves from the\n5| // profile or the install image, and a knob absent from both fails\n6| // the apply loudly instead of falling back to a compiled default.\n7| func (m *Mesh) applyProfile(p Profile) error {\n8| \tfor _, k := range meshKnobs {\n9| \t\tv, ok := p.lookup(k)\n10| \t\tif !ok {\n11| \t\t\treturn errKnobUnset(k)\n12| \t\t}\n13| \t\tif err := m.set(k, v); err != nil {\n14| \t\t\treturn err\n15| \t\t}\n16| \t}\n17| \treturn nil\n18| }\n\n### source: \"internal/mesh/converge.go\"\npurpose: Convergence tracking: version-vector confirmation over sampled rounds.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n\n### source: \"docs/mesh-operations.md\"\npurpose: Mesh operations guide: profile-driven settings and cadence change flow.\nlanguage: markdown\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n",
+      "content": "### source: \"internal/mesh/profile.go\"\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nnote: metadata overview (summary omitted: budget)\n--- source: \"internal/mesh/profile.go\" (lines 1-18, similarity: 1.00) ---\n1| package mesh\n2| \n3| // applyProfile installs mesh settings from the provisioning profile.\n4| // The mesh never invents values: every knob resolves from the\n5| // profile or the install image, and a knob absent from both fails\n6| // the apply loudly instead of falling back to a compiled default.\n7| func (m *Mesh) applyProfile(p Profile) error {\n8| \tfor _, k := range meshKnobs {\n9| \t\tv, ok := p.lookup(k)\n10| \t\tif !ok {\n11| \t\t\treturn errKnobUnset(k)\n12| \t\t}\n13| \t\tif err := m.set(k, v); err != nil {\n14| \t\t\treturn err\n15| \t\t}\n16| \t}\n17| \treturn nil\n18| }\n\n### source: \"internal/mesh/converge.go\"\npurpose: Convergence tracking: version-vector confirmation over sampled rounds.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n\n### source: \"docs/mesh-operations.md\"\nlanguage: markdown\nindexed: 2025-07-27T00:00:00Z\nnote: metadata overview (summary omitted: budget)\n",
       "tool_call_id": "c1",
       "name": "retrieve"
     },
@@ -102,7 +102,7 @@
     },
     {
       "role": "tool",
-      "content": "rec-edge-cadence · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src: · edge gossip holds at 10 seconds; the relay soak needs the short round\nrec-install-image · working · created:2025-07-27 · updated:2025-07-27 · scope:session · ns: · src:\nrec-soak-archive · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:",
+      "content": "trust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-edge-cadence · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src-claim: · edge gossip holds at 10 seconds; the relay soak needs the short round\ntrust=agent-written; unreviewed; origin=memory.create; session=caller-claim · rec-install-image · working · created:2025-07-27 · updated:2025-07-27 · scope:session · ns: · src-claim:\ntrust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-soak-archive · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src-claim:",
       "tool_call_id": "c2",
       "name": "agent_memory_search"
     },
@@ -126,8 +126,8 @@
       "rec-install-image",
       "rec-soak-archive"
     ],
-    "estimated_prompt_tokens": 1157,
-    "state_digest": "701d4681778081be7c9c0bfa1582eccbd58340cadc72660546c5f79ff7c02295",
+    "estimated_prompt_tokens": 1200,
+    "state_digest": "7fc170da4fd95e48eb4845a7c3382840a1bcba04fba1d80e927216bee0ffbfe6",
     "subjects": [
       "(c1|rag|internal/mesh/profile.go)",
       "(c1|rag|internal/mesh/converge.go)",
@@ -139,11 +139,11 @@
     "stratum": "stale_vs_fresh",
     "answer_home": "conversation",
     "scenario_family": "gossip-interval-staleness",
-    "budget": 1204,
-    "raw_state_tokens": 2007,
+    "budget": 1240,
+    "raw_state_tokens": 2066,
     "pressure_level": "critical",
     "shed_messages": 2,
-    "shed_bytes": 2663,
+    "shed_bytes": 2725,
     "omitted_subjects": 1
   }
 }

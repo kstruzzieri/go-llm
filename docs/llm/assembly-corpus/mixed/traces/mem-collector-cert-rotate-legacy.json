@@ -46,7 +46,7 @@
       "rec-wave-thresholds"
     ],
     "estimated_prompt_tokens": 861,
-    "state_digest": "05b14536af2118bdbf4156f08064a4179f3ecf1cbbd07134062ff98630f35150",
+    "state_digest": "2beb09eb10fcf84190dab1a137458070a7d3d2eac772131496c1573816ae424d",
     "subjects": [
       "(c1|memory|rec-canary-ring)",
       "(c1|memory|rec-cert-cadence)",
@@ -59,10 +59,10 @@
     "stratum": "memory_only",
     "answer_home": "memory",
     "scenario_family": "collector-cert-mem",
-    "budget": 923,
-    "raw_state_tokens": 1539,
+    "budget": 970,
+    "raw_state_tokens": 1617,
     "pressure_level": "critical",
     "shed_messages": 10,
-    "shed_bytes": 2283
+    "shed_bytes": 2596
   }
 }

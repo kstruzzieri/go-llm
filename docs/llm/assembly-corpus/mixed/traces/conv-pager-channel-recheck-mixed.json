@@ -102,7 +102,7 @@
     },
     {
       "role": "tool",
-      "content": "rec-page-history · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:\nrec-silence-cal · working · created:2025-07-27 · updated:2025-07-27 · scope:session · ns: · src: · maintenance silences are pre-declared in the ops calendar so planned work stays quiet\nrec-webhook-rotate · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src: · notifier webhook token rotates quarterly with the platform team; we only consume it from the secret store",
+      "content": "trust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-page-history · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src-claim:\ntrust=agent-written; unreviewed; origin=memory.create; session=caller-claim · rec-silence-cal · working · created:2025-07-27 · updated:2025-07-27 · scope:session · ns: · src-claim: · maintenance silences are pre-declared in the ops calendar so planned work stays quiet\ntrust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-webhook-rotate · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src-claim:",
       "tool_call_id": "c2",
       "name": "agent_memory_search"
     },
@@ -126,8 +126,8 @@
       "rec-silence-cal",
       "rec-webhook-rotate"
     ],
-    "estimated_prompt_tokens": 1249,
-    "state_digest": "b743bf6599f2a84b4926653bf1f7b34879940eab34df6b58f531e210b21daeff",
+    "estimated_prompt_tokens": 1285,
+    "state_digest": "26e68557d903889f455f0b520f19f5a8c456bfed27e53e7e27f73757b4822ffa",
     "subjects": [
       "(c1|rag|internal/alert/notify.go)",
       "(c1|rag|internal/alert/silence.go)",
@@ -139,11 +139,11 @@
     "stratum": "conversation_only",
     "answer_home": "conversation",
     "scenario_family": "pager-escalation-channel",
-    "budget": 1290,
-    "raw_state_tokens": 2150,
+    "budget": 1325,
+    "raw_state_tokens": 2208,
     "pressure_level": "critical",
     "shed_messages": 4,
-    "shed_bytes": 2800,
+    "shed_bytes": 2891,
     "omitted_subjects": 2
   }
 }

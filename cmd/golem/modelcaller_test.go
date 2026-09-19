@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"errors"
+	"reflect"
 	"testing"
 
 	"github.com/kstruzzieri/go-llm/agent"
@@ -144,3 +146,37 @@ func (f fakeChatStreamer) ExecuteChatStream(ctx context.Context, fn func(provide
 
 // Compile-time assertion: chainModelCaller satisfies agent.ModelCaller.
 var _ agent.ModelCaller = (*chainModelCaller)(nil)
+
+func TestNewActiveChainCaller_CarriesThePlansChainAndUseCase(t *testing.T) {
+	// The one orchestrator caller derives from the resolved active chainPlan
+	// (#476 D3): a caller routing a different use case than the admitted plan
+	// is exactly the mismatch chainPlan exists to make unrepresentable.
+	plan := chainPlan{chain: []string{"prov/big", "prov/small"}, useCase: "planning"}
+	caller, ok := newActiveChainCaller(&provider.Router{}, plan).(*chainModelCaller)
+	if !ok {
+		t.Fatal("newActiveChainCaller did not return a chainModelCaller")
+	}
+	if caller.useCase != "planning" {
+		t.Errorf("caller.useCase = %q, want %q (hard-coding agent here silently detaches the caller from the admitted plan)", caller.useCase, "planning")
+	}
+	if !reflect.DeepEqual(caller.chain, plan.chain) {
+		t.Errorf("caller.chain = %v, want the plan's chain %v", caller.chain, plan.chain)
+	}
+
+	// And the request it routes carries both: the use case stamps the
+	// RoutingRequest, and a non-empty chain rides strictly.
+	var seen provider.RoutingRequest
+	caller.route = func(_ context.Context, rr provider.RoutingRequest) (chatStreamer, error) {
+		seen = rr
+		return nil, errors.New("stop before execution")
+	}
+	_, _ = caller.Chat(context.Background(), provider.ChatRequest{
+		Messages: []provider.ChatMessage{{Role: "user", Content: "x"}},
+	}, nil)
+	if seen.UseCase != "planning" {
+		t.Errorf("routed UseCase = %q, want %q", seen.UseCase, "planning")
+	}
+	if !seen.StrictChain || !reflect.DeepEqual(seen.PreferredChain, plan.chain) {
+		t.Errorf("routed chain = (strict=%v, %v), want strict %v", seen.StrictChain, seen.PreferredChain, plan.chain)
+	}
+}

@@ -38,7 +38,7 @@
     },
     {
       "role": "tool",
-      "content": "rec-drain-plan · working · 2025-07-27 · rack drain paging annotations live in the drain plan doc; storage alarm windows are listed per phase\nrec-flap-report · semantic · 2025-07-27 · flap report backfill covers fourteen days; older history died with the compaction change\nrec-page-override · semantic · 2025-07-27 · paging note from the rack drain prep: the storage-degraded rule pages on repeat at 10 minutes until the drain wraps, set so the drain crew hears a stuck degradation before a shelf ages out of its window. the override lives in the rules file next to the rule itself, carries the drain ticket in its comment, and comes out in the same change that closes the ticket. everything else on the storage page tree keeps the shipped hold, and the drain retro owns checking that the override actually got reverted, because the last drain left a tuning override in place for a month and nobody noticed until the flap report called it out.",
+      "content": "trust=agent-written; unreviewed; origin=memory.create; session=caller-claim · rec-drain-plan · working · 2025-07-27 · rack drain paging annotations live in the drain plan doc; storage alarm windows are listed per phase\ntrust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-flap-report · semantic · 2025-07-27 · flap report backfill covers fourteen days; older history died with the compaction change\ntrust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-page-override · semantic · 2025-07-27 · paging note from the rack drain prep: the storage-degraded rule pages on repeat at 10 minutes until the drain wraps, set so the drain crew hears a stuck degradation before a shelf ages out of its window. the override lives in the rules file next to the rule itself, carries the drain ticket in its comment, and comes out in the same change that closes the ticket. everything else on the storage page tree keeps the shipped hold, and the drain retro owns checking that the override actually got reverted.",
       "tool_call_id": "c2",
       "name": "agent_memory_search"
     },
@@ -62,8 +62,8 @@
       "rec-flap-report",
       "rec-page-override"
     ],
-    "estimated_prompt_tokens": 1281,
-    "state_digest": "4aff642a9bdf543237cc7bfb85fe5ea6e42130669192be2146336c435853916d",
+    "estimated_prompt_tokens": 1309,
+    "state_digest": "459df6efe2fa70fc7ad7a9544096f274fcfb78c8c28797432ba4de5de7354d12",
     "subjects": [
       "(c1|rag|internal/alert/pager.go)",
       "(c1|rag|internal/alert/escalate.go)",
@@ -75,8 +75,8 @@
     "stratum": "cross_domain_join",
     "answer_home": "join",
     "scenario_family": "alert-debounce-override",
-    "budget": 1340,
-    "raw_state_tokens": 2233,
+    "budget": 1357,
+    "raw_state_tokens": 2261,
     "pressure_level": "critical",
     "shed_messages": 16,
     "shed_bytes": 3108

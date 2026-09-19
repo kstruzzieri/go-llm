@@ -14,26 +14,75 @@ import (
 
 	"github.com/kstruzzieri/go-llm/agent"
 	"github.com/kstruzzieri/go-llm/agent/tools"
+	"github.com/kstruzzieri/go-llm/consult"
 	"github.com/kstruzzieri/go-llm/conversation"
 	golemruntime "github.com/kstruzzieri/go-llm/golem"
 	"github.com/kstruzzieri/go-llm/internal/agenttrace"
 	"github.com/kstruzzieri/go-llm/memory"
 	"github.com/kstruzzieri/go-llm/provider"
+	"github.com/kstruzzieri/go-llm/recipe"
+	"modernc.org/sqlite"
+	sqlite3 "modernc.org/sqlite/lib"
 )
 
 // replSession holds the per-process state the REPL needs.
 type replSession struct {
-	orch                *agent.Orchestrator
-	runtime             *golemruntime.Runtime
-	newOrchestrator     func() *agent.Orchestrator
-	tools               []agent.Tool
-	baseSystem          string
-	projectContextBlock string // raw fenced project-context block; reused by the planner (-goal)
-	maxSteps            int
-	budget              agent.Budget
-	color               bool
-	clock               func() time.Time
-	retrieveOmitted     bool // when true, /tools appends the omission note
+	commandsDir     string
+	recipes         map[string]recipe.Recipe
+	recipeHint      *recipeInvocationHint
+	canary          *canaryBinding
+	orch            *agent.Orchestrator
+	runtime         *golemruntime.Runtime
+	newOrchestrator func() *agent.Orchestrator
+	tools           []agent.Tool
+	baseSystem      string
+	// Mid-session mounting (#372). root is the canonical workspace root the
+	// gated tools are built over; sysInputs are the composition inputs behind
+	// baseSystem (invariant: baseSystem == composeSystem(sysInputs); the
+	// -goal planner reads the same inputs through injectedContext); tools[:readToolCount] are
+	// the file tools the runtime rebuilds itself; mountAt is where the gated
+	// write/exec tools sit (startup order parity); writeToolCount is how many
+	// write tools are mounted (exec inserts after them); scratch records
+	// -scratch so /allow-write can say promotion stays startup-bound;
+	// lateStore is the checkpoint store /allow-write opened (nil when
+	// -allow-write owned it at startup, whose store main.go closes itself).
+	root          string
+	stdinTerminal bool // real stdin is a TTY; required for live privilege expansion
+	sysInputs     systemInputs
+	// Observed evidence is separate from the last successful publication so a
+	// failed removal remains pending even after the new evidence is observed.
+	projectContext         *projectContextState
+	publishedProjectKey    string
+	projectContextScripted bool
+
+	gitSnapshot    gitContextSnapshot
+	noGitContext   bool
+	noCompress     bool
+	readToolCount  int
+	mountAt        int
+	writeToolCount int
+	scratch        bool
+	lateStore      *checkpointStore
+	// lateManager is the background manager /allow-exec created (bgManager
+	// aliases it for /jobs); lateStop is its REPL-context binding. Both nil
+	// when -allow-exec owned the manager at startup.
+	lateManager *tools.BackgroundManager
+	lateStop    func() bool
+	// verifier is the REPL-mode post-write verification slot (#372). nil
+	// outside the REPL, for a REPL session started with -allow-write (its
+	// verifier is bound directly, and /allow-write is idempotent there), and
+	// in narrow tests (set is nil-safe).
+	verifier *lateVerifier
+	maxSteps int
+	// startupBudget is the budget resolved at startup. It is IMMUTABLE and
+	// exists only for the AgentFlow planner/driver, which freeze their own
+	// request metadata; every REPL reader (status, /context, trace metadata)
+	// asks runtime.Budget() instead, because /model set republishes the
+	// runtime's budget without touching this field (#376 M4).
+	startupBudget   agent.Budget
+	color           bool
+	clock           func() time.Time
+	retrieveOmitted bool // when true, /tools appends the omission note
 
 	session *session // nil => --no-session (no history, no persistence)
 
@@ -43,8 +92,21 @@ type replSession struct {
 
 	records *memory.MemoryRecordStore // nil => agent memory disabled (-agent-memory absent or open failed)
 
-	lastModel string             // last routed ActualModel for /model
-	journal   *checkpointJournal // nil unless -allow-write enabled writes
+	lastModel string // last routed ActualModel for /model
+	// consultants is the loaded consultants.json, nil when /consult is
+	// disabled; advisory is the single staged consult receipt for the next
+	// goal only (#382).
+	//
+	// interceptorsOn is a DENORMALIZED security gate and must stay honest:
+	// InspectAdvisory runs whatever chain sess.orch was built with, so a true
+	// mirror over an orchestrator with no chain would admit unscanned
+	// consultant bytes under a flag the operator never set. main.go derives it
+	// from the same interceptorsFor(f, canary) call that builds sess.orch, and
+	// any future writer must keep the two on one source.
+	consultants    map[string]consult.Consultant
+	interceptorsOn bool
+	advisory       *agent.Advisory
+	journal        *checkpointJournal // nil unless -allow-write enabled writes
 	// bgManager owns every background command (#346). nil => background exec
 	// disabled (-allow-exec absent or non-interactive mode). Process-scoped by
 	// the interactive-process-scope policy: /new, /clear, and successful
@@ -63,12 +125,21 @@ type replSession struct {
 	// /grants clear revokes it and the next GOAL re-runs the batch gate.
 	// nil in ungated contexts.
 	destAdmission *destinationAdmission
-	allowWrite    bool
-	allowExec     bool
-	mcpAttached   bool    // true when external MCP tools are attached (force approver)
-	obs           *observ // nil unless -trace/-telemetry enabled
-	feedback      *feedbackService
-	pressureWarn  bool // enable the one-per-run context-pressure warning line
+	// headlessApprover is the non-interactive -allow-tool approver (#352). It
+	// is non-nil only for one-shot runs that named at least one gated tool;
+	// the REPL never has one, and a nil value keeps the pre-#352 fail-safe.
+	headlessApprover *headlessApprover
+	// machine is the -output-format json/stream-json writer (#352). It is nil
+	// in text mode and in the REPL, and every call site treats nil as "no
+	// machine output", so no existing path changes shape.
+	machine      *machineWriter
+	allowWrite   bool
+	allowExec    bool
+	mcpAttached  bool    // true when external MCP tools are attached (force approver)
+	obs          *observ // nil unless -trace/-telemetry enabled
+	feedback     *feedbackService
+	pressureWarn bool             // enable the one-per-run context-pressure warning line
+	pressure     *pressureCapture // latest attempted Runtime turn; owned by the REPL loop
 	// mixed mirrors what newOrchestratorFactory puts in ContextManager.Mixed, so
 	// the renderer can tell whether a tool result's flat Content is what the
 	// model actually read. Same -progressive flag, one source.
@@ -79,12 +150,19 @@ type replSession struct {
 	// resolved at startup.
 	grounding *groundingService
 
-	modelOptions provider.ModelOptions // per-run model options (-think)
+	thinkModels capChecker
+	// selection is the model this session runs on (#376). /think gating and
+	// the /model status block read it; a successful /model set replaces it.
+	selection modelSelection
+	// startupModelOptions is frozen for AgentFlow task/planner consumers.
+	// REPL turns and status use runtime.ModelOptions() instead.
+	startupModelOptions provider.ModelOptions
 
 	// control coordinates the prompt, async notices, and Ctrl-C. nil in tests
 	// and non-interactive callers, where runREPL falls back to a plain prompt
 	// and the caller's interrupt wiring.
-	control *replControl
+	control    *replControl
+	interrupts <-chan struct{}
 
 	// goalEditor backs /edit. nil outside the default REPL and in narrow
 	// tests that never dispatch it; nil renders the unavailable message.
@@ -95,6 +173,7 @@ type replSession struct {
 // other line as an agent goal. A value on interrupts cancels the in-flight Run
 // without ending the loop. EOF (Ctrl-D) returns nil.
 func runREPL(ctx context.Context, src lineSource, out io.Writer, interrupts <-chan struct{}, sess *replSession) error {
+	sess.interrupts = interrupts
 	for {
 		if sess.control != nil {
 			sess.control.enterPrompt()
@@ -119,8 +198,10 @@ func runREPL(ctx context.Context, src lineSource, out io.Writer, interrupts <-ch
 		if line == "" {
 			continue
 		}
+		var hint *recipeInvocationHint
 		if strings.HasPrefix(line, "/") {
 			forced, exit := dispatchSlash(ctx, out, sess, line)
+			hint, sess.recipeHint = sess.recipeHint, nil
 			if exit {
 				return nil
 			}
@@ -153,11 +234,19 @@ func runREPL(ctx context.Context, src lineSource, out io.Writer, interrupts <-ch
 				continue
 			}
 		}
-		// Recorded only here: after trimming, after the empty and slash checks,
-		// and after validation, so a blank line, a command, or malformed bytes
-		// can never reach history.
-		src.RecordGoal(line)
-		_, _ = runOnce(ctx, out, interrupts, sess, line, src)
+		// Record accepted goals after inspection has had a chance to block
+		// secrets or abort on a canary. Unrelated failures retain existing history.
+		_, runErr := runOnceWithRecipeHint(ctx, out, interrupts, sess, line, src, hint)
+		if !secretsBlocked(runErr) && !canaryAborted(runErr) && !errors.Is(runErr, errRecipeHintRefused) {
+			src.RecordGoal(line)
+			if sessionSaveRefused(runErr) {
+				_, _ = fmt.Fprintln(out, "The next turn uses the latest saved history, without this unsaved turn. Use /new for a separate session.")
+			}
+		}
+		if errors.Is(runErr, errModelRestoreFailed) {
+			_, _ = fmt.Fprintln(out, "recipes: model restoration failed; REPL stopped")
+			return runErr
+		}
 	}
 }
 
@@ -165,13 +254,36 @@ func runREPL(ctx context.Context, src lineSource, out io.Writer, interrupts <-ch
 // on stderr; main exits non-zero without printing a second message.
 var errOneShotFailed = errors.New("one-shot run failed")
 
-// runOneShot executes exactly one agent turn for -p. Only the final answer is
-// written to stdout (with a single trailing newline); every other line the
-// turn produces — tool progress, warnings, errors — goes to stderr via
-// runOnce. A nil line source means no interactive approver exists, so the
-// runtime fail-safe denies any approval-gated tool call.
+// runOneShot executes exactly one agent turn for -p. In text mode only the
+// final answer is written to stdout (with a single trailing newline); every
+// other line the turn produces — tool progress, warnings, errors — goes to
+// stderr via runOnce. A nil line source means no interactive approver exists,
+// so absent a #352 headless approver the runtime fail-safe denies any
+// approval-gated tool call.
+//
+// #352: in a machine format, stdout carries the protocol event stream
+// (stream-json) or nothing yet (json), and then exactly one golem.result.v1
+// record — written on EVERY outcome, including failures and cancellations, so
+// a consumer always ends on a result line. The record, not the protocol
+// terminal event, completes the stream.
 func runOneShot(ctx context.Context, stdout, stderr io.Writer, interrupts <-chan struct{}, sess *replSession, prompt string) error {
 	res, runErr := runOnce(ctx, stderr, interrupts, sess, prompt, nil)
+	if sess.machine != nil {
+		// Ordinary post-run local errors preserve the captured terminal result
+		// while failing the invocation. A detected canary is the exception:
+		// the final result fails without an answer even if Runtime already
+		// emitted run.finished or a different run.failed. The earlier events
+		// remain intact, and Runtime cancellation keeps its precedence.
+		rec := sess.machine.buildResult(res, runErr)
+		if werr := writeJSONLine(stdout, rec); werr != nil {
+			_, _ = fmt.Fprintf(stderr, "golem: machine output incomplete: %v\n", werr)
+			return errOneShotFailed
+		}
+		if runErr != nil || rec.Status != "completed" {
+			return errOneShotFailed // reported in the record; exit 1
+		}
+		return nil
+	}
 	if runErr != nil {
 		return errOneShotFailed // runOnce already reported the failure on stderr
 	}
@@ -182,33 +294,42 @@ func runOneShot(ctx context.Context, stdout, stderr io.Writer, interrupts <-chan
 	return nil
 }
 
+// interruptContext scopes Ctrl-C to one operation and joins its watcher before
+// returning to the prompt. Cleanup may also be called by approval/checkpoint code.
+func interruptContext(ctx context.Context, interrupts <-chan struct{}) (context.Context, context.CancelFunc) {
+	childCtx, cancel := context.WithCancel(ctx)
+	if interrupts == nil {
+		return childCtx, cancel
+	}
+	select {
+	case <-interrupts:
+	default:
+	}
+	stopped := make(chan struct{})
+	go func() {
+		defer close(stopped)
+		select {
+		case <-interrupts:
+			cancel()
+		case <-childCtx.Done():
+		}
+	}()
+	return childCtx, func() { cancel(); <-stopped }
+}
+
 // runOnce runs a single agent turn, rendering all progress and errors to out.
 // It returns the run result so runOneShot can extract the final answer; the
 // REPL ignores it.
 func runOnce(ctx context.Context, out io.Writer, interrupts <-chan struct{}, sess *replSession, line string, src lineSource) (agent.Result, error) {
-	runCtx, cancel := context.WithCancel(ctx)
+	return runOnceWithRecipeHint(ctx, out, interrupts, sess, line, src, nil)
+}
+
+func runOnceWithRecipeHint(ctx context.Context, out io.Writer, interrupts <-chan struct{}, sess *replSession, line string, src lineSource, hint *recipeInvocationHint) (_ agent.Result, retErr error) {
+	runCtx, cancel := interruptContext(ctx, interrupts)
 	defer cancel()
-
-	// Drain a stale interrupt that arrived while the REPL was idle at the
-	// prompt, so a Ctrl-C the user typed before this prompt does not cancel it.
-	if interrupts != nil {
-		select {
-		case <-interrupts:
-		default:
-		}
-	}
-
-	// Watch for an interrupt for the duration of this run.
-	done := make(chan struct{})
-	defer close(done)
-	if interrupts != nil {
-		go func() {
-			select {
-			case <-interrupts:
-				cancel()
-			case <-done:
-			}
-		}()
+	if err := refreshProjectContext(runCtx, out, sess); err != nil {
+		_, _ = fmt.Fprintln(out, gitContextText(err.Error()))
+		return agent.Result{}, err
 	}
 
 	rend := newRenderer(out, sess.color, sess.maxSteps, sess.clock, sess.mixed)
@@ -222,12 +343,41 @@ func runOnce(ctx context.Context, out io.Writer, interrupts <-chan struct{}, ses
 	// in production, read-only sessions in tests. It is capability absence, not
 	// a mode assertion: the runtime's nil-approver fail-safe then denies every
 	// gated call.
+	//
+	// #352: -allow-tool installs a non-interactive approver instead. It is
+	// checked FIRST because a headless run has no line source by construction,
+	// so the interactive branch could never be reached for it.
 	var approver agent.Approver
-	if src != nil && needsApprover(sess.allowWrite, sess.allowExec, sess.mcpAttached) {
+	switch {
+	case sess.headlessApprover != nil:
+		approver = sess.headlessApprover
+	case src != nil && needsApprover(sess.allowWrite, sess.allowExec, sess.mcpAttached):
 		ap := newReplApprover(src, renderOut, sess.color)
 		ap.beforeWrite = rend.breakLine
 		ap.grants = sess.grants
 		approver = ap
+	}
+
+	if sess.canary.needsRenewal() {
+		if err := sess.renewCanary(); err != nil {
+			writeRunLine("%s", errCanaryUnavailable)
+			return agent.Result{}, errCanaryUnavailable
+		}
+	}
+
+	if hint != nil {
+		restore, err := applyRecipeModelHint(runCtx, renderOut, sess, *hint)
+		if err != nil {
+			writeRunLine("recipes: %s", runFailureMessage("", err))
+			return agent.Result{}, err
+		}
+		if restore != nil {
+			defer func() {
+				if restoreErr := restore(context.WithoutCancel(runCtx)); restoreErr != nil {
+					retErr = errors.Join(retErr, errModelRestoreFailed, restoreErr)
+				}
+			}()
+		}
 	}
 
 	// Arm the durable checkpoint journal for this turn (#355). A refusal
@@ -237,7 +387,10 @@ func runOnce(ctx context.Context, out io.Writer, interrupts <-chan struct{}, ses
 	// slash commands remain usable.
 	if sess.journal != nil {
 		if jerr := sess.journal.beginTurn(runCtx, line, cancel); jerr != nil {
-			writeRunLine("checkpoint: %v", jerr)
+			if canaryAborted(jerr) {
+				sess.canary.burn()
+			}
+			writeRunLine("checkpoint: %s", runFailureMessage("", jerr))
 			if ferr := rend.finish(); ferr != nil {
 				writeRunLine("warning: render flush incomplete: %v", ferr)
 			}
@@ -286,23 +439,31 @@ func runOnce(ctx context.Context, out io.Writer, interrupts <-chan struct{}, ses
 	// travels on the Turn below.
 	req := agent.Request{
 		Goal:           line,
-		System:         sess.baseSystem,
+		System:         traceSystem(sess.sysInputs),
 		HistorySummary: sess.session.historySummary(), // nil-safe: nil session => empty
 		History:        sess.session.history(),        // nil-safe: nil session => nil
 		MaxSteps:       sess.maxSteps,
-		Budget:         sess.budget,
+		Budget:         sess.runtime.Budget(),
 	}
 	threadID := ""
 	if sess.session != nil {
 		threadID = sess.session.id
 	}
+	// The capture is composed FIRST, ahead of the renderer/sink/feedback/
+	// grounding fanout above: that fanout stops at the first observer error,
+	// and the /context sample must already be recorded when the renderer's
+	// pressure warning fails to write. Nesting keeps the existing
+	// renderer-then-sink order intact.
+	sess.pressure = &pressureCapture{runID: runID}
+	observer = composeObserver(sess.pressure, nil, observer)
 	res, runErr := sess.runtime.Run(runCtx, golemruntime.Turn{
 		ThreadID: threadID,
 		RunID:    runID,
 		Message:  line,
 		Approver: approver, // nil when read-only => runtime fail-safe denies Write/Exec
 		Observer: observer,
-	}, func(golemruntime.Event) error { return nil })
+		Advisory: sess.advisory, // staged by /consult; consumed by this turn only (#382)
+	}, sess.machine.sink())
 	// Seal immediately after Run on every path: writes applied before an
 	// interrupt or provider error must stay undoable. The error is joined
 	// with the run error below, after the session-persistence demotion, so
@@ -320,17 +481,55 @@ func runOnce(ctx context.Context, out io.Writer, interrupts <-chan struct{}, ses
 	if errors.Is(runErr, context.Canceled) {
 		cancel()
 	}
+	// Inspect both trees before demoting session errors or presenting a seal
+	// failure: either can carry a canary abort or secrets block with a
+	// sensitive side-error.
+	secretBlock := secretsBlocked(runErr) || secretsBlocked(sealErr)
+	canaryBlock := canaryAborted(runErr) || canaryAborted(sealErr)
+	if canaryBlock {
+		sess.canary.burn()
+	}
 	var sessionSaveErr error
 	if res.Answer != "" &&
 		errors.Is(runErr, golemruntime.ErrSessionPersistence) &&
+		!sessionSaveRefused(runErr) &&
+		!secretBlock && !canaryBlock &&
 		!errors.Is(runErr, context.Canceled) &&
 		!errors.Is(runErr, context.DeadlineExceeded) {
 		sessionSaveErr = runErr
 		runErr = nil
 	}
 	if sealErr != nil {
-		writeRunLine("checkpoint: %v", sealErr)
 		runErr = errors.Join(runErr, sealErr)
+		if !secretBlock && !canaryBlock {
+			writeRunLine("checkpoint: %v", sealErr)
+		}
+	}
+	// One goal is all a staged advisory buys, and only a turn that survives the
+	// whole reconciliation above consumes it. Deciding right after Run would
+	// read a runErr that neither the session-persistence demotion nor the seal
+	// join had settled yet: an answered-but-unpersisted turn would keep an
+	// advisory it had already spent, and a turn that failed to seal would lose
+	// one it never got to use.
+	//
+	// res.Answer != "" is the plan's D6 carve-out, not an accident: a turn that
+	// finishes cleanly with no content never put the advice to work, so the
+	// slot survives for the retry exactly as a failed turn's does.
+	if runErr == nil && res.Answer != "" {
+		sess.advisory = nil
+	}
+	// A policy refusal or context exhaustion can fail every subsequent goal
+	// with the same advice. Drop the optional input and let the user retry.
+	dropReason := ""
+	switch {
+	case errors.Is(runErr, agent.ErrAdvisoryBlocked):
+		dropReason = "interceptor refusal"
+	case errors.Is(runErr, agent.ErrContextExhausted):
+		dropReason = "context exhaustion"
+	}
+	if dropReason != "" && sess.advisory != nil {
+		writeRunLine("dropped staged advice from %s after %s", sess.advisory.Source, dropReason)
+		sess.advisory = nil
 	}
 	// A failed tail flush loses only buffered display bytes on the progress
 	// stream; the run itself completed. Demoting it to a warning keeps a good
@@ -389,11 +588,20 @@ func runOnce(ctx context.Context, out io.Writer, interrupts <-chan struct{}, ses
 			_ = rend.writeDim(groundingSummaryLine(rep, diag))
 			if raw, merr := json.Marshal(rep); merr == nil {
 				groundingRaw = raw
+				// #352: the machine surface reuses the SAME marshalled report
+				// the trace records, so the two can never disagree.
+				sess.machine.setGrounding(raw)
 			}
 		}
 	}
 
-	if sess.obs != nil && sess.obs.trace {
+	if sess.obs != nil && sess.obs.trace && canaryBlock {
+		writeRunLine("warning: trace not written: canary detected")
+	}
+	if sess.obs != nil && sess.obs.trace && secretBlock && !canaryBlock {
+		writeRunLine("warning: trace not written: sensitive content detected")
+	}
+	if sess.obs != nil && sess.obs.trace && !secretBlock && !canaryBlock {
 		meta := agenttrace.TraceMeta{
 			Goal:           req.Goal,
 			System:         req.System,
@@ -411,11 +619,11 @@ func runOnce(ctx context.Context, out io.Writer, interrupts <-chan struct{}, ses
 	}
 
 	if runErr != nil {
-		if runCtx.Err() != nil {
+		if runCtx.Err() != nil && !secretBlock && !canaryBlock {
 			writeRunLine("canceled")
 			return res, runErr
 		}
-		writeRunLine("error: %v", runErr)
+		writeRunLine("error: %s", runFailureMessage("", runErr))
 		return res, runErr
 	}
 	if m := lastRoutedModel(res); m != "" {
@@ -430,6 +638,20 @@ func runOnce(ctx context.Context, out io.Writer, interrupts <-chan struct{}, ses
 	}
 	rend.finalFooter(res, runDuration)
 	return res, nil
+}
+
+// sessionSaveRefused reports a session-persistence failure that refused the
+// write outright: a lost revision CAS, or a SQLite lock timeout, which is a
+// refused write just like a lost CAS and keeps its original SQL error. These
+// stay run errors instead of demoting to "session not saved" warnings, and the
+// REPL explains that the next turn continues without the unsaved turn.
+func sessionSaveRefused(err error) bool {
+	if !errors.Is(err, golemruntime.ErrSessionPersistence) {
+		return false
+	}
+	var sqliteErr *sqlite.Error
+	return errors.Is(err, conversation.ErrConflict) ||
+		(errors.As(err, &sqliteErr) && sqliteErr.Code()&0xff == sqlite3.SQLITE_BUSY)
 }
 
 // lastRoutedModel returns the ActualModel of the last step that carried a
@@ -448,23 +670,36 @@ func lastRoutedModel(res agent.Result) string {
 // goal the caller must run as a model goal -- /edit's result, which bypasses
 // slash dispatch exactly once even when it begins with "/".
 func dispatchSlash(ctx context.Context, out io.Writer, sess *replSession, line string) (forced string, exit bool) {
+	sess.recipeHint = nil
 	fields := strings.Fields(line)
 	cmd := fields[0]
 	switch cmd {
 	case "/exit", "/quit":
 		return "", true
+	case "/trust":
+		handleTrust(ctx, out, sess, fields)
 	case "/help":
 		_, _ = fmt.Fprint(out, golemHelp)
+		if len(sess.recipes) != 0 {
+			_, _ = fmt.Fprintln(out, "recipe commands:")
+			printRecipeEntries(out, sess.recipes)
+		}
+	case "/recipes":
+		handleRecipes(out, sess, fields)
+	case "/context":
+		handleContext(out, sess, fields)
 	case "/clear":
 		// Reset semantics (#341 D8): approval grants drop unconditionally,
 		// before the session branch — under --no-session a live approver can
 		// still hold grants.
 		sess.grants.clear()
+		sess.advisory = nil
 		if sess.session == nil {
 			_, _ = fmt.Fprintln(out, "session disabled (--no-session)")
 		} else if err := sess.session.clear(ctx); err != nil {
 			_, _ = fmt.Fprintf(out, "clear failed: %v\n", err)
 		} else {
+			sess.pressure = nil
 			_, _ = fmt.Fprintln(out, "session cleared")
 			// Conversation deletion deliberately does not cascade into agent
 			// memory (separate storage concepts); say so to avoid surprise.
@@ -476,11 +711,19 @@ func dispatchSlash(ctx context.Context, out io.Writer, sess *replSession, line s
 		// Session switch (#341 D8): grants never outlive the session they
 		// were given in, with or without conversation persistence.
 		sess.grants.clear()
+		sess.advisory = nil
 		if sess.session == nil {
 			_, _ = fmt.Fprintln(out, "session disabled (--no-session)")
 		} else {
-			sess.session.renew()
-			_, _ = fmt.Fprintf(out, "session: %s (new)\n", sess.session.id)
+			candidate := *sess.session
+			candidate.renew()
+			if err := sess.renewCanary(); err != nil {
+				_, _ = fmt.Fprintf(out, "new failed: %v\n", err)
+			} else {
+				*sess.session = candidate
+				sess.pressure = nil
+				_, _ = fmt.Fprintf(out, "session: %s (new)\n", sess.session.id)
+			}
 		}
 	case "/sessions":
 		if sess.session == nil {
@@ -503,23 +746,23 @@ func dispatchSlash(ctx context.Context, out io.Writer, sess *replSession, line s
 			_, _ = fmt.Fprintln(out, "usage: /resume <session-id>")
 		} else if id, err := resolveSessionID(sessionIDOpts{explicit: fields[1]}); err != nil {
 			_, _ = fmt.Fprintln(out, err)
-		} else if info, err := sess.session.switchTo(ctx, id); err != nil {
+		} else if info, err := sess.resumeSession(ctx, id); err != nil {
 			_, _ = fmt.Fprintf(out, "resume failed: %v\n", err)
 		} else {
 			// Success only (#341 D8): a failed /resume leaves the active
 			// session — and therefore its grants — untouched.
 			sess.grants.clear()
+			sess.pressure = nil
+			sess.advisory = nil
 			_, _ = fmt.Fprintln(out, info.line())
 		}
+	case "/consult":
+		handleConsult(ctx, out, sess, line)
 	case "/model":
-		if sess.lastModel == "" {
-			_, _ = fmt.Fprintln(out, "not yet routed")
-		} else {
-			_, _ = fmt.Fprintln(out, sess.lastModel)
-		}
+		handleModel(ctx, out, sess, fields)
 	case "/undo":
 		if sess.journal == nil {
-			_, _ = fmt.Fprintln(out, "writes disabled (run with -allow-write)")
+			_, _ = fmt.Fprintln(out, "writes disabled; run /allow-write or start with -allow-write")
 			return "", false
 		}
 		n := 1
@@ -539,7 +782,7 @@ func dispatchSlash(ctx context.Context, out io.Writer, sess *replSession, line s
 		sess.journal.undo(ctx, out, n)
 	case "/checkpoints":
 		if sess.journal == nil {
-			_, _ = fmt.Fprintln(out, "writes disabled (run with -allow-write)")
+			_, _ = fmt.Fprintln(out, "writes disabled; run /allow-write or start with -allow-write")
 		} else if len(fields) == 1 || (len(fields) == 2 && fields[1] == "list") {
 			sess.journal.listCheckpoints(ctx, out)
 		} else {
@@ -567,7 +810,7 @@ func dispatchSlash(ctx context.Context, out io.Writer, sess *replSession, line s
 		}
 	case "/auto-edits":
 		if !sess.allowWrite {
-			_, _ = fmt.Fprintln(out, "writes disabled (run with -allow-write)")
+			_, _ = fmt.Fprintln(out, "writes disabled; run /allow-write or start with -allow-write")
 			return "", false
 		}
 		if sess.grants == nil {
@@ -635,8 +878,21 @@ func dispatchSlash(ctx context.Context, out io.Writer, sess *replSession, line s
 			// Non-empty text is the forced goal; empty aborts to the prompt.
 			return strings.TrimSpace(text), false
 		}
+	case "/allow-write":
+		handleAllowWrite(ctx, out, sess, fields)
+	case "/allow-exec":
+		handleAllowExec(ctx, out, sess, fields)
+	case "/git-context":
+		handleGitContext(ctx, out, sess, fields)
+	case "/compact":
+		handleCompact(ctx, out, sess, fields)
+	case "/think":
+		handleThink(ctx, out, sess, fields)
 	default:
-		_, _ = fmt.Fprintf(out, "unknown command: %s (try /help)\n", cmd)
+		if r, ok := sess.recipes[strings.TrimPrefix(cmd, "/")]; ok {
+			return invokeRecipe(out, sess, r, line, cmd), false
+		}
+		printUnknownCommand(out, sess, cmd)
 	}
 	return "", false
 }
@@ -649,7 +905,7 @@ func dispatchSlash(ctx context.Context, out io.Writer, sess *replSession, line s
 // requested rather than printing a raw context error.
 func handleJobs(ctx context.Context, out io.Writer, sess *replSession, fields []string) {
 	if sess.bgManager == nil {
-		_, _ = fmt.Fprintln(out, "background exec disabled (run with -allow-exec)")
+		_, _ = fmt.Fprintln(out, "exec disabled; run /allow-exec or start with -allow-exec")
 		return
 	}
 	switch {
@@ -749,8 +1005,16 @@ func autoEditState(sess *replSession) string {
 
 const golemHelp = `commands:
   /help          show this help
+  /recipes [reload]
+                 list recipe commands or reload the user command directory
   /tools         list registered tools and their effect class
-  /model         show the last routed model
+  /model [set <role|name>]
+                 show the selected model chain, ceiling, thinking, and last routed model; set switches the model for the rest of this process
+  /consult <name> <prompt>
+                 ask a configured external consultant; the admitted answer is shown and staged as fenced advice for the next goal only
+  /consult drop  discard staged advice without clearing history or grants
+  /context       inspect the last assembled request
+  /compact       compact the active session's history
   /clear         delete the active session's history
   /new           start a new session (keeps history of the old one)
   /sessions      list saved sessions
@@ -758,14 +1022,24 @@ const golemHelp = `commands:
                  search saved sessions
   /resume <id>   switch to a saved session
   /edit [seed]   compose a goal in $VISUAL/$EDITOR (quoting unsupported)
-  /undo [n]      revert the last n completed turns' writes (when -allow-write)
-  /checkpoints   list undoable turn checkpoints, newest first (when -allow-write)
+  /undo [n]      revert the last n completed turns' writes (when writes are enabled)
+  /checkpoints   list turn checkpoints, newest first (when writes are enabled)
+                 receipts verified: authentic receipts, not live files; unconfirmed: missing applied evidence;
+                 unsigned: undo unavailable; invalid receipts: invalid evidence or metadata
   /jobs [stop <handle>]
-                 list background jobs, or stop one (with -allow-exec)
+                 list background jobs, or stop one (when exec is enabled)
   /auto-edits [on|off]
                  show or set session auto-approval for write/edit tools
+  /trust [sha256:<digest>]
+                 inspect project documents or approve their exact snapshot
   /grants [clear]
                  count active session approval grants, or revoke them all
+  /allow-write   enable the approval-gated write_file/edit_file tools for the rest of this session
+  /allow-exec    enable the approval-gated command tools for the rest of this session
+  /git-context refresh
+                 re-capture the repository snapshot (branch, status, recent commits) in the system prompt
+  /think [off|on|low|medium|high|default]
+                 show or set reasoning control for the rest of this process
   /remember [--global] <text>
                  save a memory (workspace scope unless --global)
   /forget <id>   delete a saved memory

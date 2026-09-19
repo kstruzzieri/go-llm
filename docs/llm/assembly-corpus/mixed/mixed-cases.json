@@ -1311,7 +1311,7 @@
         {"turn": {"role": "user", "content": "The same update is queued for the prod collectors next month. I would rather not rediscover this the hard way at scale. Can you gate the prod rollout on the corrected calculation landing first, and note the ordering somewhere it will be seen?"}},
         {"turn": {"role": "assistant", "content": "Gated the prod kernel rollout on the corrected free-space calculation: the rollout checklist now lists it as a hard prerequisite with a link to the lab investigation, and the fleet digest carries the ordering note this week."}},
         {"turn": {"role": "user", "content": "One more from the same episode: the disk-pressure warning class pages at a threshold that assumed the old pessimistic math. With the corrected numbers the threshold is effectively looser than anyone agreed to. Can you re-derive it against the new accounting?"}},
-        {"turn": {"role": "assistant", "content": "Re-derived the disk-pressure threshold against the corrected accounting so the effective headroom matches what the review originally signed off on; the change is staged with the threshold history linked for the next alerting review."}},
+        {"turn": {"role": "assistant", "content": "Re-derived the disk-pressure threshold against corrected accounting; staged it for review with the threshold history linked."}},
         {"tool_call": {"call_id": "c1", "tool": "agent_memory_search", "args": {"query": ""}}},
         {"tool_call": {"call_id": "c2", "tool": "retrieve", "args": {"query": "maintenance mute pager escalation scope", "k": 3}}},
         {"turn": {"role": "user", "content": "Which alert destinations does a maintenance mute suppress?"}}
@@ -1580,14 +1580,14 @@
       "scenario_family": "retention-floor-mem",
       "system": "You are the driftwatch assistant. driftwatch is a self-hosted telemetry ingest and alerting daemon. Answer using only the provided conversation, memory records, and retrieved context.",
       "events": [
-        {"turn": {"role": "user", "content": "Customer request triage. The bakery chain wants their dashboards to open on the outage view by default because that is all their ops person ever looks at. Reasonable? And if so can you just set it for them?"}},
+        {"turn": {"role": "user", "content": "The bakery chain wants dashboards to open on the outage view by default. Can you set that?"}},
         {"turn": {"role": "assistant", "content": "Reasonable and done: their org default now opens on the outage view, individual users can still override it, and I noted the change in their account log so support sees it before anyone asks."}},
         {"turn": {"role": "user", "content": "Next one is stranger: the logistics tenant asks why their ingest graphs dip every day at the same hour and whether we are throttling them. I suspect it is their own batch window but can you confirm from our side before I answer?"}},
         {"turn": {"role": "assistant", "content": "Confirmed from admission logs: the dip is their own nightly batch pause, not throttling on our side - their producers simply go quiet for the hour. I attached the admission graph overlay to the ticket so you can show rather than tell."}},
         {"turn": {"role": "user", "content": "Third: a prospect on the eval plan wants to know whether alert routing can page two rotations at once for the same alert class. I thought the router handled fan-out but I do not want to promise from memory. Can you check?"}},
         {"turn": {"role": "assistant", "content": "Checked the router: destination fan-out per alert class is supported and two pager destinations can gate independently, so paging two rotations at once works today; I added a config example to the prospect thread."}},
-        {"turn": {"role": "user", "content": "Last one: the workshop tenant asks for their old April data back. Their plan file says their window ended long ago, so I assume the answer is no, but can you confirm what actually remains before I write the refusal?"}},
-        {"turn": {"role": "assistant", "content": "Confirmed: April is fully outside their retained window and the segments were retired by retention sweeps at the time, so nothing remains to restore; I drafted the refusal with the retirement dates cited so the answer is factual rather than policy-flavored."}},
+        {"turn": {"role": "user", "content": "The workshop tenant wants April data restored. Their configured retention window has ended; confirm what remains."}},
+        {"turn": {"role": "assistant", "content": "April segments were retired by retention sweeps. Nothing remains to restore; the refusal cites the retirement dates."}},
         {"tool_call": {"call_id": "c1", "tool": "agent_memory_search", "args": {"query": ""}}},
         {"tool_call": {"call_id": "c2", "tool": "retrieve", "args": {"query": "tenant retention minimum clamp", "k": 3}}},
         {"turn": {"role": "user", "content": "What is the lowest retention a tenant can actually configure?"}}
@@ -1811,8 +1811,8 @@
       "scenario_family": "export-shard-schedule",
       "system": "You are the driftwatch assistant. driftwatch is a self-hosted telemetry ingest and alerting daemon. Answer using only the provided conversation, memory records, and retrieved context.",
       "events": [
-        {"turn": {"role": "user", "content": "A few things before we look at the export sizing. The warehouse loader complained about mixed-case column names after the last schema tweak; can you normalize the header casing in the writer so the loader stops special-casing us?"}},
-        {"turn": {"role": "assistant", "content": "Normalized the column header casing in the writer and ran the loader's validation suite against a sample shard; it passes clean now."}},
+        {"turn": {"role": "user", "content": "Before export sizing: normalize writer headers to fix the warehouse loader's mixed-case column errors."}},
+        {"turn": {"role": "assistant", "content": "Normalized writer headers; the loader validation passes on a sample shard."}},
         {"turn": {"role": "user", "content": "The export dashboard also lost its shard-duration panel in the reshuffle. Can you restore it next to the row-count panel so we can see both when tuning?"}},
         {"turn": {"role": "assistant", "content": "Restored the shard-duration panel beside the row-count panel and pinned the pair so future board edits keep them together."}},
         {"turn": {"role": "user", "content": "Somebody should also archive the old warehouse credentials from the secret store; the loader moved to the new service account last month and the stale entry keeps showing up in audits."}},
@@ -1894,7 +1894,7 @@
       "memory_records": [
         {"id": "rec-flip-checklist", "content": "flip-day checklist lives in the deploy repo; tick items in order, the edge steps assume the producer steps finished", "kind": "working", "workspace_id": "ws-driftwatch"},
         {"id": "rec-observer-invite", "content": "platform observer joins the flip call fifteen minutes before the window opens", "kind": "semantic"},
-        {"id": "rec-revoke-sweep", "content": "rotation cleanup: the revocation sweep lands 96 hours after the flip; it walks the token table generation by generation, revokes everything still carrying the retired prefix, and files one summary ticket per tenant that lost a live token. producers that page during the sweep get pointed at their own enrollment runbook first, because in the last two rotations every single sweep page turned out to be a producer that never finished migrating. keep the sweep window on the ops calendar until the summary tickets are all closed out, and hand the ticket list to the platform observer with the drain graphs attached so the rotation retro starts from evidence instead of memory.", "kind": "semantic"}
+        {"id": "rec-revoke-sweep", "content": "rotation cleanup: the revocation sweep lands 96 hours after the flip; it walks the token table generation by generation, revokes everything still carrying the retired prefix, and files one summary ticket per tenant that lost a live token. producers that page during the sweep get pointed at their own enrollment runbook first, because in the last two rotations every single sweep page turned out to be a producer that never finished migrating.", "kind": "semantic"}
       ],
       "rag_sources": [
         {
@@ -1959,7 +1959,7 @@
       "memory_records": [
         {"id": "rec-drain-plan", "content": "rack drain paging annotations live in the drain plan doc; storage alarm windows are listed per phase", "kind": "working", "workspace_id": "ws-driftwatch"},
         {"id": "rec-flap-report", "content": "flap report backfill covers fourteen days; older history died with the compaction change", "kind": "semantic"},
-        {"id": "rec-page-override", "content": "paging note from the rack drain prep: the storage-degraded rule pages on repeat at 10 minutes until the drain wraps, set so the drain crew hears a stuck degradation before a shelf ages out of its window. the override lives in the rules file next to the rule itself, carries the drain ticket in its comment, and comes out in the same change that closes the ticket. everything else on the storage page tree keeps the shipped hold, and the drain retro owns checking that the override actually got reverted, because the last drain left a tuning override in place for a month and nobody noticed until the flap report called it out.", "kind": "semantic"}
+        {"id": "rec-page-override", "content": "paging note from the rack drain prep: the storage-degraded rule pages on repeat at 10 minutes until the drain wraps, set so the drain crew hears a stuck degradation before a shelf ages out of its window. the override lives in the rules file next to the rule itself, carries the drain ticket in its comment, and comes out in the same change that closes the ticket. everything else on the storage page tree keeps the shipped hold, and the drain retro owns checking that the override actually got reverted.", "kind": "semantic"}
       ],
       "rag_sources": [
         {

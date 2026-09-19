@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -495,6 +496,70 @@ func TestGroundingOneShotKeepsStdoutAnswerOnly(t *testing.T) {
 	}
 	if !strings.Contains(e.out.String(), "grounding · supported") {
 		t.Fatalf("grounding line missing from stderr:\n%s", e.out.String())
+	}
+}
+
+// TestGroundingVerdictSurfacesIdenticallyInAllThreeModes (#352): the #348
+// outcome must not depend on -output-format. The stderr line renders in every
+// mode; the machine modes additionally carry the verdict in the result record,
+// field-identical to what the trace stores.
+func TestGroundingVerdictSurfacesIdenticallyInAllThreeModes(t *testing.T) {
+	statuses := map[string]string{}
+	for _, tc := range []struct {
+		name   string
+		format outputFormat
+	}{
+		{"text", outputText},
+		{"json", outputJSON},
+		{"stream-json", outputStreamJSON},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e := newGroundingE2E(t, groundingE2EOpts{grounding: true, trace: true})
+			var stdout strings.Builder
+			e.sess.machine = newMachineWriter(&stdout, tc.format)
+			if err := runOneShot(context.Background(), &stdout, e.out, nil, e.sess, "answer this"); err != nil {
+				t.Fatalf("runOneShot: %v; stderr=%s", err, e.out.String())
+			}
+			// The human line reaches stderr in EVERY mode.
+			if !strings.Contains(e.out.String(), "grounding · supported") {
+				t.Fatalf("%s: grounding line missing from stderr:\n%s", tc.name, e.out.String())
+			}
+			if tc.format == outputText {
+				if stdout.String() != "the answer\n" {
+					t.Fatalf("text stdout = %q, want the bare answer", stdout.String())
+				}
+				statuses[tc.name] = "supported"
+				return
+			}
+			lines := strings.Split(strings.TrimSuffix(stdout.String(), "\n"), "\n")
+			record := decodeResult(t, lines[len(lines)-1])
+			var rep groundingReport
+			if err := json.Unmarshal(record["grounding"], &rep); err != nil {
+				t.Fatalf("%s: record grounding not parseable: %v", tc.name, err)
+			}
+			statuses[tc.name] = rep.Status
+			// Verbatim in substance: the record's grounding object equals the
+			// trace's field for field. (The trace file is stored indented, so
+			// the comparison is canonical-JSON, not raw bytes.)
+			trace := e.readTrace(t)
+			var recObj, traceObj any
+			if err := json.Unmarshal(record["grounding"], &recObj); err != nil {
+				t.Fatal(err)
+			}
+			if err := json.Unmarshal(trace["grounding"], &traceObj); err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(recObj, traceObj) {
+				t.Errorf("%s: record grounding != trace grounding\nrecord: %s\ntrace:  %s",
+					tc.name, record["grounding"], trace["grounding"])
+			}
+		})
+	}
+	want := map[string]string{"text": "supported", "json": "supported", "stream-json": "supported"}
+	for mode, status := range want {
+		if statuses[mode] != status {
+			t.Errorf("mode %s status = %q, want %q — the verdict must not depend on the output format", mode, statuses[mode], status)
+		}
 	}
 }
 

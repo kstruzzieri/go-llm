@@ -104,3 +104,30 @@ func TestApproverInstalledWhenMCPAttached(t *testing.T) {
 		t.Fatal("write session must install the approver")
 	}
 }
+
+func TestParseMCPServersRejectsMalformedHTTP(t *testing.T) {
+	for _, spec := range []string{"https://?token=credential-value", "https://bad%zz/?token=credential-value", "https://:443/?token=credential-value", "/path?token=credential-value", "ftp://example.com/?token=credential-value"} {
+		for _, prefix := range []string{"", "fs="} {
+			servers, err := parseMCPServers(nil, []string{prefix + spec})
+			if err == nil || err.Error() != "-mcp-http: expected an absolute http or https URL with a host" || len(servers) != 0 {
+				t.Fatalf("malformed HTTP yielded servers=%v err=%v", servers, err)
+			}
+		}
+	}
+}
+
+func TestParseMCPServersHTTPAliasesExcludeCredentials(t *testing.T) {
+	servers, err := parseMCPServers(nil, []string{
+		"https://user:credential-value@api.example.com:8443/mcp?token=credential-value",
+		"https://api.example.com:8443/other?token=other-credential",
+		"stable=https://api.example.com:8443/mcp?token=credential-value",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, want := range []string{"apiexamplecom8443", "apiexamplecom84432", "stable"} {
+		if servers[i].Alias != want {
+			t.Fatalf("alias %d=%q, want %q", i, servers[i].Alias, want)
+		}
+	}
+}

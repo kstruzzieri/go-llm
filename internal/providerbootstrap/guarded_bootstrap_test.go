@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -129,11 +130,224 @@ func TestNewGatedRefreshesOnlyActiveProviders(t *testing.T) {
 	if got := b.total(); got != 0 {
 		t.Errorf("inactive provider received %d requests, want 0", got)
 	}
-	// The inactive slot-discovery backend leaves governance entirely:
-	// (0, false), never the governed fail-safe (1, true) — and therefore
-	// nothing to probe.
-	if n, ok := bundle.Router.SlotCapacity(provider.ModelKey{Provider: "b", Model: "m1"}); ok || n != 0 {
-		t.Errorf("inactive slot-discovery provider governed: (%d, %v), want (0, false)", n, ok)
+	// M3: the inactive slot-discovery backend stays GOVERNED — configured
+	// for lazy governance even though it is not active for startup I/O — so
+	// a later /model switch onto it is admission-counted by this same
+	// router. Unknown capacity keeps the conservative single slot, and
+	// reading it is a pure cache read: still zero requests.
+	if n, ok := bundle.Router.SlotCapacity(provider.ModelKey{Provider: "b", Model: "m1"}); !ok || n != 1 {
+		t.Errorf("inactive slot-discovery provider capacity = (%d, %v), want governed (1, true)", n, ok)
+	}
+	if got := b.total(); got != 0 {
+		t.Errorf("reading cached capacity sent %d requests to the inactive provider, want 0", got)
+	}
+}
+
+// M3 end to end: a provider on NO startup route is silent at bootstrap, yet
+// stays slot-governed, and its slot probe reaches the wire only once its
+// slot-probe edge is admitted additively (the #376 /model-switch shape).
+//
+// Denial before admission is asserted on the gate directly rather than by
+// racing a probe goroutine: Bind(slot-probe, "b") is the exact call the
+// source's probe binder makes, and unlike a launched probe its outcome is
+// ordered with respect to Extend.
+func TestNewGatedInactiveProviderProbesOnlyAfterAdmission(t *testing.T) {
+	a := newCountingOpenAIServer(t)
+	b := newCountingOpenAIServer(t)
+	cfg := twoProviderConfig(a.srv.URL, b.srv.URL)
+	pcB := cfg.Providers["b"]
+	pcB.SlotDiscovery = true
+	cfg.Providers["b"] = pcB
+	key := provider.ModelKey{Provider: "b", Model: "m1"}
+
+	route, err := PlanRoleRoute(cfg, "chatrole", "chat")
+	if err != nil {
+		t.Fatal(err)
+	}
+	gate, plan := gateFromPlan(t, cfg, []PlannedRoute{route}, PlanOptions{})
+
+	bundle, err := New(t.Context(), Options{
+		Config:          cfg,
+		DestinationGate: gate,
+		ActiveProviders: plan.ActiveProviders,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = bundle.Close() }()
+	if got := b.total(); got != 0 {
+		t.Fatalf("inactive provider received %d requests at startup, want 0", got)
+	}
+	if n, ok := bundle.Router.SlotCapacity(key); !ok || n != 1 {
+		t.Fatalf("inactive provider capacity = (%d, %v), want governed (1, true)", n, ok)
+	}
+	if _, err := gate.Bind(t.Context(), provider.DestinationPurposeSlotProbe, "b"); !errors.Is(err, provider.ErrDestinationDenied) {
+		t.Fatalf("pre-admission slot-probe bind = %v, want ErrDestinationDenied", err)
+	}
+
+	// Admit b's slot-probe edge additively — what a later CLI wrapper does
+	// when the session switches onto this provider. Effective supplies the
+	// SAME destination identity the bundle's guarded slot client is bound
+	// to; planning from anything else could admit a URL nothing dials.
+	extended := make([]provider.DestinationEdge, 0, len(plan.Edges)+1)
+	extended = append(extended, plan.Edges...)
+	extended = append(extended, provider.DestinationEdge{
+		Purpose:     provider.DestinationPurposeSlotProbe,
+		Destination: bundle.Effective.Destinations()["b"],
+	})
+	m, err := provider.NewDestinationManifest(extended...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := gate.Extend(provider.AllowAllDestinations(), m); err != nil {
+		t.Fatalf("Extend: %v", err)
+	}
+
+	bundle.Router.RecordSlotUse(key)
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if n, ok := bundle.Router.SlotCapacity(key); ok && n == 4 {
+			break
+		}
+		if time.Now().After(deadline) {
+			n, ok := bundle.Router.SlotCapacity(key)
+			t.Fatalf("admitted probe never landed; capacity = (%d, %v), /props hits = %d", n, ok, b.props.Load())
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if got := b.props.Load(); got != 1 {
+		t.Errorf("/props hit %d times, want exactly 1", got)
+	}
+	if got := b.total(); got != 1 {
+		t.Errorf("inactive provider received %d requests overall, want exactly 1 (the admitted probe)", got)
+	}
+}
+
+// The configured-but-inactive provider probes through a client GUARDED on
+// its own destination — never the slot source's shared fallback client. Both
+// dial the same URL, so the discriminator is the guard's redirect policy:
+// GuardHTTPClient installs a CheckRedirect that refuses EVERY redirect
+// (same-origin included) with ErrDestinationDenied, while a plain client
+// follows one. The backend answers the probe with a 302 to a second server
+// advertising a distinctive capacity; a guarded probe never sees it, so the
+// key keeps the conservative single slot.
+//
+// Ordering, not timing: the backend's redirect handler signals before it
+// writes the 302 and blocks until the test releases it, and the trailing
+// barrier — a second probe on the same provider that always completes — is
+// only started after that release, so a followed redirect has a full
+// round trip's head start over the barrier it would have to beat.
+func TestNewGatedInactiveSlotProbeUsesGuardedClient(t *testing.T) {
+	a := newCountingOpenAIServer(t)
+
+	var followed atomic.Int64
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		followed.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"total_slots": 7}`))
+	}))
+	defer target.Close()
+
+	entered := make(chan struct{}, 1)
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	releaseHandler := func() { releaseOnce.Do(func() { close(release) }) }
+
+	var props, others atomic.Int64
+	bSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/props" {
+			others.Add(1)
+			http.NotFound(w, r)
+			return
+		}
+		props.Add(1)
+		if r.URL.Query().Get("model") == "redirected" {
+			entered <- struct{}{}
+			<-release
+			http.Redirect(w, r, target.URL+"/props", http.StatusFound)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"total_slots": 4}`))
+	}))
+	defer bSrv.Close()
+	// After bSrv.Close in source order, so LIFO runs it FIRST: a handler
+	// still parked on <-release would otherwise deadlock Close, which waits
+	// for outstanding requests.
+	defer releaseHandler()
+
+	cfg := twoProviderConfig(a.srv.URL, bSrv.URL)
+	pcB := cfg.Providers["b"]
+	pcB.SlotDiscovery = true
+	cfg.Providers["b"] = pcB
+
+	route, err := PlanRoleRoute(cfg, "chatrole", "chat")
+	if err != nil {
+		t.Fatal(err)
+	}
+	gate, plan := gateFromPlan(t, cfg, []PlannedRoute{route}, PlanOptions{})
+	bundle, err := New(t.Context(), Options{
+		Config:          cfg,
+		DestinationGate: gate,
+		ActiveProviders: plan.ActiveProviders,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = bundle.Close() }()
+
+	// Admit b's slot-probe edge, exactly as the positive test above does.
+	extended := make([]provider.DestinationEdge, 0, len(plan.Edges)+1)
+	extended = append(extended, plan.Edges...)
+	extended = append(extended, provider.DestinationEdge{
+		Purpose:     provider.DestinationPurposeSlotProbe,
+		Destination: bundle.Effective.Destinations()["b"],
+	})
+	m, err := provider.NewDestinationManifest(extended...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := gate.Extend(provider.AllowAllDestinations(), m); err != nil {
+		t.Fatalf("Extend: %v", err)
+	}
+
+	redirected := provider.ModelKey{Provider: "b", Model: "redirected"}
+	direct := provider.ModelKey{Provider: "b", Model: "direct"}
+
+	bundle.Router.RecordSlotUse(redirected)
+	select {
+	case <-entered: // the probe is inside the client, before the 302 is written
+	case <-time.After(10 * time.Second):
+		t.Fatal("slot probe never reached the backend")
+	}
+	releaseHandler()
+
+	// Trailing barrier: started only after the 302 was written, and it
+	// completes a whole probe round trip of its own.
+	bundle.Router.RecordSlotUse(direct)
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if n, ok := bundle.Router.SlotCapacity(direct); ok && n == 4 {
+			break
+		}
+		if time.Now().After(deadline) {
+			n, ok := bundle.Router.SlotCapacity(direct)
+			t.Fatalf("barrier probe never landed; capacity = (%d, %v)", n, ok)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	if got := followed.Load(); got != 0 {
+		t.Errorf("redirect target received %d requests, want 0 (the guard refuses every redirect)", got)
+	}
+	if n, ok := bundle.Router.SlotCapacity(redirected); !ok || n != 1 {
+		t.Errorf("redirected key capacity = (%d, %v), want conservative (1, true) — 7 is only reachable past the guard", n, ok)
+	}
+	if got := props.Load(); got != 2 {
+		t.Errorf("/props hit %d times, want exactly 2 (one probe per key)", got)
+	}
+	if got := others.Load(); got != 0 {
+		t.Errorf("inactive provider received %d non-probe requests, want 0", got)
 	}
 }
 

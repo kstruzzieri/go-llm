@@ -38,8 +38,15 @@ var _ agent.Tool = (*toolAdapter)(nil)
 var _ agent.PlanningTool = (*toolAdapter)(nil)
 
 func (a *toolAdapter) Spec() agent.ToolSpec {
-	return agent.ToolSpec{Name: a.prefixedName, Description: a.description, Parameters: a.schema}
+	return agent.ToolSpec{Name: a.prefixedName, Description: a.description, Parameters: append(json.RawMessage(nil), a.schema...)}
 }
+
+// Origin declares every MCP observation foreign (#436 spec D4): the server is
+// outside the workspace trust boundary, so detectors may block rather than
+// tag its output.
+func (a *toolAdapter) Origin() agent.Origin { return agent.OriginForeign }
+
+var _ agent.OriginTool = (*toolAdapter)(nil)
 
 // Effect is the conservative upper bound for an untrusted remote tool. Class is
 // the full bitset: the only consumer of Class is needsApproval, which

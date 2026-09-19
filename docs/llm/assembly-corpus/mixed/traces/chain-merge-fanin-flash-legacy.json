@@ -47,7 +47,7 @@
       "rec-watermark-rule"
     ],
     "estimated_prompt_tokens": 208,
-    "state_digest": "1332a4798ad953c7076f4cfbd413bd1d816cae0c425ea4a9aced2097bd984058",
+    "state_digest": "d1efdc1131863243f75c4795c7e1eaca622712cb3dda88e0ad3342d7301d9f46",
     "subjects": [
       "(c1|memory|rec-cohort-naming)",
       "(c1|memory|rec-dash-cohorts)",
@@ -62,10 +62,10 @@
     "stratum": "chain_retention",
     "answer_home": "join",
     "scenario_family": "merge-fanin-chain",
-    "budget": 1241,
-    "raw_state_tokens": 2069,
+    "budget": 1312,
+    "raw_state_tokens": 2186,
     "pressure_level": "ok",
     "shed_messages": 8,
-    "shed_bytes": 7083
+    "shed_bytes": 7551
   }
 }

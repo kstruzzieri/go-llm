@@ -113,6 +113,12 @@ func TestSerialDispatchParentCancelHardAborts(t *testing.T) {
 		if !errors.Is(rr.err, context.Canceled) {
 			t.Fatalf("parent cancel must hard-abort Run with context.Canceled, got err=%v stop=%v", rr.err, rr.res.StopReason)
 		}
+		if len(rr.res.ToolCalls) != 1 || !rr.res.ToolCalls[0].Invoked {
+			t.Fatalf("parent cancellation lost completed Invoke metadata: %+v", rr.res.ToolCalls)
+		}
+		if got := kinds(rr.res.Events); got != "step,tool_call,tool_result" {
+			t.Fatalf("events = %s, want durable tool_result metadata", got)
+		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("Run did not return after parent cancellation (possible goroutine leak)")
 	}
@@ -281,8 +287,8 @@ func (erroringReadTool) Invoke(_ context.Context, _ json.RawMessage) (ToolResult
 
 // TestParallelGovernorSerialTail: 5 distinct erroring read tools run concurrently,
 // but Phase 3 applies the governor in model order and short-circuits after
-// defaultToolErrorCap consecutive errors, discarding the trailing (already-run)
-// results. Only the first defaultToolErrorCap results are surfaced.
+// defaultToolErrorCap consecutive errors. The trailing results stay out of State,
+// while every already-computed outcome remains in the audit record.
 func TestParallelGovernorSerialTail(t *testing.T) {
 	const n = 5
 	tools := make([]Tool, n)
@@ -295,7 +301,13 @@ func TestParallelGovernorSerialTail(t *testing.T) {
 	mc := &scriptedCaller{responses: []ModelResult{
 		{Response: provider.ChatResponse{ToolCalls: calls}},
 	}}
-	o := newTestOrchestrator(mc)
+	blockFourth := &stubInterceptor{name: "guard", toolCall: func(call ToolCallInspection) []Finding {
+		if call.Call.Function.Name == "boom3" {
+			return []Finding{{Rule: "deny", Verdict: VerdictBlock, Risk: 100}}
+		}
+		return nil
+	}}
+	o := newTestOrchestrator(mc, WithInterceptors(blockFourth))
 	res, err := o.Run(context.Background(), Request{Goal: "q", Tools: tools}, nil)
 	if err != nil {
 		t.Fatalf("Run: %v", err)
@@ -303,8 +315,20 @@ func TestParallelGovernorSerialTail(t *testing.T) {
 	if res.StopReason != ToolErrorCapReached {
 		t.Fatalf("stop = %v, want ToolErrorCapReached", res.StopReason)
 	}
-	if len(res.ToolCalls) != defaultToolErrorCap {
-		t.Fatalf("surfaced tool calls = %d, want %d", len(res.ToolCalls), defaultToolErrorCap)
+	if len(res.ToolCalls) != n {
+		t.Fatalf("audit records = %d, want all %d completed Invokes", len(res.ToolCalls), n)
+	}
+	for i, rec := range res.ToolCalls {
+		if i == 3 {
+			if rec.Invoked || !rec.Blocked || !rec.IsError {
+				t.Fatalf("blocked synthetic call = %+v", rec)
+			}
+		} else if !rec.Invoked {
+			t.Fatalf("completed parallel call is not marked invoked: %+v", res.ToolCalls)
+		}
+	}
+	if got := len(toolMessages(res.Messages)); got != defaultToolErrorCap {
+		t.Fatalf("model-visible tool observations = %d, want governor cap %d", got, defaultToolErrorCap)
 	}
 }
 
@@ -376,6 +400,14 @@ func TestParallelContextCancel(t *testing.T) {
 	case rr := <-done:
 		if !errors.Is(rr.err, context.Canceled) {
 			t.Fatalf("Run err = %v, want context.Canceled", rr.err)
+		}
+		if len(rr.res.ToolCalls) != n {
+			t.Fatalf("parent cancellation lost completed parallel Invoke metadata: %+v", rr.res.ToolCalls)
+		}
+		for _, rec := range rr.res.ToolCalls {
+			if !rec.Invoked {
+				t.Fatalf("parallel cancellation record is not marked invoked: %+v", rr.res.ToolCalls)
+			}
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("Run did not return after cancel (goroutine leak)")

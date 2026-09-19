@@ -22,6 +22,7 @@ func TestParseThinkFlag(t *testing.T) {
 		{name: "medium", args: []string{"-think", "medium"}, want: "medium"},
 		{name: "high", args: []string{"-think", "high"}, want: "high"},
 		{name: "uppercase normalized", args: []string{"-think", "HIGH"}, want: "high"},
+		{name: "default remains invalid at startup", args: []string{"-think", "default"}, wantErr: true},
 		{name: "invalid", args: []string{"-think", "max"}, wantErr: true},
 	}
 	for _, tt := range tests {
@@ -85,6 +86,7 @@ type thinkFakeReg struct {
 	errByKey   map[provider.ModelKey]error
 	errByModel map[string]error
 	nilByKey   map[provider.ModelKey]bool // Lookup returns (nil, nil)
+	onLookup   func()
 
 	lookupCalls    []provider.ModelKey
 	lookupAnyCalls []string
@@ -92,6 +94,9 @@ type thinkFakeReg struct {
 
 func (f *thinkFakeReg) Lookup(ctx context.Context, key provider.ModelKey) (*provider.ModelProfile, error) {
 	f.lookupCalls = append(f.lookupCalls, key)
+	if f.onLookup != nil {
+		f.onLookup()
+	}
 	if err := f.errByKey[key]; err != nil {
 		return nil, err
 	}
@@ -249,4 +254,57 @@ func TestThinkSupportGate(t *testing.T) {
 			t.Errorf("notice = %q, want empty", notice)
 		}
 	})
+}
+
+func TestThinkSupportGate_AllModesAndInputs(t *testing.T) {
+	falseValue, trueValue := false, true
+	key := provider.ModelKey{Provider: "test", Model: "m"}
+	const notice = "think: model test/m does not support thinking; -think ignored"
+	tests := []struct {
+		name       string
+		mode       provider.ThinkMode
+		value      string
+		wantNotice string
+		wantThink  *bool
+		wantEffort string
+	}{
+		{name: "none off", mode: provider.ThinkNone, value: "off", wantNotice: notice},
+		{name: "none on", mode: provider.ThinkNone, value: "on", wantNotice: notice},
+		{name: "none low", mode: provider.ThinkNone, value: "low", wantNotice: notice},
+		{name: "none medium", mode: provider.ThinkNone, value: "medium", wantNotice: notice},
+		{name: "none high", mode: provider.ThinkNone, value: "high", wantNotice: notice},
+		{name: "always off", mode: provider.ThinkAlways, value: "off", wantThink: &falseValue},
+		{name: "always on", mode: provider.ThinkAlways, value: "on", wantThink: &trueValue},
+		{name: "always low", mode: provider.ThinkAlways, value: "low", wantThink: &trueValue, wantEffort: "low"},
+		{name: "always medium", mode: provider.ThinkAlways, value: "medium", wantThink: &trueValue, wantEffort: "medium"},
+		{name: "always high", mode: provider.ThinkAlways, value: "high", wantThink: &trueValue, wantEffort: "high"},
+		{name: "toggle off", mode: provider.ThinkToggle, value: "off", wantThink: &falseValue},
+		{name: "toggle on", mode: provider.ThinkToggle, value: "on", wantThink: &trueValue},
+		{name: "toggle low", mode: provider.ThinkToggle, value: "low", wantThink: &trueValue, wantEffort: "low"},
+		{name: "toggle medium", mode: provider.ThinkToggle, value: "medium", wantThink: &trueValue, wantEffort: "medium"},
+		{name: "toggle high", mode: provider.ThinkToggle, value: "high", wantThink: &trueValue, wantEffort: "high"},
+		{name: "auto off", mode: provider.ThinkAuto, value: "off", wantThink: &falseValue},
+		{name: "auto on", mode: provider.ThinkAuto, value: "on", wantThink: &trueValue},
+		{name: "auto low", mode: provider.ThinkAuto, value: "low", wantThink: &trueValue, wantEffort: "low"},
+		{name: "auto medium", mode: provider.ThinkAuto, value: "medium", wantThink: &trueValue, wantEffort: "medium"},
+		{name: "auto high", mode: provider.ThinkAuto, value: "high", wantThink: &trueValue, wantEffort: "high"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			reg := &thinkFakeReg{byKey: map[provider.ModelKey]provider.ThinkMode{key: tt.mode}}
+			got, gotNotice := resolveThinkOptions(context.Background(), reg, []string{"test/m"}, tt.value)
+			if gotNotice != tt.wantNotice {
+				t.Fatalf("notice = %q, want %q", gotNotice, tt.wantNotice)
+			}
+			if (got.Think == nil) != (tt.wantThink == nil) {
+				t.Fatalf("Think = %v, want %v", got.Think, tt.wantThink)
+			}
+			if got.Think != nil && *got.Think != *tt.wantThink {
+				t.Fatalf("Think = %v, want %v", *got.Think, *tt.wantThink)
+			}
+			if got.ThinkEffort != tt.wantEffort {
+				t.Fatalf("ThinkEffort = %q, want %q", got.ThinkEffort, tt.wantEffort)
+			}
+		})
+	}
 }

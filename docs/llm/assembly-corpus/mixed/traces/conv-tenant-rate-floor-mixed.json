@@ -68,7 +68,7 @@
     },
     {
       "role": "tool",
-      "content": "### source: \"internal/ingest/limits.go\"\npurpose: Per-tenant token-bucket rate limiting with hot-reloaded rates.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n--- source: \"internal/ingest/limits.go\" (lines 1-52, similarity: 1.00) ---\n1| package ingest\n2| \n3| import (\n4| \t\"sync\"\n5| \t\"time\"\n6| )\n7| \n8| // tenantLimiter is a per-tenant token bucket. Buckets are created\n9| // lazily on first sight of a tenant and refilled on a fixed tick; the\n10| // per-tenant rates come from the tenants file and hot-reload with it.\n11| type tenantLimiter struct {\n12| \tmu      sync.Mutex\n13| \tbuckets map[string]*bucket\n14| \ttick    time.Duration\n15| }\n16| \n17| type bucket struct {\n18| \ttokens float64\n19| \trate   float64\n20| \tburst  float64\n21| \tlast   time.Time\n22| }\n23| \n24| // allow reports whether one accepted batch fits the tenant's current\n25| // budget. Unknown tenants get the default rate until the tenants file\n26| // names them explicitly; the default is deliberately conservative so a\n27| // new integration cannot crowd out established ones. The evaluation\n28| // default of 40 batches/min long predates the capacity work.\n29| func (l *tenantLimiter) allow(tenant string, now time.Time) bool {\n30| \tl.mu.Lock()\n31| \tdefer l.mu.Unlock()\n32| \tb, ok := l.buckets[tenant]\n33| \tif !ok {\n34| \t\tb = l.newBucket(tenant)\n35| \t\tl.buckets[tenant] = b\n36| \t}\n37| \tb.refill(now)\n38| \tif b.tokens \u003c 1 {\n39| \t\treturn false\n40| \t}\n41| \tb.tokens--\n42| \treturn true\n43| }\n44| \n45| func (b *bucket) refill(now time.Time) {\n46| \telapsed := now.Sub(b.last).Seconds()\n47| \tb.tokens += elapsed * b.rate\n48| \tif b.tokens \u003e b.burst {\n49| \t\tb.tokens = b.burst\n50| \t}\n51| \tb.last = now\n52| }\n\n### source: \"internal/ingest/tenants.go\"\npurpose: Tenants-file stanzas: rates, tags, hot reload with loud parse errors.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n\n### source: \"docs/tenants.md\"\nlanguage: markdown\nindexed: 2025-07-27T00:00:00Z\nnote: metadata overview (summary omitted: budget)\n",
+      "content": "### source: \"internal/ingest/limits.go\"\npurpose: Per-tenant token-bucket rate limiting with hot-reloaded rates.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n--- source: \"internal/ingest/limits.go\" (lines 1-52, similarity: 1.00) ---\n1| package ingest\n2| \n3| import (\n4| \t\"sync\"\n5| \t\"time\"\n6| )\n7| \n8| // tenantLimiter is a per-tenant token bucket. Buckets are created\n9| // lazily on first sight of a tenant and refilled on a fixed tick; the\n10| // per-tenant rates come from the tenants file and hot-reload with it.\n11| type tenantLimiter struct {\n12| \tmu      sync.Mutex\n13| \tbuckets map[string]*bucket\n14| \ttick    time.Duration\n15| }\n16| \n17| type bucket struct {\n18| \ttokens float64\n19| \trate   float64\n20| \tburst  float64\n21| \tlast   time.Time\n22| }\n23| \n24| // allow reports whether one accepted batch fits the tenant's current\n25| // budget. Unknown tenants get the default rate until the tenants file\n26| // names them explicitly; the default is deliberately conservative so a\n27| // new integration cannot crowd out established ones. The evaluation\n28| // default of 40 batches/min long predates the capacity work.\n29| func (l *tenantLimiter) allow(tenant string, now time.Time) bool {\n30| \tl.mu.Lock()\n31| \tdefer l.mu.Unlock()\n32| \tb, ok := l.buckets[tenant]\n33| \tif !ok {\n34| \t\tb = l.newBucket(tenant)\n35| \t\tl.buckets[tenant] = b\n36| \t}\n37| \tb.refill(now)\n38| \tif b.tokens \u003c 1 {\n39| \t\treturn false\n40| \t}\n41| \tb.tokens--\n42| \treturn true\n43| }\n44| \n45| func (b *bucket) refill(now time.Time) {\n46| \telapsed := now.Sub(b.last).Seconds()\n47| \tb.tokens += elapsed * b.rate\n48| \tif b.tokens \u003e b.burst {\n49| \t\tb.tokens = b.burst\n50| \t}\n51| \tb.last = now\n52| }\n\n### source: \"internal/ingest/tenants.go\"\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nnote: metadata overview (summary omitted: budget)\n\n### source: \"docs/tenants.md\"\nlanguage: markdown\nindexed: 2025-07-27T00:00:00Z\nnote: metadata overview (summary omitted: budget)\n",
       "tool_call_id": "c1",
       "name": "retrieve"
     },
@@ -86,7 +86,7 @@
     },
     {
       "role": "tool",
-      "content": "rec-capacity-cycle · working · created:2025-07-27 · updated:2025-07-27 · scope:session · ns: · src:\nrec-eval-default · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:\nrec-tenant-tags · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:",
+      "content": "trust=agent-written; unreviewed; origin=memory.create; session=caller-claim · rec-capacity-cycle · working · created:2025-07-27 · updated:2025-07-27 · scope:session · ns: · src-claim:\ntrust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-eval-default · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src-claim:\ntrust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-tenant-tags · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src-claim:",
       "tool_call_id": "c2",
       "name": "agent_memory_search"
     },
@@ -110,8 +110,8 @@
       "rec-eval-default",
       "rec-tenant-tags"
     ],
-    "estimated_prompt_tokens": 1154,
-    "state_digest": "f2fea8f3968c68ec3dadb3f22c9c4d810b8a3773aadef7d480e81bc49bd16e59",
+    "estimated_prompt_tokens": 1199,
+    "state_digest": "931cd3080d2acbe76ed3bae1bb42bbec91dc92f8ca21d4ebeac1d375dbd38d59",
     "subjects": [
       "(c1|rag|internal/ingest/limits.go)",
       "(c1|rag|internal/ingest/tenants.go)",
@@ -123,9 +123,9 @@
     "stratum": "conversation_only",
     "answer_home": "conversation",
     "scenario_family": "tenant-default-rate-conv",
-    "budget": 1207,
-    "raw_state_tokens": 2012,
+    "budget": 1243,
+    "raw_state_tokens": 2071,
     "pressure_level": "critical",
-    "shed_bytes": 2888
+    "shed_bytes": 2948
   }
 }

@@ -7,15 +7,19 @@ import "sync"
 // key, so a future tool that emits (or reuses) another tool's key cannot
 // inherit its grant. #346's background exec consults grantScopeExec.
 const (
-	grantScopeExec   = "exec"
-	grantScopeFiles  = "files"
-	grantScopeVerify = "verify"
+	grantScopeExec           = "exec"
+	grantScopeFiles          = "files"
+	grantScopeVerify         = "verify"
+	grantScopeProjectContext = "project-context"
 )
 
 // grantScope maps a tool name to its grant scope. Everything not listed is
 // ungrantable (""). start_command (#346) shares the exec scope safely: its
-// exec-bg:v1: key prefix partitions the grant space from run_command's
-// exec:v2:, so a foreground grant can never authorize a background start.
+// exec-bg:v2: key prefix partitions the grant space from run_command's
+// exec:v3: (#442 bound the workspace root; #443 inserts a scr: component
+// when scratch is enabled), so a foreground grant can never authorize a
+// background start. promote_artifact (#443) emits an empty key and stays
+// ungrantable by construction.
 // stop_command stays OFF the allowlist by frozen contract (every stop
 // prompts); command_status/command_tail never prompt, so they need no scope.
 func grantScope(toolName string) string {

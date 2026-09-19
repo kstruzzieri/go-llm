@@ -7,14 +7,6 @@
   "turns": [
     {
       "role": "user",
-      "content": "We also promised the capacity folks a dry-run report: replay a day of fleet traffic through the rollout config in shadow mode and hand them the admission deltas before anything ships. Have the shadow replay cover the weekend traffic shape too, not just a weekday, since the last rollout's only surprise came from the Sunday batch pattern that the weekday replay never exercised."
-    },
-    {
-      "role": "assistant",
-      "content": "Shadow replay is done; the admission deltas are in the report with the two outlier edges annotated, and the capacity folks have it. Replayed both a weekday and the Sunday shape; the report carries both admission delta tables and the Sunday pattern showed nothing the weekday run had not already surfaced."
-    },
-    {
-      "role": "user",
       "content": "The rollback path needs a rehearsal too. Last quarter's rehearsal found the config snapshotting racing the reload; make sure that fix actually landed and rehearse the rollback on one edge before the fleet touches this. The rehearsal should also verify the rollback leaves the wave report generator in a consistent state, because a half-written wave report after a rollback would poison the next wave's baseline comparison."
     },
     {
@@ -60,7 +52,7 @@
     },
     {
       "role": "tool",
-      "content": "### source: \"internal/ingest/dedupe.go\"\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nnote: metadata overview (summary omitted: budget)\n--- source: \"internal/ingest/dedupe.go\" (lines 1-38, similarity: 1.00) ---\n1| package ingest\n2| \n3| import (\n4| \t\"sync\"\n5| \t\"time\"\n6| )\n7| \n8| // dedupeWindow is the code default for how long a batch key stays\n9| // remembered for duplicate rejection. It is the steady-state fleet\n10| // posture; waves under rollout pin their own window through\n11| // deployment config and drop back when the pin's exit condition is\n12| // met.\n13| const dedupeWindow = 90 * time.Second\n14| \n15| // window holds recently seen keys with their first-seen times, one\n16| // map per shard so burst load spreads across locks.\n17| type window struct {\n18| \tmu   sync.Mutex\n19| \tseen map[string]time.Time\n20| }\n21| \n22| // duplicate reports whether the key was seen inside the window,\n23| // recording it either way. Entries expire lazily on the scan that\n24| // finds them, so idle shards cost nothing between bursts.\n25| func (w *window) duplicate(key string, now time.Time, ttl time.Duration) bool {\n26| \tw.mu.Lock()\n27| \tdefer w.mu.Unlock()\n28| \tif first, ok := w.seen[key]; ok \u0026\u0026 now.Sub(first) \u003c= ttl {\n29| \t\treturn true\n30| \t}\n31| \tfor k, t := range w.seen {\n32| \t\tif now.Sub(t) \u003e ttl {\n33| \t\t\tdelete(w.seen, k)\n34| \t\t}\n35| \t}\n36| \tw.seen[key] = now\n37| \treturn false\n38| }\n\n### source: \"internal/ingest/rolloutpin.go\"\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nnote: metadata overview (summary omitted: budget)\n\n### source: \"docs/rollout.md\"\nlanguage: markdown\nindexed: 2025-07-27T00:00:00Z\nnote: metadata overview (summary omitted: budget)\n",
+      "content": "### source: \"internal/ingest/dedupe.go\"\npurpose: Duplicate rejection window: code default horizon, wave pins via config.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n--- source: \"internal/ingest/dedupe.go\" (lines 1-38, similarity: 1.00) ---\n1| package ingest\n2| \n3| import (\n4| \t\"sync\"\n5| \t\"time\"\n6| )\n7| \n8| // dedupeWindow is the code default for how long a batch key stays\n9| // remembered for duplicate rejection. It is the steady-state fleet\n10| // posture; waves under rollout pin their own window through\n11| // deployment config and drop back when the pin's exit condition is\n12| // met.\n13| const dedupeWindow = 90 * time.Second\n14| \n15| // window holds recently seen keys with their first-seen times, one\n16| // map per shard so burst load spreads across locks.\n17| type window struct {\n18| \tmu   sync.Mutex\n19| \tseen map[string]time.Time\n20| }\n21| \n22| // duplicate reports whether the key was seen inside the window,\n23| // recording it either way. Entries expire lazily on the scan that\n24| // finds them, so idle shards cost nothing between bursts.\n25| func (w *window) duplicate(key string, now time.Time, ttl time.Duration) bool {\n26| \tw.mu.Lock()\n27| \tdefer w.mu.Unlock()\n28| \tif first, ok := w.seen[key]; ok \u0026\u0026 now.Sub(first) \u003c= ttl {\n29| \t\treturn true\n30| \t}\n31| \tfor k, t := range w.seen {\n32| \t\tif now.Sub(t) \u003e ttl {\n33| \t\t\tdelete(w.seen, k)\n34| \t\t}\n35| \t}\n36| \tw.seen[key] = now\n37| \treturn false\n38| }\n\n### source: \"internal/ingest/rolloutpin.go\"\npurpose: Rollout pins: per-wave window overrides with review dates and exit conditions.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n\n### source: \"docs/rollout.md\"\npurpose: Fleet rollout guide: region-spread waves, wave reports, pins with exit conditions.\nlanguage: markdown\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n",
       "tool_call_id": "c1",
       "name": "retrieve"
     },
@@ -78,7 +70,7 @@
     },
     {
       "role": "tool",
-      "content": "rec-rollback-drill · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:\nrec-shadow-report · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:\nrec-wave-plan · working · created:2025-07-27 · updated:2025-07-27 · scope:session · ns: · src:",
+      "content": "trust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-rollback-drill · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src-claim: · rollback rehearsals run on one edge before every fleet rollout; restores must come back byte-identical\ntrust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-shadow-report · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src-claim: · shadow replay reports go to the capacity folks with outlier edges annotated\ntrust=agent-written; unreviewed; origin=memory.create; session=caller-claim · rec-wave-plan · working · created:2025-07-27 · updated:2025-07-27 · scope:session · ns: · src-claim: · wave plans attach to the rollout thread; one edge per region per wave since the London lesson",
       "tool_call_id": "c2",
       "name": "agent_memory_search"
     },
@@ -102,8 +94,8 @@
       "rec-shadow-report",
       "rec-wave-plan"
     ],
-    "estimated_prompt_tokens": 1340,
-    "state_digest": "d3df7c0e43ad5fcbd3ea3373a5ed8d7b935ac81b69126c8a29cd93403ba33069",
+    "estimated_prompt_tokens": 1368,
+    "state_digest": "9dc520551418c16e9b728b3e3b99b692a20b354f111634a801682d38b189867c",
     "subjects": [
       "(c1|rag|internal/ingest/dedupe.go)",
       "(c1|rag|internal/ingest/rolloutpin.go)",
@@ -115,11 +107,11 @@
     "stratum": "cross_domain_join",
     "answer_home": "join",
     "scenario_family": "dedupe-window-join",
-    "budget": 1383,
-    "raw_state_tokens": 2305,
+    "budget": 1418,
+    "raw_state_tokens": 2363,
     "pressure_level": "critical",
-    "shed_messages": 2,
-    "shed_bytes": 3309,
-    "omitted_subjects": 1
+    "shed_messages": 4,
+    "shed_bytes": 3433,
+    "omitted_subjects": 2
   }
 }

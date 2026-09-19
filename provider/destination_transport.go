@@ -14,15 +14,20 @@ import (
 // destinationTransport is the enforcement layer of #477: the outermost
 // http.RoundTripper on a guarded client, bound at construction to ONE gate
 // and ONE canonical destination. Every request must carry a capability the
-// gate's current snapshot issued for exactly this destination, and must
+// gate issued for exactly this destination and not since revoked, and must
 // target the bound origin under the bound base path — otherwise it is denied
 // before the delegate transport, dialer, or proxy is ever invoked.
 //
-// Purpose scope: the capability authorizes by {snapshot, provider,
-// destination}. Sub-requests a provider client issues while serving one
-// routed call — a model-list on a cache miss, a retry — share that call's
-// capability toward the same destination; the purpose boundary is the edge
-// the capability was issued for, not the individual HTTP request.
+// Purpose scope: the capability authorizes by {revocation token, provider,
+// destination}. The token is a private per-generation object the gate mints
+// on Install and Narrow and drops on Clear, so a capability from another gate
+// or a revoked generation names the same strings and still denies, and a
+// capability carrying no token never authorizes. An additive Extend keeps the
+// token (#376), so a request bound before a model switch survives one.
+// Sub-requests a provider client issues while serving one routed call — a
+// model-list on a cache miss, a retry — share that call's capability toward
+// the same destination; the purpose boundary is the edge the capability was
+// issued for, not the individual HTTP request.
 type destinationTransport struct {
 	gate     *DestinationGate
 	dest     Destination

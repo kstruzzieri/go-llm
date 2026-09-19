@@ -53,6 +53,10 @@ func (*EditFile) Effect() agent.Effect {
 	return agent.Effect{Class: agent.Write, Approval: agent.ApprovalOnWrite}
 }
 
+// Origin declares this tool's observations workspace-local (#436 spec D4):
+// detectors tag, never block, what it returns.
+func (*EditFile) Origin() agent.Origin { return agent.OriginWorkspace }
+
 // computeEdit reads the file, validates uniqueness and size, and returns the
 // before/after bytes. It is shared by Plan and the Invoke re-check.
 func (t *EditFile) computeEdit(args editFileArgs) (before, after []byte, err error) {

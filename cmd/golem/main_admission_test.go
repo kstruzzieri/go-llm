@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -14,6 +15,7 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/kstruzzieri/go-llm/agent"
 	"github.com/kstruzzieri/go-llm/config"
 	"github.com/kstruzzieri/go-llm/internal/providerbootstrap"
 	"github.com/kstruzzieri/go-llm/provider"
@@ -323,7 +325,7 @@ func TestResolveBackendGuardedScan(t *testing.T) {
 	res, err := resolveBackend(context.Background(), cfg, backendResolveOpts{
 		lookupEnv:      func(string) (string, bool) { return "", false },
 		prober:         prober,
-		agentRoute:     &route,
+		activeRoute:    &route,
 		guardCandidate: discoveryCandidateGuard(context.Background(), "lc"),
 	})
 	if err != nil {
@@ -459,5 +461,400 @@ func TestRunDiscoveryPinsAndCompletes(t *testing.T) {
 	}
 	if got := requests.Load(); got == 0 {
 		t.Error("discovered backend received no requests")
+	}
+}
+
+// goalHarness serves TWO counted loopback providers: "agentprov" backing the
+// agent role and "planprov" backing the role the planning use case resolves
+// to. lastPlanModel records the model name of the most recent chat request
+// the planning provider served.
+func goalHarness(t *testing.T, planningDefaults string) (configPath, root string, agentReqs, planReqs *atomic.Int64, lastPlanModel *atomic.Pointer[string]) {
+	t.Helper()
+	agentReqs, planReqs = &atomic.Int64{}, &atomic.Int64{}
+	lastPlanModel = &atomic.Pointer[string]{}
+	agentSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		agentReqs.Add(1)
+		serveCompat(w, r, "agent-model", nil)
+	}))
+	t.Cleanup(agentSrv.Close)
+	planSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		planReqs.Add(1)
+		serveCompat(w, r, "planner-model", lastPlanModel)
+	}))
+	t.Cleanup(planSrv.Close)
+
+	root = t.TempDir()
+	configPath = filepath.Join(t.TempDir(), "models.json")
+	configJSON := fmt.Sprintf(`{
+  "providers": {
+    "agentprov": {"base_url": %q, "api_format": "openai-compat", "timeout": "5s"},
+    "planprov":  {"base_url": %q, "api_format": "openai-compat", "timeout": "5s"}
+  },
+  "models": {
+    "agent":   {"name": "agent-model", "provider": "agentprov", "type": "dense", "context_window": 32768,
+      "capabilities": ["chat", "generate", "stream", "tool_call"]},
+    "planner": {"name": "planner-model", "provider": "planprov", "type": "dense", "context_window": 32768,
+      "capabilities": ["chat", "generate", "stream", "tool_call"]}
+  },
+  "defaults": {"agent": "agent", %s}
+}`, agentSrv.URL, planSrv.URL, planningDefaults)
+	if err := os.WriteFile(configPath, []byte(configJSON), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return configPath, root, agentReqs, planReqs, lastPlanModel
+}
+
+// serveCompat answers /v1/models and /v1/chat/completions for one model,
+// recording the requested model name of chat calls when record is non-nil.
+func serveCompat(w http.ResponseWriter, r *http.Request, model string, record *atomic.Pointer[string]) {
+	switch r.URL.Path {
+	case "/v1/models":
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprintf(w, `{"data":[{"id":%q}]}`, model)
+	case "/v1/chat/completions":
+		if record != nil {
+			body, _ := io.ReadAll(r.Body)
+			var req struct {
+				Model string `json:"model"`
+			}
+			_ = json.Unmarshal(body, &req)
+			m := req.Model
+			record.Store(&m)
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = fmt.Fprintf(w, "data: {\"model\":%q,\"choices\":[{\"delta\":{\"content\":\"noop\"},\"finish_reason\":null}]}\n\n", model)
+		_, _ = fmt.Fprintf(w, "data: {\"model\":%q,\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":1,\"total_tokens\":2}}\n\n", model)
+		_, _ = io.WriteString(w, "data: [DONE]\n\n")
+	default:
+		http.NotFound(w, r)
+	}
+}
+
+func goalArgs(configPath, root string) []string {
+	return []string{"-config", configPath, "-root", root, "-goal", "outline a refactor",
+		"-max-steps", "2", "-no-probe", "-no-cap-probe", "-no-project-context"}
+}
+
+// driveGoalTurn runs a goal-mode startup through the real run(), then drives
+// ONE model turn through sess.orch -- the very orchestrator instance plan
+// authoring runs on (#476 D3) -- and stops before the author loop, which
+// would otherwise require a real agentflow CLI on the host. The turn's
+// requested model proves which route the session's caller carries.
+func driveGoalTurn(t *testing.T, configPath, root string) {
+	t.Helper()
+	stdin, stdout, stderr := runTestFiles(t)
+	errStop := errors.New("stop after the routed turn")
+	err := run(goalArgs(configPath, root), stdin, stdout, stderr, runHooks{
+		afterSessionReady: func(sess *replSession) error {
+			_, runErr := sess.orch.Run(context.Background(),
+				agent.Request{Goal: "say noop", MaxSteps: 1}, nil)
+			if runErr != nil {
+				t.Errorf("goal-session turn: %v", runErr)
+			}
+			return errStop
+		},
+	})
+	if !errors.Is(err, errStop) {
+		t.Fatalf("run error = %v, want the test stop after the routed turn\nstderr:\n%s",
+			err, readRunTestFile(t, stderr))
+	}
+}
+
+// Goal mode's active route IS the planning route (#476 D3/I5): a turn on the
+// session's orchestrator must reach the provider the planning use case
+// resolves to, with that role's model -- and the agent provider, INACTIVE in
+// goal mode, must receive zero requests: no refresh, no probe, no inference
+// (I10).
+func TestRunGoalModeSessionRoutesThePlanningChain(t *testing.T) {
+	configPath, root, agentReqs, planReqs, lastPlanModel := goalHarness(t,
+		`"planning": "planner"`)
+
+	driveGoalTurn(t, configPath, root)
+
+	if got := planReqs.Load(); got == 0 {
+		t.Error("planning provider received no requests; the session cannot have routed there")
+	}
+	if m := lastPlanModel.Load(); m == nil || *m != "planner-model" {
+		got := "<none>"
+		if m != nil {
+			got = *m
+		}
+		t.Errorf("session turn requested model %q, want %q (the planning role's model)", got, "planner-model")
+	}
+	if got := agentReqs.Load(); got != 0 {
+		t.Errorf("agent provider received %d requests in goal mode, want 0 (inactive route)", got)
+	}
+}
+
+// The reasoning hop is a real route: a config with no planning key but a
+// reasoning default routes the goal session through it (#476 D2). The model
+// assertion keeps this non-vacuous -- a bare request counter would already be
+// satisfied by the metadata refresh.
+func TestRunGoalModeFallsBackToTheReasoningRole(t *testing.T) {
+	configPath, root, agentReqs, _, lastPlanModel := goalHarness(t,
+		`"reasoning": "planner"`)
+
+	driveGoalTurn(t, configPath, root)
+
+	if m := lastPlanModel.Load(); m == nil || *m != "planner-model" {
+		got := "<none>"
+		if m != nil {
+			got = *m
+		}
+		t.Errorf("session turn requested model %q, want %q (the reasoning role's model via the planning fallback)", got, "planner-model")
+	}
+	if got := agentReqs.Load(); got != 0 {
+		t.Errorf("agent provider received %d requests in goal mode, want 0 (inactive route)", got)
+	}
+}
+
+// A remote planning fallback fails closed in noninteractive goal mode: the
+// run dies naming the destination and the exact flag, and NO provider --
+// including the local agent provider -- receives a single request, because
+// admission precedes discovery, refresh, probe, and inference (#477).
+func TestRunGoalModeRemotePlanningFallbackFailsClosed(t *testing.T) {
+	configPath, root, agentReqs, _, _ := goalHarness(t,
+		`"analysis": "remoteplan"`)
+	// Point the planning fallback at an unreachable REMOTE provider: the
+	// analysis hop resolves planning to it.
+	raw, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	amended := strings.Replace(string(raw), `"planner":`, `"remoteplan": {"name": "remote-model", "provider": "remote", "type": "dense", "context_window": 32768,
+      "capabilities": ["chat", "generate", "stream", "tool_call"]},
+    "planner":`, 1)
+	amended = strings.Replace(amended, `"planprov":`, `"remote": {"base_url": "https://opencode.invalid/zen/go", "api_format": "openai-compat", "timeout": "5s"},
+    "planprov":`, 1)
+	if err := os.WriteFile(configPath, []byte(amended), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	stdin, stdout, stderr := runTestFiles(t)
+
+	err = run(goalArgs(configPath, root), stdin, stdout, stderr)
+	if err == nil {
+		t.Fatalf("run = nil error, want fail-closed on the unconsented remote planning destination\nstderr:\n%s",
+			readRunTestFile(t, stderr))
+	}
+	if !errors.Is(err, provider.ErrDestinationDenied) {
+		t.Fatalf("run error = %v, want ErrDestinationDenied", err)
+	}
+	msg := err.Error() + readRunTestFile(t, stderr)
+	if !strings.Contains(msg, "opencode.invalid") || !strings.Contains(msg, "-allow-destination") {
+		t.Errorf("failure names neither the destination nor the flag:\n%s", msg)
+	}
+	if got := agentReqs.Load(); got != 0 {
+		t.Errorf("agent provider received %d requests before fail-closed admission, want 0", got)
+	}
+}
+
+// TestOneShotMachineModeDestinationDenialWritesResultAndExitsTwo (#352):
+// a non-interactive one-shot whose AGENT route lands on an unadmitted remote
+// destination must fail closed with exit 2 AND still put exactly one
+// golem.result.v1 record on stdout, carrying the destination_denied code.
+func TestOneShotMachineModeDestinationDenialWritesResultAndExitsTwo(t *testing.T) {
+	root := t.TempDir()
+	configPath := filepath.Join(t.TempDir(), "models.json")
+	configJSON := `{
+  "providers": {"opencode": {"base_url": "https://opencode.invalid/zen/go", "api_format": "openai-compat", "timeout": "5s"}},
+  "models": {"agent": {"name": "remote-model", "provider": "opencode", "type": "dense", "context_window": 32768,
+    "capabilities": ["chat", "generate", "stream", "tool_call"]}},
+  "defaults": {"agent": "agent"}
+}`
+	if err := os.WriteFile(configPath, []byte(configJSON), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	stdin, stdout, stderr := runTestFiles(t)
+
+	err := run([]string{"-config", configPath, "-root", root, "-p", "say done", "-output-format", "json",
+		"-no-probe", "-no-cap-probe", "-no-rag", "-no-project-context", "-no-session", "-no-memory"},
+		stdin, stdout, stderr)
+	if !errors.Is(err, provider.ErrDestinationDenied) {
+		t.Fatalf("run error = %v, want ErrDestinationDenied", err)
+	}
+	if got := exitCodeFor(err); got != 2 {
+		t.Fatalf("exitCodeFor(%v) = %d, want 2 (a typed local policy denial is a caller error)", err, got)
+	}
+	out := readRunTestFile(t, stdout)
+	lines := strings.Split(strings.TrimSuffix(out, "\n"), "\n")
+	if len(lines) != 1 {
+		t.Fatalf("machine-mode denial must write exactly one stdout line, got %d:\n%s", len(lines), out)
+	}
+	m := decodeResult(t, lines[0])
+	var recErr struct{ Code string }
+	if err := json.Unmarshal(m["error"], &recErr); err != nil || recErr.Code != "destination_denied" {
+		t.Errorf("error = %s, want code destination_denied", m["error"])
+	}
+}
+
+// TestRunAllowToolWiresHeadlessPromptAndApprover (#352, spec F6): through the
+// real run() wiring, -allow-tool run_command must install the headless
+// approver AND build the system prompt from the exact mounted set — naming
+// run_command, never the unmounted background suite, and never interactive
+// approval prose.
+func TestRunAllowToolWiresHeadlessPromptAndApprover(t *testing.T) {
+	configPath, root, _ := admissionHarness(t, "https://opencode.invalid/zen/go")
+	stdin, stdout, stderr := runTestFiles(t)
+
+	errStop := errors.New("stop after startup")
+	err := run(append(admissionArgs(configPath, root), "-allow-tool", "run_command"), stdin, stdout, stderr, runHooks{
+		afterSessionReady: func(sess *replSession) error {
+			if sess.headlessApprover == nil {
+				t.Error("-allow-tool must install the headless approver")
+			}
+			if sess.machine != nil {
+				t.Error("text mode must have no machine writer")
+			}
+			if !strings.Contains(sess.baseSystem, "run_command") {
+				t.Errorf("headless prompt must name run_command:\n%s", sess.baseSystem)
+			}
+			for _, banned := range []string{"start_command", "command_status", "command_tail", "stop_command", "after they approve"} {
+				if strings.Contains(sess.baseSystem, banned) {
+					t.Errorf("headless prompt must not carry %q:\n%s", banned, sess.baseSystem)
+				}
+			}
+			mounted := map[string]bool{}
+			for _, tool := range sess.tools {
+				mounted[tool.Spec().Name] = true
+			}
+			if !mounted["run_command"] {
+				t.Errorf("run_command must be mounted, tools = %v", mounted)
+			}
+			for _, banned := range []string{"start_command", "command_status", "command_tail", "stop_command", "write_file", "edit_file"} {
+				if mounted[banned] {
+					t.Errorf("unnamed gated tool %q must not be mounted, tools = %v", banned, mounted)
+				}
+			}
+			return errStop
+		},
+	})
+	if !errors.Is(err, errStop) {
+		t.Fatalf("run = %v, want the harness stop sentinel", err)
+	}
+}
+
+func TestRunAllowToolWriteAlignsDelegatePrompt(t *testing.T) {
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	configPath, root, _ := admissionHarness(t, "https://opencode.invalid/zen/go")
+	stdin, stdout, stderr := runTestFiles(t)
+
+	errStop := errors.New("stop after startup")
+	args := append(admissionArgs(configPath, root),
+		"-delegate", "-delegate-role", "agent", "-allow-tool", "write_file")
+	err := run(args, stdin, stdout, stderr, runHooks{
+		afterSessionReady: func(sess *replSession) error {
+			if !strings.Contains(sess.baseSystem, "review it, then write it") {
+				t.Errorf("delegate prompt must instruct use of the mounted write tool:\n%s", sess.baseSystem)
+			}
+			if strings.Contains(sess.baseSystem, "present to the user") {
+				t.Errorf("delegate prompt must not claim the result can only be presented:\n%s", sess.baseSystem)
+			}
+			if !strings.Contains(sess.baseSystem, "write_file") || strings.Contains(sess.baseSystem, "edit_file") {
+				t.Errorf("delegate prompt must preserve the exact mounted write-tool set:\n%s", sess.baseSystem)
+			}
+			return errStop
+		},
+	})
+	if !errors.Is(err, errStop) {
+		t.Fatalf("run = %v, want the harness stop sentinel", err)
+	}
+}
+
+// Each selective headless write capability must persist evidence through run(),
+// provider tool dispatch, approval and shutdown, even when its sibling is absent.
+func TestRunAllowToolPersistsMutationReceipt(t *testing.T) {
+	for _, tc := range []struct {
+		tool, args, prior, after, beforeHash, afterHash string
+	}{
+		{"write_file", `{"path":"./a.txt","content":"abc"}`, "", "abc", "absent", "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"},
+		{"edit_file", `{"path":"./a.txt","old_string":"abc","new_string":"x"}`, "abc", "x", "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad", "2d711642b726b04401627ca9fbac32f5c8530fb1903cc4db02258717921a4881"},
+	} {
+		t.Run(tc.tool, func(t *testing.T) {
+			configPath, root, _ := fenceWireHarness(t, func(req wireRequest) []string {
+				if !req.hasToolMessage() {
+					return sseToolCall("mutation", tc.tool, tc.args)
+				}
+				return sseAnswer("done")
+			})
+			if tc.prior != "" {
+				if err := os.WriteFile(filepath.Join(root, "a.txt"), []byte(tc.prior), 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			stdin, stdout, stderr := runTestFiles(t)
+			err := run(append(admissionArgs(configPath, root), "-allow-tool", tc.tool), stdin, stdout, stderr)
+			if err != nil {
+				t.Fatalf("headless %s: %v; stderr: %s", tc.tool, err, readRunTestFile(t, stderr))
+			}
+			if got, err := os.ReadFile(filepath.Join(root, "a.txt")); err != nil || string(got) != tc.after {
+				t.Fatalf("headless %s file = %q, %v; want %q", tc.tool, got, err, tc.after)
+			}
+			if out := readRunTestFile(t, stderr); strings.Count(out, "new signing identity: kid ") != 1 || strings.Contains(out, "Apply this change?") {
+				t.Fatalf("headless identity notice/approval output = %q", out)
+			}
+			receipts := readHostMutationReceipts(t, os.Getenv("XDG_DATA_HOME"), root)
+			if len(receipts) != 1 {
+				t.Fatalf("headless %s persisted %d receipts, want 1", tc.tool, len(receipts))
+			}
+			body := receipts[0].Body
+			if body.Path != "a.txt" || body.BeforeHash != tc.beforeHash || body.AfterHash != tc.afterHash || body.AfterMode != nil || body.UndoOf != "" {
+				t.Fatalf("headless %s receipt = %+v", tc.tool, body)
+			}
+		})
+	}
+}
+
+func TestRunMutationSigningRefusesMissingKey(t *testing.T) {
+	for _, mode := range []string{"startup", "headless"} {
+		t.Run(mode, func(t *testing.T) {
+			configPath, root, _ := fenceWireHarness(t, func(req wireRequest) []string {
+				if !req.hasToolMessage() {
+					return sseToolCall("write", "write_file", `{"path":"a.txt","content":"abc"}`)
+				}
+				return sseAnswer("done")
+			})
+			stdin, stdout, stderr := runTestFiles(t)
+			args := append(admissionArgs(configPath, root), "-allow-tool", "write_file")
+			if err := run(args, stdin, stdout, stderr); err != nil {
+				t.Fatal(err)
+			}
+			data := os.Getenv("XDG_DATA_HOME")
+			receipts := readHostMutationReceipts(t, data, root)
+			if len(receipts) != 1 {
+				t.Fatalf("setup persisted %d receipts, want 1", len(receipts))
+			}
+			keyPath := filepath.Join(data, "golem", "signing", "agent-ed25519.pem")
+			if err := os.Remove(keyPath); err != nil {
+				t.Fatal(err)
+			}
+			if mode == "startup" {
+				args = []string{"-config", configPath, "-root", root, "-allow-write", "-no-probe", "-no-cap-probe",
+					"-no-rag", "-no-session", "-no-memory", "-no-project-context", "-no-auto-index"}
+			}
+			stdin, stdout, stderr = runTestFiles(t)
+			reached := false
+			err := run(args, stdin, stdout, stderr, runHooks{afterSessionReady: func(*replSession) error {
+				reached = true
+				return errors.New("session must not be constructed without the historical key")
+			}})
+			want := "golem: signing key missing: key file " + keyPath + " is required by receipt " + receipts[0].Body.MutationID + " claiming kid " + receipts[0].Body.AgentID + "; restore the matching key from backup; writes disabled to preserve receipt integrity"
+			if err == nil || err.Error() != want || reached {
+				t.Fatalf("%s missing-key startup = %v, reached session=%t; want %q", mode, err, reached, want)
+			}
+			if _, err := os.Lstat(keyPath); !os.IsNotExist(err) {
+				t.Fatalf("%s startup created a replacement key: %v", mode, err)
+			}
+			canonical, err := filepath.EvalSymlinks(root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			store, err := openCheckpointStore(context.Background(), testGetenv(data), canonical)
+			if err != nil {
+				t.Fatalf("%s failed startup leaked checkpoint lease: %v", mode, err)
+			}
+			if err := store.Close(); err != nil {
+				t.Fatal(err)
+			}
+		})
 	}
 }

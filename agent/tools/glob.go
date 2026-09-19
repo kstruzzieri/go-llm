@@ -58,6 +58,10 @@ func (*Glob) Effect() agent.Effect {
 	return agent.Effect{Class: agent.Read, Approval: agent.ApprovalNever, OutputCap: listOutputCap}
 }
 
+// Origin declares this tool's observations workspace-local (#436 spec D4):
+// detectors tag, never block, what it returns.
+func (*Glob) Origin() agent.Origin { return agent.OriginWorkspace }
+
 // Invoke walks and matches relative paths against the pattern.
 func (t *Glob) Invoke(ctx context.Context, raw json.RawMessage) (agent.ToolResult, error) {
 	var args globArgs
@@ -66,6 +70,15 @@ func (t *Glob) Invoke(ctx context.Context, raw json.RawMessage) (agent.ToolResul
 	}
 	if args.Pattern == "" {
 		return errResult("pattern is required"), nil
+	}
+
+	if filepath.IsAbs(args.Pattern) || strings.ContainsRune(args.Pattern, 0) {
+		return errResult(t.ws.denyScope().Error()), nil
+	}
+	for _, component := range strings.Split(filepath.ToSlash(args.Pattern), "/") {
+		if component == ".." {
+			return errResult(t.ws.denyScope().Error()), nil
+		}
 	}
 
 	var entries []string
@@ -146,6 +159,10 @@ func (*List) Effect() agent.Effect {
 	return agent.Effect{Class: agent.Read, Approval: agent.ApprovalNever, OutputCap: listOutputCap}
 }
 
+// Origin declares this tool's observations workspace-local (#436 spec D4):
+// detectors tag, never block, what it returns.
+func (*List) Origin() agent.Origin { return agent.OriginWorkspace }
+
 // Invoke reads a single directory level. Expected failures return IsError.
 func (t *List) Invoke(ctx context.Context, raw json.RawMessage) (agent.ToolResult, error) {
 	var args listArgs
@@ -156,21 +173,17 @@ func (t *List) Invoke(ctx context.Context, raw json.RawMessage) (agent.ToolResul
 	if p == "" {
 		p = "."
 	}
-	f, err := t.ws.openDir(p)
+	f, relBase, err := t.ws.openReadDir(p)
 	if err != nil {
 		return errResult(toolErrMessage(err)), nil
 	}
 	defer func() { _ = f.Close() }()
 
-	dirents, err := f.ReadDir(-1)
+	dirents, err := readWorkspaceEntries(f)
 	if err != nil {
 		return errResult(toolErrMessage(err)), nil
 	}
 
-	relBase, err := filepath.Rel(t.ws.root, f.Name())
-	if err != nil {
-		return errResult(toolErrMessage(err)), nil
-	}
 	base := filepath.ToSlash(relBase)
 	if base == "." {
 		base = ""

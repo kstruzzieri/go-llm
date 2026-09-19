@@ -46,7 +46,7 @@
       "rec-sweep-batch"
     ],
     "estimated_prompt_tokens": 850,
-    "state_digest": "183d919b257dd1e3d76f54c41eb4a7f9b6d711791100fc43cec18f2b7fd7565b",
+    "state_digest": "98b20324060aa4f45d587e605098adf215abb40ddb14043956458517e17072de",
     "subjects": [
       "(c1|memory|rec-capacity-series)",
       "(c1|memory|rec-migration-tally)",
@@ -59,10 +59,10 @@
     "stratum": "memory_only",
     "answer_home": "memory",
     "scenario_family": "spool-sweep-mem",
-    "budget": 937,
-    "raw_state_tokens": 1562,
-    "pressure_level": "critical",
+    "budget": 984,
+    "raw_state_tokens": 1640,
+    "pressure_level": "warn",
     "shed_messages": 10,
-    "shed_bytes": 2421
+    "shed_bytes": 2734
   }
 }

@@ -9,6 +9,7 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
@@ -24,6 +25,7 @@ import (
 	"github.com/kstruzzieri/go-llm/contextdepth"
 	"github.com/kstruzzieri/go-llm/memory"
 	"github.com/kstruzzieri/go-llm/provider"
+	"github.com/kstruzzieri/go-llm/signing"
 )
 
 // mixedDefaultOutputCap restates agent's unexported defaultOutputCap
@@ -419,10 +421,9 @@ func mixedStateDigest(st agent.State) string {
 
 // seedMixedMemoryStore opens an in-memory agent-memory record store, seeds it
 // from the fixture records through the PRODUCTION Create path, and pins each
-// row's identity and timestamps to the fixture values. The store stamps
-// newID()/time.Now() with no override, but NewMemoryRecordStore's documented
-// seam is a caller-owned *sql.DB — so the pin is a direct UPDATE on that
-// handle, the same move 3a uses for chunks.indexed_at.
+// row's identity and timestamps to the fixture values. A generated fixture
+// key signs the final body; row, signature, and FTS identity change together
+// through the caller-owned DB, preserving mandatory read verification.
 //
 // The returned workspace ID is the ONE distinct non-empty workspace the
 // records declare (a single search tool has a single active workspace, as in
@@ -456,7 +457,17 @@ func seedMixedMemoryStore(ctx context.Context, records []mixedMemoryRecord) (*me
 			_ = db.Close()
 		}
 	}()
-	store, err := memory.NewMemoryRecordStore(ctx, db)
+	signer, err := signing.GenerateEd25519(rand.Reader)
+	if err != nil {
+		return nil, nil, "", fmt.Errorf("generate fixture signer: %w", err)
+	}
+	ring, err := signing.NewKeyring(signer.Verifier())
+	if err != nil {
+		return nil, nil, "", fmt.Errorf("new fixture keyring: %w", err)
+	}
+	store, err := memory.NewMemoryRecordStore(ctx, db, memory.RecordStoreConfig{
+		Signer: signer, Verifiers: ring, Initialize: true,
+	})
 	if err != nil {
 		return nil, nil, "", fmt.Errorf("new record store: %w", err)
 	}
@@ -475,14 +486,35 @@ func seedMixedMemoryStore(ctx context.Context, records []mixedMemoryRecord) (*me
 		if err != nil {
 			return nil, nil, "", fmt.Errorf("memory_records[%d] (%s): %w", i, r.ID, err)
 		}
-		if _, err := db.ExecContext(ctx,
-			`UPDATE memory_records SET id = ?, created_at = ?, updated_at = ? WHERE id = ?`,
-			r.ID, epochMs, epochMs, rec.ID); err != nil {
+		body := rec.MemoryRecordBody
+		body.ID = r.ID
+		body.CreatedAt = time.UnixMilli(epochMs).UTC()
+		body.UpdatedAt = body.CreatedAt
+		canonical, err := signing.MarshalCanonical(body)
+		if err != nil {
+			return nil, nil, "", fmt.Errorf("memory_records[%d] (%s): canonical body: %w", i, r.ID, err)
+		}
+		sig, err := signer.Sign(ctx, memory.MemoryRecordDomain, canonical)
+		if err != nil {
+			return nil, nil, "", fmt.Errorf("memory_records[%d] (%s): sign final body: %w", i, r.ID, err)
+		}
+		tx, err := db.BeginTx(ctx, nil)
+		if err != nil {
+			return nil, nil, "", fmt.Errorf("memory_records[%d] (%s): begin pin: %w", i, r.ID, err)
+		}
+		defer func() { _ = tx.Rollback() }()
+		if _, err := tx.ExecContext(ctx,
+			`UPDATE memory_records SET id = ?, created_at = ?, updated_at = ?,
+ signature_alg = ?, signature_key_id = ?, signature = ? WHERE id = ?`,
+			body.ID, epochMs, epochMs, sig.Alg, sig.KeyID, sig.Bytes, rec.ID); err != nil {
 			return nil, nil, "", fmt.Errorf("memory_records[%d] (%s): pin row: %w", i, r.ID, err)
 		}
-		if _, err := db.ExecContext(ctx,
-			`UPDATE memory_records_fts SET id = ? WHERE id = ?`, r.ID, rec.ID); err != nil {
+		if _, err := tx.ExecContext(ctx,
+			`UPDATE memory_records_fts SET id = ? WHERE id = ?`, body.ID, rec.ID); err != nil {
 			return nil, nil, "", fmt.Errorf("memory_records[%d] (%s): pin fts row: %w", i, r.ID, err)
+		}
+		if err := tx.Commit(); err != nil {
+			return nil, nil, "", fmt.Errorf("memory_records[%d] (%s): commit pin: %w", i, r.ID, err)
 		}
 	}
 	ok = true

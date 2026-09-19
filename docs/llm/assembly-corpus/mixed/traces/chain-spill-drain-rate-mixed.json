@@ -19,7 +19,7 @@
     },
     {
       "role": "tool",
-      "content": "rec-axis-units · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:\nrec-drain-pace · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src: · the spill drain runs at 80 MB/s off-peak since the io review\nrec-drain-window · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:\nrec-io-review · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:\nrec-lull-data · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:\nrec-park-policy · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:\nrec-replay-admission · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src: · drained spill batches replay through normal admission with metrics and limits applied; nothing bypasses admission on the way back in, which is why a drain pass shows up in the tenant counters and why capacity notes footnote the drain window on the ingest rows\nrec-routing-test · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:",
+      "content": "trust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-axis-units · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src-claim:\ntrust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-drain-pace · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src-claim: · the spill drain runs at 80 MB/s off-peak since the io review\ntrust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-drain-window · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src-claim:\ntrust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-io-review · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src-claim:\ntrust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-lull-data · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src-claim:\ntrust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-park-policy · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src-claim:\ntrust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-replay-admission · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src-claim:\ntrust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-routing-test · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src-claim:",
       "tool_call_id": "c1",
       "name": "agent_memory_search"
     },
@@ -63,8 +63,8 @@
       "rec-replay-admission",
       "rec-routing-test"
     ],
-    "estimated_prompt_tokens": 448,
-    "state_digest": "51ae2ada87b71fdddf5d067166f99500ad63d2c13e0f147247e830ccea02a112",
+    "estimated_prompt_tokens": 550,
+    "state_digest": "2ab04d94132723a4b3c2ac97a6b1c4c4babb7c87ff828a95ff1ff17fefcc0182",
     "subjects": [
       "(c1|memory|rec-axis-units)",
       "(c1|memory|rec-drain-pace)",
@@ -78,11 +78,11 @@
     "stratum": "chain_retention",
     "answer_home": "memory",
     "scenario_family": "spill-quota-chain",
-    "budget": 620,
-    "raw_state_tokens": 1034,
+    "budget": 714,
+    "raw_state_tokens": 1190,
     "pressure_level": "critical",
     "shed_messages": 2,
-    "shed_bytes": 2119,
+    "shed_bytes": 2334,
     "omitted_subjects": 1
   }
 }

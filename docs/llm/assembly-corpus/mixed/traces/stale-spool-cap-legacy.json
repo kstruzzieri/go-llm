@@ -38,7 +38,7 @@
     },
     {
       "role": "tool",
-      "content": "rec-capture-quota · working · 2025-07-27 · lab box capture quota was lowered after the surge filled the volume; captures now refuse before the disk fills\nrec-retro-scribe · semantic · 2025-07-27 · surge retro scribe is from the platform side; notes go in the shared retro folder\nrec-surge-review · semantic · 2025-07-27 · post-surge capacity review is with the platform team; bring the ingest peak numbers and the spool growth graph",
+      "content": "trust=agent-written; unreviewed; origin=memory.create; session=caller-claim · rec-capture-quota · working · 2025-07-27 · lab box capture quota was lowered after the surge filled the volume; captures now refuse before the disk fills\ntrust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-retro-scribe · semantic · 2025-07-27 · surge retro scribe is from the platform side; notes go in the shared retro folder\ntrust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-surge-review · semantic · 2025-07-27 · post-surge capacity review is with the platform team; bring the ingest peak numbers and the spool growth graph",
       "tool_call_id": "c2",
       "name": "agent_memory_search"
     },
@@ -62,8 +62,8 @@
       "rec-retro-scribe",
       "rec-surge-review"
     ],
-    "estimated_prompt_tokens": 1209,
-    "state_digest": "5169ba38e5646a4b854ce3c21ac9c50c18431813a9bbcb6184347082170fcfd5",
+    "estimated_prompt_tokens": 1267,
+    "state_digest": "686fa081ea2fcc021b6b6d054bcb2a2a1f9532ebc822d3e6cd6732fb94f93bf0",
     "subjects": [
       "(c1|rag|internal/spool/spool.go)",
       "(c1|rag|internal/spool/segment.go)",
@@ -75,8 +75,8 @@
     "stratum": "stale_vs_fresh",
     "answer_home": "rag",
     "scenario_family": "spool-cap-staleness",
-    "budget": 1318,
-    "raw_state_tokens": 2197,
+    "budget": 1353,
+    "raw_state_tokens": 2255,
     "pressure_level": "critical",
     "shed_messages": 20,
     "shed_bytes": 3126

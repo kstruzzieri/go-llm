@@ -19,7 +19,7 @@
     },
     {
       "role": "tool",
-      "content": "rec-gossip-note · semantic · 2025-07-27 · mesh gossip fires every 5 seconds; hands off until the soak ends\nrec-mesh-review · semantic · 2025-07-27 · mesh review doc collects the soak snapshots and the node count history\nrec-uplink-tickets · working · 2025-07-27 · both relay uplink saturation alarms from the soak have follow-up tickets filed",
+      "content": "trust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-gossip-note · semantic · 2025-07-27 · mesh gossip fires every 5 seconds; hands off until the soak ends\ntrust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-mesh-review · semantic · 2025-07-27 · mesh review doc collects the soak snapshots and the node count history\ntrust=agent-written; unreviewed; origin=memory.create; session=caller-claim · rec-uplink-tickets · working · 2025-07-27 · both relay uplink saturation alarms from the soak have follow-up tickets filed",
       "tool_call_id": "c2",
       "name": "agent_memory_search"
     },
@@ -43,8 +43,8 @@
       "rec-mesh-review",
       "rec-uplink-tickets"
     ],
-    "estimated_prompt_tokens": 142,
-    "state_digest": "403e6253bf7a4626cc7fd532b7abbddb250f0350b8786bfa2572c1363dece601",
+    "estimated_prompt_tokens": 201,
+    "state_digest": "a4fa466196c1f0b72cd1e0b1e82fc4cd41e2a66fa99ac5e24a5e58360e1b5197",
     "subjects": [
       "(c1|rag|internal/mesh/gossip.go)",
       "(c1|rag|internal/mesh/member.go)",
@@ -56,8 +56,8 @@
     "stratum": "stale_vs_fresh",
     "answer_home": "rag",
     "scenario_family": "gossip-interval-staleness",
-    "budget": 807,
-    "raw_state_tokens": 1345,
+    "budget": 842,
+    "raw_state_tokens": 1404,
     "pressure_level": "ok",
     "shed_messages": 8,
     "shed_bytes": 4448

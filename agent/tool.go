@@ -47,7 +47,9 @@ type ToolResult struct {
 	IsError   bool
 	Preview   string
 	Truncated bool
-	Attrib    *RetrievalAttribution // set by retrieval-style tools; copied to Message.Attrib
+	// Provenance is optional opaque structured evidence emitted by a tool.
+	Provenance json.RawMessage       `json:"Provenance,omitempty"`
+	Attrib     *RetrievalAttribution // set by retrieval-style tools; copied to Message.Attrib
 	// Context is the optional structured payload for mixed assembly (#331).
 	// Content remains the canonical fallback for legacy mode and persisted
 	// transcripts; in mixed mode the set's groups replace it in the
@@ -58,6 +60,12 @@ type ToolResult struct {
 	// Nil for ordinary tools. Display-only fields (Preview) and the model-facing
 	// observation (Content) are unaffected by it.
 	RouteOutcome *provider.RouteOutcome
+	// Origin declares this result's provenance per invocation (#436 spec D4).
+	// Zero (OriginUnknown) defers to the tool's static OriginTool declaration;
+	// a tool that declares neither is inspected as unknown provenance, and any
+	// value outside the enum normalizes to unknown. omitempty keeps pre-#436
+	// encodings byte-identical.
+	Origin Origin `json:"Origin,omitempty"`
 }
 
 // Effect is the static, conservative upper bound for a tool.

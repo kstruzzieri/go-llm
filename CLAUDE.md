@@ -23,11 +23,16 @@ go-llm/
 ├── rag/ast/         # Scoped structural symbol graph: Extractor + SymbolStore interfaces (skeleton)
 ├── completion/      # IDE inline completion (Fill-in-the-Middle)
 ├── analysis/        # Domain-specific analysis helpers (code review, ML metrics, trading)
+├── agent/           # Agent runtime: Orchestrator loop, effect-aware tools, serial/parallel dispatch, opt-in interceptor pipeline (#436: ingress hooks on frozen values, allow/tag/block/abort, per-run RiskReport, provenance)
+├── agent/interceptor/ # Opt-in defaults: origin-sensitive injection detectors (zero-width, encoded instructions, typoglycemia), all-origin secret/payment-card blocking, argument-invariant guards, and exec egress labels
 ├── mcp/             # MCP server: tools, prompts, resources over stdio/HTTP/2 — wired through provider.Router
 ├── mcpclient/       # MCP client: adapts external MCP servers' tools into agent.Tool (stdio/streamable-HTTP); consumed by cmd/golem
+├── consult/         # /consult seam: bounded host runner + Claude subscription adapter (#382); unsigned consult-result/v1 receipts
 ├── conversation/    # Persistent conversation storage with SQLite
 ├── memory/          # Explicit user-controlled local memories + agent-memory records (SQLite, scope-filtered FTS5/bm25 search); shared hardened-open primitives (open.go); separate from conversation + RAG; backs Golem /remember + memory_search AND MCP agent_memory_* tools
 ├── projectcontext/  # AGENTS.md-style project-context loader (discovery, safe read, ordering; consumed by cmd/golem)
+├── recipe/          # Versioned JSON prompt bundles (v1): Parse for embedded bytes, Load for explicit paths (regular-file + identity checks, 64 KiB bound, nonblocking Unix open); closed schema, strict keys, advisory role/use-case hints. Template expansion + discovery are #353.
+├── signing/         # Detached signatures over canonical JSON (ZT-301): Signer/Verifier seam, canonical form v1, Ed25519 + HMAC-SHA256 backends, Keyring rotation, hardened key files. Consumed by #445/#446/#447/#450; knows no record schema.
 ├── feedback/        # Implicit user behavioral signal collection
 ├── fingerprint/     # Model profiling (latency benchmarks, capability detection)
 ├── prefetch/        # Predictive cache-warming engine for RAG retrieval
@@ -54,7 +59,7 @@ Keep minimal. Allowed external dependencies:
 - `golang.org/x/sync` — concurrency primitives (errgroup for bounded worker pools)
 - `golang.org/x/net` — h2c HTTP/2 cleartext transport (only imported by `mcp/`)
 - `golang.org/x/term` — VT100 line editor for the Golem REPL prompt (only imported by `cmd/golem/`). Pinned to v0.42.0, the version already selected transitively, so promoting it moves no other module.
-- `golang.org/x/sys` — already required transitively; imported directly only by `cmd/golem/`'s Linux PTY lifecycle test and `profiles/`'s Windows directory-fsync (build-tagged, mirrors `config/`'s pair)
+- `golang.org/x/sys` — already required transitively; imported directly by `agent/tools/` (build-tagged: darwin/linux background exit watching, CoW cloning via clonefile/FICLONE, and the no-replace promotion install for #443), `cmd/golem/`'s Linux PTY lifecycle test, and `profiles/`'s Windows directory-fsync (build-tagged, mirrors `config/`'s pair)
 - `github.com/modelcontextprotocol/go-sdk` — official MCP Go SDK (imported by `mcp/` server side, `mcpclient/` client side, and `cmd/llm-bench/`)
 - `github.com/parquet-go/parquet-go` — Parquet file writer (only imported by `rag/parquet/`)
 - `github.com/santhosh-tekuri/jsonschema/v6` — JSON Schema validator (only imported by `cmd/llm-bench/`)
@@ -115,6 +120,10 @@ Response: `{"embeddings": [[0.1, 0.2, ...]]}`
 
 ### Streaming
 When `stream: true`, response is newline-delimited JSON. Each chunk has `done: false` until the final one which has `done: true` and includes timing stats.
+
+## Changelog
+
+Outside the fold-and-stamp release PR, never edit `CHANGELOG.md`; concurrent PRs conflict at the shared insertion point under `## [Unreleased]`. Add `changelog.d/<issue>-<slug>.md` holding the full `### <Category> — <title> (#<issue>)` section instead (see `changelog.d/README.md`). CI rejects direct edits; `scripts/changelog-fold` folds fragments at release.
 
 ## Testing
 

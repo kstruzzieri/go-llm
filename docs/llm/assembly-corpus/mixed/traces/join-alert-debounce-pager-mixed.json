@@ -7,14 +7,6 @@
   "turns": [
     {
       "role": "user",
-      "content": "Paging hygiene before anything else. The weekend's dependency bump left the alert unit tests emitting deprecation warnings on every run, and the noise is burying real failures in the CI log. Pin the deprecated call sites, file the migration task, and get the log back to signal."
-    },
-    {
-      "role": "assistant",
-      "content": "Pinned the deprecated call sites behind the compatibility shim, filed the migration task with the full warning inventory, and CI logs are clean again as of the last run."
-    },
-    {
-      "role": "user",
       "content": "The synthetic monitor that exercises the paging path fires from a single region right now, which means a regional network wobble looks identical to a broken notifier. Add a second region and require both probes to fail before the monitor itself alarms."
     },
     {
@@ -84,7 +76,7 @@
     },
     {
       "role": "tool",
-      "content": "### source: \"internal/alert/pager.go\"\npurpose: Pager repeat hold: code default with per-rule override.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n--- source: \"internal/alert/pager.go\" (lines 1-22, similarity: 1.00) ---\n1| package alert\n2| \n3| import \"time\"\n4| \n5| // pageRepeat is the code default hold between repeat pages for one\n6| // firing rule. Distinct from the notification debounce: this gate is\n7| // for the human paging path only, and per-rule overrides from the\n8| // rules file win over it when present.\n9| // It replaced the pre-1.0 25-minute hold, which survives only in\n10| // archived runbooks.\n11| const pageRepeat = 45 * time.Minute\n12| \n13| // shouldPage reports whether the pager may fire again for a rule,\n14| // given the last page time. The effective hold is the rule override\n15| // when set, else the code default above.\n16| func (e *Engine) shouldPage(r Rule, last time.Time, now time.Time) bool {\n17| \thold := pageRepeat\n18| \tif r.PageRepeat \u003e 0 {\n19| \t\thold = r.PageRepeat\n20| \t}\n21| \treturn now.Sub(last) \u003e= hold\n22| }\n\n### source: \"internal/alert/escalate.go\"\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nnote: metadata overview (summary omitted: budget)\n\n### source: \"docs/paging.md\"\nlanguage: markdown\nindexed: 2025-07-27T00:00:00Z\nnote: metadata overview (summary omitted: budget)\n",
+      "content": "### source: \"internal/alert/pager.go\"\npurpose: Pager repeat hold: code default with per-rule override.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n--- source: \"internal/alert/pager.go\" (lines 1-22, similarity: 1.00) ---\n1| package alert\n2| \n3| import \"time\"\n4| \n5| // pageRepeat is the code default hold between repeat pages for one\n6| // firing rule. Distinct from the notification debounce: this gate is\n7| // for the human paging path only, and per-rule overrides from the\n8| // rules file win over it when present.\n9| // It replaced the pre-1.0 25-minute hold, which survives only in\n10| // archived runbooks.\n11| const pageRepeat = 45 * time.Minute\n12| \n13| // shouldPage reports whether the pager may fire again for a rule,\n14| // given the last page time. The effective hold is the rule override\n15| // when set, else the code default above.\n16| func (e *Engine) shouldPage(r Rule, last time.Time, now time.Time) bool {\n17| \thold := pageRepeat\n18| \tif r.PageRepeat \u003e 0 {\n19| \t\thold = r.PageRepeat\n20| \t}\n21| \treturn now.Sub(last) \u003e= hold\n22| }\n\n### source: \"internal/alert/escalate.go\"\npurpose: Escalation ladder: contact tiers walked on unacked pages.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n\n### source: \"docs/paging.md\"\npurpose: Paging guide: repeat holds, escalation ladder, drill cadence.\nlanguage: markdown\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n",
       "tool_call_id": "c1",
       "name": "retrieve"
     },
@@ -102,7 +94,7 @@
     },
     {
       "role": "tool",
-      "content": "rec-drain-plan · working · created:2025-07-27 · updated:2025-07-27 · scope:session · ns: · src:\nrec-flap-report · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:\nrec-page-override · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:",
+      "content": "trust=agent-written; unreviewed; origin=memory.create; session=caller-claim · rec-drain-plan · working · created:2025-07-27 · updated:2025-07-27 · scope:session · ns: · src-claim:\ntrust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-flap-report · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src-claim: · flap report backfill covers fourteen days; older history died with the compaction change\ntrust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-page-override · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src-claim:",
       "tool_call_id": "c2",
       "name": "agent_memory_search"
     },
@@ -126,8 +118,8 @@
       "rec-flap-report",
       "rec-page-override"
     ],
-    "estimated_prompt_tokens": 1291,
-    "state_digest": "4aff642a9bdf543237cc7bfb85fe5ea6e42130669192be2146336c435853916d",
+    "estimated_prompt_tokens": 1298,
+    "state_digest": "459df6efe2fa70fc7ad7a9544096f274fcfb78c8c28797432ba4de5de7354d12",
     "subjects": [
       "(c1|rag|internal/alert/pager.go)",
       "(c1|rag|internal/alert/escalate.go)",
@@ -139,9 +131,11 @@
     "stratum": "cross_domain_join",
     "answer_home": "join",
     "scenario_family": "alert-debounce-override",
-    "budget": 1340,
-    "raw_state_tokens": 2233,
+    "budget": 1357,
+    "raw_state_tokens": 2261,
     "pressure_level": "critical",
-    "shed_bytes": 3098
+    "shed_messages": 2,
+    "shed_bytes": 3176,
+    "omitted_subjects": 1
   }
 }

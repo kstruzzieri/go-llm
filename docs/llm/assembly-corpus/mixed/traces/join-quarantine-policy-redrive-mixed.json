@@ -78,7 +78,7 @@
     },
     {
       "role": "tool",
-      "content": "rec-owner-draft · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src: · the draft that paged tenant owners directly on quarantine overflow was dropped before rollout\nrec-quarantine-page · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src: · quarantine alerting: overflow pages route to the ingest rotation; tenant owners get the daily digest instead\nrec-scrub-check · working · created:2025-07-27 · updated:2025-07-27 · scope:session · ns: · src: · sample scrubber has a schema-diff check now; unscrubbed fields flag before samples ship",
+      "content": "trust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-owner-draft · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src-claim: · the draft that paged tenant owners directly on quarantine overflow was dropped before rollout\ntrust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-quarantine-page · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src-claim: · quarantine alerting: overflow pages route to the ingest rotation; tenant owners get the daily digest instead\ntrust=agent-written; unreviewed; origin=memory.create; session=caller-claim · rec-scrub-check · working · created:2025-07-27 · updated:2025-07-27 · scope:session · ns: · src-claim: · sample scrubber has a schema-diff check now; unscrubbed fields flag before samples ship",
       "tool_call_id": "c2",
       "name": "agent_memory_search"
     },
@@ -102,8 +102,8 @@
       "rec-quarantine-page",
       "rec-scrub-check"
     ],
-    "estimated_prompt_tokens": 1179,
-    "state_digest": "b9b3a6f3c993a4f2652424e83ce4f4b9ad199db8fe483f1d8a8b7d2f77a75ee4",
+    "estimated_prompt_tokens": 1243,
+    "state_digest": "05f090da410a60b8c0ddb7fad32ca4a0b8da95b0e20c6fff813d9421fc379d08",
     "subjects": [
       "(c1|rag|internal/ingest/quarantine.go)",
       "(c1|rag|internal/spool/volume.go)",
@@ -115,9 +115,9 @@
     "stratum": "cross_domain_join",
     "answer_home": "join",
     "scenario_family": "quarantine-policy-join",
-    "budget": 1247,
-    "raw_state_tokens": 2079,
+    "budget": 1283,
+    "raw_state_tokens": 2138,
     "pressure_level": "critical",
-    "shed_bytes": 3120
+    "shed_bytes": 3102
   }
 }

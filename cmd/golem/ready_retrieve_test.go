@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"sync"
@@ -12,6 +14,7 @@ import (
 
 	"github.com/kstruzzieri/go-llm/agent"
 	agenttools "github.com/kstruzzieri/go-llm/agent/tools"
+	"github.com/kstruzzieri/go-llm/provider"
 )
 
 // countingTool is a stub delegate that counts invocations.
@@ -381,5 +384,91 @@ func TestReadyRetrieve_CloseWaitsForRetiredInFlightDelegate(t *testing.T) {
 	case <-closed:
 	case <-time.After(time.Second):
 		t.Fatal("wrapper close did not wait for retired delegate")
+	}
+}
+
+func TestReadyRetrieve_StaleValidationCannotAffectReplacement(t *testing.T) {
+	for _, valid := range []bool{false, true} {
+		t.Run(fmt.Sprint(valid), func(t *testing.T) {
+			r := newReadyRetrieve(warmingRetrieveMessage)
+			t.Cleanup(func() { _ = r.close() })
+			entered, release := make(chan struct{}), make(chan struct{})
+			old := &countingTool{content: "old"}
+			var closed atomic.Int32
+			reader := newRetrievalReader(old, func() error { closed.Add(1); return nil })
+			reader.valid = func(context.Context) bool { close(entered); <-release; return valid }
+			r.install(reader, "old")
+			done := make(chan agent.ToolResult, 1)
+			go func() { res, _ := r.Invoke(context.Background(), nil); done <- res }()
+			select {
+			case <-entered:
+			case <-done:
+				t.Fatal("reader admission skipped validation")
+			}
+			r.install(newRetrievalReader(&countingTool{content: "new"}, nil), "new")
+			close(release)
+			<-done
+			res, err := r.Invoke(context.Background(), nil)
+			if err != nil || res.Content != "new" || old.calls.Load() != 0 {
+				t.Error("delayed validation affected replacement or admitted retired reader")
+			}
+			if err := r.close(); err != nil {
+				t.Fatal(err)
+			}
+			if closed.Load() != 1 {
+				t.Error("old reader did not close exactly once")
+			}
+		})
+	}
+}
+
+func TestReadyRetrieve_PointerChangeDrainsAndAllowsInstall(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "k.db")
+	publishTestGeneration(t, dbPath, "workspace:k", strings.Repeat("a", 32))
+	got := enableRetrieve(context.Background(), embedCfg(), &provider.Router{}, retrieveOpts{autoDBPath: dbPath, workspaceID: "workspace:k"})
+	if got.reader == nil {
+		t.Fatal("reader not discovered")
+	}
+	old := &blockingTool{content: "old", entered: make(chan struct{}), release: make(chan struct{})}
+	got.reader.tool = old
+	var closes atomic.Int32
+	closeStore := got.reader.closeFn
+	got.reader.closeFn = func() error { closes.Add(1); return closeStore() }
+	r := newReadyRetrieve(warmingRetrieveMessage)
+	r.install(got.reader, "old")
+	t.Cleanup(func() { _ = r.close() })
+	done := make(chan agent.ToolResult, 1)
+	go func() { res, _ := r.Invoke(context.Background(), nil); done <- res }()
+	<-old.entered
+	newID := strings.Repeat("b", 32)
+	if err := publishActiveGeneration(context.Background(), dbPath, activeGenerationPointer{SchemaVersion: 1, WorkspaceID: "workspace:k", Generation: newID}, nil); err != nil {
+		t.Fatal(err)
+	}
+	// Publication precedes installation. This call must detach, never block on drain.
+	result, err := r.Invoke(context.Background(), nil)
+	if err != nil || result.Content == "old" || r.hasReader() {
+		close(old.release)
+		t.Fatal("publication gap admitted stale reader")
+	}
+	if closes.Load() != 0 {
+		t.Error("admitted reader closed before drain")
+	}
+	replacement := newRetrievalReader(&countingTool{content: "new"}, nil)
+	if !r.install(replacement, "new") {
+		t.Error("pointer mismatch permanently failed wrapper")
+	}
+	result, _ = r.Invoke(context.Background(), nil)
+	if result.Content != "new" {
+		t.Error("replacement unavailable while old reader drains")
+	}
+	close(old.release)
+	if result := <-done; result.Content != "old" {
+		t.Error("admitted call did not complete")
+	}
+	if err := r.close(); err != nil {
+		t.Fatal(err)
+	}
+	if closes.Load() != 1 {
+		t.Error("detached reader did not close exactly once")
 	}
 }

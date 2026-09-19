@@ -46,7 +46,7 @@
     },
     {
       "role": "tool",
-      "content": "rec-closeout-owner · semantic · 2025-07-27 · migration closeout is owned by the platform side; our checklist mirrors theirs in the shared folder\nrec-fleet-history · semantic · 2025-07-27 · the pre-reorg fleet ran the collector heartbeat every 60 seconds; the migration notes call that era underinstrumented\nrec-push-window · working · 2025-07-27 · config pushes land in the evening window; anything urgent goes through the oncall lead",
+      "content": "trust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-closeout-owner · semantic · 2025-07-27 · migration closeout is owned by the platform side; our checklist mirrors theirs in the shared folder\ntrust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-fleet-history · semantic · 2025-07-27 · the pre-reorg fleet ran the collector heartbeat every 60 seconds; the migration notes call that era underinstrumented\ntrust=agent-written; unreviewed; origin=memory.create; session=caller-claim · rec-push-window · working · 2025-07-27 · config pushes land in the evening window; anything urgent goes through the oncall lead",
       "tool_call_id": "c2",
       "name": "agent_memory_search"
     },
@@ -70,8 +70,8 @@
       "rec-fleet-history",
       "rec-push-window"
     ],
-    "estimated_prompt_tokens": 1447,
-    "state_digest": "260d07fc61b0e7c0f79592192fa9c332534edb128644cb97e37553db730da1ca",
+    "estimated_prompt_tokens": 1506,
+    "state_digest": "f0d2d2d77d70785a88e4634bbd81b2ae2ee41f437938cad7df59870fc35a8cc4",
     "subjects": [
       "(c1|rag|internal/collector/heartbeat.go)",
       "(c1|rag|internal/collector/registry.go)",
@@ -83,8 +83,8 @@
     "stratum": "conversation_only",
     "answer_home": "conversation",
     "scenario_family": "collector-heartbeat-conv",
-    "budget": 1517,
-    "raw_state_tokens": 2529,
+    "budget": 1553,
+    "raw_state_tokens": 2588,
     "pressure_level": "critical",
     "shed_messages": 14,
     "shed_bytes": 3631

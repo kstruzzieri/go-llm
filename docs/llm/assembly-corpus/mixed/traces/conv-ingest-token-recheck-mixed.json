@@ -84,7 +84,7 @@
     },
     {
       "role": "tool",
-      "content": "### source: \"internal/ingest/auth.go\"\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nnote: metadata overview (summary omitted: budget)\n--- source: \"internal/ingest/auth.go\" (lines 1-16, similarity: 1.00) ---\n1| package ingest\n2| \n3| import \"strings\"\n4| \n5| // authenticate checks the presented ingest token. Accepted prefixes\n6| // are supplied by deployment config so a rotation can be staged\n7| // without a rebuild; this file does not hard-code any prefix. Even\n8| // the dwk2- rollout shipped entirely through config for that reason.\n9| func (g *Gateway) authenticate(token string) bool {\n10| \tfor _, p := range g.cfg.AcceptedPrefixes {\n11| \t\tif strings.HasPrefix(token, p) {\n12| \t\t\treturn g.verify(token)\n13| \t\t}\n14| \t}\n15| \treturn false\n16| }\n\n### source: \"internal/ingest/limits.go\"\npurpose: Per-tenant token-bucket rate limiting with hot-reloaded rates.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n\n### source: \"docs/operations.md\"\nlanguage: markdown\nindexed: 2025-07-27T00:00:00Z\nnote: metadata overview (summary omitted: budget)\n",
+      "content": "### source: \"internal/ingest/auth.go\"\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nnote: metadata overview (summary omitted: budget)\n--- source: \"internal/ingest/auth.go\" (lines 1-16, similarity: 1.00) ---\n1| package ingest\n2| \n3| import \"strings\"\n4| \n5| // authenticate checks the presented ingest token. Accepted prefixes\n6| // are supplied by deployment config so a rotation can be staged\n7| // without a rebuild; this file does not hard-code any prefix. Even\n8| // the dwk2- rollout shipped entirely through config for that reason.\n9| func (g *Gateway) authenticate(token string) bool {\n10| \tfor _, p := range g.cfg.AcceptedPrefixes {\n11| \t\tif strings.HasPrefix(token, p) {\n12| \t\t\treturn g.verify(token)\n13| \t\t}\n14| \t}\n15| \treturn false\n16| }\n\n### source: \"internal/ingest/limits.go\"\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nnote: metadata overview (summary omitted: budget)\n\n### source: \"docs/operations.md\"\nlanguage: markdown\nindexed: 2025-07-27T00:00:00Z\nnote: metadata overview (summary omitted: budget)\n",
       "tool_call_id": "c1",
       "name": "retrieve"
     },
@@ -102,7 +102,7 @@
     },
     {
       "role": "tool",
-      "content": "rec-checklist-home · working · created:2025-07-27 · updated:2025-07-27 · scope:session · ns: · src:\nrec-rotation-history · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:\nrec-support-rota · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:",
+      "content": "trust=agent-written; unreviewed; origin=memory.create; session=caller-claim · rec-checklist-home · working · created:2025-07-27 · updated:2025-07-27 · scope:session · ns: · src-claim:\ntrust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-rotation-history · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src-claim:\ntrust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-support-rota · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src-claim:",
       "tool_call_id": "c2",
       "name": "agent_memory_search"
     },
@@ -126,8 +126,8 @@
       "rec-rotation-history",
       "rec-support-rota"
     ],
-    "estimated_prompt_tokens": 1380,
-    "state_digest": "fc791d0ce277f0519dce7a047623dd727cc296b915ce370eba76e0cb42a37a07",
+    "estimated_prompt_tokens": 1425,
+    "state_digest": "e2127b0119da15d6fc109262ca41b5edf9e6f532c5f2f831b8acc426198c04d6",
     "subjects": [
       "(c1|rag|internal/ingest/auth.go)",
       "(c1|rag|internal/ingest/limits.go)",
@@ -139,9 +139,9 @@
     "stratum": "conversation_only",
     "answer_home": "conversation",
     "scenario_family": "ingest-token-conv",
-    "budget": 1433,
-    "raw_state_tokens": 2388,
+    "budget": 1468,
+    "raw_state_tokens": 2446,
     "pressure_level": "critical",
-    "shed_bytes": 3359
+    "shed_bytes": 3412
   }
 }

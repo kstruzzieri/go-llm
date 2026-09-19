@@ -1,7 +1,9 @@
 package memory
 
 import (
+	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -17,6 +19,24 @@ type migration struct {
 var migrations = []migration{
 	{version: 1, description: "baseline memories table + FTS5", fn: migrateV1},
 	{version: 2, description: "agent memory records + FTS5", fn: migrateV2},
+	{version: 3, description: "signed agent memory records", fn: migrateV3},
+}
+
+func migrateV3(tx *sql.Tx) error {
+	for _, statement := range []string{
+		`ALTER TABLE memory_records ADD COLUMN origin_tool TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE memory_records ADD COLUMN origin_session_id TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE memory_records ADD COLUMN trust_class TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE memory_records ADD COLUMN signature_alg TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE memory_records ADD COLUMN signature_key_id TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE memory_records ADD COLUMN signature BLOB NOT NULL DEFAULT X''`,
+		`CREATE TABLE memory_record_signing (id INTEGER PRIMARY KEY CHECK (id = 1), initialized_at INTEGER NOT NULL)`,
+	} {
+		if _, err := tx.Exec(statement); err != nil {
+			return fmt.Errorf("memory: migrate v3: %w", err)
+		}
+	}
+	return nil
 }
 
 func migrateV1(tx *sql.Tx) error {
@@ -77,41 +97,98 @@ func migrateV2(tx *sql.Tx) error {
 	return nil
 }
 
-func runMigrations(db *sql.DB) error {
-	const createVersion = `CREATE TABLE IF NOT EXISTS memory_schema_version (
+func runMigrations(ctx context.Context, db *sql.DB) error {
+	return runMigrationsWith(ctx, db, migrations)
+}
+
+func runMigrationsWith(ctx context.Context, db *sql.DB, list []migration) error {
+	if ctx == nil {
+		return errors.New("memory: nil migration context")
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if len(list) == 0 {
+		return nil
+	}
+	currentVersion, err := currentSchemaVersion(ctx, db)
+	if err != nil {
+		return err
+	}
+	if currentVersion >= list[len(list)-1].version {
+		return nil
+	}
+	const createVersionTable = `CREATE TABLE IF NOT EXISTS memory_schema_version (
 		version     INTEGER PRIMARY KEY,
 		description TEXT NOT NULL,
 		applied_at  INTEGER NOT NULL
 	)`
-	if _, err := db.Exec(createVersion); err != nil {
+	if _, err := db.ExecContext(ctx, createVersionTable); err != nil {
 		return fmt.Errorf("memory: create version table: %w", err)
 	}
-	var cur int
-	if err := db.QueryRow(`SELECT COALESCE(MAX(version),0) FROM memory_schema_version`).Scan(&cur); err != nil {
-		return fmt.Errorf("memory: query schema version: %w", err)
-	}
-	for _, m := range migrations {
-		if m.version <= cur {
+	for _, m := range list {
+		if m.version <= currentVersion {
 			continue
 		}
-		tx, err := db.Begin()
-		if err != nil {
-			return fmt.Errorf("memory: begin migration v%d: %w", m.version, err)
-		}
-		if err := m.fn(tx); err != nil {
-			_ = tx.Rollback()
-			return fmt.Errorf("memory: migration v%d (%s): %w", m.version, m.description, err)
-		}
-		if _, err := tx.Exec(`INSERT INTO memory_schema_version (version, description, applied_at) VALUES (?, ?, ?)`,
-			m.version, m.description, time.Now().UnixMilli()); err != nil {
-			_ = tx.Rollback()
-			return fmt.Errorf("memory: record version %d: %w", m.version, err)
-		}
-		if err := tx.Commit(); err != nil {
-			return fmt.Errorf("memory: commit migration v%d: %w", m.version, err)
+		if err := applyMigration(ctx, db, m); err != nil {
+			return err
 		}
 	}
 	return nil
+}
+
+func applyMigration(ctx context.Context, db *sql.DB, m migration) (err error) {
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("memory: begin migration v%d: %w", m.version, err)
+	}
+	defer func() {
+		if rbErr := tx.Rollback(); rbErr != nil && !errors.Is(rbErr, sql.ErrTxDone) {
+			err = errors.Join(err, fmt.Errorf("memory: rollback migration v%d: %w", m.version, rbErr))
+		}
+	}()
+
+	// Claim before any reads or DDL so SQLite waits for the writer without a
+	// read-lock upgrade. The claim and migration commit together; a duplicate
+	// version means another opener already committed this step.
+	result, err := tx.ExecContext(ctx,
+		`INSERT INTO memory_schema_version (version, description, applied_at)
+		 VALUES (?, ?, ?) ON CONFLICT(version) DO NOTHING`,
+		m.version, m.description, time.Now().UnixMilli())
+	if err != nil {
+		return fmt.Errorf("memory: claim migration v%d: %w", m.version, err)
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("memory: claim migration v%d rows: %w", m.version, err)
+	}
+	if affected == 0 {
+		return nil
+	}
+	if err := m.fn(tx); err != nil {
+		return fmt.Errorf("memory: migration v%d (%s): %w", m.version, m.description, err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("memory: commit migration v%d: %w", m.version, err)
+	}
+	return nil
+}
+
+func currentSchemaVersion(ctx context.Context, db *sql.DB) (int, error) {
+	var exists bool
+	if err := db.QueryRowContext(ctx,
+		`SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'memory_schema_version')`,
+	).Scan(&exists); err != nil {
+		return 0, fmt.Errorf("memory: check version table: %w", err)
+	}
+	if !exists {
+		return 0, nil
+	}
+	var version int
+	if err := db.QueryRowContext(ctx, `SELECT COALESCE(MAX(version), 0) FROM memory_schema_version`).Scan(&version); err != nil {
+		return 0, fmt.Errorf("memory: query schema version: %w", err)
+	}
+	return version, nil
 }
 
 // sanitizeFTS5Query tokenizes into letter/digit/underscore runs and ANDs them as

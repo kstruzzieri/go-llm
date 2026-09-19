@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/kstruzzieri/go-llm/agent"
+	"github.com/kstruzzieri/go-llm/config"
 	"github.com/kstruzzieri/go-llm/fingerprint"
 	"github.com/kstruzzieri/go-llm/rag"
 )
@@ -140,6 +141,26 @@ func TestStartupNotices(t *testing.T) {
 		if !strings.Contains(joined, want) {
 			t.Errorf("notices missing %q in:\n%s", want, joined)
 		}
+	}
+}
+
+func TestStartupNotices_PlanningFallbackSource(t *testing.T) {
+	got := startupNotices(startupInfo{
+		workspace:         "/r",
+		activeUseCase:     config.UseCasePlanning,
+		suppliedByUseCase: "analysis",
+	})
+	if joined := strings.Join(got, "\n"); !strings.Contains(joined, "planning route: using defaults.analysis") {
+		t.Fatalf("startup notices missing planning fallback source:\n%s", joined)
+	}
+
+	got = startupNotices(startupInfo{
+		workspace:         "/r",
+		activeUseCase:     config.UseCasePlanning,
+		suppliedByUseCase: config.UseCasePlanning,
+	})
+	if joined := strings.Join(got, "\n"); strings.Contains(joined, "planning route: using defaults.") {
+		t.Fatalf("explicit planning default reported as a fallback:\n%s", joined)
 	}
 }
 
@@ -1612,6 +1633,28 @@ func TestApplyGoalMode_WarnsOnIgnoredFlags(t *testing.T) {
 	}
 }
 
+func TestApplyGoalMode_ThinkIsClearedLoudly(t *testing.T) {
+	// -think cannot take effect in planning mode: the planner force-disables
+	// extended thinking, and the flag sets nothing else. It must be IGNORED
+	// LOUDLY -- a warning plus a cleared flag -- and the cleared flag is also
+	// what guarantees the startup think lookup performs no registry reads in
+	// goal mode (#476 D4): resolveThinkOptions with an empty flag value
+	// returns before touching the chain.
+	f, warns := applyGoalMode(flags{goalSet: true, think: "hard"})
+	if f.think != "" {
+		t.Errorf("think = %q, want cleared", f.think)
+	}
+	found := false
+	for _, w := range warns {
+		if strings.Contains(w, "-think ignored") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("no -think warning surfaced; a silently dead flag is worse than a rejected one: %v", warns)
+	}
+}
+
 func TestStartupNotices_DispatchLine(t *testing.T) {
 	lines := startupNotices(startupInfo{workspace: "/w", dispatchLine: "dispatch: enabled -> local/speedy"})
 	found := false
@@ -1727,5 +1770,72 @@ func TestRunDispatchesSourceSubcommand(t *testing.T) {
 	}
 	if got := readRunTestFile(t, stderr); !strings.Contains(got, "usage: golem source") {
 		t.Fatalf("bare source stderr = %q", got)
+	}
+}
+
+// --- #443 Task 10: -scratch flag policy ---
+
+func TestScratchFlagRequiresAllowExec(t *testing.T) {
+	if err := validateFlags(flags{scratch: true}); err == nil {
+		t.Fatal("-scratch without -allow-exec must be rejected")
+	}
+	if err := validateFlags(flags{scratch: true, allowExec: true}); err != nil {
+		t.Fatalf("-scratch with -allow-exec must validate: %v", err)
+	}
+	f, err := parseFlags([]string{"-scratch", "-allow-exec"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !f.scratch || !f.allowExec {
+		t.Fatalf("parseFlags dropped -scratch: %+v", f)
+	}
+}
+
+func TestScratchFlagDroppedInOneShotMode(t *testing.T) {
+	f := flags{promptSet: true, allowExec: true, scratch: true}
+	out, warns := applyOneShotMode(f)
+	if out.scratch || out.allowExec {
+		t.Fatalf("one-shot must drop scratch with exec: %+v", out)
+	}
+	found := false
+	for _, w := range warns {
+		if strings.Contains(w, "-scratch") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("dropping -scratch in one-shot mode must warn about -scratch specifically")
+	}
+}
+
+func TestParseFlagsGitContextOptOut(t *testing.T) {
+	f, err := parseFlags([]string{"-no-git-context"})
+	if err != nil {
+		t.Fatalf("parseFlags: %v", err)
+	}
+	if !f.noGitContext {
+		t.Fatal("-no-git-context should set noGitContext")
+	}
+	f2, _ := parseFlags(nil)
+	if f2.noGitContext {
+		t.Fatal("noGitContext must default to false")
+	}
+}
+
+// The Git line is informational and follows the project-context line; when
+// there is no repository (or the flag is set) no line appears at all.
+func TestStartupNoticesGitContextAfterProjectContext(t *testing.T) {
+	got := startupNotices(startupInfo{
+		workspace:          "/r",
+		projectContextLine: "project context: loaded 1 file(s)",
+		gitContextLine:     "git context: main, clean, 5 recent commits",
+	})
+	joined := strings.Join(got, "\n")
+	p, g := strings.Index(joined, "project context: loaded"), strings.Index(joined, "git context: main, clean, 5 recent commits")
+	if p < 0 || g < 0 || g < p {
+		t.Fatalf("want project context then git context, got:\n%s", joined)
+	}
+	if joined := strings.Join(startupNotices(startupInfo{workspace: "/r"}), "\n"); strings.Contains(joined, "git context") {
+		t.Fatalf("absent Git context must print nothing, got:\n%s", joined)
 	}
 }

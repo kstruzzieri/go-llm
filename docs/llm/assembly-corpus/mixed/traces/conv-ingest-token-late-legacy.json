@@ -19,7 +19,7 @@
     },
     {
       "role": "tool",
-      "content": "rec-dash-refresh · semantic · 2025-07-27 · ingest overview dashboard auto-refreshes on the short interval; leave it be, the load is negligible\nrec-oncall-handoff · working · 2025-07-27 · oncall handoff happens Friday afternoon; the summary template lives in the shared doc\nrec-token-rotation · semantic · 2025-07-27 · token rotation window opens Monday; producers migrate before the edge flips preference",
+      "content": "trust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-dash-refresh · semantic · 2025-07-27 · ingest overview dashboard auto-refreshes on the short interval; leave it be, the load is negligible\ntrust=agent-written; unreviewed; origin=memory.create; session=caller-claim · rec-oncall-handoff · working · 2025-07-27 · oncall handoff happens Friday afternoon; the summary template lives in the shared doc\ntrust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-token-rotation · semantic · 2025-07-27 · token rotation window opens Monday; producers migrate before the edge flips preference",
       "tool_call_id": "c2",
       "name": "agent_memory_search"
     },
@@ -43,8 +43,8 @@
       "rec-oncall-handoff",
       "rec-token-rotation"
     ],
-    "estimated_prompt_tokens": 163,
-    "state_digest": "24c51573441b6a12b9c990ab2dc8af51adb4d5c54f1940b0d842636593ec8b12",
+    "estimated_prompt_tokens": 221,
+    "state_digest": "cacc447b62f65280cb54c6fcb0e9f0a93a131b4a53381da15986166d2e7b882e",
     "subjects": [
       "(c1|rag|internal/ingest/auth.go)",
       "(c1|rag|internal/ingest/limits.go)",
@@ -57,8 +57,8 @@
     "answer_home": "conversation",
     "scenario_family": "ingest-token-conv",
     "twin_group": "tw-ingest-token",
-    "budget": 1130,
-    "raw_state_tokens": 1883,
+    "budget": 1165,
+    "raw_state_tokens": 1941,
     "pressure_level": "ok",
     "shed_messages": 14,
     "shed_bytes": 6315

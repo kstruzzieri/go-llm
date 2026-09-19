@@ -810,7 +810,7 @@ func (c *parallelCoordinator) validateWorkerGitState(ctx context.Context, worker
 	}
 	cmd := exec.CommandContext(ctx, "git", "symbolic-ref", "--quiet", "HEAD")
 	cmd.Dir = worker.root
-	cmd.Env = parallelGitEnv()
+	cmd.Env = hostGitEnv()
 	if out, err := cmd.CombinedOutput(); err == nil {
 		return fmt.Errorf("worker %s is attached to branch %s; want detached HEAD", worker.sourceID, strings.TrimSpace(string(out)))
 	} else {
@@ -973,7 +973,7 @@ func (c *parallelCoordinator) gitEligiblePath(ctx context.Context, file string) 
 	}
 	cmd := exec.CommandContext(ctx, "git", "check-ignore", "-q", "--", file)
 	cmd.Dir = c.root
-	cmd.Env = parallelGitEnv()
+	cmd.Env = hostGitEnv()
 	err = cmd.Run()
 	if err == nil {
 		return false, nil
@@ -1039,7 +1039,7 @@ func (c *parallelCoordinator) validateWorkerDiff(ctx context.Context, worker par
 func runParallelGit(ctx context.Context, dir string, args ...string) ([]byte, error) {
 	cmd := exec.CommandContext(ctx, "git", args...)
 	cmd.Dir = dir
-	cmd.Env = parallelGitEnv()
+	cmd.Env = hostGitEnv()
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return nil, fmt.Errorf("git %s: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(string(out)))
@@ -1047,29 +1047,55 @@ func runParallelGit(ctx context.Context, dir string, args ...string) ([]byte, er
 	return out, nil
 }
 
-// parallelGitEnv strips inherited repo-location overrides so every git call
-// resolves the repository from cmd.Dir. GIT_INDEX_FILE alone would silently
-// point the clean/index-flag validation at a different index (git exports it
-// to hooks) while the toplevel identity checks still pass.
-func parallelGitEnv() []string {
-	blocked := []string{
-		"GIT_DIR=", "GIT_WORK_TREE=", "GIT_INDEX_FILE=", "GIT_OBJECT_DIRECTORY=",
-		"GIT_COMMON_DIR=", "GIT_NAMESPACE=", "GIT_ALTERNATE_OBJECT_DIRECTORIES=", "GIT_PREFIX=",
-	}
-	env := make([]string, 0, len(os.Environ())+1)
-	for _, kv := range os.Environ() {
-		drop := false
-		for _, prefix := range blocked {
-			if strings.HasPrefix(kv, prefix) {
-				drop = true
-				break
-			}
+// hostGitBlockedKeys are the inherited repository-location overrides every
+// host Git subprocess drops so cmd.Dir alone selects the repository.
+// GIT_TERMINAL_PROMPT is listed because hostGitEnv owns its value: an
+// inherited setting must not survive beside the appended =0.
+var hostGitBlockedKeys = []string{
+	"GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY",
+	"GIT_COMMON_DIR", "GIT_NAMESPACE", "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_PREFIX",
+	"GIT_TERMINAL_PROMPT",
+}
+
+// hostGitEnv strips inherited repo-location overrides so every git call
+// resolves the repository from cmd.Dir, and pins GIT_TERMINAL_PROMPT=0 so no
+// subprocess can block on a credential prompt. GIT_INDEX_FILE alone would
+// silently point the clean/index-flag validation at a different index (git
+// exports it to hooks) while the toplevel identity checks still pass. Keys are
+// matched case-insensitively: the environment is case-insensitive on Windows,
+// and a differently-cased duplicate must not slip past the filter. Shared by
+// the Agentflow Git calls and #354's capture-only gitContextEnv.
+func hostGitEnv() []string {
+	return append(dropEnvKeys(os.Environ(), hostGitBlockedKeys, nil), "GIT_TERMINAL_PROMPT=0")
+}
+
+// dropEnvKeys returns env without every entry whose key (the text before the
+// first '=') equals one of keys or starts with one of prefixes, compared
+// case-insensitively. The input is never modified.
+func dropEnvKeys(env, keys, prefixes []string) []string {
+	out := make([]string, 0, len(env)+1)
+	for _, kv := range env {
+		key, _, _ := strings.Cut(kv, "=")
+		if envKeyBlocked(key, keys, prefixes) {
+			continue
 		}
-		if !drop {
-			env = append(env, kv)
+		out = append(out, kv)
+	}
+	return out
+}
+
+func envKeyBlocked(key string, keys, prefixes []string) bool {
+	for _, k := range keys {
+		if strings.EqualFold(key, k) {
+			return true
 		}
 	}
-	return append(env, "GIT_TERMINAL_PROMPT=0")
+	for _, p := range prefixes {
+		if len(key) >= len(p) && strings.EqualFold(key[:len(p)], p) {
+			return true
+		}
+	}
+	return false
 }
 
 func parallelUnexpectedIndexPath(ctx context.Context, root string) (string, error) {

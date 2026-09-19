@@ -6,12 +6,18 @@ import (
 )
 
 // TokenBudget is the input-token budget available to the State messages
-// (system + transcript), already net of tool-schema tokens. Thresholds carries
-// the per-turn pressure bands (zero value => defaults) so Assemble stays a pure
+// (system + transcript), already net of tool schemas and wire-only advisory
+// tokens. Thresholds carries the per-turn pressure bands (zero value => defaults)
+// so Assemble stays a pure
 // function of its inputs. #63.
 type TokenBudget struct {
 	Input      int
 	Thresholds PressureThresholds
+	// ToolResultOverhead is the extra estimated cost of each role "tool"
+	// message, added to its raw content and metadata cost. ContextManager sets
+	// it for the active transport; zero means raw, unframed assembly. Custom
+	// compactors must include it when fitting and reporting token counts.
+	ToolResultOverhead int
 }
 
 // CompactionReport describes what a Compact call did.
@@ -22,7 +28,9 @@ type CompactionReport struct {
 	TokensAfter  int
 }
 
-// Compactor fits a transcript into a token budget.
+// Compactor fits a transcript into a token budget, including the per-tool
+// transport charge in TokenBudget.ToolResultOverhead. Decorators must forward
+// the complete budget to their wrapped compactor.
 type Compactor interface {
 	Compact(ctx context.Context, state State, budget TokenBudget) (State, CompactionReport, error)
 }
@@ -32,6 +40,9 @@ type Compactor interface {
 // never calls a model.
 type RecencyCompactor struct {
 	Estimate func(string) int // conversation.TokenEstimator; len/4 default when nil
+	// toolResultOverhead is local to a Compact call or the manager's cost
+	// accounting; Compact takes its value from TokenBudget.
+	toolResultOverhead int
 }
 
 func (rc RecencyCompactor) estimate(s string) int {
@@ -63,6 +74,16 @@ func (rc RecencyCompactor) checkedMessageCost(m Message) (int, bool) {
 		}
 	}
 	if !add(rc.estimate(m.ToolName)) || !add(rc.estimate(m.ToolCallID)) {
+		return n, false
+	}
+	// #430 (spec D5): when this compactor prices for the Orchestrator, whose
+	// request builder frames every tool observation, a tool message costs its
+	// raw content and metadata PLUS one frame envelope, priced by the same
+	// estimator. The envelope is an additive estimate of the framing bytes,
+	// not E(framed content): a non-additive estimator prices content and
+	// frame separately by design, and byte caps (OutputCap, the anchor cap,
+	// trace Bytes) stay about raw content.
+	if m.Role == "tool" && !add(rc.toolResultOverhead) {
 		return n, false
 	}
 	return n, true
@@ -205,6 +226,7 @@ func (rc RecencyCompactor) groups(st State) []compactionGroup {
 }
 
 func (rc RecencyCompactor) Compact(_ context.Context, st State, b TokenBudget) (State, CompactionReport, error) {
+	rc.toolResultOverhead = b.ToolResultOverhead
 	before, ok := rc.checkedTotal(st)
 	if !ok {
 		return st, CompactionReport{Strategy: "recency", TokensBefore: before, TokensAfter: before}, ErrContextExhausted

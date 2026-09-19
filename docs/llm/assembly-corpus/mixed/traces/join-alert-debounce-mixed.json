@@ -60,7 +60,7 @@
     },
     {
       "role": "tool",
-      "content": "### source: \"internal/alert/rules.go\"\npurpose: Repeat-notification debounce: code default plus per-rule override.\noverview: rules.go holds the code default hold between repeat notifications and the shouldNotify check that prefers a per-rule override from the rules file when one is present.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n--- source: \"internal/alert/rules.go\" (lines 1-19, similarity: 1.00) ---\n1| package alert\n2| \n3| import \"time\"\n4| \n5| // alertDebounce is the code default hold between repeat notifications\n6| // for the same firing rule. Per-rule overrides come from the rules\n7| // file and win over this default when present.\n8| const alertDebounce = 90 * time.Second\n9| \n10| // shouldNotify reports whether a firing rule may notify again, given\n11| // the last time it did. The effective debounce is the rule override\n12| // when set, else the code default above.\n13| func (e *Engine) shouldNotify(r Rule, last time.Time, now time.Time) bool {\n14| \td := alertDebounce\n15| \tif r.Debounce \u003e 0 {\n16| \t\td = r.Debounce\n17| \t}\n18| \treturn now.Sub(last) \u003e= d\n19| }\n\n### source: \"internal/alert/notify.go\"\npurpose: Webhook notifier with a parking retry queue for delivery failures.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n\n### source: \"docs/alerting.md\"\npurpose: Alerting guide: rule layout, repeat-notification debounce, routing, review.\nlanguage: markdown\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n",
+      "content": "### source: \"internal/alert/rules.go\"\npurpose: Repeat-notification debounce: code default plus per-rule override.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n--- source: \"internal/alert/rules.go\" (lines 1-19, similarity: 1.00) ---\n1| package alert\n2| \n3| import \"time\"\n4| \n5| // alertDebounce is the code default hold between repeat notifications\n6| // for the same firing rule. Per-rule overrides come from the rules\n7| // file and win over this default when present.\n8| const alertDebounce = 90 * time.Second\n9| \n10| // shouldNotify reports whether a firing rule may notify again, given\n11| // the last time it did. The effective debounce is the rule override\n12| // when set, else the code default above.\n13| func (e *Engine) shouldNotify(r Rule, last time.Time, now time.Time) bool {\n14| \td := alertDebounce\n15| \tif r.Debounce \u003e 0 {\n16| \t\td = r.Debounce\n17| \t}\n18| \treturn now.Sub(last) \u003e= d\n19| }\n\n### source: \"internal/alert/notify.go\"\npurpose: Webhook notifier with a parking retry queue for delivery failures.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n\n### source: \"docs/alerting.md\"\npurpose: Alerting guide: rule layout, repeat-notification debounce, routing, review.\nlanguage: markdown\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n",
       "tool_call_id": "c1",
       "name": "retrieve"
     },
@@ -78,7 +78,7 @@
     },
     {
       "role": "tool",
-      "content": "rec-debounce-override · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src: · after the flap storm ops set the disk-pressure rule debounce override to 150 seconds; revisit once the noisy rack is drained\nrec-rule-review · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src: · alert rule review happens in the fortnightly ops sync; proposals go in the shared sheet first\nrec-silence-window · working · created:2025-07-27 · updated:2025-07-27 · scope:session · ns: · src: · maintenance silences are pre-declared in the ops calendar so paging stays quiet during planned work",
+      "content": "trust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-debounce-override · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src-claim: · after the flap storm ops set the disk-pressure rule debounce override to 150 seconds; revisit once the noisy rack is drained\ntrust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-rule-review · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src-claim: · alert rule review happens in the fortnightly ops sync; proposals go in the shared sheet first\ntrust=agent-written; unreviewed; origin=memory.create; session=caller-claim · rec-silence-window · working · created:2025-07-27 · updated:2025-07-27 · scope:session · ns: · src-claim: · maintenance silences are pre-declared in the ops calendar so paging stays quiet during planned work",
       "tool_call_id": "c2",
       "name": "agent_memory_search"
     },
@@ -102,8 +102,8 @@
       "rec-rule-review",
       "rec-silence-window"
     ],
-    "estimated_prompt_tokens": 1010,
-    "state_digest": "9df56cc8b10da676807e6139a6077e74805073a25445c7bdcf37e162e7afd895",
+    "estimated_prompt_tokens": 1029,
+    "state_digest": "ba87768ddfe39018c657512aca8e7d87b6469a21543323ba5b279a8268306331",
     "subjects": [
       "(c1|rag|internal/alert/rules.go)",
       "(c1|rag|internal/alert/notify.go)",
@@ -115,9 +115,9 @@
     "stratum": "cross_domain_join",
     "answer_home": "join",
     "scenario_family": "alert-debounce-override",
-    "budget": 1048,
-    "raw_state_tokens": 1747,
+    "budget": 1083,
+    "raw_state_tokens": 1805,
     "pressure_level": "critical",
-    "shed_bytes": 2467
+    "shed_bytes": 2626
   }
 }

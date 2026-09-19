@@ -59,6 +59,7 @@ func OpenHardenedDB(ctx context.Context, path string) (*sql.DB, error) {
 	for _, pragma := range []string{"PRAGMA journal_mode=WAL", "PRAGMA busy_timeout=5000"} {
 		if _, err := db.ExecContext(ctx, pragma); err != nil {
 			_ = db.Close()
+			_ = SecureDBFiles(path)
 			return nil, fmt.Errorf("memory: db %s: %w", pragma, err)
 		}
 	}
@@ -109,12 +110,15 @@ func (r *RecordRuntime) Close() error { return r.db.Close() }
 // OpenRecordStore opens path hardened, runs the package migrations, and
 // re-secures the files migrations may have (re)created. Any failure closes
 // the handle and returns the error.
-func OpenRecordStore(ctx context.Context, path string) (*RecordRuntime, error) {
+func OpenRecordStore(ctx context.Context, path string, config RecordStoreConfig) (*RecordRuntime, error) {
 	db, err := OpenHardenedDB(ctx, path)
 	if err != nil {
 		return nil, err
 	}
-	store, err := NewMemoryRecordStore(ctx, db)
+	if config.KeyDir == "" && config.Signer == nil && config.Verifiers == nil {
+		config.KeyDir = path + ".keys"
+	}
+	store, err := NewMemoryRecordStore(ctx, db, config)
 	if err != nil {
 		_ = db.Close()
 		// Best-effort: migrations may have created loose sidecars before failing.

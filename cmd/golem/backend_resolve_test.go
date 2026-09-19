@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/kstruzzieri/go-llm/config"
+	"github.com/kstruzzieri/go-llm/internal/providerbootstrap"
 	"github.com/kstruzzieri/go-llm/provider/openaicompat"
 )
 
@@ -409,6 +410,34 @@ func TestResolveBackend_NoTargetNoOp(t *testing.T) {
 				t.Fatalf("warns = %v, want ignored-override warning", res.warns)
 			}
 		})
+	}
+}
+
+func TestResolveBackend_IgnoredOverrideWarningNamesTheActiveUseCase(t *testing.T) {
+	// A goal-mode user whose planning route has no openai-compat primary must
+	// be pointed at the planning route, not at defaults.agent -- the wrong
+	// key would send them to edit a default the active route never reads
+	// (#476). Ollama-format provider so the openai-compat target derivation
+	// fails and the override is ignored.
+	cfg := &config.Config{
+		Providers: map[string]config.ProviderConfig{"ollama": {BaseURL: "http://127.0.0.1:11434", APIFormat: "ollama"}},
+		Models:    map[string]config.ModelConfig{"planner": {Name: "big", Provider: "ollama"}},
+		Defaults:  map[string]string{"planning": "planner"},
+	}
+	route := providerbootstrap.PlannedRoute{UseCase: config.UseCasePlanning, Chain: []string{"ollama/big"}}
+	res, err := resolveBackend(context.Background(), cfg, backendResolveOpts{
+		flagBaseURL: "http://127.0.0.1:8083", flagSet: true,
+		lookupEnv:   func(string) (string, bool) { return "", false },
+		activeRoute: &route,
+	})
+	if err != nil {
+		t.Fatalf("resolveBackend: %v", err)
+	}
+	if len(res.warns) != 1 || !strings.Contains(res.warns[0], "no openai-compat planning provider") {
+		t.Fatalf("warns = %v, want the warning to name the planning route", res.warns)
+	}
+	if strings.Contains(res.warns[0], "defaults.agent") {
+		t.Fatalf("warns = %v, must not point a planning-mode user at defaults.agent", res.warns)
 	}
 }
 

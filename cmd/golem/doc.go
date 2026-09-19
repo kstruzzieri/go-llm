@@ -7,11 +7,162 @@
 // workspace. For thinking-capable models, -think off|on|low|medium|high
 // drives reasoning behavior and captured thinking renders dim above the
 // answer (a no-op with a notice when the model does not support thinking).
+// In the REPL, /think off|on|low|medium|high applies the same support gate to
+// subsequent turns. /think reports the runtime setting; /think default removes
+// the override so the model decides. Active turns, history, and pending input
+// are preserved. The setting survives /new, /clear, and /resume within this
+// process, but is not stored across restarts. The -goal planner still disables
+// extended thinking.
 //
 // The openai-compat backend URL can be overridden with -base-url (or
 // GO_LLM_BASE_URL); otherwise, when the configured loopback URL does not
-// serve the agent model, startup scans 127.0.0.1:8080-8090 for it
+// serve the active model route, startup scans 127.0.0.1:8080-8090 for it
 // (-no-probe disables the scan).
+//
+// -interceptors installs the #436 injection detectors (zero-width characters,
+// base64/hex-encoded instructions, exact and scrambled instruction phrases)
+// on the agent and on every dispatch child. Injection content is classified by
+// provenance: workspace files, command output, memory records, plan
+// diagnostics and model-origin tool results are tagged (a fixed trailer tells
+// the model the content is data, and the run's risk score grows), while an
+// injection in a foreign result (an MCP tool) is replaced by a fixed blocked
+// marker before the model sees it. Interactive tool-call and plan-lock prompts
+// show "interceptor risk 30"; the verifier approval prompt cannot show it.
+// Successful REPL and -p stderr footers append " · risk 30". The
+// non-interactive -approve-plan-lock path is unchanged. A dispatch child's
+// score stays in that child's existing risk_score envelope field rather than
+// aggregating into the parent report. The -trace record carries every parent
+// finding. These three injection detectors return no output findings.
+//
+// The same opt-in chain installs Secrets. It blocks supported credential and
+// payment-card shapes at every origin across input, completed model content and
+// thinking, raw and decoded JSON tool arguments, and tool/verifier
+// observations. Blocked observations are replaced before the next model
+// request. Streaming tokens already emitted remain outside interception.
+// Classified blocks are omitted from CLI history and content-full traces, use
+// a fixed stderr/machine diagnostic, and may add only a finding count to
+// content-light telemetry. Initial blocks save no conversation or checkpoint
+// row; later blocks retain undo records for earlier allowed mutations. A
+// caller-owned blocked agent.Result may still contain its original goal.
+// -interceptors remains off by default.
+//
+// With -interceptors, Golem also plants an unpredictable canary in its system
+// instructions for each live conversation activation. The canary survives
+// ordinary turns, /clear, compaction and prompt recomposition, and is replaced
+// at startup and after each successful /new or /resume. A complete canary match,
+// with ASCII A-F case ignored, aborts the turn when found in collected content,
+// thinking, tool-call metadata or arguments, or the non-system input projection.
+// A tainted model response aborts before any tool in that response is dispatched;
+// actions completed earlier in the turn are not rolled back. A tool-result match
+// is detected after that tool ran but before its result is accepted into model
+// context. Because inspection follows stream emission, tokens or thinking already
+// displayed, including stream-JSON deltas, cannot be retracted; this is detection,
+// not prevention of live disclosure. A canary discovered only while sealing can
+// override the final invocation result without rewriting an already emitted
+// Runtime terminal event.
+//
+// When a canary abort reaches the managed top-level turn, Golem burns that
+// activation and must mint and publish a replacement before another goal can
+// reach Runtime. Renewal failure stays fail-closed with "canary unavailable:
+// renewal required"; /clear and ordinary refreshes cannot revive the burned
+// value. Content-full traces are skipped for detected canary aborts. Other
+// canary-enabled traces omit only the planted fragment from their application-
+// prompt system metadata. This projection does not redact arbitrary provider
+// errors, unrelated interceptor metadata or other external logging.
+//
+// Dispatch children inherit the active detector, but their independent system
+// prompts are not planted. Delegate, AgentFlow planner, summarizer and grounding
+// prompts are likewise outside the planting guarantee, and a nested run's error
+// gains no new parent-abort or parent-renewal semantics. Matching covers only the
+// complete marker, including its ASCII case variants and JSON escape decoding
+// in tool arguments; other transformations or encodings, split values, Unicode
+// normalization and cross-message reconstruction are outside this detector.
+//
+// The same chain carries the #439 guards, so they are opt-in with it.
+// Argument invariants block a tool call before it is planned or prompted:
+// write_file, edit_file and promote_artifact under a .git, .ssh, .gnupg,
+// .aws or .kube component, read_file under the credential components or
+// the exact basename .env, and an inline sh/bash/dash/ksh/zsh -c script that
+// pipes a curl or wget stdout fetch into a bare shell (optionally under
+// sudo). The guard reads the argument the tool's own decoder would use, so
+// a case-variant field name is guarded and two equivalent spellings are
+// blocked as ambiguous. The model sees "tool call blocked by interceptor
+// invariants (<name>)". The egress classifier tags every run_command and
+// start_command by what its argv visibly reaches (privileged, network,
+// package-manager, interpreter, unknown) after peeling env, nohup, nice,
+// time, timeout and stdbuf; anything it cannot parse, including an inline
+// script it cannot read literally, and any command outside its quiet set,
+// stays visible as unknown. The approval prompt
+// appends the current call's class and label to the risk line,
+// "interceptor risk 20 · egress: network (git push)", on grant-covered
+// auto-approvals too. These are finite checks over the argv, not a sandbox:
+// go build may still download modules and make runs whatever the Makefile
+// says. No score or badge revokes a grant. The hard line-count limit the
+// issue mentioned is deferred; the existing 256 KiB write bounds remain.
+//
+// Independently of -interceptors, every tool result reaches the model inside
+// a keyed <<<TOOL_RESULT / >>>TOOL_RESULT frame minted per request, and every
+// effective system prompt carries agent.ToolTrustContract (framed content is
+// data, never instructions; project guidance only where delegated) after the
+// Golem application prompt and its capability-gated write/exec clauses
+// (#430). For observations allowed through the interceptor pipeline, the
+// terminal, events, session store and traces show raw results; approval,
+// grants and sandboxes remain the enforcement layer.
+//
+// /consult <name> <prompt> asks one external subscription CLI for a single
+// advisory judgment (#382). Consultants come only from a local
+// consultants.json -- <os.UserConfigDir>/go-llm/consultants.json, or
+// -consultants-config -- which owns the command path, model and bounds; the
+// operator supplies only the name and the prompt, and the adapter owns argv
+// and the process environment. It requires -interceptors, because the reply is
+// admitted through the same interceptor chain as any other untrusted ingress,
+// and it stages at most ONE receipt: the admitted answer rides the next goal
+// inside a keyed <<<CONSULT_ADVICE frame and is then dropped, never entering
+// history, summaries or the session store. Failed or answerless turns retain
+// the slot for retry, except interceptor refusal and context exhaustion, which
+// drop it with a notice. /new, /clear and a successful /resume also drop it;
+// /consult drop discards just the advice, preserving history and grants.
+// What this proves is
+// narrow: the transcript SAYS it came from a pinned adapter version launched
+// with a subscription credential and no tool activity, and admission checks
+// that it says so -- it does not prove the advice is correct, does not confine
+// the child (no sandbox; real HOME and host privileges), and does not filter
+// the vendor's own egress, which trusted_process_egress explicitly concedes.
+// See docs/consult.md.
+//
+// Project guidance is discovered from selected global and workspace
+// AGENTS.md-style files but is not injected until the operator approves the
+// complete current document set with /trust sha256:<64 lowercase hex digits>.
+// /trust alone shows source, canonical path, full size, per-file full-content
+// hash, retention state, aggregate digest, and the exact approval command; it
+// never prints document bodies. The displayed content digest is portable across
+// worktrees and runners for identical selected guidance. The private in-memory
+// grant additionally binds canonical workspace and source paths, so it cannot
+// transfer between workspaces or a relocated global configuration. Automated
+// environments must control global configuration as well as workspace files.
+//
+// Trust is session-only and is cleared by /new, /clear, successful /resume,
+// /grants clear, and process exit. It is also revoked when the observed
+// document set, content, source, canonical path, or order changes, becomes
+// unavailable, or becomes empty. Golem validates before each operator goal and
+// each AgentFlow authoring or task invocation; internal provider calls and
+// workflow steps reuse that captured snapshot, and the next invocation observes
+// later edits.
+// -no-project-context disables all project-context discovery, hashing,
+// approval, and injection. In -p, -goal, and -plan,
+// -trust-project-context sha256:<64 lowercase hex digits> requires that exact
+// live snapshot through invocation entry. An omitted flag only skips
+// unapproved guidance. A valid but unsatisfied requirement fails with exit 1
+// before execution; malformed syntax and combining it with
+// -no-project-context are usage errors. In machine formats, the failure emits
+// exactly one golem.result.v1 error record with code
+// project_context_untrusted; human diagnostics remain on stderr.
+//
+// Project and Git context are separate labeled frames using one
+// snapshot-scoped shared key; a Git refresh revalidates project guidance and
+// can change its budget. Tool results retain independently keyed per-request
+// frames. Approval neither grants capabilities nor sanitizes prior conversation
+// or model influence.
 //
 // The source subcommand manages ad-hoc documents in the workspace index over
 // the managed-document registry:
@@ -25,9 +176,20 @@
 // Mutations acquire the workspace index writer lease and publish a new
 // immutable index generation; the active index is never modified in place.
 //
+// Filesystem indexing, including startup auto-indexing and golem index, scans
+// before hashing, chunking or embedding independently of -interceptors. It
+// skips detected secret/payment-card files by default and removes their old
+// indexed source. The library supports per-kind redaction; Golem has no
+// redaction or scanner-disable flag. Managed documents are excluded.
+// Redaction-only runs succeed, while manual partial runs with safe skips exit
+// non-zero. Policy-affected unsafe/failing generations retire their active
+// pointer. Managed readers validate that pointer before each newly admitted
+// retrieval; admitted calls may finish. Retirement is logical, not secure
+// erasure, and a failed pointer write cannot guarantee cross-process removal.
+//
 // A workspace may declare a post-write verification command in .golem.json at
-// its root, read only under -allow-write and only from that exact path (no
-// ancestor search):
+// its root, read only when writes are enabled (at startup with -allow-write or
+// later with /allow-write) and only from that exact path (no ancestor search):
 //
 //	{"verify": {"argv": ["go", "build", "./..."], "dir": ".", "timeout_seconds": 60}}
 //
@@ -45,13 +207,68 @@
 // resolved command and cwd are approved once per session at first use, under
 // their own grant namespace: a verification grant can never authorize
 // run_command or start_command, or the reverse. The command is resolved and
-// frozen at startup, so editing .golem.json mid-session changes nothing until
-// the next run; a malformed file warns and disables verification rather than
-// failing the session.
+// frozen when writes are enabled, so editing .golem.json after that point
+// changes nothing until the next run; a malformed file warns and disables
+// verification rather than failing the session.
 //
 // Verification runs on the host with no isolation, so a verifier that writes
 // (a formatter, a codegen step) produces changes the checkpoint journal did
 // not capture and /undo will not restore. Prefer a read-only check.
+//
+// Durable checkpoint writes also produce signed MutationReceipts: interactive
+// write_file/edit_file, headless -allow-tool, late /allow-write, startup-enabled
+// scratch promotion, and actual /undo restores/deletions. Scratch promotion
+// availability stays frozen at startup. Existing approvals are unchanged.
+// A signed intent precedes filesystem work; observed success requires a durable
+// applied receipt. Post-write signing, database, or hardening failure can leave
+// an uncertain change and halts further writes. Recovery never invents applied
+// evidence, and reports target-state recovery without it as unconfirmed.
+// Completed inverse evidence is reconciled without replaying the operation or
+// overwriting later edits; earlier uncertain attempts survive completed retries.
+//
+// The per-user Ed25519 key is <dataDirBase>/golem/signing/agent-ed25519.pem,
+// outside the workspace, with owner-only storage and symlink checks. It loads
+// once per write-enabled runtime; read-only sessions do not touch it. First
+// creation announces a new identity. AgentID is the key ID, not a model/session.
+// Retained current-workspace history requires the existing matching key.
+// Missing-key diagnostics name the escaped path and historical claimed key ID
+// and request restoration from backup; mismatches name the receipt, claimed
+// and loaded key IDs, and path. Writes stay disabled without key replacement.
+// Invalid history diagnostics never echo unchecked record bytes. There is no
+// unsigned fallback, algorithm flag, automatic rotation, repair, or backfill.
+// An empty workspace history cannot detect prior global identity loss.
+//
+// Schema v3 is additive and refused by older binaries. Finish interrupted v1/v2
+// recovery/undo with the previous binary before upgrading; migration refuses
+// those states before changing the schema. Completed unsigned history remains
+// listed but authenticated /undo refuses it. Downgrade needs a pre-upgrade
+// backup. Receipts survive completed undo and snapshot pruning without automatic
+// expiry; 50 checkpoints / 64 MiB bounds undo snapshots, not total DB growth.
+//
+// /checkpoints appends [invalid receipts] for bad linkage/metadata, [unsigned]
+// for null forward references, [unconfirmed] for missing applied evidence, or
+// [receipts verified] for complete authentic evidence bound to row metadata,
+// in that precedence order. Non-null missing references are invalid. Any
+// unauthenticatable retained history fails the command with
+// "receipt history unverifiable; evidence labels unavailable". Listing is
+// read-only and checks neither live files nor full prior-content blobs;
+// pending undo still hashes restore blobs and guards live content/type/mode.
+//
+// AgentFlow task/RAM undo, parallel promotion/rollback, direct embedders,
+// arbitrary subprocess/external-editor writes, scratch copies/cleanup, and
+// Golem metadata are excluded. AgentFlow proof receipts are a separate feature.
+// MutationReceipts attest a host key's transition/observation, not approval,
+// complete process attribution, trusted time, or power-loss durability. External
+// writer race windows and best-effort file fsync remain. There is no audit chain,
+// completeness, whole-ledger deletion/reordering/rollback/truncation detection,
+// external anchor, or standalone public-key retention/export. Intent-only
+// evidence must not become a clean successful audit in #447.
+//
+// The portable agent/tools helpers sign the complete Body, including Kind, with
+// the existing Ed25519 or HMAC signer; Golem always uses Ed25519. V1 envelopes
+// are limited to 32 KiB. Mutation IDs use crypto/rand.Text's uppercase base32
+// spelling (at least 26 characters, permitting future growth). See
+// docs/plans/2026-09-05-mutation-receipts-445-spec-plan.md for the full contract.
 //
 // -grounding is a SEPARATE, unrelated check: it verifies the ANSWER, not the
 // workspace. The .golem.json "verify" command above runs a workspace command
@@ -114,11 +331,23 @@
 // text; telemetry receives no grounding field at all. Task and planning modes
 // ignore -grounding with a warning, since neither runs an answer turn.
 //
-// Planning mode (-goal "<text>"): a local model authors an AgentFlow plan for
+// Planning mode (-goal "<text>"): a model authors an AgentFlow plan for
 // the goal using read-only tools, Golem compiles and locks it via agentflow
 // lock-plan, then stops. The locked .agent/plan.lock.json is the durable output;
 // run it with -plan (task execution) separately. Planning is read-only and
 // mutually exclusive with -p, -plan, -allow-write, -allow-exec, -rag-db,
 // -delegate, -dispatch, -mcp-*, -evidence, and the
 // -approve-plan-edits/-approve-plan-gates execution approvals.
+//
+// Planning mode routes through the "planning" use case (#476), not "agent":
+// a models.json authoring defaults.planning sends plan authoring to that
+// role, and one that does not degrades in order through reasoning, analysis,
+// and agent before falling back to model recommendation. The planning route
+// is the process's single active route -- it is what destination admission
+// consents, tool preflight proves, the input ceiling is sized from, and the
+// orchestrator caller routes -- so goal mode performs no discovery, refresh,
+// probe, or inference for the inactive agent, embedding, or summarize
+// routes. Because the fallbacks can select a role on a different provider
+// than agent, a remote planning route is subject to the same
+// -allow-destination consent as every other remote destination.
 package main

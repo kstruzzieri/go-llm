@@ -158,6 +158,10 @@ func (t Retrieve) Effect() agent.Effect {
 	return agent.Effect{Class: agent.Read, Approval: agent.ApprovalNever, OutputCap: RetrieveOutputCap}
 }
 
+// Origin declares this tool's observations workspace-local (#436 spec D4):
+// detectors tag, never block, what it returns.
+func (Retrieve) Origin() agent.Origin { return agent.OriginWorkspace }
+
 func (t Retrieve) Invoke(ctx context.Context, raw json.RawMessage) (agent.ToolResult, error) {
 	// Resolved ONCE: the carrier ceiling below and the branch that builds the
 	// groups must agree on whether a projection happens at all.

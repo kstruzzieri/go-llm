@@ -86,7 +86,7 @@
     },
     {
       "role": "tool",
-      "content": "rec-fleet-history · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:\nrec-migration-board · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src: · the collector migration board tracks per-fleet progress; two fleets remain on the old registration path\nrec-slow-start · working · created:2025-07-27 · updated:2025-07-27 · scope:session · ns: · src:",
+      "content": "trust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-fleet-history · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src-claim:\ntrust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-migration-board · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src-claim:\ntrust=agent-written; unreviewed; origin=memory.create; session=caller-claim · rec-slow-start · working · created:2025-07-27 · updated:2025-07-27 · scope:session · ns: · src-claim:",
       "tool_call_id": "c2",
       "name": "agent_memory_search"
     },
@@ -110,8 +110,8 @@
       "rec-migration-board",
       "rec-slow-start"
     ],
-    "estimated_prompt_tokens": 1135,
-    "state_digest": "1e6294113bafe322d65134b8098c536c30701c0a71b5d767ef329d5cbbc17c14",
+    "estimated_prompt_tokens": 1172,
+    "state_digest": "09b20ff33d2f3aaf19fdbe1f824294ef38182cb19fe4e66cf307f3f20f2a8552",
     "subjects": [
       "(c1|rag|internal/collector/heartbeat.go)",
       "(c1|rag|internal/collector/registry.go)",
@@ -123,9 +123,9 @@
     "stratum": "conversation_only",
     "answer_home": "conversation",
     "scenario_family": "collector-heartbeat-conv",
-    "budget": 1184,
-    "raw_state_tokens": 1974,
+    "budget": 1220,
+    "raw_state_tokens": 2033,
     "pressure_level": "critical",
-    "shed_bytes": 2809
+    "shed_bytes": 2898
   }
 }

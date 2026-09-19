@@ -45,19 +45,6 @@ func waitForPidfile(t *testing.T, path string) int {
 	return 0
 }
 
-// waitProcessGone polls until the PID no longer exists (Kill(pid,0) == ESRCH),
-// bounded at 5s.
-func waitProcessGone(pid int) bool {
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		if errors.Is(syscall.Kill(pid, 0), syscall.ESRCH) {
-			return true
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
-	return errors.Is(syscall.Kill(pid, 0), syscall.ESRCH)
-}
-
 // TestBackgroundProcessNilStdinEOF proves direct execution with the nil-stdin
 // contract: the child sees /dev/null and reads immediate EOF instead of
 // hanging on input.

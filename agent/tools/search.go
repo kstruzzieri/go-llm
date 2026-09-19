@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"os"
 	"regexp"
 	"strings"
 
@@ -53,6 +54,10 @@ func (*Search) Effect() agent.Effect {
 	}
 }
 
+// Origin declares this tool's observations workspace-local (#436 spec D4):
+// detectors tag, never block, what it returns.
+func (*Search) Origin() agent.Origin { return agent.OriginWorkspace }
+
 // Invoke walks and matches. Expected failures return (ToolResult{IsError:true}, nil).
 func (t *Search) Invoke(ctx context.Context, raw json.RawMessage) (agent.ToolResult, error) {
 	var args searchArgs
@@ -82,7 +87,7 @@ func (t *Search) Invoke(ctx context.Context, raw json.RawMessage) (agent.ToolRes
 		if d.Type()&fs.ModeSymlink != 0 {
 			return nil // never read a symlink
 		}
-		fileTruncated, err := t.searchFile(rel, re, &out, &matches)
+		fileTruncated, err := t.searchFile(rel, d, re, &out, &matches)
 		if err != nil {
 			return err
 		}
@@ -106,12 +111,24 @@ func (t *Search) Invoke(ctx context.Context, raw json.RawMessage) (agent.ToolRes
 	return agent.ToolResult{Content: content, Truncated: truncated}, nil
 }
 
+// walkOpener is implemented by entries whose walk pinned their directory: the
+// file opens from that descriptor, so the walk never re-resolves a path by name.
+type walkOpener interface {
+	openRegular() (*os.File, error)
+}
+
 // searchFile opens one file (TOCTOU-hardened), skips it if binary or unreadable,
 // and appends matching lines. It returns true when a cap was reached (the caller
 // stops the walk). The file is closed before returning — never deferred to the
 // end of the walk — so large trees do not exhaust descriptors.
-func (t *Search) searchFile(rel string, re *regexp.Regexp, out *strings.Builder, matches *int) (bool, error) {
-	f, err := t.ws.openRegularFile(rel)
+func (t *Search) searchFile(rel string, d fs.DirEntry, re *regexp.Regexp, out *strings.Builder, matches *int) (bool, error) {
+	var f *os.File
+	var err error
+	if e, ok := d.(walkOpener); ok {
+		f, err = e.openRegular()
+	} else {
+		f, err = t.ws.openRegularFile(rel)
+	}
 	if err != nil {
 		return false, nil // unreadable or raced file: skip, not fatal
 	}

@@ -1,0 +1,116 @@
+#!/usr/bin/env bash
+# Pull request guard: CHANGELOG.md is written only by scripts/changelog-fold.
+# Any other edit reintroduces the shared insertion point under
+# "## [Unreleased]" that every concurrent PR conflicts on.
+#
+# Invariant checked: CHANGELOG.md at HEAD equals the merge-base's CHANGELOG.md
+# with (a) the fragments this PR deletes folded in by scripts/changelog-fold
+# and optionally (b) one "## [x.y.z] - YYYY-MM-DD" stamp immediately under
+# Unreleased, with its blank-line formatting. Anything else is a direct edit.
+# The fragments in the tree are also
+# validated so a malformed one fails here, not at release time.
+set -euo pipefail
+export LC_ALL=C
+
+if [ "$#" -ne 1 ]; then
+  printf 'Usage: scripts/check-changelog <base-ref>\n' >&2
+  exit 2
+fi
+base="$1"
+script_dir="$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+root="$(CDPATH='' cd -- "$script_dir/.." && pwd -P)"
+
+mb="$(git -C "$root" merge-base "$base" HEAD)"
+base_mode="$(git -C "$root" ls-tree "$mb" -- CHANGELOG.md | awk '{ print $1 }')"
+head_mode="$(git -C "$root" ls-tree HEAD -- CHANGELOG.md | awk '{ print $1 }')"
+if [ "$head_mode" != "$base_mode" ]; then
+  printf 'CHANGELOG.md mode must remain %s\n' "$base_mode" >&2
+  exit 1
+fi
+deleted="$(git -C "$root" diff --no-renames --diff-filter=D --name-only "$mb" HEAD -- changelog.d \
+  | grep -E '^changelog\.d/[0-9]+-[a-z0-9-]+\.md$' || true)"
+
+if git -C "$root" diff --quiet "$mb" HEAD -- CHANGELOG.md; then
+  if [ -n "$deleted" ]; then
+    printf 'changelog fragment removed without folding it into CHANGELOG.md\n' >&2
+    exit 1
+  fi
+  exec "$script_dir/changelog-fold" --dry-run
+fi
+
+tmp="$(cd "$(mktemp -d)" && pwd -P)"
+trap 'rm -rf "$tmp"' EXIT
+
+# Rebuild what the fold of the deleted fragments produces from the
+# merge-base, in a scratch repository, with the same script.
+scratch="$tmp/scratch"
+mkdir -p "$scratch/scripts" "$scratch/changelog.d"
+cp "$script_dir/changelog-fold" "$scratch/scripts/changelog-fold"
+git -C "$root" show "$mb:CHANGELOG.md" >"$scratch/CHANGELOG.md"
+for path in $deleted; do
+  git -C "$root" show "$mb:$path" >"$scratch/$path"
+done
+git -C "$scratch" init -q
+git -C "$scratch" -c user.name=check-changelog -c user.email=check-changelog@localhost add -A
+git -C "$scratch" -c user.name=check-changelog -c user.email=check-changelog@localhost commit -qm base
+"$scratch/scripts/changelog-fold" >/dev/null
+
+git -C "$root" show "HEAD:CHANGELOG.md" >"$tmp/head"
+# git diff --no-index exits 1 when the files differ, which is the expected
+# case here, so its status is taken explicitly rather than through a pipeline
+# where pipefail would turn "files differ" into a pass.
+set +e
+git -C "$root" diff --no-index --text --no-color --no-ext-diff --no-textconv -- \
+  "$scratch/CHANGELOG.md" "$tmp/head" >"$tmp/diff"
+status=$?
+set -e
+if [ "$status" -gt 1 ]; then
+  printf 'git diff --no-index failed with status %d\n' "$status" >&2
+  exit 1
+fi
+reject_direct() {
+  cat >&2 <<'MSG'
+CHANGELOG.md is edited directly. It is written only by scripts/changelog-fold
+at release time; add changelog.d/<issue>-<slug>.md holding the full
+"### <Category> — <title> (#<issue>)" section instead. See changelog.d/README.md.
+MSG
+  exit 1
+}
+if [ "$status" -eq 1 ] && ! grep -q '^@@' "$tmp/diff"; then
+  reject_direct
+fi
+# Only hunk lines count: content after the first "@@", so a changelog line
+# that itself starts with "--- " or "+++ " is not mistaken for the diff
+# header. No -q on the grep: an early exit would SIGPIPE the awk and, under
+# pipefail, turn a found direct edit into a pass.
+if awk '/^@@/ { body = 1; next } body && /^[-+]/' "$tmp/diff" \
+  | grep -Ev '^\+$|^\+## \[[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?\] - [0-9]{4}-[0-9]{2}-[0-9]{2}$' >/dev/null; then
+  reject_direct
+fi
+stamp_pattern='^\+## \[[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?\] - [0-9]{4}-[0-9]{2}-[0-9]{2}$'
+stamp_count="$(grep -Ec "$stamp_pattern" "$tmp/diff" || true)"
+if [ "$status" -eq 1 ] && [ "$stamp_count" -eq 0 ]; then
+  reject_direct
+fi
+if [ "$stamp_count" -ne 0 ]; then
+  stamp="$(grep -E "$stamp_pattern" "$tmp/diff" | cut -c2-)"
+  first_after_unreleased="$(awk '/^## \[Unreleased\]$/ { found = 1; next } found && NF { print; exit }' "$tmp/head")"
+  if [ "$stamp_count" -ne 1 ] || [ "$first_after_unreleased" != "$stamp" ] || [ "$(grep -Fxc -- "$stamp" "$tmp/head")" -ne 1 ]; then
+    printf 'version stamp must immediately follow "## [Unreleased]"\n' >&2
+    exit 1
+  fi
+  shopt -s nullglob
+  for fragment in "$root"/changelog.d/*; do
+    [ "${fragment##*/}" = "README.md" ] && continue
+    printf 'version stamp requires folding all changelog fragments first\n' >&2
+    exit 1
+  done
+fi
+remaining="$(git -C "$root" ls-tree -r --name-only HEAD -- changelog.d \
+  | grep -Ev '^changelog\.d/README\.md$' || true)"
+if [ -n "$remaining" ]; then
+  printf 'CHANGELOG.md changes require folding all changelog fragments\n' >&2
+  exit 1
+fi
+
+"$script_dir/changelog-fold" --dry-run

@@ -8,6 +8,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 )
@@ -217,6 +218,12 @@ type ChatRequest struct {
 	// ParseThinkTags optionally overrides the provider instance's parser tags
 	// for this request. nil uses the provider default tags.
 	ParseThinkTags *ThinkTags `json:"-"`
+	// SessionID is a stable per-conversation identifier. The openai-compat
+	// provider emits it as the x-opencode-session header, which opencode
+	// uses for request routing and prompt caching; empty omits the header,
+	// leaving the request without session metadata. Leading or trailing spaces
+	// and tabs are rejected because HTTP would trim them and change the ID.
+	SessionID string `json:"-"`
 }
 
 // ChatResponse is the provider-agnostic response from a chat completion.
@@ -294,6 +301,7 @@ type EmbedResponse struct {
 
 // ModelOptions controls generation parameters. Pointer fields are optional;
 // nil means "use the provider's default". Use the Ptr helper to set values.
+// New reference-bearing fields require updates to Clone and its isolation tests.
 type ModelOptions struct {
 	Temperature   *float64 `json:"temperature,omitempty"`
 	TopP          *float64 `json:"top_p,omitempty"`
@@ -309,6 +317,27 @@ type ModelOptions struct {
 	// false. Values are not validated here; the CLI boundary validates and
 	// openai-compat servers reject unknown efforts themselves.
 	ThinkEffort string `json:"think_effort,omitempty"`
+}
+
+// Clone returns an independent copy of the options.
+func (o ModelOptions) Clone() ModelOptions {
+	if o.Temperature != nil {
+		o.Temperature = Ptr(*o.Temperature)
+	}
+	if o.TopP != nil {
+		o.TopP = Ptr(*o.TopP)
+	}
+	if o.TopK != nil {
+		o.TopK = Ptr(*o.TopK)
+	}
+	if o.RepeatPenalty != nil {
+		o.RepeatPenalty = Ptr(*o.RepeatPenalty)
+	}
+	if o.Think != nil {
+		o.Think = Ptr(*o.Think)
+	}
+	o.Stop = slices.Clone(o.Stop)
+	return o
 }
 
 // SamplingDefaults contains the generation values that may be filled when a
@@ -673,6 +702,19 @@ type RouteOutcome struct {
 	WasSticky bool    `json:"was_sticky"`
 	Score     float64 `json:"score"`
 	Reason    string  `json:"reason"`
+
+	// UseCase is the RoutingRequest.UseCase that asked for this route (#476).
+	// Provenance only: never load-bearing for routing.
+	//
+	// This is the REQUESTED key, which is what identifies the phase that
+	// produced a route. Which use-case key actually SUPPLIED the role is
+	// config-layer knowledge (Config.RoleForUseCase walks a fallback table);
+	// the Router does not know about that table and must not learn, so the
+	// resolved-via hop is deliberately absent here.
+	//
+	// omitempty keeps outcomes that carry no use case byte-identical to their
+	// pre-#476 JSON shape.
+	UseCase string `json:"use_case,omitempty"`
 
 	// Attempts is the ordered list of execution attempts (primary first).
 	// Nil/empty pre-PR2 because nothing populates it yet; the

@@ -114,6 +114,12 @@ type RoutingRequest struct {
 	Priority Priority
 	// AffinityKey is a caller-supplied key for sticky routing (e.g. session ID).
 	AffinityKey string
+	// SessionID is the caller's stable per-conversation identifier, carried
+	// through routing so the executing provider can put it on the wire — the
+	// openai-compat provider emits it as x-opencode-session. Distinct from
+	// AffinityKey, which steers which model is chosen: SessionID never
+	// influences routing, it only travels with the request.
+	SessionID string
 	// PreferredChain is an ordered list of model selectors (same syntax as
 	// Model: "provider/model" qualified, "model" unqualified) derived from a
 	// higher layer such as config.Config.RoleFallbackChain. When non-empty,

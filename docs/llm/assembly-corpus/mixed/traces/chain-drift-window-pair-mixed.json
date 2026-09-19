@@ -35,7 +35,7 @@
     },
     {
       "role": "tool",
-      "content": "rec-drift-gate · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src: · the drift gate covers warm-tier alerts only until the pilot review closes\nrec-eval-replays · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:\nrec-pilot-review · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:\nrec-review-section · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:\nrec-series-owners · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:\nrec-suppression-log · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:",
+      "content": "trust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-drift-gate · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src-claim: · the drift gate covers warm-tier alerts only until the pilot review closes\ntrust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-eval-replays · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src-claim:\ntrust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-pilot-review · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src-claim:\ntrust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-review-section · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src-claim:\ntrust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-series-owners · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src-claim:\ntrust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-suppression-log · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src-claim:",
       "tool_call_id": "c1",
       "name": "agent_memory_search"
     },
@@ -54,7 +54,7 @@
     },
     {
       "role": "tool",
-      "content": "### source: \"internal/drift/detector.go\"\npurpose: Averaging-window constant and the z-style drift score.\noverview: detector.go pins the averaging window as a code constant after noise-chasing measurements and scores each series as deviation from its windowed mean.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n--- source: \"internal/drift/detector.go\" (lines 1-14, similarity: 1.00) ---\n1| package drift\n2| \n3| import \"time\"\n4| \n5| // driftWindow is the averaging window the detector scores against.\n6| // Shorter windows were measured to chase noise; the window is a\n7| // code constant and the alert thresholds are config, so tuning\n8| // sensitivity never silently changes what a score means.\n9| const driftWindow = 35 * time.Minute\n10| \n11| func (d *Detector) score(s series) float64 {\n12| \tbase := s.mean(driftWindow)\n13| \treturn (s.latest() - base) / s.stddev(driftWindow)\n14| }\n\n### source: \"internal/drift/route.go\"\npurpose: Tier-scoped routing with counterfactual suppression logging.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n\n### source: \"docs/drift-alerts.md\"\npurpose: Drift alerting guide: fixed-window scores, scoped routing, triage order.\noverview: drift-alerts.md explains fixed-window scoring for cross-fleet comparability, tier-scoped routing with reasoned counterfactual suppressions, and the logs-before-dashboards triage order postmortems keep vindicating.\nlanguage: markdown\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n",
+      "content": "### source: \"internal/drift/detector.go\"\npurpose: Averaging-window constant and the z-style drift score.\noverview: detector.go pins the averaging window as a code constant after noise-chasing measurements and scores each series as deviation from its windowed mean.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n--- source: \"internal/drift/detector.go\" (lines 1-14, similarity: 1.00) ---\n1| package drift\n2| \n3| import \"time\"\n4| \n5| // driftWindow is the averaging window the detector scores against.\n6| // Shorter windows were measured to chase noise; the window is a\n7| // code constant and the alert thresholds are config, so tuning\n8| // sensitivity never silently changes what a score means.\n9| const driftWindow = 35 * time.Minute\n10| \n11| func (d *Detector) score(s series) float64 {\n12| \tbase := s.mean(driftWindow)\n13| \treturn (s.latest() - base) / s.stddev(driftWindow)\n14| }\n\n### source: \"internal/drift/route.go\"\npurpose: Tier-scoped routing with counterfactual suppression logging.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n\n### source: \"docs/drift-alerts.md\"\npurpose: Drift alerting guide: fixed-window scores, scoped routing, triage order.\nlanguage: markdown\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n",
       "tool_call_id": "c2",
       "name": "retrieve"
     },
@@ -99,8 +99,8 @@
       "rec-series-owners",
       "rec-suppression-log"
     ],
-    "estimated_prompt_tokens": 927,
-    "state_digest": "24dc3db36b677a4e900eed0a379eefaf318d1cbfe5ad78d3212b009300824cc8",
+    "estimated_prompt_tokens": 997,
+    "state_digest": "11474487e46c0807d2a1684886b0d8fc6673b4823e0bebcf2fa561b36c718d4d",
     "subjects": [
       "(c1|memory|rec-drift-gate)",
       "(c1|memory|rec-eval-replays)",
@@ -115,9 +115,9 @@
     "stratum": "chain_retention",
     "answer_home": "join",
     "scenario_family": "drift-window-chain",
-    "budget": 1125,
-    "raw_state_tokens": 1875,
+    "budget": 1195,
+    "raw_state_tokens": 1992,
     "pressure_level": "critical",
-    "shed_bytes": 3439
+    "shed_bytes": 3627
   }
 }

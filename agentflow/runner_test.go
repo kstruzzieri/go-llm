@@ -2,7 +2,11 @@ package agentflow
 
 import (
 	"context"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 )
@@ -21,17 +25,81 @@ func TestExecRunnerArgv_BinaryMode(t *testing.T) {
 	}
 }
 
+func TestExecRunnerDisablePythonBytecodeWritesIsChildOnly(t *testing.T) {
+	t.Setenv("PYTHONDONTWRITEBYTECODE", "")
+	r := &ExecRunner{bin: "sh", dir: t.TempDir()}
+	r.DisablePythonBytecodeWrites()
+	out, errOut, exit, err := r.Run(context.Background(), []string{"-c", `printf %s "$PYTHONDONTWRITEBYTECODE"`}, nil)
+	if err != nil || exit != 0 || string(out) != "1" || len(errOut) != 0 {
+		t.Fatalf("child env: stdout=%q stderr=%q exit=%d err=%v", out, errOut, exit, err)
+	}
+	if got := os.Getenv("PYTHONDONTWRITEBYTECODE"); got != "" {
+		t.Fatalf("parent PYTHONDONTWRITEBYTECODE = %q, want inherited empty value", got)
+	}
+}
+
 func TestExecRunnerArgv_SrcMode(t *testing.T) {
 	r := NewSrcExecRunner("/ws", "/checkout")
 	bin, argv, env := r.commandFor([]string{"status"})
 	if bin != "python3" {
 		t.Fatalf("bin = %q, want python3", bin)
 	}
-	if want := []string{"-m", "agentflow", "status"}; !reflect.DeepEqual(argv, want) {
+	if want := []string{"-P", "-m", "agentflow", "status"}; !reflect.DeepEqual(argv, want) {
 		t.Fatalf("argv = %v, want %v", argv, want)
 	}
 	if want := "PYTHONPATH=/checkout/src"; len(env) != 1 || env[0] != want {
 		t.Fatalf("env = %v, want [%s]", env, want)
+	}
+}
+
+func TestExecRunnerSrcModeRejectsPathList(t *testing.T) {
+	r := NewSrcExecRunner(t.TempDir(), "trusted"+string(os.PathListSeparator)+"checkout")
+	r.bin = "must-not-launch"
+	out, errOut, exit, err := r.Run(t.Context(), []string{"status"}, nil)
+	if err == nil || !strings.Contains(err.Error(), "source checkout contains a path-list separator") ||
+		out != nil || errOut != nil || exit != 0 {
+		t.Fatalf("stdout=%q stderr=%q exit=%d err=%v, want source path error before launch", out, errOut, exit, err)
+	}
+}
+
+func TestExecRunnerSrcModePreservesContextWithSafePath(t *testing.T) {
+	if _, err := exec.LookPath("python3"); err != nil {
+		t.Skip("python3 unavailable; launch arguments are covered by TestExecRunnerArgv_SrcMode")
+	}
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkout := filepath.Join(t.TempDir(), "trusted checkout")
+	pkg := filepath.Join(checkout, "src", "agentflow")
+	if err := os.MkdirAll(pkg, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(pkg, "__init__.py"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// Inspect the child's search path using only a benign, explicitly selected package.
+	probe := `import os
+import sys
+assert sys.flags.safe_path
+assert sys.argv[1:] == ["--root", os.getcwd(), "--literal", "value with spaces"]
+assert all(p and os.path.realpath(p) != os.getcwd() for p in sys.path)
+assert sys.stdin.buffer.read() == b"input"
+assert sys.dont_write_bytecode
+sys.stdout.write("ok")
+`
+	if err := os.WriteFile(filepath.Join(pkg, "__main__.py"), []byte(probe), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PYTHONSAFEPATH", "")
+	t.Setenv("PYTHONOPTIMIZE", "")
+	t.Setenv("PYTHONDONTWRITEBYTECODE", "")
+	t.Setenv("PYTHONPATH", root)
+	r := NewSrcExecRunner(root, checkout)
+	r.DisablePythonBytecodeWrites()
+	out, errOut, exit, err := r.Run(t.Context(), []string{"--root", root, "--literal", "value with spaces"}, []byte("input"))
+	if err != nil || exit != 0 || string(out) != "ok" || len(errOut) != 0 {
+		t.Fatalf("stdout=%q stderr=%q exit=%d err=%v, want safe-path probe success", out, errOut, exit, err)
 	}
 }
 

@@ -19,9 +19,34 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
 
       - name: CI script self-test
         run: ./scripts/test-ci-local
+
+      - name: Changelog script self-test
+        run: ./scripts/test-changelog-fold
+
+      - name: Reject direct CHANGELOG.md edits and validate fragments
+        # The fold invariant holds for PRs into develop. A release PR promotes
+        # develop into main wholesale, and main never carries fragments, so the
+        # folded sections look like direct edits from main's side; the fold was
+        # already checked on the stamp PR into develop.
+        if: github.event_name == 'pull_request' && github.base_ref != 'main'
+        env:
+          BASE: ${{ github.base_ref }}
+        run: ./scripts/check-changelog "origin/$BASE"
+
+      - name: Require a folded changelog on release PRs
+        if: github.event_name == 'pull_request' && github.base_ref == 'main'
+        # Tracked paths, so hidden entries count and a missing README fails.
+        run: |
+          tracked="$(git ls-files -- changelog.d)"
+          if [ "$tracked" != "changelog.d/README.md" ]; then
+            printf 'release PR must carry exactly changelog.d/README.md; tracked:\n%s\n' "$tracked" >&2
+            exit 1
+          fi
 
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
@@ -30,10 +55,16 @@ jobs:
       - name: Lint
         uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9
         with:
-          version: v2.11.4
+          version: v2.13.2
 
       - name: Format all Go files
         run: golangci-lint fmt --diff
+
+      # Same discovery + exact-PASS + skip-allowlist gate the pre-push hook
+      # runs, so a renamed, skipped, or hollowed-out aggregate cannot pass the
+      # required check by bypassing the local hook.
+      - name: Security contracts
+        run: ./scripts/ci-local --mode security
 
       - name: Test
         run: go test -race ./...
@@ -46,6 +77,7 @@ jobs:
         run: |
           go build -o /dev/null ./cmd/golem
           go test -c -o /dev/null ./cmd/golem
+          go test -c -o /dev/null ./agent/interceptor
 
       # Validate .goreleaser.yaml on every PR so a schema error surfaces here,
       # not at tag-push time when it would fail the actual release.

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/kstruzzieri/go-llm/agent"
 	"github.com/kstruzzieri/go-llm/fingerprint"
 	"github.com/kstruzzieri/go-llm/provider"
 )
@@ -64,7 +65,7 @@ func (r inputCeilingTestRegistry) ExplainToolCall(_ context.Context, key provide
 func TestResolveInputCeiling(t *testing.T) {
 	key := func(model string) provider.ModelKey { return provider.ModelKey{Provider: "test", Model: model} }
 	profile := func(model string, window int) *provider.ModelProfile {
-		return &provider.ModelProfile{Key: key(model), ContextWindow: window, Caps: toolRouteCaps}
+		return &provider.ModelProfile{Key: key(model), ContextWindow: window, Caps: agent.ModelCallCapabilities(true)}
 	}
 
 	tests := []struct {
@@ -107,7 +108,7 @@ func TestResolveInputCeiling(t *testing.T) {
 			// the derivation must match or the two budgets diverge again.
 			name: "quality ceiling does not shrink agent window",
 			reg: inputCeilingTestRegistry{profiles: map[provider.ModelKey]*provider.ModelProfile{
-				key("yarn"): {Key: key("yarn"), ContextWindow: 32_768, QualityCtxCeiling: 16_384, Caps: toolRouteCaps},
+				key("yarn"): {Key: key("yarn"), ContextWindow: 32_768, QualityCtxCeiling: 16_384, Caps: agent.ModelCallCapabilities(true)},
 			}},
 			chain:      []string{"test/yarn"},
 			want:       30_720,
@@ -288,7 +289,10 @@ func TestResolveInputCeiling(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := resolveInputCeiling(context.Background(), tt.reg, tt.chain, tt.explicit, tt.outputReserve, tt.resolveTool)
+			// "agent" throughout: every expectation in this table is the
+			// pre-#476 value, so an unchanged result here is the proof that
+			// parameterizing the use case did not move ordinary execution.
+			got := resolveInputCeiling(context.Background(), tt.reg, tt.chain, "agent", tt.explicit, tt.outputReserve, tt.resolveTool)
 			if got.ceiling != tt.want || got.source != tt.wantSource {
 				t.Fatalf("resolveInputCeiling() = %+v, want ceiling=%d source=%q", got, tt.want, tt.wantSource)
 			}
@@ -298,14 +302,80 @@ func TestResolveInputCeiling(t *testing.T) {
 
 func TestResolveInputCeilingRecomputesForChangedChain(t *testing.T) {
 	reg := inputCeilingTestRegistry{profiles: map[provider.ModelKey]*provider.ModelProfile{
-		{Provider: "test", Model: "first"}:  {ContextWindow: 32_768, Caps: toolRouteCaps},
-		{Provider: "test", Model: "second"}: {ContextWindow: 131_072, Caps: toolRouteCaps},
+		{Provider: "test", Model: "first"}:  {ContextWindow: 32_768, Caps: agent.ModelCallCapabilities(true)},
+		{Provider: "test", Model: "second"}: {ContextWindow: 131_072, Caps: agent.ModelCallCapabilities(true)},
 	}}
-	first := resolveInputCeiling(context.Background(), reg, []string{"test/first"}, 0, 0, false)
-	second := resolveInputCeiling(context.Background(), reg, []string{"test/second"}, 0, 0, false)
+	first := resolveInputCeiling(context.Background(), reg, []string{"test/first"}, "agent", 0, 0, false)
+	second := resolveInputCeiling(context.Background(), reg, []string{"test/second"}, "agent", 0, 0, false)
 	if first.ceiling != 30_720 || second.ceiling != 129_024 {
 		t.Fatalf("changed chain ceilings = %d then %d, want 30720 then 129024", first.ceiling, second.ceiling)
 	}
+}
+
+func TestResolveInputCeiling_HonorsTheCallersUseCase(t *testing.T) {
+	// The probe use case is "reasoning", NOT "planning". Planning and agent
+	// agree on both functions under test today -- neither is in
+	// qualitySensitiveUseCases, and neither has a defaultExpectedOutputs entry
+	// -- so a planning-vs-agent comparison could not fail whichever literal
+	// the implementation used. "reasoning" differs on both axes, which is what
+	// makes a hard-coded "agent" detectable at all.
+	//
+	//	EffectiveContextWindow: reasoning honors QualityCtxCeiling; agent does not.
+	//	DefaultExpectedOutput:  reasoning is 4096; agent falls back to chat's 2048.
+	reg := inputCeilingTestRegistry{profiles: map[provider.ModelKey]*provider.ModelProfile{
+		{Provider: "test", Model: "yarn"}: {
+			Key:               provider.ModelKey{Provider: "test", Model: "yarn"},
+			ContextWindow:     100_000,
+			QualityCtxCeiling: 32_768,
+			Caps:              agent.ModelCallCapabilities(true),
+		},
+	}}
+	chain := []string{"test/yarn"}
+
+	t.Run("zero reserve: both window and implicit reserve follow the use case", func(t *testing.T) {
+		// agent: full 100000 window, minus the implicit 2048 chat-default reserve.
+		if got := resolveInputCeiling(context.Background(), reg, chain, "agent", 0, 0, false); got.ceiling != 97_952 {
+			t.Errorf("agent ceiling = %d, want 97952 (100000 - 2048)", got.ceiling)
+		}
+		// reasoning: quality ceiling 32768, minus its own 4096 reserve.
+		if got := resolveInputCeiling(context.Background(), reg, chain, "reasoning", 0, 0, false); got.ceiling != 28_672 {
+			t.Errorf("reasoning ceiling = %d, want 28672 (32768 - 4096)", got.ceiling)
+		}
+	})
+
+	t.Run("nonzero reserve isolates the window from the reserve", func(t *testing.T) {
+		// An explicit reserve is subtracted by turnBudget, not here, so the
+		// only remaining use-case input is EffectiveContextWindow.
+		if got := resolveInputCeiling(context.Background(), reg, chain, "agent", 0, 8_000, false); got.ceiling != 100_000 {
+			t.Errorf("agent ceiling = %d, want the full 100000 window", got.ceiling)
+		}
+		if got := resolveInputCeiling(context.Background(), reg, chain, "reasoning", 0, 8_000, false); got.ceiling != 32_768 {
+			t.Errorf("reasoning ceiling = %d, want the 32768 quality ceiling", got.ceiling)
+		}
+	})
+
+	t.Run("the unadmittable-model skip threshold follows the use case", func(t *testing.T) {
+		// window 3000 sits BETWEEN agent's 2048 reserve and reasoning's 4096:
+		// admittable as agent, never admittable as reasoning. The reasoning
+		// case must therefore skip this model and fall back rather than let a
+		// model that can never be admitted set the chain minimum.
+		tight := inputCeilingTestRegistry{profiles: map[provider.ModelKey]*provider.ModelProfile{
+			{Provider: "test", Model: "tiny"}: {
+				Key:           provider.ModelKey{Provider: "test", Model: "tiny"},
+				ContextWindow: 3_000,
+				Caps:          agent.ModelCallCapabilities(true),
+			},
+		}}
+		tightChain := []string{"test/tiny"}
+		if got := resolveInputCeiling(context.Background(), tight, tightChain, "agent", 0, 0, false); got.ceiling != 952 {
+			t.Errorf("agent ceiling = %d, want 952 (3000 - 2048)", got.ceiling)
+		}
+		got := resolveInputCeiling(context.Background(), tight, tightChain, "reasoning", 0, 0, false)
+		if got.ceiling != agent.DefaultInputCeiling || got.source != inputCeilingSafeFallback {
+			t.Errorf("reasoning resolution = %+v, want the safe fallback (%d): 3000 <= 4096 is never admittable",
+				got, agent.DefaultInputCeiling)
+		}
+	})
 }
 
 func TestInputCeilingResolutionLineReportsValueAndSource(t *testing.T) {

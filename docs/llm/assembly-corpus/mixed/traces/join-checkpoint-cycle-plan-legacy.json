@@ -45,7 +45,7 @@
       "rec-review-notes"
     ],
     "estimated_prompt_tokens": 1058,
-    "state_digest": "7dfb5dd40ed2207e6fa277ad8d19ca25f63a985fba26407ead2d006cca4ab0b6",
+    "state_digest": "3100c4ed09cb4cc90618ac9f8c3a25566aef01a28f037977f7b04c25b8c184f6",
     "subjects": [
       "(c1|memory|rec-crash-rotation)",
       "(c1|memory|rec-lease-alarm)",
@@ -57,10 +57,10 @@
     "stratum": "cross_domain_join",
     "answer_home": "join",
     "scenario_family": "checkpoint-cycle-join",
-    "budget": 1130,
-    "raw_state_tokens": 1883,
+    "budget": 1165,
+    "raw_state_tokens": 1942,
     "pressure_level": "critical",
     "shed_messages": 12,
-    "shed_bytes": 2808
+    "shed_bytes": 3043
   }
 }

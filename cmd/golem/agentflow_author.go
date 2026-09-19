@@ -21,6 +21,7 @@ import (
 	"github.com/kstruzzieri/go-llm/agent"
 	agenttools "github.com/kstruzzieri/go-llm/agent/tools"
 	"github.com/kstruzzieri/go-llm/agentflow"
+	"github.com/kstruzzieri/go-llm/config"
 	"github.com/kstruzzieri/go-llm/provider"
 )
 
@@ -109,11 +110,17 @@ func plannerModelOptions(options provider.ModelOptions) provider.ModelOptions {
 // on the same reserve). A zero reserve leaves NumPredict untouched, but the
 // router's ExpectedOutput then comes from the planner's NumPredict
 // (>= minPlannerOutput) while the derived input ceiling reserved only the
-// implicit DefaultExpectedOutput("agent"); lower the ceiling by the
+// implicit DefaultExpectedOutput(useCase); lower the ceiling by the
 // difference, or long planner sessions assemble input in a band every
 // candidate must refuse (ErrBudgetAdaptationRequired) instead of compacting.
+//
+// useCase is the use case the author's caller actually routes with (#476
+// D4). It is a parameter, not a literal: hard-coding a peer's use case here
+// silently desynchronizes this reservation from the router's ExpectedOutput
+// the moment the two use cases get different defaults.
+//
 // options is the planner's already-floored ModelOptions.
-func plannerBudget(budget agent.Budget, options provider.ModelOptions) agent.Budget {
+func plannerBudget(budget agent.Budget, options provider.ModelOptions, useCase string) agent.Budget {
 	if budget.OutputReserve > 0 {
 		budget.OutputReserve = max(budget.OutputReserve, minPlannerOutput)
 		return budget
@@ -122,7 +129,7 @@ func plannerBudget(budget agent.Budget, options provider.ModelOptions) agent.Bud
 	if ceiling <= 0 {
 		ceiling = agent.DefaultInputCeiling
 	}
-	if delta := options.NumPredict - provider.DefaultExpectedOutput("agent"); delta > 0 {
+	if delta := options.NumPredict - provider.DefaultExpectedOutput(useCase); delta > 0 {
 		// Keep the result positive: a zero InputCeiling means "unset" to
 		// turnBudget and would silently restore the full default ceiling.
 		budget.InputCeiling = max(ceiling-delta, 1)
@@ -144,6 +151,13 @@ func (t *submitPlanTool) Effect() agent.Effect {
 	// before Invoke may initialize or lock Agentflow state.
 	return agent.Effect{Class: agent.Write | agent.Exec, Approval: agent.ApprovalAlways, Scope: agent.Scope{CWD: t.sess.root}}
 }
+
+// Origin declares plan diagnostics workspace-local (#514 D6): the output of
+// the fixed local agentflow CLI over workspace proof state, the same class
+// as run_command. Tagged, never blocked.
+func (t *submitPlanTool) Origin() agent.Origin { return agent.OriginWorkspace }
+
+var _ agent.OriginTool = (*submitPlanTool)(nil)
 
 func (t *submitPlanTool) Plan(ctx context.Context, args json.RawMessage) (agent.ToolPlan, error) {
 	effect := t.Effect()
@@ -1456,18 +1470,17 @@ func runAgentflowAuthorWithClient(ctx context.Context, stdout, stderr io.Writer,
 
 	planTools := append(agenttools.NewFileToolsForWorkspace(ws), newSubmitPlanTool(as))
 
-	system := plannerBasePrompt
-	if sess.projectContextBlock != "" {
-		system = system + "\n\n" + sess.projectContextBlock
-	}
+	// The same current fragments the runtime prompt carries, in the same
+	// order (#354 D10); refresh updates sysInputs, so a later -goal sees it.
+	system := plannerBasePrompt + injectedContext(sess.sysInputs)
 
-	plannerOpts := plannerModelOptions(sess.modelOptions)
+	plannerOpts := plannerModelOptions(sess.startupModelOptions)
 	req := agent.Request{
 		Goal:     f.goal,
 		System:   system,
 		Tools:    planTools,
 		MaxSteps: sess.maxSteps,
-		Budget:   plannerBudget(sess.budget, plannerOpts),
+		Budget:   plannerBudget(sess.startupBudget, plannerOpts, config.UseCasePlanning),
 		Options:  plannerOpts,
 		Approver: &authorPlanApprover{delegate: approver, sess: as},
 	}
@@ -1518,19 +1531,42 @@ type authorPlanApprover struct {
 	sess     *authorSession
 }
 
+// recordDenial is the one place a denied lock is recorded (#514 D4), so the
+// plain and the risk-aware approval paths cannot diverge.
+func (a *authorPlanApprover) recordDenial(approved bool, err error, call provider.ToolCall) {
+	if err == nil && !approved && call.Function.Name == submitPlanToolName {
+		a.sess.approvalDenied = true
+		a.sess.deniedPlanPath, a.sess.deniedPlanSaveErr = saveDeniedPlan(call.Function.Arguments)
+		a.sess.cancel()
+	}
+}
+
 func (a *authorPlanApprover) Approve(ctx context.Context, call provider.ToolCall, preview string) (bool, error) {
 	approved := false
 	var err error
 	if a.delegate != nil {
 		approved, err = a.delegate.Approve(ctx, call, preview)
 	}
-	if err == nil && !approved && call.Function.Name == submitPlanToolName {
-		a.sess.approvalDenied = true
-		a.sess.deniedPlanPath, a.sess.deniedPlanSaveErr = saveDeniedPlan(call.Function.Arguments)
-		a.sess.cancel()
-	}
+	a.recordDenial(approved, err, call)
 	return approved, err
 }
+
+// ApproveWithRisk forwards the run's report to a delegate that can render it
+// (#514 D4); any other delegate keeps the plain path. The library prefers
+// this method, so the lock prompt shows the score when the delegate is the
+// interactive approver.
+func (a *authorPlanApprover) ApproveWithRisk(ctx context.Context, call provider.ToolCall, preview, key string, risk agent.RiskReport) (agent.ApprovalDecision, error) {
+	ra, ok := a.delegate.(agent.RiskApprover)
+	if !ok {
+		approved, err := a.Approve(ctx, call, preview)
+		return agent.ApprovalDecision{Approved: approved}, err
+	}
+	d, err := ra.ApproveWithRisk(ctx, call, preview, key, risk)
+	a.recordDenial(d.Approved, err, call)
+	return d, err
+}
+
+var _ agent.RiskApprover = (*authorPlanApprover)(nil)
 
 // autoPlanApprover implements -approve-plan-lock: the non-interactive -goal
 // path. It prints the same preview an operator would see, then approves the

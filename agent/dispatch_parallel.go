@@ -59,28 +59,43 @@ func canRunParallel(reg *toolRegistry, calls []provider.ToolCall) bool {
 //	Phase 2 (parallel): invokeCall per call via a bounded errgroup. Workers never
 //	  fail the group, so the group ctx cancels only when the PARENT ctx cancels.
 //	Phase 3 (serial): record, OnToolResult, append observation, governor, in model
-//	  order, with the same short-circuit-and-discard semantics as the serial path.
+//	  order. A short-circuit discards trailing content while retaining audit
+//	  metadata for every synthetic or invoked outcome already completed.
 func (o *Orchestrator) runToolCallsParallel(ctx context.Context, res *Result, state *State,
 	reg *toolRegistry, calls []provider.ToolCall, approver Approver, obs Observer, step int,
-	gov *restraintGovernor, b *batch) error {
+	gov *restraintGovernor, b *batch, ic *interceptorRun) error {
 
 	// Phase 1: prepare serially, in model order.
 	prepared := make([]preparedCall, len(calls))
 	for i, call := range calls {
 		res.Events = append(res.Events, EventRecord{Step: step, Kind: "tool_call"})
-		p, err := o.prepareCall(ctx, reg, call, approver, obs, step, gov)
+		p, err := o.prepareCall(ctx, reg, call, approver, obs, step, gov, ic)
 		if err != nil {
+			for _, earlier := range prepared[:i] {
+				if earlier.result != nil {
+					appendToolCallRecord(res, step, earlier.rec, earlier.result.RouteOutcome)
+				}
+			}
 			return err // hard abort: no invokes launched, nothing to cancel
 		}
 		prepared[i] = p
 	}
 
-	// Phase 2: invoke concurrently, bounded; time each invoke in isolation.
+	// Phase 2: invoke concurrently, bounded; time each invoke in isolation. A
+	// prepared call carrying a synthetic result (#436 interceptor block) is
+	// never invoked: its result is copied through. Invocation uses the
+	// canonical prepared call, never the model's slice.
 	results := make([]ToolResult, len(prepared))
 	latencies := make([]time.Duration, len(prepared))
+	invoked := make([]bool, len(prepared))
 	g, gctx := errgroup.WithContext(ctx)
 	g.SetLimit(parallelToolCallLimit)
 	for i := range prepared {
+		if prepared[i].result != nil {
+			results[i] = *prepared[i].result
+			continue
+		}
+		invoked[i] = true
 		g.Go(func() error {
 			start := o.now()
 			results[i] = o.invokeCall(gctx, prepared[i].tool, prepared[i].effect, prepared[i].call.Function.Arguments)
@@ -90,6 +105,7 @@ func (o *Orchestrator) runToolCallsParallel(ctx context.Context, res *Result, st
 	}
 	_ = g.Wait() // joins every worker -> no goroutine leak
 	if err := ctx.Err(); err != nil {
+		appendTrailingToolCallRecords(res, step, prepared, results, latencies, invoked, 0)
 		return err // parent cancelled -> hard abort
 	}
 
@@ -98,15 +114,36 @@ func (o *Orchestrator) runToolCallsParallel(ctx context.Context, res *Result, st
 	for i := range prepared {
 		rec := prepared[i].rec
 		rec.IsError = results[i].IsError
-		rec.Invoked = true
-		rec.Latency = latencies[i]
-		stop, err := o.recordResult(ctx, res, state, obs, gov, step, prepared[i].call, prepared[i].effect, rec, results[i], b)
+		if invoked[i] {
+			rec.Invoked = true
+			rec.Latency = latencies[i]
+		}
+		stop, err := o.recordResult(ctx, res, state, obs, gov, step, prepared[i].call, prepared[i].effect, rec, results[i], prepared[i].inspectResult, b, ic)
 		if err != nil {
+			appendTrailingToolCallRecords(res, step, prepared, results, latencies, invoked, i+1)
 			return err
 		}
 		if stop {
+			appendTrailingToolCallRecords(res, step, prepared, results, latencies, invoked, i+1)
 			return nil // governor tripped: discard later already-computed read-only results
 		}
 	}
 	return nil
+}
+
+func appendTrailingToolCallRecords(res *Result, step int, prepared []preparedCall, results []ToolResult,
+	latencies []time.Duration, invoked []bool, start int) {
+
+	for i := start; i < len(prepared); i++ {
+		if !invoked[i] && prepared[i].result == nil {
+			continue
+		}
+		rec := prepared[i].rec
+		rec.IsError = results[i].IsError
+		if invoked[i] {
+			rec.Invoked = true
+			rec.Latency = latencies[i]
+		}
+		appendToolCallRecord(res, step, rec, results[i].RouteOutcome)
+	}
 }

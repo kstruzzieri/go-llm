@@ -19,7 +19,7 @@
     },
     {
       "role": "tool",
-      "content": "rec-mute-draft · semantic · 2025-07-27 · the 90-minute mute figure lived only in the draft runbook; never shipped\nrec-mute-window · semantic · 2025-07-27 · a maintenance mute suppresses alerting for 25 minutes and then re-arms on its own; nobody extended it after the pager consolidation, and stacking mutes back to back was rejected at review - plan maintenance in slices that fit the window\nrec-status-cadence · working · 2025-07-27 · weekly status sweep happens Monday morning; the fleet digest goes out the same afternoon",
+      "content": "trust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-mute-draft · semantic · 2025-07-27 · the 90-minute mute figure lived only in the draft runbook; never shipped\ntrust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-mute-window · semantic · 2025-07-27 · a maintenance mute suppresses alerting for 25 minutes and then re-arms on its own; nobody extended it after the pager consolidation, and stacking mutes back to back was rejected at review - plan maintenance in slices that fit the window\ntrust=agent-written; unreviewed; origin=memory.create; session=caller-claim · rec-status-cadence · working · 2025-07-27 · weekly status sweep happens Monday morning; the fleet digest goes out the same afternoon",
       "tool_call_id": "c2",
       "name": "agent_memory_search"
     },
@@ -43,8 +43,8 @@
       "rec-mute-window",
       "rec-status-cadence"
     ],
-    "estimated_prompt_tokens": 204,
-    "state_digest": "01c08174ad989cac5ff4a9b31eb2147e5560c0cb230c35bbfbbd810bdc4ae84e",
+    "estimated_prompt_tokens": 263,
+    "state_digest": "9d0a83222e6a1c4797591ae53de5237b4521d1cd3a90bc3141572f13600d16b9",
     "subjects": [
       "(c1|rag|docs/maintenance.md)",
       "(c1|rag|internal/alert/mute.go)",
@@ -56,8 +56,8 @@
     "stratum": "memory_only",
     "answer_home": "memory",
     "scenario_family": "alert-mute-mem",
-    "budget": 937,
-    "raw_state_tokens": 1562,
+    "budget": 973,
+    "raw_state_tokens": 1621,
     "pressure_level": "ok",
     "shed_messages": 10,
     "shed_bytes": 5002

@@ -136,6 +136,29 @@ func ParseDestination(s string) (Destination, error) {
 	return NewDestination(name, raw)
 }
 
+// ParseDestinationFlag reads a repeatable -allow-destination CLI value: the
+// canonical "<provider>/<base URL>" grant, or the deprecated
+// "<provider>=<base URL>" spelling go-llm-mcp historically required, kept
+// through a deprecation window and normalized to the same canonical identity.
+// The legacy delimiter is the first "=" directly preceding an http(s) scheme,
+// so provider names containing "=" keep working; a value that parses
+// canonically is never rewritten, so a URL path carrying "=https://" cannot
+// be mangled.
+func ParseDestinationFlag(s string) (Destination, error) {
+	d, err := ParseDestination(s)
+	if err == nil {
+		return d, nil
+	}
+	i := strings.Index(s, "=http://")
+	if j := strings.Index(s, "=https://"); i < 0 || (j >= 0 && j < i) {
+		i = j
+	}
+	if i < 0 {
+		return Destination{}, err
+	}
+	return ParseDestination(s[:i] + "/" + s[i+1:])
+}
+
 // canonicalizeEndpoint implements DestinationSchemeVersion. Its output is a
 // fixed point: canonicalizing an already-canonical value returns it unchanged,
 // so a key derived on a later pass always matches the grant issued earlier.

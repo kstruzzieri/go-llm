@@ -69,15 +69,14 @@ func buildDelegateTool(router *provider.Router, role string, chain []string, str
 // delegateSystemFragment is appended to the system prompt only when delegation
 // is enabled. Empty otherwise so default runs are byte-for-byte unchanged. The
 // wording is write-aware: it only instructs the model to persist the result
-// with write_file/edit_file when those tools are actually registered
-// (-allow-write); otherwise it frames the output as review-and-present, so the
-// prompt never tells the model to call a tool that isn't available.
-func delegateSystemFragment(enabled, allowWrite bool) string {
+// when a file-mutation tool is registered. Exact tool names stay in the base
+// prompt so a selective headless run never advertises an unmounted sibling.
+func delegateSystemFragment(enabled, writeEnabled bool) string {
 	if !enabled {
 		return ""
 	}
-	if allowWrite {
-		return " For a well-scoped, self-contained code-generation sub-task you may call delegate_code with a precise prompt; it returns generated code from a specialist model. The result is a proposal: review it, then write it with write_file or edit_file. Use delegate_code for bulk generation, never for planning or decisions, and stay responsible for what you apply."
+	if writeEnabled {
+		return " For a well-scoped, self-contained code-generation sub-task you may call delegate_code with a precise prompt; it returns generated code from a specialist model. The result is a proposal: review it, then write it using the available file-mutation tool. Use delegate_code for bulk generation, never for planning or decisions, and stay responsible for what you apply."
 	}
 	return " For a well-scoped, self-contained code-generation sub-task you may call delegate_code with a precise prompt; it returns generated code from a specialist model for you to review and present to the user. Use delegate_code for bulk generation, never for planning or decisions."
 }
@@ -177,9 +176,11 @@ func resolveDispatchFanout(capacity func(provider.ModelKey) (int, bool), chain [
 // newDispatchTool is the caller-injectable seam of the dispatch wiring: tests
 // drive child behavior (toolset pass-through, retrieve reuse, fan-out,
 // budget threading, completion notices) through it with a scripted caller,
-// which a *provider.Router cannot fake. mixed mirrors -progressive so child
-// context assembly matches the shared retrieve renderer, the same pairing
-// newOrchestratorFactory enforces for the parent. budget carries the resolved
+// which a *provider.Router cannot fake. f supplies -progressive (child context
+// assembly must match the shared retrieve renderer) and -interceptors
+// (children inherit the parent's chain, #514 D2). It takes flags rather than
+// separate booleans so the production call site forwards one parsed value and
+// both builders derive policy through interceptorsFor. budget carries the resolved
 // input ceiling and output reserve for the chain children route, so a child
 // never assembles a request larger than its backend accepts; zero fields fall
 // back to library defaults. fan carries the resolved fan-out policy (#403):
@@ -194,20 +195,20 @@ func resolveDispatchFanout(capacity func(provider.ModelKey) (int, bool), chain [
 // gemma4:31b measured task 2 starving behind task 1 (single model calls ran
 // 76-347s), so golem budgets that per-task ceiling times the 4-task maximum;
 // governed fan-out only shrinks wall clock below that worst case.
-func newDispatchTool(caller agent.ModelCaller, mixed bool, budget agent.Budget, fan dispatchFanout, notify func(string), available []agent.Tool) (agent.Tool, error) {
+func newDispatchTool(caller agent.ModelCaller, f flags, budget agent.Budget, fan dispatchFanout, notify func(string), available []agent.Tool, canary *canaryBinding) (agent.Tool, error) {
 	var onChildComplete func(int, int)
 	if notify != nil {
 		onChildComplete = func(index, total int) {
 			notify(fmt.Sprintf("dispatch: task #%d finished (%d total)", index+1, total))
 		}
 	}
-	dt, err := agenttools.NewDispatch(caller, agent.ContextManager{Mixed: mixed}, available, agenttools.DispatchLimits{
+	dt, err := agenttools.NewDispatch(caller, agent.ContextManager{Mixed: f.progressive}, available, agenttools.DispatchLimits{
 		Budget:          budget,
 		MaxConcurrent:   fan.maxConcurrent,
 		Concurrency:     fan.governor,
 		OnChildComplete: onChildComplete,
 		Timeout:         20 * time.Minute, // 5m per task x 4 max tasks
-	})
+	}, interceptorsFor(f, canary)...)
 	if err != nil {
 		return nil, fmt.Errorf("golem: build dispatch tool: %w", err)
 	}
@@ -215,29 +216,50 @@ func newDispatchTool(caller agent.ModelCaller, mixed bool, budget agent.Budget, 
 }
 
 // buildExecTools constructs the approval-gated exec tool set — the foreground
-// run_command plus the four background tools (#346) — bound to ONE Workspace
-// over root and one shared manager, so foreground and background preparation
-// see identical containment. Returned only when interactive -allow-exec is set
-// (one-shot drops the flag; -plan/-goal reject it at validation).
-func buildExecTools(root string, manager *agenttools.BackgroundManager) ([]agent.Tool, error) {
-	tools, err := agenttools.NewExecToolsWithBackground(root, manager)
+// run_command plus the four background tools (#346), extended by the scratch
+// tools when opts enables them (#443) — bound to ONE Workspace over root and
+// one shared manager, so foreground and background preparation see identical
+// containment. Zero options reproduce the legacy set byte-for-byte. Built for
+// interactive -allow-exec or when one-shot -allow-tool selects an exec tool;
+// scratch remains interactive-only because one-shot mode clears it.
+func buildExecTools(root string, manager *agenttools.BackgroundManager, opts agenttools.ExecToolsOptions) ([]agent.Tool, error) {
+	tools, err := agenttools.NewExecToolsWithBackgroundOptions(root, manager, opts)
 	if err != nil {
 		return nil, fmt.Errorf("golem: build exec tools: %w", err)
 	}
 	return tools, nil
 }
 
+// buildExecMount is the ONE exec-mount seam (#372 D11): the background
+// manager and the exec tool set built over it, for startup -allow-exec and
+// for /allow-exec alike, so a future sandbox selector lands here once. On
+// failure the manager is shut down and nothing is returned.
+func buildExecMount(root string, opts agenttools.ExecToolsOptions) (*agenttools.BackgroundManager, []agent.Tool, error) {
+	manager := agenttools.NewBackgroundManager()
+	tools, err := buildExecTools(root, manager, opts)
+	if err != nil {
+		manager.Shutdown()
+		return nil, nil, err
+	}
+	return manager, tools, nil
+}
+
 // buildWriteTools constructs the workspace-mutating tool set plus the durable
 // checkpoint journal that backs /undo and /checkpoints (#355), both bound to
-// one Workspace over root and the workspace's leased store. Returned only
-// when -allow-write is set.
-func buildWriteTools(root string, store *checkpointStore) ([]agent.Tool, *checkpointJournal, error) {
+// one Workspace over root and the workspace's leased store. Built for
+// startup -allow-write, one-shot -allow-tool write_file/edit_file, and the
+// REPL's /allow-write (#372).
+func buildWriteTools(root string, store *checkpointStore, getenv func(string) string) ([]agent.Tool, *checkpointJournal, string, error) {
 	ws, err := agenttools.NewWorkspace(root)
 	if err != nil {
-		return nil, nil, fmt.Errorf("golem: build write tools: %w", err)
+		return nil, nil, "", fmt.Errorf("golem: build write tools: %w", err)
 	}
-	journal := newCheckpointJournal(ws, store)
-	return agenttools.NewMutatingTools(ws, journal), journal, nil
+	signer, verifier, notice, err := loadMutationSigning(context.Background(), getenv, root, store)
+	if err != nil {
+		return nil, nil, "", err
+	}
+	journal := newCheckpointJournal(ws, store, signer, verifier)
+	return agenttools.NewMutatingTools(ws, journal), journal, notice, nil
 }
 
 // buildTools returns golem's read-only tool set: the file tools
@@ -449,4 +471,23 @@ func effectClassName(c agent.EffectClass) string {
 		return "none"
 	}
 	return strings.Join(parts, "|")
+}
+
+// scratchExecOptions assembles the frozen scratch policy for buildExecTools
+// (#443) plus the startup notice line. The nil check on the CONCRETE journal
+// type happens here, before it becomes an interface value: a typed-nil
+// PreparingJournal would register a promotion tool whose every write
+// crashes, so promotion exists exactly when -allow-write built a journal.
+func scratchExecOptions(scratch bool, journal *checkpointJournal) (agenttools.ExecToolsOptions, string) {
+	var opts agenttools.ExecToolsOptions
+	if !scratch {
+		return opts, ""
+	}
+	opts.Scratch = agenttools.ScratchConfig{Enabled: true}
+	promote := "promote_artifact disabled (-allow-write off)"
+	if journal != nil {
+		opts.PromotionJournal = journal
+		promote = "promote_artifact prompts per artifact"
+	}
+	return opts, "scratch: commands run in a disposable snapshot with .git omitted (accident isolation on host; enforced under a sandbox runtime); " + promote
 }

@@ -1,0 +1,350 @@
+#!/usr/bin/env bash
+# Self-test for scripts/changelog-fold and scripts/check-changelog against a
+# throwaway git repository. Every expectation is an exact byte comparison.
+set -euo pipefail
+
+script_dir="$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+if ! awk '
+  /^  ci:$/ { in_ci = 1; next }
+  in_ci && /^  [a-z][a-z-]*:$/ { exit }
+  in_ci && /run: \.\/scripts\/check-changelog "origin\/\$BASE"/ { found = 1 }
+  END { exit !found }
+' "$script_dir/../.github/workflows/ci.yml"; then
+  printf 'required Lint & Test job is missing the changelog guard\n' >&2
+  exit 1
+fi
+tmp="$(cd "$(mktemp -d)" && pwd -P)"
+trap 'rm -rf "$tmp"' EXIT
+
+repo="$tmp/repo"
+mkdir -p "$repo/scripts" "$repo/changelog.d"
+cp "$script_dir/changelog-fold" "$script_dir/check-changelog" "$repo/scripts/"
+g() { git -C "$repo" -c user.name=t -c user.email=t@example.com "$@"; }
+g init -q -b develop
+
+cat >"$repo/CHANGELOG.md" <<'MD'
+# Changelog
+
+Intro paragraph.
+
+## [Unreleased]
+
+### Added — already folded entry (#7)
+
+Body seven.
+
+## [0.2.0] - 2026-08-30
+
+### Added — released entry (#5)
+
+Body five.
+--- see the release notes for the migration.
++++ and this line documents the diff syntax itself.
+MD
+printf '# Changelog fragments\n' >"$repo/changelog.d/README.md"
+printf '### Fixed — twelve (#12)\n\nBody twelve.\n\n\n' >"$repo/changelog.d/12-twelve.md"
+printf '### Added — nine (#9)\n\nBody nine.\n' >"$repo/changelog.d/9-nine.md"
+g add -A && g commit -qm base
+
+same() { # <a> <b> <message-on-difference>
+  cmp -s "$1" "$2" || { printf '%s\n' "$3" >&2; exit 1; }
+}
+expect_fail() { # <label> <expected-stderr-substring> <cmd...>
+  local label="$1" want="$2"; shift 2
+  if "$@" >"$tmp/out" 2>"$tmp/err"; then
+    printf '%s: unexpectedly succeeded\n' "$label" >&2
+    exit 1
+  fi
+  if ! grep -Fq -- "$want" "$tmp/err"; then
+    printf '%s: stderr lacks %q:\n' "$label" "$want" >&2
+    cat "$tmp/err" >&2
+    exit 1
+  fi
+}
+
+# Dry run: validates, reports the order, writes nothing.
+cp "$repo/CHANGELOG.md" "$tmp/before"
+"$repo/scripts/changelog-fold" --dry-run >"$tmp/out"
+printf 'would fold under "## [Unreleased]" in this order:\n  changelog.d/12-twelve.md\n  changelog.d/9-nine.md\n' >"$tmp/want"
+diff -u "$tmp/want" "$tmp/out"
+same "$tmp/before" "$repo/CHANGELOG.md" 'dry run modified CHANGELOG.md'
+[ "$(g ls-files changelog.d | tr '\n' ' ')" = "changelog.d/12-twelve.md changelog.d/9-nine.md changelog.d/README.md " ]
+
+# Fold: newest issue first, one blank line between sections, fragments removed.
+chmod 0640 "$repo/CHANGELOG.md"
+"$repo/scripts/changelog-fold" >"$tmp/out"
+printf 'folded 2 fragment(s) into CHANGELOG.md\n' >"$tmp/want"
+diff -u "$tmp/want" "$tmp/out"
+[ -n "$(find "$repo/CHANGELOG.md" -prune -perm 0640 -print)" ]
+cat >"$tmp/want" <<'MD'
+# Changelog
+
+Intro paragraph.
+
+## [Unreleased]
+
+### Fixed — twelve (#12)
+
+Body twelve.
+
+### Added — nine (#9)
+
+Body nine.
+
+### Added — already folded entry (#7)
+
+Body seven.
+
+## [0.2.0] - 2026-08-30
+
+### Added — released entry (#5)
+
+Body five.
+--- see the release notes for the migration.
++++ and this line documents the diff syntax itself.
+MD
+diff -u "$tmp/want" "$repo/CHANGELOG.md"
+[ "$(g ls-files changelog.d | tr '\n' ' ')" = "changelog.d/README.md " ]
+[ ! -e "$repo/changelog.d/12-twelve.md" ] && [ ! -e "$repo/changelog.d/9-nine.md" ]
+
+# Nothing to fold: no-op, no write.
+cp "$repo/CHANGELOG.md" "$tmp/before"
+"$repo/scripts/changelog-fold" >"$tmp/out"
+printf 'nothing to fold: changelog.d/ has no fragments\n' >"$tmp/want"
+diff -u "$tmp/want" "$tmp/out"
+same "$tmp/before" "$repo/CHANGELOG.md" 'no-op fold modified CHANGELOG.md'
+g commit -qam folded
+
+# A git index failure must leave both the changelog and fragment untouched.
+g checkout -q -b locked-index
+printf '### Added — locked (#9)\n' >"$repo/changelog.d/9-locked.md"
+g add -A && g commit -qm locked-fragment
+cp "$repo/CHANGELOG.md" "$tmp/before-lock"
+: >"$repo/.git/index.lock"
+expect_fail locked-index 'could not remove folded fragments; CHANGELOG.md was restored' "$repo/scripts/changelog-fold"
+same "$tmp/before-lock" "$repo/CHANGELOG.md" 'failed git rm did not restore CHANGELOG.md'
+[ -e "$repo/changelog.d/9-locked.md" ]
+rm "$repo/.git/index.lock"
+g checkout -q develop
+
+# Rejections leave CHANGELOG.md byte-identical.
+printf '## Added — no category dash (#9)\n' >"$repo/changelog.d/9-bad.md"
+expect_fail bad-heading 'changelog.d/9-bad.md: first line must be "### <Category> — <title> (#<issue>)"' "$repo/scripts/changelog-fold"
+same "$tmp/before" "$repo/CHANGELOG.md" 'rejection modified CHANGELOG.md'
+rm "$repo/changelog.d/9-bad.md"
+printf '### Bogus — unknown category (#9)\n' >"$repo/changelog.d/9-bogus.md"
+expect_fail bad-category 'changelog.d/9-bogus.md: first line must be "### <Category> — <title> (#<issue>)"' "$repo/scripts/changelog-fold"
+rm "$repo/changelog.d/9-bogus.md"
+printf '### Added — wrong issue (#8)\n' >"$repo/changelog.d/9-wrong.md"
+g add changelog.d/9-wrong.md
+expect_fail mismatched-issue 'changelog.d/9-wrong.md: heading issue #8 does not match filename issue #9' "$repo/scripts/changelog-fold" --dry-run
+g reset -q -- changelog.d/9-wrong.md
+rm "$repo/changelog.d/9-wrong.md"
+printf '### Added — escaped section (#9)\n\n## [9.9.9] - 2099-01-01\n' >"$repo/changelog.d/9-escape.md"
+g add changelog.d/9-escape.md
+expect_fail escaped-section 'changelog.d/9-escape.md: body headings must be level 4 or deeper' "$repo/scripts/changelog-fold" --dry-run
+g reset -q -- changelog.d/9-escape.md
+rm "$repo/changelog.d/9-escape.md"
+printf '### Added — peer section (#9)\n\n  ### Security — smuggled (#999)\n' >"$repo/changelog.d/9-peer.md"
+g add changelog.d/9-peer.md
+expect_fail peer-section 'changelog.d/9-peer.md: body headings must be level 4 or deeper' "$repo/scripts/changelog-fold" --dry-run
+g reset -q -- changelog.d/9-peer.md
+rm "$repo/changelog.d/9-peer.md"
+{
+  printf '### Added — large peer section (#9)\n\n### Security — smuggled (#999)\n'
+  awk 'BEGIN { for (i = 0; i < 50000; i++) print "body" }'
+} >"$repo/changelog.d/9-large-peer.md"
+g add changelog.d/9-large-peer.md
+expect_fail large-peer-section 'changelog.d/9-large-peer.md: body headings must be level 4 or deeper' "$repo/scripts/changelog-fold" --dry-run
+g reset -q -- changelog.d/9-large-peer.md
+rm "$repo/changelog.d/9-large-peer.md"
+printf '### Added — binary body (#9)\n\n\0silently lost\n' >"$repo/changelog.d/9-binary.md"
+g add changelog.d/9-binary.md
+expect_fail binary-fragment 'changelog.d/9-binary.md: contains a NUL byte' "$repo/scripts/changelog-fold" --dry-run
+g reset -q -- changelog.d/9-binary.md
+rm "$repo/changelog.d/9-binary.md"
+printf '### Added — fine (#9)\n' >"$repo/changelog.d/Nine.md"
+expect_fail bad-name 'changelog.d/Nine.md: name must be <issue>-<slug>.md' "$repo/scripts/changelog-fold"
+rm "$repo/changelog.d/Nine.md"
+printf '### Added — hidden (#9)\n' >"$repo/changelog.d/.9-hidden.md"
+g add changelog.d/.9-hidden.md
+expect_fail hidden-name 'changelog.d/.9-hidden.md: name must be <issue>-<slug>.md' "$repo/scripts/changelog-fold" --dry-run
+g reset -q -- changelog.d/.9-hidden.md
+rm "$repo/changelog.d/.9-hidden.md"
+printf '### Added — fine (#9)\n\nno newline' >"$repo/changelog.d/9-nonl.md"
+expect_fail no-newline 'changelog.d/9-nonl.md: must end with a newline' "$repo/scripts/changelog-fold"
+rm "$repo/changelog.d/9-nonl.md"
+sed -i.bak 's/^## \[Unreleased\]$/## Unreleased/' "$repo/CHANGELOG.md" && rm "$repo/CHANGELOG.md.bak"
+printf '### Added — fine (#9)\n' >"$repo/changelog.d/9-fine.md"
+expect_fail no-heading 'CHANGELOG.md has no "## [Unreleased]" heading' "$repo/scripts/changelog-fold"
+g checkout -q -- CHANGELOG.md
+rm "$repo/changelog.d/9-fine.md"
+expect_fail bad-flag 'Usage: scripts/changelog-fold [--dry-run]' "$repo/scripts/changelog-fold" --force
+printf '### Added — fine (#9)\n' >"$repo/changelog.d/9-untracked.md"
+expect_fail untracked 'changelog.d/9-untracked.md: not tracked by git; git add it first' "$repo/scripts/changelog-fold"
+same "$tmp/before" "$repo/CHANGELOG.md" 'rejection modified CHANGELOG.md'
+[ -e "$repo/changelog.d/9-untracked.md" ]
+rm "$repo/changelog.d/9-untracked.md"
+
+# Pull request guard, one branch per scenario off a develop that already
+# carries one pending fragment.
+g checkout -q develop
+printf '### Added — pending (#20)\n\nBody twenty.\n' >"$repo/changelog.d/20-pending.md"
+g add -A && g commit -qm pending
+pr() { # <name> -> checks out a fresh branch
+  g checkout -q develop && g checkout -q -b "$1"
+}
+pr adds-fragment
+printf '### Added — new work (#24)\n\nBody twenty four.\n' >"$repo/changelog.d/24-new.md"
+g add -A && g commit -qm fragment
+"$repo/scripts/check-changelog" develop >"$tmp/out"
+printf 'would fold under "## [Unreleased]" in this order:\n  changelog.d/24-new.md\n  changelog.d/20-pending.md\n' >"$tmp/want"
+diff -u "$tmp/want" "$tmp/out"
+
+pr edits-directly
+printf '\n### Added — sneaky (#21)\n\nBody.\n' >"$tmp/entry"
+sed -i.bak "/^## \\[Unreleased\\]\$/r $tmp/entry" "$repo/CHANGELOG.md" && rm "$repo/CHANGELOG.md.bak"
+g commit -qam direct
+expect_fail direct-edit 'CHANGELOG.md is edited directly.' "$repo/scripts/check-changelog" develop
+
+pr attributes-hide-direct-edit
+"$repo/scripts/changelog-fold" >/dev/null
+printf '*.md -diff\n' >"$repo/.gitattributes"
+printf '\n### Added — hidden (#21)\n' >>"$repo/CHANGELOG.md"
+g add -A && g commit -qm hidden-diff
+expect_fail attributes-hide-direct-edit 'CHANGELOG.md is edited directly.' "$repo/scripts/check-changelog" develop
+
+pr color-hide-direct-edit
+"$repo/scripts/changelog-fold" >/dev/null
+printf '\n### Added — colored (#21)\n' >>"$repo/CHANGELOG.md"
+g commit -qam colored-diff
+g config color.ui always
+expect_fail color-hide-direct-edit 'CHANGELOG.md is edited directly.' "$repo/scripts/check-changelog" develop
+g config --unset color.ui
+
+pr blank-only-direct-edit
+"$repo/scripts/changelog-fold" >/dev/null
+printf '\n' >>"$repo/CHANGELOG.md"
+g commit -qam blank-diff
+expect_fail blank-only-direct-edit 'CHANGELOG.md is edited directly.' "$repo/scripts/check-changelog" develop
+
+pr nul-hide-direct-edit
+"$repo/scripts/changelog-fold" >/dev/null
+printf '\0direct\n' >>"$repo/CHANGELOG.md"
+g commit -qam nul-diff
+expect_fail nul-changelog 'CHANGELOG.md: contains a NUL byte' "$repo/scripts/changelog-fold" --dry-run
+expect_fail nul-hide-direct-edit 'CHANGELOG.md is edited directly.' "$repo/scripts/check-changelog" develop
+
+pr invalid-byte-hide-direct-edit
+"$repo/scripts/changelog-fold" >/dev/null
+printf '\377direct\n' >>"$repo/CHANGELOG.md"
+g commit -qam invalid-byte-diff
+expect_fail invalid-byte-hide-direct-edit 'CHANGELOG.md is edited directly.' "$repo/scripts/check-changelog" develop
+
+pr deletes-without-fold
+g rm -q changelog.d/20-pending.md
+g commit -qm delete
+expect_fail delete-without-fold 'changelog fragment removed without folding it' "$repo/scripts/check-changelog" develop
+
+pr renames-fragment-out
+g mv changelog.d/20-pending.md moved-note.md
+g commit -qm rename-out
+expect_fail rename-without-fold 'changelog fragment removed without folding it' "$repo/scripts/check-changelog" develop
+
+pr folds
+"$repo/scripts/changelog-fold" >/dev/null
+g commit -qam fold
+"$repo/scripts/check-changelog" develop >"$tmp/out"
+printf 'nothing to fold: changelog.d/ has no fragments\n' >"$tmp/want"
+diff -u "$tmp/want" "$tmp/out"
+
+pr folds-and-chmods
+"$repo/scripts/changelog-fold" >/dev/null
+chmod +x "$repo/CHANGELOG.md"
+g commit -qam fold-and-chmod
+expect_fail changelog-mode 'CHANGELOG.md mode must remain 100644' "$repo/scripts/check-changelog" develop
+
+pr partial-fold
+printf '### Fixed — still pending (#21)\n' >"$repo/changelog.d/21-still-pending.md"
+g add changelog.d/21-still-pending.md
+g rm -q changelog.d/20-pending.md
+printf '\n### Added — pending (#20)\n\nBody twenty.\n' >"$tmp/entry"
+sed -i.bak "/^## \\[Unreleased\\]\$/r $tmp/entry" "$repo/CHANGELOG.md" && rm "$repo/CHANGELOG.md.bak"
+g commit -qam partial-fold
+expect_fail partial-fold 'CHANGELOG.md changes require folding all changelog fragments' "$repo/scripts/check-changelog" develop
+
+pr deletes-and-smuggles
+g rm -q changelog.d/20-pending.md
+printf '\n### Added — smuggled with a deletion (#25)\n\nBody.\n' >"$tmp/entry"
+sed -i.bak "/^## \\[Unreleased\\]\$/r $tmp/entry" "$repo/CHANGELOG.md" && rm "$repo/CHANGELOG.md.bak"
+g commit -qam smuggle
+expect_fail delete-and-smuggle 'CHANGELOG.md is edited directly.' "$repo/scripts/check-changelog" develop
+
+# Same text the fold would produce, inserted one section too low by hand.
+pr hand-folds
+g rm -q changelog.d/20-pending.md
+printf '### Added — pending (#20)\n\nBody twenty.\n\n' >"$tmp/entry"
+awk -v f="$tmp/entry" '/nine \(#9\)$/ { while ((getline line < f) > 0) print line } { print }' "$repo/CHANGELOG.md" >"$tmp/handfold"
+mv "$tmp/handfold" "$repo/CHANGELOG.md"
+g commit -qam hand-fold
+expect_fail hand-fold-wrong-place 'CHANGELOG.md is edited directly.' "$repo/scripts/check-changelog" develop
+
+pr folds-and-stamps
+"$repo/scripts/changelog-fold" >/dev/null
+printf '\n## [0.3.0-rc.1] - 2026-09-10\n' >"$tmp/entry"
+sed -i.bak "/^## \\[Unreleased\\]\$/r $tmp/entry" "$repo/CHANGELOG.md" && rm "$repo/CHANGELOG.md.bak"
+g commit -qam fold-and-stamp
+"$repo/scripts/check-changelog" develop >"$tmp/out"
+printf 'nothing to fold: changelog.d/ has no fragments\n' >"$tmp/want"
+diff -u "$tmp/want" "$tmp/out"
+
+pr stamp-wrong-place
+"$repo/scripts/changelog-fold" >/dev/null
+printf '\n## [0.3.0] - 2026-09-10\n' >>"$repo/CHANGELOG.md"
+g commit -qam misplaced-stamp
+expect_fail stamp-wrong-place 'version stamp must immediately follow "## [Unreleased]"' "$repo/scripts/check-changelog" develop
+
+pr stamps
+printf '\n## [0.3.0] - 2026-09-10\n' >"$tmp/entry"
+sed -i.bak "/^## \\[Unreleased\\]\$/r $tmp/entry" "$repo/CHANGELOG.md" && rm "$repo/CHANGELOG.md.bak"
+g commit -qam stamp
+expect_fail stamp-with-pending-fragment 'version stamp requires folding all changelog fragments' "$repo/scripts/check-changelog" develop
+
+pr stamps-and-edits
+printf '\n## [0.3.0] - 2026-09-10\n\n### Added — smuggled (#22)\n' >"$tmp/entry"
+sed -i.bak "/^## \\[Unreleased\\]\$/r $tmp/entry" "$repo/CHANGELOG.md" && rm "$repo/CHANGELOG.md.bak"
+g commit -qam smuggle
+expect_fail stamp-plus-edit 'CHANGELOG.md is edited directly.' "$repo/scripts/check-changelog" develop
+
+pr removes-line
+sed -i.bak '/^Body seven\.$/d' "$repo/CHANGELOG.md" && rm "$repo/CHANGELOG.md.bak"
+g commit -qam removal
+expect_fail removal 'CHANGELOG.md is edited directly.' "$repo/scripts/check-changelog" develop
+
+pr removes-diff-lookalike-lines
+sed -i.bak '/^--- see the release notes/d; /^+++ and this line/d' "$repo/CHANGELOG.md" && rm "$repo/CHANGELOG.md.bak"
+g commit -qam lookalike
+expect_fail lookalike 'CHANGELOG.md is edited directly.' "$repo/scripts/check-changelog" develop
+
+# A stamp PR whose base advanced with another PR's fragment after branching:
+# the guard must diff from the merge-base, or that fragment looks deleted and
+# the PR is rejected for a fold it never made.
+pr stamps-then-base-advances
+"$repo/scripts/changelog-fold" >/dev/null
+printf '\n## [0.3.0] - 2026-09-10\n' >"$tmp/entry"
+sed -i.bak "/^## \\[Unreleased\\]\$/r $tmp/entry" "$repo/CHANGELOG.md" && rm "$repo/CHANGELOG.md.bak"
+g commit -qam stamp
+g checkout -q develop
+printf '### Added — landed meanwhile (#26)\n\nBody.\n' >"$repo/changelog.d/26-meanwhile.md"
+g add -A && g commit -qm meanwhile
+g checkout -q stamps-then-base-advances
+"$repo/scripts/check-changelog" develop >/dev/null
+g checkout -q develop && g reset -q --hard HEAD~1
+
+pr bad-fragment
+printf 'no heading\n' >"$repo/changelog.d/23-bad.md"
+g add -A && g commit -qm bad
+expect_fail guard-validates 'changelog.d/23-bad.md: first line must be' "$repo/scripts/check-changelog" develop
+
+expect_fail guard-usage 'Usage: scripts/check-changelog <base-ref>' "$repo/scripts/check-changelog"
+printf 'changelog scripts: ok\n'

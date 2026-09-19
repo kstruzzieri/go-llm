@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"encoding/json"
 	"errors"
 	"time"
 
@@ -76,7 +77,10 @@ type ToolInvocationLimit struct {
 
 // Request is the unit of work handed to Run.
 type Request struct {
-	Goal           string
+	Goal string
+	// System is the caller's application prompt. Run appends
+	// ToolTrustContract and any interceptor addenda after it (#430), so the
+	// effective system prompt the model receives is longer than this text.
 	System         string
 	HistorySummary string
 	History        []provider.ChatMessage // prior non-system turns; runtime marks every entry Elastic
@@ -90,6 +94,15 @@ type Request struct {
 	// when OutputReserve is zero, a directly-set NumPredict also seeds the
 	// router's ExpectedOutput hint.
 	Options provider.ModelOptions
+	// SessionID is a stable per-conversation identifier forwarded to every
+	// model call in the run as provider.ChatRequest.SessionID. Callers that
+	// keep threads (the golem runtime passes its thread id) get consistent
+	// upstream routing and prompt caching; empty preserves prior behavior.
+	SessionID string
+	// Advisory is an optional host-attributed external judgment for this goal
+	// (#382). It is projected onto the wire copy of the goal message only:
+	// State, Result.Messages, history and summaries never carry it.
+	Advisory *Advisory
 }
 
 // Segment tags a message as always-present (Pinned) or compactable (Elastic).
@@ -183,6 +196,10 @@ type Pressure struct {
 	// histograms within one arm; do not diff them between arms.
 	Cause      PressureCause
 	Mitigation PressureMitigation
+	// Buckets describes the complete assembled input when accounting is valid.
+	// Early exhaustion and arithmetic failures leave it unavailable. It is
+	// excluded from JSON to preserve existing telemetry and result encodings.
+	Buckets PressureBuckets `json:"-"`
 }
 
 // StepRecord is the durable per-turn truth. RouteOutcome is captured
@@ -198,7 +215,7 @@ type StepRecord struct {
 // EventRecord is a lightweight ordered log entry for replay/eval.
 type EventRecord struct {
 	Step int
-	Kind string // "token" | "step" | "tool_call" | "tool_result" | "compaction" | "stop"
+	Kind string // "token" | "step" | "tool_call" | "tool_result" | "compaction" | "blocked" | "stop"
 }
 
 // ToolCallRecord captures one dispatched tool call and its outcome.
@@ -209,12 +226,20 @@ type ToolCallRecord struct {
 	Denied  bool
 	Invoked bool          // false for synthetic pre-invoke outcomes (no Invoke ran)
 	Latency time.Duration // wall time of Invoke only; zero when !Invoked
+	// Provenance is optional opaque structured evidence retained from an
+	// accepted tool result. It is omitted for rejected observations.
+	Provenance json.RawMessage `json:"Provenance,omitempty"`
 	// AutoApproved is true when the approval decision came from a session
 	// grant (KeyedApprover ViaGrant) rather than an explicit per-call answer.
 	// Decision provenance only: it can be true with Invoked=false when the
 	// invocation budget blocks a grant-approved call. omitempty keeps
 	// pre-#341 run traces byte-identical.
 	AutoApproved bool `json:"AutoApproved,omitempty"`
+	// Blocked is true when an interceptor refused this call (#436): with
+	// Invoked=false the call was blocked before Plan and approval and never
+	// ran; with Invoked=true the tool ran and its observation was replaced
+	// at ingress. omitempty keeps pre-#436 run traces byte-identical.
+	Blocked bool `json:"Blocked,omitempty"`
 	// RouteOutcome names the model a delegating tool routed to; nil for ordinary
 	// tools. Omitted from marshaled records when nil, so non-delegated run
 	// traces are byte-identical to before.
@@ -230,4 +255,7 @@ type Result struct {
 	Usage      provider.Usage
 	ToolCalls  []ToolCallRecord
 	StopReason StopReason
+	// Risk is the run's cumulative interceptor report (#436): nil when no
+	// interceptor produced a finding, so pre-#436 traces stay byte-identical.
+	Risk *RiskReport `json:"Risk,omitempty"`
 }

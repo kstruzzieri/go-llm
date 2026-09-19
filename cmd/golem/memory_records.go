@@ -4,12 +4,14 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"strings"
 
 	"github.com/kstruzzieri/go-llm/agent"
 	agenttools "github.com/kstruzzieri/go-llm/agent/tools"
+	"github.com/kstruzzieri/go-llm/internal/promptfence"
 	"github.com/kstruzzieri/go-llm/memory"
 )
 
@@ -119,6 +121,7 @@ func openMemoryRuntime(ctx context.Context, getenv func(string) string, root str
 		warnBoth(err.Error())
 		return rt
 	}
+	defer func() { _ = chmodDBFiles(dbPath) }()
 	if wantUser {
 		store, serr := memory.NewStore(ctx, db)
 		if serr != nil {
@@ -131,7 +134,7 @@ func openMemoryRuntime(ctx context.Context, getenv func(string) string, root str
 		rt.user = store
 	}
 	if wantRecords {
-		rs, rerr := memory.NewMemoryRecordStore(ctx, db)
+		rs, rerr := memory.NewMemoryRecordStore(ctx, db, memory.RecordStoreConfig{KeyDir: dbPath + ".keys", Writer: memory.WriterGolem})
 		if rerr != nil {
 			rt.warns = append(rt.warns, "agent memory disabled: "+rerr.Error())
 		} else {
@@ -161,7 +164,8 @@ func openMemoryRuntime(ctx context.Context, getenv func(string) string, root str
 
 // sidecarSecuringTool re-secures the memory DB file + sidecars after every
 // Invoke of a memory-writing tool (#237 lesson: every write path re-chmods,
-// not just the open path). Spec/Effect delegate via the embedded Tool.
+// not just the open path). Spec/Effect delegate via the embedded Tool; Origin
+// is forwarded explicitly because embedding does not promote it (#514).
 // Do not wrap PlanningTools: interface embedding drops Plan and its approval
 // gating.
 type sidecarSecuringTool struct {
@@ -174,6 +178,18 @@ func (t sidecarSecuringTool) Invoke(ctx context.Context, args json.RawMessage) (
 	_ = chmodDBFiles(t.dbPath)
 	return res, err
 }
+
+// Origin forwards the wrapped declaration (#514 D6). Interface embedding does
+// not promote Origin, and a wrapper must never upgrade trust: an undeclared
+// wrapped tool stays unknown, which the detectors may block.
+func (t sidecarSecuringTool) Origin() agent.Origin {
+	if ot, ok := t.Tool.(agent.OriginTool); ok {
+		return ot.Origin()
+	}
+	return agent.OriginUnknown
+}
+
+var _ agent.OriginTool = sidecarSecuringTool{}
 
 // recordAccess is the visibility scope golem presents for record reads and
 // mutations: this workspace plus the active session ("" when sessions are off).
@@ -192,20 +208,20 @@ func handleRecords(ctx context.Context, out io.Writer, sess *replSession, fields
 	}
 	switch {
 	case len(fields) == 3 && fields[1] == "--forget":
+		defer secureMemoryDBFiles(sess)
 		if err := sess.records.SoftDelete(ctx, fields[2], recordAccess(sess)); err != nil {
-			_, _ = fmt.Fprintf(out, "forget failed: %v\n", err)
+			_, _ = fmt.Fprintf(out, "forget failed: %s\n", recordTerminalError(err))
 			return
 		}
-		secureMemoryDBFiles(sess)
-		_, _ = fmt.Fprintf(out, "forgot record %s\n", fields[2])
+		_, _ = fmt.Fprintf(out, "forgot record %s\n", agenttools.FlattenRecordContent(fields[2]))
 	case len(fields) == 4 && fields[1] == "--promote":
+		defer secureMemoryDBFiles(sess)
 		rec, err := sess.records.Promote(ctx, fields[2], recordAccess(sess), memory.MemoryKind(strings.ToLower(fields[3])))
 		if err != nil {
-			_, _ = fmt.Fprintf(out, "promote failed: %v\n", err)
+			_, _ = fmt.Fprintf(out, "promote failed: %s\n", recordTerminalError(err))
 			return
 		}
-		secureMemoryDBFiles(sess)
-		_, _ = fmt.Fprintf(out, "promoted %s to %s\n", rec.ID, rec.Kind)
+		_, _ = fmt.Fprintf(out, "promoted %s to %s (durable; unreviewed)\n", agenttools.FlattenRecordContent(rec.ID), agenttools.FlattenRecordContent(string(rec.Kind)))
 	case len(fields) == 1:
 		listRecords(ctx, out, sess)
 	default:
@@ -225,13 +241,21 @@ func listRecords(ctx context.Context, out io.Writer, sess *replSession) {
 		Limit:       recordsListLimit,
 	})
 	if err != nil {
-		_, _ = fmt.Fprintf(out, "records failed: %v\n", err)
+		_, _ = fmt.Fprintf(out, "records failed: %s\n", recordTerminalError(err))
 		return
 	}
 	if len(rs) == 0 {
 		_, _ = fmt.Fprintln(out, "no records")
 		return
 	}
+	fence := promptfence.New()
+	renderRecords(out, rs, fence.Open("TOOL_RESULT"), fence.Close("TOOL_RESULT"))
+}
+
+// renderRecords accepts boundary strings solely to keep exact-byte terminal
+// tests deterministic; listRecords always creates a fresh prompt fence.
+func renderRecords(out io.Writer, rs []memory.MemoryRecord, open, close string) {
+	_, _ = fmt.Fprintln(out, open)
 	for _, r := range rs {
 		expires := "-"
 		if !r.ExpiresAt.IsZero() {
@@ -240,7 +264,15 @@ func listRecords(ctx context.Context, out io.Writer, sess *replSession) {
 		// Model-authored content is untrusted for terminal display: flatten to
 		// one line and strip control chars so a record cannot forge extra rows
 		// or emit ANSI escapes in the table users act on (--forget/--promote).
-		_, _ = fmt.Fprintf(out, "%s  %s  %s  %s  %s\n",
-			r.ID, r.Kind, r.CreatedAt.Format("2006-01-02"), expires, agenttools.FlattenRecordContent(r.Content))
+		_, _ = fmt.Fprintf(out, "%s · %s  %s  %s  %s  %s\n",
+			agenttools.RecordRecallLabel(r), agenttools.FlattenRecordContent(r.ID), agenttools.FlattenRecordContent(string(r.Kind)), r.CreatedAt.Format("2006-01-02"), expires, agenttools.FlattenRecordContent(r.Content))
 	}
+	_, _ = fmt.Fprintln(out, close)
+}
+
+func recordTerminalError(err error) string {
+	if errors.Is(err, memory.ErrRecordIntegrity) {
+		return "record integrity verification failed"
+	}
+	return agenttools.FlattenRecordContent(err.Error())
 }

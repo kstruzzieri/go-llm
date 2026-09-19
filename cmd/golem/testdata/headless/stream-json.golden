@@ -1,0 +1,6 @@
+{"protocol":1,"runId":"RUNID","seq":1,"type":"run.started","payload":{}}
+{"protocol":1,"runId":"RUNID","seq":2,"type":"tool.started","payload":{"toolCallId":"c1","name":"read_file","preview":""}}
+{"protocol":1,"runId":"RUNID","seq":3,"type":"tool.finished","payload":{"toolCallId":"c1","name":"read_file","preview":"","isError":false}}
+{"protocol":1,"runId":"RUNID","seq":4,"type":"message.delta","payload":{"messageId":"RUNID:1","text":"machine answer"}}
+{"protocol":1,"runId":"RUNID","seq":5,"type":"run.finished","payload":{"model":"MODEL","stopReason":"completed"}}
+{"answer":"machine answer","error":null,"grounding":null,"model":"MODEL","schema":"golem.result.v1","status":"completed","stopReason":"completed"}

@@ -19,7 +19,7 @@
     },
     {
       "role": "tool",
-      "content": "rec-drill-lead · semantic · 2025-07-27 · drill leads rotate with oncall; the wrap-up checklist sits at the top of the drill doc and gets initialed before handoff\nrec-lab-fixtures · working · 2025-07-27 · lab box fixtures are fair game to delete after any drill; nothing durable lives outside the archived capture set\nrec-replay-yield · semantic · 2025-07-27 · replay yields to live ingest once exporter lag passes 400 batches\nrec-yield-draft · semantic · 2025-07-27 · the 250 batches yield figure came from the pre-config draft; superseded before rollout",
+      "content": "trust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-drill-lead · semantic · 2025-07-27 · drill leads rotate with oncall; the wrap-up checklist sits at the top of the drill doc and gets initialed before handoff\ntrust=agent-written; unreviewed; origin=memory.create; session=caller-claim · rec-lab-fixtures · working · 2025-07-27 · lab box fixtures are fair game to delete after any drill; nothing durable lives outside the archived capture set\ntrust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-replay-yield · semantic · 2025-07-27 · replay yields to live ingest once exporter lag passes 400 batches\ntrust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-yield-draft · semantic · 2025-07-27 · the 250 batches yield figure came from the pre-config draft; superseded before rollout",
       "tool_call_id": "c2",
       "name": "agent_memory_search"
     },
@@ -44,8 +44,8 @@
       "rec-replay-yield",
       "rec-yield-draft"
     ],
-    "estimated_prompt_tokens": 213,
-    "state_digest": "4e88e7968acb1211250c9469aef11ff4962df44537f5a6a621575a29ddf15ca4",
+    "estimated_prompt_tokens": 291,
+    "state_digest": "9d0f18deb2daa80ce2960434abeae81602f7f32270f57eb80456e7f5229af273",
     "subjects": [
       "(c1|rag|internal/replay/yield.go)",
       "(c1|rag|internal/replay/pace.go)",
@@ -58,8 +58,8 @@
     "stratum": "memory_only",
     "answer_home": "memory",
     "scenario_family": "replay-cursor-note",
-    "budget": 664,
-    "raw_state_tokens": 1106,
+    "budget": 710,
+    "raw_state_tokens": 1184,
     "pressure_level": "ok",
     "shed_messages": 6,
     "shed_bytes": 3270

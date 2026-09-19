@@ -424,11 +424,15 @@ func TestDestinationGateNarrowLosesRaceToClear(t *testing.T) {
 	}
 }
 
-// Bind/authorize race Install/Clear; -race is the assertion.
+// Bind/authorize race Install/Clear/Extend; -race is the assertion.
 func TestDestinationGateConcurrentBindInstallClear(t *testing.T) {
 	remote := mustDest(t, "opencode", "https://opencode.ai/zen/go")
 	edge := DestinationEdge{Purpose: "agent", Destination: remote}
 	m, err := NewDestinationManifest(edge)
+	if err != nil {
+		t.Fatal(err)
+	}
+	extended, err := NewDestinationManifest(edge, DestinationEdge{Purpose: "summarize", Destination: remote})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -452,6 +456,7 @@ func TestDestinationGateConcurrentBindInstallClear(t *testing.T) {
 		for range 100 {
 			g.Clear()
 			_ = g.Install(pol, m)
+			_ = g.Extend(pol, extended)
 		}
 	})
 	wg.Wait()
@@ -855,5 +860,378 @@ func TestRouterStampsDestinationGateOntoPlans(t *testing.T) {
 	}
 	if err := gate.authorize(prov.lastCtx(t), "cap", local); err != nil {
 		t.Errorf("routed plan's provider ctx does not authorize: %v", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// DestinationGate — additive extension (#376)
+// ---------------------------------------------------------------------------
+
+// mustManifest builds a manifest or fails the test; test-input plumbing only.
+func mustManifest(t *testing.T, edges ...DestinationEdge) *DestinationManifest {
+	t.Helper()
+	m, err := NewDestinationManifest(edges...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return m
+}
+
+// M2: a valid superset keeps the current edges bindable AND keeps the
+// capabilities already issued for them alive, while admitting the new edge.
+func TestDestinationGateExtendAddsEdgesWithoutRevoking(t *testing.T) {
+	remote := mustDest(t, "opencode", "https://opencode.ai/zen/go")
+	added := mustDest(t, "other", "https://other.example.com")
+	kept := DestinationEdge{Purpose: "agent", Destination: remote}
+	g := installTestGate(t, kept)
+
+	preCtx, err := g.Bind(context.Background(), "agent", "opencode")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	newEdge := DestinationEdge{Purpose: "summarize", Destination: added}
+	if err := g.Extend(NewDestinationPolicy(remote, added), mustManifest(t, kept, newEdge)); err != nil {
+		t.Fatalf("Extend with a valid superset: %v", err)
+	}
+
+	if err := g.authorize(preCtx, "opencode", remote); err != nil {
+		t.Errorf("capability bound before Extend denied after it: %v", err)
+	}
+	if _, err := g.Bind(context.Background(), "agent", "opencode"); err != nil {
+		t.Errorf("preserved edge not bindable after Extend: %v", err)
+	}
+	postCtx, err := g.Bind(context.Background(), "summarize", "other")
+	if err != nil {
+		t.Fatalf("edge added by Extend not bindable: %v", err)
+	}
+	if err := g.authorize(postCtx, "other", added); err != nil {
+		t.Errorf("capability for the added edge denied: %v", err)
+	}
+	// Extension is additive, not a wildcard: an edge nobody proposed stays out.
+	if _, err := g.Bind(context.Background(), "agent", "other"); !errors.Is(err, ErrDestinationDenied) {
+		t.Errorf("Bind on an unproposed edge after Extend = %v, want ErrDestinationDenied", err)
+	}
+}
+
+// Failed validation publishes nothing: the live generation, its capabilities,
+// and its edge set are exactly what they were before the rejected call.
+func TestDestinationGateExtendRejectsInvalidProposalsWithoutMutating(t *testing.T) {
+	remote := mustDest(t, "opencode", "https://opencode.ai/zen/go")
+	retarget := mustDest(t, "opencode", "https://opencode.ai/zen/other")
+	ungranted := mustDest(t, "other", "https://other.example.com")
+	agentEdge := DestinationEdge{Purpose: "agent", Destination: remote}
+	summarizeEdge := DestinationEdge{Purpose: "summarize", Destination: remote}
+
+	tests := []struct {
+		name      string
+		policy    DestinationPolicy
+		manifest  *DestinationManifest
+		wantErr   error
+		wantParts []string
+	}{
+		{
+			name:      "removal",
+			policy:    NewDestinationPolicy(remote),
+			manifest:  mustManifest(t, agentEdge),
+			wantErr:   ErrDestinationInvalid,
+			wantParts: []string{"drops edge", "summarize", "https://opencode.ai/zen/go"},
+		},
+		{
+			name:   "retarget",
+			policy: NewDestinationPolicy(remote, retarget),
+			manifest: mustManifest(t,
+				DestinationEdge{Purpose: "agent", Destination: retarget},
+				DestinationEdge{Purpose: "summarize", Destination: retarget},
+			),
+			wantErr:   ErrDestinationInvalid,
+			wantParts: []string{"retargets edge", "https://opencode.ai/zen/go", "https://opencode.ai/zen/other"},
+		},
+		{
+			name:      "ungranted new edge",
+			policy:    NewDestinationPolicy(remote),
+			manifest:  mustManifest(t, agentEdge, summarizeEdge, DestinationEdge{Purpose: "agent", Destination: ungranted}),
+			wantErr:   ErrDestinationDenied,
+			wantParts: []string{"other", "https://other.example.com", "agent"},
+		},
+		{
+			name:      "policy no longer grants a preserved edge",
+			policy:    NewDestinationPolicy(ungranted),
+			manifest:  mustManifest(t, agentEdge, summarizeEdge, DestinationEdge{Purpose: "agent", Destination: ungranted}),
+			wantErr:   ErrDestinationDenied,
+			wantParts: []string{"opencode", "https://opencode.ai/zen/go"},
+		},
+		{
+			name:     "nil manifest",
+			policy:   NewDestinationPolicy(remote),
+			manifest: nil,
+			wantErr:  ErrDestinationInvalid,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			g := installTestGate(t, agentEdge, summarizeEdge)
+			preCtx, err := g.Bind(context.Background(), "agent", "opencode")
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			err = g.Extend(tt.policy, tt.manifest)
+			if !errors.Is(err, tt.wantErr) {
+				t.Fatalf("Extend(%s) = %v, want %v", tt.name, err, tt.wantErr)
+			}
+			for _, want := range tt.wantParts {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("Extend(%s) error missing %q: %s", tt.name, want, err)
+				}
+			}
+
+			// Current generation untouched: same token, same edges.
+			if err := g.authorize(preCtx, "opencode", remote); err != nil {
+				t.Errorf("capability revoked by a REJECTED Extend: %v", err)
+			}
+			for _, purpose := range []string{"agent", "summarize"} {
+				if _, err := g.Bind(context.Background(), purpose, "opencode"); err != nil {
+					t.Errorf("edge %q lost after a rejected Extend: %v", purpose, err)
+				}
+			}
+			if _, err := g.Bind(context.Background(), "agent", "other"); !errors.Is(err, ErrDestinationDenied) {
+				t.Errorf("rejected proposal's edge became bindable: %v", err)
+			}
+		})
+	}
+
+	t.Run("no installed generation", func(t *testing.T) {
+		g := NewDestinationGate()
+		err := g.Extend(NewDestinationPolicy(remote), mustManifest(t, agentEdge))
+		if !errors.Is(err, ErrDestinationInvalid) {
+			t.Fatalf("Extend on an uninstalled gate = %v, want ErrDestinationInvalid", err)
+		}
+		if _, err := g.Bind(context.Background(), "agent", "opencode"); !errors.Is(err, ErrDestinationDenied) {
+			t.Errorf("Extend installed a generation on an empty gate: %v", err)
+		}
+	})
+}
+
+// Two gates holding the SAME policy and the SAME manifest content are still
+// separate authorities: their tokens are distinct objects, before and after
+// any number of extensions on either side.
+func TestDestinationGateExtendKeepsForeignCapabilitiesInvalid(t *testing.T) {
+	remote := mustDest(t, "opencode", "https://opencode.ai/zen/go")
+	edges := []DestinationEdge{{Purpose: "agent", Destination: remote}}
+	g1 := installTestGate(t, edges...)
+	g2 := installTestGate(t, edges...)
+
+	check := func(t *testing.T, round string) {
+		t.Helper()
+		ctx1, err := g1.Bind(context.Background(), "agent", "opencode")
+		if err != nil {
+			t.Fatal(err)
+		}
+		ctx2, err := g2.Bind(context.Background(), "agent", "opencode")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := g1.authorize(ctx1, "opencode", remote); err != nil {
+			t.Errorf("%s: own capability denied by g1: %v", round, err)
+		}
+		if err := g2.authorize(ctx2, "opencode", remote); err != nil {
+			t.Errorf("%s: own capability denied by g2: %v", round, err)
+		}
+		if err := g1.authorize(ctx2, "opencode", remote); !errors.Is(err, ErrDestinationDenied) {
+			t.Errorf("%s: g2's capability authorized against g1: %v", round, err)
+		}
+		if err := g2.authorize(ctx1, "opencode", remote); !errors.Is(err, ErrDestinationDenied) {
+			t.Errorf("%s: g1's capability authorized against g2: %v", round, err)
+		}
+	}
+
+	check(t, "before extension")
+	for _, purpose := range []string{"summarize", "embedding", "rerank"} {
+		edges = append(edges, DestinationEdge{Purpose: purpose, Destination: remote})
+		for _, g := range []*DestinationGate{g1, g2} {
+			if err := g.Extend(NewDestinationPolicy(remote), mustManifest(t, edges...)); err != nil {
+				t.Fatalf("Extend adding %q: %v", purpose, err)
+			}
+		}
+		check(t, "after extension adding "+purpose)
+	}
+}
+
+// A capability value that never came from Bind carries no token. Token
+// identity must fail closed on it rather than treating "no token" as a match.
+func TestDestinationGateAuthorizeDeniesCapabilityWithoutToken(t *testing.T) {
+	remote := mustDest(t, "opencode", "https://opencode.ai/zen/go")
+	g := installTestGate(t, DestinationEdge{Purpose: "agent", Destination: remote})
+
+	forged := context.WithValue(context.Background(), destCapabilityCtxKey{}, &destinationCapability{
+		purpose:  "agent",
+		provider: "opencode",
+		dest:     remote,
+	})
+	if err := g.authorize(forged, "opencode", remote); !errors.Is(err, ErrDestinationDenied) {
+		t.Fatalf("capability with a zero token authorized: %v", err)
+	}
+
+	// Still denied after an extension keeps the gate's token alive.
+	if err := g.Extend(NewDestinationPolicy(remote), mustManifest(t,
+		DestinationEdge{Purpose: "agent", Destination: remote},
+		DestinationEdge{Purpose: "summarize", Destination: remote},
+	)); err != nil {
+		t.Fatal(err)
+	}
+	if err := g.authorize(forged, "opencode", remote); !errors.Is(err, ErrDestinationDenied) {
+		t.Errorf("capability with a zero token authorized after Extend: %v", err)
+	}
+}
+
+// Extension is additive, revocation is total: Clear, Install, and Narrow each
+// mint a new generation that kills capabilities issued before AND after the
+// extension. Switching models is not revocation; /grants clear is.
+func TestDestinationGateRevocationKillsPreAndPostExtendCapabilities(t *testing.T) {
+	remote := mustDest(t, "opencode", "https://opencode.ai/zen/go")
+	agentEdge := DestinationEdge{Purpose: "agent", Destination: remote}
+	summarizeEdge := DestinationEdge{Purpose: "summarize", Destination: remote}
+
+	tests := []struct {
+		name   string
+		revoke func(*testing.T, *DestinationGate)
+	}{
+		{"Clear", func(_ *testing.T, g *DestinationGate) { g.Clear() }},
+		{"Install", func(t *testing.T, g *DestinationGate) {
+			t.Helper()
+			if err := g.Install(NewDestinationPolicy(remote), mustManifest(t, agentEdge, summarizeEdge)); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"Narrow", func(t *testing.T, g *DestinationGate) {
+			t.Helper()
+			if err := g.Narrow(func(DestinationEdge) bool { return true }); err != nil {
+				t.Fatal(err)
+			}
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			g := installTestGate(t, agentEdge)
+			preCtx, err := g.Bind(context.Background(), "agent", "opencode")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := g.Extend(NewDestinationPolicy(remote), mustManifest(t, agentEdge, summarizeEdge)); err != nil {
+				t.Fatal(err)
+			}
+			postCtx, err := g.Bind(context.Background(), "summarize", "opencode")
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			tt.revoke(t, g)
+
+			if err := g.authorize(preCtx, "opencode", remote); !errors.Is(err, ErrDestinationDenied) {
+				t.Errorf("pre-Extend capability survived %s: %v", tt.name, err)
+			}
+			if err := g.authorize(postCtx, "opencode", remote); !errors.Is(err, ErrDestinationDenied) {
+				t.Errorf("post-Extend capability survived %s: %v", tt.name, err)
+			}
+		})
+	}
+}
+
+// A generation change that lands between Extend's load and its CAS wins:
+// Extend reports an error, publishes nothing, and cannot resurrect the edges
+// it was about to add. extendFrom takes the base snapshot explicitly, so the
+// test drives that exact interleaving without a timing race or a hook in
+// production code.
+func TestDestinationGateExtendLosesRaceToCompetingGenerationChange(t *testing.T) {
+	remote := mustDest(t, "opencode", "https://opencode.ai/zen/go")
+	rival := mustDest(t, "rival", "https://rival.example.com")
+	mine := mustDest(t, "mine", "https://mine.example.com")
+	agentEdge := DestinationEdge{Purpose: "agent", Destination: remote}
+	rivalEdge := DestinationEdge{Purpose: "agent", Destination: rival}
+	myEdge := DestinationEdge{Purpose: "agent", Destination: mine}
+	pol := NewDestinationPolicy(remote, rival, mine)
+
+	tests := []struct {
+		name string
+		// compete runs after the base snapshot is read and before the CAS.
+		compete func(*testing.T, *DestinationGate)
+		// wantPreValid is whether the pre-race capability survives the
+		// competing operation: only a competing Extend is additive.
+		wantPreValid bool
+		// wantRivalEdge is whether the competitor's own edge is bindable.
+		wantRivalEdge bool
+	}{
+		{
+			name:    "Clear",
+			compete: func(_ *testing.T, g *DestinationGate) { g.Clear() },
+		},
+		{
+			name: "Install",
+			compete: func(t *testing.T, g *DestinationGate) {
+				t.Helper()
+				if err := g.Install(pol, mustManifest(t, agentEdge, rivalEdge)); err != nil {
+					t.Fatal(err)
+				}
+			},
+			wantRivalEdge: true,
+		},
+		{
+			name: "Narrow",
+			compete: func(t *testing.T, g *DestinationGate) {
+				t.Helper()
+				if err := g.Narrow(func(DestinationEdge) bool { return true }); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "Extend",
+			compete: func(t *testing.T, g *DestinationGate) {
+				t.Helper()
+				if err := g.Extend(pol, mustManifest(t, agentEdge, rivalEdge)); err != nil {
+					t.Fatal(err)
+				}
+			},
+			wantPreValid:  true,
+			wantRivalEdge: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			g := installTestGate(t, agentEdge)
+			preCtx, err := g.Bind(context.Background(), "agent", "opencode")
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			base := g.snap.Load() // the snapshot Extend validated against
+			tt.compete(t, g)
+
+			err = g.extendFrom(base, pol, mustManifest(t, agentEdge, myEdge))
+			if !errors.Is(err, ErrDestinationInvalid) {
+				t.Fatalf("Extend over a concurrent %s = %v, want ErrDestinationInvalid", tt.name, err)
+			}
+
+			// The competitor's state stands, and the lost extension's edge
+			// was not published.
+			if _, err := g.Bind(context.Background(), "agent", "mine"); !errors.Is(err, ErrDestinationDenied) {
+				t.Errorf("lost Extend published its edge over the concurrent %s: %v", tt.name, err)
+			}
+			_, rivalErr := g.Bind(context.Background(), "agent", "rival")
+			if tt.wantRivalEdge && rivalErr != nil {
+				t.Errorf("concurrent %s's own edge lost: %v", tt.name, rivalErr)
+			}
+			if !tt.wantRivalEdge && !errors.Is(rivalErr, ErrDestinationDenied) {
+				t.Errorf("edge bindable after concurrent %s: %v", tt.name, rivalErr)
+			}
+			preErr := g.authorize(preCtx, "opencode", remote)
+			if tt.wantPreValid && preErr != nil {
+				t.Errorf("capability revoked by an additive concurrent %s: %v", tt.name, preErr)
+			}
+			if !tt.wantPreValid && !errors.Is(preErr, ErrDestinationDenied) {
+				t.Errorf("capability survived concurrent %s: %v", tt.name, preErr)
+			}
+		})
 	}
 }

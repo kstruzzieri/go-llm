@@ -16,6 +16,12 @@ const SchemaVersion = 2
 // TraceMeta is the replay-relevant request context the caller supplies (the
 // agent.Request is not embedded in agent.Result, and history is excluded from
 // Result.Messages, so a trace needs it to reconstruct the model input).
+// System is the caller's application-prompt projection. Golem omits its
+// CLI-owned canary fragment from this field while preserving the other typed
+// composition inputs. agent.Run appends agent.ToolTrustContract and interceptor
+// addenda, and frames every tool observation under a per-render key (#430), so
+// replaying through Run reproduces those prompt and framing rules rather than
+// reading their generated values here.
 type TraceMeta struct {
 	Goal           string
 	System         string
@@ -97,6 +103,8 @@ type runSpan struct {
 	StopReason       string  `json:"stop_reason,omitempty"`
 	MaxUsedPct       float64 `json:"max_used_pct"`
 	MaxPressureLevel string  `json:"max_pressure_level"`
+	// SecretFindings counts recognized findings without storing their contents.
+	SecretFindings int `json:"secret_findings,omitempty"`
 }
 
 type modelStepSpan struct {

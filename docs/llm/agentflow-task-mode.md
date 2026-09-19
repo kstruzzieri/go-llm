@@ -112,9 +112,11 @@ Re-run the spike if the AgentFlow validator contract tightens.
   unless both approval classes are opted in up front: one for step-scoped
   write/edit tool calls, one for running the plan's declared validation
   gates.
-- `-agentflow-src <checkout>` — run `python3 -m agentflow` from a source
+- `-agentflow-src <checkout>` — run `python3 -P -m agentflow` from a source
   checkout (`PYTHONPATH=<checkout>/src`) instead of the installed `agentflow`
-  binary. Use this when the CLI isn't installed on PATH.
+  binary. Requires Python 3.11+; the workspace is excluded from implicit module
+  search. Checkout paths containing the platform's path-list separator are
+  rejected. Use this when the CLI isn't installed on PATH.
 - `-evidence <sidecar.json>` — optional. Records evidence with AgentFlow
   before the plan is locked. Accepts one JSON object or an array of objects;
   each entry needs `id`, `claim`, and `source`.

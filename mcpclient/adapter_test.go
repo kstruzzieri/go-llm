@@ -104,3 +104,14 @@ func TestAdapterInvokeBadArgs(t *testing.T) {
 		t.Fatalf("malformed args -> IsError, no hard error; got (%+v,%v)", out, err)
 	}
 }
+
+func TestAdapterDeclaresForeignOrigin(t *testing.T) {
+	var tool agent.Tool = &toolAdapter{}
+	ot, ok := tool.(agent.OriginTool)
+	if !ok {
+		t.Fatal("toolAdapter must implement agent.OriginTool")
+	}
+	if got := ot.Origin(); got != agent.OriginForeign {
+		t.Fatalf("Origin() = %s, want foreign", got)
+	}
+}

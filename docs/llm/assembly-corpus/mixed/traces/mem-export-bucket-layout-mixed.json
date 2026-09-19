@@ -52,7 +52,7 @@
     },
     {
       "role": "tool",
-      "content": "### source: \"docs/export.md\"\npurpose: Export guide: verified batches and key layout policy.\noverview: export.md covers verified batch shipping to the archive store and the key layout policy: prefix from deployment config, the drained exports/v2/ tree readable as history only, layout changes by drain.\nlanguage: markdown\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n--- source: \"docs/export.md\" (lines 1-11, similarity: 1.00) ---\n1| # driftwatch export\n2| \n3| The exporter ships rolled segments to the archive store in verified\n4| batches; every batch writes, verifies, then commits its manifest row.\n5| \n6| ## Key layout\n7| \n8| The operative key prefix ships from deployment config. The exports/v2/\n9| tree is fully drained: treat any v2 key as historical, readable for\n10| old pulls but never a write target. Layout changes go through a\n11| drain, never an in-place rewrite.\n\n### source: \"internal/export/writer.go\"\npurpose: Batch writer refusing keys outside the operative configured prefix.\noverview: writer.go ships batches under keys built from the configured prefix plus tenant and day, refuses anything outside the operative prefix before bytes move, and commits manifest rows only after verification.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n\n### source: \"internal/export/manifest.go\"\npurpose: Append-only export manifest backing verified restores.\noverview: manifest.go records every shipped batch as an append-only row of key, checksum, bytes, and commit time, and samples rows evenly across the retention window for dry-run restores.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n",
+      "content": "### source: \"docs/export.md\"\npurpose: Export guide: verified batches and key layout policy.\noverview: export.md covers verified batch shipping to the archive store and the key layout policy: prefix from deployment config, the drained exports/v2/ tree readable as history only, layout changes by drain.\nlanguage: markdown\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n--- source: \"docs/export.md\" (lines 1-11, similarity: 1.00) ---\n1| # driftwatch export\n2| \n3| The exporter ships rolled segments to the archive store in verified\n4| batches; every batch writes, verifies, then commits its manifest row.\n5| \n6| ## Key layout\n7| \n8| The operative key prefix ships from deployment config. The exports/v2/\n9| tree is fully drained: treat any v2 key as historical, readable for\n10| old pulls but never a write target. Layout changes go through a\n11| drain, never an in-place rewrite.\n\n### source: \"internal/export/writer.go\"\npurpose: Batch writer refusing keys outside the operative configured prefix.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n\n### source: \"internal/export/manifest.go\"\npurpose: Append-only export manifest backing verified restores.\noverview: manifest.go records every shipped batch as an append-only row of key, checksum, bytes, and commit time, and samples rows evenly across the retention window for dry-run restores.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n",
       "tool_call_id": "c1",
       "name": "retrieve"
     },
@@ -70,7 +70,7 @@
     },
     {
       "role": "tool",
-      "content": "rec-audit-folder · working · created:2025-07-27 · updated:2025-07-27 · scope:session · ns: · src: · audit evidence lands in the shared evidence folder with an index sheet; auditors sample, they do not fish\nrec-export-drain · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src: · the exports/v2/ drain closed in June; the old tree is read-only history\nrec-export-layout · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:",
+      "content": "trust=agent-written; unreviewed; origin=memory.create; session=caller-claim · rec-audit-folder · working · created:2025-07-27 · updated:2025-07-27 · scope:session · ns: · src-claim: · audit evidence lands in the shared evidence folder with an index sheet; auditors sample, they do not fish\ntrust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-export-drain · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src-claim: · the exports/v2/ drain closed in June; the old tree is read-only history\ntrust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-export-layout · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src-claim:",
       "tool_call_id": "c2",
       "name": "agent_memory_search"
     },
@@ -94,8 +94,8 @@
       "rec-export-drain",
       "rec-export-layout"
     ],
-    "estimated_prompt_tokens": 1017,
-    "state_digest": "52726d447156e5b810ef6bfb3c6a79b6c686e30daa6fac241f17ab28b7423e7c",
+    "estimated_prompt_tokens": 1027,
+    "state_digest": "6b14038c3949692434a190550de91daf3535a56906afe687dfba720e4181b5b8",
     "subjects": [
       "(c1|rag|docs/export.md)",
       "(c1|rag|internal/export/writer.go)",
@@ -107,9 +107,9 @@
     "stratum": "memory_only",
     "answer_home": "memory",
     "scenario_family": "export-bucket-mem",
-    "budget": 1081,
-    "raw_state_tokens": 1801,
+    "budget": 1116,
+    "raw_state_tokens": 1860,
     "pressure_level": "critical",
-    "shed_bytes": 2718
+    "shed_bytes": 2915
   }
 }

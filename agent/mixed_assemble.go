@@ -79,7 +79,9 @@ type ContextSubjectTrace struct {
 	// Bytes is model-visible Content bytes — the quantity the anchor byte cap
 	// bounds. It is NOT a byte rendering of EstimatedTokens: the token figure
 	// also covers the envelope fields messageCost charges (tool-call id/type/
-	// name/arguments, ToolName, ToolCallID), which carry no Content bytes. A
+	// name/arguments, ToolName, ToolCallID) and, for a tool message priced
+	// for the Orchestrator, the #430 frame envelope, which is transport
+	// framing and not Content either. A
 	// chain span whose only text lives in its anchors is the visible case:
 	// EstimatedTokens 30, Bytes 0.
 	Bytes          int
@@ -173,11 +175,11 @@ func (m ContextManager) assembleMixed(ctx context.Context, st State, toolSchemaT
 		return stMat, Pressure{}, ContextAssemblyTrace{}, err
 	}
 
-	// sysTokens covers only what the units do NOT represent: the system prompt
-	// and the materialized durable summary. Pinned MESSAGES are unitPinned units
-	// charged in the allocator's must-fit step, so adding pinnedTokens here would
-	// double-charge the whole pinned span and manufacture an exhaustion.
-	sysTokens := m.estimate(stMat.System)
+	// sysTokens covers what the units do NOT represent: the system prompt,
+	// materialized durable summary and wire-only advisory. Pinned messages are
+	// unitPinned units charged in the allocator's must-fit step, so adding
+	// pinnedTokens here would double-charge the whole pinned span.
+	sysTokens := saturatedTokenAdd(m.estimate(stMat.System), m.advisoryTokens)
 	var summary *Message
 	if hadSummary {
 		// materializeDurableSummary prepends the summary under the same
@@ -239,6 +241,11 @@ func (m ContextManager) assembleMixed(ctx context.Context, st State, toolSchemaT
 	exhausted := !usedOK || !afterOK || after > budget.Input
 	usedPct := usedFraction(after, budget.Input)
 	level, mitigation := thresholds.Classify(usedPct, exhausted, shed)
+	buckets := m.pressureBuckets(out, toolSchemaTokens)
+	cause := buckets.dominantCause()
+	if !usedOK || !afterOK {
+		buckets = PressureBuckets{}
+	}
 	pressure := Pressure{
 		UsedPct:         usedPct,
 		Evicted:         alloc.evictedGroups,
@@ -247,8 +254,9 @@ func (m ContextManager) assembleMixed(ctx context.Context, st State, toolSchemaT
 		InputTokens:     after,
 		InputBudget:     budget.Input,
 		Level:           level,
-		Cause:           m.dominantCause(out, toolSchemaTokens),
+		Cause:           cause,
 		Mitigation:      mitigation,
+		Buckets:         buckets,
 	}
 	if exhausted {
 		// Unreachable for a pure estimator: exact-delta accounting makes this

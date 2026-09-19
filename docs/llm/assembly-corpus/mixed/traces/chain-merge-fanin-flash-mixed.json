@@ -35,7 +35,7 @@
     },
     {
       "role": "tool",
-      "content": "rec-cohort-naming · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:\nrec-dash-cohorts · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src: · the compaction dashboard charts cohorts per pass and bytes per cohort; reviewers read it weekly and the panel snapshot in the review has to be regenerated the same day the section is written or the numbers drift from the text\nrec-merge-tier · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src: · merge passes restricted to the flash tier during the io review\nrec-planner-dumps · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:\nrec-review-owner · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:\nrec-watermark-rule · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:",
+      "content": "trust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-cohort-naming · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src-claim:\ntrust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-dash-cohorts · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src-claim:\ntrust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-merge-tier · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src-claim: · merge passes restricted to the flash tier during the io review\ntrust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-planner-dumps · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src-claim:\ntrust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-review-owner · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src-claim:\ntrust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-watermark-rule · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src-claim:",
       "tool_call_id": "c1",
       "name": "agent_memory_search"
     },
@@ -99,8 +99,8 @@
       "rec-review-owner",
       "rec-watermark-rule"
     ],
-    "estimated_prompt_tokens": 1001,
-    "state_digest": "1332a4798ad953c7076f4cfbd413bd1d816cae0c425ea4a9aced2097bd984058",
+    "estimated_prompt_tokens": 1070,
+    "state_digest": "d1efdc1131863243f75c4795c7e1eaca622712cb3dda88e0ad3342d7301d9f46",
     "subjects": [
       "(c1|memory|rec-cohort-naming)",
       "(c1|memory|rec-dash-cohorts)",
@@ -115,9 +115,9 @@
     "stratum": "chain_retention",
     "answer_home": "join",
     "scenario_family": "merge-fanin-chain",
-    "budget": 1241,
-    "raw_state_tokens": 2069,
+    "budget": 1312,
+    "raw_state_tokens": 2186,
     "pressure_level": "critical",
-    "shed_bytes": 3919
+    "shed_bytes": 4112
   }
 }

@@ -3,9 +3,92 @@ package main
 import (
 	"context"
 	"fmt"
+	"io"
+	"strings"
 
 	"github.com/kstruzzieri/go-llm/provider"
 )
+
+func handleThink(ctx context.Context, out io.Writer, sess *replSession, fields []string) {
+	if len(fields) == 1 {
+		if sess.runtime == nil {
+			_, _ = fmt.Fprintln(out, "think: runtime unavailable")
+			return
+		}
+		_, _ = fmt.Fprintln(out, formatThinkOptions(sess.runtime.ModelOptions()))
+		return
+	}
+	if len(fields) != 2 {
+		_, _ = fmt.Fprintln(out, "usage: /think [off|on|low|medium|high|default]")
+		return
+	}
+	value := strings.ToLower(fields[1])
+	switch value {
+	case "off", "on", "low", "medium", "high", "default":
+	default:
+		_, _ = fmt.Fprintln(out, "usage: /think [off|on|low|medium|high|default]")
+		return
+	}
+	if sess.runtime == nil {
+		_, _ = fmt.Fprintln(out, "think: runtime unavailable")
+		return
+	}
+	if err := ctx.Err(); err != nil {
+		_, _ = fmt.Fprintf(out, "think: %v\n", err)
+		return
+	}
+	resolveValue := value
+	if value == "default" {
+		resolveValue = ""
+	} else if sess.thinkModels == nil {
+		_, _ = fmt.Fprintln(out, "think: model configuration unavailable")
+		return
+	}
+	resolved, notice := resolveThinkOptions(ctx, sess.thinkModels, sess.selection.chain, resolveValue)
+	if err := ctx.Err(); err != nil {
+		_, _ = fmt.Fprintf(out, "think: %v\n", err)
+		return
+	}
+	if notice != "" {
+		_, _ = fmt.Fprintln(out, notice)
+		return
+	}
+	current := sess.runtime.ModelOptions()
+	candidate := applyThinkOptions(current, resolved)
+	if sameThinkOptions(current, candidate) {
+		_, _ = fmt.Fprintln(out, formatThinkOptions(candidate))
+		return
+	}
+	if err := ctx.Err(); err != nil {
+		_, _ = fmt.Fprintf(out, "think: %v\n", err)
+		return
+	}
+	if err := sess.runtime.Replace(sess.baseSystem, sess.tools[sess.readToolCount:], candidate); err != nil {
+		_, _ = fmt.Fprintf(out, "think: %v\n", err)
+		return
+	}
+	_, _ = fmt.Fprintln(out, formatThinkOptions(candidate))
+}
+
+func sameThinkOptions(a, b provider.ModelOptions) bool {
+	if a.ThinkEffort != b.ThinkEffort || (a.Think == nil) != (b.Think == nil) {
+		return false
+	}
+	return a.Think == nil || *a.Think == *b.Think
+}
+
+func formatThinkOptions(opts provider.ModelOptions) string {
+	if opts.Think != nil && !*opts.Think {
+		return "think: off"
+	}
+	if opts.ThinkEffort != "" {
+		return "think: " + opts.ThinkEffort
+	}
+	if opts.Think != nil {
+		return "think: on"
+	}
+	return "think: default (model decides)"
+}
 
 // thinkModelOptions maps the validated -think value to per-run model options.
 // Empty input returns zero options (model decides; no wire fields sent).
@@ -23,6 +106,40 @@ func thinkModelOptions(v string) provider.ModelOptions {
 		on := true
 		return provider.ModelOptions{Think: &on, ThinkEffort: v}
 	}
+}
+
+// thinkFlagValue is the inverse of thinkModelOptions: it maps ACCEPTED model
+// options back to the resolver input that would produce them, so a chain
+// change can re-gate the thinking state the session actually runs with
+// instead of the startup -think flag (#376 M4 step 4). A value the user asked
+// for but that was never accepted -- suppressed by an all-ThinkNone chain, or
+// simply never set -- leaves no trace in the options, so it can never be
+// resurrected here.
+//
+// The branch order is formatThinkOptions': explicit false outranks an effort
+// hint. The two are kept in step by construction rather than by parsing that
+// function's display string.
+func thinkFlagValue(opts provider.ModelOptions) string {
+	if opts.Think != nil && !*opts.Think {
+		return "off"
+	}
+	if opts.ThinkEffort != "" {
+		return opts.ThinkEffort // an accepted effort: low, medium, or high
+	}
+	if opts.Think != nil {
+		return "on"
+	}
+	return ""
+}
+
+// applyThinkOptions returns current with ONLY the resolved thinking controls
+// replaced. Everything else the options carry -- temperature, num_ctx, stop
+// sequences -- belongs to the session, not to the thinking gate, so a
+// re-resolution must never overwrite it with the gate's zero value.
+func applyThinkOptions(current, resolved provider.ModelOptions) provider.ModelOptions {
+	current.Think = resolved.Think
+	current.ThinkEffort = resolved.ThinkEffort
+	return current
 }
 
 // resolveThinkOptions gates -think on the configured agent chain's effective

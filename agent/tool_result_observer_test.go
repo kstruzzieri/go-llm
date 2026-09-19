@@ -1,10 +1,12 @@
 package agent
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/kstruzzieri/go-llm/provider"
 )
@@ -15,6 +17,42 @@ type resultRec struct {
 	results []ToolResultEvent
 	failAt  int
 	n       int
+}
+
+type resultIsolationObserver struct {
+	resultEffectPath string
+}
+
+func (*resultIsolationObserver) OnStep(context.Context, StepEvent) error { return nil }
+func (*resultIsolationObserver) OnToolCall(_ context.Context, e ToolCallEvent) error {
+	e.Effect.Scope.Paths[0] = "tool-call-observer-path"
+	return nil
+}
+func (*resultIsolationObserver) OnToken(context.Context, TokenEvent) error { return nil }
+func (o *resultIsolationObserver) OnToolResult(_ context.Context, e ToolResultEvent) error {
+	o.resultEffectPath = e.Effect.Scope.Paths[0]
+	e.Call.Function.Arguments[1] = 'X'
+	e.Effect.Scope.Paths[0] = "observer-path"
+	e.Result.RouteOutcome.Reason = "observer-reason"
+	e.Result.RouteOutcome.Attempts[0].ErrorClass = "observer-error"
+	e.Result.RouteOutcome.ScoreBreakdown.FeedbackMode = "observer-mode"
+	*e.Result.RouteOutcome.ScoreBreakdown.FeedbackUpdatedAt = time.Time{}
+	return nil
+}
+
+type resultIsolationTool struct {
+	paths []string
+	route *provider.RouteOutcome
+}
+
+func (resultIsolationTool) Spec() ToolSpec {
+	return ToolSpec{Name: "isolated", Parameters: json.RawMessage(`{"type":"object"}`)}
+}
+func (t *resultIsolationTool) Effect() Effect {
+	return Effect{Class: Read, Approval: ApprovalNever, Scope: Scope{Paths: t.paths}}
+}
+func (t *resultIsolationTool) Invoke(context.Context, json.RawMessage) (ToolResult, error) {
+	return ToolResult{Content: "done", RouteOutcome: t.route}, nil
 }
 
 func (r *resultRec) OnStep(context.Context, StepEvent) error         { return nil }
@@ -99,6 +137,133 @@ func TestOnToolResult_NormalInvoke(t *testing.T) {
 	got := rec.results[0]
 	if got.Call.Function.Name != "echo" || got.Result.IsError || got.Result.Content != `tool-said:{"x":1}` {
 		t.Fatalf("unexpected result event: %+v", got)
+	}
+}
+
+func TestRecordResultProvenanceDisposition(t *testing.T) {
+	want := json.RawMessage(`{"proposal":"accepted"}`)
+	tests := []struct {
+		name           string
+		verdict        Verdict
+		observerError  bool
+		wantErr        bool
+		wantBlocked    bool
+		wantEvent      bool
+		wantProvenance bool
+	}{
+		{name: "allow", wantEvent: true, wantProvenance: true},
+		{name: "tag", verdict: VerdictTag, wantEvent: true, wantProvenance: true},
+		{name: "block", verdict: VerdictBlock, wantBlocked: true, wantEvent: true},
+		{name: "abort", verdict: VerdictAbort, wantErr: true, wantBlocked: true},
+		{name: "observer error after acceptance", observerError: true, wantErr: true, wantEvent: true, wantProvenance: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var opts []Option
+			if tt.verdict != VerdictAllow {
+				guard := &stubInterceptor{name: "guard", input: func(in InputInspection) []Finding {
+					message := in.Messages[0]
+					return []Finding{{
+						Rule: "evidence", Verdict: tt.verdict,
+						Target: TargetMessage, StateIndex: message.StateIndex,
+					}}
+				}}
+				opts = append(opts, WithInterceptors(guard))
+			}
+			o := New(nil, ContextManager{}, opts...)
+			observer := &resultRec{}
+			if tt.observerError {
+				observer.failAt = 1
+			}
+			route := &provider.RouteOutcome{ActualModel: provider.ModelKey{Provider: "local", Model: "coder"}}
+			var result Result
+			var state State
+			batch := newBatch()
+			_, err := o.recordResult(context.Background(), &result, &state, observer, &restraintGovernor{}, 0,
+				provider.ToolCall{ID: "call-1", Function: provider.ToolCallFunction{Name: "delegate_code"}},
+				Effect{Class: Read | Network}, ToolCallRecord{Step: 0, Name: "delegate_code", Invoked: true},
+				ToolResult{Content: "proposal", Provenance: want, RouteOutcome: route, Origin: OriginModel}, false,
+				&batch, o.newInterceptorRun())
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("recordResult error = %v, wantErr %v", err, tt.wantErr)
+			}
+			if len(result.ToolCalls) != 1 {
+				t.Fatalf("ToolCalls = %d, want 1", len(result.ToolCalls))
+			}
+			record := result.ToolCalls[0]
+			if record.Blocked != tt.wantBlocked || record.IsError != tt.wantBlocked || record.RouteOutcome != route {
+				t.Fatalf("route/error bookkeeping = %+v", record)
+			}
+			if got := record.Provenance; (got != nil) != tt.wantProvenance || tt.wantProvenance && !bytes.Equal(got, want) {
+				t.Fatalf("record provenance = %s, want retained %v", got, tt.wantProvenance)
+			}
+			wantEvents := 0
+			if tt.wantEvent {
+				wantEvents = 1
+			}
+			if len(observer.results) != wantEvents {
+				t.Fatalf("observer events = %d, want %d", len(observer.results), wantEvents)
+			}
+			if tt.wantEvent {
+				event := observer.results[0]
+				if event.Blocked != tt.wantBlocked || event.Result.RouteOutcome == nil {
+					t.Fatalf("observer route/error bookkeeping = %+v", event)
+				}
+				if got := event.Result.Provenance; (got != nil) != tt.wantProvenance || tt.wantProvenance && !bytes.Equal(got, want) {
+					t.Fatalf("observer provenance = %s, want retained %v", got, tt.wantProvenance)
+				}
+			}
+		})
+	}
+}
+
+func TestOnToolResultReceivesDeeplyIsolatedPayload(t *testing.T) {
+	updatedAt := time.Date(2026, 9, 3, 12, 0, 0, 0, time.UTC)
+	tool := &resultIsolationTool{
+		paths: []string{"workspace/file.go"},
+		route: &provider.RouteOutcome{
+			Reason:   "original-reason",
+			Attempts: []provider.RouteAttempt{{ErrorClass: "original-error"}},
+			ScoreBreakdown: &provider.ScoreBreakdown{
+				FeedbackMode:      "original-mode",
+				FeedbackUpdatedAt: &updatedAt,
+			},
+		},
+	}
+	first := &stubInterceptor{name: "first", toolCall: func(in ToolCallInspection) []Finding {
+		in.Effect.Scope.Paths[0] = "interceptor-path"
+		return nil
+	}}
+	var secondInterceptorPath string
+	second := &stubInterceptor{name: "second", toolCall: func(in ToolCallInspection) []Finding {
+		secondInterceptorPath = in.Effect.Scope.Paths[0]
+		return nil
+	}}
+	observer := &resultIsolationObserver{}
+	o := newTestOrchestrator(toolCallThenFinal("isolated", `{"x":1}`), WithInterceptors(first, second))
+	res, err := o.Run(context.Background(), Request{Goal: "q", Tools: []Tool{tool}}, observer)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if got := string(res.Steps[0].Response.ToolCalls[0].Function.Arguments); got != `{"x":1}` {
+		t.Fatalf("observer mutated StepRecord call arguments: %s", got)
+	}
+	if got := string(res.Messages[1].ToolCalls[0].Function.Arguments); got != `{"x":1}` {
+		t.Fatalf("observer mutated State call arguments: %s", got)
+	}
+	if tool.paths[0] != "workspace/file.go" {
+		t.Fatalf("callback mutated tool-owned effect scope: %q", tool.paths[0])
+	}
+	if secondInterceptorPath != "workspace/file.go" {
+		t.Fatalf("one interceptor mutated the next interceptor's effect: %q", secondInterceptorPath)
+	}
+	if observer.resultEffectPath != "workspace/file.go" {
+		t.Fatalf("OnToolCall mutated the effect later published by the run: %q", observer.resultEffectPath)
+	}
+	got := res.ToolCalls[0].RouteOutcome
+	if got.Reason != "original-reason" || got.Attempts[0].ErrorClass != "original-error" ||
+		got.ScoreBreakdown.FeedbackMode != "original-mode" || !got.ScoreBreakdown.FeedbackUpdatedAt.Equal(updatedAt) {
+		t.Fatalf("observer mutated canonical route outcome: %+v", got)
 	}
 }
 

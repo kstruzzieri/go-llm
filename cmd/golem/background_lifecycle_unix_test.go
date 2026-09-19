@@ -204,7 +204,7 @@ func TestJobsListAndStopWithRealJobs(t *testing.T) {
 	root := t.TempDir()
 	mgr := agenttools.NewBackgroundManager()
 	t.Cleanup(mgr.Shutdown)
-	execTools, err := buildExecTools(root, mgr)
+	execTools, err := buildExecTools(root, mgr, agenttools.ExecToolsOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -261,7 +261,7 @@ func TestJobsStopCanceledContextReportsReaping(t *testing.T) {
 	root := t.TempDir()
 	mgr := agenttools.NewBackgroundManager()
 	t.Cleanup(mgr.Shutdown)
-	execTools, err := buildExecTools(root, mgr)
+	execTools, err := buildExecTools(root, mgr, agenttools.ExecToolsOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -297,7 +297,7 @@ func TestJobsListSanitizesArgvFromRealJob(t *testing.T) {
 	root := t.TempDir()
 	mgr := agenttools.NewBackgroundManager()
 	t.Cleanup(mgr.Shutdown)
-	execTools, err := buildExecTools(root, mgr)
+	execTools, err := buildExecTools(root, mgr, agenttools.ExecToolsOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -328,7 +328,7 @@ func TestJobsSurviveSessionBoundariesWhileGrantsClear(t *testing.T) {
 	root := t.TempDir()
 	mgr := agenttools.NewBackgroundManager()
 	t.Cleanup(mgr.Shutdown)
-	execTools, err := buildExecTools(root, mgr)
+	execTools, err := buildExecTools(root, mgr, agenttools.ExecToolsOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}

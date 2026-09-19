@@ -70,7 +70,7 @@
     },
     {
       "role": "tool",
-      "content": "rec-mute-draft · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src: · the 90-minute mute figure lived only in the draft runbook; never shipped\nrec-mute-window · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:\nrec-status-cadence · working · created:2025-07-27 · updated:2025-07-27 · scope:session · ns: · src: · weekly status sweep happens Monday morning; the fleet digest goes out the same afternoon",
+      "content": "trust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-mute-draft · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src-claim: · the 90-minute mute figure lived only in the draft runbook; never shipped\ntrust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-mute-window · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src-claim:\ntrust=agent-written; unreviewed; origin=memory.create; session=caller-claim · rec-status-cadence · working · created:2025-07-27 · updated:2025-07-27 · scope:session · ns: · src-claim: · weekly status sweep happens Monday morning; the fleet digest goes out the same afternoon",
       "tool_call_id": "c2",
       "name": "agent_memory_search"
     },
@@ -94,8 +94,8 @@
       "rec-mute-window",
       "rec-status-cadence"
     ],
-    "estimated_prompt_tokens": 852,
-    "state_digest": "01c08174ad989cac5ff4a9b31eb2147e5560c0cb230c35bbfbbd810bdc4ae84e",
+    "estimated_prompt_tokens": 915,
+    "state_digest": "9d0a83222e6a1c4797591ae53de5237b4521d1cd3a90bc3141572f13600d16b9",
     "subjects": [
       "(c1|rag|docs/maintenance.md)",
       "(c1|rag|internal/alert/mute.go)",
@@ -107,9 +107,9 @@
     "stratum": "memory_only",
     "answer_home": "memory",
     "scenario_family": "alert-mute-mem",
-    "budget": 937,
-    "raw_state_tokens": 1562,
+    "budget": 973,
+    "raw_state_tokens": 1621,
     "pressure_level": "critical",
-    "shed_bytes": 2425
+    "shed_bytes": 2407
   }
 }

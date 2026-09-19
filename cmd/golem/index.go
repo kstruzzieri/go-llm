@@ -12,6 +12,7 @@ import (
 
 	"github.com/kstruzzieri/go-llm/config"
 	"github.com/kstruzzieri/go-llm/internal/providerbootstrap"
+	"github.com/kstruzzieri/go-llm/internal/secretscan"
 	"github.com/kstruzzieri/go-llm/provider"
 	"github.com/kstruzzieri/go-llm/rag"
 )
@@ -20,6 +21,8 @@ import (
 // non-zero index outcome, so main() exits non-zero WITHOUT printing an extra
 // "golem: <err>" line (runIndex owns its own output).
 var errIndexFailed = errors.New("golem index failed")
+
+const indexRetirementFailureMessage = "active-pointer retirement could not be persisted; other processes may still serve the prior generation"
 
 // indexJob carries the dependencies executeIndex needs. The indexer + store are
 // pre-built (with the chain embedder) so tests can inject a fake embedder.
@@ -39,7 +42,9 @@ type indexJob struct {
 // indexResult is executeIndex's outcome. exitErr is nil on a clean run,
 // errIndexFailed on any rendered non-zero outcome (partial, integrity, fatal).
 type indexResult struct {
-	exitErr error
+	exitErr        error
+	policyAffected bool
+	policyUnsafe   bool
 }
 
 // indexExcludes is the union of the read-tools ignoreDirs and the rag defaults,
@@ -55,72 +60,92 @@ func executeIndex(ctx context.Context, job indexJob) indexResult {
 		dirOpts = append(dirOpts, rag.WithPruneDeleted())
 	}
 	status, indexErr := job.indexer.IndexDirectoryWithStatus(ctx, job.root, dirOpts...)
-
-	// A walk failure / cancellation aborts the command: error but no completed
-	// queue. Distinguish it from a completed run with per-file errors.
-	if ctx.Err() != nil {
-		_, _ = fmt.Fprintf(job.out, "golem index: cancelled: %v\n", ctx.Err())
-		return indexResult{exitErr: errIndexFailed}
+	result := indexResult{policyAffected: len(status.PolicyOutcomes) > 0}
+	var skipped, redacted, safeSkips int
+	for _, outcome := range status.PolicyOutcomes {
+		result.policyUnsafe = result.policyUnsafe || outcome.Unsafe
+		switch outcome.Action {
+		case rag.IndexPolicySkip:
+			skipped++
+			if !outcome.Unsafe {
+				safeSkips++
+			}
+		case rag.IndexPolicyRedact:
+			redacted++
+		}
 	}
-	if indexErr != nil && len(status.Errors) == 0 {
-		_, _ = fmt.Fprintf(job.out, "golem index: %v\n", indexErr)
-		return indexResult{exitErr: errIndexFailed}
+	if result.policyAffected {
+		_, _ = fmt.Fprintf(job.out, "index policy: %d skipped, %d redacted (%d indexed files)\n", skipped, redacted, status.IndexedFiles)
+	}
+	fail := func(err error) indexResult {
+		result.exitErr = errors.Join(errIndexFailed, indexErr, err)
+		_, _ = fmt.Fprintln(job.out, "golem index: "+indexFailureMessage(result.policyAffected, err))
+		return result
+	}
+	if err := ctx.Err(); err != nil {
+		return fail(err)
+	}
+	if result.policyUnsafe {
+		return fail(errors.New("unsafe policy cleanup"))
+	}
+	if indexErr != nil && len(status.Errors) == 0 && !rag.IsSafeIndexSkip(indexErr) {
+		return fail(indexErr)
 	}
 
-	stats, statErr := job.store.Stats(ctx)
-	if statErr != nil {
-		_, _ = fmt.Fprintf(job.out, "golem index: read stats: %v\n", statErr)
-		return indexResult{exitErr: errIndexFailed}
+	stats, err := job.store.Stats(ctx)
+	if err != nil {
+		return fail(fmt.Errorf("read stats: %w", err))
 	}
-
-	// "Usable store" gate (spec §5.7): >=1 source AND a clean single-vsid probe.
-	probe, probeErr := job.store.ProbeVectorSpaces(ctx)
-	if probeErr != nil {
-		_, _ = fmt.Fprintf(job.out, "golem index: probe vector space: %v\n", probeErr)
-		return indexResult{exitErr: errIndexFailed}
+	probe, err := job.store.ProbeVectorSpaces(ctx)
+	if err != nil {
+		return fail(fmt.Errorf("probe vector space: %w", err))
 	}
 	clean := len(probe.KnownIDs) == 1 && !probe.HasUnknown
 	if stats.TotalSources < 1 || !clean {
-		_, _ = fmt.Fprintf(job.out, "golem index: corpus not usable (sources=%d, vector spaces=%v, legacy=%v); not writing index marker\n",
-			stats.TotalSources, probe.KnownIDs, probe.HasUnknown)
-		return indexResult{exitErr: errIndexFailed}
+		return fail(fmt.Errorf("corpus not usable (sources=%d, vector spaces=%v, legacy=%v); not writing index marker", stats.TotalSources, probe.KnownIDs, probe.HasUnknown))
 	}
 	if err := chmodIndexDBFiles(job.dbPath); err != nil {
-		_, _ = fmt.Fprintf(job.out, "golem index: %v\n", err)
-		return indexResult{exitErr: errIndexFailed}
+		return fail(err)
 	}
 
-	errCount := len(status.Errors)
+	errCount := len(status.Errors) + safeSkips
 	sidecarStatus := "complete"
 	if errCount > 0 {
 		sidecarStatus = "partial"
 	}
 	sc := indexSidecar{
-		SchemaVersion:           indexSchemaVersion,
-		WorkspaceID:             job.workspaceID,
-		RequestedEmbeddingModel: job.requestedModel,
-		VectorSpaceID:           probe.KnownIDs[0],
-		IndexedAt:               time.Now().UTC().Format(time.RFC3339),
-		Status:                  sidecarStatus,
-		ErrorCount:              errCount,
+		SchemaVersion: indexSchemaVersion, WorkspaceID: job.workspaceID,
+		RequestedEmbeddingModel: job.requestedModel, VectorSpaceID: probe.KnownIDs[0],
+		IndexedAt: time.Now().UTC().Format(time.RFC3339), Status: sidecarStatus, ErrorCount: errCount,
 	}
 	if err := writeSidecar(job.sidecarPath, sc); err != nil {
-		_, _ = fmt.Fprintf(job.out, "golem index: %v\n", err)
-		return indexResult{exitErr: errIndexFailed}
+		return fail(err)
 	}
-
 	displayPath := job.dbPath
 	if job.displayDBPath != "" {
 		displayPath = job.displayDBPath
 	}
-	_, _ = fmt.Fprintf(job.out, "indexed %d sources, %d chunks (%d errors) -> %s\n",
-		stats.TotalSources, stats.TotalChunks, errCount, displayPath)
+	_, _ = fmt.Fprintf(job.out, "indexed %d sources, %d chunks (%d errors) -> %s\n", stats.TotalSources, stats.TotalChunks, errCount, indexDiagnostic(displayPath))
 	if errCount > 0 {
-		printCappedErrors(job.out, status.Errors, 10)
-		// Partial run: usable index persisted + marker written, but exit non-zero.
-		return indexResult{exitErr: errIndexFailed}
+		if !result.policyAffected {
+			printCappedErrors(job.out, status.Errors, 10)
+		}
+		result.exitErr = errors.Join(errIndexFailed, indexErr)
 	}
-	return indexResult{}
+	return result
+}
+
+// indexDiagnostic protects CLI-owned indexing text, including ordinary errors
+// whose filenames contain detected values. Internal errors retain their causes.
+func indexDiagnostic(text string) string {
+	return secretscan.Redact(text, secretscan.Scan(text))
+}
+
+func indexFailureMessage(policyAffected bool, err error) string {
+	if policyAffected {
+		return "sensitive-content policy affected this index; generation unavailable"
+	}
+	return indexDiagnostic(err.Error())
 }
 
 func printCappedErrors(w io.Writer, errs []string, limit int) {
@@ -129,7 +154,7 @@ func printCappedErrors(w io.Writer, errs []string, limit int) {
 		shown = errs[:limit]
 	}
 	for _, e := range shown {
-		_, _ = fmt.Fprintf(w, "  - %s\n", e)
+		_, _ = fmt.Fprintf(w, "  - %s\n", indexDiagnostic(e))
 	}
 	if len(errs) > limit {
 		_, _ = fmt.Fprintf(w, "  (+%d more)\n", len(errs)-limit)
@@ -157,7 +182,13 @@ func chmodIndexDBFiles(dbPath string) error {
 // build the chain embedder + per-workspace store + indexer, and run executeIndex.
 // Output (summary, warnings, errors) is written to out/errOut; on a non-zero
 // outcome it returns errIndexFailed so main() exits 1 without double-printing.
-func runIndex(ctx context.Context, args []string, out, errOut io.Writer) error {
+func runIndex(ctx context.Context, args []string, out, errOut io.Writer) (runErr error) {
+	defer func() {
+		if runErr != nil && !errors.Is(runErr, errIndexFailed) && !errors.Is(runErr, flag.ErrHelp) {
+			_, _ = fmt.Fprintln(out, "golem index: "+indexDiagnostic(runErr.Error()))
+			runErr = errors.Join(errIndexFailed, runErr)
+		}
+	}()
 	var (
 		configPath  string
 		rootFlag    string
@@ -225,7 +256,7 @@ func runIndex(ctx context.Context, args []string, out, errOut io.Writer) error {
 	}
 	defer func() {
 		if closeErr := bundle.Close(); closeErr != nil {
-			_, _ = fmt.Fprintf(errOut, "golem: close provider bundle: %v\n", closeErr)
+			_, _ = fmt.Fprintf(errOut, "golem: close provider bundle: %s\n", indexDiagnostic(closeErr.Error()))
 		}
 	}()
 
@@ -247,12 +278,12 @@ func runIndex(ctx context.Context, args []string, out, errOut io.Writer) error {
 		return errIndexFailed
 	}
 	if err != nil {
-		_, _ = fmt.Fprintf(out, "golem index: %v\n", err)
+		_, _ = fmt.Fprintf(out, "golem index: %s\n", indexDiagnostic(err.Error()))
 		return errIndexFailed
 	}
 	defer func() {
 		if closeErr := lease.Close(); closeErr != nil {
-			_, _ = fmt.Fprintf(errOut, "golem: close index writer lease: %v\n", closeErr)
+			_, _ = fmt.Fprintf(errOut, "golem: close index writer lease: %s\n", indexDiagnostic(closeErr.Error()))
 		}
 	}()
 
@@ -261,7 +292,7 @@ func runIndex(ctx context.Context, args []string, out, errOut io.Writer) error {
 	}, embChain)
 	actualVectorSpace, err := probeAutoIndexEmbedder(ctx, embedder, embChain[0])
 	if err != nil {
-		_, _ = fmt.Fprintf(out, "golem index: %v\n", err)
+		_, _ = fmt.Fprintf(out, "golem index: %s\n", indexDiagnostic(err.Error()))
 		return errIndexFailed
 	}
 	built, err := buildIndexGeneration(ctx, generationBuildOptions{
@@ -277,25 +308,28 @@ func runIndex(ctx context.Context, args []string, out, errOut io.Writer) error {
 		out:                 out,
 	})
 	if built.gcWarn != "" {
-		_, _ = fmt.Fprintf(errOut, "golem index: warning: %s\n", built.gcWarn)
+		warning := indexDiagnostic(built.gcWarn)
+		if built.index.policyAffected {
+			warning = "superseded generation cleanup incomplete"
+		}
+		_, _ = fmt.Fprintf(errOut, "golem index: warning: %s\n", warning)
+	}
+	if err == nil {
+		err = built.publish(ctx, dbPath, workspaceID, nil)
 	}
 	if err != nil {
-		_, _ = fmt.Fprintf(out, "golem index: %v\n", err)
-		return errIndexFailed
-	}
-	final := built.generation
-	pointer := activeGenerationPointer{SchemaVersion: activePointerSchemaVersion, WorkspaceID: workspaceID, Generation: final.id}
-	if err := publishActiveGeneration(ctx, dbPath, pointer, nil); err != nil {
-		if shouldRemoveUnpublished(context.WithoutCancel(ctx), dbPath, final.id) {
-			if cleanupErr := removeGenerationPath(context.WithoutCancel(ctx), filepath.Dir(final.dbPath)); cleanupErr != nil {
-				err = errors.Join(err, cleanupErr)
-			}
+		_, _ = fmt.Fprintln(out, "golem index: "+indexFailureMessage(built.index.policyAffected, err))
+		if built.retirementErr != nil {
+			_, _ = fmt.Fprintln(errOut, "golem index: "+indexRetirementFailureMessage)
 		}
-		return err
+		return errors.Join(errIndexFailed, err)
 	}
 	if built.summaryErr != nil {
-		_, _ = fmt.Fprintf(errOut, "golem index: warning: progressive summaries incomplete: %s\n",
-			firstLine(built.summaryErr.Error()))
+		detail := indexDiagnostic(firstLine(built.summaryErr.Error()))
+		if built.index.policyAffected {
+			detail = "sensitive-content policy affected this index"
+		}
+		_, _ = fmt.Fprintf(errOut, "golem index: warning: progressive summaries incomplete: %s\n", detail)
 	}
 	return built.index.exitErr
 }

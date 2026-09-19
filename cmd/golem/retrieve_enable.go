@@ -82,6 +82,7 @@ func enableRetrieve(ctx context.Context, cfg *config.Config, router *provider.Ro
 		// stands alone; suppress the generic "no index" notice.
 		return retrieveResult{warns: []string{autoMismatchWarning(dec, expected)}, suppressNotice: true}
 	}
+	reader.bindGeneration(opts.autoDBPath, opts.workspaceID, gen)
 	return retrieveResult{reader: reader, line: autoGenerationLine(gen.metadata, stats), warns: legacyWarnIfAny(dec)}
 }
 

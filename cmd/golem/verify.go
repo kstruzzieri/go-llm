@@ -218,10 +218,11 @@ func sanitizeVerifyLine(s string) string {
 // cannot be armed, so a malformed or uninstalled verifier costs a startup line
 // rather than the session.
 //
-// Callers must invoke it only while -allow-write is still true, which is AFTER
-// mode normalization: applyOneShotMode clears the flag, and task, planning and
-// Agentflow modes reject it outright, so that one condition is what keeps every
-// non-interactive mode from reading the file at all.
+// It has exactly two call sites, both REPL-only: startup under f.allowWrite
+// (AFTER mode normalization: applyOneShotMode clears the flag, and task,
+// planning and Agentflow modes reject it outright) and the REPL's
+// /allow-write (#372). Together those keep every non-interactive mode from
+// reading the file at all; do not add a third site outside the REPL.
 func buildVerifier(root string) (*verifyRunner, string) {
 	disabled := func(err error) (*verifyRunner, string) {
 		return nil, "verification disabled: " + err.Error()
@@ -243,3 +244,46 @@ func buildVerifier(root string) (*verifyRunner, string) {
 	}
 	return newVerifyRunner(cmd), ""
 }
+
+// lateVerifier is the REPL's post-write verification slot (#372). The
+// orchestrator is built once at startup with agent.WithVerifier, but
+// /allow-write may build the verifier later. It is installed only for a
+// REPL session that started WITHOUT -allow-write; every other session keeps
+// a real verifier or none bound directly, so its orchestrator is
+// byte-identical to before #372.
+//
+// Unset, it performs no verification (agent.verifyBatch treats "" as append
+// nothing). That is not byte-identical to a nil verifier — verifyBatch still
+// runs its post-Verify ctx.Err() check. Before /allow-write the difference
+// is unreachable (no write tool is mounted, so Verify is never called). The
+// one residual case is a session whose /allow-write found no .golem.json:
+// writes are mounted and the slot stays unset, so a cancellation that lands
+// during a write batch surfaces from verifyBatch instead of from the next
+// model call — both end the run as canceled.
+//
+// A plain pointer suffices: slash commands and turns are serialized on the
+// REPL goroutine, and Verify runs on the orchestrator's (caller's)
+// goroutine. Add synchronization only if a command can ever mutate mounts
+// during a running turn.
+type lateVerifier struct {
+	runner *verifyRunner
+}
+
+// set installs v. A nil v (no .golem.json, or a disabled config) leaves the
+// slot unset; a nil receiver (sessions outside the REPL) is a no-op.
+func (l *lateVerifier) set(v *verifyRunner) {
+	if l == nil || v == nil {
+		return
+	}
+	l.runner = v
+}
+
+// Verify implements agent.Verifier by delegating to the installed runner.
+func (l *lateVerifier) Verify(ctx context.Context, approver agent.Approver) (string, error) {
+	if l.runner != nil {
+		return l.runner.Verify(ctx, approver)
+	}
+	return "", nil
+}
+
+var _ agent.Verifier = (*lateVerifier)(nil)

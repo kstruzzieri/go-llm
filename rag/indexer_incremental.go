@@ -34,8 +34,11 @@ func (idx *Indexer) canDoIncremental(chunks []Chunk) bool {
 }
 
 // IndexFileIncremental indexes a file using incremental diff-aware logic.
-// It re-chunks the entire file, compares against stored chunks via StableKey,
-// and only embeds chunks whose content actually changed.
+// It scans before the hash fast path. Clean files are re-chunked and compared
+// with stored chunks via StableKey so only changed chunks are embedded. A
+// redacted file whose sanitized hash is unchanged is a successful no-op;
+// changed redaction clears the old source and performs a full rebuild from one
+// sanitized snapshot.
 //
 // Falls back to full IndexFile behavior when the incremental preconditions are
 // missing or the incremental path returns ErrIncrementalRebuildRequired. Stale
@@ -45,15 +48,37 @@ func (idx *Indexer) canDoIncremental(chunks []Chunk) bool {
 // On success, the store contains exactly the same chunks that a full
 // IndexFile would produce. The only difference is fewer embedding API calls.
 func (idx *Indexer) IndexFileIncremental(ctx context.Context, path string) error {
+	_, err := idx.indexFileIncremental(ctx, path)
+	return err
+}
+
+func (idx *Indexer) indexFileIncremental(ctx context.Context, path string) (*IndexPolicyOutcome, error) {
 	if err := idx.rejectManagedDocumentSource(ctx, path); err != nil {
-		return err
+		return nil, err
 	}
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return fmt.Errorf("rag: read file %q: %w", path, err)
+		return nil, fmt.Errorf("rag: read file %q: %w", path, err)
 	}
 
-	content := string(data)
+	content, outcome := idx.sanitizeFile(path, string(data))
+	if outcome != nil {
+		if outcome.Action == IndexPolicyRedact {
+			if checker, ok := idx.store.(sourceHashChecker); ok {
+				storedHash, err := checker.GetSourceHash(ctx, path)
+				if err == nil && storedHash == idx.currentSourceSignature(content).String() {
+					return outcome, nil
+				}
+			}
+		}
+		// Clearing invalidates all old embeddings and any expected source hash.
+		// Rebuild from this sanitized snapshot through the full indexing path.
+		return idx.indexPolicyText(ctx, path, content, outcome)
+	}
+	return nil, idx.indexCleanFileIncremental(ctx, path, content)
+}
+
+func (idx *Indexer) indexCleanFileIncremental(ctx context.Context, path, content string) error {
 	if content == "" {
 		if err := idx.replaceSource(ctx, path, nil, nil); err != nil {
 			return fmt.Errorf("rag: clear chunks for empty file %q: %w", path, err)

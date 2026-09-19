@@ -70,7 +70,7 @@ func TestBuildChatRequestOrdersSystemHistoryGoal(t *testing.T) {
 			{Role: "assistant", Content: "a1"},
 		},
 	})
-	req := buildChatRequest(st, nil, 0, provider.ModelOptions{})
+	req := buildChatRequest(st, nil, 0, provider.ModelOptions{}, nil)
 	gotRoles := make([]string, len(req.Messages))
 	gotContent := make([]string, len(req.Messages))
 	for i, m := range req.Messages {
@@ -102,11 +102,12 @@ func TestRunEvictsHistoryUnderTightBudgetKeepsGoal(t *testing.T) {
 		{Role: "user", Content: "hist222222"},      // 10
 		{Role: "assistant", Content: "hist333333"}, // 10, newest
 	}
-	// System "" + no tools => pinned cost = len("GOAL") = 4 < ceiling 30. Pairwise eviction drops the oldest exchange (h0,h1); the newest (h2,h3) survives.
+	// System "" + no tools => pinned cost = the #430 base contract + len("GOAL") = 4, against a
+	// ceiling of contract + 30. Pairwise eviction drops the oldest exchange (h0,h1); the newest (h2,h3) survives.
 	_, err := o.Run(context.Background(), Request{
 		Goal:    "GOAL",
 		History: hist,
-		Budget:  Budget{InputCeiling: 30},
+		Budget:  Budget{InputCeiling: 30 + len([]rune(ToolTrustContract))},
 	}, nil)
 	if err != nil {
 		t.Fatalf("Run: %v", err)

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -20,6 +21,9 @@ import (
 	feedbackpkg "github.com/kstruzzieri/go-llm/feedback"
 	golemruntime "github.com/kstruzzieri/go-llm/golem"
 	"github.com/kstruzzieri/go-llm/provider"
+	"github.com/kstruzzieri/go-llm/signing"
+	"modernc.org/sqlite"
+	sqlite3 "modernc.org/sqlite/lib"
 )
 
 type tokenThenErrorCaller struct{}
@@ -57,9 +61,10 @@ func (c *interleavedCancelCaller) Chat(ctx context.Context, _ provider.ChatReque
 
 // scriptCaller returns queued responses in order; each Chat call pops one.
 type scriptCaller struct {
-	responses []agent.ModelResult
-	i         int
-	block     chan struct{} // when non-nil, Chat waits on ctx or this before responding
+	responses   []agent.ModelResult
+	i           int
+	block       chan struct{}        // when non-nil, Chat waits on ctx or this before responding
+	lastRequest provider.ChatRequest // the most recent request, for wire assertions
 }
 
 type attributedRetrieve struct{}
@@ -99,6 +104,7 @@ func (c *retrieveThenStopCaller) Chat(ctx context.Context, _ provider.ChatReques
 }
 
 func (s *scriptCaller) Chat(ctx context.Context, req provider.ChatRequest, onToken func(provider.ChatResponse) error) (agent.ModelResult, error) {
+	s.lastRequest = req
 	if s.block != nil {
 		select {
 		case <-ctx.Done():
@@ -139,11 +145,12 @@ func newTestSession(t *testing.T, caller agent.ModelCaller, root string) *replSe
 func newTestRuntime(t *testing.T, root, system string, orch *agent.Orchestrator, tools []agent.Tool) *golemruntime.Runtime {
 	t.Helper()
 	runtime, err := golemruntime.New(context.Background(), golemruntime.Options{
-		Root:         root,
-		System:       system,
-		Tools:        tools,
-		MaxSteps:     16,
-		Orchestrator: orch,
+		Root:           root,
+		System:         system,
+		Tools:          tools,
+		MaxSteps:       16,
+		Orchestrator:   orch,
+		FailureMessage: runFailureMessage,
 	})
 	if err != nil {
 		t.Fatalf("new runtime: %v", err)
@@ -456,7 +463,7 @@ func TestRunOnceFlushesMarkdownBeforeProviderError(t *testing.T) {
 	}
 }
 
-// runOnce deliberately does not put sess.modelOptions on an agent.Request of
+// runOnce deliberately does not put sess.startupModelOptions on an agent.Request of
 // its own: golem.Runtime owns model options (golem.Options.ModelOptions) and
 // stamps them onto every turn's request. This pins that the -think options
 // still reach the model through that path, so the REPL-side field is
@@ -478,15 +485,15 @@ func TestRunOnceAppliesRuntimeModelOptions(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = runtime.Close() })
 
-	// main.go sets both golem.Options.ModelOptions and replSession.modelOptions
+	// main.go sets both golem.Options.ModelOptions and replSession.startupModelOptions
 	// from the same -think value; mirror that so the test proves which one
 	// actually carries the options to the model.
 	sess := &replSession{
-		runtime:      runtime,
-		baseSystem:   system,
-		maxSteps:     16,
-		clock:        func() time.Time { return time.Unix(0, 0) },
-		modelOptions: thinkOpts,
+		runtime:             runtime,
+		baseSystem:          system,
+		maxSteps:            16,
+		clock:               func() time.Time { return time.Unix(0, 0) },
+		startupModelOptions: thinkOpts,
 	}
 	var out strings.Builder
 	if _, err := runOnce(context.Background(), &out, nil, sess, "think hard about this", nil); err != nil {
@@ -585,6 +592,7 @@ func TestREPL_CtrlCCancelsRunKeepsREPL(t *testing.T) {
 type captureCaller struct {
 	messages []provider.ChatMessage
 	system   string
+	tools    []string // provider-received tool names, first request
 	options  provider.ModelOptions
 	answer   string
 }
@@ -593,9 +601,16 @@ func (c *captureCaller) Chat(_ context.Context, req provider.ChatRequest, onToke
 	if c.messages == nil {
 		c.messages = append([]provider.ChatMessage(nil), req.Messages...)
 		c.options = req.Options
+		for _, tool := range req.Tools {
+			c.tools = append(c.tools, tool.Function.Name)
+		}
 		for _, m := range req.Messages {
 			if m.Role == "system" {
-				c.system = m.Content
+				// system is the APPLICATION prompt the session composed: agent.Run
+				// appends the #430 base contract to every effective prompt, and
+				// that constant suffix is asserted raw through c.messages (see
+				// TestREPL_HistoryReachesModelAsRealRoles), not here.
+				c.system = strings.TrimSuffix(m.Content, "\n\n"+agent.ToolTrustContract)
 				break
 			}
 		}
@@ -657,7 +672,7 @@ func TestREPL_HistoryReachesModelAsRealRoles(t *testing.T) {
 	// Prior turn reaches the model as real user/assistant messages, ahead of the
 	// current goal: system, user(prior), assistant(prior), user(goal).
 	wantRoles := []string{"system", "user", "assistant", "user"}
-	wantContent := []string{buildSystemPrompt(false, false), "earlier question", "earlier answer", "new question"}
+	wantContent := []string{buildSystemPrompt(false, false) + "\n\n" + agent.ToolTrustContract, "earlier question", "earlier answer", "new question"}
 	if len(caller.messages) != len(wantRoles) {
 		t.Fatalf("messages = %+v, want %d entries", caller.messages, len(wantRoles))
 	}
@@ -744,12 +759,12 @@ func TestRunOnceUnansweredFreshSessionDoesNotRefreshMissingRow(t *testing.T) {
 	}
 }
 
-func TestRunOnceKeepsAnswerWhenSessionSaveFails(t *testing.T) {
-	root := t.TempDir()
-	sess := newSessionedTestSession(t, &scriptCaller{responses: []agent.ModelResult{{
-		Response: provider.ChatResponse{Content: "completed answer"},
-	}}}, root, "workspace:save-failure")
-	if _, err := sess.session.db.ExecContext(context.Background(), `
+// failConversationSave makes every conversation insert fail with a plain
+// SQLite error: neither a lost CAS nor a lock timeout, so runOnce demotes an
+// answered turn to a success carrying a "session not saved" warning.
+func failConversationSave(t *testing.T, db *sql.DB) {
+	t.Helper()
+	if _, err := db.ExecContext(context.Background(), `
 		CREATE TRIGGER fail_conversation_save
 		BEFORE INSERT ON conversations
 		BEGIN
@@ -757,6 +772,14 @@ func TestRunOnceKeepsAnswerWhenSessionSaveFails(t *testing.T) {
 		END`); err != nil {
 		t.Fatalf("create failure trigger: %v", err)
 	}
+}
+
+func TestRunOnceKeepsAnswerWhenSessionSaveFails(t *testing.T) {
+	root := t.TempDir()
+	sess := newSessionedTestSession(t, &scriptCaller{responses: []agent.ModelResult{{
+		Response: provider.ChatResponse{Content: "completed answer"},
+	}}}, root, "workspace:save-failure")
+	failConversationSave(t, sess.session.db)
 
 	var out strings.Builder
 	result, err := runOnce(context.Background(), &out, nil, sess, "question", nil)
@@ -935,7 +958,8 @@ func newWriteEnabledTestSession(t *testing.T, caller agent.ModelCaller, root str
 	if err != nil {
 		t.Fatalf("buildTools: %v", err)
 	}
-	writeTools, journal, err := buildWriteTools(root, openTestStore(t, root))
+	store := openTestStore(t, root)
+	writeTools, journal, _, err := buildWriteTools(root, store, testStoreGetenv(store))
 	if err != nil {
 		t.Fatalf("buildWriteTools: %v", err)
 	}
@@ -961,7 +985,7 @@ func newExecOnlyTestSession(t *testing.T, caller agent.ModelCaller, root string)
 	}
 	bg := tools.NewBackgroundManager()
 	t.Cleanup(bg.Shutdown)
-	execTools, err := buildExecTools(root, bg)
+	execTools, err := buildExecTools(root, bg, tools.ExecToolsOptions{})
 	if err != nil {
 		t.Fatalf("buildExecTools: %v", err)
 	}
@@ -1092,7 +1116,7 @@ func TestREPL_ResumeSwitchesActiveSession(t *testing.T) {
 		t.Fatalf("resume output missing in:\n%s", out.String())
 	}
 	wantRoles := []string{"system", "user", "assistant", "user"}
-	wantContent := []string{buildSystemPrompt(false, false), "other question", "other answer", "follow up"}
+	wantContent := []string{buildSystemPrompt(false, false) + "\n\n" + agent.ToolTrustContract, "other question", "other answer", "follow up"}
 	if len(caller.messages) != len(wantRoles) {
 		t.Fatalf("messages = %+v, want %d entries", caller.messages, len(wantRoles))
 	}
@@ -1584,7 +1608,7 @@ func TestAutoEditsRequiresAllowWrite(t *testing.T) {
 	sess := &replSession{allowWrite: false, grants: newApprovalGrants()}
 	var out strings.Builder
 	_, _ = dispatchSlash(context.Background(), &out, sess, "/auto-edits on")
-	if !strings.Contains(out.String(), "writes disabled (run with -allow-write)") {
+	if !strings.Contains(out.String(), "writes disabled; run /allow-write or start with -allow-write") {
 		t.Fatalf("must mirror /undo's gate:\n%s", out.String())
 	}
 	if sess.grants.granted(grantScopeFiles, tools.WriteClassApprovalKey) {
@@ -1655,7 +1679,7 @@ func TestJobsDisabledWithoutManager(t *testing.T) {
 	if _, exit := dispatchSlash(context.Background(), &out, sess, "/jobs"); exit {
 		t.Fatal("/jobs must not exit")
 	}
-	if !strings.Contains(out.String(), "background exec disabled (run with -allow-exec)") {
+	if !strings.Contains(out.String(), "exec disabled; run /allow-exec or start with -allow-exec") {
 		t.Fatalf("nil manager must report background exec disabled:\n%s", out.String())
 	}
 }
@@ -1772,7 +1796,7 @@ func TestDispatchUndoAndCheckpoints(t *testing.T) {
 		for _, line := range []string{"/undo", "/undo 3", "/checkpoints", "/checkpoints list"} {
 			var out strings.Builder
 			_, _ = dispatchSlash(context.Background(), &out, sess, line)
-			if !strings.Contains(out.String(), "writes disabled (run with -allow-write)") {
+			if !strings.Contains(out.String(), "writes disabled; run /allow-write or start with -allow-write") {
 				t.Errorf("%s -> %q, want capability message", line, out.String())
 			}
 		}
@@ -1856,7 +1880,8 @@ func (c *errAfterCaller) Chat(ctx context.Context, req provider.ChatRequest, onT
 // scripted writes auto-approve.
 func newCheckpointWriteSession(t *testing.T, caller agent.ModelCaller, root string) (*replSession, *checkpointJournal) {
 	t.Helper()
-	writeTools, journal, err := buildWriteTools(root, openTestStore(t, root))
+	store := openTestStore(t, root)
+	writeTools, journal, _, err := buildWriteTools(root, store, testStoreGetenv(store))
 	if err != nil {
 		t.Fatalf("buildWriteTools: %v", err)
 	}
@@ -1973,5 +1998,298 @@ func TestCheckpointInterruptedUndoBlocksRunOnce(t *testing.T) {
 	out.Reset()
 	if _, err := runOnce(context.Background(), &out, nil, sess, "write w again", src); err != nil {
 		t.Fatalf("runOnce after resume: %v", err)
+	}
+}
+
+func TestCheckpointCommandEvidenceLabels(t *testing.T) {
+	for _, fault := range []string{"verified", "live-drift", "prior-blob", "unsigned", "unconfirmed", "invalid-path", "invalid-mode", "dangling", "empty-reference", "uncertain-inverse", "completed-retry", "invalid-inverse", "mixed-unsigned", "mixed-invalid", "open", "undoing", "restored-without-inverse"} {
+		t.Run(fault, func(t *testing.T) {
+			j, mutators, root := newJournalFixture(t)
+			beginTestTurn(t, j, "hostile\ngoal\x1b[31m")
+			for _, path := range []string{"a.txt", "b.txt"} {
+				applyTool(t, mutators, "write_file", map[string]any{"path": path, "content": "x"})
+			}
+			mustSealTurn(t, j)
+			groups, _ := j.store.newestCompleted(context.Background(), 1)
+			f := groups[0].files[0]
+			older := groups[0].files[1]
+			want := "[receipts verified]"
+			marker := ""
+			switch fault {
+			case "live-drift":
+				if err := os.WriteFile(filepath.Join(root, "b.txt"), []byte("user"), 0600); err != nil {
+					t.Fatal(err)
+				}
+			case "prior-blob":
+				checkpointSQL(t, j.store.db, `UPDATE checkpoint_files SET prior_content=? WHERE id=?`, []byte("not read by listing"), f.id)
+			case "unsigned":
+				checkpointSQL(t, j.store.db, `UPDATE checkpoint_files SET forward_mutation_id=NULL WHERE id=?`, f.id)
+				want = "[unsigned]"
+			case "unconfirmed":
+				checkpointSQL(t, j.store.db, `UPDATE mutation_receipts SET applied_json=NULL WHERE mutation_id=?`, f.forwardMutationID.String)
+				want = "[unconfirmed]"
+			case "invalid-path":
+				checkpointSQL(t, j.store.db, `UPDATE checkpoint_files SET path='forged.txt' WHERE id=?`, f.id)
+				want = "[invalid receipts]"
+			case "invalid-mode":
+				checkpointSQL(t, j.store.db, `UPDATE checkpoint_files SET after_mode=4294967296 WHERE id=?`, f.id)
+				want = "[invalid receipts]"
+			case "dangling", "empty-reference":
+				id := "missing"
+				if fault == "empty-reference" {
+					id = ""
+				}
+				checkpointSQL(t, j.store.db, `PRAGMA foreign_keys=OFF`)
+				checkpointSQL(t, j.store.db, `UPDATE checkpoint_files SET forward_mutation_id=? WHERE id=?`, id, f.id)
+				want = "[invalid receipts]"
+			case "mixed-unsigned", "mixed-invalid":
+				checkpointSQL(t, j.store.db, `UPDATE mutation_receipts SET applied_json=NULL WHERE mutation_id=?`, f.forwardMutationID.String)
+				checkpointSQL(t, j.store.db, `UPDATE checkpoint_files SET forward_mutation_id=NULL WHERE id=?`, older.id)
+				want = "[unsigned]"
+				if fault == "mixed-invalid" {
+					checkpointSQL(t, j.store.db, `UPDATE checkpoint_files SET path='forged.txt' WHERE id=?`, f.id)
+					want = "[invalid receipts]"
+				}
+			case "uncertain-inverse", "completed-retry", "invalid-inverse":
+				if err := j.store.markUndoing(context.Background(), []int64{groups[0].id}); err != nil {
+					t.Fatal(err)
+				}
+				entry, _ := j.store.loadReceipt(context.Background(), f.forwardMutationID.String)
+				body := storeInverse(mustDecodeCrashReceipt(t, entry.intentJSON).Body, strings.Repeat("U", 26))
+				if err := j.store.prepareInverseIntent(context.Background(), f.id, storeReceiptJSON(t, body)); err != nil {
+					t.Fatal(err)
+				}
+				if fault == "completed-retry" {
+					if err := j.store.testCommitInverse(context.Background(), f.id); err != nil {
+						t.Fatal(err)
+					}
+				}
+				want = "[unconfirmed]"
+				marker = "[interrupted undo]"
+				if fault == "invalid-inverse" {
+					body.Path = "forged.txt"
+					checkpointSQL(t, j.store.db, `UPDATE mutation_receipts SET intent_json=? WHERE mutation_id=?`, string(storeReceiptJSON(t, body)), body.MutationID)
+					want = "[invalid receipts]"
+				}
+			case "open":
+				checkpointSQL(t, j.store.db, `UPDATE checkpoints SET state='open'`)
+				marker = "[in progress]"
+			case "undoing":
+				if err := j.store.markUndoing(context.Background(), []int64{groups[0].id}); err != nil {
+					t.Fatal(err)
+				}
+				marker = "[interrupted undo]"
+			case "restored-without-inverse":
+				if err := j.store.markUndoing(context.Background(), []int64{groups[0].id}); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Remove(filepath.Join(root, f.path)); err != nil {
+					t.Fatal(err)
+				}
+				if err := j.store.recoverRestored(context.Background(), f.id); err != nil {
+					t.Fatal(err)
+				}
+				marker = "[interrupted undo]"
+				want = "[unconfirmed]"
+			}
+			before, err := j.store.scanReceipts(context.Background(), 0, 100)
+			if err != nil {
+				t.Fatal(err)
+			}
+			j.signer = journalTestSigner{Signer: j.signer, sign: func(context.Context, tools.MutationReceiptBody) error { t.Fatal("listing signed"); return nil }}
+			var out strings.Builder
+			_, _ = dispatchSlash(context.Background(), &out, &replSession{journal: j}, "/checkpoints")
+			text := out.String()
+			if !strings.Contains(text, want) || !strings.Contains(text, marker) || !strings.HasPrefix(text, "  1  ") || !strings.Contains(text, "hostile goal[31m") || strings.Count(text, "\n") != 1 {
+				t.Fatalf("listing = %q; want %s %s", text, marker, want)
+			}
+			after, err := j.store.scanReceipts(context.Background(), 0, 100)
+			if err != nil || !reflect.DeepEqual(before, after) {
+				t.Fatal("listing rewrote evidence")
+			}
+			if fault == "live-drift" {
+				out := runUndo(t, j, 1)
+				if !strings.Contains(out, "cannot undo") {
+					t.Fatalf("verified receipts bypassed live drift: %s", out)
+				}
+			}
+		})
+	}
+}
+
+func TestCheckpointCommandUnverifiableHistory(t *testing.T) {
+	for _, outside := range []bool{false, true} {
+		t.Run(fmt.Sprint(outside), func(t *testing.T) {
+			j, mutators, _ := newJournalFixture(t)
+			beginTestTurn(t, j, "hidden on failure")
+			applyTool(t, mutators, "write_file", map[string]any{"path": "a.txt", "content": "x"})
+			mustSealTurn(t, j)
+			entries, _ := j.store.scanReceipts(context.Background(), 0, 10)
+			receipt := mustDecodeCrashReceipt(t, entries[0].intentJSON)
+			if outside {
+				addUnreferencedReceiptPage(t, j, receipt.Body)
+				receipt.Body.MutationID = strings.Repeat("H", 26)
+			}
+			receipt.Signature.Bytes[0] ^= 1
+			raw, err := signing.MarshalCanonical(receipt)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if outside {
+				checkpointSQL(t, j.store.db, `INSERT INTO mutation_receipts(mutation_id,intent_json)VALUES(?,?)`, receipt.Body.MutationID, string(raw))
+			} else {
+				checkpointSQL(t, j.store.db, `UPDATE mutation_receipts SET intent_json=?,applied_json=NULL`, string(raw))
+			}
+			var out strings.Builder
+			_, _ = dispatchSlash(context.Background(), &out, &replSession{journal: j}, "/checkpoints")
+			if out.String() != "receipt history unverifiable; evidence labels unavailable\n" {
+				t.Fatalf("unverifiable history labeled: %q", out.String())
+			}
+		})
+	}
+}
+
+func TestCheckpointHelpEvidenceLegend(t *testing.T) {
+	var out strings.Builder
+	_, _ = dispatchSlash(context.Background(), &out, &replSession{}, "/help")
+	for _, want := range []string{"list turn checkpoints", "receipts verified: authentic receipts, not live files", "unconfirmed: missing applied evidence", "unsigned: undo unavailable", "invalid receipts: invalid evidence or metadata"} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("help missing %q", want)
+		}
+	}
+	if strings.Contains(out.String(), "list undoable turn checkpoints") {
+		t.Fatal("help calls unsigned history undoable")
+	}
+}
+
+// newConflictTestSession pairs a persisted session with a runtime store that
+// refuses every save. The one-shot cases below pin runOneShot's contract for a
+// sessioned run; -p implies -no-session today, so the CLI never builds this
+// configuration itself.
+func newConflictTestSession(t *testing.T) *replSession {
+	t.Helper()
+	root := t.TempDir()
+	sess := newSessionedTestSession(t, &captureCaller{answer: "completed answer"}, root, "user:conflict")
+	sess.root = root
+	store := &compactTestStore{Store: sess.session.store, save: func(_ context.Context, c conversation.Conversation) error {
+		return &conversation.ConflictError{ID: c.ID, ExpectedRevision: c.Revision}
+	}}
+	installCompactRuntime(t, sess, golemruntime.Options{SessionStore: store})
+	return sess
+}
+
+func TestRunOnceSessionConflictIsError(t *testing.T) {
+	sess := newConflictTestSession(t)
+	var out strings.Builder
+	result, err := runOnce(context.Background(), &out, nil, sess, "question", nil)
+	var conflict *conversation.ConflictError
+	if result.Answer != "completed answer" || !errors.Is(err, conversation.ErrConflict) || !errors.Is(err, golemruntime.ErrSessionPersistence) || !errors.As(err, &conflict) {
+		t.Fatalf("runOnce = %+v, %v; want completed answer and typed persistence conflict", result, err)
+	}
+	if got := out.String(); !strings.Contains(got, "snapshot not saved") || strings.Contains(got, "warning: session not saved:") || strings.Contains(got, "done ·") {
+		t.Fatalf("conflict output = %q; want error notice", got)
+	}
+	if len(sess.session.msgs) != 0 {
+		t.Fatalf("conflict updated cache: %+v", sess.session.msgs)
+	}
+}
+
+func TestREPLSessionConflictContinuesPrompt(t *testing.T) {
+	sess := newConflictTestSession(t)
+	var out strings.Builder
+	if err := runREPL(context.Background(), newScannerSource(strings.NewReader("question\n/help\n"), &out), &out, nil, sess); err != nil {
+		t.Fatal(err)
+	}
+	if got := out.String(); !strings.Contains(got, "snapshot not saved") || !strings.Contains(got, "The next turn uses the latest saved history, without this unsaved turn. Use /new for a separate session.") || !strings.Contains(got, golemHelp) {
+		t.Fatalf("interactive conflict = %q; want notice then help at next prompt", got)
+	}
+}
+
+func TestOneShotTextSessionConflictIsError(t *testing.T) {
+	sess := newConflictTestSession(t)
+	var stdout, stderr strings.Builder
+	if err := runOneShot(context.Background(), &stdout, &stderr, nil, sess, "question"); !errors.Is(err, errOneShotFailed) {
+		t.Fatalf("one shot = %v; want failure", err)
+	}
+	if got := stdout.String() + stderr.String(); !strings.Contains(got, "snapshot not saved") || strings.Contains(got, "done ·") {
+		t.Fatalf("one shot output = %q; want conflict notice", got)
+	}
+}
+
+// newBusyTestSession returns a session whose runtime store times out on the
+// write lock the returned transaction holds until it is rolled back, plus the
+// snapshot persisted before the lock was taken.
+func newBusyTestSession(t *testing.T) (*replSession, *sql.Tx, *conversation.Conversation) {
+	t.Helper()
+	ctx := context.Background()
+	root := t.TempDir()
+	sess := newSessionedTestSession(t, &captureCaller{answer: "completed answer"}, root, "user:busy")
+	sess.root = root
+	if err := sess.session.record(ctx, "saved question", "saved answer"); err != nil {
+		t.Fatal(err)
+	}
+	before, err := sess.session.store.Load(ctx, sess.session.id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writer, _, err := openSession(ctx, sess.session.dbPath, sess.session.id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = writer.Close() })
+	if _, err := writer.db.ExecContext(ctx, "PRAGMA busy_timeout=1"); err != nil {
+		t.Fatal(err)
+	}
+	installCompactRuntime(t, sess, golemruntime.Options{SessionStore: writer.store})
+	tx, err := sess.session.db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = tx.Rollback() })
+	if _, err := tx.ExecContext(ctx, "UPDATE conversations SET title = 'held lock' WHERE id = ?", sess.session.id); err != nil {
+		t.Fatal(err)
+	}
+	return sess, tx, before
+}
+
+func TestSessionBusyRemainsAnError(t *testing.T) {
+	const notice = "The next turn uses the latest saved history, without this unsaved turn. Use /new for a separate session."
+	for _, mode := range []string{"run", "one-shot", "repl"} {
+		t.Run(mode, func(t *testing.T) {
+			ctx := context.Background()
+			sess, tx, before := newBusyTestSession(t)
+			var stdout, stderr strings.Builder
+			switch mode {
+			case "run":
+				result, err := runOnce(ctx, &stderr, nil, sess, "new question", nil)
+				var busy *sqlite.Error
+				if result.Answer != "completed answer" || !errors.Is(err, golemruntime.ErrSessionPersistence) || !errors.As(err, &busy) || busy.Code()&0xff != sqlite3.SQLITE_BUSY || errors.Is(err, conversation.ErrConflict) {
+					t.Fatalf("runOnce = %+v, %v; want answer and original SQLITE_BUSY persistence error", result, err)
+				}
+			case "one-shot":
+				if err := runOneShot(ctx, &stdout, &stderr, nil, sess, "new question"); !errors.Is(err, errOneShotFailed) || stdout.Len() != 0 {
+					t.Fatalf("one-shot = %v, stdout %q; want error and no success answer", err, stdout.String())
+				}
+			case "repl":
+				// A lock timeout is a refused write like a lost CAS: the REPL explains
+				// the unsaved turn the same way and keeps prompting.
+				if err := runREPL(ctx, newScannerSource(strings.NewReader("new question\n/help\n"), &stderr), &stderr, nil, sess); err != nil {
+					t.Fatal(err)
+				}
+				if got := stderr.String(); !strings.Contains(got, notice) || !strings.Contains(got, golemHelp) {
+					t.Fatalf("interactive busy = %q; want notice then help at next prompt", got)
+				}
+			}
+			if got := stderr.String(); !strings.Contains(got, "error:") || strings.Contains(got, "warning: session not saved:") || (mode != "repl" && strings.Contains(got, notice)) {
+				t.Fatalf("busy output = %q; want error notice", got)
+			}
+			if err := tx.Rollback(); err != nil {
+				t.Fatal(err)
+			}
+			after, err := sess.session.store.Load(ctx, sess.session.id)
+			if err != nil || !reflect.DeepEqual(after, before) || sess.session.revision != 1 || !reflect.DeepEqual(sess.session.msgs, before.Messages) {
+				t.Fatalf("failed busy save changed storage/cache: after=%+v, err=%v, cache=%+v", after, err, sess.session)
+			}
+		})
 	}
 }

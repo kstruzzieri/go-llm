@@ -364,7 +364,7 @@ func TestVerifyBatchNeverAppendsWhenTheVerifierErrors(t *testing.T) {
 	b := batch{verifyAnchor: 0}
 	o := New(nil, ContextManager{}, WithVerifier(&fakeVerifier{out: verifyObs, err: sentinel}))
 
-	if err := o.verifyBatch(context.Background(), &st, nil, &b); !errors.Is(err, sentinel) {
+	if err := o.verifyBatch(context.Background(), &st, nil, &b, nil, 0, o.newInterceptorRun()); !errors.Is(err, sentinel) {
 		t.Fatalf("verifyBatch err = %v, want %v", err, sentinel)
 	}
 	if st.Messages[0].Content != "wrote" {
@@ -378,7 +378,7 @@ func TestVerifyBatchNeverAppendsAfterCancellation(t *testing.T) {
 	b := batch{verifyAnchor: 0}
 	o := New(nil, ContextManager{}, WithVerifier(&fakeVerifier{out: verifyObs, hook: cancel}))
 
-	if err := o.verifyBatch(ctx, &st, nil, &b); !errors.Is(err, context.Canceled) {
+	if err := o.verifyBatch(ctx, &st, nil, &b, nil, 0, o.newInterceptorRun()); !errors.Is(err, context.Canceled) {
 		t.Fatalf("verifyBatch err = %v, want context.Canceled", err)
 	}
 	if st.Messages[0].Content != "wrote" {
@@ -391,7 +391,7 @@ func TestVerifyBatchAppendsToTheAnchorOnSuccess(t *testing.T) {
 	b := batch{verifyAnchor: 0}
 	o := New(nil, ContextManager{}, WithVerifier(&fakeVerifier{out: verifyObs}))
 
-	if err := o.verifyBatch(context.Background(), &st, nil, &b); err != nil {
+	if err := o.verifyBatch(context.Background(), &st, nil, &b, nil, 0, o.newInterceptorRun()); err != nil {
 		t.Fatalf("verifyBatch: %v", err)
 	}
 	if want := "wrote" + verifyObs; st.Messages[0].Content != want {
@@ -476,14 +476,18 @@ func TestVerifyObservationReachesTheModelUnderBothAssemblies(t *testing.T) {
 			if !sawWrite || !sawRetrieve {
 				t.Fatalf("both observations must reach the model: write=%v retrieve=%v", sawWrite, sawRetrieve)
 			}
-			if !strings.HasSuffix(write, verifyObs) {
+			// #430: the verification is the tail of the write observation, INSIDE
+			// that observation's frame (immediately before its close line).
+			if k := extractToolFrameKey(t, write); !strings.HasSuffix(write, verifyObs+"\n>>>TOOL_RESULT "+k) {
 				t.Fatalf("model-visible write observation lost the verification: %q", write)
 			}
 			if strings.Contains(retrieve, "post-batch verification") {
 				t.Fatalf("verification must not ride on the retrieval anchor: %q", retrieve)
 			}
-			if mixed && retrieve != "structured-alternative" {
-				t.Fatalf("fixture invalid: mixed assembly must have rewritten the anchor, got %q", retrieve)
+			if mixed {
+				if k := extractToolFrameKey(t, retrieve); retrieve != framedLiteral(k, "structured-alternative") {
+					t.Fatalf("fixture invalid: mixed assembly must have rewritten the anchor, got %q", retrieve)
+				}
 			}
 		})
 	}

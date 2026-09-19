@@ -57,16 +57,32 @@ type Options struct {
 	// migrated; each entry point must make that choice deliberately (I18).
 	DestinationGate *provider.DestinationGate
 	// ActiveProviders is the sorted provider set from the mode's frozen
-	// network plan. Required when DestinationGate is set: a gate with no
-	// active set would silently refresh nothing, and a wiring bug should be
-	// loud.
+	// network plan: the providers active for startup I/O. Required when
+	// DestinationGate is set: a gate with no active set would silently
+	// refresh nothing, and a wiring bug should be loud.
+	//
+	// It is deliberately NARROWER than the set configured for lazy
+	// governance (M3): every configured slot_discovery provider is wired
+	// into the slot source, active or not, so a provider selected later in
+	// the session is admission-counted by this same router without a second
+	// provider stack. Configured-but-inactive costs nothing at startup —
+	// constructing the source and reading cached capacity make no requests,
+	// and every probe stays guarded by DestinationGate.
 	ActiveProviders []string
 }
 
 // Bundle is the assembled provider stack. Warnings collects non-fatal,
 // best-effort failures (e.g. a provider whose RefreshModels failed at startup).
 type Bundle struct {
-	Config    *config.Config
+	Config *config.Config
+	// Effective is the exact materialization New used: the same value whose
+	// destinations built the bundle's (guarded) clients and whose config is
+	// Config. Callers building a candidate network plan for a mid-session
+	// change (#376 /model) must plan from THIS value, not a fresh
+	// Materialize of their own config, or the planned destination and the
+	// dialed one can diverge. It is shared, not owned: Materialize's
+	// copy-on-write rule applies — never mutate through it.
+	Effective *Effective
 	Providers *provider.Registry
 	Models    *provider.ModelRegistry
 	Router    *provider.Router
@@ -118,18 +134,6 @@ func New(ctx context.Context, opts Options) (*Bundle, error) {
 		}
 		active[name] = true
 	}
-	if gate != nil {
-		// I7: an inactive provider must see zero requests, so its backend
-		// leaves slot governance entirely rather than fail-safe-probing.
-		// Nothing routes to it either (it is on no planned route), so the
-		// ungoverned-unlimited admission default is unreachable for it.
-		for name := range slotBEs {
-			if !active[name] {
-				delete(slotBEs, name)
-			}
-		}
-	}
-
 	pReg := provider.NewRegistry()
 	registered := 0
 	var warnings []error
@@ -139,12 +143,14 @@ func New(ctx context.Context, opts Options) (*Bundle, error) {
 			continue
 		}
 		registered++
-		// Gated bootstrap refreshes ONLY the active providers (I7), each
-		// call bound to a model-refresh capability. A denial — at the bind
-		// or surfacing through the guarded client — is fatal (never a
-		// warning): it means the admitted manifest and this refresh
-		// disagree, and degrading would start a session whose consent
-		// receipt does not match its traffic.
+		// Gated bootstrap refreshes ONLY the active providers (I7) — this
+		// is startup I/O, not governance: a provider merely configured for
+		// lazy slot governance (below) is refreshed by nobody and stays
+		// silent. Each call is bound to a model-refresh capability. A
+		// denial — at the bind or surfacing through the guarded client —
+		// is fatal (never a warning): it means the admitted manifest and
+		// this refresh disagree, and degrading would start a session whose
+		// consent receipt does not match its traffic.
 		rctx := ctx
 		if gate != nil {
 			if !active[p.Name()] {
@@ -227,6 +233,12 @@ func New(ctx context.Context, opts Options) (*Bundle, error) {
 	// A caller-supplied WithSlotSource (below, applied last) replaces the
 	// config-derived source, which holds no goroutines until its RecordUse
 	// is called and is simply collected — nothing to close.
+	// M3: the source governs EVERY configured slot_discovery provider, not
+	// just the active ones. Construction and cached-capacity reads perform
+	// no I/O, so an inactive provider still sends zero requests at startup;
+	// its first probe fires only after something uses it, and is guarded
+	// like any other. Governing only the active set would instead leave a
+	// provider selected mid-session ungoverned-unlimited.
 	if len(slotBEs) > 0 {
 		slotOverrides, err := buildSlotOverrides(effCfg, slotBEs)
 		if err != nil {
@@ -239,8 +251,12 @@ func New(ctx context.Context, opts Options) (*Bundle, error) {
 		if gate != nil {
 			// Slot probes are repository-owned metadata traffic (I14):
 			// per-backend guarded clients, and a slot-probe capability
-			// bound freshly per probe so re-admission after a revoke
+			// bound freshly per probe so re-admission after a revoke —
+			// or an additive Extend admitting a newly selected provider —
 			// restores probing instead of leaving a dead cached context.
+			// eff.dests has an entry for every configured provider, so
+			// the inactive ones get the same guarded client; it simply
+			// denies until their edge is admitted.
 			slotClients := make(map[string]*http.Client, len(slotBEs))
 			for name := range slotBEs {
 				gc, gerr := provider.GuardHTTPClient(gate, eff.dests[name],
@@ -274,6 +290,7 @@ func New(ctx context.Context, opts Options) (*Bundle, error) {
 
 	return &Bundle{
 		Config:    effCfg,
+		Effective: eff,
 		Providers: pReg,
 		Models:    mr,
 		Router:    router,

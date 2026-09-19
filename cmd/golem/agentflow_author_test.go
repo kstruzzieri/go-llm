@@ -14,6 +14,7 @@ import (
 
 	"github.com/kstruzzieri/go-llm/agent"
 	"github.com/kstruzzieri/go-llm/agentflow"
+	"github.com/kstruzzieri/go-llm/config"
 	"github.com/kstruzzieri/go-llm/provider"
 )
 
@@ -1132,7 +1133,7 @@ func TestRunAgentflowAuthor_UsesPlannerPromptAndProjectContext(t *testing.T) {
 	root := t.TempDir()
 	caller := &captureCaller{answer: "no submission"}
 	sess := newTestSession(t, caller, root)
-	sess.projectContextBlock = "<<<PROJECT_CONTEXT>>>\nrepo rule\n<<<END_PROJECT_CONTEXT>>>"
+	sess.sysInputs.projectContext = "<<<PROJECT_CONTEXT>>>\nrepo rule\n<<<END_PROJECT_CONTEXT>>>"
 	var out, errb bytes.Buffer
 	err := runAgentflowAuthorWithClient(context.Background(), &out, &errb, nil, sess, flags{goal: "x", goalSet: true}, root, &stubLocker{}, nil)
 	if !errors.Is(err, errPlannerNoSubmission) {
@@ -1170,12 +1171,36 @@ func TestPlannerBudgetAlignsTurnBudgetWithRouterAdmission(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := plannerBudget(tt.budget, plannerModelOptions(tt.options))
+			// config.UseCasePlanning is what the author call site passes; its
+			// DefaultExpectedOutput is the same 2048 chat fallback the old
+			// hard-coded "agent" produced, so every expectation above is the
+			// pre-parameterization value -- the proof this change moved
+			// nothing for the production path.
+			got := plannerBudget(tt.budget, plannerModelOptions(tt.options), config.UseCasePlanning)
 			if got.OutputReserve != tt.wantReserve || got.InputCeiling != tt.wantCeiling {
 				t.Fatalf("plannerBudget = {ceiling %d, reserve %d}, want {ceiling %d, reserve %d}",
 					got.InputCeiling, got.OutputReserve, tt.wantCeiling, tt.wantReserve)
 			}
 		})
+	}
+}
+
+func TestPlannerBudget_UsesTheGivenUseCaseDefault(t *testing.T) {
+	// The probe use case is "reasoning", not "planning": planning and agent
+	// both fall back to chat's 2048 default today, so a planning-vs-agent
+	// comparison could not fail whichever literal the implementation
+	// hard-coded. "reasoning" is 4096 in defaultExpectedOutputs, which is
+	// what makes a hard-coded use case detectable at all.
+	opts := provider.ModelOptions{NumPredict: minPlannerOutput}
+	base := agent.Budget{InputCeiling: 100_000}
+
+	if got := plannerBudget(base, opts, "agent"); got.InputCeiling != 100_000-(minPlannerOutput-2_048) {
+		t.Errorf("agent: InputCeiling = %d, want %d", got.InputCeiling, 100_000-(minPlannerOutput-2_048))
+	}
+	// reasoning's 4096 exceeds the planner's 3500 NumPredict, so the delta is
+	// negative and the ceiling must stay untouched.
+	if got := plannerBudget(base, opts, "reasoning"); got.InputCeiling != 100_000 {
+		t.Errorf("reasoning: InputCeiling = %d, want the ceiling untouched (100000)", got.InputCeiling)
 	}
 }
 
@@ -1196,7 +1221,11 @@ func TestRunAgentflowAuthor_UsesPlannerModelOptionsWithoutMutatingSession(t *tes
 	}{
 		{name: "default budget", wantOutput: minPlannerOutput},
 		{name: "lower budget and explicit thinking", options: provider.ModelOptions{NumPredict: 1024, Think: &on, ThinkEffort: "high"}, wantOutput: minPlannerOutput},
-		{name: "larger caller budget", options: provider.ModelOptions{NumPredict: 8192, Think: &on, ThinkEffort: "high"}, wantOutput: 8192},
+		// InputCeiling is explicit: this row measures NumPredict precedence, and
+		// the planner's effective prompt (base prompt plus the #430 base
+		// contract, plus tool schemas) no longer fits the default ceiling less
+		// an 8192 reserve.
+		{name: "larger caller budget", options: provider.ModelOptions{NumPredict: 8192, Think: &on, ThinkEffort: "high"}, budget: agent.Budget{InputCeiling: 32768}, wantOutput: 8192},
 		// Budget.OutputReserve overrides Options.NumPredict inside the agent
 		// layer, so the floor must survive it too (Codex review on PR #295).
 		{name: "small output reserve floored", budget: agent.Budget{OutputReserve: 1024}, wantOutput: minPlannerOutput},
@@ -1206,9 +1235,9 @@ func TestRunAgentflowAuthor_UsesPlannerModelOptionsWithoutMutatingSession(t *tes
 			root := t.TempDir()
 			caller := &optionsCaptureCaller{}
 			sess := newTestSession(t, caller, root)
-			sess.modelOptions = tt.options
-			sess.budget = tt.budget
-			before, err := json.Marshal(sess.modelOptions)
+			sess.startupModelOptions = tt.options
+			sess.startupBudget = tt.budget
+			before, err := json.Marshal(sess.startupModelOptions)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -1220,15 +1249,15 @@ func TestRunAgentflowAuthor_UsesPlannerModelOptionsWithoutMutatingSession(t *tes
 			if caller.options.NumPredict != tt.wantOutput || caller.options.Think == nil || *caller.options.Think || caller.options.ThinkEffort != "" {
 				t.Errorf("planner options = %+v, want output %d with thinking disabled", caller.options, tt.wantOutput)
 			}
-			after, err := json.Marshal(sess.modelOptions)
+			after, err := json.Marshal(sess.startupModelOptions)
 			if err != nil {
 				t.Fatal(err)
 			}
 			if !bytes.Equal(after, before) {
 				t.Errorf("session options mutated: before=%s after=%s", before, after)
 			}
-			if sess.budget != tt.budget {
-				t.Errorf("session budget mutated: before=%+v after=%+v", tt.budget, sess.budget)
+			if sess.startupBudget != tt.budget {
+				t.Errorf("session budget mutated: before=%+v after=%+v", tt.budget, sess.startupBudget)
 			}
 		})
 	}
@@ -1308,5 +1337,191 @@ func TestRunAgentflowAuthor_FastApproverInterruptIsInterrupted(t *testing.T) {
 	}
 	if errors.Is(err, errPlannerApprovalDenied) || errors.Is(err, errInterrupted) {
 		t.Fatalf("fast approval interrupt misclassified: %v", err)
+	}
+}
+
+// recordingRiskApprover captures what the planning approver forwards.
+type recordingRiskApprover struct {
+	approve bool
+	risk    agent.RiskReport
+	key     string
+	calls   int
+}
+
+func (r *recordingRiskApprover) Approve(context.Context, provider.ToolCall, string) (bool, error) {
+	r.calls++
+	return r.approve, nil
+}
+
+func (r *recordingRiskApprover) ApproveWithRisk(_ context.Context, _ provider.ToolCall, _, key string, risk agent.RiskReport) (agent.ApprovalDecision, error) {
+	r.calls++
+	r.risk, r.key = risk, key
+	return agent.ApprovalDecision{Approved: r.approve}, nil
+}
+
+func submitPlanToolCall() provider.ToolCall {
+	return provider.ToolCall{ID: "p1", Type: "function", Function: provider.ToolCallFunction{Name: submitPlanToolName, Arguments: json.RawMessage(`{}`)}}
+}
+
+// TestAuthorPlanApproverForwardsRiskAndRecordsDenial: the report and key
+// reach a RiskApprover delegate, and a denied lock is recorded exactly as on
+// the plain path (approvalDenied, cancel, best-effort save).
+func TestAuthorPlanApproverForwardsRiskAndRecordsDenial(t *testing.T) {
+	t.Setenv("TMPDIR", t.TempDir())
+	canceled := false
+	sess := &authorSession{cancel: func() { canceled = true }}
+	rec := &recordingRiskApprover{}
+	a := &authorPlanApprover{delegate: rec, sess: sess}
+	risk := agent.RiskReport{Score: 10, Findings: []agent.Finding{{Interceptor: "typoglycemia", Rule: "weak_phrase", Risk: 10}}}
+	d, err := a.ApproveWithRisk(context.Background(), submitPlanToolCall(), "plan preview", "k", risk)
+	if err != nil || d.Approved {
+		t.Fatalf("d=%+v err=%v", d, err)
+	}
+	if rec.calls != 1 || rec.key != "k" || !reflect.DeepEqual(rec.risk, risk) {
+		t.Fatalf("delegate saw calls=%d key=%q risk=%+v", rec.calls, rec.key, rec.risk)
+	}
+	if !sess.approvalDenied || !canceled {
+		t.Fatalf("denied lock not recorded: denied=%v canceled=%v", sess.approvalDenied, canceled)
+	}
+}
+
+// TestAuthorPlanApproverApprovedLockRecordsNothing: an approved lock through
+// the risk path leaves the denial fields untouched.
+func TestAuthorPlanApproverApprovedLockRecordsNothing(t *testing.T) {
+	sess := &authorSession{cancel: func() { t.Fatal("approval must not cancel") }}
+	a := &authorPlanApprover{delegate: &recordingRiskApprover{approve: true}, sess: sess}
+	d, err := a.ApproveWithRisk(context.Background(), submitPlanToolCall(), "plan preview", "k", agent.RiskReport{})
+	if err != nil || !d.Approved || sess.approvalDenied {
+		t.Fatalf("d=%+v err=%v denied=%v", d, err, sess.approvalDenied)
+	}
+}
+
+// TestAuthorPlanApproverPlainDelegateFallsBack: a delegate that is only an
+// Approver (the -approve-plan-lock path) still decides, with no report.
+func TestAuthorPlanApproverPlainDelegateFallsBack(t *testing.T) {
+	var out strings.Builder
+	sess := &authorSession{cancel: func() { t.Fatal("approval must not cancel") }}
+	a := &authorPlanApprover{delegate: &autoPlanApprover{out: &out}, sess: sess}
+	d, err := a.ApproveWithRisk(context.Background(), submitPlanToolCall(), "plan preview\n", "k", agent.RiskReport{Score: 10})
+	if err != nil || !d.Approved {
+		t.Fatalf("d=%+v err=%v", d, err)
+	}
+	if want := "plan preview\nplan lock auto-approved via -approve-plan-lock\n"; out.String() != want {
+		t.Fatalf("auto approver output = %q, want %q", out.String(), want)
+	}
+}
+
+// erroringApprover fails every decision; when it also implements
+// RiskApprover the risk path is taken, otherwise the plain fallback.
+type erroringApprover struct {
+	err  error
+	risk bool
+}
+
+func (e *erroringApprover) Approve(context.Context, provider.ToolCall, string) (bool, error) {
+	return false, e.err
+}
+
+// erroringRiskApprover adds the RiskApprover method on top of erroringApprover.
+type erroringRiskApprover struct{ erroringApprover }
+
+func (e *erroringRiskApprover) ApproveWithRisk(context.Context, provider.ToolCall, string, string, agent.RiskReport) (agent.ApprovalDecision, error) {
+	return agent.ApprovalDecision{}, e.err
+}
+
+// TestAuthorPlanApproverPropagatesDelegateErrorWithoutRecordingDenial: on
+// both branches a delegate error comes back unchanged and is not mistaken
+// for a denial (no approvalDenied, no cancel, no denied-plan save).
+func TestAuthorPlanApproverPropagatesDelegateErrorWithoutRecordingDenial(t *testing.T) {
+	sentinel := errors.New("approver failed")
+	for _, tc := range []struct {
+		name     string
+		delegate agent.Approver
+	}{
+		{"risk-aware delegate", &erroringRiskApprover{erroringApprover{err: sentinel}}},
+		{"plain delegate", &erroringApprover{err: sentinel}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sess := &authorSession{cancel: func() { t.Fatal("an error must not cancel the session") }}
+			a := &authorPlanApprover{delegate: tc.delegate, sess: sess}
+			d, err := a.ApproveWithRisk(context.Background(), submitPlanToolCall(), "plan preview", "k", agent.RiskReport{Score: 10})
+			if !errors.Is(err, sentinel) || d.Approved {
+				t.Fatalf("d=%+v err=%v, want the sentinel error and no approval", d, err)
+			}
+			if sess.approvalDenied || sess.deniedPlanPath != "" || sess.deniedPlanSaveErr != nil {
+				t.Fatalf("error recorded as a denial: %+v", sess)
+			}
+		})
+	}
+}
+
+// plannerWireCaller issues one read_file call, then declines to submit,
+// recording every request.
+type plannerWireCaller struct{ requests []provider.ChatRequest }
+
+func (c *plannerWireCaller) Chat(_ context.Context, req provider.ChatRequest, _ func(provider.ChatResponse) error) (agent.ModelResult, error) {
+	c.requests = append(c.requests, req)
+	if len(c.requests) == 1 {
+		return agent.ModelResult{Response: provider.ChatResponse{ToolCalls: []provider.ToolCall{{
+			ID: "p1", Type: "function",
+			Function: provider.ToolCallFunction{Name: "read_file", Arguments: json.RawMessage(`{"path":"note.txt"}`)},
+		}}}}, nil
+	}
+	return agent.ModelResult{Response: provider.ChatResponse{Content: "no submission"}}, nil
+}
+
+// TestRunAgentflowAuthor_PlannerPromptCarriesBaseContract (#430): the planner
+// runs its own prompt through the Orchestrator, so its effective system
+// prompt carries the base contract and its observations are framed.
+func TestRunAgentflowAuthor_PlannerPromptCarriesBaseContract(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "note.txt"), []byte("planner note\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	caller := &plannerWireCaller{}
+	sess := newTestSession(t, caller, root)
+	err := runAgentflowAuthorWithClient(context.Background(), io.Discard, io.Discard, nil, sess, flags{goal: "x", goalSet: true}, root, &stubLocker{}, nil)
+	if !errors.Is(err, errPlannerNoSubmission) {
+		t.Fatalf("err = %v, want no submission", err)
+	}
+	if len(caller.requests) != 2 {
+		t.Fatalf("planner requests = %d, want 2", len(caller.requests))
+	}
+	if got := caller.requests[0].Messages[0].Content; got != plannerBasePrompt+"\n\n"+agent.ToolTrustContract {
+		t.Errorf("planner system = %q, want the planner prompt plus the base contract", got)
+	}
+	var tool *provider.ChatMessage
+	for i := range caller.requests[1].Messages {
+		if caller.requests[1].Messages[i].Role == "tool" {
+			tool = &caller.requests[1].Messages[i]
+		}
+	}
+	if tool == nil {
+		t.Fatalf("planner follow-up has no tool message: %+v", caller.requests[1].Messages)
+	}
+	if k := toolFrameKey(t, tool.Content); tool.Content != framedToolResult(k, "planner note\n") {
+		t.Errorf("planner observation = %q, want %q", tool.Content, framedToolResult(k, "planner note\n"))
+	}
+}
+
+// The -goal planner reads the same current fragments the runtime prompt
+// carries: project context then Git context, in that order, after the
+// planner base prompt (#354 D10).
+func TestRunAgentflowAuthorUsesCurrentGitFragment(t *testing.T) {
+	root := t.TempDir()
+	caller := &captureCaller{answer: "no submission"}
+	sess := newTestSession(t, caller, root)
+	sess.sysInputs.projectContext = "<<<PROJECT_CONTEXT (advisory)\nrepo rule\n>>>PROJECT_CONTEXT"
+	sess.sysInputs.gitContext = gitContextOpen + "\nbranch: main\nrecent commits (newest first): (none)\nworking tree: clean\n" + gitContextClose
+	err := runAgentflowAuthorWithClient(context.Background(), io.Discard, io.Discard, nil, sess, flags{goal: "x", goalSet: true}, root, &stubLocker{}, nil)
+	if !errors.Is(err, errPlannerNoSubmission) {
+		t.Fatalf("err = %v, want no submission", err)
+	}
+	base, project, git := strings.Index(caller.system, "Golem's planner"), strings.Index(caller.system, "repo rule"), strings.Index(caller.system, gitContextOpen)
+	if base < 0 || project < 0 || git < 0 || base >= project || project >= git {
+		t.Fatalf("planner system must carry base prompt, project context, then Git context: base=%d project=%d git=%d\n%s", base, project, git, caller.system)
+	}
+	if strings.Count(caller.system, gitContextOpen) != 1 || !strings.HasSuffix(caller.system, gitContextClose) {
+		t.Fatalf("Git block duplicated or not last: %q", caller.system)
 	}
 }

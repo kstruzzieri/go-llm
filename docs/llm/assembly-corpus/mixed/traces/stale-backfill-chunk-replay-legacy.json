@@ -38,7 +38,7 @@
     },
     {
       "role": "tool",
-      "content": "rec-backfill-chunk · semantic · 2025-07-27 · replay backfill chunk at 50000 rows, raised during the columnar rewrite; the writer stages one chunk per segment flush, row assembly moved off the replay path so larger chunks stopped starving live ingest, and the rewrite notes record the sweep that settled the size\nrec-backfill-notify · working · 2025-07-27 · large backfills announce start, size, and expected duration in the data team's channel\nrec-backfill-walk · semantic · 2025-07-27 · replay backfill walks 5000-row chunks",
+      "content": "trust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-backfill-chunk · semantic · 2025-07-27 · replay backfill chunk at 50000 rows, raised during the columnar rewrite; the writer stages one chunk per segment flush, row assembly moved off the replay path so larger chunks stopped starving live ingest, and the rewrite notes record the sweep that settled the size\ntrust=agent-written; unreviewed; origin=memory.create; session=caller-claim · rec-backfill-notify · working · 2025-07-27 · large backfills announce start, size, and expected duration in the data team's channel\ntrust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-backfill-walk · semantic · 2025-07-27 · replay backfill walks 5000-row chunks",
       "tool_call_id": "c2",
       "name": "agent_memory_search"
     },
@@ -62,8 +62,8 @@
       "rec-backfill-notify",
       "rec-backfill-walk"
     ],
-    "estimated_prompt_tokens": 1094,
-    "state_digest": "70182bff136ba1a27c094d21b0bf45c1e968de8a8be42a208a852eb868134ea2",
+    "estimated_prompt_tokens": 1153,
+    "state_digest": "c96d8ee6b4da9b0fcb9e731a41123fb89c55d7125d413404ad3896f25ff87034",
     "subjects": [
       "(c1|rag|internal/replay/stage.go)",
       "(c1|rag|internal/replay/columnar.go)",
@@ -75,8 +75,8 @@
     "stratum": "stale_vs_fresh",
     "answer_home": "memory",
     "scenario_family": "backfill-chunk-staleness",
-    "budget": 1157,
-    "raw_state_tokens": 1928,
+    "budget": 1192,
+    "raw_state_tokens": 1987,
     "pressure_level": "critical",
     "shed_messages": 18,
     "shed_bytes": 2567

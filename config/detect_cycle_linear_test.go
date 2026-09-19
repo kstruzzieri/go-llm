@@ -70,7 +70,7 @@ func TestSchemaWalkerLeafRuleCoversAllConfigStructTypes(t *testing.T) {
 	seen := map[reflect.Type]bool{}
 	var sweep func(t reflect.Type)
 	sweep = func(rt reflect.Type) {
-		for rt.Kind() == reflect.Ptr || rt.Kind() == reflect.Slice || rt.Kind() == reflect.Map {
+		for rt.Kind() == reflect.Pointer || rt.Kind() == reflect.Slice || rt.Kind() == reflect.Map {
 			rt = rt.Elem()
 		}
 		if rt.Kind() != reflect.Struct || seen[rt] {

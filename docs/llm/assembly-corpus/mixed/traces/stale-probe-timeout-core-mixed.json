@@ -100,7 +100,7 @@
     },
     {
       "role": "tool",
-      "content": "### source: \"internal/core/prober.go\"\npurpose: Core probe loop: per-round collector walk with maintenance skips.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n--- source: \"internal/core/prober.go\" (lines 1-17, similarity: 1.00) ---\n1| package core\n2| \n3| // probeLoop walks the collector set on the fixed cadence and issues\n4| // one liveness probe per collector per round. Deadlines and the\n5| // cadence come from the deployment profile; the loop only owns\n6| // ordering and skip accounting for collectors in maintenance.\n7| func (p *Prober) probeLoop() {\n8| \tfor range p.ticker.C {\n9| \t\tfor _, c := range p.collectors() {\n10| \t\t\tif c.inMaintenance() {\n11| \t\t\t\tp.metricsSkipped.Inc()\n12| \t\t\t\tcontinue\n13| \t\t\t}\n14| \t\t\tp.probe(c)\n15| \t\t}\n16| \t}\n17| }\n\n### source: \"internal/core/registry.go\"\npurpose: Core collector registry: consistent snapshots, whole-set provisioning updates.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n\n### source: \"docs/core-collectors.md\"\npurpose: Core collector guide: aggregation role, registry membership, maintenance flags.\nlanguage: markdown\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n",
+      "content": "### source: \"internal/core/prober.go\"\npurpose: Core probe loop: per-round collector walk with maintenance skips.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n--- source: \"internal/core/prober.go\" (lines 1-17, similarity: 1.00) ---\n1| package core\n2| \n3| // probeLoop walks the collector set on the fixed cadence and issues\n4| // one liveness probe per collector per round. Deadlines and the\n5| // cadence come from the deployment profile; the loop only owns\n6| // ordering and skip accounting for collectors in maintenance.\n7| func (p *Prober) probeLoop() {\n8| \tfor range p.ticker.C {\n9| \t\tfor _, c := range p.collectors() {\n10| \t\t\tif c.inMaintenance() {\n11| \t\t\t\tp.metricsSkipped.Inc()\n12| \t\t\t\tcontinue\n13| \t\t\t}\n14| \t\t\tp.probe(c)\n15| \t\t}\n16| \t}\n17| }\n\n### source: \"internal/core/registry.go\"\npurpose: Core collector registry: consistent snapshots, whole-set provisioning updates.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n\n### source: \"docs/core-collectors.md\"\nlanguage: markdown\nindexed: 2025-07-27T00:00:00Z\nnote: metadata overview (summary omitted: budget)\n",
       "tool_call_id": "c1",
       "name": "retrieve"
     },
@@ -118,7 +118,7 @@
     },
     {
       "role": "tool",
-      "content": "rec-burnin-channel · working · created:2025-07-27 · updated:2025-07-27 · scope:session · ns: · src:\nrec-core-probe · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src: · core probe timeout is 4 seconds; hold it there through the collector burn-in\nrec-core-rotation · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src: · core cert renewals rotate in two waves recorded in the rotation sheet",
+      "content": "trust=agent-written; unreviewed; origin=memory.create; session=caller-claim · rec-burnin-channel · working · created:2025-07-27 · updated:2025-07-27 · scope:session · ns: · src-claim:\ntrust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-core-probe · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src-claim: · core probe timeout is 4 seconds; hold it there through the collector burn-in\ntrust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-core-rotation · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src-claim: · core cert renewals rotate in two waves recorded in the rotation sheet",
       "tool_call_id": "c2",
       "name": "agent_memory_search"
     },
@@ -142,8 +142,8 @@
       "rec-core-probe",
       "rec-core-rotation"
     ],
-    "estimated_prompt_tokens": 1137,
-    "state_digest": "1eb23089de517c3dca91af98fd1b9f55ca84962c5d351728784089e16ada6370",
+    "estimated_prompt_tokens": 1178,
+    "state_digest": "bee8f433a685487d0503c82f9d9f878bcc90282ed821e8b6428360b97b6f2a25",
     "subjects": [
       "(c1|rag|internal/core/prober.go)",
       "(c1|rag|internal/core/registry.go)",
@@ -155,9 +155,9 @@
     "stratum": "stale_vs_fresh",
     "answer_home": "conversation",
     "scenario_family": "probe-timeout-staleness",
-    "budget": 1194,
-    "raw_state_tokens": 1990,
+    "budget": 1229,
+    "raw_state_tokens": 2048,
     "pressure_level": "critical",
-    "shed_bytes": 2613
+    "shed_bytes": 2683
   }
 }

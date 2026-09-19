@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -20,6 +21,28 @@ func (e echoTool) Spec() ToolSpec {
 func (echoTool) Effect() Effect { return Effect{Class: Read, Approval: ApprovalNever} }
 func (echoTool) Invoke(_ context.Context, args json.RawMessage) (ToolResult, error) {
 	return ToolResult{Content: "tool-said:" + string(args)}, nil
+}
+
+type provenanceTool struct {
+	name       string
+	content    string
+	provenance json.RawMessage
+	isError    bool
+	cancel     context.CancelFunc
+	outputCap  int
+}
+
+func (t provenanceTool) Spec() ToolSpec {
+	return ToolSpec{Name: t.name, Parameters: json.RawMessage(`{"type":"object"}`)}
+}
+func (t provenanceTool) Effect() Effect {
+	return Effect{Class: Read, Approval: ApprovalNever, OutputCap: t.outputCap}
+}
+func (t provenanceTool) Invoke(context.Context, json.RawMessage) (ToolResult, error) {
+	if t.cancel != nil {
+		t.cancel()
+	}
+	return ToolResult{Content: t.content, IsError: t.isError, Provenance: t.provenance}, nil
 }
 
 func TestRunDispatchesToolThenAnswers(t *testing.T) {
@@ -73,13 +96,83 @@ func TestRecordResult_CopiesRouteOutcome(t *testing.T) {
 
 	o := New(nil, ContextManager{})
 	b := newBatch()
-	stop, err := o.recordResult(context.Background(), &res, &state, nil, &restraintGovernor{}, 0, call, Effect{Class: Read | Network}, ToolCallRecord{Step: 0, Name: "delegate_code"}, out, &b)
+	stop, err := o.recordResult(context.Background(), &res, &state, nil, &restraintGovernor{}, 0, call, Effect{Class: Read | Network}, ToolCallRecord{Step: 0, Name: "delegate_code"}, out, false, &b, o.newInterceptorRun())
 	if err != nil || stop {
 		t.Fatalf("recordResult: stop=%v err=%v", stop, err)
 	}
 	if len(res.ToolCalls) != 1 || res.ToolCalls[0].RouteOutcome != ro {
 		t.Fatalf("RouteOutcome not copied into ToolCallRecord: %+v", res.ToolCalls)
 	}
+}
+
+func TestRecordResultKeepsProvenanceWhenContentIsCapped(t *testing.T) {
+	const content = "content longer than its cap"
+	want := json.RawMessage(`{"evidence":"original"}`)
+	tool := provenanceTool{name: "evidence", content: content, provenance: want, outputCap: 4}
+	o := New(nil, ContextManager{})
+	effect := normalizeEffect(tool.Effect())
+	out := o.invokeCall(context.Background(), tool, effect, nil)
+	if !out.Truncated || out.Content == content {
+		t.Fatalf("forced cap did not change presentation: %+v", out)
+	}
+	var res Result
+	var state State
+	b := newBatch()
+	if _, err := o.recordResult(context.Background(), &res, &state, nil, &restraintGovernor{}, 0,
+		provider.ToolCall{ID: "call-1", Function: provider.ToolCallFunction{Name: tool.name}}, effect,
+		ToolCallRecord{Step: 0, Name: tool.name, Invoked: true}, out, false, &b, o.newInterceptorRun()); err != nil {
+		t.Fatalf("recordResult: %v", err)
+	}
+	if string(res.ToolCalls[0].Provenance) != string(want) {
+		t.Fatalf("retained provenance = %s, want %s", res.ToolCalls[0].Provenance, want)
+	}
+}
+
+func TestProvenanceSuppressedBeforeRecordingAndForDiscardedParallelResults(t *testing.T) {
+	t.Run("parent cancellation before recording", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		tool := provenanceTool{
+			name: "cancel", content: "completed", provenance: json.RawMessage(`{"call":"cancel"}`), cancel: cancel,
+		}
+		o := newTestOrchestrator(toolCallThenFinal(tool.name, `{}`))
+		result, err := o.Run(ctx, Request{Goal: "q", Tools: []Tool{tool}}, nil)
+		if err == nil || !errors.Is(err, context.Canceled) {
+			t.Fatalf("Run error = %v, want context.Canceled", err)
+		}
+		if len(result.ToolCalls) != 1 || !result.ToolCalls[0].Invoked || result.ToolCalls[0].Provenance != nil {
+			t.Fatalf("canceled record retained rejected provenance: %+v", result.ToolCalls)
+		}
+	})
+
+	t.Run("discarded trailing parallel results", func(t *testing.T) {
+		const n = 5
+		tools := make([]Tool, n)
+		calls := make([]provider.ToolCall, n)
+		for i := range n {
+			name := "evidence" + strconv.Itoa(i)
+			tools[i] = provenanceTool{
+				name: name, content: "failed", isError: true,
+				provenance: json.RawMessage(fmt.Sprintf(`{"call":%d}`, i)),
+			}
+			calls[i] = provider.ToolCall{ID: strconv.Itoa(i), Type: "function", Function: provider.ToolCallFunction{Name: name, Arguments: json.RawMessage(`{}`)}}
+		}
+		o := newTestOrchestrator(&scriptedCaller{responses: []ModelResult{{Response: provider.ChatResponse{ToolCalls: calls}}}})
+		result, err := o.Run(context.Background(), Request{Goal: "q", Tools: tools}, nil)
+		if err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+		if result.StopReason != ToolErrorCapReached || len(result.ToolCalls) != n {
+			t.Fatalf("stop=%v records=%d, want ToolErrorCapReached and %d", result.StopReason, len(result.ToolCalls), n)
+		}
+		for i, record := range result.ToolCalls {
+			if i < defaultToolErrorCap && record.Provenance == nil {
+				t.Fatalf("accepted record %d lost provenance", i)
+			}
+			if i >= defaultToolErrorCap && record.Provenance != nil {
+				t.Fatalf("discarded record %d retained provenance: %s", i, record.Provenance)
+			}
+		}
+	})
 }
 
 // ctxTool returns a caller-owned ContextSet so a test can mutate it AFTER
@@ -148,7 +241,7 @@ func dispatchBatch(t *testing.T, mixed, parallel bool, set *ContextSet, outputCa
 	o := New(nil, ContextManager{Mixed: mixed})
 	var res Result
 	var state State
-	if err := o.runToolCalls(context.Background(), &res, &state, reg, calls, nil, normalizeObserver(nil), 0, &restraintGovernor{}); err != nil {
+	if err := o.runToolCalls(context.Background(), &res, &state, reg, calls, nil, normalizeObserver(nil), 0, &restraintGovernor{}, o.newInterceptorRun()); err != nil {
 		t.Fatalf("runToolCalls: %v", err)
 	}
 	// Assert the path actually TAKEN, not the predicate that selects it: the
@@ -183,6 +276,54 @@ func attributedSet() *ContextSet {
 		{Source: "pkg/doc.go", StableKey: "k1", StartLine: 1, EndLine: 9, Score: 0.5},
 	}}
 	return s
+}
+
+func TestInvokedToolsRemainRecordedWhenContextAdmissionFails(t *testing.T) {
+	for _, tt := range []struct {
+		name     string
+		parallel bool
+	}{
+		{name: "serial"},
+		{name: "parallel", parallel: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			firstClass := EffectClass(Read | Network)
+			tools := []Tool{&ctxTool{name: "oversized", set: groupsSet(maxContextGroups + 1), class: firstClass}}
+			if tt.parallel {
+				tools[0] = &ctxTool{name: "oversized", set: groupsSet(maxContextGroups + 1), class: Read}
+				tools = append(tools, &ctxTool{name: "already-finished", class: Read})
+			}
+			reg, err := newToolRegistry(tools)
+			if err != nil {
+				t.Fatalf("newToolRegistry: %v", err)
+			}
+			calls := make([]provider.ToolCall, len(tools))
+			for i, tool := range tools {
+				calls[i] = provider.ToolCall{ID: fmt.Sprintf("call-%d", i), Type: "function", Function: provider.ToolCallFunction{
+					Name: tool.Spec().Name, Arguments: json.RawMessage(`{}`),
+				}}
+			}
+
+			o := New(nil, ContextManager{Mixed: true})
+			var res Result
+			var state State
+			err = o.runToolCalls(context.Background(), &res, &state, reg, calls, nil, normalizeObserver(nil), 0, &restraintGovernor{}, o.newInterceptorRun())
+			if err == nil || !strings.Contains(err.Error(), "groups exceeds limit") {
+				t.Fatalf("runToolCalls error = %v", err)
+			}
+			if len(res.ToolCalls) != len(tools) {
+				t.Fatalf("audit records = %+v, want one for each completed Invoke", res.ToolCalls)
+			}
+			for _, rec := range res.ToolCalls {
+				if !rec.Invoked {
+					t.Fatalf("audit record lost Invoked=true: %+v", res.ToolCalls)
+				}
+			}
+			if len(state.Messages) != 0 {
+				t.Fatalf("rejected or uninspected content reached State: %+v", state.Messages)
+			}
+		})
+	}
 }
 
 func TestToolObservationDeepCopiesContext(t *testing.T) {
@@ -240,10 +381,12 @@ func TestToolObservationDeepCopiesContext(t *testing.T) {
 	}
 }
 
-// TestRecordResultRejectsOversizedContextBeforeCloning pins the admission
-// boundary: the completed result is recorded and observed first, but its
-// oversized carrier never reaches State for cloning.
-func TestRecordResultRejectsOversizedContextBeforeCloning(t *testing.T) {
+// TestRecordResultRejectsOversizedContextBeforeAnyConsumer pins the admission
+// boundary (#436 spec D7): an oversized carrier from an untrusted tool is
+// rejected before the observer sees it and before it reaches State for cloning.
+// The completed result keeps only its audit record and event; a malformed set
+// must not reach a content consumer.
+func TestRecordResultRejectsOversizedContextBeforeAnyConsumer(t *testing.T) {
 	for _, tt := range []struct {
 		name string
 		set  *ContextSet
@@ -260,18 +403,15 @@ func TestRecordResultRejectsOversizedContextBeforeCloning(t *testing.T) {
 			b := newBatch()
 			_, err := o.recordResult(context.Background(), &res, &state, obs, &restraintGovernor{}, 0,
 				provider.ToolCall{ID: "call-1", Function: provider.ToolCallFunction{Name: "ctx"}},
-				Effect{}, ToolCallRecord{}, ToolResult{Content: "result", Context: tt.set}, &b)
+				Effect{}, ToolCallRecord{}, ToolResult{Content: "result", Context: tt.set}, false, &b, o.newInterceptorRun())
 			if err == nil || !strings.Contains(err.Error(), tt.want) {
 				t.Fatalf("recordResult error = %v, want %q", err, tt.want)
 			}
-			if len(res.ToolCalls) != 1 {
-				t.Fatalf("completed result was not recorded: %+v", res.ToolCalls)
+			if len(res.ToolCalls) != 1 || len(res.Events) != 1 || res.Events[0].Kind != "tool_result" {
+				t.Fatalf("malformed result audit metadata = calls %+v, events %+v", res.ToolCalls, res.Events)
 			}
-			if len(res.Events) != 1 || res.Events[0].Kind != "tool_result" {
-				t.Fatalf("result event = %+v, want one tool_result", res.Events)
-			}
-			if len(obs.results) != 1 || obs.results[0].Result.Context != tt.set {
-				t.Fatalf("ToolResultObserver did not receive the completed result: %+v", obs.results)
+			if len(obs.results) != 0 {
+				t.Fatalf("ToolResultObserver received a malformed result: %+v", obs.results)
 			}
 			if len(state.Messages) != 0 {
 				t.Fatalf("oversized ContextSet reached State: %+v", state.Messages)
@@ -337,11 +477,11 @@ func TestRecordResultCopiesOutputCap(t *testing.T) {
 		})
 	}
 
-	// Unresolved effect: unknown tool, malformed arguments, and plan failure all
-	// return from prepareCall BEFORE normalizeEffect, so recordResult receives a
-	// zero Effect while the anchor still carries model-visible Content. It must
-	// record 0 — quietly substituting a default the call was never dispatched
-	// under would hand mixed assembly a cap that bounds nothing.
+	// Unresolved effect: unknown tools and malformed arguments return from
+	// prepareCall before a tool effect can be normalized, so recordResult
+	// receives a zero Effect while the anchor still carries model-visible
+	// Content. It must record 0 — quietly substituting a default the call was
+	// never dispatched under would hand mixed assembly a cap that bounds nothing.
 	t.Run("unresolved effect stays zero", func(t *testing.T) {
 		var res Result
 		var state State
@@ -349,7 +489,7 @@ func TestRecordResultCopiesOutputCap(t *testing.T) {
 		b := newBatch()
 		if _, err := o.recordResult(context.Background(), &res, &state, nil, &restraintGovernor{}, 0,
 			provider.ToolCall{Function: provider.ToolCallFunction{Name: "nope"}},
-			Effect{}, ToolCallRecord{}, ToolResult{IsError: true, Content: "unknown tool: nope"}, &b); err != nil {
+			Effect{}, ToolCallRecord{}, ToolResult{IsError: true, Content: "unknown tool: nope"}, false, &b, o.newInterceptorRun()); err != nil {
 			t.Fatalf("recordResult: %v", err)
 		}
 		if got := state.Messages[0].OutputCap; got != 0 {
@@ -405,7 +545,8 @@ func TestToolCallRecord_NilRouteOutcome_OmittedFromJSON(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
-	if strings.Contains(string(b), "RouteOutcome") {
-		t.Fatalf("nil RouteOutcome should be omitted, got %s", b)
+	const want = `{"Step":1,"Name":"read_file","IsError":false,"Denied":false,"Invoked":false,"Latency":0}`
+	if string(b) != want {
+		t.Fatalf("ordinary ToolCallRecord JSON changed:\n got %s\nwant %s", b, want)
 	}
 }

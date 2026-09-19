@@ -19,7 +19,7 @@
     },
     {
       "role": "tool",
-      "content": "rec-canary-dash · semantic · 2025-07-27 · canary comparison dashboard is pinned in the ops folder; refresh interval matches the main board\nrec-export-lag · semantic · 2025-07-27 · exporter lag alarms were retuned after the parquet writer upgrade; thresholds live in the alerting repo\nrec-oncall-week · working · 2025-07-27 · oncall handoff notes live in the shared doc; rotate the summary section every Friday",
+      "content": "trust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-canary-dash · semantic · 2025-07-27 · canary comparison dashboard is pinned in the ops folder; refresh interval matches the main board\ntrust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-export-lag · semantic · 2025-07-27 · exporter lag alarms were retuned after the parquet writer upgrade; thresholds live in the alerting repo\ntrust=agent-written; unreviewed; origin=memory.create; session=caller-claim · rec-oncall-week · working · 2025-07-27 · oncall handoff notes live in the shared doc; rotate the summary section every Friday",
       "tool_call_id": "c2",
       "name": "agent_memory_search"
     },
@@ -43,8 +43,8 @@
       "rec-export-lag",
       "rec-oncall-week"
     ],
-    "estimated_prompt_tokens": 171,
-    "state_digest": "bc36b741c179e2868aa3100b830dc2aba32f7a4526d6ba48ae219d4d9e198a1c",
+    "estimated_prompt_tokens": 230,
+    "state_digest": "377b65675c9684cf90be921eed0b66ccc993ea2cf25f248ae33a1a239c46572d",
     "subjects": [
       "(c1|rag|internal/spool/spool.go)",
       "(c1|rag|internal/spool/segment.go)",
@@ -56,8 +56,8 @@
     "stratum": "conversation_only",
     "answer_home": "conversation",
     "scenario_family": "spool-flush-window",
-    "budget": 1084,
-    "raw_state_tokens": 1806,
+    "budget": 1119,
+    "raw_state_tokens": 1865,
     "pressure_level": "ok",
     "shed_messages": 10,
     "shed_bytes": 6114

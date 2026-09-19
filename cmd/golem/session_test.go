@@ -450,3 +450,64 @@ func TestSession_HistorySkipsRowsTheRuntimeWouldReject(t *testing.T) {
 		}
 	}
 }
+
+func TestSessionRevisionLifecycle(t *testing.T) {
+	ctx := context.Background()
+	s, _ := openTempSession(t, "user:revision")
+	if s.revision != 0 {
+		t.Fatalf("new revision = %d; want 0", s.revision)
+	}
+	for _, want := range []int64{1, 2} {
+		if err := s.record(ctx, "question", "answer"); err != nil {
+			t.Fatal(err)
+		}
+		saved, err := s.store.Load(ctx, s.id)
+		if err != nil || saved.Revision != want || s.revision != want {
+			t.Fatalf("record revision = %d, persisted %+v, %v; want %d", s.revision, saved, err, want)
+		}
+	}
+	reopened, _, err := openSession(ctx, s.dbPath, s.id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = reopened.Close() }()
+	if reopened.revision != 2 {
+		t.Fatalf("reopened revision = %d; want 2", reopened.revision)
+	}
+	before := *s
+	if err := reopened.record(ctx, "winner", "winner answer"); err != nil {
+		t.Fatal(err)
+	}
+	err = s.record(ctx, "loser", "loser answer")
+	var conflict *conversation.ConflictError
+	if !errors.Is(err, conversation.ErrConflict) || !errors.As(err, &conflict) || conflict.ExpectedRevision != 2 || !reflect.DeepEqual(*s, before) {
+		t.Fatalf("stale record = %v, cache %+v; want revision 2 conflict and unchanged cache", err, s)
+	}
+	if _, err := s.switchTo(ctx, "user:missing"); !errors.Is(err, conversation.ErrNotFound) || !reflect.DeepEqual(*s, before) {
+		t.Fatalf("failed switch = %v, cache %+v; want unchanged", err, s)
+	}
+	if _, err := s.switchTo(ctx, s.id); err != nil || s.revision != 3 {
+		t.Fatalf("switch revision = %d, %v; want 3", s.revision, err)
+	}
+	if _, err := s.db.ExecContext(ctx, `CREATE TRIGGER refuse_delete BEFORE DELETE ON conversations BEGIN SELECT RAISE(FAIL, 'disk failure'); END`); err != nil {
+		t.Fatal(err)
+	}
+	before = *s
+	if err := s.clear(ctx); err == nil || !reflect.DeepEqual(*s, before) {
+		t.Fatalf("failed clear = %v, cache %+v; want unchanged", err, s)
+	}
+	if _, err := s.db.ExecContext(ctx, `DROP TRIGGER refuse_delete`); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.clear(ctx); err != nil || s.revision != 0 || len(s.msgs) != 0 {
+		t.Fatalf("clear = %v, cache %+v; want revision 0", err, s)
+	}
+	if err := s.record(ctx, "recreated", "answer"); err != nil || s.revision != 1 {
+		t.Fatalf("recreate = %v, revision %d; want 1", err, s.revision)
+	}
+	oldID := s.id
+	s.renew()
+	if s.revision != 0 || s.id == oldID || len(s.msgs) != 0 {
+		t.Fatalf("renew = %+v; want fresh ID, revision 0", s)
+	}
+}

@@ -36,7 +36,7 @@
     },
     {
       "role": "tool",
-      "content": "### source: \"internal/export/target.go\"\npurpose: Archive bucket resolution from deployment config.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n--- source: \"internal/export/target.go\" (lines 1-8, similarity: 1.00) ---\n1| package export\n2| \n3| // target resolves the archive bucket for a batch. The write target\n4| // ships from deployment config; dw-archive-us predates the residency\n5| // review and holds legacy objects only, with no new writes.\n6| func (w *writer) target() string {\n7| \treturn w.cfg.ArchiveBucket\n8| }\n\n### source: \"internal/export/retry.go\"\npurpose: Capped exponential retry for failed batch shipments.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n\n### source: \"docs/export-runbook.md\"\npurpose: Runbook for safe export re-runs and what to watch.\nlanguage: markdown\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n",
+      "content": "### source: \"internal/export/target.go\"\npurpose: Archive bucket resolution from deployment config.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n--- source: \"internal/export/target.go\" (lines 1-8, similarity: 1.00) ---\n1| package export\n2| \n3| // target resolves the archive bucket for a batch. The write target\n4| // ships from deployment config; dw-archive-us predates the residency\n5| // review and holds legacy objects only, with no new writes.\n6| func (w *writer) target() string {\n7| \treturn w.cfg.ArchiveBucket\n8| }\n\n### source: \"internal/export/retry.go\"\npurpose: Capped exponential retry for failed batch shipments.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n\n### source: \"docs/export-runbook.md\"\nlanguage: markdown\nindexed: 2025-07-27T00:00:00Z\nnote: metadata overview (summary omitted: budget)\n",
       "tool_call_id": "c1",
       "name": "retrieve"
     },
@@ -54,7 +54,7 @@
     },
     {
       "role": "tool",
-      "content": "rec-cost-model · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:\nrec-export-bucket · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src: · archive exports write to the dw-archive-eu bucket; nothing else is approved\nrec-legacy-bucket · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:\nrec-verbose-tenants · working · created:2025-07-27 · updated:2025-07-27 · scope:session · ns: · src:",
+      "content": "trust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-cost-model · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src-claim:\ntrust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-export-bucket · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src-claim:\ntrust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-legacy-bucket · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src-claim:\ntrust=agent-written; unreviewed; origin=memory.create; session=caller-claim · rec-verbose-tenants · working · created:2025-07-27 · updated:2025-07-27 · scope:session · ns: · src-claim:",
       "tool_call_id": "c2",
       "name": "agent_memory_search"
     },
@@ -79,8 +79,8 @@
       "rec-legacy-bucket",
       "rec-verbose-tenants"
     ],
-    "estimated_prompt_tokens": 620,
-    "state_digest": "d55dcf2d7b2f709916cf43a7bac547cf87082b9096feeeb5d48d9a40a1a8825b",
+    "estimated_prompt_tokens": 669,
+    "state_digest": "6ad14ac4ee65a52528dfe3372e72b299ab9065e5f348dc69fd22636859c2c373",
     "subjects": [
       "(c1|rag|internal/export/target.go)",
       "(c1|rag|internal/export/retry.go)",
@@ -93,9 +93,9 @@
     "stratum": "memory_only",
     "answer_home": "memory",
     "scenario_family": "export-bucket-mem",
-    "budget": 673,
-    "raw_state_tokens": 1121,
+    "budget": 719,
+    "raw_state_tokens": 1199,
     "pressure_level": "critical",
-    "shed_bytes": 1718
+    "shed_bytes": 1832
   }
 }

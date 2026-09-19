@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"strings"
 	"sync"
 
 	"github.com/kstruzzieri/go-llm/agent"
@@ -22,11 +23,14 @@ var ErrRunConflict = errors.New("golem: run conflict")
 // ErrClosed reports use of a closed Runtime.
 var ErrClosed = errors.New("golem: runtime is closed")
 
-// ErrInvalidRequest reports a malformed or oversized turn.
+// ErrInvalidRequest reports a malformed or oversized request.
 var ErrInvalidRequest = errors.New("golem: invalid request")
 
-// ErrSessionPersistence reports a failure while persisting a completed answer.
+// ErrSessionPersistence reports a failure while persisting a turn or compaction.
 var ErrSessionPersistence = errors.New("golem: session persistence failed")
+
+// ErrCompressionUnavailable reports disabled or unconfigured history compression.
+var ErrCompressionUnavailable = errors.New("golem: compression unavailable")
 
 var errDuplicateRunID = errors.New("golem: duplicate active run ID")
 
@@ -44,12 +48,18 @@ const (
 // SessionStore loads and saves complete stateful-thread snapshots. Load must
 // return an error matching conversation.ErrNotFound for a missing ID, and a
 // successful Load must return a non-nil Conversation with that ID. Save must
-// replace or upsert the complete snapshot.
+// atomically create revision 1 for a revision-zero snapshot only if the ID is
+// absent, or replace a positive revision r only when the stored revision is r,
+// committing r+1. Reject negative and maximum int64 revisions. A failed CAS
+// must return a *conversation.ConflictError; every Save error must leave the
+// old snapshot intact. Save takes a value: retained callers advance their local
+// revision only after success; a successful commit must return nil even if context
+// cancellation races afterward. Load results and summarizer inputs are read-only.
 //
 // Calls for different thread IDs may overlap, so implementations must be safe
 // for concurrent use. Same-thread serialization applies only within one
-// Runtime; callers sharing a store across runtimes must not run the same thread
-// concurrently. Compression may save a completed turn twice: first the raw
+// Runtime; competing writers across runtimes are refused by Save revisions.
+// Compression may save a completed turn twice: first the raw
 // snapshot, then a best-effort compressed snapshot. The caller owns the store
 // and must keep it alive until Runtime.Close returns; Runtime never closes,
 // migrates, or hardens it.
@@ -60,7 +70,10 @@ type SessionStore interface {
 
 // Options configures a Runtime.
 type Options struct {
-	Root   string
+	Root string
+	// System is the application prompt; empty selects SystemPrompt(false,
+	// false). agent.Run appends agent.ToolTrustContract after it on every
+	// turn (#430), so a host never composes the base contract itself.
 	System string
 	Tools  []agent.Tool
 	// ScopeGuard is installed on the runtime-owned Workspace backing every
@@ -153,6 +166,30 @@ type Turn struct {
 	Context      []ContextItem
 	Approver     agent.Approver
 	Observer     agent.Observer
+	// Advisory is an optional staged consult receipt for this turn (#382).
+	// It is projected onto the wire copy of the goal only and never
+	// persisted with the thread.
+	Advisory *agent.Advisory
+}
+
+// CompactionReport estimates persisted non-system history and its rendered
+// durable summary. It excludes the live system prompt, tool schemas, and current turn.
+// Changed reports content replacement, not guaranteed token savings.
+type CompactionReport struct {
+	TokensBefore int
+	TokensAfter  int
+	Changed      bool
+}
+
+// turnSnapshot is the immutable {System, Tools, ModelOptions, Orchestrator,
+// Budget} value a reserved turn holds (#372, #376). Replace and
+// ReplaceConfiguration publish a new pointer; a reserved turn never rereads it.
+type turnSnapshot struct {
+	system       string
+	tools        []agent.Tool
+	modelOptions provider.ModelOptions
+	orchestrator *agent.Orchestrator
+	budget       agent.Budget
 }
 
 // Event is the versioned consumer event envelope. A run that stops early
@@ -181,14 +218,15 @@ type activeRun struct {
 
 // Runtime is a concrete facade over agent.Orchestrator.
 type Runtime struct {
-	orchestrator    *agent.Orchestrator
-	root            string
-	system          string
-	tools           []agent.Tool
+	root string
+	// fileTools is the runtime-owned prefix, immutable after New. snap is
+	// the current {System, Tools, ModelOptions, Orchestrator, Budget} value,
+	// guarded by mu: reserve reads it, Replace and ReplaceConfiguration swap
+	// it (#372, #376).
+	fileTools       []agent.Tool
+	snap            *turnSnapshot
 	maxSteps        int
-	budget          agent.Budget
 	maxMessageBytes int
-	modelOptions    provider.ModelOptions
 	summarizer      conversation.Summarizer
 	compress        bool
 	retainReasoning bool
@@ -259,14 +297,11 @@ func New(ctx context.Context, opts Options) (*Runtime, error) {
 		sessions = &threadStore{store: opts.SessionStore}
 	}
 	return &Runtime{
-		orchestrator:    orchestrator,
 		root:            root,
-		system:          opts.System,
-		tools:           tools,
+		fileTools:       fileTools,
+		snap:            &turnSnapshot{system: opts.System, tools: tools, modelOptions: opts.ModelOptions.Clone(), orchestrator: orchestrator, budget: opts.Budget},
 		maxSteps:        opts.MaxSteps,
-		budget:          opts.Budget,
 		maxMessageBytes: maxMessage,
-		modelOptions:    opts.ModelOptions,
 		summarizer:      summarizer,
 		compress:        !opts.DisableCompression && summarizer != nil,
 		retainReasoning: opts.RetainReasoning,
@@ -344,7 +379,7 @@ func (r *Runtime) Run(ctx context.Context, turn Turn, sink EventSink) (agent.Res
 		}
 		return err
 	}
-	active, err := r.reserve(turn, cancel)
+	active, snap, err := r.reserve(turn, cancel)
 	if err != nil {
 		if errors.Is(err, errDuplicateRunID) {
 			return agent.Result{}, err
@@ -365,13 +400,13 @@ func (r *Runtime) Run(ctx context.Context, turn Turn, sink EventSink) (agent.Res
 			payload = struct{}{}
 		}
 		if err := emit(eventType, payload); err != nil {
-			return err
+			return errors.Join(cause, err)
 		}
 		if eventType != "run.canceled" {
 			return cause
 		}
 		if err := runCtx.Err(); err != nil {
-			return err
+			return errors.Join(cause, err)
 		}
 		if isCancellation(cause) {
 			return cause
@@ -429,23 +464,28 @@ func (r *Runtime) Run(ctx context.Context, turn Turn, sink EventSink) (agent.Res
 	}
 	request := agent.Request{
 		Goal:     goal,
-		System:   turnSystem(r.system, turn.Instructions),
-		Tools:    r.tools,
+		System:   turnSystem(snap.system, turn.Instructions),
+		Tools:    snap.tools,
 		MaxSteps: r.maxSteps,
-		Budget:   r.budget,
+		Budget:   snap.budget,
 		Approver: turn.Approver,
-		Options:  r.modelOptions,
+		Options:  snap.modelOptions.Clone(),
+		// The thread id is the conversation's stable identity, so every turn
+		// of one thread reaches the provider under one session id (#533).
+		// Stateless turns carry no thread id and so send no session header.
+		SessionID: turn.ThreadID,
+		Advisory:  turn.Advisory,
 	}
 	if thread != nil {
 		request.History = thread.history()
 		request.HistorySummary = thread.summary()
 	}
-	result, err := r.orchestrator.Run(runCtx, request, observer)
+	result, err := snap.orchestrator.Run(runCtx, request, observer)
 	if !r.retainReasoning {
 		scrubReasoning(&result)
 	}
 	if sinkErr != nil {
-		return result, sinkErr
+		return result, errors.Join(err, sinkErr)
 	}
 	if err == nil {
 		err = runCtx.Err()
@@ -455,7 +495,7 @@ func (r *Runtime) Run(ctx context.Context, turn Turn, sink EventSink) (agent.Res
 		return result, finish(eventType, payload, err)
 	}
 	if thread != nil && result.Answer != "" {
-		if err := r.saveThread(runCtx, active, thread, turn.Message, result); err != nil {
+		if err := r.saveThread(runCtx, active, snap.budget, thread, turn.Message, result); err != nil {
 			err = fmt.Errorf("%w: %w", ErrSessionPersistence, err)
 			eventType, payload := r.terminalFailure(err)
 			return result, finish(eventType, payload, err)
@@ -526,6 +566,8 @@ func failureCode(err error) string {
 	switch {
 	case errors.As(err, &observerErr):
 		return "observer_failed"
+	case errors.Is(err, conversation.ErrConflict):
+		return "session_conflict"
 	case errors.Is(err, ErrClosed):
 		return "runtime_closed"
 	case errors.Is(err, ErrInvalidRequest),
@@ -539,6 +581,17 @@ func failureCode(err error) string {
 		errors.Is(err, provider.ErrRouterClosed),
 		provider.IsInfrastructureError(err):
 		return "provider_unavailable"
+	// A staged advisory the policy refused (#382) is the caller's to see as
+	// such, not an unexplained internal fault. This arm matches the advisory
+	// sentinel alone: every interceptor refusal carries a *BlockedError, so an
+	// errors.As arm here would also reclassify canary aborts and other blocks
+	// that consumers already pin as "internal" (cmd/golem's headless record
+	// hard-codes it). That general reclassification is a contract change
+	// outside this issue and is deliberately deferred to a follow-up. Placed
+	// below observer_failed because a hook error joined with the block still
+	// describes the host's own sink, not the policy.
+	case errors.Is(err, agent.ErrAdvisoryBlocked):
+		return "policy_blocked"
 	default:
 		return "internal"
 	}
@@ -573,6 +626,24 @@ func turnGoal(turn Turn) (string, error) {
 	return turn.Message + contextDelimiter + string(raw), nil
 }
 
+// indexControlByte returns the index of the first byte that may not appear in
+// an HTTP header field value — an ASCII control character other than
+// horizontal tab, or DEL (RFC 9110 §5.5) — or -1 when there is none.
+//
+// The thread id travels to providers as a header (x-opencode-session, #533).
+// Go's Transport refuses to send such a value, so without this check a bad id
+// would fail every turn of the thread with an opaque transport error rather
+// than a clear request-validation one. It is a validation rule, not a
+// security boundary: net/http already prevents header injection.
+func indexControlByte(s string) int {
+	for i := 0; i < len(s); i++ {
+		if c := s[i]; (c < 0x20 && c != '\t') || c == 0x7f {
+			return i
+		}
+	}
+	return -1
+}
+
 func (r *Runtime) validateTurn(turn Turn) error {
 	if turn.RunID == "" {
 		return fmt.Errorf("%w: run ID is required", ErrInvalidRequest)
@@ -583,11 +654,22 @@ func (r *Runtime) validateTurn(turn Turn) error {
 	if len(turn.ThreadID) > maxCorrelationIDBytes {
 		return fmt.Errorf("%w: thread ID exceeds %d bytes", ErrInvalidRequest, maxCorrelationIDBytes)
 	}
+	if i := indexControlByte(turn.ThreadID); i >= 0 {
+		return fmt.Errorf("%w: thread ID contains a control character at byte %d", ErrInvalidRequest, i)
+	}
+	if strings.Trim(turn.ThreadID, " \t") != turn.ThreadID {
+		return fmt.Errorf("%w: thread ID must not start or end with a space or tab", ErrInvalidRequest)
+	}
 	if turn.Message == "" {
 		return fmt.Errorf("%w: message is required", ErrInvalidRequest)
 	}
 	if len(turn.Message) > r.maxMessageBytes {
 		return fmt.Errorf("%w: message exceeds %d bytes", ErrInvalidRequest, r.maxMessageBytes)
+	}
+	if turn.Advisory != nil {
+		if err := agent.ValidateAdvisory(turn.Advisory); err != nil {
+			return fmt.Errorf("%w: %v", ErrInvalidRequest, err)
+		}
 	}
 	contextBytes := 0
 	for i, item := range turn.Context {
@@ -624,18 +706,199 @@ func (r *Runtime) Cancel(runID string) bool {
 	return true
 }
 
-func (r *Runtime) reserve(turn Turn, cancel context.CancelFunc) (*activeRun, error) {
+// Replace atomically installs system, tools, and optional model options for
+// every turn reserved after it returns. A turn reserved before Replace keeps
+// its System, Tools, and ModelOptions to completion. Reservation is the
+// critical section that makes a run visible to Cancel and Close, so the two are
+// linearizable. A successful Replace governs every reservation after it
+// returns until superseded by another successfully linearized Replace.
+//
+// system and tools have the meaning of Options.System and Options.Tools:
+// an empty system selects SystemPrompt(false, false), and the runtime's own
+// file tools (over its ScopeGuard-bound workspace) always precede tools.
+// Validation matches New (nil tool, empty name, duplicate name — including
+// against the runtime's own file tools) and installs nothing on failure;
+// ErrClosed takes precedence over validation errors, including when Close
+// completes while validation is running. tools is copied. Tool.Spec is
+// never called while the runtime lock is held. Safe for concurrent use with
+// Run, Cancel, Close, and other Replace calls.
+//
+// Omitting modelOptions preserves the options current at publication, after
+// tool validation. One value replaces all options; an explicit zero clears them.
+// More than one value returns ErrInvalidRequest. Supplied options are copied;
+// callers must not mutate arguments concurrently with New or Replace reading them.
+// The variadic signature preserves direct two-argument calls, but interfaces and
+// explicitly typed functions using the old signature must be updated.
+//
+// Replace changes no orchestrator and no budget: it preserves whichever pair
+// is current at publication, after tool validation, exactly as it preserves
+// omitted options — including when another replacement lands while this call
+// is validating. An orchestrator option that names a tool
+// (agent.WithToolInvocationLimit) therefore still requires that tool in every
+// replacement. Use ReplaceConfiguration to change the whole tuple at once.
+func (r *Runtime) Replace(system string, tools []agent.Tool, modelOptions ...provider.ModelOptions) error {
+	r.mu.Lock()
+	closed := r.closed
+	r.mu.Unlock()
+	if closed {
+		return ErrClosed
+	}
+	if system == "" {
+		system = SystemPrompt(false, false)
+	}
+	// Validation calls external Tool.Spec implementations, so it runs
+	// unlocked; its error is retained until the closed state is rechecked.
+	combined := make([]agent.Tool, 0, len(r.fileTools)+len(tools))
+	combined = append(combined, r.fileTools...)
+	combined = append(combined, tools...)
+	var validationErr error
+	if len(modelOptions) > 1 {
+		validationErr = fmt.Errorf("%w: Replace accepts at most one model options value", ErrInvalidRequest)
+	} else {
+		validationErr = validateTools(combined)
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.closed {
+		return ErrClosed
+	}
+	if validationErr != nil {
+		return validationErr
+	}
+	current := r.snap
+	options := current.modelOptions
+	if len(modelOptions) == 1 {
+		options = modelOptions[0].Clone()
+	}
+	r.snap = &turnSnapshot{
+		system:       system,
+		tools:        combined,
+		modelOptions: options,
+		orchestrator: current.orchestrator,
+		budget:       current.budget,
+	}
+	return nil
+}
+
+// Configuration is the complete execution tuple a Runtime publishes as one
+// snapshot. Every field is replaced together: ReplaceConfiguration is not a
+// field merge, so a zero field installs that zero value.
+type Configuration struct {
+	// System is the application prompt, with Options.System's meaning: empty
+	// selects SystemPrompt(false, false).
+	System string
+	// Tools are the EXTRA tools, with Options.Tools' meaning. The runtime's own
+	// file tools (over its ScopeGuard-bound workspace) always precede them and
+	// are never replaced.
+	Tools        []agent.Tool
+	ModelOptions provider.ModelOptions
+	// Orchestrator is required and stays caller-owned: publishing a new one
+	// neither closes the previous one nor its providers, which runs already
+	// reserved keep using to completion.
+	Orchestrator *agent.Orchestrator
+	// Budget governs assembly for every turn reserved after publication, and
+	// the automatic history compression those turns perform.
+	Budget agent.Budget
+}
+
+// ReplaceConfiguration atomically installs one complete Configuration for every
+// turn reserved after it returns. A turn reserved before it keeps its whole
+// tuple — system, tools, options, orchestrator, and budget — for all of its
+// steps, so no run ever observes a mixed configuration. Reservation is the
+// linearization point, exactly as for Replace.
+//
+// Validation matches New and Replace (nil tool, empty name, duplicate name —
+// including against the runtime's own file tools) and additionally rejects a
+// nil Orchestrator with ErrInvalidRequest. Nothing is installed on failure.
+// ErrClosed takes precedence over every other error, including when Close
+// completes while validation is running. ctx is checked at entry and again
+// under the publication lock after validation, so a cancellation raised while
+// Tool.Spec runs installs nothing either. Tool.Spec is never called while the
+// runtime lock is held, and this method performs no provider I/O.
+//
+// The tool and option values are copied; callers must not mutate the supplied
+// slices concurrently with this call reading them. Safe for concurrent use with
+// Run, Cancel, Close, Replace, and other ReplaceConfiguration calls.
+func (r *Runtime) ReplaceConfiguration(ctx context.Context, cfg Configuration) error {
+	r.mu.Lock()
+	closed := r.closed
+	r.mu.Unlock()
+	if closed {
+		return ErrClosed
+	}
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("golem: replace configuration: %w", err)
+	}
+	system := cfg.System
+	if system == "" {
+		system = SystemPrompt(false, false)
+	}
+	// Validation calls external Tool.Spec implementations, so it runs
+	// unlocked; its error is retained until the closed state is rechecked.
+	combined := make([]agent.Tool, 0, len(r.fileTools)+len(cfg.Tools))
+	combined = append(combined, r.fileTools...)
+	combined = append(combined, cfg.Tools...)
+	var validationErr error
+	if cfg.Orchestrator == nil {
+		validationErr = fmt.Errorf("%w: orchestrator is required", ErrInvalidRequest)
+	} else {
+		validationErr = validateTools(combined)
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.closed {
+		return ErrClosed
+	}
+	if validationErr != nil {
+		return validationErr
+	}
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("golem: replace configuration: %w", err)
+	}
+	r.snap = &turnSnapshot{
+		system:       system,
+		tools:        combined,
+		modelOptions: cfg.ModelOptions.Clone(),
+		orchestrator: cfg.Orchestrator,
+		budget:       cfg.Budget,
+	}
+	return nil
+}
+
+// Budget returns the current run budget, including after Close — the same
+// access convention as ModelOptions. agent.Budget is a plain value, so the
+// result is independent of the runtime. Safe for concurrent use with Run,
+// Replace, and ReplaceConfiguration.
+func (r *Runtime) Budget() agent.Budget {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.snap.budget
+}
+
+// ModelOptions returns an independent copy of the current options, including
+// after Close. It is safe for concurrent use with Run and Replace.
+func (r *Runtime) ModelOptions() provider.ModelOptions {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.snap.modelOptions.Clone()
+}
+
+// reserve registers the run and fixes its complete {System, Tools,
+// ModelOptions, Orchestrator, Budget} snapshot in the same critical section
+// that makes it visible to Cancel and Close, so publication and reservation
+// are linearizable (#372, #376).
+func (r *Runtime) reserve(turn Turn, cancel context.CancelFunc) (*activeRun, *turnSnapshot, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if _, ok := r.active[turn.RunID]; ok {
-		return nil, fmt.Errorf("%w: %w %q", ErrRunConflict, errDuplicateRunID, turn.RunID)
+		return nil, nil, fmt.Errorf("%w: %w %q", ErrRunConflict, errDuplicateRunID, turn.RunID)
 	}
 	if r.closed {
-		return nil, ErrClosed
+		return nil, nil, ErrClosed
 	}
 	if turn.ThreadID != "" {
 		if _, ok := r.activeThreads[turn.ThreadID]; ok {
-			return nil, fmt.Errorf("%w: thread %q is active", ErrRunConflict, turn.ThreadID)
+			return nil, nil, fmt.Errorf("%w: thread %q is active", ErrRunConflict, turn.ThreadID)
 		}
 	}
 	active := &activeRun{cancel: cancel}
@@ -644,7 +907,7 @@ func (r *Runtime) reserve(turn Turn, cancel context.CancelFunc) (*activeRun, err
 		r.activeThreads[turn.ThreadID] = active
 	}
 	r.wg.Add(1)
-	return active, nil
+	return active, r.snap, nil
 }
 
 func (r *Runtime) commitTerminal(active *activeRun, ctx context.Context, eventType string) string {
@@ -672,8 +935,8 @@ func (r *Runtime) release(turn Turn, active *activeRun) {
 	r.wg.Done()
 }
 
-// Close cancels active runs, waits for them, and releases owned resources.
-// It must not be called synchronously by code executing within an active Run.
+// Close cancels active runs and compactions, waits for them, and releases owned resources.
+// It must not be called synchronously by code executing within Run or CompactThread.
 func (r *Runtime) Close() error {
 	r.mu.Lock()
 	if r.closeDone == nil {
@@ -693,6 +956,11 @@ func (r *Runtime) Close() error {
 	// compression can still be running (the durable save is uncancelable), and
 	// Close must not wait out a summarizer model call it could abort.
 	for _, active := range r.active {
+		active.cancel()
+	}
+	// Compactions only enter activeThreads. Stateful turns appear in both
+	// maps; canceling their contexts twice is safe.
+	for _, active := range r.activeThreads {
 		active.cancel()
 	}
 	r.mu.Unlock()

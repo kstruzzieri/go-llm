@@ -27,7 +27,7 @@
     },
     {
       "role": "tool",
-      "content": "rec-atlas-quota · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src: · atlas tenant quota lifted to 40 rps after their batching fix\nrec-burst-review · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:\nrec-ingest-drill · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:\nrec-lint-rollout · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:\nrec-oncall-cycle · working · created:2025-07-27 · updated:2025-07-27 · scope:session · ns: · src:\nrec-standby-node · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:\nrec-tenant-tags · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:\nrec-warehouse-sync · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:",
+      "content": "trust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-atlas-quota · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src-claim: · atlas tenant quota lifted to 40 rps after their batching fix\ntrust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-burst-review · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src-claim:\ntrust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-ingest-drill · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src-claim:\ntrust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-lint-rollout · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src-claim:\ntrust=agent-written; unreviewed; origin=memory.create; session=caller-claim · rec-oncall-cycle · working · created:2025-07-27 · updated:2025-07-27 · scope:session · ns: · src-claim: · ingest oncall cycle rotates monthly; the capacity summary goes to whoever holds the pager next\ntrust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-standby-node · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src-claim: · standby ingest node runs one release behind on purpose; promote it only after the primary has soaked a release for a week\ntrust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-tenant-tags · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src-claim: · tenant stanzas carry team and cost-center tags now; the capacity summary groups by team tag since the reorg\ntrust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-warehouse-sync · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src-claim:",
       "tool_call_id": "c1",
       "name": "agent_memory_search"
     },
@@ -62,7 +62,7 @@
     },
     {
       "role": "tool",
-      "content": "### source: \"internal/ingest/limiter.go\"\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nnote: metadata overview (summary omitted: budget)\n--- source: \"internal/ingest/limiter.go\" (lines 1-11, similarity: 1.00) ---\n1| package ingest\n2| \n3| // Per-tenant rates come exclusively from the tenants file; the code\n4| // carries only the conservative default for tenants the file does not\n5| // name. Rate changes are config deploys, never rebuilds.\n6| func (l *tenantLimiter) rateFor(tenant string) float64 {\n7| \tif r, ok := l.rates[tenant]; ok {\n8| \t\treturn r\n9| \t}\n10| \treturn l.defaultRate\n11| }\n\n### source: \"internal/ingest/admission.go\"\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nnote: metadata overview (summary omitted: budget)\n\n### source: \"docs/tenants.md\"\nlanguage: markdown\nindexed: 2025-07-27T00:00:00Z\nnote: metadata overview (summary omitted: budget)\n--- source: \"docs/tenants.md\" (lines 1-19, similarity: 1.00) ---\n1| # driftwatch tenants\n2| \n3| Every producer maps to a tenant, and every tenant maps to a stanza in\n4| the tenants file: an ingest rate, a burst allowance, and the team and\n5| cost-center tags the capacity reports group by.\n6| \n7| ## Changing a rate\n8| \n9| Rate changes are config deploys. Edit the stanza, let the lint pass,\n10| and the hot reload applies it without a restart; the limiter picks up\n11| the new rate on its next refill tick. Keep the change and its\n12| rationale in the commit message, because the capacity summary links\n13| stanza history when quotas are questioned.\n14| \n15| ## Defaults\n16| \n17| Tenants the file does not name get the conservative built-in default.\n18| That default is for evaluation traffic only; production tenants get\n19| explicit stanzas, reviewed with the team tag owner.\n",
+      "content": "### source: \"internal/ingest/limiter.go\"\npurpose: Per-tenant rate lookup backed by the tenants file, with a conservative default.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n--- source: \"internal/ingest/limiter.go\" (lines 1-11, similarity: 1.00) ---\n1| package ingest\n2| \n3| // Per-tenant rates come exclusively from the tenants file; the code\n4| // carries only the conservative default for tenants the file does not\n5| // name. Rate changes are config deploys, never rebuilds.\n6| func (l *tenantLimiter) rateFor(tenant string) float64 {\n7| \tif r, ok := l.rates[tenant]; ok {\n8| \t\treturn r\n9| \t}\n10| \treturn l.defaultRate\n11| }\n\n### source: \"internal/ingest/admission.go\"\npurpose: Ingest admission gate: auth, per-tenant quota, then spool backpressure.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n\n### source: \"docs/tenants.md\"\npurpose: Tenants guide: stanza layout, config-deploy rate changes, default policy.\nlanguage: markdown\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n",
       "tool_call_id": "c2",
       "name": "retrieve"
     },
@@ -91,8 +91,8 @@
       "rec-tenant-tags",
       "rec-warehouse-sync"
     ],
-    "estimated_prompt_tokens": 935,
-    "state_digest": "9a646a24f6593025016995834d247e2ec49ebcb6675a0ae0fd263e9f82a70db2",
+    "estimated_prompt_tokens": 1030,
+    "state_digest": "e3aa8a9c952ed54b4a7f182f46e417393082f5d7b0202ce934d434a34724a3f2",
     "subjects": [
       "(c1|memory|rec-atlas-quota)",
       "(c1|memory|rec-burst-review)",
@@ -109,9 +109,9 @@
     "stratum": "chain_retention",
     "answer_home": "memory",
     "scenario_family": "tenant-quota-chain",
-    "budget": 983,
-    "raw_state_tokens": 1638,
+    "budget": 1076,
+    "raw_state_tokens": 1794,
     "pressure_level": "critical",
-    "shed_bytes": 2459
+    "shed_bytes": 2706
   }
 }

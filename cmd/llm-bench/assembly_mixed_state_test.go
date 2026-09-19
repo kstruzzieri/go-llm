@@ -12,6 +12,7 @@ import (
 	"github.com/kstruzzieri/go-llm/agent"
 	agenttools "github.com/kstruzzieri/go-llm/agent/tools"
 	"github.com/kstruzzieri/go-llm/contextdepth"
+	"github.com/kstruzzieri/go-llm/memory"
 	"github.com/kstruzzieri/go-llm/rag"
 )
 
@@ -469,6 +470,54 @@ func TestBuildMixedStateErrors(t *testing.T) {
 			for _, want := range tt.want {
 				if !strings.Contains(err.Error(), want) {
 					t.Errorf("err = %v; missing %q", err, want)
+				}
+			}
+		})
+	}
+}
+
+// Reverting the fixture's final-body signature makes Get reject the pinned row.
+func TestSeedMixedMemoryStoreFinalBody(t *testing.T) {
+	ctx := context.Background()
+	epoch := time.Date(2025, 7, 27, 12, 0, 0, 0, time.UTC)
+	for _, kind := range []string{"", "working"} {
+		t.Run(kind, func(t *testing.T) {
+			want := memory.MemoryRecordBody{
+				ID: "fixture-final", Kind: memory.KindSemantic, Content: "fixture final body",
+				WorkspaceID: "fixture-workspace", Metadata: json.RawMessage(`{}`),
+				Provenance: memory.Provenance{OriginTool: "memory.create", TrustClass: memory.TrustAgentWritten},
+				CreatedAt:  epoch, UpdatedAt: epoch,
+			}
+			if kind == "working" {
+				want.Kind = memory.KindWorking
+				want.SessionID = "mixed-fixture-session"
+				want.Provenance.OriginSessionID = "mixed-fixture-session"
+			}
+			for run := 0; run < 2; run++ {
+				store, db, workspace, err := seedMixedMemoryStore(ctx, []mixedMemoryRecord{{
+					ID: "fixture-final", Kind: kind, Content: "fixture final body", WorkspaceID: "fixture-workspace",
+				}})
+				if err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { _ = db.Close() })
+				if workspace != "fixture-workspace" {
+					t.Fatalf("workspace = %q", workspace)
+				}
+				got, err := store.Get(ctx, "fixture-final", memory.RecordAccess{
+					WorkspaceID: "fixture-workspace", SessionID: "mixed-fixture-session",
+				})
+				if err != nil {
+					t.Fatalf("run %d: verify final record: %v", run, err)
+				}
+				if !reflect.DeepEqual(got.MemoryRecordBody, want) {
+					t.Fatalf("run %d: final body = %+v, want %+v", run, got.MemoryRecordBody, want)
+				}
+				found, err := store.Search(ctx, "fixture", memory.RecordSearchOptions{
+					WorkspaceID: "fixture-workspace", SessionID: "mixed-fixture-session", Now: epoch,
+				})
+				if err != nil || len(found) != 1 || !reflect.DeepEqual(found[0].MemoryRecordBody, want) {
+					t.Fatalf("run %d: final FTS row = %+v, err = %v", run, found, err)
 				}
 			}
 		})

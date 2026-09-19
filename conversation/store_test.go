@@ -137,7 +137,7 @@ func TestSave_NilMessages_NormalizesToEmptyArray(t *testing.T) {
 	}
 }
 
-func TestSave_Upsert_PreservesCreatedAt(t *testing.T) {
+func TestSave_Update_PreservesCreatedAt(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()
 
@@ -158,6 +158,7 @@ func TestSave_Upsert_PreservesCreatedAt(t *testing.T) {
 
 	time.Sleep(10 * time.Millisecond)
 
+	conv = *first
 	conv.Title = "updated"
 	conv.Messages = append(conv.Messages, Message{Role: "assistant", Content: "v2"})
 	if err := store.Save(ctx, conv); err != nil {
@@ -363,6 +364,7 @@ func TestSearch_UpdateAndDeleteStayInSync(t *testing.T) {
 	}
 	if err := store.Save(ctx, Conversation{
 		ID:       id,
+		Revision: 1,
 		Title:    "Sync",
 		Messages: []Message{{Role: "user", Content: "bravo needle"}},
 	}); err != nil {

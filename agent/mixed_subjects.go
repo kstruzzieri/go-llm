@@ -280,7 +280,10 @@ func validateChainBijection(span []Message) error {
 // returns the chain's base footprint: the assistant call, every unstructured
 // tool result verbatim, and every structured anchor's ENVELOPE — the message
 // with Content emptied, because an anchor's content is allocated, not assumed
-// (#331 spec 4.1 step 4).
+// (#331 spec 4.1 step 4). When the manager prices for the Orchestrator
+// (frameToolResults), checkedMessageCost adds the #430 frame envelope to
+// every tool result and every envelope exactly once; admitted alternatives
+// are charged as raw whole-anchor deltas on top.
 //
 // Duplicate subjects are NOT re-checked here. validateContextSet owns
 // within-set uniqueness; buildMixedUnits owns assembly-wide trace-triple

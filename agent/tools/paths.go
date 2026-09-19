@@ -1,7 +1,8 @@
 package tools
 
 import (
-	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -9,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 
 	"github.com/kstruzzieri/go-llm/agent"
 )
@@ -55,6 +57,13 @@ var (
 	errScopeDenied = errors.New("path denied by workspace policy")
 )
 
+// ErrRootReplaced reports that the workspace root directory is no longer the
+// directory captured at construction (deleted and recreated, or swapped). Every
+// pinned read fails with it until the host builds a new Workspace; hosts that
+// keep a Workspace across project lifetimes should treat it as "rebuild", not
+// "retry". It wraps the identity-change error so tool output is unchanged.
+var ErrRootReplaced = fmt.Errorf("workspace root replaced: %w", errFileChanged)
+
 type scopeDeniedError struct{ cause error }
 
 func (e scopeDeniedError) Error() string        { return e.cause.Error() }
@@ -75,8 +84,13 @@ type ScopeGuard func(rel string, write bool) error
 // component is ever resolved through a symlink afterwards (symlink policy: never
 // follow).
 type Workspace struct {
-	root  string     // canonical absolute root; volume roots retain their separator
-	guard ScopeGuard // nil => allow everything (default)
+	root         string     // canonical absolute root; volume roots retain their separator
+	guard        ScopeGuard // nil => allow everything (default)
+	rootIdentity os.FileInfo
+	pinnedRoot   *os.File      // invocation-owned capability; operations borrow it
+	scopeDenials *atomic.Int64 // scoped child policy evaluations, not unique paths
+	// beforeReadOpen is a per-workspace deterministic race-test seam.
+	beforeReadOpen func()
 }
 
 // CanonicalWorkspaceRoot resolves a workspace root to its absolute, symlink-free
@@ -108,7 +122,11 @@ func NewWorkspace(root string) (*Workspace, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Workspace{root: canon}, nil
+	identity, err := os.Stat(canon)
+	if err != nil {
+		return nil, err
+	}
+	return &Workspace{root: canon, rootIdentity: identity}, nil
 }
 
 func canonicalExistingPath(path string) (string, error) {
@@ -208,6 +226,7 @@ func canonicalFuturePath(root, path string) (string, error) {
 }
 
 // SetScopeGuard installs (or clears with nil) the proof-mode scope guard.
+// Host setup must complete before workspace calls; installation is not concurrent-safe.
 func (w *Workspace) SetScopeGuard(g ScopeGuard) { w.guard = g }
 
 // checkScope consults the guard for a cleaned absolute path. A veto preserves
@@ -224,6 +243,26 @@ func (w *Workspace) checkScope(abs string, write bool) error {
 		return scopeDeniedError{cause: err}
 	}
 	return nil
+}
+
+// denyScope records one native policy rejection. Guard vetoes count in the
+// translated guard itself; wrapping/rendering an existing denial never counts.
+func (w *Workspace) denyScope() error {
+	if w.scopeDenials != nil {
+		w.scopeDenials.Add(1)
+	}
+	return errScopeDenied
+}
+
+func (w *Workspace) scopedPathError(err error) error {
+	if w.scopeDenials == nil || errors.Is(err, errScopeDenied) {
+		return err
+	}
+	if errors.Is(err, errEscape) || errors.Is(err, errAbsPath) || errors.Is(err, errNUL) || errors.Is(err, errSymlink) {
+		_ = w.denyScope()
+		return scopeDeniedError{cause: err}
+	}
+	return err
 }
 
 // underRoot reports whether a cleaned absolute candidate is the root or strictly
@@ -294,45 +333,10 @@ func (w *Workspace) rejectSymlinkAncestors(abs string) error {
 	return nil
 }
 
-// walk drives filepath.WalkDir from the canonical root, skipping ignore-set
-// directories and never descending symlinks (WalkDir does not follow them).
-// fn receives slash-normalized relative paths. ctx cancellation aborts the walk.
-func (w *Workspace) walk(ctx context.Context, fn func(rel string, d fs.DirEntry) error) error {
-	return filepath.WalkDir(w.root, func(abs string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		if cerr := ctx.Err(); cerr != nil {
-			return cerr
-		}
-		if d.IsDir() && ignoreDirs[d.Name()] {
-			return fs.SkipDir
-		}
-		rel, rerr := filepath.Rel(w.root, abs)
-		if rerr != nil {
-			return rerr
-		}
-		if rel == "." {
-			return nil // skip the root entry itself
-		}
-		slash := filepath.ToSlash(rel)
-		if w.guard != nil {
-			if gerr := w.guard(slash, false); gerr != nil {
-				if d.IsDir() {
-					return fs.SkipDir
-				}
-				return nil
-			}
-		}
-		return fn(slash, d)
-	})
-}
-
 // resolveFile contains a path to a concrete file: cleanRel for containment,
 // Lstat checks for every parent component, then final Lstat to reject symlinks
-// (never follow) and require a regular file. The returned FileInfo is the
-// pre-open Lstat result; openRegularFile re-stats the open handle and compares
-// with os.SameFile to close the final-component symlink-swap TOCTOU window.
+// (never follow) and require a regular file. The returned native FileInfo supports stat-only exec metadata checks.
+// Secured content readers use the platform descriptor backend separately.
 func (w *Workspace) resolveFile(p string) (string, os.FileInfo, error) {
 	abs, err := w.cleanRel(p)
 	if err != nil {
@@ -359,9 +363,8 @@ func (w *Workspace) resolveFile(p string) (string, os.FileInfo, error) {
 
 // resolveDir contains a path to a concrete directory: cleanRel, Lstat checks for
 // every parent component, then final Lstat to reject a symlinked directory
-// target (never follow) and require a real dir. The returned FileInfo is the
-// pre-open Lstat result; openDir re-stats the open handle and compares with
-// os.SameFile to close the final-component symlink-swap TOCTOU window.
+// target (never follow) and require a real dir. The returned native FileInfo supports stat-only exec metadata checks.
+// Secured enumeration uses the platform descriptor backend separately.
 func (w *Workspace) resolveDir(p string) (string, os.FileInfo, error) {
 	abs, err := w.cleanRel(p)
 	if err != nil {
@@ -386,34 +389,6 @@ func (w *Workspace) resolveDir(p string) (string, os.FileInfo, error) {
 	return abs, fi, nil
 }
 
-// openDir is the single helper for directory listing. It resolves the path
-// through resolveDir (containment + Lstat + symlink/kind checks), opens the
-// directory, and verifies the open handle still refers to the same directory
-// Lstat saw — closing the final-component symlink-swap TOCTOU window that a bare
-// resolveDir+os.ReadDir would leave (os.ReadDir follows a final-component symlink).
-// It returns errFileChanged if the identity no longer matches. Callers own the
-// returned file and must close it; read entries via f.ReadDir.
-func (w *Workspace) openDir(p string) (*os.File, error) {
-	abs, lfi, err := w.resolveDir(p)
-	if err != nil {
-		return nil, err
-	}
-	f, err := os.Open(abs)
-	if err != nil {
-		return nil, err
-	}
-	sfi, err := f.Stat()
-	if err != nil {
-		_ = f.Close()
-		return nil, err
-	}
-	if !os.SameFile(lfi, sfi) {
-		_ = f.Close()
-		return nil, errFileChanged
-	}
-	return f, nil
-}
-
 // NewFileToolsForWorkspace builds read-only tools over an existing workspace.
 // Use this when a caller has installed a ScopeGuard that must apply to reads,
 // search, glob, and list.
@@ -435,33 +410,6 @@ func NewFileTools(root string) ([]agent.Tool, error) {
 		return nil, err
 	}
 	return NewFileToolsForWorkspace(ws), nil
-}
-
-// openRegularFile is the single helper for content reads. It first resolves the
-// path through resolveFile (containment + Lstat + symlink/kind checks), then opens
-// the file and verifies the open handle still refers to the same file Lstat saw.
-// Returns errFileChanged if the open handle no longer matches the file Lstat saw
-// (e.g. a regular-file swap between Lstat and Open). Callers own the returned file
-// and must close it.
-func (w *Workspace) openRegularFile(p string) (*os.File, error) {
-	abs, lfi, err := w.resolveFile(p)
-	if err != nil {
-		return nil, err
-	}
-	f, err := os.Open(abs)
-	if err != nil {
-		return nil, err
-	}
-	sfi, err := f.Stat()
-	if err != nil {
-		_ = f.Close()
-		return nil, err
-	}
-	if !os.SameFile(lfi, sfi) {
-		_ = f.Close()
-		return nil, errFileChanged
-	}
-	return f, nil
 }
 
 // resolveWriteTarget contains a path to a write destination: cleanRel containment,
@@ -617,4 +565,44 @@ func (w *Workspace) readAll(p string) ([]byte, error) {
 // is absent.
 func (w *Workspace) ReadFileForUndo(p string) ([]byte, error) {
 	return w.readAll(p)
+}
+
+// ReadFileWithModeForUndo is ReadFileForUndo plus the file's complete mode,
+// both taken from ONE open handle so bytes and mode cannot race apart. Undo
+// uses it to verify a tracked created file's mode (#443) before deleting it.
+func (w *Workspace) ReadFileWithModeForUndo(p string) ([]byte, fs.FileMode, error) {
+	f, err := w.openRegularFile(p)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer func() { _ = f.Close() }()
+	fi, err := f.Stat()
+	if err != nil {
+		return nil, 0, err
+	}
+	data, err := io.ReadAll(f)
+	if err != nil {
+		return nil, 0, err
+	}
+	return data, fi.Mode(), nil
+}
+
+// HashFileWithMode returns the ContentHash and complete mode of a regular file
+// from one protected open handle. It streams content with bounded memory and
+// applies the same containment and symlink checks as ReadFileWithModeForUndo.
+func (w *Workspace) HashFileWithMode(p string) (string, fs.FileMode, error) {
+	f, err := w.openRegularFile(p)
+	if err != nil {
+		return "", 0, err
+	}
+	defer func() { _ = f.Close() }()
+	fi, err := f.Stat()
+	if err != nil {
+		return "", 0, err
+	}
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", 0, err
+	}
+	return hex.EncodeToString(h.Sum(nil)), fi.Mode(), nil
 }

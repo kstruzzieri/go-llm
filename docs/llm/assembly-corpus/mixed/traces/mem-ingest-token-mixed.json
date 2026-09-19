@@ -52,7 +52,7 @@
     },
     {
       "role": "tool",
-      "content": "### source: \"internal/ingest/auth.go\"\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nnote: metadata overview (summary omitted: budget)\n--- source: \"internal/ingest/auth.go\" (lines 1-15, similarity: 1.00) ---\n1| package ingest\n2| \n3| import \"strings\"\n4| \n5| // authenticate checks the presented ingest token against the accepted\n6| // prefixes from deployment config. Rotations are staged by widening\n7| // and later narrowing that set; no prefix is hard-coded here.\n8| func (g *Gateway) authenticate(token string) bool {\n9| \tfor _, p := range g.cfg.AcceptedPrefixes {\n10| \t\tif strings.HasPrefix(token, p) {\n11| \t\t\treturn g.verify(token)\n12| \t\t}\n13| \t}\n14| \treturn false\n15| }\n\n### source: \"internal/ingest/limits.go\"\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nnote: metadata overview (summary omitted: budget)\n\n### source: \"docs/operations.md\"\nlanguage: markdown\nindexed: 2025-07-27T00:00:00Z\nnote: metadata overview (summary omitted: budget)\n--- source: \"docs/operations.md\" (lines 1-24, similarity: 1.00) ---\n1| # driftwatch operations\n2| \n3| driftwatch ships as a single static binary. Run it under a process\n4| supervisor with the spool on local disk, and point producers at a\n5| stable DNS name rather than an address.\n6| \n7| ## Restarts\n8| \n9| Send SIGTERM and wait. Ingest stops accepting, the spool drains for a\n10| bounded grace period, and anything still buffered is picked up on the\n11| next start. No manual intervention is required.\n12| \n13| ## Credential rotation\n14| \n15| Rotations are staged through config: add the incoming credential shape\n16| to the accepted set, migrate producers, then narrow the accepted set\n17| again once the drain completes. Never narrow first; producers signing\n18| with retired credentials are rejected at the edge.\n19| \n20| ## Tenants\n21| \n22| Per-tenant ingest budgets live in the tenants file and hot-reload on\n23| change. Prefer explicit entries for every production tenant; the\n24| built-in default exists for evaluation, not for steady state.\n",
+      "content": "### source: \"internal/ingest/auth.go\"\npurpose: Ingest token authentication against config-supplied accepted prefixes.\noverview: auth.go validates presented ingest tokens against the accepted prefix set from deployment config; rotations widen and later narrow that set without a rebuild.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n--- source: \"internal/ingest/auth.go\" (lines 1-15, similarity: 1.00) ---\n1| package ingest\n2| \n3| import \"strings\"\n4| \n5| // authenticate checks the presented ingest token against the accepted\n6| // prefixes from deployment config. Rotations are staged by widening\n7| // and later narrowing that set; no prefix is hard-coded here.\n8| func (g *Gateway) authenticate(token string) bool {\n9| \tfor _, p := range g.cfg.AcceptedPrefixes {\n10| \t\tif strings.HasPrefix(token, p) {\n11| \t\t\treturn g.verify(token)\n12| \t\t}\n13| \t}\n14| \treturn false\n15| }\n\n### source: \"internal/ingest/limits.go\"\npurpose: Per-tenant token-bucket rate limiting with hot-reloaded rates.\noverview: limits.go implements the per-tenant token buckets guarding ingest admission: lazy bucket creation, tick-based refill, and conservative defaults for tenants the tenants file does not name.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n\n### source: \"docs/operations.md\"\npurpose: Operations guide: process supervision, restart drain, staged credential rotation.\nlanguage: markdown\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n",
       "tool_call_id": "c1",
       "name": "retrieve"
     },
@@ -70,7 +70,7 @@
     },
     {
       "role": "tool",
-      "content": "rec-dash-refresh · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:\nrec-oncall-handoff · working · created:2025-07-27 · updated:2025-07-27 · scope:session · ns: · src:\nrec-token-rotation · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:",
+      "content": "trust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-dash-refresh · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src-claim: · ingest overview dashboard auto-refreshes on the short interval; leave it be, the load is negligible\ntrust=agent-written; unreviewed; origin=memory.create; session=caller-claim · rec-oncall-handoff · working · created:2025-07-27 · updated:2025-07-27 · scope:session · ns: · src-claim: · oncall handoff happens Friday afternoon; the summary template lives in the shared doc\ntrust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-token-rotation · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src-claim: · rotated ingest tokens carry the dwk2- prefix; producers migrate first and legacy tokens drain until the edge narrows the accepted set",
       "tool_call_id": "c2",
       "name": "agent_memory_search"
     },
@@ -94,8 +94,8 @@
       "rec-oncall-handoff",
       "rec-token-rotation"
     ],
-    "estimated_prompt_tokens": 937,
-    "state_digest": "71de272dec4e10aeaa79b098c35318110ee1b12dbcb96df1662cc2fe252fe53d",
+    "estimated_prompt_tokens": 972,
+    "state_digest": "5ac2095b7d2ffeedf14e62f7e3f06d71d9d7470bccae79fcf87bc8246a00bc44",
     "subjects": [
       "(c1|rag|internal/ingest/auth.go)",
       "(c1|rag|internal/ingest/limits.go)",
@@ -108,9 +108,9 @@
     "answer_home": "memory",
     "scenario_family": "ingest-token-mem",
     "twin_group": "tw-ingest-token",
-    "budget": 982,
-    "raw_state_tokens": 1637,
+    "budget": 1018,
+    "raw_state_tokens": 1696,
     "pressure_level": "critical",
-    "shed_bytes": 2385
+    "shed_bytes": 2481
   }
 }

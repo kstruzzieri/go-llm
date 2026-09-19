@@ -92,7 +92,7 @@
     },
     {
       "role": "tool",
-      "content": "### source: \"internal/replay/stage.go\"\npurpose: Backfill chunk staging: whole-chunk writes into flush-bound segments.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n--- source: \"internal/replay/stage.go\" (lines 1-16, similarity: 1.00) ---\n1| package replay\n2| \n3| // stageChunk writes one backfill chunk into the staging segment and\n4| // hands it to the flush path. Chunk sizing is owned by the backfill\n5| // planner; staging only enforces that a chunk arrives whole, because\n6| // a partial chunk after a crash would replay rows twice.\n7| func (b *Backfill) stageChunk(c Chunk) error {\n8| \tif err := c.complete(); err != nil {\n9| \t\treturn err\n10| \t}\n11| \tseg := b.staging.current()\n12| \tif err := seg.append(c); err != nil {\n13| \t\treturn err\n14| \t}\n15| \treturn b.flusher.enqueue(seg)\n16| }\n\n### source: \"internal/replay/columnar.go\"\npurpose: Columnar assembly for staged chunks: per-field vectors with validity bitmaps.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n\n### source: \"docs/replay-backfill.md\"\nlanguage: markdown\nindexed: 2025-07-27T00:00:00Z\nnote: metadata overview (summary omitted: budget)\n",
+      "content": "### source: \"internal/replay/stage.go\"\npurpose: Backfill chunk staging: whole-chunk writes into flush-bound segments.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n--- source: \"internal/replay/stage.go\" (lines 1-16, similarity: 1.00) ---\n1| package replay\n2| \n3| // stageChunk writes one backfill chunk into the staging segment and\n4| // hands it to the flush path. Chunk sizing is owned by the backfill\n5| // planner; staging only enforces that a chunk arrives whole, because\n6| // a partial chunk after a crash would replay rows twice.\n7| func (b *Backfill) stageChunk(c Chunk) error {\n8| \tif err := c.complete(); err != nil {\n9| \t\treturn err\n10| \t}\n11| \tseg := b.staging.current()\n12| \tif err := seg.append(c); err != nil {\n13| \t\treturn err\n14| \t}\n15| \treturn b.flusher.enqueue(seg)\n16| }\n\n### source: \"internal/replay/columnar.go\"\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nnote: metadata overview (summary omitted: budget)\n\n### source: \"docs/replay-backfill.md\"\nlanguage: markdown\nindexed: 2025-07-27T00:00:00Z\nnote: metadata overview (summary omitted: budget)\n",
       "tool_call_id": "c1",
       "name": "retrieve"
     },
@@ -110,7 +110,7 @@
     },
     {
       "role": "tool",
-      "content": "rec-backfill-chunk · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:\nrec-backfill-notify · working · created:2025-07-27 · updated:2025-07-27 · scope:session · ns: · src:\nrec-backfill-walk · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src: · replay backfill walks 5000-row chunks",
+      "content": "trust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-backfill-chunk · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src-claim:\ntrust=agent-written; unreviewed; origin=memory.create; session=caller-claim · rec-backfill-notify · working · created:2025-07-27 · updated:2025-07-27 · scope:session · ns: · src-claim:\ntrust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-backfill-walk · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src-claim: · replay backfill walks 5000-row chunks",
       "tool_call_id": "c2",
       "name": "agent_memory_search"
     },
@@ -134,8 +134,8 @@
       "rec-backfill-notify",
       "rec-backfill-walk"
     ],
-    "estimated_prompt_tokens": 1099,
-    "state_digest": "70182bff136ba1a27c094d21b0bf45c1e968de8a8be42a208a852eb868134ea2",
+    "estimated_prompt_tokens": 1140,
+    "state_digest": "c96d8ee6b4da9b0fcb9e731a41123fb89c55d7125d413404ad3896f25ff87034",
     "subjects": [
       "(c1|rag|internal/replay/stage.go)",
       "(c1|rag|internal/replay/columnar.go)",
@@ -147,9 +147,9 @@
     "stratum": "stale_vs_fresh",
     "answer_home": "memory",
     "scenario_family": "backfill-chunk-staleness",
-    "budget": 1157,
-    "raw_state_tokens": 1928,
+    "budget": 1192,
+    "raw_state_tokens": 1987,
     "pressure_level": "critical",
-    "shed_bytes": 2581
+    "shed_bytes": 2649
   }
 }

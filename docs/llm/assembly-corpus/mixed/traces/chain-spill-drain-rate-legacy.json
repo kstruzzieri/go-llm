@@ -46,7 +46,7 @@
       "rec-routing-test"
     ],
     "estimated_prompt_tokens": 160,
-    "state_digest": "51ae2ada87b71fdddf5d067166f99500ad63d2c13e0f147247e830ccea02a112",
+    "state_digest": "2ab04d94132723a4b3c2ac97a6b1c4c4babb7c87ff828a95ff1ff17fefcc0182",
     "subjects": [
       "(c1|memory|rec-axis-units)",
       "(c1|memory|rec-drain-pace)",
@@ -60,10 +60,10 @@
     "stratum": "chain_retention",
     "answer_home": "memory",
     "scenario_family": "spill-quota-chain",
-    "budget": 620,
-    "raw_state_tokens": 1034,
+    "budget": 714,
+    "raw_state_tokens": 1190,
     "pressure_level": "ok",
     "shed_messages": 4,
-    "shed_bytes": 3270
+    "shed_bytes": 3894
   }
 }

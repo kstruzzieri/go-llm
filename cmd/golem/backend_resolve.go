@@ -106,12 +106,13 @@ type backendResolveOpts struct {
 	noProbe     bool
 	lookupEnv   func(string) (string, bool)
 	prober      backendProber
-	// agentRoute, when non-nil, is the frozen agent route from the mode's
-	// network plan (#477 D8): the discovery target derives from the ACTIVE
-	// chain's primary instead of re-reading defaults.agent, so a mode whose
-	// route differs from the default cannot discover the wrong backend.
-	// nil keeps the legacy defaults.agent derivation.
-	agentRoute *providerbootstrap.PlannedRoute
+	// activeRoute, when non-nil, is the mode's frozen ACTIVE route from the
+	// network plan (#477 D8, #476 D3): the discovery target derives from the
+	// active chain's primary instead of re-reading defaults.agent, so a mode
+	// whose route differs from the default -- goal mode routing "planning" --
+	// cannot discover the wrong backend. nil keeps the legacy defaults.agent
+	// derivation.
+	activeRoute *providerbootstrap.PlannedRoute
 	// guardCandidate, when non-nil, supplies a per-candidate guarded HTTP
 	// client and a context carrying the discovery capability (#477): the
 	// scan then probes each candidate through its own bound, no-redirect
@@ -134,16 +135,24 @@ func resolveBackend(ctx context.Context, cfg *config.Config, o backendResolveOpt
 
 	var key, model string
 	var ok bool
-	if o.agentRoute != nil {
-		key, model, ok = openAICompatTargetFromRoute(cfg, *o.agentRoute)
+	// The active route's use case names the ignored-override warning: telling
+	// a goal-mode user defaults.agent is the problem when the active route is
+	// planning would send them to the wrong config key.
+	routeUseCase := "agent"
+	if o.activeRoute != nil {
+		key, model, ok = openAICompatTargetFromRoute(cfg, *o.activeRoute)
+		if o.activeRoute.UseCase != "" {
+			routeUseCase = o.activeRoute.UseCase
+		}
 	} else {
 		key, model, ok = openAICompatAgentTarget(cfg)
 	}
 	if !ok {
 		var res backendResolution
 		if explicitURL != "" {
-			res.warns = append(res.warns,
-				source+" ignored: no openai-compat agent provider to apply it to (defaults.agent unset, unresolvable, or primary model's provider is not openai-compat)")
+			res.warns = append(res.warns, fmt.Sprintf(
+				"%s ignored: no openai-compat %s provider to apply it to (no applicable %s route, unresolvable, or primary model's provider is not openai-compat)",
+				source, routeUseCase, routeUseCase))
 		}
 		return res, nil
 	}

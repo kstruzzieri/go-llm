@@ -28,7 +28,7 @@
     },
     {
       "role": "tool",
-      "content": "### source: \"internal/retain/sweeper.go\"\npurpose: Retention sweeper cadence and the non-stacking pass loop.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n--- source: \"internal/retain/sweeper.go\" (lines 1-18, similarity: 1.00) ---\n1| package retain\n2| \n3| import \"time\"\n4| \n5| // sweepEvery is the pass cadence for the retention sweeper. Passes\n6| // walk every tier; a pass that would overlap a still-running one is\n7| // deferred rather than stacked, so a slow cold-tier volume cannot\n8| // pile up concurrent sweeps.\n9| const sweepEvery = 6 * time.Hour\n10| \n11| // loop runs sweep passes on the fixed cadence until ctx ends.\n12| func (s *Sweeper) loop() {\n13| \tt := time.NewTicker(sweepEvery)\n14| \tdefer t.Stop()\n15| \tfor range t.C {\n16| \t\ts.tryPass()\n17| \t}\n18| }\n\n### source: \"internal/retain/tiers.go\"\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nnote: metadata overview (summary omitted: budget)\n\n### source: \"docs/retention.md\"\npurpose: Retention guide: tiers, deferred sweep pacing, export-watermark safety.\nlanguage: markdown\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n",
+      "content": "### source: \"internal/retain/sweeper.go\"\npurpose: Retention sweeper cadence and the non-stacking pass loop.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n--- source: \"internal/retain/sweeper.go\" (lines 1-18, similarity: 1.00) ---\n1| package retain\n2| \n3| import \"time\"\n4| \n5| // sweepEvery is the pass cadence for the retention sweeper. Passes\n6| // walk every tier; a pass that would overlap a still-running one is\n7| // deferred rather than stacked, so a slow cold-tier volume cannot\n8| // pile up concurrent sweeps.\n9| const sweepEvery = 6 * time.Hour\n10| \n11| // loop runs sweep passes on the fixed cadence until ctx ends.\n12| func (s *Sweeper) loop() {\n13| \tt := time.NewTicker(sweepEvery)\n14| \tdefer t.Stop()\n15| \tfor range t.C {\n16| \t\ts.tryPass()\n17| \t}\n18| }\n\n### source: \"internal/retain/tiers.go\"\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nnote: metadata overview (summary omitted: budget)\n\n### source: \"docs/retention.md\"\nlanguage: markdown\nindexed: 2025-07-27T00:00:00Z\nnote: metadata overview (summary omitted: budget)\n",
       "tool_call_id": "c1",
       "name": "retrieve"
     },
@@ -64,7 +64,7 @@
     },
     {
       "role": "tool",
-      "content": "rec-cold-tier · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:\nrec-lab-logs · working · created:2025-07-27 · updated:2025-07-27 · scope:session · ns: · src: · overnight lab logs rotate weekly; pull them before Friday or they are gone\nrec-tier-review · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:",
+      "content": "trust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-cold-tier · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src-claim:\ntrust=agent-written; unreviewed; origin=memory.create; session=caller-claim · rec-lab-logs · working · created:2025-07-27 · updated:2025-07-27 · scope:session · ns: · src-claim:\ntrust=agent-written; unreviewed; origin=memory.create; session=unavailable · rec-tier-review · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src-claim:",
       "tool_call_id": "c3",
       "name": "agent_memory_search"
     },
@@ -88,8 +88,8 @@
       "rec-lab-logs",
       "rec-tier-review"
     ],
-    "estimated_prompt_tokens": 685,
-    "state_digest": "f37d1b39e85612e659ce061a19a1afae791570fcb8af71dfd1baf5ab83c76d02",
+    "estimated_prompt_tokens": 708,
+    "state_digest": "efabde750f11f2df78b9cb37fe858d5064ac93b6d41e7e2481b4ba01b5351c82",
     "subjects": [
       "(c1|rag|internal/retain/sweeper.go)",
       "(c1|rag|internal/retain/tiers.go)",
@@ -101,9 +101,9 @@
     "stratum": "chain_retention",
     "answer_home": "rag",
     "scenario_family": "retention-sweep-chain",
-    "budget": 919,
-    "raw_state_tokens": 1531,
+    "budget": 953,
+    "raw_state_tokens": 1589,
     "pressure_level": "critical",
-    "shed_bytes": 3095
+    "shed_bytes": 3235
   }
 }

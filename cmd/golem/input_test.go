@@ -46,6 +46,7 @@ func TestDestinationAdmissionInteractive(t *testing.T) {
 		want bool
 	}{
 		{"REPL terminal", flags{}, true, true},
+		{"REPL terminal with -no-editor", flags{noEditor: true}, true, true},
 		{"goal approval terminal", flags{goalSet: true}, true, true},
 		{"one-shot terminal", flags{promptSet: true}, true, false},
 		{"task terminal", flags{planPath: "plan.json"}, true, false},
@@ -218,8 +219,8 @@ func TestScannerSourceNoticeBetweenEnterPromptAndReadPrintsOnePrompt(t *testing.
 // one prompt per blank/whitespace line with nothing between them, which is what
 // a double-printing or a missing prompt would disturb.
 //
-// /bogus rather than /help on purpose -- the help body would make this golden
-// churn on unrelated command changes without testing anything the seam owns.
+// #353 adds the required available-command list to /bogus. The golden keeps
+// the original prompt/renderer bytes and explicitly includes that new output.
 //
 // It still pins the renderer footer and the ctx percentage, so an unrelated
 // renderer or system-prompt change will fail it. That is intended: confirm the
@@ -227,11 +228,17 @@ func TestScannerSourceNoticeBetweenEnterPromptAndReadPrintsOnePrompt(t *testing.
 // regenerate it from the code under test without looking.
 func TestRunREPLOutputIsByteIdenticalToPreSeam(t *testing.T) {
 	const want = "golem> ok one\n" +
-		"? · 0.0s · ctx 7% · step 1/16\n" +
+		"? · 0.0s · ctx 9% · step 1/16\n" + // 9%: the #430 base contract is pinned system cost
 		"done · 1 step · 0.0s · 0 tok\n" +
 		"golem> golem> golem> unknown command: /bogus (try /help)\n" +
+		"available commands:\n" +
+		"  /allow-exec\n  /allow-write\n  /auto-edits\n  /checkpoints\n" +
+		"  /clear\n  /compact\n  /consult\n  /context\n  /edit\n  /exit\n" +
+		"  /forget\n  /git-context\n  /grants\n  /help\n  /jobs\n  /memories\n" +
+		"  /model\n  /new\n  /quit\n  /recipes\n  /records\n  /remember\n" +
+		"  /resume\n  /search-sessions\n  /sessions\n  /think\n  /tools\n  /trust\n  /undo\n" +
 		"golem> ok two\n" +
-		"? · 0.0s · ctx 7% · step 1/16\n" +
+		"? · 0.0s · ctx 9% · step 1/16\n" + // 9%: the #430 base contract is pinned system cost
 		"done · 1 step · 0.0s · 0 tok\n" +
 		"golem> \n"
 
