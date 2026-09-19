@@ -6,7 +6,6 @@ moved unchanged from the README's Terminal Quick Start; the
 Related: [consulting an external subscription CLI](consult.md),
 [recipes](recipes.md), [agent memory](memory.md), [model backends](backends.md).
 
-
 ## Start Golem
 
 Start your configured model backend first. The checked-in `models.json` defaults to a llama.cpp-compatible server at `http://127.0.0.1:8080`; see [Local model backends](backends.md#local-model-backends) for the llama-swap and Ollama setup options.

@@ -5,7 +5,6 @@
 </picture>
 </p>
 
-
 # go-llm
 
 A local-first LLM toolkit and terminal coding agent for Go. Run models through **[llama.cpp](https://github.com/ggml-org/llama.cpp)** — the recommended, primary backend for best local performance, via its OpenAI-compatible server — or through [Ollama](https://ollama.com). go-llm provides the plumbing for model management, routing, RAG-powered retrieval, MCP integration, and domain-specific analysis — local-first by default, no cloud account required — with optional bring-your-own-key access to hosted OpenAI-compatible APIs (see [Use a hosted API](#use-a-hosted-api-bring-your-own-key)).
@@ -67,7 +66,6 @@ Use `go get` when embedding go-llm as a library:
 go get github.com/kstruzzieri/go-llm
 ```
 
-
 Prebuilt `golem` and `go-llm-mcp` binaries for each release are on the [releases page](https://github.com/kstruzzieri/go-llm/releases).
 
 ## Terminal Quick Start
@@ -118,7 +116,6 @@ func main() {
     fmt.Println(resp.Message.Content)
 }
 ```
-
 
 ## Local model backends
 
