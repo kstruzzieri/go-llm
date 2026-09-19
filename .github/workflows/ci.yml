@@ -40,10 +40,11 @@ jobs:
 
       - name: Require a folded changelog on release PRs
         if: github.event_name == 'pull_request' && github.base_ref == 'main'
+        # Tracked paths, so hidden entries count and a missing README fails.
         run: |
-          left="$(ls changelog.d | grep -v '^README\.md$' || true)"
-          if [ -n "$left" ]; then
-            printf 'release PR carries unfolded changelog fragments:\n%s\n' "$left" >&2
+          tracked="$(git ls-files -- changelog.d)"
+          if [ "$tracked" != "changelog.d/README.md" ]; then
+            printf 'release PR must carry exactly changelog.d/README.md; tracked:\n%s\n' "$tracked" >&2
             exit 1
           fi
 
