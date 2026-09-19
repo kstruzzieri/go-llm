@@ -396,37 +396,41 @@ func TestMarshalCanonicalDispatchMatchesEncodingJSON(t *testing.T) {
 	}
 }
 
-// textOnlyIface and jsonOnlyIface are static field types. encoding/json picks
-// the marshaler from the static type of a field: an interface type embedding
-// only TextMarshaler routes to MarshalText even when the dynamic value also
-// implements json.Marshaler.
+// textOnlyIface and jsonOnlyIface are static field types. encoding/json before
+// Go 1.27 picks the marshaler from the static type of a field, so an interface
+// type embedding only TextMarshaler routes to MarshalText even when the dynamic
+// value also implements json.Marshaler; the json-v2-backed implementation in
+// Go 1.27 routes on the dynamic value and would use MarshalJSON. That shape is
+// refused (#562); a TextMarshaler-only dynamic value behind the same static
+// type is dispatched identically by both and stays accepted.
 type textOnlyIface interface{ encoding.TextMarshaler }
 
 type jsonOnlyIface interface{ json.Marshaler }
 
 func TestMarshalCanonicalStaticInterfaceDispatch(t *testing.T) {
-	outputs := map[string]bool{}
-	for _, raw := range []string{"k\xff", "k\xfe"} {
-		got, err := MarshalCanonical(struct {
+	for _, raw := range []string{"k\xff", "k\xfe", "ok"} {
+		if got, err := MarshalCanonical(struct {
 			F textOnlyIface `json:"f"`
-		}{dualBoth{raw: raw}})
-		if !errors.Is(err, ErrInvalidUTF8) {
-			t.Errorf("static TextMarshaler field with invalid output %q: got %s, err %v; want ErrInvalidUTF8", raw, got, err)
-			outputs[string(got)] = true
+		}{dualBoth{raw: raw}}); !errors.Is(err, ErrAmbiguousMarshaler) {
+			t.Errorf("static TextMarshaler field holding a json.Marshaler %q: got %s, err %v; want ErrAmbiguousMarshaler", raw, got, err)
 		}
-		if _, err := MarshalCanonical([]textOnlyIface{dualBoth{raw: raw}}); !errors.Is(err, ErrInvalidUTF8) {
-			t.Errorf("static TextMarshaler slice element %q: err = %v, want ErrInvalidUTF8", raw, err)
+		if _, err := MarshalCanonical([]textOnlyIface{dualBoth{raw: raw}}); !errors.Is(err, ErrAmbiguousMarshaler) {
+			t.Errorf("static TextMarshaler slice element holding a json.Marshaler %q: err = %v, want ErrAmbiguousMarshaler", raw, err)
 		}
-		if _, err := MarshalCanonical(map[string]textOnlyIface{"v": dualBoth{raw: raw}}); !errors.Is(err, ErrInvalidUTF8) {
-			t.Errorf("static TextMarshaler map value %q: err = %v, want ErrInvalidUTF8", raw, err)
+		if _, err := MarshalCanonical(map[string]textOnlyIface{"v": dualBoth{raw: raw}}); !errors.Is(err, ErrAmbiguousMarshaler) {
+			t.Errorf("static TextMarshaler map value holding a json.Marshaler %q: err = %v, want ErrAmbiguousMarshaler", raw, err)
 		}
 	}
-	if len(outputs) == 1 {
-		t.Error("two distinct invalid MarshalText outputs canonicalized to one value")
+	for _, raw := range []string{"k\xff", "k\xfe"} {
+		if got, err := MarshalCanonical(struct {
+			F textOnlyIface `json:"f"`
+		}{textValue{out: raw}}); !errors.Is(err, ErrInvalidUTF8) {
+			t.Errorf("static TextMarshaler field with invalid output %q: got %s, err %v; want ErrInvalidUTF8", raw, got, err)
+		}
 	}
 	if got, err := MarshalCanonical(struct {
 		F textOnlyIface `json:"f"`
-	}{dualBoth{raw: "ok"}}); err != nil || string(got) != `{"f":"ok"}` {
+	}{textValue{out: "ok"}}); err != nil || string(got) != `{"f":"ok"}` {
 		t.Fatalf("static TextMarshaler field with valid output = %s, %v", got, err)
 	}
 	if got, err := MarshalCanonical(struct {

@@ -67,9 +67,14 @@
 // type of a field or element decides first (an interface type embedding
 // json.Marshaler routes to MarshalJSON, one embedding only TextMarshaler
 // routes to MarshalText), then the addressable receiver, then the value; map
-// keys use MarshalText only. Intentional []byte base64 encoding is
-// unaffected. Custom marshaler internals are not walked; determinism of
-// custom output remains the implementer's responsibility.
+// keys use MarshalText only. One shape is refused outright
+// (ErrAmbiguousMarshaler): a TextMarshaler-only interface type holding a
+// value that also implements json.Marshaler. encoding/json before Go 1.27
+// took the static route there and the json-v2-backed implementation takes
+// the dynamic one, so the shape has no toolchain-independent canonical form.
+// Intentional []byte base64 encoding is unaffected. Custom marshaler
+// internals are not walked; determinism of custom output remains the
+// implementer's responsibility.
 //
 // This is not RFC 8785 (JCS). JCS orders names by UTF-16 code units and uses
 // the I-JSON/IEEE-754 number model, under which large or high-precision
