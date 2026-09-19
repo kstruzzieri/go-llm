@@ -11,7 +11,7 @@ A local-first LLM toolkit and terminal coding agent for Go. Run models through *
 
 Use it directly in a terminal through **Golem**, the bundled local coding agent ([full guide](docs/golem.md)); expose it as a standalone [MCP server](#mcp-server); or embed the Go packages in your own application ([library reference](docs/library.md)). Pure Go with minimal dependencies (no CGo).
 
-**Current release: v0.3.0** (2026-09-19) — [release notes](CHANGELOG.md#030---2026-09-18) · [binaries](https://github.com/kstruzzieri/go-llm/releases/tag/v0.3.0). Upgrading from v0.2.0? Read the [consumer upgrade notes](CHANGELOG.md#changed--v030-consumer-upgrade-notes-560) first.
+**Current release: v0.3.0** — [release notes](CHANGELOG.md#030---2026-09-18) · [binaries](https://github.com/kstruzzieri/go-llm/releases/tag/v0.3.0). Upgrading from v0.2.0? Read the [consumer upgrade notes](CHANGELOG.md#changed--v030-consumer-upgrade-notes-560) first.
 
 ## Contents
 
@@ -27,8 +27,9 @@ Use it directly in a terminal through **Golem**, the bundled local coding agent 
 ### What's included
 
 - **Model backends** — `openai-compat` provider (llama.cpp / vLLM / LM Studio) and a native Ollama REST client: chat, completions, embeddings, model management, tool calling, streaming
-- **Golem terminal agent** — read-only by default; approval-gated write/exec with scoped session grants, background jobs, project-context trust, signed mutation receipts, `/consult` to an external subscription CLI, and destination admission that shows every remote endpoint before the first outbound byte
-- **Zero-trust agent runtime** — tool-observation fencing, deterministic injection and secret detectors, deny-default exec sandboxes (macOS Seatbelt, Linux Bubblewrap) that fail closed rather than fall back to the host, signed agent-memory provenance, and an offline audit verifier
+- **Golem terminal agent** — read-only by default, with persistent per-workspace sessions and automatic workspace RAG retrieval; approval-gated write/exec with scoped session grants, background jobs, project-context trust, signed mutation receipts, `/consult` to an external subscription CLI, and destination admission that shows every remote endpoint before the first outbound byte
+- **Execution sandboxing (library)** — deny-default sandbox backends for the exec tools in `agent/`: macOS Seatbelt (`sandbox-exec` per-invocation profiles scoping reads/writes to the workspace plus a private temp directory) and Linux Bubblewrap (fresh user/mount/pid namespaces per invocation, network unshared unless allowed). Selecting a runtime the host cannot enforce fails closed — there is no silent host fallback
+- **Zero-trust agent runtime** — tool-observation fencing, deterministic injection and secret detectors, signed agent-memory provenance, and an offline audit verifier
 - **RAG pipeline** — code-aware chunking, SQLite vector store with hybrid search, concurrent `.gitignore`-aware indexing, context-building retrieval
 - **FIM completion** — Fill-in-the-Middle for IDE inline suggestions with context window management
 - **Model config and routing** — `models.json` roles and fallback chains; use-case-aware `provider.Router` with circuit breakers and slot-aware admission
@@ -126,7 +127,7 @@ go-llm selects a backend per provider in `models.json` via the `api_format` fiel
 | `openai-compat` | llama.cpp `llama-server`, [llama-swap](https://github.com/mostlygeek/llama-swap), vLLM, LM Studio, any OpenAI `/v1` server | **Recommended** for best local performance. `base_url` is the server root — go-llm appends `/v1`. The shipped `models.json` targets llama-swap on `127.0.0.1:8080`. |
 | `ollama` (default when omitted) | Ollama's native REST API, `http://localhost:11434` | Fully supported alternative; pre-existing configs load unchanged. |
 
-Setup for each — llama-swap, pinned `llama-server` processes, Ollama, and the `slot_discovery` opt-in — is in **[docs/backends.md](docs/backends.md#local-model-backends)**. For a first-run walkthrough including model downloads, see [docs/GETTING_STARTED.md](docs/GETTING_STARTED.md).
+Setup for each — llama-swap, pinned `llama-server` processes, Ollama, and the `slot_discovery` opt-in — is in **[docs/backends.md](docs/backends.md#local-model-backends)**. For a first-run walkthrough, see [docs/GETTING_STARTED.md](docs/GETTING_STARTED.md).
 
 ## Use a hosted API (bring your own key)
 
@@ -149,7 +150,7 @@ Tools cover chat, generation, code completion, embeddings, RAG, model management
 | Release | Scope | Tracking |
 |---|---|---|
 | **v0.3.0** (current) | Zero-trust agent foundation — observation fencing, injection and secret detectors, signed mutation receipts and agent memory, scoped dispatch children, offline audit verifier — plus the Golem session surface (`/model`, `/think`, `/compact`, `/consult`, headless `-p`, Git context) and recipe bundles | [CHANGELOG](CHANGELOG.md#030---2026-09-18) |
-| **v0.4.0** | Codex `/consult` adapter (#546), capability-attenuated child tool registries (#449), ANSI sanitization of streamed output (#433), Workspace write/delete hardening (#552), migration and CAS fixes | [milestone](https://github.com/kstruzzieri/go-llm/milestone/1) |
+| **v0.4.0** | Codex `/consult` adapter (#546), capability-attenuated child tool registries (#449), ANSI sanitization of streamed output (#433), Workspace write/delete hardening (#552), removal of the deprecated `provider=URL` spelling of `-allow-destination` (#501), migration and CAS fixes | [milestone](https://github.com/kstruzzieri/go-llm/milestone/1) |
 | **v0.5.0** | Quarantined ingestion for foreign content (#434), injection-aware retrieval tagging (#435), adversarial injection corpus for `llm-bench` (#452), default-on interceptors (#517) | [milestone](https://github.com/kstruzzieri/go-llm/milestone/2) |
 | Later | Hosted-native transports (Anthropic Messages, Gemini, OpenAI Responses), agentic RAG orchestration, in-band routing transparency in MCP responses, evidence-governed feedback, vision inputs, ANN search | [open issues](https://github.com/kstruzzieri/go-llm/issues) |
 

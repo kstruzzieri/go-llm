@@ -65,7 +65,7 @@ Then declare one `openai-compat` provider per port and point each model at its p
 { "providers": { "ollama": { "base_url": "http://localhost:11434", "timeout": "5m" } } }
 ```
 
-`api_format` defaults to `ollama` when omitted, so pre-existing configs load unchanged. The low-level `ollama.NewClient()` API (used in the examples below) talks to Ollama directly; to target a llama.cpp backend, configure an `openai-compat` provider as above and route through `provider.Router`.
+`api_format` defaults to `ollama` when omitted, so pre-existing configs load unchanged. The low-level `ollama.NewClient()` API (used in the README's [library quick start](../README.md#use-as-a-go-library)) talks to Ollama directly; to target a llama.cpp backend, configure an `openai-compat` provider as above and route through `provider.Router`.
 
 ## Use a hosted API (bring your own key)
 
@@ -98,7 +98,7 @@ golem -p "..." -allow-destination "openai/https://api.openai.com"
 The standalone MCP server is gated too but never prompts, and it admits per
 provider rather than per route — pre-admit each remote provider with the same
 `-allow-destination "provider/URL"` form (repeatable); see
-[MCP Server](../README.md#mcp-server).
+[MCP Server](GETTING_STARTED.md#mcp-server).
 
 ```json
 {

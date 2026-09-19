@@ -1,8 +1,7 @@
 # Golem terminal agent
 
-Golem is the local coding agent bundled with go-llm. This is the full guide,
-moved unchanged from the README's Terminal Quick Start; the
-[README](../README.md#terminal-quick-start) keeps the short version.
+Golem is the local coding agent bundled with go-llm. This is the full guide;
+the [README](../README.md#terminal-quick-start) keeps the short version.
 Related: [consulting an external subscription CLI](consult.md),
 [recipes](recipes.md), [agent memory](memory.md), [model backends](backends.md).
 
