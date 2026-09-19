@@ -29,10 +29,23 @@ jobs:
         run: ./scripts/test-changelog-fold
 
       - name: Reject direct CHANGELOG.md edits and validate fragments
-        if: github.event_name == 'pull_request'
+        # The fold invariant holds for PRs into develop. A release PR promotes
+        # develop into main wholesale, and main never carries fragments, so the
+        # folded sections look like direct edits from main's side; the fold was
+        # already checked on the stamp PR into develop.
+        if: github.event_name == 'pull_request' && github.base_ref != 'main'
         env:
           BASE: ${{ github.base_ref }}
         run: ./scripts/check-changelog "origin/$BASE"
+
+      - name: Require a folded changelog on release PRs
+        if: github.event_name == 'pull_request' && github.base_ref == 'main'
+        run: |
+          left="$(ls changelog.d | grep -v '^README\.md$' || true)"
+          if [ -n "$left" ]; then
+            printf 'release PR carries unfolded changelog fragments:\n%s\n' "$left" >&2
+            exit 1
+          fi
 
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
