@@ -319,6 +319,48 @@ EOF
 diff -u "$tmp/expected-missing-python" "$tmp/missing-python.out"
 test ! -s "$tmp/missing-python.log"
 
+# The test suite refuses to run as root before any phase: root skips every
+# permission-denial path, so a green would be hollow. Security mode runs
+# nothing permission-sensitive and still passes.
+mkdir -p "$tmp/root-bin"
+cat >"$tmp/root-bin/id" <<'STUB'
+#!/usr/bin/env sh
+printf '0\n'
+STUB
+chmod +x "$tmp/root-bin/id"
+run_ci_as_root() {
+  name="$1"
+  shift
+  : >"$tmp/$name.log"
+  set +e
+  (
+    cd "$tmp/outside"
+    unset GOROOT
+    GOFLAGS="$caller_goflags" PATH="$tmp/root-bin:$tmp/bin:$PATH" \
+      CI_LOCAL_TEST_LOG="$tmp/$name.log" \
+      CI_LOCAL_DISCOVERY_OUTPUT="$discovery_output" \
+      CI_LOCAL_DISCOVERY_STATUS="$discovery_status" \
+      CI_LOCAL_DISCOVERY_ERROR="$discovery_error" \
+      CI_LOCAL_SECURITY_STATUS="$security_status" \
+      CI_LOCAL_SECURITY_OUTPUT="$security_output" \
+      CI_LOCAL_RACE_STATUS="$race_status" \
+      "$module/scripts/ci-local" "$@"
+  ) >"$tmp/$name.out" 2>&1
+  ci_status=$?
+  set -e
+}
+for mode in pre-push full; do
+  run_ci_as_root "root-$mode" --mode "$mode"
+  assert_status "root-$mode" 2
+  grep -Fxq 'ci-local: refusing to run the test suite as root; permission-denial tests would skip' "$tmp/root-$mode.out"
+  grep -Fxq 'hint: rebuild the CI image: docker compose -f docker-compose.ci.yml build ci' "$tmp/root-$mode.out"
+  test ! -s "$tmp/root-$mode.log"
+done
+run_ci_as_root root-security --mode security
+assert_status root-security 0
+write_expected expected-root-security security
+diff -u "$tmp/expected-root-security" "$tmp/root-security.log"
+
 for docker_status in 0 35; do
   : >"$tmp/hook-$docker_status.log"
   set +e

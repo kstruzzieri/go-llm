@@ -4,9 +4,10 @@ FROM golang:1.25-alpine
 
 ARG GOLANGCI_LINT_VERSION=v2.11.4
 
+# GOCACHE here is the build-stage cache-mount target for the tool install
+# below; the runtime user gets its own caches further down.
 ENV CGO_ENABLED=1 \
-    GOCACHE=/root/.cache/go-build \
-    GOLANGCI_LINT_CACHE=/root/.cache/golangci-lint
+    GOCACHE=/root/.cache/go-build
 
 WORKDIR /workspace
 
@@ -20,5 +21,17 @@ RUN apk add --no-cache \
 RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
     go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@${GOLANGCI_LINT_VERSION}
+
+# The gate runs unprivileged so permission-denial tests execute instead of
+# skipping as root. Cache directories are created and owned here so the named
+# volumes that mount over them inherit that ownership on first use.
+RUN adduser -D -u 1000 ci \
+    && mkdir -p /go/pkg/mod /home/ci/.cache/go-build /home/ci/.cache/golangci-lint \
+    && chown -R ci:ci /go /home/ci
+USER ci
+ENV HOME=/home/ci \
+    GOCACHE=/home/ci/.cache/go-build \
+    GOLANGCI_LINT_CACHE=/home/ci/.cache/golangci-lint \
+    GOMODCACHE=/go/pkg/mod
 
 CMD ["./scripts/ci-local", "--mode", "pre-push"]

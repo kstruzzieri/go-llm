@@ -8,14 +8,20 @@ services:
       context: .
       dockerfile: Dockerfile.ci
     working_dir: /workspace
+    # tini as PID 1 reaps orphans left by killed process groups; without it
+    # they stay zombies for the container's lifetime.
+    init: true
     command: ["./scripts/ci-local", "--mode", "pre-push"]
+    # The image runs as uid 1000 (see Dockerfile.ci). The volume names carry a
+    # -ci suffix so they are created fresh with that ownership rather than
+    # reusing the root-owned volumes of the earlier image.
     volumes:
       - .:/workspace
-      - go-build-cache:/root/.cache/go-build
-      - go-mod-cache:/go/pkg/mod
-      - golangci-lint-cache:/root/.cache/golangci-lint
+      - go-build-cache-ci:/home/ci/.cache/go-build
+      - go-mod-cache-ci:/go/pkg/mod
+      - golangci-lint-cache-ci:/home/ci/.cache/golangci-lint
 
 volumes:
-  go-build-cache:
-  go-mod-cache:
-  golangci-lint-cache:
+  go-build-cache-ci:
+  go-mod-cache-ci:
+  golangci-lint-cache-ci:

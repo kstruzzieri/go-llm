@@ -289,18 +289,8 @@ func TestUnixRunnerGroupKillReapsChild(t *testing.T) {
 	}
 
 	// Poll up to 5s confirming the grandchild is gone (SIGKILL to group must have
-	// reached it).  syscall.Kill(pid, 0) returns ESRCH when the process no longer
-	// exists (or has been fully reaped by its own parent).
-	deadline = time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		err := syscall.Kill(grandchildPID, 0)
-		if err == syscall.ESRCH {
-			return // grandchild is gone — test passes
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
-	// One last check to produce a clear failure message.
-	if err := syscall.Kill(grandchildPID, 0); err != syscall.ESRCH {
-		t.Errorf("grandchild pid %d still alive after group-kill (Kill(pid,0) err=%v)", grandchildPID, err)
+	// reached it). A zombie counts as gone; see processGone.
+	if !waitProcessGone(grandchildPID) {
+		t.Errorf("grandchild pid %d still alive after group-kill", grandchildPID)
 	}
 }
