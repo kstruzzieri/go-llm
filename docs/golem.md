@@ -9,7 +9,7 @@ Related: [consulting an external subscription CLI](consult.md),
 
 ## Start Golem
 
-Start your configured model backend first. The checked-in `models.json` defaults to a llama.cpp-compatible server at `http://127.0.0.1:8080`; see [Local model backends](#local-model-backends) for the llama-swap and Ollama setup options.
+Start your configured model backend first. The checked-in `models.json` defaults to a llama.cpp-compatible server at `http://127.0.0.1:8080`; see [Local model backends](backends.md#local-model-backends) for the llama-swap and Ollama setup options.
 
 Run Golem against a workspace:
 
@@ -220,7 +220,7 @@ trusted time, or power-loss durability. Existing external-writer race windows an
 best-effort file fsync remain. There is no audit chain, completeness guarantee,
 whole-ledger deletion/reordering/rollback/truncation detection, external anchor,
 or standalone public-key retention/export. An intent-only entry is not a clean
-successful audit for #447. The [approved design](docs/plans/2026-09-05-mutation-receipts-445-spec-plan.md)
+successful audit for #447. The [approved design](plans/2026-09-05-mutation-receipts-445-spec-plan.md)
 records the full portable wire and recovery contract.
 
 ### Offline integrity audit

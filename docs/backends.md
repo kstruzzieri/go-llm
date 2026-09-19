@@ -98,7 +98,7 @@ golem -p "..." -allow-destination "openai/https://api.openai.com"
 The standalone MCP server is gated too but never prompts, and it admits per
 provider rather than per route — pre-admit each remote provider with the same
 `-allow-destination "provider/URL"` form (repeatable); see
-[MCP Server](#mcp-server-1).
+[MCP Server](../README.md#mcp-server).
 
 ```json
 {
@@ -155,4 +155,4 @@ tool calls), set that model's `capabilities` to the endpoints that actually work
 so the Router won't send unsupported requests.
 
 For the Golem-specific walkthrough (flags, capability probing costs, verification
-runbook), see [Running Golem against a hosted API](docs/GETTING_STARTED.md#running-golem-against-a-hosted-api).
+runbook), see [Running Golem against a hosted API](GETTING_STARTED.md#running-golem-against-a-hosted-api).

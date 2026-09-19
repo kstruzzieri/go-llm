@@ -18,11 +18,11 @@ the [README](../README.md) and [Getting Started](GETTING_STARTED.md).
 | `agent/` | Agent runtime — plan-act-observe loop, tool registry, observers, budgets, approval seams, and the sandboxed exec backends (Seatbelt, Bubblewrap). |
 | `golem/` | Embeddable Golem runtime — the system prompt and agent wiring behind `cmd/golem`, for consumers that embed the agent instead of shelling out. |
 | `agentflow/` | AgentFlow integration — locked plan validation, journaled execution, and proof artifacts for task-mode runs. |
-| `memory/` | Explicit user-controlled local memories and agent-memory records (SQLite, scope-filtered FTS5 search). Backs Golem `/remember` and the MCP agent-memory tools; see [agent-memory provenance and integrity](docs/memory.md). |
+| `memory/` | Explicit user-controlled local memories and agent-memory records (SQLite, scope-filtered FTS5 search). Backs Golem `/remember` and the MCP agent-memory tools; see [agent-memory provenance and integrity](memory.md). |
 | `mcpclient/` | MCP client — adapts external MCP servers' tools into agent tools over stdio or streamable HTTP. |
-| `consult/` | `/consult` seam — a bounded host runner plus the Claude subscription adapter, producing unsigned `consult-result/v1` receipts. Not a provider, a Router member, or a tool; see [consulting an external subscription CLI](docs/consult.md). |
+| `consult/` | `/consult` seam — a bounded host runner plus the Claude subscription adapter, producing unsigned `consult-result/v1` receipts. Not a provider, a Router member, or a tool; see [consulting an external subscription CLI](consult.md). |
 | `projectcontext/` | AGENTS.md-style project-context loader — discovery, safe capped reads, and deterministic ordering. |
-| `recipe/` | Versioned JSON prompt bundles — `Parse` for embedded bytes, `Load` for explicit paths with regular-file and identity checks and a 64 KiB bound. Closed schema, strict keys, advisory role/use-case hints; see [docs/recipes.md](docs/recipes.md). |
+| `recipe/` | Versioned JSON prompt bundles — `Parse` for embedded bytes, `Load` for explicit paths with regular-file and identity checks and a 64 KiB bound. Closed schema, strict keys, advisory role/use-case hints; see [docs/recipes.md](recipes.md). |
 | `provider/` | Intelligent model routing — Router with circuit breakers, warmth tracking, token budget, sticky routing, and multi-model scoring. |
 | `rag/` | Code-aware text chunking, SQLite vector store with cosine similarity and FTS5 hybrid search, concurrent file/directory indexer with `.gitignore` support, diff-aware incremental reindexing, and context-building retriever. |
 | `rag/parquet/` | Parquet dataset exporter for ML pipeline interop — exports vector store contents with quality metrics and configurable precision. |
