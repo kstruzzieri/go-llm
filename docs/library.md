@@ -6,6 +6,40 @@ Ollama client, Fill-in-the-Middle completion, model configuration, Parquet
 export, and analysis helpers. For installation and backend setup, start from
 the [README](../README.md) and [Getting Started](GETTING_STARTED.md).
 
+## Packages
+
+| Package | Description |
+|---------|-------------|
+| `ollama/` | HTTP client for the Ollama REST API — chat, text generation, embeddings, model management, tool calling. Streaming support via callbacks. |
+| `config/` | Model configuration loader (`models.json`) with provider settings, role-based defaults, fallback chain resolution, role lifecycle, selector overrides, and credential scrub via a secret-literal-preserving atomic writer. |
+| `configview/` | Pure projection of a config for panels/CLI/MCP — a versioned wire contract with tri-state candidate eligibility, no I/O. Consumed by `golem models -json`, the MCP configview resource, and the Firn config panel. |
+| `configio/` | Explicit I/O tier for the config stack — provider inventory refresh and consent-gated per-model probes with bounded error codes. Never implicit; values in, values out. |
+| `profiles/` | Profile catalog — curated embedded configs (credential-free by pinned rule) plus a user store under a private directory boundary, with stable IDs and bounded error codes. |
+| `agent/` | Agent runtime — plan-act-observe loop, tool registry, observers, budgets, approval seams, and the sandboxed exec backends (Seatbelt, Bubblewrap). |
+| `golem/` | Embeddable Golem runtime — the system prompt and agent wiring behind `cmd/golem`, for consumers that embed the agent instead of shelling out. |
+| `agentflow/` | AgentFlow integration — locked plan validation, journaled execution, and proof artifacts for task-mode runs. |
+| `memory/` | Explicit user-controlled local memories and agent-memory records (SQLite, scope-filtered FTS5 search). Backs Golem `/remember` and the MCP agent-memory tools; see [agent-memory provenance and integrity](memory.md). |
+| `mcpclient/` | MCP client — adapts external MCP servers' tools into agent tools over stdio or streamable HTTP. |
+| `consult/` | `/consult` seam — a bounded host runner plus the Claude subscription adapter, producing unsigned `consult-result/v1` receipts. Not a provider, a Router member, or a tool; see [consulting an external subscription CLI](consult.md). |
+| `projectcontext/` | AGENTS.md-style project-context loader — discovery, safe capped reads, and deterministic ordering. |
+| `recipe/` | Versioned JSON prompt bundles — `Parse` for embedded bytes, `Load` for explicit paths with regular-file and identity checks and a 64 KiB bound. Closed schema, strict keys, advisory role/use-case hints; see [docs/recipes.md](recipes.md). |
+| `provider/` | Intelligent model routing — Router with circuit breakers, warmth tracking, token budget, sticky routing, and multi-model scoring. |
+| `rag/` | Code-aware text chunking, SQLite vector store with cosine similarity and FTS5 hybrid search, concurrent file/directory indexer with `.gitignore` support, diff-aware incremental reindexing, and context-building retriever. |
+| `rag/parquet/` | Parquet dataset exporter for ML pipeline interop — exports vector store contents with quality metrics and configurable precision. |
+| `completion/` | IDE inline completion via Fill-in-the-Middle (FIM) with context window management. Sync and streaming APIs. |
+| `analysis/` | Domain-specific analysis helpers — code review (with optional RAG context), ML training metrics, and trading strategy analysis. |
+| `mcp/` | MCP server exposing go-llm as tools, prompts, and resources over stdio and HTTP/2 transports. Tool calls flow through `provider.Router`. |
+| `conversation/` | Persistent conversation storage with SQLite. |
+| `feedback/` | Implicit user behavioral signal collection for retrieval quality improvement. |
+| `fingerprint/` | Model profiling — latency benchmarks and capability detection. |
+| `prefetch/` | Predictive cache-warming engine for RAG retrieval. |
+| `compat/` | OpenAI-compatible endpoint shim — chat, completions, model aliases, and a concurrency limiter so clients that speak OpenAI's API can target local models served through go-llm (distinct from the `openai-compat` *provider*, which consumes an upstream OpenAI `/v1` server such as llama.cpp). |
+| `cmd/golem/` | Terminal coding agent built on `agent/`, `provider.Router`, file/search tools, optional RAG retrieval, persistent sessions, and approval-gated write/exec. |
+| `cmd/go-llm-mcp/` | Standalone MCP server binary with stdio and HTTP/2 support. |
+| `cmd/fim-smoke/` | Smoke-test harness for Fill-in-the-Middle completion against a running backend. |
+| `cmd/llm-bench/` | Model evaluation harness — replays trace corpora against candidate models (llama.cpp via `openai-compat`, or Ollama) and reports AnswerQuality, tool-use, tool-restraint, latency, and tokens with paired deltas and bootstrap CIs. |
+
+
 ## Use as a Go library
 
 ### Chat with a local model

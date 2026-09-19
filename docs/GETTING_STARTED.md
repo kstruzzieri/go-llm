@@ -3,7 +3,7 @@
 A guide to setting up and using go-llm with local or hosted models. **llama.cpp is
 the recommended primary backend** (best local performance, via its
 OpenAI-compatible server); Ollama is fully supported as an alternative. See
-[Local model backends](../README.md#local-model-backends) for the full backend
+[Local model backends](backends.md#local-model-backends) for the full backend
 reference.
 
 ## Prerequisites
@@ -104,7 +104,7 @@ the model's `provider`), rather than constructing `ollama.NewClient` directly:
 
 The `provider` key on each model selects its backend (here the `llamacpp`
 provider points at the llama-swap proxy on `:8080`); `api_format` defaults to
-`ollama` when omitted. See [Local model backends](../README.md#local-model-backends).
+`ollama` when omitted. See [Local model backends](backends.md#local-model-backends).
 
 Each model can also declare static sampling defaults:
 
@@ -176,8 +176,8 @@ Golem does not require a local LLM. Any hosted OpenAI-compatible endpoint works:
 declare a provider with `api_format: "openai-compat"` and an `api_key`, point the
 `agent` role at it, and run `golem` as usual. For the general (non-Golem)
 hosted-provider reference — compatibility table, mixing providers, fallbacks —
-see [Use a hosted API](../README.md#use-a-hosted-api-bring-your-own-key) in the
-README; this section is the Golem-specific path.
+see [Use a hosted API](backends.md#use-a-hosted-api-bring-your-own-key) in the
+backend reference; this section is the Golem-specific path.
 
 A minimal hosted `models.json` (this exact config is load-verified against
 `config.Load`):
@@ -406,6 +406,9 @@ go build -o go-llm-mcp ./cmd/go-llm-mcp/
 
 # HTTP/2 with TLS (remote deployment)
 ./go-llm-mcp --transport http --addr 0.0.0.0:443 --tls-cert cert.pem --tls-key key.pem
+
+# Opt-in agent-memory tools (agent_memory_search/create/promote)
+./go-llm-mcp --agent-memory-db ~/.local/share/go-llm/memories.db
 ```
 
 #### Claude Desktop Configuration
@@ -422,6 +425,12 @@ Add to `claude_desktop_config.json`:
   }
 }
 ```
+
+#### Tools, routing, and remote admission
+
+The server exposes tools for chat, generation, code completion, embeddings, RAG, model management, and analysis, plus opt-in agent-memory tools (`agent_memory_search`, `agent_memory_create`, `agent_memory_promote`) registered only when `--agent-memory-db <path>` is set; their signing, key lifecycle, and fenced-result contract are documented in [Agent-memory provenance and integrity](memory.md). The server also exposes prompt templates and routing/config resources. Remote model destinations are denied unless pre-admitted: the standalone server never prompts, so pass `-allow-destination "provider/https://host/base"` (repeatable) for each remote endpoint — the same canonical form Golem takes (the deprecated `provider=URL` spelling is still accepted for now). Its admission scope is broader than Golem's route-derived manifest — any configured provider may be reached for any served purpose, plus health, model-listing, and warmth checks — so admit every remote provider the config declares, not just the destinations Golem's manifest showed. Chat, generate, completion, embedding, and analysis tools accept an optional `model` parameter; when omitted, the request is routed by `provider.Router` using a use-case-appropriate weight profile (chat / fim / embedding / reasoning / analysis / code-review / agent), with circuit-breaker-aware fallback. Routing state for diagnostics is exposed via the `route://breakers`, `route://warmth`, and `route://sticky` resources. (The actual model that served a given call is computed internally as `RouteOutcome.ActualModel` but is not currently included in tool responses; see the [README roadmap](../README.md#roadmap).)
+
+`rag_search` and chat requests with `use_rag=true` also accept optional `current_file`, `workspace_root`, and `open_files` fields for contextual ranking; chat rejects non-empty context fields when `use_rag=false`. Omitted or empty fields preserve the current hybrid-by-default retrieval path, response shape, and compact chat prompt. `rag_search` can additionally set `explain_scores=true` to return the existing scored-result JSON, including fused `RankScore` and available per-signal `Signals`; without that flag, contextual results are flattened back to the ordinary semantic-similarity `SearchResult` shape.
 
 #### Embedded in a Go Application
 

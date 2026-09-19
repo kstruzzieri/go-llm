@@ -6,7 +6,7 @@
 > lineup through `llama-server` (OpenAI-compatible API) via the `openai-compat`
 > provider format, with Ollama as a supported alternative. The reference
 > *models* are unchanged; only the serving backend changed. See
-> [Local model backends](../../README.md#local-model-backends) for how to
+> [Local model backends](../backends.md#local-model-backends) for how to
 > configure providers.
 
 ## Reference lineup (shipped in `models.json`)
