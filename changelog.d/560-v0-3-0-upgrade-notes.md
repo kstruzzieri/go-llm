@@ -17,8 +17,10 @@ this section under the referenced issue.
 - `memory.NewMemoryRecordStore` and `OpenRecordStore` require
   `RecordStoreConfig` (#446): set `KeyDir` or inject a signer and keyring.
   Agent-memory records are signed; legacy rows import once with
-  `legacy-migration` provenance. Back up the database and its `.keys`
-  directory together.
+  `legacy-migration` provenance. Back up the database together with its
+  signing keys: the configured `KeyDir` (`OpenRecordStore` defaults it to
+  `<database path>.keys`; `NewMemoryRecordStore` has no default) or the
+  storage behind an injected signer and keyring.
 - `mcpclient.Connect` requires `ConnectOptions{Pins, RequirePinned}` (#432).
 - Tool observations sent to a model are framed on the wire by
   `<<<TOOL_RESULT <key>` and `>>>TOOL_RESULT <key>` lines at the provider
