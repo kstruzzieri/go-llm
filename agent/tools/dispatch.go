@@ -1,12 +1,14 @@
 package tools
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
@@ -23,6 +25,7 @@ const (
 	MaxDispatchTasks = 4
 
 	maxDispatchTaskBytes         = 8 * 1024
+	maxDispatchScopeBytes        = 4 * 1024
 	maxDispatchArgsBytes         = MaxDispatchTasks*maxDispatchTaskBytes*6 + 1024
 	defaultDispatchMaxSteps      = 6
 	defaultDispatchTotalTokens   = 32 * 1024
@@ -73,10 +76,67 @@ type Dispatch struct {
 	// Children run concurrently, so the instances must be safe for concurrent
 	// use; per-run state comes from agent.RunScopedInterceptor.
 	interceptors []agent.Interceptor
+	// prepareChildTools is a per-instance lifecycle test seam. Configure before
+	// Invoke; nil uses the production childTools attenuation boundary.
+	prepareChildTools func(*string) ([]agent.Tool, *atomic.Int64, func(), error)
 }
 
 type dispatchArgs struct {
-	Tasks []string `json:"tasks"`
+	Tasks []dispatchTask `json:"tasks"`
+}
+
+// dispatchTask keeps legacy strings distinct from explicitly scoped objects.
+type dispatchTask struct {
+	task  string
+	scope *string
+}
+
+func (t *dispatchTask) UnmarshalJSON(raw []byte) error {
+	raw = bytes.TrimSpace(raw)
+	var task string
+	var scope *string
+	switch {
+	case len(raw) > 0 && raw[0] == '"':
+		if err := json.Unmarshal(raw, &task); err != nil {
+			return err
+		}
+	case len(raw) > 0 && raw[0] == '{':
+		var object struct {
+			Task  *string `json:"task"`
+			Scope *string `json:"scope"`
+		}
+		decoder := json.NewDecoder(bytes.NewReader(raw))
+		decoder.DisallowUnknownFields()
+		if err := decoder.Decode(&object); err != nil {
+			return err
+		}
+		if object.Task == nil || object.Scope == nil {
+			return fmt.Errorf("scoped dispatch task requires task and scope strings")
+		}
+		task, scope = *object.Task, object.Scope
+		if *scope == "" {
+			return fmt.Errorf("dispatch scope is empty")
+		}
+		if len(*scope) > maxDispatchScopeBytes {
+			return fmt.Errorf("dispatch scope must be at most %d bytes", maxDispatchScopeBytes)
+		}
+	default:
+		return fmt.Errorf("dispatch task must be a string or scoped object")
+	}
+	if strings.TrimSpace(task) == "" {
+		return fmt.Errorf("dispatch task is empty")
+	}
+	if len(task) > maxDispatchTaskBytes {
+		return fmt.Errorf("dispatch task must be at most %d bytes", maxDispatchTaskBytes)
+	}
+	*t = dispatchTask{task: task, scope: scope}
+	return nil
+}
+
+type dispatchChild struct {
+	tools   []agent.Tool
+	counter *atomic.Int64
+	cleanup func()
 }
 
 type dispatchResult struct {
@@ -88,6 +148,8 @@ type dispatchResult struct {
 	// RiskScore is the child's cumulative interceptor score (#436); omitted
 	// when zero so pre-#436 envelopes are byte-identical.
 	RiskScore int `json:"risk_score,omitempty"`
+	// ScopeDenials counts vetoed policy evaluations, including repeated checks and pruning.
+	ScopeDenials int64 `json:"scope_denials,omitempty"`
 }
 
 type dispatchEnvelope struct {
@@ -167,16 +229,22 @@ func (d *Dispatch) invokeConcurrency() int {
 
 // Spec returns the model-facing dispatch contract.
 func (d *Dispatch) Spec() agent.ToolSpec {
+	items := `{"type":"string"}`
+	description := "Run one or more bounded, read-only exploration tasks in child agents and return their summaries, stop reasons, and actual models."
+	if supportsScopedDispatch {
+		items = `{"oneOf":[{"type":"string"},{"type":"object","properties":{"task":{"type":"string"},"scope":{"type":"string"}},"required":["task","scope"],"additionalProperties":false}]}`
+		description += " A task is a string, or {task, scope} where scope is an existing workspace-relative subdirectory that bounds the child's reads (read_file, search, glob, list only; no retrieval)."
+	}
 	return agent.ToolSpec{
 		Name:        DispatchToolName,
-		Description: "Run one or more bounded, read-only exploration tasks in child agents and return their summaries, stop reasons, and actual models.",
+		Description: description,
 		Parameters: json.RawMessage(fmt.Sprintf(`{
   "type":"object",
   "properties":{
-    "tasks":{"type":"array","items":{"type":"string"},"minItems":1,"maxItems":%d,"description":"independent read-only investigation tasks"}
+    "tasks":{"type":"array","items":%s,"minItems":1,"maxItems":%d,"description":"independent read-only investigation tasks"}
   },
   "required":["tasks"]
-}`, d.limits.MaxTasks)),
+}`, items, d.limits.MaxTasks)),
 	}
 }
 
@@ -210,13 +278,42 @@ func (d *Dispatch) Invoke(ctx context.Context, raw json.RawMessage) (agent.ToolR
 	if len(args.Tasks) > d.limits.MaxTasks {
 		return agent.ToolResult{IsError: true, Content: fmt.Sprintf("dispatch accepts at most %d tasks", d.limits.MaxTasks)}, nil
 	}
+	// Validate the scoped envelope before retaining roots or starting any child.
+	scoped := 0
+	for _, task := range args.Tasks {
+		if task.scope != nil {
+			scoped++
+		}
+	}
+	if scoped > 0 {
+		minimum, err := minimumDispatchEnvelopeBytes(len(args.Tasks))
+		if err != nil {
+			return agent.ToolResult{}, err
+		}
+		// The longest nonnegative int64 adds 36 JSON bytes, including key/comma.
+		minimum += 36 * scoped
+		if d.limits.MaxResultBytes < minimum {
+			return agent.ToolResult{IsError: true, Content: fmt.Sprintf("dispatch max result bytes %d cannot hold required metadata (%d bytes)", d.limits.MaxResultBytes, minimum)}, nil
+		}
+	}
+	children := make([]dispatchChild, len(args.Tasks))
+	defer func() {
+		for _, child := range children {
+			if child.cleanup != nil {
+				child.cleanup()
+			}
+		}
+	}()
+	prepare := d.childTools
+	if d.prepareChildTools != nil {
+		prepare = d.prepareChildTools
+	}
 	for i, task := range args.Tasks {
-		if strings.TrimSpace(task) == "" {
-			return agent.ToolResult{IsError: true, Content: fmt.Sprintf("dispatch task %d is empty", i+1)}, nil
+		tools, counter, cleanup, err := prepare(task.scope)
+		if err != nil {
+			return agent.ToolResult{IsError: true, Content: dispatchSetupError(err)}, nil
 		}
-		if len(task) > maxDispatchTaskBytes {
-			return agent.ToolResult{IsError: true, Content: fmt.Sprintf("dispatch task %d must be at most %d bytes", i+1, maxDispatchTaskBytes)}, nil
-		}
+		children[i] = dispatchChild{tools: tools, counter: counter, cleanup: cleanup}
 	}
 
 	envelope := dispatchEnvelope{Results: make([]dispatchResult, len(args.Tasks))}
@@ -250,7 +347,7 @@ func (d *Dispatch) Invoke(ctx context.Context, raw json.RawMessage) (agent.ToolR
 					return false
 				}
 				started[i] = true
-				envelope.Results[i], childErrors[i] = d.runChild(ctx, task)
+				envelope.Results[i], childErrors[i] = d.runChild(ctx, task, children[i])
 				return true
 			}()
 			if startedChild && d.limits.OnChildComplete != nil {
@@ -296,10 +393,14 @@ func (d *Dispatch) Invoke(ctx context.Context, raw json.RawMessage) (agent.ToolR
 	return agent.ToolResult{Content: string(content), IsError: failed, Truncated: truncated || cut}, nil
 }
 
-func (d *Dispatch) runChild(ctx context.Context, task string) (dispatchResult, error) {
+func (d *Dispatch) runChild(ctx context.Context, task dispatchTask, child dispatchChild) (dispatchResult, error) {
+	system := dispatchSystemPrompt
+	if task.scope != nil {
+		system = scopedDispatchSystemPrompt
+	}
 	caller := &modelRecordingCaller{next: d.caller}
 	result, err := agent.New(caller, d.ctxMgr, agent.WithInterceptors(d.interceptors...)).Run(ctx, agent.Request{
-		Goal: task, System: dispatchSystemPrompt, Tools: d.tools,
+		Goal: task.task, System: system, Tools: child.tools,
 		MaxSteps: d.limits.MaxSteps, Budget: d.limits.Budget,
 	}, nil)
 	model, modelErr := caller.model(d.limits.MaxResultBytes)
@@ -307,6 +408,9 @@ func (d *Dispatch) runChild(ctx context.Context, task string) (dispatchResult, e
 		return dispatchResult{}, modelErr
 	}
 	out := dispatchResult{Summary: result.Answer, StopReason: result.StopReason.String(), Model: model}
+	if child.counter != nil {
+		out.ScopeDenials = child.counter.Load()
+	}
 	if result.Risk != nil {
 		out.RiskScore = result.Risk.Score
 	}
@@ -523,7 +627,19 @@ func normalizeDispatchLimits(limits DispatchLimits) (DispatchLimits, error) {
 	if limits.MaxSummaryBytes < len(dispatchSummaryTruncated) {
 		return DispatchLimits{}, fmt.Errorf("tools: dispatch: max summary bytes %d cannot hold truncation marker (%d bytes)", limits.MaxSummaryBytes, len(dispatchSummaryTruncated))
 	}
-	minimum := dispatchEnvelope{Results: make([]dispatchResult, limits.MaxTasks)}
+	minimum, err := minimumDispatchEnvelopeBytes(limits.MaxTasks)
+	if err != nil {
+		return DispatchLimits{}, err
+	}
+	if limits.MaxResultBytes < minimum {
+		return DispatchLimits{}, fmt.Errorf("tools: dispatch: max result bytes %d cannot hold required metadata (%d bytes)", limits.MaxResultBytes, minimum)
+	}
+
+	return limits, nil
+}
+
+func minimumDispatchEnvelopeBytes(tasks int) (int, error) {
+	minimum := dispatchEnvelope{Results: make([]dispatchResult, tasks)}
 	for i := range minimum.Results {
 		minimum.Results[i] = dispatchResult{
 			Summary: dispatchSummaryTruncated, StopReason: agent.ToolErrorCapReached.String(),
@@ -532,10 +648,16 @@ func normalizeDispatchLimits(limits DispatchLimits) (DispatchLimits, error) {
 	}
 	encoded, err := json.Marshal(minimum)
 	if err != nil {
-		return DispatchLimits{}, fmt.Errorf("tools: dispatch: encode minimum result: %w", err)
+		return 0, fmt.Errorf("tools: dispatch: encode minimum result: %w", err)
 	}
-	if limits.MaxResultBytes < len(encoded) {
-		return DispatchLimits{}, fmt.Errorf("tools: dispatch: max result bytes %d cannot hold required metadata (%d bytes)", limits.MaxResultBytes, len(encoded))
+	return len(encoded), nil
+}
+
+func dispatchSetupError(err error) string {
+	switch err.Error() {
+	case "scoped dispatch is unsupported on this platform", "scoped dispatch requires built-in file readers sharing one workspace":
+		return err.Error()
+	default:
+		return toolErrMessage(err)
 	}
-	return limits, nil
 }

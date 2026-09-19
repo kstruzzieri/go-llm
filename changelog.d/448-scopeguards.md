@@ -1,0 +1,9 @@
+### Security — Scoped read-only dispatch children (#448)
+
+`dispatch` accepts mixed legacy task strings and `{"task":"…","scope":"subdirectory"}` objects. Scoped tasks pin an existing real subdirectory, inherit the parent workspace policy, and expose only `read_file`, `search`, `glob`, and `list`; retrieval is unavailable. All tasks are validated and roots acquired before any child starts, and child roots remain open until workers finish, including cancellation and timeouts. Legacy strings retain their original tools and result format.
+
+Pinned scoped dispatch is supported on Linux and macOS; other platforms advertise only legacy string tasks and reject scoped tasks before starting children. The shared readers also pin directory traversal and reject symlink replacement and special-file reads.
+
+Policy is applied to the on-disk spelling of every path component, proven by enumerating the parent directory, so case aliases cannot bypass guards. A component inside a directory that cannot be enumerated (search-only permission) cannot be verified and is denied on every platform; the guard is never consulted with the unverified spelling of an existing entry. Entries removed during directory snapshotting are skipped without failing the remaining listing or walk. Pinned reads fail with the exported `ErrRootReplaced` when the workspace root directory has been replaced since construction; hosts that keep a `Workspace` across project lifetimes should build a new one on that error.
+
+Nonzero `scope_denials` reports denied policy evaluations per scoped child, including enumeration pruning and repeated checks. It is diagnostic metadata, not a count of unique paths, failed tool calls, malicious probes, or durable audit events. Existing `risk_score` behavior is unchanged. Scoped preflight reserves the full count width within the configured result cap; the independent raw argument cap remains 197632 bytes.
