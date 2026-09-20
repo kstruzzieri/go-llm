@@ -139,9 +139,12 @@ func TestRunCodexVersions(t *testing.T) {
 }
 
 func TestRunCodexErrors(t *testing.T) {
+	actionStart := `{"type":"item.started","item":` + actionItems[0] + "}\n"
+	actionComplete := strings.Replace(actionStart, "item.started", "item.completed", 1)
 	for _, tc := range []struct{ name, data, tail, code, reason string }{
 		{"malformed", success + "SECRET\n", "", "protocol", "codex-invalid-protocol"},
 		{"action", threadLine + turnLine + `{"type":"item.started","item":` + actionItems[0] + "}\n", "", "tool-activity", "codex-visible-action"},
+		{"action-lifecycle", threadLine + turnLine + actionStart + actionComplete + answerLine + doneLine, "", "tool-activity", "codex-visible-action"},
 		{"vendor", threadLine + turnLine + `{"type":"error","message":"SECRET /private/auth token"}` + "\n", "", "protocol", "codex-vendor-error"},
 		{"missing", threadLine + turnLine + answerLine, "", "protocol", "codex-terminal-missing"},
 		{"empty", threadLine + turnLine + doneLine, "", "protocol", "codex-no-answer"},

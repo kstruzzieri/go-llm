@@ -95,10 +95,19 @@ func assertDuplexCleanup(t *testing.T, out runOutcome, dir string) {
 	if _, err := os.Stat(filepath.Join(dir, "pid")); err == nil {
 		waitForDeath(t, filepath.Join(dir, "pid"))
 	}
+	// Done releases Wait before the goroutine's final return removes its stack.
+	// Allow that epilogue to finish, while still rejecting a stuck worker.
+	deadline := time.Now().Add(time.Second)
 	stack := make([]byte, 1<<20)
-	stack = stack[:runtime.Stack(stack, true)]
-	if bytes.Contains(stack, []byte("consult.runDuplex.func")) || bytes.Contains(stack, []byte("consult.(*duplexOutput).")) {
-		t.Fatal("runDuplex returned with a live transport worker")
+	for {
+		snapshot := stack[:runtime.Stack(stack, true)]
+		if !bytes.Contains(snapshot, []byte("consult.runDuplex.func")) && !bytes.Contains(snapshot, []byte("consult.(*duplexOutput).")) {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("runDuplex returned with a live transport worker:\n%s", snapshot)
+		}
+		time.Sleep(time.Millisecond)
 	}
 }
 

@@ -27,7 +27,7 @@ type codexStream struct {
 	result                 streamResult
 	rank, records          int
 	thread, turn, terminal bool
-	ids                    map[string]string // "todo" is active; "closed" can never be reused
+	ids                    map[string]string // "todo" or an action type is active; "closed" cannot be reused
 	answer                 string
 }
 
@@ -147,7 +147,7 @@ func (s *codexStream) item(event string, m map[string]any) {
 		s.ids = make(map[string]string)
 	}
 	old := s.ids[id]
-	if typ != "todo_list" && old != "" {
+	if typ != "todo_list" && old != "" && (old != typ || event == "item.started") {
 		s.fail(3)
 		return
 	}
@@ -223,7 +223,10 @@ func (s *codexStream) item(event string, m map[string]any) {
 			s.fail(3)
 			return
 		}
-		s.ids[id] = "closed"
+		s.ids[id] = typ
+		if event == "item.completed" {
+			s.ids[id] = "closed"
+		}
 		s.fail(2)
 	default:
 		s.fail(3)

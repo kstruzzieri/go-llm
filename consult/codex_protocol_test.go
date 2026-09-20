@@ -193,6 +193,34 @@ func TestCodexActions(t *testing.T) {
 	}
 }
 
+func TestCodexActionLifecycles(t *testing.T) {
+	for i, item := range actionItems {
+		start := `{"type":"item.started","item":` + item + "}\n"
+		update := strings.Replace(start, "item.started", "item.updated", 1)
+		complete := strings.Replace(start, "item.started", "item.completed", 1)
+		other := `{"type":"item.completed","item":` + actionItems[(i+1)%len(actionItems)] + "}\n"
+		for _, tc := range []struct{ name, sequence, verdict string }{
+			{"complete", start + complete, "visible_action"},
+			{"updates", start + update + update + complete, "visible_action"},
+			{"observed-update", update + complete, "visible_action"},
+			{"duplicate-start", start + start + complete, "invalid_protocol"},
+			{"duplicate-complete", start + complete + complete, "invalid_protocol"},
+			{"late-update", start + complete + update, "invalid_protocol"},
+			{"reuse", complete + start, "invalid_protocol"},
+			{"type-change", start + other, "invalid_protocol"},
+			{"answer-reuse", start + message("a", "agent_message", "OK"), "invalid_protocol"},
+			{"malformed-complete", start + strings.Replace(complete, `"id":"a"`, `"id":"a","extra":0`, 1), "invalid_protocol"},
+		} {
+			t.Run(fmt.Sprint(i)+"/"+tc.name, func(t *testing.T) {
+				r := inspectCodex([]byte(threadLine + turnLine + tc.sequence + answerLine + doneLine))
+				if r.Verdict != tc.verdict || r.Answer != "" {
+					t.Fatalf("inspectCodex(action %d, %s) = %+v, want %s with no answer", i, tc.name, r, tc.verdict)
+				}
+			})
+		}
+	}
+}
+
 func TestRejectedOversizedFinalAnswer(t *testing.T) {
 	for _, record := range []string{`{"type":"item.completed","item":{"id":"warn","type":"error","message":"warning"}}` + "\n", `{"type":"item.started","item":` + actionItems[0] + "}\n"} {
 		r := inspectCodex([]byte(threadLine + turnLine + record + message("large", "agent_message", strings.Repeat("x", 65537)) + doneLine))
