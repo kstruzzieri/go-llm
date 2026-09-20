@@ -61,10 +61,10 @@ func mustFail(t *testing.T, ctx context.Context, c Consultant, prompt string) *E
 	r, err := Run(ctx, c, prompt)
 	var ce *Error
 	if !errors.As(err, &ce) {
-		t.Fatalf("err %v, want *consult.Error", err)
+		t.Fatal("expected *consult.Error")
 	}
 	if r != (Receipt{}) {
-		t.Fatalf("receipt on failure: %+v", r)
+		t.Fatal("expected zero receipt on failure")
 	}
 	return ce
 }
@@ -421,7 +421,8 @@ func TestRunReceiptEvidenceIsFixedFieldsOnly(t *testing.T) {
 	switch {
 	case e.InitAPIKeySource != "none", !e.UsageComplete, !e.WebSearchZero,
 		e.OpusInputTokens != 10, e.OpusOutputTokens != 5,
-		e.WaitStatus != "exited(0)", e.WaitErrorKind != "none":
+		e.WaitStatus != "exited(0)", e.WaitErrorKind != "none",
+		e.CodexTransport != "", e.CodexAppServerUsagePresent:
 		t.Fatalf("evidence: %+v", e)
 	}
 }
@@ -627,5 +628,97 @@ func TestRunSharesDeadlineWithVersionPreflight(t *testing.T) {
 	c.TimeoutSeconds = 2
 	if ce := mustFail(t, context.Background(), c, "hi\n"); ce.Code != "timeout" {
 		t.Fatalf("shared deadline: %v", ce)
+	}
+}
+
+func TestRunReportsNonzeroIncompleteDrain(t *testing.T) {
+	c := consultantFor(t, versionFixture+"sleep 30 & exit 3")
+	old := runWaitDelay
+	t.Cleanup(func() { runWaitDelay = old })
+	runWaitDelay = 100 * time.Millisecond
+	ce := mustFail(t, context.Background(), c, "hi\n")
+	if ce.Code != "drain-incomplete" || ce.Reason != "wait-delay" {
+		t.Fatalf("Run(held pipe, exit 3) = %v, want drain-incomplete/wait-delay", ce)
+	}
+}
+
+func TestHostOutcomePrecedence(t *testing.T) {
+	out := runOutcome{CapExceeded: true, Canceled: true, TimedOut: true, WaitErrorKind: "wait-delay", ExitCode: 7, WaitStatus: "exited(7)"}
+	for _, tc := range []struct {
+		clear func()
+		want  Error
+	}{
+		{func() {}, Error{Code: "output-limit", Reason: "cap"}},
+		{func() { out.CapExceeded = false }, Error{Code: "canceled", Reason: "caller"}},
+		{func() { out.Canceled = false }, Error{Code: "timeout", Reason: "deadline"}},
+		{func() { out.TimedOut = false }, Error{Code: "process-exit", Reason: "cleanup"}},
+		{func() { out.GroupCleanupOK = true }, Error{Code: "process-exit", Reason: "cleanup"}},
+		{func() { out.CleanupOK = true }, Error{Code: "drain-incomplete", Reason: "wait-delay"}},
+		{func() { out.WaitErrorKind = "other" }, Error{Code: "drain-incomplete", Reason: "other"}},
+		{func() { out.WaitErrorKind = "exit" }, Error{Code: "process-exit", Reason: "exited(7)"}},
+	} {
+		tc.clear()
+		if got := classifyRunOutcome(out); got == nil || *got != tc.want {
+			t.Fatalf("classifyRunOutcome(%+v) = %v, want %v", out, got, tc.want)
+		}
+	}
+	out.ExitCode, out.WaitStatus, out.WaitErrorKind = 0, "exited(0)", "none"
+	if got := classifyRunOutcome(out); got != nil {
+		t.Fatalf("successful host outcome = %v", got)
+	}
+}
+
+func TestAppServerFixedErrorMappings(t *testing.T) {
+	for _, tc := range []struct {
+		err          error
+		code, reason string
+	}{
+		{errAppServerProtocol, "protocol", "codex-app-server-invalid-protocol"},
+		{errAppServerProtocolInitialize, "protocol", "codex-app-server-invalid-protocol-initialize"},
+		{errAppServerProtocolDiscovery, "protocol", "codex-app-server-invalid-protocol-discovery"},
+		{errAppServerProtocolThread, "protocol", "codex-app-server-invalid-protocol-thread"},
+		{errAppServerProtocolTurn, "protocol", "codex-app-server-invalid-protocol-turn"},
+		{errAppServerProtocolShutdown, "protocol", "codex-app-server-invalid-protocol-shutdown"},
+		{errAppServerConfigWarning, "protocol", "codex-app-server-config-warning-rejected"},
+		{errAppServerWarning, "protocol", "codex-app-server-warning-rejected"},
+		{errAppServerDeprecationNotice, "protocol", "codex-app-server-deprecation-notice-rejected"},
+		{errAppServerAccountUpdated, "protocol", "codex-app-server-account-updated-rejected"},
+
+		{errAppServerRequest, "tool-activity", "codex-app-server-request"},
+		{errAppServerVendor, "protocol", "codex-app-server-vendor-error"},
+		{errAppServerUnavailable, "protocol", "codex-app-server-model-unavailable"},
+		{errAppServerIncomplete, "protocol", "codex-app-server-incomplete"},
+		{errAppServerAnswer, "protocol", "codex-app-server-invalid-answer"},
+		{errDuplexEOF, "protocol", "codex-app-server-incomplete"},
+		{errDuplexWrite, "protocol", "codex-app-server-write"},
+		{errDuplexRecords, "protocol", "codex-app-server-record-limit"},
+		{errDuplexBackpressure, "protocol", "codex-app-server-backpressure"},
+		{errors.New("SECRET /private/path RPC-ID"), "protocol", "codex-app-server-invalid-protocol"},
+	} {
+		got := classifyAppServerError(fmt.Errorf("SECRET: %w", tc.err))
+		if got.Code != tc.code || got.Reason != tc.reason {
+			t.Fatalf("classifyAppServerError(%v) = %v, want %s/%s", tc.err, got, tc.code, tc.reason)
+		}
+	}
+}
+
+func TestAppServerFaultMappingIsClosed(t *testing.T) {
+	for _, tc := range []struct {
+		phase         error
+		point, reason string
+	}{
+		{errAppServerProtocolTurn, "record-decode", "codex-app-server-invalid-protocol-turn-record-decode"},
+		{errAppServerProtocolTurn, "PRIVATE-CANARY /private/path", "codex-app-server-invalid-protocol-turn"},
+		{errAppServerProtocolTurn, "", "codex-app-server-invalid-protocol-turn"},
+		{errAppServerWarning, "record-decode", "codex-app-server-warning-rejected"},
+		{errAppServerVendor, "record-decode", "codex-app-server-vendor-error"},
+		{errAppServerRequest, "record-decode", "codex-app-server-request"},
+		{errAppServerIncomplete, "record-decode", "codex-app-server-incomplete"},
+		{errAppServerAnswer, "record-decode", "codex-app-server-invalid-answer"},
+	} {
+		got := classifyAppServerError(fmt.Errorf("PRIVATE-CANARY: %w", &appServerFault{phase: tc.phase, point: tc.point}))
+		if got.Reason != tc.reason {
+			t.Errorf("classifyAppServerError fault = %s, want %s", got.Reason, tc.reason)
+		}
 	}
 }

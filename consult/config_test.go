@@ -1,10 +1,13 @@
 package consult
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -80,7 +83,7 @@ func TestLoadRejectsInvalidConfigs(t *testing.T) {
 		"egress_false":     {sub(`"trusted_process_egress":true`, `"trusted_process_egress":false`), "trusted_process_egress must be true"},
 		"egress_missing":   {sub(`,"trusted_process_egress":true`, ``), "trusted_process_egress must be true"},
 		"bad_name":         {sub(`"name":"claude"`, `"name":"Claude Max"`), "name must match"},
-		"bad_adapter":      {sub(`"adapter":"claude"`, `"adapter":"codex"`), `unsupported adapter "codex"`},
+		"bad_adapter":      {sub(`"adapter":"claude"`, `"adapter":"future"`), `unsupported adapter "future"`},
 		"bad_model":        {sub(`"model":"opus"`, `"model":"sonnet"`), `unsupported model "sonnet"`},
 		"timeout_too_long": {sub(`"timeout_seconds":120`, `"timeout_seconds":301`), "timeout_seconds must be 0..300"},
 		"timeout_negative": {sub(`"timeout_seconds":120`, `"timeout_seconds":-1`), "timeout_seconds must be 0..300"},
@@ -213,5 +216,198 @@ func TestLoadRejectsSymlinkCommand(t *testing.T) {
 	_, err := Load(lp)
 	if err == nil || !strings.Contains(err.Error(), "must not be a symlink") {
 		t.Fatalf("symlink command must be rejected as a symlink, got %v", err)
+	}
+}
+
+const codexConfig = `{"version":1,"consultants":[{"name":"codex","adapter":"codex","command":"@CMD@","model":"gpt-6-astra","trusted_process_egress":true,"trusted_vendor_runtime":true}]}`
+
+func TestLoadCodex(t *testing.T) {
+	for _, tc := range []struct {
+		name, old, new string
+		valid          bool
+	}{
+		{"valid", "", "", true},
+		{"trust-false", `"trusted_vendor_runtime":true`, `"trusted_vendor_runtime":false`, false},
+		{"trust-missing", `,"trusted_vendor_runtime":true`, "", false},
+		{"egress", `"trusted_process_egress":true`, `"trusted_process_egress":false`, false},
+		{"model", "gpt-6-astra", "gpt-5.5", false},
+		{"adapter", `"adapter":"codex"`, `"adapter":"future"`, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			body := codexConfig
+			if tc.old != "" {
+				body = strings.Replace(body, tc.old, tc.new, 1)
+			}
+			path, _ := writeConfig(t, body)
+			cs, err := Load(path)
+			if (err == nil) != tc.valid {
+				t.Fatalf("Load(%s) = %v, want valid=%t", tc.name, err, tc.valid)
+			}
+			if tc.valid {
+				c := cs["codex"]
+				if c.Transport != "" || c.Adapter != "codex" || c.Model != "gpt-6-astra" || !c.TrustedVendorRuntime || !c.TrustedProcessEgress || c.TimeoutSeconds != 120 || c.MaxOutputBytes != 1048576 {
+					t.Fatalf("Codex defaults = %+v", c)
+				}
+			}
+		})
+	}
+	for _, flag := range []string{"false", "true"} {
+		path, _ := writeConfig(t, strings.Replace(goodConfig, `"model":"opus"`, `"trusted_vendor_runtime":`+flag+`,"model":"opus"`, 1))
+		if _, err := Load(path); err != nil {
+			t.Fatalf("Claude vendor flag %s: %v", flag, err)
+		}
+	}
+}
+
+func TestLoadTransport(t *testing.T) {
+	for _, adapter := range []string{"claude", "codex"} {
+		for _, transport := range []string{"", "exec", "app-server", "unknown", "Exec", " app-server"} {
+			t.Run(adapter+"/"+transport, func(t *testing.T) {
+				body := goodConfig
+				if adapter == "codex" {
+					body = codexConfig
+				}
+				body = strings.Replace(body, `"adapter":"`+adapter+`"`, `"adapter":"`+adapter+`","transport":"`+transport+`"`, 1)
+				path, _ := writeConfig(t, body)
+				cs, err := Load(path)
+				valid := transport == "" || transport == "exec" || adapter == "codex" && transport == "app-server"
+				if (err == nil) != valid {
+					t.Fatalf("Load(%s,%q) = %+v, %v; want valid=%t", adapter, transport, cs, err, valid)
+				}
+				if !valid && !strings.Contains(err.Error(), "unsupported transport") {
+					t.Fatalf("Load(%s,%q) = %v; want unsupported transport", adapter, transport, err)
+				}
+			})
+		}
+	}
+}
+
+func TestTransportRollbackAndZeroValue(t *testing.T) {
+	// Frozen declaration shape from the exec-only strict loader. New binaries
+	// accept explicit exec, but this old shape rejects the entire new field.
+	type legacyConsultant struct {
+		Name                 string `json:"name"`
+		Adapter              string `json:"adapter"`
+		Command              string `json:"command"`
+		SHA256               string `json:"sha256,omitempty"`
+		Model                string `json:"model"`
+		TimeoutSeconds       int    `json:"timeout_seconds,omitempty"`
+		MaxOutputBytes       int    `json:"max_output_bytes,omitempty"`
+		TrustedProcessEgress bool   `json:"trusted_process_egress"`
+		TrustedVendorRuntime bool   `json:"trusted_vendor_runtime,omitempty"`
+	}
+	for _, field := range []string{"", `,"transport":""`, `,"transport":"exec"`, `,"transport":"app-server"`} {
+		body := strings.Replace(codexConfig, `"adapter":"codex"`, `"adapter":"codex"`+field, 1)
+		path, _ := writeConfig(t, body)
+		cs, err := Load(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if field == "" && cs["codex"].Transport != "" {
+			t.Fatalf("omitted transport changed zero-value declaration: %+v", cs["codex"])
+		}
+		var legacy struct {
+			Version     int                `json:"version"`
+			Consultants []legacyConsultant `json:"consultants"`
+		}
+		dec := json.NewDecoder(strings.NewReader(body))
+		dec.DisallowUnknownFields()
+		err = dec.Decode(&legacy)
+		if field == "" && err != nil || field != "" && (err == nil || !strings.Contains(err.Error(), `unknown field "transport"`)) {
+			t.Fatalf("old schema with %q = %v", field, err)
+		}
+		c := cs["codex"]
+		c.Transport = "" // Removal, not transport:exec, produces the old shape.
+		raw, err := json.Marshal(c)
+		if err != nil || bytes.Contains(raw, []byte(`"transport"`)) {
+			t.Fatalf("rollback declaration = %s, %v", raw, err)
+		}
+		dec = json.NewDecoder(bytes.NewReader(raw))
+		dec.DisallowUnknownFields()
+		var old legacyConsultant
+		if err := dec.Decode(&old); err != nil {
+			t.Fatalf("removed transport still fails old schema: %v", err)
+		}
+	}
+}
+
+func invalidDisabledMCPDeclarations() []struct {
+	name, adapter, transport string
+	servers                  []string
+} {
+	tooMany := make([]string, 33)
+	for i := range tooMany {
+		tooMany[i] = strconv.Itoa(i)
+	}
+	return []struct {
+		name, adapter, transport string
+		servers                  []string
+	}{
+		{"empty-name", "codex", "app-server", []string{""}},
+		{"dot", "codex", "app-server", []string{"private.server"}},
+		{"double-quote", "codex", "app-server", []string{`private"server`}},
+		{"single-quote", "codex", "app-server", []string{"private'server"}},
+		{"space", "codex", "app-server", []string{"private server"}},
+		{"slash", "codex", "app-server", []string{"private/server"}},
+		{"backslash", "codex", "app-server", []string{`private\server`}},
+		{"newline", "codex", "app-server", []string{"private\nserver"}},
+		{"nul", "codex", "app-server", []string{"private\x00server"}},
+		{"unicode", "codex", "app-server", []string{"privaté"}},
+		{"long-name", "codex", "app-server", []string{strings.Repeat("s", 65)}},
+		{"duplicate", "codex", "app-server", []string{"private", "private"}},
+		{"too-many", "codex", "app-server", tooMany},
+		{"codex-default", "codex", "", []string{"private"}},
+		{"codex-exec", "codex", "exec", []string{"private"}},
+		{"claude-default", "claude", "", []string{"private"}},
+		{"claude-exec", "claude", "exec", []string{"private"}},
+	}
+}
+
+func TestLoadDisabledMCPServers(t *testing.T) {
+	for _, tc := range invalidDisabledMCPDeclarations() {
+		t.Run(tc.name, func(t *testing.T) {
+			path, command := writeConfig(t, codexConfig)
+			c := Consultant{Name: "configured", Adapter: tc.adapter, Transport: tc.transport, Command: command,
+				Model: "gpt-6-astra", TrustedProcessEgress: true, TrustedVendorRuntime: true, DisabledMCPServers: tc.servers}
+			if c.Adapter == "claude" {
+				c.Model = "opus"
+			}
+			raw, err := json.Marshal(Config{Version: 1, Consultants: []Consultant{c}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path, raw, 0600); err != nil {
+				t.Fatal(err)
+			}
+			_, err = Load(path)
+			want := "consult: consultant 0: disabled_mcp_servers requires Codex app-server and at most 32 unique names matching ^[A-Za-z0-9_-]{1,64}$"
+			if err == nil || err.Error() != want {
+				t.Fatalf("Load(%s) = %v, want fixed disabled_mcp_servers validation error", tc.name, err)
+			}
+		})
+	}
+	maximum := make([]string, 32)
+	for i := range maximum {
+		suffix := strconv.Itoa(i)
+		maximum[i] = strings.Repeat("a", 64-len(suffix)) + suffix
+	}
+	for name, servers := range map[string][]string{
+		"omitted": nil, "empty": {}, "bare-keys": {"A", "0", "_", "-", "Mixed_case-123"}, "maximum": maximum,
+	} {
+		t.Run(name, func(t *testing.T) {
+			names, err := json.Marshal(servers)
+			if err != nil {
+				t.Fatal(err)
+			}
+			body := strings.Replace(codexConfig, `"adapter":"codex"`, `"adapter":"codex","transport":"app-server","disabled_mcp_servers":`+string(names), 1)
+			if servers == nil {
+				body = strings.Replace(body, `,"disabled_mcp_servers":null`, "", 1)
+			}
+			path, _ := writeConfig(t, body)
+			cs, err := Load(path)
+			if err != nil || !reflect.DeepEqual(cs["codex"].DisabledMCPServers, servers) {
+				t.Fatalf("Load(%s) = %+v, %v; want declared server names", name, cs, err)
+			}
+		})
 	}
 }
