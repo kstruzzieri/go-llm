@@ -584,18 +584,6 @@ func TestAppServerInterruptIDs(t *testing.T) {
 	s := appTestStart(t)
 	appTestFeed(t, s, append(appTestRecords()[:5], appTestTurnReply))
 	appTestSameJSON(t, s.interrupt(), `{"id":5,"method":"turn/interrupt","params":{"threadId":"thread-one","turnId":"turn-one"}}`)
-	appTestFeed(t, s, []string{`{"id":5,"result":{}}`})
-	if _, err := s.receive([]byte(`{"id":5,"result":{}}`)); err == nil {
-		t.Fatal("duplicate interrupt reply accepted")
-	}
-	for _, reply := range []string{`{"id":5,"result":{"ok":true}}`, `{"id":"5","result":{}}`, `{"id":6,"result":{}}`} {
-		s := appTestStart(t)
-		appTestFeed(t, s, appTestRecords()[:6])
-		s.interrupt()
-		if _, err := s.receive([]byte(reply)); err == nil {
-			t.Fatal("invalid interrupt reply accepted")
-		}
-	}
 }
 
 func TestAppServerUsageValidation(t *testing.T) {

@@ -57,7 +57,7 @@ type appServerItem struct {
 
 type appServerStream struct {
 	model, prompt, cwd                                                   string
-	nextID, pendingID, interruptID                                       int
+	nextID, pendingID                                                    int
 	pendingMethod                                                        string
 	initialized, remote, threadRequested, threadReply, threadStarted     bool
 	turnRequested, turnReply, turnStarted, terminal, closed, interrupted bool
@@ -192,13 +192,6 @@ func (s *appServerStream) receive(frame []byte) (duplexAction, error) {
 		n, number := m["id"].(json.Number)
 		if !number {
 			return s.rejectPoint("reply-id")
-		}
-		if s.interruptID != 0 && string(n) == strconv.Itoa(s.interruptID) {
-			s.interruptID = 0
-			if hasError || !appEmpty(m["result"]) {
-				return s.rejectPoint("interrupt-reply")
-			}
-			return duplexAction{}, nil
 		}
 		if s.pendingID == 0 || string(n) != strconv.Itoa(s.pendingID) {
 			return s.rejectPoint("reply-correlation")
@@ -804,6 +797,8 @@ func (s *appServerStream) finish() (appServerResult, error) {
 		Usage: usage{Input: s.total[1], Cached: s.total[2], CacheWrite: s.total[3], Output: s.total[4], Reasoning: s.total[5]}}, nil
 }
 
+// interrupt constructs one best-effort request. The dispatcher stops calling
+// receive on cancellation, so no acknowledgement is parsed or required.
 func (s *appServerStream) interrupt() []byte {
 	if s.interrupted {
 		return nil
@@ -813,12 +808,11 @@ func (s *appServerStream) interrupt() []byte {
 		return nil
 	}
 	s.nextID++
-	s.interruptID = s.nextID
 	return appEncode(struct {
 		ID     int    `json:"id"`
 		Method string `json:"method"`
 		Params any    `json:"params"`
-	}{s.interruptID, "turn/interrupt", map[string]any{"threadId": s.threadID, "turnId": s.turnID}})
+	}{s.nextID, "turn/interrupt", map[string]any{"threadId": s.threadID, "turnId": s.turnID}})
 }
 
 // The following validators implement only the pinned consultation subset.

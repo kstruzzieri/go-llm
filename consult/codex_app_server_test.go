@@ -140,8 +140,11 @@ func TestAppServerChild(t *testing.T) {
 	if strings.HasPrefix(mode, "cancel-") {
 		read(`{"id":5,"method":"turn/interrupt","params":{"threadId":"thread-one","turnId":"turn-one"}}`)
 		_ = os.WriteFile(filepath.Join(dir, "interrupt"), []byte("received"), 0600)
-		if mode == "cancel-ack" {
+		switch mode {
+		case "cancel-ack":
 			emit(`{"id":5,"result":{}}`)
+		case "cancel-invalid-ack":
+			emit(`{"id":5,"result":{"unexpected":true}}`)
 		}
 		if scanner.Scan() {
 			syscall.Exit(66)
@@ -244,7 +247,7 @@ func TestAppServerOperationTransportBounds(t *testing.T) {
 }
 
 func TestAppServerCancellationWithDuplex(t *testing.T) {
-	for _, mode := range []string{"cancel-before", "cancel-ack", "cancel-no-ack"} {
+	for _, mode := range []string{"cancel-before", "cancel-ack", "cancel-invalid-ack", "cancel-no-ack"} {
 		t.Run(mode, func(t *testing.T) {
 			spec, dir := appTestSpec(t, mode)
 			spec.args = codexAppServerArgs()
@@ -258,6 +261,9 @@ func TestAppServerCancellationWithDuplex(t *testing.T) {
 			done := make(chan result, 1)
 			go func() {
 				out, err := runDuplex(ctx, spec, duplexExchange{start: s.start, interrupt: s.interrupt, receive: func(frame []byte) (duplexAction, error) {
+					if s.interrupted {
+						t.Error("output dispatched after cancellation interrupt")
+					}
 					a, err := s.receive(frame)
 					want := appTestTurnStarted
 					if mode == "cancel-before" {

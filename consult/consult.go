@@ -379,7 +379,7 @@ func classifyAppServerError(err error) *Error {
 			"external-agent-config-import-progress-rejected", "file-change-output-delta-rejected", "file-change-patch-updated-rejected",
 			"fs-changed-rejected", "fuzzy-file-search-session-completed-rejected", "fuzzy-file-search-session-updated-rejected",
 			"guardian-warning-rejected", "hook-completed-rejected", "hook-started-rejected",
-			"initialize-reply", "interrupt-reply", "item-agent-citation",
+			"initialize-reply", "item-agent-citation",
 			"item-agent-questions", "item-agent-shape", "item-bound",
 			"item-collab-agent-tool-call-rejected", "item-command-execution-rejected", "item-context-compaction-rejected",
 			"item-dynamic-tool-call-rejected", "item-entered-review-mode-rejected", "item-exited-review-mode-rejected",

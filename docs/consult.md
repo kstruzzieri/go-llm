@@ -431,6 +431,10 @@ list to its declaration in `consultants.json`:
 "disabled_mcp_servers": ["node_repl", "openaiDeveloperDocs"]
 ```
 
+**Native MCP servers may start during consultation, even when no tool is used.**
+This list disables only the named servers for this launch. Review the native
+configuration yourself before enabling this trusted-runtime profile.
+
 Use the exact names from your native MCP configuration. The adapter appends one
 `-c mcp_servers.<name>.enabled=false` pair per name, in list order, after the fixed
 overrides and before `app-server`. The example adds these four argument tokens:
@@ -494,9 +498,10 @@ counting/discarding stderr through true EOF, then requires a clean exit and join
 process-group cleanup. Late violations, truncated frames, held pipes and failed
 cleanup cannot yield a receipt. On explicit cancellation it may send one bounded
 `turn/interrupt` only after an active nonempty thread/turn ID is confirmed; before
-that it closes/kills. Cleanup remains bounded independently of an acknowledgement,
-and cancellation returns no advice. Local teardown does not prove server-side
-interruption or zero token use.
+that it closes/kills. Once cancellation is dispatched, subsequent stdout is
+counted and discarded; interrupt acknowledgements are neither parsed nor required.
+Cleanup remains bounded, and cancellation returns no advice. Local teardown does
+not prove server-side interruption or zero token use.
 
 Successful receipts set `Evidence.CodexTransport` to `"app-server"`.
 `CodexAppServerUsagePresent` distinguishes unavailable usage (false, all counters
