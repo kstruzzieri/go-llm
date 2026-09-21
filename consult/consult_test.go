@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/user"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"testing"
@@ -719,6 +720,43 @@ func TestAppServerFaultMappingIsClosed(t *testing.T) {
 		got := classifyAppServerError(fmt.Errorf("PRIVATE-CANARY: %w", &appServerFault{phase: tc.phase, point: tc.point}))
 		if got.Reason != tc.reason {
 			t.Errorf("classifyAppServerError fault = %s, want %s", got.Reason, tc.reason)
+		}
+	}
+}
+
+// TestAppServerPointsMatchSource pins appServerPoints to the literals the
+// protocol file can actually emit, in both directions: a point added without an
+// allowlist entry would otherwise silently degrade to the phase-only reason,
+// and a removed point would leave a dead entry.
+func TestAppServerPointsMatchSource(t *testing.T) {
+	src, err := os.ReadFile("codex_app_server_protocol.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	re := regexp.MustCompile(`\b(?:rejectPoint|invalid)\("([a-z0-9-]+)"\)|point :?= (?:[^\n]*, )?"([a-z0-9-]+)"|return (?:result, )?"([a-z0-9-]+)"`)
+	inSource := map[string]bool{}
+	for _, m := range re.FindAllStringSubmatch(string(src), -1) {
+		for _, g := range m[1:] {
+			if g != "" {
+				inSource[g] = true
+			}
+		}
+	}
+	if len(inSource) == 0 {
+		t.Fatal("no rejection points found in source")
+	}
+	for p := range inSource {
+		if !appServerPoints[p] {
+			t.Errorf("point %q emitted by codex_app_server_protocol.go is missing from appServerPoints", p)
+		}
+		got := classifyAppServerError(&appServerFault{phase: errAppServerProtocolTurn, point: p})
+		if want := "codex-app-server-invalid-protocol-turn-" + p; got.Reason != want {
+			t.Errorf("point %q reason = %s, want %s", p, got.Reason, want)
+		}
+	}
+	for p := range appServerPoints {
+		if !inSource[p] {
+			t.Errorf("appServerPoints entry %q is not emitted by codex_app_server_protocol.go", p)
 		}
 	}
 }

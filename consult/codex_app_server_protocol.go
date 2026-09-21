@@ -1,6 +1,7 @@
 package consult
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
@@ -149,7 +150,7 @@ func (s *appServerStream) receive(frame []byte) (duplexAction, error) {
 	}
 	// B2 owns cumulative bytes, LF assembly and records. Each borrowed callback
 	// frame is bounded before the existing depth/duplicate-key decoder runs.
-	if len(frame) > streamCap || strings.ContainsRune(string(frame), '\n') {
+	if len(frame) > streamCap || bytes.IndexByte(frame, '\n') >= 0 {
 		return s.rejectPoint("record-framing")
 	}
 	m, ok := decodeRecord(frame)

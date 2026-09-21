@@ -279,7 +279,7 @@ func supportedModel(adapter, model string) bool {
 	case claudeAdapter:
 		return claudeModels[model]
 	case codexAdapter:
-		return model == "gpt-6-astra"
+		return codexModels[model]
 	default:
 		return false
 	}
