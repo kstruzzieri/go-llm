@@ -27,9 +27,9 @@ Use it directly in a terminal through **Golem**, the bundled local coding agent 
 ### What's included
 
 - **Model backends** — `openai-compat` provider (llama.cpp / vLLM / LM Studio) and a native Ollama REST client: chat, completions, embeddings, model management, tool calling, streaming
-- **Golem terminal agent** — read-only by default, with persistent per-workspace sessions and automatic workspace RAG retrieval; approval-gated write/exec with scoped session grants, background jobs, project-context trust, signed mutation receipts, `/consult` to an external subscription CLI, and destination admission that shows every remote endpoint before the first outbound byte
-- **Execution sandboxing (library)** — deny-default sandbox backends for the exec tools in `agent/`: macOS Seatbelt (`sandbox-exec` per-invocation profiles scoping reads/writes to the workspace plus a private temp directory) and Linux Bubblewrap (fresh user/mount/pid namespaces per invocation, network unshared unless allowed). Selecting a runtime the host cannot enforce fails closed — there is no silent host fallback
-- **Zero-trust agent runtime** — tool-observation fencing, deterministic injection and secret detectors, signed agent-memory provenance, and an offline audit verifier
+- **Golem terminal agent** — read-only by default, with persistent per-workspace sessions and automatic workspace RAG retrieval; approval-gated write/exec with session grants, background jobs, project-context trust, signed mutation receipts, `/consult` to an external subscription CLI, and destination admission that shows reachable remote model endpoints before provider traffic
+- **Execution sandboxing (library)** — deny-default sandbox backends for the exec tools in `agent/`: macOS Seatbelt (`sandbox-exec` per-invocation profiles scoping reads/writes to the workspace plus a private temp directory) and Linux Bubblewrap (fresh user/mount/pid namespaces per invocation, network unshared unless allowed). Selecting a runtime the host cannot enforce fails closed. The Golem CLI currently executes commands on the host; selecting these backends from the CLI is planned
+- **Zero-trust agent runtime** — tool-observation fencing, opt-in injection and secret detectors (`-interceptors`, off by default), signed agent-memory provenance, and an offline audit verifier
 - **RAG pipeline** — code-aware chunking, SQLite vector store with hybrid search, concurrent `.gitignore`-aware indexing, context-building retrieval
 - **FIM completion** — Fill-in-the-Middle for IDE inline suggestions with context window management
 - **Model config and routing** — `models.json` roles and fallback chains; use-case-aware `provider.Router` with circuit breakers and slot-aware admission
@@ -151,10 +151,10 @@ Tools cover chat, generation, code completion, embeddings, RAG, model management
 |---|---|---|
 | **v0.3.0** (current) | Zero-trust agent foundation — observation fencing, injection and secret detectors, signed mutation receipts and agent memory, scoped dispatch children, offline audit verifier — plus the Golem session surface (`/model`, `/think`, `/compact`, `/consult`, headless `-p`, Git context) and recipe bundles | [CHANGELOG](CHANGELOG.md#030---2026-09-18) |
 | **v0.4.0** | Codex `/consult` adapter (#546), capability-attenuated child tool registries (#449), ANSI sanitization of streamed output (#433), Workspace write/delete hardening (#552), removal of the deprecated `provider=URL` spelling of `-allow-destination` (#501), migration and CAS fixes | [milestone](https://github.com/kstruzzieri/go-llm/milestone/1) |
-| **v0.5.0** | Quarantined ingestion for foreign content (#434), injection-aware retrieval tagging (#435), adversarial injection corpus for `llm-bench` (#452), default-on interceptors (#517) | [milestone](https://github.com/kstruzzieri/go-llm/milestone/2) |
+| **v0.5.0** | Quarantined ingestion for foreign content (#434), injection-aware retrieval tagging (#435), adversarial injection corpus for `llm-bench` (#452), detector/Secrets default evaluation (#517) | [milestone](https://github.com/kstruzzieri/go-llm/milestone/2) |
 | Later | Hosted-native transports (Anthropic Messages, Gemini, OpenAI Responses), agentic RAG orchestration, in-band routing transparency in MCP responses, evidence-governed feedback, vision inputs, ANN search | [open issues](https://github.com/kstruzzieri/go-llm/issues) |
 
-Security work is coordinated under epic [#429](https://github.com/kstruzzieri/go-llm/issues/429).
+Security work is coordinated under epic [#429](https://github.com/kstruzzieri/go-llm/issues/429). The [least-privilege roadmap](docs/least-privilege.md) records current boundaries, planned operational controls, and provenance-aware approval work. Its dependency order does not add that work to the v0.4.0 scope above.
 
 ## Dependencies
 
