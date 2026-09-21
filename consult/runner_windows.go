@@ -12,3 +12,7 @@ import (
 func run(context.Context, runSpec) (runOutcome, error) {
 	return runOutcome{}, errors.ErrUnsupported
 }
+
+func runDuplex(context.Context, runSpec, duplexExchange) (runOutcome, error) {
+	return runOutcome{}, errors.ErrUnsupported
+}
