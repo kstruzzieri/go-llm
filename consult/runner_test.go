@@ -476,3 +476,170 @@ func TestRunArgsArePassedVerbatim(t *testing.T) {
 		t.Fatalf("argv: %q %+v %v", out.Stdout, out, err)
 	}
 }
+
+func TestNonzeroExitStillRequiresCompleteDrain(t *testing.T) {
+	for _, tc := range []struct {
+		name, body, wait string
+		code             int
+	}{
+		{"stdout", "sleep 30 2>/dev/null & exit 3", "wait-delay", 3},
+		{"stderr", "sleep 30 >/dev/null & exit 3", "wait-delay", 3},
+		{"clean", "exit 3", "exit", 3},
+		{"zero", "sleep 30 & exit 0", "wait-delay", 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			out, err := run(context.Background(), runSpec{command: script(t, tc.body), timeout: 5 * time.Second, outputCap: 4096, waitDelay: 100 * time.Millisecond})
+			if err != nil || out.ExitCode != tc.code || out.WaitStatus != fmt.Sprintf("exited(%d)", tc.code) || out.WaitErrorKind != tc.wait || !out.GroupCleanupOK || !out.CleanupOK || out.Canceled || out.TimedOut {
+				t.Fatalf("run(%s) = %+v, %v; want exit %d, %s and clean teardown", tc.name, out, err, tc.code, tc.wait)
+			}
+		})
+	}
+}
+
+type drainErrorReader struct{}
+
+func (drainErrorReader) Read([]byte) (int, error) { return 0, io.ErrUnexpectedEOF }
+
+func TestCappedWriterRecordsEOF(t *testing.T) {
+	for _, fail := range []bool{false, true} {
+		w := &cappedWriter{cap: 8, retain: true}
+		var r io.Reader = strings.NewReader("abc")
+		if fail {
+			r = io.MultiReader(r, drainErrorReader{})
+		}
+		n, err := w.ReadFrom(r)
+		if n != 3 || string(w.snapshot()) != "abc" || w.complete() == fail || (err != nil) != fail {
+			t.Fatalf("ReadFrom(error=%t) = %d, %v, complete=%t, bytes=%q", fail, n, err, w.complete(), w.snapshot())
+		}
+	}
+}
+
+// TestDrainChild is a test-binary fixture, never a vendor launch. The holder
+// deliberately escapes the leader group to keep a pipe open after SIGKILL.
+func TestDrainChild(t *testing.T) {
+	if len(os.Args) < 4 {
+		return
+	}
+	mode, pids, ready := os.Args[len(os.Args)-3], os.Args[len(os.Args)-2], os.Args[len(os.Args)-1]
+	if mode == "546-drain-holder" {
+		if err := os.WriteFile(ready, []byte("ready"), 0600); err != nil {
+			os.Exit(2)
+		}
+		time.Sleep(30 * time.Second)
+		os.Exit(0)
+	}
+	if mode != "546-drain-leader" {
+		return
+	}
+	exe, err := os.Executable()
+	if err != nil {
+		os.Exit(2)
+	}
+	child := exec.Command(exe, "-test.run=^TestDrainChild$", "--", "546-drain-holder", pids, ready)
+	child.Stdout, child.Stderr = os.Stdout, os.Stderr
+	child.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	if child.Start() != nil {
+		os.Exit(2)
+	}
+	if os.WriteFile(pids, []byte(fmt.Sprintf("%d %d", os.Getpid(), child.Process.Pid)), 0600) != nil {
+		_ = child.Process.Kill()
+		_ = child.Wait()
+		os.Exit(2)
+	}
+	_ = child.Wait()
+	os.Exit(0)
+}
+
+func TestRunInterruptedDrain(t *testing.T) {
+	for _, held := range []bool{false, true} {
+		for _, mode := range []string{"signal", "caller", "checked-caller"} {
+			t.Run(fmt.Sprintf("held=%t/%s", held, mode), func(t *testing.T) {
+				exe, err := os.Executable()
+				if err != nil {
+					t.Fatal(err)
+				}
+				exe, err = filepath.EvalSymlinks(exe)
+				if err != nil {
+					t.Fatal(err)
+				}
+				dir := t.TempDir()
+				pids, ready := filepath.Join(dir, "pids"), filepath.Join(dir, "ready")
+				// An escaped grandchild is reaped by the OS, not the killed leader.
+				// Always kill it and verify non-execution, including startup failures.
+				t.Cleanup(func() {
+					raw, _ := os.ReadFile(pids)
+					leader, holder := 0, 0
+					_, _ = fmt.Sscanf(string(raw), "%d %d", &leader, &holder)
+					if holder > 0 {
+						_ = syscall.Kill(holder, syscall.SIGKILL)
+						file := filepath.Join(dir, "holder")
+						if err := os.WriteFile(file, []byte(strconv.Itoa(holder)), 0600); err != nil {
+							t.Fatal(err)
+						}
+						waitForDeath(t, file)
+					}
+				})
+				ctx, cancel := context.WithCancel(context.Background())
+				defer cancel()
+				spec := runSpec{command: exe, args: []string{"-test.run=^TestDrainChild$", "--", "546-drain-leader", pids, ready}, timeout: 10 * time.Second, outputCap: 4096, waitDelay: 100 * time.Millisecond}
+				if !held {
+					spec.command = script(t, fmt.Sprintf("echo $$ 0 > %q; touch %q; exec sleep 30", pids, ready))
+					spec.args = nil
+				}
+				type result struct {
+					out runOutcome
+					err error
+				}
+				done := make(chan result, 1)
+				go func() {
+					if mode == "checked-caller" {
+						out, err := checkedRun(ctx, spec)
+						done <- result{out, err}
+						return
+					}
+					out, err := run(ctx, spec)
+					done <- result{out, err}
+				}()
+				deadline := time.Now().Add(5 * time.Second)
+				leader, holder := 0, 0
+				for time.Now().Before(deadline) {
+					raw, _ := os.ReadFile(pids)
+					_, _ = fmt.Sscanf(string(raw), "%d %d", &leader, &holder)
+					if leader > 0 && (!held || holder > 0) {
+						if _, err := os.Stat(ready); err == nil {
+							break
+						}
+					}
+					time.Sleep(5 * time.Millisecond)
+				}
+				if _, err := os.Stat(ready); err != nil || leader <= 0 || (held && holder <= 0) {
+					cancel()
+					<-done
+					t.Fatal("pipe-holder readiness failed")
+				}
+				if mode != "signal" {
+					cancel()
+				} else if err := killGroup(leader); err != nil {
+					cancel()
+					<-done
+					t.Fatal(err)
+				}
+				got := <-done
+				if mode == "checked-caller" {
+					var ce *Error
+					if !errors.As(got.err, &ce) || ce.Code != "canceled" || ce.Reason != "caller" || got.out.Stdout != nil || got.out.WaitStatus != "" {
+						t.Fatalf("checkedRun(cancel, held=%t) = %+v, %v; want zero outcome and canceled/caller", held, got.out, got.err)
+					}
+					return
+				}
+				wait := "exit"
+				if held {
+					wait = "wait-delay"
+				}
+				if got.err != nil || got.out.WaitStatus != "signaled(SIGKILL)" || got.out.WaitErrorKind != wait || got.out.Canceled != (mode == "caller") || got.out.TimedOut || !got.out.GroupCleanupOK || !got.out.CleanupOK {
+					t.Fatalf("run(interrupted, held=%t, mode=%s) = %+v, %v; want SIGKILL, %s and clean group/root", held, mode, got.out, got.err, wait)
+				}
+			})
+		}
+	}
+}

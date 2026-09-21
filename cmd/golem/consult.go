@@ -124,8 +124,12 @@ func handleConsult(ctx context.Context, out io.Writer, sess *replSession, line s
 		}
 		return
 	}
+	tool := r.Adapter + " " + r.Version
+	if r.Evidence.CodexTransport == "app-server" {
+		tool = r.Adapter + " app-server " + r.Version
+	}
 	adv, err := sess.orch.InspectAdvisory(runCtx, agent.Advisory{
-		Source: r.Consultant, Tool: r.Adapter + " " + r.Version, Model: r.Model,
+		Source: r.Consultant, Tool: tool, Model: r.Model,
 		Digest: r.ContentSHA256, Content: r.Answer, Origin: agent.OriginModel,
 	})
 	if err != nil {

@@ -1,6 +1,6 @@
 // Package consult runs one external subscription CLI for a single-shot
-// advisory judgment (#382). It owns the bounded host runner, the Claude
-// adapter and the unsigned receipt. It is not a provider, a Router member
+// advisory judgment (#382). It owns the bounded host runner, subscription CLI
+// adapters and the unsigned receipt. It is not a provider, a Router member
 // or a tool; consultant commands come only from local config.
 package consult
 
@@ -22,7 +22,13 @@ var ErrDisabled = errors.New("consult: no consultants configured")
 // Consultant is one explicitly trusted local consultant declaration.
 type Consultant struct {
 	Name    string `json:"name"`
-	Adapter string `json:"adapter"` // only "claude" in v1
+	Adapter string `json:"adapter"` // "claude" or "codex"
+	// Transport is "exec" (also the empty default) or Codex-only "app-server".
+	// Remove this field entirely when rolling back to an exec-only binary.
+	Transport string `json:"transport,omitempty"`
+	// DisabledMCPServers names native MCP servers to disable for Codex app-server.
+	// At most 32 unique names, each 1–64 ASCII letters, digits, underscores or hyphens.
+	DisabledMCPServers []string `json:"disabled_mcp_servers,omitempty"`
 	// Command is the absolute path of a regular file (never a symlink) that
 	// is executed as-is; the adapter owns argv.
 	Command string `json:"command"`
@@ -33,6 +39,9 @@ type Consultant struct {
 	TimeoutSeconds       int    `json:"timeout_seconds,omitempty"`  // 0 => 120, max 300
 	MaxOutputBytes       int    `json:"max_output_bytes,omitempty"` // 0 => 1 MiB, max 1 MiB
 	TrustedProcessEgress bool   `json:"trusted_process_egress"`     // must be true: vendor traffic bypasses #477
+	// TrustedVendorRuntime acknowledges native configuration and host-resource
+	// access. Required for Codex; false by default and unused for Claude.
+	TrustedVendorRuntime bool `json:"trusted_vendor_runtime,omitempty"`
 }
 
 // Config is the on-disk shape of consultants.json.
@@ -45,6 +54,7 @@ const (
 	defaultTimeoutSeconds = 120
 	maxTimeoutSeconds     = 300
 	maxOutputBytes        = 1 << 20
+	maxDisabledMCPServers = 32
 	// maxConfigBytes bounds the consultants file itself. It names the
 	// executable to run, so it is read under the same discipline as that
 	// executable: bounded, regular, and the same file when opened as when
@@ -54,6 +64,7 @@ const (
 
 var nameRE = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,31}$`)
 var shaRE = regexp.MustCompile(`^[0-9a-f]{64}$`)
+var mcpServerNameRE = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
 
 // DefaultPath is go-llm/consultants.json under os.UserConfigDir
 // ($XDG_CONFIG_HOME on Linux, ~/Library/Application Support on macOS).
@@ -176,20 +187,27 @@ func validate(c *Consultant) error {
 	switch {
 	case !nameRE.MatchString(c.Name):
 		return errors.New("name must match ^[a-z0-9][a-z0-9-]{0,31}$")
-	case c.Adapter != claudeAdapter:
+	case c.Adapter != claudeAdapter && c.Adapter != codexAdapter:
 		return fmt.Errorf("unsupported adapter %q", c.Adapter)
+	case !supportedTransport(c.Adapter, c.Transport):
+		return fmt.Errorf("unsupported transport %q for adapter %s", c.Transport, c.Adapter)
+	case !validDisabledMCPServers(c.Adapter, c.Transport, c.DisabledMCPServers):
+		return errors.New("disabled_mcp_servers requires Codex app-server and at most 32 unique names matching ^[A-Za-z0-9_-]{1,64}$")
 	case !filepath.IsAbs(c.Command):
 		return errors.New("command must be an absolute path")
 	case c.SHA256 != "" && !shaRE.MatchString(c.SHA256):
 		return errors.New("sha256 must be 64 lowercase hex characters")
-	case !claudeModels[c.Model]:
-		return fmt.Errorf("unsupported model %q for adapter claude", c.Model)
+	case !supportedModel(c.Adapter, c.Model):
+		return fmt.Errorf("unsupported model %q for adapter %s", c.Model, c.Adapter)
 	case c.TimeoutSeconds < 0 || c.TimeoutSeconds > maxTimeoutSeconds:
 		return fmt.Errorf("timeout_seconds must be 0..%d", maxTimeoutSeconds)
 	case c.MaxOutputBytes < 0 || c.MaxOutputBytes > maxOutputBytes:
 		return fmt.Errorf("max_output_bytes must be 0..%d", maxOutputBytes)
 	case !c.TrustedProcessEgress:
 		return errors.New("trusted_process_egress must be true: consultant traffic is not filtered by go-llm")
+	}
+	if c.Adapter == codexAdapter && !c.TrustedVendorRuntime {
+		return errors.New("trusted_vendor_runtime must be true: Codex native configuration and host access are trusted")
 	}
 	if _, err := validateCommand(c.Command); err != nil {
 		return err
@@ -231,4 +249,38 @@ func validateCommand(path string) (os.FileInfo, error) {
 		return nil, err
 	}
 	return info, nil
+}
+
+func supportedTransport(adapter, transport string) bool {
+	return (adapter == claudeAdapter || adapter == codexAdapter) &&
+		(transport == "" || transport == "exec" || adapter == codexAdapter && transport == "app-server")
+}
+
+func validDisabledMCPServers(adapter, transport string, names []string) bool {
+	if len(names) == 0 {
+		return true
+	}
+	if len(names) > maxDisabledMCPServers || adapter != codexAdapter || transport != "app-server" {
+		return false
+	}
+	seen := make(map[string]bool, len(names))
+	for _, name := range names {
+		if !mcpServerNameRE.MatchString(name) || seen[name] {
+			return false
+		}
+		seen[name] = true
+	}
+	return true
+}
+
+// supportedModel keeps configuration and direct Run calls on the same catalog.
+func supportedModel(adapter, model string) bool {
+	switch adapter {
+	case claudeAdapter:
+		return claudeModels[model]
+	case codexAdapter:
+		return codexModels[model]
+	default:
+		return false
+	}
 }
