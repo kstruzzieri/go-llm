@@ -41,11 +41,18 @@ func newRenderer(out io.Writer, color bool, maxSteps int, now func() time.Time, 
 		now = time.Now
 	}
 	start := now()
-	terminal := false
-	if file, ok := out.(*os.File); ok {
-		terminal = realTermOps{}.IsTerminal(int(file.Fd()))
+	return &renderer{markdown: newMarkdownWriter(out, color), color: color, terminal: isTerminalOutput(out), maxSteps: maxSteps, now: now, lastMark: start, runStart: start, mixed: mixed}
+}
+
+func isTerminalOutput(out io.Writer) bool {
+	switch w := out.(type) {
+	case *os.File:
+		return realTermOps{}.IsTerminal(int(w.Fd()))
+	case *synchronizedWriter:
+		return w.terminal
+	default:
+		return false
 	}
-	return &renderer{markdown: newMarkdownWriter(out, color), color: color, terminal: terminal, maxSteps: maxSteps, now: now, lastMark: start, runStart: start, mixed: mixed}
 }
 
 func (r *renderer) OnToken(_ context.Context, e agent.TokenEvent) error {
@@ -122,6 +129,9 @@ func (r *renderer) finalFooter(res agent.Result, elapsed time.Duration) {
 func (r *renderer) writeDim(line string) error {
 	if err := r.breakLine(); err != nil {
 		return err
+	}
+	if r.terminal {
+		line = sanitizeApprovalPreview(line)
 	}
 	return r.writeRaw(r.dim(line) + "\n")
 }
@@ -212,7 +222,11 @@ func (r *renderer) OnToolResult(_ context.Context, e agent.ToolResultEvent) erro
 	if err := r.breakLine(); err != nil {
 		return err
 	}
-	return r.writeRaw("< " + r.resultSummary(e) + "\n")
+	line := "< " + r.resultSummary(e) + "\n"
+	if r.terminal {
+		line = sanitizeApprovalPreview(line)
+	}
+	return r.writeRaw(line)
 }
 
 // OnPressure prints a single dim context-pressure warning per run when warnings

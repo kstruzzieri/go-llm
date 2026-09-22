@@ -37,6 +37,21 @@ func TestRendererDetectsTTYWithColorDisabled(t *testing.T) {
 	}
 }
 
+func TestRendererSynchronizedTerminalQuotesModelOutput(t *testing.T) {
+	var out bytes.Buffer
+	wrapped := &synchronizedWriter{out: &out, terminal: true}
+	r := newRenderer(wrapped, false, 4, nil, false)
+	if err := r.OnToken(context.Background(), agent.TokenEvent{Content: "worker\x1b]52;c;YQ==\a"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.finish(); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := out.String(), `worker\x1b]52;c;YQ==\a`; got != want {
+		t.Fatalf("wrapped terminal output = %q, want %q", got, want)
+	}
+}
+
 func TestRendererTerminalToolCallQuotesControls(t *testing.T) {
 	var out bytes.Buffer
 	r := newRenderer(&out, false, 4, nil, false)
@@ -53,6 +68,36 @@ func TestRendererTerminalToolCallQuotesControls(t *testing.T) {
 	want := "\n> read\\x1b[1D_file {\"path\":\"x\\x1b]8;;https://spoof\\a\"}\n"
 	if got := out.String(); got != want {
 		t.Fatalf("terminal tool call = %q, want %q", got, want)
+	}
+}
+
+func TestRendererTerminalToolResultQuotesPreviewControls(t *testing.T) {
+	var out bytes.Buffer
+	r := newRenderer(&out, false, 4, nil, false)
+	r.terminal = true
+	err := r.OnToolResult(context.Background(), agent.ToolResultEvent{
+		Result: agent.ToolResult{Preview: "saved \x1b]52;c;YQ==\a"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := out.String(), "< saved \\x1b]52;c;YQ==\\a\n"; got != want {
+		t.Fatalf("terminal tool result = %q, want %q", got, want)
+	}
+}
+
+func TestRendererTerminalStepQuotesModelNameControls(t *testing.T) {
+	var out bytes.Buffer
+	r := newRenderer(&out, false, 4, nil, false)
+	r.terminal = true
+	err := r.OnStep(context.Background(), agent.StepEvent{
+		RouteOutcome: &provider.RouteOutcome{ActualModel: provider.ModelKey{Provider: "local", Model: "name\x1b[2J"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := out.String(), "local/name\\x1b[2J · 0.0s · ctx 0% · step 1/4\n"; got != want {
+		t.Fatalf("terminal step footer = %q, want %q", got, want)
 	}
 }
 
@@ -190,7 +235,10 @@ func TestRendererNonTerminalPreservesForeignBytes(t *testing.T) {
 	}}}); err != nil {
 		t.Fatal(err)
 	}
-	want := "A🙂\x1b]52;c;YQ==\a\xf0\n[thinking]\n\r\b\u009b\n> read \x1b[2J\n"
+	if err := r.OnToolResult(ctx, agent.ToolResultEvent{Result: agent.ToolResult{Preview: "saved \x1b]52;c;YQ==\a"}}); err != nil {
+		t.Fatal(err)
+	}
+	want := "A🙂\x1b]52;c;YQ==\a\xf0\n[thinking]\n\r\b\u009b\n> read \x1b[2J\n< saved \x1b]52;c;YQ==\a\n"
 	if got := out.String(); got != want {
 		t.Fatalf("non-terminal output = %q, want %q", got, want)
 	}

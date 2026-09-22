@@ -127,11 +127,11 @@ if ! grep -Eq '^--- PASS: TestHardeningContracts \([0-9.]+s\)$' <<<"$security_ou
   printf 'required security test did not pass: TestHardeningContracts (top-level and Active group must PASS)\n' >&2
   exit 1
 fi
-# Only the declared deferred boundary groups may skip. Captured into a
+# Only the declared boundary groups may skip. Captured into a
 # variable rather than piped into `grep -q`: an early-exiting downstream grep
 # would SIGPIPE the upstream one and invert the condition under pipefail.
 unexpected_skips="$(grep -E '^ +--- SKIP: ' <<<"$security_output" \
-  | grep -Ev '^    --- SKIP: TestHardeningContracts/ZT-60[2-6]_#43[1-5]_' || true)"
+  | grep -Ev '^    --- SKIP: TestHardeningContracts/(ZT-602_#431_project_trust|ZT-603_#432_MCP_description_catalog_trust|ZT-605_#434_quarantine|ZT-606_#435_retrieval_screening) \([0-9.]+s\)$' || true)"
 if [ -n "$unexpected_skips" ]; then
   printf 'unexpected skip inside TestHardeningContracts:\n%s\n' "$unexpected_skips" >&2
   exit 1
