@@ -68,10 +68,6 @@ type markdownWriter struct {
 	lastNL       bool
 }
 
-type markdownRawWriter struct{ markdown *markdownWriter }
-
-func (w markdownRawWriter) Write(p []byte) (int, error) { return w.markdown.WriteRaw(p) }
-
 func newMarkdownWriter(out io.Writer, enabled bool) *markdownWriter {
 	return &markdownWriter{out: out, on: enabled, line: markdownPrefix, lastNL: true}
 }
@@ -109,11 +105,7 @@ func (w *markdownWriter) WriteStyled(style string, p []byte) (int, error) {
 	data := append(w.styled, p...)
 	w.styled = nil
 	w.styledStyle = style
-	complete := 0
-	for complete < len(data) && utf8.FullRune(data[complete:]) {
-		_, size := utf8.DecodeRune(data[complete:])
-		complete += size
-	}
+	complete := completeRunes(data)
 	// Retain the incomplete tail before emitting so an emit error cannot drop it.
 	if complete < len(data) {
 		w.styled = append([]byte(nil), data[complete:]...)
@@ -127,6 +119,18 @@ func (w *markdownWriter) WriteStyled(style string, p []byte) (int, error) {
 		return len(p), err
 	}
 	return len(p), nil
+}
+
+// completeRunes returns the length of data's prefix that ends on a rune
+// boundary. Only a tail that could still become a valid rune is excluded;
+// invalid bytes count as complete, one byte each.
+func completeRunes(data []byte) int {
+	complete := 0
+	for complete < len(data) && utf8.FullRune(data[complete:]) {
+		_, size := utf8.DecodeRune(data[complete:])
+		complete += size
+	}
+	return complete
 }
 
 func (w *markdownWriter) writeByte(b byte) error {
