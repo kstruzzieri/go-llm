@@ -53,8 +53,9 @@ type parallelCoordinator struct {
 }
 
 type synchronizedWriter struct {
-	mu  sync.Mutex
-	out io.Writer
+	mu       sync.Mutex
+	out      io.Writer
+	terminal bool
 }
 
 func (w *synchronizedWriter) Write(p []byte) (int, error) {
