@@ -34,15 +34,68 @@ func TestMutationConditionalPreservesCheckedMode(t *testing.T) {
 			if checkMode {
 				expected.Mode = 0600
 			}
+			changedAfterCheck := false
+			ws.beforeMutation = func(at mutationPhase, _ string) error {
+				if at == mutationBeforeChmod {
+					// Conditional writes preserve the checked mode, not a later change.
+					changedAfterCheck = true
+					return os.Chmod(path, 0644)
+				}
+				return nil
+			}
 			mutationMust(t, ws.WriteFileAtomicIfMatch("file", []byte("APPROVED\n"), expected))
 			info, err := os.Stat(path)
 			mutationMust(t, err)
-			if !reached || info.Mode().Perm() != 0600 {
-				t.Fatalf("restored stale permissions: reached=%v mode=%v", reached, info.Mode())
+			if !reached || !changedAfterCheck || info.Mode().Perm() != 0600 {
+				t.Fatalf("restored stale permissions: reached=%v changedAfterCheck=%v mode=%v", reached, changedAfterCheck, info.Mode())
 			}
 			mutationBytes(t, path, "APPROVED\n")
 			mutationNoTemps(t, root)
 		})
+	}
+}
+
+func TestMutationUnconditionalPreservesCurrentMode(t *testing.T) {
+	for _, phase := range []string{"guard", "before-chmod"} {
+		for _, mode := range []fs.FileMode{0600, 0000} {
+			t.Run(phase+"/"+mode.String(), func(t *testing.T) {
+				root := t.TempDir()
+				path := filepath.Join(root, "file")
+				mutationMust(t, os.WriteFile(path, []byte("ORIGINAL\n"), 0644))
+				mutationMust(t, os.Chmod(path, 0644))
+				ws, err := NewWorkspace(root)
+				mutationMust(t, err)
+				reached := false
+				changeMode := func() error {
+					reached = true
+					return os.Chmod(path, mode)
+				}
+				ws.SetScopeGuard(func(_ string, write bool) error {
+					if !write {
+						return fs.ErrPermission // unconditional writes must not require read policy
+					}
+					if phase == "guard" {
+						return changeMode()
+					}
+					return nil
+				})
+				ws.beforeMutation = func(at mutationPhase, _ string) error {
+					if phase == "before-chmod" && at == mutationBeforeChmod {
+						return changeMode()
+					}
+					return nil
+				}
+				mutationMust(t, ws.WriteFileAtomic("file", []byte("APPROVED\n")))
+				info, err := os.Stat(path)
+				mutationMust(t, err)
+				if !reached || info.Mode().Perm() != mode {
+					t.Fatalf("WriteFileAtomic restored stale permissions: reached=%v mode=%v, want %v", reached, info.Mode(), mode)
+				}
+				mutationMust(t, os.Chmod(path, 0600))
+				mutationBytes(t, path, "APPROVED\n")
+				mutationNoTemps(t, root)
+			})
+		}
 	}
 }
 

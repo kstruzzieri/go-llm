@@ -42,6 +42,9 @@ func TestMutationLeafBoundaries(t *testing.T) {
 					reached := false
 					ws.beforeMutation = func(at mutationPhase, _ string) error {
 						wanted := mutationAfterCheck
+						if !remove {
+							wanted = mutationAfterTemp
+						}
 						if late {
 							wanted = mutationBeforeRename
 							if remove {

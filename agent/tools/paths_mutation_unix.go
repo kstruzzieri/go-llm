@@ -223,6 +223,9 @@ func (target *mutationTarget) recheck(conditional bool) error {
 	if !sameMutationEntry(&target.stat, &st) {
 		return errFileChanged
 	}
+	if !conditional {
+		target.mode = fs.FileMode(st.Mode & 0777)
+	}
 	return nil
 }
 
@@ -325,6 +328,12 @@ func (w *Workspace) mutateFile(p string, content []byte, expected *FilePrecondit
 	}
 	mode := fs.FileMode(0600)
 	if target.exists {
+		// Conditional writes keep the mode captured with their verified hash.
+		if expected == nil {
+			if err := target.recheck(false); err != nil {
+				return err
+			}
+		}
 		mode = target.mode
 	}
 	// Linux O_PATH is lookup-only (fchmod/fsync return EBADF); use the writable
