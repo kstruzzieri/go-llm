@@ -131,7 +131,7 @@ fi
 # variable rather than piped into `grep -q`: an early-exiting downstream grep
 # would SIGPIPE the upstream one and invert the condition under pipefail.
 unexpected_skips="$(grep -E '^ +--- SKIP: ' <<<"$security_output" \
-  | grep -Ev '^    --- SKIP: TestHardeningContracts/(ZT-602_#431_project_trust|ZT-603_#432_MCP_description_catalog_trust|ZT-605_#434_quarantine|ZT-606_#435_retrieval_screening) \([0-9.]+s\)$' || true)"
+  | grep -Ev '^    --- SKIP: TestHardeningContracts/(ZT-602_#431_project_trust|ZT-605_#434_quarantine|ZT-606_#435_retrieval_screening) \([0-9.]+s\)$' || true)"
 if [ -n "$unexpected_skips" ]; then
   printf 'unexpected skip inside TestHardeningContracts:\n%s\n' "$unexpected_skips" >&2
   exit 1

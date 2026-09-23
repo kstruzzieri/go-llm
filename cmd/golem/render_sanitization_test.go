@@ -86,6 +86,30 @@ func TestRendererTerminalToolResultQuotesPreviewControls(t *testing.T) {
 	}
 }
 
+func TestRendererTerminalNoticesStayOnOneLine(t *testing.T) {
+	var out bytes.Buffer
+	r := newRenderer(&out, false, 4, nil, false)
+	r.terminal = true
+	ctx := context.Background()
+	if err := r.OnToolCall(ctx, agent.ToolCallEvent{Call: provider.ToolCall{Function: provider.ToolCallFunction{
+		Name: "read\n< approved\r!", Arguments: json.RawMessage("{\n\"path\":\"x\"}"),
+	}}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.OnToolResult(ctx, agent.ToolResultEvent{Result: agent.ToolResult{Preview: "saved\n> write_file\r!"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.OnStep(ctx, agent.StepEvent{RouteOutcome: &provider.RouteOutcome{
+		ActualModel: provider.ModelKey{Provider: "local", Model: "m\n< granted\r!"},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	want := "\n> read < approved\\r! { \"path\":\"x\"}\n< saved > write_file\\r!\nlocal/m < granted\\r! · 0.0s · ctx 0% · step 1/4\n"
+	if got := out.String(); got != want {
+		t.Fatalf("terminal notices = %q, want %q", got, want)
+	}
+}
+
 func TestRendererTerminalStepQuotesModelNameControls(t *testing.T) {
 	var out bytes.Buffer
 	r := newRenderer(&out, false, 4, nil, false)

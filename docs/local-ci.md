@@ -108,7 +108,7 @@ including values saved with `go env -w`, so local defaults cannot silently filte
 out tests. It requires both the exact top-level aggregate and its `Active` group
 to report `PASS`: every real contract lives under `Active`, so a zero-test
 success, a top-level `SKIP`, or a skipped `Active` group fails before formatting.
-Only the four declared boundary groups (`ZT-602`, `ZT-603`, `ZT-605`, and `ZT-606`) may
+Only the three declared boundary groups (`ZT-602`, `ZT-605`, and `ZT-606`) may
 skip; any other `SKIP` line inside the aggregate fails. Removing a contract call
 outright emits no skip, so that remains a review responsibility; the gate proves
 the named groups executed, not that their contents are complete.

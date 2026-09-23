@@ -10,6 +10,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/kstruzzieri/go-llm/agent"
+	"github.com/kstruzzieri/go-llm/internal/promptfence"
 )
 
 // renderer is an append-only agent.Observer for a terminal. It streams tokens,
@@ -68,15 +69,14 @@ func (r *renderer) OnToken(_ context.Context, e agent.TokenEvent) error {
 func (r *renderer) OnToolCall(_ context.Context, e agent.ToolCallEvent) error {
 	// Some tools take no arguments; omit the trailing space when args are empty
 	// so the line reads "> name" rather than "> name ".
-	line := "\n> " + e.Call.Function.Name
+	notice := e.Call.Function.Name
 	if args := string(e.Call.Function.Arguments); args != "" {
-		line += " " + args
+		notice += " " + args
 	}
-	line += "\n"
 	if r.terminal {
-		line = sanitizeApprovalPreview(line)
+		notice = promptfence.FlattenLine(sanitizeApprovalPreview(notice))
 	}
-	return r.writeRaw(line)
+	return r.writeRaw("\n> " + notice + "\n")
 }
 
 // OnThinking streams reasoning deltas dim, under a one-per-step "[thinking]"
@@ -131,7 +131,7 @@ func (r *renderer) writeDim(line string) error {
 		return err
 	}
 	if r.terminal {
-		line = sanitizeApprovalPreview(line)
+		line = promptfence.FlattenLine(sanitizeApprovalPreview(line))
 	}
 	return r.writeRaw(r.dim(line) + "\n")
 }
@@ -222,11 +222,11 @@ func (r *renderer) OnToolResult(_ context.Context, e agent.ToolResultEvent) erro
 	if err := r.breakLine(); err != nil {
 		return err
 	}
-	line := "< " + r.resultSummary(e) + "\n"
+	notice := r.resultSummary(e)
 	if r.terminal {
-		line = sanitizeApprovalPreview(line)
+		notice = promptfence.FlattenLine(sanitizeApprovalPreview(notice))
 	}
-	return r.writeRaw(line)
+	return r.writeRaw("< " + notice + "\n")
 }
 
 // OnPressure prints a single dim context-pressure warning per run when warnings
