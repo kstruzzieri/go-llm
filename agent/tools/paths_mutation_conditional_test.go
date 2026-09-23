@@ -13,6 +13,83 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+func TestMutationConditionalPreservesCheckedMode(t *testing.T) {
+	for _, checkMode := range []bool{false, true} {
+		t.Run(map[bool]string{false: "hash-only", true: "hash-and-mode"}[checkMode], func(t *testing.T) {
+			root := t.TempDir()
+			path := filepath.Join(root, "file")
+			mutationMust(t, os.WriteFile(path, []byte("ORIGINAL\n"), 0644))
+			mutationMust(t, os.Chmod(path, 0644))
+			ws, err := NewWorkspace(root)
+			mutationMust(t, err)
+			reached := false
+			ws.SetScopeGuard(func(_ string, write bool) error {
+				if write {
+					reached = true
+					return os.Chmod(path, 0600)
+				}
+				return nil
+			})
+			expected := FilePrecondition{Exists: true, Hash: ContentHash([]byte("ORIGINAL\n")), CheckMode: checkMode}
+			if checkMode {
+				expected.Mode = 0600
+			}
+			mutationMust(t, ws.WriteFileAtomicIfMatch("file", []byte("APPROVED\n"), expected))
+			info, err := os.Stat(path)
+			mutationMust(t, err)
+			if !reached || info.Mode().Perm() != 0600 {
+				t.Fatalf("restored stale permissions: reached=%v mode=%v", reached, info.Mode())
+			}
+			mutationBytes(t, path, "APPROVED\n")
+			mutationNoTemps(t, root)
+		})
+	}
+}
+
+func TestMutationConditionalMissingLeaf(t *testing.T) {
+	for _, remove := range []bool{false, true} {
+		for _, phase := range []mutationPhase{mutationBeforeCheck, mutationAfterCheck, mutationBeforeRemove} {
+			if !remove && phase == mutationBeforeRemove {
+				continue
+			}
+			t.Run(map[bool]string{false: "write", true: "remove"}[remove]+"/"+string(phase), func(t *testing.T) {
+				root := t.TempDir()
+				path := filepath.Join(root, "file")
+				mutationMust(t, os.WriteFile(path, []byte("ORIGINAL\n"), 0600))
+				ws, err := NewWorkspace(root)
+				mutationMust(t, err)
+				reached := false
+				cleanupErr := errors.New("cleanup blocked")
+				ws.beforeMutation = func(at mutationPhase, _ string) error {
+					if at == phase {
+						reached = true
+						mutationMust(t, os.Remove(path))
+					}
+					if at == mutationBeforeCleanup {
+						return cleanupErr
+					}
+					return nil
+				}
+				expected := FilePrecondition{Exists: true, Hash: ContentHash([]byte("ORIGINAL\n"))}
+				if remove {
+					err = ws.RemoveFileIfMatch("file", expected)
+				} else {
+					err = ws.WriteFileAtomicIfMatch("file", []byte("APPROVED\n"), expected)
+				}
+				if !reached || !errors.Is(err, ErrPreconditionMismatch) {
+					t.Fatalf("missing leaf not classified as mismatch: reached=%v err=%v", reached, err)
+				}
+				if !remove && phase == mutationAfterCheck && !errors.Is(err, cleanupErr) {
+					t.Fatalf("lost independent cleanup failure: %v", err)
+				}
+				if _, err := os.Lstat(path); !errors.Is(err, fs.ErrNotExist) {
+					t.Fatalf("missing target recreated: %v", err)
+				}
+			})
+		}
+	}
+}
+
 func TestMutationConditionalCapability(t *testing.T) {
 	for _, op := range []string{"create", "overwrite", "remove"} {
 		for _, victim := range []string{"outside", "denied"} {

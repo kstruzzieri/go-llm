@@ -23,6 +23,7 @@ type mutationTarget struct {
 	name    string
 	logical string
 	stat    unix.Stat_t
+	mode    fs.FileMode
 	exists  bool
 }
 
@@ -107,7 +108,7 @@ func (w *Workspace) openMutationTarget(p string) (target *mutationTarget, result
 			if err := regularMutationEntry(&st); err != nil {
 				return nil, err
 			}
-			return &mutationTarget{parent: parent, release: release, name: name, logical: logical, stat: st, exists: true}, nil
+			return &mutationTarget{parent: parent, release: release, name: name, logical: logical, stat: st, mode: fs.FileMode(st.Mode & 0777), exists: true}, nil
 		}
 		if st.Mode&unix.S_IFMT == unix.S_IFLNK {
 			return nil, errSymlink
@@ -176,6 +177,9 @@ func (w *Workspace) checkMutation(target *mutationTarget, expected *FilePrecondi
 	}
 	entry := workspaceEntry{name: target.name, stat: target.stat, dir: target.parent}
 	file, err := entry.openRegular()
+	if errors.Is(err, fs.ErrNotExist) {
+		return ErrPreconditionMismatch
+	}
 	if err != nil {
 		return err
 	}
@@ -191,6 +195,7 @@ func (w *Workspace) checkMutation(target *mutationTarget, expected *FilePrecondi
 	if hex.EncodeToString(hash.Sum(nil)) != expected.Hash || expected.CheckMode && info.Mode() != expected.Mode {
 		return ErrPreconditionMismatch
 	}
+	target.mode = info.Mode().Perm()
 	return nil
 }
 
@@ -199,6 +204,9 @@ func (target *mutationTarget) recheck(conditional bool) error {
 	err := unix.Fstatat(int(target.parent.Fd()), target.name, &st, unix.AT_SYMLINK_NOFOLLOW)
 	if !target.exists && errors.Is(err, fs.ErrNotExist) {
 		return nil
+	}
+	if conditional && errors.Is(err, fs.ErrNotExist) {
+		return ErrPreconditionMismatch
 	}
 	if err != nil {
 		return err
@@ -245,7 +253,11 @@ func (w *Workspace) mutateFile(p string, content []byte, expected *FilePrecondit
 		if err := w.mutationStep(mutationBeforeRemove, ""); err != nil {
 			return err
 		}
-		return unix.Unlinkat(fd, target.name, 0) // never remove a late directory
+		err := unix.Unlinkat(fd, target.name, 0) // never remove a late directory
+		if expected != nil && errors.Is(err, fs.ErrNotExist) {
+			return ErrPreconditionMismatch
+		}
+		return err
 	}
 	if err := w.mutationStep(mutationBeforeTemp, ""); err != nil {
 		return err
@@ -313,7 +325,7 @@ func (w *Workspace) mutateFile(p string, content []byte, expected *FilePrecondit
 	}
 	mode := fs.FileMode(0600)
 	if target.exists {
-		mode = fs.FileMode(target.stat.Mode & 0777)
+		mode = target.mode
 	}
 	// Linux O_PATH is lookup-only (fchmod/fsync return EBADF); use the writable
 	// temp descriptor, not the pinned parent. No parent durability promise.
