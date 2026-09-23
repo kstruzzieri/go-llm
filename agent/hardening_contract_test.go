@@ -40,11 +40,12 @@ func TestHardeningContracts(t *testing.T) {
 	})
 	for _, boundary := range []string{
 		"ZT-602_#431_project_trust",
-		"ZT-604_#433_terminal_output", "ZT-605_#434_quarantine",
+		"ZT-605_#434_quarantine",
 		"ZT-606_#435_retrieval_screening",
 	} {
 		t.Run(boundary, func(t *testing.T) { t.Skip("deferred boundary coverage; tracked separately") })
 	}
+	// #433's CLI presentation boundary is covered by cmd/golem/render_sanitization_test.go.
 	elapsed := time.Since(started)
 	t.Logf("hardening contracts elapsed: %s", elapsed)
 	if elapsed >= 500*time.Millisecond {

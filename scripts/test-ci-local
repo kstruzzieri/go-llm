@@ -198,7 +198,7 @@ diff -u "$tmp/expected-full" "$tmp/poisoned-goroot.log"
 caller_goroot=''
 
 # A successful process must also report the exact top-level test and its
-# Active group passing; only the declared deferred boundaries may skip.
+# Active group passing; only the declared boundary names may skip.
 pass_message='required security test did not pass: TestHardeningContracts (top-level and Active group must PASS)'
 skip_message='unexpected skip inside TestHardeningContracts:'
 for mode in security pre-push full; do
@@ -221,9 +221,11 @@ for mode in security pre-push full; do
   done
   # A skip anywhere under Active, or an undeclared boundary skip, fails even
   # though both required PASS lines are present.
-  for outcome in inner-skip undeclared-boundary; do
+  for outcome in inner-skip completed-432 completed-433 undeclared-boundary; do
     case "$outcome" in
       inner-skip) skip_line='        --- SKIP: TestHardeningContracts/Active/Secrets (0.00s)' ;;
+      completed-432) skip_line='    --- SKIP: TestHardeningContracts/ZT-603_#432_MCP_description_catalog_trust (0.00s)' ;;
+      completed-433) skip_line='    --- SKIP: TestHardeningContracts/ZT-604_#433_terminal_output (0.00s)' ;;
       undeclared-boundary) skip_line='    --- SKIP: TestHardeningContracts/ZT-999_#999_new (0.00s)' ;;
     esac
     security_output="$passing_output
@@ -237,8 +239,6 @@ $skip_line"
   security_output='--- PASS: TestHardeningContracts (0.01s)
     --- PASS: TestHardeningContracts/Active (0.01s)
     --- SKIP: TestHardeningContracts/ZT-602_#431_project_trust (0.00s)
-    --- SKIP: TestHardeningContracts/ZT-603_#432_MCP_description_catalog_trust (0.00s)
-    --- SKIP: TestHardeningContracts/ZT-604_#433_terminal_output (0.00s)
     --- SKIP: TestHardeningContracts/ZT-605_#434_quarantine (0.00s)
     --- SKIP: TestHardeningContracts/ZT-606_#435_retrieval_screening (0.00s)'
   run_ci "deferred-$mode" --mode "$mode"
