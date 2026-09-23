@@ -3,6 +3,7 @@ package tools
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io/fs"
 )
 
@@ -40,7 +41,22 @@ func toolErrMessage(err error) string {
 // exposes an error through Plan or ToolResult. Other diagnostics are unchanged.
 func toolVisibleError(err error) error {
 	if errors.Is(err, errScopeDenied) {
+		// Sanitize each joined cause, retaining independent cleanup/journal failures.
+		if joined, ok := err.(interface{ Unwrap() []error }); ok {
+			causes := joined.Unwrap()
+			safe := make([]error, len(causes))
+			for i, cause := range causes {
+				safe[i] = toolVisibleError(cause)
+			}
+			return errors.Join(safe...)
+		}
+		if cause := errors.Unwrap(err); cause != nil && errors.Is(cause, errScopeDenied) {
+			return toolVisibleError(cause)
+		}
 		return errScopeDenied
+	}
+	if errors.Is(err, ErrPreconditionMismatch) {
+		return fmt.Errorf("file changed since preview; retry: %w", err)
 	}
 	return err
 }
