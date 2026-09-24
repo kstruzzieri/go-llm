@@ -337,6 +337,9 @@ func TestMutationAbsentNoReplace(t *testing.T) {
 				if !reached || !errors.Is(err, want) {
 					t.Fatalf("reached=%v err=%v want=%v", reached, err, want)
 				}
+				if unsupported != nil && !strings.Contains(err.Error(), "filesystem does not support atomic no-replace create") {
+					t.Fatalf("unsupported no-replace hides its cause: %v", err)
+				}
 				switch kind {
 				case "regular":
 					mutationBytes(t, path, "CONCURRENT\n")

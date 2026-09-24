@@ -7,7 +7,8 @@ import (
 )
 
 // ErrPreconditionMismatch reports that an inspected file no longer matches the
-// expected existence, content hash, or checked mode. Inspection/cleanup errors
+// expected existence, content hash, or checked mode, including when another
+// regular file replaced it (an editor's rename-over). Inspection/cleanup errors
 // retain their own identity; callers must not discard joined errors.
 var ErrPreconditionMismatch = errors.New("file precondition mismatch")
 

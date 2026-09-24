@@ -3,6 +3,8 @@
 package tools
 
 import (
+	"context"
+	"encoding/json"
 	"errors"
 	"io/fs"
 	"os"
@@ -138,6 +140,58 @@ func TestMutationConditionalMissingLeaf(t *testing.T) {
 				if _, err := os.Lstat(path); !errors.Is(err, fs.ErrNotExist) {
 					t.Fatalf("missing target recreated: %v", err)
 				}
+			})
+		}
+	}
+}
+
+// An editor's rename-over of the checked file is a precondition mismatch at
+// both the content check and the final recheck, so write_file tells the model
+// to retry instead of reporting an identity error.
+func TestMutationConditionalReplacedLeaf(t *testing.T) {
+	for _, op := range []string{"write", "remove", "tool"} {
+		for _, phase := range []mutationPhase{mutationBeforeCheck, mutationAfterCheck} {
+			t.Run(op+"/"+string(phase), func(t *testing.T) {
+				root := t.TempDir()
+				path := filepath.Join(root, "file")
+				mutationMust(t, os.WriteFile(path, []byte("ORIGINAL\n"), 0600))
+				ws, err := NewWorkspace(root)
+				mutationMust(t, err)
+				tool := NewWriteFile(ws, nil)
+				raw := json.RawMessage(`{"path":"file","content":"APPROVED\n"}`)
+				if op == "tool" {
+					_, err = tool.Plan(context.Background(), raw)
+					mutationMust(t, err)
+				}
+				reached := false
+				ws.beforeMutation = func(at mutationPhase, _ string) error {
+					if at == phase {
+						reached = true
+						edit := filepath.Join(root, "edit") // sibling+rename: a new inode
+						mutationMust(t, os.WriteFile(edit, []byte("EDITED\n"), 0600))
+						mutationMust(t, os.Rename(edit, path))
+					}
+					return nil
+				}
+				expected := FilePrecondition{Exists: true, Hash: ContentHash([]byte("ORIGINAL\n"))}
+				switch op {
+				case "write":
+					err = ws.WriteFileAtomicIfMatch("file", []byte("APPROVED\n"), expected)
+				case "remove":
+					err = ws.RemoveFileIfMatch("file", expected)
+				default:
+					res, ierr := tool.Invoke(context.Background(), raw)
+					mutationMust(t, ierr)
+					if !res.IsError || !strings.HasPrefix(res.Content, "file changed since preview; retry") {
+						t.Fatalf("model-visible result: %+v", res)
+					}
+					err = ErrPreconditionMismatch
+				}
+				if !reached || !errors.Is(err, ErrPreconditionMismatch) {
+					t.Fatalf("replaced leaf not classified as mismatch: reached=%v err=%v", reached, err)
+				}
+				mutationBytes(t, path, "EDITED\n")
+				mutationNoTemps(t, root)
 			})
 		}
 	}

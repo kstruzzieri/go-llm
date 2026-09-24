@@ -180,8 +180,8 @@ func (w *Workspace) checkMutation(target *mutationTarget, expected *FilePrecondi
 	}
 	entry := workspaceEntry{name: target.name, stat: target.stat, dir: target.parent}
 	file, err := entry.openRegular()
-	if errors.Is(err, fs.ErrNotExist) {
-		return ErrPreconditionMismatch
+	if errors.Is(err, fs.ErrNotExist) || errors.Is(err, errFileChanged) {
+		return ErrPreconditionMismatch // removed or replaced (an editor's rename-over) since admission
 	}
 	if err != nil {
 		return err
@@ -224,6 +224,9 @@ func (target *mutationTarget) recheck(conditional bool) error {
 		return fs.ErrExist
 	}
 	if !sameMutationEntry(&target.stat, &st) {
+		if conditional {
+			return ErrPreconditionMismatch // the checked file was replaced
+		}
 		return errFileChanged
 	}
 	if !conditional {
@@ -376,6 +379,10 @@ func (w *Workspace) mutateFile(p string, content []byte, expected *FilePrecondit
 				install = w.noReplaceRename
 			}
 			err = install(fd, name, fd, target.name)
+			if errors.Is(err, unix.EINVAL) || errors.Is(err, unix.ENOTSUP) {
+				// Linux/Darwin "no-replace unsupported"; a bare errno hides the cause.
+				err = fmt.Errorf("filesystem does not support atomic no-replace create: %w", err)
+			}
 		}
 	}
 	if err != nil {
