@@ -89,6 +89,9 @@ func (w *Workspace) openMutationTarget(p string) (target *mutationTarget, result
 		if last && errors.Is(err, fs.ErrNotExist) {
 			return &mutationTarget{parent: parent, release: release, name: part, logical: filepath.Join(logical, part)}, nil
 		}
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil, errParentMissing // path-free; says a parent, not the target, is missing
+		}
 		if err != nil {
 			return nil, err
 		}
@@ -368,7 +371,11 @@ func (w *Workspace) mutateFile(p string, content []byte, expected *FilePrecondit
 		if target.exists {
 			err = unix.Renameat(fd, name, fd, target.name)
 		} else {
-			err = promoteRename(fd, name, fd, target.name)
+			install := promoteRename
+			if w.noReplaceRename != nil {
+				install = w.noReplaceRename
+			}
+			err = install(fd, name, fd, target.name)
 		}
 	}
 	if err != nil {

@@ -127,8 +127,11 @@ func TestMutationUndoAdmissionGap(t *testing.T) {
 						return string(b)
 					}
 					checkState()
-					if strings.Contains(output.String(), "undid ") || !strings.Contains(output.String(), "cannot undo") {
-						t.Errorf("false undo result: %s", output.String())
+					// The cause line proves the refusal came from the late IfMatch
+					// check, not an earlier pre-check that shares the refusal text.
+					late := "cannot undo allowed/file: file changed since golem wrote it\nundo failed for allowed/file: file precondition mismatch\n"
+					if strings.Contains(output.String(), "undid ") || !strings.Contains(output.String(), late) {
+						t.Errorf("false undo result: %q", output.String())
 					}
 					if read(allowed+"-old") != "AFTER\n" {
 						t.Error("refused undo modified original")

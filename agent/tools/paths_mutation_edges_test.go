@@ -287,7 +287,17 @@ func TestMutationDescriptorLifetime(t *testing.T) {
 	if runtime.GOOS == "linux" {
 		fdDir = "/proc/self/fd"
 	}
-	count := func() int { entries, err := os.ReadDir(fdDir); mutationMust(t, err); return len(entries) }
+	// Names only: os.ReadDir stats every entry, and on Darwin with some Go
+	// releases (seen with 1.26) the descriptor used to read /dev/fd is closed
+	// by then (fstatat EBADF).
+	count := func() int {
+		dir, err := os.Open(fdDir)
+		mutationMust(t, err)
+		names, err := dir.Readdirnames(-1)
+		_ = dir.Close()
+		mutationMust(t, err)
+		return len(names)
+	}
 	before := count()
 	for range 64 {
 		run()

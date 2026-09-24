@@ -204,7 +204,10 @@ func TestMutationRootAndComponentIdentity(t *testing.T) {
 
 func TestMutationPreconditions(t *testing.T) {
 	for _, remove := range []bool{false, true} {
-		for _, change := range []string{"hash", "absent", "mode", "invalid-hash", "invalid-absent", "unused-mode"} {
+		for _, change := range []string{
+			"hash", "absent", "mode", "special-mode", "zero", "invalid-hash", "invalid-absent", "unused-mode",
+			"short-hash", "upper-hash", "nonhex-hash", "absent-check-mode", "absent-mode",
+		} {
 			t.Run(map[bool]string{false: "write", true: "remove"}[remove]+"/"+change, func(t *testing.T) {
 				root := t.TempDir()
 				path := filepath.Join(root, "file")
@@ -230,6 +233,34 @@ func TestMutationPreconditions(t *testing.T) {
 				case "unused-mode":
 					expected.Mode = 0600
 					wantErr = fs.ErrInvalid
+				case "special-mode":
+					// Identical bytes and rwx bits; only the setuid bit drifted.
+					mutationMust(t, os.Chmod(path, 0600|fs.ModeSetuid))
+					if fi, err := os.Lstat(path); err != nil || fi.Mode()&fs.ModeSetuid == 0 {
+						t.Fatalf("fixture lacks setuid: %v %v", fi, err)
+					}
+					expected.CheckMode = true
+					expected.Mode = 0600
+				case "zero":
+					expected = FilePrecondition{} // a create for writes; never valid for removes
+					if remove {
+						wantErr = fs.ErrInvalid
+					}
+				case "short-hash":
+					expected.Hash = expected.Hash[:10]
+					wantErr = fs.ErrInvalid
+				case "upper-hash":
+					expected.Hash = strings.ToUpper(expected.Hash)
+					wantErr = fs.ErrInvalid
+				case "nonhex-hash":
+					expected.Hash = strings.Repeat("z", 64)
+					wantErr = fs.ErrInvalid
+				case "absent-check-mode":
+					expected = FilePrecondition{CheckMode: true, Mode: 0600}
+					wantErr = fs.ErrInvalid
+				case "absent-mode":
+					expected = FilePrecondition{Mode: 0600}
+					wantErr = fs.ErrInvalid
 				}
 				if remove {
 					err = ws.RemoveFileIfMatch("file", expected)
@@ -254,8 +285,11 @@ func TestMutationPreconditions(t *testing.T) {
 
 func TestMutationAbsentNoReplace(t *testing.T) {
 	for _, conditional := range []bool{false, true} {
-		for _, kind := range []string{"regular", "symlink", "directory", "unsupported"} {
+		for _, kind := range []string{"regular", "symlink", "directory", "ENOTSUP", "EINVAL"} {
 			t.Run(map[bool]string{false: "unconditional", true: "conditional"}[conditional]+"/"+kind, func(t *testing.T) {
+				// Darwin reports an unsupported RENAME_EXCL as ENOTSUP; Linux
+				// reports an unsupported RENAME_NOREPLACE as EINVAL.
+				unsupported := map[string]error{"ENOTSUP": unix.ENOTSUP, "EINVAL": unix.EINVAL}[kind]
 				root := t.TempDir()
 				ws, err := NewWorkspace(root)
 				mutationMust(t, err)
@@ -272,16 +306,21 @@ func TestMutationAbsentNoReplace(t *testing.T) {
 					mutationMust(t, os.WriteFile(replacement, []byte("CONCURRENT\n"), 0600))
 				}
 				reached := false
-				ws.beforeMutation = func(at mutationPhase, _ string) error {
-					if at != mutationBeforeRename {
+				if unsupported != nil {
+					// Fail the real no-replace call, not an earlier phase, so a
+					// plain-rename fallback on its result would create the target.
+					ws.noReplaceRename = func(int, string, int, string) error {
+						reached = true
+						return unsupported
+					}
+				} else {
+					ws.beforeMutation = func(at mutationPhase, _ string) error {
+						if at == mutationBeforeRename {
+							reached = true
+							mutationMust(t, os.Rename(replacement, path))
+						}
 						return nil
 					}
-					reached = true
-					if kind == "unsupported" {
-						return unix.ENOTSUP
-					}
-					mutationMust(t, os.Rename(replacement, path))
-					return nil
 				}
 				if conditional {
 					err = ws.WriteFileAtomicIfMatch("file", []byte("APPROVED\n"), FilePrecondition{})
@@ -292,8 +331,8 @@ func TestMutationAbsentNoReplace(t *testing.T) {
 				if conditional {
 					want = ErrPreconditionMismatch
 				}
-				if kind == "unsupported" {
-					want = unix.ENOTSUP
+				if unsupported != nil {
+					want = unsupported
 				}
 				if !reached || !errors.Is(err, want) {
 					t.Fatalf("reached=%v err=%v want=%v", reached, err, want)
@@ -310,7 +349,7 @@ func TestMutationAbsentNoReplace(t *testing.T) {
 					if err != nil || !fi.IsDir() {
 						t.Fatalf("directory replaced: %v %v", fi, err)
 					}
-				case "unsupported":
+				case "ENOTSUP", "EINVAL":
 					if _, err := os.Lstat(path); !errors.Is(err, fs.ErrNotExist) {
 						t.Fatalf("unsupported install changed target: %v", err)
 					}

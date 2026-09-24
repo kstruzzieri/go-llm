@@ -89,11 +89,12 @@ func (j *mutationJournal) undo(out io.Writer) {
 		err = j.ws.RemoveFileIfMatch(rec.Path, expected)
 	}
 	if err != nil {
+		// Same two lines as checkpoint restoreFile: the shared exact refusal,
+		// then the cause (which may carry joined cleanup failures).
 		if errors.Is(err, agenttools.ErrPreconditionMismatch) {
-			_, _ = fmt.Fprintf(out, "cannot undo %s: file changed since golem wrote it: %v\n", rec.Path, err)
-		} else {
-			_, _ = fmt.Fprintf(out, "undo failed for %s: %v\n", rec.Path, err)
+			_, _ = fmt.Fprintf(out, checkpointUndoRefusal, rec.Path)
 		}
+		_, _ = fmt.Fprintf(out, "undo failed for %s: %v\n", rec.Path, err)
 		return
 	}
 	j.recs = j.recs[:len(j.recs)-1] // pop only on success

@@ -78,7 +78,7 @@ func (a fileState) equal(b fileState) bool {
 
 // undoTargetFrom is the state a file reaches after undoing f, derived from
 // the state cur it currently holds. A create undoes to absent. An update
-// undoes via WriteFileAtomic, which preserves the existing permission bits —
+// undoes via WriteFileAtomicIfMatch, which preserves the verified permission bits —
 // so the simulated state carries cur's mode forward, keeping a tracked
 // older record verifiable across intervening legacy updates (#443).
 func undoTargetFrom(cur fileState, f checkpointFile) fileState {

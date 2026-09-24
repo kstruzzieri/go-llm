@@ -143,6 +143,90 @@ func TestMutationConditionalMissingLeaf(t *testing.T) {
 	}
 }
 
+// An entry appearing after its name was admitted absent is never adopted:
+// conditional creates report a mismatch, unconditional creates fs.ErrExist,
+// non-regular entries their type, and an absent remove never unlinks it.
+func TestMutationLateAbsentEntry(t *testing.T) {
+	for _, op := range []string{"conditional", "unconditional", "remove"} {
+		for _, kind := range []string{"regular", "symlink", "directory"} {
+			t.Run(op+"/"+kind, func(t *testing.T) {
+				root := t.TempDir()
+				path := filepath.Join(root, "file")
+				ws, err := NewWorkspace(root)
+				mutationMust(t, err)
+				phase := mutationAfterTemp // after the temp exists, before the final recheck
+				if op == "remove" {
+					phase = mutationBeforeCheck
+				}
+				reached := false
+				ws.beforeMutation = func(at mutationPhase, _ string) error {
+					if at != phase {
+						return nil
+					}
+					reached = true
+					switch kind {
+					case "symlink":
+						mutationMust(t, os.Symlink("elsewhere", path))
+					case "directory":
+						mutationMust(t, os.Mkdir(path, 0700))
+					default:
+						mutationMust(t, os.WriteFile(path, []byte("LATE\n"), 0600))
+					}
+					return nil
+				}
+				var want error
+				switch op {
+				case "conditional":
+					err = ws.WriteFileAtomicIfMatch("file", []byte("APPROVED\n"), FilePrecondition{})
+					want = ErrPreconditionMismatch
+				case "unconditional":
+					err = ws.WriteFileAtomic("file", []byte("APPROVED\n"))
+					want = fs.ErrExist
+				default:
+					err = ws.RemoveFile("file")
+					want = fs.ErrNotExist
+				}
+				if op != "remove" && kind == "symlink" {
+					want = errSymlink
+				} else if op != "remove" && kind == "directory" {
+					want = errNotRegular
+				}
+				if !reached || !errors.Is(err, want) {
+					t.Fatalf("reached=%v err=%v want=%v", reached, err, want)
+				}
+				switch kind {
+				case "symlink":
+					if link, err := os.Readlink(path); err != nil || link != "elsewhere" {
+						t.Fatalf("late symlink changed: %q %v", link, err)
+					}
+				case "directory":
+					if fi, err := os.Lstat(path); err != nil || !fi.IsDir() {
+						t.Fatalf("late directory changed: %v %v", fi, err)
+					}
+				default:
+					mutationBytes(t, path, "LATE\n")
+				}
+				mutationNoTemps(t, root)
+			})
+		}
+	}
+}
+
+// A conditional create reads no content, so read policy must not block it.
+func TestMutationConditionalCreateSkipsReadPolicy(t *testing.T) {
+	root := t.TempDir()
+	ws, err := NewWorkspace(root)
+	mutationMust(t, err)
+	ws.SetScopeGuard(func(_ string, write bool) error {
+		if !write {
+			return errors.New("reads denied")
+		}
+		return nil
+	})
+	mutationMust(t, ws.WriteFileAtomicIfMatch("file", []byte("APPROVED\n"), FilePrecondition{}))
+	mutationBytes(t, filepath.Join(root, "file"), "APPROVED\n")
+}
+
 func TestMutationConditionalCapability(t *testing.T) {
 	for _, op := range []string{"create", "overwrite", "remove"} {
 		for _, victim := range []string{"outside", "denied"} {

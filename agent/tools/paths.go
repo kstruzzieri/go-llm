@@ -98,6 +98,9 @@ type Workspace struct {
 	// beforeReadOpen is a per-workspace deterministic race-test seam.
 	beforeReadOpen func()
 	beforeMutation func(mutationPhase, string) error // private deterministic phase/failure seam
+	// noReplaceRename replaces the platform no-replace install in tests only, so
+	// an unsupported-filesystem result is observed at the real call site.
+	noReplaceRename func(srcFd int, tmpName string, dstFd int, dstName string) error
 }
 
 // CanonicalWorkspaceRoot resolves a workspace root to its absolute, symlink-free

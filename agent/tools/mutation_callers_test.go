@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -97,6 +98,30 @@ func TestMutationErrorPresentation(t *testing.T) {
 	visible = toolVisibleError(errors.Join(scopeDeniedError{cause: host}, cleanup))
 	if strings.Contains(visible.Error(), host.Error()) || !errors.Is(visible, cleanup) || !errors.Is(visible, errScopeDenied) {
 		t.Fatalf("unsafe/lossy denial: %v", visible)
+	}
+	// A wrapper around the joined denial must not collapse it to bare denial.
+	visible = toolVisibleError(fmt.Errorf("journal prepare failed: %w", errors.Join(scopeDeniedError{cause: host}, cleanup)))
+	if strings.Contains(visible.Error(), host.Error()) || !errors.Is(visible, cleanup) || !errors.Is(visible, errScopeDenied) {
+		t.Fatalf("unsafe/lossy wrapped denial: %v", visible)
+	}
+}
+
+// A missing ancestor reports errParentMissing: path-free and actionable, where a
+// bare ENOENT reads as "the target file does not exist".
+func TestMutationMissingParentMessage(t *testing.T) {
+	root := t.TempDir()
+	mutationMust(t, os.WriteFile(filepath.Join(root, "regular"), nil, 0600))
+	tool := NewWriteFile(mustWorkspace(t, root), nil)
+	for path, want := range map[string]string{
+		"nosuchdir/file.txt": errParentMissing.Error(),
+		"a/b/c.txt":          errParentMissing.Error(),
+		"regular/child.txt":  errNotDir.Error(),
+	} {
+		raw, err := json.Marshal(map[string]string{"path": path, "content": "x"})
+		mutationMust(t, err)
+		if _, err := tool.Plan(context.Background(), raw); err == nil || err.Error() != want {
+			t.Errorf("%s: got %v, want %q", path, err, want)
+		}
 	}
 }
 

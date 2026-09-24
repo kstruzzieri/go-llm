@@ -38,7 +38,8 @@ func toolErrMessage(err error) string {
 }
 
 // toolVisibleError removes host-only ScopeGuard details before a mutating tool
-// exposes an error through Plan or ToolResult. Other diagnostics are unchanged.
+// exposes an error through Plan or ToolResult, and prefixes a precondition
+// mismatch with the retry hint. Other diagnostics are unchanged.
 func toolVisibleError(err error) error {
 	if errors.Is(err, errScopeDenied) {
 		// Sanitize each joined cause, retaining independent cleanup/journal failures.

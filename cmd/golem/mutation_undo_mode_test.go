@@ -94,7 +94,8 @@ func TestMutationUndoLateModeAndCapability(t *testing.T) {
 					read(filepath.Join(parent+"-old", "file"), "AFTER\n")
 				}
 				if persistent {
-					if checkpoint.fatal == nil || !moved && !errors.Is(checkpoint.fatal, agenttools.ErrPreconditionMismatch) {
+					if checkpoint.fatal == nil || !moved && !errors.Is(checkpoint.fatal, agenttools.ErrPreconditionMismatch) ||
+						moved && checkpoint.fatal.Error() != "golem: inverse after-state mismatch" {
 						t.Fatalf("failure not latched: %v output=%s", checkpoint.fatal, out.String())
 					}
 					groups, err := checkpoint.store.list(context.Background())
@@ -114,8 +115,8 @@ func TestMutationUndoLateModeAndCapability(t *testing.T) {
 					if len(ram.recs) != 0 || !strings.Contains(out.String(), "undid ") {
 						t.Fatalf("successful capability undo not recorded: %s", out.String())
 					}
-				} else if len(ram.recs) != 1 || !strings.Contains(out.String(), "cannot undo") {
-					t.Fatalf("mode refusal lost: %s", out.String())
+				} else if len(ram.recs) != 1 || out.String() != "cannot undo parent/file: file changed since golem wrote it\nundo failed for parent/file: file precondition mismatch\n" {
+					t.Fatalf("mode refusal lost: %q", out.String())
 				}
 			})
 		}
