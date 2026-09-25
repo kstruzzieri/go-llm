@@ -9,14 +9,14 @@ import (
 	"time"
 )
 
-// WithBusyTimeout returns a DSN for path whose every connection starts with
-// the given busy_timeout, including connections database/sql opens to replace
-// a discarded one. A one-off PRAGMA configures only the connection that ran
-// it, and database/sql discards a modernc connection after a
-// context-cancelled statement. "" and ":memory:" are returned unchanged. A
-// "file:" URI keeps its query parameters, including its own busy_timeout
-// pragma, which then replaces timeout (modernc leaves the order of two
-// busy_timeout pragmas undefined). Any other path is made absolute and
+// WithBusyTimeout returns a DSN for path whose every connection starts with the
+// given busy_timeout, including connections database/sql opens to replace a
+// discarded one. A one-off PRAGMA configures only the connection that ran it,
+// and database/sql discards a modernc connection after a context-cancelled
+// statement run outside a transaction. "" and ":memory:" are returned
+// unchanged. A "file:" URI keeps its query parameters, including its own
+// busy_timeout pragma, which then replaces timeout (modernc leaves the order of
+// two busy_timeout pragmas undefined). Any other path is made absolute and
 // escaped, so '?', '#', and '%' in a file name stay part of the path.
 func WithBusyTimeout(path string, timeout time.Duration) (string, error) {
 	if path == "" || path == ":memory:" {

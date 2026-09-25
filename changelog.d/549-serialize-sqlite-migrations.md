@@ -18,11 +18,11 @@ setup before concurrent opens. Lock and I/O errors still propagate.
 `provider.OpenSQLiteFeedbackStore`, `memory.OpenHardenedDB`, and the Golem
 session/feedback, MCP retrieval-feedback, and transcript openers now set
 `busy_timeout` in the connection DSN instead of with a one-off PRAGMA. The
-`journal_mode=WAL` PRAGMA previously ran without a busy handler, so reopening
-an existing WAL database while another connection held its lock failed at once
-with `SQLITE_BUSY`. The one-off PRAGMA also did not survive connection
-replacement: `database/sql` discards a connection after a context-cancelled
-statement, and the replacement started with `busy_timeout=0`.
+`journal_mode=WAL` PRAGMA previously ran without a busy handler, so reopening an
+existing WAL database while another connection held its lock failed at once with
+`SQLITE_BUSY`. The one-off PRAGMA also did not survive connection replacement:
+`database/sql` discards a connection after a context-cancelled statement run
+outside a transaction, and the replacement started with `busy_timeout=0`.
 
 This does not change RAG migrations, serialize concurrent `journal_mode=WAL`
 setup, or serialize the transcript store's legacy audit-column upgrade.

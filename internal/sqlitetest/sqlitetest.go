@@ -37,9 +37,10 @@ func LockFileFor(t testing.TB, path string, d time.Duration) {
 
 // AssertNewConnectionBusyTimeout checks that a connection db opens after
 // discarding its current one starts with busy_timeout = want. database/sql
-// discards a modernc connection after a context-cancelled statement, so a
-// one-off PRAGMA on the first connection does not survive; the timeout must
-// come from the DSN. It stops db from keeping idle connections.
+// discards a modernc connection after a context-cancelled statement run outside
+// a transaction, so a one-off PRAGMA on the first connection does not survive;
+// the timeout must come from the DSN. It stops db from keeping idle
+// connections.
 func AssertNewConnectionBusyTimeout(t testing.TB, db *sql.DB, want time.Duration) {
 	t.Helper()
 	// With no idle connections kept, every statement runs on a new connection.

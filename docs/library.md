@@ -218,10 +218,11 @@ may write. This coordination covers the migration runners. Caller setup,
 including the initial `journal_mode=WAL` switch, must complete before racing the
 runners. A one-off PRAGMA on a `*sql.DB` does not configure every pooled or
 replacement connection (`database/sql` replaces a modernc connection after a
-context-cancelled statement); use the DSN or a connection hook for
-`busy_timeout`. `provider.OpenSQLiteFeedbackStore` and `memory.OpenHardenedDB`
-set `busy_timeout` in their DSN, so every connection waits for another
-connection's lock, including the first `journal_mode=WAL` PRAGMA.
+context-cancelled statement run outside a transaction); use the DSN or a
+connection hook for `busy_timeout`. `provider.OpenSQLiteFeedbackStore` and
+`memory.OpenHardenedDB` set `busy_timeout` in their DSN, so every connection
+waits for another connection's lock, including the first `journal_mode=WAL`
+PRAGMA.
 
 For provider routing feedback, unversioned legacy tables still must pass the
 existing column and CHECK-fingerprint validation. Validation, creation of
