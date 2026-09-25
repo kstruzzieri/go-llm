@@ -25,6 +25,7 @@ import (
 	"github.com/kstruzzieri/go-llm/feedback"
 	"github.com/kstruzzieri/go-llm/fingerprint"
 	"github.com/kstruzzieri/go-llm/internal/providerbootstrap"
+	"github.com/kstruzzieri/go-llm/internal/sqlitedsn"
 	"github.com/kstruzzieri/go-llm/memory"
 	"github.com/kstruzzieri/go-llm/ollama"
 	"github.com/kstruzzieri/go-llm/provider"
@@ -367,16 +368,20 @@ func openRetrievalFeedbackWeighter(ctx context.Context, path string) (*sql.DB, r
 	if err := prepareRetrievalFeedbackDB(path); err != nil {
 		return nil, nil, err
 	}
-	db, err := sql.Open("sqlite", path)
+	// The DSN gives every connection a 5s busy_timeout, including
+	// replacements database/sql opens after a context-cancelled statement.
+	dsn, err := sqlitedsn.WithBusyTimeout(path, 5*time.Second)
+	if err != nil {
+		return nil, nil, fmt.Errorf("open retrieval feedback db %q: %w", path, err)
+	}
+	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, nil, fmt.Errorf("open retrieval feedback db %q: %w", path, err)
 	}
 	db.SetMaxOpenConns(1)
-	for _, pragma := range []string{"PRAGMA journal_mode=WAL", "PRAGMA busy_timeout=5000"} {
-		if _, err := db.ExecContext(ctx, pragma); err != nil {
-			_ = db.Close()
-			return nil, nil, fmt.Errorf("retrieval feedback %s: %w", pragma, err)
-		}
+	if _, err := db.ExecContext(ctx, "PRAGMA journal_mode=WAL"); err != nil {
+		_ = db.Close()
+		return nil, nil, fmt.Errorf("retrieval feedback PRAGMA journal_mode=WAL: %w", err)
 	}
 	store, err := feedback.NewSignalStore(ctx, db)
 	if err != nil {

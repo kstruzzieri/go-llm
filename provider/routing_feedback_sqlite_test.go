@@ -5,11 +5,14 @@ import (
 	"database/sql"
 	"errors"
 	"math"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
 
 	_ "modernc.org/sqlite"
+
+	"github.com/kstruzzieri/go-llm/internal/sqlitetest"
 )
 
 // newSQLiteFeedbackStoreForTest opens an isolated in-memory DB pinned
@@ -229,5 +232,29 @@ func TestOpenSQLiteFeedbackStoreInMemory(t *testing.T) {
 	if err := store.Record(context.Background(), FeedbackKey{Provider: "p", Model: "m", UseCase: "chat"},
 		FeedbackSignal{Kind: RoutingSignalSuccess, At: time.Now()}); err != nil {
 		t.Errorf("Record after Open: %v", err)
+	}
+}
+
+// TestOpenSQLiteFeedbackStoreWaitsForLockedWALFile pins busy_timeout on every
+// connection the opener creates: the journal_mode PRAGMA on its first
+// connection waits behind a held database lock, and a replacement connection
+// keeps the timeout.
+func TestOpenSQLiteFeedbackStoreWaitsForLockedWALFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "feedback.db")
+	seed, err := OpenSQLiteFeedbackStore(t.Context(), path, SQLiteFeedbackStoreConfig{})
+	if err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	if err := seed.Close(); err != nil {
+		t.Fatalf("close seed: %v", err)
+	}
+	sqlitetest.LockFileFor(t, path, 200*time.Millisecond)
+	store, err := OpenSQLiteFeedbackStore(t.Context(), path, SQLiteFeedbackStoreConfig{})
+	if err != nil {
+		t.Fatalf("open behind a held database lock: %v", err)
+	}
+	sqlitetest.AssertNewConnectionBusyTimeout(t, store.db, 5*time.Second)
+	if err := store.Close(); err != nil {
+		t.Fatalf("close: %v", err)
 	}
 }

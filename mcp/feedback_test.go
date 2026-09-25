@@ -7,6 +7,9 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
+
+	"github.com/kstruzzieri/go-llm/internal/sqlitetest"
 )
 
 func TestWithRetrievalFeedbackSetsPath(t *testing.T) {
@@ -89,5 +92,29 @@ func TestWithRetrievalFeedbackBadPathIsNonFatal(t *testing.T) {
 	}
 	if s.feedbackDB != nil {
 		t.Fatal("feedbackDB = non-nil, want bad feedback path to stay disabled")
+	}
+}
+
+// TestOpenRetrievalFeedbackWeighterWaitsForLockedWALFile pins busy_timeout on
+// every connection the opener creates: the journal_mode PRAGMA on its first
+// connection waits behind a held database lock, and a replacement connection
+// keeps the timeout.
+func TestOpenRetrievalFeedbackWeighterWaitsForLockedWALFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "feedback.db")
+	seed, _, err := openRetrievalFeedbackWeighter(t.Context(), path)
+	if err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	if err := seed.Close(); err != nil {
+		t.Fatalf("close seed: %v", err)
+	}
+	sqlitetest.LockFileFor(t, path, 200*time.Millisecond)
+	db, _, err := openRetrievalFeedbackWeighter(t.Context(), path)
+	if err != nil {
+		t.Fatalf("open behind a held database lock: %v", err)
+	}
+	sqlitetest.AssertNewConnectionBusyTimeout(t, db, 5*time.Second)
+	if err := db.Close(); err != nil {
+		t.Fatalf("close: %v", err)
 	}
 }

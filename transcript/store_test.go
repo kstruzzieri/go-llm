@@ -10,8 +10,10 @@ import (
 	"runtime"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/kstruzzieri/go-llm/conversation"
+	"github.com/kstruzzieri/go-llm/internal/sqlitetest"
 )
 
 func TestOpen_RejectsEmptyPath(t *testing.T) {
@@ -588,5 +590,28 @@ func TestRecord_ConcurrentSameKeyNoRaceSingleRow(t *testing.T) {
 	}
 	if projectionErrors != 0 {
 		t.Errorf("raw rows with non-ok projection_status = %d, want 0", projectionErrors)
+	}
+}
+
+// TestOpen_WaitsForLockedWALFile pins busy_timeout on every connection the
+// opener creates: the journal_mode PRAGMA on its first connection waits behind
+// a held database lock, and a replacement connection keeps the timeout.
+func TestOpen_WaitsForLockedWALFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "transcripts.db")
+	seed, err := Open(t.Context(), path)
+	if err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	if err := seed.Close(); err != nil {
+		t.Fatalf("close seed: %v", err)
+	}
+	sqlitetest.LockFileFor(t, path, 200*time.Millisecond)
+	store, err := Open(t.Context(), path)
+	if err != nil {
+		t.Fatalf("open behind a held database lock: %v", err)
+	}
+	sqlitetest.AssertNewConnectionBusyTimeout(t, store.db, 5*time.Second)
+	if err := store.Close(); err != nil {
+		t.Fatalf("close: %v", err)
 	}
 }

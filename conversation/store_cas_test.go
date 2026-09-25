@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"net/url"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -221,16 +222,15 @@ func openCASHandles(t *testing.T) [2]*SQLiteStore {
 	path := filepath.Join(t.TempDir(), "cas.db")
 	var stores [2]*SQLiteStore
 	for i := range stores {
-		db, err := sql.Open("sqlite", path)
+		u := url.URL{Scheme: "file", Path: path, RawQuery: "_pragma=busy_timeout(5000)"}
+		db, err := sql.Open("sqlite", u.String())
 		if err != nil {
 			t.Fatal(err)
 		}
 		db.SetMaxOpenConns(1)
 		t.Cleanup(func() { _ = db.Close() })
-		for _, pragma := range []string{"PRAGMA journal_mode=WAL", "PRAGMA busy_timeout=5000"} {
-			if _, err := db.Exec(pragma); err != nil {
-				t.Fatal(err)
-			}
+		if _, err := db.Exec("PRAGMA journal_mode=WAL"); err != nil {
+			t.Fatal(err)
 		}
 		stores[i], err = NewStore(context.Background(), db)
 		if err != nil {

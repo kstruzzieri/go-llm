@@ -6,6 +6,9 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
+
+	"github.com/kstruzzieri/go-llm/internal/sqlitetest"
 )
 
 func TestOpenRecordStoreCreatesHardenedDB(t *testing.T) {
@@ -168,5 +171,29 @@ func TestRecordFailedOpenSecuresExistingSidecars(t *testing.T) {
 		if info.Mode().Perm() != 0o600 {
 			t.Errorf("failed open left sidecar %s at %o", suffix, info.Mode().Perm())
 		}
+	}
+}
+
+// TestOpenHardenedDBWaitsForLockedWALFile pins busy_timeout on every
+// connection the opener creates: the journal_mode PRAGMA on its first
+// connection waits behind a held database lock, and a replacement connection
+// keeps the timeout.
+func TestOpenHardenedDBWaitsForLockedWALFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "memories.db")
+	seed, err := OpenHardenedDB(t.Context(), path)
+	if err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	if err := seed.Close(); err != nil {
+		t.Fatalf("close seed: %v", err)
+	}
+	sqlitetest.LockFileFor(t, path, 200*time.Millisecond)
+	db, err := OpenHardenedDB(t.Context(), path)
+	if err != nil {
+		t.Fatalf("open behind a held database lock: %v", err)
+	}
+	sqlitetest.AssertNewConnectionBusyTimeout(t, db, 5*time.Second)
+	if err := db.Close(); err != nil {
+		t.Fatalf("close: %v", err)
 	}
 }
