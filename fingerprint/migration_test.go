@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -83,11 +84,15 @@ func assertMigrationSQL(t *testing.T, db *sql.DB, query, want string) {
 
 func assertMigrationVersions(t *testing.T, db *sql.DB, want string) {
 	t.Helper()
-	assertMigrationSQL(t, db, "SELECT COALESCE(group_concat(version), '') FROM (SELECT version FROM fingerprint_schema_version ORDER BY version)", want)
+	// Check before querying: with one pooled connection, a leaked migration
+	// transaction would block the query instead of failing here.
 	if inUse := db.Stats().InUse; inUse != 0 {
 		t.Fatalf("retained connections = %d", inUse)
 	}
+	assertMigrationSQL(t, db, migrationVersionsQuery, want)
 }
+
+const migrationVersionsQuery = "SELECT COALESCE(group_concat(version), '') FROM (SELECT version FROM fingerprint_schema_version ORDER BY version)"
 
 func assertMigrationSQLiteError(t *testing.T, err error, want int) {
 	t.Helper()
@@ -256,8 +261,9 @@ func TestMigrationCanceledStep(t *testing.T) {
 	if !errors.Is(err, context.Canceled) && !errors.Is(err, sql.ErrTxDone) {
 		t.Fatalf("canceled migration = %v", err)
 	}
-	// A query waits for database/sql's asynchronous cancellation rollback.
-	assertMigrationVersions(t, db, "")
+	// A query waits for database/sql's asynchronous cancellation rollback, so
+	// skip assertMigrationVersions' immediate retained-connection check.
+	assertMigrationSQL(t, db, migrationVersionsQuery, "")
 	assertMigrationSQL(t, db, "SELECT COUNT(*) FROM sqlite_schema WHERE name='tentative'", "0")
 	if err := newMigrationStore(t.Context(), db); err != nil {
 		t.Fatalf("retry after cancellation: %v", err)
@@ -341,5 +347,37 @@ func TestMigrationLockAndIOErrors(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = missing.Close() })
-	assertMigrationSQLiteError(t, newMigrationStore(t.Context(), missing), 14)
+	err = newMigrationStore(t.Context(), missing)
+	assertMigrationSQLiteError(t, err, 14)
+	if !strings.Contains(err.Error(), "check version table") {
+		t.Fatalf("missing directory = %v, want the version-table check to fail", err)
+	}
+}
+
+func TestMigrations_StrictlyIncreasingVersions(t *testing.T) {
+	t.Parallel()
+	for i := 1; i < len(migrations); i++ {
+		if got, previous := migrations[i].version, migrations[i-1].version; got <= previous {
+			t.Errorf("migrations[%d].version = %d, want greater than migrations[%d].version (%d)", i, got, i-1, previous)
+		}
+	}
+}
+
+func TestMigrationMalformedVersionTable(t *testing.T) {
+	for _, tc := range []struct{ name, ddl string }{
+		{"missing columns", "CREATE TABLE fingerprint_schema_version (version TEXT); INSERT INTO fingerprint_schema_version VALUES ('broken')"},
+		// Every column the claim needs exists, so only the version read
+		// rejects the non-integer row.
+		{"non-integer version", "CREATE TABLE fingerprint_schema_version (version PRIMARY KEY, description TEXT NOT NULL, applied_at INTEGER NOT NULL); INSERT INTO fingerprint_schema_version VALUES ('broken', 'corrupt', 0)"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			db := openMigrationDB(t, filepath.Join(t.TempDir(), "malformed.db"))
+			execMigrationSQL(t, db, tc.ddl)
+			if err := newMigrationStore(t.Context(), db); err == nil || !strings.Contains(err.Error(), "query schema version") {
+				t.Fatalf("malformed version table = %v, want a version-read error", err)
+			}
+			assertMigrationSQL(t, db, "SELECT group_concat(version) FROM fingerprint_schema_version", "broken")
+			assertMigrationSQL(t, db, "SELECT COUNT(*) FROM sqlite_schema WHERE name <> 'fingerprint_schema_version' AND name NOT LIKE 'sqlite_%'", "0")
+		})
+	}
 }

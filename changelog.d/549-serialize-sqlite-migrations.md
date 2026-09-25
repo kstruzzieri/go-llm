@@ -1,4 +1,4 @@
-### Fixed — Serialize remaining SQLite migration runners (#549)
+### Fixed — Serialize feedback, fingerprint, and routing-feedback migration runners (#549)
 
 Feedback, fingerprint, and provider routing-feedback stores now claim each
 migration version under SQLite's write lock before applying schema changes.
@@ -13,5 +13,13 @@ commit with the v1 claim, so incompatible tables are never stamped as migrated.
 
 Callers must configure a positive `busy_timeout` on every migrating connection
 (e.g. `_pragma=busy_timeout(5000)` with modernc SQLite) and complete journal-mode
-setup before concurrent opens. Lock and I/O errors still propagate. This does
-not change RAG migrations or serialize concurrent `journal_mode=WAL` setup.
+setup before concurrent opens. Lock and I/O errors still propagate.
+
+`provider.OpenSQLiteFeedbackStore`, `memory.OpenHardenedDB`, and the Golem
+session/feedback, MCP retrieval-feedback, and transcript openers now set
+`busy_timeout` before `journal_mode=WAL`. The WAL PRAGMA previously ran without
+a busy handler, so reopening an existing WAL database while another connection
+held its lock failed at once with `SQLITE_BUSY`.
+
+This does not change RAG migrations, serialize concurrent `journal_mode=WAL`
+setup, or serialize the transcript store's legacy audit-column upgrade.

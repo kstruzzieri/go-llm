@@ -44,7 +44,7 @@ func TestRunFeedbackMigrationsFreshDB(t *testing.T) {
 	var exists bool
 	err = db.QueryRow(`SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name='routing_feedback_signals')`).Scan(&exists)
 	if err != nil {
-		t.Fatalf("tableExists: %v", err)
+		t.Fatalf("probe routing_feedback_signals: %v", err)
 	}
 	if !exists {
 		t.Errorf("routing_feedback_signals table missing after migration")
@@ -225,11 +225,15 @@ func assertMigrationSQL(t *testing.T, db *sql.DB, query, want string) {
 
 func assertMigrationVersions(t *testing.T, db *sql.DB, want string) {
 	t.Helper()
-	assertMigrationSQL(t, db, "SELECT COALESCE(group_concat(version), '') FROM (SELECT version FROM routing_feedback_schema_version ORDER BY version)", want)
+	// Check before querying: with one pooled connection, a leaked migration
+	// transaction would block the query instead of failing here.
 	if inUse := db.Stats().InUse; inUse != 0 {
 		t.Fatalf("retained connections = %d", inUse)
 	}
+	assertMigrationSQL(t, db, migrationVersionsQuery, want)
 }
+
+const migrationVersionsQuery = "SELECT COALESCE(group_concat(version), '') FROM (SELECT version FROM routing_feedback_schema_version ORDER BY version)"
 
 func assertMigrationSQLiteError(t *testing.T, err error, want int) {
 	t.Helper()
@@ -398,8 +402,9 @@ func TestMigrationCanceledStep(t *testing.T) {
 	if !errors.Is(err, context.Canceled) && !errors.Is(err, sql.ErrTxDone) {
 		t.Fatalf("canceled migration = %v", err)
 	}
-	// A query waits for database/sql's asynchronous cancellation rollback.
-	assertMigrationVersions(t, db, "")
+	// A query waits for database/sql's asynchronous cancellation rollback, so
+	// skip assertMigrationVersions' immediate retained-connection check.
+	assertMigrationSQL(t, db, migrationVersionsQuery, "")
 	assertMigrationSQL(t, db, "SELECT COUNT(*) FROM sqlite_schema WHERE name='tentative'", "0")
 	if err := newMigrationStore(t.Context(), db); err != nil {
 		t.Fatalf("retry after cancellation: %v", err)
@@ -418,6 +423,9 @@ func TestMigrationInvalidContext(t *testing.T) {
 			err := newMigrationStore(tc.ctx, db)
 			if err == nil || (tc.ctx != nil && !errors.Is(err, context.Canceled)) {
 				t.Fatalf("invalid context = %v", err)
+			}
+			if !strings.HasPrefix(err.Error(), "provider: init routing feedback store: ") {
+				t.Fatalf("invalid context = %q, want the store prefix", err)
 			}
 			assertMigrationSQL(t, db, "SELECT COUNT(*) FROM sqlite_schema WHERE name='routing_feedback_schema_version'", "0")
 		})
@@ -483,7 +491,11 @@ func TestMigrationLockAndIOErrors(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = missing.Close() })
-	assertMigrationSQLiteError(t, newMigrationStore(t.Context(), missing), 14)
+	err = newMigrationStore(t.Context(), missing)
+	assertMigrationSQLiteError(t, err, 14)
+	if !strings.Contains(err.Error(), "check version table") {
+		t.Fatalf("missing directory = %v, want the version-table check to fail", err)
+	}
 }
 
 const legacySignalsSchema = `CREATE TABLE routing_feedback_signals (
@@ -586,4 +598,92 @@ func TestMigrationLegacyIndexFailureRollsBack(t *testing.T) {
 	assertMigrationVersions(t, db, "1")
 	assertMigrationSQL(t, db, "SELECT COUNT(*) FROM sqlite_schema WHERE type='index' AND name IN ('idx_rfs_key_at','idx_rfs_key_kind')", "2")
 	assertMigrationSQL(t, db, "SELECT model FROM routing_feedback_signals", "m")
+}
+
+func TestMigrations_StrictlyIncreasingVersions(t *testing.T) {
+	t.Parallel()
+	for i := 1; i < len(feedbackMigrations); i++ {
+		if got, previous := feedbackMigrations[i].version, feedbackMigrations[i-1].version; got <= previous {
+			t.Errorf("feedbackMigrations[%d].version = %d, want greater than feedbackMigrations[%d].version (%d)", i, got, i-1, previous)
+		}
+	}
+}
+
+func TestMigrationMalformedVersionTable(t *testing.T) {
+	for _, tc := range []struct{ name, ddl string }{
+		{"missing columns", "CREATE TABLE routing_feedback_schema_version (version TEXT); INSERT INTO routing_feedback_schema_version VALUES ('broken')"},
+		// Every column the claim needs exists, so only the version read
+		// rejects the non-integer row.
+		{"non-integer version", "CREATE TABLE routing_feedback_schema_version (version PRIMARY KEY, description TEXT NOT NULL, applied_at INTEGER NOT NULL); INSERT INTO routing_feedback_schema_version VALUES ('broken', 'corrupt', 0)"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			db := openMigrationDB(t, filepath.Join(t.TempDir(), "malformed.db"))
+			execMigrationSQL(t, db, tc.ddl)
+			if err := newMigrationStore(t.Context(), db); err == nil || !strings.Contains(err.Error(), "query schema version") {
+				t.Fatalf("malformed version table = %v, want a version-read error", err)
+			}
+			assertMigrationSQL(t, db, "SELECT group_concat(version) FROM routing_feedback_schema_version", "broken")
+			assertMigrationSQL(t, db, "SELECT COUNT(*) FROM sqlite_schema WHERE name <> 'routing_feedback_schema_version' AND name NOT LIKE 'sqlite_%'", "0")
+		})
+	}
+}
+
+// TestMigrationLegacyClaimBeforeValidation pins the v1 order: the claim is
+// the first statement, ahead of the legacy table probe and validation reads,
+// so a competing opener waits on the writer instead of failing a
+// read-to-write lock upgrade, which SQLite does not retry.
+func TestMigrationLegacyClaimBeforeValidation(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "legacy-claim.db")
+	a, b := openMigrationDB(t, path), openMigrationDB(t, path)
+	execMigrationSQL(t, a, legacySignalsSchema)
+	execMigrationSQL(t, a, "INSERT INTO routing_feedback_signals(id,provider,model,use_case,kind,at_ns) VALUES (17,'p','m','chat','success',123)")
+	execMigrationSQL(t, a, "CREATE TABLE routing_feedback_schema_version (version INTEGER PRIMARY KEY, description TEXT NOT NULL, applied_at INTEGER NOT NULL)")
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	claimed, release := make(chan struct{}), make(chan struct{})
+	unblock := sync.OnceFunc(func() { close(release) })
+	defer unblock()
+	baseline := feedbackMigrations[0]
+	gated := baseline
+	gated.fn = func(tx *sql.Tx) error {
+		close(claimed)
+		select {
+		case <-release:
+			return baseline.fn(tx)
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	winner, loser := make(chan error, 1), make(chan error, 1)
+	go func() { winner <- applyFeedbackMigration(ctx, a, gated) }()
+	select {
+	case <-claimed:
+	case err := <-winner:
+		t.Fatalf("before migration gate: %v", err)
+	case <-ctx.Done():
+		t.Fatal(ctx.Err())
+	}
+	stale := baseline
+	stale.fn = func(*sql.Tx) error { return errors.New("duplicate migration executed") }
+	go func() { loser <- applyFeedbackMigration(ctx, b, stale) }()
+	for b.Stats().InUse == 0 {
+		select {
+		case err := <-loser:
+			t.Fatalf("competing migration returned early: %v", err)
+		case <-ctx.Done():
+			t.Fatal(ctx.Err())
+		default:
+			runtime.Gosched()
+		}
+	}
+	unblock()
+	for _, results := range []chan error{winner, loser} {
+		if err := migrationResult(t, ctx, results); err != nil {
+			t.Fatal(err)
+		}
+	}
+	assertMigrationVersions(t, b, "1")
+	assertMigrationSQL(t, b, "SELECT description FROM routing_feedback_schema_version", baseline.description+" (pre-existing)")
+	assertMigrationSQL(t, b, "SELECT COUNT(*) FROM sqlite_schema WHERE type='index' AND name IN ('idx_rfs_key_at','idx_rfs_key_kind')", "2")
+	assertMigrationSQL(t, b, "SELECT id FROM routing_feedback_signals", "17")
 }

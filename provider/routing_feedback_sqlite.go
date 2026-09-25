@@ -86,7 +86,7 @@ func NewSQLiteFeedbackStore(ctx context.Context, db *sql.DB, cfg SQLiteFeedbackS
 		return nil, err
 	}
 	if err := runFeedbackMigrations(ctx, db); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("provider: init routing feedback store: %w", err)
 	}
 	return &SQLiteFeedbackStore{db: db, cfg: resolved, ownDB: cfg.ownDB}, nil
 }

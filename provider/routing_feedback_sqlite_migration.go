@@ -180,9 +180,9 @@ func currentFeedbackSchemaVersion(ctx context.Context, db *sql.DB) (int, error) 
 // (false, nil) when the table is absent; (false, err) when the
 // underlying probe fails so callers can distinguish "not present" from
 // "could not determine" — a closed or corrupt DB would otherwise be
-// silently treated as "table missing" and cascade into a worse error
-// later in the migration loop. Mirrors the rag helper of the same name;
-// provider-local copy to avoid an upward dependency on rag/.
+// silently treated as "table missing", and the v1 claim would skip
+// validation of a legacy table. Provider-local, unlike rag's helper of
+// the same name, which treats probe errors as absence.
 func tableExists(ctx context.Context, tx *sql.Tx, name string) (bool, error) {
 	var count int
 	if err := tx.QueryRowContext(ctx,
@@ -196,8 +196,9 @@ func tableExists(ctx context.Context, tx *sql.Tx, name string) (bool, error) {
 // validateExistingSignalsSchema checks that a pre-existing
 // routing_feedback_signals table both has every v1 column AND carries
 // the kind-specific composite CHECK constraint that enforces v1's
-// payload invariants. Used by runFeedbackMigrations when the table is
-// detected without a schema_version row.
+// payload invariants. Called by applyFeedbackMigration inside the v1
+// claim transaction when the table already exists; an error rolls back
+// the claim, so an incompatible table is never stamped as v1.
 //
 // Two checks:
 //  1. A SELECT 0 LIMIT 0 against every v1 column — SQLite reports "no
