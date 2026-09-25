@@ -372,7 +372,7 @@ func openRetrievalFeedbackWeighter(ctx context.Context, path string) (*sql.DB, r
 		return nil, nil, fmt.Errorf("open retrieval feedback db %q: %w", path, err)
 	}
 	db.SetMaxOpenConns(1)
-	for _, pragma := range []string{"PRAGMA journal_mode=WAL", "PRAGMA busy_timeout=5000"} {
+	for _, pragma := range []string{"PRAGMA busy_timeout=5000", "PRAGMA journal_mode=WAL"} {
 		if _, err := db.ExecContext(ctx, pragma); err != nil {
 			_ = db.Close()
 			return nil, nil, fmt.Errorf("retrieval feedback %s: %w", pragma, err)

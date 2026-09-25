@@ -58,7 +58,7 @@ func Open(ctx context.Context, path string) (*Store, error) {
 	// :memory: does not open a fresh private DB per connection.
 	db.SetMaxOpenConns(1)
 	if path != ":memory:" {
-		for _, pragma := range []string{"PRAGMA journal_mode=WAL", "PRAGMA busy_timeout=5000"} {
+		for _, pragma := range []string{"PRAGMA busy_timeout=5000", "PRAGMA journal_mode=WAL"} {
 			if _, err := db.ExecContext(ctx, pragma); err != nil {
 				_ = db.Close()
 				return nil, fmt.Errorf("transcript: %s: %w", pragma, err)

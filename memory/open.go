@@ -56,7 +56,7 @@ func OpenHardenedDB(ctx context.Context, path string) (*sql.DB, error) {
 		return nil, fmt.Errorf("memory: open db %q: %w", path, err)
 	}
 	db.SetMaxOpenConns(1)
-	for _, pragma := range []string{"PRAGMA journal_mode=WAL", "PRAGMA busy_timeout=5000"} {
+	for _, pragma := range []string{"PRAGMA busy_timeout=5000", "PRAGMA journal_mode=WAL"} {
 		if _, err := db.ExecContext(ctx, pragma); err != nil {
 			_ = db.Close()
 			_ = SecureDBFiles(path)

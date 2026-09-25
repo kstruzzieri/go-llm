@@ -117,17 +117,18 @@ func OpenSQLiteFeedbackStore(ctx context.Context, path string, cfg SQLiteFeedbac
 	db.SetMaxOpenConns(1)
 
 	if path != ":memory:" {
-		if _, err := db.ExecContext(ctx, "PRAGMA journal_mode=WAL"); err != nil {
-			_ = db.Close()
-			return nil, fmt.Errorf("provider: set WAL mode: %w", err)
-		}
-		// busy_timeout = 5000ms: bounded wait on a contended write lock
-		// before giving up with SQLITE_BUSY. Avoids tight retry loops in
-		// the calling code while still respecting the feedbackWriteTimeout
-		// the caller passes on the outer ctx.
+		// busy_timeout = 5000ms: bounded wait on a contended lock before
+		// giving up with SQLITE_BUSY, instead of tight retry loops in the
+		// calling code. A ctx deadline does not shorten that wait. Set it
+		// first: the journal_mode PRAGMA reads the database and would
+		// otherwise fail at once while another connection holds the lock.
 		if _, err := db.ExecContext(ctx, "PRAGMA busy_timeout=5000"); err != nil {
 			_ = db.Close()
 			return nil, fmt.Errorf("provider: set busy_timeout: %w", err)
+		}
+		if _, err := db.ExecContext(ctx, "PRAGMA journal_mode=WAL"); err != nil {
+			_ = db.Close()
+			return nil, fmt.Errorf("provider: set WAL mode: %w", err)
 		}
 	}
 	cfg.ownDB = true

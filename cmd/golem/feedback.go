@@ -209,7 +209,7 @@ func openFeedbackService(ctx context.Context, root, dbPath string, warn func(str
 			_ = writer.Close()
 		}
 	}()
-	for _, pragma := range []string{"PRAGMA journal_mode=WAL", "PRAGMA busy_timeout=1000"} {
+	for _, pragma := range []string{"PRAGMA busy_timeout=1000", "PRAGMA journal_mode=WAL"} {
 		if _, err := writer.ExecContext(ctx, pragma); err != nil {
 			return nil, fmt.Errorf("%s: %w", pragma, err)
 		}

@@ -144,7 +144,7 @@ func openSession(ctx context.Context, dbPath, id string) (*session, sessionInfo,
 	// modernc.org/sqlite applies PRAGMAs per-connection; clamp the pool to one so
 	// WAL + busy_timeout hold for every write.
 	db.SetMaxOpenConns(1)
-	for _, pragma := range []string{"PRAGMA journal_mode=WAL", "PRAGMA busy_timeout=5000"} {
+	for _, pragma := range []string{"PRAGMA busy_timeout=5000", "PRAGMA journal_mode=WAL"} {
 		if _, err := db.ExecContext(ctx, pragma); err != nil {
 			_ = db.Close()
 			return nil, sessionInfo{}, fmt.Errorf("golem: session db %s: %w", pragma, err)
