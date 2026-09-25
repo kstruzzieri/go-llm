@@ -1,0 +1,17 @@
+### Fixed — Serialize remaining SQLite migration runners (#549)
+
+Feedback, fingerprint, and provider routing-feedback stores now claim each
+migration version under SQLite's write lock before applying schema changes.
+Concurrent openers skip steps another opener committed; failed steps roll back
+both the version claim and schema changes while earlier steps remain intact.
+Constructor contexts now reach the migration runners, and current-schema opens
+only read.
+
+Provider routing-feedback legacy tables retain column/CHECK validation, rows,
+and existing indexes. Validation and creation of missing baseline indexes now
+commit with the v1 claim, so incompatible tables are never stamped as migrated.
+
+Callers must configure a positive `busy_timeout` on every migrating connection
+(e.g. `_pragma=busy_timeout(5000)` with modernc SQLite) and complete journal-mode
+setup before concurrent opens. Lock and I/O errors still propagate. This does
+not change RAG migrations or serialize concurrent `journal_mode=WAL` setup.

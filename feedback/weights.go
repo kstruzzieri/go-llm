@@ -100,7 +100,7 @@ func NewSQLiteWeightReader(ctx context.Context, dbPath string, config CollectorC
 		_ = preflight.Close()
 		return nil, fmt.Errorf("feedback: open SQLite weight reader preflight %q: %w", dbPath, err)
 	}
-	version, err := currentSchemaVersion(preflight)
+	version, err := currentSchemaVersion(ctx, preflight)
 	if err != nil {
 		_ = preflight.Close()
 		return nil, fmt.Errorf("feedback: validate SQLite weight reader schema: %w", err)

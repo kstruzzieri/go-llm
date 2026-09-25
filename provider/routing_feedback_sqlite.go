@@ -63,18 +63,20 @@ type SQLiteFeedbackStore struct {
 // NewSQLiteFeedbackStore wraps a caller-owned *sql.DB. Runs the schema
 // migrations; the caller retains responsibility for closing the DB.
 //
-// PRAGMA expectations for the caller-owned path: the routing-feedback
-// workload assumes WAL journal mode (better concurrent-read latency)
-// and a positive busy_timeout (bounded wait on contended write locks).
-// Because PRAGMAs in modernc.org/sqlite apply per-connection, callers
-// who want both to take effect across the whole pool must either
-//   - clamp `db.SetMaxOpenConns(1)` (simplest; serializes writes), or
-//   - apply the PRAGMAs via a `sql.Connector` / DSN `_pragma=` form
-//     before passing the *sql.DB in.
+// Concurrent migrations claim each version under SQLite's write lock. Each
+// migrating connection needs a positive busy_timeout, for example via the
+// modernc SQLite DSN parameter _pragma=busy_timeout(5000). A one-off PRAGMA
+// configures only that connection, not replacements in the pool. A zero or
+// expired timeout returns the underlying lock error. Cancellation is observed
+// between statements; a waiting claim may take up to busy_timeout to return.
+// Current-schema opens only read. Compatible unversioned tables are validated
+// under the claim and receive missing baseline indexes without replacing rows
+// or existing indexes.
 //
-// OpenSQLiteFeedbackStore does the former internally. Caller-owned
-// users sharing a workspace DB with rag/ inherit whatever that
-// package configured.
+// WAL is recommended for concurrent reads. Complete journal_mode setup before
+// racing constructors: migration coordination does not serialize that setup.
+// OpenSQLiteFeedbackStore configures a single connection for the convenience
+// path; caller-owned handles retain their own connection configuration.
 func NewSQLiteFeedbackStore(ctx context.Context, db *sql.DB, cfg SQLiteFeedbackStoreConfig) (*SQLiteFeedbackStore, error) {
 	if db == nil {
 		return nil, errors.New("provider: SQLiteFeedbackStore requires non-nil *sql.DB")
@@ -83,7 +85,7 @@ func NewSQLiteFeedbackStore(ctx context.Context, db *sql.DB, cfg SQLiteFeedbackS
 	if err != nil {
 		return nil, err
 	}
-	if err := runFeedbackMigrations(db); err != nil {
+	if err := runFeedbackMigrations(ctx, db); err != nil {
 		return nil, err
 	}
 	return &SQLiteFeedbackStore{db: db, cfg: resolved, ownDB: cfg.ownDB}, nil

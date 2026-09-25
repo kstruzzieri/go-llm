@@ -1,23 +1,14 @@
-// routing_feedback_sqlite_migration.go owns the schema migrations for the
-// SQLite-backed routing-feedback store. Schema lives in a version-tracking
-// table (routing_feedback_schema_version).
-//
-// Atomicity guarantee, per migration: each entry in feedbackMigrations
-// runs its DDL and version-record INSERT inside one transaction, so a
-// crash between those two cannot leave a half-applied state for that
-// migration. Across migrations the guarantee is only "no partial
-// individual step" — a crash between v1 and v2 commits leaves v1 applied
-// and the next startup picks up at v2. The pre-migration-detection path
-// (recording v1 for a DB that already has routing_feedback_signals)
-// uses its own transaction; a crash between that and v2's commit also
-// safely resumes at v2.
-//
-// Pattern mirrors rag/migration.go so future migrations follow the same
-// shape; intentional duplication beats coupling provider/ to rag/ types.
+// routing_feedback_sqlite_migration.go owns the routing-feedback schema.
+// Each step claims its version before reads or DDL and commits both together.
+// Failed steps roll back; earlier committed steps survive. Legacy v1 tables
+// are validated and given any missing baseline indexes under the same claim.
+// The package-local pattern mirrors conversation/migration.go (#543).
 package provider
 
 import (
+	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -75,79 +66,112 @@ func migrateFeedbackV1(tx *sql.Tx) error {
 	return nil
 }
 
-// runFeedbackMigrations applies all pending migrations. Handles three
-// scenarios identical to rag/runMigrations:
-//  1. Fresh DB: creates routing_feedback_schema_version, runs all migrations.
-//  2. Existing DB at version N: runs only versions > N.
-//  3. Pre-migration DB (routing_feedback_signals table exists, no version
-//     row): records v1 as already-applied, then runs v2+.
-func runFeedbackMigrations(db *sql.DB) error {
+func runFeedbackMigrations(ctx context.Context, db *sql.DB) error {
+	return runFeedbackMigrationsWith(ctx, db, feedbackMigrations)
+}
+
+func runFeedbackMigrationsWith(ctx context.Context, db *sql.DB, list []migration) error {
+	if ctx == nil {
+		return errors.New("provider: nil migration context")
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if len(list) == 0 {
+		return nil
+	}
+	currentVersion, err := currentFeedbackSchemaVersion(ctx, db)
+	if err != nil {
+		return err
+	}
+	if currentVersion >= list[len(list)-1].version {
+		return nil
+	}
 	const createVersionTable = `CREATE TABLE IF NOT EXISTS routing_feedback_schema_version (
 		version     INTEGER PRIMARY KEY,
 		description TEXT NOT NULL,
 		applied_at  INTEGER NOT NULL
 	)`
-	if _, err := db.Exec(createVersionTable); err != nil {
-		return fmt.Errorf("provider: create feedback version table: %w", err)
+	if _, err := db.ExecContext(ctx, createVersionTable); err != nil {
+		return fmt.Errorf("provider: create version table: %w", err)
 	}
-
-	currentVersion, err := currentFeedbackSchemaVersion(db)
-	if err != nil {
-		return err
-	}
-
-	exists, err := tableExists(db, "routing_feedback_signals")
-	if err != nil {
-		return fmt.Errorf("provider: probe routing_feedback_signals existence: %w", err)
-	}
-	if currentVersion == 0 && exists {
-		// Database predates the migration runner. Validate the existing
-		// schema matches v1 before marking it as applied; blessing an
-		// incompatible table would surface as a confusing "no such
-		// column" error far from the actual cause — or worse, silently
-		// accept rows that v1's CHECK constraints would have rejected.
-		if err := validateExistingSignalsSchema(db); err != nil {
-			return fmt.Errorf("provider: pre-existing routing_feedback_signals table is incompatible with v1 schema: %w", err)
-		}
-		if err := recordFeedbackVersionsUpTo(db, 1); err != nil {
-			return err
-		}
-		currentVersion = 1
-	}
-
-	for _, m := range feedbackMigrations {
+	for _, m := range list {
 		if m.version <= currentVersion {
 			continue
 		}
-		tx, err := db.Begin()
-		if err != nil {
-			return fmt.Errorf("provider: begin feedback migration v%d: %w", m.version, err)
-		}
-		if err := m.fn(tx); err != nil {
-			_ = tx.Rollback()
-			return fmt.Errorf("provider: feedback migration v%d (%s): %w", m.version, m.description, err)
-		}
-		if _, err := tx.Exec(
-			`INSERT INTO routing_feedback_schema_version (version, description, applied_at) VALUES (?, ?, ?)`,
-			m.version, m.description, time.Now().Unix(),
-		); err != nil {
-			_ = tx.Rollback()
-			return fmt.Errorf("provider: record feedback version %d: %w", m.version, err)
-		}
-		if err := tx.Commit(); err != nil {
-			return fmt.Errorf("provider: commit feedback migration v%d: %w", m.version, err)
+		if err := applyFeedbackMigration(ctx, db, m); err != nil {
+			return err
 		}
 	}
 	return nil
 }
 
-// currentFeedbackSchemaVersion returns the highest applied version, or 0
-// when no version rows exist.
-func currentFeedbackSchemaVersion(db *sql.DB) (int, error) {
-	var version int
-	err := db.QueryRow(`SELECT COALESCE(MAX(version), 0) FROM routing_feedback_schema_version`).Scan(&version)
+func applyFeedbackMigration(ctx context.Context, db *sql.DB, m migration) (err error) {
+	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
-		return 0, fmt.Errorf("provider: query feedback schema version: %w", err)
+		return fmt.Errorf("provider: begin migration v%d: %w", m.version, err)
+	}
+	defer func() {
+		if rbErr := tx.Rollback(); rbErr != nil && !errors.Is(rbErr, sql.ErrTxDone) {
+			err = errors.Join(err, fmt.Errorf("provider: rollback migration v%d: %w", m.version, rbErr))
+		}
+	}()
+
+	// Claim before any reads or DDL so SQLite waits for the writer without a
+	// read-lock upgrade. The claim and migration commit together; a duplicate
+	// version means another opener already committed this step.
+	result, err := tx.ExecContext(ctx,
+		`INSERT INTO routing_feedback_schema_version (version, description, applied_at)
+		 VALUES (?, ?, ?) ON CONFLICT(version) DO NOTHING`,
+		m.version, m.description, time.Now().Unix())
+	if err != nil {
+		return fmt.Errorf("provider: claim migration v%d: %w", m.version, err)
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("provider: claim migration v%d rows: %w", m.version, err)
+	}
+	if affected == 0 {
+		return nil
+	}
+	if m.version == 1 {
+		exists, err := tableExists(ctx, tx, "routing_feedback_signals")
+		if err != nil {
+			return fmt.Errorf("provider: probe routing_feedback_signals existence: %w", err)
+		}
+		if exists {
+			if err := validateExistingSignalsSchema(ctx, tx); err != nil {
+				return fmt.Errorf("provider: pre-existing routing_feedback_signals table is incompatible with v1 schema: %w", err)
+			}
+			if _, err := tx.ExecContext(ctx,
+				`UPDATE routing_feedback_schema_version SET description = ? WHERE version = 1`,
+				m.description+" (pre-existing)"); err != nil {
+				return fmt.Errorf("provider: record pre-existing feedback version: %w", err)
+			}
+		}
+	}
+	if err := m.fn(tx); err != nil {
+		return fmt.Errorf("provider: migration v%d (%s): %w", m.version, m.description, err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("provider: commit migration v%d: %w", m.version, err)
+	}
+	return nil
+}
+
+func currentFeedbackSchemaVersion(ctx context.Context, db *sql.DB) (int, error) {
+	var exists bool
+	if err := db.QueryRowContext(ctx,
+		`SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'routing_feedback_schema_version')`,
+	).Scan(&exists); err != nil {
+		return 0, fmt.Errorf("provider: check version table: %w", err)
+	}
+	if !exists {
+		return 0, nil
+	}
+	var version int
+	if err := db.QueryRowContext(ctx, `SELECT COALESCE(MAX(version), 0) FROM routing_feedback_schema_version`).Scan(&version); err != nil {
+		return 0, fmt.Errorf("provider: query schema version: %w", err)
 	}
 	return version, nil
 }
@@ -159,9 +183,9 @@ func currentFeedbackSchemaVersion(db *sql.DB) (int, error) {
 // silently treated as "table missing" and cascade into a worse error
 // later in the migration loop. Mirrors the rag helper of the same name;
 // provider-local copy to avoid an upward dependency on rag/.
-func tableExists(db *sql.DB, name string) (bool, error) {
+func tableExists(ctx context.Context, tx *sql.Tx, name string) (bool, error) {
 	var count int
-	if err := db.QueryRow(
+	if err := tx.QueryRowContext(ctx,
 		`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?`, name,
 	).Scan(&count); err != nil {
 		return false, err
@@ -182,8 +206,8 @@ func tableExists(db *sql.DB, name string) (bool, error) {
 //     error_class CHECK is present. Without this, a pre-existing table
 //     that had the right columns but lacked the CHECK would be blessed
 //     as v1 and silently accept rows v1 would have rejected.
-func validateExistingSignalsSchema(db *sql.DB) error {
-	if _, err := db.Exec(`SELECT
+func validateExistingSignalsSchema(ctx context.Context, tx *sql.Tx) error {
+	if _, err := tx.ExecContext(ctx, `SELECT
 		id, provider, model, use_case, kind, strength, at_ns,
 		latency_ms, error_class, route_id, completion_id, meta
 		FROM routing_feedback_signals
@@ -191,7 +215,7 @@ func validateExistingSignalsSchema(db *sql.DB) error {
 		return fmt.Errorf("column check: %w", err)
 	}
 	var ddl string
-	if err := db.QueryRow(
+	if err := tx.QueryRowContext(ctx,
 		`SELECT sql FROM sqlite_master WHERE type='table' AND name='routing_feedback_signals'`,
 	).Scan(&ddl); err != nil {
 		return fmt.Errorf("sqlite_master lookup: %w", err)
@@ -208,33 +232,6 @@ func validateExistingSignalsSchema(db *sql.DB) error {
 		if !strings.Contains(lower, want) {
 			return fmt.Errorf("missing v1 CHECK fingerprint %q in pre-existing DDL", want)
 		}
-	}
-	return nil
-}
-
-// recordFeedbackVersionsUpTo inserts version records for every migration
-// up to and including upTo. Used for pre-migration DB detection so a
-// crash cannot leave a partial version state.
-func recordFeedbackVersionsUpTo(db *sql.DB, upTo int) error {
-	tx, err := db.Begin()
-	if err != nil {
-		return fmt.Errorf("provider: begin feedback version recording: %w", err)
-	}
-	now := time.Now().Unix()
-	for _, m := range feedbackMigrations {
-		if m.version > upTo {
-			break
-		}
-		if _, err := tx.Exec(
-			`INSERT OR IGNORE INTO routing_feedback_schema_version (version, description, applied_at) VALUES (?, ?, ?)`,
-			m.version, m.description+" (pre-existing)", now,
-		); err != nil {
-			_ = tx.Rollback()
-			return fmt.Errorf("provider: record feedback version %d: %w", m.version, err)
-		}
-	}
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("provider: commit feedback version recording: %w", err)
 	}
 	return nil
 }

@@ -203,7 +203,8 @@ remove it, and recreating the same ID restarts at revision 1; an old snapshot ma
 then match that reused revision. This release does not add incarnation tokens,
 tombstones, or protection against that deletion/recreation race (#542).
 
-Conversation and memory migration runners coordinate concurrent openers through
+Conversation, memory, feedback, fingerprint, and provider routing-feedback
+migration runners coordinate concurrent openers through
 SQLite's write lock. Each step claims its version before running, then commits
 the version row and schema changes together. A competing opener skips a step
 already committed by another opener. Failed steps roll back while earlier
@@ -215,7 +216,15 @@ to the busy timeout, before the canceled context is reported. Current-schema
 opens require only reads; memory record signing initialization is separate and
 may write. This coordination covers the migration runners. Caller setup,
 including the initial `journal_mode=WAL` switch, must complete before racing the
-runners.
+runners. A one-off PRAGMA on a `*sql.DB` does not configure every pooled or
+replacement connection; use the DSN or a connection hook for `busy_timeout`.
+
+For provider routing feedback, unversioned legacy tables still must pass the
+existing column and CHECK-fingerprint validation. Validation, creation of
+missing `idx_rfs_key_at` / `idx_rfs_key_kind` indexes, and the v1 version claim
+share one transaction. Existing rows and indexes are retained; incompatible
+legacy tables fail without a committed version claim. Already-versioned
+schemas keep the read-only fast path and are not revalidated or repaired.
 
 ## RAG Details
 
