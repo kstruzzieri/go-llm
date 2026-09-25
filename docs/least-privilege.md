@@ -20,6 +20,42 @@ Provider clients currently use fixed inference, embedding and model-listing path
 
 The per-user signing key identifies the author of receipts, not a separate upstream service principal. Provider API keys are configuration credentials; no task-scoped credential broker is present. `/consult` rebuilds its child environment and explicitly trusts vendor-process egress. Golem does not independently confine the consultant process; Codex's requested read-only sandbox is a vendor-runtime control, not whole-process isolation supplied by Golem. See [grant security](golem.md#grant-security-and-observation-fencing), [MCP trust](golem.md#external-mcp-catalog-trust), and [consult boundaries](consult.md).
 
+## Workspace mutation boundary (#552)
+
+On Linux and Darwin, Workspace writes, deletes and temporary cleanup act relative
+to one validated parent directory descriptor. Root replacement and observed
+component identity changes fail closed. `write_file`, `edit_file`, RAM undo and
+checkpoint undo verify the expected content hash (and recorded mode when tracked)
+through that same parent. A separate directory substituted at the old pathname
+cannot inherit the earlier check. Conditional operations require content-read
+permission; unconditional replacement/deletion does not.
+
+The admitted directory remains authoritative for that operation even if another
+process moves it outside the root or under a denied spelling. This is directory
+capability confinement, not continuous pathname confinement or process isolation.
+Overwrite/delete are not atomic compare-and-swap of the checked leaf or bytes:
+a last-instant replacement entry may be replaced/unlinked, but the namespace
+operation never follows its final symlink or removes a directory. Temporary
+identity checks also have this final-check race. Foreign temp entries observed
+before installation/cleanup are left alone; externally moved temps are not
+searched for, and cleanup failures are returned with the original error.
+
+Targets admitted absent use atomic no-replace installation, including legacy
+unconditional `WriteFileAtomic` calls. Concurrent creation is refused; unsupported
+no-replace operations fail closed without a plain-rename fallback. Existing
+targets retain permission bits; new files use 0600. There is no stronger crash
+durability promise or automatic stale-temp sweeping.
+
+Existing names are checked against canonical on-disk spelling. With a ScopeGuard,
+unverifiable names under an unenumerable directory fail closed. Without a guard,
+search-only parents remain usable. A missing name has no canonical spelling:
+hosts reserving names must cover the filesystem's case/normalization-equivalent
+spellings or conservatively restrict accepted names. Workspace imposes no global
+normalization. Journals retain logical paths and do not follow directory renames;
+checkpoint after-state failures retain pending intent and refuse success. Other
+platforms keep the checked-path backend without these concurrent mutation
+guarantees.
+
 ## ZT-700: operational least privilege and observability
 
 This workstream belongs to [#429](https://github.com/kstruzzieri/go-llm/issues/429). It connects existing controls and makes effective authority and decisions inspectable.

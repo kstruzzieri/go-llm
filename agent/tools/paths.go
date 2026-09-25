@@ -77,6 +77,12 @@ func (e scopeDeniedError) Is(target error) bool { return target == errScopeDenie
 // path — never its ancestors — so a guard must deny descendants itself (deny
 // "secrets" AND "secrets/..."). Directory walks consult it per entry and skip
 // denied directories.
+//
+// Descriptor-based reads and Linux/Darwin mutations use verified on-disk spelling
+// for existing entries and fail closed when a guard's spelling cannot be proven.
+// Missing entries retain their requested spelling: hosts reserving absent names
+// must cover the filesystem's equivalent case/normalization spellings themselves.
+// Workspace does not impose a global folding/normalization algorithm.
 type ScopeGuard func(rel string, write bool) error
 
 // Workspace is the single audited chokepoint for all filesystem access within the
@@ -91,6 +97,10 @@ type Workspace struct {
 	scopeDenials *atomic.Int64 // scoped child policy evaluations, not unique paths
 	// beforeReadOpen is a per-workspace deterministic race-test seam.
 	beforeReadOpen func()
+	beforeMutation func(mutationPhase, string) error // private deterministic phase/failure seam
+	// noReplaceRename replaces the platform no-replace install in tests only, so
+	// an unsupported-filesystem result is observed at the real call site.
+	noReplaceRename func(srcFd int, tmpName string, dstFd int, dstName string) error
 }
 
 // CanonicalWorkspaceRoot resolves a workspace root to its absolute, symlink-free
@@ -410,140 +420,6 @@ func NewFileTools(root string) ([]agent.Tool, error) {
 		return nil, err
 	}
 	return NewFileToolsForWorkspace(ws), nil
-}
-
-// resolveWriteTarget contains a path to a write destination: cleanRel containment,
-// symlink-free ancestry, and an existing parent directory. If the leaf exists it
-// must be a regular file (never overwrite a symlink or directory). priorExists
-// reports whether the leaf already exists. No filesystem mutation occurs here.
-func (w *Workspace) resolveWriteTarget(p string) (abs string, priorExists bool, err error) {
-	abs, err = w.cleanRel(p)
-	if err != nil {
-		return "", false, err
-	}
-	if err := w.checkScope(abs, true); err != nil {
-		return "", false, err
-	}
-	if err := w.rejectSymlinkAncestors(abs); err != nil {
-		return "", false, err
-	}
-	if fi, perr := os.Lstat(filepath.Dir(abs)); perr != nil || !fi.IsDir() {
-		return "", false, errParentMissing
-	}
-	fi, lerr := os.Lstat(abs)
-	if lerr != nil {
-		if os.IsNotExist(lerr) {
-			return abs, false, nil // new file
-		}
-		return "", false, lerr
-	}
-	if fi.Mode()&os.ModeSymlink != 0 {
-		return "", false, errSymlink
-	}
-	if !fi.Mode().IsRegular() {
-		return "", false, errNotRegular
-	}
-	return abs, true, nil
-}
-
-// CanonicalPathForUndo returns the cleaned workspace-relative spelling used by
-// the filesystem for a current or future write target.
-func (w *Workspace) CanonicalPathForUndo(p string) (string, error) {
-	abs, _, err := w.resolveWriteTarget(p)
-	if err != nil {
-		return "", err
-	}
-	canonical, err := canonicalFuturePath(w.root, abs)
-	if err != nil {
-		return "", err
-	}
-	if !w.underRoot(canonical) {
-		return "", errEscape
-	}
-	rel, err := filepath.Rel(w.root, canonical)
-	if err != nil {
-		return "", err
-	}
-	return filepath.ToSlash(rel), nil
-}
-
-// WriteFileAtomic writes content to a workspace-relative path by creating a temp
-// file in the SAME directory, syncing best-effort, and renaming over the target.
-// It re-validates the target through resolveWriteTarget immediately before the
-// rename so a symlink swapped in after planning is rejected. On POSIX, rename
-// replaces a final symlink rather than following it, so containment holds even if
-// the final component changes after the last check. This is NOT a crash-durability
-// contract (undo is in-memory).
-func (w *Workspace) WriteFileAtomic(p string, content []byte) error {
-	abs, priorExists, err := w.resolveWriteTarget(p)
-	if err != nil {
-		return err
-	}
-	mode := os.FileMode(0o600)
-	if priorExists {
-		fi, err := os.Lstat(abs)
-		if err != nil {
-			return err
-		}
-		mode = fi.Mode().Perm()
-	}
-	dir := filepath.Dir(abs)
-	tmp, err := os.CreateTemp(dir, ".golem-*.tmp")
-	if err != nil {
-		return err
-	}
-	tmpName := tmp.Name()
-	cleanup := func() { _ = tmp.Close(); _ = os.Remove(tmpName) }
-	if _, err := tmp.Write(content); err != nil {
-		cleanup()
-		return err
-	}
-	if err := tmp.Chmod(mode); err != nil {
-		cleanup()
-		return err
-	}
-	_ = tmp.Sync() // best-effort durability; not a crash guarantee
-	if err := tmp.Close(); err != nil {
-		_ = os.Remove(tmpName)
-		return err
-	}
-	// Re-validate just before rename; reject a symlink/dir swapped in meanwhile.
-	if _, _, err := w.resolveWriteTarget(p); err != nil {
-		_ = os.Remove(tmpName)
-		return err
-	}
-	if err := os.Rename(tmpName, abs); err != nil {
-		_ = os.Remove(tmpName)
-		return err
-	}
-	return nil
-}
-
-// RemoveFile deletes a single regular file inside the workspace. It refuses
-// directories and symlinks and enforces containment. Used by /undo to revert a
-// file that did not exist before a mutation.
-func (w *Workspace) RemoveFile(p string) error {
-	abs, err := w.cleanRel(p)
-	if err != nil {
-		return err
-	}
-	if err := w.checkScope(abs, true); err != nil {
-		return err
-	}
-	if err := w.rejectSymlinkAncestors(abs); err != nil {
-		return err
-	}
-	fi, err := os.Lstat(abs)
-	if err != nil {
-		return err
-	}
-	if fi.Mode()&os.ModeSymlink != 0 {
-		return errSymlink
-	}
-	if !fi.Mode().IsRegular() {
-		return errNotRegular
-	}
-	return os.Remove(abs)
 }
 
 // readAll reads a workspace-relative regular file in full, TOCTOU-hardened via
