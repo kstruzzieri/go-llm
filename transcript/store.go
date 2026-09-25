@@ -17,6 +17,7 @@ import (
 	_ "modernc.org/sqlite"
 
 	"github.com/kstruzzieri/go-llm/conversation"
+	"github.com/kstruzzieri/go-llm/internal/sqlitedsn"
 )
 
 // Store persists MCP chat calls: an immutable raw_chat_calls row (source of
@@ -49,20 +50,23 @@ func Open(ctx context.Context, path string) (*Store, error) {
 			return nil, err
 		}
 	}
-	db, err := sql.Open("sqlite", path)
+	// The DSN gives every connection a 5s busy_timeout, including
+	// replacements database/sql opens after a context-cancelled statement.
+	dsn, err := sqlitedsn.WithBusyTimeout(path, 5*time.Second)
 	if err != nil {
 		return nil, fmt.Errorf("transcript: open sqlite %q: %w", path, err)
 	}
-	// modernc.org/sqlite applies PRAGMAs per-connection; clamp the pool to one
-	// connection so the WAL + busy_timeout settings hold for every write, and so
-	// :memory: does not open a fresh private DB per connection.
+	db, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		return nil, fmt.Errorf("transcript: open sqlite %q: %w", path, err)
+	}
+	// One connection serializes writes and keeps :memory: from opening a
+	// fresh private DB per connection.
 	db.SetMaxOpenConns(1)
 	if path != ":memory:" {
-		for _, pragma := range []string{"PRAGMA busy_timeout=5000", "PRAGMA journal_mode=WAL"} {
-			if _, err := db.ExecContext(ctx, pragma); err != nil {
-				_ = db.Close()
-				return nil, fmt.Errorf("transcript: %s: %w", pragma, err)
-			}
+		if _, err := db.ExecContext(ctx, "PRAGMA journal_mode=WAL"); err != nil {
+			_ = db.Close()
+			return nil, fmt.Errorf("transcript: PRAGMA journal_mode=WAL: %w", err)
 		}
 		if err := chmodTranscriptDBFiles(path); err != nil {
 			_ = db.Close()

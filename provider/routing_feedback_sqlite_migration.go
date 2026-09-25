@@ -221,10 +221,13 @@ func validateExistingSignalsSchema(ctx context.Context, tx *sql.Tx) error {
 	).Scan(&ddl); err != nil {
 		return fmt.Errorf("sqlite_master lookup: %w", err)
 	}
-	// The composite CHECK fingerprint — case-insensitive, whitespace-
-	// tolerant. We only require the disjunction's distinguishing tokens
-	// be present, not byte-for-byte identical, so a DBA-normalised DDL
-	// (different newlines, different quoting) still passes.
+	// The composite CHECK fingerprint: a case-insensitive substring match
+	// on the distinguishing tokens exactly as migrateFeedbackV1 spells
+	// them. Line breaks between clauses do not matter, but different
+	// spacing inside a token (kind='success') or quoted identifiers
+	// ("kind") fail closed. go-llm has always created this table through
+	// the v1 migration, which records a version row, so only hand-made
+	// tables reach this check.
 	lower := strings.ToLower(ddl)
 	for _, want := range []string{
 		"kind = 'success'", "kind = 'failure'", "kind = 'latency'",

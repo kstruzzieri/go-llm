@@ -11,8 +11,11 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 
 	_ "modernc.org/sqlite"
+
+	"github.com/kstruzzieri/go-llm/internal/sqlitedsn"
 )
 
 const (
@@ -46,22 +49,26 @@ func PrepareDBFile(path string) error {
 
 // OpenHardenedDB prepares the hardened DB file and opens it WAL-mode with a
 // single connection (modernc.org/sqlite is not safe for concurrent writers
-// on separate connections to the same file).
+// on separate connections to the same file). The DSN gives every connection,
+// including replacements database/sql opens after a context-cancelled
+// statement, a 5s busy_timeout.
 func OpenHardenedDB(ctx context.Context, path string) (*sql.DB, error) {
 	if err := PrepareDBFile(path); err != nil {
 		return nil, err
 	}
-	db, err := sql.Open("sqlite", path)
+	dsn, err := sqlitedsn.WithBusyTimeout(path, 5*time.Second)
+	if err != nil {
+		return nil, fmt.Errorf("memory: open db %q: %w", path, err)
+	}
+	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("memory: open db %q: %w", path, err)
 	}
 	db.SetMaxOpenConns(1)
-	for _, pragma := range []string{"PRAGMA busy_timeout=5000", "PRAGMA journal_mode=WAL"} {
-		if _, err := db.ExecContext(ctx, pragma); err != nil {
-			_ = db.Close()
-			_ = SecureDBFiles(path)
-			return nil, fmt.Errorf("memory: db %s: %w", pragma, err)
-		}
+	if _, err := db.ExecContext(ctx, "PRAGMA journal_mode=WAL"); err != nil {
+		_ = db.Close()
+		_ = SecureDBFiles(path)
+		return nil, fmt.Errorf("memory: db PRAGMA journal_mode=WAL: %w", err)
 	}
 	return db, nil
 }

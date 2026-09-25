@@ -19,6 +19,8 @@ import (
 	"time"
 
 	_ "modernc.org/sqlite"
+
+	"github.com/kstruzzieri/go-llm/internal/sqlitedsn"
 )
 
 // Compile-time interface check.
@@ -75,8 +77,8 @@ type SQLiteFeedbackStore struct {
 //
 // WAL is recommended for concurrent reads. Complete journal_mode setup before
 // racing constructors: migration coordination does not serialize that setup.
-// OpenSQLiteFeedbackStore configures a single connection for the convenience
-// path; caller-owned handles retain their own connection configuration.
+// OpenSQLiteFeedbackStore sets busy_timeout in its DSN and uses a single
+// connection; caller-owned handles retain their own connection configuration.
 func NewSQLiteFeedbackStore(ctx context.Context, db *sql.DB, cfg SQLiteFeedbackStoreConfig) (*SQLiteFeedbackStore, error) {
 	if db == nil {
 		return nil, errors.New("provider: SQLiteFeedbackStore requires non-nil *sql.DB")
@@ -99,33 +101,24 @@ func OpenSQLiteFeedbackStore(ctx context.Context, path string, cfg SQLiteFeedbac
 	if path == "" {
 		return nil, errors.New("provider: OpenSQLiteFeedbackStore requires non-empty path; pass \":memory:\" explicitly")
 	}
-	db, err := sql.Open("sqlite", path)
+	// busy_timeout = 5000ms: bounded wait on a contended lock before giving
+	// up with SQLITE_BUSY, instead of tight retry loops in the calling code.
+	// A ctx deadline does not shorten that wait. The DSN sets it on every
+	// connection: the journal_mode PRAGMA below reads the database, and
+	// database/sql replaces a connection after a context-cancelled statement.
+	dsn, err := sqlitedsn.WithBusyTimeout(path, 5*time.Second)
 	if err != nil {
 		return nil, fmt.Errorf("provider: open sqlite %q: %w", path, err)
 	}
-	// Clamp the connection pool to one connection regardless of path.
-	// modernc.org/sqlite applies PRAGMAs per-connection; without this,
-	// the WAL + busy_timeout PRAGMAs below would only apply to the
-	// connection that received them, and other connections in the pool
-	// would silently revert to journal_mode=DELETE / busy_timeout=0 —
-	// exactly the contention behavior the PRAGMAs exist to prevent.
-	// Routing-feedback writes are low-rate; serializing through one
-	// connection is acceptable until benchmarks show otherwise.
-	// (:memory: also requires MaxOpenConns(1) because each connection
-	// opens its own private database otherwise — same outcome via a
-	// different mechanism.)
+	db, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		return nil, fmt.Errorf("provider: open sqlite %q: %w", path, err)
+	}
+	// One connection serializes the low-rate routing-feedback writes and
+	// keeps :memory: from opening a private database per connection.
 	db.SetMaxOpenConns(1)
 
 	if path != ":memory:" {
-		// busy_timeout = 5000ms: bounded wait on a contended lock before
-		// giving up with SQLITE_BUSY, instead of tight retry loops in the
-		// calling code. A ctx deadline does not shorten that wait. Set it
-		// first: the journal_mode PRAGMA reads the database and would
-		// otherwise fail at once while another connection holds the lock.
-		if _, err := db.ExecContext(ctx, "PRAGMA busy_timeout=5000"); err != nil {
-			_ = db.Close()
-			return nil, fmt.Errorf("provider: set busy_timeout: %w", err)
-		}
 		if _, err := db.ExecContext(ctx, "PRAGMA journal_mode=WAL"); err != nil {
 			_ = db.Close()
 			return nil, fmt.Errorf("provider: set WAL mode: %w", err)
