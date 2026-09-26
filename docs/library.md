@@ -159,18 +159,42 @@ resp, _ := client.Chat(ctx, ollama.ChatRequest{
 
 `conversation.SQLiteStore` saves complete conversation snapshots. `Load` returns
 the stored `Conversation.Revision`; pass that revision back to `Save` with the
-edited snapshot. Revision zero means create-only. A successful create stores
-revision 1, and each successful update stores the submitted revision plus one.
-`Save` takes a value and does not mutate it: if you retain the submitted snapshot,
-increment its revision only after `Save` returns nil. Do not load a newer revision
-and attach it to old messages; load and reconcile the complete snapshot instead.
+edited snapshot. Revision zero means create-only. `Save` now returns
+`(int64, error)`: the committed revision on success, or zero on every error. It
+takes a value and does not mutate it. Retained callers must use the result:
+
+```go
+revision, err := store.Save(ctx, conv)
+if err != nil {
+    return err
+}
+conv.Revision = revision
+```
+
+Creation uses the durable store-wide revision floor plus one, which can exceed
+1 even for a brand-new ID. An update replaces only the exact submitted positive
+revision and stores that revision plus one. Do not increment a retained revision
+locally or load a newer revision and attach it to old messages; load and reconcile
+the complete snapshot instead. Listing and search projections are not save tokens.
 
 An existing ID on create, a stale revision, or a missing ID on update returns an
 error matching `conversation.ErrConflict`. Use `errors.As` with
 `*conversation.ConflictError` to inspect its `ID` and `ExpectedRevision`.
 Negative revisions and the maximum int64 revision are rejected without writing.
-The transcript, durable summary, revision, and search projection commit in one
-transaction; a conflict leaves the winning snapshot and index intact.
+If the floor reaches maximum int64, creation fails with a non-conflict exhaustion
+error, while existing lower revisions can still advance. A snapshot stored at
+maximum int64 can be loaded or deleted but cannot be updated. Duplicate creation
+still returns a conflict at exhaustion.
+
+The transcript, durable summary, revision, floor, and search projection commit
+atomically; failures leave durable state unchanged. SQLite lock, cancellation,
+and I/O errors retain their original identities rather than becoming conflicts.
+`Delete` and `/clear` capture the deleted revision before committing, so a later
+recreation cannot match any snapshot deleted since the upgrade. This uses one
+integer row, without retaining deleted IDs or transcripts. `Delete` remains
+unconditional and idempotent: a stale caller can still delete a newer snapshot.
+Missing floor metadata causes creation and live-row deletion to fail; it is
+never silently recreated.
 
 Golem returns a completed answer alongside `golem.ErrSessionPersistence` and the
 underlying conflict if the raw turn could not be saved. Its terminal event is
@@ -189,19 +213,31 @@ Automatic compression runs after the raw turn has committed, so its conflict is
 an `OnWarning` notification and the turn remains successful. Hosts that omit
 `OnWarning` retain quiet best-effort compression behavior.
 
-Implementations supplied through `golem.Options.SessionStore` must implement
-the same atomic revision check and exact revision-plus-one success contract,
-even though the Go method signatures are unchanged. The runtime advances its
-retained revision between the raw save and an automatic compression save.
+Implementations supplied through `golem.Options.SessionStore` must adopt the
+new `Save(context.Context, conversation.Conversation) (int64, error)` signature,
+return the committed revision, and enforce the same atomic create/update checks
+and protection across deletion. On error, return zero and leave storage unchanged;
+after a successful commit, return success even if cancellation races afterward.
+The runtime retains the returned revision between raw and compressed saves.
+Firn's older `MemorySessionStore` must add CAS and return committed revisions
+when upgrading its go-llm dependency; changing only its signature is insufficient.
 
-Opening an existing database applies migration v4 through
-`conversation_schema_version`, preserving its data and giving existing rows
-revision 1. Upgrade and restart all processes writing a shared sessions database
-together: older binaries can still perform unconditional writes and bypass CAS.
-The guarantee applies while a row continuously exists. `Delete` and `/clear`
-remove it, and recreating the same ID restarts at revision 1; an old snapshot may
-then match that reused revision. This release does not add incarnation tokens,
-tombstones, or protection against that deletion/recreation race (#542).
+Opening an existing database applies migration v5 through
+`conversation_schema_version`. It preserves live revisions and all conversation
+and search bytes, seeding the floor with `COALESCE(MAX(revision), 0)`. The seed
+also blocks released legacy upserts immediately on nonempty databases. Earlier
+schemas first receive v4's revision column. Revisions erased before v5 cannot be
+recovered; discard pre-upgrade in-memory snapshots.
+
+Upgrade and restart all processes writing a shared sessions database together.
+The v5 insert trigger rejects revisions at or below the floor with
+`conversation store upgraded (#542): upgrade go-llm/golem to write`.
+On a positive floor, v0.1.0/v0.2.0 unconditional upserts fail before their conflict
+update can overwrite a live row, and v0.3.0 creates fail; v0.3.0 matching positive
+CAS updates can still succeed. Legacy deletes also capture the deleted revision.
+A fresh empty database starts with floor zero and admits legacy revision-1
+writes until a deletion raises it. These triggers are compatibility guards,
+not protection against arbitrary SQL or edits to revision metadata.
 
 Conversation, memory, feedback, fingerprint, and provider routing-feedback
 migration runners coordinate concurrent openers through
