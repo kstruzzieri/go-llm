@@ -75,6 +75,9 @@ func (o *Orchestrator) runToolCallsSerial(ctx context.Context, res *Result, stat
 		res.Events = append(res.Events, EventRecord{Step: step, Kind: "tool_call"})
 		out, effect, rec, inspectResult, err := o.dispatch(ctx, reg, call, approver, obs, step, gov, ic)
 		if err != nil {
+			if errors.Is(err, errRunBudgetExhausted) {
+				res.Events = res.Events[:len(res.Events)-1] // budget refused this call before invocation
+			}
 			appendInvokedToolCallRecord(res, step, rec, out.RouteOutcome)
 			return err // hard abort: preserve post-Invoke metadata, but publish no observation or OnToolResult
 		}

@@ -16,6 +16,8 @@ Exhaustion during callbacks or a tool batch also blocks subsequent invocations,
 including queued parallel tools, while preserving cancellation errors after
 verification callbacks. Stopped batches retain only observed tool calls, even
 when provider call IDs are empty or duplicated.
+Budget-refused calls are also omitted from the ordered event log; synthetic
+outcomes and other error-path events retain their existing meaning.
 
 Result.DescendantUsage reports descendant usage separately while Result.Usage
 and Golem's existing output retain their local-step meaning. Returned run scopes

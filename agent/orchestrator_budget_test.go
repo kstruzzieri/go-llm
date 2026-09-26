@@ -836,6 +836,9 @@ func TestRunBudgetStopsPreparationAfterExhaustion(t *testing.T) {
 		if err != nil || res.StopReason != BudgetReached || !reflect.DeepEqual(prepared, []string{"dispatch"}) {
 			t.Fatalf("stop=%v err=%v prepared=%v; want only dispatch prepared", res.StopReason, err, prepared)
 		}
+		if got := kinds(res.Events); got != "step,tool_call,tool_result,stop" {
+			t.Fatalf("events=%s; refused serial call must have no event", got)
+		}
 	})
 	t.Run("parallel", func(t *testing.T) {
 		a := &invokeCountingTool{echoTool: echoTool{name: "a"}}
@@ -855,6 +858,9 @@ func TestRunBudgetStopsPreparationAfterExhaustion(t *testing.T) {
 		if err != nil || res.StopReason != BudgetReached || a.invoked+b.invoked != 0 || len(prepared) != 1 {
 			t.Fatalf("stop=%v err=%v invokes=%d/%d prepared=%v", res.StopReason, err, a.invoked, b.invoked, prepared)
 		}
+		if got := kinds(res.Events); got != "step,stop" {
+			t.Fatalf("events=%s; uninvoked prepared calls must have no events", got)
+		}
 	})
 }
 
@@ -873,64 +879,121 @@ func TestRunBudgetKeepsAssistantTextWhenNoCallRan(t *testing.T) {
 	if len(res.Messages) != 2 || res.Messages[1].Content != "let me check" || len(res.Messages[1].ToolCalls) != 0 {
 		t.Fatalf("assistant text lost or call left dangling: %+v", res.Messages)
 	}
+	if got := kinds(res.Events); got != "token,step,stop" {
+		t.Fatalf("events=%s; call refused after preparation must have no event", got)
+	}
 }
 
 // A queued parallel call refused by the budget was never invoked and must not
 // be audited as such, including on the trailing-record path.
 func TestRunBudgetRefusedParallelCallNotAudited(t *testing.T) {
-	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
-	defer cancel()
-	started := make(chan struct{}, parallelToolCallLimit)
-	release := make(chan struct{})
-	var late atomic.Int32
-	var tools []Tool
-	var calls []provider.ToolCall
-	for i := 0; i <= parallelToolCallLimit; i++ {
-		name := fmt.Sprint("read", i)
-		calls = append(calls, tc(name, "{}"))
-		tools = append(tools, budgetInvokeTool{echoTool{name: name}, func(ctx context.Context) (ToolResult, error) {
-			if i == parallelToolCallLimit {
-				late.Add(1)
-				return ToolResult{}, nil
-			}
-			select {
-			case started <- struct{}{}:
-			case <-ctx.Done():
-				return ToolResult{}, ctx.Err()
-			}
-			if i == 0 {
-				for range parallelToolCallLimit {
+	for _, observerError := range []bool{false, true} {
+		t.Run(map[bool]string{false: "budget stop", true: "observer error"}[observerError], func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+			defer cancel()
+			started := make(chan struct{}, parallelToolCallLimit)
+			release := make(chan struct{})
+			var late atomic.Int32
+			var tools []Tool
+			var calls []provider.ToolCall
+			for i := 0; i <= parallelToolCallLimit; i++ {
+				name := fmt.Sprint("read", i)
+				calls = append(calls, tc(name, "{}"))
+				tools = append(tools, budgetInvokeTool{echoTool{name: name}, func(ctx context.Context) (ToolResult, error) {
+					if i == parallelToolCallLimit {
+						late.Add(1)
+						return ToolResult{}, nil
+					}
 					select {
-					case <-started:
+					case started <- struct{}{}:
 					case <-ctx.Done():
 						return ToolResult{}, ctx.Err()
 					}
+					if i == 0 {
+						for range parallelToolCallLimit {
+							select {
+							case <-started:
+							case <-ctx.Done():
+								return ToolResult{}, ctx.Err()
+							}
+						}
+						err := exhaustRunBudget(ctx)
+						close(release)
+						return ToolResult{Content: "nested"}, err
+					}
+					select {
+					case <-release:
+						return ToolResult{Content: "read"}, nil
+					case <-ctx.Done():
+						return ToolResult{}, ctx.Err()
+					}
+				}})
+			}
+			var stop error
+			if observerError {
+				stop = errors.New("observer stop")
+			}
+			obs := budgetObserver{result: func(context.Context, ToolResultEvent) error { return stop }}
+			caller := &scriptedCaller{responses: []ModelResult{{Response: provider.ChatResponse{ToolCalls: calls}}}}
+			res, err := New(caller, ContextManager{}).Run(ctx, Request{
+				Goal: "q", Tools: tools, Budget: Budget{TotalTokens: 10000, OutputReserve: 64},
+			}, obs)
+			if !errors.Is(err, stop) || late.Load() != 0 {
+				t.Fatalf("err=%v late=%d", err, late.Load())
+			}
+			for _, rec := range res.ToolCalls {
+				if rec.Name == fmt.Sprint("read", parallelToolCallLimit) {
+					t.Fatalf("refused call audited: %+v", rec)
 				}
-				err := exhaustRunBudget(ctx)
-				close(release)
-				return ToolResult{Content: "nested"}, err
 			}
-			select {
-			case <-release:
-				return ToolResult{Content: "read"}, nil
-			case <-ctx.Done():
-				return ToolResult{}, ctx.Err()
+			if stop == nil && res.StopReason != BudgetReached {
+				t.Fatalf("stop=%v; want budget stop", res.StopReason)
 			}
-		}})
+			want := []string{"step"}
+			for range parallelToolCallLimit {
+				want = append(want, "tool_call")
+			}
+			for range parallelToolCallLimit {
+				want = append(want, "tool_result")
+			}
+			if stop == nil {
+				want = append(want, "stop")
+			}
+			if got := kinds(res.Events); got != strings.Join(want, ",") {
+				t.Fatalf("events=%s; want %s", got, strings.Join(want, ","))
+			}
+		})
 	}
-	stop := errors.New("observer stop")
-	obs := budgetObserver{result: func(context.Context, ToolResultEvent) error { return stop }}
-	caller := &scriptedCaller{responses: []ModelResult{{Response: provider.ChatResponse{ToolCalls: calls}}}}
-	res, err := New(caller, ContextManager{}).Run(ctx, Request{
-		Goal: "q", Tools: tools, Budget: Budget{TotalTokens: 10000, OutputReserve: 64},
-	}, obs)
-	if !errors.Is(err, stop) || late.Load() != 0 {
-		t.Fatalf("err=%v late=%d", err, late.Load())
-	}
-	for _, rec := range res.ToolCalls {
-		if rec.Name == fmt.Sprint("read", parallelToolCallLimit) {
-			t.Fatalf("refused call audited: %+v", rec)
+}
+
+func TestRunBudgetPreparationStopKeepsSyntheticEvents(t *testing.T) {
+	a := &invokeCountingTool{echoTool: echoTool{name: "a"}}
+	b := &invokeCountingTool{echoTool: echoTool{name: "b"}}
+	c := &invokeCountingTool{echoTool: echoTool{name: "c"}}
+	block := &stubInterceptor{name: "guard", toolCall: func(call ToolCallInspection) []Finding {
+		if call.Call.Function.Name == "a" {
+			return []Finding{{Rule: "deny", Verdict: VerdictBlock, Risk: 100}}
 		}
+		return nil
+	}}
+	obs := budgetObserver{tool: func(ctx context.Context, e ToolCallEvent) error {
+		if e.Call.Function.Name == "b" {
+			return exhaustRunBudget(ctx)
+		}
+		return nil
+	}}
+	caller := batchThenAnswer(tc("a", "{}"), tc("b", "{}"), tc("c", "{}"))
+	res, err := New(caller, ContextManager{}, WithInterceptors(block)).Run(t.Context(), Request{
+		Goal: "q", Tools: []Tool{a, b, c}, Budget: Budget{TotalTokens: 10000, OutputReserve: 64},
+	}, obs)
+	if err != nil || res.StopReason != BudgetReached || a.invoked+b.invoked+c.invoked != 0 {
+		t.Fatalf("stop=%v err=%v invoked=%d/%d/%d", res.StopReason, err, a.invoked, b.invoked, c.invoked)
+	}
+	if len(res.ToolCalls) != 1 || res.ToolCalls[0].Name != "a" || !res.ToolCalls[0].Blocked || res.ToolCalls[0].Invoked {
+		t.Fatalf("synthetic outcome lost: %+v", res.ToolCalls)
+	}
+	if got := kinds(res.Events); got != "step,tool_call,tool_result,stop" {
+		t.Fatalf("events=%s; want only synthetic call and result", got)
 	}
 }
 

@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"time"
 
 	"golang.org/x/sync/errgroup"
@@ -66,11 +67,16 @@ func (o *Orchestrator) runToolCallsParallel(ctx context.Context, res *Result, st
 	gov *restraintGovernor, b *batch, ic *interceptorRun) error {
 
 	// Phase 1: prepare serially, in model order.
+	eventStart := len(res.Events)
 	prepared := make([]preparedCall, len(calls))
 	for i, call := range calls {
 		res.Events = append(res.Events, EventRecord{Step: step, Kind: "tool_call"})
 		p, err := o.prepareCall(ctx, reg, call, approver, obs, step, gov, ic)
 		if err != nil {
+			if errors.Is(err, errRunBudgetExhausted) {
+				// No workers started; only prior synthetic outcomes are audited.
+				retainToolCallEvents(res, eventStart, func(j int) bool { return prepared[j].result != nil })
+			}
 			for _, earlier := range prepared[:i] {
 				if earlier.result != nil {
 					appendToolCallRecord(res, step, earlier.rec, earlier.result.RouteOutcome)
@@ -105,6 +111,10 @@ func (o *Orchestrator) runToolCallsParallel(ctx context.Context, res *Result, st
 		})
 	}
 	_ = g.Wait() // joins every worker -> no goroutine leak
+	// Prune budget refusals before any cancellation or observer-error exit.
+	retainToolCallEvents(res, eventStart, func(i int) bool {
+		return !errors.Is(invokeErrors[i], errRunBudgetExhausted)
+	})
 	if err := ctx.Err(); err != nil {
 		appendTrailingToolCallRecords(res, step, prepared, results, latencies, invoked, 0)
 		return err // parent cancelled -> hard abort
@@ -134,6 +144,18 @@ func (o *Orchestrator) runToolCallsParallel(ctx context.Context, res *Result, st
 		}
 	}
 	return nil
+}
+
+// retainToolCallEvents filters the current batch's contiguous call events before
+// any results are appended. Earlier events and retained call order stay intact.
+func retainToolCallEvents(res *Result, start int, keep func(int) bool) {
+	events := res.Events[start:]
+	res.Events = res.Events[:start]
+	for i, event := range events {
+		if keep(i) {
+			res.Events = append(res.Events, event)
+		}
+	}
 }
 
 func appendTrailingToolCallRecords(res *Result, step int, prepared []preparedCall, results []ToolResult,

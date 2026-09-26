@@ -86,6 +86,14 @@ can shorten child summaries. If intersection leaves a child's output reserve at
 or above its inherited input ceiling, the child fails with ErrContextExhausted
 before any model call rather than silently shrinking its generation cap.
 
+When configuring a research child behind a terse parent, size the parent's input
+and generation caps for the child's work too. For example, a parent
+OutputReserve of 64 also limits a child's 1,024-token summary to 64, even with a
+separate dispatch route. Use prompting for shorter parent answers when children
+need more output capacity. In Golem, review `-input-ceiling` and
+`-output-reserve` alongside `-dispatch-role`: a larger child route cannot raise
+inherited capacities, and the parent limits must still fit its own model.
+
 Generation uses positive OutputReserve, otherwise positive Options.NumPredict,
 otherwise the fixed chat default (2,048) when any finite total allowance applies,
 then intersects with the parent's cap. Dispatch keeps its 1,024 generation
