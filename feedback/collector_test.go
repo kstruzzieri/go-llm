@@ -298,9 +298,9 @@ func TestCollectorCloseWaitsForRegistration(t *testing.T) {
 				var windowsAtClose int
 				go func() {
 					c.Close()
-					c.mu.Lock()
+					// Close must finish registration and stop the sweeper before
+					// this read; another lock would mask an early return.
 					windowsAtClose = len(c.windows)
-					c.mu.Unlock()
 					close(closeDone)
 				}()
 				// Wait until Close has either returned or blocked on the admitted
