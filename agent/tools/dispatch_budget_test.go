@@ -278,7 +278,11 @@ func TestDispatchIndependentParentAllowances(t *testing.T) {
 	started := make(chan struct{}, 2) // exactly two simultaneous parent runs
 	release := make(chan struct{})
 	d := newBudgetDispatch(t, dispatchModelFunc(func(ctx context.Context, _ provider.ChatRequest) (agent.ModelResult, error) {
-		started <- struct{}{}
+		select {
+		case started <- struct{}{}:
+		case <-ctx.Done():
+			return agent.ModelResult{}, ctx.Err()
+		}
 		select {
 		case <-release:
 		case <-ctx.Done():

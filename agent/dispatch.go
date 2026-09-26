@@ -32,13 +32,13 @@ func (o *Orchestrator) runToolCalls(ctx context.Context, res *Result, state *Sta
 	} else {
 		err = o.runToolCallsSerial(ctx, res, state, reg, calls, approver, obs, step, gov, &b, ic)
 	}
-	if err != nil && !errors.Is(err, errRunBudgetExhausted) {
-		return err
-	}
-	if checkErr := checkRunBudget(ctx); checkErr != nil {
-		err = checkErr // cancellation takes precedence over a normal budget stop
+	if err == nil && runBudgetStopped(ctx) {
+		err = errRunBudgetExhausted // a nested run spent the allowance during this batch
 	}
 	if errors.Is(err, errRunBudgetExhausted) {
+		if cerr := ctx.Err(); cerr != nil {
+			return cerr // cancellation takes precedence over a budget stop only
+		}
 		// Retain completed observations, but remove unexecuted calls from the
 		// assistant message so the returned transcript has no dangling calls.
 		msg := &state.Messages[assistantIndex]
@@ -50,7 +50,10 @@ func (o *Orchestrator) runToolCalls(ctx context.Context, res *Result, state *Sta
 		if len(kept) == 0 && msg.Content == "" {
 			state.Messages = state.Messages[:assistantIndex]
 		}
-		res.StopReason = BudgetReached
+		if res.StopReason == Completed {
+			res.StopReason = BudgetReached // keep a governor stop recorded by this batch
+		}
+		// Like a governor stop, the run ends here, so verification is skipped.
 		return nil
 	}
 	if err != nil {

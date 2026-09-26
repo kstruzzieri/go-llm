@@ -82,7 +82,9 @@ effective input ceiling, fixed generation cap and configured step cap. Smaller
 child settings remain smaller; child steps do not decrement the parent's loop
 steps. An unset input ceiling resolves to 8,192, so even an explicit larger child
 route is attenuated to an unset parent's 8,192 ceiling. A terse parent output cap
-can shorten child summaries.
+can shorten child summaries. If intersection leaves a child's output reserve at
+or above its inherited input ceiling, the child fails with ErrContextExhausted
+before any model call rather than silently shrinking its generation cap.
 
 Generation uses positive OutputReserve, otherwise positive Options.NumPredict,
 otherwise the fixed chat default (2,048) when any finite total allowance applies,
@@ -104,12 +106,17 @@ Consistent decomposed usage on a successful single-attempt call may refund
 unused generation, but its prompt charge is at least the assembled estimate.
 Total-only, missing, invalid, failed or known multi-attempt reports retain at
 least the full reservation and larger safely known usage. Routing error
-sentinels alone do not prove non-execution. An overrun is fully charged and stops
-the current run before its returned tool calls execute; accepted answer text
-survives unless a safety check or actual error takes precedence.
+sentinels alone do not prove non-execution. Reported usage above the
+reservation is fully charged. A prompt count above the estimate is expected
+estimator error and does not stop the run by itself. Output beyond the fixed
+generation cap, or excess that cannot be attributed to the prompt, is an overrun:
+it stops the current run before its returned tool calls execute; accepted answer
+text survives unless a safety check or actual error takes precedence.
 Tool invocation rechecks the allowance after callbacks and before queued work
 starts. If a nested run exhausts it, later tools cannot execute; already admitted
-invocations may finish. Returned transcripts omit unexecuted tool calls.
+invocations may finish. Returned transcripts omit unexecuted tool calls. A
+restraint-governor stop recorded in the same batch keeps its stop reason, and a
+cancellation keeps precedence over the budget stop.
 
 `Result.Usage` remains the raw usage of that run's recorded steps.
 `Result.DescendantUsage` separately snapshots valid reported descendant usage,

@@ -77,8 +77,8 @@ func (b *runBudget) reserve(ctx context.Context, promptTokens int) (*tokenReserv
 		return nil, err
 	}
 	need, ok := checkedTokenAdd(promptTokens, b.generation)
-	if promptTokens < 0 || !ok {
-		return nil, errRunBudgetExhausted
+	if b.finite && (promptTokens < 0 || !ok) {
+		return nil, errRunBudgetExhausted // an unusable estimate cannot be admitted against a finite allowance
 	}
 	for node := b; node != nil; node = node.parent {
 		if node.closed || node.overrun || (node.limit > 0 && node.charged >= node.limit) {
@@ -126,7 +126,11 @@ func (r *tokenReservation) settle(mr ModelResult, callErr error) {
 	if callErr != nil || !valid || u.PromptTokens == 0 || multiAttempt {
 		charge = max(charge, r.tokens)
 	}
-	if b.finite && charge > r.tokens {
+	// A reported prompt above the estimate is expected estimator error (len/4
+	// by default) and is charged without stopping. Only output beyond the
+	// fixed generation cap, or excess that cannot be attributed to the prompt,
+	// shows the provider ignored its cap.
+	if b.finite && charge-max(r.prompt, u.PromptTokens) > b.generation {
 		b.overrun = true
 	}
 	for node := b; node != nil; node = node.parent {
@@ -159,10 +163,16 @@ func checkRunBudget(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if b, ok := ctx.Value(runBudgetKey{}).(*runBudget); ok && b.stopped() {
+	if runBudgetStopped(ctx) {
 		return errRunBudgetExhausted
 	}
 	return nil
+}
+
+// runBudgetStopped reports budget exhaustion alone, ignoring cancellation.
+func runBudgetStopped(ctx context.Context) bool {
+	b, ok := ctx.Value(runBudgetKey{}).(*runBudget)
+	return ok && b.stopped()
 }
 
 func (b *runBudget) close() *provider.Usage {

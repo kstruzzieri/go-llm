@@ -26,6 +26,7 @@ type budgetObserver struct {
 	step     func(context.Context, StepEvent) error
 	token    func(context.Context, TokenEvent) error
 	tool     func(context.Context, ToolCallEvent) error
+	result   func(context.Context, ToolResultEvent) error
 }
 
 func (o budgetObserver) OnPressure(ctx context.Context, e PressureEvent) error {
@@ -52,6 +53,22 @@ func (o budgetObserver) OnToolCall(ctx context.Context, e ToolCallEvent) error {
 		return o.tool(ctx, e)
 	}
 	return nil
+}
+
+func (o budgetObserver) OnToolResult(ctx context.Context, e ToolResultEvent) error {
+	if o.result != nil {
+		return o.result(ctx, e)
+	}
+	return nil
+}
+
+// exhaustRunBudget spends a 10,000-credit allowance through a nested Run.
+func exhaustRunBudget(ctx context.Context) error {
+	child := New(&scriptedCaller{responses: []ModelResult{{Response: provider.ChatResponse{
+		Content: "child", Usage: provider.Usage{TotalTokens: 10000},
+	}}}}, ContextManager{})
+	_, err := child.Run(ctx, Request{Goal: "q"}, nil)
+	return err
 }
 
 func assertBudgetUsage(t *testing.T, res Result) {
@@ -106,7 +123,7 @@ func TestRunBudgetAdmissionAfterAssembly(t *testing.T) {
 			limited := &toolThenAnswerCaller{}
 			got := &pressureRec{}
 			res, err = New(limited, ContextManager{Mixed: mixed}).Run(t.Context(), req, got)
-			if err != nil || res.StopReason != BudgetReached || len(limited.reqs) != 1 {
+			if err != nil || res.StopReason != BudgetReached || len(limited.reqs) != 1 || len(res.Messages) != 3 {
 				t.Fatalf("limited: %+v, %v; calls=%d", res, err, len(limited.reqs))
 			}
 			if !reflect.DeepEqual(got.pressures, want.pressures) {
@@ -371,6 +388,9 @@ func TestRunBudgetOverrunStopsBeforeTools(t *testing.T) {
 			if err != nil || res.StopReason != BudgetReached || res.Answer != "accepted" || len(res.Steps[0].Response.ToolCalls) != 1 {
 				t.Fatalf("overrun: %+v %v", res, err)
 			}
+			if last := res.Messages[len(res.Messages)-1]; last.Role != "assistant" || last.Content != "accepted" || len(last.ToolCalls) != 0 {
+				t.Fatalf("accepted text not persisted without calls: %+v", res.Messages)
+			}
 			next := New(&scriptedCaller{responses: []ModelResult{finalAnswer("next")}}, ContextManager{})
 			if _, err := next.Run(t.Context(), Request{Goal: "continue", History: res.Messages}, nil); err != nil {
 				t.Fatalf("dangling history: %v", err)
@@ -573,8 +593,8 @@ func TestRunBudgetOverrunPreservesCancellation(t *testing.T) {
 	res, err := New(&scriptedCaller{responses: []ModelResult{mr}}, ContextManager{}).Run(ctx, Request{
 		Goal: "q", Tools: []Tool{tool}, Budget: Budget{TotalTokens: 10000, OutputReserve: 64},
 	}, obs)
-	if !errors.Is(err, context.Canceled) || tool.invoked != 0 {
-		t.Fatalf("stop=%v err=%v invokes=%d", res.StopReason, err, tool.invoked)
+	if !errors.Is(err, context.Canceled) || tool.invoked != 0 || len(res.Messages) != 1 {
+		t.Fatalf("stop=%v err=%v invokes=%d messages=%+v", res.StopReason, err, tool.invoked, res.Messages)
 	}
 	assertBudgetUsage(t, res)
 }
@@ -605,6 +625,9 @@ func TestRunBudgetReturnedResultIsSnapshot(t *testing.T) {
 	}
 	if res.DescendantUsage == nil || *res.DescendantUsage != (provider.Usage{TotalTokens: 20}) {
 		t.Fatalf("snapshot changed: %+v", res.DescendantUsage)
+	}
+	if retained.Err() == nil {
+		t.Fatal("returned run left its context live")
 	}
 	late := &scriptedCaller{responses: []ModelResult{finalAnswer("unexpected")}}
 	lateRes, err := New(late, ContextManager{}).Run(context.WithoutCancel(retained), Request{Goal: "q"}, nil)
@@ -647,4 +670,282 @@ func TestRunBudgetGrandchildUsageCountedOnce(t *testing.T) {
 	}
 	assertBudgetUsage(t, res)
 	assertBudgetUsage(t, childResult)
+}
+
+func TestRunBudgetOverrunMeansGenerationBeyondCap(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		usage   provider.Usage
+		stop    StopReason
+		invoked int
+	}{
+		// A real tokenizer and chat template routinely count more prompt tokens
+		// than len/4. The excess is charged, but it is not a provider overrun.
+		{name: "prompt undercount", usage: provider.Usage{PromptTokens: 5000, CompletionTokens: 10, TotalTokens: 5010}, stop: Completed, invoked: 1},
+		// One token past the fixed cap shows the provider ignored it.
+		{name: "generation beyond cap", usage: provider.Usage{PromptTokens: 1, CompletionTokens: 65, TotalTokens: 66}, stop: BudgetReached},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tool := &invokeCountingTool{echoTool: echoTool{name: "echo"}}
+			first := echoCall("one", "{}")
+			first.Response.Usage = tc.usage
+			caller := &scriptedCaller{responses: []ModelResult{first, finalAnswer("done")}}
+			res, err := New(caller, ContextManager{}).Run(t.Context(), Request{
+				Goal: "q", Tools: []Tool{tool}, Budget: Budget{OutputReserve: 64, TotalTokens: 100000},
+			}, nil)
+			if err != nil || res.StopReason != tc.stop || tool.invoked != tc.invoked {
+				t.Fatalf("stop=%v err=%v invoked=%d; want %v and %d", res.StopReason, err, tool.invoked, tc.stop, tc.invoked)
+			}
+			assertBudgetUsage(t, res)
+		})
+	}
+}
+
+// Budget checks must not change cancellation or governor outcomes for runs
+// that never exhaust an allowance, including unbounded ones.
+func TestRunBudgetCancellationKeepsPriorOutcomes(t *testing.T) {
+	t.Run("cancel before next chat keeps transcript", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+		caller := batchThenAnswer(toolCall("c1", "echo", "{}"))
+		obs := budgetObserver{pressure: func(_ context.Context, e PressureEvent) error {
+			if e.Step == 1 {
+				cancel()
+			}
+			return nil
+		}}
+		res, err := New(caller, ContextManager{}).Run(ctx, Request{Goal: "q", Tools: []Tool{echoTool{name: "echo"}}}, obs)
+		if !errors.Is(err, context.Canceled) || len(res.Messages) != 3 || caller.calls != 1 {
+			t.Fatalf("err=%v messages=%+v calls=%d; want cancellation with step 0 transcript", err, res.Messages, caller.calls)
+		}
+	})
+	t.Run("governor stop survives later cancellation", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+		calls := make([]provider.ToolCall, defaultToolErrorCap)
+		for i := range calls {
+			calls[i] = toolCall(fmt.Sprint("u", i), fmt.Sprint("unknown", i), "{}")
+		}
+		seen := 0
+		obs := budgetObserver{result: func(context.Context, ToolResultEvent) error {
+			if seen++; seen == defaultToolErrorCap {
+				cancel()
+			}
+			return nil
+		}}
+		res, err := New(batchThenAnswer(calls...), ContextManager{}).Run(ctx, Request{Goal: "q"}, obs)
+		if err != nil || res.StopReason != ToolErrorCapReached {
+			t.Fatalf("stop=%v err=%v; want governor stop", res.StopReason, err)
+		}
+	})
+}
+
+func TestRunBudgetKeepsGovernorStopInSameBatch(t *testing.T) {
+	child := New(&scriptedCaller{responses: []ModelResult{{Response: provider.ChatResponse{
+		Content: "child", Usage: provider.Usage{TotalTokens: 10000},
+	}}}}, ContextManager{})
+	// The third consecutive error trips the governor after a nested run has
+	// also exhausted the shared allowance.
+	spend := budgetInvokeTool{echoTool{name: "spend"}, func(ctx context.Context) (ToolResult, error) {
+		if _, err := child.Run(ctx, Request{Goal: "q"}, nil); err != nil {
+			return ToolResult{}, err
+		}
+		return ToolResult{Content: "spent", IsError: true}, nil
+	}}
+	calls := []provider.ToolCall{toolCall("a", "missing_a", "{}"), toolCall("b", "missing_b", "{}"), toolCall("c", "spend", "{}")}
+	res, err := New(batchThenAnswer(calls...), ContextManager{}).Run(t.Context(), Request{
+		Goal: "q", Tools: []Tool{spend}, Budget: Budget{TotalTokens: 10000, OutputReserve: 64},
+	}, nil)
+	if err != nil || res.StopReason != ToolErrorCapReached || len(toolMessages(res.Messages)) != len(calls) {
+		t.Fatalf("stop=%v err=%v messages=%+v; want governor stop with all observations", res.StopReason, err, res.Messages)
+	}
+	if !reflect.DeepEqual(res.Messages[1].ToolCalls, calls) {
+		t.Fatalf("completed calls dropped: %+v", res.Messages[1].ToolCalls)
+	}
+}
+
+func TestRunBudgetOverrunParentStopsNestedChild(t *testing.T) {
+	childCalls := 0
+	child := New(budgetModelFunc(func(context.Context, provider.ChatRequest, func(provider.ChatResponse) error) (ModelResult, error) {
+		childCalls++
+		return finalAnswer("c"), nil
+	}), ContextManager{})
+	var childRes Result
+	obs := budgetObserver{step: func(ctx context.Context, _ StepEvent) error {
+		var err error
+		childRes, err = child.Run(ctx, Request{Goal: "q"}, nil)
+		return err
+	}}
+	// Total-only usage above the reservation is an overrun while charged
+	// remains below the 10,000 allowance.
+	mr := finalAnswer("parent")
+	mr.Response.Usage = provider.Usage{TotalTokens: 5000}
+	res, err := New(&scriptedCaller{responses: []ModelResult{mr}}, ContextManager{}).Run(t.Context(), Request{
+		Goal: "q", Budget: Budget{TotalTokens: 10000, OutputReserve: 64},
+	}, obs)
+	if err != nil || res.StopReason != BudgetReached {
+		t.Fatalf("parent: stop=%v err=%v", res.StopReason, err)
+	}
+	if childCalls != 0 || childRes.StopReason != BudgetReached {
+		t.Fatalf("child admitted under overrun parent: calls=%d stop=%v", childCalls, childRes.StopReason)
+	}
+}
+
+func TestRunBudgetBatchEndPrecedence(t *testing.T) {
+	spend := budgetInvokeTool{echoTool{name: "dispatch"}, func(ctx context.Context) (ToolResult, error) {
+		return ToolResult{Content: "ok"}, exhaustRunBudget(ctx)
+	}}
+	boom := errors.New("observer failed")
+	for _, tc := range []struct {
+		name   string
+		result func(cancel context.CancelFunc) error
+		want   error
+	}{
+		{name: "cancellation beats budget stop", result: func(cancel context.CancelFunc) error { cancel(); return nil }, want: context.Canceled},
+		{name: "observer error beats budget stop", result: func(context.CancelFunc) error { return boom }, want: boom},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			obs := budgetObserver{result: func(context.Context, ToolResultEvent) error { return tc.result(cancel) }}
+			res, err := New(batchThenAnswer(toolCall("a", "dispatch", "{}")), ContextManager{}).Run(ctx, Request{
+				Goal: "q", Tools: []Tool{spend}, Budget: Budget{TotalTokens: 10000, OutputReserve: 64},
+			}, obs)
+			if !errors.Is(err, tc.want) {
+				t.Fatalf("stop=%v err=%v; want %v", res.StopReason, err, tc.want)
+			}
+		})
+	}
+}
+
+func TestRunBudgetStopsPreparationAfterExhaustion(t *testing.T) {
+	t.Run("serial", func(t *testing.T) {
+		spend := budgetInvokeTool{echoTool{name: "dispatch"}, func(ctx context.Context) (ToolResult, error) {
+			return ToolResult{Content: "ok"}, exhaustRunBudget(ctx)
+		}}
+		var prepared []string
+		obs := budgetObserver{tool: func(_ context.Context, e ToolCallEvent) error {
+			prepared = append(prepared, e.Call.Function.Name)
+			return nil
+		}}
+		calls := []provider.ToolCall{toolCall("a", "dispatch", "{}"), toolCall("b", "write_file", "{}")}
+		res, err := New(batchThenAnswer(calls...), ContextManager{}).Run(t.Context(), Request{
+			Goal: "q", Tools: []Tool{spend, fakeWriteTool{name: "write_file", approval: ApprovalNever}},
+			Budget: Budget{TotalTokens: 10000, OutputReserve: 64},
+		}, obs)
+		if err != nil || res.StopReason != BudgetReached || !reflect.DeepEqual(prepared, []string{"dispatch"}) {
+			t.Fatalf("stop=%v err=%v prepared=%v; want only dispatch prepared", res.StopReason, err, prepared)
+		}
+	})
+	t.Run("parallel", func(t *testing.T) {
+		a := &invokeCountingTool{echoTool: echoTool{name: "a"}}
+		b := &invokeCountingTool{echoTool: echoTool{name: "b"}}
+		var prepared []string
+		obs := budgetObserver{tool: func(ctx context.Context, e ToolCallEvent) error {
+			prepared = append(prepared, e.Call.Function.Name)
+			if e.Call.Function.Name == "a" {
+				return exhaustRunBudget(ctx)
+			}
+			return nil
+		}}
+		caller := &scriptedCaller{responses: []ModelResult{{Response: provider.ChatResponse{ToolCalls: []provider.ToolCall{tc("a", "{}"), tc("b", "{}")}}}}}
+		res, err := New(caller, ContextManager{}).Run(t.Context(), Request{
+			Goal: "q", Tools: []Tool{a, b}, Budget: Budget{TotalTokens: 10000, OutputReserve: 64},
+		}, obs)
+		if err != nil || res.StopReason != BudgetReached || a.invoked+b.invoked != 0 || len(prepared) != 1 {
+			t.Fatalf("stop=%v err=%v invokes=%d/%d prepared=%v", res.StopReason, err, a.invoked, b.invoked, prepared)
+		}
+	})
+}
+
+func TestRunBudgetKeepsAssistantTextWhenNoCallRan(t *testing.T) {
+	tool := &invokeCountingTool{echoTool: echoTool{name: "last"}}
+	obs := budgetObserver{tool: func(ctx context.Context, _ ToolCallEvent) error { return exhaustRunBudget(ctx) }}
+	caller := &scriptedCaller{responses: []ModelResult{{Response: provider.ChatResponse{
+		Content: "let me check", ToolCalls: []provider.ToolCall{tc("last", "{}")},
+	}}}}
+	res, err := New(caller, ContextManager{}).Run(t.Context(), Request{
+		Goal: "q", Tools: []Tool{tool}, Budget: Budget{TotalTokens: 10000, OutputReserve: 64},
+	}, obs)
+	if err != nil || res.StopReason != BudgetReached || tool.invoked != 0 {
+		t.Fatalf("stop=%v err=%v invoked=%d", res.StopReason, err, tool.invoked)
+	}
+	if len(res.Messages) != 2 || res.Messages[1].Content != "let me check" || len(res.Messages[1].ToolCalls) != 0 {
+		t.Fatalf("assistant text lost or call left dangling: %+v", res.Messages)
+	}
+}
+
+// A queued parallel call refused by the budget was never invoked and must not
+// be audited as such, including on the trailing-record path.
+func TestRunBudgetRefusedParallelCallNotAudited(t *testing.T) {
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	started := make(chan struct{}, parallelToolCallLimit)
+	release := make(chan struct{})
+	var late atomic.Int32
+	var tools []Tool
+	var calls []provider.ToolCall
+	for i := 0; i <= parallelToolCallLimit; i++ {
+		name := fmt.Sprint("read", i)
+		calls = append(calls, tc(name, "{}"))
+		tools = append(tools, budgetInvokeTool{echoTool{name: name}, func(ctx context.Context) (ToolResult, error) {
+			if i == parallelToolCallLimit {
+				late.Add(1)
+				return ToolResult{}, nil
+			}
+			select {
+			case started <- struct{}{}:
+			case <-ctx.Done():
+				return ToolResult{}, ctx.Err()
+			}
+			if i == 0 {
+				for range parallelToolCallLimit {
+					select {
+					case <-started:
+					case <-ctx.Done():
+						return ToolResult{}, ctx.Err()
+					}
+				}
+				err := exhaustRunBudget(ctx)
+				close(release)
+				return ToolResult{Content: "nested"}, err
+			}
+			select {
+			case <-release:
+				return ToolResult{Content: "read"}, nil
+			case <-ctx.Done():
+				return ToolResult{}, ctx.Err()
+			}
+		}})
+	}
+	stop := errors.New("observer stop")
+	obs := budgetObserver{result: func(context.Context, ToolResultEvent) error { return stop }}
+	caller := &scriptedCaller{responses: []ModelResult{{Response: provider.ChatResponse{ToolCalls: calls}}}}
+	res, err := New(caller, ContextManager{}).Run(ctx, Request{
+		Goal: "q", Tools: tools, Budget: Budget{TotalTokens: 10000, OutputReserve: 64},
+	}, obs)
+	if !errors.Is(err, stop) || late.Load() != 0 {
+		t.Fatalf("err=%v late=%d", err, late.Load())
+	}
+	for _, rec := range res.ToolCalls {
+		if rec.Name == fmt.Sprint("read", parallelToolCallLimit) {
+			t.Fatalf("refused call audited: %+v", rec)
+		}
+	}
+}
+
+type exhaustingVerifier struct{}
+
+func (exhaustingVerifier) Verify(ctx context.Context, _ Approver) (string, error) {
+	return "", exhaustRunBudget(ctx)
+}
+
+func TestRunBudgetVerifierExhaustionOnLastStep(t *testing.T) {
+	res, err := New(batchThenAnswer(toolCall("w", "write_file", "{}")), ContextManager{}, WithVerifier(exhaustingVerifier{})).Run(t.Context(), Request{
+		Goal: "q", MaxSteps: 1, Tools: []Tool{fakeWriteTool{name: "write_file", approval: ApprovalNever}},
+		Budget: Budget{TotalTokens: 10000, OutputReserve: 64},
+	}, nil)
+	if err != nil || res.StopReason != BudgetReached || len(res.Messages) != 3 {
+		t.Fatalf("stop=%v err=%v messages=%+v; want BudgetReached with the step transcript", res.StopReason, err, res.Messages)
+	}
 }

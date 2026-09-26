@@ -268,11 +268,11 @@ func (o *Orchestrator) run(ctx context.Context, req Request, obs Observer, ic *i
 		// admission happens afterward, without changing static context capacity.
 		reservation, err := budgetRun.reserve(ctx, pressure.InputTokens)
 		if err != nil {
+			res.Messages = resultMessages(state, historyLen) // as on a cancelled Chat
 			if !errors.Is(err, errRunBudgetExhausted) {
-				return finishWithError(&res, state, historyLen, err)
+				return res, err
 			}
 			res.StopReason = BudgetReached
-			res.Messages = resultMessages(state, historyLen)
 			res.Events = append(res.Events, EventRecord{Step: step, Kind: "stop"})
 			return res, nil
 		}
@@ -348,7 +348,8 @@ func (o *Orchestrator) run(ctx context.Context, req Request, obs Observer, ic *i
 
 		if budgetRun.stopped() {
 			if err := ctx.Err(); err != nil {
-				return finishWithError(&res, state, historyLen, err)
+				res.Messages = resultMessages(state, historyLen)
+				return res, err
 			}
 			// Keep accepted text, but never persist unexecuted tool-call residue.
 			if resp.Content != "" {

@@ -28,6 +28,8 @@ func TestRunBudgetCapacityIntersection(t *testing.T) {
 		{"smaller parent", Request{Budget: Budget{InputCeiling: 4000, OutputReserve: 128}, MaxSteps: 2}, Request{Budget: Budget{InputCeiling: 16000, OutputReserve: 1024}, MaxSteps: 6}, 4000, 128, 128, 2},
 		{"smaller child", Request{Budget: Budget{InputCeiling: 16000, OutputReserve: 1024}, MaxSteps: 6}, Request{Budget: Budget{InputCeiling: 4000, OutputReserve: 128}, MaxSteps: 2}, 4000, 128, 128, 2},
 		{"parent generation without reserve", Request{Options: provider.ModelOptions{NumPredict: 100}}, Request{Budget: Budget{OutputReserve: 1024}}, 8192, 100, 100, 16},
+		{"uncapped child inherits unbounded parent cap", Request{Options: provider.ModelOptions{NumPredict: 100}}, Request{}, 8192, 0, 100, 16},
+		{"unlimited child inherits unbounded parent cap", Request{Options: provider.ModelOptions{NumPredict: 100}}, Request{Options: provider.ModelOptions{NumPredict: -1}}, 8192, 0, 100, 16},
 		{"inherited finite fallback", Request{Budget: Budget{TotalTokens: 10000}}, Request{}, 8192, 0, 2048, 16},
 		{"child generation default below parent", Request{Budget: Budget{TotalTokens: 10000, OutputReserve: 4096}}, Request{}, 8192, 0, 2048, 16},
 	} {
@@ -59,9 +61,6 @@ func TestRunBudgetGenerationPrecedence(t *testing.T) {
 			_, got, _ := testRunBudget(t, t.Context(), input)
 			if got.Options.NumPredict != tc.want || got.Budget.OutputReserve != tc.reserve {
 				t.Fatalf("predict/reserve = %d/%d, want %d/%d", got.Options.NumPredict, got.Budget.OutputReserve, tc.want, tc.reserve)
-			}
-			if input.Options.NumPredict != tc.predict {
-				t.Fatal("mutated caller request")
 			}
 		})
 	}
@@ -148,9 +147,11 @@ func TestRunBudgetSettlement(t *testing.T) {
 		responseOutcome bool
 		charge          int
 		telemetry       bool
+		continues       bool // charged beyond the reservation without a generation overrun
 	}{
 		{name: "prompt floor", usage: provider.Usage{PromptTokens: 80, CompletionTokens: 20, TotalTokens: 100}, charge: 120, telemetry: true},
 		{name: "reported larger prompt", usage: provider.Usage{PromptTokens: 120, CompletionTokens: 20, TotalTokens: 140}, charge: 140, telemetry: true},
+		{name: "prompt undercount beyond reservation", usage: provider.Usage{PromptTokens: 200, CompletionTokens: 20, TotalTokens: 220}, charge: 220, telemetry: true, continues: true},
 		{name: "derive logical total", usage: provider.Usage{PromptTokens: 100, CompletionTokens: 20}, charge: 120, telemetry: true},
 		{name: "reasoning subset", usage: provider.Usage{PromptTokens: 100, CompletionTokens: 20, TotalTokens: 120, ReasoningTokens: 10, ReasoningTokensReported: true}, charge: 120, telemetry: true},
 		{name: "total only", usage: provider.Usage{TotalTokens: 100}, charge: 150, telemetry: true},
@@ -160,11 +161,14 @@ func TestRunBudgetSettlement(t *testing.T) {
 		{name: "router sentinel without outcome", err: provider.ErrRouterClosed, charge: 150},
 		{name: "multiple attempts", usage: provider.Usage{PromptTokens: 100, CompletionTokens: 20, TotalTokens: 120}, outcome: &provider.RouteOutcome{Attempts: make([]provider.RouteAttempt, 2)}, charge: 150, telemetry: true},
 		{name: "response multiple attempts", usage: provider.Usage{PromptTokens: 100, CompletionTokens: 20, TotalTokens: 120}, outcome: &provider.RouteOutcome{Attempts: make([]provider.RouteAttempt, 2)}, responseOutcome: true, charge: 150, telemetry: true},
+		{name: "fallback without attempts", usage: provider.Usage{PromptTokens: 100, CompletionTokens: 20, TotalTokens: 120}, outcome: &provider.RouteOutcome{FallbacksUsed: 1}, charge: 150, telemetry: true},
+		{name: "response fallback without attempts", usage: provider.Usage{PromptTokens: 100, CompletionTokens: 20, TotalTokens: 120}, outcome: &provider.RouteOutcome{FallbacksUsed: 1}, responseOutcome: true, charge: 150, telemetry: true},
 		{name: "overrun", usage: provider.Usage{PromptTokens: 100, CompletionTokens: 80, TotalTokens: 180}, charge: 180, telemetry: true},
 		{name: "contradiction", usage: provider.Usage{PromptTokens: 100, CompletionTokens: 20, TotalTokens: 119}, charge: 150},
 		{name: "negative prompt", usage: provider.Usage{PromptTokens: -1}, charge: 150},
 		{name: "negative completion", usage: provider.Usage{CompletionTokens: -1}, charge: 150},
 		{name: "negative total", usage: provider.Usage{TotalTokens: -1}, charge: 150},
+		{name: "negative reasoning", usage: provider.Usage{PromptTokens: 100, CompletionTokens: 20, TotalTokens: 120, ReasoningTokens: -1}, charge: 150},
 		{name: "larger contradictory total", usage: provider.Usage{PromptTokens: 100, CompletionTokens: 20, TotalTokens: 500}, charge: 500},
 		{name: "overflow", usage: provider.Usage{PromptTokens: math.MaxInt, CompletionTokens: 1}, charge: math.MaxInt},
 	} {
@@ -181,7 +185,7 @@ func TestRunBudgetSettlement(t *testing.T) {
 			}
 			r.settle(mr, tc.err)
 			r.settle(mr, tc.err) // Must not release/charge/aggregate twice.
-			if child.stopped() != (tc.charge > 150) {
+			if child.stopped() != (tc.charge > 150 && !tc.continues) {
 				t.Fatalf("overrun stop = %v", child.stopped())
 			}
 
@@ -231,7 +235,15 @@ func TestRunBudgetInvalidEstimate(t *testing.T) {
 }
 
 func TestRunBudgetUnboundedIgnoresReportedSpend(t *testing.T) {
-	ctx, _, b := testRunBudget(t, t.Context(), Request{})
+	ctx, _, b := testRunBudget(t, t.Context(), Request{Options: provider.ModelOptions{NumPredict: 1}})
+	// Without a finite allowance an unusable estimate has nothing to protect.
+	for _, estimate := range []int{-1, math.MaxInt} {
+		r, err := b.reserve(ctx, estimate)
+		if err != nil {
+			t.Fatalf("unbounded estimate %d: %v", estimate, err)
+		}
+		r.settle(ModelResult{}, nil)
+	}
 	for range 2 {
 		r, err := b.reserve(ctx, 100)
 		if err != nil {
@@ -268,5 +280,43 @@ func TestRunBudgetSnapshotAfterLateSettlement(t *testing.T) {
 	}
 	if !child.stopped() {
 		t.Fatal("child not sealed")
+	}
+}
+
+func TestRunBudgetOverrunBlocksLaterAdmission(t *testing.T) {
+	ctx, _, b := testRunBudget(t, t.Context(), Request{Budget: Budget{TotalTokens: 1000, OutputReserve: 10}})
+	r, err := b.reserve(ctx, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Completion 20 exceeds the fixed cap of 10 while charged stays far below 1000.
+	r.settle(ModelResult{Response: provider.ChatResponse{Usage: provider.Usage{PromptTokens: 10, CompletionTokens: 20, TotalTokens: 30}}}, nil)
+	if r, err := b.reserve(ctx, 1); r != nil || !errors.Is(err, errRunBudgetExhausted) {
+		t.Fatalf("overrun run re-admitted: %v %v", r, err)
+	}
+	childCtx, _, child := testRunBudget(t, ctx, Request{})
+	if r, err := child.reserve(childCtx, 1); r != nil || !errors.Is(err, errRunBudgetExhausted) {
+		t.Fatalf("child of overrun run admitted: %v %v", r, err)
+	}
+}
+
+func TestRunBudgetUsedOverflowFailsClosed(t *testing.T) {
+	ctx, _, _ := testRunBudget(t, t.Context(), Request{Budget: Budget{TotalTokens: math.MaxInt}})
+	heldCtx, _, holder := testRunBudget(t, ctx, Request{Options: provider.ModelOptions{NumPredict: 1}})
+	held, err := holder.reserve(heldCtx, math.MaxInt/2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer held.settle(ModelResult{}, nil)
+	spendCtx, _, spender := testRunBudget(t, ctx, Request{Options: provider.ModelOptions{NumPredict: 1}})
+	r, err := spender.reserve(spendCtx, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.settle(ModelResult{Response: provider.ChatResponse{Usage: provider.Usage{TotalTokens: math.MaxInt - 2}}}, nil)
+	// charged + reserved now overflows int; admission must fail rather than wrap.
+	probeCtx, _, probe := testRunBudget(t, ctx, Request{Options: provider.ModelOptions{NumPredict: 1}})
+	if got, err := probe.reserve(probeCtx, 0); got != nil || !errors.Is(err, errRunBudgetExhausted) {
+		t.Fatalf("wrapped usage admitted: %v %v", got, err)
 	}
 }

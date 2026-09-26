@@ -222,7 +222,11 @@ provider telemetry and from an exact tokenizer or billing-token claim.
   chunk stream are empty. Other arbitrary ModelCallers likewise provide no
   proof of non-execution. A future refund needs explicit evidence from the
   pre-execution boundary, not errors.Is plus absent telemetry.
-- Charge reported overages in full. Exhaustion or an overrun stops inference
+- Charge reported overages in full. (Review amendment, PR #595: an overrun
+  means output beyond the fixed generation cap, or excess not attributable to
+  the prompt. A reported prompt above the len/4 estimate is charged but does
+  not stop the run; otherwise ordinary tokenizer drift halted dispatch children
+  after one call far below their allowance.) Exhaustion or an overrun stops inference
   and tool execution with `StopReason=BudgetReached` and nil error when Chat and
   subsequent safety/observer checks succeed. Preserve accepted answer text;
   do not run its tool calls. A security block, callback error, provider error

@@ -8,9 +8,10 @@ those using a separately configured larger model route.
 Finite token allowances now reserve the assembled prompt estimate plus a fixed
 generation cap before inference and account for concurrent and repeated child
 runs together. Requests that do not fit stop before calling the model. Unknown
-or failed usage retains its reservation; reported overruns stop before executing
-returned tool calls. This is estimated admission accounting, not an exact
-provider billing guarantee.
+or failed usage retains its reservation. A reported prompt above the estimate is
+charged without stopping; output beyond the generation cap stops the run before
+its returned tool calls execute. This is estimated admission accounting, not an
+exact provider billing guarantee.
 Exhaustion during callbacks or a tool batch also blocks subsequent invocations,
 including queued parallel tools, while preserving cancellation errors after
 verification callbacks. Stopped batches retain only observed tool calls, even
