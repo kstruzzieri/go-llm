@@ -56,6 +56,82 @@ checkpoint after-state failures retain pending intent and refuse success. Other
 platforms keep the checked-path backend without these concurrent mutation
 guarantees.
 
+## Child capability and budget boundary (#449)
+
+Dispatch selects only `read_file`, `search`, `glob`, `list` and optional
+`retrieve`. Other parent tools, including write, exec, network, planning,
+nested dispatch and MCP tools, are omitted. A selected canonical entry must
+declare exactly Read, ApprovalNever and no PlanningTool interface; unsafe
+selected entries fail construction. A child requesting an omitted tool receives
+the ordinary unknown-tool denial. Installed implementations are trusted host
+code: their Effect metadata must remain constant and truthful. This is not
+process isolation, and the child's model transport and configured retrieval
+backend can still use the network.
+
+Scoped tasks retain #448's single pinned descendant directory. Native readers
+must share one Workspace, and every read must satisfy both the caller's guard
+and the selected subtree. Typed, sanitized denials disclose neither denied
+contents nor private guard diagnostics. Legacy string tasks remain unscoped.
+Separate tasks may select different subtrees; a single child spanning disjoint
+roots is not implemented. Scoped retrieval remains excluded and belongs to
+[#554](https://github.com/kstruzzieri/go-llm/issues/554). #552's filesystem
+boundaries remain unchanged.
+
+Every nested `Orchestrator.Run` using its caller's context inherits that run's
+effective input ceiling, fixed generation cap and configured step cap. Smaller
+child settings remain smaller; child steps do not decrement the parent's loop
+steps. An unset input ceiling resolves to 8,192, so even an explicit larger child
+route is attenuated to an unset parent's 8,192 ceiling. A terse parent output cap
+can shorten child summaries.
+
+Generation uses positive OutputReserve, otherwise positive Options.NumPredict,
+otherwise the fixed chat default (2,048) when any finite total allowance applies,
+then intersects with the parent's cap. Dispatch keeps its 1,024 generation
+default, six-step cap and 32,768-token local allowance. The generation cap never
+shrinks to fit remaining credits. The fallback sets NumPredict without creating
+an extra OutputReserve subtraction; normal assembly and pressure reporting use
+static capacity.
+
+A positive TotalTokens applies to the run's own inference and all descendants.
+After normal context assembly and pre-inference callbacks, the runtime atomically
+reserves the checked prompt estimate plus fixed generation allowance against
+every finite ancestor. Concurrent siblings and repeated dispatch calls cannot
+reserve the same credits. A request that does not fit stops with BudgetReached
+before Chat, without extra compaction or a shorter output cap.
+
+Settlement happens immediately after Chat, including errors and cancellation.
+Consistent decomposed usage on a successful single-attempt call may refund
+unused generation, but its prompt charge is at least the assembled estimate.
+Total-only, missing, invalid, failed or known multi-attempt reports retain at
+least the full reservation and larger safely known usage. Routing error
+sentinels alone do not prove non-execution. An overrun is fully charged and stops
+the current run before its returned tool calls execute; accepted answer text
+survives unless a safety check or actual error takes precedence.
+
+`Result.Usage` remains the raw usage of that run's recorded steps.
+`Result.DescendantUsage` separately snapshots valid reported descendant usage,
+including known failed-call usage, once per model call. Neither field fabricates
+reported tokens from admission estimates. Golem's footer and machine output keep
+their existing meaning. A run seals its scope and cancels its context on return:
+late nested admission fails even through context.WithoutCancel. Admitted calls
+still settle, but returned Results do not change; hosts must join nested work
+for complete telemetry.
+
+TotalTokens zero adds no local allowance. **Golem currently supplies no finite
+parent TotalTokens; #449 introduces no new aggregate Golem spend pool.** Its
+configured product remains four dispatch invocations × four children × 32,768 =
+524,288 admission credits, with per-child admission replacing the older
+post-call-only checks. Standalone Dispatch.Invoke has independent child limits,
+without an inferred parent or cross-invocation pool.
+
+These are logical admission credits, not exact billing tokens. The default
+prompt estimate is approximate, providers must honor generation caps and report
+usage truthfully, and internal router retries/fallbacks do not expose complete
+per-attempt usage. Direct Chat calls outside Orchestrator—such as delegate_code,
+custom compactor inference or retrieval-internal inference—are not metered here.
+All nested Runs in tools, observers and interceptors inherit the supplied
+context; trusted host code can deliberately start an independent context.
+
 ## ZT-700: operational least privilege and observability
 
 This workstream belongs to [#429](https://github.com/kstruzzieri/go-llm/issues/429). It connects existing controls and makes effective authority and decisions inspectable.

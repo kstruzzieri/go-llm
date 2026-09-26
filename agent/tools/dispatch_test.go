@@ -746,7 +746,7 @@ func (c *loopingDispatchCaller) Chat(context.Context, provider.ChatRequest, func
 	}, nil
 }
 
-func TestDispatchReportsPerChildBudgetStopAndModel(t *testing.T) {
+func TestDispatchReportsPerChildBudgetStopWithoutModelCall(t *testing.T) {
 	read := agent.Effect{Class: agent.Read, Approval: agent.ApprovalNever}
 	available := []agent.Tool{
 		dispatchNamedTool{name: "read_file", effect: read},
@@ -763,7 +763,7 @@ func TestDispatchReportsPerChildBudgetStopAndModel(t *testing.T) {
 		t.Fatalf("NewDispatch: %v", err)
 	}
 	out, err := tool.Invoke(context.Background(), json.RawMessage(`{"tasks":["one","two"]}`))
-	if err != nil || out.IsError {
+	if err != nil || !out.IsError {
 		t.Fatalf("Invoke = %+v, %v", out, err)
 	}
 	var envelope dispatchEnvelope
@@ -771,12 +771,12 @@ func TestDispatchReportsPerChildBudgetStopAndModel(t *testing.T) {
 		t.Fatalf("decode result: %v", err)
 	}
 	for i, result := range envelope.Results {
-		if result.StopReason != agent.BudgetReached.String() || result.Model != "local/fast" || result.Summary != "Partial result before budget_reached: unused" || result.Error != "" {
+		if result.StopReason != agent.BudgetReached.String() || result.Model != "" || result.Summary != "" || !strings.Contains(result.Error, "no summary") || !strings.Contains(result.Error, "identity unavailable") {
 			t.Fatalf("result %d = %+v", i, result)
 		}
 	}
-	if caller.calls.Load() != 2 {
-		t.Fatalf("model calls = %d, want one independently budgeted call per child", caller.calls.Load())
+	if caller.calls.Load() != 0 {
+		t.Fatalf("model calls = %d, want no call beyond the allowance", caller.calls.Load())
 	}
 }
 
@@ -790,7 +790,7 @@ func TestDispatchReportsChildStepCap(t *testing.T) {
 	}
 	caller := &loopingDispatchCaller{usage: provider.Usage{TotalTokens: 1}}
 	tool, err := NewDispatch(caller, agent.ContextManager{}, available, DispatchLimits{
-		MaxSteps: 2, Budget: agent.Budget{InputCeiling: 4096, OutputReserve: 123, TotalTokens: 100},
+		MaxSteps: 2, Budget: agent.Budget{InputCeiling: 4096, OutputReserve: 123, TotalTokens: 10000},
 		MaxTasks: 1, MaxConcurrent: 1, MaxSummaryBytes: 1024, MaxResultBytes: 4096, Timeout: time.Minute,
 	})
 	if err != nil {

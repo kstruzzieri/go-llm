@@ -442,6 +442,50 @@ func invokeDispatch(t *testing.T, tool agent.Tool, tasks []string) dispatchTestE
 	return envelope
 }
 
+// Invoke through the shared runtime so the child sees the active parent's caps,
+// including when the dispatcher was constructed for a larger explicit route.
+func invokeDispatchFromParent(t *testing.T, tool agent.Tool, tasks []string, budget agent.Budget) dispatchTestEnvelope {
+	t.Helper()
+	raw, err := json.Marshal(map[string][]string{"tasks": tasks})
+	if err != nil {
+		t.Fatal(err)
+	}
+	caller := &scriptCaller{responses: []agent.ModelResult{
+		{Response: provider.ChatResponse{ToolCalls: []provider.ToolCall{{ID: "dispatch", Type: "function", Function: provider.ToolCallFunction{Name: "dispatch", Arguments: raw}}}}},
+		{Response: provider.ChatResponse{Content: "done", Done: true}},
+	}}
+	res, err := agent.New(caller, agent.ContextManager{}).Run(t.Context(), agent.Request{Goal: "inspect", Tools: []agent.Tool{tool}, Budget: budget}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, msg := range res.Messages {
+		if msg.Role == "tool" && msg.ToolName == "dispatch" {
+			var envelope dispatchTestEnvelope
+			if err := json.Unmarshal([]byte(msg.Content), &envelope); err != nil {
+				t.Fatal(err)
+			}
+			return envelope
+		}
+	}
+	t.Fatalf("dispatch result missing: %+v", res)
+	return dispatchTestEnvelope{}
+}
+
+func TestNewDispatchTool_AttenuatesAtParentRun(t *testing.T) {
+	caller := &specRecordingCaller{}
+	tool, err := newDispatchTool(caller, flags{}, agent.Budget{InputCeiling: 16384, OutputReserve: 777}, dispatchFanout{maxConcurrent: 1}, nil, validDispatchAvailable(t), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	envelope := invokeDispatchFromParent(t, tool, []string{"inspect"}, agent.Budget{OutputReserve: 128})
+	if len(envelope.Results) != 1 || envelope.Results[0].Summary != "child done" {
+		t.Fatalf("child result: %+v", envelope.Results)
+	}
+	if len(caller.numPredicts) != 1 || caller.numPredicts[0] != 128 {
+		t.Fatalf("child generation = %v, want [128]", caller.numPredicts)
+	}
+}
+
 // TestNewDispatchTool_TimeoutCoversAllSequentialTasks pins the golem-side
 // dispatch invocation ceiling: the library's 5m default bounds the WHOLE
 // invocation, and a live two-task smoke on gemma4:31b measured task 2 starving

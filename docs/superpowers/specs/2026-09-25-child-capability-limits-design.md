@@ -1,7 +1,7 @@
 # Child capability and budget limits (#449)
 
 Status: revised after code-grounded review and approved by the user on 2026-09-25.
-Implementation has not started. This revision supersedes the budget contract in
+Implementation is in progress. This revision supersedes the budget contract in
 `93f1622`.
 
 ## Goal and baseline

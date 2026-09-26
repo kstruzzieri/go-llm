@@ -69,7 +69,7 @@ Use one typed context key, parent links and a shared mutex; no registry of all d
 
 **Interfaces:** Produce all five private functions above and errRunBudgetExhausted. Consume existing checkedTokenAdd, checkedTokenSub, saturatedTokenAdd, DefaultInputCeiling, defaultMaxSteps, provider.DefaultExpectedOutput and ModelResult.
 
-- [ ] **Step 1: Write normalization and lifetime tests.**
+- [x] **Step 1: Write normalization and lifetime tests.**
 
 Name the table tests `TestRunBudgetCapacityIntersection` and `TestRunBudgetGenerationPrecedence`. Each row constructs a parent and child via newRunBudget, closes both using cleanup, and asserts the returned effective Request. Cover explicit smaller/larger child limits, default input/steps, OutputReserve precedence over NumPredict, positive NumPredict with zero reserve, finite fallback, inherited finite fallback, and fully unbounded NumPredict compatibility.
 
@@ -89,7 +89,7 @@ if req.Options.NumPredict != -1 { t.Fatal(req) }
 
 `TestRunBudgetClosedAncestor`: close a parent, create a child from context.WithoutCancel(parentCtx), and assert reserve returns errRunBudgetExhausted and no reservation. Also close an intermediate node while root remains open. `TestRunBudgetCanceledAdmission` asserts errors.Is(err, context.Canceled) before any reservation exists.
 
-- [ ] **Step 2: Write admission, settlement and telemetry tests.**
+- [x] **Step 2: Write admission, settlement and telemetry tests.**
 
 `TestRunBudgetConcurrentReservations`: four sibling nodes, E=1000, G=1024, parent total=8096, child input=100000. Use channels/barriers to hold all four reservations simultaneously; all fit, a fifth does not. Independent root with identical limits admits independently. Settle every admitted reservation.
 
@@ -120,13 +120,13 @@ Assert the next reservation fits exactly at the remaining-credit boundary and fa
 
 `TestRunBudgetSnapshotAfterLateSettlement`: obtain a snapshot containing one descendant report, settle an already admitted second call after parent.close, and assert the first snapshot remains byte-for-byte unchanged. All subsequent admissions fail; the second call still releases its reservation exactly once.
 
-- [ ] **Step 3: Run the new tests and record the expected failure.**
+- [x] **Step 3: Run the new tests and record the expected failure.**
 
 `rtk proxy env -u GOROOT go test ./agent -run '^TestRunBudget' -count=1`
 
 Expected initially: compile failure for the missing private interfaces. Implement the smallest declarations, rerun to observe failing behavior before filling in the logic.
 
-- [ ] **Step 4: Implement the ledger in run_budget.go.**
+- [x] **Step 4: Implement the ledger in run_budget.go.**
 
 Normalize copies of Request; intersect input and configured effective step caps with the parent. Resolve fixed generation in the approved precedence order. Set NumPredict to the effective positive cap; clamp a configured positive OutputReserve to that cap, but never synthesize OutputReserve from the generation fallback. Reuse existing constants.
 
@@ -136,7 +136,7 @@ settle releases that reservation and adds the logical charge along the ancestor 
 
 Aggregate valid raw descendant P/C/T once into ancestors only, including failed-call reports. A zero total with usable components remains raw zero in telemetry; derived logical charge stays private. Reject negative/contradictory/overflowing telemetry and saturate aggregate counters rather than wrapping. Do not aggregate reasoning separately. stopped checks actual exhausted/overrun/closed state, not temporary sibling reservations as permanent exhaustion.
 
-- [ ] **Step 5: Verify and commit.**
+- [x] **Step 5: Verify and commit.**
 
 Run `rtk proxy env -u GOROOT go test -race ./agent -run '^TestRunBudget' -count=1`; expect PASS, no race report. Review diff, run `rtk git diff --check`, then commit these two files as `feat(agent): add per-run token admission ledger`.
 
@@ -146,7 +146,7 @@ Run `rtk proxy env -u GOROOT go test -race ./agent -run '^TestRunBudget' -count=
 
 **Interfaces:** Consume Task 1's five functions. Extend the private method to `func (o *Orchestrator) run(ctx context.Context, req Request, obs Observer, ic *interceptorRun, budgetRun *runBudget) (Result, error)`; preserve the public Run signature. Produce Result.DescendantUsage with the exact type/tag in Global Constraints.
 
-- [ ] **Step 1: Write behavioral regressions through Run.**
+- [x] **Step 1: Write behavioral regressions through Run.**
 
 Reuse scriptedCaller, newTestOrchestrator, pressureRec, echoTool, stepAbortObserver, tokenAbortObserver and stubInterceptor where they fit. For callback-controlled cases add only this test adapter in orchestrator_budget_test.go:
 
@@ -177,13 +177,13 @@ if res.DescendantUsage != nil { t.Fatal(res.DescendantUsage) }
 
 For every completed/error test with recorded steps, sum P/C/T from Steps and assert equality with res.Usage. Failed Chat reports without StepRecords must not appear in local Usage. Marshal results and assert DescendantUsage absent when nil, present under precisely that casing otherwise.
 
-- [ ] **Step 2: Run the new regressions before integration.**
+- [x] **Step 2: Run the new regressions before integration.**
 
 `rtk proxy env -u GOROOT go test ./agent -run '^TestRunBudget' -count=1`
 
 Expected: behavioral failures for missing runtime admission/lifetime/telemetry (plus the missing Result field until declared). Record failures; do not loosen old tests to accept both semantics.
 
-- [ ] **Step 3: Integrate admission and settlement.**
+- [x] **Step 3: Integrate admission and settlement.**
 
 In Run establish the derived context/effective Request before any run-scoped callbacks; ensure close executes for every return and assign its copied telemetry after o.run completes. Keep Risk publication.
 
@@ -193,7 +193,7 @@ Call settle immediately after Chat returns, before output inspection, OnStep, pa
 
 Update Budget/Run comments with inherited context, capacity/spend distinction and stable caps. Add DescendantUsage to Result without changing Budget's positional field layout.
 
-- [ ] **Step 4: Update old budget fixtures, verify and commit.**
+- [x] **Step 4: Update old budget fixtures, verify and commit.**
 
 Update `TestBudgetCapStop` and `TestBudgetCapStopOnFinalAnswer` to use a small explicit generation cap and a total that admits the first request, then a report that demonstrably overruns it. Assert calls, accepted answer and no post-overrun tool execution; retain separately the new tiny-total no-Chat test.
 
@@ -257,4 +257,4 @@ Run `rtk proxy env -u GOROOT go test -race ./agent ./agent/tools ./cmd/golem`; e
 
 ## Plan review
 
-Self-review completed against the approved spec: registry/scope, capacity/defaults, atomic admission, conservative settlement, cancellation/lifetime, Usage compatibility, Golem wiring and publication each have an owning task. Test selectors include the actual ModelSet rebuild tests. No provider migration or new dependency is planned. Implementation remains pending plan review and execution-method selection.
+Self-review completed against the approved spec: registry/scope, capacity/defaults, atomic admission, conservative settlement, cancellation/lifetime, Usage compatibility, Golem wiring and publication each have an owning task. Test selectors include the actual ModelSet rebuild tests. No provider migration or new dependency is planned. Native execution proceeds under the user's approved design and original implementation request; progress is recorded in this plan's execution ledger.
