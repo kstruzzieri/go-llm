@@ -248,7 +248,9 @@ func (secretSaveFailureStore) Load(context.Context, string) (*conversation.Conve
 	return nil, conversation.ErrNotFound
 }
 
-func (s secretSaveFailureStore) Save(context.Context, conversation.Conversation) error { return s.err }
+func (s secretSaveFailureStore) Save(context.Context, conversation.Conversation) (int64, error) {
+	return 0, s.err
+}
 
 func TestSecretSessionSaveErrorIsNotDemoted(t *testing.T) {
 	root := t.TempDir()

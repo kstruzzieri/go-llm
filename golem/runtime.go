@@ -48,13 +48,14 @@ const (
 // SessionStore loads and saves complete stateful-thread snapshots. Load must
 // return an error matching conversation.ErrNotFound for a missing ID, and a
 // successful Load must return a non-nil Conversation with that ID. Save must
-// atomically create revision 1 for a revision-zero snapshot only if the ID is
-// absent, or replace a positive revision r only when the stored revision is r,
-// committing r+1. Reject negative and maximum int64 revisions. A failed CAS
-// must return a *conversation.ConflictError; every Save error must leave the
-// old snapshot intact. Save takes a value: retained callers advance their local
-// revision only after success; a successful commit must return nil even if context
-// cancellation races afterward. Load results and summarizer inputs are read-only.
+// atomically create for a revision-zero snapshot only if the ID is absent, or
+// replace a positive revision r only when the stored revision is r, committing
+// r+1. Recreated IDs must never reuse a deleted revision. Save returns the
+// committed revision without modifying its input; callers retain that result.
+// Reject negative and maximum int64 input revisions. A failed CAS must return
+// a *conversation.ConflictError. Every error returns revision zero and leaves
+// storage unchanged; a successful commit returns nil error even if cancellation
+// races afterward. Load results and summarizer inputs are read-only.
 //
 // Calls for different thread IDs may overlap, so implementations must be safe
 // for concurrent use. Same-thread serialization applies only within one
@@ -65,7 +66,7 @@ const (
 // migrates, or hardens it.
 type SessionStore interface {
 	Load(ctx context.Context, id string) (*conversation.Conversation, error)
-	Save(ctx context.Context, conv conversation.Conversation) error
+	Save(ctx context.Context, conv conversation.Conversation) (int64, error)
 }
 
 // Options configures a Runtime.

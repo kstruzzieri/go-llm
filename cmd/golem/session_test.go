@@ -347,7 +347,7 @@ func TestSession_History(t *testing.T) {
 func TestSession_HistorySummaryLoadedAndPreserved(t *testing.T) {
 	ctx := context.Background()
 	s, _ := openTempSession(t, "workspace:summary")
-	if err := s.store.Save(ctx, conversation.Conversation{
+	if _, err := s.store.Save(ctx, conversation.Conversation{
 		ID:       s.id,
 		Title:    "summary",
 		Messages: []conversation.Message{{Role: "user", Content: "recent"}},
@@ -502,8 +502,8 @@ func TestSessionRevisionLifecycle(t *testing.T) {
 	if err := s.clear(ctx); err != nil || s.revision != 0 || len(s.msgs) != 0 {
 		t.Fatalf("clear = %v, cache %+v; want revision 0", err, s)
 	}
-	if err := s.record(ctx, "recreated", "answer"); err != nil || s.revision != 1 {
-		t.Fatalf("recreate = %v, revision %d; want 1", err, s.revision)
+	if err := s.record(ctx, "recreated", "answer"); err != nil || s.revision != 4 {
+		t.Fatalf("recreate = %v, revision %d; want 4", err, s.revision)
 	}
 	oldID := s.id
 	s.renew()

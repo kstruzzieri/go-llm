@@ -30,7 +30,7 @@ func TestCompactThreadCloseWaitsBeforeClosingResources(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := store.Save(context.Background(), conversation.Conversation{ID: "thread", Messages: compactExchanges(5)}); err != nil {
+	if _, err := store.Save(context.Background(), conversation.Conversation{ID: "thread", Messages: compactExchanges(5)}); err != nil {
 		t.Fatal(err)
 	}
 	started, canceled, release, resourcesClosed := make(chan struct{}), make(chan struct{}), make(chan struct{}), make(chan struct{})
@@ -666,7 +666,7 @@ func TestSaveThreadRetainsCommittedRevision(t *testing.T) {
 			for range 5 {
 				current.Messages = append(current.Messages, conversation.Message{Role: "user", Content: "old question"}, conversation.Message{Role: "assistant", Content: "old answer"})
 			}
-			if err := store.Save(ctx, current); err != nil {
+			if _, err := store.Save(ctx, current); err != nil {
 				t.Fatal(err)
 			}
 			current.Revision = 1
