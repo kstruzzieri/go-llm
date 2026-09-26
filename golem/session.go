@@ -162,7 +162,7 @@ func (r *Runtime) CompactThread(ctx context.Context, threadID string) (Compactio
 	if err := ctx.Err(); err != nil {
 		return report, fmt.Errorf("golem: compact thread %q: %w", threadID, err)
 	}
-	if err := store.store.Save(ctx, candidate); err != nil {
+	if _, err := store.store.Save(ctx, candidate); err != nil {
 		return report, fmt.Errorf("%w: compact thread %q: %w", ErrSessionPersistence, threadID, err)
 	}
 	r.secureThreadStore(store)
@@ -192,10 +192,11 @@ func (r *Runtime) saveThread(ctx context.Context, active *activeRun, budget agen
 	if err != nil {
 		return err
 	}
-	if err := store.store.Save(persistCtx, candidate); err != nil {
+	revision, err := store.store.Save(persistCtx, candidate)
+	if err != nil {
 		return fmt.Errorf("golem: save thread %q: %w", candidate.ID, err)
 	}
-	candidate.Revision++
+	candidate.Revision = revision
 	state.conversation = candidate
 	// The turn is durable from here. Hardening and compression failures are
 	// warnings, not run failures: reporting a failure for a committed turn
@@ -212,11 +213,12 @@ func (r *Runtime) saveThread(ctx context.Context, active *activeRun, budget agen
 	if !changed {
 		return nil
 	}
-	if err := store.store.Save(ctx, compacted); err != nil {
+	revision, err = store.store.Save(ctx, compacted)
+	if err != nil {
 		r.reportCompressionWarning(candidate.ID, fmt.Errorf("save compressed conversation: %w", err))
 		return nil
 	}
-	compacted.Revision++
+	compacted.Revision = revision
 	state.conversation = compacted
 	r.secureThreadStore(store)
 	return nil

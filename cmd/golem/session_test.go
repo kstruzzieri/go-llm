@@ -347,7 +347,7 @@ func TestSession_History(t *testing.T) {
 func TestSession_HistorySummaryLoadedAndPreserved(t *testing.T) {
 	ctx := context.Background()
 	s, _ := openTempSession(t, "workspace:summary")
-	if err := s.store.Save(ctx, conversation.Conversation{
+	if _, err := s.store.Save(ctx, conversation.Conversation{
 		ID:       s.id,
 		Title:    "summary",
 		Messages: []conversation.Message{{Role: "user", Content: "recent"}},
@@ -457,7 +457,8 @@ func TestSessionRevisionLifecycle(t *testing.T) {
 	if s.revision != 0 {
 		t.Fatalf("new revision = %d; want 0", s.revision)
 	}
-	for _, want := range []int64{1, 2} {
+	// A fresh store's v5 floor seed is 1, so the first create commits 2.
+	for _, want := range []int64{2, 3} {
 		if err := s.record(ctx, "question", "answer"); err != nil {
 			t.Fatal(err)
 		}
@@ -471,8 +472,8 @@ func TestSessionRevisionLifecycle(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = reopened.Close() }()
-	if reopened.revision != 2 {
-		t.Fatalf("reopened revision = %d; want 2", reopened.revision)
+	if reopened.revision != 3 {
+		t.Fatalf("reopened revision = %d; want 3", reopened.revision)
 	}
 	before := *s
 	if err := reopened.record(ctx, "winner", "winner answer"); err != nil {
@@ -480,14 +481,14 @@ func TestSessionRevisionLifecycle(t *testing.T) {
 	}
 	err = s.record(ctx, "loser", "loser answer")
 	var conflict *conversation.ConflictError
-	if !errors.Is(err, conversation.ErrConflict) || !errors.As(err, &conflict) || conflict.ExpectedRevision != 2 || !reflect.DeepEqual(*s, before) {
-		t.Fatalf("stale record = %v, cache %+v; want revision 2 conflict and unchanged cache", err, s)
+	if !errors.Is(err, conversation.ErrConflict) || !errors.As(err, &conflict) || conflict.ExpectedRevision != 3 || !reflect.DeepEqual(*s, before) {
+		t.Fatalf("stale record = %v, cache %+v; want revision 3 conflict and unchanged cache", err, s)
 	}
 	if _, err := s.switchTo(ctx, "user:missing"); !errors.Is(err, conversation.ErrNotFound) || !reflect.DeepEqual(*s, before) {
 		t.Fatalf("failed switch = %v, cache %+v; want unchanged", err, s)
 	}
-	if _, err := s.switchTo(ctx, s.id); err != nil || s.revision != 3 {
-		t.Fatalf("switch revision = %d, %v; want 3", s.revision, err)
+	if _, err := s.switchTo(ctx, s.id); err != nil || s.revision != 4 {
+		t.Fatalf("switch revision = %d, %v; want 4", s.revision, err)
 	}
 	if _, err := s.db.ExecContext(ctx, `CREATE TRIGGER refuse_delete BEFORE DELETE ON conversations BEGIN SELECT RAISE(FAIL, 'disk failure'); END`); err != nil {
 		t.Fatal(err)
@@ -502,8 +503,15 @@ func TestSessionRevisionLifecycle(t *testing.T) {
 	if err := s.clear(ctx); err != nil || s.revision != 0 || len(s.msgs) != 0 {
 		t.Fatalf("clear = %v, cache %+v; want revision 0", err, s)
 	}
-	if err := s.record(ctx, "recreated", "answer"); err != nil || s.revision != 1 {
-		t.Fatalf("recreate = %v, revision %d; want 1", err, s.revision)
+	if err := s.record(ctx, "recreated", "answer"); err != nil || s.revision != 5 {
+		t.Fatalf("recreate = %v, revision %d; want 5", err, s.revision)
+	}
+	if err := s.record(ctx, "next", "answer"); err != nil || s.revision != 6 {
+		t.Fatalf("next record = %v, revision %d; want 6", err, s.revision)
+	}
+	loaded, err := s.store.Load(ctx, s.id)
+	if err != nil || loaded.Revision != s.revision || !reflect.DeepEqual(loaded.Messages, s.msgs) {
+		t.Fatalf("persisted = %+v, %v; want cached revision %d and messages", loaded, err, s.revision)
 	}
 	oldID := s.id
 	s.renew()

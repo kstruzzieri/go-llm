@@ -33,7 +33,8 @@ func storedCASState(t *testing.T, store *SQLiteStore) string {
 	t.Helper()
 	rows, err := store.db.Query(`SELECT json_array(id,title,messages,summary_content,summary_message_count,revision,created_at,updated_at) FROM conversations
  UNION ALL SELECT json_array(id,title,body,message_count,created_at,updated_at) FROM conversation_search
- UNION ALL SELECT json_array(id,title,body) FROM conversation_fts`)
+ UNION ALL SELECT json_array(id,title,body) FROM conversation_fts
+ UNION ALL SELECT json_array(id,value) FROM conversation_revision_floor`)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -66,7 +67,7 @@ func TestSaveCAS_RevisionsAndCreationTimes(t *testing.T) {
 	ctx := context.Background()
 	initial := Conversation{ID: "cas", Title: "original", Messages: []Message{{Role: "user", Content: "originaltoken"}}, DurableSummary: &DurableSummary{Content: "summarytoken", MessageCount: 4}}
 	beforeInput, _ := json.Marshal(initial)
-	if err := store.Save(ctx, initial); err != nil {
+	if _, err := store.Save(ctx, initial); err != nil {
 		t.Fatal(err)
 	}
 	afterInput, _ := json.Marshal(initial)
@@ -77,8 +78,9 @@ func TestSaveCAS_RevisionsAndCreationTimes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if loaded.Revision != 1 {
-		t.Fatalf("create revision = %d, want 1", loaded.Revision)
+	// The v5 floor seed is 1, so a fresh store's first create commits 2.
+	if loaded.Revision != 2 {
+		t.Fatalf("create revision = %d, want 2", loaded.Revision)
 	}
 	// Pin old timestamps without clock sleeps so accidental rewrites cannot pass.
 	for _, table := range []string{"conversations", "conversation_search"} {
@@ -89,14 +91,14 @@ func TestSaveCAS_RevisionsAndCreationTimes(t *testing.T) {
 	for _, step := range []struct {
 		created      time.Time
 		wantRevision int64
-	}{{time.Time{}, 2}, {time.UnixMilli(9999), 3}} {
+	}{{time.Time{}, 3}, {time.UnixMilli(9999), 4}} {
 		loaded, err = store.Load(ctx, "cas")
 		if err != nil {
 			t.Fatal(err)
 		}
 		loaded.CreatedAt = step.created
 		beforeInput, _ = json.Marshal(loaded)
-		if err := store.Save(ctx, *loaded); err != nil {
+		if _, err := store.Save(ctx, *loaded); err != nil {
 			t.Fatal(err)
 		}
 		afterInput, _ = json.Marshal(loaded)
@@ -136,7 +138,7 @@ func TestSaveCAS_ConflictsPreserveState(t *testing.T) {
 			ctx := context.Background()
 			candidate := &Conversation{ID: "cas", Revision: 1}
 			if tc.name != "absent update" {
-				if err := store.Save(ctx, Conversation{ID: "cas", Title: "winner", Messages: []Message{{Role: "user", Content: "winnertoken"}}, DurableSummary: &DurableSummary{Content: "winnersummary", MessageCount: 3}}); err != nil {
+				if _, err := store.Save(ctx, Conversation{ID: "cas", Title: "winner", Messages: []Message{{Role: "user", Content: "winnertoken"}}, DurableSummary: &DurableSummary{Content: "winnersummary", MessageCount: 3}}); err != nil {
 					t.Fatal(err)
 				}
 				var err error
@@ -165,7 +167,8 @@ func TestSaveCAS_ConflictsPreserveState(t *testing.T) {
 			if _, err := store.db.Exec(`CREATE TRIGGER refuse_search BEFORE INSERT ON conversation_search BEGIN SELECT RAISE(ABORT, 'unexpected projection write'); END`); err != nil {
 				t.Fatal(err)
 			}
-			requireConflict(t, store.Save(ctx, *candidate), "cas", tc.revision)
+			_, err := store.Save(ctx, *candidate)
+			requireConflict(t, err, "cas", tc.revision)
 			if got := storedCASState(t, store); got != before {
 				t.Errorf("conflicting Save changed storage:\n%s\nwant:\n%s", got, before)
 			}
@@ -176,13 +179,13 @@ func TestSaveCAS_ConflictsPreserveState(t *testing.T) {
 func TestSaveCAS_RevisionLimits(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()
-	if err := store.Save(ctx, Conversation{ID: "cas", Title: "original"}); err != nil {
+	if _, err := store.Save(ctx, Conversation{ID: "cas", Title: "original"}); err != nil {
 		t.Fatal(err)
 	}
 	for _, id := range []string{"cas", "absent"} {
 		for _, revision := range []int64{-1, math.MaxInt64} {
 			before := storedCASState(t, store)
-			err := store.Save(ctx, Conversation{ID: id, Revision: revision, Title: "invalid"})
+			_, err := store.Save(ctx, Conversation{ID: id, Revision: revision, Title: "invalid"})
 			if err == nil || errors.Is(err, ErrConflict) {
 				t.Errorf("Save(%q, %d) = %v, want non-conflict validation error", id, revision, err)
 			}
@@ -198,7 +201,7 @@ func TestSaveCAS_RevisionLimits(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := store.Save(ctx, *loaded); err != nil {
+	if _, err := store.Save(ctx, *loaded); err != nil {
 		t.Fatalf("Save(max-minus-one) = %v", err)
 	}
 	loaded, err = store.Load(ctx, "cas")
@@ -209,7 +212,7 @@ func TestSaveCAS_RevisionLimits(t *testing.T) {
 		t.Fatalf("Load revision = %d, want max int64", loaded.Revision)
 	}
 	before := storedCASState(t, store)
-	if err := store.Save(ctx, *loaded); err == nil || errors.Is(err, ErrConflict) {
+	if _, err := store.Save(ctx, *loaded); err == nil || errors.Is(err, ErrConflict) {
 		t.Errorf("Save(max) = %v, want validation error", err)
 	}
 	if got := storedCASState(t, store); got != before {
@@ -241,13 +244,19 @@ func openCASHandles(t *testing.T) [2]*SQLiteStore {
 }
 
 func TestSaveCAS_TwoHandles(t *testing.T) {
-	for _, create := range []bool{false, true} {
-		t.Run(fmt.Sprintf("create=%t", create), func(t *testing.T) {
+	for _, mode := range []string{"create", "update", "recreate"} {
+		t.Run(mode, func(t *testing.T) {
+			create := mode != "update"
 			stores := openCASHandles(t)
 			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 			defer cancel()
-			if !create {
-				if err := stores[0].Save(ctx, Conversation{ID: "race", Title: "base", Messages: []Message{{Role: "user", Content: "base"}}}); err != nil {
+			if mode != "create" {
+				if _, err := stores[0].Save(ctx, Conversation{ID: "race", Title: "base", Messages: []Message{{Role: "user", Content: "base"}}}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if mode == "recreate" {
+				if err := stores[0].Delete(ctx, "race"); err != nil {
 					t.Fatal(err)
 				}
 			}
@@ -260,8 +269,9 @@ func TestSaveCAS_TwoHandles(t *testing.T) {
 			var releaseOnce sync.Once
 			start := func() { releaseOnce.Do(func() { close(release) }) }
 			type outcome struct {
-				worker int
-				err    error
+				worker   int
+				revision int64
+				err      error
 			}
 			outcomes := make(chan outcome, 2)
 			var workers sync.WaitGroup
@@ -291,8 +301,8 @@ func TestSaveCAS_TwoHandles(t *testing.T) {
 							ready <- err
 							return
 						}
-						if loaded.Revision != 1 {
-							ready <- fmt.Errorf("loaded revision = %d, want 1", loaded.Revision)
+						if loaded.Revision != 2 {
+							ready <- fmt.Errorf("loaded revision = %d, want 2", loaded.Revision)
 							return
 						}
 						candidate.Revision = loaded.Revision
@@ -303,7 +313,8 @@ func TestSaveCAS_TwoHandles(t *testing.T) {
 					case <-ctx.Done():
 						return
 					}
-					outcomes <- outcome{i, store.Save(ctx, candidate)}
+					revision, err := store.Save(ctx, candidate)
+					outcomes <- outcome{i, revision, err}
 				}()
 			}
 			go func() { workers.Wait(); close(done) }()
@@ -324,13 +335,25 @@ func TestSaveCAS_TwoHandles(t *testing.T) {
 				case result := <-outcomes:
 					if result.err == nil {
 						winner = result.worker
+						// Fresh creates commit floor seed 1 plus one; the base and a
+						// recreation after deleting it each advance one further.
+						want := int64(3)
+						if mode == "create" {
+							want = 2
+						}
+						if result.revision != want {
+							t.Errorf("returned revision = %d, want %d", result.revision, want)
+						}
 						successes++
 					} else {
-						expected := int64(1)
+						expected := int64(2)
 						if create {
 							expected = 0
 						}
 						requireConflict(t, result.err, "race", expected)
+						if result.revision != 0 {
+							t.Errorf("conflict returned revision %d", result.revision)
+						}
 						conflicts++
 					}
 				case <-ctx.Done():
@@ -344,9 +367,9 @@ func TestSaveCAS_TwoHandles(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			expectedRevision := int64(2)
-			if create {
-				expectedRevision = 1
+			expectedRevision := int64(3)
+			if mode == "create" {
+				expectedRevision = 2
 			}
 			if got.Revision != expectedRevision {
 				t.Errorf("persisted revision = %d, want %d", got.Revision, expectedRevision)
@@ -384,7 +407,7 @@ func TestSaveCAS_TwoHandles(t *testing.T) {
 func TestSaveCAS_IndexFailureRollsBack(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()
-	if err := store.Save(ctx, Conversation{ID: "cas", Title: "originaltitle", Messages: []Message{{Role: "user", Content: "originalmessage"}}, DurableSummary: &DurableSummary{Content: "originalsummary", MessageCount: 3}}); err != nil {
+	if _, err := store.Save(ctx, Conversation{ID: "cas", Title: "originaltitle", Messages: []Message{{Role: "user", Content: "originalmessage"}}, DurableSummary: &DurableSummary{Content: "originalsummary", MessageCount: 3}}); err != nil {
 		t.Fatal(err)
 	}
 	for _, table := range []string{"conversations", "conversation_search"} {
@@ -403,7 +426,7 @@ func TestSaveCAS_IndexFailureRollsBack(t *testing.T) {
 	if _, err := store.db.Exec(`CREATE TRIGGER fail_search BEFORE UPDATE ON conversation_search BEGIN SELECT RAISE(ABORT, 'forced metadata failure'); END`); err != nil {
 		t.Fatal(err)
 	}
-	err = store.Save(ctx, *loaded)
+	_, err = store.Save(ctx, *loaded)
 	if err == nil || errors.Is(err, ErrConflict) || !strings.Contains(err.Error(), "forced metadata failure") {
 		t.Fatalf("Save with failing search trigger = %v, want original SQL failure", err)
 	}
@@ -425,17 +448,17 @@ func TestSaveCAS_IndexFailureRollsBack(t *testing.T) {
 func TestSaveCAS_NonConflictErrors(t *testing.T) {
 	stores := openCASHandles(t)
 	ctx := context.Background()
-	if err := stores[0].Save(ctx, Conversation{ID: "cas"}); err != nil {
+	if _, err := stores[0].Save(ctx, Conversation{ID: "cas"}); err != nil {
 		t.Fatal(err)
 	}
 	before := storedCASState(t, stores[0])
 	canceled, cancel := context.WithCancel(ctx)
 	cancel()
-	err := stores[0].Save(canceled, Conversation{ID: "cas", Revision: 1})
+	_, err := stores[0].Save(canceled, Conversation{ID: "cas", Revision: 1})
 	if !errors.Is(err, context.Canceled) || errors.Is(err, ErrConflict) {
 		t.Errorf("canceled Save = %v, want context.Canceled only", err)
 	}
-	err = stores[0].Save(ctx, Conversation{ID: "cas", Revision: 1, Messages: []Message{{ToolCalls: json.RawMessage(`{`)}}})
+	_, err = stores[0].Save(ctx, Conversation{ID: "cas", Revision: 1, Messages: []Message{{ToolCalls: json.RawMessage(`{`)}}})
 	var encodingError *json.MarshalerError
 	if !errors.As(err, &encodingError) || errors.Is(err, ErrConflict) {
 		t.Errorf("invalid JSON Save = %v, want encoding error only", err)
@@ -451,7 +474,7 @@ func TestSaveCAS_NonConflictErrors(t *testing.T) {
 	if _, err := tx.Exec(`UPDATE conversations SET title = 'locked' WHERE id = 'cas'`); err != nil {
 		t.Fatal(err)
 	}
-	err = stores[1].Save(ctx, Conversation{ID: "cas", Revision: 1})
+	_, err = stores[1].Save(ctx, Conversation{ID: "cas", Revision: 1})
 	var sqlError interface{ Code() int }
 	if err == nil || errors.Is(err, ErrConflict) || !errors.As(err, &sqlError) || sqlError.Code() != 5 {
 		t.Errorf("busy Save = %v, want SQLITE_BUSY only", err)

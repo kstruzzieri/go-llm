@@ -196,16 +196,17 @@ func (s *session) record(ctx context.Context, userLine, answer string) error {
 
 func (s *session) recordMessages(ctx context.Context, msgs []conversation.Message) error {
 	next := append(append([]conversation.Message{}, s.msgs...), msgs...)
-	if err := s.store.Save(ctx, conversation.Conversation{
+	revision, err := s.store.Save(ctx, conversation.Conversation{
 		ID:             s.id,
 		Revision:       s.revision,
 		Title:          sessionTitle(next),
 		Messages:       next,
 		DurableSummary: cloneDurableSummary(s.summary),
-	}); err != nil {
+	})
+	if err != nil {
 		return err
 	}
-	s.revision++
+	s.revision = revision
 	s.msgs = next
 	// SQLite may have (re)created the -wal/-shm sidecars honoring the umask on
 	// this write; re-secure them (the WAL can hold un-checkpointed message text).

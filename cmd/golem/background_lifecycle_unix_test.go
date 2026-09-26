@@ -334,7 +334,7 @@ func TestJobsSurviveSessionBoundariesWhileGrantsClear(t *testing.T) {
 	}
 	sess := newSessionedTestSession(t, &captureCaller{answer: "x"}, root, "workspace:a1")
 	sess.bgManager = mgr
-	if err := sess.session.store.Save(context.Background(), conversation.Conversation{
+	if _, err := sess.session.store.Save(context.Background(), conversation.Conversation{
 		ID:    "user:other",
 		Title: "other",
 		Messages: []conversation.Message{
