@@ -127,6 +127,7 @@ func (o *Orchestrator) runToolCallsParallel(ctx context.Context, res *Result, st
 			appendTrailingToolCallRecords(res, step, prepared, results, latencies, invoked, i+1)
 			return err
 		}
+		b.completed = append(b.completed, i)
 		if stop {
 			appendTrailingToolCallRecords(res, step, prepared, results, latencies, invoked, i+1)
 			return nil // governor tripped: discard later already-computed read-only results

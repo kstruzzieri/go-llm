@@ -430,56 +430,136 @@ func (t budgetInvokeTool) Invoke(ctx context.Context, _ json.RawMessage) (ToolRe
 }
 
 func TestRunBudgetStopsQueuedParallelTool(t *testing.T) {
-	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
-	defer cancel()
-	started := make(chan struct{}, parallelToolCallLimit)
-	release := make(chan struct{})
-	var late atomic.Int32
-	child := New(&scriptedCaller{responses: []ModelResult{{Response: provider.ChatResponse{
-		Content: "child", Usage: provider.Usage{TotalTokens: 10000},
-	}}}}, ContextManager{})
-	var tools []Tool
-	var calls []provider.ToolCall
-	for i := 0; i <= parallelToolCallLimit; i++ {
-		name := fmt.Sprint("read", i)
-		calls = append(calls, tc(name, "{}"))
-		tools = append(tools, budgetInvokeTool{echoTool{name: name}, func(ctx context.Context) (ToolResult, error) {
-			if i == parallelToolCallLimit {
-				late.Add(1)
-				return ToolResult{}, nil
-			}
-			started <- struct{}{}
-			if i == 0 {
-				// Hold every worker until all eight are admitted. Exhaust the
-				// allowance before freeing any slot for the ninth invocation.
-				for range parallelToolCallLimit {
+	for _, idCase := range []string{"unique", "", "duplicate"} {
+		t.Run(fmt.Sprintf("ids=%q", idCase), func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+			defer cancel()
+			started := make(chan struct{}, parallelToolCallLimit)
+			release := make(chan struct{})
+			var late atomic.Int32
+			child := New(&scriptedCaller{responses: []ModelResult{{Response: provider.ChatResponse{
+				Content: "child", Usage: provider.Usage{TotalTokens: 10000},
+			}}}}, ContextManager{})
+			var tools []Tool
+			var calls []provider.ToolCall
+			for i := 0; i <= parallelToolCallLimit; i++ {
+				name := fmt.Sprint("read", i)
+				call := tc(name, "{}")
+				if idCase != "unique" {
+					call.ID = idCase
+				}
+				calls = append(calls, call)
+				tools = append(tools, budgetInvokeTool{echoTool{name: name}, func(ctx context.Context) (ToolResult, error) {
+					if i == parallelToolCallLimit {
+						late.Add(1)
+						return ToolResult{}, nil
+					}
+					started <- struct{}{}
+					if i == 0 {
+						// Hold every worker until all eight are admitted. Exhaust the
+						// allowance before freeing any slot for the ninth invocation.
+						for range parallelToolCallLimit {
+							select {
+							case <-started:
+							case <-ctx.Done():
+								return ToolResult{}, ctx.Err()
+							}
+						}
+						_, err := child.Run(ctx, Request{Goal: "q"}, nil)
+						close(release)
+						return ToolResult{Content: "nested"}, err
+					}
 					select {
-					case <-started:
+					case <-release:
+						return ToolResult{Content: "read"}, nil
 					case <-ctx.Done():
 						return ToolResult{}, ctx.Err()
 					}
-				}
+				}})
+			}
+			caller := &scriptedCaller{responses: []ModelResult{{Response: provider.ChatResponse{ToolCalls: calls}}}}
+			res, err := New(caller, ContextManager{}).Run(ctx, Request{
+				Goal: "q", Tools: tools, Budget: Budget{TotalTokens: 10000, OutputReserve: 64},
+			}, nil)
+			if err != nil || res.StopReason != BudgetReached || late.Load() != 0 || len(res.ToolCalls) != parallelToolCallLimit {
+				t.Fatalf("stop=%v err=%v late=%d records=%+v", res.StopReason, err, late.Load(), res.ToolCalls)
+			}
+			if !reflect.DeepEqual(res.Messages[1].ToolCalls, calls[:parallelToolCallLimit]) || len(toolMessages(res.Messages)) != parallelToolCallLimit {
+				t.Fatalf("incomplete transcript: %+v", res.Messages)
+			}
+		})
+	}
+}
+
+func TestRunBudgetStopsSerialToolWithDuplicateIDs(t *testing.T) {
+	for _, id := range []string{"", "duplicate"} {
+		t.Run(fmt.Sprintf("id=%q", id), func(t *testing.T) {
+			child := New(&scriptedCaller{responses: []ModelResult{{Response: provider.ChatResponse{
+				Content: "child", Usage: provider.Usage{TotalTokens: 10000},
+			}}}}, ContextManager{})
+			first := budgetInvokeTool{echoTool{name: "dispatch"}, func(ctx context.Context) (ToolResult, error) {
 				_, err := child.Run(ctx, Request{Goal: "q"}, nil)
-				close(release)
-				return ToolResult{Content: "nested"}, err
+				return ToolResult{Content: "child finished"}, err
+			}}
+			calls := []provider.ToolCall{toolCall(id, "dispatch", "{}"), toolCall(id, "write_file", "{}")}
+			caller := batchThenAnswer(calls...)
+			res, err := New(caller, ContextManager{}).Run(t.Context(), Request{
+				Goal: "q", Tools: []Tool{first, fakeWriteTool{name: "write_file", approval: ApprovalNever}},
+				Budget: Budget{TotalTokens: 10000, OutputReserve: 64},
+			}, nil)
+			if err != nil || res.StopReason != BudgetReached || len(res.ToolCalls) != 1 {
+				t.Fatalf("stop=%v err=%v records=%+v; want budget stop and one completed call", res.StopReason, err, res.ToolCalls)
 			}
-			select {
-			case <-release:
-				return ToolResult{Content: "read"}, nil
-			case <-ctx.Done():
-				return ToolResult{}, ctx.Err()
+			if !reflect.DeepEqual(res.Messages[1].ToolCalls, calls[:1]) || len(toolMessages(res.Messages)) != 1 {
+				t.Fatalf("incomplete transcript: %+v; want only dispatch", res.Messages)
 			}
-		}})
+		})
 	}
-	caller := &scriptedCaller{responses: []ModelResult{{Response: provider.ChatResponse{ToolCalls: calls}}}}
-	res, err := New(caller, ContextManager{}).Run(ctx, Request{
-		Goal: "q", Tools: tools, Budget: Budget{TotalTokens: 10000, OutputReserve: 64},
-	}, nil)
-	if err != nil || res.StopReason != BudgetReached || late.Load() != 0 || len(res.ToolCalls) != parallelToolCallLimit {
-		t.Fatalf("stop=%v err=%v late=%d records=%+v", res.StopReason, err, late.Load(), res.ToolCalls)
-	}
-	if len(res.Messages[1].ToolCalls) != parallelToolCallLimit || len(toolMessages(res.Messages)) != parallelToolCallLimit {
-		t.Fatalf("incomplete transcript: %+v", res.Messages)
+}
+
+func TestRunBudgetVerificationPreservesCancellation(t *testing.T) {
+	for _, exhaust := range []bool{false, true} {
+		t.Run(fmt.Sprintf("exhaust=%v", exhaust), func(t *testing.T) {
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			var runCtx context.Context
+			child := New(&scriptedCaller{responses: []ModelResult{{Response: provider.ChatResponse{
+				Content: "child", Usage: provider.Usage{TotalTokens: 10000},
+			}}}}, ContextManager{})
+			ic := &stubInterceptor{name: "verification", input: func(in InputInspection) []Finding {
+				for _, msg := range in.Messages {
+					if msg.Content == "verifier-budget-cancel" {
+						if exhaust {
+							if _, err := child.Run(runCtx, Request{Goal: "q"}, nil); err != nil {
+								t.Fatal(err)
+							}
+						}
+						cancel()
+					}
+				}
+				return nil
+			}}
+			obs := budgetObserver{step: func(ctx context.Context, _ StepEvent) error { runCtx = ctx; return nil }}
+			calls := 0
+			caller := budgetModelFunc(func(ctx context.Context, _ provider.ChatRequest, _ func(provider.ChatResponse) error) (ModelResult, error) {
+				calls++
+				if err := ctx.Err(); err != nil {
+					return ModelResult{}, err
+				}
+				if calls == 1 {
+					return ModelResult{Response: provider.ChatResponse{ToolCalls: []provider.ToolCall{tc("write_file", "{}")}}}, nil
+				}
+				return finalAnswer("done"), nil
+			})
+			parent := New(caller, ContextManager{}, WithInterceptors(ic), WithVerifier(stubVerifier{out: "verifier-budget-cancel"}))
+			res, err := parent.Run(ctx, Request{
+				Goal: "q", MaxSteps: 3, Tools: []Tool{fakeWriteTool{name: "write_file", approval: ApprovalNever}},
+				Budget: Budget{TotalTokens: 10000, OutputReserve: 64},
+			}, obs)
+			if !errors.Is(err, context.Canceled) || calls != 1 {
+				t.Fatalf("stop=%v err=%v model calls=%d; want cancellation after one call", res.StopReason, err, calls)
+			}
+		})
 	}
 }
 

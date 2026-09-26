@@ -41,18 +41,10 @@ func (o *Orchestrator) runToolCalls(ctx context.Context, res *Result, state *Sta
 	if errors.Is(err, errRunBudgetExhausted) {
 		// Retain completed observations, but remove unexecuted calls from the
 		// assistant message so the returned transcript has no dangling calls.
-		completed := make(map[string]bool)
-		for _, msg := range state.Messages[assistantIndex+1:] {
-			if msg.Role == "tool" {
-				completed[msg.ToolCallID] = true
-			}
-		}
 		msg := &state.Messages[assistantIndex]
-		kept := make([]provider.ToolCall, 0, len(msg.ToolCalls))
-		for _, call := range msg.ToolCalls {
-			if completed[call.ID] {
-				kept = append(kept, call)
-			}
+		kept := make([]provider.ToolCall, 0, len(b.completed))
+		for _, index := range b.completed {
+			kept = append(kept, msg.ToolCalls[index])
 		}
 		msg.ToolCalls = kept
 		if len(kept) == 0 && msg.Content == "" {
@@ -76,7 +68,7 @@ func (o *Orchestrator) runToolCallsSerial(ctx context.Context, res *Result, stat
 	reg *toolRegistry, calls []provider.ToolCall, approver Approver, obs Observer, step int,
 	gov *restraintGovernor, b *batch, ic *interceptorRun) error {
 
-	for _, call := range calls {
+	for i, call := range calls {
 		res.Events = append(res.Events, EventRecord{Step: step, Kind: "tool_call"})
 		out, effect, rec, inspectResult, err := o.dispatch(ctx, reg, call, approver, obs, step, gov, ic)
 		if err != nil {
@@ -87,6 +79,7 @@ func (o *Orchestrator) runToolCallsSerial(ctx context.Context, res *Result, stat
 		if err != nil {
 			return err
 		}
+		b.completed = append(b.completed, i)
 		if stop {
 			return nil
 		}

@@ -61,9 +61,11 @@ func mutatesWorkspaceFiles(name string) bool {
 	return name == WriteFileToolName || name == EditFileToolName
 }
 
-// batch carries the post-batch policy inputs that the shared recordResult tail
-// accumulates across BOTH dispatch paths.
+// batch carries the post-batch policy inputs accumulated by both dispatch paths.
 type batch struct {
+	// completed holds model-order call indexes with recorded observations.
+	// Provider IDs may be empty or duplicated.
+	completed []int
 	// verifyAnchor is the index in State.Messages of the last observation in
 	// this batch produced by a successfully invoked workspace-file mutator;
 	// -1 when the batch mutated no workspace file.
@@ -111,6 +113,9 @@ func (o *Orchestrator) verifyBatch(ctx context.Context, state *State, approver A
 		ToolName: anchor.ToolName, ToolCallID: anchor.ToolCallID, Content: out,
 	})
 	if err != nil {
+		return err
+	}
+	if err := ctx.Err(); err != nil {
 		return err
 	}
 	if block != nil {
