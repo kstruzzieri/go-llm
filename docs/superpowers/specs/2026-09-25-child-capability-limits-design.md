@@ -1,6 +1,6 @@
 # Child capability and budget limits (#449)
 
-Status: revised after code-grounded review on 2026-09-25; proposed for approval.
+Status: revised after code-grounded review and approved by the user on 2026-09-25.
 Implementation has not started. This revision supersedes the budget contract in
 `93f1622`.
 
@@ -346,7 +346,7 @@ Final checks:
 
 ```sh
 rtk proxy env -u GOROOT go test ./agent/tools -run 'Test(NewDispatch|Dispatch|Scoped)' -count=1
-rtk proxy env -u GOROOT go test ./cmd/golem -run 'Test(NewDispatchTool|OrchestratorFactory_Dispatch|RebuildDispatch)' -count=1
+rtk proxy env -u GOROOT go test ./cmd/golem -run 'Test(NewDispatchTool|OrchestratorFactory_Dispatch|ModelSet.*Dispatch|ModelSetAfterAllowWrite)' -count=1
 rtk proxy env -u GOROOT go test -race ./agent ./agent/tools ./cmd/golem
 rtk docker compose -p go-llm-449 -f docker-compose.ci.yml run --build --rm ci ./scripts/ci-local --mode full
 ```
