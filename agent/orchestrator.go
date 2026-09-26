@@ -118,15 +118,19 @@ func buildChatRequest(st State, specs []provider.Tool, outputReserve int, opts p
 
 // Run executes the loop until the model produces a final answer or a cap is
 // hit. Result.Risk is published on every return path, including blocks and
-// errors.
-func (o *Orchestrator) Run(ctx context.Context, req Request, obs Observer) (Result, error) {
+// errors. Nested Runs using the supplied context inherit capacities and finite
+// token allowances. Returning seals that scope and cancels its context; callers
+// must join nested work before returning to receive complete descendant usage.
+func (o *Orchestrator) Run(ctx context.Context, req Request, obs Observer) (res Result, err error) {
+	ctx, req, budgetRun := newRunBudget(ctx, req)
+	defer func() { res.DescendantUsage = budgetRun.close() }()
 	ic := &interceptorRun{}
-	res, err := o.run(ctx, req, obs, ic)
+	res, err = o.run(ctx, req, obs, ic, budgetRun)
 	res.Risk = ic.result()
 	return res, err
 }
 
-func (o *Orchestrator) run(ctx context.Context, req Request, obs Observer, ic *interceptorRun) (Result, error) {
+func (o *Orchestrator) run(ctx context.Context, req Request, obs Observer, ic *interceptorRun, budgetRun *runBudget) (Result, error) {
 	obs = normalizeObserver(obs)
 	if req.Goal == "" {
 		return Result{}, fmt.Errorf("agent: empty goal")
@@ -140,9 +144,6 @@ func (o *Orchestrator) run(ctx context.Context, req Request, obs Observer, ic *i
 		}
 	}
 	maxSteps := req.MaxSteps
-	if maxSteps <= 0 {
-		maxSteps = defaultMaxSteps
-	}
 	reg, err := newToolRegistry(req.Tools)
 	if err != nil {
 		return Result{}, err
@@ -263,6 +264,18 @@ func (o *Orchestrator) run(ctx context.Context, req Request, obs Observer, ic *i
 		chatReq := buildChatRequest(assembled, specs, req.Budget.OutputReserve, req.Options, advisory)
 		// Session identity belongs to the run, independent of transcript rebuilding.
 		chatReq.SessionID = req.SessionID
+		// Both assembly modes report the checked, complete prompt cost. Spend
+		// admission happens afterward, without changing static context capacity.
+		reservation, err := budgetRun.reserve(ctx, pressure.InputTokens)
+		if err != nil {
+			if !errors.Is(err, errRunBudgetExhausted) {
+				return finishWithError(&res, state, historyLen, err)
+			}
+			res.StopReason = BudgetReached
+			res.Messages = resultMessages(state, historyLen)
+			res.Events = append(res.Events, EventRecord{Step: step, Kind: "stop"})
+			return res, nil
+		}
 		modelResult, err := o.model.Chat(ctx, chatReq, func(c provider.ChatResponse) error {
 			if c.Thinking != "" {
 				if to, ok := obs.(ThinkingObserver); ok {
@@ -280,6 +293,7 @@ func (o *Orchestrator) run(ctx context.Context, req Request, obs Observer, ic *i
 			}
 			return obs.OnToken(ctx, TokenEvent{Step: step, Content: c.Content})
 		})
+		reservation.settle(modelResult, err)
 		modelLatency := o.now().Sub(modelStart)
 		if err != nil {
 			// A failed stream may still return collected text. Preserve only that
@@ -332,15 +346,24 @@ func (o *Orchestrator) run(ctx context.Context, req Request, obs Observer, ic *i
 			return res, err
 		}
 
+		if budgetRun.stopped() {
+			// Keep accepted text, but never persist unexecuted tool-call residue.
+			if resp.Content != "" {
+				accepted := resp
+				accepted.ToolCalls = nil
+				state.Messages = append(state.Messages, assistantMessage(accepted))
+			}
+			res.Answer = resp.Content
+			res.StopReason = BudgetReached
+			res.Messages = resultMessages(state, historyLen)
+			res.Events = append(res.Events, EventRecord{Step: step, Kind: "stop"})
+			return res, nil
+		}
 		if len(resp.ToolCalls) == 0 {
 			state.Messages = append(state.Messages, assistantMessage(resp))
 			res.Answer = resp.Content
 			res.Messages = resultMessages(state, historyLen)
-			if budgetExceeded(res.Usage, req.Budget) {
-				res.StopReason = BudgetReached
-			} else {
-				res.StopReason = Completed
-			}
+			res.StopReason = Completed
 			res.Events = append(res.Events, EventRecord{Step: step, Kind: "stop"})
 			return res, nil
 		}
@@ -354,7 +377,7 @@ func (o *Orchestrator) run(ctx context.Context, req Request, obs Observer, ic *i
 			res.Events = append(res.Events, EventRecord{Step: step, Kind: "stop"})
 			return res, nil
 		}
-		if budgetExceeded(res.Usage, req.Budget) {
+		if budgetRun.stopped() {
 			res.StopReason = BudgetReached
 			res.Messages = resultMessages(state, historyLen)
 			res.Events = append(res.Events, EventRecord{Step: step, Kind: "stop"})
@@ -456,10 +479,6 @@ func resultMessages(st State, historyLen int) []provider.ChatMessage {
 		out = append(out, cloneChatMessage(m.ChatMessage))
 	}
 	return out
-}
-
-func budgetExceeded(u provider.Usage, b Budget) bool {
-	return b.TotalTokens > 0 && u.TotalTokens >= b.TotalTokens
 }
 
 func toolSchemaString(specs []provider.Tool) string {

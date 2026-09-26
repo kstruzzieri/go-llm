@@ -54,14 +54,20 @@ func (s StopReason) String() string {
 
 // Budget holds run-level token caps the consumer sets. InputCeiling is the
 // authoritative per-turn input ceiling (the concrete model is unknown until the
-// router selects one). Zero falls back to a conservative default.
+// router selects one). Zero falls back to DefaultInputCeiling. Nested Runs
+// intersect input and generation capacities with their enclosing Run.
 type Budget struct {
 	InputCeiling int
 	// OutputReserve reserves room for the model's answer. It is forwarded to the
 	// model request as Options.NumPredict when > 0 (capping generation) and is
 	// also subtracted from the per-turn input ceiling during assembly.
 	OutputReserve int
-	TotalTokens   int // 0 = unbounded whole-run cap
+	// TotalTokens bounds logical admission credits for this Run and descendants.
+	// Zero adds no local cap; finite ancestor allowances still apply. Each Chat
+	// reserves its assembled prompt estimate plus a fixed generation cap before
+	// execution. Unknown or failed usage retains that reservation. Provider
+	// overruns are charged, so this is not an exact billing-token guarantee.
+	TotalTokens int
 	// Pressure tunes the warn/watch/critical bands classified during assembly.
 	// The zero value normalizes to conservative defaults. #63.
 	Pressure PressureThresholds
@@ -89,10 +95,11 @@ type Request struct {
 	Budget         Budget
 	Approver       Approver // nil => fail-safe (auto Read, deny Write/Exec)
 	// Options carries per-run model options (think controls, temperature,
-	// ...) applied to every model call in the run. Zero value preserves
-	// prior behavior. Budget.OutputReserve still overrides NumPredict;
+	// ...) applied to every model call in the run. Zero value keeps provider
+	// defaults when no finite total applies. Budget.OutputReserve overrides NumPredict;
 	// when OutputReserve is zero, a directly-set NumPredict also seeds the
-	// router's ExpectedOutput hint.
+	// router's ExpectedOutput hint. A finite total allowance supplies the fixed
+	// provider.DefaultExpectedOutput("chat") cap when neither setting is positive.
 	Options provider.ModelOptions
 	// SessionID is a stable per-conversation identifier forwarded to every
 	// model call in the run as provider.ChatRequest.SessionID. Callers that
@@ -248,13 +255,17 @@ type ToolCallRecord struct {
 
 // Result is the canonical final state of a run.
 type Result struct {
-	Answer     string
-	Messages   []provider.ChatMessage
-	Steps      []StepRecord
-	Events     []EventRecord
-	Usage      provider.Usage
-	ToolCalls  []ToolCallRecord
-	StopReason StopReason
+	Answer   string
+	Messages []provider.ChatMessage
+	Steps    []StepRecord
+	Events   []EventRecord
+	Usage    provider.Usage
+	// DescendantUsage is a copied snapshot of validated raw descendant P/C/T
+	// reports, including known failed-call usage. Usage remains local to recorded
+	// Steps. Neither field includes estimated or unknown-usage admission charges.
+	DescendantUsage *provider.Usage `json:"DescendantUsage,omitempty"`
+	ToolCalls       []ToolCallRecord
+	StopReason      StopReason
 	// Risk is the run's cumulative interceptor report (#436): nil when no
 	// interceptor produced a finding, so pre-#436 traces stay byte-identical.
 	Risk *RiskReport `json:"Risk,omitempty"`
