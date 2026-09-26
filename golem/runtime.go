@@ -50,8 +50,9 @@ const (
 // successful Load must return a non-nil Conversation with that ID. Save must
 // atomically create for a revision-zero snapshot only if the ID is absent, or
 // replace a positive revision r only when the stored revision is r, committing
-// r+1. Recreated IDs must never reuse a deleted revision. Save returns the
-// committed revision without modifying its input; callers retain that result.
+// r+1. A recreated ID must receive a revision greater than every revision its
+// deleted snapshots held, not merely a different one. Save returns the committed
+// revision without modifying its input; callers retain that result.
 // Reject negative and maximum int64 input revisions. A failed CAS must return
 // a *conversation.ConflictError. Every error returns revision zero and leaves
 // storage unchanged; a successful commit returns nil error even if cancellation

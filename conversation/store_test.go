@@ -355,16 +355,17 @@ func TestSearch_UpdateAndDeleteStayInSync(t *testing.T) {
 	ctx := context.Background()
 
 	id := "workspace:sync"
-	if _, err := store.Save(ctx, Conversation{
+	revision, err := store.Save(ctx, Conversation{
 		ID:       id,
 		Title:    "Sync",
 		Messages: []Message{{Role: "user", Content: "alpha needle"}},
-	}); err != nil {
+	})
+	if err != nil {
 		t.Fatal(err)
 	}
 	if _, err := store.Save(ctx, Conversation{
 		ID:       id,
-		Revision: 1,
+		Revision: revision,
 		Title:    "Sync",
 		Messages: []Message{{Role: "user", Content: "bravo needle"}},
 	}); err != nil {

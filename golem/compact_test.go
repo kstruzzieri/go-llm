@@ -137,7 +137,8 @@ func TestCompactThreadSQLiteReopenAndSearch(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := cloneConversation(current)
-	want.Revision = 2
+	// A fresh store creates at floor seed 1 plus one; compaction commits the next.
+	want.Revision = 3
 	want.Messages = want.Messages[2:]
 	want.DurableSummary = &conversation.DurableSummary{Content: "SUM", MessageCount: 2}
 	want.UpdatedAt = saved.UpdatedAt
@@ -812,9 +813,10 @@ func TestCompactionSessionConflictPreservesWinnerAndSearch(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			wantRevision := int64(1)
+			// A fresh store creates at floor seed 1 plus one.
+			wantRevision := int64(2)
 			if automatic {
-				wantRevision = 2
+				wantRevision = 3
 				if len(winning.Messages) != 12 || winning.Messages[10].Content != "raw question" {
 					t.Fatalf("raw commit missing before summary: %+v", winning)
 				}

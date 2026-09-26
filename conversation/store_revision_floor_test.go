@@ -55,9 +55,10 @@ func TestRevisionFloor_ReopenCycles(t *testing.T) {
 		}
 		candidate := Conversation{ID: "reused", Title: fmt.Sprintf("title%d", cycle), Messages: []Message{{Role: "user", Content: fmt.Sprintf("message%d", cycle)}}, DurableSummary: &DurableSummary{Content: fmt.Sprintf("summary%d", cycle), MessageCount: 3}}
 		input, _ := json.Marshal(candidate)
+		// Floor seed 1, then each deletion captures the previous creation.
 		revision, err := store.Save(ctx, candidate)
-		if err != nil || revision != cycle {
-			t.Fatalf("create = %d, %v; want %d", revision, err, cycle)
+		if err != nil || revision != cycle+1 {
+			t.Fatalf("create = %d, %v; want %d", revision, err, cycle+1)
 		}
 		after, _ := json.Marshal(candidate)
 		if string(after) != string(input) {
@@ -166,8 +167,8 @@ func TestRevisionFloor_Exhaustion(t *testing.T) {
 		t.Fatal("failed creation changed storage or returned revision")
 	}
 	assertMigrationSQL(t, store.db, `SELECT typeof(value) FROM conversation_revision_floor`, "integer")
-	if revision, err := store.Save(ctx, Conversation{ID: "low", Revision: 1}); err != nil || revision != 2 {
-		t.Fatalf("lower update = %d, %v; want 2", revision, err)
+	if revision, err := store.Save(ctx, Conversation{ID: "low", Revision: 2}); err != nil || revision != 3 {
+		t.Fatalf("lower update = %d, %v; want 3", revision, err)
 	}
 }
 
@@ -211,8 +212,8 @@ func TestRevisionFloor_CreateRollback(t *testing.T) {
 		t.Fatal("failed creation changed durable state")
 	}
 	execMigrationSQL(t, store.db, `DROP TRIGGER refuse_create_search`)
-	if revision, err := store.Save(ctx, Conversation{ID: "reused"}); err != nil || revision != 2 {
-		t.Fatalf("retry = %d, %v; want 2", revision, err)
+	if revision, err := store.Save(ctx, Conversation{ID: "reused"}); err != nil || revision != 3 {
+		t.Fatalf("retry = %d, %v; want 3", revision, err)
 	}
 	before = storedCASState(t, store)
 	// An obsolete retained caller increments 0 to 1 after creation.
@@ -245,6 +246,27 @@ const legacyV03Update = `UPDATE conversations SET title = ?, messages = ?, summa
 
 // Copied verbatim from v0.3.0 conversation/store.go:236.
 const legacyV03Delete = `DELETE FROM conversations WHERE id = ?`
+
+func TestRevisionFloor_FreshStoreRejectsLegacyWriters(t *testing.T) {
+	store := newTestStore(t)
+	ctx := t.Context()
+	assertMigrationSQL(t, store.db, `SELECT value FROM conversation_revision_floor`, "1")
+	if revision, err := store.Save(ctx, Conversation{ID: "live", Title: "winner", Messages: []Message{{Role: "user", Content: "winnertoken"}}}); err != nil || revision != 2 {
+		t.Fatalf("first create = %d, %v; want 2", revision, err)
+	}
+	before := storedCASState(t, store)
+	for _, query := range []string{legacyV02Save, legacyV03Save} {
+		for _, id := range []string{"live", "absent"} {
+			_, err := store.db.Exec(query, id, "obsolete", `[]`, "", 0, 1234, 2345)
+			if err == nil || !strings.Contains(err.Error(), "conversation store upgraded (#542): upgrade go-llm/golem to write") {
+				t.Fatalf("legacy write %q = %v; want upgrade error", id, err)
+			}
+			if storedCASState(t, store) != before {
+				t.Fatal("legacy write changed a fresh store")
+			}
+		}
+	}
+}
 
 func TestRevisionFloor_LegacyWriter(t *testing.T) {
 	for _, floor := range []int64{17, math.MaxInt64} {

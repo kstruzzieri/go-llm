@@ -2287,7 +2287,7 @@ func TestSessionBusyRemainsAnError(t *testing.T) {
 				t.Fatal(err)
 			}
 			after, err := sess.session.store.Load(ctx, sess.session.id)
-			if err != nil || !reflect.DeepEqual(after, before) || sess.session.revision != 1 || !reflect.DeepEqual(sess.session.msgs, before.Messages) {
+			if err != nil || !reflect.DeepEqual(after, before) || sess.session.revision != before.Revision || !reflect.DeepEqual(sess.session.msgs, before.Messages) {
 				t.Fatalf("failed busy save changed storage/cache: after=%+v, err=%v, cache=%+v", after, err, sess.session)
 			}
 		})

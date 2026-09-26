@@ -11,9 +11,9 @@ data, and snapshot, summary, revision metadata, and search updates remain atomic
 Golem and CLI sessions retain the returned revision after saving or clearing.
 
 Upgrade and restart all writers sharing a sessions database together and discard
-pre-upgrade snapshots. With a positive floor, released v0.1/v0.2 upserts and v0.3
-creates fail with an upgrade message; matching v0.3 updates still work. A fresh
-floor-zero database still admits legacy writes until deletion raises the floor.
-Revisions erased before migration cannot be recovered, and Delete remains
-unconditional. See the conversation persistence section in `docs/library.md` for
-consumer migration and exhaustion behavior.
+pre-upgrade snapshots. The floor starts at 1 or higher, so creation never commits
+revision 1, and released v0.1/v0.2 upserts and v0.3 creates fail with an upgrade
+message even on a fresh database; matching v0.3 updates still work. Revisions
+erased before migration cannot be recovered, and Delete remains unconditional.
+See the conversation persistence section in `docs/library.md` for consumer
+migration and exhaustion behavior.

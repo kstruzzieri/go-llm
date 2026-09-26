@@ -78,8 +78,9 @@ func TestSaveCAS_RevisionsAndCreationTimes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if loaded.Revision != 1 {
-		t.Fatalf("create revision = %d, want 1", loaded.Revision)
+	// The v5 floor seed is 1, so a fresh store's first create commits 2.
+	if loaded.Revision != 2 {
+		t.Fatalf("create revision = %d, want 2", loaded.Revision)
 	}
 	// Pin old timestamps without clock sleeps so accidental rewrites cannot pass.
 	for _, table := range []string{"conversations", "conversation_search"} {
@@ -90,7 +91,7 @@ func TestSaveCAS_RevisionsAndCreationTimes(t *testing.T) {
 	for _, step := range []struct {
 		created      time.Time
 		wantRevision int64
-	}{{time.Time{}, 2}, {time.UnixMilli(9999), 3}} {
+	}{{time.Time{}, 3}, {time.UnixMilli(9999), 4}} {
 		loaded, err = store.Load(ctx, "cas")
 		if err != nil {
 			t.Fatal(err)
@@ -300,8 +301,8 @@ func TestSaveCAS_TwoHandles(t *testing.T) {
 							ready <- err
 							return
 						}
-						if loaded.Revision != 1 {
-							ready <- fmt.Errorf("loaded revision = %d, want 1", loaded.Revision)
+						if loaded.Revision != 2 {
+							ready <- fmt.Errorf("loaded revision = %d, want 2", loaded.Revision)
 							return
 						}
 						candidate.Revision = loaded.Revision
@@ -334,16 +335,18 @@ func TestSaveCAS_TwoHandles(t *testing.T) {
 				case result := <-outcomes:
 					if result.err == nil {
 						winner = result.worker
-						want := int64(2)
+						// Fresh creates commit floor seed 1 plus one; the base and a
+						// recreation after deleting it each advance one further.
+						want := int64(3)
 						if mode == "create" {
-							want = 1
+							want = 2
 						}
 						if result.revision != want {
 							t.Errorf("returned revision = %d, want %d", result.revision, want)
 						}
 						successes++
 					} else {
-						expected := int64(1)
+						expected := int64(2)
 						if create {
 							expected = 0
 						}
@@ -364,9 +367,9 @@ func TestSaveCAS_TwoHandles(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			expectedRevision := int64(2)
+			expectedRevision := int64(3)
 			if mode == "create" {
-				expectedRevision = 1
+				expectedRevision = 2
 			}
 			if got.Revision != expectedRevision {
 				t.Errorf("persisted revision = %d, want %d", got.Revision, expectedRevision)

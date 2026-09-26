@@ -171,8 +171,8 @@ if err != nil {
 conv.Revision = revision
 ```
 
-Creation uses the durable store-wide revision floor plus one, which can exceed
-1 even for a brand-new ID. An update replaces only the exact submitted positive
+Creation uses the durable store-wide revision floor plus one, so a brand-new ID
+never starts at revision 1. An update replaces only the exact submitted positive
 revision and stores that revision plus one. Do not increment a retained revision
 locally or load a newer revision and attach it to old messages; load and reconcile
 the complete snapshot instead. Listing and search projections are not save tokens.
@@ -224,20 +224,20 @@ when upgrading its go-llm dependency; changing only its signature is insufficien
 
 Opening an existing database applies migration v5 through
 `conversation_schema_version`. It preserves live revisions and all conversation
-and search bytes, seeding the floor with `COALESCE(MAX(revision), 0)`. The seed
-also blocks released legacy upserts immediately on nonempty databases. Earlier
+and search bytes, seeding the floor with `MAX(1, COALESCE(MAX(revision), 0))`.
+Because released writers always insert revision 1, the seed blocks their
+upserts and creates immediately, including on a fresh database. Earlier
 schemas first receive v4's revision column. Revisions erased before v5 cannot be
 recovered; discard pre-upgrade in-memory snapshots.
 
 Upgrade and restart all processes writing a shared sessions database together.
 The v5 insert trigger rejects revisions at or below the floor with
 `conversation store upgraded (#542): upgrade go-llm/golem to write`.
-On a positive floor, v0.1.0/v0.2.0 unconditional upserts fail before their conflict
-update can overwrite a live row, and v0.3.0 creates fail; v0.3.0 matching positive
-CAS updates can still succeed. Legacy deletes also capture the deleted revision.
-A fresh empty database starts with floor zero and admits legacy revision-1
-writes until a deletion raises it. These triggers are compatibility guards,
-not protection against arbitrary SQL or edits to revision metadata.
+v0.1.0/v0.2.0 unconditional upserts fail before their conflict update can
+overwrite a live row, and v0.3.0 creates fail; v0.3.0 matching positive CAS
+updates can still succeed. Legacy deletes also capture the deleted revision.
+These triggers are compatibility guards, not protection against arbitrary SQL
+or edits to revision metadata.
 
 Conversation, memory, feedback, fingerprint, and provider routing-feedback
 migration runners coordinate concurrent openers through

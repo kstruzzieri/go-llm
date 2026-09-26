@@ -113,15 +113,16 @@ func migrateV4(tx *sql.Tx) error {
 }
 
 func migrateV5(tx *sql.Tx) error {
-	// Seed from live revisions so legacy upserts (default revision 1) are
-	// rejected immediately on nonempty databases without rewriting any rows.
+	// Seed at least 1 from live revisions, without rewriting rows: released
+	// writers always insert revision 1, so the insert trigger rejects their
+	// unconditional upserts and creates even on a fresh database.
 	stmts := []string{
 		`CREATE TABLE conversation_revision_floor (
 			id INTEGER PRIMARY KEY CHECK (id = 1),
 			value INTEGER NOT NULL CHECK (typeof(value) = 'integer' AND value >= 0)
 		)`,
 		`INSERT INTO conversation_revision_floor (id, value)
-		 SELECT 1, COALESCE(MAX(revision), 0) FROM conversations`,
+		 SELECT 1, MAX(1, COALESCE(MAX(revision), 0)) FROM conversations`,
 		`CREATE TRIGGER conversations_capture_revision AFTER DELETE ON conversations
 		 BEGIN
 			SELECT RAISE(ABORT, 'conversation: revision floor missing')
