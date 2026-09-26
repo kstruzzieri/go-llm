@@ -372,7 +372,7 @@ for docker_status in 0 35; do
   ci_status=$?
   set -e
   assert_status "hook-$docker_status" "$docker_status"
-  printf '%s\n' 'compose -f docker-compose.ci.yml run --rm ci ./scripts/ci-local --mode full' >"$tmp/expected-hook"
+  printf '%s\n' 'compose -f docker-compose.ci.yml run --build --rm ci ./scripts/ci-local --mode full' >"$tmp/expected-hook"
   diff -u "$tmp/expected-hook" "$tmp/hook-$docker_status.log"
 done
 

@@ -10,26 +10,29 @@ Enable the pre-push hook once per clone:
 scripts/setup-local-ci
 ```
 
-After updating to this version, rebuild the CI image once so it includes the
-Python prerequisite used by the audit regression test:
+Run the same suite the hook runs. `--build` builds the image from this checkout
+before the gate, reusing cached layers when the Dockerfile has not changed:
 
 ```bash
-docker compose -f docker-compose.ci.yml build ci
-```
-
-Run the same suite the hook runs:
-
-```bash
-docker compose -f docker-compose.ci.yml run --rm ci ./scripts/ci-local --mode full
+docker compose -f docker-compose.ci.yml run --build --rm ci ./scripts/ci-local --mode full
 ```
 
 Run the faster pre-push subset manually when you do not need the compile-smoke pass:
 
 ```bash
-docker compose -f docker-compose.ci.yml run --rm ci ./scripts/ci-local --mode pre-push
+docker compose -f docker-compose.ci.yml run --build --rm ci ./scripts/ci-local --mode pre-push
 ```
 
 The Docker runner builds from `Dockerfile.ci`, mounts the repository at `/workspace`, and keeps named cache volumes for Go modules, Go build output, and golangci-lint data. The compose file pins the project name to `go-llm`, so linked worktrees share the same image and cache volumes as the main checkout.
+Rebuilding from another branch replaces that shared image. The hook builds from
+its own checkout before testing, but this does not isolate concurrent builds:
+coordinate builds across worktrees when their Dockerfiles differ. For a manual
+run with a separate image and cache volumes, use an explicit project name:
+
+```bash
+docker compose -p go-llm-my-branch -f docker-compose.ci.yml run --build --rm ci ./scripts/ci-local --mode full
+```
+
 On a Linux host the bind-mounted checkout must be readable by uid 1000; the gate never writes into it. The volumes carry a `-ci` suffix (`go-llm_go-build-cache-ci`, `go-llm_go-mod-cache-ci`, `go-llm_golangci-lint-cache-ci`) because the image runs unprivileged and the volumes must be created with that ownership; the root-owned volumes of the earlier image (`go-llm_go-build-cache`, `go-llm_go-mod-cache`, `go-llm_golangci-lint-cache`) are no longer used and can be removed with `docker volume rm`.
 
 ## Linked Worktrees
@@ -46,7 +49,7 @@ pre-push hook, and the native Darwin selectors and requirement environment. The
 
 1. Make code changes normally.
 2. Run `scripts/ci-local --mode pre-push` for a faster host-side check while iterating, or use the Docker command above when you want the pinned CI toolchain.
-3. Push the branch. The `.githooks/pre-push` hook automatically runs the Docker-backed `full` suite and blocks the push on failure.
+3. Push the branch. The `.githooks/pre-push` hook automatically builds the current checkout's CI image and runs the Docker-backed `full` suite and blocks the push on failure.
 4. GitHub runs the required `Lint & Test` and `macOS Compile Smoke` workflows on PRs to satisfy branch protection. Ordinary push-triggered Actions remain disabled.
 
 ## Command Contract
@@ -74,13 +77,13 @@ scripts/ci-local --mode security
 Run the faster pre-push subset inside Docker:
 
 ```bash
-docker compose -f docker-compose.ci.yml run --rm ci ./scripts/ci-local --mode pre-push
+docker compose -f docker-compose.ci.yml run --build --rm ci ./scripts/ci-local --mode pre-push
 ```
 
 Run the full suite inside Docker. This is what the pre-push hook runs automatically:
 
 ```bash
-docker compose -f docker-compose.ci.yml run --rm ci ./scripts/ci-local --mode full
+docker compose -f docker-compose.ci.yml run --build --rm ci ./scripts/ci-local --mode full
 ```
 
 ## Check Sets
@@ -140,11 +143,11 @@ test ...'` execs its final command, leaving `go` as PID 1) never reaps them and
 The pre-push hook lives at `.githooks/pre-push` and runs the full Docker-backed suite:
 
 ```bash
-docker compose -f docker-compose.ci.yml run --rm ci ./scripts/ci-local --mode full
+docker compose -f docker-compose.ci.yml run --build --rm ci ./scripts/ci-local --mode full
 ```
 
-That means pushes fail locally if security contracts, lint, race tests, or
-compile-smoke checks fail.
+That means pushes fail locally if the image build, security contracts, lint, race
+tests, or compile-smoke checks fail.
 
 The setup script only updates this clone's local Git config:
 
