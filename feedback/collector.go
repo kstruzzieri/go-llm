@@ -84,8 +84,8 @@ func NewManualCollector(store AtomicSignalStore, config CollectorConfig) *Collec
 	}
 }
 
-// Close stops the background goroutine and waits for it to finish.
-// Close is safe to call multiple times.
+// Close stops background maintenance and waits for admitted registrations and
+// records to finish. It is a no-op for manual collectors and safe to call multiple times.
 func (c *Collector) Close() {
 	if c.done == nil {
 		return
@@ -109,10 +109,20 @@ func (c *Collector) RegisterRetrieval(ctx context.Context, query string, chunkKe
 // zero presentedAt. With an atomic store, the retrieval and count updates
 // commit together. Its legacy two-call fallback can leave the retrieval row
 // committed when count updates fail. Neither path installs an in-memory window
-// on error.
+// on error. Background collectors reject registration after Close.
 func (c *Collector) RegisterRetrievalAt(ctx context.Context, query string, chunkKeys []string, presentedAt time.Time) (string, error) {
 	if presentedAt.IsZero() {
 		return "", fmt.Errorf("feedback: register retrieval: presented time is required")
+	}
+	if c.done != nil {
+		c.lifecycleMu.Lock()
+		if c.closed {
+			c.lifecycleMu.Unlock()
+			return "", fmt.Errorf("feedback: register retrieval: collector is closed")
+		}
+		c.wg.Add(1)
+		c.lifecycleMu.Unlock()
+		defer c.wg.Done()
 	}
 
 	id, err := generateID()
