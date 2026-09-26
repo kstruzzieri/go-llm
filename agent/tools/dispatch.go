@@ -160,6 +160,9 @@ type dispatchEnvelope struct {
 // four built-in file readers and an optional retrieve tool cross the boundary;
 // every other registered capability is omitted. interceptors are installed on
 // every child (#436); existing callers pass none.
+// Selected implementations are trusted host code: Effect must remain constant
+// and truthful after construction. Runtime capacities and finite token allowances
+// are intersected by Orchestrator.Run when Invoke inherits a parent run context.
 func NewDispatch(caller agent.ModelCaller, ctxMgr agent.ContextManager, available []agent.Tool, limits DispatchLimits, interceptors ...agent.Interceptor) (*Dispatch, error) {
 	if caller == nil {
 		return nil, fmt.Errorf("tools: dispatch: model caller is required")

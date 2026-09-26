@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"time"
 
 	"golang.org/x/sync/errgroup"
@@ -66,11 +67,16 @@ func (o *Orchestrator) runToolCallsParallel(ctx context.Context, res *Result, st
 	gov *restraintGovernor, b *batch, ic *interceptorRun) error {
 
 	// Phase 1: prepare serially, in model order.
+	eventStart := len(res.Events)
 	prepared := make([]preparedCall, len(calls))
 	for i, call := range calls {
 		res.Events = append(res.Events, EventRecord{Step: step, Kind: "tool_call"})
 		p, err := o.prepareCall(ctx, reg, call, approver, obs, step, gov, ic)
 		if err != nil {
+			if errors.Is(err, errRunBudgetExhausted) {
+				// No workers started; only prior synthetic outcomes are audited.
+				retainToolCallEvents(res, eventStart, func(j int) bool { return prepared[j].result != nil })
+			}
 			for _, earlier := range prepared[:i] {
 				if earlier.result != nil {
 					appendToolCallRecord(res, step, earlier.rec, earlier.result.RouteOutcome)
@@ -88,6 +94,7 @@ func (o *Orchestrator) runToolCallsParallel(ctx context.Context, res *Result, st
 	results := make([]ToolResult, len(prepared))
 	latencies := make([]time.Duration, len(prepared))
 	invoked := make([]bool, len(prepared))
+	invokeErrors := make([]error, len(prepared))
 	g, gctx := errgroup.WithContext(ctx)
 	g.SetLimit(parallelToolCallLimit)
 	for i := range prepared {
@@ -95,15 +102,19 @@ func (o *Orchestrator) runToolCallsParallel(ctx context.Context, res *Result, st
 			results[i] = *prepared[i].result
 			continue
 		}
-		invoked[i] = true
 		g.Go(func() error {
 			start := o.now()
-			results[i] = o.invokeCall(gctx, prepared[i].tool, prepared[i].effect, prepared[i].call.Function.Arguments)
+			results[i], invokeErrors[i] = o.invokeCall(gctx, prepared[i].tool, prepared[i].effect, prepared[i].call.Function.Arguments)
+			invoked[i] = invokeErrors[i] == nil
 			latencies[i] = o.now().Sub(start)
 			return nil // never fail the group; tool errors are model-visible results
 		})
 	}
 	_ = g.Wait() // joins every worker -> no goroutine leak
+	// Prune budget refusals before any cancellation or observer-error exit.
+	retainToolCallEvents(res, eventStart, func(i int) bool {
+		return !errors.Is(invokeErrors[i], errRunBudgetExhausted)
+	})
 	if err := ctx.Err(); err != nil {
 		appendTrailingToolCallRecords(res, step, prepared, results, latencies, invoked, 0)
 		return err // parent cancelled -> hard abort
@@ -112,6 +123,9 @@ func (o *Orchestrator) runToolCallsParallel(ctx context.Context, res *Result, st
 	// Phase 3: observe serially, in model order, via the shared recordResult tail
 	// so governor/observer semantics are identical to the serial path.
 	for i := range prepared {
+		if invokeErrors[i] != nil {
+			continue // no invocation or observation; shared batch tail handles the stop
+		}
 		rec := prepared[i].rec
 		rec.IsError = results[i].IsError
 		if invoked[i] {
@@ -123,12 +137,25 @@ func (o *Orchestrator) runToolCallsParallel(ctx context.Context, res *Result, st
 			appendTrailingToolCallRecords(res, step, prepared, results, latencies, invoked, i+1)
 			return err
 		}
+		b.completed = append(b.completed, i)
 		if stop {
 			appendTrailingToolCallRecords(res, step, prepared, results, latencies, invoked, i+1)
 			return nil // governor tripped: discard later already-computed read-only results
 		}
 	}
 	return nil
+}
+
+// retainToolCallEvents filters the current batch's contiguous call events before
+// any results are appended. Earlier events and retained call order stay intact.
+func retainToolCallEvents(res *Result, start int, keep func(int) bool) {
+	events := res.Events[start:]
+	res.Events = res.Events[:start]
+	for i, event := range events {
+		if keep(i) {
+			res.Events = append(res.Events, event)
+		}
+	}
 }
 
 func appendTrailingToolCallRecords(res *Result, step int, prepared []preparedCall, results []ToolResult,

@@ -25,11 +25,36 @@ func (o *Orchestrator) runToolCalls(ctx context.Context, res *Result, state *Sta
 	gov *restraintGovernor, ic *interceptorRun) error {
 
 	b := newBatch()
+	assistantIndex := len(state.Messages) - 1
 	var err error
 	if len(calls) >= 2 && canRunParallel(reg, calls) && gov.parallelUncapped(calls) {
 		err = o.runToolCallsParallel(ctx, res, state, reg, calls, approver, obs, step, gov, &b, ic)
 	} else {
 		err = o.runToolCallsSerial(ctx, res, state, reg, calls, approver, obs, step, gov, &b, ic)
+	}
+	if err == nil && runBudgetStopped(ctx) {
+		err = errRunBudgetExhausted // a nested run spent the allowance during this batch
+	}
+	if errors.Is(err, errRunBudgetExhausted) {
+		if cerr := ctx.Err(); cerr != nil {
+			return cerr // cancellation takes precedence over a budget stop only
+		}
+		// Retain completed observations, but remove unexecuted calls from the
+		// assistant message so the returned transcript has no dangling calls.
+		msg := &state.Messages[assistantIndex]
+		kept := make([]provider.ToolCall, 0, len(b.completed))
+		for _, index := range b.completed {
+			kept = append(kept, msg.ToolCalls[index])
+		}
+		msg.ToolCalls = kept
+		if len(kept) == 0 && msg.Content == "" {
+			state.Messages = state.Messages[:assistantIndex]
+		}
+		if res.StopReason == Completed {
+			res.StopReason = BudgetReached // keep a governor stop recorded by this batch
+		}
+		// Like a governor stop, the run ends here, so verification is skipped.
+		return nil
 	}
 	if err != nil {
 		return err
@@ -46,10 +71,13 @@ func (o *Orchestrator) runToolCallsSerial(ctx context.Context, res *Result, stat
 	reg *toolRegistry, calls []provider.ToolCall, approver Approver, obs Observer, step int,
 	gov *restraintGovernor, b *batch, ic *interceptorRun) error {
 
-	for _, call := range calls {
+	for i, call := range calls {
 		res.Events = append(res.Events, EventRecord{Step: step, Kind: "tool_call"})
 		out, effect, rec, inspectResult, err := o.dispatch(ctx, reg, call, approver, obs, step, gov, ic)
 		if err != nil {
+			if errors.Is(err, errRunBudgetExhausted) {
+				res.Events = res.Events[:len(res.Events)-1] // budget refused this call before invocation
+			}
 			appendInvokedToolCallRecord(res, step, rec, out.RouteOutcome)
 			return err // hard abort: preserve post-Invoke metadata, but publish no observation or OnToolResult
 		}
@@ -57,6 +85,7 @@ func (o *Orchestrator) runToolCallsSerial(ctx context.Context, res *Result, stat
 		if err != nil {
 			return err
 		}
+		b.completed = append(b.completed, i)
 		if stop {
 			return nil
 		}
@@ -201,6 +230,9 @@ type preparedCall struct {
 // returned so the caller can record it.
 func (o *Orchestrator) prepareCall(ctx context.Context, reg *toolRegistry, call provider.ToolCall,
 	approver Approver, obs Observer, step int, gov *restraintGovernor, ic *interceptorRun) (preparedCall, error) {
+	if err := checkRunBudget(ctx); err != nil {
+		return preparedCall{}, err
+	}
 
 	// #436 spec D6: one canonical copy for inspection and invocation. Every
 	// callback below (Plan, approver, OnToolCall) receives its own clone, so
@@ -281,14 +313,17 @@ func (o *Orchestrator) prepareCall(ctx context.Context, reg *toolRegistry, call 
 
 // invokeCall runs the tool body: per-call timeout, Invoke, output cap. Any tool
 // error (including the per-call timeout) becomes a model-visible IsError result.
-// It carries NO parent-cancellation policy — callers decide whether a cancelled
-// parent ctx is a hard abort.
-func (o *Orchestrator) invokeCall(ctx context.Context, tool Tool, effect Effect, args json.RawMessage) ToolResult {
+// A non-nil error means the run's cancellation or budget prevented invocation.
+// Callers also check parent cancellation after an admitted invocation returns.
+func (o *Orchestrator) invokeCall(ctx context.Context, tool Tool, effect Effect, args json.RawMessage) (ToolResult, error) {
+	if err := checkRunBudget(ctx); err != nil {
+		return ToolResult{}, err
+	}
 	cctx, cancel := context.WithTimeout(ctx, effect.Timeout)
 	defer cancel()
 	out, err := tool.Invoke(cctx, args)
 	if err != nil {
-		return ToolResult{IsError: true, Content: err.Error(), Origin: staticOrigin(tool)}
+		return ToolResult{IsError: true, Content: err.Error(), Origin: staticOrigin(tool)}, nil
 	}
 	out = capOutput(out, effect.OutputCap)
 	// #436 spec D4: an unset per-invocation origin defers to the static
@@ -305,7 +340,7 @@ func (o *Orchestrator) invokeCall(ctx context.Context, tool Tool, effect Effect,
 	default:
 		out.Origin = normalizeOrigin(out.Origin)
 	}
-	return out
+	return out, nil
 }
 
 // dispatch is the serial composition: prepare on the main goroutine, then invoke.
@@ -322,7 +357,10 @@ func (o *Orchestrator) dispatch(ctx context.Context, reg *toolRegistry, call pro
 		return *p.result, p.effect, p.rec, p.inspectResult, nil
 	}
 	start := o.now()
-	out := o.invokeCall(ctx, p.tool, p.effect, p.call.Function.Arguments) // the canonical, inspected bytes
+	out, err := o.invokeCall(ctx, p.tool, p.effect, p.call.Function.Arguments) // the canonical, inspected bytes
+	if err != nil {
+		return out, p.effect, p.rec, false, err
+	}
 	p.rec.Invoked = true
 	p.rec.Latency = o.now().Sub(start)
 	p.rec.IsError = out.IsError
