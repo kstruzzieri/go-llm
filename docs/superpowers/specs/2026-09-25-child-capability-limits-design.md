@@ -1,8 +1,9 @@
 # Child capability and budget limits (#449)
 
 Status: revised after code-grounded review and approved by the user on 2026-09-25.
-Implementation is in progress. This revision supersedes the budget contract in
-`93f1622`.
+Implementation and independent review fixes are complete; verification and
+publication procedures are recorded in the implementation plan. This revision supersedes the
+budget contract in `93f1622`.
 
 ## Goal and baseline
 
@@ -16,6 +17,8 @@ Isolated worktree:
 Branch: `feat/449-child-capability-limits`.
 Fetched base: `099007ce4c761fa46f413ee0a26fbeed9f2336d0`, containing #587
 (terminal sanitization) and #588 (workspace mutation hardening).
+Publication base updated to `3ee6df68ef1d4bf6cb88b908cc8c6065e0adfff1`
+after #549/#589 merged; the isolated branch rebased cleanly.
 
 The primary checkout and other worktrees remain untouched. #549 owns the
 feedback/fingerprint/provider migrations; #542 owns conversation CAS.

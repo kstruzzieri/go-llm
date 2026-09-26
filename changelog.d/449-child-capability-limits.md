@@ -11,6 +11,8 @@ runs together. Requests that do not fit stop before calling the model. Unknown
 or failed usage retains its reservation; reported overruns stop before executing
 returned tool calls. This is estimated admission accounting, not an exact
 provider billing guarantee.
+Exhaustion during callbacks or a tool batch also blocks subsequent invocations,
+including queued parallel tools, while preserving cancellation errors.
 
 Result.DescendantUsage reports descendant usage separately while Result.Usage
 and Golem's existing output retain their local-step meaning. Returned run scopes

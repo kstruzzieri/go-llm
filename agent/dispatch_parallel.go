@@ -88,6 +88,7 @@ func (o *Orchestrator) runToolCallsParallel(ctx context.Context, res *Result, st
 	results := make([]ToolResult, len(prepared))
 	latencies := make([]time.Duration, len(prepared))
 	invoked := make([]bool, len(prepared))
+	invokeErrors := make([]error, len(prepared))
 	g, gctx := errgroup.WithContext(ctx)
 	g.SetLimit(parallelToolCallLimit)
 	for i := range prepared {
@@ -95,10 +96,10 @@ func (o *Orchestrator) runToolCallsParallel(ctx context.Context, res *Result, st
 			results[i] = *prepared[i].result
 			continue
 		}
-		invoked[i] = true
 		g.Go(func() error {
 			start := o.now()
-			results[i] = o.invokeCall(gctx, prepared[i].tool, prepared[i].effect, prepared[i].call.Function.Arguments)
+			results[i], invokeErrors[i] = o.invokeCall(gctx, prepared[i].tool, prepared[i].effect, prepared[i].call.Function.Arguments)
+			invoked[i] = invokeErrors[i] == nil
 			latencies[i] = o.now().Sub(start)
 			return nil // never fail the group; tool errors are model-visible results
 		})
@@ -112,6 +113,9 @@ func (o *Orchestrator) runToolCallsParallel(ctx context.Context, res *Result, st
 	// Phase 3: observe serially, in model order, via the shared recordResult tail
 	// so governor/observer semantics are identical to the serial path.
 	for i := range prepared {
+		if invokeErrors[i] != nil {
+			continue // no invocation or observation; shared batch tail handles the stop
+		}
 		rec := prepared[i].rec
 		rec.IsError = results[i].IsError
 		if invoked[i] {

@@ -368,3 +368,32 @@ func TestDispatchReportsAdmittedOverrunAndModel(t *testing.T) {
 		t.Fatal(got)
 	}
 }
+
+func TestDispatchExhaustionStopsFollowingMutation(t *testing.T) {
+	var writes atomic.Int32
+	writer := dispatchCountedTool{dispatchNamedTool{name: "write_file", effect: agent.Effect{Class: agent.Write, Approval: agent.ApprovalNever}}, &writes}
+	d := newBudgetDispatch(t, dispatchModelFunc(func(context.Context, provider.ChatRequest) (agent.ModelResult, error) {
+		return dispatchBudgetAnswer(provider.Usage{TotalTokens: 7}), nil
+	}), dispatchCreditContext(), DispatchLimits{})
+	caller := dispatchModelFunc(func(context.Context, provider.ChatRequest) (agent.ModelResult, error) {
+		return agent.ModelResult{Response: provider.ChatResponse{ToolCalls: []provider.ToolCall{
+			budgetDispatchCall("child", "q"),
+			{ID: "write", Type: "function", Function: provider.ToolCallFunction{Name: "write_file", Arguments: json.RawMessage("{}")}},
+		}}}, nil
+	})
+	res, err := agent.New(caller, dispatchCreditContext()).Run(t.Context(), agent.Request{
+		Goal: "q", Tools: []agent.Tool{d, writer}, Budget: agent.Budget{TotalTokens: 134, OutputReserve: 64},
+	}, nil)
+	if err != nil || res.StopReason != agent.BudgetReached || writes.Load() != 0 {
+		t.Fatalf("stop=%v err=%v writes=%d", res.StopReason, err, writes.Load())
+	}
+	if len(res.ToolCalls) != 1 || !res.ToolCalls[0].Invoked || res.DescendantUsage == nil || res.DescendantUsage.TotalTokens != 7 {
+		t.Fatalf("audit=%+v descendants=%+v", res.ToolCalls, res.DescendantUsage)
+	}
+	// History accepts only plain chat today. The returned tool transcript
+	// must nonetheless pair every retained call with its completed result.
+	if len(res.Messages) != 3 || len(res.Messages[1].ToolCalls) != 1 ||
+		res.Messages[1].ToolCalls[0].ID != "child" || res.Messages[2].ToolCallID != "child" {
+		t.Fatalf("dangling call in transcript: %+v", res.Messages)
+	}
+}

@@ -107,6 +107,9 @@ least the full reservation and larger safely known usage. Routing error
 sentinels alone do not prove non-execution. An overrun is fully charged and stops
 the current run before its returned tool calls execute; accepted answer text
 survives unless a safety check or actual error takes precedence.
+Tool invocation rechecks the allowance after callbacks and before queued work
+starts. If a nested run exhausts it, later tools cannot execute; already admitted
+invocations may finish. Returned transcripts omit unexecuted tool calls.
 
 `Result.Usage` remains the raw usage of that run's recorded steps.
 `Result.DescendantUsage` separately snapshots valid reported descendant usage,

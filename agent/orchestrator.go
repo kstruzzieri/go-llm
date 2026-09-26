@@ -347,6 +347,9 @@ func (o *Orchestrator) run(ctx context.Context, req Request, obs Observer, ic *i
 		}
 
 		if budgetRun.stopped() {
+			if err := ctx.Err(); err != nil {
+				return finishWithError(&res, state, historyLen, err)
+			}
 			// Keep accepted text, but never persist unexecuted tool-call residue.
 			if resp.Content != "" {
 				accepted := resp

@@ -153,6 +153,18 @@ func (b *runBudget) stopped() bool {
 	return false
 }
 
+// checkRunBudget gates tool preparation and invocation after callbacks may
+// have spent the remaining allowance through a nested Run.
+func checkRunBudget(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if b, ok := ctx.Value(runBudgetKey{}).(*runBudget); ok && b.stopped() {
+		return errRunBudgetExhausted
+	}
+	return nil
+}
+
 func (b *runBudget) close() *provider.Usage {
 	b.mu.Lock()
 	b.closed = true

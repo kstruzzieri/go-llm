@@ -205,7 +205,7 @@ Run `rtk proxy env -u GOROOT go test ./agent -count=1` and `rtk proxy env -u GOR
 
 **Interfaces:** Consume unchanged NewDispatch/Dispatch.Invoke/Orchestrator.Run and Result.DescendantUsage. Use existing dispatchModelFunc, dispatchNamedTool, gatedDispatchCaller, validDispatchAvailable, specRecordingCaller and newModelSwitchFixture; extend those small test fixtures as needed, not production APIs.
 
-- [ ] **Step 1: Add/adjust integration regressions before any dispatch changes.**
+- [x] **Step 1: Add/adjust integration regressions before any dispatch changes.**
 
 `TestDispatchRejectsUnsafeSelectedTools`: table selected names with Write, Exec, Network, mixed Read combinations, approval-requiring and PlanningTool entries; all constructor calls fail. Retain missing/duplicate/nil and native scoped-reader tests.
 
@@ -230,7 +230,7 @@ Replace `TestDispatchReportsPerChildBudgetStopAndModel`'s impossible total 10/ou
 
 Add `TestNewDispatchTool_AttenuatesAtParentRun` and extend existing model-switch fixtures to dispatch through parent Run after startup, parent-following rebuild and an explicitly pinned larger child route. Assert runtime cap attenuation while retaining the selected child model/route. Keep existing standalone constructor tests proving output777 passes through, read-only tool lists, shared retrieve and tiny-ceiling rejection.
 
-- [ ] **Step 2: Run targeted tests and inspect failures.**
+- [x] **Step 2: Run targeted tests and inspect failures.**
 
 ```sh
 rtk proxy env -u GOROOT go test ./agent/tools -run 'Test(NewDispatch|Dispatch|Scoped)' -count=1
@@ -239,7 +239,7 @@ rtk proxy env -u GOROOT go test ./cmd/golem -run 'Test(NewDispatchTool|Orchestra
 
 Expect the new runtime cases to pass with Task 2, and the deliberately corrected old fixtures to pass. If a remaining enforcement gap fails, record it before making the smallest shared-path fix. No redundant dispatch clamp when Run already enforces it.
 
-- [ ] **Step 3: Document and verify the contract.**
+- [x] **Step 3: Document and verify the contract.**
 
 Document constant Effect metadata, exact selected registry, caller guard AND one selected subtree, omitted scoped retrieval, inherited capacities/defaults, logical reservation/settlement, fixed generation, telemetry split and sealed lifetime in docs/least-privilege.md. Include the unbounded Golem parent and unchanged configured product 4×4×32768=524288 admission credits, without promising exact billed-token bounds. Name direct Chat, estimator/provider compliance and hidden router attempt limitations.
 
@@ -249,12 +249,49 @@ Run `rtk proxy env -u GOROOT go test -race ./agent ./agent/tools ./cmd/golem`; e
 
 ## Final review and publication
 
-- [ ] Re-read approved spec and map every requirement to implementation/tests; independently review the whole branch using the selected execution method and applicable review skill. Fix actionable findings and rerun affected checks.
-- [ ] Fetch origin/develop; compare against base 099007c. If it advanced, rebase/update the isolated branch safely, resolve conflicts, and rerun affected checks before publication.
-- [ ] Run `rtk docker compose -p go-llm-449 -f docker-compose.ci.yml run --build --rm ci ./scripts/ci-local --mode full`; require successful security contracts, formatting, lint, repository-wide race tests and compile smoke. Inspect hook/shared-image state; do not modify hooks, bypass their gate or rebuild shared images concurrently with another task.
-- [ ] Verify `rtk git diff --check`, clean committed worktree, intended branch and no unrelated files. Include exact validation results and material limits in the PR description.
-- [ ] Push the feature branch with its normal pre-push gate and create a PR to develop with `Closes #449`. Use a body file for gh, attach the created PR using the Codex artifact tool, and report its URL. Do not merge.
+- [x] Re-read approved spec and map every requirement to implementation/tests; independently review the whole branch using the selected execution method and applicable review skill. Fix actionable findings and rerun affected checks.
+- [x] Fetch origin/develop; compare against base 099007c. If it advanced, rebase/update the isolated branch safely, resolve conflicts, and rerun affected checks before publication.
+- [x] Run `rtk docker compose -p go-llm-449 -f docker-compose.ci.yml run --build --rm ci ./scripts/ci-local --mode full`; require successful security contracts, formatting, lint, repository-wide race tests and compile smoke. Inspect hook/shared-image state; do not modify hooks, bypass their gate or rebuild shared images concurrently with another task.
+- [x] Verify `rtk git diff --check`, intended branch and no unrelated files. Include exact validation results and material limits in the PR description.
+Publication: push the feature branch with its normal pre-push gate and create a PR to develop with `Closes #449`. Use a body file for gh, attach the created PR using the Codex artifact tool, and report its URL. Do not merge.
 
 ## Plan review
 
 Self-review completed against the approved spec: registry/scope, capacity/defaults, atomic admission, conservative settlement, cancellation/lifetime, Usage compatibility, Golem wiring and publication each have an owning task. Test selectors include the actual ModelSet rebuild tests. No provider migration or new dependency is planned. Native execution proceeds under the user's approved design and original implementation request; progress is recorded in this plan's execution ledger.
+
+## Independent review fixes
+
+The final branch review found two important defects, both reproduced before the
+fix: exhaustion during a tool batch or preparation callback still permitted
+later invocations, and cancellation during OnStep could be hidden by the new
+overrun return. The shared invocation boundary now checks the run budget after
+callbacks, serial preparation stops after exhaustion, queued parallel calls are
+not invoked, and cancellation precedes a successful budget stop. Completed tool
+observations remain paired; unexecuted calls and empty assistant residue are
+removed. Existing History still accepts plain chat only.
+
+Regressions cover dispatch followed by a mutation, serial/parallel callbacks,
+queued parallel work, and cancellation after an overrun. No minor findings or
+additional product-scope changes were raised. Final verification and publication
+outcomes are recorded in the execution ledger and attached PR.
+
+## Verification record
+
+Final isolated full Docker gate passed after the review fixes: security
+contracts, formatting, lint (zero issues), repository-wide race tests (including
+Golem, 281.904s), and compile smoke. Native agent/tool race tests passed
+(13.822s/55.416s), as did native Golem dispatch/model-switch race tests (3.528s),
+vet for all three packages, changelog validation, and diff whitespace checks.
+The unchanged pre-push hook runs with the per-command Compose project
+`go-llm-449`; shared hooks, credentials and Docker configuration are untouched.
+Publication outcome belongs to the PR/task attachment rather than this
+pre-publication commit.
+
+## Recorded rulings
+
+- Ruling: proceed from approved design to native implementation without another approval round — developer autonomy instruction and user's carry-it-out request authorize this reversible work — user may prefer a different execution method, which remains easy to switch.
+- Task 2: Ruling: nested output/step callback test expects BudgetReached for an admitted child that exactly exhausts the shared allowance — the fixture has 2E+65 credits, parent charges E+1 and child E+64 — expecting Completed would contradict the approved exhaustion contract; cost if wrong is stop classification, not admission.
+- Final: Ruling: exact billing, hidden attempt costs and dishonest installed tools stay outside the guarantee — users get conservative logical admission and explicit trust/provider limits, matching the approved spec — cost if wrong: treating credits as billed-token proof would overstate the boundary.
+- Final: Ruling: no finite aggregate Golem pool — configured parent TotalTokens remains zero; finite caller budgets are enforced when supplied, as approved — cost if wrong: Golem users expecting a new global spend cap would still lack one.
+- Final: Ruling: pending Docker gate is execution status, not a code defect — publication waits for the completed full gate rather than inventing a review finding — cost if wrong: publication delay or an unvalidated regression if completion were misread.
+- Final: Ruling: absent repository-specific review escalation files — use the supplied safety contract and CLAUDE.md under the user's approved security-boundary task — cost if wrong: unavailable local review requirements could be missed.
