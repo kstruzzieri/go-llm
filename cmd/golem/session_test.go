@@ -505,6 +505,13 @@ func TestSessionRevisionLifecycle(t *testing.T) {
 	if err := s.record(ctx, "recreated", "answer"); err != nil || s.revision != 4 {
 		t.Fatalf("recreate = %v, revision %d; want 4", err, s.revision)
 	}
+	if err := s.record(ctx, "next", "answer"); err != nil || s.revision != 5 {
+		t.Fatalf("next record = %v, revision %d; want 5", err, s.revision)
+	}
+	loaded, err := s.store.Load(ctx, s.id)
+	if err != nil || loaded.Revision != s.revision || !reflect.DeepEqual(loaded.Messages, s.msgs) {
+		t.Fatalf("persisted = %+v, %v; want cached revision %d and messages", loaded, err, s.revision)
+	}
 	oldID := s.id
 	s.renew()
 	if s.revision != 0 || s.id == oldID || len(s.msgs) != 0 {

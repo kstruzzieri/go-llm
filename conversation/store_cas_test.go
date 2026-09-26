@@ -243,13 +243,19 @@ func openCASHandles(t *testing.T) [2]*SQLiteStore {
 }
 
 func TestSaveCAS_TwoHandles(t *testing.T) {
-	for _, create := range []bool{false, true} {
-		t.Run(fmt.Sprintf("create=%t", create), func(t *testing.T) {
+	for _, mode := range []string{"create", "update", "recreate"} {
+		t.Run(mode, func(t *testing.T) {
+			create := mode != "update"
 			stores := openCASHandles(t)
 			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 			defer cancel()
-			if !create {
+			if mode != "create" {
 				if _, err := stores[0].Save(ctx, Conversation{ID: "race", Title: "base", Messages: []Message{{Role: "user", Content: "base"}}}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if mode == "recreate" {
+				if err := stores[0].Delete(ctx, "race"); err != nil {
 					t.Fatal(err)
 				}
 			}
@@ -262,8 +268,9 @@ func TestSaveCAS_TwoHandles(t *testing.T) {
 			var releaseOnce sync.Once
 			start := func() { releaseOnce.Do(func() { close(release) }) }
 			type outcome struct {
-				worker int
-				err    error
+				worker   int
+				revision int64
+				err      error
 			}
 			outcomes := make(chan outcome, 2)
 			var workers sync.WaitGroup
@@ -305,8 +312,8 @@ func TestSaveCAS_TwoHandles(t *testing.T) {
 					case <-ctx.Done():
 						return
 					}
-					_, err = store.Save(ctx, candidate)
-					outcomes <- outcome{i, err}
+					revision, err := store.Save(ctx, candidate)
+					outcomes <- outcome{i, revision, err}
 				}()
 			}
 			go func() { workers.Wait(); close(done) }()
@@ -327,6 +334,13 @@ func TestSaveCAS_TwoHandles(t *testing.T) {
 				case result := <-outcomes:
 					if result.err == nil {
 						winner = result.worker
+						want := int64(2)
+						if mode == "create" {
+							want = 1
+						}
+						if result.revision != want {
+							t.Errorf("returned revision = %d, want %d", result.revision, want)
+						}
 						successes++
 					} else {
 						expected := int64(1)
@@ -334,6 +348,9 @@ func TestSaveCAS_TwoHandles(t *testing.T) {
 							expected = 0
 						}
 						requireConflict(t, result.err, "race", expected)
+						if result.revision != 0 {
+							t.Errorf("conflict returned revision %d", result.revision)
+						}
 						conflicts++
 					}
 				case <-ctx.Done():
@@ -348,7 +365,7 @@ func TestSaveCAS_TwoHandles(t *testing.T) {
 				t.Fatal(err)
 			}
 			expectedRevision := int64(2)
-			if create {
+			if mode == "create" {
 				expectedRevision = 1
 			}
 			if got.Revision != expectedRevision {

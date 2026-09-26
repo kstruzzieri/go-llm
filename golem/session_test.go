@@ -669,15 +669,24 @@ func TestSaveThreadRetainsCommittedRevision(t *testing.T) {
 			if _, err := store.Save(ctx, current); err != nil {
 				t.Fatal(err)
 			}
-			current.Revision = 1
+			if _, err := db.Exec(`UPDATE conversations SET revision = 17 WHERE id = 'retained'`); err != nil {
+				t.Fatal(err)
+			}
+			if err := store.Delete(ctx, current.ID); err != nil {
+				t.Fatal(err)
+			}
 			state := &threadState{conversation: current}
-			runtime := &Runtime{sessions: &threadStore{store: store}, compress: compress, summarizer: func(context.Context, string, []conversation.Message) (string, error) { return "summary", nil }}
+			var warnings []error
+			runtime := &Runtime{onWarning: func(err error) { warnings = append(warnings, err) }, sessions: &threadStore{store: store}, compress: compress, summarizer: func(context.Context, string, []conversation.Message) (string, error) { return "summary", nil }}
 			if err := runtime.saveThread(ctx, &activeRun{}, agent.Budget{InputCeiling: 2}, state, "new question", agent.Result{Answer: "new answer"}); err != nil {
 				t.Fatal(err)
 			}
-			want := int64(2)
+			want := int64(18)
 			if compress {
-				want = 3
+				want = 19
+			}
+			if len(warnings) != 0 {
+				t.Fatalf("compression warnings: %v", warnings)
 			}
 			saved, err := store.Load(ctx, current.ID)
 			if err != nil || state.conversation.Revision != want || saved.Revision != want || !reflect.DeepEqual(state.conversation.Messages, saved.Messages) || !reflect.DeepEqual(state.conversation.DurableSummary, saved.DurableSummary) {
@@ -686,6 +695,9 @@ func TestSaveThreadRetainsCommittedRevision(t *testing.T) {
 			// Reusing the retained value must be safe; fetching a new token onto stale content is forbidden.
 			if err := runtime.saveThread(ctx, &activeRun{}, agent.Budget{InputCeiling: 2}, state, "later question", agent.Result{Answer: "later answer"}); err != nil {
 				t.Fatalf("save retained snapshot: %v", err)
+			}
+			if len(warnings) != 0 {
+				t.Fatalf("retained save warnings: %v", warnings)
 			}
 		})
 	}
