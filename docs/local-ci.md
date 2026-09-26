@@ -159,6 +159,27 @@ git config core.hooksPath .githooks
 
 The `CI` workflow runs on `pull_request` so protected branches receive the required `Lint & Test` status. It does not run on ordinary pushes. Its `Security contracts` step runs `scripts/ci-local --mode security`, the same discovery, exact-`PASS`, and skip-allowlist gate the pre-push hook runs, so a renamed, skipped, or hollowed-out aggregate cannot pass the required check by bypassing the local hook.
 
+The workflow runs the full race-test suite on two toolchains, logging `go version`
+immediately before each run:
+
+| Check | Toolchain | Checks |
+| --- | --- | --- |
+| `Lint & Test` | `go-version-file: go.mod` (currently `toolchain go1.27.1`) | CI/changelog self-tests and guards, lint, formatting, security contracts, race tests, Windows compile smoke, and GoReleaser config validation |
+| `Test (Go 1.26)` | `actions/setup-go` resolves `1.26.x` | `go test -race ./...` only |
+
+The compatibility job sets `GOTOOLCHAIN=local` for both its version log and tests,
+so the newer `toolchain` directive cannot silently replace the compiler selected
+by setup-go. `1.26.x` is a setup-go version query, not a concrete toolchain name.
+The current job retains the exact required status name `Lint & Test`; sandbox
+jobs and release tooling continue to use the toolchain declared in `go.mod`.
+
+Keep the compatibility version and check name aligned with the [Go support
+window](https://go.dev/doc/devel/release#policy): each major release is supported
+until two newer major releases exist. When Go 1.28 ships, advance this lane to
+Go 1.27. This coverage does not change the module's `go 1.25.0` language floor.
+A cross-version contract or golden-vector failure is a toolchain dependency to
+investigate before release; do not hide it by upgrading the compatibility run.
+
 The macOS compile-smoke workflow also runs on pull requests to `develop` and `main`, providing the required native-Darwin status and real Seatbelt confinement coverage. It remains available as a manual fallback through `workflow_dispatch`. Local Docker CI is the blocking path before pushes during normal development.
 
 The Darwin background-exec selector also runs the #481 exit-observer
