@@ -33,6 +33,12 @@ run with a separate image and cache volumes, use an explicit project name:
 docker compose -p go-llm-my-branch -f docker-compose.ci.yml run --build --rm ci ./scripts/ci-local --mode full
 ```
 
+That project starts with cold caches. Remove its image and volumes when done:
+
+```bash
+docker compose -p go-llm-my-branch -f docker-compose.ci.yml down --volumes --rmi local
+```
+
 On a Linux host the bind-mounted checkout must be readable by uid 1000; the gate never writes into it. The volumes carry a `-ci` suffix (`go-llm_go-build-cache-ci`, `go-llm_go-mod-cache-ci`, `go-llm_golangci-lint-cache-ci`) because the image runs unprivileged and the volumes must be created with that ownership; the root-owned volumes of the earlier image (`go-llm_go-build-cache`, `go-llm_go-mod-cache`, `go-llm_golangci-lint-cache`) are no longer used and can be removed with `docker volume rm`.
 
 ## Linked Worktrees
@@ -50,7 +56,7 @@ pre-push hook, and the native Darwin selectors and requirement environment. The
 1. Make code changes normally.
 2. Run `scripts/ci-local --mode pre-push` for a faster host-side check while iterating, or use the Docker command above when you want the pinned CI toolchain.
 3. Push the branch. The `.githooks/pre-push` hook automatically builds the current checkout's CI image and runs the Docker-backed `full` suite and blocks the push on failure.
-4. GitHub runs the required `Lint & Test` and `macOS Compile Smoke` workflows on PRs to satisfy branch protection. Ordinary push-triggered Actions remain disabled.
+4. GitHub runs the required `Lint & Test`, `Test (oldest supported Go)`, `Linux Sandbox (bwrap)`, and `macOS Compile Smoke` checks on PRs to satisfy branch protection. Ordinary push-triggered Actions remain disabled.
 
 ## Command Contract
 
@@ -164,19 +170,23 @@ immediately before each run:
 
 | Check | Toolchain | Checks |
 | --- | --- | --- |
-| `Lint & Test` | `go-version-file: go.mod` (currently `toolchain go1.27.1`) | CI/changelog self-tests and guards, lint, formatting, security contracts, race tests, Windows compile smoke, and GoReleaser config validation |
-| `Test (Go 1.26)` | `actions/setup-go` resolves `1.26.x` | `go test -race ./...` only |
+| `Lint & Test` | `go-version-file: go.mod` (the `toolchain` directive) | CI/changelog self-tests and guards, lint, formatting, security contracts, race tests, Windows compile smoke, and GoReleaser config validation |
+| `Test (oldest supported Go)` | `actions/setup-go` resolves the `go-version: '1.N.x'` query in `ci.yml` | `go test -race ./...` only |
 
 The compatibility job sets `GOTOOLCHAIN=local` for both its version log and tests,
 so the newer `toolchain` directive cannot silently replace the compiler selected
-by setup-go. `1.26.x` is a setup-go version query, not a concrete toolchain name.
+by setup-go. `1.N.x` is a setup-go version query, not a concrete toolchain name.
 The current job retains the exact required status name `Lint & Test`; sandbox
 jobs and release tooling continue to use the toolchain declared in `go.mod`.
 
-Keep the compatibility version and check name aligned with the [Go support
+The compatibility lane follows the [Go support
 window](https://go.dev/doc/devel/release#policy): each major release is supported
-until two newer major releases exist. When Go 1.28 ships, advance this lane to
-Go 1.27. This coverage does not change the module's `go 1.25.0` language floor.
+until two newer major releases exist, so the lane runs one minor below the
+`toolchain` line. `scripts/test-ci-local` fails when the two drift apart or when
+`GOTOOLCHAIN: local` is removed, so advance the lane in the same change that
+bumps `toolchain`. The check name carries no version, so branch protection keeps
+requiring it across bumps. This coverage does not change the module's `go`
+language floor, which no CI lane builds with.
 A cross-version contract or golden-vector failure is a toolchain dependency to
 investigate before release; do not hide it by upgrading the compatibility run.
 

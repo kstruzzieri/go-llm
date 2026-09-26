@@ -91,10 +91,12 @@ jobs:
           version: 2.17.0
           args: check
 
-  # Keep the oldest supported Go release here; advance to 1.27 when 1.28 ships.
-  # A separate job preserves the required "Lint & Test" status and runs only tests.
+  # Oldest supported Go: one minor below go.mod's toolchain line, pinned by
+  # scripts/test-ci-local so a toolchain bump cannot leave this lane behind.
+  # A separate job preserves the required "Lint & Test" status and runs only
+  # tests; the versionless name lets branch protection require it across bumps.
   compatibility:
-    name: Test (Go 1.26)
+    name: Test (oldest supported Go)
     runs-on: ubuntu-latest
     env:
       # Use setup-go's compiler even though go.mod suggests a newer toolchain.

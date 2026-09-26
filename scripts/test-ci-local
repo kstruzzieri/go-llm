@@ -15,6 +15,21 @@ fi
 grep -Fxq 'CMD ["./scripts/ci-local", "--mode", "pre-push"]' "$repo_root/Dockerfile.ci"
 grep -Fxq '    command: ["./scripts/ci-local", "--mode", "pre-push"]' "$repo_root/docker-compose.ci.yml"
 
+# The compatibility lane must run setup-go's compiler (without GOTOOLCHAIN=local
+# the toolchain directive silently swaps in the newer Go) and sit exactly one
+# minor below go.mod's toolchain line, the oldest release Go still supports.
+if ! grep -Fxq '      GOTOOLCHAIN: local' "$repo_root/.github/workflows/ci.yml"; then
+  printf 'GitHub CI compatibility lane is missing GOTOOLCHAIN: local\n' >&2
+  exit 1
+fi
+toolchain_minor="$(sed -n 's/^toolchain go1\.\([0-9][0-9]*\)\..*$/\1/p' "$repo_root/go.mod")"
+compat_minor="$(sed -n "s/^          go-version: '1\.\([0-9][0-9]*\)\.x'\$/\1/p" "$repo_root/.github/workflows/ci.yml")"
+if [ -z "$toolchain_minor" ] || [ "$compat_minor" != "$((toolchain_minor - 1))" ]; then
+  printf 'compatibility Go lane 1.%s.x must be one minor below go.mod toolchain go1.%s\n' \
+    "$compat_minor" "$toolchain_minor" >&2
+  exit 1
+fi
+
 tmp="$(cd "$(mktemp -d)" && pwd -P)"
 trap 'rm -rf "$tmp"' EXIT
 
