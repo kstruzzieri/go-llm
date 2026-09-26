@@ -166,7 +166,7 @@ func TestConsultClearedByNewAndResume(t *testing.T) {
 			sess.interceptorsOn = true
 			sess.consultants = fakeConsultants(t, "claude", consultTranscript("OK"))
 			if cmd != "/new" {
-				if err := sess.session.store.Save(context.Background(), conversation.Conversation{
+				if _, err := sess.session.store.Save(context.Background(), conversation.Conversation{
 					ID: "user:other", Messages: []conversation.Message{{Role: "user", Content: "old"}},
 				}); err != nil {
 					t.Fatal(err)

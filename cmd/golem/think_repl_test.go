@@ -583,7 +583,7 @@ func TestThinkREPLPreservesBufferedGoalsHistoryAndWrites(t *testing.T) {
 	sess.thinkModels = reg
 	sess.selection = modelSelection{chain: []string{"test/thinking"}, useCase: "agent"}
 	sess.session.summary = &conversation.DurableSummary{Content: "prior summary", MessageCount: 2}
-	if err := sess.session.store.Save(context.Background(), conversation.Conversation{ID: sess.session.id, DurableSummary: sess.session.summary}); err != nil {
+	if _, err := sess.session.store.Save(context.Background(), conversation.Conversation{ID: sess.session.id, DurableSummary: sess.session.summary}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := sess.session.db.Exec(`CREATE TABLE think_writes(n INTEGER);
@@ -833,7 +833,7 @@ func TestThinkSurvivesSessionResetCommands(t *testing.T) {
 			if err := sess.session.record(context.Background(), "old question", "old answer"); err != nil {
 				t.Fatal(err)
 			}
-			if err := sess.session.store.Save(context.Background(), conversation.Conversation{ID: "user:other", Messages: []conversation.Message{{Role: "user", Content: "resumed question"}, {Role: "assistant", Content: "resumed answer"}}}); err != nil {
+			if _, err := sess.session.store.Save(context.Background(), conversation.Conversation{ID: "user:other", Messages: []conversation.Message{{Role: "user", Content: "resumed question"}, {Role: "assistant", Content: "resumed answer"}}}); err != nil {
 				t.Fatal(err)
 			}
 			var out strings.Builder

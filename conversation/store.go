@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
 	"strings"
@@ -11,14 +12,15 @@ import (
 	"unicode"
 )
 
-// Store defines conversation persistence operations. Save creates revision 1 only
-// when revision 0 names an absent ID; a positive revision replaces only that exact
-// stored revision and advances it by one. Conflicts leave storage unchanged.
-// After success, callers retaining the submitted value must increment its revision;
-// negative and maximum int64 revisions are invalid. List and Search projections
-// are not save tokens.
+// Store defines conversation persistence operations. Revision zero creates only
+// an absent ID; positive revisions replace only that exact stored revision and
+// advance it by one. A recreated ID must receive a revision greater than any of
+// its deleted snapshots. Save returns the committed revision without modifying
+// its input; retained callers must assign that result after success. Every error
+// returns revision zero and leaves storage unchanged. Negative and maximum int64
+// revisions are invalid. List and Search projections are not save tokens.
 type Store interface {
-	Save(ctx context.Context, conv Conversation) error
+	Save(ctx context.Context, conv Conversation) (int64, error)
 	Load(ctx context.Context, id string) (*Conversation, error)
 	List(ctx context.Context) ([]Summary, error)
 	Search(ctx context.Context, query string, opts SearchOptions) ([]SearchResult, error)
@@ -43,17 +45,18 @@ func NewStore(ctx context.Context, db *sql.DB) (*SQLiteStore, error) {
 	return &SQLiteStore{db: db}, nil
 }
 
-// Save atomically persists a snapshot and its search projection using its revision.
-// Revision 0 creates; positive revisions update only a matching stored revision.
-// A successful save commits revision r+1 without modifying conv. Negative and
-// maximum int64 revisions are invalid. Conflicts return *ConflictError.
-func (s *SQLiteStore) Save(ctx context.Context, conv Conversation) error {
+// Save atomically persists a snapshot and its search projection. Revision zero
+// creates at the durable store-wide revision floor plus one; positive revisions
+// update only a matching stored revision, committing r+1. It returns the committed
+// revision without modifying conv. Conflicts return *ConflictError. Invalid input
+// revisions and an exhausted creation floor return non-conflict errors.
+func (s *SQLiteStore) Save(ctx context.Context, conv Conversation) (int64, error) {
 	if conv.ID == "" {
-		return fmt.Errorf("conversation: save: id is required")
+		return 0, fmt.Errorf("conversation: save: id is required")
 	}
 
 	if conv.Revision < 0 || conv.Revision == math.MaxInt64 {
-		return fmt.Errorf("conversation: save %q: invalid revision %d", conv.ID, conv.Revision)
+		return 0, fmt.Errorf("conversation: save %q: invalid revision %d", conv.ID, conv.Revision)
 	}
 
 	msgs := conv.Messages
@@ -63,7 +66,7 @@ func (s *SQLiteStore) Save(ctx context.Context, conv Conversation) error {
 
 	messagesJSON, err := json.Marshal(msgs)
 	if err != nil {
-		return fmt.Errorf("conversation: save: marshal messages: %w", err)
+		return 0, fmt.Errorf("conversation: save: marshal messages: %w", err)
 	}
 	summaryContent, summaryMessageCount := durableSummaryValues(conv.DurableSummary)
 
@@ -75,43 +78,60 @@ func (s *SQLiteStore) Save(ctx context.Context, conv Conversation) error {
 	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return fmt.Errorf("conversation: save %q: begin: %w", conv.ID, err)
+		return 0, fmt.Errorf("conversation: save %q: begin: %w", conv.ID, err)
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	var result sql.Result
+	var revision int64
 	if conv.Revision == 0 {
-		result, err = tx.ExecContext(ctx,
+		// Write first: reading the floor before this statement would allow a
+		// WAL read-to-write upgrade to fail with SQLITE_BUSY_SNAPSHOT.
+		err = tx.QueryRowContext(ctx,
 			`INSERT INTO conversations (id, title, messages, summary_content, summary_message_count, revision, created_at, updated_at)
-			 VALUES (?, ?, ?, ?, ?, 1, ?, ?)
-			 ON CONFLICT(id) DO NOTHING`,
-			conv.ID, conv.Title, string(messagesJSON), summaryContent, summaryMessageCount, now, now,
-		)
+			 SELECT ?, ?, ?, ?, ?, value + 1, ?, ? FROM conversation_revision_floor
+			 WHERE id = 1 AND value < ?
+			 ON CONFLICT(id) DO NOTHING RETURNING revision`,
+			conv.ID, conv.Title, string(messagesJSON), summaryContent, summaryMessageCount, now, now, int64(math.MaxInt64),
+		).Scan(&revision)
+		if errors.Is(err, sql.ErrNoRows) {
+			// Even a no-row INSERT holds the writer lock. Prefer a duplicate-ID
+			// conflict over exhaustion, and never repair missing metadata.
+			var exists bool
+			var floor int64
+			if err := tx.QueryRowContext(ctx,
+				`SELECT EXISTS(SELECT 1 FROM conversations WHERE id = ?), value
+				 FROM conversation_revision_floor WHERE id = 1`, conv.ID,
+			).Scan(&exists, &floor); err != nil {
+				return 0, fmt.Errorf("conversation: save %q: read revision floor: %w", conv.ID, err)
+			}
+			if !exists {
+				if floor == math.MaxInt64 {
+					return 0, fmt.Errorf("conversation: save %q: revision exhausted", conv.ID)
+				}
+				return 0, fmt.Errorf("conversation: save %q: no revision allocated", conv.ID)
+			}
+		}
 	} else {
-		result, err = tx.ExecContext(ctx,
+		err = tx.QueryRowContext(ctx,
 			`UPDATE conversations SET title = ?, messages = ?, summary_content = ?, summary_message_count = ?,
 			 revision = revision + 1, updated_at = ?
-			 WHERE id = ? AND revision = ?`,
+			 WHERE id = ? AND revision = ? RETURNING revision`,
 			conv.Title, string(messagesJSON), summaryContent, summaryMessageCount, now, conv.ID, conv.Revision,
-		)
+		).Scan(&revision)
+	}
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, &ConflictError{ID: conv.ID, ExpectedRevision: conv.Revision}
 	}
 	if err != nil {
-		return fmt.Errorf("conversation: save %q: %w", conv.ID, err)
-	}
-	affected, err := result.RowsAffected()
-	if err != nil {
-		return fmt.Errorf("conversation: save %q: rows affected: %w", conv.ID, err)
-	}
-	if affected == 0 {
-		return &ConflictError{ID: conv.ID, ExpectedRevision: conv.Revision}
+		return 0, fmt.Errorf("conversation: save %q: %w", conv.ID, err)
 	}
 	if err := s.saveSearchIndex(ctx, tx, conv.ID, conv.Title, searchBody, len(msgs), now, now); err != nil {
-		return err
+		return 0, err
 	}
 	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("conversation: save %q: commit: %w", conv.ID, err)
+		return 0, fmt.Errorf("conversation: save %q: commit: %w", conv.ID, err)
 	}
-	return nil
+	return revision, nil
 }
 
 // Load retrieves a conversation by ID. Returns ErrNotFound if not found.
@@ -226,7 +246,9 @@ func (s *SQLiteStore) Search(ctx context.Context, query string, opts SearchOptio
 	return results, nil
 }
 
-// Delete removes a conversation by ID. Returns nil if not found (idempotent).
+// Delete unconditionally removes a conversation by ID. Its revision is captured
+// by the schema trigger in the same transaction as the search deletion. It returns
+// nil if not found (idempotent); a stale caller can still delete a newer snapshot.
 func (s *SQLiteStore) Delete(ctx context.Context, id string) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {

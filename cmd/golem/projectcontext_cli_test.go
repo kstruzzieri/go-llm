@@ -317,7 +317,7 @@ func TestProjectTrustPersistentLifecycle(t *testing.T) {
 			sess, caller := newTrustSession(t, "session-guidance")
 			saved := newSessionedTestSession(t, caller, sess.root, "workspace:current")
 			sess.session = saved.session
-			if err := sess.session.store.Save(t.Context(), conversation.Conversation{ID: "user:other", Title: "other", Messages: []conversation.Message{{Role: "user", Content: "hi"}}}); err != nil {
+			if _, err := sess.session.store.Save(t.Context(), conversation.Conversation{ID: "user:other", Title: "other", Messages: []conversation.Message{{Role: "user", Content: "hi"}}}); err != nil {
 				t.Fatal(err)
 			}
 			trustSlash(t, sess, "/trust "+trustFixtureDigest(t, sess.root))

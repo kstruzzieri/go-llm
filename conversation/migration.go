@@ -35,6 +35,11 @@ var migrations = []migration{
 		description: "conversation revisions",
 		fn:          migrateV4,
 	},
+	{
+		version:     5,
+		description: "conversation revision floor across deletion",
+		fn:          migrateV5,
+	},
 }
 
 func migrateV1(tx *sql.Tx) error {
@@ -103,6 +108,39 @@ func migrateV3(tx *sql.Tx) error {
 func migrateV4(tx *sql.Tx) error {
 	if _, err := tx.Exec(`ALTER TABLE conversations ADD COLUMN revision INTEGER NOT NULL DEFAULT 1`); err != nil {
 		return fmt.Errorf("conversation: migrate v4: %w", err)
+	}
+	return nil
+}
+
+func migrateV5(tx *sql.Tx) error {
+	// Seed at least 1 from live revisions, without rewriting rows: released
+	// writers always insert revision 1, so the insert trigger rejects their
+	// unconditional upserts and creates even on a fresh database.
+	stmts := []string{
+		`CREATE TABLE conversation_revision_floor (
+			id INTEGER PRIMARY KEY CHECK (id = 1),
+			value INTEGER NOT NULL CHECK (typeof(value) = 'integer' AND value >= 0)
+		)`,
+		`INSERT INTO conversation_revision_floor (id, value)
+		 SELECT 1, MAX(1, COALESCE(MAX(revision), 0)) FROM conversations`,
+		`CREATE TRIGGER conversations_capture_revision AFTER DELETE ON conversations
+		 BEGIN
+			SELECT RAISE(ABORT, 'conversation: revision floor missing')
+			 WHERE NOT EXISTS (SELECT 1 FROM conversation_revision_floor WHERE id = 1);
+			UPDATE conversation_revision_floor SET value = MAX(value, OLD.revision) WHERE id = 1;
+		 END`,
+		`CREATE TRIGGER conversations_no_reused_revision BEFORE INSERT ON conversations
+		 BEGIN
+			SELECT RAISE(ABORT, 'conversation: revision floor missing')
+			 WHERE NOT EXISTS (SELECT 1 FROM conversation_revision_floor WHERE id = 1);
+			SELECT RAISE(ABORT, 'conversation store upgraded (#542): upgrade go-llm/golem to write')
+			 WHERE NEW.revision <= (SELECT value FROM conversation_revision_floor WHERE id = 1);
+		 END`,
+	}
+	for _, stmt := range stmts {
+		if _, err := tx.Exec(stmt); err != nil {
+			return fmt.Errorf("conversation: migrate v5: %w", err)
+		}
 	}
 	return nil
 }

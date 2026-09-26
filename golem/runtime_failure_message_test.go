@@ -40,8 +40,11 @@ func (s *stubSessionStore) Load(_ context.Context, id string) (*conversation.Con
 	return nil, fmt.Errorf("stub store: load %q: %w", id, conversation.ErrNotFound)
 }
 
-func (s *stubSessionStore) Save(context.Context, conversation.Conversation) error {
-	return s.saveErr
+func (s *stubSessionStore) Save(_ context.Context, conv conversation.Conversation) (int64, error) {
+	if s.saveErr != nil {
+		return 0, s.saveErr
+	}
+	return conv.Revision + 1, nil
 }
 
 type failingCaller struct{ err error }
