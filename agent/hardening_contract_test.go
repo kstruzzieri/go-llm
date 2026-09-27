@@ -664,7 +664,7 @@ func runDefaultPipelineContracts(t *testing.T) {
 		for i := range chain {
 			names[i] = chain[i].Name()
 		}
-		want := []string{"zero_width", "encoding", "typoglycemia", "invariants", "egress", "secrets"}
+		want := []string{"zero_width", "encoding", "typoglycemia", "invariants", "egress", "secrets", "child_scope_denials"}
 		if !reflect.DeepEqual(names, want) {
 			t.Errorf("Defaults names = %v, want %v", names, want)
 		}
