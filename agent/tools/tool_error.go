@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+
+	"github.com/kstruzzieri/go-llm/agent"
 )
 
 // toolErrMessage maps an internal filesystem or scope failure to the fixed,
@@ -60,4 +62,14 @@ func toolVisibleError(err error) error {
 		return fmt.Errorf("file changed since preview; retry: %w", err)
 	}
 	return err
+}
+
+// toolErrorResult counts an actual refused scoped request at its terminal error
+// return, before the typed identity is lost to display text. Formatting errors
+// and silently pruning enumeration entries never pass this boundary.
+func (w *Workspace) toolErrorResult(err error) agent.ToolResult {
+	if w.scope != nil && errors.Is(err, errScopeDenied) {
+		w.scope.requests.Add(1)
+	}
+	return errResult(toolErrMessage(err))
 }

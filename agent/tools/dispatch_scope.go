@@ -9,12 +9,19 @@ import (
 	"github.com/kstruzzieri/go-llm/agent"
 )
 
+// scopeCounters belongs to one scoped child; evaluations include quiet pruning,
+// while requests counts only terminal native reader refusals.
+type scopeCounters struct {
+	evaluations atomic.Int64
+	requests    atomic.Int64
+}
+
 const scopedDispatchSystemPrompt = "You are a bounded read-only exploration child. Use only read_file, search, glob, and list within your delegated directory; retrieval is unavailable. Do not write or edit files, run commands, call external tools, submit plans, or dispatch children. Return a concise evidence-backed summary and do not claim actions you did not perform."
 
 // childTools is the capability attenuation boundary. nil preserves the legacy
 // tools; a scope builds independent readers and an invocation-owned root.
 // Host tool/guard setup must finish before calls begin, as with SetScopeGuard.
-func (d *Dispatch) childTools(scope *string) ([]agent.Tool, *atomic.Int64, func(), error) {
+func (d *Dispatch) childTools(scope *string) ([]agent.Tool, *scopeCounters, func(), error) {
 	if scope == nil {
 		return d.tools, nil, func() {}, nil
 	}
@@ -59,7 +66,7 @@ func (d *Dispatch) childTools(scope *string) ([]agent.Tool, *atomic.Int64, func(
 	return NewFileToolsForWorkspace(ws), counter, cleanup, nil
 }
 
-func newScopedWorkspace(parent *Workspace, scope string) (*Workspace, *atomic.Int64, func(), error) {
+func newScopedWorkspace(parent *Workspace, scope string) (*Workspace, *scopeCounters, func(), error) {
 	// Copy captures the host-owned guard at preflight, without modifying parent.
 	snapshot := *parent
 	abs, err := snapshot.cleanRel(scope)
@@ -82,8 +89,8 @@ func newScopedWorkspace(parent *Workspace, scope string) (*Workspace, *atomic.In
 		cleanup()
 		return nil, nil, nil, err
 	}
-	counter := new(atomic.Int64)
-	ws := &Workspace{root: filepath.Join(snapshot.root, rel), rootIdentity: identity, pinnedRoot: root, scopeDenials: counter}
+	counter := new(scopeCounters)
+	ws := &Workspace{root: filepath.Join(snapshot.root, rel), rootIdentity: identity, pinnedRoot: root, scope: counter}
 	ws.guard = func(childRel string, write bool) error {
 		var err error
 		if write {
@@ -92,7 +99,7 @@ func newScopedWorkspace(parent *Workspace, scope string) (*Workspace, *atomic.In
 			err = snapshot.guard(filepath.ToSlash(filepath.Join(rel, childRel)), false)
 		}
 		if err != nil {
-			counter.Add(1)
+			counter.evaluations.Add(1)
 		}
 		return err
 	}

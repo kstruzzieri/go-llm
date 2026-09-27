@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
@@ -78,7 +77,7 @@ type Dispatch struct {
 	interceptors []agent.Interceptor
 	// prepareChildTools is a per-instance lifecycle test seam. Configure before
 	// Invoke; nil uses the production childTools attenuation boundary.
-	prepareChildTools func(*string) ([]agent.Tool, *atomic.Int64, func(), error)
+	prepareChildTools func(*string) ([]agent.Tool, *scopeCounters, func(), error)
 }
 
 type dispatchArgs struct {
@@ -135,7 +134,7 @@ func (t *dispatchTask) UnmarshalJSON(raw []byte) error {
 
 type dispatchChild struct {
 	tools   []agent.Tool
-	counter *atomic.Int64
+	counter *scopeCounters
 	cleanup func()
 }
 
@@ -150,6 +149,8 @@ type dispatchResult struct {
 	RiskScore int `json:"risk_score,omitempty"`
 	// ScopeDenials counts vetoed policy evaluations, including repeated checks and pruning.
 	ScopeDenials int64 `json:"scope_denials,omitempty"`
+	// deniedRequests is native evidence; it must never enter the JSON envelope.
+	deniedRequests int64
 }
 
 type dispatchEnvelope struct {
@@ -412,7 +413,8 @@ func (d *Dispatch) runChild(ctx context.Context, task dispatchTask, child dispat
 	}
 	out := dispatchResult{Summary: result.Answer, StopReason: result.StopReason.String(), Model: model}
 	if child.counter != nil {
-		out.ScopeDenials = child.counter.Load()
+		out.ScopeDenials = child.counter.evaluations.Load()
+		out.deniedRequests = child.counter.requests.Load()
 	}
 	if result.Risk != nil {
 		out.RiskScore = result.Risk.Score

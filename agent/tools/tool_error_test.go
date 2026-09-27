@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -93,4 +94,41 @@ func TestToolErrorClassifierAllowlist(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestScopedRequestDenialsTypedIdentity(t *testing.T) {
+	t.Run("typed identity", func(t *testing.T) {
+		for _, tc := range []struct {
+			name string
+			err  error
+			want int64
+			text string
+		}{
+			{"typed", errScopeDenied, 1, "path denied by workspace policy"},
+			{"wrapped", fmt.Errorf("private host path: %w", errScopeDenied), 1, "path denied by workspace policy"},
+			{"guard", scopeDeniedError{cause: errors.New("private guard detail")}, 1, "path denied by workspace policy"},
+			{"same text", errors.New("path denied by workspace policy"), 0, "filesystem operation failed"},
+			{"missing", os.ErrNotExist, 0, "path not found"},
+			{"canceled", context.Canceled, 0, "filesystem operation canceled"},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				ws := &Workspace{scope: new(scopeCounters)}
+				out := ws.toolErrorResult(tc.err)
+				if !out.IsError || out.Content != tc.text || ws.scope.requests.Load() != tc.want {
+					t.Fatalf("result=%+v requests=%d, want %q / %d", out, ws.scope.requests.Load(), tc.text, tc.want)
+				}
+				if ws.scope.evaluations.Load() != 0 {
+					t.Fatal("rendering added a policy evaluation")
+				}
+				_ = toolErrMessage(tc.err)
+				if ws.scope.requests.Load() != tc.want {
+					t.Fatal("pure formatting added a request")
+				}
+				unscoped := &Workspace{}
+				if got := unscoped.toolErrorResult(tc.err); got.Content != out.Content || got.IsError != out.IsError {
+					t.Fatalf("unscoped sanitization changed: %+v", got)
+				}
+			})
+		}
+	})
 }

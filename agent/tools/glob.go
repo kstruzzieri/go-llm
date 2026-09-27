@@ -73,11 +73,11 @@ func (t *Glob) Invoke(ctx context.Context, raw json.RawMessage) (agent.ToolResul
 	}
 
 	if filepath.IsAbs(args.Pattern) || strings.ContainsRune(args.Pattern, 0) {
-		return errResult(t.ws.denyScope().Error()), nil
+		return t.ws.toolErrorResult(t.ws.denyScope()), nil
 	}
 	for _, component := range strings.Split(filepath.ToSlash(args.Pattern), "/") {
 		if component == ".." {
-			return errResult(t.ws.denyScope().Error()), nil
+			return t.ws.toolErrorResult(t.ws.denyScope()), nil
 		}
 	}
 
@@ -95,7 +95,7 @@ func (t *Glob) Invoke(ctx context.Context, raw json.RawMessage) (agent.ToolResul
 		return nil
 	})
 	if walkErr != nil && walkErr != fs.SkipAll {
-		return errResult(toolErrMessage(walkErr)), nil
+		return t.ws.toolErrorResult(walkErr), nil
 	}
 	return renderEntries(entries, truncated), nil
 }
@@ -175,13 +175,13 @@ func (t *List) Invoke(ctx context.Context, raw json.RawMessage) (agent.ToolResul
 	}
 	f, relBase, err := t.ws.openReadDir(p)
 	if err != nil {
-		return errResult(toolErrMessage(err)), nil
+		return t.ws.toolErrorResult(err), nil
 	}
 	defer func() { _ = f.Close() }()
 
 	dirents, err := readWorkspaceEntries(f)
 	if err != nil {
-		return errResult(toolErrMessage(err)), nil
+		return t.ws.toolErrorResult(err), nil
 	}
 
 	base := filepath.ToSlash(relBase)

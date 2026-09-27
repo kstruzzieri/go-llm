@@ -287,7 +287,7 @@ func captureDispatchRoots(d *Dispatch) (func() []*os.File, <-chan struct{}) {
 	var mu sync.Mutex
 	var roots []*os.File
 	acquired := make(chan struct{}, 16)
-	d.prepareChildTools = func(scope *string) ([]agent.Tool, *atomic.Int64, func(), error) {
+	d.prepareChildTools = func(scope *string) ([]agent.Tool, *scopeCounters, func(), error) {
 		readers, count, cleanup, err := d.childTools(scope)
 		if err == nil && scope != nil {
 			mu.Lock()
@@ -481,10 +481,10 @@ func TestDispatchScopedMaximumCountSurvivesTruncation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	d.prepareChildTools = func(scope *string) ([]agent.Tool, *atomic.Int64, func(), error) {
+	d.prepareChildTools = func(scope *string) ([]agent.Tool, *scopeCounters, func(), error) {
 		tools, count, cleanup, err := d.childTools(scope)
 		if count != nil {
-			count.Store(math.MaxInt64)
+			count.evaluations.Store(math.MaxInt64)
 		}
 		return tools, count, cleanup, err
 	}

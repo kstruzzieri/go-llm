@@ -64,8 +64,8 @@ func TestScopedReaders(t *testing.T) {
 			t.Errorf("%s = %+v, %v, want %q", tc.tool.Spec().Name, got, err, tc.want)
 		}
 	}
-	if count.Load() != 3 {
-		t.Errorf("three enumeration vetoes = %d, want 3", count.Load())
+	if count.evaluations.Load() != 3 {
+		t.Errorf("three enumeration vetoes = %d, want 3", count.evaluations.Load())
 	}
 	if got, err := parent.readAll("b/visible.txt"); err != nil || string(got) != "B_ONLY\n" {
 		t.Errorf("parent sibling = %q, %v", got, err)
@@ -84,14 +84,14 @@ func TestScopedDeniedEvaluations(t *testing.T) {
 	if _, err := ws.readAll("visible.txt"); err != nil {
 		t.Fatal(err)
 	}
-	if count.Load() != 0 {
-		t.Fatalf("allowed = %d", count.Load())
+	if count.evaluations.Load() != 0 {
+		t.Fatalf("allowed = %d", count.evaluations.Load())
 	}
 	if _, err := ws.readAll("private.txt"); !errors.Is(err, errScopeDenied) {
 		t.Fatalf("veto = %v", err)
 	}
-	if count.Load() != 1 {
-		t.Fatalf("one veto = %d", count.Load())
+	if count.evaluations.Load() != 1 {
+		t.Fatalf("one veto = %d", count.evaluations.Load())
 	}
 	if _, err := ws.readAll("../b/visible.txt"); !errors.Is(err, errScopeDenied) {
 		t.Fatalf("escape = %v", err)
@@ -100,8 +100,8 @@ func TestScopedDeniedEvaluations(t *testing.T) {
 			t.Errorf("wrapped denial = %q", got)
 		}
 	}
-	if count.Load() != 2 {
-		t.Fatalf("escape plus wrapping = %d", count.Load())
+	if count.evaluations.Load() != 2 {
+		t.Fatalf("escape plus wrapping = %d", count.evaluations.Load())
 	}
 	for _, p := range []string{"../ab/prefix.txt", "/absolute", "bad\x00path"} {
 		raw, _ := json.Marshal(map[string]string{"path": p})
@@ -110,8 +110,8 @@ func TestScopedDeniedEvaluations(t *testing.T) {
 			t.Errorf("read(%q) = %+v", p, got)
 		}
 	}
-	if count.Load() != 5 {
-		t.Fatalf("invalid paths = %d", count.Load())
+	if count.evaluations.Load() != 5 {
+		t.Fatalf("invalid paths = %d", count.evaluations.Load())
 	}
 	for _, p := range []string{"../*", "a/../*", "/absolute", "bad\x00pattern"} {
 		raw, _ := json.Marshal(map[string]string{"pattern": p})
@@ -120,8 +120,8 @@ func TestScopedDeniedEvaluations(t *testing.T) {
 			t.Errorf("glob(%q) = %+v", p, got)
 		}
 	}
-	if count.Load() != 9 {
-		t.Fatalf("glob invalid paths = %d", count.Load())
+	if count.evaluations.Load() != 9 {
+		t.Fatalf("glob invalid paths = %d", count.evaluations.Load())
 	}
 	for range 2 {
 		got, _ := NewGlob(ws).Invoke(t.Context(), json.RawMessage(`{"pattern":"visible*"}`))
@@ -129,14 +129,14 @@ func TestScopedDeniedEvaluations(t *testing.T) {
 			t.Fatal(got)
 		}
 	}
-	if count.Load() != 11 {
-		t.Fatalf("repeated pruning = %d", count.Load())
+	if count.evaluations.Load() != 11 {
+		t.Fatalf("repeated pruning = %d", count.evaluations.Load())
 	}
 	if err := ws.WriteFileAtomic("new.txt", []byte("bad")); !errors.Is(err, errScopeDenied) {
 		t.Fatalf("write = %v", err)
 	}
-	if count.Load() != 12 {
-		t.Fatalf("write veto = %d", count.Load())
+	if count.evaluations.Load() != 12 {
+		t.Fatalf("write veto = %d", count.evaluations.Load())
 	}
 }
 
@@ -253,8 +253,8 @@ func TestScopedSearchOnlyRoot(t *testing.T) {
 	if got, err := ws.readAll("visible.txt"); !errors.Is(err, errScopeDenied) {
 		t.Fatalf("search-only read = %q, %v; want denial", got, err)
 	}
-	if count.Load() != 1 {
-		t.Fatalf("scope denials = %d, want 1", count.Load())
+	if count.evaluations.Load() != 1 {
+		t.Fatalf("scope denials = %d, want 1", count.evaluations.Load())
 	}
 }
 
@@ -281,8 +281,8 @@ func TestScopedIndependentConcurrentCounters(t *testing.T) {
 			if err != nil || string(got) != want {
 				t.Errorf("scope %s = %q, %v", scope, got, err)
 			}
-			if count.Load() != int64(i+1) {
-				t.Errorf("scope %s count = %d, want %d", scope, count.Load(), i+1)
+			if count.evaluations.Load() != int64(i+1) {
+				t.Errorf("scope %s count = %d, want %d", scope, count.evaluations.Load(), i+1)
 			}
 		}()
 	}
@@ -341,10 +341,10 @@ func TestDispatchChildToolsOmitRetrieveAndSnapshotGuard(t *testing.T) {
 			if !got.IsError || got.Content != "path denied by workspace policy" {
 				t.Errorf("late guard = %+v", got)
 			}
-			if count.Load() != 1 {
-				t.Fatalf("late guard count = %d", count.Load())
+			if count.evaluations.Load() != 1 {
+				t.Fatalf("late guard count = %d", count.evaluations.Load())
 			}
-			before := count.Load()
+			before := count.evaluations.Load()
 			result, err := agent.New(scopedRetrieveCaller{}, agent.ContextManager{}).Run(t.Context(), agent.Request{Goal: "retrieve", System: scopedDispatchSystemPrompt, Tools: readers, MaxSteps: 3}, nil)
 			if err != nil {
 				t.Fatal(err)
@@ -361,8 +361,8 @@ func TestDispatchChildToolsOmitRetrieveAndSnapshotGuard(t *testing.T) {
 			if len(result.ToolCalls) != 1 || result.ToolCalls[0].Invoked {
 				t.Errorf("retrieve invocation records = %+v", result.ToolCalls)
 			}
-			if backend.retrieveCalls != 0 || !reflect.ValueOf(backend.gotReq).IsZero() || count.Load() != before {
-				t.Errorf("retrieve backend=%d render=%+v count=%d", backend.retrieveCalls, backend.gotReq, count.Load())
+			if backend.retrieveCalls != 0 || !reflect.ValueOf(backend.gotReq).IsZero() || count.evaluations.Load() != before {
+				t.Errorf("retrieve backend=%d render=%+v count=%d", backend.retrieveCalls, backend.gotReq, count.evaluations.Load())
 			}
 			legacy, legacyCount, legacyCleanup, err := d.childTools(nil)
 			if err != nil {
@@ -412,8 +412,8 @@ func TestScopedSymlinkDenials(t *testing.T) {
 			t.Errorf("symlink %q = %+v, %v", p, got, err)
 		}
 	}
-	if count.Load() != 2 {
-		t.Errorf("symlink count = %d, want 2", count.Load())
+	if count.evaluations.Load() != 2 {
+		t.Errorf("symlink count = %d, want 2", count.evaluations.Load())
 	}
 }
 
@@ -515,8 +515,8 @@ func TestScopedCounterConcurrentEvaluations(t *testing.T) {
 		}()
 	}
 	wg.Wait()
-	if count.Load() != 1600 {
-		t.Errorf("concurrent evaluations = %d, want 1600", count.Load())
+	if count.evaluations.Load() != 1600 {
+		t.Errorf("concurrent evaluations = %d, want 1600", count.evaluations.Load())
 	}
 }
 

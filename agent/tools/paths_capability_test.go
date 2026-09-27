@@ -577,8 +577,8 @@ func TestWorkspaceSearchOnlyDenied(t *testing.T) {
 					t.Errorf("%s: guard saw %v, want the absent spelling once", tc.name, seen)
 				}
 			}
-			if scoped && ws.scopeDenials.Load() != int64(denied) {
-				t.Errorf("scope denials = %d, want %d", ws.scopeDenials.Load(), denied)
+			if scoped && ws.scope.evaluations.Load() != int64(denied) {
+				t.Errorf("scope denials = %d, want %d", ws.scope.evaluations.Load(), denied)
 			}
 			// Enumeration restored: the same names resolve and policy sees
 			// canonical spellings again.
