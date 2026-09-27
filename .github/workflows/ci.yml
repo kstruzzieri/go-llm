@@ -67,7 +67,9 @@ jobs:
         run: ./scripts/ci-local --mode security
 
       - name: Test
-        run: go test -race ./...
+        run: |
+          go version
+          go test -race ./...
 
       - name: Windows compile smoke
         env:
@@ -88,6 +90,28 @@ jobs:
           # Keep in exact lockstep with .github/workflows/release.yml.
           version: 2.17.0
           args: check
+
+  # Oldest Go this module accepts: the go.mod `go` directive's minor, pinned by
+  # scripts/test-ci-local so raising the floor cannot leave this lane behind.
+  # A separate job preserves the required "Lint & Test" status and runs only
+  # tests; the versionless name lets branch protection require it across bumps.
+  compatibility:
+    name: Test (oldest supported Go)
+    runs-on: ubuntu-latest
+    env:
+      # Use setup-go's compiler even though go.mod suggests a newer toolchain.
+      GOTOOLCHAIN: local
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version: '1.27.x'
+
+      - name: Test
+        run: |
+          go version
+          go test -race ./...
 
   # Real bwrap confinement (#441) on a full VM: Docker-based local CI cannot
   # create user namespaces, so this pinned runner is the behavioral gate.

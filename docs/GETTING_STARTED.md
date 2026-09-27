@@ -8,7 +8,7 @@ reference.
 
 ## Prerequisites
 
-1. **Go 1.25+** installed
+1. **Go 1.27+** installed
 2. A model backend — one of:
    - **llama.cpp** (recommended) — `llama-server` per model, exposing the OpenAI-compatible API
    - **Ollama** (alternative) — running locally ([install](https://ollama.com/download))
