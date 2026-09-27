@@ -450,7 +450,24 @@ Every tool result the model reads (file contents, command output, search and ret
 
 ## Interceptors and secret detection
 
-`-interceptors` turns on the deterministic injection detectors from `agent/interceptor` for the session, including dispatch children. Workspace content that looks like an instruction ("ignore previous instructions", a zero-width character, a base64-encoded phrase) is tagged for the model and counted toward a per-turn risk score; the same content coming back from an MCP tool is blocked before the model reads it. Interactive tool-call and plan-lock prompts show the score (`interceptor risk 30`); when a prompt offers `a`, a high score is a reason to prefer `y`. Verifier approval prompts cannot show the score. Risk scores are informational and do not suspend existing session grants. Successful REPL and `-p` stderr footers append ` · risk 30` to summarize the completed turn. Dispatch child scores remain scoped to each child's existing `risk_score` envelope field. Machine stdout schemas do not change. The three injection detectors do not flag raw model output. The feature is off by default because tags are model-visible text and their effect on answer quality has not been measured yet.
+`-interceptors` turns on the deterministic injection detectors from `agent/interceptor` for the session, including dispatch children. Workspace content that looks like an instruction ("ignore previous instructions", a zero-width character, a base64-encoded phrase) is tagged for the model and counted toward a per-turn risk score; the same content coming back from an MCP tool is blocked before the model reads it. Interactive tool-call and plan-lock prompts show the score (`interceptor risk 30`); when a prompt offers `a`, a high score is a reason to prefer `y`. Verifier approval prompts cannot show the score. Risk scores are informational and do not suspend existing session grants. Successful REPL and `-p` stderr footers append ` · risk 30` to summarize the completed turn. Dispatch child scores remain scoped to each child's existing `risk_score` envelope field and are not added to the parent score. Machine stdout schemas do not change. The three injection detectors do not flag raw model output. The feature is off by default because tags are model-visible text and their effect on answer quality has not been measured yet.
+
+The chain separately reports actual native workspace refusals from scoped
+dispatch children through `ChildScopeDenials`. Each affected child produces one
+`child_scope_denied` finding in the parent: 10 points per refused request, capped
+at 100 per child per dispatch invocation. The detail retains the full count;
+separate children and invocations contribute independently. Counts come from
+typed native refusals, never summaries, JSON, replayed history, child
+`risk_score` or the `scope_denials` evaluation count. Quiet filtering contributes
+none. Legacy unscoped tasks are excluded, including host-guard refusals; scoped
+symlink refusals count even when the link stays inside the scope. A refusal is
+policy telemetry, not proof of malicious intent. `OriginModel` describes the
+parent dispatch observation's provenance. These findings add no annotation,
+blocking or stronger enforcement. Library callers opt in with
+`interceptor.Defaults()` or `interceptor.ChildScopeDenials{}`; custom chains
+without the reporter remain unchanged. Parent reporting works with child
+interceptors disabled. Reporting follows the existing
+[result lifecycle](least-privilege.md#child-capability-and-budget-boundary-449).
 
 The same opt-in chain installs `Secrets` on the agent and dispatch children. It
 blocks supported secret and payment-card shapes at every origin, including

@@ -534,11 +534,11 @@ func TestDispatchDenialIsolation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	out1.ChildScopeDenials[0].Requests = 999
 	out2, err := d.Invoke(t.Context(), raw)
 	if err != nil {
 		t.Fatal(err)
 	}
+	out1.ChildScopeDenials[0].Requests = 999
 	if out2.ChildScopeDenials[0].Requests != 1 {
 		t.Fatal(out2.ChildScopeDenials)
 	}

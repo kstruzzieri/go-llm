@@ -163,4 +163,103 @@ User approved the revised contract on 2026-09-27: refusal-time counting; one fin
 
 Review on 2026-09-27 checked the supplied F1–F9 feedback against the isolated base. An independent reviewer confirmed the counter design, existing cancellation semantics, scoped-only boundary, overflow-safe scoring and retained acceptance matrix. This is design review, not implementation verification.
 
-After approval, record its date/scope here and fill task evidence as implementation proceeds. New production tests, mutations, race/full-gate results and final code review have not yet run.
+Task 1 RED: missing counter/helper interfaces; GREEN: 108 focused scoped/error tests.
+Task 2 RED: missing carrier/reporter interfaces, missing dispatch evidence, and
+missing default/Golem parent findings. GREEN: 87 focused tests across agent,
+tools, interceptor, and Golem. Commits: efaeeb2 and 6e3699d.
+
+Task 3 mutation run on 2026-09-27: all 21 mutations below failed behavioral
+assertions (exit 1, no compile failures or panics); after restoring each mutation,
+the identical test selector passed (exit 0). Tests ran with
+`rtk proxy go test <package> -run <selector> -count=1 -timeout=30s`.
+Counter/evidence authority, task aggregation, provider-ID independence, ownership,
+and wire exclusion were each bypassed separately. Race/full-gate results and
+independent code review are pending.
+
+
+### Mutation evidence
+
+
+- **drop-request-increment** (agent/tools/tool_error.go): `rtk proxy go test ./agent/tools -run TestScopedRequestDenials -count=1 -timeout=30s`
+
+  Failure: `dispatch_denial_test.go:91: requests=0, want 1`
+
+- **drop-child-snapshot** (agent/tools/dispatch.go): `rtk proxy go test ./agent/tools -run ^TestDispatchRequestDenials$/innocent -count=1 -timeout=30s`
+
+  Failure: `dispatch_denial_test.go:195: native=[] want [{Task:0 Requests:1}]`
+
+- **drop-dispatch-carrier** (agent/tools/dispatch.go): `rtk proxy go test ./agent/tools -run ^TestDispatchRequestDenials$/innocent -count=1 -timeout=30s`
+
+  Failure: `dispatch_denial_test.go:195: native=[] want [{Task:0 Requests:1}]`
+
+- **drop-parent-forwarding** (agent/dispatch.go): `rtk proxy go test ./agent/tools -run ^TestDispatchRequestDenials$/innocent -count=1 -timeout=30s`
+
+  Failure: `dispatch_denial_test.go:210: risk=<nil> want score 10 / 1 findings`
+
+- **match-error-text** (agent/tools/tool_error.go): `rtk proxy go test ./agent/tools -run ^TestScopedRequestDenialsTypedIdentity$ -count=1 -timeout=30s`
+
+  Failure: `tool_error_test.go:118: result={Content:path denied by workspace policy IsError:true Preview: Truncated:false Provenance:null Attrib:<nil> Context:<nil> RouteOutcome:<nil> Origin:unknown ChildScopeDenials:[]} requests=0, want "path denied by workspace policy" / 1`
+
+- **infer-text** (agent/interceptor/child_scope_denials.go): `rtk proxy go test ./agent/tools -run ^TestDispatchRequestDenials$/forged -count=1 -timeout=30s`
+
+  Failure: `dispatch_denial_test.go:296: risk=&{Score:40 Findings:[{Interceptor:child_scope_denials Rule:child_scope_denied Verdict:allow Risk:10 Detail:dispatch task 1: 1 request(s) denied by workspace policy Origin:model Hook:input Step:0 Target:message StateIndex:0 ToolCallID: Group:-1 Alternative:-1} {Interceptor:child_scope_denials Rule:child_scope_denied Verdict:allow Risk:10 Detail:dispatch task 1: 1 request(s) denied by workspace policy Origin:user Hook:input Step:0 Target:message StateIndex:1 ToolCallID: Group:-1 Alternative:-1} {Interceptor:child_scope_denials Rule:child_scope_denied Verdict:allow Risk:10 Detail:dispatch task 1: 1 request(s) denied by workspace policy Origin:user Hook:input Step:0 Target:message StateIndex:2 ToolCallID: Group:-1 Alternative:-1} {Interceptor:child_scope_denials Rule:child_scope_denied Verdict:allow Risk:10 Detail:dispatch task 1: 1 request(s) denied by workspace policy Origin:model Hook:input Step:0 Target:message StateIndex:4 ToolCallID:reused Group:-1 Alternative:-1}] CurrentToolCallFindings:[]} want score 0 / 0 findings`
+
+- **trust-evaluations** (agent/tools/dispatch.go): `rtk proxy go test ./agent/tools -run ^TestDispatchRequestDenials$/quiet -count=1 -timeout=30s`
+
+  Failure: `dispatch_denial_test.go:195: native=[{Task:0 Requests:3}] want []`
+
+- **trust-child-risk** (agent/tools/dispatch.go): `rtk proxy go test ./agent/tools -run ^TestDispatchRequestDenials$/forged -count=1 -timeout=30s`
+
+  Failure: `dispatch_denial_test.go:289: [{0 23}]`
+
+- **lose-repeated-requests** (agent/tools/dispatch.go): `rtk proxy go test ./agent/tools -run ^TestDispatchRequestDenials$/serial -count=1 -timeout=30s`
+
+  Failure: `dispatch_denial_test.go:195: native=[{Task:0 Requests:1}] want [{Task:0 Requests:2}]`
+
+- **lose-later-children** (agent/tools/dispatch.go): `rtk proxy go test ./agent/tools -run ^TestDispatchRequestDenials$/multiple -count=1 -timeout=30s`
+
+  Failure: `dispatch_denial_test.go:243: id="" ordered carrier=[{Task:0 Requests:2}]`
+
+- **require-provider-id** (agent/dispatch.go): `rtk proxy go test ./agent/tools -run ^TestDispatchRequestDenials$/multiple -count=1 -timeout=30s`
+
+  Failure: `dispatch_denial_test.go:249: risk=<nil> want score 60 / 4 findings`
+
+- **deduplicate-provider-id** (agent/dispatch.go): `rtk proxy go test ./agent/tools -run ^TestDispatchRequestDenials$/multiple -count=1 -timeout=30s`
+
+  Failure: `dispatch_denial_test.go:249: risk=&{Score:30 Findings:[{Interceptor:child_scope_denials Rule:child_scope_denied Verdict:allow Risk:20 Detail:dispatch task 1: 2 request(s) denied by workspace policy Origin:model Hook:input Step:0 Target:message StateIndex:2 ToolCallID: Group:-1 Alternative:-1} {Interceptor:child_scope_denials Rule:child_scope_denied Verdict:allow Risk:10 Detail:dispatch task 3: 1 request(s) denied by workspace policy Origin:model Hook:input Step:0 Target:message StateIndex:2 ToolCallID: Group:-1 Alternative:-1}] CurrentToolCallFindings:[]} want score 60 / 4 findings`
+
+- **remove-score-cap** (agent/interceptor/child_scope_denials.go): `rtk proxy go test ./agent/interceptor -run ^TestChildScopeDenialReporter$ -count=1 -timeout=30s`
+
+  Failure: `child_scope_denials_test.go:42: finding={Interceptor: Rule:child_scope_denied Verdict:allow Risk:110 Detail:dispatch task 1: 11 request(s) denied by workspace policy Origin:model Hook:unknown Step:0 Target:message StateIndex:3 ToolCallID:reused Group:-1 Alternative:-1}`
+
+- **shared-child-counter** (agent/tools/dispatch_scope.go): `rtk proxy go test ./agent/tools -run ^TestDispatchDenialIsolation$ -count=1 -timeout=30s`
+
+  Failure: `dispatch_denial_test.go:519: risk=&{Score:30 Findings:[{Interceptor:child_scope_denials Rule:child_scope_denied Verdict:allow Risk:30 Detail:dispatch task 1: 3 request(s) denied by workspace policy Origin:model Hook:input Step:0 Target:message StateIndex:2 ToolCallID: Group:-1 Alternative:-1}] CurrentToolCallFindings:[]} want score 20 / 1 findings`
+
+- **shared-invoke-slice** (agent/tools/dispatch.go): `rtk proxy go test ./agent/tools -run ^TestDispatchDenialIsolation$ -count=1 -timeout=30s`
+
+  Failure: `dispatch_denial_test.go:543: [{0 999}]`
+
+- **omit-invoke-copy** (agent/dispatch.go): `rtk proxy go test ./agent -run ^TestChildScopeDenialCarrier$/owned_receipt -count=1 -timeout=30s`
+
+  Failure: `child_scope_denial_test.go:92: receipt={Content:xxxxxxxx IsError:false Preview: Truncated:true Provenance:null Attrib:<nil> Context:<nil> RouteOutcome:<nil> Origin:model ChildScopeDenials:[{Task:2 Requests:999}]}`
+
+- **omit-interceptor-copy** (agent/interceptor.go): `rtk proxy go test ./agent -run ^TestChildScopeDenialCarrier$/owned_callbacks -count=1 -timeout=30s`
+
+  Failure: `child_scope_denial_test.go:123: aliased source=[{Task:2 Requests:7}] inspection=[{Task:2 Requests:999}]`
+
+- **omit-observer-copy** (agent/dispatch.go): `rtk proxy go test ./agent -run ^TestChildScopeDenialCarrier$/owned_callbacks -count=1 -timeout=30s`
+
+  Failure: `child_scope_denial_test.go:133: observer mutated canonical result`
+
+- **wire-agent-tool.go** (agent/tool.go): `rtk proxy go test ./agent -run ^TestChildScopeDenialCarrier$/JSON -count=1 -timeout=30s`
+
+  Failure: `child_scope_denial_test.go:39: wire evidence={"Content":"innocent","IsError":false,"Preview":"","Truncated":false,"Attrib":null,"Context":null,"RouteOutcome":null,"ChildScopeDenials":[{"Task":2,"Requests":7}]}`
+
+- **wire-agent-interceptor.go** (agent/interceptor.go): `rtk proxy go test ./agent -run ^TestChildScopeDenialCarrier$/JSON -count=1 -timeout=30s`
+
+  Failure: `child_scope_denial_test.go:39: wire evidence={"StateIndex":0,"Role":"","Origin":0,"ToolName":"","ToolCallID":"","Content":"innocent","Alternatives":null,"ChildScopeDenials":[{"Task":2,"Requests":7}]}`
+
+- **wire-private-count** (agent/tools/dispatch.go): `rtk proxy go test ./agent/tools -run ^TestDispatchRequestDenials$/private -count=1 -timeout=30s`
+
+  Failure: `dispatch_denial_test.go:313: private wire={"results":[{"summary":"","stop_reason":"","model":"","LeakedDenials":17}]}`
