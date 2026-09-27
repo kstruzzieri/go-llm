@@ -15,6 +15,21 @@ fi
 grep -Fxq 'CMD ["./scripts/ci-local", "--mode", "pre-push"]' "$repo_root/Dockerfile.ci"
 grep -Fxq '    command: ["./scripts/ci-local", "--mode", "pre-push"]' "$repo_root/docker-compose.ci.yml"
 
+# The compatibility lane must run setup-go's compiler (without GOTOOLCHAIN=local
+# the toolchain directive silently swaps in the newer Go) and test the oldest Go
+# the module accepts: the minor of go.mod's `go` directive.
+if ! grep -Fxq '      GOTOOLCHAIN: local' "$repo_root/.github/workflows/ci.yml"; then
+  printf 'GitHub CI compatibility lane is missing GOTOOLCHAIN: local\n' >&2
+  exit 1
+fi
+floor_minor="$(sed -n 's/^go 1\.\([0-9][0-9]*\)\(\.[0-9][0-9]*\)\{0,1\}$/\1/p' "$repo_root/go.mod")"
+compat_minor="$(sed -n "s/^          go-version: '1\.\([0-9][0-9]*\)\.x'\$/\1/p" "$repo_root/.github/workflows/ci.yml")"
+if [ -z "$floor_minor" ] || [ "$compat_minor" != "$floor_minor" ]; then
+  printf 'compatibility Go lane 1.%s.x must match the go.mod go directive 1.%s\n' \
+    "$compat_minor" "$floor_minor" >&2
+  exit 1
+fi
+
 tmp="$(cd "$(mktemp -d)" && pwd -P)"
 trap 'rm -rf "$tmp"' EXIT
 
@@ -372,7 +387,7 @@ for docker_status in 0 35; do
   ci_status=$?
   set -e
   assert_status "hook-$docker_status" "$docker_status"
-  printf '%s\n' 'compose -f docker-compose.ci.yml run --rm ci ./scripts/ci-local --mode full' >"$tmp/expected-hook"
+  printf '%s\n' 'compose -f docker-compose.ci.yml run --build --rm ci ./scripts/ci-local --mode full' >"$tmp/expected-hook"
   diff -u "$tmp/expected-hook" "$tmp/hook-$docker_status.log"
 done
 
