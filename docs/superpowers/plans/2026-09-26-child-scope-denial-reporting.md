@@ -155,7 +155,7 @@ Test actual encoding/json Marshal/Unmarshal of ToolResult and InspectedMessage/I
 - [x] Run `rtk docker compose -p go-llm-555 -f docker-compose.ci.yml run --build --rm ci ./scripts/ci-local --mode full`. Preserve the current Go 1.27 security/lint/race/smoke gates. Coordinate a shared hook-image rebuild if another branch's Dockerfile differs; do not change shared infrastructure.
 - [x] Complete independent whole-diff review using the applicable review skill, fix verified findings and record revision/evidence.
 - [x] Fetch develop before publication. If #501 lands first, incorporate it and rerun affected checks, resolving only narrow reporting-document overlaps.
-- [ ] Review the final diff; explicitly add selected ticket files and force-add only this approved plan in the ignored docs/superpowers directory. Never use broad git add -A or force-add the directory. Commit, push through the normal hook and prepare/attach a PR to develop with contract, RED/GREEN, mutation, race and full-gate evidence. Do not merge, tag or release.
+- [x] Review the final diff; explicitly add selected ticket files and force-add only this approved plan in the ignored docs/superpowers directory. Never use broad git add -A or force-add the directory. Commit, push through the normal hook and prepare/attach a PR to develop with contract, RED/GREEN, mutation, race and full-gate evidence. Do not merge, tag or release.
 
 ## Approval and execution evidence
 
@@ -193,8 +193,8 @@ expectation in `TestHardeningContracts`; updating its expected list to include
 the seventh interceptor produced a passing focused check and the final gates
 above. No enforcement or lifecycle change was needed.
 
-Publication through the normal pre-push hook and a PR to develop is the remaining
-delivery step; no merge, tag or release is authorized.
+Published through the normal pre-push hook as PR #599 to develop; no merge, tag
+or release is authorized.
 
 
 ### Mutation evidence

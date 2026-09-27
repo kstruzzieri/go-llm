@@ -1,5 +1,6 @@
 // Package interceptor provides the default interceptors for the agent
-// pipeline: four detectors (#436/#437) and two guards (#439).
+// pipeline: four detectors (#436/#437), two guards (#439) and one reporter
+// (#555).
 //
 // Detectors: zero-width characters (raw and JSON-escaped), encoded
 // instructions (base64 in all four stdlib forms, hex, line-folded runs, one
@@ -36,4 +37,10 @@
 // finding so an approver can render a badge on the prompt. Both are finite
 // recognizers over literal words: nothing here evaluates a shell, resolves
 // an executable, or touches the filesystem or network.
+//
+// ChildScopeDenials reports refused requests from scoped dispatch children
+// in the parent's RiskReport. It reads only the native ChildScopeDenials
+// metadata that installed Go tools such as Dispatch attach to a tool
+// observation, never text, and emits one informational finding per entry
+// without tagging or blocking.
 package interceptor

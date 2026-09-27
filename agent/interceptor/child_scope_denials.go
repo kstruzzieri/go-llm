@@ -7,9 +7,14 @@ import (
 	"github.com/kstruzzieri/go-llm/agent"
 )
 
-// ChildScopeDenialRisk is the score per refused request, capped at ten requests
-// per child. A refusal is policy telemetry, not proof of malicious intent.
+// ChildScopeDenialRisk is the score per refused request, capped at
+// childScopeDenialMaxRequests per child. A refusal is policy telemetry, not
+// proof of malicious intent.
 const ChildScopeDenialRisk = 10
+
+// childScopeDenialMaxRequests caps the scored count before multiplication so
+// an int64 count cannot overflow; the detail still shows the full count.
+const childScopeDenialMaxRequests = 10
 
 // ChildScopeDenials reports native scoped-child refusals at parent ingress.
 // It does not infer evidence from content or change filesystem enforcement.
@@ -28,7 +33,7 @@ func (ChildScopeDenials) InspectInput(_ context.Context, in agent.InputInspectio
 			}
 			t := target{kind: agent.TargetMessage, origin: m.Origin, stateIndex: m.StateIndex, group: -1, alt: -1, toolCallID: m.ToolCallID}
 			findings = append(findings, t.finding("child_scope_denied", agent.VerdictAllow,
-				ChildScopeDenialRisk*int(min(d.Requests, 10)),
+				ChildScopeDenialRisk*int(min(d.Requests, childScopeDenialMaxRequests)),
 				fmt.Sprintf("dispatch task %d: %d request(s) denied by workspace policy", d.Task+1, d.Requests)))
 		}
 	}
