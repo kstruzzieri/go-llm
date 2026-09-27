@@ -40,7 +40,7 @@ Package-by-package map: [docs/library.md#packages](docs/library.md#packages).
 
 ## Requirements
 
-- Go 1.25+
+- Go 1.27+
 - A local model backend (choose one or run both side by side):
   - **llama.cpp** (recommended) — `llama-server` exposing its OpenAI-compatible API
   - **Ollama** — running locally (default: `http://localhost:11434`)

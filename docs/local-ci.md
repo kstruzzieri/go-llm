@@ -179,14 +179,15 @@ by setup-go. `1.N.x` is a setup-go version query, not a concrete toolchain name.
 The current job retains the exact required status name `Lint & Test`; sandbox
 jobs and release tooling continue to use the toolchain declared in `go.mod`.
 
-The compatibility lane follows the [Go support
-window](https://go.dev/doc/devel/release#policy): each major release is supported
-until two newer major releases exist, so the lane runs one minor below the
-`toolchain` line. `scripts/test-ci-local` fails when the two drift apart or when
-`GOTOOLCHAIN: local` is removed, so advance the lane in the same change that
-bumps `toolchain`. The check name carries no version, so branch protection keeps
-requiring it across bumps. This coverage does not change the module's `go`
-language floor, which no CI lane builds with.
+The compatibility lane tests the oldest Go the module accepts: the minor of the
+`go` directive in `go.mod`. While that matches the `toolchain` line it only adds
+the latest patch release; once `toolchain` moves to a newer minor it is the only
+lane that builds with the floor. `scripts/test-ci-local` fails when the lane and
+the `go` directive drift apart or when `GOTOOLCHAIN: local` is removed, so move
+the lane in the same change that moves the floor. Keep the floor on a release
+inside the [Go support window](https://go.dev/doc/devel/release#policy) (each
+major release is supported until two newer major releases exist). The check name
+carries no version, so branch protection keeps requiring it across bumps.
 A cross-version contract or golden-vector failure is a toolchain dependency to
 investigate before release; do not hide it by upgrading the compatibility run.
 
@@ -220,4 +221,4 @@ filesystem still skip in the container; the native Darwin job covers those.
 
 ## Notes
 
-The CI image is based on `golang:1.27-alpine`, matching the `toolchain` line in `go.mod` (the module's minimum language version stays `go 1.25.0`). It installs `build-base` and sets `CGO_ENABLED=1` because Go's race detector requires cgo support even though the module itself avoids cgo-only dependencies.
+The CI image is based on `golang:1.27-alpine`, matching the `toolchain` line and the `go` directive in `go.mod`. It installs `build-base` and sets `CGO_ENABLED=1` because Go's race detector requires cgo support even though the module itself avoids cgo-only dependencies.

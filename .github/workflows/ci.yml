@@ -91,8 +91,8 @@ jobs:
           version: 2.17.0
           args: check
 
-  # Oldest supported Go: one minor below go.mod's toolchain line, pinned by
-  # scripts/test-ci-local so a toolchain bump cannot leave this lane behind.
+  # Oldest Go this module accepts: the go.mod `go` directive's minor, pinned by
+  # scripts/test-ci-local so raising the floor cannot leave this lane behind.
   # A separate job preserves the required "Lint & Test" status and runs only
   # tests; the versionless name lets branch protection require it across bumps.
   compatibility:
@@ -106,7 +106,7 @@ jobs:
 
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
-          go-version: '1.26.x'
+          go-version: '1.27.x'
 
       - name: Test
         run: |
