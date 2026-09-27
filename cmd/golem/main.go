@@ -135,7 +135,7 @@ func parseFlags(args []string) (flags, error) {
 	fs.BoolVar(&f.interceptors, "interceptors", false, "enable the interceptor pipeline (#436/#437/#439): origin-sensitive injection detectors, all-origin supported secret/payment-card blocking across completed turns, argument guards, and command egress labels on the agent and dispatch children; streaming output is not intercepted; risk appears at interactive tool-call and plan-lock prompts and successful REPL/-p stderr footers, but not verifier approval prompts; default off")
 	fs.Var(&f.mcpStdio, "mcp-stdio", "attach an MCP server over stdio: \"[alias=]command args...\" (repeatable; use `env KEY=val cmd` for env vars)")
 	fs.Var(&f.mcpHTTP, "mcp-http", "attach an MCP server over streamable HTTP: \"[alias=]https://endpoint\" (repeatable)")
-	fs.Var(&f.allowDestinations, "allow-destination", "admit a remote model destination without prompting: \"<provider>/<canonical base URL>\" (repeatable; the deprecated \"<provider>=<base URL>\" form is still accepted; required for remote destinations in noninteractive runs)")
+	fs.Var(&f.allowDestinations, "allow-destination", "admit a remote model destination without prompting: \"<provider>/<canonical base URL>\" (repeatable; required for remote destinations in noninteractive runs)")
 	fs.BoolVar(&f.noRag, "no-rag", false, "disable the retrieve tool entirely (ignore any auto index)")
 	fs.BoolVar(&f.noAutoIndex, "no-auto-index", false, "disable startup auto-index refresh, which otherwise skips detected secret/payment-card files by default; existing auto indexes may still be used")
 	fs.BoolVar(&f.progressive, "progressive", false, "generate and retrieve opt-in L0/L1 progressive source summaries; enable mixed context assembly")

@@ -353,25 +353,44 @@ func TestAdmissionRejectsMalformedAllowFlag(t *testing.T) {
 	}
 }
 
-// -allow-destination accepts the canonical "<provider>/<base URL>" grant and
-// the deprecated "<provider>=<base URL>" spelling go-llm-mcp historically
-// used; both admit the same canonical destination identity.
-func TestAdmissionAllowFlagBothForms(t *testing.T) {
+// -allow-destination admits canonical grants and rejects legacy spellings
+// without echoing raw values or credentials.
+func TestAdmissionAllowFlagCanonicalOnly(t *testing.T) {
 	tests := []struct {
-		name string
-		flag string
+		name    string
+		flag    string
+		wantErr bool
 	}{
 		{name: "canonical", flag: "opencode/HTTPS://opencode.ai:443/zen/go/"},
-		// The legacy marker is the historic go-llm-mcp grammar exactly: a
-		// lowercase scheme directly after "=". Canonicalization stays
-		// case-insensitive past the marker (the canonical row above admits an
-		// uppercase scheme), but the marker itself is not.
-		{name: "legacy equals", flag: "opencode=https://opencode.ai:443/zen/go/"},
+		{name: "legacy equals", flag: "opencode=https://opencode.ai:443/zen/go/", wantErr: true},
+		{name: "legacy http", flag: "opencode=http://opencode.ai/zen/go", wantErr: true},
+		{name: "legacy userinfo", flag: "opencode=https://user:SECRET@opencode.ai/zen/go", wantErr: true},
+		{name: "legacy query", flag: "opencode=https://opencode.ai/zen/go?key=SECRET", wantErr: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			p := &fakePrompt{answer: false} // must not be consulted
-			adm, _ := newTestAdmission(t, admEdges(t), []string{tt.flag}, false, p)
+			adm, err := newDestinationAdmission(destinationAdmissionConfig{
+				Gate:       provider.NewDestinationGate(),
+				Edges:      admEdges(t),
+				AllowFlags: []string{tt.flag},
+				PromptYN:   p.ask,
+			})
+			if tt.wantErr {
+				if !errors.Is(err, provider.ErrDestinationInvalid) || !strings.Contains(err.Error(), `expected "<provider>/<base URL>"`) {
+					t.Fatalf("newDestinationAdmission() error = %v, want canonical-grammar hint", err)
+				}
+				if !strings.Contains(err.Error(), "-allow-destination") {
+					t.Errorf("newDestinationAdmission() error does not name the flag: %v", err)
+				}
+				if strings.Contains(err.Error(), "SECRET") || strings.Contains(err.Error(), tt.flag) {
+					t.Errorf("newDestinationAdmission() echoes rejected value: %v", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
 			if err := adm.ensure(context.Background()); err != nil {
 				t.Fatalf("allowlisted noninteractive admission: %v", err)
 			}
