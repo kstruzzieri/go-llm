@@ -2,10 +2,12 @@ package feedback
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -62,6 +64,26 @@ func (s *blockingRecomputeStore) RecomputeAggregates(ctx context.Context, _ floa
 	select {
 	case <-s.release:
 		return s.err
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+type blockingRetrievalStore struct {
+	*SQLiteSignalStore
+	started chan struct{}
+	release chan struct{}
+	err     error
+}
+
+func (s *blockingRetrievalStore) InsertRetrievalWithCounts(ctx context.Context, id, query string, chunkKeys []string, createdAt time.Time) error {
+	close(s.started)
+	select {
+	case <-s.release:
+		if s.err != nil {
+			return s.err
+		}
+		return s.SQLiteSignalStore.InsertRetrievalWithCounts(ctx, id, query, chunkKeys, createdAt)
 	case <-ctx.Done():
 		return ctx.Err()
 	}
@@ -200,6 +222,277 @@ func TestRegisterRetrievalUniqueIDs(t *testing.T) {
 	}
 }
 
+func TestRegisterRetrievalRejectsAfterClose(t *testing.T) {
+	for _, tt := range []struct {
+		name     string
+		legacy   bool
+		explicit bool
+	}{
+		{name: "RegisterRetrieval"},
+		{name: "RegisterRetrievalAt", explicit: true},
+		{name: "legacy/RegisterRetrieval", legacy: true},
+		{name: "legacy/RegisterRetrievalAt", legacy: true, explicit: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			base := newTestStore(t)
+			var store SignalStore = base
+			if tt.legacy {
+				store = legacySignalStore{SignalStore: base}
+			}
+			c := NewCollector(store, CollectorConfig{})
+			c.Close()
+
+			var id string
+			var err error
+			if tt.explicit {
+				id, err = c.RegisterRetrievalAt(ctx, "q", []string{"chunk"}, time.Now())
+			} else {
+				id, err = c.RegisterRetrieval(ctx, "q", []string{"chunk"})
+			}
+			if id != "" || err == nil || !strings.Contains(err.Error(), "collector is closed") {
+				t.Errorf("registration after Close = (%q, %v), want empty ID and closed collector error", id, err)
+			}
+			var retrievals, aggregates int
+			if err := base.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM feedback_retrievals`).Scan(&retrievals); err != nil {
+				t.Fatal(err)
+			}
+			if err := base.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM feedback_aggregates`).Scan(&aggregates); err != nil {
+				t.Fatal(err)
+			}
+			if retrievals != 0 || aggregates != 0 || len(c.windows) != 0 {
+				t.Errorf("registration after Close left (%d retrievals, %d aggregates, %d windows), want zero", retrievals, aggregates, len(c.windows))
+			}
+		})
+	}
+}
+
+func TestCollectorCloseWaitsForRegistration(t *testing.T) {
+	for _, tt := range []struct {
+		name   string
+		err    error
+		cancel bool
+	}{
+		{name: "success"},
+		{name: "store error", err: errors.New("registration failed")},
+		{name: "canceled", err: context.Canceled, cancel: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				store := &blockingRetrievalStore{
+					SQLiteSignalStore: newTestStore(t),
+					started:           make(chan struct{}),
+					release:           make(chan struct{}),
+					err:               tt.err,
+				}
+				c := NewCollector(store, CollectorConfig{})
+				ctx, cancel := context.WithCancel(context.Background())
+				defer cancel()
+				var id string
+				var err error
+				go func() {
+					id, err = c.RegisterRetrievalAt(ctx, "q", []string{"chunk"}, time.Now())
+				}()
+				<-store.started
+				closeDone := make(chan struct{})
+				var windowsAtClose int
+				go func() {
+					c.Close()
+					// Close must finish registration and stop the sweeper before
+					// this read; another lock would mask an early return.
+					windowsAtClose = len(c.windows)
+					close(closeDone)
+				}()
+				// Wait until Close has either returned or blocked on the admitted
+				// registration. No elapsed-time assumption decides this assertion.
+				synctest.Wait()
+				select {
+				case <-c.done:
+				default:
+					t.Error("Close did not close admission while registration was blocked")
+				}
+				select {
+				case <-closeDone:
+					t.Error("Close returned before registration finished persistence")
+				default:
+				}
+
+				if tt.cancel {
+					cancel()
+				} else {
+					close(store.release)
+				}
+				synctest.Wait()
+				select {
+				case <-closeDone:
+				default:
+					t.Fatal("Close did not return after registration completed")
+				}
+				if !errors.Is(err, tt.err) {
+					t.Fatalf("RegisterRetrievalAt error = %v, want %v", err, tt.err)
+				}
+				if tt.err != nil {
+					if id != "" || len(c.windows) != 0 {
+						t.Errorf("failed registration = (%q, %d windows), want empty ID and no windows", id, len(c.windows))
+					}
+				} else if id == "" || c.windows[id] == nil || windowsAtClose != 1 {
+					t.Errorf("successful registration = (%q, %v, %d windows at Close), want an installed window before Close returns", id, c.windows[id], windowsAtClose)
+				}
+				c.Close()
+			})
+		})
+	}
+}
+
+func TestCollectorCloseFinalSweepCoversAdmittedRegistration(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		store := &blockingRetrievalStore{
+			SQLiteSignalStore: newTestStore(t),
+			started:           make(chan struct{}),
+			release:           make(chan struct{}),
+		}
+		c := NewCollector(store, CollectorConfig{})
+		var id string
+		var err error
+		go func() {
+			id, err = c.RegisterRetrievalAt(context.Background(), "q", []string{"chunk"}, time.Now().Add(-maxWindowAge))
+		}()
+		<-store.started
+		closeDone := make(chan struct{})
+		go func() {
+			c.Close()
+			close(closeDone)
+		}()
+		// Let every shutdown step that does not depend on the admitted
+		// registration run before the registration installs its window.
+		synctest.Wait()
+		close(store.release)
+		synctest.Wait()
+		select {
+		case <-closeDone:
+		default:
+			t.Fatal("Close did not return after registration completed")
+		}
+		if err != nil {
+			t.Fatalf("RegisterRetrievalAt: %v", err)
+		}
+		var expired int
+		if err := store.db.QueryRowContext(context.Background(),
+			`SELECT COUNT(*) FROM feedback_signals WHERE retrieval_id = ? AND signal_kind = ?`, id, SignalWindowExpired,
+		).Scan(&expired); err != nil {
+			t.Fatal(err)
+		}
+		if expired != 1 || c.windows[id] != nil {
+			t.Errorf("admitted expired registration after Close = (%d expiry rows, window %v), want 1 row and no window", expired, c.windows[id])
+		}
+	})
+}
+
+func TestBackgroundExplicitRecordsRejectAfterClose(t *testing.T) {
+	for _, tt := range []struct {
+		name  string
+		batch bool
+	}{
+		{name: "RecordAt"},
+		{name: "RecordBatchAt", batch: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			store := newTestStore(t)
+			c := NewCollector(store, CollectorConfig{})
+			id, err := c.RegisterRetrieval(ctx, "q", []string{"chunk"})
+			if err != nil {
+				t.Fatalf("RegisterRetrieval: %v", err)
+			}
+			c.Close()
+
+			signal := Signal{Kind: SignalCodeKept, RetrievalID: id}
+			var committed bool
+			if tt.batch {
+				var signals []Signal
+				signals, err = c.RecordBatchAt(ctx, []Signal{signal}, time.Now())
+				committed = len(signals) > 0
+			} else {
+				committed, err = c.RecordAt(ctx, signal, time.Now())
+			}
+			if committed || err == nil || !strings.Contains(err.Error(), "collector is closed") {
+				t.Errorf("%s after Close = (%v, %v), want no commit and closed collector error", tt.name, committed, err)
+			}
+			if count, err := store.SignalCount(ctx); err != nil || count != 0 {
+				t.Errorf("signals after rejected %s = %d, %v; want 0, nil", tt.name, count, err)
+			}
+		})
+	}
+}
+
+func TestCollectorCloseWaitsForExplicitRecord(t *testing.T) {
+	for _, tt := range []struct {
+		name  string
+		batch bool
+	}{
+		{name: "RecordAt"},
+		{name: "RecordBatchAt", batch: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				ctx := context.Background()
+				store := &closeBoundaryStore{
+					SQLiteSignalStore: newTestStore(t),
+					committed:         make(chan struct{}),
+					releaseInsert:     make(chan struct{}),
+					recomputeStarted:  make(chan struct{}),
+					releaseRecompute:  make(chan struct{}),
+				}
+				close(store.releaseInsert)
+				c := NewCollector(store, CollectorConfig{})
+				keys := make([]string, recomputeInterval)
+				for i := range keys {
+					keys[i] = fmt.Sprintf("chunk-%03d", i)
+				}
+				id, err := c.RegisterRetrieval(ctx, "q", keys)
+				if err != nil {
+					t.Fatalf("RegisterRetrieval: %v", err)
+				}
+				signal := Signal{Kind: SignalCodeKept, RetrievalID: id}
+				var committed bool
+				go func() {
+					if tt.batch {
+						var signals []Signal
+						signals, err = c.RecordBatchAt(ctx, []Signal{signal}, time.Now())
+						committed = len(signals) == 1
+					} else {
+						committed, err = c.RecordAt(ctx, signal, time.Now())
+					}
+				}()
+				// Block in the synchronous threshold recompute, after the batch
+				// commits and c.mu is released, so no lock hides an early Close.
+				<-store.recomputeStarted
+				closeDone := make(chan struct{})
+				go func() {
+					c.Close()
+					close(closeDone)
+				}()
+				synctest.Wait()
+				select {
+				case <-closeDone:
+					t.Errorf("Close returned before %s finished", tt.name)
+				default:
+				}
+				close(store.releaseRecompute)
+				synctest.Wait()
+				select {
+				case <-closeDone:
+				default:
+					t.Fatalf("Close did not return after %s completed", tt.name)
+				}
+				if !committed || err != nil {
+					t.Errorf("%s admitted before Close = (%v, %v), want committed", tt.name, committed, err)
+				}
+			})
+		})
+	}
+}
+
 func TestRecordAgainstOpenWindow(t *testing.T) {
 	c := newTestCollector(t, CollectorConfig{})
 	ctx := context.Background()
@@ -268,6 +561,9 @@ func TestManualCollectorDoesNotSweepAndCloseWritesNoExpiry(t *testing.T) {
 		t.Fatalf("RegisterRetrievalAt: %v", err)
 	}
 	c.Close()
+	if _, err := c.RegisterRetrievalAt(ctx, "after close", []string{"chunk-2"}, presentedAt); err != nil {
+		t.Fatalf("RegisterRetrievalAt after manual Close: %v", err)
+	}
 
 	count, err := store.SignalCount(ctx)
 	if err != nil {
