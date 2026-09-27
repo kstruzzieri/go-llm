@@ -20,8 +20,15 @@ func TestParseDestinationFlag(t *testing.T) {
 		{name: "canonical http normalizes", in: "backup/http://EXAMPLE.com:80/root/", provider: "backup", baseURL: "http://example.com/root"},
 		{name: "legacy https", in: "openai=https://api.openai.com", wantErr: `expected "<provider>/<base URL>"`},
 		{name: "legacy http", in: "backup=http://EXAMPLE.com:80/root/", wantErr: `expected "<provider>/<base URL>"`},
-		{name: "legacy provider keeps embedded equals", in: "team=prod=https://host/base", wantErr: `expected "<provider>/<base URL>"`},
-		{name: "legacy earliest scheme marker wins", in: "a=http://h/p=https://q", wantErr: `expected "<provider>/<base URL>"`},
+		{name: "legacy provider with embedded equals", in: "team=prod=https://host/base", wantErr: `expected "<provider>/<base URL>"`},
+		// The guard keys on the FIRST scheme marker; a later marker after a
+		// slash must not let the legacy value fall through to ParseDestination.
+		{name: "legacy with second scheme marker in path", in: "a=http://h/p=https://q", wantErr: `expected "<provider>/<base URL>"`},
+		// A bare URL (no provider) takes the same guard: without it, the
+		// scheme's colon becomes the provider name and the diagnostic
+		// misreports the grammar as a scheme error.
+		{name: "bare URL", in: "https://api.openai.com", wantErr: `expected "<provider>/<base URL>"`},
+		{name: "bare URL with userinfo", in: "https://user:secret@api.openai.com/v1", wantErr: `expected "<provider>/<base URL>"`},
 		{name: "canonical provider keeps embedded equals", in: "team=prod/https://host/base", provider: "team=prod", baseURL: "https://host/base"},
 		{name: "canonical wins over legacy marker in path", in: "p/https://host/next=https://evil.example", provider: "p", baseURL: "https://host/next=https://evil.example"},
 		{name: "no separator", in: "not-a-destination", wantErr: `expected "<provider>/<base URL>"`},
@@ -43,7 +50,7 @@ func TestParseDestinationFlag(t *testing.T) {
 					t.Errorf("ParseDestinationFlag(%q) error = %v, want ErrDestinationInvalid and %q", tt.in, err, tt.wantErr)
 				}
 				if strings.Contains(err.Error(), "secret") || (tt.in != "" && strings.Contains(err.Error(), tt.in)) {
-					t.Errorf("ParseDestinationFlag(%q) error echoes the secret: %v", tt.in, err)
+					t.Errorf("ParseDestinationFlag(%q) error echoes the rejected value: %v", tt.in, err)
 				}
 				return
 			}
