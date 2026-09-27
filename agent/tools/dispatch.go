@@ -394,7 +394,13 @@ func (d *Dispatch) Invoke(ctx context.Context, raw json.RawMessage) (agent.ToolR
 	if err != nil {
 		return agent.ToolResult{}, err
 	}
-	return agent.ToolResult{Content: string(content), IsError: failed, Truncated: truncated || cut}, nil
+	out := agent.ToolResult{Content: string(content), IsError: failed, Truncated: truncated || cut}
+	for i, result := range envelope.Results {
+		if result.deniedRequests > 0 {
+			out.ChildScopeDenials = append(out.ChildScopeDenials, agent.ChildScopeDenial{Task: i, Requests: result.deniedRequests})
+		}
+	}
+	return out, nil
 }
 
 func (d *Dispatch) runChild(ctx context.Context, task dispatchTask, child dispatchChild) (dispatchResult, error) {

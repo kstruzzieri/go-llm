@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"unicode/utf8"
 
 	"github.com/kstruzzieri/go-llm/provider"
@@ -132,6 +133,7 @@ func (o *Orchestrator) recordResult(ctx context.Context, res *Result, state *Sta
 		msg := InspectedMessage{
 			StateIndex: len(state.Messages), Role: "tool", Origin: out.Origin,
 			ToolName: call.Function.Name, ToolCallID: call.ID, Content: out.Content,
+			ChildScopeDenials: out.ChildScopeDenials,
 		}
 		if o.ctxMgr.Mixed {
 			msg.Alternatives = alternativesOf(out.Context)
@@ -164,6 +166,7 @@ func (o *Orchestrator) recordResult(ctx context.Context, res *Result, state *Sta
 		// and a deep copy would let an untrusted tool make this path
 		// arbitrarily expensive.
 		published := out
+		published.ChildScopeDenials = slices.Clone(out.ChildScopeDenials)
 		published.Provenance = bytes.Clone(rec.Provenance)
 		published.Attrib = cloneAttrib(out.Attrib)
 		published.RouteOutcome = cloneRouteOutcome(out.RouteOutcome)
@@ -325,6 +328,7 @@ func (o *Orchestrator) invokeCall(ctx context.Context, tool Tool, effect Effect,
 	if err != nil {
 		return ToolResult{IsError: true, Content: err.Error(), Origin: staticOrigin(tool)}, nil
 	}
+	out.ChildScopeDenials = slices.Clone(out.ChildScopeDenials)
 	out = capOutput(out, effect.OutputCap)
 	// #436 spec D4: an unset per-invocation origin defers to the static
 	// declaration; a set but invalid one is unknown provenance, never the

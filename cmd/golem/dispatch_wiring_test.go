@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -897,5 +898,76 @@ func TestNewDispatchTool_CompletionNoticeUsesReboundSink(t *testing.T) {
 		if strings.Count(got, want) != 1 {
 			t.Fatalf("completion notice %q count != 1 in %q", want, got)
 		}
+	}
+}
+
+func TestGolemChildScopeDenialReporting(t *testing.T) {
+	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" {
+		t.Skip("native scoped dispatch is unsupported")
+	}
+	for _, tc := range []struct {
+		name          string
+		parent, child bool
+	}{
+		{"off", false, false}, {"on", true, true}, {"parent only", true, false}, {"child only", false, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			if err := os.Mkdir(filepath.Join(root, "a"), 0700); err != nil {
+				t.Fatal(err)
+			}
+			readers, err := buildTools(root, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			call := func(id, name, args string) agent.ModelResult {
+				return agent.ModelResult{Response: provider.ChatResponse{ToolCalls: []provider.ToolCall{{ID: id, Type: "function", Function: provider.ToolCallFunction{Name: name, Arguments: json.RawMessage(args)}}}}, RouteOutcome: &provider.RouteOutcome{ActualModel: provider.ModelKey{Provider: "local", Model: "fast"}}}
+			}
+			answer := agent.ModelResult{Response: provider.ChatResponse{Content: "done"}, RouteOutcome: &provider.RouteOutcome{ActualModel: provider.ModelKey{Provider: "local", Model: "fast"}}}
+			child := &scriptCaller{responses: []agent.ModelResult{call("child", "read_file", `{"path":"../outside"}`), answer}}
+			canary := testCanaryBinding(t)
+			d, err := newDispatchTool(child, flags{dispatch: true, interceptors: tc.child}, agent.Budget{}, dispatchFanout{maxConcurrent: 1}, nil, readers, canary)
+			if err != nil {
+				t.Fatal(err)
+			}
+			parent := &scriptCaller{responses: []agent.ModelResult{call("parent", "dispatch", `{"tasks":[{"task":"inspect","scope":"a"}]}`), answer}}
+			o := newOrchestratorFactory(parent, flags{dispatch: true, interceptors: tc.parent}, nil, canary)()
+			res, err := o.Run(t.Context(), agent.Request{Goal: "inspect", Tools: []agent.Tool{d}}, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(res.ToolCalls) != 1 || !res.ToolCalls[0].Invoked || res.ToolCalls[0].IsError {
+				t.Fatalf("parent calls=%+v", res.ToolCalls)
+			}
+			found := false
+			for _, m := range res.Messages {
+				if m.Role == "tool" {
+					var envelope dispatchTestEnvelope
+					if err := json.Unmarshal([]byte(m.Content), &envelope); err != nil {
+						t.Fatal(err)
+					}
+					if len(envelope.Results) != 1 || envelope.Results[0].Summary != "done" || envelope.Results[0].RiskScore != 0 || strings.Contains(m.Content, "risk_score") {
+						t.Fatalf("child envelope=%s", m.Content)
+					}
+					found = true
+				}
+			}
+			if !found {
+				t.Fatal("missing envelope")
+			}
+			if !tc.parent {
+				if res.Risk != nil {
+					t.Fatal(res.Risk)
+				}
+				return
+			}
+			if res.Risk == nil || res.Risk.Score != 10 || len(res.Risk.Findings) != 1 {
+				t.Fatalf("parent risk=%+v", res.Risk)
+			}
+			f := res.Risk.Findings[0]
+			if f.Rule != "child_scope_denied" || f.Verdict != agent.VerdictAllow || f.Origin != agent.OriginModel || f.ToolCallID != "parent" || f.Detail != "dispatch task 1: 1 request(s) denied by workspace policy" {
+				t.Fatal(f)
+			}
+		})
 	}
 }

@@ -80,7 +80,7 @@ func TestInterceptorsFor(t *testing.T) {
 	for _, ic := range interceptorsFor(flags{interceptors: true}, testCanaryBinding(t)) {
 		names = append(names, ic.Name())
 	}
-	if want := []string{"zero_width", "encoding", "typoglycemia", "invariants", "egress", "secrets", "canary"}; !slices.Equal(names, want) {
+	if want := []string{"zero_width", "encoding", "typoglycemia", "invariants", "egress", "secrets", "child_scope_denials", "canary"}; !slices.Equal(names, want) {
 		t.Fatalf("on: chain = %v, want %v", names, want)
 	}
 }
@@ -90,7 +90,7 @@ func TestStartupNotices_Interceptors(t *testing.T) {
 		workspace:       "/w",
 		interceptorLine: interceptorsNotice(interceptorsFor(flags{interceptors: true}, testCanaryBinding(t))),
 	}), "\n")
-	if want := "workspace: /w\ninterceptors: enabled (zero_width, encoding, typoglycemia, invariants, egress, secrets, canary)"; on != want {
+	if want := "workspace: /w\ninterceptors: enabled (zero_width, encoding, typoglycemia, invariants, egress, secrets, child_scope_denials, canary)"; on != want {
 		t.Fatalf("notices with the flag = %q, want %q", on, want)
 	}
 	off := strings.Join(startupNotices(startupInfo{workspace: "/w"}), "\n")
@@ -104,7 +104,7 @@ func TestStartupNotices_Interceptors(t *testing.T) {
 // notice still says enabled. A benign mention of "system prompt" is enough to
 // exercise scoring without requiring tool calls from the test backend.
 func TestRunWiresInterceptors(t *testing.T) {
-	const want = "interceptors: enabled (zero_width, encoding, typoglycemia, invariants, egress, secrets, canary)"
+	const want = "interceptors: enabled (zero_width, encoding, typoglycemia, invariants, egress, secrets, child_scope_denials, canary)"
 	const goal = "Explain the term system prompt."
 	for _, tc := range []struct {
 		name string
