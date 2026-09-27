@@ -334,27 +334,41 @@ func TestDestinationLoopbackSpellingsAreClassifiedConservatively(t *testing.T) {
 	})
 }
 
-// D1: the repeatable CLI grant form, split at the first slash.
+// D1: the repeatable CLI grant form, split at the first slash. golem's denial
+// diagnostic tells the user to pass String() to -allow-destination, so the
+// flag parser must round-trip it too, including provider keys config accepts
+// with ":" or "=" ahead of the separator.
 func TestDestinationStringParseRoundTrip(t *testing.T) {
-	for _, raw := range []string{
-		"https://opencode.ai/zen/go",
-		"http://127.0.0.1:8090",
-		"http://[::1]:8090/v1",
-		"https://api.example.com",
-	} {
-		t.Run(raw, func(t *testing.T) {
-			want, err := NewDestination("opencode", raw)
-			if err != nil {
-				t.Fatalf("NewDestination: %v", err)
-			}
-			got, err := ParseDestination(want.String())
-			if err != nil {
-				t.Fatalf("ParseDestination(%q): %v", want.String(), err)
-			}
-			if got != want {
-				t.Errorf("round trip: %q -> %q -> %q", raw, want.String(), got.String())
-			}
-		})
+	parsers := []struct {
+		name  string
+		parse func(string) (Destination, error)
+	}{
+		{name: "ParseDestination", parse: ParseDestination},
+		{name: "ParseDestinationFlag", parse: ParseDestinationFlag},
+	}
+	for _, providerName := range []string{"opencode", "azure:east", "team=prod"} {
+		for _, raw := range []string{
+			"https://opencode.ai/zen/go",
+			"http://127.0.0.1:8090",
+			"http://[::1]:8090/v1",
+			"https://api.example.com",
+		} {
+			t.Run(providerName+" "+raw, func(t *testing.T) {
+				want, err := NewDestination(providerName, raw)
+				if err != nil {
+					t.Fatalf("NewDestination: %v", err)
+				}
+				for _, p := range parsers {
+					got, err := p.parse(want.String())
+					if err != nil {
+						t.Fatalf("%s(%q): %v", p.name, want.String(), err)
+					}
+					if got != want {
+						t.Errorf("%s round trip: %q -> %q -> %q", p.name, raw, want.String(), got.String())
+					}
+				}
+			})
+		}
 	}
 }
 

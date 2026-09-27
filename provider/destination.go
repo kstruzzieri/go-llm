@@ -136,27 +136,16 @@ func ParseDestination(s string) (Destination, error) {
 	return NewDestination(name, raw)
 }
 
-// ParseDestinationFlag reads a repeatable -allow-destination CLI value: the
-// canonical "<provider>/<base URL>" grant, or the deprecated
-// "<provider>=<base URL>" spelling go-llm-mcp historically required, kept
-// through a deprecation window and normalized to the same canonical identity.
-// The legacy delimiter is the first "=" directly preceding an http(s) scheme,
-// so provider names containing "=" keep working; a value that parses
-// canonically is never rewritten, so a URL path carrying "=https://" cannot
-// be mangled.
+// ParseDestinationFlag reads a repeatable -allow-destination CLI value in
+// the canonical "<provider>/<base URL>" form.
 func ParseDestinationFlag(s string) (Destination, error) {
-	d, err := ParseDestination(s)
-	if err == nil {
-		return d, nil
+	// A scheme before the provider separator is a bare or legacy URL.
+	// Do not let its first slash become the separator or echo the raw value.
+	if i := strings.Index(s, "://"); i >= 0 && !strings.Contains(s[:i], "/") {
+		return Destination{}, fmt.Errorf(
+			"%w: expected \"<provider>/<base URL>\"", ErrDestinationInvalid)
 	}
-	i := strings.Index(s, "=http://")
-	if j := strings.Index(s, "=https://"); i < 0 || (j >= 0 && j < i) {
-		i = j
-	}
-	if i < 0 {
-		return Destination{}, err
-	}
-	return ParseDestination(s[:i] + "/" + s[i+1:])
+	return ParseDestination(s)
 }
 
 // canonicalizeEndpoint implements DestinationSchemeVersion. Its output is a
