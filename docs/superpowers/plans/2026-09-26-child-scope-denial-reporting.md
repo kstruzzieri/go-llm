@@ -1,6 +1,6 @@
 # Child scope-denial reporting (#555): revised spec and TDD plan
 
-> **Status:** Approved by the user on 2026-09-27; implementation in progress.
+> **Status:** Approved by the user on 2026-09-27; implemented, verified and independently reviewed.
 >
 > **For agentic workers:** After approval, use superpowers:executing-plans for native implementation in this chat. Complete each test-first task before continuing; independent reviews may use subagents.
 
@@ -114,10 +114,10 @@ Test actual encoding/json Marshal/Unmarshal of ToolResult and InspectedMessage/I
 
 **Interfaces:** Produce `scopeCounters{evaluations, requests atomic.Int64}`; replace private Workspace.scopeDenials with `scope *scopeCounters`; childTools/newScopedWorkspace and prepareChildTools return/pass *scopeCounters in the existing counter position; dispatchChild.counter uses *scopeCounters. Produce toolErrorResult(error) ToolResult and private dispatchResult.deniedRequests int64. No public function signature changes or filesystem enforcement changes.
 
-- [ ] Write `TestScopedRequestDenials` with table subtests for typed/wrapped errors, unrelated same-text errors, private guard errors, real read/list/glob terminal refusals, in-scope symlinks, malformed arguments, unknown requests, missing files, denial-looking file contents, quiet search/list/glob pruning and skipped unreadable files. Assert exactly one request per refused tool Invoke, unchanged sanitized text/evaluation count and zero new requests for direct Workspace access or pure toolErrMessage formatting. Follow existing Darwin/Linux scoped test build tags; keep platform-neutral classifier cases portable.
-- [ ] Add runChild snapshot subtests to `TestScopedRequestDenials`: prepare a real scoped dispatchChild and run serial/parallel distinct native readers and repeated requests. Inspect the returned private dispatchResult directly: deniedRequests equals terminal refusals, ScopeDenials keeps its existing evaluation meaning and RiskScore stays unchanged. Unscoped guarded tools retain zero deniedRequests. Task 2 owns outer Invoke ordering and metadata tests.
-- [ ] Run `rtk go test ./agent/tools -run '^TestScopedRequestDenials$' -count=1`; record RED before adding implementation. Add the pointer-owned counter/helper/snapshot, then run GREEN and existing scoped/error/cleanup tests.
-- [ ] Review every changed error path and commit the tested ticket code only.
+- [x] Write `TestScopedRequestDenials` with table subtests for typed/wrapped errors, unrelated same-text errors, private guard errors, real read/list/glob terminal refusals, in-scope symlinks, malformed arguments, unknown requests, missing files, denial-looking file contents, quiet search/list/glob pruning and skipped unreadable files. Assert exactly one request per refused tool Invoke, unchanged sanitized text/evaluation count and zero new requests for direct Workspace access or pure toolErrMessage formatting. Follow existing Darwin/Linux scoped test build tags; keep platform-neutral classifier cases portable.
+- [x] Add runChild snapshot subtests to `TestScopedRequestDenials`: prepare a real scoped dispatchChild and run serial/parallel distinct native readers and repeated requests. Inspect the returned private dispatchResult directly: deniedRequests equals terminal refusals, ScopeDenials keeps its existing evaluation meaning and RiskScore stays unchanged. Unscoped guarded tools retain zero deniedRequests. Task 2 owns outer Invoke ordering and metadata tests.
+- [x] Run `rtk go test ./agent/tools -run '^TestScopedRequestDenials$' -count=1`; record RED before adding implementation. Add the pointer-owned counter/helper/snapshot, then run GREEN and existing scoped/error/cleanup tests.
+- [x] Review every changed error path and commit the tested ticket code only.
 
 ### Task 2: Transport owned metadata and add the opt-in reporter
 
@@ -125,20 +125,20 @@ Test actual encoding/json Marshal/Unmarshal of ToolResult and InspectedMessage/I
 
 **Interfaces:** Produce ChildScopeDenial{Task int, Requests int64}, the two json:"-" slice fields, ChildScopeDenials' four Interceptor methods and ChildScopeDenialRisk=10. Consume Task 1's snapshot; only attach positive per-task counts after a successful join/marshal.
 
-- [ ] Write `TestChildScopeDenialReporter`: counts 1, 2, 10, 11 and MaxInt64 score 10, 20, 100, 100 and 100; nonpositive counts/negative task positions yield none. Assert exact detail and Allow verdict, normalized TargetMessage/OriginModel, two children contribute two findings, and identical positions in a later inspection count again. No text/JSON inference.
-- [ ] Write `TestChildScopeDenialCarrier` with JSON encode/decode/round-trip subtests, no private envelope count, output truncation, owned tool/interceptor/observer copies and no State/history carrier. Assert mutations by an earlier callback cannot affect later callbacks or a captured output.
-- [ ] Write `TestDispatchRequestDenials` through outer Invoke and parent Run: actual denial then innocent summary scores 10; counts two/one yield 30 in two findings; >10 refusals cap per child while displaying full count. Include serial/parallel distinct native readers, mixed scoped/legacy tasks, reverse child completion order, empty/reused provider IDs, repeated dispatch calls, positive pruning counts with no requests, unrelated positive child risk, forged summaries/files/JSON/provenance and replayed history. Use enough varying refused arguments/steps to avoid the existing repeat governor terminating cap fixtures early.
-- [ ] Write `TestChildScopeDenialLifecycle`: child pre/post-refusal cancellation, Block/Abort/interceptor/observer failures, discarded child parallel results, dispatch own deadline, parent deadline/cancel, hard envelope errors, parent validation/discard and later rejection. Pin existing cancellation-during-drain behavior with read-only native-carrier fixtures; real dispatch is Read|Network and cannot run on the parent's parallel path. Use barriers, not timing sleeps; cover both assembly modes.
-- [ ] Write `TestDispatchDenialIsolation`: overlap independent parents sharing a dispatcher and order child completion with channels; verify exact independent findings, a clean next Run and detached returned slices. No shared mutable test callback state.
-- [ ] Write `TestChildScopeDenialOptIn` and `TestGolemChildScopeDenialReporting`: no chain/custom chain without reporter produces no scope findings; reporter-only parent works with child chain disabled; the reporter in children contributes no child risk itself. Update the exact default-chain/notice assertions and verify Golem factory/dispatch flag-on/off wiring.
-- [ ] Run focused tests RED before implementation, then GREEN: `rtk go test ./agent ./agent/interceptor -run '^TestChildScopeDenial' -count=1`; `rtk go test ./agent/tools -run 'Test(DispatchRequestDenials|DispatchDenialIsolation)$' -count=1`; `rtk go test ./cmd/golem -run 'Test(GolemChildScopeDenialReporting|InterceptorsFor|StartupNotices_Interceptors|RunWiresInterceptors)$' -count=1`. Place lifecycle/opt-in integration subtests in dispatch_denial_test.go where native scope construction is required and run those actual names explicitly too.
-- [ ] Review and commit. No global cancellation fix, call-level dedup machinery or CLI parsing edits.
+- [x] Write `TestChildScopeDenialReporter`: counts 1, 2, 10, 11 and MaxInt64 score 10, 20, 100, 100 and 100; nonpositive counts/negative task positions yield none. Assert exact detail and Allow verdict, normalized TargetMessage/OriginModel, two children contribute two findings, and identical positions in a later inspection count again. No text/JSON inference.
+- [x] Write `TestChildScopeDenialCarrier` with JSON encode/decode/round-trip subtests, no private envelope count, output truncation, owned tool/interceptor/observer copies and no State/history carrier. Assert mutations by an earlier callback cannot affect later callbacks or a captured output.
+- [x] Write `TestDispatchRequestDenials` through outer Invoke and parent Run: actual denial then innocent summary scores 10; counts two/one yield 30 in two findings; >10 refusals cap per child while displaying full count. Include serial/parallel distinct native readers, mixed scoped/legacy tasks, reverse child completion order, empty/reused provider IDs, repeated dispatch calls, positive pruning counts with no requests, unrelated positive child risk, forged summaries/files/JSON/provenance and replayed history. Use enough varying refused arguments/steps to avoid the existing repeat governor terminating cap fixtures early.
+- [x] Write `TestChildScopeDenialLifecycle`: child pre/post-refusal cancellation, Block/Abort/interceptor/observer failures, discarded child parallel results, dispatch own deadline, parent deadline/cancel, hard envelope errors, parent validation/discard and later rejection. Pin existing cancellation-during-drain behavior with read-only native-carrier fixtures; real dispatch is Read|Network and cannot run on the parent's parallel path. Use barriers, not timing sleeps; cover both assembly modes.
+- [x] Write `TestDispatchDenialIsolation`: overlap independent parents sharing a dispatcher and order child completion with channels; verify exact independent findings, a clean next Run and detached returned slices. No shared mutable test callback state.
+- [x] Write `TestChildScopeDenialOptIn` and `TestGolemChildScopeDenialReporting`: no chain/custom chain without reporter produces no scope findings; reporter-only parent works with child chain disabled; the reporter in children contributes no child risk itself. Update the exact default-chain/notice assertions and verify Golem factory/dispatch flag-on/off wiring.
+- [x] Run focused tests RED before implementation, then GREEN: `rtk go test ./agent ./agent/interceptor -run '^TestChildScopeDenial' -count=1`; `rtk go test ./agent/tools -run 'Test(DispatchRequestDenials|DispatchDenialIsolation)$' -count=1`; `rtk go test ./cmd/golem -run 'Test(GolemChildScopeDenialReporting|InterceptorsFor|StartupNotices_Interceptors|RunWiresInterceptors)$' -count=1`. Place lifecycle/opt-in integration subtests in dispatch_denial_test.go where native scope construction is required and run those actual names explicitly too.
+- [x] Review and commit. No global cancellation fix, call-level dedup machinery or CLI parsing edits.
 
 ### Task 3: Mutation evidence, existing docs, review and publication
 
 **Files:** reporting paragraphs in docs/golem.md and docs/least-privilege.md; changelog.d/555-child-scope-denial-reporting.md; this exact approved plan and its evidence. No standalone reporting document or unrelated roadmap/release rewrite.
 
-- [ ] Perform each mutation separately, record its exact failing test/assertion/exit status, restore it and rerun the affected test. Keep the live issue's mandatory aggregation/isolation evidence even though the implementation has no dedup map.
+- [x] Perform each mutation separately, record its exact failing test/assertion/exit status, restore it and rerun the affected test. Keep the live issue's mandatory aggregation/isolation evidence even though the implementation has no dedup map.
 
 | Mutation | Required failing coverage |
 |---|---|
@@ -149,12 +149,12 @@ Test actual encoding/json Marshal/Unmarshal of ToolResult and InspectedMessage/I
 | Reuse a counter/evidence slice across tasks, invokes or runs | TestDispatchDenialIsolation |
 | Remove a copy or expose parent/private metadata to JSON | TestChildScopeDenialCarrier |
 
-- [ ] Update golem.md to distinguish unchanged child risk_score from separately reported native refusals. Update the relevant child/interceptor boundaries in least-privilege.md. Document per-child capped scoring, scope-only and symlink limits, OriginModel meaning, existing cancellation semantics, opt-in/custom chains and no stronger enforcement.
-- [ ] Add the valid fragment `### Added — Child scope-denial reporting (#555)`; never edit CHANGELOG.md.
-- [ ] Run `rtk go test -race ./agent ./agent/tools ./agent/interceptor ./cmd/golem`; run new tests explicitly by their actual names.
-- [ ] Run `rtk docker compose -p go-llm-555 -f docker-compose.ci.yml run --build --rm ci ./scripts/ci-local --mode full`. Preserve the current Go 1.27 security/lint/race/smoke gates. Coordinate a shared hook-image rebuild if another branch's Dockerfile differs; do not change shared infrastructure.
-- [ ] Complete independent whole-diff review using the applicable review skill, fix verified findings and record revision/evidence.
-- [ ] Fetch develop before publication. If #501 lands first, incorporate it and rerun affected checks, resolving only narrow reporting-document overlaps.
+- [x] Update golem.md to distinguish unchanged child risk_score from separately reported native refusals. Update the relevant child/interceptor boundaries in least-privilege.md. Document per-child capped scoring, scope-only and symlink limits, OriginModel meaning, existing cancellation semantics, opt-in/custom chains and no stronger enforcement.
+- [x] Add the valid fragment `### Added — Child scope-denial reporting (#555)`; never edit CHANGELOG.md.
+- [x] Run `rtk go test -race ./agent ./agent/tools ./agent/interceptor ./cmd/golem`; run new tests explicitly by their actual names.
+- [x] Run `rtk docker compose -p go-llm-555 -f docker-compose.ci.yml run --build --rm ci ./scripts/ci-local --mode full`. Preserve the current Go 1.27 security/lint/race/smoke gates. Coordinate a shared hook-image rebuild if another branch's Dockerfile differs; do not change shared infrastructure.
+- [x] Complete independent whole-diff review using the applicable review skill, fix verified findings and record revision/evidence.
+- [x] Fetch develop before publication. If #501 lands first, incorporate it and rerun affected checks, resolving only narrow reporting-document overlaps.
 - [ ] Review the final diff; explicitly add selected ticket files and force-add only this approved plan in the ignored docs/superpowers directory. Never use broad git add -A or force-add the directory. Commit, push through the normal hook and prepare/attach a PR to develop with contract, RED/GREEN, mutation, race and full-gate evidence. Do not merge, tag or release.
 
 ## Approval and execution evidence
@@ -173,8 +173,28 @@ assertions (exit 1, no compile failures or panics); after restoring each mutatio
 the identical test selector passed (exit 0). Tests ran with
 `rtk proxy go test <package> -run <selector> -count=1 -timeout=30s`.
 Counter/evidence authority, task aggregation, provider-ID independence, ownership,
-and wire exclusion were each bypassed separately. Race/full-gate results and
-independent code review are pending.
+and wire exclusion were each bypassed separately. Final verification:
+- `rtk go test -race ./agent ./agent/tools ./agent/interceptor ./cmd/golem`:
+  passed on the final code (RTK reports 7,000 passed).
+- `rtk docker compose -p go-llm-555 -f docker-compose.ci.yml run --build --rm ci ./scripts/ci-local --mode full`:
+  exit 0; security contracts, format, lint (0 issues), repository-wide race tests
+  and compile smoke passed. Existing platform-boundary skips are unchanged.
+- `scripts/check-changelog 2d3fbd892e83a88fb3b050983b8960aae39e18f4` and
+  `git diff --check`: passed.
+- Independent fresh-context review of `2d3fbd8..1a4c3e2`: APPROVE after
+  broad, adversarial and security passes; no actionable findings, deferred
+  minors or declined-to-judge items. Repository AI-kit manifests were absent;
+  review used CLAUDE.md and the supplied safety rules.
+- Fresh `origin/develop` remains `2d3fbd892e83a88fb3b050983b8960aae39e18f4`;
+  #501 has not landed. CI Dockerfile and compose definitions match develop.
+
+The first broad gate caught one additional existing exact default-chain
+expectation in `TestHardeningContracts`; updating its expected list to include
+the seventh interceptor produced a passing focused check and the final gates
+above. No enforcement or lifecycle change was needed.
+
+Publication through the normal pre-push hook and a PR to develop is the remaining
+delivery step; no merge, tag or release is authorized.
 
 
 ### Mutation evidence
