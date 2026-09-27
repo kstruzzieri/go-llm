@@ -51,7 +51,7 @@ func main() {
 	tlsCert := flag.String("tls-cert", "", "TLS certificate file (enables HTTPS)")
 	tlsKey := flag.String("tls-key", "", "TLS private key file")
 	var allowDestinations destinationGrants
-	flag.Var(&allowDestinations, "allow-destination", "Allow exact remote destination \"<provider>/<canonical base URL>\" (repeatable; the deprecated \"<provider>=<base URL>\" form is still accepted)")
+	flag.Var(&allowDestinations, "allow-destination", "Allow exact remote destination \"<provider>/<canonical base URL>\" (repeatable)")
 	flag.Parse()
 
 	destinationPolicy, err := allowDestinations.policy()
