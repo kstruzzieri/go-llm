@@ -1,6 +1,9 @@
 ### Fixed — Track retrieval registration through collector shutdown (#569)
 
-Background feedback collectors reject new retrieval registrations after shutdown
-begins and wait for admitted registrations to finish persistence and window
-installation before `Close` returns. Manual collector lifecycle behavior is
-unchanged.
+Background feedback collectors reject new retrieval registrations and
+explicit-time records (`RegisterRetrieval`, `RegisterRetrievalAt`, `RecordAt`,
+`RecordBatchAt`) after shutdown begins, matching `Record`. `Close` waits for
+admitted registrations and records to finish persistence, window installation,
+and recomputation, then runs its final sweep, so a window an admitted
+registration installs during shutdown still receives its expiry signals.
+Manual collector lifecycle behavior is unchanged.

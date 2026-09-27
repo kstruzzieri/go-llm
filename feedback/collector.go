@@ -84,8 +84,10 @@ func NewManualCollector(store AtomicSignalStore, config CollectorConfig) *Collec
 	}
 }
 
-// Close stops background maintenance and waits for admitted registrations and
-// records to finish. It is a no-op for manual collectors and safe to call multiple times.
+// Close stops background maintenance, waits for admitted registrations and
+// records to finish, then runs a final sweep that covers every window they
+// installed. It is a no-op for manual collectors and safe to call multiple
+// times; every call returns only after shutdown completes.
 func (c *Collector) Close() {
 	if c.done == nil {
 		return
@@ -95,8 +97,25 @@ func (c *Collector) Close() {
 		c.closed = true
 		close(c.done)
 		c.lifecycleMu.Unlock()
+		c.wg.Wait()
+		c.sweepExpired()
 	})
-	c.wg.Wait()
+}
+
+// admit enrolls work in a background collector's shutdown: it fails once Close
+// has begun, and otherwise Close waits until release is called. Manual
+// collectors have no background lifecycle and always admit.
+func (c *Collector) admit(op string) (release func(), err error) {
+	if c.done == nil {
+		return func() {}, nil
+	}
+	c.lifecycleMu.Lock()
+	defer c.lifecycleMu.Unlock()
+	if c.closed {
+		return nil, fmt.Errorf("feedback: %s: collector is closed", op)
+	}
+	c.wg.Add(1)
+	return c.wg.Done, nil
 }
 
 // RegisterRetrieval opens an attribution window for the given query and
@@ -114,16 +133,11 @@ func (c *Collector) RegisterRetrievalAt(ctx context.Context, query string, chunk
 	if presentedAt.IsZero() {
 		return "", fmt.Errorf("feedback: register retrieval: presented time is required")
 	}
-	if c.done != nil {
-		c.lifecycleMu.Lock()
-		if c.closed {
-			c.lifecycleMu.Unlock()
-			return "", fmt.Errorf("feedback: register retrieval: collector is closed")
-		}
-		c.wg.Add(1)
-		c.lifecycleMu.Unlock()
-		defer c.wg.Done()
+	release, err := c.admit("register retrieval")
+	if err != nil {
+		return "", err
 	}
+	defer release()
 
 	id, err := generateID()
 	if err != nil {
@@ -158,23 +172,20 @@ func (c *Collector) Record(ctx context.Context, signal Signal) error {
 		_, err := c.RecordAt(ctx, signal, time.Now())
 		return err
 	}
-	c.lifecycleMu.Lock()
-	if c.closed {
-		c.lifecycleMu.Unlock()
-		return fmt.Errorf("feedback: record: collector is closed")
+	release, err := c.admit("record")
+	if err != nil {
+		return err
 	}
-	c.wg.Add(1)
-	c.lifecycleMu.Unlock()
 	committed, recompute, err := c.recordBatchAt(ctx, []Signal{signal}, time.Now())
 	if err != nil || !recompute {
-		c.wg.Done()
+		release()
 		if len(committed) > 0 {
 			return nil
 		}
 		return err
 	}
 	go func() {
-		defer c.wg.Done()
+		defer release()
 		_ = c.recompute(context.Background())
 	}()
 	return nil
@@ -191,7 +202,13 @@ func (c *Collector) Record(ctx context.Context, signal Signal) error {
 // `(false, err)` means no signal committed. With a legacy non-atomic store,
 // persistence is best-effort per key: `(false, err)` may leave earlier keys in
 // the batch committed, but interaction state is never marked on any error.
+// Background collectors reject it after Close.
 func (c *Collector) RecordAt(ctx context.Context, signal Signal, observedAt time.Time) (bool, error) {
+	release, err := c.admit("record")
+	if err != nil {
+		return false, err
+	}
+	defer release()
 	committed, recompute, err := c.recordBatchAt(ctx, []Signal{signal}, observedAt)
 	if err != nil || !recompute {
 		return len(committed) > 0, err
@@ -201,11 +218,17 @@ func (c *Collector) RecordAt(ctx context.Context, signal Signal, observedAt time
 
 // RecordBatchAt atomically records one observer event against all matching
 // attribution windows. Returned signals are exactly those durably committed.
-// It rejects collectors constructed without an AtomicSignalStore.
+// It rejects collectors constructed without an AtomicSignalStore, and
+// background collectors after Close.
 func (c *Collector) RecordBatchAt(ctx context.Context, signals []Signal, observedAt time.Time) ([]Signal, error) {
 	if c.atomicStore == nil {
 		return nil, fmt.Errorf("feedback: record batch: atomic store is required")
 	}
+	release, err := c.admit("record batch")
+	if err != nil {
+		return nil, err
+	}
+	defer release()
 	committed, recompute, err := c.recordBatchAt(ctx, signals, observedAt)
 	if err != nil || !recompute {
 		return committed, err
@@ -326,7 +349,7 @@ func (c *Collector) WeightsBatch(ctx context.Context, chunkKeys []string) (map[s
 }
 
 // sweepLoop runs in a goroutine, expiring attribution windows and applying
-// weak negatives for non-interacted chunks.
+// weak negatives for non-interacted chunks. Close runs the final sweep.
 func (c *Collector) sweepLoop() {
 	defer c.wg.Done()
 	ticker := time.NewTicker(SweepInterval)
@@ -335,8 +358,6 @@ func (c *Collector) sweepLoop() {
 	for {
 		select {
 		case <-c.done:
-			// Final sweep on shutdown.
-			c.sweepExpired()
 			return
 		case <-ticker.C:
 			c.sweepExpired()
