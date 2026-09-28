@@ -24,7 +24,7 @@ go-llm/
 ├── completion/      # IDE inline completion (Fill-in-the-Middle)
 ├── analysis/        # Domain-specific analysis helpers (code review, ML metrics, trading)
 ├── agent/           # Agent runtime: Orchestrator loop, effect-aware tools, serial/parallel dispatch, opt-in interceptor pipeline (#436: ingress hooks on frozen values, allow/tag/block/abort, per-run RiskReport, provenance)
-├── agent/interceptor/ # Opt-in defaults: origin-sensitive injection detectors (zero-width, encoded instructions, typoglycemia), all-origin secret/payment-card blocking, argument-invariant guards, and exec egress labels
+├── agent/interceptor/ # Opt-in defaults: origin-sensitive injection detectors (zero-width, encoded instructions, typoglycemia), all-origin secret/payment-card blocking, argument-invariant guards, exec egress labels, and native scoped-child refusal reporting (#555)
 ├── mcp/             # MCP server: tools, prompts, resources over stdio/HTTP/2 — wired through provider.Router
 ├── mcpclient/       # MCP client: adapts external MCP servers' tools into agent.Tool (stdio/streamable-HTTP); consumed by cmd/golem
 ├── consult/         # /consult seam: bounded host runner + Claude and Codex subscription adapters (#382, #546); unsigned consult-result/v1 receipts

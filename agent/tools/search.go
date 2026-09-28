@@ -98,7 +98,7 @@ func (t *Search) Invoke(ctx context.Context, raw json.RawMessage) (agent.ToolRes
 		return nil
 	})
 	if walkErr != nil && walkErr != fs.SkipAll {
-		return errResult(toolErrMessage(walkErr)), nil
+		return t.ws.toolErrorResult(walkErr), nil
 	}
 
 	content := strings.TrimRight(out.String(), "\n")

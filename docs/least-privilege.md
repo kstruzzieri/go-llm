@@ -10,7 +10,7 @@ The [Mnemoverse article on least privilege for AI agents](https://mnemoverse.com
 |---|---|---|
 | Tool execution | Read-only CLI default; explicit tool mounting; shared preparation, validation and approval before invocation. | Opting into exec permits host execution. Sanitized command environments do not restrict filesystem or network access. |
 | Native sandboxes | Library Seatbelt and Bubblewrap backends fail closed when explicitly selected but unavailable. Sandbox policy participates in exec approval identity. | CLI exec and verification do not yet select these backends. |
-| Interceptors | Optional deterministic injection/secret detectors, argument invariants and exec egress labels. Observation fencing is independent. | `-interceptors` is off by default. Labels and risk scores do not constrain network access or suspend grants. |
+| Interceptors | Optional deterministic injection/secret detectors, argument invariants, exec egress labels and native scoped-child refusal reporting. Observation fencing is independent. | `-interceptors` is off by default. Labels and risk scores do not constrain network access or suspend grants. |
 | Provider destinations | Model-provider requests made by config-driven Golem and the go-llm MCP server require admission for remote destinations; guarded transports check capabilities, origins and base paths and refuse redirects. Grants are revocable. | This provider boundary does not govern Golem's connections to external MCP tool servers, shell traffic, or consultant-process traffic. |
 | MCP client | Workspace/alias catalog pins detect definition drift; tools require approval, have bounded execution/output, and produce foreign observations. | Pins do not attest endpoint/process identity. All admitted catalog tools are mounted. Local stdio servers run with host-user authority and inherit the parent environment; their HTTP counterparts are outside provider admission. |
 | Grants | Exec grants bind command/environment/runtime details; grants can be cleared. | Edit grants cover the write class; changed script contents and foreign content do not automatically invalidate reuse. |
@@ -76,6 +76,21 @@ Separate tasks may select different subtrees; a single child spanning disjoint
 roots is not implemented. Scoped retrieval remains excluded and belongs to
 [#554](https://github.com/kstruzzieri/go-llm/issues/554). #552's filesystem
 boundaries remain unchanged.
+
+With the parent reporter enabled, actual scoped native-reader refusals contribute
+to its run-level risk report as described in
+[interceptors and secret detection](golem.md#interceptors-and-secret-detection).
+A refusal is counted when the reader returns it, even if the child observation
+is later rejected, canceled or discarded. Reporting requires the dispatch
+envelope to reach parent inspection under the existing runtime lifecycle.
+Hard-aborted dispatches publish no evidence; a dispatch deadline may return a
+partial envelope. Parent results rejected or discarded before inspection
+contribute none. Once inspection runs, later interceptor, observer or governor
+rejection does not remove its findings. Cancellation during result draining
+follows the existing behavior and can still allow later inspection. This is not
+a complete access audit: no envelope means no parent evidence. Native metadata
+is excluded from JSON and conversation history; output truncation does not erase
+it. Filesystem enforcement is unchanged.
 
 Every nested `Orchestrator.Run` using its caller's context inherits that run's
 effective input ceiling, fixed generation cap and configured step cap. Smaller

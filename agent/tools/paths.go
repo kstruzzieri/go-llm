@@ -10,7 +10,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync/atomic"
 
 	"github.com/kstruzzieri/go-llm/agent"
 )
@@ -93,8 +92,8 @@ type Workspace struct {
 	root         string     // canonical absolute root; volume roots retain their separator
 	guard        ScopeGuard // nil => allow everything (default)
 	rootIdentity os.FileInfo
-	pinnedRoot   *os.File      // invocation-owned capability; operations borrow it
-	scopeDenials *atomic.Int64 // scoped child policy evaluations, not unique paths
+	pinnedRoot   *os.File       // invocation-owned capability; operations borrow it
+	scope        *scopeCounters // invocation-owned scoped child counters
 	// beforeReadOpen is a per-workspace deterministic race-test seam.
 	beforeReadOpen func()
 	beforeMutation func(mutationPhase, string) error // private deterministic phase/failure seam
@@ -258,14 +257,14 @@ func (w *Workspace) checkScope(abs string, write bool) error {
 // denyScope records one native policy rejection. Guard vetoes count in the
 // translated guard itself; wrapping/rendering an existing denial never counts.
 func (w *Workspace) denyScope() error {
-	if w.scopeDenials != nil {
-		w.scopeDenials.Add(1)
+	if w.scope != nil {
+		w.scope.evaluations.Add(1)
 	}
 	return errScopeDenied
 }
 
 func (w *Workspace) scopedPathError(err error) error {
-	if w.scopeDenials == nil || errors.Is(err, errScopeDenied) {
+	if w.scope == nil || errors.Is(err, errScopeDenied) {
 		return err
 	}
 	if errors.Is(err, errEscape) || errors.Is(err, errAbsPath) || errors.Is(err, errNUL) || errors.Is(err, errSymlink) {
