@@ -115,7 +115,8 @@ fi
 security_status=0
 # -hardening-budget enables the aggregate's <500ms wall-clock budget. Only this
 # isolated run passes it: the race pass below shares the machine with every
-# other package, so wall time there measures contention, not the contracts.
+# other package, so wall time there is dominated by contention, not the
+# contracts.
 # The timeout bounds a hang at well under Go's 10-minute default so a stuck
 # pre-push fails quickly.
 security_output="$(go test -count=1 -timeout 60s -v -run '^TestHardeningContracts$' ./agent -args -hardening-budget)" || security_status=$?

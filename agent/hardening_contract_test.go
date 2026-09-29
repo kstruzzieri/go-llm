@@ -29,7 +29,7 @@ const hardeningBudget = 500 * time.Millisecond
 
 // enforceHardeningBudget enables hardeningBudget. scripts/ci-local passes it to
 // its isolated run; the repository-wide race pass shares the machine with every
-// other package, so wall time there measures scheduling contention rather than
+// other package, so wall time there is dominated by scheduling contention, not
 // the contracts. The contracts themselves run regardless of the flag.
 var enforceHardeningBudget = flag.Bool("hardening-budget", false, "enforce TestHardeningContracts' "+hardeningBudget.String()+" wall-clock budget")
 

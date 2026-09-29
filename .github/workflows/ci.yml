@@ -62,7 +62,9 @@ jobs:
 
       # Same discovery + exact-PASS + skip-allowlist gate the pre-push hook
       # runs, so a renamed, skipped, or hollowed-out aggregate cannot pass the
-      # required check by bypassing the local hook.
+      # required check by bypassing the local hook. It is also the only CI run
+      # that enforces the aggregate's 500 ms budget (-hardening-budget); the
+      # Test step's race pass runs the same contracts without it.
       - name: Security contracts
         run: ./scripts/ci-local --mode security
 

@@ -128,8 +128,8 @@ The aggregate phase uses these exact commands (with `GOROOT` unset and
 hung contract well under Go's ten-minute default. `-hardening-budget` makes the
 aggregate assert its 500 ms wall-clock budget, cleanup included. Only this
 isolated run passes it: the repository-wide race pass shares the machine with
-every other package, so wall time there measures scheduling contention rather
-than the contracts. The contracts themselves run in both passes. Renaming the
+every other package, so wall time there is dominated by scheduling contention,
+not the contracts. The contracts themselves run in both passes. Renaming the
 flag in the test fails this run on an undefined flag, and dropping it from the
 script fails `scripts/test-ci-local`, which pins the exact command; deleting the
 assertion while keeping the flag remains a review responsibility.
