@@ -27,10 +27,9 @@ import (
 // hardeningBudget is the aggregate's wall-clock regression budget (#451).
 const hardeningBudget = 500 * time.Millisecond
 
-// enforceHardeningBudget enables hardeningBudget. scripts/ci-local passes it to
-// its isolated run; the repository-wide race pass shares the machine with every
-// other package, so wall time there is dominated by scheduling contention, not
-// the contracts. The contracts themselves run regardless of the flag.
+// enforceHardeningBudget turns on the hardeningBudget assertion. Only
+// scripts/ci-local's isolated run passes it (see docs/local-ci.md); the
+// contracts run regardless of the flag.
 var enforceHardeningBudget = flag.Bool("hardening-budget", false, "enforce TestHardeningContracts' "+hardeningBudget.String()+" wall-clock budget")
 
 func TestHardeningContracts(t *testing.T) {
