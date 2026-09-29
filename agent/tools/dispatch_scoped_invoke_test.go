@@ -175,12 +175,6 @@ func TestDispatchScopedMinimumCapBeforeLaunch(t *testing.T) {
 	}
 }
 
-type dispatchModelFunc func(context.Context, provider.ChatRequest) (agent.ModelResult, error)
-
-func (f dispatchModelFunc) Chat(ctx context.Context, req provider.ChatRequest, _ func(provider.ChatResponse) error) (agent.ModelResult, error) {
-	return f(ctx, req)
-}
-
 func TestDispatchScopedRealToolObservations(t *testing.T) {
 	parent := scopedFixture(t)
 	backend := progressiveFixture()
