@@ -293,8 +293,8 @@ func runOneShot(ctx context.Context, stdout, stderr io.Writer, interrupts <-chan
 	answer := res.Answer
 	if isTerminalOutput(stdout) {
 		// #433: the progress stream quoted these bytes; reprinting them raw
-		// would hand the same controls to the same terminal. Captured stdout
-		// stays byte-exact. Sanitized before trimming so a final CRLF keeps
+		// would hand the same controls to the same terminal. Redirected stdout
+		// bypasses sanitization. Sanitize before trimming so a final CRLF keeps
 		// its CR paired with the newline Fprintln restores.
 		answer = sanitizeTerminalStream(answer)
 	}
