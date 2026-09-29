@@ -3,6 +3,8 @@ set -euo pipefail
 
 script_dir="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 repo_root="$(cd "$script_dir/.." && pwd -P)"
+# The go stub logs the target platform; start every run on the host's.
+unset GOOS GOARCH CGO_ENABLED
 if ! grep -Fq 'run: golangci-lint fmt --diff' "$repo_root/.github/workflows/ci.yml"; then
   printf 'GitHub CI is missing the all-file formatting gate\n' >&2
   exit 1
@@ -11,6 +13,13 @@ if ! grep -Fxq '        run: ./scripts/ci-local --mode security' "$repo_root/.gi
   printf 'GitHub CI is missing the server-side security-contract gate\n' >&2
   exit 1
 fi
+# The full-mode expectations below pin ci-local's copy of these vets.
+for platform in windows freebsd; do
+  if ! grep -Fxq "          GOOS=$platform go vet ./..." "$repo_root/.github/workflows/ci.yml"; then
+    printf 'GitHub CI is missing the %s cross-platform vet\n' "$platform" >&2
+    exit 1
+  fi
+done
 # Anchored (-x) so a commented-out line cannot satisfy the pin.
 grep -Fxq 'CMD ["./scripts/ci-local", "--mode", "pre-push"]' "$repo_root/Dockerfile.ci"
 grep -Fxq '    command: ["./scripts/ci-local", "--mode", "pre-push"]' "$repo_root/docker-compose.ci.yml"
@@ -55,7 +64,7 @@ if [ "${GOROOT+x}" = x ] || [ "${GOFLAGS-}" != ' ' ]; then
   printf 'go received caller toolchain overrides\n' >&2
   exit 39
 fi
-printf '%s|%s\n' "$PWD" "$*" >>"$CI_LOCAL_TEST_LOG"
+printf '%s|%s%s\n' "$PWD" "${GOOS:+GOOS=$GOOS GOARCH=${GOARCH-} CGO_ENABLED=${CGO_ENABLED-} }" "$*" >>"$CI_LOCAL_TEST_LOG"
 case "$*" in
   'test -list ^TestHardeningContracts$ ./agent')
     printf 'stub: security discovery\n' >&2
@@ -157,7 +166,11 @@ $module|run
 $module|test -race ./...
 EOF
   if [ "$2" = full ]; then
-    printf '%s|test -run ^$ ./...\n' "$module" >>"$tmp/$1"
+    cat >>"$tmp/$1" <<EOF
+$module|test -run ^$ ./...
+$module|GOOS=windows GOARCH=amd64 CGO_ENABLED=0 vet ./...
+$module|GOOS=freebsd GOARCH=amd64 CGO_ENABLED=0 vet ./...
+EOF
   fi
 }
 

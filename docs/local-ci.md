@@ -48,7 +48,8 @@ On a Linux host the bind-mounted checkout must be readable by uid 1000; the gate
 `scripts/test-ci-local` is a hermetic regression harness for the local gate. It
 stubs the external commands, needs no toolchain or Docker, and covers root
 discovery, exact phase ordering, prerequisites, failure status propagation, the
-pre-push hook, and the native Darwin selectors and requirement environment. The
+pre-push hook, the native Darwin selectors and requirement environment, and the
+Windows and FreeBSD vets shared by `--mode full` and the `CI` workflow. The
 `CI` workflow runs it on every pull request.
 
 ## Typical Workflow
@@ -66,7 +67,7 @@ Run the faster pre-push subset directly on the host:
 scripts/ci-local --mode pre-push
 ```
 
-Run the full suite directly on the host. This includes all `pre-push` checks plus compile smoke:
+Run the full suite directly on the host. This includes all `pre-push` checks plus compile smoke, which also runs `go vet ./...` with `GOOS=windows` and `GOOS=freebsd` so code or tests that only type-check on Linux or macOS fail locally:
 
 ```bash
 scripts/ci-local --mode full
@@ -170,7 +171,7 @@ immediately before each run:
 
 | Check | Toolchain | Checks |
 | --- | --- | --- |
-| `Lint & Test` | `go-version-file: go.mod` (the `toolchain` directive) | CI/changelog self-tests and guards, lint, formatting, security contracts, race tests, Windows compile smoke, and GoReleaser config validation |
+| `Lint & Test` | `go-version-file: go.mod` (the `toolchain` directive) | CI/changelog self-tests and guards, lint, formatting, security contracts, race tests, cross-platform compile smoke (a Windows `cmd/golem` build plus `go vet ./...` for Windows and FreeBSD), and GoReleaser config validation |
 | `Test (oldest supported Go)` | `actions/setup-go` resolves the `go-version: '1.N.x'` query in `ci.yml` | `go test -race ./...` only |
 
 The compatibility job sets `GOTOOLCHAIN=local` for both its version log and tests,
