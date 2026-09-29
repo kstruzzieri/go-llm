@@ -24,6 +24,12 @@ type dispatchCaller struct {
 	reqs []provider.ChatRequest
 }
 
+type dispatchModelFunc func(context.Context, provider.ChatRequest) (agent.ModelResult, error)
+
+func (f dispatchModelFunc) Chat(ctx context.Context, req provider.ChatRequest, _ func(provider.ChatResponse) error) (agent.ModelResult, error) {
+	return f(ctx, req)
+}
+
 type cancelDispatchCaller struct {
 	started chan string
 	exited  chan string
