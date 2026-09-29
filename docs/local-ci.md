@@ -131,8 +131,8 @@ isolated run passes it: the repository-wide race pass shares the machine with
 every other package, so wall time there is dominated by scheduling contention,
 not the contracts. The contracts themselves run in both passes. Renaming the
 flag in the test fails this run on an undefined flag, and dropping it from the
-script fails `scripts/test-ci-local`, which pins the exact command; deleting the
-assertion while keeping the flag remains a review responsibility.
+script fails `scripts/test-ci-local`, which pins the exact command; deleting or
+inverting the assertion while keeping the flag remains a review responsibility.
 
 ```bash
 go test -list '^TestHardeningContracts$' ./agent
