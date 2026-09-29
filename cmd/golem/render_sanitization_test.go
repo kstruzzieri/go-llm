@@ -135,7 +135,7 @@ func TestRendererTerminalThinkingQuotesControlsKeepsStyle(t *testing.T) {
 	if err := r.finish(); err != nil {
 		t.Fatal(err)
 	}
-	want := "\x1b[2m[thinking]\x1b[0m\n\x1b[2mthink\\x1b[2J\\r\\b\x1b[0m\x1b[2m\\t\\u009b\x1b[0m"
+	want := "\x1b[2m[thinking]\x1b[0m\n\x1b[2mthink\\x1b[2J\\r\\b\x1b[0m\x1b[2m\t\\u009b\x1b[0m"
 	if got := out.String(); got != want {
 		t.Fatalf("terminal thinking = %q, want %q", got, want)
 	}
@@ -155,6 +155,74 @@ func TestRendererTerminalTokenPreservesSplitUTF8AndQuotesControls(t *testing.T) 
 	}
 	if got, want := out.String(), "A🙂\\x1b[2J\nB"; got != want {
 		t.Fatalf("split terminal token = %q, want %q", got, want)
+	}
+}
+
+// Tab and CR directly before LF cannot erase or move the cursor backward on an
+// append-only stream, and tab-indented code and CRLF text depend on them. Every
+// other CR is still quoted, including one held across a delta boundary that the
+// next delta does not complete as CRLF, and one left at the end of the stream.
+func TestRendererTerminalKeepsTabsAndCRLFQuotesLoneCR(t *testing.T) {
+	var out bytes.Buffer
+	r := newRenderer(&out, false, 4, nil, false)
+	r.terminal = true
+	for _, delta := range []string{"func f() {\r", "\n\treturn\r\n}\r", "x\ry\r\r", "\nend\r"} {
+		if err := r.OnToken(context.Background(), agent.TokenEvent{Content: delta}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := r.finish(); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := out.String(), "func f() {\r\n\treturn\r\n}\\rx\\ry\\r\r\nend\\r"; got != want {
+		t.Fatalf("terminal layout = %q, want %q", got, want)
+	}
+}
+
+// Chrome written through rawWriter (the approver, run-status lines) must land
+// after model bytes the renderer is still holding, not before them.
+func TestRendererRawWriterFlushesHeldModelBytesFirst(t *testing.T) {
+	var out bytes.Buffer
+	r := newRenderer(&out, false, 4, nil, false)
+	r.terminal = true
+	if err := r.OnToken(context.Background(), agent.TokenEvent{Content: "held\r"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := io.WriteString(r.rawWriter(), "chrome\n"); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.finish(); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := out.String(), "held\\rchrome\n"; got != want {
+		t.Fatalf("raw write ordering = %q, want %q", got, want)
+	}
+}
+
+// One-shot text mode streams progress to stderr and then reprints the answer
+// on stdout; a terminal stdout must not receive the controls the stream quoted.
+func TestOneShotTerminalStdoutQuotesAnswerControls(t *testing.T) {
+	answer := "safe\x1b]52;c;YQ==\a\tend\r\n"
+	for _, tc := range []struct {
+		name     string
+		terminal bool
+		want     string
+	}{
+		{"terminal", true, "safe\\x1b]52;c;YQ==\\a\tend\r\n"},
+		{"redirected", false, answer},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			caller := &scriptCaller{responses: []agent.ModelResult{{Response: provider.ChatResponse{Content: answer}}}}
+			sess := newTestSession(t, caller, t.TempDir())
+			var stdout bytes.Buffer
+			var stderr strings.Builder
+			if err := runOneShot(context.Background(), &synchronizedWriter{out: &stdout, terminal: tc.terminal}, &stderr, nil, sess, "go"); err != nil {
+				t.Fatalf("runOneShot: %v", err)
+			}
+			if got := stdout.String(); got != tc.want {
+				t.Fatalf("stdout = %q, want %q", got, tc.want)
+			}
+		})
 	}
 }
 

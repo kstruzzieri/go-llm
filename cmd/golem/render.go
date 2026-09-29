@@ -7,7 +7,6 @@ import (
 	"os"
 	"strings"
 	"time"
-	"unicode/utf8"
 
 	"github.com/kstruzzieri/go-llm/agent"
 	"github.com/kstruzzieri/go-llm/internal/promptfence"
@@ -19,7 +18,7 @@ import (
 type renderer struct {
 	markdown     *markdownWriter
 	color        bool
-	terminal     bool
+	terminal     bool // out is a TTY: quote controls in model-controlled text, independent of color
 	maxSteps     int
 	now          func() time.Time
 	lastMark     time.Time
@@ -27,8 +26,8 @@ type renderer struct {
 	warnPressure bool   // print a one-line context-pressure warning
 	warned       bool   // ensures at most one pressure line per run
 	thinkOpen    bool   // "[thinking]" header printed for the current step
-	pending      []byte // incomplete UTF-8 rune from terminal-bound model content
-	pendingThink bool
+	pending      []byte // terminal-bound model bytes held for the next delta: a split rune or a trailing CR
+	pendingThink bool   // pending belongs to the thinking stream (flushed dim)
 	// mixed mirrors ContextManager.Mixed for the run this renderer observes. It
 	// is a constructor PARAMETER rather than a settable field like warnPressure
 	// because forgetting it at a new call site would not fail loudly — it would
@@ -137,10 +136,7 @@ func (r *renderer) writeDim(line string) error {
 }
 
 func (r *renderer) writeRaw(s string) error {
-	if err := r.flushPending(); err != nil {
-		return err
-	}
-	_, err := r.markdown.WriteRaw([]byte(s))
+	_, err := rendererRawWriter{r}.Write([]byte(s))
 	return err
 }
 
@@ -160,7 +156,19 @@ func (r *renderer) breakLine() error {
 	return r.markdown.BreakLine()
 }
 
-func (r *renderer) rawWriter() io.Writer { return markdownRawWriter{markdown: r.markdown} }
+// rawWriter writes terminal chrome through the renderer, so chrome can never
+// overtake model bytes the renderer still holds (a split rune or a CR waiting
+// for LF), even from a caller that did not break the line first.
+func (r *renderer) rawWriter() io.Writer { return rendererRawWriter{r} }
+
+type rendererRawWriter struct{ r *renderer }
+
+func (w rendererRawWriter) Write(p []byte) (int, error) {
+	if err := w.r.flushPending(); err != nil {
+		return 0, err
+	}
+	return w.r.markdown.WriteRaw(p)
+}
 
 func (r *renderer) finish() error {
 	r.thinkOpen = false
@@ -175,12 +183,13 @@ func (r *renderer) streamContent(s string, thinking bool) error {
 		return r.writeContent(s, thinking)
 	}
 	data := append(r.pending, s...)
-	complete := 0
-	for complete < len(data) && utf8.FullRune(data[complete:]) {
-		_, size := utf8.DecodeRune(data[complete:])
-		complete += size
+	complete := completeRunes(data)
+	// A trailing CR waits for the next delta: only CR directly before LF
+	// passes, and a split CRLF must not be quoted as a lone CR.
+	if complete > 0 && data[complete-1] == '\r' {
+		complete--
 	}
-	safe := sanitizeApprovalPreview(string(data[:complete]))
+	safe := sanitizeTerminalStream(string(data[:complete]))
 	r.pending = append(r.pending[:0], data[complete:]...)
 	r.pendingThink = thinking
 	if complete == 0 {
@@ -193,9 +202,28 @@ func (r *renderer) flushPending() error {
 	if len(r.pending) == 0 {
 		return nil
 	}
-	text := sanitizeApprovalPreview(string(r.pending))
+	text := sanitizeTerminalStream(string(r.pending))
 	r.pending = nil
 	return r.writeContent(text, r.pendingThink)
+}
+
+// sanitizeTerminalStream applies the approval-preview policy to model content
+// bound for a terminal, except for the layout that content relies on and that
+// can neither erase nor move the cursor backward on an append-only stream: tab
+// (tab-indented code) and CR directly before LF (CRLF line ends). Notices stay
+// on the stricter preview policy because they are one line by construction.
+func sanitizeTerminalStream(s string) string {
+	var safe strings.Builder
+	start := 0
+	for i := 0; i < len(s); i++ {
+		if s[i] == '\t' || s[i] == '\r' && i+1 < len(s) && s[i+1] == '\n' {
+			safe.WriteString(sanitizeApprovalPreview(s[start:i]))
+			safe.WriteByte(s[i])
+			start = i + 1
+		}
+	}
+	safe.WriteString(sanitizeApprovalPreview(s[start:]))
+	return safe.String()
 }
 
 func (r *renderer) writeContent(s string, thinking bool) error {
