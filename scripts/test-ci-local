@@ -82,6 +82,10 @@ case "$*" in
   'test -race ./...')
     exit "$CI_LOCAL_RACE_STATUS"
     ;;
+  *TestHardeningContracts*)
+    printf 'stub: unexpected security invocation: %s\n' "$*" >&2
+    exit 64
+    ;;
 esac
 STUB
 
