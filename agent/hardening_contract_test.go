@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"flag"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -22,6 +23,13 @@ import (
 	"github.com/kstruzzieri/go-llm/contextdepth"
 	"github.com/kstruzzieri/go-llm/provider"
 )
+
+// hardeningBudget enables the aggregate's 500 ms wall-clock budget.
+// scripts/ci-local passes it to its isolated run; the repository-wide race pass
+// shares the machine with every other package, so wall time there measures
+// scheduling contention rather than the contracts. The contracts themselves
+// run regardless of the flag.
+var hardeningBudget = flag.Bool("hardening-budget", false, "enforce TestHardeningContracts' 500ms wall-clock budget")
 
 func TestHardeningContracts(t *testing.T) {
 	started := time.Now()
@@ -47,8 +55,8 @@ func TestHardeningContracts(t *testing.T) {
 	}
 	// #433's CLI presentation boundary is covered by cmd/golem/render_sanitization_test.go.
 	elapsed := time.Since(started)
-	t.Logf("hardening contracts elapsed: %s", elapsed)
-	if elapsed >= 500*time.Millisecond {
+	t.Logf("hardening contracts elapsed: %s (budget enforced: %t)", elapsed, *hardeningBudget)
+	if *hardeningBudget && elapsed >= 500*time.Millisecond {
 		t.Errorf("hardening contracts elapsed = %s, want < 500ms", elapsed)
 	}
 }

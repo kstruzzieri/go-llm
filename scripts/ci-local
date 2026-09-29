@@ -113,9 +113,12 @@ if ! grep -Fxq 'TestHardeningContracts' <<<"$security_tests"; then
   exit 1
 fi
 security_status=0
-# The aggregate asserts its own <500ms budget; the timeout bounds a hang at
-# well under Go's 10-minute default so a stuck pre-push fails quickly.
-security_output="$(go test -count=1 -timeout 60s -v -run '^TestHardeningContracts$' ./agent)" || security_status=$?
+# -hardening-budget enables the aggregate's <500ms wall-clock budget. Only this
+# isolated run passes it: the race pass below shares the machine with every
+# other package, so wall time there measures contention, not the contracts.
+# The timeout bounds a hang at well under Go's 10-minute default so a stuck
+# pre-push fails quickly.
+security_output="$(go test -count=1 -timeout 60s -v -run '^TestHardeningContracts$' ./agent -args -hardening-budget)" || security_status=$?
 printf '%s\n' "$security_output"
 if [ "$security_status" -ne 0 ]; then
   exit "$security_status"

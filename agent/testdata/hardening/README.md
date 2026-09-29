@@ -52,9 +52,12 @@ Other tools and broader platform/path cases stay in their focused tool suites
 and the #452 corpus. The aggregate deliberately reuses focused tests so they
 also run under its single budget; invoking helpers instead of Test functions
 would not remove that duplicate execution. The 500 ms wall-clock assertion
-includes cleanup and can fail under scheduling contention; it is a regression
-budget, not a hard timeout. Exact byte fixtures and named deferred skips are
-intentional parts of this contract.
+includes cleanup; it is a regression budget, not a hard timeout. It applies
+only when the test binary receives `-hardening-budget`, which
+`scripts/ci-local` passes to its isolated run; the repository-wide race pass
+omits it because scheduling contention there, not the contracts, dominates
+wall time. The contracts run either way. Exact byte fixtures and named
+deferred skips are intentional parts of this contract.
 
 Deferred coverage: ZT-602/#431 project trust, ZT-605/#434 quarantine, and
 ZT-606/#435 retrieval screening. These are explicit skipped subtests, not

@@ -98,7 +98,7 @@ docker compose -f docker-compose.ci.yml run --build --rm ci ./scripts/ci-local -
 `pre-push` runs:
 
 - compiled discovery of `TestHardeningContracts`, followed by a fresh,
-  verbose, non-race run of that aggregate
+  verbose, non-race run of that aggregate with its 500 ms budget enforced
 - `golangci-lint fmt --diff` (all Go files, including inactive build tags)
 - `golangci-lint run`
 - `go test -race ./...`
@@ -125,12 +125,18 @@ the named groups executed, not that their contents are complete.
 
 The aggregate phase uses these exact commands (with `GOROOT` unset and
 `GOFLAGS=' '` exported for the rest of the script). The 60-second timeout bounds a
-hung contract well under Go's ten-minute default; the aggregate itself asserts a
-500 ms budget.
+hung contract well under Go's ten-minute default. `-hardening-budget` makes the
+aggregate assert its 500 ms wall-clock budget, cleanup included. Only this
+isolated run passes it: the repository-wide race pass shares the machine with
+every other package, so wall time there measures scheduling contention rather
+than the contracts. The contracts run in both passes either way. Renaming the
+flag in the test fails this run on an undefined flag, and dropping it from the
+script fails `scripts/test-ci-local`, which pins the exact command; deleting the
+assertion while keeping the flag remains a review responsibility.
 
 ```bash
 go test -list '^TestHardeningContracts$' ./agent
-go test -count=1 -timeout 60s -v -run '^TestHardeningContracts$' ./agent
+go test -count=1 -timeout 60s -v -run '^TestHardeningContracts$' ./agent -args -hardening-budget
 ```
 
 The local Docker service runs as an unprivileged user (uid 1000), so the

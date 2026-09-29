@@ -74,7 +74,7 @@ case "$*" in
       exit "$CI_LOCAL_DISCOVERY_STATUS"
     fi
     ;;
-  'test -count=1 -timeout 60s -v -run ^TestHardeningContracts$ ./agent')
+  'test -count=1 -timeout 60s -v -run ^TestHardeningContracts$ ./agent -args -hardening-budget')
     printf 'stub: security execution\n' >&2
     printf '%s\n' "$CI_LOCAL_SECURITY_OUTPUT"
     exit "$CI_LOCAL_SECURITY_STATUS"
@@ -152,10 +152,12 @@ assert_scope_notice() {
   ' "$tmp/$1.out"
 }
 
+# -hardening-budget is the only switch for the aggregate's wall-clock budget;
+# pinning it here keeps ci-local from silently dropping enforcement.
 write_expected() {
   cat >"$tmp/$1" <<EOF
 $module|test -list ^TestHardeningContracts$ ./agent
-$module|test -count=1 -timeout 60s -v -run ^TestHardeningContracts$ ./agent
+$module|test -count=1 -timeout 60s -v -run ^TestHardeningContracts$ ./agent -args -hardening-budget
 EOF
   if [ "$2" = security ]; then
     return
