@@ -111,7 +111,10 @@ func TestRecordResultKeepsProvenanceWhenContentIsCapped(t *testing.T) {
 	tool := provenanceTool{name: "evidence", content: content, provenance: want, outputCap: 4}
 	o := New(nil, ContextManager{})
 	effect := normalizeEffect(tool.Effect())
-	out := o.invokeCall(context.Background(), tool, effect, nil)
+	out, err := o.invokeCall(context.Background(), tool, effect, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if !out.Truncated || out.Content == content {
 		t.Fatalf("forced cap did not change presentation: %+v", out)
 	}

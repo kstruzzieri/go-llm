@@ -591,7 +591,7 @@ func runAgentflowTask(ctx context.Context, stdout, stderr io.Writer, interrupts 
 	}
 	var coordinator *parallelCoordinator
 	if f.planWorkers > 1 {
-		workerOut := &synchronizedWriter{out: stderr}
+		workerOut := &synchronizedWriter{out: stderr, terminal: isTerminalOutput(stderr)}
 		coordinator = newParallelCoordinator(root, &plan, f.planWorkers,
 			newAssignedParallelWorker(&plan, sess, f.approveEdits, workerOut, runnerForRoot))
 		coordinator.interrupts = interrupts

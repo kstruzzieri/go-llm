@@ -205,7 +205,7 @@ func TestMigrationV2_UpgradesExistingV1DB(t *testing.T) {
 		t.Fatalf("upgrade store: %v", err)
 	}
 	want := migrations[len(migrations)-1].version
-	if v, err := currentSchemaVersion(db); err != nil || v != want {
+	if v, err := currentSchemaVersion(t.Context(), db); err != nil || v != want {
 		t.Fatalf("want schema version %d, got %d (err %v)", want, v, err)
 	}
 	in := CapProbe{BackendID: "b", ModelName: "m", Capability: "tool_call",

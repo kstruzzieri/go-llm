@@ -33,6 +33,7 @@ var (
 // from the parent process: the runner builds the child environment from
 // scratch and executes inside a disposable private filesystem envelope.
 type runSpec struct {
+	adapter string // closed environment selector; empty preserves Claude
 	// command is the absolute path of the executable; sha256, when set, is the
 	// lowercase hex digest its bytes must match immediately before exec.
 	command, sha256 string
@@ -63,3 +64,27 @@ type runOutcome struct {
 	Duration       time.Duration
 	Cwds           []string // private cwd spellings, for the parser's cwd check
 }
+
+// duplexExchange is the private App Server dispatcher. Callbacks run serially;
+// receive borrows one complete frame without its LF, including after closeStdin.
+// Returning an error prevents admission but does not discard a negative reply
+// returned in the same action. Batch multiple outbound records in write.
+// interrupt may return one confirmed-turn request. Its write gets a bounded
+// opportunity; cancellation never waits for an RPC acknowledgement.
+type duplexExchange struct {
+	start     func(cwd string) (duplexAction, error)
+	receive   func(frame []byte) (duplexAction, error)
+	interrupt func() []byte
+}
+
+type duplexAction struct {
+	write      []byte // complete JSONL bytes; copied before handing to the writer
+	closeStdin bool
+}
+
+var (
+	errDuplexEOF          = errors.New("consult: incomplete duplex exchange")
+	errDuplexWrite        = errors.New("consult: duplex write failed")
+	errDuplexBackpressure = errors.New("consult: duplex write queue full")
+	errDuplexRecords      = errors.New("consult: duplex record limit exceeded")
+)

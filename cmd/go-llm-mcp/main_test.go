@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"flag"
 	"os"
 	"os/exec"
@@ -16,8 +17,10 @@ func TestRejectedDestinationCredentialsAreNotRendered(t *testing.T) {
 		grant string
 		want  string
 	}{
-		{name: "userinfo", grant: "hosted=https://user:SECRET@api.example", want: "base URL must not carry userinfo"},
-		{name: "query", grant: "hosted=https://api.example?api_key=SECRET", want: "base URL must not carry a query"},
+		{name: "canonical userinfo", grant: "hosted/https://user:SECRET@api.example", want: "base URL must not carry userinfo"},
+		{name: "legacy userinfo", grant: "hosted=https://user:SECRET@api.example", want: `expected "<provider>/<base URL>"`},
+		{name: "canonical query", grant: "hosted/https://api.example?api_key=SECRET", want: "base URL must not carry a query"},
+		{name: "legacy query", grant: "hosted=https://api.example?api_key=SECRET", want: `expected "<provider>/<base URL>"`},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -55,8 +58,8 @@ func TestDestinationGrantsParseRepeatableExactDestinations(t *testing.T) {
 	var grants destinationGrants
 	flags.Var(&grants, "allow-destination", "")
 	if err := flags.Parse([]string{
-		"-allow-destination", "hosted=https://HOST:443/base/",
-		"-allow-destination=backup=http://example.com:80/root",
+		"-allow-destination", "hosted/https://HOST:443/base/",
+		"-allow-destination=backup/http://example.com:80/root",
 	}); err != nil {
 		t.Fatalf("FlagSet.Parse() error = %v", err)
 	}
@@ -95,7 +98,7 @@ func TestDestinationGrantsParseRepeatableExactDestinations(t *testing.T) {
 
 func TestDestinationGrantsPreserveEqualsInProviderName(t *testing.T) {
 	var grants destinationGrants
-	if err := grants.Set("team=prod=https://HOST:443/base/"); err != nil {
+	if err := grants.Set("team=prod/https://HOST:443/base/"); err != nil {
 		t.Fatalf("destinationGrants.Set() error = %v", err)
 	}
 	if len(grants) != 1 {
@@ -114,20 +117,21 @@ func TestDestinationGrantsPreserveEqualsInProviderName(t *testing.T) {
 	}
 }
 
-// -allow-destination accepts the canonical "<provider>/<base URL>" grant and
-// the deprecated "<provider>=<base URL>" spelling this binary historically
-// required; both normalize to the same canonical destination identity.
-func TestDestinationGrantsAcceptCanonicalAndLegacyForms(t *testing.T) {
+// -allow-destination accepts only canonical grants; legacy values fail
+// during policy construction so flag parsing cannot echo a credential.
+func TestDestinationGrantsCanonicalOnly(t *testing.T) {
 	tests := []struct {
 		name     string
 		grant    string
 		provider string
 		baseURL  string
+		wantErr  bool
 	}{
 		{name: "canonical https", grant: "hosted/https://HOST:443/base/", provider: "hosted", baseURL: "https://host/base"},
 		{name: "canonical http", grant: "backup/http://example.com:80/root", provider: "backup", baseURL: "http://example.com/root"},
-		{name: "legacy https", grant: "hosted=https://HOST:443/base/", provider: "hosted", baseURL: "https://host/base"},
-		{name: "legacy http", grant: "backup=http://example.com:80/root", provider: "backup", baseURL: "http://example.com/root"},
+		{name: "legacy https", grant: "hosted=https://HOST:443/base/", wantErr: true},
+		{name: "legacy provider with equals", grant: "team=prod=https://host/base", wantErr: true},
+		{name: "legacy http", grant: "backup=http://example.com:80/root", wantErr: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -136,6 +140,15 @@ func TestDestinationGrantsAcceptCanonicalAndLegacyForms(t *testing.T) {
 				t.Fatalf("destinationGrants.Set() error = %v", err)
 			}
 			policy, err := grants.policy()
+			if tt.wantErr {
+				if !errors.Is(err, provider.ErrDestinationInvalid) || !strings.Contains(err.Error(), `expected "<provider>/<base URL>"`) {
+					t.Fatalf("destinationGrants.policy() error = %v, want canonical-grammar hint", err)
+				}
+				if strings.Contains(err.Error(), tt.grant) {
+					t.Errorf("destinationGrants.policy() echoes rejected value: %v", err)
+				}
+				return
+			}
 			if err != nil {
 				t.Fatalf("destinationGrants.policy() error = %v", err)
 			}

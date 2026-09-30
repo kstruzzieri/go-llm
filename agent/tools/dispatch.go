@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
@@ -78,7 +77,7 @@ type Dispatch struct {
 	interceptors []agent.Interceptor
 	// prepareChildTools is a per-instance lifecycle test seam. Configure before
 	// Invoke; nil uses the production childTools attenuation boundary.
-	prepareChildTools func(*string) ([]agent.Tool, *atomic.Int64, func(), error)
+	prepareChildTools func(*string) ([]agent.Tool, *scopeCounters, func(), error)
 }
 
 type dispatchArgs struct {
@@ -135,7 +134,7 @@ func (t *dispatchTask) UnmarshalJSON(raw []byte) error {
 
 type dispatchChild struct {
 	tools   []agent.Tool
-	counter *atomic.Int64
+	counter *scopeCounters
 	cleanup func()
 }
 
@@ -150,6 +149,8 @@ type dispatchResult struct {
 	RiskScore int `json:"risk_score,omitempty"`
 	// ScopeDenials counts vetoed policy evaluations, including repeated checks and pruning.
 	ScopeDenials int64 `json:"scope_denials,omitempty"`
+	// deniedRequests is native evidence; it must never enter the JSON envelope.
+	deniedRequests int64
 }
 
 type dispatchEnvelope struct {
@@ -160,6 +161,9 @@ type dispatchEnvelope struct {
 // four built-in file readers and an optional retrieve tool cross the boundary;
 // every other registered capability is omitted. interceptors are installed on
 // every child (#436); existing callers pass none.
+// Selected implementations are trusted host code: Effect must remain constant
+// and truthful after construction. Runtime capacities and finite token allowances
+// are intersected by Orchestrator.Run when Invoke inherits a parent run context.
 func NewDispatch(caller agent.ModelCaller, ctxMgr agent.ContextManager, available []agent.Tool, limits DispatchLimits, interceptors ...agent.Interceptor) (*Dispatch, error) {
 	if caller == nil {
 		return nil, fmt.Errorf("tools: dispatch: model caller is required")
@@ -390,7 +394,13 @@ func (d *Dispatch) Invoke(ctx context.Context, raw json.RawMessage) (agent.ToolR
 	if err != nil {
 		return agent.ToolResult{}, err
 	}
-	return agent.ToolResult{Content: string(content), IsError: failed, Truncated: truncated || cut}, nil
+	out := agent.ToolResult{Content: string(content), IsError: failed, Truncated: truncated || cut}
+	for i, result := range envelope.Results {
+		if result.deniedRequests > 0 {
+			out.ChildScopeDenials = append(out.ChildScopeDenials, agent.ChildScopeDenial{Task: i, Requests: result.deniedRequests})
+		}
+	}
+	return out, nil
 }
 
 func (d *Dispatch) runChild(ctx context.Context, task dispatchTask, child dispatchChild) (dispatchResult, error) {
@@ -409,7 +419,8 @@ func (d *Dispatch) runChild(ctx context.Context, task dispatchTask, child dispat
 	}
 	out := dispatchResult{Summary: result.Answer, StopReason: result.StopReason.String(), Model: model}
 	if child.counter != nil {
-		out.ScopeDenials = child.counter.Load()
+		out.ScopeDenials = child.counter.evaluations.Load()
+		out.deniedRequests = child.counter.requests.Load()
 	}
 	if result.Risk != nil {
 		out.RiskScore = result.Risk.Score

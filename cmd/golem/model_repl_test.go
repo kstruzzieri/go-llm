@@ -785,7 +785,7 @@ func TestModelSetRebuildsParentFollowingDispatchInPlace(t *testing.T) {
 
 		// Children follow the parent: the child turn is served by alt, and the
 		// child still sees exactly the read-only prefix.
-		env := invokeDispatch(t, sess.tools[4], []string{"look around"})
+		env := invokeDispatchFromParent(t, sess.tools[4], []string{"look around"}, agent.Budget{OutputReserve: 128})
 		if len(env.Results) != 1 || env.Results[0].Model != "alt/alt-model" {
 			t.Fatalf("dispatch child results = %+v, want one served by alt/alt-model", env.Results)
 		}
@@ -794,6 +794,15 @@ func TestModelSetRebuildsParentFollowingDispatchInPlace(t *testing.T) {
 			t.Fatal("alt served no child request")
 		}
 		child := bodies[len(bodies)-1]
+		var wire struct {
+			MaxTokens int `json:"max_tokens"`
+		}
+		if err := json.Unmarshal([]byte(child), &wire); err != nil {
+			t.Fatal(err)
+		}
+		if wire.MaxTokens != 128 {
+			t.Fatalf("rebuilt child cap = %d, want parent cap 128", wire.MaxTokens)
+		}
 		for _, name := range []string{"read_file", "search", "glob", "list"} {
 			if !strings.Contains(child, `"name":"`+name+`"`) {
 				t.Errorf("child request missing read-only tool %q:\n%s", name, child)
@@ -876,9 +885,22 @@ func TestModelSetKeepsAnExplicitDispatchRolePinned(t *testing.T) {
 		if sess.tools[4] != before {
 			t.Fatal("an explicit -dispatch-role dispatch tool was rebuilt by a parent switch")
 		}
-		env := invokeDispatch(t, sess.tools[4], []string{"look around"})
+		env := invokeDispatchFromParent(t, sess.tools[4], []string{"look around"}, agent.Budget{OutputReserve: 128})
 		if len(env.Results) != 1 || env.Results[0].Model != "alt/alt-model" {
 			t.Fatalf("dispatch child results = %+v, want the pinned alt route", env.Results)
+		}
+		bodies := fx.alt.chatBodies()
+		if len(bodies) == 0 {
+			t.Fatal("pinned child route served no requests")
+		}
+		var wire struct {
+			MaxTokens int `json:"max_tokens"`
+		}
+		if err := json.Unmarshal([]byte(bodies[len(bodies)-1]), &wire); err != nil {
+			t.Fatal(err)
+		}
+		if wire.MaxTokens != 128 {
+			t.Fatalf("pinned child cap = %d, want parent cap 128", wire.MaxTokens)
 		}
 		if !reflect.DeepEqual(sess.selection.chain, []string{"primary/agent-model-b"}) {
 			t.Fatalf("parent chain = %v, want the switched one", sess.selection.chain)

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"strings"
 	"testing"
 )
 
@@ -24,5 +25,23 @@ func TestWindowsLoadsWritableCommandThenReportsUnsupported(t *testing.T) {
 	var ce *Error
 	if !errors.As(err, &ce) || ce.Code != "unsupported-platform" || r.Answer != "" {
 		t.Fatalf("Windows run = %+v, %v; want unsupported-platform without a receipt", r, err)
+	}
+}
+
+func TestWindowsCodexUnsupported(t *testing.T) {
+	for _, transport := range []string{"", "exec", "app-server"} {
+		t.Run(transport, func(t *testing.T) {
+			body := strings.Replace(codexConfig, `"adapter":"codex"`, `"adapter":"codex","transport":"`+transport+`"`, 1)
+			path, _ := writeConfig(t, body)
+			cs, err := Load(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			r, err := Run(context.Background(), cs["codex"], "q")
+			var ce *Error
+			if !errors.As(err, &ce) || *ce != (Error{Code: "unsupported-platform", Reason: "platform"}) || r != (Receipt{}) {
+				t.Fatalf("Codex Windows Run(%q) = %+v, %v", transport, r, err)
+			}
+		})
 	}
 }

@@ -47,8 +47,8 @@ not "what `go-llm` requires."
 The fleet co-resides in ~77GB with comfortable headroom. **llama.cpp is now
 the primary local backend** (run one `llama-server` per model on its own
 port, exposing the OpenAI-compatible API; go-llm reaches it via the
-`openai-compat` provider format — see the root
-[README "Local model backends"](../../README.md#local-model-backends)).
+`openai-compat` provider format — see
+[docs/backends.md "Local model backends"](../backends.md#local-model-backends)).
 Ollama remains a supported alternative. The benchmark harness
 (`cmd/llm-bench`) drives both via the `openai-compat/` and `ollama/` model
 selectors; recent calibration runs use llama.cpp. See [setups.md](setups.md)

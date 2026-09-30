@@ -78,7 +78,7 @@ func (a fileState) equal(b fileState) bool {
 
 // undoTargetFrom is the state a file reaches after undoing f, derived from
 // the state cur it currently holds. A create undoes to absent. An update
-// undoes via WriteFileAtomic, which preserves the existing permission bits —
+// undoes via WriteFileAtomicIfMatch, which preserves the verified permission bits —
 // so the simulated state carries cur's mode forward, keeping a tracked
 // older record verifiable across intervening legacy updates (#443).
 func undoTargetFrom(cur fileState, f checkpointFile) fileState {
@@ -714,6 +714,9 @@ func (j *checkpointJournal) restoreFile(out io.Writer, f checkpointFile, e *chec
 	ctx := context.Background()
 	fail := func(err error) bool {
 		j.latch(err)
+		if errors.Is(err, agenttools.ErrPreconditionMismatch) {
+			_, _ = fmt.Fprintf(out, checkpointUndoRefusal, checkpointDisplayText(f.path))
+		}
 		_, _ = fmt.Fprintf(out, "undo failed for %s: %s\n", checkpointDisplayText(f.path), checkpointDisplayText(err.Error()))
 		return false
 	}
@@ -777,10 +780,14 @@ func (j *checkpointJournal) restoreFile(out io.Writer, f checkpointFile, e *chec
 	if !liveBefore.equal(cur) || !matchesAfter(liveBefore, f) {
 		return fail(errors.New("golem: file changed during inverse preparation"))
 	}
+	expected := agenttools.FilePrecondition{Exists: true, Hash: f.afterHash}
+	if f.trackedMode {
+		expected.CheckMode, expected.Mode = true, f.afterMode
+	}
 	if f.existed {
-		err = j.ws.WriteFileAtomic(f.path, f.priorContent)
+		err = j.ws.WriteFileAtomicIfMatch(f.path, f.priorContent, expected)
 	} else {
-		err = j.ws.RemoveFile(f.path)
+		err = j.ws.RemoveFileIfMatch(f.path, expected)
 	}
 	if err != nil {
 		return fail(err)

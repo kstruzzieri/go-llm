@@ -70,8 +70,16 @@ var _ AtomicSignalStore = (*SQLiteSignalStore)(nil)
 
 // NewSignalStore creates a SQLiteSignalStore, running migrations on the
 // provided database if needed.
+//
+// Concurrent migrations coordinate through SQLite's write lock. Configure a
+// positive busy_timeout on every connection (for example, the modernc SQLite
+// DSN parameter _pragma=busy_timeout(5000)); a one-off PRAGMA on a pooled DB
+// does not configure replacement connections. An expired timeout returns the
+// underlying lock error. Complete journal_mode setup before concurrent opens.
+// Current-schema opens only read. Cancellation is observed between statements;
+// a claim waiting on a writer may wait up to busy_timeout before returning.
 func NewSignalStore(ctx context.Context, db *sql.DB) (*SQLiteSignalStore, error) {
-	if err := runMigrations(db); err != nil {
+	if err := runMigrations(ctx, db); err != nil {
 		return nil, fmt.Errorf("feedback: init store: %w", err)
 	}
 	return &SQLiteSignalStore{db: db}, nil

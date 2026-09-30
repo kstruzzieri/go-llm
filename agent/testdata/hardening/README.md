@@ -52,13 +52,17 @@ Other tools and broader platform/path cases stay in their focused tool suites
 and the #452 corpus. The aggregate deliberately reuses focused tests so they
 also run under its single budget; invoking helpers instead of Test functions
 would not remove that duplicate execution. The 500 ms wall-clock assertion
-includes cleanup and can fail under scheduling contention; it is a regression
-budget, not a hard timeout. Exact byte fixtures and named deferred skips are
-intentional parts of this contract.
+includes cleanup and can fail under disk or CPU contention; it is a regression
+budget, not a hard timeout. It applies only when the test binary receives
+`-hardening-budget`, which `scripts/ci-local` passes to its isolated run; the
+contracts run either way. `docs/local-ci.md` explains the split and where
+isolated outliers have come from. Exact byte fixtures and named deferred skips
+are intentional parts of this contract.
 
-Deferred coverage: ZT-602/#431 project trust, ZT-603/#432 MCP description/catalog
-trust, ZT-604/#433 terminal output, ZT-605/#434 quarantine, and ZT-606/#435
-retrieval screening. These are explicit skipped subtests, not implementation
-claims. ANSI preservation at the agent boundary does not test a terminal.
+Deferred coverage: ZT-602/#431 project trust, ZT-605/#434 quarantine, and
+ZT-606/#435 retrieval screening. These are explicit skipped subtests, not
+implementation claims. ZT-603/#432 is active. ZT-604/#433 terminal presentation is covered in
+`cmd/golem/render_sanitization_test.go`; ANSI preservation at the agent boundary
+does not test a terminal.
 Framing is structural; these tests do not establish model obedience.
 #452 owns the broader corpus; #453 owns the dedicated security gate.

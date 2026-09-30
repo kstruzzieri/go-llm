@@ -13,6 +13,7 @@ import (
 	"github.com/kstruzzieri/go-llm/conversation"
 	"github.com/kstruzzieri/go-llm/internal/datadir"
 	"github.com/kstruzzieri/go-llm/internal/pathguard"
+	"github.com/kstruzzieri/go-llm/internal/sqlitedsn"
 	"github.com/kstruzzieri/go-llm/memory"
 	"github.com/kstruzzieri/go-llm/provider"
 	_ "modernc.org/sqlite"
@@ -137,18 +138,21 @@ func openSession(ctx context.Context, dbPath, id string) (*session, sessionInfo,
 	if err := prepareDBFile(dbPath); err != nil {
 		return nil, sessionInfo{}, err
 	}
-	db, err := sql.Open("sqlite", dbPath)
+	// The DSN gives every connection a 5s busy_timeout, including
+	// replacements database/sql opens after a context-cancelled statement.
+	dsn, err := sqlitedsn.WithBusyTimeout(dbPath, 5*time.Second)
 	if err != nil {
 		return nil, sessionInfo{}, fmt.Errorf("golem: open session db %q: %w", dbPath, err)
 	}
-	// modernc.org/sqlite applies PRAGMAs per-connection; clamp the pool to one so
-	// WAL + busy_timeout hold for every write.
+	db, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		return nil, sessionInfo{}, fmt.Errorf("golem: open session db %q: %w", dbPath, err)
+	}
+	// One connection serializes writes.
 	db.SetMaxOpenConns(1)
-	for _, pragma := range []string{"PRAGMA journal_mode=WAL", "PRAGMA busy_timeout=5000"} {
-		if _, err := db.ExecContext(ctx, pragma); err != nil {
-			_ = db.Close()
-			return nil, sessionInfo{}, fmt.Errorf("golem: session db %s: %w", pragma, err)
-		}
+	if _, err := db.ExecContext(ctx, "PRAGMA journal_mode=WAL"); err != nil {
+		_ = db.Close()
+		return nil, sessionInfo{}, fmt.Errorf("golem: session db PRAGMA journal_mode=WAL: %w", err)
 	}
 	store, err := conversation.NewStore(ctx, db) // runs migrations (may create -wal/-shm)
 	if err != nil {
@@ -192,16 +196,17 @@ func (s *session) record(ctx context.Context, userLine, answer string) error {
 
 func (s *session) recordMessages(ctx context.Context, msgs []conversation.Message) error {
 	next := append(append([]conversation.Message{}, s.msgs...), msgs...)
-	if err := s.store.Save(ctx, conversation.Conversation{
+	revision, err := s.store.Save(ctx, conversation.Conversation{
 		ID:             s.id,
 		Revision:       s.revision,
 		Title:          sessionTitle(next),
 		Messages:       next,
 		DurableSummary: cloneDurableSummary(s.summary),
-	}); err != nil {
+	})
+	if err != nil {
 		return err
 	}
-	s.revision++
+	s.revision = revision
 	s.msgs = next
 	// SQLite may have (re)created the -wal/-shm sidecars honoring the umask on
 	// this write; re-secure them (the WAL can hold un-checkpointed message text).

@@ -66,11 +66,12 @@ func TestStepCapStop(t *testing.T) {
 }
 
 func TestBudgetCapStop(t *testing.T) {
-	// each tool turn reports 50 tokens; TotalTokens cap of 60 trips after step 1.
+	// The first request fits admission, but its report overruns the reservation.
+	// Stop before invoking the returned tool call.
 	resps := make([]ModelResult, 10)
 	for i := range resps {
 		resps[i] = ModelResult{Response: provider.ChatResponse{
-			Usage: provider.Usage{TotalTokens: 50},
+			Usage: provider.Usage{TotalTokens: 20000},
 			ToolCalls: []provider.ToolCall{{
 				ID: "1", Type: "function",
 				Function: provider.ToolCallFunction{
@@ -82,13 +83,16 @@ func TestBudgetCapStop(t *testing.T) {
 	mc := &scriptedCaller{responses: resps}
 	o := newTestOrchestrator(mc)
 	res, err := o.Run(context.Background(), Request{
-		Goal: "q", Budget: Budget{TotalTokens: 60}, Tools: []Tool{echoTool{name: "echo"}},
+		Goal: "q", Budget: Budget{TotalTokens: 10000, OutputReserve: 64}, Tools: []Tool{echoTool{name: "echo"}},
 	}, nil)
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 	if res.StopReason != BudgetReached {
 		t.Fatalf("stop = %v, want BudgetReached", res.StopReason)
+	}
+	if mc.calls != 1 || len(res.ToolCalls) != 0 {
+		t.Fatalf("calls=%d tools=%+v, want one model call and no tool execution", mc.calls, res.ToolCalls)
 	}
 }
 
@@ -97,11 +101,11 @@ func TestBudgetCapStopOnFinalAnswer(t *testing.T) {
 		{Response: provider.ChatResponse{
 			Content: "final",
 			Done:    true,
-			Usage:   provider.Usage{TotalTokens: 75},
+			Usage:   provider.Usage{TotalTokens: 20000},
 		}},
 	}}
 	o := newTestOrchestrator(mc)
-	res, err := o.Run(context.Background(), Request{Goal: "q", Budget: Budget{TotalTokens: 60}}, nil)
+	res, err := o.Run(context.Background(), Request{Goal: "q", Budget: Budget{TotalTokens: 10000, OutputReserve: 64}}, nil)
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}

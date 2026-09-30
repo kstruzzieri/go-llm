@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -78,16 +79,23 @@ func (j *mutationJournal) undo(out io.Writer) {
 		return // leave the record on the stack
 	}
 
+	expected := agenttools.FilePrecondition{Exists: true, Hash: rec.AfterHash}
+	if rec.TrackedMode {
+		expected.CheckMode, expected.Mode = true, rec.AfterMode
+	}
 	if rec.Existed {
-		if werr := j.ws.WriteFileAtomic(rec.Path, rec.PriorContent); werr != nil {
-			_, _ = fmt.Fprintf(out, "undo failed for %s: %v\n", rec.Path, werr)
-			return
-		}
+		err = j.ws.WriteFileAtomicIfMatch(rec.Path, rec.PriorContent, expected)
 	} else {
-		if rerr := j.ws.RemoveFile(rec.Path); rerr != nil {
-			_, _ = fmt.Fprintf(out, "undo failed for %s: %v\n", rec.Path, rerr)
-			return
+		err = j.ws.RemoveFileIfMatch(rec.Path, expected)
+	}
+	if err != nil {
+		// Same two lines as checkpoint restoreFile: the shared exact refusal,
+		// then the cause (which may carry joined cleanup failures).
+		if errors.Is(err, agenttools.ErrPreconditionMismatch) {
+			_, _ = fmt.Fprintf(out, checkpointUndoRefusal, rec.Path)
 		}
+		_, _ = fmt.Fprintf(out, "undo failed for %s: %v\n", rec.Path, err)
+		return
 	}
 	j.recs = j.recs[:len(j.recs)-1] // pop only on success
 	_, _ = fmt.Fprintf(out, "undid %s\n", rec.Path)

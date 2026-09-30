@@ -41,6 +41,14 @@ type ToolPlan struct {
 	ApprovalKey string
 }
 
+// ChildScopeDenial is native evidence of refused requests in one scoped dispatch
+// task. Task is its zero-based input position; Requests excludes quiet pruning.
+// Installed Go tools are trusted to produce this evidence.
+type ChildScopeDenial struct {
+	Task     int
+	Requests int64
+}
+
 // ToolResult is the outcome fed back as a tool-role observation.
 type ToolResult struct {
 	Content   string
@@ -66,6 +74,9 @@ type ToolResult struct {
 	// value outside the enum normalizes to unknown. omitempty keeps pre-#436
 	// encodings byte-identical.
 	Origin Origin `json:"Origin,omitempty"`
+	// ChildScopeDenials is transient native evidence for parent inspection.
+	// It has no wire representation and is never stored in conversation history.
+	ChildScopeDenials []ChildScopeDenial `json:"-"`
 }
 
 // Effect is the static, conservative upper bound for a tool.

@@ -123,10 +123,13 @@ func TestToolTrustContractPrecedesInspectionAndFitting(t *testing.T) {
 	if _, err := o.Run(context.Background(), Request{Goal: "q", System: "sys"}, nil); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	if len(ic.inputs) == 0 || !strings.Contains(ic.inputs[0].System, ToolTrustContract) {
-		t.Errorf("inspection missed base contract: step-0 System = %q", ic.inputs)
+	if len(ic.inputs) == 0 {
+		t.Fatal("inspection saw no model input")
 	}
-	if want := "sys\n\n" + ToolTrustContract + "\n\n [canary:x]"; len(ic.inputs) == 0 || ic.inputs[0].System != want {
+	if !strings.Contains(ic.inputs[0].System, ToolTrustContract) {
+		t.Errorf("inspection missed base contract: step-0 System = %q", ic.inputs[0].System)
+	}
+	if want := "sys\n\n" + ToolTrustContract + "\n\n [canary:x]"; ic.inputs[0].System != want {
 		t.Errorf("inspected System = %q, want %q (caller text, contract, addenda)", ic.inputs[0].System, want)
 	}
 	if len(sc.scopes) != 1 || sc.scopes[0] != (RunScope{System: "sys"}) {

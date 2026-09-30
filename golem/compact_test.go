@@ -99,7 +99,7 @@ func TestCompactThreadSQLiteReopenAndSearch(t *testing.T) {
 	}
 	current := compactionConversation(5)
 	current.Revision = 0
-	if err := store.Save(ctx, current); err != nil {
+	if _, err := store.Save(ctx, current); err != nil {
 		t.Fatal(err)
 	}
 	loaded, err := store.Load(ctx, current.ID)
@@ -137,7 +137,8 @@ func TestCompactThreadSQLiteReopenAndSearch(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := cloneConversation(current)
-	want.Revision = 2
+	// A fresh store creates at floor seed 1 plus one; compaction commits the next.
+	want.Revision = 3
 	want.Messages = want.Messages[2:]
 	want.DurableSummary = &conversation.DurableSummary{Content: "SUM", MessageCount: 2}
 	want.UpdatedAt = saved.UpdatedAt
@@ -375,12 +376,12 @@ func TestCompactThreadCloseCancelsSave(t *testing.T) {
 	started, canceled, release := make(chan struct{}), make(chan struct{}), make(chan struct{})
 	unblock := sync.OnceFunc(func() { close(release) })
 	defer unblock()
-	store := compactionStoreHooks{SessionStore: base, save: func(ctx context.Context, _ conversation.Conversation) error {
+	store := compactionStoreHooks{SessionStore: base, save: func(ctx context.Context, _ conversation.Conversation) (int64, error) {
 		close(started)
 		<-ctx.Done()
 		close(canceled)
 		<-release
-		return ctx.Err()
+		return 0, ctx.Err()
 	}}
 	runtime := newCompactionRuntime(t, golem.Options{SessionStore: store, Summarizer: func(context.Context, string, []conversation.Message) (string, error) { return "SUM", nil }})
 	ctx, cancel := context.WithCancel(context.Background())
@@ -409,7 +410,7 @@ func TestCompactThreadCloseCancelsSave(t *testing.T) {
 type compactionStoreHooks struct {
 	golem.SessionStore
 	load func(context.Context, string) (*conversation.Conversation, error)
-	save func(context.Context, conversation.Conversation) error
+	save func(context.Context, conversation.Conversation) (int64, error)
 }
 
 func (s compactionStoreHooks) Load(ctx context.Context, id string) (*conversation.Conversation, error) {
@@ -419,7 +420,7 @@ func (s compactionStoreHooks) Load(ctx context.Context, id string) (*conversatio
 	return s.SessionStore.Load(ctx, id)
 }
 
-func (s compactionStoreHooks) Save(ctx context.Context, current conversation.Conversation) error {
+func (s compactionStoreHooks) Save(ctx context.Context, current conversation.Conversation) (int64, error) {
 	if s.save != nil {
 		return s.save(ctx, current)
 	}
@@ -567,21 +568,22 @@ func TestCompactThreadCancellationBoundaries(t *testing.T) {
 					loaded := cloneConversation(current)
 					return &loaded, nil
 				},
-				save: func(saveCtx context.Context, candidate conversation.Conversation) error {
+				save: func(saveCtx context.Context, candidate conversation.Conversation) (int64, error) {
 					saves++
 					if phase == "save" {
 						cancel()
-						return saveCtx.Err()
+						return 0, saveCtx.Err()
 					}
 					// Ignore cancellation deliberately: the runtime must refuse to
 					// call Save when cancellation happened before this boundary.
-					if err := base.Save(context.Background(), candidate); err != nil {
-						return err
+					revision, err := base.Save(context.Background(), candidate)
+					if err != nil {
+						return 0, err
 					}
 					if phase == "committed save" {
 						cancel()
 					}
-					return nil
+					return revision, nil
 				},
 			}
 			runtime := newCompactionRuntime(t, golem.Options{SessionStore: store, Summarizer: func(context.Context, string, []conversation.Message) (string, error) {
@@ -757,7 +759,7 @@ func TestCompactionSessionConflictPreservesWinnerAndSearch(t *testing.T) {
 			}
 			current := compactionConversation(5)
 			current.Revision = 0
-			if err := store.Save(ctx, current); err != nil {
+			if _, err := store.Save(ctx, current); err != nil {
 				t.Fatal(err)
 			}
 			otherDB, err := memory.OpenHardenedDB(ctx, path)
@@ -811,9 +813,10 @@ func TestCompactionSessionConflictPreservesWinnerAndSearch(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			wantRevision := int64(1)
+			// A fresh store creates at floor seed 1 plus one.
+			wantRevision := int64(2)
 			if automatic {
-				wantRevision = 2
+				wantRevision = 3
 				if len(winning.Messages) != 12 || winning.Messages[10].Content != "raw question" {
 					t.Fatalf("raw commit missing before summary: %+v", winning)
 				}
@@ -823,7 +826,7 @@ func TestCompactionSessionConflictPreservesWinnerAndSearch(t *testing.T) {
 			}
 			winning.Title = "winner"
 			winning.DurableSummary = &conversation.DurableSummary{Content: "winningsummary", MessageCount: 22}
-			if err := other.Save(ctx, *winning); err != nil {
+			if _, err := other.Save(ctx, *winning); err != nil {
 				t.Fatal(err)
 			}
 			want, err := other.Load(ctx, current.ID)

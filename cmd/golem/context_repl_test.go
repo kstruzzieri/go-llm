@@ -147,7 +147,7 @@ func TestContextSessionBoundaries(t *testing.T) {
 		for _, fail := range []bool{false, true} {
 			t.Run(cmd+map[bool]string{true: " failure", false: " success"}[fail], func(t *testing.T) {
 				sess := newCanarySession(t, &captureCaller{answer: "ok"})
-				if err := sess.session.store.Save(t.Context(), conversation.Conversation{ID: "user:other", Messages: []conversation.Message{{Role: "user", Content: "old"}}}); err != nil {
+				if _, err := sess.session.store.Save(t.Context(), conversation.Conversation{ID: "user:other", Messages: []conversation.Message{{Role: "user", Content: "old"}}}); err != nil {
 					t.Fatal(err)
 				}
 				capture := &pressureCapture{runID: "prior", seen: true, latest: contextFixture()}

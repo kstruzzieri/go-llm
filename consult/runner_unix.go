@@ -222,6 +222,25 @@ func killGroup(pid int) error {
 	}
 }
 
+// cleanupGroup removes same-group descendants after the leader has exited.
+// Keep the existing one-second cleanup proof bound independent of pipe EOF.
+func cleanupGroup(pid int) bool {
+	_ = killGroup(pid)
+	deadline := time.Now().Add(time.Second)
+	delay := 10 * time.Millisecond
+	for {
+		if groupExited(pid) {
+			return true
+		}
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return false
+		}
+		time.Sleep(min(delay, remaining))
+		delay = min(2*delay, 100*time.Millisecond)
+	}
+}
+
 // cappedWriter counts every byte, retains at most cap of them when retain is
 // set, drains the rest without blocking, and fires onExceed exactly once when
 // the cap is crossed.
@@ -232,6 +251,7 @@ type cappedWriter struct {
 	n        int
 	cap      int
 	exceeded bool
+	drained  bool
 	onExceed func()
 }
 
@@ -255,6 +275,22 @@ func (w *cappedWriter) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
+// ReadFrom records EOF independently: exec.Wait can prefer a nonzero exit
+// error over the error from an abandoned pipe copy.
+func (w *cappedWriter) ReadFrom(r io.Reader) (int64, error) {
+	n, err := io.Copy(struct{ io.Writer }{w}, r)
+	w.mu.Lock()
+	w.drained = err == nil
+	w.mu.Unlock()
+	return n, err
+}
+
+func (w *cappedWriter) complete() bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.drained
+}
+
 func (w *cappedWriter) count() int {
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -276,6 +312,9 @@ func run(ctx context.Context, spec runSpec) (out runOutcome, err error) {
 	if len(spec.stdin) > maxStdinBytes || !utf8.ValidString(spec.stdin) {
 		return out, fmt.Errorf("%w: input exceeds 64 KiB or is not valid UTF-8", errStdinInvalid)
 	}
+	if spec.adapter != "" && spec.adapter != claudeAdapter && spec.adapter != codexAdapter {
+		return out, errors.New("consult: unsupported environment profile")
+	}
 	if spec.timeout <= 0 || spec.outputCap <= 0 {
 		return out, errors.New("consult: timeout and output cap must be positive")
 	}
@@ -295,7 +334,12 @@ func run(ctx context.Context, spec runSpec) (out runOutcome, err error) {
 	}()
 	out.Cwds = env.cwds()
 
-	childEnv, envErr := buildEnv(env)
+	var childEnv []string
+	if spec.adapter == codexAdapter {
+		childEnv, envErr = codexEnv(env)
+	} else {
+		childEnv, envErr = buildEnv(env)
+	}
 	if envErr != nil {
 		return out, envErr
 	}
@@ -345,26 +389,15 @@ func run(ctx context.Context, spec runSpec) (out runOutcome, err error) {
 	}
 	waitErr := cmd.Wait()
 	out.WaitErrorKind = waitErrorKind(waitErr)
+	if !outW.complete() || !errW.complete() {
+		out.WaitErrorKind = "wait-delay"
+	}
 	out.WaitStatus = waitStatus(cmd.ProcessState)
 
 	// Same-group descendants can outlive a normally exiting leader; setsid
 	// escapes remain outside this trust boundary. Nothing left to kill is the
 	// expected case here, so the result is ignored.
-	_ = killGroup(cmd.Process.Pid)
-	deadline := time.Now().Add(time.Second)
-	delay := 10 * time.Millisecond
-	for {
-		if groupExited(cmd.Process.Pid) {
-			out.GroupCleanupOK = true
-			break
-		}
-		remaining := time.Until(deadline)
-		if remaining <= 0 {
-			break
-		}
-		time.Sleep(min(delay, remaining))
-		delay = min(2*delay, 100*time.Millisecond)
-	}
+	out.GroupCleanupOK = cleanupGroup(cmd.Process.Pid)
 
 	out.Duration = time.Since(start)
 	out.Stdout = outW.snapshot()
@@ -427,9 +460,9 @@ func waitStatus(ps *os.ProcessState) string {
 	return "exited(" + strconv.Itoa(ps.ExitCode()) + ")"
 }
 
-// waitErrorKind maps cmd.Wait's error to a fixed literal. Only "none" and
-// "exit" mean the pipes were drained to EOF; "wait-delay" means WaitDelay
-// abandoned the copy and "other" is any unexpected error. Both fail closed.
+// waitErrorKind maps cmd.Wait's error to a fixed literal. The caller must
+// independently check both pipe copies: an ExitError can hide a drain error.
+// "wait-delay" and "other" fail closed regardless of the exit status.
 //
 // "other" also catches the context error Go injects when a child exits 0 while
 // being cancelled. That is deliberate: the drain cannot be trusted in that
@@ -447,4 +480,17 @@ func waitErrorKind(err error) string {
 	default:
 		return "other"
 	}
+}
+
+// codexEnv supplies only the nine names in the accepted Codex profile.
+func codexEnv(e *envelope) ([]string, error) {
+	identity, err := hostIdentity()
+	if err != nil {
+		return nil, err
+	}
+	return []string{
+		"PATH=/usr/bin:/bin:/usr/sbin:/sbin", "LC_ALL=C", "HOME=" + identity.home,
+		"TMPDIR=" + e.tmp, "USER=" + identity.name, "XDG_CONFIG_HOME=" + e.config,
+		"XDG_CACHE_HOME=" + e.cache, "XDG_STATE_HOME=" + e.state, "CODEX_EXEC_SERVER_URL=none",
+	}, nil
 }

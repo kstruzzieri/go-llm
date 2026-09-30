@@ -24,10 +24,10 @@ go-llm/
 ├── completion/      # IDE inline completion (Fill-in-the-Middle)
 ├── analysis/        # Domain-specific analysis helpers (code review, ML metrics, trading)
 ├── agent/           # Agent runtime: Orchestrator loop, effect-aware tools, serial/parallel dispatch, opt-in interceptor pipeline (#436: ingress hooks on frozen values, allow/tag/block/abort, per-run RiskReport, provenance)
-├── agent/interceptor/ # Opt-in defaults: origin-sensitive injection detectors (zero-width, encoded instructions, typoglycemia), all-origin secret/payment-card blocking, argument-invariant guards, and exec egress labels
+├── agent/interceptor/ # Opt-in defaults: origin-sensitive injection detectors (zero-width, encoded instructions, typoglycemia), all-origin secret/payment-card blocking, argument-invariant guards, exec egress labels, and native scoped-child refusal reporting (#555)
 ├── mcp/             # MCP server: tools, prompts, resources over stdio/HTTP/2 — wired through provider.Router
 ├── mcpclient/       # MCP client: adapts external MCP servers' tools into agent.Tool (stdio/streamable-HTTP); consumed by cmd/golem
-├── consult/         # /consult seam: bounded host runner + Claude subscription adapter (#382); unsigned consult-result/v1 receipts
+├── consult/         # /consult seam: bounded host runner + Claude and Codex subscription adapters (#382, #546); unsigned consult-result/v1 receipts
 ├── conversation/    # Persistent conversation storage with SQLite
 ├── memory/          # Explicit user-controlled local memories + agent-memory records (SQLite, scope-filtered FTS5/bm25 search); shared hardened-open primitives (open.go); separate from conversation + RAG; backs Golem /remember + memory_search AND MCP agent_memory_* tools
 ├── projectcontext/  # AGENTS.md-style project-context loader (discovery, safe read, ordering; consumed by cmd/golem)

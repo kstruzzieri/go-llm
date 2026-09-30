@@ -35,7 +35,7 @@ func TestSave_And_Load_RoundTrip(t *testing.T) {
 		},
 	}
 
-	if err := store.Save(ctx, conv); err != nil {
+	if _, err := store.Save(ctx, conv); err != nil {
 		t.Fatalf("Save() error: %v", err)
 	}
 
@@ -84,7 +84,7 @@ func TestSave_And_Load_RoundTripWithDurableSummary(t *testing.T) {
 		},
 	}
 
-	if err := store.Save(ctx, conv); err != nil {
+	if _, err := store.Save(ctx, conv); err != nil {
 		t.Fatalf("Save() error: %v", err)
 	}
 
@@ -110,7 +110,7 @@ func TestSave_EmptyID_ReturnsError(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()
 
-	err := store.Save(ctx, Conversation{ID: "", Title: "no id"})
+	_, err := store.Save(ctx, Conversation{ID: "", Title: "no id"})
 	if err == nil {
 		t.Fatal("Save() with empty ID should return error")
 	}
@@ -121,7 +121,7 @@ func TestSave_NilMessages_NormalizesToEmptyArray(t *testing.T) {
 	ctx := context.Background()
 
 	conv := Conversation{ID: NewID(), Title: "empty"}
-	if err := store.Save(ctx, conv); err != nil {
+	if _, err := store.Save(ctx, conv); err != nil {
 		t.Fatalf("Save() error: %v", err)
 	}
 
@@ -147,7 +147,7 @@ func TestSave_Update_PreservesCreatedAt(t *testing.T) {
 		Title:    "original",
 		Messages: []Message{{Role: "user", Content: "v1"}},
 	}
-	if err := store.Save(ctx, conv); err != nil {
+	if _, err := store.Save(ctx, conv); err != nil {
 		t.Fatalf("Save() error: %v", err)
 	}
 
@@ -161,7 +161,7 @@ func TestSave_Update_PreservesCreatedAt(t *testing.T) {
 	conv = *first
 	conv.Title = "updated"
 	conv.Messages = append(conv.Messages, Message{Role: "assistant", Content: "v2"})
-	if err := store.Save(ctx, conv); err != nil {
+	if _, err := store.Save(ctx, conv); err != nil {
 		t.Fatalf("Save() update error: %v", err)
 	}
 
@@ -204,7 +204,7 @@ func TestList_OrderedByUpdatedAtDesc(t *testing.T) {
 	ids := make([]string, 3)
 	for i := range ids {
 		ids[i] = NewID()
-		err := store.Save(ctx, Conversation{
+		_, err := store.Save(ctx, Conversation{
 			ID:       ids[i],
 			Title:    string(rune('A' + i)),
 			Messages: []Message{{Role: "user", Content: "msg"}},
@@ -242,7 +242,7 @@ func TestDelete_Idempotent(t *testing.T) {
 	ctx := context.Background()
 
 	id := NewID()
-	if err := store.Save(ctx, Conversation{ID: id, Title: "delete me"}); err != nil {
+	if _, err := store.Save(ctx, Conversation{ID: id, Title: "delete me"}); err != nil {
 		t.Fatalf("Save() error: %v", err)
 	}
 	if err := store.Delete(ctx, id); err != nil {
@@ -269,10 +269,10 @@ func TestSearch_FindsMessageTextWithoutLoadingBlobs(t *testing.T) {
 			{Role: "assistant", Content: "The approval prompt gates writes and exec."},
 		},
 	}
-	if err := store.Save(ctx, conv); err != nil {
+	if _, err := store.Save(ctx, conv); err != nil {
 		t.Fatalf("Save() error: %v", err)
 	}
-	if err := store.Save(ctx, Conversation{
+	if _, err := store.Save(ctx, Conversation{
 		ID:       "workspace:beta",
 		Title:    "Unrelated",
 		Messages: []Message{{Role: "user", Content: "quantum trading notes"}},
@@ -311,7 +311,7 @@ func TestSearch_FindsDurableSummaryText(t *testing.T) {
 			MessageCount: 8,
 		},
 	}
-	if err := store.Save(ctx, conv); err != nil {
+	if _, err := store.Save(ctx, conv); err != nil {
 		t.Fatalf("Save() error: %v", err)
 	}
 
@@ -328,7 +328,7 @@ func TestSearch_FindsToolCallPayloads(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()
 
-	if err := store.Save(ctx, Conversation{
+	if _, err := store.Save(ctx, Conversation{
 		ID:    "workspace:toolcall",
 		Title: "Tool call session",
 		Messages: []Message{
@@ -355,16 +355,17 @@ func TestSearch_UpdateAndDeleteStayInSync(t *testing.T) {
 	ctx := context.Background()
 
 	id := "workspace:sync"
-	if err := store.Save(ctx, Conversation{
+	revision, err := store.Save(ctx, Conversation{
 		ID:       id,
 		Title:    "Sync",
 		Messages: []Message{{Role: "user", Content: "alpha needle"}},
-	}); err != nil {
+	})
+	if err != nil {
 		t.Fatal(err)
 	}
-	if err := store.Save(ctx, Conversation{
+	if _, err := store.Save(ctx, Conversation{
 		ID:       id,
-		Revision: 1,
+		Revision: revision,
 		Title:    "Sync",
 		Messages: []Message{{Role: "user", Content: "bravo needle"}},
 	}); err != nil {
@@ -407,7 +408,7 @@ func TestSearch_IDPrefixScopeAndLimit(t *testing.T) {
 		{ID: "user:b", Title: "B", Messages: []Message{{Role: "user", Content: "shared term"}}},
 		{ID: "user:c", Title: "C", Messages: []Message{{Role: "user", Content: "shared term"}}},
 	} {
-		if err := store.Save(ctx, conv); err != nil {
+		if _, err := store.Save(ctx, conv); err != nil {
 			t.Fatalf("Save(%s): %v", conv.ID, err)
 		}
 	}
@@ -466,7 +467,7 @@ func TestSave_And_Load_WithToolCalls(t *testing.T) {
 		Title:    "tool call test",
 		Messages: msgs,
 	}
-	if err := store.Save(ctx, conv); err != nil {
+	if _, err := store.Save(ctx, conv); err != nil {
 		t.Fatalf("Save() error: %v", err)
 	}
 

@@ -13,6 +13,7 @@ import (
 
 	"github.com/kstruzzieri/go-llm/agent"
 	"github.com/kstruzzieri/go-llm/feedback"
+	"github.com/kstruzzieri/go-llm/internal/sqlitedsn"
 	"github.com/kstruzzieri/go-llm/rag"
 )
 
@@ -198,7 +199,13 @@ func openFeedbackService(ctx context.Context, root, dbPath string, warn func(str
 	if err := prepareDBFile(dbPath); err != nil {
 		return nil, err
 	}
-	writer, err := sql.Open("sqlite", dbPath)
+	// The DSN gives every connection a 1s busy_timeout, including
+	// replacements database/sql opens after a context-cancelled statement.
+	dsn, err := sqlitedsn.WithBusyTimeout(dbPath, time.Second)
+	if err != nil {
+		return nil, fmt.Errorf("open %q: %w", dbPath, err)
+	}
+	writer, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("open %q: %w", dbPath, err)
 	}
@@ -209,10 +216,8 @@ func openFeedbackService(ctx context.Context, root, dbPath string, warn func(str
 			_ = writer.Close()
 		}
 	}()
-	for _, pragma := range []string{"PRAGMA journal_mode=WAL", "PRAGMA busy_timeout=1000"} {
-		if _, err := writer.ExecContext(ctx, pragma); err != nil {
-			return nil, fmt.Errorf("%s: %w", pragma, err)
-		}
+	if _, err := writer.ExecContext(ctx, "PRAGMA journal_mode=WAL"); err != nil {
+		return nil, fmt.Errorf("PRAGMA journal_mode=WAL: %w", err)
 	}
 	store, err := feedback.NewSignalStore(ctx, writer)
 	if err != nil {

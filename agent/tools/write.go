@@ -129,16 +129,19 @@ func (t *WriteFile) Invoke(ctx context.Context, raw json.RawMessage) (agent.Tool
 	if nowExists != pp.priorExists || curHash != pp.beforeHash {
 		return errResult("file changed since preview; retry"), nil
 	}
-	// Residual TOCTOU window: an external process could change the file's content
-	// between this re-read and the rename below. WriteFileAtomic re-checks path TYPE
-	// (symlink/dir) before renaming but not content; without OS file locks this is an
-	// accepted limitation for a local single-user coding agent.
+	// The decisive hash/existence check runs after Prepare, through the same
+	// parent capability as installation. The earlier read supplies helpful errors;
+	// it does not authorize a later walk.
 	rec := MutationRecord{
 		Path: pp.path, PriorContent: pp.priorContent, Existed: pp.priorExists,
 		AfterHash: pp.afterHash, Summary: pp.summary, At: time.Now(),
 	}
+	expected := FilePrecondition{Exists: pp.priorExists}
+	if pp.priorExists {
+		expected.Hash = pp.beforeHash // never pass the private absentHash marker
+	}
 	toolErr, internalErr := runJournaledWrite(ctx, t.j, rec, func() error {
-		return t.ws.WriteFileAtomic(pp.path, pp.afterContent)
+		return t.ws.WriteFileAtomicIfMatch(pp.path, pp.afterContent, expected)
 	})
 	if internalErr != nil {
 		return agent.ToolResult{}, internalErr

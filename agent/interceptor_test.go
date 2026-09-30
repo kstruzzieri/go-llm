@@ -1383,7 +1383,10 @@ func recordOne(t *testing.T, o *Orchestrator, run *interceptorRun, obs Observer,
 	effect := normalizeEffect(Effect{Class: Read, OutputCap: cap})
 	var res Result
 	var state State
-	out := o.invokeCall(context.Background(), tool, effect, call.Function.Arguments)
+	out, err := o.invokeCall(context.Background(), tool, effect, call.Function.Arguments)
+	if err != nil {
+		t.Fatal(err)
+	}
 	b := newBatch()
 	if _, err := o.recordResult(context.Background(), &res, &state, obs, &restraintGovernor{}, 0, call, effect, ToolCallRecord{Step: 0, Name: tool.Spec().Name, Invoked: true}, out, false, &b, run); err != nil {
 		t.Fatalf("recordResult: %v", err)

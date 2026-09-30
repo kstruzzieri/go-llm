@@ -10,26 +10,35 @@ Enable the pre-push hook once per clone:
 scripts/setup-local-ci
 ```
 
-After updating to this version, rebuild the CI image once so it includes the
-Python prerequisite used by the audit regression test:
+Run the same suite the hook runs. `--build` builds the image from this checkout
+before the gate, reusing cached layers when the Dockerfile has not changed:
 
 ```bash
-docker compose -f docker-compose.ci.yml build ci
-```
-
-Run the same suite the hook runs:
-
-```bash
-docker compose -f docker-compose.ci.yml run --rm ci ./scripts/ci-local --mode full
+docker compose -f docker-compose.ci.yml run --build --rm ci ./scripts/ci-local --mode full
 ```
 
 Run the faster pre-push subset manually when you do not need the compile-smoke pass:
 
 ```bash
-docker compose -f docker-compose.ci.yml run --rm ci ./scripts/ci-local --mode pre-push
+docker compose -f docker-compose.ci.yml run --build --rm ci ./scripts/ci-local --mode pre-push
 ```
 
 The Docker runner builds from `Dockerfile.ci`, mounts the repository at `/workspace`, and keeps named cache volumes for Go modules, Go build output, and golangci-lint data. The compose file pins the project name to `go-llm`, so linked worktrees share the same image and cache volumes as the main checkout.
+Rebuilding from another branch replaces that shared image. The hook builds from
+its own checkout before testing, but this does not isolate concurrent builds:
+coordinate builds across worktrees when their Dockerfiles differ. For a manual
+run with a separate image and cache volumes, use an explicit project name:
+
+```bash
+docker compose -p go-llm-my-branch -f docker-compose.ci.yml run --build --rm ci ./scripts/ci-local --mode full
+```
+
+That project starts with cold caches. Remove its image and volumes when done:
+
+```bash
+docker compose -p go-llm-my-branch -f docker-compose.ci.yml down --volumes --rmi local
+```
+
 On a Linux host the bind-mounted checkout must be readable by uid 1000; the gate never writes into it. The volumes carry a `-ci` suffix (`go-llm_go-build-cache-ci`, `go-llm_go-mod-cache-ci`, `go-llm_golangci-lint-cache-ci`) because the image runs unprivileged and the volumes must be created with that ownership; the root-owned volumes of the earlier image (`go-llm_go-build-cache`, `go-llm_go-mod-cache`, `go-llm_golangci-lint-cache`) are no longer used and can be removed with `docker volume rm`.
 
 ## Linked Worktrees
@@ -39,15 +48,16 @@ On a Linux host the bind-mounted checkout must be readable by uid 1000; the gate
 `scripts/test-ci-local` is a hermetic regression harness for the local gate. It
 stubs the external commands, needs no toolchain or Docker, and covers root
 discovery, exact phase ordering, prerequisites, failure status propagation, the
-pre-push hook, and the native Darwin selectors and requirement environment. The
+pre-push hook, the native Darwin selectors and requirement environment, and the
+Windows and FreeBSD vets shared by `--mode full` and the `CI` workflow. The
 `CI` workflow runs it on every pull request.
 
 ## Typical Workflow
 
 1. Make code changes normally.
 2. Run `scripts/ci-local --mode pre-push` for a faster host-side check while iterating, or use the Docker command above when you want the pinned CI toolchain.
-3. Push the branch. The `.githooks/pre-push` hook automatically runs the Docker-backed `full` suite and blocks the push on failure.
-4. GitHub runs the required `Lint & Test` and `macOS Compile Smoke` workflows on PRs to satisfy branch protection. Ordinary push-triggered Actions remain disabled.
+3. Push the branch. The `.githooks/pre-push` hook automatically builds the current checkout's CI image and runs the Docker-backed `full` suite and blocks the push on failure.
+4. GitHub runs the required `Lint & Test`, `Test (oldest supported Go)`, `Linux Sandbox (bwrap)`, and `macOS Compile Smoke` checks on PRs to satisfy branch protection. Ordinary push-triggered Actions remain disabled.
 
 ## Command Contract
 
@@ -57,7 +67,7 @@ Run the faster pre-push subset directly on the host:
 scripts/ci-local --mode pre-push
 ```
 
-Run the full suite directly on the host. This includes all `pre-push` checks plus compile smoke:
+Run the full suite directly on the host. This includes all `pre-push` checks plus compile smoke, which also runs `go vet ./...` with `GOOS=windows` and `GOOS=freebsd` so code or tests that only type-check on Linux or macOS fail locally:
 
 ```bash
 scripts/ci-local --mode full
@@ -74,13 +84,13 @@ scripts/ci-local --mode security
 Run the faster pre-push subset inside Docker:
 
 ```bash
-docker compose -f docker-compose.ci.yml run --rm ci ./scripts/ci-local --mode pre-push
+docker compose -f docker-compose.ci.yml run --build --rm ci ./scripts/ci-local --mode pre-push
 ```
 
 Run the full suite inside Docker. This is what the pre-push hook runs automatically:
 
 ```bash
-docker compose -f docker-compose.ci.yml run --rm ci ./scripts/ci-local --mode full
+docker compose -f docker-compose.ci.yml run --build --rm ci ./scripts/ci-local --mode full
 ```
 
 ## Check Sets
@@ -88,7 +98,7 @@ docker compose -f docker-compose.ci.yml run --rm ci ./scripts/ci-local --mode fu
 `pre-push` runs:
 
 - compiled discovery of `TestHardeningContracts`, followed by a fresh,
-  verbose, non-race run of that aggregate
+  verbose, non-race run of that aggregate with its 500 ms budget enforced
 - `golangci-lint fmt --diff` (all Go files, including inactive build tags)
 - `golangci-lint run`
 - `go test -race ./...`
@@ -108,20 +118,37 @@ including values saved with `go env -w`, so local defaults cannot silently filte
 out tests. It requires both the exact top-level aggregate and its `Active` group
 to report `PASS`: every real contract lives under `Active`, so a zero-test
 success, a top-level `SKIP`, or a skipped `Active` group fails before formatting.
-Only the five declared deferred boundary groups (`ZT-602` through `ZT-606`) may
+Only the three declared boundary groups (`ZT-602`, `ZT-605`, and `ZT-606`) may
 skip; any other `SKIP` line inside the aggregate fails. Removing a contract call
 outright emits no skip, so that remains a review responsibility; the gate proves
 the named groups executed, not that their contents are complete.
 
 The aggregate phase uses these exact commands (with `GOROOT` unset and
-`GOFLAGS=' '` exported for the rest of the script). The 60-second timeout bounds a
-hung contract well under Go's ten-minute default; the aggregate itself asserts a
-500 ms budget.
+`GOFLAGS=' '` exported for the rest of the script):
 
 ```bash
 go test -list '^TestHardeningContracts$' ./agent
-go test -count=1 -timeout 60s -v -run '^TestHardeningContracts$' ./agent
+go test -count=1 -timeout 60s -v -run '^TestHardeningContracts$' ./agent -args -hardening-budget
 ```
+
+The 60-second timeout bounds a hung contract well under Go's ten-minute
+default. `-hardening-budget` makes the aggregate assert its 500 ms wall-clock
+budget, cleanup included. Only this isolated run passes it; the
+repository-wide race pass runs the same contracts without it, because there the
+aggregate competes with every other package's tests for disk and CPU.
+
+Isolation reduces that contention but does not remove it. Isolated outliers so
+far concentrate in one contract, ZT-603 (MCP catalog trust), which makes
+durable pin writes and opens loopback MCP sessions; a local experiment slowed
+it more under write-and-fsync load than under CPU load (measurements in PR
+#604). When a budget failure's `-v` output shows ZT-603 dominating, suspect
+machine load, especially disk, before a regression.
+
+The script also requires the run to log `budget enforced: true`. Renaming the
+flag in the test fails this run on an undefined flag; dropping it from the
+script fails `scripts/test-ci-local`, which pins the exact command, and fails
+the log check; deleting the budget block fails the log check. Deleting or
+inverting only the assertion remains a review responsibility.
 
 The local Docker service runs as an unprivileged user (uid 1000), so the
 permission-denial tests that skip under root execute in the gate exactly as they
@@ -140,11 +167,11 @@ test ...'` execs its final command, leaving `go` as PID 1) never reaps them and
 The pre-push hook lives at `.githooks/pre-push` and runs the full Docker-backed suite:
 
 ```bash
-docker compose -f docker-compose.ci.yml run --rm ci ./scripts/ci-local --mode full
+docker compose -f docker-compose.ci.yml run --build --rm ci ./scripts/ci-local --mode full
 ```
 
-That means pushes fail locally if security contracts, lint, race tests, or
-compile-smoke checks fail.
+That means pushes fail locally if the image build, security contracts, lint, race
+tests, or compile-smoke checks fail.
 
 The setup script only updates this clone's local Git config:
 
@@ -155,6 +182,32 @@ git config core.hooksPath .githooks
 ## GitHub Actions
 
 The `CI` workflow runs on `pull_request` so protected branches receive the required `Lint & Test` status. It does not run on ordinary pushes. Its `Security contracts` step runs `scripts/ci-local --mode security`, the same discovery, exact-`PASS`, and skip-allowlist gate the pre-push hook runs, so a renamed, skipped, or hollowed-out aggregate cannot pass the required check by bypassing the local hook.
+
+The workflow runs the full race-test suite on two toolchains, logging `go version`
+immediately before each run:
+
+| Check | Toolchain | Checks |
+| --- | --- | --- |
+| `Lint & Test` | `go-version-file: go.mod` (the `toolchain` directive) | CI/changelog self-tests and guards, lint, formatting, security contracts, race tests, cross-platform compile smoke (a Windows `cmd/golem` build plus `go vet ./...` for Windows and FreeBSD), and GoReleaser config validation |
+| `Test (oldest supported Go)` | `actions/setup-go` resolves the `go-version: '1.N.x'` query in `ci.yml` | `go test -race ./...` only |
+
+The compatibility job sets `GOTOOLCHAIN=local` for both its version log and tests,
+so the newer `toolchain` directive cannot silently replace the compiler selected
+by setup-go. `1.N.x` is a setup-go version query, not a concrete toolchain name.
+The current job retains the exact required status name `Lint & Test`; sandbox
+jobs and release tooling continue to use the toolchain declared in `go.mod`.
+
+The compatibility lane tests the oldest Go the module accepts: the minor of the
+`go` directive in `go.mod`. While that matches the `toolchain` line it only adds
+the latest patch release; once `toolchain` moves to a newer minor it is the only
+lane that builds with the floor. `scripts/test-ci-local` fails when the lane and
+the `go` directive drift apart or when `GOTOOLCHAIN: local` is removed, so move
+the lane in the same change that moves the floor. Keep the floor on a release
+inside the [Go support window](https://go.dev/doc/devel/release#policy) (each
+major release is supported until two newer major releases exist). The check name
+carries no version, so branch protection keeps requiring it across bumps.
+A cross-version contract or golden-vector failure is a toolchain dependency to
+investigate before release; do not hide it by upgrading the compatibility run.
 
 The macOS compile-smoke workflow also runs on pull requests to `develop` and `main`, providing the required native-Darwin status and real Seatbelt confinement coverage. It remains available as a manual fallback through `workflow_dispatch`. Local Docker CI is the blocking path before pushes during normal development.
 
@@ -186,4 +239,4 @@ filesystem still skip in the container; the native Darwin job covers those.
 
 ## Notes
 
-The CI image is based on `golang:1.27-alpine`, matching the `toolchain` line in `go.mod` (the module's minimum language version stays `go 1.25.0`). It installs `build-base` and sets `CGO_ENABLED=1` because Go's race detector requires cgo support even though the module itself avoids cgo-only dependencies.
+The CI image is based on `golang:1.27-alpine`, matching the `toolchain` line and the `go` directive in `go.mod`. It installs `build-base` and sets `CGO_ENABLED=1` because Go's race detector requires cgo support even though the module itself avoids cgo-only dependencies.

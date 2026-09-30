@@ -3,7 +3,10 @@ package tools
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io/fs"
+
+	"github.com/kstruzzieri/go-llm/agent"
 )
 
 // toolErrMessage maps an internal filesystem or scope failure to the fixed,
@@ -37,10 +40,36 @@ func toolErrMessage(err error) string {
 }
 
 // toolVisibleError removes host-only ScopeGuard details before a mutating tool
-// exposes an error through Plan or ToolResult. Other diagnostics are unchanged.
+// exposes an error through Plan or ToolResult, and prefixes a precondition
+// mismatch with the retry hint. Other diagnostics are unchanged.
 func toolVisibleError(err error) error {
 	if errors.Is(err, errScopeDenied) {
+		// Sanitize each joined cause, retaining independent cleanup/journal failures.
+		if joined, ok := err.(interface{ Unwrap() []error }); ok {
+			causes := joined.Unwrap()
+			safe := make([]error, len(causes))
+			for i, cause := range causes {
+				safe[i] = toolVisibleError(cause)
+			}
+			return errors.Join(safe...)
+		}
+		if cause := errors.Unwrap(err); cause != nil && errors.Is(cause, errScopeDenied) {
+			return toolVisibleError(cause)
+		}
 		return errScopeDenied
 	}
+	if errors.Is(err, ErrPreconditionMismatch) {
+		return fmt.Errorf("file changed since preview; retry: %w", err)
+	}
 	return err
+}
+
+// toolErrorResult counts an actual refused scoped request at its terminal error
+// return, before the typed identity is lost to display text. Formatting errors
+// and silently pruning enumeration entries never pass this boundary.
+func (w *Workspace) toolErrorResult(err error) agent.ToolResult {
+	if w.scope != nil && errors.Is(err, errScopeDenied) {
+		w.scope.requests.Add(1)
+	}
+	return errResult(toolErrMessage(err))
 }

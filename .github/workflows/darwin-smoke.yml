@@ -37,6 +37,12 @@ jobs:
       - name: Background exec runtime
         run: go test -race -run 'TestBackground(Process|Manager)|TestRunBackground|TestJobs|TestProcessExitObserver' ./agent/tools ./cmd/golem
 
+      # Workspace mutation boundary (#552) on APFS: the case/normalization
+      # alias suites skip on case-sensitive Linux filesystems, and the Darwin
+      # O_SEARCH / RENAME_EXCL descriptor paths differ from Linux.
+      - name: Workspace mutation boundary
+        run: go test -race -count=1 -run '^TestMutation' ./agent/tools ./cmd/golem
+
       # Real Seatbelt confinement (#442). GO_LLM_REQUIRE_SEATBELT=1 turns a
       # skip into a hard failure, so a runner that cannot apply Seatbelt (a
       # nested sandbox) fails the gate rather than silently passing. The

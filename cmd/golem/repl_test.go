@@ -1065,7 +1065,7 @@ func TestREPL_SessionsListsStoredSessions(t *testing.T) {
 	if err := sess.session.record(context.Background(), "current question", "current answer"); err != nil {
 		t.Fatal(err)
 	}
-	if err := sess.session.store.Save(context.Background(), conversation.Conversation{
+	if _, err := sess.session.store.Save(context.Background(), conversation.Conversation{
 		ID:       "user:other",
 		Title:    "other title",
 		Messages: []conversation.Message{{Role: "user", Content: "other"}},
@@ -1093,7 +1093,7 @@ func TestREPL_ResumeSwitchesActiveSession(t *testing.T) {
 	if err := sess.session.record(context.Background(), "current question", "current answer"); err != nil {
 		t.Fatal(err)
 	}
-	if err := sess.session.store.Save(context.Background(), conversation.Conversation{
+	if _, err := sess.session.store.Save(context.Background(), conversation.Conversation{
 		ID:    "user:other",
 		Title: "other question",
 		Messages: []conversation.Message{
@@ -1135,7 +1135,7 @@ func TestREPL_SearchSessions(t *testing.T) {
 	if err := sess.session.record(context.Background(), "approval prompts", "writes require approval"); err != nil {
 		t.Fatal(err)
 	}
-	if err := sess.session.store.Save(context.Background(), conversation.Conversation{
+	if _, err := sess.session.store.Save(context.Background(), conversation.Conversation{
 		ID:       "user:other",
 		Title:    "other",
 		Messages: []conversation.Message{{Role: "user", Content: "quantum notes"}},
@@ -1528,7 +1528,7 @@ func TestSlashResumeClearsGrantsOnlyOnSuccess(t *testing.T) {
 	root := t.TempDir()
 	sess := newSessionedTestSession(t, &captureCaller{answer: "x"}, root, "workspace:current")
 	sess.grants = newApprovalGrants()
-	if err := sess.session.store.Save(context.Background(), conversation.Conversation{
+	if _, err := sess.session.store.Save(context.Background(), conversation.Conversation{
 		ID:    "user:other",
 		Title: "other question",
 		Messages: []conversation.Message{
@@ -2171,8 +2171,8 @@ func newConflictTestSession(t *testing.T) *replSession {
 	root := t.TempDir()
 	sess := newSessionedTestSession(t, &captureCaller{answer: "completed answer"}, root, "user:conflict")
 	sess.root = root
-	store := &compactTestStore{Store: sess.session.store, save: func(_ context.Context, c conversation.Conversation) error {
-		return &conversation.ConflictError{ID: c.ID, ExpectedRevision: c.Revision}
+	store := &compactTestStore{Store: sess.session.store, save: func(_ context.Context, c conversation.Conversation) (int64, error) {
+		return 0, &conversation.ConflictError{ID: c.ID, ExpectedRevision: c.Revision}
 	}}
 	installCompactRuntime(t, sess, golemruntime.Options{SessionStore: store})
 	return sess
@@ -2287,7 +2287,7 @@ func TestSessionBusyRemainsAnError(t *testing.T) {
 				t.Fatal(err)
 			}
 			after, err := sess.session.store.Load(ctx, sess.session.id)
-			if err != nil || !reflect.DeepEqual(after, before) || sess.session.revision != 1 || !reflect.DeepEqual(sess.session.msgs, before.Messages) {
+			if err != nil || !reflect.DeepEqual(after, before) || sess.session.revision != before.Revision || !reflect.DeepEqual(sess.session.msgs, before.Messages) {
 				t.Fatalf("failed busy save changed storage/cache: after=%+v, err=%v, cache=%+v", after, err, sess.session)
 			}
 		})

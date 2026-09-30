@@ -6,6 +6,40 @@ Ollama client, Fill-in-the-Middle completion, model configuration, Parquet
 export, and analysis helpers. For installation and backend setup, start from
 the [README](../README.md) and [Getting Started](GETTING_STARTED.md).
 
+## Packages
+
+| Package | Description |
+|---------|-------------|
+| `ollama/` | HTTP client for the Ollama REST API — chat, text generation, embeddings, model management, tool calling. Streaming support via callbacks. |
+| `config/` | Model configuration loader (`models.json`) with provider settings, role-based defaults, fallback chain resolution, role lifecycle, selector overrides, and credential scrub via a secret-literal-preserving atomic writer. |
+| `configview/` | Pure projection of a config for panels/CLI/MCP — a versioned wire contract with tri-state candidate eligibility, no I/O. Consumed by `golem models -json`, the MCP configview resource, and the Firn config panel. |
+| `configio/` | Explicit I/O tier for the config stack — provider inventory refresh and consent-gated per-model probes with bounded error codes. Never implicit; values in, values out. |
+| `profiles/` | Profile catalog — curated embedded configs (credential-free by pinned rule) plus a user store under a private directory boundary, with stable IDs and bounded error codes. |
+| `agent/` | Agent runtime — plan-act-observe loop, tool registry, observers, budgets, approval seams, and the sandboxed exec backends (Seatbelt, Bubblewrap). |
+| `golem/` | Embeddable Golem runtime — the system prompt and agent wiring behind `cmd/golem`, for consumers that embed the agent instead of shelling out. |
+| `agentflow/` | AgentFlow integration — locked plan validation, journaled execution, and proof artifacts for task-mode runs. |
+| `memory/` | Explicit user-controlled local memories and agent-memory records (SQLite, scope-filtered FTS5 search). Backs Golem `/remember` and the MCP agent-memory tools; see [agent-memory provenance and integrity](memory.md). |
+| `mcpclient/` | MCP client — adapts external MCP servers' tools into agent tools over stdio or streamable HTTP. |
+| `consult/` | `/consult` seam — a bounded host runner plus the Claude and Codex subscription adapters, producing unsigned `consult-result/v1` receipts. Not a provider, a Router member, or a tool; see [consulting an external subscription CLI](consult.md). |
+| `projectcontext/` | AGENTS.md-style project-context loader — discovery, safe capped reads, and deterministic ordering. |
+| `recipe/` | Versioned JSON prompt bundles — `Parse` for embedded bytes, `Load` for explicit paths with regular-file and identity checks and a 64 KiB bound. Closed schema, strict keys, advisory role/use-case hints; see [docs/recipes.md](recipes.md). |
+| `provider/` | Intelligent model routing — Router with circuit breakers, warmth tracking, token budget, sticky routing, and multi-model scoring. |
+| `rag/` | Code-aware text chunking, SQLite vector store with cosine similarity and FTS5 hybrid search, concurrent file/directory indexer with `.gitignore` support, diff-aware incremental reindexing, and context-building retriever. |
+| `rag/parquet/` | Parquet dataset exporter for ML pipeline interop — exports vector store contents with quality metrics and configurable precision. |
+| `completion/` | IDE inline completion via Fill-in-the-Middle (FIM) with context window management. Sync and streaming APIs. |
+| `analysis/` | Domain-specific analysis helpers — code review (with optional RAG context), ML training metrics, and trading strategy analysis. |
+| `mcp/` | MCP server exposing go-llm as tools, prompts, and resources over stdio and HTTP/2 transports. Tool calls flow through `provider.Router`. |
+| `conversation/` | Persistent conversation storage with SQLite. |
+| `feedback/` | Implicit user behavioral signal collection for retrieval quality improvement. |
+| `fingerprint/` | Model profiling — latency benchmarks and capability detection. |
+| `prefetch/` | Predictive cache-warming engine for RAG retrieval. |
+| `compat/` | OpenAI-compatible endpoint shim — chat, completions, model aliases, and a concurrency limiter so clients that speak OpenAI's API can target local models served through go-llm (distinct from the `openai-compat` *provider*, which consumes an upstream OpenAI `/v1` server such as llama.cpp). |
+| `cmd/golem/` | Terminal coding agent built on `agent/`, `provider.Router`, file/search tools, optional RAG retrieval, persistent sessions, and approval-gated write/exec. |
+| `cmd/go-llm-mcp/` | Standalone MCP server binary with stdio and HTTP/2 support. |
+| `cmd/fim-smoke/` | Smoke-test harness for Fill-in-the-Middle completion against a running backend. |
+| `cmd/llm-bench/` | Model evaluation harness — replays trace corpora against candidate models (llama.cpp via `openai-compat`, or Ollama) and reports AnswerQuality, tool-use, tool-restraint, latency, and tokens with paired deltas and bootstrap CIs. |
+
+
 ## Use as a Go library
 
 ### Chat with a local model
@@ -125,18 +159,42 @@ resp, _ := client.Chat(ctx, ollama.ChatRequest{
 
 `conversation.SQLiteStore` saves complete conversation snapshots. `Load` returns
 the stored `Conversation.Revision`; pass that revision back to `Save` with the
-edited snapshot. Revision zero means create-only. A successful create stores
-revision 1, and each successful update stores the submitted revision plus one.
-`Save` takes a value and does not mutate it: if you retain the submitted snapshot,
-increment its revision only after `Save` returns nil. Do not load a newer revision
-and attach it to old messages; load and reconcile the complete snapshot instead.
+edited snapshot. Revision zero means create-only. `Save` now returns
+`(int64, error)`: the committed revision on success, or zero on every error. It
+takes a value and does not mutate it. Retained callers must use the result:
+
+```go
+revision, err := store.Save(ctx, conv)
+if err != nil {
+    return err
+}
+conv.Revision = revision
+```
+
+Creation uses the durable store-wide revision floor plus one, so a brand-new ID
+never starts at revision 1. An update replaces only the exact submitted positive
+revision and stores that revision plus one. Do not increment a retained revision
+locally or load a newer revision and attach it to old messages; load and reconcile
+the complete snapshot instead. Listing and search projections are not save tokens.
 
 An existing ID on create, a stale revision, or a missing ID on update returns an
 error matching `conversation.ErrConflict`. Use `errors.As` with
 `*conversation.ConflictError` to inspect its `ID` and `ExpectedRevision`.
 Negative revisions and the maximum int64 revision are rejected without writing.
-The transcript, durable summary, revision, and search projection commit in one
-transaction; a conflict leaves the winning snapshot and index intact.
+If the floor reaches maximum int64, creation fails with a non-conflict exhaustion
+error, while existing lower revisions can still advance. A snapshot stored at
+maximum int64 can be loaded or deleted but cannot be updated. Duplicate creation
+still returns a conflict at exhaustion.
+
+The transcript, durable summary, revision, floor, and search projection commit
+atomically; failures leave durable state unchanged. SQLite lock, cancellation,
+and I/O errors retain their original identities rather than becoming conflicts.
+`Delete` and `/clear` capture the deleted revision before committing, so a later
+recreation cannot match any snapshot deleted since the upgrade. This uses one
+integer row, without retaining deleted IDs or transcripts. `Delete` remains
+unconditional and idempotent: a stale caller can still delete a newer snapshot.
+Missing floor metadata causes creation and live-row deletion to fail; it is
+never silently recreated.
 
 Golem returns a completed answer alongside `golem.ErrSessionPersistence` and the
 underlying conflict if the raw turn could not be saved. Its terminal event is
@@ -155,21 +213,34 @@ Automatic compression runs after the raw turn has committed, so its conflict is
 an `OnWarning` notification and the turn remains successful. Hosts that omit
 `OnWarning` retain quiet best-effort compression behavior.
 
-Implementations supplied through `golem.Options.SessionStore` must implement
-the same atomic revision check and exact revision-plus-one success contract,
-even though the Go method signatures are unchanged. The runtime advances its
-retained revision between the raw save and an automatic compression save.
+Implementations supplied through `golem.Options.SessionStore` must adopt the
+new `Save(context.Context, conversation.Conversation) (int64, error)` signature,
+return the committed revision, and enforce the same atomic create/update checks
+and protection across deletion. On error, return zero and leave storage unchanged;
+after a successful commit, return success even if cancellation races afterward.
+The runtime retains the returned revision between raw and compressed saves.
+Firn's older `MemorySessionStore` must add CAS and return committed revisions
+when upgrading its go-llm dependency; changing only its signature is insufficient.
 
-Opening an existing database applies migration v4 through
-`conversation_schema_version`, preserving its data and giving existing rows
-revision 1. Upgrade and restart all processes writing a shared sessions database
-together: older binaries can still perform unconditional writes and bypass CAS.
-The guarantee applies while a row continuously exists. `Delete` and `/clear`
-remove it, and recreating the same ID restarts at revision 1; an old snapshot may
-then match that reused revision. This release does not add incarnation tokens,
-tombstones, or protection against that deletion/recreation race (#542).
+Opening an existing database applies migration v5 through
+`conversation_schema_version`. It preserves live revisions and all conversation
+and search bytes, seeding the floor with `MAX(1, COALESCE(MAX(revision), 0))`.
+Because released writers always insert revision 1, the seed blocks their
+upserts and creates immediately, including on a fresh database. Earlier
+schemas first receive v4's revision column. Revisions erased before v5 cannot be
+recovered; discard pre-upgrade in-memory snapshots.
 
-Conversation and memory migration runners coordinate concurrent openers through
+Upgrade and restart all processes writing a shared sessions database together.
+The v5 insert trigger rejects revisions at or below the floor with
+`conversation store upgraded (#542): upgrade go-llm/golem to write`.
+v0.1.0/v0.2.0 unconditional upserts fail before their conflict update can
+overwrite a live row, and v0.3.0 creates fail; v0.3.0 matching positive CAS
+updates can still succeed. Legacy deletes also capture the deleted revision.
+These triggers are compatibility guards, not protection against arbitrary SQL
+or edits to revision metadata.
+
+Conversation, memory, feedback, fingerprint, and provider routing-feedback
+migration runners coordinate concurrent openers through
 SQLite's write lock. Each step claims its version before running, then commits
 the version row and schema changes together. A competing opener skips a step
 already committed by another opener. Failed steps roll back while earlier
@@ -181,7 +252,20 @@ to the busy timeout, before the canceled context is reported. Current-schema
 opens require only reads; memory record signing initialization is separate and
 may write. This coordination covers the migration runners. Caller setup,
 including the initial `journal_mode=WAL` switch, must complete before racing the
-runners.
+runners. A one-off PRAGMA on a `*sql.DB` does not configure every pooled or
+replacement connection (`database/sql` replaces a modernc connection after a
+context-cancelled statement run outside a transaction); use the DSN or a
+connection hook for `busy_timeout`. `provider.OpenSQLiteFeedbackStore` and
+`memory.OpenHardenedDB` set `busy_timeout` in their DSN, so every connection
+waits for another connection's lock, including the first `journal_mode=WAL`
+PRAGMA.
+
+For provider routing feedback, unversioned legacy tables still must pass the
+existing column and CHECK-fingerprint validation. Validation, creation of
+missing `idx_rfs_key_at` / `idx_rfs_key_kind` indexes, and the v1 version claim
+share one transaction. Existing rows and indexes are retained; incompatible
+legacy tables fail without a committed version claim. Already-versioned
+schemas keep the read-only fast path and are not revalidated or repaired.
 
 ## RAG Details
 

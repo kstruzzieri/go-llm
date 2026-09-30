@@ -259,7 +259,7 @@ func TestCanaryActivation(t *testing.T) {
 				if err := sess.session.record(t.Context(), "prior", "answer"); err != nil {
 					t.Fatal(err)
 				}
-				if err := sess.session.store.Save(t.Context(), conversation.Conversation{ID: "user:other"}); err != nil {
+				if _, err := sess.session.store.Save(t.Context(), conversation.Conversation{ID: "user:other"}); err != nil {
 					t.Fatal(err)
 				}
 				if burned {
@@ -303,7 +303,7 @@ func TestCanaryActivationFailure(t *testing.T) {
 					if err := sess.session.record(t.Context(), "retained question", "retained answer"); err != nil {
 						t.Fatal(err)
 					}
-					if err := sess.session.store.Save(t.Context(), conversation.Conversation{ID: "user:other"}); err != nil {
+					if _, err := sess.session.store.Save(t.Context(), conversation.Conversation{ID: "user:other"}); err != nil {
 						t.Fatal(err)
 					}
 					if burned {

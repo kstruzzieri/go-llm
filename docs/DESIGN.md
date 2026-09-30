@@ -574,7 +574,7 @@ Minimal external dependencies:
 // go.mod
 module github.com/kstruzzieri/go-llm
 
-go 1.25
+go 1.27
 
 require (
     modernc.org/sqlite                      // SQLite for vector store (pure Go, no CGo)

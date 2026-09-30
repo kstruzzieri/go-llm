@@ -113,9 +113,11 @@ if ! grep -Fxq 'TestHardeningContracts' <<<"$security_tests"; then
   exit 1
 fi
 security_status=0
-# The aggregate asserts its own <500ms budget; the timeout bounds a hang at
-# well under Go's 10-minute default so a stuck pre-push fails quickly.
-security_output="$(go test -count=1 -timeout 60s -v -run '^TestHardeningContracts$' ./agent)" || security_status=$?
+# -hardening-budget enforces the aggregate's 500 ms budget in this run only;
+# docs/local-ci.md explains why and where outliers have come from. The timeout
+# bounds a hang at well under Go's 10-minute default so a stuck pre-push fails
+# quickly.
+security_output="$(go test -count=1 -timeout 60s -v -run '^TestHardeningContracts$' ./agent -args -hardening-budget)" || security_status=$?
 printf '%s\n' "$security_output"
 if [ "$security_status" -ne 0 ]; then
   exit "$security_status"
@@ -127,11 +129,17 @@ if ! grep -Eq '^--- PASS: TestHardeningContracts \([0-9.]+s\)$' <<<"$security_ou
   printf 'required security test did not pass: TestHardeningContracts (top-level and Active group must PASS)\n' >&2
   exit 1
 fi
-# Only the declared deferred boundary groups may skip. Captured into a
+# The aggregate logs whether it enforced its budget; require that it did, so a
+# dropped flag or a deleted budget block cannot pass silently.
+if ! grep -Eq '^    hardening_contract_test\.go:[0-9]+: hardening contracts elapsed: [^ ]+ \(budget enforced: true\)$' <<<"$security_output"; then
+  printf 'required security test did not enforce its budget: TestHardeningContracts (must log budget enforced: true)\n' >&2
+  exit 1
+fi
+# Only the declared boundary groups may skip. Captured into a
 # variable rather than piped into `grep -q`: an early-exiting downstream grep
 # would SIGPIPE the upstream one and invert the condition under pipefail.
 unexpected_skips="$(grep -E '^ +--- SKIP: ' <<<"$security_output" \
-  | grep -Ev '^    --- SKIP: TestHardeningContracts/ZT-60[2-6]_#43[1-5]_' || true)"
+  | grep -Ev '^    --- SKIP: TestHardeningContracts/(ZT-602_#431_project_trust|ZT-605_#434_quarantine|ZT-606_#435_retrieval_screening) \([0-9.]+s\)$' || true)"
 if [ -n "$unexpected_skips" ]; then
   printf 'unexpected skip inside TestHardeningContracts:\n%s\n' "$unexpected_skips" >&2
   exit 1
@@ -152,4 +160,7 @@ go test -race ./...
 if [ "$mode" = "full" ]; then
   section "compile smoke"
   go test -run '^$' ./...
+  # Same cross-platform vets as the CI workflow's compile smoke step.
+  GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go vet ./...
+  GOOS=freebsd GOARCH=amd64 CGO_ENABLED=0 go vet ./...
 fi

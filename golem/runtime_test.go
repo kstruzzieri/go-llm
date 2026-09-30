@@ -227,32 +227,32 @@ func (s *mapSessionStore) Load(ctx context.Context, id string) (*conversation.Co
 	return &cloned, nil
 }
 
-func (s *mapSessionStore) Save(ctx context.Context, conv conversation.Conversation) error {
+func (s *mapSessionStore) Save(ctx context.Context, conv conversation.Conversation) (int64, error) {
 	if err := ctx.Err(); err != nil {
-		return err
+		return 0, err
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.saves++
 	if s.saveErr != nil {
-		return s.saveErr
+		return 0, s.saveErr
 	}
 	if conv.DurableSummary != nil && s.compressedErr != nil {
-		return s.compressedErr
+		return 0, s.compressedErr
 	}
 	if s.conversations == nil {
 		s.conversations = make(map[string]conversation.Conversation)
 	}
 	if conv.Revision < 0 || conv.Revision == math.MaxInt64 {
-		return fmt.Errorf("invalid revision %d", conv.Revision)
+		return 0, fmt.Errorf("invalid revision %d", conv.Revision)
 	}
 	stored, exists := s.conversations[conv.ID]
 	if (conv.Revision == 0 && exists) || (conv.Revision > 0 && (!exists || stored.Revision != conv.Revision)) {
-		return &conversation.ConflictError{ID: conv.ID, ExpectedRevision: conv.Revision}
+		return 0, &conversation.ConflictError{ID: conv.ID, ExpectedRevision: conv.Revision}
 	}
 	conv.Revision++
 	s.conversations[conv.ID] = cloneConversation(conv)
-	return nil
+	return conv.Revision, nil
 }
 
 func cloneConversation(conv conversation.Conversation) conversation.Conversation {
@@ -286,13 +286,13 @@ type blockingCompressionStore struct {
 	once    sync.Once
 }
 
-func (s *blockingCompressionStore) Save(ctx context.Context, conv conversation.Conversation) error {
+func (s *blockingCompressionStore) Save(ctx context.Context, conv conversation.Conversation) (int64, error) {
 	if conv.DurableSummary == nil {
 		return s.mapSessionStore.Save(ctx, conv)
 	}
 	s.once.Do(func() { close(s.started) })
 	<-ctx.Done()
-	return ctx.Err()
+	return 0, ctx.Err()
 }
 
 type malformedSessionStore struct {
@@ -303,7 +303,9 @@ func (s malformedSessionStore) Load(context.Context, string) (*conversation.Conv
 	return s.conversation, nil
 }
 
-func (malformedSessionStore) Save(context.Context, conversation.Conversation) error { return nil }
+func (malformedSessionStore) Save(context.Context, conversation.Conversation) (int64, error) {
+	return 1, nil
+}
 
 type thinkingCaller struct {
 	requests []provider.ChatRequest

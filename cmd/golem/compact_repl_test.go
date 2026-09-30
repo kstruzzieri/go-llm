@@ -53,7 +53,7 @@ func newCompactSession(t *testing.T, exchanges int, summarize conversation.Summa
 			conversation.Message{Role: "user", Content: strings.Repeat(string(rune('a'+i)), 40)},
 			conversation.Message{Role: "assistant", Content: strings.Repeat(string(rune('A'+i)), 40)})
 	}
-	if err := sess.session.store.Save(context.Background(), current); err != nil {
+	if _, err := sess.session.store.Save(context.Background(), current); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := sess.session.switchTo(context.Background(), current.ID); err != nil {
@@ -226,11 +226,11 @@ func TestCompactStartupWiresDisableFlag(t *testing.T) {
 type compactTestStore struct {
 	conversation.Store
 	saves int
-	save  func(context.Context, conversation.Conversation) error
+	save  func(context.Context, conversation.Conversation) (int64, error)
 	load  func(context.Context, string) (*conversation.Conversation, error)
 }
 
-func (s *compactTestStore) Save(ctx context.Context, c conversation.Conversation) error {
+func (s *compactTestStore) Save(ctx context.Context, c conversation.Conversation) (int64, error) {
 	s.saves++
 	if s.save != nil {
 		return s.save(ctx, c)
@@ -410,15 +410,16 @@ func TestCompactREPLCancellationAfterCommit(t *testing.T) {
 	backing := sess.session.store
 	committed := make(chan struct{})
 	store := &compactTestStore{Store: backing}
-	store.save = func(ctx context.Context, c conversation.Conversation) error {
-		if err := backing.Save(ctx, c); err != nil {
-			return err
+	store.save = func(ctx context.Context, c conversation.Conversation) (int64, error) {
+		revision, err := backing.Save(ctx, c)
+		if err != nil {
+			return 0, err
 		}
 		if store.saves == 1 {
 			close(committed)
 			<-ctx.Done()
 		}
-		return nil
+		return revision, nil
 	}
 	installCompactRuntime(t, sess, golemruntime.Options{SessionStore: store, Summarizer: summarize})
 	interrupts := make(chan struct{}, 1)
@@ -589,7 +590,7 @@ func TestCompactSaveFailurePreservesHistory(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	store := &compactTestStore{Store: sess.session.store, save: func(context.Context, conversation.Conversation) error { return errors.New("disk full") }}
+	store := &compactTestStore{Store: sess.session.store, save: func(context.Context, conversation.Conversation) (int64, error) { return 0, errors.New("disk full") }}
 	installCompactRuntime(t, sess, golemruntime.Options{SessionStore: store, Summarizer: summarize})
 	var out strings.Builder
 	_, _ = dispatchSlash(context.Background(), &out, sess, "/compact")
@@ -643,8 +644,8 @@ func TestCompactSessionConflictDoesNotRefreshCache(t *testing.T) {
 	summarize := func(context.Context, string, []conversation.Message) (string, error) { return "SUM", nil }
 	sess, _ := newCompactSession(t, 5, summarize)
 	before := *sess.session
-	store := &compactTestStore{Store: sess.session.store, save: func(_ context.Context, c conversation.Conversation) error {
-		return &conversation.ConflictError{ID: c.ID, ExpectedRevision: c.Revision}
+	store := &compactTestStore{Store: sess.session.store, save: func(_ context.Context, c conversation.Conversation) (int64, error) {
+		return 0, &conversation.ConflictError{ID: c.ID, ExpectedRevision: c.Revision}
 	}}
 	installCompactRuntime(t, sess, golemruntime.Options{SessionStore: store, Summarizer: summarize})
 	loads := 0

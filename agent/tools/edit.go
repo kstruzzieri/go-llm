@@ -150,7 +150,7 @@ func (t *EditFile) Invoke(ctx context.Context, raw json.RawMessage) (agent.ToolR
 		AfterHash: pp.afterHash, Summary: pp.summary, At: time.Now(),
 	}
 	toolErr, internalErr := runJournaledWrite(ctx, t.j, rec, func() error {
-		return t.ws.WriteFileAtomic(pp.path, pp.afterContent)
+		return t.ws.WriteFileAtomicIfMatch(pp.path, pp.afterContent, FilePrecondition{Exists: true, Hash: pp.beforeHash})
 	})
 	if internalErr != nil {
 		return agent.ToolResult{}, internalErr

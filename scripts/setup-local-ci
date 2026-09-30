@@ -22,4 +22,4 @@ fi
 git -C "$repo_root" config core.hooksPath .githooks
 
 printf 'Configured core.hooksPath=.githooks for %s\n' "$repo_root"
-printf 'Pre-push local CI will run the Docker-backed full suite before pushes.\n'
+printf 'Pre-push local CI will build the current checkout CI image and run the Docker-backed full suite before pushes.\n'

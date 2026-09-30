@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"flag"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -23,6 +24,14 @@ import (
 	"github.com/kstruzzieri/go-llm/provider"
 )
 
+// hardeningBudget is the aggregate's wall-clock regression budget (#451).
+const hardeningBudget = 500 * time.Millisecond
+
+// enforceHardeningBudget turns on the hardeningBudget assertion. Only
+// scripts/ci-local's isolated run passes it (see docs/local-ci.md); the
+// contracts run regardless of the flag.
+var enforceHardeningBudget = flag.Bool("hardening-budget", false, "enforce TestHardeningContracts' "+hardeningBudget.String()+" wall-clock budget")
+
 func TestHardeningContracts(t *testing.T) {
 	started := time.Now()
 	// Child cleanup completes before the sole elapsed assertion, including the
@@ -40,15 +49,16 @@ func TestHardeningContracts(t *testing.T) {
 	})
 	for _, boundary := range []string{
 		"ZT-602_#431_project_trust",
-		"ZT-604_#433_terminal_output", "ZT-605_#434_quarantine",
+		"ZT-605_#434_quarantine",
 		"ZT-606_#435_retrieval_screening",
 	} {
 		t.Run(boundary, func(t *testing.T) { t.Skip("deferred boundary coverage; tracked separately") })
 	}
+	// #433's CLI presentation boundary is covered by cmd/golem/render_sanitization_test.go.
 	elapsed := time.Since(started)
-	t.Logf("hardening contracts elapsed: %s", elapsed)
-	if elapsed >= 500*time.Millisecond {
-		t.Errorf("hardening contracts elapsed = %s, want < 500ms", elapsed)
+	t.Logf("hardening contracts elapsed: %s (budget enforced: %t)", elapsed, *enforceHardeningBudget)
+	if *enforceHardeningBudget && elapsed >= hardeningBudget {
+		t.Errorf("hardening contracts elapsed = %s, want < %s", elapsed, hardeningBudget)
 	}
 }
 
@@ -663,7 +673,7 @@ func runDefaultPipelineContracts(t *testing.T) {
 		for i := range chain {
 			names[i] = chain[i].Name()
 		}
-		want := []string{"zero_width", "encoding", "typoglycemia", "invariants", "egress", "secrets"}
+		want := []string{"zero_width", "encoding", "typoglycemia", "invariants", "egress", "secrets", "child_scope_denials"}
 		if !reflect.DeepEqual(names, want) {
 			t.Errorf("Defaults names = %v, want %v", names, want)
 		}

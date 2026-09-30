@@ -184,6 +184,8 @@ type InspectedMessage struct {
 	ToolCallID   string
 	Content      string
 	Alternatives []InspectedAlternative
+	// ChildScopeDenials is native dispatch evidence, available only at ingress.
+	ChildScopeDenials []ChildScopeDenial `json:"-"`
 }
 
 // InputInspection is either the initial state at step 0 (System, Summary,
@@ -692,6 +694,7 @@ func cloneInput(in InputInspection) InputInspection {
 	in.Messages = slices.Clone(in.Messages)
 	for i := range in.Messages {
 		in.Messages[i].Alternatives = slices.Clone(in.Messages[i].Alternatives)
+		in.Messages[i].ChildScopeDenials = slices.Clone(in.Messages[i].ChildScopeDenials)
 	}
 	return in
 }
