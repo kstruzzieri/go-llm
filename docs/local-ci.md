@@ -98,7 +98,7 @@ docker compose -f docker-compose.ci.yml run --build --rm ci ./scripts/ci-local -
 `pre-push` runs:
 
 - compiled discovery of `TestHardeningContracts`, followed by a fresh,
-  verbose, non-race run of that aggregate
+  verbose, non-race run of that aggregate with its 500 ms budget enforced
 - `golangci-lint fmt --diff` (all Go files, including inactive build tags)
 - `golangci-lint run`
 - `go test -race ./...`
@@ -124,14 +124,31 @@ outright emits no skip, so that remains a review responsibility; the gate proves
 the named groups executed, not that their contents are complete.
 
 The aggregate phase uses these exact commands (with `GOROOT` unset and
-`GOFLAGS=' '` exported for the rest of the script). The 60-second timeout bounds a
-hung contract well under Go's ten-minute default; the aggregate itself asserts a
-500 ms budget.
+`GOFLAGS=' '` exported for the rest of the script):
 
 ```bash
 go test -list '^TestHardeningContracts$' ./agent
-go test -count=1 -timeout 60s -v -run '^TestHardeningContracts$' ./agent
+go test -count=1 -timeout 60s -v -run '^TestHardeningContracts$' ./agent -args -hardening-budget
 ```
+
+The 60-second timeout bounds a hung contract well under Go's ten-minute
+default. `-hardening-budget` makes the aggregate assert its 500 ms wall-clock
+budget, cleanup included. Only this isolated run passes it; the
+repository-wide race pass runs the same contracts without it, because there the
+aggregate competes with every other package's tests for disk and CPU.
+
+Isolation reduces that contention but does not remove it. Isolated outliers so
+far concentrate in one contract, ZT-603 (MCP catalog trust), which makes
+durable pin writes and opens loopback MCP sessions; a local experiment slowed
+it more under write-and-fsync load than under CPU load (measurements in PR
+#604). When a budget failure's `-v` output shows ZT-603 dominating, suspect
+machine load, especially disk, before a regression.
+
+The script also requires the run to log `budget enforced: true`. Renaming the
+flag in the test fails this run on an undefined flag; dropping it from the
+script fails `scripts/test-ci-local`, which pins the exact command, and fails
+the log check; deleting the budget block fails the log check. Deleting or
+inverting only the assertion remains a review responsibility.
 
 The local Docker service runs as an unprivileged user (uid 1000), so the
 permission-denial tests that skip under root execute in the gate exactly as they

@@ -74,13 +74,17 @@ case "$*" in
       exit "$CI_LOCAL_DISCOVERY_STATUS"
     fi
     ;;
-  'test -count=1 -timeout 60s -v -run ^TestHardeningContracts$ ./agent')
+  'test -count=1 -timeout 60s -v -run ^TestHardeningContracts$ ./agent -args -hardening-budget')
     printf 'stub: security execution\n' >&2
     printf '%s\n' "$CI_LOCAL_SECURITY_OUTPUT"
     exit "$CI_LOCAL_SECURITY_STATUS"
     ;;
   'test -race ./...')
     exit "$CI_LOCAL_RACE_STATUS"
+    ;;
+  *TestHardeningContracts*)
+    printf 'stub: unexpected security invocation: %s\n' "$*" >&2
+    exit 64
     ;;
 esac
 STUB
@@ -101,7 +105,9 @@ discovery_output=TestHardeningContracts
 discovery_status=0
 discovery_error='discovery failed'
 security_status=0
-passing_output='--- PASS: TestHardeningContracts (0.01s)
+budget_line='    hardening_contract_test.go:60: hardening contracts elapsed: 29.866573ms (budget enforced: true)'
+passing_output="$budget_line"'
+--- PASS: TestHardeningContracts (0.01s)
     --- PASS: TestHardeningContracts/Active (0.01s)
     --- SKIP: TestHardeningContracts/ZT-602_#431_project_trust (0.00s)'
 security_output="$passing_output"
@@ -152,10 +158,12 @@ assert_scope_notice() {
   ' "$tmp/$1.out"
 }
 
+# -hardening-budget is the only switch for the aggregate's wall-clock budget;
+# pinning it here keeps ci-local from silently dropping enforcement.
 write_expected() {
   cat >"$tmp/$1" <<EOF
 $module|test -list ^TestHardeningContracts$ ./agent
-$module|test -count=1 -timeout 60s -v -run ^TestHardeningContracts$ ./agent
+$module|test -count=1 -timeout 60s -v -run ^TestHardeningContracts$ ./agent -args -hardening-budget
 EOF
   if [ "$2" = security ]; then
     return
@@ -229,6 +237,7 @@ caller_goroot=''
 # Active group passing; only the declared boundary names may skip.
 pass_message='required security test did not pass: TestHardeningContracts (top-level and Active group must PASS)'
 skip_message='unexpected skip inside TestHardeningContracts:'
+budget_message='required security test did not enforce its budget: TestHardeningContracts (must log budget enforced: true)'
 for mode in security pre-push full; do
   for outcome in empty skipped fail renamed child active-missing active-skipped; do
     case "$outcome" in
@@ -264,7 +273,20 @@ $skip_line"
     grep -Fxq -- "$skip_line" "$tmp/aggregate-$outcome-$mode.out"
     diff -u "$tmp/expected-security" "$tmp/aggregate-$outcome-$mode.log"
   done
-  security_output='--- PASS: TestHardeningContracts (0.01s)
+  # The run must also report that it enforced its wall-clock budget; a missing
+  # or false report means the budget block or the flag did not reach it.
+  for outcome in budget-missing budget-off; do
+    case "$outcome" in
+      budget-missing) security_output="$(printf '%s\n' "$passing_output" | tail -n +2)" ;;
+      budget-off) security_output="$(printf '%s\n' "$passing_output" | sed 's/(budget enforced: true)$/(budget enforced: false)/')" ;;
+    esac
+    run_ci "aggregate-$outcome-$mode" --mode "$mode"
+    assert_status "aggregate-$outcome-$mode" 1
+    grep -Fxq "$budget_message" "$tmp/aggregate-$outcome-$mode.out"
+    diff -u "$tmp/expected-security" "$tmp/aggregate-$outcome-$mode.log"
+  done
+  security_output="$budget_line"'
+--- PASS: TestHardeningContracts (0.01s)
     --- PASS: TestHardeningContracts/Active (0.01s)
     --- SKIP: TestHardeningContracts/ZT-602_#431_project_trust (0.00s)
     --- SKIP: TestHardeningContracts/ZT-605_#434_quarantine (0.00s)
