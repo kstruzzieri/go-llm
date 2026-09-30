@@ -6,6 +6,215 @@ All notable changes to `go-llm` are documented here. Downstream consumers
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-09-29
+
+### Changed — v0.4.0 consumer upgrade notes (#603)
+
+Read this before upgrading from v0.3.0. Consumers on older pins must also apply
+the v0.3.0 upgrade notes.
+
+- Build consumers with Go 1.27 or newer; update their module directives, CI and
+  build images together (#565).
+- `conversation.Store.Save`, `conversation.SQLiteStore.Save` and
+  `golem.SessionStore.Save` now return `(int64, error)` (#542). Retain the returned
+  revision after success instead of incrementing locally. Custom stores must
+  enforce atomic CAS and prevent revision reuse after deletion/recreation; every
+  error returns zero and leaves storage unchanged. Upgrade all writers sharing
+  a sessions database together and discard pre-upgrade snapshots.
+- Replace `-allow-destination "provider=URL"` with the canonical
+  `-allow-destination "provider/https://host"` form (#501).
+- Use keyed literals for `agent.Result`, `agent.ToolResult`,
+  `agent.InspectedMessage`, `consult.Consultant` and `consult.Evidence`, which gained
+  fields. `consult.Consultant` now contains a slice and cannot be compared with
+  `==`/`!=` or used as a map key.
+- On Linux/Darwin, Workspace writes to targets admitted absent require an atomic
+  no-replace operation (#552). Unsupported operations and concurrent creates are
+  refused, including for unconditional `WriteFileAtomic`; there is no plain-rename
+  fallback.
+- `Orchestrator.Run` seals and cancels its run context on return (#449). Late
+  nested admission is refused even through `context.WithoutCancel`; join nested
+  work before the parent returns for complete descendant usage.
+- Firn's `MemorySessionStore.Save` needs the returned-revision and true CAS
+  contract above before its dependency bump. Update callers, fakes and tests,
+  including conflict and deleted-ID revision-reuse cases; changing the return
+  signature alone is insufficient.
+
+The [full consumer upgrade guide](https://github.com/kstruzzieri/go-llm/blob/develop/docs/releases/v0.4.0.md)
+covers migration details, other behavior changes and consumer compatibility
+checks.
+
+### Fixed — Track retrieval registration through collector shutdown (#569)
+
+Background feedback collectors reject new retrieval registrations and
+explicit-time records (`RegisterRetrieval`, `RegisterRetrievalAt`, `RecordAt`,
+`RecordBatchAt`) after shutdown begins, matching `Record`. `Close` waits for
+admitted registrations and records to finish persistence, window installation,
+and recomputation, then runs its final sweep, so a window an admitted
+registration installs during shutdown still receives its expiry signals.
+Manual collector lifecycle behavior is unchanged.
+
+### Changed — Go 1.27 is the minimum supported Go (#565)
+
+`go.mod` now declares `go 1.27.0` (previously `go 1.25.0`, a release Go no
+longer supports). Modules that require go-llm need Go 1.27 or newer, and
+`go get` raises an importer's own `go` line to match.
+
+Binaries whose main module is go-llm, including `golem` and `go-llm-mcp`, no
+longer carry the compatibility GODEBUG defaults the 1.25 line selected
+(`cryptocustomrand=1`, `tlssecpmlkem=0`, `tracebacklabels=0`,
+`urlstrictcolons=0`, `x509sslcertoverrideplatform=0`) and run with Go 1.27's
+default behavior. Importers' binaries take their defaults from their own `go`
+line. CI now runs the race suite on the newest Go 1.27 patch release as well as
+the pinned toolchain.
+
+### Added — Child scope-denial reporting (#555)
+
+Opt-in interceptors now report actual native workspace refusals from scoped
+dispatch children in the parent's risk report. Each affected child contributes
+10 points per refused request, capped at 100 per child per dispatch
+invocation. Reporting uses native evidence independently of child summaries
+and scores; legacy unscoped tasks remain excluded. Findings are informational
+and do not change filesystem enforcement or grants.
+
+### Security — Anchor workspace mutations and undo checks (#552)
+
+Linux and Darwin Workspace writes, deletes and temporary cleanup now use the same
+validated parent directory descriptor. Preview and undo hash/mode checks run
+inside that boundary, preventing substituted ancestors from redirecting approved
+changes. Observed foreign temp entries are preserved, and failures retain journal
+and cleanup evidence.
+
+Absent targets use atomic no-replace installation even for unconditional writes;
+concurrent creates and unsupported no-replace operations are refused. Guarded
+existing names require verified canonical spelling; unguarded search-only parent
+permissions remain supported. Conditional operations require readable content.
+
+Authority stays with an admitted directory if it is renamed. Overwrite/delete
+are not leaf/content compare-and-swap, journals do not track renames, and other
+platforms retain best-effort checked-path behavior. See the workspace mutation
+boundary in `docs/least-privilege.md` for these limits and absent-name guard policy.
+
+### Fixed — Serialize feedback, fingerprint, and routing-feedback migration runners (#549)
+
+Feedback, fingerprint, and provider routing-feedback stores now claim each
+migration version under SQLite's write lock before applying schema changes.
+Concurrent openers skip steps another opener committed; failed steps roll back
+both the version claim and schema changes while earlier steps remain intact.
+Constructor contexts now reach the migration runners, and current-schema opens
+only read.
+
+Provider routing-feedback legacy tables retain column/CHECK validation, rows,
+and existing indexes. Validation and creation of missing baseline indexes now
+commit with the v1 claim, so incompatible tables are never stamped as migrated.
+
+Callers must configure a positive `busy_timeout` on every migrating connection
+(e.g. `_pragma=busy_timeout(5000)` with modernc SQLite) and complete journal-mode
+setup before concurrent opens. Lock and I/O errors still propagate.
+
+`provider.OpenSQLiteFeedbackStore`, `memory.OpenHardenedDB`, and the Golem
+session/feedback, MCP retrieval-feedback, and transcript openers now set
+`busy_timeout` in the connection DSN instead of with a one-off PRAGMA. The
+`journal_mode=WAL` PRAGMA previously ran without a busy handler, so reopening an
+existing WAL database while another connection held its lock failed at once with
+`SQLITE_BUSY`. The one-off PRAGMA also did not survive connection replacement:
+`database/sql` discards a connection after a context-cancelled statement run
+outside a transaction, and the replacement started with `busy_timeout=0`.
+
+This does not change RAG migrations, serialize concurrent `journal_mode=WAL`
+setup, or serialize the transcript store's legacy audit-column upgrade.
+
+### Added — Codex subscription consultation (#546)
+
+Add the `codex` consultant adapter for native Codex CLI 0.153.4 and requested model
+`gpt-6-astra`, with explicit `trusted_vendor_runtime` consent in addition to
+process-egress consent. Advisory text uses the existing bounded runner,
+interceptors, unsigned receipt and next-goal fence. Native vendor configuration
+and host-resource access remain trusted; no serving-model or billing attestation
+is inferred from the transcript.
+
+Add opt-in `transport: "app-server"` with an independently pinned stdio RPC
+profile, bounded model discovery, one ephemeral text turn and bounded shutdown.
+The actual `/consult` path displays `codex app-server 0.153.4`, retains mandatory
+interceptor checks and stages advice for one goal. This does not add `models.json`
+routing. Omitted/empty transport retains exec; remove the entire transport key
+before rolling back to the old strict configuration parser. Receipts distinguish
+App Server usage absence from measured zero without changing the answer hash.
+
+Require independent stdout/stderr EOF checks so a nonzero exit cannot hide an
+incomplete pipe drain. Preserve Claude configuration and admission behavior.
+
+Identify the first App Server rejection with fixed phase and validation-point
+labels, including MCP startup validation, error notifications and system-error
+status, without exposing vendor diagnostics or changing admission rules.
+
+Add optional `disabled_mcp_servers` for Codex App Server consultants. Validated,
+bounded server names become per-launch disable overrides; native global settings,
+the version probe and failed-startup admission remain unchanged. Omitted or empty
+lists preserve the existing profile. Remove the key before using an older binary.
+
+### Changed — Conversation revisions survive deletion (#542)
+
+**Breaking:** `conversation.Store.Save`, `SQLiteStore.Save`, and
+`golem.SessionStore.Save` now return `(int64, error)`. Retained callers must assign
+the returned revision after success; custom stores must enforce CAS and return
+the committed revision, or zero on error.
+
+A constant-size durable revision floor prevents stale snapshots from overwriting
+a recreated conversation ID. Migration v5 preserves live conversation and search
+data, and snapshot, summary, revision metadata, and search updates remain atomic.
+Golem and CLI sessions retain the returned revision after saving or clearing.
+
+Upgrade and restart all writers sharing a sessions database together and discard
+pre-upgrade snapshots. The floor starts at 1 or higher, so creation never commits
+revision 1, and released v0.1/v0.2 upserts and v0.3 creates fail with an upgrade
+message even on a fresh database; matching v0.3 updates still work. Revisions
+erased before migration cannot be recovered, and Delete remains unconditional.
+See the conversation persistence section in `docs/library.md` for consumer
+migration and exhaustion behavior.
+
+### Removed — Legacy destination flag syntax (#501)
+
+**Breaking change in v0.4.0:** `golem` and `go-llm-mcp` no longer accept
+`-allow-destination "provider=URL"`. Update scripts to use the repeatable
+canonical form, for example `-allow-destination "openai/https://api.openai.com"`.
+Rejected legacy values report the canonical grammar without echoing the value
+or credentials. Canonical destination normalization and admission policy are
+unchanged; equals signs in canonical provider names and URL paths remain valid.
+
+### Security — Child capability and budget limits (#449)
+
+Nested agent runs now intersect their input, generation and configured step
+capacities with the active parent. An unset parent input ceiling resolves to
+8,192, and smaller parent generation caps may shorten child summaries, including
+those using a separately configured larger model route.
+
+Finite token allowances now reserve the assembled prompt estimate plus a fixed
+generation cap before inference and account for concurrent and repeated child
+runs together. Requests that do not fit stop before calling the model. Unknown
+or failed usage retains its reservation. A reported prompt above the estimate is
+charged without stopping; output beyond the generation cap stops the run before
+its returned tool calls execute. This is estimated admission accounting, not an
+exact provider billing guarantee.
+Exhaustion during callbacks or a tool batch also blocks subsequent invocations,
+including queued parallel tools, while preserving cancellation errors after
+verification callbacks. Stopped batches retain only observed tool calls, even
+when provider call IDs are empty or duplicated.
+Budget-refused calls are also omitted from the ordered event log; synthetic
+outcomes and other error-path events retain their existing meaning.
+
+Result.DescendantUsage reports descendant usage separately while Result.Usage
+and Golem's existing output retain their local-step meaning. Returned run scopes
+reject late child admission and publish immutable usage snapshots.
+
+Dispatch retains the canonical read-only tool registry, caller-guard composition
+and one-subtree-per-child boundary; scoped retrieval remains separate. Golem's
+parent total remains unbounded: this change adds no new finite aggregate Golem
+spend pool.
+
+### Security — Neutralize terminal controls in streamed Golem output (#433)
+
+Golem visibly quotes terminal control characters in streamed answers, thinking, tool-call echoes, and result summaries when writing to a terminal, and in the `-p` answer when stdout is a terminal. Tabs and CRLF line ends in model text pass through. Redirected output remains byte-for-byte unchanged.
+
 ## [0.3.0] - 2026-09-18
 
 ### Changed — signing refuses toolchain-dependent marshaler dispatch (#562)
