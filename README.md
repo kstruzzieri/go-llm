@@ -11,7 +11,7 @@ A local-first LLM toolkit and terminal coding agent for Go. Run models through *
 
 Use it directly in a terminal through **Golem**, the bundled local coding agent ([full guide](docs/golem.md)); expose it as a standalone [MCP server](#mcp-server); or embed the Go packages in your own application ([library reference](docs/library.md)). Pure Go with minimal dependencies (no CGo).
 
-**v0.4.0 release notes** — [changelog](CHANGELOG.md#040---2026-09-29) · [consumer upgrade notes](https://github.com/kstruzzieri/go-llm/blob/develop/docs/releases/v0.4.0.md). Available versions and binaries are listed on the [releases page](https://github.com/kstruzzieri/go-llm/releases); a changelog stamp alone does not publish a version.
+**Current release: v0.4.0** — [binaries](https://github.com/kstruzzieri/go-llm/releases/tag/v0.4.0) · [changelog](CHANGELOG.md#040---2026-09-29) · [consumer upgrade notes](https://github.com/kstruzzieri/go-llm/blob/v0.4.0/docs/releases/v0.4.0.md).
 
 ## Contents
 
@@ -149,8 +149,7 @@ Tools cover chat, generation, code completion, embeddings, RAG, model management
 
 | Release | Scope | Tracking |
 |---|---|---|
-| **v0.3.0** | Zero-trust agent foundation — observation fencing, injection and secret detectors, signed mutation receipts and agent memory, scoped dispatch children, offline audit verifier — plus the Golem session surface (`/model`, `/think`, `/compact`, `/consult`, headless `-p`, Git context) and recipe bundles | [CHANGELOG](CHANGELOG.md#030---2026-09-18) |
-| **v0.4.0** | Codex `/consult` adapter (#546), inherited child budgets (#449) and scope-denial reporting (#555), terminal output sanitization (#433), workspace mutation hardening (#552), canonical destination flags (#501), conversation and SQLite migration fixes (#542, #549), collector shutdown fix (#569), and Go 1.27 minimum (#565) | [CHANGELOG](CHANGELOG.md#040---2026-09-29) · [upgrade notes](https://github.com/kstruzzieri/go-llm/blob/develop/docs/releases/v0.4.0.md) |
+| **v0.4.0 (current)** | Codex `/consult` adapter (#546), inherited child budgets (#449) and scope-denial reporting (#555), terminal output sanitization (#433), workspace mutation hardening (#552), canonical destination flags (#501), conversation and SQLite migration fixes (#542, #549), collector shutdown fix (#569), and Go 1.27 minimum (#565) | [CHANGELOG](CHANGELOG.md#040---2026-09-29) · [upgrade notes](https://github.com/kstruzzieri/go-llm/blob/v0.4.0/docs/releases/v0.4.0.md) |
 | **v0.5.0** | Quarantined ingestion for foreign content (#434), injection-aware retrieval tagging (#435), adversarial injection corpus for `llm-bench` (#452), detector/Secrets default evaluation (#517) | [milestone](https://github.com/kstruzzieri/go-llm/milestone/2) |
 | Later | Hosted-native transports (Anthropic Messages, Gemini, OpenAI Responses), agentic RAG orchestration, in-band routing transparency in MCP responses, evidence-governed feedback, vision inputs, ANN search | [open issues](https://github.com/kstruzzieri/go-llm/issues) |
 
