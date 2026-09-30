@@ -40,8 +40,8 @@ the v0.3.0 upgrade notes.
   signature alone is insufficient.
 
 The [full consumer upgrade guide](https://github.com/kstruzzieri/go-llm/blob/develop/docs/releases/v0.4.0.md)
-will accompany the v0.4.0 release stamp in #603, including migration details,
-other behavior changes and consumer compatibility checks.
+covers migration details, other behavior changes and consumer compatibility
+checks.
 
 ### Fixed — Track retrieval registration through collector shutdown (#569)
 
