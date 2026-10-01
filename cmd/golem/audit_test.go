@@ -402,6 +402,9 @@ func assertAuditFixtureTreeUnchanged(t *testing.T, root string, before map[strin
 	t.Fatalf("audit changed fixture tree %q (entries expose name, byte digest/size, mode, and mtime):%s", root, changes.String())
 }
 
+// auditEnvSecret stands in for a value mistyped into -agentflow-env.
+const auditEnvSecret = "ENV-SECRET-577"
+
 func TestAuditExitContractHelper(t *testing.T) {
 	if os.Getenv("GOLEM_AUDIT_EXIT_HELPER") != "1" {
 		return
@@ -413,6 +416,10 @@ func TestAuditExitContractHelper(t *testing.T) {
 		args = []string{"golem", "audit", "-help"}
 	case "invalid":
 		args = []string{"golem", "audit", "-json"}
+	case "env-literal":
+		args = []string{"golem", "audit", "-root", root, "-agentflow-env", "NAME=" + auditEnvSecret}
+	case "env-positional":
+		args = []string{"golem", "audit", "-root", root, "-agentflow-env", "NAME", auditEnvSecret}
 	case "explicit-missing":
 		args = append(args, "-scope", "workspace")
 	case "memory":
@@ -555,6 +562,18 @@ func TestAuditExitContract(t *testing.T) {
 				return nil
 			},
 			wantStdout: func(_, _ string) string { return "" },
+		},
+		{
+			name: "agentflow-env value literal", scenario: "env-literal", wantExit: 2,
+			wantStdout: func(_, _ string) string { return "" },
+			wantStderr: "golem audit: -agentflow-env: agentflow: environment name #1 is not a variable name (names only; values are read from the environment)\n",
+			absent:     []string{auditEnvSecret},
+		},
+		{
+			name: "agentflow-env value as positional", scenario: "env-positional", wantExit: 2,
+			wantStdout: func(_, _ string) string { return "" },
+			wantStderr: "golem audit: 1 unexpected positional argument(s)\n",
+			absent:     []string{auditEnvSecret},
 		},
 		{
 			name: "help", scenario: "help", wantExit: 0,
