@@ -29,8 +29,10 @@ func TestAgentflowRunnerForTest_PrefersSourceOverride(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(binDir, "agentflow"), []byte("#!/bin/sh\n"), 0o700); err != nil {
 		t.Fatal(err)
 	}
+	checkout := writeSourceCheckoutFixture(t)
 	t.Setenv("PATH", binDir)
-	t.Setenv("AGENTFLOW_SRC", "/preferred-checkout")
+	t.Setenv("AGENTFLOW_SRC", checkout)
+	t.Setenv("GO_LLM_REQUIRE_AGENTFLOW", "")
 
 	runner, ok := agentflowRunnerForTest(t, t.TempDir()).(*ExecRunner)
 	if !ok {
@@ -38,7 +40,7 @@ func TestAgentflowRunnerForTest_PrefersSourceOverride(t *testing.T) {
 	}
 	bin, argv, env := runner.commandFor([]string{"--version"})
 	if bin != "python3" || !reflect.DeepEqual(argv, []string{"-P", "-m", "agentflow", "--version"}) ||
-		!reflect.DeepEqual(env, []string{"PYTHONPATH=/preferred-checkout/src"}) {
+		!reflect.DeepEqual(env, []string{"PYTHONPATH=" + filepath.Join(checkout, "src")}) {
 		t.Fatalf("command = (%q, %v, %v), want explicit source checkout", bin, argv, env)
 	}
 }

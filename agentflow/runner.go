@@ -15,8 +15,10 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -45,20 +47,48 @@ func NewExecRunner(dir string) *ExecRunner {
 	return &ExecRunner{bin: "agentflow", dir: dir}
 }
 
-// NewSrcExecRunner runs `python3 -P -m agentflow` with PYTHONPATH=<checkout>/src.
-// It requires Python 3.11+ and excludes the workspace from implicit module search.
-// Run rejects checkout paths containing a path-list separator before launching.
+// NewSrcExecRunner runs `python3 -P -m agentflow` with PYTHONPATH set to the
+// canonical checkout's src directory. It requires Python 3.11+ and excludes
+// the workspace from implicit module search. The checkout must be an absolute
+// path to a directory holding src/agentflow/__init__.py; symlinks are resolved
+// first. An invalid checkout makes Run fail before launching anything.
 func NewSrcExecRunner(dir, checkout string) *ExecRunner {
-	r := &ExecRunner{
-		bin:    "python3",
-		prefix: []string{"-P", "-m", "agentflow"},
-		dir:    dir,
-		env:    []string{"PYTHONPATH=" + checkout + "/src"},
+	r := &ExecRunner{bin: "python3", prefix: []string{"-P", "-m", "agentflow"}, dir: dir}
+	canonical, err := canonicalSourceCheckout(checkout)
+	if err != nil {
+		r.initErr = err
+		return r
 	}
-	if strings.ContainsRune(checkout, os.PathListSeparator) {
-		r.initErr = errors.New("agentflow source checkout contains a path-list separator")
-	}
+	r.env = []string{"PYTHONPATH=" + filepath.Join(canonical, "src")}
 	return r
+}
+
+var errSourcePathList = errors.New("agentflow source checkout contains a path-list separator")
+
+// canonicalSourceCheckout validates an operator-supplied checkout once, at
+// construction. The checkout is trusted operator input: a swap between this
+// check and a later launch is outside the threat model.
+func canonicalSourceCheckout(checkout string) (string, error) {
+	switch {
+	case checkout == "":
+		return "", errors.New("agentflow source checkout is empty")
+	case !filepath.IsAbs(checkout):
+		return "", errors.New("agentflow source checkout must be an absolute path")
+	case strings.ContainsRune(checkout, os.PathListSeparator):
+		return "", errSourcePathList
+	}
+	canonical, err := filepath.EvalSymlinks(checkout)
+	if err != nil {
+		return "", fmt.Errorf("agentflow source checkout: %w", err)
+	}
+	if strings.ContainsRune(canonical, os.PathListSeparator) {
+		return "", errSourcePathList
+	}
+	fi, err := os.Stat(filepath.Join(canonical, "src", "agentflow", "__init__.py"))
+	if err != nil || !fi.Mode().IsRegular() {
+		return "", errors.New("agentflow source checkout has no src/agentflow package")
+	}
+	return canonical, nil
 }
 
 // DisablePythonBytecodeWrites keeps Python-backed verification from writing import
