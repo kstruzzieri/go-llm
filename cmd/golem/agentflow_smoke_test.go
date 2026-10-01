@@ -678,6 +678,8 @@ func TestAgentflowParallelSmoke(t *testing.T) {
 // agentflowRunnerOrSkip honors GO_LLM_REQUIRE_AGENTFLOW and the explicit
 // AGENTFLOW_SRC checkout, otherwise uses an installed binary or skips. Mirrors
 // agentflow.agentflowRunnerForTest, which is unexported in another package.
+// CI's agentflow-compat job selects real-CLI tests by name, so a new test using
+// this must be named Test*_RealCLI or Test*_RealCLI_<scenario>.
 func agentflowRunnerOrSkip(t *testing.T, dir string) agentflow.Runner {
 	t.Helper()
 	mode, src := os.Getenv("GO_LLM_REQUIRE_AGENTFLOW"), os.Getenv("AGENTFLOW_SRC")

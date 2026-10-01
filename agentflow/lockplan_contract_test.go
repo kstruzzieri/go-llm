@@ -40,7 +40,9 @@ func agentflowTestSource(mode, src string, installed bool) (useSrc, skip bool, e
 }
 
 // agentflowRunnerForTest honors GO_LLM_REQUIRE_AGENTFLOW and the explicit
-// AGENTFLOW_SRC checkout, otherwise uses an installed binary or skips.
+// AGENTFLOW_SRC checkout, otherwise uses an installed binary or skips. CI's
+// agentflow-compat job selects real-CLI tests by name, so a test using this
+// must be named Test*_RealCLI or Test*_RealCLI_<scenario>.
 func agentflowRunnerForTest(t *testing.T, dir string) Runner {
 	t.Helper()
 	src := os.Getenv("AGENTFLOW_SRC")
