@@ -157,3 +157,45 @@ jobs:
         env:
           GO_LLM_REQUIRE_BWRAP: "1"
         run: go test -race -count=1 -run '^(TestBwrap|TestBuildBwrap|TestCollectBwrap|TestProbeBwrap|TestExistingPolicyPaths)' ./agent/tools
+
+  # Real-CLI Agentflow suite (#577) against the one verified-compatible pin, run
+  # twice: against an installed `agentflow` and against a source checkout.
+  # GO_LLM_REQUIRE_AGENTFLOW turns a missing-Agentflow skip into a hard failure,
+  # so a runner that cannot find Agentflow fails loudly instead of passing.
+  agentflow-compat:
+    name: Agentflow compatibility
+    runs-on: ubuntu-24.04
+    env:
+      AGENTFLOW_TESTS: '^(Test.*_RealCLI($|_)|TestAgentflow(Smoke|ParallelSmoke)$)'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version-file: go.mod
+
+      # Pinned to the last Agentflow commit Golem develop is verified against.
+      # Agentflow main moved to 1.0 schemas; bumping this pin is #612's job.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          repository: kstruzzieri/agentflow
+          ref: 418602db857d726b4673cfab352650474743ccce
+          path: _agentflow
+          persist-credentials: false
+
+      - name: Install Agentflow
+        run: |
+          python3 -m venv "$RUNNER_TEMP/agentflow-venv"
+          "$RUNNER_TEMP/agentflow-venv/bin/pip" install ./_agentflow
+          echo "$RUNNER_TEMP/agentflow-venv/bin" >> "$GITHUB_PATH"
+
+      - name: Agentflow compatibility (installed)
+        env:
+          GO_LLM_REQUIRE_AGENTFLOW: installed
+        run: go test -tags=agentflow_integration -count=1 -run "$AGENTFLOW_TESTS" ./agentflow ./cmd/golem
+
+      - name: Agentflow compatibility (source)
+        env:
+          GO_LLM_REQUIRE_AGENTFLOW: source
+          AGENTFLOW_SRC: ${{ github.workspace }}/_agentflow
+        run: go test -tags=agentflow_integration -count=1 -run "$AGENTFLOW_TESTS" ./agentflow ./cmd/golem
