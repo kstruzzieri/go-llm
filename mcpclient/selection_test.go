@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"slices"
 	"strings"
 	"testing"
 
@@ -83,7 +84,8 @@ func TestValidateSelection(t *testing.T) {
 	}{
 		{nil, ""},
 		{[]string{"read", "write_file", "a-b"}, ""},
-		{[]string{strings.Repeat("a", 55)}, ""}, // "mcp__fs__" + 55 bytes = 64, the composed-name limit
+		{[]string{strings.Repeat("a", 55)}, ""},                                                           // "mcp__fs__" + 55 bytes = 64, the composed-name limit
+		{[]string{strings.Repeat("a", 56)}, "mcpclient: tool selection entry 1 is not a valid tool name"}, // one byte over
 		{full, ""},
 		{[]string{"read", "bad name", "read"}, "mcpclient: tool selection entry 2 is not a valid tool name"},
 		{[]string{"read", "write", "read"}, "mcpclient: tool selection entry 3 repeats a name"},
@@ -108,7 +110,6 @@ func TestSelectionMissingBlocksAlias(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = m.Close() })
-	waitOn(t, done, "selection_missing session close")
 	failure := admission(t, w)
 	if failure.Reason != "selection_missing" || len(failure.Names) != 1 || failure.Names[0] != "delete" {
 		t.Fatalf("failure = (%q, %q), want (selection_missing, [delete])", failure.Reason, failure.Names)
@@ -125,6 +126,7 @@ func TestSelectionMissingBlocksAlias(t *testing.T) {
 	if !bytes.Contains(pinBytes(t, pins, "fs"), []byte(`"mcp__fs__read"`)) {
 		t.Fatal("full-catalog pin was not created before selection applied")
 	}
+	waitOn(t, done, "selection_missing session close")
 }
 
 // closeErrTransport makes the client connection's Close report err after
@@ -162,7 +164,7 @@ func TestSelectionMissingSurvivesCloseError(t *testing.T) {
 	t.Cleanup(func() { _ = m.Close() })
 	failure := admission(t, w)
 	if !errors.Is(failure, context.Canceled) {
-		t.Fatalf("fixture: session.Close did not surface the connection's close error: %v", failure)
+		t.Fatalf("selection_missing failure lacks the close error as its cause (fixture, or the session was not closed): %v", failure)
 	}
 	if failure.Reason != "selection_missing" {
 		t.Fatalf("reason = %q, want selection_missing despite a canceled close", failure.Reason)
@@ -182,5 +184,18 @@ func TestExplicitEmptySelectionExposesNothing(t *testing.T) {
 	}
 	if !bytes.Contains(pinBytes(t, pins, "fs"), []byte(`"mcp__fs__read"`)) {
 		t.Fatal("explicit-empty selection skipped the full-catalog pin")
+	}
+}
+
+func TestSelectionMissingNamesKeepSelectionOrder(t *testing.T) {
+	s, _, _ := staticCatalogServer(t, "fs", &gomcp.Tool{Name: "read"})
+	m, w, err := Connect(context.Background(), Implementation{Name: "test"}, []Server{s.WithTools("zeta", "read", "alpha")}, ConnectOptions{Pins: testPins(t)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = m.Close() })
+	failure := admission(t, w)
+	if got, want := failure.Error(), `server "fs": selection_missing: zeta, alpha`; got != want || !slices.Equal(failure.Names, []string{"zeta", "alpha"}) {
+		t.Fatalf("failure = (%q, %q), want (%q, [zeta alpha]): selection order, not sorted or catalog order", got, failure.Names, want)
 	}
 }
