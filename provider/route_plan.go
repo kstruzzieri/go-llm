@@ -1318,9 +1318,11 @@ func clampMs(duration time.Duration) int64 {
 
 // feedbackWriteTimeout bounds how long recordOutcomeFeedback will wait for
 // the store before giving up. Picked to be generous for an in-memory store
-// and survivable for a SQLite store under contention. Without this bound a
-// stuck store (locked WAL, frozen filesystem) would block every routed
-// request indefinitely.
+// and survivable for a SQLite store under contention: SQLiteFeedbackStore
+// caps SQLite's busy wait to the time left on this deadline, so a locked
+// database costs about this long. The bound is a context deadline, not a
+// hard wall-clock limit; a store blocked outside a lock wait (for example on
+// a frozen filesystem) can still hold up the routed request.
 //
 // Declared as a package-level var (not const) so tests can override it to
 // exercise the timeout path without burning real wall-clock seconds.
