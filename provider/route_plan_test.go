@@ -2370,8 +2370,10 @@ func TestRecordOutcomeFeedbackBoundsSQLiteLockWait(t *testing.T) {
 	if elapsed < feedbackWriteTimeout/2 {
 		t.Fatalf("fixture invalid: returned after %v without waiting on the held lock", elapsed)
 	}
-	if elapsed > 2500*time.Millisecond {
-		t.Fatalf("recordOutcomeFeedback returned after %v, want under 2.5s", elapsed)
+	// feedbackWriteTimeout plus 1.5s of slack for scheduling under the race
+	// gate; without the cap the write waited out the store's 5s busy_timeout.
+	if limit := feedbackWriteTimeout + 1500*time.Millisecond; elapsed > limit {
+		t.Fatalf("recordOutcomeFeedback returned after %v, want under %v", elapsed, limit)
 	}
 	if got := len(logs.snapshot()); got != 1 {
 		t.Fatalf("write warnings = %d, want 1", got)

@@ -166,23 +166,35 @@ func assertContendedFailure(t *testing.T, err error, elapsed, minWait, maxWait t
 }
 
 // Test 1: a short deadline bounds the lock wait on a caller-owned pool whose
-// busy_timeout is 5s.
+// busy_timeout is 5s. Under _txlock=immediate, BEGIN itself takes the write
+// lock, so the cap must be in place before BEGIN, not just before the first
+// write.
 func TestSQLiteFeedbackStoreDeadlineBoundsLockWait(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "feedback.db")
-	db := openFeedbackFileDB(t, path, "_pragma=busy_timeout(5000)", 2)
-	execFeedbackSQL(t, db, "PRAGMA journal_mode=WAL")
-	store := newFileFeedbackStore(t, db)
-	release := holdFeedbackLock(t, path, "BEGIN IMMEDIATE")
-	start := time.Now()
-	ctx, cancel := context.WithTimeout(t.Context(), 200*time.Millisecond)
-	defer cancel()
-	err := store.RecordBatch(ctx, []FeedbackItem{testFeedbackItem("m")})
-	elapsed := time.Since(start)
-	release()
-	t.Logf("ELAPSED deadline-bounds %v", elapsed)
-	assertContendedFailure(t, err, elapsed, 100*time.Millisecond, 600*time.Millisecond)
-	if n := feedbackRows(t, db); n != 0 {
-		t.Fatalf("signals after a failed write = %d, want 0", n)
+	for _, tc := range []struct{ name, query, phase string }{
+		{"deferred", "_pragma=busy_timeout(5000)", "insert signal"},
+		{"txlock-immediate", "_pragma=busy_timeout(5000)&_txlock=immediate", "begin"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "feedback.db")
+			db := openFeedbackFileDB(t, path, tc.query, 2)
+			execFeedbackSQL(t, db, "PRAGMA journal_mode=WAL")
+			store := newFileFeedbackStore(t, db)
+			release := holdFeedbackLock(t, path, "BEGIN IMMEDIATE")
+			start := time.Now()
+			ctx, cancel := context.WithTimeout(t.Context(), 200*time.Millisecond)
+			defer cancel()
+			err := store.RecordBatch(ctx, []FeedbackItem{testFeedbackItem("m")})
+			elapsed := time.Since(start)
+			release()
+			t.Logf("ELAPSED deadline-bounds/%s %v", tc.name, elapsed)
+			if err == nil || !strings.Contains(err.Error(), tc.phase) {
+				t.Fatalf("fixture invalid: err = %v, want the lock wait in %q", err, tc.phase)
+			}
+			assertContendedFailure(t, err, elapsed, 100*time.Millisecond, 600*time.Millisecond)
+			if n := feedbackRows(t, db); n != 0 {
+				t.Fatalf("signals after a failed write = %d, want 0", n)
+			}
+		})
 	}
 }
 
@@ -395,9 +407,16 @@ func TestSQLiteFeedbackStoreRejectsDoneContext(t *testing.T) {
 	cancel()
 	expired, cancelExpired := context.WithDeadline(t.Context(), time.Now().Add(-time.Second))
 	defer cancelExpired()
-	for name, ctx := range map[string]context.Context{"cancelled": cancelled, "expired": expired} {
-		if err := store.RecordBatch(ctx, []FeedbackItem{testFeedbackItem("m")}); err == nil {
-			t.Errorf("%s context: RecordBatch succeeded", name)
+	for _, tc := range []struct {
+		name string
+		ctx  context.Context
+		want error
+	}{
+		{"cancelled", cancelled, context.Canceled},
+		{"expired", expired, context.DeadlineExceeded},
+	} {
+		if err := store.RecordBatch(tc.ctx, []FeedbackItem{testFeedbackItem("m")}); !errors.Is(err, tc.want) {
+			t.Errorf("%s context: RecordBatch err = %v, want %v", tc.name, err, tc.want)
 		}
 	}
 	if n := feedbackRows(t, db); n != 0 {
