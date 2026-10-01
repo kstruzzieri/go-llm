@@ -4,7 +4,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -15,17 +18,13 @@ import (
 	"github.com/kstruzzieri/go-llm/recipe"
 )
 
-// TestRunOneShotDefaultGuardsBlockCredentialRead: the startup orchestrator a
-// plain -p run builds (no -interceptors) blocks a .env read on the wire.
-func TestRunOneShotDefaultGuardsBlockCredentialRead(t *testing.T) {
-	configPath, root, requests := fenceWireHarness(t, func(req wireRequest) []string {
-		if req.hasToolMessage() {
-			return sseAnswer("final answer")
-		}
-		return sseToolCall("r1", "read_file", `{"path":".env"}`)
-	})
+// TestDefaultGuardsPath_OneShot: the startup orchestrator a plain -p run
+// builds (no -interceptors) blocks a .env read on the wire, and the footer
+// shows the guards' score.
+func TestDefaultGuardsPath_OneShot(t *testing.T) {
+	configPath, root, requests := fenceWireHarness(t, guardProbeWire(sseAnswer("final answer")))
 	writeEnvSentinel(t, root)
-	runFenceOneShot(t, configPath, root)
+	stderr := runFenceOneShot(t, configPath, root)
 	reqs := requests()
 	if len(reqs) != 2 {
 		t.Fatalf("requests = %d, want 2", len(reqs))
@@ -36,18 +35,72 @@ func TestRunOneShotDefaultGuardsBlockCredentialRead(t *testing.T) {
 	}
 	for i, r := range reqs {
 		for _, m := range r.Messages {
-			if strings.Contains(m.Content, "guard-probe-575") {
+			if strings.Contains(m.Content, envSentinelToken) {
 				t.Fatalf("request %d leaked the sentinel", i)
 			}
 		}
 	}
+	// render.go finalFooter: "done · <n> steps · <s>s · <n> tok · risk <score>",
+	// with no stop suffix on a completed run.
+	footer := false
+	for _, line := range strings.Split(stderr, "\n") {
+		if strings.HasPrefix(line, "done · ") && strings.HasSuffix(line, " · risk 30") {
+			footer = true
+		}
+	}
+	if !footer {
+		t.Fatalf("stderr has no footer ending %q:\n%s", " · risk 30", stderr)
+	}
 }
 
-// TestModelSetRebuildKeepsDefaultGuards: /model set republishes an
+// TestDefaultGuardsPath_ProductionAgentflowModes: the -goal and -plan
+// startups hand AgentFlow a guarded sess.orch and a guarded factory. The
+// author, driver, and worker tests below only prove that those paths run the
+// orchestrator they are handed.
+func TestDefaultGuardsPath_ProductionAgentflowModes(t *testing.T) {
+	plan := filepath.Join(t.TempDir(), "plan.json")
+	if err := os.WriteFile(plan, []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	approve := []string{"-approve-plan-edits", "-approve-plan-gates"}
+	for _, tc := range []struct {
+		name string
+		args []string
+	}{
+		{"goal", []string{"-goal", "x"}},
+		{"plan", append([]string{"-plan", plan}, approve...)},
+		{"plan workers", append([]string{"-plan", plan, "-plan-workers", "2"}, approve...)},
+		{"resume", append([]string{"-agentflow-resume", "-plan", plan}, approve...)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// fenceWireHarness isolates HOME, XDG_CONFIG_HOME and XDG_DATA_HOME.
+			configPath, root, _ := fenceWireHarness(t, guardProbeWire(sseAnswer("final answer")))
+			writeEnvSentinel(t, root)
+			stdin, stdout, stderr := runTestFiles(t)
+			errStop := errors.New("stop at session ready")
+			args := append([]string{"-config", configPath, "-root", root,
+				"-no-probe", "-no-cap-probe", "-no-session", "-no-memory", "-no-rag",
+				"-no-project-context", "-no-auto-index"}, tc.args...)
+			err := run(args, stdin, stdout, stderr, runHooks{afterSessionReady: func(sess *replSession) error {
+				req := agent.Request{Goal: "read the env", MaxSteps: 4, Tools: sess.tools}
+				res, err := sess.orch.Run(t.Context(), req, nil)
+				assertCredentialBlocked(t, res, err)
+				fresh, err := sess.newOrchestrator().Run(t.Context(), req, nil)
+				assertCredentialBlocked(t, fresh, err)
+				return errStop
+			}})
+			if !errors.Is(err, errStop) {
+				t.Fatalf("run = %v, want the session-ready stop\nstderr:\n%s", err, readRunTestFile(t, stderr))
+			}
+		})
+	}
+}
+
+// TestDefaultGuardsPath_ModelSetRebuild: /model set republishes an
 // orchestrator and factory that still block.
-func TestModelSetRebuildKeepsDefaultGuards(t *testing.T) {
+func TestDefaultGuardsPath_ModelSetRebuild(t *testing.T) {
 	fx := newModelSwitchFixture(t, "")
-	fx.alt.chatResponse = guardProbeResponse("alt-model")
+	fx.alt.chatResponse = guardProbeResponse()
 	writeEnvSentinel(t, fx.root)
 	fx.withSession(t, nil, func(t *testing.T, sess *replSession) {
 		slash(t, sess, "/model set swap")
@@ -63,17 +116,21 @@ func TestModelSetRebuildKeepsDefaultGuards(t *testing.T) {
 	})
 }
 
-// TestRecipeModelPublicationAndRestorationKeepDefaultGuards: a recipe model
-// hint publishes a guarded orchestrator for its turn and restores a guarded
-// one afterwards. Restoration republishes the SAVED startup orchestrator and
-// factory (recipes_model.go), so the restored assertions are also what pins
-// the REPL startup construction; -p is pinned separately above.
-func TestRecipeModelPublicationAndRestorationKeepDefaultGuards(t *testing.T) {
+// TestDefaultGuardsPath_RecipePublicationAndRestoration: the REPL startup
+// runtime blocks, a recipe model hint publishes a guarded orchestrator for
+// its turn, and restoration leaves a guarded runtime and factory.
+func TestDefaultGuardsPath_RecipePublicationAndRestoration(t *testing.T) {
 	fx := newModelSwitchFixture(t, "")
-	fx.alt.chatResponse = guardProbeResponse("alt-model")
-	fx.primary.chatResponse = guardProbeResponse("agent-model")
+	fx.alt.chatResponse = guardProbeResponse()
+	fx.primary.chatResponse = guardProbeResponse()
 	writeEnvSentinel(t, fx.root)
 	fx.withSession(t, nil, func(t *testing.T, sess *replSession) {
+		// Before any switch: the runtime REPL startup published.
+		startup, err := sess.runtime.Run(t.Context(), golemruntime.Turn{RunID: "guard-startup", Message: "read the env"}, sess.machine.sink())
+		assertCredentialBlocked(t, startup, err)
+		if startup.Answer != "primary answer" {
+			t.Fatalf("startup answer = %q, want the primary backend's", startup.Answer)
+		}
 		res, err := runOnceWithRecipeHint(t.Context(), io.Discard, nil, sess, "read the env", nil,
 			&recipeInvocationHint{command: "/review", hint: recipe.ModelHint{Role: "swap"}})
 		assertCredentialBlocked(t, res, err)
@@ -90,9 +147,9 @@ func TestRecipeModelPublicationAndRestorationKeepDefaultGuards(t *testing.T) {
 	})
 }
 
-// TestAgentflowAuthorRunsSessionOrchestratorGuards: the planner runs on
-// sess.orch, which production builds through the factory.
-func TestAgentflowAuthorRunsSessionOrchestratorGuards(t *testing.T) {
+// TestDefaultGuardsPath_AgentflowAuthor: the planner runs on sess.orch,
+// whatever orchestrator that is; here the factory's.
+func TestDefaultGuardsPath_AgentflowAuthor(t *testing.T) {
 	root := t.TempDir()
 	writeEnvSentinel(t, root)
 	caller := &recordingScript{scriptCaller: scriptCaller{responses: []agent.ModelResult{
@@ -108,17 +165,17 @@ func TestAgentflowAuthorRunsSessionOrchestratorGuards(t *testing.T) {
 	assertBlockedObservationSeen(t, caller.reqs, credentialBlocked)
 }
 
-// TestTaskStepRunnerRunsGivenOrchestratorGuards: a task step runs on the
-// orchestrator it is handed (production hands it sess.orch) and builds none
-// of its own.
-func TestTaskStepRunnerRunsGivenOrchestratorGuards(t *testing.T) {
+// TestDefaultGuardsPath_TaskStepRunner: a task step runs on the orchestrator
+// it is handed (production hands it sess.orch), builds none of its own, and
+// carries on past the block to the step's allowed write.
+func TestDefaultGuardsPath_TaskStepRunner(t *testing.T) {
 	root := t.TempDir()
 	writeEnvSentinel(t, root)
 	plan := &agentflow.Plan{AllowedFiles: []string{"out.txt"}, Steps: []agentflow.Step{{ID: "P1", Files: []string{"out.txt"}}}}
 	caller := &recordingScript{scriptCaller: scriptCaller{responses: []agent.ModelResult{
 		toolStep("r1", "read_file", `{"path":".env"}`),
 		toolStep("w1", "write_file", `{"path":"out.txt","content":"worker\n"}`),
-		finalStep("done"),
+		answerStep("done"),
 	}}}
 	orch := newOrchestratorFactory(caller, flags{}, nil, nil)()
 	af := &fakeAF{}
@@ -133,12 +190,14 @@ func TestTaskStepRunnerRunsGivenOrchestratorGuards(t *testing.T) {
 		t.Fatal(err)
 	}
 	assertBlockedObservationSeen(t, caller.reqs, credentialBlocked)
+	if got, err := os.ReadFile(filepath.Join(root, "out.txt")); err != nil || string(got) != "worker\n" {
+		t.Fatalf("out.txt = %q, %v; want the allowed write after the block", got, err)
+	}
 }
 
-// TestParallelWorkerRunsSessionFactoryGuards: each parallel worker builds its
-// orchestrator from sess.newOrchestrator, which production binds to the
-// factory.
-func TestParallelWorkerRunsSessionFactoryGuards(t *testing.T) {
+// TestDefaultGuardsPath_ParallelWorker: each parallel worker builds its
+// orchestrator from sess.newOrchestrator, whatever that is; here the factory.
+func TestDefaultGuardsPath_ParallelWorker(t *testing.T) {
 	root := t.TempDir()
 	writeEnvSentinel(t, root)
 	plan := &agentflow.Plan{AllowedFiles: []string{"worker.go"}, Steps: []agentflow.Step{{
@@ -148,7 +207,7 @@ func TestParallelWorkerRunsSessionFactoryGuards(t *testing.T) {
 	runner := &assignedWorkerRunner{nextAction: `{"resumability":{"contract":{"plan_sha256":"plan","locked":true,"execution_contract_sha256":"execution"},"agent_id":"golem-w2","step":{"id":"P1","state":"pending","completed":false},"attempt":null,"diagnostics":[]}}`}
 	caller := &recordingScript{scriptCaller: scriptCaller{responses: []agent.ModelResult{
 		toolStep("r1", "read_file", `{"path":".env"}`),
-		finalStep("done"),
+		answerStep("done"),
 	}}}
 	sess := &replSession{maxSteps: 4, newOrchestrator: newOrchestratorFactory(caller, flags{}, nil, nil)}
 	run := newAssignedParallelWorker(plan, sess, true, io.Discard, func(string) agentflow.Runner { return runner })
@@ -158,9 +217,9 @@ func TestParallelWorkerRunsSessionFactoryGuards(t *testing.T) {
 	assertBlockedObservationSeen(t, caller.reqs, credentialBlocked)
 }
 
-// TestDispatchChildRunsDefaultGuards: newDispatchTool derives the child chain
+// TestDefaultGuardsPath_DispatchChild: newDispatchTool derives the child chain
 // from the flags value it is given, so a child .env read is blocked and scored.
-func TestDispatchChildRunsDefaultGuards(t *testing.T) {
+func TestDefaultGuardsPath_DispatchChild(t *testing.T) {
 	root := t.TempDir()
 	writeEnvSentinel(t, root)
 	readers, err := buildTools(root, nil)
@@ -170,7 +229,7 @@ func TestDispatchChildRunsDefaultGuards(t *testing.T) {
 	route := &provider.RouteOutcome{ActualModel: provider.ModelKey{Provider: "local", Model: "fast"}}
 	read := toolStep("c1", "read_file", `{"path":".env"}`)
 	read.RouteOutcome = route
-	answer := finalStep("done")
+	answer := answerStep("done")
 	answer.RouteOutcome = route
 	child := &recordingScript{scriptCaller: scriptCaller{responses: []agent.ModelResult{read, answer}}}
 	d, err := newDispatchTool(child, flags{dispatch: true}, agent.Budget{}, dispatchFanout{maxConcurrent: 1}, nil, readers, nil)

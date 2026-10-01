@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"testing"
 
@@ -15,10 +14,12 @@ import (
 	"github.com/kstruzzieri/go-llm/provider"
 )
 
-// envSentinel is the synthetic, non-secret content of every fixture .env. It
-// must never reach a provider request: the credential_path guard blocks the
-// read before invocation.
-const envSentinel = "TOKEN=guard-probe-575"
+// envSentinelToken is the synthetic, non-secret marker inside every fixture
+// .env. It must never reach a provider request: the credential_path guard
+// blocks the read before invocation, so every leak check searches for it.
+const envSentinelToken = "guard-probe-575"
+
+const envSentinel = "TOKEN=" + envSentinelToken
 
 const credentialBlocked = "tool call blocked by interceptor invariants (credential_path)"
 
@@ -34,11 +35,6 @@ func toolStep(id, name, args string) agent.ModelResult {
 	return agent.ModelResult{Response: provider.ChatResponse{ToolCalls: []provider.ToolCall{{
 		ID: id, Type: "function", Function: provider.ToolCallFunction{Name: name, Arguments: json.RawMessage(args)},
 	}}}}
-}
-
-// finalStep scripts a final answer.
-func finalStep(answer string) agent.ModelResult {
-	return agent.ModelResult{Response: provider.ChatResponse{Content: answer, Done: true}}
 }
 
 // recordingScript is a scriptCaller that keeps every request, for wire
@@ -75,7 +71,7 @@ func assertBlockedObservationSeen(t *testing.T, reqs []provider.ChatRequest, wan
 	found := false
 	for _, req := range reqs {
 		for _, m := range req.Messages {
-			if strings.Contains(m.Content, "guard-probe-575") {
+			if strings.Contains(m.Content, envSentinelToken) {
 				t.Fatalf("credential sentinel reached the model: %q", m.Content)
 			}
 			if m.Role == "tool" && m.Content == framedToolResult(toolFrameKey(t, m.Content), want) {
@@ -88,10 +84,21 @@ func assertBlockedObservationSeen(t *testing.T, reqs []provider.ChatRequest, wan
 	}
 }
 
+// guardProbeWire answers a turn's first request with a .env read and, once a
+// tool observation is present, the given chunks.
+func guardProbeWire(answer []string) func(wireRequest) []string {
+	return func(req wireRequest) []string {
+		if req.hasToolMessage() {
+			return answer
+		}
+		return sseToolCall("r1", "read_file", `{"path":".env"}`)
+	}
+}
+
 // guardProbeResponse makes a modelBackend request a .env read on a turn's
-// first request and fall through to its default answer once a tool
+// first request and fall through to its labeled default answer once a tool
 // observation is present.
-func guardProbeResponse(model string) func(http.ResponseWriter, *http.Request, string) bool {
+func guardProbeResponse() func(http.ResponseWriter, *http.Request, string) bool {
 	return func(w http.ResponseWriter, _ *http.Request, body string) bool {
 		var req wireRequest
 		if err := json.Unmarshal([]byte(body), &req); err != nil || req.hasToolMessage() {
@@ -99,7 +106,7 @@ func guardProbeResponse(model string) func(http.ResponseWriter, *http.Request, s
 		}
 		w.Header().Set("Content-Type", "text/event-stream")
 		for _, chunk := range sseToolCall("g1", "read_file", `{"path":".env"}`) {
-			_, _ = io.WriteString(w, "data: "+strings.Replace(chunk, `"agent-model"`, strconv.Quote(model), 1)+"\n\n")
+			_, _ = io.WriteString(w, "data: "+chunk+"\n\n")
 		}
 		_, _ = io.WriteString(w, "data: [DONE]\n\n")
 		return true
