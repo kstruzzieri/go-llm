@@ -17,8 +17,9 @@ that pipe a `curl`/`wget` stdout fetch into a bare shell (optionally `-s`,
 optionally under `sudo`); and the same guarded argument spelled twice.
 Matching calls are refused before approval; grants and `-allow-tool` cannot
 override this. The model sees the refusal as a tool error, and three
-consecutive errors stop the run. A `-p` run in `json` or `stream-json` format
-stopped this way reports `status: error` with `empty_answer` and exits 1.
+consecutive errors stop the run. A `-p` run stopped this way exits 1: text
+format prints `one-shot: model produced no final answer`, and `json` or
+`stream-json` report `status: error` with `empty_answer`.
 Blocked calls emit no `tool.started`/`tool.finished` events. Other routes to
 the same files or effects are not covered: shell commands, search, retrieval,
 MCP tools, verifier commands, and shell forms the recognizer does not model
@@ -27,7 +28,8 @@ MCP tools, verifier commands, and shell forms the recognizer does not model
 Egress labels classify the `argv` of any exec-class call whose arguments
 carry one, MCP tools included, unless the command is on the quiet set. They
 appear on interactive approval prompts. Invariant refusals (30 each), egress
-labels and scoped-child refusals (10 each) add to the `interceptor risk`
+labels (0 to 20 by class; see docs/golem.md) and scoped-child refusals (10
+each) add to the `interceptor risk`
 score shown on prompts and stderr footers, now also without
 `-interceptors`; a dispatch child's envelope gains its own `risk_score` the
 same way. Labels and scores are informational and do not confine network
