@@ -79,14 +79,37 @@ func migrate(ctx context.Context, db *sql.DB) error {
 	return nil
 }
 
+// auditUpgradeHooks are per-call test seams for addMissingAuditColumnsWith.
+// Production passes the zero value.
+type auditUpgradeHooks struct {
+	afterProbe  func()                 // the lock-free probe found a missing column
+	afterLock   func()                 // the write lock is held and columns re-probed
+	beforeAlter func(col string) error // before each ALTER
+}
+
 func addMissingAuditColumns(ctx context.Context, db *sql.DB) error {
+	return addMissingAuditColumnsWith(ctx, db, auditUpgradeHooks{})
+}
+
+func addMissingAuditColumnsWith(ctx context.Context, db *sql.DB, hooks auditUpgradeHooks) error {
 	existing, err := conversationColumns(ctx, db)
 	if err != nil {
 		return err
 	}
+	if hooks.afterProbe != nil {
+		hooks.afterProbe()
+	}
+	if hooks.afterLock != nil {
+		hooks.afterLock()
+	}
 	for _, col := range auditColumns {
 		if existing[col.name] {
 			continue
+		}
+		if hooks.beforeAlter != nil {
+			if err := hooks.beforeAlter(col.name); err != nil {
+				return err
+			}
 		}
 		stmt := fmt.Sprintf("ALTER TABLE conversations ADD COLUMN %s %s", col.name, col.ddl)
 		if _, err := db.ExecContext(ctx, stmt); err != nil {
