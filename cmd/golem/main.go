@@ -108,6 +108,25 @@ type flags struct {
 	consultantsConfig string // -consultants-config: explicit consultants.json path (#382)
 }
 
+// parseQuietly parses args without the flag package's own error output, which
+// quotes argv (unknown flags, bad values) and so may echo secrets. Help still
+// prints the default usage to helpOut (nil means stderr, the flag package
+// default); every other failure becomes one value-free error.
+func parseQuietly(fs *flag.FlagSet, args []string, helpOut io.Writer) error {
+	fs.SetOutput(io.Discard)
+	err := fs.Parse(args)
+	if err == nil {
+		return nil
+	}
+	if errors.Is(err, flag.ErrHelp) {
+		fs.SetOutput(helpOut)
+		_, _ = fmt.Fprintf(fs.Output(), "Usage of %s:\n", fs.Name())
+		fs.PrintDefaults()
+		return flag.ErrHelp
+	}
+	return fmt.Errorf("invalid command-line flags in %d argument(s); run with -help for usage", len(args))
+}
+
 func parseFlags(args []string) (flags, error) {
 	var f flags
 	fs := flag.NewFlagSet("golem", flag.ContinueOnError)
@@ -179,7 +198,8 @@ func parseFlags(args []string) (flags, error) {
 	fs.BoolVar(&f.approvePlanLock, "approve-plan-lock", false, "planning mode: print the plan preview and approve the lock without prompting (non-interactive -goal)")
 	fs.StringVar(&f.outputFormat, "output-format", "text", "one-shot mode: stdout format — text (the final answer), json (one golem.result.v1 record), or stream-json (one protocol-v1 event per line, then the same record); requires -p")
 	fs.Var(&f.allowTools, "allow-tool", "one-shot mode: mount and non-interactively approve one exact built-in gated tool by name (repeatable; write_file, edit_file, run_command, start_command, stop_command); creates no session grants; MCP tools and submit_plan are never eligible; requires -p")
-	if err := fs.Parse(args); err != nil {
+	// main() prefixes "golem: " when it prints the error.
+	if err := parseQuietly(fs, args, nil); err != nil {
 		return flags{}, err
 	}
 	if fs.NArg() > 0 {

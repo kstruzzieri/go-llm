@@ -47,10 +47,15 @@ func TestParseAuditFlags(t *testing.T) {
 		{name: "empty root", args: []string{"-root="}, wantErr: "-root requires a non-empty value"},
 		{name: "empty agentflow source", args: []string{"-agentflow-src="}, wantErr: "-agentflow-src requires a non-empty value"},
 		{name: "extra argument", args: []string{"workspace"}, wantErr: "unexpected positional argument(s)"},
-		{name: "unknown flag", args: []string{"-wat"}, wantErr: "flag provided but not defined"},
-		{name: "json unsupported", args: []string{"-json"}, wantErr: "flag provided but not defined"},
-		{name: "output format unsupported", args: []string{"-output-format", "json"}, wantErr: "flag provided but not defined"},
+		{name: "unknown flag", args: []string{"-wat"}, wantErr: auditFlagParseError(1)},
+		{name: "json unsupported", args: []string{"-json"}, wantErr: auditFlagParseError(1)},
+		{name: "output format unsupported", args: []string{"-output-format", "json"}, wantErr: auditFlagParseError(2)},
+		{name: "unknown flag after env name", args: []string{"-agentflow-env", "NAME", "-sk-SECRET-577"}, wantErr: auditFlagParseError(3)},
+		{name: "double-dash unknown flag", args: []string{"--sk-SECRET-577"}, wantErr: auditFlagParseError(1)},
+		{name: "bad flag syntax", args: []string{"---sk-SECRET-577"}, wantErr: auditFlagParseError(1)},
+		{name: "flag needs an argument", args: []string{"-root"}, wantErr: auditFlagParseError(1)},
 		{name: "help", args: []string{"-help"}, wantHelp: true, wantOutput: "Usage of golem audit:"},
+		{name: "short help", args: []string{"-h"}, wantHelp: true, wantOutput: "Usage of golem audit:"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var output bytes.Buffer
@@ -72,8 +77,15 @@ func TestParseAuditFlags(t *testing.T) {
 			if !strings.Contains(output.String(), tc.wantOutput) {
 				t.Fatalf("flag output = %q, want substring %q", output.String(), tc.wantOutput)
 			}
+			if !tc.wantHelp && output.Len() != 0 {
+				t.Fatalf("parser wrote flag output %q", output.String())
+			}
 		})
 	}
+}
+
+func auditFlagParseError(n int) string {
+	return fmt.Sprintf("golem audit: invalid command-line flags in %d argument(s); run with -help for usage", n)
 }
 
 func TestRunAuditReportAndExitPrecedence(t *testing.T) {
@@ -428,8 +440,16 @@ func TestAuditExitContractHelper(t *testing.T) {
 	switch os.Getenv("GOLEM_AUDIT_CASE") {
 	case "help":
 		args = []string{"golem", "audit", "-help"}
+	case "help-short":
+		args = []string{"golem", "audit", "-h"}
 	case "invalid":
 		args = []string{"golem", "audit", "-json"}
+	case "flag-unknown":
+		args = []string{"golem", "audit", "-agentflow-env", "NAME", "-sk-" + auditEnvSecret}
+	case "flag-double-dash":
+		args = []string{"golem", "audit", "--sk-" + auditEnvSecret}
+	case "flag-bad-syntax":
+		args = []string{"golem", "audit", "---sk-" + auditEnvSecret}
 	case "env-literal":
 		args = []string{"golem", "audit", "-root", root, "-agentflow-env", "NAME=" + auditEnvSecret}
 	case "env-positional":
@@ -643,9 +663,32 @@ func TestAuditExitContract(t *testing.T) {
 			wantStderr: "Usage of golem audit:\n  -agentflow-env value\n    \tforward one named parent environment variable to AgentFlow (repeatable; names only)\n  -agentflow-src string\n    \tAgentFlow source checkout\n  -root string\n    \tworkspace root (default \".\")\n  -scope string\n    \taudit scope: all, workspace, memory, or proofs (default \"all\")\n",
 		},
 		{
+			name: "short help", scenario: "help-short", wantExit: 0,
+			wantStdout: func(_, _ string) string { return "" },
+			wantStderr: "Usage of golem audit:\n  -agentflow-env value\n    \tforward one named parent environment variable to AgentFlow (repeatable; names only)\n  -agentflow-src string\n    \tAgentFlow source checkout\n  -root string\n    \tworkspace root (default \".\")\n  -scope string\n    \taudit scope: all, workspace, memory, or proofs (default \"all\")\n",
+		},
+		{
 			name: "unsupported machine output", scenario: "invalid", wantExit: 2,
 			wantStdout: func(_, _ string) string { return "" },
-			wantStderr: "flag provided but not defined: -json\nUsage of golem audit:\n  -agentflow-env value\n    \tforward one named parent environment variable to AgentFlow (repeatable; names only)\n  -agentflow-src string\n    \tAgentFlow source checkout\n  -root string\n    \tworkspace root (default \".\")\n  -scope string\n    \taudit scope: all, workspace, memory, or proofs (default \"all\")\n",
+			wantStderr: auditFlagParseError(1) + "\n",
+		},
+		{
+			name: "unknown flag does not echo", scenario: "flag-unknown", wantExit: 2,
+			wantStdout: func(_, _ string) string { return "" },
+			wantStderr: auditFlagParseError(3) + "\n",
+			absent:     []string{auditEnvSecret},
+		},
+		{
+			name: "double-dash flag does not echo", scenario: "flag-double-dash", wantExit: 2,
+			wantStdout: func(_, _ string) string { return "" },
+			wantStderr: auditFlagParseError(1) + "\n",
+			absent:     []string{auditEnvSecret},
+		},
+		{
+			name: "bad flag syntax does not echo", scenario: "flag-bad-syntax", wantExit: 2,
+			wantStdout: func(_, _ string) string { return "" },
+			wantStderr: auditFlagParseError(1) + "\n",
+			absent:     []string{auditEnvSecret},
 		},
 	}
 

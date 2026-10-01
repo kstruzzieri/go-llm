@@ -30,5 +30,6 @@ every gate.
 - `golem -goal` now resolves a relative `-agentflow-src` against `-root`, like
   task and status modes, and its printed "execute separately" command carries
   every `-agentflow-env` name.
-- `golem` and `golem audit` report unexpected positional arguments by count
-  instead of echoing them.
+- `golem` and `golem audit` no longer echo command-line text in argument
+  errors: unexpected positional arguments are reported by count, and
+  flag-parse errors report the argument count and point to `-help`.

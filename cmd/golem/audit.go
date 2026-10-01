@@ -53,13 +53,15 @@ type auditScanners struct {
 func parseAuditFlags(args []string, output io.Writer) (auditFlags, error) {
 	f := auditFlags{root: ".", scope: "all"}
 	fs := flag.NewFlagSet("golem audit", flag.ContinueOnError)
-	fs.SetOutput(output)
 	fs.StringVar(&f.root, "root", f.root, "workspace root")
 	fs.StringVar(&f.scope, "scope", f.scope, "audit scope: all, workspace, memory, or proofs")
 	fs.StringVar(&f.agentflowSrc, "agentflow-src", "", "AgentFlow source checkout")
 	fs.Var(&f.agentflowEnv, "agentflow-env", "forward one named parent environment variable to AgentFlow (repeatable; names only)")
-	if err := fs.Parse(args); err != nil {
-		return auditFlags{}, err
+	if err := parseQuietly(fs, args, output); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return auditFlags{}, err
+		}
+		return auditFlags{}, fmt.Errorf("golem audit: %w", err)
 	}
 	if fs.NArg() != 0 {
 		return auditFlags{}, fmt.Errorf("golem audit: %d unexpected positional argument(s)", fs.NArg())

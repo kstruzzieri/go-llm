@@ -1932,6 +1932,114 @@ func TestParseFlagsPositionalErrorDoesNotEchoTokens(t *testing.T) {
 	}
 }
 
+// flagParseSentinels cover every flag-package error form that quotes argv:
+// unknown flag, bad syntax, invalid value, invalid boolean, missing argument.
+var flagParseSentinels = [][]string{
+	{"-agentflow-env", "NAME", "-sk-SECRET-577"},
+	{"--sk-SECRET-577"},
+	{"---sk-SECRET-577"},
+	{"-plan-workers", "SECRET-577"},
+	{"-allow-exec=SECRET-577"},
+	{"-plan"},
+}
+
+func TestParseFlagsErrorsDoNotEchoArgv(t *testing.T) {
+	for _, args := range flagParseSentinels {
+		t.Run(strings.Join(args, " "), func(t *testing.T) {
+			_, _, stderr := runTestFiles(t)
+			original := os.Stderr
+			t.Cleanup(func() { os.Stderr = original })
+			os.Stderr = stderr
+			_, err := parseFlags(args)
+			os.Stderr = original
+			want := fmt.Sprintf("invalid command-line flags in %d argument(s); run with -help for usage", len(args))
+			if err == nil || err.Error() != want {
+				t.Fatalf("parseFlags error = %v, want %q", err, want)
+			}
+			if written := readRunTestFile(t, stderr); written != "" {
+				t.Fatalf("parser wrote to stderr: %q", written)
+			}
+		})
+	}
+}
+
+// TestGolemMainArgsHelper runs main() with the JSON argv in GOLEM_MAIN_ARGS so
+// tests can observe exactly what the process prints and exits with.
+func TestGolemMainArgsHelper(t *testing.T) {
+	raw, ok := os.LookupEnv("GOLEM_MAIN_ARGS")
+	if !ok {
+		return
+	}
+	var args []string
+	if err := json.Unmarshal([]byte(raw), &args); err != nil {
+		os.Exit(99)
+	}
+	os.Args = append([]string{"golem"}, args...)
+	main()
+	os.Exit(0)
+}
+
+func runGolemMain(t *testing.T, args ...string) (exit int, stdout, stderr string) {
+	t.Helper()
+	raw, err := json.Marshal(args)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(os.Args[0], "-test.run=^TestGolemMainArgsHelper$")
+	cmd.Env = append(os.Environ(), "GOLEM_MAIN_ARGS="+string(raw))
+	var out, errOut bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &out, &errOut
+	if err := cmd.Run(); err != nil {
+		var exitErr *exec.ExitError
+		if !errors.As(err, &exitErr) {
+			t.Fatal(err)
+		}
+		exit = exitErr.ExitCode()
+	}
+	return exit, out.String(), errOut.String()
+}
+
+func TestMainFlagParseErrorsPrintOneValueFreeLine(t *testing.T) {
+	cases := []struct {
+		args []string
+		exit int
+	}{
+		{[]string{"-p", "x", "-bogus"}, 2},           // headless taxonomy
+		{[]string{"-agentflow-status", "-bogus"}, 1}, // exit 2 means "resume serially" to status consumers
+	}
+	for _, args := range flagParseSentinels {
+		cases = append(cases, struct {
+			args []string
+			exit int
+		}{args, 1})
+	}
+	for _, tc := range cases {
+		t.Run(strings.Join(tc.args, " "), func(t *testing.T) {
+			exit, stdout, stderr := runGolemMain(t, tc.args...)
+			want := fmt.Sprintf("golem: invalid command-line flags in %d argument(s); run with -help for usage\n", len(tc.args))
+			if exit != tc.exit || stdout != "" || stderr != want {
+				t.Fatalf("exit/stdout/stderr = %d / %q / %q, want %d / \"\" / %q", exit, stdout, stderr, tc.exit, want)
+			}
+		})
+	}
+}
+
+func TestMainHelpPrintsUsageToStderr(t *testing.T) {
+	var first string
+	for _, arg := range []string{"-h", "-help", "--help"} {
+		exit, stdout, stderr := runGolemMain(t, arg)
+		if exit != 0 || stdout != "" || !strings.HasPrefix(stderr, "Usage of golem:\n") ||
+			!strings.Contains(stderr, "  -agentflow-env value\n") || strings.Contains(stderr, "golem: ") {
+			t.Fatalf("%s: exit/stdout/stderr = %d / %q / %q", arg, exit, stdout, stderr)
+		}
+		if first == "" {
+			first = stderr
+		} else if stderr != first {
+			t.Fatalf("%s usage differs from -h usage", arg)
+		}
+	}
+}
+
 func TestAgentflowEnvValidationKeepsModeExitCodes(t *testing.T) {
 	devNull, err := os.OpenFile(os.DevNull, os.O_RDWR, 0)
 	if err != nil {
