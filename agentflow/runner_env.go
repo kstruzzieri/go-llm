@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"maps"
 	"regexp"
-	"runtime"
 	"slices"
 	"strings"
 )
@@ -32,10 +31,11 @@ type childEnvPolicy struct {
 	foldCase bool     // Windows: names compare case-insensitively
 }
 
-// hostChildEnvPolicy is the policy for the running platform.
-func hostChildEnvPolicy(approved, owned []string) childEnvPolicy {
+// childEnvPolicyFor is the policy on goos (runtime.GOOS at launch). It takes
+// the platform as input so the Windows policy is testable on every host.
+func childEnvPolicyFor(goos string, approved, owned []string) childEnvPolicy {
 	p := childEnvPolicy{baseline: agentflowBaselineEnv, approved: approved, owned: owned}
-	if runtime.GOOS == "windows" {
+	if goos == "windows" {
 		p.baseline = append(slices.Clone(agentflowBaselineEnv), windowsBaselineEnv...)
 		p.foldCase = true
 	}

@@ -75,6 +75,31 @@ func TestBuildChildEnv(t *testing.T) {
 	}
 }
 
+// CI never runs Windows, so this is the only check of the Windows selection.
+// Expected lists are literals so a change to either baseline variable shows up.
+func TestChildEnvPolicyFor(t *testing.T) {
+	approved, owned := []string{"GOPRIVATE"}, []string{"PYTHONPATH=/af/src"}
+	for _, tc := range []struct {
+		goos     string
+		baseline []string
+		foldCase bool
+	}{
+		{"linux", []string{"PATH", "HOME", "USER", "TMPDIR", "LANG"}, false},
+		{"darwin", []string{"PATH", "HOME", "USER", "TMPDIR", "LANG"}, false},
+		{"windows", []string{"PATH", "HOME", "USER", "TMPDIR", "LANG",
+			"SYSTEMROOT", "TEMP", "TMP", "PATHEXT", "USERPROFILE", "COMSPEC"}, true},
+	} {
+		p := childEnvPolicyFor(tc.goos, approved, owned)
+		if !reflect.DeepEqual(p.baseline, tc.baseline) || p.foldCase != tc.foldCase ||
+			!reflect.DeepEqual(p.approved, approved) || !reflect.DeepEqual(p.owned, owned) {
+			t.Errorf("%s: policy = %+v, want baseline %v foldCase %v", tc.goos, p, tc.baseline, tc.foldCase)
+		}
+	}
+	if want := []string{"PATH", "HOME", "USER", "TMPDIR", "LANG"}; !reflect.DeepEqual(agentflowBaselineEnv, want) {
+		t.Fatalf("building the Windows policy changed the shared baseline: %v", agentflowBaselineEnv)
+	}
+}
+
 func TestBuildChildEnvUnsetApprovedNameFails(t *testing.T) {
 	_, err := buildChildEnv(childEnvPolicy{approved: []string{"GOPRIVATE"}},
 		mapLookup(map[string]string{"OTHER": "sk-secret-577"}))
