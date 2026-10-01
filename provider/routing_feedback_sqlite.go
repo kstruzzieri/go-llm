@@ -428,7 +428,7 @@ func (s *SQLiteFeedbackStore) runInTxBefore(ctx context.Context, deadline time.T
 	return nil
 }
 
-// outsideTx reports whether conn is in autocommit mode. SQLite rolls a
+// outsideTx reports whether conn is in autocommit mode. SQLite can roll a
 // transaction back by itself when a write is interrupted or fails with
 // SQLITE_FULL, SQLITE_IOERR, or SQLITE_NOMEM; ROLLBACK then reports that no
 // transaction is active. BEGIN succeeds only outside a transaction.

@@ -414,9 +414,10 @@ func TestSQLiteFeedbackStoreInterruptedWriteKeepsDatabase(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = store.Close() })
+	// Finite bound: if the interrupt is lost, the write ends in minutes, not a package timeout.
 	execFeedbackSQL(t, store.db, `CREATE TRIGGER slow AFTER INSERT ON routing_feedback_signals
 		WHEN NEW.model = 'slow' BEGIN
-		SELECT COUNT(*) FROM (WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM c WHERE x < 1000000000) SELECT x FROM c);
+		SELECT COUNT(*) FROM (WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM c WHERE x < 10000000) SELECT x FROM c);
 	END`)
 	ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
 	defer cancel()
@@ -466,4 +467,29 @@ func TestSQLiteFeedbackStoreCancelledWriteKeepsTransaction(t *testing.T) {
 		t.Fatal("connection discarded after a cancelled write")
 	}
 	assertBusyTimeouts(t, db, 1, 5000)
+}
+
+// outsideTx alone tells a connection SQLite already rolled back from one still
+// inside a transaction. modernc never leaves the latter after a failed
+// rollback or COMMIT, so the store tests cannot reach it; pin the probe here.
+func TestOutsideTxReportsTransactionState(t *testing.T) {
+	db := openFeedbackFileDB(t, filepath.Join(t.TempDir(), "feedback.db"), "", 1)
+	c, err := db.Conn(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = c.Close() }()
+	if !outsideTx(c) {
+		t.Fatal("autocommit connection reported inside a transaction")
+	}
+	// The probe must leave no transaction behind.
+	if _, err := c.ExecContext(t.Context(), "BEGIN"); err != nil {
+		t.Fatalf("BEGIN after the probe: %v", err)
+	}
+	if outsideTx(c) {
+		t.Fatal("open transaction reported as autocommit")
+	}
+	if _, err := c.ExecContext(t.Context(), "ROLLBACK"); err != nil {
+		t.Fatal(err)
+	}
 }
