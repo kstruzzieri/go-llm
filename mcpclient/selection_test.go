@@ -189,13 +189,16 @@ func TestExplicitEmptySelectionExposesNothing(t *testing.T) {
 
 func TestSelectionMissingNamesKeepSelectionOrder(t *testing.T) {
 	s, _, _ := staticCatalogServer(t, "fs", &gomcp.Tool{Name: "read"})
-	m, w, err := Connect(context.Background(), Implementation{Name: "test"}, []Server{s.WithTools("zeta", "read", "alpha")}, ConnectOptions{Pins: testPins(t)})
+	m, w, err := Connect(context.Background(), Implementation{Name: "test"}, []Server{s.WithTools("zeta", "read", "alpha", "mu", "beta", "omega", "kappa", "delta", "sigma", "gamma")}, ConnectOptions{Pins: testPins(t)})
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = m.Close() })
 	failure := admission(t, w)
-	if got, want := failure.Error(), `server "fs": selection_missing: zeta, alpha`; got != want || !slices.Equal(failure.Names, []string{"zeta", "alpha"}) {
-		t.Fatalf("failure = (%q, %q), want (%q, [zeta alpha]): selection order, not sorted or catalog order", got, failure.Names, want)
+	// Nine missing names: more than one map group, so any map-order iteration
+	// reorders them with near certainty.
+	wantNames := []string{"zeta", "alpha", "mu", "beta", "omega", "kappa", "delta", "sigma", "gamma"}
+	if got, want := failure.Error(), `server "fs": selection_missing: zeta, alpha, mu, beta, omega, kappa, delta, sigma, gamma`; got != want || !slices.Equal(failure.Names, wantNames) {
+		t.Fatalf("failure = (%q, %q), want (%q, %q): selection order, not sorted or map order", got, failure.Names, want, wantNames)
 	}
 }
