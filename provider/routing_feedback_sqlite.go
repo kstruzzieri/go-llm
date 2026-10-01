@@ -80,6 +80,11 @@ type SQLiteFeedbackStore struct {
 // racing constructors: migration coordination does not serialize that setup.
 // OpenSQLiteFeedbackStore sets busy_timeout in its DSN and uses a single
 // connection; caller-owned handles retain their own connection configuration.
+// Record and RecordBatch with a ctx deadline pin one pooled connection, lower
+// its busy_timeout to the time left for the duration of the write, and restore
+// it before returning the connection; a connection still inside a
+// transaction, or whose busy_timeout restore fails, is closed instead, losing
+// connection-local state such as TEMP tables.
 func NewSQLiteFeedbackStore(ctx context.Context, db *sql.DB, cfg SQLiteFeedbackStoreConfig) (*SQLiteFeedbackStore, error) {
 	if db == nil {
 		return nil, errors.New("provider: SQLiteFeedbackStore requires non-nil *sql.DB")
@@ -354,9 +359,11 @@ func (s *SQLiteFeedbackStore) runInTx(ctx context.Context, fn func(*sql.Tx) erro
 //
 // The transaction runs under context.WithoutCancel so database/sql does not
 // roll it back concurrently when ctx expires; statements in fn still use ctx
-// and are interrupted. The store rolls back itself. A connection whose
-// rollback, COMMIT, or busy_timeout restore fails is discarded instead of
-// returning to the pool in an unknown state.
+// and are interrupted. The store rolls back itself. A connection still inside
+// a transaction after a failed rollback or COMMIT, or whose busy_timeout
+// restore fails, is discarded instead of returning to the pool in an unknown
+// state; SQLite may already have rolled back after an interrupted write, in
+// which case the connection is kept.
 func (s *SQLiteFeedbackStore) runInTxBefore(ctx context.Context, deadline time.Time, fn func(*sql.Tx) error) (err error) {
 	conn, err := s.db.Conn(ctx)
 	if err != nil {
@@ -371,7 +378,7 @@ func (s *SQLiteFeedbackStore) runInTxBefore(ctx context.Context, deadline time.T
 	committed, discard := false, false
 	defer func() {
 		if tx != nil && !committed {
-			if rbErr := tx.Rollback(); rbErr != nil && !errors.Is(rbErr, sql.ErrTxDone) {
+			if rbErr := tx.Rollback(); rbErr != nil && !errors.Is(rbErr, sql.ErrTxDone) && !outsideTx(conn) {
 				err = errors.Join(err, fmt.Errorf("provider: SQLiteFeedbackStore rollback: %w", rbErr))
 				discard = true
 			}
@@ -411,13 +418,26 @@ func (s *SQLiteFeedbackStore) runInTxBefore(ctx context.Context, deadline time.T
 		return err
 	}
 	if err := tx.Commit(); err != nil {
-		// modernc suppresses its own rollback error after a failed COMMIT,
-		// so the connection's transaction state is unknown.
-		discard = true
+		// modernc rolls back after a failed COMMIT that left the connection
+		// inside the transaction, but suppresses that rollback's error; keep
+		// the connection only if it is now outside a transaction.
+		discard = !outsideTx(conn)
 		return fmt.Errorf("provider: SQLiteFeedbackStore commit: %w", err)
 	}
 	committed = true
 	return nil
+}
+
+// outsideTx reports whether conn is in autocommit mode. SQLite rolls a
+// transaction back by itself when a write is interrupted or fails with
+// SQLITE_FULL, SQLITE_IOERR, or SQLITE_NOMEM; ROLLBACK then reports that no
+// transaction is active. BEGIN succeeds only outside a transaction.
+func outsideTx(conn *sql.Conn) bool {
+	if _, err := conn.ExecContext(context.Background(), "BEGIN"); err != nil {
+		return false
+	}
+	_, err := conn.ExecContext(context.Background(), "ROLLBACK")
+	return err == nil
 }
 
 // insertSignalTx writes one signal row. Meta is marshalled to JSON; the

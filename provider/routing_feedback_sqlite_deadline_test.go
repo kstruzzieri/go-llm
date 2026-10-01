@@ -84,6 +84,23 @@ func feedbackRows(t *testing.T, db *sql.DB) int {
 	return n
 }
 
+// markConn creates a TEMP table on the (single) pooled connection. It survives
+// only while that physical connection is reused rather than discarded.
+func markConn(t *testing.T, db *sql.DB) {
+	t.Helper()
+	execFeedbackSQL(t, db, "CREATE TEMP TABLE conn_marker(x)")
+}
+
+func connMarked(t *testing.T, db *sql.DB) bool {
+	t.Helper()
+	var n int
+	err := db.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM temp.conn_marker").Scan(&n)
+	if err != nil && !strings.Contains(err.Error(), "no such table") {
+		t.Fatalf("probe marker: %v", err)
+	}
+	return err == nil
+}
+
 // assertBusyTimeouts pins n connections at once and checks each one's
 // busy_timeout, so every pooled connection is inspected.
 func assertBusyTimeouts(t *testing.T, db *sql.DB, n int, want int64) {
@@ -224,6 +241,7 @@ func TestSQLiteFeedbackStoreRefreshesCapBeforeCommit(t *testing.T) {
 	db := openFeedbackFileDB(t, path, "_pragma=busy_timeout(5000)", 1)
 	execFeedbackSQL(t, db, "PRAGMA journal_mode=DELETE")
 	store := newFileFeedbackStore(t, db)
+	markConn(t, db)
 	release := holdFeedbackLock(t, path, "BEGIN", "SELECT COUNT(*) FROM routing_feedback_signals")
 	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
 	defer cancel()
@@ -251,6 +269,22 @@ func TestSQLiteFeedbackStoreRefreshesCapBeforeCommit(t *testing.T) {
 	if elapsed > 2600*time.Millisecond {
 		t.Fatalf("returned after %v, want under 2.6s", elapsed)
 	}
+	// modernc rolled the failed COMMIT back, so the store keeps the
+	// connection, and that connection is outside any transaction.
+	if !connMarked(t, db) {
+		t.Fatal("connection discarded after a failed COMMIT that left it outside a transaction")
+	}
+	c, err := db.Conn(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.ExecContext(t.Context(), "BEGIN IMMEDIATE"); err != nil {
+		t.Fatalf("BEGIN IMMEDIATE on the kept connection: %v", err)
+	}
+	if _, err := c.ExecContext(t.Context(), "ROLLBACK"); err != nil {
+		t.Fatalf("ROLLBACK on the kept connection: %v", err)
+	}
+	_ = c.Close()
 	if n := feedbackRows(t, db); n != 0 {
 		t.Fatalf("signals after a failed COMMIT = %d, want 0", n)
 	}
@@ -362,5 +396,29 @@ func TestSQLiteFeedbackStoreRejectsDoneContext(t *testing.T) {
 	}
 	if n := feedbackRows(t, db); n != 0 {
 		t.Fatalf("signals after done-context writes = %d, want 0", n)
+	}
+}
+
+// SQLite rolls back a transaction itself when a write is interrupted; the
+// store must not report that as a failed rollback or discard the connection,
+// which for ":memory:" is the whole database (#592).
+func TestSQLiteFeedbackStoreInterruptedWriteKeepsDatabase(t *testing.T) {
+	store, err := OpenSQLiteFeedbackStore(t.Context(), ":memory:", SQLiteFeedbackStoreConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	execFeedbackSQL(t, store.db, `CREATE TRIGGER slow AFTER INSERT ON routing_feedback_signals
+		WHEN NEW.model = 'slow' BEGIN
+		SELECT COUNT(*) FROM (WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM c WHERE x < 1000000000) SELECT x FROM c);
+	END`)
+	ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
+	defer cancel()
+	err = store.RecordBatch(ctx, []FeedbackItem{testFeedbackItem("slow")})
+	if !errors.Is(err, context.DeadlineExceeded) || strings.Contains(err.Error(), "rollback") {
+		t.Fatalf("interrupted write err = %v, want only the deadline", err)
+	}
+	if err := store.RecordBatch(t.Context(), []FeedbackItem{testFeedbackItem("after")}); err != nil {
+		t.Fatalf("write after an interrupted write: %v", err)
 	}
 }
