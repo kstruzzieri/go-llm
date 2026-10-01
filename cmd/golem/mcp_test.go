@@ -1,8 +1,12 @@
 package main
 
 import (
+	"fmt"
 	"reflect"
+	"strings"
 	"testing"
+
+	"github.com/kstruzzieri/go-llm/mcpclient"
 )
 
 func TestSplitAlias(t *testing.T) {
@@ -128,6 +132,82 @@ func TestParseMCPServersHTTPAliasesExcludeCredentials(t *testing.T) {
 	for i, want := range []string{"apiexamplecom8443", "apiexamplecom84432", "stable"} {
 		if servers[i].Alias != want {
 			t.Fatalf("alias %d=%q, want %q", i, servers[i].Alias, want)
+		}
+	}
+}
+
+func serverSelection(server mcpclient.Server) (names []string, set bool) {
+	v := reflect.ValueOf(server)
+	tools := v.FieldByName("tools")
+	for i := 0; i < tools.Len(); i++ {
+		names = append(names, tools.Index(i).String())
+	}
+	return names, v.FieldByName("toolsSet").Bool()
+}
+
+func TestApplyMCPTools(t *testing.T) {
+	parse := func(t *testing.T) []mcpclient.Server {
+		t.Helper()
+		servers, err := parseMCPServers([]string{"fs=server one", "npx other"}, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return servers
+	}
+	servers, err := applyMCPTools(parse(t), []string{"fs=read,write", "npx="})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if names, set := serverSelection(servers[0]); !set || !reflect.DeepEqual(names, []string{"read", "write"}) {
+		t.Fatalf("fs selection = (%q, %v), want ([read write], true)", names, set)
+	}
+	if names, set := serverSelection(servers[1]); !set || len(names) != 0 {
+		t.Fatalf("npx selection = (%q, %v), want explicit-empty", names, set)
+	}
+	if _, set := serverSelection(parse(t)[0]); set {
+		t.Fatal("no -mcp-tools flag must leave selection omitted")
+	}
+	// "mcp__fs__" is 9 bytes and composed names are capped at 64, so the
+	// longest remote name for alias fs is 55 bytes.
+	if _, err := applyMCPTools(parse(t), []string{"fs=" + strings.Repeat("a", 55)}); err != nil {
+		t.Fatalf("55-byte name for alias fs rejected: %v", err)
+	}
+	many := make([]string, 129)
+	for i := range many {
+		many[i] = fmt.Sprintf("t%d", i)
+	}
+	for _, tt := range []struct {
+		flags []string
+		want  string
+	}{
+		{[]string{"fs"}, "-mcp-tools #1: expected alias=name[,name...]"},
+		{[]string{"bad alias=read"}, "-mcp-tools #1: expected alias=name[,name...]"},
+		{[]string{"missing=read"}, "-mcp-tools #1: alias is not a configured MCP server"},
+		{[]string{"fs=read", "fs=write"}, "-mcp-tools #2: alias is already selected"},
+		{[]string{"fs=read,,write"}, "-mcp-tools #1: entry 2 is not a tool name for this alias"},
+		{[]string{"fs=read,credential-value!"}, "-mcp-tools #1: entry 2 is not a tool name for this alias"},
+		{[]string{"fs=" + strings.Repeat("a", 56)}, "-mcp-tools #1: entry 1 is not a tool name for this alias"},
+		{[]string{"fs=read,read"}, "-mcp-tools #1: entry 2 repeats a name"},
+		{[]string{"fs=" + strings.Join(many, ",")}, "-mcp-tools #1: more than 128 names"},
+	} {
+		_, err := applyMCPTools(parse(t), tt.flags)
+		if err == nil || err.Error() != tt.want {
+			t.Fatalf("applyMCPTools(%q) error = %v, want %q", tt.flags, err, tt.want)
+		}
+		if strings.Contains(err.Error(), "credential-value") {
+			t.Fatalf("applyMCPTools echoed supplied text: %v", err)
+		}
+	}
+}
+
+func TestMCPToolsRejectedInGoalAndPlan(t *testing.T) {
+	for _, mode := range []string{"-goal", "-plan"} {
+		in, out, diag := runTestFiles(t)
+		err := run([]string{mode, "unused", "-mcp-tools", "fs=read"}, in, out, diag)
+		// The exact mode rejection: without the guard, -mcp-tools would fail
+		// later with a different MCP error ("alias is not a configured MCP server").
+		if err == nil || !strings.Contains(err.Error(), "does not attach MCP tools") {
+			t.Fatalf("%s with -mcp-tools err = %v, want the mode's MCP rejection", mode, err)
 		}
 	}
 }

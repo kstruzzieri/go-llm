@@ -130,3 +130,53 @@ func needsApprover(allowWrite, allowExec, mcpAttached bool) bool {
 func mcpClientImpl() mcpclient.Implementation {
 	return mcpclient.Implementation{Name: mcpClientName, Version: "dev"}
 }
+
+var mcpToolNameRE = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
+
+// maxMCPToolName mirrors mcpclient's composed-name cap: "mcp__<alias>__<name>"
+// must fit the strict provider function-name limit of 64 bytes.
+const maxMCPToolName = 64
+
+// applyMCPTools applies repeatable -mcp-tools 'alias=a,b' values to parsed
+// servers; 'alias=' selects no tools. Errors name the flag occurrence and
+// entry by position and never echo supplied text.
+func applyMCPTools(servers []mcpclient.Server, flags []string) ([]mcpclient.Server, error) {
+	index := make(map[string]int, len(servers))
+	for i, server := range servers {
+		index[server.Alias] = i
+	}
+	selected := make(map[string]bool, len(flags))
+	for n, raw := range flags {
+		alias, list, ok := strings.Cut(strings.TrimSpace(raw), "=")
+		if !ok || !golemAliasRE.MatchString(alias) {
+			return nil, fmt.Errorf("-mcp-tools #%d: expected alias=name[,name...]", n+1)
+		}
+		i, known := index[alias]
+		if !known {
+			return nil, fmt.Errorf("-mcp-tools #%d: alias is not a configured MCP server", n+1)
+		}
+		if selected[alias] {
+			return nil, fmt.Errorf("-mcp-tools #%d: alias is already selected", n+1)
+		}
+		selected[alias] = true
+		var names []string
+		if list != "" {
+			names = strings.Split(list, ",")
+		}
+		if len(names) > 128 {
+			return nil, fmt.Errorf("-mcp-tools #%d: more than 128 names", n+1)
+		}
+		seen := make(map[string]bool, len(names))
+		for e, name := range names {
+			if !mcpToolNameRE.MatchString(name) || len("mcp__"+alias+"__"+name) > maxMCPToolName {
+				return nil, fmt.Errorf("-mcp-tools #%d: entry %d is not a tool name for this alias", n+1, e+1)
+			}
+			if seen[name] {
+				return nil, fmt.Errorf("-mcp-tools #%d: entry %d repeats a name", n+1, e+1)
+			}
+			seen[name] = true
+		}
+		servers[i] = servers[i].WithTools(names...)
+	}
+	return servers, nil
+}
