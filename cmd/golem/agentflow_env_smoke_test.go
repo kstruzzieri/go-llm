@@ -112,5 +112,6 @@ func TestAgentflowEnv_RealCLI_ParallelDriverForwardsApprovedNames(t *testing.T) 
 	if !ok {
 		t.Fatalf("no proof pack in stdout:\n%s", stdout.String())
 	}
+	proof, _, _ = strings.Cut(proof, "\n")
 	assertParallelSmokeProof(t, dir, strings.TrimSpace(proof), base)
 }
