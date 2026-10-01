@@ -18,6 +18,7 @@ import (
 	"github.com/kstruzzieri/go-llm/agent"
 	"github.com/kstruzzieri/go-llm/agent/interceptor"
 	agenttools "github.com/kstruzzieri/go-llm/agent/tools"
+	"github.com/kstruzzieri/go-llm/agentflow"
 	"github.com/kstruzzieri/go-llm/config"
 	"github.com/kstruzzieri/go-llm/conversation"
 	"github.com/kstruzzieri/go-llm/fingerprint"
@@ -80,6 +81,7 @@ type flags struct {
 	approveEdits        bool
 	approveGates        bool
 	agentflowSrc        string
+	agentflowEnv        stringSliceFlag // -agentflow-env: parent variable names Agentflow and its gates may receive
 	agentflowStatus     bool
 	agentflowResume     bool
 	jsonOutput          bool
@@ -163,6 +165,7 @@ func parseFlags(args []string) (flags, error) {
 	fs.BoolVar(&f.approveEdits, "approve-plan-edits", false, "required in task mode: auto-approve step-scoped write/edit (still bounded by the step-scope and .agent guards)")
 	fs.BoolVar(&f.approveGates, "approve-plan-gates", false, "required in task mode: auto-run plan-declared validation gates")
 	fs.StringVar(&f.agentflowSrc, "agentflow-src", "", "run 'python3 -P -m agentflow' with PYTHONPATH=<checkout>/src instead of the agentflow binary (Python 3.11+)")
+	fs.Var(&f.agentflowEnv, "agentflow-env", "forward one named parent environment variable to Agentflow and every gate it runs (repeatable; names only, values are read at launch)")
 	fs.BoolVar(&f.agentflowStatus, "agentflow-status", false, "inspect the current Agentflow next action without mutation")
 	fs.BoolVar(&f.agentflowResume, "agentflow-resume", false, "resume an existing Agentflow run serially; requires -plan and both plan approvals")
 	fs.BoolVar(&f.jsonOutput, "json", false, "with -agentflow-status, relay Agentflow next-action JSON verbatim")
@@ -180,7 +183,7 @@ func parseFlags(args []string) (flags, error) {
 		return flags{}, err
 	}
 	if fs.NArg() > 0 {
-		return flags{}, fmt.Errorf("golem: unexpected positional arguments %q; every option must be a -flag", fs.Args())
+		return flags{}, fmt.Errorf("golem: %d unexpected positional argument(s); every option must be a -flag", fs.NArg())
 	}
 	f.think = strings.ToLower(f.think)
 	switch f.think {
@@ -239,6 +242,9 @@ func autoIndexEnabled(f flags, autoErr, embChainErr error) bool {
 
 // validateFlags rejects flag values flag.Parse cannot police.
 func validateFlags(f flags) error {
+	if err := agentflow.ValidateEnvNames(f.agentflowEnv); err != nil {
+		return fmt.Errorf("golem: -agentflow-env: %w", err)
+	}
 	if f.trustProjectContextSet {
 		if f.noProjectContext {
 			return fmt.Errorf("-trust-project-context conflicts with -no-project-context")

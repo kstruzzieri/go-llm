@@ -35,11 +35,17 @@ func TestParseAuditFlags(t *testing.T) {
 		{name: "memory", args: []string{"-scope=memory"}, want: auditFlags{root: ".", scope: "memory"}},
 		{name: "proofs", args: []string{"-scope", "proofs", "-agentflow-src", "../agentflow"}, want: auditFlags{root: ".", scope: "proofs", agentflowSrc: "../agentflow"}},
 		{name: "all explicit", args: []string{"-scope", "all"}, want: auditFlags{root: ".", scope: "all"}},
+		{name: "approved env", args: []string{"-scope", "proofs", "-agentflow-env", "GOPRIVATE", "-agentflow-env", "HTTPS_PROXY"},
+			want: auditFlags{root: ".", scope: "proofs", agentflowEnv: stringSliceFlag{"GOPRIVATE", "HTTPS_PROXY"}}},
+		{name: "env literal rejected without echo", args: []string{"-agentflow-env", "NAME=sk-SECRET-577"},
+			wantErr: "golem audit: -agentflow-env: agentflow: environment name #1 is not a variable name"},
+		{name: "positional after env flag", args: []string{"-agentflow-env", "NAME", "sk-SECRET-577"},
+			wantErr: "golem audit: 1 unexpected positional argument(s)"},
 		{name: "unknown scope", args: []string{"-scope", "files"}, wantErr: `invalid -scope "files"`},
 		{name: "empty scope", args: []string{"-scope="}, wantErr: "-scope requires a non-empty value"},
 		{name: "empty root", args: []string{"-root="}, wantErr: "-root requires a non-empty value"},
 		{name: "empty agentflow source", args: []string{"-agentflow-src="}, wantErr: "-agentflow-src requires a non-empty value"},
-		{name: "extra argument", args: []string{"workspace"}, wantErr: "unexpected positional arguments"},
+		{name: "extra argument", args: []string{"workspace"}, wantErr: "unexpected positional argument(s)"},
 		{name: "unknown flag", args: []string{"-wat"}, wantErr: "flag provided but not defined"},
 		{name: "json unsupported", args: []string{"-json"}, wantErr: "flag provided but not defined"},
 		{name: "output format unsupported", args: []string{"-output-format", "json"}, wantErr: "flag provided but not defined"},
@@ -56,8 +62,11 @@ func TestParseAuditFlags(t *testing.T) {
 				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
 					t.Fatalf("parseAuditFlags error = %v, want %q", err, tc.wantErr)
 				}
-			} else if err != nil || got != tc.want {
+			} else if err != nil || !reflect.DeepEqual(got, tc.want) {
 				t.Fatalf("parseAuditFlags = %#v, %v; want %#v, nil", got, err, tc.want)
+			}
+			if err != nil && strings.Contains(err.Error(), "SECRET") {
+				t.Fatalf("parseAuditFlags error echoes its input: %v", err)
 			}
 			if !strings.Contains(output.String(), tc.wantOutput) {
 				t.Fatalf("flag output = %q, want substring %q", output.String(), tc.wantOutput)
@@ -550,12 +559,12 @@ func TestAuditExitContract(t *testing.T) {
 		{
 			name: "help", scenario: "help", wantExit: 0,
 			wantStdout: func(_, _ string) string { return "" },
-			wantStderr: "Usage of golem audit:\n  -agentflow-src string\n    \tAgentFlow source checkout\n  -root string\n    \tworkspace root (default \".\")\n  -scope string\n    \taudit scope: all, workspace, memory, or proofs (default \"all\")\n",
+			wantStderr: "Usage of golem audit:\n  -agentflow-env value\n    \tforward one named parent environment variable to AgentFlow (repeatable; names only)\n  -agentflow-src string\n    \tAgentFlow source checkout\n  -root string\n    \tworkspace root (default \".\")\n  -scope string\n    \taudit scope: all, workspace, memory, or proofs (default \"all\")\n",
 		},
 		{
 			name: "unsupported machine output", scenario: "invalid", wantExit: 2,
 			wantStdout: func(_, _ string) string { return "" },
-			wantStderr: "flag provided but not defined: -json\nUsage of golem audit:\n  -agentflow-src string\n    \tAgentFlow source checkout\n  -root string\n    \tworkspace root (default \".\")\n  -scope string\n    \taudit scope: all, workspace, memory, or proofs (default \"all\")\n",
+			wantStderr: "flag provided but not defined: -json\nUsage of golem audit:\n  -agentflow-env value\n    \tforward one named parent environment variable to AgentFlow (repeatable; names only)\n  -agentflow-src string\n    \tAgentFlow source checkout\n  -root string\n    \tworkspace root (default \".\")\n  -scope string\n    \taudit scope: all, workspace, memory, or proofs (default \"all\")\n",
 		},
 	}
 

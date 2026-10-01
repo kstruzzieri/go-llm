@@ -16,6 +16,7 @@ import (
 
 type auditFlags struct {
 	root, scope, agentflowSrc string
+	agentflowEnv              stringSliceFlag
 }
 
 type auditExitError struct{ code int }
@@ -56,11 +57,12 @@ func parseAuditFlags(args []string, output io.Writer) (auditFlags, error) {
 	fs.StringVar(&f.root, "root", f.root, "workspace root")
 	fs.StringVar(&f.scope, "scope", f.scope, "audit scope: all, workspace, memory, or proofs")
 	fs.StringVar(&f.agentflowSrc, "agentflow-src", "", "AgentFlow source checkout")
+	fs.Var(&f.agentflowEnv, "agentflow-env", "forward one named parent environment variable to AgentFlow (repeatable; names only)")
 	if err := fs.Parse(args); err != nil {
 		return auditFlags{}, err
 	}
 	if fs.NArg() != 0 {
-		return auditFlags{}, fmt.Errorf("golem audit: unexpected positional arguments %q", fs.Args())
+		return auditFlags{}, fmt.Errorf("golem audit: %d unexpected positional argument(s)", fs.NArg())
 	}
 	var rootSet, scopeSet, sourceSet bool
 	fs.Visit(func(fl *flag.Flag) {
@@ -81,6 +83,9 @@ func parseAuditFlags(args []string, output io.Writer) (auditFlags, error) {
 	}
 	if sourceSet && f.agentflowSrc == "" {
 		return auditFlags{}, fmt.Errorf("golem audit: -agentflow-src requires a non-empty value")
+	}
+	if err := agentflow.ValidateEnvNames(f.agentflowEnv); err != nil {
+		return auditFlags{}, fmt.Errorf("golem audit: -agentflow-env: %w", err)
 	}
 	switch f.scope {
 	case "all", "workspace", "memory", "proofs":

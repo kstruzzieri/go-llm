@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"sync"
@@ -1837,5 +1838,52 @@ func TestStartupNoticesGitContextAfterProjectContext(t *testing.T) {
 	}
 	if joined := strings.Join(startupNotices(startupInfo{workspace: "/r"}), "\n"); strings.Contains(joined, "git context") {
 		t.Fatalf("absent Git context must print nothing, got:\n%s", joined)
+	}
+}
+
+func TestAgentflowEnvFlagParsesAndValidatesWithoutEcho(t *testing.T) {
+	f, err := parseFlags([]string{"-agentflow-env", "GOPRIVATE", "-agentflow-env", "NAME=sk-SECRET-577"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual([]string(f.agentflowEnv), []string{"GOPRIVATE", "NAME=sk-SECRET-577"}) {
+		t.Fatalf("agentflowEnv = %v", f.agentflowEnv)
+	}
+	err = validateFlags(f)
+	if err == nil || !strings.Contains(err.Error(), "golem: -agentflow-env: agentflow: environment name #2 is not a variable name") ||
+		strings.Contains(err.Error(), "SECRET") {
+		t.Fatalf("validateFlags error = %v", err)
+	}
+}
+
+func TestParseFlagsPositionalErrorDoesNotEchoTokens(t *testing.T) {
+	_, err := parseFlags([]string{"-agentflow-env", "NAME", "sk-SECRET-577"})
+	if err == nil || strings.Contains(err.Error(), "SECRET") || !strings.Contains(err.Error(), "golem: 1 unexpected positional argument(s)") {
+		t.Fatalf("parseFlags error = %v", err)
+	}
+}
+
+func TestAgentflowEnvValidationKeepsModeExitCodes(t *testing.T) {
+	devNull, err := os.OpenFile(os.DevNull, os.O_RDWR, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = devNull.Close() }()
+	for _, tc := range []struct {
+		name string
+		args []string
+		want int
+	}{
+		{"status keeps exit 1", []string{"-agentflow-status", "-agentflow-env", "BAD=x"}, 1},
+		{"task keeps exit 1", []string{"-plan", "plan.json", "-agentflow-env", "BAD=x"}, 1},
+		{"goal keeps exit 1", []string{"-goal", "x", "-agentflow-env", "BAD=x"}, 1},
+		{"headless one-shot is a usage error", []string{"-p", "x", "-agentflow-env", "BAD=x"}, 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := run(tc.args, devNull, devNull, devNull)
+			if err == nil || !strings.Contains(err.Error(), "-agentflow-env") || exitCodeFor(err) != tc.want {
+				t.Fatalf("run error = %v (exit %d), want -agentflow-env error with exit %d", err, exitCodeFor(err), tc.want)
+			}
+		})
 	}
 }
