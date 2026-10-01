@@ -56,6 +56,9 @@ func TestVersionPrintsNoChainNotice(t *testing.T) {
 	if err := run([]string{"-version"}, stdin, stdout, stderr); err != nil {
 		t.Fatalf("run -version: %v", err)
 	}
+	if got, want := readRunTestFile(t, stdout), versionString()+"\n"; got != want {
+		t.Fatalf("stdout = %q, want only the version %q", got, want)
+	}
 	for name, s := range map[string]string{"stdout": readRunTestFile(t, stdout), "stderr": readRunTestFile(t, stderr)} {
 		if strings.Contains(s, "guards:") || strings.Contains(s, "interceptors:") {
 			t.Fatalf("%s = %q, want no chain notice", name, s)
@@ -65,8 +68,8 @@ func TestVersionPrintsNoChainNotice(t *testing.T) {
 
 // TestStartupNoticeInEveryExecutionMode (§4.3): every agent-execution mode
 // that reaches startup prints the guards line on stderr and never on stdout.
-// The AgentFlow modes dispatch after afterSessionReady (main.go:1893,
-// :1944-1947), so stopping there pins their notice without the runtime.
+// The AgentFlow modes reach invokeAgentflow only after afterSessionReady, so
+// stopping there pins their notice without the runtime.
 func TestStartupNoticeInEveryExecutionMode(t *testing.T) {
 	const guards = "guards: invariants, egress, child_scope_denials (always on; -interceptors adds detectors, secrets, canary)"
 	plan := filepath.Join(t.TempDir(), "plan.json")

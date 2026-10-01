@@ -45,8 +45,8 @@
 // show "interceptor risk 30"; the verifier approval prompt cannot show it.
 // Successful REPL and -p stderr footers append " · risk 30". The
 // non-interactive -approve-plan-lock path is unchanged. A dispatch child's
-// score stays in that child's existing risk_score envelope field rather than
-// aggregating into the parent report. The -trace record carries every parent
+// own score stays in that child's existing risk_score envelope field rather
+// than aggregating into the parent report. The -trace record carries every parent
 // finding. These three injection detectors return no output findings.
 //
 // The same opt-in chain installs Secrets. It blocks supported credential and
@@ -59,7 +59,8 @@
 // content-light telemetry. Initial blocks save no conversation or checkpoint
 // row; later blocks retain undo records for earlier allowed mutations. A
 // caller-owned blocked agent.Result may still contain its original goal.
-// -interceptors remains off by default; the guards above do not depend on it.
+// -interceptors remains off by default; the three always-on interceptors
+// described first do not depend on it.
 //
 // With -interceptors, Golem also plants an unpredictable canary in its system
 // instructions for each live conversation activation. The canary survives
@@ -103,8 +104,10 @@
 // a case-variant field name is guarded and two equivalent spellings are
 // blocked as ambiguous. The model sees "tool call blocked by interceptor
 // invariants (<name>)". The egress classifier tags every run_command and
-// start_command by what its argv visibly reaches (privileged, network,
-// package-manager, interpreter, unknown) after peeling env, nohup, nice,
+// start_command, and any other exec-class call whose arguments carry a
+// decodable argv (MCP tools included), by what its argv visibly reaches
+// (privileged, network, package-manager, interpreter, unknown) after
+// peeling env, nohup, nice,
 // time, timeout and stdbuf; anything it cannot parse, including an inline
 // script it cannot read literally, and any command outside its quiet set,
 // stays visible as unknown. The approval prompt
