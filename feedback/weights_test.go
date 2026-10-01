@@ -479,6 +479,7 @@ func TestSQLiteWeightReaderRejectionKeepsMainAndWAL(t *testing.T) {
 			{"0 bytes", nil},
 			{"1 byte", []byte("S")},
 			{"100 bytes", bytes.Repeat([]byte{0xAB}, 100)},
+			{"511 bytes", bytes.Repeat([]byte{0xAB}, 511)},
 		} {
 			t.Run(tc.name, func(t *testing.T) {
 				dir := t.TempDir()
