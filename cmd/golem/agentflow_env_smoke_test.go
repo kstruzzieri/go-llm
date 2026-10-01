@@ -4,10 +4,16 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
+
+	"github.com/kstruzzieri/go-llm/agent"
 )
 
 // Real Agentflow does not yet implement verify-proof --integrity-only (see
@@ -45,4 +51,66 @@ func TestAgentflowEnv_RealCLI_AuditLaunchesUnderPolicy(t *testing.T) {
 	if !errors.As(err, &exit) || exit.ExitCode() != 2 || out.String() != want || errOut.Len() != 0 {
 		t.Fatalf("audit: err=%v stdout=%q stderr=%q", err, out.String(), errOut.String())
 	}
+}
+
+// The production task entry with two plan workers must give every Agentflow
+// launch it wires (canonical root, each worker root, the aggregate) the approved
+// names. A guard shadowing the Agentflow executable on PATH exits 97 unless the
+// approved name reached it, so any construction site that drops the names fails
+// its launch. The barrier caller deadlocks a serial run, so the parallel cohort
+// must really run for the test to pass.
+func TestAgentflowEnv_RealCLI_ParallelDriverForwardsApprovedNames(t *testing.T) {
+	dir, _, base := writeParallelSmokeFixture(t)
+	_ = agentflowRunnerOrSkip(t, dir)
+	src := os.Getenv("AGENTFLOW_SRC")
+	bin := "agentflow"
+	if src != "" {
+		bin = "python3"
+	}
+	real, err := exec.LookPath(bin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if real, err = filepath.Abs(real); err != nil {
+		t.Fatal(err)
+	}
+	const guardName = "GOLEM_577_GUARD"
+	guardDir := t.TempDir()
+	guard := "#!/bin/sh\n[ \"$" + guardName + "\" = on ] || { echo 'golem577: approved name missing' >&2; exit 97; }\nexec " + shellQuote(real) + " \"$@\"\n"
+	if err := os.WriteFile(filepath.Join(guardDir, bin), []byte(guard), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", guardDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv(guardName, "on")
+
+	barrier := &parallelSmokeBarrier{ready: make(chan struct{})}
+	newOrchestrator := func() *agent.Orchestrator {
+		return agent.New(parallelSmokeCaller{barrier: barrier}, agent.ContextManager{})
+	}
+	sess := &replSession{orch: newOrchestrator(), newOrchestrator: newOrchestrator, maxSteps: 4, clock: time.Now}
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	defer cancel()
+	var stdout, stderr bytes.Buffer
+	err = runAgentflowTask(ctx, &stdout, &stderr, nil, sess, flags{
+		planPath: filepath.Join(dir, "plan.json"), planWorkers: 2, approveEdits: true, approveGates: true,
+		agentflowSrc: src, agentflowEnv: stringSliceFlag{guardName},
+	}, dir)
+	// The version probe reports only the exit code, not the guard's stderr.
+	if strings.Contains(stderr.String(), "golem577: approved name missing") || strings.Contains(stderr.String(), "exit 97") {
+		t.Fatalf("an Agentflow launch ran without approved name %s (guard exit 97); err=%v\nstderr:\n%s", guardName, err, stderr.String())
+	}
+	if err != nil {
+		t.Fatalf("runAgentflowTask: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
+	}
+	if strings.Contains(stdout.String(), "no safe parallel cohort; continuing serially") {
+		t.Fatalf("driver fell back to serial:\n%s", stdout.String())
+	}
+	if got := barrier.count(); got != 2 {
+		t.Fatalf("parallel worker barrier arrivals = %d, want 2", got)
+	}
+	_, proof, ok := strings.Cut(stdout.String(), "proof pack: ")
+	if !ok {
+		t.Fatalf("no proof pack in stdout:\n%s", stdout.String())
+	}
+	assertParallelSmokeProof(t, dir, strings.TrimSpace(proof), base)
 }
