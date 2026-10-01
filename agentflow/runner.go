@@ -108,8 +108,9 @@ func (r *ExecRunner) DisablePythonBytecodeWrites() {
 // AllowEnv approves parent variables, by name, for this runner's children:
 // Agentflow and every gate it runs. Values are read at each launch, and an
 // approved name that is unset then fails the launch. Validation is atomic: on
-// error nothing is added. Duplicates collapse. Configure before the runner is
-// used concurrently.
+// error nothing is added. A repeated name is harmless: each variable appears
+// once in the child environment. Configure before the runner is used
+// concurrently.
 func (r *ExecRunner) AllowEnv(names ...string) error {
 	if err := ValidateEnvNames(names); err != nil {
 		return err
