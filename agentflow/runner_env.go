@@ -14,8 +14,10 @@ import (
 var agentflowBaselineEnv = []string{"PATH", "HOME", "USER", "TMPDIR", "LANG"}
 
 // windowsBaselineEnv extends the baseline on Windows. Forwarded only when set;
-// Windows runtime behavior is built but not exercised in CI.
-var windowsBaselineEnv = []string{"SYSTEMROOT", "TEMP", "TMP", "PATHEXT", "USERPROFILE", "COMSPEC"}
+// Windows runtime behavior is built but not exercised in CI. LOCALAPPDATA and
+// APPDATA play HOME's role there: Go reads its build cache and saved settings
+// from them, and nothing else substitutes.
+var windowsBaselineEnv = []string{"SYSTEMROOT", "TEMP", "TMP", "PATHEXT", "USERPROFILE", "COMSPEC", "LOCALAPPDATA", "APPDATA"}
 
 // strictEnvName is Agentflow's strict-mode switch. Upstream enables strict mode
 // only for the exact value "1", so only that value is forwarded, as a constant.

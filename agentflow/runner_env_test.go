@@ -94,7 +94,7 @@ func TestChildEnvPolicyFor(t *testing.T) {
 		{"linux", []string{"PATH", "HOME", "USER", "TMPDIR", "LANG"}, false},
 		{"darwin", []string{"PATH", "HOME", "USER", "TMPDIR", "LANG"}, false},
 		{"windows", []string{"PATH", "HOME", "USER", "TMPDIR", "LANG",
-			"SYSTEMROOT", "TEMP", "TMP", "PATHEXT", "USERPROFILE", "COMSPEC"}, true},
+			"SYSTEMROOT", "TEMP", "TMP", "PATHEXT", "USERPROFILE", "COMSPEC", "LOCALAPPDATA", "APPDATA"}, true},
 	} {
 		p := childEnvPolicyFor(tc.goos, approved, owned)
 		if !reflect.DeepEqual(p.baseline, tc.baseline) || p.foldCase != tc.foldCase ||
@@ -104,6 +104,38 @@ func TestChildEnvPolicyFor(t *testing.T) {
 	}
 	if want := []string{"PATH", "HOME", "USER", "TMPDIR", "LANG"}; !reflect.DeepEqual(agentflowBaselineEnv, want) {
 		t.Fatalf("building the Windows policy changed the shared baseline: %v", agentflowBaselineEnv)
+	}
+}
+
+// Go reads its build cache from %LocalAppData% and its saved settings from
+// %AppData% on Windows; HOME and USERPROFILE do not substitute. Both are
+// optional baseline entries there, like HOME elsewhere.
+func TestBuildChildEnvWindowsDirectories(t *testing.T) {
+	parent := map[string]string{
+		"LOCALAPPDATA": `C:\Users\u\AppData\Local`, "APPDATA": `C:\Users\u\AppData\Roaming`,
+		"OPENAI_API_KEY": "sk-x",
+	}
+	for _, tc := range []struct {
+		name     string
+		goos     string
+		approved []string
+		parent   map[string]string
+		want     []string
+	}{
+		{name: "windows forwards both", goos: "windows", parent: parent,
+			want: []string{`APPDATA=C:\Users\u\AppData\Roaming`, `LOCALAPPDATA=C:\Users\u\AppData\Local`}},
+		{name: "windows treats them as optional", goos: "windows", parent: map[string]string{}, want: []string{}},
+		{name: "windows approval of LocalAppData folds into one entry", goos: "windows", approved: []string{"LocalAppData"},
+			parent: map[string]string{"LOCALAPPDATA": `C:\L`, "LocalAppData": `C:\L`},
+			want:   []string{`LocalAppData=C:\L`}},
+		{name: "unix does not forward them", goos: "linux", parent: parent, want: []string{}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := buildChildEnv(childEnvPolicyFor(tc.goos, tc.approved, nil), mapLookup(tc.parent))
+			if err != nil || !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("env = %#v, err = %v; want %#v", got, err, tc.want)
+			}
+		})
 	}
 }
 

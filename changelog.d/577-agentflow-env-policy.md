@@ -2,8 +2,8 @@
 
 AgentFlow, every validation gate it runs and its own `git` calls now receive an
 environment built from scratch: `PATH`, `HOME`, `USER`, `TMPDIR` and `LANG`
-(plus `SYSTEMROOT`, `TEMP`, `TMP`, `PATHEXT`, `USERPROFILE` and `COMSPEC` on
-Windows), operator-approved names (`-agentflow-env`), `AGENTFLOW_STRICT=1` when
+(plus `SYSTEMROOT`, `TEMP`, `TMP`, `PATHEXT`, `USERPROFILE`, `COMSPEC`,
+`LOCALAPPDATA` and `APPDATA` on Windows), operator-approved names (`-agentflow-env`), `AGENTFLOW_STRICT=1` when
 set to exactly `1`, and the runner's own `PYTHONPATH` and
 `PYTHONDONTWRITEBYTECODE`. Provider API keys and other parent variables no
 longer reach gates unless explicitly approved.

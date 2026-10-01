@@ -454,8 +454,9 @@ environment Golem builds from scratch. AgentFlow hands that environment to
 every validation gate and to its own `git` calls. They receive only:
 
 - **Baseline:** `PATH`, `HOME`, `USER`, `TMPDIR` and `LANG`, when set. On
-  Windows also `SYSTEMROOT`, `TEMP`, `TMP`, `PATHEXT`, `USERPROFILE` and
-  `COMSPEC`.
+  Windows also `SYSTEMROOT`, `TEMP`, `TMP`, `PATHEXT`, `USERPROFILE`,
+  `COMSPEC`, `LOCALAPPDATA` and `APPDATA` (Go keeps its build cache and saved
+  settings there).
 - **Approved names:** each `-agentflow-env NAME` (repeatable, on `golem` and
   `golem audit`) forwards that variable. Its value is read at every launch; if
   it is unset, the launch fails before AgentFlow starts and the error names the
@@ -493,8 +494,10 @@ caches start cold and modules download again.
 
 This limits inherited secrets; it does not confine the process. Gates still run
 as you, with access to your files under `HOME`, your network and your
-filesystem. Golem resolves the `agentflow` or `python3` executable with its own
-`PATH` before launch. Windows support is built but untested, and on non-Unix
+filesystem. Tools also read configuration saved in those directories, such as
+Go's `go env -w` settings, so on-disk settings still apply without approval.
+Golem resolves the `agentflow` or `python3` executable with its own `PATH`
+before launch. Windows support is built but untested, and on non-Unix
 platforms cancellation stops only the direct child. Golem's own `git` calls in
 parallel task mode still inherit its environment, minus repository-location
 overrides.
