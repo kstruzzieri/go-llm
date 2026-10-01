@@ -24,8 +24,16 @@ func TestAgentflowEnv_RealCLI_AuditLaunchesUnderPolicy(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	src := os.Getenv("AGENTFLOW_SRC")
+	// Audit's runner must reach real Agentflow first: an interpreter too old for
+	// `python3 -P` also exits 2 and would impersonate the argparse answer below.
+	probe := mustAgentflowRunner(root, src, nil)
+	probe.DisablePythonBytecodeWrites()
+	if _, stderr, exit, err := probe.Run(t.Context(), []string{"--version"}, nil); err != nil || exit != 0 {
+		t.Fatalf("audit runner cannot launch Agentflow: exit=%d err=%v stderr=%q", exit, err, stderr)
+	}
 	args := []string{"-root", root, "-scope", "proofs"}
-	if src := os.Getenv("AGENTFLOW_SRC"); src != "" {
+	if src != "" {
 		args = append(args, "-agentflow-src", src)
 	}
 	var out, errOut bytes.Buffer
