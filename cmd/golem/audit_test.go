@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -256,12 +257,11 @@ func TestAuditProofRunnerDoesNotWritePythonBytecode(t *testing.T) {
 				if err := os.MkdirAll(bin, 0o700); err != nil {
 					t.Fatal(err)
 				}
-				script := "#!/usr/bin/env python3\nfrom audit_cache_probe import finish\nfinish()\n"
+				script := "#!/usr/bin/env python3\nimport sys\nsys.path.insert(0, " + strconv.Quote(filepath.Join(root, "src")) + ")\nfrom audit_cache_probe import finish\nfinish()\n"
 				if err := os.WriteFile(filepath.Join(bin, "agentflow"), []byte(script), 0o700); err != nil {
 					t.Fatal(err)
 				}
 				t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
-				t.Setenv("PYTHONPATH", filepath.Join(root, "src"))
 				return nil
 			},
 		},
@@ -282,7 +282,7 @@ func TestAuditProofRunnerDoesNotWritePythonBytecode(t *testing.T) {
 			rootBefore := snapshotAuditFixtureTree(t, root)
 			dataBefore := snapshotAuditFixtureTree(t, data)
 
-			args := append([]string{"-root", root, "-scope", "proofs"}, extraArgs...)
+			args := append([]string{"-root", root, "-scope", "proofs", "-agentflow-env", "GOLEM_AUDIT_EXPECT_ROOT"}, extraArgs...)
 			var out, errOut bytes.Buffer
 			err = runAudit(t.Context(), args, &out, &errOut)
 			var exit *auditExitError
@@ -411,6 +411,11 @@ func TestAuditExitContractHelper(t *testing.T) {
 	}
 	root := os.Getenv("GOLEM_AUDIT_ROOT")
 	args := []string{"golem", "audit", "-root", root}
+	for _, name := range []string{"GOLEM_AUDIT_ROOT", "GOLEM_AUDIT_AF_PAYLOAD", "GOLEM_AUDIT_AF_EXIT"} {
+		if _, ok := os.LookupEnv(name); ok {
+			args = append(args, "-agentflow-env", name)
+		}
+	}
 	switch os.Getenv("GOLEM_AUDIT_CASE") {
 	case "help":
 		args = []string{"golem", "audit", "-help"}

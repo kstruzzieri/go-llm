@@ -170,3 +170,16 @@ func TestAgentflowTestSource(t *testing.T) {
 		}
 	}
 }
+
+func TestExecRunnerAllowEnvIsAtomic(t *testing.T) {
+	r := NewExecRunner(t.TempDir())
+	if err := r.AllowEnv("GOPRIVATE"); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.AllowEnv("HTTPS_PROXY", "NAME=sk-SECRET-577"); err == nil || strings.Contains(err.Error(), "SECRET") {
+		t.Fatalf("AllowEnv error = %v, want a value-free validation error", err)
+	}
+	if !reflect.DeepEqual(r.allowed, []string{"GOPRIVATE"}) {
+		t.Fatalf("allowed = %v, want only the first batch", r.allowed)
+	}
+}

@@ -881,6 +881,39 @@ func TestRunAgentflowAuthor_HappyPathPrintsExecuteSeparately(t *testing.T) {
 	}
 }
 
+func TestRunAgentflowAuthor_PrintedCommandCarriesApprovedEnv(t *testing.T) {
+	root := t.TempDir()
+	caller := &scriptCaller{responses: []agent.ModelResult{submitPlanCall(validIRJSON(t))}}
+	sess := newTestSession(t, caller, root)
+	f := flags{goal: "x", goalSet: true, agentflowSrc: "/af", agentflowEnv: stringSliceFlag{"GOPRIVATE", "HTTPS_PROXY"}}
+	var out, errb bytes.Buffer
+	if err := runAgentflowAuthorWithClient(context.Background(), &out, &errb, nil, sess, f, root, &stubLocker{}, fixedApprover(true)); err != nil {
+		t.Fatal(err)
+	}
+	want := " -agentflow-src '/af' -agentflow-env 'GOPRIVATE' -agentflow-env 'HTTPS_PROXY' -approve-plan-edits -approve-plan-gates\n"
+	if !strings.Contains(out.String(), want) {
+		t.Fatalf("printed command missing approved names:\n%s", out.String())
+	}
+}
+
+func TestRunAgentflowAuthor_ResolvesRelativeSourceAgainstRoot(t *testing.T) {
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(root, "tools"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	sess := newTestSession(t, &scriptCaller{}, root)
+	f := flags{goal: "x", goalSet: true, approvePlanLock: true, agentflowSrc: filepath.Join("tools", "af")}
+	var out, errb bytes.Buffer
+	err = runAgentflowAuthor(context.Background(), nil, &out, &errb, nil, sess, f, root)
+	if err == nil || !strings.Contains(err.Error(), "agentflow source checkout: ") ||
+		!strings.Contains(err.Error(), filepath.Join(root, "tools", "af")) {
+		t.Fatalf("author error = %v, want the root-resolved checkout to fail validation", err)
+	}
+}
+
 func TestRunAgentflowAuthor_RefusesLockWithoutExplicitApproval(t *testing.T) {
 	root := t.TempDir()
 	caller := &scriptCaller{responses: []agent.ModelResult{submitPlanCall(validIRJSON(t))}}

@@ -68,16 +68,12 @@ type agentflowStatusExit struct{ code int }
 func (e *agentflowStatusExit) Error() string { return fmt.Sprintf("agentflow status exit %d", e.code) }
 func (e *agentflowStatusExit) ExitCode() int { return e.code }
 
-func runAgentflowStatus(ctx context.Context, out io.Writer, root, source string, jsonOutput bool) error {
+func runAgentflowStatus(ctx context.Context, out io.Writer, root, source string, envNames []string, jsonOutput bool) error {
 	source, err := resolveTaskAgentflowSource(root, source)
 	if err != nil {
 		return err
 	}
-	var runner agentflow.Runner = agentflow.NewExecRunner(root)
-	if source != "" {
-		runner = agentflow.NewSrcExecRunner(root, source)
-	}
-	return runAgentflowStatusWithRunner(ctx, out, root, jsonOutput, runner)
+	return runAgentflowStatusWithRunner(ctx, out, root, jsonOutput, mustAgentflowRunner(root, source, envNames))
 }
 
 func runAgentflowStatusWithRunner(ctx context.Context, out io.Writer, root string, jsonOutput bool, runner agentflow.Runner) error {

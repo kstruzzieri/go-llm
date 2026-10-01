@@ -107,6 +107,7 @@ func TestProjectTrustAgentflowProviderWire(t *testing.T) {
 				installTrustAgentflow(t)
 				writeTrustDocument(t, root, "frozen-agentflow-guidance")
 				args := []string{"-config", config, "-root", root, "-no-probe", "-no-cap-probe", "-no-git-context", "-no-rag", "-no-auto-index"}
+				args = append(args, "-agentflow-env", "GOLEM_TRUST_TEST_BINARY", "-agentflow-env", "GOLEM_TRUST_AF_PROCESS", "-agentflow-env", "GOLEM_TRUST_AF_STATE")
 				if approved {
 					args = append(args, "-trust-project-context", trustFixtureDigest(t, root))
 				}
@@ -128,6 +129,7 @@ func TestProjectTrustAgentflowProviderWire(t *testing.T) {
 					}
 					args = append(args, "-plan", path, "-approve-plan-edits", "-approve-plan-gates")
 					t.Setenv("GOLEM_TRUST_AF_EDIT", filepath.Join(root, "AGENTS.md"))
+					args = append(args, "-agentflow-env", "GOLEM_TRUST_AF_EDIT")
 				}
 				in, out, diag := runTestFiles(t)
 				err := run(args, in, out, diag)

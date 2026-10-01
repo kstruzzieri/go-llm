@@ -135,10 +135,7 @@ func runAuditWith(ctx context.Context, args []string, out, errOut io.Writer, sca
 		_, _ = io.WriteString(errOut, line)
 		return newAuditExitError(2)
 	}
-	runner := agentflow.NewExecRunner(root)
-	if source != "" {
-		runner = agentflow.NewSrcExecRunner(root, source)
-	}
+	runner := mustAgentflowRunner(root, source, f.agentflowEnv)
 	runner.DisablePythonBytecodeWrites()
 
 	results := make([]auditResult, 0, 3)

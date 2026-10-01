@@ -38,7 +38,8 @@ type ExecRunner struct {
 	bin     string
 	prefix  []string // e.g. {"-P","-m","agentflow"} for src mode
 	dir     string   // Cmd.Dir = workspace root
-	env     []string // extra environment, e.g. PYTHONPATH=<checkout>/src
+	env     []string // runner-owned NAME=VALUE entries, e.g. PYTHONPATH=<checkout>/src
+	allowed []string // host-approved parent variable names (AllowEnv)
 	initErr error
 }
 
@@ -100,6 +101,19 @@ func canonicalSourceCheckout(checkout string) (string, error) {
 // child environment.
 func (r *ExecRunner) DisablePythonBytecodeWrites() {
 	r.env = append(r.env, "PYTHONDONTWRITEBYTECODE=1")
+}
+
+// AllowEnv approves parent variables, by name, for this runner's children:
+// Agentflow and every gate it runs. Values are read at each launch, and an
+// approved name that is unset then fails the launch. Validation is atomic: on
+// error nothing is added. Duplicates collapse. Configure before the runner is
+// used concurrently.
+func (r *ExecRunner) AllowEnv(names ...string) error {
+	if err := ValidateEnvNames(names); err != nil {
+		return err
+	}
+	r.allowed = append(r.allowed, names...)
+	return nil
 }
 
 // commandFor returns the concrete (bin, argv, extraEnv) for a subcommand call.

@@ -870,7 +870,7 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 
 	ctx := context.Background()
 	if f.agentflowStatus {
-		return runAgentflowStatus(ctx, stdout, root, f.agentflowSrc, f.jsonOutput)
+		return runAgentflowStatus(ctx, stdout, root, f.agentflowSrc, f.agentflowEnv, f.jsonOutput)
 	}
 
 	projectState, pendingTrust, err := preflightProjectContext(ctx, stderr, root, f)

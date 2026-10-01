@@ -1224,6 +1224,7 @@ func TestRun_AgentflowStatusDispatchesBeforeConfig(t *testing.T) {
 
 	err = run([]string{
 		"-agentflow-status", "-json", "-root", root,
+		"-agentflow-env", "GOLEM_AGENTFLOW_STATUS_PAYLOAD",
 		"-config", filepath.Join(root, "missing-models.json"),
 	}, os.Stdin, out, errOut)
 	var statusErr *agentflowStatusExit
@@ -1248,6 +1249,7 @@ func TestAgentflowStatusExitHelper(t *testing.T) {
 	}
 	os.Args = []string{
 		"golem", "-agentflow-status", "-json", "-root", os.Getenv("GOLEM_AGENTFLOW_STATUS_ROOT"),
+		"-agentflow-env", "GOLEM_AGENTFLOW_STATUS_PAYLOAD",
 		"-config", filepath.Join(os.Getenv("GOLEM_AGENTFLOW_STATUS_ROOT"), "missing-models.json"),
 	}
 	main()
