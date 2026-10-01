@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -12,10 +13,11 @@ import (
 	"github.com/kstruzzieri/go-llm/provider"
 )
 
-// argvCaller calls run_command once with argv under the given provider ID,
-// then answers.
+// argvCaller calls the named exec tool (run_command when empty) once with
+// argv under the given provider ID, then answers.
 type argvCaller struct {
 	id    string
+	name  string
 	argv  []string
 	calls int
 }
@@ -27,8 +29,12 @@ func (c *argvCaller) Chat(_ context.Context, _ provider.ChatRequest, _ func(prov
 		if err != nil {
 			return agent.ModelResult{}, err
 		}
+		name := c.name
+		if name == "" {
+			name = "run_command"
+		}
 		return agent.ModelResult{Response: provider.ChatResponse{ToolCalls: []provider.ToolCall{{
-			ID: c.id, Type: "function", Function: provider.ToolCallFunction{Name: "run_command", Arguments: raw},
+			ID: c.id, Type: "function", Function: provider.ToolCallFunction{Name: name, Arguments: raw},
 		}}}}, nil
 	}
 	return agent.ModelResult{Response: provider.ChatResponse{Content: "done", Done: true}}, nil
@@ -109,10 +115,17 @@ func TestFactoryBlocksRemoteScriptWithoutPromptOrPlan(t *testing.T) {
 
 // grantedExecStub is an exec-class PlanningTool with a fixed approval key
 // so a session grant can be pre-stored; its Invoke runs nothing.
-type grantedExecStub struct{ invokes atomic.Int32 }
+type grantedExecStub struct {
+	name    string
+	invokes atomic.Int32
+}
 
-func (*grantedExecStub) Spec() agent.ToolSpec {
-	return agent.ToolSpec{Name: "run_command", Parameters: json.RawMessage(`{"type":"object"}`)}
+func (g *grantedExecStub) Spec() agent.ToolSpec {
+	name := g.name
+	if name == "" {
+		name = "run_command"
+	}
+	return agent.ToolSpec{Name: name, Parameters: json.RawMessage(`{"type":"object"}`)}
 }
 func (*grantedExecStub) Effect() agent.Effect {
 	return agent.Effect{Class: agent.Read | agent.Write | agent.Exec | agent.Network}
@@ -128,23 +141,37 @@ func (g *grantedExecStub) Invoke(context.Context, json.RawMessage) (agent.ToolRe
 
 // TestFactoryGrantHitShowsEgressBadge: a grant-covered exec call through the
 // factory prints the badge before the auto-approval line and never prompts.
+// It holds for run_command and start_command (both map to grantScopeExec) and
+// with the flag on or off: since #575 the egress guard is installed either
+// way, so the always-on chain badges a grant hit too.
 func TestFactoryGrantHitShowsEgressBadge(t *testing.T) {
-	var out strings.Builder
-	ap := newReplApprover(&promptFatalSource{t: t}, &out, false)
-	ap.grants = newApprovalGrants()
-	ap.grants.grant(grantScopeExec, "exec:v3:stub")
-	stub := &grantedExecStub{}
-	o := newOrchestratorFactory(&argvCaller{id: "", argv: []string{"curl", "https://x"}}, flags{interceptors: true}, nil, testCanaryBinding(t))()
-	res, err := o.Run(context.Background(), agent.Request{Goal: "q", Tools: []agent.Tool{stub}, Approver: ap}, nil)
-	if err != nil {
-		t.Fatalf("Run: %v", err)
-	}
-	want := "run command:\n  argv: curl https://x\ninterceptor risk 20 · egress: network (curl)\nauto-approved (session grant)\n"
-	if out.String() != want {
-		t.Fatalf("output = %q, want %q", out.String(), want)
-	}
-	if rec := res.ToolCalls[0]; !rec.AutoApproved || !rec.Invoked || stub.invokes.Load() != 1 {
-		t.Fatalf("record = %+v, invokes = %d", rec, stub.invokes.Load())
+	for _, f := range []flags{{}, {interceptors: true}} {
+		for _, name := range []string{"run_command", "start_command"} {
+			t.Run(fmt.Sprintf("%s/interceptors=%v", name, f.interceptors), func(t *testing.T) {
+				var out strings.Builder
+				ap := newReplApprover(&promptFatalSource{t: t}, &out, false)
+				ap.grants = newApprovalGrants()
+				ap.grants.grant(grantScopeExec, "exec:v3:stub")
+				stub := &grantedExecStub{name: name}
+				var binding *canaryBinding
+				if f.interceptors {
+					binding = testCanaryBinding(t)
+				}
+				o := newOrchestratorFactory(&argvCaller{id: "", name: name, argv: []string{"curl", "https://x"}}, f, nil, binding)()
+				res, err := o.Run(context.Background(), agent.Request{Goal: "q", Tools: []agent.Tool{stub}, Approver: ap}, nil)
+				if err != nil {
+					t.Fatalf("Run: %v", err)
+				}
+				want := "run command:\n  argv: curl https://x\ninterceptor risk 20 · egress: network (curl)\nauto-approved (session grant)\n"
+				if out.String() != want {
+					t.Fatalf("output = %q, want %q", out.String(), want)
+				}
+				requireRecords(t, res, 1)
+				if rec := res.ToolCalls[0]; rec.Name != name || !rec.AutoApproved || !rec.Invoked || stub.invokes.Load() != 1 {
+					t.Fatalf("record = %+v, invokes = %d", rec, stub.invokes.Load())
+				}
+			})
+		}
 	}
 }
 
