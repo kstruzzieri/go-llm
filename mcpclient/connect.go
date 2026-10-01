@@ -177,14 +177,15 @@ func connectWithHooks(ctx context.Context, impl Implementation, servers []Server
 	m := &Manager{}
 	var warnings []error
 	for i, r := range results {
-		if r.session != nil {
-			if err := ctx.Err(); err != nil {
-				warnings = append(warnings, admissionFailure(servers[i].Alias, "canceled", errors.Join(err, r.session.Close())))
-				continue
-			}
-		}
+		// A live session means connectOne succeeded, so warns holds only
+		// notices; keep them on cancellation: a first-pin notice reports a
+		// pin already on disk.
 		warnings = append(warnings, r.warns...)
 		if r.session == nil {
+			continue
+		}
+		if err := ctx.Err(); err != nil {
+			warnings = append(warnings, admissionFailure(servers[i].Alias, "canceled", errors.Join(err, r.session.Close())))
 			continue
 		}
 		m.sessions = append(m.sessions, r.session)
@@ -213,7 +214,10 @@ func connectOne(ctx context.Context, impl Implementation, s Server, opts Connect
 	}
 	if err != nil {
 		closeErr := session.Close()
-		failure := admissionFailure(s.Alias, "pin_unavailable", errors.Join(err, closeErr))
+		// Classify the refusal alone; a close error (even context.Canceled)
+		// stays in the chain but must not rename the reason.
+		failure := admissionFailure(s.Alias, "pin_unavailable", err)
+		failure.cause = errors.Join(err, closeErr)
 		failure.PinnedDigest, failure.CandidateDigest = prior.digest(), catalog.digest()
 		failure.Diff = diffCatalogs(prior, catalog)
 		return nil, nil, []error{failure}
@@ -249,7 +253,9 @@ func discover(ctx context.Context, impl Implementation, s Server) (*gomcp.Client
 		err = ctx.Err()
 	}
 	if err != nil {
-		return nil, nil, toolCatalog{}, nil, admissionFailure(s.Alias, "invalid_catalog", errors.Join(err, session.Close()))
+		failure := admissionFailure(s.Alias, "invalid_catalog", err)
+		failure.cause = errors.Join(err, session.Close()) // as in connectOne
+		return nil, nil, toolCatalog{}, nil, failure
 	}
 	return session, remote, catalog, notices, nil
 }
