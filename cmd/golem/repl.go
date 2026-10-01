@@ -98,11 +98,13 @@ type replSession struct {
 	// goal only (#382).
 	//
 	// interceptorsOn is a DENORMALIZED security gate and must stay honest:
-	// InspectAdvisory runs whatever chain sess.orch was built with, so a true
-	// mirror over an orchestrator with no chain would admit unscanned
-	// consultant bytes under a flag the operator never set. main.go derives it
-	// from the same interceptorsFor(f, canary) call that builds sess.orch, and
-	// any future writer must keep the two on one source.
+	// InspectAdvisory runs whatever chain sess.orch was built with, and only
+	// the FULL chain (-interceptors) scans advisory text; the always-on
+	// guards (#575) do not. A true mirror over a guards-only orchestrator
+	// would admit unscanned consultant bytes under a flag the operator never
+	// set. main.go sets it from f.interceptors next to the interceptorsFor
+	// call that builds sess.orch; any future writer must keep the two on one
+	// source.
 	consultants    map[string]consult.Consultant
 	interceptorsOn bool
 	advisory       *agent.Advisory

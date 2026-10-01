@@ -901,6 +901,10 @@ func TestNewDispatchTool_CompletionNoticeUsesReboundSink(t *testing.T) {
 	}
 }
 
+// TestGolemChildScopeDenialReporting: a scoped child's native refusal surfaces
+// as one parent finding. #575: ChildScopeDenials is in Golem's always-on
+// guards, so the parent reports native refusals with or without -interceptors
+// on either side.
 func TestGolemChildScopeDenialReporting(t *testing.T) {
 	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" {
 		t.Skip("native scoped dispatch is unsupported")
@@ -954,12 +958,6 @@ func TestGolemChildScopeDenialReporting(t *testing.T) {
 			}
 			if !found {
 				t.Fatal("missing envelope")
-			}
-			if !tc.parent {
-				if res.Risk != nil {
-					t.Fatal(res.Risk)
-				}
-				return
 			}
 			if res.Risk == nil || res.Risk.Score != 10 || len(res.Risk.Findings) != 1 {
 				t.Fatalf("parent risk=%+v", res.Risk)
