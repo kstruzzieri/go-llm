@@ -265,8 +265,8 @@ consistency check, not an atomic snapshot of a running system.
 implicit module search. Checkout paths containing the platform's path-list
 separator (`:` on Unix, `;` on Windows) are rejected.
 
-`-agentflow-src` must name an absolute path (relative paths resolve against
-`-root`) whose `src/agentflow/__init__.py` exists; symlinks are resolved first.
+`-agentflow-src` resolves a relative path against `-root`, then resolves
+symlinks; the result must contain `src/agentflow/__init__.py`.
 See [AgentFlow subprocess environment](#agentflow-subprocess-environment) for
 what AgentFlow and its gates receive and for `-agentflow-env`.
 
@@ -448,9 +448,10 @@ Git notices go to stderr, never to machine stdout.
 ## AgentFlow subprocess environment
 
 Planning and task modes (`-goal`, `-plan`, `-agentflow-status`,
-`-agentflow-resume`) and `golem audit -scope proofs` start AgentFlow with an
-environment Golem builds from scratch. AgentFlow hands that environment to every validation gate and to
-its own `git` calls. They receive only:
+`-agentflow-resume`) and `golem audit` whenever it checks proofs (`-scope
+proofs`, or the default `all` when `.agent/` exists) start AgentFlow with an
+environment Golem builds from scratch. AgentFlow hands that environment to
+every validation gate and to its own `git` calls. They receive only:
 
 - **Baseline:** `PATH`, `HOME`, `USER`, `TMPDIR` and `LANG`, when set. On
   Windows also `SYSTEMROOT`, `TEMP`, `TMP`, `PATHEXT`, `USERPROFILE` and

@@ -187,12 +187,15 @@ jobs:
         run: |
           python3 -m venv "$RUNNER_TEMP/agentflow-venv"
           "$RUNNER_TEMP/agentflow-venv/bin/pip" install ./_agentflow
-          echo "$RUNNER_TEMP/agentflow-venv/bin" >> "$GITHUB_PATH"
 
+      # Only this step puts the venv on PATH. The source step must run the
+      # system python3, which cannot import Agentflow except from AGENTFLOW_SRC.
       - name: Agentflow compatibility (installed)
         env:
           GO_LLM_REQUIRE_AGENTFLOW: installed
-        run: go test -tags=agentflow_integration -count=1 -run "$AGENTFLOW_TESTS" ./agentflow ./cmd/golem
+        run: |
+          export PATH="$RUNNER_TEMP/agentflow-venv/bin:$PATH"
+          go test -tags=agentflow_integration -count=1 -run "$AGENTFLOW_TESTS" ./agentflow ./cmd/golem
 
       - name: Agentflow compatibility (source)
         env:

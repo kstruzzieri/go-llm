@@ -114,8 +114,8 @@ Re-run the spike if the AgentFlow validator contract tightens.
   gates.
 - `-agentflow-src <checkout>` — run `python3 -P -m agentflow` from a source
   checkout (`PYTHONPATH=<checkout>/src`) instead of the installed `agentflow`
-  binary. The path must be absolute (a relative path resolves against `-root`),
-  symlinks are resolved, and `src/agentflow/__init__.py` must exist; paths
+  binary. A relative path resolves against `-root`, symlinks are then
+  resolved, and the result must contain `src/agentflow/__init__.py`; paths
   containing the platform's path-list separator are rejected. Requires Python
   3.11+; the workspace is excluded from implicit module search. Use this when
   the CLI isn't installed on PATH.
