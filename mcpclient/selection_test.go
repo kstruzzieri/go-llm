@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/kstruzzieri/go-llm/agent"
+	"github.com/kstruzzieri/go-llm/provider"
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -305,5 +306,61 @@ func TestSelectedToolsKeepPerCallApproval(t *testing.T) {
 	}
 	if plan.Effect.Approval != agent.ApprovalAlways || plan.ApprovalKey != "" {
 		t.Fatalf("plan = (%v, %q), want (ApprovalAlways, no session-grant key)", plan.Effect.Approval, plan.ApprovalKey)
+	}
+}
+
+// selectionModel replays a fixed sequence of model turns.
+type selectionModel struct {
+	steps []agent.ModelResult
+	n     int
+}
+
+func (m *selectionModel) Chat(context.Context, provider.ChatRequest, func(provider.ChatResponse) error) (agent.ModelResult, error) {
+	if m.n >= len(m.steps) {
+		return agent.ModelResult{}, errors.New("selection model exhausted")
+	}
+	m.n++
+	return m.steps[m.n-1], nil
+}
+
+type approveAll struct{}
+
+func (approveAll) Approve(context.Context, provider.ToolCall, string) (bool, error) { return true, nil }
+
+func selectionCall(id, name string) agent.ModelResult {
+	return agent.ModelResult{Response: provider.ChatResponse{ToolCalls: []provider.ToolCall{{
+		ID: id, Type: "function", Function: provider.ToolCallFunction{Name: name, Arguments: json.RawMessage(`{}`)},
+	}}}}
+}
+
+func TestUnselectedToolCallNeverReachesSession(t *testing.T) {
+	s, _, calls := staticCatalogServer(t, "fs", &gomcp.Tool{Name: "read"}, &gomcp.Tool{Name: "write"})
+	m, _, err := Connect(context.Background(), Implementation{Name: "test"}, []Server{s.WithTools("read")}, ConnectOptions{Pins: testPins(t)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = m.Close() })
+	model := &selectionModel{steps: []agent.ModelResult{
+		selectionCall("1", "mcp__fs__read"),
+		selectionCall("2", "mcp__fs__write"),
+		{Response: provider.ChatResponse{Content: "done", Done: true}},
+	}}
+	res, err := agent.New(model, agent.ContextManager{}).Run(context.Background(), agent.Request{Goal: "q", Tools: m.Tools(), Approver: approveAll{}}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The selected call is the positive control: it proves the counter sees
+	// real calls, so a zero for the unselected one is meaningful.
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("tools/call requests reaching the server = %d, want 1 (selected read only)", got)
+	}
+	found := false
+	for _, msg := range res.Messages {
+		if strings.Contains(msg.Content, "unknown tool: mcp__fs__write") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("unselected call did not produce the dispatcher's unknown-tool result")
 	}
 }
