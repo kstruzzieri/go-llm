@@ -79,13 +79,13 @@ type SQLiteWeightReader struct {
 }
 
 // NewSQLiteWeightReader opens an existing migrated feedback database read-only
-// and validates its schema on the connection that then serves reads, so the
-// check sees committed WAL pages under SQLite's locks. It never writes or
-// deletes the main file or an existing WAL. Like any read-only SQLite
-// connection, it may create the database's coordination sidecars, a -shm file
-// and an empty -wal when a WAL-mode database has none, including beside a
-// database it then rejects. A WAL-mode database whose sidecars can be neither
-// opened nor created fails to open.
+// and validates its schema on the handle that then serves reads, so the check
+// sees committed WAL pages under SQLite's locks. It never writes or deletes the
+// main file or an existing WAL, and never changes schema or data. Like any
+// read-only SQLite connection, it may create the database's coordination
+// sidecars, a -shm file and an empty -wal when a WAL-mode database has none,
+// including beside a database it then rejects. A WAL-mode database whose
+// sidecars can be neither opened nor created fails to open.
 func NewSQLiteWeightReader(ctx context.Context, dbPath string, config CollectorConfig) (*SQLiteWeightReader, error) {
 	if dbPath == "" {
 		return nil, fmt.Errorf("feedback: open SQLite weight reader: empty path")
@@ -93,9 +93,11 @@ func NewSQLiteWeightReader(ctx context.Context, dbPath string, config CollectorC
 	want := migrations[len(migrations)-1].version
 	// SQLite deletes a WAL that sits beside an empty main file when it opens
 	// the database, and an empty file holds no schema, so reject it first.
+	// The stat-to-open window is accepted: a non-empty main never shrinks to
+	// 0 bytes in normal operation.
 	info, err := os.Stat(dbPath)
 	if err != nil {
-		return nil, fmt.Errorf("feedback: open SQLite weight reader %q: %w", dbPath, err)
+		return nil, fmt.Errorf("feedback: open SQLite weight reader: %w", err)
 	}
 	if info.Size() == 0 {
 		return nil, fmt.Errorf("feedback: validate SQLite weight reader schema: empty database file, want version %d", want)

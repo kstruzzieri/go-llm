@@ -412,6 +412,21 @@ func TestSQLiteWeightReaderValidatesSchemaCommittedOnlyToWAL(t *testing.T) {
 	if _, err := NewSignalStore(ctx, db); err != nil {
 		t.Fatalf("NewSignalStore: %v", err)
 	}
+	// Fixture check: the main file alone holds no schema version.
+	u := url.URL{Scheme: "file", Path: path, RawQuery: "mode=ro&immutable=1"}
+	mainOnly, err := sql.Open("sqlite", u.String())
+	if err != nil {
+		t.Fatalf("open immutable fixture check: %v", err)
+	}
+	var versionTables int
+	err = mainOnly.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_schema WHERE name = 'feedback_schema_version'`).Scan(&versionTables)
+	_ = mainOnly.Close()
+	if err != nil {
+		t.Fatalf("query immutable fixture check: %v", err)
+	}
+	if versionTables != 0 {
+		t.Fatal("fixture invalid: migrations already reached the main file")
+	}
 	reader, err := NewSQLiteWeightReader(ctx, path, CollectorConfig{})
 	if err != nil {
 		t.Fatalf("NewSQLiteWeightReader with the schema only in the WAL: %v", err)
@@ -465,8 +480,10 @@ func TestSQLiteWeightReaderRejectionKeepsMainAndWAL(t *testing.T) {
 		if _, err := NewSQLiteWeightReader(ctx, path, CollectorConfig{}); err == nil {
 			t.Fatal("NewSQLiteWeightReader accepted an empty database file")
 		}
-		if info, err := os.Stat(path); err != nil || info.Size() != 0 {
-			t.Fatalf("empty main after rejection: %v, %v", info, err)
+		if info, err := os.Stat(path); err != nil {
+			t.Fatalf("stat empty main after rejection: %v", err)
+		} else if info.Size() != 0 {
+			t.Fatalf("empty main after rejection is %d bytes", info.Size())
 		}
 		walAfter, err := os.ReadFile(path + "-wal")
 		if err != nil {
@@ -484,6 +501,7 @@ func TestSQLiteWeightReaderRejectionKeepsMainAndWAL(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		t.Cleanup(func() { _ = w.Close() })
 		for _, q := range []string{`PRAGMA journal_mode=WAL`, `CREATE TABLE existing (value TEXT)`, `INSERT INTO existing (value) VALUES ('main')`} {
 			if _, err := w.ExecContext(ctx, q); err != nil {
 				t.Fatalf("%s: %v", q, err)
@@ -516,8 +534,42 @@ func TestSQLiteWeightReaderRejectionKeepsMainAndWAL(t *testing.T) {
 				t.Fatalf("rejection created %q", name)
 			}
 		}
-		if info, err := os.Stat(path + "-wal"); err == nil && info.Size() != 0 {
+		switch info, err := os.Stat(path + "-wal"); {
+		case errors.Is(err, os.ErrNotExist):
+		case err != nil:
+			t.Fatalf("stat WAL after rejection: %v", err)
+		case info.Size() != 0:
 			t.Fatalf("rejection wrote %d WAL bytes", info.Size())
 		}
 	})
+}
+
+// TestSQLiteWeightReaderClosesHandleOnRejection: a rejected database must not
+// keep a reader connection open. Leaving WAL mode needs exclusive access, so a
+// leaked connection makes the writer's journal_mode change fail as locked.
+func TestSQLiteWeightReaderClosesHandleOnRejection(t *testing.T) {
+	ctx := t.Context()
+	path := filepath.Join(t.TempDir(), "unmigrated.db")
+	u := url.URL{Scheme: "file", Path: path, RawQuery: "_pragma=busy_timeout(0)"}
+	w, err := sql.Open("sqlite", u.String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	w.SetMaxOpenConns(1)
+	t.Cleanup(func() { _ = w.Close() })
+	for _, q := range []string{`PRAGMA journal_mode=WAL`, `CREATE TABLE existing (value TEXT)`} {
+		if _, err := w.ExecContext(ctx, q); err != nil {
+			t.Fatalf("%s: %v", q, err)
+		}
+	}
+	if _, err := NewSQLiteWeightReader(ctx, path, CollectorConfig{}); err == nil {
+		t.Fatal("NewSQLiteWeightReader accepted an unmigrated database")
+	}
+	var mode string
+	if err := w.QueryRowContext(ctx, `PRAGMA journal_mode=DELETE`).Scan(&mode); err != nil {
+		t.Fatalf("leave WAL after rejection: %v", err)
+	}
+	if mode != "delete" {
+		t.Fatalf("journal_mode after rejection = %q, want delete", mode)
+	}
 }
