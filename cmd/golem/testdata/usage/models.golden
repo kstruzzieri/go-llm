@@ -1,0 +1,19 @@
+Usage of golem models:
+  -allow-destination value
+    	admit a remote model destination: "<provider>/<canonical base URL>" (repeatable; this command never prompts)
+  -base-url string
+    	override the openai-compat backend base URL (server root, without /v1); used as given, disables discovery
+  -config string
+    	path to models.json (default: auto-discover)
+  -json
+    	emit the configview snapshot as JSON (no probing; excludes -probe-all/-reprobe)
+  -no-probe
+    	disable openai-compat backend port discovery; explicit and configured URLs are still used as resolved
+  -ollama-url string
+    	override Ollama base URL
+  -probe-all
+    	actively probe every non-explicit entry (no bounded-eager stop)
+  -reprobe
+    	delete cached probe verdicts for non-explicit entries then re-probe
+  -root string
+    	workspace root (scopes the cap-probe cache path guard) (default ".")

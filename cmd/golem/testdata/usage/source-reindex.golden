@@ -1,0 +1,9 @@
+Usage of golem source reindex:
+  -allow-destination value
+    	admit a remote model destination: "<provider>/<canonical base URL>" (repeatable; this command never prompts)
+  -config string
+    	path to models.json (default: auto-discover)
+  -ollama-url string
+    	override Ollama base URL
+  -root string
+    	workspace root (default ".")
