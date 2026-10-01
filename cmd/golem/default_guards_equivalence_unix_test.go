@@ -51,7 +51,13 @@ func normalizedRequests(t *testing.T, reqs []provider.ChatRequest) []string {
 			s = strings.ReplaceAll(s, key, "FENCEID")
 			fenced++
 		}
-		out[i] = s
+		// json:"-" fields still reach the provider (SessionID becomes a
+		// request header), so compare them too.
+		hidden, err := json.Marshal([]any{req.SessionID, req.ParseThinkMode, req.ParseThinkTags})
+		if err != nil {
+			t.Fatal(err)
+		}
+		out[i] = s + string(hidden)
 	}
 	if fenced == 0 {
 		t.Fatalf("no request carried a fenced tool message in %d requests", len(reqs))
@@ -63,7 +69,7 @@ func normalizedRequests(t *testing.T, reqs []provider.ChatRequest) []string {
 // guarded run and an unguarded run execute the same calls, record the same
 // raw observations and send the same provider requests modulo the per-render
 // fence id. The guards still saw the exec calls (uname scores unknown 10),
-// which is the only allowed difference. The non-quiet run_command is approved
+// which is the only allowed difference. Both run_command calls are approved
 // through the real -allow-tool approver, so equivalence holds under the same
 // authorization path a headless run uses.
 func TestDefaultGuardsLeaveAllowedCallsEquivalent(t *testing.T) {
@@ -93,7 +99,7 @@ func TestDefaultGuardsLeaveAllowedCallsEquivalent(t *testing.T) {
 			answerStep("equivalent"),
 		}}}
 		res, err := agent.New(caller, agent.ContextManager{}, opts...).Run(context.Background(),
-			agent.Request{Goal: "equivalence", Tools: append(readers, execs...), Approver: newHeadlessApprover(allow)}, nil)
+			agent.Request{Goal: "equivalence", SessionID: "equivalence", Tools: append(readers, execs...), Approver: newHeadlessApprover(allow)}, nil)
 		if err != nil {
 			t.Fatalf("Run: %v", err)
 		}
@@ -125,12 +131,26 @@ func TestDefaultGuardsLeaveAllowedCallsEquivalent(t *testing.T) {
 			!strings.Contains(outs[1], "hello.txt:1: hello guards") ||
 			outs[2] != "exit code: 0\n--- stdout ---\nquiet\n\n--- stderr ---\n" ||
 			!strings.HasPrefix(outs[3], "exit code: 0\n--- stdout ---\n") ||
+			!strings.HasSuffix(outs[3], "\n\n--- stderr ---\n") ||
 			len(outs[3]) <= len("exit code: 0\n--- stdout ---\n\n--- stderr ---\n") {
 			t.Fatalf("%s outputs = %q", name, outs)
 		}
 	}
-	if !reflect.DeepEqual(guarded.Messages, bare.Messages) {
-		t.Fatalf("raw observations differ:\nguarded %+v\nbare    %+v", guarded.Messages, bare.Messages)
+	// Whole results, not just Messages: records (AutoApproved, Provenance...),
+	// events and stop reason must match too. Latency is wall-clock and Risk
+	// is the one intended difference, checked below.
+	norm := func(r agent.Result) agent.Result {
+		r.ToolCalls, r.Steps, r.Risk = slices.Clone(r.ToolCalls), slices.Clone(r.Steps), nil
+		for i := range r.ToolCalls {
+			r.ToolCalls[i].Latency = 0
+		}
+		for i := range r.Steps {
+			r.Steps[i].Latency = 0
+		}
+		return r
+	}
+	if g, b := norm(guarded), norm(bare); !reflect.DeepEqual(g, b) {
+		t.Fatalf("results differ beyond risk:\nguarded %+v\nbare    %+v", g, b)
 	}
 	if len(guardedReqs) != 5 || len(bareReqs) != 5 {
 		t.Fatalf("request counts = %d guarded, %d bare, want 5 (four tool steps and the answer)", len(guardedReqs), len(bareReqs))
@@ -142,8 +162,8 @@ func TestDefaultGuardsLeaveAllowedCallsEquivalent(t *testing.T) {
 			}
 		}
 	}
-	// The guards saw exactly the non-quiet exec and nothing else: the one
-	// allowed difference between the runs.
+	// The guards inspected every call but flagged exactly the non-quiet exec:
+	// the one allowed difference between the runs.
 	if guarded.Risk == nil || guarded.Risk.Score != 10 || bare.Risk != nil {
 		t.Fatalf("risk guarded = %+v bare = %+v, want 10 (uname unknown) and nil", guarded.Risk, bare.Risk)
 	}
