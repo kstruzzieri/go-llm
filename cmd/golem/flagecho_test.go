@@ -166,3 +166,13 @@ func TestSourcePositionalErrorsDoNotEchoArgv(t *testing.T) {
 		})
 	}
 }
+
+// TestUnknownCommandDoesNotEchoArgv covers the top-level dispatcher, which
+// rejects a non-flag first argument before any flag parsing.
+func TestUnknownCommandDoesNotEchoArgv(t *testing.T) {
+	exit, stdout, stderr := runGolemMain(t, "sk-"+flagEchoSecret)
+	want := "golem: unknown command (did you mean \"audit\", \"index\", \"models\", \"source\", or \"mcp\"?)\n"
+	if exit != 1 || stdout != "" || stderr != want {
+		t.Fatalf("exit/stdout/stderr = %d / %q / %q, want 1 / \"\" / %q", exit, stdout, stderr, want)
+	}
+}
