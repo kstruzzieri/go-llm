@@ -665,6 +665,16 @@ stderr. Later changes block the entire alias, close its session, and report a
 names-only diff. Other healthy aliases remain available; the startup summary
 counts blocked aliases separately from tools.
 
+Narrow an attached server to the tools a task needs with
+`-mcp-tools 'fs=read_file,list_directory'` (repeatable, one per alias). Names are
+the server's own tool names, not the `mcp__fs__` form. `-mcp-tools 'fs='`
+exposes no tools from that server. Selection applies after the complete catalog
+is verified and pinned, so a change to an unselected tool still blocks the
+alias, and a selected name the server does not offer blocks the alias
+(`selection_missing`) instead of exposing a partial set. Selected tools still
+require approval for every call. `golem mcp inspect` and `approve` do not take
+`-mcp-tools`: they always review the complete catalog.
+
 Review and approve the exact current catalog without starting a model session
 or invoking a tool:
 

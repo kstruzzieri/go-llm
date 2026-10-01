@@ -11,6 +11,13 @@
 // configuration order in Manager.Tools. Callers must close the Manager, and
 // strict all-alias admission callers must reject any AdmissionError themselves.
 //
+// Server.WithTools selects exact original tool names per alias. Selection
+// applies after complete-catalog admission: pins, diffs and Inspect always
+// cover every tool, a changed unselected tool still blocks the alias, and a
+// selected name absent from the admitted catalog blocks the alias with
+// selection_missing. Omitted selection exposes the whole catalog; an explicit
+// empty selection exposes none. Every exposed tool still requires approval.
+//
 // Inspect never writes a pin and renders quoted definitions. Approve re-fetches
 // and publishes only the exact supplied candidate digest if the prior pin
 // revision is unchanged. Approval invokes no tools and grants no tool execution
