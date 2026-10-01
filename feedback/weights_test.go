@@ -627,16 +627,18 @@ func TestSQLiteWeightReaderResolvesRelativePath(t *testing.T) {
 	}
 	t.Chdir(dir)
 	for _, name := range []string{"rel.db", "./rel.db"} {
-		reader, err := NewSQLiteWeightReader(ctx, name, CollectorConfig{})
-		if err != nil {
-			t.Fatalf("NewSQLiteWeightReader(%q): %v", name, err)
-		}
-		if _, err := reader.WeightsBatch(ctx, []string{"chunk"}); err != nil {
-			t.Fatalf("WeightsBatch via %q: %v", name, err)
-		}
-		if err := reader.Close(); err != nil {
-			t.Fatalf("Close via %q: %v", name, err)
-		}
+		t.Run(name, func(t *testing.T) {
+			reader, err := NewSQLiteWeightReader(ctx, name, CollectorConfig{})
+			if err != nil {
+				t.Fatalf("NewSQLiteWeightReader(%q): %v", name, err)
+			}
+			if _, err := reader.WeightsBatch(ctx, []string{"chunk"}); err != nil {
+				t.Fatalf("WeightsBatch via %q: %v", name, err)
+			}
+			if err := reader.Close(); err != nil {
+				t.Fatalf("Close via %q: %v", name, err)
+			}
+		})
 	}
 }
 
