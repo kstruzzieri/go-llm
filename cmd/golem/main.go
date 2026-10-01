@@ -110,8 +110,8 @@ type flags struct {
 
 // parseQuietly parses args without the flag package's own error output, which
 // quotes argv (unknown flags, bad values) and so may echo secrets. Help still
-// prints the default usage to helpOut (nil means stderr, the flag package
-// default); every other failure becomes one value-free error.
+// prints fs.Usage to helpOut (nil means stderr, the flag package default);
+// every other failure becomes one value-free error.
 func parseQuietly(fs *flag.FlagSet, args []string, helpOut io.Writer) error {
 	fs.SetOutput(io.Discard)
 	err := fs.Parse(args)
@@ -120,8 +120,7 @@ func parseQuietly(fs *flag.FlagSet, args []string, helpOut io.Writer) error {
 	}
 	if errors.Is(err, flag.ErrHelp) {
 		fs.SetOutput(helpOut)
-		_, _ = fmt.Fprintf(fs.Output(), "Usage of %s:\n", fs.Name())
-		fs.PrintDefaults()
+		fs.Usage()
 		return flag.ErrHelp
 	}
 	return fmt.Errorf("invalid command-line flags in %d argument(s); run with -help for usage", len(args))
