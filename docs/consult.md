@@ -41,7 +41,9 @@ transport adds provider routing, automatic consultation or fallback.
 
 `/consult` requires `-interceptors`. The advisory is untrusted external text
 that the model will read, so the command is unavailable unless the #436
-interceptor pipeline is active to inspect it.
+content interceptor pipeline is active to inspect it. Golem's always-on tool
+guards (#575) do not count: they check tool-call arguments and report native
+dispatch refusals, and never inspect advisory text.
 
 Consultants are declared in a JSON file, found in one of two ways:
 
