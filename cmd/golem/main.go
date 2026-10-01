@@ -55,7 +55,7 @@ type flags struct {
 	delegateRole        string
 	dispatch            bool
 	dispatchRole        string
-	interceptors        bool // -interceptors: default interceptor chain on every orchestrator and dispatch child (#514/#439)
+	interceptors        bool // -interceptors: full content chain on top of the always-on guards (#514/#439/#575)
 	mcpStdio            stringSliceFlag
 	mcpHTTP             stringSliceFlag
 	allowDestinations   stringSliceFlag
@@ -132,7 +132,7 @@ func parseFlags(args []string) (flags, error) {
 	fs.StringVar(&f.delegateRole, "delegate-role", "coding", "model role the delegate_code tool routes to")
 	fs.BoolVar(&f.dispatch, "dispatch", false, "enable the dispatch tool (bounded read-only exploration tasks use backend-governed concurrency; ungoverned routing stays serial)")
 	fs.StringVar(&f.dispatchRole, "dispatch-role", "", "model role dispatch child agents route to (default: the primary agent chain, so children never force a model swap)")
-	fs.BoolVar(&f.interceptors, "interceptors", false, "enable the interceptor pipeline (#436/#437/#439): origin-sensitive injection detectors, all-origin supported secret/payment-card blocking across completed turns, argument guards, and command egress labels on the agent and dispatch children; streaming output is not intercepted; risk appears at interactive tool-call and plan-lock prompts and successful REPL/-p stderr footers, but not verifier approval prompts; default off")
+	fs.BoolVar(&f.interceptors, "interceptors", false, "add the content interceptor pipeline (#436/#437) on top of the always-on guards (#575: argument invariants for named tools, exec-class egress labels, scoped-child refusal reporting): origin-sensitive injection detectors, all-origin supported secret/payment-card blocking across completed turns, and a canary; required by /consult; streaming output is not intercepted; risk appears at interactive tool-call and plan-lock prompts and successful REPL/-p stderr footers, but not verifier approval prompts; default off")
 	fs.Var(&f.mcpStdio, "mcp-stdio", "attach an MCP server over stdio: \"[alias=]command args...\" (repeatable; use `env KEY=val cmd` for env vars)")
 	fs.Var(&f.mcpHTTP, "mcp-http", "attach an MCP server over streamable HTTP: \"[alias=]https://endpoint\" (repeatable)")
 	fs.Var(&f.allowDestinations, "allow-destination", "admit a remote model destination without prompting: \"<provider>/<canonical base URL>\" (repeatable; required for remote destinations in noninteractive runs)")

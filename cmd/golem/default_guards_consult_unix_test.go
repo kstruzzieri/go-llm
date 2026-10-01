@@ -3,6 +3,7 @@
 package main
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -44,5 +45,33 @@ func TestConsultGateRequiresFullChainThroughStartup(t *testing.T) {
 				}
 			})
 		})
+	}
+}
+
+// TestAgentflowStatusPrintsNoChainNotice (§4.3): -agentflow-status returns
+// before chain construction for every flag value, so neither notice appears
+// on either channel.
+func TestAgentflowStatusPrintsNoChainNotice(t *testing.T) {
+	for _, flag := range [][]string{nil, {"-interceptors=false"}, {"-interceptors"}} {
+		root := t.TempDir()
+		t.Setenv("PATH", writeFakeAgentflow(t)+string(os.PathListSeparator)+os.Getenv("PATH"))
+		const payload = "{\"state\":\"uninitialized\"}\n"
+		t.Setenv("GOLEM_AGENTFLOW_STATUS_PAYLOAD", payload)
+		stdin, stdout, stderr := runTestFiles(t)
+		err := run(append([]string{"-agentflow-status", "-json", "-root", root}, flag...), stdin, stdout, stderr)
+		// The status path must really have run, or an early argument error
+		// would also print no notice: it relays the payload and exits 3.
+		var statusErr *agentflowStatusExit
+		if !errors.As(err, &statusErr) || statusErr.ExitCode() != 3 {
+			t.Fatalf("flags %v: run error = %v, want agentflow status exit 3", flag, err)
+		}
+		if got := readRunTestFile(t, stdout); got != payload {
+			t.Fatalf("flags %v: stdout = %q, want the relayed payload %q", flag, got, payload)
+		}
+		for name, s := range map[string]string{"stdout": readRunTestFile(t, stdout), "stderr": readRunTestFile(t, stderr)} {
+			if strings.Contains(s, "guards:") || strings.Contains(s, "interceptors:") {
+				t.Fatalf("flags %v: %s = %q, want no chain notice", flag, name, s)
+			}
+		}
 	}
 }

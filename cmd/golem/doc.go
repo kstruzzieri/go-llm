@@ -19,7 +19,22 @@
 // serve the active model route, startup scans 127.0.0.1:8080-8090 for it
 // (-no-probe disables the scan).
 //
-// -interceptors installs the #436 injection detectors (zero-width characters,
+// Every run installs three deterministic interceptors on the agent and on
+// every dispatch child, with or without -interceptors (#575). Argument
+// invariants refuse write_file/edit_file/promote_artifact paths under .git,
+// .ssh, .gnupg, .aws or .kube, read_file paths under the credential
+// directories or named .env, inline sh -c/bash -c scripts that pipe a
+// recognized curl/wget fetch into a shell, and a guarded argument spelled
+// twice. A refusal happens before planning and approval, so grants and
+// -allow-tool cannot override it; the model sees a tool error. These are
+// lexical checks on named tool arguments, not confinement: shell commands,
+// search, retrieval, MCP tools and verifier commands can reach the same files.
+// The egress classifier labels the argv of any exec-class tool, MCP tools
+// included, on the approval prompt and in the risk score; labels do not
+// confine network access. Scoped-child refusal reporting adds native dispatch
+// refusals to the parent's risk report.
+//
+// -interceptors adds the #436 injection detectors (zero-width characters,
 // base64/hex-encoded instructions, exact and scrambled instruction phrases)
 // on the agent and on every dispatch child. Injection content is classified by
 // provenance: workspace files, command output, memory records, plan
@@ -44,7 +59,7 @@
 // content-light telemetry. Initial blocks save no conversation or checkpoint
 // row; later blocks retain undo records for earlier allowed mutations. A
 // caller-owned blocked agent.Result may still contain its original goal.
-// -interceptors remains off by default.
+// -interceptors remains off by default; the guards above do not depend on it.
 //
 // With -interceptors, Golem also plants an unpredictable canary in its system
 // instructions for each live conversation activation. The canary survives
@@ -78,7 +93,7 @@
 // in tool arguments; other transformations or encodings, split values, Unicode
 // normalization and cross-message reconstruction are outside this detector.
 //
-// The same chain carries the #439 guards, so they are opt-in with it.
+// The #439 guards run in every session, with or without -interceptors (#575).
 // Argument invariants block a tool call before it is planned or prompted:
 // write_file, edit_file and promote_artifact under a .git, .ssh, .gnupg,
 // .aws or .kube component, read_file under the credential components or
@@ -115,7 +130,8 @@
 // -consultants-config -- which owns the command path, model and bounds; the
 // operator supplies only the name and the prompt, and the adapter owns argv
 // and the process environment. It requires -interceptors, because the reply is
-// admitted through the same interceptor chain as any other untrusted ingress,
+// admitted through the content interceptor pipeline as any other untrusted
+// ingress (the always-on guards scan no advisory text),
 // and it stages at most ONE receipt: the admitted answer rides the next goal
 // inside a keyed <<<CONSULT_ADVICE frame and is then dropped, never entering
 // history, summaries or the session store. Failed or answerless turns retain
