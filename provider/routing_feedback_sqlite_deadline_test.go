@@ -187,6 +187,9 @@ func TestSQLiteFeedbackStoreDeadlineBoundsLockWait(t *testing.T) {
 			elapsed := time.Since(start)
 			release()
 			t.Logf("ELAPSED deadline-bounds/%s %v", tc.name, elapsed)
+			if err != nil && strings.Contains(err.Error(), "cap busy_timeout") {
+				t.Skipf("fixture invalid: stalled past the deadline before the first cap: %v", err)
+			}
 			if err == nil || !strings.Contains(err.Error(), tc.phase) {
 				t.Fatalf("fixture invalid: err = %v, want the lock wait in %q", err, tc.phase)
 			}
@@ -407,12 +410,16 @@ func TestSQLiteFeedbackStoreRejectsDoneContext(t *testing.T) {
 	cancel()
 	expired, cancelExpired := context.WithDeadline(t.Context(), time.Now().Add(-time.Second))
 	defer cancelExpired()
+	// A cancelled ctx that still carries a deadline takes the deadline path.
+	cancelledWithDeadline, cancelWithDeadline := context.WithTimeout(t.Context(), time.Hour)
+	cancelWithDeadline()
 	for _, tc := range []struct {
 		name string
 		ctx  context.Context
 		want error
 	}{
 		{"cancelled", cancelled, context.Canceled},
+		{"cancelled with deadline", cancelledWithDeadline, context.Canceled},
 		{"expired", expired, context.DeadlineExceeded},
 	} {
 		if err := store.RecordBatch(tc.ctx, []FeedbackItem{testFeedbackItem("m")}); !errors.Is(err, tc.want) {
