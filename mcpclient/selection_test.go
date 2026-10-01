@@ -3,11 +3,13 @@ package mcpclient
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"slices"
 	"strings"
 	"testing"
 
+	"github.com/kstruzzieri/go-llm/agent"
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -200,5 +202,108 @@ func TestSelectionMissingNamesKeepSelectionOrder(t *testing.T) {
 	wantNames := []string{"zeta", "alpha", "mu", "beta", "omega", "kappa", "delta", "sigma", "gamma"}
 	if got, want := failure.Error(), `server "fs": selection_missing: zeta, alpha, mu, beta, omega, kappa, delta, sigma, gamma`; got != want || !slices.Equal(failure.Names, wantNames) {
 		t.Fatalf("failure = (%q, %q), want (%q, %q): selection order, not sorted or map order", got, failure.Names, want, wantNames)
+	}
+}
+
+func toolNames(tools []agent.Tool) []string {
+	out := make([]string, len(tools))
+	for i, tool := range tools {
+		out[i] = tool.Spec().Name
+	}
+	return out
+}
+
+func TestSelectionIsPerAliasWithIdenticalRemoteNames(t *testing.T) {
+	pins := testPins(t)
+	a, _, _ := staticCatalogServer(t, "a", &gomcp.Tool{Name: "read"}, &gomcp.Tool{Name: "write"})
+	b, _, _ := staticCatalogServer(t, "b", &gomcp.Tool{Name: "read"}, &gomcp.Tool{Name: "write"})
+	m, _, err := Connect(context.Background(), Implementation{Name: "test"}, []Server{a.WithTools("read"), b.WithTools("write")}, ConnectOptions{Pins: pins})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = m.Close() })
+	if got, want := toolNames(m.Tools()), []string{"mcp__a__read", "mcp__b__write"}; !slices.Equal(got, want) {
+		t.Fatalf("tools = %q, want %q", got, want)
+	}
+	for alias, want := range map[string][]string{
+		"a": {`"mcp__a__read"`, `"mcp__a__write"`},
+		"b": {`"mcp__b__read"`, `"mcp__b__write"`},
+	} {
+		pin := pinBytes(t, pins, alias)
+		for _, name := range want {
+			if !bytes.Contains(pin, []byte(name)) {
+				t.Fatalf("pin %s lacks %s; selection narrowed the pinned catalog", alias, name)
+			}
+		}
+	}
+}
+
+func TestSelectionKeepsFullCatalogChangeDetection(t *testing.T) {
+	pins := testPins(t)
+	first, _, _ := staticCatalogServer(t, "fs", &gomcp.Tool{Name: "read", Description: "R"}, &gomcp.Tool{Name: "write", Description: "W"})
+	m, _, err := Connect(context.Background(), Implementation{Name: "test"}, []Server{first.WithTools("read")}, ConnectOptions{Pins: pins})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := toolNames(m.Tools()); !slices.Equal(got, []string{"mcp__fs__read"}) {
+		t.Fatalf("first connect tools = %q, want [mcp__fs__read]", got)
+	}
+	if err := m.Close(); err != nil {
+		t.Fatal(err)
+	}
+	changed, done, _ := staticCatalogServer(t, "fs", &gomcp.Tool{Name: "read", Description: "R"}, &gomcp.Tool{Name: "write", Description: "W2"})
+	m, w, err := Connect(context.Background(), Implementation{Name: "test"}, []Server{changed.WithTools("read")}, ConnectOptions{Pins: pins})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = m.Close() })
+	waitOn(t, done, "changed-hidden-tool session close")
+	failure := admission(t, w)
+	if failure.Reason != "catalog_changed" || failure.Diff.String() != "changed: mcp__fs__write (description)" || len(m.Tools()) != 0 {
+		t.Fatalf("hidden change = (%q, %q, %d tools), want (catalog_changed, changed: mcp__fs__write (description), 0)", failure.Reason, failure.Diff.String(), len(m.Tools()))
+	}
+}
+
+func TestSelectionKeepsServerListingOrder(t *testing.T) {
+	s, _, _ := staticCatalogServer(t, "fs", &gomcp.Tool{Name: "read"}, &gomcp.Tool{Name: "write"}, &gomcp.Tool{Name: "delete"})
+	m, _, err := Connect(context.Background(), Implementation{Name: "test"}, []Server{s.WithTools("write", "read")}, ConnectOptions{Pins: testPins(t)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = m.Close() })
+	if got, want := toolNames(m.Tools()), []string{"mcp__fs__read", "mcp__fs__write"}; !slices.Equal(got, want) {
+		t.Fatalf("tools = %q, want server listing order %q (not selection order)", got, want)
+	}
+}
+
+func TestOmittedSelectionExposesWholeCatalog(t *testing.T) {
+	s, _, _ := staticCatalogServer(t, "fs", &gomcp.Tool{Name: "write"}, &gomcp.Tool{Name: "read"})
+	m, _, err := Connect(context.Background(), Implementation{Name: "test"}, []Server{s}, ConnectOptions{Pins: testPins(t)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = m.Close() })
+	if got, want := toolNames(m.Tools()), []string{"mcp__fs__write", "mcp__fs__read"}; !slices.Equal(got, want) {
+		t.Fatalf("omitted selection tools = %q, want server order %q", got, want)
+	}
+}
+
+func TestSelectedToolsKeepPerCallApproval(t *testing.T) {
+	s, _, _ := staticCatalogServer(t, "fs", &gomcp.Tool{Name: "read", Annotations: &gomcp.ToolAnnotations{ReadOnlyHint: true}})
+	m, _, err := Connect(context.Background(), Implementation{Name: "test"}, []Server{s.WithTools("read")}, ConnectOptions{Pins: testPins(t)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = m.Close() })
+	tools := m.Tools()
+	if len(tools) != 1 || tools[0].Effect().Approval != agent.ApprovalAlways {
+		t.Fatalf("selected read-only-hinted tool effect = %+v, want ApprovalAlways", tools)
+	}
+	plan, err := tools[0].(agent.PlanningTool).Plan(context.Background(), json.RawMessage(`{}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.Effect.Approval != agent.ApprovalAlways || plan.ApprovalKey != "" {
+		t.Fatalf("plan = (%v, %q), want (ApprovalAlways, no session-grant key)", plan.Effect.Approval, plan.ApprovalKey)
 	}
 }
