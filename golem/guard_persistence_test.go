@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -39,10 +40,13 @@ func readCall(id, path string) agent.ModelResult {
 	}}}}
 }
 
-// TestGuardBlockedObservationsPersistAsToday (#575): Golem's guard set
-// (mirrored here; the CLI pins its own composition) yields blocked
-// observations that answered runs persist raw with their arguments, risk
-// resets per run, and a capped empty-answer turn is not saved.
+// TestGuardBlockedObservationsPersistAsToday (#575): pins the runtime-level
+// behavior of the always-on guards with a locally composed guard chain: an
+// answered run saves its blocked observations raw with the call arguments,
+// nothing but the conversation's own fields is persisted, risk resets per
+// run, and a capped empty-answer turn is not saved. The chain is composed
+// here, not taken from the CLI; persistence under the CLI's own composition
+// is pinned by TestDefaultGuardsBlockedObservationPersists in cmd/golem.
 func TestGuardBlockedObservationsPersistAsToday(t *testing.T) {
 	inv, err := interceptor.NewInvariants(interceptor.DefaultInvariants())
 	if err != nil {
@@ -113,9 +117,10 @@ func TestGuardBlockedObservationsPersistAsToday(t *testing.T) {
 		t.Fatalf("stored observation = %+v, want the raw blocked observation for b1", m)
 	}
 	// Risk, blocked and native metadata are not persisted: a stored message
-	// carries only the conversation.Message keys, so a risk or blocked field
-	// added to the type or to the save path fails here. The blocked state
-	// survives only as the observation text above.
+	// carries only the conversation.Message keys, and the conversation itself
+	// is exactly its identity, title, revision and messages. So a risk or
+	// blocked field added to either type or to the save path fails here. The
+	// blocked state survives only as the observation text above.
 	for i, m := range conv.Messages {
 		raw, err := json.Marshal(m)
 		if err != nil {
@@ -130,6 +135,14 @@ func TestGuardBlockedObservationsPersistAsToday(t *testing.T) {
 				t.Fatalf("stored message %d carries unexpected key %q: %s", i, k, raw)
 			}
 		}
+	}
+	// Revision 2 is one save per answered turn. mapSessionStore stamps no
+	// wall-clock fields, so CreatedAt and UpdatedAt are zero and compared as
+	// such. The messages are pinned above; comparing them to themselves here
+	// leaves every other field of the conversation under test.
+	wantConv := conversation.Conversation{ID: "t", Title: "q1", Messages: conv.Messages, Revision: 2}
+	if !reflect.DeepEqual(conv, wantConv) {
+		t.Fatalf("stored conversation = %+v, want only id, title, revision and messages: %+v", conv, wantConv)
 	}
 
 	if first.Risk == nil || first.Risk.Score != 30 {

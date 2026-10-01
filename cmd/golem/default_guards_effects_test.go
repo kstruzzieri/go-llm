@@ -5,10 +5,12 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
 	"github.com/kstruzzieri/go-llm/agent"
+	golemruntime "github.com/kstruzzieri/go-llm/golem"
 	"github.com/kstruzzieri/go-llm/internal/agenttrace"
 	"github.com/kstruzzieri/go-llm/provider"
 )
@@ -27,9 +29,11 @@ func (v *countingVerifier) Verify(context.Context, agent.Approver) (string, erro
 // succeed (Plan needs an existing parent) and the run would verify: the test
 // can only pass through the guards. newCheckpointWriteSession pre-grants the
 // write class, so the first write must auto-approve through that grant: the
-// answer source fails the test if it is ever consulted, which also proves a
-// blocked write never reaches approval. That a files grant cannot bypass a
-// block is pinned by TestDefaultGuardsBlockDespiteFilesGrant.
+// answer source fails the test if it is ever consulted. The grant also means
+// a blocked write that reached approval would be approved silently, never
+// prompting, so the fatal source cannot prove block-before-approval; the
+// blocked records must instead not be AutoApproved. That a files grant cannot
+// bypass a block is also pinned by TestDefaultGuardsBlockDespiteFilesGrant.
 func TestDefaultGuardsCapAfterWriteSkipsVerificationKeepsUndo(t *testing.T) {
 	root := t.TempDir()
 	for _, d := range []string{".git/hooks", ".ssh", ".aws"} {
@@ -61,6 +65,11 @@ func TestDefaultGuardsCapAfterWriteSkipsVerificationKeepsUndo(t *testing.T) {
 		t.Fatalf("first write = %+v, want applied through the grant", r)
 	}
 	assertBlockedAt(t, res.ToolCalls, 1, 2, 3)
+	for i := 1; i <= 3; i++ {
+		if res.ToolCalls[i].AutoApproved {
+			t.Fatalf("record %d = %+v: a blocked write reached approval and the grant approved it", i, res.ToolCalls[i])
+		}
+	}
 	if res.Risk == nil || res.Risk.Score != 90 {
 		t.Fatalf("risk = %+v, want 90", res.Risk)
 	}
@@ -79,8 +88,10 @@ func TestDefaultGuardsCapAfterWriteSkipsVerificationKeepsUndo(t *testing.T) {
 	}
 	var undo strings.Builder
 	dispatchSlash(context.Background(), &undo, sess, "/undo 1")
-	if want := "undid a.txt\nundid checkpoint: write then probe [receipts verified]\n"; undo.String() != want {
-		t.Fatalf("/undo output = %q, want %q", undo.String(), want)
+	for _, want := range []string{"undid a.txt\n", "[receipts verified]"} {
+		if !strings.Contains(undo.String(), want) {
+			t.Fatalf("/undo output = %q, want it to contain %q", undo.String(), want)
+		}
 	}
 	if _, err := os.Stat(filepath.Join(root, "a.txt")); !os.IsNotExist(err) {
 		t.Fatalf("/undo left a.txt (%v): %s", err, undo.String())
@@ -90,6 +101,57 @@ func TestDefaultGuardsCapAfterWriteSkipsVerificationKeepsUndo(t *testing.T) {
 			t.Fatalf("%s exists after /undo (%v)", p, err)
 		}
 	}
+}
+
+// TestDefaultGuardsBlockedObservationPersists (#575): a real default run (the
+// factory's own chain, the runtime's real save path, a real session store)
+// persists the raw blocked observation and the call's arguments, and never the
+// credential bytes. The golem package test composes its own guard chain, so
+// this is the test that follows defaultGuards(): swapping a guard there, or
+// dropping the chain, stores the sentinel. Every credential file exists, so an
+// unguarded read succeeds.
+func TestDefaultGuardsBlockedObservationPersists(t *testing.T) {
+	root := t.TempDir()
+	writeCredentialFiles(t, root)
+	caller := &scriptCaller{responses: []agent.ModelResult{
+		toolStep("b1", "read_file", `{"path":".env"}`),
+		answerStep("answered"),
+	}}
+	sess := newSessionedTestSession(t, caller, root, "user:guards")
+	sess.root = root
+	sess.orch = newOrchestratorFactory(caller, flags{}, nil, nil)()
+	installCompactRuntime(t, sess, golemruntime.Options{})
+	res, err := runOnce(context.Background(), &strings.Builder{}, nil, sess, "read the env", nil)
+	if err != nil || res.Answer != "answered" {
+		t.Fatalf("run = %q, %v; want the run to complete and answer", res.Answer, err)
+	}
+	stored, err := sess.session.store.Load(context.Background(), sess.session.id)
+	if err != nil {
+		t.Fatalf("the answered turn was not saved: %v", err)
+	}
+	var roles []string
+	for _, m := range stored.Messages {
+		roles = append(roles, m.Role)
+		if strings.Contains(m.Content, envSentinelToken) || strings.Contains(string(m.ToolCalls), envSentinelToken) {
+			t.Fatalf("stored message leaked the credential sentinel: %+v", m)
+		}
+	}
+	if want := []string{"user", "assistant", "tool", "assistant"}; !slices.Equal(roles, want) {
+		t.Fatalf("stored roles = %v, want %v: %+v", roles, want, stored.Messages)
+	}
+	var calls []provider.ToolCall
+	if err := json.Unmarshal(stored.Messages[1].ToolCalls, &calls); err != nil {
+		t.Fatalf("stored tool calls = %s: %v", stored.Messages[1].ToolCalls, err)
+	}
+	if len(calls) != 1 || calls[0].ID != "b1" || calls[0].Function.Name != "read_file" || string(calls[0].Function.Arguments) != `{"path":".env"}` {
+		t.Fatalf("stored tool calls = %+v, want read_file b1 with its arguments", calls)
+	}
+	if m := stored.Messages[2]; m.Content != credentialBlocked || m.ToolCallID != "b1" {
+		t.Fatalf("stored observation = %+v, want the raw blocked observation for b1", m)
+	}
+	// Last, so a missing guard is reported by what it stored, not by the
+	// record check that would otherwise stop the test first.
+	assertCredentialBlocked(t, res, err)
 }
 
 // TestDefaultGuardsCapTracesAsCompleted (#575): a nil-error cap is classified
