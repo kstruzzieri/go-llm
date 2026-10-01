@@ -176,6 +176,9 @@ func TestApplyMCPTools(t *testing.T) {
 	for i := range many {
 		many[i] = fmt.Sprintf("t%d", i)
 	}
+	if _, err := applyMCPTools(parse(t), []string{"fs=" + strings.Join(many[:128], ",")}); err != nil {
+		t.Fatalf("128 names for alias fs rejected: %v", err)
+	}
 	for _, tt := range []struct {
 		flags []string
 		want  string
@@ -204,8 +207,7 @@ func TestMCPToolsRejectedInGoalAndPlan(t *testing.T) {
 	for _, mode := range []string{"-goal", "-plan"} {
 		in, out, diag := runTestFiles(t)
 		err := run([]string{mode, "unused", "-mcp-tools", "fs=read"}, in, out, diag)
-		// The exact mode rejection: without the guard, -mcp-tools would fail
-		// later with a different MCP error ("alias is not a configured MCP server").
+		// The exact mode rejection: without the guard, -mcp-tools fails later with a different error (an unknown alias for -goal, the approval-flag requirement for -plan).
 		if err == nil || !strings.Contains(err.Error(), "does not attach MCP tools") {
 			t.Fatalf("%s with -mcp-tools err = %v, want the mode's MCP rejection", mode, err)
 		}

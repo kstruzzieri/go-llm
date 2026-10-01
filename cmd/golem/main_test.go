@@ -1175,6 +1175,7 @@ func TestValidateFlags_AgentflowRecovery(t *testing.T) {
 		{"-rag-db", "rag.db"},
 		{"-delegate"},
 		{"-mcp-stdio", "server"},
+		{"-mcp-tools", "fs=read"},
 		{"-allow-write"},
 		{"-allow-exec"},
 		{"-approve-plan-lock"},

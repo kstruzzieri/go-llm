@@ -137,6 +137,9 @@ var mcpToolNameRE = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
 // must fit the strict provider function-name limit of 64 bytes.
 const maxMCPToolName = 64
 
+// maxMCPToolsPerAlias mirrors mcpclient's per-server tool cap.
+const maxMCPToolsPerAlias = 128
+
 // applyMCPTools applies repeatable -mcp-tools 'alias=a,b' values to parsed
 // servers; 'alias=' selects no tools. Errors name the flag occurrence and
 // entry by position and never echo supplied text.
@@ -163,8 +166,8 @@ func applyMCPTools(servers []mcpclient.Server, flags []string) ([]mcpclient.Serv
 		if list != "" {
 			names = strings.Split(list, ",")
 		}
-		if len(names) > 128 {
-			return nil, fmt.Errorf("-mcp-tools #%d: more than 128 names", n+1)
+		if len(names) > maxMCPToolsPerAlias {
+			return nil, fmt.Errorf("-mcp-tools #%d: more than %d names", n+1, maxMCPToolsPerAlias)
 		}
 		seen := make(map[string]bool, len(names))
 		for e, name := range names {
