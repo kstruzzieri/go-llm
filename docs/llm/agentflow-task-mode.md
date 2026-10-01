@@ -114,9 +114,17 @@ Re-run the spike if the AgentFlow validator contract tightens.
   gates.
 - `-agentflow-src <checkout>` — run `python3 -P -m agentflow` from a source
   checkout (`PYTHONPATH=<checkout>/src`) instead of the installed `agentflow`
-  binary. Requires Python 3.11+; the workspace is excluded from implicit module
-  search. Checkout paths containing the platform's path-list separator are
-  rejected. Use this when the CLI isn't installed on PATH.
+  binary. The path must be absolute (a relative path resolves against `-root`),
+  symlinks are resolved, and `src/agentflow/__init__.py` must exist; paths
+  containing the platform's path-list separator are rejected. Requires Python
+  3.11+; the workspace is excluded from implicit module search. Use this when
+  the CLI isn't installed on PATH.
+- `-agentflow-env <NAME>` — repeatable. Forwards one named parent environment
+  variable to AgentFlow and every gate it runs. Names only: the value is read
+  at each launch, and an unset name fails the launch. Everything not approved,
+  apart from a small baseline, is dropped; see
+  [AgentFlow subprocess environment](../golem.md#agentflow-subprocess-environment)
+  for the full policy.
 - `-evidence <sidecar.json>` — optional. Records evidence with AgentFlow
   before the plan is locked. Accepts one JSON object or an array of objects;
   each entry needs `id`, `claim`, and `source`.
