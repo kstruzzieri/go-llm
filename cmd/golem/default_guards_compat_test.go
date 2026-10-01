@@ -290,7 +290,7 @@ func assertBlockedAt(t *testing.T, recs []agent.ToolCallRecord, idx ...int) {
 // zeroWidthFixture holds a U+200B: with every default detector installed the
 // ZeroWidth interceptor would tag this observation with a trailer, so an
 // unchanged observation proves only the always-on guards ran.
-const zeroWidthFixture = "fi​ne\n"
+const zeroWidthFixture = "fi\u200bne\n"
 
 // TestDefaultGuardsRecoveryResetsTheErrorCount (#575): two blocks, a
 // successful allowed call, two blocks, an answer. The run completes only
