@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"strings"
 	"testing"
 
 	"github.com/kstruzzieri/go-llm/agent"
@@ -35,7 +36,7 @@ func TestRunOneShotDefaultGuardsBlockCredentialRead(t *testing.T) {
 	}
 	for i, r := range reqs {
 		for _, m := range r.Messages {
-			if bytes.Contains([]byte(m.Content), []byte("guard-probe-575")) {
+			if strings.Contains(m.Content, "guard-probe-575") {
 				t.Fatalf("request %d leaked the sentinel", i)
 			}
 		}
@@ -64,7 +65,9 @@ func TestModelSetRebuildKeepsDefaultGuards(t *testing.T) {
 
 // TestRecipeModelPublicationAndRestorationKeepDefaultGuards: a recipe model
 // hint publishes a guarded orchestrator for its turn and restores a guarded
-// one afterwards.
+// one afterwards. Restoration republishes the SAVED startup orchestrator and
+// factory (recipes_model.go), so the restored assertions are also what pins
+// the REPL startup construction; -p is pinned separately above.
 func TestRecipeModelPublicationAndRestorationKeepDefaultGuards(t *testing.T) {
 	fx := newModelSwitchFixture(t, "")
 	fx.alt.chatResponse = guardProbeResponse("alt-model")
