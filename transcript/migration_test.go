@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"modernc.org/sqlite"
+	sqlite3 "modernc.org/sqlite/lib"
 
 	"github.com/kstruzzieri/go-llm/internal/sqlitedsn"
 )
@@ -281,7 +282,7 @@ func TestAuditUpgradeOwnsWriteLockBeforeAltering(t *testing.T) {
 	if err := upgradeResult(t, ctx, done); err != nil {
 		t.Fatalf("upgrade: %v", err)
 	}
-	assertSQLiteCode(t, lockErr, 5)
+	assertSQLiteCode(t, lockErr, sqlite3.SQLITE_BUSY)
 	assertAuditUpgrade(t, a)
 }
 

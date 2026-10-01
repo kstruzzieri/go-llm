@@ -99,7 +99,8 @@ func addMissingAuditColumns(ctx context.Context, db *sql.DB) error {
 // still-missing column in one transaction: a concurrent opener waits on
 // busy_timeout, then finds the columns the first one committed. Reading before
 // writing would instead fail at once with SQLITE_BUSY or SQLITE_BUSY_SNAPSHOT
-// rather than wait.
+// rather than wait. Cancellation is observed between statements, not during
+// the lock wait; the DSN's busy_timeout (5s) bounds that wait.
 func addMissingAuditColumnsWith(ctx context.Context, db *sql.DB, hooks auditUpgradeHooks) (err error) {
 	existing, err := conversationColumns(ctx, db)
 	if err != nil {
@@ -125,7 +126,7 @@ func addMissingAuditColumnsWith(ctx context.Context, db *sql.DB, hooks auditUpgr
 		return fmt.Errorf("transcript: claim audit-column upgrade: %w", err)
 	}
 	if existing, err = conversationColumns(ctx, tx); err != nil {
-		return err
+		return fmt.Errorf("transcript: re-probe audit columns under lock: %w", err)
 	}
 	if hooks.afterLock != nil {
 		hooks.afterLock()
