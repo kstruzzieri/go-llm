@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 )
@@ -452,7 +453,7 @@ func dirEntryNames(t *testing.T, dir string) []string {
 // existing WAL; only SQLite's coordination sidecars may appear.
 func TestSQLiteWeightReaderRejectionKeepsMainAndWAL(t *testing.T) {
 	ctx := t.Context()
-	t.Run("empty main beside WAL", func(t *testing.T) {
+	t.Run("short main beside WAL", func(t *testing.T) {
 		src := filepath.Join(t.TempDir(), "src.db")
 		w, err := sql.Open("sqlite", src)
 		if err != nil {
@@ -469,28 +470,47 @@ func TestSQLiteWeightReaderRejectionKeepsMainAndWAL(t *testing.T) {
 		if err != nil || len(walBefore) == 0 {
 			t.Fatalf("fixture invalid: source WAL = %d bytes, %v", len(walBefore), err)
 		}
-		dir := t.TempDir()
-		path := filepath.Join(dir, "empty.db")
-		if err := os.WriteFile(path, nil, 0o600); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(path+"-wal", walBefore, 0o600); err != nil {
-			t.Fatal(err)
-		}
-		if _, err := NewSQLiteWeightReader(ctx, path, CollectorConfig{}); err == nil {
-			t.Fatal("NewSQLiteWeightReader accepted an empty database file")
-		}
-		if info, err := os.Stat(path); err != nil {
-			t.Fatalf("stat empty main after rejection: %v", err)
-		} else if info.Size() != 0 {
-			t.Fatalf("empty main after rejection is %d bytes", info.Size())
-		}
-		walAfter, err := os.ReadFile(path + "-wal")
-		if err != nil {
-			t.Fatalf("WAL beside the empty main is gone: %v", err)
-		}
-		if !bytes.Equal(walAfter, walBefore) {
-			t.Fatal("WAL beside the empty main changed")
+		// modernc's VFS sizes a 1-byte file as 0 bytes (SQLite ticket #3260);
+		// every file below one 512-byte page must be rejected before any open.
+		for _, tc := range []struct {
+			name string
+			main []byte
+		}{
+			{"0 bytes", nil},
+			{"1 byte", []byte("S")},
+			{"100 bytes", bytes.Repeat([]byte{0xAB}, 100)},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				dir := t.TempDir()
+				path := filepath.Join(dir, "short.db")
+				if err := os.WriteFile(path, tc.main, 0o600); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(path+"-wal", walBefore, 0o600); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := NewSQLiteWeightReader(ctx, path, CollectorConfig{}); err == nil {
+					t.Fatal("NewSQLiteWeightReader accepted a database file shorter than one page")
+				}
+				mainAfter, err := os.ReadFile(path)
+				if err != nil {
+					t.Fatalf("read short main after rejection: %v", err)
+				}
+				if !bytes.Equal(mainAfter, tc.main) {
+					t.Fatalf("short main after rejection is %d bytes, want %d unchanged", len(mainAfter), len(tc.main))
+				}
+				walAfter, err := os.ReadFile(path + "-wal")
+				if err != nil {
+					t.Fatalf("WAL beside the short main is gone: %v", err)
+				}
+				if !bytes.Equal(walAfter, walBefore) {
+					t.Fatal("WAL beside the short main changed")
+				}
+				// No -shm: the rejection came before any SQLite open.
+				if names := dirEntryNames(t, dir); !slices.Equal(names, []string{"short.db", "short.db-wal"}) {
+					t.Fatalf("directory after rejection = %v, want only short.db and short.db-wal", names)
+				}
+			})
 		}
 	})
 
@@ -548,28 +568,82 @@ func TestSQLiteWeightReaderRejectionKeepsMainAndWAL(t *testing.T) {
 // keep a reader connection open. Leaving WAL mode needs exclusive access, so a
 // leaked connection makes the writer's journal_mode change fail as locked.
 func TestSQLiteWeightReaderClosesHandleOnRejection(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		setup   string
+		wantErr string
+	}{
+		// currentSchemaVersion returns 0: the version-mismatch branch.
+		{"unmigrated", `CREATE TABLE existing (value TEXT)`, "version 0, want 1"},
+		// The version table lacks its version column, so
+		// currentSchemaVersion fails: the schema-query error branch.
+		{"unreadable version", `CREATE TABLE feedback_schema_version (other INTEGER)`, "query schema version"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := t.Context()
+			path := filepath.Join(t.TempDir(), "rejected.db")
+			u := url.URL{Scheme: "file", Path: path, RawQuery: "_pragma=busy_timeout(0)"}
+			w, err := sql.Open("sqlite", u.String())
+			if err != nil {
+				t.Fatal(err)
+			}
+			w.SetMaxOpenConns(1)
+			t.Cleanup(func() { _ = w.Close() })
+			for _, q := range []string{`PRAGMA journal_mode=WAL`, tc.setup} {
+				if _, err := w.ExecContext(ctx, q); err != nil {
+					t.Fatalf("%s: %v", q, err)
+				}
+			}
+			_, err = NewSQLiteWeightReader(ctx, path, CollectorConfig{})
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("NewSQLiteWeightReader error = %v, want rejection containing %q", err, tc.wantErr)
+			}
+			var mode string
+			if err := w.QueryRowContext(ctx, `PRAGMA journal_mode=DELETE`).Scan(&mode); err != nil {
+				t.Fatalf("leave WAL after rejection: %v", err)
+			}
+			if mode != "delete" {
+				t.Fatalf("journal_mode after rejection = %q, want delete", mode)
+			}
+		})
+	}
+}
+
+// TestSQLiteWeightReaderResolvesRelativePath: a relative path must open the
+// file in the working directory rather than render as a file://name URI,
+// which SQLite rejects as an authority.
+func TestSQLiteWeightReaderResolvesRelativePath(t *testing.T) {
 	ctx := t.Context()
-	path := filepath.Join(t.TempDir(), "unmigrated.db")
-	u := url.URL{Scheme: "file", Path: path, RawQuery: "_pragma=busy_timeout(0)"}
-	w, err := sql.Open("sqlite", u.String())
+	dir := t.TempDir()
+	w, err := sql.Open("sqlite", filepath.Join(dir, "rel.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	w.SetMaxOpenConns(1)
-	t.Cleanup(func() { _ = w.Close() })
-	for _, q := range []string{`PRAGMA journal_mode=WAL`, `CREATE TABLE existing (value TEXT)`} {
-		if _, err := w.ExecContext(ctx, q); err != nil {
-			t.Fatalf("%s: %v", q, err)
+	if _, err := NewSignalStore(ctx, w); err != nil {
+		t.Fatalf("NewSignalStore: %v", err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(dir)
+	for _, name := range []string{"rel.db", "./rel.db"} {
+		reader, err := NewSQLiteWeightReader(ctx, name, CollectorConfig{})
+		if err != nil {
+			t.Fatalf("NewSQLiteWeightReader(%q): %v", name, err)
+		}
+		if _, err := reader.WeightsBatch(ctx, []string{"chunk"}); err != nil {
+			t.Fatalf("WeightsBatch via %q: %v", name, err)
+		}
+		if err := reader.Close(); err != nil {
+			t.Fatalf("Close via %q: %v", name, err)
 		}
 	}
-	if _, err := NewSQLiteWeightReader(ctx, path, CollectorConfig{}); err == nil {
-		t.Fatal("NewSQLiteWeightReader accepted an unmigrated database")
-	}
-	var mode string
-	if err := w.QueryRowContext(ctx, `PRAGMA journal_mode=DELETE`).Scan(&mode); err != nil {
-		t.Fatalf("leave WAL after rejection: %v", err)
-	}
-	if mode != "delete" {
-		t.Fatalf("journal_mode after rejection = %q, want delete", mode)
+}
+
+func TestSQLiteWeightReaderRejectsNonRegularFile(t *testing.T) {
+	dir := t.TempDir()
+	_, err := NewSQLiteWeightReader(t.Context(), dir, CollectorConfig{})
+	if err == nil || !strings.Contains(err.Error(), "not a regular file") {
+		t.Fatalf("NewSQLiteWeightReader(directory) error = %v, want not a regular file", err)
 	}
 }

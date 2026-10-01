@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"path/filepath"
 	"sync"
 
 	_ "modernc.org/sqlite"
@@ -80,29 +81,44 @@ type SQLiteWeightReader struct {
 
 // NewSQLiteWeightReader opens an existing migrated feedback database read-only
 // and validates its schema on the handle that then serves reads, so the check
-// sees committed WAL pages under SQLite's locks. It never writes or deletes the
-// main file or an existing WAL, and never changes schema or data. Like any
-// read-only SQLite connection, it may create the database's coordination
-// sidecars, a -shm file and an empty -wal when a WAL-mode database has none,
-// including beside a database it then rejects. A WAL-mode database whose
-// sidecars can be neither opened nor created fails to open.
+// sees committed WAL pages under SQLite's locks. A relative dbPath is resolved
+// against the working directory. A path that is not a regular file, or a file
+// smaller than one SQLite page, is rejected before any SQLite open. It never
+// writes or deletes the main file or an existing WAL, and never changes schema
+// or data, with one exception normal operation never triggers: if the main
+// file shrinks below one page between the size check and the open, SQLite may
+// delete the WAL beside it. Like any read-only SQLite connection, it may
+// create the database's coordination sidecars, a -shm file and an empty -wal
+// when a WAL-mode database has none, including beside a database it then
+// rejects. A WAL-mode database whose sidecars can be neither opened nor
+// created fails to open.
 func NewSQLiteWeightReader(ctx context.Context, dbPath string, config CollectorConfig) (*SQLiteWeightReader, error) {
 	if dbPath == "" {
 		return nil, fmt.Errorf("feedback: open SQLite weight reader: empty path")
 	}
+	// A relative path would render as file://name, which SQLite rejects as a
+	// URI authority.
+	abs, err := filepath.Abs(dbPath)
+	if err != nil {
+		return nil, fmt.Errorf("feedback: open SQLite weight reader: resolve path %q: %w", dbPath, err)
+	}
 	want := migrations[len(migrations)-1].version
-	// SQLite deletes a WAL that sits beside an empty main file when it opens
-	// the database, and an empty file holds no schema, so reject it first.
-	// The stat-to-open window is accepted: a non-empty main never shrinks to
-	// 0 bytes in normal operation.
-	info, err := os.Stat(dbPath)
+	info, err := os.Stat(abs)
 	if err != nil {
 		return nil, fmt.Errorf("feedback: open SQLite weight reader: %w", err)
 	}
-	if info.Size() == 0 {
-		return nil, fmt.Errorf("feedback: validate SQLite weight reader schema: empty database file, want version %d", want)
+	if !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("feedback: open SQLite weight reader %q: not a regular file", abs)
 	}
-	u := url.URL{Scheme: "file", Path: dbPath}
+	// SQLite's minimum page size is 512 bytes, so a shorter file holds no
+	// schema. Reject it before any SQLite open: SQLite deletes the WAL beside a
+	// main file it sizes at zero pages, and modernc's unix VFS reports a 1-byte
+	// file as 0 bytes (SQLite ticket #3260). The stat-to-open window is
+	// accepted: a main file never shrinks below one page in normal operation.
+	if info.Size() < 512 {
+		return nil, fmt.Errorf("feedback: validate SQLite weight reader schema: database file is %d bytes, smaller than one SQLite page; want version %d", info.Size(), want)
+	}
+	u := url.URL{Scheme: "file", Path: abs}
 	q := u.Query()
 	q.Set("mode", "ro")
 	u.RawQuery = q.Encode()
@@ -113,7 +129,7 @@ func NewSQLiteWeightReader(ctx context.Context, dbPath string, config CollectorC
 	db.SetMaxOpenConns(1)
 	if err := db.PingContext(ctx); err != nil {
 		_ = db.Close()
-		return nil, fmt.Errorf("feedback: open SQLite weight reader %q: %w", dbPath, err)
+		return nil, fmt.Errorf("feedback: open SQLite weight reader %q: %w", abs, err)
 	}
 	version, err := currentSchemaVersion(ctx, db)
 	if err != nil {
