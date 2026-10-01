@@ -181,6 +181,9 @@ func validateTrustConfig(servers []Server, pins *PinStore) error {
 			return fmt.Errorf("mcpclient: duplicate server alias %q", s.Alias)
 		}
 		seen[s.Alias] = true
+		if err := validateSelection(s); err != nil {
+			return admissionFailure(s.Alias, "invalid_config", err)
+		}
 		if _, err := s.transport(); err != nil {
 			return admissionFailure(s.Alias, "invalid_config", err)
 		}
