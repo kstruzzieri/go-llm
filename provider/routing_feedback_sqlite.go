@@ -353,9 +353,13 @@ func (s *SQLiteFeedbackStore) runInTx(ctx context.Context, fn func(*sql.Tx) erro
 // deadline. modernc interrupts a statement when ctx expires, but SQLite's busy
 // handler keeps sleeping for up to busy_timeout regardless, so a contended
 // write could outlast the deadline by the whole timeout. The store pins a
-// connection and lowers its busy_timeout to the time left before the two
-// statements that can wait for a lock (the first write and COMMIT), then
-// restores it. Time spent waiting for the connection is already spent.
+// connection, lowers its busy_timeout to the time left before BEGIN (which
+// takes the write lock itself under _txlock=immediate or exclusive), refreshes
+// the cap before COMMIT, and restores it afterward. A statement in fn that must
+// escalate its lock later (for example a rollback-journal cache spill) waits
+// with the cap computed before BEGIN. Time spent waiting for a pooled
+// connection comes out of the budget, but opening a new one runs the DSN
+// pragmas under the DSN's own busy_timeout.
 //
 // The transaction runs under context.WithoutCancel so database/sql does not
 // roll it back concurrently when ctx expires; statements in fn still use ctx

@@ -1319,10 +1319,13 @@ func clampMs(duration time.Duration) int64 {
 // feedbackWriteTimeout bounds how long recordOutcomeFeedback will wait for
 // the store before giving up. Picked to be generous for an in-memory store
 // and survivable for a SQLite store under contention: SQLiteFeedbackStore
-// caps SQLite's busy wait to the time left on this deadline, so a locked
-// database costs about this long. The bound is a context deadline, not a
-// hard wall-clock limit; a store blocked outside a lock wait (for example on
-// a frozen filesystem) can still hold up the routed request.
+// caps SQLite's busy wait to the time left on this deadline, so a contended
+// feedback write costs about this long. The bound is a context deadline, not
+// a hard wall-clock limit. It does not cover a store blocked outside a lock
+// wait (for example on a frozen filesystem), a shared-cache database
+// (modernc's unlock_notify retry ignores ctx and busy_timeout), or the DSN
+// pragmas run when a new pooled connection opens. Feedback scoring reads
+// (Get, used when scoring is on) are not capped.
 //
 // Declared as a package-level var (not const) so tests can override it to
 // exercise the timeout path without burning real wall-clock seconds.
@@ -1333,9 +1336,9 @@ var feedbackWriteTimeout = 1 * time.Second
 // UseCase. The seam is observational, never load-bearing for routing;
 // errors do not bubble up to the caller. Uses a fresh context with a
 // bounded timeout (not the request ctx) so cancellation of the caller's
-// ctx does not cut short the feedback write, and so a contended store
-// gives up after about feedbackWriteTimeout (see feedbackWriteTimeout for
-// what that bound does not cover).
+// ctx does not cut short the feedback write, and so a contended feedback
+// write gives up after about feedbackWriteTimeout (see feedbackWriteTimeout
+// for what that bound does not cover).
 //
 // On non-nil store error: emits a once-logged warning via feedbackWarn /
 // feedbackLogger (set by buildPlan through setFeedbackTelemetry). Replaces
