@@ -1,10 +1,13 @@
 package mcpclient
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"strings"
 	"testing"
+
+	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
 func TestStdioServerCopiesCommand(t *testing.T) {
@@ -94,5 +97,90 @@ func TestValidateSelection(t *testing.T) {
 		if got != tt.want {
 			t.Errorf("validateSelection(%d names) = %q, want %q", len(tt.names), got, tt.want)
 		}
+	}
+}
+
+func TestSelectionMissingBlocksAlias(t *testing.T) {
+	pins := testPins(t)
+	s, done, _ := staticCatalogServer(t, "fs", &gomcp.Tool{Name: "read"})
+	m, w, err := Connect(context.Background(), Implementation{Name: "test"}, []Server{s.WithTools("read", "delete")}, ConnectOptions{Pins: pins})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = m.Close() })
+	waitOn(t, done, "selection_missing session close")
+	failure := admission(t, w)
+	if failure.Reason != "selection_missing" || len(failure.Names) != 1 || failure.Names[0] != "delete" {
+		t.Fatalf("failure = (%q, %q), want (selection_missing, [delete])", failure.Reason, failure.Names)
+	}
+	if got, want := failure.Error(), `server "fs": selection_missing: delete`; got != want {
+		t.Fatalf("Error() = %q, want %q", got, want)
+	}
+	if len(m.Tools()) != 0 || len(m.sessions) != 0 {
+		t.Fatalf("blocked alias published %d tools and %d sessions, want 0 and 0", len(m.Tools()), len(m.sessions))
+	}
+	if len(w) != 2 || !strings.Contains(w[0].Error(), "first pin") {
+		t.Fatalf("warnings = %v, want the first-pin notice then the failure", w)
+	}
+	if !bytes.Contains(pinBytes(t, pins, "fs"), []byte(`"mcp__fs__read"`)) {
+		t.Fatal("full-catalog pin was not created before selection applied")
+	}
+}
+
+// closeErrTransport makes the client connection's Close report err after
+// really closing, to prove cleanup errors cannot rename a refusal.
+type closeErrTransport struct {
+	gomcp.Transport
+	err error
+}
+
+func (t closeErrTransport) Connect(ctx context.Context) (gomcp.Connection, error) {
+	c, err := t.Transport.Connect(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return closeErrConn{Connection: c, err: t.err}, nil
+}
+
+type closeErrConn struct {
+	gomcp.Connection
+	err error
+}
+
+func (c closeErrConn) Close() error {
+	_ = c.Connection.Close()
+	return c.err
+}
+
+func TestSelectionMissingSurvivesCloseError(t *testing.T) {
+	s, _, _ := staticCatalogServer(t, "fs", &gomcp.Tool{Name: "read"})
+	s.tr = closeErrTransport{Transport: s.tr, err: context.Canceled}
+	m, w, err := Connect(context.Background(), Implementation{Name: "test"}, []Server{s.WithTools("delete")}, ConnectOptions{Pins: testPins(t)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = m.Close() })
+	failure := admission(t, w)
+	if !errors.Is(failure, context.Canceled) {
+		t.Fatalf("fixture: session.Close did not surface the connection's close error: %v", failure)
+	}
+	if failure.Reason != "selection_missing" {
+		t.Fatalf("reason = %q, want selection_missing despite a canceled close", failure.Reason)
+	}
+}
+
+func TestExplicitEmptySelectionExposesNothing(t *testing.T) {
+	pins := testPins(t)
+	s, _, _ := staticCatalogServer(t, "fs", &gomcp.Tool{Name: "read"})
+	m, w, err := Connect(context.Background(), Implementation{Name: "test"}, []Server{s.WithTools()}, ConnectOptions{Pins: pins})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = m.Close() })
+	if len(m.Tools()) != 0 || len(m.sessions) != 1 || len(w) != 1 {
+		t.Fatalf("explicit-empty = (%d tools, %d sessions, %v), want (0, 1, [first-pin notice])", len(m.Tools()), len(m.sessions), w)
+	}
+	if !bytes.Contains(pinBytes(t, pins, "fs"), []byte(`"mcp__fs__read"`)) {
+		t.Fatal("explicit-empty selection skipped the full-catalog pin")
 	}
 }

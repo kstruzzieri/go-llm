@@ -19,11 +19,17 @@ type AdmissionError struct {
 	PinnedDigest    string
 	CandidateDigest string
 	Diff            CatalogDiff
-	cause           error
+	// Names lists validated names relevant to Reason (for selection_missing,
+	// the selected tools absent from the admitted catalog). Never remote prose.
+	Names []string
+	cause error
 }
 
 func (e *AdmissionError) Error() string {
 	text := fmt.Sprintf("server %q: %s", e.Alias, e.Reason)
+	if len(e.Names) > 0 {
+		text += ": " + strings.Join(e.Names, ", ")
+	}
 	if e.PinnedDigest != "" {
 		text += "; pinned " + e.PinnedDigest
 	}
