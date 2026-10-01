@@ -49,6 +49,18 @@ func (r *recordingScript) Chat(ctx context.Context, req provider.ChatRequest, on
 	return r.scriptCaller.Chat(ctx, req, onToken)
 }
 
+// recordingCaller keeps every request a wrapped caller receives, including
+// the ones it answers with an error.
+type recordingCaller struct {
+	next agent.ModelCaller
+	reqs []provider.ChatRequest
+}
+
+func (r *recordingCaller) Chat(ctx context.Context, req provider.ChatRequest, onToken func(provider.ChatResponse) error) (agent.ModelResult, error) {
+	r.reqs = append(r.reqs, req)
+	return r.next.Chat(ctx, req, onToken)
+}
+
 // assertCredentialBlocked checks a run whose first call read .env: blocked,
 // never invoked, invariant score only (read_file is not exec-class).
 func assertCredentialBlocked(t *testing.T, res agent.Result, err error) {

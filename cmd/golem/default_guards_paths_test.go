@@ -3,7 +3,6 @@ package main
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"io"
 	"os"
@@ -14,7 +13,6 @@ import (
 	"github.com/kstruzzieri/go-llm/agent"
 	"github.com/kstruzzieri/go-llm/agentflow"
 	golemruntime "github.com/kstruzzieri/go-llm/golem"
-	"github.com/kstruzzieri/go-llm/provider"
 	"github.com/kstruzzieri/go-llm/recipe"
 )
 
@@ -222,33 +220,15 @@ func TestDefaultGuardsPath_ParallelWorker(t *testing.T) {
 func TestDefaultGuardsPath_DispatchChild(t *testing.T) {
 	root := t.TempDir()
 	writeEnvSentinel(t, root)
-	readers, err := buildTools(root, nil)
-	if err != nil {
-		t.Fatal(err)
+	child := &recordingScript{scriptCaller: scriptCaller{responses: []agent.ModelResult{
+		routed(toolStep("c1", "read_file", `{"path":".env"}`)),
+		routed(answerStep("done")),
+	}}}
+	out, env := dispatchOnce(t, child, root)
+	if out.IsError {
+		t.Fatalf("Invoke = %+v, want no error", out)
 	}
-	route := &provider.RouteOutcome{ActualModel: provider.ModelKey{Provider: "local", Model: "fast"}}
-	read := toolStep("c1", "read_file", `{"path":".env"}`)
-	read.RouteOutcome = route
-	answer := answerStep("done")
-	answer.RouteOutcome = route
-	child := &recordingScript{scriptCaller: scriptCaller{responses: []agent.ModelResult{read, answer}}}
-	d, err := newDispatchTool(child, flags{dispatch: true}, agent.Budget{}, dispatchFanout{maxConcurrent: 1}, nil, readers, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	raw, err := json.Marshal(map[string][]string{"tasks": {"read the env"}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	out, err := d.Invoke(context.Background(), raw)
-	if err != nil || out.IsError {
-		t.Fatalf("Invoke = %+v, %v", out, err)
-	}
-	var env dispatchTestEnvelope
-	if err := json.Unmarshal([]byte(out.Content), &env); err != nil {
-		t.Fatal(err)
-	}
-	if len(env.Results) != 1 || env.Results[0].RiskScore != 30 || env.Results[0].Error != "" || env.Results[0].Summary != "done" {
+	if r := env.Results[0]; r.RiskScore != 30 || r.Error != "" || r.Summary != "done" {
 		t.Fatalf("envelope = %s", out.Content)
 	}
 	assertBlockedObservationSeen(t, child.reqs, credentialBlocked)

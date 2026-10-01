@@ -26,21 +26,9 @@ func routed(r agent.ModelResult) agent.ModelResult {
 	return r
 }
 
-// recordingCaller keeps every request a wrapped caller receives, including
-// the ones it answers with an error.
-type recordingCaller struct {
-	next agent.ModelCaller
-	reqs []provider.ChatRequest
-}
-
-func (r *recordingCaller) Chat(ctx context.Context, req provider.ChatRequest, onToken func(provider.ChatResponse) error) (agent.ModelResult, error) {
-	r.reqs = append(r.reqs, req)
-	return r.next.Chat(ctx, req, onToken)
-}
-
 // writeCredentialFiles creates one real file behind each credential path the
-// invariant covers, all holding the sentinel, so an unguarded read succeeds
-// and the sentinel would reach the child's next request.
+// soft-stop script reads, all holding the sentinel, so an unguarded read
+// succeeds and the sentinel would reach the child's next request.
 func writeCredentialFiles(t *testing.T, root string) {
 	t.Helper()
 	writeEnvSentinel(t, root)
@@ -66,8 +54,9 @@ func requireBlockedObservation(t *testing.T, req provider.ChatRequest, id string
 }
 
 // dispatchOnce invokes an unscoped single-task dispatch over root directly
-// (no parent run) and returns the tool result with its decoded envelope, which
-// is checked to hold exactly one child result.
+// (no parent run) and returns the tool result with its decoded envelope. The
+// envelope is checked to hold exactly one child result and never to carry the
+// credential sentinel.
 func dispatchOnce(t *testing.T, child agent.ModelCaller, root string) (agent.ToolResult, dispatchTestEnvelope) {
 	t.Helper()
 	readers, err := buildTools(root, nil)
@@ -85,6 +74,9 @@ func dispatchOnce(t *testing.T, child agent.ModelCaller, root string) (agent.Too
 	out, err := d.Invoke(context.Background(), raw)
 	if err != nil {
 		t.Fatalf("Invoke: %v", err)
+	}
+	if strings.Contains(out.Content, envSentinelToken) {
+		t.Fatalf("credential sentinel reached the parent-facing envelope: %s", out.Content)
 	}
 	var env dispatchTestEnvelope
 	if err := json.Unmarshal([]byte(out.Content), &env); err != nil {
@@ -158,8 +150,10 @@ func TestDefaultGuardsChildErrorKeepsRisk(t *testing.T) {
 	if r.StopReason != "error" || r.Model != childModel || r.RiskScore != 30 {
 		t.Fatalf("envelope = %s, want stop_reason error, model %s, risk retained at 30", out.Content, childModel)
 	}
-	if r.Error != "provider exploded" {
-		t.Fatalf("error = %q, want the provider error verbatim", r.Error)
+	// Contains, not equality: whether the orchestrator wraps a provider error
+	// is its own business and says nothing about the retained risk (#575).
+	if !strings.Contains(r.Error, "provider exploded") {
+		t.Fatalf("error = %q, want it to carry the provider error", r.Error)
 	}
 	if want := "Partial result before error: " + credentialBlocked; r.Summary != want {
 		t.Fatalf("summary = %q, want %q", r.Summary, want)
@@ -170,9 +164,10 @@ func TestDefaultGuardsChildErrorKeepsRisk(t *testing.T) {
 // child, an out-of-scope .env read is refused by the invariant before the
 // native reader, so the child scores 30 and the parent reports no native
 // denial. The control rows make that non-blind: a native refusal of a
-// non-credential path IS reported by the parent (score 10, one finding), and a
-// child that does both reports only the native one, so the child's score is
-// not added to the parent's and the blocked read is not counted as a request.
+// non-credential path IS reported by the parent (score 10, one finding), and
+// when the child does both, the parent reports only the native refusal, so the
+// child's score is not added to the parent's and the blocked read is not
+// counted as a request.
 func TestDefaultGuardsBlockedReadNeverReachesNativeCounter(t *testing.T) {
 	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" {
 		t.Skip("native scoped dispatch is unsupported")
@@ -228,11 +223,19 @@ func TestDefaultGuardsBlockedReadNeverReachesNativeCounter(t *testing.T) {
 				t.Fatalf("parent call = %+v, want an invoked, successful dispatch", c)
 			}
 
-			// Neither protected file may have been read into the child's context.
-			for _, req := range child.reqs {
-				for _, m := range req.Messages {
-					if strings.Contains(m.Content, notesMarker) {
-						t.Fatalf("out-of-scope file reached the child: %q", m.Content)
+			// Neither protected file may have been read into the child's context,
+			// whatever the row, nor surfaced in the parent's own messages.
+			for _, token := range []string{envSentinelToken, notesMarker} {
+				for _, req := range child.reqs {
+					for _, m := range req.Messages {
+						if strings.Contains(m.Content, token) {
+							t.Fatalf("protected file content %q reached the child: %q", token, m.Content)
+						}
+					}
+				}
+				for _, m := range res.Messages {
+					if strings.Contains(m.Content, token) {
+						t.Fatalf("protected file content %q reached the parent: %q", token, m.Content)
 					}
 				}
 			}
