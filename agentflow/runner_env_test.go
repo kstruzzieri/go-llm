@@ -1,7 +1,14 @@
 package agentflow
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"os"
+	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -181,5 +188,149 @@ func TestExecRunnerAllowEnvIsAtomic(t *testing.T) {
 	}
 	if !reflect.DeepEqual(r.allowed, []string{"GOPRIVATE"}) {
 		t.Fatalf("allowed = %v, want only the first batch", r.allowed)
+	}
+}
+
+const (
+	envCanaryName   = "GO_LLM_577_CANARY"
+	envCanaryValue  = "sk-canary-577-must-not-reach-children"
+	envApprovedName = "GO_LLM_577_APPROVED"
+)
+
+// envProbeReport is what the probe child writes: names, a canary flag and a
+// digest, never a value, so a failing test cannot print a secret.
+type envProbeReport struct {
+	Names          []string `json:"names"`
+	Canary         bool     `json:"canary"`
+	ApprovedSHA256 string   `json:"approved_sha256"`
+}
+
+// TestEnvProbeHelper is not a test. Re-executed as `<test binary>
+// -test.run=^TestEnvProbeHelper$ -- envprobe <out>`, it writes an
+// envProbeReport to <out>. It is selected by argv rather than an environment
+// marker because the policy under test strips unknown variables.
+func TestEnvProbeHelper(t *testing.T) {
+	i := slices.Index(os.Args, "--")
+	if i < 0 || len(os.Args) != i+3 || os.Args[i+1] != "envprobe" {
+		return
+	}
+	report := envProbeReport{Names: []string{}}
+	for _, kv := range os.Environ() {
+		name, value, _ := strings.Cut(kv, "=")
+		report.Names = append(report.Names, name)
+		if name == envCanaryName || strings.Contains(value, envCanaryValue) {
+			report.Canary = true
+		}
+		if name == envApprovedName {
+			sum := sha256.Sum256([]byte(value))
+			report.ApprovedSHA256 = hex.EncodeToString(sum[:])
+		}
+	}
+	slices.Sort(report.Names)
+	data, err := json.Marshal(report)
+	if err != nil {
+		os.Exit(3)
+	}
+	if err := os.WriteFile(os.Args[i+2], data, 0o600); err != nil {
+		os.Exit(4)
+	}
+	os.Exit(0)
+}
+
+// envProbeArgv is the argv, after the test binary, that runs the probe.
+func envProbeArgv(out string) []string {
+	return []string{"-test.run=^TestEnvProbeHelper$", "--", "envprobe", out}
+}
+
+func readEnvProbe(t *testing.T, out string) envProbeReport {
+	t.Helper()
+	data, err := os.ReadFile(out)
+	if err != nil {
+		t.Fatalf("probe report: %v", err)
+	}
+	var report envProbeReport
+	if err := json.Unmarshal(data, &report); err != nil {
+		t.Fatalf("probe report: %v", err)
+	}
+	return report
+}
+
+// runEnvProbe swaps only the executable and argv of a constructed runner, so
+// the constructor's environment wiring is what gets exercised.
+func runEnvProbe(t *testing.T, r *ExecRunner) envProbeReport {
+	t.Helper()
+	out := filepath.Join(t.TempDir(), "probe.json")
+	r.bin, r.prefix = os.Args[0], envProbeArgv(out)
+	_, stderr, exit, err := r.Run(t.Context(), nil, nil)
+	if err != nil || exit != 0 {
+		t.Fatalf("probe exit=%d err=%v stderr=%q", exit, err, stderr)
+	}
+	return readEnvProbe(t, out)
+}
+
+func TestExecRunnerConstructorsDropParentEnvironment(t *testing.T) {
+	t.Setenv(envCanaryName, envCanaryValue)
+	t.Setenv("OPENAI_API_KEY", envCanaryValue)
+	t.Setenv("HOME", t.TempDir())
+	checkout := writeSourceCheckoutFixture(t)
+	for _, tc := range []struct {
+		name      string
+		runner    *ExecRunner
+		wantNames []string
+	}{
+		{name: "installed", runner: NewExecRunner(t.TempDir()), wantNames: []string{"HOME", "PATH"}},
+		{name: "source", runner: NewSrcExecRunner(t.TempDir(), checkout), wantNames: []string{"HOME", "PATH", "PYTHONPATH"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			before := os.Environ()
+			report := runEnvProbe(t, tc.runner)
+			if report.Canary || slices.Contains(report.Names, "OPENAI_API_KEY") {
+				t.Fatalf("parent secret reached the child; names=%v", report.Names)
+			}
+			for _, name := range tc.wantNames {
+				if !slices.Contains(report.Names, name) {
+					t.Fatalf("names=%v, want %s", report.Names, name)
+				}
+			}
+			if !reflect.DeepEqual(os.Environ(), before) {
+				t.Fatal("Run changed the parent environment")
+			}
+		})
+	}
+}
+
+func TestExecRunnerReadsApprovedValuesAtEachLaunch(t *testing.T) {
+	r := NewExecRunner(t.TempDir())
+	if err := r.AllowEnv(envApprovedName); err != nil {
+		t.Fatal(err)
+	}
+	for _, value := range []string{"first", "second"} {
+		t.Setenv(envApprovedName, value)
+		sum := sha256.Sum256([]byte(value))
+		if got := runEnvProbe(t, r).ApprovedSHA256; got != hex.EncodeToString(sum[:]) {
+			t.Fatalf("approved digest = %s, want the digest of the value set before this launch", got)
+		}
+	}
+	if err := os.Unsetenv(envApprovedName); err != nil {
+		t.Fatal(err)
+	}
+	out := filepath.Join(t.TempDir(), "probe.json")
+	r.prefix = envProbeArgv(out)
+	stdout, stderr, exit, err := r.Run(t.Context(), nil, nil)
+	if err == nil || err.Error() != `agentflow: approved environment variable "GO_LLM_577_APPROVED" is not set` ||
+		stdout != nil || stderr != nil || exit != 0 {
+		t.Fatalf("unset approved name: stdout=%q stderr=%q exit=%d err=%v", stdout, stderr, exit, err)
+	}
+	if _, statErr := os.Stat(out); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("probe launched despite an unset approved name: %v", statErr)
+	}
+}
+
+func TestExecRunnerStartupFailureReturnsError(t *testing.T) {
+	r := NewExecRunner(t.TempDir())
+	r.bin = filepath.Join(t.TempDir(), "missing-agentflow")
+	stdout, stderr, exit, err := r.Run(t.Context(), []string{"--version"}, nil)
+	if err == nil || len(stdout) != 0 || len(stderr) != 0 || exit != 0 {
+		t.Fatalf("stdout=%q stderr=%q exit=%d err=%v, want a launch error", stdout, stderr, exit, err)
 	}
 }

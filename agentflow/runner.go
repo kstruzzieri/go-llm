@@ -19,6 +19,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 )
@@ -33,7 +34,8 @@ type Runner interface {
 // ExecRunner runs the real agentflow CLI. Two modes: the installed `agentflow`
 // binary, or `python3 -P -m agentflow` with PYTHONPATH pointed at a checkout (for
 // environments where the console script is not installed). argv is always built
-// explicitly; no shell string is ever parsed.
+// explicitly; no shell string is ever parsed. The child environment is built
+// from scratch for every launch (see buildChildEnv).
 type ExecRunner struct {
 	bin     string
 	prefix  []string // e.g. {"-P","-m","agentflow"} for src mode
@@ -116,9 +118,9 @@ func (r *ExecRunner) AllowEnv(names ...string) error {
 	return nil
 }
 
-// commandFor returns the concrete (bin, argv, extraEnv) for a subcommand call.
-// Split out for testability.
-func (r *ExecRunner) commandFor(args []string) (bin string, argv []string, env []string) {
+// commandFor returns the concrete (bin, argv, owned) for a subcommand call,
+// where owned is the runner-owned NAME=VALUE entries. Split out for testability.
+func (r *ExecRunner) commandFor(args []string) (bin string, argv []string, owned []string) {
 	argv = append(append([]string(nil), r.prefix...), args...)
 	return r.bin, argv, r.env
 }
@@ -127,21 +129,23 @@ func (r *ExecRunner) Run(ctx context.Context, args []string, stdin []byte) ([]by
 	if r.initErr != nil {
 		return nil, nil, 0, r.initErr
 	}
-	bin, argv, extraEnv := r.commandFor(args)
+	bin, argv, owned := r.commandFor(args)
+	env, err := buildChildEnv(childEnvPolicyFor(runtime.GOOS, r.allowed, owned), os.LookupEnv)
+	if err != nil {
+		return nil, nil, 0, err
+	}
 	cmd := exec.CommandContext(ctx, bin, argv...)
 	configureProcessCancellation(cmd)
 	cmd.WaitDelay = 5 * time.Second
 	cmd.Dir = r.dir
-	if len(extraEnv) > 0 {
-		cmd.Env = append(os.Environ(), extraEnv...)
-	}
+	cmd.Env = env // complete and never nil: nothing is inherited implicitly
 	if len(stdin) > 0 {
 		cmd.Stdin = bytes.NewReader(stdin)
 	}
 	var outBuf, errBuf bytes.Buffer
 	cmd.Stdout = &outBuf
 	cmd.Stderr = &errBuf
-	err := cmd.Run()
+	err = cmd.Run()
 	exit := 0
 	if ee, ok := err.(*exec.ExitError); ok {
 		exit = ee.ExitCode()

@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -166,5 +167,38 @@ func TestNewSrcExecRunnerKeepsUnexpectedStatError(t *testing.T) {
 	_, _, _, err := NewSrcExecRunner(t.TempDir(), checkout).Run(t.Context(), nil, nil)
 	if !errors.Is(err, os.ErrPermission) || strings.Contains(err.Error(), "no src/agentflow package") {
 		t.Fatalf("err = %v, want the permission error, not a missing package", err)
+	}
+}
+
+// TestExecRunnerEmptyPolicyHelper is not a test. Re-executed as `<test
+// binary> -test.run=^TestExecRunnerEmptyPolicyHelper$ -- emptypolicy <out>`
+// with an environment that holds only the canary, it runs the env probe
+// through an installed-mode runner whose policy selects nothing.
+func TestExecRunnerEmptyPolicyHelper(t *testing.T) {
+	i := slices.Index(os.Args, "--")
+	if i < 0 || len(os.Args) != i+3 || os.Args[i+1] != "emptypolicy" {
+		return
+	}
+	r := NewExecRunner("/")
+	r.bin, r.prefix = os.Args[0], envProbeArgv(os.Args[i+2])
+	if _, _, exit, err := r.Run(context.Background(), nil, nil); err != nil || exit != 0 {
+		os.Exit(5)
+	}
+	os.Exit(0)
+}
+
+// TestExecRunnerEmptyPolicyNeverInherits catches a regression to
+// `if len(env) > 0 { cmd.Env = env }`: with no baseline variable set, the
+// policy is empty, and an empty environment must not fall back to inheritance.
+func TestExecRunnerEmptyPolicyNeverInherits(t *testing.T) {
+	out := filepath.Join(t.TempDir(), "probe.json")
+	cmd := exec.Command(os.Args[0], "-test.run=^TestExecRunnerEmptyPolicyHelper$", "--", "emptypolicy", out)
+	cmd.Env = []string{envCanaryName + "=" + envCanaryValue}
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("helper: %v: %s", err, output)
+	}
+	report := readEnvProbe(t, out)
+	if report.Canary || len(report.Names) != 0 {
+		t.Fatalf("empty-policy child names=%v canary=%v, want none", report.Names, report.Canary)
 	}
 }
