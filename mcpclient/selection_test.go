@@ -192,16 +192,15 @@ func TestExplicitEmptySelectionExposesNothing(t *testing.T) {
 
 func TestSelectionMissingNamesKeepSelectionOrder(t *testing.T) {
 	s, _, _ := staticCatalogServer(t, "fs", &gomcp.Tool{Name: "read"})
-	m, w, err := Connect(context.Background(), Implementation{Name: "test"}, []Server{s.WithTools("zeta", "read", "alpha", "mu", "beta", "omega", "kappa", "delta", "sigma", "gamma")}, ConnectOptions{Pins: testPins(t)})
+	m, w, err := Connect(context.Background(), Implementation{Name: "test"}, []Server{s.WithTools("zeta", "read", "alpha", "mu", "beta", "omega", "kappa", "delta", "sigma", "gamma", "eta", "iota", "nu", "xi", "pi", "rho", "tau", "chi")}, ConnectOptions{Pins: testPins(t)})
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = m.Close() })
 	failure := admission(t, w)
-	// Nine missing names: more than one map group, so any map-order iteration
-	// reorders them with near certainty.
-	wantNames := []string{"zeta", "alpha", "mu", "beta", "omega", "kappa", "delta", "sigma", "gamma"}
-	if got, want := failure.Error(), `server "fs": selection_missing: zeta, alpha, mu, beta, omega, kappa, delta, sigma, gamma`; got != want || !slices.Equal(failure.Names, wantNames) {
+	// Seventeen missing names span four map groups, so an implementation that iterates a map cannot reproduce selection order by chance (nine names still did about 1% of the time).
+	wantNames := []string{"zeta", "alpha", "mu", "beta", "omega", "kappa", "delta", "sigma", "gamma", "eta", "iota", "nu", "xi", "pi", "rho", "tau", "chi"}
+	if got, want := failure.Error(), `server "fs": selection_missing: zeta, alpha, mu, beta, omega, kappa, delta, sigma, gamma, eta, iota, nu, xi, pi, rho, tau, chi`; got != want || !slices.Equal(failure.Names, wantNames) {
 		t.Fatalf("failure = (%q, %q), want (%q, %q): selection order, not sorted or map order", got, failure.Names, want, wantNames)
 	}
 }
@@ -258,11 +257,11 @@ func TestSelectionKeepsFullCatalogChangeDetection(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = m.Close() })
-	waitOn(t, done, "changed-hidden-tool session close")
 	failure := admission(t, w)
 	if failure.Reason != "catalog_changed" || failure.Diff.String() != "changed: mcp__fs__write (description)" || len(m.Tools()) != 0 {
 		t.Fatalf("hidden change = (%q, %q, %d tools), want (catalog_changed, changed: mcp__fs__write (description), 0)", failure.Reason, failure.Diff.String(), len(m.Tools()))
 	}
+	waitOn(t, done, "changed-hidden-tool session close")
 }
 
 func TestSelectionKeepsServerListingOrder(t *testing.T) {
@@ -297,8 +296,11 @@ func TestSelectedToolsKeepPerCallApproval(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = m.Close() })
 	tools := m.Tools()
-	if len(tools) != 1 || tools[0].Effect().Approval != agent.ApprovalAlways {
-		t.Fatalf("selected read-only-hinted tool effect = %+v, want ApprovalAlways", tools)
+	if len(tools) != 1 {
+		t.Fatalf("tools = %q, want [mcp__fs__read]", toolNames(tools))
+	}
+	if got := tools[0].Effect(); got.Approval != agent.ApprovalAlways {
+		t.Fatalf("selected read-only-hinted tool effect = %+v, want Approval ApprovalAlways", got)
 	}
 	plan, err := tools[0].(agent.PlanningTool).Plan(context.Background(), json.RawMessage(`{}`))
 	if err != nil {
