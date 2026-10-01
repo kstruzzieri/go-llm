@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"net/url"
+	"os"
 	"sync"
 
 	_ "modernc.org/sqlite"
@@ -77,42 +78,32 @@ type SQLiteWeightReader struct {
 	reader *WeightReader
 }
 
-// NewSQLiteWeightReader opens an existing migrated feedback database read-only.
+// NewSQLiteWeightReader opens an existing migrated feedback database read-only
+// and validates its schema on the connection that then serves reads, so the
+// check sees committed WAL pages under SQLite's locks. It never writes or
+// deletes the main file or an existing WAL. Like any read-only SQLite
+// connection, it may create the database's coordination sidecars, a -shm file
+// and an empty -wal when a WAL-mode database has none, including beside a
+// database it then rejects. A WAL-mode database whose sidecars can be neither
+// opened nor created fails to open.
 func NewSQLiteWeightReader(ctx context.Context, dbPath string, config CollectorConfig) (*SQLiteWeightReader, error) {
 	if dbPath == "" {
 		return nil, fmt.Errorf("feedback: open SQLite weight reader: empty path")
+	}
+	want := migrations[len(migrations)-1].version
+	// SQLite deletes a WAL that sits beside an empty main file when it opens
+	// the database, and an empty file holds no schema, so reject it first.
+	info, err := os.Stat(dbPath)
+	if err != nil {
+		return nil, fmt.Errorf("feedback: open SQLite weight reader %q: %w", dbPath, err)
+	}
+	if info.Size() == 0 {
+		return nil, fmt.Errorf("feedback: validate SQLite weight reader schema: empty database file, want version %d", want)
 	}
 	u := url.URL{Scheme: "file", Path: dbPath}
 	q := u.Query()
 	q.Set("mode", "ro")
 	u.RawQuery = q.Encode()
-
-	preflightURL := u
-	preflightQuery := preflightURL.Query()
-	preflightQuery.Set("immutable", "1")
-	preflightURL.RawQuery = preflightQuery.Encode()
-	preflight, err := sql.Open("sqlite", preflightURL.String())
-	if err != nil {
-		return nil, fmt.Errorf("feedback: open SQLite weight reader preflight: %w", err)
-	}
-	preflight.SetMaxOpenConns(1)
-	if err := preflight.PingContext(ctx); err != nil {
-		_ = preflight.Close()
-		return nil, fmt.Errorf("feedback: open SQLite weight reader preflight %q: %w", dbPath, err)
-	}
-	version, err := currentSchemaVersion(ctx, preflight)
-	if err != nil {
-		_ = preflight.Close()
-		return nil, fmt.Errorf("feedback: validate SQLite weight reader schema: %w", err)
-	}
-	if want := migrations[len(migrations)-1].version; version != want {
-		_ = preflight.Close()
-		return nil, fmt.Errorf("feedback: validate SQLite weight reader schema: version %d, want %d", version, want)
-	}
-	if err := preflight.Close(); err != nil {
-		return nil, fmt.Errorf("feedback: close SQLite weight reader preflight: %w", err)
-	}
-
 	db, err := sql.Open("sqlite", u.String())
 	if err != nil {
 		return nil, fmt.Errorf("feedback: open SQLite weight reader: %w", err)
@@ -122,7 +113,15 @@ func NewSQLiteWeightReader(ctx context.Context, dbPath string, config CollectorC
 		_ = db.Close()
 		return nil, fmt.Errorf("feedback: open SQLite weight reader %q: %w", dbPath, err)
 	}
-
+	version, err := currentSchemaVersion(ctx, db)
+	if err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("feedback: validate SQLite weight reader schema: %w", err)
+	}
+	if version != want {
+		_ = db.Close()
+		return nil, fmt.Errorf("feedback: validate SQLite weight reader schema: version %d, want %d", version, want)
+	}
 	store := &SQLiteSignalStore{db: db}
 	return &SQLiteWeightReader{db: db, reader: NewWeightReader(store, config)}, nil
 }

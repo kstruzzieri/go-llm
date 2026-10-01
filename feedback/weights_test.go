@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 	"time"
 )
@@ -203,6 +204,18 @@ func TestSQLiteWeightReaderSeesLiveWALWithoutWriting(t *testing.T) {
 	if got := weights["chunk-live"]; got != 0.8 {
 		t.Fatalf("live WAL weight = %v, want 0.8", got)
 	}
+	// A commit after construction is visible to the same reader: no read
+	// snapshot outlives a WeightsBatch call.
+	if _, err := db.ExecContext(ctx, `UPDATE feedback_aggregates SET weighted_score = 0.3 WHERE chunk_key = 'chunk-live'`); err != nil {
+		t.Fatalf("update aggregate after open: %v", err)
+	}
+	weights, err = reader.WeightsBatch(ctx, []string{"chunk-live"})
+	if err != nil {
+		t.Fatalf("WeightsBatch after a post-open commit: %v", err)
+	}
+	if got := weights["chunk-live"]; got != 0.3 {
+		t.Fatalf("post-open WAL weight = %v, want 0.3", got)
+	}
 	if _, err := reader.db.ExecContext(ctx, `INSERT INTO feedback_aggregates (chunk_key) VALUES ('forbidden')`); err == nil {
 		t.Fatal("write through reader succeeded")
 	}
@@ -282,12 +295,11 @@ func TestSQLiteWeightReaderRejectsMissingAndUnmigratedDatabasesWithoutMutation(t
 		if _, err := NewSQLiteWeightReader(ctx, path, CollectorConfig{}); err == nil {
 			t.Fatal("NewSQLiteWeightReader succeeded for unmigrated database")
 		}
-		entries, err := os.ReadDir(dir)
-		if err != nil {
-			t.Fatalf("read fixture directory: %v", err)
-		}
-		if len(entries) != 2 || entries[0].Name() != "unmigrated.db" || entries[1].Name() != "unmigrated.db-wal" {
-			t.Fatalf("fixture directory after construction = %v, want only main and WAL", entries)
+		// D2 (#591): SQLite may add its -shm coordination file; nothing else.
+		names := dirEntryNames(t, dir)
+		if !slices.Equal(names, []string{"unmigrated.db", "unmigrated.db-wal"}) &&
+			!slices.Equal(names, []string{"unmigrated.db", "unmigrated.db-shm", "unmigrated.db-wal"}) {
+			t.Fatalf("fixture directory after construction = %v, want main and WAL plus at most -shm", names)
 		}
 		mainAfter, err := os.ReadFile(path)
 		if err != nil {
@@ -378,4 +390,134 @@ func TestSQLiteWeightReaderZeroAndClosed(t *testing.T) {
 	if _, err := reader.WeightsBatch(ctx, []string{"chunk"}); err == nil {
 		t.Fatal("closed reader WeightsBatch succeeded")
 	}
+}
+
+// TestSQLiteWeightReaderValidatesSchemaCommittedOnlyToWAL: the migrations
+// sit in an open writer's WAL and were never checkpointed, so validation must
+// read through the WAL rather than the main file alone.
+func TestSQLiteWeightReaderValidatesSchemaCommittedOnlyToWAL(t *testing.T) {
+	ctx := t.Context()
+	path := filepath.Join(t.TempDir(), "feedback.db")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("open writer: %v", err)
+	}
+	db.SetMaxOpenConns(1)
+	t.Cleanup(func() { _ = db.Close() })
+	for _, q := range []string{`PRAGMA journal_mode=WAL`, `PRAGMA wal_autocheckpoint=0`} {
+		if _, err := db.ExecContext(ctx, q); err != nil {
+			t.Fatalf("%s: %v", q, err)
+		}
+	}
+	if _, err := NewSignalStore(ctx, db); err != nil {
+		t.Fatalf("NewSignalStore: %v", err)
+	}
+	reader, err := NewSQLiteWeightReader(ctx, path, CollectorConfig{})
+	if err != nil {
+		t.Fatalf("NewSQLiteWeightReader with the schema only in the WAL: %v", err)
+	}
+	t.Cleanup(func() { _ = reader.Close() })
+}
+
+func dirEntryNames(t *testing.T, dir string) []string {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("read directory: %v", err)
+	}
+	names := make([]string, len(entries))
+	for i, e := range entries {
+		names[i] = e.Name()
+	}
+	return names
+}
+
+// TestSQLiteWeightReaderRejectionKeepsMainAndWAL pins the D2 contract
+// (#591): rejecting a database never writes or deletes its main file or an
+// existing WAL; only SQLite's coordination sidecars may appear.
+func TestSQLiteWeightReaderRejectionKeepsMainAndWAL(t *testing.T) {
+	ctx := t.Context()
+	t.Run("empty main beside WAL", func(t *testing.T) {
+		src := filepath.Join(t.TempDir(), "src.db")
+		w, err := sql.Open("sqlite", src)
+		if err != nil {
+			t.Fatal(err)
+		}
+		w.SetMaxOpenConns(1)
+		t.Cleanup(func() { _ = w.Close() })
+		for _, q := range []string{`PRAGMA journal_mode=WAL`, `PRAGMA wal_autocheckpoint=0`, `CREATE TABLE existing (value TEXT)`, `INSERT INTO existing (value) VALUES ('wal-only')`} {
+			if _, err := w.ExecContext(ctx, q); err != nil {
+				t.Fatalf("%s: %v", q, err)
+			}
+		}
+		walBefore, err := os.ReadFile(src + "-wal")
+		if err != nil || len(walBefore) == 0 {
+			t.Fatalf("fixture invalid: source WAL = %d bytes, %v", len(walBefore), err)
+		}
+		dir := t.TempDir()
+		path := filepath.Join(dir, "empty.db")
+		if err := os.WriteFile(path, nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path+"-wal", walBefore, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := NewSQLiteWeightReader(ctx, path, CollectorConfig{}); err == nil {
+			t.Fatal("NewSQLiteWeightReader accepted an empty database file")
+		}
+		if info, err := os.Stat(path); err != nil || info.Size() != 0 {
+			t.Fatalf("empty main after rejection: %v, %v", info, err)
+		}
+		walAfter, err := os.ReadFile(path + "-wal")
+		if err != nil {
+			t.Fatalf("WAL beside the empty main is gone: %v", err)
+		}
+		if !bytes.Equal(walAfter, walBefore) {
+			t.Fatal("WAL beside the empty main changed")
+		}
+	})
+
+	t.Run("WAL-mode main without WAL", func(t *testing.T) {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "closed.db")
+		w, err := sql.Open("sqlite", path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, q := range []string{`PRAGMA journal_mode=WAL`, `CREATE TABLE existing (value TEXT)`, `INSERT INTO existing (value) VALUES ('main')`} {
+			if _, err := w.ExecContext(ctx, q); err != nil {
+				t.Fatalf("%s: %v", q, err)
+			}
+		}
+		// The last close checkpoints and removes -wal and -shm.
+		if err := w.Close(); err != nil {
+			t.Fatal(err)
+		}
+		if names := dirEntryNames(t, dir); !slices.Equal(names, []string{"closed.db"}) {
+			t.Fatalf("fixture invalid: directory = %v, want only closed.db", names)
+		}
+		mainBefore, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := NewSQLiteWeightReader(ctx, path, CollectorConfig{}); err == nil {
+			t.Fatal("NewSQLiteWeightReader accepted an unmigrated database")
+		}
+		mainAfter, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Equal(mainAfter, mainBefore) {
+			t.Fatal("main database changed during rejection")
+		}
+		allowed := map[string]bool{"closed.db": true, "closed.db-shm": true, "closed.db-wal": true}
+		for _, name := range dirEntryNames(t, dir) {
+			if !allowed[name] {
+				t.Fatalf("rejection created %q", name)
+			}
+		}
+		if info, err := os.Stat(path + "-wal"); err == nil && info.Size() != 0 {
+			t.Fatalf("rejection wrote %d WAL bytes", info.Size())
+		}
+	})
 }
