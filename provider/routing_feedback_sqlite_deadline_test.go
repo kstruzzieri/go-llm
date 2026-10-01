@@ -146,8 +146,9 @@ func waitUntil(t *testing.T, cond func() bool) {
 }
 
 // assertContendedFailure fails unless err comes from waiting on the held lock
-// (SQLITE_BUSY, an interrupt, or the deadline) after at least minWait, and
-// arrived within maxWait. An early unrelated error is an invalid fixture.
+// (SQLITE_BUSY, an interrupt, or the deadline) and elapsed lies within
+// [minWait, maxWait]. An unrelated error is an invalid fixture; an early return
+// means the write gave up before its budget ran out.
 func assertContendedFailure(t *testing.T, err error, elapsed, minWait, maxWait time.Duration) {
 	t.Helper()
 	var se *sqlite.Error
@@ -157,7 +158,7 @@ func assertContendedFailure(t *testing.T, err error, elapsed, minWait, maxWait t
 		t.Fatalf("fixture invalid: err = %v, want a lock-wait failure", err)
 	}
 	if elapsed < minWait {
-		t.Fatalf("fixture invalid: failed after %v, before the %v it should have waited", elapsed, minWait)
+		t.Fatalf("returned after %v, before %v: the write did not wait out its budget", elapsed, minWait)
 	}
 	if elapsed > maxWait {
 		t.Fatalf("returned after %v, want under %v", elapsed, maxWait)
@@ -172,14 +173,14 @@ func TestSQLiteFeedbackStoreDeadlineBoundsLockWait(t *testing.T) {
 	execFeedbackSQL(t, db, "PRAGMA journal_mode=WAL")
 	store := newFileFeedbackStore(t, db)
 	release := holdFeedbackLock(t, path, "BEGIN IMMEDIATE")
+	start := time.Now()
 	ctx, cancel := context.WithTimeout(t.Context(), 200*time.Millisecond)
 	defer cancel()
-	start := time.Now()
 	err := store.RecordBatch(ctx, []FeedbackItem{testFeedbackItem("m")})
 	elapsed := time.Since(start)
 	release()
 	t.Logf("ELAPSED deadline-bounds %v", elapsed)
-	assertContendedFailure(t, err, elapsed, 150*time.Millisecond, 600*time.Millisecond)
+	assertContendedFailure(t, err, elapsed, 100*time.Millisecond, 600*time.Millisecond)
 	if n := feedbackRows(t, db); n != 0 {
 		t.Fatalf("signals after a failed write = %d, want 0", n)
 	}
@@ -196,9 +197,9 @@ func TestSQLiteFeedbackStoreDeductsPoolWait(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	start := time.Now()
 	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
 	defer cancel()
-	start := time.Now()
 	done := make(chan error, 1)
 	acquired := make(chan struct{})
 	item := testFeedbackItem("m")
@@ -216,7 +217,6 @@ func TestSQLiteFeedbackStoreDeductsPoolWait(t *testing.T) {
 	// write really started after the handover.
 	waitUntil(t, func() bool { return db.Stats().WaitCount > 0 })
 	time.Sleep(1200*time.Millisecond - time.Since(start))
-	handedOver := time.Since(start)
 	_ = pinned.Close()
 	var recErr error
 	select {
@@ -231,7 +231,8 @@ func TestSQLiteFeedbackStoreDeductsPoolWait(t *testing.T) {
 	default:
 		t.Fatalf("fixture invalid: returned before acquiring the pool connection: %v", recErr)
 	}
-	assertContendedFailure(t, recErr, elapsed, handedOver, 2600*time.Millisecond)
+	// The write must spend the rest of the budget waiting, not less.
+	assertContendedFailure(t, recErr, elapsed, 1500*time.Millisecond, 2600*time.Millisecond)
 }
 
 // Test 5: the cap is refreshed before COMMIT, which in rollback-journal mode
@@ -243,11 +244,11 @@ func TestSQLiteFeedbackStoreRefreshesCapBeforeCommit(t *testing.T) {
 	store := newFileFeedbackStore(t, db)
 	markConn(t, db)
 	release := holdFeedbackLock(t, path, "BEGIN", "SELECT COUNT(*) FROM routing_feedback_signals")
+	start := time.Now()
 	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
 	defer cancel()
 	item := testFeedbackItem("m")
 	insertedLive := false
-	start := time.Now()
 	err := store.runInTx(ctx, func(tx *sql.Tx) error {
 		if err := insertSignalTx(ctx, tx, item.Key, item.Signal); err != nil {
 			return err
@@ -266,8 +267,8 @@ func TestSQLiteFeedbackStoreRefreshesCapBeforeCommit(t *testing.T) {
 	if !errors.As(err, &se) || se.Code()&255 != 5 {
 		t.Fatalf("fixture invalid: err = %v, want SQLITE_BUSY from the contended COMMIT", err)
 	}
-	if elapsed > 2600*time.Millisecond {
-		t.Fatalf("returned after %v, want under 2.6s", elapsed)
+	if elapsed < 1500*time.Millisecond || elapsed > 2600*time.Millisecond {
+		t.Fatalf("returned after %v, want 1.5s..2.6s (COMMIT waits out the rest of the budget)", elapsed)
 	}
 	// modernc rolled the failed COMMIT back, so the store keeps the
 	// connection, and that connection is outside any transaction.
@@ -326,14 +327,16 @@ func TestSQLiteFeedbackStoreRestoresBusyTimeout(t *testing.T) {
 }
 
 // Test 6: a deadline-bearing write that fails partway leaves no rows and a
-// clean, restored connection.
+// clean, restored connection. The single-connection pool and its TEMP marker
+// prove the store kept that connection rather than replacing it.
 func TestSQLiteFeedbackStoreDeadlineWriteRollsBackPartialBatch(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "feedback.db")
-	db := openFeedbackFileDB(t, path, "_pragma=busy_timeout(5000)", 2)
+	db := openFeedbackFileDB(t, path, "_pragma=busy_timeout(5000)", 1)
 	execFeedbackSQL(t, db, "PRAGMA journal_mode=WAL")
 	store := newFileFeedbackStore(t, db)
 	execFeedbackSQL(t, db, `CREATE TRIGGER reject_boom BEFORE INSERT ON routing_feedback_signals
 		WHEN NEW.model = 'boom' BEGIN SELECT RAISE(ABORT, 'boom'); END`)
+	markConn(t, db)
 
 	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
 	defer cancel()
@@ -370,7 +373,10 @@ func TestSQLiteFeedbackStoreDeadlineWriteRollsBackPartialBatch(t *testing.T) {
 	if n := feedbackRows(t, db); n != 0 {
 		t.Fatalf("signals after failed writes = %d, want 0", n)
 	}
-	assertBusyTimeouts(t, db, 2, 5000)
+	if !connMarked(t, db) {
+		t.Fatal("connection discarded after failed writes, want it kept")
+	}
+	assertBusyTimeouts(t, db, 1, 5000)
 	if err := store.RecordBatch(t.Context(), []FeedbackItem{testFeedbackItem("ok")}); err != nil {
 		t.Fatalf("write after failures: %v", err)
 	}
@@ -421,4 +427,43 @@ func TestSQLiteFeedbackStoreInterruptedWriteKeepsDatabase(t *testing.T) {
 	if err := store.RecordBatch(t.Context(), []FeedbackItem{testFeedbackItem("after")}); err != nil {
 		t.Fatalf("write after an interrupted write: %v", err)
 	}
+}
+
+// Cancelling ctx mid-fn must not end the transaction under the store, and the
+// store must return the connection (restored) instead of discarding it.
+func TestSQLiteFeedbackStoreCancelledWriteKeepsTransaction(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "feedback.db")
+	db := openFeedbackFileDB(t, path, "_pragma=busy_timeout(5000)", 1)
+	execFeedbackSQL(t, db, "PRAGMA journal_mode=WAL")
+	store := newFileFeedbackStore(t, db)
+	markConn(t, db)
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+	defer cancel()
+	item := testFeedbackItem("m")
+	err := store.runInTx(ctx, func(tx *sql.Tx) error {
+		if err := insertSignalTx(ctx, tx, item.Key, item.Signal); err != nil {
+			return err
+		}
+		cancel()
+		// A ctx-bound transaction is rolled back by database/sql shortly
+		// after cancel; give that the chance to happen.
+		stop := time.Now().Add(100 * time.Millisecond)
+		for time.Now().Before(stop) {
+			if _, err := tx.ExecContext(context.Background(), "SELECT 1"); err != nil {
+				return fmt.Errorf("transaction ended under the store: %w", err)
+			}
+			time.Sleep(time.Millisecond)
+		}
+		return ctx.Err()
+	})
+	if !errors.Is(err, context.Canceled) || strings.Contains(err.Error(), "busy_timeout") || strings.Contains(err.Error(), "rollback") {
+		t.Fatalf("err = %v, want only the cancellation", err)
+	}
+	if n := feedbackRows(t, db); n != 0 {
+		t.Fatalf("signals after a cancelled write = %d, want 0", n)
+	}
+	if !connMarked(t, db) {
+		t.Fatal("connection discarded after a cancelled write")
+	}
+	assertBusyTimeouts(t, db, 1, 5000)
 }

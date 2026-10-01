@@ -1333,8 +1333,9 @@ var feedbackWriteTimeout = 1 * time.Second
 // UseCase. The seam is observational, never load-bearing for routing;
 // errors do not bubble up to the caller. Uses a fresh context with a
 // bounded timeout (not the request ctx) so cancellation of the caller's
-// ctx does not cut short the feedback write, and so a slow/stuck store
-// does not block the routing path indefinitely.
+// ctx does not cut short the feedback write, and so a contended store
+// gives up after about feedbackWriteTimeout (see feedbackWriteTimeout for
+// what that bound does not cover).
 //
 // On non-nil store error: emits a once-logged warning via feedbackWarn /
 // feedbackLogger (set by buildPlan through setFeedbackTelemetry). Replaces
