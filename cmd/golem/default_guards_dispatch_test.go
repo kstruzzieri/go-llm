@@ -26,23 +26,6 @@ func routed(r agent.ModelResult) agent.ModelResult {
 	return r
 }
 
-// writeCredentialFiles creates one real file behind each credential path the
-// soft-stop script reads, all holding the sentinel, so an unguarded read
-// succeeds and the sentinel would reach the child's next request.
-func writeCredentialFiles(t *testing.T, root string) {
-	t.Helper()
-	writeEnvSentinel(t, root)
-	for _, rel := range []string{".ssh/id_ed25519", ".aws/credentials"} {
-		p := filepath.Join(root, filepath.FromSlash(rel))
-		if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(p, []byte(envSentinel+"\n"), 0o600); err != nil {
-			t.Fatal(err)
-		}
-	}
-}
-
 // requireBlockedObservation fails unless the tool observation answering call
 // id is exactly the framed credential_path block.
 func requireBlockedObservation(t *testing.T, req provider.ChatRequest, id string) {
@@ -96,7 +79,7 @@ func dispatchOnce(t *testing.T, child agent.ModelCaller, root string) (agent.Too
 func TestDefaultGuardsChildSoftStop(t *testing.T) {
 	root := t.TempDir()
 	writeCredentialFiles(t, root)
-	child := &recordingScript{scriptCaller: scriptCaller{responses: []agent.ModelResult{
+	child := &recordingCaller{next: &scriptCaller{responses: []agent.ModelResult{
 		routed(toolStep("b1", "read_file", `{"path":".env"}`)),
 		routed(toolStep("b2", "read_file", `{"path":".ssh/id_ed25519"}`)),
 		routed(toolStep("b3", "read_file", `{"path":".aws/credentials"}`)),
@@ -205,7 +188,7 @@ func TestDefaultGuardsBlockedReadNeverReachesNativeCounter(t *testing.T) {
 				steps = append(steps, routed(toolStep(fmt.Sprintf("c%d", i+1), "read_file", string(args))))
 			}
 			steps = append(steps, routed(answerStep("done")))
-			child := &recordingScript{scriptCaller: scriptCaller{responses: steps}}
+			child := &recordingCaller{next: &scriptCaller{responses: steps}}
 			d, err := newDispatchTool(child, flags{dispatch: true}, agent.Budget{}, dispatchFanout{maxConcurrent: 1}, nil, readers, nil)
 			if err != nil {
 				t.Fatal(err)

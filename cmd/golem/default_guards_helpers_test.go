@@ -37,18 +37,6 @@ func toolStep(id, name, args string) agent.ModelResult {
 	}}}}
 }
 
-// recordingScript is a scriptCaller that keeps every request, for wire
-// assertions across a whole run (scriptCaller keeps only the last).
-type recordingScript struct {
-	scriptCaller
-	reqs []provider.ChatRequest
-}
-
-func (r *recordingScript) Chat(ctx context.Context, req provider.ChatRequest, onToken func(provider.ChatResponse) error) (agent.ModelResult, error) {
-	r.reqs = append(r.reqs, req)
-	return r.scriptCaller.Chat(ctx, req, onToken)
-}
-
 // recordingCaller keeps every request a wrapped caller receives, including
 // the ones it answers with an error.
 type recordingCaller struct {
@@ -136,4 +124,43 @@ func guardProbeResponse() func(http.ResponseWriter, *http.Request, string) bool 
 		_, _ = io.WriteString(w, "data: [DONE]\n\n")
 		return true
 	}
+}
+
+// writeCredentialFiles creates one real file behind each credential path the
+// soft-stop script reads, all holding the sentinel, so an unguarded read
+// succeeds and the sentinel would reach the child's next request.
+func writeCredentialFiles(t *testing.T, root string) {
+	t.Helper()
+	writeEnvSentinel(t, root)
+	for _, rel := range []string{".ssh/id_ed25519", ".aws/credentials"} {
+		p := filepath.Join(root, filepath.FromSlash(rel))
+		if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(envSentinel+"\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// requireRecords fails clearly unless the run recorded exactly n tool calls,
+// so a stop at a different step is reported instead of panicking on an index.
+func requireRecords(t *testing.T, res agent.Result, n int) {
+	t.Helper()
+	if len(res.ToolCalls) != n {
+		t.Fatalf("tool call records = %d, want %d: %+v", len(res.ToolCalls), n, res.ToolCalls)
+	}
+}
+
+// toolObservation returns the tool observation that answers call id, failing
+// clearly when the run produced none.
+func toolObservation(t *testing.T, msgs []provider.ChatMessage, id string) provider.ChatMessage {
+	t.Helper()
+	for _, m := range msgs {
+		if m.Role == "tool" && m.ToolCallID == id {
+			return m
+		}
+	}
+	t.Fatalf("no tool message for call %q in %d messages", id, len(msgs))
+	return provider.ChatMessage{}
 }

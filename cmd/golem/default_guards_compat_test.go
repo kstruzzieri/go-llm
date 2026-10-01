@@ -61,28 +61,6 @@ func findingPairs(fs []agent.Finding) []findingPair {
 	return out
 }
 
-// requireRecords fails clearly unless the run recorded exactly n tool calls,
-// so a stop at a different step is reported instead of panicking on an index.
-func requireRecords(t *testing.T, res agent.Result, n int) {
-	t.Helper()
-	if len(res.ToolCalls) != n {
-		t.Fatalf("tool call records = %d, want %d: %+v", len(res.ToolCalls), n, res.ToolCalls)
-	}
-}
-
-// toolObservation returns the tool observation that answers call id, failing
-// clearly when the run produced none.
-func toolObservation(t *testing.T, msgs []provider.ChatMessage, id string) provider.ChatMessage {
-	t.Helper()
-	for _, m := range msgs {
-		if m.Role == "tool" && m.ToolCallID == id {
-			return m
-		}
-	}
-	t.Fatalf("no tool message for call %q in %d messages", id, len(msgs))
-	return provider.ChatMessage{}
-}
-
 // TestDefaultGuardsBlockEachRuleBeforePlan (#575): every invariant blocks
 // before Plan, approval and Invoke, with the exact observation, the additive
 // score and the exact findings that produced it. Arguments use each real

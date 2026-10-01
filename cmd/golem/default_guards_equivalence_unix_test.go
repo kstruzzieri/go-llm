@@ -91,7 +91,7 @@ func TestDefaultGuardsLeaveAllowedCallsEquivalent(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		caller := &recordingScript{scriptCaller: scriptCaller{responses: []agent.ModelResult{
+		caller := &recordingCaller{next: &scriptCaller{responses: []agent.ModelResult{
 			toolStep("a1", "read_file", `{"path":"hello.txt"}`),
 			toolStep("a2", "search", `{"pattern":"hello"}`),
 			toolStep("a3", "run_command", `{"argv":["echo","quiet"]}`),

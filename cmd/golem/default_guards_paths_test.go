@@ -141,7 +141,7 @@ func TestDefaultGuardsPath_RecipePublicationAndRestoration(t *testing.T) {
 func TestDefaultGuardsPath_AgentflowAuthor(t *testing.T) {
 	root := t.TempDir()
 	writeEnvSentinel(t, root)
-	caller := &recordingScript{scriptCaller: scriptCaller{responses: []agent.ModelResult{
+	caller := &recordingCaller{next: &scriptCaller{responses: []agent.ModelResult{
 		toolStep("r1", "read_file", `{"path":".env"}`),
 		submitPlanCall(validIRJSON(t)),
 	}}}
@@ -161,7 +161,7 @@ func TestDefaultGuardsPath_TaskStepRunner(t *testing.T) {
 	root := t.TempDir()
 	writeEnvSentinel(t, root)
 	plan := &agentflow.Plan{AllowedFiles: []string{"out.txt"}, Steps: []agentflow.Step{{ID: "P1", Files: []string{"out.txt"}}}}
-	caller := &recordingScript{scriptCaller: scriptCaller{responses: []agent.ModelResult{
+	caller := &recordingCaller{next: &scriptCaller{responses: []agent.ModelResult{
 		toolStep("r1", "read_file", `{"path":".env"}`),
 		toolStep("w1", "write_file", `{"path":"out.txt","content":"worker\n"}`),
 		answerStep("done"),
@@ -194,7 +194,7 @@ func TestDefaultGuardsPath_ParallelWorker(t *testing.T) {
 		Gates: []agentflow.Gate{{Kind: "command", Run: []string{"go", "test", "./worker"}}},
 	}}}
 	runner := &assignedWorkerRunner{nextAction: `{"resumability":{"contract":{"plan_sha256":"plan","locked":true,"execution_contract_sha256":"execution"},"agent_id":"golem-w2","step":{"id":"P1","state":"pending","completed":false},"attempt":null,"diagnostics":[]}}`}
-	caller := &recordingScript{scriptCaller: scriptCaller{responses: []agent.ModelResult{
+	caller := &recordingCaller{next: &scriptCaller{responses: []agent.ModelResult{
 		toolStep("r1", "read_file", `{"path":".env"}`),
 		answerStep("done"),
 	}}}
@@ -211,7 +211,7 @@ func TestDefaultGuardsPath_ParallelWorker(t *testing.T) {
 func TestDefaultGuardsPath_DispatchChild(t *testing.T) {
 	root := t.TempDir()
 	writeEnvSentinel(t, root)
-	child := &recordingScript{scriptCaller: scriptCaller{responses: []agent.ModelResult{
+	child := &recordingCaller{next: &scriptCaller{responses: []agent.ModelResult{
 		routed(toolStep("c1", "read_file", `{"path":".env"}`)),
 		routed(answerStep("done")),
 	}}}
