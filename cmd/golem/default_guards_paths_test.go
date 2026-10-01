@@ -38,17 +38,8 @@ func TestDefaultGuardsPath_OneShot(t *testing.T) {
 			}
 		}
 	}
-	// render.go finalFooter: "done · <n> steps · <s>s · <n> tok · risk <score>",
-	// with no stop suffix on a completed run.
-	footer := false
-	for _, line := range strings.Split(stderr, "\n") {
-		if strings.HasPrefix(line, "done · ") && strings.HasSuffix(line, " · risk 30") {
-			footer = true
-		}
-	}
-	if !footer {
-		t.Fatalf("stderr has no footer ending %q:\n%s", " · risk 30", stderr)
-	}
+	// finalFooter ends a completed run's line with the score and no stop suffix.
+	assertFooterTail(t, stderr, " · risk 30")
 }
 
 // TestDefaultGuardsPath_ProductionAgentflowModes: the -goal and -plan

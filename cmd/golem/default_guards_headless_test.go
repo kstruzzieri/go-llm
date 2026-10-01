@@ -2,9 +2,11 @@ package main
 
 import (
 	"encoding/json"
+	"maps"
 	"path/filepath"
 	"runtime"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -62,18 +64,28 @@ func TestDefaultGuardsHeadlessContracts(t *testing.T) {
 		wantAnswer   string
 		wantCode     string
 		wantExit     int
+		// wantEvents is the literal stream-json event sequence and wantToolIDs
+		// the tool call ID of each tool.started/tool.finished event in order.
+		// Blocked calls appear in neither.
+		wantEvents  []string
+		wantToolIDs []string
 		// The stderr text footer's tail. finalFooter prints "done · ... ·
 		// risk <score>" on stderr in the machine formats too (the progress
 		// renderer is format-independent) and appends "  stopped: <reason>"
-		// when the run stopped early. uname scores egress "unknown" 10, so the
-		// allowed-exec row has a finding a wrongly wired risk line could show.
+		// when the run stopped early. expr is outside the egress quiet set and
+		// scores "unknown" 10, so the allowed-exec row has a finding a wrongly
+		// wired risk line could show.
 		wantFooterTail string
 	}{
 		{
-			name:         "allowed exec",
-			calls:        []guardedCall{{id: "x1", tool: "run_command", args: `{"argv":["uname"]}`}},
+			name: "allowed exec",
+			// The result proves the command ran: exit 0, "2" on stdout, empty stderr.
+			calls: []guardedCall{{id: "x1", tool: "run_command", args: `{"argv":["expr","1","+","1"]}`,
+				result: "exit code: 0\n--- stdout ---\n2\n\n--- stderr ---\n"}},
 			wantRequests: 2,
 			wantStatus:   "completed", wantStop: "completed", wantAnswer: "final answer",
+			wantEvents:     []string{"run.started", "tool.started", "tool.finished", "message.delta", "run.finished"},
+			wantToolIDs:    []string{"x1", "x1"},
 			wantFooterTail: " · risk 10",
 		},
 		{
@@ -84,6 +96,8 @@ func TestDefaultGuardsHeadlessContracts(t *testing.T) {
 			},
 			wantRequests: 3,
 			wantStatus:   "completed", wantStop: "completed", wantAnswer: "final answer",
+			wantEvents:     []string{"run.started", "tool.started", "tool.finished", "message.delta", "run.finished"},
+			wantToolIDs:    []string{"ok", "ok"},
 			wantFooterTail: " · risk 30",
 		},
 		{
@@ -96,6 +110,7 @@ func TestDefaultGuardsHeadlessContracts(t *testing.T) {
 			// The cap stops the run after the third observation: no fourth request.
 			wantRequests: 3,
 			wantStatus:   "error", wantStop: "tool_error_cap_reached", wantAnswer: "", wantCode: "empty_answer", wantExit: 1,
+			wantEvents:     []string{"run.started", "run.finished"},
 			wantFooterTail: " · risk 90  stopped: tool_error_cap_reached",
 		},
 	}
@@ -123,20 +138,12 @@ func TestDefaultGuardsHeadlessContracts(t *testing.T) {
 				if !slices.Contains(errLines, guardsNoticeLine) {
 					t.Errorf("stderr lines = %q, want the line %q", errLines, guardsNoticeLine)
 				}
-				// Headless approval has no preview/risk line, even for the uname call
+				// Headless approval has no preview/risk line, even for the expr call
 				// whose egress finding (footer risk 10) a risk approver would render.
 				if strings.Contains(out+errOut, "interceptor risk") {
 					t.Errorf("a headless run printed an interceptor risk line:\nstdout:\n%s\nstderr:\n%s", out, errOut)
 				}
-				footer := false
-				for _, line := range errLines {
-					if strings.HasPrefix(line, "done · ") && strings.HasSuffix(line, tc.wantFooterTail) {
-						footer = true
-					}
-				}
-				if !footer {
-					t.Errorf("stderr has no footer ending %q:\n%s", tc.wantFooterTail, errOut)
-				}
+				assertFooterTail(t, errOut, tc.wantFooterTail)
 
 				// Wire: the sentinel never leaves the host, the run makes exactly the
 				// expected requests, and each blocked call's observation is the framed
@@ -171,7 +178,8 @@ func TestDefaultGuardsHeadlessContracts(t *testing.T) {
 					}
 				}
 
-				// The golem.result.v1 record: the last stdout line, exactly seven keys.
+				// The golem.result.v1 record. splitMachineLines fails on any protocol
+				// line after a result, so results[0] is the last stdout line.
 				events, results := splitMachineLines(t, out)
 				if len(results) != 1 {
 					t.Fatalf("result records = %d, want 1", len(results))
@@ -179,84 +187,61 @@ func TestDefaultGuardsHeadlessContracts(t *testing.T) {
 				if format == "json" && len(events) != 0 {
 					t.Fatalf("json mode emitted %d events", len(events))
 				}
-				lines := strings.Split(strings.TrimSpace(out), "\n")
-				if len(lines) == 0 || lines[0] == "" {
-					t.Fatalf("stdout has no lines")
-				}
-				// decodeResult checks key presence only; pin the exact key count and
-				// every field's value and nullability. A capped run's answer is "" (a
-				// string), not null (buildResult).
-				rec := decodeResult(t, lines[len(lines)-1])
+				// decodeResult already asserts all seven keys are present, the schema
+				// and no protocol key. It does not pin an extra key or any value, and a
+				// null would unmarshal into a string without error, so compare each
+				// key's raw JSON: a capped run's answer is "" (a string), not null.
+				rec := results[0]
 				if len(rec) != 7 {
-					t.Fatalf("record has %d keys, want exactly 7: %s", len(rec), lines[len(lines)-1])
+					t.Fatalf("record has %d keys, want exactly 7: %s", len(rec), rec)
 				}
-				var status, stop, answer, model string
-				for key, dst := range map[string]*string{"status": &status, "stopReason": &stop, "answer": &answer, "model": &model} {
-					if err := json.Unmarshal(rec[key], dst); err != nil {
-						t.Fatalf("record %s = %s, want a string: %v", key, rec[key], err)
-					}
+				wantRaw := map[string]string{
+					"schema": `"golem.result.v1"`, "status": strconv.Quote(tc.wantStatus),
+					"answer": strconv.Quote(tc.wantAnswer), "stopReason": strconv.Quote(tc.wantStop),
+					"model": `"test/agent-model"`, "grounding": "null", "error": "null",
 				}
-				if status != tc.wantStatus || stop != tc.wantStop || answer != tc.wantAnswer || model != "test/agent-model" {
-					t.Fatalf("record = status %q stop %q answer %q model %q, want %q %q %q test/agent-model",
-						status, stop, answer, model, tc.wantStatus, tc.wantStop, tc.wantAnswer)
-				}
-				if string(rec["grounding"]) != "null" {
-					t.Fatalf("grounding = %s, want null", rec["grounding"])
-				}
-				if tc.wantCode == "" {
-					if string(rec["error"]) != "null" {
-						t.Fatalf("error = %s, want null", rec["error"])
-					}
-				} else {
+				if tc.wantCode != "" {
+					delete(wantRaw, "error") // the message is diagnostic text; pin the bounded code
 					var recErr struct{ Code string }
 					if err := json.Unmarshal(rec["error"], &recErr); err != nil || recErr.Code != tc.wantCode {
-						t.Fatalf("error = %s, want code %q", rec["error"], tc.wantCode)
+						t.Errorf("error = %s, want code %q", rec["error"], tc.wantCode)
+					}
+				}
+				for _, key := range slices.Sorted(maps.Keys(wantRaw)) {
+					if got := string(rec[key]); got != wantRaw[key] {
+						t.Errorf("record %s = %s, want %s", key, got, wantRaw[key])
 					}
 				}
 				if format != "stream-json" {
 					return
 				}
 
-				// stream-json: run.finished is the last event, and tool events exist
-				// exactly once per invoked call and never for a blocked one.
-				if len(events) == 0 {
-					t.Fatal("stream-json emitted no events")
-				}
-				if last := events[len(events)-1]; last.Type != "run.finished" {
-					t.Fatalf("terminal event = %q, want run.finished", last.Type)
-				}
-				started, finished := map[string]int{}, map[string]int{}
+				// stream-json: the exact event sequence. A blocked call emits no tool
+				// event of any kind, an invoked call exactly one started and one
+				// finished (not an error), and run.finished is last.
+				var types, ids []string
 				for _, e := range events {
+					types = append(types, e.Type)
+					if e.Type != "tool.started" && e.Type != "tool.finished" {
+						continue
+					}
 					var p struct {
 						ToolCallID string `json:"toolCallId"`
+						IsError    bool   `json:"isError"`
 					}
-					switch e.Type {
-					case "tool.started":
-						if err := json.Unmarshal(e.Payload, &p); err != nil {
-							t.Fatalf("tool.started payload: %v", err)
-						}
-						started[p.ToolCallID]++
-					case "tool.finished":
-						if err := json.Unmarshal(e.Payload, &p); err != nil {
-							t.Fatalf("tool.finished payload: %v", err)
-						}
-						finished[p.ToolCallID]++
+					if err := json.Unmarshal(e.Payload, &p); err != nil {
+						t.Fatalf("%s payload %s: %v", e.Type, e.Payload, err)
 					}
+					if p.IsError {
+						t.Errorf("%s for %q reports isError", e.Type, p.ToolCallID)
+					}
+					ids = append(ids, p.ToolCallID)
 				}
-				invoked := 0
-				for _, c := range tc.calls {
-					want := 1
-					if c.blocked {
-						want = 0
-					} else {
-						invoked++
-					}
-					if started[c.id] != want || finished[c.id] != want {
-						t.Fatalf("call %s (blocked=%v): started %d finished %d, want %d and %d", c.id, c.blocked, started[c.id], finished[c.id], want, want)
-					}
+				if !slices.Equal(types, tc.wantEvents) {
+					t.Errorf("event types = %v, want %v", types, tc.wantEvents)
 				}
-				if len(started) != invoked || len(finished) != invoked {
-					t.Fatalf("tool events cover started=%v finished=%v, want only the %d invoked calls", started, finished, invoked)
+				if !slices.Equal(ids, tc.wantToolIDs) {
+					t.Errorf("tool event call IDs = %v, want %v", ids, tc.wantToolIDs)
 				}
 			})
 		}
