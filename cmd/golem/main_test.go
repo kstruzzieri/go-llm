@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"syscall"
@@ -1252,8 +1253,74 @@ func TestAgentflowStatusExitHelper(t *testing.T) {
 		"-agentflow-env", "GOLEM_AGENTFLOW_STATUS_PAYLOAD",
 		"-config", filepath.Join(os.Getenv("GOLEM_AGENTFLOW_STATUS_ROOT"), "missing-models.json"),
 	}
+	if os.Getenv("GOLEM_AGENTFLOW_STATUS_TEXT") == "1" {
+		os.Args = slices.DeleteFunc(os.Args, func(arg string) bool { return arg == "-json" })
+	}
+	if os.Getenv("GOLEM_AGENTFLOW_STATUS_UNSET") == "1" {
+		if _, ok := os.LookupEnv(statusUnsetEnvName); ok {
+			os.Exit(99) // the scenario needs the approved name unset
+		}
+		os.Args = append(os.Args, "-agentflow-env", statusUnsetEnvName)
+	}
+	if src := os.Getenv("GOLEM_AGENTFLOW_STATUS_SRC"); src != "" {
+		os.Args = append(os.Args, "-agentflow-src", src)
+	}
 	main()
 	os.Exit(0)
+}
+
+// statusUnsetEnvName is approved with -agentflow-env but never set in the child.
+const statusUnsetEnvName = "GOLEM_577_UNSET"
+
+// TestAgentflowStatusRunnerFailures pins what a status process prints when the
+// runner fails before AgentFlow starts: an unset approved name is named once
+// (stderr in JSON mode, stdout in text mode); any other runner error stays
+// silent in JSON mode. The exit code is 3 either way.
+func TestAgentflowStatusRunnerFailures(t *testing.T) {
+	const secret = "RUNNER-SECRET-577"
+	root := t.TempDir()
+	unsetLine := `agentflow: approved environment variable "GOLEM_577_UNSET" is not set`
+	for _, test := range []struct {
+		name               string
+		env                []string
+		wantStdout, wantSE string
+	}{
+		{
+			name: "json unset approved name", env: []string{"GOLEM_AGENTFLOW_STATUS_UNSET=1"},
+			wantSE: "golem: " + unsetLine + "\n",
+		},
+		{
+			name: "json generic runner failure",
+			env:  []string{"GOLEM_AGENTFLOW_STATUS_SRC=" + filepath.Join(root, secret)},
+		},
+		{
+			name: "text unset approved name", env: []string{"GOLEM_AGENTFLOW_STATUS_UNSET=1", "GOLEM_AGENTFLOW_STATUS_TEXT=1"},
+			wantStdout: "agentflow status unavailable: " + strings.ReplaceAll(unsetLine, `"`, `\"`) + "\n",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			cmd := exec.Command(os.Args[0], "-test.run=^TestAgentflowStatusExitHelper$")
+			cmd.Env = append(os.Environ(),
+				"GOLEM_AGENTFLOW_STATUS_EXIT_HELPER=1",
+				"GOLEM_AGENTFLOW_STATUS_ROOT="+root,
+				"GOLEM_AGENTFLOW_STATUS_PAYLOAD={}",
+			)
+			cmd.Env = append(cmd.Env, test.env...)
+			var stdout, stderr bytes.Buffer
+			cmd.Stdout, cmd.Stderr = &stdout, &stderr
+			err := cmd.Run()
+			var exitErr *exec.ExitError
+			if !errors.As(err, &exitErr) || exitErr.ExitCode() != 3 {
+				t.Fatalf("err = %v, want exit 3; stdout=%q stderr=%q", err, stdout.String(), stderr.String())
+			}
+			if stdout.String() != test.wantStdout || stderr.String() != test.wantSE {
+				t.Fatalf("stdout/stderr = %q / %q, want %q / %q", stdout.String(), stderr.String(), test.wantStdout, test.wantSE)
+			}
+			if strings.Contains(stdout.String()+stderr.String(), secret) {
+				t.Fatalf("status output disclosed runner error text")
+			}
+		})
+	}
 }
 
 func TestAgentflowStatusExitCodesDoNotPrintGenericErrors(t *testing.T) {

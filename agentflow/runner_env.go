@@ -42,6 +42,14 @@ func childEnvPolicyFor(goos string, approved, owned []string) childEnvPolicy {
 	return p
 }
 
+// EnvNotSetError reports an approved environment variable that is unset when a
+// child is launched. It carries only the validated name, never a value.
+type EnvNotSetError struct{ Name string }
+
+func (e *EnvNotSetError) Error() string {
+	return fmt.Sprintf("agentflow: approved environment variable %q is not set", e.Name)
+}
+
 // buildChildEnv returns a child's complete environment: never nil, one entry
 // per name, sorted by name. Layers apply in order and later layers win:
 // baseline, approved names, strict mode, runner-owned entries. Nothing else
@@ -62,7 +70,7 @@ func buildChildEnv(p childEnvPolicy, lookup func(string) (string, bool)) ([]stri
 	for _, name := range p.approved {
 		value, ok := lookup(name)
 		if !ok {
-			return nil, fmt.Errorf("agentflow: approved environment variable %q is not set", name)
+			return nil, &EnvNotSetError{Name: name}
 		}
 		entries[key(name)] = name + "=" + value
 	}

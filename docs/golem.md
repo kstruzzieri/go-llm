@@ -458,7 +458,10 @@ every validation gate and to its own `git` calls. They receive only:
   `COMSPEC`.
 - **Approved names:** each `-agentflow-env NAME` (repeatable, on `golem` and
   `golem audit`) forwards that variable. Its value is read at every launch; if
-  it is unset, the launch fails before AgentFlow starts.
+  it is unset, the launch fails before AgentFlow starts and the error names the
+  variable, never a value. `golem audit` reports it under
+  `agentflow_unavailable` with the name; `-agentflow-status -json` keeps exit 3
+  and empty stdout and prints the name on stderr.
 - **Strict mode:** `AGENTFLOW_STRICT=1`, when set to exactly `1`.
 - **Runner settings:** `PYTHONPATH` for `-agentflow-src`, and
   `PYTHONDONTWRITEBYTECODE=1` during audit.

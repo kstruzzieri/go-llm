@@ -719,6 +719,9 @@ func main() {
 		}
 		var statusErr *agentflowStatusExit
 		if errors.As(err, &statusErr) {
+			if statusErr.diagnostic != "" {
+				_, _ = fmt.Fprintf(os.Stderr, "golem: %s\n", statusErr.diagnostic)
+			}
 			os.Exit(statusErr.ExitCode())
 		}
 		if code, ok := auditExitCode(err); ok {

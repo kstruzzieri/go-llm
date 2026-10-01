@@ -405,6 +405,9 @@ func assertAuditFixtureTreeUnchanged(t *testing.T, root string, before map[strin
 // auditEnvSecret stands in for a value mistyped into -agentflow-env.
 const auditEnvSecret = "ENV-SECRET-577"
 
+// auditUnsetEnvName is approved with -agentflow-env but never set in the child.
+const auditUnsetEnvName = "GOLEM_577_UNSET"
+
 func TestAuditExitContractHelper(t *testing.T) {
 	if os.Getenv("GOLEM_AUDIT_EXIT_HELPER") != "1" {
 		return
@@ -415,6 +418,12 @@ func TestAuditExitContractHelper(t *testing.T) {
 		if _, ok := os.LookupEnv(name); ok {
 			args = append(args, "-agentflow-env", name)
 		}
+	}
+	if os.Getenv("GOLEM_AUDIT_UNSET_APPROVAL") == "1" {
+		if _, ok := os.LookupEnv(auditUnsetEnvName); ok {
+			os.Exit(99) // the scenario needs the approved name unset
+		}
+		args = append(args, "-agentflow-env", auditUnsetEnvName)
 	}
 	switch os.Getenv("GOLEM_AUDIT_CASE") {
 	case "help":
@@ -547,6 +556,54 @@ func TestAuditExitContract(t *testing.T) {
 					"proofs: outcome=incomplete assurance=\"structural/checksum; unsigned\" checked=0 sources=0\n  diagnostic code=agentflow_unavailable target=\"\" message=\"agentflow proof verification unavailable: requires agentflow with --integrity-only support\"\noverall: outcome=violation\n"
 			},
 			absent: []string{secretProof},
+		},
+		{
+			name: "unset approved name names the variable", scenario: "proofs", wantExit: 2,
+			prepare: func(t *testing.T, root, _ string) map[string]string {
+				if err := os.Mkdir(filepath.Join(root, ".agent"), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				return map[string]string{"GOLEM_AUDIT_UNSET_APPROVAL": "1"}
+			},
+			wantStdout: func(_, _ string) string {
+				return "proofs: outcome=incomplete assurance=\"structural/checksum; unsigned\" checked=0 sources=0\n  diagnostic code=agentflow_unavailable target=\"\" message=\"agentflow proof verification unavailable: approved environment variable GOLEM_577_UNSET is not set\"\noverall: outcome=incomplete\n"
+			},
+		},
+		{
+			name: "violation outranks unset approved name", wantExit: 1,
+			prepare: func(t *testing.T, root, data string) map[string]string {
+				path, err := checkpointDBPath(func(string) string { return data }, root)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(path, []byte("not sqlite"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Mkdir(filepath.Join(root, ".agent"), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				return map[string]string{"GOLEM_AUDIT_UNSET_APPROVAL": "1"}
+			},
+			wantStdout: func(root, data string) string {
+				workspacePath, _ := checkpointDBPath(func(string) string { return data }, root)
+				memoryPath := filepath.Join(data, "golem", "memories.db")
+				return fmt.Sprintf("workspace: outcome=violation assurance=\"signed\" checked=0 paths=0\n  diagnostic code=store-corrupt target=%q message=\"SQLite integrity verification failed.\"\n", workspacePath) +
+					fmt.Sprintf("memory: outcome=not-present assurance=\"signed\" checked=0 total=unavailable\n  diagnostic code=store-not-present target=%q message=\"Store is not present.\"\n", memoryPath) +
+					"proofs: outcome=incomplete assurance=\"structural/checksum; unsigned\" checked=0 sources=0\n  diagnostic code=agentflow_unavailable target=\"\" message=\"agentflow proof verification unavailable: approved environment variable GOLEM_577_UNSET is not set\"\noverall: outcome=violation\n"
+			},
+		},
+		{
+			name: "unset approved name does not affect workspace scope", scenario: "explicit-missing", wantExit: 0,
+			prepare: func(t *testing.T, root, data string) map[string]string {
+				createEmptyAuditWorkspace(t, root, data)
+				return map[string]string{"GOLEM_AUDIT_UNSET_APPROVAL": "1"}
+			},
+			wantStdout: func(_, _ string) string {
+				return "workspace: outcome=valid assurance=\"signed\" checked=0 paths=0\noverall: outcome=valid\n"
+			},
 		},
 		{
 			name: "memory violation hides record body", scenario: "memory", wantExit: 1,

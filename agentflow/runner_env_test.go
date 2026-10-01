@@ -110,8 +110,10 @@ func TestChildEnvPolicyFor(t *testing.T) {
 func TestBuildChildEnvUnsetApprovedNameFails(t *testing.T) {
 	_, err := buildChildEnv(childEnvPolicy{approved: []string{"GOPRIVATE"}},
 		mapLookup(map[string]string{"OTHER": "sk-secret-577"}))
-	if err == nil || err.Error() != `agentflow: approved environment variable "GOPRIVATE" is not set` {
-		t.Fatalf("err = %v", err)
+	var unset *EnvNotSetError
+	if !errors.As(err, &unset) || unset.Name != "GOPRIVATE" ||
+		err.Error() != `agentflow: approved environment variable "GOPRIVATE" is not set` {
+		t.Fatalf("err = %v, want *EnvNotSetError naming GOPRIVATE", err)
 	}
 }
 
@@ -317,7 +319,9 @@ func TestExecRunnerReadsApprovedValuesAtEachLaunch(t *testing.T) {
 	out := filepath.Join(t.TempDir(), "probe.json")
 	r.prefix = envProbeArgv(out)
 	stdout, stderr, exit, err := r.Run(t.Context(), nil, nil)
-	if err == nil || err.Error() != `agentflow: approved environment variable "GO_LLM_577_APPROVED" is not set` ||
+	var unset *EnvNotSetError
+	if !errors.As(err, &unset) || unset.Name != envApprovedName ||
+		err.Error() != `agentflow: approved environment variable "GO_LLM_577_APPROVED" is not set` ||
 		stdout != nil || stderr != nil || exit != 0 {
 		t.Fatalf("unset approved name: stdout=%q stderr=%q exit=%d err=%v", stdout, stderr, exit, err)
 	}

@@ -20,6 +20,10 @@ every gate.
 
 - `agentflow.ValidateEnvNames` and `(*agentflow.ExecRunner).AllowEnv` approve
   parent variables by name.
+- `agentflow.EnvNotSetError` reports an approved name that is unset at launch;
+  it carries the name only. `golem audit` names the variable in its
+  `agentflow_unavailable` diagnostic, and `golem -agentflow-status -json` prints
+  it on stderr while keeping exit 3 and empty stdout.
 - `agentflow.NewSrcExecRunner` now requires an absolute checkout containing
   `src/agentflow/__init__.py` and resolves symlinks; an invalid checkout fails
   at `Run`.
