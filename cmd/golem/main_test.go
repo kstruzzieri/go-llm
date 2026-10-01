@@ -1880,7 +1880,10 @@ func TestAgentflowEnvValidationKeepsModeExitCodes(t *testing.T) {
 		{"headless one-shot is a usage error", []string{"-p", "x", "-agentflow-env", "BAD=x"}, 2},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			err := run(tc.args, devNull, devNull, devNull)
+			// An empty root and a missing config make a validation regression
+			// fail fast instead of reaching Agentflow or a real provider.
+			isolate := []string{"-root", t.TempDir(), "-config", filepath.Join(t.TempDir(), "missing-models.json")}
+			err := run(append(isolate, tc.args...), devNull, devNull, devNull)
 			if err == nil || !strings.Contains(err.Error(), "-agentflow-env") || exitCodeFor(err) != tc.want {
 				t.Fatalf("run error = %v (exit %d), want -agentflow-env error with exit %d", err, exitCodeFor(err), tc.want)
 			}
