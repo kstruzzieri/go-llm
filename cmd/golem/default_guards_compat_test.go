@@ -46,11 +46,12 @@ func (r *resultEvents) OnToolResult(_ context.Context, e agent.ToolResultEvent) 
 	return nil
 }
 
-// TestDefaultGuardsBlockEachRuleBeforePlan (§6.1.2): every invariant blocks
+// TestDefaultGuardsBlockEachRuleBeforePlan (#575): every invariant blocks
 // before Plan, approval and Invoke, with the exact observation and the
-// additive score. Arguments use each real tool's decoder names
-// (agent/tools/edit.go:30, scratch_promote.go:52). The stub's fatal Plan is
-// what proves "before Plan"; the grant case is TestDefaultGuardsBlockDespiteSessionGrant.
+// additive score. Arguments use each real tool's decoder names (edit_file's
+// old_string/new_string, promote_artifact's id/path in agent/tools). The
+// stub's fatal Plan is what proves "before Plan"; the grant case is
+// TestDefaultGuardsBlockDespiteSessionGrant.
 func TestDefaultGuardsBlockEachRuleBeforePlan(t *testing.T) {
 	for _, tc := range []struct {
 		name, tool, args, rule string
@@ -92,12 +93,12 @@ func TestDefaultGuardsBlockEachRuleBeforePlan(t *testing.T) {
 	}
 }
 
-// TestDefaultGuardsBlockDespiteSessionGrant (§6.1.2): a call whose real
+// TestDefaultGuardsBlockDespiteSessionGrant (#575): a call whose real
 // approval key holds a session grant is still blocked, without a prompt. The
 // existing grantedExecStub returns ApprovalKey exec:v3:stub from Plan, so the
 // grant would auto-approve the call if it ever reached approval. The
 // file-class grant case uses the real write_file under a pre-granted write
-// class in TestDefaultGuardsCapAfterWriteSkipsVerificationKeepsUndo (Task 9).
+// class in TestDefaultGuardsCapAfterWriteSkipsVerificationKeepsUndo.
 func TestDefaultGuardsBlockDespiteSessionGrant(t *testing.T) {
 	stub := &grantedExecStub{}
 	ap := newReplApprover(&promptFatalSource{t: t}, &strings.Builder{}, false)
@@ -138,7 +139,7 @@ func assertBlockedAt(t *testing.T, recs []agent.ToolCallRecord, idx ...int) {
 	}
 }
 
-// TestDefaultGuardsRecoveryResetsTheErrorCount (§6.1.2): two blocks, a
+// TestDefaultGuardsRecoveryResetsTheErrorCount (#575): two blocks, a
 // successful allowed call, two blocks, an answer. The run completes only
 // because a successful call resets the consecutive-error count. The allowed
 // observation carries no interceptor trailer.
@@ -180,7 +181,7 @@ func TestDefaultGuardsRecoveryResetsTheErrorCount(t *testing.T) {
 	}
 }
 
-// TestDefaultGuardsErrorDoesNotResetTheCount (§6.1.2 contrast): an allowed
+// TestDefaultGuardsErrorDoesNotResetTheCount (#575, contrast): an allowed
 // call that returns IsError does not reset, so block, error, block trips the
 // cap at the third call and the scripted answer is never requested.
 func TestDefaultGuardsErrorDoesNotResetTheCount(t *testing.T) {
@@ -210,7 +211,7 @@ func TestDefaultGuardsErrorDoesNotResetTheCount(t *testing.T) {
 	}
 }
 
-// TestDefaultGuardsThreeBlocksStopTheRun (§6.1.2): three consecutive blocks
+// TestDefaultGuardsThreeBlocksStopTheRun (#575): three consecutive blocks
 // end the run at the tool-error cap with no answer.
 func TestDefaultGuardsThreeBlocksStopTheRun(t *testing.T) {
 	readers, err := buildTools(t.TempDir(), nil)
@@ -227,8 +228,10 @@ func TestDefaultGuardsThreeBlocksStopTheRun(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
+	// Records first: three missing-file errors also cap the run, so the
+	// per-record block check is what separates a guard stop from that.
+	assertBlockedAt(t, res.ToolCalls, 0, 1, 2)
 	if res.StopReason != agent.ToolErrorCapReached || res.Answer != "" || res.Risk == nil || res.Risk.Score != 90 {
 		t.Fatalf("stop = %v answer = %q risk = %+v, want cap, no answer, 90", res.StopReason, res.Answer, res.Risk)
 	}
-	assertBlockedAt(t, res.ToolCalls, 0, 1, 2)
 }
