@@ -212,6 +212,11 @@ func connectOne(ctx context.Context, impl Implementation, s Server, opts Connect
 	if err == nil {
 		err = ctx.Err()
 	}
+	// created can accompany an error (the store joins ctx.Err() and lease
+	// cleanup after the rename): the pin is on disk either way, so report it.
+	if created {
+		notices = append(notices, fmt.Errorf("server %q: first pin %s; tools: %s; use explicit alias= values for stable pins", s.Alias, catalog.digest(), strings.Join(catalogNames(catalog), ", ")))
+	}
 	if err != nil {
 		closeErr := session.Close()
 		// Classify the refusal alone; a close error (even context.Canceled)
@@ -220,10 +225,7 @@ func connectOne(ctx context.Context, impl Implementation, s Server, opts Connect
 		failure.cause = errors.Join(err, closeErr)
 		failure.PinnedDigest, failure.CandidateDigest = prior.digest(), catalog.digest()
 		failure.Diff = diffCatalogs(prior, catalog)
-		return nil, nil, []error{failure}
-	}
-	if created {
-		notices = append(notices, fmt.Errorf("server %q: first pin %s; tools: %s; use explicit alias= values for stable pins", s.Alias, catalog.digest(), strings.Join(catalogNames(catalog), ", ")))
+		return nil, nil, append(notices, failure)
 	}
 	return session, adapters(session, s.Alias, remote, catalog), notices
 }
