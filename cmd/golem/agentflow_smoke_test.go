@@ -675,15 +675,34 @@ func TestAgentflowParallelSmoke(t *testing.T) {
 	}
 }
 
-// agentflowRunnerOrSkip honors the explicit AGENTFLOW_SRC checkout, otherwise
-// uses an installed binary or skips. Mirrors
+// agentflowRunnerOrSkip honors GO_LLM_REQUIRE_AGENTFLOW and the explicit
+// AGENTFLOW_SRC checkout, otherwise uses an installed binary or skips. Mirrors
 // agentflow.agentflowRunnerForTest, which is unexported in another package.
 func agentflowRunnerOrSkip(t *testing.T, dir string) agentflow.Runner {
 	t.Helper()
-	if src := os.Getenv("AGENTFLOW_SRC"); src != "" {
+	mode, src := os.Getenv("GO_LLM_REQUIRE_AGENTFLOW"), os.Getenv("AGENTFLOW_SRC")
+	_, lookErr := exec.LookPath("agentflow")
+	installed := lookErr == nil
+	switch mode {
+	case "":
+	case "installed":
+		if src != "" {
+			t.Fatal("GO_LLM_REQUIRE_AGENTFLOW=installed but AGENTFLOW_SRC is set")
+		}
+		if !installed {
+			t.Fatal("GO_LLM_REQUIRE_AGENTFLOW=installed but agentflow is not on PATH")
+		}
+	case "source":
+		if src == "" {
+			t.Fatal("GO_LLM_REQUIRE_AGENTFLOW=source but AGENTFLOW_SRC is empty")
+		}
+	default:
+		t.Fatalf("GO_LLM_REQUIRE_AGENTFLOW=%q, want installed or source", mode)
+	}
+	if src != "" {
 		return agentflow.NewSrcExecRunner(dir, src)
 	}
-	if _, err := exec.LookPath("agentflow"); err == nil {
+	if installed {
 		return agentflow.NewExecRunner(dir)
 	}
 	t.Skip("agentflow CLI not available (set AGENTFLOW_SRC=<checkout> to run)")

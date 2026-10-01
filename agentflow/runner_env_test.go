@@ -140,3 +140,33 @@ func TestValidateEnvNames(t *testing.T) {
 		}
 	}
 }
+
+func TestAgentflowTestSource(t *testing.T) {
+	for _, tc := range []struct {
+		mode, src    string
+		installed    bool
+		useSrc, skip bool
+		wantErr      string
+	}{
+		{mode: "", src: "", installed: false, skip: true},
+		{mode: "", src: "", installed: true},
+		{mode: "", src: "/af", installed: true, useSrc: true},
+		{mode: "installed", src: "", installed: true},
+		{mode: "installed", src: "/af", installed: true, wantErr: "AGENTFLOW_SRC is set"},
+		{mode: "installed", src: "", installed: false, wantErr: "agentflow is not on PATH"},
+		{mode: "source", src: "/af", useSrc: true},
+		{mode: "source", src: "", installed: true, wantErr: "AGENTFLOW_SRC is empty"},
+		{mode: "yes", wantErr: `GO_LLM_REQUIRE_AGENTFLOW="yes", want installed or source`},
+	} {
+		useSrc, skip, err := agentflowTestSource(tc.mode, tc.src, tc.installed)
+		if tc.wantErr != "" {
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Errorf("%+v: err = %v, want %q", tc, err, tc.wantErr)
+			}
+			continue
+		}
+		if err != nil || useSrc != tc.useSrc || skip != tc.skip {
+			t.Errorf("%+v: got useSrc=%v skip=%v err=%v", tc, useSrc, skip, err)
+		}
+	}
+}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -11,17 +12,49 @@ import (
 	"testing"
 )
 
-// agentflowRunnerForTest honors the explicit AGENTFLOW_SRC checkout, otherwise
-// uses an installed binary or skips.
+// agentflowTestSource decides how integration tests reach Agentflow. mode is
+// GO_LLM_REQUIRE_AGENTFLOW: empty skips when Agentflow is absent; "installed"
+// or "source" turns absence or a mode mismatch into a failure, so a CI step
+// cannot pass by skipping or by testing the other mode.
+func agentflowTestSource(mode, src string, installed bool) (useSrc, skip bool, err error) {
+	switch mode {
+	case "":
+	case "installed":
+		if src != "" {
+			return false, false, errors.New("GO_LLM_REQUIRE_AGENTFLOW=installed but AGENTFLOW_SRC is set")
+		}
+		if !installed {
+			return false, false, errors.New("GO_LLM_REQUIRE_AGENTFLOW=installed but agentflow is not on PATH")
+		}
+	case "source":
+		if src == "" {
+			return false, false, errors.New("GO_LLM_REQUIRE_AGENTFLOW=source but AGENTFLOW_SRC is empty")
+		}
+	default:
+		return false, false, fmt.Errorf("GO_LLM_REQUIRE_AGENTFLOW=%q, want installed or source", mode)
+	}
+	if src != "" {
+		return true, false, nil
+	}
+	return false, !installed, nil
+}
+
+// agentflowRunnerForTest honors GO_LLM_REQUIRE_AGENTFLOW and the explicit
+// AGENTFLOW_SRC checkout, otherwise uses an installed binary or skips.
 func agentflowRunnerForTest(t *testing.T, dir string) Runner {
-	if src := os.Getenv("AGENTFLOW_SRC"); src != "" {
+	t.Helper()
+	src := os.Getenv("AGENTFLOW_SRC")
+	_, lookErr := exec.LookPath("agentflow")
+	useSrc, skip, err := agentflowTestSource(os.Getenv("GO_LLM_REQUIRE_AGENTFLOW"), src, lookErr == nil)
+	switch {
+	case err != nil:
+		t.Fatal(err)
+	case skip:
+		t.Skip("agentflow CLI not available (set AGENTFLOW_SRC=<checkout> to run)")
+	case useSrc:
 		return NewSrcExecRunner(dir, src)
 	}
-	if _, err := exec.LookPath("agentflow"); err == nil {
-		return NewExecRunner(dir)
-	}
-	t.Skip("agentflow CLI not available (set AGENTFLOW_SRC=<checkout> to run)")
-	return nil
+	return NewExecRunner(dir)
 }
 
 func TestAgentflowRunnerForTest_PrefersSourceOverride(t *testing.T) {
