@@ -85,10 +85,14 @@ func canonicalSourceCheckout(checkout string) (string, error) {
 		return "", errSourcePathList
 	}
 	fi, err := os.Stat(filepath.Join(canonical, "src", "agentflow", "__init__.py"))
-	if err != nil || !fi.Mode().IsRegular() {
+	switch {
+	case err == nil && fi.Mode().IsRegular():
+		return canonical, nil
+	case err == nil || errors.Is(err, os.ErrNotExist):
 		return "", errors.New("agentflow source checkout has no src/agentflow package")
+	default: // e.g. permission denied: the package may exist, so keep the cause
+		return "", fmt.Errorf("agentflow source checkout: %w", err)
 	}
-	return canonical, nil
 }
 
 // DisablePythonBytecodeWrites keeps Python-backed verification from writing import

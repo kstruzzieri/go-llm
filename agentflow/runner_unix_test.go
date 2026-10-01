@@ -8,6 +8,7 @@ import (
 	"errors"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
@@ -148,4 +149,22 @@ func processExited(pid int) bool {
 func processStatIsZombie(stat []byte) bool {
 	closeParen := bytes.LastIndexByte(stat, ')')
 	return closeParen >= 0 && len(stat) > closeParen+2 && stat[closeParen+1] == ' ' && stat[closeParen+2] == 'Z'
+}
+
+// A stat failure other than a missing file keeps its cause: an unreadable
+// package directory must not be reported as a missing package.
+func TestNewSrcExecRunnerKeepsUnexpectedStatError(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses directory permissions")
+	}
+	checkout := writeSourceCheckoutFixture(t)
+	pkg := filepath.Join(checkout, "src", "agentflow")
+	if err := os.Chmod(pkg, 0); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(pkg, 0o700) })
+	_, _, _, err := NewSrcExecRunner(t.TempDir(), checkout).Run(t.Context(), nil, nil)
+	if !errors.Is(err, os.ErrPermission) || strings.Contains(err.Error(), "no src/agentflow package") {
+		t.Fatalf("err = %v, want the permission error, not a missing package", err)
+	}
 }
