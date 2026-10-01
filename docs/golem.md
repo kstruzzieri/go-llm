@@ -447,9 +447,9 @@ Git notices go to stderr, never to machine stdout.
 
 ## AgentFlow subprocess environment
 
-Task mode (`-plan`, `-goal`, `-agentflow-status`, `-agentflow-resume`) and
-`golem audit -scope proofs` start AgentFlow with an environment Golem builds
-from scratch. AgentFlow hands that environment to every validation gate and to
+Planning and task modes (`-goal`, `-plan`, `-agentflow-status`,
+`-agentflow-resume`) and `golem audit -scope proofs` start AgentFlow with an
+environment Golem builds from scratch. AgentFlow hands that environment to every validation gate and to
 its own `git` calls. They receive only:
 
 - **Baseline:** `PATH`, `HOME`, `USER`, `TMPDIR` and `LANG`, when set. On
