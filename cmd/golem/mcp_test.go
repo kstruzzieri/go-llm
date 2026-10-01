@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"reflect"
 	"strings"
@@ -210,6 +211,30 @@ func TestMCPToolsRejectedInGoalAndPlan(t *testing.T) {
 		// The exact mode rejection: without the guard, -mcp-tools fails later with a different error (an unknown alias for -goal, the approval-flag requirement for -plan).
 		if err == nil || !strings.Contains(err.Error(), "does not attach MCP tools") {
 			t.Fatalf("%s with -mcp-tools err = %v, want the mode's MCP rejection", mode, err)
+		}
+	}
+}
+
+// TestMCPToolsValidationMatchesLibrary keeps the CLI's positional pre-check in
+// step with mcpclient's fatal selection validation.
+func TestMCPToolsValidationMatchesLibrary(t *testing.T) {
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	pins, err := mcpclient.NewPinStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	many := make([]string, 129)
+	for i := range many {
+		many[i] = fmt.Sprintf("t%d", i)
+	}
+	for _, names := range [][]string{{strings.Repeat("a", 55)}, {strings.Repeat("a", 56)}, many[:128], many, {"a.b"}, {"a", "a"}} {
+		server := mcpclient.HTTPServer("fs", "http://127.0.0.1:1")
+		_, cliErr := applyMCPTools([]mcpclient.Server{server}, []string{"fs=" + strings.Join(names, ",")})
+		_, libErr := mcpclient.Inspect(t.Context(), mcpClientImpl(), server.WithTools(names...), pins)
+		var ae *mcpclient.AdmissionError
+		libRejects := errors.As(libErr, &ae) && ae.Reason == "invalid_config"
+		if (cliErr != nil) != libRejects {
+			t.Fatalf("%d names: CLI rejects=%v, library rejects=%v (%v)", len(names), cliErr != nil, libRejects, libErr)
 		}
 	}
 }

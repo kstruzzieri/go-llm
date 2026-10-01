@@ -590,3 +590,18 @@ func TestMCPToolsRunWiring(t *testing.T) {
 		t.Fatal("-mcp-tools value echoed")
 	}
 }
+
+func TestMCPTrustRejectsToolSelection(t *testing.T) {
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	root := t.TempDir()
+	f := newTrustHTTPFixture(t)
+	for _, action := range []string{"inspect", "approve"} {
+		out, _, err := trustCommand(t, action, "-root", root, "-mcp-http", "fs="+f.url, "-mcp-tools", "fs=credential-value")
+		if err == nil || out != "" || err.Error() != "mcp: inspect and approve do not take -mcp-tools; they always review the complete catalog" {
+			t.Fatalf("%s with -mcp-tools = (%v, %q), want the explicit rejection", action, err, out)
+		}
+	}
+	if f.deletes.Load() != 0 {
+		t.Fatal("a rejected -mcp-tools command contacted the server")
+	}
+}

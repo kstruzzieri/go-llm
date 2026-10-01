@@ -366,3 +366,23 @@ func TestUnselectedToolCallNeverReachesSession(t *testing.T) {
 		t.Fatal("unselected call did not produce the dispatcher's unknown-tool result")
 	}
 }
+
+func TestInspectAndApproveIgnoreSelection(t *testing.T) {
+	pins := testPins(t)
+	// An in-memory fixture serves one dial, so Approve gets a fresh server.
+	inspectSrv, _, _ := staticCatalogServer(t, "fs", &gomcp.Tool{Name: "read"}, &gomcp.Tool{Name: "write"})
+	inspected, err := Inspect(context.Background(), Implementation{Name: "test"}, inspectSrv.WithTools("read"), pins)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(inspected.String(), "candidate mcp__fs__write\n") {
+		t.Fatalf("Inspect narrowed the reviewed catalog to the selection:\n%s", inspected)
+	}
+	approveSrv, _, _ := staticCatalogServer(t, "fs", &gomcp.Tool{Name: "read"}, &gomcp.Tool{Name: "write"})
+	if _, err := Approve(context.Background(), Implementation{Name: "test"}, approveSrv.WithTools("read"), pins, inspected.CandidateDigest); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(pinBytes(t, pins, "fs"), []byte(`"mcp__fs__write"`)) {
+		t.Fatal("Approve pinned only the selected tools")
+	}
+}
