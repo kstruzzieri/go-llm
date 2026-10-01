@@ -68,6 +68,7 @@ func TestMigrate_FreshCreatesBothTables(t *testing.T) {
 	for _, c := range []string{
 		"id", "title", "messages", "created_at", "updated_at",
 		"conversation_key", "identity_source", "latest_call_id", "message_count", "stitch_status",
+		"rendered_messages",
 	} {
 		if !conv[c] {
 			t.Errorf("conversations missing column %q", c)
@@ -109,9 +110,12 @@ func TestMigrate_LegacyFiveColumnTableGetsAuditColumns(t *testing.T) {
 	}
 
 	conv := columns(t, db, "conversations")
-	for _, col := range auditColumns {
-		if !conv[col.name] {
-			t.Errorf("legacy conversations missing audit column %q after migrate", col.name)
+	for _, c := range []string{
+		"conversation_key", "identity_source", "latest_call_id", "message_count", "stitch_status",
+		"rendered_messages",
+	} {
+		if !conv[c] {
+			t.Errorf("legacy conversations missing audit column %q after migrate", c)
 		}
 	}
 
@@ -291,6 +295,7 @@ func TestAuditUpgradeRechecksColumnsUnderLock(t *testing.T) {
 	}{
 		{"legacy", nil},
 		{"partial", []string{"identity_source", "stitch_status"}},
+		{"newest-missing", []string{"conversation_key", "identity_source", "latest_call_id", "message_count", "stitch_status"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "transcript.db")
@@ -331,6 +336,63 @@ func TestAuditUpgradeRechecksColumnsUnderLock(t *testing.T) {
 	}
 }
 
+// TestAuditUpgradeWaitsForConcurrentUpgrade: two openers both on the slow
+// path. While A holds the write lock, B must wait on busy_timeout instead of
+// failing at once, then find A's columns and succeed.
+func TestAuditUpgradeWaitsForConcurrentUpgrade(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "transcript.db")
+	a, b := openUpgradeDB(t, path), openUpgradeDB(t, path)
+	seedLegacyConversations(t, a)
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	aLocked, release := make(chan struct{}), make(chan struct{})
+	unblock := sync.OnceFunc(func() { close(release) })
+	defer unblock()
+	aDone := make(chan error, 1)
+	go func() {
+		aDone <- addMissingAuditColumnsWith(ctx, a, auditUpgradeHooks{afterLock: func() {
+			close(aLocked)
+			select {
+			case <-release:
+			case <-ctx.Done():
+			}
+		}})
+	}()
+	select {
+	case <-aLocked:
+	case err := <-aDone:
+		t.Fatalf("A finished before its lock gate: %v", err)
+	case <-ctx.Done():
+		t.Fatal(ctx.Err())
+	}
+	bProbed := make(chan struct{})
+	bDone := make(chan error, 1)
+	go func() {
+		bDone <- addMissingAuditColumnsWith(ctx, b, auditUpgradeHooks{afterProbe: func() { close(bProbed) }})
+	}()
+	select {
+	case <-bProbed:
+	case err := <-bDone:
+		t.Fatalf("B finished before its probe gate: %v", err)
+	case <-ctx.Done():
+		t.Fatal(ctx.Err())
+	}
+	select {
+	case err := <-bDone:
+		t.Fatalf("B returned while A held the write lock: %v; want it to wait on busy_timeout", err)
+	case <-time.After(200 * time.Millisecond):
+	}
+	unblock()
+	if err := upgradeResult(t, ctx, aDone); err != nil {
+		t.Fatalf("A: %v", err)
+	}
+	if err := upgradeResult(t, ctx, bDone); err != nil {
+		t.Fatalf("B after A's upgrade: %v", err)
+	}
+	assertAuditUpgrade(t, a)
+	assertAuditUpgrade(t, b)
+}
+
 // TestAuditUpgradeIsAtomic: a failure mid-upgrade leaves no column behind,
 // and a retry completes the upgrade.
 func TestAuditUpgradeIsAtomic(t *testing.T) {
@@ -358,8 +420,8 @@ func TestAuditUpgradeIsAtomic(t *testing.T) {
 // TestMigrateCurrentSchemaTakesNoWriteLock: on an up-to-date database the
 // real Open only reads, so it returns at once while another connection holds
 // the write lock. Existing-object CREATE ... IF NOT EXISTS and journal_mode=WAL
-// on a WAL database take no write lock under modernc (spec Evidence table;
-// journal_mode probe in $E/modernc-probe/walpragma.out).
+// on a WAL database take no write lock under modernc v1.46.1 (SQLite 3.51.2);
+// this test pins that.
 func TestMigrateCurrentSchemaTakesNoWriteLock(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "transcript.db")
 	a := openUpgradeDB(t, path)
