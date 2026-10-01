@@ -121,7 +121,9 @@ type Options struct {
 	// ownership: Close never releases it or its providers. The bootstrap
 	// installs no interceptors; an embedder that wants the Golem CLI's
 	// always-on tool guards (#575) supplies an Orchestrator built with
-	// agent.WithInterceptors.
+	// agent.WithInterceptors(inv, interceptor.Egress{},
+	// interceptor.ChildScopeDenials{}), where inv comes from
+	// interceptor.NewInvariants(interceptor.DefaultInvariants()).
 	Orchestrator *agent.Orchestrator
 	// DestinationPolicy governs which REMOTE model destinations the
 	// config-driven runtime may reach (#477). The zero value fails closed:

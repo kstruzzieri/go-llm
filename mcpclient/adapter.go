@@ -53,7 +53,8 @@ var _ agent.OriginTool = (*toolAdapter)(nil)
 // forces needsApproval to true, and it makes /tools honest. It is not inert:
 // since #575 Golem's always-on egress guard (agent/interceptor Egress) tests
 // Class.Has(Exec) on every run, so an MCP call whose arguments carry a
-// decodable argv gets an egress finding and a badge at its approval prompt.
+// decodable argv gets an egress finding and a badge at its approval prompt
+// (unless that argv is on the classifier's quiet set).
 // Narrowing Class would silently drop that classification. ApprovalAlways is
 // mandatory -- Network alone is NOT "mutating" (IsMutating checks Write|Exec),
 // so an ApprovalDefault network tool would skip approval entirely.

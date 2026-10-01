@@ -77,7 +77,7 @@ roots is not implemented. Scoped retrieval remains excluded and belongs to
 [#554](https://github.com/kstruzzieri/go-llm/issues/554). #552's filesystem
 boundaries remain unchanged.
 
-With the parent reporter enabled, actual scoped native-reader refusals contribute
+With the parent reporter enabled (always in Golem since #575), actual scoped native-reader refusals contribute
 to its run-level risk report as described in
 [interceptors and secret detection](golem.md#interceptors-and-secret-detection).
 A refusal is counted when the reader returns it, even if the child observation

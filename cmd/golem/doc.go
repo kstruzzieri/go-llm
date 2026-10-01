@@ -95,24 +95,30 @@
 // or .kube component, read_file under the credential components or the exact
 // basename .env, and a run_command or start_command whose argv is an inline
 // sh, bash, dash, ksh or zsh script run with -c, -lc, -ec or -euc that pipes a
-// curl or wget stdout fetch into a bare shell (optionally under sudo). The
-// guard reads the argument the tool's own decoder would use, so a case-variant
-// field name is guarded and two equivalent spellings are blocked as ambiguous.
-// These are direct-access tripwires on named tool arguments, not confinement:
-// run_command, search, retrieve, MCP tools and verifier commands can still
-// reach or expose the same files. The egress classifier tags the argv of every
-// run_command and start_command, and of any other exec-class call (MCP tools
-// included) whose arguments carry a top-level argv string array, by what it
-// visibly reaches (privileged, network, package-manager, interpreter, unknown)
-// after peeling env, nohup, nice, time, timeout and stdbuf; anything it cannot
-// parse, including an inline script it cannot read literally, and any command
-// outside its quiet set, stays visible as unknown. The approval prompt appends
-// the current call's class and label to the risk line, "interceptor risk 20 ·
-// egress: network (git push)", on grant-covered auto-approvals too. These are
-// finite checks over the argv, not a sandbox: go build may still download
-// modules and make runs whatever the Makefile says. No score or badge revokes
-// a grant. The hard line-count limit the issue mentioned is deferred; the
-// existing 256 KiB write bounds remain.
+// curl or wget stdout fetch into a bare shell (optionally -s, optionally under
+// sudo). A shell started with any other option form (bash -e -c, bash -o
+// pipefail -c, sh -xc, bash -lic) is not read, so such a pipeline is neither
+// blocked nor labeled network. The guard reads the argument the tool's own
+// decoder would use, so a case-variant field name is guarded and two
+// equivalent spellings are blocked as ambiguous. These are direct-access
+// tripwires on named tool arguments, not confinement: run_command, search,
+// retrieve, MCP tools and verifier commands can still reach or expose the same
+// files. The egress classifier reads the argv of every run_command and
+// start_command, and of any other exec-class call (MCP tools included) whose
+// arguments carry a top-level argv string array, after peeling env, nohup,
+// nice, time, timeout and stdbuf, and labels what it visibly reaches
+// (privileged, network, package-manager, interpreter, unknown). A command in
+// its quiet set gets no label. Anything else it cannot parse, including an
+// inline -c/-lc/-ec/-euc script it cannot read literally, is labeled unknown;
+// a shell started with an unmodeled option form is labeled interpreter 0
+// whatever its script does. The approval prompt appends the current call's
+// class and label to the risk line, "interceptor risk 20 · egress: network
+// (git push)", on grant-covered auto-approvals too. These are finite checks
+// over the argv, not a sandbox: go build may still download modules, make runs
+// whatever the Makefile says, and quiet commands such as find -exec, awk
+// system() or git -c options can still run anything. No score or badge
+// revokes a grant. The hard line-count limit the issue mentioned is deferred;
+// the existing 256 KiB write bounds remain.
 //
 // Independently of -interceptors, every tool result reaches the model inside
 // a keyed <<<TOOL_RESULT / >>>TOOL_RESULT frame minted per request, and every
@@ -121,7 +127,8 @@
 // Golem application prompt and its capability-gated write/exec clauses
 // (#430). For observations allowed through the interceptor pipeline, the
 // terminal, events, session store and traces show raw results; approval,
-// grants and sandboxes remain the enforcement layer.
+// grants and sandboxes, plus the always-on argument invariants (a lexical
+// tripwire), remain the enforcement layer.
 //
 // /consult <name> <prompt> asks one external subscription CLI for a single
 // advisory judgment (#382). Consultants come only from a local
