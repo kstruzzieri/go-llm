@@ -115,9 +115,9 @@ func TestStartupNotices_Interceptors(t *testing.T) {
 		want string
 	}{
 		{"full chain", interceptorsNotice(true, interceptorsFor(flags{interceptors: true}, testCanaryBinding(t))),
-			"workspace: /w\ninterceptors: enabled (zero_width, encoding, typoglycemia, invariants, egress, secrets, child_scope_denials, canary)"},
+			"workspace: /w\n" + fullNoticeLine},
 		{"guards only", interceptorsNotice(false, interceptorsFor(flags{}, nil)),
-			"workspace: /w\nguards: invariants, egress, child_scope_denials (always on; -interceptors adds detectors, secrets, canary)"},
+			"workspace: /w\n" + guardsNoticeLine},
 	} {
 		got := strings.Join(startupNotices(startupInfo{workspace: "/w", interceptorLine: tc.line}), "\n")
 		if got != tc.want {
@@ -131,7 +131,6 @@ func TestStartupNotices_Interceptors(t *testing.T) {
 // notice still says enabled. A benign mention of "system prompt" is enough to
 // exercise scoring without requiring tool calls from the test backend.
 func TestRunWiresInterceptors(t *testing.T) {
-	const want = "interceptors: enabled (zero_width, encoding, typoglycemia, invariants, egress, secrets, child_scope_denials, canary)"
 	const goal = "Explain the term system prompt."
 	for _, tc := range []struct {
 		name string
@@ -215,13 +214,12 @@ func TestRunWiresInterceptors(t *testing.T) {
 				t.Fatalf("run = %v, want test stop; stderr:\n%s", err, readRunTestFile(t, stderr))
 			}
 			lines := strings.Split(strings.TrimSpace(readRunTestFile(t, stderr)), "\n")
-			if got := slices.Contains(lines, want); got != tc.on {
-				t.Fatalf("startup lines = %q, exact line %q present = %v, want %v", lines, want, got, tc.on)
+			if got := slices.Contains(lines, fullNoticeLine); got != tc.on {
+				t.Fatalf("startup lines = %q, exact line %q present = %v, want %v", lines, fullNoticeLine, got, tc.on)
 			}
 			// #575: the guards-only chain has its own line and never says "enabled".
-			const guards = "guards: invariants, egress, child_scope_denials (always on; -interceptors adds detectors, secrets, canary)"
-			if got := slices.Contains(lines, guards); got == tc.on {
-				t.Fatalf("startup lines = %q, exact line %q present = %v, want %v", lines, guards, got, !tc.on)
+			if got := slices.Contains(lines, guardsNoticeLine); got == tc.on {
+				t.Fatalf("startup lines = %q, exact line %q present = %v, want %v", lines, guardsNoticeLine, got, !tc.on)
 			}
 		})
 	}
