@@ -66,3 +66,33 @@ func TestConnectRejectsInvalidSelection(t *testing.T) {
 		})
 	}
 }
+
+// TestValidateSelection pins what Connect accepts, the exact boundaries, and
+// that errors name entries by 1-based position without echoing them.
+func TestValidateSelection(t *testing.T) {
+	full := make([]string, maxToolsPerServer)
+	for i := range full {
+		full[i] = "t" + itoa(i)
+	}
+	for _, tt := range []struct {
+		names []string
+		want  string
+	}{
+		{nil, ""},
+		{[]string{"read", "write_file", "a-b"}, ""},
+		{[]string{strings.Repeat("a", 55)}, ""}, // "mcp__fs__" + 55 bytes = 64, the composed-name limit
+		{full, ""},
+		{[]string{"read", "bad name", "read"}, "mcpclient: tool selection entry 2 is not a valid tool name"},
+		{[]string{"read", "write", "read"}, "mcpclient: tool selection entry 3 repeats a name"},
+		{append(full, "extra"), "mcpclient: tool selection exceeds 128 names"},
+	} {
+		err := validateSelection(Server{Alias: "fs"}.WithTools(tt.names...))
+		got := ""
+		if err != nil {
+			got = err.Error()
+		}
+		if got != tt.want {
+			t.Errorf("validateSelection(%d names) = %q, want %q", len(tt.names), got, tt.want)
+		}
+	}
+}

@@ -1,15 +1,12 @@
 package mcpclient
 
-import (
-	"errors"
-	"fmt"
-)
+import "fmt"
 
 // validateSelection rejects a selection that could never name exactly one
 // admitted tool. Errors identify entries by position, never by text.
 func validateSelection(s Server) error {
 	if len(s.tools) > maxToolsPerServer {
-		return errors.New("mcpclient: tool selection exceeds 128 names")
+		return fmt.Errorf("mcpclient: tool selection exceeds %d names", maxToolsPerServer)
 	}
 	seen := make(map[string]bool, len(s.tools))
 	for i, name := range s.tools {
