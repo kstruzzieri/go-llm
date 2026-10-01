@@ -16,7 +16,8 @@
 // cover every tool, a changed unselected tool still blocks the alias, and a
 // selected name absent from the admitted catalog blocks the alias with
 // selection_missing. Omitted selection exposes the whole catalog; an explicit
-// empty selection exposes none. Every exposed tool still requires approval.
+// empty selection exposes none. Every exposed tool keeps per-call approval
+// (agent.ApprovalAlways).
 //
 // Inspect never writes a pin and renders quoted definitions. Approve re-fetches
 // and publishes only the exact supplied candidate digest if the prior pin

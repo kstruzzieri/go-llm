@@ -668,12 +668,14 @@ counts blocked aliases separately from tools.
 Narrow an attached server to the tools a task needs with
 `-mcp-tools 'fs=read_file,list_directory'` (repeatable, one per alias). Names are
 the server's own tool names, not the `mcp__fs__` form. `-mcp-tools 'fs='`
-exposes no tools from that server. Selection applies after the complete catalog
-is verified and pinned, so a change to an unselected tool still blocks the
-alias, and a selected name the server does not offer blocks the alias
-(`selection_missing`) instead of exposing a partial set. Selected tools still
-require approval for every call. `golem mcp inspect` and `approve` do not take
-`-mcp-tools`: they always review the complete catalog.
+exposes no tools from that server. The server is still started, verified and
+kept connected for the session; omit its `-mcp-stdio`/`-mcp-http` flag to not
+run it. Selection applies after the complete catalog is verified and pinned, so
+a change to an unselected tool still blocks the alias, and a selected name the
+server does not offer blocks the alias (`selection_missing`) instead of
+exposing a partial set. Selected tools still require approval for every call.
+`golem mcp inspect` and `approve` do not take `-mcp-tools`: they always review
+the complete catalog.
 
 Review and approve the exact current catalog without starting a model session
 or invoking a tool:
@@ -695,12 +697,14 @@ the accepted names-only diff and digest on stderr. A durability error is failure
 even if published bytes may already exist; inspect before retrying.
 
 `-p` requires an existing matching pin for every configured alias before model
-discovery, capability probes, or inference. Missing, changed, invalid, unavailable,
-or unreadable catalogs stop the invocation with exit 1 and no pin writes. JSON
-and stream-json emit one `golem.result.v1` error record with code `mcp_untrusted`
-and no runtime events; text prints diagnostics on stderr. Catalog approval does
-not authorize tool execution: MCP tools still require interactive approval and
-remain denied headlessly. `-goal` and `-plan` still reject MCP attachments.
+discovery, capability probes, or inference. Missing, changed, invalid,
+unavailable, or unreadable catalogs, and a `-mcp-tools` name the server does not
+offer (`selection_missing`), stop the invocation with exit 1 and no pin writes.
+JSON and stream-json emit one `golem.result.v1` error record with code
+`mcp_untrusted` and no runtime events; text prints diagnostics on stderr.
+Catalog approval does not authorize tool execution: MCP tools still require
+interactive approval and remain denied headlessly. `-goal` and `-plan` still
+reject MCP attachments.
 
 Pins bind the complete model-facing catalog to the canonical workspace and alias.
 A new linked or scratch worktree has a new trust namespace: REPL first contact
