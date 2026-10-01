@@ -369,8 +369,12 @@ func (s *SQLiteFeedbackStore) runInTxBefore(ctx context.Context, deadline time.T
 	if err != nil {
 		return fmt.Errorf("provider: SQLiteFeedbackStore conn: %w", err)
 	}
+	// Background, not ctx: this PRAGMA never touches the database file, and an
+	// interrupt raised here by an expiring ctx would stay set on the connection
+	// returned below, so database/sql's validity check would discard it (for
+	// ":memory:", the whole database).
 	var saved int64
-	if err := conn.QueryRowContext(ctx, "PRAGMA busy_timeout").Scan(&saved); err != nil {
+	if err := conn.QueryRowContext(context.Background(), "PRAGMA busy_timeout").Scan(&saved); err != nil {
 		_ = conn.Close()
 		return fmt.Errorf("provider: SQLiteFeedbackStore read busy_timeout: %w", err)
 	}
@@ -412,7 +416,7 @@ func (s *SQLiteFeedbackStore) runInTxBefore(ctx context.Context, deadline time.T
 		return err
 	}
 	if err := ctx.Err(); err != nil {
-		return fmt.Errorf("provider: SQLiteFeedbackStore commit: %w", err)
+		return fmt.Errorf("provider: SQLiteFeedbackStore before commit: %w", err)
 	}
 	if err := capBusy(tx); err != nil {
 		return err
