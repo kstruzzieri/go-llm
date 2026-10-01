@@ -678,8 +678,9 @@ interceptor trailer on its own line, and stages it.
   cleared by `/clear`, by `/new`, by a successful `/resume`, and by a turn
   that both completes without error and produces an answer.
 - **Dropping.** `/consult drop` discards the slot without changing conversation
-  history or grants. It also works when consulting is disabled or interceptors
-  are off, and reports `no staged advice` when the slot is already empty.
+  history or grants. It also works when consulting is disabled or
+  `-interceptors` is off, and reports `no staged advice` when the slot is
+  already empty.
 - **Retained on failure.** If the turn fails or you cancel it, the advisory
   stays staged; the consultant is not rerun. A step-0 interceptor refusal or
   `ErrContextExhausted` instead **drops** the slot and prints `dropped staged

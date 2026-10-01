@@ -636,12 +636,18 @@ func defaultGuards() []agent.Interceptor {
 			out = append(out, ic)
 		}
 	}
+	// Fail closed, like interceptor.mustInvariants: a re-typed or removed
+	// library guard must not silently shrink the always-on set.
+	if len(out) != 3 {
+		panic(fmt.Sprintf("golem: default guards: matched %d of 3 in interceptor.Defaults", len(out)))
+	}
 	return out
 }
 
-// interceptorsNotice names the installed chain in the startup notice, from
-// the instances themselves, so the line cannot drift from what runs. The
-// guards-only chain (#575) never claims "enabled".
+// interceptorsNotice names the installed chain in the startup notice. The
+// names come from the instances themselves, so the list cannot drift from
+// what runs; the guards-only suffix is fixed text. The guards-only chain
+// (#575) never claims "enabled".
 func interceptorsNotice(full bool, ics []agent.Interceptor) string {
 	names := make([]string, len(ics))
 	for i, ic := range ics {

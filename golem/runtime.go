@@ -118,7 +118,10 @@ type Options struct {
 	// synchronously.
 	OnWarning func(error)
 	// Orchestrator overrides the config-driven bootstrap. The caller retains
-	// ownership: Close never releases it or its providers.
+	// ownership: Close never releases it or its providers. The bootstrap
+	// installs no interceptors; an embedder that wants the Golem CLI's
+	// always-on tool guards (#575) supplies an Orchestrator built with
+	// agent.WithInterceptors.
 	Orchestrator *agent.Orchestrator
 	// DestinationPolicy governs which REMOTE model destinations the
 	// config-driven runtime may reach (#477). The zero value fails closed:
