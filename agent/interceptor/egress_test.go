@@ -450,6 +450,12 @@ func TestEgressClassificationData(t *testing.T) {
 	pin("privileged", privilegedBins, "sudo doas su")
 	pin("package", packageBins, "npm npx yarn pnpm bun pip pip3 pipx uv poetry conda cargo gem bundle composer brew apt apt-get dnf yum pacman apk nix mvn gradle")
 	pin("shells", shellNames, "sh bash zsh dash ksh fish")
+	pin("inline shells", inlineShells, "sh bash dash ksh zsh")
+	pin("shell -o names", shellOptionNames, "errexit nounset xtrace")
+	pin("pipefail shells", pipefailShells, "bash zsh ksh")
+	if shellOptionLetters != "ceuxli" {
+		t.Errorf("shellOptionLetters = %q, want %q", shellOptionLetters, "ceuxli")
+	}
 	pin("interpreters", interpreterNames, "python python3 perl ruby node deno php")
 	pin("git network", gitNetworkSubs, "push fetch pull clone ls-remote remote submodule")
 	pin("git quiet", gitQuietSubs, "status diff log show rev-parse rev-list ls-files ls-tree cat-file check-ignore check-attr describe branch tag config help version")
