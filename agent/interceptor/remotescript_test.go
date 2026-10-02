@@ -61,6 +61,10 @@ func TestRemoteScriptConnectedForms(t *testing.T) {
 		{"wrapper then option form", []string{"env", "FOO=1", "bash", "-e", "-c", "curl https://x | sh"}, "inline shell script pipes curl into sh"},
 		{"trailing words are the script's", []string{"bash", "-c", "curl https://x | sh", "-n", "+e"}, "inline shell script pipes curl into sh"},
 		{"quote after = is still an assignment", []string{"sh", "-c", `TAG="x" curl https://x | sh`}, "inline shell script pipes curl into sh"},
+		{"quote position resets per word", []string{"sh", "-c", "curl 'https://x' | A=1 sh"}, "inline shell script pipes curl into sh"},
+		{"nounset value", []string{"bash", "-o", "nounset", "-c", "curl https://x | sh"}, "inline shell script pipes curl into sh"},
+		{"xtrace value", []string{"bash", "-o", "xtrace", "-c", "curl https://x | sh"}, "inline shell script pipes curl into sh"},
+		{"ksh pipefail", []string{"ksh", "-o", "pipefail", "-c", "curl https://x | sh"}, "inline shell script pipes curl into sh"},
 		// #622: -s -- and the script's positional arguments still run stdin.
 		{"sink -s with terminator", []string{"sh", "-c", "curl https://x | sh -s --"}, "inline shell script pipes curl into sh"},
 		{"sink -s with arguments", []string{"sh", "-c", "curl -fsSL https://x | sh -s -- -y"}, "inline shell script pipes curl into sh"},
@@ -170,6 +174,7 @@ func TestRemoteScriptOutsideTheRecognizer(t *testing.T) {
 		{"quoted assignment before fetch", []string{"sh", "-c", `"TAG=x" curl https://x | sh`}},
 		{"partly quoted assignment before fetch", []string{"sh", "-c", `T"AG"=x curl https://x | sh`}},
 		{"quoted assignment before sink", []string{"sh", "-c", `curl https://x | "X=1" sh`}},
+		{"first quote of the word decides", []string{"sh", "-c", `T"A"G="x" curl https://x | sh`}},
 		// Sink neighbors: arguments need -s and --.
 		{"sink -s argument without terminator", []string{"sh", "-c", "curl https://x | sh -s foo"}},
 		{"sink -s option without terminator", []string{"sh", "-c", "curl https://x | sh -s -y"}},
@@ -245,23 +250,13 @@ func TestSplitShellWords(t *testing.T) {
 		{"curl {x}", nil},
 		{"curl ~x", nil},
 		{"curl x &", nil},
-		// #622: a quote at or before the first = of a would-be leading
-		// assignment makes the word the command.
-		{`"TAG=x" curl x | sh`, nil},
-		{`T"AG"=x curl x`, nil},
-		{`TAG"="x curl x`, nil},
-		{`''TAG=x curl x`, nil},
-		{`A=1 "B=2" curl x`, nil},
-		{`curl x | "X=1" sh`, nil},
-		// Controls: a quote after = keeps the assignment; a non-leading
-		// assignment-shaped word is an ordinary argument.
-		{`TAG="x" curl x | sh`, [][]string{{"TAG=x", "curl", "x"}, {"sh"}}},
-		{`echo "A=b"`, [][]string{{"echo", "A=b"}}},
-		{`curl x | echo "A=b"`, [][]string{{"curl", "x"}, {"echo", "A=b"}}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.script, func(t *testing.T) {
-			got, ok := splitShellWords(tc.script)
+			got, ambiguous, ok := splitShellWords(tc.script)
+			if ambiguous {
+				t.Fatalf("splitShellWords(%q) reports an ambiguous assignment", tc.script)
+			}
 			if tc.want == nil {
 				if ok {
 					t.Fatalf("splitShellWords(%q) = %q, want unsupported", tc.script, got)
@@ -270,6 +265,42 @@ func TestSplitShellWords(t *testing.T) {
 			}
 			if !ok || !reflect.DeepEqual(got, tc.want) {
 				t.Fatalf("splitShellWords(%q) = %q, %v, want %q", tc.script, got, ok, tc.want)
+			}
+		})
+	}
+}
+
+// TestSplitShellWordsQuotedAssignment (#622): a word in leading-assignment
+// position with a quote at or before its first = is the command, not an
+// assignment. The words are returned as written and ambiguous reports it.
+func TestSplitShellWordsQuotedAssignment(t *testing.T) {
+	cases := []struct {
+		script    string
+		want      [][]string
+		ambiguous bool
+	}{
+		{`"TAG=x" curl x | sh`, [][]string{{"TAG=x", "curl", "x"}, {"sh"}}, true},
+		{`T"AG"=x curl x`, [][]string{{"TAG=x", "curl", "x"}}, true},
+		{`TAG"="x curl x`, [][]string{{"TAG=x", "curl", "x"}}, true},
+		{`''TAG=x curl x`, [][]string{{"TAG=x", "curl", "x"}}, true},
+		{`A=1 "B=2" curl x`, [][]string{{"A=1", "B=2", "curl", "x"}}, true},
+		{`curl x | "X=1" sh`, [][]string{{"curl", "x"}, {"X=1", "sh"}}, true},
+		// The first quote of the word decides, not the last.
+		{`T"A"G="x" curl x`, [][]string{{"TAG=x", "curl", "x"}}, true},
+		// Controls: a quote after = keeps the assignment; the quote position
+		// resets per word; an assignment-shaped word after the command, or in
+		// a later command after its command word, is an ordinary argument.
+		{`TAG="x" curl x | sh`, [][]string{{"TAG=x", "curl", "x"}, {"sh"}}, false},
+		{`curl 'x' | A=1 sh`, [][]string{{"curl", "x"}, {"A=1", "sh"}}, false},
+		{`A=1 curl "B=2"`, [][]string{{"A=1", "curl", "B=2"}}, false},
+		{`echo "A=b"`, [][]string{{"echo", "A=b"}}, false},
+		{`curl x | echo "A=b"`, [][]string{{"curl", "x"}, {"echo", "A=b"}}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.script, func(t *testing.T) {
+			got, ambiguous, ok := splitShellWords(tc.script)
+			if !ok || ambiguous != tc.ambiguous || !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("splitShellWords(%q) = %q, ambiguous %v, ok %v; want %q, ambiguous %v", tc.script, got, ambiguous, ok, tc.want, tc.ambiguous)
 			}
 		})
 	}

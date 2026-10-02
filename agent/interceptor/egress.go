@@ -333,24 +333,30 @@ func inlineShellScript(argv []string) (shell, flag, script string, form shellFor
 // nothing about what runs and need no evaluation. Any other unquoted
 // metacharacter (an interior newline included), an unterminated quote, an
 // empty command, or a comment that is followed by more script lines makes
-// the script unsupported. So does a word in leading-assignment position that
-// would be NAME=VALUE but has a quote at or before its first =: in shell
-// grammar that word is the command, not an assignment (#622).
-func splitShellWords(script string) (cmds [][]string, ok bool) {
+// the script unsupported. A word in leading-assignment position that would
+// be NAME=VALUE but has a quote at or before its first = is the command in
+// shell grammar, not an assignment; it is returned as written and ambiguous
+// reports it, because commandWords would strip it (#622).
+func splitShellWords(script string) (cmds [][]string, ambiguous, ok bool) {
 	script = strings.TrimRight(script, " \t\n")
 	var (
-		cur        []string
-		word       []rune
-		inWord     bool
-		quote      rune // 0, '\'' or '"'
-		quoteAt    = -1 // index in word where its first quote opened
-		quotedName bool // a would-be leading assignment had a quote at or before =
-		endWord    = func() {
+		cur      []string
+		word     []rune
+		inWord   bool
+		quote    rune   // 0, '\'' or '"'
+		quoteAt  = -1   // index in word where its first quote opened
+		inPrefix = true // every earlier word of this command is an assignment
+		endWord  = func() {
 			if inWord {
-				if quoteAt >= 0 && len(commandWords(cur)) == 0 && envAssignment.MatchString(string(word)) && quoteAt <= slices.Index(word, '=') {
-					quotedName = true
+				w := string(word)
+				if inPrefix {
+					assign := envAssignment.MatchString(w)
+					if assign && quoteAt >= 0 && quoteAt <= slices.Index(word, '=') {
+						ambiguous, assign = true, false
+					}
+					inPrefix = assign
 				}
-				cur = append(cur, string(word))
+				cur = append(cur, w)
 				word, inWord, quoteAt = word[:0], false, -1
 			}
 		}
@@ -370,7 +376,7 @@ func splitShellWords(script string) (cmds [][]string, ok bool) {
 			case '"':
 				quote = 0
 			case '$', '`', '\\':
-				return nil, false
+				return nil, false, false
 			default:
 				word = append(word, r)
 			}
@@ -384,31 +390,28 @@ func splitShellWords(script string) (cmds [][]string, ok bool) {
 		case r == '|':
 			endWord()
 			if len(cur) == 0 {
-				return nil, false
+				return nil, false, false
 			}
-			cmds, cur = append(cmds, cur), nil
+			cmds, cur, inPrefix = append(cmds, cur), nil, true
 		case r == '#' && !inWord:
 			if slices.Contains(rs[i:], '\n') {
-				return nil, false
+				return nil, false, false
 			}
 			i = len(rs)
 		case strings.ContainsRune(shellUnsupported, r):
-			return nil, false
+			return nil, false, false
 		default:
 			word, inWord = append(word, r), true
 		}
 	}
 	if quote != 0 {
-		return nil, false
+		return nil, false, false
 	}
 	endWord()
-	if quotedName {
-		return nil, false
-	}
 	if len(cur) == 0 {
-		return nil, false
+		return nil, false, false
 	}
-	return append(cmds, cur), true
+	return append(cmds, cur), ambiguous, true
 }
 
 // commandWords drops the leading NAME=VALUE assignment words of a simple
@@ -525,7 +528,9 @@ func scriptNetworkEvidence(rest []string) (label string, ev scriptEvidence) {
 	case shellFormUnsupported:
 		return strconv.Quote(shell) + " unsupported form", scriptUnsupported
 	}
-	cmds, ok := splitShellWords(script)
+	// An ambiguous assignment keeps the reading it had before #622, so the
+	// badge never drops below it; only the hard block refuses that reading.
+	cmds, _, ok := splitShellWords(script)
 	if !ok {
 		return strconv.Quote(shell+" "+flag) + " unsupported script", scriptUnsupported
 	}

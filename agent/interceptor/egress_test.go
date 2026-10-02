@@ -116,7 +116,9 @@ func TestEgressDirectNames(t *testing.T) {
 
 // TestEgressShellScriptEvidence: a recognized inline script contributes
 // network evidence only from the command position of its literal simple
-// commands, one level deep; everything else keeps the interpreter badge.
+// commands, one level deep. A readable script without one keeps the
+// interpreter badge; an unreadable script or an unmodeled option form is
+// unknown.
 func TestEgressShellScriptEvidence(t *testing.T) {
 	cases := []struct {
 		name string
@@ -159,8 +161,9 @@ func TestEgressShellScriptEvidence(t *testing.T) {
 }
 
 // TestEgressShellOptionForms pins the outer-shell option grammar (#622): the
-// modeled forms are read like -c, everything else is visible as unknown, and
-// a form without -c stays a script-file or stdin interpreter.
+// modeled forms are read like -c, a modeled form without -c stays a
+// script-file or stdin interpreter, and every unmodeled form is visible as
+// unknown.
 func TestEgressShellOptionForms(t *testing.T) {
 	cases := []struct {
 		name string
@@ -176,9 +179,12 @@ func TestEgressShellOptionForms(t *testing.T) {
 		{"interactive login cluster", []string{"bash", "-lic", "curl https://x"}, egressWant{"network", 20, "curl via bash -lic"}},
 		{"option after -c", []string{"bash", "-c", "-e", "curl https://x"}, egressWant{"network", 20, "curl via bash -c"}},
 		{"terminator after -c", []string{"sh", "-c", "--", "curl https://x"}, egressWant{"network", 20, "curl via sh -c"}},
-		{"c repeated across words", []string{"bash", "-c", "-c", "curl https://x"}, egressWant{"network", 20, "curl via bash -c"}},
+		{"c repeated across words labels the first", []string{"bash", "-ec", "-c", "curl https://x"}, egressWant{"network", 20, "curl via bash -ec"}},
 		{"zsh pipefail", []string{"zsh", "-o", "pipefail", "-c", "curl https://x"}, egressWant{"network", 20, "curl via zsh -c"}},
 		{"ksh errexit", []string{"ksh", "-o", "errexit", "-c", "curl https://x"}, egressWant{"network", 20, "curl via ksh -c"}},
+		{"nounset value", []string{"bash", "-o", "nounset", "-c", "curl https://x"}, egressWant{"network", 20, "curl via bash -c"}},
+		{"xtrace value", []string{"bash", "-o", "xtrace", "-c", "curl https://x"}, egressWant{"network", 20, "curl via bash -c"}},
+		{"ksh pipefail", []string{"ksh", "-o", "pipefail", "-c", "curl https://x"}, egressWant{"network", 20, "curl via ksh -c"}},
 		{"unreadable script under an option", []string{"bash", "-e", "-c", "echo $HOME; rm -rf x"}, egressWant{"unknown", 10, `"bash -c" unsupported script`}},
 		// Unmodeled forms: visible, never interpreter 0.
 		{"parse-only -n", []string{"bash", "-n", "-c", "curl https://x"}, egressWant{"unknown", 10, `"bash" unsupported form`}},
@@ -213,8 +219,10 @@ func TestEgressShellOptionForms(t *testing.T) {
 		{"command builtin prefix", []string{"sh", "-c", "command curl https://x"}, egressWant{"interpreter", 0, "sh"}},
 		{"exec builtin prefix", []string{"sh", "-c", "exec curl https://x"}, egressWant{"interpreter", 0, "sh"}},
 		{"zsh equals expansion", []string{"zsh", "-c", "=curl https://x"}, egressWant{"interpreter", 0, "zsh"}},
-		// A quoted would-be assignment is the command: the script is unreadable.
-		{"quoted assignment is the command", []string{"sh", "-c", `"TAG=x" curl https://x`}, egressWant{"unknown", 10, `"sh -c" unsupported script`}},
+		// A quoted would-be assignment keeps its pre-#622 reading: the badge
+		// never drops below it (only the block refuses it).
+		{"quoted assignment keeps the badge", []string{"sh", "-c", `"TAG=x" curl https://x`}, egressWant{"network", 20, "curl via sh -c"}},
+		{"quoted assignment before the sink keeps the badge", []string{"sh", "-c", `curl https://x | "X=1" sh`}, egressWant{"network", 20, "curl via sh -c"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
