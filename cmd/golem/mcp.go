@@ -170,7 +170,11 @@ func applyMCPTools(servers []mcpclient.Server, flags []string) ([]mcpclient.Serv
 			return nil, fmt.Errorf("-mcp-tools #%d: more than %d names", n+1, maxMCPToolsPerAlias)
 		}
 		seen := make(map[string]bool, len(names))
-		for e, name := range names {
+		for e := range names {
+			// Tool names cannot contain spaces, so trimming never changes a
+			// name; it only forgives "read, write".
+			name := strings.TrimSpace(names[e])
+			names[e] = name
 			if !mcpToolNameRE.MatchString(name) || len("mcp__"+alias+"__"+name) > maxMCPToolName {
 				return nil, fmt.Errorf("-mcp-tools #%d: entry %d is not a tool name for this alias", n+1, e+1)
 			}

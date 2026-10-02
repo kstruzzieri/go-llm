@@ -168,6 +168,15 @@ func TestApplyMCPTools(t *testing.T) {
 	if _, set := serverSelection(parse(t)[0]); set {
 		t.Fatal("no -mcp-tools flag must leave selection omitted")
 	}
+	// Tool names cannot contain spaces, so a space after a comma is trimmed
+	// instead of being reported as an unexplained bad entry.
+	spaced, err := applyMCPTools(parse(t), []string{"fs=read, write"})
+	if err != nil {
+		t.Fatalf("space after a comma rejected: %v", err)
+	}
+	if names, _ := serverSelection(spaced[0]); !reflect.DeepEqual(names, []string{"read", "write"}) {
+		t.Fatalf("spaced selection = %q, want [read write]", names)
+	}
 	// "mcp__fs__" is 9 bytes and composed names are capped at 64, so the
 	// longest remote name for alias fs is 55 bytes.
 	if _, err := applyMCPTools(parse(t), []string{"fs=" + strings.Repeat("a", 55)}); err != nil {
@@ -189,6 +198,8 @@ func TestApplyMCPTools(t *testing.T) {
 		{[]string{"missing=read"}, "-mcp-tools #1: alias is not a configured MCP server"},
 		{[]string{"fs=read", "fs=write"}, "-mcp-tools #2: alias is already selected"},
 		{[]string{"fs=read,,write"}, "-mcp-tools #1: entry 2 is not a tool name for this alias"},
+		{[]string{"fs=read, ,write"}, "-mcp-tools #1: entry 2 is not a tool name for this alias"},
+		{[]string{"fs=re ad"}, "-mcp-tools #1: entry 1 is not a tool name for this alias"},
 		{[]string{"fs=read,credential-value!"}, "-mcp-tools #1: entry 2 is not a tool name for this alias"},
 		{[]string{"fs=" + strings.Repeat("a", 56)}, "-mcp-tools #1: entry 1 is not a tool name for this alias"},
 		{[]string{"fs=read,read"}, "-mcp-tools #1: entry 2 repeats a name"},
