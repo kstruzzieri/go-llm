@@ -333,18 +333,25 @@ func inlineShellScript(argv []string) (shell, flag, script string, form shellFor
 // nothing about what runs and need no evaluation. Any other unquoted
 // metacharacter (an interior newline included), an unterminated quote, an
 // empty command, or a comment that is followed by more script lines makes
-// the script unsupported.
+// the script unsupported. So does a word in leading-assignment position that
+// would be NAME=VALUE but has a quote at or before its first =: in shell
+// grammar that word is the command, not an assignment (#622).
 func splitShellWords(script string) (cmds [][]string, ok bool) {
 	script = strings.TrimRight(script, " \t\n")
 	var (
-		cur     []string
-		word    []rune
-		inWord  bool
-		quote   rune // 0, '\'' or '"'
-		endWord = func() {
+		cur        []string
+		word       []rune
+		inWord     bool
+		quote      rune // 0, '\'' or '"'
+		quoteAt    = -1 // index in word where its first quote opened
+		quotedName bool // a would-be leading assignment had a quote at or before =
+		endWord    = func() {
 			if inWord {
+				if quoteAt >= 0 && len(commandWords(cur)) == 0 && envAssignment.MatchString(string(word)) && quoteAt <= slices.Index(word, '=') {
+					quotedName = true
+				}
 				cur = append(cur, string(word))
-				word, inWord = word[:0], false
+				word, inWord, quoteAt = word[:0], false, -1
 			}
 		}
 	)
@@ -368,6 +375,9 @@ func splitShellWords(script string) (cmds [][]string, ok bool) {
 				word = append(word, r)
 			}
 		case r == '\'' || r == '"':
+			if quoteAt < 0 {
+				quoteAt = len(word)
+			}
 			quote, inWord = r, true
 		case r == ' ' || r == '\t':
 			endWord()
@@ -392,6 +402,9 @@ func splitShellWords(script string) (cmds [][]string, ok bool) {
 		return nil, false
 	}
 	endWord()
+	if quotedName {
+		return nil, false
+	}
 	if len(cur) == 0 {
 		return nil, false
 	}

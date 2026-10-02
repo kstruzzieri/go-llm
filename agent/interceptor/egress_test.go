@@ -213,6 +213,8 @@ func TestEgressShellOptionForms(t *testing.T) {
 		{"command builtin prefix", []string{"sh", "-c", "command curl https://x"}, egressWant{"interpreter", 0, "sh"}},
 		{"exec builtin prefix", []string{"sh", "-c", "exec curl https://x"}, egressWant{"interpreter", 0, "sh"}},
 		{"zsh equals expansion", []string{"zsh", "-c", "=curl https://x"}, egressWant{"interpreter", 0, "zsh"}},
+		// A quoted would-be assignment is the command: the script is unreadable.
+		{"quoted assignment is the command", []string{"sh", "-c", `"TAG=x" curl https://x`}, egressWant{"unknown", 10, `"sh -c" unsupported script`}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
