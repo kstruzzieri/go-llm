@@ -93,7 +93,9 @@ type SQLiteWeightReader struct {
 // connection, it may create the database's coordination sidecars, a -shm file
 // and an empty -wal when a WAL-mode database has none, including beside a
 // database it then rejects. A WAL-mode database whose sidecars can be neither
-// opened nor created fails to open.
+// opened nor created fails to open. The connection waits up to one second for
+// a lock another connection holds, during construction and each read, before
+// failing as SQLITE_BUSY.
 func NewSQLiteWeightReader(ctx context.Context, dbPath string, config CollectorConfig) (*SQLiteWeightReader, error) {
 	if dbPath == "" {
 		return nil, fmt.Errorf("feedback: open SQLite weight reader: empty path")
@@ -123,6 +125,9 @@ func NewSQLiteWeightReader(ctx context.Context, dbPath string, config CollectorC
 	u := url.URL{Scheme: "file", Path: abs}
 	q := u.Query()
 	q.Set("mode", "ro")
+	// In the DSN so a connection database/sql opens to replace a discarded one
+	// keeps it. SQLite's default is 0: fail at once as SQLITE_BUSY.
+	q.Set("_pragma", "busy_timeout(1000)")
 	u.RawQuery = q.Encode()
 	db, err := sql.Open("sqlite", u.String())
 	if err != nil {

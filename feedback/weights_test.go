@@ -650,3 +650,64 @@ func TestSQLiteWeightReaderRejectsNonRegularFile(t *testing.T) {
 		t.Fatalf("NewSQLiteWeightReader(directory) error = %v, want not a regular file", err)
 	}
 }
+
+// TestSQLiteWeightReaderWaitsOutBriefLock: another connection holds the
+// database exclusively for a moment. Construction and a later read must wait
+// for the lock, not fail as SQLITE_BUSY. A rollback-journal database under
+// BEGIN EXCLUSIVE blocks readers deterministically; WAL readers are blocked
+// only by close-time checkpoints and recovery, which a test cannot hold open.
+func TestSQLiteWeightReaderWaitsOutBriefLock(t *testing.T) {
+	ctx := t.Context()
+	path := filepath.Join(t.TempDir(), "feedback.db")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("open writer: %v", err)
+	}
+	db.SetMaxOpenConns(1)
+	t.Cleanup(func() { _ = db.Close() })
+	if _, err := NewSignalStore(ctx, db); err != nil {
+		t.Fatalf("NewSignalStore: %v", err)
+	}
+	holder, err := db.Conn(ctx)
+	if err != nil {
+		t.Fatalf("lock holder connection: %v", err)
+	}
+	t.Cleanup(func() { _ = holder.Close() })
+	const held = 100 * time.Millisecond
+	underLock := func(what string, op func() error) {
+		t.Helper()
+		if _, err := holder.ExecContext(ctx, `BEGIN EXCLUSIVE`); err != nil {
+			t.Fatalf("take lock: %v", err)
+		}
+		released := make(chan error, 1)
+		start := time.Now()
+		go func() {
+			time.Sleep(held)
+			_, err := holder.ExecContext(ctx, `ROLLBACK`)
+			released <- err
+		}()
+		err := op()
+		elapsed := time.Since(start)
+		if rerr := <-released; rerr != nil {
+			t.Fatalf("release lock: %v", rerr)
+		}
+		if err != nil {
+			t.Fatalf("%s under a %v lock: %v", what, held, err)
+		}
+		// Fixture check: the lock really blocked the reader.
+		if elapsed < held {
+			t.Fatalf("fixture invalid: %s returned after %v, before the lock was released", what, elapsed)
+		}
+	}
+	var reader *SQLiteWeightReader
+	underLock("NewSQLiteWeightReader", func() error {
+		var err error
+		reader, err = NewSQLiteWeightReader(ctx, path, CollectorConfig{})
+		return err
+	})
+	t.Cleanup(func() { _ = reader.Close() })
+	underLock("WeightsBatch", func() error {
+		_, err := reader.WeightsBatch(ctx, []string{"chunk"})
+		return err
+	})
+}

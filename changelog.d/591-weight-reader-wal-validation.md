@@ -10,5 +10,7 @@ or a path that is not a regular file, before opening it, and resolves a
 relative path against the working directory. It may now create SQLite's `-shm`
 file, and an empty `-wal` for a WAL-mode database that has none, beside a
 database it rejects; outside a concurrent truncation of the main file, it
-still never writes or deletes the main file or an existing WAL. Golem no
-longer checkpoints before opening the reader.
+still never writes or deletes the main file or an existing WAL. The reader
+now waits up to one second for a lock another connection holds, where it
+previously failed at once as `SQLITE_BUSY`. Golem no longer checkpoints
+before opening the reader.
