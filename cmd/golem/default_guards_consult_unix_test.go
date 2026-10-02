@@ -65,7 +65,10 @@ func TestAgentflowStatusPrintsNoChainNotice(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			stdin, stdout, stderr := runTestFiles(t)
-			err := run(append([]string{"-agentflow-status", "-json", "-root", t.TempDir()}, tc.flag...), stdin, stdout, stderr)
+			// The fake agentflow reads its payload from the environment, which
+			// Agentflow children receive only for approved names (#577).
+			args := []string{"-agentflow-status", "-json", "-root", t.TempDir(), "-agentflow-env", "GOLEM_AGENTFLOW_STATUS_PAYLOAD"}
+			err := run(append(args, tc.flag...), stdin, stdout, stderr)
 			// The status path must really have run, or an early argument error
 			// would also print no notice: it relays the payload and exits 3.
 			var statusErr *agentflowStatusExit
