@@ -544,12 +544,7 @@ func runAgentflowTask(ctx context.Context, stdout, stderr io.Writer, interrupts 
 
 	// 3. Build root-specific Agentflow runners for the canonical and optional
 	// worker roots.
-	runnerForRoot := func(root string) agentflow.Runner {
-		if agentflowSrc != "" {
-			return agentflow.NewSrcExecRunner(root, agentflowSrc)
-		}
-		return agentflow.NewExecRunner(root)
-	}
+	runnerForRoot := agentflowRunnerForRoot(agentflowSrc, f.agentflowEnv)
 	rootRunner := runnerForRoot(root)
 	client := agentflow.NewClient(rootRunner, root)
 	if f.agentflowResume {
@@ -803,6 +798,28 @@ func resolveTaskAgentflowSource(root, source string) (string, error) {
 		source = filepath.Join(root, source)
 	}
 	return filepath.Abs(source)
+}
+
+// mustAgentflowRunner builds the Agentflow runner for root: the installed
+// binary, or `python3 -P -m agentflow` when source is set. envNames are the
+// -agentflow-env names; flag validation has already accepted them, so a
+// failure here is a wiring bug. The panic message carries the validator's
+// position-only text, never the rejected input.
+func mustAgentflowRunner(root, source string, envNames []string) *agentflow.ExecRunner {
+	r := agentflow.NewExecRunner(root)
+	if source != "" {
+		r = agentflow.NewSrcExecRunner(root, source)
+	}
+	if err := r.AllowEnv(envNames...); err != nil {
+		panic(fmt.Sprintf("golem: unvalidated -agentflow-env reached a runner: %v", err))
+	}
+	return r
+}
+
+// agentflowRunnerForRoot is the one constructor the driver uses for the
+// canonical root and every worker root, so all share one environment policy.
+func agentflowRunnerForRoot(source string, envNames []string) func(root string) agentflow.Runner {
+	return func(root string) agentflow.Runner { return mustAgentflowRunner(root, source, envNames) }
 }
 
 // resolveReviewManifest absolutizes an optional review manifest against the

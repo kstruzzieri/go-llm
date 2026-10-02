@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -11,17 +12,51 @@ import (
 	"testing"
 )
 
-// agentflowRunnerForTest honors the explicit AGENTFLOW_SRC checkout, otherwise
-// uses an installed binary or skips.
+// agentflowTestSource decides how integration tests reach Agentflow. mode is
+// GO_LLM_REQUIRE_AGENTFLOW: empty skips when Agentflow is absent; "installed"
+// or "source" turns absence or a mode mismatch into a failure, so a CI step
+// cannot pass by skipping or by testing the other mode.
+func agentflowTestSource(mode, src string, installed bool) (useSrc, skip bool, err error) {
+	switch mode {
+	case "":
+	case "installed":
+		if src != "" {
+			return false, false, errors.New("GO_LLM_REQUIRE_AGENTFLOW=installed but AGENTFLOW_SRC is set")
+		}
+		if !installed {
+			return false, false, errors.New("GO_LLM_REQUIRE_AGENTFLOW=installed but agentflow is not on PATH")
+		}
+	case "source":
+		if src == "" {
+			return false, false, errors.New("GO_LLM_REQUIRE_AGENTFLOW=source but AGENTFLOW_SRC is empty")
+		}
+	default:
+		return false, false, fmt.Errorf("GO_LLM_REQUIRE_AGENTFLOW=%q, want installed or source", mode)
+	}
+	if src != "" {
+		return true, false, nil
+	}
+	return false, !installed, nil
+}
+
+// agentflowRunnerForTest honors GO_LLM_REQUIRE_AGENTFLOW and the explicit
+// AGENTFLOW_SRC checkout, otherwise uses an installed binary or skips. CI's
+// agentflow-compat job selects real-CLI tests by name, so a test using this
+// must be named Test*_RealCLI or Test*_RealCLI_<scenario>.
 func agentflowRunnerForTest(t *testing.T, dir string) Runner {
-	if src := os.Getenv("AGENTFLOW_SRC"); src != "" {
+	t.Helper()
+	src := os.Getenv("AGENTFLOW_SRC")
+	_, lookErr := exec.LookPath("agentflow")
+	useSrc, skip, err := agentflowTestSource(os.Getenv("GO_LLM_REQUIRE_AGENTFLOW"), src, lookErr == nil)
+	switch {
+	case err != nil:
+		t.Fatal(err)
+	case skip:
+		t.Skip("agentflow CLI not available (set AGENTFLOW_SRC=<checkout> to run)")
+	case useSrc:
 		return NewSrcExecRunner(dir, src)
 	}
-	if _, err := exec.LookPath("agentflow"); err == nil {
-		return NewExecRunner(dir)
-	}
-	t.Skip("agentflow CLI not available (set AGENTFLOW_SRC=<checkout> to run)")
-	return nil
+	return NewExecRunner(dir)
 }
 
 func TestAgentflowRunnerForTest_PrefersSourceOverride(t *testing.T) {
@@ -29,8 +64,10 @@ func TestAgentflowRunnerForTest_PrefersSourceOverride(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(binDir, "agentflow"), []byte("#!/bin/sh\n"), 0o700); err != nil {
 		t.Fatal(err)
 	}
+	checkout := writeSourceCheckoutFixture(t)
 	t.Setenv("PATH", binDir)
-	t.Setenv("AGENTFLOW_SRC", "/preferred-checkout")
+	t.Setenv("AGENTFLOW_SRC", checkout)
+	t.Setenv("GO_LLM_REQUIRE_AGENTFLOW", "")
 
 	runner, ok := agentflowRunnerForTest(t, t.TempDir()).(*ExecRunner)
 	if !ok {
@@ -38,7 +75,7 @@ func TestAgentflowRunnerForTest_PrefersSourceOverride(t *testing.T) {
 	}
 	bin, argv, env := runner.commandFor([]string{"--version"})
 	if bin != "python3" || !reflect.DeepEqual(argv, []string{"-P", "-m", "agentflow", "--version"}) ||
-		!reflect.DeepEqual(env, []string{"PYTHONPATH=/preferred-checkout/src"}) {
+		!reflect.DeepEqual(env, []string{"PYTHONPATH=" + filepath.Join(checkout, "src")}) {
 		t.Fatalf("command = (%q, %v, %v), want explicit source checkout", bin, argv, env)
 	}
 }
