@@ -19,7 +19,8 @@ import (
 	"sync"
 	"time"
 
-	_ "modernc.org/sqlite"
+	"modernc.org/sqlite"
+	sqlite3 "modernc.org/sqlite/lib"
 
 	"github.com/kstruzzieri/go-llm/internal/sqlitedsn"
 )
@@ -386,9 +387,15 @@ func (s *SQLiteFeedbackStore) runInTxBefore(ctx context.Context, deadline time.T
 	committed, discard := false, false
 	defer func() {
 		if tx != nil && !committed {
-			if rbErr := tx.Rollback(); rbErr != nil && !errors.Is(rbErr, sql.ErrTxDone) && !outsideTx(conn) {
-				err = errors.Join(err, fmt.Errorf("provider: SQLiteFeedbackStore rollback: %w", rbErr))
-				discard = true
+			if rbErr := tx.Rollback(); rbErr != nil && !errors.Is(rbErr, sql.ErrTxDone) {
+				// Still inside a transaction: report and discard. Outside one,
+				// SQLite already rolled back; drop only its "no transaction is
+				// active" reply and keep any other rollback error visible.
+				inTx := !outsideTx(conn)
+				if inTx || !isNoTransactionError(rbErr) {
+					err = errors.Join(err, fmt.Errorf("provider: SQLiteFeedbackStore rollback: %w", rbErr))
+				}
+				discard = inTx
 			}
 		}
 		if !discard {
@@ -446,6 +453,14 @@ func outsideTx(conn *sql.Conn) bool {
 	}
 	_, err := conn.ExecContext(context.Background(), "ROLLBACK")
 	return err == nil
+}
+
+// isNoTransactionError reports whether err is SQLite's reply to a ROLLBACK
+// with no transaction active (primary code SQLITE_ERROR), as opposed to an
+// I/O or other failure worth surfacing.
+func isNoTransactionError(err error) bool {
+	var se *sqlite.Error
+	return errors.As(err, &se) && se.Code()&0xff == sqlite3.SQLITE_ERROR
 }
 
 // insertSignalTx writes one signal row. Meta is marshalled to JSON; the

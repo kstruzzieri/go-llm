@@ -519,3 +519,38 @@ func TestOutsideTxReportsTransactionState(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// isNoTransactionError drops only SQLite's "no transaction is active" reply
+// to ROLLBACK; any other rollback failure must stay in the returned error.
+// The cases are real driver errors, not hand-built ones.
+func TestIsNoTransactionErrorMatchesOnlyNoTransactionReply(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "feedback.db")
+	db := openFeedbackFileDB(t, path, "_pragma=busy_timeout(0)", 1)
+	execFeedbackSQL(t, db, "PRAGMA journal_mode=WAL")
+
+	_, noTx := db.ExecContext(t.Context(), "ROLLBACK")
+	if noTx == nil {
+		t.Fatal("fixture invalid: ROLLBACK outside a transaction succeeded")
+	}
+	_ = holdFeedbackLock(t, path, "BEGIN IMMEDIATE")
+	_, busy := db.ExecContext(t.Context(), "BEGIN IMMEDIATE")
+	var se *sqlite.Error
+	if !errors.As(busy, &se) || se.Code()&0xff != 5 {
+		t.Fatalf("fixture invalid: contended BEGIN IMMEDIATE err = %v, want SQLITE_BUSY", busy)
+	}
+
+	for _, tc := range []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"no transaction is active", noTx, true},
+		{"wrapped no transaction", fmt.Errorf("provider: rollback: %w", noTx), true},
+		{"SQLITE_BUSY", busy, false},
+		{"non-SQLite error", errors.New("disk on fire"), false},
+	} {
+		if got := isNoTransactionError(tc.err); got != tc.want {
+			t.Errorf("%s: isNoTransactionError(%v) = %v, want %v", tc.name, tc.err, got, tc.want)
+		}
+	}
+}
