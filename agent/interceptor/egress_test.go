@@ -89,7 +89,7 @@ func TestEgressDirectNames(t *testing.T) {
 		{"pip", []string{"pip", "install", "x"}, egressWant{"package-manager", 10, "pip"}},
 		{"brew", []string{"brew", "install", "x"}, egressWant{"package-manager", 10, "brew"}},
 		{"bash script file", []string{"bash", "build.sh"}, egressWant{"interpreter", 0, "bash"}},
-		{"fish inline", []string{"fish", "-c", "curl x"}, egressWant{"interpreter", 0, "fish"}},
+		{"fish inline", []string{"fish", "-c", "curl x"}, egressWant{"unknown", 10, `"fish" unsupported form`}},
 		{"python script", []string{"python", "foo.py"}, egressWant{"interpreter", 0, "python"}},
 		{"node script", []string{"node", "app.js"}, egressWant{"interpreter", 0, "node"}},
 		{"versioned python is unknown", []string{"python3.12", "x.py"}, egressWant{"unknown", 10, `"python3.12"`}},
@@ -146,10 +146,73 @@ func TestEgressShellScriptEvidence(t *testing.T) {
 		{"package manager in script stays interpreter", []string{"bash", "-c", "npm install"}, egressWant{"interpreter", 0, "bash"}},
 		{"sudo in script stays interpreter", []string{"bash", "-c", "sudo ls"}, egressWant{"interpreter", 0, "bash"}},
 		{"nested shell is one level", []string{"bash", "-c", "bash -c 'curl https://x'"}, egressWant{"interpreter", 0, "bash"}},
-		{"fish dialect", []string{"fish", "-c", "curl https://x"}, egressWant{"interpreter", 0, "fish"}},
-		{"unsupported shell flag", []string{"bash", "--posix", "-c", "curl https://x"}, egressWant{"interpreter", 0, "bash"}},
+		{"fish dialect", []string{"fish", "-c", "curl https://x"}, egressWant{"unknown", 10, `"fish" unsupported form`}},
+		{"unsupported shell flag", []string{"bash", "--posix", "-c", "curl https://x"}, egressWant{"unknown", 10, `"bash" unsupported form`}},
 		{"script file", []string{"bash", "install.sh"}, egressWant{"interpreter", 0, "bash"}},
 		{"unknown client in script", []string{"bash", "-c", "frob https://x"}, egressWant{"interpreter", 0, "bash"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			expectEgress(t, classifyArgv(t, tc.argv...), tc.want)
+		})
+	}
+}
+
+// TestEgressShellOptionForms pins the outer-shell option grammar (#622): the
+// modeled forms are read like -c, everything else is visible as unknown, and
+// a form without -c stays a script-file or stdin interpreter.
+func TestEgressShellOptionForms(t *testing.T) {
+	cases := []struct {
+		name string
+		argv []string
+		want egressWant
+	}{
+		// Read: the label names the first option word carrying c.
+		{"errexit before -c", []string{"bash", "-e", "-c", "curl https://x"}, egressWant{"network", 20, "curl via bash -c"}},
+		{"pipefail before -c", []string{"bash", "-o", "pipefail", "-c", "curl https://x"}, egressWant{"network", 20, "curl via bash -c"}},
+		{"clustered pipefail", []string{"bash", "-eo", "pipefail", "-c", "curl https://x"}, egressWant{"network", 20, "curl via bash -c"}},
+		{"o value after c", []string{"bash", "-co", "pipefail", "curl https://x"}, egressWant{"network", 20, "curl via bash -co"}},
+		{"xtrace cluster", []string{"sh", "-xc", "curl https://x"}, egressWant{"network", 20, "curl via sh -xc"}},
+		{"interactive login cluster", []string{"bash", "-lic", "curl https://x"}, egressWant{"network", 20, "curl via bash -lic"}},
+		{"option after -c", []string{"bash", "-c", "-e", "curl https://x"}, egressWant{"network", 20, "curl via bash -c"}},
+		{"terminator after -c", []string{"sh", "-c", "--", "curl https://x"}, egressWant{"network", 20, "curl via sh -c"}},
+		{"c repeated across words", []string{"bash", "-c", "-c", "curl https://x"}, egressWant{"network", 20, "curl via bash -c"}},
+		{"zsh pipefail", []string{"zsh", "-o", "pipefail", "-c", "curl https://x"}, egressWant{"network", 20, "curl via zsh -c"}},
+		{"ksh errexit", []string{"ksh", "-o", "errexit", "-c", "curl https://x"}, egressWant{"network", 20, "curl via ksh -c"}},
+		{"unreadable script under an option", []string{"bash", "-e", "-c", "echo $HOME; rm -rf x"}, egressWant{"unknown", 10, `"bash -c" unsupported script`}},
+		// Unmodeled forms: visible, never interpreter 0.
+		{"parse-only -n", []string{"bash", "-n", "-c", "curl https://x"}, egressWant{"unknown", 10, `"bash" unsupported form`}},
+		{"parse-only noexec", []string{"bash", "-o", "noexec", "-c", "curl https://x"}, egressWant{"unknown", 10, `"bash" unsupported form`}},
+		{"stdin flag with -c", []string{"bash", "-s", "-c", "curl https://x"}, egressWant{"unknown", 10, `"bash" unsupported form`}},
+		{"plus option", []string{"bash", "+e", "-c", "curl https://x"}, egressWant{"unknown", 10, `"bash" unsupported form`}},
+		{"repeated letter in a word", []string{"bash", "-ee", "-c", "curl https://x"}, egressWant{"unknown", 10, `"bash" unsupported form`}},
+		{"o not last", []string{"bash", "-oe", "pipefail", "-c", "curl https://x"}, egressWant{"unknown", 10, `"bash" unsupported form`}},
+		{"o without value", []string{"bash", "-o"}, egressWant{"unknown", 10, `"bash" unsupported form`}},
+		{"attached o value", []string{"bash", "-opipefail", "-c", "curl https://x"}, egressWant{"unknown", 10, `"bash" unsupported form`}},
+		{"shopt option", []string{"bash", "-O", "extglob", "-c", "curl https://x"}, egressWant{"unknown", 10, `"bash" unsupported form`}},
+		{"lone dash", []string{"bash", "-", "-c", "curl https://x"}, egressWant{"unknown", 10, `"bash" unsupported form`}},
+		{"-c without operand", []string{"bash", "-c"}, egressWant{"unknown", 10, `"bash" unsupported form`}},
+		{"-c then terminator without operand", []string{"bash", "-c", "--"}, egressWant{"unknown", 10, `"bash" unsupported form`}},
+		{"sh pipefail", []string{"sh", "-o", "pipefail", "-c", "curl https://x"}, egressWant{"unknown", 10, `"sh" unsupported form`}},
+		{"dash pipefail", []string{"dash", "-o", "pipefail", "-c", "curl https://x"}, egressWant{"unknown", 10, `"dash" unsupported form`}},
+		{"preamble on sh", []string{"sh", "--norc", "-c", "curl https://x"}, egressWant{"unknown", 10, `"sh" unsupported form`}},
+		{"preamble after a short option", []string{"bash", "-e", "--norc", "-c", "curl https://x"}, egressWant{"unknown", 10, `"bash" unsupported form`}},
+		{"long informational option", []string{"bash", "--version"}, egressWant{"unknown", 10, `"bash" unsupported form`}},
+		// Controls: unchanged outcomes, each named by a mutation in the #622 plan.
+		{"readable quiet script under an option", []string{"bash", "-o", "pipefail", "-c", "go test ./..."}, egressWant{"interpreter", 0, "bash"}},
+		{"terminator before -c is a script file", []string{"bash", "--", "-c", "curl https://x"}, egressWant{"interpreter", 0, "bash"}},
+		{"script file stops options", []string{"bash", "build.sh", "-c", "curl https://x"}, egressWant{"interpreter", 0, "bash"}},
+		{"modeled option on a script file", []string{"bash", "-x", "build.sh"}, egressWant{"interpreter", 0, "bash"}},
+		{"modeled option reading stdin", []string{"bash", "-e"}, egressWant{"interpreter", 0, "bash"}},
+		{"fish script file", []string{"fish", "run.fish"}, egressWant{"interpreter", 0, "fish"}},
+		{"trailing words are the script's", []string{"bash", "-c", "curl https://x", "-n", "+e"}, egressWant{"network", 20, "curl via bash -c"}},
+		{"zsh -ec label", []string{"zsh", "-ec", "curl https://x"}, egressWant{"network", 20, "curl via zsh -ec"}},
+		{"dash -euc label", []string{"dash", "-euc", "curl https://x"}, egressWant{"network", 20, "curl via dash -euc"}},
+		{"both preambles label", []string{"bash", "--noprofile", "--norc", "-lc", "curl https://x"}, egressWant{"network", 20, "curl via bash -lc"}},
+		// Documented ceilings: readable, no literal network command.
+		{"command builtin prefix", []string{"sh", "-c", "command curl https://x"}, egressWant{"interpreter", 0, "sh"}},
+		{"exec builtin prefix", []string{"sh", "-c", "exec curl https://x"}, egressWant{"interpreter", 0, "sh"}},
+		{"zsh equals expansion", []string{"zsh", "-c", "=curl https://x"}, egressWant{"interpreter", 0, "zsh"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

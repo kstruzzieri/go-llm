@@ -101,8 +101,8 @@ func (RemoteScript) check(raw json.RawMessage) (string, bool) {
 	if status != peelOK {
 		return "", false
 	}
-	_, _, script, ok := inlineShellScript(rest)
-	if !ok {
+	_, _, script, form := inlineShellScript(rest)
+	if form != shellFormInline {
 		return "", false
 	}
 	cmds, ok := splitShellWords(script)
