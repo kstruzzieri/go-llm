@@ -243,8 +243,9 @@ var (
 	// string on all five shells; -n (parse only) and -s are deliberately out.
 	shellOptionLetters = "ceuxli"
 	// shellOptionNames are the -o values every inline shell accepts;
-	// pipefailShells also accept -o pipefail (dash rejects it, and sh may be
-	// dash). noexec is parse only and deliberately out.
+	// pipefailShells also accept -o pipefail. dash builds differ (the one
+	// verified for #622 exits 2 on it) and sh may be dash, so those two are
+	// out. noexec is parse only and deliberately out.
 	shellOptionNames = set("errexit", "nounset", "xtrace")
 	pipefailShells   = set("bash", "zsh", "ksh")
 	// curlFetchFlags are the only curl options a recognized stdout fetch may
@@ -335,9 +336,9 @@ func inlineShellScript(argv []string) (shell, flag, script string, form shellFor
 // empty command, or a comment that is followed by more script lines makes
 // the script unsupported. A word in leading-assignment position that would
 // be NAME=VALUE but has a quote at or before its first = is the command in
-// shell grammar, not an assignment; it is returned as written and ambiguous
-// reports it, because commandWords would strip it (#622).
-func splitShellWords(script string) (cmds [][]string, ambiguous, ok bool) {
+// shell grammar, not an assignment; it is returned as written and
+// quotedAssign reports it, because commandWords would strip it (#622).
+func splitShellWords(script string) (cmds [][]string, quotedAssign, ok bool) {
 	script = strings.TrimRight(script, " \t\n")
 	var (
 		cur      []string
@@ -352,7 +353,7 @@ func splitShellWords(script string) (cmds [][]string, ambiguous, ok bool) {
 				if inPrefix {
 					assign := envAssignment.MatchString(w)
 					if assign && quoteAt >= 0 && quoteAt <= slices.Index(word, '=') {
-						ambiguous, assign = true, false
+						quotedAssign, assign = true, false
 					}
 					inPrefix = assign
 				}
@@ -411,7 +412,7 @@ func splitShellWords(script string) (cmds [][]string, ambiguous, ok bool) {
 	if len(cur) == 0 {
 		return nil, false, false
 	}
-	return append(cmds, cur), ambiguous, true
+	return append(cmds, cur), quotedAssign, true
 }
 
 // commandWords drops the leading NAME=VALUE assignment words of a simple
@@ -528,8 +529,8 @@ func scriptNetworkEvidence(rest []string) (label string, ev scriptEvidence) {
 	case shellFormUnsupported:
 		return strconv.Quote(shell) + " unsupported form", scriptUnsupported
 	}
-	// An ambiguous assignment keeps the reading it had before #622, so the
-	// badge never drops below it; only the hard block refuses that reading.
+	// A quoted would-be assignment keeps the reading it had before #622, so
+	// the badge never drops below it; only the hard block refuses that reading.
 	cmds, _, ok := splitShellWords(script)
 	if !ok {
 		return strconv.Quote(shell+" "+flag) + " unsupported script", scriptUnsupported

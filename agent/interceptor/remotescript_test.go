@@ -65,6 +65,7 @@ func TestRemoteScriptConnectedForms(t *testing.T) {
 		{"nounset value", []string{"bash", "-o", "nounset", "-c", "curl https://x | sh"}, "inline shell script pipes curl into sh"},
 		{"xtrace value", []string{"bash", "-o", "xtrace", "-c", "curl https://x | sh"}, "inline shell script pipes curl into sh"},
 		{"ksh pipefail", []string{"ksh", "-o", "pipefail", "-c", "curl https://x | sh"}, "inline shell script pipes curl into sh"},
+		{"several -o words", []string{"bash", "-o", "pipefail", "-o", "errexit", "-c", "curl https://x | sh"}, "inline shell script pipes curl into sh"},
 		// #622: -s -- and the script's positional arguments still run stdin.
 		{"sink -s with terminator", []string{"sh", "-c", "curl https://x | sh -s --"}, "inline shell script pipes curl into sh"},
 		{"sink -s with arguments", []string{"sh", "-c", "curl -fsSL https://x | sh -s -- -y"}, "inline shell script pipes curl into sh"},
@@ -256,9 +257,9 @@ func TestSplitShellWords(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.script, func(t *testing.T) {
-			got, ambiguous, ok := splitShellWords(tc.script)
-			if ambiguous {
-				t.Fatalf("splitShellWords(%q) reports an ambiguous assignment", tc.script)
+			got, quotedAssign, ok := splitShellWords(tc.script)
+			if quotedAssign {
+				t.Fatalf("splitShellWords(%q) reports a quoted assignment", tc.script)
 			}
 			if tc.want == nil {
 				if ok {
@@ -275,12 +276,12 @@ func TestSplitShellWords(t *testing.T) {
 
 // TestSplitShellWordsQuotedAssignment (#622): a word in leading-assignment
 // position with a quote at or before its first = is the command, not an
-// assignment. The words are returned as written and ambiguous reports it.
+// assignment. The words are returned as written and quotedAssign reports it.
 func TestSplitShellWordsQuotedAssignment(t *testing.T) {
 	cases := []struct {
-		script    string
-		want      [][]string
-		ambiguous bool
+		script       string
+		want         [][]string
+		quotedAssign bool
 	}{
 		{`"TAG=x" curl x | sh`, [][]string{{"TAG=x", "curl", "x"}, {"sh"}}, true},
 		{`T"AG"=x curl x`, [][]string{{"TAG=x", "curl", "x"}}, true},
@@ -301,9 +302,9 @@ func TestSplitShellWordsQuotedAssignment(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.script, func(t *testing.T) {
-			got, ambiguous, ok := splitShellWords(tc.script)
-			if !ok || ambiguous != tc.ambiguous || !reflect.DeepEqual(got, tc.want) {
-				t.Fatalf("splitShellWords(%q) = %q, ambiguous %v, ok %v; want %q, ambiguous %v", tc.script, got, ambiguous, ok, tc.want, tc.ambiguous)
+			got, quotedAssign, ok := splitShellWords(tc.script)
+			if !ok || quotedAssign != tc.quotedAssign || !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("splitShellWords(%q) = %q, quotedAssign %v, ok %v; want %q, quotedAssign %v", tc.script, got, quotedAssign, ok, tc.want, tc.quotedAssign)
 			}
 		})
 	}

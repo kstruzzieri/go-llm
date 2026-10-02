@@ -185,6 +185,7 @@ func TestEgressShellOptionForms(t *testing.T) {
 		{"nounset value", []string{"bash", "-o", "nounset", "-c", "curl https://x"}, egressWant{"network", 20, "curl via bash -c"}},
 		{"xtrace value", []string{"bash", "-o", "xtrace", "-c", "curl https://x"}, egressWant{"network", 20, "curl via bash -c"}},
 		{"ksh pipefail", []string{"ksh", "-o", "pipefail", "-c", "curl https://x"}, egressWant{"network", 20, "curl via ksh -c"}},
+		{"several -o words", []string{"bash", "-o", "pipefail", "-o", "errexit", "-c", "curl https://x"}, egressWant{"network", 20, "curl via bash -c"}},
 		{"unreadable script under an option", []string{"bash", "-e", "-c", "echo $HOME; rm -rf x"}, egressWant{"unknown", 10, `"bash -c" unsupported script`}},
 		// Unmodeled forms: visible, never interpreter 0.
 		{"parse-only -n", []string{"bash", "-n", "-c", "curl https://x"}, egressWant{"unknown", 10, `"bash" unsupported form`}},

@@ -106,8 +106,8 @@ func (RemoteScript) check(raw json.RawMessage) (string, bool) {
 	if form != shellFormInline {
 		return "", false
 	}
-	cmds, ambiguous, ok := splitShellWords(script)
-	if !ok || ambiguous || len(cmds) != 2 {
+	cmds, quotedAssign, ok := splitShellWords(script)
+	if !ok || quotedAssign || len(cmds) != 2 {
 		return "", false
 	}
 	fetch, ok := recognizeFetch(cmds[0])
