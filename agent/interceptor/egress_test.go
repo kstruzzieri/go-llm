@@ -204,7 +204,9 @@ func TestEgressShellOptionForms(t *testing.T) {
 		{"preamble on sh", []string{"sh", "--norc", "-c", "curl https://x"}, egressWant{"unknown", 10, `"sh" unsupported form`}},
 		{"preamble after a short option", []string{"bash", "-e", "--norc", "-c", "curl https://x"}, egressWant{"unknown", 10, `"bash" unsupported form`}},
 		{"long informational option", []string{"bash", "--version"}, egressWant{"unknown", 10, `"bash" unsupported form`}},
-		// Controls: unchanged outcomes, each named by a mutation in the #622 plan.
+		{"unmodeled option before a script file", []string{"bash", "-v", "build.sh"}, egressWant{"unknown", 10, `"bash" unsupported form`}},
+		{"parse-only check of a script file", []string{"sh", "-n", "check.sh"}, egressWant{"unknown", 10, `"sh" unsupported form`}},
+		// Controls: outcomes #622 leaves unchanged.
 		{"readable quiet script under an option", []string{"bash", "-o", "pipefail", "-c", "go test ./..."}, egressWant{"interpreter", 0, "bash"}},
 		{"terminator before -c is a script file", []string{"bash", "--", "-c", "curl https://x"}, egressWant{"interpreter", 0, "bash"}},
 		{"script file stops options", []string{"bash", "build.sh", "-c", "curl https://x"}, egressWant{"interpreter", 0, "bash"}},

