@@ -6,6 +6,7 @@ import (
 	"errors"
 	"math"
 	"net"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -2336,5 +2337,52 @@ func TestRecordOutcomeFeedbackLogsOnceOnStoreError(t *testing.T) {
 	}
 	if got := len(cap.snapshot()); got != 1 {
 		t.Errorf("warnFeedbackWriteOnce fired %d times, want 1", got)
+	}
+}
+
+// TestRecordOutcomeFeedbackBoundsSQLiteLockWait: a held feedback database
+// lock costs a routed request about feedbackWriteTimeout, not the store's
+// five-second busy_timeout (#592).
+func TestRecordOutcomeFeedbackBoundsSQLiteLockWait(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "feedback.db")
+	store, err := OpenSQLiteFeedbackStore(t.Context(), path, SQLiteFeedbackStoreConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	logs := &capturingLogger{}
+	rp := &RoutePlan{
+		Profile: &ModelProfile{Key: ModelKey{Provider: "p", Model: "m"}},
+		Request: RoutingRequest{UseCase: "chat"},
+	}
+	rp.SetFeedback(NewRoutingFeedback(store))
+	rp.setFeedbackTelemetry(newFeedbackWarningState(), logs)
+	outcome := &RouteOutcome{
+		PlannedModel: ModelKey{Provider: "p", Model: "m"},
+		Attempts:     []RouteAttempt{{Key: ModelKey{Provider: "p", Model: "m"}, Status: AttemptStatusSucceeded}},
+	}
+	release := holdFeedbackLock(t, path, "BEGIN IMMEDIATE")
+	start := time.Now()
+	rp.recordOutcomeFeedback(outcome)
+	elapsed := time.Since(start)
+	release()
+	t.Logf("ELAPSED routed-request %v", elapsed)
+	if elapsed < feedbackWriteTimeout/2 {
+		t.Fatalf("fixture invalid: returned after %v without waiting on the held lock", elapsed)
+	}
+	// feedbackWriteTimeout plus 1.5s of slack for scheduling under the race
+	// gate; without the cap the write waited out the store's 5s busy_timeout.
+	if limit := feedbackWriteTimeout + 1500*time.Millisecond; elapsed > limit {
+		t.Fatalf("recordOutcomeFeedback returned after %v, want under %v", elapsed, limit)
+	}
+	if got := len(logs.snapshot()); got != 1 {
+		t.Fatalf("write warnings = %d, want 1", got)
+	}
+	if n := feedbackRows(t, store.db); n != 0 {
+		t.Fatalf("signals after the contended write = %d, want 0", n)
+	}
+	rp.recordOutcomeFeedback(outcome)
+	if n := feedbackRows(t, store.db); n != 1 {
+		t.Fatalf("signals after the lock released = %d, want 1", n)
 	}
 }
