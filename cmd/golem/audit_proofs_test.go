@@ -3,11 +3,15 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
+
+	"github.com/kstruzzieri/go-llm/agentflow"
 )
 
 type auditProofRunner struct {
@@ -320,6 +324,7 @@ func TestAuditProofsReportsOlderProviderWithoutParsingUsageText(t *testing.T) {
 }
 
 func TestAuditProofsMapsRunnerFailuresToSafeIncompleteReasons(t *testing.T) {
+	const secret = "RUNNER-SECRET-577"
 	root := t.TempDir()
 	if err := os.Mkdir(filepath.Join(root, ".agent"), 0o700); err != nil {
 		t.Fatal(err)
@@ -335,11 +340,20 @@ func TestAuditProofsMapsRunnerFailuresToSafeIncompleteReasons(t *testing.T) {
 			want: auditDiagnostic{code: "agentflow_unavailable", message: "agentflow proof verification unavailable: agentflow executable not found"},
 		},
 		{
-			name: "transport failure", ctx: context.Background(), err: errors.New("private transport detail"),
+			name: "transport failure", ctx: context.Background(), err: errors.New("private transport detail " + secret),
 			want: auditDiagnostic{code: "agentflow_unavailable", message: "agentflow proof verification unavailable"},
 		},
 		{
+			name: "unset approved environment variable", ctx: context.Background(),
+			err:  fmt.Errorf("wrapped: %w", &agentflow.EnvNotSetError{Name: "GOLEM_577_UNSET"}),
+			want: auditDiagnostic{code: "agentflow_unavailable", message: "agentflow proof verification unavailable: approved environment variable GOLEM_577_UNSET is not set"},
+		},
+		{
 			name: "canceled", ctx: canceledContext(), err: context.Canceled,
+			want: auditDiagnostic{code: "canceled", message: "agentflow proof verification was canceled"},
+		},
+		{
+			name: "canceled before unset approved name", ctx: canceledContext(), err: &agentflow.EnvNotSetError{Name: "GOLEM_577_UNSET"},
 			want: auditDiagnostic{code: "canceled", message: "agentflow proof verification was canceled"},
 		},
 	}
@@ -348,6 +362,9 @@ func TestAuditProofsMapsRunnerFailuresToSafeIncompleteReasons(t *testing.T) {
 			got := auditProofs(test.ctx, root, &auditProofRunner{err: test.err})
 			if got.outcome != "incomplete" || !reflect.DeepEqual(got.diagnostics, []auditDiagnostic{test.want}) {
 				t.Fatalf("result = %#v, want %#v", got, test.want)
+			}
+			if strings.Contains(fmt.Sprint(got.diagnostics), secret) {
+				t.Fatalf("diagnostics disclose runner error text: %#v", got.diagnostics)
 			}
 		})
 	}
