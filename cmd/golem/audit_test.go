@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -35,15 +36,26 @@ func TestParseAuditFlags(t *testing.T) {
 		{name: "memory", args: []string{"-scope=memory"}, want: auditFlags{root: ".", scope: "memory"}},
 		{name: "proofs", args: []string{"-scope", "proofs", "-agentflow-src", "../agentflow"}, want: auditFlags{root: ".", scope: "proofs", agentflowSrc: "../agentflow"}},
 		{name: "all explicit", args: []string{"-scope", "all"}, want: auditFlags{root: ".", scope: "all"}},
+		{name: "approved env", args: []string{"-scope", "proofs", "-agentflow-env", "GOPRIVATE", "-agentflow-env", "HTTPS_PROXY"},
+			want: auditFlags{root: ".", scope: "proofs", agentflowEnv: stringSliceFlag{"GOPRIVATE", "HTTPS_PROXY"}}},
+		{name: "env literal rejected without echo", args: []string{"-agentflow-env", "NAME=sk-SECRET-577"},
+			wantErr: "golem audit: -agentflow-env: agentflow: environment name #1 is not a variable name"},
+		{name: "positional after env flag", args: []string{"-agentflow-env", "NAME", "sk-SECRET-577"},
+			wantErr: "golem audit: 1 unexpected positional argument(s)"},
 		{name: "unknown scope", args: []string{"-scope", "files"}, wantErr: `invalid -scope "files"`},
 		{name: "empty scope", args: []string{"-scope="}, wantErr: "-scope requires a non-empty value"},
 		{name: "empty root", args: []string{"-root="}, wantErr: "-root requires a non-empty value"},
 		{name: "empty agentflow source", args: []string{"-agentflow-src="}, wantErr: "-agentflow-src requires a non-empty value"},
-		{name: "extra argument", args: []string{"workspace"}, wantErr: "unexpected positional arguments"},
-		{name: "unknown flag", args: []string{"-wat"}, wantErr: "flag provided but not defined"},
-		{name: "json unsupported", args: []string{"-json"}, wantErr: "flag provided but not defined"},
-		{name: "output format unsupported", args: []string{"-output-format", "json"}, wantErr: "flag provided but not defined"},
+		{name: "extra argument", args: []string{"workspace"}, wantErr: "unexpected positional argument(s)"},
+		{name: "unknown flag", args: []string{"-wat"}, wantErr: auditFlagParseError(1)},
+		{name: "json unsupported", args: []string{"-json"}, wantErr: auditFlagParseError(1)},
+		{name: "output format unsupported", args: []string{"-output-format", "json"}, wantErr: auditFlagParseError(2)},
+		{name: "unknown flag after env name", args: []string{"-agentflow-env", "NAME", "-sk-SECRET-577"}, wantErr: auditFlagParseError(3)},
+		{name: "double-dash unknown flag", args: []string{"--sk-SECRET-577"}, wantErr: auditFlagParseError(1)},
+		{name: "bad flag syntax", args: []string{"---sk-SECRET-577"}, wantErr: auditFlagParseError(1)},
+		{name: "flag needs an argument", args: []string{"-root"}, wantErr: auditFlagParseError(1)},
 		{name: "help", args: []string{"-help"}, wantHelp: true, wantOutput: "Usage of golem audit:"},
+		{name: "short help", args: []string{"-h"}, wantHelp: true, wantOutput: "Usage of golem audit:"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var output bytes.Buffer
@@ -56,14 +68,24 @@ func TestParseAuditFlags(t *testing.T) {
 				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
 					t.Fatalf("parseAuditFlags error = %v, want %q", err, tc.wantErr)
 				}
-			} else if err != nil || got != tc.want {
+			} else if err != nil || !reflect.DeepEqual(got, tc.want) {
 				t.Fatalf("parseAuditFlags = %#v, %v; want %#v, nil", got, err, tc.want)
+			}
+			if err != nil && strings.Contains(err.Error(), "SECRET") {
+				t.Fatalf("parseAuditFlags error echoes its input: %v", err)
 			}
 			if !strings.Contains(output.String(), tc.wantOutput) {
 				t.Fatalf("flag output = %q, want substring %q", output.String(), tc.wantOutput)
 			}
+			if !tc.wantHelp && output.Len() != 0 {
+				t.Fatalf("parser wrote flag output %q", output.String())
+			}
 		})
 	}
+}
+
+func auditFlagParseError(n int) string {
+	return fmt.Sprintf("golem audit: invalid command-line flags in %d argument(s); run with -help for usage", n)
 }
 
 func TestRunAuditReportAndExitPrecedence(t *testing.T) {
@@ -247,12 +269,11 @@ func TestAuditProofRunnerDoesNotWritePythonBytecode(t *testing.T) {
 				if err := os.MkdirAll(bin, 0o700); err != nil {
 					t.Fatal(err)
 				}
-				script := "#!/usr/bin/env python3\nfrom audit_cache_probe import finish\nfinish()\n"
+				script := "#!/usr/bin/env python3\nimport sys\nsys.path.insert(0, " + strconv.Quote(filepath.Join(root, "src")) + ")\nfrom audit_cache_probe import finish\nfinish()\n"
 				if err := os.WriteFile(filepath.Join(bin, "agentflow"), []byte(script), 0o700); err != nil {
 					t.Fatal(err)
 				}
 				t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
-				t.Setenv("PYTHONPATH", filepath.Join(root, "src"))
 				return nil
 			},
 		},
@@ -273,7 +294,7 @@ func TestAuditProofRunnerDoesNotWritePythonBytecode(t *testing.T) {
 			rootBefore := snapshotAuditFixtureTree(t, root)
 			dataBefore := snapshotAuditFixtureTree(t, data)
 
-			args := append([]string{"-root", root, "-scope", "proofs"}, extraArgs...)
+			args := append([]string{"-root", root, "-scope", "proofs", "-agentflow-env", "GOLEM_AUDIT_EXPECT_ROOT"}, extraArgs...)
 			var out, errOut bytes.Buffer
 			err = runAudit(t.Context(), args, &out, &errOut)
 			var exit *auditExitError
@@ -393,17 +414,46 @@ func assertAuditFixtureTreeUnchanged(t *testing.T, root string, before map[strin
 	t.Fatalf("audit changed fixture tree %q (entries expose name, byte digest/size, mode, and mtime):%s", root, changes.String())
 }
 
+// auditEnvSecret stands in for a value mistyped into -agentflow-env.
+const auditEnvSecret = "ENV-SECRET-577"
+
+// auditUnsetEnvName is approved with -agentflow-env but never set in the child.
+const auditUnsetEnvName = "GOLEM_577_UNSET"
+
 func TestAuditExitContractHelper(t *testing.T) {
 	if os.Getenv("GOLEM_AUDIT_EXIT_HELPER") != "1" {
 		return
 	}
 	root := os.Getenv("GOLEM_AUDIT_ROOT")
 	args := []string{"golem", "audit", "-root", root}
+	for _, name := range []string{"GOLEM_AUDIT_ROOT", "GOLEM_AUDIT_AF_PAYLOAD", "GOLEM_AUDIT_AF_EXIT"} {
+		if _, ok := os.LookupEnv(name); ok {
+			args = append(args, "-agentflow-env", name)
+		}
+	}
+	if os.Getenv("GOLEM_AUDIT_UNSET_APPROVAL") == "1" {
+		if _, ok := os.LookupEnv(auditUnsetEnvName); ok {
+			os.Exit(99) // the scenario needs the approved name unset
+		}
+		args = append(args, "-agentflow-env", auditUnsetEnvName)
+	}
 	switch os.Getenv("GOLEM_AUDIT_CASE") {
 	case "help":
 		args = []string{"golem", "audit", "-help"}
+	case "help-short":
+		args = []string{"golem", "audit", "-h"}
 	case "invalid":
 		args = []string{"golem", "audit", "-json"}
+	case "flag-unknown":
+		args = []string{"golem", "audit", "-agentflow-env", "NAME", "-sk-" + auditEnvSecret}
+	case "flag-double-dash":
+		args = []string{"golem", "audit", "--sk-" + auditEnvSecret}
+	case "flag-bad-syntax":
+		args = []string{"golem", "audit", "---sk-" + auditEnvSecret}
+	case "env-literal":
+		args = []string{"golem", "audit", "-root", root, "-agentflow-env", "NAME=" + auditEnvSecret}
+	case "env-positional":
+		args = []string{"golem", "audit", "-root", root, "-agentflow-env", "NAME", auditEnvSecret}
 	case "explicit-missing":
 		args = append(args, "-scope", "workspace")
 	case "memory":
@@ -528,6 +578,54 @@ func TestAuditExitContract(t *testing.T) {
 			absent: []string{secretProof},
 		},
 		{
+			name: "unset approved name names the variable", scenario: "proofs", wantExit: 2,
+			prepare: func(t *testing.T, root, _ string) map[string]string {
+				if err := os.Mkdir(filepath.Join(root, ".agent"), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				return map[string]string{"GOLEM_AUDIT_UNSET_APPROVAL": "1"}
+			},
+			wantStdout: func(_, _ string) string {
+				return "proofs: outcome=incomplete assurance=\"structural/checksum; unsigned\" checked=0 sources=0\n  diagnostic code=agentflow_unavailable target=\"\" message=\"agentflow proof verification unavailable: approved environment variable GOLEM_577_UNSET is not set\"\noverall: outcome=incomplete\n"
+			},
+		},
+		{
+			name: "violation outranks unset approved name", wantExit: 1,
+			prepare: func(t *testing.T, root, data string) map[string]string {
+				path, err := checkpointDBPath(func(string) string { return data }, root)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(path, []byte("not sqlite"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Mkdir(filepath.Join(root, ".agent"), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				return map[string]string{"GOLEM_AUDIT_UNSET_APPROVAL": "1"}
+			},
+			wantStdout: func(root, data string) string {
+				workspacePath, _ := checkpointDBPath(func(string) string { return data }, root)
+				memoryPath := filepath.Join(data, "golem", "memories.db")
+				return fmt.Sprintf("workspace: outcome=violation assurance=\"signed\" checked=0 paths=0\n  diagnostic code=store-corrupt target=%q message=\"SQLite integrity verification failed.\"\n", workspacePath) +
+					fmt.Sprintf("memory: outcome=not-present assurance=\"signed\" checked=0 total=unavailable\n  diagnostic code=store-not-present target=%q message=\"Store is not present.\"\n", memoryPath) +
+					"proofs: outcome=incomplete assurance=\"structural/checksum; unsigned\" checked=0 sources=0\n  diagnostic code=agentflow_unavailable target=\"\" message=\"agentflow proof verification unavailable: approved environment variable GOLEM_577_UNSET is not set\"\noverall: outcome=violation\n"
+			},
+		},
+		{
+			name: "unset approved name does not affect workspace scope", scenario: "explicit-missing", wantExit: 0,
+			prepare: func(t *testing.T, root, data string) map[string]string {
+				createEmptyAuditWorkspace(t, root, data)
+				return map[string]string{"GOLEM_AUDIT_UNSET_APPROVAL": "1"}
+			},
+			wantStdout: func(_, _ string) string {
+				return "workspace: outcome=valid assurance=\"signed\" checked=0 paths=0\noverall: outcome=valid\n"
+			},
+		},
+		{
 			name: "memory violation hides record body", scenario: "memory", wantExit: 1,
 			prepare: func(t *testing.T, _, data string) map[string]string {
 				createInvalidAuditMemory(t, data, secretMemory)
@@ -548,14 +646,49 @@ func TestAuditExitContract(t *testing.T) {
 			wantStdout: func(_, _ string) string { return "" },
 		},
 		{
+			name: "agentflow-env value literal", scenario: "env-literal", wantExit: 2,
+			wantStdout: func(_, _ string) string { return "" },
+			wantStderr: "golem audit: -agentflow-env: agentflow: environment name #1 is not a variable name (names only; values are read from the environment)\n",
+			absent:     []string{auditEnvSecret},
+		},
+		{
+			name: "agentflow-env value as positional", scenario: "env-positional", wantExit: 2,
+			wantStdout: func(_, _ string) string { return "" },
+			wantStderr: "golem audit: 1 unexpected positional argument(s)\n",
+			absent:     []string{auditEnvSecret},
+		},
+		{
 			name: "help", scenario: "help", wantExit: 0,
 			wantStdout: func(_, _ string) string { return "" },
-			wantStderr: "Usage of golem audit:\n  -agentflow-src string\n    \tAgentFlow source checkout\n  -root string\n    \tworkspace root (default \".\")\n  -scope string\n    \taudit scope: all, workspace, memory, or proofs (default \"all\")\n",
+			wantStderr: "Usage of golem audit:\n  -agentflow-env value\n    \tforward one named parent environment variable to AgentFlow (repeatable; names only)\n  -agentflow-src string\n    \tAgentFlow source checkout\n  -root string\n    \tworkspace root (default \".\")\n  -scope string\n    \taudit scope: all, workspace, memory, or proofs (default \"all\")\n",
+		},
+		{
+			name: "short help", scenario: "help-short", wantExit: 0,
+			wantStdout: func(_, _ string) string { return "" },
+			wantStderr: "Usage of golem audit:\n  -agentflow-env value\n    \tforward one named parent environment variable to AgentFlow (repeatable; names only)\n  -agentflow-src string\n    \tAgentFlow source checkout\n  -root string\n    \tworkspace root (default \".\")\n  -scope string\n    \taudit scope: all, workspace, memory, or proofs (default \"all\")\n",
 		},
 		{
 			name: "unsupported machine output", scenario: "invalid", wantExit: 2,
 			wantStdout: func(_, _ string) string { return "" },
-			wantStderr: "flag provided but not defined: -json\nUsage of golem audit:\n  -agentflow-src string\n    \tAgentFlow source checkout\n  -root string\n    \tworkspace root (default \".\")\n  -scope string\n    \taudit scope: all, workspace, memory, or proofs (default \"all\")\n",
+			wantStderr: auditFlagParseError(1) + "\n",
+		},
+		{
+			name: "unknown flag does not echo", scenario: "flag-unknown", wantExit: 2,
+			wantStdout: func(_, _ string) string { return "" },
+			wantStderr: auditFlagParseError(3) + "\n",
+			absent:     []string{auditEnvSecret},
+		},
+		{
+			name: "double-dash flag does not echo", scenario: "flag-double-dash", wantExit: 2,
+			wantStdout: func(_, _ string) string { return "" },
+			wantStderr: auditFlagParseError(1) + "\n",
+			absent:     []string{auditEnvSecret},
+		},
+		{
+			name: "bad flag syntax does not echo", scenario: "flag-bad-syntax", wantExit: 2,
+			wantStdout: func(_, _ string) string { return "" },
+			wantStderr: auditFlagParseError(1) + "\n",
+			absent:     []string{auditEnvSecret},
 		},
 	}
 

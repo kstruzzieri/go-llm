@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -63,21 +64,22 @@ func resumeDisposition(state string) recoveryDisposition {
 	}
 }
 
-type agentflowStatusExit struct{ code int }
+// agentflowStatusExit carries a status exit code. diagnostic, when set, is the
+// one stderr line main prints before exiting; stdout stays the JSON contract.
+type agentflowStatusExit struct {
+	code       int
+	diagnostic string
+}
 
 func (e *agentflowStatusExit) Error() string { return fmt.Sprintf("agentflow status exit %d", e.code) }
 func (e *agentflowStatusExit) ExitCode() int { return e.code }
 
-func runAgentflowStatus(ctx context.Context, out io.Writer, root, source string, jsonOutput bool) error {
+func runAgentflowStatus(ctx context.Context, out io.Writer, root, source string, envNames []string, jsonOutput bool) error {
 	source, err := resolveTaskAgentflowSource(root, source)
 	if err != nil {
 		return err
 	}
-	var runner agentflow.Runner = agentflow.NewExecRunner(root)
-	if source != "" {
-		runner = agentflow.NewSrcExecRunner(root, source)
-	}
-	return runAgentflowStatusWithRunner(ctx, out, root, jsonOutput, runner)
+	return runAgentflowStatusWithRunner(ctx, out, root, jsonOutput, mustAgentflowRunner(root, source, envNames))
 }
 
 func runAgentflowStatusWithRunner(ctx context.Context, out io.Writer, root string, jsonOutput bool, runner agentflow.Runner) error {
@@ -98,6 +100,13 @@ func runAgentflowStatusWithRunner(ctx context.Context, out io.Writer, root strin
 		}
 		if !jsonOutput {
 			_, _ = fmt.Fprintf(out, "agentflow status unavailable: %s\n", recoveryDisplayText(err.Error()))
+			return statusExit(3)
+		}
+		// JSON mode: only an unset approved name is reported (on stderr, by
+		// main); other runner errors may carry arbitrary text and stay silent.
+		var unset *agentflow.EnvNotSetError
+		if errors.As(err, &unset) {
+			return &agentflowStatusExit{code: 3, diagnostic: unset.Error()}
 		}
 		return statusExit(3)
 	}

@@ -39,7 +39,8 @@ func TestExecRunnerDisablePythonBytecodeWritesIsChildOnly(t *testing.T) {
 }
 
 func TestExecRunnerArgv_SrcMode(t *testing.T) {
-	r := NewSrcExecRunner("/ws", "/checkout")
+	checkout := writeSourceCheckoutFixture(t)
+	r := NewSrcExecRunner("/ws", checkout)
 	bin, argv, env := r.commandFor([]string{"status"})
 	if bin != "python3" {
 		t.Fatalf("bin = %q, want python3", bin)
@@ -47,18 +48,57 @@ func TestExecRunnerArgv_SrcMode(t *testing.T) {
 	if want := []string{"-P", "-m", "agentflow", "status"}; !reflect.DeepEqual(argv, want) {
 		t.Fatalf("argv = %v, want %v", argv, want)
 	}
-	if want := "PYTHONPATH=/checkout/src"; len(env) != 1 || env[0] != want {
-		t.Fatalf("env = %v, want [%s]", env, want)
+	if want := []string{"PYTHONPATH=" + filepath.Join(checkout, "src")}; !reflect.DeepEqual(env, want) {
+		t.Fatalf("env = %v, want %v", env, want)
 	}
 }
 
-func TestExecRunnerSrcModeRejectsPathList(t *testing.T) {
-	r := NewSrcExecRunner(t.TempDir(), "trusted"+string(os.PathListSeparator)+"checkout")
-	r.bin = "must-not-launch"
-	out, errOut, exit, err := r.Run(t.Context(), []string{"status"}, nil)
-	if err == nil || !strings.Contains(err.Error(), "source checkout contains a path-list separator") ||
-		out != nil || errOut != nil || exit != 0 {
-		t.Fatalf("stdout=%q stderr=%q exit=%d err=%v, want source path error before launch", out, errOut, exit, err)
+func TestNewSrcExecRunnerUsesCanonicalCheckout(t *testing.T) {
+	checkout := writeSourceCheckoutFixture(t)
+	link := filepath.Join(t.TempDir(), "checkout-link")
+	if err := os.Symlink(checkout, link); err != nil {
+		t.Fatal(err)
+	}
+	_, _, env := NewSrcExecRunner("/ws", link).commandFor(nil)
+	if want := []string{"PYTHONPATH=" + filepath.Join(checkout, "src")}; !reflect.DeepEqual(env, want) {
+		t.Fatalf("env = %v, want canonical %v", env, want)
+	}
+}
+
+func TestNewSrcExecRunnerRejectsInvalidCheckout(t *testing.T) {
+	sep := string(os.PathListSeparator)
+	sepTarget := filepath.Join(t.TempDir(), "with"+sep+"separator")
+	if err := os.MkdirAll(filepath.Join(sepTarget, "src", "agentflow"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sepTarget, "src", "agentflow", "__init__.py"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(t.TempDir(), "link")
+	if err := os.Symlink(sepTarget, link); err != nil {
+		t.Fatal(err)
+	}
+	initDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(initDir, "src", "agentflow", "__init__.py"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct{ name, checkout, wantErr string }{
+		{"empty", "", "agentflow source checkout is empty"},
+		{"relative", filepath.Join("tools", "agentflow"), "agentflow source checkout must be an absolute path"},
+		{"separator in path", filepath.Join(t.TempDir(), "a"+sep+"b"), "agentflow source checkout contains a path-list separator"},
+		{"missing", filepath.Join(t.TempDir(), "missing"), "agentflow source checkout: "},
+		{"separator after symlink resolution", link, "agentflow source checkout contains a path-list separator"},
+		{"no package", t.TempDir(), "agentflow source checkout has no src/agentflow package"},
+		{"package init is a directory", initDir, "agentflow source checkout has no src/agentflow package"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := NewSrcExecRunner(t.TempDir(), tc.checkout)
+			r.bin = "must-not-launch"
+			out, errOut, exit, err := r.Run(t.Context(), []string{"status"}, nil)
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) || out != nil || errOut != nil || exit != 0 {
+				t.Fatalf("stdout=%q stderr=%q exit=%d err=%v, want %q before launch", out, errOut, exit, err, tc.wantErr)
+			}
+		})
 	}
 }
 
@@ -175,4 +215,22 @@ func (f *fakeRunner) Run(_ context.Context, args []string, stdin []byte) ([]byte
 	}
 	rep := f.replies[args[0]]
 	return rep.stdout, rep.stderr, rep.exit, rep.err
+}
+
+// writeSourceCheckoutFixture returns a canonical checkout path holding the
+// minimal src/agentflow package that source-mode validation requires.
+func writeSourceCheckoutFixture(t *testing.T) string {
+	t.Helper()
+	checkout, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	pkg := filepath.Join(checkout, "src", "agentflow")
+	if err := os.MkdirAll(pkg, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(pkg, "__init__.py"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return checkout
 }

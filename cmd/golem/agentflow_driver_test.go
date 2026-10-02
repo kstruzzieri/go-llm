@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -1597,4 +1598,43 @@ func TestAgentflowDriverSeesRefreshedGitFragment(t *testing.T) {
 	if caller.system != sess.baseSystem || !strings.Contains(caller.system, "branch: feature\n") || strings.Count(caller.system, gitContextOpen) != 1 {
 		t.Fatalf("driver request after refresh:\n%s", caller.system)
 	}
+}
+
+// The driver builds the canonical runner and every worker runner through
+// agentflowRunnerForRoot, so a non-canonical root here stands in for a worker.
+func TestAgentflowRunnerForRootForwardsApprovedNamesToWorkerRoots(t *testing.T) {
+	bin := t.TempDir()
+	script := "#!/bin/sh\nprintf '%s\\n%s\\n' \"$PWD\" \"${GOLEM_577_APPROVED-unset}\" > \"$GOLEM_577_OUT\"\n"
+	if err := os.WriteFile(filepath.Join(bin, "agentflow"), []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	out := filepath.Join(t.TempDir(), "out")
+	t.Setenv("GOLEM_577_OUT", out)
+	t.Setenv("GOLEM_577_APPROVED", "worker-visible")
+	workerRoot, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := agentflowRunnerForRoot("", []string{"GOLEM_577_OUT", "GOLEM_577_APPROVED"})(workerRoot)
+	if _, stderr, exit, err := r.Run(t.Context(), []string{"status"}, nil); err != nil || exit != 0 {
+		t.Fatalf("fake agentflow: exit=%d err=%v stderr=%q", exit, err, stderr)
+	}
+	got, err := os.ReadFile(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := workerRoot + "\nworker-visible\n"; string(got) != want {
+		t.Fatalf("worker child saw %q, want cwd and approved value %q", got, want)
+	}
+}
+
+func TestMustAgentflowRunnerPanicsWithoutEchoOnUnvalidatedNames(t *testing.T) {
+	defer func() {
+		r := recover()
+		if r == nil || strings.Contains(fmt.Sprint(r), "SECRET") {
+			t.Fatalf("recover = %v, want a value-free panic", r)
+		}
+	}()
+	mustAgentflowRunner(t.TempDir(), "", []string{"NAME=sk-SECRET-577"})
 }

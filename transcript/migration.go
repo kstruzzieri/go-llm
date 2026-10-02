@@ -4,6 +4,7 @@ package transcript
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 )
 
@@ -79,25 +80,93 @@ func migrate(ctx context.Context, db *sql.DB) error {
 	return nil
 }
 
+// auditUpgradeHooks are per-call test seams for addMissingAuditColumnsWith.
+// Production passes the zero value.
+type auditUpgradeHooks struct {
+	afterProbe  func()                 // the lock-free probe found a missing column
+	afterLock   func()                 // the write lock is held and columns re-probed
+	beforeAlter func(col string) error // before each ALTER
+}
+
 func addMissingAuditColumns(ctx context.Context, db *sql.DB) error {
+	return addMissingAuditColumnsWith(ctx, db, auditUpgradeHooks{})
+}
+
+// addMissingAuditColumnsWith adds the audit columns a legacy conversations
+// table lacks. A lock-free probe returns early when every column exists, so a
+// current-schema open only reads. Otherwise the upgrade takes SQLite's write
+// lock with its first statement, re-probes under the lock, and adds every
+// still-missing column in one transaction: a concurrent opener waits on
+// busy_timeout, then finds the columns the first one committed. Reading before
+// writing would instead fail at once with SQLITE_BUSY or SQLITE_BUSY_SNAPSHOT
+// rather than wait. Cancellation is observed between statements, not during
+// the lock wait; the DSN's busy_timeout (5s) bounds that wait.
+func addMissingAuditColumnsWith(ctx context.Context, db *sql.DB, hooks auditUpgradeHooks) (err error) {
 	existing, err := conversationColumns(ctx, db)
 	if err != nil {
 		return err
+	}
+	if !missingAuditColumn(existing) {
+		return nil
+	}
+	if hooks.afterProbe != nil {
+		hooks.afterProbe()
+	}
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("transcript: begin audit-column upgrade: %w", err)
+	}
+	defer func() {
+		if rbErr := tx.Rollback(); rbErr != nil && !errors.Is(rbErr, sql.ErrTxDone) {
+			err = errors.Join(err, fmt.Errorf("transcript: rollback audit-column upgrade: %w", rbErr))
+		}
+	}()
+	// A zero-row UPDATE takes the write lock without changing any row.
+	if _, err := tx.ExecContext(ctx, "UPDATE conversations SET id = id WHERE 0"); err != nil {
+		return fmt.Errorf("transcript: claim audit-column upgrade: %w", err)
+	}
+	if existing, err = conversationColumns(ctx, tx); err != nil {
+		return fmt.Errorf("transcript: re-probe audit columns under lock: %w", err)
+	}
+	if hooks.afterLock != nil {
+		hooks.afterLock()
 	}
 	for _, col := range auditColumns {
 		if existing[col.name] {
 			continue
 		}
+		if hooks.beforeAlter != nil {
+			if err := hooks.beforeAlter(col.name); err != nil {
+				return err
+			}
+		}
 		stmt := fmt.Sprintf("ALTER TABLE conversations ADD COLUMN %s %s", col.name, col.ddl)
-		if _, err := db.ExecContext(ctx, stmt); err != nil {
+		if _, err := tx.ExecContext(ctx, stmt); err != nil {
 			return fmt.Errorf("transcript: add column %s: %w", col.name, err)
 		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("transcript: commit audit-column upgrade: %w", err)
 	}
 	return nil
 }
 
-func conversationColumns(ctx context.Context, db *sql.DB) (map[string]bool, error) {
-	rows, err := db.QueryContext(ctx, "PRAGMA table_info(conversations)")
+func missingAuditColumn(existing map[string]bool) bool {
+	for _, col := range auditColumns {
+		if !existing[col.name] {
+			return true
+		}
+	}
+	return false
+}
+
+// queryer is the QueryContext method shared by *sql.DB and *sql.Tx.
+type queryer interface {
+	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
+}
+
+func conversationColumns(ctx context.Context, q queryer) (map[string]bool, error) {
+	rows, err := q.QueryContext(ctx, "PRAGMA table_info(conversations)")
 	if err != nil {
 		return nil, fmt.Errorf("transcript: table_info: %w", err)
 	}
