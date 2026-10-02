@@ -496,37 +496,7 @@ func (c parallelSmokeCaller) Chat(ctx context.Context, req provider.ChatRequest,
 }
 
 func TestAgentflowParallelSmoke(t *testing.T) {
-	dir := t.TempDir()
-	copyTree(t, "../../testdata/agentflow", dir)
-	plan := agentflow.Plan{
-		SchemaVersion: "0.3.0", Objective: "prove bounded parallel task execution", Scope: []string{"src"},
-		NonGoals: []string{}, Invariants: []string{"only declared files change"}, RiskLevel: "low",
-		DriftBudget:  agentflow.DriftBudget{UnrelatedEdits: 0, NewDependencies: 0, FormattingDrift: "minimal", ArchitectureDrift: "requires_approval"},
-		AllowedFiles: []string{"src/*", ".agent/"}, BlockedFiles: []string{},
-		ValidationGates: []string{"p1", "p2", "p3"}, RollbackPlan: "git checkout -- .", EvidenceIDs: []string{},
-		Steps: []agentflow.Step{
-			{ID: "P1", Action: "write worker one", Files: []string{"src/parallel-one.txt"}, Preconditions: []string{}, ExpectedDiff: []string{"worker-one"}, Validation: []string{"p1"}, EvidenceIDs: []string{}, Gates: []agentflow.Gate{{Kind: "command", Run: []string{"grep", "-qx", "worker-one", "src/parallel-one.txt"}}}},
-			{ID: "P2", Action: "write worker two", Files: []string{"src/parallel-two.txt"}, Preconditions: []string{}, ExpectedDiff: []string{"worker-two"}, Validation: []string{"p2"}, EvidenceIDs: []string{}, Gates: []agentflow.Gate{{Kind: "command", Run: []string{"grep", "-qx", "worker-two", "src/parallel-two.txt"}}}},
-			{ID: "P3", Action: "write canonical three", Files: []string{"src/parallel-three.txt"}, Preconditions: []string{}, ExpectedDiff: []string{"canonical-three"}, Validation: []string{"p3"}, EvidenceIDs: []string{}, DependsOn: []string{"P1", "P2"}, Gates: []agentflow.Gate{{Kind: "command", Run: []string{"grep", "-qx", "canonical-three", "src/parallel-three.txt"}}}},
-		},
-	}
-	planBytes, err := json.MarshalIndent(plan, "", "  ")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(dir, "plan.json"), append(planBytes, '\n'), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(dir, ".gitignore"), []byte(".agent/\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	for _, name := range []string{"parallel-one.txt", "parallel-two.txt", "parallel-three.txt"} {
-		if err := os.WriteFile(filepath.Join(dir, "src", name), []byte("pending\n"), 0o600); err != nil {
-			t.Fatal(err)
-		}
-	}
-	gitInit(t, dir)
-	base := strings.TrimSpace(runTestGit(t, dir, "rev-parse", "HEAD"))
+	dir, plan, base := writeParallelSmokeFixture(t)
 
 	// Skip before goroutines start when neither a source checkout nor installed
 	// CLI is available, then create one real runner per production root.
@@ -572,48 +542,7 @@ func TestAgentflowParallelSmoke(t *testing.T) {
 		t.Fatalf("parallel driver: %v\n%s", err, stderr.String())
 	}
 
-	wantBytes := map[string]string{
-		"parallel-one.txt": "worker-one\n", "parallel-two.txt": "worker-two\n", "parallel-three.txt": "canonical-three\n",
-	}
-	for name, want := range wantBytes {
-		got, err := os.ReadFile(filepath.Join(dir, "src", name))
-		if err != nil || string(got) != want {
-			t.Fatalf("src/%s = %q, %v; want %q", name, got, err, want)
-		}
-	}
-	proofBytes, err := os.ReadFile(proof)
-	if err != nil || len(bytes.TrimSpace(proofBytes)) == 0 {
-		t.Fatalf("verified proof %q is empty or missing: %v", proof, err)
-	}
-	var proofState struct {
-		Aggregation *struct {
-			SchemaVersion string `json:"schema_version"`
-			Mode          string `json:"mode"`
-			SourceCount   int    `json:"source_count"`
-			Sources       []struct {
-				SourceID         string  `json:"source_id"`
-				BaseCommit       *string `json:"base_commit"`
-				HeadCommit       *string `json:"head_commit"`
-				NamespacedPrefix string  `json:"namespaced_prefix"`
-			} `json:"sources"`
-		} `json:"aggregation"`
-	}
-	if err := json.Unmarshal(proofBytes, &proofState); err != nil {
-		t.Fatal(err)
-	}
-	if proofState.Aggregation == nil || proofState.Aggregation.SchemaVersion != "0.1.0" || proofState.Aggregation.Mode != "cross_worktree" || proofState.Aggregation.SourceCount != 2 {
-		t.Fatalf("aggregation provenance = %#v", proofState.Aggregation)
-	}
-	provenance := map[string]string{}
-	for _, source := range proofState.Aggregation.Sources {
-		if source.BaseCommit == nil || source.HeadCommit == nil || *source.BaseCommit != base || *source.HeadCommit != base {
-			t.Fatalf("source %s commits = %v/%v, want %s", source.SourceID, source.BaseCommit, source.HeadCommit, base)
-		}
-		provenance[source.SourceID] = source.NamespacedPrefix
-	}
-	if provenance["w1"] != "WTw1-" || provenance["w2"] != "WTw2-" || len(provenance) != 2 {
-		t.Fatalf("aggregation sources = %v", provenance)
-	}
+	assertParallelSmokeProof(t, dir, proof, base)
 
 	calls := recorder.snapshot()
 	claims := map[string]parallelSmokeCall{}
@@ -658,7 +587,7 @@ func TestAgentflowParallelSmoke(t *testing.T) {
 		t.Fatalf("P2 worker advisory projection = %q, want P1 while assigned P2", projections[claims["P2"].root])
 	}
 	for _, aggregate := range aggregates {
-		if aggregate.promoted["parallel-one.txt"] != wantBytes["parallel-one.txt"] || aggregate.promoted["parallel-two.txt"] != wantBytes["parallel-two.txt"] {
+		if aggregate.promoted["parallel-one.txt"] != parallelSmokeWant["parallel-one.txt"] || aggregate.promoted["parallel-two.txt"] != parallelSmokeWant["parallel-two.txt"] {
 			t.Fatalf("source was not promoted before aggregation: %v", aggregate.promoted)
 		}
 	}
@@ -675,15 +604,126 @@ func TestAgentflowParallelSmoke(t *testing.T) {
 	}
 }
 
-// agentflowRunnerOrSkip honors the explicit AGENTFLOW_SRC checkout, otherwise
-// uses an installed binary or skips. Mirrors
+// parallelSmokeWant is the content each parallel fixture step writes under src/.
+var parallelSmokeWant = map[string]string{
+	"parallel-one.txt": "worker-one\n", "parallel-two.txt": "worker-two\n", "parallel-three.txt": "canonical-three\n",
+}
+
+// writeParallelSmokeFixture builds a committed repo whose plan has two
+// independent steps (P1, P2) and a dependent P3, and returns the root, the plan,
+// and the baseline commit.
+func writeParallelSmokeFixture(t *testing.T) (string, agentflow.Plan, string) {
+	t.Helper()
+	dir := t.TempDir()
+	copyTree(t, "../../testdata/agentflow", dir)
+	plan := agentflow.Plan{
+		SchemaVersion: "0.3.0", Objective: "prove bounded parallel task execution", Scope: []string{"src"},
+		NonGoals: []string{}, Invariants: []string{"only declared files change"}, RiskLevel: "low",
+		DriftBudget:  agentflow.DriftBudget{UnrelatedEdits: 0, NewDependencies: 0, FormattingDrift: "minimal", ArchitectureDrift: "requires_approval"},
+		AllowedFiles: []string{"src/*", ".agent/"}, BlockedFiles: []string{},
+		ValidationGates: []string{"p1", "p2", "p3"}, RollbackPlan: "git checkout -- .", EvidenceIDs: []string{},
+		Steps: []agentflow.Step{
+			{ID: "P1", Action: "write worker one", Files: []string{"src/parallel-one.txt"}, Preconditions: []string{}, ExpectedDiff: []string{"worker-one"}, Validation: []string{"p1"}, EvidenceIDs: []string{}, Gates: []agentflow.Gate{{Kind: "command", Run: []string{"grep", "-qx", "worker-one", "src/parallel-one.txt"}}}},
+			{ID: "P2", Action: "write worker two", Files: []string{"src/parallel-two.txt"}, Preconditions: []string{}, ExpectedDiff: []string{"worker-two"}, Validation: []string{"p2"}, EvidenceIDs: []string{}, Gates: []agentflow.Gate{{Kind: "command", Run: []string{"grep", "-qx", "worker-two", "src/parallel-two.txt"}}}},
+			{ID: "P3", Action: "write canonical three", Files: []string{"src/parallel-three.txt"}, Preconditions: []string{}, ExpectedDiff: []string{"canonical-three"}, Validation: []string{"p3"}, EvidenceIDs: []string{}, DependsOn: []string{"P1", "P2"}, Gates: []agentflow.Gate{{Kind: "command", Run: []string{"grep", "-qx", "canonical-three", "src/parallel-three.txt"}}}},
+		},
+	}
+	planBytes, err := json.MarshalIndent(plan, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "plan.json"), append(planBytes, '\n'), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, ".gitignore"), []byte(".agent/\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"parallel-one.txt", "parallel-two.txt", "parallel-three.txt"} {
+		if err := os.WriteFile(filepath.Join(dir, "src", name), []byte("pending\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	gitInit(t, dir)
+	base := strings.TrimSpace(runTestGit(t, dir, "rev-parse", "HEAD"))
+	return dir, plan, base
+}
+
+// assertParallelSmokeProof checks that every fixture step's bytes landed in dir
+// and that the verified proof aggregated exactly the two worker ledgers across
+// worktrees, both pinned to base.
+func assertParallelSmokeProof(t *testing.T, dir, proof, base string) {
+	t.Helper()
+	for name, want := range parallelSmokeWant {
+		got, err := os.ReadFile(filepath.Join(dir, "src", name))
+		if err != nil || string(got) != want {
+			t.Fatalf("src/%s = %q, %v; want %q", name, got, err, want)
+		}
+	}
+	proofBytes, err := os.ReadFile(proof)
+	if err != nil || len(bytes.TrimSpace(proofBytes)) == 0 {
+		t.Fatalf("verified proof %q is empty or missing: %v", proof, err)
+	}
+	var proofState struct {
+		Aggregation *struct {
+			SchemaVersion string `json:"schema_version"`
+			Mode          string `json:"mode"`
+			SourceCount   int    `json:"source_count"`
+			Sources       []struct {
+				SourceID         string  `json:"source_id"`
+				BaseCommit       *string `json:"base_commit"`
+				HeadCommit       *string `json:"head_commit"`
+				NamespacedPrefix string  `json:"namespaced_prefix"`
+			} `json:"sources"`
+		} `json:"aggregation"`
+	}
+	if err := json.Unmarshal(proofBytes, &proofState); err != nil {
+		t.Fatal(err)
+	}
+	if proofState.Aggregation == nil || proofState.Aggregation.SchemaVersion != "0.1.0" || proofState.Aggregation.Mode != "cross_worktree" || proofState.Aggregation.SourceCount != 2 {
+		t.Fatalf("aggregation provenance = %#v", proofState.Aggregation)
+	}
+	provenance := map[string]string{}
+	for _, source := range proofState.Aggregation.Sources {
+		if source.BaseCommit == nil || source.HeadCommit == nil || *source.BaseCommit != base || *source.HeadCommit != base {
+			t.Fatalf("source %s commits = %v/%v, want %s", source.SourceID, source.BaseCommit, source.HeadCommit, base)
+		}
+		provenance[source.SourceID] = source.NamespacedPrefix
+	}
+	if provenance["w1"] != "WTw1-" || provenance["w2"] != "WTw2-" || len(provenance) != 2 {
+		t.Fatalf("aggregation sources = %v", provenance)
+	}
+}
+
+// agentflowRunnerOrSkip honors GO_LLM_REQUIRE_AGENTFLOW and the explicit
+// AGENTFLOW_SRC checkout, otherwise uses an installed binary or skips. Mirrors
 // agentflow.agentflowRunnerForTest, which is unexported in another package.
+// CI's agentflow-compat job selects real-CLI tests by name, so a new test using
+// this must be named Test*_RealCLI or Test*_RealCLI_<scenario>.
 func agentflowRunnerOrSkip(t *testing.T, dir string) agentflow.Runner {
 	t.Helper()
-	if src := os.Getenv("AGENTFLOW_SRC"); src != "" {
+	mode, src := os.Getenv("GO_LLM_REQUIRE_AGENTFLOW"), os.Getenv("AGENTFLOW_SRC")
+	_, lookErr := exec.LookPath("agentflow")
+	installed := lookErr == nil
+	switch mode {
+	case "":
+	case "installed":
+		if src != "" {
+			t.Fatal("GO_LLM_REQUIRE_AGENTFLOW=installed but AGENTFLOW_SRC is set")
+		}
+		if !installed {
+			t.Fatal("GO_LLM_REQUIRE_AGENTFLOW=installed but agentflow is not on PATH")
+		}
+	case "source":
+		if src == "" {
+			t.Fatal("GO_LLM_REQUIRE_AGENTFLOW=source but AGENTFLOW_SRC is empty")
+		}
+	default:
+		t.Fatalf("GO_LLM_REQUIRE_AGENTFLOW=%q, want installed or source", mode)
+	}
+	if src != "" {
 		return agentflow.NewSrcExecRunner(dir, src)
 	}
-	if _, err := exec.LookPath("agentflow"); err == nil {
+	if installed {
 		return agentflow.NewExecRunner(dir)
 	}
 	t.Skip("agentflow CLI not available (set AGENTFLOW_SRC=<checkout> to run)")

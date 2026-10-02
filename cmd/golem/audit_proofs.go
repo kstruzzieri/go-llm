@@ -150,10 +150,14 @@ func auditProofs(ctx context.Context, root string, runner agentflow.Runner) audi
 	if err != nil {
 		result.outcome = "incomplete"
 		diagnostic := auditDiagnostic{code: "agentflow_unavailable", message: "agentflow proof verification unavailable"}
+		var unset *agentflow.EnvNotSetError
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || ctx.Err() != nil {
 			diagnostic = auditDiagnostic{code: "canceled", message: auditProofIncompleteMessages["canceled"]}
 		} else if errors.Is(err, exec.ErrNotFound) {
 			diagnostic.message = "agentflow proof verification unavailable: agentflow executable not found"
+		} else if errors.As(err, &unset) {
+			// The name is a validated identifier; no value is ever rendered.
+			diagnostic.message = "agentflow proof verification unavailable: approved environment variable " + unset.Name + " is not set"
 		}
 		result.diagnostics = []auditDiagnostic{diagnostic}
 		return result

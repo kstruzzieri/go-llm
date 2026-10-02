@@ -53,6 +53,7 @@ func TestExitCodeTaxonomy(t *testing.T) {
 		// rather than impersonate a state-machine instruction.
 		{"agentflow-status with -p", []string{"-agentflow-status", "-p", "hi"}, "", 1},
 		{"agentflow-status with -p and a bad flag", []string{"-agentflow-status", "-p", "hi", "-nope"}, "", 1},
+		{"agentflow-status with a bad flag", []string{"-agentflow-status", "-nope"}, "", 1},
 		{"agentflow-resume with -p", []string{"-agentflow-resume", "-p", "hi"}, "", 1},
 	}
 	for _, tc := range cases {
