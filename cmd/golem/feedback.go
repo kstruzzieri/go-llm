@@ -223,10 +223,6 @@ func openFeedbackService(ctx context.Context, root, dbPath string, warn func(str
 	if err != nil {
 		return nil, err
 	}
-	// NewSQLiteWeightReader's immutable schema preflight cannot read WAL pages.
-	if _, err := writer.ExecContext(ctx, "PRAGMA wal_checkpoint(FULL)"); err != nil {
-		return nil, fmt.Errorf("checkpoint feedback migrations: %w", err)
-	}
 	if err := chmodDBFiles(dbPath); err != nil {
 		return nil, err
 	}

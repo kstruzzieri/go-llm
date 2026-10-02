@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -1761,5 +1762,72 @@ func TestFeedbackDBPathForWorkspaceRejectsInsideWorkspace(t *testing.T) {
 	}
 	if _, err := feedbackDBPathForWorkspace(getenv, root); err == nil {
 		t.Fatalf("expected path inside workspace to be rejected")
+	}
+}
+
+// TestOpenFeedbackServiceReadsSchemaThroughUncheckpointedWAL: a reader pinned
+// to an old snapshot keeps the migrations out of the main file. Golem must
+// still open its weight reader, which validates through the WAL.
+func TestOpenFeedbackServiceReadsSchemaThroughUncheckpointedWAL(t *testing.T) {
+	ctx := t.Context()
+	dbPath := filepath.Join(t.TempDir(), "feedback.db")
+	openDB := func(query string) *sql.DB {
+		t.Helper()
+		u := url.URL{Scheme: "file", Path: dbPath, RawQuery: query}
+		db, err := sql.Open("sqlite", u.String())
+		if err != nil {
+			t.Fatal(err)
+		}
+		db.SetMaxOpenConns(1)
+		t.Cleanup(func() { _ = db.Close() })
+		return db
+	}
+	// 1. A WAL database.
+	writer := openDB("")
+	if _, err := writer.ExecContext(ctx, "PRAGMA journal_mode=WAL"); err != nil {
+		t.Fatal(err)
+	}
+	// 2. Pin an old snapshot: a read transaction that has executed a read.
+	snapshot, err := openDB("").BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = snapshot.Rollback() })
+	var n int
+	if err := snapshot.QueryRowContext(ctx, "SELECT COUNT(*) FROM sqlite_schema").Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	// 3. Commit the migrations through a separate writer that stays open.
+	if _, err := writer.ExecContext(ctx, "PRAGMA wal_autocheckpoint=0"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := feedbackpkg.NewSignalStore(ctx, writer); err != nil {
+		t.Fatal(err)
+	}
+	// 4. Fixture check: a FULL checkpoint cannot pass the pinned snapshot.
+	var busy, logFrames, checkpointed int
+	if err := openDB("_pragma=busy_timeout(0)").QueryRowContext(ctx, "PRAGMA wal_checkpoint(FULL)").Scan(&busy, &logFrames, &checkpointed); err != nil {
+		t.Fatal(err)
+	}
+	if busy != 1 || logFrames <= checkpointed {
+		t.Fatalf("fixture invalid: wal_checkpoint(FULL) = (%d,%d,%d), want busy=1 and log > checkpointed", busy, logFrames, checkpointed)
+	}
+	// 5. Fixture check: the main file alone holds no schema version.
+	var versionTables int
+	if err := openDB("mode=ro&immutable=1").QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM sqlite_schema WHERE name = 'feedback_schema_version'`).Scan(&versionTables); err != nil {
+		t.Fatal(err)
+	}
+	if versionTables != 0 {
+		t.Fatal("fixture invalid: migrations already reached the main file")
+	}
+	// 6. The real opener.
+	svc, err := openFeedbackService(ctx, t.TempDir(), dbPath, feedbackTestWarn(t))
+	if err != nil {
+		t.Fatalf("openFeedbackService with an uncheckpointed WAL: %v", err)
+	}
+	t.Cleanup(func() { _, _ = svc.close() })
+	if _, err := svc.behavioralWeighter().WeightsBatch(ctx, []string{"key"}); err != nil {
+		t.Fatalf("WeightsBatch: %v", err)
 	}
 }

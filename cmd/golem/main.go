@@ -18,6 +18,7 @@ import (
 	"github.com/kstruzzieri/go-llm/agent"
 	"github.com/kstruzzieri/go-llm/agent/interceptor"
 	agenttools "github.com/kstruzzieri/go-llm/agent/tools"
+	"github.com/kstruzzieri/go-llm/agentflow"
 	"github.com/kstruzzieri/go-llm/config"
 	"github.com/kstruzzieri/go-llm/conversation"
 	"github.com/kstruzzieri/go-llm/fingerprint"
@@ -81,6 +82,7 @@ type flags struct {
 	approveEdits        bool
 	approveGates        bool
 	agentflowSrc        string
+	agentflowEnv        stringSliceFlag // -agentflow-env: parent variable names Agentflow and its gates may receive
 	agentflowStatus     bool
 	agentflowResume     bool
 	jsonOutput          bool
@@ -105,6 +107,24 @@ type flags struct {
 	trustProjectContextSet bool
 
 	consultantsConfig string // -consultants-config: explicit consultants.json path (#382)
+}
+
+// parseQuietly parses args without the flag package's own error output, which
+// quotes argv (unknown flags, bad values) and so may echo secrets. Help still
+// prints fs.Usage to helpOut (nil means stderr, the flag package default);
+// every other failure becomes one value-free error.
+func parseQuietly(fs *flag.FlagSet, args []string, helpOut io.Writer) error {
+	fs.SetOutput(io.Discard)
+	err := fs.Parse(args)
+	if err == nil {
+		return nil
+	}
+	if errors.Is(err, flag.ErrHelp) {
+		fs.SetOutput(helpOut)
+		fs.Usage()
+		return flag.ErrHelp
+	}
+	return fmt.Errorf("invalid command-line flags in %d argument(s); run with -help for usage", len(args))
 }
 
 func parseFlags(args []string) (flags, error) {
@@ -165,6 +185,7 @@ func parseFlags(args []string) (flags, error) {
 	fs.BoolVar(&f.approveEdits, "approve-plan-edits", false, "required in task mode: auto-approve step-scoped write/edit (still bounded by the step-scope and .agent guards)")
 	fs.BoolVar(&f.approveGates, "approve-plan-gates", false, "required in task mode: auto-run plan-declared validation gates")
 	fs.StringVar(&f.agentflowSrc, "agentflow-src", "", "run 'python3 -P -m agentflow' with PYTHONPATH=<checkout>/src instead of the agentflow binary (Python 3.11+)")
+	fs.Var(&f.agentflowEnv, "agentflow-env", "forward one named parent environment variable to Agentflow and every gate it runs (repeatable; names only, values are read at launch)")
 	fs.BoolVar(&f.agentflowStatus, "agentflow-status", false, "inspect the current Agentflow next action without mutation")
 	fs.BoolVar(&f.agentflowResume, "agentflow-resume", false, "resume an existing Agentflow run serially; requires -plan and both plan approvals")
 	fs.BoolVar(&f.jsonOutput, "json", false, "with -agentflow-status, relay Agentflow next-action JSON verbatim")
@@ -178,11 +199,12 @@ func parseFlags(args []string) (flags, error) {
 	fs.BoolVar(&f.approvePlanLock, "approve-plan-lock", false, "planning mode: print the plan preview and approve the lock without prompting (non-interactive -goal)")
 	fs.StringVar(&f.outputFormat, "output-format", "text", "one-shot mode: stdout format — text (the final answer), json (one golem.result.v1 record), or stream-json (one protocol-v1 event per line, then the same record); requires -p")
 	fs.Var(&f.allowTools, "allow-tool", "one-shot mode: mount and non-interactively approve one exact built-in gated tool by name (repeatable; write_file, edit_file, run_command, start_command, stop_command); creates no session grants; MCP tools and submit_plan are never eligible; requires -p")
-	if err := fs.Parse(args); err != nil {
+	// main() prefixes "golem: " when it prints the error.
+	if err := parseQuietly(fs, args, nil); err != nil {
 		return flags{}, err
 	}
 	if fs.NArg() > 0 {
-		return flags{}, fmt.Errorf("golem: unexpected positional arguments %q; every option must be a -flag", fs.Args())
+		return flags{}, fmt.Errorf("golem: %d unexpected positional argument(s); every option must be a -flag", fs.NArg())
 	}
 	f.think = strings.ToLower(f.think)
 	switch f.think {
@@ -241,6 +263,9 @@ func autoIndexEnabled(f flags, autoErr, embChainErr error) bool {
 
 // validateFlags rejects flag values flag.Parse cannot police.
 func validateFlags(f flags) error {
+	if err := agentflow.ValidateEnvNames(f.agentflowEnv); err != nil {
+		return fmt.Errorf("golem: -agentflow-env: %w", err)
+	}
 	if f.trustProjectContextSet {
 		if f.noProjectContext {
 			return fmt.Errorf("-trust-project-context conflicts with -no-project-context")
@@ -715,6 +740,9 @@ func main() {
 		}
 		var statusErr *agentflowStatusExit
 		if errors.As(err, &statusErr) {
+			if statusErr.diagnostic != "" {
+				_, _ = fmt.Fprintf(os.Stderr, "golem: %s\n", statusErr.diagnostic)
+			}
 			os.Exit(statusErr.ExitCode())
 		}
 		if code, ok := auditExitCode(err); ok {
@@ -870,7 +898,7 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 
 	ctx := context.Background()
 	if f.agentflowStatus {
-		return runAgentflowStatus(ctx, stdout, root, f.agentflowSrc, f.jsonOutput)
+		return runAgentflowStatus(ctx, stdout, root, f.agentflowSrc, f.agentflowEnv, f.jsonOutput)
 	}
 
 	projectState, pendingTrust, err := preflightProjectContext(ctx, stderr, root, f)

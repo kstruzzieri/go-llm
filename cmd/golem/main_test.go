@@ -13,7 +13,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"syscall"
@@ -1224,6 +1226,7 @@ func TestRun_AgentflowStatusDispatchesBeforeConfig(t *testing.T) {
 
 	err = run([]string{
 		"-agentflow-status", "-json", "-root", root,
+		"-agentflow-env", "GOLEM_AGENTFLOW_STATUS_PAYLOAD",
 		"-config", filepath.Join(root, "missing-models.json"),
 	}, os.Stdin, out, errOut)
 	var statusErr *agentflowStatusExit
@@ -1248,10 +1251,77 @@ func TestAgentflowStatusExitHelper(t *testing.T) {
 	}
 	os.Args = []string{
 		"golem", "-agentflow-status", "-json", "-root", os.Getenv("GOLEM_AGENTFLOW_STATUS_ROOT"),
+		"-agentflow-env", "GOLEM_AGENTFLOW_STATUS_PAYLOAD",
 		"-config", filepath.Join(os.Getenv("GOLEM_AGENTFLOW_STATUS_ROOT"), "missing-models.json"),
+	}
+	if os.Getenv("GOLEM_AGENTFLOW_STATUS_TEXT") == "1" {
+		os.Args = slices.DeleteFunc(os.Args, func(arg string) bool { return arg == "-json" })
+	}
+	if os.Getenv("GOLEM_AGENTFLOW_STATUS_UNSET") == "1" {
+		if _, ok := os.LookupEnv(statusUnsetEnvName); ok {
+			os.Exit(99) // the scenario needs the approved name unset
+		}
+		os.Args = append(os.Args, "-agentflow-env", statusUnsetEnvName)
+	}
+	if src := os.Getenv("GOLEM_AGENTFLOW_STATUS_SRC"); src != "" {
+		os.Args = append(os.Args, "-agentflow-src", src)
 	}
 	main()
 	os.Exit(0)
+}
+
+// statusUnsetEnvName is approved with -agentflow-env but never set in the child.
+const statusUnsetEnvName = "GOLEM_577_UNSET"
+
+// TestAgentflowStatusRunnerFailures pins what a status process prints when the
+// runner fails before AgentFlow starts: an unset approved name is named once
+// (stderr in JSON mode, stdout in text mode); any other runner error stays
+// silent in JSON mode. The exit code is 3 either way.
+func TestAgentflowStatusRunnerFailures(t *testing.T) {
+	const secret = "RUNNER-SECRET-577"
+	root := t.TempDir()
+	unsetLine := `agentflow: approved environment variable "GOLEM_577_UNSET" is not set`
+	for _, test := range []struct {
+		name               string
+		env                []string
+		wantStdout, wantSE string
+	}{
+		{
+			name: "json unset approved name", env: []string{"GOLEM_AGENTFLOW_STATUS_UNSET=1"},
+			wantSE: "golem: " + unsetLine + "\n",
+		},
+		{
+			name: "json generic runner failure",
+			env:  []string{"GOLEM_AGENTFLOW_STATUS_SRC=" + filepath.Join(root, secret)},
+		},
+		{
+			name: "text unset approved name", env: []string{"GOLEM_AGENTFLOW_STATUS_UNSET=1", "GOLEM_AGENTFLOW_STATUS_TEXT=1"},
+			wantStdout: "agentflow status unavailable: " + strings.ReplaceAll(unsetLine, `"`, `\"`) + "\n",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			cmd := exec.Command(os.Args[0], "-test.run=^TestAgentflowStatusExitHelper$")
+			cmd.Env = append(os.Environ(),
+				"GOLEM_AGENTFLOW_STATUS_EXIT_HELPER=1",
+				"GOLEM_AGENTFLOW_STATUS_ROOT="+root,
+				"GOLEM_AGENTFLOW_STATUS_PAYLOAD={}",
+			)
+			cmd.Env = append(cmd.Env, test.env...)
+			var stdout, stderr bytes.Buffer
+			cmd.Stdout, cmd.Stderr = &stdout, &stderr
+			err := cmd.Run()
+			var exitErr *exec.ExitError
+			if !errors.As(err, &exitErr) || exitErr.ExitCode() != 3 {
+				t.Fatalf("err = %v, want exit 3; stdout=%q stderr=%q", err, stdout.String(), stderr.String())
+			}
+			if stdout.String() != test.wantStdout || stderr.String() != test.wantSE {
+				t.Fatalf("stdout/stderr = %q / %q, want %q / %q", stdout.String(), stderr.String(), test.wantStdout, test.wantSE)
+			}
+			if strings.Contains(stdout.String()+stderr.String(), secret) {
+				t.Fatalf("status output disclosed runner error text")
+			}
+		})
+	}
 }
 
 func TestAgentflowStatusExitCodesDoNotPrintGenericErrors(t *testing.T) {
@@ -1838,5 +1908,163 @@ func TestStartupNoticesGitContextAfterProjectContext(t *testing.T) {
 	}
 	if joined := strings.Join(startupNotices(startupInfo{workspace: "/r"}), "\n"); strings.Contains(joined, "git context") {
 		t.Fatalf("absent Git context must print nothing, got:\n%s", joined)
+	}
+}
+
+func TestAgentflowEnvFlagParsesAndValidatesWithoutEcho(t *testing.T) {
+	f, err := parseFlags([]string{"-agentflow-env", "GOPRIVATE", "-agentflow-env", "NAME=sk-SECRET-577"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual([]string(f.agentflowEnv), []string{"GOPRIVATE", "NAME=sk-SECRET-577"}) {
+		t.Fatalf("agentflowEnv = %v", f.agentflowEnv)
+	}
+	err = validateFlags(f)
+	if err == nil || !strings.Contains(err.Error(), "golem: -agentflow-env: agentflow: environment name #2 is not a variable name") ||
+		strings.Contains(err.Error(), "SECRET") {
+		t.Fatalf("validateFlags error = %v", err)
+	}
+}
+
+func TestParseFlagsPositionalErrorDoesNotEchoTokens(t *testing.T) {
+	_, err := parseFlags([]string{"-agentflow-env", "NAME", "sk-SECRET-577"})
+	if err == nil || strings.Contains(err.Error(), "SECRET") || !strings.Contains(err.Error(), "golem: 1 unexpected positional argument(s)") {
+		t.Fatalf("parseFlags error = %v", err)
+	}
+}
+
+// flagParseSentinels cover every flag-package error form that quotes argv:
+// unknown flag, bad syntax, invalid value, invalid boolean, missing argument.
+var flagParseSentinels = [][]string{
+	{"-agentflow-env", "NAME", "-sk-SECRET-577"},
+	{"--sk-SECRET-577"},
+	{"---sk-SECRET-577"},
+	{"-plan-workers", "SECRET-577"},
+	{"-allow-exec=SECRET-577"},
+	{"-plan"},
+}
+
+func TestParseFlagsErrorsDoNotEchoArgv(t *testing.T) {
+	for _, args := range flagParseSentinels {
+		t.Run(strings.Join(args, " "), func(t *testing.T) {
+			_, _, stderr := runTestFiles(t)
+			original := os.Stderr
+			t.Cleanup(func() { os.Stderr = original })
+			os.Stderr = stderr
+			_, err := parseFlags(args)
+			os.Stderr = original
+			want := fmt.Sprintf("invalid command-line flags in %d argument(s); run with -help for usage", len(args))
+			if err == nil || err.Error() != want {
+				t.Fatalf("parseFlags error = %v, want %q", err, want)
+			}
+			if written := readRunTestFile(t, stderr); written != "" {
+				t.Fatalf("parser wrote to stderr: %q", written)
+			}
+		})
+	}
+}
+
+// TestGolemMainArgsHelper runs main() with the JSON argv in GOLEM_MAIN_ARGS so
+// tests can observe exactly what the process prints and exits with.
+func TestGolemMainArgsHelper(t *testing.T) {
+	raw, ok := os.LookupEnv("GOLEM_MAIN_ARGS")
+	if !ok {
+		return
+	}
+	var args []string
+	if err := json.Unmarshal([]byte(raw), &args); err != nil {
+		os.Exit(99)
+	}
+	os.Args = append([]string{"golem"}, args...)
+	main()
+	os.Exit(0)
+}
+
+func runGolemMain(t *testing.T, args ...string) (exit int, stdout, stderr string) {
+	t.Helper()
+	raw, err := json.Marshal(args)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(os.Args[0], "-test.run=^TestGolemMainArgsHelper$")
+	cmd.Env = append(os.Environ(), "GOLEM_MAIN_ARGS="+string(raw))
+	var out, errOut bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &out, &errOut
+	if err := cmd.Run(); err != nil {
+		var exitErr *exec.ExitError
+		if !errors.As(err, &exitErr) {
+			t.Fatal(err)
+		}
+		exit = exitErr.ExitCode()
+	}
+	return exit, out.String(), errOut.String()
+}
+
+func TestMainFlagParseErrorsPrintOneValueFreeLine(t *testing.T) {
+	cases := []struct {
+		args []string
+		exit int
+	}{
+		{[]string{"-p", "x", "-bogus"}, 2},           // headless taxonomy
+		{[]string{"-agentflow-status", "-bogus"}, 1}, // exit 2 means "resume serially" to status consumers
+	}
+	for _, args := range flagParseSentinels {
+		cases = append(cases, struct {
+			args []string
+			exit int
+		}{args, 1})
+	}
+	for _, tc := range cases {
+		t.Run(strings.Join(tc.args, " "), func(t *testing.T) {
+			exit, stdout, stderr := runGolemMain(t, tc.args...)
+			want := fmt.Sprintf("golem: invalid command-line flags in %d argument(s); run with -help for usage\n", len(tc.args))
+			if exit != tc.exit || stdout != "" || stderr != want {
+				t.Fatalf("exit/stdout/stderr = %d / %q / %q, want %d / \"\" / %q", exit, stdout, stderr, tc.exit, want)
+			}
+		})
+	}
+}
+
+func TestMainHelpPrintsUsageToStderr(t *testing.T) {
+	var first string
+	for _, arg := range []string{"-h", "-help", "--help"} {
+		exit, stdout, stderr := runGolemMain(t, arg)
+		if exit != 0 || stdout != "" || !strings.HasPrefix(stderr, "Usage of golem:\n") ||
+			!strings.Contains(stderr, "  -agentflow-env value\n") || strings.Contains(stderr, "golem: ") {
+			t.Fatalf("%s: exit/stdout/stderr = %d / %q / %q", arg, exit, stdout, stderr)
+		}
+		if first == "" {
+			first = stderr
+		} else if stderr != first {
+			t.Fatalf("%s usage differs from -h usage", arg)
+		}
+	}
+}
+
+func TestAgentflowEnvValidationKeepsModeExitCodes(t *testing.T) {
+	devNull, err := os.OpenFile(os.DevNull, os.O_RDWR, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = devNull.Close() }()
+	for _, tc := range []struct {
+		name string
+		args []string
+		want int
+	}{
+		{"status keeps exit 1", []string{"-agentflow-status", "-agentflow-env", "BAD=x"}, 1},
+		{"task keeps exit 1", []string{"-plan", "plan.json", "-agentflow-env", "BAD=x"}, 1},
+		{"goal keeps exit 1", []string{"-goal", "x", "-agentflow-env", "BAD=x"}, 1},
+		{"headless one-shot is a usage error", []string{"-p", "x", "-agentflow-env", "BAD=x"}, 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// An empty root and a missing config make a validation regression
+			// fail fast instead of reaching Agentflow or a real provider.
+			isolate := []string{"-root", t.TempDir(), "-config", filepath.Join(t.TempDir(), "missing-models.json")}
+			err := run(append(isolate, tc.args...), devNull, devNull, devNull)
+			if err == nil || !strings.Contains(err.Error(), "-agentflow-env") || exitCodeFor(err) != tc.want {
+				t.Fatalf("run error = %v (exit %d), want -agentflow-env error with exit %d", err, exitCodeFor(err), tc.want)
+			}
+		})
 	}
 }

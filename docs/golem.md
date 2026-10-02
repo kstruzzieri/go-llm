@@ -265,6 +265,11 @@ consistency check, not an atomic snapshot of a running system.
 implicit module search. Checkout paths containing the platform's path-list
 separator (`:` on Unix, `;` on Windows) are rejected.
 
+`-agentflow-src` resolves a relative path against `-root`, then resolves
+symlinks; the result must contain `src/agentflow/__init__.py`.
+See [AgentFlow subprocess environment](#agentflow-subprocess-environment) for
+what AgentFlow and its gates receive and for `-agentflow-env`.
+
 | Exit | Meaning |
 |---|---|
 | `0` | All present, configured selected components passed. |
@@ -439,6 +444,63 @@ the previous Git block (`git context refresh failed: ...`). Project guidance is
 always rediscovered and revalidated during refresh: an unapproved, changed, or
 unavailable project snapshot is removed even when the prior Git snapshot is retained.
 Git notices go to stderr, never to machine stdout.
+
+## AgentFlow subprocess environment
+
+Planning and task modes (`-goal`, `-plan`, `-agentflow-status`,
+`-agentflow-resume`) and `golem audit` whenever it checks proofs (`-scope
+proofs`, or the default `all` when `.agent/` exists) start AgentFlow with an
+environment Golem builds from scratch. AgentFlow hands that environment to
+every validation gate and to its own `git` calls. They receive only:
+
+- **Baseline:** `PATH`, `HOME`, `USER`, `TMPDIR` and `LANG`, when set. On
+  Windows also `SYSTEMROOT`, `TEMP`, `TMP`, `PATHEXT`, `USERPROFILE`,
+  `COMSPEC`, `LOCALAPPDATA` and `APPDATA` (Go keeps its build cache and saved
+  settings there).
+- **Approved names:** each `-agentflow-env NAME` (repeatable, on `golem` and
+  `golem audit`) forwards that variable. Its value is read at every launch; if
+  it is unset, the launch fails before AgentFlow starts and the error names the
+  variable, never a value. `golem audit` reports it under
+  `agentflow_unavailable` with the name; `-agentflow-status -json` keeps exit 3
+  and empty stdout and prints the name on stderr.
+- **Strict mode:** `AGENTFLOW_STRICT=1`, when set to exactly `1`.
+- **Runner settings:** `PYTHONPATH` for `-agentflow-src`, and
+  `PYTHONDONTWRITEBYTECODE=1` during audit.
+
+Everything else, including provider API keys, is dropped unless you approve it
+with `-agentflow-env`; an approved value reaches AgentFlow and every gate.
+`AGENTFLOW_CONFIRM_RISK` and `AGENTFLOW_AGENT_ID` are never forwarded; Golem
+passes those decisions as explicit arguments. `-agentflow-env` takes names
+only (`[A-Za-z_][A-Za-z0-9_]*`). It rejects `PYTHONPATH`,
+`PYTHONDONTWRITEBYTECODE` and `AGENTFLOW_*`, and its errors identify an entry
+by position instead of echoing it.
+
+```bash
+golem -plan plan.json -approve-plan-edits -approve-plan-gates \
+  -agentflow-env GOPRIVATE -agentflow-env HTTPS_PROXY
+```
+
+**An approved variable reaches AgentFlow and every gate.** Approving
+`SSH_AUTH_SOCK` gives every gate your SSH agent. AgentFlow records gate output
+and Golem includes AgentFlow error text in its errors, so a gate that prints an
+approved value exposes it there.
+
+**Upgrading:** gates that relied on inherited variables such as `GOFLAGS`,
+`GOPATH`, `GOCACHE`, `GOMODCACHE`, `GOPROXY`, `GOPRIVATE`, proxy settings or
+`SSL_CERT_FILE` now run without them; approve the ones they need. Removing
+ambient configuration can change what a gate does even when it still passes: a
+dropped `GOCACHE` or `GOMODCACHE` falls back to the default under `HOME`, so
+caches start cold and modules download again.
+
+This limits inherited secrets; it does not confine the process. Gates still run
+as you, with access to your files under `HOME`, your network and your
+filesystem. Tools also read configuration saved in those directories, such as
+Go's `go env -w` settings, so on-disk settings still apply without approval.
+Golem resolves the `agentflow` or `python3` executable with its own `PATH`
+before launch. Windows support is built but untested, and on non-Unix
+platforms cancellation stops only the direct child. Golem's own `git` calls in
+parallel task mode still inherit its environment, minus repository-location
+overrides.
 
 ## Grant security and observation fencing
 
