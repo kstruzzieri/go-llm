@@ -75,7 +75,7 @@ func TestConnectRejectsInvalidSelection(t *testing.T) {
 }
 
 // TestValidateSelection pins what Connect accepts, the exact boundaries, and
-// that errors name entries by 1-based position without echoing them.
+// that public errors name entries by 1-based position without echoing them.
 func TestValidateSelection(t *testing.T) {
 	full := make([]string, maxToolsPerServer)
 	for i := range full {
@@ -101,6 +101,24 @@ func TestValidateSelection(t *testing.T) {
 		}
 		if got != tt.want {
 			t.Errorf("validateSelection(%d names) = %q, want %q", len(tt.names), got, tt.want)
+		}
+		if tt.want == "" {
+			continue
+		}
+		pins := testPins(t)
+		s := Server{Alias: "fs", tr: &failingTransport{err: errors.New("unreachable")}}.WithTools(tt.names...)
+		impl := Implementation{Name: "test"}
+		_, _, connectErr := Connect(t.Context(), impl, []Server{s}, ConnectOptions{Pins: pins})
+		_, inspectErr := Inspect(t.Context(), impl, s, pins)
+		_, approveErr := Approve(t.Context(), impl, s, pins, "sha256:"+strings.Repeat("0", 64))
+		for operation, err := range map[string]error{"Connect": connectErr, "Inspect": inspectErr, "Approve": approveErr} {
+			var failure *AdmissionError
+			if !errors.As(err, &failure) || failure.Reason != "invalid_config" || failure.Alias != "fs" {
+				t.Fatalf("%s error = %v, want invalid_config for fs", operation, err)
+			}
+			if want := `server "fs": invalid_config: ` + tt.want; err.Error() != want {
+				t.Errorf("%s(%d names) error = %q, want %q", operation, len(tt.names), err, want)
+			}
 		}
 	}
 }

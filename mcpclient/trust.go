@@ -188,7 +188,8 @@ func validateTrustConfig(servers []Server, pins *PinStore) error {
 		}
 		seen[s.Alias] = true
 		if err := validateSelection(s); err != nil {
-			return admissionFailure(s.Alias, "invalid_config", err)
+			// Selection diagnostics contain only positions and fixed text.
+			return fmt.Errorf("%w: %s", admissionFailure(s.Alias, "invalid_config", err), err)
 		}
 		if _, err := s.transport(); err != nil {
 			return admissionFailure(s.Alias, "invalid_config", err)
