@@ -460,8 +460,9 @@ func recognizeFetch(words []string) (name string, ok bool) {
 }
 
 // recognizeSink reports a simple command that executes its stdin: a bare
-// sh/bash/dash/ksh/zsh, optionally with -s, optionally preceded by a bare
-// sudo. The label names what would run.
+// sh/bash/dash/ksh/zsh, optionally with -s, or with -s -- and the script's
+// positional arguments (#622), optionally preceded by a bare sudo. The label
+// names what would run.
 func recognizeSink(words []string) (label string, ok bool) {
 	words = commandWords(words)
 	i := 0
@@ -476,7 +477,7 @@ func recognizeSink(words []string) (label string, ok bool) {
 		return "", false
 	}
 	rest := words[i+1:]
-	if len(rest) > 1 || (len(rest) == 1 && rest[0] != "-s") {
+	if len(rest) > 0 && (rest[0] != "-s" || len(rest) > 1 && rest[1] != "--") {
 		return "", false
 	}
 	return label + shell, true
