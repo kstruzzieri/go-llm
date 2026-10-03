@@ -2,6 +2,8 @@ package mcpclient
 
 import (
 	"errors"
+	"fmt"
+	"io"
 	"net/url"
 	"strings"
 	"unicode/utf8"
@@ -10,8 +12,9 @@ import (
 )
 
 // endpoint is one admitted streamable-HTTP endpoint (spec §5.5). Its path and
-// query can carry credentials: String is for the SDK and comparison, never for
-// display. The struct is comparable; equal values are the same endpoint.
+// query can carry credentials: sdkURL is for the SDK and comparison, never for
+// display, and Format keeps every fmt verb to the origin. The struct is
+// comparable; equal values are the same endpoint.
 type endpoint struct {
 	origin     string // canonical scheme://host[:port]
 	path       string // escaped path, byte-for-byte; "/" when empty
@@ -19,12 +22,21 @@ type endpoint struct {
 	forceQuery bool // "?" with an empty query
 }
 
-func (e endpoint) String() string {
+// sdkURL is the canonical string handed to the SDK. It carries the path and
+// query verbatim, so it must never be rendered.
+func (e endpoint) sdkURL() string {
 	s := e.origin + e.path
 	if e.rawQuery != "" || e.forceQuery {
 		s += "?" + e.rawQuery
 	}
 	return s
+}
+
+// Format renders only the origin under every fmt verb; without it fmt would
+// print the path and query (String, or the unexported fields). Value receiver
+// so values and pointers both implement fmt.Formatter.
+func (e endpoint) Format(f fmt.State, _ rune) {
+	_, _ = io.WriteString(f, e.origin)
 }
 
 // canonicalEndpoint parses an operator-supplied endpoint. Errors never contain
@@ -41,9 +53,12 @@ func canonicalEndpoint(raw string) (endpoint, error) {
 }
 
 // endpointFromURL judges structured URL fields, never a string form, so the
-// request guard and admission share one rule. Origins reuse provider's
-// canonicalization only after non-ASCII hosts are rejected, so lowercasing
-// cannot disagree with the HTTP client's IDNA handling.
+// request guard and admission share one rule. u.Host must be a bare
+// host[:port]: the origin is rebuilt from text and re-parsed, so a Host that
+// smuggles a path or authority delimiter is rejected rather than trimmed into
+// an admitted origin. Origins reuse provider's canonicalization only after
+// non-ASCII hosts are rejected, so lowercasing cannot disagree with the HTTP
+// client's IDNA handling.
 func endpointFromURL(u *url.URL) (endpoint, error) {
 	scheme := strings.ToLower(u.Scheme)
 	switch {
@@ -67,6 +82,9 @@ func endpointFromURL(u *url.URL) (endpoint, error) {
 	}
 	if strings.Contains(host, "%") {
 		return endpoint{}, errors.New("mcpclient: endpoint host must not carry a zone ID")
+	}
+	if strings.ContainsAny(u.Host, "/\\?#@") {
+		return endpoint{}, errors.New("mcpclient: endpoint host is invalid")
 	}
 	dest, err := provider.NewDestination("mcp", scheme+"://"+u.Host)
 	if err != nil {
