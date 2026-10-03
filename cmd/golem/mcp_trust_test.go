@@ -128,6 +128,7 @@ func TestMCPTrustArguments(t *testing.T) {
 		{}, {"unknown"}, {"inspect"}, {"inspect", "-mcp-http", f.url}, {"inspect", "-mcp-stdio", "env TOKEN=credential-value command"},
 		{"inspect", "-mcp-http", "fs=" + f.url, "-mcp-http", "other=" + f.url},
 		{"inspect", "-mcp-http", "fs=" + f.url, "extra"},
+		{"inspect", "-mcp-http", "fs=" + f.url, "-mcp-tools", "fs=read"},
 		{"inspect", "-root", "", "-mcp-http", "fs=" + f.url},
 		{"inspect", "-root", filepath.Join(root, "missing"), "-mcp-http", "fs=" + f.url},
 		{"inspect", "-mcp-stdio", `fs=env TOKEN=credential-value "`},
@@ -566,5 +567,41 @@ func TestMCPTrustMalformedHTTPDoesNotLeak(t *testing.T) {
 				}
 			}
 		}
+	}
+}
+
+func TestMCPToolsRunWiring(t *testing.T) {
+	config, root := writeRunLifecycleConfig(t)
+	f := newTrustHTTPFixture(t)
+	in, out, diag := runTestFiles(t)
+	args := []string{"-config", config, "-root", root, "-mcp-http", "fs=" + f.url, "-mcp-tools", "fs=", "-no-probe", "-no-cap-probe", "-no-git-context", "-no-project-context", "-no-rag", "-no-memory", "-no-session", "-no-auto-index"}
+	if err := run(args, in, out, diag); err != nil {
+		t.Fatal(err)
+	}
+	if got := readRunTestFile(t, diag); !strings.Contains(got, "mcp: attached 0 tool(s) from 1 configured server(s)\n") {
+		t.Fatalf("-mcp-tools fs= did not reach Connect: %q", got)
+	}
+	in, out, diag = runTestFiles(t)
+	err := run([]string{"-p", "hi", "-mcp-tools", "fs=credential-value!"}, in, out, diag)
+	if err == nil || exitCodeFor(err) != 2 || err.Error() != "golem: -mcp-tools #1: alias is not a configured MCP server" {
+		t.Fatalf("headless -mcp-tools error = %v (exit %d), want positional usage error, exit 2", err, exitCodeFor(err))
+	}
+	if strings.Contains(err.Error()+readRunTestFile(t, out)+readRunTestFile(t, diag), "credential-value") {
+		t.Fatal("-mcp-tools value echoed")
+	}
+}
+
+func TestMCPTrustRejectsToolSelection(t *testing.T) {
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	root := t.TempDir()
+	f := newTrustHTTPFixture(t)
+	for _, action := range []string{"inspect", "approve"} {
+		out, _, err := trustCommand(t, action, "-root", root, "-mcp-http", "fs="+f.url, "-mcp-tools", "fs=credential-value")
+		if err == nil || out != "" || err.Error() != "mcp: inspect and approve do not take -mcp-tools; they always review the complete catalog" {
+			t.Fatalf("%s with -mcp-tools = (%v, %q), want the explicit rejection", action, err, out)
+		}
+	}
+	if f.deletes.Load() != 0 {
+		t.Fatal("a rejected -mcp-tools command contacted the server")
 	}
 }

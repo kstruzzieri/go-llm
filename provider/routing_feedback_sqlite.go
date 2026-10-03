@@ -12,13 +12,15 @@ package provider
 import (
 	"context"
 	"database/sql"
+	"database/sql/driver"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"sync"
 	"time"
 
-	_ "modernc.org/sqlite"
+	"modernc.org/sqlite"
+	sqlite3 "modernc.org/sqlite/lib"
 
 	"github.com/kstruzzieri/go-llm/internal/sqlitedsn"
 )
@@ -79,6 +81,11 @@ type SQLiteFeedbackStore struct {
 // racing constructors: migration coordination does not serialize that setup.
 // OpenSQLiteFeedbackStore sets busy_timeout in its DSN and uses a single
 // connection; caller-owned handles retain their own connection configuration.
+// Record and RecordBatch with a ctx deadline pin one pooled connection, lower
+// its busy_timeout to the time left for the duration of the write, and restore
+// it before returning the connection; a connection still inside a
+// transaction, or whose busy_timeout restore fails, is closed instead, losing
+// connection-local state such as TEMP tables.
 func NewSQLiteFeedbackStore(ctx context.Context, db *sql.DB, cfg SQLiteFeedbackStoreConfig) (*SQLiteFeedbackStore, error) {
 	if db == nil {
 		return nil, errors.New("provider: SQLiteFeedbackStore requires non-nil *sql.DB")
@@ -103,9 +110,11 @@ func OpenSQLiteFeedbackStore(ctx context.Context, path string, cfg SQLiteFeedbac
 	}
 	// busy_timeout = 5000ms: bounded wait on a contended lock before giving up
 	// with SQLITE_BUSY, instead of tight retry loops in the calling code. A ctx
-	// deadline does not shorten that wait. The DSN sets it on every connection:
-	// the journal_mode PRAGMA below reads the database, and database/sql replaces
-	// a connection after a context-cancelled statement run outside a transaction.
+	// deadline alone does not shorten that wait; Record and RecordBatch cap it
+	// to the time left on their deadline (runInTxBefore). The DSN sets it on
+	// every connection: the journal_mode PRAGMA below reads the database, and
+	// database/sql replaces a connection after a context-cancelled statement
+	// run outside a transaction.
 	dsn, err := sqlitedsn.WithBusyTimeout(path, 5*time.Second)
 	if err != nil {
 		return nil, fmt.Errorf("provider: open sqlite %q: %w", path, err)
@@ -315,7 +324,15 @@ func (s *SQLiteFeedbackStore) RecordBatch(ctx context.Context, items []FeedbackI
 	})
 }
 
+// sqlExecer is the ExecContext method shared by *sql.Conn and *sql.Tx.
+type sqlExecer interface {
+	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
+}
+
 func (s *SQLiteFeedbackStore) runInTx(ctx context.Context, fn func(*sql.Tx) error) error {
+	if deadline, ok := ctx.Deadline(); ok {
+		return s.runInTxBefore(ctx, deadline, fn)
+	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("provider: SQLiteFeedbackStore begin: %w", err)
@@ -331,6 +348,119 @@ func (s *SQLiteFeedbackStore) runInTx(ctx context.Context, fn func(*sql.Tx) erro
 		return fmt.Errorf("provider: SQLiteFeedbackStore commit: %w", err)
 	}
 	return nil
+}
+
+// runInTxBefore runs fn in one transaction whose SQLite lock waits end by
+// deadline. modernc interrupts a statement when ctx expires, but SQLite's busy
+// handler keeps sleeping for up to busy_timeout regardless, so a contended
+// write could outlast the deadline by the whole timeout. The store pins a
+// connection, lowers its busy_timeout to the time left before BEGIN (which
+// takes the write lock itself under _txlock=immediate or exclusive), refreshes
+// the cap before COMMIT, and restores it afterward. A statement in fn that must
+// escalate its lock later (for example a rollback-journal cache spill) waits
+// with the cap computed before BEGIN. Time spent waiting for a pooled
+// connection comes out of the budget, but opening a new one runs the DSN
+// pragmas under the DSN's own busy_timeout.
+//
+// The transaction runs under context.WithoutCancel so database/sql does not
+// roll it back concurrently when ctx expires; statements in fn still use ctx
+// and are interrupted. The store rolls back itself. A connection still inside
+// a transaction after a failed rollback or COMMIT, or whose busy_timeout
+// restore fails, is discarded instead of returning to the pool in an unknown
+// state; SQLite may already have rolled back after an interrupted write, in
+// which case the connection is kept.
+func (s *SQLiteFeedbackStore) runInTxBefore(ctx context.Context, deadline time.Time, fn func(*sql.Tx) error) (err error) {
+	conn, err := s.db.Conn(ctx)
+	if err != nil {
+		return fmt.Errorf("provider: SQLiteFeedbackStore conn: %w", err)
+	}
+	// Background, not ctx: this PRAGMA never touches the database file, and an
+	// interrupt raised here by an expiring ctx would stay set on the connection
+	// returned below, so database/sql's validity check would discard it (for
+	// ":memory:", the whole database).
+	var saved int64
+	if err := conn.QueryRowContext(context.Background(), "PRAGMA busy_timeout").Scan(&saved); err != nil {
+		_ = conn.Close()
+		return fmt.Errorf("provider: SQLiteFeedbackStore read busy_timeout: %w", err)
+	}
+	var tx *sql.Tx
+	committed, discard := false, false
+	defer func() {
+		if tx != nil && !committed {
+			if rbErr := tx.Rollback(); rbErr != nil && !errors.Is(rbErr, sql.ErrTxDone) {
+				// Still inside a transaction: report and discard. Outside one,
+				// SQLite already rolled back; drop only its "no transaction is
+				// active" reply and keep any other rollback error visible.
+				inTx := !outsideTx(conn)
+				if inTx || !isNoTransactionError(rbErr) {
+					err = errors.Join(err, fmt.Errorf("provider: SQLiteFeedbackStore rollback: %w", rbErr))
+				}
+				discard = inTx
+			}
+		}
+		if !discard {
+			if _, rsErr := conn.ExecContext(context.Background(), fmt.Sprintf("PRAGMA busy_timeout = %d", saved)); rsErr != nil {
+				err = errors.Join(err, fmt.Errorf("provider: SQLiteFeedbackStore restore busy_timeout: %w", rsErr))
+				discard = true
+			}
+		}
+		if discard {
+			_ = conn.Raw(func(any) error { return driver.ErrBadConn })
+		}
+		_ = conn.Close()
+	}()
+	capBusy := func(e sqlExecer) error {
+		ms := min(max(time.Until(deadline).Milliseconds(), 0), saved)
+		if _, err := e.ExecContext(ctx, fmt.Sprintf("PRAGMA busy_timeout = %d", ms)); err != nil {
+			return fmt.Errorf("provider: SQLiteFeedbackStore cap busy_timeout: %w", err)
+		}
+		return nil
+	}
+	if err := capBusy(conn); err != nil {
+		return err
+	}
+	tx, err = conn.BeginTx(context.WithoutCancel(ctx), nil)
+	if err != nil {
+		return fmt.Errorf("provider: SQLiteFeedbackStore begin: %w", err)
+	}
+	if err := fn(tx); err != nil {
+		return err
+	}
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("provider: SQLiteFeedbackStore before commit: %w", err)
+	}
+	if err := capBusy(tx); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		// modernc rolls back after a failed COMMIT that left the connection
+		// inside the transaction, but suppresses that rollback's error; keep
+		// the connection only if it is now outside a transaction.
+		discard = !outsideTx(conn)
+		return fmt.Errorf("provider: SQLiteFeedbackStore commit: %w", err)
+	}
+	committed = true
+	return nil
+}
+
+// outsideTx reports whether conn is in autocommit mode. SQLite can roll a
+// transaction back by itself when a write is interrupted or fails with
+// SQLITE_FULL, SQLITE_IOERR, or SQLITE_NOMEM; ROLLBACK then reports that no
+// transaction is active. BEGIN succeeds only outside a transaction.
+func outsideTx(conn *sql.Conn) bool {
+	if _, err := conn.ExecContext(context.Background(), "BEGIN"); err != nil {
+		return false
+	}
+	_, err := conn.ExecContext(context.Background(), "ROLLBACK")
+	return err == nil
+}
+
+// isNoTransactionError reports whether err is SQLite's reply to a ROLLBACK
+// with no transaction active (primary code SQLITE_ERROR), as opposed to an
+// I/O or other failure worth surfacing.
+func isNoTransactionError(err error) bool {
+	var se *sqlite.Error
+	return errors.As(err, &se) && se.Code()&0xff == sqlite3.SQLITE_ERROR
 }
 
 // insertSignalTx writes one signal row. Meta is marshalled to JSON; the

@@ -73,29 +73,56 @@ func TestSecretMachineStartupWiresFailurePresenter(t *testing.T) {
 }
 
 func TestInterceptorsFor(t *testing.T) {
-	if got := interceptorsFor(flags{}, nil); got != nil {
-		t.Fatalf("off: chain = %v, want nil", got)
+	names := func(ics []agent.Interceptor) []string {
+		var out []string
+		for _, ic := range ics {
+			out = append(out, ic.Name())
+		}
+		return out
 	}
-	var names []string
-	for _, ic := range interceptorsFor(flags{interceptors: true}, testCanaryBinding(t)) {
-		names = append(names, ic.Name())
+	// #575: literal lists, never derived from interceptor.Defaults(), so a
+	// library reorder or a new Defaults member cannot move both sides.
+	guards := []string{"invariants", "egress", "child_scope_denials"}
+	for _, tc := range []struct {
+		name string
+		args []string
+	}{
+		{"omitted", nil},
+		{"explicit false", []string{"-interceptors=false"}},
+	} {
+		f, err := parseFlags(tc.args)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := names(interceptorsFor(f, nil)); !slices.Equal(got, guards) {
+			t.Fatalf("%s: chain = %v, want %v", tc.name, got, guards)
+		}
 	}
-	if want := []string{"zero_width", "encoding", "typoglycemia", "invariants", "egress", "secrets", "child_scope_denials", "canary"}; !slices.Equal(names, want) {
-		t.Fatalf("on: chain = %v, want %v", names, want)
+	f, err := parseFlags([]string{"-interceptors"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	full := []string{"zero_width", "encoding", "typoglycemia", "invariants", "egress", "secrets", "child_scope_denials", "canary"}
+	if got := names(interceptorsFor(f, testCanaryBinding(t))); !slices.Equal(got, full) {
+		t.Fatalf("on: chain = %v, want %v", got, full)
 	}
 }
 
 func TestStartupNotices_Interceptors(t *testing.T) {
-	on := strings.Join(startupNotices(startupInfo{
-		workspace:       "/w",
-		interceptorLine: interceptorsNotice(interceptorsFor(flags{interceptors: true}, testCanaryBinding(t))),
-	}), "\n")
-	if want := "workspace: /w\ninterceptors: enabled (zero_width, encoding, typoglycemia, invariants, egress, secrets, child_scope_denials, canary)"; on != want {
-		t.Fatalf("notices with the flag = %q, want %q", on, want)
-	}
-	off := strings.Join(startupNotices(startupInfo{workspace: "/w"}), "\n")
-	if want := "workspace: /w"; off != want {
-		t.Fatalf("notices without the flag = %q, want %q", off, want)
+	for _, tc := range []struct {
+		name string
+		line string
+		want string
+	}{
+		{"full chain", interceptorsNotice(true, interceptorsFor(flags{interceptors: true}, testCanaryBinding(t))),
+			"workspace: /w\n" + fullNoticeLine},
+		{"guards only", interceptorsNotice(false, interceptorsFor(flags{}, nil)),
+			"workspace: /w\n" + guardsNoticeLine},
+	} {
+		got := strings.Join(startupNotices(startupInfo{workspace: "/w", interceptorLine: tc.line}), "\n")
+		if got != tc.want {
+			t.Fatalf("%s: notices = %q, want %q", tc.name, got, tc.want)
+		}
 	}
 }
 
@@ -104,7 +131,6 @@ func TestStartupNotices_Interceptors(t *testing.T) {
 // notice still says enabled. A benign mention of "system prompt" is enough to
 // exercise scoring without requiring tool calls from the test backend.
 func TestRunWiresInterceptors(t *testing.T) {
-	const want = "interceptors: enabled (zero_width, encoding, typoglycemia, invariants, egress, secrets, child_scope_denials, canary)"
 	const goal = "Explain the term system prompt."
 	for _, tc := range []struct {
 		name string
@@ -188,16 +214,21 @@ func TestRunWiresInterceptors(t *testing.T) {
 				t.Fatalf("run = %v, want test stop; stderr:\n%s", err, readRunTestFile(t, stderr))
 			}
 			lines := strings.Split(strings.TrimSpace(readRunTestFile(t, stderr)), "\n")
-			if got := slices.Contains(lines, want); got != tc.on {
-				t.Fatalf("startup lines = %q, exact line %q present = %v, want %v", lines, want, got, tc.on)
+			if got := slices.Contains(lines, fullNoticeLine); got != tc.on {
+				t.Fatalf("startup lines = %q, exact line %q present = %v, want %v", lines, fullNoticeLine, got, tc.on)
+			}
+			// #575: the guards-only chain has its own line and never says "enabled".
+			if got := slices.Contains(lines, guardsNoticeLine); got == tc.on {
+				t.Fatalf("startup lines = %q, exact line %q present = %v, want %v", lines, guardsNoticeLine, got, !tc.on)
 			}
 		})
 	}
 }
 
 // TestOrchestratorFactoryInstallsInterceptorsBehindFlag proves the factory
-// (every Golem run path) carries the chain iff the flag is on: a foreign
-// tool's injection is replaced with the flag, verbatim without it.
+// (every Golem run path) carries the injection detectors iff the flag is on: a
+// foreign tool's injection is replaced with the flag, verbatim without it
+// (the always-on #575 guards scan no message text).
 func TestOrchestratorFactoryInstallsInterceptorsBehindFlag(t *testing.T) {
 	run := func(f flags) agent.Result {
 		t.Helper()

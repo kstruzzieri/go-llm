@@ -556,3 +556,103 @@ func TestTrustDurabilityErrorSurvivesCancellation(t *testing.T) {
 		t.Fatalf("misleading durability result: %v", w)
 	}
 }
+
+// cancelOnClose really closes the client connection, then reports
+// context.Canceled, as a session torn down under cancellation can.
+type cancelOnClose struct{ gomcp.Transport }
+
+func (c cancelOnClose) Connect(ctx context.Context) (gomcp.Connection, error) {
+	conn, err := c.Transport.Connect(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return cancelOnCloseConn{conn}, nil
+}
+
+type cancelOnCloseConn struct{ gomcp.Connection }
+
+func (c cancelOnCloseConn) Close() error {
+	_ = c.Connection.Close()
+	return context.Canceled
+}
+
+// A refusal's reason comes from the refusal, not from closing its session:
+// one case per close site (admission in connectOne, validation in discover).
+func TestTrustCleanupErrorKeepsRefusalReason(t *testing.T) {
+	for want, remote := range map[string][]*gomcp.Tool{
+		"catalog_changed": {tool("write")},
+		"invalid_catalog": {tool("dup"), tool("dup")},
+	} {
+		t.Run(want, func(t *testing.T) {
+			pins := testPins(t)
+			connectCatalog(t, pins, false, tool("read"))
+			before := pinBytes(t, pins, "fs")
+			s, done, _ := staticCatalogServer(t, "fs", remote...)
+			s.tr = cancelOnClose{s.tr}
+			m, w, e := Connect(context.Background(), Implementation{Name: "test"}, []Server{s}, ConnectOptions{Pins: pins})
+			if e != nil {
+				t.Fatal(e)
+			}
+			defer func() { _ = m.Close() }()
+			waitOn(t, done, "refused session close")
+			failure := admission(t, w)
+			if failure.Reason != want || !errors.Is(failure, context.Canceled) {
+				t.Fatalf("reason = %q (close error kept: %t), want %s with the close error kept", failure.Reason, errors.Is(failure, context.Canceled), want)
+			}
+			if len(m.Tools()) != 0 || !bytes.Equal(before, pinBytes(t, pins, "fs")) {
+				t.Fatal("refused catalog published tools or changed the pin")
+			}
+		})
+	}
+}
+
+// Cancellation after a first pin is written still reports that pin, ahead of
+// the canceled failure, so a caller never loses a trust decision on disk:
+// whether it lands inside admission (the pin store joins ctx.Err() after the
+// rename) or after the server's result was recorded.
+func TestTrustFirstPinNoticeSurvivesCancellation(t *testing.T) {
+	for _, at := range []string{"admission", "aggregation"} {
+		t.Run(at, func(t *testing.T) {
+			pins := testPins(t)
+			s, done, _ := staticCatalogServer(t, "fs", tool("read"))
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			hooks := &connectHooks{}
+			if at == "admission" {
+				rename := pins.ops.rename
+				pins.ops.rename = func(r *os.Root, a, b string) error {
+					err := rename(r, a, b)
+					if err == nil {
+						cancel()
+					}
+					return err
+				}
+			} else {
+				hooks.published = func(int) { cancel() }
+			}
+			m, w, e := connectWithHooks(ctx, Implementation{Name: "test"}, []Server{s}, ConnectOptions{Pins: pins}, hooks)
+			if e != nil {
+				t.Fatal(e)
+			}
+			defer func() { _ = m.Close() }()
+			waitOn(t, done, "canceled first contact close")
+			pinned, _, err := pins.capturePin(context.Background(), "fs")
+			if err != nil || pinned.digest() == "" {
+				t.Fatalf("first pin not created: %v", err)
+			}
+			if len(w) != 2 {
+				t.Fatalf("warnings = %v, want the first-pin notice then the canceled failure", w)
+			}
+			var failure *AdmissionError
+			if errors.As(w[0], &failure) || !strings.Contains(w[0].Error(), "first pin "+pinned.digest()) {
+				t.Fatalf("warnings[0] = %v, want the first-pin notice for %s", w[0], pinned.digest())
+			}
+			if !errors.As(w[1], &failure) || failure.Reason != "canceled" {
+				t.Fatalf("warnings[1] = %v, want the canceled failure", w[1])
+			}
+			if len(m.Tools()) != 0 || len(m.sessions) != 0 {
+				t.Fatal("canceled first contact published tools")
+			}
+		})
+	}
+}

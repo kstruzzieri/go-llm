@@ -5,6 +5,8 @@ import (
 	"database/sql"
 	"fmt"
 	"net/url"
+	"os"
+	"path/filepath"
 	"sync"
 
 	_ "modernc.org/sqlite"
@@ -77,42 +79,56 @@ type SQLiteWeightReader struct {
 	reader *WeightReader
 }
 
-// NewSQLiteWeightReader opens an existing migrated feedback database read-only.
+// NewSQLiteWeightReader opens an existing migrated feedback database read-only
+// and validates its schema on the handle that then serves reads, so the check
+// sees committed WAL pages under SQLite's locks. dbPath is made absolute and
+// cleaned lexically (filepath.Abs), so a relative path resolves against the
+// working directory and ".." after a symlinked component resolves lexically,
+// matching the writer's sqlitedsn path handling. A path that is not a regular
+// file, or a file smaller than one SQLite page, is rejected before any SQLite
+// open. It never writes or deletes the main file or an existing WAL, and never
+// changes schema or data, with one exception normal operation never triggers:
+// if the main file shrinks below one page between the size check and the
+// open, SQLite may delete the WAL beside it. Like any read-only SQLite
+// connection, it may create the database's coordination sidecars, a -shm file
+// and an empty -wal when a WAL-mode database has none, including beside a
+// database it then rejects. A WAL-mode database whose sidecars can be neither
+// opened nor created fails to open. The connection waits up to one second for
+// a lock another connection holds, during construction and each read, before
+// failing as SQLITE_BUSY.
 func NewSQLiteWeightReader(ctx context.Context, dbPath string, config CollectorConfig) (*SQLiteWeightReader, error) {
 	if dbPath == "" {
 		return nil, fmt.Errorf("feedback: open SQLite weight reader: empty path")
 	}
-	u := url.URL{Scheme: "file", Path: dbPath}
+	// A relative path would render as file://name, which SQLite rejects as a
+	// URI authority.
+	abs, err := filepath.Abs(dbPath)
+	if err != nil {
+		return nil, fmt.Errorf("feedback: open SQLite weight reader: resolve path %q: %w", dbPath, err)
+	}
+	want := migrations[len(migrations)-1].version
+	info, err := os.Stat(abs)
+	if err != nil {
+		return nil, fmt.Errorf("feedback: open SQLite weight reader: %w", err)
+	}
+	if !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("feedback: open SQLite weight reader %q: not a regular file", abs)
+	}
+	// SQLite's minimum page size is 512 bytes, so a shorter file holds no
+	// schema. Reject it before any SQLite open: SQLite deletes the WAL beside a
+	// main file it sizes at zero pages, and modernc's unix VFS reports a 1-byte
+	// file as 0 bytes (SQLite ticket #3260). The stat-to-open window is
+	// accepted: a main file never shrinks below one page in normal operation.
+	if info.Size() < 512 {
+		return nil, fmt.Errorf("feedback: validate SQLite weight reader schema: database file size %d is smaller than one SQLite page (512 bytes); want version %d", info.Size(), want)
+	}
+	u := url.URL{Scheme: "file", Path: abs}
 	q := u.Query()
 	q.Set("mode", "ro")
+	// In the DSN so a connection database/sql opens to replace a discarded one
+	// keeps it. SQLite's default is 0: fail at once as SQLITE_BUSY.
+	q.Set("_pragma", "busy_timeout(1000)")
 	u.RawQuery = q.Encode()
-
-	preflightURL := u
-	preflightQuery := preflightURL.Query()
-	preflightQuery.Set("immutable", "1")
-	preflightURL.RawQuery = preflightQuery.Encode()
-	preflight, err := sql.Open("sqlite", preflightURL.String())
-	if err != nil {
-		return nil, fmt.Errorf("feedback: open SQLite weight reader preflight: %w", err)
-	}
-	preflight.SetMaxOpenConns(1)
-	if err := preflight.PingContext(ctx); err != nil {
-		_ = preflight.Close()
-		return nil, fmt.Errorf("feedback: open SQLite weight reader preflight %q: %w", dbPath, err)
-	}
-	version, err := currentSchemaVersion(ctx, preflight)
-	if err != nil {
-		_ = preflight.Close()
-		return nil, fmt.Errorf("feedback: validate SQLite weight reader schema: %w", err)
-	}
-	if want := migrations[len(migrations)-1].version; version != want {
-		_ = preflight.Close()
-		return nil, fmt.Errorf("feedback: validate SQLite weight reader schema: version %d, want %d", version, want)
-	}
-	if err := preflight.Close(); err != nil {
-		return nil, fmt.Errorf("feedback: close SQLite weight reader preflight: %w", err)
-	}
-
 	db, err := sql.Open("sqlite", u.String())
 	if err != nil {
 		return nil, fmt.Errorf("feedback: open SQLite weight reader: %w", err)
@@ -120,9 +136,17 @@ func NewSQLiteWeightReader(ctx context.Context, dbPath string, config CollectorC
 	db.SetMaxOpenConns(1)
 	if err := db.PingContext(ctx); err != nil {
 		_ = db.Close()
-		return nil, fmt.Errorf("feedback: open SQLite weight reader %q: %w", dbPath, err)
+		return nil, fmt.Errorf("feedback: open SQLite weight reader %q: %w", abs, err)
 	}
-
+	version, err := currentSchemaVersion(ctx, db)
+	if err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("feedback: validate SQLite weight reader schema: %w", err)
+	}
+	if version != want {
+		_ = db.Close()
+		return nil, fmt.Errorf("feedback: validate SQLite weight reader schema: version %d, want %d", version, want)
+	}
 	store := &SQLiteSignalStore{db: db}
 	return &SQLiteWeightReader{db: db, reader: NewWeightReader(store, config)}, nil
 }

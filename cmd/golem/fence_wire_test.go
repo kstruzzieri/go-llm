@@ -83,6 +83,10 @@ func sseAnswer(text string) []string {
 func fenceWireHarness(t *testing.T, script func(req wireRequest) []string) (configPath, root string, requests func() []wireRequest) {
 	t.Helper()
 	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	// run() reads os.UserConfigDir (consultants.json, REPL commands); keep the
+	// developer's real config out of the run.
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	var mu sync.Mutex
 	var seen []wireRequest
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -132,7 +136,8 @@ func fenceWireHarness(t *testing.T, script func(req wireRequest) []string) (conf
 	}
 }
 
-func runFenceOneShot(t *testing.T, configPath, root string, extra ...string) {
+// runFenceOneShot runs one -p turn and returns its stderr text.
+func runFenceOneShot(t *testing.T, configPath, root string, extra ...string) string {
 	t.Helper()
 	args := append([]string{"-config", configPath, "-root", root, "-p", "go",
 		"-no-probe", "-no-cap-probe", "-no-rag", "-no-project-context"}, extra...)
@@ -140,6 +145,7 @@ func runFenceOneShot(t *testing.T, configPath, root string, extra ...string) {
 	if err := run(args, stdin, stdout, stderr); err != nil {
 		t.Fatalf("run: %v\nstderr:\n%s", err, readRunTestFile(t, stderr))
 	}
+	return readRunTestFile(t, stderr)
 }
 
 // assertFramedTool pins one framed wire tool message: literal markers, the
