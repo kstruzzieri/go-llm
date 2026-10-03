@@ -19,11 +19,17 @@ type AdmissionError struct {
 	PinnedDigest    string
 	CandidateDigest string
 	Diff            CatalogDiff
-	cause           error
+	// Names lists validated names relevant to Reason (for selection_missing,
+	// the selected tools absent from the admitted catalog). Never remote prose.
+	Names []string
+	cause error
 }
 
 func (e *AdmissionError) Error() string {
 	text := fmt.Sprintf("server %q: %s", e.Alias, e.Reason)
+	if len(e.Names) > 0 {
+		text += ": " + strings.Join(e.Names, ", ")
+	}
 	if e.PinnedDigest != "" {
 		text += "; pinned " + e.PinnedDigest
 	}
@@ -181,6 +187,10 @@ func validateTrustConfig(servers []Server, pins *PinStore) error {
 			return fmt.Errorf("mcpclient: duplicate server alias %q", s.Alias)
 		}
 		seen[s.Alias] = true
+		if err := validateSelection(s); err != nil {
+			// Selection diagnostics contain only positions and fixed text.
+			return fmt.Errorf("%w: %s", admissionFailure(s.Alias, "invalid_config", err), err)
+		}
 		if _, err := s.transport(); err != nil {
 			return admissionFailure(s.Alias, "invalid_config", err)
 		}

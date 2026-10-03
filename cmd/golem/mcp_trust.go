@@ -33,6 +33,8 @@ func runMCPTrust(ctx context.Context, args []string, stdout, stderr io.Writer) e
 	var stdio, httpFlags stringSliceFlag
 	fs.Var(&stdio, "mcp-stdio", "one explicitly aliased stdio server")
 	fs.Var(&httpFlags, "mcp-http", "one explicitly aliased HTTP server")
+	var selection stringSliceFlag
+	fs.Var(&selection, "mcp-tools", "not accepted: inspect and approve always review the complete catalog")
 	digest := ""
 	if action == "approve" {
 		fs.StringVar(&digest, "digest", "", "exact candidate digest from inspect")
@@ -44,6 +46,9 @@ func runMCPTrust(ctx context.Context, args []string, stdout, stderr io.Writer) e
 			return flag.ErrHelp
 		}
 		return errors.New("mcp: invalid command flags")
+	}
+	if len(selection) > 0 {
+		return errors.New("mcp: inspect and approve do not take -mcp-tools; they always review the complete catalog")
 	}
 	if strings.TrimSpace(*root) == "" {
 		return errors.New("mcp: -root must not be empty")

@@ -59,6 +59,7 @@ type flags struct {
 	interceptors        bool // -interceptors: full content chain on top of the always-on guards (#514/#439/#575)
 	mcpStdio            stringSliceFlag
 	mcpHTTP             stringSliceFlag
+	mcpTools            stringSliceFlag
 	allowDestinations   stringSliceFlag
 	noRag               bool
 	noAutoIndex         bool
@@ -155,6 +156,7 @@ func parseFlags(args []string) (flags, error) {
 	fs.BoolVar(&f.interceptors, "interceptors", false, "add the content interceptor pipeline (#436/#437/#438) on top of the always-on guards (#439/#555, always on since #575: argument invariants for named tools, exec-class egress labels, scoped-child refusal reporting): origin-sensitive injection detectors, all-origin supported secret/payment-card blocking across completed turns, and a canary; required by /consult; streaming output is not intercepted; risk appears at interactive tool-call and plan-lock prompts and successful REPL/-p stderr footers with or without this flag, but not verifier approval prompts; default off")
 	fs.Var(&f.mcpStdio, "mcp-stdio", "attach an MCP server over stdio: \"[alias=]command args...\" (repeatable; use `env KEY=val cmd` for env vars)")
 	fs.Var(&f.mcpHTTP, "mcp-http", "attach an MCP server over streamable HTTP: \"[alias=]https://endpoint\" (repeatable)")
+	fs.Var(&f.mcpTools, "mcp-tools", "expose only these original tools of an attached MCP server: \"alias=name[,name...]\"; \"alias=\" exposes none (repeatable; the complete catalog is still verified and pinned)")
 	fs.Var(&f.allowDestinations, "allow-destination", "admit a remote model destination without prompting: \"<provider>/<canonical base URL>\" (repeatable; required for remote destinations in noninteractive runs)")
 	fs.BoolVar(&f.noRag, "no-rag", false, "disable the retrieve tool entirely (ignore any auto index)")
 	fs.BoolVar(&f.noAutoIndex, "no-auto-index", false, "disable startup auto-index refresh, which otherwise skips detected secret/payment-card files by default; existing auto indexes may still be used")
@@ -297,7 +299,7 @@ func validateFlags(f flags) error {
 		}
 		if f.promptSet || f.goalSet || f.reviewManifest != "" || f.evidencePath != "" ||
 			f.wfProfileSet || f.wfReasonSet || f.workflowProfile != "" || f.workflowReason != "" ||
-			f.ragDB != "" || f.delegate || f.dispatch || len(f.mcpStdio) > 0 || len(f.mcpHTTP) > 0 ||
+			f.ragDB != "" || f.delegate || f.dispatch || len(f.mcpStdio) > 0 || len(f.mcpHTTP) > 0 || len(f.mcpTools) > 0 ||
 			f.allowWrite || f.allowExec || f.approvePlanLock {
 			return fmt.Errorf("golem: %s cannot be combined with planning, setup, review, or ambient tool flags", mode)
 		}
@@ -393,7 +395,7 @@ func validateFlags(f flags) error {
 	if f.planPath != "" && f.dispatch {
 		return fmt.Errorf("golem: -plan (task mode) does not attach dispatch; proof-mode tools are built from the locked plan")
 	}
-	if f.planPath != "" && (len(f.mcpStdio) > 0 || len(f.mcpHTTP) > 0) {
+	if f.planPath != "" && (len(f.mcpStdio) > 0 || len(f.mcpHTTP) > 0 || len(f.mcpTools) > 0) {
 		return fmt.Errorf("golem: -plan (task mode) does not attach MCP tools; proof-mode tools are built from the locked plan")
 	}
 	if f.planPath != "" && (!f.approveEdits || !f.approveGates) {
@@ -420,7 +422,7 @@ func validateFlags(f flags) error {
 	if f.goalSet && f.dispatch {
 		return fmt.Errorf("golem: -goal (planning mode) does not attach dispatch")
 	}
-	if f.goalSet && (len(f.mcpStdio) > 0 || len(f.mcpHTTP) > 0) {
+	if f.goalSet && (len(f.mcpStdio) > 0 || len(f.mcpHTTP) > 0 || len(f.mcpTools) > 0) {
 		return fmt.Errorf("golem: -goal (planning mode) does not attach MCP tools")
 	}
 	if f.goalSet && f.evidencePath != "" {
@@ -900,6 +902,10 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 	mcpServers, merr := parseMCPServers(f.mcpStdio, f.mcpHTTP)
 	if merr != nil {
 		return maybeUsageError(errors.New("golem: invalid MCP server specification"), headlessExitApplies(f))
+	}
+	mcpServers, merr = applyMCPTools(mcpServers, f.mcpTools)
+	if merr != nil {
+		return maybeUsageError(fmt.Errorf("golem: %w", merr), headlessExitApplies(f))
 	}
 	f, taskWarns := applyTaskMode(f)
 	f, goalWarns := applyGoalMode(f)
