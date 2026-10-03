@@ -24,7 +24,7 @@ func TestRunSourceUsageErrors(t *testing.T) {
 		want string
 	}{
 		{"no subcommand", nil, "usage: golem source"},
-		{"unknown subcommand", []string{"bogus"}, `unknown source command "bogus"`},
+		{"unknown subcommand", []string{"bogus"}, "golem source: unknown source command\n"},
 		{"add no path no text", []string{"add"}, "path is required"},
 		{"add text without name", []string{"add", "-text"}, "-name is required"},
 		{"add text with path", []string{"add", "-text", "-name", "n", "x.txt"}, "cannot combine -text with a path"},
@@ -68,8 +68,9 @@ func TestSourceRejectsRagDBAsRenderedUsage(t *testing.T) {
 		if !errors.Is(err, errSourceFailed) {
 			t.Fatalf("%v: error = %v, want errSourceFailed", args, err)
 		}
-		if out.Len() != 0 || !strings.Contains(errOut.String(), "flag provided but not defined: -rag-db") {
-			t.Fatalf("%v: stdout=%q stderr=%q", args, out.String(), errOut.String())
+		want := fmt.Sprintf("golem source %s: %s\n", args[0], flagParseFailure(len(args)-1))
+		if out.Len() != 0 || errOut.String() != want {
+			t.Fatalf("%v: stdout=%q stderr=%q, want stderr %q", args, out.String(), errOut.String(), want)
 		}
 	}
 }

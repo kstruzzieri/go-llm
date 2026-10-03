@@ -1,0 +1,5 @@
+Usage of golem source list:
+  -json
+    	emit JSON
+  -root string
+    	workspace root (default ".")
