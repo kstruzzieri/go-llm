@@ -1,0 +1,19 @@
+Usage of golem source add:
+  -allow-destination value
+    	admit a remote model destination: "<provider>/<canonical base URL>" (repeatable; this command never prompts)
+  -collection string
+    	optional collection
+  -config string
+    	path to models.json (default: auto-discover)
+  -name string
+    	document name (required with -text)
+  -ollama-url string
+    	override Ollama base URL
+  -root string
+    	workspace root (default ".")
+  -tag value
+    	optional tag (repeatable)
+  -text
+    	ingest stdin as a named text document
+  -title string
+    	optional display title

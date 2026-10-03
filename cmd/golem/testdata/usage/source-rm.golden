@@ -1,0 +1,3 @@
+Usage of golem source rm:
+  -root string
+    	workspace root (default ".")

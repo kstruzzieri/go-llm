@@ -854,7 +854,8 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 		case "source":
 			return runSource(context.Background(), args[1:], stdin, stdout, stderr)
 		default:
-			return fmt.Errorf("unknown command %q (did you mean \"audit\", \"index\", \"models\", \"source\", or \"mcp\"?)", args[0])
+			// Unquoted: the argument may be a pasted secret.
+			return errors.New("unknown command (did you mean \"audit\", \"index\", \"models\", \"source\", or \"mcp\"?)")
 		}
 	}
 

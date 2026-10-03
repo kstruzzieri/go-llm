@@ -1,0 +1,15 @@
+Usage of golem index:
+  -allow-destination value
+    	admit a remote model destination: "<provider>/<canonical base URL>" (repeatable; this command never prompts)
+  -config string
+    	path to models.json (default: auto-discover)
+  -full
+    	clean rebuild (drop the existing index first)
+  -no-color
+    	disable dim ANSI footers in summary
+  -ollama-url string
+    	override Ollama base URL
+  -progressive
+    	generate opt-in L0/L1 progressive source summaries
+  -root string
+    	workspace root to index (default ".")
