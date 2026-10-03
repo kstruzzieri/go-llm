@@ -227,6 +227,18 @@ func connectOne(ctx context.Context, impl Implementation, s Server, opts Connect
 		failure.Diff = diffCatalogs(prior, catalog)
 		return nil, nil, append(notices, failure)
 	}
+	// Selection applies only after the complete catalog was validated, hashed
+	// and admitted above, so unselected tools stay under change detection.
+	if s.toolsSet {
+		var missing []string
+		remote, missing = selectRemote(remote, s.tools)
+		if len(missing) > 0 {
+			// A cleanup error stays the cause; it never replaces the reason
+			// (admissionFailure would reclassify a canceled close).
+			failure := &AdmissionError{Alias: s.Alias, Reason: "selection_missing", Names: missing, cause: session.Close()}
+			return nil, nil, append(notices, failure)
+		}
+	}
 	return session, adapters(session, s.Alias, remote, catalog), notices
 }
 

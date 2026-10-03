@@ -59,6 +59,11 @@ type Server struct {
 	kind     transportKind
 	command  []string // stdio
 	endpoint string   // http
+	// tools is the host-selected subset of original server tool names.
+	// toolsSet distinguishes an explicit empty selection (expose no tools)
+	// from an omitted one (expose the whole admitted catalog).
+	tools    []string
+	toolsSet bool
 	// tr, when non-nil, overrides the built transport. Test-only: lets the
 	// concurrency tests drive Connect with gated in-memory transports, the same
 	// way connectOne lets them drive a single dial.
@@ -66,8 +71,20 @@ type Server struct {
 }
 
 // StdioServer attaches an MCP server run as a subprocess over stdin/stdout.
+// The command slice is copied.
 func StdioServer(alias string, command []string) Server {
-	return Server{Alias: alias, kind: transportStdio, command: command}
+	return Server{Alias: alias, kind: transportStdio, command: append([]string(nil), command...)}
+}
+
+// WithTools returns a copy that exposes only the named original server tools
+// (not the mcp__alias__ form). With zero names it exposes no tools; never
+// calling it exposes the whole admitted catalog. A later call replaces an
+// earlier one, and names is copied. Selection never narrows catalog
+// verification: pins, diffs and Inspect always cover every tool.
+func (s Server) WithTools(names ...string) Server {
+	s.tools = append([]string(nil), names...)
+	s.toolsSet = true
+	return s
 }
 
 // HTTPServer attaches an MCP server reachable over streamable HTTP.
