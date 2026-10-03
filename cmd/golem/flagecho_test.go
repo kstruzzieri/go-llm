@@ -48,8 +48,8 @@ func subcommandFlagSurfaces() []subcommandFlagSurface {
 	return []subcommandFlagSurface{
 		{
 			argv: []string{"index"}, golden: "index", typed: "-full=" + flagEchoSecret,
-			call: func(args []string, out, errOut io.Writer) error { return runIndex(ctx, args, out, errOut) },
-			out:  "golem index: MSG\n", stdout: "golem index: MSG\n",
+			call:   func(args []string, out, errOut io.Writer) error { return runIndex(ctx, args, out, errOut) },
+			errOut: "golem index: MSG\n", stderr: "golem index: MSG\n",
 		},
 		{
 			argv: []string{"models"}, golden: "models", typed: "-json=" + flagEchoSecret,

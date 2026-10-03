@@ -205,9 +205,12 @@ func runIndex(ctx context.Context, args []string, out, errOut io.Writer) (runErr
 	fs.Bool("no-color", false, "disable dim ANSI footers in summary")
 	var allowDest stringSliceFlag
 	fs.Var(&allowDest, "allow-destination", "admit a remote model destination: \"<provider>/<canonical base URL>\" (repeatable; this command never prompts)")
-	// The deferred handler prefixes "golem index: " when it prints the error.
 	if err := parseQuietly(fs, args, errOut); err != nil {
-		return err
+		if errors.Is(err, flag.ErrHelp) {
+			return err
+		}
+		_, _ = fmt.Fprintf(errOut, "golem index: %v\n", err)
+		return errors.Join(errIndexFailed, err)
 	}
 
 	root, err := filepath.Abs(rootFlag)
