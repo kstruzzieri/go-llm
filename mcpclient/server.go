@@ -64,6 +64,10 @@ type Server struct {
 	// from an omitted one (expose the whole admitted catalog).
 	tools    []string
 	toolsSet bool
+	// env and dir are stdio launch options: host-approved environment
+	// additions and the working directory ("" = process cwd at prepare).
+	env []EnvVar
+	dir string
 	// tr, when non-nil, overrides the built transport. Test-only: lets the
 	// concurrency tests drive Connect with gated in-memory transports, the same
 	// way connectOne lets them drive a single dial.
@@ -85,6 +89,32 @@ func (s Server) WithTools(names ...string) Server {
 	s.tools = append([]string(nil), names...)
 	s.toolsSet = true
 	return s
+}
+
+// WithEnv returns a copy of a stdio server that forwards these additions on
+// top of the baseline environment. A later call replaces an earlier one, and
+// vars is copied.
+func (s Server) WithEnv(vars ...EnvVar) Server {
+	s.env = append([]EnvVar(nil), vars...)
+	return s
+}
+
+// WithDir returns a copy of a stdio server that runs in dir, which must be
+// absolute. Without it the server runs in the process working directory
+// captured when Connect, Inspect or Approve prepares it.
+func (s Server) WithDir(dir string) Server {
+	s.dir = dir
+	return s
+}
+
+// Format renders only the transport kind and alias, for every verb, so argv,
+// endpoints and explicit environment values never reach logs through fmt.
+func (s Server) Format(f fmt.State, _ rune) {
+	kind := "stdio"
+	if s.kind == transportHTTP {
+		kind = "http"
+	}
+	_, _ = fmt.Fprintf(f, "%s:%s", kind, s.Alias)
 }
 
 // HTTPServer attaches an MCP server reachable over streamable HTTP.

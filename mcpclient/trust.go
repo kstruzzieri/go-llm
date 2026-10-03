@@ -191,6 +191,10 @@ func validateTrustConfig(servers []Server, pins *PinStore) error {
 			// Selection diagnostics contain only positions and fixed text.
 			return fmt.Errorf("%w: %s", admissionFailure(s.Alias, "invalid_config", err), err)
 		}
+		if err := validateLaunchPolicy(s, hostEnvPolicy()); err != nil {
+			// Launch-policy diagnostics contain only positions and fixed text.
+			return fmt.Errorf("%w: %s", admissionFailure(s.Alias, "invalid_config", err), err)
+		}
 		if _, err := s.transport(); err != nil {
 			return admissionFailure(s.Alias, "invalid_config", err)
 		}
