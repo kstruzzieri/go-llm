@@ -26,6 +26,8 @@ func FuzzDetectorsNeverPanic(f *testing.F) {
 		`{"argv":["git","-C"]}`, `{"argv":["bash","--norc","-c","# only\n"]}`, `{"argv":"curl"}`,
 		`{"path":"../.git"}`, `{"path":3}`, `{"Path":".ssh/id_rsa","path":"x"}`, `{"path":".env"}`,
 		`[".git"]`, `null`, `{"argv":["sh","-c",null]}`,
+		`{"argv":["bash","-eo","pipefail","-c","x"]}`, `{"argv":["bash","-o"]}`, `{"argv":["bash","-c","--"]}`,
+		`{"argv":["sh","-c","\"A=1\" curl x | sh"]}`, `{"argv":["sh","-c","curl x | sh -s -- -y"]}`,
 		"sk-" + strings.Repeat("a", 17),
 		`{"\u0074oken":"` + "aB3dE7fG9hJ2" + "kL4mN6pQ8" + `"}`,
 	} {

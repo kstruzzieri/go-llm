@@ -86,9 +86,10 @@ func normalizePath(s string) string {
 // recognized remote fetch into a recognized shell (#439 D5): after the same
 // wrapper peel the classifier applies, the outer command must be a supported
 // shell in command-execution mode, the script must tokenize into exactly two
-// literal simple commands joined by one unquoted pipe, the first a stdout
-// fetch (curl/wget forms in the matrix) and the second a stdin shell sink.
-// Anything the recognizer cannot interpret is not blocked; it stays a badge.
+// literal simple commands joined by one unquoted pipe, with no quoted
+// would-be assignment, the first a stdout fetch (curl/wget forms in the
+// matrix) and the second a stdin shell sink. Anything the recognizer cannot
+// interpret is not blocked; it stays a badge.
 // Substitution, eval and source forms are deliberately outside this set.
 type RemoteScript struct{}
 
@@ -101,12 +102,12 @@ func (RemoteScript) check(raw json.RawMessage) (string, bool) {
 	if status != peelOK {
 		return "", false
 	}
-	_, _, script, ok := inlineShellScript(rest)
-	if !ok {
+	_, _, script, form := inlineShellScript(rest)
+	if form != shellFormInline {
 		return "", false
 	}
-	cmds, ok := splitShellWords(script)
-	if !ok || len(cmds) != 2 {
+	cmds, quotedAssign, ok := splitShellWords(script)
+	if !ok || quotedAssign || len(cmds) != 2 {
 		return "", false
 	}
 	fetch, ok := recognizeFetch(cmds[0])

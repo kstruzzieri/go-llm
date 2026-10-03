@@ -234,11 +234,20 @@ scan:
 // invariant never hard-blocks on text it did not actually understand.
 var (
 	// inlineShells are the shells recognized both as an outer command running
-	// an inline script under the exact options below and as a bare stdin
-	// sink; the spec lists the same five for both roles.
+	// an inline script and as a stdin sink; the spec lists the same five for
+	// both roles. fish is a shell name with no modeled options.
 	inlineShells = set("sh", "bash", "dash", "ksh", "zsh")
-	inlineFlags  = set("-c", "-lc", "-ec", "-euc")
 	bashPreamble = set("--norc", "--noprofile")
+	// shellOptionLetters are the option letters an outer shell may carry,
+	// singly or clustered (#622). Each keeps the operand running as a command
+	// string on all five shells; -n (parse only) and -s are deliberately out.
+	shellOptionLetters = "ceuxli"
+	// shellOptionNames are the -o values every inline shell accepts;
+	// pipefailShells also accept -o pipefail. dash builds differ (the one
+	// verified for #622 exits 2 on it) and sh may be dash, so those two are
+	// out. noexec is parse only and deliberately out.
+	shellOptionNames = set("errexit", "nounset", "xtrace")
+	pipefailShells   = set("bash", "zsh", "ksh")
 	// curlFetchFlags are the only curl options a recognized stdout fetch may
 	// carry, singly or clustered.
 	curlFetchFlags = regexp.MustCompile(`^-[fsSL]+$`)
@@ -248,26 +257,73 @@ var (
 	shellUnsupported = ";&()<>\n$`\\*?[]{}~"
 )
 
-// inlineShellScript recognizes an outer shell in command-execution mode:
-// sh/bash/dash/ksh/zsh, for bash optionally --norc/--noprofile first, then
-// exactly one of -c, -lc, -ec, -euc and the script operand. Arguments after
-// the script are the script's own and are not interpreted.
-func inlineShellScript(argv []string) (shell, flag, script string, ok bool) {
+// shellForm is how an outer shell's options read.
+type shellForm int
+
+const (
+	shellFormNone        shellForm = iota // not a shell, or a modeled form without -c: a script file or stdin
+	shellFormInline                       // command-execution mode with its script operand
+	shellFormUnsupported                  // an option or form outside the grammar
+)
+
+// inlineShellScript reads an outer shell's options (#622). For bash,
+// --norc/--noprofile may come first. Then option words until the first
+// operand: -- ends them; otherwise a word is - and distinct letters from
+// shellOptionLetters, where o may also be the final letter and takes the next
+// word as its value (shellOptionNames, or pipefail on pipefailShells). c in
+// any word selects command-execution mode and the first operand is the
+// script; later words are the script's own and are not interpreted. Any
+// other word starting with - or +, and any option on fish, is unsupported.
+// flag is the first option word carrying c, for labels.
+func inlineShellScript(argv []string) (shell, flag, script string, form shellForm) {
 	if len(argv) == 0 {
-		return "", "", "", false
+		return "", "", "", shellFormNone
 	}
 	shell = commandName(argv[0])
-	if !inlineShells[shell] {
-		return "", "", "", false
+	if !shellNames[shell] {
+		return "", "", "", shellFormNone
 	}
 	i := 1
 	for shell == "bash" && i < len(argv) && bashPreamble[argv[i]] {
 		i++
 	}
-	if i+1 >= len(argv) || !inlineFlags[argv[i]] {
-		return "", "", "", false
+	for ; i < len(argv); i++ {
+		a := argv[i]
+		if a == "--" {
+			i++
+			break
+		}
+		if !strings.HasPrefix(a, "-") && !strings.HasPrefix(a, "+") {
+			break
+		}
+		letters := a[1:]
+		if a[0] == '+' || letters == "" || !inlineShells[shell] {
+			return shell, "", "", shellFormUnsupported
+		}
+		for j := 0; j < len(letters); j++ {
+			switch l := letters[j]; {
+			case strings.IndexByte(letters[j+1:], l) >= 0:
+				return shell, "", "", shellFormUnsupported
+			case l == 'o' && j == len(letters)-1:
+				i++
+				if i >= len(argv) || !shellOptionNames[argv[i]] && (argv[i] != "pipefail" || !pipefailShells[shell]) {
+					return shell, "", "", shellFormUnsupported
+				}
+			case strings.IndexByte(shellOptionLetters, l) < 0:
+				return shell, "", "", shellFormUnsupported
+			}
+		}
+		if flag == "" && strings.IndexByte(letters, 'c') >= 0 {
+			flag = a
+		}
 	}
-	return shell, argv[i], argv[i+1], true
+	switch {
+	case flag == "":
+		return shell, "", "", shellFormNone
+	case i >= len(argv):
+		return shell, "", "", shellFormUnsupported
+	}
+	return shell, flag, argv[i], shellFormInline
 }
 
 // splitShellWords tokenizes a script into simple commands of literal words:
@@ -278,18 +334,31 @@ func inlineShellScript(argv []string) (shell, flag, script string, ok bool) {
 // nothing about what runs and need no evaluation. Any other unquoted
 // metacharacter (an interior newline included), an unterminated quote, an
 // empty command, or a comment that is followed by more script lines makes
-// the script unsupported.
-func splitShellWords(script string) (cmds [][]string, ok bool) {
+// the script unsupported. A word in leading-assignment position that would
+// be NAME=VALUE but has a quote at or before its first = is the command in
+// shell grammar, not an assignment; it is returned as written and
+// quotedAssign reports it, because commandWords would strip it (#622).
+func splitShellWords(script string) (cmds [][]string, quotedAssign, ok bool) {
 	script = strings.TrimRight(script, " \t\n")
 	var (
-		cur     []string
-		word    []rune
-		inWord  bool
-		quote   rune // 0, '\'' or '"'
-		endWord = func() {
+		cur      []string
+		word     []rune
+		inWord   bool
+		quote    rune   // 0, '\'' or '"'
+		quoteAt  = -1   // index in word where its first quote opened
+		inPrefix = true // every earlier word of this command is an assignment
+		endWord  = func() {
 			if inWord {
-				cur = append(cur, string(word))
-				word, inWord = word[:0], false
+				w := string(word)
+				if inPrefix {
+					assign := envAssignment.MatchString(w)
+					if assign && quoteAt >= 0 && quoteAt <= slices.Index(word, '=') {
+						quotedAssign, assign = true, false
+					}
+					inPrefix = assign
+				}
+				cur = append(cur, w)
+				word, inWord, quoteAt = word[:0], false, -1
 			}
 		}
 	)
@@ -308,39 +377,42 @@ func splitShellWords(script string) (cmds [][]string, ok bool) {
 			case '"':
 				quote = 0
 			case '$', '`', '\\':
-				return nil, false
+				return nil, false, false
 			default:
 				word = append(word, r)
 			}
 		case r == '\'' || r == '"':
+			if quoteAt < 0 {
+				quoteAt = len(word)
+			}
 			quote, inWord = r, true
 		case r == ' ' || r == '\t':
 			endWord()
 		case r == '|':
 			endWord()
 			if len(cur) == 0 {
-				return nil, false
+				return nil, false, false
 			}
-			cmds, cur = append(cmds, cur), nil
+			cmds, cur, inPrefix = append(cmds, cur), nil, true
 		case r == '#' && !inWord:
 			if slices.Contains(rs[i:], '\n') {
-				return nil, false
+				return nil, false, false
 			}
 			i = len(rs)
 		case strings.ContainsRune(shellUnsupported, r):
-			return nil, false
+			return nil, false, false
 		default:
 			word, inWord = append(word, r), true
 		}
 	}
 	if quote != 0 {
-		return nil, false
+		return nil, false, false
 	}
 	endWord()
 	if len(cur) == 0 {
-		return nil, false
+		return nil, false, false
 	}
-	return append(cmds, cur), true
+	return append(cmds, cur), quotedAssign, true
 }
 
 // commandWords drops the leading NAME=VALUE assignment words of a simple
@@ -392,8 +464,9 @@ func recognizeFetch(words []string) (name string, ok bool) {
 }
 
 // recognizeSink reports a simple command that executes its stdin: a bare
-// sh/bash/dash/ksh/zsh, optionally with -s, optionally preceded by a bare
-// sudo. The label names what would run.
+// sh/bash/dash/ksh/zsh, optionally with -s, or with -s -- and the script's
+// positional arguments (#622), optionally preceded by a bare sudo. The label
+// names what would run.
 func recognizeSink(words []string) (label string, ok bool) {
 	words = commandWords(words)
 	i := 0
@@ -408,7 +481,7 @@ func recognizeSink(words []string) (label string, ok bool) {
 		return "", false
 	}
 	rest := words[i+1:]
-	if len(rest) > 1 || (len(rest) == 1 && rest[0] != "-s") {
+	if len(rest) > 0 && (rest[0] != "-s" || len(rest) > 1 && rest[1] != "--") {
 		return "", false
 	}
 	return label + shell, true
@@ -438,22 +511,27 @@ type scriptEvidence int
 
 const (
 	scriptNone        scriptEvidence = iota // not an inline script, or readable with no network command
-	scriptUnsupported                       // an inline script the recognizer cannot read
+	scriptUnsupported                       // a shell option form or an inline script the recognizer cannot read
 	scriptNetwork                           // a readable script with a network command in command position
 )
 
-// scriptNetworkEvidence inspects a recognized inline script. A readable
-// script whose simple commands include one that classifies as network on
-// its own (a direct client, or a network git subcommand) yields that label;
-// a script the tokenizer cannot read is reported as such so the caller can
-// keep the uncertainty visible instead of dropping to interpreter; anything
-// else contributes nothing.
+// scriptNetworkEvidence inspects an outer shell. A readable inline script
+// whose simple commands include one that classifies as network on its own (a
+// direct client, or a network git subcommand) yields that label; an option
+// form or a script the recognizer cannot read is reported as such so the
+// caller can keep the uncertainty visible instead of dropping to interpreter;
+// anything else contributes nothing.
 func scriptNetworkEvidence(rest []string) (label string, ev scriptEvidence) {
-	shell, flag, script, ok := inlineShellScript(rest)
-	if !ok {
+	shell, flag, script, form := inlineShellScript(rest)
+	switch form {
+	case shellFormNone:
 		return "", scriptNone
+	case shellFormUnsupported:
+		return strconv.Quote(shell) + " unsupported form", scriptUnsupported
 	}
-	cmds, ok := splitShellWords(script)
+	// A quoted would-be assignment keeps the reading it had before #622, so
+	// the badge never drops below it; only the hard block refuses that reading.
+	cmds, _, ok := splitShellWords(script)
 	if !ok {
 		return strconv.Quote(shell+" "+flag) + " unsupported script", scriptUnsupported
 	}
