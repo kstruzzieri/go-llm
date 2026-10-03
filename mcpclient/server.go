@@ -136,30 +136,12 @@ func (s Server) transport() (gomcp.Transport, error) {
 		}
 		return &gomcp.CommandTransport{Command: exec.Command(s.command[0], s.command[1:]...)}, nil
 	case transportHTTP:
-		if s.endpoint == "" {
-			return nil, fmt.Errorf("mcpclient: http server %q has empty endpoint", s.Alias)
+		ep, err := canonicalEndpoint(s.endpoint)
+		if err != nil {
+			return nil, err
 		}
-		client := *http.DefaultClient
-		if client.Transport == nil {
-			client.Transport = http.DefaultTransport
-		}
-		client.Transport = httpSessionTransport{RoundTripper: client.Transport}
-		checkRedirect := client.CheckRedirect
-		client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
-			if len(via) > 0 && via[0].Method == http.MethodDelete {
-				return http.ErrUseLastResponse
-			}
-			if checkRedirect != nil {
-				return checkRedirect(req, via)
-			}
-			if len(via) >= 10 {
-				return errors.New("stopped after 10 redirects")
-			}
-			return nil
-		}
-		// DisableStandaloneSSE: MVP only needs request/response; no server-initiated
-		// notifications, no standalone SSE stream, no auto-reconnect on that stream.
-		return &gomcp.StreamableClientTransport{Endpoint: s.endpoint, HTTPClient: &client, DisableStandaloneSSE: true}, nil
+		tr, _ := newHTTPTransport(ep)
+		return tr, nil
 	default:
 		return nil, fmt.Errorf("mcpclient: server %q has unknown transport", s.Alias)
 	}

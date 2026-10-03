@@ -57,6 +57,10 @@ func admissionFailure(alias, reason string, cause error) *AdmissionError {
 	switch {
 	case errors.Is(cause, errPinDurability):
 		reason = "pin_durability"
+	case errors.Is(cause, errRedirectRefused):
+		reason = "redirect_refused"
+	case errors.Is(cause, errDestinationRefused):
+		reason = "destination_refused"
 	case errors.Is(cause, context.Canceled), errors.Is(cause, context.DeadlineExceeded):
 		reason = "canceled"
 	case errors.Is(cause, errPinMissing):

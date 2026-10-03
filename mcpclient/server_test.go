@@ -2,6 +2,7 @@ package mcpclient
 
 import (
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"strings"
@@ -145,28 +146,24 @@ func TestHTTPSessionDeleteDoesNotRedirectAndClosesBody(t *testing.T) {
 	})}
 	t.Cleanup(func() { http.DefaultClient = originalClient })
 
-	tr, err := HTTPServer("fs", "https://mcp.invalid").transport()
-	if err != nil {
-		t.Fatal(err)
-	}
+	tr, _ := newHTTPTransport(mustEndpoint(t, "https://mcp.invalid"))
 	client := tr.(*gomcp.StreamableClientTransport).HTTPClient
-	req, err := http.NewRequest(http.MethodDelete, "https://mcp.invalid", nil)
+	req, err := http.NewRequest(http.MethodDelete, "https://mcp.invalid/", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	resp, err := client.Do(req)
-	if err != nil {
-		t.Fatal(err)
+	if resp != nil {
+		_ = resp.Body.Close()
 	}
-	t.Cleanup(func() { _ = resp.Body.Close() })
 	if redirected {
 		t.Error("HTTP session DELETE followed a redirect")
 	}
-	if resp.StatusCode != http.StatusFound {
-		t.Errorf("HTTP session DELETE status = %d, want %d", resp.StatusCode, http.StatusFound)
+	if !errors.Is(err, errRedirectRefused) {
+		t.Errorf("HTTP session DELETE error = %v, want errRedirectRefused", err)
 	}
-	if !deleteBody.closed || resp.Body != http.NoBody {
-		t.Errorf("HTTP session DELETE body = (closed %t, %T), want (true, http.NoBody)", deleteBody.closed, resp.Body)
+	if !deleteBody.closed {
+		t.Error("HTTP session DELETE redirect body was not closed")
 	}
 }
 

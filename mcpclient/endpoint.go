@@ -4,9 +4,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"net/url"
 	"strings"
+	"sync/atomic"
 	"unicode/utf8"
+
+	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/kstruzzieri/go-llm/provider"
 )
@@ -106,4 +110,61 @@ func endpointFromURL(u *url.URL) (endpoint, error) {
 		}
 	}
 	return endpoint{origin: dest.BaseURL(), path: path, rawQuery: u.RawQuery, forceQuery: u.ForceQuery && u.RawQuery == ""}, nil
+}
+
+var (
+	errRedirectRefused    = errors.New("mcpclient: HTTP redirect refused")
+	errDestinationRefused = errors.New("mcpclient: HTTP request outside the admitted endpoint")
+)
+
+// httpRefusals records policy refusals on one transport, so admission can
+// name them even where the SDK flattens the error chain.
+type httpRefusals struct {
+	redirect, destination atomic.Bool
+}
+
+// endpointGuard refuses every request that is not exactly the admitted
+// endpoint, judged on URL fields, before any dial.
+type endpointGuard struct {
+	admitted endpoint
+	refusals *httpRefusals
+	next     http.RoundTripper
+}
+
+func (g endpointGuard) RoundTrip(req *http.Request) (*http.Response, error) {
+	allowed := req.URL != nil && (req.Host == "" || req.Host == req.URL.Host)
+	if allowed {
+		got, err := endpointFromURL(req.URL)
+		allowed = err == nil && got == g.admitted
+	}
+	if !allowed {
+		if req.Body != nil {
+			_ = req.Body.Close()
+		}
+		g.refusals.destination.Store(true)
+		return nil, errDestinationRefused
+	}
+	return g.next.RoundTrip(req)
+}
+
+// newHTTPTransport builds the SDK transport for an admitted endpoint. Every
+// redirect is refused, same-origin included: an admitted endpoint must not
+// hand a request, its body or credentials to a Location target.
+func newHTTPTransport(ep endpoint) (gomcp.Transport, *httpRefusals) {
+	refusals := new(httpRefusals)
+	// Copy the default client, as before, so its Timeout still applies; drop
+	// any cookie jar, whose behavior the guard cannot vouch for.
+	client := *http.DefaultClient
+	client.Jar = nil
+	base := client.Transport
+	if base == nil {
+		base = http.DefaultTransport
+	}
+	client.Transport = endpointGuard{admitted: ep, refusals: refusals, next: httpSessionTransport{RoundTripper: base}}
+	client.CheckRedirect = func(*http.Request, []*http.Request) error {
+		refusals.redirect.Store(true)
+		return errRedirectRefused
+	}
+	// DisableStandaloneSSE: request/response only; no standalone SSE stream.
+	return &gomcp.StreamableClientTransport{Endpoint: ep.sdkURL(), HTTPClient: &client, DisableStandaloneSSE: true}, refusals
 }

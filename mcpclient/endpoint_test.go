@@ -1,10 +1,17 @@
 package mcpclient
 
 import (
+	"context"
+	"errors"
 	"fmt"
+	"net/http"
 	"net/url"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
+
+	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
 func mustEndpoint(t *testing.T, raw string) endpoint {
@@ -129,4 +136,123 @@ func TestEndpointNeverRendersPathOrQuery(t *testing.T) {
 	if got := fmt.Sprint(e); got != "https://example.com" {
 		t.Errorf("fmt.Sprint(endpoint) = %q, want https://example.com", got)
 	}
+}
+
+func TestEndpointGuardRefusesBeforeDelegate(t *testing.T) {
+	admitted := mustEndpoint(t, "https://example.com/mcp?token=canary")
+	var delegated atomic.Int32
+	guard := endpointGuard{admitted: admitted, refusals: new(httpRefusals), next: mcpRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+		delegated.Add(1)
+		return mcpHTTPResponse(req, http.StatusOK, ""), nil
+	})}
+	ok, _ := http.NewRequest(http.MethodPost, "https://example.com/mcp?token=canary", nil)
+	if _, err := guard.RoundTrip(ok); err != nil || delegated.Load() != 1 || guard.refusals.destination.Load() {
+		t.Fatalf("exact request = (%v, %d delegated), want allowed", err, delegated.Load())
+	}
+	hostOverride, _ := http.NewRequest(http.MethodPost, "https://example.com/mcp?token=canary", nil)
+	hostOverride.Host = "evil.example"
+	for name, req := range map[string]*http.Request{
+		"path":   mustRequest(t, "https://example.com/other?token=canary"),
+		"query":  mustRequest(t, "https://example.com/mcp?token=other"),
+		"port":   mustRequest(t, "https://example.com:8443/mcp?token=canary"),
+		"host":   hostOverride,
+		"opaque": {Method: http.MethodPost, URL: &url.URL{Scheme: "https", Host: "evil.example", Opaque: "//example.com/mcp", RawQuery: "token=canary"}, Header: http.Header{}},
+		"slash":  {Method: http.MethodPost, URL: &url.URL{Scheme: "https", Host: "example.com", Path: "mcp", RawQuery: "token=canary"}, Header: http.Header{}},
+	} {
+		// The opaque fixture is only meaningful if its string form is the
+		// admitted endpoint: then only a field-based guard can refuse it.
+		if name == "opaque" && req.URL.String() != admitted.sdkURL() {
+			t.Fatalf("opaque fixture stringifies to %q, want %q", req.URL.String(), admitted.sdkURL())
+		}
+		body := &closeTrackingBody{Reader: strings.NewReader("{}")}
+		req.Body = body
+		if _, err := guard.RoundTrip(req); !errors.Is(err, errDestinationRefused) || !body.closed {
+			t.Errorf("%s request = (%v, body closed %t), want errDestinationRefused and a closed body", name, err, body.closed)
+		}
+	}
+	if delegated.Load() != 1 || !guard.refusals.destination.Load() {
+		t.Fatalf("refused requests reached the delegate (%d) or were not recorded", delegated.Load())
+	}
+}
+
+func mustRequest(t *testing.T, raw string) *http.Request {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodPost, raw, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return req
+}
+
+func TestHTTPClientRefusesEveryRedirect(t *testing.T) {
+	var elsewhere atomic.Int32
+	// Each case redirects exactly once: if a mutation allows redirects, a
+	// same-URL Location then gets 200 instead of looping forever (a custom
+	// CheckRedirect replaces net/http's default ten-hop limit).
+	var redirected atomic.Bool
+	originalClient := http.DefaultClient
+	http.DefaultClient = &http.Client{Transport: mcpRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+		if req.URL.Path != "/mcp" {
+			elsewhere.Add(1)
+			return mcpHTTPResponse(req, http.StatusOK, ""), nil
+		}
+		resp := mcpHTTPResponse(req, http.StatusOK, "")
+		if !redirected.Swap(true) {
+			resp.StatusCode = statusFrom(req)
+			resp.Header.Set("Location", req.Header.Get("X-Location"))
+		}
+		return resp, nil
+	})}
+	t.Cleanup(func() { http.DefaultClient = originalClient })
+	tr, refusals := newHTTPTransport(mustEndpoint(t, "https://mcp.invalid/mcp"))
+	client := tr.(*gomcp.StreamableClientTransport).HTTPClient
+	for _, method := range []string{http.MethodPost, http.MethodGet, http.MethodDelete} {
+		for _, status := range []int{301, 302, 303, 307, 308} {
+			for _, location := range []string{"/elsewhere", "https://mcp.invalid/mcp"} {
+				redirected.Store(false)
+				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				// strings.Reader sets GetBody, as the SDK's bytes.Reader does;
+				// without it net/http silently declines to follow a 307/308.
+				req, _ := http.NewRequestWithContext(ctx, method, "https://mcp.invalid/mcp", strings.NewReader("{}"))
+				req.Header.Set("X-Status", itoa(status))
+				req.Header.Set("X-Location", location)
+				resp, err := client.Do(req)
+				cancel()
+				if resp != nil && resp.Body != nil {
+					_ = resp.Body.Close()
+				}
+				if !errors.Is(err, errRedirectRefused) {
+					t.Errorf("%s %d -> %s: err = %v, want errRedirectRefused", method, status, location, err)
+				}
+			}
+		}
+	}
+	if elsewhere.Load() != 0 || !refusals.redirect.Load() {
+		t.Fatalf("redirect target requests = %d (want 0); recorded = %t", elsewhere.Load(), refusals.redirect.Load())
+	}
+}
+
+func TestHTTPTransportKeepsDefaultClientTimeout(t *testing.T) {
+	originalClient := http.DefaultClient
+	http.DefaultClient = &http.Client{Timeout: 7 * time.Second, Jar: noJar{}}
+	t.Cleanup(func() { http.DefaultClient = originalClient })
+	tr, _ := newHTTPTransport(mustEndpoint(t, "https://mcp.invalid/mcp"))
+	client := tr.(*gomcp.StreamableClientTransport).HTTPClient
+	if client.Timeout != 7*time.Second || client.Jar != nil {
+		t.Fatalf("client = (timeout %s, jar %v), want (7s, nil)", client.Timeout, client.Jar)
+	}
+}
+
+// noJar is a do-nothing cookie jar, only to prove newHTTPTransport drops jars.
+type noJar struct{}
+
+func (noJar) SetCookies(*url.URL, []*http.Cookie) {}
+func (noJar) Cookies(*url.URL) []*http.Cookie     { return nil }
+
+func statusFrom(req *http.Request) int {
+	n := 0
+	for _, c := range req.Header.Get("X-Status") {
+		n = n*10 + int(c-'0')
+	}
+	return n
 }
