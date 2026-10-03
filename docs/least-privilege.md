@@ -11,7 +11,7 @@ The [Mnemoverse article on least privilege for AI agents](https://mnemoverse.com
 | Tool execution | Read-only CLI default; explicit tool mounting; shared preparation, validation and approval before invocation. | Opting into exec permits host execution. Sanitized command environments do not restrict filesystem or network access. |
 | Agentflow subprocesses | Agentflow, its gates and its `git` calls receive a documented baseline plus operator-approved names (`-agentflow-env`); provider keys and other parent variables are dropped unless explicitly approved. | Environment narrowing only: gates keep host-user filesystem and network authority, and an approved value reaches every gate. Golem's own parallel-mode `git` calls still inherit its environment. |
 | Native sandboxes | Library Seatbelt and Bubblewrap backends fail closed when explicitly selected but unavailable. Sandbox policy participates in exec approval identity. | CLI exec and verification do not yet select these backends. |
-| Interceptors | Optional deterministic injection/secret detectors, argument invariants, exec egress labels and native scoped-child refusal reporting. Observation fencing is independent. | `-interceptors` is off by default. Labels and risk scores do not constrain network access or suspend grants. |
+| Interceptors | Always-on argument invariants, exec-class egress labels and native scoped-child refusal reporting in Golem (#575); optional deterministic injection/secret detectors and canary (`-interceptors`). Observation fencing is independent. | Content detectors and Secrets are off by default. Invariants are lexical checks on named tool arguments, not confinement. Labels and risk scores do not constrain network access or suspend grants. Library consumers stay opt-in. |
 | Provider destinations | Model-provider requests made by config-driven Golem and the go-llm MCP server require admission for remote destinations; guarded transports check capabilities, origins and base paths and refuse redirects. Grants are revocable. | This provider boundary does not govern Golem's connections to external MCP tool servers, shell traffic, or consultant-process traffic. |
 | MCP client | Workspace/alias catalog pins detect definition drift; tools require approval, have bounded execution/output, and produce foreign observations. | Pins do not attest endpoint/process identity. All admitted catalog tools are mounted unless the host selects exact tools per alias (`-mcp-tools`, #579); selection narrows exposure, not catalog verification. Local stdio servers run with host-user authority and inherit the parent environment; their HTTP counterparts are outside provider admission. |
 | Grants | Exec grants bind command/environment/runtime details; grants can be cleared. | Edit grants cover the write class; changed script contents and foreign content do not automatically invalidate reuse. |
@@ -78,7 +78,7 @@ roots is not implemented. Scoped retrieval remains excluded and belongs to
 [#554](https://github.com/kstruzzieri/go-llm/issues/554). #552's filesystem
 boundaries remain unchanged.
 
-With the parent reporter enabled, actual scoped native-reader refusals contribute
+With the parent reporter enabled (always in Golem since #575), actual scoped native-reader refusals contribute
 to its run-level risk report as described in
 [interceptors and secret detection](golem.md#interceptors-and-secret-detection).
 A refusal is counted when the reader returns it, even if the child observation

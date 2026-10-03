@@ -56,7 +56,7 @@ type flags struct {
 	delegateRole        string
 	dispatch            bool
 	dispatchRole        string
-	interceptors        bool // -interceptors: default interceptor chain on every orchestrator and dispatch child (#514/#439)
+	interceptors        bool // -interceptors: full content chain on top of the always-on guards (#514/#439/#575)
 	mcpStdio            stringSliceFlag
 	mcpHTTP             stringSliceFlag
 	mcpTools            stringSliceFlag
@@ -153,7 +153,7 @@ func parseFlags(args []string) (flags, error) {
 	fs.StringVar(&f.delegateRole, "delegate-role", "coding", "model role the delegate_code tool routes to")
 	fs.BoolVar(&f.dispatch, "dispatch", false, "enable the dispatch tool (bounded read-only exploration tasks use backend-governed concurrency; ungoverned routing stays serial)")
 	fs.StringVar(&f.dispatchRole, "dispatch-role", "", "model role dispatch child agents route to (default: the primary agent chain, so children never force a model swap)")
-	fs.BoolVar(&f.interceptors, "interceptors", false, "enable the interceptor pipeline (#436/#437/#439): origin-sensitive injection detectors, all-origin supported secret/payment-card blocking across completed turns, argument guards, and command egress labels on the agent and dispatch children; streaming output is not intercepted; risk appears at interactive tool-call and plan-lock prompts and successful REPL/-p stderr footers, but not verifier approval prompts; default off")
+	fs.BoolVar(&f.interceptors, "interceptors", false, "add the content interceptor pipeline (#436/#437/#438) on top of the always-on guards (#439/#555, always on since #575: argument invariants for named tools, exec-class egress labels, scoped-child refusal reporting): origin-sensitive injection detectors, all-origin supported secret/payment-card blocking across completed turns, and a canary; required by /consult; streaming output is not intercepted; risk appears at interactive tool-call and plan-lock prompts and successful REPL/-p stderr footers with or without this flag, but not verifier approval prompts; default off")
 	fs.Var(&f.mcpStdio, "mcp-stdio", "attach an MCP server over stdio: \"[alias=]command args...\" (repeatable; use `env KEY=val cmd` for env vars)")
 	fs.Var(&f.mcpHTTP, "mcp-http", "attach an MCP server over streamable HTTP: \"[alias=]https://endpoint\" (repeatable)")
 	fs.Var(&f.mcpTools, "mcp-tools", "expose only these original tools of an attached MCP server: \"alias=name[,name...]\"; \"alias=\" exposes none (repeatable; the complete catalog is still verified and pinned)")
@@ -635,13 +635,14 @@ func startupNotices(info startupInfo) []string {
 	return out
 }
 
-// interceptorsFor is the ONE place the flag becomes a chain (#514 D2): the
-// startup orchestrator, every factory-built orchestrator, and every dispatch
-// child derive exactly this list from the production flags value. nil when
-// -interceptors is off.
+// interceptorsFor is the ONE place the flag becomes a chain (#514 D2, #575):
+// the startup orchestrator, every factory-built orchestrator, and every
+// dispatch child derive exactly this list from the production flags value.
+// Without -interceptors it is Golem's always-on deterministic guards; with it,
+// the full default chain plus the canary. Never empty.
 func interceptorsFor(f flags, canary *canaryBinding) []agent.Interceptor {
 	if !f.interceptors {
-		return nil
+		return defaultGuards()
 	}
 	if canary == nil {
 		// An omitted binding fails at ForRun instead of silently losing policy.
@@ -650,14 +651,39 @@ func interceptorsFor(f flags, canary *canaryBinding) []agent.Interceptor {
 	return append(interceptor.Defaults(), canary)
 }
 
-// interceptorsNotice names the installed chain in the startup notice, from
-// the instances themselves, so the line cannot drift from what runs.
-func interceptorsNotice(ics []agent.Interceptor) string {
+// defaultGuards is Golem's always-on subset of interceptor.Defaults (#575 D2,
+// D4), selected by concrete type so construction and relative order stay the
+// library's. ponytail: a new Defaults member stays off until it is named
+// here, which keeps widening the default an explicit decision.
+func defaultGuards() []agent.Interceptor {
+	var out []agent.Interceptor
+	for _, ic := range interceptor.Defaults() {
+		switch ic.(type) {
+		case interceptor.Invariants, interceptor.Egress, interceptor.ChildScopeDenials:
+			out = append(out, ic)
+		}
+	}
+	// Fail closed, like interceptor.mustInvariants: a re-typed or removed
+	// library guard must not silently shrink the always-on set.
+	if len(out) != 3 {
+		panic(fmt.Sprintf("golem: default guards: matched %d of 3 in interceptor.Defaults", len(out)))
+	}
+	return out
+}
+
+// interceptorsNotice names the installed chain in the startup notice. The
+// names come from the instances themselves, so the list cannot drift from
+// what runs; the guards-only suffix is fixed text. The guards-only chain
+// (#575) never claims "enabled".
+func interceptorsNotice(full bool, ics []agent.Interceptor) string {
 	names := make([]string, len(ics))
 	for i, ic := range ics {
 		names[i] = ic.Name()
 	}
-	return "interceptors: enabled (" + strings.Join(names, ", ") + ")"
+	if full {
+		return "interceptors: enabled (" + strings.Join(names, ", ") + ")"
+	}
+	return "guards: " + strings.Join(names, ", ") + " (always on; -interceptors adds detectors, secrets, canary)"
 }
 
 // newOrchestratorFactory returns the session's orchestrator constructor. The
@@ -671,7 +697,8 @@ func interceptorsNotice(ics []agent.Interceptor) string {
 //
 // With -dispatch it also installs the per-run dispatch invocation cap, and
 // with a workspace-declared verifier (#347) the post-write verification hook.
-// With -interceptors it also installs the default interceptor chain (#514/#439).
+// It always installs interceptorsFor's chain: the deterministic guards, or
+// the full default chain with -interceptors (#514/#439/#575).
 // A typed-nil verifier would satisfy the interface and panic on first use
 // (#347); the factory normalizes the two concrete types it can receive so
 // that guarantee does not rest on every call site.
@@ -693,12 +720,10 @@ func newOrchestratorFactory(caller agent.ModelCaller, f flags, verifier agent.Ve
 			Max:  agenttools.DefaultDispatchCallsPerRun,
 		}))
 	}
-	if ics := interceptorsFor(f, canary); len(ics) > 0 {
-		// #514 D2: the same chain on every orchestrator this factory builds;
-		// dispatch children receive it through newDispatchTool from the same
-		// flags value.
-		opts = append(opts, agent.WithInterceptors(ics...))
-	}
+	// #514 D2 / #575: the same chain on every orchestrator this factory
+	// builds; dispatch children receive it through newDispatchTool from the
+	// same flags value.
+	opts = append(opts, agent.WithInterceptors(interceptorsFor(f, canary)...))
 	return func() *agent.Orchestrator {
 		return agent.New(caller, agent.ContextManager{Mixed: f.progressive}, opts...)
 	}
@@ -1339,12 +1364,11 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 		}
 		dispatchLine = fmt.Sprintf("dispatch: enabled -> %s", head)
 	}
-	interceptorLine := ""
-	interceptorsOn := false
-	if ics := interceptorsFor(f, canary); len(ics) > 0 {
-		interceptorLine = interceptorsNotice(ics)
-		interceptorsOn = true
-	}
+	interceptorLine := interceptorsNotice(f.interceptors, interceptorsFor(f, canary))
+	// #575 D5: /consult admits staged advice only under the FULL chain. The
+	// always-on guards never inspect advisory text, so the gate follows the
+	// flag, not "a chain is installed".
+	interceptorsOn := f.interceptors
 
 	consultants, cerr := loadConsultants(f.consultantsConfig)
 	if cerr != nil {

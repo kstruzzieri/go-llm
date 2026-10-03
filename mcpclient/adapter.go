@@ -49,11 +49,15 @@ func (a *toolAdapter) Origin() agent.Origin { return agent.OriginForeign }
 var _ agent.OriginTool = (*toolAdapter)(nil)
 
 // Effect is the conservative upper bound for an untrusted remote tool. Class is
-// the full bitset: the only consumer of Class is needsApproval, which
-// ApprovalAlways already forces to true, so the full set changes no control flow
-// and only makes /tools honest. ApprovalAlways is mandatory -- Network alone is
-// NOT "mutating" (IsMutating checks Write|Exec), so an ApprovalDefault network
-// tool would skip approval entirely.
+// the full bitset. It leaves approval unchanged, because ApprovalAlways already
+// forces needsApproval to true, and it makes /tools honest. It is not inert:
+// since #575 Golem's always-on egress guard (agent/interceptor Egress) tests
+// Class.Has(Exec) on every run, so an MCP call whose arguments carry a
+// decodable argv gets an egress finding and a badge at its approval prompt
+// (unless that argv is on the classifier's quiet set).
+// Narrowing Class would silently drop that classification. ApprovalAlways is
+// mandatory -- Network alone is NOT "mutating" (IsMutating checks Write|Exec),
+// so an ApprovalDefault network tool would skip approval entirely.
 func (a *toolAdapter) Effect() agent.Effect {
 	to, oc := a.timeout, a.outputCap
 	if to <= 0 {
