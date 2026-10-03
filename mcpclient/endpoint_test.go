@@ -256,3 +256,16 @@ func statusFrom(req *http.Request) int {
 	}
 	return n
 }
+
+func TestAdmissionFailureNamesHTTPRefusals(t *testing.T) {
+	for cause, want := range map[error]string{
+		errRedirectRefused:    "redirect_refused",
+		errDestinationRefused: "destination_refused",
+	} {
+		// Wrapped as net/http's client and then the SDK deliver it.
+		err := fmt.Errorf("calling initialize: %w", &url.Error{Op: "Post", URL: "https://example.com/mcp", Err: cause})
+		if got := admissionFailure("fs", "unavailable", err).Reason; got != want {
+			t.Errorf("admissionFailure(%v).Reason = %q, want %q", cause, got, want)
+		}
+	}
+}
