@@ -78,6 +78,13 @@ export the variable. go-llm expands it when the config loads and fails fast if t
 variable is unset or empty, so a missing key surfaces as a clear config error
 rather than a remote 401. Literal keys still work, but `${ENV_VAR}` is recommended.
 
+Key expansion checks every declared provider, including providers the current
+run will not use. An unset or empty reference fails the **entire config load**
+for any consumer loading that file. To keep local use independent of hosted
+credentials, keep separate local and hosted config files and select one with
+`-config /path/to/models.json` or `GO_LLM_CONFIG`. A shared config requires all
+referenced variables in each consumer's environment.
+
 ```bash
 export OPENAI_API_KEY=sk-...
 golem -config models.json
