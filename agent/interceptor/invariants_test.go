@@ -63,6 +63,8 @@ func TestNewInvariantsRejectsMalformedTables(t *testing.T) {
 		{"nil pattern", []Invariant{{Tool: "t", Name: "n", Field: "f", Check: PathDeny{}}}, "interceptor: invariant t/n has a PathDeny with no pattern"},
 		{"pointer check", []Invariant{{Tool: "t", Name: "n", Field: "f", Check: &deny}}, "interceptor: invariant t/n has unsupported check kind *interceptor.PathDeny"},
 		{"typed nil check", []Invariant{{Tool: "t", Name: "n", Field: "f", Check: (*PathDeny)(nil)}}, "interceptor: invariant t/n has unsupported check kind *interceptor.PathDeny"},
+		{"credential pointer check", []Invariant{{Tool: "t", Name: "n", Field: "f", Check: &CredentialPath{}}}, "interceptor: invariant t/n has unsupported check kind *interceptor.CredentialPath"},
+		{"credential typed nil check", []Invariant{{Tool: "t", Name: "n", Field: "f", Check: (*CredentialPath)(nil)}}, "interceptor: invariant t/n has unsupported check kind *interceptor.CredentialPath"},
 		{"duplicate", []Invariant{{Tool: "t", Name: "n", Field: "f", Check: deny}, {Tool: "t", Name: "n", Field: "g", Check: deny}}, "interceptor: duplicate invariant t/n"},
 	}
 	for _, tc := range cases {
