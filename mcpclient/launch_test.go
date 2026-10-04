@@ -209,7 +209,7 @@ func TestMCPClientEnvProbeHelper(t *testing.T) {
 	for _, kv := range os.Environ() {
 		name, value, _ := strings.Cut(kv, "=")
 		names = append(names, name)
-		if strings.HasPrefix(name, "PROBE_") {
+		if strings.HasPrefix(name, "PROBE_") || name == "PATH" {
 			values[name] = value
 		}
 	}
@@ -272,6 +272,17 @@ func TestStdioServerReceivesOnlyPolicyEnvironment(t *testing.T) {
 	}
 	if report.Values["PROBE_TOKEN"] != "tok" || report.Values["PROBE_SET"] != "explicit" || report.Cwd != want {
 		t.Fatalf("child values/cwd = (%v, %q), want (tok, explicit, %q)", report.Values, report.Cwd, want)
+	}
+}
+
+func TestStdioServerPathDropsRelativeEntries(t *testing.T) {
+	report := runEnvProbe(t, probeServer(t).WithDir(t.TempDir()), testLaunchEnv(map[string]string{"PATH": "/usr/bin:.:./node_modules/.bin::/bin"}))
+	if got := report.Values["PATH"]; got != "/usr/bin:/bin" {
+		t.Fatalf("child PATH = %q, want /usr/bin:/bin", got)
+	}
+	report = runEnvProbe(t, probeServer(t).WithDir(t.TempDir()), testLaunchEnv(map[string]string{"PATH": ".:bin"}))
+	if len(report.Names) != 0 {
+		t.Fatalf("child env names = %q, want none: an all-relative PATH is omitted", report.Names)
 	}
 }
 

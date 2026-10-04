@@ -56,20 +56,39 @@ func (v EnvVar) Format(f fmt.State, _ rune) {
 	}
 }
 
-// envPolicy is a platform's baseline environment and name-matching rule.
+// envPolicy is a platform's baseline environment, name-matching rule, and
+// PATH list syntax. The PATH rules are explicit, not the host's filepath, so
+// both policies behave the same on every host.
 type envPolicy struct {
 	id       string // part of the connection identity
 	baseline []string
 	foldCase bool
+	listSep  byte              // PATH list separator
+	isAbs    func(string) bool // whether a PATH entry is absolute
 }
 
 var (
-	unixEnvPolicy    = envPolicy{id: "unix-v1", baseline: []string{"HOME", "LANG", "PATH", "TMPDIR", "USER"}}
-	windowsEnvPolicy = envPolicy{id: "windows-v1", foldCase: true, baseline: []string{
+	unixEnvPolicy = envPolicy{id: "unix-v1", listSep: ':', isAbs: unixAbs,
+		baseline: []string{"HOME", "LANG", "PATH", "TMPDIR", "USER"}}
+	windowsEnvPolicy = envPolicy{id: "windows-v1", foldCase: true, listSep: ';', isAbs: windowsAbs, baseline: []string{
 		"APPDATA", "COMSPEC", "HOME", "LANG", "LOCALAPPDATA", "PATH", "PATHEXT",
 		"SYSTEMROOT", "TEMP", "TMP", "TMPDIR", "USER", "USERPROFILE",
 	}}
 )
+
+func unixAbs(entry string) bool { return strings.HasPrefix(entry, "/") }
+
+// windowsAbs accepts a drive letter, colon and separator (C:\x, C:/x) or a
+// UNC prefix (\\server\share). A rooted path without a drive (\x) and a
+// drive-relative path (C:x) depend on the current drive or directory.
+func windowsAbs(entry string) bool {
+	sep := func(i int) bool { return i < len(entry) && (entry[i] == '\\' || entry[i] == '/') }
+	if len(entry) >= 3 && entry[1] == ':' && sep(2) {
+		c := entry[0]
+		return 'A' <= c && c <= 'Z' || 'a' <= c && c <= 'z'
+	}
+	return sep(0) && sep(1) && len(entry) > 2 && !sep(2)
+}
 
 // hostEnvPolicy selects the running platform's policy.
 func hostEnvPolicy() envPolicy {
@@ -116,16 +135,32 @@ func validateEnvAdditions(vars []EnvVar, p envPolicy) error {
 // matching key in key order, and the inherited additions the parent lacks.
 // The result is never nil: an empty environment is empty, never inherited.
 // vars must already pass validateEnvAdditions.
+//
+// PATH keeps only its absolute entries, in order (absolutePath). A PATH left
+// with none is omitted, not forwarded empty: POSIX lookup reads an empty PATH
+// as the current directory, while an unset one falls back to the system
+// default. An InheritEnv("PATH") filtered to nothing is still set, so it is
+// omitted, never env_unset.
 func buildServerEnv(p envPolicy, vars []EnvVar, lookup func(string) (string, bool)) (env []string, unset []string) {
 	entries := make(map[string]string)
+	put := func(name, value string) {
+		key := p.key(name)
+		if key == p.key("PATH") {
+			if value = p.absolutePath(value); value == "" {
+				delete(entries, key)
+				return
+			}
+		}
+		entries[key] = name + "=" + value
+	}
 	for _, name := range p.baseline {
 		if value, ok := lookup(name); ok {
-			entries[p.key(name)] = name + "=" + value
+			put(name, value)
 		}
 	}
 	for _, v := range vars {
 		if v.set {
-			entries[p.key(v.name)] = v.name + "=" + *v.value
+			put(v.name, *v.value)
 			continue
 		}
 		value, ok := lookup(v.name)
@@ -133,7 +168,7 @@ func buildServerEnv(p envPolicy, vars []EnvVar, lookup func(string) (string, boo
 			unset = append(unset, v.name)
 			continue
 		}
-		entries[p.key(v.name)] = v.name + "=" + value
+		put(v.name, value)
 	}
 	keys := make([]string, 0, len(entries))
 	for k := range entries {
@@ -145,6 +180,22 @@ func buildServerEnv(p envPolicy, vars []EnvVar, lookup func(string) (string, boo
 		env = append(env, entries[k])
 	}
 	return env, unset
+}
+
+// absolutePath keeps the absolute entries of a PATH list, in order, dropping
+// empty and relative ones: the server runs in the workspace, where a relative
+// entry would select programs from the workspace. The launcher agrees:
+// exec.LookPath refuses a result found through a relative or empty entry
+// (exec.ErrDot), and prepare refuses ErrDot.
+func (p envPolicy) absolutePath(list string) string {
+	sep := string(p.listSep)
+	var kept []string
+	for _, entry := range strings.Split(list, sep) {
+		if p.isAbs(entry) {
+			kept = append(kept, entry)
+		}
+	}
+	return strings.Join(kept, sep)
 }
 
 // envIdentity is the sorted source:KEY list that is fingerprinted for vars.

@@ -69,10 +69,10 @@
 // TOFU detects definition and connection drift, not malicious initial
 // definitions, a program replaced at the same path, a file or symlink swapped
 // between check and launch, or changed behavior behind unchanged catalogs and
-// launchers. The connection binds the launcher, not the value of PATH or what
-// a wrapper (env, npx, uvx, sh -c) or a script's #! interpreter later runs, and
-// a relative PATH entry resolves in the server's working directory. Stdio
-// servers keep the host user's filesystem and network authority. A backup
+// launchers. The child's PATH keeps only its absolute entries (a PATH with
+// none is omitted), but PATH values are not identity: a wrapper (env, npx,
+// uvx, sh -c) or a script's #! interpreter binds only the launcher, not what
+// it later finds through those entries. Stdio servers keep the host user's filesystem and network authority. A backup
 // holding both the key and the pins allows offline guessing of low-entropy
 // argv or query secrets. New workspaces and aliases have fresh
 // trust namespaces. Live catalog-change notifications are not handled.

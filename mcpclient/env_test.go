@@ -173,17 +173,95 @@ func TestBuildServerEnv(t *testing.T) {
 }
 
 func TestBuildServerEnvCompleteBaselines(t *testing.T) {
-	everything := func(name string) (string, bool) { return strings.ToLower(name), true }
-	unix, _ := buildServerEnv(unixEnvPolicy, nil, everything)
-	if want := []string{"HOME=home", "LANG=lang", "PATH=path", "TMPDIR=tmpdir", "USER=user"}; !slices.Equal(unix, want) {
+	// PATH carries an absolute entry so relative-entry filtering keeps it.
+	everything := func(path string) func(string) (string, bool) {
+		return func(name string) (string, bool) {
+			if name == "PATH" {
+				return path, true
+			}
+			return strings.ToLower(name), true
+		}
+	}
+	unix, _ := buildServerEnv(unixEnvPolicy, nil, everything("/path"))
+	if want := []string{"HOME=home", "LANG=lang", "PATH=/path", "TMPDIR=tmpdir", "USER=user"}; !slices.Equal(unix, want) {
 		t.Fatalf("unix baseline = %q, want %q", unix, want)
 	}
-	windows, _ := buildServerEnv(windowsEnvPolicy, nil, everything)
+	windows, _ := buildServerEnv(windowsEnvPolicy, nil, everything(`C:\path`))
 	if want := []string{
-		"APPDATA=appdata", "COMSPEC=comspec", "HOME=home", "LANG=lang", "LOCALAPPDATA=localappdata", "PATH=path", "PATHEXT=pathext",
+		"APPDATA=appdata", "COMSPEC=comspec", "HOME=home", "LANG=lang", "LOCALAPPDATA=localappdata", `PATH=C:\path`, "PATHEXT=pathext",
 		"SYSTEMROOT=systemroot", "TEMP=temp", "TMP=tmp", "TMPDIR=tmpdir", "USER=user", "USERPROFILE=userprofile",
 	}; !slices.Equal(windows, want) {
 		t.Fatalf("windows baseline = %q, want %q", windows, want)
+	}
+}
+
+// The child's PATH keeps only absolute entries, in order, under the policy's
+// list separator and path rules; with none left PATH is omitted, because an
+// empty PATH means the current directory to POSIX lookups.
+func TestBuildServerEnvDropsRelativePathEntries(t *testing.T) {
+	for _, tt := range []struct {
+		name   string
+		policy envPolicy
+		vars   []EnvVar
+		key    string // the parent's spelling of PATH
+		parent string
+		want   []string
+	}{
+		{"unix baseline", unixEnvPolicy, nil, "PATH", "/usr/bin::./node_modules/.bin:.:/bin:rel", []string{"PATH=/usr/bin:/bin"}},
+		{"unix all relative", unixEnvPolicy, nil, "PATH", ".:bin", []string{}},
+		{"unix empty", unixEnvPolicy, nil, "PATH", "", []string{}},
+		{"unix inherited overlap", unixEnvPolicy, []EnvVar{InheritEnv("PATH")}, "PATH", "/usr/bin::./node_modules/.bin:.:/bin:rel", []string{"PATH=/usr/bin:/bin"}},
+		{"unix inherited all relative", unixEnvPolicy, []EnvVar{InheritEnv("PATH")}, "PATH", ".:bin", []string{}},
+		{"windows baseline", windowsEnvPolicy, nil, "PATH", `C:\bin;;.\x;\rooted;C:rel;\\srv\share\bin;D:/y`, []string{`PATH=C:\bin;\\srv\share\bin;D:/y`}},
+		{"windows inherited Path", windowsEnvPolicy, []EnvVar{InheritEnv("Path")}, "Path", `C:\bin;;.\x;\rooted;C:rel;\\srv\share\bin;D:/y`, []string{`Path=C:\bin;\\srv\share\bin;D:/y`}},
+		{"windows colon is not a separator", windowsEnvPolicy, nil, "PATH", `C:\a:b;rel`, []string{`PATH=C:\a:b`}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			lookup := func(name string) (string, bool) {
+				if tt.policy.key(name) == tt.policy.key(tt.key) {
+					return tt.parent, true
+				}
+				return "", false
+			}
+			env, unset := buildServerEnv(tt.policy, tt.vars, lookup)
+			if !slices.Equal(env, tt.want) || env == nil || unset != nil {
+				t.Fatalf("env = %#v (unset %q), want %#v and nothing unset", env, unset, tt.want)
+			}
+		})
+	}
+}
+
+func TestEnvPolicyPathRules(t *testing.T) {
+	for _, tt := range []struct {
+		policy envPolicy
+		entry  string
+		abs    bool
+	}{
+		{unixEnvPolicy, "/usr/bin", true},
+		{unixEnvPolicy, "", false},
+		{unixEnvPolicy, ".", false},
+		{unixEnvPolicy, "./node_modules/.bin", false},
+		{unixEnvPolicy, "bin", false},
+		{unixEnvPolicy, `C:\bin`, false},
+		{windowsEnvPolicy, `C:\bin`, true},
+		{windowsEnvPolicy, "c:/bin", true},
+		{windowsEnvPolicy, `\\srv\share`, true},
+		{windowsEnvPolicy, "//srv/share", true},
+		{windowsEnvPolicy, `\\\x`, false},
+		{windowsEnvPolicy, `\rooted`, false},
+		{windowsEnvPolicy, "/rooted", false},
+		{windowsEnvPolicy, "C:rel", false},
+		{windowsEnvPolicy, "C:", false},
+		{windowsEnvPolicy, `1:\x`, false},
+		{windowsEnvPolicy, ".", false},
+		{windowsEnvPolicy, "", false},
+	} {
+		if got := tt.policy.isAbs(tt.entry); got != tt.abs {
+			t.Errorf("%s isAbs(%q) = %t, want %t", tt.policy.id, tt.entry, got, tt.abs)
+		}
+	}
+	if unixEnvPolicy.listSep != ':' || windowsEnvPolicy.listSep != ';' {
+		t.Fatalf("list separators = (%q, %q), want (':', ';')", unixEnvPolicy.listSep, windowsEnvPolicy.listSep)
 	}
 }
 

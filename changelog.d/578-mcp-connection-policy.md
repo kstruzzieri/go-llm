@@ -35,11 +35,14 @@ and network authority (#580).
 - Stdio servers now start in `-root` instead of the current directory, and a
   relative program path containing a separator (`./bin/server`) resolves
   against `-root`, not Golem's current directory.
-- A stdio connection binds the launcher, not the value of `PATH` or what a
-  wrapper (`env KEY=val command`, `npx`, `uvx`, `sh -c`) or a script's `#!`
-  interpreter later runs; with servers in `-root`, a relative `PATH` entry
-  (`.`, `./node_modules/.bin`) resolves inside the workspace. Prefer absolute
-  launcher paths to wrappers, and keep `PATH` free of relative entries.
+- Relative and empty `PATH` entries (`.`, `./node_modules/.bin`) are dropped
+  from a stdio server's `PATH`, and a `PATH` with no absolute entry is omitted.
+  Servers that relied on a relative entry need absolute entries instead.
+- `PATH` values are not part of the connection: a wrapper
+  (`env KEY=val command`, `npx`, `uvx`, `sh -c`) or a script's `#!`
+  interpreter binds only the launcher, so what it finds through the absolute
+  `PATH` entries can change without `connection_changed`. Prefer absolute
+  launcher paths to wrappers.
 - HTTP endpoints with userinfo, a fragment (including a bare trailing `#`),
   `.` or `..` path segments (including percent-encoded `%2e%2e` and
   `%2F`-joined forms), a backslash, an IPv6 zone ID, or a non-ASCII host now

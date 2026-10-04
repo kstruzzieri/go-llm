@@ -748,7 +748,8 @@ relative program path containing a separator (`./bin/server`) resolves against
 it. They get a minimal environment: `PATH`, `HOME`, `LANG`, `USER` and `TMPDIR`
 (on Windows also `SYSTEMROOT`, `TEMP`, `TMP`, `PATHEXT`, `USERPROFILE`,
 `COMSPEC`, `APPDATA` and `LOCALAPPDATA`), each copied from Golem's environment
-when set. Nothing else is inherited. Forward more variables by name with
+when set (`PATH` without its relative or empty entries). Nothing else is
+inherited. Forward more variables by name with
 `-mcp-env 'fs=GITHUB_TOKEN,HTTPS_PROXY'` (repeatable, one per stdio alias);
 values are read from Golem's environment and never appear on the command line. A
 named variable that is unset blocks that server before launch (`env_unset`); one
@@ -770,15 +771,14 @@ connection blocks the alias before anything is launched or contacted
 is identical. Updating a program in place at the same path or changing a
 forwarded value does not change the connection; an upgrade that moves a symlink
 to a new versioned path changes `target`. A file or symlink swapped between the
-check and the launch is not detected. The connection binds the launcher, not
-the value of `PATH` and not what the launcher runs: with a wrapper such as
-`env KEY=val command`, `npx`, `uvx` or `sh -c '…'`, or a script that starts
-`#!/usr/bin/env node`, only the wrapper or script is bound, so the program it
-finds on `PATH`, or the interpreter a `#!` line names, can change without
-`connection_changed`. Because stdio servers run in `-root`, a relative `PATH`
-entry such as `.` or `./node_modules/.bin` resolves inside the workspace.
-Prefer an absolute launcher path to a wrapper, and keep `PATH` free of relative
-entries.
+check and the launch is not detected. Relative and empty `PATH` entries (`.`,
+`./node_modules/.bin`) are dropped from the server's `PATH`, and a `PATH` with
+no absolute entry is omitted. The value of `PATH` is not part of the
+connection: with a wrapper such as `env KEY=val command`, `npx`, `uvx` or
+`sh -c '…'`, or a script that starts `#!/usr/bin/env node`, only the wrapper or
+script is bound, so the program it finds through the absolute `PATH` entries,
+or the interpreter a `#!` line names, can change without `connection_changed`.
+Prefer an absolute launcher path to a wrapper.
 
 HTTP servers are pinned to that one endpoint: every request must target it
 exactly, and every redirect is refused, same-origin included
