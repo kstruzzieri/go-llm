@@ -57,29 +57,60 @@ func (d PathDeny) check(raw json.RawMessage) (string, bool) {
 }
 
 // normalizePath renders a path the way the host will open it, as far as a
-// lexical check can: filepath.Clean, filepath.ToSlash, on Windows a trim of
-// trailing periods and spaces from every component, then a lower-casing of
-// every component. The Windows trim is deliberately broader than Win32
-// itself, which drops a single trailing period from an intermediate
-// segment and all trailing periods and spaces from the final one; trimming
-// every component can only over-block, the right direction for a deny
-// list (a component made only of periods is a valid name and is kept).
-// Lower-casing is deliberate too: on APFS and NTFS ".Git" is ".git", and on
-// a case-sensitive filesystem it only over-blocks a distinct spelling. Short
-// (8.3) names and other OS aliases are outside a lexical check; the
-// workspace layer is the boundary.
+// lexical check can: filepath.Clean and filepath.ToSlash; pathAliases, which
+// maps the spellings a case-insensitive filesystem treats as one name; on
+// Windows, windowsComponent on every component after the volume name; then a
+// lower-casing. Lower-casing is deliberate: on APFS and NTFS ".Git" is ".git".
+// Every step can only over-block a distinct spelling on a filesystem that
+// does not alias it, the right direction for a deny list. Short (8.3) names
+// are outside a lexical check; the workspace layer is the boundary.
 func normalizePath(s string) string {
-	clean := filepath.ToSlash(filepath.Clean(s))
+	clean := filepath.Clean(s)
+	vol := filepath.VolumeName(clean)
+	rest := pathAliases.Replace(filepath.ToSlash(clean[len(vol):]))
 	if runtime.GOOS == "windows" {
-		parts := strings.Split(clean, "/")
+		parts := strings.Split(rest, "/")
 		for i, p := range parts {
-			if t := strings.TrimRight(p, ". "); t != "" {
-				parts[i] = t
-			}
+			parts[i] = windowsComponent(p)
 		}
-		clean = strings.Join(parts, "/")
+		rest = strings.Join(parts, "/")
 	}
-	return strings.ToLower(clean)
+	return strings.ToLower(filepath.ToSlash(vol) + rest)
+}
+
+// pathAliases maps name spellings that a case-insensitive filesystem treats
+// as one name onto the spelling the rules match (#627). APFS applies full
+// Unicode case folding; these are the 11 non-ASCII code points whose fold is
+// pure ASCII (strings.ToLower leaves ſ and ß alone). HFS+ ignores 16 format
+// code points in names, the set Git strips for CVE-2014-9390. Both lists were
+// enumerated (Unicode 15.1 case folding with NFD, and a scan of a real HFS+
+// volume), not recalled.
+var pathAliases = strings.NewReplacer(
+	"\u017F", "s", "\u212A", "k", "\u00DF", "ss", "\u1E9E", "ss",
+	"\uFB00", "ff", "\uFB01", "fi", "\uFB02", "fl", "\uFB03", "ffi", "\uFB04", "ffl",
+	"\uFB05", "st", "\uFB06", "st",
+	"\u200C", "", "\u200D", "", "\u200E", "", "\u200F", "",
+	"\u202A", "", "\u202B", "", "\u202C", "", "\u202D", "", "\u202E", "",
+	"\u206A", "", "\u206B", "", "\u206C", "", "\u206D", "", "\u206E", "", "\u206F", "",
+	"\uFEFF", "",
+)
+
+// windowsComponent renders one component the way Win32 opens it: an NTFS
+// stream suffix is dropped (".env::$DATA" is .env's default stream and
+// ".env:x" a named one; a colon is otherwise illegal in a Windows name), then
+// trailing periods and spaces. The trim is deliberately broader than Win32,
+// which drops a single trailing period from an intermediate segment and all
+// trailing periods and spaces from the final one; trimming every component
+// can only over-block. A component made only of periods is a valid name and
+// is kept. A pure string function, so it is tested on every platform.
+func windowsComponent(p string) string {
+	if i := strings.IndexByte(p, ':'); i >= 0 {
+		p = p[:i]
+	}
+	if t := strings.TrimRight(p, ". "); t != "" {
+		return t
+	}
+	return p
 }
 
 // RemoteScript blocks an argv that runs an inline shell script piping a
