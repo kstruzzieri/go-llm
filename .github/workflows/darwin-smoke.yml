@@ -48,13 +48,20 @@ jobs:
       # only on a case-insensitive volume, so these cases exercise the
       # stored-spelling paths natively. Linux CI runs them too, where each
       # spelling is its own directory. Two of them skip on a volume without
-      # the aliases, so a skip here fails the step instead of passing it.
+      # the aliases, so a skip here fails the step instead of passing it, and
+      # so does any count of passing tests other than the four (a rename
+      # would otherwise run nothing and pass).
       - name: Credential tripwire aliases
         shell: bash
         run: |
           go test -race -count=1 -v -run '^TestCredentialAlias' ./agent/tools | tee "$RUNNER_TEMP/credential-alias.txt"
           if grep -q -- '--- SKIP' "$RUNNER_TEMP/credential-alias.txt"; then
             echo "::error::credential alias tests skipped: this runner volume does not alias .ssh spellings"
+            exit 1
+          fi
+          passed=$(grep -c -- '--- PASS: TestCredentialAlias' "$RUNNER_TEMP/credential-alias.txt" || true)
+          if [ "$passed" -ne 4 ]; then
+            echo "::error::expected 4 passing TestCredentialAlias tests, saw $passed"
             exit 1
           fi
 

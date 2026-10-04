@@ -110,7 +110,7 @@ func TestValidateSelection(t *testing.T) {
 		impl := Implementation{Name: "test"}
 		_, _, connectErr := Connect(t.Context(), impl, []Server{s}, ConnectOptions{Pins: pins})
 		_, inspectErr := Inspect(t.Context(), impl, s, pins)
-		_, approveErr := Approve(t.Context(), impl, s, pins, "sha256:"+strings.Repeat("0", 64))
+		_, approveErr := Approve(t.Context(), impl, s, pins, ApprovalDigests{Catalog: "sha256:" + strings.Repeat("0", 64), Connection: "hmac-sha256:" + strings.Repeat("0", 64)})
 		for operation, err := range map[string]error{"Connect": connectErr, "Inspect": inspectErr, "Approve": approveErr} {
 			var failure *AdmissionError
 			if !errors.As(err, &failure) || failure.Reason != "invalid_config" || failure.Alias != "fs" {
@@ -397,7 +397,7 @@ func TestInspectAndApproveIgnoreSelection(t *testing.T) {
 		t.Fatalf("Inspect narrowed the reviewed catalog to the selection:\n%s", inspected)
 	}
 	approveSrv, _, _ := staticCatalogServer(t, "fs", &gomcp.Tool{Name: "read"}, &gomcp.Tool{Name: "write"})
-	if _, err := Approve(context.Background(), Implementation{Name: "test"}, approveSrv.WithTools("read"), pins, inspected.CandidateDigest); err != nil {
+	if _, err := Approve(context.Background(), Implementation{Name: "test"}, approveSrv.WithTools("read"), pins, approvalFor(inspected)); err != nil {
 		t.Fatal(err)
 	}
 	if !bytes.Contains(pinBytes(t, pins, "fs"), []byte(`"mcp__fs__write"`)) {

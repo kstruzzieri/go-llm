@@ -20,6 +20,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"time"
 )
@@ -35,7 +36,8 @@ type Runner interface {
 // binary, or `python3 -P -m agentflow` with PYTHONPATH pointed at a checkout (for
 // environments where the console script is not installed). argv is always built
 // explicitly; no shell string is ever parsed. The child environment is built
-// from scratch for every launch (see buildChildEnv).
+// from scratch for every launch (see buildChildEnv), and Run adds the
+// runner-owned PWD (see workingDirEnv).
 type ExecRunner struct {
 	bin     string
 	prefix  []string // e.g. {"-P","-m","agentflow"} for src mode
@@ -131,6 +133,15 @@ func (r *ExecRunner) Run(ctx context.Context, args []string, stdin []byte) ([]by
 		return nil, nil, 0, r.initErr
 	}
 	bin, argv, owned := r.commandFor(args)
+	pwd, err := workingDirEnv(runtime.GOOS, r.dir)
+	if err != nil {
+		return nil, nil, 0, err
+	}
+	if pwd != "" {
+		// A fresh slice: owned is r.env itself, and appending into its spare
+		// capacity would race between concurrent launches.
+		owned = append(slices.Clone(owned), pwd)
+	}
 	env, err := buildChildEnv(childEnvPolicyFor(runtime.GOOS, r.allowed, owned), os.LookupEnv)
 	if err != nil {
 		return nil, nil, 0, err

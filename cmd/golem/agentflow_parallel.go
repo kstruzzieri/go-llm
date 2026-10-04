@@ -12,6 +12,8 @@ import (
 	"os/exec"
 	"path"
 	"path/filepath"
+	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -694,7 +696,14 @@ func (c *parallelCoordinator) prepareWorkers(ctx context.Context) error {
 	c.tempParent = parent
 	for i := range c.workers {
 		workerRoot := filepath.Join(parent, c.workers[i].sourceID)
+		_, preErr := os.Lstat(workerRoot)
 		if _, err := runParallelGit(ctx, c.root, "worktree", "add", "--detach", workerRoot, c.head); err != nil {
+			// Git keeps a worktree whose post-checkout hook failed. Record a root
+			// this add created, so failure reporting names it as preserved and a
+			// cleanup removes it; never record a directory that was already there.
+			if _, postErr := os.Lstat(workerRoot); errors.Is(preErr, fs.ErrNotExist) && postErr == nil {
+				c.workers[i].root = workerRoot
+			}
 			return fmt.Errorf("create worktree %s: %w", c.workers[i].sourceID, err)
 		}
 		// Record the root only once the worktree exists, so failure paths never
@@ -1048,55 +1057,54 @@ func runParallelGit(ctx context.Context, dir string, args ...string) ([]byte, er
 	return out, nil
 }
 
-// hostGitBlockedKeys are the inherited repository-location overrides every
-// host Git subprocess drops so cmd.Dir alone selects the repository.
-// GIT_TERMINAL_PROMPT is listed because hostGitEnv owns its value: an
-// inherited setting must not survive beside the appended =0.
-var hostGitBlockedKeys = []string{
-	"GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY",
-	"GIT_COMMON_DIR", "GIT_NAMESPACE", "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_PREFIX",
-	"GIT_TERMINAL_PROMPT",
+// hostGitBaselineEnv names the parent variables Golem's own git calls receive
+// when they are set (#623); nothing else is inherited. PATH, HOME, USER,
+// TMPDIR and LANG match Agentflow's baseline (USER serves hooks; git's
+// identity fallback does not need it). XDG_CONFIG_HOME and
+// GIT_CONFIG_GLOBAL/SYSTEM/NOSYSTEM select the user's own git configuration,
+// which carries safe.directory and core.excludesFile: dropping them would turn
+// a dotfiles setup into dubious-ownership failures or change which paths count
+// as ignored. Repository-location overrides, config injection and discovery
+// overrides are absent by construction. An inherited GIT_INDEX_FILE, which git
+// exports to hooks and so reaches Golem when it runs inside one, would
+// otherwise point index-flag validation at another index while the toplevel
+// identity checks still pass.
+var hostGitBaselineEnv = []string{"PATH", "HOME", "USER", "TMPDIR", "LANG",
+	"XDG_CONFIG_HOME", "GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM", "GIT_CONFIG_NOSYSTEM"}
+
+// hostGitWindowsEnv extends the baseline on Windows: Agentflow's Windows
+// extras plus HOMEDRIVE and HOMEPATH, which Git for Windows tries before
+// USERPROFILE when HOME is unset. Built, not exercised in CI.
+var hostGitWindowsEnv = []string{"SYSTEMROOT", "TEMP", "TMP", "PATHEXT", "USERPROFILE",
+	"COMSPEC", "LOCALAPPDATA", "APPDATA", "HOMEDRIVE", "HOMEPATH"}
+
+// buildHostGitEnv returns the complete environment of one host git launch on
+// goos: each baseline name that lookup reports as set (an empty value is kept),
+// then the owned NAME=VALUE entries, sorted. It is never nil. Owned names are
+// never baseline names, so no name repeats, and the fixed upper-case names
+// need no case folding.
+func buildHostGitEnv(goos string, lookup func(string) (string, bool), owned ...string) []string {
+	names := hostGitBaselineEnv
+	if goos == "windows" {
+		names = append(slices.Clone(hostGitBaselineEnv), hostGitWindowsEnv...)
+	}
+	env := make([]string, 0, len(names)+len(owned))
+	for _, name := range names {
+		if value, ok := lookup(name); ok {
+			env = append(env, name+"="+value)
+		}
+	}
+	env = append(env, owned...)
+	// Names hold only A-Z and '_', both above '=', so entry order is name order.
+	slices.Sort(env)
+	return env
 }
 
-// hostGitEnv strips inherited repo-location overrides so every git call
-// resolves the repository from cmd.Dir, and pins GIT_TERMINAL_PROMPT=0 so no
-// subprocess can block on a credential prompt. GIT_INDEX_FILE alone would
-// silently point the clean/index-flag validation at a different index (git
-// exports it to hooks) while the toplevel identity checks still pass. Keys are
-// matched case-insensitively: the environment is case-insensitive on Windows,
-// and a differently-cased duplicate must not slip past the filter. Shared by
-// the Agentflow Git calls and #354's capture-only gitContextEnv.
+// hostGitEnv is the environment of parallel task mode's git calls, built at
+// each launch. GIT_TERMINAL_PROMPT=0 keeps any git subprocess from blocking on
+// a credential prompt.
 func hostGitEnv() []string {
-	return append(dropEnvKeys(os.Environ(), hostGitBlockedKeys, nil), "GIT_TERMINAL_PROMPT=0")
-}
-
-// dropEnvKeys returns env without every entry whose key (the text before the
-// first '=') equals one of keys or starts with one of prefixes, compared
-// case-insensitively. The input is never modified.
-func dropEnvKeys(env, keys, prefixes []string) []string {
-	out := make([]string, 0, len(env)+1)
-	for _, kv := range env {
-		key, _, _ := strings.Cut(kv, "=")
-		if envKeyBlocked(key, keys, prefixes) {
-			continue
-		}
-		out = append(out, kv)
-	}
-	return out
-}
-
-func envKeyBlocked(key string, keys, prefixes []string) bool {
-	for _, k := range keys {
-		if strings.EqualFold(key, k) {
-			return true
-		}
-	}
-	for _, p := range prefixes {
-		if len(key) >= len(p) && strings.EqualFold(key[:len(p)], p) {
-			return true
-		}
-	}
-	return false
+	return buildHostGitEnv(runtime.GOOS, os.LookupEnv, "GIT_TERMINAL_PROMPT=0")
 }
 
 func parallelUnexpectedIndexPath(ctx context.Context, root string) (string, error) {

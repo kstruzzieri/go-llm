@@ -113,7 +113,7 @@ func TestEndToEndInMemory(t *testing.T) {
 
 	// Drive the real mcpclient connect path: handshake + time-bounded setup +
 	// paginated list + adapt, over the in-memory transport.
-	session, tools, warns := connectOne(ctx, Implementation{Name: "golem", Version: "test"}, Server{Alias: "fs", tr: clientTr}, ConnectOptions{Pins: testPins(t)})
+	session, tools, warns := connectOne(ctx, Implementation{Name: "golem", Version: "test"}, Server{Alias: "fs", tr: clientTr}, ConnectOptions{Pins: testPins(t)}, hostLaunchEnv(), nil)
 	if session == nil {
 		t.Fatalf("connectOne returned nil session; warns=%v", warns)
 	}

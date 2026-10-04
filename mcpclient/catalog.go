@@ -63,5 +63,3 @@ func (c toolCatalog) entriesCopy() []catalogEntry {
 	}
 	return entries
 }
-
-func (toolCatalog) version() int { return catalogFormatVersion }
