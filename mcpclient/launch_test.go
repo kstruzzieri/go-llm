@@ -97,6 +97,21 @@ func TestPrepareStdioFreezesResolvedLaunch(t *testing.T) {
 	}
 }
 
+// prepare fingerprints env names under the launch policy, so on Windows
+// -mcp-env Path and PATH are one identity, as they are one variable.
+func TestPrepareStdioEnvIdentityFollowsPolicy(t *testing.T) {
+	le := testLaunchEnv(nil)
+	le.policy = windowsEnvPolicy
+	_, ct := gomcp.NewInMemoryTransports()
+	p, err := prepare(Server{Alias: "fs", tr: ct, env: []EnvVar{InheritEnv("Path")}}, "/ws", le)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(p.identity.env, []string{"inherit:PATH"}) || p.identity.envBaseline != "windows-v1" {
+		t.Fatalf("identity env = (%q, %q), want ([inherit:PATH], windows-v1)", p.identity.env, p.identity.envBaseline)
+	}
+}
+
 func TestPrepareStdioDefaultsToProcessCwd(t *testing.T) {
 	cwd := t.TempDir()
 	le := testLaunchEnv(map[string]string{"PATH": os.Getenv("PATH")})
