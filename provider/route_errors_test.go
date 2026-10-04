@@ -62,6 +62,9 @@ func TestClassifyError(t *testing.T) {
 			if gotClass != tc.wantClass {
 				t.Errorf("class = %q, want %q", gotClass, tc.wantClass)
 			}
+			if got := ErrorClassOf(tc.err); got != tc.wantClass {
+				t.Errorf("ErrorClassOf = %q, want %q", got, tc.wantClass)
+			}
 			if gotStatus != tc.wantStatus {
 				t.Errorf("status = %v, want %v", gotStatus, tc.wantStatus)
 			}

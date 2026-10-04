@@ -6,15 +6,17 @@ import "net"
 // An empty host (e.g. ":8080") is NOT considered loopback because Go's
 // net/http binds to 0.0.0.0 (all interfaces) in that case.
 //
-// Mirrors mcp/transport.go:71-84.
+// Same semantics as isLoopback in mcp/transport.go.
 func isLoopback(addr string) bool {
 	host, _, err := net.SplitHostPort(addr)
 	if err != nil {
 		return false
 	}
-	if host == "" {
-		return false
-	}
+	return isLoopbackHost(host)
+}
+
+// isLoopbackHost reports whether host is "localhost" or a loopback IP.
+func isLoopbackHost(host string) bool {
 	if host == "localhost" {
 		return true
 	}

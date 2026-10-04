@@ -15,6 +15,10 @@ import (
 // address is not a loopback and WithTLS was not configured.
 var ErrNonLoopbackRequiresTLS = errors.New("compat: non-loopback address requires TLS (use WithTLS)")
 
+// ErrInvalidCORSOrigin is returned from ListenAndServe when the WithCORS
+// origin is neither "" nor "*" and is not an origin as browsers send it.
+var ErrInvalidCORSOrigin = errors.New(`compat: WithCORS origin must be "*" or an exact browser origin such as "https://app.example"`)
+
 // Server is the OpenAI-compatible HTTP façade over a provider.Router.
 //
 // After New returns, Server is safe for concurrent use: ListenAndServe runs
@@ -30,6 +34,7 @@ type Server struct {
 	addr              string
 	basePath          string
 	corsOrigin        string
+	allowedHosts      []string
 	tlsCert           string
 	tlsKey            string
 	aliases           map[string]string
@@ -72,7 +77,7 @@ func New(router *provider.Router, registry *provider.ModelRegistry, providers *p
 		providers:         providers,
 		addr:              "127.0.0.1:18741",
 		basePath:          "/v1",
-		corsOrigin:        "*",
+		corsOrigin:        "",
 		aliases:           map[string]string{},
 		maxConcurrency:    4,
 		embeddingsEnabled: false,
@@ -93,10 +98,14 @@ func New(router *provider.Router, registry *provider.ModelRegistry, providers *p
 }
 
 // ListenAndServe starts the HTTP server and blocks until ctx is cancelled or
-// an unrecoverable error occurs. Non-loopback bind requires TLS.
+// an unrecoverable error occurs. Non-loopback bind requires TLS, and a
+// WithCORS origin no browser would send returns ErrInvalidCORSOrigin.
 func (s *Server) ListenAndServe(ctx context.Context) error {
 	if s.tlsCert == "" && !isLoopback(s.addr) {
 		return fmt.Errorf("%w: addr=%q", ErrNonLoopbackRequiresTLS, s.addr)
+	}
+	if err := checkCORSOrigin(s.corsOrigin); err != nil {
+		return err
 	}
 
 	// ReadHeaderTimeout bounds the header-read phase so a slow-header attack
@@ -165,13 +174,19 @@ func (s *Server) Close() error {
 	return err
 }
 
-// buildHandler constructs the HTTP handler. Routes are registered on the mux
-// in later tasks; the returned handler wraps the mux in (outermost first)
-// CORS → request-ID → logging → recovery → mux. Empty corsOrigin disables CORS.
+// buildHandler constructs the HTTP handler: the route mux wrapped in
+// (outermost first) Host guard → CORS → request-ID → logging → cross-origin
+// guard → recovery → mux. Empty corsOrigin disables CORS.
 //
 // Order matters:
-//   - request-ID is outside CORS-preflight short-circuit so OPTIONS responses
-//     still carry X-Request-Id for correlation.
+//   - the Host guard is outermost so a foreign Host (DNS rebinding) is
+//     refused before CORS can approve a preflight or any route runs. It logs
+//     its own refusals because they never reach logging.
+//   - when enabled, CORS answers preflights itself, so those OPTIONS
+//     responses carry no X-Request-Id and are not logged.
+//   - the cross-origin guard sits inside logging so its refusals are logged
+//     with a request ID; it refuses only unsafe methods, which CORS passes
+//     on, and hands recovery the same writer.
 //   - logging wraps recovery so panics (converted to 500s by recovery) are
 //     still recorded in the access log with the correct status.
 //   - recovery is innermost so its statusRecorder-aware writer check (for
@@ -194,8 +209,10 @@ func (s *Server) buildHandler() http.Handler {
 
 	var handler http.Handler = mux
 	handler = recoveryMiddleware(handler)
+	handler = crossOriginMiddleware(handler, s.corsOrigin)
 	handler = loggingMiddleware(handler)
 	handler = requestIDMiddleware(handler)
 	handler = corsMiddleware(handler, s.corsOrigin)
+	handler = hostMiddleware(handler, append([]string{hostname(s.addr)}, s.allowedHosts...))
 	return handler
 }
