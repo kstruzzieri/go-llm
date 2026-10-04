@@ -112,9 +112,9 @@ func OpenSQLiteFeedbackStore(ctx context.Context, path string, cfg SQLiteFeedbac
 	// with SQLITE_BUSY, instead of tight retry loops in the calling code. A ctx
 	// deadline alone does not shorten that wait; Record and RecordBatch cap it
 	// to the time left on their deadline (runInTxBefore). The DSN sets it on
-	// every connection: the journal_mode PRAGMA below reads the database, and
-	// database/sql replaces a connection after a context-cancelled statement
-	// run outside a transaction.
+	// every connection: the WAL switch below retries within it when another
+	// opener races it, and database/sql replaces a connection after a
+	// context-cancelled statement run outside a transaction.
 	dsn, err := sqlitedsn.WithBusyTimeout(path, 5*time.Second)
 	if err != nil {
 		return nil, fmt.Errorf("provider: open sqlite %q: %w", path, err)
@@ -128,7 +128,7 @@ func OpenSQLiteFeedbackStore(ctx context.Context, path string, cfg SQLiteFeedbac
 	db.SetMaxOpenConns(1)
 
 	if path != ":memory:" {
-		if _, err := db.ExecContext(ctx, "PRAGMA journal_mode=WAL"); err != nil {
+		if err := sqlitedsn.EnableWAL(ctx, db); err != nil {
 			_ = db.Close()
 			return nil, fmt.Errorf("provider: set WAL mode: %w", err)
 		}
