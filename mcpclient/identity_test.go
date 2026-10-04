@@ -7,7 +7,6 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
-	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -175,13 +174,17 @@ func TestConnectionInvalidUTF8IsLaunchInvalid(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = m.Close() })
 	const want = `server "fs": launch_invalid: mcpclient: connection identity is not valid UTF-8`
-	if a := admission(t, w); a.Reason != "launch_invalid" || len(m.Tools()) != 0 || len(w) != 1 || w[0].Error() != want {
-		t.Fatalf("connect: reason %q, %d tools, warnings %v; want %q", a.Reason, len(m.Tools()), w, want)
+	if len(w) != 1 || len(m.Tools()) != 0 {
+		t.Fatalf("connect: %d tools, warnings %v; want one warning", len(m.Tools()), w)
+	}
+	// Per-alias rejections are bare *AdmissionError values: callers may
+	// type-assert.
+	if a, ok := w[0].(*AdmissionError); !ok || a.Reason != "launch_invalid" || a.Error() != want {
+		t.Fatalf("connect warning = %#v; want a bare *AdmissionError reading %q", w[0], want)
 	}
 	_, err = Inspect(context.Background(), Implementation{Name: "test"}, s, pins)
-	var a *AdmissionError
-	if !errors.As(err, &a) || a.Reason != "launch_invalid" || err.Error() != want {
-		t.Fatalf("inspect: %v; want %q", err, want)
+	if a, ok := err.(*AdmissionError); !ok || a.Reason != "launch_invalid" || a.Error() != want {
+		t.Fatalf("inspect = %#v; want a bare *AdmissionError reading %q", err, want)
 	}
 }
 

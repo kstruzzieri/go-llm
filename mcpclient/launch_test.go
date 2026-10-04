@@ -150,8 +150,8 @@ func TestPrepareStdioFailures(t *testing.T) {
 		"getwd fails": {StdioServer("fs", []string{"/bin/sh"}), func(le *launchEnv) {
 			le.getwd = func() (string, error) { return "", errors.New("getwd " + dir) }
 		}, "launch_invalid", invalid + "cannot determine the working directory"},
-		"missing dir":        {StdioServer("fs", []string{"/bin/sh"}).WithDir(filepath.Join(dir, "missing")), nil, "launch_invalid", invalid + "working directory is not an existing directory"},
-		"dir is a file":      {StdioServer("fs", []string{"/bin/sh"}).WithDir(file), nil, "launch_invalid", invalid + "working directory is not an existing directory"},
+		"missing dir":        {StdioServer("fs", []string{"/bin/sh"}).WithDir(filepath.Join(dir, "missing")), nil, "launch_invalid", invalid + "working directory cannot be resolved or is not a directory"},
+		"dir is a file":      {StdioServer("fs", []string{"/bin/sh"}).WithDir(file), nil, "launch_invalid", invalid + "working directory cannot be resolved or is not a directory"},
 		"missing executable": {StdioServer("fs", []string{filepath.Join(dir, "nope")}).WithDir(dir), nil, "launch_invalid", invalid + "executable not found or not executable"},
 		"not executable":     {StdioServer("fs", []string{file}).WithDir(dir), nil, "launch_invalid", invalid + "executable not found or not executable"},
 		"current-directory executable": {StdioServer("fs", []string{"server"}).WithDir(dir), lookPath("", &exec.Error{Name: filepath.Join(dir, "server"), Err: exec.ErrDot}),
@@ -166,9 +166,10 @@ func TestPrepareStdioFailures(t *testing.T) {
 				tt.le(&le)
 			}
 			_, err := prepare(tt.s, "/ws", le)
-			var failure *AdmissionError
-			if !errors.As(err, &failure) || failure.Reason != tt.reason {
-				t.Fatalf("prepare = %v, want %s", err, tt.reason)
+			// A bare *AdmissionError, not a wrapper: callers may type-assert.
+			failure, ok := err.(*AdmissionError)
+			if !ok || failure.Reason != tt.reason {
+				t.Fatalf("prepare = %#v, want a bare *AdmissionError with reason %s", err, tt.reason)
 			}
 			if err.Error() != tt.want || strings.Contains(err.Error(), dir) {
 				t.Fatalf("prepare error = %q, want %q", err.Error(), tt.want)

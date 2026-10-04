@@ -2,7 +2,6 @@ package mcpclient
 
 import (
 	"errors"
-	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -88,7 +87,7 @@ func prepareStdio(p preparedServer, s Server, le launchEnv) (preparedServer, err
 		}
 		dir = wd
 	}
-	const notDir = "mcpclient: working directory is not an existing directory"
+	const notDir = "mcpclient: working directory cannot be resolved or is not a directory"
 	// Resolving symlinks freezes the actual directory: retargeting a link
 	// later changes the identity instead of silently moving the server.
 	dir, err := filepath.EvalSymlinks(dir)
@@ -148,15 +147,15 @@ func prepareHTTP(p preparedServer, s Server) (preparedServer, error) {
 // fingerprinted (argv or a path that is not valid UTF-8).
 const invalidIdentity = "mcpclient: connection identity is not valid UTF-8"
 
-// launchInvalid blocks alias as an unusable launch. detail is fixed text an
-// operator can act on, never a path, argv or OS error; the cause stays
-// reachable through errors.Is and errors.As.
-func launchInvalid(alias, detail string, cause error) error {
+// launchInvalid blocks alias as an unusable launch with a bare
+// *AdmissionError. detail is fixed text an operator can act on, never a path,
+// argv or OS error; the cause stays reachable through errors.Is and errors.As.
+func launchInvalid(alias, detail string, cause error) *AdmissionError {
 	failure := admissionFailure(alias, "launch_invalid", cause)
-	if failure.Reason != "launch_invalid" {
-		return failure // canceled, say: the detail would misname it
+	if failure.Reason == "launch_invalid" { // not canceled, say: the detail would misname it
+		failure.detail = detail
 	}
-	return fmt.Errorf("%w: %s", failure, detail)
+	return failure
 }
 
 // resolveLauncher resolves argv0 to the absolute path that will be executed.

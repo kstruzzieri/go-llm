@@ -26,6 +26,7 @@ type AdmissionError struct {
 	// ConnectionChanges lists fixed labels for a changed connection identity
 	// (connection_changed). Never values, paths or fingerprints.
 	ConnectionChanges []string
+	detail            string // fixed text naming the rule, shown after Reason
 	cause             error
 }
 
@@ -34,6 +35,9 @@ var reviewReasons = map[string]bool{"pin_missing": true, "connection_missing": t
 
 func (e *AdmissionError) Error() string {
 	text := fmt.Sprintf("server %q: %s", e.Alias, e.Reason)
+	if e.detail != "" {
+		text += ": " + e.detail
+	}
 	if len(e.Names) > 0 {
 		text += ": " + strings.Join(e.Names, ", ")
 	}

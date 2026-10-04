@@ -77,7 +77,9 @@ and network authority (#580).
 - `mcpclient.Inspection` gains `CandidateConnection` (a new `ConnectionView`),
   `PinnedConnection` and `ConnectionChanges`; `AdmissionError` gains
   `ConnectionChanges`, and its `Names` also lists unset variables for
-  `env_unset`.
+  `env_unset`. A `launch_invalid` rejection's text names the fixed rule that
+  failed (for example `executable not found or not executable`), and per-alias
+  rejections remain bare `*AdmissionError` values.
 - `StdioServer` children receive only the platform baseline environment plus
   `Server.WithEnv` additions, built with `InheritEnv` (the parent's value,
   read at launch) or `SetEnv` (a host-supplied value, which may not name a

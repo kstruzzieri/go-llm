@@ -838,15 +838,15 @@ catalog both match before model discovery, capability probes, or inference. A
 missing pin (`pin_missing`), a v0.4 pin (`connection_missing`), a changed
 connection (`connection_changed`), an unset `-mcp-env` name (`env_unset`), or a
 missing or unusable program or folder (`launch_invalid`, which also covers
-arguments or paths that are not valid UTF-8) stops the invocation before the
-server is launched or contacted. Changed, invalid, unavailable, or unreadable
-catalogs, a refused redirect or destination, and a `-mcp-tools` name the server
-does not offer (`selection_missing`) stop it after contact. Either way the exit
-is 1 and no pin is written. JSON and stream-json emit one `golem.result.v1`
-error record with code `mcp_untrusted` and no runtime events; text prints
-diagnostics on stderr. Catalog approval does not authorize tool execution: MCP
-tools still require interactive approval and remain denied headlessly. `-goal`
-and `-plan` still reject MCP attachments.
+arguments or paths that are not valid UTF-8 and names the failed rule, never the
+path) stops the invocation before the server is launched or contacted. Changed,
+invalid, unavailable, or unreadable catalogs, a refused redirect or destination,
+and a `-mcp-tools` name the server does not offer (`selection_missing`) stop it
+after contact. Either way the exit is 1 and no pin is written. JSON and
+stream-json emit one `golem.result.v1` error record with code `mcp_untrusted`
+and no runtime events; text prints diagnostics on stderr. Catalog approval does
+not authorize tool execution: MCP tools still require interactive approval and
+remain denied headlessly. `-goal` and `-plan` still reject MCP attachments.
 
 Pins bind the complete model-facing catalog and the connection to the canonical
 workspace and alias. A new linked or scratch worktree has a new trust namespace:
@@ -863,8 +863,10 @@ as absent; delete it to start over. The fingerprint key is
 `$XDG_DATA_HOME/golem/mcp-pins/connection-hmac.pem`, created on first use, so
 the `mcp-pins` directory must be writable. A key that is unreadable or corrupt,
 or on Unix one with group or other permission bits or another owner, makes the
-pin store unavailable and is never replaced; a deleted key is recreated, and
-every pin then reports `connection_changed` (`key`) until approved once more.
+pin store unavailable and is never replaced (Golem's message names `-root` and
+the `golem/mcp-pins` directory, including `connection-hmac.pem`); a deleted key
+is recreated, and every pin then reports `connection_changed` (`key`) until
+approved once more.
 A backup holding both the key and the pins allows offline guessing of
 low-entropy secrets in arguments or queries. Diagnostics and approval hints
 never include endpoints, arguments or fingerprints; they point to `inspect`

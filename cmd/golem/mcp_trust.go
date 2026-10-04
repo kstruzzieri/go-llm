@@ -11,12 +11,15 @@ import (
 	"github.com/kstruzzieri/go-llm/mcpclient"
 )
 
+// mcpPinStoreHint says what to check when the pin store cannot be opened.
+const mcpPinStoreHint = "check -root and the user data directory (golem/mcp-pins, including connection-hmac.pem)"
+
 // openMCPPins keeps filesystem diagnostics from revealing credential-bearing
 // paths. Detailed remote definitions are only rendered by explicit inspection.
 func openMCPPins(root string) (*mcpclient.PinStore, error) {
 	pins, err := mcpclient.NewPinStore(root)
 	if err != nil {
-		return nil, errors.New("mcp: pin store unavailable; check -root and the user data directory")
+		return nil, errors.New("mcp: pin store unavailable; " + mcpPinStoreHint)
 	}
 	return pins, nil
 }
@@ -110,7 +113,7 @@ func connectMCP(ctx context.Context, root string, servers []mcpclient.Server, re
 	if err != nil {
 		failures := make([]error, 0, len(servers))
 		for _, server := range servers {
-			failures = append(failures, fmt.Errorf("%w; check -root and the user data directory (golem/mcp-pins, including connection-hmac.pem)", &mcpclient.AdmissionError{Alias: server.Alias, Reason: "pin_unavailable"}))
+			failures = append(failures, fmt.Errorf("%w; %s", &mcpclient.AdmissionError{Alias: server.Alias, Reason: "pin_unavailable"}, mcpPinStoreHint))
 		}
 		return nil, failures, nil
 	}

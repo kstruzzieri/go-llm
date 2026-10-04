@@ -6,11 +6,12 @@
 // came from, to canonical workspaces and operator-selected aliases in private
 // user data outside the workspace. Ordinary connections pin the first valid
 // catalog, including an empty catalog; RequirePinned connections never create
-// pins. Missing stores are configuration errors. Per-alias rejection is an
-// *AdmissionError in warnings; first-pin and description-truncation notices are
-// ordinary warnings. Healthy aliases retain configuration order in
-// Manager.Tools. Callers must close the Manager, and strict all-alias admission
-// callers must reject any AdmissionError themselves.
+// pins. Missing stores are configuration errors. Per-alias rejection is a bare
+// *AdmissionError in warnings (a type assertion suffices), whose text may name
+// a fixed rule after the reason (launch_invalid); first-pin and
+// description-truncation notices are ordinary warnings. Healthy aliases retain
+// configuration order in Manager.Tools. Callers must close the Manager, and
+// strict all-alias admission callers must reject any AdmissionError themselves.
 //
 // Server.WithTools selects exact original tool names per alias. Selection
 // applies after complete-catalog admission: pins, diffs and Inspect always

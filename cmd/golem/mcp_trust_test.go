@@ -208,8 +208,8 @@ func TestMCPTrustArguments(t *testing.T) {
 		t.Fatalf("default root: %v", err)
 	}
 	t.Setenv("XDG_DATA_HOME", root)
-	if _, _, err := trustCommand(t, "inspect", "-mcp-http", "fs="+f.url); err == nil {
-		t.Fatal("accepted in-workspace pins")
+	if _, _, err := trustCommand(t, "inspect", "-mcp-http", "fs="+f.url); err == nil || err.Error() != "mcp: pin store unavailable; check -root and the user data directory (golem/mcp-pins, including connection-hmac.pem)" {
+		t.Fatalf("in-workspace pins = %v, want the pin store refusal with its hint", err)
 	}
 }
 
