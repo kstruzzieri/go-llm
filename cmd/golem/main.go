@@ -24,6 +24,7 @@ import (
 	"github.com/kstruzzieri/go-llm/fingerprint"
 	golemruntime "github.com/kstruzzieri/go-llm/golem"
 	"github.com/kstruzzieri/go-llm/internal/providerbootstrap"
+	"github.com/kstruzzieri/go-llm/mcpclient"
 	"github.com/kstruzzieri/go-llm/provider"
 	"github.com/kstruzzieri/go-llm/provider/openaicompat"
 	"github.com/kstruzzieri/go-llm/rag"
@@ -1079,7 +1080,14 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 	mcpBlocked := mcpBlockedAliases(mcpWarns)
 	if mcpErr != nil || (f.promptSet && len(mcpBlocked) > 0) {
 		err := errors.New("golem: MCP catalog admission failed")
-		_, _ = fmt.Fprintln(stderr, "mcp: catalog admission failed")
+		// An AdmissionError's text is alias, reason and a fixed rule; any
+		// other fatal error may carry paths, so it stays generic.
+		var refusal *mcpclient.AdmissionError
+		if mcpErr != nil && errors.As(mcpErr, &refusal) {
+			_, _ = fmt.Fprintln(stderr, "mcp: "+mcpErr.Error())
+		} else {
+			_, _ = fmt.Fprintln(stderr, "mcp: catalog admission failed")
+		}
 		reportPreRunFailure(stdout, outFormat, "mcp_untrusted", err)
 		return err
 	}

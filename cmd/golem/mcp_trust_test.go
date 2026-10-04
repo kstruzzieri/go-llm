@@ -744,6 +744,36 @@ func TestMCPTrustMalformedHTTPDoesNotLeak(t *testing.T) {
 	}
 }
 
+// TestMCPFatalConfigNamesReason: a configuration Connect refuses outright
+// reports the alias, reason and fixed rule (never the URL) on stderr, and the
+// machine record and exit code stay the generic mcp_untrusted refusal.
+func TestMCPFatalConfigNamesReason(t *testing.T) {
+	for _, format := range []string{"text", "json"} {
+		t.Run(format, func(t *testing.T) {
+			config, root := writeRunLifecycleConfig(t)
+			in, out, diag := runTestFiles(t)
+			err := run([]string{"-config", config, "-root", root, "-p", "hi", "-output-format", format, "-mcp-http", "fs=https://user:canary@example.com/mcp", "-no-project-context", "-no-git-context", "-no-probe", "-no-cap-probe", "-no-rag"}, in, out, diag)
+			if err == nil || exitCodeFor(err) != 1 || err.Error() != "golem: MCP catalog admission failed" {
+				t.Fatalf("exit: %v (%d)", err, exitCodeFor(err))
+			}
+			want := ""
+			if format == "json" {
+				want = "{\"schema\":\"golem.result.v1\",\"status\":\"error\",\"answer\":null,\"stopReason\":null,\"model\":null,\"error\":{\"code\":\"mcp_untrusted\",\"message\":\"golem: MCP catalog admission failed\"},\"grounding\":null}\n"
+			}
+			if got := readRunTestFile(t, out); got != want {
+				t.Fatalf("stdout=%q want=%q", got, want)
+			}
+			got := readRunTestFile(t, diag)
+			if !strings.Contains(got, "mcp: server \"fs\": invalid_config: mcpclient: endpoint must not carry userinfo\n") {
+				t.Fatalf("diagnostics=%q, want the alias, reason and rule", got)
+			}
+			if strings.Contains(got, "canary") || strings.Contains(got, "example.com") {
+				t.Fatalf("diagnostics leaked endpoint text: %q", got)
+			}
+		})
+	}
+}
+
 func TestMCPToolsRunWiring(t *testing.T) {
 	config, root := writeRunLifecycleConfig(t)
 	f := newTrustHTTPFixture(t)
