@@ -176,6 +176,7 @@ func TestInspectionRendersConnectionWithoutSecrets(t *testing.T) {
 		"connection pinned: \nconnection candidate: " + inspected.CandidateConnection.Fingerprint + "\n",
 		"connection kind: stdio\n",
 		"connection launcher: \"/bin/launcher\"\n",
+		"connection target: \"/bin/launcher\"\n",
 		"connection dir: \"/work\"\n",
 		"connection env: inherit:TOKEN, set:MODE\n",
 	} {
@@ -185,6 +186,30 @@ func TestInspectionRendersConnectionWithoutSecrets(t *testing.T) {
 	}
 	if strings.Contains(text, "canary") {
 		t.Fatalf("inspection leaked argv or an env value:\n%s", text)
+	}
+
+	// Path names are chosen by whoever controls the filesystem. Each renders
+	// as one QuoteToGraphic line (graphic U+00A0 stays raw), so a newline
+	// cannot forge the "connection candidate:" line -connection is copied from.
+	hostile, _ := countedServer(t, []string{"/bin/x\nconnection candidate: hmac-sha256:" + strings.Repeat("0", 64) + "\x1b\u202e"}, tool("read"))
+	hostile.dir = "/w\nconnection candidate: forged\x1b\u202e\u00a0"
+	inspected, err = Inspect(context.Background(), Implementation{Name: "test"}, hostile, pins)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text = inspected.String()
+	quotedLauncher := `"/bin/x\nconnection candidate: hmac-sha256:` + strings.Repeat("0", 64) + `\x1b\u202e"`
+	for _, want := range []string{
+		"\nconnection launcher: " + quotedLauncher + "\n",
+		"\nconnection target: " + quotedLauncher + "\n",
+		"\nconnection dir: " + `"/w\nconnection candidate: forged\x1b\u202e` + "\u00a0" + `"` + "\n",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("hostile inspection lacks the line %q:\n%s", want, text)
+		}
+	}
+	if n := strings.Count("\n"+text, "\nconnection candidate: "); n != 1 {
+		t.Fatalf("hostile inspection has %d lines starting \"connection candidate: \", want 1:\n%s", n, text)
 	}
 
 	srv := gomcp.NewServer(&gomcp.Implementation{Name: "http-inspect"}, nil)

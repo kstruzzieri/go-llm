@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -28,6 +29,8 @@ type trustHTTPFixture struct {
 	url     string
 	calls   atomic.Int32
 	deletes atomic.Int32
+	// requests counts every HTTP request, so tests can prove no contact.
+	requests atomic.Int32
 	// down makes every request fail, so a pinned endpoint becomes unavailable.
 	down atomic.Bool
 }
@@ -38,6 +41,7 @@ func newTrustHTTPFixture(t *testing.T) *trustHTTPFixture {
 	f.set("Read\nfile", map[string]any{"type": "object"})
 	handler := gomcp.NewStreamableHTTPHandler(func(*http.Request) *gomcp.Server { return f.server }, nil)
 	httpServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		f.requests.Add(1)
 		if r.Method == http.MethodDelete {
 			f.deletes.Add(1)
 		}
@@ -136,9 +140,14 @@ func TestMCPTrustOperator(t *testing.T) {
 	if err != nil || out != "" || diag != "mcp: approved server \"fs\" "+mcpDigestB+"; changed: mcp__fs__read (description)\n" {
 		t.Fatalf("changed approval: %v %q %q", err, out, diag)
 	}
-	_, _, err = trustCommand(t, "approve", "-root", root, "-mcp-http", "other="+f.url, "-digest", mcpDigestB, "-connection", conn)
-	if err == nil {
-		t.Fatal("digest accepted under wrong alias")
+	// other's own fingerprint passes the connection check, so the refusal
+	// proves the catalog digest itself is bound to the alias.
+	otherConn := mcpConnection(t, root, "-mcp-http", "other="+f.url)
+	requests := f.requests.Load()
+	_, _, err = trustCommand(t, "approve", "-root", root, "-mcp-http", "other="+f.url, "-digest", mcpDigestB, "-connection", otherConn)
+	var refusal *mcpclient.AdmissionError
+	if !errors.As(err, &refusal) || refusal.Reason != "digest_mismatch" || f.requests.Load() == requests {
+		t.Fatalf("digest under wrong alias = (%v, %d requests), want digest_mismatch after fetching the catalog", err, f.requests.Load()-requests)
 	}
 	if f.calls.Load() != 0 {
 		t.Fatal("trust command invoked a tool")
@@ -155,8 +164,8 @@ func TestMCPTrustApproveRequiresConnection(t *testing.T) {
 	if _, _, err := trustCommand(t, "approve", "-root", root, "-mcp-http", "fs="+f.url, "-digest", mcpDigestA); err == nil {
 		t.Fatal("approve without -connection succeeded")
 	}
-	if f.deletes.Load() != 0 {
-		t.Fatal("approve without -connection contacted the server")
+	if n := f.requests.Load(); n != 0 {
+		t.Fatalf("approve without -connection sent %d requests to the server", n)
 	}
 }
 
@@ -181,6 +190,18 @@ func TestMCPTrustArguments(t *testing.T) {
 		if strings.Contains(diag+err.Error(), "credential-value") {
 			t.Fatal("credentials leaked")
 		}
+	}
+	// -digest and -connection are approve-only: inspect refuses them before
+	// contacting the server.
+	before := f.requests.Load()
+	for _, extra := range [][]string{{"-connection", "hmac-sha256:" + strings.Repeat("0", 64)}, {"-digest", mcpDigestA}} {
+		out, _, err := trustCommand(t, append([]string{"inspect", "-root", root, "-mcp-http", "fs=" + f.url}, extra...)...)
+		if err == nil || err.Error() != "mcp: invalid command flags" || out != "" {
+			t.Fatalf("inspect %s = (%v, %q), want \"mcp: invalid command flags\" and no output", extra[0], err, out)
+		}
+	}
+	if n := f.requests.Load() - before; n != 0 {
+		t.Fatalf("inspect with an approve-only flag sent %d requests", n)
 	}
 	t.Chdir(root)
 	if _, _, err := trustCommand(t, "inspect", "-mcp-http", "fs="+f.url); err != nil {
