@@ -187,9 +187,7 @@ func TestExecRunnerEmptyPolicyHelper(t *testing.T) {
 	os.Exit(0)
 }
 
-// TestExecRunnerEmptyPolicyNeverInherits catches a regression to
-// `if len(env) > 0 { cmd.Env = env }`: with no baseline variable set, the
-// policy is empty, and an empty environment must not fall back to inheritance.
+// TestExecRunnerEmptyPolicyNeverInherits runs a runner whose policy selects only the runner-owned PWD: nothing from the canary-only parent may appear.
 func TestExecRunnerEmptyPolicyNeverInherits(t *testing.T) {
 	out := filepath.Join(t.TempDir(), "probe.json")
 	cmd := exec.Command(os.Args[0], "-test.run=^TestExecRunnerEmptyPolicyHelper$", "--", "emptypolicy", out)
@@ -198,7 +196,128 @@ func TestExecRunnerEmptyPolicyNeverInherits(t *testing.T) {
 		t.Fatalf("helper: %v: %s", err, output)
 	}
 	report := readEnvProbe(t, out)
-	if report.Canary || len(report.Names) != 0 {
-		t.Fatalf("empty-policy child names=%v canary=%v, want none", report.Names, report.Canary)
+	if report.Canary || !slices.Equal(report.Names, []string{"PWD"}) || report.PWD != "/" {
+		t.Fatalf("empty-policy child names=%v pwd=%q canary=%v, want only the runner-owned PWD=/", report.Names, report.PWD, report.Canary)
+	}
+}
+
+func TestWorkingDirEnv(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct{ goos, dir, want string }{
+		{goos: "linux", dir: "/a/b/../c", want: "PWD=/a/c"},
+		{goos: "darwin", dir: dir, want: "PWD=" + dir},
+		{goos: "linux", dir: "rel", want: "PWD=" + filepath.Join(wd, "rel")},
+		{goos: "linux", dir: "", want: "PWD=" + wd},
+		{goos: "windows", dir: dir, want: ""},
+		{goos: "plan9", dir: dir, want: ""},
+	} {
+		got, err := workingDirEnv(tc.goos, tc.dir)
+		if err != nil || got != tc.want {
+			t.Errorf("workingDirEnv(%q, %q) = %q, %v; want %q", tc.goos, tc.dir, got, err, tc.want)
+		}
+	}
+}
+
+// The child's PWD is the runner directory as given: never the parent's PWD,
+// never canonicalized, absolute for a relative directory.
+func TestExecRunnerSetsPWDFromRunnerDir(t *testing.T) {
+	t.Chdir(t.TempDir()) // t.Chdir sets PWD, so the stale value must come after it
+	t.Setenv("PWD", "/stale/parent/pwd")
+	wd, err := os.Getwd() // the stale PWD fails Getwd's identity check
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir("rel", 0o700); err != nil {
+		t.Fatal(err)
+	}
+	base := t.TempDir()
+	realDir := filepath.Join(base, "real")
+	if err := os.Mkdir(realDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(base, "link")
+	if err := os.Symlink(realDir, link); err != nil {
+		t.Fatal(err)
+	}
+	other := t.TempDir()
+	checkout := writeSourceCheckoutFixture(t)
+	for _, tc := range []struct {
+		name   string
+		runner *ExecRunner
+		want   string
+	}{
+		{name: "installed, symlinked dir keeps its spelling", runner: NewExecRunner(link), want: link},
+		{name: "source", runner: NewSrcExecRunner(realDir, checkout), want: realDir},
+		{name: "relative dir", runner: NewExecRunner("rel"), want: filepath.Join(wd, "rel")},
+		{name: "a second root", runner: NewExecRunner(other), want: other},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if report := runEnvProbe(t, tc.runner); report.PWD != tc.want {
+				t.Fatalf("child PWD = %q, want %q", report.PWD, tc.want)
+			}
+		})
+	}
+}
+
+// Run must add PWD to a copy of the owned entries: owned is r.env itself, and
+// appending into its spare capacity would race between concurrent launches.
+func TestExecRunnerAppendsPWDToACopyOfOwnedEntries(t *testing.T) {
+	r := NewExecRunner(t.TempDir())
+	backing := []string{"PYTHONDONTWRITEBYTECODE=1", "sentinel"}
+	r.env = backing[:1]
+	report := runEnvProbe(t, r)
+	if backing[1] != "sentinel" || !slices.Equal(r.env, []string{"PYTHONDONTWRITEBYTECODE=1"}) {
+		t.Fatalf("Run wrote into the runner's owned entries: backing[1]=%q env=%q", backing[1], r.env)
+	}
+	if !slices.Contains(report.Names, "PWD") || !slices.Contains(report.Names, "PYTHONDONTWRITEBYTECODE") {
+		t.Fatalf("child names = %v, want PWD and PYTHONDONTWRITEBYTECODE", report.Names)
+	}
+}
+
+// TestExecRunnerRemovedCwdHelper is not a test. Re-executed as `<test binary>
+// -test.run=^TestExecRunnerRemovedCwdHelper$ -- removedcwd <out>`, it removes
+// its own working directory and runs the env probe through a runner with an
+// empty dir, whose PWD therefore needs the (unresolvable) cwd. Exit 6: Run
+// succeeded; exit 7: the probe launched.
+func TestExecRunnerRemovedCwdHelper(t *testing.T) {
+	i := slices.Index(os.Args, "--")
+	if i < 0 || len(os.Args) != i+3 || os.Args[i+1] != "removedcwd" {
+		return
+	}
+	dir, err := os.MkdirTemp("", "removed-cwd-")
+	if err != nil {
+		os.Exit(2)
+	}
+	if err := os.Chdir(dir); err != nil {
+		os.Exit(2)
+	}
+	if err := os.Remove(dir); err != nil {
+		os.Exit(2)
+	}
+	r := NewExecRunner("")
+	r.bin, r.prefix = os.Args[0], envProbeArgv(os.Args[i+2])
+	if _, _, _, err := r.Run(context.Background(), nil, nil); err == nil {
+		os.Exit(6)
+	}
+	if _, err := os.Stat(os.Args[i+2]); err == nil {
+		os.Exit(7)
+	}
+	os.Exit(0)
+}
+
+func TestExecRunnerFailsBeforeLaunchWhenWorkingDirIsUnresolvable(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("darwin's getcwd still resolves a removed directory; Linux reports ENOENT")
+	}
+	out := filepath.Join(t.TempDir(), "probe.json")
+	cmd := exec.Command(os.Args[0], "-test.run=^TestExecRunnerRemovedCwdHelper$", "--", "removedcwd", out)
+	cmd.Env = []string{"PATH=" + os.Getenv("PATH")} // no PWD: Getwd must ask the kernel
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("helper: %v: %s", err, output)
 	}
 }

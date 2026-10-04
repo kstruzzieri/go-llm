@@ -20,6 +20,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"time"
 )
@@ -131,6 +132,15 @@ func (r *ExecRunner) Run(ctx context.Context, args []string, stdin []byte) ([]by
 		return nil, nil, 0, r.initErr
 	}
 	bin, argv, owned := r.commandFor(args)
+	pwd, err := workingDirEnv(runtime.GOOS, r.dir)
+	if err != nil {
+		return nil, nil, 0, err
+	}
+	if pwd != "" {
+		// A fresh slice: owned is r.env itself, and appending into its spare
+		// capacity would race between concurrent launches.
+		owned = append(slices.Clone(owned), pwd)
+	}
 	env, err := buildChildEnv(childEnvPolicyFor(runtime.GOOS, r.allowed, owned), os.LookupEnv)
 	if err != nil {
 		return nil, nil, 0, err

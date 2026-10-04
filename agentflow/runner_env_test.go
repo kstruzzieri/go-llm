@@ -155,13 +155,16 @@ func TestValidateEnvNames(t *testing.T) {
 		wantErr string
 	}{
 		{names: nil},
-		{names: []string{"GOPRIVATE", "_X", "https_proxy", "A1", "AGENTFLOW"}},
+		{names: []string{"GOPRIVATE", "_X", "https_proxy", "A1", "AGENTFLOW", "OLDPWD"}},
 		{names: []string{"GOPRIVATE", "NAME=sk-SECRET-577"},
 			wantErr: "agentflow: environment name #2 is not a variable name (names only; values are read from the environment)"},
 		{names: []string{""}, wantErr: "#1 is not a variable name"},
 		{names: []string{"1ABC"}, wantErr: "#1 is not a variable name"},
 		{names: []string{"A B"}, wantErr: "#1 is not a variable name"},
 		{names: []string{"pythonPath"}, wantErr: "agentflow: environment name #1 is runner-owned"},
+		{names: []string{"PWD"}, wantErr: "agentflow: environment name #1 is runner-owned"},
+		{names: []string{"X", "pwd"}, wantErr: "agentflow: environment name #2 is runner-owned"},
+		{names: []string{"Pwd"}, wantErr: "agentflow: environment name #1 is runner-owned"},
 		{names: []string{"X", "PYTHONDONTWRITEBYTECODE"}, wantErr: "agentflow: environment name #2 is runner-owned"},
 		{names: []string{"agentflow_strict"}, wantErr: "agentflow: environment name #1 is an Agentflow control variable"},
 		{names: []string{"AGENTFLOW_CONFIRM_RISK"}, wantErr: "#1 is an Agentflow control variable"},
@@ -237,6 +240,7 @@ type envProbeReport struct {
 	Names          []string `json:"names"`
 	Canary         bool     `json:"canary"`
 	ApprovedSHA256 string   `json:"approved_sha256"`
+	PWD            string   `json:"pwd"` // a path, never a secret
 }
 
 // TestEnvProbeHelper is not a test. Re-executed as `<test binary>
@@ -258,6 +262,9 @@ func TestEnvProbeHelper(t *testing.T) {
 		if name == envApprovedName {
 			sum := sha256.Sum256([]byte(value))
 			report.ApprovedSHA256 = hex.EncodeToString(sum[:])
+		}
+		if name == "PWD" {
+			report.PWD = value
 		}
 	}
 	slices.Sort(report.Names)
