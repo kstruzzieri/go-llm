@@ -211,8 +211,8 @@ func (s *session) recordMessages(ctx context.Context, msgs []conversation.Messag
 	}
 	s.revision = revision
 	s.msgs = next
-	// SQLite may have (re)created the -wal/-shm sidecars honoring the umask on
-	// this write; re-secure them (the WAL can hold un-checkpointed message text).
+	// A -wal/-shm sidecar left with looser bits keeps them; re-secure them (the
+	// WAL can hold un-checkpointed message text).
 	_ = chmodDBFiles(s.dbPath)
 	return nil
 }

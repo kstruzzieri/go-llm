@@ -81,9 +81,9 @@ func assertDBFilesSecured(t *testing.T, dbPath string) {
 }
 
 func TestOpenCapProbeStore_SaveCapProbeSecuresSidecars(t *testing.T) {
-	// SaveCapProbe runs mid-session (route-time probes). A WAL checkpoint can
-	// recreate a -wal/-shm sidecar at the umask, not 0600. The store decorator
-	// must re-chmod after every write.
+	// SaveCapProbe runs mid-session (route-time probes). A -wal/-shm sidecar
+	// left with looser bits keeps them, since SQLite only gives new sidecars the
+	// DB file's mode. The store decorator must re-chmod after every write.
 	base := t.TempDir()
 	root := t.TempDir()
 	getenv := func(k string) string {
