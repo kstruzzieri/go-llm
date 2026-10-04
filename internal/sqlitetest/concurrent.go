@@ -45,6 +45,7 @@ const (
 	concurrentOpenPathEnv   = "GO_LLM_SQLITETEST_OPEN_PATH"
 	concurrentOpenTrialsEnv = "GO_LLM_SQLITETEST_OPEN_TRIALS"
 	concurrentOpenReady     = "GO_LLM_SQLITETEST_READY"
+	concurrentOpenDone      = "GO_LLM_SQLITETEST_DONE"
 )
 
 // RunConcurrentFirstOpens checks that procs processes opening one new
@@ -54,7 +55,10 @@ const (
 // open, checks the result, closes it, and returns, so the test and any
 // TestMain finish normally. Every child must report ready before any is
 // released, so a child that never reaches the opener (for example, one whose
-// -test.run pattern matches nothing) fails the trial instead of passing.
+// -test.run pattern matches nothing) fails the trial instead of passing, and
+// every child must report done after its open, AssertWAL and Close succeed,
+// so an opener that skips or exits early fails it too. procs must be at
+// least 2 and trials at least 1.
 // GO_LLM_SQLITETEST_OPEN_TRIALS overrides trials, for mutation runs.
 func RunConcurrentFirstOpens(t *testing.T, procs, trials int, open func(ctx context.Context, path string) (io.Closer, error)) {
 	t.Helper()
@@ -64,6 +68,9 @@ func RunConcurrentFirstOpens(t *testing.T, procs, trials int, open func(ctx cont
 	}
 	if strings.Contains(t.Name(), "/") {
 		t.Fatalf("RunConcurrentFirstOpens needs a top-level test, not %q", t.Name())
+	}
+	if procs < 2 || trials < 1 {
+		t.Fatalf("RunConcurrentFirstOpens(procs=%d, trials=%d): want procs >= 2 and trials >= 1", procs, trials)
 	}
 	if v := os.Getenv(concurrentOpenTrialsEnv); v != "" {
 		n, err := strconv.Atoi(v)
@@ -83,6 +90,8 @@ type concurrentChild struct {
 	stderr  bytes.Buffer
 	scanned chan struct{} // closed once stdout is fully read
 	stdout  strings.Builder
+	ready   bool // the child printed the ready marker
+	done    bool // the child printed the done marker
 }
 
 func concurrentOpenTrial(t *testing.T, trial, procs int) {
@@ -124,8 +133,9 @@ func concurrentOpenTrial(t *testing.T, trial, procs int) {
 	for i, c := range children {
 		<-c.scanned
 		err := c.cmd.Wait()
-		if err != nil {
-			failed = append(failed, fmt.Sprintf("process %d (%v):\n%s%s", i, err, c.stdout.String(), c.stderr.String()))
+		if err != nil || !c.done {
+			failed = append(failed, fmt.Sprintf("process %d (exit: %v, ready: %t, done: %t):\n%s%s",
+				i, err, c.ready, c.done, c.stdout.String(), c.stderr.String()))
 		}
 	}
 	if !allReady || len(failed) > 0 {
@@ -152,17 +162,29 @@ func startConcurrentChild(ctx context.Context, name, path string, ready chan<- b
 	}
 	go func() {
 		defer close(c.scanned)
-		sentReady := false
-		sc := bufio.NewScanner(stdout)
-		for sc.Scan() {
-			line := sc.Text()
-			c.stdout.WriteString(line + "\n")
-			if line == concurrentOpenReady && !sentReady {
-				sentReady = true
-				ready <- true
+		// bufio.Reader, not Scanner: a line over Scanner's 64 KiB limit would
+		// stop the reads, hide the markers after it and block the child.
+		r := bufio.NewReader(stdout)
+		for {
+			line, err := r.ReadString('\n')
+			c.stdout.WriteString(line)
+			switch strings.TrimRight(line, "\r\n") {
+			case concurrentOpenReady:
+				if !c.ready {
+					c.ready = true
+					ready <- true
+				}
+			case concurrentOpenDone:
+				c.done = true
+			}
+			if err != nil {
+				if err != io.EOF {
+					c.stdout.WriteString("read stdout: " + err.Error() + "\n")
+				}
+				break
 			}
 		}
-		if !sentReady {
+		if !c.ready {
 			ready <- false
 		}
 	}()
@@ -188,4 +210,5 @@ func concurrentOpenChild(t *testing.T, path string, open func(ctx context.Contex
 	if err := closeOnce(); err != nil {
 		t.Fatalf("close after concurrent first open: %v", err)
 	}
+	fmt.Println(concurrentOpenDone)
 }
