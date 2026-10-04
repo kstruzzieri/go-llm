@@ -4,10 +4,13 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"fmt"
 	"log"
 	"net"
 	"net/http"
+	"net/url"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -54,9 +57,9 @@ func crossOriginMiddleware(next http.Handler, origin string) http.Handler {
 	}
 	protection := http.NewCrossOriginProtection()
 	if origin != "" {
-		if err := protection.AddTrustedOrigin(origin); err != nil {
-			log.Printf("compat: WithCORS: %v; cross-origin requests stay refused", err)
-		}
+		// ListenAndServe refuses an origin no browser sends (checkCORSOrigin);
+		// one that reaches here anyway matches no request and admits no one.
+		_ = protection.AddTrustedOrigin(origin)
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if err := protection.Check(r); err != nil {
@@ -65,6 +68,37 @@ func crossOriginMiddleware(next http.Handler, origin string) http.Handler {
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+// checkCORSOrigin rejects a WithCORS origin that no browser sends as Origin.
+// CORS and the cross-origin guard both compare it with the request's Origin
+// byte for byte, so anything but a lower-case scheme://host[:port] without
+// the scheme's default port refuses the very client it was meant to admit.
+func checkCORSOrigin(origin string) error {
+	if origin == "" || origin == "*" {
+		return nil
+	}
+	if err := http.NewCrossOriginProtection().AddTrustedOrigin(origin); err != nil {
+		return fmt.Errorf("%w: %v", ErrInvalidCORSOrigin, err)
+	}
+	u, _ := url.Parse(origin) // cannot fail: AddTrustedOrigin parsed it
+	if origin != strings.ToLower(u.Scheme+"://"+u.Host) {
+		return fmt.Errorf("%w: %q is not a lower-case scheme://host[:port]", ErrInvalidCORSOrigin, origin)
+	}
+	if strings.HasSuffix(u.Host, ":") {
+		return fmt.Errorf("%w: %q has an empty port", ErrInvalidCORSOrigin, origin)
+	}
+	if portText := u.Port(); portText != "" {
+		// Browsers serialize ports as 16-bit decimal numbers without leading zeros.
+		port, err := strconv.ParseUint(portText, 10, 16)
+		if err != nil || portText != strconv.FormatUint(port, 10) {
+			return fmt.Errorf("%w: %q port must be a canonical decimal number from 0 to 65535", ErrInvalidCORSOrigin, origin)
+		}
+		if u.Scheme == "https" && port == 443 || u.Scheme == "http" && port == 80 {
+			return fmt.Errorf("%w: %q must omit the default port", ErrInvalidCORSOrigin, origin)
+		}
+	}
+	return nil
 }
 
 // hostMiddleware refuses requests whose Host header names neither a loopback
