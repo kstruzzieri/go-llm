@@ -194,12 +194,8 @@ func TestAgentflowResumeStatusAndProof_RealCLI(t *testing.T) {
 		t.Fatalf("verify-proof: exit=%d err=%v stdout=%s stderr=%s", exitCode, runErr, out, errOut)
 	}
 
-	receipts, err := os.ReadFile(filepath.Join(dir, ".agent", "command-receipts.jsonl"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if lines := strings.Split(strings.TrimSpace(string(receipts)), "\n"); len(lines) != 1 {
-		t.Fatalf("command receipts = %d, want exactly one: %s", len(lines), receipts)
+	if n := commandReceiptCount(t, dir); n != 1 {
+		t.Fatalf("command receipts = %d, want exactly one", n)
 	}
 	stepRuns, err := os.ReadFile(filepath.Join(dir, ".agent", "step-runs.jsonl"))
 	if err != nil {
@@ -818,12 +814,12 @@ func lastStepRunEvent(events []stepRunEvent, attempt string) stepRunEvent {
 	return last
 }
 
+// commandReceiptCount counts the command-receipt ledger's rows. init-execution
+// always creates the ledger, so a missing file fails the test instead of
+// reading as zero receipts.
 func commandReceiptCount(t *testing.T, dir string) int {
 	t.Helper()
 	b, err := os.ReadFile(filepath.Join(dir, ".agent", "command-receipts.jsonl"))
-	if errors.Is(err, fs.ErrNotExist) {
-		return 0
-	}
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -872,7 +868,7 @@ func runStoppedSmokeStep(t *testing.T) (string, agentflow.Runner, agentflow.Plan
 		t.Fatalf("A1 last event = %+v, want blocked with the Golem reason", got)
 	}
 	if n := commandReceiptCount(t, dir); n != 0 {
-		t.Fatalf("command receipts = %d before the block, want 0", n)
+		t.Fatalf("command receipts = %d, want 0: a gate ran before the block", n)
 	}
 	return dir, runner, plan, planBytes
 }
@@ -936,8 +932,11 @@ func TestAgentflowStoppedStepPartialEditFailsClosed_RealCLI(t *testing.T) {
 		t.Fatal(err)
 	}
 	d := &driver{af: client, plan: &plan, runStep: runStep}
-	if _, err := d.resume(runCtx, dir, planBytes, nil); err == nil || !strings.Contains(err.Error(), "file_receipts_missing") {
-		t.Fatalf("resume err = %v, want a fail-closed file_receipts_missing stop", err)
+	if _, err := d.resume(runCtx, dir, planBytes, nil); err == nil || !strings.Contains(err.Error(), "reached state \"file_receipts_missing\" before gates") {
+		t.Fatalf("want the before-gates refusal in state file_receipts_missing, got resume err = %v", err)
+	}
+	if got := lastStepRunEvent(readStepRunEvents(t, dir), "A2").Event; got != "claimed" {
+		t.Fatalf("A2 last event = %q after the refusal, want claimed: the refused attempt stays open", got)
 	}
 	if n := commandReceiptCount(t, dir); n != 0 {
 		t.Fatalf("command receipts = %d, want no gate after the inherited edit", n)
@@ -955,8 +954,12 @@ func TestAgentflowStoppedStepPartialEditFailsClosed_RealCLI(t *testing.T) {
 	if err := client.BlockStep(ctx, "P1", "A2", "operator: discard inherited partial edit"); err != nil {
 		t.Fatal(err)
 	}
-	if out, err := exec.Command("git", "-C", dir, "checkout", "--", "src/answer.txt").CombinedOutput(); err != nil {
-		t.Fatalf("restore: %v: %s", err, out)
+	runTestGit(t, dir, "checkout", "--", "src/answer.txt")
+	if got := lastStepRunEvent(readStepRunEvents(t, dir), "A2"); got.Event != "blocked" || got.Reason != "operator: discard inherited partial edit" {
+		t.Fatalf("A2 last event = %+v, want blocked with the operator reason", got)
+	}
+	if b, err := os.ReadFile(filepath.Join(dir, "src", "answer.txt")); err != nil || string(b) != "pending\n" {
+		t.Fatalf("src/answer.txt = %q, err=%v after the restore, want the committed %q", b, err, "pending\n")
 	}
 	orch = agent.New(&scriptCaller{responses: []agent.ModelResult{
 		toolStep("w3", "write_file", `{"path":"src/answer.txt","content":"expected\n"}`),
@@ -971,7 +974,17 @@ func TestAgentflowStoppedStepPartialEditFailsClosed_RealCLI(t *testing.T) {
 	if err != nil || final.State != "complete" {
 		t.Fatalf("resume after the remedy: state=%q err=%v", final.State, err)
 	}
-	if got := lastStepRunEvent(readStepRunEvents(t, dir), "A3").Event; got != "completed" {
+	events := readStepRunEvents(t, dir)
+	if got := lastStepRunEvent(events, "A3").Event; got != "completed" {
 		t.Fatalf("A3 last event = %q, want completed", got)
+	}
+	claims := 0
+	for _, event := range events {
+		if event.Event == "claimed" {
+			claims++
+		}
+	}
+	if claims != 3 {
+		t.Fatalf("claim events = %d, want three (A1, A2, A3)", claims)
 	}
 }
