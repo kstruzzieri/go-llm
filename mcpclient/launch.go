@@ -2,6 +2,7 @@ package mcpclient
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -76,25 +77,26 @@ func prepareStdio(p preparedServer, s Server, le launchEnv) (preparedServer, err
 		p.transport = s.tr
 		return p, nil
 	}
-	invalid := func(err error) (preparedServer, error) {
-		return preparedServer{}, admissionFailure(s.Alias, "launch_invalid", err)
+	invalid := func(detail string, cause error) (preparedServer, error) {
+		return preparedServer{}, launchInvalid(s.Alias, detail, cause)
 	}
 	dir := s.dir
 	if dir == "" {
 		wd, err := le.getwd()
 		if err != nil {
-			return invalid(err)
+			return invalid("mcpclient: cannot determine the working directory", err)
 		}
 		dir = wd
 	}
+	const notDir = "mcpclient: working directory is not an existing directory"
 	// Resolving symlinks freezes the actual directory: retargeting a link
 	// later changes the identity instead of silently moving the server.
 	dir, err := filepath.EvalSymlinks(dir)
 	if err != nil {
-		return invalid(err)
+		return invalid(notDir, err)
 	}
 	if info, statErr := os.Stat(dir); statErr != nil || !info.IsDir() {
-		return invalid(errors.New("mcpclient: working directory is not a directory"))
+		return invalid(notDir, statErr)
 	}
 	// Validation rejects an empty command; an unvalidated one reaches
 	// resolveLauncher's empty-executable refusal instead of panicking here.
@@ -104,11 +106,11 @@ func prepareStdio(p preparedServer, s Server, le launchEnv) (preparedServer, err
 	}
 	launcher, err := resolveLauncher(argv0, dir, le.lookPath)
 	if err != nil {
-		return invalid(err)
+		return invalid(err.Error(), err) // fixed text by construction
 	}
 	target, err := filepath.EvalSymlinks(launcher)
 	if err != nil {
-		return invalid(err)
+		return invalid("mcpclient: executable symlink target cannot be resolved", err)
 	}
 	env, unset := buildServerEnv(le.policy, s.env, le.lookup)
 	if len(unset) > 0 {
@@ -142,12 +144,27 @@ func prepareHTTP(p preparedServer, s Server) (preparedServer, error) {
 	return p, nil
 }
 
+// invalidIdentity is the launch_invalid detail for an identity that cannot be
+// fingerprinted (argv or a path that is not valid UTF-8).
+const invalidIdentity = "mcpclient: connection identity is not valid UTF-8"
+
+// launchInvalid blocks alias as an unusable launch. detail is fixed text an
+// operator can act on, never a path, argv or OS error; the cause stays
+// reachable through errors.Is and errors.As.
+func launchInvalid(alias, detail string, cause error) error {
+	failure := admissionFailure(alias, "launch_invalid", cause)
+	if failure.Reason != "launch_invalid" {
+		return failure // canceled, say: the detail would misname it
+	}
+	return fmt.Errorf("%w: %s", failure, detail)
+}
+
 // resolveLauncher resolves argv0 to the absolute path that will be executed.
 // Every form goes through lookPath, so Windows PATHEXT resolution here matches
 // exec.Cmd.Start's own re-resolution of the same path. argv0 is cleaned
 // lexically before lookup and lookPath's result is returned unchanged, so the
 // path checked is exactly the path executed; a symlink followed by ".."
-// therefore resolves lexically, not as the kernel would.
+// therefore resolves lexically, not as the kernel would. Errors are fixed text.
 func resolveLauncher(argv0, dir string, lookPath func(string) (string, error)) (string, error) {
 	if argv0 == "" {
 		return "", errors.New("mcpclient: empty executable")
@@ -157,8 +174,11 @@ func resolveLauncher(argv0, dir string, lookPath func(string) (string, error)) (
 		name = filepath.Join(dir, name)
 	}
 	resolved, err := lookPath(filepath.Clean(name))
+	if errors.Is(err, exec.ErrDot) {
+		return "", errors.New("mcpclient: executable resolves relative to the current directory")
+	}
 	if err != nil {
-		return "", err
+		return "", errors.New("mcpclient: executable not found or not executable")
 	}
 	if !filepath.IsAbs(resolved) {
 		return "", errors.New("mcpclient: executable did not resolve to an absolute path")

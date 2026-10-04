@@ -774,6 +774,26 @@ func TestMCPFatalConfigNamesReason(t *testing.T) {
 	}
 }
 
+// An unusable pin store blocks each alias with a hint at what to check, and
+// the alias is still reported as blocked.
+func TestMCPPinStoreFailureHint(t *testing.T) {
+	file := filepath.Join(t.TempDir(), "not-a-dir")
+	if err := os.WriteFile(file, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("XDG_DATA_HOME", file)
+	mgr, warnings, err := connectMCP(t.Context(), t.TempDir(), []mcpclient.Server{mcpclient.HTTPServer("fs", "https://example.com/mcp")}, true)
+	if mgr != nil || err != nil || len(warnings) != 1 {
+		t.Fatalf("connectMCP = (%v, %v, %v), want one warning", mgr, warnings, err)
+	}
+	if got, want := warnings[0].Error(), `server "fs": pin_unavailable; check -root and the user data directory (golem/mcp-pins, including connection-hmac.pem)`; got != want {
+		t.Fatalf("warning = %q, want %q", got, want)
+	}
+	if got := mcpBlockedAliases(warnings); !slices.Equal(got, []string{"fs (pin_unavailable)"}) {
+		t.Fatalf("blocked = %q", got)
+	}
+}
+
 func TestMCPToolsRunWiring(t *testing.T) {
 	config, root := writeRunLifecycleConfig(t)
 	f := newTrustHTTPFixture(t)

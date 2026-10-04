@@ -767,11 +767,18 @@ connection blocks the alias before anything is launched or contacted
 (`connection_changed`, naming the changed fields: `launcher`, `target`, `dir`,
 `env`, `env_baseline`, `argv`, `origin`, `endpoint`, `kind`, `key`, or
 `identity` when no single field explains the change), even when the tool list
-is identical. Updating a program in place at the same path, changing a
-forwarded value, or changing a package behind an unchanged launcher such as
-`npx` or `uvx` does not change the connection; an upgrade that moves a symlink
+is identical. Updating a program in place at the same path or changing a
+forwarded value does not change the connection; an upgrade that moves a symlink
 to a new versioned path changes `target`. A file or symlink swapped between the
-check and the launch is not detected.
+check and the launch is not detected. The connection binds the launcher, not
+the value of `PATH` and not what the launcher runs: with a wrapper such as
+`env KEY=val command`, `npx`, `uvx` or `sh -c '…'`, or a script that starts
+`#!/usr/bin/env node`, only the wrapper or script is bound, so the program it
+finds on `PATH`, or the interpreter a `#!` line names, can change without
+`connection_changed`. Because stdio servers run in `-root`, a relative `PATH`
+entry such as `.` or `./node_modules/.bin` resolves inside the workspace.
+Prefer an absolute launcher path to a wrapper, and keep `PATH` free of relative
+entries.
 
 HTTP servers are pinned to that one endpoint: every request must target it
 exactly, and every redirect is refused, same-origin included

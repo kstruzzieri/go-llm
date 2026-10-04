@@ -110,7 +110,7 @@ func connectMCP(ctx context.Context, root string, servers []mcpclient.Server, re
 	if err != nil {
 		failures := make([]error, 0, len(servers))
 		for _, server := range servers {
-			failures = append(failures, &mcpclient.AdmissionError{Alias: server.Alias, Reason: "pin_unavailable"})
+			failures = append(failures, fmt.Errorf("%w; check -root and the user data directory (golem/mcp-pins, including connection-hmac.pem)", &mcpclient.AdmissionError{Alias: server.Alias, Reason: "pin_unavailable"}))
 		}
 		return nil, failures, nil
 	}

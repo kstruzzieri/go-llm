@@ -152,7 +152,8 @@ func Connect(ctx context.Context, impl Implementation, servers []Server, opts Co
 }
 
 // connectHooks carries test-only seams; nil in production. launched fires on
-// the caller's goroutine immediately before a server's dial is dispatched;
+// the caller's goroutine immediately before a server's worker is dispatched
+// (preparation, preflight and any dial run later, inside that worker);
 // published fires after that server's result is recorded; launch overrides
 // the process facts prepare reads; preflighted fires after a server's
 // pre-launch connection check passes.
@@ -238,7 +239,7 @@ func connectOne(ctx context.Context, impl Implementation, s Server, opts Connect
 	if err != nil {
 		// An identity that cannot be fingerprinted (non-UTF-8 argv or path)
 		// is an unusable launch, not a pin store fault.
-		return nil, nil, []error{admissionFailure(s.Alias, "launch_invalid", err)}
+		return nil, nil, []error{launchInvalid(s.Alias, invalidIdentity, err)}
 	}
 	// Preflight (spec §5.8 step 3): nothing is launched or contacted unless
 	// this is permitted first contact or the pinned connection matches.

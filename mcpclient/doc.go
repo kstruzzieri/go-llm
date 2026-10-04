@@ -69,9 +69,12 @@
 // TOFU detects definition and connection drift, not malicious initial
 // definitions, a program replaced at the same path, a file or symlink swapped
 // between check and launch, or changed behavior behind unchanged catalogs and
-// launchers. Stdio servers keep the host user's filesystem and network
-// authority. A backup holding both the key and the pins allows offline guessing
-// of low-entropy argv or query secrets. New workspaces and aliases have fresh
+// launchers. The connection binds the launcher, not the value of PATH or what
+// a wrapper (env, npx, uvx, sh -c) or a script's #! interpreter later runs, and
+// a relative PATH entry resolves in the server's working directory. Stdio
+// servers keep the host user's filesystem and network authority. A backup
+// holding both the key and the pins allows offline guessing of low-entropy
+// argv or query secrets. New workspaces and aliases have fresh
 // trust namespaces. Live catalog-change notifications are not handled.
 // Foreign-result provenance and observation fencing remain independent.
 package mcpclient

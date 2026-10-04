@@ -126,33 +126,55 @@ func TestPrepareStdioDefaultsToProcessCwd(t *testing.T) {
 	}
 }
 
+// Each refusal names a fixed rule an operator can act on, never a path, argv
+// or OS error text.
 func TestPrepareStdioFailures(t *testing.T) {
 	dir := t.TempDir()
 	file := filepath.Join(dir, "plain")
 	if err := os.WriteFile(file, []byte("x"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	lookPath := func(result string, err error) func(*launchEnv) {
+		return func(le *launchEnv) { le.lookPath = func(string) (string, error) { return result, err } }
+	}
+	const invalid = `server "fs": launch_invalid: mcpclient: `
 	for name, tt := range map[string]struct {
 		s      Server
+		le     func(*launchEnv)
 		reason string
+		want   string
 	}{
 		// Validation rejects an empty command first; prepare must still
 		// refuse it rather than panic in a Connect worker.
-		"empty command":      {StdioServer("fs", nil).WithDir(dir), "launch_invalid"},
-		"missing dir":        {StdioServer("fs", []string{"/bin/sh"}).WithDir(filepath.Join(dir, "missing")), "launch_invalid"},
-		"dir is a file":      {StdioServer("fs", []string{"/bin/sh"}).WithDir(file), "launch_invalid"},
-		"missing executable": {StdioServer("fs", []string{filepath.Join(dir, "nope")}).WithDir(dir), "launch_invalid"},
-		"not executable":     {StdioServer("fs", []string{file}).WithDir(dir), "launch_invalid"},
-		"unset inherited":    {StdioServer("fs", []string{"/bin/sh"}).WithDir(dir).WithEnv(InheritEnv("TOKEN")), "env_unset"},
+		"empty command": {StdioServer("fs", nil).WithDir(dir), nil, "launch_invalid", invalid + "empty executable"},
+		"getwd fails": {StdioServer("fs", []string{"/bin/sh"}), func(le *launchEnv) {
+			le.getwd = func() (string, error) { return "", errors.New("getwd " + dir) }
+		}, "launch_invalid", invalid + "cannot determine the working directory"},
+		"missing dir":        {StdioServer("fs", []string{"/bin/sh"}).WithDir(filepath.Join(dir, "missing")), nil, "launch_invalid", invalid + "working directory is not an existing directory"},
+		"dir is a file":      {StdioServer("fs", []string{"/bin/sh"}).WithDir(file), nil, "launch_invalid", invalid + "working directory is not an existing directory"},
+		"missing executable": {StdioServer("fs", []string{filepath.Join(dir, "nope")}).WithDir(dir), nil, "launch_invalid", invalid + "executable not found or not executable"},
+		"not executable":     {StdioServer("fs", []string{file}).WithDir(dir), nil, "launch_invalid", invalid + "executable not found or not executable"},
+		"current-directory executable": {StdioServer("fs", []string{"server"}).WithDir(dir), lookPath("", &exec.Error{Name: filepath.Join(dir, "server"), Err: exec.ErrDot}),
+			"launch_invalid", invalid + "executable resolves relative to the current directory"},
+		"relative resolution": {StdioServer("fs", []string{"server"}).WithDir(dir), lookPath("server", nil), "launch_invalid", invalid + "executable did not resolve to an absolute path"},
+		"unresolvable target": {StdioServer("fs", []string{"server"}).WithDir(dir), lookPath(filepath.Join(dir, "gone"), nil), "launch_invalid", invalid + "executable symlink target cannot be resolved"},
+		"unset inherited":     {StdioServer("fs", []string{"/bin/sh"}).WithDir(dir).WithEnv(InheritEnv("TOKEN")), nil, "env_unset", `server "fs": env_unset: TOKEN`},
 	} {
 		t.Run(name, func(t *testing.T) {
-			_, err := prepare(tt.s, "/ws", testLaunchEnv(map[string]string{"PATH": "/bin"}))
+			le := testLaunchEnv(map[string]string{"PATH": "/bin"})
+			if tt.le != nil {
+				tt.le(&le)
+			}
+			_, err := prepare(tt.s, "/ws", le)
 			var failure *AdmissionError
 			if !errors.As(err, &failure) || failure.Reason != tt.reason {
 				t.Fatalf("prepare = %v, want %s", err, tt.reason)
 			}
-			if tt.reason == "env_unset" && (!slices.Equal(failure.Names, []string{"TOKEN"}) || failure.Error() != `server "fs": env_unset: TOKEN`) {
-				t.Fatalf("env_unset = (%q, %q)", failure.Names, failure.Error())
+			if err.Error() != tt.want || strings.Contains(err.Error(), dir) {
+				t.Fatalf("prepare error = %q, want %q", err.Error(), tt.want)
+			}
+			if tt.reason == "env_unset" && !slices.Equal(failure.Names, []string{"TOKEN"}) {
+				t.Fatalf("env_unset names = %q", failure.Names)
 			}
 		})
 	}

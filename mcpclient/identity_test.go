@@ -174,13 +174,26 @@ func TestConnectionInvalidUTF8IsLaunchInvalid(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = m.Close() })
-	if a := admission(t, w); a.Reason != "launch_invalid" || len(m.Tools()) != 0 || strings.Contains(fmt.Sprint(w), "canary") {
-		t.Fatalf("connect: reason %q, %d tools, warnings %v", a.Reason, len(m.Tools()), w)
+	const want = `server "fs": launch_invalid: mcpclient: connection identity is not valid UTF-8`
+	if a := admission(t, w); a.Reason != "launch_invalid" || len(m.Tools()) != 0 || len(w) != 1 || w[0].Error() != want {
+		t.Fatalf("connect: reason %q, %d tools, warnings %v; want %q", a.Reason, len(m.Tools()), w, want)
 	}
 	_, err = Inspect(context.Background(), Implementation{Name: "test"}, s, pins)
 	var a *AdmissionError
-	if !errors.As(err, &a) || a.Reason != "launch_invalid" || strings.Contains(err.Error(), "canary") {
-		t.Fatalf("inspect: %v", err)
+	if !errors.As(err, &a) || a.Reason != "launch_invalid" || err.Error() != want {
+		t.Fatalf("inspect: %v; want %q", err, want)
+	}
+}
+
+// A fingerprint that fails because the context ended is canceled, not an
+// unusable launch, and carries no launch detail.
+func TestConnectionDigestCanceledIsNotLaunchInvalid(t *testing.T) {
+	s, _, _ := staticCatalogServer(t, "fs", &gomcp.Tool{Name: "read", Description: "A"})
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err := Inspect(ctx, Implementation{Name: "test"}, s, testPins(t))
+	if err == nil || err.Error() != `server "fs": canceled` {
+		t.Fatalf("inspect = %v, want %q", err, `server "fs": canceled`)
 	}
 }
 
