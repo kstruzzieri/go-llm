@@ -51,21 +51,23 @@ func PrepareDBFile(path string) error {
 // single connection (modernc.org/sqlite is not safe for concurrent writers
 // on separate connections to the same file). The DSN gives every connection,
 // including replacements database/sql opens after a context-cancelled
-// statement, a 5s busy_timeout.
+// statement, a 5s busy_timeout; it is built before the file is prepared, so a
+// path it rejects is never created. The WAL switch retries within that
+// timeout when another opener races it.
 func OpenHardenedDB(ctx context.Context, path string) (*sql.DB, error) {
-	if err := PrepareDBFile(path); err != nil {
-		return nil, err
-	}
 	dsn, err := sqlitedsn.WithBusyTimeout(path, 5*time.Second)
 	if err != nil {
 		return nil, fmt.Errorf("memory: open db %q: %w", path, err)
+	}
+	if err := PrepareDBFile(path); err != nil {
+		return nil, err
 	}
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("memory: open db %q: %w", path, err)
 	}
 	db.SetMaxOpenConns(1)
-	if _, err := db.ExecContext(ctx, "PRAGMA journal_mode=WAL"); err != nil {
+	if err := sqlitedsn.EnableWAL(ctx, db); err != nil {
 		_ = db.Close()
 		_ = SecureDBFiles(path)
 		return nil, fmt.Errorf("memory: db PRAGMA journal_mode=WAL: %w", err)
@@ -74,10 +76,15 @@ func OpenHardenedDB(ctx context.Context, path string) (*sql.DB, error) {
 }
 
 // SecureDBFiles chmods the DB file and its -wal/-shm sidecars to 0600.
-// Missing sidecars are skipped. Callers invoke this after migrations and
-// after every write (WAL checkpoints can recreate sidecars honoring the
-// umask, not the DB file's mode).
-func SecureDBFiles(path string) error {
+// Missing sidecars are skipped, including one another connection's last
+// close unlinks between its stat and chmod. Callers invoke this after
+// migrations and after every write (WAL checkpoints can recreate sidecars
+// honoring the umask, not the DB file's mode).
+func SecureDBFiles(path string) error { return secureDBFilesWith(path, os.Chmod) }
+
+// secureDBFilesWith is SecureDBFiles with the chmod call injected, so tests
+// can remove a sidecar between its Stat and its Chmod.
+func secureDBFilesWith(path string, chmod func(string, os.FileMode) error) error {
 	for _, p := range []string{path, path + "-wal", path + "-shm"} {
 		info, err := os.Stat(p)
 		if err != nil {
@@ -89,7 +96,10 @@ func SecureDBFiles(path string) error {
 		if info.IsDir() {
 			return fmt.Errorf("memory: %q is a directory", p)
 		}
-		if err := os.Chmod(p, dbFileMode); err != nil {
+		if err := chmod(p, dbFileMode); err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
 			return fmt.Errorf("memory: chmod %q: %w", p, err)
 		}
 	}
