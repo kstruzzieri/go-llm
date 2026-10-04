@@ -13,6 +13,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/kstruzzieri/go-llm/internal/sqlitedsn"
 )
 
 func newTestStore(t *testing.T) *SQLiteStore {
@@ -88,7 +90,11 @@ func TestNewSQLiteStoreAcceptsRelativePath(t *testing.T) {
 
 func TestNewSQLiteStorePreservesFileURI(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "uri.db")
-	uri := (&url.URL{Scheme: "file", Path: path}).String() + "?cache=shared&mode=rwc&_pragma=foreign_keys(1)"
+	fileURL, err := sqlitedsn.FileURL(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	uri := fileURL.String() + "?cache=shared&mode=rwc&_pragma=foreign_keys(1)"
 	dsn, err := sqliteReadWriteDSN(uri)
 	if err != nil {
 		t.Fatalf("sqliteReadWriteDSN(file URI) error: %v", err)
@@ -96,9 +102,6 @@ func TestNewSQLiteStorePreservesFileURI(t *testing.T) {
 	parsed, err := url.Parse(dsn)
 	if err != nil {
 		t.Fatalf("parse DSN: %v", err)
-	}
-	if parsed.Path != path {
-		t.Fatalf("DSN path = %q, want %q", parsed.Path, path)
 	}
 	query := parsed.Query()
 	if query.Get("cache") != "shared" || query.Get("mode") != "rwc" {

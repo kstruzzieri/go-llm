@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/kstruzzieri/go-llm/internal/sqlitedsn"
+
 	"modernc.org/sqlite"
 	sqlite3 "modernc.org/sqlite/lib"
 )
@@ -90,20 +92,18 @@ func auditStoreURI(path string) (string, error) {
 	if strings.HasPrefix(path, "//") || strings.HasPrefix(path, `\\`) {
 		return "", os.ErrInvalid
 	}
+	// Absolute first, so a relative name that starts with "file:" stays a
+	// path. FileURL renders drive-letter paths as file:///C:/... and rejects
+	// UNC and device paths on Windows.
 	absolute, err := filepath.Abs(path)
 	if err != nil {
 		return "", err
 	}
-	normalized := filepath.ToSlash(absolute)
-	if strings.HasPrefix(normalized, "//") {
-		return "", os.ErrInvalid
+	u, err := sqlitedsn.FileURL(absolute)
+	if err != nil {
+		return "", err
 	}
-	if volume := filepath.VolumeName(absolute); len(volume) == 2 && volume[1] == ':' {
-		normalized = "/" + normalized
-	}
-	u := url.URL{Scheme: "file", Path: normalized}
-	q := url.Values{"cache": {"private"}, "immutable": {"1"}, "mode": {"ro"}}
-	u.RawQuery = q.Encode()
+	u.RawQuery = url.Values{"cache": {"private"}, "immutable": {"1"}, "mode": {"ro"}}.Encode()
 	return u.String(), nil
 }
 

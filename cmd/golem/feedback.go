@@ -196,14 +196,16 @@ func openConfiguredFeedback(ctx context.Context, enabled bool, root, explicitDB 
 }
 
 func openFeedbackService(ctx context.Context, root, dbPath string, warn func(string)) (*feedbackService, error) {
-	if err := prepareDBFile(dbPath); err != nil {
-		return nil, err
-	}
 	// The DSN gives every connection a 1s busy_timeout, including
 	// replacements database/sql opens after a context-cancelled statement.
+	// It is built before the file is prepared, so a path it rejects is never
+	// created.
 	dsn, err := sqlitedsn.WithBusyTimeout(dbPath, time.Second)
 	if err != nil {
 		return nil, fmt.Errorf("open %q: %w", dbPath, err)
+	}
+	if err := prepareDBFile(dbPath); err != nil {
+		return nil, err
 	}
 	writer, err := sql.Open("sqlite", dsn)
 	if err != nil {
@@ -216,7 +218,8 @@ func openFeedbackService(ctx context.Context, root, dbPath string, warn func(str
 			_ = writer.Close()
 		}
 	}()
-	if _, err := writer.ExecContext(ctx, "PRAGMA journal_mode=WAL"); err != nil {
+	// EnableWAL retries the switch when another opener races it.
+	if err := sqlitedsn.EnableWAL(ctx, writer); err != nil {
 		return nil, fmt.Errorf("PRAGMA journal_mode=WAL: %w", err)
 	}
 	store, err := feedback.NewSignalStore(ctx, writer)

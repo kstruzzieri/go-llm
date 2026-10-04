@@ -336,28 +336,6 @@ func prepareRetrievalFeedbackDB(path string) error {
 	return f.Close()
 }
 
-// chmodRetrievalFeedbackDBFiles re-applies 0600 to the feedback DB and its WAL/SHM
-// sidecars, which journal_mode=WAL creates with default (group/world-readable on
-// some umasks) permissions. Telemetry must never leak through a sidecar.
-func chmodRetrievalFeedbackDBFiles(path string) error {
-	for _, p := range []string{path, path + "-wal", path + "-shm"} {
-		info, err := os.Stat(p)
-		if err != nil {
-			if os.IsNotExist(err) {
-				continue
-			}
-			return fmt.Errorf("stat retrieval feedback db %q: %w", p, err)
-		}
-		if info.IsDir() {
-			return fmt.Errorf("retrieval feedback db %q is a directory", p)
-		}
-		if err := os.Chmod(p, 0o600); err != nil {
-			return fmt.Errorf("chmod retrieval feedback db %q: %w", p, err)
-		}
-	}
-	return nil
-}
-
 // openRetrievalFeedbackWeighter best-effort opens the feedback DB and returns a
 // consume-only weighter plus the owning *sql.DB. It is hardened the same way as
 // the Golem path: single connection, WAL + busy_timeout, private 0600 files
@@ -365,21 +343,24 @@ func chmodRetrievalFeedbackDBFiles(path string) error {
 // retrievals or outcomes. On any failure it closes the db and returns an error;
 // the caller logs and continues with neutral ranking (non-fatal).
 func openRetrievalFeedbackWeighter(ctx context.Context, path string) (*sql.DB, rag.BehavioralWeighter, error) {
-	if err := prepareRetrievalFeedbackDB(path); err != nil {
-		return nil, nil, err
-	}
 	// The DSN gives every connection a 5s busy_timeout, including
 	// replacements database/sql opens after a context-cancelled statement.
+	// It is built before the file is prepared, so a path it rejects is never
+	// created.
 	dsn, err := sqlitedsn.WithBusyTimeout(path, 5*time.Second)
 	if err != nil {
 		return nil, nil, fmt.Errorf("open retrieval feedback db %q: %w", path, err)
+	}
+	if err := prepareRetrievalFeedbackDB(path); err != nil {
+		return nil, nil, err
 	}
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, nil, fmt.Errorf("open retrieval feedback db %q: %w", path, err)
 	}
 	db.SetMaxOpenConns(1)
-	if _, err := db.ExecContext(ctx, "PRAGMA journal_mode=WAL"); err != nil {
+	// EnableWAL retries the switch when another opener races it.
+	if err := sqlitedsn.EnableWAL(ctx, db); err != nil {
 		_ = db.Close()
 		return nil, nil, fmt.Errorf("retrieval feedback PRAGMA journal_mode=WAL: %w", err)
 	}
@@ -388,7 +369,10 @@ func openRetrievalFeedbackWeighter(ctx context.Context, path string) (*sql.DB, r
 		_ = db.Close()
 		return nil, nil, fmt.Errorf("init retrieval feedback db %q: %w", path, err)
 	}
-	if err := chmodRetrievalFeedbackDBFiles(path); err != nil {
+	// SQLite creates WAL/SHM sidecars with the DB file's mode, but sidecars
+	// left by an earlier, looser DB keep theirs: re-secure all three to 0600.
+	// Telemetry must never leak through a sidecar.
+	if err := memory.SecureDBFiles(path); err != nil {
 		_ = db.Close()
 		return nil, nil, err
 	}

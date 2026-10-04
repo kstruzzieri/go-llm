@@ -6,6 +6,7 @@ import (
 	"errors"
 	"math"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -232,6 +233,21 @@ func TestOpenSQLiteFeedbackStoreInMemory(t *testing.T) {
 	if err := store.Record(context.Background(), FeedbackKey{Provider: "p", Model: "m", UseCase: "chat"},
 		FeedbackSignal{Kind: RoutingSignalSuccess, At: time.Now()}); err != nil {
 		t.Errorf("Record after Open: %v", err)
+	}
+}
+
+// A connection that cannot use WAL must fail the open, not run the store with
+// a rollback journal: nolock=1 turns locking off, and SQLite then reports
+// journal mode "delete".
+func TestOpenSQLiteFeedbackStoreRejectsNonWAL(t *testing.T) {
+	path := filepath.ToSlash(filepath.Join(t.TempDir(), "feedback.db"))
+	store, err := OpenSQLiteFeedbackStore(t.Context(), "file:"+path+"?nolock=1", SQLiteFeedbackStoreConfig{})
+	if err == nil {
+		_ = store.Close()
+		t.Fatal("open of a nolock database succeeded; want a WAL-mode error")
+	}
+	if !strings.Contains(err.Error(), `journal_mode is "delete", want wal`) {
+		t.Fatalf("err = %v, want the WAL-mode error", err)
 	}
 }
 
