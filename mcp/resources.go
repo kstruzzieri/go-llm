@@ -204,10 +204,17 @@ func (s *Server) handleModelDetailResource(ctx context.Context, req *gomcp.ReadR
 	return marshalResource(req.Params.URI, info)
 }
 
-// breakerEntry pairs a provider name with its breaker state for JSON output.
+// breakerEntry is the route://breakers wire projection of one provider's
+// circuit breaker. Zero times and a nil last error are omitted. The last error
+// is reduced to its bounded routing class: its text can carry endpoint URLs,
+// and an error value has no stable JSON form.
 type breakerEntry struct {
-	Provider string               `json:"provider"`
-	Info     provider.BreakerInfo `json:"info"`
+	Provider       string              `json:"provider"`
+	State          string              `json:"state"`
+	Failures       int                 `json:"failures"`
+	LastFailure    string              `json:"lastFailure,omitempty"`
+	RecoverAt      string              `json:"recoverAt,omitempty"`
+	LastErrorClass provider.ErrorClass `json:"lastErrorClass,omitempty"`
 }
 
 func (s *Server) handleRouteBreakersResource(_ context.Context, _ *gomcp.ReadResourceRequest) (*gomcp.ReadResourceResult, error) {
@@ -217,7 +224,14 @@ func (s *Server) handleRouteBreakersResource(_ context.Context, _ *gomcp.ReadRes
 	if router != nil && providerRegistry != nil {
 		for _, name := range providerRegistry.Names() {
 			if info, ok := router.BreakerInfo(name); ok {
-				entries = append(entries, breakerEntry{Provider: name, Info: info})
+				entries = append(entries, breakerEntry{
+					Provider:       name,
+					State:          info.State.String(),
+					Failures:       info.Failures,
+					LastFailure:    rfc3339OrEmpty(info.LastFailure),
+					RecoverAt:      rfc3339OrEmpty(info.RecoverAt),
+					LastErrorClass: provider.ErrorClassOf(info.LastError),
+				})
 			}
 		}
 	}

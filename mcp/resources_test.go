@@ -3,17 +3,22 @@ package mcp
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/kstruzzieri/go-llm/configview"
+	"github.com/kstruzzieri/go-llm/provider"
 )
 
 // TestConfigViewResource pins the additive go-llm://configview/v1 resource:
@@ -385,5 +390,97 @@ func TestModelDetailResourceUsesDirectMetadataWhenListFails(t *testing.T) {
 	}
 	if info.Family != "qwen3" || info.ParameterSize != "8B" {
 		t.Fatalf("model detail = %+v, want qwen3 8B metadata", info)
+	}
+}
+
+// breakerRouteEngine serves canned breaker snapshots so the route://breakers
+// projection can be pinned without real breaker clocks.
+type breakerRouteEngine struct {
+	*recordingRouteEngine
+	infos map[string]provider.BreakerInfo
+}
+
+func (e breakerRouteEngine) BreakerInfo(name string) (provider.BreakerInfo, bool) {
+	info, ok := e.infos[name]
+	return info, ok
+}
+
+// TestRouteBreakersResourceJSON pins the route://breakers wire projection:
+// state by name, zero times and nil errors omitted, times in UTC, and the last
+// error reduced to its bounded routing class. Raw error text can carry
+// endpoint URLs and credentials, so it must never reach resource readers.
+func TestRouteBreakersResourceJSON(t *testing.T) {
+	edt := time.FixedZone("EDT", -4*60*60)
+	openFailure := time.Date(2026, 10, 3, 8, 15, 30, 123_000_000, edt)
+	halfOpenFailure := time.Date(2026, 10, 3, 7, 59, 0, 0, edt)
+	urlErr := &url.Error{
+		Op:  "Post",
+		URL: "http://user:hunter2@10.9.8.7:8080/v1/chat/completions?api_key=sk-secret",
+		Err: &net.OpError{Op: "dial", Net: "tcp", Err: errors.New("connect: connection refused")},
+	}
+
+	reg := provider.NewRegistry()
+	for _, name := range []string{"alpha", "beta", "gamma"} {
+		if err := reg.Register(&fakeRouteProvider{name: name}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	s := &Server{
+		providerRegistry: reg,
+		router: breakerRouteEngine{
+			recordingRouteEngine: newRecordingRouteEngine(""),
+			infos: map[string]provider.BreakerInfo{
+				"alpha": {State: provider.BreakerClosed},
+				"beta": {
+					State:       provider.BreakerOpen,
+					Failures:    3,
+					LastFailure: openFailure,
+					LastError:   urlErr,
+					RecoverAt:   openFailure.Add(30 * time.Second),
+				},
+				"gamma": {
+					State:       provider.BreakerHalfOpen,
+					Failures:    3,
+					LastFailure: halfOpenFailure,
+					LastError:   &provider.HTTPStatusError{StatusCode: 503, Status: "503 Service Unavailable"},
+				},
+			},
+		},
+	}
+
+	res, err := s.handleRouteBreakersResource(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("handleRouteBreakersResource() error = %v", err)
+	}
+	got := res.Contents[0].Text
+	for _, leak := range []string{"10.9.8.7", "hunter2", "sk-secret", "refused", "Service Unavailable"} {
+		if strings.Contains(got, leak) {
+			t.Errorf("route://breakers leaks raw error text %q", leak)
+		}
+	}
+	want := `[
+  {
+    "provider": "alpha",
+    "state": "closed",
+    "failures": 0
+  },
+  {
+    "provider": "beta",
+    "state": "open",
+    "failures": 3,
+    "lastFailure": "2026-10-03T12:15:30.123Z",
+    "recoverAt": "2026-10-03T12:16:00.123Z",
+    "lastErrorClass": "network"
+  },
+  {
+    "provider": "gamma",
+    "state": "half-open",
+    "failures": 3,
+    "lastFailure": "2026-10-03T11:59:00Z",
+    "lastErrorClass": "5xx"
+  }
+]`
+	if got != want {
+		t.Errorf("route://breakers JSON:\n%s\nwant:\n%s", got, want)
 	}
 }
