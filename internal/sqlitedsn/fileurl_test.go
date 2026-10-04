@@ -75,6 +75,9 @@ func TestWindowsURIFilenameResolvesAgainstWorkingDirectory(t *testing.T) {
 	unc := windowsAbs(`\\server\share\work`)
 	for _, in := range []string{
 		"file:x.db", "file:/x.db", "file:///x.db", "file://localhost/x.db", "file:sub/x.db?mode=ro",
+		// Only the filename decides whether a file is named: SQLite applies the
+		// last mode option, and callers may change the query after FileURL returns.
+		"file:shared?mode=memory&cache=shared", "file:x.db?mode=memory&mode=rwc", "file:x.db?mode=memory",
 	} {
 		if err := windowsURIFilename(mustParse(t, in), unc); err == nil {
 			t.Errorf("windowsURIFilename(%q) under a UNC working directory = nil, want an error", in)
@@ -83,7 +86,7 @@ func TestWindowsURIFilenameResolvesAgainstWorkingDirectory(t *testing.T) {
 	// These name a drive-letter file, or no file at all.
 	for _, in := range []string{
 		"file:///C:/x.db", "file://localhost/C:/x.db", "file:C:/x.db",
-		"file::memory:", "file::memory:?cache=shared", "file:shared?mode=memory&cache=shared",
+		"file::memory:", "file::memory:?cache=shared",
 		"file:", "file:?mode=ro",
 	} {
 		if err := windowsURIFilename(mustParse(t, in), unc); err != nil {
@@ -200,6 +203,11 @@ func TestFileURLOnWindows(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(dir, "relative.db")); err != nil {
 		t.Errorf("relative URI did not create relative.db in %q: %v", dir, err)
+	}
+
+	// The real filepath.Abs turns NUL into the device path \\.\NUL, which must be rejected.
+	if dsn, err := WithBusyTimeout("file:NUL", 0); err == nil {
+		t.Errorf(`WithBusyTimeout("file:NUL") = %q, want an error: filepath.Abs resolves NUL to the \\.\NUL device`, dsn)
 	}
 }
 

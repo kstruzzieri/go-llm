@@ -67,8 +67,9 @@ func windowsURIPath(abs string) (string, error) {
 // GetFullPathNameW, turns into anything but a drive-letter path. That covers
 // file:%5C%5Cserver%5Cshare, file:/%5C%5C%3F%5CUNC%5C..., file:////server/share,
 // file://server/share, and file:x.db or file:/x.db under a UNC working
-// directory. A temporary or in-memory database names no file and is not
-// resolved.
+// directory. A temporary ("") or :memory: database names no file and is not
+// resolved; the skip reads only the filename, because SQLite applies the last
+// mode option and callers may change the query after FileURL returns.
 func windowsURIFilename(u *url.URL, abs func(string) (string, error)) error {
 	if u.Host != "" && u.Host != "localhost" {
 		return fmt.Errorf("sqlitedsn: URI %q names host %q; only localhost is allowed", u.String(), u.Host)
@@ -83,7 +84,7 @@ func windowsURIFilename(u *url.URL, abs func(string) (string, error)) error {
 	if strings.HasPrefix(strings.ReplaceAll(name, `\`, "/"), "//") {
 		return fmt.Errorf("sqlitedsn: URI %q names a UNC or device path; use a local drive path (SQLite WAL does not work on network filesystems)", u.String())
 	}
-	if name == "" || name == ":memory:" || u.Query().Get("mode") == "memory" {
+	if name == "" || name == ":memory:" {
 		return nil
 	}
 	// SQLite drops the "/" before a drive letter ("/C:/x.db") and resolves
@@ -96,7 +97,7 @@ func windowsURIFilename(u *url.URL, abs func(string) (string, error)) error {
 		return fmt.Errorf("sqlitedsn: resolve URI %q: %w", u.String(), err)
 	}
 	if _, err := windowsURIPath(full); err != nil {
-		return fmt.Errorf("sqlitedsn: URI %q resolves to %q; UNC and device paths are not supported (SQLite WAL does not work on network filesystems)", u.String(), full)
+		return fmt.Errorf("sqlitedsn: URI %q resolves against the working directory to %q; UNC and device paths are not supported (SQLite WAL does not work on network filesystems)", u.String(), full)
 	}
 	return nil
 }
