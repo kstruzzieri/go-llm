@@ -1,9 +1,12 @@
 package compat
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
+	"log"
 	"net/http"
+	"slices"
 	"time"
 
 	"github.com/kstruzzieri/go-llm/provider"
@@ -26,12 +29,14 @@ type StatusResponse struct {
 	Uptime    string            `json:"uptime"`
 }
 
-// ProviderStatus describes one registered backend.
+// ProviderStatus describes one registered backend. A failed health check is
+// reported by its bounded routing class, never its text, which can carry the
+// endpoint URL; the text goes to the server log, truncated to 512 runes.
 type ProviderStatus struct {
-	Name         string   `json:"name"`
-	Healthy      bool     `json:"healthy"`
-	Capabilities []string `json:"capabilities"`
-	Error        string   `json:"error,omitempty"`
+	Name         string              `json:"name"`
+	Healthy      bool                `json:"healthy"`
+	Capabilities []string            `json:"capabilities"`
+	ErrorClass   provider.ErrorClass `json:"error_class,omitempty"`
 }
 
 // WarmModelStatus describes one model currently resident in a provider's memory.
@@ -54,6 +59,10 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	}
 
 	providers := s.providers.All()
+	// All ranges a map; sort so repeated reads list providers in one order.
+	slices.SortFunc(providers, func(a, b provider.Provider) int {
+		return cmp.Compare(a.Name(), b.Name())
+	})
 	out := StatusResponse{
 		Providers: make([]ProviderStatus, 0, len(providers)),
 		Uptime:    time.Since(s.startedAt).Round(time.Second).String(),
@@ -68,7 +77,10 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		err := p.Health(hctx)
 		hcancel()
 		if err != nil {
-			ps.Error = err.Error()
+			ps.ErrorClass = provider.ErrorClassOf(err)
+			// Truncated: an openaicompat error can carry a 64 KiB upstream
+			// body, and this endpoint is polled.
+			log.Printf("compat: status health provider=%s rid=%s: %.512v", ps.Name, requestIDFrom(r.Context()), err)
 		} else {
 			ps.Healthy = true
 			healthy++
@@ -93,10 +105,18 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 				VRAMGB:   wm.Info.VRAM,
 			}
 			if !wm.Info.ExpiresAt.IsZero() {
-				ws.ExpiresAt = wm.Info.ExpiresAt.Format(time.RFC3339)
+				ws.ExpiresAt = wm.Info.ExpiresAt.UTC().Format(time.RFC3339Nano)
 			}
 			out.Warm = append(out.Warm, ws)
 		}
+		// Warmth sources may iterate a map, so sort for a stable read-to-read
+		// order, as route://warmth does.
+		slices.SortFunc(out.Warm, func(a, b WarmModelStatus) int {
+			if c := cmp.Compare(a.Provider, b.Provider); c != 0 {
+				return c
+			}
+			return cmp.Compare(a.Model, b.Model)
+		})
 	}
 
 	w.Header().Set("Content-Type", "application/json")
