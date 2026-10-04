@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"slices"
+	"strings"
 	"testing"
 )
 
@@ -270,6 +271,7 @@ func TestPreflightP0_RequiresAgentflow1xPlanSchema(t *testing.T) {
 		ok      bool
 	}{
 		{"", false}, {"0.3.0", false}, {"0.4.0", false}, {"2.0.0", false}, {"1.x", false}, {"01.0.0", false},
+		{"1.0.0-rc1", false}, {"1.0.0\n", false}, {" 1.0.0", false},
 		{"1.0.0", true}, {"1.2.0", true},
 	} {
 		t.Run("v="+tt.version, func(t *testing.T) {
@@ -293,15 +295,15 @@ func TestPreflightP0_RejectsNonCommandGate(t *testing.T) {
 		ID: "P1", Validation: []string{"manual"},
 		Gates: []Gate{{Kind: "inspection"}},
 	}}}
-	if err := PreflightP0(&p); err == nil {
-		t.Fatal("expected preflight to reject an inspection-only step in P0")
+	if err := PreflightP0(&p); err == nil || !strings.Contains(err.Error(), "P0 supports only command gates") {
+		t.Fatalf("PreflightP0 = %v, want an inspection-only gate rejection", err)
 	}
 }
 
 func TestPreflightP0_RejectsMissingGate(t *testing.T) {
 	p := Plan{SchemaVersion: PlanSchemaVersion, Steps: []Step{{ID: "P1", Validation: []string{"go test"}}}} // no gates[]
-	if err := PreflightP0(&p); err == nil {
-		t.Fatal("expected preflight to reject a step with no structured command gate")
+	if err := PreflightP0(&p); err == nil || !strings.Contains(err.Error(), "P0 requires one gates[] command") {
+		t.Fatalf("PreflightP0 = %v, want a missing-gate rejection", err)
 	}
 }
 
@@ -310,7 +312,7 @@ func TestPreflightP0_RejectsValidationWithoutMatchingCommandGate(t *testing.T) {
 		ID: "P1", Validation: []string{"unit", "lint"},
 		Gates: []Gate{{Kind: "command", Run: []string{"go", "test", "./..."}}},
 	}}}
-	if err := PreflightP0(&p); err == nil {
-		t.Fatal("expected every validation entry to have a matching command gate in P0")
+	if err := PreflightP0(&p); err == nil || !strings.Contains(err.Error(), "P0 requires one gates[] command") {
+		t.Fatalf("PreflightP0 = %v, want a validation/gate count rejection", err)
 	}
 }

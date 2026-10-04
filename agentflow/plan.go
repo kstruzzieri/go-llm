@@ -230,6 +230,10 @@ const PlanSchemaVersion = "1.0.0"
 
 // SupportedSchemaVersion reports whether v is an AgentFlow 1.x schema triple,
 // the only major this adapter drives (#612). AgentFlow owns the minor rule.
+// It applies only to the AgentFlow artifact families that moved to 1.0.0 (plan
+// lock, execution contract, and the step-run, command-receipt, file-receipt and
+// verification-run ledgers); families that stay 0.x at AgentFlow 1.0 (workflow
+// contract, evidence, review runs, runtime) must not be checked with it.
 func SupportedSchemaVersion(v string) bool {
 	parts := schemaVersionPattern.FindStringSubmatch(v)
 	return parts != nil && parts[1] == "1"
