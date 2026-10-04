@@ -74,7 +74,7 @@ func TestDefaultInvariantsMatchToolSchemas(t *testing.T) {
 	exempt := map[string]string{
 		"glob":           "directory listing; the pattern argument bypasses a path check",
 		"list":           "directory listing; a name check would be bypassed by listing the parent",
-		"search":         "no path argument; content exposure is #437's",
+		"search":         "no path argument; its walk skips interceptor.IsCredentialPath files (#627)",
 		"command_status": "handle argument only",
 		"command_tail":   "handle argument only",
 		"stop_command":   "handle argument only",
