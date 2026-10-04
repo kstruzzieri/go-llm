@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -453,6 +454,71 @@ func TestRunCaptureDoesNotMigrateSourceDB(t *testing.T) {
 	}
 	if versionTables != 0 {
 		t.Fatalf("capture created conversation_schema_version table")
+	}
+}
+
+// TestRunCaptureLeavesUncheckpointedWALUntouched covers a source whose writer
+// exited without checkpointing. mode=ro is the only thing stopping capture from
+// checkpointing that WAL into the source: a read-write connection's last close
+// would fold the WAL into the main file and delete it. Capture must still read
+// the row that lives only in the WAL.
+func TestRunCaptureLeavesUncheckpointedWALUntouched(t *testing.T) {
+	ctx := context.Background()
+	src := filepath.Join(t.TempDir(), "src.db")
+	w, err := sql.Open("sqlite", src)
+	if err != nil {
+		t.Fatalf("open writer: %v", err)
+	}
+	w.SetMaxOpenConns(1)
+	t.Cleanup(func() { _ = w.Close() })
+	for _, q := range []string{
+		`PRAGMA journal_mode=WAL`,
+		`CREATE TABLE conversations (id TEXT PRIMARY KEY, title TEXT NOT NULL DEFAULT '', messages TEXT NOT NULL, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL)`,
+		`PRAGMA wal_checkpoint(TRUNCATE)`,
+		`PRAGMA wal_autocheckpoint=0`,
+	} {
+		if _, err := w.ExecContext(ctx, q); err != nil {
+			t.Fatalf("%s: %v", q, err)
+		}
+	}
+	msgs := `[{"role":"system","content":"s"},{"role":"user","content":"q"},{"role":"assistant","content":"a"}]`
+	if _, err := w.ExecContext(ctx, `INSERT INTO conversations VALUES ('c1','t',?,1,2)`, msgs); err != nil {
+		t.Fatalf("insert: %v", err)
+	}
+	mainBefore, err := os.ReadFile(src)
+	if err != nil {
+		t.Fatalf("read main file: %v", err)
+	}
+	walBefore, err := os.ReadFile(src + "-wal")
+	if err != nil || len(walBefore) == 0 {
+		t.Fatalf("fixture invalid: WAL %d bytes, %v", len(walBefore), err)
+	}
+	// Capture runs on a copy that has no live writer, as after a crash.
+	path := filepath.Join(t.TempDir(), "crashed.db")
+	if err := os.WriteFile(path, mainBefore, 0o600); err != nil {
+		t.Fatalf("copy main file: %v", err)
+	}
+	if err := os.WriteFile(path+"-wal", walBefore, 0o600); err != nil {
+		t.Fatalf("copy WAL: %v", err)
+	}
+
+	res, err := runCapture(ctx, captureOptions{DBPath: path, OutputDir: t.TempDir(), Source: "test"})
+	if err != nil {
+		t.Fatalf("runCapture: %v", err)
+	}
+	if len(res.Written) != 1 {
+		t.Fatalf("written = %d, want 1 (the row lives only in the WAL)", len(res.Written))
+	}
+	mainAfter, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read main file after capture: %v", err)
+	}
+	walAfter, err := os.ReadFile(path + "-wal")
+	if err != nil {
+		t.Fatalf("WAL gone after capture: %v", err)
+	}
+	if !bytes.Equal(mainAfter, mainBefore) || !bytes.Equal(walAfter, walBefore) {
+		t.Fatalf("capture changed the source: main %d->%d bytes, WAL %d->%d bytes", len(mainBefore), len(mainAfter), len(walBefore), len(walAfter))
 	}
 }
 
