@@ -45,16 +45,18 @@ func Open(ctx context.Context, path string) (*Store, error) {
 	if path == "" {
 		return nil, fmt.Errorf("transcript: Open requires non-empty path; pass \":memory:\" explicitly")
 	}
+	// The DSN gives every connection a 5s busy_timeout, including
+	// replacements database/sql opens after a context-cancelled statement.
+	// It is built before the file is prepared, so a path it rejects is never
+	// created.
+	dsn, err := sqlitedsn.WithBusyTimeout(path, 5*time.Second)
+	if err != nil {
+		return nil, fmt.Errorf("transcript: open sqlite %q: %w", path, err)
+	}
 	if path != ":memory:" {
 		if err := prepareTranscriptDBFile(path); err != nil {
 			return nil, err
 		}
-	}
-	// The DSN gives every connection a 5s busy_timeout, including
-	// replacements database/sql opens after a context-cancelled statement.
-	dsn, err := sqlitedsn.WithBusyTimeout(path, 5*time.Second)
-	if err != nil {
-		return nil, fmt.Errorf("transcript: open sqlite %q: %w", path, err)
 	}
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
@@ -64,7 +66,8 @@ func Open(ctx context.Context, path string) (*Store, error) {
 	// fresh private DB per connection.
 	db.SetMaxOpenConns(1)
 	if path != ":memory:" {
-		if _, err := db.ExecContext(ctx, "PRAGMA journal_mode=WAL"); err != nil {
+		// EnableWAL retries the switch when another opener races it.
+		if err := sqlitedsn.EnableWAL(ctx, db); err != nil {
 			_ = db.Close()
 			return nil, fmt.Errorf("transcript: PRAGMA journal_mode=WAL: %w", err)
 		}
@@ -126,15 +129,21 @@ func dbPath(path string) string {
 }
 
 func chmodTranscriptDBFiles(path string) error {
+	return chmodTranscriptDBFilesWith(path, os.Chmod)
+}
+
+// chmodTranscriptDBFilesWith is chmodTranscriptDBFiles with the chmod call
+// injected, so tests can remove a sidecar between its Stat and its Chmod.
+func chmodTranscriptDBFilesWith(path string, chmod func(string, os.FileMode) error) error {
 	for _, file := range []string{path, path + "-wal", path + "-shm"} {
-		if err := chmodTranscriptFileIfExists(file); err != nil {
+		if err := chmodTranscriptFileIfExists(file, chmod); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func chmodTranscriptFileIfExists(path string) error {
+func chmodTranscriptFileIfExists(path string, chmod func(string, os.FileMode) error) error {
 	info, err := os.Stat(path)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -145,7 +154,12 @@ func chmodTranscriptFileIfExists(path string) error {
 	if info.IsDir() {
 		return fmt.Errorf("transcript: %q is a directory", path)
 	}
-	if err := os.Chmod(path, transcriptFileMode); err != nil {
+	// Another connection's last close unlinks the WAL sidecars, which can land
+	// between the Stat above and this Chmod; a vanished file is absent.
+	if err := chmod(path, transcriptFileMode); err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
 		return fmt.Errorf("transcript: chmod %q: %w", path, err)
 	}
 	return nil
