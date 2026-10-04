@@ -37,9 +37,10 @@ and network authority (#580).
   against `-root`, not Golem's current directory.
 - Relative and empty `PATH` entries (`.`, `./node_modules/.bin`) are dropped
   from a stdio server's `PATH` (a quoted Windows entry is judged without its
-  quotes and kept as written), and a `PATH` with no absolute entry is omitted
-  (then programs use their own default search path). Servers that relied on a
-  relative entry need absolute entries instead.
+  quotes and kept as written, but one holding a `;` only when the whole entry
+  is quoted), and a `PATH` with no absolute entry is omitted (then programs use
+  their own default search path). Servers that relied on a relative entry need
+  absolute entries instead.
 - On Windows a stdio server always gets `NoDefaultCurrentDirectoryInExePath=1`,
   so a bare program name is not looked up in the workspace root before `PATH`;
   `-mcp-env` may not name it.

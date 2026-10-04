@@ -88,14 +88,25 @@ func unixAbs(entry string) bool { return strings.HasPrefix(entry, "/") }
 
 // windowsAbs accepts a drive letter, colon and separator (C:\x, C:/x) or a
 // UNC prefix (\\server\share). A rooted path without a drive (\x) and a
-// drive-relative path (C:x) depend on the current drive or directory.
+// drive-relative path (C:x) depend on the current drive or directory. A "."
+// or ".." server or share component does not name a fixed volume
+// (filepath.IsAbs refuses ".."); refusing "." also refuses \\.\ device paths.
 func windowsAbs(entry string) bool {
 	sep := func(i int) bool { return i < len(entry) && (entry[i] == '\\' || entry[i] == '/') }
 	if len(entry) >= 3 && entry[1] == ':' && sep(2) {
 		c := entry[0]
 		return 'A' <= c && c <= 'Z' || 'a' <= c && c <= 'z'
 	}
-	return sep(0) && sep(1) && len(entry) > 2 && !sep(2)
+	if !sep(0) || !sep(1) || len(entry) < 3 || sep(2) {
+		return false
+	}
+	volume := strings.FieldsFunc(entry[2:], func(r rune) bool { return r == '\\' || r == '/' })
+	for _, part := range volume[:min(2, len(volume))] {
+		if part == "." || part == ".." {
+			return false
+		}
+	}
+	return true
 }
 
 // hostEnvPolicy selects the running platform's policy.
@@ -209,7 +220,10 @@ func buildServerEnv(p envPolicy, vars []EnvVar, lookup func(string) (string, boo
 // (exec.ErrDot), and prepare refuses ErrDot. Where quotes apply, entries split
 // and are judged as filepath.SplitList does on Windows (a separator inside
 // quotes does not split, an unbalanced quote runs to the end, quotes are
-// removed), and a kept entry is forwarded with its quotes.
+// removed), and a kept entry is forwarded with its quotes. An entry holding a
+// separator is kept only as one whole leading-quote span ("C:\a;b"): libuv
+// (Node's spawn, npx) honours a quote only at the start of an entry, so any
+// other quoted separator would split there into a workspace-relative path.
 func (p envPolicy) absolutePath(list string) string {
 	var entries []string
 	if p.quotes {
@@ -230,6 +244,9 @@ func (p envPolicy) absolutePath(list string) string {
 	for _, entry := range entries {
 		unquoted := entry
 		if p.quotes {
+			if strings.IndexByte(entry, p.listSep) >= 0 && (entry[0] != '"' || strings.Contains(entry[1:len(entry)-1], `"`)) {
+				continue
+			}
 			unquoted = strings.ReplaceAll(entry, `"`, "")
 		}
 		if p.isAbs(unquoted) {

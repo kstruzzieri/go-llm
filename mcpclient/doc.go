@@ -73,13 +73,14 @@
 // definitions, a program replaced at the same path, a file or symlink swapped
 // between check and launch, or changed behavior behind unchanged catalogs and
 // launchers. The child's PATH keeps only its absolute entries (a quoted Windows
-// entry is judged unquoted and kept as written); a PATH with none is omitted,
-// leaving each program its own default search path. PATH values are not
-// identity: a wrapper (env, npx, uvx, sh -c) or a script's #! interpreter binds
-// only the launcher, not what it later finds through those entries. Stdio
-// servers keep the host user's filesystem and network authority. A backup
-// holding both the key and the pins allows offline guessing of low-entropy argv
-// or query secrets. New workspaces and aliases have fresh trust namespaces.
-// Live catalog-change notifications are not handled. Foreign-result provenance
-// and observation fencing remain independent.
+// entry is judged unquoted and kept as written, one holding a separator only
+// when wholly quoted); a PATH with none is omitted, leaving each program its
+// own default search path. PATH values are not identity: a wrapper (env, npx,
+// uvx, sh -c) or a script's #! interpreter binds only the launcher, not what it
+// later finds through those entries. Stdio servers keep the host user's
+// filesystem and network authority. A backup holding both the key and the pins
+// allows offline guessing of low-entropy argv or query secrets. New workspaces
+// and aliases have fresh trust namespaces. Live catalog-change notifications
+// are not handled. Foreign-result provenance and observation fencing remain
+// independent.
 package mcpclient

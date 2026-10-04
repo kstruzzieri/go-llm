@@ -775,14 +775,14 @@ value does not change the connection; an upgrade that moves a symlink to a new
 versioned path changes `target`. A file or symlink swapped between the check and
 the launch is not detected. Relative and empty `PATH` entries (`.`,
 `./node_modules/.bin`) are dropped from the server's `PATH`; on Windows a quoted
-entry is judged without its quotes and kept as written. A `PATH` with no
-absolute entry is omitted (then programs use their own default search path). The
-value of `PATH` is not part of the connection: with a wrapper such as
-`env KEY=val command`, `npx`, `uvx` or `sh -c '…'`, or a script that starts
-`#!/usr/bin/env node`, only the wrapper or script is bound, so the program it
-finds through the absolute `PATH` entries, or the interpreter a `#!` line names,
-can change without `connection_changed`. Prefer an absolute launcher path to a
-wrapper.
+entry is judged without its quotes and kept as written, but one holding a `;`
+only when the whole entry is quoted. A `PATH` with no absolute entry is omitted
+(then programs use their own default search path). The value of `PATH` is not
+part of the connection: with a wrapper such as `env KEY=val command`, `npx`,
+`uvx` or `sh -c '…'`, or a script that starts `#!/usr/bin/env node`, only the
+wrapper or script is bound, so the program it finds through the absolute `PATH`
+entries, or the interpreter a `#!` line names, can change without
+`connection_changed`. Prefer an absolute launcher path to a wrapper.
 
 HTTP servers are pinned to that one endpoint: every request must target it
 exactly, and every redirect is refused, same-origin included

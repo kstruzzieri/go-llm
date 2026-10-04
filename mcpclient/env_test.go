@@ -268,6 +268,11 @@ func TestBuildServerEnvDropsRelativePathEntries(t *testing.T) {
 		// filepath.SplitList; the whole tail is one entry, judged unquoted.
 		{"windows unbalanced quote absolute", windowsEnvPolicy, nil, "PATH", `C:\x;"C:\y;rel`, []string{forced, `PATH=C:\x;"C:\y;rel`}},
 		{"windows unbalanced quote relative", windowsEnvPolicy, nil, "PATH", `C:\x;"rel;C:\y`, []string{forced, `PATH=C:\x`}},
+		// libuv (Node's spawn, npx) honours a quote only at the start of an
+		// entry, so any other quoted separator would split there: dropped.
+		{"windows mid-entry quoted separator", windowsEnvPolicy, nil, "PATH", `C:\"x;rel";C:\ok`, []string{forced, `PATH=C:\ok`}},
+		{"windows several quote spans", windowsEnvPolicy, nil, "PATH", `"C:\a"x"y;rel";C:\ok`, []string{forced, `PATH=C:\ok`}},
+		{"windows mid-entry unbalanced quote", windowsEnvPolicy, nil, "PATH", `C:\x;C:\"y;rel`, []string{forced, `PATH=C:\x`}},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			lookup := func(name string) (string, bool) {
@@ -301,6 +306,12 @@ func TestEnvPolicyPathRules(t *testing.T) {
 		{windowsEnvPolicy, `\\srv\share`, true},
 		{windowsEnvPolicy, "//srv/share", true},
 		{windowsEnvPolicy, `\\\x`, false},
+		{windowsEnvPolicy, `\\srv\share\bin`, true},
+		{windowsEnvPolicy, `\\..\x`, false},
+		{windowsEnvPolicy, `\\.\..\x`, false},
+		{windowsEnvPolicy, `\\a\..`, false},
+		{windowsEnvPolicy, `\\a\.\x`, false},
+		{windowsEnvPolicy, `\\.\C:\bin`, false}, // a "." server is refused, device paths included
 		{windowsEnvPolicy, `\rooted`, false},
 		{windowsEnvPolicy, "/rooted", false},
 		{windowsEnvPolicy, "C:rel", false},
