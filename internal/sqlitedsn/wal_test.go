@@ -136,6 +136,9 @@ func TestEnableWALStopsAtBudget(t *testing.T) {
 	if elapsed < 200*time.Millisecond {
 		t.Fatalf("gave up after %v, want retries for the 200ms budget", elapsed)
 	}
+	if elapsed > budgetSlack(200*time.Millisecond) {
+		t.Fatalf("returned after %v; the later ctx deadline extended the 200ms budget", elapsed)
+	}
 }
 
 // Integration check for the per-attempt cap; TestSetBusyTimeoutCap is the
@@ -418,13 +421,17 @@ func TestEnableWALStopsAtContextDeadline(t *testing.T) {
 	start := time.Now()
 	err := EnableWAL(ctx, db)
 	elapsed := time.Since(start)
-	// Which one depends on whether the deadline lands inside SQLite's wait or
-	// in the 1ms pause between attempts; the bound below is the contract.
+	// Either error is correct: modernc returns ctx.Err() when the deadline lands
+	// inside an attempt, and SQLite's BUSY can win the race; the bounds below
+	// are the contract.
 	var se *sqlite.Error
 	if !errors.Is(err, context.DeadlineExceeded) && (!errors.As(err, &se) || se.Code()&0xff != sqlite3.SQLITE_BUSY) {
 		t.Fatalf("err = %v, want SQLITE_BUSY or context.DeadlineExceeded", err)
 	}
 	t.Logf("elapsed %v", elapsed)
+	if elapsed < 150*time.Millisecond {
+		t.Fatalf("gave up after %v, want lock waits until the 200ms ctx deadline", elapsed)
+	}
 	if elapsed > budgetSlack(200*time.Millisecond) {
 		t.Fatalf("returned after %v; the 200ms ctx deadline did not end the 5s budget", elapsed)
 	}
