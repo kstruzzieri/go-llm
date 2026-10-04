@@ -48,6 +48,8 @@ const (
 	concurrentOpenDone      = "GO_LLM_SQLITETEST_DONE"
 )
 
+var concurrentOpenCalls sync.Map // *testing.T -> struct{}; one call per test
+
 // RunConcurrentFirstOpens checks that procs processes opening one new
 // database path at the same moment all succeed and leave it in WAL mode, once
 // per trial on a fresh path. Call it once, from a top-level test: the parent
@@ -62,6 +64,9 @@ const (
 // GO_LLM_SQLITETEST_OPEN_TRIALS overrides trials, for mutation runs.
 func RunConcurrentFirstOpens(t *testing.T, procs, trials int, open func(ctx context.Context, path string) (io.Closer, error)) {
 	t.Helper()
+	if _, dup := concurrentOpenCalls.LoadOrStore(t, struct{}{}); dup {
+		t.Fatalf("RunConcurrentFirstOpens called twice in %s; call it once per top-level test", t.Name())
+	}
 	if path := os.Getenv(concurrentOpenPathEnv); path != "" {
 		concurrentOpenChild(t, path, open)
 		return
@@ -154,7 +159,7 @@ func concurrentOpenTrial(t *testing.T, trial, procs int) {
 // and reported before the test binary panics on -test.timeout.
 func trialTimeout(remaining time.Duration, hasDeadline bool) time.Duration {
 	if hasDeadline {
-		return min(time.Minute, remaining*3/4)
+		return min(time.Minute, remaining-remaining/4)
 	}
 	return time.Minute
 }

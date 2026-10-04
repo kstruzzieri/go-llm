@@ -69,6 +69,7 @@ func TestRunConcurrentFirstOpensFails(t *testing.T) {
 		{"skip", "done: false"},
 		{"one-proc", "procs=1"},
 		{"zero-trials", "trials=0"},
+		{"twice", "called twice"},
 	} {
 		t.Run(tc.mode, func(t *testing.T) {
 			cmd := exec.Command(os.Args[0], "-test.run=^TestRunConcurrentFirstOpensFails$", "-test.count=1")
@@ -96,6 +97,9 @@ func runFailingHarness(t *testing.T, mode string) {
 		sqlitetest.RunConcurrentFirstOpens(t, 1, 1, openWAL)
 	case "zero-trials":
 		sqlitetest.RunConcurrentFirstOpens(t, 2, 0, openWAL)
+	case "twice":
+		sqlitetest.RunConcurrentFirstOpens(t, 2, 1, openWAL)
+		sqlitetest.RunConcurrentFirstOpens(t, 2, 1, openWithoutWAL)
 	default:
 		t.Fatalf("unknown %s=%q", harnessModeEnv, mode)
 	}
