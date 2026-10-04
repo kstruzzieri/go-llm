@@ -135,14 +135,16 @@ func (i sessionInfo) line() string {
 // and loads the keyed conversation. A missing row is a new session (not an
 // error); any other load error is surfaced so the caller can disable + report.
 func openSession(ctx context.Context, dbPath, id string) (*session, sessionInfo, error) {
-	if err := prepareDBFile(dbPath); err != nil {
-		return nil, sessionInfo{}, err
-	}
 	// The DSN gives every connection a 5s busy_timeout, including
 	// replacements database/sql opens after a context-cancelled statement.
+	// It is built before the file is prepared, so a path it rejects is never
+	// created.
 	dsn, err := sqlitedsn.WithBusyTimeout(dbPath, 5*time.Second)
 	if err != nil {
 		return nil, sessionInfo{}, fmt.Errorf("golem: open session db %q: %w", dbPath, err)
+	}
+	if err := prepareDBFile(dbPath); err != nil {
+		return nil, sessionInfo{}, err
 	}
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
@@ -150,7 +152,8 @@ func openSession(ctx context.Context, dbPath, id string) (*session, sessionInfo,
 	}
 	// One connection serializes writes.
 	db.SetMaxOpenConns(1)
-	if _, err := db.ExecContext(ctx, "PRAGMA journal_mode=WAL"); err != nil {
+	// EnableWAL retries the switch when another opener races it.
+	if err := sqlitedsn.EnableWAL(ctx, db); err != nil {
 		_ = db.Close()
 		return nil, sessionInfo{}, fmt.Errorf("golem: session db PRAGMA journal_mode=WAL: %w", err)
 	}
