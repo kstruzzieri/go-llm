@@ -78,8 +78,9 @@ func OpenHardenedDB(ctx context.Context, path string) (*sql.DB, error) {
 // SecureDBFiles chmods the DB file and its -wal/-shm sidecars to 0600.
 // Missing sidecars are skipped, including one another connection's last
 // close unlinks between its stat and chmod. Callers invoke this after
-// migrations and after every write (WAL checkpoints can recreate sidecars
-// honoring the umask, not the DB file's mode).
+// migrations and after every write: SQLite gives a new sidecar the DB file's
+// mode, but a sidecar left with looser bits (by an older run or a looser DB
+// file) keeps them.
 func SecureDBFiles(path string) error { return secureDBFilesWith(path, os.Chmod) }
 
 // secureDBFilesWith is SecureDBFiles with the chmod call injected, so tests

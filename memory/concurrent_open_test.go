@@ -49,6 +49,36 @@ func TestSecureDBFilesSkipsSidecarRemovedAfterStat(t *testing.T) {
 	}
 }
 
+// A sidecar that vanishes must not stop the others from being secured: with
+// only -wal removed after its Stat, a loose -shm must still end up 0600.
+func TestSecureDBFilesKeepsGoingAfterVanishedSidecar(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("file mode bits are not portable on Windows")
+	}
+	path := filepath.Join(t.TempDir(), "m.db")
+	for _, p := range []string{path, path + "-wal", path + "-shm"} {
+		if err := os.WriteFile(p, nil, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	chmod := func(p string, mode os.FileMode) error {
+		if p == path+"-wal" {
+			_ = os.Remove(p)
+		}
+		return os.Chmod(p, mode)
+	}
+	if err := secureDBFilesWith(path, chmod); err != nil {
+		t.Fatalf("secureDBFilesWith = %v, want nil", err)
+	}
+	info, err := os.Stat(path + "-shm")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := info.Mode().Perm(); got != dbFileMode {
+		t.Fatalf("-shm mode = %v, want %v", got, os.FileMode(dbFileMode))
+	}
+}
+
 // Only a vanished file is tolerated: any other chmod error must fail, or the
 // database could stay readable by others.
 func TestSecureDBFilesReportsChmodError(t *testing.T) {
