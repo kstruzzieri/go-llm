@@ -12,6 +12,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/kstruzzieri/go-llm/agent"
 	"github.com/kstruzzieri/go-llm/agentflow"
@@ -43,7 +44,10 @@ func (f *fakeAF) failure(name string) error {
 	return f.failAt[name]
 }
 
-func (f *fakeAF) Probe(context.Context) error { f.seq = append(f.seq, "probe"); return nil }
+func (f *fakeAF) Probe(context.Context) error {
+	f.seq = append(f.seq, "probe")
+	return f.failure("probe")
+}
 func (f *fakeAF) ProbeParallel(context.Context) error {
 	f.seq = append(f.seq, "probe-parallel")
 	return f.failure("probe-parallel")
@@ -1037,6 +1041,77 @@ func TestRunAgentflowTask_RejectsZeroXPlanBeforeClientUse(t *testing.T) {
 	}
 	if got, readErr := os.ReadFile(calls); readErr == nil {
 		t.Fatalf("AgentFlow ran before the schema check: %q", got)
+	}
+}
+
+// #612 U7: with a rejected AgentFlow, fresh runs and resume make no call but
+// --version: resume probes first (R6), and the failure report does not ask the
+// refused binary for next-action or status (R10).
+func TestRunAgentflowTask_RejectedVersionMakesNoOtherCall(t *testing.T) {
+	for _, resume := range []bool{false, true} {
+		t.Run(fmt.Sprintf("resume=%t", resume), func(t *testing.T) {
+			root := t.TempDir()
+			calls := fakeAgentflowOnPath(t, "0.4.0")
+			planBytes, err := json.Marshal(agentflow.Compile(validTraceableIR()))
+			if err != nil {
+				t.Fatal(err)
+			}
+			planPath := filepath.Join(t.TempDir(), "plan.json")
+			if err := os.WriteFile(planPath, planBytes, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			sess := &replSession{orch: agent.New(&scriptCaller{}, agent.ContextManager{}), maxSteps: 4, clock: time.Now}
+			var stdout, stderr bytes.Buffer
+			err = runAgentflowTask(context.Background(), &stdout, &stderr, nil, sess, flags{
+				planPath: planPath, approveEdits: true, approveGates: true, agentflowResume: resume,
+			}, root)
+			if !errors.Is(err, errAgentflowTaskFailed) {
+				t.Fatalf("err = %v, want errAgentflowTaskFailed", err)
+			}
+			if !strings.Contains(stderr.String(), "agentflow 0.4 is too old; need >= 1.0") {
+				t.Fatalf("stderr = %q, want the version rejection", stderr.String())
+			}
+			got, err := os.ReadFile(calls)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(got) != "--version\n" {
+				t.Fatalf("AgentFlow calls = %q, want only --version", got)
+			}
+		})
+	}
+}
+
+// The driver marks every probe failure, so runAgentflowTask can skip recovery.
+// Each row fails one probe; parallel and review probes run only when their
+// feature is configured.
+func TestDriverRun_MarksProbeFailuresUnavailable(t *testing.T) {
+	for _, tt := range []struct {
+		probe    string
+		parallel bool
+		review   string
+	}{
+		{probe: "probe"},
+		{probe: "probe-parallel", parallel: true},
+		{probe: "probe-workflow"},
+		{probe: "probe-review", review: "review.json"},
+	} {
+		af := &fakeAF{failAt: map[string]error{tt.probe: errors.New("too old")}}
+		d := &driver{
+			af: af, plan: stopTestPlan(), reviewManifest: tt.review,
+			runStep: func(context.Context, agentflow.Step, string, string) error { return nil },
+		}
+		if tt.parallel {
+			d.parallelCohort = func(context.Context) error { return nil }
+		}
+		_, err := d.run(context.Background())
+		var unavailable *agentflowUnavailableError
+		if !errors.As(err, &unavailable) || !strings.Contains(err.Error(), "too old") {
+			t.Fatalf("%s failure = %v, want *agentflowUnavailableError wrapping it", tt.probe, err)
+		}
+		if got := af.seq[len(af.seq)-1]; got != tt.probe {
+			t.Fatalf("%s: last call = %q (seq %v), want the failing probe", tt.probe, got, af.seq)
+		}
 	}
 }
 

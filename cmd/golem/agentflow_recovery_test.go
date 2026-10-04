@@ -458,7 +458,7 @@ func TestAgentflowRecoveryOutputEscapesTerminalControls(t *testing.T) {
 		t.Fatal(err)
 	}
 	var report bytes.Buffer
-	reportAgentflowRecovery(context.Background(), &report, agentflow.NewOwnedClient(&recoveryRunner{payload: payload}, t.TempDir(), "golem"))
+	reportAgentflowRecovery(context.Background(), &report, agentflow.NewOwnedClient(&recoveryRunner{payload: payload}, t.TempDir(), "golem"), nil)
 	if strings.Contains(report.String(), "\x1b") || strings.Contains(report.String(), "\u0085") || strings.Contains(report.String(), "\nproof: verified\n") {
 		t.Fatalf("raw terminal control or forged line reached recovery report: %q", report.String())
 	}
@@ -947,7 +947,7 @@ func TestResumeReentersExistingSerialStepLoop(t *testing.T) {
 		t.Fatalf("state=%q err=%v", final.State, err)
 	}
 	want := []string{
-		"next-action", "next-step", "claim:P1", "model:P1",
+		"probe", "next-action", "next-step", "claim:P1", "model:P1",
 		"next-action",
 		"gate:P1:unit-tests", "gate:P1:lint", "finish-step:P1:A-P1",
 		"next-step", "finish-run", "next-action",
@@ -996,7 +996,7 @@ func TestResumeRunsMultipleRemainingStepsSerially(t *testing.T) {
 		t.Fatalf("state=%q err=%v", final.State, err)
 	}
 	want := []string{
-		"next-action", "next-step", "claim:P1", "model:P1",
+		"probe", "next-action", "next-step", "claim:P1", "model:P1",
 		"next-action", "gate:P1:unit-tests", "gate:P1:lint", "finish-step:P1:A-P1",
 		"next-step", "claim:P2", "model:P2",
 		"next-action", "gate:P2:unit-tests-2", "finish-step:P2:A-P2",
@@ -1030,7 +1030,7 @@ func TestResumeRejectsFiniteEnforcedRecoveryBeforeMutation(t *testing.T) {
 			if _, err := d.resume(context.Background(), fixture.root, fixture.planJSON, nil); err == nil || !strings.Contains(err.Error(), "finite enforced lease") {
 				t.Fatalf("resume error = %v, want finite enforced lease refusal", err)
 			}
-			if want := []string{"next-action"}; !reflect.DeepEqual(af.seq, want) {
+			if want := []string{"probe", "next-action"}; !reflect.DeepEqual(af.seq, want) {
 				t.Fatalf("mutations before lease refusal = %v, want %v", af.seq, want)
 			}
 		})
@@ -1063,7 +1063,7 @@ func TestResumeReentryRefusesAlreadySatisfiedGateInsteadOfDuplicatingIt(t *testi
 	if _, err := d.resume(context.Background(), initialFixture.root, initialFixture.planJSON, nil); err == nil || !strings.Contains(err.Error(), "refusing duplicate execution") {
 		t.Fatalf("resume error = %v, want duplicate gate refusal", err)
 	}
-	want := []string{"next-action", "next-step", "claim:P1", "model:P1", "next-action"}
+	want := []string{"probe", "next-action", "next-step", "claim:P1", "model:P1", "next-action"}
 	if !reflect.DeepEqual(af.seq, want) || len(af.gateArgv) != 0 {
 		t.Fatalf("calls before duplicate refusal = %v argv=%v, want %v and no gate argv", af.seq, af.gateArgv, want)
 	}
@@ -1082,7 +1082,7 @@ func TestResumeProgressReadOccursOnlyAfterSettlement(t *testing.T) {
 		if _, err := d.resume(context.Background(), fixture.root, fixture.planJSON, nil); err == nil || !strings.Contains(err.Error(), "did not progress") {
 			t.Fatalf("resume error = %v", err)
 		}
-		want := []string{"next-action", "finish-step:P1:A1", "next-action"}
+		want := []string{"probe", "next-action", "finish-step:P1:A1", "next-action"}
 		if !reflect.DeepEqual(af.seq, want) {
 			t.Fatalf("seq = %v, want %v", af.seq, want)
 		}
@@ -1098,7 +1098,7 @@ func TestResumeProgressReadOccursOnlyAfterSettlement(t *testing.T) {
 			if _, err := d.resume(context.Background(), fixture.root, fixture.planJSON, nil); err != nil {
 				t.Fatal(err)
 			}
-			want := []string{"next-action", "next-step", "finish-run", "next-action"}
+			want := []string{"probe", "next-action", "next-step", "finish-run", "next-action"}
 			if !reflect.DeepEqual(af.seq, want) {
 				t.Fatalf("seq = %v, want %v", af.seq, want)
 			}
@@ -1118,15 +1118,15 @@ func TestResumeSettlementContinuesSeriallyWithoutRepeatingMutation(t *testing.T)
 				{Kind: "command", Label: "go test ./...", Status: "satisfied"},
 				{Kind: "command", Label: "go vet ./...", Status: "missing"},
 			},
-			want: []string{"next-action", "gate:P1:lint", "finish-step:P1:A1", "next-action", "next-step", "finish-run", "next-action"},
+			want: []string{"probe", "next-action", "gate:P1:lint", "finish-step:P1:A1", "next-action", "next-step", "finish-run", "next-action"},
 		},
 		{
 			state: "step_unverified",
-			want:  []string{"next-action", "finish-step:P1:A1", "next-action", "next-step", "finish-run", "next-action"},
+			want:  []string{"probe", "next-action", "finish-step:P1:A1", "next-action", "next-step", "finish-run", "next-action"},
 		},
 		{
 			state: "step_uncompleted",
-			want:  []string{"next-action", "complete-step:P1:A1", "next-action", "next-step", "finish-run", "next-action"},
+			want:  []string{"probe", "next-action", "complete-step:P1:A1", "next-action", "next-step", "finish-run", "next-action"},
 		},
 	}
 	for _, test := range tests {
@@ -1158,7 +1158,7 @@ func TestResumeBlockedStatesDoNotMutate(t *testing.T) {
 			if _, err := d.resume(context.Background(), fixture.root, fixture.planJSON, nil); err == nil {
 				t.Fatal("resume unexpectedly succeeded")
 			}
-			if want := []string{"next-action"}; !reflect.DeepEqual(af.seq, want) {
+			if want := []string{"probe", "next-action"}; !reflect.DeepEqual(af.seq, want) {
 				t.Fatalf("seq = %v, want read-only %v", af.seq, want)
 			}
 		})

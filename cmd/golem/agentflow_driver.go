@@ -61,6 +61,13 @@ type runStoppedError struct{ reason agent.StopReason }
 
 func (e *runStoppedError) Error() string { return "agent run stopped: " + e.reason.String() }
 
+// agentflowUnavailableError marks a failed version gate or capability probe.
+// A refused AgentFlow is not asked for recovery advice (#612 R10).
+type agentflowUnavailableError struct{ err error }
+
+func (e *agentflowUnavailableError) Error() string { return e.err.Error() }
+func (e *agentflowUnavailableError) Unwrap() error { return e.err }
+
 // beforeGatesFunc is a resume-only, read-only safety check invoked after the
 // model has recorded file receipts and immediately before any command gate.
 // Fresh execution leaves it nil and preserves the existing driver sequence.
@@ -133,15 +140,15 @@ func validateFreshWorkerProjection(state agentflow.NextActionState, agentID stri
 // run drives the P0 sequence and returns the proof-pack path on success.
 func (d *driver) run(ctx context.Context) (string, error) {
 	if err := d.af.Probe(ctx); err != nil {
-		return "", fmt.Errorf("agentflow unavailable: %w", err)
+		return "", &agentflowUnavailableError{fmt.Errorf("agentflow unavailable: %w", err)}
 	}
 	if d.parallelCohort != nil {
 		if err := d.af.ProbeParallel(ctx); err != nil {
-			return "", fmt.Errorf("agentflow parallel runtime unavailable: %w", err)
+			return "", &agentflowUnavailableError{fmt.Errorf("agentflow parallel runtime unavailable: %w", err)}
 		}
 	}
 	if err := d.af.ProbeWorkflow(ctx); err != nil {
-		return "", fmt.Errorf("agentflow workflow routing unavailable: %w", err)
+		return "", &agentflowUnavailableError{fmt.Errorf("agentflow workflow routing unavailable: %w", err)}
 	}
 	var recommendation agentflow.WorkflowRecommendation
 	if d.approvedRecommendation != nil {
@@ -160,7 +167,7 @@ func (d *driver) run(ctx context.Context) (string, error) {
 	}
 	if d.reviewManifest != "" {
 		if err := d.af.ProbeReview(ctx); err != nil {
-			return "", fmt.Errorf("agentflow review unavailable: %w", err)
+			return "", &agentflowUnavailableError{fmt.Errorf("agentflow review unavailable: %w", err)}
 		}
 	}
 	if err := d.af.Init(ctx); err != nil {
@@ -602,7 +609,7 @@ func runAgentflowTask(ctx context.Context, stdout, stderr io.Writer, interrupts 
 		final, err := d.resume(runCtx, root, planBytes, approvedRecommendation)
 		if err != nil {
 			reportAgentflowResumeError(stderr, err)
-			reportAgentflowRecovery(ctx, stderr, client)
+			reportAgentflowRecovery(ctx, stderr, client, err)
 			return errAgentflowTaskFailed
 		}
 		summary, err := verifiedAgentflowProofSummary(runCtx, client)
@@ -631,7 +638,7 @@ func runAgentflowTask(ctx context.Context, stdout, stderr io.Writer, interrupts 
 	proof, err := runTaskDriver(runCtx, d, coordinator, stderr)
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "agentflow task failed: %s\n", recoveryDisplayText(err.Error()))
-		reportAgentflowRecovery(ctx, stderr, client)
+		reportAgentflowRecovery(ctx, stderr, client, err)
 		return errAgentflowTaskFailed
 	}
 	_, _ = fmt.Fprintf(stdout, "proof pack: %s\n", proof)
@@ -1000,8 +1007,14 @@ func writeStepGoalList(b *strings.Builder, values []string) {
 
 // reportAgentflowRecovery prints the authoritative AgentFlow recovery state after
 // a failed run. next-action is advisory only: its command is printed, never
-// executed, so proof state stays adapter-driven.
-func reportAgentflowRecovery(ctx context.Context, out io.Writer, client *agentflow.Client) {
+// executed, so proof state stays adapter-driven. cause is the failure being
+// reported: when AgentFlow itself was unavailable (version gate or capability
+// probe) the binary is not asked for advice (#612 R10).
+func reportAgentflowRecovery(ctx context.Context, out io.Writer, client *agentflow.Client, cause error) {
+	var unavailable *agentflowUnavailableError
+	if errors.As(cause, &unavailable) {
+		return // #612 R10: a refused AgentFlow gives no recovery advice
+	}
 	if st, err := client.NextAction(ctx); err == nil {
 		_, _ = fmt.Fprintf(out, "agentflow next-action: %s", recoveryDisplayText(st.State))
 		if st.Reason != "" {
