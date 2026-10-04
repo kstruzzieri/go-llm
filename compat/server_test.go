@@ -6,6 +6,8 @@ import (
 	"net"
 	"net/http"
 	"runtime"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 )
@@ -40,6 +42,68 @@ func TestListenAndServe_NonLoopbackWithoutTLSErrors(t *testing.T) {
 	}
 	if !errors.Is(err, ErrNonLoopbackRequiresTLS) {
 		t.Fatalf("want ErrNonLoopbackRequiresTLS, got %v", err)
+	}
+}
+
+// A WithCORS origin that no browser sends as Origin would start a server that
+// refuses every POST from the intended client, so ListenAndServe refuses it.
+// The server is closed first: an accepted origin then reaches the closed check
+// and returns http.ErrServerClosed without binding.
+func TestListenAndServe_CORSOrigin(t *testing.T) {
+	cases := []struct {
+		name   string
+		origin string
+		valid  bool
+	}{
+		{"disabled", "", true},
+		{"star", "*", true},
+		{"https origin", "https://app.example", true},
+		{"origin with port", "http://localhost:3000", true},
+		{"zero port", "https://app.example:0", true},
+		{"maximum port", "https://app.example:65535", true},
+		{"ipv6 without port", "http://[::1]", true},
+		{"ipv6 origin", "http://[::1]:8080", true},
+		{"non-http scheme", "chrome-extension://abcdefghijklmnop", true},
+		{"trailing slash", "https://app.example/", false},
+		{"no scheme", "app.example", false},
+		{"no host", "https://", false},
+		{"unparseable", "https://app example", false},
+		{"null", "null", false},
+		{"upper-case host", "https://App.example", false},
+		{"default https port", "https://app.example:443", false},
+		{"default http port", "http://localhost:80", false},
+		{"padded default https port", "https://app.example:0443", false},
+		{"padded default http port", "http://localhost:080", false},
+		{"padded non-default port", "http://localhost:03000", false},
+		{"padded zero port", "https://app.example:00", false},
+		{"empty port", "https://app.example:", false},
+		{"empty ipv6 port", "http://[::1]:", false},
+		{"out-of-range port", "https://app.example:65536", false},
+		{"out-of-range ipv6 port", "http://[::1]:65536", false},
+		{"overflowing port", "https://app.example:18446744073709551616", false},
+		{"userinfo", "https://user@app.example", false},
+		{"empty query", "https://app.example?", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s := New(nil, nil, nil, WithCORS(tc.origin))
+			if err := s.Close(); err != nil {
+				t.Fatalf("Close: %v", err)
+			}
+			err := s.ListenAndServe(context.Background())
+			if tc.valid {
+				if !errors.Is(err, http.ErrServerClosed) {
+					t.Fatalf("ListenAndServe = %v, want http.ErrServerClosed (origin accepted)", err)
+				}
+				return
+			}
+			if !errors.Is(err, ErrInvalidCORSOrigin) {
+				t.Fatalf("ListenAndServe = %v, want ErrInvalidCORSOrigin", err)
+			}
+			if !strings.Contains(err.Error(), strconv.Quote(tc.origin)) {
+				t.Errorf("error %q does not name the origin", err)
+			}
+		})
 	}
 }
 

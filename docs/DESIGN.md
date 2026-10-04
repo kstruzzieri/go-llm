@@ -413,7 +413,7 @@ func (s *Server) Close() error
 
 **4 prompt templates:** `code-review`, `explain`, `rag-query`, `refactor`
 
-**5 resources:** `go-llm://health`, `go-llm://models`, `go-llm://models/{name}`, `go-llm://rag/stats`, `go-llm://config`
+**9 resources:** `go-llm://health`, `go-llm://models`, `go-llm://models/{name}`, `go-llm://rag/stats`, `go-llm://config`, `go-llm://configview/v1`, and the routing diagnostics `route://breakers`, `route://warmth`, `route://sticky`
 
 **Key design decisions:**
 - Stateful `Server` struct wraps `ollama.Client` + optional `rag.VectorStore`/`rag.Indexer`/`rag.Retriever`
