@@ -970,8 +970,26 @@ func TestValidateTraceability_RejectsInvalidReferences(t *testing.T) {
 	}
 }
 
+// fakeAgentflowOnPath puts an `agentflow` script first on PATH. It appends each
+// invocation's arguments to a log and answers --version with version; any
+// other call prints {}. The returned log path exists only once the script ran.
+func fakeAgentflowOnPath(t *testing.T, version string) string {
+	t.Helper()
+	bin := t.TempDir()
+	log := filepath.Join(t.TempDir(), "calls")
+	script := "#!/bin/sh\nprintf '%s\\n' \"$*\" >> " + shellQuote(log) + "\n" +
+		"if [ \"$1\" = --version ]; then printf 'agentflow %s\\n' " + shellQuote(version) + "; exit 0; fi\n" +
+		"printf '{}\\n'\n"
+	if err := os.WriteFile(filepath.Join(bin, "agentflow"), []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	return log
+}
+
 func TestRunAgentflowTask_RejectsInvalidTraceabilityBeforeClientUse(t *testing.T) {
 	planJSON := `{
+		"schema_version":"1.0.0",
 		"requirements":[{"id":"REQ-1","text":"behavior","acceptance_criteria":[{"id":"AC-1","text":"verified","review":{"minimum_depth":"deep"}}]}],
 		"steps":[{"id":"P1","files":["a.go"],"criterion_ids":["AC-MISSING"],"validation":["true"],"gates":[{"kind":"command","run":["true"]}]}]
 	}`
@@ -992,9 +1010,39 @@ func TestRunAgentflowTask_RejectsInvalidTraceabilityBeforeClientUse(t *testing.T
 	}
 }
 
+// #612 R4: a 0.x plan file is refused before any AgentFlow call.
+func TestRunAgentflowTask_RejectsZeroXPlanBeforeClientUse(t *testing.T) {
+	calls := fakeAgentflowOnPath(t, "1.0.0")
+	plan := agentflow.Compile(validTraceableIR())
+	plan.SchemaVersion = "0.3.0"
+	planBytes, err := json.Marshal(plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	planPath := filepath.Join(t.TempDir(), "plan.json")
+	if err := os.WriteFile(planPath, planBytes, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	sess := &replSession{orch: agent.New(&scriptCaller{}, agent.ContextManager{})}
+	var stdout, stderr bytes.Buffer
+	err = runAgentflowTask(context.Background(), &stdout, &stderr, nil, sess, flags{
+		planPath: planPath, approveEdits: true, approveGates: true,
+	}, t.TempDir())
+	want := `plan schema_version "0.3.0" is not an AgentFlow 1.x plan; migrate it to schema_version 1.0.0 and review it again, or re-plan with -goal after moving any existing .agent/ aside`
+	if err == nil || err.Error() != want {
+		t.Fatalf("err = %v, want %q", err, want)
+	}
+	if stdout.Len() != 0 || stderr.Len() != 0 {
+		t.Fatalf("schema rejection used task output: stdout=%q stderr=%q", stdout.String(), stderr.String())
+	}
+	if got, readErr := os.ReadFile(calls); readErr == nil {
+		t.Fatalf("AgentFlow ran before the schema check: %q", got)
+	}
+}
+
 func TestRunAgentflowTask_RejectsInvalidDesignTraceabilityBeforeClientUse(t *testing.T) {
 	planJSON := `{
-		"schema_version":"0.4.0",
+		"schema_version":"1.0.0",
 		"design_decisions":[],
 		"steps":[{"id":"P1","files":["a.go"],"design_decision_ids":["DD-MISSING"],"validation":["true"],"gates":[{"kind":"command","run":["true"]}]}]
 	}`
@@ -1328,7 +1376,7 @@ func TestReadEvidenceSidecar(t *testing.T) {
 // a headless run missing either approval class errors before building the runner
 // or touching agentflow (no binary is on PATH here).
 func TestRunAgentflowTask_RequiresApprovalFlags(t *testing.T) {
-	planJSON := `{"steps":[{"id":"P1","files":["a.go"],"validation":["go test"],"gates":[{"kind":"command","run":["go","test"]}]}]}`
+	planJSON := `{"schema_version":"1.0.0","steps":[{"id":"P1","files":["a.go"],"validation":["go test"],"gates":[{"kind":"command","run":["go","test"]}]}]}`
 	planPath := filepath.Join(t.TempDir(), "plan.json")
 	if err := os.WriteFile(planPath, []byte(planJSON), 0o600); err != nil {
 		t.Fatal(err)

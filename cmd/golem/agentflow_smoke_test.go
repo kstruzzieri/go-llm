@@ -613,7 +613,7 @@ func writeParallelSmokeFixture(t *testing.T) (string, agentflow.Plan, string) {
 	dir := t.TempDir()
 	copyTree(t, "../../testdata/agentflow", dir)
 	plan := agentflow.Plan{
-		SchemaVersion: "0.3.0", Objective: "prove bounded parallel task execution", Scope: []string{"src"},
+		SchemaVersion: "1.0.0", Objective: "prove bounded parallel task execution", Scope: []string{"src"},
 		NonGoals: []string{}, Invariants: []string{"only declared files change"}, RiskLevel: "low",
 		DriftBudget:  agentflow.DriftBudget{UnrelatedEdits: 0, NewDependencies: 0, FormattingDrift: "minimal", ArchitectureDrift: "requires_approval"},
 		AllowedFiles: []string{"src/*", ".agent/"}, BlockedFiles: []string{},

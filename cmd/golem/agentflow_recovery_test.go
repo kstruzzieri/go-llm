@@ -60,7 +60,7 @@ func TestAgentflowStatus_HumanIsReadOnlyAndOwned(t *testing.T) {
 	if err := os.WriteFile(statePath, before, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	planBytes, err := json.Marshal(agentflow.Plan{Steps: []agentflow.Step{{
+	planBytes, err := json.Marshal(agentflow.Plan{SchemaVersion: agentflow.PlanSchemaVersion, Steps: []agentflow.Step{{
 		ID: "P1", Validation: []string{"unit-tests"},
 		Gates: []agentflow.Gate{{Kind: "command", Run: []string{"go", "test", "./..."}}},
 	}}})
@@ -655,7 +655,7 @@ func recoveryAttemptState(state string, gates []agentflow.ResumabilityGate) agen
 }
 
 func recoveryPlan() *agentflow.Plan {
-	return &agentflow.Plan{Steps: []agentflow.Step{{
+	return &agentflow.Plan{SchemaVersion: agentflow.PlanSchemaVersion, Steps: []agentflow.Step{{
 		ID:         "P1",
 		Validation: []string{"unit-tests", "lint"},
 		Gates: []agentflow.Gate{

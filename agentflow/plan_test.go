@@ -3,6 +3,7 @@ package agentflow
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"slices"
 	"testing"
 )
@@ -260,8 +261,35 @@ func TestPlan_IgnoresNoncanonicalDesignDecisionKeyVariants(t *testing.T) {
 	}
 }
 
+// TestPreflightP0_RequiresAgentflow1xPlanSchema pins R4: only the major is
+// checked here; AgentFlow keeps its own minor rule.
+func TestPreflightP0_RequiresAgentflow1xPlanSchema(t *testing.T) {
+	gated := []Step{{ID: "P1", Validation: []string{"go test"}, Gates: []Gate{{Kind: "command", Run: []string{"go", "test"}}}}}
+	for _, tt := range []struct {
+		version string
+		ok      bool
+	}{
+		{"", false}, {"0.3.0", false}, {"0.4.0", false}, {"2.0.0", false}, {"1.x", false}, {"01.0.0", false},
+		{"1.0.0", true}, {"1.2.0", true},
+	} {
+		t.Run("v="+tt.version, func(t *testing.T) {
+			err := PreflightP0(&Plan{SchemaVersion: tt.version, Steps: gated})
+			if tt.ok {
+				if err != nil {
+					t.Fatalf("PreflightP0(%q) = %v", tt.version, err)
+				}
+				return
+			}
+			want := fmt.Sprintf("plan schema_version %q is not an AgentFlow 1.x plan; migrate it to schema_version 1.0.0 and review it again, or re-plan with -goal after moving any existing .agent/ aside", tt.version)
+			if err == nil || err.Error() != want {
+				t.Fatalf("PreflightP0(%q) = %v, want %q", tt.version, err, want)
+			}
+		})
+	}
+}
+
 func TestPreflightP0_RejectsNonCommandGate(t *testing.T) {
-	p := Plan{Steps: []Step{{
+	p := Plan{SchemaVersion: PlanSchemaVersion, Steps: []Step{{
 		ID: "P1", Validation: []string{"manual"},
 		Gates: []Gate{{Kind: "inspection"}},
 	}}}
@@ -271,14 +299,14 @@ func TestPreflightP0_RejectsNonCommandGate(t *testing.T) {
 }
 
 func TestPreflightP0_RejectsMissingGate(t *testing.T) {
-	p := Plan{Steps: []Step{{ID: "P1", Validation: []string{"go test"}}}} // no gates[]
+	p := Plan{SchemaVersion: PlanSchemaVersion, Steps: []Step{{ID: "P1", Validation: []string{"go test"}}}} // no gates[]
 	if err := PreflightP0(&p); err == nil {
 		t.Fatal("expected preflight to reject a step with no structured command gate")
 	}
 }
 
 func TestPreflightP0_RejectsValidationWithoutMatchingCommandGate(t *testing.T) {
-	p := Plan{Steps: []Step{{
+	p := Plan{SchemaVersion: PlanSchemaVersion, Steps: []Step{{
 		ID: "P1", Validation: []string{"unit", "lint"},
 		Gates: []Gate{{Kind: "command", Run: []string{"go", "test", "./..."}}},
 	}}}

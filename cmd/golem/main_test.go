@@ -1331,7 +1331,7 @@ func TestAgentflowStatusExitCodesDoNotPrintGenericErrors(t *testing.T) {
 	if err := os.Mkdir(agentDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	plan := `{"steps":[{"id":"P1","gates":[{"kind":"command","run":["true"]}]}]}`
+	plan := `{"schema_version":"1.0.0","steps":[{"id":"P1","gates":[{"kind":"command","run":["true"]}]}]}`
 	if err := os.WriteFile(filepath.Join(agentDir, "plan.lock.json"), []byte(plan), 0o600); err != nil {
 		t.Fatal(err)
 	}

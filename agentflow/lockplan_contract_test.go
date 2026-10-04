@@ -170,7 +170,7 @@ func TestLockPlan_RealCLI_AcceptsTypedDesignDecisionTraceability(t *testing.T) {
 		{ID: "DD-UNSELECTED", Text: "An optional unselected declaration."},
 	}
 	selected := []string{"DD-1"}
-	plan.SchemaVersion = "0.4.0"
+	plan.SchemaVersion = "1.0.0"
 	plan.DesignDecisions = &decisions
 	plan.Steps[0].DesignDecisionIDs = &selected
 	if ds := TraceabilityDiagnostics(plan); len(ds) != 0 {
@@ -223,7 +223,7 @@ func TestLockPlan_RealCLI_AllowsCriterionWithoutVerificationMapping(t *testing.T
 		t.Fatal(err)
 	}
 	if err := c.LockPlan(ctx, planPath); err != nil {
-		t.Fatalf("Agentflow contract changed: expected v0.4 to allow no verification mapping: %v", err)
+		t.Fatalf("Agentflow contract changed: expected v1.0 to allow no verification mapping: %v", err)
 	}
 }
 

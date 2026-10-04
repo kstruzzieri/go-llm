@@ -260,7 +260,7 @@ func TestRenderPlanPreview_DeterministicAndTraceable(t *testing.T) {
 		"Allowed files\n  - \"src/*\"\n  - \".agent/\"\n\n" +
 		"Blocked files\n  - none\n\n" +
 		"Rollback\n  \"git checkout -- .\"\n\n" +
-		"Schema\n  \"0.3.0\"\n\n" +
+		"Schema\n  \"1.0.0\"\n\n" +
 		"Drift budget\n  unrelated_edits: 0\n  new_dependencies: 0\n  formatting_drift: \"minimal\"\n  architecture_drift: \"requires_approval\"\n\n" +
 		"Requirements\n  \"REQ-1\": \"add the requested behavior\"\n    \"AC-1\": \"the focused validation passes\"\n\n" +
 		"Steps\n  \"S1\": \"do\"\n    files: [\"src/a.go\"]\n    depends_on: none\n    criteria: [\"AC-1\"]\n    expected_diff: [\"x\"]\n    validation:\n      - \"true\"\n        argv: [\"true\"]\n        criteria: [\"AC-1\"]\n"
