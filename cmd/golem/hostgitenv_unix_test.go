@@ -4,7 +4,9 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -352,5 +354,42 @@ func TestParallelEligibilityHonorsXDGIgnore(t *testing.T) {
 				t.Fatalf("selected=%v err=%v workers=%v, want %v", selected, err, workerStepIDs(c.workers), tc.want)
 			}
 		})
+	}
+}
+
+// Git keeps a worktree whose post-checkout hook failed (F10). Golem must
+// record it so cleanup removes it and failure reporting names it.
+func TestParallelPrepareRecordsWorktreeLeftByFailingHook(t *testing.T) {
+	isolateGitConfig(t)
+	root := newParallelTestRepo(t)
+	hooks := t.TempDir()
+	writeExecutable(t, filepath.Join(hooks, "post-checkout"), "exit 1\n")
+	runTestGit(t, root, "config", "core.hooksPath", hooks)
+	c := newParallelCoordinator(root, parallelTestPlan("a.go", "b.go"), 2, nil)
+	selected, err := c.selectWorkers(context.Background())
+	defer func() { _ = c.releaseWorkspaceLock() }()
+	if err != nil || !selected {
+		t.Fatalf("selectWorkers() = %v, %v", selected, err)
+	}
+	if err := c.prepareWorkers(context.Background()); err == nil {
+		t.Fatal("prepareWorkers() succeeded although the post-checkout hook failed")
+	}
+	parent := c.tempParent
+	t.Cleanup(func() { _ = os.RemoveAll(parent) })
+	roots := c.preservedRoots()
+	if len(roots) != 1 || filepath.Base(roots[0]) != "w1" {
+		t.Fatalf("preservedRoots() = %v, want the w1 worktree git kept", roots)
+	}
+	if err := c.cleanup(context.Background()); err != nil {
+		t.Fatalf("cleanup: %v", err)
+	}
+	if _, err := os.Lstat(roots[0]); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("worker root after cleanup: %v, want removed", err)
+	}
+	if _, err := os.Lstat(parent); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("worktree parent after cleanup: %v, want removed", err)
+	}
+	if list := runTestGit(t, root, "worktree", "list", "--porcelain"); strings.Contains(list, filepath.Base(parent)) {
+		t.Fatalf("git still lists the worker worktree:\n%s", list)
 	}
 }
