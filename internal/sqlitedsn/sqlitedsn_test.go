@@ -22,7 +22,7 @@ func TestWithBusyTimeoutPassesThroughMemory(t *testing.T) {
 }
 
 func TestWithBusyTimeoutOpensExactFile(t *testing.T) {
-	for _, name := range []string{"plain.db", "query?name.db", "hash#name.db", "percent%41name.db"} {
+	for _, name := range []string{"plain.db", "space name.db", "query?name.db", "hash#name.db", "percent%41name.db"} {
 		t.Run(name, func(t *testing.T) {
 			if runtime.GOOS == "windows" && name == "query?name.db" {
 				t.Skip("'?' is not valid in Windows file names")
@@ -77,16 +77,18 @@ func TestWithBusyTimeoutResolvesRelativePath(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	u, err := url.Parse(dsn)
+	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		t.Fatal(err)
 	}
-	want, err := filepath.Abs("relative.db")
-	if err != nil {
-		t.Fatal(err)
+	defer func() { _ = db.Close() }()
+	if _, err := db.Exec("CREATE TABLE t (id INTEGER)"); err != nil {
+		t.Fatalf("create table via %q: %v", dsn, err)
 	}
-	if u.Path != want {
-		t.Errorf("WithBusyTimeout path = %q, want %q", u.Path, want)
+	// Compare the file that opened, not the URL path: on Windows the URL path
+	// is "/C:/..." while filepath.Abs returns "C:\...".
+	if _, err := os.Stat(filepath.Join(dir, "relative.db")); err != nil {
+		t.Errorf("relative.db not created in the working directory (dsn %q): %v", dsn, err)
 	}
 }
 
