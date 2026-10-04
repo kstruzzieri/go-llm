@@ -1,7 +1,11 @@
-// Package sqlitedsn builds modernc.org/sqlite DSNs for go-llm's store openers.
+// Package sqlitedsn builds modernc.org/sqlite DSNs for go-llm's store openers
+// and switches their databases to WAL journal mode.
 package sqlitedsn
 
 import (
+	"context"
+	"database/sql"
+	"database/sql/driver"
 	"errors"
 	"fmt"
 	"net/url"
@@ -9,6 +13,9 @@ import (
 	"runtime"
 	"strings"
 	"time"
+
+	"modernc.org/sqlite"
+	sqlite3 "modernc.org/sqlite/lib"
 )
 
 // FileURL returns the file: URL that opens path. A plain path is made
@@ -131,4 +138,101 @@ func WithBusyTimeout(path string, timeout time.Duration) (string, error) {
 	q.Add("_pragma", fmt.Sprintf("busy_timeout(%d)", timeout.Milliseconds()))
 	u.RawQuery = q.Encode()
 	return u.String(), nil
+}
+
+// EnableWAL switches db's database to WAL journal mode. The switch upgrades a
+// read lock to a write lock, and SQLite skips the busy handler on that upgrade,
+// so two connections racing a database's first switch fail at once with
+// SQLITE_BUSY whatever busy_timeout says. EnableWAL retries on SQLITE_BUSY
+// within one budget equal to the connection's busy_timeout, which also caps
+// SQLite's own lock waits during each attempt's prepare and execute; a zero
+// busy_timeout allows one attempt. The total wait is bounded by the budget
+// plus scheduling and I/O overhead. It returns an error if SQLite reports a
+// journal mode other than "wal"; an in-memory database reports "memory" and
+// is accepted unchanged. Cancellation is checked between attempts; a lock
+// wait already in progress ends by the budget's deadline.
+func EnableWAL(ctx context.Context, db *sql.DB) error { return enableWAL(ctx, db, nil) }
+
+// enableWAL is EnableWAL with onBusy called after each attempt that fails with
+// SQLITE_BUSY and will be retried; tests release their lock holder there.
+func enableWAL(ctx context.Context, db *sql.DB, onBusy func()) (err error) {
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		return err
+	}
+	// Background, not ctx: these PRAGMAs never touch the database file, and an
+	// interrupt raised here by an expiring ctx would stay set on the
+	// connection, so database/sql would discard it (as in provider's
+	// runInTxBefore).
+	var saved int64
+	if err := conn.QueryRowContext(context.Background(), "PRAGMA busy_timeout").Scan(&saved); err != nil {
+		_ = conn.Close()
+		return fmt.Errorf("sqlitedsn: read busy_timeout: %w", err)
+	}
+	defer func() {
+		if _, rsErr := conn.ExecContext(context.Background(), fmt.Sprintf("PRAGMA busy_timeout = %d", saved)); rsErr != nil {
+			err = errors.Join(err, fmt.Errorf("sqlitedsn: restore busy_timeout: %w", rsErr))
+			// Never return a connection with a lowered timeout to the pool.
+			_ = conn.Raw(func(any) error { return driver.ErrBadConn })
+		}
+		_ = conn.Close()
+	}()
+	deadline := time.Now().Add(time.Duration(saved) * time.Millisecond)
+	capBusy := func() error { return setBusyTimeoutCap(conn, saved, time.Until(deadline)) }
+	for {
+		mode, err := walAttempt(ctx, conn, capBusy)
+		if err == nil {
+			if mode == "wal" || mode == "memory" {
+				return nil
+			}
+			return fmt.Errorf("sqlitedsn: journal_mode is %q, want wal", mode)
+		}
+		var se *sqlite.Error
+		if !errors.As(err, &se) || se.Code()&0xff != sqlite3.SQLITE_BUSY || !time.Now().Before(deadline) {
+			return err
+		}
+		if onBusy != nil {
+			onBusy()
+		}
+		timer := time.NewTimer(time.Millisecond)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-timer.C:
+		}
+	}
+}
+
+// setBusyTimeoutCap sets conn's busy_timeout to the budget remaining, in
+// whole milliseconds, never above saved. SQLite treats a negative timeout as
+// zero, so a spent budget needs no clamp.
+func setBusyTimeoutCap(conn *sql.Conn, saved int64, remaining time.Duration) error {
+	ms := min(remaining.Milliseconds(), saved)
+	_, err := conn.ExecContext(context.Background(), fmt.Sprintf("PRAGMA busy_timeout = %d", ms))
+	return err
+}
+
+// walAttempt runs one WAL switch with SQLite's lock waits capped to the time
+// left. modernc prepares eagerly, and journal_mode loads the schema, which can
+// wait for a read lock; execution can wait again for the commit's exclusive
+// lock, so the cap is refreshed in between or one attempt could spend the
+// remaining budget twice.
+func walAttempt(ctx context.Context, conn *sql.Conn, capBusy func() error) (string, error) {
+	if err := capBusy(); err != nil {
+		return "", err
+	}
+	stmt, err := conn.PrepareContext(ctx, "PRAGMA journal_mode=WAL")
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = stmt.Close() }()
+	if err := capBusy(); err != nil {
+		return "", err
+	}
+	var mode string
+	if err := stmt.QueryRowContext(ctx).Scan(&mode); err != nil {
+		return "", err
+	}
+	return strings.ToLower(mode), nil
 }
