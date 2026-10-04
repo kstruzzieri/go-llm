@@ -20,10 +20,29 @@ func WithBasePath(prefix string) Option {
 	return func(s *Server) { s.basePath = normalizeBase(prefix) }
 }
 
-// WithCORS sets the Access-Control-Allow-Origin value. Default "*".
-// Pass the empty string to disable CORS headers entirely.
+// WithCORS sets the Access-Control-Allow-Origin value, which is also the one
+// browser origin allowed to send state-changing requests. Default ""
+// (disabled): the server sends no CORS headers and refuses POSTs that
+// browsers mark as cross-origin, so pages on other origins can neither read
+// responses nor run models blind. Browser clients opt in by passing their
+// exact origin, e.g. "https://app.example". The server is unauthenticated, so
+// "*" lets any website the user visits call it and read the results.
 func WithCORS(origin string) Option {
 	return func(s *Server) { s.corsOrigin = origin }
+}
+
+// WithAllowedHosts adds names the server accepts in the Host header besides
+// loopback names and the WithAddr host, e.g. "host.docker.internal" for a
+// container reaching the host, or the names LAN clients use when the server
+// binds a wildcard address. Requests naming any other host are refused with
+// 403, which blocks DNS rebinding. Entries are exact names, without
+// wildcards; matching ignores ports and case. Repeated calls accumulate.
+func WithAllowedHosts(hosts ...string) Option {
+	return func(s *Server) {
+		for _, h := range hosts {
+			s.allowedHosts = append(s.allowedHosts, hostname(h))
+		}
+	}
 }
 
 // WithTLS enables HTTPS using the given certificate and private key paths.

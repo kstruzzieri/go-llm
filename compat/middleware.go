@@ -5,7 +5,10 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"log"
+	"net"
 	"net/http"
+	"slices"
+	"strings"
 	"time"
 
 	"github.com/kstruzzieri/go-llm/provider"
@@ -38,6 +41,58 @@ func corsMiddleware(next http.Handler, origin string) http.Handler {
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+// crossOriginMiddleware refuses state-changing requests that a browser marks
+// as coming from another origin (http.CrossOriginProtection). Disabling CORS
+// only hides responses: a page can still send a text/plain POST, which needs
+// no preflight, and run a model blind. The WithCORS origin is trusted, and
+// "*" turns the check off, since it already invites every origin.
+func crossOriginMiddleware(next http.Handler, origin string) http.Handler {
+	if origin == "*" {
+		return next
+	}
+	protection := http.NewCrossOriginProtection()
+	if origin != "" {
+		if err := protection.AddTrustedOrigin(origin); err != nil {
+			log.Printf("compat: WithCORS: %v; cross-origin requests stay refused", err)
+		}
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := protection.Check(r); err != nil {
+			writeError(w, http.StatusForbidden, "cross_origin_not_allowed", "cross-origin request not allowed (configure compat.WithCORS)")
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// hostMiddleware refuses requests whose Host header names neither a loopback
+// address nor an allowed host. This blocks DNS rebinding: a page on an
+// attacker's domain that resolves to 127.0.0.1 is same-origin to the browser,
+// so neither CORS nor the cross-origin guard applies, but its requests still
+// carry the attacker's Host.
+// allowed holds names already normalized by hostname.
+func hostMiddleware(next http.Handler, allowed []string) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		host := hostname(r.Host)
+		if host != "" && (isLoopbackHost(host) || slices.Contains(allowed, host)) {
+			next.ServeHTTP(w, r)
+			return
+		}
+		log.Printf("compat: refused %s %q: Host %q not allowed (see WithAllowedHosts)", r.Method, r.URL.Path, r.Host)
+		writeError(w, http.StatusForbidden, "host_not_allowed", "Host header not allowed (configure compat.WithAllowedHosts)")
+	})
+}
+
+// hostname returns the lower-cased host of a Host header or host:port
+// address, without the port or IPv6 brackets.
+func hostname(hostport string) string {
+	host := hostport
+	if h, _, err := net.SplitHostPort(hostport); err == nil {
+		host = h
+	}
+	return strings.ToLower(strings.TrimSuffix(strings.TrimPrefix(host, "["), "]"))
 }
 
 // recoveryMiddleware turns handler panics into 500 JSON errors. If the handler
