@@ -23,7 +23,7 @@ func openMCPPins(root string) (*mcpclient.PinStore, error) {
 
 func runMCPTrust(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	if len(args) == 0 || (args[0] != "inspect" && args[0] != "approve") {
-		return errors.New("usage: golem mcp inspect|approve [-root .] -mcp-stdio 'alias=command args'|-mcp-http 'alias=https://endpoint' [-digest sha256:…]")
+		return errors.New("usage: golem mcp inspect|approve [-root .] -mcp-stdio 'alias=command args'|-mcp-http 'alias=https://endpoint' [-digest sha256:… -connection hmac-sha256:…]")
 	}
 	action := args[0]
 	fs := flag.NewFlagSet("golem mcp "+action, flag.ContinueOnError)
@@ -35,9 +35,10 @@ func runMCPTrust(ctx context.Context, args []string, stdout, stderr io.Writer) e
 	fs.Var(&httpFlags, "mcp-http", "one explicitly aliased HTTP server")
 	var selection stringSliceFlag
 	fs.Var(&selection, "mcp-tools", "not accepted: inspect and approve always review the complete catalog")
-	digest := ""
+	digest, connection := "", ""
 	if action == "approve" {
 		fs.StringVar(&digest, "digest", "", "exact candidate digest from inspect")
+		fs.StringVar(&connection, "connection", "", "exact connection fingerprint from inspect")
 	}
 	if err := fs.Parse(args[1:]); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -77,7 +78,7 @@ func runMCPTrust(ctx context.Context, args []string, stdout, stderr io.Writer) e
 	if action == "inspect" {
 		inspection, err = mcpclient.Inspect(ctx, mcpClientImpl(), servers[0], pins)
 	} else {
-		inspection, err = mcpclient.Approve(ctx, mcpClientImpl(), servers[0], pins, digest)
+		inspection, err = mcpclient.Approve(ctx, mcpClientImpl(), servers[0], pins, mcpclient.ApprovalDigests{Catalog: digest, Connection: connection})
 	}
 	if err != nil {
 		return err

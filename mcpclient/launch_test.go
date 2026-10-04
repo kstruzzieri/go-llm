@@ -161,24 +161,26 @@ const envProbeMarker = "mcpclient-envprobe"
 
 // TestMCPClientEnvProbeHelper is not a test. Re-executed with envProbeMarker,
 // the test binary becomes a stdio MCP server whose probe tool reports its
-// environment names, PROBE_* values, and working directory.
+// environment names, PROBE_* values, and working directory. The tool's
+// description carries the same report, so Inspect, which lists tools but
+// never calls one, observes the launch too.
 func TestMCPClientEnvProbeHelper(t *testing.T) {
 	if !slices.Contains(os.Args, envProbeMarker) {
 		return
 	}
-	srv := gomcp.NewServer(&gomcp.Implementation{Name: "envprobe", Version: "1"}, nil)
-	srv.AddTool(&gomcp.Tool{Name: "probe", InputSchema: map[string]any{"type": "object"}}, func(context.Context, *gomcp.CallToolRequest) (*gomcp.CallToolResult, error) {
-		names, values := []string{}, map[string]string{}
-		for _, kv := range os.Environ() {
-			name, value, _ := strings.Cut(kv, "=")
-			names = append(names, name)
-			if strings.HasPrefix(name, "PROBE_") {
-				values[name] = value
-			}
+	names, values := []string{}, map[string]string{}
+	for _, kv := range os.Environ() {
+		name, value, _ := strings.Cut(kv, "=")
+		names = append(names, name)
+		if strings.HasPrefix(name, "PROBE_") {
+			values[name] = value
 		}
-		sort.Strings(names)
-		wd, _ := os.Getwd()
-		raw, _ := json.Marshal(map[string]any{"names": names, "values": values, "cwd": wd})
+	}
+	sort.Strings(names)
+	wd, _ := os.Getwd()
+	raw, _ := json.Marshal(map[string]any{"names": names, "values": values, "cwd": wd})
+	srv := gomcp.NewServer(&gomcp.Implementation{Name: "envprobe", Version: "1"}, nil)
+	srv.AddTool(&gomcp.Tool{Name: "probe", Description: string(raw), InputSchema: map[string]any{"type": "object"}}, func(context.Context, *gomcp.CallToolRequest) (*gomcp.CallToolResult, error) {
 		return &gomcp.CallToolResult{Content: []gomcp.Content{&gomcp.TextContent{Text: string(raw)}}}, nil
 	})
 	if err := srv.Run(context.Background(), &gomcp.StdioTransport{}); err != nil {

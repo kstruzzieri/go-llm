@@ -23,6 +23,10 @@ func testPins(t *testing.T) *PinStore {
 	return s
 }
 
+func approvalFor(i *Inspection) ApprovalDigests {
+	return ApprovalDigests{Catalog: i.CandidateDigest, Connection: i.CandidateConnection.Fingerprint}
+}
+
 // The fixture crosses the SDK's JSON transport. Middleware substitutes only
 // remote tools/list responses; Connect, decoding and session close are real.
 func catalogServer(t *testing.T, alias string, list func(context.Context, *gomcp.ListToolsParams) (*gomcp.ListToolsResult, error)) (Server, <-chan struct{}, *atomic.Int32) {
@@ -122,7 +126,7 @@ func TestTrustFirstMatchChangeApproveAndStale(t *testing.T) {
 		t.Fatal("inspection changed trust or invoked tool")
 	}
 	s, done, calls = staticCatalogServer(t, "fs", &gomcp.Tool{Name: "read", Description: "C"})
-	if _, e = Approve(context.Background(), Implementation{Name: "test"}, s, pins, inspected.CandidateDigest); e == nil {
+	if _, e = Approve(context.Background(), Implementation{Name: "test"}, s, pins, approvalFor(inspected)); e == nil {
 		t.Fatal("stale approval accepted")
 	}
 	waitOn(t, done, "stale approval close")
@@ -130,7 +134,7 @@ func TestTrustFirstMatchChangeApproveAndStale(t *testing.T) {
 		t.Fatal("stale approval changed pin/called tool")
 	}
 	s, done, calls = staticCatalogServer(t, "fs", b)
-	approved, e := Approve(context.Background(), Implementation{Name: "test"}, s, pins, inspected.CandidateDigest)
+	approved, e := Approve(context.Background(), Implementation{Name: "test"}, s, pins, approvalFor(inspected))
 	if e != nil {
 		t.Fatal(e)
 	}
@@ -288,13 +292,13 @@ func TestTrustApprovalRevisionRace(t *testing.T) {
 			})
 			result := make(chan error, 1)
 			go func() {
-				_, e := Approve(context.Background(), Implementation{Name: "test"}, s, pins, inspected.CandidateDigest)
+				_, e := Approve(context.Background(), Implementation{Name: "test"}, s, pins, approvalFor(inspected))
 				result <- e
 			}()
 			waitOn(t, started, "approval discovery")
 			other, _, _ := staticCatalogServer(t, "fs", &gomcp.Tool{Name: "read", Description: "B"})
 			if existing {
-				if _, e := Approve(context.Background(), Implementation{Name: "test"}, other, pins, inspected.CandidateDigest); e != nil {
+				if _, e := Approve(context.Background(), Implementation{Name: "test"}, other, pins, approvalFor(inspected)); e != nil {
 					t.Fatal(e)
 				}
 			} else {
@@ -343,7 +347,7 @@ func TestTrustConfigValidatedBeforeDial(t *testing.T) {
 			}
 			var err error
 			if mode == "bad-digest" {
-				_, err = Approve(context.Background(), Implementation{Name: "test"}, servers[0], pins, "sha256:"+strings.Repeat("A", 64))
+				_, err = Approve(context.Background(), Implementation{Name: "test"}, servers[0], pins, ApprovalDigests{Catalog: "sha256:" + strings.Repeat("A", 64)})
 			} else {
 				_, _, err = Connect(context.Background(), Implementation{Name: "test"}, servers, ConnectOptions{Pins: pins})
 			}
@@ -371,7 +375,7 @@ func TestTrustEmptyPinAndApproval(t *testing.T) {
 		t.Fatal("empty inspect created pin")
 	}
 	s, done, _ = staticCatalogServer(t, "fs")
-	if _, e = Approve(context.Background(), Implementation{Name: "test"}, s, pins, inspected.CandidateDigest); e != nil {
+	if _, e = Approve(context.Background(), Implementation{Name: "test"}, s, pins, approvalFor(inspected)); e != nil {
 		t.Fatal(e)
 	}
 	waitOn(t, done, "empty approve close")

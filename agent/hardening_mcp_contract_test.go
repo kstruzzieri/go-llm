@@ -61,10 +61,15 @@ func runMCPTrustContract(t *testing.T) {
 		if err := mgr.Close(); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := mcpclient.Approve(t.Context(), impl, server, pins, "sha256:d076c0d77d90e89d7022d158c501320cb52ff0acfb18157506f397b195feb99e"); err == nil {
+		inspection, err := mcpclient.Inspect(t.Context(), impl, server, pins)
+		if err != nil {
+			t.Fatal(err)
+		}
+		connection := inspection.CandidateConnection.Fingerprint
+		if _, err := mcpclient.Approve(t.Context(), impl, server, pins, mcpclient.ApprovalDigests{Catalog: "sha256:d076c0d77d90e89d7022d158c501320cb52ff0acfb18157506f397b195feb99e", Connection: connection}); err == nil {
 			t.Fatal("stale digest approved")
 		}
-		approval, err := mcpclient.Approve(t.Context(), impl, server, pins, "sha256:5ed6cdea197afcbc274e95c7b9eb7fa76263b49fb300dd5a43409054e2ae9bf3")
+		approval, err := mcpclient.Approve(t.Context(), impl, server, pins, mcpclient.ApprovalDigests{Catalog: "sha256:5ed6cdea197afcbc274e95c7b9eb7fa76263b49fb300dd5a43409054e2ae9bf3", Connection: connection})
 		if err != nil {
 			t.Fatal(err)
 		}

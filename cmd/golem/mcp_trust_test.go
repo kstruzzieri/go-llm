@@ -54,6 +54,24 @@ func trustCommand(t *testing.T, args ...string) (string, string, error) {
 	err := run(append([]string{"mcp"}, args...), in, out, diag)
 	return readRunTestFile(t, out), readRunTestFile(t, diag), err
 }
+
+// mcpConnection returns the candidate connection fingerprint that
+// `golem mcp inspect` prints for one server specification under root.
+func mcpConnection(t *testing.T, root, flag, spec string) string {
+	t.Helper()
+	out, _, err := trustCommand(t, "inspect", "-root", root, flag, spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const label = "connection candidate: "
+	i := strings.Index(out, label)
+	if i < 0 {
+		t.Fatalf("inspect output lacks %q: %q", label, out)
+	}
+	line := out[i+len(label):]
+	return line[:strings.IndexByte(line, '\n')]
+}
+
 func TestMCPTrustOperator(t *testing.T) {
 	t.Setenv("XDG_DATA_HOME", t.TempDir())
 	root := t.TempDir()
@@ -71,7 +89,8 @@ func TestMCPTrustOperator(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := "server \"fs\"\npin file: " + strconv.QuoteToGraphic(inspection.PinPath) + "\npinned: \ncandidate: " + mcpDigestA + "\nadded: mcp__fs__read\ncandidate mcp__fs__read\n  description: \"Read file\"\n  inputSchema: \"{\\\"type\\\":\\\"object\\\"}\"\n"
+	conn := inspection.CandidateConnection.Fingerprint
+	want := "server \"fs\"\npin file: " + strconv.QuoteToGraphic(inspection.PinPath) + "\npinned: \ncandidate: " + mcpDigestA + "\nadded: mcp__fs__read\nconnection pinned: \nconnection candidate: " + conn + "\nconnection kind: http\nconnection origin: " + strconv.QuoteToGraphic(f.url) + "\ncandidate mcp__fs__read\n  description: \"Read file\"\n  inputSchema: \"{\\\"type\\\":\\\"object\\\"}\"\n"
 	if out != want {
 		t.Fatalf("inspect output\ngot %q\nwant %q", out, want)
 	}
@@ -79,7 +98,7 @@ func TestMCPTrustOperator(t *testing.T) {
 		t.Fatalf("inspection wrote pin: %v", err)
 	}
 	for _, digest := range []string{"", "sha256:bad", "sha256:" + strings.Repeat("A", 64), mcpDigestB} {
-		_, _, err := trustCommand(t, append(append([]string{"approve"}, args...), "-digest", digest)...)
+		_, _, err := trustCommand(t, append(append([]string{"approve"}, args...), "-digest", digest, "-connection", conn)...)
 		if err == nil {
 			t.Fatalf("approved wrong digest %q", digest)
 		}
@@ -87,7 +106,7 @@ func TestMCPTrustOperator(t *testing.T) {
 			t.Fatal("failed approval wrote pin")
 		}
 	}
-	out, diag, err = trustCommand(t, append(append([]string{"approve"}, args...), "-digest", mcpDigestA)...)
+	out, diag, err = trustCommand(t, append(append([]string{"approve"}, args...), "-digest", mcpDigestA, "-connection", conn)...)
 	if err != nil || out != "" || diag != "mcp: approved server \"fs\" "+mcpDigestA+"; added: mcp__fs__read\n" {
 		t.Fatalf("approve: %v stdout=%q stderr=%q", err, out, diag)
 	}
@@ -96,7 +115,7 @@ func TestMCPTrustOperator(t *testing.T) {
 		t.Fatal(err)
 	}
 	f.set("Read\nfiles", map[string]any{"type": "object"})
-	_, _, err = trustCommand(t, append(append([]string{"approve"}, args...), "-digest", mcpDigestA)...)
+	_, _, err = trustCommand(t, append(append([]string{"approve"}, args...), "-digest", mcpDigestA, "-connection", conn)...)
 	if err == nil {
 		t.Fatal("approved stale digest")
 	}
@@ -104,11 +123,11 @@ func TestMCPTrustOperator(t *testing.T) {
 	if string(after) != string(before) {
 		t.Fatal("stale approval replaced pin")
 	}
-	out, diag, err = trustCommand(t, append(append([]string{"approve"}, args...), "-digest", mcpDigestB)...)
+	out, diag, err = trustCommand(t, append(append([]string{"approve"}, args...), "-digest", mcpDigestB, "-connection", conn)...)
 	if err != nil || out != "" || diag != "mcp: approved server \"fs\" "+mcpDigestB+"; changed: mcp__fs__read (description)\n" {
 		t.Fatalf("changed approval: %v %q %q", err, out, diag)
 	}
-	_, _, err = trustCommand(t, "approve", "-root", root, "-mcp-http", "other="+f.url, "-digest", mcpDigestB)
+	_, _, err = trustCommand(t, "approve", "-root", root, "-mcp-http", "other="+f.url, "-digest", mcpDigestB, "-connection", conn)
 	if err == nil {
 		t.Fatal("digest accepted under wrong alias")
 	}
@@ -117,6 +136,18 @@ func TestMCPTrustOperator(t *testing.T) {
 	}
 	for range f.server.Sessions() {
 		t.Fatal("trust command left session open")
+	}
+}
+
+func TestMCPTrustApproveRequiresConnection(t *testing.T) {
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	root := t.TempDir()
+	f := newTrustHTTPFixture(t)
+	if _, _, err := trustCommand(t, "approve", "-root", root, "-mcp-http", "fs="+f.url, "-digest", mcpDigestA); err == nil {
+		t.Fatal("approve without -connection succeeded")
+	}
+	if f.deletes.Load() != 0 {
+		t.Fatal("approve without -connection contacted the server")
 	}
 }
 
@@ -186,7 +217,7 @@ func TestMCPTrustEarlyOneShot(t *testing.T) {
 				}
 				var before []byte
 				if kind == "mismatch" || kind == "unreadable" {
-					if _, err := mcpclient.Approve(t.Context(), mcpClientImpl(), server, pins, mcpDigestA); err != nil {
+					if _, err := mcpclient.Approve(t.Context(), mcpClientImpl(), server, pins, mcpclient.ApprovalDigests{Catalog: mcpDigestA, Connection: inspection.CandidateConnection.Fingerprint}); err != nil {
 						t.Fatal(err)
 					}
 					before, _ = os.ReadFile(inspection.PinPath)
@@ -365,7 +396,7 @@ func TestMCPTrustDerivedAliases(t *testing.T) {
 	if err != nil || !strings.Contains(out, "server \"env2\"") || !strings.Contains(out, candidate.CandidateDigest) {
 		t.Fatalf("env2 inspection=%q %v", out, err)
 	}
-	_, diag, err := trustCommand(t, "approve", "-root", root, "-mcp-stdio", "env2="+first, "-digest", candidate.CandidateDigest)
+	_, diag, err := trustCommand(t, "approve", "-root", root, "-mcp-stdio", "env2="+first, "-digest", candidate.CandidateDigest, "-connection", candidate.CandidateConnection.Fingerprint)
 	if err != nil || !strings.Contains(diag, "changed: mcp__env2__read (description)") {
 		t.Fatalf("env2 approval=%q %v", diag, err)
 	}
@@ -379,7 +410,7 @@ func TestMCPTrustInspectionQuoting(t *testing.T) {
 	t.Setenv("XDG_DATA_HOME", t.TempDir())
 	root := t.TempDir()
 	f := newTrustHTTPFixture(t)
-	if _, _, err := trustCommand(t, "approve", "-root", root, "-mcp-http", "fs="+f.url, "-digest", mcpDigestA); err != nil {
+	if _, _, err := trustCommand(t, "approve", "-root", root, "-mcp-http", "fs="+f.url, "-digest", mcpDigestA, "-connection", mcpConnection(t, root, "-mcp-http", "fs="+f.url)); err != nil {
 		t.Fatal(err)
 	}
 	f.set("line\n\x00\x1b\u0081\u202e\xff", map[string]any{"type": "object", "description": "schema\n\x00\x1b\u0081\u202e"})
@@ -466,7 +497,7 @@ func TestMCPTrustCleanupOnLaterFailure(t *testing.T) {
 		t.Run(fmt.Sprint(mixed), func(t *testing.T) {
 			config, root := writeRunLifecycleConfig(t)
 			f := newTrustHTTPFixture(t)
-			_, _, err := trustCommand(t, "approve", "-root", root, "-mcp-http", "fs="+f.url, "-digest", mcpDigestA)
+			_, _, err := trustCommand(t, "approve", "-root", root, "-mcp-http", "fs="+f.url, "-digest", mcpDigestA, "-connection", mcpConnection(t, root, "-mcp-http", "fs="+f.url))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -521,7 +552,7 @@ func TestMCPTrustEmptyApproval(t *testing.T) {
 	f := newTrustHTTPFixture(t)
 	f.server.RemoveTools("read")
 	const digest = "sha256:4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
-	out, diag, err := trustCommand(t, "approve", "-root", root, "-mcp-http", "fs="+f.url, "-digest", digest)
+	out, diag, err := trustCommand(t, "approve", "-root", root, "-mcp-http", "fs="+f.url, "-digest", digest, "-connection", mcpConnection(t, root, "-mcp-http", "fs="+f.url))
 	if err != nil || out != "" || diag != "mcp: approved server \"fs\" "+digest+"\n" {
 		t.Fatalf("empty approval: %v %q %q", err, out, diag)
 	}

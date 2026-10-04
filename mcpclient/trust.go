@@ -168,15 +168,32 @@ func catalogNames(c toolCatalog) []string {
 	return names
 }
 
+// ConnectionView is the candidate connection as an operator reviews it,
+// computed live. Paths are local metadata shown only by explicit inspection;
+// argv, URL path and query are never included.
+type ConnectionView struct {
+	Fingerprint string
+	Kind        string
+	Launcher    string
+	Target      string
+	Dir         string
+	Env         []string // source:NAME
+	Origin      string
+}
+
 // Inspection describes a fetched candidate and the prior pin. String includes
-// quoted complete definitions for operator review; it never includes endpoints.
+// quoted complete definitions for operator review; it never includes argv,
+// URL paths or queries.
 type Inspection struct {
-	Alias             string
-	PinPath           string
-	PinnedDigest      string // empty means absent, distinct from a pinned empty catalog
-	CandidateDigest   string
-	Diff              CatalogDiff
-	pinned, candidate toolCatalog
+	Alias               string
+	PinPath             string
+	PinnedDigest        string // empty means absent, distinct from a pinned empty catalog
+	CandidateDigest     string
+	Diff                CatalogDiff
+	CandidateConnection ConnectionView
+	PinnedConnection    string   // pinned fingerprint; empty when absent or a v1 record
+	ConnectionChanges   []string // fixed labels; nil when unchanged or nothing pinned
+	pinned, candidate   toolCatalog
 }
 
 func (i *Inspection) String() string {
@@ -184,6 +201,18 @@ func (i *Inspection) String() string {
 	fmt.Fprintf(&b, "server %q\npin file: %s\npinned: %s\ncandidate: %s\n", i.Alias, strconv.QuoteToGraphic(i.PinPath), i.PinnedDigest, i.CandidateDigest)
 	if diff := i.Diff.String(); diff != "" {
 		fmt.Fprintln(&b, diff)
+	}
+	c := i.CandidateConnection
+	fmt.Fprintf(&b, "connection pinned: %s\nconnection candidate: %s\n", i.PinnedConnection, c.Fingerprint)
+	if len(i.ConnectionChanges) > 0 {
+		fmt.Fprintf(&b, "connection changed: %s\n", strings.Join(i.ConnectionChanges, ", "))
+	}
+	fmt.Fprintf(&b, "connection kind: %s\n", c.Kind)
+	if c.Kind == "http" {
+		fmt.Fprintf(&b, "connection origin: %s\n", strconv.QuoteToGraphic(c.Origin))
+	} else {
+		fmt.Fprintf(&b, "connection launcher: %s\nconnection target: %s\nconnection dir: %s\nconnection env: %s\n",
+			strconv.QuoteToGraphic(c.Launcher), strconv.QuoteToGraphic(c.Target), strconv.QuoteToGraphic(c.Dir), strings.Join(c.Env, ", "))
 	}
 	for _, set := range []struct {
 		label   string
@@ -195,8 +224,23 @@ func (i *Inspection) String() string {
 	}
 	return b.String()
 }
-func inspection(s *PinStore, alias string, prior, candidate toolCatalog) *Inspection {
-	return &Inspection{Alias: alias, PinPath: filepath.Join(s.dir, pinKey(alias)+".json"), PinnedDigest: prior.digest(), CandidateDigest: candidate.digest(), Diff: diffCatalogs(prior, candidate), pinned: prior, candidate: candidate}
+
+func inspection(s *PinStore, alias string, prior, candidate pinEntry, id connectionIdentity) *Inspection {
+	result := &Inspection{
+		Alias:               alias,
+		PinPath:             filepath.Join(s.dir, pinKey(alias)+".json"),
+		PinnedDigest:        prior.digest(),
+		CandidateDigest:     candidate.digest(),
+		Diff:                diffCatalogs(prior.toolCatalog, candidate.toolCatalog),
+		CandidateConnection: ConnectionView{Fingerprint: candidate.conn.fingerprint, Kind: id.kind, Launcher: id.launcher, Target: id.target, Dir: id.dir, Env: id.env, Origin: id.origin},
+		pinned:              prior.toolCatalog,
+		candidate:           candidate.toolCatalog,
+	}
+	if prior.conn != nil {
+		result.PinnedConnection = prior.conn.fingerprint
+		result.ConnectionChanges = compareConnectionPins(prior.conn, candidate.conn)
+	}
+	return result
 }
 
 var digestRE = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
@@ -226,31 +270,44 @@ func validateTrustConfig(servers []Server, pins *PinStore, policy envPolicy) err
 	return nil
 }
 
-// Inspect fetches and validates a complete catalog without creating a pin or
-// invoking a tool. Callers must supply an explicitly selected stable alias.
-func Inspect(ctx context.Context, impl Implementation, server Server, pins *PinStore) (*Inspection, error) {
-	return inspectOrApprove(ctx, impl, server, pins, "")
+// ApprovalDigests binds an approval to both identities the operator reviewed
+// with Inspect. Both are required; an empty field is an error, never a
+// wildcard.
+type ApprovalDigests struct {
+	Catalog    string // "sha256:" + 64 lowercase hex
+	Connection string // "hmac-sha256:" + 64 lowercase hex
 }
 
-// Approve re-fetches the catalog and replaces the captured pin revision only if
-// its internally computed digest exactly equals the operator's supplied digest.
-func Approve(ctx context.Context, impl Implementation, server Server, pins *PinStore, digest string) (*Inspection, error) {
-	if !digestRE.MatchString(digest) {
+// Inspect fetches and validates a complete catalog without writing a pin
+// record or invoking a tool. It does launch or contact the candidate: that is
+// the explicit operator action. Callers must supply a stable alias.
+func Inspect(ctx context.Context, impl Implementation, server Server, pins *PinStore) (*Inspection, error) {
+	return inspectOrApprove(ctx, impl, server, pins, hostLaunchEnv(), nil)
+}
+
+// Approve checks the connection fingerprint before anything is launched,
+// re-fetches the catalog, and replaces the captured pin revision only if both
+// digests equal the operator's.
+func Approve(ctx context.Context, impl Implementation, server Server, pins *PinStore, want ApprovalDigests) (*Inspection, error) {
+	if !digestRE.MatchString(want.Catalog) {
 		return nil, errors.New("mcpclient: digest must be sha256: followed by 64 lowercase hex digits")
 	}
-	return inspectOrApprove(ctx, impl, server, pins, digest)
+	if !fingerprintRE.MatchString(want.Connection) {
+		return nil, errors.New("mcpclient: connection must be hmac-sha256: followed by 64 lowercase hex digits")
+	}
+	return inspectOrApprove(ctx, impl, server, pins, hostLaunchEnv(), &want)
 }
-func inspectOrApprove(ctx context.Context, impl Implementation, server Server, pins *PinStore, digest string) (result *Inspection, err error) {
-	if err = validateTrustConfig([]Server{server}, pins, hostEnvPolicy()); err != nil {
+
+// inspectOrApprove prepares server under le exactly as Connect would, so the
+// fingerprint reviewed is the one Connect checks and the process launched is
+// the one Connect launches.
+func inspectOrApprove(ctx context.Context, impl Implementation, server Server, pins *PinStore, le launchEnv, want *ApprovalDigests) (result *Inspection, err error) {
+	if err = validateTrustConfig([]Server{server}, pins, le.policy); err != nil {
 		return nil, err
 	}
 	ctx, cancel := context.WithTimeout(ctx, connectTimeout)
 	defer cancel()
-	prior, revision, err := pins.capturePin(ctx, server.Alias)
-	if err != nil {
-		return nil, admissionFailure(server.Alias, "pin_unavailable", err)
-	}
-	prepared, err := prepare(server, pins.workspace, hostLaunchEnv())
+	prepared, err := prepare(server, pins.workspace, le)
 	if err != nil {
 		return nil, err
 	}
@@ -258,6 +315,13 @@ func inspectOrApprove(ctx context.Context, impl Implementation, server Server, p
 	if err != nil {
 		// As in connectOne: an unfingerprintable identity is an unusable launch.
 		return nil, admissionFailure(server.Alias, "launch_invalid", err)
+	}
+	if want != nil && !equalTag(conn.fingerprint, want.Connection) {
+		return nil, admissionFailure(server.Alias, "connection_mismatch", nil)
+	}
+	prior, revision, err := pins.capturePin(ctx, server.Alias)
+	if err != nil {
+		return nil, admissionFailure(server.Alias, "pin_unavailable", err)
 	}
 	session, _, candidate, _, err := discover(ctx, impl, prepared)
 	if err != nil {
@@ -271,16 +335,15 @@ func inspectOrApprove(ctx context.Context, impl Implementation, server Server, p
 	if err = ctx.Err(); err != nil {
 		return nil, admissionFailure(server.Alias, "canceled", err)
 	}
-	result = inspection(pins, server.Alias, prior.toolCatalog, candidate)
-	if digest != "" {
-		if candidate.digest() != digest {
+	entry := pinEntry{toolCatalog: candidate, conn: conn}
+	result = inspection(pins, server.Alias, prior, entry, prepared.identity)
+	if want != nil {
+		if candidate.digest() != want.Catalog {
 			failure := admissionFailure(server.Alias, "digest_mismatch", nil)
-			failure.PinnedDigest = prior.digest()
-			failure.CandidateDigest = candidate.digest()
-			failure.Diff = result.Diff
+			failure.PinnedDigest, failure.CandidateDigest, failure.Diff = prior.digest(), candidate.digest(), result.Diff
 			return nil, failure
 		}
-		if err = pins.replacePin(ctx, server.Alias, revision, pinEntry{toolCatalog: candidate, conn: conn}); err != nil {
+		if err = pins.replacePin(ctx, server.Alias, revision, entry); err != nil {
 			return nil, admissionFailure(server.Alias, "pin_unavailable", err)
 		}
 	}
