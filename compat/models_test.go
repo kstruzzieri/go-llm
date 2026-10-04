@@ -154,7 +154,7 @@ func TestModelsHandler_ListsAliasEntriesAndXResources(t *testing.T) {
 }
 
 func TestModelsHandler_NoRegistry(t *testing.T) {
-	srv := New(nil, nil, nil)
+	srv := New(nil, nil, nil, allowHTTPTestHost)
 
 	rec := httptest.NewRecorder()
 	srv.buildHandler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/v1/models", nil))
@@ -175,7 +175,7 @@ func TestModelsHandler_EmptyRegistryReturnsEmptyList(t *testing.T) {
 	}
 	router := provider.NewRouter(modelReg, provReg)
 	defer func() { _ = router.Close() }()
-	srv := New(router, modelReg, provReg)
+	srv := New(router, modelReg, provReg, allowHTTPTestHost)
 
 	rec := httptest.NewRecorder()
 	srv.buildHandler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/v1/models", nil))
@@ -301,7 +301,7 @@ func TestModelsHandler_WarmModelsGetXWarmTrue(t *testing.T) {
 		provider.WithWarmthSource(ws),
 	)
 	defer func() { _ = router.Close() }()
-	srv := New(router, modelReg, provReg)
+	srv := New(router, modelReg, provReg, allowHTTPTestHost)
 
 	rec := httptest.NewRecorder()
 	srv.buildHandler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/v1/models", nil))

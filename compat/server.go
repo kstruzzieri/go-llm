@@ -30,6 +30,7 @@ type Server struct {
 	addr              string
 	basePath          string
 	corsOrigin        string
+	allowedHosts      []string
 	tlsCert           string
 	tlsKey            string
 	aliases           map[string]string
@@ -72,7 +73,7 @@ func New(router *provider.Router, registry *provider.ModelRegistry, providers *p
 		providers:         providers,
 		addr:              "127.0.0.1:18741",
 		basePath:          "/v1",
-		corsOrigin:        "*",
+		corsOrigin:        "",
 		aliases:           map[string]string{},
 		maxConcurrency:    4,
 		embeddingsEnabled: false,
@@ -165,13 +166,19 @@ func (s *Server) Close() error {
 	return err
 }
 
-// buildHandler constructs the HTTP handler. Routes are registered on the mux
-// in later tasks; the returned handler wraps the mux in (outermost first)
-// CORS → request-ID → logging → recovery → mux. Empty corsOrigin disables CORS.
+// buildHandler constructs the HTTP handler: the route mux wrapped in
+// (outermost first) Host guard → CORS → request-ID → logging → cross-origin
+// guard → recovery → mux. Empty corsOrigin disables CORS.
 //
 // Order matters:
-//   - request-ID is outside CORS-preflight short-circuit so OPTIONS responses
-//     still carry X-Request-Id for correlation.
+//   - the Host guard is outermost so a foreign Host (DNS rebinding) is
+//     refused before CORS can approve a preflight or any route runs. It logs
+//     its own refusals because they never reach logging.
+//   - when enabled, CORS answers preflights itself, so those OPTIONS
+//     responses carry no X-Request-Id and are not logged.
+//   - the cross-origin guard sits inside logging so its refusals are logged
+//     with a request ID; it refuses only unsafe methods, which CORS passes
+//     on, and hands recovery the same writer.
 //   - logging wraps recovery so panics (converted to 500s by recovery) are
 //     still recorded in the access log with the correct status.
 //   - recovery is innermost so its statusRecorder-aware writer check (for
@@ -194,8 +201,10 @@ func (s *Server) buildHandler() http.Handler {
 
 	var handler http.Handler = mux
 	handler = recoveryMiddleware(handler)
+	handler = crossOriginMiddleware(handler, s.corsOrigin)
 	handler = loggingMiddleware(handler)
 	handler = requestIDMiddleware(handler)
 	handler = corsMiddleware(handler, s.corsOrigin)
+	handler = hostMiddleware(handler, append([]string{hostname(s.addr)}, s.allowedHosts...))
 	return handler
 }

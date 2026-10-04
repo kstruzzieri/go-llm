@@ -18,8 +18,8 @@ func TestNew_DefaultsAreLoopbackAndV1(t *testing.T) {
 	if s.basePath != "/v1" {
 		t.Errorf("default basePath = %q, want /v1", s.basePath)
 	}
-	if s.corsOrigin != "*" {
-		t.Errorf("default corsOrigin = %q, want *", s.corsOrigin)
+	if s.corsOrigin != "" {
+		t.Errorf("default corsOrigin = %q, want \"\" (CORS disabled)", s.corsOrigin)
 	}
 	if s.maxConcurrency != 4 {
 		t.Errorf("default maxConcurrency = %d, want 4", s.maxConcurrency)

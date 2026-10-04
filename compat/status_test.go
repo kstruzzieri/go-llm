@@ -68,7 +68,7 @@ func TestStatusHandler_UnavailableWithNoProviders(t *testing.T) {
 	}
 	router := provider.NewRouter(modelReg, provReg)
 	defer func() { _ = router.Close() }()
-	srv := New(router, modelReg, provReg)
+	srv := New(router, modelReg, provReg, allowHTTPTestHost)
 
 	rec := httptest.NewRecorder()
 	srv.buildHandler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/v1/status", nil))

@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -18,14 +19,184 @@ import (
 func TestCORSMiddleware_SetsHeaders(t *testing.T) {
 	h := corsMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
-	}), "*")
+	}), "https://app.example")
 
 	req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 
-	if got := rec.Header().Get("Access-Control-Allow-Origin"); got != "*" {
-		t.Errorf("CORS origin = %q, want *", got)
+	if got := rec.Header().Get("Access-Control-Allow-Origin"); got != "https://app.example" {
+		t.Errorf("CORS origin = %q, want https://app.example", got)
+	}
+}
+
+// TestBuildHandler_DefaultDisablesCORS pins the #633 default: a Server built
+// without WithCORS sends no CORS headers, so a page on another origin can
+// neither read responses nor get a preflight approved.
+func TestBuildHandler_DefaultDisablesCORS(t *testing.T) {
+	h := New(nil, nil, nil).buildHandler()
+	for _, method := range []string{http.MethodGet, http.MethodOptions} {
+		req := httptest.NewRequest(method, "/v1/models", nil)
+		req.Host = "127.0.0.1:18741"
+		req.Header.Set("Origin", "https://evil.example")
+		req.Header.Set("Access-Control-Request-Method", http.MethodPost)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if got := rec.Header().Get("Access-Control-Allow-Origin"); got != "" {
+			t.Errorf("%s: Access-Control-Allow-Origin = %q, want none by default", method, got)
+		}
+	}
+}
+
+// TestBuildHandler_HostGuard pins DNS-rebinding protection (#633): only a
+// Host naming a loopback address, the WithAddr host, or a WithAllowedHosts
+// entry reaches the routes; anything else is refused with 403. Allowed hosts
+// request an unknown route, so a 404 proves the request got past the guard.
+func TestBuildHandler_HostGuard(t *testing.T) {
+	cases := []struct {
+		name    string
+		opts    []Option
+		host    string
+		allowed bool
+	}{
+		{"loopback v4", nil, "127.0.0.1:18741", true},
+		{"loopback v4 without port", nil, "127.0.0.1", true},
+		{"loopback v4 range", nil, "127.0.0.2:18741", true},
+		{"loopback v6", nil, "[::1]:18741", true},
+		{"loopback v6 without port", nil, "[::1]", true},
+		{"localhost", nil, "localhost:18741", true},
+		{"localhost any case", nil, "LocalHost:18741", true},
+		{"rebinding name", nil, "attacker.example:18741", false},
+		{"rebinding name without port", nil, "attacker.example", false},
+		{"name embedding loopback ip", nil, "127.0.0.1.nip.io:18741", false},
+		{"name embedding localhost", nil, "localhost.attacker.example:18741", false},
+		{"unconfigured lan address", nil, "192.168.1.5:18741", false},
+		{"unspecified address", nil, "0.0.0.0:18741", false},
+		{"empty", nil, "", false},
+		{"empty despite empty allowlist entry", []Option{WithAllowedHosts("")}, "", false},
+		{"listen host", []Option{WithAddr("10.0.0.5:18741")}, "10.0.0.5:18741", true},
+		{"listen host name any case", []Option{WithAddr("gateway.internal:443")}, "Gateway.Internal", true},
+		{"other lan address with listen host", []Option{WithAddr("10.0.0.5:18741")}, "10.0.0.6:18741", false},
+		{"allowlisted name", []Option{WithAllowedHosts("host.docker.internal")}, "host.docker.internal:18741", true},
+		{"allowlist ignores entry port and case", []Option{WithAllowedHosts("Host.Docker.Internal:9999")}, "host.docker.internal:18741", true},
+		{"allowlist accumulates", []Option{WithAllowedHosts("a.internal"), WithAllowedHosts("b.internal")}, "a.internal:18741", true},
+		{"allowlist matches whole names", []Option{WithAllowedHosts("docker.internal")}, "host.docker.internal:18741", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, "/v1/no-such-route", nil)
+			req.Host = tc.host
+			rec := httptest.NewRecorder()
+			New(nil, nil, nil, tc.opts...).buildHandler().ServeHTTP(rec, req)
+			if tc.allowed {
+				if rec.Code != http.StatusNotFound {
+					t.Fatalf("Host %q: status = %d, want 404 from the mux (allowed)", tc.host, rec.Code)
+				}
+				return
+			}
+			if rec.Code != http.StatusForbidden {
+				t.Fatalf("Host %q: status = %d, want 403 (refused)", tc.host, rec.Code)
+			}
+			if env := decodeErrorEnvelope(t, rec); env.Error.Code != "host_not_allowed" {
+				t.Errorf("Host %q: error code = %q, want host_not_allowed", tc.host, env.Error.Code)
+			}
+		})
+	}
+}
+
+// TestBuildHandler_HostGuardPrecedesCORS pins the guard outside CORS: with
+// CORS enabled, a preflight naming a foreign Host is refused instead of
+// approved, while one naming a loopback Host is still answered.
+func TestBuildHandler_HostGuardPrecedesCORS(t *testing.T) {
+	h := New(nil, nil, nil, WithCORS("https://app.example")).buildHandler()
+	for _, tc := range []struct {
+		host string
+		want int
+	}{
+		{"attacker.example:18741", http.StatusForbidden},
+		{"127.0.0.1:18741", http.StatusNoContent},
+	} {
+		req := httptest.NewRequest(http.MethodOptions, "/v1/chat/completions", nil)
+		req.Host = tc.host
+		req.Header.Set("Origin", "https://app.example")
+		req.Header.Set("Access-Control-Request-Method", http.MethodPost)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != tc.want {
+			t.Errorf("preflight with Host %q: status = %d, want %d", tc.host, rec.Code, tc.want)
+		}
+	}
+}
+
+// TestBuildHandler_CrossOriginGuard pins CSRF protection (#633): a POST that a
+// browser marks as coming from another origin is refused unless that origin
+// is the WithCORS origin, while non-browser clients are unaffected. Allowed
+// requests hit an unknown route, so a 404 proves they got past the guard.
+func TestBuildHandler_CrossOriginGuard(t *testing.T) {
+	cases := []struct {
+		name      string
+		opts      []Option
+		origin    string // Origin header; "" sends none
+		fetchSite string // Sec-Fetch-Site header; "" sends none
+		allowed   bool
+	}{
+		{"non-browser client", nil, "", "", true},
+		{"cross-site page", nil, "https://evil.example", "cross-site", false},
+		{"same-site page on another port", nil, "http://localhost:3000", "same-site", false},
+		{"old browser without Sec-Fetch-Site", nil, "https://evil.example", "", false},
+		{"WithCORS origin is trusted", []Option{WithCORS("https://app.example")}, "https://app.example", "cross-site", true},
+		{"other origin despite WithCORS", []Option{WithCORS("https://app.example")}, "https://evil.example", "cross-site", false},
+		{"WithCORS star turns the check off", []Option{WithCORS("*")}, "https://evil.example", "cross-site", true},
+		{"malformed WithCORS origin trusts nothing", []Option{WithCORS("https://app.example/")}, "https://app.example", "cross-site", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPost, "/v1/no-such-route", strings.NewReader("{}"))
+			req.Host = "127.0.0.1:18741"
+			req.Header.Set("Content-Type", "text/plain")
+			if tc.origin != "" {
+				req.Header.Set("Origin", tc.origin)
+			}
+			if tc.fetchSite != "" {
+				req.Header.Set("Sec-Fetch-Site", tc.fetchSite)
+			}
+			rec := httptest.NewRecorder()
+			New(nil, nil, nil, tc.opts...).buildHandler().ServeHTTP(rec, req)
+			if tc.allowed {
+				if rec.Code != http.StatusNotFound {
+					t.Fatalf("status = %d, want 404 from the mux (allowed)", rec.Code)
+				}
+				return
+			}
+			if rec.Code != http.StatusForbidden {
+				t.Fatalf("status = %d, want 403 (refused)", rec.Code)
+			}
+			if env := decodeErrorEnvelope(t, rec); env.Error.Code != "cross_origin_not_allowed" {
+				t.Errorf("error code = %q, want cross_origin_not_allowed", env.Error.Code)
+			}
+		})
+	}
+}
+
+// TestChat_CrossSiteSimplePOSTDoesNotRunModel is the #633 regression: with
+// CORS disabled a page can still send a text/plain POST, which needs no
+// preflight. It must be refused before the model runs, not merely hidden.
+func TestChat_CrossSiteSimplePOSTDoesNotRunModel(t *testing.T) {
+	srv, _, calls, teardown := newChatFixture(t, "hi")
+	defer teardown()
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
+		strings.NewReader(`{"model":"qwen3:8b","messages":[{"role":"user","content":"x"}]}`))
+	req.Host = "127.0.0.1:18741"
+	req.Header.Set("Content-Type", "text/plain;charset=UTF-8")
+	req.Header.Set("Origin", "https://evil.example")
+	req.Header.Set("Sec-Fetch-Site", "cross-site")
+	rec := httptest.NewRecorder()
+	srv.buildHandler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Errorf("status = %d, want 403", rec.Code)
+	}
+	if n := atomic.LoadInt32(calls); n != 0 {
+		t.Errorf("model ran %d time(s) for a cross-site POST, want 0", n)
 	}
 }
 
@@ -43,7 +214,7 @@ func TestCORSMiddleware_EmptyOriginDisables(t *testing.T) {
 func TestCORSMiddleware_OptionsReturns204(t *testing.T) {
 	h := corsMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		t.Fatal("next should not run for OPTIONS")
-	}), "*")
+	}), "https://app.example")
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest(http.MethodOptions, "/v1/models", nil))
 	if rec.Code != http.StatusNoContent {
