@@ -105,9 +105,9 @@ Re-run the spike if the AgentFlow validator contract tightens.
 ## Enabling task mode
 
 `-goal`, `-plan`, `-agentflow-status` and `-agentflow-resume` require AgentFlow
-1.x: `agentflow --version` must report `1.y.z`. An older or newer AgentFlow is
-refused before any mutation, and a failed run does not ask it for recovery
-advice.
+1.x: `agentflow --version` must report a 1.x version. An older or newer
+AgentFlow is refused before any mutation, and a failed run does not ask it for
+recovery advice.
 
 - `-plan <plan.json>` — required; the path to the plan document to lock and
   execute. Passing it turns on task mode.
@@ -372,14 +372,21 @@ What Golem does with 0.x state:
 - `-plan`, `-agentflow-resume` and `-goal` refuse a workspace when
   `.agent/plan.lock.json`, `.agent/execution.contract.json`, or any row of the
   four execution ledgers has a schema major other than 1. The refusal names the
-  file (and line) and makes no AgentFlow call. `-goal` keeps refusing an
-  existing locked plan or non-empty draft first, with its own message.
+  file (and line) and makes no AgentFlow call. For `-goal` this check runs
+  before the locked-plan and non-empty-draft refusal, which still applies to a
+  1.x plan.
 - A plan file whose `schema_version` major is not 1 is refused before any
   AgentFlow call.
 - `-agentflow-status` stays read-only and exits 3. AgentFlow 1.x reports a
-  workspace whose plan lock is 0.x as `state_invalid`, with its own upgrade
-  diagnostic. A partial tree can show a setup state instead, such as
-  `execution_uninitialized` when the execution contract is missing.
+  workspace whose plan lock is 0.x as `state_invalid`, and its `next-action`
+  diagnostic names the incompatible version (for example `plan-lock
+  schema_version 0.3.0 is incompatible with supported 1.0.0`). When the
+  execution contract is 0.x, `agentflow doctor` adds AgentFlow's own upgrade
+  remedy: run `build-proof` with the older AgentFlow and keep the bundle. Follow
+  the steps above; they move `.agent/` aside, which AgentFlow's remedy to
+  re-initialise execution state does not do. A partial tree can show a setup
+  state instead, such as `execution_uninitialized` when the execution contract
+  is missing.
 
 ## Workflow routing in task mode
 

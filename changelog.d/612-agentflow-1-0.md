@@ -15,7 +15,8 @@ AgentFlow 1.0.0 release.
   exit 3.
 - **Plans:** a plan whose `schema_version` major is not 1 (including Golem's
   previous `0.3.0` and external `0.4.0` plans) is refused before any AgentFlow
-  call. Migrate it to `1.0.0` and review it again, or re-plan with `-goal`.
+  call. Migrate it to `1.0.0` and review it again, or re-plan with `-goal`
+  after moving any existing `.agent/` aside.
 - **Existing 0.x state:** `-plan`, `-agentflow-resume` and `-goal` refuse a
   workspace whose `.agent/` plan lock, execution contract or any execution
   ledger row is not AgentFlow 1.x, naming the file. Finish or `build-proof` the
@@ -25,6 +26,20 @@ AgentFlow 1.0.0 release.
   `docs/llm/agentflow-task-mode.md`.
 - `-agentflow-status` now makes two read-only AgentFlow calls:
   `--version`, then `next-action`.
-- Developers running go-llm's own tests with an AgentFlow 0.x binary on PATH
-  will see the untagged real-CLI tests in `./agentflow` (lock-plan and review)
-  fail: install AgentFlow 1.x, or set `AGENTFLOW_SRC` to a 1.x checkout.
+- Developers running go-llm's own tests with an AgentFlow that is not 1.x on
+  PATH (or at `AGENTFLOW_SRC`): the real-CLI tests, including the untagged
+  ones in `./agentflow` (lock-plan and review), now skip with a message naming
+  the version found. They fail instead when `GO_LLM_REQUIRE_AGENTFLOW` is set.
+  Install AgentFlow 1.x, or set `AGENTFLOW_SRC` to a 1.x checkout.
+
+#### Library changes
+
+- `agentflow.PreflightP0` rejects a plan whose `schema_version` major is not 1,
+  and `agentflow.Compile` emits `1.0.0`.
+- New exports: `Client.CheckVersion` (runs only `agentflow --version` and the
+  1.x gate), `VersionError` (a rejected version), `PlanSchemaVersion` and
+  `SupportedSchemaVersion`.
+- The `Probe` and `ProbeParallel` capability hints for a missing subcommand or
+  flag now end in `(upgrade Agentflow)` instead of naming a version.
+- A failed `agentflow --version` now includes its stderr in the error, and only
+  the first line of the `--version` output is parsed.
