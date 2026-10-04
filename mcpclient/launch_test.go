@@ -1,0 +1,357 @@
+package mcpclient
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"slices"
+	"sort"
+	"strings"
+	"testing"
+
+	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
+)
+
+func TestResolveLauncher(t *testing.T) {
+	var got string
+	fake := func(result string, err error) func(string) (string, error) {
+		return func(name string) (string, error) { got = name; return result, err }
+	}
+	dir := filepath.Join(string(filepath.Separator), "work")
+	for _, tt := range []struct {
+		argv0, wantArg, result string
+		err                    error
+		ok                     bool
+	}{
+		{"server", "server", "/usr/bin/server", nil, true},
+		{"./bin/server", filepath.Join(dir, "bin", "server"), "/work/bin/server", nil, true},
+		{"/opt/server", "/opt/server", "/opt/server", nil, true},
+		{"server", "server", "", &exec.Error{Name: "server", Err: exec.ErrDot}, false},
+		{"server", "server", "server", nil, false},                    // relative result (GODEBUG=execerrdot=0)
+		{"/opt/x/../server", "/opt/server", "/opt/server", nil, true}, // cleaned before lookup, not after
+		{"/opt/server", "/opt/server", "/opt/./server", nil, true},    // lookPath's result is executed unchanged
+	} {
+		launcher, err := resolveLauncher(tt.argv0, dir, fake(tt.result, tt.err))
+		if got != tt.wantArg || (err == nil) != tt.ok || (tt.ok && launcher != tt.result) {
+			t.Errorf("resolveLauncher(%q) passed %q, returned (%q, %v); want %q, ok=%t", tt.argv0, got, launcher, err, tt.wantArg, tt.ok)
+		}
+	}
+	if _, err := resolveLauncher("", dir, fake("/x", nil)); err == nil {
+		t.Error("empty argv0 accepted")
+	}
+}
+
+func testLaunchEnv(parent map[string]string) launchEnv {
+	return launchEnv{
+		lookup:   func(name string) (string, bool) { v, ok := parent[name]; return v, ok },
+		lookPath: exec.LookPath,
+		getwd:    os.Getwd,
+		policy:   unixEnvPolicy,
+	}
+}
+
+// A Windows PATHEXT suffix must not introduce a path component: otherwise
+// exec.Cmd.Start can append it again to the prepared extensionless basename
+// and execute a different file. Removing the pre-lookup check must fail these
+// cases even when the launcher itself exists.
+func TestPrepareStdioRejectsPathExtSeparatorsBeforeLookup(t *testing.T) {
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	for _, tt := range []struct {
+		name    string
+		policy  envPolicy
+		pathExt string
+		set     bool
+		invalid bool
+	}{
+		{"windows slash", windowsEnvPolicy, ".exe/canary", true, true},
+		{"windows backslash", windowsEnvPolicy, `.exe\canary`, true, true},
+		{"windows colon", windowsEnvPolicy, ".exe:canary", true, true},
+		{"windows later entry", windowsEnvPolicy, ".COM;.EXE;cmd/canary", true, true},
+		{"windows standard", windowsEnvPolicy, ".COM;.EXE;.BAT;.CMD", true, false},
+		{"windows without leading dots", windowsEnvPolicy, "COM;EXE;BAT;CMD", true, false},
+		{"windows empty", windowsEnvPolicy, "", true, false},
+		{"windows empty entries", windowsEnvPolicy, ";;", true, false},
+		{"windows unset", windowsEnvPolicy, "", false, false},
+		{"unix ignores PATHEXT", unixEnvPolicy, `.exe/canary;.cmd\canary;.exe:canary`, true, false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			parent := make(map[string]string)
+			if tt.set {
+				parent["PATHEXT"] = tt.pathExt
+			}
+			le := testLaunchEnv(parent)
+			le.policy = tt.policy
+			lookedUp := false
+			le.lookPath = func(string) (string, error) {
+				lookedUp = true
+				return exe, nil
+			}
+			p, err := prepare(StdioServer("fs", []string{exe}).WithDir(dir), "/ws", le)
+			if !tt.invalid {
+				if err != nil || !lookedUp || p.transport == nil {
+					t.Fatalf("prepare(PATHEXT=%q) = (%v, lookup=%t), want a prepared transport", tt.pathExt, err, lookedUp)
+				}
+				return
+			}
+			if lookedUp || p.transport != nil {
+				t.Error("prepare with a PATHEXT path separator performed executable lookup or prepared a transport")
+			}
+			failure, ok := err.(*AdmissionError)
+			if !ok || failure.Reason != "launch_invalid" {
+				t.Fatalf("prepare(PATHEXT=%q) = %v, want a bare launch_invalid AdmissionError", tt.pathExt, err)
+			}
+			const want = `server "fs": launch_invalid: mcpclient: PATHEXT must not contain path delimiters`
+			if err.Error() != want {
+				t.Errorf("prepare(PATHEXT=%q) error = %q, want fixed text %q without the value", tt.pathExt, err.Error(), want)
+			}
+		})
+	}
+}
+
+func TestPrepareStdioFreezesResolvedLaunch(t *testing.T) {
+	root := t.TempDir()
+	real := filepath.Join(root, "real")
+	if err := os.Mkdir(real, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(real, "server"), []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("server", filepath.Join(real, "link")); err != nil {
+		t.Fatal(err)
+	}
+	linkedDir := filepath.Join(root, "linked")
+	if err := os.Symlink(real, linkedDir); err != nil {
+		t.Fatal(err)
+	}
+	wantDir, err := filepath.EvalSymlinks(real)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := StdioServer("fs", []string{"./link", "--flag"}).WithDir(linkedDir).WithEnv(InheritEnv("TOKEN"), SetEnv("MODE", "x"))
+	p, err := prepare(s, "/ws", testLaunchEnv(map[string]string{"PATH": "/bin", "HOME": "/h", "CANARY_SECRET": "c", "TOKEN": "t"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// prepare must own its argv: StdioServer already copied the caller's
+	// slice, so mutate the Server's own backing array instead.
+	s.command[1] = "--changed"
+	id := p.identity
+	if id.dir != wantDir || id.launcher != filepath.Join(wantDir, "link") || id.target != filepath.Join(wantDir, "server") {
+		t.Fatalf("identity paths = (%q, %q, %q), want (%q, %q, %q)", id.dir, id.launcher, id.target, wantDir, filepath.Join(wantDir, "link"), filepath.Join(wantDir, "server"))
+	}
+	if !slices.Equal(id.argv, []string{"./link", "--flag"}) || !slices.Equal(id.env, []string{"inherit:TOKEN", "set:MODE"}) || id.envBaseline != "unix-v1" || id.kind != "stdio" {
+		t.Fatalf("identity = %+v", id)
+	}
+	cmd := p.transport.(*gomcp.CommandTransport).Command
+	if cmd.Path != id.launcher || !slices.Equal(cmd.Args, []string{"./link", "--flag"}) || cmd.Dir != wantDir {
+		t.Fatalf("command = (%q, %q, %q)", cmd.Path, cmd.Args, cmd.Dir)
+	}
+	if want := []string{"HOME=/h", "MODE=x", "PATH=/bin", "TOKEN=t"}; !slices.Equal(cmd.Env, want) {
+		t.Fatalf("command env = %q, want %q", cmd.Env, want)
+	}
+}
+
+// prepare fingerprints env names under the launch policy, so on Windows
+// -mcp-env Path and PATH are one identity, as they are one variable.
+func TestPrepareStdioEnvIdentityFollowsPolicy(t *testing.T) {
+	le := testLaunchEnv(nil)
+	le.policy = windowsEnvPolicy
+	_, ct := gomcp.NewInMemoryTransports()
+	p, err := prepare(Server{Alias: "fs", tr: ct, env: []EnvVar{InheritEnv("Path")}}, "/ws", le)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(p.identity.env, []string{"inherit:PATH"}) || p.identity.envBaseline != "windows-v1" {
+		t.Fatalf("identity env = (%q, %q), want ([inherit:PATH], windows-v1)", p.identity.env, p.identity.envBaseline)
+	}
+}
+
+func TestPrepareStdioDefaultsToProcessCwd(t *testing.T) {
+	cwd := t.TempDir()
+	le := testLaunchEnv(map[string]string{"PATH": os.Getenv("PATH")})
+	le.getwd = func() (string, error) { return cwd, nil }
+	p, err := prepare(StdioServer("fs", []string{"/bin/sh"}), "/ws", le)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, _ := filepath.EvalSymlinks(cwd)
+	if p.identity.dir != want {
+		t.Fatalf("default dir = %q, want %q", p.identity.dir, want)
+	}
+}
+
+// Each refusal names a fixed rule an operator can act on, never a path, argv
+// or OS error text.
+func TestPrepareStdioFailures(t *testing.T) {
+	dir := t.TempDir()
+	file := filepath.Join(dir, "plain")
+	if err := os.WriteFile(file, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	lookPath := func(result string, err error) func(*launchEnv) {
+		return func(le *launchEnv) { le.lookPath = func(string) (string, error) { return result, err } }
+	}
+	const invalid = `server "fs": launch_invalid: mcpclient: `
+	for name, tt := range map[string]struct {
+		s      Server
+		le     func(*launchEnv)
+		reason string
+		want   string
+	}{
+		// Validation rejects an empty command first; prepare must still
+		// refuse it rather than panic in a Connect worker.
+		"empty command": {StdioServer("fs", nil).WithDir(dir), nil, "launch_invalid", invalid + "empty executable"},
+		"getwd fails": {StdioServer("fs", []string{"/bin/sh"}), func(le *launchEnv) {
+			le.getwd = func() (string, error) { return "", errors.New("getwd " + dir) }
+		}, "launch_invalid", invalid + "cannot determine the working directory"},
+		"missing dir":        {StdioServer("fs", []string{"/bin/sh"}).WithDir(filepath.Join(dir, "missing")), nil, "launch_invalid", invalid + "working directory cannot be resolved or is not a directory"},
+		"dir is a file":      {StdioServer("fs", []string{"/bin/sh"}).WithDir(file), nil, "launch_invalid", invalid + "working directory cannot be resolved or is not a directory"},
+		"missing executable": {StdioServer("fs", []string{filepath.Join(dir, "nope")}).WithDir(dir), nil, "launch_invalid", invalid + "executable not found or not executable"},
+		"not executable":     {StdioServer("fs", []string{file}).WithDir(dir), nil, "launch_invalid", invalid + "executable not found or not executable"},
+		"current-directory executable": {StdioServer("fs", []string{"server"}).WithDir(dir), lookPath("", &exec.Error{Name: filepath.Join(dir, "server"), Err: exec.ErrDot}),
+			"launch_invalid", invalid + "executable resolves relative to the current directory"},
+		"relative resolution": {StdioServer("fs", []string{"server"}).WithDir(dir), lookPath("server", nil), "launch_invalid", invalid + "executable did not resolve to an absolute path"},
+		"unresolvable target": {StdioServer("fs", []string{"server"}).WithDir(dir), lookPath(filepath.Join(dir, "gone"), nil), "launch_invalid", invalid + "executable symlink target cannot be resolved"},
+		"unset inherited":     {StdioServer("fs", []string{"/bin/sh"}).WithDir(dir).WithEnv(InheritEnv("TOKEN")), nil, "env_unset", `server "fs": env_unset: TOKEN`},
+	} {
+		t.Run(name, func(t *testing.T) {
+			le := testLaunchEnv(map[string]string{"PATH": "/bin"})
+			if tt.le != nil {
+				tt.le(&le)
+			}
+			_, err := prepare(tt.s, "/ws", le)
+			// A bare *AdmissionError, not a wrapper: callers may type-assert.
+			failure, ok := err.(*AdmissionError)
+			if !ok || failure.Reason != tt.reason {
+				t.Fatalf("prepare = %#v, want a bare *AdmissionError with reason %s", err, tt.reason)
+			}
+			if err.Error() != tt.want || strings.Contains(err.Error(), dir) {
+				t.Fatalf("prepare error = %q, want %q", err.Error(), tt.want)
+			}
+			if tt.reason == "env_unset" && !slices.Equal(failure.Names, []string{"TOKEN"}) {
+				t.Fatalf("env_unset names = %q", failure.Names)
+			}
+		})
+	}
+}
+
+func TestPrepareHTTP(t *testing.T) {
+	p, err := prepare(HTTPServer("api", "HTTPS://Example.COM/mcp?token=q"), "/ws", testLaunchEnv(nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.identity.kind != "http" || p.identity.origin != "https://example.com" || p.identity.endpoint != "/mcp?token=q" {
+		t.Fatalf("http identity = %+v", p.identity)
+	}
+	sc := p.transport.(*gomcp.StreamableClientTransport)
+	if sc.Endpoint != "https://example.com/mcp?token=q" || !sc.DisableStandaloneSSE || p.refusals == nil {
+		t.Fatalf("http transport = (%q, %t, %v)", sc.Endpoint, sc.DisableStandaloneSSE, p.refusals)
+	}
+}
+
+const envProbeMarker = "mcpclient-envprobe"
+
+// TestMCPClientEnvProbeHelper is not a test. Re-executed with envProbeMarker,
+// the test binary becomes a stdio MCP server whose probe tool reports its
+// environment names, PROBE_* values, and working directory. The tool's
+// description carries the same report, so Inspect, which lists tools but
+// never calls one, observes the launch too.
+func TestMCPClientEnvProbeHelper(t *testing.T) {
+	if !slices.Contains(os.Args, envProbeMarker) {
+		return
+	}
+	names, values := []string{}, map[string]string{}
+	for _, kv := range os.Environ() {
+		name, value, _ := strings.Cut(kv, "=")
+		names = append(names, name)
+		if strings.HasPrefix(name, "PROBE_") || name == "PATH" {
+			values[name] = value
+		}
+	}
+	sort.Strings(names)
+	wd, _ := os.Getwd()
+	raw, _ := json.Marshal(map[string]any{"names": names, "values": values, "cwd": wd})
+	srv := gomcp.NewServer(&gomcp.Implementation{Name: "envprobe", Version: "1"}, nil)
+	srv.AddTool(&gomcp.Tool{Name: "probe", Description: string(raw), InputSchema: map[string]any{"type": "object"}}, func(context.Context, *gomcp.CallToolRequest) (*gomcp.CallToolResult, error) {
+		return &gomcp.CallToolResult{Content: []gomcp.Content{&gomcp.TextContent{Text: string(raw)}}}, nil
+	})
+	if err := srv.Run(context.Background(), &gomcp.StdioTransport{}); err != nil {
+		os.Exit(1)
+	}
+	os.Exit(0)
+}
+
+type probeReport struct {
+	Names  []string          `json:"names"`
+	Values map[string]string `json:"values"`
+	Cwd    string            `json:"cwd"`
+}
+
+func runEnvProbe(t *testing.T, s Server, le launchEnv) probeReport {
+	t.Helper()
+	m, w, err := connectWithHooks(context.Background(), Implementation{Name: "test"}, []Server{s}, ConnectOptions{Pins: testPins(t)}, &connectHooks{launch: &le})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = m.Close() })
+	if len(m.Tools()) != 1 {
+		t.Fatalf("probe server not admitted: %v", w)
+	}
+	res, err := m.Tools()[0].Invoke(context.Background(), json.RawMessage(`{}`))
+	if err != nil || res.IsError {
+		t.Fatalf("probe call = (%+v, %v)", res, err)
+	}
+	var report probeReport
+	if err := json.Unmarshal([]byte(res.Content), &report); err != nil {
+		t.Fatalf("probe report %q: %v", res.Content, err)
+	}
+	return report
+}
+
+func probeServer(t *testing.T) Server {
+	t.Helper()
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return StdioServer("probe", []string{exe, "-test.run=^TestMCPClientEnvProbeHelper$", "--", envProbeMarker})
+}
+
+func TestStdioServerReceivesOnlyPolicyEnvironment(t *testing.T) {
+	dir := t.TempDir()
+	want, _ := filepath.EvalSymlinks(dir)
+	report := runEnvProbe(t, probeServer(t).WithDir(dir).WithEnv(InheritEnv("PROBE_TOKEN"), SetEnv("PROBE_SET", "explicit")),
+		testLaunchEnv(map[string]string{"PATH": "/usr/bin:/bin", "HOME": dir, "CANARY_SECRET": "canary", "PROBE_TOKEN": "tok"}))
+	if wantNames := []string{"HOME", "PATH", "PROBE_SET", "PROBE_TOKEN"}; !slices.Equal(report.Names, wantNames) {
+		t.Fatalf("child env names = %q, want exactly %q", report.Names, wantNames)
+	}
+	if report.Values["PROBE_TOKEN"] != "tok" || report.Values["PROBE_SET"] != "explicit" || report.Cwd != want {
+		t.Fatalf("child values/cwd = (%v, %q), want (tok, explicit, %q)", report.Values, report.Cwd, want)
+	}
+}
+
+func TestStdioServerPathDropsRelativeEntries(t *testing.T) {
+	report := runEnvProbe(t, probeServer(t).WithDir(t.TempDir()), testLaunchEnv(map[string]string{"PATH": "/usr/bin:.:./node_modules/.bin::/bin"}))
+	if got := report.Values["PATH"]; got != "/usr/bin:/bin" {
+		t.Fatalf("child PATH = %q, want /usr/bin:/bin", got)
+	}
+	report = runEnvProbe(t, probeServer(t).WithDir(t.TempDir()), testLaunchEnv(map[string]string{"PATH": ".:bin"}))
+	if len(report.Names) != 0 {
+		t.Fatalf("child env names = %q, want none: an all-relative PATH is omitted", report.Names)
+	}
+}
+
+func TestStdioServerWithEmptyParentGetsEmptyEnvironment(t *testing.T) {
+	report := runEnvProbe(t, probeServer(t).WithDir(t.TempDir()), testLaunchEnv(nil))
+	if len(report.Names) != 0 {
+		t.Fatalf("child env names = %q, want none (empty must never mean inherit)", report.Names)
+	}
+}

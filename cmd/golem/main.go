@@ -24,6 +24,7 @@ import (
 	"github.com/kstruzzieri/go-llm/fingerprint"
 	golemruntime "github.com/kstruzzieri/go-llm/golem"
 	"github.com/kstruzzieri/go-llm/internal/providerbootstrap"
+	"github.com/kstruzzieri/go-llm/mcpclient"
 	"github.com/kstruzzieri/go-llm/provider"
 	"github.com/kstruzzieri/go-llm/provider/openaicompat"
 	"github.com/kstruzzieri/go-llm/rag"
@@ -60,6 +61,7 @@ type flags struct {
 	mcpStdio            stringSliceFlag
 	mcpHTTP             stringSliceFlag
 	mcpTools            stringSliceFlag
+	mcpEnv              stringSliceFlag
 	allowDestinations   stringSliceFlag
 	noRag               bool
 	noAutoIndex         bool
@@ -154,9 +156,10 @@ func parseFlags(args []string) (flags, error) {
 	fs.BoolVar(&f.dispatch, "dispatch", false, "enable the dispatch tool (bounded read-only exploration tasks use backend-governed concurrency; ungoverned routing stays serial)")
 	fs.StringVar(&f.dispatchRole, "dispatch-role", "", "model role dispatch child agents route to (default: the primary agent chain, so children never force a model swap)")
 	fs.BoolVar(&f.interceptors, "interceptors", false, "add the content interceptor pipeline (#436/#437/#438) on top of the always-on guards (#439/#555, always on since #575: argument invariants for named tools, exec-class egress labels, scoped-child refusal reporting): origin-sensitive injection detectors, all-origin supported secret/payment-card blocking across completed turns, and a canary; required by /consult; streaming output is not intercepted; risk appears at interactive tool-call and plan-lock prompts and successful REPL/-p stderr footers with or without this flag, but not verifier approval prompts; default off")
-	fs.Var(&f.mcpStdio, "mcp-stdio", "attach an MCP server over stdio: \"[alias=]command args...\" (repeatable; use `env KEY=val cmd` for env vars)")
+	fs.Var(&f.mcpStdio, "mcp-stdio", "attach an MCP server over stdio: \"[alias=]command args...\" (repeatable; runs in -root with a minimal environment; forward variables with -mcp-env)")
 	fs.Var(&f.mcpHTTP, "mcp-http", "attach an MCP server over streamable HTTP: \"[alias=]https://endpoint\" (repeatable)")
 	fs.Var(&f.mcpTools, "mcp-tools", "expose only these original tools of an attached MCP server: \"alias=name[,name...]\"; \"alias=\" exposes none (repeatable; the complete catalog is still verified and pinned)")
+	fs.Var(&f.mcpEnv, "mcp-env", "forward named environment variables to an attached stdio MCP server: \"alias=NAME[,NAME...]\" (repeatable; values are read from golem's environment, never from the command line)")
 	fs.Var(&f.allowDestinations, "allow-destination", "admit a remote model destination without prompting: \"<provider>/<canonical base URL>\" (repeatable; required for remote destinations in noninteractive runs)")
 	fs.BoolVar(&f.noRag, "no-rag", false, "disable the retrieve tool entirely (ignore any auto index)")
 	fs.BoolVar(&f.noAutoIndex, "no-auto-index", false, "disable startup auto-index refresh, which otherwise skips detected secret/payment-card files by default; existing auto indexes may still be used")
@@ -299,7 +302,7 @@ func validateFlags(f flags) error {
 		}
 		if f.promptSet || f.goalSet || f.reviewManifest != "" || f.evidencePath != "" ||
 			f.wfProfileSet || f.wfReasonSet || f.workflowProfile != "" || f.workflowReason != "" ||
-			f.ragDB != "" || f.delegate || f.dispatch || len(f.mcpStdio) > 0 || len(f.mcpHTTP) > 0 || len(f.mcpTools) > 0 ||
+			f.ragDB != "" || f.delegate || f.dispatch || len(f.mcpStdio) > 0 || len(f.mcpHTTP) > 0 || len(f.mcpTools) > 0 || len(f.mcpEnv) > 0 ||
 			f.allowWrite || f.allowExec || f.approvePlanLock {
 			return fmt.Errorf("golem: %s cannot be combined with planning, setup, review, or ambient tool flags", mode)
 		}
@@ -395,7 +398,7 @@ func validateFlags(f flags) error {
 	if f.planPath != "" && f.dispatch {
 		return fmt.Errorf("golem: -plan (task mode) does not attach dispatch; proof-mode tools are built from the locked plan")
 	}
-	if f.planPath != "" && (len(f.mcpStdio) > 0 || len(f.mcpHTTP) > 0 || len(f.mcpTools) > 0) {
+	if f.planPath != "" && (len(f.mcpStdio) > 0 || len(f.mcpHTTP) > 0 || len(f.mcpTools) > 0 || len(f.mcpEnv) > 0) {
 		return fmt.Errorf("golem: -plan (task mode) does not attach MCP tools; proof-mode tools are built from the locked plan")
 	}
 	if f.planPath != "" && (!f.approveEdits || !f.approveGates) {
@@ -422,7 +425,7 @@ func validateFlags(f flags) error {
 	if f.goalSet && f.dispatch {
 		return fmt.Errorf("golem: -goal (planning mode) does not attach dispatch")
 	}
-	if f.goalSet && (len(f.mcpStdio) > 0 || len(f.mcpHTTP) > 0 || len(f.mcpTools) > 0) {
+	if f.goalSet && (len(f.mcpStdio) > 0 || len(f.mcpHTTP) > 0 || len(f.mcpTools) > 0 || len(f.mcpEnv) > 0) {
 		return fmt.Errorf("golem: -goal (planning mode) does not attach MCP tools")
 	}
 	if f.goalSet && f.evidencePath != "" {
@@ -921,6 +924,10 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 	if root, err = filepath.EvalSymlinks(root); err != nil {
 		return maybeUsageError(fmt.Errorf("resolve root: %w", err), headlessExitApplies(f))
 	}
+	mcpServers, merr = withMCPPolicy(root, mcpServers, len(f.mcpStdio), f.mcpEnv)
+	if merr != nil {
+		return maybeUsageError(fmt.Errorf("golem: %w", merr), headlessExitApplies(f))
+	}
 
 	ctx := context.Background()
 	if f.agentflowStatus {
@@ -1073,7 +1080,14 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 	mcpBlocked := mcpBlockedAliases(mcpWarns)
 	if mcpErr != nil || (f.promptSet && len(mcpBlocked) > 0) {
 		err := errors.New("golem: MCP catalog admission failed")
-		_, _ = fmt.Fprintln(stderr, "mcp: catalog admission failed")
+		// An AdmissionError's text is alias, reason and a fixed rule; any
+		// other fatal error may carry paths, so it stays generic.
+		var refusal *mcpclient.AdmissionError
+		if mcpErr != nil && errors.As(mcpErr, &refusal) {
+			_, _ = fmt.Fprintln(stderr, "mcp: "+mcpErr.Error())
+		} else {
+			_, _ = fmt.Fprintln(stderr, "mcp: catalog admission failed")
+		}
 		reportPreRunFailure(stdout, outFormat, "mcp_untrusted", err)
 		return err
 	}

@@ -11,19 +11,22 @@ import (
 	"github.com/kstruzzieri/go-llm/mcpclient"
 )
 
+// mcpPinStoreHint says what to check when the pin store cannot be opened.
+const mcpPinStoreHint = "check -root and the user data directory (golem/mcp-pins, including connection-hmac.pem)"
+
 // openMCPPins keeps filesystem diagnostics from revealing credential-bearing
 // paths. Detailed remote definitions are only rendered by explicit inspection.
 func openMCPPins(root string) (*mcpclient.PinStore, error) {
 	pins, err := mcpclient.NewPinStore(root)
 	if err != nil {
-		return nil, errors.New("mcp: pin store unavailable; check -root and the user data directory")
+		return nil, errors.New("mcp: pin store unavailable; " + mcpPinStoreHint)
 	}
 	return pins, nil
 }
 
 func runMCPTrust(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	if len(args) == 0 || (args[0] != "inspect" && args[0] != "approve") {
-		return errors.New("usage: golem mcp inspect|approve [-root .] -mcp-stdio 'alias=command args'|-mcp-http 'alias=https://endpoint' [-digest sha256:…]")
+		return errors.New("usage: golem mcp inspect|approve [-root .] -mcp-stdio 'alias=command args'|-mcp-http 'alias=https://endpoint' [-mcp-env 'alias=NAME,...'] [-digest sha256:… -connection hmac-sha256:…]")
 	}
 	action := args[0]
 	fs := flag.NewFlagSet("golem mcp "+action, flag.ContinueOnError)
@@ -33,11 +36,14 @@ func runMCPTrust(ctx context.Context, args []string, stdout, stderr io.Writer) e
 	var stdio, httpFlags stringSliceFlag
 	fs.Var(&stdio, "mcp-stdio", "one explicitly aliased stdio server")
 	fs.Var(&httpFlags, "mcp-http", "one explicitly aliased HTTP server")
+	var envFlags stringSliceFlag
+	fs.Var(&envFlags, "mcp-env", "forward these variables by name to the stdio server")
 	var selection stringSliceFlag
 	fs.Var(&selection, "mcp-tools", "not accepted: inspect and approve always review the complete catalog")
-	digest := ""
+	digest, connection := "", ""
 	if action == "approve" {
 		fs.StringVar(&digest, "digest", "", "exact candidate digest from inspect")
+		fs.StringVar(&connection, "connection", "", "exact connection fingerprint from inspect")
 	}
 	if err := fs.Parse(args[1:]); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -69,6 +75,9 @@ func runMCPTrust(ctx context.Context, args []string, stdout, stderr io.Writer) e
 	if err != nil {
 		return errors.New("mcp: invalid server specification")
 	}
+	if servers, err = withMCPPolicy(*root, servers, len(stdio), envFlags); err != nil {
+		return fmt.Errorf("mcp: %w", err)
+	}
 	pins, err := openMCPPins(*root)
 	if err != nil {
 		return err
@@ -77,7 +86,7 @@ func runMCPTrust(ctx context.Context, args []string, stdout, stderr io.Writer) e
 	if action == "inspect" {
 		inspection, err = mcpclient.Inspect(ctx, mcpClientImpl(), servers[0], pins)
 	} else {
-		inspection, err = mcpclient.Approve(ctx, mcpClientImpl(), servers[0], pins, digest)
+		inspection, err = mcpclient.Approve(ctx, mcpClientImpl(), servers[0], pins, mcpclient.ApprovalDigests{Catalog: digest, Connection: connection})
 	}
 	if err != nil {
 		return err
@@ -104,7 +113,7 @@ func connectMCP(ctx context.Context, root string, servers []mcpclient.Server, re
 	if err != nil {
 		failures := make([]error, 0, len(servers))
 		for _, server := range servers {
-			failures = append(failures, &mcpclient.AdmissionError{Alias: server.Alias, Reason: "pin_unavailable"})
+			failures = append(failures, fmt.Errorf("%w; %s", &mcpclient.AdmissionError{Alias: server.Alias, Reason: "pin_unavailable"}, mcpPinStoreHint))
 		}
 		return nil, failures, nil
 	}

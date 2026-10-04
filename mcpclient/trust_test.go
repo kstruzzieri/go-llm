@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -20,6 +21,10 @@ func testPins(t *testing.T) *PinStore {
 		t.Fatal(err)
 	}
 	return s
+}
+
+func approvalFor(i *Inspection) ApprovalDigests {
+	return ApprovalDigests{Catalog: i.CandidateDigest, Connection: i.CandidateConnection.Fingerprint}
 }
 
 // The fixture crosses the SDK's JSON transport. Middleware substitutes only
@@ -121,7 +126,7 @@ func TestTrustFirstMatchChangeApproveAndStale(t *testing.T) {
 		t.Fatal("inspection changed trust or invoked tool")
 	}
 	s, done, calls = staticCatalogServer(t, "fs", &gomcp.Tool{Name: "read", Description: "C"})
-	if _, e = Approve(context.Background(), Implementation{Name: "test"}, s, pins, inspected.CandidateDigest); e == nil {
+	if _, e = Approve(context.Background(), Implementation{Name: "test"}, s, pins, approvalFor(inspected)); e == nil {
 		t.Fatal("stale approval accepted")
 	}
 	waitOn(t, done, "stale approval close")
@@ -129,7 +134,7 @@ func TestTrustFirstMatchChangeApproveAndStale(t *testing.T) {
 		t.Fatal("stale approval changed pin/called tool")
 	}
 	s, done, calls = staticCatalogServer(t, "fs", b)
-	approved, e := Approve(context.Background(), Implementation{Name: "test"}, s, pins, inspected.CandidateDigest)
+	approved, e := Approve(context.Background(), Implementation{Name: "test"}, s, pins, approvalFor(inspected))
 	if e != nil {
 		t.Fatal(e)
 	}
@@ -151,7 +156,9 @@ func TestTrustRequirePinned(t *testing.T) {
 			if strings.HasPrefix(name, "empty") {
 				remote = nil
 			}
-			if name != "absent" && name != "empty-absent" && name != "invalid" && name != "unavailable" {
+			// Every case but the absent ones starts from a matching pin, so
+			// preflight passes and each reaches its own failure.
+			if name != "absent" && name != "empty-absent" {
 				connectCatalog(t, pins, false, remote...)
 			}
 			if name == "unreadable" {
@@ -181,12 +188,18 @@ func TestTrustRequirePinned(t *testing.T) {
 					t.Fatalf("matching rejected: %v", w)
 				}
 			} else {
-				_ = admission(t, w)
+				failure := admission(t, w)
 				if len(m.Tools()) != 0 || len(m.sessions) != 0 {
 					t.Fatal("untrusted tools admitted")
 				}
-				if name != "unavailable" {
+				// Only a server that passed preflight was ever dialed (#578).
+				if name == "changed" || name == "invalid" {
 					waitOn(t, done, "rejection close")
+				}
+				want := map[string]string{"absent": "pin_missing", "empty-absent": "pin_missing", "changed": "catalog_changed",
+					"invalid": "invalid_catalog", "unavailable": "unavailable", "unreadable": "pin_unavailable"}[name]
+				if failure.Reason != want {
+					t.Fatalf("reason = %q, want %s", failure.Reason, want)
 				}
 			}
 			if !bytes.Equal(before, pinBytes(t, pins, "fs")) {
@@ -281,13 +294,13 @@ func TestTrustApprovalRevisionRace(t *testing.T) {
 			})
 			result := make(chan error, 1)
 			go func() {
-				_, e := Approve(context.Background(), Implementation{Name: "test"}, s, pins, inspected.CandidateDigest)
+				_, e := Approve(context.Background(), Implementation{Name: "test"}, s, pins, approvalFor(inspected))
 				result <- e
 			}()
 			waitOn(t, started, "approval discovery")
 			other, _, _ := staticCatalogServer(t, "fs", &gomcp.Tool{Name: "read", Description: "B"})
 			if existing {
-				if _, e := Approve(context.Background(), Implementation{Name: "test"}, other, pins, inspected.CandidateDigest); e != nil {
+				if _, e := Approve(context.Background(), Implementation{Name: "test"}, other, pins, approvalFor(inspected)); e != nil {
 					t.Fatal(e)
 				}
 			} else {
@@ -312,7 +325,7 @@ func TestTrustApprovalRevisionRace(t *testing.T) {
 }
 
 func TestTrustConfigValidatedBeforeDial(t *testing.T) {
-	for _, mode := range []string{"missing-store", "zero-store", "invalid-alias", "duplicate", "empty-command", "empty-endpoint", "bad-digest"} {
+	for _, mode := range []string{"missing-store", "zero-store", "keyless-store", "invalid-alias", "duplicate", "empty-command", "empty-endpoint", "bad-digest"} {
 		t.Run(mode, func(t *testing.T) {
 			pins := testPins(t)
 			attempted := make(chan string, 2)
@@ -323,6 +336,8 @@ func TestTrustConfigValidatedBeforeDial(t *testing.T) {
 				pins = nil
 			case "zero-store":
 				pins = &PinStore{}
+			case "keyless-store":
+				pins = &PinStore{workspace: "/x", dir: "/y"}
 			case "invalid-alias":
 				servers = append(servers, StdioServer("bad\x1b", []string{"x"}))
 			case "duplicate":
@@ -334,7 +349,7 @@ func TestTrustConfigValidatedBeforeDial(t *testing.T) {
 			}
 			var err error
 			if mode == "bad-digest" {
-				_, err = Approve(context.Background(), Implementation{Name: "test"}, servers[0], pins, "sha256:"+strings.Repeat("A", 64))
+				_, err = Approve(context.Background(), Implementation{Name: "test"}, servers[0], pins, ApprovalDigests{Catalog: "sha256:" + strings.Repeat("A", 64)})
 			} else {
 				_, _, err = Connect(context.Background(), Implementation{Name: "test"}, servers, ConnectOptions{Pins: pins})
 			}
@@ -362,7 +377,7 @@ func TestTrustEmptyPinAndApproval(t *testing.T) {
 		t.Fatal("empty inspect created pin")
 	}
 	s, done, _ = staticCatalogServer(t, "fs")
-	if _, e = Approve(context.Background(), Implementation{Name: "test"}, s, pins, inspected.CandidateDigest); e != nil {
+	if _, e = Approve(context.Background(), Implementation{Name: "test"}, s, pins, approvalFor(inspected)); e != nil {
 		t.Fatal(e)
 	}
 	waitOn(t, done, "empty approve close")
@@ -603,6 +618,78 @@ func TestTrustCleanupErrorKeepsRefusalReason(t *testing.T) {
 				t.Fatal("refused catalog published tools or changed the pin")
 			}
 		})
+	}
+}
+
+// redirectOnClose really closes the client connection, then reports a refused
+// redirect, as an HTTP session whose close DELETE is redirected does.
+type redirectOnClose struct{ gomcp.Transport }
+
+func (c redirectOnClose) Connect(ctx context.Context) (gomcp.Connection, error) {
+	conn, err := c.Transport.Connect(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return redirectOnCloseConn{conn}, nil
+}
+
+type redirectOnCloseConn struct{ gomcp.Connection }
+
+func (c redirectOnCloseConn) Close() error {
+	_ = c.Connection.Close()
+	return fmt.Errorf("close: %w", errRedirectRefused)
+}
+
+// A close failure other than a refused redirect still fails Inspect and
+// Approve, and Approve publishes nothing. Each call gets a fresh server: an
+// in-memory transport serves one session, so a reused one fails at dial.
+func TestInspectApproveCloseFailureIsUnavailable(t *testing.T) {
+	pins := testPins(t)
+	clean, _, _ := staticCatalogServer(t, "fs", tool("read"))
+	inspected, err := Inspect(context.Background(), Implementation{Name: "test"}, clean, pins)
+	if err != nil {
+		t.Fatal(err)
+	}
+	closeFailed := errors.New("close failed")
+	for _, action := range []string{"inspect", "approve"} {
+		s, _, _ := staticCatalogServer(t, "fs", tool("read"))
+		s.tr = closeErrTransport{Transport: s.tr, err: closeFailed}
+		if action == "inspect" {
+			_, err = Inspect(context.Background(), Implementation{Name: "test"}, s, pins)
+		} else {
+			_, err = Approve(context.Background(), Implementation{Name: "test"}, s, pins, approvalFor(inspected))
+		}
+		var a *AdmissionError
+		if !errors.As(err, &a) || a.Reason != "unavailable" || !errors.Is(err, closeFailed) {
+			t.Fatalf("%s = %v, want unavailable caused by the close failure", action, err)
+		}
+		if pinBytes(t, pins, "fs") != nil {
+			t.Fatalf("%s wrote a pin despite the close failure", action)
+		}
+	}
+}
+
+// A Connect canceled after a dial succeeded reports canceled even when
+// closing that session fails with a refusal: cleanup keeps its error in the
+// cause but never renames the reason.
+func TestTrustCanceledConnectKeepsReasonOverCloseRefusal(t *testing.T) {
+	pins := testPins(t)
+	s, done, _ := staticCatalogServer(t, "fs", tool("read"))
+	s.tr = redirectOnClose{s.tr}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	m, w, e := connectWithHooks(ctx, Implementation{Name: "test"}, []Server{s}, ConnectOptions{Pins: pins}, &connectHooks{published: func(int) { cancel() }})
+	if e != nil {
+		t.Fatal(e)
+	}
+	defer func() { _ = m.Close() }()
+	waitOn(t, done, "canceled session close")
+	failure := admission(t, w)
+	if failure.Reason != "canceled" || !errors.Is(failure, errRedirectRefused) {
+		t.Fatalf("reason = %q (close error kept: %t), want canceled with the close error kept", failure.Reason, errors.Is(failure, errRedirectRefused))
+	}
+	if len(m.Tools()) != 0 {
+		t.Fatal("canceled connect published tools")
 	}
 }
 

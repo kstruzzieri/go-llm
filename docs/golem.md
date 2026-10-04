@@ -778,11 +778,13 @@ exit 0/1 as before.
 
 Golem can attach external tools with `-mcp-stdio 'fs=command args'` or
 `-mcp-http 'fs=https://endpoint'`. Use explicit, stable aliases. Ordinary REPL
-startup pins the first complete valid catalog (including an empty catalog) in
-private user data outside the workspace and prints its digest and tool names on
-stderr. Later changes block the entire alias, close its session, and report a
-names-only diff. Other healthy aliases remain available; the startup summary
-counts blocked aliases separately from tools.
+startup pins the first complete valid catalog (including an empty catalog),
+together with the connection it came from, in private user data outside the
+workspace and prints the catalog digest and tool names on stderr. A later
+catalog change blocks the entire alias, closes its session, and reports a
+names-only diff; a changed connection blocks it before launch (below). Other
+healthy aliases remain available; the startup summary counts blocked aliases
+separately from tools.
 
 Narrow an attached server to the tools a task needs with
 `-mcp-tools 'fs=read_file,list_directory'` (repeatable, one per alias). Names are
@@ -796,48 +798,134 @@ exposing a partial set. Selected tools still require approval for every call.
 `golem mcp inspect` and `approve` do not take `-mcp-tools`: they always review
 the complete catalog.
 
-Review and approve the exact current catalog without starting a model session
-or invoking a tool:
+Stdio servers run in the workspace root (`-root`, symlinks resolved), and a
+relative program path containing a separator (`./bin/server`) resolves against
+it. They get a minimal environment: `PATH`, `HOME`, `LANG`, `USER` and `TMPDIR`
+(on Windows also `SYSTEMROOT`, `TEMP`, `TMP`, `PATHEXT`, `USERPROFILE`,
+`COMSPEC`, `APPDATA` and `LOCALAPPDATA`), each copied from Golem's environment
+when set (`PATH` without its relative or empty entries). On Windows Golem also
+always sets `NoDefaultCurrentDirectoryInExePath=1`, so a bare program name is
+not looked up in the workspace root before `PATH`; `-mcp-env` may not name it.
+Nothing else is inherited. Forward more variables by name with
+`-mcp-env 'fs=GITHUB_TOKEN,HTTPS_PROXY'` (repeatable, one per stdio alias);
+values are read from Golem's environment and never appear on the command line. A
+named variable that is unset blocks that server before launch (`env_unset`); one
+set to an empty value is forwarded empty. `-mcp-env 'fs='` is a usage error.
+`env KEY=val command` still works for non-secret values; they become part of the
+arguments, which are pinned only as a keyed fingerprint and never displayed.
+Stdio servers keep the host user's filesystem and network authority; confinement
+is [#580](https://github.com/kstruzzieri/go-llm/issues/580).
+
+Each pin also binds the connection: for stdio, the resolved program path and its
+symlink-resolved target, the arguments, the working directory, and the
+environment policy (the platform baseline and the forwarded names, not their
+values); for HTTP, the exact endpoint (scheme, host, port, path and query). The
+pin stores these only as fingerprints keyed with a per-user secret. A changed
+connection blocks the alias before anything is launched or contacted
+(`connection_changed`, naming the changed fields: `launcher`, `target`, `dir`,
+`env`, `env_baseline`, `argv`, `origin`, `endpoint`, `kind`, `key`, or
+`identity` when no single field explains the change), even when the tool list is
+identical. Updating a program in place at the same path or changing a forwarded
+value does not change the connection; an upgrade that moves a symlink to a new
+versioned path changes `target`. A file or symlink swapped between the check and
+the launch is not detected. Relative and empty `PATH` entries (`.`,
+`./node_modules/.bin`) are dropped from the server's `PATH`; on Windows a quoted
+entry is judged without its quotes and kept as written, but one holding a `;`
+only when the whole entry is quoted. A `PATH` with no absolute entry is omitted
+(then programs use their own default search path). The value of `PATH` is not
+part of the connection: with a wrapper such as `env KEY=val command`, `npx`,
+`uvx` or `sh -c '…'`, or a script that starts `#!/usr/bin/env node`, only the
+wrapper or script is bound, so the program it finds through the absolute `PATH`
+entries, or the interpreter a `#!` line names, can change without
+`connection_changed`. Prefer an absolute launcher path to a wrapper.
+
+HTTP servers are pinned to that one endpoint: every request must target it
+exactly, and every redirect is refused, same-origin included
+(`redirect_refused`, `destination_refused`). A redirected session-close
+`DELETE` is never followed either; it fails only the close, which the library's
+`Manager.Close` reports with fixed text, never startup, inspection or approval.
+Endpoints with userinfo, a fragment (even a bare trailing `#`), `.` or `..`
+path segments (percent-encoded ones included), a backslash, an IPv6 zone ID, or
+a non-ASCII host (use the `xn--` form) are rejected as `invalid_config`, which
+stops startup with the alias and the rule on stderr; `golem mcp inspect` with
+the same server names it too.
+
+Review and approve both identities without starting a model session or invoking
+a tool. `inspect` launches or contacts the candidate to read its catalog, so it
+is an explicit decision to run that server:
 
 ```sh
-golem mcp inspect -root /path/to/workspace -mcp-stdio 'fs=command args'
-golem mcp approve -root /path/to/workspace -mcp-stdio 'fs=command args' -digest 'sha256:<64 lowercase hex digits from inspect>'
+golem mcp inspect -root /path/to/workspace -mcp-stdio 'fs=command args' [-mcp-env 'fs=NAME']
+golem mcp approve -root /path/to/workspace -mcp-stdio 'fs=command args' [-mcp-env 'fs=NAME'] -digest 'sha256:<from inspect>' -connection 'hmac-sha256:<from inspect>'
 # HTTP uses the same alias and endpoint as startup:
 golem mcp inspect -root /path/to/workspace -mcp-http 'fs=https://endpoint'
-golem mcp approve -root /path/to/workspace -mcp-http 'fs=https://endpoint' -digest 'sha256:<64 lowercase hex digits from inspect>'
+golem mcp approve -root /path/to/workspace -mcp-http 'fs=https://endpoint' -digest 'sha256:<from inspect>' -connection 'hmac-sha256:<from inspect>'
 ```
 
-Each command requires exactly one explicitly aliased server; `-root` defaults to
-`.` and an explicitly empty root is invalid. Inspection is text-only and prints
-the quoted pin path and safely quoted old/new definitions. Approval re-fetches,
-checks the supplied digest, and atomically replaces only the unchanged prior pin
-revision. Concurrent changes require a fresh inspection/approval. Success prints
-the accepted names-only diff and digest on stderr. A durability error is failure
-even if published bytes may already exist; inspect before retrying.
+Each command requires exactly one explicitly aliased server, given with the same
+`-root` and `-mcp-env` names as at startup, because both are part of the
+connection; `-root` defaults to `.` and an explicitly empty root is invalid.
+Inspection is text-only. It prints the quoted pin path, the pinned and
+candidate catalog digests and connection fingerprints (each 64 lowercase hex
+digits after its prefix), the changed connection fields, the candidate's quoted
+launcher, target and working directory and its forwarded variable names (or the
+HTTP origin), and safely quoted old/new definitions; it never prints arguments,
+URL paths or queries. Approval requires both `-digest` and `-connection`. It
+checks `-connection` before launching anything (`connection_mismatch`),
+re-fetches the catalog, checks `-digest` (`digest_mismatch`), and atomically
+replaces only the unchanged prior pin revision. Concurrent changes require a
+fresh inspection/approval. Success prints the accepted names-only diff and
+digest on stderr. A durability error is failure even if published bytes may
+already exist; inspect before retrying.
 
-`-p` requires an existing matching pin for every configured alias before model
-discovery, capability probes, or inference. Missing, changed, invalid,
-unavailable, or unreadable catalogs, and a `-mcp-tools` name the server does not
-offer (`selection_missing`), stop the invocation with exit 1 and no pin writes.
-JSON and stream-json emit one `golem.result.v1` error record with code
-`mcp_untrusted` and no runtime events; text prints diagnostics on stderr.
-Catalog approval does not authorize tool execution: MCP tools still require
-interactive approval and remain denied headlessly. `-goal` and `-plan` still
-reject MCP attachments.
+**Upgrading from v0.4:** pins written by v0.4.0 and earlier bind only the
+catalog, so every attached server reports `connection_missing`, in the REPL and
+with `-p`, until you run `inspect` and `approve` once. Stdio servers now start
+in `-root` instead of Golem's current directory, and a relative program path
+such as `./bin/server` resolves against `-root`. Servers that relied on
+inherited variables (tokens, `HTTP_PROXY`/`HTTPS_PROXY`, `NODE_EXTRA_CA_CERTS`,
+`VIRTUAL_ENV`, nvm or pyenv paths, `XDG_*`) need `-mcp-env`. A v0.4 binary
+reports pins written by this version as `pin_unavailable` and blocks those
+aliases.
 
-Pins bind the complete model-facing catalog to the canonical workspace and alias.
-A new linked or scratch worktree has a new trust namespace: REPL first contact
-pins there, while `-p` requires prior explicit approval. Derived aliases such as
-`env`/`env2` depend on configuration order; reordering can mismatch a pin or create
-a fresh first-contact boundary. To review the second server, explicitly use
-`env2=command args`. Changing aliases or deleting pins resets trust. Pins live
-under `$XDG_DATA_HOME/golem/mcp-pins/<sha256 hex of the symlink-resolved
-absolute workspace path>/<sha256 hex of the alias>.json` (default
-`$XDG_DATA_HOME` is `~/.local/share`); a successful `golem mcp inspect` prints
-the exact file. A pin that is unreadable, unsafe, or invalid blocks its alias
-as `pin_unavailable` and is never rewritten or treated as absent; delete it to
-start over. Pins do not attest transport/process identity; approval hints omit
-endpoints and arguments because those may contain credentials.
+`-p` requires, for every configured alias, an existing pin whose connection and
+catalog both match before model discovery, capability probes, or inference. A
+missing pin (`pin_missing`), a v0.4 pin (`connection_missing`), a changed
+connection (`connection_changed`), an unset `-mcp-env` name (`env_unset`), or a
+missing or unusable program or folder (`launch_invalid`, which also covers
+arguments or paths that are not valid UTF-8 and names the failed rule, never the
+path) stops the invocation before the server is launched or contacted. Changed,
+invalid, unavailable, or unreadable catalogs, a refused redirect or destination,
+and a `-mcp-tools` name the server does not offer (`selection_missing`) stop it
+after contact. Either way the exit is 1 and no pin is written. JSON and
+stream-json emit one `golem.result.v1` error record with code `mcp_untrusted`
+and no runtime events; text prints diagnostics on stderr. Catalog approval does
+not authorize tool execution: MCP tools still require interactive approval and
+remain denied headlessly. `-goal` and `-plan` still reject MCP attachments.
+
+Pins bind the complete model-facing catalog and the connection to the canonical
+workspace and alias. A new linked or scratch worktree has a new trust namespace:
+REPL first contact pins there, while `-p` requires prior explicit approval.
+Derived aliases such as `env`/`env2` depend on configuration order; reordering
+can mismatch a pin or create a fresh first-contact boundary. To review the
+second server, explicitly use `env2=command args`. Changing aliases or deleting
+pins resets trust. Pins live under `$XDG_DATA_HOME/golem/mcp-pins/<sha256 hex of
+the symlink-resolved absolute workspace path>/<sha256 hex of the alias>.json`
+(default `$XDG_DATA_HOME` is `~/.local/share`); a successful
+`golem mcp inspect` prints the exact file. A pin that is unreadable, unsafe, or
+invalid blocks its alias as `pin_unavailable` and is never rewritten or treated
+as absent; delete it to start over. The fingerprint key is
+`$XDG_DATA_HOME/golem/mcp-pins/connection-hmac.pem`, created on first use, so
+the `mcp-pins` directory must be writable. A key that is unreadable or corrupt,
+or on Unix one with group or other permission bits or another owner, makes the
+pin store unavailable and is never replaced (Golem's message names `-root` and
+the `golem/mcp-pins` directory, including `connection-hmac.pem`); a deleted key
+is recreated, and every pin then reports `connection_changed` (`key`) until
+approved once more.
+A backup holding both the key and the pins allows offline guessing of
+low-entropy secrets in arguments or queries. Diagnostics and approval hints
+never include endpoints, arguments or fingerprints; they point to `inspect`
+with the same `-root`, server and `-mcp-env` arguments.
 
 Top-level descriptions are flattened and bounded before registration. Every
 schema field, including nested descriptions, titles, extensions, and instance
@@ -850,10 +938,11 @@ canonical schema is rejected as a whole, as are incomplete listings, repeated
 cursors, nil entries, duplicate names, and invalid names/schemas. Description
 truncation alone remains valid and produces a notice.
 
-TOFU detects definition drift after first contact. It cannot validate prose,
-protect against an initially malicious server, or detect behavior changes behind
-unchanged definitions. Live `tools/list_changed` handling remains out of scope.
-Existing foreign-result provenance and observation fencing still apply.
+TOFU detects definition and connection drift after first contact. It cannot
+validate prose, protect against an initially malicious server, or detect
+behavior changes behind unchanged definitions. Live `tools/list_changed`
+handling remains out of scope. Existing foreign-result provenance and
+observation fencing still apply.
 
 ## MCP server
 

@@ -155,7 +155,7 @@ Re-run the spike if the AgentFlow validator contract tightens.
 
 `-plan` is mutually exclusive with `-p` (one-shot mode), `-allow-write` /
 `-allow-exec`, `-rag-db`, `-delegate`, `-dispatch`, and `-mcp-stdio` /
-`-mcp-http`. Task
+`-mcp-http` / `-mcp-tools` / `-mcp-env`. Task
 mode builds its toolset from the locked plan alone, so it refuses to start
 if any of those are also passed — it is a constrained proof surface, not a
 general-purpose agent session with a plan bolted on.
