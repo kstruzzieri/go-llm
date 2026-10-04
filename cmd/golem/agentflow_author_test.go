@@ -107,6 +107,39 @@ func TestCanonicalPlanJSONSHA256RejectsMalformedInput(t *testing.T) {
 	}
 }
 
+// parseAgentflowJSON runs on every retained ledger row before any AgentFlow
+// call, so nesting is bounded like encoding/json (10000): a deep line is
+// refused, not a fatal stack overflow (#612).
+func TestParseAgentflowJSONBoundsNesting(t *testing.T) {
+	arrays := func(n int) string { return strings.Repeat("[", n) + strings.Repeat("]", n) }
+	objects := func(n int) string { return strings.Repeat(`{"a":`, n) + "1" + strings.Repeat("}", n) }
+	for _, tc := range []struct {
+		name    string
+		data    string
+		wantErr bool
+	}{
+		{"arrays at the limit", arrays(10000), false},
+		{"arrays past the limit", arrays(10001), true},
+		{"objects at the limit", objects(10000), false},
+		{"objects past the limit", objects(10001), true},
+		// Width is not depth: leaving a container gives its level back.
+		{"10001 sibling arrays", "[" + strings.Repeat("[],", 10001) + "[]]", false},
+		{"10001 sibling objects", "[" + strings.Repeat("{},", 10001) + "{}]", false},
+		{"4M unterminated arrays", strings.Repeat("[", 4_000_000), true},
+		{"4M unterminated objects", strings.Repeat(`{"a":`, 4_000_000), true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := parseAgentflowJSON([]byte(tc.data))
+			switch {
+			case tc.wantErr && (err == nil || !strings.Contains(err.Error(), "nested too deeply")):
+				t.Fatalf("err = %v, want a nested-too-deeply refusal", err)
+			case !tc.wantErr && err != nil:
+				t.Fatalf("err = %v, want success", err)
+			}
+		})
+	}
+}
+
 func TestDecodeAgentflowPlanJSONRejectsUnexecutableLoneSurrogate(t *testing.T) {
 	data := []byte(`{"steps":[{"id":"P1","gates":[{"kind":"command","run":["echo","\ud800"]}]}]}`)
 	var plan agentflow.Plan

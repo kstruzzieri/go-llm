@@ -34,6 +34,12 @@ const (
 	v0Row      = `{"schema_version":"0.3.0","step_id":"S1"}`
 )
 
+// nestedRow is a well-formed schema 1.0.0 row whose "x" nests arrays depth
+// deep, so only the depth can make it unreadable.
+func nestedRow(depth int) string {
+	return `{"schema_version":"1.0.0","x":` + strings.Repeat("[", depth) + strings.Repeat("]", depth) + "}"
+}
+
 var stateLedgers = []string{"step-runs.jsonl", "command-receipts.jsonl", "file-receipts.jsonl", "verification-runs.jsonl"}
 
 // TestCheckAgentflowStateMajor is U5's table: every retained artifact AgentFlow
@@ -95,6 +101,13 @@ func TestCheckAgentflowStateMajor(t *testing.T) {
 			want: ".agent/plan.lock.json unreadable"},
 		{name: "top-level array", files: []file{{"plan.lock.json", `[]`}},
 			want: ".agent/plan.lock.json unreadable"},
+		// One deeply nested row is refused like encoding/json did, not a fatal
+		// stack overflow before any AgentFlow call (#612).
+		{name: "ledger row nested past the limit", files: []file{{"step-runs.jsonl", nestedRow(10001) + "\n"}},
+			want: ".agent/step-runs.jsonl:1 unreadable"},
+		{name: "plan lock nested past the limit", files: []file{{"plan.lock.json", nestedRow(10001)}},
+			want: ".agent/plan.lock.json unreadable"},
+		{name: "ledger row nested well past Python's limit but bounded", files: []file{{"step-runs.jsonl", nestedRow(2000) + "\n"}}},
 	}
 	for _, ledger := range stateLedgers {
 		cases = append(cases, struct {

@@ -815,10 +815,28 @@ func agentflowJSONStringEqualASCII(value agentflowJSONString, want string) bool 
 	return true
 }
 
+// agentflowJSONMaxDepth bounds container nesting like encoding/json. It runs
+// on every retained ledger row before any AgentFlow call, and Go cannot recover
+// from a stack overflow. Python's own recursion limit (about 1000) is lower, so
+// nothing AgentFlow accepts is refused.
+const agentflowJSONMaxDepth = 10000
+
 type agentflowJSONParser struct {
 	data   []byte
 	offset int
+	depth  int
 }
+
+// enter counts one more open object or array; the caller defers leave.
+func (p *agentflowJSONParser) enter() error {
+	if p.depth >= agentflowJSONMaxDepth {
+		return p.errorf("JSON nested too deeply")
+	}
+	p.depth++
+	return nil
+}
+
+func (p *agentflowJSONParser) leave() { p.depth-- }
 
 func parseAgentflowJSON(data []byte) (any, error) {
 	parser := agentflowJSONParser{data: data}
@@ -864,6 +882,10 @@ func (p *agentflowJSONParser) value() (any, error) {
 }
 
 func (p *agentflowJSONParser) object() (agentflowJSONObject, error) {
+	if err := p.enter(); err != nil {
+		return nil, err
+	}
+	defer p.leave()
 	p.offset++
 	p.skipSpace()
 	if p.take('}') {
@@ -906,6 +928,10 @@ func (p *agentflowJSONParser) object() (agentflowJSONObject, error) {
 }
 
 func (p *agentflowJSONParser) array() ([]any, error) {
+	if err := p.enter(); err != nil {
+		return nil, err
+	}
+	defer p.leave()
 	p.offset++
 	p.skipSpace()
 	if p.take(']') {

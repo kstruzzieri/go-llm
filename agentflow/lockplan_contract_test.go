@@ -74,14 +74,15 @@ func TestAgentflowRunnerForTest_PrefersSourceOverride(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(binDir, "agentflow"), []byte("#!/bin/sh\n"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	// Source mode runs `python3 -m agentflow --version` for the version gate.
+	// Source mode runs `python3 -P -m agentflow --version` for the version gate.
 	if err := os.WriteFile(filepath.Join(binDir, "python3"), []byte("#!/bin/sh\necho 'agentflow 1.0.0'\n"), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	checkout := writeSourceCheckoutFixture(t)
 	t.Setenv("PATH", binDir)
 	t.Setenv("AGENTFLOW_SRC", checkout)
-	t.Setenv("GO_LLM_REQUIRE_AGENTFLOW", "")
+	// Required, so a broken python3 shim fails the test instead of skipping it.
+	t.Setenv("GO_LLM_REQUIRE_AGENTFLOW", "source")
 
 	runner, ok := agentflowRunnerForTest(t, t.TempDir()).(*ExecRunner)
 	if !ok {

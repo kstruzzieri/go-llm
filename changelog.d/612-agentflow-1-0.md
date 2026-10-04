@@ -39,7 +39,8 @@ AgentFlow 1.0.0 release.
 - New exports: `Client.CheckVersion` (runs only `agentflow --version` and the
   1.x gate), `VersionError` (a rejected version), `PlanSchemaVersion` and
   `SupportedSchemaVersion`.
-- The `Probe` and `ProbeParallel` capability hints for a missing subcommand or
-  flag now end in `(upgrade Agentflow)` instead of naming a version.
+- `Probe`'s missing-subcommand and flag hints, and `ProbeParallel`'s flag hint,
+  now end in `(upgrade Agentflow)` instead of naming a version.
+  `ProbeParallel`'s missing-subcommand error gains the same hint.
 - A failed `agentflow --version` now includes its stderr in the error, and only
   the first line of the `--version` output is parsed.
