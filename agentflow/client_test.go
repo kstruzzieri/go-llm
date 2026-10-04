@@ -509,6 +509,16 @@ func TestClient_BlockStep_SurfacesCommandError(t *testing.T) {
 	}
 }
 
+func TestClient_BlockStep_SurfacesStructuredErrors(t *testing.T) {
+	c, _ := newTestClient(map[string]fakeReply{
+		"block-step": {stdout: []byte(`{"status":"failed","diagnostics":["attempt A1 is not open"]}`), exit: 1},
+	})
+	err := c.BlockStep(context.Background(), "P1", "A1", "golem: agent run stopped: step_cap_reached")
+	if err == nil || !strings.Contains(err.Error(), "attempt A1 is not open") {
+		t.Fatalf("block-step error must surface structured diagnostics, got %v", err)
+	}
+}
+
 func TestClient_FinishRun_StopReportsStoppedAt(t *testing.T) {
 	c, _ := newTestClient(map[string]fakeReply{
 		"finish-run": {stdout: []byte(`{"ok":false,"stopped_at":"verify-proof","diagnostics":["bad proof"]}`), exit: 1},
