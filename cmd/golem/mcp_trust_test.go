@@ -25,6 +25,8 @@ type trustHTTPFixture struct {
 	url     string
 	calls   atomic.Int32
 	deletes atomic.Int32
+	// down makes every request fail, so a pinned endpoint becomes unavailable.
+	down atomic.Bool
 }
 
 func newTrustHTTPFixture(t *testing.T) *trustHTTPFixture {
@@ -35,6 +37,10 @@ func newTrustHTTPFixture(t *testing.T) *trustHTTPFixture {
 	httpServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodDelete {
 			f.deletes.Add(1)
+		}
+		if f.down.Load() {
+			http.Error(w, "down", http.StatusServiceUnavailable)
+			return
 		}
 		handler.ServeHTTP(w, r)
 	}))
@@ -210,17 +216,25 @@ func TestMCPTrustEarlyOneShot(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				server := mcpclient.HTTPServer("fs", f.url)
+				endpoint := f.url
+				if kind == "unavailable" {
+					endpoint += "/?token=credential-value"
+				}
+				server := mcpclient.HTTPServer("fs", endpoint)
 				inspection, err := mcpclient.Inspect(t.Context(), mcpClientImpl(), server, pins)
 				if err != nil {
 					t.Fatal(err)
 				}
 				var before []byte
-				if kind == "mismatch" || kind == "unreadable" {
+				// Seed a matching pin wherever a record is in play, so
+				// preflight passes and each kind reaches its own failure.
+				if kind != "absent" && kind != "store" {
 					if _, err := mcpclient.Approve(t.Context(), mcpClientImpl(), server, pins, mcpclient.ApprovalDigests{Catalog: mcpDigestA, Connection: inspection.CandidateConnection.Fingerprint}); err != nil {
 						t.Fatal(err)
 					}
 					before, _ = os.ReadFile(inspection.PinPath)
+				}
+				if kind == "mismatch" || kind == "unreadable" {
 					f.set("Read\nfiles", map[string]any{"type": "object"})
 					if kind == "unreadable" {
 						before = []byte("invalid pin")
@@ -229,10 +243,9 @@ func TestMCPTrustEarlyOneShot(t *testing.T) {
 						}
 					}
 				}
-				endpoint := f.url
 				switch kind {
 				case "unavailable":
-					endpoint = "http://127.0.0.1:1/?token=credential-value"
+					f.down.Store(true)
 				case "store":
 					t.Setenv("XDG_DATA_HOME", root)
 				case "invalid":
@@ -250,14 +263,19 @@ func TestMCPTrustEarlyOneShot(t *testing.T) {
 				if got := readRunTestFile(t, out); got != want {
 					t.Fatalf("stdout=%q want=%q", got, want)
 				}
-				if got := readRunTestFile(t, diag); !strings.Contains(got, "mcp:") || strings.Contains(got, "credential-value") {
+				got := readRunTestFile(t, diag)
+				if !strings.Contains(got, "mcp:") || strings.Contains(got, "credential-value") {
 					t.Fatalf("diagnostics=%q", got)
+				}
+				reason := map[string]string{"absent": "pin_missing", "mismatch": "catalog_changed", "unavailable": "unavailable", "invalid": "invalid_catalog", "unreadable": "pin_unavailable"}[kind]
+				if reason != "" && !strings.Contains(got, `warning: mcp: server "fs": `+reason) {
+					t.Fatalf("diagnostics=%q, want reason %s", got, reason)
 				}
 				if providerCalls.Load() != 0 {
 					t.Fatalf("provider requests=%d before MCP refusal", providerCalls.Load())
 				}
 				after, readErr := os.ReadFile(inspection.PinPath)
-				if kind == "mismatch" || kind == "unreadable" {
+				if before != nil {
 					if string(after) != string(before) {
 						t.Fatal("changed pin")
 					}

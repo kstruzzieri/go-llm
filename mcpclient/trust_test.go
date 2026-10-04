@@ -156,7 +156,9 @@ func TestTrustRequirePinned(t *testing.T) {
 			if strings.HasPrefix(name, "empty") {
 				remote = nil
 			}
-			if name != "absent" && name != "empty-absent" && name != "invalid" && name != "unavailable" {
+			// Every case but the absent ones starts from a matching pin, so
+			// preflight passes and each reaches its own failure.
+			if name != "absent" && name != "empty-absent" {
 				connectCatalog(t, pins, false, remote...)
 			}
 			if name == "unreadable" {
@@ -191,13 +193,13 @@ func TestTrustRequirePinned(t *testing.T) {
 					t.Fatal("untrusted tools admitted")
 				}
 				// Only a server that passed preflight was ever dialed (#578).
-				switch name {
-				case "changed":
+				if name == "changed" || name == "invalid" {
 					waitOn(t, done, "rejection close")
-				case "absent", "empty-absent", "invalid":
-					if failure.Reason != "pin_missing" {
-						t.Fatalf("reason = %q, want pin_missing before launch", failure.Reason)
-					}
+				}
+				want := map[string]string{"absent": "pin_missing", "empty-absent": "pin_missing", "changed": "catalog_changed",
+					"invalid": "invalid_catalog", "unavailable": "unavailable", "unreadable": "pin_unavailable"}[name]
+				if failure.Reason != want {
+					t.Fatalf("reason = %q, want %s", failure.Reason, want)
 				}
 			}
 			if !bytes.Equal(before, pinBytes(t, pins, "fs")) {

@@ -28,6 +28,9 @@ func TestApproveChecksConnectionBeforeLaunch(t *testing.T) {
 	if failure := admissionOf(err); failure == nil || failure.Reason != "connection_mismatch" || counter.dials.Load() != before || pinBytes(t, pins, "fs") != nil {
 		t.Fatalf("mismatched connection = (%v, %d new dials), want connection_mismatch before launch", err, counter.dials.Load()-before)
 	}
+	if text := err.Error(); !strings.HasSuffix(text, "; "+reviewHintFS) {
+		t.Fatalf("connection_mismatch Error() = %q, want the review hint (spec §5.9)", text)
+	}
 	const (
 		badDigest     = "mcpclient: digest must be sha256: followed by 64 lowercase hex digits"
 		badConnection = "mcpclient: connection must be hmac-sha256: followed by 64 lowercase hex digits"

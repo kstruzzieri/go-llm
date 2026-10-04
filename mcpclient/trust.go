@@ -29,7 +29,7 @@ type AdmissionError struct {
 }
 
 // reviewReasons are refusals an operator resolves with inspect and approve.
-var reviewReasons = map[string]bool{"pin_missing": true, "connection_missing": true, "connection_changed": true}
+var reviewReasons = map[string]bool{"pin_missing": true, "connection_missing": true, "connection_changed": true, "connection_mismatch": true}
 
 func (e *AdmissionError) Error() string {
 	text := fmt.Sprintf("server %q: %s", e.Alias, e.Reason)
@@ -92,7 +92,7 @@ func admissionFailure(alias, reason string, cause error) *AdmissionError {
 		reason = "pin_contention"
 	}
 	failure := &AdmissionError{Alias: alias, Reason: reason, cause: cause}
-	if isChanged {
+	if isChanged && reason == "connection_changed" {
 		failure.ConnectionChanges = append([]string(nil), changed.labels...)
 	}
 	return failure

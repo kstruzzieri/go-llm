@@ -51,12 +51,20 @@ func connectOnce(t *testing.T, pins *PinStore, require bool, s Server) (*Manager
 func TestConnectionChangedBlocksBeforeLaunch(t *testing.T) {
 	pins := testPins(t)
 	first, _ := countedServer(t, []string{"a"}, tool("read"))
-	if m, w := connectOnce(t, pins, false, first); len(m.Tools()) != 1 {
+	m, w := connectOnce(t, pins, false, first)
+	if len(m.Tools()) != 1 {
 		t.Fatalf("first contact: %v", w)
+	}
+	pinned, _, err := pins.capturePin(context.Background(), "fs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "server \"fs\": first pin " + pinned.digest() + "; connection pinned; tools: mcp__fs__read; use explicit alias= values for stable pins"; len(w) != 1 || w[0].Error() != want {
+		t.Fatalf("first contact notices = %v, want exactly %q", w, want)
 	}
 	before := pinBytes(t, pins, "fs")
 	changed, counter := countedServer(t, []string{"b"}, tool("read"))
-	m, w := connectOnce(t, pins, false, changed)
+	m, w = connectOnce(t, pins, false, changed)
 	failure := admission(t, w)
 	if failure.Reason != "connection_changed" || !slices.Equal(failure.ConnectionChanges, []string{"launcher", "target", "argv"}) {
 		t.Fatalf("failure = (%q, %q), want (connection_changed, [launcher target argv])", failure.Reason, failure.ConnectionChanges)
@@ -86,6 +94,26 @@ func TestV1PinBlocksInEveryModeBeforeLaunch(t *testing.T) {
 		}
 		if !bytes.Equal(raw, pinBytes(t, pins, "fs")) {
 			t.Fatal("v1 record rewritten")
+		}
+	}
+}
+
+// A record that cannot be read is no evidence of a launch: preflight refuses it
+// in every mode instead of treating it as absent.
+func TestUnreadablePinBlocksBeforeLaunch(t *testing.T) {
+	for _, require := range []bool{false, true} {
+		pins := testPins(t)
+		corrupt := []byte("corrupt")
+		if err := os.WriteFile(filepath.Join(pins.dir, pinKey("fs")+".json"), corrupt, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		s, counter := countedServer(t, nil, tool("read"))
+		m, w := connectOnce(t, pins, require, s)
+		if failure := admission(t, w); failure.Reason != "pin_unavailable" || counter.dials.Load() != 0 || len(m.Tools()) != 0 {
+			t.Fatalf("require=%t: (%q, %d dials), want pin_unavailable with no dial", require, failure.Reason, counter.dials.Load())
+		}
+		if !bytes.Equal(corrupt, pinBytes(t, pins, "fs")) {
+			t.Fatalf("require=%t: unreadable record rewritten", require)
 		}
 	}
 }
@@ -206,8 +234,12 @@ func TestRetargetedLauncherOrDirIsConnectionChanged(t *testing.T) {
 		retarget(work, dirA)
 		retarget(tt.path, tt.to)
 		_, w := connect()
-		if failure := admission(t, w); failure.Reason != "connection_changed" || !slices.Equal(failure.ConnectionChanges, tt.want) {
+		failure := admission(t, w)
+		if failure.Reason != "connection_changed" || !slices.Equal(failure.ConnectionChanges, tt.want) {
 			t.Fatalf("retarget %s = (%q, %q), want (connection_changed, %q)", tt.path, failure.Reason, failure.ConnectionChanges, tt.want)
+		}
+		if text := failure.Error(); !strings.HasSuffix(text, "; review with golem mcp inspect using the same -root, server and -mcp-env arguments and explicit alias=probe, then golem mcp approve with the -digest and -connection it prints") {
+			t.Fatalf("retarget %s Error() = %q, want the hint for alias probe", tt.path, text)
 		}
 	}
 	if !bytes.Equal(before, pinBytes(t, pins, "probe")) {
@@ -284,5 +316,37 @@ func TestConcurrentIdenticalFirstContactsOneConflict(t *testing.T) {
 	}
 	if admitted != 1 || conflicts != 1 {
 		t.Fatalf("concurrent first contacts = (%d admitted, %d pin_conflict), want exactly one of each (spec §6)", admitted, conflicts)
+	}
+}
+
+// The change labels name fields, never their values: a changed identity full
+// of canaries renders none of them and no fingerprint.
+func TestConnectionChangedNeverEchoesIdentity(t *testing.T) {
+	pins := testPins(t)
+	first, _ := countedServer(t, []string{"a"}, tool("read"))
+	if m, w := connectOnce(t, pins, false, first); len(m.Tools()) != 1 {
+		t.Fatalf("first contact: %v", w)
+	}
+	changed, counter := countedServer(t, []string{"/canary-launcher", "--token=canary-argv"}, tool("read"))
+	changed = changed.WithDir("/canary-dir").WithEnv(SetEnv("X", "canary-env"))
+	_, w := connectOnce(t, pins, false, changed)
+	failure := admission(t, w)
+	if failure.Reason != "connection_changed" || counter.dials.Load() != 0 {
+		t.Fatalf("(%q, %d dials), want connection_changed with no dial", failure.Reason, counter.dials.Load())
+	}
+	if text := failure.Error(); !strings.Contains(text, "connection fields: ") || strings.Contains(text, "canary") || strings.Contains(text, "hmac-sha256") {
+		t.Fatalf("Error() = %q, want change labels without identity values or fingerprints", text)
+	}
+}
+
+// Change labels belong to connection_changed alone: a cause that also carries
+// a higher-priority condition reports that reason without them.
+func TestAdmissionFailureLabelsOnlyConnectionChanged(t *testing.T) {
+	changed := &connectionChangedError{labels: []string{"argv"}}
+	if failure := admissionFailure("fs", "pin_unavailable", errors.Join(changed, context.Canceled)); failure.Reason != "canceled" || failure.ConnectionChanges != nil {
+		t.Fatalf("canceled = (%q, %q), want (canceled, nil)", failure.Reason, failure.ConnectionChanges)
+	}
+	if failure := admissionFailure("fs", "pin_unavailable", changed); failure.Reason != "connection_changed" || !slices.Equal(failure.ConnectionChanges, []string{"argv"}) {
+		t.Fatalf("changed = (%q, %q), want (connection_changed, [argv])", failure.Reason, failure.ConnectionChanges)
 	}
 }
