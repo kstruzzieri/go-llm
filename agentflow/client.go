@@ -366,7 +366,10 @@ func (c *Client) CompleteStep(ctx context.Context, step, attempt string) error {
 
 // BlockStep closes an open attempt as blocked, recording reason in the ledger.
 // Like the other attempt commands it acts as this client's agent, so a parallel
-// worker blocks as its own owner.
+// worker blocks as its own owner. AgentFlow does not refuse an attempt that is
+// already closed, so call it only on an attempt the caller holds open. A non-nil
+// error does not prove the attempt is still open: AgentFlow appends the blocked
+// event before it clears the attempt pointer.
 func (c *Client) BlockStep(ctx context.Context, step, attempt, reason string) error {
 	args := append([]string{"block-step", step}, c.rootArgs("--attempt", attempt, "--reason", reason, "--agent", c.agentName(), "--json")...)
 	_, err := c.call(ctx, "block-step", args, true)

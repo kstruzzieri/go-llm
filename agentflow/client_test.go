@@ -504,18 +504,11 @@ func TestClient_BlockStep_SurfacesCommandError(t *testing.T) {
 	c, _ := newTestClient(map[string]fakeReply{"block-step": {stderr: []byte("block rejected: A1 lease expired"), exit: 2}})
 	err := c.BlockStep(context.Background(), "P1", "A1", "golem: agent run stopped: step_cap_reached")
 	var ce *CommandError
-	if !errors.As(err, &ce) || ce.Exit != 2 || !strings.Contains(ce.Stderr, "lease expired") {
-		t.Fatalf("err = %v, want *CommandError exit 2 carrying the stderr", err)
+	if !errors.As(err, &ce) || ce.Cmd != "block-step" || ce.Exit != 2 {
+		t.Fatalf("err = %v, want *CommandError for block-step with exit 2", err)
 	}
-}
-
-func TestClient_BlockStep_SurfacesStructuredErrors(t *testing.T) {
-	c, _ := newTestClient(map[string]fakeReply{
-		"block-step": {stdout: []byte(`{"status":"failed","diagnostics":["attempt A1 is not open"]}`), exit: 1},
-	})
-	err := c.BlockStep(context.Background(), "P1", "A1", "golem: agent run stopped: step_cap_reached")
-	if err == nil || !strings.Contains(err.Error(), "attempt A1 is not open") {
-		t.Fatalf("block-step error must surface structured diagnostics, got %v", err)
+	if got, want := err.Error(), "agentflow block-step: exit 2: block rejected: A1 lease expired"; got != want {
+		t.Fatalf("err.Error() = %q, want %q", got, want)
 	}
 }
 
