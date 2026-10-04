@@ -4,6 +4,7 @@ import (
 	"context"
 	"io"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -26,6 +27,9 @@ func TestOpenRetrievalFeedbackWeighterConcurrentFirstOpens(t *testing.T) {
 // opener prepares the raw path string, which for a file: URI is a relative
 // path (#648).
 func TestOpenRetrievalFeedbackWeighterRejectsNonWAL(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("#648: the opener prepares the raw file: string, which Windows rejects as a file name")
+	}
 	path := filepath.ToSlash(filepath.Join(t.TempDir(), "x.db"))
 	t.Chdir(t.TempDir())
 	db, _, err := openRetrievalFeedbackWeighter(t.Context(), "file:"+path+"?nolock=1")

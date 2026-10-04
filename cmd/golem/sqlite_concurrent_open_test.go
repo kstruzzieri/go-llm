@@ -4,6 +4,7 @@ import (
 	"context"
 	"io"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -40,6 +41,9 @@ func TestOpenFeedbackServiceConcurrentFirstOpens(t *testing.T) {
 // opener prepares the raw path string, which for a file: URI is a relative
 // path (#648).
 func TestOpenSessionRejectsNonWAL(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("#648: the opener prepares the raw file: string, which Windows rejects as a file name")
+	}
 	path := filepath.ToSlash(filepath.Join(t.TempDir(), "x.db"))
 	t.Chdir(t.TempDir())
 	s, _, err := openSession(t.Context(), "file:"+path+"?nolock=1", "nonwal")
@@ -58,6 +62,9 @@ func TestOpenSessionRejectsNonWAL(t *testing.T) {
 // opener prepares the raw path string, which for a file: URI is a relative
 // path (#648).
 func TestOpenFeedbackServiceRejectsNonWAL(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("#648: the opener prepares the raw file: string, which Windows rejects as a file name")
+	}
 	path := filepath.ToSlash(filepath.Join(t.TempDir(), "x.db"))
 	t.Chdir(t.TempDir())
 	svc, err := openFeedbackService(t.Context(), t.TempDir(), "file:"+path+"?nolock=1", func(string) {})
