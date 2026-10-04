@@ -182,16 +182,23 @@ func sqliteReadWriteDSN(dbPath string) (string, error) {
 // it for retrieval/probe paths that must not create WAL/SHM files or mutate
 // copied/foreign index DBs. dbPath may be a plain path or a file: URI; the open
 // always forces mode=ro, immutable=1 and a private cache, whatever the URI's
-// own parameters say.
+// own parameters say. Caller-supplied _pragma parameters are rejected before
+// opening. Plain paths retain their filesystem symlink and ".." resolution.
 func OpenSQLiteStoreReadOnly(dbPath string) (*SQLiteStore, error) {
 	if dbPath == "" {
 		return nil, fmt.Errorf("rag: open sqlite read-only: empty path")
 	}
-	u, err := sqlitedsn.FileURL(dbPath)
+	u, err := sqlitedsn.FileURLPreservingPath(dbPath)
 	if err != nil {
 		return nil, fmt.Errorf("rag: open sqlite read-only: %w", err)
 	}
 	q := u.Query()
+	// modernc executes _pragma values as SQL during connection setup. Even
+	// mode=ro on the main database cannot prevent an appended ATTACH from
+	// opening another writable handle to the same file.
+	if q.Has("_pragma") {
+		return nil, fmt.Errorf("rag: open sqlite read-only: _pragma URI parameters are not supported")
+	}
 	q.Set("mode", "ro")
 	q.Set("immutable", "1")
 	// A shared cache would join a read-write opener's btree and ignore mode=ro.

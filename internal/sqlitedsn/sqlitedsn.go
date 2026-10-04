@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -54,6 +55,27 @@ func FileURL(path string) (*url.URL, error) {
 		}
 	}
 	return &url.URL{Scheme: "file", Path: abs}, nil
+}
+
+// FileURLPreservingPath is FileURL without lexical path cleaning on Unix.
+// Plain relative paths are made absolute by prepending the working directory,
+// keeping symlinks and ".." for SQLite to resolve in filesystem order. This
+// lets read-only callers open the same file as os.Stat of the original path.
+// File URIs are kept as given; Windows uses FileURL's native path resolution
+// and UNC/device-path checks.
+func FileURLPreservingPath(path string) (*url.URL, error) {
+	if path == "" || strings.HasPrefix(path, "file:") || runtime.GOOS == "windows" {
+		return FileURL(path)
+	}
+	if !filepath.IsAbs(path) {
+		wd, err := os.Getwd()
+		if err != nil {
+			return nil, fmt.Errorf("sqlitedsn: resolve path %q: %w", path, err)
+		}
+		// filepath.Join would erase symlink/.. before SQLite sees it.
+		path = wd + string(filepath.Separator) + path
+	}
+	return &url.URL{Scheme: "file", Path: path}, nil
 }
 
 // windowsURIPath turns an absolute Windows path into the path of a file: URL

@@ -30,7 +30,11 @@
   `SQLITE_BUSY` rather than `context.DeadlineExceeded`.
 - `rag.OpenSQLiteStoreReadOnly` now accepts a `file:` URI as well as a path. It
   always opens read-only and immutable with a private cache, whatever the URI's
-  own `mode` or `cache` parameters say.
+  own `mode` or `cache` parameters say. Caller-supplied `_pragma` URI options
+  are rejected before connection setup, so they cannot execute SQL that
+  modifies the source database.
+- Plain read-only RAG paths retain filesystem symlink and `..` resolution,
+  so opening an index selects the same database as the supplied path.
 - `rag.NewSQLiteStore("")` (a temporary database) now keeps one connection, so
   the store no longer sees an empty, unmigrated database on a second pooled
   connection.
