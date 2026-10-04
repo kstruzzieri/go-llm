@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -34,6 +35,10 @@ func TestCallFailureAllowlist(t *testing.T) {
 		{fmt.Errorf("x: %w", context.DeadlineExceeded), "mcp call failed: timed out"},
 		{fmt.Errorf("%w: %w", server, errRedirectRefused), "mcp call failed: redirect refused"},
 		{fmt.Errorf("%w: %w", server, context.DeadlineExceeded), "mcp call failed: timed out"},
+		// Chains can mix sentinels (go-sdk's call returns errors.Join(ctx.Err(), err)).
+		{errors.Join(context.Canceled, errDestinationRefused, errRedirectRefused), "mcp call failed: redirect refused"},
+		{errors.Join(context.DeadlineExceeded, context.Canceled, errDestinationRefused), "mcp call failed: destination refused"},
+		{errors.Join(context.DeadlineExceeded, context.Canceled), "mcp call failed: canceled"},
 		{fmt.Errorf("call: %w", &jsonrpc.Error{Code: -32602, Message: "invalid params: path"}), "mcp call failed: invalid params: path"},
 		{fmt.Errorf("%w: %w", rejected, leak), "mcp call failed: transport error"},
 		{&jsonrpc.Error{Code: -32001, Message: "canary from server"}, "mcp call failed: transport error"},
@@ -44,6 +49,57 @@ func TestCallFailureAllowlist(t *testing.T) {
 		if got := callFailure(tt.err); got != tt.want {
 			t.Errorf("callFailure(%v) = %q, want %q", tt.err, got, tt.want)
 		}
+	}
+}
+
+func TestServerJSONRPCErrorsShowOnlyTheirMessage(t *testing.T) {
+	srv := gomcp.NewServer(&gomcp.Implementation{Name: "refuser"}, nil)
+	for name, rpcErr := range map[string]*jsonrpc.Error{
+		"deny":   {Code: -32602, Message: "server says no"},
+		"reject": {Code: -32005, Message: "canary-rejected"},
+	} {
+		srv.AddTool(&gomcp.Tool{Name: name, InputSchema: map[string]any{"type": "object"}}, func(context.Context, *gomcp.CallToolRequest) (*gomcp.CallToolResult, error) {
+			return nil, rpcErr
+		})
+	}
+	httpServer := httptest.NewServer(gomcp.NewStreamableHTTPHandler(func(*http.Request) *gomcp.Server { return srv }, nil))
+	t.Cleanup(httpServer.Close)
+	m, w, err := Connect(context.Background(), Implementation{Name: "test"}, []Server{HTTPServer("fs", httpServer.URL+"/mcp?token=canary")}, ConnectOptions{Pins: testPins(t)})
+	if err != nil || len(m.Tools()) != 2 {
+		t.Fatalf("connect = (%v, %v)", err, w)
+	}
+	t.Cleanup(func() { _ = m.Close() })
+	got := map[string]string{}
+	for _, tool := range m.Tools() {
+		res, err := tool.Invoke(context.Background(), json.RawMessage(`{}`))
+		if err != nil || !res.IsError {
+			t.Fatalf("%s = (%+v, %v), want an error result", tool.Spec().Name, res, err)
+		}
+		got[tool.Spec().Name] = res.Content
+	}
+	want := map[string]string{
+		"mcp__fs__deny":   "mcp call failed: server says no",
+		"mcp__fs__reject": "mcp call failed: transport error",
+	}
+	if !maps.Equal(got, want) {
+		t.Fatalf("server errors = %q, want %q", got, want)
+	}
+}
+
+func TestManagerCloseRedactsEndpoint(t *testing.T) {
+	srv := gomcp.NewServer(&gomcp.Implementation{Name: "closer"}, nil)
+	srv.AddTool(&gomcp.Tool{Name: "read", InputSchema: map[string]any{"type": "object"}}, func(context.Context, *gomcp.CallToolRequest) (*gomcp.CallToolResult, error) {
+		return &gomcp.CallToolResult{}, nil
+	})
+	httpServer := httptest.NewServer(gomcp.NewStreamableHTTPHandler(func(*http.Request) *gomcp.Server { return srv }, nil))
+	m, w, err := Connect(context.Background(), Implementation{Name: "test"}, []Server{HTTPServer("fs", httpServer.URL+"/mcp?token=canary")}, ConnectOptions{Pins: testPins(t)})
+	if err != nil || len(m.Tools()) != 1 {
+		t.Fatalf("connect = (%v, %v)", err, w)
+	}
+	httpServer.Close() // the session DELETE now fails with a *url.Error naming the endpoint
+	err = m.Close()
+	if err == nil || err.Error() != "mcpclient: closing MCP sessions failed" || strings.Contains(err.Error(), "canary") || strings.Contains(err.Error(), "127.0.0.1") || !errors.As(err, new(*url.Error)) {
+		t.Fatalf("close = %v, want the fixed text with the *url.Error still reachable", err)
 	}
 }
 

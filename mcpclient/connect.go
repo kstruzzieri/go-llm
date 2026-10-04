@@ -114,6 +114,8 @@ func (m *Manager) Tools() []agent.Tool {
 }
 
 // Close closes every client session (which terminates stdio subprocesses).
+// A failure's text is fixed and never includes endpoints; the causes stay
+// reachable through errors.Is and errors.As.
 func (m *Manager) Close() error {
 	var errs []error
 	for _, s := range m.sessions {
@@ -121,8 +123,19 @@ func (m *Manager) Close() error {
 			errs = append(errs, err)
 		}
 	}
-	return errors.Join(errs...)
+	if err := errors.Join(errs...); err != nil {
+		return &closeError{cause: err}
+	}
+	return nil
 }
+
+// closeError hides session close causes from display: an HTTP DELETE failure
+// is a *url.Error whose text holds the full endpoint, query included.
+type closeError struct{ cause error }
+
+func (e *closeError) Error() string { return "mcpclient: closing MCP sessions failed" }
+
+func (e *closeError) Unwrap() error { return e.cause }
 
 // ConnectOptions selects the workspace trust store and first-contact policy.
 // Pins is required; RequirePinned forbids automatic first pin creation.

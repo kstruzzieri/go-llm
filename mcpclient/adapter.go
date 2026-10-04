@@ -112,7 +112,10 @@ func (a *toolAdapter) Invoke(ctx context.Context, raw json.RawMessage) (agent.To
 
 // sdkLifecycleCodes are the go-sdk's own JSON-RPC sentinels (internal/jsonrpc2,
 // not importable): unknown error, client closing, server closing, rejected by
-// transport. They report transport state, not a server's answer.
+// transport. They report transport state, not a server's answer. -32001 is
+// also go-sdk's mcp.CodeHeaderMismatch, which go-sdk servers send with a
+// diagnostic message; that message is reported as a transport error, an
+// accepted loss (spec §5.11).
 var sdkLifecycleCodes = map[int64]bool{-32001: true, -32003: true, -32004: true, -32005: true}
 
 // callFailure maps a call error to model-facing text by an ordered allowlist
