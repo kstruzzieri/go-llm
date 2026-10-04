@@ -55,3 +55,22 @@ func TestOpenSQLiteStoreReadOnlyRelativePath(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// A caller's cache=shared would join the btree of an earlier read-write opener
+// in the same process and ignore mode=ro, making the snapshot writable.
+func TestOpenSQLiteStoreReadOnlyIgnoresSharedCache(t *testing.T) {
+	uri := "file:" + filepath.ToSlash(filepath.Join(t.TempDir(), "shared.db")) + "?cache=shared"
+	rw, err := NewSQLiteStore(uri)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = rw.Close() })
+	ro, err := OpenSQLiteStoreReadOnly(uri)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ro.Close() })
+	if _, err := ro.db.Exec("CREATE TABLE ro_write_probe (x)"); err == nil {
+		t.Fatal("CREATE TABLE through the read-only store succeeded; want a read-only error")
+	}
+}

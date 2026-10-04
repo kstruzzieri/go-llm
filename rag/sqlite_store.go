@@ -190,6 +190,8 @@ func OpenSQLiteStoreReadOnly(dbPath string) (*SQLiteStore, error) {
 	q := u.Query()
 	q.Set("mode", "ro")
 	q.Set("immutable", "1")
+	// A shared cache would join a read-write opener's btree and ignore mode=ro.
+	q.Set("cache", "private")
 	u.RawQuery = q.Encode()
 
 	db, err := sql.Open("sqlite", u.String())
