@@ -61,6 +61,11 @@ func (m *mockProvider) Embed(ctx context.Context, req provider.EmbedRequest) (*p
 	return m.embedFn(ctx, req)
 }
 
+// allowHTTPTestHost admits "example.com", the Host httptest.NewRequest sets
+// when the target names none, so handler tests reach their routes;
+// TestBuildHandler_HostGuard covers the Host guard itself.
+var allowHTTPTestHost = WithAllowedHosts("example.com")
+
 // newTestServer builds a Server wired to a real Router backed by the given
 // scripted mock provider. The returned teardown closes the Router.
 func newTestServer(t *testing.T, mp *mockProvider, opts ...Option) (*Server, func()) {
@@ -80,7 +85,7 @@ func newTestServer(t *testing.T, mp *mockProvider, opts ...Option) (*Server, fun
 		provider.WithStickyTTL(time.Second),
 		provider.WithAvailableRAM(256),
 	)
-	srv := New(router, modelReg, provReg, opts...)
+	srv := New(router, modelReg, provReg, append([]Option{allowHTTPTestHost}, opts...)...)
 	return srv, func() {
 		_ = router.Close()
 	}
