@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"os/exec"
 	"time"
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
@@ -120,29 +119,4 @@ func (s Server) Format(f fmt.State, _ rune) {
 // HTTPServer attaches an MCP server reachable over streamable HTTP.
 func HTTPServer(alias, endpoint string) Server {
 	return Server{Alias: alias, kind: transportHTTP, endpoint: endpoint}
-}
-
-// transport builds the SDK transport. The stdio subprocess is created with
-// exec.Command (NOT CommandContext): its lifetime is bound to the session and
-// ended by Manager.Close, not by the short-lived Connect context.
-func (s Server) transport() (gomcp.Transport, error) {
-	if s.tr != nil {
-		return s.tr, nil
-	}
-	switch s.kind {
-	case transportStdio:
-		if len(s.command) == 0 {
-			return nil, fmt.Errorf("mcpclient: stdio server %q has empty command", s.Alias)
-		}
-		return &gomcp.CommandTransport{Command: exec.Command(s.command[0], s.command[1:]...)}, nil
-	case transportHTTP:
-		ep, err := canonicalEndpoint(s.endpoint)
-		if err != nil {
-			return nil, err
-		}
-		tr, _ := newHTTPTransport(ep)
-		return tr, nil
-	default:
-		return nil, fmt.Errorf("mcpclient: server %q has unknown transport", s.Alias)
-	}
 }

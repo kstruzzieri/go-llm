@@ -138,16 +138,24 @@ func Connect(ctx context.Context, impl Implementation, servers []Server, opts Co
 	return connectWithHooks(ctx, impl, servers, opts, nil)
 }
 
-// connectHooks carries test-only observation callbacks; nil in production.
-// launched fires on the caller's goroutine immediately before a server's dial
-// is dispatched; published fires after that server's result is recorded.
+// connectHooks carries test-only seams; nil in production. launched fires on
+// the caller's goroutine immediately before a server's dial is dispatched;
+// published fires after that server's result is recorded; launch overrides
+// the process facts prepare reads; preflighted fires after a server's
+// pre-launch connection check passes.
 type connectHooks struct {
-	launched  func(i int)
-	published func(i int)
+	launched    func(i int)
+	published   func(i int)
+	launch      *launchEnv
+	preflighted func(alias string)
 }
 
 func connectWithHooks(ctx context.Context, impl Implementation, servers []Server, opts ConnectOptions, h *connectHooks) (*Manager, []error, error) {
-	if err := validateTrustConfig(servers, opts.Pins); err != nil {
+	le := hostLaunchEnv()
+	if h != nil && h.launch != nil {
+		le = *h.launch
+	}
+	if err := validateTrustConfig(servers, opts.Pins, le.policy); err != nil {
 		return nil, nil, err
 	}
 
@@ -164,7 +172,7 @@ func connectWithHooks(ctx context.Context, impl Implementation, servers []Server
 			h.launched(i)
 		}
 		g.Go(func() error {
-			session, tools, warns := connectOne(ctx, impl, s, opts)
+			session, tools, warns := connectOne(ctx, impl, s, opts, le, h)
 			results[i] = connectResult{session: session, tools: tools, warns: warns}
 			if h != nil && h.published != nil {
 				h.published(i)
@@ -201,10 +209,14 @@ type connectResult struct {
 	warns   []error
 }
 
-func connectOne(ctx context.Context, impl Implementation, s Server, opts ConnectOptions) (*gomcp.ClientSession, []agent.Tool, []error) {
+func connectOne(ctx context.Context, impl Implementation, s Server, opts ConnectOptions, le launchEnv, h *connectHooks) (*gomcp.ClientSession, []agent.Tool, []error) {
 	ctx, cancel := context.WithTimeout(ctx, connectTimeout)
 	defer cancel()
-	session, remote, catalog, notices, err := discover(ctx, impl, s)
+	prepared, err := prepare(s, opts.Pins.workspace, le)
+	if err != nil {
+		return nil, nil, []error{err}
+	}
+	session, remote, catalog, notices, err := discover(ctx, impl, prepared)
 	if err != nil {
 		return nil, nil, []error{err}
 	}
@@ -244,30 +256,33 @@ func connectOne(ctx context.Context, impl Implementation, s Server, opts Connect
 
 // discover owns the candidate session until a complete catalog is returned.
 // The caller closes successful candidates or transfers ownership to Manager.
-func discover(ctx context.Context, impl Implementation, s Server) (*gomcp.ClientSession, []*gomcp.Tool, toolCatalog, []error, error) {
-	tr, err := s.transport()
-	if err != nil {
-		return nil, nil, toolCatalog{}, nil, admissionFailure(s.Alias, "unavailable", err)
+func discover(ctx context.Context, impl Implementation, p preparedServer) (*gomcp.ClientSession, []*gomcp.Tool, toolCatalog, []error, error) {
+	fail := func(reason string, cause error) *AdmissionError {
+		failure := admissionFailure(p.alias, reason, cause)
+		if refused := p.refusal(); refused != "" {
+			failure.Reason = refused
+		}
+		return failure
 	}
 	// Empty capabilities disables roots, sampling and elicitation.
 	client := gomcp.NewClient(&gomcp.Implementation{Name: impl.Name, Version: impl.Version}, &gomcp.ClientOptions{Capabilities: &gomcp.ClientCapabilities{}})
-	session, err := client.Connect(ctx, tr, nil)
+	session, err := client.Connect(ctx, p.transport, nil)
 	if err != nil {
-		return nil, nil, toolCatalog{}, nil, admissionFailure(s.Alias, "unavailable", err)
+		return nil, nil, toolCatalog{}, nil, fail("unavailable", err)
 	}
-	remote, failures := listAllTools(ctx, session, s.Alias)
+	remote, failures := listAllTools(ctx, session, p.alias)
 	var catalog toolCatalog
 	var notices []error
 	if len(failures) > 0 {
 		err = failures[0]
 	} else {
-		catalog, notices, err = validateCatalog(s.Alias, remote)
+		catalog, notices, err = validateCatalog(p.alias, remote)
 	}
 	if err == nil {
 		err = ctx.Err()
 	}
 	if err != nil {
-		failure := admissionFailure(s.Alias, "invalid_catalog", err)
+		failure := fail("invalid_catalog", err)
 		failure.cause = errors.Join(err, session.Close()) // as in connectOne
 		return nil, nil, toolCatalog{}, nil, failure
 	}

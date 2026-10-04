@@ -27,30 +27,30 @@ func (b *closeTrackingBody) Close() error {
 	return nil
 }
 
-func TestStdioTransport(t *testing.T) {
-	tr, err := StdioServer("fs", []string{"echo", "hi"}).transport()
+func TestStdioPrepareBuildsCommandTransport(t *testing.T) {
+	p, err := prepare(StdioServer("fs", []string{"/bin/echo", "hi"}).WithDir(t.TempDir()), "/ws", hostLaunchEnv())
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
-	if _, ok := tr.(*gomcp.CommandTransport); !ok {
-		t.Fatalf("want *CommandTransport, got %T", tr)
+	if _, ok := p.transport.(*gomcp.CommandTransport); !ok {
+		t.Fatalf("want *CommandTransport, got %T", p.transport)
 	}
 }
 
-func TestStdioEmptyCommand(t *testing.T) {
-	if _, err := StdioServer("fs", nil).transport(); err == nil {
+func TestStdioEmptyCommandInvalid(t *testing.T) {
+	if err := validateLaunchPolicy(StdioServer("fs", nil), unixEnvPolicy); err == nil {
 		t.Fatal("empty command must error")
 	}
 }
 
-func TestHTTPTransport(t *testing.T) {
-	tr, err := HTTPServer("api", "https://h/mcp").transport()
+func TestHTTPPrepareBuildsStreamableTransport(t *testing.T) {
+	p, err := prepare(HTTPServer("api", "https://h/mcp"), "/ws", hostLaunchEnv())
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
-	sc, ok := tr.(*gomcp.StreamableClientTransport)
+	sc, ok := p.transport.(*gomcp.StreamableClientTransport)
 	if !ok {
-		t.Fatalf("want *StreamableClientTransport, got %T", tr)
+		t.Fatalf("want *StreamableClientTransport, got %T", p.transport)
 	}
 	if !sc.DisableStandaloneSSE {
 		t.Fatal("MVP must disable the standalone SSE stream (request/response only)")
@@ -176,8 +176,8 @@ func mcpHTTPResponse(req *http.Request, status int, body string) *http.Response 
 	}
 }
 
-func TestHTTPEmptyEndpoint(t *testing.T) {
-	if _, err := HTTPServer("api", "").transport(); err == nil {
+func TestHTTPEmptyEndpointInvalid(t *testing.T) {
+	if err := validateLaunchPolicy(HTTPServer("api", ""), unixEnvPolicy); err == nil {
 		t.Fatal("empty endpoint must error")
 	}
 }

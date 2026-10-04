@@ -178,7 +178,7 @@ func inspection(s *PinStore, alias string, prior, candidate toolCatalog) *Inspec
 
 var digestRE = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
 
-func validateTrustConfig(servers []Server, pins *PinStore) error {
+func validateTrustConfig(servers []Server, pins *PinStore, policy envPolicy) error {
 	if pins == nil || pins.workspace == "" || pins.dir == "" {
 		return errors.New("mcpclient: initialized pin store required")
 	}
@@ -195,12 +195,9 @@ func validateTrustConfig(servers []Server, pins *PinStore) error {
 			// Selection diagnostics contain only positions and fixed text.
 			return fmt.Errorf("%w: %s", admissionFailure(s.Alias, "invalid_config", err), err)
 		}
-		if err := validateLaunchPolicy(s, hostEnvPolicy()); err != nil {
+		if err := validateLaunchPolicy(s, policy); err != nil {
 			// Launch-policy diagnostics contain only positions and fixed text.
 			return fmt.Errorf("%w: %s", admissionFailure(s.Alias, "invalid_config", err), err)
-		}
-		if _, err := s.transport(); err != nil {
-			return admissionFailure(s.Alias, "invalid_config", err)
 		}
 	}
 	return nil
@@ -221,7 +218,7 @@ func Approve(ctx context.Context, impl Implementation, server Server, pins *PinS
 	return inspectOrApprove(ctx, impl, server, pins, digest)
 }
 func inspectOrApprove(ctx context.Context, impl Implementation, server Server, pins *PinStore, digest string) (result *Inspection, err error) {
-	if err = validateTrustConfig([]Server{server}, pins); err != nil {
+	if err = validateTrustConfig([]Server{server}, pins, hostEnvPolicy()); err != nil {
 		return nil, err
 	}
 	ctx, cancel := context.WithTimeout(ctx, connectTimeout)
@@ -230,7 +227,11 @@ func inspectOrApprove(ctx context.Context, impl Implementation, server Server, p
 	if err != nil {
 		return nil, admissionFailure(server.Alias, "pin_unavailable", err)
 	}
-	session, _, candidate, _, err := discover(ctx, impl, server)
+	prepared, err := prepare(server, pins.workspace, hostLaunchEnv())
+	if err != nil {
+		return nil, err
+	}
+	session, _, candidate, _, err := discover(ctx, impl, prepared)
 	if err != nil {
 		return nil, err
 	}
