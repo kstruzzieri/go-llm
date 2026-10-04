@@ -150,9 +150,12 @@ func WithBusyTimeout(path string, timeout time.Duration) (string, error) {
 // plus scheduling and I/O overhead. It returns an error if SQLite reports a
 // journal mode other than "wal"; an in-memory database reports "memory" and
 // is accepted unchanged. Cancellation is checked between attempts; a lock
-// wait already in progress ends by the budget's deadline. The bound excludes
-// shared-cache (cache=shared) lock waits, which modernc retries outside the
-// busy handler; no store opens with a shared cache.
+// wait already in progress ends by the budget's deadline. Shared-cache
+// (cache=shared) connections are outside this contract: modernc waits on an
+// unlock notification outside the busy handler, and a concurrent writer on the
+// same shared cache makes SQLite decline the switch, which EnableWAL reports as
+// an error. rag.NewSQLiteStore forwards a caller's cache=shared URI; go-llm's
+// own openers never build one.
 func EnableWAL(ctx context.Context, db *sql.DB) error { return enableWAL(ctx, db, nil) }
 
 // enableWAL is EnableWAL with onBusy called after each attempt that fails with
