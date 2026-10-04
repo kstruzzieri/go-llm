@@ -1,11 +1,14 @@
 package interceptor_test
 
 import (
+	"context"
 	"strings"
 	"testing"
 
+	"github.com/kstruzzieri/go-llm/agent"
 	"github.com/kstruzzieri/go-llm/agent/interceptor"
 	"github.com/kstruzzieri/go-llm/agent/tools"
+	"github.com/kstruzzieri/go-llm/provider"
 )
 
 // TestSearchDescriptionNamesCredentialSet (#627): the search description
@@ -16,6 +19,35 @@ func TestSearchDescriptionNamesCredentialSet(t *testing.T) {
 	for _, name := range interceptor.CredentialRuleNames() {
 		if !strings.Contains(desc, name) {
 			t.Errorf("search description does not name %q: %s", name, desc)
+		}
+	}
+}
+
+type nopCaller struct{}
+
+func (nopCaller) Chat(context.Context, provider.ChatRequest, func(provider.ChatResponse) error) (agent.ModelResult, error) {
+	return agent.ModelResult{}, nil
+}
+
+// TestDispatchDescriptionNamesProtectedScopes (#627): where scoped dispatch
+// exists, its description names every protected directory a scope may not
+// sit in, so the refusal set and the model-facing text cannot drift apart.
+func TestDispatchDescriptionNamesProtectedScopes(t *testing.T) {
+	readers, err := tools.NewFileTools(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	d, err := tools.NewDispatch(nopCaller{}, agent.ContextManager{}, readers, tools.DispatchLimits{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	desc := d.Spec().Description
+	if !strings.Contains(desc, "scope") {
+		t.Skip("scoped dispatch is not supported on this platform")
+	}
+	for _, name := range append([]string{".git"}, interceptor.CredentialRuleNames()...) {
+		if interceptor.IsProtectedPath(name) && !strings.Contains(desc, name) {
+			t.Errorf("dispatch description does not name protected %q: %s", name, desc)
 		}
 	}
 }
