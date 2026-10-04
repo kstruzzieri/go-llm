@@ -49,7 +49,7 @@ func TestCheckAgentflowStateMajor(t *testing.T) {
 		{name: "absent .agent"},
 		{name: "1.x tree with ledger rows", files: []file{
 			{"plan.lock.json", v1Lock}, {"execution.contract.json", v1Contract},
-			{"step-runs.jsonl", v1Row + "\n\n" + v1Row + "\n"}, {"command-receipts.jsonl", v1Row + "\n"},
+			{"step-runs.jsonl", v1Row + "\r\n  \t\r\n" + v1Row}, {"command-receipts.jsonl", v1Row + "\n"}, // CRLF, whitespace-only line, no final newline
 			{"file-receipts.jsonl", v1Row + "\n"}, {"verification-runs.jsonl", v1Row + "\n"},
 		}},
 		{name: "empty ledgers", files: []file{
@@ -70,6 +70,8 @@ func TestCheckAgentflowStateMajor(t *testing.T) {
 		{name: "plan lock not JSON", files: []file{{"plan.lock.json", `{not json`}},
 			want: ".agent/plan.lock.json unreadable"},
 		{name: "contract without schema_version", files: []file{{"execution.contract.json", `{}`}},
+			want: ".agent/execution.contract.json unreadable"},
+		{name: "empty execution contract", files: []file{{"plan.lock.json", v1Lock}, {"execution.contract.json", ""}},
 			want: ".agent/execution.contract.json unreadable"},
 		{name: "plan lock is a directory", dirs: []string{"plan.lock.json"},
 			want: ".agent/plan.lock.json unreadable"},

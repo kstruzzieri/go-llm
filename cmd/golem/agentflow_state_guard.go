@@ -25,7 +25,8 @@ var (
 // (#612 R5). Absent files and empty ledgers pass. The drift report and proof
 // pack are not checked (finish regenerates the first; the second has its own
 // historical rule). ponytail: a preflight for one operator, not a lock against
-// a concurrent writer.
+// a concurrent writer; lock .agent/ if concurrent runs ever matter (relock
+// policy is #643).
 func checkAgentflowStateMajor(root string) error {
 	dir := filepath.Join(root, ".agent")
 	for _, name := range agentflowStateDocs {
