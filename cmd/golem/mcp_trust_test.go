@@ -440,8 +440,7 @@ func TestMCPTrustDisjointDiffAndHint(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	candidate, err := mcpclient.Inspect(t.Context(), mcpClientImpl(), servers[0], pins)
-	if err != nil {
+	if _, err := mcpclient.Inspect(t.Context(), mcpClientImpl(), servers[0], pins); err != nil {
 		t.Fatal(err)
 	}
 	message := warnings[0].Error()
@@ -456,7 +455,7 @@ func TestMCPTrustDisjointDiffAndHint(t *testing.T) {
 			t.Fatalf("diagnostic leaked %q", secret)
 		}
 	}
-	wantHint := "review with golem mcp inspect, then run golem mcp approve with the same -root and server arguments, explicit alias=fs, and -digest " + candidate.CandidateDigest
+	wantHint := "review with golem mcp inspect using the same -root, server and -mcp-env arguments and explicit alias=fs, then golem mcp approve with the -digest and -connection it prints"
 	if !strings.HasSuffix(message, wantHint) {
 		t.Fatalf("hint not bound: %s", message)
 	}

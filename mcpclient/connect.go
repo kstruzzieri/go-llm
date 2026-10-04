@@ -227,25 +227,30 @@ func connectOne(ctx context.Context, impl Implementation, s Server, opts Connect
 		// is an unusable launch, not a pin store fault.
 		return nil, nil, []error{admissionFailure(s.Alias, "launch_invalid", err)}
 	}
+	// Preflight (spec §5.8 step 3): nothing is launched or contacted unless
+	// this is permitted first contact or the pinned connection matches.
+	current, revision, err := opts.Pins.capturePin(ctx, s.Alias)
+	if err == nil {
+		err = preflightConnection(current, revision, conn, opts.RequirePinned)
+	}
+	if err != nil {
+		return nil, nil, []error{admissionFailure(s.Alias, "pin_unavailable", err)}
+	}
+	if h != nil && h.preflighted != nil {
+		h.preflighted(s.Alias)
+	}
 	session, remote, catalog, notices, err := discover(ctx, impl, prepared)
 	if err != nil {
 		return nil, nil, []error{err}
 	}
-	prior, revision, err := opts.Pins.capturePin(ctx, s.Alias)
-	if err == nil && !revision.exists && opts.RequirePinned {
-		err = errPinMissing
-	}
-	created := false
-	if err == nil {
-		prior, created, err = opts.Pins.admitAt(ctx, s.Alias, revision, pinEntry{toolCatalog: catalog, conn: conn})
-	}
+	prior, created, err := opts.Pins.admitAt(ctx, s.Alias, revision, pinEntry{toolCatalog: catalog, conn: conn})
 	if err == nil {
 		err = ctx.Err()
 	}
 	// created can accompany an error (the store joins ctx.Err() and lease
 	// cleanup after the rename): the pin is on disk either way, so report it.
 	if created {
-		notices = append(notices, fmt.Errorf("server %q: first pin %s; tools: %s; use explicit alias= values for stable pins", s.Alias, catalog.digest(), strings.Join(catalogNames(catalog), ", ")))
+		notices = append(notices, fmt.Errorf("server %q: first pin %s; connection pinned; tools: %s; use explicit alias= values for stable pins", s.Alias, catalog.digest(), strings.Join(catalogNames(catalog), ", ")))
 	}
 	if err != nil {
 		closeErr := session.Close()
@@ -270,6 +275,19 @@ func connectOne(ctx context.Context, impl Implementation, s Server, opts Connect
 		}
 	}
 	return session, adapters(session, s.Alias, remote, catalog), notices
+}
+
+// preflightConnection decides before launch whether a server may be contacted:
+// a missing record only under trust-on-first-use, a version 1 record never,
+// and a version 2 record only when its connection identity matches.
+func preflightConnection(current pinEntry, rev pinRevision, candidate *connectionPin, requirePinned bool) error {
+	if !rev.exists {
+		if requirePinned {
+			return errPinMissing
+		}
+		return nil
+	}
+	return checkConnection(current, candidate)
 }
 
 // discover owns the candidate session until a complete catalog is returned.

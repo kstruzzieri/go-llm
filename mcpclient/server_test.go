@@ -1,6 +1,7 @@
 package mcpclient
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"io"
@@ -107,20 +108,34 @@ func TestHTTPRejectedSessionDeleteIsBounded(t *testing.T) {
 		t.Cleanup(func() { http.DefaultClient = originalClient })
 
 		pins := testPins(t)
-		mgr, warnings, err := Connect(t.Context(), Implementation{Name: "test"}, []Server{HTTPServer("fs", "https://mcp.invalid")}, ConnectOptions{Pins: pins, RequirePinned: true})
+		server := HTTPServer("fs", "https://mcp.invalid")
+		prepared, err := prepare(server, pins.workspace, hostLaunchEnv())
 		if err != nil {
-			t.Fatalf("Connect(strict missing pin) error = %v, want nil", err)
+			t.Fatal(err)
+		}
+		conn, err := pins.digestConnection(t.Context(), prepared.identity)
+		if err != nil {
+			t.Fatal(err)
+		}
+		// Pin this connection with a different catalog, so admission fails
+		// only after discovery: that is the path that closes an HTTP session.
+		if _, _, err := pins.admit(t.Context(), "fs", pinEntry{toolCatalog: pinCatalog(t, "fs", "other").toolCatalog, conn: conn}, false); err != nil {
+			t.Fatal(err)
+		}
+		before := pinBytes(t, pins, "fs")
+		mgr, warnings, err := Connect(t.Context(), Implementation{Name: "test"}, []Server{server}, ConnectOptions{Pins: pins, RequirePinned: true})
+		if err != nil {
+			t.Fatalf("Connect(strict changed catalog) error = %v, want nil", err)
 		}
 		t.Cleanup(func() { _ = mgr.Close() })
-		failure := admission(t, warnings)
-		if failure.Reason != "pin_missing" {
-			t.Errorf("Connect(strict missing pin) reason = %q, want pin_missing", failure.Reason)
+		if failure := admission(t, warnings); failure.Reason != "catalog_changed" {
+			t.Errorf("Connect(strict changed catalog) reason = %q, want catalog_changed", failure.Reason)
 		}
-		if len(mgr.Tools()) != 0 || pinBytes(t, pins, "fs") != nil {
-			t.Errorf("Connect(strict missing pin) = (%d tools, pin %t), want (0, false)", len(mgr.Tools()), pinBytes(t, pins, "fs") != nil)
+		if len(mgr.Tools()) != 0 || !bytes.Equal(before, pinBytes(t, pins, "fs")) {
+			t.Errorf("Connect(strict changed catalog) published tools or changed the pin")
 		}
 		if timeout := <-deleteTimeout; timeout <= 0 || timeout > 5*time.Second {
-			t.Errorf("Connect(strict missing pin) HTTP DELETE timeout = %s, want (0s, 5s]", timeout)
+			t.Errorf("HTTP DELETE timeout = %s, want (0s, 5s]", timeout)
 		}
 		for range 3 {
 			if remaining := time.Until(<-postDeadline); remaining <= 20*time.Second {

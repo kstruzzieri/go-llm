@@ -182,12 +182,18 @@ func TestTrustRequirePinned(t *testing.T) {
 					t.Fatalf("matching rejected: %v", w)
 				}
 			} else {
-				_ = admission(t, w)
+				failure := admission(t, w)
 				if len(m.Tools()) != 0 || len(m.sessions) != 0 {
 					t.Fatal("untrusted tools admitted")
 				}
-				if name != "unavailable" {
+				// Only a server that passed preflight was ever dialed (#578).
+				switch name {
+				case "changed":
 					waitOn(t, done, "rejection close")
+				case "absent", "empty-absent", "invalid":
+					if failure.Reason != "pin_missing" {
+						t.Fatalf("reason = %q, want pin_missing before launch", failure.Reason)
+					}
 				}
 			}
 			if !bytes.Equal(before, pinBytes(t, pins, "fs")) {

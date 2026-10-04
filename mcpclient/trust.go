@@ -22,13 +22,22 @@ type AdmissionError struct {
 	// Names lists validated names relevant to Reason (for selection_missing,
 	// the selected tools absent from the admitted catalog). Never remote prose.
 	Names []string
-	cause error
+	// ConnectionChanges lists fixed labels for a changed connection identity
+	// (connection_changed). Never values, paths or fingerprints.
+	ConnectionChanges []string
+	cause             error
 }
+
+// reviewReasons are refusals an operator resolves with inspect and approve.
+var reviewReasons = map[string]bool{"pin_missing": true, "connection_missing": true, "connection_changed": true}
 
 func (e *AdmissionError) Error() string {
 	text := fmt.Sprintf("server %q: %s", e.Alias, e.Reason)
 	if len(e.Names) > 0 {
 		text += ": " + strings.Join(e.Names, ", ")
+	}
+	if len(e.ConnectionChanges) > 0 {
+		text += "; connection fields: " + strings.Join(e.ConnectionChanges, ", ")
 	}
 	if e.PinnedDigest != "" {
 		text += "; pinned " + e.PinnedDigest
@@ -38,7 +47,11 @@ func (e *AdmissionError) Error() string {
 		if diff := e.Diff.String(); diff != "" {
 			text += "; " + diff
 		}
-		text += fmt.Sprintf("; review with golem mcp inspect, then run golem mcp approve with the same -root and server arguments, explicit alias=%s, and -digest %s", e.Alias, e.CandidateDigest)
+	}
+	// Approval needs the connection fingerprint, which only inspect shows, so
+	// the hint never offers a ready-made digest.
+	if e.CandidateDigest != "" || reviewReasons[e.Reason] {
+		text += fmt.Sprintf("; review with golem mcp inspect using the same -root, server and -mcp-env arguments and explicit alias=%s, then golem mcp approve with the -digest and -connection it prints", e.Alias)
 	}
 	if e.Reason == "pin_durability" {
 		text += "; published bytes may already be present; durability is unconfirmed"
@@ -54,6 +67,8 @@ func admissionFailure(alias, reason string, cause error) *AdmissionError {
 	if errors.As(cause, &previous) {
 		reason = previous.Reason
 	}
+	var changed *connectionChangedError
+	isChanged := errors.As(cause, &changed)
 	switch {
 	case errors.Is(cause, errPinDurability):
 		reason = "pin_durability"
@@ -65,6 +80,10 @@ func admissionFailure(alias, reason string, cause error) *AdmissionError {
 		reason = "canceled"
 	case errors.Is(cause, errPinMissing):
 		reason = "pin_missing"
+	case errors.Is(cause, errConnectionMissing):
+		reason = "connection_missing"
+	case isChanged:
+		reason = "connection_changed"
 	case errors.Is(cause, errPinMismatch):
 		reason = "catalog_changed"
 	case errors.Is(cause, errPinRevisionConflict):
@@ -72,7 +91,11 @@ func admissionFailure(alias, reason string, cause error) *AdmissionError {
 	case errors.Is(cause, errPinContention):
 		reason = "pin_contention"
 	}
-	return &AdmissionError{Alias: alias, Reason: reason, cause: cause}
+	failure := &AdmissionError{Alias: alias, Reason: reason, cause: cause}
+	if isChanged {
+		failure.ConnectionChanges = append([]string(nil), changed.labels...)
+	}
+	return failure
 }
 
 // CatalogChange names a changed tool and the definition fields that changed.
