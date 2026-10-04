@@ -393,17 +393,23 @@ func TestModelDetailResourceUsesDirectMetadataWhenListFails(t *testing.T) {
 	}
 }
 
-// breakerRouteEngine serves canned breaker snapshots so the route://breakers
-// projection can be pinned without real breaker clocks.
-type breakerRouteEngine struct {
+// routeSnapshotEngine serves canned routing snapshots so the route://
+// projections can be pinned without real breaker, warmth, or sticky clocks.
+type routeSnapshotEngine struct {
 	*recordingRouteEngine
-	infos map[string]provider.BreakerInfo
+	breakers map[string]provider.BreakerInfo
+	warm     []provider.WarmModel
+	sticky   map[string]provider.StickyRouteInfo
 }
 
-func (e breakerRouteEngine) BreakerInfo(name string) (provider.BreakerInfo, bool) {
-	info, ok := e.infos[name]
+func (e routeSnapshotEngine) BreakerInfo(name string) (provider.BreakerInfo, bool) {
+	info, ok := e.breakers[name]
 	return info, ok
 }
+
+func (e routeSnapshotEngine) WarmthSnapshot() []provider.WarmModel { return e.warm }
+
+func (e routeSnapshotEngine) StickyRoutes() map[string]provider.StickyRouteInfo { return e.sticky }
 
 // TestRouteBreakersResourceJSON pins the route://breakers wire projection:
 // state by name, zero times and nil errors omitted, times in UTC, and the last
@@ -427,9 +433,9 @@ func TestRouteBreakersResourceJSON(t *testing.T) {
 	}
 	s := &Server{
 		providerRegistry: reg,
-		router: breakerRouteEngine{
+		router: routeSnapshotEngine{
 			recordingRouteEngine: newRecordingRouteEngine(""),
-			infos: map[string]provider.BreakerInfo{
+			breakers: map[string]provider.BreakerInfo{
 				"alpha": {State: provider.BreakerClosed},
 				"beta": {
 					State:       provider.BreakerOpen,
@@ -482,5 +488,81 @@ func TestRouteBreakersResourceJSON(t *testing.T) {
 ]`
 	if got != want {
 		t.Errorf("route://breakers JSON:\n%s\nwant:\n%s", got, want)
+	}
+}
+
+// TestRouteWarmthAndStickyResourceJSON pins the route://warmth and
+// route://sticky wire projections: flat provider/model keys, times in UTC,
+// zero times omitted, and the empty forms [] and {} rather than null.
+func TestRouteWarmthAndStickyResourceJSON(t *testing.T) {
+	edt := time.FixedZone("EDT", -4*60*60)
+	loadedAt := time.Date(2026, 10, 3, 8, 0, 0, 0, edt)
+	key := provider.ModelKey{Provider: "local", Model: "qwen3:8b"}
+	populated := routeSnapshotEngine{
+		recordingRouteEngine: newRecordingRouteEngine(""),
+		warm: []provider.WarmModel{
+			{Key: key, Info: provider.WarmthInfo{Loaded: true, Since: loadedAt, ExpiresAt: loadedAt.Add(5 * time.Minute), VRAM: 5.5}},
+			{Key: provider.ModelKey{Provider: "local", Model: "qwen3-embedding:8b"}, Info: provider.WarmthInfo{Loaded: true}},
+		},
+		sticky: map[string]provider.StickyRouteInfo{
+			"9f86d081884c7d659a2feaa0c55ad015": {
+				Key:        key,
+				Score:      0.875,
+				Reason:     "score=0.875, quality=high, speed=fast",
+				CreatedAt:  loadedAt,
+				LastUsedAt: loadedAt.Add(time.Minute),
+				ExpiresAt:  loadedAt.Add(31 * time.Minute),
+			},
+		},
+	}
+	empty := routeSnapshotEngine{recordingRouteEngine: newRecordingRouteEngine("")}
+
+	type handler func(*Server, context.Context, *gomcp.ReadResourceRequest) (*gomcp.ReadResourceResult, error)
+	tests := []struct {
+		name   string
+		read   handler
+		engine routeSnapshotEngine
+		want   string
+	}{
+		{"warmth empty", (*Server).handleRouteWarmthResource, empty, `[]`},
+		{"warmth", (*Server).handleRouteWarmthResource, populated, `[
+  {
+    "provider": "local",
+    "model": "qwen3:8b",
+    "loaded": true,
+    "since": "2026-10-03T12:00:00Z",
+    "expiresAt": "2026-10-03T12:05:00Z",
+    "vramGB": 5.5
+  },
+  {
+    "provider": "local",
+    "model": "qwen3-embedding:8b",
+    "loaded": true,
+    "vramGB": 0
+  }
+]`},
+		{"sticky empty", (*Server).handleRouteStickyResource, empty, `{}`},
+		{"sticky", (*Server).handleRouteStickyResource, populated, `{
+  "9f86d081884c7d659a2feaa0c55ad015": {
+    "provider": "local",
+    "model": "qwen3:8b",
+    "score": 0.875,
+    "reason": "score=0.875, quality=high, speed=fast",
+    "createdAt": "2026-10-03T12:00:00Z",
+    "lastUsedAt": "2026-10-03T12:01:00Z",
+    "expiresAt": "2026-10-03T12:31:00Z"
+  }
+}`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			res, err := tt.read(&Server{router: tt.engine}, context.Background(), nil)
+			if err != nil {
+				t.Fatalf("read error = %v", err)
+			}
+			if got := res.Contents[0].Text; got != tt.want {
+				t.Errorf("JSON:\n%s\nwant:\n%s", got, tt.want)
+			}
+		})
 	}
 }

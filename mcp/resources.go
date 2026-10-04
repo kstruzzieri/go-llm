@@ -238,18 +238,56 @@ func (s *Server) handleRouteBreakersResource(_ context.Context, _ *gomcp.ReadRes
 	return marshalResource("route://breakers", entries)
 }
 
+// warmEntry is the route://warmth wire projection of one warm model. Zero
+// times are omitted.
+type warmEntry struct {
+	Provider  string  `json:"provider"`
+	Model     string  `json:"model"`
+	Loaded    bool    `json:"loaded"`
+	Since     string  `json:"since,omitempty"`
+	ExpiresAt string  `json:"expiresAt,omitempty"`
+	VRAMGB    float64 `json:"vramGB"`
+}
+
 func (s *Server) handleRouteWarmthResource(_ context.Context, _ *gomcp.ReadResourceRequest) (*gomcp.ReadResourceResult, error) {
-	snap := s.WarmthSnapshot()
-	if snap == nil {
-		snap = []provider.WarmModel{}
+	entries := []warmEntry{}
+	for _, m := range s.WarmthSnapshot() {
+		entries = append(entries, warmEntry{
+			Provider:  m.Key.Provider,
+			Model:     m.Key.Model,
+			Loaded:    m.Info.Loaded,
+			Since:     rfc3339OrEmpty(m.Info.Since),
+			ExpiresAt: rfc3339OrEmpty(m.Info.ExpiresAt),
+			VRAMGB:    m.Info.VRAM,
+		})
 	}
-	return marshalResource("route://warmth", snap)
+	return marshalResource("route://warmth", entries)
+}
+
+// stickyEntry is the route://sticky wire projection of one cached route,
+// keyed in the resource by its sticky key hash. Zero times are omitted.
+type stickyEntry struct {
+	Provider   string  `json:"provider"`
+	Model      string  `json:"model"`
+	Score      float64 `json:"score"`
+	Reason     string  `json:"reason"`
+	CreatedAt  string  `json:"createdAt,omitempty"`
+	LastUsedAt string  `json:"lastUsedAt,omitempty"`
+	ExpiresAt  string  `json:"expiresAt,omitempty"`
 }
 
 func (s *Server) handleRouteStickyResource(_ context.Context, _ *gomcp.ReadResourceRequest) (*gomcp.ReadResourceResult, error) {
-	snap := s.StickyRoutes()
-	if snap == nil {
-		snap = map[string]provider.StickyRouteInfo{}
+	entries := map[string]stickyEntry{}
+	for key, r := range s.StickyRoutes() {
+		entries[key] = stickyEntry{
+			Provider:   r.Key.Provider,
+			Model:      r.Key.Model,
+			Score:      r.Score,
+			Reason:     r.Reason,
+			CreatedAt:  rfc3339OrEmpty(r.CreatedAt),
+			LastUsedAt: rfc3339OrEmpty(r.LastUsedAt),
+			ExpiresAt:  rfc3339OrEmpty(r.ExpiresAt),
+		}
 	}
-	return marshalResource("route://sticky", snap)
+	return marshalResource("route://sticky", entries)
 }
