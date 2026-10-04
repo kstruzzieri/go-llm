@@ -43,6 +43,28 @@ jobs:
       - name: Workspace mutation boundary
         run: go test -race -count=1 -run '^TestMutation' ./agent/tools ./cmd/golem
 
+      # Credential tripwire aliases (#627) on APFS: case and Unicode fold
+      # spellings of a protected directory resolve to the directory itself
+      # only on a case-insensitive volume, so these cases exercise the
+      # stored-spelling paths natively. Linux CI runs them too, where each
+      # spelling is its own directory. Two of them skip on a volume without
+      # the aliases, so a skip here fails the step instead of passing it, and
+      # so does any count of passing tests other than the four (a rename
+      # would otherwise run nothing and pass).
+      - name: Credential tripwire aliases
+        shell: bash
+        run: |
+          go test -race -count=1 -v -run '^TestCredentialAlias' ./agent/tools | tee "$RUNNER_TEMP/credential-alias.txt"
+          if grep -q -- '--- SKIP' "$RUNNER_TEMP/credential-alias.txt"; then
+            echo "::error::credential alias tests skipped: this runner volume does not alias .ssh spellings"
+            exit 1
+          fi
+          passed=$(grep -c -- '--- PASS: TestCredentialAlias' "$RUNNER_TEMP/credential-alias.txt" || true)
+          if [ "$passed" -ne 4 ]; then
+            echo "::error::expected 4 passing TestCredentialAlias tests, saw $passed"
+            exit 1
+          fi
+
       # Real Seatbelt confinement (#442). GO_LLM_REQUIRE_SEATBELT=1 turns a
       # skip into a hard failure, so a runner that cannot apply Seatbelt (a
       # nested sandbox) fails the gate rather than silently passing. The

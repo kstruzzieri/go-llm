@@ -95,3 +95,12 @@ func classifyError(err error) (ErrorClass, AttemptStatus) {
 
 	return ErrorClassUnknown, AttemptStatusFailed
 }
+
+// ErrorClassOf returns the bounded ErrorClass for err, using the same mapping
+// as RoutingFeedback attempt attribution. It returns "" for nil and for caller
+// cancellation, which carry no failure class. Use it to expose an error across
+// a wire boundary instead of its text, which can carry endpoint URLs.
+func ErrorClassOf(err error) ErrorClass {
+	class, _ := classifyError(err)
+	return class
+}

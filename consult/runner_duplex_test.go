@@ -698,7 +698,10 @@ func TestDuplexChild(t *testing.T) {
 		return
 	}
 	mode = strings.TrimPrefix(mode, "546-duplex-")
-	if os.WriteFile(filepath.Join(dir, "pid"), []byte(strconv.Itoa(os.Getpid())), 0600) != nil {
+	// Publish the pid by rename. The runner may SIGKILL this child at any
+	// instant, and a plain WriteFile can leave an empty pid file behind.
+	pidTmp := filepath.Join(dir, "pid.tmp")
+	if os.WriteFile(pidTmp, []byte(strconv.Itoa(os.Getpid())), 0600) != nil || os.Rename(pidTmp, filepath.Join(dir, "pid")) != nil {
 		syscall.Exit(2)
 	}
 	if mode == "empty" {

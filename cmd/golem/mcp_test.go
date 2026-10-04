@@ -3,6 +3,8 @@ package main
 import (
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -247,5 +249,154 @@ func TestMCPToolsValidationMatchesLibrary(t *testing.T) {
 		if (cliErr != nil) != libRejects {
 			t.Fatalf("%d names: CLI rejects=%v, library rejects=%v (%v)", len(names), cliErr != nil, libRejects, libErr)
 		}
+	}
+}
+
+func TestWithMCPPolicy(t *testing.T) {
+	root := t.TempDir()
+	parse := func(t *testing.T) []mcpclient.Server {
+		t.Helper()
+		servers, err := parseMCPServers([]string{"fs=server one", "npx other"}, []string{"api=https://example.com/mcp"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return servers
+	}
+	// Stdio servers run in the canonical root (symlinks resolved, as the pin
+	// store keys it), never the spelling that was passed.
+	canonical, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The space after the comma must be trimmed, not rejected (PR 1 parity).
+	servers, err := withMCPPolicy(root, parse(t), 2, []string{"fs=GITHUB_TOKEN, HTTPS_PROXY"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, wantDir := range []string{canonical, canonical, ""} {
+		if got := serverDir(servers[i]); got != wantDir {
+			t.Fatalf("server %d dir = %q, want %q", i, got, wantDir)
+		}
+	}
+	if got := serverEnvLen(servers[0]); got != 2 {
+		t.Fatalf("fs env additions = %d, want 2", got)
+	}
+	// -mcp-env lands on the named alias only, here the second stdio server.
+	servers, err = withMCPPolicy(root, parse(t), 2, []string{"npx=A"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, want := range []int{0, 1, 0} {
+		if got := serverEnvLen(servers[i]); got != want {
+			t.Fatalf("npx=A: server %d env additions = %d, want %d", i, got, want)
+		}
+	}
+	// Aliases are case-sensitive: FS is a different server from fs.
+	cased, err := parseMCPServers([]string{"fs=a", "FS=b"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cased, err = withMCPPolicy(root, cased, 2, []string{"FS=A"}); err != nil {
+		t.Fatal(err)
+	}
+	if fs, upper := serverEnvLen(cased[0]), serverEnvLen(cased[1]); fs != 0 || upper != 1 {
+		t.Fatalf("FS=A env additions = (fs %d, FS %d), want (0, 1)", fs, upper)
+	}
+	// The default -root "." becomes the canonical absolute root.
+	t.Chdir(root)
+	relative, err := withMCPPolicy(".", parse(t), 2, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := serverDir(relative[0]); got != canonical {
+		t.Fatalf("-root . dir = %q, want %q", got, canonical)
+	}
+	for _, tt := range []struct {
+		flags []string
+		want  string
+	}{
+		{[]string{"fs"}, "-mcp-env #1: expected alias=NAME[,NAME...]"},
+		{[]string{"fs="}, "-mcp-env #1: expected alias=NAME[,NAME...]"},
+		{[]string{"missing=A"}, "-mcp-env #1: alias is not a configured MCP server"},
+		{[]string{"api=A"}, "-mcp-env #1: alias is not a stdio MCP server"},
+		{[]string{"fs=A", "fs=B"}, "-mcp-env #2: alias is already configured"},
+		{[]string{"fs=A,1BAD"}, "-mcp-env #1: entry 2 is not a variable name"},
+		{[]string{"fs=TOKEN=credential-value"}, "-mcp-env #1: entry 1 is not a variable name"},
+		{[]string{"fs=A,A"}, "-mcp-env #1: entry 2 repeats a name"},
+	} {
+		_, err := withMCPPolicy(root, parse(t), 2, tt.flags)
+		if err == nil || err.Error() != tt.want || strings.Contains(err.Error(), "credential-value") {
+			t.Fatalf("withMCPPolicy(%q) error = %v, want %q", tt.flags, err, tt.want)
+		}
+	}
+}
+
+func TestMCPEnvRejectedInGoalAndPlan(t *testing.T) {
+	for _, mode := range []string{"-goal", "-plan"} {
+		in, out, diag := runTestFiles(t)
+		err := run([]string{mode, "unused", "-mcp-env", "fs=A"}, in, out, diag)
+		// The exact mode rejection, not a later -mcp-env alias error.
+		if err == nil || !strings.Contains(err.Error(), "does not attach MCP tools") {
+			t.Fatalf("%s with -mcp-env err = %v, want the mode's MCP rejection", mode, err)
+		}
+	}
+}
+
+func TestMCPEnvInvalidThroughCLIDoesNotLeak(t *testing.T) {
+	in, out, diag := runTestFiles(t)
+	// An absent -config and a temp -root keep a regression (validation that no
+	// longer stops the run) away from the developer's real config.
+	err := run([]string{"-config", filepath.Join(t.TempDir(), "absent.json"), "-root", t.TempDir(), "-mcp-stdio", "fs=server", "-mcp-env", "fs=TOKEN=credential-value", "-no-project-context", "-no-git-context"}, in, out, diag)
+	if err == nil || !strings.Contains(err.Error(), "-mcp-env #1: entry 1 is not a variable name") {
+		t.Fatalf("invalid -mcp-env err = %v", err)
+	}
+	if strings.Contains(err.Error()+readRunTestFile(t, out)+readRunTestFile(t, diag), "credential-value") {
+		t.Fatal("invalid -mcp-env echoed the supplied text")
+	}
+}
+
+func serverDir(server mcpclient.Server) string {
+	return reflect.ValueOf(server).FieldByName("dir").String()
+}
+
+func serverEnvLen(server mcpclient.Server) int {
+	return reflect.ValueOf(server).FieldByName("env").Len()
+}
+
+// TestWithMCPPolicyCanonicalCase pins the stdio working directory to the same
+// case-canonical root the pin store uses, so -root .../Proj and .../pROJ share
+// one connection identity. It needs a case-insensitive volume (the macOS
+// default) and skips on case-sensitive ones, such as Linux CI.
+func TestWithMCPPolicyCanonicalCase(t *testing.T) {
+	parent, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := filepath.Join(parent, "Proj")
+	if err := os.Mkdir(want, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	flipped := filepath.Join(parent, "pROJ")
+	if _, err := os.Stat(flipped); err != nil {
+		t.Skip("case-sensitive volume: a case-flipped root is a different directory")
+	}
+	servers, err := withMCPPolicy(flipped, []mcpclient.Server{mcpclient.StdioServer("fs", []string{"server"})}, 1, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := serverDir(servers[0]); got != want {
+		t.Fatalf("dir for %q = %q, want the canonical %q", flipped, got, want)
+	}
+}
+
+// TestMCPEnvVarsFoldCase runs both duplicate rules on every host; production
+// folds case only on Windows, where environment names are case-insensitive.
+func TestMCPEnvVarsFoldCase(t *testing.T) {
+	vars, err := mcpEnvVars(1, "Path,PATH", false)
+	if err != nil || len(vars) != 2 {
+		t.Fatalf("case-sensitive Path,PATH = (%d vars, %v), want 2 vars", len(vars), err)
+	}
+	if _, err := mcpEnvVars(1, "Path,PATH", true); err == nil || err.Error() != "-mcp-env #1: entry 2 repeats a name" {
+		t.Fatalf("case-folded Path,PATH error = %v, want entry 2 repeats a name", err)
 	}
 }

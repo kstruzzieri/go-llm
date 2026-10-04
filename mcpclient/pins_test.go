@@ -25,13 +25,35 @@ func pinStoreForTest(t *testing.T) *PinStore {
 	return s
 }
 
-func pinCatalog(t *testing.T, alias, desc string) toolCatalog {
+func pinCatalog(t *testing.T, alias, desc string) pinEntry {
 	t.Helper()
 	c, err := newToolCatalog([]catalogEntry{{Name: "mcp__" + alias + "__read", Description: desc, InputSchema: json.RawMessage(`{"type":"object"}`)}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	return c
+	return testEntry(c)
+}
+
+// testConnPin is a fixed, well-formed connection pin for store tests that
+// exercise the file machinery rather than fingerprinting.
+func testConnPin() *connectionPin {
+	return &connectionPin{fingerprint: "hmac-sha256:" + strings.Repeat("a", 64), keyID: strings.Repeat("b", 64), kind: "http",
+		fields: map[string]string{"origin": strings.Repeat("c", 64), "endpoint": strings.Repeat("d", 64)}}
+}
+
+func testEntry(c toolCatalog) pinEntry { return pinEntry{toolCatalog: c, conn: testConnPin()} }
+
+// admit is the pin-store tests' single-lease admission, kept from before
+// connection identity: trust on first use unless requirePinned. Production
+// admits at a preflight revision (admitAt); both run through admitWith, so
+// these tests keep exercising the real lease, load and publish path.
+func (s *PinStore) admit(ctx context.Context, alias string, candidate pinEntry, requirePinned bool) (pinEntry, bool, error) {
+	return s.admitWith(ctx, alias, candidate, func(rev pinRevision) error {
+		if !rev.exists && requirePinned {
+			return errPinMissing
+		}
+		return nil
+	})
 }
 
 func readPinBytes(t *testing.T, s *PinStore) []byte {
@@ -74,7 +96,7 @@ func TestPinAdmission(t *testing.T) {
 		t.Fatal("mismatch changed literal record")
 	}
 	empty, _ := newToolCatalog(nil)
-	if _, _, err := s.admit(ctx, "empty", empty, false); err != nil {
+	if _, _, err := s.admit(ctx, "empty", testEntry(empty), false); err != nil {
 		t.Fatal(err)
 	}
 	if _, _, err := s.admit(ctx, "empty", pinCatalog(t, "empty", "new"), false); !errors.Is(err, errPinMismatch) {
@@ -109,13 +131,13 @@ func TestPinIsolationAndAliasValidation(t *testing.T) {
 	}
 	before, _ := os.ReadDir(s.dir)
 	for _, alias := range []string{"", "../escape", "a/b", "a\\b", strings.Repeat("x", 65)} {
-		if _, _, err := s.admit(ctx, alias, toolCatalog{}, false); err == nil {
+		if _, _, err := s.admit(ctx, alias, pinEntry{}, false); err == nil {
 			t.Fatalf("admit accepted %q", alias)
 		}
 		if _, _, err := s.capturePin(ctx, alias); err == nil {
 			t.Fatalf("capture accepted %q", alias)
 		}
-		if err := s.replacePin(ctx, alias, pinRevision{}, toolCatalog{}); err == nil {
+		if err := s.replacePin(ctx, alias, pinRevision{}, pinEntry{}); err == nil {
 			t.Fatalf("replace accepted %q", alias)
 		}
 	}
@@ -146,66 +168,74 @@ func TestPinCorruptNeverAbsent(t *testing.T) {
 	}
 }
 
+// Every case runs against both record versions this binary reads, so the
+// version 1 decoder keeps the same negative coverage as version 2.
 func TestPinRecordValidation(t *testing.T) {
-	for _, field := range []string{"version", "workspace", "alias", "digest", "tools", "unknown", "description", "name", "schema", "order", "duplicate", "case-key"} {
-		t.Run(field, func(t *testing.T) {
-			s := pinStoreForTest(t)
-			ctx := context.Background()
-			a := pinCatalog(t, "fs", "A")
-			if _, _, err := s.admit(ctx, "fs", a, false); err != nil {
-				t.Fatal(err)
-			}
-			var record map[string]any
-			if err := json.Unmarshal(readPinBytes(t, s), &record); err != nil {
-				t.Fatal(err)
-			}
-			switch field {
-			case "version":
-				record[field] = 2
-			case "workspace", "alias", "digest":
-				record[field] = "wrong"
-			case "tools":
-				record[field] = nil
-			case "unknown":
-				record[field] = true
-			case "case-key":
-				record["Version"] = record["version"]
-				delete(record, "version")
-			default:
-				entries := a.entriesCopy()
-				switch field {
-				case "description":
-					entries[0].Description = strings.Repeat("x", 8193)
-				case "name":
-					entries[0].Name = "mcp__other__read"
-				case "schema":
-					entries[0].InputSchema = json.RawMessage(`null`)
-				case "order":
-					entries = append(entries, catalogEntry{Name: "mcp__fs__aaa", InputSchema: json.RawMessage(`{}`)})
-				case "duplicate":
-					entries = append(entries, entries[0])
+	for _, version := range []int{1, 2} {
+		for _, field := range []string{"version", "workspace", "alias", "digest", "tools", "unknown", "missing", "description", "name", "schema", "order", "duplicate", "case-key"} {
+			t.Run(fmt.Sprintf("v%d/%s", version, field), func(t *testing.T) {
+				s := pinStoreForTest(t)
+				ctx := context.Background()
+				a := pinCatalog(t, "fs", "A")
+				if version == 1 {
+					writeV1Pin(t, s, "fs", a.toolCatalog)
+				} else if _, _, err := s.admit(ctx, "fs", a, false); err != nil {
+					t.Fatal(err)
 				}
-				canonical, err := newToolCatalog(entries)
+				var record map[string]any
+				if err := json.Unmarshal(readPinBytes(t, s), &record); err != nil {
+					t.Fatal(err)
+				}
+				switch field {
+				case "version":
+					record[field] = 3
+				case "workspace", "alias", "digest":
+					record[field] = "wrong"
+				case "tools":
+					record[field] = nil
+				case "unknown":
+					record[field] = true
+				case "missing":
+					delete(record, "workspace")
+				case "case-key":
+					record["Version"] = record["version"]
+					delete(record, "version")
+				default:
+					entries := a.entriesCopy()
+					switch field {
+					case "description":
+						entries[0].Description = strings.Repeat("x", 8193)
+					case "name":
+						entries[0].Name = "mcp__other__read"
+					case "schema":
+						entries[0].InputSchema = json.RawMessage(`null`)
+					case "order":
+						entries = append(entries, catalogEntry{Name: "mcp__fs__aaa", InputSchema: json.RawMessage(`{}`)})
+					case "duplicate":
+						entries = append(entries, entries[0])
+					}
+					canonical, err := newToolCatalog(entries)
+					if err != nil {
+						t.Fatal(err)
+					}
+					record["tools"] = entries
+					record["digest"] = canonical.digest()
+				}
+				raw, err := json.Marshal(record)
 				if err != nil {
 					t.Fatal(err)
 				}
-				record["tools"] = entries
-				record["digest"] = canonical.digest()
-			}
-			raw, err := json.Marshal(record)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if err = os.WriteFile(filepath.Join(s.dir, fsKey+".json"), raw, 0600); err != nil {
-				t.Fatal(err)
-			}
-			if _, _, err = s.capturePin(ctx, "fs"); err == nil {
-				t.Fatalf("accepted invalid %s", field)
-			}
-			if !bytes.Equal(raw, readPinBytes(t, s)) {
-				t.Fatal("invalid record rewritten")
-			}
-		})
+				if err = os.WriteFile(filepath.Join(s.dir, fsKey+".json"), raw, 0600); err != nil {
+					t.Fatal(err)
+				}
+				if _, _, err = s.capturePin(ctx, "fs"); err == nil {
+					t.Fatalf("accepted invalid %s", field)
+				}
+				if !bytes.Equal(raw, readPinBytes(t, s)) {
+					t.Fatal("invalid record rewritten")
+				}
+			})
+		}
 	}
 }
 
@@ -287,7 +317,7 @@ func TestPinMaximalEscapedCatalog(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err = s.admit(context.Background(), "fs", c, false); err != nil {
+	if _, _, err = s.admit(context.Background(), "fs", testEntry(c), false); err != nil {
 		t.Fatal(err)
 	}
 	if len(readPinBytes(t, s)) < 10*1024*1024 {
@@ -313,7 +343,7 @@ func TestPinPublishesCanonicalBytesWithinBound(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, created, err := s.admit(context.Background(), "fs", c, false); err != nil || !created {
+	if _, created, err := s.admit(context.Background(), "fs", testEntry(c), false); err != nil || !created {
 		t.Fatalf("publish: created=%v err=%v", created, err)
 	}
 	raw := readPinBytes(t, s)
@@ -328,7 +358,7 @@ func TestPinPublishesCanonicalBytesWithinBound(t *testing.T) {
 	var header bytes.Buffer
 	enc := json.NewEncoder(&header)
 	enc.SetEscapeHTML(false)
-	if err = enc.Encode(pinRecord{Version: c.version(), Workspace: s.workspace, Alias: "fs", Digest: c.digest(), Tools: json.RawMessage("[]")}); err != nil {
+	if err = enc.Encode(pinRecord{Version: pinRecordVersion, Workspace: s.workspace, Alias: "fs", Digest: c.digest(), Tools: json.RawMessage("[]"), Connection: testConnPin().record()}); err != nil {
 		t.Fatal(err)
 	}
 	if want := len(bytes.TrimSpace(header.Bytes())) - len("[]") + len(c.canonicalBytes()); len(raw) != want {
@@ -406,7 +436,7 @@ func TestPinSerializedBound(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = root.Close() }()
-	err = s.publish(context.Background(), root, fsKey+".json", "fs", candidate)
+	err = s.publish(context.Background(), root, fsKey+".json", "fs", testEntry(candidate))
 	if err == nil || !strings.Contains(err.Error(), "serialized pin exceeds") {
 		t.Fatalf("serialized bound: %v", err)
 	}

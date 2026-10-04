@@ -1,9 +1,11 @@
 package mcp
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strings"
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
@@ -204,10 +206,18 @@ func (s *Server) handleModelDetailResource(ctx context.Context, req *gomcp.ReadR
 	return marshalResource(req.Params.URI, info)
 }
 
-// breakerEntry pairs a provider name with its breaker state for JSON output.
+// breakerEntry is the route://breakers wire projection of one provider's
+// circuit breaker. The last error is reduced to its bounded routing class: its
+// text can carry endpoint URLs, and an error value has no stable JSON form.
+// Zero times are omitted, as is a class ErrorClassOf leaves empty (no error, or
+// a cancellation, which the router never records).
 type breakerEntry struct {
-	Provider string               `json:"provider"`
-	Info     provider.BreakerInfo `json:"info"`
+	Provider       string              `json:"provider"`
+	State          string              `json:"state"`
+	Failures       int                 `json:"failures"`
+	LastFailure    string              `json:"last_failure,omitempty"`
+	RecoverAt      string              `json:"recover_at,omitempty"`
+	LastErrorClass provider.ErrorClass `json:"last_error_class,omitempty"`
 }
 
 func (s *Server) handleRouteBreakersResource(_ context.Context, _ *gomcp.ReadResourceRequest) (*gomcp.ReadResourceResult, error) {
@@ -217,25 +227,79 @@ func (s *Server) handleRouteBreakersResource(_ context.Context, _ *gomcp.ReadRes
 	if router != nil && providerRegistry != nil {
 		for _, name := range providerRegistry.Names() {
 			if info, ok := router.BreakerInfo(name); ok {
-				entries = append(entries, breakerEntry{Provider: name, Info: info})
+				entries = append(entries, breakerEntry{
+					Provider:       name,
+					State:          info.State.String(),
+					Failures:       info.Failures,
+					LastFailure:    rfc3339OrEmpty(info.LastFailure),
+					RecoverAt:      rfc3339OrEmpty(info.RecoverAt),
+					LastErrorClass: provider.ErrorClassOf(info.LastError),
+				})
 			}
 		}
 	}
 	return marshalResource("route://breakers", entries)
 }
 
+// warmEntry is the route://warmth wire projection of one warm model. Zero
+// times are omitted, and so is a zero VRAM figure, because 0 also stands for
+// "not measured yet": OllamaWarmthSource.RecordUse records a model with VRAM 0
+// until its next poll.
+type warmEntry struct {
+	Provider  string  `json:"provider"`
+	Model     string  `json:"model"`
+	Loaded    bool    `json:"loaded"`
+	Since     string  `json:"since,omitempty"`
+	ExpiresAt string  `json:"expires_at,omitempty"`
+	VRAMGB    float64 `json:"vram_gb,omitempty"`
+}
+
 func (s *Server) handleRouteWarmthResource(_ context.Context, _ *gomcp.ReadResourceRequest) (*gomcp.ReadResourceResult, error) {
-	snap := s.WarmthSnapshot()
-	if snap == nil {
-		snap = []provider.WarmModel{}
+	entries := []warmEntry{}
+	for _, m := range s.WarmthSnapshot() {
+		entries = append(entries, warmEntry{
+			Provider:  m.Key.Provider,
+			Model:     m.Key.Model,
+			Loaded:    m.Info.Loaded,
+			Since:     rfc3339OrEmpty(m.Info.Since),
+			ExpiresAt: rfc3339OrEmpty(m.Info.ExpiresAt),
+			VRAMGB:    m.Info.VRAM,
+		})
 	}
-	return marshalResource("route://warmth", snap)
+	// Warmth sources may iterate a map, so sort for a stable read-to-read order.
+	slices.SortFunc(entries, func(a, b warmEntry) int {
+		if c := cmp.Compare(a.Provider, b.Provider); c != 0 {
+			return c
+		}
+		return cmp.Compare(a.Model, b.Model)
+	})
+	return marshalResource("route://warmth", entries)
+}
+
+// stickyEntry is the route://sticky wire projection of one cached route,
+// keyed in the resource by its sticky key hash. Zero times are omitted.
+type stickyEntry struct {
+	Provider   string  `json:"provider"`
+	Model      string  `json:"model"`
+	Score      float64 `json:"score"`
+	Reason     string  `json:"reason"`
+	CreatedAt  string  `json:"created_at,omitempty"`
+	LastUsedAt string  `json:"last_used_at,omitempty"`
+	ExpiresAt  string  `json:"expires_at,omitempty"`
 }
 
 func (s *Server) handleRouteStickyResource(_ context.Context, _ *gomcp.ReadResourceRequest) (*gomcp.ReadResourceResult, error) {
-	snap := s.StickyRoutes()
-	if snap == nil {
-		snap = map[string]provider.StickyRouteInfo{}
+	entries := map[string]stickyEntry{}
+	for key, r := range s.StickyRoutes() {
+		entries[key] = stickyEntry{
+			Provider:   r.Key.Provider,
+			Model:      r.Key.Model,
+			Score:      r.Score,
+			Reason:     r.Reason,
+			CreatedAt:  rfc3339OrEmpty(r.CreatedAt),
+			LastUsedAt: rfc3339OrEmpty(r.LastUsedAt),
+			ExpiresAt:  rfc3339OrEmpty(r.ExpiresAt),
+		}
 	}
-	return marshalResource("route://sticky", snap)
+	return marshalResource("route://sticky", entries)
 }

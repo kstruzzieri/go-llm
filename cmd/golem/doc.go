@@ -92,8 +92,11 @@
 // session grants and -allow-tool cannot override them; the model sees "tool
 // call blocked by interceptor invariants (<name>)" as a tool error. They cover
 // write_file, edit_file and promote_artifact under a .git, .ssh, .gnupg, .aws
-// or .kube component, read_file under the credential components or the exact
-// basename .env, and a run_command or start_command whose argv is an inline
+// or .kube component, read_file of a credential path (anything under .ssh,
+// .gnupg, .aws or .kube; .env and .env.* other than the committed templates
+// .env.example, .env.sample, .env.template and .env.dist; .netrc, _netrc,
+// .npmrc, .pypirc, .git-credentials; a config file under .git), and a
+// run_command or start_command whose argv is an inline
 // sh, bash, dash, ksh or zsh script that pipes a curl or wget stdout fetch
 // into a bare shell (optionally -s, or -s -- and arguments, optionally under
 // sudo). The outer shell is read with -c alone or among -e, -u, -x, -l and -i
@@ -102,25 +105,32 @@
 // any other option form, parse-only -n included, is not read and never
 // blocked. The guard reads the argument the tool's own decoder would use, so a
 // case-variant field name is guarded and two equivalent spellings are blocked
-// as ambiguous. These are direct-access tripwires on named tool arguments, not
-// confinement: run_command, search, retrieve, MCP tools and verifier commands
-// can still reach or expose the same files. The egress classifier reads the
-// argv of every run_command and start_command, and of any other exec-class
-// call (MCP tools included) whose arguments carry a top-level argv string
-// array, after peeling env, nohup, nice, time, timeout and stdbuf, and labels
-// what it visibly reaches (privileged, network, package-manager, interpreter,
-// unknown). A command in its quiet set gets no label. Anything else it cannot
-// parse, including a shell option form it does not read or an inline script it
-// cannot read literally, is labeled unknown; a readable script whose network
-// command is not literally in command position (command curl, exec curl, a
-// nested shell, zsh =curl) stays interpreter 0. The approval prompt appends
-// the current call's class and label to the risk line, "interceptor risk 20 ·
-// egress: network (git push)", on grant-covered auto-approvals too. These are
-// finite checks over the argv, not a sandbox: go build may still download
-// modules, make runs whatever the Makefile says, and quiet commands such as
-// find -exec, awk system() or git -c options can still run anything. No score
-// or badge revokes a grant. The hard line-count limit the issue mentioned is
-// deferred; the existing 256 KiB write bounds remain.
+// as ambiguous. Paths are matched relative to the workspace root (a session
+// rooted inside one of these directories is not covered) after a case fold that
+// also maps the spellings filesystems treat as one name (.ſsh and .ßh on APFS;
+// zero-width joiners and non-joiners, bidirectional and deprecated format
+// controls, and the BOM on HFS+; ::$DATA streams on Windows). These are
+// direct-access tripwires on named tool arguments, not confinement: search
+// skips the credential files and dispatch refuses a scope at or below .git,
+// .ssh, .gnupg, .aws or .kube, but run_command, retrieve, MCP tools, verifier
+// commands, edit_file's pre-approval match errors, and copies or hard links
+// under other names can still reach or expose the same files. The egress
+// classifier reads the argv of every run_command and start_command, and of any
+// other exec-class call (MCP tools included) whose arguments carry a top-level
+// argv string array, after peeling env, nohup, nice, time, timeout and stdbuf,
+// and labels what it visibly reaches (privileged, network, package-manager,
+// interpreter, unknown). A command in its quiet set gets no label. Anything
+// else it cannot parse, including a shell option form it does not read or an
+// inline script it cannot read literally, is labeled unknown; a readable script
+// whose network command is not literally in command position (command curl,
+// exec curl, a nested shell, zsh =curl) stays interpreter 0. The approval
+// prompt appends the current call's class and label to the risk line,
+// "interceptor risk 20 · egress: network (git push)", on grant-covered
+// auto-approvals too. These are finite checks over the argv, not a sandbox: go
+// build may still download modules, make runs whatever the Makefile says, and
+// quiet commands such as find -exec, awk system() or git -c options can still
+// run anything. No score or badge revokes a grant. The hard line-count limit
+// the issue mentioned is deferred; the existing 256 KiB write bounds remain.
 //
 // Independently of -interceptors, every tool result reaches the model inside
 // a keyed <<<TOOL_RESULT / >>>TOOL_RESULT frame minted per request, and every

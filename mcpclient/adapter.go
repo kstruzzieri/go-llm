@@ -3,10 +3,12 @@ package mcpclient
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
 
+	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/kstruzzieri/go-llm/agent"
@@ -103,7 +105,36 @@ func (a *toolAdapter) Invoke(ctx context.Context, raw json.RawMessage) (agent.To
 	}
 	res, err := a.caller.CallTool(ctx, &gomcp.CallToolParams{Name: a.remoteName, Arguments: args})
 	if err != nil {
-		return agent.ToolResult{IsError: true, Content: "mcp call failed: " + err.Error()}, nil
+		return agent.ToolResult{IsError: true, Content: callFailure(err)}, nil
 	}
 	return agent.ToolResult{Content: flattenContent(res), IsError: res.IsError}, nil
+}
+
+// sdkLifecycleCodes are the go-sdk's own JSON-RPC sentinels (internal/jsonrpc2,
+// not importable): unknown error, client closing, server closing, rejected by
+// transport. They report transport state, not a server's answer. -32001 is
+// also go-sdk's mcp.CodeHeaderMismatch, which go-sdk servers send with a
+// diagnostic message; that message is reported as a transport error, an
+// accepted loss (spec §5.11).
+var sdkLifecycleCodes = map[int64]bool{-32001: true, -32003: true, -32004: true, -32005: true}
+
+// callFailure maps a call error to model-facing text by an ordered allowlist
+// (spec §5.11). Transport errors can embed the full URL, query included, so
+// only a server-returned JSON-RPC message is ever passed through.
+func callFailure(err error) string {
+	var rpcErr *jsonrpc.Error
+	switch {
+	case errors.Is(err, errRedirectRefused):
+		return "mcp call failed: redirect refused"
+	case errors.Is(err, errDestinationRefused):
+		return "mcp call failed: destination refused"
+	case errors.Is(err, context.Canceled):
+		return "mcp call failed: canceled"
+	case errors.Is(err, context.DeadlineExceeded):
+		return "mcp call failed: timed out"
+	case errors.As(err, &rpcErr) && !sdkLifecycleCodes[rpcErr.Code]:
+		return "mcp call failed: " + rpcErr.Message
+	default:
+		return "mcp call failed: transport error"
+	}
 }

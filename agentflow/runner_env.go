@@ -3,6 +3,7 @@ package agentflow
 import (
 	"fmt"
 	"maps"
+	"path/filepath"
 	"regexp"
 	"slices"
 	"strings"
@@ -91,10 +92,10 @@ func buildChildEnv(p childEnvPolicy, lookup func(string) (string, bool)) ([]stri
 }
 
 // ValidateEnvNames reports whether every name may be approved for Agentflow
-// children. Names must be plain variable names; runner-owned Python settings
-// and Agentflow control variables (AGENTFLOW_*) are reserved, compared without
-// regard to case. Errors identify an entry by position and never echo it, so a
-// mistyped NAME=VALUE cannot leak its value.
+// children. Names must be plain variable names; runner-owned settings (PWD and
+// the Python settings) and Agentflow control variables (AGENTFLOW_*) are
+// reserved, compared without regard to case. Errors identify an entry by
+// position and never echo it, so a mistyped NAME=VALUE cannot leak its value.
 func ValidateEnvNames(names []string) error {
 	for i, name := range names {
 		if !envNamePattern.MatchString(name) {
@@ -102,11 +103,28 @@ func ValidateEnvNames(names []string) error {
 		}
 		upper := strings.ToUpper(name)
 		switch {
-		case upper == "PYTHONPATH" || upper == "PYTHONDONTWRITEBYTECODE":
+		case upper == "PWD" || upper == "PYTHONPATH" || upper == "PYTHONDONTWRITEBYTECODE":
 			return fmt.Errorf("agentflow: environment name #%d is runner-owned", i+1)
 		case strings.HasPrefix(upper, "AGENTFLOW_"):
 			return fmt.Errorf("agentflow: environment name #%d is an Agentflow control variable", i+1)
 		}
 	}
 	return nil
+}
+
+// workingDirEnv is Go's nil-Env PWD rule (os/exec Cmd.environ) made explicit
+// for a child whose environment is built from scratch (#624): "PWD=" plus
+// filepath.Abs(dir), or "" on windows and plan9, which do not use PWD. The
+// spelling of dir is kept (symlinks are not resolved) and the parent's PWD
+// is never forwarded; an empty dir means the launch cwd. An unresolvable
+// cwd is an error, as it is for Go's Start.
+func workingDirEnv(goos, dir string) (string, error) {
+	if goos == "windows" || goos == "plan9" {
+		return "", nil
+	}
+	abs, err := filepath.Abs(dir)
+	if err != nil {
+		return "", fmt.Errorf("agentflow: working directory: %w", err)
+	}
+	return "PWD=" + abs, nil
 }

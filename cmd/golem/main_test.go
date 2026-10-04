@@ -1178,6 +1178,7 @@ func TestValidateFlags_AgentflowRecovery(t *testing.T) {
 		{"-delegate"},
 		{"-mcp-stdio", "server"},
 		{"-mcp-tools", "fs=read"},
+		{"-mcp-env", "fs=TOKEN"},
 		{"-allow-write"},
 		{"-allow-exec"},
 		{"-approve-plan-lock"},

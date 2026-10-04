@@ -25,18 +25,21 @@
 //
 // Guards inspect tool calls only and add no model-visible trailer.
 // Invariants is a declarative table of per-tool argument bounds: protected
-// and credential path components (and the exact basename .env on direct
-// reads), and an inline shell script that pipes a recognized remote fetch
-// into a shell. A violation BLOCKS the call before Plan and approval
-// regardless of origin, because invariants are policy, not detection; the
-// finding's Rule names the invariant and the guard reads arguments with the
-// tool decoder's own name equivalence. Egress classifies an exec-class argv
-// as privileged, network, package-manager, interpreter or unknown (anything
-// outside an explicit quiet set, including any wrapper or subcommand form
-// it cannot parse) and TAGS it; the class and a short label ride the
-// finding so an approver can render a badge on the prompt. Both are finite
-// recognizers over literal words: nothing here evaluates a shell, resolves
-// an executable, or touches the filesystem or network.
+// path components on writes, the credential set IsCredentialPath defines on
+// direct reads (the search tool skips the same files, #627), and an inline
+// shell script that pipes a recognized remote fetch into a shell. Paths are
+// matched after a normalization that also maps the alias spellings APFS, HFS+
+// and NTFS treat as one name, so a custom PathDeny pattern is written in
+// normalized form (PathDeny lists the mapping). A violation BLOCKS the call
+// before Plan and approval regardless of origin, because invariants are policy,
+// not detection; the finding's Rule names the invariant and the guard reads
+// arguments with the tool decoder's own name equivalence. Egress classifies an
+// exec-class argv as privileged, network, package-manager, interpreter or
+// unknown (anything outside an explicit quiet set, including any wrapper or
+// subcommand form it cannot parse) and TAGS it; the class and a short label
+// ride the finding so an approver can render a badge on the prompt. Both are
+// finite recognizers over literal words: nothing here evaluates a shell,
+// resolves an executable, or touches the filesystem or network.
 //
 // ChildScopeDenials reports refused requests from scoped dispatch children
 // in the parent's RiskReport. It reads only the native ChildScopeDenials

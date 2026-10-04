@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"os/exec"
 	"time"
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
@@ -64,6 +63,10 @@ type Server struct {
 	// from an omitted one (expose the whole admitted catalog).
 	tools    []string
 	toolsSet bool
+	// env and dir are stdio launch options: host-approved environment
+	// additions and the working directory ("" = process cwd at prepare).
+	env []EnvVar
+	dir string
 	// tr, when non-nil, overrides the built transport. Test-only: lets the
 	// concurrency tests drive Connect with gated in-memory transports, the same
 	// way connectOne lets them drive a single dial.
@@ -87,50 +90,37 @@ func (s Server) WithTools(names ...string) Server {
 	return s
 }
 
+// WithEnv returns a copy of a stdio server that forwards these additions on
+// top of the baseline environment. A later call replaces an earlier one, and
+// vars is copied.
+func (s Server) WithEnv(vars ...EnvVar) Server {
+	s.env = append([]EnvVar(nil), vars...)
+	return s
+}
+
+// WithDir returns a copy of a stdio server that runs in dir, which must be
+// absolute. Without it the server runs in the process working directory
+// captured when Connect, Inspect or Approve prepares it.
+func (s Server) WithDir(dir string) Server {
+	s.dir = dir
+	return s
+}
+
+// Format renders only the transport kind and alias whenever fmt calls it (any
+// verb on a value or pointer, including through exported fields, slices and
+// maps), so argv, endpoints and explicit environment values never reach logs
+// that way. fmt cannot call Format through an unexported field or under %p;
+// those paths print the raw fields, where environment values are only
+// pointers but argv and endpoint text are not redacted.
+func (s Server) Format(f fmt.State, _ rune) {
+	kind := "stdio"
+	if s.kind == transportHTTP {
+		kind = "http"
+	}
+	_, _ = fmt.Fprintf(f, "%s:%s", kind, s.Alias)
+}
+
 // HTTPServer attaches an MCP server reachable over streamable HTTP.
 func HTTPServer(alias, endpoint string) Server {
 	return Server{Alias: alias, kind: transportHTTP, endpoint: endpoint}
-}
-
-// transport builds the SDK transport. The stdio subprocess is created with
-// exec.Command (NOT CommandContext): its lifetime is bound to the session and
-// ended by Manager.Close, not by the short-lived Connect context.
-func (s Server) transport() (gomcp.Transport, error) {
-	if s.tr != nil {
-		return s.tr, nil
-	}
-	switch s.kind {
-	case transportStdio:
-		if len(s.command) == 0 {
-			return nil, fmt.Errorf("mcpclient: stdio server %q has empty command", s.Alias)
-		}
-		return &gomcp.CommandTransport{Command: exec.Command(s.command[0], s.command[1:]...)}, nil
-	case transportHTTP:
-		if s.endpoint == "" {
-			return nil, fmt.Errorf("mcpclient: http server %q has empty endpoint", s.Alias)
-		}
-		client := *http.DefaultClient
-		if client.Transport == nil {
-			client.Transport = http.DefaultTransport
-		}
-		client.Transport = httpSessionTransport{RoundTripper: client.Transport}
-		checkRedirect := client.CheckRedirect
-		client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
-			if len(via) > 0 && via[0].Method == http.MethodDelete {
-				return http.ErrUseLastResponse
-			}
-			if checkRedirect != nil {
-				return checkRedirect(req, via)
-			}
-			if len(via) >= 10 {
-				return errors.New("stopped after 10 redirects")
-			}
-			return nil
-		}
-		// DisableStandaloneSSE: MVP only needs request/response; no server-initiated
-		// notifications, no standalone SSE stream, no auto-reconnect on that stream.
-		return &gomcp.StreamableClientTransport{Endpoint: s.endpoint, HTTPClient: &client, DisableStandaloneSSE: true}, nil
-	default:
-		return nil, fmt.Errorf("mcpclient: server %q has unknown transport", s.Alias)
-	}
 }
