@@ -224,3 +224,36 @@ func TestDefaultGuardsPath_DispatchChild(t *testing.T) {
 	}
 	assertBlockedObservationSeen(t, child.reqs, credentialBlocked)
 }
+
+// #611 with #575: three default-guard denials stop the step at
+// tool_error_cap_reached, which blocks the attempt before its gates.
+func TestDefaultGuardsPath_TaskStepStoppedByDenialsIsBlocked(t *testing.T) {
+	root := t.TempDir()
+	writeEnvSentinel(t, root)
+	plan := &agentflow.Plan{AllowedFiles: []string{"out.txt"}, Steps: []agentflow.Step{{
+		ID: "P1", Files: []string{"out.txt"},
+		Validation: []string{"go test"}, Gates: []agentflow.Gate{{Kind: "command", Run: []string{"go", "test"}}},
+	}}}
+	caller := &recordingCaller{next: &scriptCaller{responses: []agent.ModelResult{
+		toolStep("r1", "read_file", `{"path":".env"}`),
+		toolStep("r2", "read_file", `{"path":".env"}`),
+		toolStep("r3", "read_file", `{"path":".env"}`),
+	}}}
+	orch := newOrchestratorFactory(caller, flags{}, nil, nil)()
+	af := &fakeAF{}
+	runCtx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	runStep, err := newTaskStepRunner(root, plan, af, orch, &replSession{maxSteps: 4}, true, io.Discard, nil, cancel)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := &driver{af: af, plan: plan, runStep: runStep}
+	err = d.runOneStep(runCtx, "P1")
+	if want := "step P1 attempt A-P1: agent run stopped: tool_error_cap_reached; attempt recorded as blocked"; err == nil || err.Error() != want {
+		t.Fatalf("err = %v, want %q", err, want)
+	}
+	if want := []string{"claim:P1", "block-step:P1:A-P1:golem: agent run stopped: tool_error_cap_reached"}; !equalSeq(af.seq, want) {
+		t.Fatalf("agentflow calls = %v, want %v", af.seq, want)
+	}
+	assertBlockedObservationSeen(t, caller.reqs, credentialBlocked)
+}
