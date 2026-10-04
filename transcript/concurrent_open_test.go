@@ -2,9 +2,12 @@ package transcript
 
 import (
 	"context"
+	"errors"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/kstruzzieri/go-llm/internal/sqlitetest"
@@ -38,12 +41,30 @@ func TestChmodTranscriptDBFilesSkipsSidecarRemovedAfterStat(t *testing.T) {
 	if err := chmodTranscriptDBFilesWith(path, chmod); err != nil {
 		t.Fatalf("chmodTranscriptDBFilesWith = %v, want nil for sidecars removed after Stat", err)
 	}
-	info, err := os.Stat(path)
-	if err != nil {
+	// File mode bits are not portable on Windows.
+	if runtime.GOOS != "windows" {
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := info.Mode().Perm(); got != transcriptFileMode {
+			t.Fatalf("db mode = %v, want %v", got, transcriptFileMode)
+		}
+	}
+}
+
+// Only a vanished file is tolerated: any other chmod error must fail the
+// open, or a transcript could stay readable by others.
+func TestChmodTranscriptDBFilesReportsChmodError(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "t.db")
+	if err := os.WriteFile(path, nil, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if got := info.Mode().Perm(); got != transcriptFileMode {
-		t.Fatalf("db mode = %v, want %v", got, transcriptFileMode)
+	chmod := func(p string, _ os.FileMode) error {
+		return &fs.PathError{Op: "chmod", Path: p, Err: fs.ErrPermission}
+	}
+	if err := chmodTranscriptDBFilesWith(path, chmod); !errors.Is(err, fs.ErrPermission) {
+		t.Fatalf("chmodTranscriptDBFilesWith = %v, want an fs.ErrPermission error", err)
 	}
 }
 
