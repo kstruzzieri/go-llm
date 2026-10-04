@@ -369,8 +369,8 @@ func openRetrievalFeedbackWeighter(ctx context.Context, path string) (*sql.DB, r
 		_ = db.Close()
 		return nil, nil, fmt.Errorf("init retrieval feedback db %q: %w", path, err)
 	}
-	// 0600 on the DB and its WAL/SHM sidecars, which journal_mode=WAL creates
-	// with default (group/world-readable on some umasks) permissions.
+	// SQLite creates WAL/SHM sidecars with the DB file's mode, but sidecars
+	// left by an earlier, looser DB keep theirs: re-secure all three to 0600.
 	// Telemetry must never leak through a sidecar.
 	if err := memory.SecureDBFiles(path); err != nil {
 		_ = db.Close()
