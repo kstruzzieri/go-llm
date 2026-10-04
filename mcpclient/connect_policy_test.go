@@ -34,6 +34,10 @@ func countedServer(t *testing.T, command []string, remote ...*gomcp.Tool) (Serve
 	return s, counter
 }
 
+// reviewHintFS is the review hint for alias fs. pin_missing and
+// connection_missing carry no candidate digest, so only the reason selects it.
+const reviewHintFS = "review with golem mcp inspect using the same -root, server and -mcp-env arguments and explicit alias=fs, then golem mcp approve with the -digest and -connection it prints"
+
 func connectOnce(t *testing.T, pins *PinStore, require bool, s Server) (*Manager, []error) {
 	t.Helper()
 	m, w, err := Connect(context.Background(), Implementation{Name: "test"}, []Server{s}, ConnectOptions{Pins: pins, RequirePinned: require})
@@ -73,8 +77,12 @@ func TestV1PinBlocksInEveryModeBeforeLaunch(t *testing.T) {
 		raw := writeV1Pin(t, pins, "fs", pinCatalog(t, "fs", "").toolCatalog)
 		s, counter := countedServer(t, nil, tool("read"))
 		m, w := connectOnce(t, pins, require, s)
-		if failure := admission(t, w); failure.Reason != "connection_missing" || counter.dials.Load() != 0 || len(m.Tools()) != 0 {
+		failure := admission(t, w)
+		if failure.Reason != "connection_missing" || counter.dials.Load() != 0 || len(m.Tools()) != 0 {
 			t.Fatalf("require=%t: (%q, %d dials), want connection_missing with no dial", require, failure.Reason, counter.dials.Load())
+		}
+		if text := failure.Error(); !strings.HasSuffix(text, "; "+reviewHintFS) {
+			t.Fatalf("require=%t: Error() = %q, want the review hint (spec §5.9)", require, text)
 		}
 		if !bytes.Equal(raw, pinBytes(t, pins, "fs")) {
 			t.Fatal("v1 record rewritten")
@@ -86,8 +94,12 @@ func TestHeadlessPinMissingBeforeLaunch(t *testing.T) {
 	pins := testPins(t)
 	s, counter := countedServer(t, nil, tool("read"))
 	_, w := connectOnce(t, pins, true, s)
-	if failure := admission(t, w); failure.Reason != "pin_missing" || counter.dials.Load() != 0 || pinBytes(t, pins, "fs") != nil {
+	failure := admission(t, w)
+	if failure.Reason != "pin_missing" || counter.dials.Load() != 0 || pinBytes(t, pins, "fs") != nil {
 		t.Fatalf("(%q, %d dials), want pin_missing with no dial and no pin", failure.Reason, counter.dials.Load())
+	}
+	if text := failure.Error(); !strings.HasSuffix(text, "; "+reviewHintFS) {
+		t.Fatalf("Error() = %q, want the review hint (spec §5.9)", text)
 	}
 }
 
