@@ -1,6 +1,7 @@
 package sqlitedsn
 
 import (
+	"bytes"
 	"fmt"
 	"go/scanner"
 	"go/token"
@@ -30,6 +31,7 @@ func TestStoreOpenersUseSharedHelpers(t *testing.T) {
 		t.Fatal(err)
 	}
 	var hits []string
+	scanned := map[string]bool{} // files calling sqlitedsn.EnableWAL, by root-relative path
 	err = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -39,7 +41,7 @@ func TestStoreOpenersUseSharedHelpers(t *testing.T) {
 				return nil
 			}
 			name := d.Name()
-			if path == self || strings.HasPrefix(name, ".") || name == "testdata" || name == "docs" || name == "vendor" || isFile(filepath.Join(path, "go.mod")) {
+			if path == self || strings.HasPrefix(name, ".") || strings.HasPrefix(name, "_") || name == "testdata" || name == "docs" || name == "vendor" || isFile(filepath.Join(path, "go.mod")) {
 				return filepath.SkipDir
 			}
 			return nil
@@ -52,8 +54,12 @@ func TestStoreOpenersUseSharedHelpers(t *testing.T) {
 			return err
 		}
 		rel, _ := filepath.Rel(root, path)
+		rel = filepath.ToSlash(rel)
+		if bytes.Contains(src, []byte("sqlitedsn.EnableWAL(")) {
+			scanned[rel] = true
+		}
 		for _, h := range sqliteSetupHits(src) {
-			hits = append(hits, filepath.ToSlash(rel)+":"+h)
+			hits = append(hits, rel+":"+h)
 		}
 		return nil
 	})
@@ -61,7 +67,24 @@ func TestStoreOpenersUseSharedHelpers(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(hits) > 0 {
-		t.Errorf("use sqlitedsn.EnableWAL and sqlitedsn.FileURL instead of:\n%s", strings.Join(hits, "\n"))
+		t.Errorf("raw SQLite setup outside internal/sqlitedsn (#619): switch to WAL with sqlitedsn.EnableWAL (a raw switch fails at once with SQLITE_BUSY when openers race), and build DSNs with sqlitedsn.WithBusyTimeout or sqlitedsn.FileURL (hand-built file: URLs break on Windows):\n%s", strings.Join(hits, "\n"))
+	}
+	// The walk scans nothing if a skip rule swallows the root or an opener's
+	// directory, and then the guard passes with a raw switch planted anywhere.
+	// Pinning the known openers makes losing one as loud as adding one. A new
+	// opener that calls EnableWAL needs no entry.
+	for _, f := range []string{
+		"cmd/golem/feedback.go",
+		"cmd/golem/session.go",
+		"mcp/server.go",
+		"memory/open.go",
+		"provider/routing_feedback_sqlite.go",
+		"rag/sqlite_store.go",
+		"transcript/store.go",
+	} {
+		if !scanned[f] {
+			t.Errorf("store opener %s was not scanned or no longer calls sqlitedsn.EnableWAL; if it moved, update this census deliberately", f)
+		}
 	}
 }
 
