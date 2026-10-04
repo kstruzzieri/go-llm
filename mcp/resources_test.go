@@ -412,9 +412,10 @@ func (e routeSnapshotEngine) WarmthSnapshot() []provider.WarmModel { return e.wa
 func (e routeSnapshotEngine) StickyRoutes() map[string]provider.StickyRouteInfo { return e.sticky }
 
 // TestRouteBreakersResourceJSON pins the route://breakers wire projection:
-// state by name, zero times and nil errors omitted, times in UTC, and the last
-// error reduced to its bounded routing class. Raw error text can carry
-// endpoint URLs and credentials, so it must never reach resource readers.
+// state by name, zero times and absent error classes omitted, times in UTC,
+// the last error reduced to its bounded routing class, and [] when no
+// registered provider has a breaker yet. Raw error text can carry endpoint
+// URLs and credentials, so it must never reach resource readers.
 func TestRouteBreakersResourceJSON(t *testing.T) {
 	edt := time.FixedZone("EDT", -4*60*60)
 	openFailure := time.Date(2026, 10, 3, 8, 15, 30, 123_000_000, edt)
@@ -474,35 +475,51 @@ func TestRouteBreakersResourceJSON(t *testing.T) {
     "provider": "beta",
     "state": "open",
     "failures": 3,
-    "lastFailure": "2026-10-03T12:15:30.123Z",
-    "recoverAt": "2026-10-03T12:16:00.123Z",
-    "lastErrorClass": "network"
+    "last_failure": "2026-10-03T12:15:30.123Z",
+    "recover_at": "2026-10-03T12:16:00.123Z",
+    "last_error_class": "network"
   },
   {
     "provider": "gamma",
     "state": "half-open",
     "failures": 3,
-    "lastFailure": "2026-10-03T11:59:00Z",
-    "lastErrorClass": "5xx"
+    "last_failure": "2026-10-03T11:59:00Z",
+    "last_error_class": "5xx"
   }
 ]`
 	if got != want {
 		t.Errorf("route://breakers JSON:\n%s\nwant:\n%s", got, want)
 	}
+
+	// Breakers are created lazily on first use, so registered providers
+	// without one are skipped and an all-skipped read is [], never null.
+	s.router = routeSnapshotEngine{recordingRouteEngine: newRecordingRouteEngine("")}
+	res, err = s.handleRouteBreakersResource(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("handleRouteBreakersResource() error = %v", err)
+	}
+	if got := res.Contents[0].Text; got != "[]" {
+		t.Errorf("route://breakers with no breakers = %s, want []", got)
+	}
 }
 
 // TestRouteWarmthAndStickyResourceJSON pins the route://warmth and
-// route://sticky wire projections: flat provider/model keys, times in UTC,
-// zero times omitted, and the empty forms [] and {} rather than null.
+// route://sticky wire projections: flat provider/model keys, warmth sorted by
+// provider then model, times in UTC, zero times and unmeasured VRAM omitted,
+// and the empty forms [] and {} rather than null.
 func TestRouteWarmthAndStickyResourceJSON(t *testing.T) {
 	edt := time.FixedZone("EDT", -4*60*60)
 	loadedAt := time.Date(2026, 10, 3, 8, 0, 0, 0, edt)
 	key := provider.ModelKey{Provider: "local", Model: "qwen3:8b"}
+	embedKey := provider.ModelKey{Provider: "local", Model: "qwen3-embedding:8b"}
 	populated := routeSnapshotEngine{
 		recordingRouteEngine: newRecordingRouteEngine(""),
+		// Deliberately unsorted. The embedding entry has VRAM 0 the way
+		// OllamaWarmthSource.RecordUse leaves it until the next poll.
 		warm: []provider.WarmModel{
 			{Key: key, Info: provider.WarmthInfo{Loaded: true, Since: loadedAt, ExpiresAt: loadedAt.Add(5 * time.Minute), VRAM: 5.5}},
-			{Key: provider.ModelKey{Provider: "local", Model: "qwen3-embedding:8b"}, Info: provider.WarmthInfo{Loaded: true}},
+			{Key: embedKey, Info: provider.WarmthInfo{Loaded: true, Since: loadedAt, ExpiresAt: loadedAt.Add(5 * time.Minute)}},
+			{Key: provider.ModelKey{Provider: "cloud", Model: "zeta"}, Info: provider.WarmthInfo{}},
 		},
 		sticky: map[string]provider.StickyRouteInfo{
 			"9f86d081884c7d659a2feaa0c55ad015": {
@@ -512,6 +529,11 @@ func TestRouteWarmthAndStickyResourceJSON(t *testing.T) {
 				CreatedAt:  loadedAt,
 				LastUsedAt: loadedAt.Add(time.Minute),
 				ExpiresAt:  loadedAt.Add(31 * time.Minute),
+			},
+			"2c26b46b68ffc68ff99b453c1d304134": {
+				Key:    embedKey,
+				Score:  0.5,
+				Reason: "score=0.500, quality=medium, speed=fast",
 			},
 		},
 	}
@@ -527,30 +549,42 @@ func TestRouteWarmthAndStickyResourceJSON(t *testing.T) {
 		{"warmth empty", (*Server).handleRouteWarmthResource, empty, `[]`},
 		{"warmth", (*Server).handleRouteWarmthResource, populated, `[
   {
-    "provider": "local",
-    "model": "qwen3:8b",
-    "loaded": true,
-    "since": "2026-10-03T12:00:00Z",
-    "expiresAt": "2026-10-03T12:05:00Z",
-    "vramGB": 5.5
+    "provider": "cloud",
+    "model": "zeta",
+    "loaded": false
   },
   {
     "provider": "local",
     "model": "qwen3-embedding:8b",
     "loaded": true,
-    "vramGB": 0
+    "since": "2026-10-03T12:00:00Z",
+    "expires_at": "2026-10-03T12:05:00Z"
+  },
+  {
+    "provider": "local",
+    "model": "qwen3:8b",
+    "loaded": true,
+    "since": "2026-10-03T12:00:00Z",
+    "expires_at": "2026-10-03T12:05:00Z",
+    "vram_gb": 5.5
   }
 ]`},
 		{"sticky empty", (*Server).handleRouteStickyResource, empty, `{}`},
 		{"sticky", (*Server).handleRouteStickyResource, populated, `{
+  "2c26b46b68ffc68ff99b453c1d304134": {
+    "provider": "local",
+    "model": "qwen3-embedding:8b",
+    "score": 0.5,
+    "reason": "score=0.500, quality=medium, speed=fast"
+  },
   "9f86d081884c7d659a2feaa0c55ad015": {
     "provider": "local",
     "model": "qwen3:8b",
     "score": 0.875,
     "reason": "score=0.875, quality=high, speed=fast",
-    "createdAt": "2026-10-03T12:00:00Z",
-    "lastUsedAt": "2026-10-03T12:01:00Z",
-    "expiresAt": "2026-10-03T12:31:00Z"
+    "created_at": "2026-10-03T12:00:00Z",
+    "last_used_at": "2026-10-03T12:01:00Z",
+    "expires_at": "2026-10-03T12:31:00Z"
   }
 }`},
 	}

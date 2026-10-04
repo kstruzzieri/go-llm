@@ -1,9 +1,11 @@
 package mcp
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strings"
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
@@ -205,16 +207,17 @@ func (s *Server) handleModelDetailResource(ctx context.Context, req *gomcp.ReadR
 }
 
 // breakerEntry is the route://breakers wire projection of one provider's
-// circuit breaker. Zero times and a nil last error are omitted. The last error
-// is reduced to its bounded routing class: its text can carry endpoint URLs,
-// and an error value has no stable JSON form.
+// circuit breaker. The last error is reduced to its bounded routing class: its
+// text can carry endpoint URLs, and an error value has no stable JSON form.
+// Zero times are omitted, as is a class ErrorClassOf leaves empty (no error, or
+// a cancellation, which the router never records).
 type breakerEntry struct {
 	Provider       string              `json:"provider"`
 	State          string              `json:"state"`
 	Failures       int                 `json:"failures"`
-	LastFailure    string              `json:"lastFailure,omitempty"`
-	RecoverAt      string              `json:"recoverAt,omitempty"`
-	LastErrorClass provider.ErrorClass `json:"lastErrorClass,omitempty"`
+	LastFailure    string              `json:"last_failure,omitempty"`
+	RecoverAt      string              `json:"recover_at,omitempty"`
+	LastErrorClass provider.ErrorClass `json:"last_error_class,omitempty"`
 }
 
 func (s *Server) handleRouteBreakersResource(_ context.Context, _ *gomcp.ReadResourceRequest) (*gomcp.ReadResourceResult, error) {
@@ -239,14 +242,15 @@ func (s *Server) handleRouteBreakersResource(_ context.Context, _ *gomcp.ReadRes
 }
 
 // warmEntry is the route://warmth wire projection of one warm model. Zero
-// times are omitted.
+// times are omitted, and so is VRAM until the warmth source has measured it:
+// OllamaWarmthSource.RecordUse records a model with VRAM 0 until its next poll.
 type warmEntry struct {
 	Provider  string  `json:"provider"`
 	Model     string  `json:"model"`
 	Loaded    bool    `json:"loaded"`
 	Since     string  `json:"since,omitempty"`
-	ExpiresAt string  `json:"expiresAt,omitempty"`
-	VRAMGB    float64 `json:"vramGB"`
+	ExpiresAt string  `json:"expires_at,omitempty"`
+	VRAMGB    float64 `json:"vram_gb,omitempty"`
 }
 
 func (s *Server) handleRouteWarmthResource(_ context.Context, _ *gomcp.ReadResourceRequest) (*gomcp.ReadResourceResult, error) {
@@ -261,6 +265,13 @@ func (s *Server) handleRouteWarmthResource(_ context.Context, _ *gomcp.ReadResou
 			VRAMGB:    m.Info.VRAM,
 		})
 	}
+	// Warmth sources may iterate a map, so sort for a stable read-to-read order.
+	slices.SortFunc(entries, func(a, b warmEntry) int {
+		if c := cmp.Compare(a.Provider, b.Provider); c != 0 {
+			return c
+		}
+		return cmp.Compare(a.Model, b.Model)
+	})
 	return marshalResource("route://warmth", entries)
 }
 
@@ -271,9 +282,9 @@ type stickyEntry struct {
 	Model      string  `json:"model"`
 	Score      float64 `json:"score"`
 	Reason     string  `json:"reason"`
-	CreatedAt  string  `json:"createdAt,omitempty"`
-	LastUsedAt string  `json:"lastUsedAt,omitempty"`
-	ExpiresAt  string  `json:"expiresAt,omitempty"`
+	CreatedAt  string  `json:"created_at,omitempty"`
+	LastUsedAt string  `json:"last_used_at,omitempty"`
+	ExpiresAt  string  `json:"expires_at,omitempty"`
 }
 
 func (s *Server) handleRouteStickyResource(_ context.Context, _ *gomcp.ReadResourceRequest) (*gomcp.ReadResourceResult, error) {
