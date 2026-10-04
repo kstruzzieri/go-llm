@@ -7,10 +7,13 @@
 A failed health check used to report the error's text. For OpenAI-compatible
 providers (`api_format: openai-compat`) that text included the request URL,
 with any credentials in its query string, or up to 64 KiB of the upstream error
-body. The provider now reports the bounded routing error class (`network`,
-`timeout`, `4xx`, `5xx`, `rate_limit` or `unknown`), and the error text goes to
-the server log, truncated to 512 characters. Ollama's health check keeps no
-cause, so an unhealthy Ollama provider reports `unknown`.
+body. The provider now reports and logs only the bounded routing error class
+(`network`, `timeout`, `4xx`, `5xx`, `rate_limit` or `unknown`). Raw error text
+is omitted from logs too: truncation alone still leaks credentials and allows
+upstream control characters to forge log entries. Health logs retain provider
+and request identifiers, each limited to 512 runes and quoted to escape control
+characters. Ollama's health check keeps no cause, so an unhealthy Ollama provider
+reports `unknown`.
 
 Providers are now sorted by name, and warm models by provider, then model, so
 repeated reads list them in the same order. `expires_at` is RFC 3339 UTC with

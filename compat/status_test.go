@@ -2,6 +2,7 @@ package compat
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"log"
@@ -14,6 +15,7 @@ import (
 	"time"
 
 	"github.com/kstruzzieri/go-llm/provider"
+	"github.com/kstruzzieri/go-llm/provider/openaicompat"
 )
 
 func TestStatusHandler_ReadyWithProviders(t *testing.T) {
@@ -185,47 +187,113 @@ func TestStatusHandler_BoundedErrorAndStableWarmth(t *testing.T) {
 	}
 }
 
-// TestStatusHandler_LogsTruncatedHealthErrors pins the operator half of the
-// /v1/status error projection: the health error that the response reduces to
-// a class reaches the server log, truncated so a polled endpoint cannot copy
-// a 64 KiB upstream error body into the log on every read.
-func TestStatusHandler_LogsTruncatedHealthErrors(t *testing.T) {
+// Health diagnostics retain the provider, request ID and error class without
+// copying credentials or control characters from real provider errors.
+func TestStatusHandler_LogsSafeHealthDiagnostics(t *testing.T) {
+	const apiKey = "synthetic-review-bearer"
+	for _, tc := range []struct {
+		name      string
+		status    int
+		jsonError bool
+		wantClass provider.ErrorClass
+	}{
+		{name: "healthy", status: http.StatusOK},
+		{name: "json error", status: http.StatusUnauthorized, jsonError: true, wantClass: provider.ErrorClass4xx},
+		{name: "plain error", status: http.StatusServiceUnavailable, wantClass: provider.ErrorClass5xx},
+		{name: "transport error", wantClass: provider.ErrorClassNetwork},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(tc.status)
+				if tc.status == http.StatusOK {
+					_, _ = w.Write([]byte(`{"data":[]}`))
+					return
+				}
+				message := "UPSTREAM_ERROR " + r.Header.Get("Authorization") + "\nFORGED_LOG_RECORD\r\x1b[31m" + strings.Repeat("Z", 64*1024)
+				if tc.jsonError {
+					_ = json.NewEncoder(w).Encode(map[string]any{"error": map[string]string{"message": message[:256]}})
+				} else {
+					_, _ = w.Write([]byte(message))
+				}
+			}))
+			defer upstream.Close()
+			baseURL := upstream.URL
+			if tc.status == 0 {
+				upstream.Close()
+				baseURL = strings.Replace(baseURL, "http://", "http://user:synthetic-password@", 1) + "?api_key=synthetic-query-key"
+			}
+			reg := provider.NewRegistry()
+			p := openaicompat.NewProvider(openaicompat.NewClient(baseURL, openaicompat.WithAPIKey(apiKey)), openaicompat.WithProviderName("upstream"))
+			if err := reg.Register(p); err != nil {
+				t.Fatal(err)
+			}
+			srv := New(nil, nil, reg, allowHTTPTestHost)
+			var buf bytes.Buffer
+			orig := log.Writer()
+			log.SetOutput(&buf)
+			defer log.SetOutput(orig)
+
+			req := httptest.NewRequest(http.MethodGet, "/v1/status", nil)
+			req.Header.Set("X-Request-Id", "review-639")
+			rec := httptest.NewRecorder()
+			srv.buildHandler().ServeHTTP(rec, req)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status = %d, want 200", rec.Code)
+			}
+			var resp StatusResponse
+			if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+				t.Fatal(err)
+			}
+			if len(resp.Providers) != 1 || resp.Providers[0].ErrorClass != tc.wantClass || resp.Providers[0].Healthy != (tc.wantClass == "") {
+				t.Fatalf("providers = %+v, want healthy=%t, class=%q", resp.Providers, tc.wantClass == "", tc.wantClass)
+			}
+			logged := buf.String()
+			for _, leak := range []string{apiKey, "synthetic-password", "synthetic-query-key", "127.0.0.1", "UPSTREAM_ERROR", "FORGED_LOG_RECORD", "\x1b", "ZZZZ"} {
+				if strings.Contains(logged, leak) || strings.Contains(rec.Body.String(), leak) {
+					t.Errorf("provider error content %q reached diagnostics", leak)
+				}
+			}
+			if tc.wantClass == "" {
+				if strings.Contains(logged, "compat: status health") {
+					t.Error("healthy provider produced a failure log")
+				}
+				return
+			}
+			for _, want := range []string{"compat: status health", `provider="upstream"`, `rid="review-639"`, "error_class=" + string(tc.wantClass)} {
+				if !strings.Contains(logged, want) {
+					t.Errorf("health log lacks %q", want)
+				}
+			}
+		})
+	}
+}
+
+func TestStatusHandler_BoundsAndQuotesHealthLogIdentifiers(t *testing.T) {
 	var buf bytes.Buffer
 	orig := log.Writer()
 	log.SetOutput(&buf)
 	defer log.SetOutput(orig)
 
-	provReg := provider.NewRegistry()
-	for _, mp := range []*mockProvider{
-		{name: "local", caps: provider.CapChat, health: &url.Error{
-			Op:  "Get",
-			URL: "http://10.9.8.7:8080/v1/models",
-			Err: &net.OpError{Op: "dial", Net: "tcp", Err: errors.New("connect: connection refused")},
-		}},
-		{name: "upstream", caps: provider.CapChat, health: errors.New("503 Service Unavailable: " + strings.Repeat("Z", 64*1024))},
-	} {
-		if err := provReg.Register(mp); err != nil {
-			t.Fatalf("register provider: %v", err)
-		}
+	reg := provider.NewRegistry()
+	if err := reg.Register(&mockProvider{name: "provider\n\x1b" + strings.Repeat("P", 1024), health: errExpected}); err != nil {
+		t.Fatal(err)
 	}
-	modelReg, err := provider.NewModelRegistry(provReg, nil)
-	if err != nil {
-		t.Fatalf("NewModelRegistry: %v", err)
-	}
-	router := provider.NewRouter(modelReg, provReg)
-	defer func() { _ = router.Close() }()
-	srv := New(router, modelReg, provReg, allowHTTPTestHost)
-
-	srv.buildHandler().ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/v1/status", nil))
-	log.SetOutput(orig)
+	req := httptest.NewRequest(http.MethodGet, "/v1/status", nil)
+	req = req.WithContext(context.WithValue(req.Context(), ctxRequestID, "request\r\n\x1b"+strings.Repeat("R", 1024)))
+	// Exercise this log sink directly; access logging is a separate boundary.
+	New(nil, nil, reg).handleStatus(httptest.NewRecorder(), req)
 	logged := buf.String()
-
-	for _, want := range []string{"provider=local", "10.9.8.7", "connection refused", "provider=upstream"} {
+	if strings.Count(logged, "\n") != 1 || strings.ContainsAny(logged, "\r\x1b") {
+		t.Fatal("health log contains unescaped control characters")
+	}
+	for _, want := range []string{`provider="provider\n\x1b`, `rid="request\r\n\x1b`, "error_class=unknown"} {
 		if !strings.Contains(logged, want) {
-			t.Errorf("server log lacks %q:\n%.2000s", want, logged)
+			t.Errorf("health log lacks %q", want)
 		}
 	}
-	if n := strings.Count(logged, "Z"); n == 0 || n > 512 {
-		t.Errorf("logged %d runes of the upstream error body, want 1..512", n)
+	for _, padding := range []string{"P", "R"} {
+		if n := strings.Count(logged, padding); n == 0 || n > 512 {
+			t.Errorf("logged %d identifier padding runes, want 1..512", n)
+		}
 	}
 }

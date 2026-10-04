@@ -30,8 +30,8 @@ type StatusResponse struct {
 }
 
 // ProviderStatus describes one registered backend. A failed health check is
-// reported by its bounded routing class, never its text, which can carry the
-// endpoint URL; the text goes to the server log, truncated to 512 runes.
+// reported and logged by its bounded routing class, never its text, which can
+// carry endpoint credentials or arbitrary upstream content.
 type ProviderStatus struct {
 	Name         string              `json:"name"`
 	Healthy      bool                `json:"healthy"`
@@ -78,9 +78,9 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		hcancel()
 		if err != nil {
 			ps.ErrorClass = provider.ErrorClassOf(err)
-			// Truncated: an openaicompat error can carry a 64 KiB upstream
-			// body, and this endpoint is polled.
-			log.Printf("compat: status health provider=%s rid=%s: %.512v", ps.Name, requestIDFrom(r.Context()), err)
+			// Keep arbitrary error text out of logs as well as the response.
+			// Quote and bound identifiers to keep each polled event on one line.
+			log.Printf("compat: status health provider=%.512q rid=%.512q error_class=%s", ps.Name, requestIDFrom(r.Context()), ps.ErrorClass)
 		} else {
 			ps.Healthy = true
 			healthy++
