@@ -40,10 +40,10 @@ func unsetenvForTest(t *testing.T, name string) {
 	}
 }
 
-// hostGitLocationKeys are the repository-location overrides every host Git
-// call (Agentflow's and #354's) must drop so cmd.Dir alone selects the
-// repository. GIT_TERMINAL_PROMPT is listed because the helper owns its
-// value: an inherited one must not survive beside the appended =0.
+// hostGitLocationKeys are the repository-location overrides no host Git call
+// (parallel mode's or #354's) may receive, so cmd.Dir alone selects the
+// repository. GIT_TERMINAL_PROMPT is listed because the adapters own its
+// value: an inherited one must not appear beside the owned =0.
 var hostGitLocationKeys = []string{
 	"GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY",
 	"GIT_COMMON_DIR", "GIT_NAMESPACE", "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_PREFIX",
@@ -78,7 +78,9 @@ func TestHostGitEnvStripsLocationOverridesCaseInsensitively(t *testing.T) {
 	}
 }
 
-// gitContextEnv is the capture environment (#354 D5): the host-git allowlist plus LC_ALL=C and GIT_NO_LAZY_FETCH=1, so config injection, discovery overrides and unrelated parent variables never reach it.
+// gitContextEnv is the capture environment (#354 D5): the host-git allowlist
+// plus LC_ALL=C and GIT_NO_LAZY_FETCH=1, so config injection, discovery
+// overrides and unrelated parent variables never reach it.
 func TestGitContextEnvStripsConfigAndDiscoveryOverrides(t *testing.T) {
 	extra := []string{
 		"GIT_CONFIG", "GIT_CONFIG_PARAMETERS", "GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0",

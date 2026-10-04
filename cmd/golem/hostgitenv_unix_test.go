@@ -147,7 +147,9 @@ func requireGitRecord(t *testing.T, records []gitRecord, kind string, words ...s
 }
 
 // requireCleanRecords is the leak check. It first requires that records
-// exist, so a fixture that never ran cannot pass as "no leak".
+// exist, so a fixture that never ran cannot pass as "no leak". Every bad
+// record is reported, not just the first, so a leak shows which kinds of
+// process (git, hook, smudge, fsmonitor, clean) each caught it.
 func requireCleanRecords(t *testing.T, records []gitRecord) {
 	t.Helper()
 	if len(records) == 0 {
@@ -155,11 +157,14 @@ func requireCleanRecords(t *testing.T, records []gitRecord) {
 	}
 	for _, r := range records {
 		if r.canary {
-			t.Fatalf("the parent canary reached a %s process (argv %q)", r.kind, r.argv)
+			t.Errorf("the parent canary reached a %s process (argv %q)", r.kind, r.argv)
 		}
 		if !r.home || !r.path {
-			t.Fatalf("a %s process lacks the baseline: home=%v path=%v", r.kind, r.home, r.path)
+			t.Errorf("a %s process lacks the baseline: home=%v path=%v", r.kind, r.home, r.path)
 		}
+	}
+	if t.Failed() {
+		t.FailNow()
 	}
 }
 
