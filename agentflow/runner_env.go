@@ -94,8 +94,8 @@ func buildChildEnv(p childEnvPolicy, lookup func(string) (string, bool)) ([]stri
 // ValidateEnvNames reports whether every name may be approved for Agentflow
 // children. Names must be plain variable names; runner-owned settings (PWD and
 // the Python settings) and Agentflow control variables (AGENTFLOW_*) are
-// reserved, compared without regard to case. Errors identify an entry by position and never echo it, so a
-// mistyped NAME=VALUE cannot leak its value.
+// reserved, compared without regard to case. Errors identify an entry by
+// position and never echo it, so a mistyped NAME=VALUE cannot leak its value.
 func ValidateEnvNames(names []string) error {
 	for i, name := range names {
 		if !envNamePattern.MatchString(name) {

@@ -187,7 +187,8 @@ func TestExecRunnerEmptyPolicyHelper(t *testing.T) {
 	os.Exit(0)
 }
 
-// TestExecRunnerEmptyPolicyNeverInherits runs a runner whose policy selects only the runner-owned PWD: nothing from the canary-only parent may appear.
+// TestExecRunnerEmptyPolicyNeverInherits runs a runner whose policy selects
+// only the runner-owned PWD: nothing from the canary-only parent may appear.
 func TestExecRunnerEmptyPolicyNeverInherits(t *testing.T) {
 	out := filepath.Join(t.TempDir(), "probe.json")
 	cmd := exec.Command(os.Args[0], "-test.run=^TestExecRunnerEmptyPolicyHelper$", "--", "emptypolicy", out)

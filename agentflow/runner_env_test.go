@@ -234,8 +234,9 @@ const (
 	envApprovedName = "GO_LLM_577_APPROVED"
 )
 
-// envProbeReport is what the probe child writes: names, a canary flag and a
-// digest, never a value, so a failing test cannot print a secret.
+// envProbeReport is what the probe child writes: names, a canary flag, a
+// digest and PWD (a path), never another value, so a failing test cannot print
+// a secret.
 type envProbeReport struct {
 	Names          []string `json:"names"`
 	Canary         bool     `json:"canary"`
