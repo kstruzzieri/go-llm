@@ -7,3 +7,7 @@ import "slices"
 func CredentialRuleNames() []string {
 	return slices.Concat(credentialDirs, credentialFiles, envTemplates)
 }
+
+// ProtectedDirNames exposes the write rule's components, the set dispatch
+// refuses as a scope, to external tests (#627).
+func ProtectedDirNames() []string { return protectedDirs }
